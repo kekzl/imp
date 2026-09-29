@@ -29,7 +29,6 @@ __global__ void gdn_scan_decode_kernel(const float*, const float*, const float*,
 // CSPLIT: CTAs per head along HD (blockIdx.z), each owning HD/CSPLIT state columns. The delta rule
 // is column-independent; K/Q normalisation is recomputed per CTA. Not with fac_in/fac_out (one
 // per-head buffer, read at start and written at end by different CTAs).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, typename YOut, int SPLIT = 1, typename StateT = float, int CSPLIT = 1>
 __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
@@ -81,13 +80,15 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     // Single-sequence state was last written by this layer's scan one step (or chunk) earlier, never
     // by the immediate predecessor: fetch it before the PDL wait. CSPLIT > 1 loads registers (220
     // regs); at CSPLIT=1 that second load site spills (255 regs + 576 B stack), so it prefetches L2.
+    // #2218 bounded: HD, SS template args <= 128 (instantiations 64/128 only): (s_base + s) * HD < SS * HD
+    // <= 16384, (i % kLines) * 128 < kLines * 128 <= 512 (kSeg <= 128 * 4 B), smem 2 * SS <= 256
     const bool state_early = seq_slots == nullptr;
     if constexpr (CSPLIT > 1) {
         if (state_early) {
             const StateT* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
             for (int s = 0; s < SS_PER; s++)
-                H_reg[s] = static_cast<float>(H_col[(s_base + s) * HD]);
+                H_reg[s] = static_cast<float>(H_col[static_cast<ptrdiff_t>((s_base + s) * HD)]);
         }
     } else if (state_early) {
         constexpr int kNT = HD * SPLIT / CSPLIT;
@@ -96,9 +97,9 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
         const char* base = reinterpret_cast<const char*>(h_state + static_cast<size_t>(h) * SS * HD +
                                                          blockIdx.z * (HD / CSPLIT));
         for (int i = threadIdx.x; i < SS * kLines; i += kNT)
-            asm volatile("prefetch.global.L2 [%0];" ::"l"(base + static_cast<size_t>(i / kLines) * HD *
-                                                                     sizeof(StateT) +
-                                                      (i % kLines) * 128));
+            asm volatile("prefetch.global.L2 [%0];" ::"l"(
+                base + static_cast<size_t>(i / kLines) * HD * sizeof(StateT) +
+                static_cast<size_t>((i % kLines) * 128)));
     }
     const float A_h = A_log[h];
     const float dtb_h = dt_bias[h];
@@ -151,7 +152,7 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
         const StateT* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS_PER; s++)
-            H_reg[s] = static_cast<float>(H_col[(s_base + s) * HD]);
+            H_reg[s] = static_cast<float>(H_col[static_cast<ptrdiff_t>((s_base + s) * HD)]);
     }
     // Factor rows are indexed by the recurrent SLOT, not by the batch
     // position: a request keeps its slot across steps but moves within the
@@ -164,14 +165,14 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     extern __shared__ float smem[];
     float* s_k = smem;
     float* s_q = smem + SS;
-    float* s_reduce = smem + 2 * SS;
+    float* s_reduce = smem + static_cast<ptrdiff_t>(2 * SS);
 
     // Process each token
     for (int t = 0; t < n_tokens; t++) {
         const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
-        const float* Q_g = row + g * SS;
-        const float* K_g = row + BC_size + g * SS;
-        const float* V_base = row + 2 * BC_size;
+        const float* Q_g = row + static_cast<int64_t>(g) * SS;
+        const float* K_g = row + BC_size + static_cast<int64_t>(g) * SS;
+        const float* V_base = row + static_cast<int64_t>(2) * BC_size;
 
         // Load V for this thread's d index
         float v_d = V_base[h * HD + d];
@@ -300,14 +301,14 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
                 StateT* H_col = h_out + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
                 for (int s = 0; s < SS_PER; s++)
-                    H_col[(s_base + s) * HD] = static_cast<StateT>(H_reg[s]);
+                    H_col[static_cast<ptrdiff_t>((s_base + s) * HD)] = static_cast<StateT>(H_reg[s]);
             }
         }
         if (t + 1 == snap_n) {
             StateT* S_col = h_snap_dst + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
             for (int s = 0; s < SS_PER; s++)
-                S_col[(s_base + s) * HD] = static_cast<StateT>(H_reg[s]);
+                S_col[static_cast<ptrdiff_t>((s_base + s) * HD)] = static_cast<StateT>(H_reg[s]);
         }
 
         // Sync before next token — the next iteration overwrites s_k/s_q in
@@ -318,7 +319,6 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     }
     pdl_trigger();  // state committed inside the loop; nothing global remains
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Gated-norm family (FP16/FP32 variants) lives in gdn_gated_norm.cu.
 
@@ -577,7 +577,6 @@ void gdn_scan_fused_fp32out_bf16(const float* conv_f32, int conv_channels, const
 // head_dim_v; state kept in SHARED memory (not registers) for the token loop, written back at
 // the end. Math is identical to the fused kernel - if outputs differ, the fused kernel has a
 // correctness bug (register lifetime, sync, or dataflow).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void gdn_scan_reference_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
     const half* __restrict__ alpha_all,  // [n_tokens, n_heads] FP16
@@ -609,7 +608,7 @@ __global__ void gdn_scan_reference_kernel(
     // s_reduce[HD] block reduction scratch (all for this block's head, this token).
     extern __shared__ float smem[];
     float* s_H = smem;
-    float* s_k = s_H + SS * HD;
+    float* s_k = s_H + static_cast<int64_t>(SS) * HD;
     float* s_q = s_k + SS;
     float* s_v = s_q + SS;
     float* s_reduce = s_v + HD;
@@ -625,9 +624,9 @@ __global__ void gdn_scan_reference_kernel(
 
     for (int t = 0; t < n_tokens; t++) {
         const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
-        const float* Q_g = row + g * SS;
-        const float* K_g = row + BC_size + g * SS;
-        const float* V_base = row + 2 * BC_size + h * HD;
+        const float* Q_g = row + static_cast<int64_t>(g) * SS;
+        const float* K_g = row + BC_size + static_cast<int64_t>(g) * SS;
+        const float* V_base = row + static_cast<int64_t>(2) * BC_size + static_cast<int64_t>(h) * HD;
 
         // Load V (one element per thread)
         s_v[d] = V_base[d];
@@ -711,7 +710,6 @@ __global__ void gdn_scan_reference_kernel(
         __syncthreads();  // before next token overwrites s_k/s_q/s_v
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
                             const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
@@ -740,7 +738,6 @@ void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half
 // ---------------------------------------------------------------------------
 
 // Old per-token decode kernel (still available for reference)
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void gdn_scan_decode_kernel(const float* __restrict__ x, const float* __restrict__ B_in,
                                        const float* __restrict__ C_in, const half* __restrict__ alpha_raw,
                                        const half* __restrict__ beta_raw, const float* __restrict__ A_log,
@@ -756,8 +753,8 @@ __global__ void gdn_scan_decode_kernel(const float* __restrict__ x, const float*
 
     const int g = grouped_layout ? (h / (n_heads / n_groups)) : (h % n_groups);
     float* H = h_state + static_cast<size_t>(h) * state_size * head_dim_ssm;
-    const float* K_g = B_in + g * state_size;
-    const float* Q_g = C_in + g * state_size;
+    const float* K_g = B_in + static_cast<int64_t>(g) * state_size;
+    const float* Q_g = C_in + static_cast<int64_t>(g) * state_size;
 
     float v_d = x[h * head_dim_ssm + d];
     float alpha_h = __half2float(alpha_raw[h]);
@@ -805,7 +802,6 @@ __global__ void gdn_scan_decode_kernel(const float* __restrict__ x, const float*
     }
     y[h * head_dim_ssm + d] = __float2half(y_partial * scale);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void gdn_scan_decode_f32(const float* x, const float* B, const float* C, const half* alpha, const half* beta,
                          const float* A_log, const float* dt_bias, float* h_state, half* y, const half* z,

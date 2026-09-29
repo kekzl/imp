@@ -26,7 +26,6 @@ __device__ __forceinline__ void q5k_scale_min(int j, const uint8_t* q, uint32_t&
     }
 }
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM>
 __device__ __forceinline__ void load_kstep_q5k(int tid, const int8_t* __restrict__ A,
                                                const __half* __restrict__ Asc, const float* __restrict__ Ars,
@@ -45,6 +44,7 @@ __device__ __forceinline__ void load_kstep_q5k(int tid, const int8_t* __restrict
     const int ks = k_base / kBK;
     const int sblk = ks >> 2;  // super-block index along K
     const int grp = ks & 3;    // 32-byte nibble group within it
+    // #2218 bounded: grp = ks & 3 <= 3: grp * 32 <= 96 B (in-block offset)
 #pragma unroll
     for (int i = tid; i < kBN * 5; i += kThreads) {
         const int row = i / 5;
@@ -58,7 +58,7 @@ __device__ __forceinline__ void load_kstep_q5k(int tid, const int8_t* __restrict
             cp_async_cg_16(&sBqh[row][off], blk + 16 + off, bvalid);  // qh, shared by all 4 groups
         } else {
             const int off = (part - 3) * 16;
-            cp_async_cg_16(&sBq[row][off], blk + kQsOff + grp * 32 + off, bvalid);
+            cp_async_cg_16(&sBq[row][off], blk + kQsOff + static_cast<ptrdiff_t>(grp * 32) + off, bvalid);
         }
     }
     const int kb0 = k_base / 32;
@@ -69,7 +69,6 @@ __device__ __forceinline__ void load_kstep_q5k(int tid, const int8_t* __restrict
         cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Four 5-bit weights of one u32 lane group as s8 (q - 16): nibbles at `shift`, fifth bit at `hbit`.
 __device__ __forceinline__ uint32_t q5k_s8x4(uint32_t qs, uint32_t qh, uint32_t shift, uint32_t hbit) {
@@ -80,7 +79,6 @@ __device__ __forceinline__ uint32_t q5k_s8x4(uint32_t qs, uint32_t qh, uint32_t 
 
 }  // namespace
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM, bool BETA1>
 __global__ void __launch_bounds__(kThreads) mmq_imma_q5k_raw_kernel(
     const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale, const float* __restrict__ x_rowsum,
@@ -123,6 +121,7 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q5k_raw_kernel(
     const int warp_n = warp_id % kWN;
     const int rl = lane >> 2;
     const int cl = lane & 3;
+    // #2218 bounded: cl = lane & 3 <= 3: smem column cl * 4 <= 12
 
     // Dynamic smem (q5k_smem_bytes): the staged qh rows push the Q4_K layout past the 48 KB static cap.
     extern __shared__ __align__(16) uint8_t smem_raw[];
@@ -208,9 +207,11 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q5k_raw_kernel(
 #pragma unroll
                 for (int nf = 0; nf < kNF; ++nf) {
                     const int bcol = warp_n * kTileN + nf * 8 + rl;
-                    const uint32_t b0 =
-                        q5k_s8x4(*reinterpret_cast<const uint32_t*>(&sBq[stage][bcol][cl * 4]),
-                                 *reinterpret_cast<const uint32_t*>(&sBqh[stage][bcol][cl * 4]), shift, hbit);
+                    const uint32_t b0 = q5k_s8x4(*reinterpret_cast<const uint32_t*>(
+                                                     &sBq[stage][bcol][static_cast<ptrdiff_t>(cl * 4)]),
+                                                 *reinterpret_cast<const uint32_t*>(
+                                                     &sBqh[stage][bcol][static_cast<ptrdiff_t>(cl * 4)]),
+                                                 shift, hbit);
                     const uint32_t b1 = q5k_s8x4(
                         *reinterpret_cast<const uint32_t*>(&sBq[stage][bcol][cl * 4 + 16]),
                         *reinterpret_cast<const uint32_t*>(&sBqh[stage][bcol][cl * 4 + 16]), shift, hbit);
@@ -261,7 +262,6 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q5k_raw_kernel(
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Explicit instantiations launched by the dispatch in mmq_q8_imma.cu.
 template __global__ void mmq_imma_q5k_raw_kernel<32, false>(const int8_t*, const __half*, const float*,

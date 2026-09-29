@@ -26,6 +26,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - Tokenizer parity with HF `tokenizers` (`tools/tokenizer_parity/run.sh`, 1196 strings): Unicode classes in the regex pre-tokenizers, full NFC, Gemma-4 tokenizer.json as gemma4 BPE, added-token lstrip/rstrip. Mismatches: Gemma-4 NVFP4 1196 -> 0, Qwen3 544 -> 0, DeepSeek-V2 400 -> 0, Phi-4 142 -> 0, gpt-oss 123 -> 0.
+- Device index products (#2218, #2259): 180 int32 products that can pass 2^31 (token, row, KV-slot, split, weight and unvalidated SSM/GDN extents) multiply in int64; 381 keep int32 behind an explicit cast and a bound from a template constant or an enforced check. NVFP4 HW quant strides are int64. No kernel spills (max +8 regs).
 - FP16 FMHA prefill picks Bq only among instanced (Bq, head_dim) tiles. Off sm_120 smem limits, HD512 could select Bq=32 and HD256 Bq=16, both with no kernel, so the launch returned false. sm_120 choices unchanged (#2243).
 - GPTQ SafeTensors dequant reads qzeros as AutoGPTQ writes them (`[groups, N/8]`) with the v1 zero offset (`(z + 1) & 0xF`, `gptq_v2`: none); config also from `config.json`; other formats, `bits != 4`, bad shapes refused at load. Qwen2.5-0.5B-Instruct-GPTQ-Int4 per-row cosine vs BF16: 0.8373 -> 0.9901 (#2249).
 - Qwen3 dense GGUF: `kv_cache.dtype=auto` resolves to FP16 again; FP8 KV turned greedy output into "The capital of France is not Paris". Decode after 16k context 208.5 -> 182.6 tok/s (Qwen3-8B-Q8_0); `kv_cache.dtype=fp8` restores it (#2208).

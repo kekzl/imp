@@ -65,7 +65,6 @@ void dispatch_dp4a_gemv(QType qtype, const void* W, const block_q8_1* q8_1, cons
 // with one launch. Source row layout is interleaved [Q_h0|Gate_h0|...]
 // each hd-sized; both destinations are contiguous [n,nh*hd]. Grid: (n*nh)
 // blocks of hd threads, each copying one (token,head) pair's Q+gate vectors.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <typename T>
 __global__ __launch_bounds__(256) void attn_gate_split_interleaved_kernel(
     const T* __restrict__ src, T* __restrict__ q_dst, T* __restrict__ gate_dst, int n_tokens, int nh,
@@ -76,13 +75,13 @@ __global__ __launch_bounds__(256) void attn_gate_split_interleaved_kernel(
     if (t >= n_tokens || h >= nh || tid >= hd)
         return;
     const T* src_row = src + static_cast<int64_t>(t) * q_out_dim;
-    int64_t dst_off = static_cast<int64_t>(t) * (nh * hd) + static_cast<int64_t>(h) * hd + tid;
+    int64_t dst_off = static_cast<int64_t>(t) * (static_cast<int64_t>(nh) * hd) +
+                      static_cast<int64_t>(h) * hd + tid;
     int q_src = h * 2 * hd + tid;
     int g_src = h * 2 * hd + hd + tid;
     q_dst[dst_off] = src_row[q_src];
     gate_dst[dst_off] = src_row[g_src];
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Explicit template instantiations (FP16 + BF16 paths used by attention).
 template __global__ void attn_gate_split_interleaved_kernel<half>(

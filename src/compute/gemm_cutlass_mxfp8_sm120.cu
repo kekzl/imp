@@ -126,7 +126,6 @@ __device__ __forceinline__ uint16_t mx8_pack_e4m3_pair(float v0, float v1) {
 }
 
 // One thread per 32-element block: 64 B in (4 x uint4), 32 B out (2 x uint4), one scale byte.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void quantize_fp16_mxfp8_cutlass_kernel(const half* __restrict__ input, uint8_t* __restrict__ out,
                                                    uint8_t* __restrict__ sf_out, int rows, int K,
                                                    int n_k_tiles) {
@@ -158,9 +157,11 @@ __global__ void quantize_fp16_mxfp8_cutlass_kernel(const half* __restrict__ inpu
     const float inv = 1.0f / mx8_ue8m0_to_float(e);
 
     uint32_t words[8];
+    // #2218 bounded: w * 4 <= 28 (loop w < 8 literal)
 #pragma unroll
     for (int w = 0; w < 8; w++) {
-        const uint32_t lo = mx8_pack_e4m3_pair(vals[w * 4] * inv, vals[w * 4 + 1] * inv);
+        const uint32_t lo = mx8_pack_e4m3_pair(vals[static_cast<ptrdiff_t>(w * 4)] * inv,
+                                               vals[w * 4 + 1] * inv);
         const uint32_t hi = mx8_pack_e4m3_pair(vals[w * 4 + 2] * inv, vals[w * 4 + 3] * inv);
         words[w] = lo | (hi << 16);
     }
@@ -168,7 +169,6 @@ __global__ void quantize_fp16_mxfp8_cutlass_kernel(const half* __restrict__ inpu
     dst[0] = make_uint4(words[0], words[1], words[2], words[3]);
     dst[1] = make_uint4(words[4], words[5], words[6], words[7]);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void quantize_fp16_to_mxfp8_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
                                     cudaStream_t stream) {

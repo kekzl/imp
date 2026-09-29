@@ -356,7 +356,6 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
 // on-the-fly. ROWSCALE selects a per-row (output-channel) scale instead of one per-tensor
 // scale (the fp8_ssm_proj sidecar quantizes heterogeneous packed rows, where one tensor scale
 // wastes e4m3 range).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <bool ROWSCALE>
 __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* __restrict__ x,
                                      half* __restrict__ y, int M, int K, float scale,
@@ -386,7 +385,7 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* 
         float4 a_raw = A_row_v[i];
 
         // 16 FP8 values need 16 FP16 values = 2 float4 loads from x
-        float4 x_raw0 = x_v[2 * i];
+        float4 x_raw0 = x_v[static_cast<int64_t>(2) * i];
         float4 x_raw1 = x_v[2 * i + 1];
 
         // Reinterpret FP8 bytes
@@ -428,11 +427,9 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* 
         y[row] = __float2half(sum);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Fused Q6_K GEMV, dequant-and-dot in one pass. Q6_K block = 210 bytes for 256 elements:
 // ql[128]+qh[64]+scales[16]+d[2]. Each warp computes one output row's dot product.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W, const half* __restrict__ x,
                                 half* __restrict__ y, int M, int K) {
     const int warps_per_block = blockDim.x / 32;
@@ -449,7 +446,7 @@ __global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W, const half* __res
     float sum = 0.0f;
 
     for (int b = 0; b < blocks_per_row; ++b) {
-        const uint8_t* bp = W_row + b * 210;
+        const uint8_t* bp = W_row + static_cast<int64_t>(b) * 210;
         const uint8_t* ql = bp;                            // ql[128]
         const uint8_t* qh = bp + 128;                      // qh[64]
         const int8_t* sc = (const int8_t*)(bp + 192);      // scales[16]
@@ -493,7 +490,6 @@ __global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W, const half* __res
     if (lane == 0)
         y[row] = __float2half(sum);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void gemv_q6k(const void* W, const half* x, half* y, int M, int K, cudaStream_t stream) {
     gemv_q6k_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(W), x, y, M, K);
@@ -503,7 +499,6 @@ void gemv_q6k(const void* W, const half* x, half* y, int M, int K, cudaStream_t 
 // Fused Q8_0 GEMV, dequant-and-dot in one pass. Q8_0 block = 34 bytes for 32 elements:
 // d[2]+qs[32]. Each warp computes one output row; each thread handles one element per block
 // (32 threads = 32 elements = 1 block).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void gemv_q8_0_kernel(const uint8_t* __restrict__ W, const half* __restrict__ x,
                                  half* __restrict__ y, int M, int K) {
     const int warps_per_block = blockDim.x / 32;
@@ -520,7 +515,7 @@ __global__ void gemv_q8_0_kernel(const uint8_t* __restrict__ W, const half* __re
     float sum = 0.0f;
 
     for (int b = 0; b < blocks_per_row; ++b) {
-        const uint8_t* bp = W_row + b * 34;
+        const uint8_t* bp = W_row + static_cast<int64_t>(b) * 34;
         float d = __half2float(*(const half*)bp);
         int8_t q = ((const int8_t*)(bp + 2))[lane];
         sum += d * (float)q * __half2float(x[b * 32 + lane]);
@@ -532,7 +527,6 @@ __global__ void gemv_q8_0_kernel(const uint8_t* __restrict__ W, const half* __re
     if (lane == 0)
         y[row] = __float2half(sum);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void gemv_q8_0(const void* W, const half* x, half* y, int M, int K, cudaStream_t stream) {
     gemv_q8_0_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(W), x, y, M, K);

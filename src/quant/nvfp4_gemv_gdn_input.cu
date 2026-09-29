@@ -40,7 +40,6 @@ struct GdnInputArgs {
 
 // Same loads and accumulation order as gemv_fp16_kernel (compute/gemm_gemv_dtype.cu):
 // 16 halves per lane per iteration, half2 products summed in fp32. K % 16 == 0.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ float warp_dot_fp16(const half* __restrict__ row, const half* __restrict__ x,
                                                int K, int lane) {
     const int K_vec16 = K / 16;
@@ -48,9 +47,9 @@ __device__ __forceinline__ float warp_dot_fp16(const half* __restrict__ row, con
     const float4* x_v = reinterpret_cast<const float4*>(x);
     float sum = 0.0f;
     for (int i = lane; i < K_vec16; i += 32) {
-        float4 a0 = row_v[2 * i];
+        float4 a0 = row_v[static_cast<int64_t>(2) * i];
         float4 a1 = row_v[2 * i + 1];
-        float4 x0 = x_v[2 * i];
+        float4 x0 = x_v[static_cast<int64_t>(2) * i];
         float4 x1 = x_v[2 * i + 1];
         const half2* a_h2_0 = reinterpret_cast<const half2*>(&a0);
         const half2* x_h2_0 = reinterpret_cast<const half2*>(&x0);
@@ -69,7 +68,6 @@ __device__ __forceinline__ float warp_dot_fp16(const half* __restrict__ row, con
     }
     return sum;
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 constexpr int kGdnInputNR = 8;  // warp-per-row rows per block (in_proj, alpha, beta)
 constexpr int kGdnGateRowsPerBlock = kMRThreads / kKparThreads;  // 2: K-par rows per block

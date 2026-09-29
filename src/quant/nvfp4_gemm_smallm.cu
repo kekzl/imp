@@ -52,7 +52,6 @@ constexpr int kSplitK = 3;      // grid.y: K-range splits. 160 blocks starved
 // traced to L2 (every block re-reads the 327 KiB x tile and the GDN scan evicts it, 45.8 us
 // real-step vs 23.9 isolated); packed x is ~92 KiB, small enough to survive without an
 // access-policy window.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <bool kAQuant>
 __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
@@ -64,6 +63,8 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
     const int tid = threadIdx.x;
     const int warp = tid / 32;
 
+    // #2218 bounded: mb * kMicroBlockSize < kMbPerTile * 16 = kKT = 128 (mb = i % kMbPerTile, :39,41);
+    // warp_m, warp_n <= 1 (kThreads = 128 -> 4 warps, kNR / 16 = 2, :38,40): warp_m/warp_n * 16 <= 16
     __shared__ half s_x[kSmM][kKT + kXPad];
     __shared__ half s_w[kNR][kKT + kWPad];
     __shared__ half s_out[kSmM][kNR];
@@ -151,7 +152,7 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
                 const int mb = xi % kMbPerTile;
                 const uint8_t* pb = reinterpret_cast<const uint8_t*>(&pxq[v]);
                 const half2 cs2 = __float2half2_rn(pxs[v]);
-                half2* dst = reinterpret_cast<half2*>(&s_x[m][mb * kMicroBlockSize]);
+                half2* dst = reinterpret_cast<half2*>(&s_x[m][static_cast<ptrdiff_t>(mb * kMicroBlockSize)]);
 #pragma unroll
                 for (int b = 0; b < 8; ++b) {
                     uint32_t w_fp16x2;
@@ -178,7 +179,7 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
             const int mb = wi % kMbPerTile;
             const uint8_t* pb = reinterpret_cast<const uint8_t*>(&pw[v]);
             const half2 cs2 = __float2half2_rn(pcs[v]);
-            half2* dst = reinterpret_cast<half2*>(&s_w[row][mb * kMicroBlockSize]);
+            half2* dst = reinterpret_cast<half2*>(&s_w[row][static_cast<ptrdiff_t>(mb * kMicroBlockSize)]);
 #pragma unroll
             for (int b = 0; b < 8; ++b) {
                 uint32_t w_fp16x2;
@@ -202,8 +203,8 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
         for (int k0 = 0; k0 < kKT; k0 += 16) {
             wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a;
             wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b;
-            wmma::load_matrix_sync(a, &s_x[warp_m * 16][k0], kKT + kXPad);
-            wmma::load_matrix_sync(b, &s_w[warp_n * 16][k0], kKT + kWPad);
+            wmma::load_matrix_sync(a, &s_x[static_cast<ptrdiff_t>(warp_m * 16)][k0], kKT + kXPad);
+            wmma::load_matrix_sync(b, &s_w[static_cast<ptrdiff_t>(warp_n * 16)][k0], kKT + kWPad);
             wmma::mma_sync(acc, a, b, acc);
         }
         __syncthreads();
@@ -213,7 +214,9 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
     // (block.x, split), so the reduction is deterministic — no atomics.
     {
         __shared__ float s_acc[kSmM][kNR];
-        wmma::store_matrix_sync(&s_acc[warp_m * 16][warp_n * 16], acc, kNR, wmma::mem_row_major);
+        wmma::store_matrix_sync(
+            &s_acc[static_cast<ptrdiff_t>(warp_m * 16)][static_cast<ptrdiff_t>(warp_n * 16)], acc, kNR,
+            wmma::mem_row_major);
         __syncthreads();
         // Streaming stores: each partial is written once and read once by the reduce kernel;
         // letting it age normally in L2 knocks out sets the weight stream needs (split-K
@@ -229,7 +232,6 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
     }
     (void)s_out;
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Reduce the kSplitK partial planes into the FP16 output. kAcc adds onto
 // the existing y (the o_proj/down residual-add call sites use beta=1).
