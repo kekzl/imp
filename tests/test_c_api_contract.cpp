@@ -22,6 +22,9 @@ TEST(CApiContract, NullArgumentsAreInvalidArg) {
     EXPECT_EQ(imp_context_create(nullptr, &cfg, &ctx), IMP_ERROR_INVALID_ARG);
     EXPECT_EQ(imp_context_create(empty_model(), nullptr, &ctx), IMP_ERROR_INVALID_ARG);
     EXPECT_EQ(imp_context_create(empty_model(), &cfg, nullptr), IMP_ERROR_INVALID_ARG);
+    int32_t tok = 7;
+    EXPECT_EQ(imp_prefill_token(nullptr, &tok), IMP_ERROR_INVALID_ARG);  // #2251
+    EXPECT_EQ(tok, 7);
 }
 
 // #2199: the unload entry point refuses a null context like its load/set siblings.
