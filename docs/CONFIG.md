@@ -171,6 +171,9 @@ Both GGUF and SafeTensors accepted; `--model` is optional (model-less start, fir
 | `--max-concurrent <n>` | `64` (`0`=unlimited) | max simultaneous requests |
 | `--rate-limit <n>` | `0` (unlimited) | max requests/min per IP |
 | `--log-requests <path>` | off | append per-request JSONL with prompt + response content + timing |
+| `--responses-store-ttl <s>` | `3600` (`0`=store off) | lifetime of a `store: true` response, see [API_FEATURES.md](API_FEATURES.md#responses-store) |
+| `--responses-store-max-entries <n>` | `1000` (`0`=store off) | Responses store entry cap, LRU eviction |
+| `--responses-store-max-mib <n>` | `256` (`0`=store off) | Responses store byte cap, LRU eviction |
 | `--reasoning-format <f>` | `deepseek` | `deepseek` or `none` - controls `<think>` channel handling |
 | `--think-budget <f>` | `0.5` (`0`=off) | fraction of `max_tokens` a reasoning model may spend thinking; force-closed at `max_tokens - max(reserve, max_tokens/4)`, paired with `runtime.think_answer_reserve` |
 | `--request-timeout <s>` | `300` (`0`=unlimited) | per-request timeout |
