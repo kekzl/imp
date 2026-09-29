@@ -96,8 +96,7 @@ __global__ void ssm_conv1d_decode_kernel(
     if (ch >= channels)
         return;
 
-    // #2218 bounded: ch * kernel_size < channels * 4 (conv_state [channels, kernel_size], kernel_size <= 4)
-    float* state = conv_state + static_cast<ptrdiff_t>(ch * kernel_size);
+    float* state = conv_state + static_cast<int64_t>(ch) * kernel_size;
     float sum;
     if (kernel_size == 4) {
         // One 16B read and one 16B write per channel, instead of the shift loop's three loads and
@@ -106,7 +105,7 @@ __global__ void ssm_conv1d_decode_kernel(
         float4 s = *reinterpret_cast<const float4*>(state);
         s = make_float4(s.y, s.z, s.w, __half2float(x_in[ch]));
         *reinterpret_cast<float4*>(state) = s;
-        const uint2 wraw = *reinterpret_cast<const uint2*>(weight + static_cast<ptrdiff_t>(ch * 4));
+        const uint2 wraw = *reinterpret_cast<const uint2*>(weight + static_cast<int64_t>(ch) * 4);
         const half2 w01 = *reinterpret_cast<const half2*>(&wraw.x);
         const half2 w23 = *reinterpret_cast<const half2*>(&wraw.y);
         sum = fmaf(s.w, __high2float(w23),
@@ -148,10 +147,9 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     const bool early = seq_slots == nullptr && kernel_size == 4;
     float4 s_early{};
     uint2 w_early{};
-    // #2218 bounded: ch * kernel_size < channels * 4 (conv_state [channels, kernel_size], kernel_size <= 4)
     if (early) {
-        s_early = *reinterpret_cast<const float4*>(conv_state + static_cast<ptrdiff_t>(ch * 4));
-        w_early = *reinterpret_cast<const uint2*>(weight + static_cast<ptrdiff_t>(ch * 4));
+        s_early = *reinterpret_cast<const float4*>(conv_state + static_cast<int64_t>(ch) * 4);
+        w_early = *reinterpret_cast<const uint2*>(weight + static_cast<int64_t>(ch) * 4);
     }
     pdl_wait();
     pdl_trigger();
@@ -161,7 +159,7 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     x_in += static_cast<size_t>(seq) * channels;
     x_out += static_cast<size_t>(seq) * channels;
 
-    float* state = conv_state + static_cast<ptrdiff_t>(ch * kernel_size);
+    float* state = conv_state + static_cast<int64_t>(ch) * kernel_size;
     float sum;
     if (kernel_size == 4) {
         // One 16B read and one 16B write per channel, instead of the shift loop's three loads and
@@ -171,7 +169,7 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
         s = make_float4(s.y, s.z, s.w, __half2float(x_in[ch]));
         *reinterpret_cast<float4*>(state) = s;
         const uint2 wraw = early ? w_early
-                                 : *reinterpret_cast<const uint2*>(weight + static_cast<ptrdiff_t>(ch * 4));
+                                 : *reinterpret_cast<const uint2*>(weight + static_cast<int64_t>(ch) * 4);
         const half2 w01 = *reinterpret_cast<const half2*>(&wraw.x);
         const half2 w23 = *reinterpret_cast<const half2*>(&wraw.y);
         sum = fmaf(s.w, __high2float(w23),
@@ -296,10 +294,8 @@ __global__ void ssm_conv1d_prefill_kernel(
         // not the live one (the real-row commit may have already run on another block).
         // snap_n==real_n needs no second copy - the two commits coincide.
         if (token == snap_n - 1 && conv_snap && conv_prev && snap_n != real_n) {
-            // #2218 bounded: ch * kernel_size < channels * 4 (conv_state [channels, kernel_size], kernel_size
-            // <= 4)
-            float* snap = conv_snap + static_cast<ptrdiff_t>(ch * kernel_size);
-            const float* prev = conv_prev + static_cast<ptrdiff_t>(ch * kernel_size);
+            float* snap = conv_snap + static_cast<int64_t>(ch) * kernel_size;
+            const float* prev = conv_prev + static_cast<int64_t>(ch) * kernel_size;
             for (int k = 0; k < kernel_size; k++) {
                 int src_t = snap_n - kernel_size + k;
                 snap[k] = (src_t >= 0) ? __half2float(x_in[static_cast<int64_t>(src_t) * channels + ch])
@@ -335,9 +331,8 @@ __global__ void ssm_conv1d_commit_kernel(float* __restrict__ conv_state, const h
     const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
     if (real_n <= 0)
         return;
-    // #2218 bounded: ch * kernel_size < channels * 4 (conv_state [channels, kernel_size], kernel_size <= 4)
-    const float* src = conv_state + static_cast<ptrdiff_t>(ch * kernel_size);
-    float* dst = dst_state + static_cast<ptrdiff_t>(ch * kernel_size);
+    const float* src = conv_state + static_cast<int64_t>(ch) * kernel_size;
+    float* dst = dst_state + static_cast<int64_t>(ch) * kernel_size;
     for (int k = 0; k < kernel_size; k++) {
         const int src_t = real_n - kernel_size + k;
         dst[k] = (src_t >= 0) ? __half2float(x_in[static_cast<int64_t>(src_t) * channels + ch])
@@ -442,10 +437,8 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
         // here silently picks up whichever block ran first, dropping draft acceptance with no
         // error anywhere.
         if (token == snap_n - 1 && conv_snap && conv_prev && snap_n != real_n) {
-            // #2218 bounded: ch * kernel_size < channels * 4 (conv_state [channels, kernel_size], kernel_size
-            // <= 4)
-            const float* src_state = conv_prev + static_cast<ptrdiff_t>(ch * kernel_size);
-            float* snap = conv_snap + static_cast<ptrdiff_t>(ch * kernel_size);
+            const float* src_state = conv_prev + static_cast<int64_t>(ch) * kernel_size;
+            float* snap = conv_snap + static_cast<int64_t>(ch) * kernel_size;
             for (int k = 0; k < kernel_size; k++) {
                 int src_t = snap_n - kernel_size + k;
                 snap[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch])
@@ -570,8 +563,7 @@ __global__ void ssm_scan_kernel(
     int64_t h_base = static_cast<int64_t>(h) * state_size * head_dim_ssm;
 
     // Shared memory for y_acc reduction across s-tiles: [head_dim_ssm * s_tiles]
-    // #2218 bounded: h * head_dim_ssm < 256 heads * 576 = 147456; smem d_tid * s_tiles < 12288 floats (48
-    // KiB)
+    // #2218 bounded: smem d_tid * s_tiles < head_dim_ssm * s_tiles <= 1024 (s_tiles > 1 only; ssm.cu:655)
     extern __shared__ float smem[];
 
     for (int t = 0; t < n_tokens; t++) {
@@ -584,7 +576,7 @@ __global__ void ssm_scan_kernel(
         float a_bar = expf(dt_val * a_log_h);
 
         float x_val = __half2float(
-            x[static_cast<int64_t>(t) * inner_size + static_cast<ptrdiff_t>(h * head_dim_ssm) + d_tid]);
+            x[static_cast<int64_t>(t) * inner_size + static_cast<int64_t>(h) * head_dim_ssm + d_tid]);
 
         float y_partial = 0.0f;
         for (int s = s_start; s < s_end; s++) {
@@ -632,11 +624,11 @@ __global__ void ssm_scan_kernel(
                 float y_val = smem[static_cast<ptrdiff_t>(d_tid * s_tiles)] + d_val * x_val;
                 if constexpr (FUSE_GATE) {
                     float z_val = __half2float(z[static_cast<int64_t>(t) * inner_size +
-                                                 static_cast<ptrdiff_t>(h * head_dim_ssm) + d_tid]);
+                                                 static_cast<int64_t>(h) * head_dim_ssm + d_tid]);
                     z_val = z_val / (1.0f + expf(-z_val));
                     y_val *= z_val;
                 }
-                y[static_cast<int64_t>(t) * inner_size + static_cast<ptrdiff_t>(h * head_dim_ssm) + d_tid] =
+                y[static_cast<int64_t>(t) * inner_size + static_cast<int64_t>(h) * head_dim_ssm + d_tid] =
                     __float2half(y_val);
             }
             // Barrier before next token iteration (all threads must finish writing smem)
@@ -646,12 +638,12 @@ __global__ void ssm_scan_kernel(
             // s_tiles == 1: no reduction needed
             float y_val = y_partial + d_val * x_val;
             if constexpr (FUSE_GATE) {
-                float z_val = __half2float(z[static_cast<int64_t>(t) * inner_size +
-                                             static_cast<ptrdiff_t>(h * head_dim_ssm) + d_tid]);
+                float z_val = __half2float(
+                    z[static_cast<int64_t>(t) * inner_size + static_cast<int64_t>(h) * head_dim_ssm + d_tid]);
                 z_val = z_val / (1.0f + expf(-z_val));
                 y_val *= z_val;
             }
-            y[static_cast<int64_t>(t) * inner_size + static_cast<ptrdiff_t>(h * head_dim_ssm) + d_tid] =
+            y[static_cast<int64_t>(t) * inner_size + static_cast<int64_t>(h) * head_dim_ssm + d_tid] =
                 __float2half(y_val);
         }
     }

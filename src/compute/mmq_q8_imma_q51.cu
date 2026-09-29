@@ -42,7 +42,7 @@ __device__ __forceinline__ void load_kstep_q51(int tid, const int8_t* __restrict
                        A + static_cast<size_t>(base_m + row) * K + k_base + col, valid);
     }
     const int kb0 = k_base / 32;
-    // #2218 bounded: part * 16 < 48 B (part < 3)
+    // #2218 bounded: part = i % 3 <= 2: part * 16 <= 32 B
 #pragma unroll
     for (int i = tid; i < kBN * 3; i += kThreads) {
         const int row = i / 3;
@@ -104,7 +104,7 @@ __global__ void __launch_bounds__(kThreads)
     const int warp_n = warp_id % kWN;
     const int rl = lane >> 2;
     const int cl = lane & 3;
-    // #2218 bounded: smem offsets kb * 24 < 48 (kb < 2), cl * 4 < 16 (cl = lane & 3)
+    // #2218 bounded: kb = i & 1 or loop kb < 2 (:146, :159): kb * 24 <= 24; cl = lane & 3: cl * 4 <= 12
 
     __shared__ int8_t sA[kStages][BM][kRow];
     __shared__ uint8_t sBq[kStages][kBN][kQ51Row];

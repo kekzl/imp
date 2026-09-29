@@ -341,7 +341,7 @@ __global__ void swiglu_fp16_nvfp4_kernel(const __half* __restrict__ gate, const 
     const float inv = 1.0f / actual;
     uint2 pk;
     uint8_t* pb = reinterpret_cast<uint8_t*>(&pk);
-    // #2218 bounded: register index k * 2 < 16 (k < 8)
+    // #2218 bounded: k * 2 <= 14 (loop k < 8 literal, float vals[16] at :313)
 #pragma unroll
     for (int k = 0; k < 8; ++k)
         pb[k] = nvfp4_pack_pair_hw(vals[static_cast<ptrdiff_t>(k * 2)] * inv, vals[k * 2 + 1] * inv);

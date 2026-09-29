@@ -42,9 +42,8 @@ __global__ void ssm_conv_tap_apply_kernel(float* __restrict__ conv_pool, int64_t
     if (ch >= channels)
         return;
     const int slot = slots[blockIdx.y];
-    // #2218 bounded: ch * kernel_size < channels * 4 (conv window [channels, kernel_size], kernel_size <= 4)
     float* w = conv_pool + static_cast<size_t>(slot) * static_cast<size_t>(slot_stride) +
-               static_cast<ptrdiff_t>(ch * kernel_size);
+               static_cast<int64_t>(ch) * kernel_size;
     for (int k = 0; k + 1 < kernel_size; k++)
         w[k] = w[k + 1];
     w[kernel_size - 1] = __half2float(tap_pool[static_cast<size_t>(slot) * channels + ch]);

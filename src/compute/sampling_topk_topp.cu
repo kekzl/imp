@@ -41,7 +41,8 @@ __device__ __forceinline__ void topk_partial_body(const float* __restrict__ logi
                                                   int* __restrict__ cand_idx_out) {
     extern __shared__ char smem_raw[];
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
-    // #2218 bounded: smem NUM_WARPS * top_k <= 32 * 128 = 4096 (top_k <= SAMPLE_MAX_TOP_K, sampling.h:55)
+    // #2218 bounded: NUM_WARPS * top_k <= 8 * 128 = 1024 (BLOCK_SIZE 256, sampling_internal.cuh:9; top_k
+    // <= MAX_TOP_K: sampling_topk_topp.cu:655,725,748, executor_sampling.cu:382)
     float* s_reduce = reinterpret_cast<float*>(smem_raw);  // BLOCK_SIZE
     float* s_gmax = s_reduce + BLOCK_SIZE;                 // 1
     float* s_gsum = s_gmax + 1;                            // 1
@@ -170,7 +171,8 @@ __device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float
                                                    int32_t* __restrict__ d_result) {
     extern __shared__ char smem_raw[];
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
-    // #2218 bounded: smem NUM_WARPS * top_k <= 32 * 128 = 4096 (top_k <= SAMPLE_MAX_TOP_K, sampling.h:55)
+    // #2218 bounded: NUM_WARPS * top_k <= 8 * 128 = 1024 (BLOCK_SIZE 256, sampling_internal.cuh:9; top_k
+    // <= MAX_TOP_K: sampling_topk_topp.cu:655,725,748, executor_sampling.cu:382)
     float* s_warp_vals = reinterpret_cast<float*>(smem_raw);  // NUM_WARPS * top_k
     int* s_warp_idxs = reinterpret_cast<int*>(s_warp_vals + static_cast<ptrdiff_t>(NUM_WARPS * top_k));
     float* s_val = reinterpret_cast<float*>(s_warp_idxs +

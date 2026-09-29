@@ -103,8 +103,8 @@ __global__ void paged_attention_decode_int4_kernel(
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
             // Prefetch next token's K + V into L1 cache
             if (t + 1 < (tok_end - tok_start)) {
-                // #2218 bounded: kv_head * kv_head_bytes < 256 * 288 = 73728
-                // (heads <= 256, kv_head_bytes = HEAD_DIM / 2 <= 288).
+                // #2218 bounded: kv_head * kv_head_bytes <= kMaxHeads * 256 / 2 = 2^19
+                // (model_limits.h:24, max HEAD_DIM :469).
                 const auto* K_next = K_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
                                      static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
                 const auto* V_next = V_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
@@ -238,8 +238,9 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
     // Total per warp: 3 * (HEAD_DIM/2) bytes. 8 warps: 3 * 64 * 8 = 1.5 KiB for HD=128.
     extern __shared__ char smem_pipe_int4[];
     constexpr int WARP_SMEM_BYTES = 3 * (HEAD_DIM / 2);
-    // #2218 bounded: warp_id * WARP_SMEM_BYTES < 32 * 3 * 288 = 27648, 2 * (HEAD_DIM / 2) <= 576 (smem);
-    // kv_head * kv_head_bytes < 256 * 288 = 73728 (heads <= 256, HEAD_DIM / 2 <= 288).
+    // #2218 bounded: smem warp_id * WARP_SMEM_BYTES < 8 * 3 * 128 = 3072, 2 * (HEAD_DIM / 2) <= 256
+    // (NUM_WARPS = 8 attention_paged_common.cuh:13, max HEAD_DIM :434);
+    // kv_head * kv_head_bytes <= kMaxHeads * 128 = 2^19 (model_limits.h:24).
     uint8_t* my_smem = reinterpret_cast<uint8_t*>(smem_pipe_int4) +
                        static_cast<ptrdiff_t>(warp_id * WARP_SMEM_BYTES);
     uint8_t* k_buf0 = my_smem;

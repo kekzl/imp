@@ -139,8 +139,8 @@ __global__ void paged_attention_splitk_int8_kernel(
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
             // Prefetch next token's K + V into L1 cache
             if (t + 1 < (tok_end - tok_start)) {
-                // #2218 bounded: kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576);
-                // i * 4 < 4 * DP4A_CALLS <= 20 (ELEMS = HEAD_DIM / 32 <= 18).
+                // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 256 (:529) = 2^20 (model_limits.h:24);
+                // i * 4 < 4 * DP4A_CALLS <= 8 (constexpr :25, ELEMS = 256 / 32 = 8).
                 const auto* K_next = K_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
                                      static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
                 const auto* V_next = V_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
@@ -365,8 +365,8 @@ __global__ void paged_attention_decode_int8_kernel(
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
             // Prefetch next token's K + V into L1 cache
             if (t + 1 < (tok_end - tok_start)) {
-                // #2218 bounded: kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576);
-                // i * 4 < 4 * DP4A_CALLS <= 20 (ELEMS = HEAD_DIM / 32 <= 18).
+                // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 256 (:563) = 2^20 (model_limits.h:24);
+                // i * 4 < 4 * DP4A_CALLS <= 8 (constexpr :269, ELEMS = 256 / 32 = 8).
                 const auto* K_next = K_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
                                      static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
                 const auto* V_next = V_block + static_cast<int64_t>(t + 1) * kv_slot_stride +

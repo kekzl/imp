@@ -159,8 +159,9 @@ __device__ __forceinline__ void smallm_v2_cta_body(
     const int kt1 = min(k_tiles, kt0 + per_stripe);
     const int iters = kt1 - kt0;
 
-    // #2218 bounded: smem offsets < kStages * kStageBytes (s * kStageBytes, row * kNibStride/kSfStride,
-    // j * 16, T0 * 4, c * 32 within a 15360 B stage) <= 101376 B (sm_120 opt-in max); global j * 16 < 128 B
+    // #2218 bounded: s * kStageBytes < kStages * 15360 <= 92160 B (kStages template, max 6 at :600);
+    // r, a_row, n_row, sfa_row < kNR = 64: row * kNibStride < 9216 B; j * 16, c * 32, T0 * 4, c * 4 < 128 B
+    // (constexpr loop bounds)
     auto stage_base = [&](int s) { return smem + static_cast<ptrdiff_t>(s * kStageBytes); };
 
     // Per-lane chunk assignments are fixed; only the K offset advances:

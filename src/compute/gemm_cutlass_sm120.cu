@@ -330,7 +330,7 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* input_row
     float local_absmax = 0.0f;
     const half2* src_h2 = reinterpret_cast<const half2*>(input_row_base +
                                                          static_cast<int64_t>(k_group) * kSFVecSize);
-    // #2218 bounded: register index i * 2 < kSFVecSize = 16
+    // #2218 bounded: i * 2 <= 14 (loop i < kSFVecSize / 2, kSFVecSize = 16 at :174)
 #pragma unroll
     for (int i = 0; i < kSFVecSize / 2; i++) {
         half2 h2 = src_h2[i];
@@ -626,7 +626,7 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
     for (int i = 0; i < kSFVecSize / 2; i++) {
         half2 uh2 = up_h2[i];
         float u0 = __half2float(uh2.x);
-        // #2218 bounded: register index i * 2 < kSFVecSize = 16
+        // #2218 bounded: i * 2 <= 14 (loop i < kSFVecSize / 2, kSFVecSize = 16 at :174)
         float u1 = __half2float(uh2.y);
         float v0, v1;
         if (kAct == 0) {  // SWIGLU

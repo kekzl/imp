@@ -48,8 +48,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
             H_reg[s] = H_col[static_cast<ptrdiff_t>(s * HD)];
     }
 
-    // #2218 bounded: HD = SS = 128, CHUNK <= 32 (dispatch below): smem offsets and tile offsets
-    // (k * 16 * HD) < 128 * 128 = 16384, H_col s * HD < 16384, y_out h * HD < 256 heads * 128
+    // #2218 bounded: HD = SS = 128, CHUNK = 16 template args (only instantiation, launcher below):
+    // smem and tile offsets <= SS * HD = 16384 (k * 16 * HD with k < SS / 16), H_col s * HD < 16384
     extern __shared__ float smem[];
     half* s_k_fp16 = reinterpret_cast<half*>(smem);                      // [L * SS]
     half* s_q_fp16 = s_k_fp16 + static_cast<ptrdiff_t>(CHUNK * SS);      // [L * SS]
@@ -238,7 +238,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
                 const float coef = (D_0t1 / s_D[j + 1]) * s_qk_fp32[t_loc * CHUNK + j];
                 y += coef * s_u_fp32[j * HD + d];
             }
-            y_out[static_cast<size_t>(t) * inner + static_cast<size_t>(h * HD) + d] = __float2half(y * scale);
+            y_out[static_cast<size_t>(t) * inner + static_cast<size_t>(h) * HD + d] = __float2half(y * scale);
         }
 
         // ---------------- STEP 7: H_L = D[0..L] H_0 + Σ_t (D[0..L]/D[0..t+1]) k̃_t u_t^T ----------------
@@ -325,8 +325,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
             H_reg[s] = H_col[static_cast<ptrdiff_t>(s * HD)];
     }
 
-    // #2218 bounded: HD = SS = 128, CHUNK <= 32 (dispatch below): smem offsets and tile offsets
-    // (k * 16 * HD, m_offset * SS) < 128 * 128 = 16384, H_col s * HD < 16384, y_out h * HD < 256 * 128
+    // #2218 bounded: HD = SS = 128, CHUNK = 32 template args (only instantiation, launcher below): smem
+    // and tile offsets <= SS * HD = 16384 (k * 16 * HD, m_offset * SS < CHUNK * SS), H_col s * HD < 16384
     extern __shared__ float smem[];
     half* s_k_fp16 = reinterpret_cast<half*>(smem);                  // [L*SS]
     half* s_q_fp16 = s_k_fp16 + static_cast<ptrdiff_t>(CHUNK * SS);  // [L*SS]
@@ -546,7 +546,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
                 const float coef = (D_0t1 / s_D[j + 1]) * s_qk_fp32[t_loc * CHUNK + j];
                 y += coef * s_u_fp32[j * HD + d];
             }
-            y_out[static_cast<size_t>(t) * inner + static_cast<size_t>(h * HD) + d] = __float2half(y * scale);
+            y_out[static_cast<size_t>(t) * inner + static_cast<size_t>(h) * HD + d] = __float2half(y * scale);
         }
         __syncthreads();
 

@@ -171,7 +171,8 @@ __global__ void paged_attention_decode_nvfp4_kernel(
             first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
-            // #2218 bounded: kv_head * kv_head_bytes < 256 * 288 = 73728 (heads <= 256, HEAD_DIM / 2 <= 288).
+            // #2218 bounded: kv_head * kv_head_bytes <= kMaxHeads * 512 / 2 = 2^20 (model_limits.h:24;
+            // max HEAD_DIM :488, :585).
             const uint8_t* K_tok = K_block + static_cast<int64_t>(t) * kv_slot_stride +
                                    static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
             const uint8_t* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +
@@ -322,7 +323,8 @@ __global__ void paged_attention_splitk_nvfp4_kernel(
             first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
-            // #2218 bounded: kv_head * kv_head_bytes < 256 * 288 = 73728 (heads <= 256, HEAD_DIM / 2 <= 288).
+            // #2218 bounded: kv_head * kv_head_bytes <= kMaxHeads * 512 / 2 = 2^20 (model_limits.h:24;
+            // max HEAD_DIM :455, :552).
             const uint8_t* K_tok = K_block + static_cast<int64_t>(t) * kv_slot_stride +
                                    static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
             const uint8_t* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +

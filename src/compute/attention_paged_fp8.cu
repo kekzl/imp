@@ -110,8 +110,9 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
     // Total per warp: 3 * HEAD_DIM bytes. 8 warps: 3 * 128 * 8 = 3 KiB for HD=128.
     extern __shared__ char smem_pipe_fp8[];
     constexpr int WARP_SMEM_BYTES = 3 * HEAD_DIM;
-    // #2218 bounded: warp_id * WARP_SMEM_BYTES < 32 warps * 3 * 576 = 55296, 2 * HEAD_DIM <= 1152 (smem);
-    // kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
+    // #2218 bounded: smem warp_id * WARP_SMEM_BYTES < NUM_WARPS * 3 * 512 = 12288, 2 * HEAD_DIM <= 1024
+    // (NUM_WARPS = 8 attention_paged_common.cuh:13, max HEAD_DIM :495);
+    // kv_head * HEAD_DIM <= kMaxHeads * 512 = 2^21 (model_limits.h:24).
     uint8_t* my_smem = reinterpret_cast<uint8_t*>(smem_pipe_fp8) +
                        static_cast<ptrdiff_t>(warp_id * WARP_SMEM_BYTES);
     uint8_t* k_buf0 = my_smem;
@@ -319,7 +320,7 @@ __global__ void paged_attention_decode_fp8_kernel(const half* __restrict__ Q,
             first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
-            // #2218 bounded: kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
+            // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 (:558) = 2^21 (model_limits.h:24).
             const uint8_t* K_tok = K_block + static_cast<int64_t>(t) * kv_slot_stride +
                                    static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
 

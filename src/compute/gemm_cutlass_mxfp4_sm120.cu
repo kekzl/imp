@@ -328,7 +328,7 @@ __global__ void dequant_mxfp4_split_kernel(const uint8_t* __restrict__ data,    
     if (out_base + 31 >= out_limit)
         return;
 
-    // #2218 bounded: in-block offset i * 2 < 32 (i < 16)
+    // #2218 bounded: i * 2 <= 30 (loop i < 16 literal)
     for (int i = 0; i < 16; i++) {
         uint8_t packed = block_data[i];
         out[out_base + static_cast<ptrdiff_t>(i * 2)] = __float2half(kE2M1Table[packed & 0xF] * scale);
@@ -433,7 +433,7 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
     float vals[32];
     float local_absmax = 0.0f;
     const half2* src_h2 = reinterpret_cast<const half2*>(input + base);
-    // #2218 bounded: register index i * 2 < 32 (i < 16)
+    // #2218 bounded: i * 2 <= 30 (loop i < 16 literal, float vals[32])
 #pragma unroll
     for (int i = 0; i < 16; i++) {
         half2 h2 = src_h2[i];

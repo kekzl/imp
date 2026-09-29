@@ -89,8 +89,8 @@ gemm_qk_dp4a_moe_fused_kernel(
     const uint8_t* w_row = packed_weight + static_cast<size_t>(expert) * weight_stride +
                            static_cast<size_t>(n_col) * row_bytes;
 
-    // #2218 bounded: smem Q8 tile offsets (TILE_M * q8_per_row * 32, (mi * q8_per_row + q) * 32) <
-    // dynamic smem size <= 101376 B (sm_120 opt-in max, launch below)
+    // #2218 bounded: TILE_M * q8_per_row * 32, (mi * q8_per_row + q) * 32 < smem_bytes (gemm_q4k.cu:436)
+    // <= 101376 B (sm_120 opt-in max; the launch at :446 fails above it)
     extern __shared__ char smem_raw[];
     int8_t* smem_qs = reinterpret_cast<int8_t*>(smem_raw);
     float* smem_d8 = reinterpret_cast<float*>(smem_raw + static_cast<ptrdiff_t>(TILE_M * q8_per_row * 32));
@@ -254,8 +254,8 @@ gemm_qk_dp4a_dense_kernel(
     const size_t row_bytes = static_cast<size_t>(blocks_per_row) * Traits::BYTES;
     const uint8_t* w_row = packed_weight + static_cast<size_t>(n_col) * row_bytes;
 
-    // #2218 bounded: smem Q8 tile offsets (DENSE_TILE_M * q8_per_row * 32, (mi * q8_per_row + q) * 32) <
-    // dynamic smem size <= 101376 B (sm_120 opt-in max, launch below)
+    // #2218 bounded: DENSE_TILE_M * q8_per_row * 32, (mi * q8_per_row + q) * 32 < smem_bytes (:400)
+    // <= 101376 B (sm_120 opt-in max; the launch at :412 fails above it)
     extern __shared__ char smem_raw[];
     int8_t* smem_qs = reinterpret_cast<int8_t*>(smem_raw);
     float* smem_d8 = reinterpret_cast<float*>(smem_raw +

@@ -194,9 +194,9 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         constexpr int K_TILES = HEAD_DIM / 16;
 
         // Per-warp WMMA scratch
-        // #2218 bounded: smem NUM_WARPS * WARP_TC_HALVES <= 8 * 1024, 16 * 16 = 256; t < 16:
-        // t * kv_slot_stride < 16 * 256 * 288 = 1179648; kv_head * kv_head_bytes < 256 * 288 = 73728;
-        // kv_head * kv_head_stride_res < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
+        // #2218 bounded: smem warp_id * WARP_TC_HALVES < NUM_WARPS * 1024 = 8192, 16 * 16 = 256 (:75);
+        // t * kv_slot_stride < 16 * kMaxHeads * 256 = 2^24, kv_head * kv_head_bytes <= kMaxHeads * 256,
+        // kv_head * kv_head_stride_res <= kMaxHeads * 512 = 2^21 (model_limits.h:24, max HEAD_DIM :1147).
         __half* sQ_w = tc_smem + static_cast<ptrdiff_t>(warp_id * WARP_TC_HALVES);
         __half* sK_w = sQ_w + static_cast<ptrdiff_t>(16 * 16);
         float* sFV_w = reinterpret_cast<float*>(sK_w +
@@ -654,7 +654,7 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
             first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
-            // #2218 bounded: kv_head * kv_head_bytes < 256 * 288 = 73728 (heads <= 256, HEAD_DIM / 2 <= 288).
+            // #2218 bounded: kv_head * kv_head_bytes <= kMaxHeads * 256 = 2^20 (model_limits.h:24, :1066).
             const uint8_t* K_tok = K_block + static_cast<int64_t>(t) * kv_slot_stride +
                                    static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
             const uint8_t* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +
@@ -865,7 +865,7 @@ __global__ void paged_attention_residual_reduce_kernel(
 
         for (int t = warp_id; t < res_active; t += NUM_WARPS) {
             int slot = (sb + t) % residual_n_tokens;
-            // #2218 bounded: kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
+            // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 = 2^21 (model_limits.h:24, :1104).
             const half* K_tok = K_res + (int64_t)slot * slot_stride +
                                 static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
             const half* V_tok = V_res + (int64_t)slot * slot_stride +

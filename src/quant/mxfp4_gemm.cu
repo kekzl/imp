@@ -46,7 +46,7 @@ __device__ __forceinline__ float dot_micro_block(const uint8_t* __restrict__ pb,
     constexpr uint32_t kLutHi = 0x46444240u;
 
     float acc = 0.0f;
-    // #2218 bounded: in-block offset b * 2 < 16 (b < 8)
+    // #2218 bounded: in-block offset b * 2 <= 14 (loop b < 8 literal)
 #pragma unroll
     for (int b = 0; b < 8; b++) {
         uint32_t byte_val = pb[b];
@@ -337,7 +337,7 @@ __device__ __forceinline__ float dot_micro_block_swiglu(const uint8_t* __restric
                                                         const half* __restrict__ up, int elem_base,
                                                         const float* s_lut) {
     float acc = 0.0f;
-    // #2218 bounded: in-block offset b * 2 < 16 (b < 8)
+    // #2218 bounded: in-block offset b * 2 <= 14 (loop b < 8 literal)
 #pragma unroll
     for (int b = 0; b < 8; b++) {
         const half2 gh = *reinterpret_cast<const half2*>(gate + elem_base + static_cast<ptrdiff_t>(b * 2));
@@ -402,7 +402,7 @@ __device__ __forceinline__ float dot_micro_block_geglu(const uint8_t* __restrict
     constexpr float SQRT_2_PI = 0.7978845608028654f;
     constexpr float COEFF = 0.044715f;
     float acc = 0.0f;
-    // #2218 bounded: in-block offset b * 2 < 16 (b < 8)
+    // #2218 bounded: in-block offset b * 2 <= 14 (loop b < 8 literal)
 #pragma unroll
     for (int b = 0; b < 8; b++) {
         const half2 gh = *reinterpret_cast<const half2*>(gate + elem_base + static_cast<ptrdiff_t>(b * 2));

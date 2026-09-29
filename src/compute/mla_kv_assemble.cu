@@ -28,15 +28,13 @@ __global__ static void mla_assemble_kv_kernel(
     const int h = blockIdx.x;   // head index
     const int t = blockIdx.y;   // token index
 
-    // #2218 bounded: h * (nope_dim + v_head_dim), h * head_dim, h * v_dst_hd < 256 * 576 = 147456
-    // (heads <= 256, head dims <= 576).
     const __half* kv_b_h = kv_b + static_cast<int64_t>(t) * kv_stride +
-                           static_cast<ptrdiff_t>(h * (nope_dim + v_head_dim));
+                           static_cast<int64_t>(h) * (nope_dim + v_head_dim);
     const __half* rope_t = k_rope + static_cast<int64_t>(t) * rope_dim;
     __half* k_dst = K_out + static_cast<int64_t>(t) * n_heads * head_dim +
-                    static_cast<ptrdiff_t>(h * head_dim);
+                    static_cast<int64_t>(h) * head_dim;
     __half* v_dst = V_out + static_cast<int64_t>(t) * n_heads * v_dst_hd +
-                    static_cast<ptrdiff_t>(h * v_dst_hd);
+                    static_cast<int64_t>(h) * v_dst_hd;
 
     // pe (rope) first — approach (b)
     for (int j = threadIdx.x; j < rope_dim; j += blockDim.x)
@@ -62,9 +60,8 @@ __global__ static void mla_reorder_q_kernel(
     const int h = blockIdx.x;
     const int t = blockIdx.y;
 
-    // #2218 bounded: h * head_dim < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
     __half* q_head = q_data + static_cast<int64_t>(t) * n_heads * head_dim +
-                     static_cast<ptrdiff_t>(h * head_dim);
+                     static_cast<int64_t>(h) * head_dim;
 
     extern __shared__ __half smem[];
     for (int j = threadIdx.x; j < head_dim; j += blockDim.x)

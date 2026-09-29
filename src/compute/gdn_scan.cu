@@ -41,8 +41,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
             H_reg[s] = H_col[static_cast<ptrdiff_t>(s * HD)];
     }
 
-    // #2218 bounded: SS, HD <= 128, CHUNK <= 64 (dispatch below): smem offsets < 2 * 64 * 128 = 16384
-    // floats, H_col s * HD and t_local * SS < 16384, 2 * BC_size < 2 * 256 groups * 128 = 65536
+    // #2218 bounded: HD, SS, CHUNK template args (128/128/64, 64/64/64 dispatch below): smem offsets
+    // <= 2 * CHUNK * SS <= 16384 floats, H_col s * HD < SS * HD <= 16384, t_local * SS < CHUNK * SS <= 8192
     extern __shared__ float smem[];
     float* s_k = smem;                               // [CHUNK * SS]
     float* s_q = smem + static_cast<ptrdiff_t>(CHUNK * SS);           // [CHUNK * SS]
@@ -105,7 +105,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
         for (int t_local = 0; t_local < L; t_local++) {
             const int t_global = t_chunk_start + t_local;
             const float* row = conv_f32 + static_cast<size_t>(t_global) * conv_channels;
-            const float* V_base = row + static_cast<ptrdiff_t>(2 * BC_size);
+            const float* V_base = row + static_cast<int64_t>(2) * BC_size;
             const float v_d = V_base[h * HD + d];
 
             const float* k_row = s_k + static_cast<ptrdiff_t>(t_local * SS);
@@ -193,8 +193,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
     }
 
     // Shared memory layout (sized for CHUNK, SS, HD; opt-in dynamic smem).
-    // #2218 bounded: SS, HD <= 128, CHUNK <= 64 (dispatch below): smem offsets < 8 * 64 * 128 = 65536
-    // floats, H_col s * HD and t_loc * SS < 16384, y_out h * HD < 256 heads * 128 = 32768
+    // #2218 bounded: HD = SS = 128, CHUNK = 32 template args (only instantiation, dispatch below): smem
+    // CHUNK * SS = CHUNK * HD = 4096, CHUNK * CHUNK = 1024, H_col s * HD < 16384, t_loc * SS < 4096
     extern __shared__ float smem[];
     float* s_k = smem;                          // [CHUNK * SS]    normalized K
     float* s_q = s_k + static_cast<ptrdiff_t>(CHUNK * SS);    // [CHUNK * SS]    normalized Q
@@ -348,7 +348,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
                 const float logD_j1t1 = s_logD[t_loc + 1] - s_logD[j + 1];
                 y += expf(logD_j1t1) * s_qk[t_loc * L + j] * s_u[j * HD + d];
             }
-            y_out[static_cast<size_t>(t) * inner + static_cast<size_t>(h * HD) + d] = __float2half(y * scale);
+            y_out[static_cast<size_t>(t) * inner + static_cast<size_t>(h) * HD + d] = __float2half(y * scale);
         }
 
         // Step 6: H_L = D[0..L]*H_0 + sum_t D[t+1..L] k~_t u_t^T. D[t+1..L] hoisted out of the (s,t)

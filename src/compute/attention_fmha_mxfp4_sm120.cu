@@ -184,9 +184,9 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     //
     extern __shared__ char smem[];
 
-    // #2218 bounded: smem layout/MMA/WMMA/scale offsets in this kernel < 99 KiB smem (Bq <= 128, Bkv = 64,
-    // HD <= 256); kg * 16, 2 * b < HD <= 256; 2 * i < 16; n_kv_heads * hd_half, n_kv_heads * n_k_groups
-    // <= 256 * 128 = 32768 (heads <= 256).
+    // #2218 bounded: smem offsets < launch smem <= 101376 B (sm_120 opt-in, cudaFuncSetAttribute :1664);
+    // kg * 16, 2 * b < HD <= 256, 2 * i < 16 (HD instantiations :1713-1757); n_kv_heads * hd_half,
+    // n_kv_heads * n_k_groups <= kMaxHeads * 128 = 2^19 (model_limits.h:24).
     uint8_t* Q_fp4 = reinterpret_cast<uint8_t*>(smem);
     float* q_scales = reinterpret_cast<float*>(Q_fp4 + static_cast<ptrdiff_t>(Bq * hd_half_padded));
     // KV_buf is aligned to 16 bytes for vectorized loads

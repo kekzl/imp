@@ -69,8 +69,8 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     float* QE_s = ws.QE + slot * kChunk * SS;
     float* YA_s = ws.YA + slot * kChunk * HD;
 
-    // #2218 bounded: smem offsets <= 4 * kChunk * SS = 32768 floats (kChunk 64, SS 128); g_idx * SS,
-    // lane * 4, 2 * BC_size and h * HD index one conv row, < 3 * 256 heads * 128 = 98304 (heads <= 256)
+    // #2218 bounded: kChunk = 64 (gdn_scan_chunkpar.cuh:16), HD = SS = 128 (static_assert :48, :92):
+    // smem kChunk * SS = 8192, kChunk * SQ = 4352 floats; lane * 4 < 128 (lane < 32)
     extern __shared__ float smem[];
     float* s_k = smem;                     // [kChunk * SS]  phase A
     float* s_q = s_k + static_cast<ptrdiff_t>(kChunk * SS);  // [kChunk * SS]  phase A
@@ -93,9 +93,9 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     for (int t = warp; t < L; t += 2 * HD / 32) {
         const float* row = conv_f32 + static_cast<size_t>(t0 + t) * conv_channels;
         *reinterpret_cast<float4*>(&s_q[swz128(t, lane * 4)]) = *reinterpret_cast<const float4*>(
-            row + static_cast<ptrdiff_t>(g_idx * SS) + static_cast<ptrdiff_t>(lane * 4));
+            row + static_cast<int64_t>(g_idx) * SS + static_cast<ptrdiff_t>(lane * 4));
         *reinterpret_cast<float4*>(&s_k[swz128(t, lane * 4)]) = *reinterpret_cast<const float4*>(
-            row + BC_size + static_cast<ptrdiff_t>(g_idx * SS) + static_cast<ptrdiff_t>(lane * 4));
+            row + BC_size + static_cast<int64_t>(g_idx) * SS + static_cast<ptrdiff_t>(lane * 4));
     }
     // Per-token decay / learning rate — same formulas as gdn_scan_fused_kernel:
     // the transcendental part per token in parallel, the prefix sum (same
@@ -215,8 +215,8 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
             float4 u = make_float4(0.0f, 0.0f, 0.0f, 0.0f), w = u;
             if (t < L) {
                 const float* row = conv_f32 + static_cast<size_t>(t0 + t) * conv_channels;
-                u = *reinterpret_cast<const float4*>(row + static_cast<ptrdiff_t>(2 * BC_size) +
-                                                     static_cast<ptrdiff_t>(h * HD) + c4);
+                u = *reinterpret_cast<const float4*>(row + static_cast<int64_t>(2) * BC_size +
+                                                     static_cast<int64_t>(h) * HD + c4);
                 const float bt = s_beta[t];
                 u.x *= bt;
                 u.y *= bt;

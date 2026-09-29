@@ -50,8 +50,8 @@ __device__ __forceinline__ void tile_load(uint8_t* k_tile, uint8_t* v_tile, cons
         int piece = lane + 32 * i;  // 128 pieces: row = piece/8, 16B col = piece%8
         int row = piece >> 3;
         int col = (piece & 7) * 16;
-        // #2218 bounded: row < 16 (piece < 128): row * kTileRowStride < 2304 (smem),
-        // row * kv_slot_stride < 16 * 256 * 128 = 524288 (heads <= 256, HEAD_DIM = 128).
+        // #2218 bounded: row < 16 (piece < 128): row * kTileRowStride < 16 * 144 = 2304 (constexpr :26),
+        // row * kv_slot_stride < 16 * kMaxHeads * 128 = 2^23 (model_limits.h:24, callers :127, :345).
         cp_async_ca_16(k_tile + static_cast<ptrdiff_t>(row * kTileRowStride) + col,
                        k_src + static_cast<ptrdiff_t>(row * kv_slot_stride) + col);
         cp_async_ca_16(v_tile + static_cast<ptrdiff_t>(row * kTileRowStride) + col,
@@ -65,8 +65,8 @@ __device__ __forceinline__ void tile_load_block(uint8_t* k_tile, uint8_t* v_tile
                                                 const uint8_t* v_src, int kv_slot_stride, int tid,
                                                 int nthreads) {
     for (int piece = tid; piece < 256; piece += nthreads) {
-        // #2218 bounded: row < 16 (idx < 128): row * kTileRowStride < 2304 (smem),
-        // row * kv_slot_stride < 16 * 256 * 128 = 524288 (heads <= 256, HEAD_DIM = 128).
+        // #2218 bounded: row < 16 (idx < 128): row * kTileRowStride < 16 * 144 = 2304 (constexpr :26),
+        // row * kv_slot_stride < 16 * kMaxHeads * 128 = 2^23 (model_limits.h:24, callers :127, :345).
         int idx = piece & 127;
         int row = idx >> 3;
         int col = (idx & 7) * 16;
@@ -129,8 +129,8 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
     const float fused_scale = scale * kv_scale;
 
     extern __shared__ char smem_tile_fp8[];
-    // #2218 bounded: smem warp_id * kWarpSmemBytes, 3 * kTileBytes < kBlockSmemBytes = 73728,
-    // my_tok * kTileRowStride < 16 * 144 = 2304, my_half * (HEAD_DIM / 2) <= 64 (my_half <= 1).
+    // #2218 bounded: smem warp_id * kWarpSmemBytes, 3 * kTileBytes < kBlockSmemBytes = 73728 (:29),
+    // my_tok * kTileRowStride < 16 * 144 = 2304, my_half * (HEAD_DIM / 2) <= 64 (my_half <= 1, :90).
     uint8_t* my_smem = reinterpret_cast<uint8_t*>(smem_tile_fp8) +
                        static_cast<ptrdiff_t>(warp_id * kWarpSmemBytes);
     uint8_t* k_tiles[2] = {my_smem, my_smem + static_cast<ptrdiff_t>(2 * kTileBytes)};
@@ -351,8 +351,8 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
     uint8_t* v_tiles[kGqaStages];
 #pragma unroll
     for (int i = 0; i < kGqaStages; i++) {
-        // #2218 bounded: smem i * 2 * kTileBytes < 2 * 2 * 2304 = 9216,
-        // my_tok * kTileRowStride < 16 * 144 = 2304, my_half * (HEAD_DIM / 2) <= 64 (my_half <= 1).
+        // #2218 bounded: smem i * 2 * kTileBytes < kGqaStages * 2 * 2304 = 9216 (constexpr :27, :30),
+        // my_tok * kTileRowStride < 16 * 144 = 2304, my_half * (HEAD_DIM / 2) <= 64 (my_half <= 1, :300).
         k_tiles[i] = smem_gqa + static_cast<ptrdiff_t>(i * 2 * kTileBytes);
         v_tiles[i] = smem_gqa + static_cast<ptrdiff_t>(i * 2 * kTileBytes) + kTileBytes;
     }

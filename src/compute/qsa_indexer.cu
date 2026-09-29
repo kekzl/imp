@@ -59,11 +59,10 @@ __global__ void qsa_prep_queries_kernel(const half* __restrict__ qk, const int* 
     const int row = blockIdx.x, head = blockIdx.y, d = threadIdx.x;
     const int stride = (g.n_heads + 1) * D;
     const int pos = positions[row];
-    // #2218 bounded: g.n_heads * D, head * D < 256 * 128 = 32768 (heads <= 256, D = kQsaDim = 128).
     if (head == 0)
         raw_keys[static_cast<size_t>(pos) * D + d] =
-            qk[static_cast<size_t>(row) * stride + static_cast<size_t>(g.n_heads * D) + d];
-    y[d] = __half2float(qk[static_cast<size_t>(row) * stride + static_cast<size_t>(head * D) + d]);
+            qk[static_cast<size_t>(row) * stride + static_cast<size_t>(g.n_heads) * D + d];
+    y[d] = __half2float(qk[static_cast<size_t>(row) * stride + static_cast<size_t>(head) * D + d]);
     __syncthreads();
     const float out = norm_rope_128(y, red, w_q, pos, g);
     q_out[(static_cast<size_t>(row) * g.n_heads + head) * D + d] = __float2half(out);
@@ -104,7 +103,7 @@ __global__ void __launch_bounds__(kScoreWarps * 32) qsa_score_kernel(const half*
     const int r = blockIdx.y, lane = threadIdx.x & 31;
     const int nb = (positions[r] + 1) / g.ratio;
     float qr[4][4];
-    // #2218 bounded: lane * 4 < 32 * 4 = 128.
+    // #2218 bounded: lane * 4 < 32 * 4 = 128 (lane = threadIdx.x & 31, :103).
 #pragma unroll
     for (int h = 0; h < 4; ++h) {
         const uint2 u = h < g.n_heads ? *reinterpret_cast<const uint2*>(
@@ -119,7 +118,7 @@ __global__ void __launch_bounds__(kScoreWarps * 32) qsa_score_kernel(const half*
     float* my_scores = scores + static_cast<size_t>(r) * max_blocks;
     const int stride = gridDim.x * kScoreWarps;
     for (int b = blockIdx.x * kScoreWarps + (threadIdx.x >> 5); b < nb; b += stride) {
-        // #2218 bounded: lane * 4 < 32 * 4 = 128.
+        // #2218 bounded: lane * 4 < 32 * 4 = 128 (lane = threadIdx.x & 31, :103).
         const uint2 u = *reinterpret_cast<const uint2*>(block_keys + static_cast<size_t>(b) * D +
                                                         static_cast<size_t>(lane * 4));
         const float2 k0 = __half22float2(*reinterpret_cast<const half2*>(&u.x));
@@ -292,7 +291,7 @@ __global__ void qsa_gather_kv_kernel(const int4* __restrict__ k_cache, const int
     const int tok = sel_tokens[static_cast<size_t>(r) * cap + j];
     const size_t src = (static_cast<size_t>(bt[tok / block_size]) * block_size + tok % block_size) *
                            vec_per_token + v;
-    const size_t dst = (static_cast<size_t>(r * blocks_per_row + j / block_size) * block_size +
+    const size_t dst = ((static_cast<size_t>(r) * blocks_per_row + j / block_size) * block_size +
                         j % block_size) * vec_per_token + v;
     k_scratch[dst] = k_cache[src];
     v_scratch[dst] = v_cache[src];

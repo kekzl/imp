@@ -156,7 +156,7 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
             const half2* wh = reinterpret_cast<const half2*>(&wv);
             float4 result;
             half2* rh = reinterpret_cast<half2*>(&result);
-            // #2218 bounded: register index k * 2 < 8 (k < 4)
+            // #2218 bounded: k * 2 <= 6 (loop k < 4 literal)
 #pragma unroll
             for (int k = 0; k < 4; ++k) {
                 const float2 xf = __half22float2(xh[k]);

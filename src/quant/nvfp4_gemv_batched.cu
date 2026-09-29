@@ -45,7 +45,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
         // Decode the 16 FP4 weights ONCE and reuse across all MR activation rows
         // (the old per-row path re-decoded the weight byte per row — 16x cvt).
-        // #2218 bounded: register index b * 2 < 16 (b < 8)
+        // #2218 bounded: b * 2 <= 14 (loop b < 8 literal, float wf[16] extent)
         float wf[16];
 #pragma unroll
         for (int b = 0; b < 8; ++b) {
@@ -174,7 +174,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
         float wf[16];
 #pragma unroll
-        // #2218 bounded: register index b * 2 < 16 (b < 8)
+        // #2218 bounded: b * 2 <= 14 (loop b < 8 literal, float wf[16] extent)
         for (int b = 0; b < 8; ++b) {
             uint32_t w_fp16x2;
             asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"

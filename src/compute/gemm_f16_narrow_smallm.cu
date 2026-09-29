@@ -68,7 +68,7 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(Narrow
 
     // A fragment rows g, g+8 (m-tile 0) and g+16, g+24 (m-tile 1); rows past M
     // read zero (pointer clamped, value masked).
-    // #2218 bounded: 2 * tg < 8 (tg = lane & 3)
+    // #2218 bounded: tg = lane & 3 <= 3 (:67): 2 * tg <= 6
     const half* Ar[4];
     bool vr[4];
 #pragma unroll

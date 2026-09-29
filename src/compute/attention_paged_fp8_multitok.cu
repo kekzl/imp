@@ -83,7 +83,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
         const int phys_block = bt[blk];
         if (phys_block < 0)
             continue;  // StreamingLLM sentinel, same guard as the plain kernel
-        // #2218 bounded: kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
+        // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 128 (static_assert :41) = 2^19 (model_limits.h:24)
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride +
                                  static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset;
         const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride +

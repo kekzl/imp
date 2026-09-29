@@ -189,7 +189,7 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(const void* __restrict
     float d8[QR4_K];
 
     const int bq8_offset = QR4_K * ((iqs / 2) / (QK8_1 / (4 * 2)));  // QI8_1 = 8, QI8_1/2 = 4
-    // #2218 bounded: offset inside one Q4_K block, 16 * bq8_offset + 12 < 128 B qs (iqs < QI4_K = 32)
+    // #2218 bounded: iqs = kqs < qi = QI4_K = 32 (:446, :54): 16 * bq8_offset <= 96, 4 * ((iqs/2) % 4) <= 12
 
     const int* q4 = (const int*)(bq4_K->qs + static_cast<ptrdiff_t>(16 * bq8_offset) +
                                  static_cast<ptrdiff_t>(4 * ((iqs / 2) % 4)));
@@ -333,7 +333,7 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1(const void* __restrict
     float d8[QR5_K];
 
     const int bq8_offset = QR5_K * ((iqs / 2) / (QI8_1 / 2));
-    // #2218 bounded: offsets inside one Q5_K block, 16 * bq8_offset + 12 < 128 B qs (iqs < QI5_K = 32)
+    // #2218 bounded: iqs = kqs < qi = QI5_K = 32 (:446, :286): 16 * bq8_offset <= 96, 4 * ((iqs/2) % 4) <= 12
     const int* ql = (const int*)(bq5_K->qs + static_cast<ptrdiff_t>(16 * bq8_offset) +
                                  static_cast<ptrdiff_t>(4 * ((iqs / 2) % 4)));
     const int* qh = (const int*)(bq5_K->qh + static_cast<ptrdiff_t>(4 * ((iqs / 2) % 4)));

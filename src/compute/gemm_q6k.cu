@@ -60,8 +60,8 @@ __global__ void __launch_bounds__(128, 2) gemm_q6k_moe_fused_kernel(const uint8_
     // smem_d8[TILE_M][q8_per_row] float (Q8_1 block scales). Stored as flat int8_t arrays, not
     // full block_q8_1, to save smem.
     extern __shared__ char smem_raw[];
-    // #2218 bounded: smem Q8 tile offsets (TILE_M * q8_per_row * 32, (mi * q8_per_row + q) * 32) <
-    // dynamic smem size <= 101376 B (sm_120 opt-in max, launch below)
+    // #2218 bounded: TILE_M * q8_per_row * 32, (mi * q8_per_row + q) * 32 < smem_bytes (gemm_q6k.cu:212)
+    // <= 101376 B (sm_120 opt-in max; the launch at :222 fails above it)
     int8_t* smem_qs = reinterpret_cast<int8_t*>(smem_raw);
     // smem_qs: TILE_M * q8_per_row * 32 bytes
     float* smem_d8 = reinterpret_cast<float*>(smem_raw + static_cast<ptrdiff_t>(TILE_M * q8_per_row * 32));

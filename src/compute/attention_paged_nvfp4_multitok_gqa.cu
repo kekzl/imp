@@ -62,8 +62,8 @@ __device__ __forceinline__ void nvfp4_block_multitok_gqa(
     GqaState<HEAD_DIM, HPC>& st) {
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
     constexpr int PACK = ELEMS / 2;
-    // #2218 bounded: kv_head * kv_head_bytes < 256 * 288 = 73728, kv_head * sc_groups < 256 * 36 = 9216
-    // (heads <= 256, callers pass kv_head_bytes = HEAD_DIM / 2, sc_groups = HEAD_DIM / 16, HEAD_DIM <= 576).
+    // #2218 bounded: kv_head * kv_head_bytes <= kMaxHeads * 128 = 2^19, kv_head * sc_groups <= kMaxHeads
+    // * 16 = 2^16 (model_limits.h:24; callers pass HEAD_DIM / 2, / 16; HEAD_DIM <= 256 by refusal :353).
     const uint8_t* K_lane = K_block + static_cast<ptrdiff_t>(kv_head * kv_head_bytes) + lane_offset / 2;
     const uint8_t* V_lane = V_block + static_cast<ptrdiff_t>(kv_head * kv_head_bytes) + lane_offset / 2;
     const uint8_t* K_sc_lane = K_sc_block + static_cast<ptrdiff_t>(kv_head * sc_groups) + lane_group;

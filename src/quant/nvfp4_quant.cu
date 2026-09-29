@@ -123,7 +123,7 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* __restric
     float vals[kMicroBlockSize];
     float local_absmax = 0.0f;
 
-    // #2218 bounded: register index i * 2 < kMicroBlockSize = 16
+    // #2218 bounded: i * 2 <= 14 (loop i < kMicroBlockSize / 2, kMicroBlockSize = 16 at nvfp4_quant.cu:99)
     const half2* src_h2 = reinterpret_cast<const half2*>(input + base);
 #pragma unroll
     for (int i = 0; i < kMicroBlockSize / 2; i++) {

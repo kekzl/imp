@@ -245,7 +245,8 @@ __global__ void smallM_kernel_v1(
     // SMEM layout (aligned to 128B for TMA): A[N_STAGES][TILE_M][A_BYTES_ROW],
     // B[N_STAGES][TILE_N][B_BYTES_ROW], SFA[N_STAGES][TILE_M][SFA_BYTES_ROW],
     // SFB[N_STAGES][TILE_N][SFB_BYTES_ROW], mbar[N_STAGES] (8B each, padded to 16B).
-    // #2218 bounded: smem offsets < dynamic smem size <= 101376 B (sm_120 opt-in max, launch below)
+    // #2218 bounded: static_asserts :212-217 (TILE_M, TILE_N <= 128, TILE_K <= 256, N_STAGES <= 4): smem
+    // products N_STAGES * A/B_TILE_BYTES <= 4 * 128 * 128 = 65536 B, s * tile bytes < same
     extern __shared__ __align__(128) uint8_t smem_raw[];
     uint8_t* smem_A   = smem_raw;
     uint8_t* smem_B = smem_A + static_cast<ptrdiff_t>(N_STAGES * A_TILE_BYTES);

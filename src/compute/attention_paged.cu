@@ -106,8 +106,8 @@ __global__ void __launch_bounds__(1024) paged_attention_gqa_kernel(
     // Prefetch first block into buffer 0
     if (first_block < num_ctx_blocks) {
         int phys_block = bt[first_block];
-        // #2218 bounded: kv_head * head_dim < 256 * 576 = 147456 (heads <= 256, head_dim <= 576);
-        // buf * 2 * tile_elems: smem double-buffer offset < 99 KiB opt-in smem.
+        // #2218 bounded: kv_head * head_dim <= kMaxHeads * 12672 < 2^26 (model_limits.h:24; smem limit
+        // 101376 B >= kv_tile_bytes :1361); buf * 2 * tile_elems <= kv_tile_bytes / 4 <= 25344.
         const half* K_block_base = K_cache + (int64_t)phys_block * kv_block_stride +
                                    static_cast<ptrdiff_t>(kv_head * head_dim);
         const half* V_block_base = V_cache + (int64_t)phys_block * kv_block_stride +
@@ -319,7 +319,7 @@ __global__ void paged_attention_decode_kernel(const half* __restrict__ Q, const 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
             // Prefetch next token's K + V into L1 cache
             if (t + 1 < (tok_end - tok_start)) {
-                // #2218 bounded: kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
+                // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 (:1441) = 2^21 (model_limits.h:24).
                 const auto* K_next = K_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
                                      static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
                 const auto* V_next = V_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
@@ -480,11 +480,10 @@ __global__ void paged_attention_decode_kernel_generic(
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
             // Prefetch next token's K + V into L1 cache
             if (t + 1 < (tok_end - tok_start)) {
-                // #2218 bounded: kv_head * head_dim < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
                 const auto* K_next = K_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
-                                     static_cast<ptrdiff_t>(kv_head * head_dim);
+                                     static_cast<int64_t>(kv_head) * head_dim;
                 const auto* V_next = V_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
-                                     static_cast<ptrdiff_t>(kv_head * head_dim);
+                                     static_cast<int64_t>(kv_head) * head_dim;
                 if (lane_id == 0) {
                     asm volatile("prefetch.global.L1 [%0];\n" ::"l"(K_next));
                     asm volatile("prefetch.global.L1 [%0];\n" ::"l"(V_next));
@@ -492,7 +491,7 @@ __global__ void paged_attention_decode_kernel_generic(
             }
 
             const half* K_tok = K_block + static_cast<int64_t>(t) * kv_slot_stride +
-                                static_cast<ptrdiff_t>(kv_head * head_dim);
+                                static_cast<int64_t>(kv_head) * head_dim;
 
             float dot = 0.0f;
             for (int i = 0; i < elems_per_thread; i++) {
@@ -509,7 +508,7 @@ __global__ void paged_attention_decode_kernel_generic(
 
             // V slot is head_dim-wide; read only v_head_dim elements (MLA over-allocation)
             const half* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +
-                                static_cast<ptrdiff_t>(kv_head * head_dim);
+                                static_cast<int64_t>(kv_head) * head_dim;
             for (int i = 0; i < v_elems_per_thread; i++) {
                 int d = lane_id + i * WARP_SIZE;
                 if (d < v_head_dim)
@@ -667,7 +666,7 @@ __global__ void paged_attention_splitk_kernel(
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
             // Prefetch next token's K + V into L1 cache
             if (t + 1 < (tok_end - tok_start)) {
-                // #2218 bounded: kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
+                // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 (:1311) = 2^21 (model_limits.h:24).
                 const auto* K_next = K_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
                                      static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
                 const auto* V_next = V_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
@@ -845,8 +844,9 @@ __global__ void paged_attention_splitk_pipeline_kernel(
     // Layout: [NUM_WARPS][3][HEAD_DIM] halfs = k_buf[0], k_buf[1], v_buf
     extern __shared__ char smem_pipe[];
     constexpr int WARP_SMEM = 3 * HEAD_DIM;  // halfs per warp
-    // #2218 bounded: warp_id * WARP_SMEM < 32 warps * 3 * 576 = 55296, 2 * HEAD_DIM <= 1152 (smem);
-    // kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
+    // #2218 bounded: smem warp_id * WARP_SMEM < NUM_WARPS * 3 * 512 = 12288, 2 * HEAD_DIM <= 1024
+    // (NUM_WARPS = 8 attention_paged_common.cuh:13, max HEAD_DIM :1281);
+    // kv_head * HEAD_DIM <= kMaxHeads * 512 = 2^21 (model_limits.h:24).
     half* my_smem = reinterpret_cast<half*>(smem_pipe) + static_cast<ptrdiff_t>(warp_id * WARP_SMEM);
     half* k_buf0 = my_smem;
     half* k_buf1 = my_smem + HEAD_DIM;

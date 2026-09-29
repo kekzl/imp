@@ -40,7 +40,7 @@ __device__ __forceinline__ void lane_vec_to_float(const typename LaneVec<ELEMS>:
 #pragma unroll
     for (int i = 0; i < ELEMS / 2; i++) {
         const float2 f = __half22float2(h2[i]);
-        // #2218 bounded: 2 * i < ELEMS <= 576 / 32 = 18 (register array).
+        // #2218 bounded: 2 * i < ELEMS <= 8 (LaneVec<ELEMS> defined for 2 / 4 / 8 only, :22-35).
         out[static_cast<ptrdiff_t>(2 * i)] = f.x;
         out[2 * i + 1] = f.y;
     }
@@ -227,7 +227,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_f16_mult
         if (tok_start + n_tok > ctx_len)
             n_tok = ctx_len - tok_start;
         const int first_tok = (tok_start < effective_start) ? (effective_start - tok_start) : 0;
-        // #2218 bounded: kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
+        // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 256 (static_assert:191) = 2^20 (model_limits.h:24)
         f16_block_multitok<HEAD_DIM, TOK, HPC>(K_cache + (int64_t)phys_block * kv_block_stride +
                                                    static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
                                                V_cache + (int64_t)phys_block * kv_block_stride +
@@ -310,7 +310,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_f16_mult
         if (tok_start + n_tok > ctx_len)
             n_tok = ctx_len - tok_start;
         const int first_tok = (tok_start < effective_start) ? (effective_start - tok_start) : 0;
-        // #2218 bounded: kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
+        // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 256 (static_assert:260) = 2^20 (model_limits.h:24)
         f16_block_multitok<HEAD_DIM, TOK, HPC>(K_cache + (int64_t)phys_block * kv_block_stride +
                                                    static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
                                                V_cache + (int64_t)phys_block * kv_block_stride +

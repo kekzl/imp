@@ -51,7 +51,7 @@ __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict
     const int ks = k_base / kBK;
     const int sblk = ks >> 2;          // super-block index along K
     const int grp = ks & 3;            // 32-byte nibble group within it
-    // #2218 bounded: in-block offset grp * 32 < 128 B (grp = ks & 3)
+    // #2218 bounded: grp = ks & 3 <= 3: grp * 32 <= 96 B (in-block offset)
 #pragma unroll
     for (int i = tid; i < kBN * 3; i += kThreads) {
         const int row = i / 3;
@@ -118,7 +118,7 @@ __global__ void __launch_bounds__(kThreads)
     const int warp_n = warp_id % kWN;
     const int rl = lane >> 2;
     const int cl = lane & 3;
-    // #2218 bounded: smem column cl * 4 < 16 (cl = lane & 3)
+    // #2218 bounded: cl = lane & 3 <= 3: smem column cl * 4 <= 12
 
     __shared__ int8_t sA[kStages][BM][kRow];
     __shared__ uint8_t sBq[kStages][kBN][kQRow];

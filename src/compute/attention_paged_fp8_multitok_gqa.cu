@@ -186,8 +186,8 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
     // the CTA's HPC q heads (contiguous in Q) for the per-iteration slice reads.
     extern __shared__ char smem_fp8_gqa[];
     float* merge_smem = reinterpret_cast<float*>(smem_fp8_gqa);
-    // #2218 bounded: smem offsets 2 * NUM_WARPS, NUM_WARPS * HD, h * HD <= 8 * 128 = 1024 (NUM_WARPS = 8,
-    // HD = 128, h < HPC <= 5).
+    // #2218 bounded: smem 2 * NUM_WARPS, NUM_WARPS * HD, h * HD (h < HPC) <= 8 * 128 = 1024 (NUM_WARPS = 8
+    // attention_paged_common.cuh:13, constexpr HD = 128 :22, HPC <= 5 :441); also q_saddr h * HD at :265.
     float* relayout = merge_smem + static_cast<ptrdiff_t>(2 * NUM_WARPS) +
                       static_cast<ptrdiff_t>(NUM_WARPS * HD);  // NUM_WARPS x HD
     half2* q_smem = reinterpret_cast<half2*>(relayout +

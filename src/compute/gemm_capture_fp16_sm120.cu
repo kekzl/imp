@@ -79,7 +79,7 @@ __device__ __forceinline__ void issue_tile_load(__half* a_smem, __half* b_smem, 
     static_assert(BK == 32, "BK must be 32 for the bit-shift row/col split");
     static_assert(CHUNK_HALVES == 8, "CHUNK_HALVES must be 8 for cp.async 16B");
 
-    // #2218 bounded: smem row * BK_SMEM < 128 rows * 32 = 4096 halves (BM, BN <= 128)
+    // #2218 bounded: row < max(BM, BN) = 128 (BM template 64/128 at :304,309; BN :25): row * BK_SMEM < 4096
     int tid     = threadIdx.x;
     bool a_full = (block_m + BM <= M);
     bool b_full = (block_n + BN <= N);
@@ -122,8 +122,8 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
     static_assert(STAGES == 2 || STAGES == 3, "STAGES must be 2 or 3");
 
     extern __shared__ __align__(16) char smem_raw[];
-    // #2218 bounded: smem offsets < STAGES * STAGE_HALVES = 2 * 256 * 32 = 16384 halves (BM <= 128,
-    // BN 128, BK 32): s * STAGE_HALVES, a_row/b_row * BK_SMEM, kk * WMMA_K, warp * WMMA_M * WMMA_N
+    // #2218 bounded: BM <= 128 (:304,309), BN = 128, BK_SMEM = 32, STAGES <= 3 (:122): s * STAGE_HALVES
+    // <= 2 * 8192 = 16384, a_row/b_row * BK_SMEM < 4096, kk * WMMA_K < 32, warp * WMMA_M * WMMA_N < 1024
     __half* smem_base = reinterpret_cast<__half*>(smem_raw);
     __half* A_stage[STAGES];
     __half* B_stage[STAGES];

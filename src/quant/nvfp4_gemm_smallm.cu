@@ -63,7 +63,8 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
     const int tid = threadIdx.x;
     const int warp = tid / 32;
 
-    // #2218 bounded: smem indices mb * kMicroBlockSize < kKT = 128, warp_m/warp_n * 16 < kSmM = kNR = 32
+    // #2218 bounded: mb * kMicroBlockSize < kMbPerTile * 16 = kKT = 128 (mb = i % kMbPerTile, :39,41);
+    // warp_m, warp_n <= 1 (kThreads = 128 -> 4 warps, kNR / 16 = 2, :38,40): warp_m/warp_n * 16 <= 16
     __shared__ half s_x[kSmM][kKT + kXPad];
     __shared__ half s_w[kNR][kKT + kWPad];
     __shared__ half s_out[kSmM][kNR];

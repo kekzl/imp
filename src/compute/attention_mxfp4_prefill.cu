@@ -117,10 +117,11 @@ __global__ void quantize_fp16_mxfp4_strided_kernel(const half* __restrict__ inpu
 
     int row = mb_idx / K_groups;
     int k_group = mb_idx % K_groups;
-    int base = row * input_row_stride + k_group * kMxGroupSize;
+    const int64_t base =
+        static_cast<int64_t>(row) * input_row_stride + static_cast<int64_t>(k_group) * kMxGroupSize;
 
     // Load 32 FP16 values via vectorized half2 loads, track absmax
-    // #2218 bounded: i * 2 < 32 (register array vals[32], i < 16).
+    // #2218 bounded: i * 2 <= 30 < 32 (array extent vals[32] :124, constant loop bound i < 16 :128).
     float vals[32];
     float local_absmax = 0.0f;
     const half2* src_h2 = reinterpret_cast<const half2*>(input + base);

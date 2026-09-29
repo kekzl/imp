@@ -85,7 +85,7 @@ __global__ void nvfp4_quant_hw_kernel(const half* __restrict__ input, uint8_t* _
         reinterpret_cast<uint32_t&>(in_vec.elts[i]) = 0u;
     }
 
-    // #2218 bounded: in-row offset (tid % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD < HEAD_DIM <= 128
+    // #2218 bounded: (tid % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD < HEAD_DIM <= 128 (:73)
     if (token_id < n_tokens) {
         const half* src = input + batch_id * stride_bz_input + head_id * stride_h_input +
                           token_id * stride_seq_input +
@@ -197,7 +197,7 @@ __global__ void nvfp4_dequant_hw_kernel(const uint8_t* __restrict__ nvfp4_in,
                          token_id * stride_seq_input +
                          (threadIdx.x % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD / 2;
 
-    // #2218 bounded: in-row offset (tid % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD < HEAD_DIM <= 128
+    // #2218 bounded: (tid % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD < HEAD_DIM <= 128 (:169)
     half* dst = output + batch_id * stride_bz_output + head_id * stride_h_output +
                 token_id * stride_seq_output +
                 static_cast<ptrdiff_t>((threadIdx.x % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD);

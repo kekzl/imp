@@ -79,7 +79,7 @@ __device__ __forceinline__ void load_stage(half* stage, const PrefillArgs& args,
     half* As = stage;
     half* Ws = stage + Smem<NPAD>::kA;
     const int k0 = kt * kBK;
-    // #2218 bounded: smem r * kBK < NPAD * kBK = 128 * 32 = 4096 halves (r < kBM, NPAD <= 128)
+    // #2218 bounded: r < max(kBM, NPAD) <= 128 (NPAD template 32..128, :311): r * kBK < 128 * 32 = 4096
     for (int c = threadIdx.x; c < kBM * kChunksPerRow; c += kThreads) {
         const int r = c / kChunksPerRow;
         const int kc = (c - r * kChunksPerRow) * kChunkHalves;
@@ -106,8 +106,8 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_prefill_kernel(Prefi
     constexpr int kStages = Smem<NPAD>::kStages;
     __shared__ __align__(16) unsigned char smem_raw[Smem<NPAD>::kBytes];
     half* stages = reinterpret_cast<half*>(smem_raw);
-    // #2218 bounded: smem tile offsets < kBM * NPAD = 64 * 128 = 8192 (warp * 16 * kBK, j * 16 * kBK,
-    // warp * 16 * NPAD, kk * 16, j * 16; NPAD <= kMaxN = 128)
+    // #2218 bounded: kBM = 64, kBK = 32 (:22,23), NPAD template <= 128 (launch<128> :311), warp < 4:
+    // warp * 16 * NPAD < 8192, j * 16 * kBK < NPAD * kBK <= 4096, warp * 16 * kBK < 2048, kk/j * 16 < 128
 
     pdl_wait();
 

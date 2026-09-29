@@ -99,7 +99,7 @@ __device__ __forceinline__ void commit_b_q6k_unpacked(const Q6kUnpackedB& rb, in
         const int row = t / kUnpParts;
         const int part = t % kUnpParts;
         const uint32_t s = (rb.shifts >> (8 * i)) & 0xFFu;
-        // #2218 bounded: smem column part * 16 < 64 (part < 6)
+        // #2218 bounded: part < 6 (branch below): part * 16 <= 48, (part - 4) * 16 <= 16
         if (part < 6) {
             uint4 v;
             v.x = __funnelshift_r(rb.w[i][0], rb.w[i][1], s);
@@ -158,7 +158,7 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
     const int warp_n = warp_id % kWN;
     const int rl = lane >> 2;
     const int cl = lane & 3;
-    // #2218 bounded: staged scale index 2 * kb < 4 (kb < 2)
+    // #2218 bounded: kb < 2 (loop bound literal, mmq_q8_imma_q6k.cu:217): 2 * kb <= 2
 
     // dynamic smem (BM=128 + Q6 staging exceeds the 48-KB static limit);
     // offsets are COMPILE-TIME constants — no runtime pointer arrays (the

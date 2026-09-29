@@ -75,8 +75,8 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
     // row_l       : float [Br]          running row sum
     extern __shared__ char smem[];
 
-    // #2218 bounded: all smem offsets in this kernel (layout, Q/KV/SP/O WMMA tiles) < 99 KiB opt-in smem,
-    // Br <= 128, BW_Bc = 64, HD <= 128.
+    // #2218 bounded: smem tile offsets (ri, ci, k, di from Br / 16, BW_Bc / 16, HD / 16 :126-131) <= Br * HD,
+    // BW_Bc * HD <= 64 * 256 = 16384 (template instantiations Br x HD :419-444, BW_Bc = 64 :17).
     half* Q_tile = reinterpret_cast<half*>(smem);
     half* KV_buf0 = Q_tile + static_cast<ptrdiff_t>(Br * head_dim);
     half* KV_buf1 = KV_buf0 + static_cast<ptrdiff_t>(BW_Bc * head_dim);
