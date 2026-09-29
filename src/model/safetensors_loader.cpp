@@ -927,6 +927,18 @@ static bool gptq_refuses(Model& model, const std::unordered_map<std::string, Ten
     return false;
 }
 
+// generation_config.json (optional): sampling/EOS defaults; its EOS ids join the tokenizer's stop list.
+static void apply_generation_config(Model& model, const std::string& model_dir) {
+    if (model_dir.empty())
+        return;
+    // Optional file: absent or unparsable keeps the defaults.
+    (void)HFConfigLoader::load_generation_config(model_dir, model.generation_config_);
+    if (!model.tokenizer_)
+        return;
+    for (int32_t eid : model.generation_config_.eos_token_ids)
+        model.tokenizer_->add_eos_id(eid);
+}
+
 std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head) {
     namespace fs = std::filesystem;
 
@@ -1360,15 +1372,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     // generation_config.json: sampling/EOS defaults shipped by the model author, loaded into
     // model->generation_config_ for engine + CLI consumers. EOS IDs are additionally pushed
     // onto the tokenizer's eos list so the existing stop-condition path picks them up.
-    if (!model_dir.empty()) {
-        // Optional file: absent or unparsable keeps the defaults.
-        (void)HFConfigLoader::load_generation_config(model_dir, model->generation_config_);
-        if (model->tokenizer_) {
-            for (int32_t eid : model->generation_config_.eos_token_ids) {
-                model->tokenizer_->add_eos_id(eid);
-            }
-        }
-    }
+    apply_generation_config(*model, model_dir);
 
     // Cross-checks special_tokens_map.json against the loaded tokenizer's special-flag column.
     // The model author's list is authoritative: a string in additional_special_tokens that
