@@ -103,13 +103,16 @@ std::shared_ptr<ServerRequest> make_score_request(const ScoreJob& job, bool dire
     return sr;
 }
 
-bool submit_one(ServerState& state, const std::shared_ptr<ServerRequest>& sr, httplib::Response& res) {
+// One queue insertion per wave: the worker admits the whole wave in one iteration, so the
+// ragged batch composition (and its numerics) does not depend on submission timing.
+bool submit_all(ServerState& state, const std::vector<std::shared_ptr<ServerRequest>>& srs,
+                httplib::Response& res) {
     std::lock_guard<std::timed_mutex> lock(state.mtx);
     if (!state.batching || !state.batching->is_running()) {
         send_json_error(res, 503, "server_error", "Scoring requires the batching worker");
         return false;
     }
-    state.batching->submit(sr);
+    state.batching->submit_all(srs);
     return true;
 }
 
@@ -148,14 +151,10 @@ bool run_wave(ServerState& state, const std::vector<ScoreJob>& jobs, const std::
               ScoreMode mode, httplib::Response& res, std::vector<ScoreOut>& out) {
     std::vector<std::shared_ptr<ServerRequest>> submitted;
     submitted.reserve(wave.size());
-    for (const size_t i : wave) {
+    for (const size_t i : wave)
         submitted.push_back(make_score_request(jobs[i], mode == ScoreMode::Direct));
-        if (!submit_one(state, submitted.back(), res)) {
-            for (auto& s : submitted)
-                s->cancelled = true;
-            return false;
-        }
-    }
+    if (!submit_all(state, submitted, res))
+        return false;
     for (size_t k = 0; k < wave.size(); k++) {
         if (!collect_one(*submitted[k], jobs[wave[k]].ids.size(), res, out[wave[k]])) {
             for (size_t j = k + 1; j < submitted.size(); j++)

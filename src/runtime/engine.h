@@ -354,6 +354,13 @@ public:
     uint64_t mixed_decode_steps() const noexcept {
         return mixed_decode_steps_.load(std::memory_order_relaxed);
     }
+    // Most sequences one ragged prefill forward carried since the last reset (tests, #2198).
+    int ragged_prefill_max_seqs() const noexcept {
+        return ragged_prefill_max_seqs_.load(std::memory_order_relaxed);
+    }
+    void reset_ragged_prefill_max_seqs() noexcept {
+        ragged_prefill_max_seqs_.store(0, std::memory_order_relaxed);
+    }
     // Counted by the pool itself, not mirrored here: growth is decided in
     // KVCache::try_grow_to and a second copy is a second thing to keep in sync.
     uint64_t kv_pool_growths() const noexcept { return kv_cache_raw_ ? kv_cache_raw_->growths() : 0; }
@@ -1474,6 +1481,7 @@ private:
     void mixed_collect_riders_(std::vector<std::shared_ptr<Request>>& riders);
     bool mixed_served_this_step_ = false;
     std::atomic<uint64_t> mixed_decode_steps_{0};
+    std::atomic<int> ragged_prefill_max_seqs_{0};
 
     // step_decode sub-phase, one decoder: KV block for this step's token,
     // SWA window, StreamingLLM valves. False = cancelled, skip this step.

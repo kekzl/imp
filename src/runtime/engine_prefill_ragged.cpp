@@ -449,6 +449,8 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
     IMP_LOG_DEBUG("Ragged prefill: %d seqs, %d rows (chunk cap %d, %d riders)", n_seq, total, effective_chunk,
                   n_riders);
 
+    ragged_prefill_max_seqs_.store(std::max(n_seq, ragged_prefill_max_seqs_.load(std::memory_order_relaxed)),
+                                   std::memory_order_relaxed);
     Tensor logits_out;
     executor_->forward_logits(state, logits_out, stream);
 

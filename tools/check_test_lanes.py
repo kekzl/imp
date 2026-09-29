@@ -338,7 +338,9 @@ def main():
     # (#2201); they need a model dir, so they sit beside the tokenizer parity tests.
     # 1154 -> 1162: CandidateTokenGuardTest x8 (test-e2e): /v1/decide boundary guard on the real Qwen3
     # tokenizer.json (model file via IMP_TEST_TOKENIZER_QWEN3, no GPU).
-    PINNED = 1162
+    # 1162 -> 1163: HybridSharedScoreTest x1 (test-e2e, GPU): #2198 shared score rows restoring one
+    # recurrent snapshot in one ragged forward (IMP_TEST_MODEL_GDN).
+    PINNED = 1163
 
     text = CMAKE.read_text()
     mods = module_sources(text)
