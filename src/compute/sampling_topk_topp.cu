@@ -637,39 +637,37 @@ static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, 
 static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int top_k, float top_p,
                                     float inv_temperature, unsigned int seed, int32_t* d_result,
                                     cudaStream_t stream) {
-    if (!sample_topk_topp_cub_enqueue(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result,
-                                      stream))
-        return 0;
-    int32_t h_result = 0;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-    if (!sampler_sync_ok(stream, "sample_topk_topp"))
-        return 0;
-    return h_result;
+    sampler_enqueued_or_throw(sample_topk_topp_cub_enqueue(d_logits, vocab_size, top_k, top_p,
+                                                           inv_temperature, seed, d_result, stream),
+                              "sample_topk_topp CUB");
+    return sampler_readback_or_throw(d_result, stream, "sample_topk_topp readback");
 }
+
+namespace {
+// Frees an internally allocated d_result on every exit, including a throw (#2307).
+struct OwnedSampleScratch {
+    int32_t* p;
+    bool owned;
+    ~OwnedSampleScratch() {
+        if (owned)
+            IMP_CUDA_CHECK_LOG(cudaFree(p));
+    }
+};
+}  // namespace
 
 // Shared implementation for both sample_topk_topp overloads.
 // When owns_result is true, d_result was allocated internally and will be freed.
 static int32_t sample_topk_topp_impl(const float* d_logits, int vocab_size, int top_k, float top_p,
                                      float inv_temperature, unsigned int seed, int32_t* d_result,
                                      bool owns_result, cudaStream_t stream) {
+    const OwnedSampleScratch scratch{d_result, owns_result};
     // For large top_k, use CUB radix sort path (no MAX_TOP_K limit)
-    if (top_k > MAX_TOP_K) {
-        int32_t result = sample_topk_topp_cub(d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
-                                              d_result, stream);
-        if (owns_result)
-            IMP_CUDA_CHECK_LOG(cudaFree(d_result));
-        return result;
-    }
+    if (top_k > MAX_TOP_K)
+        return sample_topk_topp_cub(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result,
+                                    stream);
 
     launch_topk_topp_multiblock(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, stream);
-
-    int32_t h_result = 0;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-    const bool synced = sampler_sync_ok(stream, "sample_topk_topp");
-
-    if (owns_result)
-        IMP_CUDA_CHECK_LOG(cudaFree(d_result));
-    return synced ? h_result : 0;
+    return sampler_readback_or_throw(d_result, stream, "sample_topk_topp readback");
 }
 
 int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float temperature, unsigned int seed,
@@ -684,10 +682,7 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float tem
     float inv_temperature = 1.0f / temperature;
 
     int32_t* d_result = nullptr;
-    if (cudaMalloc(&d_result, SAMPLE_SCRATCH_BYTES) != cudaSuccess) {
-        IMP_LOG_ERROR("sample_topk_topp: cudaMalloc failed");
-        return 0;
-    }
+    cuda_call_or_throw(cudaMalloc(&d_result, SAMPLE_SCRATCH_BYTES), "sample_topk_topp scratch");
 
     return sample_topk_topp_impl(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, true,
                                  stream);
@@ -731,7 +726,7 @@ bool sample_topk_topp_async(const Tensor& logits, int top_k, float top_p, float 
     return true;
 }
 
-void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p, float temperature,
+bool sample_topk_topp_device(const Tensor& logits, int top_k, float top_p, float temperature,
                              unsigned int seed, int32_t* d_result, int32_t* h_mapped, cudaStream_t stream,
                              const int* d_seed_salt) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
@@ -749,14 +744,18 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p, float
     if (top_k > MAX_TOP_K) {
         if (!sample_topk_topp_cub_enqueue(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result,
                                           stream, d_seed_salt))
-            return;
+            return false;
     } else {
         launch_topk_topp_multiblock(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result,
                                     stream, d_seed_salt);
     }
 
-    // Async copy to mapped pinned memory — no sync needed.
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+    // Async copy to mapped pinned memory, no sync (capture-safe); false = *h_mapped is stale (#2307).
+    const cudaError_t err = cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost,
+                                            stream);
+    if (err != cudaSuccess)
+        IMP_LOG_ERROR("sample_topk_topp_device: token copy enqueue failed: %s", cudaGetErrorString(err));
+    return err == cudaSuccess;
 }
 
 // Free persistent CUB sort scratch. Called by sampling_cleanup().

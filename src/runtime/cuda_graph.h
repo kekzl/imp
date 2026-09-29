@@ -260,6 +260,11 @@ public:
     bool is_setup() const { return static_cast<bool>(exec_); }
 
 private:
+    // setup() step 5a-5c: decode forward + post-step kernel into the capturing body, then ends the
+    // capture. false = sampler not enqueued (#2307) or EndCapture failed; the capture is closed either way.
+    [[nodiscard]] bool capture_decode_body_(GraphExecutor* executor, const InferenceState& body_state,
+                                            cudaStream_t stream);
+
     CudaGraph graph_;
     CudaGraphExec exec_;
     CudaGraphExec spare_exec_;  // last request's exec, reused by the next setup()

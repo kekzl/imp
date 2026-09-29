@@ -213,13 +213,15 @@ public:
     // Async decode: forward reads the token from device memory (d_token_id),
     // samples, writes back to d_token_id. No host-device sync; returns
     // immediately. h_mapped is pinned memory for host polling of the token.
-    void forward_decode_async(const InferenceState& state, int32_t* d_token_id, int32_t* h_mapped,
-                              cudaStream_t stream = nullptr);
+    // Runs under graph capture, so no throw: false = sampler not enqueued, abort the capture (#2307).
+    [[nodiscard]] bool forward_decode_async(const InferenceState& state, int32_t* d_token_id,
+                                            int32_t* h_mapped, cudaStream_t stream = nullptr);
 
     // Constrained async sampling (pipelined constrained decode): applies
     // device-side banned-token + active json/schema mask, samples on device.
     // Writes to d_result (must be SAMPLE_SCRATCH_BYTES) and async-copies to
     // h_pinned. No host-device sync; order via an event.
+    // Eager (not captured): a sampler that enqueued nothing throws (#2307).
     void masked_sample_async(const InferenceState& state, const Tensor& logits, int32_t* d_result,
                              int32_t* h_pinned, cudaStream_t stream);
 

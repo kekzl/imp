@@ -50,4 +50,17 @@ inline void cuda_sync_or_throw(cudaError_t err, const char* where) {
     return *h_token;
 }
 
+// Sampler scratch alloc / readback enqueue: failure throws; no token 0 in place of a sample (#2307).
+inline void cuda_call_or_throw(cudaError_t err, const char* where) {
+    if (err != cudaSuccess)
+        throw std::runtime_error(std::string("CUDA call failed (") + cudaGetErrorString(err) + ") in " +
+                                 where + ": no token was sampled");
+}
+
+// Sampler that enqueued nothing (CUB scratch unavailable): throws; its slot holds a stale token (#2307).
+inline void sampler_enqueued_or_throw(bool enqueued, const char* where) {
+    if (!enqueued)
+        throw std::runtime_error(std::string("sampler not enqueued in ") + where + ": no token was sampled");
+}
+
 }  // namespace imp

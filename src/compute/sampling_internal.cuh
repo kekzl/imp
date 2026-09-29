@@ -1,6 +1,7 @@
 #pragma once
 
 #include "compute/warp_reduce.cuh"
+#include "core/cuda_errors.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cfloat>
@@ -12,13 +13,14 @@ static constexpr int WARP_SIZE = 32;
 
 static constexpr int MAX_TOP_K = 128;
 
-// Readback sync of the synchronous samplers; false = the host copy is not valid, the sampler
-// returns token 0 (its existing failure value) and the error stays in cudaGetLastError.
-[[nodiscard]] inline bool sampler_sync_ok(cudaStream_t stream, const char* who) {
-    const cudaError_t err = cudaStreamSynchronize(stream);
-    if (err != cudaSuccess)
-        IMP_LOG_ERROR("%s: readback sync failed: %s", who, cudaGetErrorString(err));
-    return err == cudaSuccess;
+// Synchronous sampler readback: failed enqueue or sync throws (#2307); never token 0 in place of a sample.
+// Syncs the stream: not callable under graph capture.
+[[nodiscard]] inline int32_t sampler_readback_or_throw(const int32_t* d_token, cudaStream_t stream,
+                                                       const char* who) {
+    int32_t h_token = 0;
+    cuda_call_or_throw(cudaMemcpyAsync(&h_token, d_token, sizeof(int32_t), cudaMemcpyDeviceToHost, stream),
+                       who);
+    return synced_token_or_throw(cudaStreamSynchronize(stream), &h_token, who);
 }
 
 // Per-TU cleanup helpers for file-scope persistent scratch that is split across

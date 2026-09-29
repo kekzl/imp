@@ -429,33 +429,32 @@ static int32_t sample_mirostat_v2_impl(const Tensor& logits, float temperature, 
                                                             d_result, d_surprise);
     IMP_CUDA_CHECK_LAUNCH();
 
-    // Read results
+    // Read results; every failure frees an owned d_result, then throws with mu unchanged (#2307).
     int32_t h_result = 0;
     float h_surprise = 0.0f;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-    IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(&h_surprise, d_surprise, sizeof(float), cudaMemcpyDeviceToHost, stream));
-    const bool synced = sampler_sync_ok(stream, "sample_mirostat_v2");
+    const cudaError_t tok_copy = cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost,
+                                                 stream);
+    const cudaError_t sur_copy = cudaMemcpyAsync(&h_surprise, d_surprise, sizeof(float),
+                                                 cudaMemcpyDeviceToHost, stream);
+    const cudaError_t synced = cudaStreamSynchronize(stream);
 
     if (owns_result)
         IMP_CUDA_CHECK_LOG(cudaFree(d_result));
-    if (!synced)
-        return 0;  // mu unchanged: h_surprise was never read back
+    cuda_call_or_throw(tok_copy, "sample_mirostat_v2 readback");
+    cuda_call_or_throw(sur_copy, "sample_mirostat_v2 surprise readback");
+    const int32_t token = synced_token_or_throw(synced, &h_result, "sample_mirostat_v2 readback");
 
     // Update mu: mu = mu - eta * (surprise - tau)
     *mu = *mu - eta * (h_surprise - tau);
 
-    return h_result;
+    return token;
 }
 
 int32_t sample_mirostat_v2(const Tensor& logits, float temperature, float tau, float eta, float* mu,
                            unsigned int seed, cudaStream_t stream) {
     // Allocate temp buffer: 4 bytes for token + 4 bytes for surprise
     int32_t* d_result = nullptr;
-    if (cudaMalloc(&d_result, 2 * sizeof(int32_t)) != cudaSuccess) {
-        IMP_LOG_ERROR("sample_mirostat_v2: cudaMalloc failed");
-        return 0;
-    }
+    cuda_call_or_throw(cudaMalloc(&d_result, 2 * sizeof(int32_t)), "sample_mirostat_v2 scratch");
     return sample_mirostat_v2_impl(logits, temperature, tau, eta, mu, seed, d_result, true, stream);
 }
 
