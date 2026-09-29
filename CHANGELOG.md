@@ -26,6 +26,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Qwen3.8-Flash-Next (host-resident experts): the F16 GDN in/gate/out are freed after load; M>32 prefill runs their NVFP4 (in) / MXFP8 (gate, out, now "auto") copies, smaller M rebuild from those. Expert cache 290 -> 355 slots/layer, tg512 prose 66.81 -> 70.24 tok/s, 45k PPL windows +0.31 % / -0.21 %.
 
 ### Fixed
+- Forced `tool_choice` (named function) on gpt-oss (Harmony) and Gemma-4 is enforced instead of a 400 (#2279): envelope `to=functions.NAME` / `<|tool_call>call:NAME` + JSON args. Every 4xx logs one `HTTP <status> <method> <path>: <reason>` line.
 - Forced tool-call envelope: at most 2 whitespace chars before the open literal, then `<` is forced. Phi-4-reasoning-plus emitted tabs until `max_tokens` on degen_suite's forced `tool_choice` (#2273).
 - Jinja context defines `tools` as none without tools, like HF `apply_chat_template`: gpt-oss `--chat` parity 3/3 -> 0/3 mismatched (#2269).
 - GGUF pre `deepseek-r1-qwen` uses the Qwen2 pre-tokenizer and NFC: DeepSeek-R1-Distill-Qwen-1.5B Q4_K_M parity 842/1196 -> 0/1196 mismatched (#2270).

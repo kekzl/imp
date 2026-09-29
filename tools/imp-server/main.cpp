@@ -1,6 +1,7 @@
 #include "args.h"
 #include "common/exit_codes.h"
 #include "handlers.h"
+#include "client_error_log.h"
 #include "utils.h"
 #include "webui_asset.h"  // generated: IMP_WEBUI_HTML
 #include "model/hf_fetch.h"
@@ -469,9 +470,17 @@ int main(int argc, char** argv) {
     // Wraps any >=400 response that would go out with an EMPTY body (e.g. an unmatched route's bare
     // httplib 404) in the standard JSON error envelope - a client doing
     // r.json()["error"]["message"] got a parse error instead (#1302). A body already present is untouched.
-    svr.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
-        if (!res.body.empty())
+    // #2279: one WARN line per 4xx with the reason sent. Here, not in post-routing: httplib calls this
+    // for every status >= 400 before it compresses the body.
+    auto log_client_error = [](const httplib::Request& req, const httplib::Response& res) {
+        if (res.status >= 400 && res.status < 500)
+            IMP_LOG_WARN("%s", client_error_log_line(res.status, req.method, req.path, res.body).c_str());
+    };
+    svr.set_error_handler([log_client_error](const httplib::Request& req, httplib::Response& res) {
+        if (!res.body.empty()) {
+            log_client_error(req, res);
             return httplib::Server::HandlerResponse::Unhandled;
+        }
         const bool not_found = res.status == 404;
         // Echoes method+path sanitized and truncated (#1618): raw client bytes fed straight into
         // .dump() threw json::type_error.316 on ill-formed UTF-8, so a 404 for a bad path produced a 500
@@ -487,6 +496,7 @@ int main(int argc, char** argv) {
         const char* openai_type = res.status >= 500 ? "server_error" : "invalid_request_error";
         const int status = res.status;
         send_dialect_error(res, req.path, status, openai_type, anthropic_type, msg);
+        log_client_error(req, res);
         return httplib::Server::HandlerResponse::Handled;
     });
 

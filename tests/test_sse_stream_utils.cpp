@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "utils.h"            // tools/imp-server/utils.h
+#include "client_error_log.h"  // tools/imp-server/client_error_log.h
 #include "logit_bias.h"       // tools/imp-server/logit_bias.h
 #include "completion_prompt.h"  // tools/imp-server/completion_prompt.h
 #include "request_field_types.h"  // tools/imp-server/request_field_types.h
@@ -946,4 +947,25 @@ TEST(JsonNestingDepth, TheHostileBodyIsOverTheLimitAndARealOneIsNot) {
         R"("properties":{"a":{"type":"array","items":{"type":"object","properties":)"
         R"({"b":{"type":"string"}}}}}}}}]})";
     EXPECT_LE(json_nesting_depth(real, 100), 12);
+}
+
+// #2279: the 4xx log line carries status, route and the reason the client got.
+TEST(ClientErrorLogLine, CarriesStatusRouteAndReason) {
+    EXPECT_EQ(
+        client_error_log_line(400, "POST", "/v1/chat/completions",
+                              R"({"error":{"message":"bad tool_choice","type":"invalid_request_error"}})"),
+        "HTTP 400 POST /v1/chat/completions: bad tool_choice");
+    // Anthropic envelope: {"type":"error","error":{...}}.
+    EXPECT_EQ(client_error_log_line(404, "GET", "/v1/x", R"({"type":"error","error":{"message":"nope"}})"),
+              "HTTP 404 GET /v1/x: nope");
+}
+
+TEST(ClientErrorLogLine, NoMessageAndControlBytesStayOneLine) {
+    EXPECT_EQ(client_error_log_line(413, "POST", "/p", "not json"),
+              "HTTP 413 POST /p: (no error message in body)");
+    const std::string line = client_error_log_line(400, "POST", "/p\r\nX: y",
+                                                   R"({"error":{"message":"a\nb\rc"}})");
+    EXPECT_EQ(line.find('\n'), std::string::npos) << line;
+    EXPECT_EQ(line.find('\r'), std::string::npos) << line;
+    EXPECT_NE(line.find("a b c"), std::string::npos) << line;
 }

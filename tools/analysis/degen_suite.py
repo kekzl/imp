@@ -870,7 +870,17 @@ class Suite:
                 max_tokens=200, tools=[tool],
                 tool_choice={"type": "function", "function": {"name": "set_reminder"}})
         except urllib.error.HTTPError as e:
-            self.skip("constrained", "forced tool call", f"server rejected: {e}")
+            # #2279: the reason is in the body. A documented refusal (docs/API.md, template family
+            # without a tool-call grammar) is SKIP; any other 4xx/5xx is a FAIL.
+            try:
+                err = json.loads(e.read() or b"{}").get("error") or {}
+            except ValueError:
+                err = {}
+            why = f"HTTP {e.code}: {err.get('message', e.reason)}"
+            if err.get("code") == "tool_choice_unenforceable":
+                self.skip("constrained", "forced tool call", why)
+            else:
+                self.record("constrained", "forced tool_choice: emits a tool_call", False, why)
             return
         calls = (r["raw"]["choices"][0]["message"] or {}).get("tool_calls") or []
         self.record("constrained", "forced tool_choice: emits a tool_call",

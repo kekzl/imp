@@ -221,6 +221,8 @@ Every error is a JSON envelope, never a bare status with an empty body, and
 `/v1/messages*` paths get the Anthropic error shape rather than the OpenAI one.
 An unmatched route answers with an envelope too.
 
+Every 4xx logs one WARN line `HTTP <status> <method> <path>: <error.message>` (#2279). `tool_choice` refusals (`tool_choice_unenforceable`, per family): [`API_FEATURES.md`](API_FEATURES.md#tool-calling).
+
 On `/v1/messages` the `error.type` is always one of Anthropic's own -
 `invalid_request_error`, `authentication_error`, `billing_error`,
 `permission_error`, `not_found_error`, `request_too_large`, `rate_limit_error`,

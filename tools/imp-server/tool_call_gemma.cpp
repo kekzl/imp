@@ -187,9 +187,14 @@ bool parse_gemma_tool_call_body(const std::string& body_in, ParsedToolCall& tc) 
     if (name.empty())
         return false;
 
-    size_t bp = brace;
-    json args;
-    bool ok = parse_gemma_object(body, bp, args);
+    // A forced tool_choice constrains a JSON arguments object here (#2279); Gemma's own syntax has
+    // unquoted keys, so a body that parses as a JSON object is JSON.
+    json args = json::parse(body.substr(brace), nullptr, false);
+    bool ok = !args.is_discarded() && args.is_object();
+    if (!ok) {
+        size_t bp = brace;
+        ok = parse_gemma_object(body, bp, args);
+    }
     tc.name = std::move(name);
     tc.arguments = ok ? dump_safe(args) : "{}";
     return true;

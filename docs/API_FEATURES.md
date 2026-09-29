@@ -54,10 +54,18 @@ only where the loaded model's chat template has a grammar for it:
 | `tool_choice` | enforced on |
 |---|---|
 | `"required"` | `chatml` |
-| a named function | `chatml`, `llama3` |
+| a named function | `chatml`, `llama3`, `harmony` (gpt-oss), `gemma` with the `<\|tool_call>` token (Gemma-4) |
 | `"auto"` / `"none"` / absent | nothing to enforce, every family |
 
-ChatML parses `<tool_call>` envelopes; other families have no enforced structure.
+Named-function envelopes forced on the bare-args families (#2279), body = the function's `parameters` schema as JSON:
+
+| family | forced open literal | close |
+|---|---|---|
+| `llama3` | `<function=NAME>` | `</function>` |
+| `harmony` | `<\|channel\|>commentary to=functions.NAME <\|constrain\|>json<\|message\|>` | `<\|call\|>` |
+| `gemma` (Gemma-4) | `<\|tool_call>call:NAME` | `<tool_call\|>` |
+
+gemma-3 has no `<|tool_call>` token: a named function stays a 400 there. The 400 body names the family and the families that enforce.
 
 On every other family (measurement: 10 requests @ temperature 0.7 with one `get_weather` function):
 
@@ -83,8 +91,8 @@ Measurement on `gpt-oss-20b-mxfp4`, `tool_choice: "auto"` (10 requests each):
 | `/v1/chat/completions` | 0 / 10 | **10 / 10** |
 | the same, streaming | 0 / 10 | **10 / 10** |
 
-`tool_choice: "required"` on `harmony` is still a 400: the FSM has no grammar
-for this envelope, so the call is the model's choice rather than a guarantee.
+`tool_choice: "required"` on `harmony` and `gemma` is still a 400: the name sits in the
+envelope header and the FSM has no name enum there. A named function is forced (#2279).
 
 Reasoning models separate their chain of thought into `reasoning_content` (Anthropic: `thinking`) rather than emitting it as the answer.
 
