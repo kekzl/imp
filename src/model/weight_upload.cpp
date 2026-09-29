@@ -496,8 +496,8 @@ static bool upload_mtp_fp8_experts(MtpHead& head, const UploadCtx& ctx) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(b, x.gate_proj.data, mat, cudaMemcpyHostToDevice, ctx.stream));
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(b + mat, x.up_proj.data, mat, cudaMemcpyHostToDevice, ctx.stream));
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(b + 2 * mat, x.down_proj.data, mat, cudaMemcpyHostToDevice, ctx.stream));
-        gu_tab[2 * e] = b;
-        gu_tab[2 * e + 1] = b + mat;
+        gu_tab[size_t{2} * e] = b;
+        gu_tab[size_t{2} * e + 1] = b + mat;
         dn_tab[e] = b + 2 * mat;
         widen(x.gate_scale_inv, &gu_s[(2 * static_cast<size_t>(e)) * gu_sc], gu_sc);
         widen(x.up_scale_inv, &gu_s[(2 * static_cast<size_t>(e) + 1) * gu_sc], gu_sc);
@@ -515,8 +515,8 @@ static bool upload_mtp_fp8_experts(MtpHead& head, const UploadCtx& ctx) {
         return true;
     };
     const void *gt = nullptr, *dt = nullptr, *gs = nullptr, *ds = nullptr;
-    const bool ok = put(gu_tab.data(), gu_tab.size() * sizeof(void*), &gt) &&
-                    put(dn_tab.data(), dn_tab.size() * sizeof(void*), &dt) &&
+    const bool ok = put(static_cast<const void*>(gu_tab.data()), gu_tab.size() * sizeof(void*), &gt) &&
+                    put(static_cast<const void*>(dn_tab.data()), dn_tab.size() * sizeof(void*), &dt) &&
                     put(gu_s.data(), gu_s.size() * sizeof(float), &gs) &&
                     put(dn_s.data(), dn_s.size() * sizeof(float), &ds);
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(ctx.stream));
@@ -622,7 +622,7 @@ static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
             checked_cuda_malloc(&slab, per * static_cast<size_t>(ne), ctx.stream);
             if (!slab) {
                 IMP_LOG_ERROR("MTP %s: slab allocation failed (%zu MiB)", what,
-                              per * static_cast<size_t>(ne) / (1024 * 1024));
+                              per * static_cast<size_t>(ne) / (size_t{1024} * 1024));
                 return false;
             }
             ctx.gpu_allocs.push_back(slab);
@@ -1431,7 +1431,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             "NVFP4 experts: %d MoE layer(s) stay host-resident (%zu MiB of experts, %zu MiB free) — "
             "they will be served from the expert cache. Decode on those layers is materially "
             "slower than resident; the load is refused later if the cache cannot hold them.",
-            host_layers, total_expert_bytes / (1024 * 1024), free_mem / (1024 * 1024));
+            host_layers, total_expert_bytes / (size_t{1024} * 1024), free_mem / (size_t{1024} * 1024));
     }
 
     // Upload expert weights for each layer
@@ -2233,7 +2233,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
             IMP_LOG_WARN(
                 "MTP head: needs %zu MiB plus %zu MiB allocator headroom, %zu MiB free. "
                 "Skipping the head, spec-decode disabled.",
-                mtp_need / (1024 * 1024), mtp_headroom / (1024 * 1024), mtp_free / (1024 * 1024));
+                mtp_need / (size_t{1024} * 1024), mtp_headroom / (size_t{1024} * 1024),
+                mtp_free / (size_t{1024} * 1024));
             mtp_->loaded = false;
         }
     }
@@ -2251,7 +2252,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
             IMP_LOG_INFO(
                 "MTP head: uploaded to GPU (%zu allocations, %zu MiB of device free, "
                 "%.2f GiB on disk)",
-                gpu_allocations_.size() - allocs_before, mtp_used / (1024 * 1024),
+                gpu_allocations_.size() - allocs_before, mtp_used / (size_t{1024} * 1024),
                 static_cast<double>(mtp_->info.file_bytes) / (1024.0 * 1024.0 * 1024.0));
         } else {
             IMP_LOG_WARN("MTP head: GPU upload failed — spec-decode disabled");

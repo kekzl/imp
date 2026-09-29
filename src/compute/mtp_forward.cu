@@ -223,7 +223,7 @@ __global__ void mtp_gate_attn_out_kernel(
     int rem = t % (num_heads * head_dim);
     int h = rem / head_dim;
     int d = rem % head_dim;
-    int64_t gate_idx = (static_cast<int64_t>(r) * num_heads + h) * (2 * head_dim) + head_dim + d;
+    int64_t gate_idx = (static_cast<int64_t>(r) * num_heads + h) * (int64_t{2} * head_dim) + head_dim + d;
     float g = __half2float(q_full[gate_idx]);
     // Qwen3-Next attn_output_gate: attn_out *= sigmoid(gate) (NOT silu).
     // Ref: vLLM Qwen3NextAttention.forward — attn_output * torch.sigmoid(gate).
@@ -445,16 +445,16 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     // Phase 2.1 buffers (always allocated)
     ok &= alloc(&ws.d_emb_norm,   hidden_dim * sizeof(__half));
     ok &= alloc(&ws.d_h_norm, hidden_dim * sizeof(__half));
-    ok &= alloc(&ws.d_fc_in, 2 * hidden_dim * sizeof(__half));
+    ok &= alloc(&ws.d_fc_in, sizeof(__half) * 2 * hidden_dim);
     ok &= alloc(&ws.d_fc_out, hidden_dim * sizeof(__half));
     ok &= alloc(&ws.d_h_final, hidden_dim * sizeof(__half));
     ok &= alloc(&ws.d_logits, vocab_size * sizeof(__half));
     ok &= alloc(&ws.d_logits_f32, vocab_size * sizeof(float));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_topk), kMtpMaxTopW * sizeof(int));
-    ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_part_val), kMtpTopWBlocks * kMtpMaxTopW * sizeof(float));
-    ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_part_idx), kMtpTopWBlocks * kMtpMaxTopW * sizeof(int));
+    ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_part_val), sizeof(float) * kMtpTopWBlocks * kMtpMaxTopW);
+    ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_part_idx), sizeof(int) * kMtpTopWBlocks * kMtpMaxTopW);
     ok &= alloc(reinterpret_cast<void**>(&ws.d_topk_val), kMtpMaxTopW * sizeof(float));
-    ok &= alloc(reinterpret_cast<void**>(&ws.d_chain_tokens), kMtpMaxTopW * kMtpMaxChainK * sizeof(int32_t));
+    ok &= alloc(reinterpret_cast<void**>(&ws.d_chain_tokens), sizeof(int32_t) * kMtpMaxTopW * kMtpMaxChainK);
     ok &= alloc(&ws.d_h_final_snap, hidden_dim * sizeof(__half));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_argmax), sizeof(int));
     ok &= alloc(reinterpret_cast<void**>(&ws.d_tok), sizeof(int32_t));
@@ -471,13 +471,13 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
     // Phase 2.2.Attn buffers (only if attention dims > 0)
     if (ok && num_heads > 0 && head_dim > 0) {
         ok &= alloc(&ws.d_input_norm,    hidden_dim * sizeof(__half));
-        ok &= alloc(&ws.d_q_full,        2 * num_heads * head_dim * sizeof(__half));
-        ok &= alloc(&ws.d_q_attn,        num_heads * head_dim * sizeof(__half));
+        ok &= alloc(&ws.d_q_full, sizeof(__half) * 2 * num_heads * head_dim);
+        ok &= alloc(&ws.d_q_attn, sizeof(__half) * num_heads * head_dim);
         if (num_kv_heads > 0) {
-            ok &= alloc(&ws.d_k_proj,    num_kv_heads * head_dim * sizeof(__half));
-            ok &= alloc(&ws.d_v_proj,    num_kv_heads * head_dim * sizeof(__half));
+            ok &= alloc(&ws.d_k_proj, sizeof(__half) * num_kv_heads * head_dim);
+            ok &= alloc(&ws.d_v_proj, sizeof(__half) * num_kv_heads * head_dim);
         }
-        ok &= alloc(&ws.d_attn_out,      num_heads * head_dim * sizeof(__half));
+        ok &= alloc(&ws.d_attn_out, sizeof(__half) * num_heads * head_dim);
         ok &= alloc(&ws.d_attn_residual, hidden_dim * sizeof(__half));
         // Device int for RoPE position (single int)
         ok &= (cudaMalloc(reinterpret_cast<void**>(&ws.d_mtp_position), sizeof(int)) == cudaSuccess);
@@ -506,7 +506,7 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
         const size_t slots = hc_count > 0 ? static_cast<size_t>(top_k) : 1;
         ok &= alloc(&ws.d_expert_gate_up,  slots * 2 * expert_d_ff * sizeof(__half));
         ok &= alloc(&ws.d_expert_act,      slots * expert_d_ff * sizeof(__half));
-        ok &= alloc(&ws.d_expert_outputs,  top_k * hidden_dim * sizeof(__half));
+        ok &= alloc(&ws.d_expert_outputs, sizeof(__half) * top_k * hidden_dim);
 
         // Routing pool (max 1 token for M=1 decode).
         ws.routing_buf.allocate(/*max_tokens=*/1, /*max_experts=*/n_experts, /*top_k=*/top_k);
@@ -702,7 +702,7 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
     // 5.A.2 — Q (full, including gate): q_proj @ d_input_norm → [2 * nh * hdh]
     {
         int64_t in_shape[2]  = {1, hd};
-        int64_t out_shape[2] = {1, 2 * nh * hdh};
+        int64_t out_shape[2] = {1, int64_t{2} * nh * hdh};
         Tensor in_view (ws.d_input_norm, QType::F16, 2, in_shape,  true);
         Tensor out_view(ws.d_q_full,     QType::F16, 2, out_shape, true);
         imp::gemm(in_view, mtp.q_proj, out_view, 1.0f, 0.0f, stream);
@@ -710,14 +710,14 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
     // 5.A.3 — K, V: k_proj/v_proj @ d_input_norm → [nkv * hdh] each
     if (ws.d_k_proj && nkv > 0) {
         int64_t in_shape[2]  = {1, hd};
-        int64_t out_shape[2] = {1, nkv * hdh};
+        int64_t out_shape[2] = {1, static_cast<int64_t>(nkv) * hdh};
         Tensor in_view (ws.d_input_norm, QType::F16, 2, in_shape,  true);
         Tensor out_view(ws.d_k_proj,     QType::F16, 2, out_shape, true);
         imp::gemm(in_view, mtp.k_proj, out_view, 1.0f, 0.0f, stream);
     }
     if (ws.d_v_proj && nkv > 0) {
         int64_t in_shape[2]  = {1, hd};
-        int64_t out_shape[2] = {1, nkv * hdh};
+        int64_t out_shape[2] = {1, static_cast<int64_t>(nkv) * hdh};
         Tensor in_view (ws.d_input_norm, QType::F16, 2, in_shape,  true);
         Tensor out_view(ws.d_v_proj,     QType::F16, 2, out_shape, true);
         imp::gemm(in_view, mtp.v_proj, out_view, 1.0f, 0.0f, stream);
@@ -839,7 +839,7 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
     }
     // 5.A.5 — o_proj @ d_attn_out → d_attn_residual
     {
-        int64_t in_shape[2]  = {1, nh * hdh};
+        int64_t in_shape[2] = {1, static_cast<int64_t>(nh) * hdh};
         int64_t out_shape[2] = {1, hd};
         Tensor in_view (ws.d_attn_out,      QType::F16, 2, in_shape,  true);
         Tensor out_view(ws.d_attn_residual, QType::F16, 2, out_shape, true);
@@ -1062,7 +1062,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
 
     // Step 4: fc_out = fc @ fc_in  ([hidden_dim, 2*hidden_dim] x [2*hidden_dim] = [hidden_dim])
     {
-        int64_t fc_in_shape[2]  = {1, 2 * hidden_dim};
+        int64_t fc_in_shape[2] = {1, int64_t{2} * hidden_dim};
         int64_t fc_out_shape[2] = {1, hidden_dim};
         Tensor fc_in_view (ws.d_fc_in,  QType::F16, 2, fc_in_shape,  true);
         Tensor fc_out_view(ws.d_fc_out, QType::F16, 2, fc_out_shape, true);
@@ -1174,7 +1174,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
             const size_t gu_per_expert_bytes = static_cast<size_t>(2) * d_ff_e * hd * sizeof(__half);
             const size_t dn_per_expert_bytes = static_cast<size_t>(hd) * d_ff_e * sizeof(__half);
 
-            int64_t gu_shape[2] = {2 * d_ff_e, hd};
+            int64_t gu_shape[2] = {int64_t{2} * d_ff_e, hd};
             int64_t dn_shape[2] = {hd, d_ff_e};
 
             for (int k = 0; k < top_k; ++k) {
@@ -1232,7 +1232,8 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
                     int64_t in_shape[2] = {1, d_ff_e};
                     int64_t out_shape[2] = {1, hd};
                     Tensor in_view(ws.d_expert_act, QType::F16, 2, in_shape, true);
-                    __half* out_base = static_cast<__half*>(ws.d_expert_outputs) + k * hd;
+                    __half* out_base = static_cast<__half*>(ws.d_expert_outputs) +
+                                       static_cast<ptrdiff_t>(k) * hd;
                     Tensor out_view(out_base, QType::F16, 2, out_shape, true);
                     imp::gemm(in_view, dn_view, out_view, 1.0f, 0.0f, stream);
                 }
@@ -1310,13 +1311,12 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
             // the dense-MLP variant has no gate tensor and is unscaled.
             if (mtp.shared_expert_gate.data != nullptr) {
                 imp::shared_expert_gate_scale(
-                    /*x=*/ ws.d_post_norm,
-                    /*W=*/ mtp.shared_expert_gate.data,
-                    /*y_inout=*/ ws.d_shared_out,
-                    /*n=*/ 1,
-                    /*d_model=*/ hd,
-                    /*d=*/ hd,
-                    stream);
+                    /*x_fp16=*/ws.d_post_norm,
+                    /*W_fp16=*/mtp.shared_expert_gate.data,
+                    /*y_fp16_inout=*/ws.d_shared_out,
+                    /*n=*/1,
+                    /*d_model=*/hd,
+                    /*d=*/hd, stream);
             }
 
             // moe_out += shared_out → write back into d_fc_out for downstream
@@ -1397,7 +1397,7 @@ bool mtp_feed_dense_rows(const MtpHead& mtp, MtpDraftWorkspace& ws, Tensor& emb_
 
     // 4 - fc: [n, 2H] -> [n, H]
     {
-        int64_t in_s[2] = {n, 2 * H};
+        int64_t in_s[2] = {n, int64_t{2} * H};
         Tensor in_v(ws.d_b_fc_in, QType::F16, 2, in_s, true);
         Tensor out_v(ws.d_b_fc_out, QType::F16, 2, nH, true);
         imp::gemm(in_v, mtp.fc, out_v, 1.0f, 0.0f, stream);
@@ -1415,7 +1415,7 @@ bool mtp_feed_dense_rows(const MtpHead& mtp, MtpDraftWorkspace& ws, Tensor& emb_
             imp::gemm(in_v, mtp.q_proj, out_v, 1.0f, 0.0f, stream);
         }
         {
-            int64_t out_s[2] = {n, nkv * hdh};
+            int64_t out_s[2] = {n, static_cast<int64_t>(nkv) * hdh};
             Tensor k_v(ws.d_b_k, QType::F16, 2, out_s, true);
             Tensor v_v(ws.d_b_v, QType::F16, 2, out_s, true);
             imp::gemm(in_v, mtp.k_proj, k_v, 1.0f, 0.0f, stream);
@@ -1452,7 +1452,7 @@ bool mtp_feed_dense_rows(const MtpHead& mtp, MtpDraftWorkspace& ws, Tensor& emb_
         }
         // o_proj + residual into fc_out
         {
-            int64_t in_s[2] = {n, nh * hdh};
+            int64_t in_s[2] = {n, static_cast<int64_t>(nh) * hdh};
             Tensor in_a(ws.d_b_attn_out, QType::F16, 2, in_s, true);
             Tensor out_v(ws.d_b_res, QType::F16, 2, nH, true);
             imp::gemm(in_a, mtp.o_proj, out_v, 1.0f, 0.0f, stream);
@@ -1536,7 +1536,7 @@ bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_ro
         }
         const int max_seq = base + n;  // longest row's context
         const size_t shmem_bytes = static_cast<size_t>(max_seq) * sizeof(float);
-        if (shmem_bytes > 48 * 1024) {
+        if (shmem_bytes > size_t{48} * 1024) {
             // >48 KiB dynamic shmem needs the opt-in attribute (sm_120: ~99 KiB per block;
             // the 16k kMtpKvCap needs 64 KiB). Set to the cache's own ceiling once.
             static bool smem_opted_in = false;
@@ -1641,7 +1641,7 @@ bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, 
             IMP_CUDA_CHECK_LAUNCH();
         }
         const size_t shmem_bytes = static_cast<size_t>(max_pos + 1) * sizeof(float);
-        if (shmem_bytes > 48 * 1024) {
+        if (shmem_bytes > size_t{48} * 1024) {
             static bool smem_opted_in = false;
             if (!smem_opted_in) {
                 IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(mtp_attn_kv_scan_rows_kernel,

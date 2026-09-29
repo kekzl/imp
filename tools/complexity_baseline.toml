@@ -5,9 +5,10 @@
 # This counter: 202 (lizard's #203 is the executor_attention_prefill.cu fragment,
 # charged here to run_attention); 3789 of 3821 shared functions equal lizard's CCN.
 # Every entry is a CEILING: growth by 1 fails, shrinking is a NOTE.
-# Regenerate with `python3 tools/check_complexity.py --update` and say in the
-# PR body why a function was added or grew. Key: `path::signature`, as in
-# function_size_thresholds.toml. Lines below [baseline] are generated.
+# Pins only shrink: scripts/ci_static_gates.sh passes the base branch's copy as
+# --base-config; an added or raised pin fails (#2210). Lower pins with `--update`.
+# Key: `path::signature`, as in function_size_thresholds.toml. Lines below
+# [baseline] are generated.
 #
 # Pin changes (newest first):
 #   #2212 item 3 (mtp_feed per-row body shared): mtp_feed_rows_multislot 50 -> 30, mtp_feed_batch 35 -> 15

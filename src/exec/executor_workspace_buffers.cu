@@ -70,7 +70,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     // the CUDA-graph-captured decode region. Sized for max_tokens.
     if (cfg.is_mla() && max_tokens_ > 0) {
         const size_t T = static_cast<size_t>(max_tokens_);
-        const size_t kva_out = static_cast<size_t>(cfg.kv_lora_rank + cfg.qk_rope_head_dim);
+        const size_t kva_out = static_cast<size_t>(cfg.kv_lora_rank) +
+                               static_cast<size_t>(cfg.qk_rope_head_dim);
         const size_t kvb_out =
             static_cast<size_t>(cfg.n_heads) * (cfg.qk_nope_head_dim + cfg.v_head_dim);
         // T2 quartet (A7 step 4b.2, charged as mla_scratch): no degradation contract, both
@@ -118,8 +119,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 IMP_LOG_WARN("attention.mla_absorb: kv_b_proj is not FP16 on all layers — "
                              "absorbed decode disabled, using materialized MLA path.");
             } else {
-                const size_t row_w =
-                    static_cast<size_t>(cfg.kv_lora_rank + cfg.qk_rope_head_dim);
+                const size_t row_w = static_cast<size_t>(cfg.kv_lora_rank) +
+                                     static_cast<size_t>(cfg.qk_rope_head_dim);
                 mla_absorb_layer_stride_ = static_cast<size_t>(mla_absorb_max_seq_) * row_w;
                 size_t cache_bytes =
                     static_cast<size_t>(cfg.n_layers) * mla_absorb_layer_stride_ * sizeof(half);

@@ -244,10 +244,12 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
             halpha[e] = experts[e].tensor_scale;
         }
         const size_t off = static_cast<size_t>(p) * moe_.layer_stage_ptr_stride;
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_b_ptrs + off, hb.data(),
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_b_ptrs + off),
+                                           static_cast<const void*>(hb.data()),
                                            static_cast<size_t>(ne) * sizeof(const void*),
                                            cudaMemcpyHostToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_sfb_ptrs + off, hsfb.data(),
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_sfb_ptrs + off),
+                                           static_cast<const void*>(hsfb.data()),
                                            static_cast<size_t>(ne) * sizeof(const void*),
                                            cudaMemcpyHostToDevice, stream));
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_alpha + off, halpha.data(),
@@ -318,10 +320,12 @@ bool GraphExecutor::stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1,
             halpha[i] = experts[e0 + i].tensor_scale;
         }
         const size_t off = static_cast<size_t>(p) * moe_.layer_stage_ptr_stride + e0;
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_b_ptrs + off, hb.data(), n * sizeof(const void*),
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_b_ptrs + off),
+                                           static_cast<const void*>(hb.data()), n * sizeof(const void*),
                                            cudaMemcpyHostToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_sfb_ptrs + off, hsfb.data(),
-                                           n * sizeof(const void*), cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_sfb_ptrs + off),
+                                           static_cast<const void*>(hsfb.data()), n * sizeof(const void*),
+                                           cudaMemcpyHostToDevice, stream));
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_alpha + off, halpha.data(), n * sizeof(float),
                                            cudaMemcpyHostToDevice, stream));
     }
@@ -541,7 +545,7 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
 
     const int32_t* gate_idx = moe_.d_slot_idx;
     const int32_t* up_idx = moe_.d_slot_idx + top_k;
-    const int32_t* down_idx = moe_.d_slot_idx + 2 * top_k;
+    const int32_t* down_idx = moe_.d_slot_idx + static_cast<ptrdiff_t>(2) * top_k;
 
     const NvFP4MoEQuantResult up_view =
         pool_view(layer_pool, slot_size, ms_off[std::to_underlying(ExpertProj::Up)], slot_scales,
@@ -615,9 +619,11 @@ void GraphExecutor::run_moe_decode_rows_host_(int layer, cudaStream_t stream, Mo
     for (int i = 0; i < ctx.n; ++i) {
         MoeRoutingResult rr = ctx.routing;
         const int64_t rs[1] = {ctx.top_k};
-        rr.expert_indices = Tensor(static_cast<int32_t*>(ctx.routing.expert_indices.data) + i * ctx.top_k,
+        rr.expert_indices = Tensor(static_cast<int32_t*>(ctx.routing.expert_indices.data) +
+                                       static_cast<ptrdiff_t>(i) * ctx.top_k,
                                    QType::INT32, 1, rs, true);
-        rr.expert_weights = Tensor(static_cast<float*>(ctx.routing.expert_weights.data) + i * ctx.top_k,
+        rr.expert_weights = Tensor(static_cast<float*>(ctx.routing.expert_weights.data) +
+                                       static_cast<ptrdiff_t>(i) * ctx.top_k,
                                    QType::F32, 1, rs, true);
         Tensor no = row(ctx.no, i);
         Tensor h = row(ctx.h, i);

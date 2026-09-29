@@ -217,9 +217,9 @@ void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
     IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
     IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
 
-    const double nvfp4_mib =
-        (static_cast<size_t>(rows) * cols / 2 + static_cast<size_t>(rows) * cols / 16) /
-        (1024.0 * 1024.0);
+    // Bytes: FP4 data (2 per byte) + one FP8 scale per 16 elements, integer bytes as before.
+    const size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 + static_cast<size_t>(rows) * cols / 16;
+    const double nvfp4_mib = static_cast<double>(nvfp4_bytes) / (1024.0 * 1024.0);
     IMP_LOG_INFO("NVFP4 LM head: quantized FP16 [%d x %d] → NVFP4 (%.1f MiB), decode GEMV fast path",
                  rows, cols, nvfp4_mib);
     // The checkpoint may have listed lm_head as a module to leave at source precision; imp
