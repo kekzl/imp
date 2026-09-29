@@ -323,15 +323,17 @@ __global__ void dequant_mxfp4_split_kernel(const uint8_t* __restrict__ data,    
     memcpy(&scale, &fbits, sizeof(float));
 
     const uint8_t* block_data = data + blk_idx * 16;
-    int64_t out_base = static_cast<int64_t>(row) * K + static_cast<int64_t>(blk * 32);
+    int64_t out_base = static_cast<int64_t>(row) * K + static_cast<int64_t>(blk) * 32;
     int64_t out_limit = static_cast<int64_t>(N) * K;
     if (out_base + 31 >= out_limit)
         return;
 
+    // #2218 bounded: in-block offset i * 2 < 32 (i < 16)
     for (int i = 0; i < 16; i++) {
         uint8_t packed = block_data[i];
-        out[out_base + i * 2] = __float2half(kE2M1Table[packed & 0xF] * scale);
-        out[out_base + i * 2 + 1] = __float2half(kE2M1Table[(packed >> 4) & 0xF] * scale);
+        out[out_base + static_cast<ptrdiff_t>(i * 2)] = __float2half(kE2M1Table[packed & 0xF] * scale);
+        out[out_base + static_cast<ptrdiff_t>(i * 2) + 1] = __float2half(kE2M1Table[(packed >> 4) & 0xF] *
+                                                                         scale);
     }
 }
 
@@ -425,18 +427,20 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
 
     int row = mb_idx / K_groups;
     int k_group = mb_idx % K_groups;
-    int base = row * K + k_group * kMxSFVecSize;
+    const int64_t base = static_cast<int64_t>(row) * K + static_cast<int64_t>(k_group) * kMxSFVecSize;
 
     // Load 32 values via vectorized half2 loads and find absmax
     float vals[32];
     float local_absmax = 0.0f;
     const half2* src_h2 = reinterpret_cast<const half2*>(input + base);
+    // #2218 bounded: register index i * 2 < 32 (i < 16)
 #pragma unroll
     for (int i = 0; i < 16; i++) {
         half2 h2 = src_h2[i];
-        vals[i * 2] = __half2float(h2.x);
+        vals[static_cast<ptrdiff_t>(i * 2)] = __half2float(h2.x);
         vals[i * 2 + 1] = __half2float(h2.y);
-        local_absmax = fmaxf(local_absmax, fmaxf(fabsf(vals[i * 2]), fabsf(vals[i * 2 + 1])));
+        local_absmax = fmaxf(local_absmax,
+                             fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[i * 2 + 1])));
     }
 
     // Compute UE8M0 scale = ceil_pow2(absmax / 6.0)
@@ -452,7 +456,8 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
     sf_out[sf_idx] = ue8m0;
 
     // Quantize and pack FP4 values (2 per byte) via HW conversion
-    int packed_base = row * (K / 2) + k_group * (kMxSFVecSize / 2);
+    int64_t packed_base = static_cast<int64_t>(row) * (K / 2) +
+                          static_cast<int64_t>(k_group) * (kMxSFVecSize / 2);
 #pragma unroll
     for (int i = 0; i < 32; i += 2) {
         float s0 = vals[i] * inv_scale;

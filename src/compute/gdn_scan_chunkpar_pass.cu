@@ -92,10 +92,12 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
     const ChunkparWs ws = chunkpar_ws_layout<HD, SS>(ws_base, n_heads);
     float* H32_h = ws.H32 + static_cast<size_t>(h) * SS * HD;
 
+    // #2218 bounded: smem offsets < (kChunk + SS) * SS = 24576 floats (kChunk 64, SS 128);
+    // y_out column h * HD < 256 heads * 128 = 32768 (heads <= 256)
     extern __shared__ float smem[];
     float* s_a = smem;               // [kChunk][SS] swz128  staging: W, then Qeff, then K_d
-    float* s_h = s_a + kChunk * SS;  // [SS][SH]             state slice, FP32
-    float* s_ue = s_h + SS * SH;     // [kChunk][SH]  u_eff
+    float* s_h = s_a + static_cast<ptrdiff_t>(kChunk * SS);  // [SS][SH]             state slice, FP32
+    float* s_ue = s_h + static_cast<ptrdiff_t>(SS * SH);     // [kChunk][SH]  u_eff
 
     // This CTA's state slice: H[s][d_base + dl].
     for (int idx = tid; idx < SS * COLS; idx += NT) {
@@ -193,16 +195,18 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
             }
             float acc[NTW][4];
             gemm_rows_x_h<SS, SH, NTW, false>(s_a, s_h + n0, m0, g, tg, acc);  // output only: plain fp16
-            const size_t t_base = static_cast<size_t>(strip_t0) + c * kChunk;
+            const size_t t_base = static_cast<size_t>(strip_t0) + static_cast<size_t>(c) * kChunk;
 #pragma unroll
             for (int nt = 0; nt < NTW; nt++) {
                 const int col = n0 + nt * 8 + 2 * tg;
                 if (r0 < L)
-                    *reinterpret_cast<__half2*>(&y_out[(t_base + r0) * inner + h * HD + d_base + col]) =
+                    *reinterpret_cast<__half2*>(
+                        &y_out[(t_base + r0) * inner + static_cast<size_t>(h * HD) + d_base + col]) =
                         __floats2half2_rn((ya[nt][0].x + acc[nt][0]) * scale,
                                           (ya[nt][0].y + acc[nt][1]) * scale);
                 if (r1 < L)
-                    *reinterpret_cast<__half2*>(&y_out[(t_base + r1) * inner + h * HD + d_base + col]) =
+                    *reinterpret_cast<__half2*>(
+                        &y_out[(t_base + r1) * inner + static_cast<size_t>(h * HD) + d_base + col]) =
                         __floats2half2_rn((ya[nt][1].x + acc[nt][2]) * scale,
                                           (ya[nt][1].y + acc[nt][3]) * scale);
             }

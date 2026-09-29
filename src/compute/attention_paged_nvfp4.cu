@@ -171,8 +171,11 @@ __global__ void paged_attention_decode_nvfp4_kernel(
             first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
-            const uint8_t* K_tok = K_block + t * kv_slot_stride + kv_head * kv_head_bytes;
-            const uint8_t* V_tok = V_block + t * kv_slot_stride + kv_head * kv_head_bytes;
+            // #2218 bounded: kv_head * kv_head_bytes < 256 * 288 = 73728 (heads <= 256, HEAD_DIM / 2 <= 288).
+            const uint8_t* K_tok = K_block + static_cast<int64_t>(t) * kv_slot_stride +
+                                   static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
+            const uint8_t* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +
+                                   static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
 
             // Per-lane scale (one group covers all ELEMS for this lane)
             float k_scale = decode_kv_scale<SCALE_DTYPE>(
@@ -319,8 +322,11 @@ __global__ void paged_attention_splitk_nvfp4_kernel(
             first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
-            const uint8_t* K_tok = K_block + t * kv_slot_stride + kv_head * kv_head_bytes;
-            const uint8_t* V_tok = V_block + t * kv_slot_stride + kv_head * kv_head_bytes;
+            // #2218 bounded: kv_head * kv_head_bytes < 256 * 288 = 73728 (heads <= 256, HEAD_DIM / 2 <= 288).
+            const uint8_t* K_tok = K_block + static_cast<int64_t>(t) * kv_slot_stride +
+                                   static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
+            const uint8_t* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +
+                                   static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
 
             float k_scale = decode_kv_scale<SCALE_DTYPE>(
                 K_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);

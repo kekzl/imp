@@ -51,6 +51,7 @@ __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict
     const int ks = k_base / kBK;
     const int sblk = ks >> 2;          // super-block index along K
     const int grp = ks & 3;            // 32-byte nibble group within it
+    // #2218 bounded: in-block offset grp * 32 < 128 B (grp = ks & 3)
 #pragma unroll
     for (int i = tid; i < kBN * 3; i += kThreads) {
         const int row = i / 3;
@@ -61,7 +62,7 @@ __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict
             cp_async_cg_16(&sBh[row][0], blk, bvalid);  // d, dmin, 12-B scales
         } else {
             const int off = (part - 1) * 16;
-            cp_async_cg_16(&sBq[row][off], blk + 16 + grp * 32 + off, bvalid);
+            cp_async_cg_16(&sBq[row][off], blk + 16 + static_cast<ptrdiff_t>(grp * 32) + off, bvalid);
         }
     }
     const int kb0 = k_base / 32;
@@ -117,6 +118,7 @@ __global__ void __launch_bounds__(kThreads)
     const int warp_n = warp_id % kWN;
     const int rl = lane >> 2;
     const int cl = lane & 3;
+    // #2218 bounded: smem column cl * 4 < 16 (cl = lane & 3)
 
     __shared__ int8_t sA[kStages][BM][kRow];
     __shared__ uint8_t sBq[kStages][kBN][kQRow];
@@ -193,8 +195,8 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
                 for (int nf = 0; nf < kNF; ++nf) {
                     const int bcol = warp_n * kTileN + nf * 8 + rl;
-                    const uint32_t raw0 =
-                        *reinterpret_cast<const uint32_t*>(&sBq[stage][bcol][cl * 4]);
+                    const uint32_t raw0 = *reinterpret_cast<const uint32_t*>(
+                        &sBq[stage][bcol][static_cast<ptrdiff_t>(cl * 4)]);
                     const uint32_t raw1 =
                         *reinterpret_cast<const uint32_t*>(&sBq[stage][bcol][cl * 4 + 16]);
                     const uint32_t b0 = __vsub4((raw0 >> shift) & 0x0F0F0F0Fu, 0x08080808u);

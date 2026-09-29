@@ -59,9 +59,11 @@ __global__ void qsa_prep_queries_kernel(const half* __restrict__ qk, const int* 
     const int row = blockIdx.x, head = blockIdx.y, d = threadIdx.x;
     const int stride = (g.n_heads + 1) * D;
     const int pos = positions[row];
+    // #2218 bounded: g.n_heads * D, head * D < 256 * 128 = 32768 (heads <= 256, D = kQsaDim = 128).
     if (head == 0)
-        raw_keys[static_cast<size_t>(pos) * D + d] = qk[static_cast<size_t>(row) * stride + g.n_heads * D + d];
-    y[d] = __half2float(qk[static_cast<size_t>(row) * stride + head * D + d]);
+        raw_keys[static_cast<size_t>(pos) * D + d] =
+            qk[static_cast<size_t>(row) * stride + static_cast<size_t>(g.n_heads * D) + d];
+    y[d] = __half2float(qk[static_cast<size_t>(row) * stride + static_cast<size_t>(head * D) + d]);
     __syncthreads();
     const float out = norm_rope_128(y, red, w_q, pos, g);
     q_out[(static_cast<size_t>(row) * g.n_heads + head) * D + d] = __float2half(out);
@@ -102,10 +104,12 @@ __global__ void __launch_bounds__(kScoreWarps * 32) qsa_score_kernel(const half*
     const int r = blockIdx.y, lane = threadIdx.x & 31;
     const int nb = (positions[r] + 1) / g.ratio;
     float qr[4][4];
+    // #2218 bounded: lane * 4 < 32 * 4 = 128.
 #pragma unroll
     for (int h = 0; h < 4; ++h) {
         const uint2 u = h < g.n_heads ? *reinterpret_cast<const uint2*>(
-                                            q + (static_cast<size_t>(r) * g.n_heads + h) * D + lane * 4)
+                                            q + (static_cast<size_t>(r) * g.n_heads + h) * D +
+                                            static_cast<size_t>(lane * 4))
                                       : make_uint2(0u, 0u);
         const float2 a = __half22float2(*reinterpret_cast<const half2*>(&u.x));
         const float2 b = __half22float2(*reinterpret_cast<const half2*>(&u.y));
@@ -115,7 +119,9 @@ __global__ void __launch_bounds__(kScoreWarps * 32) qsa_score_kernel(const half*
     float* my_scores = scores + static_cast<size_t>(r) * max_blocks;
     const int stride = gridDim.x * kScoreWarps;
     for (int b = blockIdx.x * kScoreWarps + (threadIdx.x >> 5); b < nb; b += stride) {
-        const uint2 u = *reinterpret_cast<const uint2*>(block_keys + static_cast<size_t>(b) * D + lane * 4);
+        // #2218 bounded: lane * 4 < 32 * 4 = 128.
+        const uint2 u = *reinterpret_cast<const uint2*>(block_keys + static_cast<size_t>(b) * D +
+                                                        static_cast<size_t>(lane * 4));
         const float2 k0 = __half22float2(*reinterpret_cast<const half2*>(&u.x));
         const float2 k1 = __half22float2(*reinterpret_cast<const half2*>(&u.y));
         float dot[4];

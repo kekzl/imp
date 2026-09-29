@@ -613,8 +613,9 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     const int vec_elems = row_elems / 4;
     const half2* src2 = reinterpret_cast<const half2*>(src);
     uint32_t* dst4 = reinterpret_cast<uint32_t*>(dst);
+    // #2218 bounded: 2 * i < row_elems / 2 = n_kv_heads * head_dim / 2 < 256 * 576 / 2 = 73728
     for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
-        half2 lo = __hmul2(src2[2 * i], inv_scale_h2);
+        half2 lo = __hmul2(src2[static_cast<ptrdiff_t>(2 * i)], inv_scale_h2);
         half2 hi = __hmul2(src2[2 * i + 1], inv_scale_h2);
         uint16_t e4m3_lo = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&lo));
         uint16_t e4m3_hi = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&hi));

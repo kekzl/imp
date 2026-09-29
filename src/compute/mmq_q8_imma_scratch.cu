@@ -51,7 +51,7 @@ __global__ void quantize_act_fast_kernel(const __half* __restrict__ X, int M, in
     for (int idx = warp; idx < total; idx += nwarps) {
         const int m = idx / subs;
         const int s = idx - m * subs;
-        const size_t off = static_cast<size_t>(m) * K + static_cast<size_t>(s * 32);
+        const size_t off = static_cast<size_t>(m) * K + static_cast<size_t>(s) * 32;
         const float v = __half2float(X[off + lane]);
         float amax = fabsf(v);
 #pragma unroll

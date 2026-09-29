@@ -79,6 +79,7 @@ __device__ __forceinline__ void load_stage(half* stage, const PrefillArgs& args,
     half* As = stage;
     half* Ws = stage + Smem<NPAD>::kA;
     const int k0 = kt * kBK;
+    // #2218 bounded: smem r * kBK < NPAD * kBK = 128 * 32 = 4096 halves (r < kBM, NPAD <= 128)
     for (int c = threadIdx.x; c < kBM * kChunksPerRow; c += kThreads) {
         const int r = c / kChunksPerRow;
         const int kc = (c - r * kChunksPerRow) * kChunkHalves;
@@ -105,6 +106,8 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_prefill_kernel(Prefi
     constexpr int kStages = Smem<NPAD>::kStages;
     __shared__ __align__(16) unsigned char smem_raw[Smem<NPAD>::kBytes];
     half* stages = reinterpret_cast<half*>(smem_raw);
+    // #2218 bounded: smem tile offsets < kBM * NPAD = 64 * 128 = 8192 (warp * 16 * kBK, j * 16 * kBK,
+    // warp * 16 * NPAD, kk * 16, j * 16; NPAD <= kMaxN = 128)
 
     pdl_wait();
 
@@ -143,11 +146,13 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_prefill_kernel(Prefi
 #pragma unroll
         for (int kk = 0; kk < kBK / 16; ++kk) {
             wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
-            wmma::load_matrix_sync(a_frag, As + static_cast<ptrdiff_t>(warp * 16 * kBK + kk * 16), kBK);
+            wmma::load_matrix_sync(
+                a_frag, As + static_cast<ptrdiff_t>(warp * 16 * kBK) + static_cast<ptrdiff_t>(kk * 16), kBK);
 #pragma unroll
             for (int j = 0; j < NF; ++j) {
                 wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
-                wmma::load_matrix_sync(b_frag, Ws + static_cast<ptrdiff_t>(j * 16 * kBK + kk * 16), kBK);
+                wmma::load_matrix_sync(
+                    b_frag, Ws + static_cast<ptrdiff_t>(j * 16 * kBK) + static_cast<ptrdiff_t>(kk * 16), kBK);
                 wmma::mma_sync(acc[j], a_frag, b_frag, acc[j]);
             }
         }
@@ -160,8 +165,9 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_prefill_kernel(Prefi
     float* tile = reinterpret_cast<float*>(smem_raw);
 #pragma unroll
     for (int j = 0; j < NF; ++j)
-        wmma::store_matrix_sync(tile + static_cast<ptrdiff_t>(warp * 16 * NPAD + j * 16), acc[j], NPAD,
-                                wmma::mem_row_major);
+        wmma::store_matrix_sync(tile + static_cast<ptrdiff_t>(warp * 16 * NPAD) +
+                                    static_cast<ptrdiff_t>(j * 16),
+                                acc[j], NPAD, wmma::mem_row_major);
     __syncwarp();
 
     if (args.split == 1) {

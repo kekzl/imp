@@ -159,6 +159,8 @@ __device__ __forceinline__ void smallm_v2_cta_body(
     const int kt1 = min(k_tiles, kt0 + per_stripe);
     const int iters = kt1 - kt0;
 
+    // #2218 bounded: smem offsets < kStages * kStageBytes (s * kStageBytes, row * kNibStride/kSfStride,
+    // j * 16, T0 * 4, c * 32 within a 15360 B stage) <= 101376 B (sm_120 opt-in max); global j * 16 < 128 B
     auto stage_base = [&](int s) { return smem + static_cast<ptrdiff_t>(s * kStageBytes); };
 
     // Per-lane chunk assignments are fixed; only the K offset advances:
@@ -183,13 +185,15 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         for (int v = 0; v < 16; ++v) {
             const int c = lane + v * 32;
             const int r = c / 8, j = c % 8;
-            cp_async16(s_wn + r * kNibStride + j * 16,
-                       w_packed + (n_base + r) * w_row_bytes + k_nib_off + j * 16, 16);
+            cp_async16(s_wn + static_cast<ptrdiff_t>(r * kNibStride) + static_cast<ptrdiff_t>(j * 16),
+                       w_packed + (n_base + r) * w_row_bytes + k_nib_off + static_cast<ptrdiff_t>(j * 16),
+                       16);
         }
 #pragma unroll
         for (int v = 0; v < 2; ++v) {
             const int r = lane + v * 32;
-            cp_async16(s_wsf + r * kSfStride, w_scales + (n_base + r) * sf_row_bytes + k_sf_off, 16);
+            cp_async16(s_wsf + static_cast<ptrdiff_t>(r * kSfStride),
+                       w_scales + (n_base + r) * sf_row_bytes + k_sf_off, 16);
         }
     };
 
@@ -207,11 +211,12 @@ __device__ __forceinline__ void smallm_v2_cta_body(
             for (int v = 0; v < 8; ++v) {
                 const int c = lane + v * 32;
                 const int r = c / 8, j = c % 8;
-                cp_async16(s_xn + r * kNibStride + j * 16, xq_packed + r * w_row_bytes + k_nib_off + j * 16,
+                cp_async16(s_xn + static_cast<ptrdiff_t>(r * kNibStride) + static_cast<ptrdiff_t>(j * 16),
+                           xq_packed + r * w_row_bytes + k_nib_off + static_cast<ptrdiff_t>(j * 16),
                            r < M ? 16 : 0);
             }
-            cp_async16(s_xsf + lane * kSfStride, xq_scales + lane * sf_row_bytes + k_sf_off,
-                       lane < M ? 16 : 0);
+            cp_async16(s_xsf + static_cast<ptrdiff_t>(lane * kSfStride),
+                       xq_scales + lane * sf_row_bytes + k_sf_off, lane < M ? 16 : 0);
             // One async-arrive per lane covers every cp.async this lane issued
             // for the stage, the weights before the grid dependency included.
             cp_async_mbar_arrive(&bar_full[s]);
@@ -278,20 +283,23 @@ __device__ __forceinline__ void smallm_v2_cta_body(
 #pragma unroll
             for (int c = 0; c < kKT / 64; ++c) {
                 uint32_t a[4];
-                const uint8_t* xr = s_xn + a_row * kNibStride + T0 * 4 + c * 32;
+                const uint8_t* xr = s_xn + static_cast<ptrdiff_t>(a_row * kNibStride) +
+                                    static_cast<ptrdiff_t>(T0 * 4) + static_cast<ptrdiff_t>(c * 32);
                 a[0] = *reinterpret_cast<const uint32_t*>(xr);
-                a[1] = *reinterpret_cast<const uint32_t*>(xr + 8 * kNibStride);
+                a[1] = *reinterpret_cast<const uint32_t*>(xr + static_cast<ptrdiff_t>(8 * kNibStride));
                 a[2] = *reinterpret_cast<const uint32_t*>(xr + 16);
-                a[3] = *reinterpret_cast<const uint32_t*>(xr + 8 * kNibStride + 16);
-                const uint32_t sfa = *reinterpret_cast<const uint32_t*>(s_xsf + sfa_row * kSfStride + c * 4);
+                a[3] = *reinterpret_cast<const uint32_t*>(xr + static_cast<ptrdiff_t>(8 * kNibStride) + 16);
+                const uint32_t sfa = *reinterpret_cast<const uint32_t*>(
+                    s_xsf + static_cast<ptrdiff_t>(sfa_row * kSfStride) + static_cast<ptrdiff_t>(c * 4));
 #pragma unroll
                 for (int nf = 0; nf < 4; ++nf) {
                     const int n_row = warp_n * 32 + nf * 8 + T1;
-                    const uint8_t* wr = s_wn + n_row * kNibStride + T0 * 4 + c * 32;
+                    const uint8_t* wr = s_wn + static_cast<ptrdiff_t>(n_row * kNibStride) +
+                                        static_cast<ptrdiff_t>(T0 * 4) + static_cast<ptrdiff_t>(c * 32);
                     const uint32_t b0 = *reinterpret_cast<const uint32_t*>(wr);
                     const uint32_t b1 = *reinterpret_cast<const uint32_t*>(wr + 16);
-                    const uint32_t sfb = *reinterpret_cast<const uint32_t*>(s_wsf + n_row * kSfStride +
-                                                                            c * 4);
+                    const uint32_t sfb = *reinterpret_cast<const uint32_t*>(
+                        s_wsf + static_cast<ptrdiff_t>(n_row * kSfStride) + static_cast<ptrdiff_t>(c * 4));
                     mma_mxf4nvf4(acc[nf], a, b0, b1, sfa, sfb);
                 }
             }

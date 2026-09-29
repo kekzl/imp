@@ -103,8 +103,8 @@ __global__ void vision_layernorm_kernel(const half* __restrict__ x, const half* 
     int row = blockIdx.x;
     int tid = threadIdx.x;
 
-    const half* x_row = x + row * D;
-    half* o_row = out + row * D;
+    const half* x_row = x + static_cast<int64_t>(row) * D;
+    half* o_row = out + static_cast<int64_t>(row) * D;
 
     // Compute mean
     __shared__ float s_buf[32];
@@ -135,8 +135,8 @@ __global__ void vision_rmsnorm_kernel(const half* __restrict__ x, const half* __
     int row = blockIdx.x;
     int tid = threadIdx.x;
 
-    const half* x_row = x + row * D;
-    half* o_row = out + row * D;
+    const half* x_row = x + static_cast<int64_t>(row) * D;
+    half* o_row = out + static_cast<int64_t>(row) * D;
 
     __shared__ float s_buf[32];
     float ss = 0.0f;

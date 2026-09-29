@@ -113,11 +113,12 @@ __global__ void split_qkv_rope_kernel(const half* __restrict__ qkv, const int32_
     const int hidden = heads * head_dim;
     const int half_rot = head_dim / 2;  // rotated pair distance
     const int quarter = half_rot / 2;   // where the row axis hands over to the column axis
-    const int64_t src = static_cast<int64_t>(token) * 3 * hidden + head * head_dim;
+    // #2218 bounded: head * head_dim < hidden, 2 * hidden < 2 * 256 heads * 576 = 294912
+    const int64_t src = static_cast<int64_t>(token) * 3 * hidden + static_cast<int64_t>(head * head_dim);
     const int64_t dst = (static_cast<int64_t>(head) * tokens + token) * head_dim;
 
     for (int j = threadIdx.x; j < head_dim; j += blockDim.x)
-        v[dst + j] = qkv[src + 2 * hidden + j];
+        v[dst + j] = qkv[src + static_cast<ptrdiff_t>(2 * hidden) + j];
 
     const float r = static_cast<float>(row_id[token]);
     const float c = static_cast<float>(col_id[token]);

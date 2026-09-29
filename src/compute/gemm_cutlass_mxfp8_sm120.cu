@@ -157,9 +157,11 @@ __global__ void quantize_fp16_mxfp8_cutlass_kernel(const half* __restrict__ inpu
     const float inv = 1.0f / mx8_ue8m0_to_float(e);
 
     uint32_t words[8];
+    // #2218 bounded: register index w * 4 < 32 (w < 8)
 #pragma unroll
     for (int w = 0; w < 8; w++) {
-        const uint32_t lo = mx8_pack_e4m3_pair(vals[w * 4] * inv, vals[w * 4 + 1] * inv);
+        const uint32_t lo = mx8_pack_e4m3_pair(vals[static_cast<ptrdiff_t>(w * 4)] * inv,
+                                               vals[w * 4 + 1] * inv);
         const uint32_t hi = mx8_pack_e4m3_pair(vals[w * 4 + 2] * inv, vals[w * 4 + 3] * inv);
         words[w] = lo | (hi << 16);
     }

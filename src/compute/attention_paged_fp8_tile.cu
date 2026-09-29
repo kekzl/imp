@@ -50,8 +50,12 @@ __device__ __forceinline__ void tile_load(uint8_t* k_tile, uint8_t* v_tile, cons
         int piece = lane + 32 * i;  // 128 pieces: row = piece/8, 16B col = piece%8
         int row = piece >> 3;
         int col = (piece & 7) * 16;
-        cp_async_ca_16(k_tile + row * kTileRowStride + col, k_src + row * kv_slot_stride + col);
-        cp_async_ca_16(v_tile + row * kTileRowStride + col, v_src + row * kv_slot_stride + col);
+        // #2218 bounded: row < 16 (piece < 128): row * kTileRowStride < 2304 (smem),
+        // row * kv_slot_stride < 16 * 256 * 128 = 524288 (heads <= 256, HEAD_DIM = 128).
+        cp_async_ca_16(k_tile + static_cast<ptrdiff_t>(row * kTileRowStride) + col,
+                       k_src + static_cast<ptrdiff_t>(row * kv_slot_stride) + col);
+        cp_async_ca_16(v_tile + static_cast<ptrdiff_t>(row * kTileRowStride) + col,
+                       v_src + static_cast<ptrdiff_t>(row * kv_slot_stride) + col);
     }
 }
 
@@ -61,13 +65,17 @@ __device__ __forceinline__ void tile_load_block(uint8_t* k_tile, uint8_t* v_tile
                                                 const uint8_t* v_src, int kv_slot_stride, int tid,
                                                 int nthreads) {
     for (int piece = tid; piece < 256; piece += nthreads) {
+        // #2218 bounded: row < 16 (idx < 128): row * kTileRowStride < 2304 (smem),
+        // row * kv_slot_stride < 16 * 256 * 128 = 524288 (heads <= 256, HEAD_DIM = 128).
         int idx = piece & 127;
         int row = idx >> 3;
         int col = (idx & 7) * 16;
         if (piece < 128)
-            cp_async_ca_16(k_tile + row * kTileRowStride + col, k_src + row * kv_slot_stride + col);
+            cp_async_ca_16(k_tile + static_cast<ptrdiff_t>(row * kTileRowStride) + col,
+                           k_src + static_cast<ptrdiff_t>(row * kv_slot_stride) + col);
         else
-            cp_async_ca_16(v_tile + row * kTileRowStride + col, v_src + row * kv_slot_stride + col);
+            cp_async_ca_16(v_tile + static_cast<ptrdiff_t>(row * kTileRowStride) + col,
+                           v_src + static_cast<ptrdiff_t>(row * kv_slot_stride) + col);
     }
 }
 
@@ -121,9 +129,12 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
     const float fused_scale = scale * kv_scale;
 
     extern __shared__ char smem_tile_fp8[];
-    uint8_t* my_smem = reinterpret_cast<uint8_t*>(smem_tile_fp8) + warp_id * kWarpSmemBytes;
-    uint8_t* k_tiles[2] = {my_smem, my_smem + 2 * kTileBytes};
-    uint8_t* v_tiles[2] = {my_smem + kTileBytes, my_smem + 3 * kTileBytes};
+    // #2218 bounded: smem warp_id * kWarpSmemBytes, 3 * kTileBytes < kBlockSmemBytes = 73728,
+    // my_tok * kTileRowStride < 16 * 144 = 2304, my_half * (HEAD_DIM / 2) <= 64 (my_half <= 1).
+    uint8_t* my_smem = reinterpret_cast<uint8_t*>(smem_tile_fp8) +
+                       static_cast<ptrdiff_t>(warp_id * kWarpSmemBytes);
+    uint8_t* k_tiles[2] = {my_smem, my_smem + static_cast<ptrdiff_t>(2 * kTileBytes)};
+    uint8_t* v_tiles[2] = {my_smem + kTileBytes, my_smem + static_cast<ptrdiff_t>(3 * kTileBytes)};
 
     // Dot-phase mapping: lane = (dim_half << 4) | token.
     const int my_tok = lane_id & 15;
@@ -133,7 +144,8 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
     half2 q_reg[HEAD_DIM / 4];
     {
         const uint4* q4 = reinterpret_cast<const uint4*>(Q + (int64_t)batch_idx * n_heads * HEAD_DIM +
-                                                         (int64_t)head_idx * HEAD_DIM + my_half * (HEAD_DIM / 2));
+                                                         (int64_t)head_idx * HEAD_DIM +
+                                                         static_cast<ptrdiff_t>(my_half * (HEAD_DIM / 2)));
 #pragma unroll
         for (int i = 0; i < HEAD_DIM / 16; i++) {
             uint4 v = q4[i];
@@ -163,7 +175,8 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
         const int page = ch / chunks_per_page;
         const int slot0 = (ch - page * chunks_per_page) * kTileTokens;
         const int phys = max(bt[page], 0);
-        return cache + (int64_t)phys * kv_block_stride + slot0 * kv_slot_stride + kv_head_off;
+        return cache + (int64_t)phys * kv_block_stride + static_cast<int64_t>(slot0) * kv_slot_stride +
+               kv_head_off;
     };
 
     int chunk = chunk_begin + warp_id;
@@ -193,7 +206,8 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
         const bool valid = page_live(chunk) && (my_tok >= first_tok) && (my_tok < n_toks);
 
         // ---- Dot phase: lane (token, dim-half) computes a 64-dim partial ----
-        const uint8_t* k_row = k_tiles[cur] + my_tok * kTileRowStride + my_half * (HEAD_DIM / 2);
+        const uint8_t* k_row = k_tiles[cur] + static_cast<ptrdiff_t>(my_tok * kTileRowStride) +
+                               static_cast<ptrdiff_t>(my_half * (HEAD_DIM / 2));
         float part = 0.0f;
 #pragma unroll
         for (int i = 0; i < HEAD_DIM / 8; i++) {
@@ -337,8 +351,10 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
     uint8_t* v_tiles[kGqaStages];
 #pragma unroll
     for (int i = 0; i < kGqaStages; i++) {
-        k_tiles[i] = smem_gqa + i * 2 * kTileBytes;
-        v_tiles[i] = smem_gqa + i * 2 * kTileBytes + kTileBytes;
+        // #2218 bounded: smem i * 2 * kTileBytes < 2 * 2 * 2304 = 9216,
+        // my_tok * kTileRowStride < 16 * 144 = 2304, my_half * (HEAD_DIM / 2) <= 64 (my_half <= 1).
+        k_tiles[i] = smem_gqa + static_cast<ptrdiff_t>(i * 2 * kTileBytes);
+        v_tiles[i] = smem_gqa + static_cast<ptrdiff_t>(i * 2 * kTileBytes) + kTileBytes;
     }
 
     // Dot-phase mapping: lane = (dim_half << 4) | token.
@@ -349,7 +365,8 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
     half2 q_reg[HEAD_DIM / 4];
     {
         const uint4* q4 = reinterpret_cast<const uint4*>(Q + (int64_t)batch_idx * n_heads * HEAD_DIM +
-                                                         (int64_t)head_idx * HEAD_DIM + my_half * (HEAD_DIM / 2));
+                                                         (int64_t)head_idx * HEAD_DIM +
+                                                         static_cast<ptrdiff_t>(my_half * (HEAD_DIM / 2)));
 #pragma unroll
         for (int i = 0; i < HEAD_DIM / 16; i++) {
             uint4 v = q4[i];
@@ -378,7 +395,8 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
         const int page = ch / chunks_per_page;
         const int slot0 = (ch - page * chunks_per_page) * kTileTokens;
         const int phys = max(bt[page], 0);
-        return cache + (int64_t)phys * kv_block_stride + slot0 * kv_slot_stride + kv_head_off;
+        return cache + (int64_t)phys * kv_block_stride + static_cast<int64_t>(slot0) * kv_slot_stride +
+               kv_head_off;
     };
 
     const int tid = threadIdx.x;
@@ -414,7 +432,8 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
         const bool valid = page_live(chunk) && (my_tok >= first_tok) && (my_tok < n_toks);
 
         // ---- Dot phase (identical to the per-head tile kernel) ----
-        const uint8_t* k_row = k_tiles[cur] + my_tok * kTileRowStride + my_half * (HEAD_DIM / 2);
+        const uint8_t* k_row = k_tiles[cur] + static_cast<ptrdiff_t>(my_tok * kTileRowStride) +
+                               static_cast<ptrdiff_t>(my_half * (HEAD_DIM / 2));
         float part = 0.0f;
 #pragma unroll
         for (int i = 0; i < HEAD_DIM / 8; i++) {

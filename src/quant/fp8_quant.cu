@@ -367,7 +367,7 @@ __global__ void dequantize_fp8_rows_kernel(const uint8_t* __restrict__ in, const
             *reinterpret_cast<uint8_t*>(&q) = b[j];
             h[j] = __float2half(static_cast<float>(q) * s);
         }
-        *reinterpret_cast<uint4*>(o + static_cast<ptrdiff_t>(8 * i)) = *reinterpret_cast<const uint4*>(h);
+        *reinterpret_cast<uint4*>(o + static_cast<int64_t>(8) * i) = *reinterpret_cast<const uint4*>(h);
     }
 }
 

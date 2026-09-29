@@ -41,10 +41,12 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
             H_reg[s] = H_col[static_cast<ptrdiff_t>(s * HD)];
     }
 
+    // #2218 bounded: SS, HD <= 128, CHUNK <= 64 (dispatch below): smem offsets < 2 * 64 * 128 = 16384
+    // floats, H_col s * HD and t_local * SS < 16384, 2 * BC_size < 2 * 256 groups * 128 = 65536
     extern __shared__ float smem[];
     float* s_k = smem;                               // [CHUNK * SS]
-    float* s_q = smem + CHUNK * SS;                  // [CHUNK * SS]
-    float* s_reduce = smem + 2 * CHUNK * SS;         // [HD]
+    float* s_q = smem + static_cast<ptrdiff_t>(CHUNK * SS);           // [CHUNK * SS]
+    float* s_reduce = smem + static_cast<ptrdiff_t>(2 * CHUNK * SS);  // [HD]
 
     int t_chunk_start = 0;
     while (t_chunk_start < n_tokens) {
@@ -191,15 +193,18 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
     }
 
     // Shared memory layout (sized for CHUNK, SS, HD; opt-in dynamic smem).
+    // #2218 bounded: SS, HD <= 128, CHUNK <= 64 (dispatch below): smem offsets < 8 * 64 * 128 = 65536
+    // floats, H_col s * HD and t_loc * SS < 16384, y_out h * HD < 256 heads * 128 = 32768
     extern __shared__ float smem[];
     float* s_k = smem;                          // [CHUNK * SS]    normalized K
-    float* s_q = s_k + CHUNK * SS;              // [CHUNK * SS]    normalized Q
-    float* s_u = s_q + CHUNK * SS;              // [CHUNK * HD]    triangular-solve output
-    float* s_kh = s_u + CHUNK * HD;             // [CHUNK * HD]    K̃ H_0
-    float* s_qh = s_kh + CHUNK * HD;            // [CHUNK * HD]    Q̃ H_0
-    float* s_kk = s_qh + CHUNK * HD;            // [CHUNK * CHUNK] K̃ K̃^T (lower-tri only used)
-    float* s_qk = s_kk + CHUNK * CHUNK;         // [CHUNK * CHUNK] Q̃ K̃^T (lower-tri only used)
-    float* s_g = s_qk + CHUNK * CHUNK;          // [CHUNK]         per-token decay
+    float* s_q = s_k + static_cast<ptrdiff_t>(CHUNK * SS);    // [CHUNK * SS]    normalized Q
+    float* s_u = s_q + static_cast<ptrdiff_t>(CHUNK * SS);    // [CHUNK * HD]    triangular-solve output
+    float* s_kh = s_u + static_cast<ptrdiff_t>(CHUNK * HD);   // [CHUNK * HD]    K̃ H_0
+    float* s_qh = s_kh + static_cast<ptrdiff_t>(CHUNK * HD);  // [CHUNK * HD]    Q̃ H_0
+    float* s_kk = s_qh + static_cast<ptrdiff_t>(CHUNK * HD);  // [CHUNK * CHUNK] K̃ K̃^T (lower-tri only used)
+    float* s_qk = s_kk +
+                  static_cast<ptrdiff_t>(CHUNK * CHUNK);  // [CHUNK * CHUNK] Q̃ K̃^T (lower-tri only used)
+    float* s_g = s_qk + static_cast<ptrdiff_t>(CHUNK * CHUNK);  // [CHUNK]         per-token decay
     float* s_beta = s_g + CHUNK;                // [CHUNK]         per-token learning rate
     float* s_logD = s_beta + CHUNK;             // [CHUNK + 1]     cumulative log decay
     float* s_reduce = s_logD + CHUNK + 1;       // [HD]            block-reduction scratch

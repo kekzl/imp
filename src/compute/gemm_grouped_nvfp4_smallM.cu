@@ -225,8 +225,8 @@ __global__ void smallM_kernel_v1(
     const uint8_t* SFB_e = static_cast<const uint8_t*>(d_SFB[e]);
     half*          D_e   = static_cast<half*>(d_D[e]);
     const float    alpha = d_alpha[e];
-    const CUtensorMap* desc_A = d_descs + 2 * e + 0;
-    const CUtensorMap* desc_B = d_descs + 2 * e + 1;
+    const CUtensorMap* desc_A = d_descs + static_cast<int64_t>(2) * e + 0;
+    const CUtensorMap* desc_B = d_descs + static_cast<int64_t>(2) * e + 1;
 
     constexpr int A_BYTES_ROW   = TILE_K / 2;     // 64 bytes per A-row in tile
     constexpr int B_BYTES_ROW   = TILE_K / 2;     // 64 bytes per B-row in tile
@@ -245,13 +245,15 @@ __global__ void smallM_kernel_v1(
     // SMEM layout (aligned to 128B for TMA): A[N_STAGES][TILE_M][A_BYTES_ROW],
     // B[N_STAGES][TILE_N][B_BYTES_ROW], SFA[N_STAGES][TILE_M][SFA_BYTES_ROW],
     // SFB[N_STAGES][TILE_N][SFB_BYTES_ROW], mbar[N_STAGES] (8B each, padded to 16B).
+    // #2218 bounded: smem offsets < dynamic smem size <= 101376 B (sm_120 opt-in max, launch below)
     extern __shared__ __align__(128) uint8_t smem_raw[];
     uint8_t* smem_A   = smem_raw;
     uint8_t* smem_B = smem_A + static_cast<ptrdiff_t>(N_STAGES * A_TILE_BYTES);
     uint8_t* smem_SFA = smem_B + static_cast<ptrdiff_t>(N_STAGES * B_TILE_BYTES);
     uint8_t* smem_SFB = smem_SFA + static_cast<ptrdiff_t>(N_STAGES * SFA_TILE_BYTES);
     // 16-byte align mbarriers.
-    uintptr_t mbar_base = reinterpret_cast<uintptr_t>(smem_SFB + N_STAGES * SFB_TILE_BYTES);
+    uintptr_t mbar_base = reinterpret_cast<uintptr_t>(smem_SFB +
+                                                      static_cast<ptrdiff_t>(N_STAGES * SFB_TILE_BYTES));
     mbar_base = (mbar_base + 15) & ~uintptr_t(15);
     uint64_t* smem_mbar = reinterpret_cast<uint64_t*>(mbar_base);
 

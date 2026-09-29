@@ -80,6 +80,8 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     // Single-sequence state was last written by this layer's scan one step (or chunk) earlier, never
     // by the immediate predecessor: fetch it before the PDL wait. CSPLIT > 1 loads registers (220
     // regs); at CSPLIT=1 that second load site spills (255 regs + 576 B stack), so it prefetches L2.
+    // #2218 bounded: HD = SS <= 128 (template args 64/128): (s_base + s) * HD < 16384, (i % kLines) * 128
+    // < 640 B, smem 2 * SS < 256, g * SS and 2 * BC_size < 2 * 256 groups * 128 = 65536
     const bool state_early = seq_slots == nullptr;
     if constexpr (CSPLIT > 1) {
         if (state_early) {
@@ -604,6 +606,8 @@ __global__ void gdn_scan_reference_kernel(
 
     // Shared memory: s_H[SS*HD] state slab, s_k[SS]/s_q[SS] K/Q post-L2-norm, s_v[HD] V,
     // s_reduce[HD] block reduction scratch (all for this block's head, this token).
+    // #2218 bounded: smem 96 KiB (launch below) caps SS * HD < 24576 floats; g * SS, h * HD and
+    // 2 * BC_size < 2 * 256 groups * 24576 = 12582912 (heads, groups <= 256)
     extern __shared__ float smem[];
     float* s_H = smem;
     float* s_k = s_H + static_cast<ptrdiff_t>(SS * HD);
@@ -751,6 +755,7 @@ __global__ void gdn_scan_decode_kernel(const float* __restrict__ x, const float*
 
     const int g = grouped_layout ? (h / (n_heads / n_groups)) : (h % n_groups);
     float* H = h_state + static_cast<size_t>(h) * state_size * head_dim_ssm;
+    // #2218 bounded: g * state_size < 256 groups * 6144 = 1572864 (2 * state_size floats fit 48 KiB smem)
     const float* K_g = B_in + static_cast<ptrdiff_t>(g * state_size);
     const float* Q_g = C_in + static_cast<ptrdiff_t>(g * state_size);
 

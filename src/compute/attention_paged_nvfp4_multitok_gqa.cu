@@ -62,18 +62,20 @@ __device__ __forceinline__ void nvfp4_block_multitok_gqa(
     GqaState<HEAD_DIM, HPC>& st) {
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
     constexpr int PACK = ELEMS / 2;
-    const uint8_t* K_lane = K_block + kv_head * kv_head_bytes + lane_offset / 2;
-    const uint8_t* V_lane = V_block + kv_head * kv_head_bytes + lane_offset / 2;
-    const uint8_t* K_sc_lane = K_sc_block + kv_head * sc_groups + lane_group;
-    const uint8_t* V_sc_lane = V_sc_block + kv_head * sc_groups + lane_group;
+    // #2218 bounded: kv_head * kv_head_bytes < 256 * 288 = 73728, kv_head * sc_groups < 256 * 36 = 9216
+    // (heads <= 256, callers pass kv_head_bytes = HEAD_DIM / 2, sc_groups = HEAD_DIM / 16, HEAD_DIM <= 576).
+    const uint8_t* K_lane = K_block + static_cast<ptrdiff_t>(kv_head * kv_head_bytes) + lane_offset / 2;
+    const uint8_t* V_lane = V_block + static_cast<ptrdiff_t>(kv_head * kv_head_bytes) + lane_offset / 2;
+    const uint8_t* K_sc_lane = K_sc_block + static_cast<ptrdiff_t>(kv_head * sc_groups) + lane_group;
+    const uint8_t* V_sc_lane = V_sc_block + static_cast<ptrdiff_t>(kv_head * sc_groups) + lane_group;
     for (int t = first_tok; t < n_tok; t += TOK) {
         uint32_t kw[TOK];
         uint8_t ks[TOK];
 #pragma unroll
         for (int i = 0; i < TOK; i++) {
             const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);  // clamped, masked below
-            kw[i] = load_packed<PACK>(K_lane + ti * kv_slot_stride);
-            ks[i] = __ldg(K_sc_lane + ti * sc_slot_stride);
+            kw[i] = load_packed<PACK>(K_lane + static_cast<int64_t>(ti) * kv_slot_stride);
+            ks[i] = __ldg(K_sc_lane + static_cast<int64_t>(ti) * sc_slot_stride);
         }
         float dot[HPC][TOK];
 #pragma unroll
@@ -130,8 +132,8 @@ __device__ __forceinline__ void nvfp4_block_multitok_gqa(
 #pragma unroll
         for (int i = 0; i < TOK; i++) {
             const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
-            vw[i] = load_packed<PACK>(V_lane + ti * kv_slot_stride);
-            vs[i] = __ldg(V_sc_lane + ti * sc_slot_stride);
+            vw[i] = load_packed<PACK>(V_lane + static_cast<int64_t>(ti) * kv_slot_stride);
+            vs[i] = __ldg(V_sc_lane + static_cast<int64_t>(ti) * sc_slot_stride);
         }
 #pragma unroll
         for (int h = 0; h < HPC; h++)

@@ -186,8 +186,12 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
     // the CTA's HPC q heads (contiguous in Q) for the per-iteration slice reads.
     extern __shared__ char smem_fp8_gqa[];
     float* merge_smem = reinterpret_cast<float*>(smem_fp8_gqa);
-    float* relayout = merge_smem + 2 * NUM_WARPS + NUM_WARPS * HD;  // NUM_WARPS x HD
-    half2* q_smem = reinterpret_cast<half2*>(relayout + NUM_WARPS * HD);  // HPC x HD / 2
+    // #2218 bounded: smem offsets 2 * NUM_WARPS, NUM_WARPS * HD, h * HD <= 8 * 128 = 1024 (NUM_WARPS = 8,
+    // HD = 128, h < HPC <= 5).
+    float* relayout = merge_smem + static_cast<ptrdiff_t>(2 * NUM_WARPS) +
+                      static_cast<ptrdiff_t>(NUM_WARPS * HD);  // NUM_WARPS x HD
+    half2* q_smem = reinterpret_cast<half2*>(relayout +
+                                             static_cast<ptrdiff_t>(NUM_WARPS * HD));  // HPC x HD / 2
     {
         const half2* q_src = reinterpret_cast<const half2*>(Q + ((int64_t)batch_idx * n_heads + head0) * HD);
         for (int i = threadIdx.x; i < HPC * HD / 2; i += BLOCK_THREADS)
@@ -226,8 +230,10 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
         for (int j = 0; j < TOK; j++) {
             const int r = c.t + j * RPW + row_slot;
             const int rc = (r < c.n_tok) ? r : (c.n_tok - 1);
-            kq[j] = __ldcs(reinterpret_cast<const Vec*>(c.K_block + rc * kv_slot_stride));
-            vq[j] = __ldcs(reinterpret_cast<const Vec*>(c.V_block + rc * kv_slot_stride));
+            kq[j] = __ldcs(
+                reinterpret_cast<const Vec*>(c.K_block + static_cast<int64_t>(rc) * kv_slot_stride));
+            vq[j] = __ldcs(
+                reinterpret_cast<const Vec*>(c.V_block + static_cast<int64_t>(rc) * kv_slot_stride));
         }
     };
 

@@ -314,7 +314,7 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4_from_vals(const float
 
     *sfa_target = ue4m3;
 
-    uint8_t* packed_at = packed_out_row + static_cast<ptrdiff_t>(k_group * (kSFVecSize / 2));
+    uint8_t* packed_at = packed_out_row + static_cast<int64_t>(k_group) * (kSFVecSize / 2);
 #pragma unroll
     for (int i = 0; i < kSFVecSize; i += 2) {
         float s0 = vals[i] * inv_scale;
@@ -328,13 +328,16 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* input_row
                                                            uint8_t* packed_out_row, uint8_t* sfa_target) {
     float vals[kSFVecSize];
     float local_absmax = 0.0f;
-    const half2* src_h2 = reinterpret_cast<const half2*>(input_row_base + k_group * kSFVecSize);
+    const half2* src_h2 = reinterpret_cast<const half2*>(input_row_base +
+                                                         static_cast<int64_t>(k_group) * kSFVecSize);
+    // #2218 bounded: register index i * 2 < kSFVecSize = 16
 #pragma unroll
     for (int i = 0; i < kSFVecSize / 2; i++) {
         half2 h2 = src_h2[i];
-        vals[i * 2] = __half2float(h2.x);
+        vals[static_cast<ptrdiff_t>(i * 2)] = __half2float(h2.x);
         vals[i * 2 + 1] = __half2float(h2.y);
-        local_absmax = fmaxf(local_absmax, fmaxf(fabsf(vals[i * 2]), fabsf(vals[i * 2 + 1])));
+        local_absmax = fmaxf(local_absmax,
+                             fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[i * 2 + 1])));
     }
     quantize_micro_block_nvfp4_from_vals(vals, local_absmax, packed_out_row, k_group, sfa_target);
 }
@@ -612,7 +615,7 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
     // Compute 16 activation values + their absmax in registers.
     float vals[kSFVecSize];
     float local_absmax = 0.0f;
-    const int64_t row_off = static_cast<int64_t>(row) * K + static_cast<int64_t>(k_group * kSFVecSize);
+    const int64_t row_off = static_cast<int64_t>(row) * K + static_cast<int64_t>(k_group) * kSFVecSize;
     const half2* up_h2 = reinterpret_cast<const half2*>(up + row_off);
     const half2* gate_h2 = (gate != nullptr) ? reinterpret_cast<const half2*>(gate + row_off) : nullptr;
 
@@ -623,6 +626,7 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
     for (int i = 0; i < kSFVecSize / 2; i++) {
         half2 uh2 = up_h2[i];
         float u0 = __half2float(uh2.x);
+        // #2218 bounded: register index i * 2 < kSFVecSize = 16
         float u1 = __half2float(uh2.y);
         float v0, v1;
         if (kAct == 0) {  // SWIGLU
@@ -645,7 +649,7 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
             v0 = (u0 > 0.0f) ? (u0 * u0) : 0.0f;
             v1 = (u1 > 0.0f) ? (u1 * u1) : 0.0f;
         }
-        vals[i * 2] = v0;
+        vals[static_cast<ptrdiff_t>(i * 2)] = v0;
         vals[i * 2 + 1] = v1;
         local_absmax = fmaxf(local_absmax, fmaxf(fabsf(v0), fabsf(v1)));
     }

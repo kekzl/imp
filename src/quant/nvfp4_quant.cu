@@ -123,13 +123,15 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* __restric
     float vals[kMicroBlockSize];
     float local_absmax = 0.0f;
 
+    // #2218 bounded: register index i * 2 < kMicroBlockSize = 16
     const half2* src_h2 = reinterpret_cast<const half2*>(input + base);
 #pragma unroll
     for (int i = 0; i < kMicroBlockSize / 2; i++) {
         half2 h2 = src_h2[i];
-        vals[i * 2] = __half2float(h2.x);
+        vals[static_cast<ptrdiff_t>(i * 2)] = __half2float(h2.x);
         vals[i * 2 + 1] = __half2float(h2.y);
-        local_absmax = fmaxf(local_absmax, fmaxf(fabsf(vals[i * 2]), fabsf(vals[i * 2 + 1])));
+        local_absmax = fmaxf(local_absmax,
+                             fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[i * 2 + 1])));
     }
 
     // Step 2: Compute micro-scale = local_absmax / (tensor_scale * 6.0).

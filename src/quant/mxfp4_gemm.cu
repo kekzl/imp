@@ -46,6 +46,7 @@ __device__ __forceinline__ float dot_micro_block(const uint8_t* __restrict__ pb,
     constexpr uint32_t kLutHi = 0x46444240u;
 
     float acc = 0.0f;
+    // #2218 bounded: in-block offset b * 2 < 16 (b < 8)
 #pragma unroll
     for (int b = 0; b < 8; b++) {
         uint32_t byte_val = pb[b];
@@ -80,7 +81,8 @@ __device__ __forceinline__ float gemv_mxfp4_row(const uint8_t* __restrict__ row_
     float acc = 0.0f;
     for (int gi = tid; gi < n_groups; gi += kKparThreads) {
         // Load 16 bytes as uint4 (128-bit coalesced)
-        uint4 packed4 = *reinterpret_cast<const uint4*>(row_packed + gi * kMxGroupBytes);
+        uint4 packed4 = *reinterpret_cast<const uint4*>(row_packed +
+                                                        static_cast<int64_t>(gi) * kMxGroupBytes);
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed4);
         float scale = ue8m0_to_float(row_scales[gi]);
         // Two micro-blocks of 8 bytes (16 nibbles) each, shared scale
@@ -98,7 +100,8 @@ __device__ __forceinline__ float warp_k_loop(const uint8_t* __restrict__ row_pac
                                              DotFn dot_fn) {
     float acc = 0.0f;
     for (int gi = lane; gi < n_groups; gi += 32) {
-        uint4 packed4 = *reinterpret_cast<const uint4*>(row_packed + gi * kMxGroupBytes);
+        uint4 packed4 = *reinterpret_cast<const uint4*>(row_packed +
+                                                        static_cast<int64_t>(gi) * kMxGroupBytes);
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed4);
         float scale = ue8m0_to_float(row_scales[gi]);
         acc = __fmaf_rn(dot_fn(pb, gi * kMxGroupSize), scale, acc);
@@ -334,6 +337,7 @@ __device__ __forceinline__ float dot_micro_block_swiglu(const uint8_t* __restric
                                                         const half* __restrict__ up, int elem_base,
                                                         const float* s_lut) {
     float acc = 0.0f;
+    // #2218 bounded: in-block offset b * 2 < 16 (b < 8)
 #pragma unroll
     for (int b = 0; b < 8; b++) {
         const half2 gh = *reinterpret_cast<const half2*>(gate + elem_base + static_cast<ptrdiff_t>(b * 2));
@@ -375,7 +379,8 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_swiglu_residual_k
     const uint8_t* row_scales = linear_scales + (int64_t)row * n_groups;
     float acc = 0.0f;
     for (int gi = tid; gi < n_groups; gi += kKparThreads) {
-        uint4 packed4 = *reinterpret_cast<const uint4*>(row_packed + gi * kMxGroupBytes);
+        uint4 packed4 = *reinterpret_cast<const uint4*>(row_packed +
+                                                        static_cast<int64_t>(gi) * kMxGroupBytes);
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed4);
         float scale = ue8m0_to_float(row_scales[gi]);
         float dot0 = dot_micro_block_swiglu(pb, gate, up, gi * kMxGroupSize, s_lut);
@@ -397,6 +402,7 @@ __device__ __forceinline__ float dot_micro_block_geglu(const uint8_t* __restrict
     constexpr float SQRT_2_PI = 0.7978845608028654f;
     constexpr float COEFF = 0.044715f;
     float acc = 0.0f;
+    // #2218 bounded: in-block offset b * 2 < 16 (b < 8)
 #pragma unroll
     for (int b = 0; b < 8; b++) {
         const half2 gh = *reinterpret_cast<const half2*>(gate + elem_base + static_cast<ptrdiff_t>(b * 2));
@@ -431,7 +437,8 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_geglu_residual_ke
     const uint8_t* row_scales = linear_scales + (int64_t)row * n_groups;
     float acc = 0.0f;
     for (int gi = tid; gi < n_groups; gi += kKparThreads) {
-        uint4 packed4 = *reinterpret_cast<const uint4*>(row_packed + gi * kMxGroupBytes);
+        uint4 packed4 = *reinterpret_cast<const uint4*>(row_packed +
+                                                        static_cast<int64_t>(gi) * kMxGroupBytes);
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed4);
         float scale = ue8m0_to_float(row_scales[gi]);
         float dot0 = dot_micro_block_geglu(pb, gate, up, gi * kMxGroupSize, s_lut);

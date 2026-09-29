@@ -71,7 +71,7 @@ __global__ void __launch_bounds__(FUSED_BLOCK) gemm_q6k_fused_moe_prefill_kernel
 
         // Walk K dimension in Q6_K blocks of 256 elements
         for (int blk = 0; blk < blocks_per_row; blk++) {
-            const uint8_t* bp = W_row + static_cast<ptrdiff_t>(blk * 210);
+            const uint8_t* bp = W_row + static_cast<int64_t>(blk) * 210;
 
             // Load block-level and per-group scales
             float d_w = __half2float(*reinterpret_cast<const half*>(bp + 208));

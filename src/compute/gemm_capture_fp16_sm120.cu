@@ -79,6 +79,7 @@ __device__ __forceinline__ void issue_tile_load(__half* a_smem, __half* b_smem, 
     static_assert(BK == 32, "BK must be 32 for the bit-shift row/col split");
     static_assert(CHUNK_HALVES == 8, "CHUNK_HALVES must be 8 for cp.async 16B");
 
+    // #2218 bounded: smem row * BK_SMEM < 128 rows * 32 = 4096 halves (BM, BN <= 128)
     int tid     = threadIdx.x;
     bool a_full = (block_m + BM <= M);
     bool b_full = (block_n + BN <= N);
@@ -90,7 +91,7 @@ __device__ __forceinline__ void issue_tile_load(__half* a_smem, __half* b_smem, 
         int col           = (chunk & 3) << 3; // (chunk % 4) * CHUNK_HALVES
         int g_row         = block_m + row;
         int g_col         = k_tile + col;
-        __half* dst       = a_smem + row * BK_SMEM + col;  // padded SMEM stride
+        __half* dst = a_smem + static_cast<ptrdiff_t>(row * BK_SMEM) + col;  // padded SMEM stride
         const __half* src = A + (int64_t)g_row * K + g_col;
         bool valid        = a_full || (g_row < M);
         cp_async_cg16_zero(dst, src, valid);
@@ -102,7 +103,7 @@ __device__ __forceinline__ void issue_tile_load(__half* a_smem, __half* b_smem, 
         int col           = (chunk & 3) << 3;
         int g_row         = block_n + row;
         int g_col         = k_tile + col;
-        __half* dst       = b_smem + row * BK_SMEM + col;  // padded SMEM stride
+        __half* dst = b_smem + static_cast<ptrdiff_t>(row * BK_SMEM) + col;  // padded SMEM stride
         const __half* src = B + (int64_t)g_row * K + g_col;
         bool valid        = b_full || (g_row < N);
         cp_async_cg16_zero(dst, src, valid);
@@ -121,6 +122,8 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
     static_assert(STAGES == 2 || STAGES == 3, "STAGES must be 2 or 3");
 
     extern __shared__ __align__(16) char smem_raw[];
+    // #2218 bounded: smem offsets < STAGES * STAGE_HALVES = 2 * 256 * 32 = 16384 halves (BM <= 128,
+    // BN 128, BK 32): s * STAGE_HALVES, a_row/b_row * BK_SMEM, kk * WMMA_K, warp * WMMA_M * WMMA_N
     __half* smem_base = reinterpret_cast<__half*>(smem_raw);
     __half* A_stage[STAGES];
     __half* B_stage[STAGES];
@@ -184,13 +187,19 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
 #pragma unroll
             for (int i = 0; i < FRAGS_M; ++i) {
                 int a_row = wm * WARP_M + i * WMMA_M;
-                wmma::load_matrix_sync(a_frag[i], A_s + a_row * BK_SMEM + kk * WMMA_K, BK_SMEM);
+                wmma::load_matrix_sync(a_frag[i],
+                                       A_s + static_cast<ptrdiff_t>(a_row * BK_SMEM) +
+                                           static_cast<ptrdiff_t>(kk * WMMA_K),
+                                       BK_SMEM);
             }
             wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, wmma::col_major> b_frag[FRAGS_N];
 #pragma unroll
             for (int j = 0; j < FRAGS_N; ++j) {
                 int b_row = wn * WARP_N + j * WMMA_N;
-                wmma::load_matrix_sync(b_frag[j], B_s + b_row * BK_SMEM + kk * WMMA_K, BK_SMEM);
+                wmma::load_matrix_sync(b_frag[j],
+                                       B_s + static_cast<ptrdiff_t>(b_row * BK_SMEM) +
+                                           static_cast<ptrdiff_t>(kk * WMMA_K),
+                                       BK_SMEM);
             }
 #pragma unroll
             for (int i = 0; i < FRAGS_M; ++i)

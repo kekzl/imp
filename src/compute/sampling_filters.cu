@@ -168,7 +168,8 @@ __global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_siz
     if (deterministic) {
         // Ordered accumulation, no local frame: each warp owns one histogram row, lanes that hit
         // the same bucket in one iteration are summed in lane order and added by the lowest lane.
-        float* row = s_warp_buckets + warp_id * TYPICAL_NBUCKETS;
+        // #2218 bounded: smem row warp_id * TYPICAL_NBUCKETS < 32 warps * 256 = 8192 floats
+        float* row = s_warp_buckets + static_cast<ptrdiff_t>(warp_id * TYPICAL_NBUCKETS);
         for (int b = lane_id; b < TYPICAL_NBUCKETS; b += WARP_SIZE)
             row[b] = 0.0f;
         __syncwarp();

@@ -75,7 +75,9 @@ __global__ __launch_bounds__(256) void attn_gate_split_interleaved_kernel(
     if (t >= n_tokens || h >= nh || tid >= hd)
         return;
     const T* src_row = src + static_cast<int64_t>(t) * q_out_dim;
-    int64_t dst_off = static_cast<int64_t>(t) * (nh * hd) + static_cast<int64_t>(h) * hd + tid;
+    // #2218 bounded: nh * hd < 256 heads * 576 = 147456
+    int64_t dst_off = static_cast<int64_t>(t) * static_cast<int64_t>(nh * hd) + static_cast<int64_t>(h) * hd +
+                      tid;
     int q_src = h * 2 * hd + tid;
     int g_src = h * 2 * hd + hd + tid;
     q_dst[dst_off] = src_row[q_src];

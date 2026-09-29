@@ -83,10 +83,11 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
         const int phys_block = bt[blk];
         if (phys_block < 0)
             continue;  // StreamingLLM sentinel, same guard as the plain kernel
-        const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride + kv_head * HEAD_DIM +
-                                 lane_offset;
-        const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride + kv_head * HEAD_DIM +
-                                 lane_offset;
+        // #2218 bounded: kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
+        const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride +
+                                 static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset;
+        const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride +
+                                 static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset;
         const int tok_start = blk * block_size;
         int n_tok = block_size;
         if (tok_start + n_tok > ctx_len)
@@ -103,7 +104,8 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
 #pragma unroll
             for (int i = 0; i < TOK; i++) {
                 const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
-                kp[i] = __ldcs(reinterpret_cast<const uint32_t*>(K_block + ti * kv_slot_stride));
+                kp[i] = __ldcs(
+                    reinterpret_cast<const uint32_t*>(K_block + static_cast<int64_t>(ti) * kv_slot_stride));
             }
             float dot[TOK];
 #pragma unroll
@@ -144,7 +146,8 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
 #pragma unroll
             for (int i = 0; i < TOK; i++) {
                 const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
-                vp[i] = __ldcs(reinterpret_cast<const uint32_t*>(V_block + ti * kv_slot_stride));
+                vp[i] = __ldcs(
+                    reinterpret_cast<const uint32_t*>(V_block + static_cast<int64_t>(ti) * kv_slot_stride));
             }
 #pragma unroll
             for (int e = 0; e < ELEMS; e++)

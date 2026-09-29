@@ -385,7 +385,7 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* 
         float4 a_raw = A_row_v[i];
 
         // 16 FP8 values need 16 FP16 values = 2 float4 loads from x
-        float4 x_raw0 = x_v[2 * i];
+        float4 x_raw0 = x_v[static_cast<int64_t>(2) * i];
         float4 x_raw1 = x_v[2 * i + 1];
 
         // Reinterpret FP8 bytes
@@ -446,7 +446,7 @@ __global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W, const half* __res
     float sum = 0.0f;
 
     for (int b = 0; b < blocks_per_row; ++b) {
-        const uint8_t* bp = W_row + static_cast<ptrdiff_t>(b * 210);
+        const uint8_t* bp = W_row + static_cast<int64_t>(b) * 210;
         const uint8_t* ql = bp;                            // ql[128]
         const uint8_t* qh = bp + 128;                      // qh[64]
         const int8_t* sc = (const int8_t*)(bp + 192);      // scales[16]
@@ -515,7 +515,7 @@ __global__ void gemv_q8_0_kernel(const uint8_t* __restrict__ W, const half* __re
     float sum = 0.0f;
 
     for (int b = 0; b < blocks_per_row; ++b) {
-        const uint8_t* bp = W_row + static_cast<ptrdiff_t>(b * 34);
+        const uint8_t* bp = W_row + static_cast<int64_t>(b) * 34;
         float d = __half2float(*(const half*)bp);
         int8_t q = ((const int8_t*)(bp + 2))[lane];
         sum += d * (float)q * __half2float(x[b * 32 + lane]);

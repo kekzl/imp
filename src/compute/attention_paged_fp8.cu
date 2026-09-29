@@ -110,7 +110,10 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
     // Total per warp: 3 * HEAD_DIM bytes. 8 warps: 3 * 128 * 8 = 3 KiB for HD=128.
     extern __shared__ char smem_pipe_fp8[];
     constexpr int WARP_SMEM_BYTES = 3 * HEAD_DIM;
-    uint8_t* my_smem = reinterpret_cast<uint8_t*>(smem_pipe_fp8) + warp_id * WARP_SMEM_BYTES;
+    // #2218 bounded: warp_id * WARP_SMEM_BYTES < 32 warps * 3 * 576 = 55296, 2 * HEAD_DIM <= 1152 (smem);
+    // kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
+    uint8_t* my_smem = reinterpret_cast<uint8_t*>(smem_pipe_fp8) +
+                       static_cast<ptrdiff_t>(warp_id * WARP_SMEM_BYTES);
     uint8_t* k_buf0 = my_smem;
     uint8_t* k_buf1 = my_smem + HEAD_DIM;
     uint8_t* v_buf = my_smem + static_cast<ptrdiff_t>(2 * HEAD_DIM);
@@ -146,7 +149,8 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
         // Prime: async load K[first_tok] into k_buf0
         // FP8: ELEMS bytes per thread (4 for HD=128, 8 for HD=256)
         {
-            const uint8_t* K_tok = K_block + first_tok * kv_slot_stride + kv_head * HEAD_DIM;
+            const uint8_t* K_tok = K_block + static_cast<int64_t>(first_tok) * kv_slot_stride +
+                                   static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
             fp8_kv_stage_lane<ELEMS>(&k_buf0[lane_offset], &K_tok[lane_offset]);
             cp_async_commit();
         }
@@ -156,11 +160,13 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
 
         for (int ti = 0; ti < n_toks; ti++) {
             int t = first_tok + ti;
-            const uint8_t* V_tok = V_block + t * kv_slot_stride + kv_head * HEAD_DIM;
+            const uint8_t* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +
+                                   static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
 
             // Start async V[t] + K[t+1] loads (branchless: clamp to last valid token)
             int t_next = min(t + 1, first_tok + n_toks - 1);
-            const uint8_t* K_next = K_block + t_next * kv_slot_stride + kv_head * HEAD_DIM;
+            const uint8_t* K_next = K_block + static_cast<int64_t>(t_next) * kv_slot_stride +
+                                    static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
             fp8_kv_stage_lane<ELEMS>(&v_buf[lane_offset], &V_tok[lane_offset]);
             fp8_kv_stage_lane<ELEMS>(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
             cp_async_commit();
@@ -313,7 +319,9 @@ __global__ void paged_attention_decode_fp8_kernel(const half* __restrict__ Q,
             first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
-            const uint8_t* K_tok = K_block + t * kv_slot_stride + kv_head * HEAD_DIM;
+            // #2218 bounded: kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
+            const uint8_t* K_tok = K_block + static_cast<int64_t>(t) * kv_slot_stride +
+                                   static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
 
             // Vectorized Q.K dot product with uint32_t FP8 loads
             float dot = 0.0f;
@@ -344,7 +352,8 @@ __global__ void paged_attention_decode_fp8_kernel(const half* __restrict__ Q,
             float rescale, w_new;
             online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
-            const uint8_t* V_tok = V_block + t * kv_slot_stride + kv_head * HEAD_DIM;
+            const uint8_t* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +
+                                   static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
             float w_new_scaled = w_new * kv_scale;
             {
                 if constexpr (FP8_VEC4 > 0) {

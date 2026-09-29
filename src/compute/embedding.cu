@@ -89,7 +89,7 @@ template __global__ void embedding_lookup_vec_kernel<uint16_t>(const uint16_t*, 
 static __device__ __forceinline__ half dequant_q8_0_element(const uint8_t* __restrict__ row_ptr, int i) {
     int blk = i / 32;
     int q_idx = i % 32;
-    const uint8_t* block_ptr = row_ptr + blk * 34;
+    const uint8_t* block_ptr = row_ptr + static_cast<int64_t>(blk) * 34;
     half d_val = *reinterpret_cast<const half*>(block_ptr);
     int8_t q = reinterpret_cast<const int8_t*>(block_ptr + 2)[q_idx];
     return __float2half(__half2float(d_val) * static_cast<float>(q));
@@ -99,7 +99,7 @@ static __device__ __forceinline__ half dequant_q8_0_element(const uint8_t* __res
 static __device__ __forceinline__ half dequant_q6k_element(const uint8_t* __restrict__ row_ptr, int idx) {
     int blk = idx / 256;
     int i = idx % 256;
-    const uint8_t* block_ptr = row_ptr + blk * 210;
+    const uint8_t* block_ptr = row_ptr + static_cast<int64_t>(blk) * 210;
 
     const uint8_t* ql = block_ptr;
     const uint8_t* qh = block_ptr + 128;

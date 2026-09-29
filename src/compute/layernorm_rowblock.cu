@@ -156,6 +156,7 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
             const half2* wh = reinterpret_cast<const half2*>(&wv);
             float4 result;
             half2* rh = reinterpret_cast<half2*>(&result);
+            // #2218 bounded: register index k * 2 < 8 (k < 4)
 #pragma unroll
             for (int k = 0; k < 4; ++k) {
                 const float2 xf = __half22float2(xh[k]);
@@ -163,7 +164,7 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
                 rh[k] = __float22half2_rn(make_float2(xf.x * inv_rms * (wf.x + weight_offset),
                                                       xf.y * inv_rms * (wf.y + weight_offset)));
                 const float2 rf = __half22float2(rh[k]);
-                vals[k * 2] = rf.x;
+                vals[static_cast<ptrdiff_t>(k * 2)] = rf.x;
                 vals[k * 2 + 1] = rf.y;
                 amax = fmaxf(amax, fmaxf(fabsf(rf.x), fabsf(rf.y)));
             }

@@ -75,14 +75,17 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
     // row_l       : float [Br]          running row sum
     extern __shared__ char smem[];
 
+    // #2218 bounded: all smem offsets in this kernel (layout, Q/KV/SP/O WMMA tiles) < 99 KiB opt-in smem,
+    // Br <= 128, BW_Bc = 64, HD <= 128.
     half* Q_tile = reinterpret_cast<half*>(smem);
-    half* KV_buf0 = Q_tile + Br * head_dim;
-    half* KV_buf1 = KV_buf0 + BW_Bc * head_dim;
+    half* KV_buf0 = Q_tile + static_cast<ptrdiff_t>(Br * head_dim);
+    half* KV_buf1 = KV_buf0 + static_cast<ptrdiff_t>(BW_Bc * head_dim);
     // SP_tile: union of float[Br*Bc] and half[Br*Bc]
-    float* SP_float = reinterpret_cast<float*>(KV_buf1 + BW_Bc * head_dim);
+    float* SP_float = reinterpret_cast<float*>(KV_buf1 + static_cast<ptrdiff_t>(BW_Bc * head_dim));
     half* SP_half = reinterpret_cast<half*>(SP_float);
-    float* O_acc = reinterpret_cast<float*>(reinterpret_cast<char*>(SP_float) + Br * BW_Bc * sizeof(float));
-    float* row_m = reinterpret_cast<float*>(O_acc + Br * head_dim);
+    float* O_acc = reinterpret_cast<float*>(reinterpret_cast<char*>(SP_float) +
+                                            static_cast<size_t>(Br * BW_Bc) * sizeof(float));
+    float* row_m = reinterpret_cast<float*>(O_acc + static_cast<ptrdiff_t>(Br * head_dim));
     float* row_l = row_m + Br;
 
     half* KV_bufs[2] = {KV_buf0, KV_buf1};
@@ -170,17 +173,23 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
 
             for (int k = 0; k < hd_chunks; k++) {
                 wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> a_frag;
-                wmma::load_matrix_sync(a_frag, Q_tile + ri * WMMA_M * head_dim + k * WMMA_K, head_dim);
+                wmma::load_matrix_sync(a_frag,
+                                       Q_tile + static_cast<ptrdiff_t>(ri * WMMA_M * head_dim) +
+                                           static_cast<ptrdiff_t>(k * WMMA_K),
+                                       head_dim);
 
                 wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> b_frag;
-                wmma::load_matrix_sync(b_frag, KV_bufs[cur_buf] + ci * WMMA_N * head_dim + k * WMMA_K,
+                wmma::load_matrix_sync(b_frag,
+                                       KV_bufs[cur_buf] + static_cast<ptrdiff_t>(ci * WMMA_N * head_dim) +
+                                           static_cast<ptrdiff_t>(k * WMMA_K),
                                        head_dim);
 
                 wmma::mma_sync(acc, a_frag, b_frag, acc);
             }
 
-            wmma::store_matrix_sync(SP_float + ri * WMMA_M * BW_Bc + ci * WMMA_N, acc, BW_Bc,
-                                    wmma::mem_row_major);
+            wmma::store_matrix_sync(SP_float + static_cast<ptrdiff_t>(ri * WMMA_M * BW_Bc) +
+                                        static_cast<ptrdiff_t>(ci * WMMA_N),
+                                    acc, BW_Bc, wmma::mem_row_major);
         }
         __syncthreads();
 
@@ -290,22 +299,30 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
             int di = tile_idx % o_col_tiles;
 
             wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> o_frag;
-            wmma::load_matrix_sync(o_frag, O_acc + ri * WMMA_M * head_dim + di * WMMA_N, head_dim,
-                                   wmma::mem_row_major);
+            wmma::load_matrix_sync(o_frag,
+                                   O_acc + static_cast<ptrdiff_t>(ri * WMMA_M * head_dim) +
+                                       static_cast<ptrdiff_t>(di * WMMA_N),
+                                   head_dim, wmma::mem_row_major);
 
             for (int k = 0; k < pv_chunks; k++) {
                 wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> p_frag;
-                wmma::load_matrix_sync(p_frag, SP_half + ri * WMMA_M * BW_Bc + k * WMMA_K, BW_Bc);
+                wmma::load_matrix_sync(p_frag,
+                                       SP_half + static_cast<ptrdiff_t>(ri * WMMA_M * BW_Bc) +
+                                           static_cast<ptrdiff_t>(k * WMMA_K),
+                                       BW_Bc);
 
                 wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> v_frag;
-                wmma::load_matrix_sync(v_frag, KV_bufs[cur_buf] + k * WMMA_N * head_dim + di * WMMA_N,
+                wmma::load_matrix_sync(v_frag,
+                                       KV_bufs[cur_buf] + static_cast<ptrdiff_t>(k * WMMA_N * head_dim) +
+                                           static_cast<ptrdiff_t>(di * WMMA_N),
                                        head_dim);
 
                 wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
             }
 
-            wmma::store_matrix_sync(O_acc + ri * WMMA_M * head_dim + di * WMMA_N, o_frag, head_dim,
-                                    wmma::mem_row_major);
+            wmma::store_matrix_sync(O_acc + static_cast<ptrdiff_t>(ri * WMMA_M * head_dim) +
+                                        static_cast<ptrdiff_t>(di * WMMA_N),
+                                    o_frag, head_dim, wmma::mem_row_major);
         }
         __syncthreads();
 

@@ -184,6 +184,9 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     //
     extern __shared__ char smem[];
 
+    // #2218 bounded: smem layout/MMA/WMMA/scale offsets in this kernel < 99 KiB smem (Bq <= 128, Bkv = 64,
+    // HD <= 256); kg * 16, 2 * b < HD <= 256; 2 * i < 16; n_kv_heads * hd_half, n_kv_heads * n_k_groups
+    // <= 256 * 128 = 32768 (heads <= 256).
     uint8_t* Q_fp4 = reinterpret_cast<uint8_t*>(smem);
     float* q_scales = reinterpret_cast<float*>(Q_fp4 + static_cast<ptrdiff_t>(Bq * hd_half_padded));
     // KV_buf is aligned to 16 bytes for vectorized loads
@@ -194,8 +197,8 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     half* KV_fp16 = reinterpret_cast<half*>(KV_raw);       // V as FP16 (same slot)
     float* k_scales = reinterpret_cast<float*>(KV_raw + static_cast<size_t>(Bkv * head_dim) * sizeof(half));
     float* S_tile = k_scales + Bkv;
-    float* O_acc = S_tile + Bq * Bkv;
-    float* row_m = O_acc + Bq * head_dim;
+    float* O_acc = S_tile + static_cast<ptrdiff_t>(Bq * Bkv);
+    float* row_m = O_acc + static_cast<ptrdiff_t>(Bq * head_dim);
     float* row_l = row_m + Bq;
     // Per-k_group UE4M3 scales for blockscale-MMA sfa/sfb operands.
     // Each row has n_k_groups = HD/16 scales (one per 16-K-block).
@@ -209,11 +212,11 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     float* p_rowf = row_l + Bq;                        // [Bq] per-row PV post-factor
     float* p_rowq = p_rowf + (PVFP4 ? Bq : 0);         // [Bq] per-row P quant multiplier
     uint8_t* q_scales_fp8 = reinterpret_cast<uint8_t*>(p_rowq + (PVFP4 ? Bq : 0));
-    uint8_t* k_scales_fp8 = q_scales_fp8 + Bq * n_k_groups;
-    uint8_t* p_scales_fp8 = k_scales_fp8 + Bkv * n_k_groups;  // [Bq][n_kv_groups]
-    uint8_t* v_scales_fp8 = p_scales_fp8 + Bq * n_kv_groups;  // [HD][n_kv_groups]
-    uint8_t* P_fp4 = v_scales_fp8 + HD * n_kv_groups;         // [Bq][kv_half_padded]
-    uint8_t* V_fp4T = P_fp4 + Bq * kv_half_padded;            // [HD][kv_half_padded]
+    uint8_t* k_scales_fp8 = q_scales_fp8 + static_cast<ptrdiff_t>(Bq * n_k_groups);
+    uint8_t* p_scales_fp8 = k_scales_fp8 + static_cast<ptrdiff_t>(Bkv * n_k_groups);  // [Bq][n_kv_groups]
+    uint8_t* v_scales_fp8 = p_scales_fp8 + static_cast<ptrdiff_t>(Bq * n_kv_groups);  // [HD][n_kv_groups]
+    uint8_t* P_fp4 = v_scales_fp8 + static_cast<ptrdiff_t>(HD * n_kv_groups);         // [Bq][kv_half_padded]
+    uint8_t* V_fp4T = P_fp4 + static_cast<ptrdiff_t>(Bq * kv_half_padded);            // [HD][kv_half_padded]
 
     // K-smoothing: per-channel mean pointer for this (batch, kv_head).
     const float* kmean = (d_kmean != nullptr)
@@ -329,7 +332,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 int kg = idx % n_k_groups;
                 float absmax = 0.0f;
                 if (q_start + r < seq_q) {
-                    const half* row = &Q_ptr[(int64_t)r * q_row_stride + kg * 16];
+                    const half* row = &Q_ptr[(int64_t)r * q_row_stride + static_cast<ptrdiff_t>(kg * 16)];
 #pragma unroll
                     for (int i = 0; i < 16; i++)
                         absmax = fmaxf(absmax, fabsf(__half2float(row[i])));
@@ -578,7 +581,8 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     int kg = idx % n_k_groups;
                     float absmax = 0.0f;
                     if (kv_start + r < seq_kv) {
-                        const half* row = &K_ptr[(int64_t)(kv_start + r) * kv_row_stride + kg * 16];
+                        const half* row =
+                            &K_ptr[(int64_t)(kv_start + r) * kv_row_stride + static_cast<ptrdiff_t>(kg * 16)];
 #pragma unroll
                         for (int i = 0; i < 16; i++) {
                             float kv = __half2float(row[i]);
@@ -770,17 +774,19 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 for (int k = 0; k < k_pairs; k++) {
                     const int k0 = 2 * k;
                     const int k1 = k0 + 1;
-                    const uint8_t* q_base0 = Q_fp4 + ri * MX_MMA_M * hd_half_padded + k0 * FP4_K_BYTES;
-                    const uint8_t* q_base1 = Q_fp4 + ri * MX_MMA_M * hd_half_padded + k1 * FP4_K_BYTES;
+                    const uint8_t* q_base0 = Q_fp4 + static_cast<ptrdiff_t>(ri * MX_MMA_M * hd_half_padded) +
+                                             static_cast<ptrdiff_t>(k0 * FP4_K_BYTES);
+                    const uint8_t* q_base1 = Q_fp4 + static_cast<ptrdiff_t>(ri * MX_MMA_M * hd_half_padded) +
+                                             static_cast<ptrdiff_t>(k1 * FP4_K_BYTES);
                     // A loaded once, reused for all 4 ci's
-                    uint32_t a0 = *reinterpret_cast<const uint32_t*>(q_base0 + group_id * hd_half_padded +
-                                                                     byte_offset);
+                    uint32_t a0 = *reinterpret_cast<const uint32_t*>(
+                        q_base0 + static_cast<ptrdiff_t>(group_id * hd_half_padded) + byte_offset);
                     uint32_t a1 = *reinterpret_cast<const uint32_t*>(
-                        q_base0 + (group_id + 8) * hd_half_padded + byte_offset);
-                    uint32_t a2 = *reinterpret_cast<const uint32_t*>(q_base1 + group_id * hd_half_padded +
-                                                                     byte_offset);
+                        q_base0 + static_cast<ptrdiff_t>((group_id + 8) * hd_half_padded) + byte_offset);
+                    uint32_t a2 = *reinterpret_cast<const uint32_t*>(
+                        q_base1 + static_cast<ptrdiff_t>(group_id * hd_half_padded) + byte_offset);
                     uint32_t a3 = *reinterpret_cast<const uint32_t*>(
-                        q_base1 + (group_id + 8) * hd_half_padded + byte_offset);
+                        q_base1 + static_cast<ptrdiff_t>((group_id + 8) * hd_half_padded) + byte_offset);
 
                     // sfa shared across all 4 ci's
                     const int kg_base = k * 4;
@@ -791,14 +797,18 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
 #pragma unroll
                     for (int co = 0; co < CI_PER_META; co++) {
                         int ci_local = ci_meta_base + co;
-                        const uint8_t* k_base0 = KV_fp4 + ci_local * MX_MMA_N * hd_half_padded +
-                                                 k0 * FP4_K_BYTES;
-                        const uint8_t* k_base1 = KV_fp4 + ci_local * MX_MMA_N * hd_half_padded +
-                                                 k1 * FP4_K_BYTES;
-                        uint32_t b0 = *reinterpret_cast<const uint32_t*>(k_base0 + group_id * hd_half_padded +
-                                                                         byte_offset);
-                        uint32_t b1 = *reinterpret_cast<const uint32_t*>(k_base1 + group_id * hd_half_padded +
-                                                                         byte_offset);
+                        const uint8_t* k_base0 = KV_fp4 +
+                                                 static_cast<ptrdiff_t>(ci_local * MX_MMA_N *
+                                                                        hd_half_padded) +
+                                                 static_cast<ptrdiff_t>(k0 * FP4_K_BYTES);
+                        const uint8_t* k_base1 = KV_fp4 +
+                                                 static_cast<ptrdiff_t>(ci_local * MX_MMA_N *
+                                                                        hd_half_padded) +
+                                                 static_cast<ptrdiff_t>(k1 * FP4_K_BYTES);
+                        uint32_t b0 = *reinterpret_cast<const uint32_t*>(
+                            k_base0 + static_cast<ptrdiff_t>(group_id * hd_half_padded) + byte_offset);
+                        uint32_t b1 = *reinterpret_cast<const uint32_t*>(
+                            k_base1 + static_cast<ptrdiff_t>(group_id * hd_half_padded) + byte_offset);
                         uint32_t sfb = *reinterpret_cast<const uint32_t*>(
                             &k_scales_fp8[(ci_local * MX_MMA_N + n_sfb) * n_k_groups + kg_base]);
 #if __CUDA_ARCH__ >= 1200
@@ -820,20 +830,24 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     // Load A fragment: a0=row[groupID], a1=row[groupID+8], a2=a3=0
                     uint32_t a0, a1;
                     {
-                        const uint8_t* q_base = Q_fp4 + ri * MX_MMA_M * hd_half_padded + k * FP4_K_BYTES;
-                        a0 = *reinterpret_cast<const uint32_t*>(q_base + group_id * hd_half_padded +
-                                                                byte_offset);
-                        a1 = *reinterpret_cast<const uint32_t*>(q_base + (group_id + 8) * hd_half_padded +
-                                                                byte_offset);
+                        const uint8_t* q_base = Q_fp4 +
+                                                static_cast<ptrdiff_t>(ri * MX_MMA_M * hd_half_padded) +
+                                                static_cast<ptrdiff_t>(k * FP4_K_BYTES);
+                        a0 = *reinterpret_cast<const uint32_t*>(
+                            q_base + static_cast<ptrdiff_t>(group_id * hd_half_padded) + byte_offset);
+                        a1 = *reinterpret_cast<const uint32_t*>(
+                            q_base + static_cast<ptrdiff_t>((group_id + 8) * hd_half_padded) + byte_offset);
                     }
                     uint32_t a2 = 0, a3 = 0;  // padding for uniform register encoding
 
                     // Load B fragment: b0=col[groupID], b1=0
                     uint32_t b0;
                     {
-                        const uint8_t* k_base = KV_fp4 + ci * MX_MMA_N * hd_half_padded + k * FP4_K_BYTES;
-                        b0 = *reinterpret_cast<const uint32_t*>(k_base + group_id * hd_half_padded +
-                                                                byte_offset);
+                        const uint8_t* k_base = KV_fp4 +
+                                                static_cast<ptrdiff_t>(ci * MX_MMA_N * hd_half_padded) +
+                                                static_cast<ptrdiff_t>(k * FP4_K_BYTES);
+                        b0 = *reinterpret_cast<const uint32_t*>(
+                            k_base + static_cast<ptrdiff_t>(group_id * hd_half_padded) + byte_offset);
                     }
                     uint32_t b1 = 0;  // padding
 
@@ -932,7 +946,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 if (pos >= q_offset && pos < seq_kv) {
                     // Current-chunk V: fresh FP16 (V arg holds the chunk rows).
                     out = *reinterpret_cast<const half2*>(
-                        &V_ptr[(int64_t)(pos - q_offset) * kv_row_stride + 2 * b]);
+                        &V_ptr[(int64_t)(pos - q_offset) * kv_row_stride + static_cast<ptrdiff_t>(2 * b)]);
                 } else if (pos < seq_kv) {
                     const int blk = pkv.block_table[pos / pkv.block_size];
                     const int slot = pos % pkv.block_size;
@@ -1073,7 +1087,8 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     uint8_t* dst = &P_fp4[rr * kv_half_padded + kg * 8];
 #pragma unroll
                     for (int i = 0; i < 8; i++)
-                        dst[i] = pack_fp4_pair(prow[2 * i] * inv, prow[2 * i + 1] * inv);
+                        dst[i] = pack_fp4_pair(prow[static_cast<ptrdiff_t>(2 * i)] * inv,
+                                               prow[2 * i + 1] * inv);
                 }
                 (void)SP_half;
             }
@@ -1109,7 +1124,8 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     uint8_t* dst = &V_fp4T[dcol * kv_half_padded + kg * 8];
 #pragma unroll
                     for (int i = 0; i < 8; i++)
-                        dst[i] = pack_fp4_pair(vals[2 * i] * inv, vals[2 * i + 1] * inv);
+                        dst[i] = pack_fp4_pair(vals[static_cast<ptrdiff_t>(2 * i)] * inv,
+                                               vals[2 * i + 1] * inv);
                 }
             }
             __syncthreads();
@@ -1130,24 +1146,24 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     const int ri = tile_idx / pv_col_tiles;
                     const int ci = tile_idx % pv_col_tiles;
                     float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;
-                    const uint8_t* p_base = P_fp4 + ri * MX_MMA_M * kv_half_padded;
-                    uint32_t a0 = *reinterpret_cast<const uint32_t*>(p_base + group_id * kv_half_padded +
-                                                                     byte_offset);
+                    const uint8_t* p_base = P_fp4 + static_cast<ptrdiff_t>(ri * MX_MMA_M * kv_half_padded);
+                    uint32_t a0 = *reinterpret_cast<const uint32_t*>(
+                        p_base + static_cast<ptrdiff_t>(group_id * kv_half_padded) + byte_offset);
                     uint32_t a1 = *reinterpret_cast<const uint32_t*>(
-                        p_base + (group_id + 8) * kv_half_padded + byte_offset);
-                    uint32_t a2 = *reinterpret_cast<const uint32_t*>(p_base + group_id * kv_half_padded +
-                                                                     16 + byte_offset);
+                        p_base + static_cast<ptrdiff_t>((group_id + 8) * kv_half_padded) + byte_offset);
+                    uint32_t a2 = *reinterpret_cast<const uint32_t*>(
+                        p_base + static_cast<ptrdiff_t>(group_id * kv_half_padded) + 16 + byte_offset);
                     uint32_t a3 = *reinterpret_cast<const uint32_t*>(
-                        p_base + (group_id + 8) * kv_half_padded + 16 + byte_offset);
+                        p_base + static_cast<ptrdiff_t>((group_id + 8) * kv_half_padded) + 16 + byte_offset);
                     const uint8_t* v_base = V_fp4T + (size_t)(ci * MX_MMA_N) * kv_half_padded;
-                    uint32_t b0 = *reinterpret_cast<const uint32_t*>(v_base + group_id * kv_half_padded +
-                                                                     byte_offset);
-                    uint32_t b1 = *reinterpret_cast<const uint32_t*>(v_base + group_id * kv_half_padded +
-                                                                     16 + byte_offset);
+                    uint32_t b0 = *reinterpret_cast<const uint32_t*>(
+                        v_base + static_cast<ptrdiff_t>(group_id * kv_half_padded) + byte_offset);
+                    uint32_t b1 = *reinterpret_cast<const uint32_t*>(
+                        v_base + static_cast<ptrdiff_t>(group_id * kv_half_padded) + 16 + byte_offset);
                     uint32_t sfa = *reinterpret_cast<const uint32_t*>(
-                        &p_scales_fp8[(ri * MX_MMA_M + m_sfa) * n_kv_groups]);
+                        &p_scales_fp8[static_cast<ptrdiff_t>((ri * MX_MMA_M + m_sfa) * n_kv_groups)]);
                     uint32_t sfb = *reinterpret_cast<const uint32_t*>(
-                        &v_scales_fp8[(ci * MX_MMA_N + n_sfb) * n_kv_groups]);
+                        &v_scales_fp8[static_cast<ptrdiff_t>((ci * MX_MMA_N + n_sfb) * n_kv_groups)]);
 #if __CUDA_ARCH__ >= 1200
                     asm volatile(
                         "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32."
@@ -1189,24 +1205,32 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 int di = tile_idx % o_col_tiles;
 
                 wmma::fragment<wmma::accumulator, MX_WMMA_M, MX_WMMA_N, MX_WMMA_K, float> o_frag;
-                wmma::load_matrix_sync(o_frag, O_acc + ri * MX_WMMA_M * head_dim + di * MX_WMMA_N, head_dim,
-                                       wmma::mem_row_major);
+                wmma::load_matrix_sync(o_frag,
+                                       O_acc + static_cast<ptrdiff_t>(ri * MX_WMMA_M * head_dim) +
+                                           static_cast<ptrdiff_t>(di * MX_WMMA_N),
+                                       head_dim, wmma::mem_row_major);
 
                 for (int k = 0; k < pv_chunks; k++) {
                     wmma::fragment<wmma::matrix_a, MX_WMMA_M, MX_WMMA_N, MX_WMMA_K, half, wmma::row_major>
                         p_frag;
-                    wmma::load_matrix_sync(p_frag, P_half + ri * MX_WMMA_M * Bkv + k * MX_WMMA_K, Bkv);
+                    wmma::load_matrix_sync(p_frag,
+                                           P_half + static_cast<ptrdiff_t>(ri * MX_WMMA_M * Bkv) +
+                                               static_cast<ptrdiff_t>(k * MX_WMMA_K),
+                                           Bkv);
 
                     wmma::fragment<wmma::matrix_b, MX_WMMA_M, MX_WMMA_N, MX_WMMA_K, half, wmma::row_major>
                         v_frag;
-                    wmma::load_matrix_sync(v_frag, KV_fp16 + k * MX_WMMA_N * head_dim + di * MX_WMMA_N,
+                    wmma::load_matrix_sync(v_frag,
+                                           KV_fp16 + static_cast<ptrdiff_t>(k * MX_WMMA_N * head_dim) +
+                                               static_cast<ptrdiff_t>(di * MX_WMMA_N),
                                            head_dim);
 
                     wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
                 }
 
-                wmma::store_matrix_sync(O_acc + ri * MX_WMMA_M * head_dim + di * MX_WMMA_N, o_frag, head_dim,
-                                        wmma::mem_row_major);
+                wmma::store_matrix_sync(O_acc + static_cast<ptrdiff_t>(ri * MX_WMMA_M * head_dim) +
+                                            static_cast<ptrdiff_t>(di * MX_WMMA_N),
+                                        o_frag, head_dim, wmma::mem_row_major);
             }
         }
         first_kv_iter = false;

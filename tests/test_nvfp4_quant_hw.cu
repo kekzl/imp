@@ -49,20 +49,20 @@ protected:
         cudaMemcpy(d_input, h_input.data(), in_elems * sizeof(half), cudaMemcpyHostToDevice);
 
         // Strides (contiguous, row-major [B, H, T, D]).
-        int s_bz = heads * tokens * head_dim;
-        int s_h = tokens * head_dim;
-        int s_t = head_dim;
+        int64_t s_bz = static_cast<int64_t>(heads) * tokens * head_dim;
+        int64_t s_h = static_cast<int64_t>(tokens) * head_dim;
+        int64_t s_t = head_dim;
 
-        int s_bz_out = heads * tokens * head_dim / 2;
-        int s_h_out = tokens * head_dim / 2;
-        int s_t_out = head_dim / 2;
+        int64_t s_bz_out = static_cast<int64_t>(heads) * tokens * head_dim / 2;
+        int64_t s_h_out = static_cast<int64_t>(tokens) * head_dim / 2;
+        int64_t s_t_out = head_dim / 2;
 
         // Scale strides: HW layout stores (head_dim/16) bytes per token.
         // Kernel advances base by (token_id/64) * 64 * s_t_sf to reach the
         // next 64-token block, so s_t_sf must equal (head_dim/16) bytes/token.
-        int s_t_sf = head_dim / 16;
-        int s_h_sf = tokens_rounded * s_t_sf;
-        int s_bz_sf = heads * s_h_sf;
+        int64_t s_t_sf = head_dim / 16;
+        int64_t s_h_sf = tokens_rounded * s_t_sf;
+        int64_t s_bz_sf = heads * s_h_sf;
 
         bool q_ok = nvfp4_quant_hw_fp16(d_input, d_nvfp4, d_sf, batch, heads, tokens, head_dim, s_bz, s_h,
                                         s_t, s_bz_out, s_h_out, s_t_out, s_bz_sf, s_h_sf, s_t_sf, 0);

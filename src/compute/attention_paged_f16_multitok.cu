@@ -40,7 +40,8 @@ __device__ __forceinline__ void lane_vec_to_float(const typename LaneVec<ELEMS>:
 #pragma unroll
     for (int i = 0; i < ELEMS / 2; i++) {
         const float2 f = __half22float2(h2[i]);
-        out[2 * i] = f.x;
+        // #2218 bounded: 2 * i < ELEMS <= 576 / 32 = 18 (register array).
+        out[static_cast<ptrdiff_t>(2 * i)] = f.x;
         out[2 * i + 1] = f.y;
     }
 }
@@ -94,7 +95,7 @@ __device__ __forceinline__ void f16_block_multitok(const half* __restrict__ K_bl
 #pragma unroll
         for (int i = 0; i < TOK; i++) {
             const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
-            kp[i] = __ldcs(reinterpret_cast<const Vec*>(K_block + ti * kv_slot_stride));
+            kp[i] = __ldcs(reinterpret_cast<const Vec*>(K_block + static_cast<int64_t>(ti) * kv_slot_stride));
         }
         float dot[HPC][TOK];
 #pragma unroll
@@ -146,7 +147,7 @@ __device__ __forceinline__ void f16_block_multitok(const half* __restrict__ K_bl
 #pragma unroll
         for (int i = 0; i < TOK; i++) {
             const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
-            vp[i] = __ldcs(reinterpret_cast<const Vec*>(V_block + ti * kv_slot_stride));
+            vp[i] = __ldcs(reinterpret_cast<const Vec*>(V_block + static_cast<int64_t>(ti) * kv_slot_stride));
         }
 #pragma unroll
         for (int h = 0; h < HPC; h++)
@@ -226,10 +227,11 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_f16_mult
         if (tok_start + n_tok > ctx_len)
             n_tok = ctx_len - tok_start;
         const int first_tok = (tok_start < effective_start) ? (effective_start - tok_start) : 0;
+        // #2218 bounded: kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
         f16_block_multitok<HEAD_DIM, TOK, HPC>(K_cache + (int64_t)phys_block * kv_block_stride +
-                                                   kv_head * HEAD_DIM + lane_offset,
+                                                   static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
                                                V_cache + (int64_t)phys_block * kv_block_stride +
-                                                   kv_head * HEAD_DIM + lane_offset,
+                                                   static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
                                                first_tok, n_tok, kv_slot_stride, q_reg, scale, softcap, st);
     }
 
@@ -308,10 +310,11 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_f16_mult
         if (tok_start + n_tok > ctx_len)
             n_tok = ctx_len - tok_start;
         const int first_tok = (tok_start < effective_start) ? (effective_start - tok_start) : 0;
+        // #2218 bounded: kv_head * HEAD_DIM < 256 * 576 = 147456 (heads <= 256, head_dim <= 576).
         f16_block_multitok<HEAD_DIM, TOK, HPC>(K_cache + (int64_t)phys_block * kv_block_stride +
-                                                   kv_head * HEAD_DIM + lane_offset,
+                                                   static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
                                                V_cache + (int64_t)phys_block * kv_block_stride +
-                                                   kv_head * HEAD_DIM + lane_offset,
+                                                   static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
                                                first_tok, n_tok, kv_slot_stride, q_reg, scale, softcap, st);
     }
 

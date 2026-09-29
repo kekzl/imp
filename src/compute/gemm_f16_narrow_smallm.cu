@@ -68,6 +68,7 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(Narrow
 
     // A fragment rows g, g+8 (m-tile 0) and g+16, g+24 (m-tile 1); rows past M
     // read zero (pointer clamped, value masked).
+    // #2218 bounded: 2 * tg < 8 (tg = lane & 3)
     const half* Ar[4];
     bool vr[4];
 #pragma unroll
@@ -159,7 +160,7 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(Narrow
 #pragma unroll
         for (int k2 = 0; k2 < kSplit; ++k2)
             sum += __ldcg(&ws[(static_cast<size_t>(k2) * kMaxM + m) * args.n_total + col0 + c]);
-        C[static_cast<size_t>(m) * N + static_cast<size_t>(tile_in_pair * kNT) + c] = __float2half_rn(sum);
+        C[static_cast<size_t>(m) * N + static_cast<size_t>(tile_in_pair) * kNT + c] = __float2half_rn(sum);
     }
     if (threadIdx.x == 0)
         args.tickets[tile] = 0;

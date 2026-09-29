@@ -28,10 +28,11 @@ struct TokenIn {
 
 // Offsets are 32-bit: the launcher refuses n_tokens * row > INT_MAX.
 template <int SPT, bool FUSE_GATE>
-__device__ __forceinline__ void load_token(TokenIn<SPT>& in, const half* __restrict__ b_base,
-                                           const half* __restrict__ c_base, const half* __restrict__ x_base,
-                                           const half* __restrict__ z_base, int t, int bc_size,
-                                           int inner_size) {
+__device__ __forceinline__ void load_token(
+    TokenIn<SPT>& in, const half* __restrict__ b_base, const half* __restrict__ c_base,
+    const half* __restrict__ x_base, const half* __restrict__ z_base, int t, int bc_size,
+    // #2218 bounded: t * bc_size, t * inner_size < n_tokens * row <= INT32_MAX (launcher check, line 243)
+    int inner_size) {
     const uint4* b = reinterpret_cast<const uint4*>(b_base + static_cast<ptrdiff_t>(t * bc_size));
     const uint4* c = reinterpret_cast<const uint4*>(c_base + static_cast<ptrdiff_t>(t * bc_size));
 #pragma unroll
@@ -77,11 +78,13 @@ __global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __re
     const int inner_size = n_heads * head_dim_ssm;
     const int bc_size = n_groups * kState;
     const int s_start = s_tid * SPT;
-    const half* b_base = B_in + g * kState + s_start;
-    const half* c_base = C_in + g * kState + s_start;
-    const half* x_base = x + h * head_dim_ssm + d;
-    const half* z_base = FUSE_GATE ? z + h * head_dim_ssm + d : nullptr;
-    half* y_base = y + h * head_dim_ssm + d;
+    // #2218 bounded: g * kState, h * head_dim_ssm, t * inner_size < n_tokens * row <= INT32_MAX (launcher
+    // check, line 243)
+    const half* b_base = B_in + static_cast<ptrdiff_t>(g * kState) + s_start;
+    const half* c_base = C_in + static_cast<ptrdiff_t>(g * kState) + s_start;
+    const half* x_base = x + static_cast<ptrdiff_t>(h * head_dim_ssm) + d;
+    const half* z_base = FUSE_GATE ? z + static_cast<ptrdiff_t>(h * head_dim_ssm) + d : nullptr;
+    half* y_base = y + static_cast<ptrdiff_t>(h * head_dim_ssm) + d;
     const int64_t h_base = static_cast<int64_t>(h) * kState * head_dim_ssm + d;
 
     float hs[SPT];

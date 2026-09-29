@@ -89,9 +89,11 @@ gemm_qk_dp4a_moe_fused_kernel(
     const uint8_t* w_row = packed_weight + static_cast<size_t>(expert) * weight_stride +
                            static_cast<size_t>(n_col) * row_bytes;
 
+    // #2218 bounded: smem Q8 tile offsets (TILE_M * q8_per_row * 32, (mi * q8_per_row + q) * 32) <
+    // dynamic smem size <= 101376 B (sm_120 opt-in max, launch below)
     extern __shared__ char smem_raw[];
     int8_t* smem_qs = reinterpret_cast<int8_t*>(smem_raw);
-    float* smem_d8 = reinterpret_cast<float*>(smem_raw + TILE_M * q8_per_row * 32);
+    float* smem_d8 = reinterpret_cast<float*>(smem_raw + static_cast<ptrdiff_t>(TILE_M * q8_per_row * 32));
 
     for (int m_base = 0; m_base < M_e; m_base += TILE_M) {
         const int m_count = min(TILE_M, M_e - m_base);
@@ -105,7 +107,8 @@ gemm_qk_dp4a_moe_fused_kernel(
                 const int tok = m_start + m_base + mi;
 
                 const block_q8_1& src = q8_base[tok * q8_per_row + qi];
-                int4* dst_qs = reinterpret_cast<int4*>(smem_qs + (mi * q8_per_row + qi) * 32);
+                int4* dst_qs = reinterpret_cast<int4*>(smem_qs +
+                                                       static_cast<ptrdiff_t>((mi * q8_per_row + qi) * 32));
                 int4 tmp0, tmp1;
                 memcpy(&tmp0, src.qs, 16);
                 memcpy(&tmp1, src.qs + 16, 16);
@@ -251,9 +254,12 @@ gemm_qk_dp4a_dense_kernel(
     const size_t row_bytes = static_cast<size_t>(blocks_per_row) * Traits::BYTES;
     const uint8_t* w_row = packed_weight + static_cast<size_t>(n_col) * row_bytes;
 
+    // #2218 bounded: smem Q8 tile offsets (DENSE_TILE_M * q8_per_row * 32, (mi * q8_per_row + q) * 32) <
+    // dynamic smem size <= 101376 B (sm_120 opt-in max, launch below)
     extern __shared__ char smem_raw[];
     int8_t* smem_qs = reinterpret_cast<int8_t*>(smem_raw);
-    float* smem_d8 = reinterpret_cast<float*>(smem_raw + DENSE_TILE_M * q8_per_row * 32);
+    float* smem_d8 = reinterpret_cast<float*>(smem_raw +
+                                              static_cast<ptrdiff_t>(DENSE_TILE_M * q8_per_row * 32));
 
     for (int m_base = 0; m_base < M; m_base += DENSE_TILE_M) {
         const int m_count = min(DENSE_TILE_M, M - m_base);
@@ -266,7 +272,8 @@ gemm_qk_dp4a_dense_kernel(
                 const int tok = m_base + mi;
 
                 const block_q8_1& src = q8_base[tok * q8_per_row + qi];
-                int4* dst_qs = reinterpret_cast<int4*>(smem_qs + (mi * q8_per_row + qi) * 32);
+                int4* dst_qs = reinterpret_cast<int4*>(smem_qs +
+                                                       static_cast<ptrdiff_t>((mi * q8_per_row + qi) * 32));
                 int4 tmp0, tmp1;
                 memcpy(&tmp0, src.qs, 16);
                 memcpy(&tmp1, src.qs + 16, 16);

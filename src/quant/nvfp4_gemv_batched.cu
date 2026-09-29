@@ -45,6 +45,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
         // Decode the 16 FP4 weights ONCE and reuse across all MR activation rows
         // (the old per-row path re-decoded the weight byte per row — 16x cvt).
+        // #2218 bounded: register index b * 2 < 16 (b < 8)
         float wf[16];
 #pragma unroll
         for (int b = 0; b < 8; ++b) {
@@ -53,7 +54,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
                 : "=r"(w_fp16x2)
                 : "r"(static_cast<uint32_t>(pb[b])));
             float2 wf2 = __half22float2(*reinterpret_cast<const half2*>(&w_fp16x2));
-            wf[b * 2] = wf2.x;
+            wf[static_cast<ptrdiff_t>(b * 2)] = wf2.x;
             wf[b * 2 + 1] = wf2.y;
         }
         float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
@@ -70,7 +71,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
 #pragma unroll
             for (int b = 0; b < 8; ++b) {
                 float2 xf = __half22float2(xh[b]);
-                d = __fmaf_rn(wf[b * 2], xf.x, d);
+                d = __fmaf_rn(wf[static_cast<ptrdiff_t>(b * 2)], xf.x, d);
                 d = __fmaf_rn(wf[b * 2 + 1], xf.y, d);
             }
             acc[m] = __fmaf_rn(d, cs, acc[m]);
@@ -173,13 +174,14 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
         float wf[16];
 #pragma unroll
+        // #2218 bounded: register index b * 2 < 16 (b < 8)
         for (int b = 0; b < 8; ++b) {
             uint32_t w_fp16x2;
             asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"
                 : "=r"(w_fp16x2)
                 : "r"(static_cast<uint32_t>(pb[b])));
             float2 wf2 = __half22float2(*reinterpret_cast<const half2*>(&w_fp16x2));
-            wf[b * 2] = wf2.x;
+            wf[static_cast<ptrdiff_t>(b * 2)] = wf2.x;
             wf[b * 2 + 1] = wf2.y;
         }
         float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
@@ -196,7 +198,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
 #pragma unroll
             for (int b = 0; b < 8; ++b) {
                 float2 xf = __half22float2(xh[b]);
-                d = __fmaf_rn(wf[b * 2], xf.x, d);
+                d = __fmaf_rn(wf[static_cast<ptrdiff_t>(b * 2)], xf.x, d);
                 d = __fmaf_rn(wf[b * 2 + 1], xf.y, d);
             }
             acc[m] = __fmaf_rn(d, cs, acc[m]);

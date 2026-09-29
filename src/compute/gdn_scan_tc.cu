@@ -48,16 +48,18 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
             H_reg[s] = H_col[static_cast<ptrdiff_t>(s * HD)];
     }
 
+    // #2218 bounded: HD = SS = 128, CHUNK <= 32 (dispatch below): smem offsets and tile offsets
+    // (k * 16 * HD) < 128 * 128 = 16384, H_col s * HD < 16384, y_out h * HD < 256 heads * 128
     extern __shared__ float smem[];
     half* s_k_fp16 = reinterpret_cast<half*>(smem);                      // [L * SS]
-    half* s_q_fp16 = s_k_fp16 + CHUNK * SS;                              // [L * SS]
-    half* s_h0_fp16 = s_q_fp16 + CHUNK * SS;                             // [SS * HD]
-    float* s_kh_fp32 = reinterpret_cast<float*>(s_h0_fp16 + SS * HD);    // [L * HD]
-    float* s_qh_fp32 = s_kh_fp32 + CHUNK * HD;                           // [L * HD]
-    float* s_kk_fp32 = s_qh_fp32 + CHUNK * HD;                           // [L * L]
-    float* s_qk_fp32 = s_kk_fp32 + CHUNK * CHUNK;                        // [L * L]
-    float* s_u_fp32 = s_qk_fp32 + CHUNK * CHUNK;                         // [L * HD]
-    float* s_D = s_u_fp32 + CHUNK * HD;                                  // [L + 1]   exp-cumulative decay
+    half* s_q_fp16 = s_k_fp16 + static_cast<ptrdiff_t>(CHUNK * SS);      // [L * SS]
+    half* s_h0_fp16 = s_q_fp16 + static_cast<ptrdiff_t>(CHUNK * SS);     // [SS * HD]
+    float* s_kh_fp32 = reinterpret_cast<float*>(s_h0_fp16 + static_cast<ptrdiff_t>(SS * HD));  // [L * HD]
+    float* s_qh_fp32 = s_kh_fp32 + static_cast<ptrdiff_t>(CHUNK * HD);                         // [L * HD]
+    float* s_kk_fp32 = s_qh_fp32 + static_cast<ptrdiff_t>(CHUNK * HD);                         // [L * L]
+    float* s_qk_fp32 = s_kk_fp32 + static_cast<ptrdiff_t>(CHUNK * CHUNK);                      // [L * L]
+    float* s_u_fp32 = s_qk_fp32 + static_cast<ptrdiff_t>(CHUNK * CHUNK);                       // [L * HD]
+    float* s_D = s_u_fp32 + static_cast<ptrdiff_t>(CHUNK * HD);          // [L + 1]   exp-cumulative decay
     float* s_g = s_D + (CHUNK + 1);                                      // [L]
     float* s_beta = s_g + CHUNK;                                         // [L]
     float* s_reduce = s_beta + CHUNK;                                    // [HD]
@@ -150,9 +152,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
             wmma::fill_fragment(c_frag, 0.0f);
             for (int k = 0; k < SS / 16; k++) {
                 wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
-                wmma::load_matrix_sync(a_frag, s_k_fp16 + k * 16, SS);
+                wmma::load_matrix_sync(a_frag, s_k_fp16 + static_cast<ptrdiff_t>(k * 16), SS);
                 wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b_frag;
-                wmma::load_matrix_sync(b_frag, s_k_fp16 + k * 16, SS);
+                wmma::load_matrix_sync(b_frag, s_k_fp16 + static_cast<ptrdiff_t>(k * 16), SS);
                 wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
             }
             wmma::store_matrix_sync(s_kk_fp32, c_frag, CHUNK, wmma::mem_row_major);
@@ -161,9 +163,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
             wmma::fill_fragment(c_frag, 0.0f);
             for (int k = 0; k < SS / 16; k++) {
                 wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
-                wmma::load_matrix_sync(a_frag, s_q_fp16 + k * 16, SS);
+                wmma::load_matrix_sync(a_frag, s_q_fp16 + static_cast<ptrdiff_t>(k * 16), SS);
                 wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b_frag;
-                wmma::load_matrix_sync(b_frag, s_k_fp16 + k * 16, SS);
+                wmma::load_matrix_sync(b_frag, s_k_fp16 + static_cast<ptrdiff_t>(k * 16), SS);
                 wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
             }
             wmma::store_matrix_sync(s_qk_fp32, c_frag, CHUNK, wmma::mem_row_major);
@@ -178,9 +180,10 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
             wmma::fill_fragment(c_frag, 0.0f);
             for (int k = 0; k < SS / 16; k++) {
                 wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
-                wmma::load_matrix_sync(a_frag, s_k_fp16 + k * 16, SS);
+                wmma::load_matrix_sync(a_frag, s_k_fp16 + static_cast<ptrdiff_t>(k * 16), SS);
                 wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
-                wmma::load_matrix_sync(b_frag, s_h0_fp16 + k * 16 * HD + n_offset, HD);
+                wmma::load_matrix_sync(b_frag, s_h0_fp16 + static_cast<ptrdiff_t>(k * 16 * HD) + n_offset,
+                                       HD);
                 wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
             }
             wmma::store_matrix_sync(s_kh_fp32 + n_offset, c_frag, HD, wmma::mem_row_major);
@@ -191,9 +194,10 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
             wmma::fill_fragment(c_frag, 0.0f);
             for (int k = 0; k < SS / 16; k++) {
                 wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
-                wmma::load_matrix_sync(a_frag, s_q_fp16 + k * 16, SS);
+                wmma::load_matrix_sync(a_frag, s_q_fp16 + static_cast<ptrdiff_t>(k * 16), SS);
                 wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
-                wmma::load_matrix_sync(b_frag, s_h0_fp16 + k * 16 * HD + n_offset, HD);
+                wmma::load_matrix_sync(b_frag, s_h0_fp16 + static_cast<ptrdiff_t>(k * 16 * HD) + n_offset,
+                                       HD);
                 wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
             }
             wmma::store_matrix_sync(s_qh_fp32 + n_offset, c_frag, HD, wmma::mem_row_major);
@@ -321,25 +325,28 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
             H_reg[s] = H_col[static_cast<ptrdiff_t>(s * HD)];
     }
 
+    // #2218 bounded: HD = SS = 128, CHUNK <= 32 (dispatch below): smem offsets and tile offsets
+    // (k * 16 * HD, m_offset * SS) < 128 * 128 = 16384, H_col s * HD < 16384, y_out h * HD < 256 * 128
     extern __shared__ float smem[];
     half* s_k_fp16 = reinterpret_cast<half*>(smem);                  // [L*SS]
-    half* s_q_fp16 = s_k_fp16 + CHUNK * SS;                          // [L*SS]
-    half* s_h0_fp16 = s_q_fp16 + CHUNK * SS;                         // [SS*HD]
+    half* s_q_fp16 = s_k_fp16 + static_cast<ptrdiff_t>(CHUNK * SS);  // [L*SS]
+    half* s_h0_fp16 = s_q_fp16 + static_cast<ptrdiff_t>(CHUNK * SS);  // [SS*HD]
     // s_kh_buf is the multipurpose 16 KiB region: Step 4 KH (FP32 [L,HD]); between Step 4
     // and 5 recomputed as QH (FP32 [L,HD]); Step 7 split as s_u_fp16 (FP16 [L,HD]=8 KiB) +
     // s_strip_out (FP32 [16,HD]=8 KiB).
-    float* s_kh_fp32 = reinterpret_cast<float*>(s_h0_fp16 + SS * HD);  // [L*HD]
-    float* s_kk_fp32 = s_kh_fp32 + CHUNK * HD;                       // [L*L]
-    float* s_qk_fp32 = s_kk_fp32 + CHUNK * CHUNK;                    // [L*L]
-    float* s_u_fp32 = s_qk_fp32 + CHUNK * CHUNK;                     // [L*HD]
-    float* s_D = s_u_fp32 + CHUNK * HD;                              // [L+1]
+    float* s_kh_fp32 = reinterpret_cast<float*>(s_h0_fp16 + static_cast<ptrdiff_t>(SS * HD));  // [L*HD]
+    float* s_kk_fp32 = s_kh_fp32 + static_cast<ptrdiff_t>(CHUNK * HD);                         // [L*L]
+    float* s_qk_fp32 = s_kk_fp32 + static_cast<ptrdiff_t>(CHUNK * CHUNK);                      // [L*L]
+    float* s_u_fp32 = s_qk_fp32 + static_cast<ptrdiff_t>(CHUNK * CHUNK);                       // [L*HD]
+    float* s_D = s_u_fp32 + static_cast<ptrdiff_t>(CHUNK * HD);                                // [L+1]
     float* s_g = s_D + (CHUNK + 1);                                  // [L]
     float* s_beta = s_g + CHUNK;                                     // [L]
     float* s_reduce = s_beta + CHUNK;                                // [HD]
 
     // Phase 7 buffer aliases (s_kh region reused).
     half* s_u_fp16 = reinterpret_cast<half*>(s_kh_fp32);              // [L*HD] (= 8 KiB)
-    float* s_strip_out = reinterpret_cast<float*>(s_u_fp16 + CHUNK * HD);  // [16*HD] (= 8 KiB)
+    float* s_strip_out = reinterpret_cast<float*>(s_u_fp16 +
+                                                  static_cast<ptrdiff_t>(CHUNK * HD));  // [16*HD] (= 8 KiB)
 
     int t_chunk_start = 0;
     while (t_chunk_start < n_tokens) {
@@ -431,13 +438,19 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
                     wmma::fill_fragment(c_frag, 0.0f);
                     for (int k = 0; k < SS / 16; k++) {
                         wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
-                        wmma::load_matrix_sync(a_frag, a_src + m_offset * SS + k * 16, SS);
+                        wmma::load_matrix_sync(a_frag,
+                                               a_src + static_cast<ptrdiff_t>(m_offset * SS) +
+                                                   static_cast<ptrdiff_t>(k * 16),
+                                               SS);
                         wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b_frag;
-                        wmma::load_matrix_sync(b_frag, b_src + n_offset * SS + k * 16, SS);
+                        wmma::load_matrix_sync(b_frag,
+                                               b_src + static_cast<ptrdiff_t>(n_offset * SS) +
+                                                   static_cast<ptrdiff_t>(k * 16),
+                                               SS);
                         wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
                     }
-                    wmma::store_matrix_sync(out + m_offset * CHUNK + n_offset, c_frag, CHUNK,
-                                            wmma::mem_row_major);
+                    wmma::store_matrix_sync(out + static_cast<ptrdiff_t>(m_offset * CHUNK) + n_offset, c_frag,
+                                            CHUNK, wmma::mem_row_major);
                 }
             }
         }
@@ -456,13 +469,17 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
                 wmma::fill_fragment(c_frag, 0.0f);
                 for (int k = 0; k < SS / 16; k++) {
                     wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
-                    wmma::load_matrix_sync(a_frag, s_k_fp16 + m_offset * SS + k * 16, SS);
+                    wmma::load_matrix_sync(a_frag,
+                                           s_k_fp16 + static_cast<ptrdiff_t>(m_offset * SS) +
+                                               static_cast<ptrdiff_t>(k * 16),
+                                           SS);
                     wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
-                    wmma::load_matrix_sync(b_frag, s_h0_fp16 + k * 16 * HD + n_offset, HD);
+                    wmma::load_matrix_sync(b_frag, s_h0_fp16 + static_cast<ptrdiff_t>(k * 16 * HD) + n_offset,
+                                           HD);
                     wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
                 }
-                wmma::store_matrix_sync(s_kh_fp32 + m_offset * HD + n_offset, c_frag, HD,
-                                        wmma::mem_row_major);
+                wmma::store_matrix_sync(s_kh_fp32 + static_cast<ptrdiff_t>(m_offset * HD) + n_offset, c_frag,
+                                        HD, wmma::mem_row_major);
             }
         }
         __syncthreads();
@@ -502,13 +519,17 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
                 wmma::fill_fragment(c_frag, 0.0f);
                 for (int k = 0; k < SS / 16; k++) {
                     wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a_frag;
-                    wmma::load_matrix_sync(a_frag, s_q_fp16 + m_offset * SS + k * 16, SS);
+                    wmma::load_matrix_sync(a_frag,
+                                           s_q_fp16 + static_cast<ptrdiff_t>(m_offset * SS) +
+                                               static_cast<ptrdiff_t>(k * 16),
+                                           SS);
                     wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
-                    wmma::load_matrix_sync(b_frag, s_h0_fp16 + k * 16 * HD + n_offset, HD);
+                    wmma::load_matrix_sync(b_frag, s_h0_fp16 + static_cast<ptrdiff_t>(k * 16 * HD) + n_offset,
+                                           HD);
                     wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
                 }
-                wmma::store_matrix_sync(s_kh_fp32 + m_offset * HD + n_offset, c_frag, HD,
-                                        wmma::mem_row_major);
+                wmma::store_matrix_sync(s_kh_fp32 + static_cast<ptrdiff_t>(m_offset * HD) + n_offset, c_frag,
+                                        HD, wmma::mem_row_major);
             }
         }
         __syncthreads();
@@ -564,10 +585,12 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
                     // s_k_fp16[k_global*SS+m_global]. For col_major matrix_a with ld=SS: A[m_local,k_local]
                     // at base[m_local + k_local*SS], base = s_k_fp16 + k_offset*SS + m_offset.
                     wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::col_major> a_frag;
-                    wmma::load_matrix_sync(a_frag, s_k_fp16 + k * 16 * SS + m_offset, SS);
+                    wmma::load_matrix_sync(a_frag, s_k_fp16 + static_cast<ptrdiff_t>(k * 16 * SS) + m_offset,
+                                           SS);
                     // B = U_scaled[k_global, n_global] at s_u_fp16[k_global*HD + n_global].
                     wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> b_frag;
-                    wmma::load_matrix_sync(b_frag, s_u_fp16 + k * 16 * HD + n_offset, HD);
+                    wmma::load_matrix_sync(b_frag, s_u_fp16 + static_cast<ptrdiff_t>(k * 16 * HD) + n_offset,
+                                           HD);
                     wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
                 }
                 wmma::store_matrix_sync(s_strip_out + n_offset, c_frag, HD, wmma::mem_row_major);

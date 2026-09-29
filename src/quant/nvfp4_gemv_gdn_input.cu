@@ -47,9 +47,9 @@ __device__ __forceinline__ float warp_dot_fp16(const half* __restrict__ row, con
     const float4* x_v = reinterpret_cast<const float4*>(x);
     float sum = 0.0f;
     for (int i = lane; i < K_vec16; i += 32) {
-        float4 a0 = row_v[2 * i];
+        float4 a0 = row_v[static_cast<int64_t>(2) * i];
         float4 a1 = row_v[2 * i + 1];
-        float4 x0 = x_v[2 * i];
+        float4 x0 = x_v[static_cast<int64_t>(2) * i];
         float4 x1 = x_v[2 * i + 1];
         const half2* a_h2_0 = reinterpret_cast<const half2*>(&a0);
         const half2* x_h2_0 = reinterpret_cast<const half2*>(&x0);

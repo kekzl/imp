@@ -189,8 +189,10 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(const void* __restrict
     float d8[QR4_K];
 
     const int bq8_offset = QR4_K * ((iqs / 2) / (QK8_1 / (4 * 2)));  // QI8_1 = 8, QI8_1/2 = 4
+    // #2218 bounded: offset inside one Q4_K block, 16 * bq8_offset + 12 < 128 B qs (iqs < QI4_K = 32)
 
-    const int* q4 = (const int*)(bq4_K->qs + static_cast<ptrdiff_t>(16 * bq8_offset + 4 * ((iqs / 2) % 4)));
+    const int* q4 = (const int*)(bq4_K->qs + static_cast<ptrdiff_t>(16 * bq8_offset) +
+                                 static_cast<ptrdiff_t>(4 * ((iqs / 2) % 4)));
     v[0] = q4[0];
     v[1] = q4[4];
 
@@ -233,7 +235,7 @@ static __global__ void quantize_fp16_to_q8_1_ggml_kernel(const half* __restrict_
     if (block_id >= num_blocks)
         return;
 
-    const half* xb = x + static_cast<ptrdiff_t>(block_id * QK8_1);
+    const half* xb = x + static_cast<int64_t>(block_id) * QK8_1;
     ggml_block_q8_1* yb = y + block_id;
 
     // Find max absolute value
@@ -331,7 +333,9 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1(const void* __restrict
     float d8[QR5_K];
 
     const int bq8_offset = QR5_K * ((iqs / 2) / (QI8_1 / 2));
-    const int* ql = (const int*)(bq5_K->qs + static_cast<ptrdiff_t>(16 * bq8_offset + 4 * ((iqs / 2) % 4)));
+    // #2218 bounded: offsets inside one Q5_K block, 16 * bq8_offset + 12 < 128 B qs (iqs < QI5_K = 32)
+    const int* ql = (const int*)(bq5_K->qs + static_cast<ptrdiff_t>(16 * bq8_offset) +
+                                 static_cast<ptrdiff_t>(4 * ((iqs / 2) % 4)));
     const int* qh = (const int*)(bq5_K->qh + static_cast<ptrdiff_t>(4 * ((iqs / 2) % 4)));
 
     vl[0] = ql[0];
@@ -433,7 +437,7 @@ static __global__ void mmvq_kernel(const void* __restrict__ W, const ggml_block_
     const int blocks_per_row = K / qk;
 
     // Quantized input: offset to correct row
-    const ggml_block_q8_1* yq = x_q8 + static_cast<ptrdiff_t>(col * (K / QK8_1));
+    const ggml_block_q8_1* yq = x_q8 + static_cast<int64_t>(col) * (K / QK8_1);
 
     float tmp = 0.0f;
 

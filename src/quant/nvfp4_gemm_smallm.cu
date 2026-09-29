@@ -63,6 +63,7 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
     const int tid = threadIdx.x;
     const int warp = tid / 32;
 
+    // #2218 bounded: smem indices mb * kMicroBlockSize < kKT = 128, warp_m/warp_n * 16 < kSmM = kNR = 32
     __shared__ half s_x[kSmM][kKT + kXPad];
     __shared__ half s_w[kNR][kKT + kWPad];
     __shared__ half s_out[kSmM][kNR];
@@ -150,7 +151,7 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
                 const int mb = xi % kMbPerTile;
                 const uint8_t* pb = reinterpret_cast<const uint8_t*>(&pxq[v]);
                 const half2 cs2 = __float2half2_rn(pxs[v]);
-                half2* dst = reinterpret_cast<half2*>(&s_x[m][mb * kMicroBlockSize]);
+                half2* dst = reinterpret_cast<half2*>(&s_x[m][static_cast<ptrdiff_t>(mb * kMicroBlockSize)]);
 #pragma unroll
                 for (int b = 0; b < 8; ++b) {
                     uint32_t w_fp16x2;
@@ -177,7 +178,7 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
             const int mb = wi % kMbPerTile;
             const uint8_t* pb = reinterpret_cast<const uint8_t*>(&pw[v]);
             const half2 cs2 = __float2half2_rn(pcs[v]);
-            half2* dst = reinterpret_cast<half2*>(&s_w[row][mb * kMicroBlockSize]);
+            half2* dst = reinterpret_cast<half2*>(&s_w[row][static_cast<ptrdiff_t>(mb * kMicroBlockSize)]);
 #pragma unroll
             for (int b = 0; b < 8; ++b) {
                 uint32_t w_fp16x2;
@@ -201,8 +202,8 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
         for (int k0 = 0; k0 < kKT; k0 += 16) {
             wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a;
             wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b;
-            wmma::load_matrix_sync(a, &s_x[warp_m * 16][k0], kKT + kXPad);
-            wmma::load_matrix_sync(b, &s_w[warp_n * 16][k0], kKT + kWPad);
+            wmma::load_matrix_sync(a, &s_x[static_cast<ptrdiff_t>(warp_m * 16)][k0], kKT + kXPad);
+            wmma::load_matrix_sync(b, &s_w[static_cast<ptrdiff_t>(warp_n * 16)][k0], kKT + kWPad);
             wmma::mma_sync(acc, a, b, acc);
         }
         __syncthreads();
@@ -212,7 +213,9 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
     // (block.x, split), so the reduction is deterministic — no atomics.
     {
         __shared__ float s_acc[kSmM][kNR];
-        wmma::store_matrix_sync(&s_acc[warp_m * 16][warp_n * 16], acc, kNR, wmma::mem_row_major);
+        wmma::store_matrix_sync(
+            &s_acc[static_cast<ptrdiff_t>(warp_m * 16)][static_cast<ptrdiff_t>(warp_n * 16)], acc, kNR,
+            wmma::mem_row_major);
         __syncthreads();
         // Streaming stores: each partial is written once and read once by the reduce kernel;
         // letting it age normally in L2 knocks out sets the weight stream needs (split-K

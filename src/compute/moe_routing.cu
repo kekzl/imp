@@ -454,7 +454,8 @@ __global__ void __launch_bounds__(256) moe_fused_permute_deterministic_kernel(
     // flat indices routed to the same expert (#1546), making layout independent of scheduling.
     // One blockDim-sized chunk at a time, chunks in index order, threads counting only lower
     // thread ids -> identical layout to a full single-thread walk.
-    int32_t* s_chunk = smem + 2 * n_experts;  // [blockDim.x]
+    // #2218 bounded: smem offset 2 * n_experts < 12288 ints (48 KiB dynamic smem, no opt-in)
+    int32_t* s_chunk = smem + static_cast<ptrdiff_t>(2 * n_experts);  // [blockDim.x]
     const int block_n = static_cast<int>(blockDim.x);
     for (int base = 0; base < total; base += block_n) {
         const int idx = base + tid;

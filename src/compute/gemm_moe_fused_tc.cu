@@ -182,7 +182,8 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
                                               ? static_cast<int64_t>(sorted_token_ids[expanded_idx])
                                               : static_cast<int64_t>(expanded_idx);
                     *reinterpret_cast<uint4*>(&AC_smem[row * TC_STRIDE + col]) =
-                        *reinterpret_cast<const uint4*>(&activations[token * K + k_block * TC_K_TILE + col]);
+                        *reinterpret_cast<const uint4*>(
+                            &activations[token * K + static_cast<int64_t>(k_block) * TC_K_TILE + col]);
                 } else {
                     *reinterpret_cast<uint4*>(&AC_smem[row * TC_STRIDE + col]) = make_uint4(0, 0, 0, 0);
                 }

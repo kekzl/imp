@@ -44,6 +44,7 @@ __device__ __forceinline__ void load_kstep_q5k(int tid, const int8_t* __restrict
     const int ks = k_base / kBK;
     const int sblk = ks >> 2;  // super-block index along K
     const int grp = ks & 3;    // 32-byte nibble group within it
+    // #2218 bounded: in-block offset grp * 32 < 128 B (grp = ks & 3)
 #pragma unroll
     for (int i = tid; i < kBN * 5; i += kThreads) {
         const int row = i / 5;
@@ -57,7 +58,7 @@ __device__ __forceinline__ void load_kstep_q5k(int tid, const int8_t* __restrict
             cp_async_cg_16(&sBqh[row][off], blk + 16 + off, bvalid);  // qh, shared by all 4 groups
         } else {
             const int off = (part - 3) * 16;
-            cp_async_cg_16(&sBq[row][off], blk + kQsOff + grp * 32 + off, bvalid);
+            cp_async_cg_16(&sBq[row][off], blk + kQsOff + static_cast<ptrdiff_t>(grp * 32) + off, bvalid);
         }
     }
     const int kb0 = k_base / 32;
@@ -120,6 +121,7 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q5k_raw_kernel(
     const int warp_n = warp_id % kWN;
     const int rl = lane >> 2;
     const int cl = lane & 3;
+    // #2218 bounded: smem column cl * 4 < 16 (cl = lane & 3)
 
     // Dynamic smem (q5k_smem_bytes): the staged qh rows push the Q4_K layout past the 48 KB static cap.
     extern __shared__ __align__(16) uint8_t smem_raw[];
@@ -205,9 +207,11 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q5k_raw_kernel(
 #pragma unroll
                 for (int nf = 0; nf < kNF; ++nf) {
                     const int bcol = warp_n * kTileN + nf * 8 + rl;
-                    const uint32_t b0 =
-                        q5k_s8x4(*reinterpret_cast<const uint32_t*>(&sBq[stage][bcol][cl * 4]),
-                                 *reinterpret_cast<const uint32_t*>(&sBqh[stage][bcol][cl * 4]), shift, hbit);
+                    const uint32_t b0 = q5k_s8x4(*reinterpret_cast<const uint32_t*>(
+                                                     &sBq[stage][bcol][static_cast<ptrdiff_t>(cl * 4)]),
+                                                 *reinterpret_cast<const uint32_t*>(
+                                                     &sBqh[stage][bcol][static_cast<ptrdiff_t>(cl * 4)]),
+                                                 shift, hbit);
                     const uint32_t b1 = q5k_s8x4(
                         *reinterpret_cast<const uint32_t*>(&sBq[stage][bcol][cl * 4 + 16]),
                         *reinterpret_cast<const uint32_t*>(&sBqh[stage][bcol][cl * 4 + 16]), shift, hbit);
