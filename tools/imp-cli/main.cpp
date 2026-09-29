@@ -253,7 +253,7 @@ int main(int argc, char** argv) {
         std::string text;
         char buf[4096];
         size_t r;
-        while ((r = std::fread(buf, 1, sizeof(buf), f)) > 0)
+        while (!std::feof(f) && !std::ferror(f) && (r = std::fread(buf, 1, sizeof(buf), f)) > 0)
             text.append(buf, r);
         std::fclose(f);
         int vocab_size = imp_model_vocab_size(model);

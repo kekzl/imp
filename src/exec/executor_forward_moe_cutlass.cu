@@ -492,12 +492,14 @@ bool smallM_done = false;
                                 const float* d_act_ts,  // device ptr
                                 char* c_base,
                                 int K_in, int N_out) -> bool {
+                if (!W)  // no NVFP4 weights for this projection: fail, caller falls back
+                    return false;
                 // Upload weight tensor_scales H2D once per projection.
                 // W->tensor_scales is already on device if non-null.
                 float* d_alpha = nullptr;
                 IMP_CUDA_CHECK_LOG(cudaMallocAsync(
                     &d_alpha, static_cast<size_t>(ne) * sizeof(float), stream));
-                if (W && W->tensor_scales) {
+                if (W->tensor_scales) {
                     // Compute alpha = act_ts * weight_ts on device.
                     imp::compute_moe_alpha_device(
                         d_act_ts, W->tensor_scales, d_alpha, ne, stream);
