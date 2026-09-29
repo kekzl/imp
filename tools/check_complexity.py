@@ -16,6 +16,8 @@ at its measured CCN, keyed `path::signature` like function_size_thresholds.toml.
   FAIL  a function over the threshold that is not in the baseline (new)
   FAIL  a baseline function whose CCN grew past its pin (no slack: +1 fails)
   NOTE  a baseline function that shrank or is gone (re-pin with --update)
+  FAIL  with --base-config: a pin added or raised vs the base baseline (pins only shrink;
+        a key moved to another path keeps its pin if the signature is unchanged)
 
 Exit codes: 0 pass, 1 violation, 2 malformed config.
 
@@ -285,6 +287,27 @@ def evaluate(measured, baseline, limit):
     return new, grown, notes
 
 
+def pin_ratchet(base, head):
+    """[(key, base_pin, head_pin)] for pins added or raised vs the base baseline.
+
+    A key absent from the base passes only as a move: a base key gone from head with the
+    same signature (text after the first '::') and a pin >= the new one.
+    """
+    moved_from = {}
+    for k, p in base.items():
+        if k not in head:
+            sig = k.split("::", 1)[-1]
+            moved_from[sig] = max(moved_from.get(sig, 0), p)
+    out = []
+    for k, p in sorted(head.items()):
+        if k in base:
+            if p > base[k]:
+                out.append((k, base[k], p))
+        elif p > moved_from.get(k.split("::", 1)[-1], 0):
+            out.append((k, None, p))
+    return out
+
+
 def write_baseline(path, measured, limit):
     text = open(path, encoding="utf-8").read()
     head = text[:text.index("[baseline]\n") + len("[baseline]\n")]
@@ -356,7 +379,21 @@ def selftest():
         ok = got == want
         failures += not ok
         print(f"  {'ok  ' if ok else 'FAIL'}  {name}: expected {want}, got {got}")
-    total = len(cases) + 2 + len(gate_cases)
+    ratchet_cases = [
+        ("pin unchanged passes", {"a::f": 30}, {"a::f": 30}, 0),
+        ("pin lowered passes", {"a::f": 30}, {"a::f": 28}, 0),
+        ("pin removed passes", {"a::f": 30}, {}, 0),
+        ("pin raised fails", {"a::f": 30}, {"a::f": 31}, 1),
+        ("new pin fails", {}, {"a::g": 26}, 1),
+        ("moved file, same signature, same pin passes", {"a::f": 30}, {"b::f": 30}, 0),
+        ("moved file with a raised pin fails", {"a::f": 30}, {"b::f": 31}, 1),
+    ]
+    for name, base, head, want in ratchet_cases:
+        got = len(pin_ratchet(base, head))
+        ok = got == want
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'}  {name}: expected {want}, got {got}")
+    total = len(cases) + 2 + len(gate_cases) + len(ratchet_cases)
     print(f"selftest: {total - failures}/{total} cases")
     return 1 if failures else 0
 
@@ -367,6 +404,7 @@ def main():
     ap.add_argument("--list", action="store_true", help="print every function over the threshold")
     ap.add_argument("--update", action="store_true", help="rewrite [baseline] from the tree")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--base-config", help="the base branch's baseline: pins may only shrink vs it")
     args = ap.parse_args()
     if args.selftest:
         return selftest()
@@ -375,6 +413,20 @@ def main():
         cfg = tomllib.load(f)
     limit = cfg["thresholds"]["cyclomatic"]
     baseline = cfg.get("baseline", {})
+    if args.base_config:
+        with open(args.base_config, "rb") as f:
+            base_cfg = tomllib.load(f)
+        raised = pin_ratchet(base_cfg.get("baseline", {}), baseline)
+        base_limit = base_cfg["thresholds"]["cyclomatic"]
+        print(f"pin ratchet vs base: {len(base_cfg.get('baseline', {}))} -> {len(baseline)} pins, "
+              f"threshold {base_limit} -> {limit}, {len(raised)} added/raised")
+        for k, p, c in raised:
+            print(f"FAIL  pin {'added' if p is None else f'raised {p} ->'} {c}  {k[:110]}")
+        if limit > base_limit:
+            print(f"FAIL  threshold raised {base_limit} -> {limit}")
+        if raised or limit > base_limit:
+            print("\nFAIL: pins may only shrink. Split the function below its old pin (or below the threshold).")
+            return 1
     bad = [k for k, v in baseline.items() if not isinstance(v, int) or v <= limit]
     if bad:
         print(f"ERROR: [baseline] values are integers above {limit}. Offenders:")
@@ -406,7 +458,7 @@ def main():
     for k, p, c in grown:
         print(f"FAIL  grew CCN {p} -> {c}  {k[:110]}")
     if new or grown:
-        print("\nFAIL: split the function. A new pin needs --update and a reason in the PR body.")
+        print("\nFAIL: split the function. Pins only shrink: a new or raised pin fails against the base.")
         return 1
     print("OK")
     return 0

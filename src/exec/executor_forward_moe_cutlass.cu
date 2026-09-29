@@ -222,11 +222,11 @@ bool device_args_done = false;
                     // Failed table upload: false, the caller's !ok fallback runs (no GEMM on stale tables).
                     const size_t ptr_bytes = ne * sizeof(const void*);
                     IMP_CUDA_CHECK_BOOL(cudaMemcpyAsync(static_cast<void*>(moe_.d_B_ptrs_cache),
-                                                        h_B_ptrs.data(), ptr_bytes, cudaMemcpyHostToDevice,
-                                                        stream));
+                                                        static_cast<const void*>(h_B_ptrs.data()), ptr_bytes,
+                                                        cudaMemcpyHostToDevice, stream));
                     IMP_CUDA_CHECK_BOOL(cudaMemcpyAsync(static_cast<void*>(moe_.d_SFB_ptrs_cache),
-                                                        h_SFB_ptrs.data(), ptr_bytes, cudaMemcpyHostToDevice,
-                                                        stream));
+                                                        static_cast<const void*>(h_SFB_ptrs.data()),
+                                                        ptr_bytes, cudaMemcpyHostToDevice, stream));
                     IMP_CUDA_CHECK_BOOL(cudaMemcpyAsync(moe_.d_alpha_full, h_alpha.data(), ne * sizeof(float),
                                                         cudaMemcpyHostToDevice, stream));
                     d_B   = moe_.d_B_ptrs_cache;

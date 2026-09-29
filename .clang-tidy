@@ -3,9 +3,11 @@
 # SCOPE: host .cpp / .h translation units, plus the host side of .cu TUs: nvcc
 # flags are unreadable to clang, so tools/tidy_cu_db.py rewrites the .cu entries
 # of compile_commands.json to `clang -x cuda --cuda-host-only` (#2210). The CI
-# tidy job lints changed .cpp and .cu. For IDEs, clangd picks this file up.
+# tidy job lints changed .cpp and .cu, `make tidy` all of them (scripts/tidy_lane.sh). For IDEs,
+# clangd picks this file up.
 #
-# Advisory: WarningsAsErrors is empty, so findings surface but do not block. The
+# WarningsAsErrors = the checks that fail the lane (tools/check_tidy_findings.py, pins in
+# tools/tidy_baseline.toml); every other check is advisory. The
 # disabled checks below are calibrated against a full sweep (it reported ~2000
 # findings, ~85% of them low-value style churn). We keep the bugprone-* /
 # performance-* / clang-diagnostic-* signal and drop the cosmetic mass (const on
@@ -111,6 +113,6 @@ Checks: >
   -clang-analyzer-core.NonNullParamChecker,
   -clang-analyzer-optin.core.EnumCastOutOfRange
 
-WarningsAsErrors: ''
+WarningsAsErrors: 'bugprone-*,clang-analyzer-*'
 HeaderFilterRegex: '(src|include/imp)/.*\.(h|hpp)$'
 FormatStyle: file

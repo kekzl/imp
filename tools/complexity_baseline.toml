@@ -5,9 +5,10 @@
 # This counter: 202 (lizard's #203 is the executor_attention_prefill.cu fragment,
 # charged here to run_attention); 3789 of 3821 shared functions equal lizard's CCN.
 # Every entry is a CEILING: growth by 1 fails, shrinking is a NOTE.
-# Regenerate with `python3 tools/check_complexity.py --update` and say in the
-# PR body why a function was added or grew. Key: `path::signature`, as in
-# function_size_thresholds.toml. Lines below [baseline] are generated.
+# Pins only shrink: scripts/ci_static_gates.sh passes the base branch's copy as
+# --base-config; an added or raised pin fails (#2210). Lower pins with `--update`.
+# Key: `path::signature`, as in function_size_thresholds.toml. Lines below
+# [baseline] are generated.
 #
 # Pin changes (newest first):
 #   #2212 item 3 (mtp_feed per-row body shared): mtp_feed_rows_multislot 50 -> 30, mtp_feed_batch 35 -> 15
@@ -113,7 +114,7 @@ skip_dirs = []
 "src/exec/executor_workspace_buffers.cu::bool GraphExecutor::allocate_nvfp4_dequant_workspace()" = 30
 "src/exec/executor_workspace_buffers.cu::bool GraphExecutor::chunk_capture_supported() const" = 45
 "src/exec/executor_workspace_buffers.cu::int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) const" = 29
-"src/exec/executor_workspace_buffers.cu::void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant)" = 226
+"src/exec/executor_workspace_buffers.cu::void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant)" = 225
 "src/exec/executor_workspace_buffers.cu::void GraphExecutor::free_buffers()" = 65
 "src/exec/expert_cache.cu::ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, ExpertCacheKey key, const void* src_host, size_t stamp_bytes, cudaStream_t stream, bool* hit)" = 26
 "src/exec/expert_cache.cu::int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fallback)" = 35
@@ -163,7 +164,7 @@ skip_dirs = []
 "src/model/safetensors_loader.cpp::static bool load_shard(const std::string& path, std::unordered_map<std::string, Tensor>& tensor_map, ShardInfo& shard, bool llm_compressor_format, bool keep_vision, imp::llm_compressor::TranslationCounters& counters, std::unordered_map<std::string, Tensor>* mtp_out = nullptr, bool sparse = false)" = 57
 "src/model/safetensors_loader.cpp::static bool load_sharded(const std::string& model_dir, std::unordered_map<std::string, Tensor>& tensor_map, std::vector<ShardInfo>& shards, bool keep_vision, std::unordered_map<std::string, Tensor>* mtp_out)" = 26
 "src/model/safetensors_loader.cpp::static void infer_config(ModelConfig& cfg, const std::unordered_map<std::string, Tensor>& tensors)" = 29
-"src/model/safetensors_loader.cpp::std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head)" = 133
+"src/model/safetensors_loader.cpp::std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head)" = 128
 "src/model/safetensors_writer.cpp::std::string write_safetensors(const std::string& path, const std::vector<SafeTensorsOut>& tensors, const std::vector<std::pair<std::string, std::string>>& metadata)" = 28
 "src/model/sentencepiece_loader.cpp::bool parse_sentencepiece_model(const void* data, size_t size, SentencePieceModel* out, std::string* err)" = 34
 "src/model/tensor_kind_matcher.cpp::TensorKind match_tensor_kind(std::string_view name)" = 79
@@ -177,7 +178,7 @@ skip_dirs = []
 "src/model/tokenizer_pretok.cpp::bool parse_class(const std::string& rx, size_t& i, std::vector<std::pair<uint32_t, uint32_t>>& out)" = 27
 "src/model/weight_map.cpp::bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string, Tensor>& tensors)" = 405
 "src/model/weight_map.cpp::std::string WeightMap::map_name(const std::string& name) const" = 126
-"src/model/weight_upload.cpp::bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t expert_reserve_bytes, bool warm_cache, const std::string& warm_cache_dir)" = 112
+"src/model/weight_upload.cpp::bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t expert_reserve_bytes, bool warm_cache, const std::string& warm_cache_dir)" = 111
 "src/model/weight_upload.cpp::static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_layers, size_t expert_reserve_bytes, const UploadCtx& ctx)" = 85
 "src/model/weight_upload.cpp::static bool upload_layer_attention_weights(TransformerLayer& L, int i, const UploadCtx& ctx)" = 37
 "src/model/weight_upload.cpp::static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx& ctx)" = 72
