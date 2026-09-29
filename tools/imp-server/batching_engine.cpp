@@ -103,6 +103,22 @@ void BatchingEngine::submit(std::shared_ptr<ServerRequest> req) {
     queue_cv_.notify_one();
 }
 
+void BatchingEngine::submit_all(const std::vector<std::shared_ptr<ServerRequest>>& reqs) {
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto& r : reqs)
+        r->t_submit = now;
+    if (faulted_.load(std::memory_order_relaxed) || stop_requested_.load(std::memory_order_relaxed)) {
+        for (const auto& r : reqs)
+            r->push_finish("internal_error");
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        pending_queue_.insert(pending_queue_.end(), reqs.begin(), reqs.end());
+    }
+    queue_cv_.notify_one();
+}
+
 int BatchingEngine::queue_depth() const {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     return static_cast<int>(pending_queue_.size()) + static_cast<int>(active_requests_.size());

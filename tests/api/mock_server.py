@@ -1096,13 +1096,10 @@ class MockHandler(BaseHTTPRequestHandler):
     # a raw prompt ending in ':' or '>' merges with an alphanumeric candidate (Qwen ":A").
     def _score_mode(self, body: dict) -> str | None:
         mode = body.get("mode", "auto")
-        if mode == "shared":
-            self._send_error(400, 'mode "shared" is not implemented yet, see #2198')
-            return None
-        if mode not in ("auto", "serial", "direct"):
+        if mode not in ("auto", "serial", "direct", "shared"):
             self._send_error(400, '"mode" must be one of auto, serial, direct, shared')
             return None
-        return "direct" if mode == "direct" else "serial"
+        return "serial" if mode == "auto" else mode
 
     @staticmethod
     def _mock_probs(seed: str, n: int) -> list[float]:
@@ -1157,7 +1154,7 @@ class MockHandler(BaseHTTPRequestHandler):
             probs = self._mock_probs(evidence + it["criterion"], len(letters))
             best = max(range(len(probs)), key=probs.__getitem__)
             prompt_tokens = evidence_tokens + max(1, len(it["criterion"] + "".join(it["options"])) // 4) + 8
-            cached = evidence_tokens if (mode == "serial" and i > 0) else 0
+            cached = evidence_tokens if (mode in ("serial", "shared") and i > 0) else 0
             total_prompt += prompt_tokens
             total_cached += cached
             out.append({"id": it.get("id", i), "probs": dict(zip(letters, probs)), "argmax": letters[best],

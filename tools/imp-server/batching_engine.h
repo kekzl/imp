@@ -123,6 +123,9 @@ public:
     // Submit a request for inference. Thread-safe.
     // The request will be picked up by the worker on the next iteration.
     void submit(std::shared_ptr<ServerRequest> req);
+    // All of `reqs` enter the queue under one lock: the worker admits them in the same
+    // iteration, so a /v1/decide shared wave has one batch composition (#2198).
+    void submit_all(const std::vector<std::shared_ptr<ServerRequest>>& reqs);
 
     // Returns the number of active + pending requests.
     int queue_depth() const;

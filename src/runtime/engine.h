@@ -354,6 +354,13 @@ public:
     uint64_t mixed_decode_steps() const noexcept {
         return mixed_decode_steps_.load(std::memory_order_relaxed);
     }
+    // Most sequences one ragged prefill forward carried since the last reset (tests, #2198).
+    int ragged_prefill_max_seqs() const noexcept {
+        return ragged_prefill_max_seqs_.load(std::memory_order_relaxed);
+    }
+    void reset_ragged_prefill_max_seqs() noexcept {
+        ragged_prefill_max_seqs_.store(0, std::memory_order_relaxed);
+    }
     // Counted by the pool itself, not mirrored here: growth is decided in
     // KVCache::try_grow_to and a second copy is a second thing to keep in sync.
     uint64_t kv_pool_growths() const noexcept { return kv_cache_raw_ ? kv_cache_raw_->growths() : 0; }
@@ -1457,7 +1464,7 @@ private:
     // Model/engine-level gate (lazily probes the layer stack once: Mamba2 and
     // MLA are out of scope, GDN requires the fused batched scan route).
     bool prefill_ragged_enabled_();
-    // Per-request gate: vision, embeddings, rerank scoring, logprobs and
+    // Per-request gate (Request::ragged_prefill_allowed): vision, embeddings, logprobs and
     // constrained decoding keep the serial path.
     bool prefill_ragged_req_ok_(const Request& req) const;
     // Concatenate the next chunk of each request into one ragged forward
@@ -1470,6 +1477,8 @@ private:
     // step needs no separate decode forward.
     void step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, int effective_chunk,
                               cudaStream_t stream, std::vector<std::shared_ptr<Request>>* riders = nullptr);
+    // Last-chunk epilogue of one ragged row: score capture + finish, or sample + stop check.
+    void ragged_finish_row_(std::shared_ptr<Request>& req, const Tensor& row, cudaStream_t stream);
     int prefill_ragged_model_ok_ = -1;  // lazy probe: -1 unknown, 0 no, 1 yes
 
     // ── Mixed prefill+decode step (runtime.prefill_mixed_decode) ──
@@ -1486,6 +1495,7 @@ private:
     void mixed_collect_riders_(std::vector<std::shared_ptr<Request>>& riders);
     bool mixed_served_this_step_ = false;
     std::atomic<uint64_t> mixed_decode_steps_{0};
+    std::atomic<int> ragged_prefill_max_seqs_{0};
 
     // step_decode sub-phase, one decoder: KV block for this step's token,
     // SWA window, StreamingLLM valves. False = cancelled, skip this step.
