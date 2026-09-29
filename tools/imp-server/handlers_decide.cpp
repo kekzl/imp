@@ -5,6 +5,7 @@
 #include "candidate_tokens.h"
 #include "handlers.h"
 #include "handlers_internal.h"
+#include "runtime/snapshot_boundary.h"
 #include "utils.h"
 
 #include <algorithm>
@@ -25,6 +26,7 @@ enum class ScoreMode { Serial, Direct };
 struct ScoreJob {
     std::vector<int32_t> tokens;
     std::vector<int32_t> ids;
+    int shared_prefix = 0;  // tokens shared with every sibling item (hybrid snapshot hint)
 };
 
 struct ScoreOut {
@@ -93,6 +95,7 @@ std::shared_ptr<ServerRequest> make_score_request(const ScoreJob& job, bool dire
     r->stream = false;
     r->score_token_ids = job.ids;
     r->bypass_prefix_cache = direct;
+    r->snapshot_hint_tokens = direct ? 0 : job.shared_prefix;
     r->status = imp::RequestStatus::PENDING;
     auto sr = std::make_shared<ServerRequest>();
     sr->request = r;
@@ -347,6 +350,17 @@ void handle_decide(const httplib::Request& req, httplib::Response& res, ServerSt
             letters_per_item.push_back(std::move(letters));
         }
         state.metrics.requests_total++;
+    }
+    // Hybrid models restore only at a snapshotted block: without a save at the shared evidence
+    // prefix, item 2+ diverge before item 1's prompt-end snapshot and reuse nothing.
+    if (mode == ScoreMode::Serial && jobs.size() >= 2) {
+        std::vector<std::vector<int32_t>> seqs;
+        seqs.reserve(jobs.size());
+        for (const auto& j : jobs)
+            seqs.push_back(j.tokens);
+        const int shared = imp::common_prefix_tokens(seqs);
+        for (auto& j : jobs)
+            j.shared_prefix = shared;
     }
 
     const auto t0 = std::chrono::steady_clock::now();

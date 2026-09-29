@@ -562,7 +562,7 @@ int Engine::swa_prefix_reuse_limit_(Request& req) {
     return 0;
 }
 
-int Engine::snapshot_end_(const Request& req) const {
+int Engine::snapshot_end_(const Request& req, int offset) const {
     // Hybrid: the recurrent store must be live; otherwise the SWA store.
     if (ssm_state_ ? !(recurrent_snapshots_ && recurrent_snapshots_->enabled())
                    : !(swa_snapshots_ && swa_snapshots_->enabled()))
@@ -572,8 +572,10 @@ int Engine::snapshot_end_(const Request& req) const {
     if (req.vision_emb || req.image || vision_.has_input())
         return 0;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
-    return snapshot_boundary(static_cast<int>(req.input_tokens.size()), bs,
-                             runtime_config_.server.snapshot_min_prompt_tokens);
+    // Hint only for the hybrid store: the SWA saver snapshots at the prompt's block floor, not snap_end.
+    return next_snapshot_boundary(static_cast<int>(req.input_tokens.size()), bs,
+                                  runtime_config_.server.snapshot_min_prompt_tokens,
+                                  ssm_state_ ? req.snapshot_hint_tokens : 0, offset);
 }
 
 // Core save: snapshots the seq's live window at the block-floor of `tokens`.

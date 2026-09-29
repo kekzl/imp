@@ -182,7 +182,7 @@ Response (values illustrative):
 
 | mode | behaviour |
 |---|---|
-| `serial` | item k+1 is submitted after item k finished: its evidence prefix is a prefix-cache hit (`cached_tokens` > 0 from item 2 on) |
+| `serial` | item k+1 is submitted after item k finished: its evidence prefix is a prefix-cache hit (`cached_tokens` > 0 from item 2 on). Hybrid models: each item also saves a recurrent snapshot at the block floor of the prefix all items share (`Request::snapshot_hint_tokens`) |
 | `direct` | all items submitted at once, each bypassing the prefix cache (`cached_tokens` = 0). `cache_prompt: false` does not do this; it only controls pinning |
 
 `POST /v1/score` request: `model`, exactly one of `prompt` (raw string, tokenized like `/v1/completions`) or `messages` (`[{role, content}]`, chat template + generation prompt), `candidates` (2 to 256 token strings or integer token ids), `mode` as above. Response: `candidates[] {candidate, token_id, logit, prob}`, `argmax_index`, `prompt_tokens`, `cached_tokens`, `mode_used`, `usage`.

@@ -164,3 +164,31 @@ TEST(GraphEligibility, EverySnapshotBoundaryFitsUnderTheRestoreCap) {
         }
     }
 }
+
+// #2198 serial decide on hybrids: items share the evidence prefix and diverge before the
+// prompt-end boundary, so the prefill saves one more snapshot at the shared prefix's block floor.
+TEST(GraphEligibility, SnapshotHintAddsTheSharedPrefixBoundary) {
+    EXPECT_EQ(next_snapshot_boundary(500, 16, 256, 350, 0), 336) << "hint floor comes first";
+    EXPECT_EQ(next_snapshot_boundary(500, 16, 256, 350, 336), 496) << "past the hint: prompt boundary";
+    EXPECT_EQ(next_snapshot_boundary(500, 16, 256, 0, 0), 496) << "no hint: unchanged";
+    EXPECT_EQ(next_snapshot_boundary(500, 16, 256, 200, 0), 496) << "hint under the minimum";
+    EXPECT_EQ(next_snapshot_boundary(500, 16, 256, 499, 0), 496) << "hint at or past the prompt boundary";
+    EXPECT_EQ(next_snapshot_boundary(200, 16, 256, 100, 0), 0) << "short prompt: no snapshot at all";
+    EXPECT_EQ(next_snapshot_boundary(100, 16, 0, 10, 0), 96) << "hint under one block";
+    for (int bs : {16, 32})
+        for (int n = 1; n <= 700; ++n)
+            for (int hint : {0, 17, 255, 256, 300, 511, 699}) {
+                const int s = next_snapshot_boundary(n, bs, 0, hint, 0);
+                ASSERT_EQ(s % bs, 0) << n << " " << bs << " " << hint;
+                ASSERT_LE(s / bs, (n - 1) / bs)
+                    << "n=" << n << " hint=" << hint << ": restore cap rejects it";
+            }
+}
+
+TEST(GraphEligibility, CommonPrefixTokens) {
+    EXPECT_EQ(common_prefix_tokens({}), 0);
+    EXPECT_EQ(common_prefix_tokens({{1, 2, 3}}), 0) << "one sequence shares with nobody";
+    EXPECT_EQ(common_prefix_tokens({{1, 2, 3}, {1, 2, 4}, {1, 2, 3, 5}}), 2);
+    EXPECT_EQ(common_prefix_tokens({{1, 2}, {1, 2}}), 2);
+    EXPECT_EQ(common_prefix_tokens({{7, 2}, {1, 2}}), 0);
+}

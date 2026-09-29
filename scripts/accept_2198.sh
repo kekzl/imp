@@ -87,16 +87,21 @@ fi
 
 # Check 2: argmax equals the letter a temperature-0, max_tokens=1, regex-constrained chat produces.
 match=0
+# /v1/chat/completions requires "model"; the decide response names the loaded one.
+MODEL_ID="$(jq -r '.model // empty' "$WORK/serial.json")"
 for i in $(seq 0 $((N_ITEMS - 1))); do
-    body="$(jq -c --argjson i "$i" --arg sys "$SYS" '
+    body="$(jq -c --argjson i "$i" --arg sys "$SYS" --arg model "$MODEL_ID" '
         .items[$i] as $it |
         ([range(0; $it.options | length) | [65 + .] | implode]) as $L |
         {evidence: .evidence, criterion: $it.criterion,
          options: ([range(0; $L | length)] | map({key: $L[.], value: $it.options[.]}) | from_entries)} as $u |
-        {messages: [{role: "system", content: $sys}, {role: "user", content: ($u | tojson)}],
+        {model: $model, messages: [{role: "system", content: $sys}, {role: "user", content: ($u | tojson)}],
          temperature: 0, max_tokens: 1, repetition_penalty: 1.0,
          response_format: {type: "regex", regex: ("(" + ($L | join("|")) + ")")}}' "$WORK/set.json")"
-    chat="$(printf '%s' "$body" | post /v1/chat/completions | jq -r '.choices[0].message.content // "ERR"')"
+    raw="$(printf '%s' "$body" | post /v1/chat/completions)"
+    chat="$(jq -r '.choices[0].message.content // "ERR"' <<<"$raw" 2>/dev/null)"
+    chat="${chat:-ERR}"
+    [ "$chat" = ERR ] && echo "  item $i chat error: $(head -c 200 <<<"$raw")"
     want="$(jq -r --argjson i "$i" '.items[$i].argmax // "none"' "$WORK/serial.json")"
     if [ "$chat" = "$want" ]; then match=$((match + 1)); else echo "  item $i: decide=$want chat=$chat"; fi
 done
@@ -108,9 +113,9 @@ echo "  info: argmax equals the true option on $(jq '[.items[] | select(.argmax_
 ev_tokens="$(jq -c '{content: .evidence}' "$WORK/set.json" | post /tokenize | jq '.tokens | length')"
 min_cached="$(jq '[.items[1:][] | .cached_tokens] | min' "$WORK/serial.json")"
 if [ -n "$ev_tokens" ] && [ -n "$min_cached" ] && [ "$min_cached" != null ] && [ "$min_cached" -ge "$ev_tokens" ]; then
-    pass "serial-cached: min cached_tokens over items 2..$N_ITEMS = $min_cached >= evidence tokens $ev_tokens"
+    pass "serial-cached: min cached_tokens over items 2..$N_ITEMS = $min_cached >= evidence tokens $h_ev"
 else
-    fail "serial-cached: min cached_tokens over items 2..$N_ITEMS = $min_cached, evidence tokens $ev_tokens"
+    fail "serial-cached: min cached_tokens over items 2..$N_ITEMS = $min_cached, evidence tokens $h_ev"
 fi
 
 # Check 4: direct reports cached_tokens == 0 on every item, with the evidence already cached.
@@ -139,13 +144,20 @@ for mode in direct serial; do
     done
 done
 
-# Check 6: hybrid model (recurrent-snapshot prefix path). Serial first: control (items 2..8 reuse > 0,
-# else the path is inactive and the direct check proves nothing) and it caches every prompt direct sends.
+# Check 6: hybrid model (recurrent-snapshot prefix path). Serial items 2..8 must restore the shared
+# evidence prefix (snapshot saved at its block floor, #2198); it also caches every prompt direct sends.
 start_server "$HYBRID"
 decide serial 8 "" > "$WORK/h_serial.json"
 h_ctl="$(jq '[.items[1:][] | .cached_tokens] | min' "$WORK/h_serial.json" 2>/dev/null)"
+echo "  info: hybrid serial cached_tokens $(jq -c '[.items[] | .cached_tokens]' "$WORK/h_serial.json" 2>/dev/null)"
+h_ev="$(jq -c '{content: .evidence}' "$WORK/set.json" | post /tokenize | jq '.tokens | length')"
 decide direct 8 "" > "$WORK/h_direct.json"
 h_max="$(jq '[.items[] | .cached_tokens] | max' "$WORK/h_direct.json" 2>/dev/null)"
+if [[ "$h_ctl" =~ ^[0-9]+$ ]] && [[ "$h_ev" =~ ^[0-9]+$ ]] && [ "$h_ctl" -ge "$h_ev" ]; then
+    pass "hybrid-serial-cached ($HYBRID): items 2..8 min cached_tokens = $h_ctl >= evidence tokens $h_ev"
+else
+    fail "hybrid-serial-cached ($HYBRID): items 2..8 min cached_tokens = $h_ctl, evidence tokens $h_ev"
+fi
 if ! [[ "$h_ctl" =~ ^[0-9]+$ ]] || [ "$h_ctl" -le 0 ]; then
     fail "hybrid-direct-uncached ($HYBRID): control inactive, serial items 2..8 min cached_tokens = $h_ctl"
 elif [ "$h_max" = 0 ]; then

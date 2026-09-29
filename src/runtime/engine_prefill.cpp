@@ -465,7 +465,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     // the largest block-aligned prompt position so state there can be
     // captured (only full blocks are cacheable). Extra tail chunk is at most
     // block_size-1 tokens; prompts under server.snapshot_min_prompt_tokens skip the boundary (snapshot_boundary.h).
-    const int snap_end = snapshot_end_(*req);
+    const int snap_end = snapshot_end_(*req, offset);
     if (snap_end > offset && snap_end < offset + chunk_len) {
         chunk_len = snap_end - offset;
         is_last_chunk = false;

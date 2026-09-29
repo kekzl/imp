@@ -21,8 +21,8 @@ Usage:
 
 import argparse
 import json
-import os
 import math
+import os
 import random
 import signal
 import sys

@@ -1390,7 +1390,7 @@ private:
     // same admission/save pattern as the hybrid pair, but the state is the
     // packed windowed-layer KV instead of the recurrent slab.
     int swa_prefix_reuse_limit_(Request& req);
-    int snapshot_end_(const Request& req) const;  // hybrid or SWA save position, 0 = none
+    int snapshot_end_(const Request& req, int offset = 0) const;  // next hybrid/SWA save position, 0 = none
     void maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> tokens,
                                        cudaStream_t stream, bool hard_sync);
     void finish_request(std::shared_ptr<Request>& req);
