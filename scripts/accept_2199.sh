@@ -251,11 +251,11 @@ fi
 docker rm -f "$CTR" >/dev/null 2>&1
 
 # ================= Phase C: model swap drops LoRA adapters (#2217) =================
-# The same weights mounted under a second name are a real swap (full teardown + load) whose
-# shapes still fit the adapter: the drop is policy, not a shape refusal.
+# The same weights mounted under two names in --models-dir: both resolve, every name change is
+# a real swap (full teardown + load) whose shapes still fit the adapter: the drop is policy.
 SWAP_ID="$MODEL-swap"
 SWAP_CYCLES=4  # even: ends on the start model
-DOCKER_EXTRA=(-v "$MODELS_DIR/$MODEL":"/swap/$SWAP_ID":ro)
+DOCKER_EXTRA=(-v "$MODELS_DIR/$MODEL":"/swap/$MODEL":ro -v "$MODELS_DIR/$MODEL":"/swap/$SWAP_ID":ro)
 if ! start_server --models-dir /swap; then
     verdict C8-swap-drops-lora FAIL "server with --models-dir /swap did not start"
     verdict C9-swap-frees-lora-vram FAIL "server with --models-dir /swap did not start"
@@ -287,19 +287,22 @@ else
             [ "$ust" = 404 ] && [ "$uerr" = lora_not_found ] || swap_bad+=" c$c"
     done
     swap_end=$(vram_used)
+    # Control: every name change above was a swap (2 warm-up + one per cycle), or C8/C9 are blind.
+    swaps=$(docker logs "$CTR" 2>&1 | grep -c "\[model-swap\] now serving")
+    echo "swaps logged: $swaps (want $((SWAP_CYCLES + 2)))"
     drop_logs=$(docker logs "$CTR" 2>&1 | grep -c "\[model-swap\] dropped LoRA adapter 'acc'.*: model swapped")
     echo "drop log lines: $drop_logs"
-    if [ -z "$swap_bad" ] && [ "$drop_logs" = "$SWAP_CYCLES" ]; then
+    if [ "$swaps" = $((SWAP_CYCLES + 2)) ] && [ -z "$swap_bad" ] && [ "$drop_logs" = "$SWAP_CYCLES" ]; then
         verdict C8-swap-drops-lora PASS "$SWAP_CYCLES/$SWAP_CYCLES swaps: request 400 lora_not_loaded, unload 404 lora_not_found, $drop_logs drop log lines"
     else
-        verdict C8-swap-drops-lora FAIL "failed cycles:${swap_bad:- none}, drop log lines $drop_logs (want $SWAP_CYCLES)"
+        verdict C8-swap-drops-lora FAIL "swaps $swaps (want $((SWAP_CYCLES + 2))), failed cycles:${swap_bad:- none}, drop log lines $drop_logs (want $SWAP_CYCLES)"
     fi
     # A leaked adapter per swap would add load_delta each cycle; one adapter's worth is the limit.
     swap_drift=$((swap_end - swap_base))
-    if [ "$load_delta" -ge 32 ] && [ "$swap_drift" -lt "$load_delta" ]; then
+    if [ "$swaps" = $((SWAP_CYCLES + 2)) ] && [ "$load_delta" -ge 32 ] && [ "$swap_drift" -lt "$load_delta" ]; then
         verdict C9-swap-frees-lora-vram PASS "used $swap_base -> $swap_end MiB after $SWAP_CYCLES swaps with an adapter loaded (drift $swap_drift, adapter $load_delta MiB)"
     else
-        verdict C9-swap-frees-lora-vram FAIL "used $swap_base -> $swap_end MiB (drift $swap_drift), adapter load delta $load_delta MiB (control needs >= 32, drift must be below it)"
+        verdict C9-swap-frees-lora-vram FAIL "swaps $swaps (want $((SWAP_CYCLES + 2))), used $swap_base -> $swap_end MiB (drift $swap_drift), adapter load delta $load_delta MiB (control needs >= 32, drift must be below it)"
     fi
 fi
 
