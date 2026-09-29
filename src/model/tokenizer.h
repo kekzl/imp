@@ -50,8 +50,11 @@ public:
     void set_add_space_prefix(bool add) { add_space_prefix_ = add; }
     bool add_space_prefix() const { return add_space_prefix_; }
 
-    // Pre-tokenizer type from GGUF metadata (e.g. "default", "llama3", "deepseek-llm")
-    void set_pre_tokenizer(const std::string& pre) { pre_tokenizer_ = pre; }
+    // Pre-tokenizer type from GGUF metadata (e.g. "default", "llama3", "deepseek-llm").
+    // "deepseek-r1-qwen": tokenizer.json regex and NFC equal Qwen2's, stored as "qwen2" (#2270).
+    void set_pre_tokenizer(const std::string& pre) {
+        pre_tokenizer_ = pre == "deepseek-r1-qwen" ? "qwen2" : pre;
+    }
     const std::string& pre_tokenizer() const { return pre_tokenizer_; }
 
     // Chat template string from GGUF metadata (Jinja2 format, used for detection)

@@ -710,6 +710,8 @@ std::string ChatTemplate::render_jinja(const Tokenizer& tok, const std::vector<C
     // Build Jinja2 context
     jinja::Context ctx;
     ctx["messages"] = jinja::Value(build_jinja_messages(msgs, suppress_thinking));
+    // HF apply_chat_template passes tools=None: `tools is defined` holds without tools (#2269).
+    ctx["tools"] = jinja::Value();
     ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
     // Stamp enable_thinking only when the caller has an opinion: Qwen3 defaults undefined to an
     // open <think>, Gemma-4 to a pre-closed thought block. force_thinking opens a template's

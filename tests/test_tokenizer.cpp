@@ -719,6 +719,15 @@ TEST(Qwen2PreTokenizeTest, Qwen35RoutesToQwen2NotGpt2) {
     EXPECT_NE(tok.encode("x->y", /*no_prefix=*/true), qwen2_ids);
 }
 
+// #2270: GGUF pre "deepseek-r1-qwen" (DeepSeek-R1-Distill-Qwen) is the Qwen2 regex + NFC.
+TEST(Qwen2PreTokenizeTest, DeepSeekR1QwenMapsToQwen2) {
+    Tokenizer tok = make_gpt2_tokenizer();
+    tok.set_pre_tokenizer("deepseek-r1-qwen");
+    EXPECT_EQ(tok.pre_tokenizer(), "qwen2");
+    tok.set_pre_tokenizer("qwen35");
+    EXPECT_EQ(tok.pre_tokenizer(), "qwen35");
+}
+
 // #657: expected chunks verified against HF tokenizers pre_tokenize_str on the gpt-oss-20b
 // tokenizer.json (rendered as plain space/newline here).
 

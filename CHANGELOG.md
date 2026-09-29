@@ -26,6 +26,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Qwen3.8-Flash-Next (host-resident experts): the F16 GDN in/gate/out are freed after load; M>32 prefill runs their NVFP4 (in) / MXFP8 (gate, out, now "auto") copies, smaller M rebuild from those. Expert cache 290 -> 355 slots/layer, tg512 prose 66.81 -> 70.24 tok/s, 45k PPL windows +0.31 % / -0.21 %.
 
 ### Fixed
+- Forced tool-call envelope: at most 2 whitespace chars before the open literal, then `<` is forced. Phi-4-reasoning-plus emitted tabs until `max_tokens` on degen_suite's forced `tool_choice` (#2273).
+- Jinja context defines `tools` as none without tools, like HF `apply_chat_template`: gpt-oss `--chat` parity 3/3 -> 0/3 mismatched (#2269).
+- GGUF pre `deepseek-r1-qwen` uses the Qwen2 pre-tokenizer and NFC: DeepSeek-R1-Distill-Qwen-1.5B Q4_K_M parity 842/1196 -> 0/1196 mismatched (#2270).
 - Tokenizer parity with HF `tokenizers` (`tools/tokenizer_parity/run.sh`, 1196 strings): Unicode classes in the regex pre-tokenizers, full NFC, Gemma-4 tokenizer.json as gemma4 BPE, added-token lstrip/rstrip. Mismatches: Gemma-4 NVFP4 1196 -> 0, Qwen3 544 -> 0, DeepSeek-V2 400 -> 0, Phi-4 142 -> 0, gpt-oss 123 -> 0.
 - Device index products (#2218, #2259): 180 int32 products that can pass 2^31 (token, row, KV-slot, split, weight and unvalidated SSM/GDN extents) multiply in int64; 381 keep int32 behind an explicit cast and a bound from a template constant or an enforced check. NVFP4 HW quant strides are int64. No kernel spills (max +8 regs).
 - FP16 FMHA prefill picks Bq only among instanced (Bq, head_dim) tiles. Off sm_120 smem limits, HD512 could select Bq=32 and HD256 Bq=16, both with no kernel, so the launch returned false. sm_120 choices unchanged (#2243).

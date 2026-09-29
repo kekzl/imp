@@ -100,6 +100,9 @@ struct SchemaFrame {
     // the delimiter. Null = free raw text.
     const SchemaNode* xml_enum = nullptr;
 
+    // ENVELOPE_OPEN frames: whitespace chars consumed before the open literal (#2273).
+    int lead_ws = 0;
+
     // True right after a ',' inside an object: a key is now mandatory, so the
     // object may not close (`}`) until another key/value is emitted — prevents
     // trailing commas (`{"a":1,}`).
