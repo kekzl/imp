@@ -20,6 +20,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Qwen3.8-Flash-Next (host-resident experts): the F16 GDN in/gate/out are freed after load; M>32 prefill runs their NVFP4 (in) / MXFP8 (gate, out, now "auto") copies, smaller M rebuild from those. Expert cache 290 -> 355 slots/layer, tg512 prose 66.81 -> 70.24 tok/s, 45k PPL windows +0.31 % / -0.21 %.
 
 ### Fixed
+- FP16 FMHA prefill picks Bq only among instanced (Bq, head_dim) tiles. Off sm_120 smem limits, HD512 could select Bq=32 and HD256 Bq=16, both with no kernel, so the launch returned false. sm_120 choices unchanged (#2243).
 - `gemm.nvfp4_lm_head=auto` builds the FP8 head only from a 16-bit head; an 8-bit GGUF head (Q8_0) stays at checkpoint precision. Qwen3-8B-Q8_0 first token: This -0.674 (FP8) -> The -0.646, HF fp32 The -0.644 (#2224).
 - GDN hybrids with `gdn.state_bf16 = false` (FP32 state): a recurrent snapshot over a 65+ row scan threw `h_snap needs a single chunk`, and at exactly 64 rows the slab stayed unwritten. Snapshot scans now run the fused kernel over the whole range (#2214).
 - `runtime.deterministic`: cuBLAS `cublasGemm*Ex` calls used `CUBLAS_GEMM_AUTOTUNE`, which times algorithms once per process, so Gemma-4 NVFP4 answered in one of two ways per server (2 of 6 vs 4 of 6). Deterministic mode now takes `CUBLAS_GEMM_DEFAULT`: 12 of 12 processes identical.

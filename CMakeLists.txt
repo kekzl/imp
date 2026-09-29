@@ -894,6 +894,8 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_dispatch_rules.cpp
         # FP8 FMHA tile selector: every (Bq, head_dim) it can return has a kernel instance (#2195).
         tests/test_fmha_fp8_tile_select.cpp
+        # FP16 FMHA tile selector: same invariant for fmha_sm120_prefill (#2243).
+        tests/test_fmha_sm120_tile_select.cpp
         # The serving metadata pool's byte layout (invariant I2): every region
         # 256-aligned, disjoint and inside the one allocation the paths share.
         tests/test_serving_metadata_layout.cpp
