@@ -11,6 +11,7 @@ What the HTTP surface actually accepts.
 
 - Status legend from [`FEATURES.md`](FEATURES.md): ✅ code path plus a gated test, 🟡 code path, no test.
 - Constrained decoding, tool calling, thinking/reasoning and images: [`API_FEATURES.md`](API_FEATURES.md).
+- Closed-choice scoring (`/v1/decide`, `/v1/score`): [`API_SCORING.md`](API_SCORING.md).
 
 **Two dialects, both native.** `/v1/messages` is implemented against the
 Anthropic wire format directly, no shim in either direction. All three
@@ -28,7 +29,7 @@ all of them at once.
 | `POST /v1/responses` | ✅ | OpenAI Responses, the dialect Codex and the Agents SDK speak by default; stateless, so use `store: false` and resend the transcript in `input` |
 | `POST /v1/embeddings` | ✅ | needs an embedding model loaded |
 | `POST /v1/rerank`, `POST /rerank` | ✅ | Cohere/Jina/vLLM shape |
-| `POST /v1/decide` | 🟡 | closed-choice letter scoring, no decoding; see [below](#closed-choice-scoring-v1decide-v1score). GPU acceptance: `scripts/accept_2198.sh` |
+| `POST /v1/decide` | 🟡 | closed-choice letter scoring, no decoding; see [`API_SCORING.md`](API_SCORING.md). GPU acceptance: `scripts/accept_2198.sh` |
 | `POST /v1/score` | 🟡 | softmax over caller-given candidate tokens at the last prompt position |
 | `POST /tokenize`, `POST /detokenize` | ✅ | `/tokenize` takes `content` (llama.cpp) or `prompt` (vLLM) |
 | `GET /v1/models` | ✅ | loaded model plus the rest of the directory, each with `loaded: true|false`; the loaded entry carries `meta.reasoning_effort` `{values, default}` when its chat template names the list (Qwen3.8: `xhigh`, `medium`, `low`) |
@@ -147,53 +148,6 @@ pinned region, rather than pinning the whole prompt. Usage reporting carries
 The cache is keyed on the picture as well as the token ids for image requests,
 and it is model-fingerprint-gated on disk, so a cache file from another model is
 never replayed.
-
-## Closed-choice scoring: `/v1/decide`, `/v1/score`
-
-One prefill per item, no sampling: the answer is a softmax over candidate-token logits at the last prompt position (#2198).
-
-`POST /v1/decide` request:
-
-| field | type | rule |
-|---|---|---|
-| `model` | string | optional, as on every route |
-| `evidence` | string | required; shared by every item |
-| `system` | string | optional; default `Answer only with the letter of the correct option.` |
-| `mode` | string | `auto` (= `serial`), `serial`, `direct`; `shared` is a 400 until implemented (#2198) |
-| `items[]` | array | required, non-empty, at most `--max-batch-items` |
-| `items[].id` | any | optional, echoed; default the item index |
-| `items[].criterion` | string | required |
-| `items[].options` | string array | 2 to 16 entries, labelled `A` to `P` |
-
-Prompt per item:
-
-- `[system, user]` through the model's chat template, generation prompt appended, thinking suppressed.
-- user message: compact JSON, keys in this order: `{"evidence":...,"criterion":...,"options":{"A":...,"B":...}}`.
-- evidence first, so every item shares the evidence prefix.
-
-Response (values illustrative):
-
-```json
-{"object": "decide", "model": "...", "mode_used": "serial",
- "items": [{"id": "paid", "probs": {"A": 0.93, "B": 0.05, "C": 0.02}, "argmax": "A",
-            "argmax_index": 0, "prompt_tokens": 71, "cached_tokens": 48}],
- "usage": {"prompt_tokens": 71, "cached_tokens": 48, "total_tokens": 71}}
-```
-
-| mode | behaviour |
-|---|---|
-| `serial` | item k+1 is submitted after item k finished: its evidence prefix is a prefix-cache hit (`cached_tokens` > 0 from item 2 on). Hybrid models: each item also saves a recurrent snapshot at the block floor of the prefix all items share (`Request::snapshot_hint_tokens`) |
-| `direct` | all items submitted at once, each bypassing the prefix cache (`cached_tokens` = 0). `cache_prompt: false` does not do this; it only controls pinning |
-
-`POST /v1/score` request: `model`, exactly one of `prompt` (raw string, tokenized like `/v1/completions`) or `messages` (`[{role, content}]`, chat template + generation prompt), `candidates` (2 to 256 token strings or integer token ids), `mode` as above. Response: `candidates[] {candidate, token_id, logit, prob}`, `argmax_index`, `prompt_tokens`, `cached_tokens`, `mode_used`, `usage`.
-
-Token guards, each a 400:
-
-| check | example |
-|---|---|
-| a letter or candidate string encodes to exactly one token | `"Xylophone"` is several |
-| `tokenize(prefix + c) == tokenize(prefix) + [id]`, prefix = prompt text after its last control token | a prompt ending in `:` or `>`: `":A"`, `">A"` are single tokens in Qwen, gpt-oss and Nemotron vocabularies |
-| candidate ids are distinct and inside the vocabulary | |
 
 ## Request tracing
 
