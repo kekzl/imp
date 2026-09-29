@@ -729,6 +729,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset, chunk_len,
                                               ppl_capture_.d_nll, pf_stream, ppl_capture_.d_match);
         }
+        prompt_logprobs_chunk_(*req, offset, chunk_len, pf_stream);
 
         // Embedding pooling for this chunk (#1005): hidden_ still holds it.
         if (req->embedding_request)
@@ -891,6 +892,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset, chunk_len,
                                               ppl_capture_.d_nll, pf_stream, ppl_capture_.d_match);
         }
+        prompt_logprobs_chunk_(*req, offset, chunk_len, pf_stream);
 
         req->output_tokens.push_back(next_token);
         track_think_state(*req, next_token);

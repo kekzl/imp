@@ -369,6 +369,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_graph_decode.cpp
     src/runtime/engine_scheduler.cpp
     src/runtime/engine_prefill.cpp
+    src/runtime/engine_prompt_logprobs.cpp
     src/runtime/engine_decode_pipeline.cpp
     src/runtime/engine_prefill_ragged.cpp
     src/runtime/engine_qwen3vl.cpp
@@ -433,6 +434,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_attention.cu
     src/exec/executor_forward.cu
     src/exec/executor_perplexity.cu
+    src/exec/executor_prompt_logprobs.cu
     src/exec/executor_lm_head_fp8.cu
     src/exec/executor_lora.cu
     src/lora/lora_adapter.cpp
@@ -626,6 +628,7 @@ if(IMP_BUILD_SERVER)
     tools/common/mtp_auto.cpp
     tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
+        tools/imp-server/prompt_logprobs.cpp
         tools/imp-server/rate_limit.cpp
         tools/imp-server/logit_bias.cpp
         tools/imp-server/tool_call.cpp
@@ -917,6 +920,8 @@ if(IMP_BUILD_TESTS)
             tests/test_spec_usage.cpp  # includes handlers_internal.h -> httplib.h
             tests/test_sse_stream_utils.cpp
             tests/test_logprobs_shapes.cpp
+            tools/imp-server/prompt_logprobs.cpp
+            tests/test_prompt_logprobs.cpp
             tests/test_tool_call.cpp
         tests/test_regex_constrain.cpp
             tests/test_tool_stream_filter.cpp
