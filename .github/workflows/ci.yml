@@ -1031,7 +1031,7 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: clang + libFuzzer (pin: scripts/install_llvm.sh)
+      - name: "clang + libFuzzer (pin: scripts/install_llvm.sh)"
         run: bash scripts/install_llvm.sh clang libclang-rt
 
       - name: Restore the corpus
