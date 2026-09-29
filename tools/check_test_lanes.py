@@ -340,7 +340,9 @@ def main():
     # tokenizer.json (model file via IMP_TEST_TOKENIZER_QWEN3, no GPU).
     # 1162 -> 1164: KVHostSpillGpuTest x2 TEST_P (test-kv): host spill tier round trip and its no-tier
     # control on a device KVCache (#2203).
-    PINNED = 1164
+    # 1164 -> 1165: DequantGptqGpu.KernelBitEqualToHostReference (test-quant): dequant_gptq4 kernel vs
+    # host reference (#2249); needs a card.
+    PINNED = 1165
 
     text = CMAKE.read_text()
     mods = module_sources(text)
