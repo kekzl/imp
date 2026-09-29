@@ -111,6 +111,7 @@ public:
         return ok;
     }
 
+protected:
     MemError do_commit_range(Region& region, size_t offset, size_t bytes) override {
         if (bytes == 0)
             return MemError::Ok;
@@ -128,6 +129,7 @@ public:
         return e;
     }
 
+public:
     MemError decommit_range(Region& region, size_t offset, size_t bytes) override {
         if (bytes == 0)
             return MemError::Ok;
@@ -146,6 +148,7 @@ public:
         return MemError::Ok;
     }
 
+protected:
     MemError do_commit(Region& region, size_t new_committed) override {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = regions_.find(region.base());
@@ -165,6 +168,7 @@ public:
         return e;
     }
 
+public:
     BackendStats stats() const override {
         std::lock_guard<std::mutex> lock(mu_);
         BackendStats s = stats_;

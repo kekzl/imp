@@ -104,7 +104,7 @@ bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_
     out.expert_stride_ms = static_cast<size_t>(N) * ms_per_row;
     out.borrowed = false;
     if (h_tscales_out)
-        *h_tscales_out = tscales;
+        *h_tscales_out = std::move(tscales);
     return true;
 }
 
