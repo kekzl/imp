@@ -23,6 +23,27 @@ static constexpr int MAX_TOP_K = 128;
     return synced_token_or_throw(cudaStreamSynchronize(stream), &h_token, who);
 }
 
+// Sampler launch status (#2310): a non-sticky launch error never reaches the later sync, which then
+// reads a stale d_result as the token. begin clears an unrelated stale error, so the cudaGetLastError()
+// passed to status right after a launch is that launch's own. No sync, capture-safe.
+inline void sampler_launch_begin(const char* who) {
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess)
+        IMP_LOG_WARN("%s: stale CUDA error cleared before the sampler launch: %s", who,
+                     cudaGetErrorString(e));
+}
+
+[[nodiscard]] inline cudaError_t sampler_launch_status(cudaError_t e, const char* who) {
+    if (e != cudaSuccess)
+        IMP_LOG_ERROR("%s: sampler kernel launch failed: %s", who, cudaGetErrorString(e));
+    return e;
+}
+
+// Launch chain: the first failure wins, a later launch's status never masks it.
+[[nodiscard]] inline cudaError_t first_launch_error(cudaError_t first, cudaError_t next) {
+    return first != cudaSuccess ? first : next;
+}
+
 // Per-TU cleanup helpers for file-scope persistent scratch that is split across
 // translation units. sampling_cleanup() (public) calls both.
 void sampling_cleanup_cub();  // frees CUB sort scratch (sampling_topk_topp.cu)

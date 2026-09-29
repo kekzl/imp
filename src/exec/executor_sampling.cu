@@ -127,7 +127,8 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
                 auto* slot = reinterpret_cast<int32_t*>(reinterpret_cast<char*>(d_sample_result_) +
                                                         static_cast<size_t>(i) * SAMPLE_SCRATCH_BYTES);
                 if (greedy) {
-                    sample_greedy_async(seq_logits, slot, stream);
+                    sampler_enqueued_or_throw(sample_greedy_async(seq_logits, slot, stream),
+                                              "sample_tokens");  // false = launch failed (#2310)
                 } else {
                     unsigned int seed =
                         state.seed >= 0 ? static_cast<unsigned int>(state.seed + i) : (42u + i);
@@ -382,7 +383,8 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
             g.d_result = slot;
             return true;
         }
-        sample_greedy_async(flat, slot, stream);
+        sampler_enqueued_or_throw(sample_greedy_async(flat, slot, stream),
+                                  "sample_single_from_logits_async");  // false = launch failed (#2310)
         return true;
     }
     unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
@@ -427,32 +429,34 @@ void GraphExecutor::flush_pending_penalty_rows_(cudaStream_t stream) {
 // Flush the stashed greedy rows: one pinned H2D, one batched partial + one
 // batched reduce covering every row (bit-identical per row to
 // sample_greedy_async — same geometry, same slot scratch).
-void GraphExecutor::flush_pending_greedy_rows_(cudaStream_t stream) {
+cudaError_t GraphExecutor::flush_pending_greedy_rows_(cudaStream_t stream) {
     if (n_pending_greedy_rows_ <= 0)
-        return;
+        return cudaSuccess;
     GreedyRowArgs* h_base = h_greedy_args_.as<GreedyRowArgs>() +
                             static_cast<ptrdiff_t>(sample_parity_) * sample_slots_;
     GreedyRowArgs* d_base = d_greedy_args_ + static_cast<ptrdiff_t>(sample_parity_) * sample_slots_;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_base, h_base, sizeof(GreedyRowArgs) * n_pending_greedy_rows_,
                                        cudaMemcpyHostToDevice, stream));
-    launch_greedy_rows(d_base, n_pending_greedy_rows_, pending_sample_vocab_, stream);
+    const cudaError_t launched = launch_greedy_rows(d_base, n_pending_greedy_rows_, pending_sample_vocab_, stream);
     n_pending_greedy_rows_ = 0;
+    return launched;
 }
 
 // Flush the stashed top-k rows of the ACTIVE parity half: one pinned H2D of
 // the args, one partial + one finalize launch covering every row.
-void GraphExecutor::flush_pending_topk_rows_(cudaStream_t stream) {
+cudaError_t GraphExecutor::flush_pending_topk_rows_(cudaStream_t stream) {
     if (n_pending_topk_rows_ <= 0)
-        return;
+        return cudaSuccess;
     TopkRowArgs* h_base = h_row_args_.as<TopkRowArgs>() +
                           static_cast<ptrdiff_t>(sample_parity_) * sample_slots_;
     TopkRowArgs* d_base = d_row_args_ + static_cast<ptrdiff_t>(sample_parity_) * sample_slots_;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_base, h_base, sizeof(TopkRowArgs) * n_pending_topk_rows_,
                                        cudaMemcpyHostToDevice, stream));
-    launch_topk_topp_rows(d_base, n_pending_topk_rows_, pending_topk_max_k_, pending_topk_vocab_,
-                          stream);
+    const cudaError_t launched = launch_topk_topp_rows(d_base, n_pending_topk_rows_, pending_topk_max_k_,
+                                                       pending_topk_vocab_, stream);
     n_pending_topk_rows_ = 0;
     pending_topk_max_k_ = 0;
+    return launched;
 }
 
 bool GraphExecutor::append_sampled_history(const PenaltyAppendArgs& args, int32_t* d_hist,
@@ -474,8 +478,11 @@ const int32_t* GraphExecutor::collect_sampled_tokens(int n_slots, cudaStream_t s
         return nullptr;
     }
     flush_pending_penalty_rows_(stream);
-    flush_pending_greedy_rows_(stream);
-    flush_pending_topk_rows_(stream);
+    // Both flushes run (pending counts reset) before a launch failure throws (#2310).
+    const cudaError_t greedy_launched = flush_pending_greedy_rows_(stream);
+    const cudaError_t topk_launched = flush_pending_topk_rows_(stream);
+    cuda_call_or_throw(greedy_launched, "collect_sampled_tokens greedy rows");
+    cuda_call_or_throw(topk_launched, "collect_sampled_tokens top-k rows");
     // Slots are SAMPLE_SCRATCH_BYTES apart; the token is the first int32 of
     // each slot — one strided D2H gathers the whole batch.
     const size_t base = static_cast<size_t>(sample_parity_) * sample_slots_;
@@ -500,8 +507,11 @@ bool GraphExecutor::gather_sampled_tokens_async(int n_slots, cudaStream_t stream
         return false;
     }
     flush_pending_penalty_rows_(stream);
-    flush_pending_greedy_rows_(stream);
-    flush_pending_topk_rows_(stream);
+    // Both flushes run (pending counts reset) before a launch failure throws (#2310).
+    const cudaError_t greedy_launched = flush_pending_greedy_rows_(stream);
+    const cudaError_t topk_launched = flush_pending_topk_rows_(stream);
+    cuda_call_or_throw(greedy_launched, "gather_sampled_tokens_async greedy rows");
+    cuda_call_or_throw(topk_launched, "gather_sampled_tokens_async top-k rows");
     const size_t base = static_cast<size_t>(sample_parity_) * sample_slots_;
     IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(h_sample_pinned_.as<int32_t>() + base, sizeof(int32_t),
                                          reinterpret_cast<char*>(d_sample_result_) +
