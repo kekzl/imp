@@ -34,14 +34,14 @@ Both layers ultimately call kernels from `src/quant/` (`dequant_q4k_to_fp16`, `q
 ### `src/exec/pre_dequant_*.cu` - init-time pipeline (Phase 3 of refactor)
 Pure orchestration; calls `src/quant/` kernels for the actual format work.
 
-- `executor_pre_dequant.cu` - 76 LOC orchestrator that calls each phase in order
+- `executor_pre_dequant.cpp` - 76 LOC orchestrator that calls each phase in order
 - `pre_dequant_internal.h` - 6 shared helpers (`borrow_payload_from_wcache`, `for_each_dense_weight`, etc.)
-- `pre_dequant_phase0_nvfp4_loader.cu` - Phase 0 + 0b: NVFP4 sidecar promotion + CUTLASS-NVFP4 registration. The fused-projection scale split is gated on provenance recorded by `weight_map.cpp` and asserted afterwards (`nvfp4_merged_scale_guard.h`, pure); the checkpoint's `quantization_config.ignore` partition is reconstructed and enforced in `safetensors_loader.cpp` via `model/nvfp4_module_policy.h` (also the role list `imp-quantize` writes against). A compressed-tensors W4A16 checkpoint (`input_activations: null`, never read) is served A16 at `n == 1` and W4A4 from M >= 2: `gemm.nvfp4_smallm` up to M = 32, CUTLASS NVFP4 x NVFP4 above.
-- `pre_dequant_phase1_fp16_cache.cu` - Phase 1: GGUF Q*_K -> FP16 device cache (used by Q4_K_M, Q5_K_M, Q6_K, Q8_0, ...)
-- `pre_dequant_phase2_fp8_cache.cu` - Phase 2: FP16 -> FP8 device tensors for the `fp8_prefill` path
-- `pre_dequant_phase3_nvfp4_decode.cu` - Phase 3: NVFP4 decode-cache quantization (the bulk, 10 helpers), split further into `pre_dequant_phase3_fp8.cu`, `pre_dequant_phase3_cutlass.cu` and `pre_dequant_phase3_moe.cu` (the MoE expert stacks, where #1106 gave the `nvfp4_moe_sfatom` scale-factor slabs an owner)
-- `pre_dequant_phase3c_mxfp4.cu` - Phase 3c: standalone MXFP4 (separate from NVFP4 pipeline)
-- `pre_dequant_phase4_tensor_registry.cu` - Phase 4: WeightMap -> role/tier registration
+- `pre_dequant_phase0_nvfp4_loader.cpp` - Phase 0 + 0b: NVFP4 sidecar promotion + CUTLASS-NVFP4 registration. The fused-projection scale split is gated on provenance recorded by `weight_map.cpp` and asserted afterwards (`nvfp4_merged_scale_guard.h`, pure); the checkpoint's `quantization_config.ignore` partition is reconstructed and enforced in `safetensors_loader.cpp` via `model/nvfp4_module_policy.h` (also the role list `imp-quantize` writes against). A compressed-tensors W4A16 checkpoint (`input_activations: null`, never read) is served A16 at `n == 1` and W4A4 from M >= 2: `gemm.nvfp4_smallm` up to M = 32, CUTLASS NVFP4 x NVFP4 above.
+- `pre_dequant_phase1_fp16_cache.cpp` - Phase 1: GGUF Q*_K -> FP16 device cache (used by Q4_K_M, Q5_K_M, Q6_K, Q8_0, ...)
+- `pre_dequant_phase2_fp8_cache.cpp` - Phase 2: FP16 -> FP8 device tensors for the `fp8_prefill` path
+- `pre_dequant_phase3_nvfp4_decode.cpp` - Phase 3: NVFP4 decode-cache quantization (the bulk, 10 helpers), split further into `pre_dequant_phase3_fp8.cpp`, `pre_dequant_phase3_cutlass.cpp` and `pre_dequant_phase3_moe.cpp` (the MoE expert stacks, where #1106 gave the `nvfp4_moe_sfatom` scale-factor slabs an owner)
+- `pre_dequant_phase3c_mxfp4.cpp` - Phase 3c: standalone MXFP4 (separate from NVFP4 pipeline)
+- `pre_dequant_phase4_tensor_registry.cpp` - Phase 4: WeightMap -> role/tier registration
 
 ## Loader enforcement (NVFP4 checkpoints)
 
@@ -91,28 +91,28 @@ AUDIT_arch_2026 dispatch #8, decision (b), `docs/audit/SETTLED.md` section H).
 A new key lands together with its dispatch site; `GemmKernelRegistryTest.RegistryHoldsExactlyTheProducedKeys`
 pins the count at 10. Registered tiers:
 
-- `gemm_kernel_cutlass_nvfp4.cu`: `{CUTLASS_NVFP4, F16, M>1}`, CUTLASS NVFP4 prefill GEMM (with the dual-cache MXFP4 hand-off)
+- `gemm_kernel_cutlass_nvfp4.cpp`: `{CUTLASS_NVFP4, F16, M>1}`, CUTLASS NVFP4 prefill GEMM (with the dual-cache MXFP4 hand-off)
 - `gemm_kernel_gguf.cu`: `{FP16, <qtype>, M==1}` for Q4_K, Q5_K, Q5_1, Q8_0, Q6_K, Q4_0, Q2_K, Q3_K; GGUF small-M (dp4a + mmvq + fused-gemv fallback)
-- `gemm_kernel_generic_dequant.cu`: `{FP16, NONE, M>1}`, dequant -> cuBLAS catch-all for uncached weights
+- `gemm_kernel_generic_dequant.cpp`: `{FP16, NONE, M>1}`, dequant -> cuBLAS catch-all for uncached weights
 
 ## Boundary rules
 
 When adding a new quant format:
 
 - If the format needs **per-call decode** during forward pass: add the kernel to `src/quant/` and a dispatch entry to `src/exec/gemm_kernel_<format>.cu`.
-- If the format needs **per-engine setup** (allocating tiered device tensors, computing a quant cache at load time): add a new `src/exec/pre_dequant_phase<N>_<name>.cu` file and one call from `executor_pre_dequant.cu`.
+- If the format needs **per-engine setup** (allocating tiered device tensors, computing a quant cache at load time): add a new `src/exec/pre_dequant_phase<N>_<name>.cu` file and one call from `executor_pre_dequant.cpp`.
 - The boundary stays clean as long as `src/quant/` stays kernels-and-helpers and `src/exec/pre_dequant_*.cu` stays orchestration.
 
 ## Where the two layers meet at runtime
 
-1. `Engine::init_kv_cache()` (`src/runtime/engine_kv_cache_init.cpp`) -> `executor_pre_dequant.cu::pre_dequant_weights()` runs all phases sequentially, producing device tensors in the right tiers. **The call site is load-bearing, not incidental**: since #1106 the whole pipeline runs *before* the KV pool is sized, so the pool takes the measured residual instead of the caches being sized against an estimate (#1103, the reverse order left the card at 0 MiB free and cost ~7x decode).
+1. `Engine::init_kv_cache()` (`src/runtime/engine_kv_cache_init.cpp`) -> `executor_pre_dequant.cpp::pre_dequant_weights()` runs all phases sequentially, producing device tensors in the right tiers. **The call site is load-bearing, not incidental**: since #1106 the whole pipeline runs *before* the KV pool is sized, so the pool takes the measured residual instead of the caches being sized against an estimate (#1103, the reverse order left the card at 0 MiB free and cost ~7x decode).
 2. Per-forward-pass: `gemm_kernel_registry` dispatches to the right `gemm_kernel_<format>.cu`, which reads the pre-dequant tier or calls `src/quant/dequant_*.cu` for an on-demand decode.
 
 Both paths share kernels in `src/quant/`. The split between `src/quant/` and `src/exec/pre_dequant_*.cu` is **when the work happens**, not what work it is.
 
 ## NVFP4 walkthrough
 
-Dense layers, Phase 0 through decode (`pre_dequant_phase0_nvfp4_loader.cu`, `pre_dequant_phase3_cutlass.cu`):
+Dense layers, Phase 0 through decode (`pre_dequant_phase0_nvfp4_loader.cpp`, `pre_dequant_phase3_cutlass.cpp`):
 
 ```
 SafeTensors NVFP4 packed weights + scales
@@ -123,7 +123,7 @@ SafeTensors NVFP4 packed weights + scales
   -> decode:  NVFP4 GEMV (prmt register LUT, K-parallel)
 ```
 
-MoE layers (Modelopt SafeTensors, per-expert; `pre_dequant_phase3_moe.cu`):
+MoE layers (Modelopt SafeTensors, per-expert; `pre_dequant_phase3_moe.cpp`):
 
 ```
 SafeTensors per-expert weights

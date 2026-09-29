@@ -782,7 +782,7 @@ void GraphExecutor::ensure_smallm_xq_(size_t xq_need, cudaStream_t stream) {
 }
 
 // smallm_producer_xq_/tag_, rmsnorm/swiglu_for_smallm_ and
-// try_smallm_pair_dispatch_ live in executor_gemm_smallm.cu (2026-08-27
+// try_smallm_pair_dispatch_ live in executor_gemm_smallm.cpp (2026-08-27
 // split — see its header comment).
 
 

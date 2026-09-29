@@ -44,7 +44,7 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
     // NvFP4MoEQuantResult. ggml type-39 packs [scale(1)|qs(16)] with SPLIT nibble order
     // (element j = low nibble of qs[j], j+16 = high nibble); type-31 packs [qs(16)|scale(1)]
     // in LINEAR pair order. Normalize to linear pairs + a separate ue8m0 scale plane
-    // (mirrors weight_upload.cu's upload_qtype_mxfp4_). stride=1: GGUF stores gate/up as
+    // (mirrors weight_upload.cpp's upload_qtype_mxfp4_). stride=1: GGUF stores gate/up as
     // distinct tensors (HF interleaves them, stride=2).
     auto gguf_convert = [&](const Tensor& t, float extra_scale, NvFP4MoEQuantResult& r,
                             std::vector<float>& ts) -> bool {
@@ -360,7 +360,7 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
     for (int i = 0; i < cfg.n_layers; i++) {
         // Need mutable access to expert_*_packed for cache_moe_native_nvfp4
         // to stamp the contiguous buffer pointer. const_cast follows the
-        // existing pattern at e.g. lines 1517 / 1598 of weight_upload.cu.
+        // existing pattern at e.g. lines 1517 / 1598 of weight_upload.cpp.
         auto& L = const_cast<Model*>(model_)->layer(i);
 
         bool g = false, u = false, d = false;

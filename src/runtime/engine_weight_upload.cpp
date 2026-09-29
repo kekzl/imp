@@ -1,5 +1,5 @@
 // Engine init phase: weight upload to VRAM via Model::upload_weights_gpu
-// (src/model/weight_upload.cu, pre-dequant via executor_pre_dequant.cu). Also
+// (src/model/weight_upload.cpp, pre-dequant via executor_pre_dequant.cpp). Also
 // reserves L2 cache, tunes cudaMallocAsync, sizes the expert-upload VRAM reserve, wires StreamingLLM / host-offload guards, and hashes the model identity for the persisted prefix cache.
 
 #include "runtime/engine.h"
@@ -356,7 +356,7 @@ bool Engine::init_weights() {
         // decode replays correctly. init_device_expert_cache() demotes later if a
         // host-resident layer stays on the host path.
         // pin_host_experts is no longer part of the condition: host-resident NVFP4 experts
-        // are pinned unless the host is out of RAM (weight_upload.cu), and a failed pin
+        // are pinned unless the host is out of RAM (weight_upload.cpp), and a failed pin
         // demotes through init_device_expert_cache() below.
         const bool device_cache_planned = runtime_config_.moe.device_expert_cache && mcfg.is_nvfp4_prequant;
         if (experts_on_host_ && config_.use_cuda_graphs && device_cache_planned) {

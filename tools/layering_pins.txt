@@ -17,7 +17,7 @@ compute model/tokenizer.h                       4   grammar/json/regex/schema co
 exec    runtime/vram_budget.h                   6   the pre-dequant phases read the Engine-planned VRAMBudget; executor.h forward-declares it so a vram_budget.h edit rebuilds 53 TUs, not 82
 exec    vision/deepstack_inject.h               1   executor_forward.cu injects deepstack visual tokens into the text forward (Qwen3-VL)
 memory  model/model.h                           3   layer_offload / weight_snapshot / weight_cache_file walk the Model weight table; memory <-> model is an ordering decision
-model   exec/nvfp4_expert_offload.h             1   weight_upload.cu applies the exec-owned expert host-offload budget rule (P0-5; moving the header leaves the SCC unchanged)
+model   exec/nvfp4_expert_offload.h             1   weight_upload.cpp applies the exec-owned expert host-offload budget rule (P0-5; moving the header leaves the SCC unchanged)
 model   vision/qwen3vl_vision_config.h          1   the model loader owns the vision tower's config; model <-> vision is an ordering decision
 model   vision/qwen3vl_vision_load.h            1   weight_map.cpp maps the vision tower's tensors
 model   vision/vision_model.h                   2   model.cpp / hf_config_loader.cpp own the VisionModel

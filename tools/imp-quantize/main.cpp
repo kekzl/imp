@@ -95,7 +95,7 @@ const std::vector<float>& plan_vec(const std::map<std::string, std::vector<float
 
 // Fresh copy of a 1-D producer with 1/s folded in, in the tensor's ORIGINAL dtype: the loader
 // reads by dtype, so widening would be a format change, and would be WRONG on a unit-offset
-// norm (weight_upload.cu adds +1 on BF16-source paths only). `offset` comes from the plan, not
+// norm (weight_upload.cpp adds +1 on BF16-source paths only). `offset` comes from the plan, not
 // a guess: folding a norm as plain produces a checkpoint that loads and is a different model.
 std::vector<unsigned char> folded_copy(const RawTensor& t, const std::vector<float>& div, NormOffset offset,
                                        bool& ok) {

@@ -34,7 +34,7 @@ std::optional<NormConvention> arch_norm_convention(const std::string& model_type
     // Plain: out = norm(x) * g. The four this tool has always accepted.
     static const char* kPlain[] = {"qwen2", "qwen3", "llama", "mistral"};
     // Unit offset: out = norm(x) * (1 + g). imp bakes the +1 at load for these
-    // (src/model/weight_upload.cu arch_norm_offset), so runtime norm_weight_offset stays 0 and the
+    // (src/model/weight_upload.cpp arch_norm_offset), so runtime norm_weight_offset stays 0 and the
     // fold must carry it. Spellings from src/model/hf_config_loader.cpp: a Qwen3.8 checkpoint
     // declares qwen3_5 top-level and qwen3_5_text under text_config.
     static const char* kUnitOffset[] = {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text",

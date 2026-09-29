@@ -825,7 +825,7 @@ bool Engine::enable_mtp_spec_decode(int k) {
     }
     // weight_offset matches the main model's rmsnorm calls (norm_weight_offset
     // from ModelConfig): 0.0 for Qwen3.5/3.6 (the +1 gamma=1+W is already baked
-    // in at upload, see upload_mtp_weights in weight_upload.cu), 1.0 for Gemma-3. Don't double-apply.
+    // in at upload, see upload_mtp_weights in weight_upload.cpp), 1.0 for Gemma-3. Don't double-apply.
     ws->arch_norm_offset = model_->config_.norm_weight_offset;
 
     mtp_ws_storage_.reset(ws.release());

@@ -19,49 +19,53 @@ void imp::mmq_imma_q5k_raw_kernel<128, false>	sm_120a	248	0	0
 void imp::mmq_imma_q5k_raw_kernel<128, true>	sm_120a	248	0	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, false, 32, true, false, false>	sm_120a	246	0	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 32, true, false, false>	sm_120a	246	0	0
-void imp::(anonymous namespace)::gemm_fp16_kernel<128, 2>	sm_120a	243	32	0
-void imp::(anonymous namespace)::gemm_fp16_kernel<64, 2>	sm_120a	156	32	0
+void imp::(anonymous namespace)::gemm_fp16_kernel<128, 2>	sm_120a	244	32	0
+_ZN7cutlass13device_kernelINS_4gemm6kernel13GemmUniversalINS1_17GroupProblemShapeIN4cute5tupleIJiiiEEEEENS1_10collective13CollectiveMmaINS1_47MainloopSm120ArrayTmaWarpSpecializedBlockScaledILi4ELi3ENS6_IJNS5_1CILi1EEESD_SD_EEENS1_59KernelPtrArrayTmaWarpSpecializedCooperativeBlockScaledSm120ILi3EEEEENS6_IJNSC_ILi128EEESI_SI_EEENS6_IJNS_12float_e2m1_tENS_13float_ue4m3_tEEEENS6_IJPNS6_IJlSD_NSC_ILi0EEEEEEPNS5_6LayoutINS6_IJNS6_IJNS6_IJNSC_ILi32EEENSC_ILi4EEEEEEiEEENS6_IJNS6_IJNSC_ILi16EEESS_EEEiEEENS6_IJSD_iEEEEEENS6_IJSX_NS6_IJNS6_IJSN_SD_EEENSC_ILi512EEEEEENS6_IJSN_iEEEEEEEEEEESM_S17_NS5_8TiledMMAINS5_8MMA_AtomIJNS5_5SM12011BLOCKSCALED19SM120_16x8x64_TN_VSISK_SK_fSL_Li16EEEEEENSQ_INS6_IJSS_NSC_ILi2EEESD_EEENS6_IJSD_SS_SN_EEEEENS6_IJSI_NSQ_INS6_IJNSC_ILi8EEES1F_S1F_EEENS6_IJSD_SV_S1J_EEEEENSC_ILi64EEEEEEEENS6_IJNS5_13SM90_TMA_LOADES1Q_EEENS6_IJNS5_14ComposedLayoutINS5_7SwizzleILi2ELi4ELi3EEENS5_18smem_ptr_flag_bitsILi4EEENSQ_INS6_IJS1J_SI_EEENS6_IJSI_SD_EEEEEEENSQ_INS6_IJNS6_IJST_SD_EEENS6_IJSW_SD_S1F_EEEEEENS6_IJNS6_IJSW_S11_EEENS6_IJS10_SS_S11_EEEEEEEEEEENS6_IJNS5_9Copy_AtomIJNS5_17SM75_U32x4_LDSM_NENS_15integer_subbyteILi4ELb0EEEEEENS29_IJNS5_13UniversalCopyISL_SL_EESL_EEEEEENS5_8identityES1R_S28_S2H_S2I_EENS_8epilogue10collective18CollectiveEpilogueINS2K_30Sm90PtrArrayTmaWarpSpecializedILi3ELi2ELi4ELb1ELb0ELi2EEEJSJ_NS6_IJS1N_SR_EEENS_6half_tESP_S2Q_SP_NS2K_6fusion15FusionCallbacksINS2K_31Sm120PtrArrayTmaWarpSpecializedILi3ELi2ELi4ELb1ELb0ELi2EEENS2R_17LinearCombinationIS2Q_fS2Q_fLNS_15FloatRoundStyleE2EEESJ_S2P_JEEES1Q_NS1S_IS1U_NS1V_ILi16EEENSQ_INS6_IJS1J_SR_EEENS6_IJSR_SD_EEEEEEENS5_17SM75_U32x2_LDSM_NENS5_14SM90_TMA_STOREES33_NS5_17SM90_U32x2_STSM_NENS29_IJS36_S2Q_EEEvEEEvvEEEEvNT_6ParamsE	sm_120a	168	32	0
+_ZN7cutlass13device_kernelINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS1_10collective13CollectiveMmaINS1_42MainloopSm120TmaWarpSpecializedBlockScaledILi6ELi3ENS5_IJNS4_1CILi1EEESB_SB_EEENS1_48KernelTmaWarpSpecializedPingpongBlockScaledSm120ILi3EEEEENS5_IJNSA_ILi128EEENSA_ILi64EEESG_EEENS5_IJNS_12float_e2m1_tENS_13float_ue4m3_tEEEENS5_IJNS5_IJlSB_lEEENS4_6LayoutINS5_IJNS5_IJNS5_IJNSA_ILi32EEENSA_ILi4EEEEEEiEEENS5_IJNS5_IJNSA_ILi16EEESP_EEEiEEENS5_IJSB_iEEEEEENS5_IJSU_NS5_IJNS5_IJNSA_ILi0EEESB_EEENSA_ILi512EEEEEENS5_IJSX_iEEEEEEEEEEESL_S14_NS4_8TiledMMAINS4_8MMA_AtomIJNS4_5SM12011BLOCKSCALED19SM120_16x8x64_TN_VSISJ_SJ_fSK_Li16EEEEEENSN_INS5_IJNSA_ILi2EEES1C_SB_EEENS5_IJSB_S1C_SX_EEEEENS5_IJSG_NSN_INS5_IJNSA_ILi8EEES1C_S1C_EEENS5_IJSB_SS_S1G_EEEEESH_EEEEENS5_IJNS4_13SM90_TMA_LOADES1M_EEENS5_IJNS4_14ComposedLayoutINS4_7SwizzleILi2ELi4ELi3EEENS4_18smem_ptr_flag_bitsILi4EEENSN_INS5_IJS1G_SG_EEENS5_IJSG_SB_EEEEEEENSN_INS5_IJNS5_IJSQ_SB_EEENS5_IJST_SB_S1C_EEEEEENS5_IJNS5_IJST_SZ_EEENS5_IJSY_SP_SZ_EEEEEEEEEEENS5_IJNS4_9Copy_AtomIJNS4_17SM75_U32x4_LDSM_NENS_15integer_subbyteILi4ELb0EEEEEENS25_IJNS4_13UniversalCopyISK_SK_EESK_EEEEEENS4_8identityES1N_S24_S2D_S2E_EENS_8epilogue10collective18CollectiveEpilogueINS2G_22Sm90TmaWarpSpecializedILi3ELi2ELi4ELb1ELb0EEEJSI_NS5_IJSH_SO_EEENS_6half_tESM_S2M_SM_NS2G_6fusion15FusionCallbacksINS2G_23Sm120TmaWarpSpecializedILi3ELi2ELi4ELb1ELb0EEENS2N_17LinearCombinationIS2M_fS2M_fLNS_15FloatRoundStyleE2EEESI_S2L_JEEES1M_NS1O_IS1Q_NS1R_ILi16EEENSN_INS5_IJS1G_SO_EEENS5_IJSO_SB_EEEEEEENS4_17SM75_U32x2_LDSM_NENS4_14SM90_TMA_STOREES2Z_NS4_17SM90_U32x2_STSM_NENS25_IJS32_S2M_EEEvEEEvvEEEEvNT_6ParamsE	sm_120a	168	16	0
+void imp::(anonymous namespace)::gemm_fp16_kernel<64, 2>	sm_120a	158	32	0
 void imp::fmha_sm120_fa2_kernel_2cta<128, 128, true, true, 64, true, true, false>	sm_120a	128	40	0
-void imp::(anonymous namespace)::smallM_kernel_v1<32, 128, 256, 2>	sm_120a	101	160	0
+void imp::(anonymous namespace)::smallM_kernel_v1<32, 128, 256, 2>	sm_120a	104	160	0
 void imp::paged_attention_splitk_fp8_tile_kernel<128>	sm_120a	96	32	0
 void imp::paged_attention_splitk_fp8_tile_gqa_kernel<128>	sm_120a	80	32	0
-void imp::paged_attention_splitk_pipeline_kernel<512>	sm_120a	80	16	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<512>	sm_120a	79	16	0
-void imp::(anonymous namespace)::smallM_kernel_v1<64, 128, 128, 3>	sm_120a	72	288	0
-void imp::(anonymous namespace)::smallM_kernel_v1<128, 128, 128, 3>	sm_120a	64	544	0
+void imp::paged_attention_splitk_pipeline_kernel<512>	sm_120a	79	16	0
+void imp::(anonymous namespace)::smallM_kernel_v1<128, 128, 128, 3>	sm_120a	66	544	0
 void imp::(anonymous namespace)::smallM_kernel_v1<32, 128, 128, 3>	sm_120a	64	160	0
 void imp::flash_attention_blackwell_kernel<128, 96>	sm_120a	64	16	0
 void imp::paged_attention_splitk_int4_pipeline_kernel<256>	sm_120a	64	16	0
 void imp::paged_attention_splitk_pipeline_kernel<256>	sm_120a	64	16	0
-void imp::flash_attention_blackwell_kernel<128, 64>	sm_120a	63	16	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<256>	sm_120a	63	16	0
+void imp::(anonymous namespace)::smallM_kernel_v1<64, 128, 128, 3>	sm_120a	62	288	0
 imp::paged_attention_gqa_kernel	sm_120a	61	128	0
-void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 8>	sm_120a	60	16	0
-void imp::(anonymous namespace)::smallM_kernel_v1<16, 128, 256, 2>	sm_120a	58	16	0
+void imp::(anonymous namespace)::smallM_kernel_v1<16, 128, 256, 2>	sm_120a	60	16	0
 void imp::(anonymous namespace)::smallM_kernel_v1<128, 128, 256, 2>	sm_120a	56	544	0
 void imp::(anonymous namespace)::smallM_kernel_v1<64, 128, 256, 2>	sm_120a	56	288	0
-void imp::flash_attention_blackwell_kernel<64, 128>	sm_120a	56	16	0
-void imp::flash_attention_blackwell_kernel<64, 64>	sm_120a	56	16	0
 void imp::flash_attention_blackwell_kernel<64, 96>	sm_120a	56	16	0
+void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 8>	sm_120a	56	16	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<128>	sm_120a	56	16	0
-void imp::paged_attention_splitk_pipeline_kernel<128>	sm_120a	56	16	0
 void imp::flash_attention_blackwell_kernel<64, 256>	sm_120a	55	16	0
 void imp::paged_attention_splitk_int4_pipeline_kernel<64>	sm_120a	54	16	0
-void imp::(anonymous namespace)::smallM_kernel_v1<16, 128, 128, 3>	sm_120a	51	24	0
+void imp::flash_attention_blackwell_kernel<128, 64>	sm_120a	53	16	0
+void imp::paged_attention_splitk_pipeline_kernel<128>	sm_120a	53	16	0
+void imp::(anonymous namespace)::smallM_kernel_v1<16, 128, 128, 3>	sm_120a	52	24	0
+void imp::flash_attention_blackwell_kernel<64, 128>	sm_120a	48	16	0
+void imp::flash_attention_blackwell_kernel<64, 64>	sm_120a	48	16	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<64>	sm_120a	48	16	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<96>	sm_120a	48	16	0
 void imp::paged_attention_splitk_int4_pipeline_kernel<128>	sm_120a	48	16	0
 void imp::paged_attention_splitk_int4_pipeline_kernel<96>	sm_120a	48	16	0
-void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 4>	sm_120a	46	16	0
+void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, false>	sm_120a	48	8	0
+void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp16_kernel<3, true>	sm_120a	48	8	0
+void imp::(anonymous namespace)::gemv_nvfp4_kpar_mb_fp32_kernel<3>	sm_120a	48	8	0
 imp::topk_finalize_rows_kernel	sm_120a	44	1056	0
+void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 4>	sm_120a	44	16	0
 imp::topk_partial_rows_kernel	sm_120a	42	1056	0
-void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	42	16	0
 imp::topk_finalize_kernel	sm_120a	40	1056	0
-imp::(anonymous namespace)::kv_block_copy_kernel	sm_120a	40	128	0
 imp::(anonymous namespace)::ple_conv_shift_kernel	sm_120a	40	128	0
 imp::paged_attention_decode_kernel_generic	sm_120a	40	128	0
 imp::rowwise_topm_reduce_kernel	sm_120a	40	64	0
 imp::(anonymous namespace)::ple_conv_add_kernel	sm_120a	40	32	0
+void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	40	16	0
 void imp::gemv_dp4a_fp32_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0
 void imp::gemv_dp4a_fp32_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	40	16	0
 void imp::gemv_dp4a_gate_up_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0
@@ -82,9 +86,9 @@ void imp::gemv_dp4a_qkv_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40
 void imp::gemv_dp4a_qkv_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	40	16	0
 imp::topk_partial_kernel	sm_120a	39	1056	0
 imp::post_decode_step_kernel	sm_120a	39	24	0
-imp::(anonymous namespace)::plp_rmsnorm_q8_roundtrip_kernel	sm_120a	36	128	0
+imp::(anonymous namespace)::plp_rmsnorm_q8_roundtrip_kernel	sm_120a	38	128	0
 imp::rmsnorm_quantize_q8_1_kernel	sm_120a	36	128	0
-imp::dequant_q3k_kernel	sm_120a	28	16	0
-imp::bench_separate	sm_120a	28	8	0
+imp::bench_separate	sm_120a	29	8	0
 imp::bench_tma_v_load	sm_120a	26	8	0
 imp::bench_fused	sm_120a	25	8	0
+imp::dequant_q3k_kernel	sm_120a	24	16	0

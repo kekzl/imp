@@ -677,7 +677,7 @@ void Workspace::free_buffers() {
 // GraphExecutor::allocate_auxiliary_buffers(), release_moe_batch_buf(),
 // free_buffers() are in executor_workspace_buffers.cu
 
-// pre_dequant_weights() is in executor_pre_dequant.cu
+// pre_dequant_weights() is in executor_pre_dequant.cpp
 // configure_*_workspace(), resize_workspace(), allocate_decode_workspace(),
 // use_workspace(), layer_has_*(), view_tokens(), ensure_logits_pinned()
 // are in executor_workspace_config.cu

@@ -3,7 +3,7 @@
 1 src/api/imp_api.cpp
 3 src/compute/attention_blackwell.cu
 10 src/compute/attention_cublas.cu
-3 src/compute/attention_dispatch.cu
+3 src/compute/attention_dispatch.cpp
 4 src/compute/attention_fmha_mxfp4_sm120.cu
 9 src/compute/attention_fmha_sm120.cu
 1 src/compute/attention_paged_common.cuh
@@ -34,7 +34,7 @@
 2 src/compute/sampling.cu
 1 src/compute/sampling_penalties.cu
 2 src/compute/sampling_topk_topp.cu
-3 src/compute/weight_dispatch.cu
+3 src/compute/weight_dispatch.cpp
 12 src/core/cuda_raii.h
 1 src/core/pdl.cu
 1 src/core/pdl.h
@@ -56,12 +56,12 @@
 3 src/exec/executor_workspace.cu
 2 src/exec/executor_workspace_buffers.cu
 2 src/exec/expert_cache.cu
-2 src/exec/pre_dequant_phase0_nvfp4_loader.cu
-6 src/exec/pre_dequant_phase4_tensor_registry.cu
+2 src/exec/pre_dequant_phase0_nvfp4_loader.cpp
+6 src/exec/pre_dequant_phase4_tensor_registry.cpp
 1 src/exec/sparse_attn_select.cu
 2 src/lora/lora_adapter.cpp
-11 src/model/weight_upload.cu
-6 src/quant/gpt_oss_mxfp4_convert.cu
+11 src/model/weight_upload.cpp
+6 src/quant/gpt_oss_mxfp4_convert.cpp
 2 src/quant/mxfp4_gemm.cu
 3 src/quant/nvfp4_gemm.cu
 1 src/quant/nvfp4_gemm_internal.cuh

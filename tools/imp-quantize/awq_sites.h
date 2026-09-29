@@ -5,7 +5,7 @@
 // activation, which producer absorbs 1/s, whether the norm carries a unit offset. Search
 // (awq.cu) and the unlisted-consumer safety scan stay in awq_plan.cpp.
 // Architecture question is which convention the LOADER applies to that model_type
-// (src/model/weight_upload.cu arch_norm_offset, hf_config_loader.cpp for names); an unknown
+// (src/model/weight_upload.cpp arch_norm_offset, hf_config_loader.cpp for names); an unknown
 // convention is refused.
 // qwen3_5 family fold sites (verified against Qwen3.8-27B's tensor index): A
 // self_attn.{q,k,v}_proj<-input_layernorm (offset); G linear_attn.in_proj_*<-input_layernorm

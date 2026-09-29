@@ -243,7 +243,7 @@ TEST(QsaIndexer, PrepQueriesMatchesCpu) {
     }
 }
 
-// The selected path runs with split-K enabled (executor_qsa.cu), and
+// The selected path runs with split-K enabled (executor_qsa.cpp), and
 // compute_splitk_splits() takes max_context_len as an input: passing the constant cap
 // there instead of the real context makes the SAME bytes reduce in a different order.
 // Below the budget the selection is every token in order, so the two must agree with

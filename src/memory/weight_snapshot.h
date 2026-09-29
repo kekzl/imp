@@ -150,7 +150,7 @@ private:
     std::unordered_map<std::string, size_t> by_key_;
 };
 
-// Restore-side CUDA hooks: routed back into weight_upload.cu's checked
+// Restore-side CUDA hooks: routed back into weight_upload.cpp's checked
 // allocator (VRAM budget accounting) and staged H2D copy (PinnedStager).
 struct WarmRestoreOps {
     cudaError_t (*alloc)(void** ptr, size_t bytes, cudaStream_t stream) = nullptr;

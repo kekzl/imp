@@ -1751,7 +1751,7 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
         }
     }
     // #1675: a sink model routes straight to the FP16 WMMA FMHA tier
-    // (attention_dispatch.cu:65-71) since #992, and that tier needs no
+    // (attention_dispatch.cpp:65-71) since #992, and that tier needs no
     // S-matrix. All three no-clamp returns below excluded sinks, so gpt-oss
     // took the quadratic clamp for a reason the dispatch stopped having - the
     // chunk collapsing with offset, at no benefit. The condition mirrors the
@@ -1922,7 +1922,7 @@ bool GraphExecutor::ensure_chunk_capture_scratch(int ctx_capacity) {
     return true;
 }
 
-// pre_dequant_weights() is in executor_pre_dequant.cu
+// pre_dequant_weights() is in executor_pre_dequant.cpp
 // configure_*_workspace(), resize_workspace(), allocate_decode_workspace(),
 // use_workspace(), layer_has_*(), view_tokens(), ensure_logits_pinned()
 // are in executor_workspace_config.cu

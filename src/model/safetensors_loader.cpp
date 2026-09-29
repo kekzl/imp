@@ -1169,7 +1169,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         return nullptr;
 
     // NVFP4: scale tensors were already routed into model->nvfp4_scratch_ by weight_map.cpp;
-    // executor_pre_dequant.cu Phase 0 promote() resolves them back onto the weight's sidecars,
+    // executor_pre_dequant.cpp Phase 0 promote() resolves them back onto the weight's sidecars,
     // no load-side linking needed here. MXFP4: gpt-oss experts decode natively (transcoded
     // MXFP4->NVFP4 at init, run through CUTLASS NVFP4 grouped GEMM); other MXFP4 SafeTensors
     // archs have no decode path yet and still need the GGUF conversion warning.
@@ -1466,12 +1466,12 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         // (inf by L23, NaN logits). FP16 scaling is a lossless exponent shift; RMSNorm is
         // scale-invariant and lm_head reads only normed values, so scaling every h-contributor is
         // exact. Contributors: embeddings (cfg.embed_scale), Wo+o_bias+expert down bias (scaled
-        // here), expert down weights (tensor_scales in pre_dequant_phase3_nvfp4_decode.cu).
+        // here), expert down weights (tensor_scales in pre_dequant_phase3_nvfp4_decode.cpp).
         auto scale_bf16_pow2 = [&](Tensor& t, int neg_exp) -> bool {
             if (!t.data || t.on_device)
                 return true;
             // An NVFP4-packed Wo (U8 nibbles, INT8 wire qtype until Phase 0 promotes it) carries
-            // the 2^-4 in its tensor_scale instead: pre_dequant_phase0_nvfp4_loader.cu.
+            // the 2^-4 in its tensor_scale instead: pre_dequant_phase0_nvfp4_loader.cpp.
             if (cfg.is_nvfp4_prequant && t.qtype == QType::INT8)
                 return true;
             if (t.qtype != QType::BF16) {

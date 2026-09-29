@@ -23,7 +23,7 @@
 
 namespace imp::pre_dequant_internal {
 
-// The per-row FP8 head (pre_dequant_fp8_lm_head.cu) can serve this head: F16 or GPU-dequantable
+// The per-row FP8 head (pre_dequant_fp8_lm_head.cpp) can serve this head: F16 or GPU-dequantable
 // source on device, F16 final norm (F16 hidden rows), d_model a multiple of 256.
 inline bool fp8_lm_head_eligible(const Model& m) {
     const Tensor& lm = m.output_proj();

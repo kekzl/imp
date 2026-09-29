@@ -2679,7 +2679,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
             }
             upload_scale(sc.weight_scale_2);
             // input_scale is loaded for diagnostics but never read by any GEMM kernel (see
-            // executor_pre_dequant.cu Phase 0). Only uploaded when audit mode is on, to avoid burning
+            // executor_pre_dequant.cpp Phase 0). Only uploaded when audit mode is on, to avoid burning
             // VRAM on a tensor never used in production.
             if (audit) {
                 upload_scale(sc.input_scale);

@@ -243,7 +243,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     if (t <= 0 || max_k <= 0)
         return out;
 
-    // gemm_scratch.cu: per_call = max_tokens * ceil(K/32) * 36, need = 2x.
+    // gemm_scratch.cpp: per_call = max_tokens * ceil(K/32) * 36, need = 2x.
     out.mmvq_scratch = static_cast<size_t>(t) * ((static_cast<size_t>(max_k) + 31) / 32) * 36 * 2;
 
     // executor_workspace_buffers.cu: the largest dequant target at or below the
@@ -281,7 +281,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
 
     out.nvfp4_dequant = covered;
 
-    // Small-M NVFP4 scratch (executor_gemm_smallm.cu): the largest of the v1/v2 split-K
+    // Small-M NVFP4 scratch (executor_gemm_smallm.cpp): the largest of the v1/v2 split-K
     // workspaces over the dense projections (the LM head never takes this route), plus the
     // packed 32-row activation for the widest K. Both kernel variants are charged because
     // the choice is a runtime knob (gemm.nvfp4_smallm_impl).

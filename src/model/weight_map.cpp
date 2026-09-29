@@ -530,7 +530,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             continue;
         }
         // NVFP4 prequant LM head scales (Model Optimizer/llm-compressor): routed into the load-time
-        // scratch map under key "out_proj"; Phase 0 promote() in executor_pre_dequant.cu copies the
+        // scratch map under key "out_proj"; Phase 0 promote() in executor_pre_dequant.cpp copies the
         // device pointer onto model.out_proj_'s sidecars and clears the entry.
         if (name == "lm_head.weight_scale" || name == "lm_head.weight_scale_2" ||
             name == "lm_head.input_scale") {
@@ -1344,7 +1344,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             }
             // Mamba2 NVFP4 prequant scales: mamba.{in_proj,out_proj}.{weight_scale,weight_scale_2,
             // input_scale} route to nvfp4_scratch_ under "L<i>.ssm_in/ssm_out" so promote() in
-            // executor_pre_dequant.cu attaches them (SSM weights are excluded from the NVFP4 cache).
+            // executor_pre_dequant.cpp attaches them (SSM weights are excluded from the NVFP4 cache).
             else if (!matched && parts.size() >= 6 &&
                      (parts[5] == "weight_scale" || parts[5] == "weight_scale_2" ||
                       parts[5] == "input_scale")) {

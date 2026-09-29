@@ -18,7 +18,7 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
     if (!mcfg.is_nvfp4_prequant)
         return d;
 
-    // Mirrors phase 3b's slab sizing (pre_dequant_phase3_cutlass.cu): each slab entry is
+    // Mirrors phase 3b's slab sizing (pre_dequant_phase3_cutlass.cpp): each slab entry is
     // align_up(cutlass_nvfp4_sf_size(N, K), 256); contiguous MoE expert groups occupy
     // align_up(ne × sf_size, 256) as ONE entry. Wire shapes store K/2 (e2m1 pairs): logical K = 2 × shape[1].
     constexpr size_t kSfAlign = 256;
@@ -64,7 +64,7 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
     };
 
     // The same tensor set phase 0b registers for the decode cache
-    // (pre_dequant_phase0_nvfp4_loader.cu register_prequant), including
+    // (pre_dequant_phase0_nvfp4_loader.cpp register_prequant), including
     // ssm_in/ssm_out/gdn_gate: required for GDN hybrids (e.g. Qwen3.6-35B).
     add_dense(model.output_proj());
     for (int i = 0; i < mcfg.n_layers; i++) {
@@ -186,7 +186,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     }
 
     // Mandatory MXFP4 -> FP16 decode-fallback reserve: on GDN hybrids the native MXFP4 GEMV is
-    // disabled (see pre_dequant_phase3_cutlass.cu), so decode requires the FP16 dequant cache
+    // disabled (see pre_dequant_phase3_cutlass.cpp), so decode requires the FP16 dequant cache
     // (~4x the raw MXFP4 bytes) resident alongside it. StoragePlanner sizes at MXFP4 wire size
     // and misses this: must charge it here or the KV clamp starves the fallback (#934).
     size_t mxfp4_fp16_fallback_bytes = 0;
@@ -359,7 +359,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     // Cross-check heuristic estimate against StoragePlanner's projected total (source-qtype-aware):
     // divergence means the heuristic missed a tier (e.g. Q4_K routed to FP16 cache but treated as 0
     // here since nvfp4_beneficial is false, #875). This plan is UNCONSTRAINED (no vram_budget_bytes
-    // hint); the actual budget-constrained plan is built in QuantPipeline::build (executor_pre_dequant.cu).
+    // hint); the actual budget-constrained plan is built in QuantPipeline::build (executor_pre_dequant.cpp).
     {
         PlanHints hints;
         hints.prefer_nvfp4_decode = (config.use_nvfp4_decode > 0);
