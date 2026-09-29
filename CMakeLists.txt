@@ -170,6 +170,8 @@ set(IMP_MEMORY_SOURCES
     src/memory/mem_account.cu
     src/memory/kv_cache.cu
     src/memory/kv_cache_manager.cpp
+    src/memory/kv_cache_manager_spill.cpp
+    src/memory/kv_host_spill.cpp
     src/memory/recurrent_snapshot_store.cpp
     src/memory/weight_snapshot.cpp
     src/memory/weight_cache_file.cpp
@@ -897,6 +899,8 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_dispatch_rules.cpp
         # FP8 FMHA tile selector: every (Bq, head_dim) it can return has a kernel instance (#2195).
         tests/test_fmha_fp8_tile_select.cpp
+        # KV host spill tier slot bookkeeping (#2203); the byte round trip is in test-kv.
+        tests/test_kv_host_spill.cpp
         # The serving metadata pool's byte layout (invariant I2): every region
         # 256-aligned, disjoint and inside the one allocation the paths share.
         tests/test_serving_metadata_layout.cpp
@@ -1099,6 +1103,7 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_cache_write.cu
         tests/test_kv_gather.cu
         tests/test_kv_block_copy.cu
+        tests/test_kv_host_spill_gpu.cu
         tests/test_vmm_backend.cu
         tests/test_green_ctx.cu
         tests/test_capture_abort.cu

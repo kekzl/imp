@@ -260,6 +260,11 @@ swa_sizing                  = auto
 # is worse than 0 — the store stays off and prefix caching is disabled with it,
 # so you lose both. The server logs the required size when this happens.
 swa_snapshot_mb             = 0
+# Host spill tier for the prefix cache (#2203): pinned host RAM in MiB. Blocks
+# the pool reclaims are copied here and restored by H2D on a later prefix hit
+# instead of re-prefilled. 0 = off. Needs prefix caching; refused with SWA
+# layers or sparse attention key metadata.
+host_spill_mb               = 0
 # Pin the KV pool to exactly this many blocks instead of sizing it from the
 # VRAM budget. 0 = auto (the default). Useful when several processes share a
 # card and the pool should be a declared quantity rather than "whatever was
