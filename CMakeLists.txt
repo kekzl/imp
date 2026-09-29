@@ -1182,6 +1182,8 @@ if(IMP_BUILD_TESTS)
         tests/test_warm_cache.cu
         tests/test_lora.cpp
         tests/test_prefix_cache_e2e.cpp
+        # #2257: prompt_logprobs chunk logits released after the pass (IMP_TEST_MODEL).
+        tests/test_prompt_logprobs_e2e.cpp
         # Chained recurrent restores: 30 growing turns against a cold prefill of
         # the same prompt, compared on the state slab rather than on tokens.
         tests/test_hybrid_restore_chain.cu
