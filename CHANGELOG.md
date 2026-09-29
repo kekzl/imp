@@ -5,7 +5,6 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
-- `gemm.q8_imma_bm` (default 128): Q8_0 IMMA prefill on 160- or 192-row tiles, 10 / 12 warps per CTA instead of 8 (BM=128: 172 regs, 1 CTA per SM). Outputs bit-identical to BM=128 (`MmqQ8Imma.TallTilesBitIdenticalToBm128`); timing pending `scripts/bench_2267.sh` (#2267).
 - Qwen3.8-Flash-Next MTP drafting (`speculative.mtp_k=1`, auto declines it): hc-stream draft layer, FP8 block-scale experts (2400 MiB head), captured verify over host-resident experts (56.7 -> 27-36 ms/verify). Draft logits vs the vLLM math: max |dlogit| 0.0135 (band 0.11). Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
 - AWQ SafeTensors checkpoints (`quant_method: awq`, `bits: 4`, `zero_point: true`, `version: gemm`) load: q/k/v/o/gate/up/down dequantize to FP16 at upload in AutoAWQ packing order (`src/quant/dequant_awq.cu`); VRAM holds FP16 weights. GEMV, Marlin, other bit widths and `zero_point: false` stay refused at load (#2205, #2196).
 - C API `imp_prefill_token(ctx, &tok)`: the token `imp_prefill`/`imp_prefill_with_params` sampled; `imp_decode_step` returns the next one. GreedyLockTest locks now start with it: Qwen3-8B-Q8_0 `Q: What is 17 + 25?` matches llama.cpp in all 31 tokens (#2251).
@@ -42,6 +41,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Softmax MoE routing (Qwen3-30B-A3B, Qwen3.8-Flash-Next and every softmax-routed MoE): a warp could read another warp's partial sum as the softmax max, and top-k picked wrong experts (354 of 204800 routings in the new test). PPL is bit-identical across processes now: Qwen3-30B-A3B 13.0332 x3, Flash-Next 4.6353 x2.
 - Qwen3.8-Flash-Next: a prefix-cache resume did not restore the PLE conv rows and n-gram context, so a turn resumed from a snapshot continued the previous request's state. The recurrent snapshot carries the conv rows as a sidecar; the same turn 2 sent 3x: 2 distinct answers before, 1 after.
 - Qwen3.8-Flash-Next: after a graph-replayed decode, the next prefill reused the previous request's PLE n-gram rows, context and conv state, so greedy output depended on the prior request. Same prompt after 5 others: 5 distinct outputs before, 1 after; degen_suite kv-growth FAIL 1/1 -> 0/3.
+
+### Removed
+- `gemm.q8_imma_bm` and the Q8_0 IMMA tall tiles (BM 160 / 192): slower than BM=128 on every benched shape (#2267). Q8_0 IMMA prefill runs BM=128 only, the former default.
 
 ## [0.45.0] - 2026-09-27
 

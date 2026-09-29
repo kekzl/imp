@@ -497,13 +497,3 @@ TEST(ConfigBinding, PrefillChunkSizeIsBound) {
     // And it is still a number, not anything (#1627).
     EXPECT_EQ(cfg.apply_overrides({"runtime.prefill_chunk_size=large"}).size(), 1u);
 }
-
-// #2267: Q8_0 IMMA tall-tile selector, default BM=128.
-TEST(ConfigBinding, Q8ImmaBmIsBound) {
-    imp::RuntimeConfig cfg;
-    EXPECT_EQ(cfg.gemm.q8_imma_bm, 128);
-    EXPECT_TRUE(cfg.apply_overrides({"gemm.q8_imma_bm=192"}).empty());
-    EXPECT_EQ(cfg.gemm.q8_imma_bm, 192);
-    EXPECT_EQ(cfg.apply_overrides({"gemm.q8_imma_bm=tall"}).size(), 1u);
-    EXPECT_EQ(cfg.gemm.q8_imma_bm, 192);
-}

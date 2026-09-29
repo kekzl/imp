@@ -26,7 +26,7 @@ static void print_usage(const char* prog) {
     printf("Available benchmarks:\n");
     printf("  gemm        GEMM micro-benchmark\n");
     printf("  nvfp4       Production CUTLASS sm_120 NVFP4 dense GEMM (isolated, ncu target)\n");
-    printf("  q8imma      Q8_0 prefill GEMM: dequant + cuBLAS vs IMMA BM 128/160/192 (#2267)\n");
+    printf("  q8imma      Q8_0 prefill GEMM: dequant + cuBLAS vs IMMA (#2267)\n");
     printf("  attention   Flash Attention prefill benchmark\n");
     printf("  decode-attn Paged Attention decode benchmark\n");
     printf("  e2e         End-to-end tok/s benchmark\n");

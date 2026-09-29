@@ -719,9 +719,6 @@ cublas_fp16_acc      = auto
 # Qwen3-8B/30B-MoE/gemma-4-26B (neutral or better) and Qwen3.6-35B (+0.55%).
 # Q8_0 dense prefill GEMMs (Qwen3-8B Q8_0 pp512 +7% over fp16-acc cuBLAS).
 q8_imma_enabled      = true
-# Q8_0 IMMA tile rows where BM=128 runs: 160 / 192 = 10 / 12 warps per CTA instead of 8
-# (BM=128: 172 regs x 256 threads = 1 CTA per SM). Outputs bit-identical to 128 (#2267).
-q8_imma_bm           = 128
 # Grouped MoE expert prefill (one launch over all experts). The big one:
 # Qwen3-30B-A3B +151% (ABOVE llama.cpp), gemma-4-26B +111%, Qwen3.6-35B +40%.
 moe_imma_prefill     = true
