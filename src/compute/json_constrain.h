@@ -87,11 +87,11 @@ struct JsonGrammar {
     // Category mask legal in the current state.
     uint16_t compute_allowed_mask() const;
     // Advance by one character; false = not a legal continuation.
-    bool advance_char(char c);
+    [[nodiscard]] bool advance_char(char c);
     // Seed the number sub-state on entry: a bare '-' still owes its first digit.
     void enter_number(char c);
     // True once the document is complete.
-    bool done() const { return current_state == JsonState::DONE; }
+    [[nodiscard]] bool done() const { return current_state == JsonState::DONE; }
 };
 
 class JsonConstrainer {
@@ -124,7 +124,7 @@ public:
     // Strict-simulate `text` from the current state without mutating it —
     // true iff every char is a legal grammar continuation. Public for the
     // FSM unit tests; apply_mask uses it for whole-token validation.
-    bool sim_token_valid(const std::string& text);
+    [[nodiscard]] bool sim_token_valid(const std::string& text);
 
     // Category mask the decode path would apply right now. Public for the FSM unit tests:
     // apply_mask() needs an initialised GPU vocabulary, but the force-close narrowing (#1104)
@@ -137,7 +137,8 @@ public:
     // Advance the FSM over raw text (tests use this to reach mid-document
     // states; the decode path goes through update()).
     void advance_text(const std::string& text) {
-        for (char c : text) advance_char(c);
+        for (char c : text)
+            (void)advance_char(c);  // test helper: the test asserts the reached state
     }
 
     // Allows a free-form preamble before strict JSON enforcement starts. close_token>=0 enables
@@ -197,7 +198,7 @@ private:
     // Forwarders onto g_ — kept so the call sites below and the tests read the
     // same as before the split.
     uint16_t compute_allowed_mask() const { return g_.compute_allowed_mask(); }
-    bool advance_char(char c) { return g_.advance_char(c); }
+    [[nodiscard]] bool advance_char(char c) { return g_.advance_char(c); }
 };
 
 }  // namespace imp

@@ -217,7 +217,8 @@ bool Engine::init_weights() {
                                                  head_dim_est);
         {
             size_t total_vram = 0, f = 0;
-            vram_budget_mem_get_info(&f, &total_vram);
+            // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+            (void)vram_budget_mem_get_info(&f, &total_vram);
             // For large MoE models (128 experts), prefer fitting all experts on GPU
             // over reserving huge KV cache. All-GPU experts enable the decode fast
             // path (dp4a GEMV, no D2H sync) and CUDA graph capture.

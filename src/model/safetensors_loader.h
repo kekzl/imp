@@ -17,7 +17,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
 // True when a model.safetensors.index.json shard name is a bare filename next to the
 // index. Names are file content; a separator escapes the model directory into an
 // arbitrary open()/mmap() (#1612). Exposed for the test; the loader calls it first.
-bool safetensors_shard_name_is_safe(const std::string& name);
+[[nodiscard]] bool safetensors_shard_name_is_safe(const std::string& name);
 
 // Mirrors the production validation rules in load_shard() (safetensors_loader.cpp),
 // exposed so unit tests can drive them with synthetic blobs without a full Model.

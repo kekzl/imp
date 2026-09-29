@@ -405,7 +405,8 @@ bool Engine::init_kv_cache() {
                                       : std::max(max_blocks, vram_budget.kv_max_blocks);
     if (per_block_total_bytes > 0) {
         size_t free_now = 0, total_now = 0;
-        vram_budget_mem_get_info(&free_now, &total_now);
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&free_now, &total_now);
         // IMMA prefill planes are still OUTSTANDING here (taken on each Q8_0
         // weight's first prefill, during warmup). Charging them here keeps the
         // residual pass from handing the pool bytes the next forward claims (#1899).

@@ -137,10 +137,10 @@ extern std::unordered_map<const void*, WeightPlanes> g_imma_weights;
 extern ActScratch g_imma_act;
 extern SplitKScratch g_imma_splitk;
 
-bool imma_stream_capturing(cudaStream_t stream);
-bool imma_ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool capturing);
-bool imma_ensure_act(int M, int K, bool capturing);
-bool imma_ensure_splitk(size_t floats, bool capturing);
+[[nodiscard]] bool imma_stream_capturing(cudaStream_t stream);
+[[nodiscard]] bool imma_ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool capturing);
+[[nodiscard]] bool imma_ensure_act(int M, int K, bool capturing);
+[[nodiscard]] bool imma_ensure_splitk(size_t floats, bool capturing);
 void imma_quantize_act(const __half* x, int M, int K, cudaStream_t stream);
 
 }  // namespace imp

@@ -104,7 +104,7 @@ void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask) {
             second_row[c] = static_cast<int16_t>(second_ok.size());
             auto& row = second_ok.emplace_back();
             std::vector<SchemaFrame> base = stack_;
-            sim_advance(base, static_cast<char>(c));
+            (void)sim_advance(base, static_cast<char>(c));  // legal: first_ok[c]
             for (int d = 0; d < 256; d++) {
                 std::vector<SchemaFrame> probe = base;
                 row[d] = sim_advance(probe, static_cast<char>(d));

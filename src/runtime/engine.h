@@ -148,7 +148,7 @@ struct EngineConfig {
 // RuntimeConfig::Rope). Bumps max_seq_len to factor × orig_ctx. Returns
 // false when off or refused (LongRoPE/llama3 per-dim tables, MLA, NoPE, bad
 // factor). Free function: host-only tests can drive it without a GPU.
-bool apply_rope_override(ModelConfig& mcfg, const RuntimeConfig::Rope& rope);
+[[nodiscard]] bool apply_rope_override(ModelConfig& mcfg, const RuntimeConfig::Rope& rope);
 
 class Engine {
 public:
@@ -187,8 +187,8 @@ public:
     // graphs (captures hold adapter kernels/pointers); swap between requests.
     // lora_load returns adapter id >= 1, or 0 on failure; id 0 = base model.
     int lora_load(const std::string& path);
-    bool lora_set(int id);  // 0 deactivates
-    bool lora_unload(int id);  // frees it; slot stays empty, ids never reused (prefix salt = id)
+    [[nodiscard]] bool lora_set(int id);  // 0 deactivates
+    [[nodiscard]] bool lora_unload(int id);  // frees it; slot stays empty, ids never reused (prefix salt = id)
     int active_lora() const { return active_lora_; }
 
     // Reset batch pool upload cache (call on context_reset to prevent
@@ -213,7 +213,7 @@ public:
     std::vector<int> pending_image_token_counts() const;
     // Server path: CPU-only patchify (safe off the batch worker) and the token
     // count the prompt must reserve for it.
-    bool preprocess_image_qwen(std::span<const uint8_t> data, QwenPatches& out) const;
+    [[nodiscard]] bool preprocess_image_qwen(std::span<const uint8_t> data, QwenPatches& out) const;
     int image_tokens_of(const QwenPatches& patches) const;
     bool has_qwen_vision() const noexcept { return qwen_vision_.is_ready(); }
     // Vision: set image for next generation. Returns false if no mmproj loaded.
@@ -236,20 +236,20 @@ public:
     // Enable MTP-based speculative decoding. K = draft length (1-4 typical).
     // Requires model->mtp_->loaded. Allocates the MTP workspace via the VRAM
     // allocator. False when the head is absent or the workspace alloc fails.
-    bool enable_mtp_spec_decode(int k);
-    bool mtp_spec_decode_enabled() const noexcept { return mtp_spec_k_ > 0; }
+    [[nodiscard]] bool enable_mtp_spec_decode(int k);
+    [[nodiscard]] bool mtp_spec_decode_enabled() const noexcept { return mtp_spec_k_ > 0; }
     int  mtp_spec_decode_k() const noexcept { return mtp_spec_k_; }
 
     // mtp_draft_one: one draft step. Not for direct production use; wired
     // into the decode loop internally.
     // Encoder embedder (#836): pooled + L2-normalized embedding for `tokens`.
     // Only valid when the loaded model is encoder-only (profile().is_encoder).
-    bool encoder_embed(std::span<const int32_t> tokens, std::vector<float>& out);
+    [[nodiscard]] bool encoder_embed(std::span<const int32_t> tokens, std::vector<float>& out);
     bool is_encoder_model() const { return encoder_ws_storage_ != nullptr; }
     // Tokens one encoder_embed call can take, [CLS]/[SEP] included (0 = not an encoder).
     int encoder_max_tokens() const;
 
-    bool mtp_draft_one(int prev_token_id, const void* d_h_prev,
+    [[nodiscard]] bool mtp_draft_one(int prev_token_id, const void* d_h_prev,
                        int hidden_dim, int vocab_size, int* out_token_id,
                        int* out_topk_ids = nullptr, int top_w = 0,
                        const int32_t* d_prev_token = nullptr,
@@ -349,7 +349,7 @@ public:
     // tokens, not a full context); every prompt past it is cancelled at
     // admission. Permanent for the process (pool sized once at init); the
     // server reads this since /health and /v1/models do not reflect it.
-    bool kv_pool_floored() const noexcept { return kv_pool_floored_; }
+    [[nodiscard]] bool kv_pool_floored() const noexcept { return kv_pool_floored_; }
     // KV-pressure events, for /metrics (#1641). Counted in the engine, where
     // the decision is made; the server reads them at scrape time.
     uint64_t kv_pressure_rejections() const noexcept {
@@ -759,16 +759,16 @@ private:
     // Moves the CLI's single pending image onto the first request that reserves
     // placeholders for it. The server bypasses this and sets
     // `Request::qwen_patches` itself, because it admits images concurrently.
-    bool attach_qwen_image_(Request& req);
+    [[nodiscard]] bool attach_qwen_image_(Request& req);
     // Batch-worker half: patches -> this request's own device buffers.
     // Takes the stream the CALLER will read the result on: encoding on the
     // engine's own stream and reading on the prefill stream is unsynchronised,
     // and the freshly allocated buffer may be RECYCLED memory still holding
     // the previous request's image, so the race surfaces as a wrong answer,
     // not garbage.
-    bool encode_qwen_image_for_(Request& req, cudaStream_t stream);
+    [[nodiscard]] bool encode_qwen_image_for_(Request& req, cudaStream_t stream);
     // Prompt-side half: where the image sits and what it costs in positions.
-    bool build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& shapes);
+    [[nodiscard]] bool build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& shapes);
 
     // CLI only: images preprocessed on the caller's thread, in the order they
     // were given, waiting for the next request that has placeholders for them.
@@ -1001,7 +1001,7 @@ private:
     // a multi-candidate chunk.
     void mtp_post_verify_update_(const Request& req, int emitted, int row0 = 0);
     // Shared helper: run pair catch-up + chain draft from host token list.
-    bool mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows,
+    [[nodiscard]] bool mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows,
                          int n_pairs, bool chain_after);
     void mtp_unbind_(const char* why);
 
@@ -1013,7 +1013,7 @@ private:
     // when it handled this decode step; false falls through to normal decode.
     // min_draft > 0 (#1003 batch-RR): soft-decline when the draft is
     // shallower, since at batch > 1 the whole batch pays for the verify.
-    bool step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream, int min_draft = 0);
+    [[nodiscard]] bool step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream, int min_draft = 0);
     // #847 capturability census for the verify chunk forward (see
     // diagnostics.spec_capture_probe). Runs the forward via stream capture +
     // graph launch when possible, eagerly otherwise.
@@ -1053,7 +1053,7 @@ private:
     // eligible use. Hybrids with SSMState qualify: the recurrent chunk
     // kernels read the real chunk length from device (d_chunk_len) so pad
     // rows never advance the committed state.
-    bool spec_capture_ready_(int ctx_padded, int rows);
+    [[nodiscard]] bool spec_capture_ready_(int ctx_padded, int rows);
     // Round the real chunk length up to its capture bucket.
     int spec_capture_bucket_(int chunk_len) const;
     int spec_capture_bucket_max_() const;
@@ -1076,11 +1076,11 @@ private:
     // launch failure). Sets spec_capture_doomed_ after repeated failures: the
     // caller must then clear the state's capture fields before its eager
     // forward (a doom inside the forward means the capture path itself threw).
-    bool spec_captured_forward_(InferenceState& state, Tensor& logits_out, cudaStream_t stream);
+    [[nodiscard]] bool spec_captured_forward_(InferenceState& state, Tensor& logits_out, cudaStream_t stream);
     void free_spec_graphs_();
     // Effective n-gram speculation state for a request: honors the per-request
     // tri-state override (Request::spec_override), else the global default.
-    bool spec_ngram_enabled_(const Request& req) const {
+    [[nodiscard]] bool spec_ngram_enabled_(const Request& req) const {
         // A model that can never speculate must not look "enabled": the
         // decode loop chops itself into miss_burst bursts whenever this says
         // yes, and a model whose gates always fail made greedy output depend
@@ -1093,7 +1093,7 @@ private:
     // (n-gram/suffix matcher, MTP head, token recycling all feed the same
     // chunk), so ENTERING the step must ask this, not "is the n-gram source
     // on" - conflating them silently disabled MTP when ngram=false.
-    bool spec_any_drafter_enabled_(const Request& req) const {
+    [[nodiscard]] bool spec_any_drafter_enabled_(const Request& req) const {
         return spec_any_drafter(spec_drafter_state_(req));
     }
     // The configuration half, split out so the rule itself lives in
@@ -1123,11 +1123,11 @@ private:
     // spec_ngram_enabled_ sits on the per-step decode path; recomputing this
     // there (it reaches into supports_chunked_prefill_) would put avoidable
     // work on the hot path of every model.
-    bool spec_ngram_model_capable_() const { return spec_ngram_model_capable_flag_; }
+    [[nodiscard]] bool spec_ngram_model_capable_() const { return spec_ngram_model_capable_flag_; }
     // Computed ONCE at the end of Engine::init, never lazily: a lazy cache
     // filled on the first call would lock in the answer before `ssm_state_`
     // and the model profile are final.
-    bool spec_ngram_model_capable_uncached_() const;
+    [[nodiscard]] bool spec_ngram_model_capable_uncached_() const;
     bool spec_ngram_model_capable_flag_ = false;
     // Prompt-lookup drafting is cold by construction: it matches a suffix of
     // generated text against earlier occurrences, so early on there is
@@ -1136,18 +1136,18 @@ private:
     // not the request's eventual length (not known). Inline here because
     // engine_spec_ngram.cpp is at its hard-review ceiling. See
     // speculative.min_history.
-    bool spec_history_too_short_(const Request& req) const {
+    [[nodiscard]] bool spec_history_too_short_(const Request& req) const {
         const int n = runtime_config_.speculative.min_history;
         return n > 0 && static_cast<int>(req.output_tokens.size()) < n;
     }
     // Which gate refuses, or nullptr when none does. See the definition in
     // engine_spec_ngram.cpp for why the reason is a string and not a bool.
     const char* spec_verify_gate_refusal_(const Request& req, bool ignore_think = false) const;
-    bool spec_verify_gates_ok_(const Request& req, bool ignore_think = false) const;
-    bool spec_burst_launch_ok_(const Request& req) const;
+    [[nodiscard]] bool spec_verify_gates_ok_(const Request& req, bool ignore_think = false) const;
+    [[nodiscard]] bool spec_burst_launch_ok_(const Request& req) const;
     int spec_effective_miss_burst_(const Request& req) const;
     void spec_maybe_rearm_(Request& req) const;
-    bool ensure_spec_buffers_(int chunk_cap, int max_blocks);
+    [[nodiscard]] bool ensure_spec_buffers_(int chunk_cap, int max_blocks);
     void free_spec_buffers_();
     void log_spec_stats_() const;
     // One verify step's tally, aggregate plus per draft source.
@@ -1211,7 +1211,7 @@ private:
     double spec_fidelity_max_delta_ = 0.0;
     int* d_spec_snap_n_ = nullptr;     // device row count the snapshot is taken at
     size_t spec_state_scratch_bytes_ = 0;
-    bool ensure_spec_state_scratch_();
+    [[nodiscard]] bool ensure_spec_state_scratch_();
     int recurrent_slot_for_(int req_id) const;
     // ── Multi-candidate verify on a hybrid (roadmap gap 5, Stage 3) ──
     // W candidates run as W recurrent sequences: candidate 0 on the
@@ -1229,20 +1229,20 @@ private:
     int spec_mc_reserved_slots_() const;
     // Route gate for the grouped hybrid chunk (needs the reserved slots and
     // the fused batched scan: no fp32_scan/ref_kernel, GDN layers only).
-    bool spec_mc_hybrid_ok_(int width) const;
+    [[nodiscard]] bool spec_mc_hybrid_ok_(int width) const;
     std::vector<int> h_spec_mc_slots_;
     int* d_spec_mc_slots_ = nullptr;  // sub-pointer into d_spec_stage_ (kMtpMaxTopW ints)
     // ── Batched speculative verify (speculative.batch_verify) ──
     // docs/plans/2026-09-11-batched-mtp-verify.md, engine_spec_batch_verify.cpp,
     // state types in spec_batch_verify_state.h.
     BatchVerifyState bv_;
-    bool ensure_batch_verify_bufs_();       // init-time; sized from max_batch_size
+    [[nodiscard]] bool ensure_batch_verify_bufs_();       // init-time; sized from max_batch_size
     void free_batch_verify_bufs_();
     int acquire_spare_slot_(int req_id);
     int32_t batch_verify_draft_(Request& req, bool& from_mtp);
     const char* batch_verify_refusal_(const std::vector<std::shared_ptr<Request>>& batch) const;
     // Returns true when it handled the step (tokens emitted for every row).
-    bool step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& batch, cudaStream_t stream);
+    [[nodiscard]] bool step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& batch, cudaStream_t stream);
     // Session telemetry (logged when a request finishes).
     SpecStats spec_stats_{};
 
@@ -1268,13 +1268,13 @@ private:
     size_t effective_free_vram() const;
 
     // ── Init sub-phases ────────────────────────────────────────────
-    bool init_weights();
-    bool init_kv_cache();
+    [[nodiscard]] bool init_weights();
+    [[nodiscard]] bool init_kv_cache();
     // Plan rejected: lower max_batch_size to the largest batch the plan fits
     // when the batch-shaped SSM/GDN state is the overrun (MEMORY.md D14).
     void clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, int ssm_reserved_slots,
                                   int live_kv_blocks);
-    bool init_features();
+    [[nodiscard]] bool init_features();
     void warmup();
     // Config-resolution helpers for the front half of init() — each one
     // mutates config_ / RuntimeConfig in place, then init() executes
@@ -1384,20 +1384,20 @@ private:
     // conditional-graph loop; size == vocab.
     std::vector<uint8_t> token_is_whitespace_;
     uint8_t* d_token_is_whitespace_ = nullptr;
-    bool token_is_whitespace(int32_t token) const {
+    [[nodiscard]] bool token_is_whitespace(int32_t token) const {
         return token >= 0 && token < static_cast<int32_t>(token_is_whitespace_.size()) &&
                token_is_whitespace_[token];
     }
     void upload_penalties(const Request& req, InferenceState& state, cudaStream_t stream);
     void fill_sampling_params(Request& req, InferenceState& state) const;
     // False only on a reset whose transcript-snapshot tail block is gone (caller cancels).
-    bool fill_recurrent_state(const Request& req, InferenceState& state, bool reset, cudaStream_t stream);
+    [[nodiscard]] bool fill_recurrent_state(const Request& req, InferenceState& state, bool reset, cudaStream_t stream);
     int acquire_recurrent_slot_(int req_id);   // distinct free slot for a new sequence
     void release_recurrent_slot_(int req_id);  // idempotent; returns slot to the pool
     // Scheduler admission gate: the slot the next acquire will hand out is
     // committed (lazy SSM slab), or there is no slab to commit. False leaves
     // the request pending for the next round.
-    bool recurrent_slot_admissible_();
+    [[nodiscard]] bool recurrent_slot_admissible_();
     // After warmup: the graph prewarm captured a decode graph per batch size
     // and touched every recurrent slot doing so. Hand the free ones back so
     // the lazy slab starts serving at zero committed slots.
@@ -1412,7 +1412,7 @@ private:
     // Transcript snapshot at request finish (server.transcript_snapshot): the state after
     // every forwarded token, keyed by transcript_snapshot_key(); the partial tail block stays
     // cached with it and fill_recurrent_state clones it on the restore.
-    bool transcript_snapshot_active_() const;
+    [[nodiscard]] bool transcript_snapshot_active_() const;
     void maybe_save_transcript_snapshot_(const Request& req, std::span<const int32_t> tokens, cudaStream_t stream);
     // SWA window snapshots (kv_cache.swa_snapshot_mb, engine_sampling_stop.cpp):
     // same admission/save pattern as the hybrid pair, but the state is the
@@ -1446,7 +1446,7 @@ private:
     // first decode step of an eligible json/schema request; one tick harvests
     // one token. Returns: 0 = inactive/exhausted (fall through to eager),
     // 1 = produced a token and continues, -1 = generation finished.
-    bool try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaStream_t stream);
+    [[nodiscard]] bool try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaStream_t stream);
     int step_constrained_pipeline();
     // Jump-ahead (#844): probe the schema FSM for a forced continuation and
     // pend its canonical-tokenization draft (host-only, no GPU work).
@@ -1459,7 +1459,7 @@ private:
 
     // Schedule prefill/decode batches and reconfigure green contexts.
     // Returns true if there is work to do (batches non-empty).
-    bool step_schedule();
+    [[nodiscard]] bool step_schedule();
 
     // Process all prefill requests in sched_prefill_batch_.
     void step_prefill(cudaStream_t stream);
@@ -1470,10 +1470,10 @@ private:
     // ── Cross-sequence ragged prefill (runtime.prefill_batch, roadmap 0(d)) ──
     // Model/engine-level gate (lazily probes the layer stack once: Mamba2 and
     // MLA are out of scope, GDN requires the fused batched scan route).
-    bool prefill_ragged_enabled_();
+    [[nodiscard]] bool prefill_ragged_enabled_();
     // Per-request gate (Request::ragged_prefill_allowed): vision, embeddings, logprobs and
     // constrained decoding keep the serial path.
-    bool prefill_ragged_req_ok_(const Request& req) const;
+    [[nodiscard]] bool prefill_ragged_req_ok_(const Request& req) const;
     // Concatenate the next chunk of each request into one ragged forward
     // (capped at effective_chunk total rows); requests that do not fit stay in
     // sched_prefill_batch_ for the next step. Implementation:
@@ -1496,7 +1496,7 @@ private:
     // runs the per-sequence prefill route, sampling and delivery stay the
     // decode path's. Dense models only (no recurrent state to carry), and
     // only decoders the ragged path admits.
-    bool mixed_rider_ok_(const Request& r) const;
+    [[nodiscard]] bool mixed_rider_ok_(const Request& r) const;
     // The decoders that ride this step (each with its KV block prepared),
     // empty when the step is not mixed. Fills mixed_served_this_step_.
     void mixed_collect_riders_(std::vector<std::shared_ptr<Request>>& riders);
@@ -1506,7 +1506,7 @@ private:
 
     // step_decode sub-phase, one decoder: KV block for this step's token,
     // SWA window, StreamingLLM valves. False = cancelled, skip this step.
-    bool decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs);
+    [[nodiscard]] bool decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs);
     // One token per decode row of `logits` (row i = valid_decode[i]) with
     // each request's own sampling state (async batched sampler, device
     // penalty histories, per-row constraints, sync-only rows).
@@ -1531,15 +1531,15 @@ private:
     // ── Pipelined batched decode (bd_pipe_) ──────────────────────────
     // Static per-row / per-batch eligibility for the one-step-in-flight
     // pipeline (the clean serving case; see runtime.decode_pipeline).
-    bool pipeline_row_eligible_(const Request& r) const;
-    bool pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>>& rows) const;
+    [[nodiscard]] bool pipeline_row_eligible_(const Request& r) const;
+    [[nodiscard]] bool pipeline_batch_eligible_(const std::vector<std::shared_ptr<Request>>& rows) const;
     // Build the per-row sampling InferenceState for a CHAINED step (seed one
     // step ahead of the host-visible output count; rep/freq/presence
     // penalties read the device-side history including the in-flight token).
     InferenceState pipeline_row_state_(Request& req, int row_idx) const;
     // Lazily allocate the mapped-pinned patch/pos staging + the per-row
     // device history. False = allocation failed (pipeline stays off).
-    bool pipeline_staging_ensure_();
+    [[nodiscard]] bool pipeline_staging_ensure_();
     // Append KV blocks needed for the chained step (host ctx + 1) and stage
     // the block-table patches into the mapped-pinned set of `parity`.
     // Returns -1 on allocation failure / stride overflow, else patch count.
@@ -1547,11 +1547,11 @@ private:
     // Enqueue the next chained step: advance kernel + graph replay + per-row
     // sampler enqueue (slot parity `parity`) + async gather. False = could
     // not enqueue (nothing was put on the stream beyond the advance guard).
-    bool pipeline_enqueue_next_(int parity, cudaStream_t stream);
+    [[nodiscard]] bool pipeline_enqueue_next_(int parity, cudaStream_t stream);
     // Entry from step_decode_forward: gather step N async, chain N+1 if
     // possible, wait N's event and return its tokens. False = caller must
     // use the legacy synchronous collect path.
-    bool pipeline_enter_(std::vector<std::shared_ptr<Request>>& rows, const GPUBatch& gpu_batch,
+    [[nodiscard]] bool pipeline_enter_(std::vector<std::shared_ptr<Request>>& rows, const GPUBatch& gpu_batch,
                          int graph_idx, const InferenceState& state, const Tensor& logits,
                          cudaStream_t stream, std::vector<int32_t>& tokens_out);
     // Steady-state handler called at the top of step_decode while a step is
@@ -1590,7 +1590,7 @@ private:
 
     std::vector<int32_t> try_graph_loop_decode(std::shared_ptr<Request> req, int32_t first_token,
                                                cudaStream_t stream);
-    bool try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t first_token,
+    [[nodiscard]] bool try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t first_token,
                                      cudaStream_t stream, int step_limit = 0);
 };
 

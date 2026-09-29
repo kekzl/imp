@@ -13,12 +13,12 @@
 namespace imp {
 
 // True on sm_120+ hardware. Cached.
-bool capture_gemm_fp16_sm120_available();
+[[nodiscard]] bool capture_gemm_fp16_sm120_available();
 
 // Returns false if the GEMM cannot be implemented for the requested
 // shape (M, N, K must be positive; M and N must be tile-aligned for
 // the v1 kernel). Caller must fall back to the existing path if false.
-bool gemm_capture_fp16_sm120(const void* A, const void* B, void* D, int M, int N, int K, float alpha,
+[[nodiscard]] bool gemm_capture_fp16_sm120(const void* A, const void* B, void* D, int M, int N, int K, float alpha,
                               float beta, cudaStream_t stream);
 
 }  // namespace imp

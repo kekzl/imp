@@ -59,15 +59,15 @@ struct QwenPatchifyConfig {
 
 // Resize (smart_resize target, Catmull-Rom), rescale to [0,1], normalise, and
 // patchify. Returns false on a decode/size failure. `rgb` is [h, w, 3] u8.
-bool qwen_patchify(const uint8_t* rgb, int width, int height, const QwenPatchifyConfig& cfg,
+[[nodiscard]] bool qwen_patchify(const uint8_t* rgb, int width, int height, const QwenPatchifyConfig& cfg,
                    QwenPatches& out);
 
 // Load image from file, resize to target_size x target_size, normalize, convert to FP16 CHW.
-bool load_and_preprocess_image(const std::string& path, int target_size, const float mean[3],
+[[nodiscard]] bool load_and_preprocess_image(const std::string& path, int target_size, const float mean[3],
                                const float std[3], ImageData& out);
 
 // Load image from memory buffer, resize + normalize + FP16 CHW.
-bool load_and_preprocess_image_from_memory(std::span<const uint8_t> data, int target_size,
+[[nodiscard]] bool load_and_preprocess_image_from_memory(std::span<const uint8_t> data, int target_size,
                                            const float mean[3], const float std[3], ImageData& out);
 
 }  // namespace imp

@@ -89,7 +89,7 @@ public:
     // True when the raw Jinja template references reasoning (<think> or enable_thinking). Vocab
     // -level <think> tokens alone are not evidence: Qwen3-*-Instruct-2507 ships think specials
     // but its template never opens a think block.
-    bool mentions_thinking() const { return mentions_thinking_; }
+    [[nodiscard]] bool mentions_thinking() const { return mentions_thinking_; }
     // True when a raw Jinja template is driving rendering (mentions_thinking
     // is only meaningful evidence in that case).
     bool has_jinja() const { return use_jinja_; }
@@ -99,7 +99,7 @@ public:
     const std::string& reasoning_effort_default() const { return reasoning_effort_default_; }
     // True when the Jinja template teaches the Qwen-Coder/Qwen3.6 XML tool-call body
     // (<function=NAME><parameter=KEY>, raw-text values) instead of the ChatML JSON body.
-    bool tool_xml_dialect() const { return tool_xml_dialect_; }
+    [[nodiscard]] bool tool_xml_dialect() const { return tool_xml_dialect_; }
     bool is_raw() const { return family_ == ChatTemplateFamily::RAW; }
     bool supports_tools() const;
     const std::string& default_system_message() const { return default_system_message_; }
@@ -190,8 +190,8 @@ private:
     std::string reasoning_effort_default_;
 
     // Jinja2-based apply: render template, split on control tokens, encode
-    bool probe_render_mentions_think(const Tokenizer& tok) const;
-    bool probe_render_teaches_xml_tools(const Tokenizer& tok) const;
+    [[nodiscard]] bool probe_render_mentions_think(const Tokenizer& tok) const;
+    [[nodiscard]] bool probe_render_teaches_xml_tools(const Tokenizer& tok) const;
     std::vector<int32_t> apply_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
                                      bool add_generation_prompt = true, bool suppress_thinking = false,
                                      bool force_thinking = false,

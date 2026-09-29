@@ -829,7 +829,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     if (!init_kv_cache()) {
         return false;
     }
-    kv_manager_->enable_host_spill(static_cast<size_t>(std::max(0, runtime_config_.kv_cache.host_spill_mb))
+    // Optional tier: false = off (budget 0, or WARN logged with the reason); serving runs without it.
+    (void)kv_manager_->enable_host_spill(static_cast<size_t>(std::max(0, runtime_config_.kv_cache.host_spill_mb))
                                    << 20);
     MemAccount::instance().checkpoint("03_kv_cache");
     // Before warmup's graph prewarm: a captured decode step cannot allocate

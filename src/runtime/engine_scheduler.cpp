@@ -404,7 +404,8 @@ bool Engine::step_schedule() {
             target_ratio = 1.0f;
         }
         if (std::abs(target_ratio - green_ctx_.prefill_ratio()) > 0.1f) {
-            green_ctx_.reconfigure(target_ratio);
+            // false: init logged ERROR, is_available() is false, prefill/decode fall back to stream_.
+            (void)green_ctx_.reconfigure(target_ratio);
         }
     }
 
@@ -1198,7 +1199,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     }
 
     // Recurrent state
-    fill_recurrent_state(*valid_decode[0], state, false, dec_stream);
+    (void)fill_recurrent_state(*valid_decode[0], state, false, dec_stream);  // reset=false cannot fail
 
     // Check if any request needs logprobs or constrained mode
     // ONE flag for "this batch is driven by a host-side constraint FSM":
@@ -1580,7 +1581,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         Tensor logits_out;
         graph_runner.set_decode_fn(
             [this, &state, &logits_out](cudaStream_t s) { executor_->forward_logits(state, logits_out, s); });
-        graph_runner.execute(dec_stream);
+        // false only without a decode fn; capture/replay failures fall back to eager inside execute().
+        (void)graph_runner.execute(dec_stream);
 
         if (logits_out.data == nullptr) {
             logits_out = executor_->get_logits_view(gpu_batch.n_sequences);
@@ -2046,7 +2048,8 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                 if (launch_limit == 0 || launch_limit > slice_left)
                     launch_limit = slice_left;
             }
-            try_launch_async_graph_loop(dreq, last_token, dec_stream, launch_limit);
+            // Opportunistic: false = not launched, the next step() decodes eagerly.
+            (void)try_launch_async_graph_loop(dreq, last_token, dec_stream, launch_limit);
         }
     }
 
@@ -2075,7 +2078,8 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             // device cache's take-over before each step (both in prepare_decode_step_host).
             model_->ngram_table() == nullptr && !experts_on_host_;
         if (pipeline_compatible && dreq->status == RequestStatus::DECODING && !dreq->output_tokens.empty()) {
-            try_launch_constrained_pipeline(dreq, dec_stream);
+            // Opportunistic: false = not launched, the next step() decodes eagerly.
+            (void)try_launch_constrained_pipeline(dreq, dec_stream);
         }
     }
 }

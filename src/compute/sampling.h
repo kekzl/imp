@@ -45,7 +45,7 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float tem
 // sample_topk_topp_async returns false when top_k > SAMPLE_MAX_TOP_K (needs the
 // internally-syncing CUB path); caller falls back to the synchronous variant.
 void sample_greedy_async(const Tensor& logits, int32_t* d_result, cudaStream_t stream = nullptr);
-bool sample_topk_topp_async(const Tensor& logits, int top_k, float top_p, float temperature,
+[[nodiscard]] bool sample_topk_topp_async(const Tensor& logits, int top_k, float top_p, float temperature,
                             unsigned int seed, int32_t* d_result, cudaStream_t stream = nullptr);
 
 // Row-parallel batched top-k/top-p: one partial launch (grid 64 x n_rows) + one finalize
@@ -108,7 +108,7 @@ void apply_penalties_device_count_sweep(float* logits, int vocab_size, const int
 // Per-row 16-bit token counts for the history-sized penalty kernels: rows x
 // vocab halves from the T2 arena, once per engine (charged as
 // ExecT2Demand::penalty_counts). False leaves the penalties on the sweep.
-bool sampling_preallocate_penalty_counts(int rows, int vocab_size);
+[[nodiscard]] bool sampling_preallocate_penalty_counts(int rows, int vocab_size);
 // Forget the count scratch (engine teardown, test arenas): the arena that
 // backed it is gone, the launchers fall back to the sweep until the next
 // sampling_preallocate_penalty_counts.

@@ -189,7 +189,8 @@ bool apply_rope_override(ModelConfig& mcfg, const RuntimeConfig::Rope& rope) {
 }
 
 void Engine::init_apply_rope_override_() {
-    apply_rope_override(model_->config_, runtime_config_.rope);
+    // false = override refused and logged (WARN/ERROR); the model keeps its own RoPE.
+    (void)apply_rope_override(model_->config_, runtime_config_.rope);
 }
 
 // KV cache dtype policy + FP8 KV NaN-bug deterministic-cuBLAS workaround +
@@ -391,7 +392,8 @@ void Engine::init_resolve_kv_dtype_policy_() {
 
     if (config_.max_batch_size <= 0) {
         size_t free_vram_now = 0, total_vram_now = 0;
-        vram_budget_mem_get_info(&free_vram_now, &total_vram_now);
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&free_vram_now, &total_vram_now);
         size_t approx_weight_bytes = approx_weight_footprint_bytes(
             mcfg, estimated_host_expert_layers(mcfg, runtime_config_.moe.force_host_experts, free_vram_now));
         // Weight-footprint tier: kept as a FLOOR so this never regresses
@@ -880,7 +882,8 @@ void Engine::init_compute_max_seq_len_() {
     if (config_.max_seq_len <= 0) {
         int model_ctx = mcfg.max_seq_len;  // from GGUF metadata
         size_t free_vram = 0, total_vram = 0;
-        vram_budget_mem_get_info(&free_vram, &total_vram);
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&free_vram, &total_vram);
         int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
         // Hybrid models (Qwen3.5/3.6 GDN, Nemotron-H Mamba2) populate
         // n_kv_heads_per_layer with zeros for non-attention layers, which

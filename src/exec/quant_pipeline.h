@@ -125,7 +125,7 @@ private:
     void nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg, const VRAMBudget& budget,
                                          size_t& remaining_budget, cudaStream_t stream,
                                          Nvfp4DecodeContext& dctx);
-    bool cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>& experts, cudaStream_t stream,
+    [[nodiscard]] bool cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>& experts, cudaStream_t stream,
                                  Nvfp4DecodeContext& dctx, bool& moe_budget_exhausted,
                                  size_t& moe_logical_avail);
     void gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx);

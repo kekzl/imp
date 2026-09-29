@@ -89,7 +89,7 @@ public:
     // When enabled, freed blocks are retained in a hash table keyed by
     // token content, and allocate_blocks_with_prefix() reuses them.
     void set_prefix_caching_enabled(bool enabled) { prefix_caching_enabled_ = enabled; }
-    bool prefix_caching_enabled() const { return prefix_caching_enabled_; }
+    [[nodiscard]] bool prefix_caching_enabled() const { return prefix_caching_enabled_; }
 
     // Allocate blocks for a sequence, reusing cached KV blocks matching the token prefix.
     // Returns the number of prefix blocks reused; caller skips prefill for the first
@@ -128,7 +128,7 @@ public:
     //    path when that pool is on). The hold drops in free_sequence().
     void register_partial_block(int seq_id, std::span<const int32_t> tokens, size_t key);
     int hold_cached_block(size_t key, int seq_id);
-    bool clone_held_block(int seq_id, int block_index, cudaStream_t stream);
+    [[nodiscard]] bool clone_held_block(int seq_id, int block_index, cudaStream_t stream);
     void release_held_block(int seq_id);
 
     // Number of cached (unreferenced) blocks in the hash table.
@@ -136,7 +136,7 @@ public:
 
     // Evict a single cached block (LRU order). Returns true if a block
     // was evicted, false if no cached blocks remain.
-    bool evict_cached_block();
+    [[nodiscard]] bool evict_cached_block();
 
     // ── Prefix block pinning (agentic workloads) ────────────────────
 
@@ -171,7 +171,7 @@ public:
     // Reclaimed prefix blocks go to pinned host RAM (budget_bytes); a later prefix hit restores
     // them by H2D copy instead of re-prefill. False (tier off) without prefix caching, on SWA
     // layers or the key min/max pool, or when the pinned alloc fails.
-    bool enable_host_spill(size_t budget_bytes);
+    [[nodiscard]] bool enable_host_spill(size_t budget_bytes);
     const KVHostSpill* host_spill() const { return host_spill_.get(); }
 
     // SWA-aware sizing (kv_cache.swa_sizing): sliding-window layers read/write a small
@@ -186,7 +186,7 @@ public:
     //   - rollback()/free_sequence() handle the SWA table automatically.
     // SWA blocks are never hashed, pinned, persisted, or shared.
     void enable_swa_sizing(int window_tokens, int slack_tokens);
-    bool swa_sizing_enabled() const { return swa_window_ > 0; }
+    [[nodiscard]] bool swa_sizing_enabled() const { return swa_window_ > 0; }
     [[nodiscard]] bool swa_prepare(int seq_id, int from_tokens, int upto_tokens);
     [[nodiscard]] bool swa_prepare(int seq_id, int upto_tokens) {
         return swa_prepare(seq_id, upto_tokens, upto_tokens);
@@ -202,18 +202,18 @@ public:
     // makes a prefix-cache hit at P valid for windowed layers (their earlier blocks were
     // trailing-freed and cannot back reuse). enable_swa_snapshots() must be called after
     // enable_swa_sizing.
-    bool enable_swa_snapshots();
+    [[nodiscard]] bool enable_swa_snapshots();
     // Fixed slab size (bytes) of one snapshot; 0 until enabled.
     size_t swa_snapshot_bytes() const { return swa_snap_bytes_; }
     int swa_first_live_block(int upto_tokens) const;
     // Pack seq's live window blocks at exactly upto_tokens into slab
     // (device, >= swa_snapshot_bytes()). False if a needed block is a hole.
-    bool swa_snapshot_pack(int seq_id, int upto_tokens, void* slab, cudaStream_t stream);
+    [[nodiscard]] bool swa_snapshot_pack(int seq_id, int upto_tokens, void* slab, cudaStream_t stream);
     // Allocate window blocks for a sequence whose global prefix [0, upto) was reused from
     // the prefix cache and fill them from slab. Table slots before the window stay -1
     // holes. False on SWA-group exhaustion (allocated blocks released; caller falls back to
     // full prefill).
-    bool swa_snapshot_restore(int seq_id, int upto_tokens, const void* slab, cudaStream_t stream);
+    [[nodiscard]] bool swa_snapshot_restore(int seq_id, int upto_tokens, const void* slab, cudaStream_t stream);
 
     // ── Speculative decoding rollback ────────────────────────────────
 
@@ -271,7 +271,7 @@ public:
     // Returns true on success, false on alloc failure or if residual_n==0.
     [[nodiscard]] bool enable_residual_buffer(int max_seqs, int residual_n, VRAMAllocator* alloc);
 
-    bool residual_enabled() const { return residual_pool_ != nullptr; }
+    [[nodiscard]] bool residual_enabled() const { return residual_pool_ != nullptr; }
     int residual_n_tokens() const { return residual_n_tokens_; }
 
     // Per-(seq, layer) K/V pointer into the residual pool. Returns nullptr if residual is
@@ -393,7 +393,7 @@ private:
     // allocate_blocks_with_prefix returns. Stream order keeps a slot's pending H2D ahead of a later
     // D2H into the same slot.
     void spill_block_(int block_id, size_t hash);
-    bool restore_spilled_(size_t hash, int block_id);
+    [[nodiscard]] bool restore_spilled_(size_t hash, int block_id);
     void flush_spill_restores_();
     bool spill_restores_pending_ = false;
 
@@ -430,7 +430,7 @@ private:
     // Build pack (to_slab=true) or restore (to_slab=false) descs for the
     // seq's SWA table slots [swa_first_live_block(upto), upto/bs) across
     // all SWA layers and run them in one launch.
-    bool swa_snapshot_copy_(int seq_id, int upto_tokens, void* slab, bool to_slab,
+    [[nodiscard]] bool swa_snapshot_copy_(int seq_id, int upto_tokens, void* slab, bool to_slab,
                             cudaStream_t stream);
 
     // ── LRU tracking ─────────────────────────────────────────────────

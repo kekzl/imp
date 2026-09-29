@@ -35,9 +35,9 @@ class RegexNfa {
 public:
     // Compile `pattern` into a Thompson NFA. Returns false on unsupported
     // syntax (caller should treat as "no pattern constraint").
-    bool compile(const std::string& pattern);
+    [[nodiscard]] bool compile(const std::string& pattern);
 
-    bool compiled() const { return compiled_; }
+    [[nodiscard]] bool compiled() const { return compiled_; }
 
     // Epsilon-closure of the start state.
     std::vector<int> start_set() const;
@@ -47,7 +47,7 @@ public:
     std::vector<int> step(const std::vector<int>& states, unsigned char c) const;
 
     // True if any state in `states` is accepting.
-    bool accepts(const std::vector<int>& states) const;
+    [[nodiscard]] bool accepts(const std::vector<int>& states) const;
 
     // Bounds on what one pattern may cost: request-supplied text on an unauthenticated endpoint,
     // both limits below were unbounded (#1608, #1609). kMaxRepeat mirrors the GBNF parser's own
@@ -82,12 +82,12 @@ private:
         int start;
         int accept;
     };
-    bool parse_alt(Frag& out);
-    bool parse_concat(Frag& out);
-    bool parse_repeat(Frag& out);
-    bool parse_atom(Frag& out);
-    bool parse_class(Frag& out);  // [...]
-    static bool make_shorthand(char esc, std::vector<uint8_t>& cls);  // \d \w \s ...
+    [[nodiscard]] bool parse_alt(Frag& out);
+    [[nodiscard]] bool parse_concat(Frag& out);
+    [[nodiscard]] bool parse_repeat(Frag& out);
+    [[nodiscard]] bool parse_atom(Frag& out);
+    [[nodiscard]] bool parse_class(Frag& out);  // [...]
+    [[nodiscard]] static bool make_shorthand(char esc, std::vector<uint8_t>& cls);  // \d \w \s ...
 };
 
 enum class SchemaType {

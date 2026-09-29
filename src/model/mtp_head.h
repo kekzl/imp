@@ -89,7 +89,7 @@ namespace imp {
 // Checkpoint tensor is part of an MTP head if named mtp.* or model.mtp.* (outer prefix
 // kept). One rule, two callers (load_shard's divert decision, the presence probe) - both
 // must ask this shared question to avoid the #1384/#1443 defect class of disagreeing answers.
-inline bool name_is_mtp_tensor(std::string_view name) {
+[[nodiscard]] inline bool name_is_mtp_tensor(std::string_view name) {
     return name.rfind("mtp.", 0) == 0 || name.rfind("model.mtp.", 0) == 0;
 }
 
@@ -100,7 +100,7 @@ inline constexpr const char* kMtpHeadKeyEhProj = "mtp.layers.0.eh_proj.weight";
 inline constexpr const char* kMtpHeadKeyFc = "mtp.fc.weight";
 inline constexpr const char* kMtpHeadKeyFcEmbedding = "mtp.fc_embedding.weight";
 
-inline bool name_is_mtp_head_key(std::string_view name) {
+[[nodiscard]] inline bool name_is_mtp_head_key(std::string_view name) {
     if (name.rfind("model.", 0) == 0)
         name.remove_prefix(6);
     return name == kMtpHeadKeyEhProj || name == kMtpHeadKeyFc || name == kMtpHeadKeyFcEmbedding;
@@ -112,7 +112,7 @@ enum class MtpLayout { None, Qwen, Nemotron, Qwen4Exp };
 // True when `model_dir` ships an MTP head, decided from tensor NAMES only: the
 // sidecar file, the shard index, or the single-file header. Reads no weight
 // byte, so it is cheap enough to run on a load that does not want the head.
-bool probe_mtp_head(const std::string& model_dir);
+[[nodiscard]] bool probe_mtp_head(const std::string& model_dir);
 
 // Phase 1.A leftover — kept as part of the new MtpHead struct for compatibility
 // with the existing Model::mtp_info_ field.

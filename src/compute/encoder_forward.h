@@ -58,13 +58,13 @@ struct EncoderWorkspace {
 };
 
 // Dequantize weights + allocate scratch. Call once after upload_weights_gpu.
-bool encoder_workspace_init(EncoderWorkspace& ws, const Model& model, int max_tokens,
+[[nodiscard]] bool encoder_workspace_init(EncoderWorkspace& ws, const Model& model, int max_tokens,
                             cudaStream_t stream);
 void encoder_workspace_free(EncoderWorkspace& ws);
 
 // Full pass: host tokens -> pooled, L2-normalized embedding (host float[d]).
 // Returns false on precondition violation (n > max_tokens, ws not init).
-bool encoder_embed(const Model& model, EncoderWorkspace& ws, std::span<const int32_t> tokens, float* out_host,
+[[nodiscard]] bool encoder_embed(const Model& model, EncoderWorkspace& ws, std::span<const int32_t> tokens, float* out_host,
                    cudaStream_t stream);
 
 }  // namespace imp

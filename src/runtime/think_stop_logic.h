@@ -36,7 +36,7 @@ inline ThinkSeed seed_from_prompt_tail(std::string_view tail) {
 // is_added (tokenizer.json added_tokens) counts as a control marker even
 // with special=false (Qwen3.x NVFP4 SafeTensors); only a NORMAL BPE piece
 // that merely spells "<think>" stays rejected.
-inline bool accept_think_token(int32_t start_id, bool has_token_types, bool is_special, bool is_added,
+[[nodiscard]] inline bool accept_think_token(int32_t start_id, bool has_token_types, bool is_special, bool is_added,
                                int vocab_size) {
     if (start_id < 0)
         return false;
@@ -113,7 +113,7 @@ struct TextThinkState {
 
     // Feed one decoded piece. Returns true if a transition just fired (entered
     // or exited a think block) this call.
-    bool feed_piece(const std::string& piece) {
+    [[nodiscard]] bool feed_piece(const std::string& piece) {
         if (piece.empty())
             return false;
         think_text_tail += piece;
@@ -171,7 +171,7 @@ IMP_THINK_HD inline bool stop_mask_active(bool in_think, bool budget_can_close, 
 // Whitespace-only decoded text (e.g. "\n" right after </think>) must NOT count
 // as real content or release the grace, or a stop right after it yields a
 // 0-content completion (#798). Only a token with a non-whitespace byte counts.
-inline bool piece_is_whitespace(const std::string& piece) {
+[[nodiscard]] inline bool piece_is_whitespace(const std::string& piece) {
     return piece.find_first_not_of(" \t\n\r\f\v") == std::string::npos;
 }
 

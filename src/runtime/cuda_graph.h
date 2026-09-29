@@ -28,16 +28,16 @@ public:
     CudaGraphCapture() = default;
     ~CudaGraphCapture();
 
-    bool begin_capture(cudaStream_t stream);
-    bool end_capture();
-    bool replay(cudaStream_t stream);
+    [[nodiscard]] bool begin_capture(cudaStream_t stream);
+    [[nodiscard]] bool end_capture();
+    [[nodiscard]] bool replay(cudaStream_t stream);
     bool is_captured() const { return captured_; }
     void reset();
 
     // End capture and update the existing exec in-place if possible; falls back to full
     // re-instantiate if topology changed or no exec exists. Skips cudaDeviceGraphMemTrim on the
     // fast path to avoid churn during frequent re-captures (e.g. KV block table growth).
-    bool end_capture_and_update();
+    [[nodiscard]] bool end_capture_and_update();
 
     // Release graph_ only (keep graph_exec_ alive for in-place update).
     // Called between reusing an exec and the next capture.
@@ -81,7 +81,7 @@ public:
     void set_decode_fn(DecodeFn fn) { decode_fn_ = std::move(fn); }
 
     // Execute: runs the decode function, managing capture/replay.
-    bool execute(cudaStream_t stream);
+    [[nodiscard]] bool execute(cudaStream_t stream);
 
     // Mark the current graph as invalid (e.g., batch size changed).
     // Next execute() will re-capture. Fully destroys exec_ and graph_.
@@ -99,14 +99,14 @@ public:
     // by the pipelined batched decode to re-enqueue the forward for step N+1 after the
     // device-side chain advance. Returns false (and resets, so next execute() re-captures) when
     // no captured graph exists or the replay fails; caller falls back to the per-step path.
-    bool replay_only(cudaStream_t stream);
+    [[nodiscard]] bool replay_only(cudaStream_t stream);
     // True when the next execute() runs graph kernels: either already captured, or it will
     // capture immediately (process-warm via mark_process_warm, no eager warmup steps pending,
     // no prior capture failure). Scheduler gates that pick the async loop / pipelines by pool
     // readiness must use THIS, not is_ready(): gating on is_captured() enters those paths one
     // step later on the process's FIRST request, a numerically different kernel mix that flips
     // greedy output on near-ties (the 30B-NVFP4-MoE temp=0 flipper).
-    bool graph_path_available() const {
+    [[nodiscard]] bool graph_path_available() const {
         return !capture_failed_ && (graph_.is_captured() || step_count_ >= warmup_steps_);
     }
 
@@ -210,7 +210,7 @@ public:
                              int32_t first_token, Config config, cudaStream_t stream);
 
     // Launch the graph. Returns immediately.
-    bool launch(cudaStream_t stream);
+    [[nodiscard]] bool launch(cudaStream_t stream);
 
     // Re-seed device state for another bounded launch WITHOUT recapturing the graph. first_token
     // is forwarded at `position` with context length `context_len` (physical values, no +1
@@ -219,7 +219,7 @@ public:
     // caller passes full_budget - tokens_already_thought). Returns false when no graph is built,
     // a launch is in flight, or context_len would exceed the captured ceiling; caller falls back
     // to a full setup().
-    bool rearm(int32_t first_token, int position, int context_len, int step_limit, bool in_think,
+    [[nodiscard]] bool rearm(int32_t first_token, int position, int context_len, int step_limit, bool in_think,
                int think_limit, cudaStream_t stream);
 
     // Context ceiling baked into the captured graph (attention workspace
@@ -240,14 +240,14 @@ public:
     // launched flag. Stream errors surface like wait_and_get_tokens (F-A17); tokens already read
     // via poll_new_tokens stand. Deliberately NOT cudaStreamQuery-based: it reports the stream
     // idle while a conditional WHILE graph is still iterating.
-    bool try_finish_burst(cudaStream_t stream);
+    [[nodiscard]] bool try_finish_burst(cudaStream_t stream);
 
     // Blocking fallback when the device loop stops making progress without
     // publishing done (graph error paths): sync the stream, end the burst.
     void finish_burst_blocking(cudaStream_t stream);
 
     // A conditional-loop burst is currently running on the device.
-    bool launch_in_flight() const { return launched_; }
+    [[nodiscard]] bool launch_in_flight() const { return launched_; }
 
     void cleanup();
 

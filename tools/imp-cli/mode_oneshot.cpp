@@ -313,7 +313,10 @@ int run_oneshot(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGenerate
         // This eliminates per-step host overhead — shows true GPU-limited throughput.
         if (ctx->engine->runtime_config().bench.generate) {
             // Reset context for fresh generation
-            imp_context_reset(ctx);
+            if (const ImpError reset_err = imp_context_reset(ctx); reset_err != IMP_SUCCESS) {
+                fprintf(stderr, "Context reset error: %s\n", imp_error_string(reset_err));
+                return 1;
+            }
 
             // Use Engine::generate() directly for accurate timing
             imp::Engine* engine = ctx->engine.get();

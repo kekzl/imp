@@ -33,7 +33,7 @@ public:
 
     // Pattern-only init for unit tests: no tokenizer, no device buffers. Only
     // update_text/is_done/would_accept work afterwards.
-    bool init_pattern_only(const std::string& pattern);
+    [[nodiscard]] bool init_pattern_only(const std::string& pattern);
 
     bool is_initialized() const { return initialized_; }
 
@@ -48,16 +48,16 @@ public:
     // Advance the FSM with the token the sampler actually chose.
     // Returns false if that token was not in the language (should not happen
     // when apply_mask ran, and is logged by the caller if it does).
-    bool update(int32_t token_id);
+    [[nodiscard]] bool update(int32_t token_id);
 
     // Advance by raw text — the path unit tests use.
-    bool update_text(const std::string& text);
+    [[nodiscard]] bool update_text(const std::string& text);
 
     // True when the active state set accepts, i.e. stopping here is legal.
     bool is_done() const;
 
     // Would `text` keep the output inside the language? Does not advance.
-    bool would_accept(const std::string& text) const;
+    [[nodiscard]] bool would_accept(const std::string& text) const;
 
     // See JsonConstrainer::set_preamble — lets a reasoning model emit its
     // <think> block before the constraint engages.
@@ -75,7 +75,7 @@ private:
 
     // False when no input can ever reach an accepting state — such a pattern is
     // refused at init rather than silently producing an empty completion.
-    bool language_non_empty() const;
+    [[nodiscard]] bool language_non_empty() const;
 
     bool initialized_ = false;
     int vocab_size_ = 0;

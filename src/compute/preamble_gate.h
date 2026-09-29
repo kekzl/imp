@@ -70,14 +70,14 @@ public:
     // active()=true skips the FSM mask: ACTIVE (preamble), TOOL_BODY (unconstrained tool
     // call), TERMINAL_OFF (after tool call closed). OFF and TOOL_ARGS (strict tool-call body)
     // let the FSM mask through.
-    bool active() const noexcept {
+    [[nodiscard]] bool active() const noexcept {
         return state_ == State::ACTIVE || state_ == State::TOOL_BODY || state_ == State::TERMINAL_OFF;
     }
 
     // True once a strict optional tool call opened and its body is now
     // FSM-constrained (#1002) — the constrainer engages its TOOL_CALL body
     // frame on the ACTIVE → TOOL_ARGS transition.
-    bool in_tool_args() const noexcept { return state_ == State::TOOL_ARGS; }
+    [[nodiscard]] bool in_tool_args() const noexcept { return state_ == State::TOOL_ARGS; }
 
     // Re-arm after a strict tool-call body completes (parallel_tool_calls, #1002): TOOL_ARGS
     // -> ACTIVE so free text/EOS/another tool opener pass again, and the next <tool_call>
@@ -91,7 +91,7 @@ public:
     // Returns true if the token was fully consumed by the gate (FSM should
     // NOT process it). Returns false only for the one transition where
     // the token must be forwarded to the FSM: ACTIVE → OFF via `{` or `[`.
-    bool absorb(int32_t token, const std::string& text) {
+    [[nodiscard]] bool absorb(int32_t token, const std::string& text) {
         switch (state_) {
             case State::ACTIVE:
                 return absorb_active(token, text);
@@ -110,7 +110,7 @@ public:
 private:
     enum class State : uint8_t { ACTIVE, TOOL_BODY, TOOL_ARGS, TERMINAL_OFF, OFF };
 
-    bool absorb_active(int32_t token, const std::string& text) {
+    [[nodiscard]] bool absorb_active(int32_t token, const std::string& text) {
         seen_++;
 
         // On close token (e.g. </think>): tool-aware mode stays ACTIVE (tool-opener detection
@@ -161,7 +161,7 @@ private:
         return true;
     }
 
-    bool absorb_tool_body(int32_t token, const std::string& text) {
+    [[nodiscard]] bool absorb_tool_body(int32_t token, const std::string& text) {
         // Close-token detection (token-set fast-path).
         if (is_tool_close_token(token)) {
             state_ = State::TERMINAL_OFF;
@@ -182,7 +182,7 @@ private:
         return true;  // body content is always absorbed
     }
 
-    bool tool_detection_active() const { return !open_tokens_.empty() || !open_prefix_.empty(); }
+    [[nodiscard]] bool tool_detection_active() const { return !open_tokens_.empty() || !open_prefix_.empty(); }
 
     bool is_tool_open_token(int32_t token) const {
         if (token < 0)

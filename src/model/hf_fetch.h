@@ -15,7 +15,7 @@ struct HfUri {
 
 // True for any string starting with "hf://"; parse_hf_uri() then validates it.
 bool is_hf_uri(const std::string& s);
-bool parse_hf_uri(const std::string& s, HfUri& out, std::string& err);
+[[nodiscard]] bool parse_hf_uri(const std::string& s, HfUri& out, std::string& err);
 
 struct RepoFile {
     std::string name;    // path inside the repo ("rfilename")
@@ -43,12 +43,12 @@ std::string resolve_url(const std::string& endpoint, const std::string& repo, co
                         const std::string& file);
 
 // Parses the /api/models response (with ?blobs=true). False + err on malformed JSON.
-bool parse_repo_info(const std::string& json, RepoInfo& out, std::string& err);
+[[nodiscard]] bool parse_repo_info(const std::string& json, RepoInfo& out, std::string& err);
 
 // Files to download. `selector` names one .gguf; empty: the only .gguf, else the
 // SafeTensors set (top-level *.safetensors, *.json, *.jinja, tokenizer.model, merges/vocab).
 // `load_rel` is the path to load, relative to the snapshot ("" = the snapshot dir).
-bool select_files(const RepoInfo& info, const std::string& selector, std::vector<RepoFile>& out,
+[[nodiscard]] bool select_files(const RepoInfo& info, const std::string& selector, std::vector<RepoFile>& out,
                   std::string& load_rel, std::string& err);
 
 // <cache>/models--<org>--<repo>, the layout hf_hub.cpp resolves.

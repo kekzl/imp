@@ -215,19 +215,22 @@ bool bench_attention() {
                     float ms_fp8 = -1.0f;
                     {
                         Tensor O(dofp8, QType::F16, 4, qs, true);
+                        bool ran = true;
                         for (int i = 0; i < warmup; i++)
-                            fmha_sm120_fp8_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);
+                            ran = fmha_sm120_fp8_prefill(Q, K, V, O, sc, true, 0, 0.0f, s) && ran;
+                        if (!ran)
+                            fprintf(stderr, "fp8 FMHA refused seq=%d: row reports -1\n", seq);
                         cudaStreamSynchronize(s);
                         cudaEvent_t t0, t1;
                         cudaEventCreate(&t0);
                         cudaEventCreate(&t1);
                         cudaEventRecord(t0, s);
                         for (int i = 0; i < iters; i++)
-                            fmha_sm120_fp8_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);
+                            (void)fmha_sm120_fp8_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);  // args checked in warmup
                         cudaEventRecord(t1, s);
                         cudaEventSynchronize(t1);
                         cudaEventElapsedTime(&ms_fp8, t0, t1);
-                        ms_fp8 /= iters;
+                        ms_fp8 = ran ? ms_fp8 / iters : -1.0f;
                         cudaEventDestroy(t0);
                         cudaEventDestroy(t1);
                     }
@@ -236,19 +239,22 @@ bool bench_attention() {
                     float ms_mxfp4 = -1.0f;
                     {
                         Tensor O(domx, QType::F16, 4, qs, true);
+                        bool ran = true;
                         for (int i = 0; i < warmup; i++)
-                            fmha_sm120_mxfp4_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);
+                            ran = fmha_sm120_mxfp4_prefill(Q, K, V, O, sc, true, 0, 0.0f, s) && ran;
+                        if (!ran)
+                            fprintf(stderr, "mxfp4 FMHA refused seq=%d: row reports -1\n", seq);
                         cudaStreamSynchronize(s);
                         cudaEvent_t t0, t1;
                         cudaEventCreate(&t0);
                         cudaEventCreate(&t1);
                         cudaEventRecord(t0, s);
                         for (int i = 0; i < iters; i++)
-                            fmha_sm120_mxfp4_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);
+                            (void)fmha_sm120_mxfp4_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);  // args checked in warmup
                         cudaEventRecord(t1, s);
                         cudaEventSynchronize(t1);
                         cudaEventElapsedTime(&ms_mxfp4, t0, t1);
-                        ms_mxfp4 /= iters;
+                        ms_mxfp4 = ran ? ms_mxfp4 / iters : -1.0f;
                         cudaEventDestroy(t0);
                         cudaEventDestroy(t1);
                     }

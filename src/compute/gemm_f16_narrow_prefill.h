@@ -19,7 +19,7 @@ size_t gemm_f16_narrow_prefill_workspace_bytes(int M, int n_total, int split);
 
 // Returns false (nothing launched) when a shape does not fit; the caller keeps its previous
 // path. N1 == 0 runs pair 0 only. ws may be null (split 1).
-bool gemm_f16_narrow_prefill(const half* A, int M, int K, const half* W0, half* C0, int N0, const half* W1,
+[[nodiscard]] bool gemm_f16_narrow_prefill(const half* A, int M, int K, const half* W0, half* C0, int N0, const half* W1,
                              half* C1, int N1, void* ws, size_t ws_bytes, cudaStream_t stream);
 
 // Grid-shape knobs for the sweep in tests/test_gemm_f16_narrow_prefill.cu: the split-K cap

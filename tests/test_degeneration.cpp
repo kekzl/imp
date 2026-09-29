@@ -164,7 +164,7 @@ TEST_F(DegenerationTest, SecondRequestNotCorrupt) {
     std::string out1 = generate(model_, ctx_, "Say hello", 20);
 
     // Reset context
-    imp_context_reset(ctx_);
+    EXPECT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
 
     // Second request — should NOT be corrupted by first request's state
     std::string out2 = generate(model_, ctx_, "What is 2+2?", 30);
@@ -200,7 +200,7 @@ TEST_F(DegenerationTest, LongGenerationStability) {
 // i.e. before the engine's SetUp() creates the handle.
 TEST_F(DegenerationTest, GreedyDeterminism) {
     auto gen_greedy = [&](const std::string& prompt) {
-        imp_context_reset(ctx_);
+        EXPECT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
         ImpGenerateParams p = imp_generate_params_default();
         p.max_tokens = 30;
         p.temperature = 0.0f;
@@ -224,7 +224,7 @@ TEST_F(DegenerationTest, PrefillGraphReplayMatchesEager) {
     // imp_prefill_with_params runs the serial prefill (imp_generate goes through the scheduler's
     // ragged path, which this graph does not cover).
     auto gen_greedy = [&](int n_prompt, int salt) {
-        imp_context_reset(ctx_);
+        EXPECT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
         const int vocab = imp_model_vocab_size(model_);
         std::vector<int32_t> tokens(n_prompt);
         for (int i = 0; i < n_prompt; i++)

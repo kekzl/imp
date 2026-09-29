@@ -39,7 +39,7 @@ struct LoraDims {
 
 // Expected [K, N] of one projection's adapter; false when the model has no
 // such projection (an FFN target on a model without a dense FFN).
-inline bool lora_proj_expected(LoraProj p, const LoraDims& d, int* K, int* N) {
+[[nodiscard]] inline bool lora_proj_expected(LoraProj p, const LoraDims& d, int* K, int* N) {
     switch (p) {
         case LoraProj::Q:
             *K = d.d_model, *N = d.q_out;
@@ -73,10 +73,10 @@ public:
     // Load a PEFT adapter directory (or a bare .safetensors file, in which
     // case alpha/r fall back to the tensor shapes with scale=1). Returns
     // false with a logged reason on any parse/shape problem.
-    bool load(const std::string& path, int n_layers);
+    [[nodiscard]] bool load(const std::string& path, int n_layers);
     // Every loaded pair must match the base model's widths; `why` names the
     // first mismatch. Call after load(), before the adapter can be selected.
-    bool check_dims(const LoraDims& d, std::string* why) const;
+    [[nodiscard]] bool check_dims(const LoraDims& d, std::string* why) const;
 
     const LoraWeights* get(int layer, LoraProj p) const {
         if (layer < 0 || layer >= static_cast<int>(layers_.size()))

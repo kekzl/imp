@@ -223,7 +223,8 @@ bool Engine::init_features() {
     sampling_preallocate_dry(config_.max_seq_len, decode_stream());
     // History-sized penalties (sampling_penalties.cu): per-row token counts,
     // sized like the sampling scratch (max_logit_tokens = max(batch, 8)).
-    sampling_preallocate_penalty_counts(std::max(config_.max_batch_size, 8), model_->config().vocab_size);
+    // false: WARN logged, penalties stay on the sweep kernels (sampling.h).
+    (void)sampling_preallocate_penalty_counts(std::max(config_.max_batch_size, 8), model_->config().vocab_size);
     // 4096 slots is 32 KiB and four times the server's own --max-logit-bias
     // default, so the fallback path in apply_logit_bias stays unreachable for
     // any request the server accepts (#1617).
@@ -423,7 +424,8 @@ void Engine::warmup() {
     // init only (AUDIT B41).
     MemAccount::instance().checkpoint("05a_pre_warmup_forward");
     size_t warm_free_before = 0;
-    vram_budget_mem_get_info(&warm_free_before, nullptr);
+    // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+    (void)vram_budget_mem_get_info(&warm_free_before, nullptr);
     const size_t imma_planes_before = mmq_q8_imma_plane_bytes_used();
 
     for (int prompt_len : {16, 32}) {

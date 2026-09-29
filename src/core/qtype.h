@@ -46,7 +46,7 @@ enum class QType : uint16_t {
 // Does this source qtype benefit from an NVFP4 decode-cache conversion
 // (>4.5 bits/elem, or no fast native decode kernel)? Single source of truth
 // for both the pre-dequant phases and the VRAM-budget heuristic.
-inline bool nvfp4_beneficial(QType qt, bool decode_all = false) {
+[[nodiscard]] inline bool nvfp4_beneficial(QType qt, bool decode_all = false) {
     switch (qt) {
         case QType::Q8_0:
         case QType::Q8_K:

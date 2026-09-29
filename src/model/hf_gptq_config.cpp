@@ -29,12 +29,12 @@ bool HFConfigLoader::load_gptq_config(const std::string& model_dir, GPTQConfig& 
             return false;
 
         IMP_LOG_INFO("loading GPTQ config from %s", path.c_str());
-        jobj_get_int(*base, "bits", cfg.bits);
-        jobj_get_int(*base, "group_size", cfg.group_size);
+        jobj_opt_int(*base, "bits", cfg.bits);
+        jobj_opt_int(*base, "group_size", cfg.group_size);
         const JValue* da = jobj_find(*base, "desc_act");
         cfg.desc_act = da && da->type == JType::NUMBER && da->num_val != 0.0;
         if (!jobj_get_string(*base, "checkpoint_format", cfg.checkpoint_format))
-            jobj_get_string(*base, "format", cfg.checkpoint_format);
+            jobj_opt_string(*base, "format", cfg.checkpoint_format);
         const JValue* marlin = jobj_find(*base, "is_marlin_format");
         if (marlin && marlin->type == JType::NUMBER && marlin->num_val != 0.0)
             cfg.checkpoint_format = "marlin";

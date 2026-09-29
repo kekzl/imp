@@ -679,7 +679,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 // KV cache + weight caches (FP8/NVFP4) need the remaining VRAM,
                 // so expert cache must not over-commit.
                 size_t free_mem = 0, total_mem = 0;
-                vram_budget_mem_get_info(&free_mem, &total_mem);
+                // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+                (void)vram_budget_mem_get_info(&free_mem, &total_mem);
                 size_t safety = 128 << 20;  // 128 MiB reserve
                 size_t budget = (free_mem > safety) ? free_mem - safety : 0;
                 int pct = dispatch_policy().moe.expert_cache_budget_pct;
@@ -740,7 +741,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 // Only worth it if it fits comfortably: this runs on a model
                 // that already did not fit, so never take the last of VRAM.
                 size_t free_mem = 0, total_mem = 0;
-                vram_budget_mem_get_info(&free_mem, &total_mem);
+                // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+                (void)vram_budget_mem_get_info(&free_mem, &total_mem);
                 if (total + (512u << 20) < free_mem) {
                     moe_.layer_stage_buf = vram_alloc(vram_alloc_, total, "moe_layer_stage");
                     if (moe_.layer_stage_buf) {
@@ -822,7 +824,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // runs after this and sees what's left). Leave >= 1 GiB free: covers vram_budget reserve
             // (~768 MiB) plus a useful KV cache.
             size_t free_now = 0, total_now = 0;
-            vram_budget_mem_get_info(&free_now, &total_now);
+            // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+            (void)vram_budget_mem_get_info(&free_now, &total_now);
             constexpr size_t kPostBufReserve = 1024ULL * 1024 * 1024;
             size_t cap_bytes = (free_now > kPostBufReserve) ? (free_now - kPostBufReserve) : 0;
 

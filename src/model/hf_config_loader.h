@@ -16,7 +16,7 @@ struct HFConfigLoader {
     // Loads config.json, populates ModelConfig; only overwrites fields present in the JSON.
     // out_vision_tower, when non-null and the checkpoint carries a supported vision tower,
     // receives a VisionModel with only its config filled; weights are weight_map's half.
-    static bool load_config(const std::string& model_dir, ModelConfig& cfg,
+    [[nodiscard]] static bool load_config(const std::string& model_dir, ModelConfig& cfg,
                             std::unique_ptr<VisionModel>* out_vision_tower = nullptr);
 
     // Sampling/stop-condition defaults from generation_config.json. Sentinels mean "not
@@ -32,7 +32,7 @@ struct HFConfigLoader {
 
     // Load generation_config.json. Returns true if file found and parsed.
     // Only fields present in the JSON are populated; the rest stay at sentinel.
-    static bool load_generation_config(const std::string& model_dir, GenerationConfig& cfg);
+    [[nodiscard]] static bool load_generation_config(const std::string& model_dir, GenerationConfig& cfg);
 
     // Load chat_template string from tokenizer_config.json.
     // Returns empty string if not found.
@@ -57,7 +57,7 @@ struct HFConfigLoader {
         std::string pad_token;
         std::string unk_token;
     };
-    static bool load_special_tokens_map(const std::string& model_dir, SpecialTokensMap& out);
+    [[nodiscard]] static bool load_special_tokens_map(const std::string& model_dir, SpecialTokensMap& out);
 
     // Tokenizer-side flags from tokenizer_config.json; GGUF equivalent is
     // tokenizer.ggml.add_bos_token / add_space_prefix. Sentinel -1=absent, 0=false, 1=true.
@@ -75,7 +75,7 @@ struct HFConfigLoader {
         std::string bos_token;
         std::string eos_token;
     };
-    static bool load_tokenizer_flags(const std::string& model_dir, TokenizerFlags& out);
+    [[nodiscard]] static bool load_tokenizer_flags(const std::string& model_dir, TokenizerFlags& out);
 
     // GPTQ quantization config: quantize_config.json, else config.json quantization_config
     // with quant_method gptq. checkpoint_format from "checkpoint_format" or "format" (GPTQModel).
@@ -85,7 +85,7 @@ struct HFConfigLoader {
         bool desc_act = false;
         std::string checkpoint_format;  // "" = unspecified (AutoGPTQ default: gptq v1)
     };
-    static bool load_gptq_config(const std::string& model_dir, GPTQConfig& cfg);
+    [[nodiscard]] static bool load_gptq_config(const std::string& model_dir, GPTQConfig& cfg);
 
     // Source format of NVFP4 quantization metadata.
     enum class NvFP4Format {
@@ -108,12 +108,12 @@ struct HFConfigLoader {
         int n_fp8_tensors = 0;
         int n_other_tensors = 0;  // an algorithm this build does not recognise
     };
-    static bool load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg);
+    [[nodiscard]] static bool load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg);
 
     // True if config.json declares a vision_config this build can build a tower from. Must
     // run before load_config(): shards are mapped first and a dropped shard cannot be
     // recovered. Only answers "worth keeping tensors for"; geometry is validated by load_config().
-    static bool probe_vision_tower(const std::string& model_dir);
+    [[nodiscard]] static bool probe_vision_tower(const std::string& model_dir);
 
     // MXFP4 quantization config (e.g. GPT-OSS): config.json quantization_config,
     // quant_method=="mxfp4". Only metadata is parsed; the SafeTensors decode path is not
@@ -121,7 +121,7 @@ struct HFConfigLoader {
     struct MxFP4Config {
         int block_size = 32;  // E8M0 scale per 32 elements is the standard
     };
-    static bool load_mxfp4_config(const std::string& model_dir, MxFP4Config& cfg);
+    [[nodiscard]] static bool load_mxfp4_config(const std::string& model_dir, MxFP4Config& cfg);
 
     // AWQ (Activation-aware Weight Quantization) config. Sourced from
     // `quantization_config` in `config.json` or a separate `quant_config.json`.
@@ -132,7 +132,7 @@ struct HFConfigLoader {
         bool zero_point = true;  // AWQ uses zero-points by default
         std::string version;     // "gemm", "gemv", "marlin", or empty
     };
-    static bool load_awq_config(const std::string& model_dir, AWQConfig& cfg);
+    [[nodiscard]] static bool load_awq_config(const std::string& model_dir, AWQConfig& cfg);
 
     // Map HF architecture class name to imp ModelArch.
     static ModelArch map_architecture(const std::string& hf_arch);

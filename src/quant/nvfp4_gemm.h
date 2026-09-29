@@ -57,10 +57,10 @@ void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, floa
 // prefill fallback fully materializes the weight per call). Marlin recipe: dequant-to-FP16
 // in smem + FP16 tensor-core MMA. M<=32, K%128==0.
 size_t gemm_nvfp4_smallm_workspace_bytes(int N_out);
-bool gemm_nvfp4_smallm(const NvFP4QuantResult& W, const half* x, half* y, int M, int N_out, int K,
+[[nodiscard]] bool gemm_nvfp4_smallm(const NvFP4QuantResult& W, const half* x, half* y, int M, int N_out, int K,
                        void* d_workspace, cudaStream_t stream, bool accumulate = false);
 // A4 variant: both sides packed NVFP4 (activations quantized by the caller).
-bool gemm_nvfp4_smallm_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
+[[nodiscard]] bool gemm_nvfp4_smallm_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
                           int N_out, int K, void* d_workspace, cudaStream_t stream,
                           bool accumulate = false);
 // v2: native block-scaled mxf4nvf4 MMA on both plain-NVFP4 sides, fed by a producer/
@@ -68,17 +68,17 @@ bool gemm_nvfp4_smallm_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq,
 // nvfp4_gemm_smallm_v2.cu for design, gemm.h for the v1 postmortem motivating it.
 int gemm_nvfp4_smallm_v2_stripes(int N_out, int K);
 size_t gemm_nvfp4_smallm_v2_workspace_bytes(int N_out, int K);
-bool gemm_nvfp4_smallm_v2_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
+[[nodiscard]] bool gemm_nvfp4_smallm_v2_a4(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
                              int N_out, int K, void* d_workspace, cudaStream_t stream,
                              bool accumulate = false);
 // FP32-output twin for the batched LM head (samplers read float logits): single-stripe
 // shapes only (a vocab-sized N tiles the card many times over), fresh output, no
 // workspace; false otherwise. Same accumulators as the FP16 kernel, written before the
 // FP16 rounding.
-bool gemm_nvfp4_smallm_v2_a4_f32(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, float* y, int M,
+[[nodiscard]] bool gemm_nvfp4_smallm_v2_a4_f32(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, float* y, int M,
                                  int N_out, int K, cudaStream_t stream);
 // Tuning hook (tests only): explicit stage depth {2,3,4,6} and stripe count.
-bool gemm_nvfp4_smallm_v2_a4_tuned(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
+[[nodiscard]] bool gemm_nvfp4_smallm_v2_a4_tuned(const NvFP4QuantResult& W, const NvFP4QuantResult& Xq, half* y, int M,
                                    int N_out, int K, void* d_workspace, cudaStream_t stream,
                                    bool accumulate, int stages, int stripes);
 // Sibling variant: two or three weights with the same K sharing one quantized activation
@@ -92,9 +92,9 @@ struct SmallMV2Sibling {
     half* y;
     int N;
 };
-bool gemm_nvfp4_smallm_v2_multi_a4(const SmallMV2Sibling* t, int count, const NvFP4QuantResult& Xq, int M,
+[[nodiscard]] bool gemm_nvfp4_smallm_v2_multi_a4(const SmallMV2Sibling* t, int count, const NvFP4QuantResult& Xq, int M,
                                    int K, cudaStream_t stream);
-bool gemm_nvfp4_smallm_v2_pair_a4(const NvFP4QuantResult& W1, const NvFP4QuantResult& W2,
+[[nodiscard]] bool gemm_nvfp4_smallm_v2_pair_a4(const NvFP4QuantResult& W1, const NvFP4QuantResult& W2,
                                   const NvFP4QuantResult& Xq, half* y1, half* y2, int M, int N1, int N2,
                                   int K, cudaStream_t stream);
 
@@ -116,7 +116,7 @@ void gemv_nvfp4_gate_up_fused(const NvFP4QuantResult& wg, const NvFP4QuantResult
 // M=1 GDN input projections in one launch: in_proj+gate (NVFP4) and alpha+beta (FP16
 // [ab_rows,K]) on one x. Returns false when K%16!=0, K>8192, or a weight's K differs; the
 // caller keeps its four-call path. Registered for PDL by nvfp4_gemv_pdl_register().
-bool gemv_nvfp4_gdn_input_fused(const NvFP4QuantResult& w_in, const NvFP4QuantResult& w_gate, const half* w_alpha,
+[[nodiscard]] bool gemv_nvfp4_gdn_input_fused(const NvFP4QuantResult& w_in, const NvFP4QuantResult& w_gate, const half* w_alpha,
                                 const half* w_beta, int ab_rows, const half* x, half* y_in, half* y_gate,
                                 half* y_alpha, half* y_beta, int K, cudaStream_t stream,
                                 const NvFP4NormFoldIn& fold = {});

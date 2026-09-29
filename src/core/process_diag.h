@@ -83,52 +83,52 @@ const ProcessDiag& process_diag_current();
 void process_diag_set(const ProcessDiag& d);
 
 // Diagnostics
-bool process_diag_debug_forward();
-bool process_diag_debug_template();
-bool process_diag_graph_diag();
-bool process_diag_nvfp4_force_dequant();
-bool process_diag_prefill_graph_ignore_dequant_cap();
-bool process_diag_log_gemm_algo();
-bool process_diag_audit_nvfp4_scales();
+[[nodiscard]] bool process_diag_debug_forward();
+[[nodiscard]] bool process_diag_debug_template();
+[[nodiscard]] bool process_diag_graph_diag();
+[[nodiscard]] bool process_diag_nvfp4_force_dequant();
+[[nodiscard]] bool process_diag_prefill_graph_ignore_dequant_cap();
+[[nodiscard]] bool process_diag_log_gemm_algo();
+[[nodiscard]] bool process_diag_audit_nvfp4_scales();
 const char* process_diag_dump_hidden_dir();   // nullptr when unset; "1"/"all" → "/tmp"
 const char* process_diag_graph_dump_dir();    // nullptr when unset
 
 // Runtime modes
-bool process_diag_no_pdl();
+[[nodiscard]] bool process_diag_no_pdl();
 
 // Pinned staging ring for the weight upload (#1653). Depth and chunk size in
 // MiB; the defaults are 4 and 4. Load-time only - the ring is built once per
 // upload pass and destroyed with it.
 int process_diag_upload_ring_depth();
 int process_diag_upload_ring_chunk_mib();
-bool process_diag_no_vision_graph();
+[[nodiscard]] bool process_diag_no_vision_graph();
 // "global" | "relaxed" | "thread_local" (default "relaxed")
 const std::string& process_diag_graph_capture_mode();
-bool process_diag_prefill_graph_enabled();
+[[nodiscard]] bool process_diag_prefill_graph_enabled();
 
 // Mirrored at engine init from cfg.runtime.deterministic_gemm; some arch
 // resolvers (Gemma-4, FP8 KV) promote this flag during init_resolve_*.
 // process_diag_set_deterministic_gemm() lets the resolver update the cache in place.
-bool process_diag_deterministic_gemm();
+[[nodiscard]] bool process_diag_deterministic_gemm();
 void process_diag_set_deterministic_gemm(bool v);
 // FP16-accumulate cuBLAS prefill GEMMs (gemm.cublas_fp16_acc), read by the
 // free-function gemm() in compute/gemm.cu, which carries no RuntimeConfig.
 // "auto" resolved per-arch by init_resolve_quant_flags_; install() maps auto -> off for engine-less tools.
-bool process_diag_cublas_fp16_acc();
+[[nodiscard]] bool process_diag_cublas_fp16_acc();
 void process_diag_set_cublas_fp16_acc(bool v);
 
 // Attention
-bool process_diag_attention_splitk_pipe();
-bool process_diag_attention_fp8_tile();
-bool process_diag_attention_fp8_tile_gqa();
-bool process_diag_fa2_f16acc();  // f16-accumulate QK^T in the fp16-qk FA2 kernel (#597)
-bool process_diag_fa2_pv_f16acc();  // f16-accumulate the PV MMA too (#667 follow-up)
+[[nodiscard]] bool process_diag_attention_splitk_pipe();
+[[nodiscard]] bool process_diag_attention_fp8_tile();
+[[nodiscard]] bool process_diag_attention_fp8_tile_gqa();
+[[nodiscard]] bool process_diag_fa2_f16acc();  // f16-accumulate QK^T in the fp16-qk FA2 kernel (#597)
+[[nodiscard]] bool process_diag_fa2_pv_f16acc();  // f16-accumulate the PV MMA too (#667 follow-up)
 // test hooks (mirror process_diag_set_cublas_fp16_acc)
 void process_diag_set_fa2_f16acc(bool v);
 void process_diag_set_fa2_pv_f16acc(bool v);
-bool process_diag_fa2_hd256();  // HD=256 FA2 port (attention.fa2_hd256, default on since #932)
+[[nodiscard]] bool process_diag_fa2_hd256();  // HD=256 FA2 port (attention.fa2_hd256, default on since #932)
 void process_diag_set_fa2_hd256(bool v);
-bool process_diag_fa2_dense_2cta();  // dense Bq=128 FA2 at 2 CTAs/SM (attention.fa2_dense_2cta)
+[[nodiscard]] bool process_diag_fa2_dense_2cta();  // dense Bq=128 FA2 at 2 CTAs/SM (attention.fa2_dense_2cta)
 int process_diag_paged_fp8_multitok();  // FP8 paged decode tokens per warp iteration
                                         // (attention.paged_fp8_multitok)
 void process_diag_set_paged_fp8_multitok(int v);
@@ -146,26 +146,26 @@ int process_diag_paged_fp8_hpc();  // FP8 grouped-kernel Q heads per CTA, 0 = au
                                    // (tests only)
 void process_diag_set_paged_fp8_hpc(int v);
 void process_diag_set_fa2_dense_2cta(bool v);
-bool process_diag_fa2_heavy_first();  // causal FA2 CTA order, heavy q-tiles first (attention.fa2_heavy_first)
+[[nodiscard]] bool process_diag_fa2_heavy_first();  // causal FA2 CTA order, heavy q-tiles first (attention.fa2_heavy_first)
 void process_diag_set_fa2_heavy_first(bool v);
 int process_diag_fa2_hd256_bkv();  // KV tile rows of the HD=256 instance (attention.fa2_hd256_bkv)
 void process_diag_set_fa2_hd256_bkv(int v);
-bool process_diag_fp8_qk_scaled();  // amax-scaled e4m3 fp8-QK (#680)
+[[nodiscard]] bool process_diag_fp8_qk_scaled();  // amax-scaled e4m3 fp8-QK (#680)
 void process_diag_set_fp8_qk_scaled(bool v);
 int process_diag_nvfp4_cutlass_streamk();  // gemm.nvfp4_cutlass_streamk: 0 off, 1 sub-2-wave grids, 2 forced
 void process_diag_set_nvfp4_cutlass_streamk(int v);
 // test hook: force the paged-decode split-K path onto its single-split GQA/MHA
 // fallback even on a clean launch, so the fallback can be verified against the
 // split-K result without provoking a real cudaErrorInvalidValue. Default off.
-bool process_diag_force_splitk_fallback();
+[[nodiscard]] bool process_diag_force_splitk_fallback();
 void process_diag_set_force_splitk_fallback(bool v);
 // "auto" | "always" | "never" (default "auto"); attention_mxfp4_available()
 // only enables MXFP4 attention when mode == "always".
 const std::string& process_diag_attention_mxfp4_mode();
 // #846 NVFP4-attention spike knobs (only meaningful when mxfp4 == "always").
-bool process_diag_mxfp4_blockscale();
-bool process_diag_mxfp4_ksmooth();
-bool process_diag_mxfp4_pv_fp4();
+[[nodiscard]] bool process_diag_mxfp4_blockscale();
+[[nodiscard]] bool process_diag_mxfp4_ksmooth();
+[[nodiscard]] bool process_diag_mxfp4_pv_fp4();
 void process_diag_set_mxfp4_ksmooth(bool v);
 void process_diag_set_mxfp4_pv_fp4(bool v);
 // ThriftAttention-style outlier promotion budget (0 = off, requires blockscale).
@@ -173,10 +173,10 @@ float process_diag_mxfp4_promote_budget();
 void process_diag_set_mxfp4_promote_budget(float v);
 
 // FFN
-bool process_diag_ffn_sparsity_probe();
+[[nodiscard]] bool process_diag_ffn_sparsity_probe();
 
 // MoE
-bool process_diag_verify_row_parity();  // verify chunk reduces K like the decode GEMV
+[[nodiscard]] bool process_diag_verify_row_parity();  // verify chunk reduces K like the decode GEMV
 void process_diag_set_verify_row_parity(bool);
 int process_diag_moe_mr_nr();  // rows-per-block for NVFP4 MoE decode (4/8/16/32)
 // Read at model-load time by weight_upload (Pass 2 expert offload budget
@@ -185,7 +185,7 @@ int process_diag_moe_expert_overhead_pct();
 int process_diag_moe_force_host_experts();
 // Copy host-resident NVFP4 experts into pinned host memory at load (a trade:
 // +14.7 % prefill for 4.6x model-load time — see dispatch_policy.h).
-bool process_diag_moe_pin_host_experts();
+[[nodiscard]] bool process_diag_moe_pin_host_experts();
 
 // GDN: layout override read at model-load time by hf_config_loader (no
 // per-Engine context at that point in the loader pipeline).

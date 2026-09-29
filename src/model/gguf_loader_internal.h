@@ -23,13 +23,13 @@ public:
     size_t pos() const { return pos_; }
     size_t remaining() const { return size_ - pos_; }
     const uint8_t* ptr() const { return data_ + pos_; }
-    bool failed() const { return failed_; }
+    [[nodiscard]] bool failed() const { return failed_; }
     void fail() { failed_ = true; }
 
     // Bounds check for an n-byte read at the current cursor. Guards against
     // pos_ + n overflowing on attacker-controlled u64 lengths (a wrapped sum
     // would otherwise compare <= size_ and admit an out-of-bounds read).
-    bool check(size_t n) const { return n <= size_ - pos_; }
+    [[nodiscard]] bool check(size_t n) const { return n <= size_ - pos_; }
 
     void skip(size_t n) {
         if (!check(n)) {
@@ -117,9 +117,9 @@ double val_float(const GGUFValue& v);
 void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count,
                         std::vector<GGUFTensorInfo>& out);
 
-bool gguf_tensor_in_bounds(const GGUFTensorInfo& info);
+[[nodiscard]] bool gguf_tensor_in_bounds(const GGUFTensorInfo& info);
 
-bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, GgufWireType gtype);
+[[nodiscard]] bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, GgufWireType gtype);
 
 // The reportable family of a tensor name: its first path segment with digit runs
 // collapsed to N, so a whole dropped subtree is one log line rather than one per

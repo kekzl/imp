@@ -40,7 +40,7 @@ public:
     // MemAccount pool "engine_arena" and comes off the reserved-uncommitted
     // ledger (vram_query.h).
     [[nodiscard]] MemError open(Backend& backend, size_t capacity, RegionTag tag, bool lazy = false);
-    bool lazy() const { return lazy_; }
+    [[nodiscard]] bool lazy() const { return lazy_; }
     // Physical bytes backing the arena right now. Equals capacity() unless lazy.
     size_t committed() const;
 

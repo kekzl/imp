@@ -10,7 +10,7 @@ namespace imp {
 // Returns false when no template fits (hd not in {64,96,128,256}, or smem over opt-in - hd=256
 // needs ~176KB at Br=64 vs 99KB) or the launch errors. Callers must handle decline (old silent
 // fallback was #654).
-bool flash_attention_blackwell(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+[[nodiscard]] bool flash_attention_blackwell(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                                bool causal = true, int sliding_window = 0, float softcap = 0.0f,
                                cudaStream_t stream = nullptr, int q_offset = 0);
 

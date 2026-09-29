@@ -545,7 +545,8 @@ void JsonConstrainer::update(int32_t token) {
     if (preamble_.absorb(token, text))
         return;
     for (char c : text) {
-        advance_char(c);
+        // Not checked: EOS and special-token text reach here too, and their chars are not JSON.
+        (void)advance_char(c);
     }
 }
 
@@ -591,7 +592,7 @@ size_t JsonConstrainer::build_token_allow(uint16_t mask, int n_classified) {
             second_row[c] = static_cast<int16_t>(second_ok.size());
             auto& row = second_ok.emplace_back();
             JsonGrammar base = g_;
-            base.advance_char(static_cast<char>(c));
+            (void)base.advance_char(static_cast<char>(c));  // legal: first_ok[c]
             for (int d = 0; d < 256; d++) {
                 JsonGrammar probe = base;
                 row[d] = probe.advance_char(static_cast<char>(d));

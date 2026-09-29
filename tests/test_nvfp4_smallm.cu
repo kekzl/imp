@@ -174,7 +174,8 @@ TEST_F(NvFP4SmallMTest, BandwidthAboveStarvationFloor) {
         // of a ~40 us kernel were 8 ms and measured the ramp, not the kernel:
         // identical configs read 23-62 us across runs until this was fixed.
         for (int i = 0; i < 30000; ++i)
-            imp::gemm_nvfp4_smallm(q, static_cast<const half*>(d_x), static_cast<half*>(d_y), M, N, K,
+            // timing loop: the launch status is not under test
+            (void)imp::gemm_nvfp4_smallm(q, static_cast<const half*>(d_x), static_cast<half*>(d_y), M, N, K,
                                    d_ws, bench_stream);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
@@ -183,7 +184,8 @@ TEST_F(NvFP4SmallMTest, BandwidthAboveStarvationFloor) {
         const int iters = 300;
         cudaEventRecord(t0, bench_stream);
         for (int i = 0; i < iters; ++i)
-            imp::gemm_nvfp4_smallm(q, static_cast<const half*>(d_x), static_cast<half*>(d_y), M, N, K,
+            // timing loop: the launch status is not under test
+            (void)imp::gemm_nvfp4_smallm(q, static_cast<const half*>(d_x), static_cast<half*>(d_y), M, N, K,
                                    d_ws, bench_stream);
         cudaEventRecord(t1, bench_stream);
         ASSERT_EQ(cudaEventSynchronize(t1), cudaSuccess);
@@ -288,7 +290,8 @@ TEST_F(NvFP4SmallMTest, A4BandwidthStableWithoutWindow) {
     ASSERT_EQ(cudaMalloc(&d_ws, imp::gemm_nvfp4_smallm_workspace_bytes(N)), cudaSuccess);
 
     for (int i = 0; i < 30000; ++i)
-        imp::gemm_nvfp4_smallm_a4(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws, nullptr);
+        // timing loop: the launch status is not under test
+        (void)imp::gemm_nvfp4_smallm_a4(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws, nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     cudaEvent_t t0, t1;
@@ -296,7 +299,8 @@ TEST_F(NvFP4SmallMTest, A4BandwidthStableWithoutWindow) {
     const int iters = 300;
     cudaEventRecord(t0);
     for (int i = 0; i < iters; ++i)
-        imp::gemm_nvfp4_smallm_a4(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws, nullptr);
+        // timing loop: the launch status is not under test
+        (void)imp::gemm_nvfp4_smallm_a4(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws, nullptr);
     cudaEventRecord(t1);
     ASSERT_EQ(cudaEventSynchronize(t1), cudaSuccess);
     float ms = 0.0f;

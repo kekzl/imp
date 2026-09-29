@@ -26,18 +26,18 @@ namespace imp {
 // Dense Q8_0: out[M,N] = x·W^T (beta=0) or += (beta=1).
 // Declines: M < 2, N % 2, K % 64, beta ∉ {0,1}, capture-guarded miss.
 // allow_splitk=false: no M<=32 split-K, so a row matches its value at any M (prompt rows, #2152).
-bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
+[[nodiscard]] bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
                       cudaStream_t stream, float beta = 0.0f, bool allow_splitk = true);
 
 // Dense Q4_K (new stack — distinct from the retired 2026-05 64x32 q4k_imma
 // kernel): same contract; K % 256 == 0 (Q4_K super-block).
-bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
+[[nodiscard]] bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
                        cudaStream_t stream, float beta = 0.0f, bool allow_splitk = true);
 
 // Dense Q6_K: per-16 scales via half-MMA split (symmetric, no beta term), GGUF 210-B blocks read
 // in place. K % 256 == 0. Not routed: dense Q6_K loses to dequant + fp16-acc cuBLAS
 // (Qwen3-14B-Q6_K pp512 6957 -> 3747 tok/s); kept as the BM=128 test entry.
-bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
+[[nodiscard]] bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
                        cudaStream_t stream, float beta = 0.0f);
 
 // MoE grouped prefill GEMM over ne experts in one launch (gridDim.z=ne).
@@ -46,7 +46,7 @@ bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* ou
 // h_max_rows: upper bound on rows/expert, sizes grid.y (surplus CTAs exit on their offsets);
 // rows_hint (0 = h_max_rows) picks the tile: <96 selects BM=32 small-M (
 // pp512 top-8/128 routing averages ~32 rows/expert). qkind: 0=Q8_0, 1=Q4_K, 2=Q6_K, 3=Q5_1, 4=Q5_K.
-bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __half* out_f16,
+[[nodiscard]] bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __half* out_f16,
                        const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N, int K,
                        cudaStream_t stream, int rows_hint = 0);
 

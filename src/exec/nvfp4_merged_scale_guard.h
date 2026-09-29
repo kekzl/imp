@@ -43,7 +43,7 @@ inline int64_t fused_split_needed_rows(const FusedSplitRequest& r) {
 // fire in either direction (weight_map already slices per sibling): kept as the repair
 // path for a fused layout whose scale plane is NOT sliced per sibling, and to keep the
 // wrong repair impossible.
-inline bool fused_split_eligible(const FusedSplitRequest& r, std::string* why_not) {
+[[nodiscard]] inline bool fused_split_eligible(const FusedSplitRequest& r, std::string* why_not) {
     auto no = [&](const char* m) {
         if (why_not)
             *why_not = m;
@@ -92,7 +92,7 @@ struct MergedScaleGroup {
 // (two distinct allocations never share an address); offsets are checked only when the
 // fix-up arm actually wrote them, since a tidy allocator placing two planes adjacently
 // must not be refused.
-inline bool merged_scale_group_ok(const MergedScaleGroup& g, std::string* err) {
+[[nodiscard]] inline bool merged_scale_group_ok(const MergedScaleGroup& g, std::string* err) {
     auto fail = [&](const std::string& m) {
         if (err)
             *err = "layer " + std::to_string(g.layer) + " " + g.what + ": " + m;

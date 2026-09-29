@@ -28,7 +28,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
 // Slices attention_cublas_prefill into q-row chunks sized to the S workspace (S-matrix-overflow
 // regime: long ctx x wide chunk). Sizing stays on the FP32-S path (use_fp32_s), floored to a
 // multiple of 16; returns false if even a 16-row slice overflows, caller falls back to tiled FMHA.
-bool attention_cublas_prefill_sliced(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
+[[nodiscard]] bool attention_cublas_prefill_sliced(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
                                      Tensor& S, int n_heads, int n_kv_heads, int head_dim, float scale,
                                      bool causal, float softcap = 0.0f, int q_offset = 0,
                                      cudaStream_t stream = nullptr, int sliding_window = 0,

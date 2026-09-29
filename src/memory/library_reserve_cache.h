@@ -45,7 +45,7 @@ size_t library_reserve_cache_load(const std::string& path, const LibraryReserveK
 // Record `bytes` for `key`, replacing any previous entry. Returns false when the
 // file could not be written — the caller should warn once and carry on, because
 // failing a model load over a cache write would be absurd.
-bool library_reserve_cache_store(const std::string& path, const LibraryReserveKey& key,
+[[nodiscard]] bool library_reserve_cache_store(const std::string& path, const LibraryReserveKey& key,
                                  size_t bytes);
 
 }  // namespace imp

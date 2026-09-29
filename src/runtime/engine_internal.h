@@ -96,7 +96,8 @@ inline const int32_t* ple_step_context(int ctx_len, int32_t eos,
     out.assign(static_cast<size_t>(n_seq) * ctx_len, 0);
     for (int s = 0; s < n_seq; s++) {
         const Request& r = *rows[static_cast<size_t>(s)];
-        ngram_context_at(r.input_tokens.data(), static_cast<int>(r.input_tokens.size()),
+        // false = positions past the history are eos-filled, the documented contract (ngram_table.h).
+        (void)ngram_context_at(r.input_tokens.data(), static_cast<int>(r.input_tokens.size()),
                          r.output_tokens.data(), static_cast<int>(r.output_tokens.size()),
                          positions[static_cast<size_t>(s) * per_seq], ctx_len, eos,
                          out.data() + static_cast<size_t>(s) * ctx_len);
@@ -106,7 +107,7 @@ inline const int32_t* ple_step_context(int ctx_len, int32_t eos,
 
 // The decode step's host work (GraphExecutor::prepare_decode_step_host) with each row's PLE
 // context. True = PLE rows staged for this step (InferenceState::ple_host_ready).
-inline bool prepare_decode_step_host(GraphExecutor& ex, const Model& model,
+[[nodiscard]] inline bool prepare_decode_step_host(GraphExecutor& ex, const Model& model,
                                      const std::vector<std::shared_ptr<Request>>& rows, const Batch& batch,
                                      cudaStream_t stream) {
     const int32_t* ctx = ple_step_context(ex.ple_context_len(), model.config().ple_eos_token_id, rows,
@@ -129,7 +130,7 @@ inline cudaError_t copy_d2h_sync(void* dst, const void* src, size_t bytes, cudaS
 
 // Single-seq residual slot into d_buf[0], skipped while uploaded[0] already holds it.
 // False: upload failed, cache cleared (retried next step), d_buf unusable this step.
-inline bool upload_residual_slot(int* d_buf, int slot, std::vector<int>& uploaded, cudaStream_t stream) {
+[[nodiscard]] inline bool upload_residual_slot(int* d_buf, int slot, std::vector<int>& uploaded, cudaStream_t stream) {
     if (!uploaded.empty() && uploaded[0] == slot)
         return true;
     const cudaError_t err = cudaMemcpyAsync(d_buf, &slot, sizeof(int), cudaMemcpyHostToDevice, stream);

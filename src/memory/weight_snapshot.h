@@ -86,7 +86,7 @@ struct WeightUploadRecord {
 // Warm-cache records are file-supplied (AUDIT_arch_2026 F1-3): alloc indices, byte offsets,
 // and the Tensor POD may come from a file another process replaced. Validates indices only
 // (caller already checked byte bounds); one bad record forces a cold load, never clamps.
-inline bool weight_record_indices_ok(const WeightUploadRecord& rec, std::string* why) {
+[[nodiscard]] inline bool weight_record_indices_ok(const WeightUploadRecord& rec, std::string* why) {
     auto fail = [why](std::string msg) {
         if (why)
             *why = std::move(msg);
@@ -166,17 +166,17 @@ public:
     // Restore one keyed upload: alloc device buffers, copy blob back, restore tensor state,
     // append to gpu_allocs, re-record into new_log so a later suspend still works.
     // Returns false (weight untouched) on miss/mismatch; caller falls back to cold upload.
-    bool try_restore(const char* key, Tensor& weight, cudaStream_t stream,
+    [[nodiscard]] bool try_restore(const char* key, Tensor& weight, cudaStream_t stream,
                      std::vector<void*>& gpu_allocs, const WarmRestoreOps& ops,
                      WeightUploadLog* new_log);
 
     size_t total_bytes() const { return total_bytes_; }
     int hits() const { return hits_; }
     // Model-identity guard checked once by upload_weights_gpu before use.
-    bool matches(const Model& model) const;
+    [[nodiscard]] bool matches(const Model& model) const;
     // Test hook: drop one captured record so that key takes the cold path at
     // resume — proves warm and cold uploads mix byte-safely.
-    bool drop_key(const std::string& key) { return blobs_.erase(key) > 0; }
+    [[nodiscard]] bool drop_key(const std::string& key) { return blobs_.erase(key) > 0; }
 
     // Zero-copy variant: blob bytes are VIEWS into an mmap the snapshot takes
     // ownership of via builder_set_mmap (munmapped in the destructor).

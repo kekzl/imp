@@ -792,10 +792,12 @@ static void hd256_bench_vs_wmma(cudaStream_t stream_, int NH, int NKV, const cha
         return ms / kIters;
     };
     float fa2_ms = time_kernel([&] {
-        fmha_sm120_fa2_prefill(Qt, Kt, Vt, O_fa2, scale, causal, 0, 0.0f, stream_, 0, true);
+        // timing loop: the launch status is not under test
+        (void)fmha_sm120_fa2_prefill(Qt, Kt, Vt, O_fa2, scale, causal, 0, 0.0f, stream_, 0, true);
     });
     float wmma_ms = time_kernel([&] {
-        fmha_sm120_prefill(Qt, Kt, Vt, O_wmma, scale, causal, 0, 0.0f, stream_, 0);
+        // timing loop: the launch status is not under test
+        (void)fmha_sm120_prefill(Qt, Kt, Vt, O_wmma, scale, causal, 0, 0.0f, stream_, 0);
     });
     printf("[hd256-bench] %s (Sq=%d NH=%d NKV=%d): FA2=%.3f ms  WMMA=%.3f ms  "
            "(FA2/WMMA = %.2fx)\n",

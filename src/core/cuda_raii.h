@@ -124,7 +124,7 @@ public:
     explicit operator bool() const noexcept { return event_ != nullptr; }
 
     // Convenience: ensure created, then record on stream.
-    bool record(cudaStream_t stream) {
+    [[nodiscard]] bool record(cudaStream_t stream) {
         if (!event_ && !create())
             return false;
         return cudaEventRecord(event_, stream) == cudaSuccess;

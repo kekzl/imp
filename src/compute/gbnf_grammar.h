@@ -24,11 +24,11 @@ struct GbnfCharSet {
     std::vector<std::pair<uint32_t, uint32_t>> ranges;
     bool negated = false;
 
-    bool matches(uint32_t cp) const;
+    [[nodiscard]] bool matches(uint32_t cp) const;
     // True if ANY codepoint in [lo,hi] is a member. Used for partial-UTF-8
     // liveness: a token may end mid-codepoint, and the question is then whether
     // any completion of it could be legal.
-    bool intersects(uint32_t lo, uint32_t hi) const;
+    [[nodiscard]] bool intersects(uint32_t lo, uint32_t hi) const;
 };
 
 // One element of an alternative: either consumes a character, or descends into
@@ -68,14 +68,14 @@ using GbnfStackSet = std::vector<int32_t>;
 // Parses GBNF source into a rule table, reporting root's index. Returns false with a one-line
 // reason on syntax error, undefined rule, or missing root. Implemented in gbnf_parser.cpp,
 // kept a separate TU since it shares nothing with the simulator but these structs.
-bool parse_gbnf(const std::string& src, std::vector<GbnfRule>& rules, int32_t& root, std::string* err);
+[[nodiscard]] bool parse_gbnf(const std::string& src, std::vector<GbnfRule>& rules, int32_t& root, std::string* err);
 
 class GbnfGrammar {
 public:
     // Compile GBNF source. On failure returns false and, when `err` is given,
     // fills it with a one-line human-readable reason.
-    bool compile(const std::string& src, std::string* err = nullptr);
-    bool compiled() const { return compiled_; }
+    [[nodiscard]] bool compile(const std::string& src, std::string* err = nullptr);
+    [[nodiscard]] bool compiled() const { return compiled_; }
 
     // Expanded stack set for the start of `root`.
     GbnfStackSet start_set() const;
@@ -88,7 +88,7 @@ public:
     void step_into(const GbnfStackSet& stacks, uint32_t cp, GbnfStackSet& out) const;
 
     // The derivation is complete iff some stack is empty.
-    static bool accepts(const GbnfStackSet& stacks);
+    [[nodiscard]] static bool accepts(const GbnfStackSet& stacks);
 
     // Can the next codepoint be anything in [lo,hi]? (partial-UTF-8 liveness)
     bool can_consume_range(const GbnfStackSet& stacks, uint32_t lo, uint32_t hi) const;
@@ -137,7 +137,7 @@ private:
     // Fixed point over rules that can derive the empty string.
     void compute_nullable();
     // Refuses `a ::= a "x"` and mutual variants; see the header comment.
-    bool check_left_recursion(std::string* err) const;
+    [[nodiscard]] bool check_left_recursion(std::string* err) const;
 
     std::vector<GbnfRule> rules_;
     std::vector<uint8_t> nullable_;
@@ -170,17 +170,17 @@ struct GbnfPartial {
 // bug in this tree escaped CI because its test needed a GPU.
 class GbnfMatcher {
 public:
-    bool compile(const std::string& src, std::string* err = nullptr);
-    bool compiled() const { return grammar_.compiled(); }
+    [[nodiscard]] bool compile(const std::string& src, std::string* err = nullptr);
+    [[nodiscard]] bool compiled() const { return grammar_.compiled(); }
     const GbnfGrammar& grammar() const { return grammar_; }
 
     // Back to the start of `root`, keeping the compiled grammar.
     void reset();
 
     // Would `text` keep the output inside the language? Does not advance.
-    bool would_accept(const std::string& text) const;
+    [[nodiscard]] bool would_accept(const std::string& text) const;
     // Same, but commits the resulting state when the text is legal.
-    bool update_text(const std::string& text);
+    [[nodiscard]] bool update_text(const std::string& text);
 
     // True when the derivation is complete and no character is half-written,
     // i.e. stopping here is legal.
@@ -194,7 +194,7 @@ public:
     std::vector<int32_t> state_key() const;
 
 private:
-    bool run(const std::string& text, GbnfStackSet& stacks, GbnfPartial& partial) const;
+    [[nodiscard]] bool run(const std::string& text, GbnfStackSet& stacks, GbnfPartial& partial) const;
 
     GbnfGrammar grammar_;
     GbnfStackSet stacks_;

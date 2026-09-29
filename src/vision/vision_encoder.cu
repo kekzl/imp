@@ -529,7 +529,8 @@ bool VisionEncoder::encode(const half* d_pixels, half* d_output, cudaStream_t st
     bool ok = true;
     encode_graph_.set_decode_fn(
         [this, d_pixels, d_output, &ok](cudaStream_t s) { ok = encode_impl(d_pixels, d_output, s); });
-    encode_graph_.execute(stream);
+    // false only without a decode fn; capture/replay failures fall back to eager inside execute().
+    (void)encode_graph_.execute(stream);
     return ok;
 }
 

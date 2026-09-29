@@ -66,10 +66,10 @@ public:
     // Builds the per-layer tables for every MoE layer whose experts are host-resident,
     // NVFP4-promoted and pinned in a MAPPED slab of `model`. False (and no layer ready)
     // when any of that does not hold; the host path then serves the layer.
-    bool init(const Model& model, ExpertLRUCache& cache, VRAMAllocator* alloc, int top_k);
+    [[nodiscard]] bool init(const Model& model, ExpertLRUCache& cache, VRAMAllocator* alloc, int top_k);
     void destroy();
 
-    bool layer_ready(int layer) const {
+    [[nodiscard]] bool layer_ready(int layer) const {
         return layer >= 0 && layer < static_cast<int>(layers_.size()) && layers_[layer].src;
     }
     // Resolves the layer's routed experts to slots (staging the misses), on `stream`:
@@ -90,11 +90,11 @@ public:
     // buf + p * proj_bytes + e * pb, micro-scales at buf + p * proj_bytes + n_experts * pb + e * mb).
     // Untouched experts keep stale bytes no grouped-GEMM group reads. False (nothing copied)
     // when the layer is not ready or the layout differs from the cache's.
-    bool stage_touched(int layer, const int32_t* expert_offsets, char* stage_buf, size_t proj_bytes,
+    [[nodiscard]] bool stage_touched(int layer, const int32_t* expert_offsets, char* stage_buf, size_t proj_bytes,
                        size_t pb, size_t mb, cudaStream_t stream);
     // Block form: experts [e0, e0 + n) of projection proj0 into slot 0 and proj1 (-1 = none) into
     // slot 1, block-local index (packed at slot + i * pb, micro-scales at slot + n * pb + i * mb).
-    bool stage_touched_range(int layer, const int32_t* expert_offsets, char* stage_buf, size_t proj_bytes,
+    [[nodiscard]] bool stage_touched_range(int layer, const int32_t* expert_offsets, char* stage_buf, size_t proj_bytes,
                              size_t pb, size_t mb, int e0, int n, int proj0, int proj1, cudaStream_t stream);
 
     // Per-projection micro-scale offset within a slot (same layout the host path uses).
