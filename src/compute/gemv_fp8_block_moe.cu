@@ -23,7 +23,8 @@ __device__ __forceinline__ float fp8x16_dot(const uint4 w, const uint4 xa, const
             __nv_cvt_fp8x2_to_halfraw2(static_cast<__nv_fp8x2_storage_t>(wv[i] >> 16), __NV_E4M3);
         const float2 wl = __half22float2(*reinterpret_cast<const __half2*>(&lo));
         const float2 wh = __half22float2(*reinterpret_cast<const __half2*>(&hi));
-        const float2 x0 = __half22float2(*reinterpret_cast<const __half2*>(&xv[2 * i]));
+        const float2 x0 = __half22float2(
+            *reinterpret_cast<const __half2*>(&xv[static_cast<ptrdiff_t>(2 * i)]));
         const float2 x1 = __half22float2(*reinterpret_cast<const __half2*>(&xv[2 * i + 1]));
         acc += wl.x * x0.x + wl.y * x0.y + wh.x * x1.x + wh.y * x1.y;
     }
@@ -50,9 +51,9 @@ __global__ void gemv_fp8_block_moe_kernel(Fp8BlockMoeArgs a, int blocks_per_proj
     float sum = 0.0f;
     const int chunks = a.K / 16;
     for (int c = lane; c < chunks; c += 32) {
-        const uint4 w = *reinterpret_cast<const uint4*>(w_row + c * 16);
-        const uint4 xa = *reinterpret_cast<const uint4*>(x + c * 16);
-        const uint4 xb = *reinterpret_cast<const uint4*>(x + c * 16 + 8);
+        const uint4 w = *reinterpret_cast<const uint4*>(w_row + static_cast<ptrdiff_t>(c * 16));
+        const uint4 xa = *reinterpret_cast<const uint4*>(x + static_cast<ptrdiff_t>(c * 16));
+        const uint4 xb = *reinterpret_cast<const uint4*>(x + static_cast<ptrdiff_t>(c * 16) + 8);
         sum += fp8x16_dot(w, xa, xb) * s_row[(c * 16) / kFp8BlockSize];
     }
     sum = warp_reduce_sum(sum);

@@ -27,7 +27,6 @@ namespace {
 // response are three phases instead of one 593-LOC body (#1905 file-size gate).
 struct CompletionCtx {
     const std::string& prompt;
-    const std::vector<int32_t>& tokens;
     const std::vector<std::string>& stop_sequences;
     const std::string& comp_id;
     const std::string& snap_model_name;
@@ -409,7 +408,8 @@ void nonstream_completion_response_(httplib::Response& res, ServerState& state, 
     double ttft_ms = -1.0;
     auto t_prev_token = t_start;  // last delivered token (ITL)
     for (;;) {
-        if ((finish = nonstream_should_stop_(state, *server_req, ns_comp_start, c.client_gone)))
+        finish = nonstream_should_stop_(state, *server_req, ns_comp_start, c.client_gone);
+        if (finish)
             break;
 
         TokenEvent evt{};
@@ -848,7 +848,6 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
     int64_t created = unix_timestamp();
 
     const CompletionCtx cctx{prompt,
-                             tokens,
                              stop_sequences,
                              comp_id,
                              snap_model_name,

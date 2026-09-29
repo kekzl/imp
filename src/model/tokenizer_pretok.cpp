@@ -173,16 +173,16 @@ private:
     }
 
     size_t match_at(size_t i) const {
-        size_t e;
-        if (spec_.contractions == Contractions::kPrefix && (e = contraction_end(i)) != kNone)
+        if (spec_.contractions == Contractions::kPrefix)
+            if (const size_t e = contraction_end(i); e != kNone)
+                return e;
+        if (const size_t e = letters(i); e != kNone)
             return e;
-        if ((e = letters(i)) != kNone)
+        if (const size_t e = digits(i); e != kNone)
             return e;
-        if ((e = digits(i)) != kNone)
+        if (const size_t e = symbols(i); e != kNone)
             return e;
-        if ((e = symbols(i)) != kNone)
-            return e;
-        if ((e = whitespace(i)) != kNone)
+        if (const size_t e = whitespace(i); e != kNone)
             return e;
         return i + step(i);  // unreachable: every codepoint is L, N, \s or a symbol
     }

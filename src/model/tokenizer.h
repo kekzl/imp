@@ -14,7 +14,7 @@ struct SplitSequence;  // tokenizer_pretok.cpp
 // index vocab_/scores_/token_types_ directly, needing both bounds: below zero is an OOB
 // write, near INT_MAX the max_id+1 sizing wraps. 4M is ~16x the largest shipped vocabulary
 // (Gemma, ~256k).
-constexpr int64_t kMaxTokenId = 4 * 1024 * 1024;
+constexpr int64_t kMaxTokenId = int64_t{4} * 1024 * 1024;
 
 class Tokenizer {
 public:

@@ -51,7 +51,7 @@ static bool is_rate_limited_endpoint(const std::string& path) {
     return true;
 }
 
-int main(int argc, char** argv) {
+static int run_server(int argc, char** argv) {
     ServerArgs args = parse_server_args(argc, argv);
 
     printf("IMP Server %s\n", imp_version());
@@ -633,4 +633,16 @@ int main(int argc, char** argv) {
     imp_model_free(state.model);
     imp_weights_snapshot_free(state.weight_snapshot);  // non-null only when suspended
     return exit_status;
+}
+
+// An exception escaping run_server ends the process with a message and exit 1, not std::terminate.
+int main(int argc, char** argv) {
+    try {
+        return run_server(argc, argv);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "imp-server: fatal: uncaught exception: %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "imp-server: fatal: uncaught non-standard exception\n");
+    }
+    return 1;
 }

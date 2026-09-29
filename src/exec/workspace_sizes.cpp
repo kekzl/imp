@@ -10,6 +10,9 @@ namespace imp {
 
 namespace {
 
+// Per-take alignment of the workspace arena (bytes): each take may waste up to this much.
+constexpr size_t kTakeAlign = 256;
+
 // Logical (unpacked) K of a weight tensor. NVFP4 stores two e2m1 values per
 // byte, so shape[...] is the PACKED byte count and the dequant target is twice
 // as wide — the same distinction allocate_nvfp4_dequant_workspace makes.
@@ -299,7 +302,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
         }
         if (ws > 0)
             out.smallm_scratch = ws + 32 * static_cast<size_t>(k_max / 2) +
-                                 32 * static_cast<size_t>(k_max / 16) + 2 * 256;
+                                 32 * static_cast<size_t>(k_max / 16) + 2 * kTakeAlign;
     }
 
     // Sampling result scratch: two parities of max_logit_tokens slots, each
@@ -329,7 +332,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
                          + ne * sizeof(float)         // d_alpha_full
                          + ne * sizeof(void*)         // d_weight_ptrs
                          + ne * sizeof(void*)         // cutlass3x_sfa_ptrs
-                         + 11 * 256;                  // per-take 256 B alignment
+                         + 11 * kTakeAlign;                  // per-take 256 B alignment
     }
 
     // dp4a input staging, all three tenants of one sizing family. max_blocks = max(max_k/32,
@@ -357,7 +360,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
                                               (static_cast<size_t>(shape.mmvq_max_k) / 32);
                 out.quant_scratch += prefill_blocks * (kExecBlockQ81Bytes + sizeof(float));
             }
-            out.quant_scratch += 5 * 256;  // per-take 256 B alignment
+            out.quant_scratch += 5 * kTakeAlign;  // per-take 256 B alignment
         }
     }
 
@@ -384,14 +387,14 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     {
         const int effective = (max_seq_len > 0) ? max_seq_len : shape.max_seq_len_cfg;
         const size_t slots = static_cast<size_t>(effective > 0 ? effective : 4096);
-        out.dry_penalty = slots * (sizeof(int32_t) + sizeof(float)) + 2 * 256;
+        out.dry_penalty = slots * (sizeof(int32_t) + sizeof(float)) + 2 * kTakeAlign;
     }
 
     // cuBLASLt workspace + algo-bench scratch (compute/gemm.cu, gemm_init()): not a function
     // of shape at all. cuBLASLt is handed a workspace CEILING and picks algos that fit
     // inside it, so the number is a policy choice. Charged for every model since gemm_init()
     // is unconditional; the site steps down if the arena can't serve the full amount.
-    out.cublas_workspace = kExecCublasWorkspaceBytes + kExecBenchScratchBytes + 2 * 256;
+    out.cublas_workspace = kExecCublasWorkspaceBytes + kExecBenchScratchBytes + 2 * kTakeAlign;
 
     // IMMA prefill activation scratch (mmq_q8_imma.cu) plus its split-K
     // partials. The act triple is M*K int8 + M*(K/32) half + M*(K/32) float =
@@ -399,7 +402,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     if (const ImmaScratchShape imma = exec_imma_scratch_shape(shape, max_seq_len); imma.valid()) {
         const size_t rows = static_cast<size_t>(imma.rows);
         const size_t k = static_cast<size_t>(imma.k);
-        out.imma_scratch = rows * k + rows * (k / 32) * 6 + kExecImmaSplitkBytes + 4 * 256;
+        out.imma_scratch = rows * k + rows * (k / 32) * 6 + kExecImmaSplitkBytes + 4 * kTakeAlign;
     }
 
     // Chunk-capture K/V pair (ensure_chunk_capture_scratch): two buffers of ctx * kv_heads *
@@ -410,7 +413,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
         const size_t ctx = static_cast<size_t>(shape.capture_ctx_cap);
         out.chunk_capture = 2 * ctx * static_cast<size_t>(shape.kv_heads_max) *
                                 static_cast<size_t>(shape.head_dim_max) * sizeof(uint16_t) +
-                            2 * 256;
+                            2 * kTakeAlign;
     }
 
     // CUTLASS 3.x grouped staging + workspace, MoE models only (same gate engine.cpp puts on
@@ -418,20 +421,21 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     // MiB the pre-arena code reserved (AUDIT B73); the arena reserves it before the
     // pre-dequant caches can spend it, which is what makes the smaller number safe.
     if (shape.is_moe)
-        out.grouped3x = kExecGrouped3xStagingBytes + kExecGrouped3xWorkspaceBytes + 2 * 256;
+        out.grouped3x = kExecGrouped3xStagingBytes + kExecGrouped3xWorkspaceBytes + 2 * kTakeAlign;
 
     // MLA QKV scratch. kv_lora_rank > 0 IS is_mla(). Sized for max_tokens and, unlike every
     // other tenant here, has NO degradation contract: executor_attention_qkv.cu dereferences
     // all four unconditionally, so a short arena fails the load instead of handing out null.
     if (shape.kv_lora_rank > 0) {
         const size_t T = static_cast<size_t>(t);
-        const size_t kva_out = static_cast<size_t>(shape.kv_lora_rank + shape.qk_rope_head_dim);
+        const size_t kva_out = static_cast<size_t>(shape.kv_lora_rank) +
+                               static_cast<size_t>(shape.qk_rope_head_dim);
         const size_t kvb_out =
             static_cast<size_t>(shape.n_heads) * (shape.qk_nope_head_dim + shape.v_head_dim);
         out.mla_scratch = T * 2 *
                           (kva_out + static_cast<size_t>(shape.kv_lora_rank) +
                            static_cast<size_t>(shape.qk_rope_head_dim) + kvb_out);
-        out.mla_scratch += 4 * 256;  // four takes
+        out.mla_scratch += 4 * kTakeAlign;  // four takes
 
         // Absorbed-decode latent cache: sized from the FULL sequence length, NOT max_tokens
         // (mla_absorb_max_seq_ is deliberately uncapped where max_tokens_ clamps at 4096).
@@ -442,7 +446,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
             const size_t absorb_seq = static_cast<size_t>(effective > 0 ? effective : 4096);
             out.mla_scratch += static_cast<size_t>(shape.n_layers) * absorb_seq * kva_out * 2;
             out.mla_scratch += static_cast<size_t>(shape.n_heads) * absorb_seq * sizeof(float);
-            out.mla_scratch += 2 * 256;
+            out.mla_scratch += 2 * kTakeAlign;
         }
     }
 
@@ -466,7 +470,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
         }
         const size_t act = static_cast<size_t>(t) * static_cast<size_t>(max_dim);
         const size_t grid = ((act + 3) / 4 + 255) / 256;
-        out.fp8_reduction = grid * sizeof(float) + 2 * sizeof(float) + 3 * 256;
+        out.fp8_reduction = grid * sizeof(float) + 2 * sizeof(float) + 3 * kTakeAlign;
     }
 
     return out;

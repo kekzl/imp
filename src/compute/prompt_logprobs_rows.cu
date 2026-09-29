@@ -139,8 +139,9 @@ __global__ void __launch_bounds__(kPlpRowThreads) prompt_logprobs_rows_kernel(
     }
     if (tid < top_n) {
         const int64_t o = static_cast<int64_t>(row) * top_n + tid;
-        out_top_ids[o] = s_i[tid * kPlpRowThreads];
-        out_top_lp[o] = static_cast<float>(static_cast<double>(s_v[tid * kPlpRowThreads]) - lse);
+        out_top_ids[o] = s_i[static_cast<ptrdiff_t>(tid * kPlpRowThreads)];
+        out_top_lp[o] = static_cast<float>(
+            static_cast<double>(s_v[static_cast<ptrdiff_t>(tid * kPlpRowThreads)]) - lse);
     }
 }
 

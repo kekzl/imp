@@ -400,12 +400,17 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
                          {"total_tokens", n_prompt_tokens + lres.n_output_tokens},
                          {"input_tokens_details", std::move(in_details)},
                          {"output_tokens_details", {{"reasoning_tokens", lres.n_reasoning_tokens}}}};
-    const bool emitted = out.emit(incomplete ? "response.incomplete" : "response.completed",
-                                  json{{"response", store_ctx.store ? json(response)
-                                                                   : json(std::move(response))}});
-    sink.done();
-    if (emitted)
-        store_response(state, response_id, store_ctx, response, model_name);
+    const char* const final_event = incomplete ? "response.incomplete" : "response.completed";
+    if (store_ctx.store) {
+        // Stored: emit a copy, keep `response` for the store.
+        const bool emitted = out.emit(final_event, json{{"response", response}});
+        sink.done();
+        if (emitted)
+            store_response(state, response_id, store_ctx, response, model_name);
+    } else {
+        out.emit(final_event, json{{"response", std::move(response)}});
+        sink.done();
+    }
 
     finish_stream_accounting_(state, ctx, active_req, lres, response_id, "responses stream: ");
     return true;
