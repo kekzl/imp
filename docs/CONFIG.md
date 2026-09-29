@@ -34,7 +34,7 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `runtime.max_seq_len` | `0` (auto) | KV context ceiling in tokens |
 | `runtime.max_batch_size` | `0` (auto) | decode batch / KV+workspace sizing |
 | `runtime.think_answer_reserve` | `256` | tokens reserved for the answer after forced reasoning close |
-| `kv_cache.dtype` | `auto` | widest saving measured safe for the family; `auto`/`fp16`/`fp8`/`int8`/`int4`/`nvfp4`/`mxfp4` |
+| `kv_cache.dtype` | `auto` | widest saving measured safe for the family; `auto`/`fp16`/`fp8`/`int8`/`int4`/`nvfp4`/`mxfp4`. Qwen3 dense GGUF resolves to FP16 (#2208); `fp8` restores the faster long-context decode |
 | `kv_cache.growable` | `true` | pool grows at admission instead of committing the full plan at start |
 | `kv_cache.growable_initial_pct` | `25` | % of the planned pool committed at startup when growable |
 | `vram.kv_fraction` (imp.conf `[vram]` section) | `0.8` | KV share of post-reserve VRAM |

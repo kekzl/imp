@@ -28,6 +28,18 @@ struct TokenLogprobInfo {
     std::vector<TokenLogprob> top;  // top_logprobs alternatives
 };
 
+inline constexpr int kMaxPromptLogprobs = 20;
+
+// Teacher-forced prompt logprobs, row p = log p(input_tokens[p+1] | input_tokens[0..p]).
+struct PromptLogprobs {
+    int top_n = 0;
+    int rows = 0;                  // rows written so far
+    std::vector<float> token_lp;   // [n_prompt-1]
+    std::vector<int32_t> rank;     // [n_prompt-1], 1-based rank of the prompt token
+    std::vector<int32_t> top_ids;  // [(n_prompt-1) * top_n], best first
+    std::vector<float> top_lp;     // [(n_prompt-1) * top_n]
+};
+
 enum class RequestStatus { PENDING, PREFILLING, DECODING, FINISHED, CANCELLED };
 
 // Why a CANCELLED request was cancelled. Most cancellations are indistinguishable to a
@@ -196,6 +208,11 @@ struct Request {
     int top_logprobs = 0;                           // 0-20, number of top alternatives
     std::vector<TokenLogprobInfo> output_logprobs;  // parallel to output_tokens
 
+    // Prompt logprobs (#2207): -1 off, else top-N (0..kMaxPromptLogprobs) per prompt token.
+    // Row p scores input_tokens[p+1]; filled per prefill chunk, rows == n_prompt-1 when complete.
+    int prompt_logprobs = -1;
+    PromptLogprobs prompt_lp;
+
     // Embedding request (#1005): prefill-only. Hidden states are mean-pooled across ALL prefill
     // chunks (device partial sums, host accumulation) into `embedding_out`; finishes without
     // sampling, so it batches with concurrent decodes instead of pausing them.
@@ -303,10 +320,12 @@ struct Request {
 
     int context_len() const { return static_cast<int>(input_tokens.size() + output_tokens.size()); }
     // Prefix-cache reuse allowed: an image joins only via its content hash (every image token
-    // shares one id); direct mode (#2198) never reuses.
+    // shares one id); direct mode (#2198) never reuses; embeddings mean-pool (#2245) and prompt
+    // logprobs (#2207) score every input row.
     bool prefix_reuse_allowed() const {
         const bool has_image = image || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
-        return (!has_image || vision_content_hash != 0) && !bypass_prefix_cache;
+        return (!has_image || vision_content_hash != 0) && !bypass_prefix_cache && !embedding_request &&
+               prompt_logprobs < 0;
     }
 
     // Deliberately LAST rather than next to `status`: Request is touched every decode step, so
