@@ -14,6 +14,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <stdexcept>
 
 namespace imp {
 
@@ -145,5 +146,23 @@ static void set_l2_persist_kv(cudaStream_t stream, const void* kv_ptr, size_t kv
 
 // Alias for the shared clear_l2_policy helper (back-compat name for call sites).
 static void clear_l2_persist(cudaStream_t stream) { clear_l2_policy(stream); }
+
+// Chunked-prefill per-call K/V gather buffer: K at 0, V at the 256 B-aligned offset.
+static size_t chunk_kv_v_offset(size_t kv_bytes) { return (kv_bytes + 255) & ~static_cast<size_t>(255); }
+static size_t chunk_kv_bytes(size_t kv_bytes) { return 2 * chunk_kv_v_offset(kv_bytes); }
+
+// Sets *k / *v only when the allocation succeeded; they stay nullptr otherwise.
+static void chunk_kv_split(cudaError_t err, half* kv, size_t kv_bytes, half** k, half** v) {
+    if (err != cudaSuccess || kv == nullptr) return;
+    const size_t v_elems = chunk_kv_v_offset(kv_bytes) / sizeof(half);
+    *k = kv;
+    *v = kv + v_elems;
+}
+
+// The append offsets both buffers by q_offset rows; null is UB (#2288).
+static void require_chunk_kv(const half* k, const half* v) {
+    if (k == nullptr || v == nullptr)
+        throw std::runtime_error("chunked_prefill: K/V gather buffer allocation failed");
+}
 
 }  // namespace imp

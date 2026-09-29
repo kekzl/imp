@@ -865,6 +865,8 @@ if(IMP_BUILD_TESTS)
     tests/test_mtp_presence.cpp
         # dispatch_mtp_head layout detection on synthetic name lists (Qwen4Exp 3101 names).
         tests/test_mtp_layout_dispatch.cpp
+        # mtp_draft_step returns false on attention weights without a V buffer (#2288).
+        tests/test_mtp_attn_guard.cpp
         tests/test_spec_gates.cpp
         # The per-request speculation contract (depth + decline reason), the
         # batch_rr drafter predicate and the NVFP4 dequant-cap arithmetic. All
