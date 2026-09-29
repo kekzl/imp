@@ -12,6 +12,7 @@
 #include <cuda_runtime.h>
 
 #include <stdexcept>
+#include <string>
 
 namespace imp {
 
@@ -26,6 +27,14 @@ inline void moe_host_args_capture_guard(cudaStream_t stream) {
     if (cudaStreamIsCapturing(stream, &st) == cudaSuccess && st != cudaStreamCaptureStatusNone)
         throw std::runtime_error(
             "MoE host-args prefill path reads routing on the host — not graph-capturable");
+}
+
+// Host-args readback status (D2H copy or its sync): on failure the host routing is unwritten.
+// Throws like the capture guard, so no GEMM is sized from it; lands in BatchingEngine::step()'s catch.
+inline void moe_host_args_ok_or_throw(cudaError_t err, const char* where) {
+    if (err != cudaSuccess)
+        throw std::runtime_error(std::string("MoE host-args readback failed (") + cudaGetErrorString(err) +
+                                 ") in " + where);
 }
 
 __global__ void sanitize_fp16_kernel(__half* __restrict__ data, int64_t n);

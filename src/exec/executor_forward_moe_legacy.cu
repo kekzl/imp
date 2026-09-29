@@ -50,6 +50,16 @@
 
 namespace imp {
 
+namespace {
+// Staged expert weight: the staging buffer on a successful H2D, else nullptr (ERROR logged).
+const void* staged_or_null(cudaError_t st, const void* staging, int eidx) {
+    if (st == cudaSuccess)
+        return staging;
+    IMP_LOG_ERROR("MoE legacy: expert %d staging copy failed: %s", eidx, cudaGetErrorString(st));
+    return nullptr;
+}
+}  // namespace
+
 void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
     const auto& cfg = model_->config();
     const auto& ly  = model_->layer(layer);
@@ -69,10 +79,11 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
     {
         moe_host_args_capture_guard(stream);
         std::vector<int32_t> h_offsets(ne + 1);
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
-                                           static_cast<size_t>(ne + 1) * sizeof(int32_t),
-                                           cudaMemcpyDeviceToHost, stream));
-        cudaStreamSynchronize(stream);
+        moe_host_args_ok_or_throw(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+                                                  static_cast<size_t>(ne + 1) * sizeof(int32_t),
+                                                  cudaMemcpyDeviceToHost, stream),
+                                  "legacy prefill");
+        moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "legacy prefill");
 
         // Use the LRU cache only when this dispatch's working set fits the layer's
         // slot pool: one dispatch touches kExpertProjCount cells per ACTIVE
@@ -199,11 +210,11 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                     // prompt on a 128-expert model). Pre-caching to host is a follow-up (correctness first).
                     float ts_h = 1.0f;
                     if (moe_cache.tensor_scales) {
-                        cudaMemcpyAsync(&ts_h,
-                                        moe_cache.tensor_scales + eidx,
-                                        sizeof(float),
-                                        cudaMemcpyDeviceToHost, stream);
-                        cudaStreamSynchronize(stream);
+                        moe_host_args_ok_or_throw(cudaMemcpyAsync(&ts_h, moe_cache.tensor_scales + eidx,
+                                                                  sizeof(float), cudaMemcpyDeviceToHost,
+                                                                  stream),
+                                                  "legacy tensor_scale");
+                        moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "legacy tensor_scale");
                     }
                     NvFP4QuantResult nw;
                     nw.packed_data = static_cast<char*>(moe_cache.packed_data) +
@@ -409,9 +420,10 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                         w = expert_cache_.get_or_load(layer, proj, ck, host_ptr,
                                                        expert_raw, stream);
                     } else if (moe_.raw_staging_buf && expert_raw <= moe_.raw_staging_size) {
-                        cudaMemcpyAsync(moe_.raw_staging_buf, host_ptr, expert_raw,
-                                        cudaMemcpyHostToDevice, stream);
-                        w = moe_.raw_staging_buf;
+                        // Failed staging: w stays null, the dequant + GEMM fallback below runs.
+                        w = staged_or_null(cudaMemcpyAsync(moe_.raw_staging_buf, host_ptr, expert_raw,
+                                                           cudaMemcpyHostToDevice, stream),
+                                           moe_.raw_staging_buf, eidx);
                     }
                 }
 

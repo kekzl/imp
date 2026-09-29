@@ -151,6 +151,32 @@ GraphExecutor::~GraphExecutor() {
     free_buffers();
 }
 
+namespace {
+// Gemma 4 V-norm weight (no learned weight): FP16 ones, max head_dim long (512 for the 26B model).
+// false only on a failed upload (ERROR logged, init fails); a failed cudaMalloc leaves *buf null
+// and V-norm off, as before.
+bool alloc_v_norm_ones(const Model& model, void** buf) {
+    int hd_max = 0;
+    for (int v : model.config().head_dim_per_layer)
+        hd_max = std::max(hd_max, v);
+    if (hd_max == 0)
+        hd_max = model.config().head_dim;
+    size_t buf_bytes = static_cast<size_t>(hd_max) * sizeof(half);
+    if (cudaMalloc(buf, buf_bytes) != cudaSuccess)
+        return true;
+    // Fill with FP16 1.0 via memset is not possible (FP16 1.0 is 0x3C00).
+    // Use a small host buffer + memcpy.
+    std::vector<uint16_t> ones(hd_max, 0x3C00);  // FP16 1.0
+    if (const cudaError_t err = cudaMemcpy(*buf, ones.data(), buf_bytes, cudaMemcpyHostToDevice);
+        err != cudaSuccess) {
+        IMP_LOG_ERROR("Gemma 4: V-norm ones upload failed: %s", cudaGetErrorString(err));
+        return false;
+    }
+    IMP_LOG_INFO("Gemma 4: allocated V-norm ones buffer (%d halfs)", hd_max);
+    return true;
+}
+}  // namespace
+
 bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, int max_batch_size,
                          int max_seq_len, bool use_fp8_prefill, int use_nvfp4_decode,
                          bool use_mxfp4_prefill) {
@@ -163,22 +189,8 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     norm_w_off_ = model.config().norm_weight_offset;
 
     // Gemma 4: allocate a ones buffer for V-normalization (no learned weight).
-    // Size = max head_dim (512 for 26B model). Used as rmsnorm weight.
-    if (model.profile().is_gemma4) {
-        int hd_max = 0;
-        for (int v : model.config().head_dim_per_layer)
-            hd_max = std::max(hd_max, v);
-        if (hd_max == 0)
-            hd_max = model.config().head_dim;
-        size_t buf_bytes = static_cast<size_t>(hd_max) * sizeof(half);
-        if (cudaMalloc(&v_norm_ones_buf_, buf_bytes) == cudaSuccess) {
-            // Fill with FP16 1.0 via memset is not possible (FP16 1.0 is 0x3C00).
-            // Use a small host buffer + memcpy.
-            std::vector<uint16_t> ones(hd_max, 0x3C00);  // FP16 1.0
-            cudaMemcpy(v_norm_ones_buf_, ones.data(), buf_bytes, cudaMemcpyHostToDevice);
-            IMP_LOG_INFO("Gemma 4: allocated V-norm ones buffer (%d halfs)", hd_max);
-        }
-    }
+    if (model.profile().is_gemma4 && !alloc_v_norm_ones(model, &v_norm_ones_buf_))
+        return false;
     use_pdl_ = use_pdl;
     wcache_.use_fp8 = use_fp8_prefill;
     wcache_.nvfp4_decode_mode = use_nvfp4_decode;
@@ -350,11 +362,11 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
             IMP_LOG_ERROR("Failed to allocate LongRoPE frequency buffers: %s",
                           cudaGetErrorString(e1 != cudaSuccess ? e1 : e2));
             if (longrope_short_freqs_) {
-                cudaFree(longrope_short_freqs_);
+                IMP_CUDA_CHECK_LOG(cudaFree(longrope_short_freqs_));
                 longrope_short_freqs_ = nullptr;
             }
             if (longrope_long_freqs_) {
-                cudaFree(longrope_long_freqs_);
+                IMP_CUDA_CHECK_LOG(cudaFree(longrope_long_freqs_));
                 longrope_long_freqs_ = nullptr;
             }
             return false;

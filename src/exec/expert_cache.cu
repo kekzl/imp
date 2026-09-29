@@ -710,11 +710,11 @@ void ExpertLRUCache::destroy() {
         if (alloc_)
             alloc_->free(pool_);
         else
-            cudaFree(pool_);
+            IMP_CUDA_CHECK_LOG(cudaFree(pool_));
         pool_ = nullptr;
     }
     if (d_lookup_) {
-        cudaFree(d_lookup_);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_lookup_));
         d_lookup_ = nullptr;
     }
     // d_slot_scales_ points into pool_, freed above - nothing of its own.

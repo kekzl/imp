@@ -130,11 +130,11 @@ void GraphExecutor::moe_ffn_phase1_setup_(int layer, cudaStream_t stream) {
     // legacy-serial-fallback uninit read becomes a deterministic zero.
     // Enabled via moe.zero_workspace. Cheap (~1 MiB memset).
     if (dispatch_policy().moe.zero_workspace) {
-        cudaMemsetAsync(moe_.expert_gate.data, 0, moe_.expert_gate.nbytes(), stream);
-        cudaMemsetAsync(moe_.expert_up.data, 0, moe_.expert_up.nbytes(), stream);
-        cudaMemsetAsync(moe_.expert_swiglu.data, 0, moe_.expert_swiglu.nbytes(), stream);
-        cudaMemsetAsync(moe_.expert_down.data, 0, moe_.expert_down.nbytes(), stream);
-        cudaMemsetAsync(moe_.gathered.data, 0, moe_.gathered.nbytes(), stream);
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_gate.data, 0, moe_.expert_gate.nbytes(), stream));
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_up.data, 0, moe_.expert_up.nbytes(), stream));
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_swiglu.data, 0, moe_.expert_swiglu.nbytes(), stream));
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_down.data, 0, moe_.expert_down.nbytes(), stream));
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.gathered.data, 0, moe_.gathered.nbytes(), stream));
     }
 }
 

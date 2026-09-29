@@ -750,7 +750,7 @@ void GraphExecutor::ensure_smallm_ws_(size_t need, cudaStream_t stream) {
     if (cap != cudaStreamCaptureStatusNone)
         return;
     if (smallm_ws_ && !smallm_ws_arena_)
-        cudaFree(smallm_ws_);
+        IMP_CUDA_CHECK_LOG(cudaFree(smallm_ws_));
     if (cudaMalloc(&smallm_ws_, need) == cudaSuccess)
         smallm_ws_bytes_ = need;
     else {
@@ -769,7 +769,7 @@ void GraphExecutor::ensure_smallm_xq_(size_t xq_need, cudaStream_t stream) {
     if (cap != cudaStreamCaptureStatusNone)
         return;
     if (smallm_xq_ && !smallm_xq_arena_)
-        cudaFree(smallm_xq_);
+        IMP_CUDA_CHECK_LOG(cudaFree(smallm_xq_));
     smallm_xq_arena_ = false;
     if (cudaMalloc(&smallm_xq_, xq_need) == cudaSuccess)
         smallm_xq_bytes_ = xq_need;

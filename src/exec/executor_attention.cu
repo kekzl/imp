@@ -721,10 +721,14 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 debug_tensor_rows("pre_fp32accum_po_rows", view_tokens(po, n), stream);
                 debug_tensor_rows("pre_fp32accum_h_rows", view_tokens(h, n), stream);
                 // Dump FP32 accumulator state
-                {
-                    std::vector<float> fp32_tmp(static_cast<int64_t>(n) * model_->config().d_model);
-                    cudaMemcpy(fp32_tmp.data(), fp32_h.data, fp32_tmp.size() * sizeof(float),
-                               cudaMemcpyDeviceToHost);
+                std::vector<float> fp32_tmp(static_cast<int64_t>(n) * model_->config().d_model);
+                if (const cudaError_t cp_err = cudaMemcpy(fp32_tmp.data(), fp32_h.data,
+                                                          fp32_tmp.size() * sizeof(float),
+                                                          cudaMemcpyDeviceToHost);
+                    cp_err != cudaSuccess) {
+                    IMP_LOG_ERROR("[DEBUG_FWD] L0_fp32_accum_pre: D2H failed: %s",
+                                  cudaGetErrorString(cp_err));
+                } else {
                     double fs = 0, fss = 0;
                     for (auto v : fp32_tmp) {
                         fs += v;

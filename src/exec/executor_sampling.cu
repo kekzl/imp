@@ -198,7 +198,14 @@ const int32_t* GraphExecutor::banned_cache_(const InferenceState& state, cudaStr
         }
         e.cap = static_cast<size_t>(state.n_banned_tokens);
     }
-    cudaMemcpyAsync(e.d, state.banned_tokens, ban_bytes, cudaMemcpyHostToDevice, stream);
+    if (const cudaError_t err = cudaMemcpyAsync(e.d, state.banned_tokens, ban_bytes, cudaMemcpyHostToDevice,
+                                                stream);
+        err != cudaSuccess) {
+        IMP_LOG_ERROR("banned-token upload failed: %s", cudaGetErrorString(err));
+        e.src = nullptr;  // not cached: the next call uploads again
+        e.n = 0;
+        return nullptr;
+    }
     e.src = state.banned_tokens;
     e.n = state.n_banned_tokens;
     return e.d;

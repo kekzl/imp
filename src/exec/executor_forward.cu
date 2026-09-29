@@ -111,11 +111,13 @@ void debug_top_logits(const Tensor& logits, cudaStream_t stream, int topk = 10) 
         std::vector<half> tmp(vocab);
         IMP_CUDA_CHECK_LOG(
             cudaMemcpyAsync(tmp.data(), src, vocab * sizeof(half), cudaMemcpyDeviceToHost, stream));
-        cudaStreamSynchronize(stream);
+        if (!debug_cuda_ok(cudaStreamSynchronize(stream), "debug_top_logits"))
+            return;
         for (int i = 0; i < vocab; i++)
             host[i] = __half2float(tmp[i]);
     }
-    cudaStreamSynchronize(stream);
+    if (!debug_cuda_ok(cudaStreamSynchronize(stream), "debug_top_logits"))
+        return;
     // Also print min/max/L2 over the dumped row for cross-impl comparison.
     float mn = host[0], mx = host[0];
     double ss = 0.0;
@@ -139,6 +141,22 @@ void debug_top_logits(const Tensor& logits, cudaStream_t stream, int topk = 10) 
     }
 }
 
+namespace {
+// [DUMP_GDN] readback: sync, then each layer's FP32 state. false = ERROR logged, the pass is not written.
+bool read_gdn_state(SSMState& ssm, int seq, int n_layers, size_t layer_bytes, float* dst,
+                    cudaStream_t stream) {
+    if (!debug_cuda_ok(cudaStreamSynchronize(stream), "DUMP_GDN"))
+        return false;
+    const size_t per_layer = layer_bytes / sizeof(float);
+    for (int l = 0; l < n_layers; l++)
+        if (!debug_cuda_ok(cudaMemcpy(dst + l * per_layer, ssm.h_state(seq, l), layer_bytes,
+                                      cudaMemcpyDeviceToHost),
+                           "DUMP_GDN"))
+            return false;
+    return true;
+}
+}  // namespace
+
 // run_attention: moved to executor_attention.cu
 
 // run_ffn: moved to executor_ffn.cu
@@ -161,7 +179,13 @@ void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
         return;  // LM head is not in the NVFP4 decode cache (nvfp4_lm_head off / GDN)
     // Borrows the FP4 data from the decode cache; allocates only the SfAtom scales.
     convert_nvfp4_to_cutlass(it->second, lm_head_cutlass_, stream);
-    cudaStreamSynchronize(stream);
+    if (const cudaError_t err = cudaStreamSynchronize(stream); err != cudaSuccess) {
+        IMP_LOG_WARN("LM head: CUTLASS NVFP4 conversion failed (%s), GEMV path stays",
+                     cudaGetErrorString(err));
+        free_cutlass_nvfp4_weight(lm_head_cutlass_);
+        lm_head_cutlass_ = {};
+        return;
+    }
     lm_head_cutlass_ready_ =
         (lm_head_cutlass_.data != nullptr && lm_head_cutlass_.scale_factors != nullptr);
     if (lm_head_cutlass_ready_)
@@ -258,7 +282,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             (void)ev_attn[i].create(cudaEventDefault);
             (void)ev_ffn[i].create(cudaEventDefault);
         }
-        cudaEventRecord(ev_start, stream);
+        IMP_CUDA_CHECK_LOG(cudaEventRecord(ev_start, stream));
     }
 
     // All member tensors are [max_tokens_, cols]. view_tokens creates [n, cols]
@@ -334,28 +358,30 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // Dump FP32 accumulator for decode debugging
     if (fp32_accum_buf_ && n == 1 && debug_forward_enabled()) {
         float tmp[4];
-        cudaMemcpyAsync(tmp, view_tokens(fp32_hidden_, n).data, 4 * sizeof(float), cudaMemcpyDeviceToHost,
-                        stream);
-        cudaStreamSynchronize(stream);
-        IMP_LOG_DEBUG("[DEBUG_FWD] [step=%d] fp32_accum_init: [%.4f %.4f %.4f %.4f]", decode_step, tmp[0],
-                      tmp[1], tmp[2], tmp[3]);
+        if (debug_d2h_async(tmp, view_tokens(fp32_hidden_, n).data, 4 * sizeof(float), stream,
+                            "fp32_accum_init"))
+            IMP_LOG_DEBUG("[DEBUG_FWD] [step=%d] fp32_accum_init: [%.4f %.4f %.4f %.4f]", decode_step, tmp[0],
+                          tmp[1], tmp[2], tmp[3]);
     }
     // Binary dump: write the full FP16 hidden state to file
     if (!dispatch_policy().diagnostics.dump_hidden_dir.empty()) {
         std::vector<half> h_buf(static_cast<int64_t>(n) * cfg.d_model);
-        cudaMemcpy(h_buf.data(), h.data, h_buf.size() * sizeof(half), cudaMemcpyDeviceToHost);
-        char fname[256];
-        snprintf(fname, sizeof(fname), "/tmp/imp_embed_step%d.bin", decode_step);
-        FILE* f = fopen(fname, "wb");
-        if (f) {
-            fwrite(h_buf.data(), sizeof(half), h_buf.size(), f);
-            fclose(f);
+        if (debug_cuda_ok(cudaMemcpy(h_buf.data(), h.data, h_buf.size() * sizeof(half),
+                                     cudaMemcpyDeviceToHost),
+                          "embed dump")) {
+            char fname[256];
+            snprintf(fname, sizeof(fname), "/tmp/imp_embed_step%d.bin", decode_step);
+            FILE* f = fopen(fname, "wb");
+            if (f) {
+                fwrite(h_buf.data(), sizeof(half), h_buf.size(), f);
+                fclose(f);
+            }
+            IMP_LOG_DEBUG("[DUMP_BIN] Wrote %s (%zu halfs)", fname, h_buf.size());
         }
-        IMP_LOG_DEBUG("[DUMP_BIN] Wrote %s (%zu halfs)", fname, h_buf.size());
     }
 
     if (profile_active)
-        cudaEventRecord(ev_emb, stream);
+        IMP_CUDA_CHECK_LOG(cudaEventRecord(ev_emb, stream));
 
     // ---- Step 2: Transformer/Hybrid layers ----
     int max_layer = (state.exit_layer > 0) ? std::min(state.exit_layer, cfg.n_layers) : cfg.n_layers;
@@ -421,7 +447,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             }
         }
         if (profile_active)
-            cudaEventRecord(ev_attn[i], stream);
+            IMP_CUDA_CHECK_LOG(cudaEventRecord(ev_attn[i], stream));
 
         if (model_->profile().gated_residual) {
             const auto& hly = model_->layer(i);
@@ -459,13 +485,12 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 const std::string& dh = dispatch_policy().diagnostics.dump_hidden_dir;
                 if (!dh.empty() && (dh == "all" || i == 0 || i == 5 || i == 15 || i == 29)) {
                     std::vector<half> h_buf(static_cast<size_t>(n) * cfg.d_model);
-                    cudaStreamSynchronize(stream);
-                    cudaMemcpy(h_buf.data(), view_tokens(h, n).data, h_buf.size() * sizeof(half),
-                               cudaMemcpyDeviceToHost);
+                    const bool read_ok = debug_sync_d2h(h_buf.data(), view_tokens(h, n).data,
+                                                        h_buf.size() * sizeof(half), stream, "layer dump");
                     char fname[512];
                     snprintf(fname, sizeof(fname), "%s/imp_L%02d_step%d_n%d.bin",
                              dh == "all" ? "/tmp" : dh.c_str(), i, decode_step, n);
-                    if (FILE* f = fopen(fname, "wb")) {
+                    if (FILE* f = read_ok ? fopen(fname, "wb") : nullptr) {
                         fwrite(h_buf.data(), sizeof(half), h_buf.size(), f);
                         fclose(f);
                     }
@@ -496,20 +521,16 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                     IMP_CUDA_CHECK_LAUNCH();
                 }
                 if (debug_forward_enabled()) {
-                    float sval = 0.0f;
                     half h_scale;
-                    cudaMemcpyAsync(&h_scale, ly.layer_out_scale.data, sizeof(half), cudaMemcpyDeviceToHost,
-                                    stream);
-                    cudaStreamSynchronize(stream);
-                    sval = __half2float(h_scale);
-                    if (i == 0 || i == 29)
-                        IMP_LOG_DEBUG("[DEBUG_FWD] L%d_out_scale = %.6f", i, sval);
+                    if (debug_d2h_async(&h_scale, ly.layer_out_scale.data, sizeof(half), stream,
+                                        "out_scale") &&
+                        (i == 0 || i == 29))
+                        IMP_LOG_DEBUG("[DEBUG_FWD] L%d_out_scale = %.6f", i, __half2float(h_scale));
                     // Dump FP16 hidden after scale for all layers (decode only)
-                    if (n == 1 && debug_forward_enabled()) {
-                        half h_tmp[8];
-                        cudaMemcpyAsync(h_tmp, view_tokens(h, n).data, 8 * sizeof(half),
-                                        cudaMemcpyDeviceToHost, stream);
-                        cudaStreamSynchronize(stream);
+                    half h_tmp[8];
+                    if (n == 1 && debug_forward_enabled() &&
+                        debug_d2h_async(h_tmp, view_tokens(h, n).data, 8 * sizeof(half), stream,
+                                        "layer dump")) {
                         IMP_LOG_DEBUG("[DUMP] step=%d L%02d h=[%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f]",
                                       decode_step, i, __half2float(h_tmp[0]), __half2float(h_tmp[1]),
                                       __half2float(h_tmp[2]), __half2float(h_tmp[3]), __half2float(h_tmp[4]),
@@ -572,7 +593,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             debug_tensor_stats("after_last_layer", h, stream);
         }
         if (profile_active)
-            cudaEventRecord(ev_ffn[i], stream);
+            IMP_CUDA_CHECK_LOG(cudaEventRecord(ev_ffn[i], stream));
 
         // Release offloaded layer (restore host pointers)
         if (offload_mgr_) {
@@ -1024,8 +1045,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         const int rows = static_cast<int>(logits_out.shape[0]);
         const int vocab = cfg.vocab_size;
         std::vector<float> host(static_cast<size_t>(rows) * vocab);
-        cudaStreamSynchronize(stream);
-        cudaMemcpy(host.data(), logits_out.data, host.size() * sizeof(float), cudaMemcpyDeviceToHost);
+        if (!debug_sync_d2h(host.data(), logits_out.data, host.size() * sizeof(float), stream, "DUMP_LOGITS"))
+            goto final_logits_dump_done;  // pass not written, dump_pass not advanced
         char fname[512];
         // The INPUT token count goes in the filename, not just the output row
         // count: with all_logits off, a prefill and every engine warm-up pass both
@@ -1058,11 +1079,8 @@ final_logits_dump_done:
             const int per_layer = static_cast<int>(hb / sizeof(float));
             static int gdn_pass = 0;
             std::vector<float> all(static_cast<size_t>(n_gdn) * per_layer);
-            cudaStreamSynchronize(stream);
-            for (int l = 0; l < n_gdn; l++) {
-                cudaMemcpy(all.data() + static_cast<size_t>(l) * per_layer,
-                           state.ssm_state->h_state(state.ssm_seq_id, l), hb, cudaMemcpyDeviceToHost);
-            }
+            if (!read_gdn_state(*state.ssm_state, state.ssm_seq_id, n_gdn, hb, all.data(), stream))
+                goto gdn_state_dump_done;  // pass not written, gdn_pass not advanced
             double ss = 0.0;
             float mn = all.empty() ? 0.0f : all[0], mx = mn;
             size_t nonfinite = 0;
@@ -1091,29 +1109,32 @@ final_logits_dump_done:
             gdn_pass++;
         }
     }
+gdn_state_dump_done:
 
     // ---- Profile summary ----
     if (profile_active) {
-        cudaEventRecord(ev_lm, stream);
-        cudaStreamSynchronize(stream);
+        IMP_CUDA_CHECK_LOG(cudaEventRecord(ev_lm, stream));
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
+        ProfileElapsed elapsed;
         float t_emb = 0, t_lm = 0;
         float t_attn_total = 0, t_ffn_total = 0;
-        cudaEventElapsedTime(&t_emb, ev_start, ev_emb);
+        elapsed(&t_emb, ev_start, ev_emb);
 
         cudaEvent_t prev = ev_emb;
         for (int i = 0; i < cfg.n_layers; i++) {
             float t_attn = 0, t_ffn = 0;
-            cudaEventElapsedTime(&t_attn, prev, ev_attn[i]);
-            cudaEventElapsedTime(&t_ffn, ev_attn[i], ev_ffn[i]);
+            elapsed(&t_attn, prev, ev_attn[i]);
+            elapsed(&t_ffn, ev_attn[i], ev_ffn[i]);
             t_attn_total += t_attn;
             t_ffn_total += t_ffn;
             prev = ev_ffn[i];
         }
-        cudaEventElapsedTime(&t_lm, prev, ev_lm);
+        elapsed(&t_lm, prev, ev_lm);
 
         float t_total = 0;
-        cudaEventElapsedTime(&t_total, ev_start, ev_lm);
+        elapsed(&t_total, ev_start, ev_lm);
+        elapsed.report();
         acc_total += t_total;
         acc_attn += t_attn_total;
         acc_ffn += t_ffn_total;
