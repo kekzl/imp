@@ -27,7 +27,10 @@ static int mxfp4_n_sms() {
     static int n_sms = 0;
     if (__builtin_expect(n_sms == 0, 0)) {
         cudaDeviceProp prop;
-        cudaGetDeviceProperties(&prop, 0);
+        if (cudaError_t e = cudaGetDeviceProperties(&prop, 0); e != cudaSuccess) {
+            IMP_LOG_WARN("SM count query failed: %s; multirow gated on K only", cudaGetErrorString(e));
+            return 0;  // not cached: the next call retries
+        }
         n_sms = prop.multiProcessorCount;
     }
     return n_sms;
@@ -541,7 +544,8 @@ void gemv_mxfp4_geglu_residual(const CutlassMxFP4Weight& W, const half* gate, co
 // One-time L1 cache carveout for MXFP4 GEMV kernels (bandwidth-bound, no SMEM).
 void mxfp4_gemv_set_l1_carveout() {
 #define MX_L1(kern) \
-    cudaFuncSetAttribute(kern, cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxL1)
+    IMP_CUDA_CHECK_LOG( \
+    cudaFuncSetAttribute(kern, cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxL1))
     MX_L1(gemv_mxfp4_kpar_kernel);
     MX_L1(gemv_mxfp4_kpar_fp32_kernel);
     MX_L1(gemv_mxfp4_multirow_kernel<kMRWarps>);

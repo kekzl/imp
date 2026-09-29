@@ -120,35 +120,38 @@ struct PinnedStager {
     bool init() {
         for (int i = 0; i < ring(); i++) {
             buf[i] = PinnedBuffer::acquire(cuda_host_pinned_allocator(), chunk_size());
-            if (buf[i].empty()) {
+            if (buf[i].empty() || !done[i].create(cudaEventDisableTiming)) {
                 destroy();
                 return false;
             }
-            (void)done[i].create(cudaEventDisableTiming);
         }
         return true;
     }
 
+    // First failing call ends the copy and is returned.
     cudaError_t copy(void* dst, const void* src, size_t n, cudaStream_t s) {
-        cudaError_t last = cudaSuccess;
         for (size_t off = 0; off < n;) {
             size_t chunk = std::min(n - off, chunk_size());
             int b = idx % ring();
-            cudaEventSynchronize(done[b]);
+            if (cudaError_t e = cudaEventSynchronize(done[b]); e != cudaSuccess)
+                return e;
             memcpy(buf[b].data(), static_cast<const char*>(src) + off, chunk);
-            last = cudaMemcpyAsync(static_cast<char*>(dst) + off, buf[b].data(), chunk,
-                                   cudaMemcpyHostToDevice, s);
-            cudaEventRecord(done[b], s);
+            if (cudaError_t e = cudaMemcpyAsync(static_cast<char*>(dst) + off, buf[b].data(), chunk,
+                                                cudaMemcpyHostToDevice, s);
+                e != cudaSuccess)
+                return e;
+            if (cudaError_t e = cudaEventRecord(done[b], s); e != cudaSuccess)
+                return e;
             off += chunk;
             idx++;
         }
-        return last;
+        return cudaSuccess;
     }
 
     void destroy() {
         for (int i = 0; i < ring(); i++) {
             if (done[i]) {
-                cudaEventSynchronize(done[i]);
+                IMP_CUDA_CHECK_LOG(cudaEventSynchronize(done[i]));
                 done[i].reset();
             }
             buf[i].reset();
@@ -164,6 +167,44 @@ static cudaError_t h2d_copy(void* dst, const void* src, size_t n, cudaStream_t s
     if (g_stager)
         return g_stager->copy(dst, src, n, s);
     return cudaMemcpyAsync(dst, src, n, cudaMemcpyHostToDevice, s);
+}
+
+// Syncs `stream` (the device when null); false + log on failure.
+static bool sync_upload(cudaStream_t stream, const char* what) {
+    const cudaError_t e = stream ? cudaStreamSynchronize(stream) : cudaDeviceSynchronize();
+    if (e != cudaSuccess)
+        IMP_LOG_ERROR("upload_weights_gpu: %s sync failed: %s", what, cudaGetErrorString(e));
+    return e == cudaSuccess;
+}
+
+// Device copy of a host scale tensor. Any allocation goes into `allocs`; nullptr on failure.
+static void* scale_to_device(const void* src, size_t bytes, cudaStream_t stream, std::vector<void*>& allocs) {
+    void* d_ptr = nullptr;
+    if (cudaMallocAsync(&d_ptr, bytes, stream) != cudaSuccess)
+        return nullptr;
+    allocs.push_back(d_ptr);
+    const cudaError_t e = cudaMemcpyAsync(d_ptr, src, bytes, cudaMemcpyHostToDevice, stream);
+    if (e != cudaSuccess)
+        IMP_LOG_ERROR("scale upload: cudaMemcpyAsync %zu bytes: %s", bytes, cudaGetErrorString(e));
+    return e == cudaSuccess ? d_ptr : nullptr;
+}
+
+// Copies each expert's host weight_scale into `slab`; false = copy e failed, experts >= e stay on host.
+static bool upload_scale_slab(void* slab, const std::vector<NvFP4PreQuantWeight*>& grp, size_t e_ms,
+                              cudaStream_t stream, int& scale_count) {
+    for (size_t e = 0; e < grp.size(); ++e) {
+        Tensor& ws = grp[e]->weight_scale;
+        void* dst = static_cast<char*>(slab) + e * e_ms;
+        if (cudaError_t ce = cudaMemcpyAsync(dst, ws.data, e_ms, cudaMemcpyHostToDevice, stream);
+            ce != cudaSuccess) {
+            IMP_LOG_ERROR("scale slab: cudaMemcpyAsync expert %zu: %s", e, cudaGetErrorString(ce));
+            return false;
+        }
+        ws.data = dst;        // interior pointer, NOT tracked as a base alloc
+        ws.on_device = true;  // the per-tensor upload_scale loop skips it
+        scale_count++;
+    }
+    return true;
 }
 
 // WSL2 detection: cudaHostRegister on mmap'd memory can succeed but produce corrupted DMA
@@ -2149,7 +2190,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                                                n_exp, cudaMemcpyDeviceToDevice, ctx.stream);
             if (cp != cudaSuccess) {
                 IMP_LOG_ERROR("Gemma 4: cudaMemcpy2DAsync failed (layer %d): %s", i, cudaGetErrorString(cp));
-                cudaFreeAsync(up_buf, ctx.stream);
+                IMP_CUDA_CHECK_LOG(cudaFreeAsync(up_buf, ctx.stream));
                 return false;
             }
             // Compacts the gate half in-place: row e (offset e*src_pitch) moves to e*dst_pitch. With
@@ -2162,7 +2203,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                 if (cp_e != cudaSuccess) {
                     IMP_LOG_ERROR("Gemma 4: gate compact memcpy failed (layer %d, expert %ld): %s", i,
                                   (long)e, cudaGetErrorString(cp_e));
-                    cudaFreeAsync(up_buf, ctx.stream);
+                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(up_buf, ctx.stream));
                     return false;
                 }
             }
@@ -2454,11 +2495,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     }
 
     // Sync Pass 1 before measuring free VRAM for expert budget
-    if (stream) {
-        cudaStreamSynchronize(stream);
-    } else {
-        cudaDeviceSynchronize();
-    }
+    if (!sync_upload(stream, "pass-1"))
+        return false;
 
     // Reset cached VRAM state — the dense upload pass consumed an unknown amount
     // of VRAM (including CUDA driver overhead, page tables, alignment).
@@ -2501,12 +2539,9 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
         auto upload_scale = [&](Tensor& t) {
             if (!t.data || t.on_device || t.numel() == 0)
                 return;
-            size_t bytes = t.nbytes();
-            void* d_ptr = nullptr;
-            if (cudaMallocAsync(&d_ptr, bytes, stream) != cudaSuccess)
-                return;
-            cudaMemcpyAsync(d_ptr, t.data, bytes, cudaMemcpyHostToDevice, stream);
-            gpu_allocations_.push_back(d_ptr);
+            void* d_ptr = scale_to_device(t.data, t.nbytes(), stream, gpu_allocations_);
+            if (!d_ptr)
+                return;  // stays on host
             t.data = d_ptr;
             t.on_device = true;
             scale_count++;
@@ -2588,15 +2623,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                 if (cudaMallocAsync(&slab, static_cast<size_t>(N) * e_ms, stream) != cudaSuccess)
                     return;
                 gpu_allocations_.push_back(slab);  // single base alloc; ~Model frees it once
-                for (int e = 0; e < N; ++e) {
-                    Tensor& ws = grp[e]->weight_scale;
-                    void* dst = static_cast<char*>(slab) + static_cast<size_t>(e) * e_ms;
-                    cudaMemcpyAsync(dst, ws.data, e_ms, cudaMemcpyHostToDevice, stream);
-                    ws.data = dst;        // interior pointer — NOT tracked as a base alloc
-                    ws.on_device = true;  // existing upload_scale loop now skips it
-                    scale_count++;
-                }
-                ++moe_scale_slabs;
+                moe_scale_slabs += upload_scale_slab(slab, grp, e_ms, stream, scale_count);
             };
             for (size_t i = 0; i < layers_.size(); ++i) {
                 slab_proj_scales(layers_[i].expert_w_gate, static_cast<int>(i), "expert_w_gate");
@@ -2768,11 +2795,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     }
 
     // Final sync
-    if (stream) {
-        cudaStreamSynchronize(stream);
-    } else {
-        cudaDeviceSynchronize();
-    }
+    if (!sync_upload(stream, "final"))
+        return false;
 
     gpu_weights_ready_ = true;
     last_warm_hits_ = g_warm ? g_warm->hits() : 0;

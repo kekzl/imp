@@ -77,20 +77,20 @@ bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_
     if (cudaMalloc(&d_packed, packed.size()) != cudaSuccess)
         return false;
     if (cudaMalloc(&d_ms, mscales.size()) != cudaSuccess) {
-        cudaFree(d_packed);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_packed));
         return false;
     }
     if (cudaMalloc(&d_ts, sizeof(float) * ne) != cudaSuccess) {
-        cudaFree(d_packed);
-        cudaFree(d_ms);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_packed));
+        IMP_CUDA_CHECK_LOG(cudaFree(d_ms));
         return false;
     }
     if (cudaMemcpy(d_packed, packed.data(), packed.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
         cudaMemcpy(d_ms, mscales.data(), mscales.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
         cudaMemcpy(d_ts, tscales.data(), sizeof(float) * ne, cudaMemcpyHostToDevice) != cudaSuccess) {
-        cudaFree(d_packed);
-        cudaFree(d_ms);
-        cudaFree(d_ts);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_packed));
+        IMP_CUDA_CHECK_LOG(cudaFree(d_ms));
+        IMP_CUDA_CHECK_LOG(cudaFree(d_ts));
         return false;
     }
 

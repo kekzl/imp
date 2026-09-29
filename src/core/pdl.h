@@ -2,6 +2,8 @@
 
 #include <cuda_runtime.h>
 
+#include "core/logging.h"
+
 namespace imp {
 
 namespace pdl {
@@ -49,7 +51,8 @@ void launch(KernelFunc func, dim3 grid, dim3 block, size_t smem, cudaStream_t st
         config.attrs = &attr;
         config.numAttrs = 1;
 
-        cudaLaunchKernelEx(&config, func, args...);
+        // Report-only: the error also stays in cudaGetLastError, as with <<<>>>.
+        IMP_CUDA_CHECK_LOG(cudaLaunchKernelEx(&config, func, args...));
     } else {
         func<<<grid, block, smem, stream>>>(args...);
     }

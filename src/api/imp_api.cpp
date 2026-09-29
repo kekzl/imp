@@ -765,7 +765,8 @@ ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, dou
     *out_ppl = -1.0;
     try {
         // Fresh context so the prefill covers exactly this corpus.
-        imp_context_reset(ctx);
+        if (const ImpError r = imp_context_reset(ctx); r != IMP_SUCCESS)
+            return r;
         // Chunked-prefill-aware NLL: executor hidden_ only retains the most recent
         // chunk, so accumulate per-chunk instead of post-hoc (which silently scored
         // stale positions once corpus exceeded the resolved chunk size, default 512).
@@ -777,9 +778,11 @@ ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, dou
         // Do NOT null active_request before imp_context_reset: reset only releases
         // the KV/SSM slot while it still sees the request. Nulling first leaked the
         // KV sequence and GDN slot on every imp_perplexity call.
-        imp_context_reset(ctx);
+        const ImpError reset_err = imp_context_reset(ctx);
         if (e != IMP_SUCCESS)
             return e;
+        if (reset_err != IMP_SUCCESS)
+            return reset_err;
         if (!reduced || ppl < 0.0)
             return IMP_ERROR_INTERNAL;
         *out_ppl = ppl;
@@ -951,7 +954,10 @@ ImpError imp_context_reset(ImpContext ctx) {
         // Sync GPU to ensure all async operations from the previous request complete
         // before resetting state. Without this, stale async graph loops or pending
         // kernel launches can corrupt the next request's data.
-        cudaDeviceSynchronize();
+        // Failure: the reset still runs, the call returns IMP_ERROR_CUDA.
+        const cudaError_t sync_err = cudaDeviceSynchronize();
+        if (sync_err != cudaSuccess)
+            IMP_LOG_ERROR("imp_context_reset: cudaDeviceSynchronize: %s", cudaGetErrorString(sync_err));
 
         // Invalidate cached CUDA graphs — stale graph captures from the previous
         // request can produce non-deterministic output if replayed for a new request.
@@ -965,7 +971,7 @@ ImpError imp_context_reset(ImpContext ctx) {
         // Reset MTP-side KV cache + accuracy telemetry for a clean new session.
         ctx->engine->mtp_accuracy_reset();
 
-        return IMP_SUCCESS;
+        return sync_err == cudaSuccess ? IMP_SUCCESS : IMP_ERROR_CUDA;
     });
 }
 

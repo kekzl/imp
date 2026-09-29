@@ -7,6 +7,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_gemm_internal.cuh"
 #include "quant/nvfp4_quant.h"
+#include "core/logging.h"
 #include "core/pdl.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -178,8 +179,9 @@ bool gemv_nvfp4_gdn_input_fused(const NvFP4QuantResult& w_in, const NvFP4QuantRe
 
 void nvfp4_gdn_input_pdl_register() {
     pdl::enable_kernel(gemv_nvfp4_gdn_input_kernel);
-    cudaFuncSetAttribute(gemv_nvfp4_gdn_input_kernel, cudaFuncAttributePreferredSharedMemoryCarveout,
-                         cudaSharedmemCarveoutMaxL1);
+    IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(gemv_nvfp4_gdn_input_kernel,
+                                            cudaFuncAttributePreferredSharedMemoryCarveout,
+                                            cudaSharedmemCarveoutMaxL1));
 }
 
 }  // namespace imp

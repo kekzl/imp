@@ -3,6 +3,8 @@
 #include <cuda_runtime.h>
 #include <utility>
 
+#include "core/logging.h"
+
 namespace imp {
 
 // RAII wrapper for cudaStream_t.
@@ -44,12 +46,12 @@ public:
     // Destroy the held stream now (does not wait for queued work).
     void reset() noexcept {
         if (stream_)
-            cudaStreamDestroy(std::exchange(stream_, nullptr));
+            IMP_CUDA_CHECK_LOG(cudaStreamDestroy(std::exchange(stream_, nullptr)));
     }
 
     ~CudaStream() {
         if (stream_)
-            cudaStreamDestroy(stream_);
+            IMP_CUDA_CHECK_LOG(cudaStreamDestroy(stream_));
     }
 
     CudaStream(const CudaStream&) = delete;
@@ -59,7 +61,7 @@ public:
     CudaStream& operator=(CudaStream&& o) noexcept {
         if (this != &o) {
             if (stream_)
-                cudaStreamDestroy(stream_);
+                IMP_CUDA_CHECK_LOG(cudaStreamDestroy(stream_));
             stream_ = std::exchange(o.stream_, nullptr);
         }
         return *this;
@@ -96,12 +98,12 @@ public:
     // Destroy the held event now.
     void reset() noexcept {
         if (event_)
-            cudaEventDestroy(std::exchange(event_, nullptr));
+            IMP_CUDA_CHECK_LOG(cudaEventDestroy(std::exchange(event_, nullptr)));
     }
 
     ~CudaEvent() {
         if (event_)
-            cudaEventDestroy(event_);
+            IMP_CUDA_CHECK_LOG(cudaEventDestroy(event_));
     }
 
     CudaEvent(const CudaEvent&) = delete;
@@ -111,7 +113,7 @@ public:
     CudaEvent& operator=(CudaEvent&& o) noexcept {
         if (this != &o) {
             if (event_)
-                cudaEventDestroy(event_);
+                IMP_CUDA_CHECK_LOG(cudaEventDestroy(event_));
             event_ = std::exchange(o.event_, nullptr);
         }
         return *this;
@@ -143,7 +145,7 @@ public:
 
     ~CudaGraph() {
         if (graph_)
-            cudaGraphDestroy(graph_);
+            IMP_CUDA_CHECK_LOG(cudaGraphDestroy(graph_));
     }
 
     CudaGraph(const CudaGraph&) = delete;
@@ -153,7 +155,7 @@ public:
     CudaGraph& operator=(CudaGraph&& o) noexcept {
         if (this != &o) {
             if (graph_)
-                cudaGraphDestroy(graph_);
+                IMP_CUDA_CHECK_LOG(cudaGraphDestroy(graph_));
             graph_ = std::exchange(o.graph_, nullptr);
         }
         return *this;
@@ -162,7 +164,7 @@ public:
     // Destroy the held graph (if any) and adopt `g`.
     void reset(cudaGraph_t g = nullptr) noexcept {
         if (graph_)
-            cudaGraphDestroy(graph_);
+            IMP_CUDA_CHECK_LOG(cudaGraphDestroy(graph_));
         graph_ = g;
     }
 
@@ -184,7 +186,7 @@ public:
 
     ~CudaGraphExec() {
         if (exec_)
-            cudaGraphExecDestroy(exec_);
+            IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(exec_));
     }
 
     CudaGraphExec(const CudaGraphExec&) = delete;
@@ -194,7 +196,7 @@ public:
     CudaGraphExec& operator=(CudaGraphExec&& o) noexcept {
         if (this != &o) {
             if (exec_)
-                cudaGraphExecDestroy(exec_);
+                IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(exec_));
             exec_ = std::exchange(o.exec_, nullptr);
         }
         return *this;
@@ -203,7 +205,7 @@ public:
     // Destroy the held exec (if any) and adopt `e`.
     void reset(cudaGraphExec_t e = nullptr) noexcept {
         if (exec_)
-            cudaGraphExecDestroy(exec_);
+            IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(exec_));
         exec_ = e;
     }
 
