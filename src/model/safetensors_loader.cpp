@@ -882,17 +882,28 @@ static bool gptq_refuses(Model& model, const std::unordered_map<std::string, Ten
             detected.c_str());
         return true;
     }
+    static constexpr const char* kProj[] = {"q_proj",    "k_proj",  "v_proj",   "o_proj",
+                                            "gate_proj", "up_proj", "down_proj"};
     size_t n_proj = 0;
     for (size_t li = 0; li < model.layers_.size(); ++li) {
         auto& L = model.layers_[li];
+        size_t pi = 0;
         for (auto* gw :
              {&L.gptq_q, &L.gptq_k, &L.gptq_v, &L.gptq_o, &L.gptq_gate, &L.gptq_up, &L.gptq_down}) {
+            const char* proj = kProj[pi++];
             if (!gw->qweight.data)
                 continue;
             std::string why;
             if (!gptq_projection_ok(*gw, c.group_size, &why)) {
                 IMP_LOG_ERROR("GPTQ SafeTensors (%s) refused: layer %zu: %s", detected.c_str(), li,
                               why.c_str());
+                return true;
+            }
+            // #2253: desc_act=true without g_idx would dequantize with sequential groups.
+            if (c.desc_act && !gw->g_idx.data) {
+                IMP_LOG_ERROR(
+                    "GPTQ SafeTensors (%s) refused: layer %zu %s: desc_act=true but no g_idx tensor",
+                    detected.c_str(), li, proj);
                 return true;
             }
             gw->bits = 4;
