@@ -2,6 +2,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include <atomic>
 #include "compute/gemm_capture_fp16_sm120.h"
+#include "core/cuda_raii.h"
 #include "core/cuda_static_reset.h"
 #include "compute/gemm_internal.cuh"
 #include "core/logging.h"
@@ -515,9 +516,9 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     }
     void* temp_c = s_bench_scratch;
 
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    CudaEvent start, stop;  // timing enabled for cudaEventElapsedTime
+    (void)start.create(cudaEventDefault);
+    (void)stop.create(cudaEventDefault);
     std::vector<float> cand_ms(nresults, 1e30f);
 
     // Warmup all candidates first so steady-state caches are warm before any is timed: a
@@ -602,8 +603,8 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         }
     }
 
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
+    start.reset();
+    stop.reset();
 
     // [diag] per-candidate cost, so the margin below can be chosen from measured
     // spread instead of guessed. Without this only the winner's time is logged,

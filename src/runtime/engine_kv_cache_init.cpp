@@ -964,14 +964,12 @@ bool Engine::init_kv_cache() {
         h_pf_token_ids_ = PinnedBuffer::acquire(
             cuda_host_pinned_allocator(),
             static_cast<size_t>(config_.max_seq_len) * sizeof(int32_t));
-        if (cudaEventCreateWithFlags(&pf_staging_evt_, cudaEventDisableTiming) != cudaSuccess)
-            pf_staging_evt_ = nullptr;
+        (void)pf_staging_evt_.create(cudaEventDisableTiming);  // stays null on failure
         // The constrained pipeline's pinned landing for the sampled token and
         // its ready event: engine-lifetime, so a first json request does not
         // allocate while serving (I2 gate phase B counted the lazy acquire).
         cpipe_.h_token = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int32_t));
-        if (cudaEventCreateWithFlags(&cpipe_.ev, cudaEventDisableTiming) != cudaSuccess)
-            cpipe_.ev = nullptr;
+        (void)cpipe_.ev.create(cudaEventDisableTiming);  // stays null on failure
     }
 
     // Report memory

@@ -1695,7 +1695,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         // exactly covers the pre-step context. After an async-loop burst
         // (device-side tokens, no host hiddens) the cache is stale — skip
         // feeding so it never desynchronizes silently.
-        auto* ws_gate = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+        auto* ws_gate = mtp_ws_storage_.get();
         // A parked binding (batched verify serves several requests) becomes
         // the active one before the sync gate reads its cache position.
         if (mtp_bound(mtp_active_, mtp_pool_, valid_decode[0]->id))
@@ -1740,7 +1740,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             // the first chain step's append should persist (it represents what
             // the main model actually does next). Roll back to mtp_pos_saved
             // after K-1 speculative steps so the real cache stays aligned.
-            auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+            auto* ws = mtp_ws_storage_.get();
             const int K = mtp_req_k;
             const int mtp_pos_before = ws->mtp_pos;
             int chain_prev_tok = next_token;

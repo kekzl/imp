@@ -138,20 +138,17 @@ bool GreenContextManager::init(int device, float prefill_sm_ratio) {
         // Create streams directly on green contexts. Priority: decode > prefill
         // so the scheduler yields to latency-critical decode work when both are
         // ready on different SM partitions.
-        err = cudaExecutionCtxStreamCreate(&prefill_stream_, prefill_green_ctx_, cudaStreamNonBlocking,
-                                           low_prio);
+        err = prefill_stream_.create_on_ctx(prefill_green_ctx_, cudaStreamNonBlocking, low_prio);
         if (err != cudaSuccess) {
             IMP_LOG_WARN("GreenContextManager: failed to create prefill stream (%s)",
                          cudaGetErrorString(err));
             goto cleanup_green;
         }
 
-        err = cudaExecutionCtxStreamCreate(&decode_stream_, decode_green_ctx_, cudaStreamNonBlocking,
-                                           high_prio);
+        err = decode_stream_.create_on_ctx(decode_green_ctx_, cudaStreamNonBlocking, high_prio);
         if (err != cudaSuccess) {
             IMP_LOG_WARN("GreenContextManager: failed to create decode stream (%s)", cudaGetErrorString(err));
-            cudaStreamDestroy(prefill_stream_);
-            prefill_stream_ = nullptr;
+            prefill_stream_.reset();
             goto cleanup_green;
         }
 
@@ -197,16 +194,15 @@ fallback:
         "priority %d/%d and distinct memSyncDomains",
         low_prio, high_prio);
 
-    err = cudaStreamCreateWithPriority(&prefill_stream_, cudaStreamNonBlocking, low_prio);
+    err = prefill_stream_.create_with_priority(cudaStreamNonBlocking, low_prio);
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("GreenContextManager: failed to create prefill stream");
         return false;
     }
 
-    err = cudaStreamCreateWithPriority(&decode_stream_, cudaStreamNonBlocking, high_prio);
+    err = decode_stream_.create_with_priority(cudaStreamNonBlocking, high_prio);
     if (err != cudaSuccess) {
-        cudaStreamDestroy(prefill_stream_);
-        prefill_stream_ = nullptr;
+        prefill_stream_.reset();
         IMP_LOG_ERROR("GreenContextManager: failed to create decode stream");
         return false;
     }
@@ -231,7 +227,7 @@ bool GreenContextManager::reconfigure(float new_prefill_sm_ratio) {
 
 void GreenContextManager::destroy() {
     // #1656: reconfigure() calls this from step_schedule() with work in
-    // flight. cudaStreamDestroy does not wait; destroying the green context
+    // flight. Stream destruction does not wait; destroying the green context
     // right after leaves the replacement streams with no ordering against
     // it. Draining first costs latency once; not draining leaves the
     // outcome to timing.
@@ -240,14 +236,9 @@ void GreenContextManager::destroy() {
     if (decode_stream_)
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(decode_stream_));
 
-    if (prefill_stream_) {
-        cudaStreamDestroy(prefill_stream_);
-        prefill_stream_ = nullptr;
-    }
-    if (decode_stream_) {
-        cudaStreamDestroy(decode_stream_);
-        decode_stream_ = nullptr;
-    }
+    // Streams before their green contexts.
+    prefill_stream_.reset();
+    decode_stream_.reset();
 
     if (prefill_green_ctx_) {
         cudaExecutionCtxDestroy(prefill_green_ctx_);

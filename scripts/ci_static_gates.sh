@@ -98,6 +98,9 @@ if want alloc; then
     # 2026-09-05, one of them a use-after-free on the default model-swap path.
     run "lazy device statics re-arm"            python3 tools/check_static_reset.py
     run "that gate still classifies its cases"  python3 tools/check_static_reset.py --selftest
+    # #2213: stream/event create/destroy only in src/core/cuda_raii.h; allowlist 0.
+    run "CUDA stream/event sites via cuda_raii.h" python3 tools/check_cuda_raii_sites.py
+    run "that gate still matches its cases"     python3 tools/check_cuda_raii_sites.py --selftest
 fi
 
 # Needs a BUILT artifact + cuobjdump (unlike every other gate here, which is source-derived).

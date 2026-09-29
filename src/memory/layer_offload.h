@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/cuda_raii.h"
 #include "model/model.h"
 #include <cuda_runtime.h>
 #include <vector>
@@ -52,8 +53,8 @@ private:
         void* gpu_buf = nullptr;
         size_t buf_size = 0;
         int loaded_layer = -1;
-        cudaEvent_t ready_event = nullptr;
-        cudaStream_t transfer_stream = nullptr;
+        CudaEvent ready_event;
+        CudaStream transfer_stream;
     };
 
     Model* model_ = nullptr;

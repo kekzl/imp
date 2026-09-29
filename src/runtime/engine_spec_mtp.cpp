@@ -36,7 +36,7 @@ void Engine::mtp_unbind_(const char* why) {
     // The slot goes back to the pool with the tokens its cache covers, so a
     // follow-up request can resume over the shared prefix.
     if (mtp_active_.req >= 0 && mtp_ws_storage_ != nullptr) {
-        auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+        auto* ws = mtp_ws_storage_.get();
         const int slot = ws->cur_slot;
         if (slot >= 0 && slot < static_cast<int>(mtp_pool_.slot_history.size())) {
             mtp_pool_.slot_history[static_cast<size_t>(slot)] = mtp_active_.history;
@@ -63,7 +63,7 @@ void Engine::mtp_activate_(int req_id) {
     if (req_id >= 0 && it == mtp_pool_.binds.end())
         return;
     if (mtp_active_.req >= 0) {
-        mtp_active_.slot = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_)->cur_slot;
+        mtp_active_.slot = mtp_ws_storage_->cur_slot;
         const int req = mtp_active_.req;
         mtp_pool_.binds[req] = std::move(mtp_active_);
         mtp_active_ = MtpBind{};
@@ -76,13 +76,13 @@ void Engine::mtp_activate_(int req_id) {
     mtp_active_ = std::move(it->second);
     mtp_pool_.binds.erase(it);
     mtp_active_.req = req_id;
-    imp::mtp_select_slot(*static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_), mtp_active_.slot);
+    imp::mtp_select_slot(*mtp_ws_storage_, mtp_active_.slot);
 }
 
 int Engine::mtp_acquire_slot_(const Request& req) {
     if (mtp_ws_storage_ == nullptr)
         return -1;
-    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    auto* ws = mtp_ws_storage_.get();
     const int n_slots = std::max(1, ws->n_kv_slots);
     if (!mtp_pool_.initialized) {
         mtp_pool_.free_slots.clear();
@@ -142,7 +142,7 @@ void Engine::mtp_release_(int req_id) {
 
 void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs, const std::vector<int>& rows,
                                const std::vector<int>& emitted, cudaStream_t stream) {
-    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    auto* ws = mtp_ws_storage_.get();
     if (ws == nullptr || !model_ || !model_->mtp_.has_value() || !model_->mtp_->loaded)
         return;
     const int N = static_cast<int>(reqs.size());
@@ -311,7 +311,7 @@ std::vector<std::vector<int32_t>> Engine::mtp_take_chains_(const Request& req) {
 // chaining feed needs logits/argmax: lm_head GEMV dominates per-pair cost (~1 GiB read on Qwen3.6's 248k vocab).
 bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, int n_pairs,
                              bool chain_after) {
-    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    auto* ws = mtp_ws_storage_.get();
     if (ws == nullptr || n_pairs <= 0)
         return false;
     const int hidden_dim = model_->config_.d_model;
@@ -526,7 +526,7 @@ void Engine::mtp_post_verify_update_(const Request& req, int emitted, int row0) 
         mtp_activate_(req.id);
     if (mtp_active_.req != req.id || emitted <= 0)
         return;
-    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    auto* ws = mtp_ws_storage_.get();
     if (ws == nullptr)
         return;
     // Sync check: the cache must cover exactly the pre-step context
@@ -559,7 +559,7 @@ void Engine::mtp_prefill_feed_chunk(const Request& req, int offset, int chunk_le
         return;
     if (chunk_len <= 0)
         return;
-    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    auto* ws = mtp_ws_storage_.get();
     const auto& in = req.input_tokens;
 
     // (Re)bind on this request's first chunk: resume over the longest common
@@ -735,7 +735,7 @@ bool Engine::enable_mtp_spec_decode(int k) {
         const int fit = static_cast<int>(budget / (row_bytes * static_cast<size_t>(n_kv_slots)));
         mtp_kv_max = std::clamp(fit, 2048, mtp_kv_max);
     }
-    auto* ws = new imp::MtpDraftWorkspace();
+    auto ws = std::make_unique<imp::MtpDraftWorkspace>();
     // set_alloc_phase(Serving) fires at the end of engine init, but this API
     // is exposed AFTER context creation and the server calls it before any
     // request: init traffic sitting on the wrong side of the boundary, not an
@@ -744,7 +744,6 @@ bool Engine::enable_mtp_spec_decode(int k) {
     if (!imp::mtp_workspace_allocate(*ws, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff,
                                      mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max, n_kv_slots, head.hc_count,
                                      hc_lowrank)) {
-        delete ws;
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
     }
@@ -829,7 +828,7 @@ bool Engine::enable_mtp_spec_decode(int k) {
     // in at upload, see upload_mtp_weights in weight_upload.cu), 1.0 for Gemma-3. Don't double-apply.
     ws->arch_norm_offset = model_->config_.norm_weight_offset;
 
-    mtp_ws_storage_ = ws;
+    mtp_ws_storage_.reset(ws.release());
     mtp_spec_k_ = k;
     mtp_pool_.binds.clear();
     mtp_pool_.free_slots.clear();
@@ -863,7 +862,7 @@ void Engine::mtp_accuracy_reset() noexcept {
     mtp_pool_.slot_history.clear();
     mtp_pool_.initialized = false;
     if (mtp_ws_storage_) {
-        auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+        auto* ws = mtp_ws_storage_.get();
         imp::mtp_kv_reset(*ws);
         imp::mtp_select_slot(*ws, 0);
     }
@@ -879,7 +878,7 @@ bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev, int hidden_d
         IMP_LOG_ERROR("mtp_draft_one: MTP head not loaded");
         return false;
     }
-    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    auto* ws = mtp_ws_storage_.get();
     // Chain lm_head via the NVFP4 decode cache when available: full-vocab FP16
     // GEMV is the dominant per-draft cost (#847 lever 3). Draft-only precision
     // (verify stays lossless); falls back to FP16 GEMV with no cache entry (nvfp4_lm_head/_gdn off, or FP8 LM head).

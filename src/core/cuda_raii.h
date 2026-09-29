@@ -12,15 +12,39 @@ public:
     CudaStream() = default;
 
     // Create a stream with the given flags. Returns false from create() on failure.
-    [[nodiscard]] bool create(unsigned int flags = cudaStreamNonBlocking) {
-        if (stream_)
-            cudaStreamDestroy(stream_);
+    [[nodiscard]] bool create(unsigned int flags = cudaStreamNonBlocking) { return try_create(flags) == cudaSuccess; }
+
+    // create() that returns the CUDA error for logging.
+    [[nodiscard]] cudaError_t try_create(unsigned int flags = cudaStreamNonBlocking) {
+        reset();
         cudaError_t err = cudaStreamCreateWithFlags(&stream_, flags);
-        if (err != cudaSuccess) {
+        if (err != cudaSuccess)
             stream_ = nullptr;
-            return false;
-        }
-        return true;
+        return err;
+    }
+
+    // cudaStreamCreateWithPriority: lower number = higher priority.
+    [[nodiscard]] cudaError_t create_with_priority(unsigned int flags, int priority) {
+        reset();
+        cudaError_t err = cudaStreamCreateWithPriority(&stream_, flags, priority);
+        if (err != cudaSuccess)
+            stream_ = nullptr;
+        return err;
+    }
+
+    // Stream bound to a green context; must be reset() before that context is destroyed.
+    [[nodiscard]] cudaError_t create_on_ctx(cudaExecutionContext_t ctx, unsigned int flags, int priority) {
+        reset();
+        cudaError_t err = cudaExecutionCtxStreamCreate(&stream_, ctx, flags, priority);
+        if (err != cudaSuccess)
+            stream_ = nullptr;
+        return err;
+    }
+
+    // Destroy the held stream now (does not wait for queued work).
+    void reset() noexcept {
+        if (stream_)
+            cudaStreamDestroy(std::exchange(stream_, nullptr));
     }
 
     ~CudaStream() {
@@ -58,15 +82,21 @@ class CudaEvent {
 public:
     CudaEvent() = default;
 
-    [[nodiscard]] bool create(unsigned int flags = cudaEventDisableTiming) {
-        if (event_)
-            cudaEventDestroy(event_);
+    [[nodiscard]] bool create(unsigned int flags = cudaEventDisableTiming) { return try_create(flags) == cudaSuccess; }
+
+    // create() that returns the CUDA error for logging. cudaEventDefault = timing enabled.
+    [[nodiscard]] cudaError_t try_create(unsigned int flags = cudaEventDisableTiming) {
+        reset();
         cudaError_t err = cudaEventCreateWithFlags(&event_, flags);
-        if (err != cudaSuccess) {
+        if (err != cudaSuccess)
             event_ = nullptr;
-            return false;
-        }
-        return true;
+        return err;
+    }
+
+    // Destroy the held event now.
+    void reset() noexcept {
+        if (event_)
+            cudaEventDestroy(std::exchange(event_, nullptr));
     }
 
     ~CudaEvent() {

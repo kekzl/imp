@@ -255,10 +255,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
 
     // Per-parity gather-done events for the pipelined split gather/wait.
     for (int p = 0; p < 2; ++p) {
-        if (!sample_gather_evt_[p] &&
-            cudaEventCreateWithFlags(&sample_gather_evt_[p], cudaEventDisableTiming) != cudaSuccess) {
-            sample_gather_evt_[p] = nullptr;
-        }
+        if (!sample_gather_evt_[p])
+            (void)sample_gather_evt_[p].create(cudaEventDisableTiming);  // stays null on failure
     }
 
     // MMVQ (dp4a) scratch buffers for quantized input vectors.
@@ -1666,10 +1664,7 @@ void GraphExecutor::free_buffers() {
         d_row_args_ = nullptr;
     }
     for (int p = 0; p < 2; ++p) {
-        if (sample_gather_evt_[p]) {
-            IMP_CUDA_CHECK_LOG(cudaEventDestroy(sample_gather_evt_[p]));
-            sample_gather_evt_[p] = nullptr;
-        }
+        sample_gather_evt_[p].reset();
     }
     sample_parity_ = 0;
     h_logits_pinned_.reset();

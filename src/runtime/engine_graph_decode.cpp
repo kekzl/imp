@@ -476,7 +476,7 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
         p.h_token = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int32_t));
     ok = ok && !p.h_token.empty();
     if (ok && !p.ev)
-        ok = cudaEventCreateWithFlags(&p.ev, cudaEventDisableTiming) == cudaSuccess;
+        ok = p.ev.create(cudaEventDisableTiming);
     if (!ok) {
         teardown_constrained_pipeline(/*synchronize=*/false);
         return false;
