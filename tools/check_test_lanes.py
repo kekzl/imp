@@ -344,7 +344,9 @@ def main():
     # host reference (#2249); needs a card.
     # 1165 -> 1166: HybridSharedScoreTest x1 (test-e2e, GPU): #2198 shared score rows restoring one
     # recurrent snapshot in one ragged forward (IMP_TEST_MODEL_GDN).
-    PINNED = 1166
+    # 1166 -> 1169: PromptLogprobsRows x3 (test-compute, GPU): fused prompt-logprobs row kernel vs CPU
+    # reference (#2257).
+    PINNED = 1169
 
     text = CMAKE.read_text()
     mods = module_sources(text)

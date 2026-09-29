@@ -803,6 +803,8 @@ private:
         int top_n = 0;
         VramOwned<int32_t> targets, rank, top_ids;
         VramOwned<float> lp, top_lp;
+        int logit_rows = 0;  // logits: [logit_rows x vocab] FP32, grows only (#2257)
+        VramOwned<float> logits;
     } prompt_lp_scratch_;
 
     // ── Pre-allocated prefill metadata (eliminates per-request cudaMalloc) ──

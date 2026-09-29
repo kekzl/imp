@@ -1,8 +1,10 @@
 // Prompt logprobs (#2207): per-chunk device gather into Request::prompt_lp.
 
 #include "runtime/engine.h"
+#include "runtime/prompt_lp_chunk.h"
 #include "runtime/request.h"
 #include "exec/executor.h"
+#include "compute/prompt_logprobs_rows.h"
 #include "core/logging.h"
 
 #include <algorithm>
@@ -10,6 +12,8 @@
 #include <cuda_runtime.h>
 
 namespace imp {
+
+static_assert(kMaxPromptLogprobs <= kPlpMaxTopN, "prompt_logprobs_rows caps top-N at kPlpMaxTopN");
 
 void Engine::prompt_logprobs_chunk_(Request& req, int offset, int chunk_len, cudaStream_t stream) {
     if (req.prompt_logprobs < 0 || !executor_)
@@ -57,13 +61,24 @@ void Engine::prompt_logprobs_chunk_(Request& req, int offset, int chunk_len, cud
         s.top_n = t;
     }
 
+    // Logits chunk for one LM-head GEMM per chunk (#2257); a failed grow keeps the per-batch driver.
+    const int vocab = model_->config().vocab_size;
+    const int want = prompt_lp_chunk_rows(rows, vocab, vram_alloc_.available());
+    if (want > s.logit_rows) {
+        s.logits.reset();
+        s.logits = VramOwned<float>(vram_alloc_, static_cast<size_t>(want) * static_cast<size_t>(vocab),
+                                    "prompt_lp_logits");
+        s.logit_rows = s.logits ? want : 0;
+    }
+
     const size_t nrows = static_cast<size_t>(rows);
     const size_t ntop = nrows * static_cast<size_t>(top_n);
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s.targets.get(), req.input_tokens.data() + offset + 1,
                                        nrows * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
     executor_->prompt_logprobs_partial(s.targets.get(), rows, top_n, s.lp.get(), s.rank.get(),
                                        top_n > 0 ? s.top_ids.get() : nullptr,
-                                       top_n > 0 ? s.top_lp.get() : nullptr, stream);
+                                       top_n > 0 ? s.top_lp.get() : nullptr, s.logits.get(),
+                                       std::min(rows, s.logit_rows), stream);
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(out.token_lp.data() + offset, s.lp.get(), nrows * sizeof(float),
                                        cudaMemcpyDeviceToHost, stream));
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(out.rank.data() + offset, s.rank.get(), nrows * sizeof(int32_t),

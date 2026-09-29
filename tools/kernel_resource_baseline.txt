@@ -82,6 +82,7 @@ void imp::gemv_dp4a_qkv_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	40
 imp::topk_partial_kernel	sm_120a	39	1056	0
 imp::(anonymous namespace)::ple_conv_add_kernel	sm_120a	40	32	0
 imp::post_decode_step_kernel	sm_120a	39	24	0
+imp::(anonymous namespace)::plp_rmsnorm_q8_roundtrip_kernel	sm_120a	36	128	0
 imp::rmsnorm_quantize_q8_1_kernel	sm_120a	36	128	0
 imp::dequant_q3k_kernel	sm_120a	28	16	0
 imp::bench_separate	sm_120a	28	8	0
