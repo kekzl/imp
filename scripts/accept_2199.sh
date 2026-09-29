@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GPU acceptance for #2199: --idle-unload-seconds and POST /admin/lora/{load,unload}.
+# GPU acceptance for #2199 (--idle-unload-seconds, POST /admin/lora/{load,unload}) and #2217 (swap drops LoRA).
 # Prints PASS/FAIL per criterion, exit 0 only if every criterion passes. Needs a GPU, the
 # worktree image (make build) and a safetensors model dir with config.json under IMP_MODELS_DIR.
 # Usage: bash scripts/accept_2199.sh
@@ -9,7 +9,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 
 # Hold the card for the whole run (scripts/gpu_lock.sh); refuse a busy one.
 if [ -z "${IMP_ACCEPT_2199_LOCKED:-}" ]; then
@@ -37,6 +37,7 @@ bash scripts/image_tag.sh check "$IMG" || { echo "FAIL setup: $IMG is not this t
 ADIR="$(mktemp -d "${TMPDIR:-/tmp}/accept_2199.XXXXXX")"
 # mktemp -d is 0700; imp-server in the container runs as uid 1001 and must read the adapter.
 chmod 755 "$ADIR"
+# shellcheck disable=SC2329  # invoked by the EXIT trap
 cleanup() { docker rm -f "$CTR" >/dev/null 2>&1 || true; rm -rf "$ADIR"; }
 trap cleanup EXIT
 
@@ -52,6 +53,7 @@ now_ms() { date +%s%3N; }
 # ---- zero-valued PEFT adapter sized from the model config (F16, all 7 projections) ----
 le64() {
     local n=$1 i
+    # shellcheck disable=SC2059  # the format IS the byte escape
     for i in 0 1 2 3 4 5 6 7; do printf "\\x$(printf %02x $(((n >> (8 * i)) & 255)))"; done
 }
 gen_adapter() {  # gen_adapter <dir>
@@ -91,10 +93,11 @@ gen_adapter() {  # gen_adapter <dir>
     echo "adapter: $nl layers x 7 projections, rank $RANK, $((off / 1048576)) MiB payload"
 }
 
+DOCKER_EXTRA=()  # extra docker run args for the next start_server (Phase C mounts)
 start_server() {  # start_server <extra imp-server args...>
     docker rm -f "$CTR" >/dev/null 2>&1 || true
     docker run -d --name "$CTR" --gpus all -v "$MODELS_DIR":/models:ro -v "$ADIR":/adapters:ro \
-        -p "$PORT":"$PORT" "$IMG" imp-server --model "/models/$MODEL" --host 0.0.0.0 --port "$PORT" \
+        "${DOCKER_EXTRA[@]}" -p "$PORT":"$PORT" "$IMG" imp-server --model "/models/$MODEL" --host 0.0.0.0 --port "$PORT" \
         --max-concurrent 8 "$@" >/dev/null || return 1
     local i
     for i in $(seq 1 120); do
@@ -245,12 +248,66 @@ else
         verdict C7-wsl2-suspend-measured FAIL "/admin/suspend HTTP $sus_status: $sus"
     fi
 fi
+docker rm -f "$CTR" >/dev/null 2>&1
+
+# ================= Phase C: model swap drops LoRA adapters (#2217) =================
+# The same weights mounted under a second name are a real swap (full teardown + load) whose
+# shapes still fit the adapter: the drop is policy, not a shape refusal.
+SWAP_ID="$MODEL-swap"
+SWAP_CYCLES=4  # even: ends on the start model
+DOCKER_EXTRA=(-v "$MODELS_DIR/$MODEL":"/swap/$SWAP_ID":ro)
+if ! start_server --models-dir /swap; then
+    verdict C8-swap-drops-lora FAIL "server with --models-dir /swap did not start"
+    verdict C9-swap-frees-lora-vram FAIL "server with --models-dir /swap did not start"
+else
+    A_ID=$(curl -s "$BASE/v1/models" | jq -r '[.data[] | select(.loaded == true)][0].id')
+    # Warm both sides once so the baseline already carries a post-swap engine.
+    MODEL_ID=$SWAP_ID; read -r warm_b _ <<<"$(chat)"
+    MODEL_ID=$A_ID; read -r warm_a _ <<<"$(chat)"
+    echo "swap warm-up: $SWAP_ID HTTP $warm_b, $A_ID HTTP $warm_a"
+    swap_base=$(vram_used)
+    load_delta=0
+    swap_bad=""
+    for ((c = 1; c <= SWAP_CYCLES; c++)); do
+        cur=$([ $((c % 2)) = 1 ] && echo "$A_ID" || echo "$SWAP_ID")
+        nxt=$([ $((c % 2)) = 1 ] && echo "$SWAP_ID" || echo "$A_ID")
+        pre=$(vram_used)
+        load=$(admin /admin/lora/load '{"path": "/adapters/acc", "name": "acc"}')
+        lst=$(cat "$ADIR/status")
+        [ "$c" = 1 ] && load_delta=$(($(vram_used) - pre))
+        sid=$(jq -r '.id // 0' <<<"$load")
+        MODEL_ID=$cur; read -r use_code _ <<<"$(chat acc)"
+        MODEL_ID=$nxt; read -r swap_code _ <<<"$(chat acc)"
+        swap_err=$(jq -r '.error.code // empty' "$ADIR/resp.json" 2>/dev/null)
+        admin /admin/lora/unload "{\"id\": $sid}" >"$ADIR/gone.json"
+        ust=$(cat "$ADIR/status")
+        uerr=$(jq -r '.error.code // empty' "$ADIR/gone.json" 2>/dev/null)
+        echo "swap cycle $c: load HTTP $lst id=$sid, use on $cur HTTP $use_code, swap to $nxt HTTP $swap_code $swap_err, unload id=$sid HTTP $ust $uerr"
+        [ "$lst" = 200 ] && [ "$use_code" = 200 ] && [ "$swap_code" = 400 ] && [ "$swap_err" = lora_not_loaded ] &&
+            [ "$ust" = 404 ] && [ "$uerr" = lora_not_found ] || swap_bad+=" c$c"
+    done
+    swap_end=$(vram_used)
+    drop_logs=$(docker logs "$CTR" 2>&1 | grep -c "\[model-swap\] dropped LoRA adapter 'acc'.*: model swapped")
+    echo "drop log lines: $drop_logs"
+    if [ -z "$swap_bad" ] && [ "$drop_logs" = "$SWAP_CYCLES" ]; then
+        verdict C8-swap-drops-lora PASS "$SWAP_CYCLES/$SWAP_CYCLES swaps: request 400 lora_not_loaded, unload 404 lora_not_found, $drop_logs drop log lines"
+    else
+        verdict C8-swap-drops-lora FAIL "failed cycles:${swap_bad:- none}, drop log lines $drop_logs (want $SWAP_CYCLES)"
+    fi
+    # A leaked adapter per swap would add load_delta each cycle; one adapter's worth is the limit.
+    swap_drift=$((swap_end - swap_base))
+    if [ "$load_delta" -ge 32 ] && [ "$swap_drift" -lt "$load_delta" ]; then
+        verdict C9-swap-frees-lora-vram PASS "used $swap_base -> $swap_end MiB after $SWAP_CYCLES swaps with an adapter loaded (drift $swap_drift, adapter $load_delta MiB)"
+    else
+        verdict C9-swap-frees-lora-vram FAIL "used $swap_base -> $swap_end MiB (drift $swap_drift), adapter load delta $load_delta MiB (control needs >= 32, drift must be below it)"
+    fi
+fi
 
 echo
 echo "== accept_2199 summary ($MODEL, image $IMG) =="
 printf '%s\n' "${RESULTS[@]}"
 fails=$(printf '%s\n' "${RESULTS[@]}" | grep -c '^FAIL')
-[ ${#RESULTS[@]} -eq 7 ] || { echo "FAIL: ${#RESULTS[@]}/7 criteria reported"; exit 1; }
+[ ${#RESULTS[@]} -eq 9 ] || { echo "FAIL: ${#RESULTS[@]}/9 criteria reported"; exit 1; }
 [ "$fails" = 0 ] && { echo "ALL PASS"; exit 0; }
 echo "$fails FAIL"
 exit 1

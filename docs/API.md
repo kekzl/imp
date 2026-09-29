@@ -203,6 +203,7 @@ Both sit behind the same `--api-key` and `--rate-limit` as every other non-probe
 - Both drain in-flight requests first (`server.model_swap_drain_ms`), never cancel them; 503 if the drain times out.
 - `id` is stable across suspend/resume; ids are never reused.
 - Adapters survive an idle or operator suspend: resume re-loads them from their paths.
+- A model swap (`server.model_swap`) drops every adapter: device memory freed with the old context, one log line each (`[model-swap] dropped LoRA adapter '<name>' (id=N, path=...): model swapped`). A request naming one then answers 400 `lora_not_loaded`, unload answers 404 `lora_not_found`. Nothing is re-loaded onto the new model, also not when a failed swap restores the previous one: `POST /admin/lora/load` again.
 
 ## Errors
 

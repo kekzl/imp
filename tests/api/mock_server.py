@@ -78,7 +78,7 @@ metrics = MockMetrics()
 
 class MockConfig:
     """Per-server configuration (avoids class variable pollution across instances)."""
-    def __init__(self, latency_ms=5, fail_rate=0.0, oom=False, idle_unload_seconds=0):
+    def __init__(self, latency_ms=5, fail_rate=0.0, oom=False, idle_unload_seconds=0, swap_models=None):
         self.latency_ms = latency_ms
         self.fail_rate = fail_rate
         self.oom_mode = oom
@@ -88,6 +88,9 @@ class MockConfig:
         self.loras = {}
         self.next_lora_id = 1
         self.lora_lock = threading.Lock()
+        # --swap-model NAME (repeatable): extra resolvable models, the mock's --models-dir.
+        self.current_model = MOCK_MODEL_ID
+        self.swap_models = set(swap_models or ())
 
 
 class MockHandler(BaseHTTPRequestHandler):
@@ -132,10 +135,16 @@ class MockHandler(BaseHTTPRequestHandler):
         self._send_json(status, {"error": {"message": message, "type": error_type}})
 
     def _check_model(self, model: str) -> bool:
-        if model != MOCK_MODEL_ID:
-            self._send_error(404, f"Model '{model}' not found. Loaded: {MOCK_MODEL_ID}")
-            return False
-        return True
+        with self.config.lora_lock:
+            if model == self.config.current_model:
+                return True
+            # handlers.cpp ensure_model_loaded: a swap drops every LoRA adapter (#2217).
+            if model == MOCK_MODEL_ID or model in self.config.swap_models:
+                self.config.current_model = model
+                self.config.loras.clear()
+                return True
+        self._send_error(404, f"Model '{model}' not found. Loaded: {self.config.current_model}")
+        return False
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -429,16 +438,6 @@ class MockHandler(BaseHTTPRequestHandler):
             return
         if not self._validate_sampling(body):
             return
-        lora = body.get("lora")
-        if lora:
-            with self.config.lora_lock:
-                known = lora in self.config.loras
-            if not known:
-                self._send_coded_error(
-                    400, f"LoRA adapter '{lora}' is not loaded (POST /admin/lora/load, or --lora "
-                    "NAME=PATH at startup)", "lora", "lora_not_loaded")
-                return
-
         messages = body.get("messages", [])
         if not messages:
             self._send_error(400, "messages array is required and must not be empty")
@@ -478,6 +477,16 @@ class MockHandler(BaseHTTPRequestHandler):
             return
         if not self._check_model(model):
             return
+        # After the model check, as in handlers_chat_core.cpp: a swap drops the adapter table first.
+        lora = body.get("lora")
+        if lora:
+            with self.config.lora_lock:
+                known = lora in self.config.loras
+            if not known:
+                self._send_coded_error(
+                    400, f"LoRA adapter '{lora}' is not loaded (POST /admin/lora/load, or --lora "
+                    "NAME=PATH at startup)", "lora", "lora_not_loaded")
+                return
 
         # Simulate OOM
         if self.config.oom_mode:
@@ -816,6 +825,7 @@ def main():
     parser.add_argument("--fail-rate", type=float, default=0.0)
     parser.add_argument("--oom", action="store_true")
     parser.add_argument("--idle-unload-seconds", type=str, default="0")
+    parser.add_argument("--swap-model", action="append", default=[])
     args = parser.parse_args()
 
     # Same contract as tools/imp-server/args.cpp: integer >= 0, else exit 1.
@@ -829,7 +839,7 @@ def main():
         sys.exit(1)
 
     config = MockConfig(latency_ms=args.latency_ms, fail_rate=args.fail_rate, oom=args.oom,
-                        idle_unload_seconds=idle)
+                        idle_unload_seconds=idle, swap_models=args.swap_model)
     handler_class = make_handler_class(config)
     server = ThreadedHTTPServer(("127.0.0.1", args.port), handler_class)
 

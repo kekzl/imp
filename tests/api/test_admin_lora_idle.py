@@ -168,6 +168,47 @@ class TestLoraCycleMock:
         assert _err(r).get("code") == "lora_load_failed"
 
 
+class TestLoraDroppedOnSwapMock:
+    """#2217: a model swap drops every adapter; the swap needs a model, so mock only."""
+
+    SWAP_TO = "mock-model-v2"
+
+    @pytest.fixture(autouse=True)
+    def _mock_only(self, is_mock):
+        if not is_mock:
+            pytest.skip("a swap needs a loaded model: scripts/accept_2199.sh")
+
+    def test_swap_drops_adapters(self, model, tmp_path):
+        adapter = tmp_path / "style-s"
+        adapter.mkdir()
+        port = _free_port()
+        proc = _start(port, "--swap-model", self.SWAP_TO)
+        try:
+            with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=10) as c:
+                def chat(m):
+                    return c.post("/v1/chat/completions", json={
+                        "model": m, "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 4, "lora": "style-s"})
+
+                r = c.post("/admin/lora/load", json={"path": str(adapter)})
+                assert r.status_code == 200, r.text
+                lora_id = r.json()["id"]
+                assert chat(model).status_code == 200
+
+                refused = chat(self.SWAP_TO)
+                assert refused.status_code == 400, refused.text
+                assert _err(refused).get("code") == "lora_not_loaded"
+                # Swapping back does not bring it back.
+                assert chat(model).status_code == 400
+
+                for body in ({"id": lora_id}, {"name": "style-s"}):
+                    gone = c.post("/admin/lora/unload", json=body)
+                    assert gone.status_code == 404, gone.text
+                    assert _err(gone).get("code") == "lora_not_found"
+        finally:
+            _stop(proc)
+
+
 @pytest.mark.nomodel
 class TestIdleUnloadFlag:
     """--idle-unload-seconds: default off, parsed strictly, reported on /health."""
