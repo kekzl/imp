@@ -412,6 +412,20 @@ static constexpr float kAlgoMargin = 0.10f;
 // select cuBLAS legacy WMMA kernels (Finding 1/5).
 static int gemm_algo_log_enabled() { return imp::process_diag_log_gemm_algo() ? 1 : 0; }
 
+// ms per run() over `iters` runs; 1e30f (= unmeasured, as cand_ms starts) on an event error, never 0.
+template <typename Run>
+static float time_on_stream(cudaEvent_t start, cudaEvent_t stop, cudaStream_t stream, int iters, Run&& run) {
+    cudaError_t err = cudaEventRecord(start, stream);
+    for (int r = 0; r < iters; r++) run();
+    float ms = 0;
+    if (err == cudaSuccess) err = cudaEventRecord(stop, stream);
+    if (err == cudaSuccess) err = cudaEventSynchronize(stop);
+    if (err == cudaSuccess) err = cudaEventElapsedTime(&ms, start, stop);
+    if (err == cudaSuccess) return ms / static_cast<float>(iters);
+    IMP_LOG_WARN("[gemm-algo] candidate timing failed: %s", cudaGetErrorString(err));
+    return 1e30f;
+}
+
 static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry, const void* A_data,
                                       const void* B_data, size_t C_bytes, float alpha, float beta,
                                       bool is_int_compute, cudaStream_t stream, int M = 0, int N = 0,
@@ -545,16 +559,11 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     }
 
     auto time_candidate = [&](int i, int iters) {
-        cudaEventRecord(start, stream);
-        for (int r = 0; r < iters; r++)
+        return time_on_stream(start, stop, stream, iters, [&] {
             cublasLtMatmul(lt, entry.opDesc, p_alpha, B_data, entry.Bdesc, A_data, entry.Adesc, p_zero, temp_c,
                            entry.Cdesc, temp_c, entry.Cdesc, &results[i].algo, s_workspace,
                            results[i].workspaceSize, stream);
-        cudaEventRecord(stop, stream);
-        cudaEventSynchronize(stop);
-        float ms = 0;
-        cudaEventElapsedTime(&ms, start, stop);
-        return ms / static_cast<float>(iters);
+        });
     };
 
     // Probe round — its timings are thrown away, they only size the real rounds.
@@ -1010,16 +1019,24 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
                         "Consider --set attention.fp8_prefill=never to skip FP8 overhead.");
                 }
                 float a_scale_h = 1.0f, b_scale_h = 1.0f;
+                cudaError_t serr = cudaSuccess;
                 if (aScale)
-                    cudaMemcpy(&a_scale_h, aScale, sizeof(float), cudaMemcpyDeviceToHost);
-                if (bScale)
-                    cudaMemcpy(&b_scale_h, bScale, sizeof(float), cudaMemcpyDeviceToHost);
+                    serr = cudaMemcpy(&a_scale_h, aScale, sizeof(float), cudaMemcpyDeviceToHost);
+                if (bScale && serr == cudaSuccess)
+                    serr = cudaMemcpy(&b_scale_h, bScale, sizeof(float), cudaMemcpyDeviceToHost);
+                if (serr != cudaSuccess) {  // a wrong scale would be a silent wrong result
+                    IMP_LOG_ERROR("gemm_cublaslt: FP8 fallback scale read failed M=%ld K=%ld N=%ld: %s",
+                                  (long)M, (long)K, (long)N, cudaGetErrorString(serr));
+                    return;
+                }
 
                 int a_elems = static_cast<int>(M * K);
                 int b_elems = static_cast<int>(N * K);
                 half *d_a16 = nullptr, *d_b16 = nullptr;
-                cudaMallocAsync(&d_a16, static_cast<size_t>(a_elems) * sizeof(half), stream);
-                cudaMallocAsync(&d_b16, static_cast<size_t>(b_elems) * sizeof(half), stream);
+                if (cudaMallocAsync(&d_a16, static_cast<size_t>(a_elems) * sizeof(half), stream) != cudaSuccess)
+                    d_a16 = nullptr;
+                if (cudaMallocAsync(&d_b16, static_cast<size_t>(b_elems) * sizeof(half), stream) != cudaSuccess)
+                    d_b16 = nullptr;
                 if (d_a16 && d_b16) {
                     dequantize_fp8_e4m3_to_fp16(A.data, d_a16, a_elems, a_scale_h, stream);
                     dequantize_fp8_e4m3_to_fp16(B.data, d_b16, b_elems, b_scale_h, stream);
@@ -1032,8 +1049,8 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
                     IMP_LOG_ERROR("gemm_cublaslt: FP8 dequant fallback alloc failed M=%ld K=%ld N=%ld",
                                   (long)M, (long)K, (long)N);
                 }
-                if (d_a16) cudaFreeAsync(d_a16, stream);
-                if (d_b16) cudaFreeAsync(d_b16, stream);
+                if (d_a16) IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_a16, stream));
+                if (d_b16) IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_b16, stream));
             }
         }
     }
