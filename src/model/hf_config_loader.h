@@ -77,11 +77,13 @@ struct HFConfigLoader {
     };
     static bool load_tokenizer_flags(const std::string& model_dir, TokenizerFlags& out);
 
-    // GPTQ quantization config from quantize_config.json
+    // GPTQ quantization config: quantize_config.json, else config.json quantization_config
+    // with quant_method gptq. checkpoint_format from "checkpoint_format" or "format" (GPTQModel).
     struct GPTQConfig {
         int bits = 0;  // 4 or 8
         int group_size = 128;
         bool desc_act = false;
+        std::string checkpoint_format;  // "" = unspecified (AutoGPTQ default: gptq v1)
     };
     static bool load_gptq_config(const std::string& model_dir, GPTQConfig& cfg);
 
