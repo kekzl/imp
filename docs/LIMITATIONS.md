@@ -30,7 +30,6 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | Shares the Qwen3-VL tower; `make test-vision` runs gemma-3-4b-vl and Qwen3-VL-4B-Instruct only | Qwen3.6-35B-A3B vision | none | #1680 |
 | Dequant paths with no gate reading such a checkpoint (Q4_0, Q8_0, Q4_K, Q5_K, Q6_K do have one) | GGUF Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q8_K | none | #1680 |
 | **Q8_1** (GGUF wire type 9, llama.cpp's activation format) has no weight path at all | GGUF loader | refused at parse | - |
-| **AWQ** SafeTensors checkpoints (`quant_method: awq`) have no dequant kernel | AWQ SafeTensors loader | refused at load with the detected bits/group_size/zero_point/version; use a GPTQ or NVFP4 export | #2196, #2205 |
 | Cross-check vs llama.cpp is opt-in behind `COMPARE_URL=`; default `make test-rerank` skips it | `/v1/rerank` | set `COMPARE_URL=` | #1680 |
 | Implemented, ungated | `/admin/suspend`, `/admin/resume`, `server.model_swap` | none | #1680 |
 | SSE frames, usage accounting, `finish_reason`, tool-call streaming: CI's `Real API contract (model-less)` job deselects every token-producing test, no GPU runner | server generation contract | run `make test-server` on a carded machine | #1600, #1559 |
@@ -77,6 +76,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | Prefill graph capture is disabled per model when one NVFP4 weight exceeds the dequant-workspace cap | affected NVFP4 checkpoints | decode graphs unaffected | - |
 | No video input | video prompts | images work; video needs a decoder this tree does not vendor | - |
 | No vision architecture registry | InternVL, Pixtral | tower allowlist covers Qwen3-VL-shaped encoders and Gemma; each needs a port | - |
+| **AWQ** SafeTensors checkpoints (`quant_method: awq`) have no dequant kernel | AWQ SafeTensors loader | refused at load with the detected bits/group_size/zero_point/version; use a GPTQ or NVFP4 export | #2196, #2205 |
 
 ## Model-specific blockers
 
