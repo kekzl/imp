@@ -232,10 +232,12 @@
                 kv_chunk_append_fp16(v_full, static_cast<const half*>(vv.data), state.d_past_len, n,
                                      nkv * hd, stream);
             } else {
-                cudaMemcpyAsync(k_full + (size_t)q_offset * nkv * hd, kk.data,
-                                (size_t)n * nkv * hd * sizeof(half), cudaMemcpyDeviceToDevice, stream);
-                cudaMemcpyAsync(v_full + (size_t)q_offset * nkv * hd, vv.data,
-                                (size_t)n * nkv * hd * sizeof(half), cudaMemcpyDeviceToDevice, stream);
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(k_full + (size_t)q_offset * nkv * hd, kk.data,
+                                                   (size_t)n * nkv * hd * sizeof(half),
+                                                   cudaMemcpyDeviceToDevice, stream));
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(v_full + (size_t)q_offset * nkv * hd, vv.data,
+                                                   (size_t)n * nkv * hd * sizeof(half),
+                                                   cudaMemcpyDeviceToDevice, stream));
             }
 
             int64_t kv_full_shape[2] = {(int64_t)(cap_replay ? state.ctx_capacity : ctx_len),
@@ -312,7 +314,7 @@
             }
 
             if (!cap_replay && !used_eager_scratch) {
-                cudaFreeAsync(k_full, stream);  // v_full lives in the same allocation
+                IMP_CUDA_CHECK_LOG(cudaFreeAsync(k_full, stream));  // v_full lives in the same allocation
             }
 
             // Persist current chunk's K/V (same as non-chunked path).

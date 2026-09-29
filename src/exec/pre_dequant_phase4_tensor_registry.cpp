@@ -409,14 +409,15 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                 err = cudaMalloc(&d_B,   ne * sizeof(const void*)); if (err != cudaSuccess) return false;
                 err = cudaMalloc(&d_SFB, ne * sizeof(const void*)); if (err != cudaSuccess) return false;
                 err = cudaMalloc(&d_alpha, ne * sizeof(float));     if (err != cudaSuccess) return false;
-                cudaMemcpy(static_cast<void*>(const_cast<void**>(d_B)),
-                           static_cast<const void*>(h_B_ptrs.data()), ne * sizeof(const void*),
-                           cudaMemcpyHostToDevice);
-                cudaMemcpy(static_cast<void*>(const_cast<void**>(d_SFB)),
-                           static_cast<const void*>(h_SFB_ptrs.data()), ne * sizeof(const void*),
-                           cudaMemcpyHostToDevice);
-                cudaMemcpy(d_alpha, h_alpha.data(),
-                           ne * sizeof(float),       cudaMemcpyHostToDevice);
+                // Upload failure = build failure, as a failed cudaMalloc above (layer not ready).
+                IMP_CUDA_CHECK_BOOL(cudaMemcpy(static_cast<void*>(const_cast<void**>(d_B)),
+                                               static_cast<const void*>(h_B_ptrs.data()),
+                                               ne * sizeof(const void*), cudaMemcpyHostToDevice));
+                IMP_CUDA_CHECK_BOOL(cudaMemcpy(static_cast<void*>(const_cast<void**>(d_SFB)),
+                                               static_cast<const void*>(h_SFB_ptrs.data()),
+                                               ne * sizeof(const void*), cudaMemcpyHostToDevice));
+                IMP_CUDA_CHECK_BOOL(
+                    cudaMemcpy(d_alpha, h_alpha.data(), ne * sizeof(float), cudaMemcpyHostToDevice));
                 return true;
             };
 
@@ -644,7 +645,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         ++released_layers;
     }
     if (wcache_->dropped_gdn_bytes > 0) {
-        cudaStreamSynchronize(stream);
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         // A threshold-0 pool releases at the sync above; the default pool needs the trim.
         const size_t pool_released = pool_before - std::min(pool_before, pools_reserved());
         // Minus what the release costs (rebuild scratch, and the MXFP8 copies "auto" builds for
@@ -677,7 +678,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         free_source(head);
         if (mut_model->out_proj_id != kInvalidTensorID)
             registry_->handle(mut_model->out_proj_id).source_released = true;  // handle GEMMs fail loudly
-        cudaStreamSynchronize(stream);
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         const size_t pool_after = release_on_free_pool_reserved(ReleasePool::LmHead);
         const size_t back = std::min(head_bytes, head_pool_before - std::min(head_pool_before, pool_after) +
                                                      trim_device_mempool());
@@ -705,7 +706,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         // Drain async frees: cudaFreeAsync returns allocations to the pool WITHOUT releasing
         // physical pages (no WDDM page release, no cuBLAS status-14). Physical reclaim is
         // deferred to Model::~Model, which trims the pool after all weights are freed.
-        cudaStreamSynchronize(stream);
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         IMP_LOG_INFO("Phase-4b: async pool reclaimed %.2f MiB (retained in pool)",
                      marked_bytes / (1024.0 * 1024.0));
     }

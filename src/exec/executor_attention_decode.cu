@@ -65,65 +65,11 @@
         // DEBUG: force cuBLAS attention for decode to isolate paged attention bugs.
         // When enabled, uses the same materialized QK^T path as prefill.
         const bool force_cublas_decode = dispatch_policy().attention.force_cublas_decode;
-        if (force_cublas_decode && n == 1 && attn_scores_buf_) {
-            // Reconstruct K/V from cache for this position
-            KVCache* cache_dbg = state.kv_cache;
-            int kv_layer_dbg = get_kv_layer(kv_layer_map_, layer);
-            int ctx_len = 0;
-            cudaMemcpy(&ctx_len, state.context_lens, sizeof(int), cudaMemcpyDeviceToHost);
-            // Allocate temp K/V for all context tokens
-            int kv_elems = ctx_len * nkv * hd;
-            half *k_flat = nullptr, *v_flat = nullptr;
-            cudaMalloc(&k_flat, kv_elems * sizeof(half));
-            cudaMalloc(&v_flat, kv_elems * sizeof(half));
-            // Copy from paged KV cache to contiguous buffer
-            int kv_bs = cache_dbg->block_size();
-            int n_blocks = (ctx_len + kv_bs - 1) / kv_bs;
-            // Heap-sized to n_blocks — a fixed [1024] stack array overran 4x at
-            // the 64K context cap (n_blocks=4096) and silently smashed the frame.
-            std::vector<int32_t> h_block_table(n_blocks > 0 ? n_blocks : 1);
-            cudaMemcpy(h_block_table.data(), layer_block_tables, n_blocks * sizeof(int32_t),
-                       cudaMemcpyDeviceToHost);
-            // SWA trailing-free holes (-1) leave their rows zeroed — they sit
-            // outside the window mask, so the reference output is unaffected.
-            cudaMemset(k_flat, 0, kv_elems * sizeof(half));
-            cudaMemset(v_flat, 0, kv_elems * sizeof(half));
-            for (int b = 0; b < n_blocks; b++) {
-                int block_id = h_block_table[b];
-                if (block_id < 0)
-                    continue;
-                int toks_in_block = std::min(kv_bs, ctx_len - b * kv_bs);
-                size_t row_bytes = nkv * hd * sizeof(half);
-                half* k_src = static_cast<half*>(cache_dbg->k_ptr(kv_layer_dbg, block_id));
-                half* v_src = static_cast<half*>(cache_dbg->v_ptr(kv_layer_dbg, block_id));
-                cudaMemcpy(k_flat + b * kv_bs * nkv * hd, k_src, toks_in_block * row_bytes,
-                           cudaMemcpyDeviceToDevice);
-                cudaMemcpy(v_flat + b * kv_bs * nkv * hd, v_src, toks_in_block * row_bytes,
-                           cudaMemcpyDeviceToDevice);
-            }
-            // Reshape for cuBLAS attention: Q[1,nh,hd], K[ctx_len,nkv,hd], V[ctx_len,nkv,hd]
-            int64_t k_shape[2] = {ctx_len, nkv * hd};
-            int64_t v_shape[2] = {ctx_len, nkv * hd};
-            Tensor k_cont(k_flat, QType::F16, 2, k_shape, true);
-            Tensor v_cont(v_flat, QType::F16, 2, v_shape, true);
-            // n=1 cuBLAS attention: causal=true + q_offset=ctx_len-1 lets the single
-            // query see the full context AND keeps the sliding-window mask correct
-            // (causal=false/q_offset=0 broke SWA: abs_row=0 never triggered the
-            // window). Sinks pass through so this stays a faithful gpt-oss reference (#547).
-            {
-                int64_t s_shape[3] = {(int64_t)nh, 1, (int64_t)ctx_len};
-                half* s_buf = nullptr;
-                cudaMalloc(&s_buf, (size_t)nh * ctx_len * sizeof(half));
-                Tensor s_view(s_buf, QType::F16, 3, s_shape, true);
-                attention_cublas_prefill(qv, k_cont, v_cont, ao, s_view, nh, nkv, hd, scale, /*causal=*/true,
-                                         cfg.attn_logit_softcap, /*q_offset=*/ctx_len - 1, stream,
-                                         layer_sliding_window, attn_sinks);
-                cudaFree(s_buf);
-            }
-            cudaFree(k_flat);
-            cudaFree(v_flat);
+        if (force_cublas_decode && n == 1 && attn_scores_buf_ &&
+            cublas_decode_reference(state, layer, get_kv_layer(kv_layer_map_, layer), layer_block_tables, qv,
+                                    ao, nh, nkv, hd, scale, cfg.attn_logit_softcap, layer_sliding_window,
+                                    attn_sinks, stream))
             return;  // leaves the decode_attend lambda (executor_attention.cu)
-        }
 
         // Paged attention: Q shape depends on batch size
         int n_seq = state.n_sequences;

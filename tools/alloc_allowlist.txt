@@ -30,7 +30,7 @@ src/compute/sampling_penalties.cu  # 2
 src/compute/sampling_topk_topp.cu  # 3
 src/core/buffer.cpp  # 2
 src/exec/executor_attention.cu  # 2
-src/exec/executor_attention_decode.cu  # 6
+src/exec/executor_attention_internal.h  # 6
 src/exec/executor_attention_prefill.cu  # 8
 src/exec/executor_forward.cu  # 2
 src/exec/executor_forward_moe.cu  # 4

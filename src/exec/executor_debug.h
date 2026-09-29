@@ -32,6 +32,25 @@ inline int& debug_decode_step() {
 // nullptr. "1" or "all" is shorthand for /tmp.
 inline const char* dump_hidden_dir() { return imp::process_diag_dump_hidden_dir(); }
 
+// Debug readback status: false = ERROR logged, the caller skips its dump.
+inline bool debug_cuda_ok(cudaError_t err, const char* who) {
+    if (err != cudaSuccess)
+        IMP_LOG_ERROR("[DEBUG_FWD] %s: readback failed: %s", who, cudaGetErrorString(err));
+    return err == cudaSuccess;
+}
+
+// Debug D2H: async copy on `stream`, then sync. false = ERROR logged, the caller skips its dump.
+inline bool debug_d2h_async(void* dst, const void* src, size_t bytes, cudaStream_t stream, const char* who) {
+    return debug_cuda_ok(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost, stream), who) &&
+           debug_cuda_ok(cudaStreamSynchronize(stream), who);
+}
+
+// Debug D2H: sync `stream`, then a blocking copy. false = ERROR logged, the caller skips its dump.
+inline bool debug_sync_d2h(void* dst, const void* src, size_t bytes, cudaStream_t stream, const char* who) {
+    return debug_cuda_ok(cudaStreamSynchronize(stream), who) &&
+           debug_cuda_ok(cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost), who);
+}
+
 // Writes a numpy .npy v1.0 file with a 2D FP32 array.
 // Self-describing (python: np.load(path) just works).
 inline void write_npy_fp32(const std::string& path, const float* data, int rows, int cols) {
@@ -76,30 +95,38 @@ inline void dump_tensor_npy(const char* tag, const Tensor& t, cudaStream_t strea
     size_t n = static_cast<size_t>(rows) * cols;
 
     std::vector<float> host(n);
-    cudaStreamSynchronize(stream);
+    if (!debug_cuda_ok(cudaStreamSynchronize(stream), tag))
+        return;
     if (t.qtype == QType::F16) {
         std::vector<half> tmp(n);
         if (row_stride == cols) {
-            cudaMemcpy(tmp.data(), t.data, n * sizeof(half), cudaMemcpyDeviceToHost);
+            if (!debug_cuda_ok(cudaMemcpy(tmp.data(), t.data, n * sizeof(half), cudaMemcpyDeviceToHost), tag))
+                return;
         } else {
             for (int r = 0; r < rows; r++) {
-                cudaMemcpy(tmp.data() + static_cast<size_t>(r) * cols,
-                           static_cast<const char*>(t.data) +
-                               static_cast<int64_t>(r) * row_stride * sizeof(half),
-                           cols * sizeof(half), cudaMemcpyDeviceToHost);
+                if (!debug_cuda_ok(cudaMemcpy(tmp.data() + static_cast<size_t>(r) * cols,
+                                              static_cast<const char*>(t.data) +
+                                                  static_cast<int64_t>(r) * row_stride * sizeof(half),
+                                              cols * sizeof(half), cudaMemcpyDeviceToHost),
+                                   tag))
+                    return;
             }
         }
         for (size_t i = 0; i < n; i++)
             host[i] = __half2float(tmp[i]);
     } else {
         if (row_stride == cols) {
-            cudaMemcpy(host.data(), t.data, n * sizeof(float), cudaMemcpyDeviceToHost);
+            if (!debug_cuda_ok(cudaMemcpy(host.data(), t.data, n * sizeof(float), cudaMemcpyDeviceToHost),
+                               tag))
+                return;
         } else {
             for (int r = 0; r < rows; r++) {
-                cudaMemcpy(host.data() + static_cast<size_t>(r) * cols,
-                           static_cast<const char*>(t.data) +
-                               static_cast<int64_t>(r) * row_stride * sizeof(float),
-                           cols * sizeof(float), cudaMemcpyDeviceToHost);
+                if (!debug_cuda_ok(cudaMemcpy(host.data() + static_cast<size_t>(r) * cols,
+                                              static_cast<const char*>(t.data) +
+                                                  static_cast<int64_t>(r) * row_stride * sizeof(float),
+                                              cols * sizeof(float), cudaMemcpyDeviceToHost),
+                                   tag))
+                    return;
             }
         }
     }
@@ -140,14 +167,16 @@ inline void debug_tensor_stats(const char* name, const Tensor& t, cudaStream_t s
         std::vector<half> tmp(n);
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(tmp.data(), static_cast<const half*>(t.data) + (int64_t)row * cols,
                                            n * sizeof(half), cudaMemcpyDeviceToHost, stream));
-        cudaStreamSynchronize(stream);
+        if (!debug_cuda_ok(cudaStreamSynchronize(stream), name))
+            return;
         for (int i = 0; i < n; i++)
             host[i] = __half2float(tmp[i]);
     } else if (t.qtype == QType::F32) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(host.data(),
                                            static_cast<const float*>(t.data) + (int64_t)row * cols,
                                            n * sizeof(float), cudaMemcpyDeviceToHost, stream));
-        cudaStreamSynchronize(stream);
+        if (!debug_cuda_ok(cudaStreamSynchronize(stream), name))
+            return;
     } else {
         IMP_LOG_ERROR("[DEBUG_FWD] %s: unsupported dtype %d", name, std::to_underlying(t.qtype));
         return;
@@ -189,7 +218,8 @@ inline void debug_tensor_stats(const char* name, const Tensor& t, cudaStream_t s
 inline void debug_tensor_rows(const char* name, const Tensor& t, cudaStream_t stream) {
     if (!debug_forward_enabled())
         return;
-    cudaStreamSynchronize(stream);
+    if (!debug_cuda_ok(cudaStreamSynchronize(stream), name))
+        return;
     int cols = static_cast<int>(t.shape[t.ndim - 1]);
     int nrows = static_cast<int>(t.shape[0]);
     // stride[0] is in elements, not bytes. For contiguous [n, cols] it equals cols,
@@ -207,11 +237,14 @@ inline void debug_tensor_rows(const char* name, const Tensor& t, cudaStream_t st
         const char* src = static_cast<const char*>(t.data) + (int64_t)r * row_stride * elem_sz;
         if (t.qtype == QType::F16) {
             std::vector<half> tmp(cols);
-            cudaMemcpy(tmp.data(), src, cols * sizeof(half), cudaMemcpyDeviceToHost);
+            if (!debug_cuda_ok(cudaMemcpy(tmp.data(), src, cols * sizeof(half), cudaMemcpyDeviceToHost),
+                               name))
+                return;
             for (int i = 0; i < cols; i++)
                 row_f[i] = __half2float(tmp[i]);
-        } else {
-            cudaMemcpy(row_f.data(), src, cols * sizeof(float), cudaMemcpyDeviceToHost);
+        } else if (!debug_cuda_ok(cudaMemcpy(row_f.data(), src, cols * sizeof(float), cudaMemcpyDeviceToHost),
+                                  name)) {
+            return;
         }
         // Simple per-row L2 to detect all-zero or broadcast-identical rows quickly.
         double ss = 0.0;
@@ -226,7 +259,8 @@ inline void debug_tensor_rows(const char* name, const Tensor& t, cudaStream_t st
 inline void debug_tensor_stats_all(const char* name, const Tensor& t, cudaStream_t stream) {
     if (!debug_forward_enabled())
         return;
-    cudaStreamSynchronize(stream);  // wait for pending work on this stream
+    if (!debug_cuda_ok(cudaStreamSynchronize(stream), name))  // wait for pending work on this stream
+        return;
     int cols = static_cast<int>(t.shape[t.ndim - 1]);
     int nrows = static_cast<int>(t.shape[0]);
     int64_t n = static_cast<int64_t>(cols) * nrows;
@@ -237,11 +271,13 @@ inline void debug_tensor_stats_all(const char* name, const Tensor& t, cudaStream
     std::vector<float> host(n);
     if (t.qtype == QType::F16) {
         std::vector<half> tmp(n);
-        cudaMemcpy(tmp.data(), t.data, n * sizeof(half), cudaMemcpyDeviceToHost);
+        if (!debug_cuda_ok(cudaMemcpy(tmp.data(), t.data, n * sizeof(half), cudaMemcpyDeviceToHost), name))
+            return;
         for (int64_t i = 0; i < n; i++)
             host[i] = __half2float(tmp[i]);
-    } else {
-        cudaMemcpy(host.data(), t.data, n * sizeof(float), cudaMemcpyDeviceToHost);
+    } else if (!debug_cuda_ok(cudaMemcpy(host.data(), t.data, n * sizeof(float), cudaMemcpyDeviceToHost),
+                              name)) {
+        return;
     }
     double vsum = 0.0, vss = 0.0;
     for (int64_t i = 0; i < n; i++) {

@@ -474,9 +474,10 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
         h_experts_fallback.resize(top_k);
         h_experts = h_experts_fallback.data();
     }
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_experts, expert_indices, readback_bytes,
-                                       cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
+    moe_host_args_ok_or_throw(cudaMemcpyAsync(h_experts, expert_indices, readback_bytes,
+                                              cudaMemcpyDeviceToHost, stream),
+                              "nvfp4 host experts");
+    moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "nvfp4 host experts");
 
     std::vector<int32_t> h_slots(static_cast<size_t>(kExpertProjCount) * top_k, -1);
 
