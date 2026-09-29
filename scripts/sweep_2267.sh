@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Sweep for #2267: Q8_0 prefill time, INT8 IMMA on vs off, per prompt length and model. No PASS/FAIL.
-# A = IMMA at every M (gemm.q8_imma_max_rows=INT_MAX), B = gemm.q8_imma_enabled=false.
+# Sweep for #2267: Q8_0 prefill time per arm, prompt length and model. No PASS/FAIL (scripts/accept_2267.sh).
+# Arms (IMP_SWEEP_ARMS, "name=override,override" or "name" for defaults), default:
+#   on (default config), off (gemm.q8_imma_enabled=false), bm160 / bm192 (gemm.q8_imma_bm=160 / 192).
 # Rows per GEMM = min(tokens, runtime.prefill_chunk_size); default chunk 2048, IMP_SWEEP_CHUNK overrides.
 # Usage: make build && bash scripts/sweep_2267.sh. Exit 0 = every measurement completed.
 # Env: IMP_MODELS_DIR (~/models), IMP_SWEEP_MODELS (Qwen3-8B-Q8_0.gguf Qwen3-4B-Instruct-2507-Q8_0.gguf),
 #      IMP_SWEEP_TOKENS (256 512 1024 1536 2048 4096 8192), IMP_SWEEP_ROUNDS (5), IMP_SWEEP_PORT (8267),
-#      IMP_SWEEP_CHUNK (unset = engine default 2048), IMP_TEST_IMG, IMP_GPU_BUSY_CHECK (busy-check script).
+#      IMP_SWEEP_CHUNK (unset = engine default 2048), IMP_SWEEP_TSV (write "model tokens arm median_s" rows),
+#      IMP_TEST_IMG, IMP_GPU_BUSY_CHECK (busy-check script).
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,8 +16,10 @@ cd "$ROOT" || exit 1
 MODELS_DIR="${IMP_MODELS_DIR:-$HOME/models}"
 read -r -a MODELS <<<"${IMP_SWEEP_MODELS:-Qwen3-8B-Q8_0.gguf Qwen3-4B-Instruct-2507-Q8_0.gguf}"
 read -r -a TOKENS <<<"${IMP_SWEEP_TOKENS:-256 512 1024 1536 2048 4096 8192}"
+read -r -a ARMS <<<"${IMP_SWEEP_ARMS:-on off=gemm.q8_imma_enabled=false bm160=gemm.q8_imma_bm=160 bm192=gemm.q8_imma_bm=192}"
 ROUNDS="${IMP_SWEEP_ROUNDS:-5}"
 CHUNK="${IMP_SWEEP_CHUNK:-}"
+TSV="${IMP_SWEEP_TSV:-}"
 
 for tool in docker curl jq; do
     command -v "$tool" >/dev/null || { echo "ERROR setup: $tool not on PATH"; exit 1; }
@@ -56,9 +60,15 @@ for n in "${TOKENS[@]}"; do
         temperature: 0}' >"$WORK/req_$n.json"
 done
 
-start_server() {  # start_server <model> <A|B>
+arm_name() { echo "${1%%=*}"; }
+
+start_server() {  # start_server <model> <arm spec>
     local -a extra=()
-    if [ "$2" = A ]; then extra=(--set gemm.q8_imma_max_rows=2147483647); else extra=(--set gemm.q8_imma_enabled=false); fi
+    local ov
+    if [[ "$2" == *=* ]]; then
+        IFS=, read -r -a ovs <<<"${2#*=}"
+        for ov in "${ovs[@]}"; do extra+=(--set "$ov"); done
+    fi
     [ -n "$CHUNK" ] && extra+=(--set "runtime.prefill_chunk_size=$CHUNK")
     docker rm -f "$CTR" >/dev/null 2>&1 || true
     docker run -d --name "$CTR" --gpus all -v "$MODELS_DIR":/models:ro -p "$PORT":"$PORT" "$IMG" \
@@ -81,9 +91,10 @@ complete() {  # complete <json body file> <out-file> -> prints "<http_code> <sec
 }
 
 # Per round, model and arm: one server load, 1 warm-up + 1 timed request per length.
-measure_arm() {  # measure_arm <model index> <A|B> <round>
-    local mi="$1" arm="$2" r="$3" n code t np
-    start_server "${MODELS[$mi]}" "$arm" || { err "${MODELS[$mi]} round $r arm $arm: server did not load"; return; }
+measure_arm() {  # measure_arm <model index> <arm spec> <round>
+    local mi="$1" spec="$2" r="$3" arm n code t np
+    arm=$(arm_name "$spec")
+    start_server "${MODELS[$mi]}" "$spec" || { err "${MODELS[$mi]} round $r arm $arm: server did not load"; return; }
     for n in "${TOKENS[@]}"; do
         read -r code _ < <(complete "$WORK/req_$n.json" "$WORK/warm.json")
         [ "$code" = 200 ] || { err "${MODELS[$mi]} round $r arm $arm warm-up $n: HTTP $code"; continue; }
@@ -97,10 +108,15 @@ measure_arm() {  # measure_arm <model index> <A|B> <round>
     docker rm -f "$CTR" >/dev/null 2>&1 || true
 }
 
+# Odd rounds run the arms forward, even rounds reversed (AB/BA for two arms).
 for r in $(seq 1 "$ROUNDS"); do
-    if [ $((r % 2)) = 1 ]; then order="A B"; else order="B A"; fi
+    order=("${ARMS[@]}")
+    if [ $((r % 2)) = 0 ]; then
+        order=()
+        for ((i = ${#ARMS[@]} - 1; i >= 0; i--)); do order+=("${ARMS[$i]}"); done
+    fi
     for mi in "${!MODELS[@]}"; do
-        for arm in $order; do measure_arm "$mi" "$arm" "$r"; done
+        for spec in "${order[@]}"; do measure_arm "$mi" "$spec" "$r"; done
     done
 done
 
@@ -109,30 +125,40 @@ median() {  # median <file> -> median of its lines, "ERR" if fewer than ROUNDS
     sort -g "$1" | sed -n "$(((ROUNDS + 1) / 2))p"
 }
 
-echo "== sweep_2267: image $IMG, median of $ROUNDS, rounds alternate AB/BA, prefix cache off =="
-echo "   on = gemm.q8_imma_max_rows=INT_MAX, off = gemm.q8_imma_enabled=false; prefill = curl time_total, max_tokens 1"
-row() { printf '%-36s %7s %9s %9s %9s %8s\n' "$@"; }
-row model tokens rows on_s off_s off/on
+NAMES=()
+for spec in "${ARMS[@]}"; do NAMES+=("$(arm_name "$spec")"); done
+echo "== sweep_2267: image $IMG, median of $ROUNDS, arm order alternates per round, prefix cache off =="
+echo "   arms: ${ARMS[*]}; prefill = curl time_total, max_tokens 1; ratio = off / arm (>1: arm faster than off)"
+hdr=$(printf '%-34s %6s %5s' model tokens rows)
+for a in "${NAMES[@]}"; do hdr+=$(printf ' %9s' "${a}_s"); done
+for a in "${NAMES[@]}"; do [ "$a" = off ] || hdr+=$(printf ' %9s' "off/$a"); done
+echo "$hdr"
+[ -n "$TSV" ] && : >"$TSV"
 for mi in "${!MODELS[@]}"; do
-    cross=""
     for n in "${TOKENS[@]}"; do
         rows=$n
         eff_chunk="${CHUNK:-2048}"
         [ "$eff_chunk" -gt 0 ] && [ "$rows" -gt "$eff_chunk" ] && rows=$eff_chunk
-        a=$(median "$WORK/t_${mi}_A_$n"); b=$(median "$WORK/t_${mi}_B_$n")
-        if [ "$a" = ERR ] || [ "$b" = ERR ]; then
-            err "${MODELS[$mi]} $n: fewer than $ROUNDS timed requests"
-            row "${MODELS[$mi]}" "$n" "$rows" ERR ERR ERR
-            continue
-        fi
-        read -r a b q < <(jq -rn --argjson a "$a" --argjson b "$b" \
-            '"\($a * 1e4 | round / 1e4) \($b * 1e4 | round / 1e4) \($b / $a * 1e3 | round / 1e3)"')
-        q=$(printf "%.3f" "$q")
-        row "${MODELS[$mi]}" "$n" "$rows" "$a" "$b" "$q"
-        # Crossover: first length where off beats on (off/on < 1).
-        [ -z "$cross" ] && jq -en --argjson q "$q" '$q < 1' >/dev/null && cross="$n tokens ($rows rows)"
+        line=$(printf '%-34s %6s %5s' "${MODELS[$mi]}" "$n" "$rows")
+        declare -A med=()
+        for a in "${NAMES[@]}"; do
+            med[$a]=$(median "$WORK/t_${mi}_${a}_$n")
+            [ "${med[$a]}" = ERR ] && err "${MODELS[$mi]} $n arm $a: fewer than $ROUNDS timed requests"
+            line+=$(printf ' %9s' "${med[$a]}")
+            [ -n "$TSV" ] && printf '%s\t%s\t%s\t%s\n' "${MODELS[$mi]}" "$n" "$a" "${med[$a]}" >>"$TSV"
+        done
+        for a in "${NAMES[@]}"; do
+            [ "$a" = off ] && continue
+            q=ERR
+            if [ -n "${med[off]:-}" ] && [ "${med[off]}" != ERR ] && [ "${med[$a]}" != ERR ]; then
+                q=$(jq -rn --argjson o "${med[off]}" --argjson x "${med[$a]}" '$o / $x * 1e3 | round / 1e3')
+                q=$(printf '%.3f' "$q")
+            fi
+            line+=$(printf ' %9s' "$q")
+        done
+        echo "$line"
+        unset med
     done
-    echo "   crossover ${MODELS[$mi]}: ${cross:-none (IMMA faster at every length)}"
 done
 [ "$ERRORS" = 0 ] && { echo "ALL MEASUREMENTS COMPLETED"; exit 0; }
 echo "$ERRORS measurement errors"

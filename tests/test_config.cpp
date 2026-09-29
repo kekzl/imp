@@ -2,7 +2,6 @@
 #include "runtime/config.h"
 #include "model/model_arch.h"
 
-#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -499,25 +498,12 @@ TEST(ConfigBinding, PrefillChunkSizeIsBound) {
     EXPECT_EQ(cfg.apply_overrides({"runtime.prefill_chunk_size=large"}).size(), 1u);
 }
 
-// #2267: Q8 IMMA prefill only up to gemm.q8_imma_max_rows rows per GEMM.
-TEST(ConfigBinding, Q8ImmaMaxRowsIsBound) {
+// #2267: Q8_0 IMMA tall-tile selector, default BM=128.
+TEST(ConfigBinding, Q8ImmaBmIsBound) {
     imp::RuntimeConfig cfg;
-    EXPECT_EQ(cfg.gemm.q8_imma_max_rows, INT_MAX) << "default keeps IMMA at every M";
-    EXPECT_TRUE(cfg.apply_overrides({"gemm.q8_imma_max_rows=1024"}).empty());
-    EXPECT_EQ(cfg.gemm.q8_imma_max_rows, 1024);
-    EXPECT_EQ(cfg.apply_overrides({"gemm.q8_imma_max_rows=many"}).size(), 1u);
-    EXPECT_EQ(cfg.gemm.q8_imma_max_rows, 1024);
-}
-
-TEST(Q8ImmaRoute, RowThresholdIsInclusive) {
-    EXPECT_TRUE(imp::cfg::q8_imma_route(true, 1024, 1023));
-    EXPECT_TRUE(imp::cfg::q8_imma_route(true, 1024, 1024));
-    EXPECT_FALSE(imp::cfg::q8_imma_route(true, 1024, 1025));
-    EXPECT_FALSE(imp::cfg::q8_imma_route(true, 1024, 2048));
-    EXPECT_TRUE(imp::cfg::q8_imma_route(true, INT_MAX, 8192));
-}
-
-TEST(Q8ImmaRoute, DisabledNeverRoutes) {
-    EXPECT_FALSE(imp::cfg::q8_imma_route(false, 1024, 2));
-    EXPECT_FALSE(imp::cfg::q8_imma_route(false, INT_MAX, 512));
+    EXPECT_EQ(cfg.gemm.q8_imma_bm, 128);
+    EXPECT_TRUE(cfg.apply_overrides({"gemm.q8_imma_bm=192"}).empty());
+    EXPECT_EQ(cfg.gemm.q8_imma_bm, 192);
+    EXPECT_EQ(cfg.apply_overrides({"gemm.q8_imma_bm=tall"}).size(), 1u);
+    EXPECT_EQ(cfg.gemm.q8_imma_bm, 192);
 }

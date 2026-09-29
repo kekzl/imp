@@ -1046,7 +1046,7 @@ private:
     // eligible use. Hybrids with SSMState qualify: the recurrent chunk
     // kernels read the real chunk length from device (d_chunk_len) so pad
     // rows never advance the committed state.
-    bool spec_capture_ready_(int ctx_padded);
+    bool spec_capture_ready_(int ctx_padded, int rows);
     // Round the real chunk length up to its capture bucket.
     int spec_capture_bucket_(int chunk_len) const;
     int spec_capture_bucket_max_() const;

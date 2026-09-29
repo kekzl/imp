@@ -23,18 +23,18 @@ void imp::(anonymous namespace)::gemm_fp16_kernel<128, 2>	sm_120a	243	32	0
 void imp::(anonymous namespace)::gemm_fp16_kernel<64, 2>	sm_120a	156	32	0
 void imp::fmha_sm120_fa2_kernel_2cta<128, 128, true, true, 64, true, true, false>	sm_120a	128	40	0
 void imp::(anonymous namespace)::smallM_kernel_v1<32, 128, 256, 2>	sm_120a	101	160	0
-void imp::paged_attention_splitk_fp8_tile_kernel<128>	sm_120a	94	32	0
+void imp::paged_attention_splitk_fp8_tile_kernel<128>	sm_120a	96	32	0
 void imp::paged_attention_splitk_fp8_tile_gqa_kernel<128>	sm_120a	80	32	0
+void imp::paged_attention_splitk_pipeline_kernel<512>	sm_120a	80	16	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<512>	sm_120a	79	16	0
 void imp::(anonymous namespace)::smallM_kernel_v1<64, 128, 128, 3>	sm_120a	72	288	0
-void imp::paged_attention_splitk_pipeline_kernel<512>	sm_120a	72	16	0
 void imp::(anonymous namespace)::smallM_kernel_v1<128, 128, 128, 3>	sm_120a	64	544	0
 void imp::(anonymous namespace)::smallM_kernel_v1<32, 128, 128, 3>	sm_120a	64	160	0
 void imp::flash_attention_blackwell_kernel<128, 96>	sm_120a	64	16	0
-void imp::paged_attention_splitk_fp8_pipeline_kernel<256>	sm_120a	64	16	0
 void imp::paged_attention_splitk_int4_pipeline_kernel<256>	sm_120a	64	16	0
 void imp::paged_attention_splitk_pipeline_kernel<256>	sm_120a	64	16	0
 void imp::flash_attention_blackwell_kernel<128, 64>	sm_120a	63	16	0
+void imp::paged_attention_splitk_fp8_pipeline_kernel<256>	sm_120a	63	16	0
 imp::paged_attention_gqa_kernel	sm_120a	61	128	0
 void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 8>	sm_120a	60	16	0
 void imp::(anonymous namespace)::smallM_kernel_v1<16, 128, 256, 2>	sm_120a	58	16	0
@@ -46,7 +46,7 @@ void imp::flash_attention_blackwell_kernel<64, 96>	sm_120a	56	16	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<128>	sm_120a	56	16	0
 void imp::paged_attention_splitk_pipeline_kernel<128>	sm_120a	56	16	0
 void imp::flash_attention_blackwell_kernel<64, 256>	sm_120a	55	16	0
-void imp::paged_attention_splitk_int4_pipeline_kernel<64>	sm_120a	53	16	0
+void imp::paged_attention_splitk_int4_pipeline_kernel<64>	sm_120a	54	16	0
 void imp::(anonymous namespace)::smallM_kernel_v1<16, 128, 128, 3>	sm_120a	51	24	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<64>	sm_120a	48	16	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<96>	sm_120a	48	16	0
@@ -61,6 +61,7 @@ imp::(anonymous namespace)::kv_block_copy_kernel	sm_120a	40	128	0
 imp::(anonymous namespace)::ple_conv_shift_kernel	sm_120a	40	128	0
 imp::paged_attention_decode_kernel_generic	sm_120a	40	128	0
 imp::rowwise_topm_reduce_kernel	sm_120a	40	64	0
+imp::(anonymous namespace)::ple_conv_add_kernel	sm_120a	40	32	0
 void imp::gemv_dp4a_fp32_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0
 void imp::gemv_dp4a_fp32_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	40	16	0
 void imp::gemv_dp4a_gate_up_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0
@@ -80,8 +81,8 @@ void imp::gemv_dp4a_moe_gate_up_kernel<imp::DequantTraits<(imp::DPQTag)6> >	sm_1
 void imp::gemv_dp4a_qkv_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0
 void imp::gemv_dp4a_qkv_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	40	16	0
 imp::topk_partial_kernel	sm_120a	39	1056	0
-imp::(anonymous namespace)::ple_conv_add_kernel	sm_120a	40	32	0
 imp::post_decode_step_kernel	sm_120a	39	24	0
+imp::(anonymous namespace)::plp_rmsnorm_q8_roundtrip_kernel	sm_120a	36	128	0
 imp::rmsnorm_quantize_q8_1_kernel	sm_120a	36	128	0
 imp::dequant_q3k_kernel	sm_120a	28	16	0
 imp::bench_separate	sm_120a	28	8	0

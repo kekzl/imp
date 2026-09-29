@@ -39,7 +39,6 @@ namespace {
 // kChunk+4); region3 beta, logD. Phase A: float4 row loads, Gram matrices as 3xTF32 mma.
 // Phase B: blockwise forward substitution (16-row diagonal blocks in registers,
 // off-diagonal as 3xTF32 mma). Phase C: P@W and P@U_A as 3xTF32 mma.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS>
 __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
@@ -70,15 +69,19 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     float* QE_s = ws.QE + slot * kChunk * SS;
     float* YA_s = ws.YA + slot * kChunk * HD;
 
+    // #2218 bounded: kChunk = 64 (gdn_scan_chunkpar.cuh:16), HD = SS = 128 (static_assert :48, :92):
+    // smem kChunk * SS = 8192, kChunk * SQ = 4352 floats; lane * 4 < 128 (lane < 32)
     extern __shared__ float smem[];
     float* s_k = smem;                     // [kChunk * SS]  phase A
-    float* s_q = s_k + kChunk * SS;        // [kChunk * SS]  phase A
+    float* s_q = s_k + static_cast<ptrdiff_t>(kChunk * SS);  // [kChunk * SS]  phase A
     float* s_u = s_k;                      // [kChunk * HD]  phase B/C alias
     float* s_w = s_q;                      // [kChunk * SS]  phase B/C alias
     constexpr int SQ = kChunk + 4;         // padded stride of KK/T and QK/P (the mma A operands)
-    float* s_kk = s_q + kChunk * SS;       // [kChunk * SQ]  KK, then T in place (phase-B mma A operand)
-    float* s_qk = s_kk + kChunk * SQ;      // [kChunk * SQ]  QK, then P in place (phase-C mma A operand)
-    float* s_beta = s_qk + kChunk * SQ;    // [kChunk]
+    float* s_kk = s_q + static_cast<ptrdiff_t>(
+                            kChunk * SS);  // [kChunk * SQ]  KK, then T in place (phase-B mma A operand)
+    float* s_qk = s_kk + static_cast<ptrdiff_t>(
+                             kChunk * SQ);  // [kChunk * SQ]  QK, then P in place (phase-C mma A operand)
+    float* s_beta = s_qk + static_cast<ptrdiff_t>(kChunk * SQ);  // [kChunk]
     float* s_logD = s_beta + kChunk;       // [kChunk + 1]
     const int warp = tid / 32, lane = tid % 32;
     const int g = lane / 4, tg = lane % 4;  // mma fragment coordinates
@@ -90,9 +93,9 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     for (int t = warp; t < L; t += 2 * HD / 32) {
         const float* row = conv_f32 + static_cast<size_t>(t0 + t) * conv_channels;
         *reinterpret_cast<float4*>(&s_q[swz128(t, lane * 4)]) = *reinterpret_cast<const float4*>(
-            row + g_idx * SS + lane * 4);
+            row + static_cast<int64_t>(g_idx) * SS + static_cast<ptrdiff_t>(lane * 4));
         *reinterpret_cast<float4*>(&s_k[swz128(t, lane * 4)]) = *reinterpret_cast<const float4*>(
-            row + BC_size + g_idx * SS + lane * 4);
+            row + BC_size + static_cast<int64_t>(g_idx) * SS + static_cast<ptrdiff_t>(lane * 4));
     }
     // Per-token decay / learning rate — same formulas as gdn_scan_fused_kernel:
     // the transcendental part per token in parallel, the prefix sum (same
@@ -212,7 +215,8 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
             float4 u = make_float4(0.0f, 0.0f, 0.0f, 0.0f), w = u;
             if (t < L) {
                 const float* row = conv_f32 + static_cast<size_t>(t0 + t) * conv_channels;
-                u = *reinterpret_cast<const float4*>(row + 2 * BC_size + h * HD + c4);
+                u = *reinterpret_cast<const float4*>(row + static_cast<int64_t>(2) * BC_size +
+                                                     static_cast<int64_t>(h) * HD + c4);
                 const float bt = s_beta[t];
                 u.x *= bt;
                 u.y *= bt;
@@ -417,7 +421,6 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 

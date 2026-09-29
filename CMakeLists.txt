@@ -207,6 +207,9 @@ set(IMP_MODEL_SOURCES
     src/model/tokenizer.cpp
     src/model/fim.cpp
     src/model/tokenizer_nfc.cpp
+    src/model/tokenizer_pretok.cpp
+    src/model/unicode_class.cpp
+    src/model/unicode_nfc_data.cpp
     src/model/tensor_kind_name.cpp
     src/model/tensor_kind_table.cu
     src/model/tensor_kind_matcher.cpp
@@ -283,6 +286,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/embedding.cu
     src/compute/sampling.cu
     src/compute/rowwise_topm.cu
+    src/compute/prompt_logprobs_rows.cu
     src/compute/sampling_topk_topp.cu
     src/compute/sampling_penalties.cu
     src/compute/sampling_penalties_history.cu
@@ -398,6 +402,8 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/cuda_graph.cu
     src/runtime/presets.cpp
     src/compute/mtp_forward.cu
+    src/compute/mtp_forward_qwen4exp.cu
+    src/compute/gemv_fp8_block_moe.cu
     src/compute/mtp_topw.cu
     src/compute/encoder_forward.cu
 )
@@ -588,6 +594,7 @@ if(IMP_BUILD_TOOLS)
         add_executable(imp-bench
             tools/imp-bench/main.cpp
             tools/imp-bench/bench_gemm.cu
+            tools/imp-bench/bench_q8_imma.cu
             tools/imp-bench/bench_attention.cu
             tools/imp-bench/bench_e2e.cpp
         )
@@ -1022,6 +1029,7 @@ if(IMP_BUILD_TESTS)
         tests/test_sampling_advanced.cu
         tests/test_penalty_hist_append.cu
         tests/test_rowwise_topm.cu
+        tests/test_prompt_logprobs_rows.cu
         tests/test_executor_kernels.cu
         tests/test_hadamard.cu
         tests/test_mmq_q4k_imma_layout.cu
@@ -1096,6 +1104,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mmq_q4k_imma_tile_bench.cu
         tests/test_mmq_q4k_imma_gemm.cu
         tests/test_mmq_q8_imma.cu
+        tests/test_mmq_q8_imma_tall.cu
         tests/test_mmq_q8_imma_q5k.cu
         tests/test_mmq_q8_imma_q6k.cu
         tests/test_weight_dispatch.cu
@@ -1185,6 +1194,8 @@ if(IMP_BUILD_TESTS)
         tests/test_warm_cache.cu
         tests/test_lora.cpp
         tests/test_prefix_cache_e2e.cpp
+        # #2257: prompt_logprobs chunk logits released after the pass (IMP_TEST_MODEL).
+        tests/test_prompt_logprobs_e2e.cpp
         # Chained recurrent restores: 30 growing turns against a cold prefill of
         # the same prompt, compared on the state slab rather than on tokens.
         tests/test_hybrid_restore_chain.cu
@@ -1210,6 +1221,12 @@ if(IMP_BUILD_TESTS)
     # test_batching_engine_fault.cu drives the server BatchingEngine
     # (tools/imp-server/batching_engine.cpp, no httplib or json dependency).
     target_include_directories(test-e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
+    # Qwen4Exp MTP draft step vs the numpy reference of the vLLM math (tests/fixtures). Reads
+    # safetensors headers with nlohmann, which only the server build fetches.
+    if(TARGET nlohmann_json::nlohmann_json)
+        target_sources(test-e2e PRIVATE tests/test_mtp_qwen4exp_reference.cpp)
+        target_link_libraries(test-e2e PRIVATE nlohmann_json::nlohmann_json)
+    endif()
 
     # Opt-in real huggingface.co fetch (IMP_TEST_NETWORK=1); no ctest entry, CI has no network lane.
     imp_add_test_module(test-hf-network SOURCES tests/test_hf_fetch_network.cpp)

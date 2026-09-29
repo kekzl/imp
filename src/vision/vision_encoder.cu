@@ -97,15 +97,14 @@ __global__ void extract_patches_kernel(const half* __restrict__ pixels,  // [3, 
 }
 
 // Standard LayerNorm: out = (x - mean) / sqrt(var + eps) * weight + bias
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void vision_layernorm_kernel(const half* __restrict__ x, const half* __restrict__ weight,
                                         const half* __restrict__ bias, half* __restrict__ out, int D,
                                         float eps) {
     int row = blockIdx.x;
     int tid = threadIdx.x;
 
-    const half* x_row = x + row * D;
-    half* o_row = out + row * D;
+    const half* x_row = x + static_cast<int64_t>(row) * D;
+    half* o_row = out + static_cast<int64_t>(row) * D;
 
     // Compute mean
     __shared__ float s_buf[32];
@@ -129,17 +128,15 @@ __global__ void vision_layernorm_kernel(const half* __restrict__ x, const half* 
         o_row[i] = __float2half(v);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // RMSNorm: out = x / sqrt(mean(x^2) + eps) * weight
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void vision_rmsnorm_kernel(const half* __restrict__ x, const half* __restrict__ weight,
                                       half* __restrict__ out, int D, float eps) {
     int row = blockIdx.x;
     int tid = threadIdx.x;
 
-    const half* x_row = x + row * D;
-    half* o_row = out + row * D;
+    const half* x_row = x + static_cast<int64_t>(row) * D;
+    half* o_row = out + static_cast<int64_t>(row) * D;
 
     __shared__ float s_buf[32];
     float ss = 0.0f;
@@ -154,7 +151,6 @@ __global__ void vision_rmsnorm_kernel(const half* __restrict__ x, const half* __
         o_row[i] = __float2half(v);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Add bias: x[row, i] += bias[i]
 __global__ void add_bias_kernel(half* __restrict__ x, const half* __restrict__ bias, int N, int D) {

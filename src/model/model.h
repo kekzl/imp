@@ -177,4 +177,9 @@ public:
     std::vector<void*> host_owned_buffers_;
 };
 
+// Uploads an MTP head that belongs to no Model (tests/test_mtp_qwen4exp_reference.cpp) through the
+// same path Model::upload_weights_gpu takes. Allocations land in gpu_allocs; the caller frees them.
+bool upload_mtp_head(MtpHead& head, QType compute_dtype, float arch_norm_offset, cudaStream_t stream,
+                     std::vector<void*>& gpu_allocs);
+
 }  // namespace imp

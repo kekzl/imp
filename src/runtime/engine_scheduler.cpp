@@ -1709,7 +1709,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                                 ws_gate->mtp_pos == cur_pos &&
                                 (ws_gate->max_seq_len <= 0 ||
                                  ws_gate->mtp_pos + mtp_req_k < ws_gate->max_seq_len);
-        Tensor h_view = executor_->view_hidden(1);  // [1, d_model] FP16
+        Tensor h_view = executor_->view_mtp_hidden(1);  // [1, d_model], or [1, hc * d_model] (Qwen4Exp)
         if (h_view.data != nullptr && mtp_synced) {
             const int hidden_dim = model_->config_.d_model;
             const int vocab_size = model_->config_.vocab_size;
@@ -1717,7 +1717,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             // Optional: apply the main model's output norm before passing
             // h_prev to MTP. Upstream vllm passes post-RMSNorm hidden states
             // in some MTP variants; gate by env so we can A/B.
-            const bool s_pre_norm_h = runtime_config_.diagnostics.mtp_prenorm_h;
+            const bool s_pre_norm_h = runtime_config_.diagnostics.mtp_prenorm_h && ws_gate->hc_count == 0;
             const void* h_for_mtp = h_view.data;
             if (void* normed = s_pre_norm_h ? mtp_prenorm_scratch(hidden_dim * sizeof(__half)) : nullptr) {
                 int64_t hd_shape[2] = {1, hidden_dim};
@@ -1812,7 +1812,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                         mtp_pool_.pending_prediction = prediction;
                     // Chain: next iter uses this prediction + the MTP's own h_final.
                     chain_prev_tok = prediction;
-                    chain_h_prev = ws->d_h_final;
+                    chain_h_prev = imp::mtp_chain_hidden(*ws);
                 }
             }
             // Roll back the speculative cache writes from K-1 chained steps.

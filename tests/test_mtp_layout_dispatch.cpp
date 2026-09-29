@@ -55,6 +55,8 @@ TensorMap qwen4exp_names(int n_experts) {
              "mtp.pre_fc_norm_hidden.weight",
          })
         m.emplace(n, fake({1}));
+    m["mtp.fc_hidden.weight"] = fake({2560, 2560});
+    m["mtp.pre_fc_norm_hidden.weight"] = fake({10240});  // hc_count 4 x hidden 2560
     m.emplace("mtp.layers.0.mlp.gate.weight", fake({n_experts, 2560}));
     for (int e = 0; e < n_experts; ++e) {
         const std::string p = "mtp.layers.0.mlp.experts." + std::to_string(e) + ".";
@@ -84,7 +86,8 @@ TEST(MtpLayoutDispatch, Qwen4ExpMapsAll3101Names) {
     EXPECT_EQ(h.final_mixer.block_inject.data, nullptr) << "final mixer has use_combine=False";
     EXPECT_NE(h.indexer_qk_proj.data, nullptr);
     EXPECT_TRUE(h.experts_up.empty()) << "FP8 experts must not reach the Nemotron upload vectors";
-    EXPECT_FALSE(mtp_forward_implemented(h));
+    EXPECT_EQ(h.hc_count, 4);
+    EXPECT_EQ(mtp_auto_k_cap(h), kMtpAutoDeclines);
 }
 
 TEST(MtpLayoutDispatch, Qwen4ExpMissingExpertScaleIsIncomplete) {
@@ -115,7 +118,7 @@ TEST(MtpLayoutDispatch, FcLayoutStaysQwen) {
     EXPECT_TRUE(h.loaded);
     EXPECT_EQ(h.info.n_mapped, 19);
     EXPECT_NE(h.fc.data, nullptr);
-    EXPECT_TRUE(mtp_forward_implemented(h));
+    EXPECT_EQ(mtp_auto_k_cap(h), 0);
 }
 
 TEST(MtpLayoutDispatch, EhProjLayoutStaysNemotron) {
@@ -139,7 +142,7 @@ TEST(MtpLayoutDispatch, EhProjLayoutStaysNemotron) {
     EXPECT_TRUE(h.loaded);
     EXPECT_TRUE(h.experts_non_gated);
     EXPECT_EQ(h.experts_up.size(), 2u);
-    EXPECT_TRUE(mtp_forward_implemented(h));
+    EXPECT_EQ(mtp_auto_k_cap(h), 0);
 }
 
 TEST(MtpLayoutDispatch, HeadKeyAcceptsFcEmbedding) {

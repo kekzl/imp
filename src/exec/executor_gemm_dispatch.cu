@@ -655,12 +655,11 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         const bool imma_eligible = input.qtype == QType::F16 && output.qtype == QType::F16 &&
                                    M >= 2 && input.stride[0] == h.shape[1] &&
                                    output.stride[0] == h.shape[0];
-        if (cfg::q8_imma_route(ctx.q8_imma_enabled, ctx.q8_imma_max_rows, M) &&
-            h.source_qtype == QType::Q8_0 && imma_eligible) {
+        if (ctx.q8_imma_enabled && h.source_qtype == QType::Q8_0 && imma_eligible) {
             if (mmq_q8_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
                                  reinterpret_cast<__half*>(output.data), M, static_cast<int>(h.shape[0]),
                                  static_cast<int>(h.shape[1]), ctx.stream, ctx.beta,
-                                 /*allow_splitk=*/cur_decode_rows_))
+                                 /*allow_splitk=*/cur_decode_rows_, ctx.q8_imma_bm))
                 return;
         }
         if (ctx.q4k_imma_prefill && h.source_qtype == QType::Q4_K && imma_eligible) {

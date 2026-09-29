@@ -1,7 +1,6 @@
 #include "mtp_auto.h"
 
 #include "core/logging.h"
-#include "model/mtp_head.h"
 
 namespace imp::tools {
 
@@ -19,11 +18,10 @@ int mtp_auto_request_k(const RuntimeConfig& cfg, int configured_batch) {
 }
 
 int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, int explicit_flag,
-                        bool head_forward) {
-    // A head without a draft forward outranks the tool flag too: nothing half-built runs.
-    if (explicit_flag > 0 && (head_forward || !head_loaded))
+                        int head_auto_k_cap) {
+    if (explicit_flag > 0)
         return explicit_flag;  // a tool flag outranks the config
-    mtp_auto_finalize(cfg, requested_k, head_loaded, head_forward);
+    mtp_auto_finalize(cfg, requested_k, head_loaded, head_auto_k_cap);
     // The pending slot was stashed before the load (it gates loader
     // behaviour); re-publish so the engine takes the resolved pair.
     set_pending_runtime_config(cfg);
@@ -32,16 +30,20 @@ int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, i
     return cfg.speculative.mtp_k;
 }
 
-void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, bool head_forward) {
-    if (head_loaded && !head_forward) {
-        cfg.speculative.mtp_k = 0;
-        IMP_LOG_INFO("%s", kMtpForwardMissingLog);
-        return;
-    }
+void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, int head_auto_k_cap) {
     if (cfg.speculative.mtp_k >= 0)
         return;  // explicit configuration, nothing to resolve
 
+    if (requested_k > 0 && head_loaded && head_auto_k_cap < 0) {
+        cfg.speculative.mtp_k = 0;
+        IMP_LOG_INFO(
+            "speculative.mtp_k: auto -> off (this head does not pay for its 2400 MiB: Qwen3.8-Flash-Next "
+            "decodes 61.46 vs 61.94 tok/s spec off). Set speculative.mtp_k=1 to force it.");
+        return;
+    }
     if (requested_k > 0 && head_loaded) {
+        if (head_auto_k_cap > 0 && requested_k > head_auto_k_cap)
+            requested_k = head_auto_k_cap;  // the head's own auto depth (mtp_auto_k_cap)
         cfg.speculative.mtp_k = requested_k;
         // The measured recommendation is the PAIR: with the matcher on, the
         // head drafted 1 token where it drafts 100 with it off (#1796). An

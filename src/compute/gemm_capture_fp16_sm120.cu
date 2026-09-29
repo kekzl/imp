@@ -70,7 +70,6 @@ __device__ __forceinline__ void cp_async_wait_group() {
 // Issues all cp.async loads for one (A,B) tile. Templated on BM so the chunk-loop trip
 // counts are compile-time constants and ptxas straightlines the cp.async issues (8 for
 // BM=128, 6 for BM=64) into a back-to-back pipeline-friendly sequence.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM>
 __device__ __forceinline__ void issue_tile_load(__half* a_smem, __half* b_smem, const __half* A,
                                                 const __half* B, int block_m, int block_n,
@@ -80,6 +79,7 @@ __device__ __forceinline__ void issue_tile_load(__half* a_smem, __half* b_smem, 
     static_assert(BK == 32, "BK must be 32 for the bit-shift row/col split");
     static_assert(CHUNK_HALVES == 8, "CHUNK_HALVES must be 8 for cp.async 16B");
 
+    // #2218 bounded: row < max(BM, BN) = 128 (BM template 64/128 at :304,309; BN :25): row * BK_SMEM < 4096
     int tid     = threadIdx.x;
     bool a_full = (block_m + BM <= M);
     bool b_full = (block_n + BN <= N);
@@ -91,7 +91,7 @@ __device__ __forceinline__ void issue_tile_load(__half* a_smem, __half* b_smem, 
         int col           = (chunk & 3) << 3; // (chunk % 4) * CHUNK_HALVES
         int g_row         = block_m + row;
         int g_col         = k_tile + col;
-        __half* dst       = a_smem + row * BK_SMEM + col;  // padded SMEM stride
+        __half* dst = a_smem + static_cast<ptrdiff_t>(row * BK_SMEM) + col;  // padded SMEM stride
         const __half* src = A + (int64_t)g_row * K + g_col;
         bool valid        = a_full || (g_row < M);
         cp_async_cg16_zero(dst, src, valid);
@@ -103,15 +103,13 @@ __device__ __forceinline__ void issue_tile_load(__half* a_smem, __half* b_smem, 
         int col           = (chunk & 3) << 3;
         int g_row         = block_n + row;
         int g_col         = k_tile + col;
-        __half* dst       = b_smem + row * BK_SMEM + col;  // padded SMEM stride
+        __half* dst = b_smem + static_cast<ptrdiff_t>(row * BK_SMEM) + col;  // padded SMEM stride
         const __half* src = B + (int64_t)g_row * K + g_col;
         bool valid        = b_full || (g_row < N);
         cp_async_cg16_zero(dst, src, valid);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM, int STAGES>
 __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
     void gemm_fp16_kernel(const __half* __restrict__ A, const __half* __restrict__ B,
@@ -124,13 +122,15 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
     static_assert(STAGES == 2 || STAGES == 3, "STAGES must be 2 or 3");
 
     extern __shared__ __align__(16) char smem_raw[];
+    // #2218 bounded: BM <= 128 (:304,309), BN = 128, BK_SMEM = 32, STAGES <= 3 (:122): s * STAGE_HALVES
+    // <= 2 * 8192 = 16384, a_row/b_row * BK_SMEM < 4096, kk * WMMA_K < 32, warp * WMMA_M * WMMA_N < 1024
     __half* smem_base = reinterpret_cast<__half*>(smem_raw);
     __half* A_stage[STAGES];
     __half* B_stage[STAGES];
 #pragma unroll
     for (int s = 0; s < STAGES; ++s) {
-        A_stage[s] = smem_base + s * STAGE_HALVES;
-        B_stage[s] = smem_base + s * STAGE_HALVES + A_HALVES_PER_STAGE;
+        A_stage[s] = smem_base + static_cast<ptrdiff_t>(s * STAGE_HALVES);
+        B_stage[s] = smem_base + static_cast<ptrdiff_t>(s * STAGE_HALVES) + A_HALVES_PER_STAGE;
     }
 
     int block_m = blockIdx.y * BM;
@@ -187,13 +187,19 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
 #pragma unroll
             for (int i = 0; i < FRAGS_M; ++i) {
                 int a_row = wm * WARP_M + i * WMMA_M;
-                wmma::load_matrix_sync(a_frag[i], A_s + a_row * BK_SMEM + kk * WMMA_K, BK_SMEM);
+                wmma::load_matrix_sync(a_frag[i],
+                                       A_s + static_cast<ptrdiff_t>(a_row * BK_SMEM) +
+                                           static_cast<ptrdiff_t>(kk * WMMA_K),
+                                       BK_SMEM);
             }
             wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, wmma::col_major> b_frag[FRAGS_N];
 #pragma unroll
             for (int j = 0; j < FRAGS_N; ++j) {
                 int b_row = wn * WARP_N + j * WMMA_N;
-                wmma::load_matrix_sync(b_frag[j], B_s + b_row * BK_SMEM + kk * WMMA_K, BK_SMEM);
+                wmma::load_matrix_sync(b_frag[j],
+                                       B_s + static_cast<ptrdiff_t>(b_row * BK_SMEM) +
+                                           static_cast<ptrdiff_t>(kk * WMMA_K),
+                                       BK_SMEM);
             }
 #pragma unroll
             for (int i = 0; i < FRAGS_M; ++i)
@@ -208,7 +214,7 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
     // keeps concurrent warp writes race-free without an extra __syncthreads
     // around wmma::store_matrix_sync.
     __shared__ float frag_smem[WARPS_PER_BLOCK * WMMA_M * WMMA_N];
-    float* warp_frag = frag_smem + warp * (WMMA_M * WMMA_N);
+    float* warp_frag = frag_smem + static_cast<ptrdiff_t>(warp * (WMMA_M * WMMA_N));
 
     int warp_base_m = block_m + wm * WARP_M;
     int warp_base_n = block_n + wn * WARP_N;
@@ -241,7 +247,6 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // BM=64 wins when SM saturation matters more than per-block compute amortization
 // (small total block count); BM=128 wins when the grid already saturates the SM array

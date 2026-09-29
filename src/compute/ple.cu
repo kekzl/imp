@@ -88,24 +88,28 @@ __global__ void ple_conv_add_kernel(const half* __restrict__ gv, const half* __r
 }
 
 // Grid (channels / kThreads, n_seq). One thread per (channel, sequence) reads its state_len
-// new values before writing: no cross-thread hazard.
-__global__ void ple_conv_shift_kernel(const half* __restrict__ gvn, half* __restrict__ conv_state,
+// new values before writing: no cross-thread hazard. d_rows (device, nullable): rows committed
+// per sequence (verify chunk: real rows, or 1 for the row-0 snapshot), capped at rows_per_seq.
+__global__ void ple_conv_shift_kernel(const half* __restrict__ gvn, const half* src_state, half* dst_state,
                                       int64_t slot_stride, const int* __restrict__ slots, int rows_per_seq,
-                                      int channels, int state_len) {
+                                      const int* __restrict__ d_rows, int channels, int state_len) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= channels)
         return;
     const int s = blockIdx.y;
     const int row0 = s * rows_per_seq;
-    half* st = conv_state + seq_state_off_(slot_stride, slots, s);
+    const int rows = d_rows ? min(rows_per_seq, max(0, __ldg(d_rows))) : rows_per_seq;
+    const size_t off = seq_state_off_(slot_stride, slots, s);
+    const half* st = src_state + off;
+    half* out = dst_state + off;
     half nv[kMaxKernel * kMaxKernel];
     for (int r = 0; r < state_len; r++) {
-        const int tp = rows_per_seq - state_len + r;
+        const int tp = rows - state_len + r;
         nv[r] = (tp >= 0) ? gvn[static_cast<size_t>(row0 + tp) * channels + c]
                           : st[static_cast<size_t>(state_len + tp) * channels + c];
     }
     for (int r = 0; r < state_len; r++)
-        st[static_cast<size_t>(r) * channels + c] = nv[r];
+        out[static_cast<size_t>(r) * channels + c] = nv[r];
 }
 
 }  // namespace
@@ -124,7 +128,7 @@ void ple_gate_value(const Tensor& key, Tensor& q_gv, const Tensor& value, int hc
 
 void ple_conv_add(const Tensor& gv, const Tensor& gvn, const Tensor& w, void* conv_state, int64_t slot_stride,
                   const int* slots, int n_seq, Tensor& hidden, int channels, int kernel, int dilation,
-                  cudaStream_t stream) {
+                  cudaStream_t stream, void* snap_state, const int* d_snap_n, const int* d_real_n) {
     const int n = static_cast<int>(gv.shape[0]);
     const int state_len = (kernel - 1) * dilation;
     if (n == 0 || n_seq <= 0)
@@ -145,9 +149,17 @@ void ple_conv_add(const Tensor& gv, const Tensor& gvn, const Tensor& w, void* co
                                                        channels, n, kernel, dilation, state_len);
     IMP_CUDA_CHECK_LAUNCH();
     const dim3 sgrid(grid.x, n_seq);
-    ple_conv_shift_kernel<<<sgrid, kThreads, 0, stream>>>(static_cast<const half*>(gvn.data),
-                                                          static_cast<half*>(conv_state), slot_stride, slots,
-                                                          rows_per_seq, channels, state_len);
+    const half* gvn_h = static_cast<const half*>(gvn.data);
+    half* st = static_cast<half*>(conv_state);
+    if (snap_state != nullptr && d_snap_n != nullptr && n_seq == 1) {  // before the commit overwrites st
+        ple_conv_shift_kernel<<<sgrid, kThreads, 0, stream>>>(gvn_h, st, static_cast<half*>(snap_state), 0,
+                                                              nullptr, rows_per_seq, d_snap_n, channels,
+                                                              state_len);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+    ple_conv_shift_kernel<<<sgrid, kThreads, 0, stream>>>(gvn_h, st, st, slot_stride, slots, rows_per_seq,
+                                                          n_seq == 1 ? d_real_n : nullptr, channels,
+                                                          state_len);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
