@@ -12,7 +12,7 @@
 # Pin changes (newest first):
 #   #2167: fmha_sm120_kernel 39 -> 42 (fixed_kv_order + masked-tile no-op), fmha_sm120_prefill
 #   re-keyed (new fixed_kv_order arg), run_attention 419 -> 425 (hd=512 row-invariant route),
-#   compute_moe_routing 50 -> 54 (gemm_gate_fp32_rows router under deterministic)
+#   compute_moe_routing 50 -> 51 (row_invariant_router: gemm_gate_fp32_rows under deterministic)
 #   compute_vram_budget 92 -> 93: grew +1 by #2228 (#2224 qtype rule, lm_head_source_only branch)
 
 [thresholds]
@@ -89,7 +89,7 @@ skip_dirs = []
 "src/exec/executor_forward_moe.cu::void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 26
 "src/exec/executor_forward_moe.cu::void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 26
 "src/exec/executor_forward_moe.cu::void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream)" = 41
-"src/exec/executor_forward_moe_batch.cu::void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne, int top_k, const Tensor& router_in, bool fp32_gate_logits_ready, bool will_decode_fast, const void* router_bias_ptr, bool use_sigmoid, bool norm_weights, MoeRoutingResult& routing)" = 54
+"src/exec/executor_forward_moe_batch.cu::void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne, int top_k, const Tensor& router_in, bool fp32_gate_logits_ready, bool will_decode_fast, const void* router_bias_ptr, bool use_sigmoid, bool norm_weights, MoeRoutingResult& routing)" = 51
 "src/exec/executor_forward_moe_batch.cu::void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, int d, int eff, int top_k, const MoeRoutingResult& routing, const Tensor& no, Tensor& h, const Tensor& r, bool moe_use_fp32_residual, bool moe_fused_norm_q8, bool will_skip_residual_copy, bool& residual_fused)" = 72
 "src/exec/executor_forward_moe_cutlass.cu::bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 128
 "src/exec/executor_forward_moe_legacy.cu::void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 83

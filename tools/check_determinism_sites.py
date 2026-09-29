@@ -52,6 +52,7 @@ EXPECTED = {
     "src/compute/moe_routing.cu": 2,
     "src/compute/moe_routing_permute.cu": 1,
     "src/exec/executor_attention_internal.h": 1,
+    "src/exec/executor_forward_moe_batch.cu": 1,
 }
 
 # Where the accessor is declared and defined. Counting these as sites would be
@@ -155,6 +156,7 @@ def selftest():
         "src/compute/moe_routing.cu": 2,
         "src/compute/moe_routing_permute.cu": 1,
         "src/exec/executor_attention_internal.h": 1,
+        "src/exec/executor_forward_moe_batch.cu": 1,
     }
 
     def tree(root, extra_files=(), counts=None):

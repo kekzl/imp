@@ -2,6 +2,7 @@
 // Extracted from executor_forward_moe.cu for maintainability.
 
 #include "core/dispatch_policy.h"
+#include "core/process_diag.h"
 #include "exec/executor.h"
 #include "exec/moe_imbalance.h"
 #include "compute/mmq_q8_imma.h"
@@ -600,6 +601,13 @@ __global__ void moe_expert_trace_kernel(const int32_t* __restrict__ expert_indic
         trace[off + 1 + j] = expert_indices[j];
 }
 
+// Row-invariant FP32 router GEMM under runtime.deterministic: a prompt token routes the same in every
+// chunk (#2167). Default mode keeps cuBLAS (-5 % pp4096 on Qwen3-30B-A3B otherwise).
+static bool row_invariant_router(QType compute, const Tensor& gate, const Tensor& in, int d) {
+    return process_diag_deterministic_gemm() && compute == QType::F16 && gate.qtype == QType::F16 &&
+           (d & 1) == 0 && in.stride[0] == d;
+}
+
 void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne,
                                         int top_k, const Tensor& router_in,
                                         bool fp32_gate_logits_ready, bool will_decode_fast,
@@ -652,9 +660,7 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
             gemv_gate_fp32(static_cast<const half*>(ly.moe_gate.data),
                            static_cast<const half*>(router_in.data),
                            static_cast<float*>(gate_logits_f32.data), ne, d, stream);
-        } else if (compute_dtype_ == QType::F16 && ly.moe_gate.qtype == QType::F16 && (d & 1) == 0 &&
-                   router_in.stride[0] == d) {
-            // Row-invariant router: a prompt token routes the same in every chunk (#2167).
+        } else if (row_invariant_router(compute_dtype_, ly.moe_gate, router_in, d)) {
             gemm_gate_fp32_rows(static_cast<const half*>(ly.moe_gate.data),
                                 static_cast<const half*>(router_in.data),
                                 static_cast<float*>(gate_logits_f32.data), n, ne, d, stream);
