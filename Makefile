@@ -629,14 +629,19 @@ check-alloc-pairs:
 
 # Per-kernel registers and local frame on sm_120a (#1549). cuobjdump reads the
 # BUILT artifact, so this needs no GPU and no special build flags - but it does
-# need the CUDA toolkit, which only the builder image has. Uses build-dev
+# need the CUDA toolkit: local cuobjdump when on PATH (dev toolchain image, no
+# docker CLI), else docker run imp:builder (#2238). Uses build-dev
 # (make dev) when present, build (make build) otherwise.
 KERNEL_RES_LIB = $$(test -f build/libimp.a && echo build/libimp.a || echo build-dev/libimp.a)
 kernel-resources-dump:
 	@test -f build/libimp.a -o -f build-dev/libimp.a || { \
 	  echo "kernel-resources: no libimp.a - run 'make dev' or 'make build' first" >&2; exit 2; }
-	@docker run --rm --entrypoint bash -v $(PWD):/src imp:builder -c \
-	  '/usr/local/cuda/bin/cuobjdump -res-usage /src/'"$(KERNEL_RES_LIB)"' 2>/dev/null'
+	@if command -v cuobjdump >/dev/null 2>&1; then \
+	  cuobjdump -res-usage "$(KERNEL_RES_LIB)" 2>/dev/null; \
+	else \
+	  docker run --rm --entrypoint bash -v $(PWD):/src imp:builder -c \
+	    '/usr/local/cuda/bin/cuobjdump -res-usage /src/'"$(KERNEL_RES_LIB)"' 2>/dev/null'; \
+	fi
 
 kernel-resources: 
 	@$(MAKE) --no-print-directory kernel-resources-dump | python3 tools/kernel_resources.py -
