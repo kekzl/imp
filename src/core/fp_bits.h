@@ -14,7 +14,6 @@
 // expression, so identities are compiler-checked, not test-remembered).
 
 #include <bit>
-#include <cmath>
 #include <cstdint>
 
 namespace imp {
@@ -24,11 +23,11 @@ constexpr float half_to_float(uint16_t h) {
     uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
     float v;
     if (e == 0)
-        v = std::ldexp(static_cast<float>(m), -24);  // (m/1024) * 2^-14
+        v = static_cast<float>(m) * 0x1p-24f;  // (m/1024) * 2^-14, exact for m < 2^10
     else if (e == 0x1F)
-        v = m ? std::nanf("") : HUGE_VALF;
+        v = std::bit_cast<float>(m ? 0x7FC00000u : 0x7F800000u);  // qNaN / inf
     else
-        v = std::ldexp(1.0f + static_cast<float>(m) / 1024.0f, static_cast<int>(e) - 15);
+        v = std::bit_cast<float>(((e + 112u) << 23) | (m << 13));  // rebias exponent 15 -> 127
     return s ? -v : v;
 }
 
@@ -72,8 +71,8 @@ constexpr uint16_t float_to_bf16(float x) {
     return static_cast<uint16_t>(r);
 }
 
-// Checked at compile time. std::ldexp is constexpr in C++23, so half_to_float
-// is too, and these identities cost nothing at runtime.
+// Checked at compile time by g++, nvcc and clang: bit_cast and float multiply only,
+// no std::ldexp (clang does not constant-fold __builtin_ldexpf, #2285).
 static_assert(half_to_float(0x3C00) == 1.0f);
 static_assert(half_to_float(0x0000) == 0.0f);
 static_assert(half_to_float(0xBC00) == -1.0f);

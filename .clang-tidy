@@ -39,8 +39,23 @@
 #   performance-faster-string-find                  deprecated in LLVM 23, alias of prefer-single-char-overloads
 # New in LLVM 23 and on (findings fixed): misc-override-with-different-visibility (5),
 # performance-use-std-move (6), readability-redundant-parentheses (5), readability-redundant-qualified-alias (2).
+#
+# clang-analyzer-* is listed explicitly: LLVM 23 dropped it from the built-in default Checks
+# (21: 'clang-diagnostic-*,clang-analyzer-*', 23: 'clang-diagnostic-*'), #2285. Same full-lane
+# rule; "device" = __global__/__device__ bodies analysed host-side with stub intrinsics.
+#   clang-analyzer-deadcode.DeadStores                   LLVM 23: 10 findings, 6 are MMA operands read only under __CUDA_ARCH__
+#   clang-analyzer-optin.performance.Padding             LLVM 23: 8 findings, member order is by role, reorder = layout churn
+#   clang-analyzer-security.ArrayBound                   LLVM 23: 6 findings, 5 device (thread/lane index unknown host-side)
+#   clang-analyzer-core.UndefinedBinaryOperatorResult    LLVM 23: 5 findings, 4 device, 1 excluded by ngram_size >= 2 at load
+#   clang-analyzer-core.CallAndMessage                   LLVM 23: 5 findings, 2 device, 3 vmm driver() pointers gated by DriverApi::ok
+#   clang-analyzer-core.uninitialized.Assign             LLVM 23: 2 findings, 1 in cuda_fp16.hpp (system header), 1 on a fully initialized array
+#   clang-analyzer-core.NullPointerArithm                LLVM 23: 2 findings, judgment: device-buffer offsets on paths the analyzer assumes null
+#   clang-analyzer-core.NonNullParamChecker              LLVM 23: 2 findings, device (gate is non-null for every gated kAct)
+#   clang-analyzer-optin.core.EnumCastOutOfRange         LLVM 23: 1 finding, QType(255) is the "unset" sentinel
+# On (findings fixed): clang-analyzer-unix.Stream (2), clang-analyzer-core.NullDereference (1).
 
 Checks: >
+  clang-analyzer-*,
   bugprone-*,
   performance-*,
   misc-*,
@@ -86,7 +101,16 @@ Checks: >
   -readability-trivial-switch,
   -bugprone-random-generator-seed,
   -clang-diagnostic-cuda-compat,
-  -performance-faster-string-find
+  -performance-faster-string-find,
+  -clang-analyzer-deadcode.DeadStores,
+  -clang-analyzer-optin.performance.Padding,
+  -clang-analyzer-security.ArrayBound,
+  -clang-analyzer-core.UndefinedBinaryOperatorResult,
+  -clang-analyzer-core.CallAndMessage,
+  -clang-analyzer-core.uninitialized.Assign,
+  -clang-analyzer-core.NullPointerArithm,
+  -clang-analyzer-core.NonNullParamChecker,
+  -clang-analyzer-optin.core.EnumCastOutOfRange
 
 WarningsAsErrors: ''
 HeaderFilterRegex: '(src|include/imp)/.*\.(h|hpp)$'
