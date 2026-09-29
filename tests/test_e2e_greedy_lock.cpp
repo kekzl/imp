@@ -56,6 +56,9 @@ protected:
         rc.speculative.suffix = false;
         rc.speculative.token_recycling = false;
         rc.speculative.mtp_k = 0;
+        // FP16 KV: the locks catch code changes, not the KV-dtype policy; an "auto" that resolves
+        // to FP8 moved Qwen3-8B greedy output at a 0.29-nat fork (#2208).
+        rc.kv_cache.dtype = "fp16";
         imp::set_pending_runtime_config(rc);
 
         ImpModelFormat fmt = is_safetensors_dir(path_) ? IMP_FORMAT_SAFETENSORS : IMP_FORMAT_GGUF;
