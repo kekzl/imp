@@ -14,8 +14,8 @@ namespace {
 
 std::vector<uint8_t> read_block(KVCache& c, int block) {
     std::vector<uint8_t> out(kv_host_block_bytes(c));
-    kv_block_to_host(c, block, out.data(), nullptr);
-    cudaDeviceSynchronize();
+    EXPECT_TRUE(kv_block_to_host(c, block, out.data(), nullptr));
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     return out;
 }
 
@@ -23,8 +23,8 @@ void fill_block(KVCache& c, int block, uint8_t seed) {
     std::vector<uint8_t> pat(kv_host_block_bytes(c));
     for (size_t i = 0; i < pat.size(); ++i)
         pat[i] = static_cast<uint8_t>(seed + i * 7);
-    kv_block_from_host(c, pat.data(), block, nullptr);
-    cudaDeviceSynchronize();
+    EXPECT_TRUE(kv_block_from_host(c, pat.data(), block, nullptr));
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 }
 
 std::vector<int32_t> tokens(int n, int32_t base) {

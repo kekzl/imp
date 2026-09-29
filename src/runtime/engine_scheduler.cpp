@@ -44,8 +44,11 @@ namespace imp {
 
 using engine_internal::build_logprob_info;
 using engine_internal::compute_step_seed;
+using engine_internal::copy_d2h_sync;
 using engine_internal::ensure_prefill_workspace;
 using engine_internal::free_prefill_buffers;
+using engine_internal::upload_residual_meta;
+using engine_internal::upload_residual_slot;
 
 // =====================================================================
 // step() — main inference loop
@@ -509,7 +512,7 @@ bool Engine::begin_perplexity_capture(std::span<const int32_t> tokens) {
         return false;
     }
     if (cudaMalloc(&ppl_capture_.d_nll, static_cast<size_t>(n) * sizeof(double)) != cudaSuccess) {
-        cudaFree(ppl_capture_.d_tokens);
+        IMP_CUDA_CHECK_LOG(cudaFree(ppl_capture_.d_tokens));
         ppl_capture_.d_tokens = nullptr;
         ppl_capture_.d_nll = nullptr;
         return false;
@@ -556,10 +559,10 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
         match_sum = 0;
         for (int i = first; i <= last; ++i)
             match_sum += h_match[i];
-        cudaFree(ppl_capture_.d_match);
+        IMP_CUDA_CHECK_LOG(cudaFree(ppl_capture_.d_match));
     }
-    cudaFree(ppl_capture_.d_tokens);
-    cudaFree(ppl_capture_.d_nll);
+    IMP_CUDA_CHECK_LOG(cudaFree(ppl_capture_.d_tokens));
+    IMP_CUDA_CHECK_LOG(cudaFree(ppl_capture_.d_nll));
     ppl_capture_ = PplCapture{};
 
     // IMP_PPL_DUMP=1: sparse per-position NLL (first 16, every 16th, tail).
@@ -1119,7 +1122,8 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
         for (int i = 0; i < N; i++) {
             int sid = valid_decode[i]->id;
             residual_meta_h_seq_ids_[i] = sid;
-            kv_manager_->allocate_residual_slot(sid);
+            // -1 handled downstream: residual_slot_of() < 0 skips the residual path for this seq.
+            (void)kv_manager_->allocate_residual_slot(sid);
         }
         if (N == 1) {
             // Single-seq path: kernel reads ring state from kv_manager's
@@ -1129,16 +1133,10 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
             state.kv_seq_id = valid_decode[0]->id;
             state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
             int slot_for_req = kv_manager_->residual_slot_of(valid_decode[0]->id);
-            if (d_kv_slot_buf_ != nullptr) {
-                if (d_kv_slot_last_uploaded_.empty() ||
-                    d_kv_slot_last_uploaded_[0] != slot_for_req) {
-                    cudaMemcpyAsync(d_kv_slot_buf_, &slot_for_req, sizeof(int),
-                                    cudaMemcpyHostToDevice, dec_stream);
-                    if (d_kv_slot_last_uploaded_.empty()) d_kv_slot_last_uploaded_.assign(1, -1);
-                    d_kv_slot_last_uploaded_[0] = slot_for_req;
-                }
+            // Failed upload: no slot buffer this step, retried next step.
+            if (d_kv_slot_buf_ != nullptr &&
+                upload_residual_slot(d_kv_slot_buf_, slot_for_req, d_kv_slot_last_uploaded_, dec_stream))
                 state.d_residual_seq_slots = d_kv_slot_buf_;
-            }
         } else {
             // Multi-seq path: build per-batch metadata arrays + upload to
             // a per-step device buffer.
@@ -1159,16 +1157,18 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
             if (residual_meta_d_buf_ != nullptr && N <= residual_meta_capacity_) {
                 int* base = residual_meta_d_buf_;
                 const ptrdiff_t stride = residual_meta_capacity_;
-                cudaMemcpyAsync(base + 0 * stride, residual_meta_h_slots_.data(), N * sizeof(int),
-                                cudaMemcpyHostToDevice, dec_stream);
-                cudaMemcpyAsync(base + 1 * stride, residual_meta_h_counts_.data(), N * sizeof(int),
-                                cudaMemcpyHostToDevice, dec_stream);
-                cudaMemcpyAsync(base + 2 * stride, residual_meta_h_widxes_.data(), N * sizeof(int),
-                                cudaMemcpyHostToDevice, dec_stream);
-                state.d_residual_seq_slots = base + 0 * stride;
-                state.d_residual_counts = base + 1 * stride;
-                state.d_residual_write_idxes = base + 2 * stride;
-                state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
+                if (const cudaError_t err = upload_residual_meta(
+                        base, stride, residual_meta_h_slots_.data(), residual_meta_h_counts_.data(),
+                        residual_meta_h_widxes_.data(), N, dec_stream);
+                    err == cudaSuccess) {
+                    state.d_residual_seq_slots = base + 0 * stride;
+                    state.d_residual_counts = base + 1 * stride;
+                    state.d_residual_write_idxes = base + 2 * stride;
+                    state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
+                } else {
+                    IMP_LOG_ERROR("residual metadata upload failed (%s); this step runs without it",
+                                  cudaGetErrorString(err));
+                }
             } else {
                 // Neither case is expected: the buffer is sized for
                 // max_batch_size at init and admission is clamped to it. Say
@@ -1773,10 +1773,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                     launched++;
                 }
                 int32_t h_chain[imp::kMtpMaxChainK];
-                if (launched > 0 && cudaMemcpyAsync(h_chain, ws->d_chain_tokens,
-                                                    static_cast<size_t>(launched) * sizeof(int32_t),
-                                                    cudaMemcpyDeviceToHost, decode_stream()) == cudaSuccess) {
-                    cudaStreamSynchronize(decode_stream());
+                if (launched > 0 && copy_d2h_sync(h_chain, ws->d_chain_tokens, static_cast<size_t>(launched) * sizeof(int32_t),
+                                                  decode_stream()) == cudaSuccess) {
                     for (int k = 0; k < launched; ++k) {
                         const int prediction = h_chain[k];
                         if (prediction < 0 || prediction >= vocab_size)

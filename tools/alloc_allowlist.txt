@@ -64,11 +64,11 @@ src/quant/nvfp4_gemm.cu  # 3
 src/quant/nvfp4_quant.cu  # 16
 src/runtime/batch.cpp  # 10
 src/runtime/cuda_graph.cu  # 28
-src/runtime/engine.cpp  # 4
+src/runtime/engine.cpp  # 6
 src/runtime/engine_decode_pipeline.cpp  # 2
 src/runtime/engine_graph_decode.cpp  # 23
 src/runtime/engine_internal.h  # 5
-src/runtime/engine_kv_cache_init.cpp  # 5
+src/runtime/engine_kv_cache_init.cpp  # 3
 src/runtime/engine_prefill.cpp  # 10
 src/runtime/engine_prefill_ragged.cpp  # 7
 src/runtime/engine_scheduler.cpp  # 10

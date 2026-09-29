@@ -34,8 +34,8 @@ void KVCacheManager::spill_block_(int block_id, size_t hash) {
     void* dst = host_spill_->reserve(hash);
     if (!dst)
         return;
-    kv_block_to_host(*cache_, block_id, dst, spill_stream_);
-    if (cudaStreamSynchronize(spill_stream_) == cudaSuccess)
+    const bool enqueued = kv_block_to_host(*cache_, block_id, dst, spill_stream_);
+    if (cudaStreamSynchronize(spill_stream_) == cudaSuccess && enqueued)
         host_spill_->commit(hash);
     else
         host_spill_->abandon(hash);
@@ -45,8 +45,12 @@ bool KVCacheManager::restore_spilled_(size_t hash, int block_id) {
     const void* src = host_spill_->find(hash);
     if (!src)
         return false;
-    kv_block_from_host(*cache_, src, block_id, spill_stream_);
+    // Pending even on failure: flush_spill_restores_ must retire the copies that did enqueue.
     spill_restores_pending_ = true;
+    if (!kv_block_from_host(*cache_, src, block_id, spill_stream_)) {
+        IMP_LOG_ERROR("KV host spill: restore enqueue failed for block %d", block_id);
+        return false;
+    }
     host_spill_->count_restore();
     return true;
 }

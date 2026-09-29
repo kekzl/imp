@@ -51,6 +51,26 @@ namespace imp {
 // File-local helpers live in runtime/engine_internal.h, shared by the
 // per-subsystem engine_*.cpp translation units.
 
+namespace engine_internal {
+void alloc_residual_decode_buffers(int n, int*& d_slot, std::vector<int>& slot_uploaded, int*& d_meta,
+                                   int& meta_cap) {
+    const std::vector<int> init_slots(n, -1), init_meta(3 * static_cast<size_t>(n), 0);
+    const size_t slot_bytes = init_slots.size() * sizeof(int), meta_bytes = init_meta.size() * sizeof(int);
+    slot_uploaded.assign(n, -1);
+    if (cudaMalloc(&d_slot, slot_bytes) != cudaSuccess)
+        d_slot = nullptr;
+    else if (cudaMemcpy(d_slot, init_slots.data(), slot_bytes, cudaMemcpyHostToDevice) != cudaSuccess)
+        slot_uploaded.clear();  // the first decode step uploads before use
+    if (cudaMalloc(&d_meta, meta_bytes) != cudaSuccess)
+        d_meta = nullptr;
+    else if (cudaMemcpy(d_meta, init_meta.data(), meta_bytes, cudaMemcpyHostToDevice) == cudaSuccess)
+        meta_cap = n;
+    if (!d_slot || slot_uploaded.empty() || meta_cap != n)
+        IMP_LOG_WARN("residual decode buffers: alloc/init failed (slot=%p, meta capacity %d of %d)",
+                     static_cast<void*>(d_slot), meta_cap, n);
+}
+}  // namespace engine_internal
+
 void MtpDraftWorkspaceDeleter::operator()(MtpDraftWorkspace* ws) const noexcept { delete ws; }
 void EncoderWorkspaceDeleter::operator()(EncoderWorkspace* ws) const noexcept { delete ws; }
 
@@ -130,11 +150,11 @@ Engine::~Engine() {
         d_token_is_whitespace_ = nullptr;
     }
     if (d_kv_slot_buf_) {
-        cudaFree(d_kv_slot_buf_);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_kv_slot_buf_));
         d_kv_slot_buf_ = nullptr;
     }
     if (residual_meta_d_buf_) {
-        cudaFree(residual_meta_d_buf_);
+        IMP_CUDA_CHECK_LOG(cudaFree(residual_meta_d_buf_));
         residual_meta_d_buf_ = nullptr;
         residual_meta_capacity_ = 0;
     }

@@ -181,9 +181,9 @@ static void poison(void* p, size_t size, cudaStream_t stream, bool async) {
     if (async && cudaStreamIsCapturing(stream, &cs) == cudaSuccess && cs != cudaStreamCaptureStatusNone)
         return;
     if (async)
-        cudaMemsetAsync(p, IMP_ALLOC_POISON_BYTE, size, stream);
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(p, IMP_ALLOC_POISON_BYTE, size, stream));
     else
-        cudaMemset(p, IMP_ALLOC_POISON_BYTE, size);
+        IMP_CUDA_CHECK_LOG(cudaMemset(p, IMP_ALLOC_POISON_BYTE, size));
 }
 
 extern "C" {

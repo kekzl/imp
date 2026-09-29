@@ -20,8 +20,9 @@ class KVCache;
 bool kv_host_spill_supported(KVCache& cache);
 size_t kv_host_block_bytes(KVCache& cache);
 // Async on stream; the caller synchronizes before the block or the host bytes are reused.
-void kv_block_to_host(KVCache& cache, int block_id, void* dst, cudaStream_t stream);
-void kv_block_from_host(KVCache& cache, const void* src, int block_id, cudaStream_t stream);
+// False: a copy failed to enqueue (the rest were still enqueued).
+[[nodiscard]] bool kv_block_to_host(KVCache& cache, int block_id, void* dst, cudaStream_t stream);
+[[nodiscard]] bool kv_block_from_host(KVCache& cache, const void* src, int block_id, cudaStream_t stream);
 
 // Host-RAM tier for evicted prefix-cache KV blocks (#2203): a reclaimed block's KV is copied into
 // a pinned slot keyed by its chain hash; a later prefix hit on that hash copies it back instead of

@@ -28,7 +28,7 @@ public:
             const cudaError_t derr = cudaHostGetDevicePointer(&hdev, hp, 0);
             if (derr != cudaSuccess) {
                 IMP_LOG_WARN("pinned host device pointer failed: %s", cudaGetErrorString(derr));
-                cudaFreeHost(hp);
+                IMP_CUDA_CHECK_LOG(cudaFreeHost(hp));
                 return false;
             }
             if (out_device)

@@ -15,6 +15,7 @@
 #include "exec/executor.h"
 #include "model/model.h"
 #include "runtime/engine.h"
+#include "runtime/engine_internal.h"
 #include "runtime/request.h"
 
 #include <cuda_fp16.h>
@@ -444,19 +445,18 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
         }
         int32_t h_chain[imp::kMtpMaxTopW * imp::kMtpMaxChainK];
         const size_t drain = (W > 1 ? static_cast<size_t>(W) * kStride : static_cast<size_t>(launched[0]));
-        if (cudaMemcpyAsync(h_chain, ws->d_chain_tokens, drain * sizeof(int32_t), cudaMemcpyDeviceToHost,
-                            stream) != cudaSuccess) {
-            ws->mtp_pos = pos_after;
-            return false;
-        }
-        // The head's top-1/top-2 logit margin rides the same sync (W floats)
+        // The head's top-1/top-2 logit margin rides the chain's sync (W floats)
         // - the branch gate below reads it.
         float h_topv[imp::kMtpMaxTopW] = {};
         bool have_topv = false;
         if (W > 1 && ws->d_topk_val != nullptr)
             have_topv = cudaMemcpyAsync(h_topv, ws->d_topk_val, static_cast<size_t>(W) * sizeof(float),
                                         cudaMemcpyDeviceToHost, stream) == cudaSuccess;
-        cudaStreamSynchronize(stream);
+        if (engine_internal::copy_d2h_sync(h_chain, ws->d_chain_tokens, drain * sizeof(int32_t), stream) !=
+            cudaSuccess) {
+            ws->mtp_pos = pos_after;
+            return false;
+        }
         for (int k = 0; k < launched[0]; ++k) {
             if (h_chain[k] < 0 || h_chain[k] >= vocab_size)
                 break;  // NaN-logits guard, keep the valid prefix

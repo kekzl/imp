@@ -519,7 +519,7 @@ void Engine::warmup() {
     async_graph_req_ = nullptr;
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;
-    cudaDeviceSynchronize();
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
     {
         cudaError_t e = cudaGetLastError();
         if (e != cudaSuccess)
@@ -528,7 +528,7 @@ void Engine::warmup() {
     // Clear any stale CUDA errors from warmup (e.g. green context reconfigure
     // failure on consumer GPUs: the error propagates to cuBLAS otherwise).
     cudaGetLastError();
-    cudaDeviceSynchronize();  // ensure all weight upload/dequant kernels are done
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());  // ensure all weight upload/dequant kernels are done
 
     // Graph prewarm: capture the per-batch-size decode graph pool BEFORE the engine goes ready.
     // Continuous batching visits every batch size on the way up and down, and each never-seen
@@ -605,7 +605,7 @@ void Engine::warmup() {
         }
         while (kv_manager_->evict_cached_block()) {}
         decode_batch_pool_.reset_upload_cache();
-        cudaDeviceSynchronize();
+        IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
         const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         IMP_LOG_INFO("graph prewarm: %d/%d decode graphs captured (%d steps, %.1f s)%s%s",
                      captured, n, steps, dt, missing.empty() ? "" : ", missing sizes:",

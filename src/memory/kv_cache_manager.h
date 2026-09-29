@@ -300,9 +300,9 @@ public:
 
     // Slot allocation (multi-seq batch support): each active sequence holds one slot in
     // [0, residual_max_seqs_) for the duration of its decode. FIFO from a free-list. Returns
-    // the assigned slot, or -1 if residual not enabled / pool full. Idempotent: re-allocating
+    // the assigned slot, or -1 if residual not enabled / pool full / slot zero failed. Idempotent: re-allocating
     // for the same seq returns the existing slot.
-    int allocate_residual_slot(int seq_id);
+    [[nodiscard]] int allocate_residual_slot(int seq_id);
 
     // Release a sequence's slot (no-op if not allocated). Called on
     // free_sequence; safe to call eagerly. Resets the ring state too.
