@@ -35,6 +35,8 @@ docker image inspect "$IMG" >/dev/null 2>&1 || { echo "FAIL setup: image $IMG mi
 bash scripts/image_tag.sh check "$IMG" || { echo "FAIL setup: $IMG is not this tree (make build)"; exit 1; }
 
 ADIR="$(mktemp -d "${TMPDIR:-/tmp}/accept_2199.XXXXXX")"
+# mktemp -d is 0700; imp-server in the container runs as uid 1001 and must read the adapter.
+chmod 755 "$ADIR"
 cleanup() { docker rm -f "$CTR" >/dev/null 2>&1 || true; rm -rf "$ADIR"; }
 trap cleanup EXIT
 
@@ -85,6 +87,7 @@ gen_adapter() {  # gen_adapter <dir>
     mkdir -p "$dir"
     printf '{"r": %d, "lora_alpha": %d}\n' "$RANK" "$RANK" >"$dir/adapter_config.json"
     { le64 "${#hdr}"; printf '%s' "$hdr"; head -c "$off" /dev/zero; } >"$dir/adapter_model.safetensors"
+    chmod 755 "$dir" && chmod 644 "$dir/adapter_config.json" "$dir/adapter_model.safetensors"  # uid 1001 reads
     echo "adapter: $nl layers x 7 projections, rank $RANK, $((off / 1048576)) MiB payload"
 }
 
