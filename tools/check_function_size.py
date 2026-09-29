@@ -141,6 +141,30 @@ def _braces(line, in_comment):
     return delta, in_comment
 
 
+def _open_brace(line, pdepth):
+    """(index of the first `{` at paren depth 0 or -1, paren depth after the line).
+
+    A `{` inside the parameter list (`T p = {}) {`) is a default argument, not the body.
+    """
+    i, n = 0, len(line)
+    while i < n:
+        if line.startswith("//", i):
+            break
+        c = line[i]
+        if c in "\"'":
+            i += 1
+            while i < n and line[i] != c:
+                i += 2 if line[i] == "\\" else 1
+        elif c == "(":
+            pdepth += 1
+        elif c == ")":
+            pdepth = max(0, pdepth - 1)
+        elif c == "{" and pdepth == 0:
+            return i, pdepth
+        i += 1
+    return -1, pdepth
+
+
 def functions_in(path, text, frag_cache):
     """Yield (name, start_line, code_loc, included_fragments) per top-level definition."""
     lines = text.split("\n")
@@ -153,14 +177,15 @@ def functions_in(path, text, frag_cache):
             continue
         # Walk the (possibly wrapped) signature to its opening brace. A `;` first
         # means this was a declaration, not a definition.
-        sig, k, one_liner = [], i, False
+        sig, k, one_liner, pdepth, bidx = [], i, False, 0, -1
         while k < len(lines) and k - i < MAX_SIG_LINES:
             sig.append(lines[k])
             s = lines[k].rstrip()
-            if "{" in s:
+            bidx, pdepth = _open_brace(s, pdepth)
+            if bidx >= 0:
                 # `T f(a) { return x; }` closes on its own line — a body of zero
                 # counted lines, and swallowing it would merge the next function in.
-                one_liner = "}" in s[s.index("{") + 1:]
+                one_liner = "}" in s[bidx + 1:]
                 break
             if s.endswith(";") or (k > i and not lines[k][:1].isspace() and lines[k].strip()):
                 k = -1
@@ -174,7 +199,7 @@ def functions_in(path, text, frag_cache):
         # inner close inside a long body made the gate undercount and clear the hard limit
         # (AUDIT_arch_2026 G-6). Braces inside comments/string literals don't count.
         body, frags = [], []
-        depth, in_comment = _braces(lines[k][lines[k].index("{") + 1:], False)
+        depth, in_comment = _braces(lines[k][bidx + 1:], False)
         depth += 1
         j = k + 1
         while j < len(lines):
@@ -263,6 +288,12 @@ def selftest():
          "void f() {\n    s = \"}\";\n    // {\n    /* } */\n    g();\n}\n", [2]),
         ("included .cu fragment is expanded in place",
          'void f() {\n    a();\n#include "exec/frag.cu"\n    b();\n}\n', [3 + 40]),
+        ("brace-init default in the parameter list is not the body (#2215)",
+         "void k(int a, T p = {}) {\n    x();\n    y();\n    z();\n}\n", [3]),
+        ("wrapped brace-init default, body opens after the paren",
+         "void k(int a,\n       T p = {},\n       U q = {1, 2}) {\n    x();\n}\n", [1]),
+        ("one-liner with a brace-init default is still a one-liner",
+         "int r(T p = {}) { return 1; }\nvoid f() {\n    g();\n}\n", [1]),
         ("two functions in one file",
          "void f() {\n    a();\n}\nvoid g() {\n    b();\n    c();\n}\n", [1, 2]),
     ]
