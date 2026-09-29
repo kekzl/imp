@@ -22,6 +22,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Qwen3.8-Flash-Next (host-resident experts): the F16 GDN in/gate/out are freed after load; M>32 prefill runs their NVFP4 (in) / MXFP8 (gate, out, now "auto") copies, smaller M rebuild from those. Expert cache 290 -> 355 slots/layer, tg512 prose 66.81 -> 70.24 tok/s, 45k PPL windows +0.31 % / -0.21 %.
 
 ### Fixed
+- FP16 FMHA prefill picks Bq only among instanced (Bq, head_dim) tiles. Off sm_120 smem limits, HD512 could select Bq=32 and HD256 Bq=16, both with no kernel, so the launch returned false. sm_120 choices unchanged (#2243).
 - GPTQ SafeTensors dequant reads qzeros as AutoGPTQ writes them (`[groups, N/8]`) with the v1 zero offset (`(z + 1) & 0xF`, `gptq_v2`: none); config also from `config.json`; other formats, `bits != 4`, bad shapes refused at load. Qwen2.5-0.5B-Instruct-GPTQ-Int4 per-row cosine vs BF16: 0.8373 -> 0.9901 (#2249).
 - Qwen3 dense GGUF: `kv_cache.dtype=auto` resolves to FP16 again; FP8 KV turned greedy output into "The capital of France is not Paris". Decode after 16k context 208.5 -> 182.6 tok/s (Qwen3-8B-Q8_0); `kv_cache.dtype=fp8` restores it (#2208).
 - `gemm.nvfp4_lm_head=auto` builds the FP8 head only from a 16-bit head; an 8-bit GGUF head (Q8_0) stays at checkpoint precision. Qwen3-8B-Q8_0 first token: This -0.674 (FP8) -> The -0.646, HF fp32 The -0.644 (#2224).
