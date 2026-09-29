@@ -1084,7 +1084,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     // (Gemma-4) is not Qwen: NFC there composed "e" + U+0301 that HF keeps apart.
     if (tok_type != "bert")
         tokenizer->set_nfc(has_pre &&
-                           (it_pre->second.str_val == "qwen2" || it_pre->second.str_val == "qwen35"));
+                           (tokenizer->pre_tokenizer() == "qwen2" || tokenizer->pre_tokenizer() == "qwen35"));
 
     // add_bos_token flag (Qwen3: 0, LLaMA: 1)
     auto it_add_bos = metadata.find("tokenizer.ggml.add_bos_token");
