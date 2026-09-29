@@ -88,8 +88,9 @@ void apply_stop_mask(const InferenceState& state, float* lp, int vocab, cudaStre
                              state.d_stop_mask_active, stream);
 }
 
-// Pinned readback of a device sampler; a failed sync throws into BatchingEngine::step()'s catch.
-int32_t pinned_token_or_throw(const int32_t* h_pinned, cudaStream_t stream) {
+// Pinned device-sampler readback: not enqueued / failed sync throws into BatchingEngine::step()'s catch.
+int32_t pinned_token_or_throw(bool enqueued, const int32_t* h_pinned, cudaStream_t stream) {
+    sampler_enqueued_or_throw(enqueued, "forward sampler");
     return synced_token_or_throw(cudaStreamSynchronize(stream), h_pinned, "forward sampler readback");
 }
 }  // namespace
@@ -204,8 +205,9 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
 
         if (state.temperature <= 0.0f || state.top_k == 1) {
             if (d_sample_result_ && h_sample_pinned_.as<int32_t>()) {
-                sample_greedy_device(last_logits, d_sample_result_, h_sample_pinned_.as<int32_t>(), stream);
-                token = pinned_token_or_throw(h_sample_pinned_.as<int32_t>(), stream);
+                const bool enqueued = sample_greedy_device(last_logits, d_sample_result_,
+                                                           h_sample_pinned_.as<int32_t>(), stream);
+                token = pinned_token_or_throw(enqueued, h_sample_pinned_.as<int32_t>(), stream);
             } else if (d_sample_result_) {
                 token = sample_greedy(last_logits, d_sample_result_, stream);
             } else {
@@ -216,9 +218,10 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
             float top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
             unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
             if (d_sample_result_ && h_sample_pinned_.as<int32_t>()) {
-                sample_topk_topp_device(last_logits, top_k, top_p, state.temperature, seed, d_sample_result_,
-                                        h_sample_pinned_.as<int32_t>(), stream);
-                token = pinned_token_or_throw(h_sample_pinned_.as<int32_t>(), stream);
+                const bool enqueued = sample_topk_topp_device(last_logits, top_k, top_p, state.temperature,
+                                                              seed, d_sample_result_,
+                                                              h_sample_pinned_.as<int32_t>(), stream);
+                token = pinned_token_or_throw(enqueued, h_sample_pinned_.as<int32_t>(), stream);
             } else if (d_sample_result_) {
                 token = sample_topk_topp(last_logits, top_k, top_p, state.temperature, seed, d_sample_result_,
                                          stream);
@@ -252,7 +255,8 @@ void GraphExecutor::masked_sample_async(const InferenceState& state, const Tenso
         Tensor last_f = logits.slice(0, 1);
         int64_t vshape_f[1] = {last_f.shape[1]};
         last_f = last_f.reshape(1, vshape_f);
-        sample_greedy_device(last_f, d_result, h_pinned, stream);
+        sampler_enqueued_or_throw(sample_greedy_device(last_f, d_result, h_pinned, stream),
+                                  "masked_sample_async");
         return;
     }
 
@@ -287,21 +291,24 @@ void GraphExecutor::masked_sample_async(const InferenceState& state, const Tenso
     Tensor last = logits.slice(0, 1);
     int64_t vocab_shape[1] = {last.shape[1]};
     last = last.reshape(1, vocab_shape);
+    bool enqueued = false;
     if (state.temperature <= 0.0f || state.top_k == 1) {
-        sample_greedy_device(last, d_result, h_pinned, stream);
+        enqueued = sample_greedy_device(last, d_result, h_pinned, stream);
     } else {
         int top_k = state.top_k > 0 ? state.top_k : 50;
         float top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
         unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
-        sample_topk_topp_device(last, top_k, top_p, state.temperature, seed, d_result, h_pinned, stream);
+        enqueued = sample_topk_topp_device(last, top_k, top_p, state.temperature, seed, d_result, h_pinned,
+                                           stream);
     }
+    sampler_enqueued_or_throw(enqueued, "masked_sample_async");
 }
 
-void GraphExecutor::forward_decode_async(const InferenceState& state, int32_t* d_token_id, int32_t* h_mapped,
+bool GraphExecutor::forward_decode_async(const InferenceState& state, int32_t* d_token_id, int32_t* h_mapped,
                                          cudaStream_t stream) {
     if (!initialized_) {
         IMP_LOG_ERROR("GraphExecutor::forward_decode_async called before init()");
-        return;
+        return false;
     }
 
     // Delegates to the canonical forward_logits path (embedding -> layers ->
@@ -338,17 +345,14 @@ void GraphExecutor::forward_decode_async(const InferenceState& state, int32_t* d
     int64_t vocab_shape[1] = {last_logits.shape[1]};
     last_logits = last_logits.reshape(1, vocab_shape);
 
-    if (state.temperature <= 0.0f || state.top_k == 1) {
-        sample_greedy_device(last_logits, d_token_id, h_mapped, stream);
-    } else {
-        int top_k = state.top_k > 0 ? state.top_k : 50;
-        float top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
-        unsigned int seed = (state.seed >= 0 || state.d_seed_salt) ? static_cast<unsigned int>(state.seed)
-                                                                   : 42u;
-        sample_topk_topp_device(last_logits, top_k, top_p, state.temperature, seed, d_token_id, h_mapped,
-                                stream, state.d_seed_salt);
-    }
-    // No cudaStreamSynchronize — host polls h_mapped asynchronously.
+    // No cudaStreamSynchronize: host polls h_mapped asynchronously. Captured: false, never a throw.
+    if (state.temperature <= 0.0f || state.top_k == 1)
+        return sample_greedy_device(last_logits, d_token_id, h_mapped, stream);
+    int top_k = state.top_k > 0 ? state.top_k : 50;
+    float top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
+    unsigned int seed = (state.seed >= 0 || state.d_seed_salt) ? static_cast<unsigned int>(state.seed) : 42u;
+    return sample_topk_topp_device(last_logits, top_k, top_p, state.temperature, seed, d_token_id, h_mapped,
+                                   stream, state.d_seed_salt);
 }
 
 }  // namespace imp

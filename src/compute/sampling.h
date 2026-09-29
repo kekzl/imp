@@ -25,6 +25,8 @@ static constexpr size_t SAMPLE_SCRATCH_BYTES =
     sizeof(int32_t) + SAMPLE_NBLOCKS * (2 * sizeof(float) +
                                         SAMPLE_MAX_TOP_K * (sizeof(float) + sizeof(int32_t)));
 
+// Synchronous samplers (sample_greedy, sample_topk_topp, sample_mirostat_v2): sync the stream,
+// never under graph capture. Failed scratch alloc / readback throws std::runtime_error (#2307).
 // Greedy: argmax over logits
 int32_t sample_greedy(const Tensor& logits, cudaStream_t stream = nullptr);
 
@@ -42,8 +44,8 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float tem
 // after), no readback/sync. Caller enqueues per sequence then does one pinned D2H + one
 // stream sync for the whole batch - avoids per-sequence pageable-readback serialization.
 // Kernels/normalization identical to the synchronous variants: bit-identical tokens.
-// sample_topk_topp_async returns false when top_k > SAMPLE_MAX_TOP_K (needs the
-// internally-syncing CUB path); caller falls back to the synchronous variant.
+// sample_topk_topp_async returns false when the CUB scratch (top_k > SAMPLE_MAX_TOP_K) is
+// unavailable: nothing enqueued, the slot holds a stale token (#2307).
 void sample_greedy_async(const Tensor& logits, int32_t* d_result, cudaStream_t stream = nullptr);
 [[nodiscard]] bool sample_topk_topp_async(const Tensor& logits, int top_k, float top_p, float temperature,
                             unsigned int seed, int32_t* d_result, cudaStream_t stream = nullptr);
@@ -117,13 +119,14 @@ void sampling_reset_penalty_counts();
 // Async device-side sampling: writes result to a device buffer AND mapped pinned memory,
 // no cudaStreamSynchronize (GPU-side token stays on device). h_mapped: pinned host pointer
 // (cudaHostAllocMapped). Returns immediately; host polls *h_mapped for readback.
-void sample_greedy_device(const Tensor& logits, int32_t* d_result, int32_t* h_mapped,
-                          cudaStream_t stream = nullptr);
+// false = nothing enqueued (copy enqueue or CUB scratch failed): *h_mapped is stale, never read it (#2307).
+[[nodiscard]] bool sample_greedy_device(const Tensor& logits, int32_t* d_result, int32_t* h_mapped,
+                                        cudaStream_t stream = nullptr);
 // d_seed_salt: device int added to seed inside the kernel, so a captured graph draws a new
 // quantile every step (nullptr = seed as is).
-void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p, float temperature,
-                             unsigned int seed, int32_t* d_result, int32_t* h_mapped,
-                             cudaStream_t stream = nullptr, const int* d_seed_salt = nullptr);
+[[nodiscard]] bool sample_topk_topp_device(const Tensor& logits, int top_k, float top_p, float temperature,
+                                           unsigned int seed, int32_t* d_result, int32_t* h_mapped,
+                                           cudaStream_t stream = nullptr, const int* d_seed_salt = nullptr);
 
 // Apply repetition / frequency / presence penalties to logits in-place.
 // token_ids: device array of previously generated tokens.

@@ -829,8 +829,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             // (allocated at warmup when overlap is ready; shared slot is the serial-path default).
             int32_t* sample_slot =
                 d_prefill_sample_ ? d_prefill_sample_ : executor_->d_sample_result();
-            sample_greedy_device(last_logits, sample_slot, h_sample_pinned_.as<int32_t>(),
-                                 pf_stream);
+            const bool sample_enqueued = sample_greedy_device(last_logits, sample_slot,
+                                                              h_sample_pinned_.as<int32_t>(), pf_stream);
 
             if (!prefill_done_)
                 (void)prefill_done_.create();
@@ -844,6 +844,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             // Unrecorded or failed event: h_sample_pinned_ was never written.
             cuda_sync_or_throw(rec_err, "step_prefill_one event record");
             cuda_sync_or_throw(cudaEventSynchronize(prefill_done_), "step_prefill_one");
+            sampler_enqueued_or_throw(sample_enqueued, "step_prefill_one");
             next_token = *h_sample_pinned_.as<int32_t>();
         } else if (req->logprobs) {
             executor_->forward_logits(state, prefill_logits_out, pf_stream);

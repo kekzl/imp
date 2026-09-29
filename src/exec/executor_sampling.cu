@@ -133,7 +133,8 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, con
                         state.seed >= 0 ? static_cast<unsigned int>(state.seed + i) : (42u + i);
                     bool ok = sample_topk_topp_async(seq_logits, top_k, top_p, state.temperature, seed,
                                                      slot, stream);
-                    (void)ok;  // eligibility pre-checked above; cannot decline here
+                    sampler_enqueued_or_throw(ok,
+                                              "sample_tokens");  // false = CUB scratch unavailable (#2307)
                 }
             }
             // Slots are SAMPLE_SCRATCH_BYTES apart; the token is the first
@@ -403,7 +404,8 @@ bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const 
     }
     bool ok = sample_topk_topp_async(flat, top_k, state.top_p > 0.0f ? state.top_p : 1.0f,
                                      state.temperature, seed, slot, stream);
-    (void)ok;  // eligibility pre-checked above
+    sampler_enqueued_or_throw(ok,
+                              "sample_single_from_logits_async");  // false = CUB scratch unavailable (#2307)
     return true;
 }
 

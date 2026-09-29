@@ -530,7 +530,8 @@ TEST(SamplerSeeding, DeviceSaltDrawsLikeTheHostStepSeed) {
         std::map<int32_t, int> hist;
         for (int t = 0; t < 200; ++t) {
             ASSERT_EQ(cudaMemcpy(d_salt, &t, sizeof(int), cudaMemcpyHostToDevice), cudaSuccess);
-            sample_topk_topp_device(d_logits, top_k, 0.95f, 1.0f, base, d_result, h_token, nullptr, d_salt);
+            ASSERT_TRUE(sample_topk_topp_device(d_logits, top_k, 0.95f, 1.0f, base, d_result, h_token,
+                                                nullptr, d_salt));
             ASSERT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
             const int32_t want = sample_topk_topp(d_logits, top_k, 0.95f, 1.0f, base + t);
             ASSERT_EQ(*h_token, want) << "top_k=" << top_k << " salt=" << t << ": salted draw != seed + salt";
