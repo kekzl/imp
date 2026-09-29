@@ -2,6 +2,7 @@
 // Row p of PromptLogprobs scores prompt[p + 1]; prompt[0] has no logprob (null in both shapes).
 
 #include "prompt_logprobs.h"
+#include "runtime/prompt_lp_chunk.h"
 
 #include <gtest/gtest.h>
 
@@ -195,4 +196,17 @@ TEST(PromptLogprobsAssembly, AttachRefusesAPartialResult) {
     json untouched = json::object();
     EXPECT_TRUE(attach_prompt_logprobs(untouched, off, req, token_text, 0, ""));
     EXPECT_TRUE(untouched.empty());
+}
+
+// #2257: logits chunk rows = min(n_rows, 1024, (avail / 2) / (4 * vocab)).
+TEST(PromptLogprobs, LogitsChunkRowsFormula) {
+    constexpr int kV = 151936;
+    constexpr size_t kRowBytes = sizeof(float) * kV;
+    EXPECT_EQ(imp::prompt_lp_chunk_rows(2047, kV, size_t{32} << 30), imp::kPromptLpMaxChunkRows);
+    EXPECT_EQ(imp::prompt_lp_chunk_rows(300, kV, size_t{32} << 30), 300);
+    EXPECT_EQ(imp::prompt_lp_chunk_rows(2047, kV, 2 * 100 * kRowBytes), 100);
+    EXPECT_EQ(imp::prompt_lp_chunk_rows(2047, kV, 2 * 100 * kRowBytes - 1), 99);
+    EXPECT_EQ(imp::prompt_lp_chunk_rows(2047, kV, kRowBytes), 0);
+    EXPECT_EQ(imp::prompt_lp_chunk_rows(0, kV, size_t{32} << 30), 0);
+    EXPECT_EQ(imp::prompt_lp_chunk_rows(5, 0, size_t{32} << 30), 0);
 }

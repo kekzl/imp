@@ -283,6 +283,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/embedding.cu
     src/compute/sampling.cu
     src/compute/rowwise_topm.cu
+    src/compute/prompt_logprobs_rows.cu
     src/compute/sampling_topk_topp.cu
     src/compute/sampling_penalties.cu
     src/compute/sampling_penalties_history.cu
@@ -1022,6 +1023,7 @@ if(IMP_BUILD_TESTS)
         tests/test_sampling_advanced.cu
         tests/test_penalty_hist_append.cu
         tests/test_rowwise_topm.cu
+        tests/test_prompt_logprobs_rows.cu
         tests/test_executor_kernels.cu
         tests/test_hadamard.cu
         tests/test_mmq_q4k_imma_layout.cu
@@ -1185,6 +1187,8 @@ if(IMP_BUILD_TESTS)
         tests/test_warm_cache.cu
         tests/test_lora.cpp
         tests/test_prefix_cache_e2e.cpp
+        # #2257: prompt_logprobs chunk logits released after the pass (IMP_TEST_MODEL).
+        tests/test_prompt_logprobs_e2e.cpp
         # Chained recurrent restores: 30 growing turns against a cold prefill of
         # the same prompt, compared on the state slab rather than on tokens.
         tests/test_hybrid_restore_chain.cu
