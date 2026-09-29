@@ -358,10 +358,10 @@ private:
     // than hundreds: the measured cost is per call, not per byte.
     size_t chunk_bytes_ = std::max<size_t>(granularity_, size_t(64) << 20);
 
+    // No current device: 0, and the first cuMem* call on it returns the MemError.
     static int init_device_() {
         int dev = 0;
-        cudaGetDevice(&dev);
-        return dev;
+        return cudaGetDevice(&dev) == cudaSuccess ? dev : 0;
     }
 
     size_t init_granularity_() const {

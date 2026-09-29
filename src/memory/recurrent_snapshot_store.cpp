@@ -14,9 +14,9 @@ RecurrentSnapshotStore::~RecurrentSnapshotStore() {
         to_free_host.swap(pool_->free_host_bufs);
     }
     for (void* p : to_free)
-        cudaFree(p);
+        IMP_CUDA_CHECK_LOG(cudaFree(p));
     for (void* p : to_free_host)
-        cudaFreeHost(p);
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(p));
     // Entries still held by requests free their buffers via the deleter.
 }
 
@@ -130,9 +130,9 @@ std::shared_ptr<RecurrentSnapshotEntry> RecurrentSnapshotStore::make_entry_(size
                 }
             }
             if (e->on_host)
-                cudaFreeHost(e->data);
+                IMP_CUDA_CHECK_LOG(cudaFreeHost(e->data));
             else
-                cudaFree(e->data);
+                IMP_CUDA_CHECK_LOG(cudaFree(e->data));
             delete e;
         });
 }

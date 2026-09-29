@@ -14,6 +14,15 @@
 
 namespace imp {
 
+namespace {
+// Teardown trim of the current device's graph memory pool: best effort, logged.
+void trim_graph_mem() {
+    int dev = 0;
+    IMP_CUDA_CHECK_VOID(cudaGetDevice(&dev));
+    IMP_CUDA_CHECK_LOG(cudaDeviceGraphMemTrim(dev));
+}
+}  // namespace
+
 // runtime.graph_capture_mode = "global" | "relaxed" (default) | "thread_local": selects the
 // cudaStreamCaptureMode used by CudaGraphCapture::begin_capture and the ConditionalRunner
 // body-graph capture. Probed at first call and cached.
@@ -311,7 +320,7 @@ void CudaGraphCapture::abort_capture() {
     (void)cudaStreamEndCapture(capture_stream_, &g);
     graph_diag::g_phase = graph_diag::Phase::NORMAL;
     if (g)
-        cudaGraphDestroy(g);
+        IMP_CUDA_CHECK_LOG(cudaGraphDestroy(g));
     (void)cudaGetLastError();  // clear the sticky capture-invalidated error
     capture_stream_ = nullptr;
 }
@@ -325,7 +334,7 @@ void abort_stream_capture(cudaStream_t stream) {
     cudaGraph_t g = nullptr;
     (void)cudaStreamEndCapture(stream, &g);
     if (g)
-        cudaGraphDestroy(g);
+        IMP_CUDA_CHECK_LOG(cudaGraphDestroy(g));
     (void)cudaGetLastError();
     IMP_LOG_WARN("abort_stream_capture: closed a stray open capture (stream %p)", (void*)stream);
 }
@@ -340,9 +349,7 @@ void CudaGraphCapture::reset() {
     // 128-expert MoE models) hold reserved VRAM until process exit, compounding across
     // re-captures. Trim is a no-op when the pool is already empty.
     if (had_exec) {
-        int dev = 0;
-        cudaGetDevice(&dev);
-        cudaDeviceGraphMemTrim(dev);
+        trim_graph_mem();
     }
 }
 
@@ -675,6 +682,16 @@ __global__ void post_decode_step_kernel(
     }
 }
 
+namespace {
+// Pre-capture sync, then capture into body; the first failure is returned.
+cudaError_t sync_then_begin_capture(cudaStream_t stream, cudaGraph_t body) {
+    const cudaError_t err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess)
+        return err;
+    return cudaStreamBeginCaptureToGraph(stream, body, nullptr, nullptr, 0, get_capture_mode());
+}
+}  // namespace
+
 CudaGraphConditionalRunner::~CudaGraphConditionalRunner() { cleanup(); }
 
 bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceState& state_template,
@@ -687,7 +704,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
     // (non-diag) path to avoid perturbing CUDA error state in pre-launch phases.
     if (graph_diag::enabled()) {
         int v = 1;
-        cudaMemcpyToSymbol(d_graph_diag_enabled, &v, sizeof(int));
+        IMP_CUDA_CHECK_BOOL(cudaMemcpyToSymbol(d_graph_diag_enabled, &v, sizeof(int)));
     }
 
     cudaError_t err;
@@ -1032,10 +1049,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         cudaGraph_t body_graph = cond_params.conditional.phGraph_out[0];
 
         // 5. Capture decode body into body_graph via stream capture
-        cudaStreamSynchronize(stream);
-
-        err = cudaStreamBeginCaptureToGraph(stream, body_graph, nullptr, nullptr, 0,
-                                            get_capture_mode());
+        err = sync_then_begin_capture(stream, body_graph);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR(
                 "ConditionalRunner: capture failed — falling back to per-step decode "
@@ -1279,7 +1293,7 @@ void CudaGraphConditionalRunner::finish_burst_blocking(cudaStream_t stream) {
 void CudaGraphConditionalRunner::cleanup() {
     // Ensure all GPU work referencing these resources has completed before freeing.
     if (launched_) {
-        cudaDeviceSynchronize();
+        IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
         launched_ = false;
     }
 
@@ -1321,9 +1335,7 @@ void CudaGraphConditionalRunner::cleanup() {
         h_decode_scratch_ = nullptr;
 
         if (had_exec) {
-            int dev = 0;
-            cudaGetDevice(&dev);
-            cudaDeviceGraphMemTrim(dev);
+            trim_graph_mem();
         }
         launched_ = false;
         last_read_step_ = 0;
@@ -1405,9 +1417,7 @@ void CudaGraphConditionalRunner::cleanup() {
     // Release the per-device graph memory pool (matches CudaGraphCapture::reset).
     // Keeps long-running sessions from holding stale graph reservations.
     if (had_exec) {
-        int dev = 0;
-        cudaGetDevice(&dev);
-        cudaDeviceGraphMemTrim(dev);
+        trim_graph_mem();
     }
 
     launched_ = false;

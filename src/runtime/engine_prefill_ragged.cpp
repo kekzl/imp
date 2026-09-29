@@ -350,7 +350,7 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
                  {static_cast<void*>(d_tok), static_cast<void*>(d_pos), static_cast<void*>(d_bt),
                   static_cast<void*>(d_ctx), static_cast<void*>(d_soff), static_cast<void*>(d_slots)})
                 if (p)
-                    cudaFreeAsync(p, stream);
+                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(p, stream));
         }
         RaggedMeta(const RaggedMeta&) = delete;
         RaggedMeta& operator=(const RaggedMeta&) = delete;

@@ -16,9 +16,54 @@ namespace {
 constexpr double kMiB = 1024.0 * 1024.0;
 
 void query_free_total(size_t& free_b, size_t& total_b) {
-    free_b = 0;
-    total_b = 0;
-    cudaMemGetInfo(&free_b, &total_b);
+    // total_b == 0 is the failure sentinel every caller checks.
+    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) {
+        free_b = 0;
+        total_b = 0;
+    }
+}
+
+// cudaMallocAsync default-pool slack: freed-but-not-returned-to-OS memory
+// (e.g. the #679 ms_ref cudaFree's) sits here as reserved and still counts
+// as device-used. reserved - used = trimmable headroom (cudaMemPoolTrimTo).
+template <class Emit>
+void emit_pool_lines(Emit& emit) {
+    cudaMemPool_t pool = nullptr;
+    int dev = 0;
+    unsigned long long rsv = 0, usd = 0;
+    if (cudaGetDevice(&dev) == cudaSuccess && cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess && pool &&
+        cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv) == cudaSuccess &&
+        cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &usd) == cudaSuccess) {
+        emit("mempool(async): reserved=%.0f MiB  used=%.0f MiB  trimmable=%.0f MiB",
+             rsv / kMiB, usd / kMiB, (double(rsv) - double(usd)) / kMiB);
+        // I2 / criterion 3. Armed at the Serving transition, so anything above the value it was
+        // armed at was allocated while serving; unlike steady_state_allocations(), this sees
+        // allocations that never touched Backend.
+        unsigned long long usd_hi = 0, rsv_hi = 0;
+        if (cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &usd_hi) == cudaSuccess &&
+            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemHigh, &rsv_hi) == cudaSuccess)
+            emit("mempool(async) high-water since serving began: used=%.0f MiB  reserved=%.0f MiB "
+                 "(delta vs now: used %+.0f MiB)",
+                 usd_hi / kMiB, rsv_hi / kMiB, (double(usd_hi) - double(usd)) / kMiB);
+    }
+    // Graph-owned memory: stream-ordered allocations captured INSIDE a graph land here, not
+    // the default pool. A5.2 predicts this reaches zero once step 5 removes per-request
+    // cudaMallocAsync from captured regions, at which point the cudaDeviceGraphMemTrim calls
+    // in cuda_graph.cu become provably dead.
+    {
+        int gdev = 0;
+        unsigned long long g_used = 0, g_high = 0, g_rsv = 0;
+        const bool ok =
+            cudaGetDevice(&gdev) == cudaSuccess &&
+            cudaDeviceGetGraphMemAttribute(gdev, cudaGraphMemAttrUsedMemCurrent, &g_used) == cudaSuccess &&
+            cudaDeviceGetGraphMemAttribute(gdev, cudaGraphMemAttrUsedMemHigh, &g_high) == cudaSuccess &&
+            cudaDeviceGetGraphMemAttribute(gdev, cudaGraphMemAttrReservedMemCurrent, &g_rsv) == cudaSuccess;
+        (void)cudaGetLastError();
+        if (ok) {
+            emit("graphmem: used=%.1f MiB  reserved=%.1f MiB  high_since_serving=%.1f MiB",
+                 g_used / kMiB, g_rsv / kMiB, g_high / kMiB);
+        }
+    }
 }
 }  // namespace
 
@@ -199,49 +244,7 @@ void MemAccount::report(const char* phase_label) {
         }
     }
 
-    // cudaMallocAsync default-pool slack: freed-but-not-returned-to-OS memory
-    // (e.g. the #679 ms_ref cudaFree's) sits here as reserved and still counts
-    // as device-used. reserved - used = trimmable headroom (cudaMemPoolTrimTo).
-    {
-        cudaMemPool_t pool = nullptr;
-        int dev = 0;
-        cudaGetDevice(&dev);
-        if (cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess && pool) {
-            unsigned long long rsv = 0, usd = 0;
-            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv);
-            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &usd);
-            emit("mempool(async): reserved=%.0f MiB  used=%.0f MiB  trimmable=%.0f MiB",
-                 rsv / kMiB, usd / kMiB, (double(rsv) - double(usd)) / kMiB);
-            // I2 / criterion 3. Armed at the Serving transition, so anything above the value it was
-            // armed at was allocated while serving; unlike steady_state_allocations(), this sees
-            // allocations that never touched Backend.
-            unsigned long long usd_hi = 0, rsv_hi = 0;
-            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemHigh, &usd_hi);
-            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemHigh, &rsv_hi);
-            emit("mempool(async) high-water since serving began: used=%.0f MiB  reserved=%.0f MiB "
-                 "(delta vs now: used %+.0f MiB)",
-                 usd_hi / kMiB, rsv_hi / kMiB, (double(usd_hi) - double(usd)) / kMiB);
-        }
-        // Graph-owned memory: stream-ordered allocations captured INSIDE a graph land here, not
-        // the default pool. A5.2 predicts this reaches zero once step 5 removes per-request
-        // cudaMallocAsync from captured regions, at which point the cudaDeviceGraphMemTrim calls
-        // in cuda_graph.cu become provably dead.
-        {
-            int gdev = 0;
-            cudaGetDevice(&gdev);
-            unsigned long long g_used = 0, g_high = 0, g_rsv = 0;
-            const bool ok =
-                cudaDeviceGetGraphMemAttribute(gdev, cudaGraphMemAttrUsedMemCurrent, &g_used) ==
-                cudaSuccess;
-            cudaDeviceGetGraphMemAttribute(gdev, cudaGraphMemAttrUsedMemHigh, &g_high);
-            cudaDeviceGetGraphMemAttribute(gdev, cudaGraphMemAttrReservedMemCurrent, &g_rsv);
-            (void)cudaGetLastError();
-            if (ok) {
-                emit("graphmem: used=%.1f MiB  reserved=%.1f MiB  high_since_serving=%.1f MiB",
-                     g_used / kMiB, g_rsv / kMiB, g_high / kMiB);
-            }
-        }
-    }
+    emit_pool_lines(emit);
 
     if (!checkpoints_.empty()) {
         emit("--- lifecycle checkpoints (phase delta = measured cost) ---");
@@ -347,14 +350,14 @@ std::vector<MemTierStat> memory_tier_stats() {
         cudaMemPool_t pool = nullptr;
         if (cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess) {
             unsigned long long rsv = 0, used = 0;
-            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv);
-            cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used);
-            push("async_pool", static_cast<size_t>(rsv), static_cast<size_t>(used));
+            if (cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv) == cudaSuccess &&
+                cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used) == cudaSuccess)
+                push("async_pool", static_cast<size_t>(rsv), static_cast<size_t>(used));
         }
         size_t g_rsv = 0, g_used = 0;
-        cudaDeviceGetGraphMemAttribute(dev, cudaGraphMemAttrReservedMemCurrent, &g_rsv);
-        cudaDeviceGetGraphMemAttribute(dev, cudaGraphMemAttrUsedMemCurrent, &g_used);
-        push("graph_pool", g_rsv, g_used);
+        if (cudaDeviceGetGraphMemAttribute(dev, cudaGraphMemAttrReservedMemCurrent, &g_rsv) == cudaSuccess &&
+            cudaDeviceGetGraphMemAttribute(dev, cudaGraphMemAttrUsedMemCurrent, &g_used) == cudaSuccess)
+            push("graph_pool", g_rsv, g_used);
     }
     // Tiers imp owns outright.
     {
@@ -382,22 +385,23 @@ MemBudgetStat memory_budget_stat() {
 size_t trim_device_mempool() {
     // Retire pending async frees before trimming, otherwise their blocks are
     // still referenced and survive the trim.
-    cudaDeviceSynchronize();
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
     size_t released = 0;
     int dev = 0;
     cudaMemPool_t pool = nullptr;
     if (cudaGetDevice(&dev) == cudaSuccess &&
         cudaDeviceGetDefaultMemPool(&pool, dev) == cudaSuccess && pool != nullptr) {
         unsigned long long rsv_before = 0, used_before = 0, rsv_after = 0, used_after = 0;
-        cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv_before);
-        cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used_before);
+        bool ok = cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv_before) == cudaSuccess;
+        ok &= cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used_before) == cudaSuccess;
         cudaError_t te = cudaMemPoolTrimTo(pool, 0);
-        cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv_after);
-        cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used_after);
+        ok &= cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &rsv_after) == cudaSuccess;
+        ok &= cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &used_after) == cudaSuccess;
         IMP_LOG_INFO("mempool trim: reserved %.0f->%.0f MiB used %.0f->%.0f MiB (rc=%s)",
                      rsv_before / kMiB, rsv_after / kMiB, used_before / kMiB, used_after / kMiB,
                      cudaGetErrorString(te));
-        released = rsv_before > rsv_after ? static_cast<size_t>(rsv_before - rsv_after) : 0;
+        // Unknown sizes report 0 released.
+        released = ok && rsv_before > rsv_after ? static_cast<size_t>(rsv_before - rsv_after) : 0;
     }
     // Clear any sticky error (e.g. sync/trim during process-exit teardown when
     // the runtime has already torn the pool down) so a later cudaGetLastError
@@ -421,7 +425,7 @@ cudaMemPool_t make_release_on_free_pool() {
         return nullptr;
     }
     uint64_t threshold = 0;  // the default for a new pool, set so it is explicit
-    cudaMemPoolSetAttribute(p, cudaMemPoolAttrReleaseThreshold, &threshold);
+    IMP_CUDA_CHECK_LOG(cudaMemPoolSetAttribute(p, cudaMemPoolAttrReleaseThreshold, &threshold));
     return p;
 }
 }  // namespace

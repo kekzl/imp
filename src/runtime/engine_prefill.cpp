@@ -7,6 +7,7 @@
 #include "runtime/prefill_pacing.h"
 #include "runtime/config.h"
 #include "core/buffer.h"
+#include "core/cuda_errors.h"
 #include "compute/mtp_forward.h"
 #include "compute/dispatch_record.h"
 #include "model/image_placeholders.h"
@@ -832,14 +833,16 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
 
             if (!prefill_done_)
                 (void)prefill_done_.create();
-            cudaEventRecord(prefill_done_, pf_stream);
+            const cudaError_t rec_err = cudaEventRecord(prefill_done_, pf_stream);
 
             if (!pf_pool_used) {
                 free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa,
                                      d_context_lens, pf_stream);
             }
 
-            cudaEventSynchronize(prefill_done_);
+            // Unrecorded or failed event: h_sample_pinned_ was never written.
+            cuda_sync_or_throw(rec_err, "step_prefill_one event record");
+            cuda_sync_or_throw(cudaEventSynchronize(prefill_done_), "step_prefill_one");
             next_token = *h_sample_pinned_.as<int32_t>();
         } else if (req->logprobs) {
             executor_->forward_logits(state, prefill_logits_out, pf_stream);

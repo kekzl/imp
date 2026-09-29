@@ -115,4 +115,46 @@ inline bool prepare_decode_step_host(GraphExecutor& ex, const Model& model,
                                        static_cast<int>(rows.size()), ctx, stream);
 }
 
+// Residual decode buffers, allocated ONCE (#1648): a captured forward_logits graph bakes their
+// addresses. Failed alloc/init leaves a buffer unused (null, capacity 0 or an empty upload
+// cache), which engine_scheduler.cpp skips; ~Engine frees whatever was allocated.
+void alloc_residual_decode_buffers(int n, int*& d_slot, std::vector<int>& slot_uploaded, int*& d_meta,
+                                   int& meta_cap);
+
+// D2H copy, then stream sync; the first failure is returned.
+inline cudaError_t copy_d2h_sync(void* dst, const void* src, size_t bytes, cudaStream_t stream) {
+    const cudaError_t err = cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost, stream);
+    return err != cudaSuccess ? err : cudaStreamSynchronize(stream);
+}
+
+// Single-seq residual slot into d_buf[0], skipped while uploaded[0] already holds it.
+// False: upload failed, cache cleared (retried next step), d_buf unusable this step.
+inline bool upload_residual_slot(int* d_buf, int slot, std::vector<int>& uploaded, cudaStream_t stream) {
+    if (!uploaded.empty() && uploaded[0] == slot)
+        return true;
+    const cudaError_t err = cudaMemcpyAsync(d_buf, &slot, sizeof(int), cudaMemcpyHostToDevice, stream);
+    if (err != cudaSuccess) {
+        uploaded.clear();
+        IMP_LOG_ERROR("residual slot upload failed: %s", cudaGetErrorString(err));
+        return false;
+    }
+    if (uploaded.empty())
+        uploaded.assign(1, -1);
+    uploaded[0] = slot;
+    return true;
+}
+
+// Multi-seq residual metadata: slots, counts, write_idxes as [n] arrays at stride `cap` from
+// base; the first failure is returned.
+inline cudaError_t upload_residual_meta(int* base, ptrdiff_t cap, const int* slots, const int* counts,
+                                        const int* widxes, int n, cudaStream_t stream) {
+    const size_t bytes = static_cast<size_t>(n) * sizeof(int);
+    cudaError_t err = cudaMemcpyAsync(base, slots, bytes, cudaMemcpyHostToDevice, stream);
+    if (err == cudaSuccess)
+        err = cudaMemcpyAsync(base + cap, counts, bytes, cudaMemcpyHostToDevice, stream);
+    if (err == cudaSuccess)
+        err = cudaMemcpyAsync(base + 2 * cap, widxes, bytes, cudaMemcpyHostToDevice, stream);
+    return err;
+}
+
 }  // namespace imp::engine_internal

@@ -75,28 +75,34 @@ size_t kv_host_block_bytes(KVCache& cache) {
     return for_each_part(cache, 0, [](size_t, char*, size_t, size_t, int) {}, [](size_t, void*, size_t) {});
 }
 
-void kv_block_to_host(KVCache& cache, int block_id, void* dst, cudaStream_t stream) {
+bool kv_block_to_host(KVCache& cache, int block_id, void* dst, cudaStream_t stream) {
     char* out = static_cast<char*>(dst);
+    bool ok = true;
     for_each_part(
         cache, block_id,
         [&](size_t off, char* dev, size_t pitch, size_t width, int rows) {
-            cudaMemcpy2DAsync(out + off, width, dev, pitch, width, rows, cudaMemcpyDeviceToHost, stream);
+            ok &= cudaMemcpy2DAsync(out + off, width, dev, pitch, width, rows, cudaMemcpyDeviceToHost, stream) ==
+                  cudaSuccess;
         },
         [&](size_t off, void* dev, size_t bytes) {
-            cudaMemcpyAsync(out + off, dev, bytes, cudaMemcpyDeviceToHost, stream);
+            ok &= cudaMemcpyAsync(out + off, dev, bytes, cudaMemcpyDeviceToHost, stream) == cudaSuccess;
         });
+    return ok;
 }
 
-void kv_block_from_host(KVCache& cache, const void* src, int block_id, cudaStream_t stream) {
+bool kv_block_from_host(KVCache& cache, const void* src, int block_id, cudaStream_t stream) {
     const char* in = static_cast<const char*>(src);
+    bool ok = true;
     for_each_part(
         cache, block_id,
         [&](size_t off, char* dev, size_t pitch, size_t width, int rows) {
-            cudaMemcpy2DAsync(dev, pitch, in + off, width, width, rows, cudaMemcpyHostToDevice, stream);
+            ok &= cudaMemcpy2DAsync(dev, pitch, in + off, width, width, rows, cudaMemcpyHostToDevice, stream) ==
+                  cudaSuccess;
         },
         [&](size_t off, void* dev, size_t bytes) {
-            cudaMemcpyAsync(dev, in + off, bytes, cudaMemcpyHostToDevice, stream);
+            ok &= cudaMemcpyAsync(dev, in + off, bytes, cudaMemcpyHostToDevice, stream) == cudaSuccess;
         });
+    return ok;
 }
 
 KVHostSpill::KVHostSpill(size_t budget_bytes, size_t slot_bytes, Alloc alloc, Free free)

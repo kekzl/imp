@@ -17,7 +17,8 @@ static constexpr cudaLaunchMemSyncDomain kDecodeSyncDomain = cudaLaunchMemSyncDo
 static void apply_stream_sync_domain(cudaStream_t stream, cudaLaunchMemSyncDomain domain) {
     cudaStreamAttrValue v = {};
     v.memSyncDomain = domain;
-    cudaStreamSetAttribute(stream, cudaStreamAttributeMemSyncDomain, &v);
+    if (cudaStreamSetAttribute(stream, cudaStreamAttributeMemSyncDomain, &v) != cudaSuccess)
+        IMP_LOG_DEBUG("stream sync domain attribute unsupported");
     // Clear any error: this attribute is advisory.
     cudaGetLastError();
 }
@@ -130,7 +131,7 @@ bool GreenContextManager::init(int device, float prefill_sm_ratio) {
                 "GreenContextManager: cudaGreenCtxCreate (decode) "
                 "failed (%s)",
                 cudaGetErrorString(err));
-            cudaExecutionCtxDestroy(prefill_green_ctx_);
+            IMP_CUDA_CHECK_LOG(cudaExecutionCtxDestroy(prefill_green_ctx_));
             prefill_green_ctx_ = nullptr;
             goto fallback;
         }
@@ -169,11 +170,11 @@ bool GreenContextManager::init(int device, float prefill_sm_ratio) {
 
     cleanup_green:
         if (prefill_green_ctx_) {
-            cudaExecutionCtxDestroy(prefill_green_ctx_);
+            IMP_CUDA_CHECK_LOG(cudaExecutionCtxDestroy(prefill_green_ctx_));
             prefill_green_ctx_ = nullptr;
         }
         if (decode_green_ctx_) {
-            cudaExecutionCtxDestroy(decode_green_ctx_);
+            IMP_CUDA_CHECK_LOG(cudaExecutionCtxDestroy(decode_green_ctx_));
             decode_green_ctx_ = nullptr;
         }
         prefill_resource_desc_ = nullptr;
@@ -241,11 +242,11 @@ void GreenContextManager::destroy() {
     decode_stream_.reset();
 
     if (prefill_green_ctx_) {
-        cudaExecutionCtxDestroy(prefill_green_ctx_);
+        IMP_CUDA_CHECK_LOG(cudaExecutionCtxDestroy(prefill_green_ctx_));
         prefill_green_ctx_ = nullptr;
     }
     if (decode_green_ctx_) {
-        cudaExecutionCtxDestroy(decode_green_ctx_);
+        IMP_CUDA_CHECK_LOG(cudaExecutionCtxDestroy(decode_green_ctx_));
         decode_green_ctx_ = nullptr;
     }
     prefill_resource_desc_ = nullptr;

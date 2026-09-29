@@ -92,6 +92,42 @@ size_t model_source_bytes(const std::string& path) {
     }
     return ec ? 0 : total;
 }
+
+// cudaLimitPersistingL2CacheSize is a per-primary-context device limit that
+// survives Engine teardown, so a previous model's reservation persists.
+// Reset it first, or the next access-policy-window set can return cudaErrorInvalidValue and poison the stream.
+void reserve_persisting_l2() {
+    cudaDeviceProp prop{};
+    size_t max_persist = 0;
+    if (cudaGetDeviceProperties(&prop, 0) == cudaSuccess)
+        max_persist = prop.persistingL2CacheMaxSize;
+    else
+        IMP_LOG_WARN("L2 persisting cache: device query failed, nothing reserved");
+    if (max_persist > 0) {
+        if (cudaCtxResetPersistingL2Cache() != cudaSuccess)
+            IMP_LOG_DEBUG("L2 persisting cache: reset unsupported");
+        (void)cudaGetLastError();
+        size_t reserve = max_persist * 3 / 4;
+        if (const cudaError_t e = cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, reserve); e == cudaSuccess)
+            IMP_LOG_INFO("L2 persisting cache: reserved %zu MB / %zu MB total", reserve >> 20,
+                         max_persist >> 20);
+        else
+            IMP_LOG_WARN("L2 persisting cache: reserve %zu MB failed: %s", reserve >> 20, cudaGetErrorString(e));
+    }
+}
+
+// Tunes the default cudaMallocAsync pool to retain freed memory instead of
+// calling cuMemUnmap on every free (default threshold 0): many paths (prefill
+// metadata, MoE scratch, spec block tables, vision staging) use this pool; KV cache and workspaces own their memory separately (VRAMAllocator/cudaMalloc).
+void retain_async_pool_memory() {
+    cudaMemPool_t default_pool = nullptr;
+    int dev = 0;
+    if (cudaGetDevice(&dev) == cudaSuccess && cudaDeviceGetDefaultMemPool(&default_pool, dev) == cudaSuccess &&
+        default_pool != nullptr) {
+        uint64_t threshold = UINT64_MAX;
+        IMP_CUDA_CHECK_LOG(cudaMemPoolSetAttribute(default_pool, cudaMemPoolAttrReleaseThreshold, &threshold));
+    }
+}
 }  // namespace
 
 bool Engine::init_weights() {
@@ -158,35 +194,8 @@ bool Engine::init_weights() {
         }
     }
 
-    // cudaLimitPersistingL2CacheSize is a per-primary-context device limit that
-    // survives Engine teardown, so a previous model's reservation persists.
-    // Reset it first, or the next access-policy-window set can return cudaErrorInvalidValue and poison the stream.
-    {
-        cudaDeviceProp prop{};
-        cudaGetDeviceProperties(&prop, 0);
-        size_t max_persist = prop.persistingL2CacheMaxSize;
-        if (max_persist > 0) {
-            cudaCtxResetPersistingL2Cache();
-            (void)cudaGetLastError();
-            size_t reserve = max_persist * 3 / 4;
-            cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, reserve);
-            IMP_LOG_INFO("L2 persisting cache: reserved %zu MB / %zu MB total", reserve >> 20,
-                         max_persist >> 20);
-        }
-    }
-
-    // Tunes the default cudaMallocAsync pool to retain freed memory instead of
-    // calling cuMemUnmap on every free (default threshold 0): many paths (prefill
-    // metadata, MoE scratch, spec block tables, vision staging) use this pool; KV cache and workspaces own their memory separately (VRAMAllocator/cudaMalloc).
-    {
-        cudaMemPool_t default_pool = nullptr;
-        int dev = 0;
-        cudaGetDevice(&dev);
-        if (cudaDeviceGetDefaultMemPool(&default_pool, dev) == cudaSuccess && default_pool != nullptr) {
-            uint64_t threshold = UINT64_MAX;
-            cudaMemPoolSetAttribute(default_pool, cudaMemPoolAttrReleaseThreshold, &threshold);
-        }
-    }
+    reserve_persisting_l2();
+    retain_async_pool_memory();
 
     // Compute VRAM reserve for expert weight upload
     size_t expert_reserve = executor_->workspace_estimate();
@@ -256,7 +265,7 @@ bool Engine::init_weights() {
 
     // Upload weights
     size_t free_before = 0, total_before = 0;
-    cudaMemGetInfo(&free_before, &total_before);
+    const bool mem_before_ok = cudaMemGetInfo(&free_before, &total_before) == cudaSuccess;
     IMP_LOG_INFO("GPU memory before weight upload: %zu MiB free / %zu MiB total",
                  free_before / (1024UL * 1024), total_before / (1024UL * 1024));
 
@@ -282,7 +291,8 @@ bool Engine::init_weights() {
     }
 
     size_t free_after = 0, total_after = 0;
-    cudaMemGetInfo(&free_after, &total_after);
+    // A failed query on either side: no occupancy verdict.
+    const bool mem_ok = cudaMemGetInfo(&free_after, &total_after) == cudaSuccess && mem_before_ok;
     // A free-VRAM delta is not a weight size: on WSL2 the driver reports the
     // whole card as free until a process allocates, so a server started beside
     // a neighbour only learns of it THROUGH its own upload (MEMORY.md B8).
@@ -295,7 +305,7 @@ bool Engine::init_weights() {
     // One-sided on purpose: consuming less than the checkpoint is ordinary
     // (host-resident experts, dropped sources), but consuming a quarter more
     // cannot be weights, and this is the only moment occupancy is observable.
-    if (upload_exceeds_checkpoint(upload_consumed, on_disk)) {
+    if (mem_ok && upload_exceeds_checkpoint(upload_consumed, on_disk)) {
         IMP_LOG_WARN(
             "Weight upload consumed %zu MiB of device free VRAM for a %zu MiB checkpoint. The "
             "excess is not weights: another process is holding the card (on WSL2 it is invisible "
