@@ -124,6 +124,13 @@ public:
                                 int chunk_len, double* d_nll, cudaStream_t stream,
                                 int32_t* d_match = nullptr);
 
+    // Prompt logprobs (#2207) for hidden_[0..n_rows): row r scores d_targets[r]; writes logprob,
+    // 1-based rank and top_n (id, logprob) per row. Enqueue only; overwrites logits_ like the above.
+    // d_logits [chunk_rows x vocab] FP32: one LM-head GEMM per chunk (#2257); null = per-batch driver.
+    void prompt_logprobs_partial(const int32_t* d_targets, int n_rows, int top_n, float* d_lp,
+                                 int32_t* d_rank, int32_t* d_top_ids, float* d_top_lp, float* d_logits,
+                                 int chunk_rows, cudaStream_t stream);
+
     // Embedding pooling (#1005): column-wise sum of hidden_[0..n_tokens) into
     // d_out[d_model] fp32. Runs after a chunk's forward while hidden_ still
     // holds it; engine accumulates chunk sums host-side for full-input pooling.
@@ -561,6 +568,9 @@ private:
     // FP8 per-row LM head (gemm.nvfp4_lm_head=fp8): final norm + gemv_fp8_rowscale_fp32 over h's rows
     // into lg (FP32). False = no FP8 head built; the caller keeps its own dispatch.
     bool lm_head_fp8_(const Tensor& h, Tensor& lg, cudaStream_t stream);
+    // Prompt logprobs (#2257): LM head for hidden_[row0, row0 + csz) into lg (FP32, vocab slabs of
+    // slab_w columns, compute/prompt_logprobs_rows.h). False = no one-GEMM route, nothing written.
+    bool prompt_lm_head_chunk_(int row0, int csz, float* lg, int& slab_w, cudaStream_t stream);
 
     // Spec-decode verify argmax partials (lazy, grows only; freed in
     // free_buffers).

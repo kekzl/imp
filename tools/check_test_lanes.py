@@ -338,9 +338,19 @@ def main():
     # (#2201); they need a model dir, so they sit beside the tokenizer parity tests.
     # 1154 -> 1162: CandidateTokenGuardTest x8 (test-e2e): /v1/decide boundary guard on the real Qwen3
     # tokenizer.json (model file via IMP_TEST_TOKENIZER_QWEN3, no GPU).
-    # 1162 -> 1163: MtpQwen4ExpReference.TwoDraftStepsMatchVllmMath (test-e2e): Qwen4Exp draft step
+    # 1162 -> 1164: KVHostSpillGpuTest x2 TEST_P (test-kv): host spill tier round trip and its no-tier
+    # control on a device KVCache (#2203).
+    # 1164 -> 1165: DequantGptqGpu.KernelBitEqualToHostReference (test-quant): dequant_gptq4 kernel vs
+    # host reference (#2249); needs a card.
+    # 1165 -> 1166: HybridSharedScoreTest x1 (test-e2e, GPU): #2198 shared score rows restoring one
+    # recurrent snapshot in one ragged forward (IMP_TEST_MODEL_GDN).
+    # 1166 -> 1167: DequantAwqGpu.KernelBitEqualToHostReference (test-quant): dequant_awq4 kernel vs
+    # host reference (#2205); needs a card.
+    # 1167 -> 1171: PromptLogprobsRows x3 (test-compute, GPU): fused prompt-logprobs row kernel vs CPU
+    # reference; PromptLogprobsE2ETest x1 (test-e2e, IMP_TEST_MODEL): chunk logits released (#2257).
+    # 1171 -> 1172: MtpQwen4ExpReference.TwoDraftStepsMatchVllmMath (test-e2e): Qwen4Exp draft step
     # vs the numpy reference fixture, needs the Flash-Next checkpoint and a card.
-    PINNED = 1163
+    PINNED = 1172
 
     text = CMAKE.read_text()
     mods = module_sources(text)

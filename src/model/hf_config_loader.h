@@ -77,11 +77,13 @@ struct HFConfigLoader {
     };
     static bool load_tokenizer_flags(const std::string& model_dir, TokenizerFlags& out);
 
-    // GPTQ quantization config from quantize_config.json
+    // GPTQ quantization config: quantize_config.json, else config.json quantization_config
+    // with quant_method gptq. checkpoint_format from "checkpoint_format" or "format" (GPTQModel).
     struct GPTQConfig {
         int bits = 0;  // 4 or 8
         int group_size = 128;
         bool desc_act = false;
+        std::string checkpoint_format;  // "" = unspecified (AutoGPTQ default: gptq v1)
     };
     static bool load_gptq_config(const std::string& model_dir, GPTQConfig& cfg);
 
@@ -123,7 +125,7 @@ struct HFConfigLoader {
 
     // AWQ (Activation-aware Weight Quantization) config. Sourced from
     // `quantization_config` in `config.json` or a separate `quant_config.json`.
-    // Detection-only today; imp does not yet have an AWQ dequant kernel.
+    // 4-bit GEMM with zero points dequantizes (#2205); load_safetensors refuses the rest.
     struct AWQConfig {
         int bits = 4;            // typically 4
         int group_size = 128;    // typical AWQ group_size

@@ -54,6 +54,11 @@ struct KVCache {
     // blocks can't back reuse otherwise). One snapshot per prefill end, LRU. 0 = off.
     int swa_snapshot_mb = 0;
 
+    // Host spill tier (#2203): pinned host RAM (MiB) for prefix-cache blocks reclaimed under pool
+    // pressure; a later prefix hit restores them by H2D copy instead of re-prefill. 0 = off.
+    // Needs prefix caching; refused on SWA layers and the sparse key min/max pool.
+    int host_spill_mb = 0;
+
     // Pin the KV pool to exactly this many blocks; 0 = size from the VRAM
     // budget. Lets an operator sharing a card declare pool size explicitly and
     // reach the admission guardrail (I6) from config, not only the C API.

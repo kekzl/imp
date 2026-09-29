@@ -6,10 +6,15 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Added
 - Qwen3.8-Flash-Next MTP drafting (`speculative.mtp_k=1`, auto declines it): hc-stream draft layer, FP8 block-scale experts (2560 MiB head), captured verify over host-resident experts (56.7 -> 27-36 ms/verify). Draft logits vs the vLLM math: max |dlogit| 0.0135 (band 0.11). Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
+- AWQ SafeTensors checkpoints (`quant_method: awq`, `bits: 4`, `zero_point: true`, `version: gemm`) load: q/k/v/o/gate/up/down dequantize to FP16 at upload in AutoAWQ packing order (`src/quant/dequant_awq.cu`); VRAM holds FP16 weights. GEMV, Marlin, other bit widths and `zero_point: false` stay refused at load (#2205, #2196).
+- C API `imp_prefill_token(ctx, &tok)`: the token `imp_prefill`/`imp_prefill_with_params` sampled; `imp_decode_step` returns the next one. GreedyLockTest locks now start with it: Qwen3-8B-Q8_0 `Q: What is 17 + 25?` matches llama.cpp in all 31 tokens (#2251).
+- `kv_cache.host_spill_mb` (default 0): prefix blocks the KV pool reclaims go to pinned host RAM and come back by H2D on a later hit. Qwen3-8B-Q8_0, 4482-token re-hit after eviction: TTFT 0.504 -> 0.274 s (device hit 0.220 s), output identical (#2203).
+- `/v1/completions` prompt logprobs (#2207): vLLM `prompt_logprobs: N` (0..20) and OpenAI `echo` + `logprobs`, gathered on device per prefill row; only rows x (2 + 2N) values reach the host (168 KiB scratch per 1k rows at N = 20). `stream: true` with either is a 400. Such requests skip prefix reuse and ragged prefill.
 - `--model hf://<org>/<repo>[:<file>.gguf]` (imp-server, imp-cli) downloads inside the container via libcurl into the HF cache (`HF_HOME=/models/huggingface` in the image): Range resume, LFS sha256 check, `HF_TOKEN`; a second start makes 0 requests (#2200).
 - `gemm.nvfp4_lm_head=fp8`: per-row FP8 E4M3 LM head (#2156, #2166), GDN hybrids included; one tensor-core kernel (32 rows per weight pass, row-count-invariant bits) serves decode, batch and `--perplexity`; the source head is freed after load. Qwen3-8B tg128 286.8 vs 300.9 tok/s (auto), c=32 6519 vs 6851 tok/s. Default stays `auto`.
 
 ### Changed
+- `prompt_logprobs` LM head (#2257): one dequantized-head GEMM per chunk of min(rows, 1024, free VRAM / 2 / 4V) rows instead of 8-row dp4a batches, and one fused pass per row for logsumexp, rank and top-N (was 2 + N). Gate `scripts/accept_2257.sh`: 2048-token prefill with `prompt_logprobs=0` <= 1.30x off.
 - `check_doc_citations.py`: a moved anchor is a `DRIFT` warning (exit 0), `--fix` rewrites the line numbers; only a gone or ambiguous anchor fails (25-line window). Line drift broke main 3x on 2026-09-29 (#2231).
 - `gemm.nvfp4_lm_head=auto` now serves the LM head as per-row FP8 E4M3 where the head allows it (NVFP4 rule as fallback); `on` keeps NVFP4. PPL 45k: Qwen3-8B 11.1108 -> 10.7623, Qwen3-30B-A3B 11.8443 -> 11.3476, Flash-Next 4.6493 -> 4.4873; tg128 -4.7 % / -3.0 % (#2166, #2156).
 - Qwen3.8-Flash-Next decodes with max_batch_size > 1: PLE conv rows are a 180 KiB tail of each SSM slot and the n-gram context comes from each request's tokens, so batched rows no longer share one context. The clamp to 1 stays only with attention.qsa=true.
@@ -20,6 +25,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Qwen3.8-Flash-Next (host-resident experts): the F16 GDN in/gate/out are freed after load; M>32 prefill runs their NVFP4 (in) / MXFP8 (gate, out, now "auto") copies, smaller M rebuild from those. Expert cache 290 -> 355 slots/layer, tg512 prose 66.81 -> 70.24 tok/s, 45k PPL windows +0.31 % / -0.21 %.
 
 ### Fixed
+- FP16 FMHA prefill picks Bq only among instanced (Bq, head_dim) tiles. Off sm_120 smem limits, HD512 could select Bq=32 and HD256 Bq=16, both with no kernel, so the launch returned false. sm_120 choices unchanged (#2243).
+- GPTQ SafeTensors dequant reads qzeros as AutoGPTQ writes them (`[groups, N/8]`) with the v1 zero offset (`(z + 1) & 0xF`, `gptq_v2`: none); config also from `config.json`; other formats, `bits != 4`, bad shapes refused at load. Qwen2.5-0.5B-Instruct-GPTQ-Int4 per-row cosine vs BF16: 0.8373 -> 0.9901 (#2249).
 - Qwen3 dense GGUF: `kv_cache.dtype=auto` resolves to FP16 again; FP8 KV turned greedy output into "The capital of France is not Paris". Decode after 16k context 208.5 -> 182.6 tok/s (Qwen3-8B-Q8_0); `kv_cache.dtype=fp8` restores it (#2208).
 - `gemm.nvfp4_lm_head=auto` builds the FP8 head only from a 16-bit head; an 8-bit GGUF head (Q8_0) stays at checkpoint precision. Qwen3-8B-Q8_0 first token: This -0.674 (FP8) -> The -0.646, HF fp32 The -0.644 (#2224).
 - GDN hybrids with `gdn.state_bf16 = false` (FP32 state): a recurrent snapshot over a 65+ row scan threw `h_snap needs a single chunk`, and at exactly 64 rows the slab stayed unwritten. Snapshot scans now run the fused kernel over the whole range (#2214).

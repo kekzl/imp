@@ -1,6 +1,8 @@
 #pragma once
 
+#include "core/cuda_raii.h"
 #include "memory/kv_cache.h"
+#include "memory/kv_host_spill.h"
 #include <cuda_runtime_api.h>
 #include <atomic>
 #include <cstddef>
@@ -164,6 +166,13 @@ public:
     uint64_t cached_block_evictions() const {
         return cached_block_evictions_.load(std::memory_order_relaxed);
     }
+
+    // ── Host spill tier (#2203) ──────────────────────────────────────
+    // Reclaimed prefix blocks go to pinned host RAM (budget_bytes); a later prefix hit restores
+    // them by H2D copy instead of re-prefill. False (tier off) without prefix caching, on SWA
+    // layers or the key min/max pool, or when the pinned alloc fails.
+    bool enable_host_spill(size_t budget_bytes);
+    const KVHostSpill* host_spill() const { return host_spill_.get(); }
 
     // SWA-aware sizing (kv_cache.swa_sizing): sliding-window layers read/write a small
     // dedicated block group; the manager keeps a second positional table per sequence, same
@@ -378,8 +387,20 @@ private:
     void rollback_partial_allocation(int seq_id, SeqBlocks& blocks, std::vector<size_t>& hashes,
                                      size_t original_size);
 
+    // Host spill (kv_cache_manager_spill.cpp): spill_block_ copies a reclaimed block out under its
+    // chain hash and completes before returning (the block is reused next). restore_spilled_
+    // enqueues the H2D copy on spill_stream_; flush_spill_restores_ waits for all of them before
+    // allocate_blocks_with_prefix returns. Stream order keeps a slot's pending H2D ahead of a later
+    // D2H into the same slot.
+    void spill_block_(int block_id, size_t hash);
+    bool restore_spilled_(size_t hash, int block_id);
+    void flush_spill_restores_();
+    bool spill_restores_pending_ = false;
+
     // Underlying block-level cache (owns the memory pool).
     std::unique_ptr<KVCache> cache_;
+    std::unique_ptr<KVHostSpill> host_spill_;
+    CudaStream spill_stream_;
 
     // seq_id -> ordered list of block ids.
     std::unordered_map<int, SeqBlocks> seq_blocks_;
