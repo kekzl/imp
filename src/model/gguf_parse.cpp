@@ -3,9 +3,11 @@
 
 #include "model/gguf_loader.h"
 #include "model/gguf_loader_internal.h"
+#include "core/enum_table.h"
 #include "core/logging.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -13,141 +15,69 @@ namespace imp {
 
 // ---- GGML type tables ----
 
-int gguf_blck_size(GgufWireType type) {
-    switch (type) {
-        case GgufWireType::F32:
-            return 1;
-        case GgufWireType::F16:
-            return 1;
-        case GgufWireType::BF16:
-            return 1;
-        case GgufWireType::F64:
-            return 1;
-        case GgufWireType::I8:
-            return 1;
-        case GgufWireType::I16:
-            return 1;
-        case GgufWireType::I32:
-            return 1;
-        case GgufWireType::I64:
-            return 1;
-        case GgufWireType::Q4_0:
-            return 32;
-        case GgufWireType::Q4_1:
-            return 32;
-        case GgufWireType::Q5_0:
-            return 32;
-        case GgufWireType::Q5_1:
-            return 32;
-        case GgufWireType::Q8_0:
-            return 32;
-        case GgufWireType::Q8_1:
-            return 32;
-        case GgufWireType::IQ4_NL:
-            return 32;
-        case GgufWireType::Q2_K:
-            return 256;
-        case GgufWireType::Q3_K:
-            return 256;
-        case GgufWireType::Q4_K:
-            return 256;
-        case GgufWireType::Q5_K:
-            return 256;
-        case GgufWireType::Q6_K:
-            return 256;
-        case GgufWireType::Q8_K:
-            return 256;
-        case GgufWireType::IQ2_XXS:
-            return 256;
-        case GgufWireType::IQ2_XS:
-            return 256;
-        case GgufWireType::IQ2_S:
-            return 256;
-        case GgufWireType::IQ3_XXS:
-            return 256;
-        case GgufWireType::IQ3_S:
-            return 256;
-        case GgufWireType::IQ1_S:
-            return 256;
-        case GgufWireType::IQ1_M:
-            return 256;
-        case GgufWireType::IQ4_XS:
-            return 256;
-        case GgufWireType::MXFP4:
-        case GgufWireType::MXFP4_V2:
-            return 32;
-        default:
-            return 0;
-    }
+namespace {
+
+struct WireTypeInfo {
+    GgufWireType id;
+    const char* name;
+    int block_size;    // elements per block
+    size_t type_size;  // bytes per block (quantized) or per element
+    QType qtype;       // NONE: no engine path for this wire type
+};
+
+// One row per GgufWireType enumerator; the single source for the four gguf_type lookups.
+constexpr auto kWireRows = std::to_array<WireTypeInfo>({
+    {GgufWireType::F32, "F32", 1, 4, QType::F32},
+    {GgufWireType::F16, "F16", 1, 2, QType::F16},
+    {GgufWireType::Q4_0, "Q4_0", 32, 18, QType::Q4_0},  // 32*4/8 + 2 (fp16 scale)
+    {GgufWireType::Q4_1, "Q4_1", 32, 20, QType::Q4_1},  // 32*4/8 + 2 + 2 (scale + min)
+    {GgufWireType::Q5_0, "Q5_0", 32, 22, QType::Q5_0},  // 32*5/8 + 4 (high bits) + 2
+    {GgufWireType::Q5_1, "Q5_1", 32, 24, QType::Q5_1},  // 32*5/8 + 4 + 2 + 2
+    {GgufWireType::Q8_0, "Q8_0", 32, 34, QType::Q8_0},  // 32*1 + 2
+    // Q8_1 maps to NONE on purpose: parse_tensor_infos refuses the file (#1917).
+    {GgufWireType::Q8_1, "Q8_1", 32, 36, QType::NONE},  // 32*1 + 2 + 2
+    {GgufWireType::Q2_K, "Q2_K", 256, 84, QType::Q2_K},
+    {GgufWireType::Q3_K, "Q3_K", 256, 110, QType::Q3_K},
+    {GgufWireType::Q4_K, "Q4_K", 256, 144, QType::Q4_K},
+    {GgufWireType::Q5_K, "Q5_K", 256, 176, QType::Q5_K},
+    {GgufWireType::Q6_K, "Q6_K", 256, 210, QType::Q6_K},
+    {GgufWireType::Q8_K, "Q8_K", 256, 292, QType::Q8_K},
+    // IQ1/IQ2/IQ3 i-quants: no native QType yet.
+    {GgufWireType::IQ2_XXS, "IQ2_XXS", 256, 66, QType::NONE},
+    {GgufWireType::IQ2_XS, "IQ2_XS", 256, 74, QType::NONE},
+    {GgufWireType::IQ3_XXS, "IQ3_XXS", 256, 98, QType::NONE},
+    {GgufWireType::IQ1_S, "IQ1_S", 256, 50, QType::NONE},
+    {GgufWireType::IQ4_NL, "IQ4_NL", 32, 18, QType::IQ4_NL},
+    {GgufWireType::IQ3_S, "IQ3_S", 256, 110, QType::NONE},
+    {GgufWireType::IQ2_S, "IQ2_S", 256, 82, QType::NONE},
+    {GgufWireType::IQ4_XS, "IQ4_XS", 256, 136, QType::IQ4_XS},
+    {GgufWireType::I8, "I8", 1, 1, QType::INT8},
+    {GgufWireType::I16, "I16", 1, 2, QType::NONE},
+    {GgufWireType::I32, "I32", 1, 4, QType::INT32},
+    {GgufWireType::I64, "I64", 1, 8, QType::NONE},
+    {GgufWireType::F64, "F64", 1, 8, QType::NONE},
+    {GgufWireType::IQ1_M, "IQ1_M", 256, 56, QType::NONE},
+    {GgufWireType::BF16, "BF16", 1, 2, QType::BF16},
+    {GgufWireType::MXFP4, "MXFP4", 32, 17, QType::MXFP4},     // 32*4/8 + 1 (UE8M0 scale)
+    {GgufWireType::MXFP4_V2, "MXFP4", 32, 17, QType::MXFP4},  // same block as MXFP4
+});
+
+constexpr WireTypeInfo kUnknownWire{GgufWireType::F32, "UNKNOWN", 0, 0, QType::NONE};
+static_assert(enum_table::rows_cover_enumerators<GgufWireType, 256>(kWireRows),
+              "kWireRows must have exactly one row per GgufWireType enumerator");
+
+// Unused ids (4, 5, 32..38) and ids past the last row resolve to kUnknownWire.
+constexpr auto kWireIndex = enum_table::index_rows<enum_table::index_size(kWireRows)>(kWireRows);
+
+const WireTypeInfo& wire_info(GgufWireType type) {
+    return enum_table::lookup(kWireIndex, type, kUnknownWire);
 }
 
-size_t gguf_type_size(GgufWireType type) {
-    switch (type) {
-        case GgufWireType::F32:
-            return 4;
-        case GgufWireType::F16:
-            return 2;
-        case GgufWireType::BF16:
-            return 2;
-        case GgufWireType::F64:
-            return 8;
-        case GgufWireType::I8:
-            return 1;
-        case GgufWireType::I16:
-            return 2;
-        case GgufWireType::I32:
-            return 4;
-        case GgufWireType::I64:
-            return 8;
-        case GgufWireType::Q4_0:
-            return 18;  // 32*4/8 + 2 (fp16 scale)
-        case GgufWireType::Q4_1:
-            return 20;  // 32*4/8 + 2 + 2 (scale + min)
-        case GgufWireType::Q5_0:
-            return 22;  // 32*5/8 + 4 (high bits) + 2
-        case GgufWireType::Q5_1:
-            return 24;  // 32*5/8 + 4 + 2 + 2
-        case GgufWireType::Q8_0:
-            return 34;  // 32*1 + 2
-        case GgufWireType::Q8_1:
-            return 36;  // 32*1 + 2 + 2
-        case GgufWireType::Q2_K:
-            return 84;
-        case GgufWireType::Q3_K:
-            return 110;
-        case GgufWireType::Q4_K:
-            return 144;
-        case GgufWireType::Q5_K:
-            return 176;
-        case GgufWireType::Q6_K:
-            return 210;
-        case GgufWireType::Q8_K:
-            return 292;
-        case GgufWireType::IQ2_XXS:
-            return 66;
-        case GgufWireType::IQ2_XS:
-            return 74;
-        case GgufWireType::IQ2_S:
-            return 82;
-        case GgufWireType::IQ3_XXS:
-            return 98;
-        case GgufWireType::IQ3_S:
-            return 110;
-        case GgufWireType::IQ1_S:
-            return 50;
-        case GgufWireType::IQ1_M:
-            return 56;
-        case GgufWireType::IQ4_NL:
-            return 18;
-        case GgufWireType::IQ4_XS:
-            return 136;
-        case GgufWireType::MXFP4:
-        case GgufWireType::MXFP4_V2:
-            return 17;  // 32*4/8 + 1 (UE8M0 scale)
-        default:
-            return 0;
-    }
-}
+}  // namespace
+
+int gguf_blck_size(GgufWireType type) { return wire_info(type).block_size; }
+
+size_t gguf_type_size(GgufWireType type) { return wire_info(type).type_size; }
 
 size_t gguf_row_size(GgufWireType type, int64_t n_elements) {
     int bs = gguf_blck_size(type);
@@ -156,124 +86,9 @@ size_t gguf_row_size(GgufWireType type, int64_t n_elements) {
     return static_cast<size_t>((n_elements + bs - 1) / bs) * gguf_type_size(type);
 }
 
-QType gguf_type_to_qtype(GgufWireType type) {
-    // Wire-stable values 0..31 in QType match the GGUF on-disk numbering,
-    // so the cast is exact for every supported block-quant type. Anything
-    // outside the 0..31 range falls through to NONE.
-    switch (type) {
-        case GgufWireType::F32:
-            return QType::F32;
-        case GgufWireType::F16:
-            return QType::F16;
-        case GgufWireType::BF16:
-            return QType::BF16;
-        case GgufWireType::Q4_0:
-            return QType::Q4_0;
-        case GgufWireType::Q4_1:
-            return QType::Q4_1;
-        case GgufWireType::Q5_0:
-            return QType::Q5_0;
-        case GgufWireType::Q5_1:
-            return QType::Q5_1;
-        case GgufWireType::Q8_0:
-            return QType::Q8_0;
-        // Q8_1 has no arm on purpose: parse_tensor_infos refuses the file.
-        case GgufWireType::Q2_K:
-            return QType::Q2_K;
-        case GgufWireType::Q3_K:
-            return QType::Q3_K;
-        case GgufWireType::Q4_K:
-            return QType::Q4_K;
-        case GgufWireType::Q5_K:
-            return QType::Q5_K;
-        case GgufWireType::Q6_K:
-            return QType::Q6_K;
-        case GgufWireType::Q8_K:
-            return QType::Q8_K;
-        case GgufWireType::MXFP4:
-        case GgufWireType::MXFP4_V2:
-            return QType::MXFP4;
-        case GgufWireType::I8:
-            return QType::INT8;
-        case GgufWireType::I32:
-            return QType::INT32;
-        case GgufWireType::IQ4_NL:
-            return QType::IQ4_NL;
-        case GgufWireType::IQ4_XS:
-            return QType::IQ4_XS;
-        default:
-            // IQ1/IQ2/IQ3 i-quants — no native QType yet; mark unsupported.
-            return QType::NONE;
-    }
-}
+QType gguf_type_to_qtype(GgufWireType type) { return wire_info(type).qtype; }
 
-const char* gguf_type_name(GgufWireType type) {
-    switch (type) {
-        case GgufWireType::F32:
-            return "F32";
-        case GgufWireType::F16:
-            return "F16";
-        case GgufWireType::BF16:
-            return "BF16";
-        case GgufWireType::F64:
-            return "F64";
-        case GgufWireType::I8:
-            return "I8";
-        case GgufWireType::I16:
-            return "I16";
-        case GgufWireType::I32:
-            return "I32";
-        case GgufWireType::I64:
-            return "I64";
-        case GgufWireType::Q4_0:
-            return "Q4_0";
-        case GgufWireType::Q4_1:
-            return "Q4_1";
-        case GgufWireType::Q5_0:
-            return "Q5_0";
-        case GgufWireType::Q5_1:
-            return "Q5_1";
-        case GgufWireType::Q8_0:
-            return "Q8_0";
-        case GgufWireType::Q8_1:
-            return "Q8_1";
-        case GgufWireType::Q2_K:
-            return "Q2_K";
-        case GgufWireType::Q3_K:
-            return "Q3_K";
-        case GgufWireType::Q4_K:
-            return "Q4_K";
-        case GgufWireType::Q5_K:
-            return "Q5_K";
-        case GgufWireType::Q6_K:
-            return "Q6_K";
-        case GgufWireType::Q8_K:
-            return "Q8_K";
-        case GgufWireType::IQ2_XXS:
-            return "IQ2_XXS";
-        case GgufWireType::IQ2_XS:
-            return "IQ2_XS";
-        case GgufWireType::IQ2_S:
-            return "IQ2_S";
-        case GgufWireType::IQ3_XXS:
-            return "IQ3_XXS";
-        case GgufWireType::IQ3_S:
-            return "IQ3_S";
-        case GgufWireType::IQ1_S:
-            return "IQ1_S";
-        case GgufWireType::IQ1_M:
-            return "IQ1_M";
-        case GgufWireType::IQ4_NL:
-            return "IQ4_NL";
-        case GgufWireType::IQ4_XS:
-            return "IQ4_XS";
-        case GgufWireType::MXFP4:
-        case GgufWireType::MXFP4_V2:
-            return "MXFP4";
-        default:
-            return "UNKNOWN";
-    }
-}
+const char* gguf_type_name(GgufWireType type) { return wire_info(type).name; }
 
 // ---- Read array elements by type into a GGUFValue ----
 
@@ -402,8 +217,7 @@ double val_float(const GGUFValue& v) {
 
 // ---- Parse tensor info entries from a BinaryReader ----
 
-void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count,
-                        std::vector<GGUFTensorInfo>& out) {
+void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count, std::vector<GGUFTensorInfo>& out) {
     for (uint64_t i = 0; i < tensor_count && !reader.failed(); i++) {
         GGUFTensorInfo info;
         info.name = reader.read_string();
