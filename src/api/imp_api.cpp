@@ -734,6 +734,7 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
         return IMP_ERROR_INTERNAL;
     }
 
+    ctx->prefill_token = -1;
     try {
         // If there is an existing active request, free its KV cache and mark
         // cancelled so the scheduler removes it from active_ on next schedule().
@@ -798,6 +799,7 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
         // After prefill, any tokens already in output_tokens are "consumed"
         // by the prefill path (the first decode token).
         ctx->consumed_output = req->output_tokens.size();
+        ctx->prefill_token = req->output_tokens.empty() ? -1 : req->output_tokens.front();
 
         return IMP_SUCCESS;
     } catch (const std::bad_alloc&) {
@@ -879,6 +881,13 @@ ImpError imp_calibration_write(ImpContext ctx, const char* path) {
         IMP_LOG_ERROR("imp_calibration_write: %s", ex.what());
         return IMP_ERROR_INTERNAL;
     }
+}
+
+ImpError imp_prefill_token(ImpContext ctx, int32_t* out_token) {
+    if (!ctx || !out_token || ctx->prefill_token < 0)
+        return IMP_ERROR_INVALID_ARG;
+    *out_token = ctx->prefill_token;
+    return IMP_SUCCESS;
 }
 
 ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_t* out_token) {

@@ -92,8 +92,13 @@ protected:
         EXPECT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
         EXPECT_EQ(imp_prefill_with_params(ctx_, prompt_tokens.data(), n_prompt, &params), IMP_SUCCESS);
 
+        // The prefill-sampled token is the direct answer (" Paris"); locks start with it (#2251).
         std::vector<int32_t> out;
-        for (int i = 0; i < n_gen; i++) {
+        int32_t first = -1;
+        EXPECT_EQ(imp_prefill_token(ctx_, &first), IMP_SUCCESS);
+        if (first >= 0)
+            out.push_back(first);
+        for (int i = static_cast<int>(out.size()); i < n_gen; i++) {
             int32_t tok = -1;
             if (imp_decode_step(ctx_, &params, &tok) != IMP_SUCCESS || tok < 0)
                 break;
