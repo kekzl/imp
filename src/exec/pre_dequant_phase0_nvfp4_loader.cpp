@@ -528,7 +528,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
 }
 
 void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
-    const ModelConfig& cfg, cudaStream_t stream) {
+    const ModelConfig& cfg, cudaStream_t /*stream*/) {
     if (!cfg.is_nvfp4_prequant)
         return;
     Model* mut_model = const_cast<Model*>(model_);

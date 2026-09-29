@@ -359,7 +359,6 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
     nvfp4_decode_collect_candidates_(cfg, dctx);
 
     // Aliases keep the body that hasn't been extracted yet readable.
-    const char* mode_str = dctx.mode_str;
     using NvFP4Entry = Nvfp4DecodeContext::Entry;
     std::vector<NvFP4Entry>& nvfp4_entries = dctx.entries;
 
