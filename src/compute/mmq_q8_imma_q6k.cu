@@ -88,6 +88,7 @@ __device__ __forceinline__ void fetch_b_q6k_unpacked(Q6kUnpackedB& rb, int tid, 
     }
 }
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int T0>
 __device__ __forceinline__ void commit_b_q6k_unpacked(const Q6kUnpackedB& rb, int tid, uint8_t (*sQl)[kQlRow],
                                                       uint8_t (*sQh)[kQhRow], uint8_t (*sScd)[8]) {
@@ -113,9 +114,11 @@ __device__ __forceinline__ void commit_b_q6k_unpacked(const Q6kUnpackedB& rb, in
         }
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM, bool BETA1>
 __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
     const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale, const uint8_t* __restrict__ Wq6k,
@@ -324,6 +327,7 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
         }
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Explicit instantiations launched by the dispatch in mmq_q8_imma.cu.
 template __global__ void mmq_imma_q6k_raw_kernel<32, false>(const int8_t*, const __half*, const uint8_t*,

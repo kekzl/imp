@@ -32,6 +32,7 @@ __device__ __forceinline__ void fp8x4_to_half2x2(uint32_t packed, half2& lo, hal
     hi = half2(r1);
 }
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM, int TOK>
 __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_multitok_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -178,6 +179,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_fp8_mt), m_w, l_w, o_reg, warp_id,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx, attn_sinks);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 
@@ -187,7 +189,8 @@ void paged_attention_decode_fp8_multitok_hd128(const half* Q, const uint8_t* K_c
                                                float scale, float kv_scale, int max_num_blocks,
                                                int sliding_window, float softcap, const half* attn_sinks,
                                                cudaStream_t stream) {
-    const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 + NUM_WARPS * 128 * sizeof(float);
+    const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 +
+                              static_cast<int64_t>(NUM_WARPS) * 128 * sizeof(float);
     dim3 grid(batch_size, n_heads);
     dim3 block(BLOCK_THREADS);
     // TOK=4. An 8-token instance measured 94.2 vs 91.7 us at 32 x 1100 and

@@ -219,12 +219,11 @@ bool device_args_done = false;
                                 ? *h.payload.cutlass_nvfp4.global_scale
                                 : 1.0f;
                     }
-                    cudaMemcpyAsync(moe_.d_B_ptrs_cache, h_B_ptrs.data(),
-                                    ne * sizeof(const void*),
+                    cudaMemcpyAsync(static_cast<void*>(moe_.d_B_ptrs_cache),
+                                    static_cast<const void*>(h_B_ptrs.data()), ne * sizeof(const void*),
                                     cudaMemcpyHostToDevice, stream);
-                    cudaMemcpyAsync(moe_.d_SFB_ptrs_cache,
-                                    h_SFB_ptrs.data(),
-                                    ne * sizeof(const void*),
+                    cudaMemcpyAsync(static_cast<void*>(moe_.d_SFB_ptrs_cache),
+                                    static_cast<const void*>(h_SFB_ptrs.data()), ne * sizeof(const void*),
                                     cudaMemcpyHostToDevice, stream);
                     cudaMemcpyAsync(moe_.d_alpha_full, h_alpha.data(),
                                     ne * sizeof(float),
@@ -721,9 +720,10 @@ auto quantize_once = [&](const char* a_base, int K_in, std::vector<size_t>& sfa_
             h_sfa_bases[e] = all_sfa + sfa_offsets[e];
     }
     // Upload SFA pointer array to device (~1 KB).
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.cutlass3x_sfa_ptrs, h_sfa_bases.data(),
-                                       static_cast<size_t>(ne) * sizeof(uint8_t*),
-                                       cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.cutlass3x_sfa_ptrs),
+                                       static_cast<const void*>(h_sfa_bases.data()),
+                                       static_cast<size_t>(ne) * sizeof(uint8_t*), cudaMemcpyHostToDevice,
+                                       stream));
     // Zero active SFA region (SfAtom pads rows to 128).
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(all_sfa, 0, total_sfa, stream));
     // Fused per-expert quantize in one kernel launch.

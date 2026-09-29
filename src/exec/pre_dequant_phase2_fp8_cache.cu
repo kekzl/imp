@@ -46,7 +46,7 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
 
                 int rows = static_cast<int>(w.shape[0]);
                 int cols = static_cast<int>(w.shape[1]);
-                int64_t logical_K = cols * 2;
+                int64_t logical_K = static_cast<int64_t>(cols) * 2;
                 size_t fp16_bytes = static_cast<size_t>(rows) * logical_K * sizeof(half);
 
                 if (fp16_all_bytes + fp16_bytes > fp8_budget)
@@ -62,7 +62,7 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
                     nv.micro_scales = w.scales;
                     nv.tensor_scale = w.tensor_scale;
                     nv.N = rows;
-                    nv.K = cols * 2;
+                    nv.K = static_cast<int64_t>(cols) * 2;
                     dequantize_nvfp4_to_fp16(nv, fp16_buf, stream);
                 } else {
                     return;
@@ -177,7 +177,7 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
                     nv.micro_scales = e.weight.scales;
                     nv.tensor_scale = e.weight.tensor_scale;
                     nv.N = rows;
-                    nv.K = cols * 2;
+                    nv.K = static_cast<int64_t>(cols) * 2;
                     dequantize_nvfp4_to_fp16(nv, qscratch_->dequant, stream);
                 } else {
                     dequant_gpu(e.weight.data, qscratch_->dequant, e.qtype, rows, cols, stream);

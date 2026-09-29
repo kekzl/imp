@@ -33,6 +33,7 @@ namespace imp {
 // Phase 1: per-block max, sum, top_k logit candidates over a strided subset. Body shared
 // between the single-row kernel and the row-parallel batched wrapper (grid.y=row);
 // blockIdx.x/gridDim.x usage identical, so per-row results are bit-identical.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ void topk_partial_body(const float* __restrict__ logits, int vocab_size,
                                                   int top_k, float inv_temperature,
                                                   float* __restrict__ block_max_out,
@@ -133,6 +134,7 @@ __device__ __forceinline__ void topk_partial_body(const float* __restrict__ logi
                       cand_val_out + static_cast<size_t>(blockIdx.x) * top_k,
                       cand_idx_out + static_cast<size_t>(blockIdx.x) * top_k);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 __global__ void topk_partial_kernel(const float* __restrict__ logits, int vocab_size, int top_k,
                                     float inv_temperature, float* __restrict__ block_max_out,
@@ -160,6 +162,7 @@ __global__ void topk_partial_rows_kernel(const TopkRowArgs* __restrict__ rows, i
 // block_reduce_topk over SAMPLE_NBLOCKS*top_k candidates read straight from global
 // (coalesced, no big smem staging); only the final top-p/sample is serial. Runs inside
 // graph capture.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float inv_temperature,
                                                    unsigned int seed, int n_blocks,
                                                    const float* __restrict__ block_max_in,
@@ -266,6 +269,7 @@ __device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float
     }
     d_result[0] = static_cast<int32_t>(chosen);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 __global__ void topk_finalize_kernel(int top_k, float top_p, float inv_temperature, unsigned int seed,
                                      const int* __restrict__ d_seed_salt, int n_blocks,

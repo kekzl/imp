@@ -129,10 +129,10 @@ jobs:
           base="${{ github.event.pull_request.base.sha || github.event.before }}"
           code=true
           # `cpp` gates the clang-tidy job, which lints changed src|tools *.cpp
-          # and nothing else. It used to start on every code PR and pay ~2.6 min
-          # (container pull + cache round trip) to print "nothing to lint" - and
-          # it does that on most PRs here, which are .cu, .py or .md. Same
-          # FAIL-OPEN rule as `code`: any uncertainty runs the job.
+          # and the host side of changed src/*.cu (#2210). It used to start on
+          # every code PR and pay ~2.6 min (container pull + cache round trip)
+          # to print "nothing to lint". Same FAIL-OPEN rule as `code`: any
+          # uncertainty runs the job.
           cpp=true
           # Say so when the fail-open fires. Without this the step prints a
           # perfectly normal-looking `code=true` and an empty file list, which
@@ -158,12 +158,12 @@ jobs:
             # check (ruleset 14716423): a syntax error here fails every PR.
             # `grep -c` reads all of stdin, so nothing ever takes EPIPE, and it
             # is POSIX. `|| true` because grep exits 1 when the count is 0.
-            n_cpp="$(printf '%s\n' "$files" | grep -cE '^(src|tools)/.*\.cpp$' || true)"
+            n_cpp="$(printf '%s\n' "$files" | grep -cE '^(src|tools)/.*\.cpp$|^src/.*\.cu$' || true)"
             [ "${n_cpp:-0}" -gt 0 ] || cpp=false
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "cpp=$cpp" >> "$GITHUB_OUTPUT"
-          printf 'non-docs changes: code=%s (src|tools .cpp: %s)\nchanged files:\n%s\n' \
+          printf 'non-docs changes: code=%s (src|tools .cpp or src .cu: %s)\nchanged files:\n%s\n' \
             "$code" "$cpp" "${files:-<none>}"
 
       # The blocking static gates, FIRST, before the compile. Ruleset 14716423
@@ -331,10 +331,11 @@ jobs:
   # delays the merge-gating `Build` check (it was ~22 min of that job). Reuses the
   # Build job's cached build/ (compile_commands.json + FetchContent _deps such as
   # CUTLASS) via the same cache key, so no second CUDA configure is needed. Lints
-  # only the .cpp CHANGED in the PR — a normal PR is seconds; a big refactor is
-  # bounded to its own files. Still .cpp-only (clang-tidy can't parse .cu without
-  # the full nvcc flagset). Kernel (.cu) correctness is covered by the GPU tests +
-  # compute-sanitizer (see the `test` job).
+  # only the .cpp and .cu CHANGED in the PR: a normal PR is seconds, a big refactor is
+  # bounded to its own files. A .cu is linted host-side only (clang `-x cuda
+  # --cuda-host-only`, database from tools/tidy_cu_db.py, #2210). Device code has
+  # no automated lane: the `test` job (GPU tests + compute-sanitizer) needs a GPU
+  # runner that does not exist (docs/audit/SETTLED.md F-5, F2-7).
   tidy:
     name: clang-tidy
     needs: build
@@ -386,7 +387,7 @@ jobs:
 
       # Setup is a hard step: a failure here fails the job. Only the lint findings
       # below are advisory (#2187: continue-on-error hid exit 128 on every run).
-      - name: Select changed .cpp + compile_commands.json
+      - name: Select changed .cpp / .cu + compile databases
         id: files
         run: |
           base="${{ github.event.pull_request.base.sha }}"
@@ -397,40 +398,73 @@ jobs:
           # `|| true` on the pipeline made "git failed" and "no .cpp changed"
           # the same outcome (#1626). Fail the diff loudly, keep the empty list
           # quiet - only one of those two is normal.
-          if ! diff_out="$(git diff --name-only "$base" HEAD)"; then
+          if ! diff_out="$(git diff --name-only --diff-filter=d "$base" HEAD)"; then
             echo "::error::git diff failed against base $base — the lint list would be empty"
             exit 1
           fi
-          mapfile -t changed < <(printf '%s\n' "$diff_out" | grep -E '^(src|tools)/.*\.cpp$' || true)
-          echo "count=${#changed[@]}" >> "$GITHUB_OUTPUT"
-          if [ ${#changed[@]} -eq 0 ]; then echo "no src/tools .cpp changed — nothing to lint"; exit 0; fi
-          printf '%s\n' "${changed[@]}" > "$RUNNER_TEMP/tidy_files.txt"
+          mapfile -t cpp < <(printf '%s\n' "$diff_out" | grep -E '^(src|tools)/.*\.cpp$' || true)
+          mapfile -t cu_changed < <(printf '%s\n' "$diff_out" | grep -E '^src/.*\.cu$' || true)
+          # A .cu #include'd into another body is not a TU: lint its includer instead.
+          cu=()
+          for f in "${cu_changed[@]}"; do
+            if ! inc="$(grep -rlF --include='*.cu' "#include \"${f#src/}\"" src)"; then inc="$f"; fi
+            mapfile -t -O "${#cu[@]}" cu < <(printf '%s\n' "$inc")
+          done
+          mapfile -t cu < <(printf '%s\n' "${cu[@]}" | sed '/^$/d' | sort -u)
+          echo "count=$(( ${#cpp[@]} + ${#cu[@]} ))" >> "$GITHUB_OUTPUT"
+          if [ $(( ${#cpp[@]} + ${#cu[@]} )) -eq 0 ]; then echo "no src/tools .cpp or src .cu changed: nothing to lint"; exit 0; fi
+          printf '%s\n' "${cpp[@]}" | sed '/^$/d' > "$RUNNER_TEMP/tidy_cpp.txt"
+          printf '%s\n' "${cu[@]}" | sed '/^$/d' > "$RUNNER_TEMP/tidy_cu.txt"
           # compile_commands.json comes from the cached build/. If the cache missed
           # (cold key), reconfigure — _deps in the restored build/ keeps it cheap;
           # a fully cold _deps fetch is the rare worst case.
-          # PRs no longer save build/, so the restore is main's: a .cpp the PR adds is not in it.
+          # PRs no longer save build/, so the restore is main's: a file the PR adds is not in it.
           missing=0
-          for f in "${changed[@]}"; do grep -qF "/$f\"" build/compile_commands.json 2>/dev/null || missing=$((missing+1)); done
+          for f in "${cpp[@]}" "${cu[@]}"; do grep -qF "/$f\"" build/compile_commands.json 2>/dev/null || missing=$((missing+1)); done
           if [ ! -f build/compile_commands.json ] || [ "$missing" -gt 0 ]; then
             echo "::warning::compile_commands.json missing or lacks $missing changed file(s) - reconfiguring"
             cmake -B build -DCMAKE_BUILD_TYPE=Release -DIMP_BUILD_TESTS=ON \
               -DIMP_BUILD_TOOLS=ON -DIMP_BUILD_BENCH=OFF -DIMP_DISABLE_120F_FALLBACK=ON \
               -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null
           fi
-          echo "linting ${#changed[@]} changed .cpp:"; printf '  %s\n' "${changed[@]}"
+          # nvcc entries -> clang host-only entries; a changed .cu absent from it would lint nothing.
+          if [ ${#cu[@]} -gt 0 ]; then
+            python3 tools/tidy_cu_db.py build/compile_commands.json build/tidy-cu
+            for f in "${cu[@]}"; do
+              grep -qF "/$f\"" build/tidy-cu/compile_commands.json || { echo "::error::$f is not in build/tidy-cu/compile_commands.json"; exit 1; }
+            done
+          fi
+          echo "linting ${#cpp[@]} changed .cpp + ${#cu[@]} .cu (host side):"; printf '  %s\n' "${cpp[@]}" "${cu[@]}" | sed '/^  $/d'
 
-      - name: clang-tidy (changed .cpp only, advisory)
+      - name: clang-tidy (changed .cpp + .cu host side, advisory)
         if: steps.files.outputs.count != '0'
         continue-on-error: true  # advisory: findings only, setup failures fail the step above
         run: |
-          mapfile -t changed < "$RUNNER_TEMP/tidy_files.txt"
-          rc=0
-          clang-tidy -p build --warnings-as-errors= "${changed[@]}" > "$RUNNER_TEMP/tidy.log" 2>&1 || rc=$?
+          mapfile -t cpp < "$RUNNER_TEMP/tidy_cpp.txt"
+          mapfile -t cu < "$RUNNER_TEMP/tidy_cu.txt"
+          mkdir -p "$RUNNER_TEMP/tidy"
+          : > "$RUNNER_TEMP/tidy_rc.txt"
+          # One clang-tidy process per file, nproc in parallel.
+          { printf 'build %s\n' "${cpp[@]}"; printf 'build/tidy-cu %s\n' "${cu[@]}"; } | grep -v ' $' |
+            xargs -P "$(nproc)" -L 1 sh -c 'clang-tidy -p "$0" --warnings-as-errors= "$1" \
+              > "$RUNNER_TEMP/tidy/$(echo "$1" | tr / _).log" 2>&1; echo "$? $1" >> "$RUNNER_TEMP/tidy_rc.txt"'
           # Drop per-TU progress + cumulative count lines (CUTLASS/CUDA headers
           # inflate the count into the hundreds of thousands).
-          grep -vE '^\[[0-9]+/[0-9]+\] Processing file|^[0-9]+ warnings generated\.$' "$RUNNER_TEMP/tidy.log" || true
-          echo "clang-tidy linted ${#changed[@]} file(s), exit $rc"
-          exit "$rc"
+          cat "$RUNNER_TEMP"/tidy/*.log | grep -vE '^\[[0-9]+/[0-9]+\] Processing file|^[0-9]+ warnings generated\.$|^Suppressed [0-9]+ warnings|^Use -header-filter' || true
+          ran=$(wc -l < "$RUNNER_TEMP/tidy_rc.txt"); bad=$(grep -vc '^0 ' "$RUNNER_TEMP/tidy_rc.txt" || true)
+          echo "clang-tidy linted ${#cpp[@]} .cpp + ${#cu[@]} .cu file(s): $ran run, $bad with nonzero exit"
+          [ "$ran" -eq $(( ${#cpp[@]} + ${#cu[@]} )) ] && [ "$bad" -eq 0 ]
+
+      # Hard: a .cu that does not parse yields no findings (#2219's first run: 89 of 89,
+      # response-file includes lost). Findings stay advisory, parse errors do not.
+      - name: clang-tidy parsed every .cu (hard)
+        if: steps.files.outputs.count != '0'
+        run: |
+          shopt -s nullglob
+          logs=("$RUNNER_TEMP"/tidy/*.cu.log)
+          broken=$( { grep -l 'clang-diagnostic-error' "${logs[@]}" /dev/null || true; } | wc -l)
+          echo "${#logs[@]} .cu log(s), $broken with a clang error"
+          [ "$broken" -eq 0 ]
 
   # CPU-only API contract check (R3 / P2.6). The Python mock suite in tests/api/
   # exercises the HTTP schema, SSE envelope, error bodies and lifecycle against

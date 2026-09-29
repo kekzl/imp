@@ -30,6 +30,7 @@ __device__ __forceinline__ void q4k_scale_min(int j, const uint8_t* q, uint32_t&
 
 constexpr int kQRow = 32 + 16;  // staged qs row: 32 B group + 16-B pad (bank stride 12 words)
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM>
 __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict__ A,
                                                const __half* __restrict__ Asc,
@@ -72,9 +73,11 @@ __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict
         cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM, bool BETA1>
 __global__ void __launch_bounds__(kThreads)
     mmq_imma_q4k_raw_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
@@ -247,6 +250,7 @@ __global__ void __launch_bounds__(kThreads)
         }
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Explicit instantiations launched by the dispatch in mmq_q8_imma.cu.
 template __global__ void mmq_imma_q4k_raw_kernel<32, false>(const int8_t*, const __half*,

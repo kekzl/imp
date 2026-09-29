@@ -382,6 +382,8 @@ IMP_REGISTER_CUDA_STATIC_RESET(gemm_grouped_3x_nvfp4_cleanup);
 }  // namespace
 
 // Compile-time verification: kernel type instantiates on SM120.
+// sizeof(T) > 0 is the intended instantiation check (#2210)
+// NOLINTNEXTLINE(bugprone-sizeof-expression)
 static_assert(sizeof(GrpGemm) > 0, "GrpGemm type must instantiate");
 
 }  // namespace imp

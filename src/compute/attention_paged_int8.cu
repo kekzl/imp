@@ -13,6 +13,7 @@ namespace imp {
 // scales from the INT8 KV write kernel handle dequant. Grid:(batch,n_heads,num_splits),
 // Block: 256 (8 warps).
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_int8_kernel(
     const half* __restrict__ Q, const int8_t* __restrict__ K_cache, const int8_t* __restrict__ V_cache,
@@ -246,11 +247,13 @@ __global__ void paged_attention_splitk_int8_kernel(
                                       lane_id, lane_offset, partial_out, batch_idx, n_heads, head_idx,
                                       num_splits, split_idx);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ===========================================================================
 // INT8 dp4a Paged Attention — Non-Split-K fallback kernel (templated)
 // ===========================================================================
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_decode_int8_kernel(
     const half* __restrict__ Q, const int8_t* __restrict__ K_cache, const int8_t* __restrict__ V_cache,
@@ -455,6 +458,7 @@ __global__ void paged_attention_decode_int8_kernel(
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_int8), m_w, l_w, o_reg, warp_id,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx, attn_sinks);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ===========================================================================
 // INT8 dp4a Paged Attention — Host launcher
@@ -480,7 +484,7 @@ void paged_attention_decode_int8(const Tensor& Q, const Tensor& K_cache, const T
                                                         : (max_context_len + block_size - 1) / block_size;
 
     size_t smem_bytes = NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
-                        NUM_WARPS * head_dim * sizeof(float);
+                        static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float);
 
     // ---- Split-K decision ----
     void* scratch_ptr = nullptr;

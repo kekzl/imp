@@ -1,9 +1,9 @@
 # clang-tidy for imp — host C++ static analysis.
 #
-# SCOPE: host .cpp / .h translation units. clang-tidy cannot parse CUDA .cu files
-# without a full nvcc-equivalent flagset, so `make tidy` and the CI lint job run
-# it over the non-.cu TUs from compile_commands.json (built with the host C++
-# compiler). For IDEs, clangd picks this file up automatically.
+# SCOPE: host .cpp / .h translation units, plus the host side of .cu TUs: nvcc
+# flags are unreadable to clang, so tools/tidy_cu_db.py rewrites the .cu entries
+# of compile_commands.json to `clang -x cuda --cuda-host-only` (#2210). The CI
+# tidy job lints changed .cpp and .cu. For IDEs, clangd picks this file up.
 #
 # Advisory: WarningsAsErrors is empty, so findings surface but do not block. The
 # disabled checks below are calibrated against a full sweep (it reported ~2000
