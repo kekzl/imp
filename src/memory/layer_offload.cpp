@@ -1,9 +1,75 @@
 #include "memory/layer_offload.h"
 #include "core/logging.h"
+#include "core/qtype.h"
 #include <algorithm>
 #include <numeric>
 
 namespace imp {
+
+// Block quants have elem_bytes 0 (Q8_0: 34 B per 32 elements): size them per row.
+size_t tensor_storage_bytes(const Tensor& t) {
+    const bool packed_nibbles = t.qtype == QType::INT4 || t.qtype == QType::FP4_E2M1;
+    if (qtype_elem_bytes(t.qtype) != 0 || packed_nibbles || t.ndim < 1)
+        return t.nbytes();
+    const int64_t cols = t.shape[t.ndim - 1];
+    if (cols <= 0)
+        return 0;
+    return static_cast<size_t>(t.numel() / cols) * qtype_row_bytes(t.qtype, cols);
+}
+
+LayerOffloadPlan plan_layer_offload(const Model& model, int gpu_layers) {
+    LayerOffloadPlan plan;
+    const int n_layers = model.n_layers();
+    if (gpu_layers < 0 || gpu_layers >= n_layers)
+        return plan;
+    plan.active = true;
+
+    struct LayerPriority {
+        int layer_idx;
+        int priority;  // 0 = attention, 1 = SSM, 2 = MoE-only / other
+    };
+    std::vector<LayerPriority> priorities(n_layers);
+    for (int i = 0; i < n_layers; i++) {
+        const auto& ly = model.layer(i);
+        int prio = 2;
+        if (ly.wq.data != nullptr)
+            prio = 0;
+        else if (ly.ssm_in.data != nullptr)
+            prio = 1;
+        priorities[i] = {i, prio};
+    }
+    std::stable_sort(priorities.begin(), priorities.end(),
+                     [](const auto& a, const auto& b) { return a.priority < b.priority; });
+
+    plan.offloaded.assign(n_layers, true);
+    for (int i = 0; i < gpu_layers; i++)
+        plan.offloaded[priorities[i].layer_idx] = false;
+
+    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
+    plan.layer_bytes.assign(n_layers, 0);
+    plan.host_bytes.assign(n_layers, 0);
+    for (int i = 0; i < n_layers; i++) {
+        size_t all = 0, host = 0;
+        for_each_offloadable_tensor(model.layer(i), [&](const Tensor& t) {
+            if (!t.data)
+                return;
+            const size_t nbytes = tensor_storage_bytes(t);
+            if (nbytes == 0)
+                return;
+            all = align256(all + nbytes);
+            if (!t.on_device)
+                host = align256(host + nbytes);
+        });
+        plan.layer_bytes[i] = all;
+        plan.host_bytes[i] = host;
+        if (!plan.offloaded[i])
+            continue;
+        plan.n_offloaded++;
+        plan.planned_bytes += all;
+        plan.max_host_bytes = std::max(plan.max_host_bytes, host);
+    }
+    return plan;
+}
 
 LayerOffloadManager::~LayerOffloadManager() {
     for (auto& slot : slots_) {
@@ -18,108 +84,37 @@ LayerOffloadManager::~LayerOffloadManager() {
 }
 
 void LayerOffloadManager::scan_layer_weights(int layer) {
-    auto& ly = model_->layer(layer);
     auto& entries = layer_entries_[layer];
     entries.clear();
 
     size_t offset = 0;
     auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
-
-    // Helper: add a tensor if it has data
-    auto add = [&](Tensor& t) {
+    for_each_offloadable_tensor(model_->layer(layer), [&](Tensor& t) {
         if (!t.data || t.on_device)
             return;
-        size_t nbytes = t.nbytes();
+        const size_t nbytes = tensor_storage_bytes(t);
         if (nbytes == 0)
             return;
         entries.push_back({&t, t.data, nbytes, offset});
         offset = align256(offset + nbytes);
-    };
-
-    // Attention weights
-    add(ly.wq);
-    add(ly.wk);
-    add(ly.wv);
-    add(ly.wo);
-    add(ly.attn_norm);
-    add(ly.attn_q_norm);
-    add(ly.attn_k_norm);
-
-    // Dense FFN weights
-    add(ly.w_gate);
-    add(ly.w_up);
-    add(ly.w_down);
-    add(ly.ffn_norm);
-
-    // MoE weights (gate router, shared expert)
-    add(ly.moe_gate);
-    add(ly.w_up_shared);
-    add(ly.w_down_shared);
-    add(ly.w_gate_shared);
-    add(ly.moe_router_bias);
-
-    // Packed expert tensors (these are the big ones, but often already offloaded)
-    add(ly.expert_gate_packed);
-    add(ly.expert_up_packed);
-    add(ly.expert_down_packed);
-
-    // SSM weights
-    add(ly.ssm_in);
-    add(ly.ssm_out);
-    add(ly.ssm_conv1d_w);
-    add(ly.ssm_conv1d_b);
-    add(ly.ssm_dt_b);
-    add(ly.ssm_a);
-    add(ly.ssm_d);
-    add(ly.ssm_norm_w);
-
-    // Scale tensors (small, on GPU already from upload)
-    // These are skipped since they're always on device after upload.
-
+    });
     layer_slot_bytes_[layer] = offset;
 }
 
 bool LayerOffloadManager::init(Model* model, int gpu_layers) {
     model_ = model;
-    int n_layers = model->n_layers();
-
-    if (gpu_layers < 0 || gpu_layers >= n_layers) {
+    const int n_layers = model->n_layers();
+    const LayerOffloadPlan plan = plan_layer_offload(*model, gpu_layers);
+    if (!plan.active) {
         enabled_ = false;
         return true;  // all on GPU, nothing to offload
     }
 
-    // Determine which layers to keep on GPU (priority: attention > SSM > MoE-only)
-    struct LayerPriority {
-        int layer_idx;
-        int priority;  // 0 = attention, 1 = SSM, 2 = MoE-only / other
-    };
-    std::vector<LayerPriority> priorities(n_layers);
-    for (int i = 0; i < n_layers; i++) {
-        const auto& ly = model->layer(i);
-        int prio = 2;  // default: lowest
-        if (ly.wq.data != nullptr)
-            prio = 0;  // attention
-        else if (ly.ssm_in.data != nullptr)
-            prio = 1;  // SSM
-        priorities[i] = {i, prio};
-    }
-
-    // Sort by priority (stable to preserve layer order within same priority)
-    std::stable_sort(priorities.begin(), priorities.end(),
-                     [](const auto& a, const auto& b) { return a.priority < b.priority; });
-
-    // First gpu_layers (by priority) stay on GPU
-    offloaded_.resize(n_layers, true);
-    for (int i = 0; i < std::min(gpu_layers, n_layers); i++) {
-        offloaded_[priorities[i].layer_idx] = false;
-    }
-
-    // Scan offloaded layers to compute slot sizes
+    offloaded_ = plan.offloaded;
     layer_entries_.resize(n_layers);
     layer_slot_bytes_.resize(n_layers, 0);
     size_t max_layer_bytes = 0;
     int n_offloaded = 0;
-
     for (int i = 0; i < n_layers; i++) {
         if (!offloaded_[i])
             continue;
@@ -128,10 +123,20 @@ bool LayerOffloadManager::init(Model* model, int gpu_layers) {
         n_offloaded++;
     }
 
-    if (n_offloaded == 0 || max_layer_bytes == 0) {
+    if (n_offloaded == 0 || plan.planned_bytes == 0) {
         enabled_ = false;
         IMP_LOG_INFO("Layer offloading: nothing to offload");
         return true;
+    }
+    // Weight upload ignores gpu_layers (#2298): planned layers already sit in VRAM.
+    if (max_layer_bytes == 0) {
+        enabled_ = false;
+        IMP_LOG_ERROR(
+            "--gpu-layers %d: %d/%d layers (%.2f GiB) planned for host, but their weights are "
+            "device-resident: weight upload does not honor --gpu-layers yet (#2298). Drop "
+            "--gpu-layers or pick a smaller quant.",
+            gpu_layers, n_offloaded, n_layers, plan.planned_bytes / (1024.0 * 1024.0 * 1024.0));
+        return false;
     }
 
     // Allocate double-buffered GPU staging slots

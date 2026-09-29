@@ -399,8 +399,9 @@ bool Engine::init_weights() {
     if (config_.gpu_layers >= 0) {
         offload_mgr_ = std::make_unique<LayerOffloadManager>();
         if (!offload_mgr_->init(model_.get(), config_.gpu_layers)) {
-            IMP_LOG_WARN("Layer offloading init failed, continuing without it");
+            IMP_LOG_ERROR("Layer offloading init failed for --gpu-layers %d", config_.gpu_layers);
             offload_mgr_.reset();
+            return false;
         }
     }
 

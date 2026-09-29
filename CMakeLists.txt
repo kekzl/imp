@@ -745,6 +745,7 @@ if(IMP_BUILD_TESTS)
         tests/test_expert_cache_reinit.cpp
         tests/test_sparse_attn_geometry.cpp
         tests/test_tensor.cpp
+        tests/test_layer_offload_plan.cpp
         tests/test_tensor_kind_table.cpp
         tests/test_type_tables_golden.cpp
         tests/test_tensor_kind_matcher.cpp
