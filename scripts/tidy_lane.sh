@@ -44,7 +44,9 @@ n=$(( ${#cpp[@]} + ${#cu[@]} ))
 # A .cu that is not in the database would lint nothing.
 dbset="$(cu_db_files)"
 for f in "${cu[@]}"; do
-    printf '%s\n' "$dbset" | grep -qxF "$f" || { echo "tidy_lane: $f is not in build/tidy-cu/compile_commands.json"; exit 2; }
+    # Here-string, not `printf | grep -q`: grep -q exits at the match, printf takes EPIPE and
+    # pipefail fails a found file (#1499; hit 1 of 141 on a full run).
+    grep -qxF "$f" <<< "$dbset" || { echo "tidy_lane: $f is not in build/tidy-cu/compile_commands.json"; exit 2; }
 done
 
 rm -rf "$LOGS"; mkdir -p "$LOGS"
