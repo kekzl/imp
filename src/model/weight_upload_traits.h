@@ -262,7 +262,7 @@ struct Q4_0Fmt {
             for (int b = 0; b < blocks_per_row; ++b) {
                 const uint8_t* block_ptr = raw + (n * blocks_per_row + b) * kBlockBytes;
                 std::memcpy(&p.h16[n * blocks_per_row + b], block_ptr, 2);
-                std::memcpy(&p.h8[n * half_K + b * 16], block_ptr + 2, 16);
+                std::memcpy(&p.h8[n * half_K + static_cast<int64_t>(b) * 16], block_ptr + 2, 16);
             }
         }
         p.add(p.h8.data(), p.h8.size());
@@ -314,7 +314,8 @@ struct Q6_KFmt {
             uint8_t low4 = (quad >= 2) ? ((ql_byte >> 4) & 0xF) : (ql_byte & 0xF);
             uint8_t high2 = (qh[group * 32 + l] >> (quad * 2)) & 0x3;
             int q6 = static_cast<int>((high2 << 4) | low4) - 32;
-            out[i] = float_to_fp16(d * static_cast<float>(scales[i / 16]) * static_cast<float>(q6));
+            const int8_t scale = scales[i / 16];  // index math, not a float division
+            out[i] = float_to_fp16(d * static_cast<float>(scale) * static_cast<float>(q6));
         }
     }
     static void stage_host(const Tensor& w, QType, StagePlan& p) { stage_host_dequant<Q6_KFmt>(w, p); }

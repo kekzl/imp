@@ -178,6 +178,9 @@ jobs:
       # Runs on docs-only PRs too: the docs and release-hygiene gates are exactly
       # the ones a docs-only change can break.
       - name: Static gates (blocking, before the build)
+        env:
+          # CCN pins may only shrink vs this commit (#2210); empty -> merge-base with origin/main.
+          IMP_GATE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: bash scripts/ci_static_gates.sh
 
       - name: Install build deps
@@ -327,7 +330,7 @@ jobs:
             build/test-e2e
             build/libimp.a
 
-  # clang-tidy (advisory, NON-REQUIRED) — split out of the Build job so it never
+  # clang-tidy (NON-REQUIRED check, hard on WarningsAsErrors findings, #2210) - split out of the Build job so it never
   # delays the merge-gating `Build` check (it was ~22 min of that job). Reuses the
   # Build job's cached build/ (compile_commands.json + FetchContent _deps such as
   # CUTLASS) via the same cache key, so no second CUDA configure is needed. Lints
@@ -441,35 +444,17 @@ jobs:
           fi
           echo "linting ${#cpp[@]} changed .cpp + ${#cu[@]} .cu (host side):"; printf '  %s\n' "${cpp[@]}" "${cu[@]}" | sed '/^  $/d'
 
-      - name: clang-tidy (changed .cpp + .cu host side, advisory)
+      # Hard (#2210): scripts/tidy_lane.sh fails on a clang-tidy nonzero exit, on a .cu with
+      # a clang error (#2219's first run: 89 of 89, response-file includes lost) and on a
+      # WarningsAsErrors finding (.clang-tidy: bugprone-*, clang-analyzer-*) over its pin in
+      # tools/tidy_baseline.toml. Other checks print only. Full lane locally: `make tidy`.
+      - name: clang-tidy (changed .cpp + .cu host side)
         if: steps.files.outputs.count != '0'
-        continue-on-error: true  # advisory: findings only, setup failures fail the step above
+        env:
+          TIDY_LOGS: ${{ runner.temp }}/tidy
         run: |
-          mapfile -t cpp < "$RUNNER_TEMP/tidy_cpp.txt"
-          mapfile -t cu < "$RUNNER_TEMP/tidy_cu.txt"
-          mkdir -p "$RUNNER_TEMP/tidy"
-          : > "$RUNNER_TEMP/tidy_rc.txt"
-          # One clang-tidy process per file, nproc in parallel.
-          { printf 'build %s\n' "${cpp[@]}"; printf 'build/tidy-cu %s\n' "${cu[@]}"; } | grep -v ' $' |
-            xargs -P "$(nproc)" -L 1 sh -c 'clang-tidy -p "$0" --warnings-as-errors= "$1" \
-              > "$RUNNER_TEMP/tidy/$(echo "$1" | tr / _).log" 2>&1; echo "$? $1" >> "$RUNNER_TEMP/tidy_rc.txt"'
-          # Drop per-TU progress + cumulative count lines (CUTLASS/CUDA headers
-          # inflate the count into the hundreds of thousands).
-          cat "$RUNNER_TEMP"/tidy/*.log | grep -vE '^\[[0-9]+/[0-9]+\] Processing file|^[0-9]+ warnings generated\.$|^Suppressed [0-9]+ warnings|^Use -header-filter' || true
-          ran=$(wc -l < "$RUNNER_TEMP/tidy_rc.txt"); bad=$(grep -vc '^0 ' "$RUNNER_TEMP/tidy_rc.txt" || true)
-          echo "clang-tidy linted ${#cpp[@]} .cpp + ${#cu[@]} .cu file(s): $ran run, $bad with nonzero exit"
-          [ "$ran" -eq $(( ${#cpp[@]} + ${#cu[@]} )) ] && [ "$bad" -eq 0 ]
-
-      # Hard: a .cu that does not parse yields no findings (#2219's first run: 89 of 89,
-      # response-file includes lost). Findings stay advisory, parse errors do not.
-      - name: clang-tidy parsed every .cu (hard)
-        if: steps.files.outputs.count != '0'
-        run: |
-          shopt -s nullglob
-          logs=("$RUNNER_TEMP"/tidy/*.cu.log)
-          broken=$( { grep -l 'clang-diagnostic-error' "${logs[@]}" /dev/null || true; } | wc -l)
-          echo "${#logs[@]} .cu log(s), $broken with a clang error"
-          [ "$broken" -eq 0 ]
+          mapfile -t files < <(cat "$RUNNER_TEMP/tidy_cpp.txt" "$RUNNER_TEMP/tidy_cu.txt")
+          bash scripts/tidy_lane.sh "${files[@]}"
 
   # CPU-only API contract check (R3 / P2.6). The Python mock suite in tests/api/
   # exercises the HTTP schema, SSE envelope, error bodies and lifecycle against
@@ -627,6 +612,8 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # the CCN pin ratchet reads the base commit's baseline (#2210)
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -637,6 +624,8 @@ jobs:
       # keeps them a named check: "which gate failed" is worth a check name, and
       # the filter means there is one list rather than two that drift.
       - name: File-size gates (blocking)
+        env:
+          IMP_GATE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: bash scripts/ci_static_gates.sh filesize
 
   # The unlaned-GTest pin (tools/check_test_lanes.py). Its own check name:

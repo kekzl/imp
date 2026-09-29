@@ -704,13 +704,11 @@ format: lint-image
 format-check: lint-image
 	@$(CLANG_FORMAT_RUN) --dry-run -Werror --style=file $(CLANG_FORMAT_FILES)
 
-# clang-tidy over host C++ TUs and the host side of src/ .cu TUs (advisory: findings
-# surface, do not fail). Runs in the CUDA builder image so the CUDA headers are present;
-# clang-tidy comes from the `lint` stage (scripts/install_llvm.sh). .cu entries are rewritten to clang host-only
-# commands by tools/tidy_cu_db.py (#2210). Configures first so build/compile_commands.json exists,
-# then generates build/generated/webui_asset.h (imp-server main.cpp includes it, #2285).
-CLANG_TIDY_FILES = $$(find src tools -name '*.cpp')
-CLANG_TIDY_CU_FILES = $$(grep -o "\"file\": \"[^\"]*/src/[^\"]*\"" build/tidy-cu/compile_commands.json | cut -d\" -f4)
+# Full clang-tidy lane (#2210): every src/tools .cpp + the host side of every src/ .cu TU,
+# parallel, via scripts/tidy_lane.sh. Fails on a clang error, a nonzero clang-tidy exit or a
+# WarningsAsErrors finding (.clang-tidy) over its pin in tools/tidy_baseline.toml; CI runs the
+# same script on changed files. Configures first so build/compile_commands.json exists, then
+# generates build/generated/webui_asset.h (imp-server main.cpp includes it, #2285).
 tidy: lint-image
 	@docker run --rm -v $(PWD):/work -w /work $(LINT_IMG) bash -c '\
 	  test -f build/compile_commands.json || cmake --preset ci \
@@ -718,7 +716,5 @@ tidy: lint-image
 	      -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
 	      -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
 	      -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json >/dev/null; \
-	  cmake -DIN=tools/imp-server/webui/index.html -DOUT=build/generated/webui_asset.h -P cmake/embed_webui.cmake; \
-	  clang-tidy -p build --warnings-as-errors= $(CLANG_TIDY_FILES) || true; \
-	  python3 tools/tidy_cu_db.py build/compile_commands.json build/tidy-cu && \
-	  clang-tidy -p build/tidy-cu --warnings-as-errors= $(CLANG_TIDY_CU_FILES) || true'
+	  cmake -DIN=tools/imp-server/webui/index.html -DOUT=build/generated/webui_asset.h -P cmake/embed_webui.cmake && \
+	  bash scripts/tidy_lane.sh --all'
