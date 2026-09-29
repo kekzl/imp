@@ -37,6 +37,20 @@ using imp::pre_dequant_internal::for_each_dense_weight;
 using imp::pre_dequant_internal::nvfp4_beneficial;
 using imp::pre_dequant_internal::nvfp4_lm_head_enabled;
 
+namespace {
+// Why a quantized LM head is not NVFP4-cached, for the skip log line.
+const char* lm_head_skip_reason(bool gdn_head_ok, bool fp8_head_built, const std::string& mode,
+                                QType head_qtype) {
+    if (!gdn_head_ok)
+        return "nvfp4_lm_head_gdn=false, GDN/SSM hybrid";
+    if (fp8_head_built)
+        return "FP8 head built, #2166";
+    if (lm_head_auto_keeps_source(lm_head_mode(mode), head_qtype))
+        return "auto keeps an 8-bit head at checkpoint precision, #2224";
+    return "gemm.nvfp4_lm_head off/auto net rule (#982)";
+}
+}  // namespace
+
 void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
                                                      Nvfp4DecodeContext& dctx) {
     // Dual-path mode: attention weights stay at FP8 for quality.
@@ -134,12 +148,8 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
                 collect_weight_nvfp4(model_->output_proj(), head_qtype);
             else
                 IMP_LOG_INFO("NVFP4 LM head: skipped (%s)",
-                             !gdn_head_ok ? "nvfp4_lm_head_gdn=false, GDN/SSM hybrid"
-                             : wcache_->lm_head_fp8.weight.data != nullptr ? "FP8 head built, #2166"
-                             : lm_head_auto_keeps_source(lm_head_mode(dispatch_policy().gemm.nvfp4_lm_head),
-                                                         head_qtype)
-                                 ? "auto keeps an 8-bit head at checkpoint precision, #2224"
-                                 : "gemm.nvfp4_lm_head off/auto net rule (#982)");
+                             lm_head_skip_reason(gdn_head_ok, wcache_->lm_head_fp8.weight.data != nullptr,
+                                                 dispatch_policy().gemm.nvfp4_lm_head, head_qtype));
         }
     }
 

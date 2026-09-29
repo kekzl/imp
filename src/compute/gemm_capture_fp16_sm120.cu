@@ -70,6 +70,7 @@ __device__ __forceinline__ void cp_async_wait_group() {
 // Issues all cp.async loads for one (A,B) tile. Templated on BM so the chunk-loop trip
 // counts are compile-time constants and ptxas straightlines the cp.async issues (8 for
 // BM=128, 6 for BM=64) into a back-to-back pipeline-friendly sequence.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM>
 __device__ __forceinline__ void issue_tile_load(__half* a_smem, __half* b_smem, const __half* A,
                                                 const __half* B, int block_m, int block_n,
@@ -108,7 +109,9 @@ __device__ __forceinline__ void issue_tile_load(__half* a_smem, __half* b_smem, 
         cp_async_cg16_zero(dst, src, valid);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM, int STAGES>
 __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
     void gemm_fp16_kernel(const __half* __restrict__ A, const __half* __restrict__ B,
@@ -238,6 +241,7 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
         }
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // BM=64 wins when SM saturation matters more than per-block compute amortization
 // (small total block count); BM=128 wins when the grid already saturates the SM array
@@ -285,8 +289,10 @@ bool gemm_capture_fp16_sm120(const void* A, const void* B, void* D, int M, int N
     // growth (12->18 KiB/stage) dropped occupancy 3->2 blocks/SM, and the deeper pipeline
     // didn't recover the loss (kernel is compute-scheduling/register-bound, not
     // load-latency-bound).
-    constexpr size_t smem_bytes_bm64  = 2 * ((64 + BN) * BK_SMEM) * sizeof(__half);
-    constexpr size_t smem_bytes_bm128 = 2 * ((128 + BN) * BK_SMEM) * sizeof(__half);
+    constexpr size_t smem_bytes_bm64 = static_cast<int64_t>(2) * ((static_cast<int64_t>(64 + BN)) * BK_SMEM) *
+                                       sizeof(__half);
+    constexpr size_t smem_bytes_bm128 = static_cast<int64_t>(2) *
+                                        ((static_cast<int64_t>(128 + BN)) * BK_SMEM) * sizeof(__half);
     size_t smem_bytes                  = use_bm64 ? smem_bytes_bm64 : smem_bytes_bm128;
 
     if (use_bm64) {

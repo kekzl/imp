@@ -305,6 +305,7 @@ __device__ __constant__ float kE2M1Table[16] = {
 
 // Dequant from split MXFP4 layout: [data(N×K/2) | scales(total_blocks)].
 // Used for alpha/beta FP16 dequant before MXFP4 registration.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void dequant_mxfp4_split_kernel(const uint8_t* __restrict__ data,    // [N × K/2] packed E2M1
                                            const uint8_t* __restrict__ scales,  // [total_blocks] UE8M0
                                            half* __restrict__ out,              // [N, K]
@@ -334,6 +335,7 @@ __global__ void dequant_mxfp4_split_kernel(const uint8_t* __restrict__ data,    
         out[out_base + i * 2 + 1] = __float2half(kE2M1Table[(packed >> 4) & 0xF] * scale);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void dequant_mxfp4_to_fp16(const void* raw_mxfp4_data, int64_t N, int64_t K, void* dst_fp16,
                            cudaStream_t stream) {
@@ -413,6 +415,7 @@ __device__ __forceinline__ float ue8m0_to_float(uint8_t bits) {
 }
 
 // Each thread handles one micro-block of 32 elements (MXFP4 group size).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ input,
                                                    uint8_t* __restrict__ packed_out,
                                                    uint8_t* __restrict__ sf_out, int M, int K,
@@ -460,6 +463,7 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
         packed_out[packed_base + i / 2] = pack_fp4_pair_hw_mx(s0, s1);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
                                     cudaStream_t stream) {

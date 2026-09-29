@@ -9,6 +9,7 @@ namespace imp {
 // matmul (Yang et al. 2024).
 // Shared memory: s_k[CHUNK*SS], s_q[CHUNK*SS], s_reduce[HD]; at HD=SS=128, CHUNK=64 = 65 KiB,
 // needs the dynamic-shared-memory opt-in. Grid (n_heads), block (HD).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, int CHUNK, typename YOut>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
@@ -152,6 +153,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
             H_col[s * HD] = H_reg[s];
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Phase 2a WY-rep parallel delta-rule scan (Yang et al. 2024). Per L-token chunk:
 //   1. Cache K~,Q~ in shared memory (post L2 norm)
@@ -163,6 +165,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
 //   6. H_L = D[0..L] H_0 + sum_t D[t+1..L] k~_t u_t^T
 // Cumulative decay D[a..b] = prod_{i=a..b-1} g_i in log-space (avoids underflow; g capped e^-20).
 // CHUNK=32: L^2 + L*HD scratch must fit the 100 KiB sm_120 opt-in cap (HD=SS=128 -> ~92 KiB).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, int CHUNK>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
     const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
@@ -382,6 +385,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
             H_col[s * HD] = H_reg[s];
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launchers
@@ -451,8 +455,9 @@ static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels
     int t = 0;
     while (t < n_tokens) {
         const int this_chunk = (t + chunk_size <= n_tokens) ? chunk_size : (n_tokens - t);
-        fused(conv_f32 + static_cast<size_t>(t) * conv_channels, alpha + t * n_heads, beta + t * n_heads,
-              h_state, y + static_cast<size_t>(t) * inner, this_chunk, nullptr);
+        fused(conv_f32 + static_cast<size_t>(t) * conv_channels, alpha + static_cast<ptrdiff_t>(t) * n_heads,
+              beta + static_cast<ptrdiff_t>(t) * n_heads, h_state, y + static_cast<size_t>(t) * inner,
+              this_chunk, nullptr);
         t += this_chunk;
     }
 }

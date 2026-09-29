@@ -128,6 +128,7 @@ __device__ __forceinline__ void mma_mxf4nvf4(float acc[4], const uint32_t a[4], 
 // Everything from barrier init through the epilogue is identical to the shipped
 // single-tensor kernel. OutT: half (activations) or float (batched LM head logits, read as
 // float by samplers; single-stripe shapes only).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int kStages, typename OutT>
 __device__ __forceinline__ void smallm_v2_cta_body(
     const uint8_t* __restrict__ w_packed, const uint8_t* __restrict__ w_scales,
@@ -342,6 +343,7 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         __stcs(&plane[static_cast<int64_t>(m) * N_out + n_base + n], s_out[i]);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // grid = (N/kNR, stripes). Each CTA walks a contiguous stripe of K-tiles for
 // its n-tile and writes one FP32 partial plane per stripe (stripe-exclusive
@@ -557,7 +559,8 @@ bool gemm_nvfp4_smallm_v2_multi_a4(const SmallMV2Sibling* t, int count, const Nv
     }
     pdl::enable_kernel(gemm_nvfp4_smallm_v2_multi_kernel<kDefaultStages>);
     pdl::launch(gemm_nvfp4_smallm_v2_multi_kernel<kDefaultStages>, dim3(total_tiles), dim3(kThreads),
-                kDefaultStages * kStageBytes, stream, a, reinterpret_cast<const uint8_t*>(Xq.packed_data),
+                static_cast<int64_t>(kDefaultStages) * kStageBytes, stream, a,
+                reinterpret_cast<const uint8_t*>(Xq.packed_data),
                 reinterpret_cast<const uint8_t*>(Xq.micro_scales), M, K);
     IMP_CUDA_CHECK_LAUNCH();
     return true;

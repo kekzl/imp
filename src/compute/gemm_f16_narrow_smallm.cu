@@ -47,6 +47,7 @@ __device__ __forceinline__ void mma_f16_16x8x16(float* c, const uint32_t* a, con
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
 }
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(NarrowArgs args) {
     __shared__ float s_red[kWarps][kMaxM][kNT];
     __shared__ int s_last;
@@ -164,6 +165,7 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(Narrow
     if (threadIdx.x == 0)
         args.tickets[tile] = 0;
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 size_t partials_bytes(int n_total) { return static_cast<size_t>(kSplit) * kMaxM * n_total * sizeof(float); }
 
