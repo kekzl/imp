@@ -1321,79 +1321,61 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
                           lm_head_nvfp4, d_out_token, lm_head_fp8, lm_head_fp8_scales);
 }
 
-// Batched prefill feed (dense heads): same math as mtp_draft_step at M=n_rows instead of
-// n_rows M=1 passes. Reading the whole head's weights once per token made prefill
-// prohibitively slow; here every GEMM runs once per batch.
-bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_rows,
-                    const MtpHead& mtp, const Tensor& main_tok_emb,
-                    MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream) {
-    if (!mtp.loaded || n_rows <= 0 || n_rows > ws.feed_rows_cap)
-        return false;
-    if (h_tokens == nullptr || d_hidden_rows == nullptr || main_tok_emb.data == nullptr)
-        return false;
-    // Dense-MLP + attention + KV cache only — mirror of the alloc-time gate.
+namespace {
+
+// Dense-MLP + attention + KV cache only: mirror of the alloc-time gate.
+bool mtp_feed_dense_supported(const MtpHead& mtp, const MtpDraftWorkspace& ws) {
     const bool dense_mlp = ws.n_experts == 0 && ws.shared_d_ff > 0 &&
                            mtp.shared_expert_gate_proj.data != nullptr &&
                            mtp.shared_expert_up_proj.data != nullptr &&
                            mtp.shared_expert_down_proj.data != nullptr;
     if (!dense_mlp || ws.num_heads <= 0 || ws.num_kv_heads <= 0 || ws.head_dim <= 0)
         return false;
-    if (!mtp.input_layernorm.data || !mtp.q_proj.data || !mtp.k_proj.data ||
-        !mtp.v_proj.data || !mtp.o_proj.data || !mtp.post_attention_layernorm.data)
-        return false;
-    if (ws.d_k_cache == nullptr || ws.d_v_cache == nullptr ||
-        ws.mtp_pos + n_rows > ws.max_seq_len)
-        return false;
+    return mtp.input_layernorm.data && mtp.q_proj.data && mtp.k_proj.data && mtp.v_proj.data &&
+           mtp.o_proj.data && mtp.post_attention_layernorm.data;
+}
 
-    const int H    = hidden_dim;
-    const int n    = n_rows;
-    const int nh   = ws.num_heads;
-    const int nkv  = ws.num_kv_heads;
-    const int hdh  = ws.head_dim;
-    const int dff  = ws.shared_d_ff;
-    const int base = ws.mtp_pos;
+// Steps 2-6 of the dense feed over n rows: pre-fc norms, concat, fc, attention, SwiGLU MLP.
+// kv_attn() appends K/V and fills ws.d_b_attn_out; RoPE rotates row r at rope_pos + r or
+// d_rope_pos[r]. No allocation, sync or host read.
+template <typename KvAttnFn>
+bool mtp_feed_dense_rows(const MtpHead& mtp, MtpDraftWorkspace& ws, Tensor& emb_view, const Tensor& h_view,
+                         int H, int n, int rope_pos, const int* d_rope_pos, cudaStream_t stream,
+                         KvAttnFn&& kv_attn) {
+    const int nh = ws.num_heads;
+    const int nkv = ws.num_kv_heads;
+    const int hdh = ws.head_dim;
+    const int dff = ws.shared_d_ff;
     const int kBlock = 256;
-
-    // 1 — token ids H2D + batched embedding lookup → d_b_emb [n, H]
-    if (cudaMemcpyAsync(ws.d_feed_tokens, h_tokens,
-                        static_cast<size_t>(n) * sizeof(int32_t),
-                        cudaMemcpyHostToDevice, stream) != cudaSuccess)
-        return false;
     int64_t nH[2] = {n, H};
-    Tensor emb_view(ws.d_b_emb, QType::F16, 2, nH, /*on_device=*/true);
-    imp::embedding_lookup(main_tok_emb, ws.d_feed_tokens, n, emb_view,
-                          main_tok_emb.qtype, stream);
 
-    // 2 — twin pre-fc norms (emb in place, hidden into scratch)
-    Tensor h_view(const_cast<void*>(d_hidden_rows), QType::F16, 2, nH, true);
+    // 2 - twin pre-fc norms (emb in place, hidden into scratch)
     Tensor h_n(ws.d_b_h_norm, QType::F16, 2, nH, true);
     imp::rmsnorm(emb_view, mtp.pre_fc_norm_embedding, emb_view, 1e-6f, stream);
-    imp::rmsnorm(h_view,   mtp.pre_fc_norm_hidden,    h_n,      1e-6f, stream);
+    imp::rmsnorm(h_view, mtp.pre_fc_norm_hidden, h_n, 1e-6f, stream);
 
-    // 3 — row-wise concat → d_b_fc_in [n, 2H]
+    // 3 - row-wise concat -> d_b_fc_in [n, 2H]
     {
         int grid = (n * 2 * H + kBlock - 1) / kBlock;
-        mtp_concat_kernel<<<grid, kBlock, 0, stream>>>(
-            static_cast<const __half*>(ws.d_b_emb),
-            static_cast<const __half*>(ws.d_b_h_norm),
-            static_cast<__half*>(ws.d_b_fc_in), H, n);
+        mtp_concat_kernel<<<grid, kBlock, 0, stream>>>(static_cast<const __half*>(ws.d_b_emb),
+                                                       static_cast<const __half*>(ws.d_b_h_norm),
+                                                       static_cast<__half*>(ws.d_b_fc_in), H, n);
         IMP_CUDA_CHECK_LAUNCH();
     }
 
-    // 4 — fc: [n, 2H] → [n, H]
+    // 4 - fc: [n, 2H] -> [n, H]
     {
-        int64_t in_s[2]  = {n, 2 * H};
-        Tensor in_v (ws.d_b_fc_in,  QType::F16, 2, in_s, true);
-        Tensor out_v(ws.d_b_fc_out, QType::F16, 2, nH,   true);
+        int64_t in_s[2] = {n, 2 * H};
+        Tensor in_v(ws.d_b_fc_in, QType::F16, 2, in_s, true);
+        Tensor out_v(ws.d_b_fc_out, QType::F16, 2, nH, true);
         imp::gemm(in_v, mtp.fc, out_v, 1.0f, 0.0f, stream);
     }
 
-    // 5 — attention block
+    // 5 - attention block
     {
         Tensor fc_v(ws.d_b_fc_out, QType::F16, 2, nH, true);
-        Tensor in_v(ws.d_b_norm,   QType::F16, 2, nH, true);
+        Tensor in_v(ws.d_b_norm, QType::F16, 2, nH, true);
         imp::rmsnorm(fc_v, mtp.input_layernorm, in_v, 1e-6f, stream);
-
         const int q_out = static_cast<int>(mtp.q_proj.shape[0]);
         {
             int64_t out_s[2] = {n, q_out};
@@ -1407,18 +1389,12 @@ bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_ro
             imp::gemm(in_v, mtp.k_proj, k_v, 1.0f, 0.0f, stream);
             imp::gemm(in_v, mtp.v_proj, v_v, 1.0f, 0.0f, stream);
         }
-        // Q extract: per-head [q | gate] → contiguous Q rows. The per-head
-        // pitch pattern is uniform across tokens, so one 2D copy with
-        // height n*nh covers the whole batch.
-        const size_t q_src_pitch =
-            static_cast<size_t>(mtp.attn_output_gate ? 2 * hdh : hdh) * sizeof(__half);
-        if (cudaMemcpy2DAsync(ws.d_b_q_attn, static_cast<size_t>(hdh) * sizeof(__half),
-                              ws.d_b_q_full, q_src_pitch,
-                              static_cast<size_t>(hdh) * sizeof(__half),
-                              static_cast<size_t>(n) * nh,
+        // Q extract: per-head [q | gate] -> contiguous Q rows; one 2D copy of height n*nh.
+        const size_t q_src_pitch = static_cast<size_t>(mtp.attn_output_gate ? 2 * hdh : hdh) * sizeof(__half);
+        if (cudaMemcpy2DAsync(ws.d_b_q_attn, static_cast<size_t>(hdh) * sizeof(__half), ws.d_b_q_full, q_src_pitch,
+                              static_cast<size_t>(hdh) * sizeof(__half), static_cast<size_t>(n) * nh,
                               cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
             return false;
-        // qk-norm over all rows' heads at once
         if (mtp.q_norm.data) {
             int64_t q_s[2] = {static_cast<int64_t>(n) * nh, hdh};
             Tensor q_v(ws.d_b_q_attn, QType::F16, 2, q_s, true);
@@ -1429,15 +1405,93 @@ bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_ro
             Tensor k_v(ws.d_b_k, QType::F16, 2, k_s, true);
             imp::rmsnorm(k_v, mtp.k_norm, k_v, ws.rms_norm_eps, stream, ws.arch_norm_offset);
         }
-        // RoPE at positions base..base+n
-        if (mtp.attn_rope && ws.rope_dim > 0 &&
-            ws.mrope_sec0 + ws.mrope_sec1 + ws.mrope_sec2 == ws.rope_dim / 2) {
-            mtp_apply_mrope(ws.d_b_q_attn, nh, ws.d_b_k, nkv, hdh, ws.rope_dim, ws.rope_theta,
-                            ws.mrope_sec0, ws.mrope_sec1, ws.mrope_sec2, base,
-                            1.0f / ws.rope_freq_scale, ws.yarn_ext_factor, ws.yarn_attn_factor,
-                            ws.yarn_corr_dim_0, ws.yarn_corr_dim_1, stream, /*n_rows=*/n);
+        if (mtp.attn_rope && ws.rope_dim > 0 && ws.mrope_sec0 + ws.mrope_sec1 + ws.mrope_sec2 == ws.rope_dim / 2) {
+            mtp_apply_mrope(ws.d_b_q_attn, nh, ws.d_b_k, nkv, hdh, ws.rope_dim, ws.rope_theta, ws.mrope_sec0,
+                            ws.mrope_sec1, ws.mrope_sec2, rope_pos, 1.0f / ws.rope_freq_scale, ws.yarn_ext_factor,
+                            ws.yarn_attn_factor, ws.yarn_corr_dim_0, ws.yarn_corr_dim_1, stream, n, d_rope_pos);
         }
-        // KV append at base..base+n, then the causal per-row scan
+        kv_attn();
+        if (mtp.attn_output_gate) {
+            int grid = (n * nh * hdh + kBlock - 1) / kBlock;
+            mtp_gate_attn_out_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(ws.d_b_attn_out),
+                                                                  static_cast<const __half*>(ws.d_b_q_full), nh, hdh,
+                                                                  n);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+        // o_proj + residual into fc_out
+        {
+            int64_t in_s[2] = {n, nh * hdh};
+            Tensor in_a(ws.d_b_attn_out, QType::F16, 2, in_s, true);
+            Tensor out_v(ws.d_b_res, QType::F16, 2, nH, true);
+            imp::gemm(in_a, mtp.o_proj, out_v, 1.0f, 0.0f, stream);
+            int grid = (n * H + kBlock - 1) / kBlock;
+            mtp_add_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(ws.d_b_fc_out),
+                                                        static_cast<const __half*>(ws.d_b_res), n * H);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+    }
+
+    // 6 - dense SwiGLU MLP + residual (the per-pair path's 5.B dense arm)
+    {
+        Tensor fc_v(ws.d_b_fc_out, QType::F16, 2, nH, true);
+        Tensor pn_v(ws.d_b_norm, QType::F16, 2, nH, true);
+        imp::rmsnorm(fc_v, mtp.post_attention_layernorm, pn_v, 1e-6f, stream);
+        int64_t ff_s[2] = {n, dff};
+        Tensor gate_v(ws.d_b_gate, QType::F16, 2, ff_s, true);
+        Tensor up_v(ws.d_b_up, QType::F16, 2, ff_s, true);
+        Tensor act_v(ws.d_b_act, QType::F16, 2, ff_s, true);
+        imp::gemm(pn_v, mtp.shared_expert_gate_proj, gate_v, 1.0f, 0.0f, stream);
+        imp::gemm(pn_v, mtp.shared_expert_up_proj, up_v, 1.0f, 0.0f, stream);
+        imp::swiglu(gate_v, up_v, act_v, stream);
+        Tensor down_v(ws.d_b_res, QType::F16, 2, nH, true);
+        imp::gemm(act_v, mtp.shared_expert_down_proj, down_v, 1.0f, 0.0f, stream);
+        int grid = (n * H + kBlock - 1) / kBlock;
+        mtp_add_shared_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(ws.d_b_fc_out),
+                                                           static_cast<const __half*>(ws.d_b_res), n * H);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+    return true;
+}
+
+}  // namespace
+
+// Batched prefill feed (dense heads): same math as mtp_draft_step at M=n_rows instead of
+// n_rows M=1 passes. Reading the whole head's weights once per token made prefill
+// prohibitively slow; here every GEMM runs once per batch.
+bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_rows,
+                    const MtpHead& mtp, const Tensor& main_tok_emb,
+                    MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream) {
+    if (!mtp.loaded || n_rows <= 0 || n_rows > ws.feed_rows_cap)
+        return false;
+    if (h_tokens == nullptr || d_hidden_rows == nullptr || main_tok_emb.data == nullptr)
+        return false;
+    if (!mtp_feed_dense_supported(mtp, ws))
+        return false;
+    if (ws.d_k_cache == nullptr || ws.d_v_cache == nullptr ||
+        ws.mtp_pos + n_rows > ws.max_seq_len)
+        return false;
+
+    const int H    = hidden_dim;
+    const int n    = n_rows;
+    const int nh   = ws.num_heads;
+    const int nkv  = ws.num_kv_heads;
+    const int hdh  = ws.head_dim;
+    const int base = ws.mtp_pos;
+    const int kBlock = 256;
+
+    // 1 - token ids H2D + batched embedding lookup -> d_b_emb [n, H]
+    if (cudaMemcpyAsync(ws.d_feed_tokens, h_tokens,
+                        static_cast<size_t>(n) * sizeof(int32_t),
+                        cudaMemcpyHostToDevice, stream) != cudaSuccess)
+        return false;
+    int64_t nH[2] = {n, H};
+    Tensor emb_view(ws.d_b_emb, QType::F16, 2, nH, /*on_device=*/true);
+    imp::embedding_lookup(main_tok_emb, ws.d_feed_tokens, n, emb_view,
+                          main_tok_emb.qtype, stream);
+    Tensor h_view(const_cast<void*>(d_hidden_rows), QType::F16, 2, nH, true);
+
+    // KV append at base..base+n, then the causal per-row scan
+    auto kv_attn = [&] {
         {
             int grid = (n * nkv * hdh + kBlock - 1) / kBlock;
             mtp_kv_append_kernel<<<grid, kBlock, 0, stream>>>(
@@ -1448,74 +1502,33 @@ bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_ro
                 base, nkv, hdh, n);
             IMP_CUDA_CHECK_LAUNCH();
         }
-        {
-            const int max_seq = base + n;  // longest row's context
-            const size_t shmem_bytes = static_cast<size_t>(max_seq) * sizeof(float);
-            if (shmem_bytes > 48 * 1024) {
-                // >48 KiB dynamic shmem needs the opt-in attribute (sm_120:
-                // ~99 KiB per block; the 16k kMtpKvCap needs 64 KiB). Set to
-                // the cache's own ceiling once.
-                static bool smem_opted_in = false;
-                if (!smem_opted_in) {
-                    cudaFuncSetAttribute(mtp_attn_kv_scan_kernel,
-                                         cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                         ws.max_seq_len * static_cast<int>(sizeof(float)));
-                    smem_opted_in = true;
-                }
+        const int max_seq = base + n;  // longest row's context
+        const size_t shmem_bytes = static_cast<size_t>(max_seq) * sizeof(float);
+        if (shmem_bytes > 48 * 1024) {
+            // >48 KiB dynamic shmem needs the opt-in attribute (sm_120: ~99 KiB per block;
+            // the 16k kMtpKvCap needs 64 KiB). Set to the cache's own ceiling once.
+            static bool smem_opted_in = false;
+            if (!smem_opted_in) {
+                cudaFuncSetAttribute(mtp_attn_kv_scan_kernel,
+                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                     ws.max_seq_len * static_cast<int>(sizeof(float)));
+                smem_opted_in = true;
             }
-            const float scale = 1.0f / sqrtf(static_cast<float>(hdh));
-            mtp_attn_kv_scan_kernel<<<dim3(nh, n), kBlock, shmem_bytes, stream>>>(
-                static_cast<const __half*>(ws.d_b_q_attn),
-                static_cast<const __half*>(ws.d_k_cache),
-                static_cast<const __half*>(ws.d_v_cache),
-                static_cast<__half*>(ws.d_b_attn_out),
-                /*base_ctx=*/base, nh, nkv, hdh, ws.max_seq_len, scale);
-            IMP_CUDA_CHECK_LAUNCH();
         }
-        if (mtp.attn_output_gate) {
-            int grid = (n * nh * hdh + kBlock - 1) / kBlock;
-            mtp_gate_attn_out_kernel<<<grid, kBlock, 0, stream>>>(
-                static_cast<__half*>(ws.d_b_attn_out),
-                static_cast<const __half*>(ws.d_b_q_full),
-                nh, hdh, n);
-            IMP_CUDA_CHECK_LAUNCH();
-        }
-        // o_proj + residual into fc_out
-        {
-            int64_t in_s[2] = {n, nh * hdh};
-            Tensor in_a (ws.d_b_attn_out, QType::F16, 2, in_s, true);
-            Tensor out_v(ws.d_b_res,      QType::F16, 2, nH,   true);
-            imp::gemm(in_a, mtp.o_proj, out_v, 1.0f, 0.0f, stream);
-            int grid = (n * H + kBlock - 1) / kBlock;
-            mtp_add_kernel<<<grid, kBlock, 0, stream>>>(
-                static_cast<__half*>(ws.d_b_fc_out),
-                static_cast<const __half*>(ws.d_b_res), n * H);
-            IMP_CUDA_CHECK_LAUNCH();
-        }
-    }
-
-    // 6 — dense SwiGLU MLP + residual (the per-pair path's 5.B dense arm)
-    {
-        Tensor fc_v(ws.d_b_fc_out, QType::F16, 2, nH, true);
-        Tensor pn_v(ws.d_b_norm,   QType::F16, 2, nH, true);
-        imp::rmsnorm(fc_v, mtp.post_attention_layernorm, pn_v, 1e-6f, stream);
-        int64_t ff_s[2] = {n, dff};
-        Tensor gate_v(ws.d_b_gate, QType::F16, 2, ff_s, true);
-        Tensor up_v  (ws.d_b_up,   QType::F16, 2, ff_s, true);
-        Tensor act_v (ws.d_b_act,  QType::F16, 2, ff_s, true);
-        imp::gemm(pn_v, mtp.shared_expert_gate_proj, gate_v, 1.0f, 0.0f, stream);
-        imp::gemm(pn_v, mtp.shared_expert_up_proj,   up_v,   1.0f, 0.0f, stream);
-        imp::swiglu(gate_v, up_v, act_v, stream);
-        Tensor down_v(ws.d_b_res, QType::F16, 2, nH, true);
-        imp::gemm(act_v, mtp.shared_expert_down_proj, down_v, 1.0f, 0.0f, stream);
-        int grid = (n * H + kBlock - 1) / kBlock;
-        mtp_add_shared_kernel<<<grid, kBlock, 0, stream>>>(
-            static_cast<__half*>(ws.d_b_fc_out),
-            static_cast<const __half*>(ws.d_b_res), n * H);
+        const float scale = 1.0f / sqrtf(static_cast<float>(hdh));
+        mtp_attn_kv_scan_kernel<<<dim3(nh, n), kBlock, shmem_bytes, stream>>>(
+            static_cast<const __half*>(ws.d_b_q_attn),
+            static_cast<const __half*>(ws.d_k_cache),
+            static_cast<const __half*>(ws.d_v_cache),
+            static_cast<__half*>(ws.d_b_attn_out),
+            /*base_ctx=*/base, nh, nkv, hdh, ws.max_seq_len, scale);
         IMP_CUDA_CHECK_LAUNCH();
-    }
+    };
+    if (!mtp_feed_dense_rows(mtp, ws, emb_view, h_view, H, n, /*rope_pos=*/base, /*d_rope_pos=*/nullptr,
+                             stream, kv_attn))
+        return false;
 
-    // 7 — final_norm of the LAST row → ws.d_h_final, mirroring what the
+    // 7 - final_norm of the LAST row -> ws.d_h_final, mirroring what the
     // per-pair loop leaves behind (the chain reads it when it continues).
     {
         int64_t one[2] = {1, H};
@@ -1540,14 +1553,7 @@ bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, 
     if (h_tokens == nullptr || d_hidden_all == nullptr || h_src_rows == nullptr || h_slots == nullptr ||
         h_pos == nullptr || main_tok_emb.data == nullptr)
         return false;
-    const bool dense_mlp = ws.n_experts == 0 && ws.shared_d_ff > 0 &&
-                           mtp.shared_expert_gate_proj.data != nullptr &&
-                           mtp.shared_expert_up_proj.data != nullptr &&
-                           mtp.shared_expert_down_proj.data != nullptr;
-    if (!dense_mlp || ws.num_heads <= 0 || ws.num_kv_heads <= 0 || ws.head_dim <= 0)
-        return false;
-    if (!mtp.input_layernorm.data || !mtp.q_proj.data || !mtp.k_proj.data || !mtp.v_proj.data ||
-        !mtp.o_proj.data || !mtp.post_attention_layernorm.data)
+    if (!mtp_feed_dense_supported(mtp, ws))
         return false;
     if (ws.d_k_cache_base == nullptr || ws.d_v_cache_base == nullptr || ws.d_row_slots == nullptr ||
         ws.d_b_gather == nullptr || ws.d_b_h_final == nullptr)
@@ -1564,7 +1570,6 @@ bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, 
     const int nh = ws.num_heads;
     const int nkv = ws.num_kv_heads;
     const int hdh = ws.head_dim;
-    const int dff = ws.shared_d_ff;
     const int kBlock = 256;
 
     // 1 - tables H2D, gather the hidden rows, batched embedding lookup
@@ -1588,67 +1593,13 @@ bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, 
     Tensor emb_view(ws.d_b_emb, QType::F16, 2, nH, /*on_device=*/true);
     imp::embedding_lookup(main_tok_emb, ws.d_feed_tokens, n, emb_view, main_tok_emb.qtype, stream);
 
-    // 2 - twin pre-fc norms (after the target's final norm when asked)
+    // Target's final norm on the gathered rows when asked, before the pre-fc norms
     Tensor h_view(ws.d_b_gather, QType::F16, 2, nH, true);
     if (post_norm != nullptr && post_norm->data != nullptr)
         imp::rmsnorm(h_view, *post_norm, h_view, post_norm_eps, stream, post_norm_offset);
-    Tensor h_n(ws.d_b_h_norm, QType::F16, 2, nH, true);
-    imp::rmsnorm(emb_view, mtp.pre_fc_norm_embedding, emb_view, 1e-6f, stream);
-    imp::rmsnorm(h_view, mtp.pre_fc_norm_hidden, h_n, 1e-6f, stream);
 
-    // 3 - concat, 4 - fc
-    {
-        int grid = (n * 2 * H + kBlock - 1) / kBlock;
-        mtp_concat_kernel<<<grid, kBlock, 0, stream>>>(static_cast<const __half*>(ws.d_b_emb),
-                                                       static_cast<const __half*>(ws.d_b_h_norm),
-                                                       static_cast<__half*>(ws.d_b_fc_in), H, n);
-        IMP_CUDA_CHECK_LAUNCH();
-    }
-    {
-        int64_t in_s[2] = {n, 2 * H};
-        Tensor in_v(ws.d_b_fc_in, QType::F16, 2, in_s, true);
-        Tensor out_v(ws.d_b_fc_out, QType::F16, 2, nH, true);
-        imp::gemm(in_v, mtp.fc, out_v, 1.0f, 0.0f, stream);
-    }
-
-    // 5 - attention block, per-row slot and position
-    {
-        Tensor fc_v(ws.d_b_fc_out, QType::F16, 2, nH, true);
-        Tensor in_v(ws.d_b_norm, QType::F16, 2, nH, true);
-        imp::rmsnorm(fc_v, mtp.input_layernorm, in_v, 1e-6f, stream);
-        const int q_out = static_cast<int>(mtp.q_proj.shape[0]);
-        {
-            int64_t out_s[2] = {n, q_out};
-            Tensor out_v(ws.d_b_q_full, QType::F16, 2, out_s, true);
-            imp::gemm(in_v, mtp.q_proj, out_v, 1.0f, 0.0f, stream);
-        }
-        {
-            int64_t out_s[2] = {n, nkv * hdh};
-            Tensor k_v(ws.d_b_k, QType::F16, 2, out_s, true);
-            Tensor v_v(ws.d_b_v, QType::F16, 2, out_s, true);
-            imp::gemm(in_v, mtp.k_proj, k_v, 1.0f, 0.0f, stream);
-            imp::gemm(in_v, mtp.v_proj, v_v, 1.0f, 0.0f, stream);
-        }
-        const size_t q_src_pitch = static_cast<size_t>(mtp.attn_output_gate ? 2 * hdh : hdh) * sizeof(__half);
-        if (cudaMemcpy2DAsync(ws.d_b_q_attn, static_cast<size_t>(hdh) * sizeof(__half), ws.d_b_q_full, q_src_pitch,
-                              static_cast<size_t>(hdh) * sizeof(__half), static_cast<size_t>(n) * nh,
-                              cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
-            return false;
-        if (mtp.q_norm.data) {
-            int64_t q_s[2] = {static_cast<int64_t>(n) * nh, hdh};
-            Tensor q_v(ws.d_b_q_attn, QType::F16, 2, q_s, true);
-            imp::rmsnorm(q_v, mtp.q_norm, q_v, ws.rms_norm_eps, stream, ws.arch_norm_offset);
-        }
-        if (mtp.k_norm.data) {
-            int64_t k_s[2] = {static_cast<int64_t>(n) * nkv, hdh};
-            Tensor k_v(ws.d_b_k, QType::F16, 2, k_s, true);
-            imp::rmsnorm(k_v, mtp.k_norm, k_v, ws.rms_norm_eps, stream, ws.arch_norm_offset);
-        }
-        if (mtp.attn_rope && ws.rope_dim > 0 && ws.mrope_sec0 + ws.mrope_sec1 + ws.mrope_sec2 == ws.rope_dim / 2) {
-            mtp_apply_mrope(ws.d_b_q_attn, nh, ws.d_b_k, nkv, hdh, ws.rope_dim, ws.rope_theta, ws.mrope_sec0,
-                            ws.mrope_sec1, ws.mrope_sec2, /*pos=*/0, 1.0f / ws.rope_freq_scale, ws.yarn_ext_factor,
-                            ws.yarn_attn_factor, ws.yarn_corr_dim_0, ws.yarn_corr_dim_1, stream, n, ws.d_row_pos);
-        }
+    // KV append and scan at per-row slot and position
+    auto kv_attn = [&] {
         {
             int grid = (n * nkv * hdh + kBlock - 1) / kBlock;
             mtp_kv_append_rows_kernel<<<grid, kBlock, 0, stream>>>(
@@ -1657,61 +1608,24 @@ bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, 
                 ws.d_row_pos, static_cast<int64_t>(ws.kv_slot_elems), nkv * hdh, n);
             IMP_CUDA_CHECK_LAUNCH();
         }
-        {
-            const size_t shmem_bytes = static_cast<size_t>(max_pos + 1) * sizeof(float);
-            if (shmem_bytes > 48 * 1024) {
-                static bool smem_opted_in = false;
-                if (!smem_opted_in) {
-                    cudaFuncSetAttribute(mtp_attn_kv_scan_rows_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                         ws.max_seq_len * static_cast<int>(sizeof(float)));
-                    smem_opted_in = true;
-                }
+        const size_t shmem_bytes = static_cast<size_t>(max_pos + 1) * sizeof(float);
+        if (shmem_bytes > 48 * 1024) {
+            static bool smem_opted_in = false;
+            if (!smem_opted_in) {
+                cudaFuncSetAttribute(mtp_attn_kv_scan_rows_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                     ws.max_seq_len * static_cast<int>(sizeof(float)));
+                smem_opted_in = true;
             }
-            const float scale = 1.0f / sqrtf(static_cast<float>(hdh));
-            mtp_attn_kv_scan_rows_kernel<<<dim3(nh, n), kBlock, shmem_bytes, stream>>>(
-                static_cast<const __half*>(ws.d_b_q_attn), static_cast<const __half*>(ws.d_k_cache_base),
-                static_cast<const __half*>(ws.d_v_cache_base), static_cast<__half*>(ws.d_b_attn_out), ws.d_row_slots,
-                ws.d_row_pos, static_cast<int64_t>(ws.kv_slot_elems), nh, nkv, hdh, scale);
-            IMP_CUDA_CHECK_LAUNCH();
         }
-        if (mtp.attn_output_gate) {
-            int grid = (n * nh * hdh + kBlock - 1) / kBlock;
-            mtp_gate_attn_out_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(ws.d_b_attn_out),
-                                                                  static_cast<const __half*>(ws.d_b_q_full), nh, hdh,
-                                                                  n);
-            IMP_CUDA_CHECK_LAUNCH();
-        }
-        {
-            int64_t in_s[2] = {n, nh * hdh};
-            Tensor in_a(ws.d_b_attn_out, QType::F16, 2, in_s, true);
-            Tensor out_v(ws.d_b_res, QType::F16, 2, nH, true);
-            imp::gemm(in_a, mtp.o_proj, out_v, 1.0f, 0.0f, stream);
-            int grid = (n * H + kBlock - 1) / kBlock;
-            mtp_add_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(ws.d_b_fc_out),
-                                                        static_cast<const __half*>(ws.d_b_res), n * H);
-            IMP_CUDA_CHECK_LAUNCH();
-        }
-    }
-
-    // 6 - dense SwiGLU MLP + residual
-    {
-        Tensor fc_v(ws.d_b_fc_out, QType::F16, 2, nH, true);
-        Tensor pn_v(ws.d_b_norm, QType::F16, 2, nH, true);
-        imp::rmsnorm(fc_v, mtp.post_attention_layernorm, pn_v, 1e-6f, stream);
-        int64_t ff_s[2] = {n, dff};
-        Tensor gate_v(ws.d_b_gate, QType::F16, 2, ff_s, true);
-        Tensor up_v(ws.d_b_up, QType::F16, 2, ff_s, true);
-        Tensor act_v(ws.d_b_act, QType::F16, 2, ff_s, true);
-        imp::gemm(pn_v, mtp.shared_expert_gate_proj, gate_v, 1.0f, 0.0f, stream);
-        imp::gemm(pn_v, mtp.shared_expert_up_proj, up_v, 1.0f, 0.0f, stream);
-        imp::swiglu(gate_v, up_v, act_v, stream);
-        Tensor down_v(ws.d_b_res, QType::F16, 2, nH, true);
-        imp::gemm(act_v, mtp.shared_expert_down_proj, down_v, 1.0f, 0.0f, stream);
-        int grid = (n * H + kBlock - 1) / kBlock;
-        mtp_add_shared_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(ws.d_b_fc_out),
-                                                           static_cast<const __half*>(ws.d_b_res), n * H);
+        const float scale = 1.0f / sqrtf(static_cast<float>(hdh));
+        mtp_attn_kv_scan_rows_kernel<<<dim3(nh, n), kBlock, shmem_bytes, stream>>>(
+            static_cast<const __half*>(ws.d_b_q_attn), static_cast<const __half*>(ws.d_k_cache_base),
+            static_cast<const __half*>(ws.d_v_cache_base), static_cast<__half*>(ws.d_b_attn_out), ws.d_row_slots,
+            ws.d_row_pos, static_cast<int64_t>(ws.kv_slot_elems), nh, nkv, hdh, scale);
         IMP_CUDA_CHECK_LAUNCH();
-    }
+    };
+    if (!mtp_feed_dense_rows(mtp, ws, emb_view, h_view, H, n, /*rope_pos=*/0, ws.d_row_pos, stream, kv_attn))
+        return false;
 
     // 7 - final_norm of every row (the chain input / LM head input per row)
     {
