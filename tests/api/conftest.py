@@ -1,6 +1,8 @@
 import os
+import collections
 import subprocess
-import tempfile
+import sys
+import threading
 import time
 
 import httpx
@@ -29,17 +31,26 @@ MOCK_PORT = int(os.environ.get("IMP_MOCK_PORT", "9099"))
 HAS_MODEL = not SERVER_BIN
 
 
-def child_exit_report(child, stderr_path, lines: int = 10) -> str:
+def child_exit_report(child, stderr_tail) -> str:
     """Exit code plus the last stderr lines of a dead server child."""
-    try:
-        with open(stderr_path, errors="replace") as f:
-            tail = "".join(f.readlines()[-lines:]).rstrip()
-    except OSError:
-        tail = "<stderr unavailable>"
-    return f"exit code {child.returncode}, last stderr lines:\n{tail}"
+    if _real_stderr_thread is not None:
+        _real_stderr_thread.join(timeout=2)  # drain what the dead child wrote
+    return f"exit code {child.returncode}, last stderr lines:\n" + "".join(stderr_tail).rstrip()
 
 
-def wait_for_server(url: str, timeout: float = 120.0, child=None, stderr_path=None):
+def _pump_stderr(pipe, tail):
+    """Forward each child stderr line to the current sys.stderr (pytest capture sees it)
+    and keep the last lines in `tail`."""
+    for line in pipe:
+        tail.append(line)
+        try:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+        except (ValueError, OSError):
+            pass
+
+
+def wait_for_server(url: str, timeout: float = 120.0, child=None, stderr_tail=()):
     """Block until the server's /health endpoint returns 200.
 
     A dead `child` (subprocess.Popen) fails at once with its exit code and stderr tail.
@@ -49,7 +60,7 @@ def wait_for_server(url: str, timeout: float = 120.0, child=None, stderr_path=No
         if child is not None and child.poll() is not None:
             raise RuntimeError(
                 f"Server at {url} exited before becoming ready: "
-                + child_exit_report(child, stderr_path)
+                + child_exit_report(child, stderr_tail)
             )
         try:
             r = httpx.get(f"{url}/health", timeout=5)
@@ -64,21 +75,25 @@ def wait_for_server(url: str, timeout: float = 120.0, child=None, stderr_path=No
 # Session-scoped mock server (started once, shared across all tests)
 _mock_server = None
 _real_server = None
-_real_stderr = None
+_real_stderr_tail = collections.deque(maxlen=10)
+_real_stderr_thread = None
 
 
 def pytest_configure(config):
     """Start the server under test (mock or real binary) before collection."""
-    global _mock_server, _real_server, _real_stderr, BASE_URL, MODEL
+    global _mock_server, _real_server, _real_stderr_thread, BASE_URL, MODEL
     if SERVER_BIN:
         # No --model: the binary serves the validation surface and answers 503
-        # on anything that would need weights. stderr goes to a file so a dead
-        # child is reported with its last lines (wait_for_server), not as a timeout.
-        _real_stderr = tempfile.NamedTemporaryFile(prefix="imp-server-", suffix=".err")
+        # on anything that would need weights. stderr is pumped to sys.stderr
+        # and the last 10 lines kept, so a dead child is reported (wait_for_server).
         _real_server = subprocess.Popen(
             [SERVER_BIN, "--host", "127.0.0.1", "--port", str(SERVER_PORT)],
-            stderr=_real_stderr,
+            stderr=subprocess.PIPE, text=True, errors="replace",
         )
+        _real_stderr_thread = threading.Thread(
+            target=_pump_stderr, args=(_real_server.stderr, _real_stderr_tail), daemon=True
+        )
+        _real_stderr_thread.start()
         BASE_URL = f"http://127.0.0.1:{SERVER_PORT}"
         # Any name: nothing resolves on a model-less server, and the tests that
         # send one only care about what happens BEFORE model resolution.
@@ -116,7 +131,7 @@ def client(base_url):
         base_url,
         timeout=120 if HAS_MODEL and not USE_MOCK else 10,
         child=_real_server,
-        stderr_path=_real_stderr.name if _real_stderr else None,
+        stderr_tail=_real_stderr_tail,
     )
     with httpx.Client(base_url=base_url, timeout=60.0) as c:
         yield c
