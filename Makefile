@@ -6,12 +6,23 @@
 SHELL := bash
 .SHELLFLAGS := -o pipefail -c
 
-DOCKER_IMG ?= imp:test
+# One tag per worktree (scripts/image_tag.sh): main checkout imp:test, linked worktree
+# imp:test-<dir>-<hash8>. Exported so scripts run from here use the same image.
+ifeq ($(origin DOCKER_IMG),undefined)
+DOCKER_IMG := $(shell bash scripts/image_tag.sh)
+endif
+IMP_TEST_IMG ?= $(DOCKER_IMG)
+export DOCKER_IMG IMP_TEST_IMG
+# Runner refuses an image whose imp.tree label is not this tree (IMP_ALLOW_FOREIGN_IMAGE=1).
+IMG_CHECK = bash scripts/image_tag.sh check $(DOCKER_IMG)
+# Every GPU container runs under scripts/gpu_lock.sh: refused while another worktree holds it.
+GPU_LOCKED = bash scripts/gpu_lock.sh run "make $@" --
+GPU_DOCKER = $(GPU_LOCKED) docker run --rm --gpus all
 # Mount $(HOME)/models, not $(PWD)/models: the repo's models/ holds ABSOLUTE
 # symlinks into $(HOME)/models, which dangle inside the container. Every path
 # under $(PWD)/models therefore misses, and a missing model is a skip, so the
 # whole model suite went silently green. test-vision already mounts $(HOME).
-DOCKER_RUN = docker run --rm --gpus all -v $(HOME)/models:/models $(DOCKER_IMG)
+DOCKER_RUN = $(IMG_CHECK) && $(GPU_DOCKER) -v $(HOME)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # Dependency pins live once in cmake/imp-deps.cmake; inject them into the Docker
 # build so the tags are not duplicated (bump that file only). Extraction is in a
@@ -129,6 +140,11 @@ test-unit: build
 # paged-/crosspath-oracle sweeps, TEST_AUDIT (retired) §8). The old "<30s" note was
 # stale.
 test-gpu: build
+	@$(GPU_LOCKED) $(MAKE) --no-print-directory test-gpu-suite
+
+.PHONY: test-gpu-suite
+# The suite body; test-gpu holds the GPU lock across all three runs.
+test-gpu-suite:
 	$(DOCKER_RUN) imp-tests
 	@# #1575: DetEvalE2ETest is the only end-to-end determinism gate in the
 	@# tree, and it takes its GTEST_SKIP branch unless a model env var is set.
@@ -136,7 +152,7 @@ test-gpu: build
 	@# it as a skip - the gate existed and never executed. It runs here
 	@# explicitly, with only the two variables it needs, rather than handing
 	@# test-gpu the whole model battery.
-	docker run --rm --gpus all -v $(HOME)/models:/models \
+	$(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3-4B-Instruct-2507-Q8_0.gguf \
 		-e IMP_TEST_MOE_MODEL=$(MOE_MODEL) \
 		$(DOCKER_IMG) imp-tests --gtest_filter="*DetEvalE2ETest*"
@@ -162,7 +178,7 @@ test-gpu: build
 # 0-token #710). CI has no GPU runner, so this is the only place handlers.cpp /
 # batching_engine run end-to-end. See the script header for env knobs.
 test-server: build
-	bash scripts/test_server.sh
+	$(GPU_LOCKED) bash scripts/test_server.sh
 
 # Measured gcov line coverage of tools/imp-server/ over an end-to-end GPU run
 # (builds an instrumented imp-server, drives every endpoint + the manual server
@@ -195,7 +211,7 @@ test-all: build
 # guard_det_suite_filter (CMakeLists.txt, unit lane) holds both to that.
 MOE_MODEL ?= /models/gpt-oss-20b-mxfp4.gguf
 test-e2e: build
-	docker run --rm --gpus all -v $(HOME)/models:/models \
+	$(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3-4B-Instruct-2507-Q8_0.gguf \
 		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-mxfp4.gguf \
 		-e IMP_TEST_MODEL_GEMMA4=/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf \
@@ -209,7 +225,7 @@ test-e2e: build
 	@# never named them, and the lock table (tests/refs/e2e_greedy_locks.h) has
 	@# rows for Qwen3-8B-Q8_0, not the Qwen3-4B the line above loads. Own
 	@# container, own checkpoint, so the lock rows match what is loaded.
-	docker run --rm --gpus all -v $(HOME)/models:/models \
+	$(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3-8B-Q8_0.gguf \
 		-e IMP_TEST_GGUF=/models/Qwen3-8B-Q8_0.gguf \
 		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*:DegenerationTest.*:PrefixCacheE2ETest.*:TokenizerCompatTest.*:TensorKindCoverage.*"
@@ -223,24 +239,24 @@ test-e2e: build
 	@# (tests/CLAUDE.md - a bare Suite.* on a TEST_P matches nothing and gtest
 	@# calls that PASSED). It chains 30 restores against a cold prefill of the
 	@# same prompt and compares the recurrent slab, not the tokens.
-	docker run --rm --gpus all -v $(HOME)/models:/models \
+	$(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3.5-4B-mxfp4.gguf \
 		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-mxfp4.gguf \
 		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:PrefixCacheE2ETest.HybridTranscriptRestoreContinuesAtReplyEnd:GdnGraphBucketTest.*:*HybridRestoreChainTest*:HybridBatchedDecodeTest.*"
 	@# The lock table's other rows are the NVFP4 SafeTensors checkpoint (the
 	@# loader + RoPE path the #503 class shipped prompt-blind on).
-	docker run --rm --gpus all -v $(HOME)/models:/models \
+	$(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3-8B-NVFP4-cortecs \
 		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*"
 	@# LoraHotSwap crafts its PEFT adapters in-test against Llama-3.2-3B
 	@# (q/v, r=8); it ran from no target until AUDIT_arch_2026 dispatch #6.
-	docker run --rm --gpus all -v $(HOME)/models:/models \
+	$(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL_LLAMA=/models/Llama-3.2-3B-Instruct-Q8_0.gguf \
 		$(DOCKER_IMG) test-e2e --gtest_filter="LoraHotSwap.*"
 	@# The batch-invariance instrument (AUDIT_arch_2026 D-2): teacher-forced
 	@# M=1 vs M=32 on a DENSE native-NVFP4 checkpoint, own container because it
 	@# needs ~14 GiB free and its own deterministic-mode process state.
-	docker run --rm --gpus all -v $(HOME)/models:/models \
+	$(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL_NVFP4=$(BATCH_INVARIANCE_MODEL) \
 		$(DOCKER_IMG) test-e2e --gtest_filter="BatchInvarianceTest.*"
 
@@ -254,7 +270,7 @@ BATCH_INVARIANCE_MODEL ?= /models/Qwen3-14B-NVFP4
 #   nemotron_h one is expected to FAIL (13.4 % of replays disagree, see
 #   docs/LIMITATIONS.md).
 test-spec-fidelity: build
-	docker run --rm --gpus all -v $(HOME)/models:/models \
+	$(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL_SPEC_FIDELITY=$(SPEC_FIDELITY_MODEL) \
 		$(DOCKER_IMG) test-e2e --gtest_filter="SpecCaptureFidelityTest.CachedGraphMatchesEagerForward"
 
@@ -270,7 +286,7 @@ test-quantize: build
 # Mounts $(HOME)/models (symlink targets resolve) + the committed fixture.
 # Set IMP_VISION_GOLDEN_DUMP=1 to regenerate goldens instead of asserting.
 test-vision: build
-	docker run --rm --gpus all -v $(HOME)/models:/models -v $(PWD)/tests/fixtures:/fixtures \
+	$(GPU_DOCKER) -v $(HOME)/models:/models -v $(PWD)/tests/fixtures:/fixtures \
 		-e IMP_TEST_MMPROJ=/models/gemma-3-4b-vl/mmproj-F16.gguf \
 		-e IMP_TEST_MMPROJ_GEMMA4=/models/gemma-3-4b-vl/mmproj-gemma4-26b-bf16.gguf \
 		-e IMP_VISION_TEST_IMAGE=/fixtures/vision_test_64.png \
@@ -280,7 +296,7 @@ test-vision: build
 	@# set nowhere, and it resolves the fixture RELATIVELY, so it needs the repo
 	@# mounted as the working directory (the image ships no tests/). Until this
 	@# line existed, "Qwen3-VL runs end to end" rested on one manual run.
-	docker run --rm --gpus all -v $(HOME)/models:/models -v $(PWD):/work -w /work \
+	$(GPU_DOCKER) -v $(HOME)/models:/models -v $(PWD):/work -w /work \
 		-e IMP_TEST_MODEL_QWEN3VL=/models/Qwen3-VL-4B-Instruct \
 		-e IMP_TEST_IMAGE_ALT=/work/tests/fixtures/vision_test_green_bar.png \
 		$(DOCKER_IMG) test-e2e --gtest_filter="*Qwen3VLPipeline*"
@@ -416,21 +432,21 @@ test-golden: build
 
 # verify: full pre-merge gate (~5 min). ctest + perf + smoke.
 verify: build check-gpu
-	@scripts/verify.sh full
+	@$(GPU_LOCKED) scripts/verify.sh full
 
 # verify-fast: pre-push gate. `build` + filtered tests + perf + 1 smoke.
 # Measured on an unchanged tree: 3 s cached build + 37 s script. A source
 # change adds the full image build (#1587).
 # Perf gate uses --prefill-chunk-size 0 to stay apples-to-apples with tests/perf_baseline.json.
 verify-fast: build check-gpu
-	@scripts/verify.sh fast
+	@$(GPU_LOCKED) scripts/verify.sh fast
 
 # verify-chunked: gates chunked-prefill path (chunk=512) against tests/perf_baseline_chunked.json.
 # Looser thresholds (5%/8%) cover the gather + rect-attn per-chunk overhead.
 verify-chunked: build check-gpu
 	@IMP_VERIFY_BASELINE=tests/perf_baseline_chunked.json \
 	 IMP_VERIFY_CHUNK_SIZE=512 \
-	 scripts/verify.sh fast
+	 $(GPU_LOCKED) scripts/verify.sh fast
 
 # verify-north-star: gates the docs/GOAL.md north-star model (Qwen3-14B Q6_K) against
 # tests/perf_baseline_north_star.json. Same 8%/8% thresholds as perf_baseline.json.
@@ -440,7 +456,7 @@ verify-chunked: build check-gpu
 # (σ = 0.16 tok/s on tg128 @ ctx=2048, well inside the 3% threshold).
 verify-north-star: build check-gpu
 	@IMP_VERIFY_BASELINE=tests/perf_baseline_north_star.json \
-	 scripts/verify.sh fast
+	 $(GPU_LOCKED) scripts/verify.sh fast
 
 # verify-ab: the paired half of the perf gate (AUDIT_arch_2026 H-3). verify-fast
 # compares one arm against a pin measured weeks earlier and cannot resolve a
@@ -457,8 +473,8 @@ ab-base-image:
 	@bash scripts/ab_base_image.sh $(AB_BASE_REF)
 
 verify-ab: build check-gpu ab-base-image
-	@IMG_A=imp:ab-$$(git rev-parse --short=8 $(AB_BASE_REF)) IMG_B=$(DOCKER_IMG) \
-	 bash scripts/verify_ab.sh
+	@$(IMG_CHECK) && IMG_A=imp:ab-$$(git rev-parse --short=8 $(AB_BASE_REF)) IMG_B=$(DOCKER_IMG) \
+	 $(GPU_LOCKED) bash scripts/verify_ab.sh
 
 # Regenerate tests/perf_baseline.json with the cold-median methodology (5 trials,
 # 15s cooldown between, median of each metric). Resists cuBLAS-algo-state drift —
@@ -478,7 +494,7 @@ MODELS_DIR ?= $(HOME)/models
 # VRAM total come from the host (the script's own probes exited it under `set -e` since
 # #1684, so the medians printed and the file was never written).
 gen-perf-baseline: check-gpu build
-	@docker run --rm --gpus all \
+	@$(GPU_DOCKER) \
 		-v $(MODELS_DIR):/models \
 		-v $(PWD):/src -w /src \
 		-u $(shell id -u):$(shell id -g) \
@@ -545,7 +561,7 @@ CLANG_FORMAT_FILES = $$(find src include tools tests -name '*.cpp' -o -name '*.h
 # volume so re-runs are incremental.
 asan:
 	docker build --target builder $(BUILD_ARGS) $(DEP_ARGS) -t imp:builder .
-	docker run --rm --gpus all -v $(PWD):/src -v imp-asan-build:/basan -w /src imp:builder bash -c '\
+	$(GPU_DOCKER) -v $(PWD):/src -v imp-asan-build:/basan -w /src imp:builder bash -c '\
 	  cmake -B /basan -S /src -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DIMP_SANITIZERS=ON \
 	        -DIMP_BUILD_TOOLS=OFF -DIMP_BUILD_BENCH=OFF -DIMP_BUILD_SERVER=OFF > /basan/configure.log && \
 	  cmake --build /basan --target test-core test-text -j$$(nproc) && \

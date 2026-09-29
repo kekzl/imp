@@ -171,6 +171,7 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
         }
         if (lm_cutlass_done) {
             // logits already written
+        } else if (lm_head_fp8_(hc, lg, stream)) {
         } else if (lm_is_nvfp4) {
             // Batched-M GEMV: one weight pass per MR=4 rows instead of a full
             // vocab*d_model weight read per row, cutting the dominant cost of a

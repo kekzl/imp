@@ -212,7 +212,8 @@ bool rmsnorm_nvfp4(const Tensor& x, const Tensor& weight, Tensor& out, uint8_t* 
                    uint8_t* xq_scales, float eps, cudaStream_t stream, float weight_offset) {
     const int rows = static_cast<int>(x.shape[0]);
     const int d_model = static_cast<int>(x.shape[1]);
-    if (x.qtype != QType::F16 || rows < 2 || rows > 64 || (d_model & 255) != 0 ||
+    // Null weight (Qwen4Exp final norm, rows >= 2): refuse, rmsnorm() applies the identity.
+    if (weight.data == nullptr || x.qtype != QType::F16 || rows < 2 || rows > 64 || (d_model & 255) != 0 ||
         (d_model >> 3) > 1024)
         return false;
     if ((d_model >> 3) <= 512) {

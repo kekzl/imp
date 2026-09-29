@@ -347,6 +347,10 @@ void Engine::release_recurrent_slot_(int req_id) {
 
 bool Engine::fill_recurrent_state(const Request& req, InferenceState& state, bool reset,
                                   cudaStream_t stream) {
+    state.ple_hist_in = req.input_tokens.data();
+    state.ple_hist_in_n = static_cast<int>(req.input_tokens.size());
+    state.ple_hist_out = req.output_tokens.data();
+    state.ple_hist_out_n = static_cast<int>(req.output_tokens.size());
     if (!ssm_state_)
         return true;
     int slot;
@@ -379,16 +383,8 @@ bool Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
                 }
                 // cudaMemcpyDefault: the entry is a device slab or, from the
                 // store's host tier, pinned host memory (H2D on the stream).
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
-                    ssm_state_->seq_base(slot), req.recurrent_restore->data,
-                    ssm_state_->per_seq_bytes(), cudaMemcpyDefault, stream));
-                if (const size_t side = recurrent_snapshots_->sidecar_bytes(); side > 0) {
-                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
-                        executor_->ple_state_data(),
-                        static_cast<const char*>(req.recurrent_restore->data) + ssm_state_->per_seq_bytes(), side,
-                        cudaMemcpyDefault, stream));
-                    executor_->ple_resume_context(req.input_tokens.data(), n);
-                }
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(slot), req.recurrent_restore->data,
+                                                   ssm_state_->per_seq_bytes(), cudaMemcpyDefault, stream));
                 IMP_LOG_DEBUG("RecurrentSnapshot: restored %d-token state for req %d (slot %d, %s)",
                               req.recurrent_restore->n_tokens, req.id, slot,
                               req.recurrent_restore->on_host ? "host tier" : "device");
@@ -507,7 +503,7 @@ void Engine::maybe_save_transcript_snapshot_(const Request& req, std::span<const
     recurrent_snapshots_->erase(key);
     const auto t0 = std::chrono::steady_clock::now();
     if (!recurrent_snapshots_->save(key, n, ssm_state_->seq_base(it->second), stream,
-                                    executor_->ple_state_data(), std::move(chain)))
+                                    nullptr, std::move(chain)))
         return;
     // release_recurrent_slot_ runs right after and the next tenant's prefill writes the
     // slot on another stream: the copy must be complete before this returns.
@@ -539,7 +535,7 @@ void Engine::maybe_save_recurrent_snapshot_(const Request& req, int snap_end, cu
     recurrent_snapshots_->erase(key);
     const auto t0 = std::chrono::steady_clock::now();
     if (recurrent_snapshots_->save(key, snap_end, ssm_state_->seq_base(it->second), stream,
-                                   executor_->ple_state_data(), std::move(chain))) {
+                                   nullptr, std::move(chain))) {
         // The copy must complete before anything else mutates the slot: later
         // prefill chunks are ordered on this stream, but the first DECODE step
         // may run on a different stream (green contexts). One sync per prefill.

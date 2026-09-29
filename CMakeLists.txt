@@ -90,6 +90,10 @@ if(IMP_ALLOC_INTERPOSE)
     set(IMP_WRAP_LINK_FLAGS
         "-Wl,--wrap=cudaMalloc,--wrap=cudaFree,--wrap=cudaMallocAsync,--wrap=cudaFreeAsync,--wrap=cudaMallocHost,--wrap=cudaHostAlloc")
     message(STATUS "Allocation interposition ENABLED (measurement build)")
+    # Canary for uninitialized reads (#2168): fill every new device allocation with this byte.
+    set(IMP_ALLOC_POISON_BYTE "-1" CACHE STRING "Fill byte for new device allocations, -1 = off")
+    set_source_files_properties(src/memory/alloc_interpose.cpp PROPERTIES
+        COMPILE_DEFINITIONS "IMP_ALLOC_POISON_BYTE=${IMP_ALLOC_POISON_BYTE}")
 endif()
 option(IMP_SANITIZERS "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 # libFuzzer binaries per fuzz/ target (#1620); needs clang, g++ has no -fsanitize=fuzzer.
@@ -273,6 +277,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gdn_scan_chunkpar_pass.cu
     src/compute/gdn_scan_tc.cu
     src/compute/gemm_gemv_dtype.cu
+    src/compute/gemv_fp8_rowscale_fp32.cu
     src/compute/gemm_moe_gemv.cu
     src/compute/gemm_batched.cu
     src/compute/mmq_q8_imma_q4k.cu
@@ -412,6 +417,7 @@ set(IMP_EXEC_SOURCES
     src/exec/pre_dequant_phase0_nvfp4_loader.cu
     src/exec/pre_dequant_phase1_fp16_cache.cu
     src/exec/pre_dequant_phase2_fp8_cache.cu
+    src/exec/pre_dequant_fp8_lm_head.cu
     src/exec/pre_dequant_phase3_nvfp4_decode.cu
     src/exec/pre_dequant_phase3c_mxfp4.cu
     src/exec/pre_dequant_phase4_tensor_registry.cu
@@ -419,6 +425,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_attention.cu
     src/exec/executor_forward.cu
     src/exec/executor_perplexity.cu
+    src/exec/executor_lm_head_fp8.cu
     src/exec/executor_lora.cu
     src/lora/lora_adapter.cpp
     src/quant/gpt_oss_mxfp4_convert.cu
@@ -706,6 +713,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gguf_silent_drops.cpp
         tests/test_gguf_fault_injection.cpp
         tests/test_fp_bits.cpp
+        tests/test_fp8_lm_head.cpp
         tests/test_llm_compressor_loader.cpp
         tests/test_nvfp4_quant_contract.cpp
         tests/test_hf_config_loader.cpp
@@ -785,6 +793,10 @@ if(IMP_BUILD_TESTS)
         tests/test_memory_backend.cpp
         tests/test_memory_allocators.cpp
         tests/test_memory_plan.cpp
+        # PLE n-gram context from the token history (header-only, model/ngram_table.h).
+        tests/test_ngram_context.cpp
+        # Host-resident experts: auto max_batch_size 1, explicit batch warned (header-only).
+        tests/test_expert_batch_policy.cpp
         # The KV-pool sizing arithmetic (#1251). Pure integers, so it belongs in
         # the lane CI runs — it used to be inline in engine_kv_cache_init.cpp,
         # unreachable without a GPU and a 22 GB checkpoint.
@@ -1073,6 +1085,7 @@ if(IMP_BUILD_TESTS)
         tests/test_expert_cache.cu
         tests/test_gdn.cu
         tests/test_gdn_batched.cu
+        tests/test_ple_batched.cu
         tests/test_gdn_verify_snapshot.cu
         tests/test_mtp_feed_batch.cu
         tests/test_mtp_topw.cu

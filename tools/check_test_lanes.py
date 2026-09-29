@@ -324,7 +324,15 @@ def main():
     # CutlassMxFP8Gemm.DequantizeMatchesTheHostDecode (test-quant): rebuild kernels for freed GDN weights.
     # 1139 -> 1142: ExpertCacheReinitTest x3 (test-moe-gdn): reinit_or_disable against a real
     # VRAMAllocator and a live pool (cudaMalloc); the CPU-only case runs in test-core.
-    PINNED = 1143
+    # 1142 -> 1143: FP8GemmTest.RowscaleFp32HeadMatchesReferenceAndIsRowCountInvariant (test-compute):
+    # FP8 LM-head GEMV (gemm.nvfp4_lm_head=fp8) vs fp64, bits equal for n_rows 1/3/11 (cudaMalloc).
+    # 1143 -> 1146: PLEBatched x3 (test-moe-gdn): per-sequence PLE conv rows, batched decode vs
+    # per-sequence bitwise, neighbour isolation, chunk vs token steps (kernels need a card).
+    # 1146 -> 1147: LayerNormTest.RMSNormNvfp4RefusesNullWeight (test-compute): the fused norm +
+    # NVFP4 quantize refuses a null weight (Qwen4Exp final norm, batched LM head).
+    # 1147 -> 1148: RecurrentSnapshotStoreTest.KvChainSurvivesHostEvictionAndEraseReplaces (test-kv):
+    # a snapshot keeps its KV chain through the host tier (#2174, cudaMalloc).
+    PINNED = 1148
 
     text = CMAKE.read_text()
     mods = module_sources(text)

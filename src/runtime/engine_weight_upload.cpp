@@ -45,7 +45,7 @@ uint64_t Engine::model_fingerprint_() const {
     h = fnv(h, &c.rope_theta, sizeof(c.rope_theta));
 
     auto sample = [&](const Tensor& t) {
-        if (!t.data)
+        if (!t.data || t.dropped_source)  // freed after load (FP8 LM head, GDN sources)
             return;
         size_t n = std::min<size_t>(t.nbytes(), 512);
         if (n == 0)
@@ -232,7 +232,8 @@ bool Engine::init_weights() {
                                         n_heads,
                                         (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0,
                                         mcfg.ssm_state_size,
-                                        config_.ssm_state_dtype};
+                                        config_.ssm_state_dtype,
+                                        model_->ple_state_bytes()};
             expert_reserve += ssm_pool_bytes(geom, config_.max_batch_size, spec_mc_reserved_slots_());
             // Recurrent-snapshot store (hybrid prefix caching): its buffers
             // are pre-allocated eagerly at KV-cache init, so the offload
