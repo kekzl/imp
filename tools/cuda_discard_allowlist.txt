@@ -1,25 +1,5 @@
 # tools/check_cuda_discards.py (#2211): discarded cudaError_t per file, <count> <path> [# reason].
 # Must equal the scan; only shrinks (CEILING in the script). Entries under ZERO_DIRS (script) need a reason.
-3 src/compute/attention_blackwell.cu
-10 src/compute/attention_cublas.cu
-3 src/compute/attention_dispatch.cpp
-4 src/compute/attention_fmha_mxfp4_sm120.cu
-9 src/compute/attention_fmha_sm120.cu
-1 src/compute/attention_paged_common.cuh
-6 src/compute/encoder_forward.cu
-2 src/compute/ffn_sparsity_probe.cu
-1 src/compute/gdn.cu
-2 src/compute/gdn_scan.cu
-4 src/compute/gdn_scan_chunkpar.cu
-1 src/compute/gdn_scan_chunkpar_pass.cu
-2 src/compute/gdn_scan_tc.cu
-21 src/compute/mtp_forward.cu
-2 src/compute/qsa_indexer.cu
-3 src/compute/quantize_fp16_nvfp4_moe_native.cu
-2 src/compute/sampling.cu
-1 src/compute/sampling_penalties.cu
-2 src/compute/sampling_topk_topp.cu
-3 src/compute/weight_dispatch.cpp
 2 src/exec/executor.cu
 1 src/exec/executor_attention.cu
 12 src/exec/executor_attention_decode.cu

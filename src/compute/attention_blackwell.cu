@@ -381,10 +381,7 @@ bool flash_attention_blackwell(const Tensor& Q, const Tensor& K, const Tensor& V
     const int n_kv_heads = static_cast<int>(K.shape[2]);
 
     // Query device shared memory limit
-    int device = 0;
-    cudaGetDevice(&device);
-    int max_smem = 0;
-    cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+    const int max_smem = device_attr_or_0(cudaDevAttrMaxSharedMemoryPerBlockOptin);  // 0: declines below
 
     // Choose Br: prefer 128 if shared memory fits, else 64
     const size_t smem_128 = compute_smem(128, head_dim);
@@ -394,8 +391,9 @@ bool flash_attention_blackwell(const Tensor& Q, const Tensor& K, const Tensor& V
 // Dispatch macro: Br x HD template instantiation
 #define LAUNCH_BW(BR, HD)                                                                                 \
     do {                                                                                                  \
-        cudaFuncSetAttribute(flash_attention_blackwell_kernel<BR, HD>,                                    \
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem));        \
+        IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(flash_attention_blackwell_kernel<BR, HD>,                 \
+                                                cudaFuncAttributeMaxDynamicSharedMemorySize,              \
+                                                static_cast<int>(smem)));                                 \
         flash_attention_blackwell_kernel<BR, HD>                                                          \
             <<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),                        \
                                             reinterpret_cast<const half*>(K.data),                        \

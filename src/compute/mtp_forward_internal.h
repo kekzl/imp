@@ -8,7 +8,8 @@ namespace imp {
 
 // Gated one-row attention over the MTP KV cache: ws.d_input_norm -> ws.d_attn_residual, appends
 // this row's K/V at ws.mtp_pos and advances it.
-void mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream);
+[[nodiscard]] bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim,
+                                     cudaStream_t stream);  // false: a copy failed, draft abandoned
 
 // lm_head over ws.d_h_final, then argmax / top-W into the caller's slot (mtp_draft_step contract).
 bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidden_dim, int vocab_size,

@@ -721,8 +721,9 @@ void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half
     size_t smem = (state_size * head_dim_ssm + 2 * state_size + 2 * head_dim_ssm) * sizeof(float);
     static bool attr_set = false;
     if (!attr_set) {
-        cudaFuncSetAttribute(reinterpret_cast<const void*>(&gdn_scan_reference_kernel),
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+        IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(
+            reinterpret_cast<const void*>(&gdn_scan_reference_kernel),
+            cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024));
         attr_set = true;
     }
     gdn_scan_reference_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias,

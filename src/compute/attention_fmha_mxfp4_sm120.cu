@@ -1561,10 +1561,7 @@ bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
     const bool pv_fp4 = use_blockscale && process_diag_mxfp4_pv_fp4();
     const bool ksmooth = use_blockscale && process_diag_mxfp4_ksmooth() && softcap == 0.0f;
 
-    int device = 0;
-    cudaGetDevice(&device);
-    int max_smem = 0;
-    cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+    const int max_smem = device_attr_or_0(cudaDevAttrMaxSharedMemoryPerBlockOptin);  // 0: declines below
 
     // Select Bq: prefer larger tiles, fall back for larger HD
     int Bq;
@@ -1797,10 +1794,7 @@ bool fmha_sm120_mxfp4_prefill_paged(const Tensor& Q, Tensor& O, const half* k_fr
         block_table == nullptr)
         return false;
 
-    int device = 0;
-    cudaGetDevice(&device);
-    int max_smem = 0;
-    cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+    const int max_smem = device_attr_or_0(cudaDevAttrMaxSharedMemoryPerBlockOptin);  // 0: declines below
 
     int Bq;
     {

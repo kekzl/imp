@@ -159,10 +159,20 @@ static inline int kpar_n_sms() {
     static int n_sms = 0;
     if (__builtin_expect(n_sms == 0, 0)) {
         cudaDeviceProp prop;
-        cudaGetDeviceProperties(&prop, 0);
+        if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess)
+            return 1;  // not cached; >= 1 keeps the split heuristics' `/ sms` defined
         n_sms = prop.multiProcessorCount;
     }
     return n_sms;
+}
+
+// Current device attribute, queried per call; 0 on a query error (#2211). For the smem opt-in
+// 0 means no tile fits, so the kernel declines and the dispatcher falls back.
+static inline int device_attr_or_0(cudaDeviceAttr attr) {
+    int dev = 0, v = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&v, attr, dev) != cudaSuccess)
+        return 0;
+    return v;
 }
 
 // Online softmax step: updates running max (m_w) and sum-of-exp (l_w), computes the rescale

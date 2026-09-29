@@ -331,8 +331,9 @@ void qsa_select(const half* q, const int* positions, const half* block_keys, flo
     IMP_CHECK(g.n_heads <= 4, "qsa_select: %d indexer heads, kernel holds 4", g.n_heads);
     static const int n_sms = [] {
         int dev = 0, n = 0;
-        cudaGetDevice(&dev);
-        cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev);
+        if (cudaGetDevice(&dev) != cudaSuccess ||
+            cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess)
+            n = 0;  // -> 1 below: fewer score CTAs, same selection
         return n > 0 ? n : 1;
     }();
     // Two waves of score CTAs over all rows, never more CTAs per row than blocks to score.

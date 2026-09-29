@@ -22,10 +22,14 @@ int get_device_sm_version() {
     if (cached_sm_version >= 0)
         return cached_sm_version;
     int device = 0;
-    cudaGetDevice(&device);
     int major = 0, minor = 0;
-    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
-    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
+    cudaError_t err = cudaGetDevice(&device);
+    if (err == cudaSuccess) err = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
+    if (err == cudaSuccess) err = cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
+    if (err != cudaSuccess) {
+        IMP_LOG_WARN("Device SM version query failed: %s", cudaGetErrorString(err));
+        return 0;  // not cached: callers take the generic (pre-sm_90) path
+    }
     cached_sm_version = major * 10 + minor;
     IMP_LOG_INFO("Device SM version: %d.%d (sm_%d)", major, minor, cached_sm_version);
     return cached_sm_version;

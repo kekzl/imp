@@ -65,14 +65,21 @@ void* dequant_to_fp16(const Tensor& w, cudaStream_t stream) {
     void* dst = nullptr;
     if (cudaMalloc(&dst, static_cast<size_t>(rows) * cols * sizeof(__half)) != cudaSuccess)
         return nullptr;
+    bool ok = true;
     if (w.qtype == QType::F16) {
-        cudaMemcpyAsync(dst, w.data, static_cast<size_t>(rows) * cols * sizeof(__half),
-                        cudaMemcpyDeviceToDevice, stream);
+        const cudaError_t err = cudaMemcpyAsync(dst, w.data, static_cast<size_t>(rows) * cols * sizeof(__half),
+                                                cudaMemcpyDeviceToDevice, stream);
+        if (err != cudaSuccess)
+            IMP_LOG_ERROR("encoder: F16 weight copy failed: %s", cudaGetErrorString(err));
+        ok = err == cudaSuccess;
     } else if (dequant_gpu_supported(w.qtype)) {
         dequant_gpu(w.data, dst, w.qtype, rows, cols, stream);
     } else {
         IMP_LOG_ERROR("encoder: unsupported weight qtype %d", std::to_underlying(w.qtype));
-        cudaFree(dst);
+        ok = false;
+    }
+    if (!ok) {
+        IMP_CUDA_CHECK_LOG(cudaFree(dst));
         return nullptr;
     }
     return dst;
@@ -142,9 +149,14 @@ bool encoder_workspace_init(EncoderWorkspace& ws, const Model& model, int max_to
     // Positions 0..max_n-1 once (rope reads per-row).
     std::vector<int32_t> pos(max_tokens);
     std::iota(pos.begin(), pos.end(), 0);
-    cudaMemcpyAsync(ws.d_positions, pos.data(), max_tokens * sizeof(int32_t),
-                    cudaMemcpyHostToDevice, stream);
-    cudaStreamSynchronize(stream);
+    cudaError_t err = cudaMemcpyAsync(ws.d_positions, pos.data(), max_tokens * sizeof(int32_t),
+                                      cudaMemcpyHostToDevice, stream);
+    if (err == cudaSuccess) err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess) {
+        IMP_LOG_ERROR("encoder: positions upload failed: %s", cudaGetErrorString(err));
+        encoder_workspace_free(ws);
+        return false;
+    }
     return true;
 }
 
@@ -173,7 +185,9 @@ bool encoder_embed(const Model& model, EncoderWorkspace& ws, std::span<const int
     const int d = ws.d_model;
     const int dff = ws.d_ff;
 
-    cudaMemcpyAsync(ws.d_tokens, tokens.data(), n * sizeof(int32_t), cudaMemcpyHostToDevice, stream);
+    if (cudaMemcpyAsync(ws.d_tokens, tokens.data(), n * sizeof(int32_t), cudaMemcpyHostToDevice, stream) !=
+        cudaSuccess)
+        return false;
 
     // Embedding + token-type row 0 + post-embedding LayerNorm.
     Tensor h = fp16_view(ws.d_h, n, d);
@@ -226,8 +240,8 @@ bool encoder_embed(const Model& model, EncoderWorkspace& ws, std::span<const int
     IMP_CUDA_CHECK_LAUNCH();
     encoder_l2_normalize_kernel<<<1, 256, 0, stream>>>(ws.d_pooled, d);
     IMP_CUDA_CHECK_LAUNCH();
-    cudaMemcpyAsync(out_host, ws.d_pooled, d * sizeof(float), cudaMemcpyDeviceToHost, stream);
-    return cudaStreamSynchronize(stream) == cudaSuccess;
+    const cudaError_t err = cudaMemcpyAsync(out_host, ws.d_pooled, d * sizeof(float), cudaMemcpyDeviceToHost, stream);
+    return cudaStreamSynchronize(stream) == cudaSuccess && err == cudaSuccess;
 }
 
 }  // namespace imp

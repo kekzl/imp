@@ -24,11 +24,12 @@ SRC = REPO / "src"
 ALLOWLIST = REPO / "tools" / "cuda_discard_allowlist.txt"
 SUFFIXES = (".cpp", ".cu", ".h", ".cuh")
 # Ratchet: lower with every fix, never raise.
-CEILING = 187
+CEILING = 105
 # Entries here need a "# reason" (only class c: an intentional discard).
 ZERO_DIRS = (
     "src/runtime/", "src/memory/",
     "src/core/", "src/quant/", "src/model/", "src/vision/", "src/lora/", "src/api/",
+    "src/compute/",
 )
 
 CALL = re.compile(r"^[ \t]*cuda[A-Z][A-Za-z0-9_]*[ \t]*\(")

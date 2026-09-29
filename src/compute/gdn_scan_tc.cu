@@ -639,9 +639,9 @@ void gdn_scan_chunkwise_wy_tc_f32(const float* conv_f32, int conv_channels, cons
                                 sizeof(float);
         static bool attr_set = false;
         if (!attr_set) {
-            cudaFuncSetAttribute(
+            IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(
                 reinterpret_cast<const void*>(&gdn_scan_chunkwise_wy_tc_kernel<HD, SS, CHUNK>),
-                cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+                cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024));
             attr_set = true;
         }
         gdn_scan_chunkwise_wy_tc_kernel<HD, SS, CHUNK><<<n_heads, HD, smem, stream>>>(
@@ -668,9 +668,9 @@ void gdn_scan_chunkwise_wy_tc2_f32(const float* conv_f32, int conv_channels, con
                                 sizeof(float);
         static bool attr_set = false;
         if (!attr_set) {
-            cudaFuncSetAttribute(
+            IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(
                 reinterpret_cast<const void*>(&gdn_scan_chunkwise_wy_tc2_kernel<HD, SS, CHUNK>),
-                cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+                cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024));
             attr_set = true;
         }
         gdn_scan_chunkwise_wy_tc2_kernel<HD, SS, CHUNK><<<n_heads, HD, smem, stream>>>(
