@@ -124,6 +124,11 @@ public:
                                 int chunk_len, double* d_nll, cudaStream_t stream,
                                 int32_t* d_match = nullptr);
 
+    // Prompt logprobs (#2207) for hidden_[0..n_rows): row r scores d_targets[r]; writes logprob,
+    // 1-based rank and top_n (id, logprob) per row. Enqueue only; overwrites logits_ like the above.
+    void prompt_logprobs_partial(const int32_t* d_targets, int n_rows, int top_n, float* d_lp,
+                                 int32_t* d_rank, int32_t* d_top_ids, float* d_top_lp, cudaStream_t stream);
+
     // Embedding pooling (#1005): column-wise sum of hidden_[0..n_tokens) into
     // d_out[d_model] fp32. Runs after a chunk's forward while hidden_ still
     // holds it; engine accumulates chunk sums host-side for full-input pooling.
