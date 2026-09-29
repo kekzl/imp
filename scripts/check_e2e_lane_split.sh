@@ -30,6 +30,7 @@ EndToEndTest.ErrorStrings
 EndToEndTest.GenerateParamsDefault
 EndToEndTest.LoadNonexistentModel
 EndToEndTest.NullArguments
+EndToEndTest.StubWarmCacheStaysInStubDir
 EndToEndTest.VersionString
 RequestTest.ContextLen
 RequestTest.DefaultState
