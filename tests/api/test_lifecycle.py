@@ -51,8 +51,9 @@ class TestOOMHandling:
     @pytest.fixture(scope="class")
     def oom_server(self):
         """Start a separate mock server in OOM mode."""
-        port = 9098
-        server = run_server(port=port, latency_ms=1, oom=True)
+        # Port 0: the kernel picks a free port, never the real lane's 9098 (#2220).
+        server = run_server(port=0, latency_ms=1, oom=True)
+        port = server.server_address[1]
         url = f"http://127.0.0.1:{port}"
         # Wait for it to be ready
         deadline = time.monotonic() + 5

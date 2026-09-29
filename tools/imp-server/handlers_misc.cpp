@@ -59,6 +59,8 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
     int snap_max_seq_len = 0;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
+        if (!resume_if_idle_locked(state, res))
+            return;
         snap_model = state.model;
         snap_max_seq_len = state.max_seq_len;
     }
@@ -128,6 +130,8 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
     ImpModel snap_model;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
+        if (!resume_if_idle_locked(state, res))
+            return;
         snap_model = state.model;
     }
     if (!snap_model) {

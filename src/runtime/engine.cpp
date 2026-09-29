@@ -292,6 +292,8 @@ int Engine::lora_load(const std::string& path) {
 bool Engine::lora_set(int id) {
     if (id < 0 || id > static_cast<int>(lora_adapters_.size()))
         return false;
+    if (id > 0 && !lora_adapters_[id - 1])
+        return false;  // unloaded slot
     if (id == active_lora_)
         return true;
     active_lora_ = id;
@@ -304,6 +306,16 @@ bool Engine::lora_set(int id) {
     for (auto& g : decode_graph_pool_)
         g.invalidate();
     IMP_LOG_INFO("LoRA: active adapter -> %d%s", id, id == 0 ? " (base)" : "");
+    return true;
+}
+
+bool Engine::lora_unload(int id) {
+    if (id <= 0 || id > static_cast<int>(lora_adapters_.size()) || !lora_adapters_[id - 1])
+        return false;
+    if (id == active_lora_ && !lora_set(0))
+        return false;
+    lora_adapters_[id - 1].reset();
+    IMP_LOG_INFO("LoRA: adapter %d unloaded", id);
     return true;
 }
 

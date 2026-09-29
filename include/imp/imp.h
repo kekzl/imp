@@ -71,9 +71,13 @@ int32_t imp_model_bos_token(ImpModel model);
  * imp_lora_set: activate an adapter (0 = base model). Swapping re-captures
  * decode CUDA graphs on the next request: swap between requests, not
  * mid-generation. The prefix cache is keyed by the active adapter. Adapters
- * live until the context is freed. */
+ * live until the context is freed or imp_lora_unload.
+ * imp_lora_unload: free one adapter's device memory; the base model becomes
+ * active if it was the active one. Ids are never reused. Unknown or already
+ * unloaded id: IMP_ERROR_INVALID_ARG. Call with no generation in flight. */
 ImpError imp_lora_load(ImpContext ctx, const char* path, int32_t* out_id);
 ImpError imp_lora_set(ImpContext ctx, int32_t adapter_id);
+ImpError imp_lora_unload(ImpContext ctx, int32_t adapter_id);
 
 // --- Context / Runtime ---
 

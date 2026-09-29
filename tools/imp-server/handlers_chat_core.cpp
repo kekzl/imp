@@ -151,6 +151,12 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         std::lock_guard<std::timed_mutex> lock(state.mtx);
         if (!ensure_model_loaded(state, ctx.params.requested_model, res))
             return false;
+        // Adapter name -> engine id under mtx: /admin/lora/{load,unload} edit the table (#2199).
+        // -1 = named but not loaded, refused below.
+        if (!ctx.params.lora_name.empty()) {
+            auto it = state.loras.find(ctx.params.lora_name);
+            ctx.snap.lora_id = it == state.loras.end() ? -1 : it->second.engine_id;
+        }
         ctx.snap.tok = state.tok;
         ctx.snap.chat_tpl = state.chat_tpl;
         ctx.snap.have_template = state.have_template;
@@ -579,22 +585,12 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // Per-request LoRA selection (#522): name resolved here; batching worker switches the
     // engine-global adapter at admission once nothing of another adapter is in flight
     // (AUDIT_arch_2026 E-1). One adapter active at a time; others queue behind the barrier.
-    {
-        int32_t want = 0;
-        if (!ctx.params.lora_name.empty()) {
-            auto it = state.lora_ids.find(ctx.params.lora_name);
-            if (it == state.lora_ids.end()) {
-                res.status = 400;
-                json error = {{"error",
-                               {{"message", "Unknown LoRA adapter '" + ctx.params.lora_name +
-                                                "' (load at startup via --lora NAME=PATH)"},
-                                {"type", "invalid_request_error"}}}};
-                res.set_content(dump_safe(error), "application/json");
-                return false;
-            }
-            want = it->second;
-        }
-        ctx.snap.lora_id = want;
+    if (ctx.snap.lora_id < 0) {
+        send_json_error(res, 400, "invalid_request_error",
+                        "LoRA adapter '" + ctx.params.lora_name +
+                            "' is not loaded (POST /admin/lora/load, or --lora NAME=PATH at startup)",
+                        "lora", "lora_not_loaded");
+        return false;
     }
 
     // Clamp max_tokens to remaining context window

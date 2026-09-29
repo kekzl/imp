@@ -135,11 +135,11 @@ TEST(Fp8LmHead, ConfigValueSelectsFp8AndKeepsTheOtherSpellings) {
     RuntimeConfig cfg;
     EXPECT_EQ(cfg.gemm.nvfp4_lm_head, "auto");
     EXPECT_EQ(lm_head_mode(cfg.gemm.nvfp4_lm_head), LmHeadMode::Auto);
-    // #2166: auto builds the FP8 head (NVFP4 only as the fallback for an ineligible head); on = NVFP4.
-    EXPECT_TRUE(lm_head_mode_fp8(LmHeadMode::Auto));
-    EXPECT_TRUE(lm_head_mode_fp8(LmHeadMode::Fp8));
-    EXPECT_FALSE(lm_head_mode_fp8(LmHeadMode::Nvfp4));
-    EXPECT_FALSE(lm_head_mode_fp8(LmHeadMode::Source));
+    // #2166: auto builds the FP8 head from a 16-bit source; on = NVFP4.
+    EXPECT_TRUE(lm_head_mode_fp8(LmHeadMode::Auto, QType::F16));
+    EXPECT_TRUE(lm_head_mode_fp8(LmHeadMode::Fp8, QType::F16));
+    EXPECT_FALSE(lm_head_mode_fp8(LmHeadMode::Nvfp4, QType::F16));
+    EXPECT_FALSE(lm_head_mode_fp8(LmHeadMode::Source, QType::F16));
     ASSERT_TRUE(cfg.apply_overrides({"gemm.nvfp4_lm_head=fp8"}).empty());
     EXPECT_EQ(cfg.gemm.nvfp4_lm_head, "fp8");
     EXPECT_EQ(lm_head_mode(cfg.gemm.nvfp4_lm_head), LmHeadMode::Fp8);
@@ -155,6 +155,27 @@ TEST(Fp8LmHead, ConfigValueSelectsFp8AndKeepsTheOtherSpellings) {
     }
     RuntimeConfig bad;
     EXPECT_EQ(bad.apply_overrides({"gemm.nvfp4_lm_head=fp16"}).size(), 1u) << "unknown value is rejected";
+}
+
+// #2224: auto takes the FP8 head only from a 16-bit source; an 8-bit quantized head keeps checkpoint
+// precision (E4M3 flipped Qwen3-8B-Q8_0's top-1); narrower heads keep the #982 NVFP4 rule.
+TEST(Fp8LmHead, AutoPicksTheHeadBySourceWidth) {
+    for (QType q : {QType::F16, QType::BF16, QType::F32}) {
+        EXPECT_TRUE(lm_head_mode_fp8(LmHeadMode::Auto, q)) << qtype_name(q);
+        EXPECT_FALSE(lm_head_auto_keeps_source(LmHeadMode::Auto, q)) << qtype_name(q);
+    }
+    for (QType q : {QType::Q8_0, QType::Q8_1, QType::Q8_K, QType::FP8_E4M3, QType::FP8_E5M2}) {
+        EXPECT_FALSE(lm_head_mode_fp8(LmHeadMode::Auto, q)) << qtype_name(q);
+        EXPECT_TRUE(lm_head_auto_keeps_source(LmHeadMode::Auto, q)) << qtype_name(q);
+        EXPECT_TRUE(lm_head_mode_fp8(LmHeadMode::Fp8, q))
+            << "explicit fp8 still builds it, " << qtype_name(q);
+        EXPECT_FALSE(lm_head_auto_keeps_source(LmHeadMode::Nvfp4, q)) << "on still forces NVFP4";
+    }
+    for (QType q : {QType::Q4_K, QType::Q6_K, QType::Q4_0, QType::IQ4_XS, QType::MXFP4}) {
+        EXPECT_FALSE(lm_head_mode_fp8(LmHeadMode::Auto, q)) << qtype_name(q);
+        EXPECT_FALSE(lm_head_auto_keeps_source(LmHeadMode::Auto, q))
+            << "#982 rule decides, " << qtype_name(q);
+    }
 }
 
 }  // namespace

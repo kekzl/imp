@@ -21,6 +21,7 @@ Usage:
 
 import argparse
 import json
+import os
 import random
 import signal
 import sys
@@ -77,10 +78,16 @@ metrics = MockMetrics()
 
 class MockConfig:
     """Per-server configuration (avoids class variable pollution across instances)."""
-    def __init__(self, latency_ms=5, fail_rate=0.0, oom=False):
+    def __init__(self, latency_ms=5, fail_rate=0.0, oom=False, idle_unload_seconds=0):
         self.latency_ms = latency_ms
         self.fail_rate = fail_rate
         self.oom_mode = oom
+        # --idle-unload-seconds (#2199): reported on /health; the mock never suspends.
+        self.idle_unload_seconds = idle_unload_seconds
+        # /admin/lora/{load,unload} (#2199): name -> {"id", "path"}; ids never reused.
+        self.loras = {}
+        self.next_lora_id = 1
+        self.lora_lock = threading.Lock()
 
 
 class MockHandler(BaseHTTPRequestHandler):
@@ -145,6 +152,9 @@ class MockHandler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "model_loaded": True,
                 "queue_depth": 0,
+                "suspended": False,
+                "idle_suspended": False,
+                "idle_unload_seconds": self.config.idle_unload_seconds,
             })
         elif path == "/ready":
             # The mock always has its model: readiness is 200. The 503 branch
@@ -257,6 +267,10 @@ class MockHandler(BaseHTTPRequestHandler):
             self._handle_tokenize(raw_body)
         elif path == "/detokenize":
             self._handle_detokenize(raw_body)
+        elif path == "/admin/lora/load":
+            self._handle_lora_load(raw_body)
+        elif path == "/admin/lora/unload":
+            self._handle_lora_unload(raw_body)
         else:
             self._send_error(404, f"Unknown endpoint: {path}")
 
@@ -346,12 +360,84 @@ class MockHandler(BaseHTTPRequestHandler):
             tokens.append(rng.choice(MOCK_VOCAB))
         return tokens
 
+    def _send_coded_error(self, status: int, message: str, param: str, code: str | None = None):
+        err = {"message": message, "type": "invalid_request_error", "param": param}
+        if code:
+            err["code"] = code
+        self._send_json(status, {"error": err})
+
+    # Mirrors tools/imp-server/handlers_admin.cpp handle_lora_load. The mock has no
+    # model to check shapes against, so "loadable" means the path exists.
+    def _handle_lora_load(self, raw: bytes):
+        body = self._parse_json_body(raw)
+        if body is None:
+            return
+        path = body.get("path")
+        if not isinstance(path, str) or not path:
+            self._send_coded_error(400, "'path' (non-empty string) is required", "path")
+            return
+        if "name" in body:
+            name = body["name"]
+            if not isinstance(name, str) or not name:
+                self._send_coded_error(400, "'name' must be a non-empty string", "name")
+                return
+        else:
+            name = os.path.splitext(os.path.basename(path.rstrip("/")))[0]
+        with self.config.lora_lock:
+            if name in self.config.loras:
+                self._send_coded_error(
+                    409, f"LoRA adapter '{name}' is already loaded (id {self.config.loras[name]['id']}); "
+                    "unload it first or pass another 'name'", "name", "lora_already_loaded")
+                return
+            if not os.path.exists(path):
+                self._send_coded_error(400, f"LoRA adapter load failed for '{path}'", "path",
+                                       "lora_load_failed")
+                return
+            lora_id = self.config.next_lora_id
+            self.config.next_lora_id += 1
+            self.config.loras[name] = {"id": lora_id, "path": path}
+        self._send_json(200, {"id": lora_id, "name": name, "path": path, "loaded": True})
+
+    def _handle_lora_unload(self, raw: bytes):
+        body = self._parse_json_body(raw)
+        if body is None:
+            return
+        by_id = "id" in body
+        if by_id and (not isinstance(body["id"], int) or isinstance(body["id"], bool)):
+            self._send_coded_error(400, "'id' must be an integer", "id")
+            return
+        if not by_id and not isinstance(body.get("name"), str):
+            self._send_coded_error(400, "'id' (integer) or 'name' (string) is required", "id")
+            return
+        with self.config.lora_lock:
+            if by_id:
+                name = next((n for n, e in self.config.loras.items() if e["id"] == body["id"]), None)
+                what = f"id {body['id']}"
+            else:
+                name = body["name"] if body["name"] in self.config.loras else None
+                what = f"'{body['name']}'"
+            if name is None:
+                self._send_coded_error(404, f"LoRA adapter {what} is not loaded",
+                                       "id" if by_id else "name", "lora_not_found")
+                return
+            entry = self.config.loras.pop(name)
+        self._send_json(200, {"id": entry["id"], "name": name, "unloaded": True})
+
     def _handle_chat_completions(self, raw: bytes):
         body = self._parse_json_body(raw)
         if body is None:
             return
         if not self._validate_sampling(body):
             return
+        lora = body.get("lora")
+        if lora:
+            with self.config.lora_lock:
+                known = lora in self.config.loras
+            if not known:
+                self._send_coded_error(
+                    400, f"LoRA adapter '{lora}' is not loaded (POST /admin/lora/load, or --lora "
+                    "NAME=PATH at startup)", "lora", "lora_not_loaded")
+                return
 
         messages = body.get("messages", [])
         if not messages:
@@ -729,9 +815,21 @@ def main():
     parser.add_argument("--latency-ms", type=int, default=5)
     parser.add_argument("--fail-rate", type=float, default=0.0)
     parser.add_argument("--oom", action="store_true")
+    parser.add_argument("--idle-unload-seconds", type=str, default="0")
     args = parser.parse_args()
 
-    config = MockConfig(latency_ms=args.latency_ms, fail_rate=args.fail_rate, oom=args.oom)
+    # Same contract as tools/imp-server/args.cpp: integer >= 0, else exit 1.
+    try:
+        idle = int(args.idle_unload_seconds)
+    except ValueError:
+        idle = -1
+    if idle < 0:
+        print(f"--idle-unload-seconds expects an integer >= 0, got '{args.idle_unload_seconds}'",
+              file=sys.stderr, flush=True)
+        sys.exit(1)
+
+    config = MockConfig(latency_ms=args.latency_ms, fail_rate=args.fail_rate, oom=args.oom,
+                        idle_unload_seconds=idle)
     handler_class = make_handler_class(config)
     server = ThreadedHTTPServer(("127.0.0.1", args.port), handler_class)
 

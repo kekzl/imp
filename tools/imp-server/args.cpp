@@ -61,6 +61,8 @@ void print_server_usage(const char* prog) {
             "  --http-write-timeout <s>    Socket write timeout (default 600)\n"
             "  --http-keep-alive-max <n>   Requests per connection (default 100)\n"
             "  --log-requests <path> Append per-request JSONL with prompt + response content\n"
+            "  --idle-unload-seconds <s> Suspend (free the GPU) after s idle seconds; the next\n"
+            "                        request resumes it (default 0 = off)\n"
             "  --help                Show this help message\n",
             prog);
 }
@@ -130,6 +132,16 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.keep_alive_max = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--prefix-cache") == 0 && i + 1 < argc) {
             args.prefix_cache_path = argv[++i];
+        } else if (std::strcmp(arg, "--idle-unload-seconds") == 0 && i + 1 < argc) {
+            // Strict: a typo must not silently mean "off".
+            const char* v = argv[++i];
+            char* end = nullptr;
+            const long n = std::strtol(v, &end, 10);
+            if (end == v || *end != '\0' || n < 0 || n > 86400 * 365) {
+                fprintf(stderr, "--idle-unload-seconds expects an integer >= 0, got '%s'\n", v);
+                std::exit(1);
+            }
+            args.idle_unload_seconds = static_cast<int>(n);
         } else if (std::strcmp(arg, "--log-requests") == 0 && i + 1 < argc) {
             args.log_requests_path = argv[++i];
         } else {
