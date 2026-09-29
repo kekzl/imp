@@ -8,6 +8,9 @@
 # Regenerate with `python3 tools/check_complexity.py --update` and say in the
 # PR body why a function was added or grew. Key: `path::signature`, as in
 # function_size_thresholds.toml. Lines below [baseline] are generated.
+#
+# Pin changes (newest first):
+#   compute_vram_budget 92 -> 93: grew +1 by #2228 (#2224 qtype rule, lm_head_source_only branch)
 
 [thresholds]
 cyclomatic = 25
@@ -120,7 +123,7 @@ skip_dirs = []
 "src/exec/pre_dequant_phase3_moe.cu::bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>& experts, cudaStream_t stream, Nvfp4DecodeContext& dctx, bool& moe_budget_exhausted, size_t& moe_logical_avail)" = 73
 "src/exec/pre_dequant_phase3_moe.cu::void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx)" = 32
 "src/exec/pre_dequant_phase3_moe.cu::void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg, const VRAMBudget& budget, size_t& remaining_budget, cudaStream_t stream, Nvfp4DecodeContext& dctx)" = 43
-"src/exec/pre_dequant_phase3_nvfp4_decode.cu::void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx)" = 29
+"src/exec/pre_dequant_phase3_nvfp4_decode.cu::void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx)" = 28
 "src/exec/pre_dequant_phase3_nvfp4_decode.cu::void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(const ModelConfig& cfg, const VRAMBudget& budget, size_t& remaining_budget, cudaStream_t stream)" = 27
 "src/exec/pre_dequant_phase3c_mxfp4.cu::void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(const ModelConfig& cfg, cudaStream_t stream)" = 37
 "src/exec/pre_dequant_phase4_tensor_registry.cu::void QuantPipeline::pre_dequant_phase4_tensor_registry_(const ModelConfig& cfg, cudaStream_t stream)" = 109
@@ -216,6 +219,6 @@ skip_dirs = []
 "src/runtime/engine_workspace_warmup.cpp::void Engine::warmup()" = 44
 "src/runtime/scheduler.cpp::void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch, std::vector<std::shared_ptr<Request>>& decode_batch)" = 56
 "src/runtime/suffix_draft.cpp::NgramDraft SuffixDraftIndex::draft(int k, int k_max) const" = 32
-"src/runtime/vram_budget.cpp::VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim, size_t free_vram, int swa_live_tokens, int n_swa_layers, const NativeCacheDemand* native_demand, int ssm_reserved_slots, bool q8_imma_prefill, bool moe_imma_prefill)" = 92
+"src/runtime/vram_budget.cpp::VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim, size_t free_vram, int swa_live_tokens, int n_swa_layers, const NativeCacheDemand* native_demand, int ssm_reserved_slots, bool q8_imma_prefill, bool moe_imma_prefill)" = 93
 "src/vision/qwen3vl_vision_load.cpp::std::expected<Qwen3VLVisionLoadStats, Qwen3VLVisionLoadError> load_qwen3vl_vision_tensors(const std::unordered_map<std::string, Tensor>& tensors, VisionModel& out)" = 39
 "src/vision/vision_loader.cpp::static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& path, VisionUpload& up)" = 89
