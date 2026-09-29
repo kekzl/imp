@@ -1056,27 +1056,6 @@ bool HFConfigLoader::load_tokenizer_flags(const std::string& model_dir, Tokenize
     return true;
 }
 
-// ---- load_gptq_config ----
-
-bool HFConfigLoader::load_gptq_config(const std::string& model_dir, GPTQConfig& cfg) {
-    std::string path = model_dir + "/quantize_config.json";
-    JValue root;
-    if (!parse_json_file(path, root))
-        return false;
-
-    IMP_LOG_INFO("loading GPTQ config from %s", path.c_str());
-
-    jobj_get_int(root, "bits", cfg.bits);
-    jobj_get_int(root, "group_size", cfg.group_size);
-
-    const JValue* da = jobj_find(root, "desc_act");
-    cfg.desc_act = da && da->type == JType::NUMBER && da->num_val != 0.0;
-
-    IMP_LOG_INFO("  GPTQ: bits=%d group_size=%d desc_act=%s", cfg.bits, cfg.group_size,
-                 cfg.desc_act ? "true" : "false");
-    return true;
-}
-
 // ---- load_nvfp4_config ----
 
 namespace {

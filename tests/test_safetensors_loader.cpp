@@ -441,5 +441,117 @@ TEST(SafeTensorsAwqRefusal, AwqCheckpointIsRefusedWithTheDetectedConfig) {
     fs::remove_all(root);
 }
 
+// #2249: one GPTQ q_proj (K = N = 8, one group) with the given qzeros shape and quantization_config.
+static std::string load_gptq_dir(int qz0, int qz1, const std::string& qc, bool* loaded, bool g_idx = false) {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "imp_gptq_loader_test";
+    fs::remove_all(root);
+    fs::create_directories(root);
+    const int qz_end = 160 + qz0 * qz1 * 4;
+    {
+        // g_idx: K = 8 INT32 zeros (all columns in group 0), appended after scales.
+        const std::string gi = g_idx
+                                   ? R"(,"model.layers.0.self_attn.q_proj.g_idx":{"dtype":"I32","shape":[8],)"
+                                     R"("data_offsets":[)" +
+                                         std::to_string(qz_end + 16) + "," + std::to_string(qz_end + 48) +
+                                         "]}"
+                                   : std::string();
+        const std::string header =
+            R"({"model.embed_tokens.weight":{"dtype":"F16","shape":[8,8],"data_offsets":[0,128]},)"
+            R"("model.layers.0.self_attn.q_proj.qweight":{"dtype":"I32","shape":[1,8],"data_offsets":[128,160]},)"
+            R"("model.layers.0.self_attn.q_proj.qzeros":{"dtype":"I32","shape":[)" +
+            std::to_string(qz0) + "," + std::to_string(qz1) + R"(],"data_offsets":[160,)" +
+            std::to_string(qz_end) +
+            R"(]},)"
+            R"("model.layers.0.self_attn.q_proj.scales":{"dtype":"F16","shape":[1,8],"data_offsets":[)" +
+            std::to_string(qz_end) + "," + std::to_string(qz_end + 16) + "]}" + gi + "}";
+        std::ofstream st(root / "model.safetensors", std::ios::binary);
+        const uint64_t hdr = header.size();
+        st.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+        st << header;
+        const std::vector<char> data(static_cast<size_t>(qz_end) + (g_idx ? 48 : 16), 0);
+        st.write(data.data(), static_cast<std::streamsize>(data.size()));
+    }
+    {
+        std::ofstream cfg(root / "config.json");
+        cfg << R"({"model_type": "llama", "num_hidden_layers": 1, "hidden_size": 8,
+                   "num_attention_heads": 1, "vocab_size": 8, "quantization_config": )"
+            << qc << "}";
+    }
+    const LogLevel saved = log_get_level();
+    log_set_level(LogLevel::INFO);
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    auto model = load_safetensors(root.string());
+    std::string log = testing::internal::GetCapturedStdout();
+    log += testing::internal::GetCapturedStderr();
+    log_set_level(saved);
+    *loaded = model != nullptr;
+    fs::remove_all(root);
+    return log;
+}
+
+TEST(SafeTensorsGptq, UnknownCheckpointFormatAndBitsAreRefusedWithTheDetectedConfig) {
+    bool loaded = true;
+    std::string log = load_gptq_dir(
+        1, 1, R"({"quant_method": "gptq", "bits": 4, "group_size": 128, "checkpoint_format": "marlin"})",
+        &loaded);
+    EXPECT_FALSE(loaded) << log;
+    EXPECT_NE(log.find("bits=4 group_size=128 desc_act=false checkpoint_format=marlin"), std::string::npos)
+        << log;
+    EXPECT_NE(log.find("variant not supported"), std::string::npos) << log;
+
+    log = load_gptq_dir(1, 1, R"({"quant_method": "gptq", "bits": 8, "group_size": 128})", &loaded);
+    EXPECT_FALSE(loaded) << log;
+    EXPECT_NE(log.find("bits=8"), std::string::npos) << log;
+    EXPECT_NE(log.find("variant not supported"), std::string::npos) << log;
+}
+
+TEST(SafeTensorsGptq, PreFixQzerosLayoutIsRefused) {
+    // [groups/8, N] = [1, 8] is the layout the pre-#2249 kernel read; AutoGPTQ writes [groups, N/8].
+    bool loaded = true;
+    const std::string log = load_gptq_dir(1, 8, R"({"quant_method": "gptq", "bits": 4, "group_size": 128})",
+                                          &loaded);
+    EXPECT_FALSE(loaded) << log;
+    EXPECT_NE(log.find("qzeros is not [ceil(K/group_size), N/8]"), std::string::npos) << log;
+}
+
+TEST(SafeTensorsGptq, AutoGptqLayoutIsAcceptedWithV1AndV2Offsets) {
+    bool loaded = false;
+    std::string log = load_gptq_dir(1, 1, R"({"quant_method": "gptq", "bits": 4, "group_size": 128})",
+                                    &loaded);
+    EXPECT_NE(log.find("GPTQ 4-bit: 1 projections"), std::string::npos) << log;
+    EXPECT_NE(log.find("zero offset +1"), std::string::npos) << log;
+
+    log = load_gptq_dir(1, 1, R"({"quant_method": "gptq", "bits": 4, "checkpoint_format": "gptq_v2"})",
+                        &loaded);
+    EXPECT_NE(log.find("GPTQ 4-bit: 1 projections"), std::string::npos) << log;
+    EXPECT_NE(log.find("zero offset +0"), std::string::npos) << log;
+}
+
+TEST(SafeTensorsGptq, DescActWithoutGIdxIsRefused) {
+    // #2253: without g_idx the dequant runs sequential groups, wrong weights on act-order exports.
+    bool loaded = true;
+    const std::string log = load_gptq_dir(
+        1, 1, R"({"quant_method": "gptq", "bits": 4, "group_size": 128, "desc_act": true})", &loaded);
+    EXPECT_FALSE(loaded) << log;
+    EXPECT_NE(log.find("layer 0 q_proj: desc_act=true but no g_idx tensor"), std::string::npos) << log;
+    EXPECT_EQ(log.find("GPTQ 4-bit: 1 projections"), std::string::npos) << log;
+}
+
+TEST(SafeTensorsGptq, DescActFalseWithoutGIdxAndDescActWithGIdxStillValidate) {
+    bool loaded = false;
+    std::string log = load_gptq_dir(
+        1, 1, R"({"quant_method": "gptq", "bits": 4, "group_size": 128, "desc_act": false})", &loaded);
+    EXPECT_NE(log.find("GPTQ 4-bit: 1 projections"), std::string::npos) << log;
+    EXPECT_EQ(log.find("no g_idx tensor"), std::string::npos) << log;
+
+    log = load_gptq_dir(1, 1, R"({"quant_method": "gptq", "bits": 4, "group_size": 128, "desc_act": true})",
+                        &loaded, /*g_idx=*/true);
+    EXPECT_NE(log.find("GPTQ 4-bit: 1 projections"), std::string::npos) << log;
+    EXPECT_NE(log.find("desc_act=true"), std::string::npos) << log;
+    EXPECT_EQ(log.find("no g_idx tensor"), std::string::npos) << log;
+}
+
 }  // namespace
 }  // namespace imp

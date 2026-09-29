@@ -34,9 +34,10 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `runtime.max_seq_len` | `0` (auto) | KV context ceiling in tokens |
 | `runtime.max_batch_size` | `0` (auto) | decode batch / KV+workspace sizing |
 | `runtime.think_answer_reserve` | `256` | tokens reserved for the answer after forced reasoning close |
-| `kv_cache.dtype` | `auto` | widest saving measured safe for the family; `auto`/`fp16`/`fp8`/`int8`/`int4`/`nvfp4`/`mxfp4` |
+| `kv_cache.dtype` | `auto` | widest saving measured safe for the family; `auto`/`fp16`/`fp8`/`int8`/`int4`/`nvfp4`/`mxfp4`. Qwen3 dense GGUF resolves to FP16 (#2208); `fp8` restores the faster long-context decode |
 | `kv_cache.growable` | `true` | pool grows at admission instead of committing the full plan at start |
 | `kv_cache.growable_initial_pct` | `25` | % of the planned pool committed at startup when growable |
+| `kv_cache.host_spill_mb` | `0` | pinned host RAM (MiB) for prefix blocks the pool reclaims; a later prefix hit restores them by H2D instead of re-prefill. Off by default; needs prefix caching, refused with SWA layers or sparse key metadata; `/metrics` `imp_kv_host_spill_*` |
 | `vram.kv_fraction` (imp.conf `[vram]` section) | `0.8` | KV share of post-reserve VRAM |
 | `vram.reserve_floor_pct` | `10` | free-VRAM headroom floor as % of total |
 | `vram.library_reserve_mb` | `-1` (auto) | floor for the measured cuBLAS/CUTLASS first-forward charge (~3.9 GiB observed); since #1109 the planner's reserve is floored at it - before that, shrinking the budget shrank the reserve and left the constant uncovered |

@@ -9,6 +9,7 @@
 #include "model/sentencepiece_loader.h"
 #include "model/tokenizer.h"
 #include "model/json_util.h"
+#include "quant/dequant_gptq.h"
 #include "core/logging.h"
 
 #include <fcntl.h>
@@ -840,6 +841,91 @@ static bool nvfp4_inventory_refuses(const std::unordered_map<std::string, Tensor
     return pol::refuses(inv, cfg.is_llm_compressor_nvfp4, why);
 }
 
+static bool gptq_projection_ok(TransformerLayer::GPTQWeight& gw, int group_size, std::string* why) {
+    const bool dtypes_ok = gw.qweight.qtype == QType::INT32 && gw.qweight.ndim == 2 && gw.qzeros.data &&
+                           gw.qzeros.qtype == QType::INT32 && gw.qzeros.ndim == 2 && gw.scales.data &&
+                           gw.scales.qtype == QType::F16 && gw.scales.ndim == 2;
+    if (!dtypes_ok) {
+        *why = "needs qweight INT32 2-D, qzeros INT32 2-D, scales F16 2-D";
+        return false;
+    }
+    gptq::Dims d;
+    if (!gptq::check_shapes(gw.qweight.shape, gw.qzeros.shape, gw.scales.shape, group_size, &d, why))
+        return false;
+    gw.group_size = d.group_size;
+    if (!gw.g_idx.data)
+        return true;
+    if (gw.g_idx.qtype != QType::INT32 || gw.g_idx.ndim != 1) {
+        *why = "g_idx is not INT32 1-D";
+        return false;
+    }
+    return gptq::check_g_idx(static_cast<const int32_t*>(gw.g_idx.data), gw.g_idx.shape[0], d, why);
+}
+
+// GPTQ (#2249): checks every projection and stamps bits/group_size/zero format for upload.
+// Refuses unknown checkpoint formats, bits != 4, bad shapes, and a .qweight with no projection slot.
+static bool gptq_refuses(Model& model, const std::unordered_map<std::string, Tensor>& tensor_map,
+                         const std::string& model_dir) {
+    HFConfigLoader::GPTQConfig c;
+    if (!HFConfigLoader::load_gptq_config(model_dir, c))
+        return false;
+    const std::string detected = "bits=" + std::to_string(c.bits) +
+                                 " group_size=" + std::to_string(c.group_size) +
+                                 " desc_act=" + (c.desc_act ? "true" : "false") + " checkpoint_format=" +
+                                 (c.checkpoint_format.empty() ? "unspecified" : c.checkpoint_format);
+    gptq::ZeroFormat fmt;
+    if (c.bits != 4 || !gptq::parse_zero_format(c.checkpoint_format, &fmt)) {
+        IMP_LOG_ERROR(
+            "GPTQ SafeTensors detected (%s): variant not supported. Only bits=4 with checkpoint_format "
+            "gptq (v1, default) or gptq_v2 dequantizes (#2249).",
+            detected.c_str());
+        return true;
+    }
+    static constexpr const char* kProj[] = {"q_proj",    "k_proj",  "v_proj",   "o_proj",
+                                            "gate_proj", "up_proj", "down_proj"};
+    size_t n_proj = 0;
+    for (size_t li = 0; li < model.layers_.size(); ++li) {
+        auto& L = model.layers_[li];
+        size_t pi = 0;
+        for (auto* gw :
+             {&L.gptq_q, &L.gptq_k, &L.gptq_v, &L.gptq_o, &L.gptq_gate, &L.gptq_up, &L.gptq_down}) {
+            const char* proj = kProj[pi++];
+            if (!gw->qweight.data)
+                continue;
+            std::string why;
+            if (!gptq_projection_ok(*gw, c.group_size, &why)) {
+                IMP_LOG_ERROR("GPTQ SafeTensors (%s) refused: layer %zu: %s", detected.c_str(), li,
+                              why.c_str());
+                return true;
+            }
+            // #2253: desc_act=true without g_idx would dequantize with sequential groups.
+            if (c.desc_act && !gw->g_idx.data) {
+                IMP_LOG_ERROR(
+                    "GPTQ SafeTensors (%s) refused: layer %zu %s: desc_act=true but no g_idx tensor",
+                    detected.c_str(), li, proj);
+                return true;
+            }
+            gw->bits = 4;
+            gw->desc_act = c.desc_act;
+            gw->zero_offset = static_cast<int>(fmt);
+            ++n_proj;
+        }
+    }
+    size_t n_qweight = 0;
+    for (const auto& kv : tensor_map)
+        if (kv.first.size() > 8 && kv.first.compare(kv.first.size() - 8, 8, ".qweight") == 0)
+            ++n_qweight;
+    if (n_proj != n_qweight) {
+        IMP_LOG_ERROR(
+            "GPTQ SafeTensors (%s) refused: %zu .qweight tensors, %zu on a q/k/v/o/gate/up/down slot",
+            detected.c_str(), n_qweight, n_proj);
+        return true;
+    }
+    IMP_LOG_INFO("GPTQ 4-bit: %zu projections, %s, zero offset +%d, dequantized to FP16 at upload", n_proj,
+                 detected.c_str(), static_cast<int>(fmt));
+    return false;
+}
+
 std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head) {
     namespace fs = std::filesystem;
 
@@ -1077,21 +1163,9 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
         }
     }
 
-    // 6b. GPTQ config: set bit width and group size on all GPTQ weight structs
-    HFConfigLoader::GPTQConfig gptq_cfg;
-    bool is_gptq = HFConfigLoader::load_gptq_config(model_dir, gptq_cfg);
-    if (is_gptq) {
-        for (auto& layer : model->layers_) {
-            for (auto* gw : {&layer.gptq_q, &layer.gptq_k, &layer.gptq_v, &layer.gptq_o, &layer.gptq_gate,
-                             &layer.gptq_up, &layer.gptq_down}) {
-                gw->bits = gptq_cfg.bits;
-                gw->group_size = gptq_cfg.group_size;
-                gw->desc_act = gptq_cfg.desc_act;
-            }
-        }
-        IMP_LOG_INFO("GPTQ model: %d-bit, group_size=%d, desc_act=%s", gptq_cfg.bits, gptq_cfg.group_size,
-                     gptq_cfg.desc_act ? "true" : "false");
-    }
+    // 6b. GPTQ: validate projections, stamp bits/group_size/zero format for upload_gptq_weight.
+    if (gptq_refuses(*model, tensor_map, model_dir))
+        return nullptr;
 
     // NVFP4: scale tensors were already routed into model->nvfp4_scratch_ by weight_map.cpp;
     // executor_pre_dequant.cu Phase 0 promote() resolves them back onto the weight's sidecars,

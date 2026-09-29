@@ -21,20 +21,18 @@ struct GreedyLock {
     int32_t tokens[48];          // the frozen greedy sequence
 };
 
+// clang-format off
 inline constexpr GreedyLock kGreedyLocks[] = {
-    // verified: llama.cpp ghcr.io/ggml-org/llama.cpp:server-cuda 2026-06-04.
-    // Cross-engine note: llama.cpp greedy continues " Paris. The capital of
-    // Italy is Rome..."; imp continues ". What is the capital of Germany?
-    // ... Berlin ... Italy ... Rome..." — both coherent capital-Q&A with
-    // correct facts; the engines diverge at the FIRST token (greedy
-    // amplifies sub-ulp logit differences into different-but-valid
-    // trajectories). Locked sequence is imp's own — the lock is a
-    // regression net, not a cross-engine equality claim.
+    // verified: llama.cpp ghcr.io/ggml-org/llama.cpp:full-cuda -fa off 2026-09-29 (#2208, #2251).
+    // Locks start with the prefill-sampled token (imp_prefill_token, #2251). llama.cpp:
+    // " Paris. The capital of Italy is Rome. The capital of Germany is Berlin..."; imp (FP16 KV):
+    // the same first 12 tokens, then Spain/Madrid, Germany/Berlin, Netherlands/Amsterdam.
+    // FP8 KV (the "auto" before #2208) turned it into "The capital of France is Paris" loops.
     {"Qwen3-8B-Q8_0.gguf",
      "The capital of France is",
-     31,
-     {13,    3555, 374, 279, 6722, 315, 9856, 30,  576, 6722,  315,   9856, 374, 19846, 13,   3555,
-      374,   279,  6722, 315, 15344, 30, 576, 6722, 315, 15344, 374, 21718, 13, 3555, 374}},
+     32,
+     {12095, 13, 576, 6722, 315, 15344, 374, 21718, 13, 576, 6722, 315, 17689, 374, 24081, 13,
+      576, 6722, 315, 9856, 374, 19846, 13, 576, 6722, 315, 279, 25662, 374, 37741, 13, 576}},
     // verified: llama.cpp server-cuda 2026-06-04 — both engines answer " 42"
     // (imp then: "42\n\nOkay, let me try to figure out what 17 plus 25 is...";
     // llama.cpp: " 42\n\nQ: What is 17 + 25?\nA: 42..."). Arithmetic
@@ -46,21 +44,25 @@ inline constexpr GreedyLock kGreedyLocks[] = {
     // is 17 + 2" — the answer is unchanged and the continuation is the one
     // llama.cpp produced in the 06-04 verification. Which of the ~90 hot-path
     // PRs in between moved it is not recorded, because nothing ran this.
+    // 2026-09-29 (#2251): with the prefill token (" ") first, all 31 tokens llama.cpp -fa off
+    // returns are identical to imp's.
     {"Qwen3-8B-Q8_0.gguf",
      "Q: What is 17 + 25?\nA:",
-     31,
-     {19, 17, 271, 48, 25, 3555, 374, 220, 16, 22, 488, 220, 17, 20, 5267, 32,
-      25, 220, 19, 17, 271, 48, 25, 3555, 374, 220, 16, 22, 488, 220, 17}},
+     32,
+     {220, 19, 17, 271, 48, 25, 3555, 374, 220, 16, 22, 488, 220, 17, 20, 5267,
+      32, 25, 220, 19, 17, 271, 48, 25, 3555, 374, 220, 16, 22, 488, 220, 17}},
     // verified: internal 2026-06-04 — no external engine loads NVFP4
     // SafeTensors. Coherent capital-Q&A with correct facts (Berlin/Rome/
     // Madrid/Lisbon); degen_suite 27/0 on this model+build the same day.
     // This entry locks the SafeTensors loader + RoPE path (the #503
     // RoPE-NeoX class shipped prompt-blind output exactly here).
+    // Re-locked 2026-09-29 under pinned FP16 KV (#2208): Italy/Rome, Spain/Madrid,
+    // Germany/Berlin, Netherlands/Amsterdam; token-identical to the Q8_0 row.
     {"Qwen3-8B-NVFP4-cortecs",
      "The capital of France is",
-     31,
-     {13,  576, 6722, 315, 9856, 374, 19846, 13,  576, 6722, 315, 15344, 374, 21718, 13, 576,
-      6722, 315, 17689, 374, 24081, 13, 576, 6722, 315, 33311, 374, 80701, 13, 576, 6722}},
+     32,
+     {12095, 13, 576, 6722, 315, 15344, 374, 21718, 13, 576, 6722, 315, 17689, 374, 24081, 13,
+      576, 6722, 315, 9856, 374, 19846, 13, 576, 6722, 315, 279, 25662, 374, 37741, 13, 576}},
     // verified: internal 2026-06-04 — "17+25=42": arithmetically correct,
     // prompt-grounded (the prompt-blindness detector for the NVFP4 path).
     // Regenerated 2026-09-05 (dispatch #4, same reason as the Q8_0 row above):
@@ -68,9 +70,9 @@ inline constexpr GreedyLock kGreedyLocks[] = {
     // to the Q8_0 checkpoint's sequence now; answer unchanged, prompt-grounded.
     {"Qwen3-8B-NVFP4-cortecs",
      "Q: What is 17 + 25?\nA:",
-     31,
-     {19, 17, 271, 48, 25, 3555, 374, 220, 16, 22, 488, 220, 17, 20, 5267, 32,
-      25, 220, 19, 17, 271, 48, 25, 3555, 374, 220, 16, 22, 488, 220, 17}},
+     32,
+     {220, 19, 17, 271, 48, 25, 3555, 374, 220, 16, 22, 488, 220, 17, 20, 5267,
+      32, 25, 220, 19, 17, 271, 48, 25, 3555, 374, 220, 16, 22, 488, 220, 17}},
     // NOT locked (both Qwen3-8B-Q8_0 and -NVFP4-cortecs): "The three
     // primary colors are red, blue, and" — imp's greedy output is
     // NON-DETERMINISTIC across fresh contexts at temp=0 on a DENSE model
@@ -81,5 +83,6 @@ inline constexpr GreedyLock kGreedyLocks[] = {
     // tie, so it stays unlocked. A lock would flake; the probe turns any future
     // spread of this behavior into a loud failure.
 };
+// clang-format on
 
 }  // namespace imp_refs

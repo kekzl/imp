@@ -415,6 +415,58 @@ class MockHandler(BaseHTTPRequestHandler):
             tokens.append(rng.choice(MOCK_VOCAB))
         return tokens
 
+    def _parse_prompt_logprobs(self, body: dict):
+        """Mirror of tools/imp-server/prompt_logprobs.cpp parse_prompt_logprobs (#2207); None = 400 sent."""
+        pl = body.get("prompt_logprobs")
+        if pl is None:
+            pl = -1
+        elif isinstance(pl, bool) or not isinstance(pl, int) or not 0 <= pl <= 20:
+            self._send_error(400, f'"prompt_logprobs" must be an integer in [0, 20], got {pl!r}')
+            return None
+        lp = body.get("logprobs")
+        req_logprobs = (lp is True) or (isinstance(lp, int) and not isinstance(lp, bool) and lp > 0)
+        top = body.get("top_logprobs") or 0
+        if isinstance(lp, int) and not isinstance(lp, bool):
+            top = max(top, lp)
+        echo_top = min(max(top, 0), 20) if (body.get("echo") and req_logprobs) else -1
+        if body.get("stream") and (pl >= 0 or echo_top >= 0):
+            self._send_error(400, 'prompt logprobs ("prompt_logprobs", or "echo" with "logprobs") '
+                                  'are not supported with "stream": true')
+            return None
+        return {"prompt_logprobs": pl, "echo_top": echo_top}
+
+    @staticmethod
+    def _mock_prompt_pieces(prompt: str) -> list[str]:
+        """1 token per 4 chars, the last piece takes the remainder (matches prompt_tokens)."""
+        n = max(1, len(prompt) // 4)
+        return [prompt[i * 4:(i + 1) * 4] if i < n - 1 else prompt[i * 4:] for i in range(n)]
+
+    @staticmethod
+    def _mock_prompt_logprobs(pieces: list[str], top: int) -> list:
+        out = [None]
+        for i, piece in enumerate(pieces[1:], start=1):
+            entry = {str(100 + i): {"logprob": -1.0, "rank": top + 1, "decoded_token": piece}}
+            for k in range(top):
+                entry[str(900 + k)] = {"logprob": -0.1 * (k + 1), "rank": k + 1, "decoded_token": f"alt{k}"}
+            out.append(entry)
+        return out
+
+    @staticmethod
+    def _mock_echo_logprobs(pieces: list[str], completion: list[str], top: int, text: str) -> dict:
+        tokens, lps, tops, offsets, cursor = [], [], [], [], 0
+        for i, piece in enumerate(pieces + completion):
+            tokens.append(piece)
+            offsets.append(cursor)
+            if i == 0:
+                lps.append(None)
+                tops.append(None)
+            else:
+                lps.append(-1.0)
+                tops.append({f"alt{k}": -0.1 * (k + 1) for k in range(top)})
+            if piece and text.startswith(piece, cursor):
+                cursor += len(piece)
+        return {"tokens": tokens, "token_logprobs": lps, "top_logprobs": tops, "text_offset": offsets}
+
     def _send_coded_error(self, status: int, message: str, param: str, code: str | None = None):
         err = {"message": message, "type": "invalid_request_error", "param": param}
         if code:
@@ -750,6 +802,10 @@ class MockHandler(BaseHTTPRequestHandler):
                 400, "n>1 is not supported on /v1/completions; request one completion per call")
             return
 
+        plp = self._parse_prompt_logprobs(body)
+        if plp is None:
+            return
+
         model = body.get("model", "")
         if not model:
             self._send_error(400, '"model" is required')
@@ -794,17 +850,24 @@ class MockHandler(BaseHTTPRequestHandler):
         tokens = self._generate_tokens(seed, max_tokens)
         content = "".join(tokens)
         prompt_tokens = max(1, len(prompt) // 4)
+        choice = {
+            "index": 0,
+            "text": (prompt + content) if body.get("echo") else content,
+            "finish_reason": "stop" if len(tokens) < max_tokens else "length",
+        }
+        pieces = self._mock_prompt_pieces(prompt) if isinstance(prompt, str) else ["tok"] * prompt_tokens
+        pieces = pieces[:prompt_tokens]
+        if plp["prompt_logprobs"] >= 0:
+            choice["prompt_logprobs"] = self._mock_prompt_logprobs(pieces, plp["prompt_logprobs"])
+        if plp["echo_top"] >= 0:
+            choice["logprobs"] = self._mock_echo_logprobs(pieces, tokens, plp["echo_top"], choice["text"])
 
         self._send_json(200, {
             "id": f"mock-{int(time.time())}",
             "object": "text_completion",
             "created": int(time.time()),
             "model": model,
-            "choices": [{
-                "index": 0,
-                "text": content,
-                "finish_reason": "stop" if len(tokens) < max_tokens else "length",
-            }],
+            "choices": [choice],
             "usage": {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": len(tokens),
@@ -1033,13 +1096,10 @@ class MockHandler(BaseHTTPRequestHandler):
     # a raw prompt ending in ':' or '>' merges with an alphanumeric candidate (Qwen ":A").
     def _score_mode(self, body: dict) -> str | None:
         mode = body.get("mode", "auto")
-        if mode == "shared":
-            self._send_error(400, 'mode "shared" is not implemented yet, see #2198')
-            return None
-        if mode not in ("auto", "serial", "direct"):
+        if mode not in ("auto", "serial", "direct", "shared"):
             self._send_error(400, '"mode" must be one of auto, serial, direct, shared')
             return None
-        return "direct" if mode == "direct" else "serial"
+        return "serial" if mode == "auto" else mode
 
     @staticmethod
     def _mock_probs(seed: str, n: int) -> list[float]:
@@ -1094,7 +1154,7 @@ class MockHandler(BaseHTTPRequestHandler):
             probs = self._mock_probs(evidence + it["criterion"], len(letters))
             best = max(range(len(probs)), key=probs.__getitem__)
             prompt_tokens = evidence_tokens + max(1, len(it["criterion"] + "".join(it["options"])) // 4) + 8
-            cached = evidence_tokens if (mode == "serial" and i > 0) else 0
+            cached = evidence_tokens if (mode in ("serial", "shared") and i > 0) else 0
             total_prompt += prompt_tokens
             total_cached += cached
             out.append({"id": it.get("id", i), "probs": dict(zip(letters, probs)), "argmax": letters[best],
