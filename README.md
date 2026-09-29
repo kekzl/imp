@@ -62,6 +62,8 @@ Open <http://localhost:8080> for the built-in chat UI, or `curl` `/v1/chat/compl
        cuda=13.3 path=nvfp4-safetensors n=2 image=ghcr.io/kekzl/imp:latest
        cmd=`imp-cli --model … --prompt … --max-tokens 128 --temperature 0` (102.8/101.9 tok/s)]
 
+A GGUF or SafeTensors repo that loads as-is needs no staging: `--model hf://<org>/<repo>[:<file>.gguf]` downloads it inside the container into the mounted `/models` (HF cache layout, sha256-checked, resumable, `HF_TOKEN` for gated repos) and a restart loads it with no network request: [`docs/CONFIG.md`](docs/CONFIG.md#fetching-from-hugging-face).
+
 Full walkthrough (screenshot, other model formats, bringing your own BF16/FP8 checkpoint, the MTP head): [`docs/QUICKSTART.md`](docs/QUICKSTART.md). Quantizing it yourself, quality numbers: [`docs/quantization.md`](docs/quantization.md).
 
 ## What works today

@@ -19,6 +19,7 @@
 #include <fstream>
 #include <memory>
 #include "rate_limit.h"
+#include "responses_store.h"
 
 #include <mutex>
 #include <set>
@@ -318,6 +319,9 @@ struct ServerState {
     // Per-request JSONL logger (opt-in via --log-requests).
     RequestLogger request_logger;
 
+    // Responses API store (#2206): store=true / previous_response_id. Own mutex, never state.mtx.
+    imp_server::responses::ResponseStore response_store;
+
     bool model_loaded() const { return ctx != nullptr; }
 
     // obs_mtx guards a {loaded, model_name} snapshot for observability endpoints, held only for a
@@ -382,6 +386,8 @@ void handle_props(const httplib::Request& req, httplib::Response& res, ServerSta
 void handle_info(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_chat_completions(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_completions(const httplib::Request& req, httplib::Response& res, ServerState& state);
+// POST /infill: llama.cpp fill-in-the-middle over the /v1/completions path (#2201).
+void handle_infill(const httplib::Request& req, httplib::Response& res, ServerState& state);
 // Anthropic-compatible Messages API. Non-streaming requests are a thin shim
 // over handle_chat_completions; streaming requests drive the real per-token
 // batching-engine loop and emit native Anthropic SSE events incrementally.
@@ -390,6 +396,9 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
 // POST /v1/responses — OpenAI Responses API (Agents SDK / Codex dialect);
 // reuses the chat-completions path via the transform shim (responses.h).
 void handle_responses(const httplib::Request& req, httplib::Response& res, ServerState& state);
+// GET / DELETE /v1/responses/{id} (#2206).
+void handle_responses_get(const httplib::Request& req, httplib::Response& res, ServerState& state);
+void handle_responses_delete(const httplib::Request& req, httplib::Response& res, ServerState& state);
 // Anthropic /v1/messages/count_tokens: same body transform + tokenize chain as
 // handle_messages, but never submits to the engine; returns {"input_tokens":N}.
 void handle_count_tokens(const httplib::Request& req, httplib::Response& res, ServerState& state);
@@ -406,6 +415,11 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
 // Scores each document against the query with a cross-encoder reranker, jointly
 // in one forward. Requires a reranker model to be loaded; see handlers_rerank.cpp.
 void handle_rerank(const httplib::Request& req, httplib::Response& res, ServerState& state);
+
+// POST /v1/decide (SemIf letter scoring) and POST /v1/score (caller-given candidate tokens), #2198.
+// One prefill per item, softmax over candidate logits at the last position; handlers_decide.cpp.
+void handle_decide(const httplib::Request& req, httplib::Response& res, ServerState& state);
+void handle_score(const httplib::Request& req, httplib::Response& res, ServerState& state);
 
 // POST /admin/suspend: snapshot weights to host RAM, tear down model/engine, free VRAM.
 // POST /admin/resume: reload with the snapshot armed (warm restore). Both idempotent; standard

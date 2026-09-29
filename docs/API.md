@@ -11,6 +11,7 @@ What the HTTP surface actually accepts.
 
 - Status legend from [`FEATURES.md`](FEATURES.md): ✅ code path plus a gated test, 🟡 code path, no test.
 - Constrained decoding, tool calling, thinking/reasoning and images: [`API_FEATURES.md`](API_FEATURES.md).
+- Closed-choice scoring (`/v1/decide`, `/v1/score`): [`API_SCORING.md`](API_SCORING.md).
 
 **Two dialects, both native.** `/v1/messages` is implemented against the
 Anthropic wire format directly, no shim in either direction. All three
@@ -22,12 +23,16 @@ all of them at once.
 | endpoint | status | notes |
 |---|---|---|
 | `POST /v1/chat/completions` | ✅ | the main one. Text and image content parts |
-| `POST /v1/completions` | ✅ | legacy text completion. `prompt`: a string, a token-id list, or a one-element list of either; a batch of prompts is a 400, like `n > 1` |
+| `POST /v1/completions` | ✅ | legacy text completion. `prompt`: a string, a token-id list, or a one-element list of either; a batch of prompts is a 400, like `n > 1`. `suffix` = fill-in-the-middle, see [FIM](API_FEATURES.md#fill-in-the-middle) |
+| `POST /infill` | ✅ | llama.cpp fill-in-the-middle (`input_prefix`, `input_suffix`, `input_extra`, `prompt`), see [FIM](API_FEATURES.md#fill-in-the-middle) |
 | `POST /v1/messages` | ✅ | Anthropic. Real per-token SSE, `ping` keepalives |
 | `POST /v1/messages/count_tokens` | ✅ | |
-| `POST /v1/responses` | ✅ | OpenAI Responses, the dialect Codex and the Agents SDK speak by default; stateless, so use `store: false` and resend the transcript in `input` |
+| `POST /v1/responses` | ✅ | OpenAI Responses, the dialect Codex and the Agents SDK speak by default. `store: true` + `previous_response_id` continue server-side, see [Responses store](API_FEATURES.md#responses-store) |
+| `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | ✅ | stored responses only, see [Responses store](API_FEATURES.md#responses-store) |
 | `POST /v1/embeddings` | ✅ | needs an embedding model loaded |
 | `POST /v1/rerank`, `POST /rerank` | ✅ | Cohere/Jina/vLLM shape |
+| `POST /v1/decide` | 🟡 | closed-choice letter scoring, no decoding; see [`API_SCORING.md`](API_SCORING.md). GPU acceptance: `scripts/accept_2198.sh` |
+| `POST /v1/score` | 🟡 | softmax over caller-given candidate tokens at the last prompt position |
 | `POST /tokenize`, `POST /detokenize` | ✅ | `/tokenize` takes `content` (llama.cpp) or `prompt` (vLLM) |
 | `GET /v1/models` | ✅ | loaded model plus the rest of the directory, each with `loaded: true|false`; the loaded entry carries `meta.reasoning_effort` `{values, default}` when its chat template names the list (Qwen3.8: `xhigh`, `medium`, `low`) |
 | `GET /health`, `/metrics`, `/props`, `/info` | ✅ | `/props` is the llama.cpp shape, `/info` the TGI one |
@@ -203,6 +208,11 @@ Both sit behind the same `--api-key` and `--rate-limit` as every other non-probe
 - Both drain in-flight requests first (`server.model_swap_drain_ms`), never cancel them; 503 if the drain times out.
 - `id` is stable across suspend/resume; ids are never reused.
 - Adapters survive an idle or operator suspend: resume re-loads them from their paths.
+- A model swap (`server.model_swap`) drops every adapter: device memory freed with the old context, one log line each (`[model-swap] dropped LoRA adapter '<name>' (id=N, path=...): model swapped`). A request naming one then answers 400 `lora_not_loaded`, unload answers 404 `lora_not_found`. Nothing is re-loaded onto the new model, also not when a failed swap restores the previous one: `POST /admin/lora/load` again.
+
+## Responses store
+
+`store: true`, `previous_response_id`, `GET`/`DELETE /v1/responses/{id}`, the `--responses-store-*` limits and metrics: [`API_FEATURES.md`](API_FEATURES.md#responses-store) (#2206).
 
 ## Errors
 

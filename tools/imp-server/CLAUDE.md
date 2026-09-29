@@ -21,6 +21,7 @@ OpenAI, Anthropic and OpenAI-Responses dialects: thin wire-format adapters over 
 
 - `main.cpp`: route registration, CORS, auth
 - `handlers_chat.cpp` / `handlers_chat_stream.cpp`: OpenAI + the shared driver
+- `handlers_completions.cpp` / `fim_request.cpp`: `/v1/completions` and `POST /infill` (fill-in-the-middle, prompt assembly in `src/model/fim.h`)
 - `handlers_messages.cpp`: Anthropic wire format
 - `handlers_responses.cpp`: `/v1/responses`
 - `handlers_chat_params.cpp`: parameter parsing and validation

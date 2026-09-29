@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- `--model hf://<org>/<repo>[:<file>.gguf]` (imp-server, imp-cli) downloads inside the container via libcurl into the HF cache (`HF_HOME=/models/huggingface` in the image): Range resume, LFS sha256 check, `HF_TOKEN`; a second start makes 0 requests (#2200).
 - `gemm.nvfp4_lm_head=fp8`: per-row FP8 E4M3 LM head (#2156, #2166), GDN hybrids included; one tensor-core kernel (32 rows per weight pass, row-count-invariant bits) serves decode, batch and `--perplexity`; the source head is freed after load. Qwen3-8B tg128 286.8 vs 300.9 tok/s (auto), c=32 6519 vs 6851 tok/s. Default stays `auto`.
 - Qwen3.8-Flash-Next MTP head: all 3101 `mtp.*` tensors load into `MtpHead` (qwen4_exp layout, FP8 experts host-mapped, FP8 shard mapped without `MAP_POPULATE`). No draft forward yet: `speculative.mtp_k` is forced to 0. Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
 
