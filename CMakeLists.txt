@@ -1184,6 +1184,8 @@ if(IMP_BUILD_TESTS)
         tests/test_hybrid_restore_chain.cu
         # Engine-level batch invariance of the batched GDN decode: eight rows vs solo, greedy.
         tests/test_hybrid_batched_decode.cu
+        # #2198 shared scoring: rows restoring one recurrent snapshot in one ragged forward.
+        tests/test_hybrid_shared_score.cu
         # Row-batched sampler keeps each row's own banned list through the penalty stash (#2019).
         tests/test_sampler_row_bans.cu
         tests/test_batch_invariance.cu
