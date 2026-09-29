@@ -1,6 +1,5 @@
 // --gpu-layers planning (#2291): Qwen3-8B-Q8_0 geometry, 36 layers, gpu_layers=20.
 #include "memory/layer_offload.h"
-#include "memory/layer_offload_plan.h"
 
 #include <gtest/gtest.h>
 
@@ -10,8 +9,8 @@ namespace {
 // Qwen3-8B: d_model 4096, 8 KV heads x 128, FFN 12288. Q8_0 = 34 B per 32 elements.
 constexpr int kLayers = 36;
 constexpr size_t kQ8LayerBytes = 2 * 17'825'792 + 2 * 4'456'448 + 3 * 53'477'376;  // 204'996'608
-constexpr size_t kNormBytes = 4096 * 4 * 2 + 128 * 4 * 2;                            // 33'792
-constexpr size_t kLayerBytes = kQ8LayerBytes + kNormBytes;                           // 205'030'400
+constexpr size_t kNormBytes = 4096 * 4 * 2 + 128 * 4 * 2;                          // 33'792
+constexpr size_t kLayerBytes = kQ8LayerBytes + kNormBytes;                         // 205'030'400
 
 char g_dummy;
 

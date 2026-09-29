@@ -178,7 +178,6 @@ set(IMP_MEMORY_SOURCES
     src/memory/vram_query.cpp
     src/memory/ssm_state.cpp
     src/memory/layer_offload.cpp
-    src/memory/layer_offload_plan.cpp
 )
 
 set(IMP_MODEL_SOURCES
