@@ -35,7 +35,6 @@ struct GemmContext {
     // RuntimeConfig::current() in gemm_dispatch / gemm_kernel_gguf hot paths.
     // Wired by the executor's GemmContext::make caller from dispatch_policy().
     bool q8_imma_enabled = false;
-    int q8_imma_bm = 128;
     bool q4k_imma_prefill = false;
     bool gemm_no_mmvq = false;
     bool gemm_no_mmvq_q8_0 = false;
@@ -65,7 +64,6 @@ struct GemmContext {
         ctx.force_fp16 = force_fp16;
         ctx.force_mmvq = force_mmvq;
         ctx.q8_imma_enabled = rcfg.gemm.q8_imma_enabled;
-        ctx.q8_imma_bm = rcfg.gemm.q8_imma_bm;
         ctx.q4k_imma_prefill = rcfg.gemm.q4k_imma_prefill;
         ctx.gemm_no_mmvq = rcfg.gemm.no_mmvq;
         ctx.gemm_no_mmvq_q8_0 = rcfg.gemm.no_mmvq_q8_0;

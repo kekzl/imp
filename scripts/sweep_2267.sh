@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sweep for #2267: Q8_0 prefill time per arm, prompt length and model. No PASS/FAIL (scripts/accept_2267.sh).
 # Arms (IMP_SWEEP_ARMS, "name=override,override" or "name" for defaults), default:
-#   on (default config), off (gemm.q8_imma_enabled=false), bm160 / bm192 (gemm.q8_imma_bm=160 / 192).
+#   on (default config), off (gemm.q8_imma_enabled=false).
 # Rows per GEMM = min(tokens, runtime.prefill_chunk_size); default chunk 2048, IMP_SWEEP_CHUNK overrides.
 # Usage: make build && bash scripts/sweep_2267.sh. Exit 0 = every measurement completed.
 # Env: IMP_MODELS_DIR (~/models), IMP_SWEEP_MODELS (Qwen3-8B-Q8_0.gguf Qwen3-4B-Instruct-2507-Q8_0.gguf),
@@ -16,7 +16,7 @@ cd "$ROOT" || exit 1
 MODELS_DIR="${IMP_MODELS_DIR:-$HOME/models}"
 read -r -a MODELS <<<"${IMP_SWEEP_MODELS:-Qwen3-8B-Q8_0.gguf Qwen3-4B-Instruct-2507-Q8_0.gguf}"
 read -r -a TOKENS <<<"${IMP_SWEEP_TOKENS:-256 512 1024 1536 2048 4096 8192}"
-read -r -a ARMS <<<"${IMP_SWEEP_ARMS:-on off=gemm.q8_imma_enabled=false bm160=gemm.q8_imma_bm=160 bm192=gemm.q8_imma_bm=192}"
+read -r -a ARMS <<<"${IMP_SWEEP_ARMS:-on off=gemm.q8_imma_enabled=false}"
 ROUNDS="${IMP_SWEEP_ROUNDS:-5}"
 CHUNK="${IMP_SWEEP_CHUNK:-}"
 TSV="${IMP_SWEEP_TSV:-}"
