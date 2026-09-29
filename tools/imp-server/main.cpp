@@ -3,6 +3,7 @@
 #include "handlers.h"
 #include "utils.h"
 #include "webui_asset.h"  // generated: IMP_WEBUI_HTML
+#include "model/hf_fetch.h"
 #include "model/hf_hub.h"
 #include "runtime/config.h"
 #include "core/process_diag.h"
@@ -82,6 +83,15 @@ int main(int argc, char** argv) {
         // unresolvable name is 503, never a silent success. Lets CI run the shipping binary GPU-less (#1302).
         ImpModelFormat resolved_format = IMP_FORMAT_GGUF;
         std::string resolved_model;
+        if (imp::hf::is_hf_uri(args.model_path)) {
+            // hf://org/repo[:file]: download into the HF cache (container side), then load from disk.
+            const std::string fetched = imp::hf::fetch_model(args.model_path, args.revision);
+            if (fetched.empty()) {
+                fprintf(stderr, "Failed to fetch model: %s\n", args.model_path.c_str());
+                return 1;
+            }
+            args.model_path = fetched;
+        }
         if (!args.model_path.empty()) {
             resolved_model = imp::resolve_model_auto(args.model_path, resolved_format, args.revision);
             if (resolved_model.empty()) {
