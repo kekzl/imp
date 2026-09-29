@@ -5,7 +5,6 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
-- `gemm.q8_imma_bm` (default 128): Q8_0 IMMA prefill on 160- or 192-row tiles, 10 / 12 warps per CTA instead of 8 (BM=128: 172 regs, 1 CTA per SM). Outputs bit-identical to BM=128 (`MmqQ8Imma.TallTilesBitIdenticalToBm128`); timing pending `scripts/bench_2267.sh` (#2267).
 - Qwen3.8-Flash-Next MTP drafting (`speculative.mtp_k=1`, auto declines it): hc-stream draft layer, FP8 block-scale experts (2400 MiB head), captured verify over host-resident experts (56.7 -> 27-36 ms/verify). Draft logits vs the vLLM math: max |dlogit| 0.0135 (band 0.11). Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
 - AWQ SafeTensors checkpoints (`quant_method: awq`, `bits: 4`, `zero_point: true`, `version: gemm`) load: q/k/v/o/gate/up/down dequantize to FP16 at upload in AutoAWQ packing order (`src/quant/dequant_awq.cu`); VRAM holds FP16 weights. GEMV, Marlin, other bit widths and `zero_point: false` stay refused at load (#2205, #2196).
 - C API `imp_prefill_token(ctx, &tok)`: the token `imp_prefill`/`imp_prefill_with_params` sampled; `imp_decode_step` returns the next one. GreedyLockTest locks now start with it: Qwen3-8B-Q8_0 `Q: What is 17 + 25?` matches llama.cpp in all 31 tokens (#2251).
@@ -15,6 +14,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `gemm.nvfp4_lm_head=fp8`: per-row FP8 E4M3 LM head (#2156, #2166), GDN hybrids included; one tensor-core kernel (32 rows per weight pass, row-count-invariant bits) serves decode, batch and `--perplexity`; the source head is freed after load. Qwen3-8B tg128 286.8 vs 300.9 tok/s (auto), c=32 6519 vs 6851 tok/s. Default stays `auto`.
 
 ### Changed
+- Q8_0 IMMA prefill BM=128 kernel (`mmq_q8_imma_pipe.cu`): 4-stage cp.async ring, 1 barrier per K-step (was 2 + 2), ldmatrix.x4 from an XOR-swizzled tile (was 32-bit LDS). Bit-identical to the old kernel (`MmqQ8Imma.PipelineBitIdenticalToLegacy`); timing: `scripts/bench_2267.sh`. `gemm.q8_imma_bm` removed (tall tiles, slower) (#2267).
 - `prompt_logprobs` LM head (#2257): one dequantized-head GEMM per chunk of min(rows, 1024, free VRAM / 2 / 4V) rows instead of 8-row dp4a batches, and one fused pass per row for logsumexp, rank and top-N (was 2 + N). Gate `scripts/accept_2257.sh`: 2048-token prefill with `prompt_logprobs=0` <= 1.30x off.
 - `check_doc_citations.py`: a moved anchor is a `DRIFT` warning (exit 0), `--fix` rewrites the line numbers; only a gone or ambiguous anchor fails (25-line window). Line drift broke main 3x on 2026-09-29 (#2231).
 - `gemm.nvfp4_lm_head=auto` now serves the LM head as per-row FP8 E4M3 where the head allows it (NVFP4 rule as fallback); `on` keeps NVFP4. PPL 45k: Qwen3-8B 11.1108 -> 10.7623, Qwen3-30B-A3B 11.8443 -> 11.3476, Flash-Next 4.6493 -> 4.4873; tg128 -4.7 % / -3.0 % (#2166, #2156).

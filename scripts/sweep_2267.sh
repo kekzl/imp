@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Sweep for #2267: Q8_0 prefill time per arm, prompt length and model. No PASS/FAIL (scripts/accept_2267.sh).
-# Arms (IMP_SWEEP_ARMS, "name=override,override" or "name" for defaults), default:
-#   on (default config), off (gemm.q8_imma_enabled=false), bm160 / bm192 (gemm.q8_imma_bm=160 / 192).
+# Arms (IMP_SWEEP_ARMS, "name[@image][=override,override]"; no @image = this tree's image), default:
+#   new (default config), off (gemm.q8_imma_enabled=false), plus old@$IMP_SWEEP_OLD_IMG when set
+#   (pre-#2267 kernel image, built by scripts/bench_2267.sh).
 # Rows per GEMM = min(tokens, runtime.prefill_chunk_size); default chunk 2048, IMP_SWEEP_CHUNK overrides.
 # Usage: make build && bash scripts/sweep_2267.sh. Exit 0 = every measurement completed.
 # Env: IMP_MODELS_DIR (~/models), IMP_SWEEP_MODELS (Qwen3-8B-Q8_0.gguf Qwen3-4B-Instruct-2507-Q8_0.gguf),
 #      IMP_SWEEP_TOKENS (256 512 1024 1536 2048 4096 8192), IMP_SWEEP_ROUNDS (5), IMP_SWEEP_PORT (8267),
 #      IMP_SWEEP_CHUNK (unset = engine default 2048), IMP_SWEEP_TSV (write "model tokens arm median_s" rows),
-#      IMP_TEST_IMG, IMP_GPU_BUSY_CHECK (busy-check script).
+#      IMP_SWEEP_OLD_IMG, IMP_TEST_IMG, IMP_GPU_BUSY_CHECK (busy-check script).
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,7 +17,8 @@ cd "$ROOT" || exit 1
 MODELS_DIR="${IMP_MODELS_DIR:-$HOME/models}"
 read -r -a MODELS <<<"${IMP_SWEEP_MODELS:-Qwen3-8B-Q8_0.gguf Qwen3-4B-Instruct-2507-Q8_0.gguf}"
 read -r -a TOKENS <<<"${IMP_SWEEP_TOKENS:-256 512 1024 1536 2048 4096 8192}"
-read -r -a ARMS <<<"${IMP_SWEEP_ARMS:-on off=gemm.q8_imma_enabled=false bm160=gemm.q8_imma_bm=160 bm192=gemm.q8_imma_bm=192}"
+DEF_ARMS="new off=gemm.q8_imma_enabled=false${IMP_SWEEP_OLD_IMG:+ old@$IMP_SWEEP_OLD_IMG}"
+read -r -a ARMS <<<"${IMP_SWEEP_ARMS:-$DEF_ARMS}"
 ROUNDS="${IMP_SWEEP_ROUNDS:-5}"
 CHUNK="${IMP_SWEEP_CHUNK:-}"
 TSV="${IMP_SWEEP_TSV:-}"
@@ -60,7 +62,16 @@ for n in "${TOKENS[@]}"; do
         temperature: 0}' >"$WORK/req_$n.json"
 done
 
-arm_name() { echo "${1%%=*}"; }
+arm_head() { echo "${1%%=*}"; }                  # name[@image]
+arm_name() { local h; h=$(arm_head "$1"); echo "${h%%@*}"; }
+arm_img() {  # arm_img <spec> -> the image this arm runs
+    local h; h=$(arm_head "$1")
+    if [[ "$h" == *@* ]]; then echo "${h#*@}"; else echo "$IMG"; fi
+}
+for spec in "${ARMS[@]}"; do
+    a_img=$(arm_img "$spec")
+    docker image inspect "$a_img" >/dev/null 2>&1 || { echo "ERROR setup: arm $(arm_name "$spec") image $a_img missing"; exit 1; }
+done
 
 start_server() {  # start_server <model> <arm spec>
     local -a extra=()
@@ -71,7 +82,7 @@ start_server() {  # start_server <model> <arm spec>
     fi
     [ -n "$CHUNK" ] && extra+=(--set "runtime.prefill_chunk_size=$CHUNK")
     docker rm -f "$CTR" >/dev/null 2>&1 || true
-    docker run -d --name "$CTR" --gpus all -v "$MODELS_DIR":/models:ro -p "$PORT":"$PORT" "$IMG" \
+    docker run -d --name "$CTR" --gpus all -v "$MODELS_DIR":/models:ro -p "$PORT":"$PORT" "$(arm_img "$2")" \
         imp-server --model "/models/$1" --host 0.0.0.0 --port "$PORT" --max-batch 1 \
         --set server.prefix_cache=false --set "runtime.max_seq_len=$MAX_SEQ" "${extra[@]}" >/dev/null || return 1
     for _ in $(seq 1 180); do
@@ -127,7 +138,7 @@ median() {  # median <file> -> median of its lines, "ERR" if fewer than ROUNDS
 
 NAMES=()
 for spec in "${ARMS[@]}"; do NAMES+=("$(arm_name "$spec")"); done
-echo "== sweep_2267: image $IMG, median of $ROUNDS, arm order alternates per round, prefix cache off =="
+echo "== sweep_2267: image $IMG (arms without @image), median of $ROUNDS, arm order alternates per round, prefix cache off =="
 echo "   arms: ${ARMS[*]}; prefill = curl time_total, max_tokens 1; ratio = off / arm (>1: arm faster than off)"
 hdr=$(printf '%-34s %6s %5s' model tokens rows)
 for a in "${NAMES[@]}"; do hdr+=$(printf ' %9s' "${a}_s"); done

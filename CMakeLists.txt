@@ -326,6 +326,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/mmq_q4k_imma_layout.cu
     src/compute/mmq_q4k_imma_tile.cu
     src/compute/mmq_q8_imma.cu
+    src/compute/mmq_q8_imma_pipe.cu
     src/compute/mmq_q8_imma_scratch.cu
 )
 
@@ -1104,7 +1105,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mmq_q4k_imma_tile_bench.cu
         tests/test_mmq_q4k_imma_gemm.cu
         tests/test_mmq_q8_imma.cu
-        tests/test_mmq_q8_imma_tall.cu
+        tests/test_mmq_q8_imma_pipe.cu
         tests/test_mmq_q8_imma_q5k.cu
         tests/test_mmq_q8_imma_q6k.cu
         tests/test_weight_dispatch.cu

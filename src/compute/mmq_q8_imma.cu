@@ -1,5 +1,5 @@
 // INT8 IMMA prefill GEMM family (sm_120a) for Q8_0 and Q4_K, dense + MoE-grouped.
-// Contract: mmq_q8_imma.h. 3-stage cp.async pipelining regressed here, do not re-add.
+// Contract: mmq_q8_imma.h. BM=32 (+ split-K): mmq_imma_kernel; BM=128 Q8_0: mmq_q8_pipe_kernel.
 // Unified math (alpha/beta form; Q8_0: alpha=d, beta=0): out[m,n] = Σ_kb d_a[m,kb] · ( α[n,kb]·Σ_{k∈kb}
 // a_s8·w_s8 + β[n,kb]·rs[m,kb] )
 // rs = int rowsum of the quantized activation sub-block; couples to Q4_K's collapsed (q-8)+dmin terms
@@ -20,58 +20,7 @@ namespace imp {
 
 namespace {
 
-// Warp grid per BM: 32 -> 2x4, 128 -> 4x2 (256 threads); tall tiles 160 / 192 -> 5x2 / 6x2
-// (320 / 384 threads, same 32x64 warp tile as BM=128). #2267: 172 regs x 256 = 1 CTA, 8 warps/SM.
-constexpr int imma_wm(int bm) { return bm > 128 ? bm / 32 : (bm == 128 ? 4 : 2); }
-constexpr int imma_wn(int bm) { return bm >= 128 ? 2 : 4; }
-constexpr int imma_threads(int bm) { return imma_wm(bm) * imma_wn(bm) * 32; }
-
-// Tall tiles (BM > 128) exceed the 48 KiB static limit: dynamic smem, same layout and order.
-constexpr size_t imma_tall_smem_bytes(int bm) {
-    return static_cast<size_t>(kStages) *
-           (static_cast<size_t>(bm) * kRow + static_cast<size_t>(kBN) * kRow +
-            static_cast<size_t>(bm) * 2 * sizeof(float) + static_cast<size_t>(bm) * 2 * sizeof(__half) +
-            2 * static_cast<size_t>(kBN) * 2 * sizeof(__half));
-}
-
-// Kernel-scope static tile extent: tall tiles keep a 1-row stub, their tiles live in dynamic smem.
-constexpr int imma_static_extent(int bm, int extent) { return bm > 128 ? 1 : extent; }
-
-template <int BM>
-struct ImmaSmem {
-    int8_t (*A)[BM][kRow];
-    int8_t (*B)[kBN][kRow];
-    __half (*Asc)[BM][2];
-    float (*Ars)[BM][2];
-    __half (*Bsc)[2][kBN][2];
-};
-
-extern __shared__ __align__(16) unsigned char imma_tall_smem[];
-
-// BM <= 128: the kernel's static arrays, unchanged. Tall: dynamic smem carved A, B, Ars, Asc, Bsc.
-template <int BM, typename SA, typename SB, typename SAsc, typename SArs, typename SBsc>
-__device__ __forceinline__ ImmaSmem<BM> imma_smem(SA a, SB b, SAsc asc, SArs ars, SBsc bsc) {
-    if constexpr (BM <= 128) {
-        return ImmaSmem<BM>{a, b, asc, ars, bsc};
-    } else {
-        (void)a, (void)b, (void)asc, (void)ars, (void)bsc;
-        unsigned char* p = imma_tall_smem;
-        ImmaSmem<BM> s;
-        s.A = reinterpret_cast<int8_t (*)[BM][kRow]>(p);
-        p += sizeof(int8_t[kStages][BM][kRow]);
-        s.B = reinterpret_cast<int8_t (*)[kBN][kRow]>(p);
-        p += sizeof(int8_t[kStages][kBN][kRow]);
-        s.Ars = reinterpret_cast<float (*)[BM][2]>(p);
-        p += sizeof(float[kStages][BM][2]);
-        s.Asc = reinterpret_cast<__half (*)[BM][2]>(p);
-        p += sizeof(__half[kStages][BM][2]);
-        s.Bsc = reinterpret_cast<__half (*)[2][kBN][2]>(p);
-        return s;
-    }
-}
-
-
-// One K-step tile load, all CTA threads cooperating, loops unrolled for every BM variant:
+// One K-step tile load, all 256 threads cooperating, loops unrolled for both BM variants:
 //   A[BM][kBK] s8, M-tail zero-filled; B[kBN][kBK] s8, weight rows always full (N % kBN == 0)
 //   Asc[BM][2] half / Ars[BM][2] float: activation scale/rowsum, d-plane cols (kb0, kb0+1)
 //   Bsc[2][kBN][2] half: weight (α, β) per kb col, kb-major
@@ -86,7 +35,7 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
                                            int M, int K, int subs, int k_base,
                                            int base_n_rows) {
 #pragma unroll
-    for (int i = tid; i < BM * 4; i += imma_threads(BM)) {
+    for (int i = tid; i < BM * 4; i += kThreads) {
         const int row = i >> 2;
         const int col = (i & 3) * 16;
         const bool valid = (base_m + row) < M;
@@ -94,7 +43,7 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
                        A + static_cast<size_t>(base_m + row) * K + k_base + col, valid);
     }
 #pragma unroll
-    for (int i = tid; i < kBN * 4; i += imma_threads(BM)) {
+    for (int i = tid; i < kBN * 4; i += kThreads) {
         const int row = i >> 2;
         const int col = (i & 3) * 16;
         cp_async_cg_16(&sB[row][col], B + static_cast<size_t>(row) * K + k_base + col,
@@ -102,14 +51,14 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
     }
     const int kb0 = k_base / 32;
 #pragma unroll
-    for (int i = tid; i < BM; i += imma_threads(BM)) {
+    for (int i = tid; i < BM; i += kThreads) {
         const bool valid = (base_m + i) < M;
         cp_async_ca_4(&sAsc[i][0], Asc + static_cast<size_t>(base_m + i) * subs + kb0, valid);
         if (WB)
             cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
     }
 #pragma unroll
-    for (int i = tid; i < kBN * 2; i += imma_threads(BM)) {
+    for (int i = tid; i < kBN * 2; i += kThreads) {
         // kb-major [kb][n][2]: one fragment's two columns read as one 8-B word
         const int n = i >> 1, kb = i & 1;
         cp_async_ca_4(&sBsc[kb][n][0], Bsc + (static_cast<size_t>(n) * subs + kb0 + kb) * 2,
@@ -125,21 +74,21 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
 // order (bit-reproducible) and applies beta/residual.
 template <int BM, bool BETA1, bool WB /* weight beta term (Q4_K); false = pure alpha (Q8_0) */,
           bool SPLITK = false>
-__global__ void __launch_bounds__(imma_threads(BM))
+__global__ void __launch_bounds__(kThreads)
     mmq_imma_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
                     const float* __restrict__ x_rowsum, const int8_t* __restrict__ W_s8,
                     const __half* __restrict__ w_sc, __half* __restrict__ out, int M, int N,
                     int K, const int32_t* __restrict__ expert_offsets, size_t w_stride,
                     size_t wsc_stride, float* __restrict__ split_out = nullptr,
                     int ks_per_split = 0) {
-    constexpr int kWM = imma_wm(BM);  // warp grid
-    constexpr int kWN = imma_wn(BM);
+    constexpr int kWM = (BM == 128) ? 4 : 2;  // warp grid
+    constexpr int kWN = (BM == 128) ? 2 : 4;
     constexpr int kTileM = BM / kWM;       // 32 / 16
     constexpr int kTileN = kBN / kWN;      // 64 / 32
     constexpr int kMF = kTileM / 16;       // 2 / 1
     constexpr int kNF = kTileN / 8;        // 8 / 4
-    static_assert(kWM * kWN * 32 == imma_threads(BM), "warp grid must fill the CTA");
-    static_assert(BM <= 128 || (kTileM == 32 && kTileN == 64), "tall tiles keep the BM=128 warp tile");
+    static_assert(kWM * kWN * 32 == kThreads, "warp grid must fill the CTA");
+    static_assert(BM == 32, "BM=128 runs mmq_q8_pipe_kernel");
 
     int rows = M;
     size_t row_off = 0;
@@ -172,19 +121,11 @@ __global__ void __launch_bounds__(imma_threads(BM))
     const int rl = lane >> 2;  // 0..7
     const int cl = lane & 3;   // 0..3
 
-    constexpr int kSM = imma_static_extent(BM, BM);
-    constexpr int kSN = imma_static_extent(BM, kBN);
-    __shared__ int8_t st_A[kStages][kSM][kRow];
-    __shared__ int8_t st_B[kStages][kSN][kRow];
-    __shared__ __half st_Asc[kStages][kSM][2];
-    __shared__ float st_Ars[kStages][kSM][2];
-    __shared__ __half st_Bsc[kStages][2][kSN][2];
-    const ImmaSmem<BM> smem = imma_smem<BM>(st_A, st_B, st_Asc, st_Ars, st_Bsc);
-    const auto sA = smem.A;
-    const auto sB = smem.B;
-    const auto sAsc = smem.Asc;
-    const auto sArs = smem.Ars;
-    const auto sBsc = smem.Bsc;
+    __shared__ int8_t sA[kStages][BM][kRow];
+    __shared__ int8_t sB[kStages][kBN][kRow];
+    __shared__ __half sAsc[kStages][BM][2];
+    __shared__ float sArs[kStages][BM][2];
+    __shared__ __half sBsc[kStages][2][kBN][2];
 
     float acc[kMF][kNF][4];
 #pragma unroll
@@ -354,60 +295,13 @@ __global__ void mmq_splitk_finalize_kernel(const float* __restrict__ split_out, 
 // Pair shares ql bytes [g*64..+63] (quad&1 selects the 32-byte half, quad>=2 the nibble) and qh bytes
 // [g*32..+31] (shift quad*2).
 
-// BM=128/160/192 Q8_0 plane launch (dense and MoE >= 96 rows); BM=128 is the default tile.
-struct Q8PlaneLaunch {
-    const int8_t* qs;
-    const __half* sc;
-    __half* out;
-    int M, N, K;
-    const int32_t* d_offsets;
-    size_t w_stride, wsc_stride;
-    dim3 grid;
-    int grid_m_rows;
-    cudaStream_t stream;
-};
-
-int g_q8_last_plane_bm = 0;  // test hook: BM of the last BM>=128 Q8_0 plane launch
-
-template <int BM>
-void launch_q8_plane(bool beta1, const Q8PlaneLaunch& L) {
-    constexpr size_t smem = BM > 128 ? imma_tall_smem_bytes(BM) : 0;
-    using Kern = void (*)(const int8_t*, const __half*, const float*, const int8_t*, const __half*, __half*, int,
-                          int, int, const int32_t*, size_t, size_t, float*, int);
-    const Kern k = beta1 ? mmq_imma_kernel<BM, true, false> : mmq_imma_kernel<BM, false, false>;
-    static const bool attr_set = [] {
-        cudaFuncSetAttribute(mmq_imma_kernel<BM, true, false>, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             static_cast<int>(smem));
-        cudaFuncSetAttribute(mmq_imma_kernel<BM, false, false>, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             static_cast<int>(smem));
-        return true;
-    }();
-    (void)attr_set;
-    const dim3 g(L.grid.x, (L.grid_m_rows + BM - 1) / BM, L.grid.z);
-    k<<<g, imma_threads(BM), smem, L.stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, L.qs, L.sc,
-                                              L.out, L.M, L.N, L.K, L.d_offsets, L.w_stride, L.wsc_stride,
-                                              nullptr, 0);
-    IMP_CUDA_CHECK_LAUNCH();
-    g_q8_last_plane_bm = BM;
-}
-
-// gemm.q8_imma_bm: 160 / 192 = tall tiles (#2267), anything else BM=128. Bit-identical outputs.
-void launch_q8_plane_bm(int bm, bool beta1, const Q8PlaneLaunch& L) {
-    if (bm == 192)
-        launch_q8_plane<192>(beta1, L);
-    else if (bm == 160)
-        launch_q8_plane<160>(beta1, L);
-    else
-        launch_q8_plane<128>(beta1, L);
-}
-
 using RawImmaKernel = void (*)(const int8_t*, const __half*, const float*, const uint8_t*, __half*, int, int,
                                int, const int32_t*, size_t);
 
 bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*/, const __half* x_f16,
                  __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
                  const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0,
-                 bool allow_splitk = true, int q8_bm = 128) {
+                 bool allow_splitk = true) {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
     const bool capturing = imma_stream_capturing(stream);
     if (qkind == 0 && !imma_ensure_weight(w_blocks, ne * N, K, stream, capturing))
@@ -538,8 +432,8 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
                                            out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
-        const Q8PlaneLaunch L{w.qs, w.sc, out_f16, M, N, K, d_offsets, w_stride, wsc_stride, grid, grid_m_rows, stream};
-        launch_q8_plane_bm(d_offsets == nullptr ? q8_bm : 128, beta == 1.0f, L);
+        launch_q8_pipe(beta == 1.0f, grid, stream, g_imma_act.xs8, g_imma_act.xscale, w.qs, w.sc, out_f16, M, N, K,
+                       d_offsets, w_stride, wsc_stride);
     }
     return true;
 }
@@ -547,17 +441,15 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
 }  // namespace
 
 bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
-                      cudaStream_t stream, float beta, bool allow_splitk, int bm) {
+                      cudaStream_t stream, float beta, bool allow_splitk) {
     // M >= 2 (was >= 64): small-M callers (spec-decode verify chunks, short
     // prompts) are exactly where the dequant->cuBLAS fallback hurts most; the
     // tiles zero-fill the M-tail (same machinery as the MoE per-expert path).
     if (M < 2 || N % 2 != 0 || K % kBK != 0) return false;
     if (beta != 0.0f && beta != 1.0f) return false;
     return gemm_common(w_q8_blocks, 0, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1, 0,
-                       allow_splitk, bm);
+                       allow_splitk);
 }
-
-int mmq_q8_imma_last_plane_bm() { return g_q8_last_plane_bm; }
 
 bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
                        cudaStream_t stream, float beta, bool allow_splitk) {

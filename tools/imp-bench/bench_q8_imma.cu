@@ -1,5 +1,6 @@
 // #2267: Q8_0 prefill GEMM per shape: dequant -> FP16-acc cuBLAS (the gemm.q8_imma_enabled=false
-// route) against the IMMA kernel at BM = 128 / 160 / 192. Shapes: Qwen3-8B and Qwen3-4B projections.
+// route) against the IMMA route. Shapes: Qwen3-8B and Qwen3-4B projections. Legacy-kernel timing:
+// MmqQ8ImmaBench.DISABLED_PipelineVsLegacy (test-quant).
 // Output: one `q8imma` line per (shape, M) and one `layer` line per (model, M), times in ms.
 #include "compute/gemm.h"
 #include "compute/mmq_q8_imma.h"
@@ -38,8 +39,7 @@ constexpr Q8Shape kShapes[] = {
     {"Qwen3-4B", "down", 2560, 9728, 1},
 };
 constexpr int kRows[] = {256, 512, 1024, 1536, 2048, 4096, 8192};
-constexpr int kVariants = 4;  // 0 = off route, 1..3 = IMMA BM 128 / 160 / 192
-constexpr int kBm[kVariants] = {0, 128, 160, 192};
+constexpr int kVariants = 2;  // 0 = off route, 1 = IMMA
 constexpr int kWarmup = 3;
 constexpr int kIters = 10;
 constexpr int kRepeats = 5;
@@ -64,7 +64,7 @@ struct Bufs {
     __half* deq = nullptr;
 };
 
-// One call of the variant: 0 = dequant + cuBLAS, else IMMA at kBm[v]. False = IMMA declined.
+// One call of the variant: 0 = dequant + cuBLAS, 1 = IMMA. False = IMMA declined.
 bool run_variant(int v, const Bufs& b, int M, int N, int K) {
     if (v == 0) {
         dequant_gpu(b.w, b.deq, QType::Q8_0, N, K, nullptr);
@@ -74,7 +74,7 @@ bool run_variant(int v, const Bufs& b, int M, int N, int K) {
         gemm(x, w, o, 1.0f, 0.0f, nullptr);
         return true;
     }
-    return mmq_q8_imma_gemm(b.w, b.x, b.out, M, N, K, nullptr, 0.0f, /*allow_splitk=*/false, kBm[v]);
+    return mmq_q8_imma_gemm(b.w, b.x, b.out, M, N, K, nullptr, 0.0f, /*allow_splitk=*/false);
 }
 
 // Median over kRepeats of the mean of kIters calls, ms; -1 = declined or CUDA error.
@@ -140,7 +140,7 @@ bool bench_q8_imma() {
         ok = ok && cudaMemcpy(b.x, hx.data(), hx.size() * 2, cudaMemcpyHostToDevice) == cudaSuccess;
     }
     printf(
-        "=== Q8_0 prefill GEMM: dequant + FP16-acc cuBLAS (off) vs IMMA BM 128/160/192, median of %d x %d "
+        "=== Q8_0 prefill GEMM: dequant + FP16-acc cuBLAS (off) vs IMMA, median of %d x %d "
         "===\n",
         kRepeats, kIters);
     // layer_ms[model][m][variant]
@@ -163,8 +163,8 @@ bool bench_q8_imma() {
                 all_measured = all_measured && t[v] > 0.0f;
                 layer_ms[mi][r][v] += static_cast<double>(t[v]) * s.per_layer;
             }
-            printf("q8imma model=%s shape=%s M=%d N=%d K=%d off=%.4f bm128=%.4f bm160=%.4f bm192=%.4f\n",
-                   s.model, s.name, M, s.N, s.K, t[0], t[1], t[2], t[3]);
+            printf("q8imma model=%s shape=%s M=%d N=%d K=%d off=%.4f imma=%.4f\n",
+                   s.model, s.name, M, s.N, s.K, t[0], t[1]);
         }
         // Planes are keyed by weight pointer: keep every weight alive so no pointer is reused.
         weights.push_back(b.w);
@@ -176,8 +176,8 @@ bool bench_q8_imma() {
     for (int mi = 0; mi < 2; ++mi)
         for (size_t r = 0; r < sizeof(kRows) / sizeof(kRows[0]); ++r) {
             const double* l = layer_ms[mi][r];
-            printf("layer model=%s M=%d off=%.4f bm128=%.4f bm160=%.4f bm192=%.4f\n",
-                   mi == 0 ? "Qwen3-8B" : "Qwen3-4B", kRows[r], l[0], l[1], l[2], l[3]);
+            printf("layer model=%s M=%d off=%.4f imma=%.4f\n",
+                   mi == 0 ? "Qwen3-8B" : "Qwen3-4B", kRows[r], l[0], l[1]);
         }
     cudaFree(b.x);
     cudaFree(b.out);

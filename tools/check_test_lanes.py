@@ -352,7 +352,9 @@ def main():
     # vs the numpy reference fixture, needs the Flash-Next checkpoint and a card.
     # 1172 -> 1173: MmqQ8Imma.TallTilesBitIdenticalToBm128 (test-quant): Q8_0 IMMA BM=160/192 vs 128
     # bit-exact (#2267); needs a card.
-    PINNED = 1173
+    # 1173 -> 1175: tests/test_mmq_q8_imma_tall.cu (1) -> test_mmq_q8_imma_pipe.cu (3, test-quant): BM=128
+    # pipeline kernel vs the pre-#2267 kernel bit-exact (hook + route), DISABLED timing; needs a card.
+    PINNED = 1175
 
     text = CMAKE.read_text()
     mods = module_sources(text)

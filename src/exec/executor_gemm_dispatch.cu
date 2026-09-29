@@ -659,7 +659,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             if (mmq_q8_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
                                  reinterpret_cast<__half*>(output.data), M, static_cast<int>(h.shape[0]),
                                  static_cast<int>(h.shape[1]), ctx.stream, ctx.beta,
-                                 /*allow_splitk=*/cur_decode_rows_, ctx.q8_imma_bm))
+                                 /*allow_splitk=*/cur_decode_rows_))
                 return;
         }
         if (ctx.q4k_imma_prefill && h.source_qtype == QType::Q4_K && imma_eligible) {

@@ -84,6 +84,11 @@ __global__ void mmq_imma_q5k_raw_kernel(const int8_t* __restrict__ X_s8, const _
                                         __half* __restrict__ out, int M, int N, int K,
                                         const int32_t* __restrict__ expert_offsets, size_t w_stride_blocks);
 
+// BM=128 Q8_0 plane kernel (mmq_q8_imma_pipe.cu): grid (ceil(N/kBN), ceil(rows/128), ne), launch-checked.
+void launch_q8_pipe(bool beta1, dim3 grid, cudaStream_t stream, const int8_t* xs8, const __half* xscale,
+                    const int8_t* ws8, const __half* wsc, __half* out, int M, int N, int K,
+                    const int32_t* d_offsets, size_t w_stride, size_t wsc_stride);
+
 // Q5_K raw kernel dynamic smem: A tile, qs + qh rows (32 B + 16 pad), 16-B headers, per-row A scale
 // and rowsum, (alpha, beta) pairs; kStages each.
 constexpr size_t q5k_smem_bytes(int BM) {

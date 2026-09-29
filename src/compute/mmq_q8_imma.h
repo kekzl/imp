@@ -26,13 +26,13 @@ namespace imp {
 // Dense Q8_0: out[M,N] = x·W^T (beta=0) or += (beta=1).
 // Declines: M < 2, N % 2, K % 64, beta ∉ {0,1}, capture-guarded miss.
 // allow_splitk=false: no M<=32 split-K, so a row matches its value at any M (prompt rows, #2152).
-// bm (gemm.q8_imma_bm): tile rows where BM=128 would run; 160 / 192 = 10 / 12 warps per CTA
-// (#2267), anything else 128. Every output keeps its k order and scale expression: bit-identical.
 bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
-                      cudaStream_t stream, float beta = 0.0f, bool allow_splitk = true, int bm = 128);
+                      cudaStream_t stream, float beta = 0.0f, bool allow_splitk = true);
 
-// Test hook: BM of the last Q8_0 plane launch at BM >= 128 (0 = none yet).
-int mmq_q8_imma_last_plane_bm();
+// Test hook (#2267): the BM=128 Q8_0 kernel on caller planes (gemm_common's layout): xs8 [M][K] s8,
+// xscale [M][K/32] half, ws8 [N][K] s8, wsc [N][K/32] (alpha, beta) half. M >= 1, N % 2 == 0, K % 64 == 0.
+bool mmq_q8_imma_plane128(const int8_t* xs8, const __half* xscale, const int8_t* ws8, const __half* wsc,
+                          __half* out, int M, int N, int K, bool beta1, cudaStream_t stream);
 
 // Dense Q4_K (new stack — distinct from the retired 2026-05 64x32 q4k_imma
 // kernel): same contract; K % 256 == 0 (Q4_K super-block).
