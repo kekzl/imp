@@ -129,7 +129,7 @@ public:
     std::size_t size() const noexcept;
 
     // True when a handler is registered for exactly `strategy`. Does not invoke it (no CUDA).
-    bool contains(const GemmStrategy& strategy) const noexcept;
+    [[nodiscard]] bool contains(const GemmStrategy& strategy) const noexcept;
 
 private:
     GemmKernelRegistry() = default;
