@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tempfile
 import time
 
 import httpx
@@ -28,34 +29,55 @@ MOCK_PORT = int(os.environ.get("IMP_MOCK_PORT", "9099"))
 HAS_MODEL = not SERVER_BIN
 
 
-def wait_for_server(url: str, timeout: float = 120.0):
-    """Block until the server's /health endpoint returns 200."""
+def child_exit_report(child, stderr_path, lines: int = 10) -> str:
+    """Exit code plus the last stderr lines of a dead server child."""
+    try:
+        with open(stderr_path, errors="replace") as f:
+            tail = "".join(f.readlines()[-lines:]).rstrip()
+    except OSError:
+        tail = "<stderr unavailable>"
+    return f"exit code {child.returncode}, last stderr lines:\n{tail}"
+
+
+def wait_for_server(url: str, timeout: float = 120.0, child=None, stderr_path=None):
+    """Block until the server's /health endpoint returns 200.
+
+    A dead `child` (subprocess.Popen) fails at once with its exit code and stderr tail.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        if child is not None and child.poll() is not None:
+            raise RuntimeError(
+                f"Server at {url} exited before becoming ready: "
+                + child_exit_report(child, stderr_path)
+            )
         try:
             r = httpx.get(f"{url}/health", timeout=5)
             if r.status_code == 200:
                 return
         except httpx.ConnectError:
             pass
-        time.sleep(0.5 if USE_MOCK else 2)
+        time.sleep(0.5 if USE_MOCK or child is not None else 2)
     raise TimeoutError(f"Server at {url} not ready after {timeout}s")
 
 
 # Session-scoped mock server (started once, shared across all tests)
 _mock_server = None
 _real_server = None
+_real_stderr = None
 
 
 def pytest_configure(config):
     """Start the server under test (mock or real binary) before collection."""
-    global _mock_server, _real_server, BASE_URL, MODEL
+    global _mock_server, _real_server, _real_stderr, BASE_URL, MODEL
     if SERVER_BIN:
         # No --model: the binary serves the validation surface and answers 503
-        # on anything that would need weights. stdout/stderr are inherited so a
-        # start-up failure is visible in the job log instead of a bare timeout.
+        # on anything that would need weights. stderr goes to a file so a dead
+        # child is reported with its last lines (wait_for_server), not as a timeout.
+        _real_stderr = tempfile.NamedTemporaryFile(prefix="imp-server-", suffix=".err")
         _real_server = subprocess.Popen(
-            [SERVER_BIN, "--host", "127.0.0.1", "--port", str(SERVER_PORT)]
+            [SERVER_BIN, "--host", "127.0.0.1", "--port", str(SERVER_PORT)],
+            stderr=_real_stderr,
         )
         BASE_URL = f"http://127.0.0.1:{SERVER_PORT}"
         # Any name: nothing resolves on a model-less server, and the tests that
@@ -90,7 +112,12 @@ def model():
 
 @pytest.fixture(scope="session")
 def client(base_url):
-    wait_for_server(base_url, timeout=120 if HAS_MODEL and not USE_MOCK else 10)
+    wait_for_server(
+        base_url,
+        timeout=120 if HAS_MODEL and not USE_MOCK else 10,
+        child=_real_server,
+        stderr_path=_real_stderr.name if _real_stderr else None,
+    )
     with httpx.Client(base_url=base_url, timeout=60.0) as c:
         yield c
 
