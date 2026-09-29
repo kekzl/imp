@@ -377,6 +377,9 @@ public:
     uint64_t prefix_cache_evictions() const noexcept {
         return kv_manager_ ? kv_manager_->cached_block_evictions() : 0;
     }
+    const KVHostSpill* kv_host_spill() const noexcept {
+        return kv_manager_ ? kv_manager_->host_spill() : nullptr;
+    }
     Model* model() const noexcept { return model_.get(); }
     // Effective context window allocated by the engine (VRAM-aware auto-sizing
     // in init_compute_max_seq_len_), may be < the model's declared max context.
@@ -783,6 +786,17 @@ private:
     // and accumulate into req.embedding_out (host, fp32). Synchronizes the
     // stream (one ~20KB D2H per chunk).
     void embed_accumulate_chunk_(Request& req, int chunk_len, cudaStream_t stream);
+
+    // Prompt logprobs (#2207) for the chunk hidden_ holds, rows [offset, offset+chunk_len) of the
+    // prompt, into req.prompt_lp (host). Call after every read of the chunk's logits; synchronizes.
+    void prompt_logprobs_chunk_(Request& req, int offset, int chunk_len, cudaStream_t stream);
+    // Device scratch sized to the largest chunk: rows x (12 + 8 * top_n) bytes.
+    struct PromptLpScratch {
+        int rows = 0;
+        int top_n = 0;
+        VramOwned<int32_t> targets, rank, top_ids;
+        VramOwned<float> lp, top_lp;
+    } prompt_lp_scratch_;
 
     // ── Pre-allocated prefill metadata (eliminates per-request cudaMalloc) ──
     void* prefill_pool_ = nullptr;

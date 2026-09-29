@@ -197,7 +197,7 @@ dtype = "auto"  # auto (default) | fp16 | fp8 | int8 | int4 | nvfp4 | mxfp4
 
 | Dtype | Default behaviour | Notes |
 |---|---|---|
-| `auto` | FP16, upgrades to FP8 E4M3 for models declaring `kv_cache_quant_algo=FP8` on an allowlisted arch family (Qwen3 dense + Qwen3 MoE) | ~768 MiB KV VRAM saved on a 3.9k-token context: Qwen3-14B PPL 13.95 -> 14.10 (+1.07%), Qwen3-30B-A3B ~16.20 -> ~15.99 (neutral), both coherent |
+| `auto` | FP16, upgrades to FP8 E4M3 for models declaring `kv_cache_quant_algo=FP8` on an allowlisted arch family (Qwen3 dense + Qwen3 MoE); hint-less checkpoints (every GGUF): Qwen3 MoE only, Qwen3 dense stays FP16 (#2208: FP8 KV flipped Qwen3-8B-Q8_0 greedy output) | ~768 MiB KV VRAM saved on a 3.9k-token context: Qwen3-14B PPL 13.95 -> 14.10 (+1.07%), Qwen3-30B-A3B ~16.20 -> ~15.99 (neutral), both coherent |
 | `fp16` | forced FP16 (`dtype = "fp16"`), opts out of the `auto` FP8 upgrade | |
 | `fp8` | forced FP8 E4M3 | default flipped to FP16 in PR #51 (FP8 silently broke Llama, Mistral, DeepSeek at first decode); verified coherent on Qwen3 dense, Qwen3.5/3.6 GDN, Llama-3.2 (warmup-calibration bug fixed in PR #89), Gemma-4 (dual-head_dim carve-out removed in PR #91); opt-in beyond the `auto` allowlist |
 | `int8` / `int4` | forced INT8 (dp4a attention) / INT4 | `int4` is VRAM pressure only: coherent, ~22% decode regression at 20K context |
