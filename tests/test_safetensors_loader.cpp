@@ -14,7 +14,9 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace imp {
@@ -401,44 +403,128 @@ TEST(SafeTensorsHostileHeader, WellFormedF32TensorStillLoads) {
         << "The tensor must reach the map. Captured: " << captured;
 }
 
-// #2196: an AWQ checkpoint has no dequant kernel; loading it as wire dtype gives wrong output.
-TEST(SafeTensorsAwqRefusal, AwqCheckpointIsRefusedWithTheDetectedConfig) {
+// AWQ checkpoints (#2196 refusal, #2205 dequant): one llama layer, q_proj AWQ-packed at group 32.
+struct AwqTensor {
+    std::string name, dtype;
+    std::vector<int64_t> shape;
+    size_t bytes;
+};
+
+std::vector<AwqTensor> awq_q_proj(int64_t K, int64_t N, int64_t groups) {
+    return {{"model.embed_tokens.weight", "F16", {8, 32}, 8 * 32 * 2},
+            {"model.layers.0.self_attn.q_proj.qweight", "I32", {K, N / 8}, size_t(K * N / 8 * 4)},
+            {"model.layers.0.self_attn.q_proj.qzeros", "I32", {groups, N / 8}, size_t(groups * N / 8 * 4)},
+            {"model.layers.0.self_attn.q_proj.scales", "F16", {groups, N}, size_t(groups * N * 2)}};
+}
+
+std::filesystem::path write_awq_checkpoint(const std::string& tag, const std::string& quant_config,
+                                           const std::vector<AwqTensor>& tensors) {
     namespace fs = std::filesystem;
-    const fs::path root = fs::temp_directory_path() / "imp_awq_refusal_test";
+    const fs::path root = fs::temp_directory_path() / ("imp_awq_test_" + tag);
     fs::remove_all(root);
     fs::create_directories(root);
-    {
-        const std::string header =
-            R"({"model.embed_tokens.weight":{"dtype":"F16","shape":[4,2],"data_offsets":[0,16]}})";
-        std::ofstream st(root / "model.safetensors", std::ios::binary);
-        const uint64_t hdr = header.size();
-        st.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
-        st << header;
-        const std::vector<char> data(16, 0);
-        st.write(data.data(), static_cast<std::streamsize>(data.size()));
+    std::string header = "{";
+    size_t off = 0;
+    for (const auto& t : tensors) {
+        std::string shape;
+        for (size_t i = 0; i < t.shape.size(); ++i)
+            shape += (i ? "," : "") + std::to_string(t.shape[i]);
+        header += (off || header.size() > 1 ? "," : "") + std::string("\"") + t.name + "\":{\"dtype\":\"" + t.dtype +
+                  "\",\"shape\":[" + shape + "],\"data_offsets\":[" + std::to_string(off) + "," +
+                  std::to_string(off + t.bytes) + "]}";
+        off += t.bytes;
     }
-    {
-        std::ofstream cfg(root / "config.json");
-        cfg << R"({"model_type": "llama", "num_hidden_layers": 1, "hidden_size": 8,
-                   "num_attention_heads": 1, "vocab_size": 8,
-                   "quantization_config": {"quant_method": "awq", "bits": 4, "group_size": 64,
-                                           "zero_point": true, "version": "gemm"}})";
-    }
+    header += "}";
+    std::ofstream st(root / "model.safetensors", std::ios::binary);
+    const uint64_t hdr = header.size();
+    st.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+    st << header;
+    const std::vector<char> data(off, 0);
+    st.write(data.data(), static_cast<std::streamsize>(data.size()));
+    std::ofstream cfg(root / "config.json");
+    cfg << R"({"model_type": "llama", "num_hidden_layers": 1, "hidden_size": 32,
+               "num_attention_heads": 1, "vocab_size": 8, "quantization_config": )"
+        << quant_config << "}";
+    return root;
+}
 
+std::pair<std::unique_ptr<Model>, std::string> load_capturing(const std::filesystem::path& root) {
     const LogLevel saved = log_get_level();
-    log_set_level(LogLevel::WARN);
+    log_set_level(LogLevel::INFO);
+    testing::internal::CaptureStdout();
     testing::internal::CaptureStderr();
     auto model = load_safetensors(root.string());
-    const std::string log = testing::internal::GetCapturedStderr();
+    std::string log = testing::internal::GetCapturedStderr();
+    log += testing::internal::GetCapturedStdout();
     log_set_level(saved);
+    return {std::move(model), std::move(log)};
+}
 
-    EXPECT_EQ(model, nullptr) << log;
-    EXPECT_NE(log.find("AWQ"), std::string::npos) << log;
-    EXPECT_NE(log.find("bits=4 group_size=64 zero_point=true version=gemm"), std::string::npos) << log;
-    EXPECT_NE(log.find("not supported"), std::string::npos) << log;
-    EXPECT_NE(log.find("#2205"), std::string::npos) << log;
+// #2196: every AWQ variant without a dequant stays refused, with the detected config in the log.
+TEST(SafeTensorsAwq, UnsupportedVariantsAreRefusedWithTheDetectedConfig) {
+    const struct {
+        const char* qc;
+        const char* detected;
+    } cases[] = {
+        {R"({"quant_method": "awq", "bits": 4, "group_size": 32, "zero_point": true, "version": "gemv"})",
+         "bits=4 group_size=32 zero_point=true version=gemv"},
+        {R"({"quant_method": "awq", "bits": 3, "group_size": 32, "zero_point": true, "version": "gemm"})",
+         "bits=3 group_size=32 zero_point=true version=gemm"},
+        {R"({"quant_method": "awq", "bits": 4, "group_size": 32, "zero_point": false, "version": "gemm"})",
+         "bits=4 group_size=32 zero_point=false version=gemm"},
+        {R"({"quant_method": "awq", "bits": 4, "group_size": 32, "zero_point": true, "version": "marlin"})",
+         "bits=4 group_size=32 zero_point=true version=marlin"},
+    };
+    for (const auto& c : cases) {
+        const auto root = write_awq_checkpoint("refuse", c.qc, awq_q_proj(32, 32, 1));
+        auto [model, log] = load_capturing(root);
+        EXPECT_EQ(model, nullptr) << c.detected << "\n" << log;
+        EXPECT_NE(log.find(c.detected), std::string::npos) << log;
+        EXPECT_NE(log.find("AWQ variant not supported"), std::string::npos) << log;
+        EXPECT_NE(log.find("#2205"), std::string::npos) << log;
+        std::filesystem::remove_all(root);
+    }
+}
 
-    fs::remove_all(root);
+// #2205: 4-bit GEMM with zero points loads; q_proj is marked for dequant_awq4 at upload.
+TEST(SafeTensorsAwq, Gemm4BitZeroPointLoadsAndMarksTheProjection) {
+    for (const char* version : {"\"gemm\"", "\"GEMM\""}) {
+        const std::string qc = std::string(R"({"quant_method": "awq", "bits": 4, "group_size": 32, )") +
+                               R"("zero_point": true, "version": )" + version + "}";
+        const auto root = write_awq_checkpoint("accept", qc, awq_q_proj(64, 32, 2));
+        auto [model, log] = load_capturing(root);
+        ASSERT_NE(model, nullptr) << log;
+        EXPECT_TRUE(model->config().is_awq_prequant);
+        const auto& q = model->layers_.at(0).gptq_q;
+        EXPECT_TRUE(q.awq_gemm);
+        EXPECT_EQ(q.bits, 4);
+        EXPECT_EQ(q.group_size, 32);
+        EXPECT_FALSE(model->layers_.at(0).gptq_k.awq_gemm);
+        EXPECT_NE(log.find("AWQ GEMM 4-bit: 1 projections, group_size=32"), std::string::npos) << log;
+        std::filesystem::remove_all(root);
+    }
+}
+
+// A malformed or unmapped AWQ tensor would dequantize garbage or be dropped: refuse instead.
+TEST(SafeTensorsAwq, BadShapeOrUnmappedQweightIsRefused) {
+    const std::string qc = R"({"quant_method": "awq", "bits": 4, "group_size": 32, "zero_point": true, "version": "gemm"})";
+    auto bad = awq_q_proj(64, 32, 2);
+    bad[3].shape = {2, 16};
+    bad[3].bytes = 2 * 16 * 2;
+    auto root = write_awq_checkpoint("badshape", qc, bad);
+    auto [m1, log1] = load_capturing(root);
+    EXPECT_EQ(m1, nullptr) << log1;
+    EXPECT_NE(log1.find("layer 0: scales is not [K/group_size, N]"), std::string::npos) << log1;
+    std::filesystem::remove_all(root);
+
+    auto extra = awq_q_proj(64, 32, 2);
+    extra.push_back({"model.layers.0.mlp.experts.0.gate_proj.qweight", "I32", {64, 4}, 64 * 4 * 4});
+    root = write_awq_checkpoint("unmapped", qc, extra);
+    auto [m2, log2] = load_capturing(root);
+    EXPECT_EQ(m2, nullptr) << log2;
+    EXPECT_NE(log2.find("2 .qweight tensors, 1 on a q/k/v/o/gate/up/down projection slot"), std::string::npos)
+        << log2;
+    std::filesystem::remove_all(root);
 }
 
 }  // namespace

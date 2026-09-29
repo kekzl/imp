@@ -23,10 +23,22 @@ numbers [`PERF.md`](PERF.md) and [`BENCHMARKS.md`](BENCHMARKS.md), loader/GEMM i
 | INT4 | 4.0 | runtime | KV cache (long-ctx, opt-in) |
 | NVFP4 | 4.0 | SafeTensors | weights (decode + prefill), KV cache |
 | MXFP4 | 4.5 | GGUF | weights (decode + prefill attention) |
+| AWQ 4-bit GEMM | 4.0 on disk, 16 in VRAM | SafeTensors | dequantized to FP16 at load, then served as FP16 ([below](#awq-safetensors)) |
 
 GGUF is mmap'd and uploaded as-is; `*.K` quants store block scales in the format the dp4a
 kernels expect. NVFP4 prequant arrives packed with FP8 E4M3 micro-scales (per-16) and an FP32
 tensor scale; imp registers it directly into the NVFP4 decode cache and CUTLASS GEMM path, no re-quantization.
+
+## AWQ SafeTensors
+
+| `quantization_config` | Result |
+|---|---|
+| `quant_method: awq`, `bits: 4`, `zero_point: true`, `version: gemm` (or absent) | loads; every q/k/v/o/gate/up/down `qweight` dequantized to FP16 at upload, `w = (q - z) * s` in AutoAWQ's packing order |
+| GEMV, Marlin, `bits != 4`, `zero_point: false` | refused at load, log names the detected variant |
+| a `.qweight` outside those seven projections, or a shape that is not `[K, N/8]` / `[K/g, N/8]` / `[K/g, N]` | refused at load |
+
+- VRAM holds FP16 weights: 4x the checkpoint's weight bytes. For 4-bit weights in VRAM use an NVFP4 export.
+- Checked: CPU reference bit-exact vs hand-packed tensors (`tests/test_dequant_awq.cpp`), kernel vs reference (`tests/test_dequant_awq_gpu.cu`), PPL and first token vs the FP16 original (`scripts/accept_2205.sh`).
 
 ## NVFP4 prequant (SafeTensors)
 

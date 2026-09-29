@@ -123,7 +123,7 @@ struct HFConfigLoader {
 
     // AWQ (Activation-aware Weight Quantization) config. Sourced from
     // `quantization_config` in `config.json` or a separate `quant_config.json`.
-    // Detection-only today; imp does not yet have an AWQ dequant kernel.
+    // 4-bit GEMM with zero points dequantizes (#2205); load_safetensors refuses the rest.
     struct AWQConfig {
         int bits = 4;            // typically 4
         int group_size = 128;    // typical AWQ group_size
