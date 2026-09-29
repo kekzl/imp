@@ -1111,6 +1111,7 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e_greedy_lock.cpp
         tests/test_continuous_batching.cpp
         tests/test_scheduler.cpp
+        tests/test_scheduler_prefix_bypass.cpp
         tests/test_tensor_kind_coverage.cpp
         tests/test_tokenizer_compat.cpp
         tests/test_tokenizer_qwen38.cpp
