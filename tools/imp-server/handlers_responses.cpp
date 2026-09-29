@@ -124,6 +124,9 @@ void send_response_not_found(httplib::Response& res, const std::string& id, cons
 // Resolves `store` and `previous_response_id` in place, before the transform and before any model
 // lookup (a model-less server answers the same). False: `res` holds the 400/404.
 bool resolve_store_fields(json& body, ServerState& state, httplib::Response& res, RspStoreCtx& sc) {
+    // Absent `store` means true (OpenAI default); on a disabled store it means stateless.
+    const bool enabled = state.response_store.enabled();
+    sc.store = enabled;
     if (body.contains("store")) {
         if (!body["store"].is_boolean()) {
             send_json_error(res, 400, "invalid_request_error", "\"store\" must be a boolean", "store");
@@ -132,7 +135,7 @@ bool resolve_store_fields(json& body, ServerState& state, httplib::Response& res
         sc.store = body["store"].get<bool>();
         body.erase("store");
     }
-    if (sc.store && !state.response_store.enabled()) {
+    if (sc.store && !enabled) {
         send_json_error(res, 400, "invalid_request_error",
                         "store=true is disabled on this server (a --responses-store-* limit is 0); "
                         "use store=false and resend the transcript in `input`",

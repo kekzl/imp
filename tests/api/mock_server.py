@@ -839,9 +839,11 @@ class MockHandler(BaseHTTPRequestHandler):
         if store is not None and not isinstance(store, bool):
             self._rs_error(400, '"store" must be a boolean', "store")
             return
-        store = bool(store)
         cfg = self.config
-        if store and not (cfg.rs_ttl > 0 and cfg.rs_max_entries > 0 and cfg.rs_max_bytes > 0):
+        enabled = cfg.rs_ttl > 0 and cfg.rs_max_entries > 0 and cfg.rs_max_bytes > 0
+        # Absent means true (OpenAI default); on a disabled store it means stateless.
+        store = enabled if store is None else store
+        if store and not enabled:
             self._rs_error(400, "store=true is disabled on this server", "store")
             return
         new_input = body.get("input")

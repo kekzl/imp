@@ -217,11 +217,11 @@ No video. `temporal_patch_size` is parsed but used only as a still-image repeat.
 | stored | the conversation input as the model saw it (earlier turns flattened), the output items (reasoning, message, function_call), the response object |
 | `previous_response_id` | stored input + stored output + the new `input`, then the normal transform: the same prompt a client resending the transcript with `store: false` builds. Reasoning items are skipped on replay, as in a stateless resend |
 | not carried over | `instructions`, `tools`, sampling fields: send them on every turn (OpenAI does not carry `instructions` either) |
-| `store` absent | not stored. OpenAI defaults to `true`; imp keeps the stateless default so existing clients hold no server memory |
+| `store` absent | stored, same as `store: true` (OpenAI default), so Agents SDK clients can use `previous_response_id` without setting it. On a disabled store: stateless, no error |
 | `store: false` | stateless, as before; `previous_response_id` still works against a stored predecessor |
 | lifetime | `--responses-store-ttl` s from insertion (default 3600); a hit refreshes LRU order, not the TTL |
 | caps | `--responses-store-max-entries` (default 1000) and `--responses-store-max-mib` (default 256); the least recently used entry goes first. An entry larger than the byte cap alone is not stored (logged) |
-| off | any `--responses-store-*` flag at 0: `store: true` answers 400 (`param: "store"`) |
+| off | any `--responses-store-*` flag at 0 (e.g. `--responses-store-max-entries 0`): nothing is stored, explicit `store: true` answers 400 (`param: "store"`) |
 | unknown or expired id | 404, `code: "response_not_found"`, `param: "previous_response_id"` |
 | `GET /v1/responses/{id}` | the stored response object; 404 `response_not_found` otherwise |
 | `DELETE /v1/responses/{id}` | `{"id", "object": "response.deleted", "deleted": true}`; 404 otherwise |

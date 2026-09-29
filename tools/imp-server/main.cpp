@@ -535,7 +535,7 @@ int main(int argc, char** argv) {
             printf("Responses store: ttl %llds, max %zu entries, %zu MiB (LRU)\n",
                    static_cast<long long>(lim.ttl_seconds), lim.max_entries, lim.max_bytes >> 20);
         else
-            printf("Responses store: off (store=true answers 400)\n");
+            printf("Responses store: off (explicit store=true answers 400)\n");
     }
     printf("Server listening on http://%s:%d\n", args.host.c_str(), args.port);
     printf("Endpoints:\n");

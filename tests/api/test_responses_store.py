@@ -136,6 +136,10 @@ class TestStoreFlags:
             r = httpx.post(f"http://127.0.0.1:{port}/v1/responses", timeout=10,
                            json={"model": model, "input": "x", "store": False, "max_output_tokens": 4})
             assert r.status_code != 400, r.text
+            # absent `store` on a disabled store: stateless, not refused
+            r = httpx.post(f"http://127.0.0.1:{port}/v1/responses", timeout=10,
+                           json={"model": model, "input": "x", "max_output_tokens": 4})
+            assert r.status_code != 400, r.text
         finally:
             _stop(proc)
 
@@ -226,9 +230,18 @@ class TestStoreMock:
         cont = _ask(c, model, input="y", previous_response_id=r["id"])
         assert cont.status_code == 404
         assert _err(cont)["code"] == "response_not_found"
-        # absent `store` is not stored either (imp default, unlike OpenAI's)
+
+    def test_absent_store_is_stored_and_continuable(self, own_mock, model):
+        # OpenAI default: no `store` field means store=true (Agents SDK sends none).
+        c = own_mock()
         r = _ask(c, model, input="x").json()
-        assert c.get(f"/v1/responses/{r['id']}").status_code == 404
+        assert r["store"] is True
+        got = c.get(f"/v1/responses/{r['id']}")
+        assert got.status_code == 200, got.text
+        assert got.json()["output"] == r["output"]
+        cont = _ask(c, model, input="y", previous_response_id=r["id"])
+        assert cont.status_code == 200, cont.text
+        assert cont.json()["previous_response_id"] == r["id"]
 
     def test_ttl_expiry_is_404(self, own_mock, model):
         c = own_mock(responses_store_ttl=0.3)
