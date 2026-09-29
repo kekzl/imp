@@ -835,8 +835,10 @@ private:
 
     // Pre-allocated sampling result buffers (avoids cudaMalloc/cudaFree per token).
     void apply_row_filters_(float* lp, int vocab, const InferenceState& state, cudaStream_t stream);
+    // nullptr only for an empty list; alloc or upload failure throws (#2313).
     const int32_t* banned_cache_(const InferenceState& state, cudaStream_t stream);
-    // Flushes return the launch status; != cudaSuccess = those rows hold stale tokens (#2310).
+    // Flushes return the args-upload or launch status; != cudaSuccess = those rows
+    // hold stale tokens (#2310, #2313).
     [[nodiscard]] cudaError_t flush_pending_topk_rows_(cudaStream_t stream);
     // Row-batched top-k/top-p staging: sample_single_from_logits_async stashes
     // eligible rows here instead of launching; collect_sampled_tokens uploads
@@ -851,7 +853,7 @@ private:
     // Flush order in the collectors is penalties -> greedy -> top-k, preserving
     // each row's own penalties-before-sampler order on the single stream.
     [[nodiscard]] cudaError_t flush_pending_greedy_rows_(cudaStream_t stream);
-    void flush_pending_penalty_rows_(cudaStream_t stream);
+    [[nodiscard]] cudaError_t flush_pending_penalty_rows_(cudaStream_t stream);
     PinnedBuffer h_greedy_args_;              // pinned, 2 x sample_slots_ (parity halves)
     GreedyRowArgs* d_greedy_args_ = nullptr;  // device mirror
     int n_pending_greedy_rows_ = 0;

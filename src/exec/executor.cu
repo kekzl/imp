@@ -164,8 +164,10 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
         for (int bi = 0; bi < state.n_banned_tokens; bi++) {
             int32_t tid = state.banned_tokens[bi];
             if (tid >= 0 && tid < vocab_size) {
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(logits_ptr + tid, &neg_inf, sizeof(float),
-                                                   cudaMemcpyHostToDevice, stream));
+                // Failed ban copy leaves the token samplable: throw (#2313).
+                cuda_call_or_throw(cudaMemcpyAsync(logits_ptr + tid, &neg_inf, sizeof(float),
+                                                   cudaMemcpyHostToDevice, stream),
+                                   "forward ban copy");
             }
         }
     }
