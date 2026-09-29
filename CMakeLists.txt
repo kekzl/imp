@@ -931,6 +931,9 @@ if(IMP_BUILD_TESTS)
         # The serving metadata pool's byte layout (invariant I2): every region
         # 256-aligned, disjoint and inside the one allocation the paths share.
         tests/test_serving_metadata_layout.cpp
+        # upload_weight's one traits-templated staging path vs the per-format uploaders it
+        # replaced (#2212): host bytes, alloc/copy/free order, result tensor, on a fake device.
+        tests/test_weight_upload_staging.cpp
     )
     if(IMP_BUILD_SERVER)
         # Anthropic /v1/messages transform tests reuse anthropic.cpp (json-only deps).
