@@ -8,11 +8,16 @@
 # Prompts are unique per request so the prefix cache doesn't turn the sweep into a cache bench.
 # Usage: serving_kpi.py --url <url> --levels 1,8,32 --max-tokens 300 [--requests-per-level N]
 # [--prompt-tokens 0] [--slo-ttft-ms 500] [--slo-tpot-ms 50] [--ignore-eos]
-# [--endpoint chat|completions] [--no-power] [--process-workers] [--json FILE] [--md-out FILE] [--tag x].
+# [--endpoint chat|completions] [--no-power] [--process-workers] [--json FILE] [--md-out FILE] [--tag x]
+# [--seed N] [--brief].
+# --seed N: prompt content (question, filler offset) drawn from Random(N, level, request), so two runs
+# send the same prompt set. --brief: compact table (TTFT/ITL/E2E p50/p99, tok/s, req/s, errors), the
+# format of `make bench-serve` (scripts/bench_serve.sh).
 import argparse
 import json
 import math
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -253,13 +258,18 @@ class Sampler(threading.Thread):
 
 # ---------------------------------------------------------------- client
 
-def make_prompt(tag, level, i, prompt_tokens):
+def make_prompt(tag, level, i, prompt_tokens, seed=None):
     head = f"[{tag}-c{level}-r{i}] "
+    if seed is None:
+        off, q = i, QUESTIONS[i % len(QUESTIONS)]
+    else:
+        rng = random.Random(f"{seed}:{level}:{i}")
+        off, q = rng.randrange(len(FILLER)), rng.choice(QUESTIONS)
     fill = ""
     if prompt_tokens > 0:
         n = max(1, prompt_tokens // 20)
-        fill = " ".join(FILLER[(i + k) % len(FILLER)] for k in range(n)) + " "
-    return head + fill + QUESTIONS[i % len(QUESTIONS)]
+        fill = " ".join(FILLER[(off + k) % len(FILLER)] for k in range(n)) + " "
+    return head + fill + q
 
 
 def consume_sse(lines, rec, clock=time.perf_counter):
@@ -292,7 +302,7 @@ def consume_sse(lines, rec, clock=time.perf_counter):
 
 
 def one_request(args, level, i):
-    prompt = make_prompt(args.tag, level, i, args.prompt_tokens)
+    prompt = make_prompt(args.tag, level, i, args.prompt_tokens, args.seed)
     extra = {"ignore_eos": True} if args.ignore_eos else {}
     if args.endpoint == "chat":
         path = "/v1/chat/completions"
@@ -427,6 +437,25 @@ def markdown(results, args):
     return "\n".join(lines)
 
 
+def brief_markdown(results):
+    """One column per level: the KPI set of `make bench-serve`, p50 / p99 only."""
+    def pp(sec, key, nd):
+        return lambda r: " / ".join(fmt(r[sec][key][p], nd) for p in ("p50", "p99"))
+
+    rows = [
+        ("TTFT p50 / p99 ms", pp("client", "ttft_ms", 0)),
+        ("ITL p50 / p99 ms", pp("client", "itl_ms", 1)),
+        ("E2E p50 / p99 s", pp("client", "e2e_s", 2)),
+        ("output tok/s", lambda r: fmt(r["client"]["output_tok_s"], 1)),
+        ("req/s", lambda r: fmt(r["client"]["req_s"], 2)),
+        ("errors", lambda r: str(r["client"]["err"])),
+    ]
+    head = "| KPI | " + " | ".join(f"c={r['concurrency']}" for r in results) + " |"
+    sep = "|---|" + "|".join("---" for _ in results) + "|"
+    return "\n".join([head, sep] + [f"| {label} | " + " | ".join(fn(r) for r in results) + " |"
+                                    for label, fn in rows])
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--url", default="http://127.0.0.1:8080")
@@ -445,6 +474,9 @@ def main():
     ap.add_argument("--no-power", action="store_true")
     ap.add_argument("--process-workers", action="store_true",
                     help="one OS process per concurrent stream instead of a thread")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="draw prompt content from Random(seed, level, request): same set every run")
+    ap.add_argument("--brief", action="store_true", help="print the compact bench-serve table")
     ap.add_argument("--tag", default=f"kpi{int(time.time()) % 100000}")
     ap.add_argument("--json", default="")
     ap.add_argument("--md-out", default="", help="write the markdown table to this file")
@@ -483,7 +515,7 @@ def main():
         time.sleep(2)
     sampler.stop()
 
-    md = markdown(results, args)
+    md = brief_markdown(results) if args.brief else markdown(results, args)
     print(md)
     if args.md_out:
         with open(args.md_out, "w") as f:
