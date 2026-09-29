@@ -303,10 +303,10 @@ struct Request {
 
     int context_len() const { return static_cast<int>(input_tokens.size() + output_tokens.size()); }
     // Prefix-cache reuse allowed: an image joins only via its content hash (every image token
-    // shares one id); direct mode (#2198) never reuses.
+    // shares one id); direct mode (#2198) never reuses; embeddings mean-pool every input row (#2245).
     bool prefix_reuse_allowed() const {
         const bool has_image = image || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
-        return (!has_image || vision_content_hash != 0) && !bypass_prefix_cache;
+        return (!has_image || vision_content_hash != 0) && !bypass_prefix_cache && !embedding_request;
     }
 
     // Deliberately LAST rather than next to `status`: Request is touched every decode step, so
