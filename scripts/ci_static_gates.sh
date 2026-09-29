@@ -66,6 +66,7 @@ if want gpulock; then
     echo "== GPU lock / image tag =="
     run "gpu_lock.sh acquire/release/stale/run"  bash tests/test_gpu_lock.sh
     run "image_tag.sh tag/tree/check"            bash tests/test_image_tag.sh
+    run "verify-ab resolves base sha once"       bash tests/test_verify_ab_sha_once.sh
 fi
 
 # Nothing throws across the C ABI: every `ImpError imp_*()` body in src/api/
