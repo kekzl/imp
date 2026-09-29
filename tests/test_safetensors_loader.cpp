@@ -442,13 +442,20 @@ TEST(SafeTensorsAwqRefusal, AwqCheckpointIsRefusedWithTheDetectedConfig) {
 }
 
 // #2249: one GPTQ q_proj (K = N = 8, one group) with the given qzeros shape and quantization_config.
-static std::string load_gptq_dir(int qz0, int qz1, const std::string& qc, bool* loaded) {
+static std::string load_gptq_dir(int qz0, int qz1, const std::string& qc, bool* loaded, bool g_idx = false) {
     namespace fs = std::filesystem;
     const fs::path root = fs::temp_directory_path() / "imp_gptq_loader_test";
     fs::remove_all(root);
     fs::create_directories(root);
     const int qz_end = 160 + qz0 * qz1 * 4;
     {
+        // g_idx: K = 8 INT32 zeros (all columns in group 0), appended after scales.
+        const std::string gi = g_idx
+                                   ? R"(,"model.layers.0.self_attn.q_proj.g_idx":{"dtype":"I32","shape":[8],)"
+                                     R"("data_offsets":[)" +
+                                         std::to_string(qz_end + 16) + "," + std::to_string(qz_end + 48) +
+                                         "]}"
+                                   : std::string();
         const std::string header =
             R"({"model.embed_tokens.weight":{"dtype":"F16","shape":[8,8],"data_offsets":[0,128]},)"
             R"("model.layers.0.self_attn.q_proj.qweight":{"dtype":"I32","shape":[1,8],"data_offsets":[128,160]},)"
@@ -457,12 +464,12 @@ static std::string load_gptq_dir(int qz0, int qz1, const std::string& qc, bool* 
             std::to_string(qz_end) +
             R"(]},)"
             R"("model.layers.0.self_attn.q_proj.scales":{"dtype":"F16","shape":[1,8],"data_offsets":[)" +
-            std::to_string(qz_end) + "," + std::to_string(qz_end + 16) + "]}}";
+            std::to_string(qz_end) + "," + std::to_string(qz_end + 16) + "]}" + gi + "}";
         std::ofstream st(root / "model.safetensors", std::ios::binary);
         const uint64_t hdr = header.size();
         st.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
         st << header;
-        const std::vector<char> data(static_cast<size_t>(qz_end) + 16, 0);
+        const std::vector<char> data(static_cast<size_t>(qz_end) + (g_idx ? 48 : 16), 0);
         st.write(data.data(), static_cast<std::streamsize>(data.size()));
     }
     {
@@ -520,6 +527,30 @@ TEST(SafeTensorsGptq, AutoGptqLayoutIsAcceptedWithV1AndV2Offsets) {
                         &loaded);
     EXPECT_NE(log.find("GPTQ 4-bit: 1 projections"), std::string::npos) << log;
     EXPECT_NE(log.find("zero offset +0"), std::string::npos) << log;
+}
+
+TEST(SafeTensorsGptq, DescActWithoutGIdxIsRefused) {
+    // #2253: without g_idx the dequant runs sequential groups, wrong weights on act-order exports.
+    bool loaded = true;
+    const std::string log = load_gptq_dir(
+        1, 1, R"({"quant_method": "gptq", "bits": 4, "group_size": 128, "desc_act": true})", &loaded);
+    EXPECT_FALSE(loaded) << log;
+    EXPECT_NE(log.find("layer 0 q_proj: desc_act=true but no g_idx tensor"), std::string::npos) << log;
+    EXPECT_EQ(log.find("GPTQ 4-bit: 1 projections"), std::string::npos) << log;
+}
+
+TEST(SafeTensorsGptq, DescActFalseWithoutGIdxAndDescActWithGIdxStillValidate) {
+    bool loaded = false;
+    std::string log = load_gptq_dir(
+        1, 1, R"({"quant_method": "gptq", "bits": 4, "group_size": 128, "desc_act": false})", &loaded);
+    EXPECT_NE(log.find("GPTQ 4-bit: 1 projections"), std::string::npos) << log;
+    EXPECT_EQ(log.find("no g_idx tensor"), std::string::npos) << log;
+
+    log = load_gptq_dir(1, 1, R"({"quant_method": "gptq", "bits": 4, "group_size": 128, "desc_act": true})",
+                        &loaded, /*g_idx=*/true);
+    EXPECT_NE(log.find("GPTQ 4-bit: 1 projections"), std::string::npos) << log;
+    EXPECT_NE(log.find("desc_act=true"), std::string::npos) << log;
+    EXPECT_EQ(log.find("no g_idx tensor"), std::string::npos) << log;
 }
 
 }  // namespace

@@ -1110,24 +1110,16 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
     if (gptq.g_idx.data) {
         size_t gi_bytes = static_cast<size_t>(K) * sizeof(int32_t);
         if (checked_cuda_malloc(reinterpret_cast<void**>(&d_g_idx), gi_bytes, stream) != cudaSuccess || !d_g_idx) {
-            IMP_LOG_WARN("GPTQ: failed to allocate g_idx, falling back to sequential groups");
-        } else {
-            h2d_copy(d_g_idx, gptq.g_idx.data, gi_bytes, stream);
+            // #2253: no sequential-group fallback, it dequantizes wrong weights.
+            IMP_LOG_ERROR("GPTQ: failed to allocate g_idx (%zu bytes)", gi_bytes);
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_scales, stream));
+            return false;
         }
-    } else if (gptq.desc_act) {
-        // Activation-reordered model export but no g_idx tensor → kernel will
-        // run sequential grouping, which silently produces wrong outputs. Warn
-        // once per process so this isn't lost in the per-layer upload spam.
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
-            IMP_LOG_WARN(
-                "GPTQ: config declares desc_act=true but g_idx tensor is "
-                "absent. Dequant will use sequential grouping; if the model "
-                "was exported with activation reordering, outputs will be "
-                "incorrect. (Logged once.)");
-        }
+        h2d_copy(d_g_idx, gptq.g_idx.data, gi_bytes, stream);
     }
+    // desc_act=true without g_idx is refused at load (gptq_refuses, #2253).
 
     // 5. Allocate FP16 output [N, K]
     size_t out_bytes = static_cast<size_t>(N) * K * sizeof(half);
