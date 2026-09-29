@@ -1,6 +1,6 @@
 #!/bin/bash
-# Stages a HuggingFace checkpoint and quantizes it to NVFP4 in one command: imp reads NVFP4
-# SafeTensors and refuses to fetch anything itself (clean-host policy, src/model/hf_hub.h).
+# Stages a HuggingFace checkpoint and quantizes it to NVFP4 in one command. A checkpoint imp
+# loads as-is needs no staging: --model hf://org/repo fetches inside the container (hf_fetch.h).
 # curl and jq only, no Python and no huggingface-cli (host has neither by policy).
 # Usage: scripts/stage-model.sh Qwen/Qwen3.8-27B-FP8 ~/models/my-Qwen3.8-NVFP4.
 set -uo pipefail

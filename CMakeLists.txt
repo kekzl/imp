@@ -44,6 +44,10 @@ target_compile_options(imp_warnings INTERFACE
 find_package(CUDAToolkit 13.2 REQUIRED)
 message(STATUS "CUDA ${CUDAToolkit_VERSION} detected")
 
+# hf:// model fetch (src/model/hf_fetch.cpp): HTTPS via libcurl, sha256 via libcrypto.
+find_package(CURL REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+
 # Target sm_120a (RTX 5090/PRO 6000, GB202): FP8 f8f6f4 MMA, NVFP4 block MMA, TMA-WS GEMM.
 # Fallback PTX compute_120f JIT-compiles for GB203, loses TMA-WS grouped GEMM (NVFP4 degraded).
 # IMP_DISABLE_120F_FALLBACK=ON strips it. CMake<3.31 can't parse a/f suffix; gencode passed direct.
@@ -192,6 +196,8 @@ set(IMP_MODEL_SOURCES
     src/model/mrope_positions.cpp
     src/model/image_placeholders.cpp
     src/model/hf_hub.cpp
+    src/model/hf_fetch.cpp
+    src/model/hf_fetch_repo.cpp
     src/model/weight_map.cpp
     src/model/weight_upload.cu
     src/model/tokenizer.cpp
@@ -509,6 +515,8 @@ target_link_libraries(imp
     PRIVATE
         pthread
         imp_warnings
+        CURL::libcurl
+        OpenSSL::Crypto
 )
 
 if(IMP_USE_CUTLASS)
@@ -923,6 +931,8 @@ if(IMP_BUILD_TESTS)
             # the only lane CI runs.
             tools/imp-server/image_fetch.cpp
             tests/test_image_fetch.cpp
+            # hf:// fetcher (#2200) against an in-process httplib mock hub on 127.0.0.1.
+            tests/test_hf_fetch.cpp
             # json_object grammar FSM battery: CPU lane, FSM is CUDA-free without init().
             # Listed unconditionally (not inside the IMP_BUILD_SERVER block) so -DIMP_BUILD_SERVER=OFF
             # (make asan) still compiles test-core, even though both files use nlohmann as oracle.
@@ -1159,6 +1169,9 @@ if(IMP_BUILD_TESTS)
     # test_batching_engine_fault.cu drives the server BatchingEngine
     # (tools/imp-server/batching_engine.cpp, no httplib or json dependency).
     target_include_directories(test-e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
+
+    # Opt-in real huggingface.co fetch (IMP_TEST_NETWORK=1); no ctest entry, CI has no network lane.
+    imp_add_test_module(test-hf-network SOURCES tests/test_hf_fetch_network.cpp)
 
     set(IMP_TEST_BINARIES
         test-core test-text test-compute test-attention

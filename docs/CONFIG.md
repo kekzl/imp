@@ -69,8 +69,8 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 
 | flag | default | notes |
 |---|---|---|
-| `--model <path>` | required | GGUF file, SafeTensors directory, or HF repo id |
-| `--revision <rev>` | - | HF revision when `--model` is a hub repo id |
+| `--model <path>` | required | GGUF file, SafeTensors directory, HF repo id (cache only), or `hf://<org>/<repo>[:<file>.gguf]` (downloads, see [Fetching from Hugging Face](#fetching-from-hugging-face)) |
+| `--revision <rev>` | `main` | HF revision when `--model` is a hub repo id or `hf://` |
 | `--mmproj <path>` | - | vision encoder GGUF (Gemma-3/4; Qwen3-VL carries its tower in the checkpoint) |
 | `--image <path>` | - | repeatable (Qwen3-VL: several images) |
 | `--gpu-layers <n>` | `-1` (all) | layers on GPU |
@@ -137,6 +137,25 @@ $ imp-bench gemm --json 2>/dev/null
 | `bench-suite` | `requested`, `run`, `wall_s`, `benchmarks[].{name,measured,seconds}` |
 
 `text` is what stdout would have shown, not `decode(output_ids)`: hidden stop/think markers stay hidden. `imp-bench` reports per-benchmark timings, not tables; machine-readable throughput comes from `imp-cli --bench --json` (what `scripts/gen_perf_baseline.sh` reads).
+
+## Fetching from Hugging Face
+
+`--model hf://<org>/<repo>[:<file>.gguf]` (`imp-server` and `imp-cli`) downloads with libcurl inside the container, then loads from disk. The host needs no Python and no HF tooling.
+
+| item | behaviour |
+|---|---|
+| target | HF cache layout under `HUGGINGFACE_HUB_CACHE`, else `$HF_HOME/hub`; the image sets `HF_HOME=/models/huggingface`, so files land in the mounted `/models` |
+| selection | `:<file>` picks one `.gguf`; without it: the repo's only `.gguf`, else exit 1 with the list; a repo without `.gguf` takes top-level `*.safetensors`, `*.json`, `*.jinja`, `tokenizer.model`, `merges.txt`, `vocab.txt` |
+| auth | `HF_TOKEN` sent as `Authorization: Bearer`; a gated repo without it fails before any byte is written |
+| integrity | `<file>.part`, resumed with `Range` (3 retries per start, and again on the next start), LFS files checked against the sha256 from `/api/models/<repo>?blobs=true`; a mismatch deletes the part |
+| second start | `refs/<rev>` plus the file present: `hf-fetch: cache hit ... no download`, no network request; delete `refs/<rev>` to pick up a newer commit |
+| endpoint | `HF_ENDPOINT` (default `https://huggingface.co`) |
+| permissions | the image user is uid 1001; a host bind mount owned by another uid needs `docker run --user $(id -u):$(id -g)` |
+
+```bash
+docker run --gpus all --user "$(id -u):$(id -g)" -v ~/models:/models -e HF_TOKEN \
+  -p 127.0.0.1:8080:8080 ghcr.io/kekzl/imp:latest --model hf://Qwen/Qwen3-0.6B-GGUF
+```
 
 ## Server flags (`imp-server` only, not on `imp-cli`)
 

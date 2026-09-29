@@ -11,6 +11,8 @@ void print_server_usage(const char* prog) {
             "\n"
             "Options:\n"
             "  --model <path>        Path to model file or HuggingFace repo ID (optional)\n"
+            "                        or hf://<org>/<repo>[:<file>.gguf]: download into the HF\n"
+            "                        cache first (HF_TOKEN for gated repos, cached runs offline)\n"
             "  --revision <rev>      HuggingFace model revision (branch, tag, or commit hash)\n"
             "  --config <path>       imp.conf path (default: ./imp.conf, ~/.config/imp/imp.conf)\n"
             "  --set <sec.key=val>   Override one imp.conf key (repeatable)\n"
