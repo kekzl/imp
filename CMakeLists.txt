@@ -706,6 +706,7 @@ if(IMP_BUILD_TESTS)
         tests/test_sparse_attn_geometry.cpp
         tests/test_tensor.cpp
         tests/test_tensor_kind_table.cpp
+        tests/test_type_tables_golden.cpp
         tests/test_tensor_kind_matcher.cpp
         tests/test_kv_cache.cpp
         tests/test_kv_accounting.cpp
