@@ -160,7 +160,8 @@ bool mtp_qwen4exp_layer(const void* d_h_prev, const MtpHead& mtp, MtpDraftWorksp
 
     // 5-7. Attention block between the attn hc read and its inject.
     hc_read_row(mtp.attn_hc, ws, d, ws.d_input_norm, stream);
-    mtp_attention_row(mtp, ws, d, stream);
+    if (!mtp_attention_row(mtp, ws, d, stream))
+        return false;
     hc_combine_row(ws, d, ws.d_attn_residual, stream);
 
     // 7-8. MoE block between the mlp hc read and its inject: x becomes multi_hidden.

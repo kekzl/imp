@@ -433,8 +433,9 @@ void chunkpar_intra_128(const float* conv_f32, const half* alpha, const half* be
                             sizeof(float);
     static std::once_flag attr_once;
     std::call_once(attr_once, [] {
-        cudaFuncSetAttribute(reinterpret_cast<const void*>(&gdn_chunkpar_intra_kernel<HD, SS>),
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem));
+        IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(
+            reinterpret_cast<const void*>(&gdn_chunkpar_intra_kernel<HD, SS>),
+            cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem)));
     });
     gdn_chunkpar_intra_kernel<HD, SS>
         <<<dim3(n_chunks, n_heads), 2 * HD, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, ws_base,
@@ -461,9 +462,12 @@ int chunkpar_strip_chunks(int n_heads, int requested) {
     static int sm_count = 0, l2_bytes = 0;
     if (sm_count == 0) {
         int dev = 0;
-        cudaGetDevice(&dev);
-        cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev);
-        cudaDeviceGetAttribute(&l2_bytes, cudaDevAttrL2CacheSize, dev);
+        if (cudaGetDevice(&dev) != cudaSuccess ||
+            cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess ||
+            cudaDeviceGetAttribute(&l2_bytes, cudaDevAttrL2CacheSize, dev) != cudaSuccess) {
+            IMP_LOG_WARN("gdn chunkpar: device query failed, strip sized for 170 SMs / 96 MiB L2");
+            sm_count = l2_bytes = 0;  // -> the defaults below
+        }
         if (sm_count <= 0)
             sm_count = 170;
         if (l2_bytes <= 0)

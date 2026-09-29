@@ -402,10 +402,7 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
         return false;
 
     // Query device shared memory limit
-    int device = 0;
-    cudaGetDevice(&device);
-    int max_smem = 0;
-    cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+    const int max_smem = device_attr_or_0(cudaDevAttrMaxSharedMemoryPerBlockOptin);  // 0: declines below
 
     // KV tile columns — must match the kernel's compile-time `Bkv` (which
     // derives from HD): hd=512 uses Bkv=32 (~82 KB at Bq=16, fits the 99 KB
@@ -446,8 +443,9 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
                          smem, cudaGetErrorString(attr_err));                                            \
             return false;                                                                                \
         }                                                                                                \
-        cudaFuncSetAttribute(fmha_sm120_kernel<BQ, HD>, cudaFuncAttributePreferredSharedMemoryCarveout,  \
-                             cudaSharedmemCarveoutMaxShared);                                            \
+        IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(                                                         \
+            fmha_sm120_kernel<BQ, HD>, cudaFuncAttributePreferredSharedMemoryCarveout,                   \
+            cudaSharedmemCarveoutMaxShared));                                                            \
         fmha_sm120_kernel<BQ, HD><<<grid, block, smem, stream>>>(                                        \
             reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K.data),                \
             reinterpret_cast<const half*>(V.data), reinterpret_cast<half*>(O.data), batch_size, seq_q,   \
@@ -945,8 +943,9 @@ static bool launch_fp8_fmha(const Fp8FmhaLaunch& a) {
                                                 static_cast<int>(a.smem));
     if (attr_err != cudaSuccess)
         return false;
-    cudaFuncSetAttribute(fmha_sm120_fp8_kernel<BQ, HD>, cudaFuncAttributePreferredSharedMemoryCarveout,
-                         cudaSharedmemCarveoutMaxShared);
+    IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(fmha_sm120_fp8_kernel<BQ, HD>,
+                                            cudaFuncAttributePreferredSharedMemoryCarveout,
+                                            cudaSharedmemCarveoutMaxShared));
     fmha_sm120_fp8_kernel<BQ, HD><<<a.grid, a.block, a.smem, a.stream>>>(
         reinterpret_cast<const half*>(a.Q.data), reinterpret_cast<const half*>(a.K.data),
         reinterpret_cast<const half*>(a.V.data), reinterpret_cast<half*>(a.O.data), a.batch_size, a.seq_q,
@@ -985,10 +984,7 @@ bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     if (head_dim % 32 != 0)
         return false;  // FP8 MMA needs k%32==0
 
-    int device = 0;
-    cudaGetDevice(&device);
-    int max_smem = 0;
-    cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+    const int max_smem = device_attr_or_0(cudaDevAttrMaxSharedMemoryPerBlockOptin);  // 0: declines below
 
     // Largest Bq with an instance for head_dim that fits smem (#2195: HD64 fit Bq=128, had no instance).
     const int Bq = fp8_fmha_select_bq(head_dim, SM120_Bkv, (size_t)max_smem);
@@ -1790,6 +1786,24 @@ namespace {
 IMP_REGISTER_CUDA_STATIC_RESET(fmha_sm120_reset_static_cuda_state);
 }  // namespace
 
+// FP8SCALED: per-chunk operand amaxes of Q (qn elems) and the gathered K (kn) into s_d_amax, two
+// tiny grid-stride passes. false = raw FP8 conversion this call (alloc or reset failed).
+static bool fa2_operand_amax(const Tensor& Q, const Tensor& K, int64_t qn, int64_t kn, cudaStream_t stream) {
+    if (!s_d_amax && cudaMalloc(&s_d_amax, 2 * sizeof(float)) != cudaSuccess) {
+        s_d_amax = nullptr;
+        return false;
+    }
+    if (cudaMemsetAsync(s_d_amax, 0, 2 * sizeof(float), stream) != cudaSuccess) {
+        IMP_LOG_WARN("FMHA FA2: amax reset failed, raw FP8 conversion this call");
+        return false;  // a stale amax would be a wrong scale
+    }
+    fa2_amax_fp16_kernel<<<128, 256, 0, stream>>>(reinterpret_cast<const half*>(Q.data), qn, s_d_amax);
+    IMP_CUDA_CHECK_LAUNCH();
+    fa2_amax_fp16_kernel<<<128, 256, 0, stream>>>(reinterpret_cast<const half*>(K.data), kn, s_d_amax + 1);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
+
 bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                             bool causal, int sliding_window, float softcap, cudaStream_t stream, int q_offset,
                             bool fp16_qk, const int* d_kv_len, const half* sinks) {
@@ -1817,12 +1831,8 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     if (head_dim != 128 && !hd64_ok && !(head_dim == 256 && fp16_qk && imp::process_diag_fa2_hd256()))
         return false;
 
-    int device = 0;
-    cudaGetDevice(&device);
-    int max_smem = 0;
-    cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-    int sm_count = 0;
-    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+    const int max_smem = device_attr_or_0(cudaDevAttrMaxSharedMemoryPerBlockOptin);  // 0: declines below
+    const int sm_count = device_attr_or_0(cudaDevAttrMultiProcessorCount);  // 0: tile bands only
 
     // Bq/Bkv bands (fp16qk path, #597 occupancy surgery), grid = q_tiles x batch*heads:
     //   blocks_128 >= sm_count: Bq=128/Bkv=64, 1 CTA/SM, 8 warps latency-hiding, deepest cp.async.
@@ -1929,25 +1939,10 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
             head_dim, Bq, Bkv, fp16_qk ? "f16" : "e4m3", f16acc ? "f16" : "f32", pv_f16 ? "f16" : "f32",
             twoslot ? "twoslot" : "dbuf", smem, seq_q, seq_kv);
     }
-    // FP8SCALED: per-chunk operand amaxes for Q and the gathered K (two tiny
-    // grid-stride passes; s_d_amax is the file-scope persistent buffer above).
-    if (fp8_scaled) {
-        if (!s_d_amax && cudaMalloc(&s_d_amax, 2 * sizeof(float)) != cudaSuccess) {
-            s_d_amax = nullptr;
-            fp8_scaled = false;  // fall back to raw conversion this call
-        }
-        if (s_d_amax) {
-            cudaMemsetAsync(s_d_amax, 0, 2 * sizeof(float), stream);
-            const int64_t qn = (int64_t)batch_size * seq_q * n_heads * head_dim;
-            const int64_t kn = (int64_t)batch_size * seq_kv * n_kv_heads * head_dim;
-            fa2_amax_fp16_kernel<<<128, 256, 0, stream>>>(reinterpret_cast<const half*>(Q.data), qn,
-                                                          s_d_amax);
-            IMP_CUDA_CHECK_LAUNCH();
-            fa2_amax_fp16_kernel<<<128, 256, 0, stream>>>(reinterpret_cast<const half*>(K.data), kn,
-                                                          s_d_amax + 1);
-            IMP_CUDA_CHECK_LAUNCH();
-        }
-    }
+    // FP8SCALED: operand amaxes into the file-scope persistent s_d_amax (fa2_operand_amax).
+    if (fp8_scaled)
+        fp8_scaled = fa2_operand_amax(Q, K, (int64_t)batch_size * seq_q * n_heads * head_dim,
+                                      (int64_t)batch_size * seq_kv * n_kv_heads * head_dim, stream);
     kern<<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),
                                         reinterpret_cast<const half*>(K.data),
                                         reinterpret_cast<const half*>(V.data),

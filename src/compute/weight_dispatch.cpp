@@ -27,6 +27,17 @@ namespace imp {
 // cuBLAS/CUTLASS workspace. FP8: [0..M*K) FP8 activation, [M*K..+sizeof(float)) d_act_scale.
 // Too-small workspace falls back to gemm_nvfp4 / plain gemm.
 
+// CUTLASS NVFP4 M=1: zero the SfAtom slice (padding the kernel does not touch), quantize, GEMM.
+// false = the caller's fallback; a failed memset counts (unzeroed padding).
+static bool cutlass_nvfp4_m1(const Tensor& x, void* act_data, void* act_sf, size_t act_sf_bytes,
+                             const CutlassNvFP4Weight& cw, Tensor& y, int M, int N, int K, void* ws_buf,
+                             size_t ws_needed, cudaStream_t stream) {
+    if (cudaMemsetAsync(act_sf, 0, act_sf_bytes, stream) != cudaSuccess)
+        return false;
+    quantize_fp16_to_nvfp4_cutlass(x.data, act_data, act_sf, M, K, stream);
+    return gemm_nvfp4_cutlass_sm120(act_data, act_sf, cw, y.data, M, N, K, ws_buf, ws_needed, stream);
+}
+
 void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Tensor& y, float alpha,
                    float beta, void* workspace, size_t workspace_bytes, cudaStream_t stream) {
     switch (w.primary_tier) {
@@ -128,11 +139,8 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
                     // SfAtom layout has padding bytes the kernel doesn't touch;
                     // workspace path can't assume the slice is pre-zeroed (unlike
                     // qscratch_.cutlass_act_sf which is zeroed at allocation).
-                    cudaMemsetAsync(act_sf, 0, act_sf_bytes, stream);
-                    quantize_fp16_to_nvfp4_cutlass(x.data, act_data, act_sf, M, K, stream);
-                    bool ok = gemm_nvfp4_cutlass_sm120(act_data, act_sf, cw, y.data, M, N, K, ws_buf,
-                                                       ws_needed, stream);
-                    if (ok)
+                    if (cutlass_nvfp4_m1(x, act_data, act_sf, act_sf_bytes, cw, y, M, N, K, ws_buf, ws_needed,
+                                         stream))
                         return;
                 }
                 // Fallback: dequant + cuBLAS (no NvFP4QuantResult with valid micro_scales).
@@ -272,9 +280,13 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y, cudaStream
             int64_t wshape[2] = {w.shape[0], w.shape[1]};
             float host_scale = 1.0f;
             if (w.payload.fp8.d_scale != nullptr) {
-                cudaMemcpyAsync(&host_scale, w.payload.fp8.d_scale, sizeof(float), cudaMemcpyDeviceToHost,
-                                stream);
-                cudaStreamSynchronize(stream);
+                cudaError_t err = cudaMemcpyAsync(&host_scale, w.payload.fp8.d_scale, sizeof(float),
+                                                  cudaMemcpyDeviceToHost, stream);
+                if (err == cudaSuccess) err = cudaStreamSynchronize(stream);
+                if (err != cudaSuccess) {  // a default scale would be a silent wrong result
+                    IMP_LOG_ERROR("gemv_dispatch FP8: scale read failed: %s", cudaGetErrorString(err));
+                    return;
+                }
             }
             Tensor w_tensor(w.payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
             gemv_fp8(w_tensor, x, y, host_scale, stream);

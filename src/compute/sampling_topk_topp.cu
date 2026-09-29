@@ -642,7 +642,8 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int t
         return 0;
     int32_t h_result = 0;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
+    if (!sampler_sync_ok(stream, "sample_topk_topp"))
+        return 0;
     return h_result;
 }
 
@@ -664,11 +665,11 @@ static int32_t sample_topk_topp_impl(const float* d_logits, int vocab_size, int 
 
     int32_t h_result = 0;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
+    const bool synced = sampler_sync_ok(stream, "sample_topk_topp");
 
     if (owns_result)
         IMP_CUDA_CHECK_LOG(cudaFree(d_result));
-    return h_result;
+    return synced ? h_result : 0;
 }
 
 int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float temperature, unsigned int seed,

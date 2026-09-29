@@ -435,10 +435,12 @@ static int32_t sample_mirostat_v2_impl(const Tensor& logits, float temperature, 
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
     IMP_CUDA_CHECK_LOG(
         cudaMemcpyAsync(&h_surprise, d_surprise, sizeof(float), cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
+    const bool synced = sampler_sync_ok(stream, "sample_mirostat_v2");
 
     if (owns_result)
         IMP_CUDA_CHECK_LOG(cudaFree(d_result));
+    if (!synced)
+        return 0;  // mu unchanged: h_surprise was never read back
 
     // Update mu: mu = mu - eta * (surprise - tau)
     *mu = *mu - eta * (h_surprise - tau);

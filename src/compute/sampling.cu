@@ -229,7 +229,8 @@ int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
 
     int32_t h_result = 0;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
+    if (!sampler_sync_ok(stream, "sample_greedy"))
+        return 0;
     return h_result;
 }
 
@@ -251,7 +252,8 @@ int32_t sample_greedy(const Tensor& logits, int32_t* d_result, cudaStream_t stre
 
     int32_t h_result = 0;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
+    if (!sampler_sync_ok(stream, "sample_greedy"))
+        return 0;
 
     return h_result;
 }

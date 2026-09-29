@@ -300,8 +300,9 @@ void chunkpar_pass_128(float* ws_base, StateT* h_state, half* y, int strip_t0, i
                             sizeof(float);
     static std::once_flag attr_once;
     std::call_once(attr_once, [] {
-        cudaFuncSetAttribute(reinterpret_cast<const void*>(&gdn_chunkpar_pass_kernel<HD, SS, StateT>),
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem));
+        IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(
+            reinterpret_cast<const void*>(&gdn_chunkpar_pass_kernel<HD, SS, StateT>),
+            cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem)));
     });
     gdn_chunkpar_pass_kernel<HD, SS, StateT><<<dim3(n_heads, kColSplit), kPassThreads, smem, stream>>>(
         ws_base, h_state, y, strip_t0, strip_tokens, n_chunks, n_heads, load_statet, store_statet);

@@ -403,7 +403,7 @@ void compact_alpha_active(
 {
     if (n_experts <= 0) {
         if (d_na_out)
-            cudaMemsetAsync(d_na_out, 0, sizeof(int32_t), stream);
+            IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_na_out, 0, sizeof(int32_t), stream));
         return;
     }
     IMP_CHECK(n_experts <= 256 * kScanMaxChunk,
@@ -478,7 +478,7 @@ void compute_sfa_offsets_device(const int32_t* d_M_per, int64_t* d_sfa_offsets_o
                                 cudaStream_t stream, uint8_t** d_sfa_bases_out, void* base_sf) {
     if (n_experts <= 0) {
         if (d_sfa_offsets_out)
-            cudaMemsetAsync(d_sfa_offsets_out, 0, sizeof(int64_t), stream);
+            IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sfa_offsets_out, 0, sizeof(int64_t), stream));
         return;
     }
     IMP_CHECK(n_experts <= 256 * kScanMaxChunk,
@@ -528,7 +528,7 @@ void bzero_sfa_active(
     if (!dst || max_bytes == 0) return;
     if (!d_sfa_offsets || n_experts <= 0) {
         // No offsets known — fall back to full memset (rare path, e.g. cold init).
-        cudaMemsetAsync(dst, 0, max_bytes, stream);
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(dst, 0, max_bytes, stream));
         return;
     }
     // Grid sized for full saturation at max_bytes; each thread does 16 bytes.

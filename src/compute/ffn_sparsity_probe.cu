@@ -46,9 +46,12 @@ void ensure_init_locked() {
             IMP_LOG_WARN("ffn-sparsity-probe: T2 arena unavailable — probe disabled");
             g_state.d_counters = nullptr;
             g_state.enabled = false;
+        } else if (cudaMemset(slab.data(), 0, bytes) != cudaSuccess) {
+            IMP_LOG_WARN("ffn-sparsity-probe: counter reset failed — probe disabled");
+            g_state.d_counters = nullptr;
+            g_state.enabled = false;
         } else {
             g_state.d_counters = reinterpret_cast<unsigned long long*>(slab.data());
-            cudaMemset(g_state.d_counters, 0, bytes);
         }
     }
     g_state.initialized = true;
@@ -163,7 +166,7 @@ void flush_ffn_sparsity_probe_log() {
     }
 
     const size_t reset_bytes = sizeof(unsigned long long) * kMaxLayers * kSlotsPerLayer;
-    cudaMemset(g_state.d_counters, 0, reset_bytes);
+    IMP_CUDA_CHECK_LOG(cudaMemset(g_state.d_counters, 0, reset_bytes));  // diagnostic counters only
     g_state.max_layer_seen = -1;
 }
 

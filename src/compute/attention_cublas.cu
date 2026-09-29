@@ -67,23 +67,29 @@ void attention_cublas_prewarm() {
     constexpr size_t kM = 8, kN = 8, kK = 8;
     half *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
     void *d_ap = nullptr, *d_bp = nullptr, *d_cp = nullptr;
-    if (cudaMalloc(&d_a, kM * kK * sizeof(half)) != cudaSuccess) return;
-    if (cudaMalloc(&d_b, kK * kN * sizeof(half)) != cudaSuccess) { cudaFree(d_a); return; }
-    if (cudaMalloc(&d_c, kM * kN * sizeof(half)) != cudaSuccess) {
-        cudaFree(d_a); cudaFree(d_b); return;
-    }
-    if (cudaMalloc(&d_ap, sizeof(void*)) != cudaSuccess ||
-        cudaMalloc(&d_bp, sizeof(void*)) != cudaSuccess ||
-        cudaMalloc(&d_cp, sizeof(void*)) != cudaSuccess) {
-        if (d_ap) cudaFree(d_ap); if (d_bp) cudaFree(d_bp); if (d_cp) cudaFree(d_cp);
-        cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
+    auto dalloc = [](auto** p, size_t bytes) {
+        if (cudaMalloc(p, bytes) == cudaSuccess) return true;
+        *p = nullptr;
+        return false;
+    };
+    auto release = [&] {
+        for (void* p : {static_cast<void*>(d_a), static_cast<void*>(d_b), static_cast<void*>(d_c), d_ap, d_bp, d_cp})
+            if (p) IMP_CUDA_CHECK_LOG(cudaFree(p));
+    };
+    // Setup failure: no warm-up GEMM (it would read unset pointer tables); best-effort, as before.
+    const bool setup_ok =
+        dalloc(&d_a, kM * kK * sizeof(half)) && dalloc(&d_b, kK * kN * sizeof(half)) &&
+        dalloc(&d_c, kM * kN * sizeof(half)) && dalloc(&d_ap, sizeof(void*)) && dalloc(&d_bp, sizeof(void*)) &&
+        dalloc(&d_cp, sizeof(void*)) && cudaMemset(d_a, 0, kM * kK * sizeof(half)) == cudaSuccess &&
+        cudaMemset(d_b, 0, kK * kN * sizeof(half)) == cudaSuccess &&
+        cudaMemcpy(d_ap, static_cast<const void*>(&d_a), sizeof(void*), cudaMemcpyHostToDevice) == cudaSuccess &&
+        cudaMemcpy(d_bp, static_cast<const void*>(&d_b), sizeof(void*), cudaMemcpyHostToDevice) == cudaSuccess &&
+        cudaMemcpy(d_cp, static_cast<const void*>(&d_c), sizeof(void*), cudaMemcpyHostToDevice) == cudaSuccess;
+    if (!setup_ok) {
+        IMP_LOG_WARN("attention_cublas_prewarm: setup failed, warm-up skipped");
+        release();
         return;
     }
-    cudaMemset(d_a, 0, kM * kK * sizeof(half));
-    cudaMemset(d_b, 0, kK * kN * sizeof(half));
-    cudaMemcpy(d_ap, static_cast<const void*>(&d_a), sizeof(void*), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_bp, static_cast<const void*>(&d_b), sizeof(void*), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_cp, static_cast<const void*>(&d_c), sizeof(void*), cudaMemcpyHostToDevice);
 
     float alpha = 1.0f, beta = 0.0f;
     (void)cublasGemmBatchedEx(h, CUBLAS_OP_T, CUBLAS_OP_N, kN, kM, kK, &alpha,
@@ -91,10 +97,8 @@ void attention_cublas_prewarm() {
                               (const void**)d_bp, CUDA_R_16F, kK, &beta,
                               (void**)d_cp, CUDA_R_16F, kN, 1, CUBLAS_COMPUTE_32F,
                               CUBLAS_GEMM_DEFAULT);
-    cudaDeviceSynchronize();
-
-    cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
-    cudaFree(d_ap); cudaFree(d_bp); cudaFree(d_cp);
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
+    release();
 }
 
 // Fused causal softmax FP32->FP16: reads FP32 S, writes FP16 probs to a separate buffer, saving

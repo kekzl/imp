@@ -426,9 +426,9 @@ static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels
             const size_t smem = (2 * CHUNK * SS + HD) * sizeof(float);
             static bool attr_set = false;
             if (!attr_set) {
-                cudaFuncSetAttribute(
+                IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(
                     reinterpret_cast<const void*>(&gdn_scan_chunkwise_kernel<HD, SS, CHUNK, YOut>),
-                    cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+                    cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024));
                 attr_set = true;
             }
             gdn_scan_chunkwise_kernel<HD, SS, CHUNK, YOut><<<n_heads, HD, smem, stream>>>(
@@ -532,9 +532,9 @@ void gdn_scan_chunkwise_wy_f32(const float* conv_f32, int conv_channels, const h
             // sm_120 caps cudaFuncAttributeMaxDynamicSharedMemorySize at 99 KiB (sharedMemPerBlockOptin
             // = 101376 B); above that returns cudaErrorInvalidValue and falls back to the 48 KiB
             // default, which fails launch since the ~89 KiB request exceeds it. Use 96 KiB.
-            cudaFuncSetAttribute(
+            IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(
                 reinterpret_cast<const void*>(&gdn_scan_chunkwise_wy_kernel<HD, SS, CHUNK>),
-                cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+                cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024));
             attr_set = true;
         }
         gdn_scan_chunkwise_wy_kernel<HD, SS, CHUNK><<<n_heads, HD, smem, stream>>>(

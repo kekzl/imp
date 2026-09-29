@@ -1,6 +1,7 @@
 #pragma once
 
 #include "compute/warp_reduce.cuh"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cfloat>
 
@@ -10,6 +11,15 @@ static constexpr int BLOCK_SIZE = 256;
 static constexpr int WARP_SIZE = 32;
 
 static constexpr int MAX_TOP_K = 128;
+
+// Readback sync of the synchronous samplers; false = the host copy is not valid, the sampler
+// returns token 0 (its existing failure value) and the error stays in cudaGetLastError.
+inline bool sampler_sync_ok(cudaStream_t stream, const char* who) {
+    const cudaError_t err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess)
+        IMP_LOG_ERROR("%s: readback sync failed: %s", who, cudaGetErrorString(err));
+    return err == cudaSuccess;
+}
 
 // Per-TU cleanup helpers for file-scope persistent scratch that is split across
 // translation units. sampling_cleanup() (public) calls both.
