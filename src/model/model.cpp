@@ -230,11 +230,11 @@ bool kv_fp8_hint_default_safe(ModelArch arch) {
 
 // Arch families verified safe for default FP8 KV even with no checkpoint hint (GGUF never
 // declares the hint; FP16 KV at 16k context costs ~-40% decode). Stricter bar than the
-// hint list (author didn't opt in): QWEN3, QWEN3_MOE only. QWEN36_MOE and LLAMA measured
-// but excluded: NVFP4 compounds with FP8 KV / baseline PPL is broken-high.
+// hint list (author didn't opt in): QWEN3_MOE only. QWEN3 (dense) out: FP8 KV decode turned
+// Qwen3-8B-Q8_0 greedy into "The capital of France is not Paris" (#2208). QWEN36_MOE and
+// LLAMA measured but excluded: NVFP4 compounds with FP8 KV / baseline PPL is broken-high.
 bool kv_fp8_no_hint_default_safe(ModelArch arch) {
     switch (arch) {
-        case ModelArch::QWEN3:
         case ModelArch::QWEN3_MOE:
             return true;
         default:

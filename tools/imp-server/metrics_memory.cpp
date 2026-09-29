@@ -56,6 +56,18 @@ if (state.ctx && state.ctx->engine) {
             }
         }
     }
+    // Host spill tier (#2203, kv_cache.host_spill_mb): present only when it is on.
+    if (const imp::KVHostSpill* spill = state.ctx->engine->kv_host_spill()) {
+        out += "# HELP imp_kv_host_spill_saves_total Prefix blocks copied to the host tier on reclaim\n";
+        out += "# TYPE imp_kv_host_spill_saves_total counter\n";
+        out += "imp_kv_host_spill_saves_total " + std::to_string(spill->saves()) + "\n";
+        out += "# HELP imp_kv_host_spill_restores_total Prefix blocks restored from the host tier (H2D)\n";
+        out += "# TYPE imp_kv_host_spill_restores_total counter\n";
+        out += "imp_kv_host_spill_restores_total " + std::to_string(spill->restores()) + "\n";
+        out += "# HELP imp_kv_host_spill_replacements_total Host-tier entries dropped to make room\n";
+        out += "# TYPE imp_kv_host_spill_replacements_total counter\n";
+        out += "imp_kv_host_spill_replacements_total " + std::to_string(spill->replacements()) + "\n";
+    }
     if (const auto* kv = state.ctx->engine->kv_cache()) {
         const int total_blocks = kv->total_blocks();
         const int free_blocks = kv->num_free_blocks();

@@ -226,6 +226,9 @@ TEST(RequestTest, RaggedPrefillAllowed) {
     Request lp;
     lp.logprobs = true;
     EXPECT_FALSE(lp.ragged_prefill_allowed());
+    Request plp;
+    plp.prompt_logprobs = 1;
+    EXPECT_FALSE(plp.ragged_prefill_allowed());
     Request constrained;
     constrained.regex_pattern = "(A|B)";
     EXPECT_FALSE(constrained.ragged_prefill_allowed());
