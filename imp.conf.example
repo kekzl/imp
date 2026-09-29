@@ -638,16 +638,15 @@ no_mmvq_q8_0         = false
 # 337 -> 361 (+7.2 %). Cost with --decode-nvfp4: decode-path PPL (--perplexity --prefill-chunk-size 1, 45k)
 # Qwen3-30B-A3B 10.9451 -> 11.3011 (+3.25 %). pp512 -10 % unless --decode-nvfp4 (mode 1) keeps FP16 prefill.
 nvfp4_decode_all     = false
-# NVFP4 LM-head decode cache: "auto" | "on" | "off" (#982 net rule).
-# auto = ON for native BF16/F16 heads (~+8-16% decode, +2.2% PPL, GOAL-listed
-# trade) and small dense GGUF heads (d_model <= 4096, e.g. 4B/8B: decode win
-# exceeds the PPL cost); OFF for larger/MoE GGUF heads where the 2026-07-12
-# parity sweep measured the PPL cost above the decode win (14B, 30B-A3B).
-# "fp8" = per-row FP8 E4M3 head instead (#2156): F16/BF16 or GGUF source, GDN hybrids
-# included, one tensor-core kernel (32 rows per weight pass) for decode, batch and --perplexity;
+# LM head format: "auto" | "fp8" | "on" | "off" (#2166).
+# auto = per-row FP8 E4M3 head (#2156) when the head allows it (F16 or GGUF source,
+# F16 final norm, d_model a multiple of 256), else the #982 NVFP4 net rule.
+# FP8 vs NVFP4, PPL 45k: Qwen3-8B-Q8_0 11.1108 -> 10.7623, Qwen3-30B-A3B-NVFP4
+# 11.8443 -> 11.3476, Flash-Next-NVFP4 4.6493 -> 4.4873; tg128 -4.7 % / -3.0 %.
 # 1.78x NVFP4 head bytes (Qwen3-8B 594.1 vs 333.8 MiB); the source head is freed after load.
+# "on" = NVFP4 head (speed opt-in), "off" = checkpoint precision, "fp8" = FP8 or source path.
 nvfp4_lm_head        = "auto"
-# Same for GDN/SSM-hybrid models (Qwen3.6-35B: +11.4% decode at +2.2% PPL;
+# NVFP4 head (on, or auto fallback) also on GDN/SSM hybrids (Qwen3.6-35B: +11.4% decode at +2.2% PPL;
 # set false for maximum coherence). Default ON since PR #483.
 nvfp4_lm_head_gdn    = true
 # Stream-K tile scheduler for the CUTLASS NVFP4 prefill GEMM (N > 2048):
