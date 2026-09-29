@@ -125,7 +125,7 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
         // #982 net rule for quantized heads — see nvfp4_lm_head_enabled().
         // GDN/SSM hybrids defer to the gdn_head_ok gate above instead of the
         // dense/MoE net rule (GOAL-listed nvfp4_lm_head_gdn trade).
-        const bool head_on = nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/true,
+        const bool head_on = nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/true, head_qtype,
                                                    prof.is_dense, cfg.d_model,
                                                    /*is_gdn_hybrid=*/prof.is_gdn || prof.is_ssm,
                                                    wcache_->lm_head_fp8.weight.data != nullptr);
@@ -135,8 +135,10 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
             else
                 IMP_LOG_INFO("NVFP4 LM head: skipped (%s)",
                              !gdn_head_ok ? "nvfp4_lm_head_gdn=false, GDN/SSM hybrid"
-                             : wcache_->lm_head_fp8.weight.data != nullptr
-                                 ? "FP8 head built, #2166"
+                             : wcache_->lm_head_fp8.weight.data != nullptr ? "FP8 head built, #2166"
+                             : lm_head_auto_keeps_source(lm_head_mode(dispatch_policy().gemm.nvfp4_lm_head),
+                                                         head_qtype)
+                                 ? "auto keeps an 8-bit head at checkpoint precision, #2224"
                                  : "gemm.nvfp4_lm_head off/auto net rule (#982)");
         }
     }
@@ -149,8 +151,8 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
 
 void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cudaStream_t stream) {
     // Native-precision head (checked below): auto → ON per the #982 net rule.
-    if (!nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/false, model_->profile().is_dense,
-                               cfg.d_model, /*is_gdn_hybrid=*/false,
+    if (!nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/false, model_->output_proj().qtype,
+                               model_->profile().is_dense, cfg.d_model, /*is_gdn_hybrid=*/false,
                                wcache_->lm_head_fp8.weight.data != nullptr))
         return;
 

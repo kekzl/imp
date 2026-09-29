@@ -335,7 +335,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     if (config.fp8_lm_head && model.output_proj().data && model.output_proj().ndim == 2)
         fp8_head_bytes = static_cast<size_t>(model.output_proj().shape[0]) *
                          (static_cast<size_t>(model.output_proj().shape[1]) + sizeof(float));
-    else
+    else if (!config.lm_head_source_only)
         count_nvfp4(model.output_proj(), model.out_proj_.qtype);
     for (int i = 0; i < mcfg.n_layers; i++) {
         const auto& L = model.layer(i);
