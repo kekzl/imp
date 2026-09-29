@@ -22,7 +22,7 @@ namespace imp::gptq {
 enum class ZeroFormat : int { V2 = 0, V1 = 1 };
 
 // "" / "gptq" -> V1, "gptq_v2" -> V2 (case-insensitive). False for any other format (marlin, ...).
-bool parse_zero_format(const std::string& checkpoint_format, ZeroFormat* out);
+[[nodiscard]] bool parse_zero_format(const std::string& checkpoint_format, ZeroFormat* out);
 
 // w[n,k] = (q - z) * s: exact integer times FP16 scale in FP32, one RN rounding, bit-equal to FP16 math.
 IMP_GPTQ_HD inline __half dequant_elem(const int32_t* qweight, const int32_t* qzeros, const __half* scales,
@@ -41,11 +41,11 @@ struct Dims {
 };
 
 // Checks one projection's tensor shapes and derives Dims. False with `err` set on any mismatch.
-bool check_shapes(const int64_t* qweight_shape, const int64_t* qzeros_shape, const int64_t* scales_shape,
+[[nodiscard]] bool check_shapes(const int64_t* qweight_shape, const int64_t* qzeros_shape, const int64_t* scales_shape,
                   int group_size, Dims* d, std::string* err);
 
 // g_idx must hold K entries, each in [0, groups).
-bool check_g_idx(const int32_t* g_idx, int64_t len, const Dims& d, std::string* err);
+[[nodiscard]] bool check_g_idx(const int32_t* g_idx, int64_t len, const Dims& d, std::string* err);
 
 // Host reference: out [N, K] FP16 (row n = output feature), same element rule as the kernel.
 void dequant4_host(__half* out, const int32_t* qweight, const int32_t* qzeros, const __half* scales,

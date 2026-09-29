@@ -56,7 +56,7 @@ inline NvFP4SlotLayout nvfp4_slot_layout(int64_t N, int64_t K) {
 // NVFP4-promoted, host-resident, carrying micro-scales, shaped like every other expert in
 // the projection. #1384 and #1403 were both a predicate standing in front of the check
 // meant to catch the problem.
-inline bool nvfp4_host_experts_servable(const std::vector<Tensor>& experts) {
+[[nodiscard]] inline bool nvfp4_host_experts_servable(const std::vector<Tensor>& experts) {
     if (experts.empty() || !experts[0].data)
         return false;
     const Tensor& e0 = experts[0];
@@ -87,7 +87,7 @@ struct StagedProj {
     bool cutlass_ready = false;
 
     bool valid() const { return packed != nullptr && ms != nullptr && n_experts > 0; }
-    bool covers(int expert) const { return valid() && expert >= 0 && expert < n_experts; }
+    [[nodiscard]] bool covers(int expert) const { return valid() && expert >= 0 && expert < n_experts; }
 };
 
 // nvfp4_scratch_ key naming one per-expert MoE weight: "L{layer}.expert_w_{gate,up,down}.

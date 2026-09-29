@@ -239,7 +239,8 @@ TEST_F(NvFP4SmallMV2Test, SweepTuning) {
             for (int r = 0; r < 3; ++r) {
                 cudaEventRecord(t0);
                 for (int i = 0; i < 1000; ++i)
-                    imp::gemm_nvfp4_smallm_v2_a4_tuned(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws,
+                    // timing loop: the launch status is not under test
+                    (void)imp::gemm_nvfp4_smallm_v2_a4_tuned(W.q, X.q, static_cast<half*>(d_y), M, N, K, d_ws,
                                                        nullptr, false, st, sp);
                 cudaEventRecord(t1);
                 ASSERT_EQ(cudaEventSynchronize(t1), cudaSuccess);

@@ -8,12 +8,13 @@
 // cuda_sync_or_throw(err, where): failed sync means the host buffer was never written; always throws.
 // Throw lands in BatchingEngine::step()'s catch (or the C API boundary), which re-probes and decides.
 #include <cuda_runtime_api.h>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
 namespace imp {
 
-inline bool cuda_error_is_unrecoverable(cudaError_t e) {
+[[nodiscard]] inline bool cuda_error_is_unrecoverable(cudaError_t e) {
     switch (e) {
         case cudaErrorIllegalAddress:
         case cudaErrorMisalignedAddress:
@@ -41,6 +42,12 @@ inline void cuda_sync_or_throw(cudaError_t err, const char* where) {
     if (err != cudaSuccess)
         throw std::runtime_error(std::string("CUDA sync failed (") + cudaGetErrorString(err) + ") in " +
                                  where + ": the sampled tokens were never written");
+}
+
+// Pinned sampler readback: *h_token after a successful sync, else throws; never a token the model did not sample.
+[[nodiscard]] inline int32_t synced_token_or_throw(cudaError_t sync_err, const int32_t* h_token, const char* where) {
+    cuda_sync_or_throw(sync_err, where);
+    return *h_token;
 }
 
 }  // namespace imp

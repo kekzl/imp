@@ -258,7 +258,8 @@ TEST_F(FmhaHd512Test, DISABLED_BenchVsCublas) {
             cudaEventRecord(a, stream_);
             for (int i = 0; i < reps; i++) {
                 if (fmha)
-                    fmha_sm120_prefill(Q4, K4, V4, O4, scale, true, 0, 0.0f, stream_, 0, nullptr);
+                    // timing loop: the launch status is not under test
+                    (void)fmha_sm120_prefill(Q4, K4, V4, O4, scale, true, 0, 0.0f, stream_, 0, nullptr);
                 else
                     attention_cublas_prefill(Q2, K2, V2, O2, S3, NH, NKV, HD, scale, true, 0.0f, 0, stream_);
             }
@@ -272,7 +273,8 @@ TEST_F(FmhaHd512Test, DISABLED_BenchVsCublas) {
         };
         // Warm the clocks (>1s of work) before timing.
         for (int w = 0; w < 40; w++) {
-            fmha_sm120_prefill(Q4, K4, V4, O4, scale, true, 0, 0.0f, stream_, 0, nullptr);
+            // timing loop: the launch status is not under test
+            (void)fmha_sm120_prefill(Q4, K4, V4, O4, scale, true, 0, 0.0f, stream_, 0, nullptr);
             attention_cublas_prefill(Q2, K2, V2, O2, S3, NH, NKV, HD, scale, true, 0.0f, 0, stream_);
         }
         cudaStreamSynchronize(stream_);

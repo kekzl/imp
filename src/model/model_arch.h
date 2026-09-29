@@ -32,17 +32,17 @@ const char* model_arch_name(ModelArch arch);
 // True iff this arch family is empirically verified safe to honor a kv_cache_quant_algo=FP8
 // hint by default. Long-context quality gate for kv_cache.dtype=auto; see model.cpp for
 // per-family evidence. Keep conservative.
-bool kv_fp8_hint_default_safe(ModelArch arch);
+[[nodiscard]] bool kv_fp8_hint_default_safe(ModelArch arch);
 
 // True iff safe for default FP8 KV with no checkpoint hint (GGUF never carries one).
 // Stricter bar than the hint list: the family must gate ~neutral, not merely <=1.5%. See
 // model.cpp for per-family evidence and exclusions.
-bool kv_fp8_no_hint_default_safe(ModelArch arch);
+[[nodiscard]] bool kv_fp8_no_hint_default_safe(ModelArch arch);
 
 // True iff measured safe for default NVFP4 KV. A capacity gate, not a speed one: on a GDN
 // hybrid only attention layers hold a KV cache, so the dtype decides how much context fits.
 // See model.cpp for per-family measurements.
-bool kv_nvfp4_default_safe(ModelArch arch);
+[[nodiscard]] bool kv_nvfp4_default_safe(ModelArch arch);
 
 // How many times the auto default's KV bytes/token an explicit dtype pin costs; 0 or 1 =
 // free. Only families whose auto default is NVFP4 can lose here. A pin can invert without
@@ -53,7 +53,7 @@ int kv_pin_context_cost_factor(ModelArch arch, QType pinned);
 // True when the KV dtype was CHOSEN rather than auto-resolved: a CLI flag sets the engine
 // enum directly, imp.conf sets a string the resolver reads. Answers only "did the operator
 // pick this"; whether the pick costs anything is kv_pin_context_cost_factor's question.
-bool kv_dtype_is_explicit_pin(QType cli_dtype, const std::string& conf_dtype);
+[[nodiscard]] bool kv_dtype_is_explicit_pin(QType cli_dtype, const std::string& conf_dtype);
 
 // max_seq_len from its two operator surfaces: preset (--max-seq-len/C-API) and file_key
 // (runtime.max_seq_len). Rule: preset>0 wins, else file_key, else 0 (auto) - CLI beats

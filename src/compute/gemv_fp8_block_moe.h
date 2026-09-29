@@ -29,7 +29,7 @@ struct Fp8BlockMoeArgs {
 };
 
 // False (nothing launched) when a shape is not a multiple of 128 or a pointer is null.
-bool gemv_fp8_block_moe(const Fp8BlockMoeArgs& a, cudaStream_t stream);
+[[nodiscard]] bool gemv_fp8_block_moe(const Fp8BlockMoeArgs& a, cudaStream_t stream);
 
 // act[s, j] = silu(gu[s, j]) * gu[s, eff + j] for the packed [top_k, 2 * eff] gate|up output.
 void swiglu_packed_rows(const half* gu, half* act, int eff, int top_k, cudaStream_t stream);

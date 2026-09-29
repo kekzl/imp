@@ -225,12 +225,14 @@ double bench_wmma(const __half* A, const __half* B, __half* D, int M, int N, int
     cudaEventCreate(&stop);
     // Warmup
     for (int i = 0; i < 3; ++i)
-        gemm_capture_fp16_sm120(A, B, D, M, N, K, 1.0f, 0.0f, 0);
+        // timing loop: the launch status is not under test
+        (void)gemm_capture_fp16_sm120(A, B, D, M, N, K, 1.0f, 0.0f, 0);
     cudaDeviceSynchronize();
 
     cudaEventRecord(start);
     for (int i = 0; i < iters; ++i)
-        gemm_capture_fp16_sm120(A, B, D, M, N, K, 1.0f, 0.0f, 0);
+        // timing loop: the launch status is not under test
+        (void)gemm_capture_fp16_sm120(A, B, D, M, N, K, 1.0f, 0.0f, 0);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     float ms = 0.0f;

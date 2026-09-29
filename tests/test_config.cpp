@@ -362,7 +362,7 @@ dtype = "fp16"
 )");
 
     RuntimeConfig cfg;
-    cfg.load_from_file(f.path);
+    EXPECT_TRUE(cfg.load_from_file(f.path));
     EXPECT_EQ(cfg.kv_cache.dtype, "fp16");
     set_(cfg, {"kv_cache.dtype=fp8"});
     EXPECT_EQ(cfg.kv_cache.dtype, "fp8");

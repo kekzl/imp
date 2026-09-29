@@ -35,6 +35,6 @@ struct StopMask {
 
 // The per-request decision every sampling site shares. `think_end_id` < 0
 // means no budget can force the close, so the in-think half stays off.
-bool stop_mask_active(const Request& req, int32_t think_end_id);
+[[nodiscard]] bool stop_mask_active(const Request& req, int32_t think_end_id);
 
 }  // namespace imp

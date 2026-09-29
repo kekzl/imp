@@ -37,7 +37,7 @@ IMP_AWQ_HD inline __half dequant_elem(const int32_t* qweight, const int32_t* qze
 }
 
 // Checks one projection's AWQ tensor shapes; derives K, N. False with `err` set on any mismatch.
-bool check_shapes(const int64_t* qweight_shape, const int64_t* qzeros_shape, const int64_t* scales_shape,
+[[nodiscard]] bool check_shapes(const int64_t* qweight_shape, const int64_t* qzeros_shape, const int64_t* scales_shape,
                   int group_size, int* K, int* N, std::string* err);
 
 // Host reference: out [N, K] FP16 (row n = output feature), same element rule as the kernel.

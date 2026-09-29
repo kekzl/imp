@@ -81,7 +81,8 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // This preserves the existing per-phase budget tracking while the VRAMBudget
     // struct controls strategy-level decisions (which phases to skip).
     size_t free_vram = 0, total_vram = 0;
-    vram_budget_mem_get_info(&free_vram, &total_vram);
+    // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+    (void)vram_budget_mem_get_info(&free_vram, &total_vram);
     // Reserve headroom to avoid shared/system memory fallback on WSL2 (not
     // visible via nvidia-smi) — canonical floor in vram_query.h.
     size_t min_reserve = std::max(budget.reserve_bytes, vram_reserve_floor(total_vram));

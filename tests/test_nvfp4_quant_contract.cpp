@@ -202,7 +202,7 @@ struct FusedSplitFixture {
 
     void apply() {
         imp::WeightMap wm(imp::ModelArch::LLAMA);
-        wm.apply_weights(model, tensors);
+        EXPECT_TRUE(wm.apply_weights(model, tensors));
     }
 };
 

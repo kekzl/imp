@@ -1,0 +1,2 @@
+# tools/check_nodiscard_status.py (#2211): header bool functions exempt from [[nodiscard]].
+# Format: <path>:<function>  # reason. Only shrinks (CEILING in the script); empty since #2211.

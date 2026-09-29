@@ -81,7 +81,8 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t str
     }
     // Fallback: per-tensor check (used outside upload passes)
     size_t free_mem = 0, total_mem = 0;
-    vram_budget_mem_get_info(&free_mem, &total_mem);
+    // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+    (void)vram_budget_mem_get_info(&free_mem, &total_mem);
     if (size + reserve > free_mem) {
         *ptr = nullptr;
         return cudaErrorMemoryAllocation;
@@ -164,7 +165,7 @@ struct PinnedStager {
 static PinnedStager* g_stager = nullptr;
 
 // H2D copy that routes through pinned staging when available
-static cudaError_t h2d_copy(void* dst, const void* src, size_t n, cudaStream_t s) {
+[[nodiscard]] static cudaError_t h2d_copy(void* dst, const void* src, size_t n, cudaStream_t s) {
     if (g_stager)
         return g_stager->copy(dst, src, n, s);
     return cudaMemcpyAsync(dst, src, n, cudaMemcpyHostToDevice, s);
@@ -664,6 +665,14 @@ bool upload_mtp_head(MtpHead& head, QType compute_dtype, float arch_norm_offset,
     return upload_mtp_weights(head, ctx);
 }
 
+// GPTQ staging copy status: false + ERROR naming the buffer.
+static bool gptq_h2d_ok(cudaError_t e, const char* what) {
+    if (e == cudaSuccess)
+        return true;
+    IMP_LOG_ERROR("GPTQ: H2D copy of %s failed: %s", what, cudaGetErrorString(e));
+    return false;
+}
+
 // upload_gptq_weight: dequantizes a GPTQ- or AWQ-packed (awq_gemm) weight to FP16 on GPU. Uploads
 // qweight/qzeros/scales/g_idx to temporary GPU buffers, runs the dequant kernel, frees the
 // temporaries, and sets the output tensor to the resulting FP16 GPU weight.
@@ -689,7 +698,8 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
         IMP_LOG_ERROR("GPTQ: failed to allocate qweight (%zu bytes)", qw_bytes);
         return false;
     }
-    h2d_copy(d_qweight, gptq.qweight.data, qw_bytes, stream);
+    // Staging status (copies + g_idx alloc); checked at step 5 so one path frees every temporary.
+    bool staged_ok = gptq_h2d_ok(h2d_copy(d_qweight, gptq.qweight.data, qw_bytes, stream), "qweight");
 
     // 2. Upload qzeros to GPU (required, checked at load)
     int32_t* d_qzeros = nullptr;
@@ -700,7 +710,7 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
         return false;
     }
-    h2d_copy(d_qzeros, gptq.qzeros.data, qz_bytes, stream);
+    staged_ok &= gptq_h2d_ok(h2d_copy(d_qzeros, gptq.qzeros.data, qz_bytes, stream), "qzeros");
 
     // 3. Upload scales to GPU
     size_t sc_bytes = static_cast<size_t>(gptq.scales.shape[0]) * gptq.scales.shape[1] * sizeof(half);
@@ -711,19 +721,18 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
         return false;
     }
-    h2d_copy(d_scales, gptq.scales.data, sc_bytes, stream);
+    staged_ok &= gptq_h2d_ok(h2d_copy(d_scales, gptq.scales.data, sc_bytes, stream), "scales");
 
     // 4. Upload g_idx to GPU (optional, for desc_act reordering)
     int32_t* d_g_idx = nullptr;
-    bool g_idx_ok = true;
     if (gptq.g_idx.data) {
         size_t gi_bytes = static_cast<size_t>(K) * sizeof(int32_t);
         if (checked_cuda_malloc(reinterpret_cast<void**>(&d_g_idx), gi_bytes, stream) != cudaSuccess || !d_g_idx) {
             // #2253: no sequential-group fallback; fails through the step-5 cleanup below.
             IMP_LOG_ERROR("GPTQ: failed to allocate g_idx (%zu bytes)", gi_bytes);
-            g_idx_ok = false;
+            staged_ok = false;
         } else {
-            h2d_copy(d_g_idx, gptq.g_idx.data, gi_bytes, stream);
+            staged_ok &= gptq_h2d_ok(h2d_copy(d_g_idx, gptq.g_idx.data, gi_bytes, stream), "g_idx");
         }
     }
     // desc_act=true without g_idx is refused at load (gptq_refuses, #2253).
@@ -731,9 +740,9 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
     // 5. Allocate FP16 output [N, K]
     size_t out_bytes = static_cast<size_t>(N) * K * sizeof(half);
     half* d_out = nullptr;
-    if (!g_idx_ok ||
+    if (!staged_ok ||
         checked_cuda_malloc(reinterpret_cast<void**>(&d_out), out_bytes, stream) != cudaSuccess || !d_out) {
-        if (g_idx_ok)
+        if (staged_ok)
             IMP_LOG_ERROR("GPTQ: failed to allocate output (%zu bytes)", out_bytes);
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qweight, stream));
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_qzeros, stream));
@@ -1089,13 +1098,7 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
         // fed the scan a positive decay rate that grew the state to inf (#1282). Decide from
         // VALUES instead: -exp(x) is strictly negative for any real x, so any value >=0 can only be
         // raw HF A_log. dtype is kept as an OR since BF16/F16 storage is HF-only regardless of sign.
-        bool has_nonnegative = false;
-        for (int64_t k = 0; k < n_elem; ++k) {
-            if (h_fp32[k] >= 0.0f) {
-                has_nonnegative = true;
-                break;
-            }
-        }
+        const bool has_nonnegative = std::any_of(h_fp32.begin(), h_fp32.end(), [](float v) { return v >= 0.0f; });
         const bool is_ssm_a_hf = (t == &L.ssm_a) &&
                                  (t->qtype == QType::BF16 || t->qtype == QType::F16 || has_nonnegative);
         if (is_ssm_a_hf) {
@@ -1109,7 +1112,11 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
                     h_fp32[0], h_fp32[1], h_fp32[2], h_fp32[3]);
             }
         }
-        h2d_copy(d_data, h_fp32.data(), fp32_bytes, ctx.stream);
+        if (const cudaError_t e = h2d_copy(d_data, h_fp32.data(), fp32_bytes, ctx.stream); e != cudaSuccess) {
+            IMP_LOG_ERROR("SSM F32 tensor H2D copy failed (layer %d): %s", i, cudaGetErrorString(e));
+            ctx.gpu_allocs.push_back(d_data);  // owner frees it with the rest of the failed load
+            return false;
+        }
 
         ctx.gpu_allocs.push_back(d_data);
         t->data = d_data;
@@ -1273,7 +1280,8 @@ static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expe
         return;
 
     size_t free_mem = 0, total_mem = 0;
-    vram_budget_mem_get_info(&free_mem, &total_mem);
+    // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+    (void)vram_budget_mem_get_info(&free_mem, &total_mem);
 
     // Auto-pick default: 10% (aggressive) if ALL experts fit with that overhead, else 30%
     // (conservative). Saves users from a silent large perf penalty on Qwen3-Coder-30B/
@@ -1426,7 +1434,8 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                                          experts_upload_layer)) {
         const int host_layers = expert_placement_host_layers(layer_expert_bytes, experts_upload_layer);
         size_t free_mem = 0, total_mem = 0;
-        vram_budget_mem_get_info(&free_mem, &total_mem);
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&free_mem, &total_mem);
         IMP_LOG_INFO(
             "NVFP4 experts: %d MoE layer(s) stay host-resident (%zu MiB of experts, %zu MiB free) — "
             "they will be served from the expert cache. Decode on those layers is materially "
@@ -1889,7 +1898,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // Cache VRAM state to avoid per-tensor cudaMemGetInfo calls
     {
         size_t free_mem = 0, total_mem = 0;
-        vram_budget_mem_get_info(&free_mem, &total_mem);
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&free_mem, &total_mem);
         g_cached_free_mem = free_mem;
         g_total_allocated = 0;
         IMP_LOG_DEBUG("VRAM at upload start: %.2f GiB free / %.2f GiB total",
@@ -2241,13 +2251,15 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     if (mtp_.has_value() && mtp_->loaded) {
         size_t allocs_before = gpu_allocations_.size();
         size_t mtp_free_before = 0;
-        vram_budget_mem_get_info(&mtp_free_before, nullptr);
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&mtp_free_before, nullptr);
         if (upload_mtp_weights(*mtp_, ctx)) {
             // Report what the device actually gave up, not the size on disk:
             // the restacking copy makes the second number roughly 2.5x the
             // first, and the file size read like the whole cost.
             size_t mtp_free_after = 0;
-            vram_budget_mem_get_info(&mtp_free_after, nullptr);
+            // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+            (void)vram_budget_mem_get_info(&mtp_free_after, nullptr);
             const size_t mtp_used = mtp_free_before > mtp_free_after ? mtp_free_before - mtp_free_after : 0;
             IMP_LOG_INFO(
                 "MTP head: uploaded to GPU (%zu allocations, %zu MiB of device free, "
@@ -2274,7 +2286,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // the conversion work. Best-effort; skipped for models whose device
     // sources were mutated in place during upload (Gemma-4 fused split).
     if (warm_cache && fully_cold && !device_sources_mutated_ && !source_path_.empty())
-        weight_cache_write(*this, weight_cache_path_for(source_path_, warm_cache_dir));
+        (void)weight_cache_write(*this, weight_cache_path_for(source_path_, warm_cache_dir));  // best-effort, logs
 
     IMP_LOG_INFO("All model weights uploaded to GPU (%zu allocations)", gpu_allocations_.size());
     return true;

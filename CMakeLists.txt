@@ -39,6 +39,10 @@ include(imp-deps)  # third-party dependency pins (single source; mirrored by Doc
 add_library(imp_warnings INTERFACE)
 target_compile_options(imp_warnings INTERFACE
     $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>)
+# #2211: a dropped [[nodiscard]] status is a build error. nvcc front end: diag 2809.
+target_compile_options(imp_warnings INTERFACE
+    $<$<COMPILE_LANGUAGE:CXX>:-Werror=unused-result>
+    $<$<COMPILE_LANGUAGE:CUDA>:--diag-error=2809>)
 
 # --- CUDA Toolkit ---
 find_package(CUDAToolkit 13.2 REQUIRED)

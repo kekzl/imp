@@ -184,7 +184,7 @@ void stage_host_dequant(const Tensor& w, StagePlan& p) {
 
 // Shared shape for Q4_0/Q8_0/Q6_K: < 2 dims refused, raw_quant uploads rows, else Fmt::stage_host.
 template <class Fmt>
-bool stage_block_quant(const Tensor& w, QType qtype, bool raw_quant, StagePlan& p) {
+[[nodiscard]] bool stage_block_quant(const Tensor& w, QType qtype, bool raw_quant, StagePlan& p) {
     if (w.ndim < 2) {
         IMP_LOG_WARN("%s weight has < 2 dims, skipping upload", Fmt::kName);
         return false;
@@ -223,7 +223,7 @@ struct Mxfp4Fmt {
             h[data_bytes + i] = src[static_cast<size_t>(i) * kBlockBytes + kDataBytes];
         }
     }
-    static bool stage(const Tensor& w, QType qtype, bool, float, StagePlan& p) {
+    [[nodiscard]] static bool stage(const Tensor& w, QType qtype, bool, float, StagePlan& p) {
         if (w.ndim < 2)
             return false;
         int64_t N = w.shape[0];
@@ -269,7 +269,7 @@ struct Q4_0Fmt {
         p.add(p.h16.data(), p.h16.size() * sizeof(uint16_t));
         p.result_2d(qtype, N, half_K);
     }
-    static bool stage(const Tensor& w, QType qtype, bool raw_quant, float, StagePlan& p) {
+    [[nodiscard]] static bool stage(const Tensor& w, QType qtype, bool raw_quant, float, StagePlan& p) {
         return stage_block_quant<Q4_0Fmt>(w, qtype, raw_quant, p);
     }
 };
@@ -288,7 +288,7 @@ struct Q8_0Fmt {
             out[q] = float_to_fp16(static_cast<float>(quants[q]) * scale_f);
     }
     static void stage_host(const Tensor& w, QType, StagePlan& p) { stage_host_dequant<Q8_0Fmt>(w, p); }
-    static bool stage(const Tensor& w, QType qtype, bool raw_quant, float, StagePlan& p) {
+    [[nodiscard]] static bool stage(const Tensor& w, QType qtype, bool raw_quant, float, StagePlan& p) {
         return stage_block_quant<Q8_0Fmt>(w, qtype, raw_quant, p);
     }
 };
@@ -319,14 +319,14 @@ struct Q6_KFmt {
         }
     }
     static void stage_host(const Tensor& w, QType, StagePlan& p) { stage_host_dequant<Q6_KFmt>(w, p); }
-    static bool stage(const Tensor& w, QType qtype, bool raw_quant, float, StagePlan& p) {
+    [[nodiscard]] static bool stage(const Tensor& w, QType qtype, bool raw_quant, float, StagePlan& p) {
         return stage_block_quant<Q6_KFmt>(w, qtype, raw_quant, p);
     }
 };
 
 // Any dequant_gpu-supported qtype: raw rows, or raw rows dequantized to F16 on device.
 struct GeneralQuantFmt {
-    static bool stage(const Tensor& w, QType qtype, bool raw_quant, float, StagePlan& p) {
+    [[nodiscard]] static bool stage(const Tensor& w, QType qtype, bool raw_quant, float, StagePlan& p) {
         stage_rows_raw(w, qtype, p);
         if (raw_quant) {
             p.log = StagePlan::Log::kRawRows;
@@ -340,14 +340,14 @@ struct GeneralQuantFmt {
 };
 
 struct F16Fmt {
-    static bool stage(const Tensor& w, QType, bool, float, StagePlan& p) {
+    [[nodiscard]] static bool stage(const Tensor& w, QType, bool, float, StagePlan& p) {
         stage_keep(w, p);
         return true;
     }
 };
 
 struct Bf16Fmt {
-    static bool stage(const Tensor& w, QType, bool, float weight_offset, StagePlan& p) {
+    [[nodiscard]] static bool stage(const Tensor& w, QType, bool, float weight_offset, StagePlan& p) {
         stage_bf16(w, weight_offset, p);
         return true;
     }
@@ -356,7 +356,7 @@ struct Bf16Fmt {
 // qtype F32/NONE: the tensor's own qtype decides. BF16 source (SafeTensors) -> FP16 with offset;
 // anything not F32 (e.g. INT8/U8 packed FP4) as-is; F32 -> FP16 without offset.
 struct F32Fmt {
-    static bool stage(const Tensor& w, QType, bool, float weight_offset, StagePlan& p) {
+    [[nodiscard]] static bool stage(const Tensor& w, QType, bool, float weight_offset, StagePlan& p) {
         if (w.qtype == QType::BF16) {
             stage_bf16(w, weight_offset, p);
             return true;
@@ -379,7 +379,7 @@ struct F32Fmt {
 
 // Raw-byte fallback (NVFP4/MXFP4/FP4_E2M1/INT8/INT4 packed payloads), qtype preserved.
 struct RawFmt {
-    static bool stage(const Tensor& w, QType qtype, bool, float, StagePlan& p) {
+    [[nodiscard]] static bool stage(const Tensor& w, QType qtype, bool, float, StagePlan& p) {
         if (w.nbytes() == 0) {
             IMP_LOG_WARN("Empty raw weight for qtype %u, skipping", std::to_underlying(qtype));
             return false;
@@ -393,7 +393,7 @@ struct RawFmt {
 // (0 = ok, result only logged), release(void*), track(void*) (-> gpu_allocs),
 // dequant(raw, out, qtype, rows, cols) (dequant + sync), const char* err_str(int).
 template <class Dev>
-bool commit_gpu_dequant(Tensor& w, QType qtype, const StagePlan& p, Dev& dev) {
+[[nodiscard]] bool commit_gpu_dequant(Tensor& w, QType qtype, const StagePlan& p, Dev& dev) {
     void* d_raw = dev.alloc(p.bytes[0]);
     if (!d_raw)
         return false;
@@ -426,7 +426,7 @@ void log_commit(const Tensor& w, QType qtype, const StagePlan& p, int copy_err, 
 }
 
 template <class Dev>
-bool commit_plan(Tensor& w, QType qtype, const StagePlan& p, Dev& dev) {
+[[nodiscard]] bool commit_plan(Tensor& w, QType qtype, const StagePlan& p, Dev& dev) {
     if (p.out == StagePlan::Out::kGpuDequant)
         return commit_gpu_dequant(w, qtype, p, dev);
     void* d[2] = {};
@@ -457,7 +457,7 @@ bool commit_plan(Tensor& w, QType qtype, const StagePlan& p, Dev& dev) {
 
 // One upload path for every format: Fmt stages on host, commit_plan does the device side.
 template <class Fmt, class Dev>
-bool upload_fmt(Tensor& w, QType qtype, bool raw_quant, float weight_offset, Dev& dev) {
+[[nodiscard]] bool upload_fmt(Tensor& w, QType qtype, bool raw_quant, float weight_offset, Dev& dev) {
     StagePlan p;
     if (!Fmt::stage(w, qtype, raw_quant, weight_offset, p))
         return false;
@@ -466,7 +466,7 @@ bool upload_fmt(Tensor& w, QType qtype, bool raw_quant, float weight_offset, Dev
 
 // Per-qtype dispatch (upload_weight). Dev::dequant_supported(qtype) = dequant_gpu_supported.
 template <class Dev>
-bool upload_dispatch(Tensor& w, QType qtype, bool raw_quant, float weight_offset, Dev& dev) {
+[[nodiscard]] bool upload_dispatch(Tensor& w, QType qtype, bool raw_quant, float weight_offset, Dev& dev) {
     switch (qtype) {
     case QType::MXFP4: return upload_fmt<Mxfp4Fmt>(w, qtype, raw_quant, weight_offset, dev);
     case QType::Q4_0: return upload_fmt<Q4_0Fmt>(w, qtype, raw_quant, weight_offset, dev);

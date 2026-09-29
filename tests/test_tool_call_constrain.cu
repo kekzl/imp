@@ -51,7 +51,7 @@ TEST(SchemaConstrainTest, ToolCallEnvelopeAndNameBinding) {
     };
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
 
     // Two tools: add / sub, both {"a" hm... use params with property "d" ...
     std::vector<std::pair<std::string, std::string>> tools = {
@@ -147,7 +147,7 @@ TEST(SchemaConstrainTest, ToolCallHoistedDefsEnforced) {
     };
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
 
     // One tool "add" whose only argument "pt" is a nested $def-referenced model
     // Point = {"x": integer}. Two ref layers: root object → $ref Point → object.
@@ -215,7 +215,7 @@ TEST(SchemaConstrainTest, ToolCallStrictOptionalEnforced) {
     };
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
 
     std::vector<std::pair<std::string, std::string>> tools = {
         {"add", R"({"type":"object","properties":{"d":{"type":"number"}},"required":["d"]})"},
@@ -297,7 +297,7 @@ TEST(SchemaConstrainTest, ToolCallStrictParallelReArms) {
     };
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
 
     std::vector<std::pair<std::string, std::string>> tools = {
         {"add", R"({"type":"object","properties":{"d":{"type":"number"}},"required":["d"]})"},
@@ -360,7 +360,7 @@ TEST(SchemaConstrainTest, Llama3BareArgsForcedEnvelope) {
     };
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
 
     // Bare parameter schema (NOT a TOOL_CALL wrapper).
     auto schema = parse_json_schema(
@@ -424,7 +424,7 @@ TEST(SchemaConstrainTest, XmlToolCallForcedGrammar) {
     };
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
 
     // "read" has a required param (path) and an optional one (limit); "sum"
     // exists to prove name-enum narrowing and cross-tool key isolation.
@@ -552,7 +552,7 @@ TEST(SchemaConstrainTest, XmlToolCallRawValueDelimiterOverlap) {
     };
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
 
     std::vector<std::pair<std::string, std::string>> tools = {
         {"sum", R"({"type":"object","properties":{"vals":{"type":"string"}},"required":["vals"]})"},
@@ -603,7 +603,7 @@ TEST(SchemaConstrainTest, XmlToolCallEmptyValue) {
     };
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
 
     std::vector<std::pair<std::string, std::string>> tools = {
         {"sum", R"({"type":"object","properties":{"vals":{"type":"string"}},"required":["vals"]})"},
@@ -640,7 +640,7 @@ TEST(SchemaConstrainTest, XmlToolCallEnumValueConstrained) {
     };
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
 
     std::vector<std::pair<std::string, std::string>> tools = {
         {"set", R"({"type":"object","properties":{"mode":{"type":"string","enum":["on","off"]}},)"
@@ -694,7 +694,7 @@ TEST(SchemaConstrainTest, XmlToolCallLiteralEnumValue) {
     };
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
     auto schema = build_xml_tool_call_schema(
         {{"set", R"({"type":"object","properties":{"v":{"enum":[1,true]}},"required":["v"]})"}});
     ASSERT_TRUE(schema != nullptr);
@@ -736,7 +736,7 @@ TEST(SchemaConstrainTest, XmlToolCallEmptyValueSingleNewline) {
     };
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
 
     std::vector<std::pair<std::string, std::string>> tools = {
         {"sum", R"({"type":"object","properties":{"vals":{"type":"string"}},"required":["vals"]})"},
@@ -776,7 +776,7 @@ TEST(SchemaConstrainTest, XmlToolCallStrictOptionalEnforced) {
     };
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
 
     std::vector<std::pair<std::string, std::string>> tools = {
         {"sum", R"({"type":"object","properties":{"vals":{"type":"string"}},"required":["vals"]})"},
@@ -838,7 +838,7 @@ TEST(SchemaConstrainTest, XmlToolCallStrictParallelReArms) {
     };
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
 
     std::vector<std::pair<std::string, std::string>> tools = {
         {"sum", R"({"type":"object","properties":{"vals":{"type":"string"}},"required":["vals"]})"},

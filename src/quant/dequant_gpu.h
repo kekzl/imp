@@ -10,7 +10,7 @@ namespace imp {
 // qtype_row_bytes lives in core/qtype.h — included above.
 
 // Returns true if the quant type supports on-GPU dequant to FP16.
-bool dequant_gpu_supported(QType qtype);
+[[nodiscard]] bool dequant_gpu_supported(QType qtype);
 
 // Dequantizes one expert's weight matrix from raw GGML block format to FP16 on GPU.
 // src: raw quantized bytes (rows*qtype_row_bytes(qtype,cols)). dst: FP16 [rows,cols].

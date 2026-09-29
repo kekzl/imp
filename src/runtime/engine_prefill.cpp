@@ -692,7 +692,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                 } lt_reset;
                 executor_->forward_logits(state, logits_out, s);
             });
-            prefill_graph_runner_.execute(pf_stream);
+            // false only without a decode fn; capture/replay failures fall back to eager inside execute().
+            (void)prefill_graph_runner_.execute(pf_stream);
             if (logits_out.data == nullptr) {
                 logits_out = executor_->get_logits_view(/*n=*/1);
             }

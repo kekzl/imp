@@ -95,7 +95,7 @@ struct MtpBindPool {
 };
 
 // Is req_id bound: the active binding or a parked one.
-inline bool mtp_bound(const MtpBind& active, const MtpBindPool& pool, int req_id) {
+[[nodiscard]] inline bool mtp_bound(const MtpBind& active, const MtpBindPool& pool, int req_id) {
     return req_id >= 0 && (active.req == req_id || pool.binds.count(req_id) != 0);
 }
 
@@ -103,15 +103,15 @@ struct RuntimeConfig;
 class Model;
 // Config + model say yes (no batch-size term): speculative.batch_verify on a
 // recurrent model with speculative.hybrid.
-bool batch_verify_on(const RuntimeConfig& cfg, const Model* model);
+[[nodiscard]] bool batch_verify_on(const RuntimeConfig& cfg, const Model* model);
 // Reserved recurrent slots the batched verify adds to the pool: one per
 // batch slot, 0 when off or at batch 1.
 // Whether the batched verify needs its staging buffers. Separate from the
 // spare-slot count because the factored form reserves no slots and still runs.
-bool batch_verify_wants_bufs(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
+[[nodiscard]] bool batch_verify_wants_bufs(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
 // The factored path is live only once its rows exist: a geometry or allocation
 // refusal clears the flag, and everything downstream reads this, not the flag.
-bool factored_spare_active(const RuntimeConfig& cfg, const BatchVerifyState& bv);
+[[nodiscard]] bool factored_spare_active(const RuntimeConfig& cfg, const BatchVerifyState& bv);
 int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int max_batch_size);
 // MTP draft KV slots: one per batch slot whenever the batched verify runs, else 1.
 // Keyed on the verify, not on batch_verify_spare_slots: the factored spare makes

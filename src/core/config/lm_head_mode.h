@@ -44,13 +44,13 @@ inline LmHeadSource lm_head_source(QType q) {
 }
 
 // This mode builds the FP8 head for a head stored as `src`: fp8 always, auto from a 16-bit source.
-inline bool lm_head_mode_fp8(LmHeadMode m, QType src) {
+[[nodiscard]] inline bool lm_head_mode_fp8(LmHeadMode m, QType src) {
     return m == LmHeadMode::Fp8 ||
            (m == LmHeadMode::Auto && lm_head_source(src) == LmHeadSource::Float16Plus);
 }
 
 // auto serves an 8-bit quantized head at checkpoint precision: no FP8, no NVFP4 (#2224).
-inline bool lm_head_auto_keeps_source(LmHeadMode m, QType src) {
+[[nodiscard]] inline bool lm_head_auto_keeps_source(LmHeadMode m, QType src) {
     return m == LmHeadMode::Auto && lm_head_source(src) == LmHeadSource::Quant8;
 }
 

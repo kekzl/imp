@@ -16,15 +16,15 @@
 
 namespace imp::nvfp4_policy {
 
-inline bool ends_with_(std::string_view s, std::string_view suf) {
+[[nodiscard]] inline bool ends_with_(std::string_view s, std::string_view suf) {
     return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
 }
 
-inline bool starts_with_(std::string_view s, std::string_view pre) {
+[[nodiscard]] inline bool starts_with_(std::string_view s, std::string_view pre) {
     return s.size() >= pre.size() && s.compare(0, pre.size(), pre) == 0;
 }
 
-inline bool contains_(std::string_view s, std::string_view what) {
+[[nodiscard]] inline bool contains_(std::string_view s, std::string_view what) {
     return s.find(what) != std::string_view::npos;
 }
 
@@ -57,7 +57,7 @@ inline std::string module_of_tensor(std::string_view tensor_name) {
 
 // Glob with `*` only (Modelopt writes `*.output_layer`); no character classes,
 // no `?`. Iterative, so a pathological pattern cannot blow the stack.
-inline bool glob_match(std::string_view pat, std::string_view s) {
+[[nodiscard]] inline bool glob_match(std::string_view pat, std::string_view s) {
     size_t p = 0, i = 0, star = std::string_view::npos, mark = 0;
     while (i < s.size()) {
         if (p < pat.size() && pat[p] == '*') {
@@ -133,7 +133,7 @@ inline CompiledIgnoreEntry compile_ignore_entry(std::string_view raw) {
 //   a.b.c        fully qualified module (imp-quantize: tensor name minus .weight)
 //   *.suffix     Modelopt glob
 // Plus a trailing-segment match (lm_head covers model.lm_head), matching vLLM's fused lookup.
-inline bool entry_matches(const CompiledIgnoreEntry& e, const std::string& module) {
+[[nodiscard]] inline bool entry_matches(const CompiledIgnoreEntry& e, const std::string& module) {
     if (e.is_regex) {
         if (!e.regex_ok)
             return false;
@@ -147,11 +147,11 @@ inline bool entry_matches(const CompiledIgnoreEntry& e, const std::string& modul
            module[module.size() - e.literal.size() - 1] == '.';
 }
 
-inline bool entry_matches(std::string_view entry_raw, const std::string& module) {
+[[nodiscard]] inline bool entry_matches(std::string_view entry_raw, const std::string& module) {
     return entry_matches(compile_ignore_entry(entry_raw), module);
 }
 
-inline bool module_is_ignored(const std::string& module, const std::vector<std::string>& ignore) {
+[[nodiscard]] inline bool module_is_ignored(const std::string& module, const std::vector<std::string>& ignore) {
     for (const std::string& e : ignore)
         if (entry_matches(e, module))
             return true;
@@ -167,7 +167,7 @@ inline bool module_is_ignored(const std::string& module, const std::vector<std::
 //   MLA latent   kv_a_proj_with_mqa/kv_b_proj are sliced/reshaped by the runtime (bisected)
 //   MoE router   FP4 across 16 shared scales flips the top-k pick (.gate.weight only)
 //   K % 16       the kernel's hard-coded micro-block size
-inline bool role_excluded(const std::string& name, int64_t K, bool allow_lm_head, std::string& why_not) {
+[[nodiscard]] inline bool role_excluded(const std::string& name, int64_t K, bool allow_lm_head, std::string& why_not) {
     // `embeddings` covers Nemotron's `backbone.embeddings`, which is an
     // embedding table under a name the `embed_*` tests miss; it was the one
     // unclassified slot across the local checkpoint set.
@@ -306,7 +306,7 @@ inline Inventory classify(const std::vector<SlotObservation>& slots, const std::
 // weight_scale_2 is genuinely optional, so applying either rule there refuses working
 // checkpoints. compressed-tensors states a complete partition with a weight_global_scale per
 // module; a gap there is an imp-side read defect, not a property of the export.
-inline bool refuses(const Inventory& inv, bool is_compressed_tensors, std::string* why) {
+[[nodiscard]] inline bool refuses(const Inventory& inv, bool is_compressed_tensors, std::string* why) {
     if (!is_compressed_tensors)
         return false;
     if (inv.unclassified > 0) {

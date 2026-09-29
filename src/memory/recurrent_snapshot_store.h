@@ -56,7 +56,7 @@ public:
     int size() const { return static_cast<int>(entries_.size()); }
     int host_size() const { return static_cast<int>(host_entries_.size()); }
 
-    bool contains(size_t key) const { return entries_.count(key) != 0 || host_entries_.count(key) != 0; }
+    [[nodiscard]] bool contains(size_t key) const { return entries_.count(key) != 0 || host_entries_.count(key) != 0; }
 
     // Look up a snapshot by key and mark it most-recently-used.
     std::shared_ptr<const RecurrentSnapshotEntry> find(size_t key);
@@ -67,7 +67,7 @@ public:
     // straight into the host tier instead. Returns false only when no slab of either tier is
     // free or on a copy failure.
     // With a sidecar, `sidecar_src` (device, sidecar_bytes) lands at data + entry_bytes.
-    bool save(size_t key, int n_tokens, const void* src, cudaStream_t stream, const void* sidecar_src = nullptr);
+    [[nodiscard]] bool save(size_t key, int n_tokens, const void* src, cudaStream_t stream, const void* sidecar_src = nullptr);
     // Saves that landed in the host tier because no device slab was free, and
     // saves dropped because no slab of either tier was.
     int host_direct_saves() const { return host_direct_saves_; }
@@ -89,8 +89,8 @@ private:
     void* acquire_buffer_(cudaStream_t stream);
     void* acquire_host_buffer_();
     void evict_device_lru_(cudaStream_t stream);
-    bool save_to_host_(size_t key, int n_tokens, const void* src, const void* sidecar_src, cudaStream_t stream);
-    bool copy_in_(void* buf, const void* src, const void* sidecar_src, cudaMemcpyKind kind,
+    [[nodiscard]] bool save_to_host_(size_t key, int n_tokens, const void* src, const void* sidecar_src, cudaStream_t stream);
+    [[nodiscard]] bool copy_in_(void* buf, const void* src, const void* sidecar_src, cudaMemcpyKind kind,
                   cudaStream_t stream) const;
     int host_direct_saves_ = 0;
     int dropped_saves_ = 0;

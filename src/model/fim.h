@@ -21,7 +21,7 @@ struct FimTokens {
     int32_t pad = -1;  // optional
     int32_t rep = -1;  // optional: repo-name marker (Qwen2.5-Coder <|repo_name|>)
     int32_t sep = -1;  // optional: file separator (<|file_sep|>)
-    bool supported() const { return pre >= 0 && suf >= 0 && mid >= 0; }
+    [[nodiscard]] bool supported() const { return pre >= 0 && suf >= 0 && mid >= 0; }
 };
 
 // GGUF metadata ids first, then a lookup of the known FIM token texts; a text hit counts only

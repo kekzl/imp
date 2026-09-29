@@ -53,7 +53,7 @@ public:
     // xml (Qwen-Coder / Qwen3.6 templates): body inside <tool_call> is the
     //   XML dialect (<function=NAME><parameter=KEY>, raw-text values);
     //   XML_TOOL_CALL grammar enforces it (see build_xml_tool_call_schema).
-    bool prepare_tool_call(const std::vector<std::pair<std::string, std::string>>& tools,
+    [[nodiscard]] bool prepare_tool_call(const std::vector<std::pair<std::string, std::string>>& tools,
                            const std::string& envelope_open, const std::string& envelope_close,
                            Tokenizer* tokenizer, bool thinking_open, bool optional = false,
                            ChatTemplateFamily tpl_family = ChatTemplateFamily::CHATML, bool parallel = true,
@@ -90,14 +90,14 @@ public:
     // engine behind it is the same RegexNfa that backs JSON-Schema `pattern`.
     // Returns false on an unsupported/malformed pattern — the caller then
     // declines constrained decoding rather than enforcing a wrong grammar.
-    bool prepare_regex(const std::string& pattern, Tokenizer* tokenizer, bool thinking_open = true);
+    [[nodiscard]] bool prepare_regex(const std::string& pattern, Tokenizer* tokenizer, bool thinking_open = true);
 
     // Constrain output to a GBNF grammar (docs/roadmap.md gap 8). Same contract
     // as prepare_regex one step up the Chomsky hierarchy: the engine is a
     // pushdown simulator, so recursive and balanced formats are expressible.
     // Returns false on a grammar that does not compile — the caller then
     // declines constrained decoding rather than enforcing a wrong grammar.
-    bool prepare_grammar(const std::string& gbnf, Tokenizer* tokenizer, bool thinking_open = true);
+    [[nodiscard]] bool prepare_grammar(const std::string& gbnf, Tokenizer* tokenizer, bool thinking_open = true);
 
     // Update FSM state after sampling a token.
     void update(int32_t token);

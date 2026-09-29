@@ -133,7 +133,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     size_t total_vram = 0;
     {
         size_t f;
-        vram_budget_mem_get_info(&f, &total_vram);
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&f, &total_vram);
     }
     // Budget-planner knobs (imp.conf [vram]): clamp once here so direct
     // EngineConfig embedders (tests, C-API) get the same envelope.

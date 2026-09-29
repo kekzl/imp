@@ -17,7 +17,7 @@ size_t gemm_f16_narrow_smallm_workspace_bytes(int n_total_max);
 
 // Returns false (nothing launched) when a shape or the workspace does not
 // fit; the caller keeps its previous path. N1 == 0 runs pair 0 only.
-bool gemm_f16_narrow_smallm(const half* A, int M, int K, const half* W0, half* C0, int N0, const half* W1,
+[[nodiscard]] bool gemm_f16_narrow_smallm(const half* A, int M, int K, const half* W0, half* C0, int N0, const half* W1,
                             half* C1, int N1, void* ws, size_t ws_bytes, cudaStream_t stream);
 
 }  // namespace imp

@@ -23,7 +23,7 @@ public:
     explicit WeightMap(ModelArch arch);
 
     std::string map_name(const std::string& name) const;
-    bool apply_weights(Model& model, const std::unordered_map<std::string, Tensor>& tensors);
+    [[nodiscard]] bool apply_weights(Model& model, const std::unordered_map<std::string, Tensor>& tensors);
 
     // Valid after apply_weights(); all zero before it.
     const SkipStats& skip_stats() const { return skip_stats_; }

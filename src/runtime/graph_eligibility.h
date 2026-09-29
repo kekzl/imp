@@ -43,7 +43,7 @@ enum class GraphDemotionReason {
 const char* graph_demotion_reason_name(GraphDemotionReason r);
 
 // True for the reasons that are decided while requests are already running.
-bool graph_demotion_is_mid_run(GraphDemotionReason r);
+[[nodiscard]] bool graph_demotion_is_mid_run(GraphDemotionReason r);
 
 // The valve looks this many tokens ahead per sequence, not to max_tokens: a
 // worst-case max_tokens evicted a 118k prompt whose reply stopped at 206 tokens.
@@ -66,7 +66,7 @@ inline int kv_unmet_blocks(int ctx_len, int remaining, int held, int block_size)
 // kv_unmet_blocks over the live sequences: while the supply covers it plus 1 %
 // of the pool, eviction would only drop context (a 112k prompt on a 123k pool
 // lost 108400 tokens and answered wrong).
-inline bool kv_pressure_demotes_graphs(int free_blocks, int reclaimable_blocks, int pool_total, int unmet) {
+[[nodiscard]] inline bool kv_pressure_demotes_graphs(int free_blocks, int reclaimable_blocks, int pool_total, int unmet) {
     const int supply = free_blocks + reclaimable_blocks;
     return pool_total > 0 && supply < pool_total / 10 && unmet > 0 &&
            supply < unmet + pool_total / 100;
@@ -77,7 +77,7 @@ inline bool kv_pressure_demotes_graphs(int free_blocks, int reclaimable_blocks, 
 // carries an evicted window (its -1 sentinels would be read by a replayed
 // graph, #948 class). A finished sequence takes its sentinels with it: a
 // process-lifetime count kept StreamingLLM armed for every later request.
-inline bool kv_pressure_repromotes_graphs(int free_blocks, int reclaimable_blocks, int pool_total,
+[[nodiscard]] inline bool kv_pressure_repromotes_graphs(int free_blocks, int reclaimable_blocks, int pool_total,
                                           int live_evicted_seqs) {
     return live_evicted_seqs == 0 && pool_total > 0 && free_blocks + reclaimable_blocks >= pool_total / 5;
 }

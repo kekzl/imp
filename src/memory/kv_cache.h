@@ -74,7 +74,7 @@ public:
 
     // True when this cache holds no memory. Production code has no reason to
     // ask; it is here so a test can assert what it built.
-    bool accounting_only() const { return accounting_only_; }
+    [[nodiscard]] bool accounting_only() const { return accounting_only_; }
 
     // How many blocks this pool could grow to. Equals total_blocks() unless it
     // was built growable and has not reached its ceiling.
@@ -82,7 +82,7 @@ public:
     // Whether the ceiling can actually be reached. Without this, a client reading
     // ceiling == total cannot tell a fixed pool from a growable one sitting at its ceiling,
     // and those want opposite reactions: wait for the card to free, or stop waiting.
-    bool growable() const { return growable_; }
+    [[nodiscard]] bool growable() const { return growable_; }
     // How many times try_grow_to() actually committed more memory. Exposed for
     // /metrics: a pool that keeps growing under load is the signal an operator
     // wants before the pool stops being able to (#1641).
@@ -118,8 +118,8 @@ public:
     void free_block(int block_id);
 
     // ── SWA block group (separate id space, no ref-count sharing) ────
-    bool swa_enabled() const { return swa_max_blocks_ > 0; }
-    bool layer_is_swa(int layer) const {
+    [[nodiscard]] bool swa_enabled() const { return swa_max_blocks_ > 0; }
+    [[nodiscard]] bool layer_is_swa(int layer) const {
         return layer >= 0 && layer < static_cast<int>(layer_is_swa_.size()) && layer_is_swa_[layer];
     }
     int allocate_swa_block();
@@ -147,8 +147,8 @@ public:
     // (layer, block): n_kv_heads * head_dim half2 pairs, (min, max) interleaved.
     // Scalar-geometry pools only (the per-layer ctor refuses). Returns false when
     // ineligible or on allocation failure; every other behaviour is then unchanged.
-    bool enable_key_minmax();
-    bool key_minmax_enabled() const { return minmax_pool_ != nullptr; }
+    [[nodiscard]] bool enable_key_minmax();
+    [[nodiscard]] bool key_minmax_enabled() const { return minmax_pool_ != nullptr; }
     void* key_minmax_ptr(int layer, int block_id);
 
     // INT8/INT4/NVFP4/MXFP4_KV per-head scale access (nullptr if not applicable).
@@ -237,7 +237,7 @@ private:
     std::atomic<int> usable_blocks_{0};
 
     int plan_growth_(int max_blocks, int ceiling_blocks);
-    bool reserve_pool_(size_t total_bytes, int fixed_blocks);
+    [[nodiscard]] bool reserve_pool_(size_t total_bytes, int fixed_blocks);
     int commit_blocks_(int blocks);
 
     // Per-layer geometry, shared by the memory-backed and accounting per-layer

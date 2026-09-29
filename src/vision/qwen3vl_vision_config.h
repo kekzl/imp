@@ -21,6 +21,6 @@ namespace imp {
 // True if vision_config.model_type names a tower this parser covers. One definition on
 // purpose: the config parser and the SafeTensors loader's keep-the-vision-tensors gate must
 // agree exactly, or tensors ride along dead or the tower loads with null slots.
-bool vision_tower_supported(const std::string& vision_model_type);
+[[nodiscard]] bool vision_tower_supported(const std::string& vision_model_type);
 
 }  // namespace imp

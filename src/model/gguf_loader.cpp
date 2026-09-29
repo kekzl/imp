@@ -1141,7 +1141,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             return nullptr;
         }
 
-        tokenizer->load_vocab(tokens, scores, bos_id, eos_id);
+        // tokens is non-empty (branch condition) and load_vocab refuses only an empty vocab: cannot fail.
+        (void)tokenizer->load_vocab(tokens, scores, bos_id, eos_id);
 
         // Load BPE merge rules (for GPT2-style tokenizers and gemma4)
         if (tok_type == "gpt2" || tok_type == "gemma4") {

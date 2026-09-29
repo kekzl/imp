@@ -7,6 +7,15 @@
 #include <stdint.h>
 #include <stddef.h>
 
+// Status the caller must check (#2211). C++17 attribute; GNU C fallback.
+#if defined(__cplusplus) && __cplusplus >= 201703L
+#define IMP_NODISCARD [[nodiscard]]
+#elif defined(__GNUC__)
+#define IMP_NODISCARD __attribute__((warn_unused_result))
+#else
+#define IMP_NODISCARD
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -163,7 +172,7 @@ ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, dou
 ImpError imp_calibration_write(ImpContext ctx, const char* path);
 
 // Reset context state (clear KV cache etc.)
-ImpError imp_context_reset(ImpContext ctx);
+IMP_NODISCARD ImpError imp_context_reset(ImpContext ctx);
 
 // MTP-based speculative decoding (DeepSeek-V3-family, e.g. Qwen3.6 model_mtp.safetensors).
 // k = draft length (1-4 typical). IMP_ERROR_INVALID_ARGUMENT if no MTP head loaded.

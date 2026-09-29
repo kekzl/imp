@@ -35,7 +35,7 @@ namespace imp {
 // numerical class as cuBLAS (f16 in, f32 accumulate), avoids the e4m3
 // quality cliff (#511/#512), no S-matrix. Declined configs (hd!=128,
 // non-F16, chunk continuation) return false; the fp8 FMHA family is NOT a fallback here.
-static bool try_fa2_fp16qk_prefill(const DispatchPolicy& rcfg, const Tensor& q, const Tensor& k,
+[[nodiscard]] static bool try_fa2_fp16qk_prefill(const DispatchPolicy& rcfg, const Tensor& q, const Tensor& k,
                                    const Tensor& v, Tensor& o, int n, int kv_len, int nh, int nkv, int hd,
                                    float scale, int sliding_window, float softcap, int q_offset,
                                    cudaStream_t stream, const int* d_kv_len = nullptr,
@@ -177,7 +177,7 @@ static void require_chunk_kv(const half* k, const half* v) {
 // DEBUG attention.force_cublas_decode (n == 1): K/V rebuilt from the paged cache, then the
 // materialized QK^T path prefill uses. false = setup failed (ERROR logged, ao not written): the
 // caller runs paged attention. Sync copies: never under graph capture.
-static bool cublas_decode_reference(const InferenceState& state, int layer, int kv_layer,
+[[nodiscard]] static bool cublas_decode_reference(const InferenceState& state, int layer, int kv_layer,
                                     const int* layer_block_tables, const Tensor& qv, Tensor& ao, int nh,
                                     int nkv, int hd, float scale, float softcap, int sliding_window,
                                     const void* sinks, cudaStream_t stream) {

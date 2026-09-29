@@ -29,7 +29,7 @@ void quantize_fp16_to_int8_subblock(const __half* X_fp16, int M, int K, int8_t* 
 // Path: (1) reorder Q4_K weight if uncached, (2) quantize activation to s8, (3) dispatch IMMA tile.
 // Eligibility: qtype Q4_K_M; M>=64, N>=32, K%32==0; M>=1024 recommended to amortize quant cost.
 // Returns true if dispatched, false if shape ineligible (no-op).
-bool mmq_q4k_imma_gemm(const void* W_q4k_blocks, const __half* X_fp16, __half* Y_fp16,
+[[nodiscard]] bool mmq_q4k_imma_gemm(const void* W_q4k_blocks, const __half* X_fp16, __half* Y_fp16,
                        int M, int N, int K, cudaStream_t stream);
 
 }  // namespace imp

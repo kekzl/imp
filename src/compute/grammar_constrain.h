@@ -35,7 +35,7 @@ public:
 
     // Grammar-only init for unit tests: no tokenizer, no device buffers. Only
     // update_text/is_done/would_accept work afterwards.
-    bool init_grammar_only(const std::string& gbnf);
+    [[nodiscard]] bool init_grammar_only(const std::string& gbnf);
 
     bool is_initialized() const { return initialized_; }
 
@@ -49,16 +49,16 @@ public:
 
     // Advance with the token the sampler actually chose. Returns false if that
     // token was not in the language (should not happen when apply_mask ran).
-    bool update(int32_t token_id);
+    [[nodiscard]] bool update(int32_t token_id);
 
     // Advance by raw text — the path unit tests use.
-    bool update_text(const std::string& text) { return matcher_.update_text(text); }
+    [[nodiscard]] bool update_text(const std::string& text) { return matcher_.update_text(text); }
 
     // True when the derivation is complete, i.e. stopping here is legal.
     bool is_done() const { return initialized_ && matcher_.is_done(); }
 
     // Would `text` keep the output inside the language? Does not advance.
-    bool would_accept(const std::string& text) const { return !initialized_ || matcher_.would_accept(text); }
+    [[nodiscard]] bool would_accept(const std::string& text) const { return !initialized_ || matcher_.would_accept(text); }
 
     // See JsonConstrainer::set_preamble — lets a reasoning model emit its
     // <think> block before the constraint engages.

@@ -787,7 +787,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             spec_stats_.miss_steps++;
             return false;
         }
-        fill_recurrent_state(*req, state, /*reset=*/false, stream);
+        (void)fill_recurrent_state(*req, state, /*reset=*/false, stream);  // reset=false cannot fail
         if (hybrid_mc) {
             // Grouped recurrent chunk: candidate c is scan sequence c on slot
             // h_spec_mc_slots_[c]. Seed the reserved slots from the committed

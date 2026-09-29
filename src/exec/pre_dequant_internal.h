@@ -25,7 +25,7 @@ namespace imp::pre_dequant_internal {
 
 // The per-row FP8 head (pre_dequant_fp8_lm_head.cpp) can serve this head: F16 or GPU-dequantable
 // source on device, F16 final norm (F16 hidden rows), d_model a multiple of 256.
-inline bool fp8_lm_head_eligible(const Model& m) {
+[[nodiscard]] inline bool fp8_lm_head_eligible(const Model& m) {
     const Tensor& lm = m.output_proj();
     const bool src_ok = lm.qtype == QType::F16 || dequant_gpu_supported(lm.qtype);
     const bool f16_compute = !m.output_norm().data || m.output_norm().qtype == QType::F16;
@@ -33,7 +33,7 @@ inline bool fp8_lm_head_eligible(const Model& m) {
 }
 
 // This load builds the FP8 head: fp8, or auto with a 16-bit source (#2224), and the head is eligible.
-inline bool fp8_lm_head_wanted(const DispatchPolicy& rc, const Model& m) {
+[[nodiscard]] inline bool fp8_lm_head_wanted(const DispatchPolicy& rc, const Model& m) {
     return lm_head_mode_fp8(lm_head_mode(rc.gemm.nvfp4_lm_head), m.output_proj().qtype) &&
            fp8_lm_head_eligible(m);
 }
@@ -48,7 +48,7 @@ inline bool fp8_lm_head_wanted(const DispatchPolicy& rc, const Model& m) {
 // quantized hybrids, so auto defers to nvfp4_lm_head_gdn via is_gdn_hybrid.
 // NATIVE (F16/BF16) heads: auto -> ON unconditionally (cuBLAS GEMV alternative, NVFP4
 // cache wins on bytes; GOAL-listed).
-inline bool nvfp4_lm_head_enabled(const DispatchPolicy& rc, bool quantized_source, QType head_qtype,
+[[nodiscard]] inline bool nvfp4_lm_head_enabled(const DispatchPolicy& rc, bool quantized_source, QType head_qtype,
                                   bool is_dense, int d_model, bool is_gdn_hybrid, bool fp8_head) {
     const LmHeadMode mode = lm_head_mode(rc.gemm.nvfp4_lm_head);
     if (mode == LmHeadMode::Nvfp4)
@@ -154,7 +154,7 @@ inline void deduct_budget(size_t& budget, size_t amount) {
     budget = (budget > amount) ? (budget - amount) : 0;
 }
 
-inline bool create_fused_weight_pair(const Tensor& w_a, const Tensor& w_b,
+[[nodiscard]] inline bool create_fused_weight_pair(const Tensor& w_a, const Tensor& w_b,
                                      const std::unordered_map<const void*, Tensor>& fp16_cache,
                                      VRAMAllocator* allocator, size_t& total_cache_bytes,
                                      size_t remaining_budget, cudaStream_t stream,

@@ -40,7 +40,7 @@ WeightCacheFingerprint weight_cache_fingerprint(const std::string& model_path);
 // Persist the model's transformed live upload records (device bytes D2H'd
 // here). Returns false and logs on any failure; never throws. Writes nothing
 // when there are no transformed records to store.
-bool weight_cache_write(const Model& model, const std::string& cache_path);
+[[nodiscard]] bool weight_cache_write(const Model& model, const std::string& cache_path);
 
 // Load + validate a cache file against the model's identity (arch, n_layers)
 // and the current fingerprint of its source path. Returns nullptr on any

@@ -63,7 +63,7 @@ void TokenRecycleTable::observe_topk(int32_t token, std::span<const int32_t> ids
     // Promote in reverse rank order so ids[0] ends up in slot 0.
     for (const int32_t id : std::views::reverse(ids))
         if (valid_(id))
-            promote_(token, id);
+            (void)promote_(token, id);  // return = "pair existed", streak uses front_existed
     streak_[token] = front_existed
                          ? static_cast<uint8_t>(std::min(255, streak_[token] + 1))
                          : uint8_t{0};

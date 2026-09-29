@@ -16,7 +16,7 @@
 
 namespace imp {
 
-inline bool debug_forward_enabled() { return imp::process_diag_debug_forward(); }
+[[nodiscard]] inline bool debug_forward_enabled() { return imp::process_diag_debug_forward(); }
 
 // Decode-step counter shared between executor_forward.cu (writer) and
 // executor_ssm_gdn.cu (reader). Prefill uses step=0; each decode pass
@@ -33,20 +33,20 @@ inline int& debug_decode_step() {
 inline const char* dump_hidden_dir() { return imp::process_diag_dump_hidden_dir(); }
 
 // Debug readback status: false = ERROR logged, the caller skips its dump.
-inline bool debug_cuda_ok(cudaError_t err, const char* who) {
+[[nodiscard]] inline bool debug_cuda_ok(cudaError_t err, const char* who) {
     if (err != cudaSuccess)
         IMP_LOG_ERROR("[DEBUG_FWD] %s: readback failed: %s", who, cudaGetErrorString(err));
     return err == cudaSuccess;
 }
 
 // Debug D2H: async copy on `stream`, then sync. false = ERROR logged, the caller skips its dump.
-inline bool debug_d2h_async(void* dst, const void* src, size_t bytes, cudaStream_t stream, const char* who) {
+[[nodiscard]] inline bool debug_d2h_async(void* dst, const void* src, size_t bytes, cudaStream_t stream, const char* who) {
     return debug_cuda_ok(cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost, stream), who) &&
            debug_cuda_ok(cudaStreamSynchronize(stream), who);
 }
 
 // Debug D2H: sync `stream`, then a blocking copy. false = ERROR logged, the caller skips its dump.
-inline bool debug_sync_d2h(void* dst, const void* src, size_t bytes, cudaStream_t stream, const char* who) {
+[[nodiscard]] inline bool debug_sync_d2h(void* dst, const void* src, size_t bytes, cudaStream_t stream, const char* who) {
     return debug_cuda_ok(cudaStreamSynchronize(stream), who) &&
            debug_cuda_ok(cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost), who);
 }

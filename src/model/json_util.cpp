@@ -245,7 +245,7 @@ JValue JsonParser::parse_object() {
         }
         break;
     }
-    expect('}');
+    (void)expect('}');  // failure sets error_, reported by ok()
     return v;
 }
 
@@ -268,7 +268,7 @@ JValue JsonParser::parse_array() {
         }
         break;
     }
-    expect(']');
+    (void)expect(']');  // failure sets error_, reported by ok()
     return v;
 }
 
