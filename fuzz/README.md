@@ -27,7 +27,7 @@ fetched (`cmake/imp-fuzzers-cpu.cmake`), which is what the nightly job runs:
 ```bash
 docker run --rm -v $PWD:/src -w /src ubuntu:26.04 bash -c '
   apt-get update -qq && apt-get install -y --no-install-recommends \
-    clang libclang-rt-dev cmake ninja-build &&
+    cmake ninja-build && bash scripts/install_llvm.sh clang libclang-rt &&
   cmake -B /tmp/build-fuzz -S /src -G Ninja \
         -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
         -DIMP_FUZZERS_CPU_ONLY=ON &&

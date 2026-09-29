@@ -50,7 +50,7 @@ permissions:
 jobs:
   build:
     name: Build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       code: ${{ steps.changes.outputs.code }}
       cpp: ${{ steps.changes.outputs.cpp }}
@@ -340,7 +340,7 @@ jobs:
     name: clang-tidy
     needs: build
     if: needs.build.outputs.cpp == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     container:
       image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
     env:
@@ -359,7 +359,7 @@ jobs:
           # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
           rm -f /etc/apt/sources.list.d/cuda*.list
           apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash cmake g++ git python3 clang-tidy libcurl4-openssl-dev
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash cmake g++ git python3 libcurl4-openssl-dev
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # base SHA must be present for the changed-files diff
@@ -384,6 +384,9 @@ jobs:
       # job has carried this line since check-release.sh hit the same wall.
       - name: Trust the checkout (container UID differs from the runner's)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      # Pin, key fingerprint: scripts/install_llvm.sh.
+      - name: Install clang-tidy
+        run: bash scripts/install_llvm.sh clang-tidy
 
       # Setup is a hard step: a failure here fails the job. Only the lint findings
       # below are advisory (#2187: continue-on-error hid exit 128 on every run).
@@ -476,7 +479,7 @@ jobs:
   # requires that exact check name.
   mock-api:
     name: Mock API contract
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -508,7 +511,7 @@ jobs:
     name: Real API contract (model-less)
     needs: build
     if: needs.build.outputs.code == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     container:
       image: ubuntu@sha256:513c074113a871b51a8d16ab445c88779d6452d937a164fb5cc479f32668a41d # 26.04
 
@@ -579,27 +582,14 @@ jobs:
   # for the same reason.
   lint:
     name: Lint
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Install clang-format
-        # ubuntu-24.04 is a non-container host runner — apt and /usr/local/bin
-        # need sudo (the CUDA Build job runs in a container as root, so it doesn't).
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang-format git curl ca-certificates
-          # Pinned to a commit, not to the release/18.x branch, and verified:
-          # this file is made executable on a runner that holds GITHUB_TOKEN
-          # (AUDIT_arch_2026 H-6). The commit is llvmorg-18.1.8, matching the
-          # clang-format apt installs above.
-          if ! command -v git-clang-format >/dev/null; then
-            curl -fsSL https://raw.githubusercontent.com/llvm/llvm-project/3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff/clang/tools/clang-format/git-clang-format \
-              -o /tmp/git-clang-format
-            echo '8097d93cc4021768521a591d8107e11c9c593f226b580a65323ea17cbed6bce4  /tmp/git-clang-format' | sha256sum -c -
-            sudo install -m 0755 /tmp/git-clang-format /usr/local/bin/git-clang-format
-          fi
+        # Host runner: root via sudo. Pin, key fingerprint: scripts/install_llvm.sh (ships git-clang-format).
+        run: sudo bash scripts/install_llvm.sh clang-format
       - name: clang-format (changed lines)
         run: |
           base="${{ github.event.pull_request.base.sha }}"
@@ -632,7 +622,7 @@ jobs:
   # is documented in docs/audit/AUDIT_FILESIZE.md. See CLAUDE.md "File Layout & Size".
   filesize:
     name: File size
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -652,7 +642,7 @@ jobs:
   # failures read as file-size problems (twice on 2026-08-25).
   testlanes:
     name: Test lanes
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -668,7 +658,7 @@ jobs:
   # to mirror. Ubuntu job, no toolchain, seconds.
   docs:
     name: Docs
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -681,7 +671,7 @@ jobs:
 
   hygiene:
     name: Release hygiene
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Release hygiene gate (blocking)
@@ -689,7 +679,7 @@ jobs:
 
   alloc-sites:
     name: Alloc sites
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -700,7 +690,7 @@ jobs:
 
   launchguards:
     name: Launch guards
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -728,7 +718,7 @@ jobs:
   # rather than a flag flip on the required one.
   ptx-fallback:
     name: PTX fallback
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     container:
       image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
     defaults:
@@ -832,7 +822,7 @@ jobs:
   # context) - so read it after a merge, not only before.
   sanitizers:
     name: Sanitizers
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     container:
       image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
     # Own ccache namespace: these objects are RelWithDebInfo + ASan/UBSan host
@@ -1025,7 +1015,7 @@ jobs:
     # configured nothing went unnoticed, since there was no way to run it
     # against a branch before it landed.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # Ubuntu 26.04 for its libstdc++: the tree's C++23 does not compile against
     # the libstdc++ 12 that silkeh/clang:18 ships (std::ranges over string_view),
     # and that image had no ninja and no nvcc either, so this job configured
@@ -1037,9 +1027,12 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            clang libclang-rt-dev cmake ninja-build git ca-certificates libcurl4-openssl-dev
+            cmake ninja-build git ca-certificates libcurl4-openssl-dev
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: "clang + libFuzzer (pin: scripts/install_llvm.sh)"
+        run: bash scripts/install_llvm.sh clang libclang-rt
 
       - name: Restore the corpus
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

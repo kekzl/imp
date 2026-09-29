@@ -272,9 +272,8 @@ for f in "${WORKFLOWS[@]}"; do
 done
 printf '  %d image refs\n' "$n_images"
 
-# 4b. Remote files: two are fetched then executed (the CMake installer in the build image,
-# git-clang-format on a runner holding GITHUB_TOKEN); a branch ref or unverified download is
-# whatever the network hands back that day.
+# 4b. Remote files: the CMake installer in the build image is fetched then executed; a branch
+# ref or unverified download is whatever the network hands back that day.
 n_fetch=0
 for f in "${DOCKERFILES[@]}" "${WORKFLOWS[@]}"; do
     while IFS= read -r hit; do
