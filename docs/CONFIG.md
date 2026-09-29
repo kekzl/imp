@@ -69,8 +69,8 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 
 | flag | default | notes |
 |---|---|---|
-| `--model <path>` | required | GGUF file, SafeTensors directory, or HF repo id |
-| `--revision <rev>` | - | HF revision when `--model` is a hub repo id |
+| `--model <path>` | required | GGUF file, SafeTensors directory, HF repo id (cache only), or `hf://<org>/<repo>[:<file>.gguf]` (downloads, see [Fetching from Hugging Face](#fetching-from-hugging-face)) |
+| `--revision <rev>` | `main` | HF revision when `--model` is a hub repo id or `hf://` |
 | `--mmproj <path>` | - | vision encoder GGUF (Gemma-3/4; Qwen3-VL carries its tower in the checkpoint) |
 | `--image <path>` | - | repeatable (Qwen3-VL: several images) |
 | `--gpu-layers <n>` | `-1` (all) | layers on GPU |
@@ -106,7 +106,7 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 | `--bench` / `--bench-pp <n>` / `--bench-reps <n>` | off / `512` / `3` | synthetic benchmark mode (matches llama-bench methodology) |
 | `--perplexity <file>` / `--calibrate <out>` | - | teacher-forced perplexity over a text file (deterministic eval harness, PR #481); `--calibrate` also writes activation-calibration stats (input for `imp-quantize --calib`) |
 
-KV-cache VRAM reservation: `--max-seq-len`/`--min-kv-tokens` control it; auto targets ~60% of free VRAM for KV, sized for the actual KV dtype after model-specific overrides (Gemma-4 -> FP16 KV via the `engine.cpp:500` carve-out). `--min-kv-tokens` overrides the defensive 80% cap, trading FP16 weight-cache capacity for more context - e.g. for a long-context prompt: `--min-kv-tokens 14000 --prompt "$(cat long.txt)"`.
+KV-cache VRAM reservation: `--max-seq-len`/`--min-kv-tokens` control it; auto targets ~60% of free VRAM for KV, sized for the actual KV dtype after model-specific overrides (Gemma-4 keeps FP8 KV: `src/runtime/engine_init_resolver.cpp:794 FP8 KV is safe on Gemma-4`). `--min-kv-tokens` overrides the defensive 80% cap, trading FP16 weight-cache capacity for more context - e.g. for a long-context prompt: `--min-kv-tokens 14000 --prompt "$(cat long.txt)"`.
 
 `--vram-budget <mb>` (also `[runtime] vram_budget_mb`) hard-caps this process's VRAM: every sizing decision (weight caches, KV clamp, expert offload, workspaces, upload gates) sees a virtual GPU of that size, so multiple `imp-server` processes can share one card.
 
@@ -138,6 +138,25 @@ $ imp-bench gemm --json 2>/dev/null
 
 `text` is what stdout would have shown, not `decode(output_ids)`: hidden stop/think markers stay hidden. `imp-bench` reports per-benchmark timings, not tables; machine-readable throughput comes from `imp-cli --bench --json` (what `scripts/gen_perf_baseline.sh` reads).
 
+## Fetching from Hugging Face
+
+`--model hf://<org>/<repo>[:<file>.gguf]` (`imp-server` and `imp-cli`) downloads with libcurl inside the container, then loads from disk. The host needs no Python and no HF tooling.
+
+| item | behaviour |
+|---|---|
+| target | HF cache layout under `HUGGINGFACE_HUB_CACHE`, else `$HF_HOME/hub`; the image sets `HF_HOME=/models/huggingface`, so files land in the mounted `/models` |
+| selection | `:<file>` picks one `.gguf`; without it: the repo's only `.gguf`, else exit 1 with the list; a repo without `.gguf` takes top-level `*.safetensors`, `*.json`, `*.jinja`, `tokenizer.model`, `merges.txt`, `vocab.txt` |
+| auth | `HF_TOKEN` sent as `Authorization: Bearer`; a gated repo without it fails before any byte is written |
+| integrity | `<file>.part`, resumed with `Range` (3 retries per start, and again on the next start), LFS files checked against the sha256 from `/api/models/<repo>?blobs=true`; a mismatch deletes the part |
+| second start | `refs/<rev>` plus the file present: `hf-fetch: cache hit ... no download`, no network request; delete `refs/<rev>` to pick up a newer commit |
+| endpoint | `HF_ENDPOINT` (default `https://huggingface.co`) |
+| permissions | the image user is uid 1001; a host bind mount owned by another uid needs `docker run --user $(id -u):$(id -g)` |
+
+```bash
+docker run --gpus all --user "$(id -u):$(id -g)" -v ~/models:/models -e HF_TOKEN \
+  -p 127.0.0.1:8080:8080 ghcr.io/kekzl/imp:latest --model hf://Qwen/Qwen3-0.6B-GGUF
+```
+
 ## Server flags (`imp-server` only, not on `imp-cli`)
 
 Both GGUF and SafeTensors accepted; `--model` is optional (model-less start, first request naming a model under `--models-dir` loads it; unresolved names get 503). Per-request caps (`--max-n`, `--max-batch-items`, `--max-logit-bias`, `--max-images-per-request`, HTTP timeouts) and auth flags: [`DEPLOYMENT.md`](DEPLOYMENT.md#auth-and-exposure).
@@ -152,6 +171,9 @@ Both GGUF and SafeTensors accepted; `--model` is optional (model-less start, fir
 | `--max-concurrent <n>` | `64` (`0`=unlimited) | max simultaneous requests |
 | `--rate-limit <n>` | `0` (unlimited) | max requests/min per IP |
 | `--log-requests <path>` | off | append per-request JSONL with prompt + response content + timing |
+| `--responses-store-ttl <s>` | `3600` (`0`=store off) | lifetime of a `store: true` response, see [API_FEATURES.md](API_FEATURES.md#responses-store) |
+| `--responses-store-max-entries <n>` | `1000` (`0`=store off) | Responses store entry cap, LRU eviction |
+| `--responses-store-max-mib <n>` | `256` (`0`=store off) | Responses store byte cap, LRU eviction |
 | `--reasoning-format <f>` | `deepseek` | `deepseek` or `none` - controls `<think>` channel handling |
 | `--think-budget <f>` | `0.5` (`0`=off) | fraction of `max_tokens` a reasoning model may spend thinking; force-closed at `max_tokens - max(reserve, max_tokens/4)`, paired with `runtime.think_answer_reserve` |
 | `--request-timeout <s>` | `300` (`0`=unlimited) | per-request timeout |

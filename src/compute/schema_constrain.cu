@@ -474,7 +474,8 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
         int t = 256, b = (vocab_size + t - 1) / t;
         constrain_mask_allow_kernel<<<b, t, 0, stream>>>(d_logits, dev_.categories(), dev_.token_allow(),
                                                          dev_.allowed_mask(), vocab_size,
-                                                         /*n_classified=*/vocab_size_, /*use_allow=*/true);
+                                                         /*n_classified=*/vocab_size_,
+                                                         /*use_token_allow=*/true);
         IMP_CUDA_CHECK_LAUNCH();
         return;
     }

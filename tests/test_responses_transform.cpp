@@ -158,13 +158,12 @@ TEST(ResponsesTransform, UnmappableToolChoiceIsRefused) {
               "f");
 }
 
-TEST(ResponsesTransform, StatefulFieldsRejected) {
+// #2206: the handler resolves both fields; an unresolved previous_response_id is a handler bug.
+TEST(ResponsesTransform, StatefulFieldsAreTheHandlers) {
     EXPECT_THROW(
         responses_to_openai_body(json{{"input", "x"}, {"previous_response_id", "resp_1"}}),
         std::invalid_argument);
-    EXPECT_THROW(responses_to_openai_body(json{{"input", "x"}, {"store", true}}),
-                 std::invalid_argument);
-    // store=false (what Codex/Agents SDK send) is fine.
+    EXPECT_NO_THROW(responses_to_openai_body(json{{"input", "x"}, {"store", true}}));
     EXPECT_NO_THROW(responses_to_openai_body(json{{"input", "x"}, {"store", false}}));
 }
 

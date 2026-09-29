@@ -97,6 +97,7 @@ __global__ void extract_patches_kernel(const half* __restrict__ pixels,  // [3, 
 }
 
 // Standard LayerNorm: out = (x - mean) / sqrt(var + eps) * weight + bias
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void vision_layernorm_kernel(const half* __restrict__ x, const half* __restrict__ weight,
                                         const half* __restrict__ bias, half* __restrict__ out, int D,
                                         float eps) {
@@ -128,8 +129,10 @@ __global__ void vision_layernorm_kernel(const half* __restrict__ x, const half* 
         o_row[i] = __float2half(v);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // RMSNorm: out = x / sqrt(mean(x^2) + eps) * weight
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void vision_rmsnorm_kernel(const half* __restrict__ x, const half* __restrict__ weight,
                                       half* __restrict__ out, int D, float eps) {
     int row = blockIdx.x;
@@ -151,6 +154,7 @@ __global__ void vision_rmsnorm_kernel(const half* __restrict__ x, const half* __
         o_row[i] = __float2half(v);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Add bias: x[row, i] += bias[i]
 __global__ void add_bias_kernel(half* __restrict__ x, const half* __restrict__ bias, int N, int D) {
@@ -455,10 +459,14 @@ bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t 
         return ptr != nullptr;
     };
 
-    if (!alloc(d_patches_, np * pd) || !alloc(d_hidden_, np * hd) || !alloc(d_residual_, np * hd) ||
-        !alloc(d_q_, np * hd) || !alloc(d_k_, np * hd) || !alloc(d_v_, np * hd) ||
-        !alloc(d_attn_out_, np * hd) || !alloc(d_attn_scores_, static_cast<size_t>(nh) * np * np) ||
-        !alloc(d_ffn_, np * ff) || !alloc(d_pooled_, cfg.num_image_tokens * hd)) {
+    if (!alloc(d_patches_, static_cast<int64_t>(np) * pd) ||
+        !alloc(d_hidden_, static_cast<int64_t>(np) * hd) ||
+        !alloc(d_residual_, static_cast<int64_t>(np) * hd) || !alloc(d_q_, static_cast<int64_t>(np) * hd) ||
+        !alloc(d_k_, static_cast<int64_t>(np) * hd) || !alloc(d_v_, static_cast<int64_t>(np) * hd) ||
+        !alloc(d_attn_out_, static_cast<int64_t>(np) * hd) ||
+        !alloc(d_attn_scores_, static_cast<size_t>(nh) * np * np) ||
+        !alloc(d_ffn_, static_cast<int64_t>(np) * ff) ||
+        !alloc(d_pooled_, static_cast<int64_t>(cfg.num_image_tokens) * hd)) {
         IMP_LOG_ERROR("Vision encoder: workspace allocation failed");
         free_buffers();
         return false;
@@ -470,7 +478,7 @@ bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t 
         int grid = cfg.image_size / cfg.patch_size;
         d_pos_x_ = static_cast<int*>(take(np * sizeof(int)));
         d_pos_y_ = static_cast<int*>(take(np * sizeof(int)));
-        if (!alloc(d_gate_, np * ff) || !d_pos_x_ || !d_pos_y_) {
+        if (!alloc(d_gate_, static_cast<int64_t>(np) * ff) || !d_pos_x_ || !d_pos_y_) {
             IMP_LOG_ERROR("Vision encoder: gemma4v workspace allocation failed");
             free_buffers();
             return false;
@@ -486,11 +494,11 @@ bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t 
 
     size_t total_mb = (np * pd + np * hd * 4 +
                        np * hd +  // patches + hidden/residual/q/attn_out + k/v overlap
-                       static_cast<size_t>(nh) * np * np +  // attention scores
-                       np * ff +                            // ffn
-                       cfg.num_image_tokens * hd            // pooled
+                       static_cast<size_t>(nh) * np * np +              // attention scores
+                       static_cast<int64_t>(np) * ff +                  // ffn
+                       static_cast<int64_t>(cfg.num_image_tokens) * hd  // pooled
                        ) *
-                      sizeof(half) / (1024 * 1024);
+                      sizeof(half) / (static_cast<int64_t>(1024) * 1024);
 
     IMP_LOG_INFO(
         "Vision encoder: workspace %.0f MiB "

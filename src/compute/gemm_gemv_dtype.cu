@@ -326,7 +326,7 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
                 // Fallback: use cuBLAS gemv for other dtypes via gemm with N=1.
                 // Construct a temporary Tensor view for the column vectors.
                 Tensor x_col;
-                x_col.data = static_cast<char*>(x.data) + b * K * dtype_size(x.qtype);
+                x_col.data = static_cast<char*>(x.data) + static_cast<int64_t>(b) * K * dtype_size(x.qtype);
                 x_col.qtype = x.qtype;
                 x_col.ndim = 2;
                 x_col.shape[0] = K;
@@ -336,7 +336,7 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
                 x_col.on_device = true;
 
                 Tensor y_col;
-                y_col.data = static_cast<char*>(y.data) + b * M * dtype_size(y.qtype);
+                y_col.data = static_cast<char*>(y.data) + static_cast<int64_t>(b) * M * dtype_size(y.qtype);
                 y_col.qtype = y.qtype;
                 y_col.ndim = 2;
                 y_col.shape[0] = M;
@@ -356,6 +356,7 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
 // on-the-fly. ROWSCALE selects a per-row (output-channel) scale instead of one per-tensor
 // scale (the fp8_ssm_proj sidecar quantizes heterogeneous packed rows, where one tensor scale
 // wastes e4m3 range).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <bool ROWSCALE>
 __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* __restrict__ x,
                                      half* __restrict__ y, int M, int K, float scale,
@@ -427,9 +428,11 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* 
         y[row] = __float2half(sum);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Fused Q6_K GEMV, dequant-and-dot in one pass. Q6_K block = 210 bytes for 256 elements:
 // ql[128]+qh[64]+scales[16]+d[2]. Each warp computes one output row's dot product.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W, const half* __restrict__ x,
                                 half* __restrict__ y, int M, int K) {
     const int warps_per_block = blockDim.x / 32;
@@ -490,6 +493,7 @@ __global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W, const half* __res
     if (lane == 0)
         y[row] = __float2half(sum);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void gemv_q6k(const void* W, const half* x, half* y, int M, int K, cudaStream_t stream) {
     gemv_q6k_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(W), x, y, M, K);
@@ -499,6 +503,7 @@ void gemv_q6k(const void* W, const half* x, half* y, int M, int K, cudaStream_t 
 // Fused Q8_0 GEMV, dequant-and-dot in one pass. Q8_0 block = 34 bytes for 32 elements:
 // d[2]+qs[32]. Each warp computes one output row; each thread handles one element per block
 // (32 threads = 32 elements = 1 block).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void gemv_q8_0_kernel(const uint8_t* __restrict__ W, const half* __restrict__ x,
                                  half* __restrict__ y, int M, int K) {
     const int warps_per_block = blockDim.x / 32;
@@ -527,6 +532,7 @@ __global__ void gemv_q8_0_kernel(const uint8_t* __restrict__ W, const half* __re
     if (lane == 0)
         y[row] = __float2half(sum);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void gemv_q8_0(const void* W, const half* x, half* y, int M, int K, cudaStream_t stream) {
     gemv_q8_0_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(W), x, y, M, K);

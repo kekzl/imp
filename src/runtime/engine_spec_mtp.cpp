@@ -654,6 +654,10 @@ bool Engine::enable_mtp_spec_decode(int k) {
         IMP_LOG_ERROR("enable_mtp_spec_decode: model has no MTP head loaded");
         return false;
     }
+    if (!mtp_forward_implemented(*model_->mtp_)) {
+        IMP_LOG_WARN("enable_mtp_spec_decode: %s", kMtpForwardMissingLog);
+        return false;
+    }
     if (mtp_ws_storage_ != nullptr) {
         IMP_LOG_WARN("enable_mtp_spec_decode: already enabled, k=%d -> %d", mtp_spec_k_, k);
         mtp_spec_k_ = k;

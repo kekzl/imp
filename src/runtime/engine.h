@@ -102,8 +102,10 @@ struct EngineConfig {
     // NVFP4 decode weight cache: -1=auto, 0=off, 1=additive (FP16+NVFP4), 2=NVFP4 only
     int use_nvfp4_decode = -1;
     // nvfp4_decode_all: extend the NVFP4 decode cache to Q4_K/Q3_K/Q2_K.
-    // fp8_lm_head: gemm.nvfp4_lm_head=fp8, the budget reserves the FP8 head instead of NVFP4.
-    bool nvfp4_decode_all = false, fp8_lm_head = false;
+    // fp8_lm_head: gemm.nvfp4_lm_head=fp8, or auto with a 16-bit head (#2224): the budget reserves the
+    // FP8 head instead of NVFP4 (larger than NVFP4, so an auto fallback to NVFP4 stays inside it).
+    // lm_head_source_only: auto with an 8-bit quantized head, neither FP8 nor NVFP4 is built (#2224).
+    bool nvfp4_decode_all = false, fp8_lm_head = false, lm_head_source_only = false;
 
     // Minimum KV cache tokens. Budget planner guarantees at least this many
     // tokens of KV capacity before allocating weight caches. 0 = auto.
@@ -180,6 +182,7 @@ public:
     // lora_load returns adapter id >= 1, or 0 on failure; id 0 = base model.
     int lora_load(const std::string& path);
     bool lora_set(int id);  // 0 deactivates
+    bool lora_unload(int id);  // frees it; slot stays empty, ids never reused (prefix salt = id)
     int active_lora() const { return active_lora_; }
 
     // Reset batch pool upload cache (call on context_reset to prevent
@@ -1387,7 +1390,7 @@ private:
     // same admission/save pattern as the hybrid pair, but the state is the
     // packed windowed-layer KV instead of the recurrent slab.
     int swa_prefix_reuse_limit_(Request& req);
-    int snapshot_end_(const Request& req) const;  // hybrid or SWA save position, 0 = none
+    int snapshot_end_(const Request& req, int offset = 0) const;  // next hybrid/SWA save position, 0 = none
     void maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> tokens,
                                        cudaStream_t stream, bool hard_sync);
     void finish_request(std::shared_ptr<Request>& req);

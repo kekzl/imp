@@ -185,7 +185,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                        ? *hw->payload.nvfp4.tensor_scale
                                        : 1.0f;
                 tmp.N = static_cast<int>(hw->shape[0]);
-                tmp.K = static_cast<int>(hw->shape[1]) * 2;
+                tmp.K = static_cast<int64_t>(static_cast<int>(hw->shape[1])) * 2;
                 return tmp;
             };
             NvFP4QuantResult nv_g = nv_g_secondary ? nv_g_it->second : from_handle(hwg);
@@ -337,7 +337,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                             ? *hwd->payload.nvfp4.tensor_scale
                                             : 1.0f;
                 wd_nvfp4.N = static_cast<int>(hwd->shape[0]);
-                wd_nvfp4.K = static_cast<int>(hwd->shape[1]) * 2;  // packed → logical K
+                wd_nvfp4.K = static_cast<int64_t>(static_cast<int>(hwd->shape[1])) * 2;  // packed → logical K
             }
             int K_d = wd_nvfp4.K;
             int M_d = wd_nvfp4.N;
@@ -412,7 +412,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                         ? *hwd->payload.nvfp4.tensor_scale
                                         : 1.0f;
             wd_nvfp4.N = static_cast<int>(hwd->shape[0]);
-            wd_nvfp4.K = static_cast<int>(hwd->shape[1]) * 2;  // packed → logical K
+            wd_nvfp4.K = static_cast<int64_t>(static_cast<int>(hwd->shape[1])) * 2;  // packed → logical K
             int K_d = wd_nvfp4.K;
             int M_d = wd_nvfp4.N;
             if (cfg.ffn_activation != FFNActivation::GEGLU)

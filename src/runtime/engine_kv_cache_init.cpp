@@ -874,7 +874,7 @@ bool Engine::init_kv_cache() {
     // all-or-nothing (mirrors executor_forward_moe.cu nvfp4_covers_layer). One
     // uncovered layer falls to host-args legacy, which throws under graph capture.
     if (mcfg.is_nvfp4_prequant && mcfg.n_experts > 0) {
-        int moe_layers = 0, covered = 0;
+        int moe_layers = 0, covered = 0, uncovered_on_device = 0;
         for (int i = 0; i < mcfg.n_layers; i++) {
             const auto& L = model_->layer(i);
             bool has_experts = L.expert_up_packed.data != nullptr ||
@@ -887,7 +887,12 @@ bool Engine::init_kv_cache() {
                 ok = L.nvfp4_moe_gate_ptr != nullptr;
             if (ok)
                 covered++;
+            else if (!L.expert_w_up.empty() && L.expert_w_up[0].on_device)
+                uncovered_on_device++;  // host-resident layers go to the device expert cache instead
         }
+        // #2180: an uncovered device-resident layer decodes on the legacy path, whose replay faulted.
+        if (uncovered_on_device > 0)
+            demote_graphs_(GraphDemotionReason::MoeDecodeCacheIncomplete);
         if (moe_layers > 0 && covered == moe_layers) {
             IMP_LOG_INFO("NVFP4 decode caches: FULL (%d/%d MoE layers) — decode graph "
                          "capture eligible",

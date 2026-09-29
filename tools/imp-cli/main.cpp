@@ -7,6 +7,7 @@
 #include "args.h"
 #include "model/chat_template.h"
 #include "model/image_placeholders.h"
+#include "model/hf_fetch.h"
 #include "model/hf_hub.h"
 #include "model/tokenizer.h"
 #include <sys/stat.h>
@@ -94,6 +95,16 @@ int main(int argc, char** argv) {
 
     printf("IMP Inference Engine %s\n", imp_version());
 
+    if (imp::hf::is_hf_uri(args.model_path)) {
+        // hf://org/repo[:file]: download into the HF cache (container side), then load from disk.
+        const std::string fetched = imp::hf::fetch_model(args.model_path, args.revision);
+        if (fetched.empty()) {
+            fprintf(stderr, "Failed to fetch model: %s\n", args.model_path.c_str());
+            return imp::tools::exit_code_for(IMP_ERROR_FILE_NOT_FOUND);
+        }
+        args.model_path = fetched;
+    }
+
     // Resolve model path: supports local files, directories, and HuggingFace repo IDs.
     // Auto-detect format: directories with .safetensors → SafeTensors, else GGUF.
     std::string resolved_model = args.model_path;
@@ -148,7 +159,8 @@ int main(int argc, char** argv) {
     // not end up with ngram off and nothing drafting (mtp_auto_after_load).
     mtp_k = imp::tools::mtp_auto_after_load(
         runtime_cfg, mtp_k, model->model->mtp_.has_value() && model->model->mtp_->loaded,
-        args.mtp_spec_decode_k);
+        args.mtp_spec_decode_k,
+        !model->model->mtp_.has_value() || imp::mtp_forward_implemented(*model->model->mtp_));
 
     ImpConfig config = imp_config_default();
 

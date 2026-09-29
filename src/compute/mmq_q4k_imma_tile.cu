@@ -52,6 +52,7 @@ __device__ __forceinline__ void cp_async_wait_group() {
 
 // Per-CTA async load of one K-block: 128 threads, each issues one A-load (16B) and B-load (8B).
 // A: 64x32=2048B = 128x16B via ca_16. B: 32x32=1024B = 128x8B via ca_8.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ void async_load_tile_mw(int tid, const int8_t* X_s8,
                                                    const int8_t* W_s8, int8_t (*sA)[kBlockK],
                                                    int8_t (*sB)[kBlockK], int base_m, int base_n,
@@ -73,6 +74,7 @@ __device__ __forceinline__ void async_load_tile_mw(int tid, const int8_t* X_s8,
         cp_async_ca_8(dst, src);
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // 4 warps per CTA, each warp doing WRM·WRN = 2·2 = 4 MMAs per K-block.
 __global__ void mmq_q4k_imma_tile_kernel(const int8_t* __restrict__ X_s8,
@@ -320,6 +322,8 @@ ActScratch g_act_scratch;
 // (mmq_q8_imma.cu hazard, same fix). Activation scratch is arena-owned; only its guard is re-armed.
 void mmq_q4k_imma_reset_static_cuda_state() {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
+    // frees every entry, order-independent (#2210)
+    // NOLINTNEXTLINE(bugprone-nondeterministic-pointer-iteration-order)
     for (auto& [_, c] : g_w_cache) {
         (void)cudaFree(c.w_sym_s8);
         (void)cudaFree(c.eff_alpha);

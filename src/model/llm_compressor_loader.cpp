@@ -115,10 +115,10 @@ bool name_is_unused(const std::string& in, bool keep_vision, bool keep_mtp) {
         return !keep_mtp;  // skipped by translate_name, but diverted, not dropped
     // Qwen4Exp n-gram table (F8 shards, I64 hash buffers, scale): NGramTable reads them
     // host-side; the 51 GiB shard must never be populated by the standard loader.
-    if (in.find(".ple.ple_embedding.") != std::string::npos)
-        return true;
-    return false;
+    return name_is_ple_host_table(in);
 }
+
+bool name_is_ple_host_table(const std::string& in) { return in.find(".ple.ple_embedding.") != std::string::npos; }
 
 NameTranslation translate_name(const std::string& in, TranslationCounters& counters, bool keep_vision) {
     std::string out = in;

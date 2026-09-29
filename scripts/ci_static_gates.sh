@@ -38,6 +38,8 @@ if want filesize; then
     run "that gate still merges #include'd .cu" python3 tools/check_filesize.py --selftest
     run "function bodies over 500 code LOC"     python3 tools/check_function_size.py
     run "that gate still parses what it must"   python3 tools/check_function_size.py --selftest
+    run "CCN > 25 ratchet (#2210)"              python3 tools/check_complexity.py
+    run "that gate still counts what it must"   python3 tools/check_complexity.py --selftest
     run "deterministic-mode sites vs the doc"   python3 tools/check_determinism_sites.py
     run "that gate still catches its drift"     python3 tools/check_determinism_sites.py --selftest
     run "header-inline definitions with no caller" python3 tools/check_dead_inline_accessors.py
@@ -66,6 +68,7 @@ if want gpulock; then
     echo "== GPU lock / image tag =="
     run "gpu_lock.sh acquire/release/stale/run"  bash tests/test_gpu_lock.sh
     run "image_tag.sh tag/tree/check"            bash tests/test_image_tag.sh
+    run "verify-ab resolves base sha once"       bash tests/test_verify_ab_sha_once.sh
 fi
 
 # Nothing throws across the C ABI: every `ImpError imp_*()` body in src/api/
@@ -145,7 +148,9 @@ fi
 
 if want citations; then
     echo "== Doc citations =="
+    # Fails only on a gone or ambiguous anchor; line drift is a warning (#2231).
     run "file:line citations in living docs"    python3 scripts/check_doc_citations.py .
+    run "that gate still tells drift from dead" python3 scripts/check_doc_citations.py --selftest
 fi
 
 if want hygiene; then

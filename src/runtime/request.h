@@ -156,6 +156,11 @@ struct Request {
     int32_t pipe_inflight_force = -1;
     int prefill_offset = 0;  // Chunked prefill: tokens processed so far
     int cached_tokens = 0;   // Tokens served from prefix cache (skipped in prefill)
+    // Skip prefix-cache reuse at admission: full prefill, cached_tokens stays 0 (#2198 direct).
+    bool bypass_prefix_cache = false;
+    // Extra recurrent-snapshot boundary (block floor of this many tokens) during prefill: the
+    // prefix shared with sibling requests, e.g. /v1/decide serial evidence (#2198). 0 = none.
+    int snapshot_hint_tokens = 0;
     // When the scheduler moved this request into its first prefill batch
     // (epoch = never). The server's queue histogram measures up to here:
     // the wait behind max_batch_size and KV admission, not the batching
@@ -297,6 +302,12 @@ struct Request {
     std::shared_ptr<Buffer> mrope_delta_dev;
 
     int context_len() const { return static_cast<int>(input_tokens.size() + output_tokens.size()); }
+    // Prefix-cache reuse allowed: an image joins only via its content hash (every image token
+    // shares one id); direct mode (#2198) never reuses; embeddings mean-pool every input row (#2245).
+    bool prefix_reuse_allowed() const {
+        const bool has_image = image || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
+        return (!has_image || vision_content_hash != 0) && !bypass_prefix_cache && !embedding_request;
+    }
 
     // Deliberately LAST rather than next to `status`: Request is touched every decode step, so
     // inserting into the middle shifts every following field for a value only read on error

@@ -7,6 +7,7 @@
 
 #include "compute/attention_fmha_sm120.h"
 #include "compute/attention_paged_common.cuh"
+#include "compute/fmha_fp8_tile_select.h"
 #include "core/cuda_static_reset.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
@@ -14,6 +15,8 @@
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <float.h>
+#include <iterator>  // std::size
+#include <utility>   // std::index_sequence
 #include <mma.h>
 #include <cute/arch/config.hpp>  // CUTE_ARCH_F8F6F4_MMA_ENABLED
 
@@ -950,13 +953,47 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
     }
 }
 
-// Shared memory for FP8 variant: Q_fp8 uses bytes not halves for Q
-static size_t compute_smem_fp8(int Bq, int Bkv, int head_dim) {
-    return (size_t)Bq * head_dim * sizeof(uint8_t)  // Q_fp8
-           + (size_t)Bkv * head_dim * sizeof(half)  // KV buffer (FP8 K or FP16 V, half is larger)
-           + (size_t)Bq * Bkv * sizeof(float)       // S_tile
-           + (size_t)Bq * head_dim * sizeof(float)  // O_acc
-           + 2 * (size_t)Bq * sizeof(float);        // row_m + row_l
+struct Fp8FmhaLaunch {
+    const Tensor& Q;
+    const Tensor& K;
+    const Tensor& V;
+    Tensor& O;
+    int batch_size, seq_q, seq_kv, n_heads, n_kv_heads;
+    float scale;
+    bool causal;
+    int sliding_window;
+    float softcap;
+    int q_offset;
+    size_t smem;
+    dim3 grid, block;
+    cudaStream_t stream;
+};
+
+template <int BQ, int HD>
+static bool launch_fp8_fmha(const Fp8FmhaLaunch& a) {
+    cudaError_t attr_err = cudaFuncSetAttribute(fmha_sm120_fp8_kernel<BQ, HD>,
+                                                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                static_cast<int>(a.smem));
+    if (attr_err != cudaSuccess)
+        return false;
+    cudaFuncSetAttribute(fmha_sm120_fp8_kernel<BQ, HD>, cudaFuncAttributePreferredSharedMemoryCarveout,
+                         cudaSharedmemCarveoutMaxShared);
+    fmha_sm120_fp8_kernel<BQ, HD><<<a.grid, a.block, a.smem, a.stream>>>(
+        reinterpret_cast<const half*>(a.Q.data), reinterpret_cast<const half*>(a.K.data),
+        reinterpret_cast<const half*>(a.V.data), reinterpret_cast<half*>(a.O.data), a.batch_size, a.seq_q,
+        a.seq_kv, a.n_heads, a.n_kv_heads, a.scale, a.causal, a.sliding_window, a.softcap, a.q_offset);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
+
+// One instance per kFp8FmhaTiles entry: the table is the instantiation set.
+template <size_t... I>
+static bool launch_fp8_fmha_tile(int bq, int head_dim, const Fp8FmhaLaunch& a, std::index_sequence<I...>) {
+    bool ok = false;
+    (void)((kFp8FmhaTiles[I].bq == bq && kFp8FmhaTiles[I].head_dim == head_dim &&
+            (ok = launch_fp8_fmha<kFp8FmhaTiles[I].bq, kFp8FmhaTiles[I].head_dim>(a), true)) ||
+           ...);
+    return ok;
 }
 
 bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
@@ -984,86 +1021,32 @@ bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
     int max_smem = 0;
     cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
 
-    int Bq;
-    {
-        size_t smem_128 = compute_smem_fp8(128, SM120_Bkv, head_dim);
-        size_t smem_64 = compute_smem_fp8(64, SM120_Bkv, head_dim);
-        size_t smem_32 = compute_smem_fp8(32, SM120_Bkv, head_dim);
-        if (smem_128 <= (size_t)max_smem)
-            Bq = 128;
-        else if (smem_64 <= (size_t)max_smem)
-            Bq = 64;
-        else if (smem_32 <= (size_t)max_smem)
-            Bq = 32;
-        else
-            return false;
-    }
-    const int Bkv = SM120_Bkv;
-    const size_t smem = compute_smem_fp8(Bq, Bkv, head_dim);
+    // Largest Bq with an instance for head_dim that fits smem (#2195: HD64 fit Bq=128, had no instance).
+    const int Bq = fp8_fmha_select_bq(head_dim, SM120_Bkv, (size_t)max_smem);
+    if (Bq == 0)
+        return false;
+    const size_t smem = fp8_fmha_smem_bytes(Bq, SM120_Bkv, head_dim);
 
     const int num_q_tiles = (seq_q + Bq - 1) / Bq;
-    dim3 grid(num_q_tiles, batch_size * n_heads);
-    dim3 block(SM120_WARP_SIZE, SM120_NUM_WARPS);
-
-#define LAUNCH_FP8_FMHA(BQ, HD)                                                                             \
-    do {                                                                                                    \
-        cudaError_t attr_err = cudaFuncSetAttribute(fmha_sm120_fp8_kernel<BQ, HD>,                          \
-                                                    cudaFuncAttributeMaxDynamicSharedMemorySize,            \
-                                                    static_cast<int>(smem));                                \
-        if (attr_err != cudaSuccess)                                                                        \
-            return false;                                                                                   \
-        cudaFuncSetAttribute(fmha_sm120_fp8_kernel<BQ, HD>, cudaFuncAttributePreferredSharedMemoryCarveout, \
-                             cudaSharedmemCarveoutMaxShared);                                               \
-        fmha_sm120_fp8_kernel<BQ, HD><<<grid, block, smem, stream>>>(                                       \
-            reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K.data),                   \
-            reinterpret_cast<const half*>(V.data), reinterpret_cast<half*>(O.data), batch_size, seq_q,      \
-            seq_kv, n_heads, n_kv_heads, scale, causal, sliding_window, softcap, q_offset);                 \
-        IMP_CUDA_CHECK_LAUNCH();                                                                            \
-    } while (0)
-
-    if (Bq == 128) {
-        switch (head_dim) {
-            case 128:
-                LAUNCH_FP8_FMHA(128, 128);
-                return true;
-            case 256:
-                LAUNCH_FP8_FMHA(128, 256);
-                return true;
-            default:
-                break;
-        }
-    } else if (Bq == 64) {
-        switch (head_dim) {
-            case 64:
-                LAUNCH_FP8_FMHA(64, 64);
-                return true;
-            case 128:
-                LAUNCH_FP8_FMHA(64, 128);
-                return true;
-            case 256:
-                LAUNCH_FP8_FMHA(64, 256);
-                return true;
-            default:
-                break;
-        }
-    } else {
-        switch (head_dim) {
-            case 64:
-                LAUNCH_FP8_FMHA(32, 64);
-                return true;
-            case 128:
-                LAUNCH_FP8_FMHA(32, 128);
-                return true;
-            case 256:
-                LAUNCH_FP8_FMHA(32, 256);
-                return true;
-            default:
-                break;
-        }
-    }
-
-#undef LAUNCH_FP8_FMHA
-    return false;
+    const Fp8FmhaLaunch launch{.Q = Q,
+                               .K = K,
+                               .V = V,
+                               .O = O,
+                               .batch_size = batch_size,
+                               .seq_q = seq_q,
+                               .seq_kv = seq_kv,
+                               .n_heads = n_heads,
+                               .n_kv_heads = n_kv_heads,
+                               .scale = scale,
+                               .causal = causal,
+                               .sliding_window = sliding_window,
+                               .softcap = softcap,
+                               .q_offset = q_offset,
+                               .smem = smem,
+                               .grid = dim3(num_q_tiles, batch_size * n_heads),
+                               .block = dim3(SM120_WARP_SIZE, SM120_NUM_WARPS),
+                               .stream = stream};
+    return launch_fp8_fmha_tile(Bq, head_dim, launch, std::make_index_sequence<std::size(kFp8FmhaTiles)>{});
 }
 
 // FA2 register-resident kernel ("echtes FA"): keeps S/P/O entirely in registers (unlike the

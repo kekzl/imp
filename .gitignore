@@ -134,3 +134,4 @@ build-interpose/
 .codegraph/
 codegraph.json
 loop/
+results/

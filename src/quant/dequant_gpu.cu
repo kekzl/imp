@@ -630,12 +630,15 @@ void dequant_gpu_fp8(const void* src, void* dst, QType qtype, int rows, int cols
 // ---------------------------------------------------------------------------
 
 // Macro for scalar dequant kernels that share (src_u8, dst_fp16, rows, cols) signature.
+// KERNEL names a __global__ in <<<>>>, where a parenthesized name does not parse (#2210)
+// NOLINTBEGIN(bugprone-macro-parentheses)
 #define DEQUANT_CASE(QTYPE, KERNEL)                                                                       \
     case QType::QTYPE:                                                                                    \
         KERNEL<<<blocks, threads, 0, stream>>>(static_cast<const uint8_t*>(src), static_cast<half*>(dst), \
                                                rows, cols);                                               \
         IMP_CUDA_CHECK_LAUNCH();                                                                          \
         break;
+// NOLINTEND(bugprone-macro-parentheses)
 
 void dequant_gpu(const void* src, void* dst, QType qtype, int rows, int cols, cudaStream_t stream) {
     int64_t total = static_cast<int64_t>(rows) * cols;

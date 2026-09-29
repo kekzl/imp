@@ -10,9 +10,11 @@
 
 #include "memory/kv_cache_manager.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace imp {
 
@@ -53,6 +55,35 @@ inline int snapshot_boundary(int prompt_tokens, int block_size, int min_tokens) 
         return 0;
     const int end = ((prompt_tokens - 1) / block_size) * block_size;
     return end >= min_tokens ? end : 0;
+}
+
+// Save position for the chunk starting at `offset`: the hint's block floor when it is a valid
+// boundary before the prompt one (shared prefix of /v1/decide items, #2198), else the prompt
+// boundary. A restore matches only a snapshot at an exact block, so the shared prefix needs its own.
+inline int next_snapshot_boundary(int prompt_tokens, int block_size, int min_tokens, int hint_tokens,
+                                  int offset) {
+    const int end = snapshot_boundary(prompt_tokens, block_size, min_tokens);
+    if (end > 0 && hint_tokens > 0) {
+        const int h = (hint_tokens / block_size) * block_size;
+        if (h >= block_size && h >= min_tokens && h > offset && h < end)
+            return h;
+    }
+    return end;
+}
+
+// Length of the token prefix every sequence shares (0 for fewer than two sequences).
+inline int common_prefix_tokens(const std::vector<std::vector<int32_t>>& seqs) {
+    if (seqs.size() < 2)
+        return 0;
+    size_t n = seqs[0].size();
+    for (size_t i = 1; i < seqs.size(); ++i) {
+        size_t k = 0;
+        const size_t lim = std::min(n, seqs[i].size());
+        while (k < lim && seqs[i][k] == seqs[0][k])
+            ++k;
+        n = k;
+    }
+    return static_cast<int>(n);
 }
 
 }  // namespace imp

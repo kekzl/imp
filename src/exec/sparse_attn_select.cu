@@ -603,7 +603,7 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
     // 128k-context tables need ~35 KiB; opt in past the 48 KiB default ONLY
     // when actually exceeded - the attribute sticks to the function and can
     // shift the L1/SMEM carveout the driver picks around it.
-    constexpr size_t kSmemDefault = 48 * 1024;
+    constexpr size_t kSmemDefault = static_cast<int64_t>(48) * 1024;
     static size_t sel_smem_granted = kSmemDefault;
     if (sel_smem > sel_smem_granted) {
         cudaFuncSetAttribute(sparse_select_topk_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,

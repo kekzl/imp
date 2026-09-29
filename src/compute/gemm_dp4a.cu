@@ -415,7 +415,7 @@ void gemv_gate_up_fused(const void* gate_weights, const void* up_weights, const 
 
 #define LAUNCH_GATE_UP_NR(QT, NR)                                                                          \
     do {                                                                                                   \
-        const int rows_per_block = warps_per_block * NR;                                                   \
+        const int rows_per_block = warps_per_block * (NR);                                                 \
         const int blocks = (M + rows_per_block - 1) / rows_per_block;                                      \
         dim3 grid(blocks, 2);                                                                              \
         const int total_q8 = (K / QT::kBlockElems) * QT::kQ8PerWeight;                                     \

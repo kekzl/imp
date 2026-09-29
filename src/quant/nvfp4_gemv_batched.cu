@@ -21,6 +21,7 @@ namespace {
 // across all MR rows (x[m] streams from L2). Removes the per-sequence weight re-read of the
 // batched decode LM head (a single M=1 GEMV per sequence re-read the whole ~389 MiB
 // LM-head matrix from HBM, the #2 decode GPU consumer at batch>1).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int MR>
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
@@ -87,6 +88,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
         __syncthreads();  // reuse warp_sums for the next activation row
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Batched twin of gemv_nvfp4_multirow_kernel, existing for NUMERICAL PARITY not speed: the
 // spec-verify chunk and M=1 decode compute the same projections with instruction-identical
@@ -149,6 +151,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_mb_kernel(
 // one block per weight row n, decoded once and reused across the MR rows of this launch.
 // kAcc adds into the existing output (cuBLAS beta=1 semantics) for the o/down residual-add
 // GEMMs (#1055).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int MR, bool kAcc = false>
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
@@ -217,6 +220,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
         __syncthreads();  // reuse warp_sums for the next activation row
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 

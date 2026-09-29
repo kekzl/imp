@@ -85,6 +85,7 @@ void sigmoid_mul(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t str
 
 // Each thread handles one channel.
 // Shift the conv_state window left by 1, insert new value, compute dot product.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void ssm_conv1d_decode_kernel(
     float* __restrict__ conv_state,   // [channels, kernel_size]
     const half* __restrict__ x_in,    // [channels]
@@ -124,9 +125,11 @@ __global__ void ssm_conv1d_decode_kernel(
 
     x_out[ch] = __float2half(sum);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // FP32-output conv1d decode: reads FP16 input, produces FP32 output with fused SiLU.
 // Used by GDN layers for full FP32 pipeline (matching llama.cpp precision).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void ssm_conv1d_decode_f32_silu_kernel(
     float* __restrict__ conv_state,   // [channels, kernel_size]
     const half* __restrict__ x_in,    // [channels] FP16
@@ -188,6 +191,7 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     // Fused SiLU: x / (1 + exp(-x))
     x_out[ch] = sum / (1.0f + expf(-sum));
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Batched conv1d decode over N independent sequences. Same contract as the GDN
 // scan's batched form: sequences on blockIdx.y, slot table selects each one's
@@ -240,6 +244,7 @@ void ssm_conv1d_decode(void* conv_state, const Tensor& x_in, const Tensor& weigh
 
 // Grid: (n_tokens), Block: 256
 // Each block handles all channels for one token using a loop.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void ssm_conv1d_prefill_kernel(
     float* __restrict__ conv_state,   // [channels, kernel_size] — updated with last K values
     const half* __restrict__ x_in,    // [n_tokens, channels]
@@ -303,6 +308,7 @@ __global__ void ssm_conv1d_prefill_kernel(
         }
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Conv window commit, one launch after the prefill grid: window = last K real inputs; a
 // chunk shorter than K shifts missing leading values in from the previous window
@@ -311,6 +317,7 @@ __global__ void ssm_conv1d_prefill_kernel(
 // prefill grid alone cannot guarantee. grid.y indexes the sequence group (grouped form).
 // dst_slots (batched speculative verify): window read from seq_slots[seq], written to
 // dst_slots[seq]; nullptr = in place.
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void ssm_conv1d_commit_kernel(float* __restrict__ conv_state, const half* __restrict__ x_in,
                                          int n_tokens, int channels, int kernel_size,
                                          const int* __restrict__ d_real_n, const int* __restrict__ seq_slots,
@@ -337,6 +344,7 @@ __global__ void ssm_conv1d_commit_kernel(float* __restrict__ conv_state, const h
         dst[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch]) : src[src_t + kernel_size];
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 static void launch_conv1d_commit(void* conv_state, const half* x_in, int n_tokens, int channels,
                                  int kernel_size, const int* d_real_n, const int* seq_slots,
@@ -374,6 +382,7 @@ void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weig
 // of n_tokens, group z reads/commits the conv window of pool slot seq_slots[z] (stride in
 // floats); nullptr = single-sequence launch (gridDim.z==1). Snapshot written from group 0
 // only (every group's row 0 is the same token from the same committed window).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void ssm_conv1d_prefill_f32_silu_kernel(
     float* __restrict__ conv_state, const half* __restrict__ x_in, const half* __restrict__ weight,
     const half* __restrict__ bias, float* __restrict__ x_out_f32, int n_tokens, int channels, int kernel_size,
@@ -445,6 +454,7 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
         }
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in, const Tensor& weight,
                                  const Tensor& bias, float* x_out_f32, int conv_kernel, cudaStream_t stream,
@@ -512,6 +522,7 @@ void ssm_conv1d_prefill_f32_silu_grouped(void* conv_state_pool, const int* seq_s
 // h_state[h,s,d]=a_bar*h_state[h,s,d]+dt_h*x[h*hd+d]*B[g*S+s];
 // y[h*hd+d]=sum_s(h_state[h,s,d]*C[g*S+s])+D[h]*x[h*hd+d]; if z: y*=SiLU(z[h*hd+d]).
 // Template: H_FP16 (h_state stored FP16, compute FP32); FUSE_GATE (fuse y*SiLU(z)).
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <bool H_FP16, bool FUSE_GATE>
 __global__ void ssm_scan_kernel(
     const half* __restrict__ x,         // [n_tokens, inner_size]
@@ -640,6 +651,7 @@ __global__ void ssm_scan_kernel(
         }
     }
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Legacy kernel's s-tiling: largest power of 2 <= min(state_size, 1024 / head_dim).
 static int ssm_scan_s_tiles(int head_dim_ssm, int state_size) {

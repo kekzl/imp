@@ -45,6 +45,7 @@ __device__ __forceinline__ void fp8_kv_stage_lane(uint8_t* smem_dst, const uint8
     }
 }
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_splitk_fp8_pipeline_kernel(
     const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
@@ -234,7 +235,9 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
                                       lane_id, lane_offset, partial_out, batch_idx, n_heads, head_idx,
                                       num_splits, split_idx);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
+// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM>
 __global__ void paged_attention_decode_fp8_kernel(const half* __restrict__ Q,
                                                   const uint8_t* __restrict__ K_cache,  // FP8 E4M3 raw bytes
@@ -381,6 +384,7 @@ __global__ void paged_attention_decode_fp8_kernel(const half* __restrict__ Q,
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_fp8), m_w, l_w, o_reg, warp_id,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx, attn_sinks);
 }
+// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launcher -- FP8 E4M3 variant (with Split-K support)
@@ -405,7 +409,7 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                                                         : (max_context_len + block_size - 1) / block_size;
 
     size_t smem_bytes = NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
-                        NUM_WARPS * head_dim * sizeof(float);
+                        static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float);
 
     // ---- Split-K decision ----
     void* scratch_ptr = nullptr;
@@ -455,7 +459,7 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                 batch_size, n_heads, n_kv_heads, block_size, scale, kv_scale, max_num_blocks, num_splits,
                 sliding_window, softcap, stream);
         } else {
-            size_t pipe_smem = NUM_WARPS * 3 * head_dim;
+            size_t pipe_smem = static_cast<int64_t>(NUM_WARPS * 3) * head_dim;
             size_t launch_smem = (pipe_smem > smem_bytes) ? pipe_smem : smem_bytes;
 
 #define LAUNCH_SPLITK_FP8_PIPE(HD)                                                                        \
