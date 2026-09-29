@@ -6,7 +6,7 @@
 #include <cmath>
 #include <stdexcept>
 #include "core/pdl_device.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 
 namespace imp {
 

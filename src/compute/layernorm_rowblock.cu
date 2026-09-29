@@ -4,7 +4,7 @@
 // radius is why it stays split). Both kernels moved verbatim from layernorm.cu.
 #include "compute/layernorm.h"
 #include "quant/nvfp4_pack.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

@@ -1,8 +1,10 @@
 #include "exec/executor_kernels.h"
+#include "exec/executor_kernels.cuh"
 #include "exec/executor_kernels_internal.cuh"
 #include "compute/ptx92_utils.cuh"
 #include "compute/warp_reduce.cuh"  // kWarpSize
 #include "core/pdl_device.cuh"
+#include "core/logging.h"  // IMP_CUDA_CHECK_LAUNCH
 
 namespace imp {
 
@@ -653,6 +655,26 @@ __global__ __launch_bounds__(256) void rope_q_only_fp16_kernel(half* __restrict_
     float q1 = __half2float(Q[base + idx1]);
     Q[base + idx0] = __float2half(q0 * cos_val - q1 * sin_val);
     Q[base + idx1] = __float2half(q0 * sin_val + q1 * cos_val);
+}
+
+void write_kv_cache_rope_fused(dim3 grid, int threads, cudaStream_t stream, const half* k_in, const half* v_in,
+                               const int* positions, const int* block_tables, half* k_cache_base,
+                               half* v_cache_base, int block_stride, int row_elems, int block_size, int n_tokens,
+                               int max_blocks_per_seq, int n_sequences, int n_kv_heads, int head_dim, float theta,
+                               float inv_scaling, int rope_pairs, bool neox, const float* longrope_inv_freqs) {
+    write_kv_cache_rope_fused_kernel<<<grid, threads, 0, stream>>>(
+        k_in, v_in, positions, block_tables, k_cache_base, v_cache_base, block_stride, row_elems, block_size,
+        n_tokens, max_blocks_per_seq, n_sequences, n_kv_heads, head_dim, theta, inv_scaling, rope_pairs, neox,
+        longrope_inv_freqs);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
+void rope_q_only_fp16(half* Q, const int* positions, int n_heads, int head_dim, float theta, float inv_scaling,
+                      int rope_pairs, bool neox, const float* longrope_inv_freqs, cudaStream_t stream) {
+    rope_q_only_fp16_kernel<<<dim3(1, n_heads), rope_pairs, 0, stream>>>(Q, positions, n_heads, head_dim, theta,
+                                                                         inv_scaling, rope_pairs, neox,
+                                                                         longrope_inv_freqs);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

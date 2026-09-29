@@ -1,6 +1,6 @@
 #include "compute/activation.h"
 #include "quant/nvfp4_pack.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 #include "core/pdl_device.cuh"
 #include "core/tensor.h"
 #include "core/logging.h"

@@ -30,8 +30,6 @@
 #include "core/pdl.h"
 #include "compute/activation.h"
 #include "compute/layernorm.h"
-#include "compute/ptx92_utils.cuh"
-#include "compute/warp_reduce.cuh"  // kWarpSize
 
 namespace imp {
 

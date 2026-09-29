@@ -146,7 +146,7 @@ endif()
 # --- Core library sources ---
 set(IMP_CORE_SOURCES
     src/core/process_diag.cpp
-    src/core/pdl.cu
+    src/core/pdl.cpp
     src/core/tensor.cpp
     src/core/qtype.cpp
     src/core/buffer.cpp
@@ -246,7 +246,7 @@ set(IMP_QUANT_SOURCES
 
 set(IMP_COMPUTE_SOURCES
     src/compute/dispatch_paths.cpp
-    src/compute/gemm.cu
+    src/compute/gemm.cpp
     src/compute/gemm_capture_fp16_sm120.cu
     src/compute/gemm_f16_narrow_smallm.cu
     src/compute/gemm_f16_narrow_prefill.cu
@@ -298,7 +298,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_gemv_dtype.cu
     src/compute/gemv_fp8_rowscale_fp32.cu
     src/compute/gemm_moe_gemv.cu
-    src/compute/gemm_batched.cu
+    src/compute/gemm_batched.cpp
     src/compute/mmq_q8_imma_q4k.cu
     src/compute/mmq_q8_imma_q5k.cu
     src/compute/mmq_q8_imma_q6k.cu
@@ -423,17 +423,17 @@ set(IMP_EXEC_SOURCES
     src/exec/pre_dequant_phase3_cutlass.cpp
     src/exec/pre_dequant_phase3_gdn_prefill.cpp
     src/exec/pre_dequant_phase3_moe.cpp
-    src/exec/executor_gemm_dispatch.cu
+    src/exec/executor_gemm_dispatch.cpp
     src/exec/executor_gemm_released.cpp
     src/exec/activation_calibrator.cu
     src/exec/gemm_kernel_registry.cpp
     src/exec/gemm_kernel_cutlass_nvfp4.cpp
-    src/exec/gemm_kernel_gguf.cu
+    src/exec/gemm_kernel_gguf.cpp
     src/exec/gemm_kernel_generic_dequant.cpp
     src/exec/gemm_scratch.cpp
     src/exec/workspace_sizes.cpp
-    src/exec/executor_workspace.cu
-    src/exec/executor_workspace_buffers.cu
+    src/exec/executor_workspace.cpp
+    src/exec/executor_workspace_buffers.cpp
     src/exec/executor_kv_write.cu
     src/exec/executor_pre_dequant.cpp
     src/exec/pre_dequant_phase0_nvfp4_loader.cpp
@@ -443,8 +443,8 @@ set(IMP_EXEC_SOURCES
     src/exec/pre_dequant_phase3_nvfp4_decode.cpp
     src/exec/pre_dequant_phase3c_mxfp4.cpp
     src/exec/pre_dequant_phase4_tensor_registry.cpp
-    src/exec/executor_workspace_config.cu
-    src/exec/executor_attention.cu
+    src/exec/executor_workspace_config.cpp
+    src/exec/executor_attention.cpp
     src/exec/executor_forward.cu
     src/exec/executor_perplexity.cu
     src/exec/executor_prompt_logprobs.cu
@@ -458,10 +458,10 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_ple.cpp
     src/exec/executor_gdn_alpha_beta.cpp
     src/exec/executor_forward_moe.cu
-    src/exec/executor_forward_moe_cutlass.cu
+    src/exec/executor_forward_moe_cutlass.cpp
     src/exec/executor_forward_moe_batch.cu
     src/exec/executor_forward_moe_nvfp4_host.cu
-    src/exec/executor_forward_moe_legacy.cu
+    src/exec/executor_forward_moe_legacy.cpp
     src/exec/expert_cache.cu
     src/exec/expert_cache_device.cu
     src/exec/executor_qsa.cpp
@@ -496,9 +496,19 @@ set(IMP_API_SOURCES
     src/api/imp_api_token.cpp
 )
 
+# --- core/ layer target ---
+# core/ has 0 outgoing layer edges (tools/check_layering.py). Its include root holds only core/,
+# so a core TU that includes a higher layer ("memory/..", "exec/..") fails to compile (#2209).
+set(IMP_CORE_INCLUDE_ROOT ${CMAKE_CURRENT_BINARY_DIR}/imp_core_include)
+file(MAKE_DIRECTORY ${IMP_CORE_INCLUDE_ROOT})
+file(CREATE_LINK ${CMAKE_CURRENT_SOURCE_DIR}/src/core ${IMP_CORE_INCLUDE_ROOT}/core SYMBOLIC)
+add_library(imp_core STATIC ${IMP_CORE_SOURCES})
+target_include_directories(imp_core PUBLIC $<BUILD_INTERFACE:${IMP_CORE_INCLUDE_ROOT}>)
+target_link_libraries(imp_core PUBLIC CUDA::cudart PRIVATE imp_warnings)
+set_target_properties(imp_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # --- Main library target ---
 add_library(imp STATIC
-    ${IMP_CORE_SOURCES}
     ${IMP_MEMORY_SOURCES}
     ${IMP_MODEL_SOURCES}
     ${IMP_QUANT_SOURCES}
@@ -524,6 +534,7 @@ target_compile_definitions(imp PRIVATE IMP_VERSION_STRING="${PROJECT_VERSION}")
 
 target_link_libraries(imp
     PUBLIC
+        imp_core
         CUDA::cudart
         CUDA::cuda_driver
         CUDA::cublas
@@ -556,6 +567,11 @@ set_source_files_properties(
     src/compute/mmq_q8_imma_q5k.cu
     src/compute/mmq_q8_imma_q6k.cu
     PROPERTIES COMPILE_OPTIONS "-rdc=true")
+# Moved from nvcc (host pass -std=c++23: no FMA contraction); g++ -march=x86-64-v3 contracted 6 sites here (#2209).
+set_source_files_properties(
+    src/exec/executor_attention.cpp
+    src/exec/executor_workspace_buffers.cpp
+    PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
 # --- Tools ---
 if(IMP_BUILD_TOOLS)
@@ -1390,7 +1406,7 @@ endif()
 # --- Install ---
 include(GNUInstallDirs)
 
-install(TARGETS imp
+install(TARGETS imp imp_core
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )

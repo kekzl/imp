@@ -1,7 +1,7 @@
 #ifndef IMP_COMPUTE_GEMM_INTERNAL_CUH
 #define IMP_COMPUTE_GEMM_INTERNAL_CUH
 
-// Shared device helpers + GEMV launch constants used across the gemm*.cu
+// Shared GEMV launch constants + cuBLAS internals used across the gemm*.cu
 // translation units split out of gemm.cu. Symbols are kept verbatim from the
 // original gemm.cu so the hot-path numerics are byte-identical.
 
@@ -12,17 +12,6 @@
 #include <cstddef>
 
 namespace imp {
-
-// ---------------------------------------------------------------------------
-// Device helpers
-// ---------------------------------------------------------------------------
-
-// Warp-level sum reduction via __shfl_down_sync. Result valid in lane 0 only.
-__device__ __forceinline__ float warp_reduce_sum(float val) {
-    for (int offset = 16; offset > 0; offset >>= 1)
-        val += __shfl_down_sync(0xFFFFFFFF, val, offset);
-    return val;
-}
 
 // GEMV launch constants: 256 threads = 8 warps per block.
 static constexpr int kGemvThreads = 256;

@@ -42,10 +42,10 @@ DOC = ROOT / "docs" / "determinism.md"
 READER = "process_diag_deterministic_gemm()"
 
 # Files the doc's known-limit 5 enumerates as reading the determinism flag; keep this list and
-# that paragraph in sync. Count is pinned per file, not just presence: gemm.cu reads the flag
+# that paragraph in sync. Count is pinned per file, not just presence: gemm.cpp reads the flag
 # in two dispatch branches, and losing one is the same drift as losing the file.
 EXPECTED = {
-    "src/compute/gemm.cu": 2,
+    "src/compute/gemm.cpp": 2,
     "src/compute/cublas_gemm_algo.h": 1,
     "src/compute/sampling_topk_topp.cu": 1,
     "src/compute/sampling_filters.cu": 1,
@@ -140,14 +140,14 @@ def selftest():
     The gate scanned src/compute/ only until 2026-09-02 and pinned files rather
     than read counts, so two of the four cases below passed silently: a reader
     in src/exec (where the MoE CUTLASS dispatch lives, the founding defect's own
-    neighbourhood) and a branch inside gemm.cu that stopped reading the flag.
+    neighbourhood) and a branch inside gemm.cpp that stopped reading the flag.
     """
     import tempfile
 
     call = f"return {READER};"
     doc = "gemm_cutlass_grouped_3x.cu process_diag_deterministic_gemm"
     base = {
-        "src/compute/gemm.cu": 2,
+        "src/compute/gemm.cpp": 2,
         "src/compute/cublas_gemm_algo.h": 1,
         "src/compute/sampling_topk_topp.cu": 1,
         "src/compute/sampling_filters.cu": 1,
@@ -175,8 +175,8 @@ def selftest():
                                    f"// {READER} in prose\n"),), None, 0),
         ("accessor's own definition", (("src/core/process_diag.cpp",
                                         f"bool {READER[:-2]}() {{ return true; }}\n"),), None, 0),
-        ("branch lost the flag", (), {**base, "src/compute/gemm.cu": 1}, 1),
-        ("branch gained the flag", (), {**base, "src/compute/gemm.cu": 3}, 1),
+        ("branch lost the flag", (), {**base, "src/compute/gemm.cpp": 1}, 1),
+        ("branch gained the flag", (), {**base, "src/compute/gemm.cpp": 3}, 1),
         ("file lost the flag", (), {k: v for k, v in base.items()
                                     if k != "src/compute/moe_routing.cu"}, 1),
     ]

@@ -8,7 +8,7 @@
 #include "quant/nvfp4_gemm_internal.cuh"
 #include "quant/nvfp4_quant.h"
 #include "core/logging.h"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>

@@ -24,7 +24,7 @@
 #include <cuda_fp16.h>
 #include <type_traits>
 #include "core/pdl_device.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 
 namespace imp {
 namespace {

@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include "exec/executor_kernels.h"
+#include "exec/executor_kernels.cuh"
 
 #include <vector>
 #include <cmath>

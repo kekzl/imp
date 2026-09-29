@@ -46,7 +46,7 @@ SRC_EXT = (".cu", ".cpp", ".h", ".cuh", ".hpp")
 
 DECISION = re.compile(r"\b(?:if|for|while|case|catch)\b|&&|\|\||\?")
 RAW_OPEN = re.compile(r'(?<![A-Za-z0-9_])(?:u8|u|U|L)?R"([^(\s]{0,16})\(')
-INCLUDE_CU = re.compile(r'^\s*#\s*include\s+"([^"]+\.cu)"')
+INCLUDE_CU = re.compile(r'^\s*#\s*include\s+"([^"]+\.(?:cu|cpp))"')  # .cpp: host-only fragments (#2209)
 PP_IF = re.compile(r"^\s*#\s*if")
 PP_ELSE = re.compile(r"^\s*#\s*(?:else|elif)\b")
 PP_ENDIF = re.compile(r"^\s*#\s*endif\b")
@@ -361,6 +361,11 @@ def selftest():
     ok = [c for _, _, c in frag] == [8]
     failures += not ok
     print(f"  {'ok  ' if ok else 'FAIL'}  included .cu fragment is charged to its body: "
+          f"expected [8], got {[c for _, _, c in frag]}")
+    frag = functions('void f() {\n    a();\n#include "exec/frag.cpp"\n}\n', lambda rel: 7)
+    ok = [c for _, _, c in frag] == [8]
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'}  included .cpp fragment is charged to its body: "
           f"expected [8], got {[c for _, _, c in frag]}")
     sig = functions("C::C(int a) : a_(a) {\n}\n")[0][0]
     ok = sig == "C::C(int a)"

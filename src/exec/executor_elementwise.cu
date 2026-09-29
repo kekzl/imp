@@ -1,6 +1,7 @@
 #include "exec/executor_kernels.h"
+#include "exec/executor_kernels.cuh"
 #include "core/logging.h"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 #include "compute/warp_reduce.cuh"  // kWarpSize
 
 #include <cuda_bf16.h>
@@ -348,6 +349,18 @@ void elementwise_add(Tensor& a, const Tensor& b, cudaStream_t stream) {
         pdl::launch(elementwise_add_fp32_kernel, dim3(blocks), dim3(threads), 0, stream,
                     static_cast<float*>(a.data), static_cast<const float*>(b.data), n);
     }
+}
+
+void rmsnorm_fp32_accum_to_fp16(const half* input, const half* norm_w, float* fp32_accum, half* output, int n,
+                                int d_model, float eps, float weight_offset, cudaStream_t stream) {
+    rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(input, norm_w, fp32_accum, output, d_model, eps,
+                                                             weight_offset);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
+// PDL registration for elementwise_add_fp16_kernel (instrumented with pdl_wait()).
+void elementwise_add_pdl_register() {
+    pdl::enable(reinterpret_cast<const void*>(&elementwise_add_fp16_kernel));
 }
 
 // Element-wise add-store: out[i] = a[i] + b[i] — avoids in-place + copy pattern

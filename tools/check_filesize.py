@@ -46,7 +46,7 @@ except ModuleNotFoundError:  # pragma: no cover
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "filesize_thresholds.toml")
 SRC_EXT = (".cu", ".cuh", ".cpp", ".hpp", ".h")
-INCLUDE_CU = re.compile(r'^\s*#include\s+"([^"]+\.cu)"', re.M)
+INCLUDE_CU = re.compile(r'^\s*#include\s+"([^"]+\.(?:cu|cpp))"', re.M)  # .cpp: host-only fragments (#2209)
 
 # An [allow] pin admits growth up to the next multiple of this strictly above
 # the pin. 25 code LOC is ~3 % of an 800-line TU: enough that a merge does not
@@ -204,7 +204,7 @@ def scan(cfg, roots):
     # rel path of every .cu pulled in textually -> the includer that charges it
     merged_into = {}
     for rel, text in files.items():
-        if not rel.endswith(".cu"):
+        if not rel.endswith((".cu", ".cpp")):
             continue
         for m in INCLUDE_CU.finditer(text):
             for base in ("src", ""):
@@ -253,6 +253,9 @@ def selftest():
          {"src/exec/a.cu": '#include "exec/b.cu"\n#include "exec/c.cu"\n',
           "src/exec/b.cu": "int b1;\n", "src/exec/c.cu": "int c1;\nint c2;\n"},
          {"src/exec/a.cu": 5}),
+        (".cpp fragment charged to its .cpp includer",
+         {"src/exec/a.cpp": 'int a1;\n#include "exec/b.cpp"\n', "src/exec/b.cpp": "int b1;\nint b2;\n"},
+         {"src/exec/a.cpp": 4}),
         ("a .cuh include is not a TU merge",
          {"src/exec/a.cu": '#include "exec/b.cuh"\n', "src/exec/b.cuh": "int b1;\n"},
          {"src/exec/a.cu": 1, "src/exec/b.cuh": 1}),

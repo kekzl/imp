@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "compute/attention_paged.h"
 #include "exec/executor_kernels.h"
+#include "exec/executor_kernels.cuh"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
