@@ -7,7 +7,7 @@ commit: 9cbb8004
 
 # API features
 
-Constrained decoding, tool calling, thinking/reasoning and images. Endpoints, sampling fields, metrics, prompt caching, request tracing, errors: [`API.md`](API.md).
+Constrained decoding, tool calling, thinking/reasoning, images and fill-in-the-middle. Endpoints, sampling fields, metrics, prompt caching, request tracing, errors: [`API.md`](API.md).
 
 ## Constrained decoding
 
@@ -207,6 +207,22 @@ Refusal rules:
 - Model with unreadable vision tower: loads text-only, image request gets `400 vision_unavailable`.
 
 No video. `temporal_patch_size` is parsed but used only as a still-image repeat.
+
+## Fill-in-the-middle
+
+Two entry points, one generation path (#2201):
+
+| Entry | Fields | Response |
+|---|---|---|
+| `POST /infill` | `input_prefix`, `input_suffix`, `input_extra` `[{filename, text}]`, `prompt` (appended to the prefix), `n_predict` (alias of `max_tokens`), `model` optional; every `/v1/completions` sampling field | `text_completion`, plus top-level `content` and `stop` (llama.cpp clients read these), streaming too |
+| `POST /v1/completions` | `suffix`: non-empty string = FIM with `prompt` as the prefix; `""` or absent = plain completion | `text_completion` |
+
+- FIM token ids come from the tokenizer: GGUF `tokenizer.ggml.fim_{pre,suf,mid,pad,rep,sep}_token_id` (or the older `prefix/suffix/middle_token_id`), else the vocab's special or added tokens `<|fim_prefix|>` (Qwen2.5/3-Coder), `<fim_prefix>` (StarCoder), `<PRE>` (CodeLlama), `<｜fim▁begin｜>` (DeepSeek-Coder), `<|code_prefix|>` (GLM-4) and their suffix/middle partners.
+- Prompt order is PSM: `[BOS] PRE prefix SUF suffix MID`, BOS only when the tokenizer asks for it.
+- `input_extra` non-empty: the llama.cpp repo layout goes in front, `<|repo_name|>myproject\n` then `<|file_sep|>{filename}\n{text}` per chunk and `<|file_sep|>filename\n`; without a file separator token each chunk is preceded by `\n\n--- snippet ---\n\n`.
+- The FIM marker texts are added as stop strings, so the model stops at `<|file_sep|>` or `<|fim_pad|>`.
+- Model without FIM prefix, suffix and middle tokens: `400`, `code: "fim_not_supported"` (`param: "suffix"` on `/v1/completions`). A `suffix` with a token-id prompt, or a non-string field: `400`.
+- The GPU acceptance run is `scripts/accept_2201.sh` (Qwen3-Coder-30B-A3B-Instruct-FP4, a Gemma-4 model for the 400).
 
 ## Responses store
 

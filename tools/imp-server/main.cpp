@@ -30,9 +30,9 @@ using json = nlohmann::json;
 // /v1/embeddings were once omitted, silently bypassing it (non-stream /v1/messages calls
 // handle_chat_completions() directly, without re-entering pre-routing).
 static bool is_inference_endpoint(const std::string& path) {
-    return path == "/v1/chat/completions" || path == "/v1/completions" || path == "/v1/responses" ||
-           path == "/v1/messages" || path == "/v1/embeddings" || path == "/v1/rerank" ||
-           path == "/rerank";
+    return path == "/v1/chat/completions" || path == "/v1/completions" || path == "/infill" ||
+           path == "/v1/responses" || path == "/v1/messages" || path == "/v1/embeddings" ||
+           path == "/v1/rerank" || path == "/rerank";
 }
 
 // Set by the pre-routing hook when it entered the in-flight gate for this
@@ -387,6 +387,10 @@ int main(int argc, char** argv) {
     svr.Post("/v1/completions", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_completions(req, res, state);
     });
+    // llama.cpp fill-in-the-middle; /v1/completions takes `suffix` for the same prompt (#2201).
+    svr.Post("/infill", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_infill(req, res, state);
+    });
 
     // Anthropic-compatible Messages API. Supports both non-streaming and
     // native incremental SSE streaming (real per-token, not synthetic replay).
@@ -557,7 +561,8 @@ int main(int argc, char** argv) {
     printf("  POST   /v1/chat/completions\n");
     printf("  POST   /v1/responses          OpenAI Responses API (Agents SDK / Codex dialect)\n");
     printf("  GET    /v1/responses/{id}     stored response (store=true); DELETE removes it\n");
-    printf("  POST   /v1/completions\n");
+    printf("  POST   /v1/completions       `suffix` = fill-in-the-middle\n");
+    printf("  POST   /infill               llama.cpp fill-in-the-middle\n");
     printf("  POST   /v1/messages          Anthropic-compatible (streaming + non-streaming)\n");
     printf("  POST   /v1/messages/count_tokens\n");
     printf("  POST   /v1/embeddings\n");
