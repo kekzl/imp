@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/cuda_raii.h"
 #include "core/dispatch_policy.h"
 
 #include "model/model.h"
@@ -632,7 +633,7 @@ private:
     Tensor ple_emb_dev_;         // [max_tokens, d] FP16, the gathered rows on the device
     std::vector<int64_t> ple_ids_;
     std::vector<int32_t> ple_step_ctx_;
-    cudaEvent_t ple_h2d_done_ = nullptr;
+    CudaEvent ple_h2d_done_;
     // Qwen4Exp QSA indexer (executor_qsa.cu): per QSA layer the raw index keys [ctx, 128]
     // and block keys [ctx/ratio, 128] of the ONE sequence; token-sized GEMM/query buffers;
     // selection lists and a scratch paged K/V for qsa_rows_ query rows.
@@ -875,7 +876,7 @@ private:
                                           // (2 x sample_slots_ int32s, parity halves)
     int sample_slots_ = 0;                // batched sampling slots per parity set (= max_batch_size)
     int sample_parity_ = 0;               // active parity half for async enqueue/flush/gather
-    cudaEvent_t sample_gather_evt_[2] = {nullptr, nullptr};  // per-parity gather-done events
+    CudaEvent sample_gather_evt_[2];  // per-parity gather-done events
 
     // Pinned host buffer for logprobs extraction (D2H copy of logits)
     PinnedBuffer h_logits_pinned_;      // [vocab_size] pinned host memory (T5b)

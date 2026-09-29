@@ -49,6 +49,12 @@ namespace imp {
 struct ImageData;  // src/vision/image_processor.h (per-request vision)
 struct ShadowPlanProbe;  // src/runtime/plan_shadow.h
 struct PlanResult;       // src/memory/plan.h
+struct MtpDraftWorkspace;  // src/compute/mtp_forward.h
+struct EncoderWorkspace;   // src/compute/encoder_forward.h
+
+// Typed owners of the forward-declared workspaces: operator() = delete, in engine.cpp.
+struct MtpDraftWorkspaceDeleter { void operator()(MtpDraftWorkspace* ws) const noexcept; };
+struct EncoderWorkspaceDeleter { void operator()(EncoderWorkspace* ws) const noexcept; };
 
 struct EngineConfig {
     int max_batch_size = 0;       // 0 = auto (engine detects from model size vs VRAM)
@@ -594,7 +600,7 @@ private:
         bool pooled = false;
         int32_t* d_banned = nullptr;  // banned token ids (engine-owned d_banned_tokens_, not freed here)
         PinnedBuffer h_token;  // pinned landing for the sampled token (T5b)
-        cudaEvent_t ev = nullptr;    // sampled-token-ready event
+        CudaEvent ev;                // sampled-token-ready event
         int budget = 0;              // tokens coverable by pre-allocated KV
         int produced = 0;            // tokens harvested by this pipeline
         bool forward_in_flight = false;
@@ -843,7 +849,7 @@ private:
     // ahead (no implicit syncs on the FA2 path) and overwrites the staging
     // while earlier copies are still queued -> chunk c uploads chunk c+N's
     // tokens/positions (#548: catastrophic chunked-prefill NLL on Llama).
-    cudaEvent_t pf_staging_evt_ = nullptr;
+    CudaEvent pf_staging_evt_;
 
     // ── Penalty token buffer ─────────────────────────────────────────
     // #1003: round-robin cursor for batched spec verify — id of the request
@@ -901,8 +907,9 @@ private:
     // when mtp_spec_k_ > 0 AND the loaded model has model->mtp_->loaded.
     // Defined in <compute/mtp_forward.h>; forward-declared to avoid include.
     int mtp_spec_k_ = 0;
-    void* mtp_ws_storage_ = nullptr;  // type-erased MtpDraftWorkspace*
-    void* encoder_ws_storage_ = nullptr;  // type-erased EncoderWorkspace* (#836)
+    // Device buffers: mtp_workspace_free / encoder_workspace_free in ~Engine.
+    std::unique_ptr<MtpDraftWorkspace, MtpDraftWorkspaceDeleter> mtp_ws_storage_;
+    std::unique_ptr<EncoderWorkspace, EncoderWorkspaceDeleter> encoder_ws_storage_;  // #836
 
     // Rolling MTP-draft-accuracy across the active session.
     // mtp_pool_.pending_prediction is the prediction made at the end of the

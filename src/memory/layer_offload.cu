@@ -11,14 +11,9 @@ LayerOffloadManager::~LayerOffloadManager() {
             IMP_CUDA_CHECK_LOG(cudaFree(slot.gpu_buf));
             slot.gpu_buf = nullptr;
         }
-        if (slot.ready_event) {
-            IMP_CUDA_CHECK_LOG(cudaEventDestroy(slot.ready_event));
-            slot.ready_event = nullptr;
-        }
-        if (slot.transfer_stream) {
-            IMP_CUDA_CHECK_LOG(cudaStreamDestroy(slot.transfer_stream));
-            slot.transfer_stream = nullptr;
-        }
+        // Buffer freed before the slot event/stream (same order as before).
+        slot.ready_event.reset();
+        slot.transfer_stream.reset();
     }
 }
 
@@ -150,13 +145,13 @@ bool LayerOffloadManager::init(Model* model, int gpu_layers) {
         slots_[s].buf_size = max_layer_bytes;
         slots_[s].loaded_layer = -1;
 
-        err = cudaEventCreateWithFlags(&slots_[s].ready_event, cudaEventDisableTiming);
+        err = slots_[s].ready_event.try_create(cudaEventDisableTiming);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("Failed to create offload event: %s", cudaGetErrorString(err));
             return false;
         }
 
-        err = cudaStreamCreateWithFlags(&slots_[s].transfer_stream, cudaStreamNonBlocking);
+        err = slots_[s].transfer_stream.try_create(cudaStreamNonBlocking);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("Failed to create offload stream: %s", cudaGetErrorString(err));
             return false;

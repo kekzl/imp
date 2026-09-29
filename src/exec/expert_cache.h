@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/cuda_raii.h"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstddef>
@@ -110,8 +111,8 @@ struct ExpertLRUCache {
     //   `prefetch_done_[layer]` before dispatching layer L's reads.
     std::vector<PerLayerAccessRing> per_layer_history_;
     int history_capacity_ = 0;        // entries per layer (sized at init)
-    cudaStream_t prefetch_stream_ = nullptr;
-    std::vector<cudaEvent_t> prefetch_done_;  // one event per layer, signaled by prefetch_layer
+    CudaStream prefetch_stream_;
+    std::vector<CudaEvent> prefetch_done_;  // one event per layer, signaled by prefetch_layer
     std::vector<bool> prefetch_issued_;       // per-layer flag — has prefetch_layer been called?
     int64_t prefetch_h2ds_ = 0;       // count of async H2Ds the prefetcher actually issued
     int64_t prefetch_skipped_cached_ = 0;  // ring entries already cached at prefetch time

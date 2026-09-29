@@ -1,3 +1,4 @@
+#include "core/cuda_raii.h"
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
 #include "vision/deepstack_inject.h"
@@ -231,27 +232,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // Skip first 2 decode steps (warmup / graph capture attempt)
     bool profile_active = profiling && (profile_idx >= 2);
 
-    // RAII guard: ensures cudaEventDestroy is called even on early return.
+    // CudaEvent members: destroyed on every return path.
     struct ProfileEvents {
-        cudaEvent_t ev_start = nullptr, ev_emb = nullptr, ev_lm = nullptr;
-        std::vector<cudaEvent_t> ev_attn, ev_ffn;
-        bool active = false;
-        ~ProfileEvents() {
-            if (!active)
-                return;
-            if (ev_start)
-                cudaEventDestroy(ev_start);
-            if (ev_emb)
-                cudaEventDestroy(ev_emb);
-            if (ev_lm)
-                cudaEventDestroy(ev_lm);
-            for (auto e : ev_attn)
-                if (e)
-                    cudaEventDestroy(e);
-            for (auto e : ev_ffn)
-                if (e)
-                    cudaEventDestroy(e);
-        }
+        CudaEvent ev_start, ev_emb, ev_lm;
+        std::vector<CudaEvent> ev_attn, ev_ffn;
     } prof;
     // Alias references for minimal churn in the rest of the function.
     auto& ev_start = prof.ev_start;
@@ -260,15 +244,15 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     auto& ev_attn = prof.ev_attn;
     auto& ev_ffn = prof.ev_ffn;
     if (profile_active) {
-        prof.active = true;
-        cudaEventCreate(&ev_start);
-        cudaEventCreate(&ev_emb);
-        cudaEventCreate(&ev_lm);
+        // cudaEventDefault: timing enabled (needed by cudaEventElapsedTime).
+        (void)ev_start.create(cudaEventDefault);
+        (void)ev_emb.create(cudaEventDefault);
+        (void)ev_lm.create(cudaEventDefault);
         ev_attn.resize(cfg.n_layers);
         ev_ffn.resize(cfg.n_layers);
         for (int i = 0; i < cfg.n_layers; i++) {
-            cudaEventCreate(&ev_attn[i]);
-            cudaEventCreate(&ev_ffn[i]);
+            (void)ev_attn[i].create(cudaEventDefault);
+            (void)ev_ffn[i].create(cudaEventDefault);
         }
         cudaEventRecord(ev_start, stream);
     }

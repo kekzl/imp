@@ -8,6 +8,7 @@
 #include "memory/mem_account.h"
 #include "quant/dequant_gpu.h"
 #include "quant/dequant_awq.h"
+#include "core/cuda_raii.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
@@ -113,7 +114,7 @@ struct PinnedStager {
     // T5a: transient load-time staging. PinnedBuffer owns it, so the partial
     // failure path below no longer has to unwind by hand (memory/host_pinned.h).
     PinnedBuffer buf[kRingMax];
-    cudaEvent_t done[kRingMax] = {};
+    CudaEvent done[kRingMax];
     int idx = 0;
 
     bool init() {
@@ -123,7 +124,7 @@ struct PinnedStager {
                 destroy();
                 return false;
             }
-            cudaEventCreateWithFlags(&done[i], cudaEventDisableTiming);
+            (void)done[i].create(cudaEventDisableTiming);
         }
         return true;
     }
@@ -148,8 +149,7 @@ struct PinnedStager {
         for (int i = 0; i < ring(); i++) {
             if (done[i]) {
                 cudaEventSynchronize(done[i]);
-                cudaEventDestroy(done[i]);
-                done[i] = nullptr;
+                done[i].reset();
             }
             buf[i].reset();
         }

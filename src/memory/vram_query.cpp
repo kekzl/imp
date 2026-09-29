@@ -1,4 +1,5 @@
 #include "memory/vram_query.h"
+#include "core/cuda_raii.h"
 #include "core/logging.h"
 
 #include <cuda_runtime_api.h>
@@ -91,13 +92,9 @@ double device_copy_bandwidth_gbps(const DeviceCopy* copies, size_t n, int warm_m
     }
     if (total == 0)
         return 0.0;
-    cudaEvent_t t0 = nullptr, t1 = nullptr;
-    if (cudaEventCreate(&t0) != cudaSuccess)
+    CudaEvent t0, t1;  // timing enabled for cudaEventElapsedTime
+    if (!t0.create(cudaEventDefault) || !t1.create(cudaEventDefault))
         return 0.0;
-    if (cudaEventCreate(&t1) != cudaSuccess) {
-        cudaEventDestroy(t0);
-        return 0.0;
-    }
     auto issue = [&]() {
         for (size_t i = 0; i < n; i++)
             if (cudaMemcpyAsync(copies[i].dst, copies[i].src, copies[i].bytes, cudaMemcpyDeviceToDevice,
@@ -114,8 +111,8 @@ double device_copy_bandwidth_gbps(const DeviceCopy* copies, size_t n, int warm_m
     float ms = 0.0f;
     ok = ok && cudaEventRecord(t1, nullptr) == cudaSuccess && cudaEventSynchronize(t1) == cudaSuccess &&
          cudaEventElapsedTime(&ms, t0, t1) == cudaSuccess;
-    cudaEventDestroy(t0);
-    cudaEventDestroy(t1);
+    t0.reset();
+    t1.reset();
     if (!ok || ms <= 0.0f) {
         (void)cudaGetLastError();  // leave nothing sticky for the next caller
         return 0.0;

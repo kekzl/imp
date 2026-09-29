@@ -51,7 +51,7 @@ bool GraphExecutor::ple_alloc_(int max_tokens) {
         return false;
     const int64_t emb_shape[2] = {max_tokens, d};
     ple_emb_dev_ = Tensor(pe, QType::F16, 2, emb_shape, true);
-    IMP_CUDA_CHECK_LOG(cudaEventCreateWithFlags(&ple_h2d_done_, cudaEventDisableTiming));
+    IMP_CUDA_CHECK_LOG(ple_h2d_done_.try_create(cudaEventDisableTiming));
     ple_ids_.resize(static_cast<size_t>(max_tokens) * tab->n_heads());
     IMP_LOG_INFO(
         "PLE: layer %d, conv kernel %d dilation %d (state %d rows x %d per SSM slot), "
@@ -67,10 +67,7 @@ void GraphExecutor::ple_free_() {
         vram_free(vram_alloc_, ple_emb_dev_.data);
         ple_emb_dev_.data = nullptr;
     }
-    if (ple_h2d_done_ != nullptr) {
-        cudaEventDestroy(ple_h2d_done_);
-        ple_h2d_done_ = nullptr;
-    }
+    ple_h2d_done_.reset();
 }
 
 int GraphExecutor::ple_context_len() const {
