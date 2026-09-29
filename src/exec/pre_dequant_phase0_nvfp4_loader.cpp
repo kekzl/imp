@@ -102,7 +102,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
 
     // SafeTensors loader + weight_map.cpp deposit each scale tensor into
     // model_->nvfp4_scratch_, keyed by slot name ("L5.wq", "L5.expert_w_gate.7", "out_proj");
-    // weight_upload.cu uploads weight_scale/weight_scale_2/input_scale first.
+    // weight_upload.cpp uploads weight_scale/weight_scale_2/input_scale first.
     // Resolves each key to its main weight tensor and copies device pointers + the FP32
     // tensor scalar (reciprocal pre-applied) onto its qtype/scales/tensor_scale sidecar, so
     // the hot path reads NVFP4 metadata off the weight tensor with no cache lookup. Scratch

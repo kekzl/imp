@@ -14,7 +14,7 @@ struct EngineConfig;
 struct NativeCacheDemand {
     // Persistent CUTLASS SfAtom SF slab (phase 3b) across ALL registered NVFP4 weights
     // (dense projections, experts, GDN/SSM projections, LM head). Sized with
-    // cutlass_nvfp4_sf_size() plus 256-byte per-entry alignment (pre_dequant_phase3_cutlass.cu).
+    // cutlass_nvfp4_sf_size() plus 256-byte per-entry alignment (pre_dequant_phase3_cutlass.cpp).
     size_t sf_bytes = 0;
     // Largest transient per-(layer,proj) contiguous MoE expert copy (phase 3-moe copy
     // branch: packed + micro-scales + tensor-scales). The zero-copy borrow branch needs

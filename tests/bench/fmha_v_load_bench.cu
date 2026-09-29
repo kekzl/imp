@@ -2,7 +2,7 @@
 // Mirrors the FMHA-MXFP4 V-prefetch shape in attention_fmha_mxfp4_sm120.cu:755-772.
 // Launches on all 170 SMs (RTX 5090) to saturate memory engines like the real kernel.
 
-#include "bench/fmha_v_load_bench.h"
+#include "fmha_v_load_bench.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

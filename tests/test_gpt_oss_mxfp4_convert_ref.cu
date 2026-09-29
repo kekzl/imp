@@ -1,5 +1,5 @@
 // TEST_AUDIT(retired) P1.1/R1.1 (#576): gpt-oss MXFP4->NVFP4 expert converter
-// (src/quant/gpt_oss_mxfp4_convert.cu, previously 0 tests) vs a format-spec-derived
+// (src/quant/gpt_oss_mxfp4_convert.cpp, previously 0 tests) vs a format-spec-derived
 // independent fp64 reference. MXFP4 nibble order was a REAL bug in the #560 sweep - the
 // class this test must catch.
 // Independence: the reference decodes ORIGINAL MXFP4 values in fp64 straight from the format

@@ -66,7 +66,7 @@ struct GemmKernelArgs {
     // QW7 dual-cache CUTLASS MXFP4 hand-off: when CUTLASS_NVFP4 fires and weight.data is also
     // in cutlass_mxfp4 (--mxfp4-prefill on), the dispatch forwards the MXFP4 payload so the
     // handler tries MXFP4 CUTLASS before falling back to NVFP4 CUTLASS. nullptr = no
-    // dual-cache hit. See cutlass_nvfp4_gemm_kernel (gemm_kernel_cutlass_nvfp4.cu).
+    // dual-cache hit. See cutlass_nvfp4_gemm_kernel (gemm_kernel_cutlass_nvfp4.cpp).
     const void* mxfp4_payload = nullptr;
 
     // dp4a/Q8_1 activation quantization scratch (GGUF dp4a tier): per-call scratch pre-sized

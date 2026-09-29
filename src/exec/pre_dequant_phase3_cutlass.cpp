@@ -519,7 +519,7 @@ if (mx_native > 0) {
             void* d_fp16 = static_cast<char*>(d_fp16_bulk) + offset;
             offset += fp16_bytes;
 
-            // GPU-side dequant via dequant_mxfp4_to_fp16. weight_upload.cu splits to
+            // GPU-side dequant via dequant_mxfp4_to_fp16. weight_upload.cpp splits to
             // [data(N*bpr*16) | scales(N*bpr)] before GPU upload; a CPU-side path assuming GGUF's
             // interleaved 17-byte block layout would read scale bytes from inside data and produce
             // garbage FP16. The GPU kernel reads the split layout correctly (data first, scales at

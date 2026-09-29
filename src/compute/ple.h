@@ -1,6 +1,6 @@
 #pragma once
 // Qwen4Exp PLE (n-gram per-layer embedding) kernels. FP16 in/out, FP32 math. The projections
-// and grouped norms around them reuse gemm() and hc_grouped_rmsnorm(); executor_ple.cu wires it.
+// and grouped norms around them reuse gemm() and hc_grouped_rmsnorm(); executor_ple.cpp wires it.
 
 #include "core/tensor.h"
 

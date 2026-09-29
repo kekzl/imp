@@ -3,7 +3,7 @@
 // One formula for the recurrent (SSM/GDN) state footprint, and the message an operator
 // reads when the pool does not fit. The formula used to live twice and disagree:
 // runtime/vram_budget.cpp charged conv_channels*(conv_kernel-1)*4 with no alignment,
-// while memory/ssm_state.cu's allocator took
+// while memory/ssm_state.cpp's allocator took
 // align256(conv_channels*conv_kernel*4) + align256(h bytes) per layer, planning short of
 // what it actually allocates (the direction that oversubscribes the card, MEMORY.md D14).
 // The allocator's shape wins, because it is the one that reaches cudaMalloc. Header-only

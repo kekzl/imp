@@ -64,7 +64,7 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
             tmp.micro_scales = w.payload.nvfp4.block_scales;
             // tensor_scale: payload.nvfp4.tensor_scale is a HOST float pointer (stable address from
             // wcache_.nvfp4). Read directly - cudaMemcpyDeviceToHost on a host pointer is undefined
-            // and silently corrupts the scale. This was the Phase-1 fix in executor_pre_dequant.cu /
+            // and silently corrupts the scale. This was the Phase-1 fix in executor_pre_dequant.cpp /
             // executor_ffn.cu / etc.; this dispatch path was missed.
             tmp.tensor_scale = (w.payload.nvfp4.tensor_scale != nullptr) ? *w.payload.nvfp4.tensor_scale
                                                                          : 1.0f;
@@ -308,7 +308,7 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y, cudaStream
             // Unreachable today, and must stay an error rather than a silent return: CUTLASS_NVFP4 is
             // a prefill tier (M>1); decode reaches the NVFP4 GEMV through the consumer, and
             // decode_tier is only ever assigned tier/FP8/NVFP4
-            // (pre_dequant_phase4_tensor_registry.cu:77,96,98,100), so no caller routes here.
+            // (pre_dequant_phase4_tensor_registry.cpp:77,96,98,100), so no caller routes here.
             // Before 2026-08-21 this branch logged and returned WITHOUT WRITING `y` (the shape #654
             // removed from attention_prefill_dispatch; SETTLED.md S-22: "no tier accepted" is an
             // error, not a degraded answer). An unreachable branch is exactly where a silent-wrong-

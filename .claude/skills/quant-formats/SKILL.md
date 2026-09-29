@@ -64,7 +64,7 @@ Per-expert NVFP4 tensors are packed into one contiguous `[ne, N, K_packed]` buff
 | Activation quantize | producer-fused since #1771/#1773 (`src/quant/nvfp4_pack.cuh`; skip = act-quant hint AND scratch tag); invariant: bit-identity vs `quantize_fp16_to_nvfp4_into` |
 | MXFP4 GGUF | Qwen3.5-4B MXFP4 works (#935/#937); Qwen3.5-27B MXFP4 blocked (OOM on 32 GB) |
 | MXFP4 on GDN hybrids | decode falls back MXFP4 -> FP16; the planner reserves that fallback (#935) or token-0 `!` garbage; keep the reserve |
-| MoE expert leak | host-resident experts left unpromoted (`status 15` / garbage): check `src/model/weight_upload.cu` promotion first (#925) |
+| MoE expert leak | host-resident experts left unpromoted (`status 15` / garbage): check `src/model/weight_upload.cpp` promotion first (#925) |
 | VRAM ordering | weight caches (bounded by the model) are built BEFORE the KV pool takes the measured residual (`src/runtime/engine_kv_cache_init.cpp`, #926 corrected by #1106); a successful `cudaMalloc` at 0 MiB free proves nothing (WDDM spills, ~1530 vs ~237 GB/s, #1103) |
 | KV block size | resolved in `init_resolve_kv_block_size_()` BEFORE `executor_->init()` (#1819); anything sized in `init_weights()` from a value `init_kv_cache()` resolves later is this trap |
 | Dequant correctness | golden-locked: GGUF bit-exact vs spec; f16-class cross-path tolerance 1e-2 (measured ~4e-4); a move is a bug |

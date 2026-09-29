@@ -52,7 +52,7 @@ size_t approx_weight_footprint_bytes(const ModelConfig& mcfg, int host_expert_la
 }
 
 // How many MoE layers the loader will leave on the host. It uploads experts only while
-// they fit (weight_upload.cu decide_expert_layer_placement_), so a model whose full
+// they fit (weight_upload.cpp decide_expert_layer_placement_), so a model whose full
 // footprint exceeds the card ends up serving every MoE layer from the expert cache.
 // Without this the auto resolvers plan as if the experts were free and hand the KV pool
 // VRAM the expert cache needs: on Qwen3.8-Flash-Next that produced max_seq_len 131072
@@ -535,7 +535,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
         IMP_LOG_INFO("max_batch_size: %d (configured)", config_.max_batch_size);
     }
 
-    // Qwen4Exp QSA keeps ONE sequence's indexer keys (executor_qsa.cu): with attention.qsa a
+    // Qwen4Exp QSA keeps ONE sequence's indexer keys (executor_qsa.cpp): with attention.qsa a
     // second sequence would select blocks from the first one's keys. PLE state is per slot.
     if (model_ && model_->ngram_table() != nullptr && runtime_config_.attention.qsa &&
         config_.max_batch_size > 1) {
@@ -776,13 +776,13 @@ void Engine::init_resolve_quant_flags_() {
             // Prequant SafeTensors NVFP4 weights are already NVFP4 on disk:
             // Phase 3a/3b (Q*_K->NVFP4->CUTLASS) iterate `wcache_.nvfp4`,
             // which stays empty here, so they are no-ops. Phase 3-MoE
-            // (cache_moe_native_nvfp4 in executor_pre_dequant.cu) IS
+            // (cache_moe_native_nvfp4 in executor_pre_dequant.cpp) IS
             // load-bearing: it builds the contiguous per-layer expert buffer
             // that lights up the M=1 decode fast path and lets CUDA Graphs
             // capture decode without D2H expert_offsets sync.
             //
             // For Q*_K source weights the per-tensor convert->quantize loop
-            // in executor_pre_dequant.cu builds wcache_.nvfp4 per tensor; the
+            // in executor_pre_dequant.cpp builds wcache_.nvfp4 per tensor; the
             // per-layer head_dim (256 SWA / 512 global) is handled uniformly
             // since each entry carries its own (N, K) shape.
             IMP_LOG_INFO("Gemma 4: NVFP4 decode cache enabled (use_nvfp4_decode=%d, prequant=%d)",

@@ -1950,7 +1950,7 @@ TEST(DualPathQuant, AttentionWeightsExcludedFromNvfp4) {
     uint8_t fake_gate, fake_up, fake_down;
     uint8_t fake_lm_head;
 
-    // Build attention exclusion set (as done in executor_pre_dequant.cu)
+    // Build attention exclusion set (as done in executor_pre_dequant.cpp)
     std::unordered_set<const void*> attn_weight_ptrs;
     attn_weight_ptrs.insert(&fake_wq);
     attn_weight_ptrs.insert(&fake_wk);

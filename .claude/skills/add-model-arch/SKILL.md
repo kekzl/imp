@@ -33,7 +33,7 @@ A new checkpoint is UNTRUSTED INPUT: SafeTensors/`tokenizer.json` parsers are ha
 | Argmax always token 0 | NaN logits upstream (residual overflow, bad scale) | gpt-oss FP16 residual |
 | Coherent to ~1k ctx, then garbage | YaRN/`rope_freq_scale` inverted or fused-rope path without YaRN | gpt-oss 1024x error, #572 |
 | Wrong only with chunked prefill at long ctx | continuation-chunk path | #553 |
-| Wrong language / valid-but-wrong tokens | weight upload / dequant layout (MoE: `weight_upload.cu` expert promotion first) | Qwen3.6-35B NVFP4, #925 |
+| Wrong language / valid-but-wrong tokens | weight upload / dequant layout (MoE: `weight_upload.cpp` expert promotion first) | Qwen3.6-35B NVFP4, #925 |
 | Garbage from token 0 (`!!!`) | silent VRAM-alloc failure in a decode fallback | MXFP4 GDN hybrids, #935 |
 | Multimodal: describes a DIFFERENT picture | M-RoPE per-token (t,h,w) layout, `src/model/mrope_positions.cpp` | Qwen3-VL |
 | Vision fluent but generic | tower loaded partly or embeddings never reach the sequence: `tools/analysis/vision_sight_check.py` | |

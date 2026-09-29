@@ -18,7 +18,7 @@ Attention, GEMM/GEMV, norms, sampling, SSM/GDN scans. `sm_120a` only; the hot pa
 
 ## Entry points
 
-- `attention_dispatch.cu`: prefill FMHA chain per (dtype x layer)
+- `attention_dispatch.cpp`: prefill FMHA chain per (dtype x layer)
 - `attention_fmha_sm120.cu`: register-resident FA2, the default prefill path
 - `attention_paged_*.cu`: paged decode kernels, one per KV dtype
 - `gemm.cu`: generic dispatch and the packed-weight guard

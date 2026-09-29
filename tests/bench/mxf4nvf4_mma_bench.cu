@@ -3,7 +3,7 @@
 // Isolates the MMA pipeline only (not a full attention kernel); answers the Project B Stage 4
 // integration-effort gate.
 
-#include "bench/mxf4nvf4_mma_bench.h"
+#include "mxf4nvf4_mma_bench.h"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstdio>

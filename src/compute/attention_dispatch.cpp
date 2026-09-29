@@ -47,7 +47,7 @@ static void verify_against_routing_model(const DispatchPolicy& rcfg, const AttnK
     warned = true;
     IMP_LOG_ERROR(
         "attention routing model disagrees with the dispatch: dispatch ran %s, "
-        "select_attn_prefill_path() says %s. attention_dispatch.cu and "
+        "select_attn_prefill_path() says %s. attention_dispatch.cpp and "
         "attention_dispatch_decision.h have drifted apart (F-3) — the routing unit "
         "test is now describing a dispatch that does not exist.",
         attn_prefill_path_name(chosen), attn_prefill_path_name(modeled));

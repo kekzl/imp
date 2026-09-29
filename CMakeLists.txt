@@ -166,8 +166,8 @@ set(IMP_MEMORY_SOURCES
     src/memory/block_pool.cpp
     src/memory/scratch_stack.cpp
     src/memory/plan.cpp
-    src/memory/vram_allocator.cu
-    src/memory/mem_account.cu
+    src/memory/vram_allocator.cpp
+    src/memory/mem_account.cpp
     src/memory/kv_cache.cu
     src/memory/kv_cache_manager.cpp
     src/memory/kv_cache_manager_spill.cpp
@@ -176,8 +176,8 @@ set(IMP_MEMORY_SOURCES
     src/memory/weight_snapshot.cpp
     src/memory/weight_cache_file.cpp
     src/memory/vram_query.cpp
-    src/memory/ssm_state.cu
-    src/memory/layer_offload.cu
+    src/memory/ssm_state.cpp
+    src/memory/layer_offload.cpp
 )
 
 set(IMP_MODEL_SOURCES
@@ -203,7 +203,7 @@ set(IMP_MODEL_SOURCES
     src/model/hf_fetch.cpp
     src/model/hf_fetch_repo.cpp
     src/model/weight_map.cpp
-    src/model/weight_upload.cu
+    src/model/weight_upload.cpp
     src/model/tokenizer.cpp
     src/model/fim.cpp
     src/model/tokenizer_nfc.cpp
@@ -211,7 +211,7 @@ set(IMP_MODEL_SOURCES
     src/model/unicode_class.cpp
     src/model/unicode_nfc_data.cpp
     src/model/tensor_kind_name.cpp
-    src/model/tensor_kind_table.cu
+    src/model/tensor_kind_table.cpp
     src/model/tensor_kind_matcher.cpp
     src/model/chat_template.cpp
     src/model/chat_template_tokenize.cpp
@@ -252,9 +252,9 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_f16_narrow_prefill.cu
     src/compute/ffn_sparsity_probe.cu
     src/compute/ffn_sparsity_mask.cu
-    src/compute/weight_dispatch.cu
+    src/compute/weight_dispatch.cpp
     src/compute/gemm_dp4a.cu
-    src/compute/gemm_grouped.cu
+    src/compute/gemm_grouped.cpp
     src/compute/ggml_mmvq.cu
     src/compute/gemm_moe_fused.cu
     src/compute/gemm_moe_fused_tc.cu
@@ -276,7 +276,7 @@ set(IMP_COMPUTE_SOURCES
     # src/compute/attention_paged_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
     src/compute/attention_blackwell.cu
     src/compute/attention_cublas.cu
-    src/compute/attention_dispatch.cu
+    src/compute/attention_dispatch.cpp
     src/compute/rope.cu
     src/compute/layernorm.cu
     src/compute/layernorm_rowblock.cu
@@ -368,7 +368,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/config.cpp
     src/runtime/spec_trace.cpp
     src/runtime/graph_eligibility.cpp
-    src/runtime/green_ctx.cu
+    src/runtime/green_ctx.cpp
     src/runtime/scheduler.cpp
     src/runtime/request.cpp
     src/runtime/batch.cpp
@@ -412,51 +412,51 @@ set(IMP_EXEC_SOURCES
     src/exec/storage_planner.cpp
     src/exec/executor.cu
     src/exec/executor_sampling.cu
-    src/exec/executor_gemm_smallm.cu
+    src/exec/executor_gemm_smallm.cpp
     src/exec/executor_norm_fold.cu
     src/exec/executor_kernels.cu
     src/exec/executor_kv_write_kernels.cu
     src/exec/sparse_attn_select.cu
     src/exec/executor_elementwise.cu
     src/exec/decode_pipeline_advance.cu
-    src/exec/pre_dequant_phase3_fp8.cu
-    src/exec/pre_dequant_phase3_cutlass.cu
-    src/exec/pre_dequant_phase3_gdn_prefill.cu
-    src/exec/pre_dequant_phase3_moe.cu
+    src/exec/pre_dequant_phase3_fp8.cpp
+    src/exec/pre_dequant_phase3_cutlass.cpp
+    src/exec/pre_dequant_phase3_gdn_prefill.cpp
+    src/exec/pre_dequant_phase3_moe.cpp
     src/exec/executor_gemm_dispatch.cu
-    src/exec/executor_gemm_released.cu
+    src/exec/executor_gemm_released.cpp
     src/exec/activation_calibrator.cu
-    src/exec/gemm_kernel_registry.cu
-    src/exec/gemm_kernel_cutlass_nvfp4.cu
+    src/exec/gemm_kernel_registry.cpp
+    src/exec/gemm_kernel_cutlass_nvfp4.cpp
     src/exec/gemm_kernel_gguf.cu
-    src/exec/gemm_kernel_generic_dequant.cu
-    src/exec/gemm_scratch.cu
+    src/exec/gemm_kernel_generic_dequant.cpp
+    src/exec/gemm_scratch.cpp
     src/exec/workspace_sizes.cpp
     src/exec/executor_workspace.cu
     src/exec/executor_workspace_buffers.cu
     src/exec/executor_kv_write.cu
-    src/exec/executor_pre_dequant.cu
-    src/exec/pre_dequant_phase0_nvfp4_loader.cu
-    src/exec/pre_dequant_phase1_fp16_cache.cu
-    src/exec/pre_dequant_phase2_fp8_cache.cu
-    src/exec/pre_dequant_fp8_lm_head.cu
-    src/exec/pre_dequant_phase3_nvfp4_decode.cu
-    src/exec/pre_dequant_phase3c_mxfp4.cu
-    src/exec/pre_dequant_phase4_tensor_registry.cu
+    src/exec/executor_pre_dequant.cpp
+    src/exec/pre_dequant_phase0_nvfp4_loader.cpp
+    src/exec/pre_dequant_phase1_fp16_cache.cpp
+    src/exec/pre_dequant_phase2_fp8_cache.cpp
+    src/exec/pre_dequant_fp8_lm_head.cpp
+    src/exec/pre_dequant_phase3_nvfp4_decode.cpp
+    src/exec/pre_dequant_phase3c_mxfp4.cpp
+    src/exec/pre_dequant_phase4_tensor_registry.cpp
     src/exec/executor_workspace_config.cu
     src/exec/executor_attention.cu
     src/exec/executor_forward.cu
     src/exec/executor_perplexity.cu
     src/exec/executor_prompt_logprobs.cu
-    src/exec/executor_lm_head_fp8.cu
+    src/exec/executor_lm_head_fp8.cpp
     src/exec/executor_lora.cu
     src/lora/lora_adapter.cpp
-    src/quant/gpt_oss_mxfp4_convert.cu
+    src/quant/gpt_oss_mxfp4_convert.cpp
     src/exec/executor_ffn.cu
     src/exec/executor_ssm_gdn.cu
-    src/exec/executor_gated_residual.cu
-    src/exec/executor_ple.cu
-    src/exec/executor_gdn_alpha_beta.cu
+    src/exec/executor_gated_residual.cpp
+    src/exec/executor_ple.cpp
+    src/exec/executor_gdn_alpha_beta.cpp
     src/exec/executor_forward_moe.cu
     src/exec/executor_forward_moe_cutlass.cu
     src/exec/executor_forward_moe_batch.cu
@@ -464,11 +464,11 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_forward_moe_legacy.cu
     src/exec/expert_cache.cu
     src/exec/expert_cache_device.cu
-    src/exec/executor_qsa.cu
+    src/exec/executor_qsa.cpp
     src/compute/qsa_indexer.cu
-    src/exec/weight_handle.cu
-    src/exec/moe_workspace.cu
-    src/exec/quant_scratch.cu
+    src/exec/weight_handle.cpp
+    src/exec/moe_workspace.cpp
+    src/exec/quant_scratch.cpp
 )
 
 set(IMP_VISION_SOURCES
@@ -481,7 +481,7 @@ set(IMP_VISION_SOURCES
     src/vision/qwen3vl_vision_grid.cpp
     src/vision/qwen3vl_vision_upload.cpp
     src/vision/qwen3vl_encoder_kernels.cu
-    src/vision/qwen3vl_encoder.cu
+    src/vision/qwen3vl_encoder.cpp
     src/vision/qwen3vl_pipeline.cpp
     src/vision/image_processor.cpp
     src/vision/vision_encoder.cu
@@ -515,7 +515,6 @@ target_include_directories(imp
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests  # for tests/bench/ headers (test/bench TUs only)
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
 )
 
@@ -544,12 +543,19 @@ if(IMP_USE_CUTLASS)
     target_compile_definitions(imp PRIVATE IMP_USE_CUTLASS=1)
 endif()
 
-# Enable separable compilation for device-side launches (PDL)
 set_target_properties(imp PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
     POSITION_INDEPENDENT_CODE ON
 )
+# rdc only where a kernel template is instantiated in one TU and launched from another (#2209 link test).
+set_source_files_properties(
+    src/quant/nvfp4_gemv_dense.cu
+    src/quant/nvfp4_gemv_fused.cu
+    src/compute/mmq_q8_imma_q4k.cu
+    src/compute/mmq_q8_imma_q51.cu
+    src/compute/mmq_q8_imma_q5k.cu
+    src/compute/mmq_q8_imma_q6k.cu
+    PROPERTIES COMPILE_OPTIONS "-rdc=true")
 
 # --- Tools ---
 if(IMP_BUILD_TOOLS)

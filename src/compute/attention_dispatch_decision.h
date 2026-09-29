@@ -3,10 +3,10 @@
 #include "compute/dispatch_paths.h"  // AttnPrefillPath
 #include "core/dispatch_policy.h"
 
-// Pure host-side model of attention_dispatch.cu's prefill routing order, covered by a cheap CPU
+// Pure host-side model of attention_dispatch.cpp's prefill routing order, covered by a cheap CPU
 // unit test (test_routing_decision.cpp) so a routing-order regression like #493 is caught there.
 // Models config gates + kernel-accept short-circuit only; the actual launch is out of scope.
-// Any reorder or gate change in attention_dispatch.cu must show up as a diff here.
+// Any reorder or gate change in attention_dispatch.cpp must show up as a diff here.
 
 namespace imp {
 

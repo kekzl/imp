@@ -954,7 +954,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     // gpt-oss residual-stream 2^-4 rescale (#547): FP16 hidden overflows to inf/NaN without it.
     // RMSNorm/lm_head are scale-invariant so scaling every residual contributor is exact.
     // Handled elsewhere: embeddings (cfg.embed_scale), expert down weights (tensor_scales in
-    // pre_dequant_phase3_nvfp4_decode.cu). Handled here into fresh host_owned_buffers_ (GGUF
+    // pre_dequant_phase3_nvfp4_decode.cpp). Handled here into fresh host_owned_buffers_ (GGUF
     // mmap is read-only): attention Wo + o_bias, expert down bias.
     if (cfg.arch == ModelArch::GPT_OSS) {
         // gpt-oss's blk.N.post_attention_norm.weight is its PRE-FFN norm (llama convention routes

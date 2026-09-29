@@ -28,7 +28,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
     (void)stream;  // unused but kept for signature consistency
     // Build WeightRegistry from wcache_ contents (phase-2 shim).
     registry_->clear();
-    // Explicit kind overrides t.kind, which is UNKNOWN after weight_upload.cu creates fresh
+    // Explicit kind overrides t.kind, which is UNKNOWN after weight_upload.cpp creates fresh
     // Tensor descriptors (TensorKind is not preserved through upload). Phase 5 plan-driven
     // allocation requires kind to be correct, so pass it explicitly from the field position.
     auto register_tensor = [&](const Tensor& t, TensorKind kind) -> TensorID {
@@ -665,7 +665,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         try_mark(mut_model->tok_emb_, mut_model->tok_emb_id);
 
     // gemm.nvfp4_lm_head=fp8: forward_logits, for_each_lm_head_batch_ and the MTP draft read the FP8
-    // head (executor_lm_head_fp8.cu), none reads the source; its bytes go to the expert cache
+    // head (executor_lm_head_fp8.cpp), none reads the source; its bytes go to the expert cache
     // minus the FP8 head built after the cache was sized. Kept when tied or keyed by another cache.
     Tensor& head = mut_model->out_proj_;
     if (wcache_->lm_head_fp8.weight.data && head.data && !head.dropped_source &&

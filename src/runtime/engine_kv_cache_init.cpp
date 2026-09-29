@@ -780,7 +780,7 @@ bool Engine::init_kv_cache() {
             }
         }
 
-        // PLE conv rows live in the SSM slab tail (executor_ple.cu): no slab, no PLE state.
+        // PLE conv rows live in the SSM slab tail (executor_ple.cpp): no slab, no PLE state.
         if (const size_t ple = model_->ple_state_bytes();
             ple > 0 && (!ssm_state_ || ssm_state_->extra_bytes() < ple))
             throw std::runtime_error("PLE model without the per-slot conv rows in the SSM/GDN state slab");

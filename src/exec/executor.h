@@ -626,7 +626,7 @@ private:
     Tensor hc_inj_;     // [max_tokens, hc] FP16, 2*sigmoid(inject(normed)/hc)
     Tensor hc_mixed_;   // [max_tokens, d] FP16, the block input kept for out = h - mixed
     Tensor hc_out_;     // [max_tokens, d] FP16, recovered block output
-    // Qwen4Exp PLE (executor_ple.cu): pinned staging for the gathered n-gram rows, the
+    // Qwen4Exp PLE (executor_ple.cpp): pinned staging for the gathered n-gram rows, the
     // n-gram id scratch. Sequence state (conv rows) is the SSM slab tail per slot.
     PinnedBuffer ple_host_;
     PinnedBuffer ple_readback_;  // token ids + first position of the chunk, D2H per forward
@@ -634,7 +634,7 @@ private:
     std::vector<int64_t> ple_ids_;
     std::vector<int32_t> ple_step_ctx_;
     CudaEvent ple_h2d_done_;
-    // Qwen4Exp QSA indexer (executor_qsa.cu): per QSA layer the raw index keys [ctx, 128]
+    // Qwen4Exp QSA indexer (executor_qsa.cpp): per QSA layer the raw index keys [ctx, 128]
     // and block keys [ctx/ratio, 128] of the ONE sequence; token-sized GEMM/query buffers;
     // selection lists and a scratch paged K/V for qsa_rows_ query rows.
     struct QsaLayerState {
@@ -1144,7 +1144,7 @@ private:
                                        QType up_qtype, const MoeRoutingResult& routing);
     void run_ssm(int layer, const InferenceState& state, cudaStream_t stream);
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
-    // Qwen4Exp gated residual (executor_gated_residual.cu). hc_read_ turns the hc streams into the
+    // Qwen4Exp gated residual (executor_gated_residual.cpp). hc_read_ turns the hc streams into the
     // block input in hidden_[n] (and the inject gates when `inject` is set); hc_write_ recovers the
     // block output from hidden_ (block convention: h = mixed + out) and injects it into the streams.
     void hc_read_(const Tensor& norm_w, const Tensor& down, const Tensor& up, const Tensor* inject, int n,
@@ -1152,11 +1152,11 @@ private:
     void hc_write_(int n, cudaStream_t stream);
     [[nodiscard]] bool hc_alloc_(int max_tokens);  // the seven hc_* buffers, no-op without gated_residual
     void hc_free_();
-    // Qwen4Exp PLE (executor_ple.cu): adds the n-gram block's output to the hc streams before
+    // Qwen4Exp PLE (executor_ple.cpp): adds the n-gram block's output to the hc streams before
     // the layer's attention hyper-connection. No-op family without model_->ngram_table().
     [[nodiscard]] bool ple_alloc_(int max_tokens);
     void ple_free_();
-    // Qwen4Exp QSA indexer (executor_qsa.cu). qsa_decode_ replaces the dense decode kernel
+    // Qwen4Exp QSA indexer (executor_qsa.cpp). qsa_decode_ replaces the dense decode kernel
     // for one sequence (false: caller runs dense); qsa_prefill_ recomputes the rows whose
     // selection is no longer all-true after the dense chunk attention.
     bool qsa_layer_(int layer) const;

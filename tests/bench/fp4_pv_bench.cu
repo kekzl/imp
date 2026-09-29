@@ -2,7 +2,7 @@
 // probabilities preserves enough precision for the +13% MMA-level upside before committing
 // to multi-week Phase 3b/3c integration. See bench/fp4_pv_bench.h.
 
-#include "bench/fp4_pv_bench.h"
+#include "fp4_pv_bench.h"
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cmath>
