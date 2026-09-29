@@ -195,6 +195,13 @@ int main(int argc, char** argv) {
     state.max_batch_items = args.max_batch_items;
     state.max_logit_bias = args.max_logit_bias;
     state.max_images = args.max_images;
+    {
+        imp_server::responses::ResponseStoreLimits lim;
+        lim.ttl_seconds = args.responses_store_ttl;
+        lim.max_entries = static_cast<size_t>(args.responses_store_max_entries);
+        lim.max_bytes = static_cast<size_t>(args.responses_store_max_mib) << 20;
+        state.response_store.set_limits(lim);
+    }
 
     // --trusted-proxy a,b,c
     {
@@ -360,6 +367,12 @@ int main(int argc, char** argv) {
     svr.Post("/v1/responses", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_responses(req, res, state);
     });
+    svr.Get(R"(/v1/responses/([^/]+))", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_responses_get(req, res, state);
+    });
+    svr.Delete(R"(/v1/responses/([^/]+))", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_responses_delete(req, res, state);
+    });
 
     svr.Post("/v1/completions", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_completions(req, res, state);
@@ -516,6 +529,14 @@ int main(int argc, char** argv) {
         });
     }
 
+    {
+        const auto lim = state.response_store.limits();
+        if (lim.enabled())
+            printf("Responses store: ttl %llds, max %zu entries, %zu MiB (LRU)\n",
+                   static_cast<long long>(lim.ttl_seconds), lim.max_entries, lim.max_bytes >> 20);
+        else
+            printf("Responses store: off (store=true answers 400)\n");
+    }
     printf("Server listening on http://%s:%d\n", args.host.c_str(), args.port);
     printf("Endpoints:\n");
     printf("  GET    /                    web UI — open this in a browser\n");
@@ -525,6 +546,7 @@ int main(int argc, char** argv) {
     printf("  GET    /info                TGI-compatible context probe (max_total_tokens)\n");
     printf("  POST   /v1/chat/completions\n");
     printf("  POST   /v1/responses          OpenAI Responses API (Agents SDK / Codex dialect)\n");
+    printf("  GET    /v1/responses/{id}     stored response (store=true); DELETE removes it\n");
     printf("  POST   /v1/completions\n");
     printf("  POST   /v1/messages          Anthropic-compatible (streaming + non-streaming)\n");
     printf("  POST   /v1/messages/count_tokens\n");

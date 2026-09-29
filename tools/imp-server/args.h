@@ -63,6 +63,11 @@ struct ServerArgs : CommonArgs {
     // --idle-unload-seconds: suspend after N s without an inference request, resume on the next
     // one (0 = off, default). Same teardown as POST /admin/suspend (#2199).
     int idle_unload_seconds = 0;
+    // Responses store (#2206): --responses-store-ttl, --responses-store-max-entries,
+    // --responses-store-max-mib. Any of them 0 disables the store (store=true answers 400).
+    int responses_store_ttl = 3600;
+    int responses_store_max_entries = 1000;
+    int responses_store_max_mib = 256;
 };
 
 ServerArgs parse_server_args(int argc, char** argv);

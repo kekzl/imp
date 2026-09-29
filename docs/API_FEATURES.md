@@ -207,3 +207,28 @@ Refusal rules:
 - Model with unreadable vision tower: loads text-only, image request gets `400 vision_unavailable`.
 
 No video. `temporal_patch_size` is parsed but used only as a still-image repeat.
+
+## Responses store
+
+`POST /v1/responses` with `store: true` keeps the response in process memory; a later request names it in `previous_response_id` instead of resending the transcript (#2206).
+
+| item | behaviour |
+|---|---|
+| stored | the conversation input as the model saw it (earlier turns flattened), the output items (reasoning, message, function_call), the response object |
+| `previous_response_id` | stored input + stored output + the new `input`, then the normal transform: the same prompt a client resending the transcript with `store: false` builds. Reasoning items are skipped on replay, as in a stateless resend |
+| not carried over | `instructions`, `tools`, sampling fields: send them on every turn (OpenAI does not carry `instructions` either) |
+| `store` absent | not stored. OpenAI defaults to `true`; imp keeps the stateless default so existing clients hold no server memory |
+| `store: false` | stateless, as before; `previous_response_id` still works against a stored predecessor |
+| lifetime | `--responses-store-ttl` s from insertion (default 3600); a hit refreshes LRU order, not the TTL |
+| caps | `--responses-store-max-entries` (default 1000) and `--responses-store-max-mib` (default 256); the least recently used entry goes first. An entry larger than the byte cap alone is not stored (logged) |
+| off | any `--responses-store-*` flag at 0: `store: true` answers 400 (`param: "store"`) |
+| unknown or expired id | 404, `code: "response_not_found"`, `param: "previous_response_id"` |
+| `GET /v1/responses/{id}` | the stored response object; 404 `response_not_found` otherwise |
+| `DELETE /v1/responses/{id}` | `{"id", "object": "response.deleted", "deleted": true}`; 404 otherwise |
+| `GET /v1/responses/{id}/input_items` | not implemented: input items carry no ids to page by |
+| ids | `resp_imp<counter><64 random bits>`: GET serves stored content, so ids are not enumerable |
+| scope | one process, no persistence: a restart or a second replica does not see the entry. Auth is the server's `--api-key`; there is no per-key isolation |
+| `/metrics` | `imp_responses_store_entries`, `imp_responses_store_bytes` (gauges), `imp_responses_store_evictions_total` (caps), `imp_responses_store_expired_total` (TTL) |
+
+- Streaming responses are stored when `response.completed` / `response.incomplete` was written; a client that disconnects earlier stores nothing.
+- Token identity of a two-turn continuation against the stateless resend on a real model: `scripts/accept_2206.sh` (GPU).

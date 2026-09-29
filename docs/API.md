@@ -25,7 +25,8 @@ all of them at once.
 | `POST /v1/completions` | ✅ | legacy text completion. `prompt`: a string, a token-id list, or a one-element list of either; a batch of prompts is a 400, like `n > 1` |
 | `POST /v1/messages` | ✅ | Anthropic. Real per-token SSE, `ping` keepalives |
 | `POST /v1/messages/count_tokens` | ✅ | |
-| `POST /v1/responses` | ✅ | OpenAI Responses, the dialect Codex and the Agents SDK speak by default; stateless, so use `store: false` and resend the transcript in `input` |
+| `POST /v1/responses` | ✅ | OpenAI Responses, the dialect Codex and the Agents SDK speak by default. `store: true` + `previous_response_id` continue server-side, see [Responses store](API_FEATURES.md#responses-store) |
+| `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | ✅ | stored responses only, see [Responses store](API_FEATURES.md#responses-store) |
 | `POST /v1/embeddings` | ✅ | needs an embedding model loaded |
 | `POST /v1/rerank`, `POST /rerank` | ✅ | Cohere/Jina/vLLM shape |
 | `POST /tokenize`, `POST /detokenize` | ✅ | `/tokenize` takes `content` (llama.cpp) or `prompt` (vLLM) |
@@ -203,6 +204,10 @@ Both sit behind the same `--api-key` and `--rate-limit` as every other non-probe
 - Both drain in-flight requests first (`server.model_swap_drain_ms`), never cancel them; 503 if the drain times out.
 - `id` is stable across suspend/resume; ids are never reused.
 - Adapters survive an idle or operator suspend: resume re-loads them from their paths.
+
+## Responses store
+
+`store: true`, `previous_response_id`, `GET`/`DELETE /v1/responses/{id}`, the `--responses-store-*` limits and metrics: [`API_FEATURES.md`](API_FEATURES.md#responses-store) (#2206).
 
 ## Errors
 

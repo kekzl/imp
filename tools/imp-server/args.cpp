@@ -63,6 +63,9 @@ void print_server_usage(const char* prog) {
             "  --log-requests <path> Append per-request JSONL with prompt + response content\n"
             "  --idle-unload-seconds <s> Suspend (free the GPU) after s idle seconds; the next\n"
             "                        request resumes it (default 0 = off)\n"
+            "  --responses-store-ttl <s>          Responses store=true lifetime (default 3600, 0=store off)\n"
+            "  --responses-store-max-entries <n>  Responses store entry cap, LRU (default 1000)\n"
+            "  --responses-store-max-mib <n>      Responses store byte cap in MiB, LRU (default 256)\n"
             "  --help                Show this help message\n",
             prog);
 }
@@ -142,6 +145,24 @@ ServerArgs parse_server_args(int argc, char** argv) {
                 std::exit(1);
             }
             args.idle_unload_seconds = static_cast<int>(n);
+        } else if ((std::strcmp(arg, "--responses-store-ttl") == 0 ||
+                    std::strcmp(arg, "--responses-store-max-entries") == 0 ||
+                    std::strcmp(arg, "--responses-store-max-mib") == 0) &&
+                   i + 1 < argc) {
+            // Strict like --idle-unload-seconds: a typo must not silently disable the store.
+            const char* v = argv[++i];
+            char* end = nullptr;
+            const long n = std::strtol(v, &end, 10);
+            if (end == v || *end != '\0' || n < 0 || n > 1000000000L) {
+                fprintf(stderr, "%s expects an integer >= 0, got '%s'\n", arg, v);
+                std::exit(1);
+            }
+            if (std::strcmp(arg, "--responses-store-ttl") == 0)
+                args.responses_store_ttl = static_cast<int>(n);
+            else if (std::strcmp(arg, "--responses-store-max-entries") == 0)
+                args.responses_store_max_entries = static_cast<int>(n);
+            else
+                args.responses_store_max_mib = static_cast<int>(n);
         } else if (std::strcmp(arg, "--log-requests") == 0 && i + 1 < argc) {
             args.log_requests_path = argv[++i];
         } else {
