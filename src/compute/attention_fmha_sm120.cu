@@ -8,6 +8,7 @@
 #include "compute/attention_fmha_sm120.h"
 #include "compute/attention_paged_common.cuh"
 #include "compute/fmha_fp8_tile_select.h"
+#include "compute/fmha_sm120_tile_select.h"
 #include "core/cuda_static_reset.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
@@ -374,13 +375,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
 // Shared memory computation
 // =============================================================================
 
-static size_t compute_smem_sm120(int Bq, int Bkv, int head_dim) {
-    return (size_t)Bq * head_dim * sizeof(half)     // Q_tile
-           + (size_t)Bkv * head_dim * sizeof(half)  // KV_tile (shared K/V buffer)
-           + (size_t)Bq * Bkv * sizeof(float)       // S_tile (float scores / half P overlay)
-           + (size_t)Bq * head_dim * sizeof(float)  // O_acc
-           + 2 * (size_t)Bq * sizeof(float);        // row_m + row_l
-}
+// sm120_fmha_smem_bytes (fmha_sm120_tile_select.h): Q + shared K/V tile + S + O_acc + row_m/row_l.
 
 // =============================================================================
 // Host launcher
@@ -415,38 +410,17 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
     // KV tile columns — must match the kernel's compile-time `Bkv` (which
     // derives from HD): hd=512 uses Bkv=32 (~82 KB at Bq=16, fits the 99 KB
     // opt-in; +40% at long context — see the kernel-side comment).
-    const int Bkv = (head_dim >= 512) ? 32 : SM120_Bkv;
+    const int Bkv = sm120_fmha_bkv(head_dim);
+    static_assert(sm120_fmha_bkv(128) == SM120_Bkv, "tile-select Bkv must match the kernel");
 
-    // Bq from head_dim + smem fit (K/V share one buffer): smem = Q+KV+S+O_acc+row state.
-    // First three branches compare against max_smem/2 (occ2_cap=50688 at max_smem=101376, the 99KB
-    // opt-in): two blocks/SM beats one bigger tile. At max_smem alone: occupancy 1.
-    //   HD64 Bq64(48.5KB) HD96 Bq32(38.2KB) HD128 Bq32(48.2KB) [<=occ2_cap]; HD256 Bq32(88.2KB)
-    //   HD512 Bq16(82.1KB) [<=max_smem only].
-    int Bq;
-    {
-        size_t smem_128 = compute_smem_sm120(128, Bkv, head_dim);
-        size_t smem_64 = compute_smem_sm120(64, Bkv, head_dim);
-        size_t smem_32 = compute_smem_sm120(32, Bkv, head_dim);
-        size_t smem_16 = compute_smem_sm120(16, Bkv, head_dim);
-        size_t occ2_cap = static_cast<size_t>(max_smem) / 2;
-        if (smem_128 <= occ2_cap) {
-            Bq = 128;
-        } else if (smem_64 <= occ2_cap) {
-            Bq = 64;
-        } else if (smem_32 <= occ2_cap) {
-            Bq = 32;
-        } else if (smem_32 <= (size_t)max_smem) {
-            Bq = 32;
-        } else if (smem_16 <= (size_t)max_smem) {
-            Bq = 16;  // hd=512: the only Bq whose SMEM fits
-        } else {
-            IMP_LOG_DEBUG("FMHA sm120: no Bq fits smem (hd=%d, smem_16=%zu, max=%d)", head_dim, smem_16,
-                          max_smem);
-            return false;
-        }
+    // Bq: largest instanced tile at occupancy 2 (smem <= max/2), else occupancy 1 (#2243).
+    const int Bq = sm120_fmha_select_bq(head_dim, static_cast<size_t>(max_smem));
+    if (Bq == 0) {
+        IMP_LOG_DEBUG("FMHA sm120: no instanced Bq fits smem (hd=%d, max=%d)", head_dim, max_smem);
+        return false;
     }
 
-    const size_t smem = compute_smem_sm120(Bq, Bkv, head_dim);
+    const size_t smem = sm120_fmha_smem_bytes(Bq, Bkv, head_dim);
     if (smem > (size_t)max_smem) {
         IMP_LOG_DEBUG("FMHA sm120: smem %zu > device max %d, skipping", smem, max_smem);
         return false;

@@ -143,6 +143,10 @@ ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens);
 ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_tokens,
                                  const ImpGenerateParams* params);
 
+// The token the last imp_prefill/imp_prefill_with_params sampled (imp_decode_step returns the next
+// one). IMP_ERROR_INVALID_ARG before a prefill or when it sampled none.
+ImpError imp_prefill_token(ImpContext ctx, int32_t* out_token);
+
 // Returns IMP_ERROR_CANCELLED when the engine cancels mid-decode (e.g. KV pool exhausted,
 // reject-newest; engine log names cause+remedy). IMP_ERROR_INTERNAL after natural FINISH is
 // the end-of-stream signal for callers that keep stepping.
