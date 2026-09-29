@@ -2,6 +2,7 @@
 #include "exec/executor.h"
 #include "lora/lora_adapter.h"
 #include "exec/executor_kernels.h"
+#include "exec/executor_kernels.cuh"
 #include "exec/executor_gemv_helpers.h"
 #include "exec/executor_helpers.h"
 #include "exec/gemm_context.h"

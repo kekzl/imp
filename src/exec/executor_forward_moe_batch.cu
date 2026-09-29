@@ -7,6 +7,7 @@
 #include "compute/mmq_q8_imma.h"
 #include "core/cuda_static_reset.h"
 #include "exec/executor_forward_moe_internal.h"
+#include "exec/executor_forward_moe_kernels.cuh"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/executor_helpers.h"
 #include "exec/executor_kernels.h"

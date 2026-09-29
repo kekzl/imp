@@ -83,7 +83,7 @@ SRC_EXT = (".cu", ".cpp")
 NOT_A_FUNCTION = re.compile(
     r"^(namespace|extern|struct|class|enum|union|using|typedef|template|#|//|/\*|\}|else)\b")
 SIG_START = re.compile(r"^[A-Za-z_~][^=]*\(")
-INCLUDE_CU = re.compile(r'^\s*#include\s+"([^"]+\.cu)"')
+INCLUDE_CU = re.compile(r'^\s*#include\s+"([^"]+\.(?:cu|cpp))"')  # .cpp: host-only fragments (#2209)
 # A signature may wrap over several lines; the continuations are indented, so the
 # opening `{` can be up to this many lines below the line that starts in column 0.
 MAX_SIG_LINES = 12
@@ -288,6 +288,8 @@ def selftest():
          "void f() {\n    s = \"}\";\n    // {\n    /* } */\n    g();\n}\n", [2]),
         ("included .cu fragment is expanded in place",
          'void f() {\n    a();\n#include "exec/frag.cu"\n    b();\n}\n', [3 + 40]),
+        ("included .cpp fragment is expanded in place",
+         'void f() {\n    a();\n#include "exec/frag.cpp"\n    b();\n}\n', [3 + 40]),
         ("brace-init default in the parameter list is not the body (#2215)",
          "void k(int a, T p = {}) {\n    x();\n    y();\n    z();\n}\n", [3]),
         ("wrapped brace-init default, body opens after the paren",
@@ -299,7 +301,7 @@ def selftest():
     ]
     failures = 0
     for name, text, want in cases:
-        got = [n for _, _, n, _ in functions_in("t.cu", text, {"exec/frag.cu": 40})]
+        got = [n for _, _, n, _ in functions_in("t.cu", text, {"exec/frag.cu": 40, "exec/frag.cpp": 40})]
         ok = got == want
         failures += not ok
         print(f"  {'ok  ' if ok else 'FAIL'}  {name}: expected {want}, got {got}")

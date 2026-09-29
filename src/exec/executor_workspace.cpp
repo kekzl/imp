@@ -314,7 +314,7 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     // (core/pdl_device.cuh); a registered kernel may run while its producer still executes.
     // Only instrumented kernels register here; others register next to their pdl::launch.
     if (use_pdl_ && pdl::is_available()) {
-        pdl::enable(reinterpret_cast<const void*>(&elementwise_add_fp16_kernel));
+        elementwise_add_pdl_register();
         nvfp4_gemv_pdl_register();
         layernorm_pdl_register();  // fp16 block / warp / residual variants (instrumented)
         rope_pdl_register();       // fused qk-norm + rope (instrumented)

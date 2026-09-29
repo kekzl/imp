@@ -1,6 +1,6 @@
 #include "compute/gemm.h"
 #include "compute/gemv_dp4a_traits.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 #include "core/qtype.h"
 #include "core/logging.h"
 

@@ -1,6 +1,6 @@
 #include "compute/layernorm.h"
 #include "compute/warp_reduce.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 #include "core/tensor.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>

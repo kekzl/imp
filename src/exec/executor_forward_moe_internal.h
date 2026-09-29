@@ -37,19 +37,6 @@ inline void moe_host_args_ok_or_throw(cudaError_t err, const char* where) {
                                  ") in " + where);
 }
 
-__global__ void sanitize_fp16_kernel(__half* __restrict__ data, int64_t n);
-__global__ void moe_apply_per_expert_scale_kernel(
-    float* __restrict__ weights, const int32_t* __restrict__ indices,
-    const __half* __restrict__ scales, int n_weights);
-
-inline void sanitize_fp16(__half* data, int64_t n, cudaStream_t stream) {
-    if (n <= 0)
-        return;
-    int threads = 256;
-    int blocks = static_cast<int>((n + threads - 1) / threads);
-    sanitize_fp16_kernel<<<blocks, threads, 0, stream>>>(data, n);
-}
-
 inline void apply_expert_activation(void* gate_data, void* up_data, void* swiglu_data, bool non_gated,
                                     int64_t rows, int64_t eff, QType compute_dtype, FFNActivation act_type,
                                     cudaStream_t stream) {

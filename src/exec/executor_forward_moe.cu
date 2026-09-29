@@ -8,6 +8,7 @@
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_forward_moe_internal.h"
+#include "exec/executor_forward_moe_kernels.cuh"
 #include "exec/gemm_context.h"
 #include "exec/executor_debug.h"
 #include <atomic>

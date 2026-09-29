@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <vector>
 #include "core/pdl_device.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 
 namespace imp {
 

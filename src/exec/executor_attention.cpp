@@ -219,7 +219,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // quant types: fused RMSNorm->Q8_1->QKV GEMV, skipping the intermediate
     // norm_out FP16 buffer. Otherwise separate RMSNorm + 3 dp4a/cuBLAS dispatches.
     {
-#include "exec/executor_attention_qkv.cu"
+#include "exec/executor_attention_qkv.cpp"  // NOLINT(bugprone-suspicious-include): body fragment, not a TU
     }
 
     // Gemma 4: K=V sharing for global attention layers (wv==null): no V
@@ -409,11 +409,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             const int effective_rope_dim = fused_rope_dim;
             const int pairs = effective_rope_dim / 2;
             const float inv_scaling = 1.0f / layer_rope_freq_scale;
-            rope_q_only_fp16_kernel<<<dim3(1, nh), pairs, 0, stream>>>(static_cast<half*>(qv.data),
-                                                                       state.positions, nh, hd,
-                                                                       layer_rope_theta, inv_scaling, pairs,
-                                                                       cfg.rope_neox, longrope_freqs);
-            IMP_CUDA_CHECK_LAUNCH();
+            rope_q_only_fp16(static_cast<half*>(qv.data), state.positions, nh, hd, layer_rope_theta, inv_scaling,
+                             pairs, cfg.rope_neox, longrope_freqs, stream);
             rope_k_deferred = true;
         } else {
             // Some archs (Qwen3.5-27B-mxfp4) ship attn_q_norm/attn_k_norm with a
@@ -499,7 +496,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // the sub-batch's own (block tables, context lens, positions start at its first sequence).
     auto decode_attend = [&](const InferenceState& state, int n, int row_begin, Tensor qv, Tensor kk,
                              Tensor vv, Tensor ao, const int* layer_block_tables) {
-#include "exec/executor_attention_decode.cu"
+#include "exec/executor_attention_decode.cpp"  // NOLINT(bugprone-suspicious-include): body fragment, not a TU
     };
 
     if (state.is_prefill && !state.chunk_decode_attn) {
@@ -511,7 +508,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                       Tensor vv, Tensor ao, const int* layer_block_tables,
                                       const int* bt_flat, const int* bt_swa_flat,
                                       const int* seq_positions) {
-#include "exec/executor_attention_prefill.cu"
+#include "exec/executor_attention_prefill.cpp"  // NOLINT(bugprone-suspicious-include): body fragment, not a TU
         };
         if (state.ragged_prefill()) {
             // Ragged cross-sequence prefill: loop the per-seq dispatch over
@@ -748,11 +745,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                   fp32_tmp[off + 2]);
                 }
             }
-            rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
-                static_cast<const half*>(po.data), static_cast<const half*>(ly.post_attn_norm.data),
-                static_cast<float*>(fp32_h.data), static_cast<half*>(h.data), model_->config().d_model, eps,
-                norm_w_off_);
-            IMP_CUDA_CHECK_LAUNCH();
+            rmsnorm_fp32_accum_to_fp16(static_cast<const half*>(po.data),
+                                       static_cast<const half*>(ly.post_attn_norm.data),
+                                       static_cast<float*>(fp32_h.data), static_cast<half*>(h.data), n,
+                                       model_->config().d_model, eps, norm_w_off_, stream);
             if (layer == 0 && debug_attn_steps) {
                 debug_tensor_stats_all("L0_post_fp32accum_h", view_tokens(h, n), stream);
             }

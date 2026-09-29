@@ -12,6 +12,7 @@
 #include "exec/executor_sampling_internal.h"
 #include "compute/gemm.h"
 #include "exec/executor_kernels.h"
+#include "exec/executor_kernels.cuh"
 #include "exec/gemm_context.h"
 #include "compute/layernorm.h"
 #include "compute/rowwise_topm.h"

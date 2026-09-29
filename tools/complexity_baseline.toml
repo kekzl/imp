@@ -2,7 +2,7 @@
 #
 # Threshold 25: lizard's "hard to test" band; 203 functions in src/ exceeded it
 # on 467bd5f8 (lizard 1.17.31), 148 of them below the 200-LOC function-size warn.
-# This counter: 202 (lizard's #203 is the executor_attention_prefill.cu fragment,
+# This counter: 202 (lizard's #203 is the executor_attention_prefill.cpp fragment,
 # charged here to run_attention); 3789 of 3821 shared functions equal lizard's CCN.
 # Every entry is a CEILING: growth by 1 fails, shrinking is a NOTE.
 # Pins only shrink: scripts/ci_static_gates.sh passes the base branch's copy as
@@ -57,8 +57,8 @@ skip_dirs = []
 "src/compute/gdn_scan_chunkpar_pass.cu::__global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(float* __restrict__ ws_base, StateT* __restrict__ h_state, half* __restrict__ y_out, int strip_t0, int strip_tokens, int n_chunks, int n_heads, int load_statet, int store_statet)" = 37
 "src/compute/gdn_scan_tc.cu::__global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(const float* __restrict__ conv_f32, const half* __restrict__ alpha_all, const half* __restrict__ beta_all, const float* __restrict__ A_log, const float* __restrict__ dt_bias, float* __restrict__ h_state, half* __restrict__ y_out, int n_tokens, int n_heads, int n_groups, int conv_channels, int grouped_layout)" = 45
 "src/compute/gdn_scan_tc.cu::__global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(const float* __restrict__ conv_f32, const half* __restrict__ alpha_all, const half* __restrict__ beta_all, const float* __restrict__ A_log, const float* __restrict__ dt_bias, float* __restrict__ h_state, half* __restrict__ y_out, int n_tokens, int n_heads, int n_groups, int conv_channels, int grouped_layout)" = 37
-"src/compute/gemm.cu::static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry, const void* A_data, const void* B_data, size_t C_bytes, float alpha, float beta, bool is_int_compute, cudaStream_t stream, int M = 0, int N = 0, int K = 0, bool fp16_scale = false)" = 54
-"src/compute/gemm.cu::static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, cudaStream_t stream)" = 38
+"src/compute/gemm.cpp::static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry, const void* A_data, const void* B_data, size_t C_bytes, float alpha, float beta, bool is_int_compute, cudaStream_t stream, int M = 0, int N = 0, int K = 0, bool fp16_scale = false)" = 54
+"src/compute/gemm.cpp::static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, cudaStream_t stream)" = 38
 "src/compute/gemm_f16_narrow_prefill.cu::bool gemm_f16_narrow_prefill(const half* A, int M, int K, const half* W0, half* C0, int N0, const half* W1, half* C1, int N1, void* ws, size_t ws_bytes, cudaStream_t stream)" = 36
 "src/compute/gemm_f16_narrow_smallm.cu::__global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(NarrowArgs args)" = 28
 "src/compute/gemm_grouped.cpp::void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, const void* const* b_ptrs, int K, int N, QType dtype, int n_experts, cudaStream_t stream, void** d_work_ptrs, QType output_dtype, const float* a_scales, const float* b_scales)" = 26
@@ -88,7 +88,7 @@ skip_dirs = []
 "src/compute/weight_dispatch.cpp::void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Tensor& y, float alpha, float beta, void* workspace, size_t workspace_bytes, cudaStream_t stream)" = 26
 "src/core/qtype.cpp::size_t qtype_row_bytes(QType q, int64_t cols)" = 27
 "src/exec/executor.cu::int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)" = 41
-"src/exec/executor_attention.cu::void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaStream_t stream)" = 418
+"src/exec/executor_attention.cpp::void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaStream_t stream)" = 418
 "src/exec/executor_ffn.cu::void GraphExecutor::run_ffn(int layer, cudaStream_t stream)" = 164
 "src/exec/executor_forward.cu::void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream)" = 206
 "src/exec/executor_forward_moe.cu::void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 26
@@ -96,11 +96,11 @@ skip_dirs = []
 "src/exec/executor_forward_moe.cu::void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream)" = 42
 "src/exec/executor_forward_moe_batch.cu::void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne, int top_k, const Tensor& router_in, bool fp32_gate_logits_ready, bool will_decode_fast, const void* router_bias_ptr, bool use_sigmoid, bool norm_weights, MoeRoutingResult& routing)" = 49
 "src/exec/executor_forward_moe_batch.cu::void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, int d, int eff, int top_k, const MoeRoutingResult& routing, const Tensor& no, Tensor& h, const Tensor& r, bool moe_use_fp32_residual, bool moe_fused_norm_q8, bool will_skip_residual_copy, bool& residual_fused)" = 72
-"src/exec/executor_forward_moe_cutlass.cu::bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 128
-"src/exec/executor_forward_moe_legacy.cu::void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 83
+"src/exec/executor_forward_moe_cutlass.cpp::bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 128
+"src/exec/executor_forward_moe_legacy.cpp::void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 83
 "src/exec/executor_forward_moe_nvfp4_host.cu::bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream, const int32_t* expert_offsets, StagedProj out[kExpertProjCount])" = 28
-"src/exec/executor_gemm_dispatch.cu::void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input, Tensor& output, const GemmContext& ctx)" = 150
-"src/exec/executor_gemm_dispatch.cu::void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx)" = 28
+"src/exec/executor_gemm_dispatch.cpp::void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input, Tensor& output, const GemmContext& ctx)" = 150
+"src/exec/executor_gemm_dispatch.cpp::void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx)" = 28
 "src/exec/executor_gemm_smallm.cpp::bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* const* outs, int count, const Tensor& input, const GemmContext& ctx)" = 35
 "src/exec/executor_kv_write.cu::void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaStream_t stream, int row_begin, int n_rows, const int* bt_flat, const int* bt_swa_flat, const int* positions_override)" = 53
 "src/exec/executor_perplexity.cu::void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, bool allow_cutlass, const std::function<void(const Tensor&, int, int)>& consume)" = 34
@@ -110,12 +110,12 @@ skip_dirs = []
 "src/exec/executor_sampling.cu::std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, const InferenceState& state, cudaStream_t stream)" = 54
 "src/exec/executor_ssm_gdn.cu::void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t stream)" = 155
 "src/exec/executor_ssm_gdn.cu::void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t stream)" = 29
-"src/exec/executor_workspace.cu::bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, int max_batch_size, int max_seq_len, bool use_fp8_prefill, int use_nvfp4_decode, bool use_mxfp4_prefill)" = 46
-"src/exec/executor_workspace_buffers.cu::bool GraphExecutor::allocate_nvfp4_dequant_workspace()" = 30
-"src/exec/executor_workspace_buffers.cu::bool GraphExecutor::chunk_capture_supported() const" = 45
-"src/exec/executor_workspace_buffers.cu::int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) const" = 29
-"src/exec/executor_workspace_buffers.cu::void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant)" = 225
-"src/exec/executor_workspace_buffers.cu::void GraphExecutor::free_buffers()" = 65
+"src/exec/executor_workspace.cpp::bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, int max_batch_size, int max_seq_len, bool use_fp8_prefill, int use_nvfp4_decode, bool use_mxfp4_prefill)" = 46
+"src/exec/executor_workspace_buffers.cpp::bool GraphExecutor::allocate_nvfp4_dequant_workspace()" = 30
+"src/exec/executor_workspace_buffers.cpp::bool GraphExecutor::chunk_capture_supported() const" = 45
+"src/exec/executor_workspace_buffers.cpp::int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) const" = 29
+"src/exec/executor_workspace_buffers.cpp::void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant)" = 225
+"src/exec/executor_workspace_buffers.cpp::void GraphExecutor::free_buffers()" = 65
 "src/exec/expert_cache.cu::ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, ExpertCacheKey key, const void* src_host, size_t stamp_bytes, cudaStream_t stream, bool* hit)" = 26
 "src/exec/expert_cache.cu::int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fallback)" = 35
 "src/exec/expert_cache_device.cu::bool DeviceExpertCache::init(const Model& model, ExpertLRUCache& cache, VRAMAllocator* alloc, int top_k)" = 38

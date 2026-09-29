@@ -47,8 +47,8 @@ bool gemm_lt_capture_allowed() {
     return g_lt_capture_allowed.load(std::memory_order_relaxed);
 }
 
-// warp_reduce_sum / kGemvThreads / kGemvWarps / gemv_blocks live in
-// gemm_internal.cuh (shared with gemm_gemv_dtype.cu + gemm_moe_gemv.cu).
+// kGemvThreads / kGemvWarps / gemv_blocks live in
+// gemm_internal.cuh, warp_reduce_sum in gemm_internal_device.cuh (shared with gemm_gemv_dtype.cu + gemm_moe_gemv.cu).
 // cublasGemm*Ex algorithm: cublas_gemm_algo() (compute/cublas_gemm_algo.h, #2168).
 
 // ---------------------------------------------------------------------------

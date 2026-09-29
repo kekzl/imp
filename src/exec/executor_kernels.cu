@@ -1,5 +1,6 @@
 #include "core/dispatch_policy.h"
 #include "exec/executor_kernels.h"
+#include "exec/executor_kernels.cuh"
 #include "exec/gemm_context.h"
 #include "exec/gemm_kernel_registry.h"
 #include "exec/executor.h"

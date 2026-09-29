@@ -19,14 +19,23 @@ JOBS="${TIDY_JOBS:-$(nproc)}"
 python3 tools/tidy_cu_db.py build/compile_commands.json build/tidy-cu || exit 2
 cu_db_files() { grep -o '"file": "[^"]*"' build/tidy-cu/compile_commands.json | cut -d'"' -f4 | sed "s|^$PWD/||; s|^/work/||; s|^/src/||"; }
 
+# The src file that textually #include's $1 (a body fragment, not a TU), if any.
+includer_of() { grep -rlF --include='*.cu' --include='*.cpp' "#include \"${1#src/}\"" src; }
+
 cpp=(); cu=()
 if [ "${1:-}" = "--all" ]; then
-    mapfile -t cpp < <(find src tools -name '*.cpp' | sort)
+    mapfile -t cpp < <(find src tools -name '*.cpp' | sort | while read -r f; do includer_of "$f" >/dev/null || echo "$f"; done)
     mapfile -t cu < <(cu_db_files | grep '^src/' | sort -u)
 else
     for f in "$@"; do
         case "$f" in
-            *.cpp) cpp+=("$f") ;;
+            *.cpp)
+                # A .cpp #include'd into another body is not a TU: lint its includer instead (#2209).
+                if inc="$(includer_of "$f")"; then
+                    mapfile -t -O "${#cpp[@]}" cpp < <(printf '%s\n' "$inc")
+                else
+                    cpp+=("$f")
+                fi ;;
             src/*.cu)
                 # A .cu #include'd into another body is not a TU: lint its includer instead.
                 if inc="$(grep -rlF --include='*.cu' "#include \"${f#src/}\"" src)"; then
@@ -36,6 +45,7 @@ else
                 fi ;;
         esac
     done
+    [ "${#cpp[@]}" -gt 0 ] && mapfile -t cpp < <(printf '%s\n' "${cpp[@]}" | sort -u)
     [ "${#cu[@]}" -gt 0 ] && mapfile -t cu < <(printf '%s\n' "${cu[@]}" | sort -u)
 fi
 n=$(( ${#cpp[@]} + ${#cu[@]} ))

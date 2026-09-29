@@ -1,7 +1,7 @@
 #include "compute/rope.h"
 #include "compute/rope_yarn.cuh"
 #include "compute/warp_reduce.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

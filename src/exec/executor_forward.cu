@@ -5,6 +5,7 @@
 #include "vision/deepstack_inject.h"
 #include "exec/executor_gemv_helpers.h"
 #include "exec/executor_kernels.h"
+#include "exec/executor_kernels.cuh"
 #include "exec/executor_helpers.h"
 #include "exec/executor_debug.h"
 #include "exec/gemm_context.h"

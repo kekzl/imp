@@ -8,7 +8,7 @@
 
 #include "compute/gemm_f16_narrow_prefill.h"
 #include "core/logging.h"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 #include "core/pdl_device.cuh"
 
 #include <cstdint>

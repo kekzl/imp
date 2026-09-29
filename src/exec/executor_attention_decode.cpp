@@ -48,13 +48,13 @@
             Tensor kv_view = kk;
             Tensor vv_view = vv;
             dim3 fused_grid(n, 2);
-            write_kv_cache_rope_fused_kernel<<<fused_grid, threads, 0, stream>>>(
-                static_cast<const half*>(kv_view.data), static_cast<const half*>(vv_view.data),
+            write_kv_cache_rope_fused(
+                fused_grid, threads, stream, static_cast<const half*>(kv_view.data),
+                static_cast<const half*>(vv_view.data),
                 state.positions, layer_block_tables, static_cast<half*>(cache->k_ptr(kv_layer, 0)),
                 static_cast<half*>(cache->v_ptr(kv_layer, 0)), block_stride, row_elems, kv_block_size_d, n,
                 state.max_blocks_per_seq, state.n_sequences, nkv, hd, layer_rope_theta, inv_scaling, pairs,
                 cfg.rope_neox, longrope_freqs);
-            IMP_CUDA_CHECK_LAUNCH();
             // Sparse decode attention metadata is updated for ALL layers in one
             // batched launch at the end of the forward: selection force-includes the
             // recent blocks, so the one-step lag is harmless.

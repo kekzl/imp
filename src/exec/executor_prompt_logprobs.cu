@@ -4,6 +4,7 @@
 
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
+#include "exec/executor_kernels.cuh"
 #include "compute/gemm.h"
 #include "compute/prompt_logprobs_rows.h"
 #include "core/logging.h"

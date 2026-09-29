@@ -1,5 +1,6 @@
 #include "compute/gemm.h"
 #include "compute/gemm_internal.cuh"
+#include "compute/gemm_internal_device.cuh"
 #include "core/logging.h"
 
 #include <cublas_v2.h>
@@ -10,7 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include "core/pdl_device.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 
 namespace imp {
 
