@@ -382,6 +382,8 @@ void handle_props(const httplib::Request& req, httplib::Response& res, ServerSta
 void handle_info(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_chat_completions(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_completions(const httplib::Request& req, httplib::Response& res, ServerState& state);
+// POST /infill: llama.cpp fill-in-the-middle over the /v1/completions path (#2201).
+void handle_infill(const httplib::Request& req, httplib::Response& res, ServerState& state);
 // Anthropic-compatible Messages API. Non-streaming requests are a thin shim
 // over handle_chat_completions; streaming requests drive the real per-token
 // batching-engine loop and emit native Anthropic SSE events incrementally.

@@ -40,6 +40,8 @@ MOCK_VOCAB = [
 
 MOCK_MODEL_ID = "mock-model-v1"
 MOCK_MAX_SEQ_LEN = 32768  # mirrors the server's context-length probes
+FIM_NOT_SUPPORTED = ("fill-in-the-middle is not supported by this model: its tokenizer has no FIM "
+                     "prefix/suffix/middle tokens")
 
 _server_instance = None
 _shutdown_event = threading.Event()
@@ -78,8 +80,10 @@ metrics = MockMetrics()
 
 class MockConfig:
     """Per-server configuration (avoids class variable pollution across instances)."""
-    def __init__(self, latency_ms=5, fail_rate=0.0, oom=False, idle_unload_seconds=0):
+    def __init__(self, latency_ms=5, fail_rate=0.0, oom=False, idle_unload_seconds=0, fim=True):
         self.latency_ms = latency_ms
+        # Loaded model has FIM tokens (#2201); False = /infill and `suffix` answer 400 fim_not_supported.
+        self.fim = fim
         self.fail_rate = fail_rate
         self.oom_mode = oom
         # --idle-unload-seconds (#2199): reported on /health; the mock never suspends.
@@ -119,7 +123,8 @@ class MockHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_error(self, status: int, message: str, error_type: str = "invalid_request_error"):
+    def _send_error(self, status: int, message: str, error_type: str = "invalid_request_error",
+                    param: str | None = None, code: str | None = None):
         # Anthropic clients read `type` at the top level; imp-server switches
         # envelope by path (main.cpp pre-routing + error handler), so the mock
         # has to as well or the two disagree on every /v1/messages error.
@@ -129,7 +134,12 @@ class MockHandler(BaseHTTPRequestHandler):
             self._send_json(status, {"type": "error",
                                      "error": {"type": error_type, "message": message}})
             return
-        self._send_json(status, {"error": {"message": message, "type": error_type}})
+        err = {"message": message, "type": error_type}
+        if param is not None:
+            err["param"] = param
+        if code is not None:
+            err["code"] = code
+        self._send_json(status, {"error": err})
 
     def _check_model(self, model: str) -> bool:
         if model != MOCK_MODEL_ID:
@@ -263,6 +273,8 @@ class MockHandler(BaseHTTPRequestHandler):
             self._handle_chat_completions(raw_body)
         elif path == "/v1/completions":
             self._handle_completions(raw_body)
+        elif path == "/infill":
+            self._handle_infill(raw_body)
         elif path == "/tokenize":
             self._handle_tokenize(raw_body)
         elif path == "/detokenize":
@@ -707,6 +719,19 @@ class MockHandler(BaseHTTPRequestHandler):
             self._send_error(400, '"prompt" is required')
             return
 
+        # `suffix` = fill-in-the-middle (#2201), same checks as fim_request.cpp.
+        suffix = body.get("suffix")
+        if suffix is not None and not isinstance(suffix, str):
+            self._send_error(400, '"suffix" must be a string', param="suffix")
+            return
+        if suffix:
+            if isinstance(prompt, list) and not (len(prompt) == 1 and isinstance(prompt[0], str)):
+                self._send_error(400, '"suffix" needs a text prompt', param="suffix")
+                return
+            if not self.config.fim:
+                self._send_error(400, FIM_NOT_SUPPORTED, param="suffix", code="fim_not_supported")
+                return
+
         if self.config.oom_mode:
             self.send_response(503)
             self.send_header("Content-Type", "application/json")
@@ -744,6 +769,67 @@ class MockHandler(BaseHTTPRequestHandler):
                 "prompt_tokens_details": {"cached_tokens": 0},
             },
         })
+
+    def _handle_infill(self, raw: bytes):
+        """POST /infill (llama.cpp shape, #2201): OpenAI text_completion + top-level content/stop."""
+        body = self._parse_json_body(raw)
+        if body is None:
+            return
+        if not self._validate_sampling(body):
+            return
+        for key in ("input_prefix", "input_suffix", "prompt"):
+            if key in body and body[key] is not None and not isinstance(body[key], str):
+                self._send_error(400, f'"{key}" must be a string')
+                return
+        extra = body.get("input_extra")
+        if extra is not None:
+            ok = isinstance(extra, list) and all(
+                isinstance(c, dict) and isinstance(c.get("text"), str)
+                and isinstance(c.get("filename", ""), (str, type(None))) for c in extra)
+            if not ok:
+                self._send_error(400, "each \"input_extra\" entry must be {\"filename\": string, \"text\": string}")
+                return
+        model = body.get("model") or MOCK_MODEL_ID  # llama.cpp clients send no model
+        if not self._check_model(model):
+            return
+        if not self.config.fim:
+            self._send_error(400, FIM_NOT_SUPPORTED, code="fim_not_supported")
+            return
+
+        metrics.inc_request()
+        n_predict = body.get("n_predict")
+        max_tokens = body.get("max_tokens") or (n_predict if isinstance(n_predict, int) and n_predict > 0 else 16)
+        tokens = self._generate_tokens(body.get("seed", 42), max_tokens)
+        finish = "stop" if len(tokens) < max_tokens else "length"
+        req_id = f"mock-{int(time.time())}"
+        created = int(time.time())
+
+        def frame(text, finish_reason):
+            return {"id": req_id, "object": "text_completion", "created": created, "model": model,
+                    "choices": [{"index": 0, "text": text, "logprobs": None, "finish_reason": finish_reason}],
+                    "content": text, "stop": finish_reason is not None}
+
+        if not body.get("stream", False):
+            resp = frame("".join(tokens), finish)
+            resp["usage"] = {"prompt_tokens": 8, "completion_tokens": len(tokens),
+                             "total_tokens": 8 + len(tokens)}
+            self._send_json(200, resp)
+            return
+
+        parts = [f"data: {json.dumps(frame(t, None))}\n\n" for t in tokens]
+        parts.append(f"data: {json.dumps(frame('', finish))}\n\n")
+        parts.append("data: [DONE]\n\n")
+        out = "".join(parts).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        try:
+            self.wfile.write(out)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _handle_tokenize(self, raw: bytes):
         body = self._parse_json_body(raw)
@@ -798,9 +884,9 @@ def make_handler_class(config: MockConfig):
 
 
 def run_server(port: int = 9090, latency_ms: int = 5,
-               fail_rate: float = 0.0, oom: bool = False) -> ThreadedHTTPServer:
+               fail_rate: float = 0.0, oom: bool = False, fim: bool = True) -> ThreadedHTTPServer:
     """Start the mock server and return the server instance."""
-    config = MockConfig(latency_ms=latency_ms, fail_rate=fail_rate, oom=oom)
+    config = MockConfig(latency_ms=latency_ms, fail_rate=fail_rate, oom=oom, fim=fim)
     handler_class = make_handler_class(config)
 
     server = ThreadedHTTPServer(("127.0.0.1", port), handler_class)

@@ -195,6 +195,7 @@ set(IMP_MODEL_SOURCES
     src/model/weight_map.cpp
     src/model/weight_upload.cu
     src/model/tokenizer.cpp
+    src/model/fim.cpp
     src/model/tokenizer_nfc.cpp
     src/model/tensor_kind_name.cpp
     src/model/tensor_kind_table.cu
@@ -626,6 +627,8 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers.cpp
         tools/imp-server/constraint_validation.cpp
         tools/imp-server/handlers_chat.cpp
+        tools/imp-server/handlers_completions.cpp
+        tools/imp-server/fim_request.cpp
         tools/imp-server/handlers_chat_core.cpp
         tools/imp-server/handlers_chat_params.cpp
         tools/imp-server/image_fetch.cpp
@@ -702,6 +705,7 @@ if(IMP_BUILD_TESTS)
         tests/test_cuda_errors.cpp
         tests/test_batch_verify_predicates.cpp
         tests/test_lora_dims.cpp
+        tests/test_fim.cpp
         tests/test_expert_cache_reinit.cpp
         tests/test_sparse_attn_geometry.cpp
         tests/test_tensor.cpp
@@ -1112,6 +1116,7 @@ if(IMP_BUILD_TESTS)
         tests/test_tensor_kind_coverage.cpp
         tests/test_tokenizer_compat.cpp
         tests/test_tokenizer_qwen38.cpp
+        tests/test_fim_tokenizer.cpp
         tests/test_real_checkpoints.cpp
         tests/test_degeneration.cpp
         tests/test_quant_pipeline.cpp
