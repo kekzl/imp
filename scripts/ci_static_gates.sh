@@ -145,7 +145,9 @@ fi
 
 if want citations; then
     echo "== Doc citations =="
+    # Fails only on a gone or ambiguous anchor; line drift is a warning (#2231).
     run "file:line citations in living docs"    python3 scripts/check_doc_citations.py .
+    run "that gate still tells drift from dead" python3 scripts/check_doc_citations.py --selftest
 fi
 
 if want hygiene; then
