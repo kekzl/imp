@@ -74,8 +74,10 @@ ImpError imp_detokenize(ImpModel model, const int32_t* tokens, int n_tokens, cha
 
 // The token the last prefill sampled; set by imp_prefill_with_params (#2251).
 ImpError imp_prefill_token(ImpContext ctx, int32_t* out_token) {
-    if (!ctx || !out_token || ctx->prefill_token < 0)
-        return IMP_ERROR_INVALID_ARG;
-    *out_token = ctx->prefill_token;
-    return IMP_SUCCESS;
+    return imp::api_guard("imp_prefill_token", [&] {
+        if (!ctx || !out_token || ctx->prefill_token < 0)
+            return IMP_ERROR_INVALID_ARG;
+        *out_token = ctx->prefill_token;
+        return IMP_SUCCESS;
+    });
 }
