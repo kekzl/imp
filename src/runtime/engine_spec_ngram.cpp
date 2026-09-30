@@ -963,6 +963,12 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         if (req->constraints)
             req->constraints->update(tokj);
         if (hard_stop) {
+            // The chunk advanced the slab past row j: a finish-time transcript snapshot
+            // would key rows [0, j] to state that includes later rows.
+            if (hybrid &&
+                !spec_hybrid_slab_at_row(hybrid_mc, mc_row0 / std::max(1, mc_rows_per_cand), j, K,
+                                         mc_rows_per_cand))
+                req->recurrent_slab_ahead = true;
             finish_request(req);
             break;
         }
@@ -976,7 +982,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // to the pre-MTP behavior.
         if (req->think_budget > 0.0f && req->in_think_block != think_at_chunk_start) break;
     }
-    kv_manager_->touch(req->id);
+    // A finished request's sequence is freed: touch() would re-add a dead id to the LRU.
+    if (req->status != RequestStatus::FINISHED)
+        kv_manager_->touch(req->id);
 
     // mc: materialize the winner's KV, copying its private block(s) covering
     // the accepted span [p0, p0+matched] back over the canonical entries.
@@ -1107,10 +1115,6 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), spec_state_scratch_,
                                            ssm_state_->per_seq_bytes(),
                                            cudaMemcpyDeviceToDevice, stream));
-        const int replay_ctx = p0 + 1 + matched;
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_spec_context_len_, &replay_ctx, sizeof(int),
-                                           cudaMemcpyHostToDevice, stream));
-        state.max_context_len = replay_ctx;
         Tensor replay_logits;
         bool replayed = false;
         if (capture_on && !spec_capture_doomed_) {
@@ -1120,6 +1124,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             // serves a shorter prefix: keep the padded row count, tell the
             // device the real one. Eager here costs more: the difference is
             // launch pacing, not work.
+            // d_spec_context_len_ keeps the staged p0 + chunk_pad
+            // (spec_replay_kv_len): FA2 derives q_offset = kv_len - chunk_pad.
             const int real_rows = matched + 1;
             if (check(cudaMemcpyAsync(d_spec_chunk_len_, &real_rows, sizeof(int), cudaMemcpyHostToDevice,
                                       stream),
@@ -1129,6 +1135,10 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             }
         }
         if (!replayed) {
+            const int replay_ctx = spec_replay_kv_len(/*graph_replay=*/false, p0, chunk_pad, matched);
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_spec_context_len_, &replay_ctx, sizeof(int),
+                                               cudaMemcpyHostToDevice, stream));
+            state.max_context_len = replay_ctx;
             state.n_tokens = matched + 1;
             // Fallback: an unpadded eager forward of the accepted prefix on the
             // plain host-length chunk path.
