@@ -22,6 +22,8 @@
 #include "runtime/request.h"
 #include "test_models.h"
 
+#include <cuda_runtime_api.h>
+
 #include <cmath>
 #include <cstdlib>
 #include <memory>
@@ -57,8 +59,12 @@ protected:
                   IMP_SUCCESS);
     }
     void TearDown() override {
-        if (ctx_)
+        if (ctx_) {
             imp_context_free(ctx_);
+            // The last step's decode work is still queued when the test frees the context;
+            // teardown must drain it before unmapping VMM regions (#2275).
+            EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess) << "context teardown faulted in-flight work";
+        }
         if (model_)
             imp_model_free(model_);
     }

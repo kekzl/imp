@@ -75,6 +75,9 @@ void MtpDraftWorkspaceDeleter::operator()(MtpDraftWorkspace* ws) const noexcept 
 void EncoderWorkspaceDeleter::operator()(EncoderWorkspace* ws) const noexcept { delete ws; }
 
 Engine::~Engine() {
+    // The last step's work can still be queued (a pipelined decode step), and VMM-backed
+    // regions (engine arena, lazy pools) unmap with no implicit sync: drain first (#2275).
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
     // Cross-model CUDA-error-leak guard: the CUDA error state is per primary
     // context, NOT per Engine, so a sticky error from this model's workload
     // survives imp_context_free/imp_model_free and corrupts the NEXT model's
