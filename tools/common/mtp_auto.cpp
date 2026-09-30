@@ -37,8 +37,8 @@ void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, in
     if (requested_k > 0 && head_loaded && head_auto_k_cap < 0) {
         cfg.speculative.mtp_k = 0;
         IMP_LOG_INFO(
-            "speculative.mtp_k: auto -> off (this head does not pay for its 2400 MiB: Qwen3.8-Flash-Next "
-            "decodes 61.46 vs 61.94 tok/s spec off). Set speculative.mtp_k=1 to force it.");
+            "speculative.mtp_k: auto -> off (Qwen3.8-Flash-Next k=1 decodes 53.15 vs 65.31 tok/s spec off, "
+            "-18.6 %%, #2272; head holds 2400 MiB). Set speculative.mtp_k=1 to force it.");
         return;
     }
     if (requested_k > 0 && head_loaded) {
