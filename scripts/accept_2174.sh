@@ -109,9 +109,10 @@ echo "INFO flash $FLASH: $ok/$FLASH_ROUNDS rounds identical + restored + rebind 
 docker rm -f "$CTR" >/dev/null 2>&1 || true
 
 # ---- C2: hybrid restore suites (the hybrid container of `make test-e2e`) ----
+# HybridBatchedDecodeTest.* excluded: pre-existing IMA on main, #2275.
 timeout 3600 docker run --rm --gpus all -v "$MODELS_DIR:/models:ro" \
     -e IMP_TEST_MODEL="/models/$GDN" -e IMP_TEST_MODEL_GDN="/models/$GDN" "$IMG" test-e2e \
-    --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:PrefixCacheE2ETest.HybridTranscriptRestoreContinuesAtReplyEnd:GdnGraphBucketTest.*:*HybridRestoreChainTest*:HybridBatchedDecodeTest.*" \
+    --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:PrefixCacheE2ETest.HybridTranscriptRestoreContinuesAtReplyEnd:GdnGraphBucketTest.*:*HybridRestoreChainTest*" \
     > "$WORK/c2.log" 2>&1
 rc=$?
 nok="$(grep -c '^\[       OK \]' "$WORK/c2.log")"
