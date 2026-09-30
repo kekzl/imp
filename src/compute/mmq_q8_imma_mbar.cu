@@ -26,15 +26,16 @@ __device__ __forceinline__ void mbar_arrive(uint64_t* bar) {
                  : "memory");
 }
 __device__ __forceinline__ void mbar_wait(uint64_t* bar, uint32_t parity) {
-    uint32_t done = 0;
-    do {
+    for (;;) {
+        uint32_t done = 0;
         asm volatile(
             "{\n .reg .pred p;\n mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2;\n"
             " selp.u32 %0, 1, 0, p;\n}\n"
             : "=r"(done)
             : "r"(smem_u32(bar)), "r"(parity)
             : "memory");
-    } while (!done);
+        if (done != 0) return;
+    }
 }
 
 // Opaque %tid.x: per-thread load addresses are rebuilt per K-step, not held (or spilled) across the loop.
@@ -82,20 +83,23 @@ __device__ __forceinline__ void load_kstep_q8(int tid, const int8_t* __restrict_
     const int ab_off = r0 * K + c0 + k_base;
 #pragma unroll
     for (int j = 0; j < kAChunks; ++j) {
-        const int row = r0 + j * (kThreads / 4);
+        const int row = r0 + (j * (kThreads / 4));
+        const int off = ab_off + (j * (kThreads / 4) * K);
         if (row < BM)
-            cp_async_cg_16(&st.sA[row][c0], A_tile + ab_off + j * (kThreads / 4) * K, row < row_left);
+            cp_async_cg_16(&st.sA[row][c0], A_tile + off, row < row_left);
     }
 #pragma unroll
     for (int j = 0; j < kBChunks; ++j) {
-        const int row = r0 + j * (kThreads / 4);
-        cp_async_cg_16(&st.sB[row][c0], B_tile + ab_off + j * (kThreads / 4) * K,
-                       (n_rem < 0) || (row < n_rem));
+        const int row = r0 + (j * (kThreads / 4));
+        const int off = ab_off + (j * (kThreads / 4) * K);
+        cp_async_cg_16(&st.sB[row][c0], B_tile + off, (n_rem < 0) || (row < n_rem));
     }
     const int kb0 = k_base / 32;
-    if (tid < BM) cp_async_ca_4(&st.sAsc[tid][0], Asc_tile + tid * subs + kb0, tid < row_left);
+    const int asc_off = (tid * subs) + kb0;
+    if (tid < BM) cp_async_ca_4(&st.sAsc[tid][0], Asc_tile + asc_off, tid < row_left);
     const int n = tid >> 1, kb = tid & 1;
-    cp_async_ca_4(&st.sBsc[kb][n][0], Bsc_tile + (n * subs + kb0 + kb) * 2, (n_rem < 0) || (n < n_rem));
+    const int bsc_off = ((n * subs) + kb0 + kb) * 2;
+    cp_async_ca_4(&st.sBsc[kb][n][0], Bsc_tile + bsc_off, (n_rem < 0) || (n < n_rem));
 }
 
 // Both 32-wide sub-blocks of one staged K-step into acc. kb loop rolled: unrolled spills 16-44 B at 128 regs.
