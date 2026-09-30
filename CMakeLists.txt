@@ -43,6 +43,9 @@ target_compile_options(imp_warnings INTERFACE
 target_compile_options(imp_warnings INTERFACE
     $<$<COMPILE_LANGUAGE:CXX>:-Werror=unused-result>
     $<$<COMPILE_LANGUAGE:CUDA>:--diag-error=2809>)
+# #2315: -Wunused-* is 0 across all first-party host TUs; errors keep it there.
+target_compile_options(imp_warnings INTERFACE
+    $<$<COMPILE_LANGUAGE:CXX>:-Werror=unused-parameter;-Werror=unused-variable;-Werror=unused-but-set-variable;-Werror=unused-but-set-parameter;-Werror=unused-function;-Werror=unused-local-typedefs;-Werror=unused-value;-Werror=unused-label>)
 
 # --- CUDA Toolkit ---
 find_package(CUDAToolkit 13.2 REQUIRED)
@@ -529,8 +532,9 @@ target_include_directories(imp
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
 )
+# Third-party headers: SYSTEM keeps them out of imp_warnings' -Werror=unused-* (#2315).
+target_include_directories(imp SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
 
 # Single-source the runtime version string from the project version so
 # imp_version() / `imp-cli --version` can never drift from CMakeLists (#760).

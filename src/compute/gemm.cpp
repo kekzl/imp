@@ -430,6 +430,8 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
                                       const void* B_data, size_t C_bytes, float alpha, float beta,
                                       bool is_int_compute, cudaStream_t stream, int M = 0, int N = 0,
                                       int K = 0, bool fp16_scale = false) {
+    (void)beta;            // CCN pin key is the signature text (tools/check_complexity.py),
+    (void)is_int_compute;  // so the dead params stay named until the function is split.
     // COMPUTE_16F descriptors take __half alpha/beta (scale type CUDA_R_16F).
     const __half h_alpha = __float2half(alpha);
     const __half h_zero = __float2half(0.0f);

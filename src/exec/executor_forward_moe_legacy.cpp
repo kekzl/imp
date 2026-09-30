@@ -507,7 +507,6 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
             int64_t rows = packed.shape[1];
             int64_t cols = packed.shape[2];
             size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
-            size_t expert_raw_sz = static_cast<size_t>(rows) * qtype_row_bytes(qtype, cols);
 
             if (!moe_.batch_dequant_buf || expert_fp16_sz == 0) {
                 // No buffer - serial fallback
