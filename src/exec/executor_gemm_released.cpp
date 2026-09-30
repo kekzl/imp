@@ -17,8 +17,8 @@ namespace imp {
 void GraphExecutor::released_source_gemm_(const WeightHandle& h, const Tensor& input, Tensor& output,
                                           const GemmContext& ctx) {
     const int M = static_cast<int>(input.shape[0]);
-    // M <= 4 (verify chunk): the M=1 GEMV per row, same bits as decode; 4 FP8 weight reads stay under
-    // the rebuild's ~5 B/elem (FP8 read + F16 write + F16 read).
+    // M <= 4 (verify chunk): one FP8 weight pass for all M rows (#2272), each row bit-equal to the
+    // decode GEMV; 1 B/elem vs the rebuild's ~5 B/elem (FP8 read + F16 write + F16 read).
     if (M <= 4 && ctx.beta == 0.0f && output.qtype == QType::F16 && input.qtype == QType::F16) {
         const FP8CacheEntry* e = nullptr;
         if (const auto fp8 = wcache_.fp8.find(h.source_data); fp8 != wcache_.fp8.end())
@@ -26,17 +26,11 @@ void GraphExecutor::released_source_gemm_(const WeightHandle& h, const Tensor& i
         else if (const auto v = wcache_.released_fp8_view.find(h.source_data);
                  v != wcache_.released_fp8_view.end())
             e = &v->second;
-        if (e && e->d_row_scales) {
-            const int64_t K = input.shape[1], N = output.shape[1];
-            for (int r = 0; r < M; ++r) {
-                const int64_t xs[2] = {1, K}, ys[2] = {1, N};
-                const Tensor x(static_cast<char*>(input.data) + r * K * sizeof(half), QType::F16, 2, xs,
-                               true);
-                Tensor y(static_cast<char*>(output.data) + r * N * sizeof(half), QType::F16, 2, ys, true);
-                gemv_fp8_rowscale(e->weight, x, y, e->d_row_scales, ctx.stream);
-            }
+        if (e && e->d_row_scales && e->weight.shape[0] == output.shape[1] && e->weight.shape[1] == input.shape[1] &&
+            gemv_fp8_rowscale_rows(e->weight.data, e->d_row_scales, static_cast<const half*>(input.data),
+                                   static_cast<half*>(output.data), static_cast<int>(e->weight.shape[0]),
+                                   static_cast<int>(e->weight.shape[1]), M, ctx.stream))
             return;
-        }
     }
     const size_t bytes = static_cast<size_t>(h.shape[0]) * h.shape[1] * sizeof(half);
     IMP_CHECK(wcache_.released_f16_scratch && bytes <= wcache_.released_f16_scratch_bytes,

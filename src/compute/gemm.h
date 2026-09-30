@@ -50,6 +50,10 @@ void gemv_fp8(const Tensor& A, const Tensor& x, Tensor& y, float scale, cudaStre
 // Per-row-scale variant (scale[row] = row_absmax/448, e.g. the fp8_ssm_proj sidecar).
 void gemv_fp8_rowscale(const Tensor& A, const Tensor& x, Tensor& y, const float* d_row_scales,
                        cudaStream_t stream = nullptr);
+// n_rows (1..4) inputs against one weight pass: W [M,K] E4M3, x [n_rows,K], y [n_rows,M] FP16.
+// Row r bit-equal to gemv_fp8_rowscale on x row r. False (nothing launched) for n_rows outside 1..4.
+[[nodiscard]] bool gemv_fp8_rowscale_rows(const void* W_fp8, const float* d_row_scales, const half* x, half* y, int M,
+                                          int K, int n_rows, cudaStream_t stream = nullptr);
 // FP32-output variant for the FP8 LM head: W [M,K] E4M3, x [n_rows,K] FP16, y [n_rows,M] FP32.
 // Tensor-core (mma m16n8k16), one weight pass per 32 rows; row bits independent of n_rows. K % 256 == 0.
 [[nodiscard]] bool gemv_fp8_rowscale_fp32(const void* W_fp8, const float* d_row_scales, const half* x, float* y, int M, int K,

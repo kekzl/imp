@@ -14,6 +14,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `gemm.nvfp4_lm_head=fp8`: per-row FP8 E4M3 LM head (#2156, #2166), GDN hybrids included; one tensor-core kernel (32 rows per weight pass, row-count-invariant bits) serves decode, batch and `--perplexity`; the source head is freed after load. Qwen3-8B tg128 286.8 vs 300.9 tok/s (auto), c=32 6519 vs 6851 tok/s. Default stays `auto`.
 
 ### Changed
+- GDN in/gate/out on a verify chunk of 2-4 rows with host-resident experts (#2272): one FP8 weight pass for all rows (`gemv_fp8_rowscale_rows`) instead of one per row, each row bit-equal to the decode GEMV. Qwen3.8-Flash-Next MTP k=1: 55.0 MiB x 36 layers = 1.93 GiB less VRAM read per verify.
 - `prompt_logprobs` LM head (#2257): one dequantized-head GEMM per chunk of min(rows, 1024, free VRAM / 2 / 4V) rows instead of 8-row dp4a batches, and one fused pass per row for logsumexp, rank and top-N (was 2 + N). Gate `scripts/accept_2257.sh`: 2048-token prefill with `prompt_logprobs=0` <= 1.30x off.
 - `check_doc_citations.py`: a moved anchor is a `DRIFT` warning (exit 0), `--fix` rewrites the line numbers; only a gone or ambiguous anchor fails (25-line window). Line drift broke main 3x on 2026-09-29 (#2231).
 - `gemm.nvfp4_lm_head=auto` now serves the LM head as per-row FP8 E4M3 where the head allows it (NVFP4 rule as fallback); `on` keeps NVFP4. PPL 45k: Qwen3-8B 11.1108 -> 10.7623, Qwen3-30B-A3B 11.8443 -> 11.3476, Flash-Next 4.6493 -> 4.4873; tg128 -4.7 % / -3.0 % (#2166, #2156).

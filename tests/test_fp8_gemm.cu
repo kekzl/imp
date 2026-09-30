@@ -420,5 +420,60 @@ TEST_F(FP8GemmTest, RowscaleFp32HeadMatchesReferenceAndIsRowCountInvariant) {
     cudaFree(d_y);
 }
 
+// GDN verify rows (#2272): gemv_fp8_rowscale_rows over n rows must be byte-equal to n
+// gemv_fp8_rowscale calls, K % 16 == 0 and K % 16 == 8 (remainder loop); n = 5 is refused.
+TEST_F(FP8GemmTest, RowscaleRowsBitEqualToPerRowGemv) {
+    constexpr int M = 1003, kMaxRows = 4;
+    for (const int K : {2560, 2568}) {
+        std::vector<half> w(static_cast<size_t>(M) * K), x(static_cast<size_t>(kMaxRows) * K);
+        uint32_t s = 71u + static_cast<uint32_t>(K);
+        auto rnd = [&s] {
+            s = s * 1664525u + 1013904223u;
+            return static_cast<float>(s >> 8) / 16777216.0f - 0.5f;
+        };
+        for (size_t i = 0; i < w.size(); ++i)
+            w[i] = __float2half(0.02f * static_cast<float>(1 + (i / K) % 9) * rnd());
+        for (auto& v : x)
+            v = __float2half(4.0f * rnd());
+        void *d_w = nullptr, *d_q = nullptr, *d_x = nullptr, *d_ya = nullptr, *d_yb = nullptr;
+        float* d_s = nullptr;
+        const size_t y_bytes = static_cast<size_t>(kMaxRows) * M * sizeof(half);
+        ASSERT_EQ(cudaMalloc(&d_w, w.size() * sizeof(half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_q, w.size()), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_x, x.size() * sizeof(half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_s, M * sizeof(float)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_ya, y_bytes), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_yb, y_bytes), cudaSuccess);
+        cudaMemcpy(d_w, w.data(), w.size() * sizeof(half), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_x, x.data(), x.size() * sizeof(half), cudaMemcpyHostToDevice);
+        quantize_fp8_rows_async(d_w, d_q, M, K, d_s, stream_);
+        const int64_t a_shape[2] = {M, K};
+        const Tensor A(d_q, QType::FP8_E4M3, 2, a_shape, true);
+        for (int n = 1; n <= kMaxRows; ++n) {
+            cudaMemset(d_ya, 0xff, y_bytes);  // NaN fill: an unwritten output fails the compare
+            cudaMemset(d_yb, 0x7f, y_bytes);
+            for (int r = 0; r < n; ++r) {
+                const int64_t xs[1] = {K}, ys[1] = {M};
+                const Tensor xr(static_cast<half*>(d_x) + static_cast<size_t>(r) * K, QType::F16, 1, xs, true);
+                Tensor yr(static_cast<half*>(d_ya) + static_cast<size_t>(r) * M, QType::F16, 1, ys, true);
+                gemv_fp8_rowscale(A, xr, yr, d_s, stream_);
+            }
+            EXPECT_TRUE(gemv_fp8_rowscale_rows(d_q, d_s, static_cast<const half*>(d_x), static_cast<half*>(d_yb), M,
+                                               K, n, stream_));
+            ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+            const size_t used = static_cast<size_t>(n) * M * sizeof(half);
+            std::vector<uint8_t> a(used), b(used);
+            cudaMemcpy(a.data(), d_ya, used, cudaMemcpyDeviceToHost);
+            cudaMemcpy(b.data(), d_yb, used, cudaMemcpyDeviceToHost);
+            EXPECT_EQ(0, std::memcmp(a.data(), b.data(), used)) << "K=" << K << " n=" << n << ": row bits differ";
+        }
+        EXPECT_FALSE(gemv_fp8_rowscale_rows(d_q, d_s, static_cast<const half*>(d_x), static_cast<half*>(d_yb), M, K,
+                                            kMaxRows + 1, stream_));
+        for (void* p : {d_w, d_q, d_x, d_ya, d_yb})
+            cudaFree(p);
+        cudaFree(d_s);
+    }
+}
+
 }  // namespace
 }  // namespace imp

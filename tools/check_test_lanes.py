@@ -354,7 +354,9 @@ def main():
     # tall tiles (#2267, measured slower than BM=128).
     # 1172 -> 1174: SamplingTest.FailedRowLaunchReturnsStatus, StaleErrorDoesNotFailSampler (test-compute,
     # GPU): sampler launch status, stale error cleared (#2310); needs a card.
-    PINNED = 1174
+    # 1174 -> 1175: FP8GemmTest.RowscaleRowsBitEqualToPerRowGemv (test-compute, GPU): verify-row FP8
+    # GEMV bytes equal to per-row decode GEMV (#2272); needs a card.
+    PINNED = 1175
 
     text = CMAKE.read_text()
     mods = module_sources(text)

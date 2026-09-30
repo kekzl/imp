@@ -429,6 +429,76 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* 
     }
 }
 
+// NR input rows against one weight pass: row r's arithmetic is gemv_fp8_e4m3_kernel<true>'s
+// statement for statement, so y row r is bit-equal to gemv_fp8_rowscale on x row r.
+// x [NR, K] row-major, y [NR, M] row-major.
+template <int NR>
+__global__ void gemv_fp8_rowscale_rows_kernel(const uint8_t* __restrict__ A, const half* __restrict__ x,
+                                              half* __restrict__ y, int M, int K,
+                                              const float* __restrict__ row_scales) {
+    const int warps_per_block = blockDim.x / 32;
+    const int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x % 32;
+    const int row = blockIdx.x * warps_per_block + warp_id;
+
+    if (row >= M)
+        return;
+    const float scale = row_scales[row];
+    const uint8_t* A_row = A + (int64_t)row * K;
+
+    float sum[NR];
+#pragma unroll
+    for (int r = 0; r < NR; ++r)
+        sum[r] = 0.0f;
+
+    const int K_vec = K / 16;
+    const float4* A_row_v = reinterpret_cast<const float4*>(A_row);
+
+    for (int i = lane; i < K_vec; i += 32) {
+        float4 a_raw = A_row_v[i];
+        const uint8_t* a_bytes = reinterpret_cast<const uint8_t*>(&a_raw);
+#pragma unroll
+        for (int r = 0; r < NR; ++r) {
+            const float4* x_v = reinterpret_cast<const float4*>(x + (int64_t)r * K);
+            float4 x_raw0 = x_v[static_cast<int64_t>(2) * i];
+            float4 x_raw1 = x_v[2 * i + 1];
+            const half* x_lo = reinterpret_cast<const half*>(&x_raw0);
+            const half* x_hi = reinterpret_cast<const half*>(&x_raw1);
+#pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                __nv_fp8_e4m3 fp8_val;
+                memcpy(&fp8_val, &a_bytes[j], 1);
+                float a_val = (float)fp8_val * scale;
+                sum[r] += a_val * __half2float(x_lo[j]);
+            }
+#pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                __nv_fp8_e4m3 fp8_val;
+                memcpy(&fp8_val, &a_bytes[8 + j], 1);
+                float a_val = (float)fp8_val * scale;
+                sum[r] += a_val * __half2float(x_hi[j]);
+            }
+        }
+    }
+
+    int base = K_vec * 16;
+    for (int i = base + lane; i < K; i += 32) {
+        __nv_fp8_e4m3 fp8_val;
+        memcpy(&fp8_val, &A_row[i], 1);
+        float a_val = (float)fp8_val * scale;
+#pragma unroll
+        for (int r = 0; r < NR; ++r)
+            sum[r] += a_val * __half2float(x[(int64_t)r * K + i]);
+    }
+
+#pragma unroll
+    for (int r = 0; r < NR; ++r) {
+        const float s = warp_reduce_sum(sum[r]);
+        if (lane == 0)
+            y[(int64_t)r * M + row] = __float2half(s);
+    }
+}
+
 // Fused Q6_K GEMV, dequant-and-dot in one pass. Q6_K block = 210 bytes for 256 elements:
 // ql[128]+qh[64]+scales[16]+d[2]. Each warp computes one output row's dot product.
 __global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W, const half* __restrict__ x,
@@ -560,6 +630,27 @@ void gemv_fp8_rowscale(const Tensor& A, const Tensor& x, Tensor& y, const float*
                                                       static_cast<half*>(y.data), M, K, 0.0f,
                                                       d_row_scales);
     IMP_CUDA_CHECK_LAUNCH();
+}
+
+namespace {
+template <int NR>
+void launch_fp8_rowscale_rows(const uint8_t* W, const float* d_row_scales, const half* x, half* y, int M, int K,
+                              cudaStream_t stream) {
+    gemv_fp8_rowscale_rows_kernel<NR><<<gemv_blocks(M), kGemvThreads, 0, stream>>>(W, x, y, M, K, d_row_scales);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+}  // namespace
+
+bool gemv_fp8_rowscale_rows(const void* W_fp8, const float* d_row_scales, const half* x, half* y, int M, int K,
+                            int n_rows, cudaStream_t stream) {
+    const auto* W = static_cast<const uint8_t*>(W_fp8);
+    switch (n_rows) {
+        case 1: launch_fp8_rowscale_rows<1>(W, d_row_scales, x, y, M, K, stream); return true;
+        case 2: launch_fp8_rowscale_rows<2>(W, d_row_scales, x, y, M, K, stream); return true;
+        case 3: launch_fp8_rowscale_rows<3>(W, d_row_scales, x, y, M, K, stream); return true;
+        case 4: launch_fp8_rowscale_rows<4>(W, d_row_scales, x, y, M, K, stream); return true;
+        default: return false;
+    }
 }
 
 }  // namespace imp
