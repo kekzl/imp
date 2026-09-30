@@ -282,7 +282,7 @@ inline void debug_tensor_stats_all(const char* name, const Tensor& t, cudaStream
     double vsum = 0.0, vss = 0.0;
     for (int64_t i = 0; i < n; i++) {
         vsum += host[i];
-        vss += host[i] * host[i];
+        vss += static_cast<double>(host[i]) * host[i];
     }
     IMP_LOG_DEBUG("[DEBUG_FWD_ALL] %-30s  rows=%d cols=%d  sum=%+.4f  L2=%.4f", name, nrows, cols, vsum,
                   std::sqrt(vss));
