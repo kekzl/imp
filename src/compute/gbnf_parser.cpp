@@ -12,7 +12,6 @@ namespace imp {
 
 namespace {
 
-constexpr uint32_t kMaxCodepoint = 0x10FFFF;
 // A repetition bound larger than this is a grammar bomb, not an intent: {0,100000}
 // would materialise 100k synthetic rules before decoding a single token.
 constexpr int kMaxRepeat = 1024;
