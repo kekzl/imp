@@ -500,6 +500,8 @@ private:
     // IMA). Monotonic: shrink replays reuse the large-ctx capture (empty
     // splits write sentinels); only growth forces re-derivation.
     int last_decode_max_ctx_per_graph_[kMaxGraphPoolSize] = {};
+    // Request-id key of the batch at the last (re)capture; read under runtime.deterministic only.
+    uint64_t last_decode_batch_key_per_graph_[kMaxGraphPoolSize] = {};
 
     // ── Pipelined batched decode (one step in flight) ────────────────
     // Step N+1 (device token-chain + forward-graph replay + sampler enqueue
