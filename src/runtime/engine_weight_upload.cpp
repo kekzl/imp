@@ -399,10 +399,11 @@ bool Engine::init_weights() {
     // Phase 2: allocate GPU workspace
     (void)executor_->allocate_workspaces(experts_on_host_);
 
-    // Layer offloading
-    if (config_.gpu_layers >= 0) {
+    // Layer offloading: one forward at a time owns the two staging slots, none captured.
+    if (layer_offload_blocks_graphs(config_.gpu_layers)) {
         offload_mgr_ = std::make_unique<LayerOffloadManager>();
-        runtime_config_.runtime.prefill_overlap = false;  // one forward at a time owns the two staging slots
+        runtime_config_.runtime.prefill_overlap = false;
+        demote_graphs_(GraphDemotionReason::LayerOffload);
         if (!offload_mgr_->init(model_.get(), config_.gpu_layers)) {
             IMP_LOG_ERROR("Layer offloading init failed for --gpu-layers %d: %s", config_.gpu_layers,
                           layer_streaming_failure(*model_));

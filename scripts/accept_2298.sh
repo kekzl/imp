@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # GPU acceptance for #2298: --gpu-layers N < n_layers streams dense layers from host.
-#   C1  Qwen3-8B-Q8_0 --gpu-layers 20 loads, logs "16/36 layers offloaded", upload consumes
+#   C1  Qwen3-8B-Q8_0 --gpu-layers 20 loads with 0 ERROR lines and graphs demoted (layer_offload),
+#       logs "16/36 layers offloaded", upload consumes
 #       >= 14 x 195 MiB less VRAM than --gpu-layers -1 (engine line "upload consumed N MiB").
 #   C2  greedy tokens bit-identical, >= 64 on each of 3 prompts, -1 vs 20, same GEMM route per layer
 #       in both arms (AB flags below): no NVFP4 decode cache, no dense FP16/FP8/fused caches
@@ -9,6 +10,7 @@
 #       |delta| <= 0.002 nats/token. INFO: p0 default-flags greedy first diff + top-2 logit margin there.
 #   C3  decode tok/s, default flags (informational).
 #   C4  GPU test modules (test-core .. test-e2e) exit 0.
+# imp-cli prints INFO lines on stdout; every run here passes --json, which moves them to stderr (<tag>.log).
 # Usage: bash scripts/accept_2298.sh
 # Env: IMP_MODELS_DIR (~/models), IMP_ACCEPT_GGUF (Qwen3-8B-Q8_0.gguf), IMP_TEST_IMG,
 #      IMP_ACCEPT_TIMEOUT (s per run, default 900).
@@ -72,13 +74,15 @@ run_img() {  # run_img <stdout> <stderr> <cmd...>: one container, killed after $
     return "$rc"
 }
 
-cli() {  # cli <tag> <gpu_layers> <prompt> <max_tokens> [flags...]: $LOGS/<tag>.out (text), .log (stderr)
+cli() {  # cli <tag> <gpu_layers> <prompt> <max_tokens> [flags...]
+    # --json: stdout = one JSON doc (.text = generated text), every log and marker line on stderr (<tag>.log).
     local tag="$1" gl="$2" prompt="$3" n="$4"
     shift 4
-    run_img "$LOGS/$tag.out" "$LOGS/$tag.log" imp-cli --model "/models/$GGUF" --gpu-layers "$gl" \
-        --prompt "$prompt" --chat-template none --max-tokens "$n" --temperature 0 --token-trace "$@"
+    run_img "$LOGS/$tag.json" "$LOGS/$tag.log" imp-cli --model "/models/$GGUF" --gpu-layers "$gl" \
+        --prompt "$prompt" --chat-template none --max-tokens "$n" --temperature 0 --token-trace --json "$@"
 }
 
+n_errors() { grep -c "\[ERROR\]" "$1"; }
 consumed_mib() { grep -oE 'upload consumed [0-9]+ MiB' "$1" | tail -1 | awk '{print $3}'; }
 tok_ids() { grep -oE '\[tok=[0-9]+' "$1" | cut -d= -f2 | tr '\n' ' '; }
 tg_tps() { grep -E '^tg ' "$1" | tail -1 | grep -oE '\( *[0-9.]+ tok/s' | tr -d '( ' | sed 's/tok\/s//'; }
@@ -104,10 +108,12 @@ keep_line=$(grep -oE -- '--gpu-layers: [0-9]+ matmul weights \([0-9.]+ MiB\) sta
     "$LOGS/c1_gl20.log" | head -1)
 c20=$(consumed_mib "$LOGS/c1_gl20.log")
 call=$(consumed_mib "$LOGS/c1_all.log")
-if [ "$rc20" = 0 ] && [ -n "$off_line" ]; then
-    verdict C1-loads-16-of-36-offloaded PASS "$off_line; $keep_line"
+demote_line=$(grep -oE "CUDA graphs disabled: layer_offload" "$LOGS/c1_gl20.log" | head -1)
+e20=$(n_errors "$LOGS/c1_gl20.log")
+if [ "$rc20" = 0 ] && [ -n "$off_line" ] && [ -n "$demote_line" ] && [ "$e20" = 0 ]; then
+    verdict C1-loads-16-of-36-offloaded PASS "$off_line; $keep_line; $demote_line; 0 ERROR lines"
 else
-    verdict C1-loads-16-of-36-offloaded FAIL "exit $rc20, line '$off_line'; $(grep -E 'ERROR|error' "$LOGS/c1_gl20.log" | head -3 | tr '\n' ' ')"
+    verdict C1-loads-16-of-36-offloaded FAIL "exit $rc20, line '$off_line', '$demote_line', $e20 ERROR lines; $(grep -E 'ERROR|error' "$LOGS/c1_gl20.log" | head -3 | tr '\n' ' ')"
 fi
 if [ "$rcall" = 0 ] && [ -n "$c20" ] && [ -n "$call" ] && [ $((call - c20)) -ge "$MIN_SAVED_MIB" ]; then
     verdict C1-vram-saved PASS "upload consumed -1: $call MiB, 20: $c20 MiB, saved $((call - c20)) MiB (need >= $MIN_SAVED_MIB)"
@@ -128,11 +134,12 @@ for i in "${!PROMPTS[@]}"; do
     na=$(wc -w <<<"$a")
     nb=$(wc -w <<<"$b")
     skipped=$(grep -c 'pre_dequant phases 1-2 skipped' "$LOGS/c2_all_$i.log")
-    if [ "$ra" = 0 ] && [ "$rb" = 0 ] && [ "$na" -ge "$NTOK" ] && [ "$a" = "$b" ] && [ "$skipped" -ge 1 ]; then
+    errs=$(($(n_errors "$LOGS/c2_all_$i.log") + $(n_errors "$LOGS/c2_gl20_$i.log")))
+    if [ "$ra" = 0 ] && [ "$rb" = 0 ] && [ "$errs" = 0 ] && [ "$na" -ge "$NTOK" ] && [ "$a" = "$b" ] && [ "$skipped" -ge 1 ]; then
         match=$((match + 1))
         detail+="p$i equal ($na/$nb tokens); "
     else
-        detail+="p$i exit $ra/$rb, $na vs $nb tokens, caches-skipped log $skipped, first diff at $(first_diff "$a" "$b"); "
+        detail+="p$i exit $ra/$rb, $errs ERROR lines, $na vs $nb tokens, caches-skipped log $skipped, first diff at $(first_diff "$a" "$b"); "
     fi
 done
 if [ "$match" = "${#PROMPTS[@]}" ]; then
@@ -149,7 +156,9 @@ for i in "${!PROMPTS[@]}"; do
     TPS_ALL+=("$(tg_tps "$LOGS/def_all_$i.log")")
     TPS_20+=("$(tg_tps "$LOGS/def_gl20_$i.log")")
 done
-verdict C3-decode-tps INFO "default flags, tg tok/s -1: ${TPS_ALL[*]}; --gpu-layers 20: ${TPS_20[*]}"
+def_err=0
+for i in "${!PROMPTS[@]}"; do def_err=$((def_err + $(n_errors "$LOGS/def_all_$i.log") + $(n_errors "$LOGS/def_gl20_$i.log"))); done
+verdict C3-decode-tps INFO "default flags, tg tok/s -1: ${TPS_ALL[*]}; --gpu-layers 20: ${TPS_20[*]}; $def_err ERROR lines"
 
 # ---- C2b: teacher-forced mean NLL over prompt + the -1 arm's greedy text ----
 nll_sum_all=0
@@ -158,7 +167,7 @@ ntok_sum=0
 c2b_ok=1
 c2b_detail=""
 for i in "${!PROMPTS[@]}"; do
-    printf '%s%s' "${PROMPTS[$i]}" "$(cat "$LOGS/def_all_$i.out")" >"$LOGS/c2b_p$i.txt"
+    printf '%s%s' "${PROMPTS[$i]}" "$(jq -r ".text // empty" "$LOGS/def_all_$i.json")" >"$LOGS/c2b_p$i.txt"
     for arm in all gl20; do
         gl=$([ "$arm" = all ] && echo -1 || echo 20)
         run_img "$LOGS/c2b_${arm}_$i.json" "$LOGS/c2b_${arm}_$i.log" imp-cli --model "/models/$GGUF" \

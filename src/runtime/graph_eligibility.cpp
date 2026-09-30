@@ -18,6 +18,8 @@ const char* graph_demotion_reason_name(GraphDemotionReason r) {
             return "experts_on_host";
         case GraphDemotionReason::MoeDecodeCacheIncomplete:
             return "moe_decode_cache_incomplete";
+        case GraphDemotionReason::LayerOffload:
+            return "layer_offload";
         case GraphDemotionReason::PinnedSampleBufUnavailable:
             return "pinned_sample_buf_unavailable";
         case GraphDemotionReason::StreamingKvKvPressure:
