@@ -749,6 +749,8 @@ static bool ensure_dummy_buffer() {
     cudaError_t err = cudaMalloc(&s_dummy, 256);
     if (err != cudaSuccess) s_dummy = nullptr;
     else err = cudaMemset(s_dummy, 0, 256);
+    // Legacy-stream memset: drain it before any launch on a non-blocking stream reads it (#2275).
+    if (err == cudaSuccess) err = cudaStreamSynchronize(nullptr);
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("[smallM] dummy TMA buffer: %s", cudaGetErrorString(err));
         gemm_grouped_nvfp4_smallM_reset_static_cuda_state();

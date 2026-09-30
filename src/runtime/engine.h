@@ -1238,7 +1238,8 @@ private:
     // docs/plans/2026-09-11-batched-mtp-verify.md, engine_spec_batch_verify.cpp,
     // state types in spec_batch_verify_state.h.
     BatchVerifyState bv_;
-    [[nodiscard]] bool ensure_batch_verify_bufs_();       // init-time; sized from max_batch_size
+    [[nodiscard]] bool ensure_batch_verify_bufs_(
+        cudaStream_t stream);  // init-time; sized from max_batch_size
     void free_batch_verify_bufs_();
     int acquire_spare_slot_(int req_id);
     int32_t batch_verify_draft_(Request& req, bool& from_mtp);

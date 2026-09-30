@@ -91,7 +91,9 @@ void* upload_f16(const uint8_t* src, size_t nbytes, const std::string& dtype, in
     void* dev = nullptr;
     if (cudaMalloc(&dev, static_cast<size_t>(numel) * 2) != cudaSuccess)
         return nullptr;
-    if (cudaMemcpy(dev, h.data(), static_cast<size_t>(numel) * 2, cudaMemcpyHostToDevice) != cudaSuccess) {
+    // Pageable H2D may return before the DMA lands: drain it before a LoRA GEMM reads it (#2275).
+    if (cudaMemcpy(dev, h.data(), static_cast<size_t>(numel) * 2, cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaStreamSynchronize(nullptr) != cudaSuccess) {
         IMP_CUDA_CHECK_LOG(cudaFree(dev));
         return nullptr;
     }
