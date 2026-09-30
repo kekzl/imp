@@ -576,8 +576,8 @@ void Workspace::compute_shared_sizes(int max_tokens) {
                            + align256(static_cast<size_t>(max_tokens) * inner * es)          // y
                            + align256(static_cast<size_t>(max_tokens) * z_cols * es)         // z
                            + align256(static_cast<size_t>(max_tokens) * d * es)              // out
-                           + align256(static_cast<size_t>(max_tokens) * n_heads * (*has_gdn_ ? 2 : 1) *
-                                      es)  // dt (2x for GDN: alpha + beta)
+                           + (*has_gdn_ ? exec_gdn_dt_bytes(max_tokens, n_heads, es)  // alpha | beta
+                                        : align256(static_cast<size_t>(max_tokens) * n_heads * es))  // dt
                            + (*has_gdn_ ? align256(static_cast<size_t>(max_tokens) * fused_total_out * es)
                                        : 0);  // gdn_fused_proj (only on GDN models)
     }

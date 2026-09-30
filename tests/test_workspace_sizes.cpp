@@ -541,3 +541,26 @@ TEST(ExecSsmZCols, MatchesTheRecurrentInnerOnEveryHybridStagedToday) {
     wide.ssm_inner_size = 6144;
     EXPECT_EQ(exec_ssm_z_cols(wide), 6144);
 }
+
+// ssm_dt_buf_ holds alpha at 0 and beta at exec_gdn_beta_offset(n). The old size,
+// align256(2 * n * n_heads * es), is 64/128 B short at n % 4 == 1/2 (n_heads 32, FP16).
+TEST(ExecGdnDtBytes, BetaFitsForEveryRowCountUpToMaxTokens) {
+    for (int n_heads : {16, 32, 48, 64}) {
+        for (int64_t n = 1; n <= 4096; ++n) {
+            const size_t beta_end = exec_gdn_beta_offset(n, n_heads, 2) + static_cast<size_t>(n) * n_heads * 2;
+            ASSERT_LE(beta_end, exec_gdn_dt_bytes(n, n_heads, 2)) << "n=" << n << " n_heads=" << n_heads;
+            ASSERT_LE(beta_end, exec_gdn_dt_bytes(4096, n_heads, 2)) << "n=" << n << " n_heads=" << n_heads;
+        }
+    }
+}
+
+TEST(ExecGdnDtBytes, OldSizeOverranAtTheTranscriptTailChunk) {
+    // Qwen3.5-4B: 32 v-heads. prompt1 = 422 tokens -> tail chunk n = 6; M=1 fused input n = 1.
+    auto old_bytes = [](int64_t n) { return ((static_cast<size_t>(n) * 32 * 2 * 2) + 255) & ~size_t(255); };
+    EXPECT_EQ(exec_gdn_beta_offset(6, 32, 2) + 6 * 32 * 2, 896u);
+    EXPECT_EQ(old_bytes(6), 768u);
+    EXPECT_EQ(exec_gdn_dt_bytes(6, 32, 2), 1024u);
+    EXPECT_EQ(exec_gdn_beta_offset(1, 32, 2) + 32 * 2, 320u);
+    EXPECT_EQ(old_bytes(1), 256u);
+    EXPECT_EQ(exec_gdn_dt_bytes(1, 32, 2), 512u);
+}

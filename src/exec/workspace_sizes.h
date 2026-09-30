@@ -207,6 +207,11 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len);
 int exec_ssm_z_cols(const ExecShape& shape);
 int exec_ssm_z_cols(const Model& model);
 
+// GDN alpha/beta scratch (ssm_dt_buf_): alpha at 0, beta at exec_gdn_beta_offset(n rows). Two
+// 256-B-aligned halves; align256(2 * rows * n_heads * es) overran it by 64/128 B at n % 4 == 1/2.
+size_t exec_gdn_beta_offset(int64_t rows, int n_heads, size_t es);
+size_t exec_gdn_dt_bytes(int64_t max_rows, int n_heads, size_t es);
+
 // Width of the attention output gate, 0 when the model has no gate. Both SSM z
 // sizings call this so the buffer and its charge cannot drift apart.
 int exec_attn_gate_cols(const Model& model);

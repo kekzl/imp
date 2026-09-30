@@ -4,6 +4,7 @@
 #include "exec/executor_kernels.cuh"
 #include "exec/executor_debug.h"
 #include "exec/executor_helpers.h"
+#include "exec/workspace_sizes.h"
 #include "exec/gemm_context.h"
 #include "compute/layernorm.h"
 #include "compute/activation.h"
@@ -637,8 +638,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 // and prefill run both in one narrow FP16 launch first (gdn.alpha_beta_smallm,
                 // gdn.alpha_beta_prefill); the two calls remain for every shape/tier declined.
                 alpha_proj_out = Tensor(ssm_dt_buf_.data, compute_dtype_, 2, ab_shape, true);
-                char* beta_ptr = static_cast<char*>(ssm_dt_buf_.data) +
-                                 ((static_cast<size_t>(n) * n_heads * es + 255) & ~size_t(255));
+                char* beta_ptr = static_cast<char*>(ssm_dt_buf_.data) + exec_gdn_beta_offset(n, n_heads, es);
                 beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
                 // m1_fused_input: step 2 already wrote both into this layout.
                 if (!m1_fused_input && !try_gdn_alpha_beta_narrow_(ly.gdn_alpha_id, ly.gdn_beta_id, no,
