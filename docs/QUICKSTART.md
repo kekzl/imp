@@ -1,15 +1,15 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-09-30
+commit: 0ef52509
 -->
 
 # Quickstart
 
 From nothing to an answered completion. Everything runs in Docker; the host needs a driver, not a CUDA toolkit.
 
-Worked example: **Qwen3.8-27B**, same as the [README](../README.md#3-command-quickstart). This page is the long version: what to check first, what the startup log should say, the other ways in.
+Worked example: **Qwen3.8-27B**, same as the [README](../README.md#install). This page is the long version: what to check first, what the startup log should say, the other ways in.
 
 ## Requirements
 
