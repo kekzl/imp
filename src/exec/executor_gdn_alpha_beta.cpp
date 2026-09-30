@@ -10,6 +10,7 @@
 #include "core/dispatch_policy.h"
 #include "core/logging.h"
 #include "exec/executor.h"
+#include "exec/workspace_sizes.h"
 #include "quant/nvfp4_gemm.h"
 #include <stdexcept>
 
@@ -143,7 +144,7 @@ bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Te
         return false;
     half* alpha_out = static_cast<half*>(ssm_dt_buf_.data);
     half* beta_out = reinterpret_cast<half*>(static_cast<char*>(ssm_dt_buf_.data) +
-                                             ((static_cast<size_t>(N) * sizeof(half) + 255) & ~size_t(255)));
+                                             exec_gdn_beta_offset(1, static_cast<int>(N), sizeof(half)));
     const bool ok = gemv_nvfp4_gdn_input_fused(w_in, w_gate, wa, wb, static_cast<int>(N),
                                                static_cast<const half*>(input.data), static_cast<half*>(proj.data),
                                                static_cast<half*>(gate_out.data), alpha_out, beta_out,
