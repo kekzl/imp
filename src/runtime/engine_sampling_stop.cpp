@@ -472,6 +472,8 @@ void Engine::maybe_save_transcript_snapshot_(const Request& req, std::span<const
                                              cudaStream_t stream) {
     if (!transcript_snapshot_active_())
         return;
+    if (req.recurrent_slab_ahead)  // slab holds rows past the transcript (spec_hybrid_slab_at_row)
+        return;
     if (req.vision_emb || req.image || req.n_vision_tokens > 0 || vision_.has_input())
         return;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;

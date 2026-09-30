@@ -72,4 +72,36 @@ TEST(SpecGates, NgramSourceImpliesTheVerifyIsEntered) {
     }
 }
 
+// Capture-mode FA2 derives q_offset = kv_len - rows (attention_fmha_sm120.cu). Both replay
+// routes must land on q_offset = p0. The graph used to get p0 + 1 + matched: q_offset
+// p0 - (chunk_pad - 1 - matched), every replayed row missing its last keys (#2275).
+TEST(SpecGates, HybridReplayKeepsQOffsetAtP0) {
+    for (int chunk_pad : {3, 9, 17, 33}) {
+        for (int matched = 1; matched < chunk_pad - 1; ++matched) {
+            const int p0 = 1000;
+            const int kv_graph = imp::spec_replay_kv_len(true, p0, chunk_pad, matched);
+            const int kv_eager = imp::spec_replay_kv_len(false, p0, chunk_pad, matched);
+            EXPECT_EQ(kv_graph - chunk_pad, p0) << "graph pad=" << chunk_pad << " m=" << matched;
+            EXPECT_EQ(kv_eager - (matched + 1), p0) << "eager pad=" << chunk_pad << " m=" << matched;
+            EXPECT_NE((p0 + 1 + matched) - chunk_pad, p0) << "old graph kv_len is the defect";
+        }
+    }
+}
+
+// Linear chunk [t0, d1..dK]: the slab ends at row K. A stop at row j < K leaves it ahead.
+TEST(SpecGates, HybridSlabMatchesOnlyAtTheCommittedRow) {
+    const int K = 16;
+    for (int j = 0; j <= K; ++j)
+        EXPECT_EQ(imp::spec_hybrid_slab_at_row(false, 0, j, K, 0), j == K) << "j=" << j;
+}
+
+// Grouped chunk: candidate 0 runs on the live slot and commits at its group's last row;
+// any other winner leaves candidate 0's state there.
+TEST(SpecGates, HybridGroupedSlabIsCandidateZerosLastRow) {
+    const int rows = 4;  // 1 + mc_depth
+    EXPECT_TRUE(imp::spec_hybrid_slab_at_row(true, 0, rows - 1, rows - 1, rows));
+    EXPECT_FALSE(imp::spec_hybrid_slab_at_row(true, 0, rows - 2, rows - 1, rows));
+    EXPECT_FALSE(imp::spec_hybrid_slab_at_row(true, 1, rows - 1, rows - 1, rows));
+}
+
 }  // namespace

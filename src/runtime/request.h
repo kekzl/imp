@@ -187,6 +187,9 @@ struct Request {
     // matches a stored snapshot. Restored into the request's recurrent slot
     // on the first prefill chunk instead of zeroing (engine_sampling_stop).
     std::shared_ptr<const struct RecurrentSnapshotEntry> recurrent_restore;
+    // Finished inside a hybrid verify chunk past its stop row: the recurrent slab holds rows
+    // the transcript does not, so the finish-time transcript snapshot is skipped.
+    bool recurrent_slab_ahead = false;
     // SWA window snapshot (kv_cache.swa_snapshot_mb): packed windowed-layer
     // KV at exactly `cached_tokens`, restored into fresh SWA blocks on the
     // first prefill chunk so a prefix-cache hit is valid under SWA sizing.
