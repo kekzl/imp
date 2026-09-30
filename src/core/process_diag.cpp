@@ -35,6 +35,7 @@ bool process_diag_no_vision_graph() { return slot().no_vision_graph; }
 const std::string& process_diag_graph_capture_mode() { return slot().graph_capture_mode; }
 bool process_diag_prefill_graph_enabled() { return slot().prefill_graph_enabled; }
 bool process_diag_deterministic_gemm() { return slot().deterministic_gemm; }
+bool process_diag_deterministic() { return slot().deterministic; }
 bool process_diag_cublas_fp16_acc() { return slot().cublas_fp16_acc; }
 void process_diag_set_cublas_fp16_acc(bool v) { slot().cublas_fp16_acc = v; }
 void process_diag_set_deterministic_gemm(bool v) { slot().deterministic_gemm = v; }

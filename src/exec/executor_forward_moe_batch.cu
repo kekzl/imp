@@ -647,7 +647,7 @@ __global__ void moe_expert_trace_kernel(const int32_t* __restrict__ expert_indic
 // Row-invariant FP32 router GEMM under runtime.deterministic: a prompt token routes the same in every
 // chunk (#2167). Default mode keeps cuBLAS (-5 % pp4096 on Qwen3-30B-A3B otherwise).
 static bool row_invariant_router(QType compute, const Tensor& gate, const Tensor& in, int d) {
-    return process_diag_deterministic_gemm() && compute == QType::F16 && gate.qtype == QType::F16 &&
+    return process_diag_deterministic() && compute == QType::F16 && gate.qtype == QType::F16 &&
            (d & 1) == 0 && in.stride[0] == d;
 }
 

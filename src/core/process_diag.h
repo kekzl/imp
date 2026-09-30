@@ -38,6 +38,8 @@ struct ProcessDiag {
 
     // GEMM (may be promoted in place by engine_init_resolver)
     bool deterministic_gemm = false;
+    // runtime.deterministic as the user set it; never promoted by an arch resolver.
+    bool deterministic = false;
     bool cublas_fp16_acc = false;
 
     // Attention
@@ -111,6 +113,9 @@ const std::string& process_diag_graph_capture_mode();
 // process_diag_set_deterministic_gemm() lets the resolver update the cache in place.
 [[nodiscard]] bool process_diag_deterministic_gemm();
 void process_diag_set_deterministic_gemm(bool v);
+// runtime.deterministic (user intent). Unlike deterministic_gemm, Gemma-4 and FP8 KV do not
+// promote it: gates that cost speed or accuracy key on this one (#2167).
+[[nodiscard]] bool process_diag_deterministic();
 // FP16-accumulate cuBLAS prefill GEMMs (gemm.cublas_fp16_acc), read by the
 // free-function gemm() in compute/gemm.cu, which carries no RuntimeConfig.
 // "auto" resolved per-arch by init_resolve_quant_flags_; install() maps auto -> off for engine-less tools.

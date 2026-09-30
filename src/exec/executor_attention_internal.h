@@ -76,7 +76,7 @@ namespace imp {
                                                           int sliding_window, float softcap, int q_offset,
                                                           cudaStream_t stream, const void* sinks) {
     const std::string& mode = rcfg.attention.hd512_prefill;
-    if (hd != 512 || !(mode == "fmha" || (mode == "auto" && process_diag_deterministic_gemm())))
+    if (hd != 512 || !(mode == "fmha" || (mode == "auto" && process_diag_deterministic())))
         return false;
     int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
     int64_t kv4s[4] = {1, (int64_t)kv_len, (int64_t)nkv, (int64_t)hd};
