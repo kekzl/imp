@@ -50,8 +50,8 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         // Still must land here because sm_120 has no FP8 prefill GEMM; left alone it reaches
         // cuBLAS raw and fails with status 15.
         const bool native_fp8 = (qtype == QType::FP8_E4M3);
-        if (!w.data || (!dequant_gpu_supported(qtype) && !native_fp8))
-            return;
+        if (!fp16_cache_source(w, qtype, dequant_gpu_supported(qtype)))
+            return;  // also skips --gpu-layers host-streamed weights (model/layer_host_keep.h)
         if (wcache_->fp16.count(w.data))
             return;  // already cached
         if (budget_exhausted)

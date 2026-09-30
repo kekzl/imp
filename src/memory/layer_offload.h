@@ -85,11 +85,15 @@ public:
     // No-op if next_layer is resident or already loaded in a slot.
     void prefetch_layer(int next_layer);
 
-    // Restore layer tensor pointers to their original host pointers.
-    // Called after processing a layer to avoid dangling GPU pointers.
-    void release_layer(int layer);
+    // Restore layer tensor pointers to their original host pointers. Records the slot's free
+    // event on compute_stream: the next upload into that slot waits for the layer's kernels.
+    void release_layer(int layer, cudaStream_t compute_stream);
 
     bool is_enabled() const { return enabled_; }
+    // Layer streams from host (its tensor pointers change in ensure_layer / release_layer).
+    bool is_offloaded(int layer) const {
+        return enabled_ && layer >= 0 && layer < static_cast<int>(offloaded_.size()) && offloaded_[layer];
+    }
 
 private:
     // Per-weight metadata for an offloaded layer
@@ -105,6 +109,7 @@ private:
         size_t buf_size = 0;
         int loaded_layer = -1;
         CudaEvent ready_event;
+        CudaEvent free_event;  // compute stream done reading the slot's previous layer
         CudaStream transfer_stream;
     };
 

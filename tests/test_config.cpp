@@ -475,6 +475,17 @@ TEST(ConfigBadValue, TriStateKeyKeepsItsThreeSpellings) {
     EXPECT_EQ(cfg.apply_overrides({"gemm.cublas_fp16_acc=sometimes"}).size(), 1u);
 }
 
+// ---- #2298: gemm.dense_weight_cache (A/B control for --gpu-layers) binds, default on ----
+TEST(ConfigBinding, DenseWeightCacheDefaultsOnAndBinds) {
+    imp::RuntimeConfig cfg;
+    EXPECT_TRUE(cfg.gemm.dense_weight_cache);
+    EXPECT_TRUE(cfg.apply_overrides({"gemm.dense_weight_cache=false"}).empty());
+    EXPECT_FALSE(cfg.gemm.dense_weight_cache);
+    EXPECT_TRUE(cfg.was_set("gemm.dense_weight_cache"));
+    EXPECT_TRUE(cfg.apply_overrides({"gemm.dense_weight_cache=true"}).empty());
+    EXPECT_TRUE(cfg.gemm.dense_weight_cache);
+}
+
 // ---- #1638: a decode-path switch nothing could set ----
 
 TEST(ConfigBinding, SpeculativeBatchRrIsBound) {

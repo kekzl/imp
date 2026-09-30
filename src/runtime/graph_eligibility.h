@@ -30,6 +30,7 @@ enum class GraphDemotionReason {
     PinnedSampleBufUnavailable,  // pinned host buffer allocation failed at warmup
     MoeDecodeCacheIncomplete,    // a device-resident MoE layer has no NVFP4 decode cache (legacy path is not
                                  // graph-safe)
+    LayerOffload,                // --gpu-layers: per-layer event waits on the transfer stream are not capturable
 
     // ── mid-run ──────────────────────────────────────────────────────
     // A mid-run demotion, not an init property: kept distinct so it can't be
@@ -44,6 +45,10 @@ const char* graph_demotion_reason_name(GraphDemotionReason r);
 
 // True for the reasons that are decided while requests are already running.
 [[nodiscard]] bool graph_demotion_is_mid_run(GraphDemotionReason r);
+
+// --gpu-layers N >= 0 creates the LayerOffloadManager, whose ensure_layer waits on transfer-stream
+// events and remaps pointers per forward: no capture may run (Reason LayerOffload).
+[[nodiscard]] inline bool layer_offload_blocks_graphs(int gpu_layers) { return gpu_layers >= 0; }
 
 // The valve looks this many tokens ahead per sequence, not to max_tokens: a
 // worst-case max_tokens evicted a 118k prompt whose reply stopped at 206 tokens.
