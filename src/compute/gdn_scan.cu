@@ -75,23 +75,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
                 k_sq += k_row[i] * k_row[i];
                 q_sq += q_row[i] * q_row[i];
             }
-            s_reduce[d] = k_sq;
-            __syncthreads();
-            for (int stride = HD / 2; stride > 0; stride >>= 1) {
-                if (d < stride)
-                    s_reduce[d] += s_reduce[d + stride];
-                __syncthreads();
-            }
-            float k_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
-
-            s_reduce[d] = q_sq;
-            __syncthreads();
-            for (int stride = HD / 2; stride > 0; stride >>= 1) {
-                if (d < stride)
-                    s_reduce[d] += s_reduce[d + stride];
-                __syncthreads();
-            }
-            float q_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
+            float k_inv = rsqrtf(fmaxf(gdn_block_sum(s_reduce, k_sq, d, HD), 1e-12f));
+            float q_inv = rsqrtf(fmaxf(gdn_block_sum(s_reduce, q_sq, d, HD), 1e-12f));
 
             if (d < SS) {
                 k_row[d] *= k_inv;
@@ -230,23 +215,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
                 k_sq += s_k[t_loc * SS + i] * s_k[t_loc * SS + i];
                 q_sq += s_q[t_loc * SS + i] * s_q[t_loc * SS + i];
             }
-            s_reduce[d] = k_sq;
-            __syncthreads();
-            for (int stride = HD / 2; stride > 0; stride >>= 1) {
-                if (d < stride)
-                    s_reduce[d] += s_reduce[d + stride];
-                __syncthreads();
-            }
-            const float k_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
-
-            s_reduce[d] = q_sq;
-            __syncthreads();
-            for (int stride = HD / 2; stride > 0; stride >>= 1) {
-                if (d < stride)
-                    s_reduce[d] += s_reduce[d + stride];
-                __syncthreads();
-            }
-            const float q_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
+            const float k_inv = rsqrtf(fmaxf(gdn_block_sum(s_reduce, k_sq, d, HD), 1e-12f));
+            const float q_inv = rsqrtf(fmaxf(gdn_block_sum(s_reduce, q_sq, d, HD), 1e-12f));
 
             if (d < SS) {
                 s_k[t_loc * SS + d] *= k_inv;
