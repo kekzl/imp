@@ -202,8 +202,8 @@ void dump_top8_gate_logits(int layer, int n, int ne, const float* d_logits) {
     int last_tok = n - 1;
     std::vector<float> h_logits(ne);
     if (!debug_cuda_ok(cudaDeviceSynchronize(), "dump_top8_gate_logits") ||
-        !debug_cuda_ok(cudaMemcpy(h_logits.data(), d_logits + last_tok * ne, ne * sizeof(float),
-                                  cudaMemcpyDeviceToHost),
+        !debug_cuda_ok(cudaMemcpy(h_logits.data(), d_logits + static_cast<ptrdiff_t>(last_tok * ne),
+                                  ne * sizeof(float), cudaMemcpyDeviceToHost),
                        "dump_top8_gate_logits"))
         return;
     std::vector<std::pair<float, int>> sorted;
@@ -224,8 +224,8 @@ void dump_top8_gate_logits(int layer, int n, int ne, const float* d_logits) {
 void dump_router_logits_l0(int n, int ne, const float* d_logits) {
     std::vector<float> rl(ne);
     const int last_tok = n - 1;
-    if (!debug_cuda_ok(cudaMemcpy(rl.data(), d_logits + last_tok * ne, ne * sizeof(float),
-                                  cudaMemcpyDeviceToHost),
+    if (!debug_cuda_ok(cudaMemcpy(rl.data(), d_logits + static_cast<ptrdiff_t>(last_tok * ne),
+                                  ne * sizeof(float), cudaMemcpyDeviceToHost),
                        "router logits"))
         return;
     double rsum = 0, rss = 0;
@@ -242,11 +242,11 @@ void dump_routing_decision(int layer, int n, int top_k, const int32_t* d_idx, co
     int last_tok = n - 1;
     std::vector<int32_t> h_idx(top_k);
     std::vector<float> h_wts(top_k);
-    if (!debug_cuda_ok(cudaMemcpy(h_idx.data(), d_idx + last_tok * top_k, top_k * sizeof(int32_t),
-                                  cudaMemcpyDeviceToHost),
+    if (!debug_cuda_ok(cudaMemcpy(h_idx.data(), d_idx + static_cast<ptrdiff_t>(last_tok * top_k),
+                                  top_k * sizeof(int32_t), cudaMemcpyDeviceToHost),
                        "ROUTE") ||
-        !debug_cuda_ok(cudaMemcpy(h_wts.data(), d_wts + last_tok * top_k, top_k * sizeof(float),
-                                  cudaMemcpyDeviceToHost),
+        !debug_cuda_ok(cudaMemcpy(h_wts.data(), d_wts + static_cast<ptrdiff_t>(last_tok * top_k),
+                                  top_k * sizeof(float), cudaMemcpyDeviceToHost),
                        "ROUTE"))
         return;
     IMP_LOG_DEBUG(
@@ -651,6 +651,24 @@ static bool row_invariant_router(QType compute, const Tensor& gate, const Tensor
            (d & 1) == 0 && in.stride[0] == d;
 }
 
+// cuBLAS router GEMM into a compute-dtype scratch (n x ne), widened into the FP32 logits.
+static void router_logits_cublas(const Tensor& in, const Tensor& gate, void* scratch, QType compute,
+                                 float* out, int n, int ne, cudaStream_t stream) {
+    int64_t gl_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(ne)};
+    Tensor tmp(scratch, compute, 2, gl_shape, true);
+    gemm(in, gate, tmp, 1.0f, 0.0f, stream);
+    const int64_t numel = static_cast<int64_t>(n) * ne;
+    if (compute == QType::F16) {
+        const int threads = 256;
+        const int blocks = static_cast<int>((numel + threads - 1) / threads);
+        fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(tmp.data), out, numel);
+        IMP_CUDA_CHECK_LAUNCH();
+    } else {
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(out, tmp.data, static_cast<size_t>(numel) * sizeof(float),
+                                           cudaMemcpyDeviceToDevice, stream));
+    }
+}
+
 void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne,
                                         int top_k, const Tensor& router_in,
                                         bool fp32_gate_logits_ready, bool will_decode_fast,
@@ -708,22 +726,8 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
                                 static_cast<const half*>(router_in.data),
                                 static_cast<float*>(gate_logits_f32.data), n, ne, d, stream);
         } else {
-            int64_t gl_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(ne)};
-            Tensor gate_logits_tmp(moe_.gathered.data, compute_dtype_, 2, gl_shape, true);
-            gemm(router_in, ly.moe_gate, gate_logits_tmp, 1.0f, 0.0f, stream);
-            int64_t numel = static_cast<int64_t>(n) * ne;
-            int threads = 256;
-            int blocks = static_cast<int>((numel + threads - 1) / threads);
-            if (compute_dtype_ == QType::F16) {
-                fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
-                    static_cast<const half*>(gate_logits_tmp.data),
-                    static_cast<float*>(gate_logits_f32.data), numel);
-                IMP_CUDA_CHECK_LAUNCH();
-            } else {
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(gate_logits_f32.data, gate_logits_tmp.data,
-                                                   static_cast<size_t>(numel) * sizeof(float),
-                                                   cudaMemcpyDeviceToDevice, stream));
-            }
+            router_logits_cublas(router_in, ly.moe_gate, moe_.gathered.data, compute_dtype_,
+                                 static_cast<float*>(gate_logits_f32.data), n, ne, stream);
         }
 
         if (debug_forward_enabled() && layer == 0)
@@ -1002,7 +1006,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
             gate_base = up_base = down_base = layer_pool;
             gate_idx = moe_.d_slot_idx;
             up_idx = moe_.d_slot_idx + top_k;
-            down_idx = moe_.d_slot_idx + 2 * top_k;
+            down_idx = moe_.d_slot_idx + static_cast<ptrdiff_t>(2 * top_k);
             slot_stride = expert_cache_.slot_size_;
             pool_addressed = true;
         } else {

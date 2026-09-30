@@ -354,7 +354,9 @@ def main():
     # tall tiles (#2267, measured slower than BM=128).
     # 1172 -> 1174: SamplingTest.FailedRowLaunchReturnsStatus, StaleErrorDoesNotFailSampler (test-compute,
     # GPU): sampler launch status, stale error cleared (#2310); needs a card.
-    PINNED = 1174
+    # 1174 -> 1178: PrefillRowInvariance x4 (test-quant): router logits, MoE act quantize (default
+    # and smallM), hd=512 FMHA, same row in different batches or chunk offsets bit-equal (#2167).
+    PINNED = 1178
 
     text = CMAKE.read_text()
     mods = module_sources(text)

@@ -86,17 +86,17 @@ __global__ void nvfp4_moe_native_quant_kernel(
 
         // Load 16 FP16 values via vectorized half2 loads.
         const half2* src_h2 = reinterpret_cast<const half2*>(
-            src + (int64_t)(M0 + m) * K + kb * kNativeMicroBlockSize);
+            src + (int64_t)(M0 + m) * K + static_cast<ptrdiff_t>(kb * kNativeMicroBlockSize));
 
         float vals[kNativeMicroBlockSize];
         float local_absmax = 0.0f;
 #pragma unroll
         for (int i = 0; i < kNativeMicroBlockSize / 2; i++) {
             half2 h2 = src_h2[i];
-            vals[i * 2]     = __half2float(h2.x);
+            vals[static_cast<ptrdiff_t>(i * 2)] = __half2float(h2.x);
             vals[i * 2 + 1] = __half2float(h2.y);
             local_absmax = fmaxf(local_absmax,
-                                 fmaxf(fabsf(vals[i * 2]), fabsf(vals[i * 2 + 1])));
+                                 fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[i * 2 + 1])));
         }
 
         // Micro-scale — same formula and clamping as quantize_micro_block_nvfp4.
@@ -120,7 +120,8 @@ __global__ void nvfp4_moe_native_quant_kernel(
         // Quantize 16 FP16 -> 8 packed bytes — native row-major:
         // packed[m * (K/2) + kb * 8 + byte_idx]
         float inv_combined = 1.0f / (tensor_scale * actual_scale);
-        uint8_t* packed_at = packed_e + (int64_t)m * (K / 2) + kb * (kNativeMicroBlockSize / 2);
+        uint8_t* packed_at = packed_e + (int64_t)m * (K / 2) +
+                             static_cast<ptrdiff_t>(kb * (kNativeMicroBlockSize / 2));
 #pragma unroll
         for (int i = 0; i < kNativeMicroBlockSize; i += 2) {
             float s0 = vals[i]     * inv_combined;
@@ -165,10 +166,11 @@ static void quantize_fp16_to_nvfp4_moe_native_impl(
     void** d_sf_dev     = nullptr;
     IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_packed_dev, sizeof(void*) * n_experts, stream));
     IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_sf_dev,     sizeof(void*) * n_experts, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_packed_dev, d_packed_ptrs, sizeof(void*) * n_experts,
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(d_packed_dev),
+                                       static_cast<const void*>(d_packed_ptrs), sizeof(void*) * n_experts,
                                        cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_sf_dev,     d_sf_ptrs,     sizeof(void*) * n_experts,
-                                       cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(d_sf_dev), static_cast<const void*>(d_sf_ptrs),
+                                       sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream));
 
     if (d_tensor_scales_opt) {
         int threads = 64;
@@ -190,8 +192,8 @@ static void quantize_fp16_to_nvfp4_moe_native_impl(
         IMP_CUDA_CHECK_LAUNCH();
     }
 
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_packed_dev, stream));
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_sf_dev,     stream));
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(static_cast<void*>(d_packed_dev), stream));
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(static_cast<void*>(d_sf_dev), stream));
 }
 
 void quantize_fp16_to_nvfp4_moe_native(
