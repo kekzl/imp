@@ -124,8 +124,8 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
     // Allocate 2x n_heads to fit both. Non-GDN SSM only uses 1x (dt projection).
     size_t dt_multiplier = has_gdn_ ? 2 : 1;
     ssm_dt_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, n_heads * dt_multiplier,
-                                        align256(static_cast<size_t>(max_tokens) * n_heads * dt_multiplier *
-                                                 es));
+                                        has_gdn_ ? exec_gdn_dt_bytes(max_tokens, n_heads, es)
+                                                 : align256(static_cast<size_t>(max_tokens) * n_heads * es));
     // Output buffer for the fused GDN input projection (4-way: ssm_in + gdn_gate +
     // gdn_alpha + gdn_beta concatenated along N). Only sized on has_gdn_ models.
     int fused_total_out = conv_channels + inner + 2 * n_heads;

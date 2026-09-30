@@ -652,24 +652,9 @@ __global__ void gdn_scan_reference_kernel(
         float k_sq = (d < SS) ? s_k[d] * s_k[d] : 0.0f;
         float q_sq = (d < SS) ? s_q[d] * s_q[d] : 0.0f;
 
-        s_reduce[d] = k_sq;
-        __syncthreads();
-        for (int stride = HD / 2; stride > 0; stride >>= 1) {
-            if (d < stride)
-                s_reduce[d] += s_reduce[d + stride];
-            __syncthreads();
-        }
         // PyTorch-style L2 norm (see note in fused kernel above).
-        float k_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
-
-        s_reduce[d] = q_sq;
-        __syncthreads();
-        for (int stride = HD / 2; stride > 0; stride >>= 1) {
-            if (d < stride)
-                s_reduce[d] += s_reduce[d + stride];
-            __syncthreads();
-        }
-        float q_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
+        float k_inv = rsqrtf(fmaxf(gdn_block_sum(s_reduce, k_sq, d, HD), 1e-12f));
+        float q_inv = rsqrtf(fmaxf(gdn_block_sum(s_reduce, q_sq, d, HD), 1e-12f));
 
         if (d < SS) {
             s_k[d] *= k_inv;
