@@ -729,7 +729,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                     double fs = 0, fss = 0;
                     for (auto v : fp32_tmp) {
                         fs += v;
-                        fss += v * v;
+                        fss += static_cast<double>(v) * v;
                     }
                     IMP_LOG_DEBUG("[DEBUG_FWD] L0_fp32_accum_pre: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f", fs,
                                   std::sqrt(fss), fp32_tmp[0], fp32_tmp[1], fp32_tmp[2]);
@@ -738,7 +738,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                     double rs = 0, rss = 0;
                     for (int i = 0; i < model_->config().d_model; i++) {
                         rs += fp32_tmp[off + i];
-                        rss += fp32_tmp[off + i] * fp32_tmp[off + i];
+                        rss += static_cast<double>(fp32_tmp[off + i]) * fp32_tmp[off + i];
                     }
                     IMP_LOG_DEBUG("[DEBUG_FWD] L0_fp32_accum_pre[%d]: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f",
                                   n - 1, rs, std::sqrt(rss), fp32_tmp[off], fp32_tmp[off + 1],
