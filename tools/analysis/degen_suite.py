@@ -679,11 +679,8 @@ class Suite:
             return
         same = first["content"] == again["content"] and bool(first["content"].strip())
         detail = f"cached={cached} first={first['content'][:60]!r} again={again['content'][:60]!r}"
-        if not cached[0]:
-            # Hybrid: the first send found no snapshot; the resend pairs its snapshot with KV
-            # blocks of the turn-1 forward (#2174).
-            self.xfail("multi-turn", name, same, "#2174", detail)
-            return
+        # Hard check also when the first send found no snapshot: a restored snapshot pairs only
+        # with the KV blocks its own forward wrote (#2174).
         self.record("multi-turn", name, same, detail)
 
     # -- per-sequence state under batched decode -----------------------------

@@ -2,6 +2,7 @@
 
 #include "core/cuda_raii.h"
 #include "memory/kv_cache.h"
+#include "memory/kv_chain_link.h"
 #include "memory/kv_host_spill.h"
 #include <cuda_runtime_api.h>
 #include <atomic>
@@ -127,6 +128,15 @@ public:
     //    `stream` (KV + scales; the key min/max metadata is NOT copied, the engine refuses the
     //    path when that pool is on). The hold drops in free_sequence().
     void register_partial_block(int seq_id, std::span<const int32_t> tokens, size_t key);
+
+    // Recurrent-snapshot pairing (#2174): a snapshot restores only with the KV blocks its
+    // forward attended to. adopt_chain binds seq_id's first n_full blocks (and, tail_key != 0,
+    // block n_full under tail_key) to their hashes, replacing another forward's binding, and
+    // returns the links; empty = a replaced binding is pinned, do not save the snapshot.
+    std::vector<KvChainLink> adopt_chain(int seq_id, std::span<const int32_t> tokens, int n_full,
+                                         size_t content_salt, size_t tail_key);
+    // True when every link is still bound: same block, same bind serial.
+    [[nodiscard]] bool chain_intact(std::span<const KvChainLink> chain) const;
     int hold_cached_block(size_t key, int seq_id);
     [[nodiscard]] bool clone_held_block(int seq_id, int block_index, cudaStream_t stream);
     void release_held_block(int seq_id);
@@ -450,6 +460,12 @@ private:
     // block_hash_to_id_ when a cached block is evicted.
     std::unordered_map<int, size_t> block_id_to_hash_;
 
+    // Serial of each block's current hash binding (bind_ bumps it); KvChainLink compares it.
+    std::unordered_map<int, uint64_t> block_bind_serial_;
+    uint64_t next_bind_serial_ = 1;
+    void bind_(size_t hash, int block_id);
+    void unbind_block_(int block_id);
+
     // LRU list of cached (unreferenced) block IDs. When a block's
     // ref_count drops to 0, it goes to the tail. Eviction pops from head.
     std::list<int> cached_blocks_lru_;
@@ -497,6 +513,7 @@ private:
 
     // Internal: allocate a fresh block, reclaiming cached blocks if needed.
     [[nodiscard]] BlockRef allocate_block_ref_with_eviction();
+    [[nodiscard]] BlockRef acquire_block_with_eviction_();
 
     // Residual FP16 cache state: single contiguous pool. Layout per element:
     //   pool[seq_slot, layer, k_or_v, ring_idx, kv_head, hd_elem]

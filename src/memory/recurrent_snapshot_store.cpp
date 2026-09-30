@@ -116,11 +116,12 @@ std::shared_ptr<const RecurrentSnapshotEntry> RecurrentSnapshotStore::find(size_
     return hit->second;
 }
 
-std::shared_ptr<RecurrentSnapshotEntry> RecurrentSnapshotStore::make_entry_(size_t key, int n_tokens,
-                                                                            void* buf, bool on_host) {
+std::shared_ptr<RecurrentSnapshotEntry> RecurrentSnapshotStore::make_entry_(
+    size_t key, int n_tokens, void* buf, bool on_host, std::vector<KvChainLink> kv_chain) {
     auto pool = pool_;
     return std::shared_ptr<RecurrentSnapshotEntry>(
-        new RecurrentSnapshotEntry{key, n_tokens, buf, on_host}, [pool](RecurrentSnapshotEntry* e) {
+        new RecurrentSnapshotEntry{key, n_tokens, buf, on_host, std::move(kv_chain)},
+        [pool](RecurrentSnapshotEntry* e) {
             {
                 std::lock_guard<std::mutex> lk(pool->mu);
                 if (!pool->shutdown) {
@@ -177,7 +178,7 @@ void RecurrentSnapshotStore::evict_device_lru_(cudaStream_t stream) {
         void* hbuf = acquire_host_buffer_();
         if (hbuf &&
             cudaMemcpyAsync(hbuf, dev->data, buf_bytes_, cudaMemcpyDeviceToHost, stream) == cudaSuccess) {
-            host_entries_[victim] = make_entry_(victim, dev->n_tokens, hbuf, /*on_host=*/true);
+            host_entries_[victim] = make_entry_(victim, dev->n_tokens, hbuf, /*on_host=*/true, dev->kv_chain);
             host_lru_.push_back(victim);
             host_lru_map_[victim] = std::prev(host_lru_.end());
         } else if (hbuf) {
@@ -222,20 +223,20 @@ bool RecurrentSnapshotStore::copy_in_(void* buf, const void* src, const void* si
 }
 
 bool RecurrentSnapshotStore::save(size_t key, int n_tokens, const void* src, cudaStream_t stream,
-                                  const void* sidecar_src) {
+                                  const void* sidecar_src, std::vector<KvChainLink> kv_chain) {
     if (!enabled() || src == nullptr || n_tokens <= 0 || (sidecar_bytes_ > 0 && sidecar_src == nullptr))
         return false;
     if (entries_.count(key) != 0 || host_entries_.count(key) != 0)
         return true;  // identical prefix already snapshotted (either tier)
     void* buf = acquire_buffer_(stream);
     if (!buf)
-        return save_to_host_(key, n_tokens, src, sidecar_src, stream);
+        return save_to_host_(key, n_tokens, src, sidecar_src, stream, std::move(kv_chain));
     if (!copy_in_(buf, src, sidecar_src, cudaMemcpyDeviceToDevice, stream)) {
         std::lock_guard<std::mutex> lk(pool_->mu);
         pool_->free_bufs.push_back(buf);
         return false;
     }
-    entries_[key] = make_entry_(key, n_tokens, buf, /*on_host=*/false);
+    entries_[key] = make_entry_(key, n_tokens, buf, /*on_host=*/false, std::move(kv_chain));
     lru_.push_back(key);
     lru_map_[key] = std::prev(lru_.end());
     return true;
@@ -247,7 +248,7 @@ bool RecurrentSnapshotStore::save(size_t key, int n_tokens, const void* src, cud
 // tier instead: the same one-slab D2H an eviction issues, and find() already serves host
 // entries.
 bool RecurrentSnapshotStore::save_to_host_(size_t key, int n_tokens, const void* src, const void* sidecar_src,
-                                          cudaStream_t stream) {
+                                           cudaStream_t stream, std::vector<KvChainLink> kv_chain) {
     void* hbuf = host_capacity_ > 0 ? acquire_host_buffer_() : nullptr;
     if (!hbuf) {
         ++dropped_saves_;
@@ -264,11 +265,24 @@ bool RecurrentSnapshotStore::save_to_host_(size_t key, int n_tokens, const void*
         pool_->free_host_bufs.push_back(hbuf);
         return false;
     }
-    host_entries_[key] = make_entry_(key, n_tokens, hbuf, /*on_host=*/true);
+    host_entries_[key] = make_entry_(key, n_tokens, hbuf, /*on_host=*/true, std::move(kv_chain));
     host_lru_.push_back(key);
     host_lru_map_[key] = std::prev(host_lru_.end());
     ++host_direct_saves_;
     return true;
+}
+
+void RecurrentSnapshotStore::erase(size_t key) {
+    if (auto lit = lru_map_.find(key); lit != lru_map_.end()) {
+        lru_.erase(lit->second);
+        lru_map_.erase(lit);
+    }
+    entries_.erase(key);
+    if (auto lit = host_lru_map_.find(key); lit != host_lru_map_.end()) {
+        host_lru_.erase(lit->second);
+        host_lru_map_.erase(lit);
+    }
+    host_entries_.erase(key);
 }
 
 void RecurrentSnapshotStore::clear() {
