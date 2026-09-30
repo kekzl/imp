@@ -77,6 +77,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | No video input | video prompts | images work; video needs a decoder this tree does not vendor | - |
 | No vision architecture registry | InternVL, Pixtral | tower allowlist covers Qwen3-VL-shaped encoders and Gemma; each needs a port | - |
 | **AWQ** SafeTensors checkpoints (`quant_method: awq`) load only as 4-bit GEMM with zero points, and not in 4-bit | AWQ SafeTensors loader | `bits=4 zero_point=true version=gemm` dequantizes to FP16 at upload (`src/quant/dequant_awq.cu`), so VRAM holds FP16 weights (4x the checkpoint); GEMV, Marlin, `bits != 4` or `zero_point=false` are refused at load with the detected bits/group_size/zero_point/version; use a GPTQ export (#2249), or an NVFP4 export for 4-bit weights in VRAM | #2196, #2205 |
+| Q8_0 dense prefill on INT8 IMMA (default) is 3-13 % slower than dequant + FP16 cuBLAS at >= 1536 prompt tokens, faster below | Q8_0 GGUF, long prompts | prefill time off/on (#2268): Qwen3-8B 1.265/1.321/1.043/0.971/0.923/0.906/0.916, Qwen3-4B 1.227/1.204/1.127/0.936/0.934/0.888/0.890 at 256/512/1024/1536/2048/4096/8192 tokens; M=2048 q_o: IMMA 361.44 us vs FP16 route 288.96 us (241.09 GEMM + 47.87 dequant), limiter stall_barrier at 1 CTA/SM; rejected: per-call M threshold (breaks #2152 bit-equality), BM 160/192 (#2268, #2282), 4-stage cp.async + ldmatrix (#2277), 2 CTAs/SM + mbarrier (#2324); IMMA KL mean 0.00082-0.00083 (#2256); long-prompt workloads: `gemm.q8_imma_enabled=false` | #2267 |
 
 ## Model-specific blockers
 
