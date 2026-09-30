@@ -79,17 +79,10 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     return GemmDispatchResult::Ok;
 }
 
-// Static registration. Slice 5 registers only the (M>1) prefill slot — the
-// (M==1) decode case always picks the gemv_nvfp4_kpar fast path (Slice 3).
-namespace {
-struct CutlassNvFP4Registration {
-    CutlassNvFP4Registration() {
-        GemmKernelRegistry::instance().register_kernel(
-            GemmStrategy{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false},
-            &cutlass_nvfp4_gemm_kernel);
-    }
-};
-static CutlassNvFP4Registration s_cutlass_nvfp4_registration;
-}  // namespace
+// Only the (M>1) prefill slot: (M==1) decode always picks the gemv_nvfp4_kpar fast path.
+void register_cutlass_nvfp4_gemm_kernels(GemmKernelRegistry& reg) {
+    reg.register_kernel(GemmStrategy{StorageTier::CUTLASS_NVFP4, QType::F16, /*m_is_one=*/false},
+                        &cutlass_nvfp4_gemm_kernel);
+}
 
 }  // namespace imp

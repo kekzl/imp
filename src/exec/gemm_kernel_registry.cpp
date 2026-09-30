@@ -9,6 +9,14 @@ namespace imp {
 // ---------------------------------------------------------------------------
 GemmKernelRegistry& GemmKernelRegistry::instance() {
     static GemmKernelRegistry registry;
+    // Magic static: runs once, thread-safe, before the first dispatch (#2317).
+    static const bool registered = [] {
+        register_generic_dequant_gemm_kernels(registry);
+        register_gguf_gemm_kernels(registry);
+        register_cutlass_nvfp4_gemm_kernels(registry);
+        return true;
+    }();
+    (void)registered;
     return registry;
 }
 
@@ -43,4 +51,12 @@ GemmDispatchResult GemmKernelRegistry::dispatch(const GemmStrategy& strategy,
 }
 
 std::size_t GemmKernelRegistry::size() const noexcept { return count_; }
+
+bool GemmKernelRegistry::contains(const GemmStrategy& strategy) const noexcept {
+    for (std::size_t i = 0; i < count_; ++i) {
+        if (entries_[i].strategy == strategy)
+            return true;
+    }
+    return false;
+}
 }  // namespace imp

@@ -631,16 +631,24 @@ TEST(SamplingTest, GreedyRowsMatchPerRowLaunch) {
     for (auto& t : logits) free_gpu_tensor(t);
 }
 
-// #2310: a failed row-sampler launch (grid dim 0 = cudaErrorInvalidConfiguration, non-sticky) is
-// returned, not only logged, and consumed so the next sampler starts clean.
+// Grid dim 0 is rejected per launch API: <<<>>>/cudaLaunchKernel -> cudaErrorInvalidConfiguration
+// (cuda_runtime_api.h \return), cudaLaunchKernelEx (pdl::launch) -> cuLaunchKernelEx
+// CUDA_ERROR_INVALID_VALUE (cuda.h \return) = cudaErrorInvalidValue. Both are non-sticky.
+static bool is_zero_grid_rejection(cudaError_t e) {
+    return e == cudaErrorInvalidConfiguration || e == cudaErrorInvalidValue;
+}
+
+// #2310: a failed row-sampler launch (grid dim 0, non-sticky) is returned, not only logged, and
+// consumed so the next sampler starts clean.
 TEST(SamplingTest, FailedRowLaunchReturnsStatus) {
     char* d_rows = nullptr;
     ASSERT_EQ(cudaMalloc(&d_rows, sizeof(TopkRowArgs) + sizeof(GreedyRowArgs)), cudaSuccess);
-    EXPECT_EQ(launch_greedy_rows(reinterpret_cast<GreedyRowArgs*>(d_rows), 0, 1024, nullptr),
-              cudaErrorInvalidConfiguration);
+    const cudaError_t greedy = launch_greedy_rows(reinterpret_cast<GreedyRowArgs*>(d_rows), 0, 1024, nullptr);
+    EXPECT_TRUE(is_zero_grid_rejection(greedy)) << cudaGetErrorName(greedy);
     EXPECT_EQ(cudaPeekAtLastError(), cudaSuccess);
-    EXPECT_EQ(launch_topk_topp_rows(reinterpret_cast<TopkRowArgs*>(d_rows), 0, 8, 1024, nullptr),
-              cudaErrorInvalidConfiguration);
+    const cudaError_t topk =
+        launch_topk_topp_rows(reinterpret_cast<TopkRowArgs*>(d_rows), 0, 8, 1024, nullptr);
+    EXPECT_TRUE(is_zero_grid_rejection(topk)) << cudaGetErrorName(topk);
     EXPECT_EQ(cudaPeekAtLastError(), cudaSuccess);
     cudaFree(d_rows);
 }

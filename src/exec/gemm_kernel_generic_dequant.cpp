@@ -55,15 +55,9 @@ static GemmDispatchResult generic_dequant_kernel(const GemmKernelArgs& args) {
 // Slice 8.5 adds one (FP16, NONE, m_is_one=false) catch-all entry. No M==1 GEMV catch-all
 // needed: M==1 is already covered by the per-qtype GGUF strategies and the FP16-cache
 // path; this catch-all is only for M>1 prefill dequant->cuBLAS last resort.
-namespace {
-struct GenericDequantRegistration {
-    GenericDequantRegistration() {
-        GemmKernelRegistry::instance().register_kernel(
-            GemmStrategy{StorageTier::FP16, QType::NONE, /*m_is_one=*/false},
-            &generic_dequant_kernel);
-    }
-};
-static GenericDequantRegistration s_generic_dequant_registration;
-}  // namespace
+void register_generic_dequant_gemm_kernels(GemmKernelRegistry& reg) {
+    reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::NONE, /*m_is_one=*/false},
+                        &generic_dequant_kernel);
+}
 
 }  // namespace imp

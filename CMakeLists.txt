@@ -830,6 +830,8 @@ if(IMP_BUILD_TESTS)
         # Pre-cudaDeviceReset hook registry (#1207): self-registration replaced a
         # hand-maintained call list, so the new failure mode is an EMPTY registry.
         tests/test_cuda_static_reset.cpp
+        # GemmKernelRegistry holds its 10 keys when linked from libimp.a (#2317).
+        tests/test_gemm_kernel_registry_link.cpp
         # GBNF grammar engine (parser + pushdown simulator + UTF-8 assembly).
         # CPU-only by construction — see the file header.
         tests/test_gbnf_grammar.cpp

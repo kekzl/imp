@@ -189,32 +189,26 @@ static GemmDispatchResult gguf_q3k_kernel(const GemmKernelArgs& args) {
         args, QType::Q3_K, /*mmvq_eligible=*/false, /*fused_gemv_eligible=*/false);
 }
 
-namespace {
-struct GgufRegistration {
-    GgufRegistration() {
-        auto& reg = GemmKernelRegistry::instance();
-        // Eight strategies, every small-M GGUF qtype reachable via mmvq or dp4a, all under
-        // (StorageTier::FP16, <qtype>, m_is_one=true). qtype is the discriminator; the handler
-        // picks the backend internally.
-        reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q4_K, /*m_is_one=*/true},
-                            &gguf_q4k_kernel);
-        reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q5_K, /*m_is_one=*/true},
-                            &gguf_q5k_kernel);
-        reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q5_1, /*m_is_one=*/true},
-                            &gguf_q5_1_kernel);
-        reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q8_0, /*m_is_one=*/true},
-                            &gguf_q8_0_kernel);
-        reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q6_K, /*m_is_one=*/true},
-                            &gguf_q6k_kernel);
-        reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q4_0, /*m_is_one=*/true},
-                            &gguf_q4_0_kernel);
-        reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q2_K, /*m_is_one=*/true},
-                            &gguf_q2k_kernel);
-        reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q3_K, /*m_is_one=*/true},
-                            &gguf_q3k_kernel);
-    }
-};
-static GgufRegistration s_gguf_registration;
-}  // namespace
+void register_gguf_gemm_kernels(GemmKernelRegistry& reg) {
+    // Eight strategies, every small-M GGUF qtype reachable via mmvq or dp4a, all under
+    // (StorageTier::FP16, <qtype>, m_is_one=true). qtype is the discriminator; the handler
+    // picks the backend internally.
+    reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q4_K, /*m_is_one=*/true},
+                        &gguf_q4k_kernel);
+    reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q5_K, /*m_is_one=*/true},
+                        &gguf_q5k_kernel);
+    reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q5_1, /*m_is_one=*/true},
+                        &gguf_q5_1_kernel);
+    reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q8_0, /*m_is_one=*/true},
+                        &gguf_q8_0_kernel);
+    reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q6_K, /*m_is_one=*/true},
+                        &gguf_q6k_kernel);
+    reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q4_0, /*m_is_one=*/true},
+                        &gguf_q4_0_kernel);
+    reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q2_K, /*m_is_one=*/true},
+                        &gguf_q2k_kernel);
+    reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q3_K, /*m_is_one=*/true},
+                        &gguf_q3k_kernel);
+}
 
 }  // namespace imp

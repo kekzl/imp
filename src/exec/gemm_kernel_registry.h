@@ -4,8 +4,11 @@
 //   {FP16, NONE, false}          generic dequant catch-all (M>1, uncached weight)
 //   {FP16, <gguf qtype>, true}   GGUF small-M (mmvq/dp4a/fused gemv), 8 qtypes
 //   {CUTLASS_NVFP4, F16, false}  CUTLASS NVFP4 prefill GEMM
-// Every key has one producer and vice versa; RegistryHoldsExactlyTheProducedKeys pins the
-// count at 10. A new tier registers here only together with its dispatch site.
+// Every key has one producer and vice versa; GemmKernelRegistryLink.HoldsExactlyTheProducedKeys
+// (test-core) pins the 10 keys. A new tier registers here only together with its dispatch site.
+// Registration is explicit: instance() calls the register_*_gemm_kernels functions below once.
+// No static registrars: a TU reachable only through its static initializer is dropped from
+// libimp.a by the linker (#2317).
 
 #include "core/storage_tier.h"
 #include "core/tensor.h"
@@ -104,8 +107,8 @@ enum class GemmDispatchResult {
 // Per-kernel function signature.
 using GemmKernelFn = GemmDispatchResult (*)(const GemmKernelArgs& args);
 
-// Registry singleton: register_kernel populates the table at static-init time (each
-// tier's .cu calls it via a constructor attribute or static-init idiom). dispatch is the
+// Registry singleton: instance() fills the table on first use via the register_*_gemm_kernels
+// functions (one per kernel TU, declared below). dispatch is the
 // hot-path entry: linear scan over the small table to the matching kernel.
 class GemmKernelRegistry {
 public:
@@ -122,8 +125,11 @@ public:
     GemmDispatchResult dispatch(const GemmStrategy& strategy, const GemmKernelArgs& args) const;
 
     // Diagnostic: returns the number of registered strategies. Useful for
-    // tests asserting that the static registration ran.
+    // tests asserting that the builtin registration ran.
     std::size_t size() const noexcept;
+
+    // True when a handler is registered for exactly `strategy`. Does not invoke it (no CUDA).
+    [[nodiscard]] bool contains(const GemmStrategy& strategy) const noexcept;
 
 private:
     GemmKernelRegistry() = default;
@@ -142,5 +148,11 @@ private:
     Entry entries_[16] = {};
     std::size_t count_ = 0;
 };
+
+// Per-TU registration, called once from GemmKernelRegistry::instance(). The call is the
+// link-time reference that keeps each kernel TU in every binary linking libimp.a.
+void register_generic_dequant_gemm_kernels(GemmKernelRegistry& reg);  // 1 key
+void register_gguf_gemm_kernels(GemmKernelRegistry& reg);             // 8 keys
+void register_cutlass_nvfp4_gemm_kernels(GemmKernelRegistry& reg);    // 1 key
 
 }  // namespace imp
