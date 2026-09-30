@@ -4,6 +4,7 @@
 #include "memory/weight_cache_file.h"
 #include "model/expert_placement.h"
 #include "model/weight_upload_traits.h"
+#include "model/layer_host_keep.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "model/gguf_loader.h"
 #include "memory/mem_account.h"
@@ -1229,6 +1230,23 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
     return true;
 }
 
+// Pass 1: non-expert per-layer weights. model.upload_host_layers_ (--gpu-layers) layers keep their
+// verbatim matmuls on host, pinned when the whole set fits host RAM (layer_host_keep.h).
+static bool upload_pass1_layers(Model& model, const UploadCtx& ctx) {
+    const bool pin_ok = host_pin_ram_available(host_keep_bytes(model, &dequant_gpu_supported));
+    auto pin = [&](size_t bytes) -> void* {
+        PinnedBuffer buf = pin_ok ? PinnedBuffer::acquire(cuda_host_pinned_allocator(), bytes) : PinnedBuffer();
+        void* p = buf.data();
+        if (p)
+            ctx.host_pinned_allocs.push_back(std::move(buf));
+        return p;
+    };
+    return upload_pass1_keeping_host(model, &dequant_gpu_supported, pin, [&](TransformerLayer& L, int i) {
+        return upload_layer_attention_weights(L, i, ctx) && upload_layer_ffn_weights(L, i, ctx) &&
+               upload_layer_ssm_weights(L, i, ctx);
+    });
+}
+
 // upload_expert_weights (Pass 2): handles packed 3D and per-expert 2D expert tensors.
 // Phase 1 computes per-layer expert-tensor byte cost (packed 3-D plus per-expert 2-D
 // NVFP4 llm-compressor tensors), filling layer_expert_bytes and returning total_expert_bytes.
@@ -1952,22 +1970,9 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // actual remaining VRAM via cudaMemGetInfo after Pass 1 and greedily uploads expert layers
     // until the budget is exhausted.
 
-    // --- Pass 1: Non-expert per-layer weights ---
-    for (int i = 0; i < n_layers(); ++i) {
-        TransformerLayer& L = layers_[i];
-
-        if (!upload_layer_attention_weights(L, i, ctx))
-            return false;
-        if (!upload_layer_ffn_weights(L, i, ctx))
-            return false;
-
-        // (Expert weights are uploaded in Pass 2 below)
-
-        if (!upload_layer_ssm_weights(L, i, ctx))
-            return false;
-
-        IMP_LOG_DEBUG("Layer %d/%d non-expert weights uploaded", i + 1, n_layers());
-    }
+    // --- Pass 1: Non-expert per-layer weights (expert weights are uploaded in Pass 2 below) ---
+    if (!upload_pass1_layers(*this, ctx))
+        return false;
 
     // Sync Pass 1 before measuring free VRAM for expert budget
     if (!sync_upload(stream, "pass-1"))

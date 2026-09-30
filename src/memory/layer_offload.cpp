@@ -128,13 +128,13 @@ bool LayerOffloadManager::init(Model* model, int gpu_layers) {
         IMP_LOG_INFO("Layer offloading: nothing to offload");
         return true;
     }
-    // Weight upload ignores gpu_layers (#2298): planned layers already sit in VRAM.
+    // Upload keeps planned layers on host for dense models only (layer_host_keep.h).
     if (max_layer_bytes == 0) {
         enabled_ = false;
         IMP_LOG_ERROR(
             "--gpu-layers %d: %d/%d layers (%.2f GiB) planned for host, but their weights are "
-            "device-resident: weight upload does not honor --gpu-layers yet (#2298). Drop "
-            "--gpu-layers or pick a smaller quant.",
+            "device-resident: upload keeps them on host only for dense models whose matmuls are "
+            "verbatim GGUF block quants (#2298). Drop --gpu-layers or pick a smaller quant.",
             gpu_layers, n_offloaded, n_layers, plan.planned_bytes / (1024.0 * 1024.0 * 1024.0));
         return false;
     }
@@ -151,6 +151,8 @@ bool LayerOffloadManager::init(Model* model, int gpu_layers) {
         slots_[s].loaded_layer = -1;
 
         err = slots_[s].ready_event.try_create(cudaEventDisableTiming);
+        if (err == cudaSuccess)
+            err = slots_[s].free_event.try_create(cudaEventDisableTiming);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("Failed to create offload event: %s", cudaGetErrorString(err));
             return false;
@@ -192,6 +194,10 @@ void LayerOffloadManager::upload_layer_to_slot(int layer, int slot_idx) {
     const auto& entries = layer_entries_[layer];
 
     char* dst_base = static_cast<char*>(slot.gpu_buf);
+
+    // Kernels of the slot's previous layer may still be queued on the compute stream: the
+    // overwrite waits for them (a never-recorded event is a no-op wait).
+    IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(slot.transfer_stream, slot.free_event, 0));
 
     cudaMemcpyAttributes attrs{};
     attrs.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
@@ -263,9 +269,14 @@ void LayerOffloadManager::prefetch_layer(int next_layer) {
     upload_layer_to_slot(next_layer, target);
 }
 
-void LayerOffloadManager::release_layer(int layer) {
+void LayerOffloadManager::release_layer(int layer, cudaStream_t compute_stream) {
     if (!enabled_ || !offloaded_[layer])
         return;
+
+    for (auto& slot : slots_) {
+        if (slot.loaded_layer == layer)
+            IMP_CUDA_CHECK_LOG(cudaEventRecord(slot.free_event, compute_stream));
+    }
 
     // Restore original host pointers so the model state remains consistent
     for (auto& e : layer_entries_[layer]) {

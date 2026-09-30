@@ -10,6 +10,7 @@
 #include "exec/weight_handle.h"
 #include "memory/vram_allocator.h"
 #include "model/model.h"
+#include "model/layer_host_keep.h"
 #include "model/model_config.h"
 #include "core/dispatch_policy.h"
 #include "core/config/lm_head_mode.h"
@@ -194,26 +195,10 @@ inline void deduct_budget(size_t& budget, size_t amount) {
     return true;
 }
 
+// Skips host-streamed weights (--gpu-layers, model/layer_host_keep.h).
 template <typename Fn>
 void for_each_dense_weight(const Model& model, const ModelConfig& cfg, Fn&& fn) {
-    for (int i = 0; i < cfg.n_layers; i++) {
-        const auto& L = model.layer(i);
-        fn(L.wq, L.wq.qtype);
-        fn(L.wk, L.wk.qtype);
-        fn(L.wv, L.wv.qtype);
-        fn(L.wo, L.wo.qtype);
-    }
-    for (int i = 0; i < cfg.n_layers; i++) {
-        const auto& L = model.layer(i);
-        fn(L.ssm_in, L.ssm_in.qtype);
-        fn(L.ssm_out, L.ssm_out.qtype);
-        fn(L.w_gate_shared, L.w_gate_shared.qtype);
-        fn(L.w_up_shared, L.w_up_shared.qtype);
-        fn(L.w_down_shared, L.w_down_shared.qtype);
-        fn(L.w_gate, L.w_gate.qtype);
-        fn(L.w_up, L.w_up.qtype);
-        fn(L.w_down, L.w_down.qtype);
-    }
+    imp::for_each_device_dense_weight(model, cfg.n_layers, std::forward<Fn>(fn));
 }
 
 }  // namespace imp::pre_dequant_internal

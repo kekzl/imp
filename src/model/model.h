@@ -122,6 +122,8 @@ public:
     TensorID out_proj_id = kInvalidTensorID;  // registry handle for LM head (Task 3.5)
     TensorID tok_emb_id = kInvalidTensorID;   // registry handle for token embedding
     std::vector<TransformerLayer> layers_;
+    // --gpu-layers plan read by upload_weights_gpu Pass 1: layer i's verbatim matmuls stay on host (#2298).
+    std::vector<bool> upload_host_layers_;
     std::unique_ptr<Tokenizer> tokenizer_;
 
     // MTP head storage, populated when model_mtp.safetensors sits next to the main weights

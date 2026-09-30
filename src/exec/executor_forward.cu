@@ -398,13 +398,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         // Layer skipping: skip layers in [skip_start, skip_end)
         if (skip_start >= 0 && skip_end > skip_start && i >= skip_start && i < skip_end)
             continue;
-        // Layer offloading: ensure weights are on GPU, prefetch next layer
-        if (offload_mgr_) {
-            offload_mgr_->ensure_layer(i, stream);
-            if (i + 1 < cfg.n_layers) {
-                offload_mgr_->prefetch_layer(i + 1);
-            }
-        }
+        offload_enter_(i, cfg.n_layers, stream);  // --gpu-layers: slot copy, prefetch next layer
 
         cur_layer_ = i;  // keys activation-calibration entries in gemm_via_handle_
 
@@ -596,10 +590,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         if (profile_active)
             IMP_CUDA_CHECK_LOG(cudaEventRecord(ev_ffn[i], stream));
 
-        // Release offloaded layer (restore host pointers)
-        if (offload_mgr_) {
-            offload_mgr_->release_layer(i);
-        }
+        offload_leave_(i, stream);  // --gpu-layers: host pointers back, slot free after this layer
     }
     cur_layer_ = -1;  // past the layers: the LM head is not a calibration target
 

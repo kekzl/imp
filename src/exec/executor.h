@@ -964,6 +964,11 @@ private:
     // (dp4a on original quant is fastest). Caller passes both the TensorID
     void gemm_via_handle_(TensorID id, const Tensor& input,
                           Tensor& output, const GemmContext& ctx);
+    // --gpu-layers: ensure_layer + prefetch / release_layer around layer i. Streamed layers rebind
+    // handle.source_data to the matmul's current data (slot, then host): gemm_via_handle_ reads it.
+    void offload_enter_(int layer, int n_layers, cudaStream_t stream);
+    void offload_leave_(int layer, cudaStream_t stream);
+    void rebind_streamed_sources_(int layer);
     // Source freed in Phase 4b: rebuild from a copy (executor_gemm_dispatch.cu).
     void released_source_gemm_(const WeightHandle& h, const Tensor& input, Tensor& output, const GemmContext& ctx);
     // Sibling-pair small-M dispatch: two weights consuming the SAME input,
