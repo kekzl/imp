@@ -17,6 +17,7 @@
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
+#include "runtime/decode_graph_ctx.h"
 #include "core/buffer.h"
 #include "runtime/batch.h"
 #include "runtime/think_stop_logic.h"
@@ -1558,11 +1559,12 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         // stale-topology kernel (illegal memory access). cudaGraphExecUpdate
         // absorbs same-topology re-captures; a kernel-choice change
         // re-instantiates.
-        const int bucketed_max_ctx = bucket_pow2(max_ctx);
-        if (bucketed_max_ctx > last_decode_max_ctx_per_graph_[graph_idx]) {
+        // runtime.deterministic: a new request set re-captures too, else it replays the
+        // previous request's high-water topology (split-K count) at its small contexts (#2182).
+        if (decode_graph_ctx_recapture(last_decode_max_ctx_per_graph_[graph_idx],
+                                       last_decode_batch_key_per_graph_[graph_idx], max_ctx,
+                                       decode_graph_batch_key_of(valid_decode), runtime_config_.runtime.deterministic))
             graph_runner.invalidate_for_update();
-            last_decode_max_ctx_per_graph_[graph_idx] = bucketed_max_ctx;
-        }
         // Recurrent (SSM/GDN) state pointers are baked into the capture as
         // kernel params. A replay for a request in a DIFFERENT state slot
         // would read/write the previous sequence's state — possible whenever

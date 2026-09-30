@@ -823,6 +823,8 @@ if(IMP_BUILD_TESTS)
         tests/test_prefill_pacing.cpp
         # Minimum prompt chunk (#2152): chunk-split and prefix-reuse caps, header-only.
         tests/test_prompt_tail.cpp
+        # Decode graph re-capture points (#2182): deterministic mode re-captures per request set.
+        tests/test_decode_graph_ctx.cpp
         # Public C enums vs their internal counterparts (#1206). A test file may
         # include both sides, which is the only place the two hand-maintained
         # copies of the arch/dtype numbering can be tied together.

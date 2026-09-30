@@ -25,6 +25,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Qwen3.8-Flash-Next (host-resident experts): the F16 GDN in/gate/out are freed after load; M>32 prefill runs their NVFP4 (in) / MXFP8 (gate, out, now "auto") copies, smaller M rebuild from those. Expert cache 290 -> 355 slots/layer, tg512 prose 66.81 -> 70.24 tok/s, 45k PPL windows +0.31 % / -0.21 %.
 
 ### Fixed
+- `runtime.deterministic`: the decode graph re-captures when the request set changes (`src/runtime/decode_graph_ctx.h`). The pow2 context high-water mark outlived requests, so a repeat request replayed the prior capture's split-K count (ctx 129) at every step (Refs #2182).
 - `--gpu-layers N < n_layers` fails engine load with the reason instead of a silent `nothing to offload` (#2291): Q8_0 layers were sized 0 B (block quant, now 205030400 B per Qwen3-8B layer) and upload leaves every layer in VRAM (#2298).
 - Forced `tool_choice` (named function) on gpt-oss (Harmony) and Gemma-4 is enforced instead of a 400 (#2279): envelope `to=functions.NAME` / `<|tool_call>call:NAME` + JSON args. Every 4xx logs one `HTTP <status> <method> <path>: <reason>` line.
 - Forced tool-call envelope: at most 2 whitespace chars before the open literal, then `<` is forced. Phi-4-reasoning-plus emitted tabs until `max_tokens` on degen_suite's forced `tool_choice` (#2273).
