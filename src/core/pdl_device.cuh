@@ -1,12 +1,15 @@
 #pragma once
 
-// Programmatic Dependent Launch, device half. pdl_wait()
-// (griddepcontrol.wait) must run before touching any global memory a
-// predecessor may still write; pdl_trigger() (griddepcontrol.launch_dependents)
-// sits after the last input read, before epilogue stores, and affects
-// scheduling only, never visibility. No-ops for a non-programmatic launch
-// and for the compute_120f fallback. Contract: every kernel registered via
-// pdl::enable() calls pdl_wait() first.
+// Programmatic Dependent Launch, device half. No-ops for a non-programmatic launch and for the
+// compute_120f fallback. Contract for every kernel registered via pdl::enable():
+// - before pdl_wait() (griddepcontrol.wait): global reads of immutable data (weights) and
+//   prefetch.global.L2 only. Any mutable buffer, even one written many kernels earlier, waits: a
+//   predecessor that triggers before its own wait (smallm_v2) lets this grid start while older grids
+//   still run, so "not the immediate predecessor" proves nothing (#2340).
+// - pdl_wait() returns after the predecessor grid completed and flushed, which transitively covers
+//   every earlier grid, since each registered grid waits before it completes.
+// - pdl_trigger() (griddepcontrol.launch_dependents) affects scheduling only, never visibility:
+//   given the rule above it may sit anywhere, also before this grid's own wait.
 
 namespace imp {
 

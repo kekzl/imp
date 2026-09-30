@@ -141,14 +141,12 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     int ch = blockIdx.x * blockDim.x + threadIdx.x;
     if (ch >= channels)
         return;
-    // Single-sequence k=4: state (this layer's conv one step earlier) and weights load before the
-    // PDL wait; only x_in is the predecessor's write. Trigger right after the wait so the scan
-    // launches during this kernel and prefetches its own state.
+    // Single-sequence k=4: weights load before the PDL wait, conv_state (mutable) only prefetches L2
+    // there (#2340). Trigger right after the wait so the scan launches during this kernel.
     const bool early = seq_slots == nullptr && kernel_size == 4;
-    float4 s_early{};
     uint2 w_early{};
     if (early) {
-        s_early = *reinterpret_cast<const float4*>(conv_state + static_cast<int64_t>(ch) * 4);
+        asm volatile("prefetch.global.L2 [%0];" ::"l"(conv_state + static_cast<int64_t>(ch) * 4));
         w_early = *reinterpret_cast<const uint2*>(weight + static_cast<int64_t>(ch) * 4);
     }
     pdl_wait();
@@ -165,7 +163,7 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
         // One 16B read and one 16B write per channel, instead of the shift loop's three loads and
         // four stores (the shift form was bandwidth-bound on instruction count). Explicit fmaf
         // chain = the contracted loop below.
-        float4 s = early ? s_early : *reinterpret_cast<const float4*>(state);
+        float4 s = *reinterpret_cast<const float4*>(state);
         s = make_float4(s.y, s.z, s.w, __half2float(x_in[ch]));
         *reinterpret_cast<float4*>(state) = s;
         const uint2 wraw = early ? w_early
