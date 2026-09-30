@@ -90,23 +90,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
                 k_sq += k * k;
                 q_sq += q * q;
             }
-            s_reduce[d] = k_sq;
-            __syncthreads();
-            for (int stride = HD / 2; stride > 0; stride >>= 1) {
-                if (d < stride)
-                    s_reduce[d] += s_reduce[d + stride];
-                __syncthreads();
-            }
-            const float k_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
-
-            s_reduce[d] = q_sq;
-            __syncthreads();
-            for (int stride = HD / 2; stride > 0; stride >>= 1) {
-                if (d < stride)
-                    s_reduce[d] += s_reduce[d + stride];
-                __syncthreads();
-            }
-            const float q_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
+            const float k_inv = rsqrtf(fmaxf(gdn_block_sum(s_reduce, k_sq, d, HD), 1e-12f));
+            const float q_inv = rsqrtf(fmaxf(gdn_block_sum(s_reduce, q_sq, d, HD), 1e-12f));
 
             if (d < SS) {
                 s_k_fp16[t_loc * SS + d] = __float2half(__half2float(s_k_fp16[t_loc * SS + d]) * k_inv);
@@ -374,23 +359,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
                 k_sq += k * k;
                 q_sq += q * q;
             }
-            s_reduce[d] = k_sq;
-            __syncthreads();
-            for (int stride = HD / 2; stride > 0; stride >>= 1) {
-                if (d < stride)
-                    s_reduce[d] += s_reduce[d + stride];
-                __syncthreads();
-            }
-            const float k_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
-
-            s_reduce[d] = q_sq;
-            __syncthreads();
-            for (int stride = HD / 2; stride > 0; stride >>= 1) {
-                if (d < stride)
-                    s_reduce[d] += s_reduce[d + stride];
-                __syncthreads();
-            }
-            const float q_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
+            const float k_inv = rsqrtf(fmaxf(gdn_block_sum(s_reduce, k_sq, d, HD), 1e-12f));
+            const float q_inv = rsqrtf(fmaxf(gdn_block_sum(s_reduce, q_sq, d, HD), 1e-12f));
 
             if (d < SS) {
                 s_k_fp16[t_loc * SS + d] = __float2half(__half2float(s_k_fp16[t_loc * SS + d]) * k_inv);

@@ -770,6 +770,8 @@ if(IMP_BUILD_TESTS)
         tests/test_sparse_attn_geometry.cpp
         tests/test_tensor.cpp
         tests/test_layer_offload_plan.cpp
+        # --gpu-layers Pass 1 host-keep decisions + pre_dequant host skip (#2298).
+        tests/test_layer_host_keep.cpp
         tests/test_tensor_kind_table.cpp
         tests/test_type_tables_golden.cpp
         tests/test_tensor_kind_matcher.cpp
@@ -823,6 +825,8 @@ if(IMP_BUILD_TESTS)
         tests/test_prefill_pacing.cpp
         # Minimum prompt chunk (#2152): chunk-split and prefix-reuse caps, header-only.
         tests/test_prompt_tail.cpp
+        # Decode graph re-capture points (#2182): deterministic mode re-captures per request set.
+        tests/test_decode_graph_ctx.cpp
         # Public C enums vs their internal counterparts (#1206). A test file may
         # include both sides, which is the only place the two hand-maintained
         # copies of the arch/dtype numbering can be tied together.

@@ -54,6 +54,7 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `warm_cache.enabled` | `true` | persist transformed weight uploads across restarts |
 | `warm_cache.dir` | `""` (`$XDG_CACHE_HOME/imp/warm` or `~/.cache/imp/warm`) | warm weight cache directory |
 | `suspend.device_reset` | `true` | `cudaDeviceReset()` on `/admin/suspend` so the process reads ~0 MiB |
+| `gemm.q8_imma_enabled` | `true` | Q8_0 dense prefill on INT8 IMMA; `false` = dequant + FP16 cuBLAS, prefill time 0.89-0.97x at >= 1536 prompt tokens, 1.04-1.32x below ([`LIMITATIONS.md`](LIMITATIONS.md), #2267) |
 | `suspend.host_ram_headroom_mb` | `2048` | host RAM the suspend snapshot must leave free |
 
 RoPE example, serving past the model's native window:

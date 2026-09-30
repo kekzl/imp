@@ -26,6 +26,7 @@ const GraphDemotionReason kAll[] = {
     GraphDemotionReason::ExpertsOnHost,
     GraphDemotionReason::PinnedSampleBufUnavailable,
     GraphDemotionReason::MoeDecodeCacheIncomplete,
+    GraphDemotionReason::LayerOffload,
     GraphDemotionReason::StreamingKvKvPressure,
 };
 
@@ -191,4 +192,15 @@ TEST(GraphEligibility, CommonPrefixTokens) {
     EXPECT_EQ(common_prefix_tokens({{1, 2, 3}, {1, 2, 4}, {1, 2, 3, 5}}), 2);
     EXPECT_EQ(common_prefix_tokens({{1, 2}, {1, 2}}), 2);
     EXPECT_EQ(common_prefix_tokens({{7, 2}, {1, 2}}), 0);
+}
+
+// #2298: any --gpu-layers >= 0 creates the offload manager, and its ensure_layer event waits
+// broke the warmup decode capture ("dependency created on uncaptured work in another stream").
+TEST(GraphEligibility, GpuLayersDemotesGraphs) {
+    EXPECT_FALSE(layer_offload_blocks_graphs(-1));
+    EXPECT_TRUE(layer_offload_blocks_graphs(0));
+    EXPECT_TRUE(layer_offload_blocks_graphs(20));
+    EXPECT_TRUE(layer_offload_blocks_graphs(36));  // manager exists, plan inactive: still no capture
+    EXPECT_STREQ(graph_demotion_reason_name(GraphDemotionReason::LayerOffload), "layer_offload");
+    EXPECT_FALSE(graph_demotion_is_mid_run(GraphDemotionReason::LayerOffload));
 }

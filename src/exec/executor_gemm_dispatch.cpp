@@ -265,6 +265,36 @@ bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
 // or tier-specific handlers. M=1 beta!=0 routes through weight_dispatch
 // (cuBLAS with beta). Undefined tier (budget-exhausted) reconstructs the
 // weight Tensor from the handle and uses the uncached dequant fallback.
+void GraphExecutor::offload_enter_(int layer, int n_layers, cudaStream_t stream) {
+    if (!offload_mgr_)
+        return;
+    offload_mgr_->ensure_layer(layer, stream);
+    if (offload_mgr_->is_offloaded(layer))
+        rebind_streamed_sources_(layer);
+    if (layer + 1 < n_layers)
+        offload_mgr_->prefetch_layer(layer + 1);
+}
+
+void GraphExecutor::offload_leave_(int layer, cudaStream_t stream) {
+    if (!offload_mgr_)
+        return;
+    offload_mgr_->release_layer(layer, stream);
+    if (offload_mgr_->is_offloaded(layer))
+        rebind_streamed_sources_(layer);
+}
+
+void GraphExecutor::rebind_streamed_sources_(int layer) {
+    // The for_each_streamable_matmul set (model/layer_host_keep.h) with its registry ids.
+    const auto& L = model_->layer(layer);
+    const std::pair<const Tensor*, TensorID> streamed[] = {
+        {&L.wq, L.wq_id},         {&L.wk, L.wk_id},     {&L.wv, L.wv_id},        {&L.wo, L.wo_id},
+        {&L.w_gate, L.w_gate_id}, {&L.w_up, L.w_up_id}, {&L.w_down, L.w_down_id},
+    };
+    for (const auto& [w, id] : streamed)
+        if (id != kInvalidTensorID)
+            registry_.handle(id).source_data = w->data;
+}
+
 void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                      Tensor& output, const GemmContext& ctx) {
     const auto& h = registry_.handle(id);

@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- `--gpu-layers N < n_layers`, dense GGUF: planned host layers keep their matmuls in pinned host RAM and stream per forward via `LayerOffloadManager` (slot reuse waits for the previous layer). Host layers skip pre_dequant caches. MoE, SSM/GDN, NVFP4-prequant refuse. A/B: `gemm.dense_weight_cache=false` (#2298).
 - Qwen3.8-Flash-Next MTP drafting (`speculative.mtp_k=1`, auto declines it): hc-stream draft layer, FP8 block-scale experts (2400 MiB head), captured verify over host-resident experts (56.7 -> 27-36 ms/verify). Draft logits vs the vLLM math: max |dlogit| 0.0135 (band 0.11). Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
 - AWQ SafeTensors checkpoints (`quant_method: awq`, `bits: 4`, `zero_point: true`, `version: gemm`) load: q/k/v/o/gate/up/down dequantize to FP16 at upload in AutoAWQ packing order (`src/quant/dequant_awq.cu`); VRAM holds FP16 weights. GEMV, Marlin, other bit widths and `zero_point: false` stay refused at load (#2205, #2196).
 - C API `imp_prefill_token(ctx, &tok)`: the token `imp_prefill`/`imp_prefill_with_params` sampled; `imp_decode_step` returns the next one. GreedyLockTest locks now start with it: Qwen3-8B-Q8_0 `Q: What is 17 + 25?` matches llama.cpp in all 31 tokens (#2251).
@@ -26,6 +27,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - `runtime.deterministic`: a prompt row of an MoE model no longer changes with its prefill chunk (FP32 row-order router GEMM, hd=512 prefill on the forward-scan FMHA). Gemma-4-26B-A4B NVFP4 first-token logprob at chunk 0/288/336: -0.0907 in all three (main -0.536/-0.408/-0.307); prefix resend probe 2/2 identical (#2167).
+- `runtime.deterministic`: the decode graph re-captures when the request set changes (`src/runtime/decode_graph_ctx.h`). The pow2 context high-water mark outlived requests, so a repeat request replayed the prior capture's split-K count (ctx 129) at every step (Refs #2182).
 - `--gpu-layers N < n_layers` fails engine load with the reason instead of a silent `nothing to offload` (#2291): Q8_0 layers were sized 0 B (block quant, now 205030400 B per Qwen3-8B layer) and upload leaves every layer in VRAM (#2298).
 - Forced `tool_choice` (named function) on gpt-oss (Harmony) and Gemma-4 is enforced instead of a 400 (#2279): envelope `to=functions.NAME` / `<|tool_call>call:NAME` + JSON args. Every 4xx logs one `HTTP <status> <method> <path>: <reason>` line.
 - Forced tool-call envelope: at most 2 whitespace chars before the open literal, then `<` is forced. Phi-4-reasoning-plus emitted tabs until `max_tokens` on degen_suite's forced `tool_choice` (#2273).

@@ -50,4 +50,18 @@ constexpr bool spec_batch_rr_active(const SpecBatchRrState& s) {
     return s.enabled && !s.recurrent && s.batch_rows > 1 && s.any_drafter;
 }
 
+// Hybrid partial-accept replay: device KV length to stage. Capture-mode FA2 derives
+// q_offset = kv_len - rows, so the graph (rows = chunk_pad) needs p0 + chunk_pad and the
+// eager replay (rows = matched + 1) needs p0 + 1 + matched; both give q_offset = p0.
+constexpr int spec_replay_kv_len(bool graph_replay, int p0, int chunk_pad, int matched) {
+    return graph_replay ? p0 + chunk_pad : p0 + 1 + matched;
+}
+
+// A hybrid verify chunk leaves the live recurrent slab at the last real row of the chunk
+// (linear) or of candidate group 0 (grouped). A request finishing at emit row j is only at
+// that row when j is it; otherwise the slab is ahead of the transcript.
+constexpr bool spec_hybrid_slab_at_row(bool grouped, int winner, int j, int K, int rows_per_cand) {
+    return grouped ? (winner == 0 && j == rows_per_cand - 1) : j == K;
+}
+
 }  // namespace imp

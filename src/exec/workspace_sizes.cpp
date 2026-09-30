@@ -189,6 +189,15 @@ int exec_max_weight_k(const ExecShape& shape) {
 
 int exec_ssm_z_cols(const ExecShape& shape) { return std::max(shape.ssm_inner_size, shape.attn_gate_cols); }
 
+size_t exec_gdn_beta_offset(int64_t rows, int n_heads, size_t es) {
+    const size_t alpha = static_cast<size_t>(rows) * static_cast<size_t>(n_heads) * es;
+    return (alpha + 255) & ~size_t(255);
+}
+
+size_t exec_gdn_dt_bytes(int64_t max_rows, int n_heads, size_t es) {
+    return 2 * exec_gdn_beta_offset(max_rows, n_heads, es);
+}
+
 int exec_attn_gate_cols(const Model& model) {
     const auto& cfg = model.config();
     const int q_cols = cfg.n_heads * cfg.head_dim;
