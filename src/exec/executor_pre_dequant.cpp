@@ -122,11 +122,14 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
                      storage_plan_.projected_vram_bytes / (1024.0 * 1024.0));
     }
 
-    // --- Phase 1: FP16 weight cache + fused KV + fused gate+up (extracted) ---
-    pre_dequant_phase1_fp16_cache_(cfg, budget, early_budget, stream);
-
-    // --- Phase 2: FP8 cache for uncached weights (extracted) ---
-    pre_dequant_phase2_fp8_cache_(cfg, budget, early_budget, stream);
+    // --- Phase 1: FP16 weight cache + fused KV + fused gate+up; Phase 2: FP8 cache for uncached
+    // weights. gemm.dense_weight_cache=false skips both: dense weights take their source route.
+    if (rcfg.gemm.dense_weight_cache) {
+        pre_dequant_phase1_fp16_cache_(cfg, budget, early_budget, stream);
+        pre_dequant_phase2_fp8_cache_(cfg, budget, early_budget, stream);
+    } else {
+        IMP_LOG_INFO("gemm.dense_weight_cache=false: pre_dequant phases 1-2 skipped");
+    }
 
     // Phases 1/2 decrement their own budget as they allocate. Charge exactly
     // what they spent against the shared budget — the untouched NVFP4

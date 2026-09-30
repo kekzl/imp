@@ -725,6 +725,9 @@ moe_imma_prefill     = true
 # Dense Q4_K via IMMA for weights with no FP16 cache: gemma-3-12b Q4_K_M kernel time
 # pp512 -5.2 %, pp4096 -1.2 %, PPL 9.9819 -> 9.9805. Dense Q6_K is not wired (slower).
 q4k_imma_prefill     = true
+# pre_dequant FP16 cache (with fused KV / gate+up) and FP8 cache for per-layer dense weights.
+# false: dense weights run their source route, as --gpu-layers host layers do (#2298 A/B control).
+dense_weight_cache   = true
 
 # There is no [gemma4] section. The one per-model Gemma-4 override left
 # (ModelConfig::Overrides::Gemma4::force_mmvq, src/model/model_config.h) is set
