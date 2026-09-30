@@ -15,6 +15,7 @@
 #include "memory/kv_cache.h"
 #include "core/tensor.h"
 #include "core/dispatch_policy.h"
+#include "core/process_diag.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -63,6 +64,39 @@ namespace imp {
     Tensor o4 = o.reshape(4, q4s);
     return fmha_sm120_fa2_prefill(q4, k4, v4, o4, scale, /*causal=*/true, sliding_window, softcap, stream,
                                   q_offset, /*fp16_qk=*/true, d_kv_len, static_cast<const half*>(sinks));
+}
+
+// hd=512 prefill whose rows do not depend on n or q_offset (#2167): the WMMA FMHA with a forward
+// KV scan, used by the single-shot and the chunk-continuation path alike.
+// attention.hd512_prefill: "fmha" always, "cublas" never, "auto" under runtime.deterministic.
+// False = not selected or declined.
+[[nodiscard]] static bool try_hd512_row_invariant_prefill(const DispatchPolicy& rcfg, int hd, const Tensor& q,
+                                                          const Tensor& k, const Tensor& v, Tensor& o, int n,
+                                                          int kv_len, int nh, int nkv, float scale,
+                                                          int sliding_window, float softcap, int q_offset,
+                                                          cudaStream_t stream, const void* sinks) {
+    const std::string& mode = rcfg.attention.hd512_prefill;
+    if (hd != 512 || !(mode == "fmha" || (mode == "auto" && process_diag_deterministic())))
+        return false;
+    int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
+    int64_t kv4s[4] = {1, (int64_t)kv_len, (int64_t)nkv, (int64_t)hd};
+    Tensor q4 = q.reshape(4, q4s);
+    Tensor k4 = k.reshape(4, kv4s);
+    Tensor v4 = v.reshape(4, kv4s);
+    Tensor o4 = o.reshape(4, q4s);
+    return fmha_sm120_prefill(q4, k4, v4, o4, scale, /*causal=*/true, sliding_window, softcap, stream,
+                              q_offset, static_cast<const half*>(sinks), /*fixed_kv_order=*/true);
+}
+
+// Capture-replay chunk: FA2 only (the S-matrix/FMHA fallbacks bound work from the baked ctx_len).
+// A decline means the engine-side eligibility check and the kernel disagree: throw, never fall back.
+static void fa2_prefill_for_replay(const DispatchPolicy& rcfg, const Tensor& q, const Tensor& k,
+                                   const Tensor& v, Tensor& o, int n, int kv_capacity, int nh, int nkv,
+                                   int hd, float scale, int sliding_window, float softcap, int q_offset,
+                                   cudaStream_t stream, const int* d_kv_len, const void* sinks) {
+    if (!try_fa2_fp16qk_prefill(rcfg, q, k, v, o, n, kv_capacity, nh, nkv, hd, scale, sliding_window, softcap,
+                                q_offset, stream, d_kv_len, sinks))
+        throw std::runtime_error("chunked_prefill: FA2 declined a capture-replay chunk");
 }
 
 // Fused QKV GEMV dispatch by quant type (all share identical signatures).
@@ -212,18 +246,18 @@ static void require_chunk_kv(const half* k, const half* v) {
         if (block_id < 0)
             continue;
         int toks_in_block = std::min(kv_bs, ctx_len - b * kv_bs);
-        size_t row_bytes = nkv * hd * sizeof(half);
+        size_t row_bytes = static_cast<size_t>(nkv * hd) * sizeof(half);
         half* k_src = static_cast<half*>(cache_dbg->k_ptr(kv_layer, block_id));
         half* v_src = static_cast<half*>(cache_dbg->v_ptr(kv_layer, block_id));
-        dbg_err = cudaMemcpy(k_flat + b * kv_bs * nkv * hd, k_src, toks_in_block * row_bytes,
-                             cudaMemcpyDeviceToDevice);
+        dbg_err = cudaMemcpy(k_flat + static_cast<ptrdiff_t>(b * kv_bs * nkv * hd), k_src,
+                             toks_in_block * row_bytes, cudaMemcpyDeviceToDevice);
         if (dbg_err == cudaSuccess)
-            dbg_err = cudaMemcpy(v_flat + b * kv_bs * nkv * hd, v_src, toks_in_block * row_bytes,
-                                 cudaMemcpyDeviceToDevice);
+            dbg_err = cudaMemcpy(v_flat + static_cast<ptrdiff_t>(b * kv_bs * nkv * hd), v_src,
+                                 toks_in_block * row_bytes, cudaMemcpyDeviceToDevice);
     }
     // Reshape for cuBLAS attention: Q[1,nh,hd], K[ctx_len,nkv,hd], V[ctx_len,nkv,hd]
-    int64_t k_shape[2] = {ctx_len, nkv * hd};
-    int64_t v_shape[2] = {ctx_len, nkv * hd};
+    int64_t k_shape[2] = {ctx_len, static_cast<int64_t>(nkv * hd)};
+    int64_t v_shape[2] = {ctx_len, static_cast<int64_t>(nkv * hd)};
     Tensor k_cont(k_flat, QType::F16, 2, k_shape, true);
     Tensor v_cont(v_flat, QType::F16, 2, v_shape, true);
     // n=1 cuBLAS attention: causal=true + q_offset=ctx_len-1 lets the single

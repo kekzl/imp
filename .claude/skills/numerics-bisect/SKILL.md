@@ -28,5 +28,6 @@ Order is fixed: ids, logprobs, hidden states, reference. Each rung is cheaper th
 ## Known causes of chunk-dependent rows
 
 - Kernel variant chosen by row count (sm120-cuda-expert numerics rules, #2152).
-- MoE NVFP4 activation tensor scale = per-expert batch absmax (quant-formats, #2167).
+- MoE router GEMM on cuBLAS picked its algorithm by n; now `gemm_gate_fp32_rows` (#2167). The NVFP4 act quantize is row-local.
+- hd=512 prefill attention (Gemma-4 global layers) on cuBLAS by n; `runtime.deterministic` runs the fixed-order FMHA (#2167).
 - Resend check: `tools/analysis/prefix_resend/prefix_resend_probe.py` (check-degeneration, from #2171).

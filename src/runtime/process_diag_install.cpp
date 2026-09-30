@@ -44,6 +44,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.graph_capture_mode = cfg.runtime.graph_capture_mode;
     d.prefill_graph_enabled = cfg.runtime.prefill_graph;
     d.deterministic_gemm = cfg.runtime.deterministic_gemm;
+    d.deterministic = cfg.runtime.deterministic;
     // "auto" resolves per-arch at engine init (init_resolve_quant_flags_ →
     // process_diag_set_cublas_fp16_acc); standalone tools without an engine
     // treat auto as off.

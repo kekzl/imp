@@ -26,7 +26,8 @@ int sm_major() {
 namespace imp {
 namespace {
 
-// Single-expert problem must be bit-exact vs quantize_fp16_to_nvfp4 (same two-level algorithm).
+// Single-expert problem must be bit-exact vs quantize_fp16_to_nvfp4_with_scale(1.0): the native
+// kernel uses a fixed activation tensor scale.
 TEST(QuantizeMoeNative, SingleExpertMatchesReference) {
     if (sm_major() < 12)
         GTEST_SKIP() << "SM120 required for HW FP4 conversion";
@@ -71,13 +72,13 @@ TEST(QuantizeMoeNative, SingleExpertMatchesReference) {
     cudaMemcpy(h_packed_got.data(), d_packed_e0, h_packed_got.size(), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_sf_got.data(),     d_sf_e0,     h_sf_got.size(),     cudaMemcpyDeviceToHost);
 
-    // Reference: single-tensor quantize_fp16_to_nvfp4.
+    // Reference: single-tensor quantize_fp16_to_nvfp4_with_scale, tensor_scale 1.
     // The reference produces linear row-major micro_scales [M, K/16] and
     // packed [M, K/2] — identical layout to what the native kernel targets.
     int64_t shape[2] = {M, K};
     Tensor src_t(d_src, QType::F16, 2, shape, true);
     NvFP4QuantResult ref;
-    quantize_fp16_to_nvfp4(src_t, ref, stream);
+    quantize_fp16_to_nvfp4_with_scale(src_t, 1.0f, ref, stream);  // fixed act scale (#2167)
     cudaStreamSynchronize(stream);
 
     std::vector<uint8_t> h_packed_ref(M * (K / 2));

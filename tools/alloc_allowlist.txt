@@ -24,7 +24,7 @@ src/compute/mmq_q8_imma.cu  # 2
 src/compute/mmq_q8_imma_scratch.cu  # 3
 src/compute/moe_routing.cu  # 12
 src/compute/mtp_forward.cu  # 15
-src/compute/quantize_fp16_nvfp4_moe_native.cu  # 6
+src/compute/quantize_fp16_nvfp4_moe_native.cu  # 4
 src/compute/sampling.cu  # 2
 src/compute/sampling_penalties.cu  # 2
 src/compute/sampling_topk_topp.cu  # 2

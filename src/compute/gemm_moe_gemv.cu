@@ -5,6 +5,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <mma.h>
 
 namespace imp {
 
@@ -34,11 +35,11 @@ __global__ void gemv_q6k_moe_decode_kernel(const uint8_t* __restrict__ packed_we
     const size_t row_bytes = (size_t)blocks_per_row * 210;
     const uint8_t* W_row = W + (size_t)row * row_bytes;
 
-    const half* x_ptr = x + expert_slot * x_stride;
+    const half* x_ptr = x + static_cast<ptrdiff_t>(expert_slot * x_stride);
     float sum = 0.0f;
 
     for (int b = 0; b < blocks_per_row; ++b) {
-        const uint8_t* bp = W_row + b * 210;
+        const uint8_t* bp = W_row + static_cast<ptrdiff_t>(b * 210);
         const uint8_t* ql = bp;
         const uint8_t* qh = bp + 128;
         const int8_t* sc = (const int8_t*)(bp + 192);
@@ -110,11 +111,11 @@ __global__ void gemv_q8_0_moe_decode_kernel(const uint8_t* __restrict__ packed_w
     const size_t row_bytes = (size_t)blocks_per_row * 34;
     const uint8_t* W_row = W + (size_t)row * row_bytes;
 
-    const half* x_ptr = x + expert_slot * x_stride;
+    const half* x_ptr = x + static_cast<ptrdiff_t>(expert_slot * x_stride);
     float sum = 0.0f;
 
     for (int b = 0; b < blocks_per_row; ++b) {
-        const uint8_t* bp = W_row + b * 34;
+        const uint8_t* bp = W_row + static_cast<ptrdiff_t>(b * 34);
         float d = __half2float(*(const half*)bp);
         int8_t q = ((const int8_t*)(bp + 2))[lane];
         sum += d * (float)q * __half2float(x_ptr[b * 32 + lane]);
@@ -158,7 +159,7 @@ __global__ void gemv_f16_moe_decode_kernel(const half* __restrict__ packed_weigh
 
     const int expert_id = expert_indices[expert_slot];
     const half* W_row = packed_weights + (size_t)expert_id * expert_stride_elems + (size_t)row * K;
-    const half* x_ptr = x + expert_slot * x_stride;
+    const half* x_ptr = x + static_cast<ptrdiff_t>(expert_slot * x_stride);
 
     float sum = 0.0f;
     // half2 path when both row start and K allow it (K is a model dim: even).
@@ -258,7 +259,7 @@ __global__ void gemv_gate_fp32_fp32input_kernel(const half* __restrict__ W, cons
 
     for (int i = lane; i < K2; i += 32) {
         half2 w = W2[i];
-        sum += __half2float(w.x) * x[i * 2];
+        sum += __half2float(w.x) * x[static_cast<ptrdiff_t>(i * 2)];
         sum += __half2float(w.y) * x[i * 2 + 1];
     }
 
@@ -275,6 +276,77 @@ void gemv_gate_fp32_fp32input(const half* W, const float* x, float* y, int M, in
     gemv_gate_fp32_fp32input_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(W, x, y, M, K);
     IMP_CUDA_CHECK_LAUNCH();
 }
+
+// Router logits for n tokens: Y[n,M] = X[n,K] @ W[M,K]^T, FP32 out. WMMA f16 -> f32, K walked
+// in order from 0, no split-K: a token's logits never depend on the other rows in its batch
+// (#2167: cuBLAS picks its kernel by n). Tile 32 tokens x 128 experts x 32 K, 8 warps.
+namespace {
+namespace wmma = nvcuda::wmma;
+constexpr int kGateBT = 32, kGateBE = 128, kGateBK = 32;
+}
+
+__global__ void __launch_bounds__(256) gemm_gate_fp32_rows_kernel(const half* __restrict__ W,
+                                                                 const half* __restrict__ X,
+                                                                 float* __restrict__ Y, int n, int M, int K) {
+    __shared__ __align__(32) half Xs[kGateBT * kGateBK];
+    __shared__ __align__(32) half Ws[kGateBE * kGateBK];
+    __shared__ __align__(32) float Ys[kGateBT * kGateBE];
+    const int t0 = blockIdx.x * kGateBT;
+    const int e0 = blockIdx.y * kGateBE;
+    const int warp = threadIdx.x / 32;
+    const int tm = warp % 2;  // 16-token sub-tile
+    const int te = warp / 2;  // 32-expert sub-tile
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2];
+    wmma::fill_fragment(acc[0], 0.0f);
+    wmma::fill_fragment(acc[1], 0.0f);
+    for (int k0 = 0; k0 < K; k0 += kGateBK) {
+        for (int i = threadIdx.x; i < kGateBT * kGateBK; i += blockDim.x) {
+            const int r = i / kGateBK, c = i % kGateBK;
+            const bool ok = t0 + r < n && k0 + c < K;
+            Xs[i] = ok ? X[(size_t)(t0 + r) * K + k0 + c] : __float2half(0.0f);
+        }
+        for (int i = threadIdx.x; i < kGateBE * kGateBK; i += blockDim.x) {
+            const int r = i / kGateBK, c = i % kGateBK;
+            const bool ok = e0 + r < M && k0 + c < K;
+            Ws[i] = ok ? W[(size_t)(e0 + r) * K + k0 + c] : __float2half(0.0f);
+        }
+        __syncthreads();
+#pragma unroll
+        for (int kk = 0; kk < kGateBK; kk += 16) {
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a;
+            wmma::load_matrix_sync(a, Xs + static_cast<ptrdiff_t>(tm * 16 * kGateBK) + kk, kGateBK);
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b;
+                wmma::load_matrix_sync(b, Ws + static_cast<ptrdiff_t>((te * 32 + j * 16) * kGateBK) + kk,
+                                       kGateBK);
+                wmma::mma_sync(acc[j], a, b, acc[j]);
+            }
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int j = 0; j < 2; ++j)
+        wmma::store_matrix_sync(Ys + static_cast<ptrdiff_t>(tm * 16 * kGateBE) +
+                                    static_cast<ptrdiff_t>(te * 32) + static_cast<ptrdiff_t>(j * 16),
+                                acc[j], kGateBE, wmma::mem_row_major);
+    __syncthreads();
+    for (int i = threadIdx.x; i < kGateBT * kGateBE; i += blockDim.x) {
+        const int r = i / kGateBE, c = i % kGateBE;
+        if (t0 + r < n && e0 + c < M)
+            Y[(size_t)(t0 + r) * M + e0 + c] = Ys[i];
+    }
+}
+
+void gemm_gate_fp32_rows(const half* W, const half* X, float* Y, int n, int M, int K, cudaStream_t stream) {
+    if (n <= 0 || M <= 0)
+        return;
+    const dim3 grid(static_cast<unsigned>((n + kGateBT - 1) / kGateBT),
+                    static_cast<unsigned>((M + kGateBE - 1) / kGateBE));
+    gemm_gate_fp32_rows_kernel<<<grid, 256, 0, stream>>>(W, X, Y, n, M, K);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 
 // ---------------------------------------------------------------------------
 // Fused gate+up MoE GEMV (scalar FP16 variants — NOT dp4a, kept as-is)
@@ -314,11 +386,11 @@ __global__ void gemv_q6k_moe_gate_up_fused_kernel(const uint8_t* __restrict__ ga
     const size_t row_bytes = (size_t)blocks_per_row * 210;
     const uint8_t* W_row = W + (size_t)row * row_bytes;
 
-    const half* x_ptr = x + expert_slot * x_stride;
+    const half* x_ptr = x + static_cast<ptrdiff_t>(expert_slot * x_stride);
     float sum = 0.0f;
 
     for (int b = 0; b < blocks_per_row; ++b) {
-        const uint8_t* bp = W_row + b * 210;
+        const uint8_t* bp = W_row + static_cast<ptrdiff_t>(b * 210);
         const uint8_t* ql = bp;
         const uint8_t* qh = bp + 128;
         const int8_t* sc = (const int8_t*)(bp + 192);
@@ -400,11 +472,11 @@ __global__ void gemv_q8_0_moe_gate_up_fused_kernel(const uint8_t* __restrict__ g
     const size_t row_bytes = (size_t)blocks_per_row * 34;
     const uint8_t* W_row = W + (size_t)row * row_bytes;
 
-    const half* x_ptr = x + expert_slot * x_stride;
+    const half* x_ptr = x + static_cast<ptrdiff_t>(expert_slot * x_stride);
     float sum = 0.0f;
 
     for (int b = 0; b < blocks_per_row; ++b) {
-        const uint8_t* bp = W_row + b * 34;
+        const uint8_t* bp = W_row + static_cast<ptrdiff_t>(b * 34);
         float d = __half2float(*(const half*)bp);
         int8_t q = ((const int8_t*)(bp + 2))[lane];
         sum += d * (float)q * __half2float(x_ptr[b * 32 + lane]);

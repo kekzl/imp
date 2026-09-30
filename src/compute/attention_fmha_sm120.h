@@ -12,9 +12,10 @@ namespace imp {
 // otherwise. Q:[batch,seq_q,n_heads,hd] K,V:[batch,seq_kv,n_kv_heads,hd] O: same as Q.
 // sinks (gpt-oss #547): optional [n_heads] FP16, virtual extra logit column with no V
 // contribution, folded into online-softmax init (m=sink, l=1). nullptr = off.
+// fixed_kv_order: forward KV scan for every Q tile; a row's bits then do not depend on its tile.
 [[nodiscard]] bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                         bool causal, int sliding_window, float softcap, cudaStream_t stream,
-                        int q_offset = 0, const half* sinks = nullptr);
+                        int q_offset = 0, const half* sinks = nullptr, bool fixed_kv_order = false);
 
 // FP8 variant: QK^T computed in FP8 E4M3 (m16n8k32) for 2x score throughput.
 // Q,K converted to FP8 on-the-fly in shared memory. PV stays FP16.

@@ -64,6 +64,11 @@ void gemv_q8_0(const void* W, const half* x, half* y, int M, int K, cudaStream_t
 // Designed for MoE gate logits (small M, large K). Replaces cuBLAS + FP16→FP32 cast.
 void gemv_gate_fp32(const half* W, const half* x, float* y, int M, int K, cudaStream_t stream = nullptr);
 
+// Router logits for n rows, FP32 out: Y[n,M] = X[n,K] @ W[M,K]^T. A row's bits do not depend on
+// n or on the other rows (fixed per-row reduction order, #2167). K must be even.
+void gemm_gate_fp32_rows(const half* W, const half* X, float* Y, int n, int M, int K,
+                         cudaStream_t stream = nullptr);
+
 // FP32-input variant: avoids FP16 truncation of router input (Gemma-4 MoE precision).
 void gemv_gate_fp32_fp32input(const half* W, const float* x, float* y, int M, int K,
                               cudaStream_t stream = nullptr);
