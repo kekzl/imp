@@ -354,7 +354,9 @@ def main():
     # tall tiles (#2267, measured slower than BM=128).
     # 1172 -> 1174: SamplingTest.FailedRowLaunchReturnsStatus, StaleErrorDoesNotFailSampler (test-compute,
     # GPU): sampler launch status, stale error cleared (#2310); needs a card.
-    PINNED = 1174
+    # 1174 -> 1181: MmqQ8Imma.NewVsLegacy* x7 (test-quant, GPU): 2-CTA/SM mbarrier Q8 IMMA kernel vs the
+    # legacy kernel, M 1..2048 (#2267); needs a card.
+    PINNED = 1181
 
     text = CMAKE.read_text()
     mods = module_sources(text)

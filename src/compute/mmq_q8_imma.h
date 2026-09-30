@@ -52,6 +52,9 @@ namespace imp {
 
 // Free cached weight planes + activation scratch (tests / teardown).
 void mmq_q8_imma_release_all();
+// Tests / imp-bench only: true = Q8_0 plane GEMMs run the pre-#2267e kernel (A/B reference).
+// Process-global, default false; the CUDA static-state reset clears it.
+void mmq_q8_imma_set_legacy_kernel(bool legacy);
 
 // Per-weight prefill cache VRAM budget (Q8_0 SoA planes), taken lazily on
 // first prefill. Uncharged planes grew into whatever KV pool left free, making the spill

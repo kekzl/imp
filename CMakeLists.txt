@@ -310,6 +310,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/mmq_q8_imma_q5k.cu
     src/compute/mmq_q8_imma_q6k.cu
     src/compute/mmq_q8_imma_q51.cu
+    src/compute/mmq_q8_imma_mbar.cu
     src/compute/moe_routing_permute.cu
     src/compute/softmax.cu
     src/compute/regex_constrain.cu
@@ -573,6 +574,7 @@ set_source_files_properties(
     src/compute/mmq_q8_imma_q51.cu
     src/compute/mmq_q8_imma_q5k.cu
     src/compute/mmq_q8_imma_q6k.cu
+    src/compute/mmq_q8_imma_mbar.cu
     PROPERTIES COMPILE_OPTIONS "-rdc=true")
 # Moved from nvcc (host pass -std=c++23: no FMA contraction); g++ -march=x86-64-v3 contracted 6 sites here (#2209).
 set_source_files_properties(
@@ -1142,6 +1144,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mmq_q4k_imma_tile_bench.cu
         tests/test_mmq_q4k_imma_gemm.cu
         tests/test_mmq_q8_imma.cu
+        tests/test_mmq_q8_imma_mbar.cu
         tests/test_mmq_q8_imma_q5k.cu
         tests/test_mmq_q8_imma_q6k.cu
         tests/test_weight_dispatch.cu

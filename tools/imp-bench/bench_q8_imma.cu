@@ -1,5 +1,5 @@
 // #2267: Q8_0 prefill GEMM per shape: dequant -> FP16-acc cuBLAS (the gemm.q8_imma_enabled=false
-// route) against the IMMA kernel (BM=128). Shapes: Qwen3-8B and Qwen3-4B projections.
+// route) against the IMMA kernel and the legacy IMMA kernel (#2267e A/B). Shapes: Qwen3-8B and Qwen3-4B.
 // Output: one `q8imma` line per (shape, M) and one `layer` line per (model, M), times in ms.
 #include "compute/gemm.h"
 #include "compute/mmq_q8_imma.h"
@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <vector>
@@ -38,7 +39,7 @@ constexpr Q8Shape kShapes[] = {
     {"Qwen3-4B", "down", 2560, 9728, 1},
 };
 constexpr int kRows[] = {256, 512, 1024, 1536, 2048, 4096, 8192};
-constexpr int kVariants = 2;  // 0 = off route, 1 = IMMA
+constexpr int kVariants = 3;  // 0 = off route, 1 = IMMA, 2 = legacy IMMA kernel (#2267e A/B)
 constexpr int kWarmup = 3;
 constexpr int kIters = 10;
 constexpr int kRepeats = 5;
@@ -63,7 +64,7 @@ struct Bufs {
     __half* deq = nullptr;
 };
 
-// One call of the variant: 0 = dequant + cuBLAS, 1 = IMMA. False = IMMA declined.
+// One call of the variant: 0 = dequant + cuBLAS, 1 = IMMA, 2 = legacy IMMA kernel. False = IMMA declined.
 bool run_variant(int v, const Bufs& b, int M, int N, int K) {
     if (v == 0) {
         dequant_gpu(b.w, b.deq, QType::Q8_0, N, K, nullptr);
@@ -145,7 +146,14 @@ bool bench_q8_imma() {
     // layer_ms[model][m][variant]
     double layer_ms[2][sizeof(kRows) / sizeof(kRows[0])][kVariants] = {};
     bool all_measured = ok;
+    // ncu filter (#2267e): IMP_Q8IMMA_MODEL, IMP_Q8IMMA_SHAPE, IMP_Q8IMMA_M; unset = every shape and M.
+    const char* f_model = std::getenv("IMP_Q8IMMA_MODEL");
+    const char* f_shape = std::getenv("IMP_Q8IMMA_SHAPE");
+    const int f_m = std::getenv("IMP_Q8IMMA_M") != nullptr ? std::atoi(std::getenv("IMP_Q8IMMA_M")) : 0;
     for (const auto& s : kShapes) {
+        if ((f_model != nullptr && std::strcmp(f_model, s.model) != 0) ||
+            (f_shape != nullptr && std::strcmp(f_shape, s.name) != 0))
+            continue;
         std::vector<uint8_t> hw;
         fill_q8(hw, s.N, s.K, static_cast<unsigned>(s.N * 31 + s.K));
         if (!ok || cudaMalloc(&b.w, hw.size()) != cudaSuccess ||
@@ -156,14 +164,17 @@ bool bench_q8_imma() {
         const int mi = std::strcmp(s.model, "Qwen3-8B") == 0 ? 0 : 1;
         for (size_t r = 0; r < sizeof(kRows) / sizeof(kRows[0]); ++r) {
             const int M = kRows[r];
+            if (f_m > 0 && M != f_m) continue;
             float t[kVariants];
             for (int v = 0; v < kVariants; ++v) {
+                mmq_q8_imma_set_legacy_kernel(v == 2);
                 t[v] = time_variant(v, b, M, s.N, s.K);
                 all_measured = all_measured && t[v] > 0.0f;
                 layer_ms[mi][r][v] += static_cast<double>(t[v]) * s.per_layer;
             }
-            printf("q8imma model=%s shape=%s M=%d N=%d K=%d off=%.4f imma=%.4f\n", s.model, s.name, M, s.N,
-                   s.K, t[0], t[1]);
+            mmq_q8_imma_set_legacy_kernel(false);
+            printf("q8imma model=%s shape=%s M=%d N=%d K=%d off=%.4f imma=%.4f legacy=%.4f\n", s.model,
+                   s.name, M, s.N, s.K, t[0], t[1], t[2]);
         }
         // Planes are keyed by weight pointer: keep every weight alive so no pointer is reused.
         weights.push_back(b.w);
@@ -175,8 +186,8 @@ bool bench_q8_imma() {
     for (int mi = 0; mi < 2; ++mi)
         for (size_t r = 0; r < sizeof(kRows) / sizeof(kRows[0]); ++r) {
             const double* l = layer_ms[mi][r];
-            printf("layer model=%s M=%d off=%.4f imma=%.4f\n", mi == 0 ? "Qwen3-8B" : "Qwen3-4B", kRows[r],
-                   l[0], l[1]);
+            printf("layer model=%s M=%d off=%.4f imma=%.4f legacy=%.4f\n", mi == 0 ? "Qwen3-8B" : "Qwen3-4B",
+                   kRows[r], l[0], l[1], l[2]);
         }
     cudaFree(b.x);
     cudaFree(b.out);

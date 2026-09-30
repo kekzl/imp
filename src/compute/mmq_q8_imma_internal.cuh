@@ -84,6 +84,14 @@ __global__ void mmq_imma_q5k_raw_kernel(const int8_t* __restrict__ X_s8, const _
                                         __half* __restrict__ out, int M, int N, int K,
                                         const int32_t* __restrict__ expert_offsets, size_t w_stride_blocks);
 
+// Q8_0 plane kernel at 2 CTAs/SM (mmq_q8_imma_mbar.cu, #2267e); x_rowsum unused (pure alpha).
+template <int BM, bool BETA1, bool SPLITK>
+__global__ void mmq_imma_q8_mbar_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
+                                        const float* __restrict__ x_rowsum, const int8_t* __restrict__ W_s8,
+                                        const __half* __restrict__ w_sc, __half* __restrict__ out, int M, int N,
+                                        int K, const int32_t* __restrict__ expert_offsets, size_t w_stride,
+                                        size_t wsc_stride, float* __restrict__ split_out, int ks_per_split);
+
 // Q5_K raw kernel dynamic smem: A tile, qs + qh rows (32 B + 16 pad), 16-B headers, per-row A scale
 // and rowsum, (alpha, beta) pairs; kStages each.
 constexpr size_t q5k_smem_bytes(int BM) {

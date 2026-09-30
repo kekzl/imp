@@ -95,6 +95,7 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
     }
 }
 
+// Legacy (pre-#2267e) kernel; mmq_q8_imma_set_legacy_kernel(true) selects it over mmq_imma_q8_mbar_kernel.
 // out = alpha/beta-scaled IMMA over [BM,kBN] tiles, += when BETA1.
 // MoE: gridDim.z = ne, indexed via expert_offsets; dense passes offsets = nullptr (z=1).
 // SPLITK (dense-only): gridDim.z = K-split index; a single M-tile grid (N/kBN blocks) is too small to hide
@@ -326,6 +327,28 @@ __global__ void mmq_splitk_finalize_kernel(const float* __restrict__ split_out, 
 using RawImmaKernel = void (*)(const int8_t*, const __half*, const float*, const uint8_t*, __half*, int, int,
                                int, const int32_t*, size_t);
 
+using Q8ImmaKernel = void (*)(const int8_t*, const __half*, const float*, const int8_t*, const __half*,
+                              __half*, int, int, int, const int32_t*, size_t, size_t, float*, int);
+
+// Legacy-kernel switch (tests / imp-bench A/B); under g_imma_mtx, cleared by the static-state reset.
+bool g_imma_q8_legacy = false;
+
+// Q8_0 plane kernel for one variant: legacy, or the 2-CTA/SM kernel with the max-shared carveout (set once).
+template <int BM, bool BETA1, bool SPLITK>
+Q8ImmaKernel q8_imma_kernel() {
+    if (g_imma_q8_legacy) return mmq_imma_kernel<BM, BETA1, false, SPLITK>;
+    static bool carveout_set = false;
+    if (!carveout_set) {
+        carveout_set = true;
+        const cudaError_t err = cudaFuncSetAttribute(mmq_imma_q8_mbar_kernel<BM, BETA1, SPLITK>,
+                                                     cudaFuncAttributePreferredSharedMemoryCarveout,
+                                                     static_cast<int>(cudaSharedmemCarveoutMaxShared));
+        if (err != cudaSuccess)
+            IMP_LOG_WARN("mmq imma: smem carveout hint failed: %s", cudaGetErrorString(err));
+    }
+    return mmq_imma_q8_mbar_kernel<BM, BETA1, SPLITK>;
+}
+
 bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*/, const __half* x_f16,
                  __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
                  const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0,
@@ -413,10 +436,10 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
             const size_t slice = static_cast<size_t>(M) * N;
             if (used > 1 && imma_ensure_splitk(slice * used, capturing)) {
                 dim3 sgrid(n_tiles, 1, used);
-                mmq_imma_kernel<32, false, false, true>
-                    <<<sgrid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum,
-                                                     w.qs, w.sc, out_f16, M, N, K, nullptr, w_stride,
-                                                     wsc_stride, g_imma_splitk.buf, ks_per_split);
+                const Q8ImmaKernel ksplit = q8_imma_kernel<32, false, true>();
+                ksplit<<<sgrid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum,
+                                                       w.qs, w.sc, out_f16, M, N, K, nullptr, w_stride,
+                                                       wsc_stride, g_imma_splitk.buf, ks_per_split);
                 IMP_CUDA_CHECK_LAUNCH();
                 const int total = static_cast<int>(slice);
                 mmq_splitk_finalize_kernel<<<(total + 255) / 256, 256, 0, stream>>>(g_imma_splitk.buf, used,
@@ -436,19 +459,19 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
     // plane path = Q8_0 only since the raw-read kernels: pure-alpha (WB=false)
     if (small_m || dense_small_grid) {
         const dim3 g32(grid.x, (grid_m_rows + 31) / 32, ne);
-        mmq_imma_kernel<32, false, false>
-            <<<g32, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
-                                           out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
+        const Q8ImmaKernel k = q8_imma_kernel<32, false, false>();
+        k<<<g32, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
+                                        out_f16, M, N, K, d_offsets, w_stride, wsc_stride, nullptr, 0);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (beta == 1.0f) {
-        mmq_imma_kernel<128, true, false>
-            <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
-                                            out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
+        const Q8ImmaKernel k = q8_imma_kernel<128, true, false>();
+        k<<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
+                                         out_f16, M, N, K, d_offsets, w_stride, wsc_stride, nullptr, 0);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
-        mmq_imma_kernel<128, false, false>
-            <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
-                                            out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
+        const Q8ImmaKernel k = q8_imma_kernel<128, false, false>();
+        k<<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
+                                         out_f16, M, N, K, d_offsets, w_stride, wsc_stride, nullptr, 0);
         IMP_CUDA_CHECK_LAUNCH();
     }
     return true;
@@ -505,6 +528,11 @@ bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __h
     return ok;
 }
 
+void mmq_q8_imma_set_legacy_kernel(bool legacy) {
+    std::lock_guard<std::mutex> lk(g_imma_mtx);
+    g_imma_q8_legacy = legacy;
+}
+
 void mmq_q8_imma_release_all() {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
     // g_imma_splitk/g_imma_act are arena-owned since A7 step 8 (~Engine closes arena; only
@@ -533,7 +561,10 @@ namespace {
 // Weight planes (up to 8.6 GiB) are keyed by SOURCE POINTER: without a teardown call, a
 // second model reuses a recycled allocation and gets served the first model's weights.
 // Teardown runs the registered hooks (core/cuda_static_reset.h).
-void mmq_q8_imma_reset_static_cuda_state() { mmq_q8_imma_release_all(); }
+void mmq_q8_imma_reset_static_cuda_state() {
+    mmq_q8_imma_release_all();
+    mmq_q8_imma_set_legacy_kernel(false);
+}
 IMP_REGISTER_CUDA_STATIC_RESET(mmq_q8_imma_reset_static_cuda_state);
 }  // namespace
 
