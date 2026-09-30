@@ -718,6 +718,7 @@ cublas_fp16_acc      = auto
 # measured). Validated 2026-06-07 with teacher-forced PPL gates on
 # Qwen3-8B/30B-MoE/gemma-4-26B (neutral or better) and Qwen3.6-35B (+0.55%).
 # Q8_0 dense prefill GEMMs (Qwen3-8B Q8_0 pp512 +7% over fp16-acc cuBLAS).
+# >= 1536 prompt tokens: 3-13% slower than false (docs/LIMITATIONS.md, #2267).
 q8_imma_enabled      = true
 # Grouped MoE expert prefill (one launch over all experts). The big one:
 # Qwen3-30B-A3B +151% (ABOVE llama.cpp), gemma-4-26B +111%, Qwen3.6-35B +40%.
