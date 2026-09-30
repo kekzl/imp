@@ -57,6 +57,9 @@ public:
             return false;
         }
         err = cudaMemcpy(d_token_categories_, host, bytes, cudaMemcpyHostToDevice);
+        // Pageable H2D may return before the DMA lands; drain before a mask kernel reads it (#2275).
+        if (err == cudaSuccess)
+            err = cudaStreamSynchronize(nullptr);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("%s: failed to copy categories to device: %s", owner, cudaGetErrorString(err));
             return false;

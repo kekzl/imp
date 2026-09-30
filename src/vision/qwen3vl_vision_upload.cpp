@@ -94,6 +94,10 @@ std::expected<size_t, std::string> qwen3vl_upload_vision_tower(VisionModel& mode
 
     if (!ok)
         return std::unexpected(err);
+    // Pageable legacy-stream H2D may return before the DMA lands; the encoder reads these on
+    // a non-blocking stream, possibly on a worker thread (lazy commit). Drain once (#2275).
+    if (cudaStreamSynchronize(nullptr) != cudaSuccess)
+        return std::unexpected(std::string("vision tower upload did not complete"));
 
     for (const auto& p : pending) {
         p.slot->data = p.device;
