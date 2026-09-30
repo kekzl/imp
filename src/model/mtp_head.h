@@ -229,7 +229,8 @@ struct MtpHead {
 };
 
 // speculative.mtp_k=auto depth for this head: 0 = kMtpAutoK, < 0 = auto declines the head.
-// Qwen4Exp declines: decode 61.46 vs 61.94 tok/s spec off (k=1, 4 prompts x 3), head holds 2400 MiB VRAM.
+// Qwen4Exp declines: k=1 decodes 53.15 vs 65.31 tok/s k=0 (-18.6 %, 4 prompts x 3, #2272),
+// head holds 2400 MiB VRAM.
 inline constexpr int kMtpAutoDeclines = -1;
 inline int mtp_auto_k_cap(const MtpHead& head) {
     return head.layout == MtpLayout::Qwen4Exp ? kMtpAutoDeclines : 0;
