@@ -2,6 +2,7 @@
 #include "memory/vram_query.h"
 #include "memory/weight_snapshot.h"
 #include "memory/weight_cache_file.h"
+#include "model/host_expert_pin.h"
 #include "model/expert_placement.h"
 #include "model/weight_upload_traits.h"
 #include "model/layer_host_keep.h"
@@ -1461,6 +1462,8 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             host_layers, total_expert_bytes / (size_t{1024} * 1024), free_mem / (size_t{1024} * 1024));
     }
 
+    HostExpertPinner pinner(ctx.host_pinned_allocs);  // joins on every return path
+
     // Upload expert weights for each layer
     for (int i = 0; i < n_layers; ++i) {
         TransformerLayer& L = layers[i];
@@ -1820,24 +1823,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                 // Pinning is skipped only when the host cannot spare the pages.
                 if (!process_diag_moe_pin_host_experts() && !g_pin_host_experts_fits)
                     return;
-                PinnedBuffer pin = PinnedBuffer::acquire(cuda_host_pinned_allocator(), total, HostPinnedKind::Mapped);
-                if (pin.empty()) {
-                    // Correct but slow: the experts stay on the mmap and every
-                    // transfer pays the staging cost above.
-                    IMP_LOG_WARN(
-                        "Host NVFP4 experts: pinned alloc failed (%.2f MiB) — staying on mmap, "
-                        "H2D will be ~3x slower",
-                        total / (1024.0 * 1024.0));
-                    return;
-                }
-                char* dst = static_cast<char*>(pin.data());
-                for (Tensor& w : expert_vec) {
-                    const size_t bytes = w.nbytes();
-                    std::memcpy(dst, w.data, bytes);
-                    w.data = dst;
-                    dst += bytes;
-                }
-                ctx.host_pinned_allocs.push_back(std::move(pin));
+                pinner.pin(expert_vec, total);  // joined when upload_expert_weights returns
             };
             pin_host_nvfp4_experts(L.expert_w_gate);
             pin_host_nvfp4_experts(L.expert_w_up);

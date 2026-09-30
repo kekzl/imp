@@ -168,6 +168,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/arena.cpp
     src/memory/engine_arena.cpp
     src/memory/graph_slots.cpp
+    src/memory/host_task_pool.cpp
     src/memory/host_pinned.cpp
     src/memory/library_reserve_cache.cpp
     src/memory/block_pool.cpp
@@ -210,6 +211,7 @@ set(IMP_MODEL_SOURCES
     src/model/hf_fetch.cpp
     src/model/hf_fetch_repo.cpp
     src/model/weight_map.cpp
+    src/model/host_expert_pin.cpp
     src/model/weight_upload.cpp
     src/model/tokenizer.cpp
     src/model/fim.cpp
@@ -881,6 +883,8 @@ if(IMP_BUILD_TESTS)
         # once, never after a move — is ownership, not CUDA, so it belongs in the
         # lane CI actually runs.
         tests/test_host_pinned.cpp
+        # HostTaskPool: load-time worker threads, every task runs before wait() returns.
+        tests/test_host_task_pool.cpp
         # Arena sizing arithmetic (A7 step 4b). Pure and Model-free via ExecShape,
         # so the numbers the T2 arena is reserved from are pinned in the lane CI
         # actually runs.
