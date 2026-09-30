@@ -33,7 +33,7 @@ static_assert(enum_table::rows_cover_enumerators<QType, 256>(kQTypeRows),
 // Gaps and values past the last row resolve to kUnknownQType.
 constexpr auto kQTypeIndex = enum_table::index_rows<enum_table::index_size(kQTypeRows)>(kQTypeRows);
 
-const QTypeInfo& qtype_info(QType q) { return enum_table::lookup(kQTypeIndex, q, kUnknownQType); }
+const QTypeInfo& qtype_info(QType q) { return enum_table::lookup(kQTypeIndex, q, &kUnknownQType); }
 
 }  // namespace
 

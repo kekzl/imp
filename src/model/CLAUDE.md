@@ -24,7 +24,7 @@ GGUF and SafeTensors loading, the architecture registry, tensor-name mapping, up
 - `gguf_loader.cpp` / `safetensors_loader.cpp`: the two formats
 - `hf_config_loader.cpp`: `config.json` parsing, arch detection
 - `weight_map.cpp`, `tensor_kind_matcher.cpp`: tensor name -> role
-- `weight_upload.cu`: device placement, expert offload decisions
+- `weight_upload.cpp`: device placement, expert offload decisions
 - `expert_placement.h`: the pure predicate for a servable MoE placement
 
 ## Test

@@ -660,70 +660,6 @@ ImpError imp_generate(ImpContext ctx, const char* prompt, const ImpGenerateParam
     }
 }
 
-ImpError imp_tokenize(ImpModel model, const char* text, int32_t* tokens, int* n_tokens, int max_tokens) {
-    if (!model || !text || !tokens || !n_tokens || max_tokens <= 0) {
-        return IMP_ERROR_INVALID_ARG;
-    }
-
-    auto* tok = model->model ? model->model->tokenizer() : nullptr;
-    if (!tok || tok->vocab_size() == 0) {
-        *n_tokens = 0;
-        return IMP_ERROR_INVALID_MODEL;
-    }
-
-    try {
-        auto ids = tok->encode(text);
-        int count = static_cast<int>(ids.size());
-        if (count > max_tokens)
-            count = max_tokens;
-
-        for (int i = 0; i < count; i++) {
-            tokens[i] = ids[i];
-        }
-        *n_tokens = count;
-        return IMP_SUCCESS;
-    } catch (const std::bad_alloc&) {
-        return IMP_ERROR_OUT_OF_MEMORY;
-    } catch (const std::exception& e) {
-        IMP_LOG_ERROR("imp_tokenize: %s", e.what());
-        return IMP_ERROR_INTERNAL;
-    } catch (...) {
-        return IMP_ERROR_INTERNAL;
-    }
-}
-
-ImpError imp_detokenize(ImpModel model, const int32_t* tokens, int n_tokens, char* output_buf,
-                        size_t output_buf_size) {
-    if (!model || !tokens || !output_buf || output_buf_size == 0 || n_tokens < 0) {
-        return IMP_ERROR_INVALID_ARG;
-    }
-
-    auto* tok = model->model ? model->model->tokenizer() : nullptr;
-    if (!tok || tok->vocab_size() == 0) {
-        output_buf[0] = '\0';
-        return IMP_ERROR_INVALID_MODEL;
-    }
-
-    try {
-        std::vector<int32_t> ids(tokens, tokens + n_tokens);
-        std::string text = tok->decode(ids);
-
-        size_t copy_len = text.size();
-        if (copy_len >= output_buf_size)
-            copy_len = output_buf_size - 1;
-        std::memcpy(output_buf, text.data(), copy_len);
-        output_buf[copy_len] = '\0';
-        return IMP_SUCCESS;
-    } catch (const std::bad_alloc&) {
-        return IMP_ERROR_OUT_OF_MEMORY;
-    } catch (const std::exception& e) {
-        IMP_LOG_ERROR("imp_detokenize: %s", e.what());
-        return IMP_ERROR_INTERNAL;
-    } catch (...) {
-        return IMP_ERROR_INTERNAL;
-    }
-}
-
 ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_tokens,
                                  const ImpGenerateParams* params) {
     if (!ctx || !tokens || n_tokens <= 0) {
@@ -734,6 +670,7 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
         return IMP_ERROR_INTERNAL;
     }
 
+    ctx->prefill_token = -1;
     try {
         // If there is an existing active request, free its KV cache and mark
         // cancelled so the scheduler removes it from active_ on next schedule().
@@ -798,6 +735,7 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
         // After prefill, any tokens already in output_tokens are "consumed"
         // by the prefill path (the first decode token).
         ctx->consumed_output = req->output_tokens.size();
+        ctx->prefill_token = req->output_tokens.empty() ? -1 : req->output_tokens.front();
 
         return IMP_SUCCESS;
     } catch (const std::bad_alloc&) {
@@ -827,7 +765,8 @@ ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, dou
     *out_ppl = -1.0;
     try {
         // Fresh context so the prefill covers exactly this corpus.
-        imp_context_reset(ctx);
+        if (const ImpError r = imp_context_reset(ctx); r != IMP_SUCCESS)
+            return r;
         // Chunked-prefill-aware NLL: executor hidden_ only retains the most recent
         // chunk, so accumulate per-chunk instead of post-hoc (which silently scored
         // stale positions once corpus exceeded the resolved chunk size, default 512).
@@ -839,9 +778,11 @@ ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, dou
         // Do NOT null active_request before imp_context_reset: reset only releases
         // the KV/SSM slot while it still sees the request. Nulling first leaked the
         // KV sequence and GDN slot on every imp_perplexity call.
-        imp_context_reset(ctx);
+        const ImpError reset_err = imp_context_reset(ctx);
         if (e != IMP_SUCCESS)
             return e;
+        if (reset_err != IMP_SUCCESS)
+            return reset_err;
         if (!reduced || ppl < 0.0)
             return IMP_ERROR_INTERNAL;
         *out_ppl = ppl;
@@ -1013,7 +954,10 @@ ImpError imp_context_reset(ImpContext ctx) {
         // Sync GPU to ensure all async operations from the previous request complete
         // before resetting state. Without this, stale async graph loops or pending
         // kernel launches can corrupt the next request's data.
-        cudaDeviceSynchronize();
+        // Failure: the reset still runs, the call returns IMP_ERROR_CUDA.
+        const cudaError_t sync_err = cudaDeviceSynchronize();
+        if (sync_err != cudaSuccess)
+            IMP_LOG_ERROR("imp_context_reset: cudaDeviceSynchronize: %s", cudaGetErrorString(sync_err));
 
         // Invalidate cached CUDA graphs — stale graph captures from the previous
         // request can produce non-deterministic output if replayed for a new request.
@@ -1027,7 +971,7 @@ ImpError imp_context_reset(ImpContext ctx) {
         // Reset MTP-side KV cache + accuracy telemetry for a clean new session.
         ctx->engine->mtp_accuracy_reset();
 
-        return IMP_SUCCESS;
+        return sync_err == cudaSuccess ? IMP_SUCCESS : IMP_ERROR_CUDA;
     });
 }
 

@@ -1,6 +1,7 @@
 // Engine init phase: paged KV cache allocation. Declaration in engine.h.
 
 #include "runtime/engine.h"
+#include "runtime/engine_internal.h"
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
 #include "memory/vram_query.h"
@@ -176,7 +177,8 @@ bool Engine::init_kv_cache() {
         key.model_fingerprint = model_fingerprint_();
         key.nvfp4_decode_mode = config_.use_nvfp4_decode;
         key.fp8_prefill = config_.use_fp8_prefill;
-        cudaRuntimeGetVersion(&key.cuda_runtime_version);
+        // Failure keeps the default 0: matches no cache entry written by a real runtime.
+        IMP_CUDA_CHECK_LOG(cudaRuntimeGetVersion(&key.cuda_runtime_version));
         library_reserve_key_ = key;
         library_reserve_cache_path_ = path;
         bool remembered_found = false;
@@ -403,7 +405,8 @@ bool Engine::init_kv_cache() {
                                       : std::max(max_blocks, vram_budget.kv_max_blocks);
     if (per_block_total_bytes > 0) {
         size_t free_now = 0, total_now = 0;
-        vram_budget_mem_get_info(&free_now, &total_now);
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&free_now, &total_now);
         // IMMA prefill planes are still OUTSTANDING here (taken on each Q8_0
         // weight's first prefill, during warmup). Charging them here keeps the
         // residual pass from handing the pool bytes the next forward claims (#1899).
@@ -661,23 +664,9 @@ bool Engine::init_kv_cache() {
         int residual_n = rcfg.kv_cache.bitdecoding_residual_tokens;
         if (residual_n > 0 && config_.kv_cache_dtype == QType::NVFP4) {
             int max_seqs = config_.max_batch_size > 0 ? config_.max_batch_size : 1;
-            if (kv_manager_->enable_residual_buffer(max_seqs, residual_n, &vram_alloc_)) {
-                // Persistent batch→slot lookup buffer (graph-safe). [max_batch_size] ints.
-                size_t slot_bytes = static_cast<size_t>(max_seqs) * sizeof(int);
-                cudaMalloc(&d_kv_slot_buf_, slot_bytes);
-                std::vector<int> init_slots(max_seqs, -1);
-                cudaMemcpy(d_kv_slot_buf_, init_slots.data(), slot_bytes, cudaMemcpyHostToDevice);
-                d_kv_slot_last_uploaded_.assign(max_seqs, -1);
-                // Same treatment for the multi-sequence metadata (#1648): must
-                // be allocated ONCE, not per decode step - a captured
-                // forward_logits graph bakes the address and nothing invalidates it on reuse.
-                size_t meta_bytes = static_cast<size_t>(3) * max_seqs * sizeof(int);
-                if (cudaMalloc(&residual_meta_d_buf_, meta_bytes) == cudaSuccess) {
-                    residual_meta_capacity_ = max_seqs;
-                    std::vector<int> init_meta(3 * static_cast<size_t>(max_seqs), 0);
-                    cudaMemcpy(residual_meta_d_buf_, init_meta.data(), meta_bytes, cudaMemcpyHostToDevice);
-                }
-            }
+            if (kv_manager_->enable_residual_buffer(max_seqs, residual_n, &vram_alloc_))
+                engine_internal::alloc_residual_decode_buffers(max_seqs, d_kv_slot_buf_, d_kv_slot_last_uploaded_,
+                                                               residual_meta_d_buf_, residual_meta_capacity_);
         } else if (residual_n > 0) {
             IMP_LOG_INFO("kv_cache.bitdecoding_residual_tokens=%d ignored (only active with kv_cache_dtype=NVFP4)",
                          residual_n);
@@ -785,13 +774,14 @@ bool Engine::init_kv_cache() {
                     IMP_LOG_WARN("batched GDN decode: slot table alloc failed — staying single-sequence");
                     d_ssm_seq_slots_ = nullptr;
                 } else {
-                    cudaMemset(d_ssm_seq_slots_, 0, bytes);
+                    // Log only: the scheduler uploads the table before every batched step.
+                    IMP_CUDA_CHECK_LOG(cudaMemset(d_ssm_seq_slots_, 0, bytes));
                     h_ssm_seq_slots_.assign(static_cast<size_t>(config_.max_batch_size), 0);
                 }
             }
         }
 
-        // PLE conv rows live in the SSM slab tail (executor_ple.cu): no slab, no PLE state.
+        // PLE conv rows live in the SSM slab tail (executor_ple.cpp): no slab, no PLE state.
         if (const size_t ple = model_->ple_state_bytes();
             ple > 0 && (!ssm_state_ || ssm_state_->extra_bytes() < ple))
             throw std::runtime_error("PLE model without the per-slot conv rows in the SSM/GDN state slab");
@@ -868,7 +858,7 @@ bool Engine::init_kv_cache() {
         }
     }
 
-    cudaStreamSynchronize(stream_);
+    IMP_CUDA_CHECK_BOOL(cudaStreamSynchronize(stream_));
 
     // Coverage check: for prequant MoE, the nvfp4_moe decode cache is
     // all-or-nothing (mirrors executor_forward_moe.cu nvfp4_covers_layer). One
@@ -964,14 +954,12 @@ bool Engine::init_kv_cache() {
         h_pf_token_ids_ = PinnedBuffer::acquire(
             cuda_host_pinned_allocator(),
             static_cast<size_t>(config_.max_seq_len) * sizeof(int32_t));
-        if (cudaEventCreateWithFlags(&pf_staging_evt_, cudaEventDisableTiming) != cudaSuccess)
-            pf_staging_evt_ = nullptr;
+        (void)pf_staging_evt_.create(cudaEventDisableTiming);  // stays null on failure
         // The constrained pipeline's pinned landing for the sampled token and
         // its ready event: engine-lifetime, so a first json request does not
         // allocate while serving (I2 gate phase B counted the lazy acquire).
         cpipe_.h_token = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int32_t));
-        if (cudaEventCreateWithFlags(&cpipe_.ev, cudaEventDisableTiming) != cudaSuccess)
-            cpipe_.ev = nullptr;
+        (void)cpipe_.ev.create(cudaEventDisableTiming);  // stays null on failure
     }
 
     // Report memory

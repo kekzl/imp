@@ -25,7 +25,6 @@ using nvfp4_mt::ue4m3_scale_to_float;
 
 // Walk the tokens [first_tok, n_tok) of one block for this warp, TOK at a time.
 // Updates the unnormalised (m_w, l_w, o_reg).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HEAD_DIM, int TOK>
 __device__ __forceinline__ void nvfp4_block_multitok(
     const uint8_t* __restrict__ K_block, const uint8_t* __restrict__ V_block,
@@ -34,18 +33,21 @@ __device__ __forceinline__ void nvfp4_block_multitok(
     int lane_group, const half2* q_h2, float scale, float softcap, float& m_w, float& l_w, float* o_reg) {
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
     constexpr int PACK = ELEMS / 2;  // packed bytes per lane per token
-    const uint8_t* K_lane = K_block + kv_head * kv_head_bytes + lane_offset / 2;
-    const uint8_t* V_lane = V_block + kv_head * kv_head_bytes + lane_offset / 2;
-    const uint8_t* K_sc_lane = K_sc_block + kv_head * sc_groups + lane_group;
-    const uint8_t* V_sc_lane = V_sc_block + kv_head * sc_groups + lane_group;
+    // #2218 bounded: kv_head * kv_head_bytes <= kMaxHeads * 128 = 2^19, kv_head * sc_groups <= kMaxHeads
+    // * 16 = 2^16 (model_limits.h:24; callers pass HEAD_DIM / 2, / 16; HEAD_DIM <= 256 by refusal :274).
+    // 2 * b < 2 * PACK = HEAD_DIM / 32 <= 8 (register array).
+    const uint8_t* K_lane = K_block + static_cast<ptrdiff_t>(kv_head * kv_head_bytes) + lane_offset / 2;
+    const uint8_t* V_lane = V_block + static_cast<ptrdiff_t>(kv_head * kv_head_bytes) + lane_offset / 2;
+    const uint8_t* K_sc_lane = K_sc_block + static_cast<ptrdiff_t>(kv_head * sc_groups) + lane_group;
+    const uint8_t* V_sc_lane = V_sc_block + static_cast<ptrdiff_t>(kv_head * sc_groups) + lane_group;
     for (int t = first_tok; t < n_tok; t += TOK) {
         uint32_t kw[TOK];
         uint8_t ks[TOK];
 #pragma unroll
         for (int i = 0; i < TOK; i++) {
             const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);  // clamped, masked below
-            kw[i] = load_packed<PACK>(K_lane + ti * kv_slot_stride);
-            ks[i] = __ldg(K_sc_lane + ti * sc_slot_stride);
+            kw[i] = load_packed<PACK>(K_lane + static_cast<int64_t>(ti) * kv_slot_stride);
+            ks[i] = __ldg(K_sc_lane + static_cast<int64_t>(ti) * sc_slot_stride);
         }
         float dot[TOK];
 #pragma unroll
@@ -88,8 +90,8 @@ __device__ __forceinline__ void nvfp4_block_multitok(
 #pragma unroll
         for (int i = 0; i < TOK; i++) {
             const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
-            vw[i] = load_packed<PACK>(V_lane + ti * kv_slot_stride);
-            vs[i] = __ldg(V_sc_lane + ti * sc_slot_stride);
+            vw[i] = load_packed<PACK>(V_lane + static_cast<int64_t>(ti) * kv_slot_stride);
+            vs[i] = __ldg(V_sc_lane + static_cast<int64_t>(ti) * sc_slot_stride);
         }
 #pragma unroll
         for (int e = 0; e < ELEMS; e++)
@@ -100,13 +102,12 @@ __device__ __forceinline__ void nvfp4_block_multitok(
 #pragma unroll
             for (int b = 0; b < PACK; b++) {
                 const float2 vf = __half22float2(fp4_pair_to_half2((vw[i] >> (8 * b)) & 0xFF));
-                o_reg[2 * b] += w * vf.x;
+                o_reg[static_cast<ptrdiff_t>(2 * b)] += w * vf.x;
                 o_reg[2 * b + 1] += w * vf.y;
             }
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 template <int HEAD_DIM>
 __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_nvfp4_multitok_kernel(

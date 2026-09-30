@@ -262,9 +262,9 @@ bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K, CutlassMxFP4We
     if (cudaMalloc(&d_sf, sf_bytes) != cudaSuccess ||
         cudaMalloc(&d_linear_sf, linear_sf_bytes) != cudaSuccess) {
         if (d_sf)
-            cudaFree(d_sf);
+            IMP_CUDA_CHECK_LOG(cudaFree(d_sf));
         if (d_linear_sf)
-            cudaFree(d_linear_sf);
+            IMP_CUDA_CHECK_LOG(cudaFree(d_linear_sf));
         return false;
     }
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));
@@ -305,7 +305,6 @@ __device__ __constant__ float kE2M1Table[16] = {
 
 // Dequant from split MXFP4 layout: [data(N×K/2) | scales(total_blocks)].
 // Used for alpha/beta FP16 dequant before MXFP4 registration.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void dequant_mxfp4_split_kernel(const uint8_t* __restrict__ data,    // [N × K/2] packed E2M1
                                            const uint8_t* __restrict__ scales,  // [total_blocks] UE8M0
                                            half* __restrict__ out,              // [N, K]
@@ -324,18 +323,19 @@ __global__ void dequant_mxfp4_split_kernel(const uint8_t* __restrict__ data,    
     memcpy(&scale, &fbits, sizeof(float));
 
     const uint8_t* block_data = data + blk_idx * 16;
-    int64_t out_base = static_cast<int64_t>(row) * K + blk * 32;
+    int64_t out_base = static_cast<int64_t>(row) * K + static_cast<int64_t>(blk) * 32;
     int64_t out_limit = static_cast<int64_t>(N) * K;
     if (out_base + 31 >= out_limit)
         return;
 
+    // #2218 bounded: i * 2 <= 30 (loop i < 16 literal)
     for (int i = 0; i < 16; i++) {
         uint8_t packed = block_data[i];
-        out[out_base + i * 2] = __float2half(kE2M1Table[packed & 0xF] * scale);
-        out[out_base + i * 2 + 1] = __float2half(kE2M1Table[(packed >> 4) & 0xF] * scale);
+        out[out_base + static_cast<ptrdiff_t>(i * 2)] = __float2half(kE2M1Table[packed & 0xF] * scale);
+        out[out_base + static_cast<ptrdiff_t>(i * 2) + 1] = __float2half(kE2M1Table[(packed >> 4) & 0xF] *
+                                                                         scale);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void dequant_mxfp4_to_fp16(const void* raw_mxfp4_data, int64_t N, int64_t K, void* dst_fp16,
                            cudaStream_t stream) {
@@ -415,7 +415,6 @@ __device__ __forceinline__ float ue8m0_to_float(uint8_t bits) {
 }
 
 // Each thread handles one micro-block of 32 elements (MXFP4 group size).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ input,
                                                    uint8_t* __restrict__ packed_out,
                                                    uint8_t* __restrict__ sf_out, int M, int K,
@@ -428,18 +427,20 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
 
     int row = mb_idx / K_groups;
     int k_group = mb_idx % K_groups;
-    int base = row * K + k_group * kMxSFVecSize;
+    const int64_t base = static_cast<int64_t>(row) * K + static_cast<int64_t>(k_group) * kMxSFVecSize;
 
     // Load 32 values via vectorized half2 loads and find absmax
     float vals[32];
     float local_absmax = 0.0f;
     const half2* src_h2 = reinterpret_cast<const half2*>(input + base);
+    // #2218 bounded: i * 2 <= 30 (loop i < 16 literal, float vals[32])
 #pragma unroll
     for (int i = 0; i < 16; i++) {
         half2 h2 = src_h2[i];
-        vals[i * 2] = __half2float(h2.x);
+        vals[static_cast<ptrdiff_t>(i * 2)] = __half2float(h2.x);
         vals[i * 2 + 1] = __half2float(h2.y);
-        local_absmax = fmaxf(local_absmax, fmaxf(fabsf(vals[i * 2]), fabsf(vals[i * 2 + 1])));
+        local_absmax = fmaxf(local_absmax,
+                             fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[i * 2 + 1])));
     }
 
     // Compute UE8M0 scale = ceil_pow2(absmax / 6.0)
@@ -455,7 +456,8 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
     sf_out[sf_idx] = ue8m0;
 
     // Quantize and pack FP4 values (2 per byte) via HW conversion
-    int packed_base = row * (K / 2) + k_group * (kMxSFVecSize / 2);
+    int64_t packed_base = static_cast<int64_t>(row) * (K / 2) +
+                          static_cast<int64_t>(k_group) * (kMxSFVecSize / 2);
 #pragma unroll
     for (int i = 0; i < 32; i += 2) {
         float s0 = vals[i] * inv_scale;
@@ -463,7 +465,6 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
         packed_out[packed_base + i / 2] = pack_fp4_pair_hw_mx(s0, s1);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
                                     cudaStream_t stream) {

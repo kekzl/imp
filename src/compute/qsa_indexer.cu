@@ -51,7 +51,6 @@ __device__ __forceinline__ float norm_rope_128(float* y, float* red, const half*
 }
 
 // grid (rows, n_heads), block 128.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void qsa_prep_queries_kernel(const half* __restrict__ qk, const int* __restrict__ positions,
                                         const half* __restrict__ w_q, half* __restrict__ q_out,
                                         half* __restrict__ raw_keys, QsaGeom g) {
@@ -61,13 +60,13 @@ __global__ void qsa_prep_queries_kernel(const half* __restrict__ qk, const int* 
     const int stride = (g.n_heads + 1) * D;
     const int pos = positions[row];
     if (head == 0)
-        raw_keys[static_cast<size_t>(pos) * D + d] = qk[static_cast<size_t>(row) * stride + g.n_heads * D + d];
-    y[d] = __half2float(qk[static_cast<size_t>(row) * stride + head * D + d]);
+        raw_keys[static_cast<size_t>(pos) * D + d] =
+            qk[static_cast<size_t>(row) * stride + static_cast<size_t>(g.n_heads) * D + d];
+    y[d] = __half2float(qk[static_cast<size_t>(row) * stride + static_cast<size_t>(head) * D + d]);
     __syncthreads();
     const float out = norm_rope_128(y, red, w_q, pos, g);
     q_out[(static_cast<size_t>(row) * g.n_heads + head) * D + d] = __float2half(out);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // grid nb, block 128. positions != nullptr: decode, the last complete block before
 // positions[0] (one launch, blockIdx.x == 0).
@@ -96,7 +95,6 @@ __global__ void qsa_pool_blocks_kernel(const half* __restrict__ raw_keys, const 
 
 // grid (x, rows), block kScoreWarps * 32: one warp per block key (256 B, coalesced),
 // grid-stride over the row's complete blocks. score = sum_h relu(q_h . blk) / sqrt(D).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(kScoreWarps * 32) qsa_score_kernel(const half* __restrict__ q,
                                                                      const int* __restrict__ positions,
                                                                      const half* __restrict__ block_keys,
@@ -105,10 +103,12 @@ __global__ void __launch_bounds__(kScoreWarps * 32) qsa_score_kernel(const half*
     const int r = blockIdx.y, lane = threadIdx.x & 31;
     const int nb = (positions[r] + 1) / g.ratio;
     float qr[4][4];
+    // #2218 bounded: lane * 4 < 32 * 4 = 128 (lane = threadIdx.x & 31, :103).
 #pragma unroll
     for (int h = 0; h < 4; ++h) {
         const uint2 u = h < g.n_heads ? *reinterpret_cast<const uint2*>(
-                                            q + (static_cast<size_t>(r) * g.n_heads + h) * D + lane * 4)
+                                            q + (static_cast<size_t>(r) * g.n_heads + h) * D +
+                                            static_cast<size_t>(lane * 4))
                                       : make_uint2(0u, 0u);
         const float2 a = __half22float2(*reinterpret_cast<const half2*>(&u.x));
         const float2 b = __half22float2(*reinterpret_cast<const half2*>(&u.y));
@@ -118,7 +118,9 @@ __global__ void __launch_bounds__(kScoreWarps * 32) qsa_score_kernel(const half*
     float* my_scores = scores + static_cast<size_t>(r) * max_blocks;
     const int stride = gridDim.x * kScoreWarps;
     for (int b = blockIdx.x * kScoreWarps + (threadIdx.x >> 5); b < nb; b += stride) {
-        const uint2 u = *reinterpret_cast<const uint2*>(block_keys + static_cast<size_t>(b) * D + lane * 4);
+        // #2218 bounded: lane * 4 < 32 * 4 = 128 (lane = threadIdx.x & 31, :103).
+        const uint2 u = *reinterpret_cast<const uint2*>(block_keys + static_cast<size_t>(b) * D +
+                                                        static_cast<size_t>(lane * 4));
         const float2 k0 = __half22float2(*reinterpret_cast<const half2*>(&u.x));
         const float2 k1 = __half22float2(*reinterpret_cast<const half2*>(&u.y));
         float dot[4];
@@ -138,7 +140,6 @@ __global__ void __launch_bounds__(kScoreWarps * 32) qsa_score_kernel(const half*
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Exclusive rank of `pred` over the CTA (kSelThreads = 32 warps) and the CTA total, via
 // warp ballots. `wsum` holds 33 ints; a caller reuses it only after a barrier.
@@ -290,7 +291,7 @@ __global__ void qsa_gather_kv_kernel(const int4* __restrict__ k_cache, const int
     const int tok = sel_tokens[static_cast<size_t>(r) * cap + j];
     const size_t src = (static_cast<size_t>(bt[tok / block_size]) * block_size + tok % block_size) *
                            vec_per_token + v;
-    const size_t dst = (static_cast<size_t>(r * blocks_per_row + j / block_size) * block_size +
+    const size_t dst = ((static_cast<size_t>(r) * blocks_per_row + j / block_size) * block_size +
                         j % block_size) * vec_per_token + v;
     k_scratch[dst] = k_cache[src];
     v_scratch[dst] = v_cache[src];
@@ -330,8 +331,9 @@ void qsa_select(const half* q, const int* positions, const half* block_keys, flo
     IMP_CHECK(g.n_heads <= 4, "qsa_select: %d indexer heads, kernel holds 4", g.n_heads);
     static const int n_sms = [] {
         int dev = 0, n = 0;
-        cudaGetDevice(&dev);
-        cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev);
+        if (cudaGetDevice(&dev) != cudaSuccess ||
+            cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess)
+            n = 0;  // -> 1 below: fewer score CTAs, same selection
         return n > 0 ? n : 1;
     }();
     // Two waves of score CTAs over all rows, never more CTAs per row than blocks to score.

@@ -9,7 +9,7 @@ namespace imp {
 // "does placement rely on that path"; the refusal for an undersized cache lives in
 // GraphExecutor::verify_host_expert_placement() (cache is sized after weight upload).
 // layer_expert_bytes[i]>0 marks layer i as MoE; experts_upload_layer[i] means device-resident.
-inline bool expert_placement_needs_host_path(bool is_nvfp4_prequant,
+[[nodiscard]] inline bool expert_placement_needs_host_path(bool is_nvfp4_prequant,
                                              const std::vector<size_t>& layer_expert_bytes,
                                              const std::vector<bool>& experts_upload_layer) {
     if (!is_nvfp4_prequant)

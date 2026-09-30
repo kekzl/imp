@@ -100,6 +100,9 @@ struct SchemaFrame {
     // the delimiter. Null = free raw text.
     const SchemaNode* xml_enum = nullptr;
 
+    // ENVELOPE_OPEN frames: whitespace chars consumed before the open literal (#2273).
+    int lead_ws = 0;
+
     // True right after a ',' inside an object: a key is now mandatory, so the
     // object may not close (`}`) until another key/value is emitted — prevents
     // trailing commas (`{"a":1,}`).
@@ -131,7 +134,7 @@ public:
     // tokenizer classification and the device buffers apply_mask needs. Runs the generative
     // battery in the `unit` lane (no GPU runner in CI); the grammar bugs it surfaces have
     // shipped before (#761, #850, #1014). Not for engine use.
-    bool init_grammar_for_test(std::unique_ptr<SchemaNode> schema);
+    [[nodiscard]] bool init_grammar_for_test(std::unique_ptr<SchemaNode> schema);
     // CPU tests: `texts` become the vocab (ids = indices, no device buffers); returns the
     // category AND allow mask apply_mask would upload for the current state.
     std::vector<uint8_t> mask_for_test(const std::vector<std::string>& texts);
@@ -153,7 +156,7 @@ public:
     // True iff emitting the whole token keeps the schema satisfiable: every char is a legal
     // transition and nothing trails past the root close. Catches multi-char tokens spanning
     // phase transitions (`{}`, `":"`, `0.98`) that the first-char category mask misses.
-    bool token_legal(const std::string& text) const;
+    [[nodiscard]] bool token_legal(const std::string& text) const;
 
     // Reset for a new generation with the same schema.
     void reset();
@@ -261,7 +264,7 @@ private:
     // Single-char transition over a frame stack; false if c is not legal for the current
     // phase. Drives both the real update path (stack_) and per-token mask simulation (cloned
     // stack) - one source of truth for the schema grammar.
-    bool sim_advance(std::vector<SchemaFrame>& stk, char c) const;
+    [[nodiscard]] bool sim_advance(std::vector<SchemaFrame>& stk, char c) const;
 
     // Find property schema by key name
     const SchemaNode* find_property(const SchemaNode* obj, const std::string& key) const;
@@ -273,9 +276,9 @@ private:
     // Check if prefix matches any enum value
     bool is_valid_enum_prefix(const std::vector<std::string>& values, const std::string& prefix) const;
     // XML enum parameter: one value char (member prefix, then "\n</parameter>"); false = illegal.
-    bool xml_enum_step(SchemaFrame& f, char c) const;
+    [[nodiscard]] bool xml_enum_step(SchemaFrame& f, char c) const;
     // ENUM_LITERAL: one char; a complete member hands a non-extending char back to the parent.
-    bool enum_literal_step(std::vector<SchemaFrame>& stk, char c) const;
+    [[nodiscard]] bool enum_literal_step(std::vector<SchemaFrame>& stk, char c) const;
 
     // True if the current string can legally close: regex accepts and length
     // constraints satisfied.

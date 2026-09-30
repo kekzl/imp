@@ -33,7 +33,6 @@ constexpr int SMEM_TOTAL = B_SIZE + A_SIZE + PREFIX_SIZE;     // 51216
 // TC_TILE_M x TC_TILE_N output block, eliminating M-loop imbalance (every CTA does exactly
 // one tile/iteration; heavy experts spread across many CTAs). Tile mapping: flat_idx ->
 // (n_tile, m_tile_flat) -> binary-search expert_id.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel(
     const uint8_t* __restrict__ packed_weights, const half* __restrict__ activations,
     half* __restrict__ output, const int32_t* __restrict__ offsets,
@@ -183,7 +182,8 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
                                               ? static_cast<int64_t>(sorted_token_ids[expanded_idx])
                                               : static_cast<int64_t>(expanded_idx);
                     *reinterpret_cast<uint4*>(&AC_smem[row * TC_STRIDE + col]) =
-                        *reinterpret_cast<const uint4*>(&activations[token * K + k_block * TC_K_TILE + col]);
+                        *reinterpret_cast<const uint4*>(
+                            &activations[token * K + static_cast<int64_t>(k_block) * TC_K_TILE + col]);
                 } else {
                     *reinterpret_cast<uint4*>(&AC_smem[row * TC_STRIDE + col]) = make_uint4(0, 0, 0, 0);
                 }
@@ -227,7 +227,6 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
         __syncthreads();
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launcher
@@ -260,16 +259,17 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activ
         return;
 
     if (!s_configured) {
-        cudaFuncSetAttribute(gemm_q6k_fused_moe_prefill_tc_kernel,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_TOTAL);
+        // Failure: the launch below fails too and IMP_CUDA_CHECK_LAUNCH reports it.
+        IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(gemm_q6k_fused_moe_prefill_tc_kernel,
+                                                cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_TOTAL));
 
         // Query optimal grid size: CTAs/SM × num_SMs
-        int max_blocks_per_sm = 0;
-        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&max_blocks_per_sm,
-                                                      gemm_q6k_fused_moe_prefill_tc_kernel, TC_BLOCK,
-                                                      SMEM_TOTAL);
+        int max_blocks_per_sm = 0;  // failure: 1 CTA/SM, the tile counter still covers every tile
+        IMP_CUDA_CHECK_LOG(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &max_blocks_per_sm, gemm_q6k_fused_moe_prefill_tc_kernel, TC_BLOCK, SMEM_TOTAL));
         int num_sms = 0;
-        cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0);
+        // Failure: stay unconfigured (grid 0 would stick), as on the tile-counter failure below.
+        IMP_CUDA_CHECK_VOID(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0));
         s_grid_size = num_sms * max(max_blocks_per_sm, 1);
 
         // T2 (engine-persistent): a 4-byte counter allocated once under the `s_configured` guard, the
@@ -288,7 +288,8 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activ
         s_configured = true;
     }
 
-    cudaMemsetAsync(s_tile_counter, 0, sizeof(int), stream);
+    // A stale counter makes the kernel skip tiles: no launch, error stays in cudaGetLastError.
+    IMP_CUDA_CHECK_VOID(cudaMemsetAsync(s_tile_counter, 0, sizeof(int), stream));
 
     gemm_q6k_fused_moe_prefill_tc_kernel<<<s_grid_size, TC_BLOCK, SMEM_TOTAL, stream>>>(
         static_cast<const uint8_t*>(packed_weights), static_cast<const half*>(activations),

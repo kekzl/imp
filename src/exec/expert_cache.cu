@@ -91,19 +91,18 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
 
     // Prefetch stream + per-layer completion events. Skipped if cudaStream
     // creation fails - prefetch APIs become no-ops in that case.
-    cudaError_t serr = cudaStreamCreateWithFlags(&prefetch_stream_, cudaStreamNonBlocking);
+    cudaError_t serr = prefetch_stream_.try_create(cudaStreamNonBlocking);
     if (serr != cudaSuccess) {
         IMP_LOG_WARN("Expert LRU cache: prefetch_stream alloc failed (%s) - Phase 4 disabled",
                      cudaGetErrorString(serr));
-        prefetch_stream_ = nullptr;
     } else {
-        prefetch_done_.assign(n_layers_, nullptr);
+        prefetch_done_.clear();
+        prefetch_done_.resize(n_layers_);
         for (int li = 0; li < n_layers_; ++li) {
-            cudaError_t eerr = cudaEventCreateWithFlags(&prefetch_done_[li], cudaEventDisableTiming);
+            cudaError_t eerr = prefetch_done_[li].try_create(cudaEventDisableTiming);
             if (eerr != cudaSuccess) {
                 IMP_LOG_WARN("Expert LRU cache: prefetch event[%d] alloc failed (%s)", li,
                              cudaGetErrorString(eerr));
-                prefetch_done_[li] = nullptr;
             }
         }
         prefetch_issued_.assign(n_layers_, false);
@@ -711,11 +710,11 @@ void ExpertLRUCache::destroy() {
         if (alloc_)
             alloc_->free(pool_);
         else
-            cudaFree(pool_);
+            IMP_CUDA_CHECK_LOG(cudaFree(pool_));
         pool_ = nullptr;
     }
     if (d_lookup_) {
-        cudaFree(d_lookup_);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_lookup_));
         d_lookup_ = nullptr;
     }
     // d_slot_scales_ points into pool_, freed above - nothing of its own.
@@ -728,15 +727,9 @@ void ExpertLRUCache::destroy() {
             IMP_LOG_INFO("Expert LRU prefetch stats: %ld H2Ds issued, %ld skipped (already cached)",
                          (long)prefetch_h2ds_, (long)prefetch_skipped_cached_);
         }
-        for (auto e : prefetch_done_) {
-            if (e) cudaEventDestroy(e);
-        }
-        prefetch_done_.clear();
+        prefetch_done_.clear();  // events destroyed before the prefetch stream, as before
     }
-    if (prefetch_stream_) {
-        cudaStreamDestroy(prefetch_stream_);
-        prefetch_stream_ = nullptr;
-    }
+    prefetch_stream_.reset();
     slots_.clear();
     per_layer_lru_.clear();
     host_expert_addrs_.clear();

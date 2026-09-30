@@ -405,7 +405,7 @@ SsmStateGeometry qwen38_gdn(QType h_dtype) {
 }  // namespace
 
 TEST(SsmStatePool, PinsTheQwen38GeometryTheAllocatorTakes) {
-    // vram_budget.cpp charged conv_channels*(conv_kernel-1)*4 unaligned; ssm_state.cu allocated
+    // vram_budget.cpp charged conv_channels*(conv_kernel-1)*4 unaligned; ssm_state.cpp allocated
     // align256(conv_channels*conv_kernel*4)+align256(h). 4968 MiB planned vs 5088 MiB taken at
     // 64 slots (MEMORY.md D14): short in the direction that oversubscribes the card.
     const auto g = qwen38_gdn(QType::F16);

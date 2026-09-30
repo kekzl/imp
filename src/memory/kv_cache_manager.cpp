@@ -14,6 +14,35 @@
 
 namespace imp {
 
+namespace {
+// Zero one residual slot's device ring state (write_idx, fill_count); false after logging.
+bool residual_slot_zeroed(int* widx, int* fc, int slot) {
+    const int zero = 0;
+    cudaError_t err = cudaMemcpy(widx + slot, &zero, sizeof(int), cudaMemcpyHostToDevice);
+    if (err == cudaSuccess)
+        err = cudaMemcpy(fc + slot, &zero, sizeof(int), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess)
+        IMP_LOG_ERROR("KVCacheManager: residual slot %d zero failed: %s", slot, cudaGetErrorString(err));
+    return err == cudaSuccess;
+}
+
+// False after logging: copies enqueued on s did not complete.
+bool stream_synced(cudaStream_t s, const char* what) {
+    const cudaError_t err = cudaStreamSynchronize(s);
+    if (err != cudaSuccess)
+        IMP_LOG_ERROR("%s: stream sync failed: %s", what, cudaGetErrorString(err));
+    return err == cudaSuccess;
+}
+
+// A failed sync drops every block: dropping an entry's reference frees it.
+template <class Entries>
+void drop_unless_synced(cudaStream_t s, Entries& entries) {
+    if (!stream_synced(s, "Prefix cache load"))
+        for (auto& e : entries)
+            e.copy_ok = false;
+}
+}  // namespace
+
 void KVCacheManager::drop_stale_hash_if_last(int block_id) {
     if (block_id >= 0 && cache_->ref_count(block_id) == 1) {
         auto hit = block_id_to_hash_.find(block_id);
@@ -26,6 +55,7 @@ void KVCacheManager::drop_stale_hash_if_last(int block_id) {
 
 void KVCacheManager::rollback_partial_allocation(int seq_id, SeqBlocks& blocks,
                                                  std::vector<size_t>& hashes, size_t original_size) {
+    flush_spill_restores_();  // no block goes back to the pool with an H2D copy in flight
     for (size_t j = original_size; j < blocks.size(); ++j)
         drop_stale_hash_if_last(blocks.id_at(j));
     blocks.resize(original_size);  // dropping the refs is the free
@@ -42,11 +72,11 @@ KVCacheManager::KVCacheManager(std::unique_ptr<KVCache> cache) : cache_(std::mov
 
 KVCacheManager::~KVCacheManager() {
     if (h_swa_descs_) {
-        cudaFreeHost(h_swa_descs_);
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_swa_descs_));
         h_swa_descs_ = nullptr;
     }
     if (d_swa_descs_) {
-        cudaFree(d_swa_descs_);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_swa_descs_));
         d_swa_descs_ = nullptr;
     }
     if (residual_pool_ && residual_alloc_) {
@@ -54,11 +84,11 @@ KVCacheManager::~KVCacheManager() {
         residual_pool_ = nullptr;
     }
     if (d_residual_widx_) {
-        cudaFree(d_residual_widx_);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_residual_widx_));
         d_residual_widx_ = nullptr;
     }
     if (d_residual_fc_) {
-        cudaFree(d_residual_fc_);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_residual_fc_));
         d_residual_fc_ = nullptr;
     }
 }
@@ -116,16 +146,16 @@ bool KVCacheManager::enable_residual_buffer(int max_seqs, int residual_n, VRAMAl
     // fill_count=0 without an extra reset call.
     const size_t state_bytes = static_cast<size_t>(max_seqs) * sizeof(int);
     if (cudaMalloc(&d_residual_widx_, state_bytes) != cudaSuccess ||
-        cudaMalloc(&d_residual_fc_, state_bytes) != cudaSuccess) {
-        IMP_LOG_ERROR("KVCacheManager: residual state buffer alloc failed (%zu bytes)", state_bytes);
-        if (d_residual_widx_) { cudaFree(d_residual_widx_); d_residual_widx_ = nullptr; }
-        if (d_residual_fc_) { cudaFree(d_residual_fc_); d_residual_fc_ = nullptr; }
+        cudaMalloc(&d_residual_fc_, state_bytes) != cudaSuccess ||
+        cudaMemset(d_residual_widx_, 0, state_bytes) != cudaSuccess ||
+        cudaMemset(d_residual_fc_, 0, state_bytes) != cudaSuccess) {
+        IMP_LOG_ERROR("KVCacheManager: residual state buffer alloc/zero failed (%zu bytes)", state_bytes);
+        if (d_residual_widx_) { IMP_CUDA_CHECK_LOG(cudaFree(d_residual_widx_)); d_residual_widx_ = nullptr; }
+        if (d_residual_fc_) { IMP_CUDA_CHECK_LOG(cudaFree(d_residual_fc_)); d_residual_fc_ = nullptr; }
         alloc->free(residual_pool_);
         residual_pool_ = nullptr;
         return false;
     }
-    cudaMemset(d_residual_widx_, 0, state_bytes);
-    cudaMemset(d_residual_fc_, 0, state_bytes);
 
     IMP_LOG_INFO("KVCacheManager: residual buffer enabled — max_seqs=%d, residual_n=%d, %.2f MiB",
                  max_seqs, residual_n, static_cast<double>(total) / (1024.0 * 1024.0));
@@ -138,15 +168,12 @@ int KVCacheManager::allocate_residual_slot(int seq_id) {
     if (it != residual_seq_slot_.end()) return it->second;
     if (residual_free_slots_.empty()) return -1;
     int slot = residual_free_slots_.back();
+    // Zero device-resident ring state for this slot. Synchronous — runs once
+    // per request admission, not on the hot decode path. Failed zero: slot stays free.
+    if (d_residual_widx_ && !residual_slot_zeroed(d_residual_widx_, d_residual_fc_, slot))
+        return -1;
     residual_free_slots_.pop_back();
     residual_seq_slot_[seq_id] = slot;
-    // Zero device-resident ring state for this slot. Synchronous — runs once
-    // per request admission, not on the hot decode path.
-    if (d_residual_widx_) {
-        int zero = 0;
-        cudaMemcpy(d_residual_widx_ + slot, &zero, sizeof(int), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_residual_fc_ + slot, &zero, sizeof(int), cudaMemcpyHostToDevice);
-    }
     return slot;
 }
 
@@ -158,11 +185,9 @@ void KVCacheManager::release_residual_slot(int seq_id) {
     residual_free_slots_.push_back(slot);
     residual_seq_slot_.erase(it);
     seq_residual_state_.erase(seq_id);
-    if (d_residual_widx_) {
-        int zero = 0;
-        cudaMemcpy(d_residual_widx_ + slot, &zero, sizeof(int), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_residual_fc_ + slot, &zero, sizeof(int), cudaMemcpyHostToDevice);
-    }
+    // Best effort (logged): allocate_residual_slot re-zeroes the slot and checks.
+    if (d_residual_widx_)
+        (void)residual_slot_zeroed(d_residual_widx_, d_residual_fc_, slot);
 }
 
 int KVCacheManager::residual_slot_of(int seq_id) const {
@@ -570,14 +595,24 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
                 continue;
             }
 
-            // No cache hit (or reuse closed) — allocate a fresh block.
-            reuse_open = false;
+            // No device hit (or reuse closed) — allocate a fresh block.
             BlockRef fresh = allocate_block_ref_with_eviction();
             if (!fresh) {
                 // Rollback everything we allocated/shared in this call.
                 rollback_partial_allocation(seq_id, blocks, hashes, original_size);
                 return -1;
             }
+            // Host tier hit: restore the spilled KV and publish the block as computed (#2203).
+            if (reuse_open && host_spill_ && restore_spilled_(block_hash, fresh.id())) {
+                block_hash_to_id_[block_hash] = fresh.id();
+                block_id_to_hash_[fresh.id()] = block_hash;
+                blocks.push(std::move(fresh));
+                hashes.push_back(block_hash);
+                parent_hash = block_hash;
+                ++reused_blocks;
+                continue;
+            }
+            reuse_open = false;
 
             blocks.push(std::move(fresh));
             hashes.push_back(block_hash);
@@ -614,6 +649,7 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
         IMP_LOG_DEBUG("PrefixCache: seq %d reused %d/%d blocks (%d tokens skippable)", seq_id, reused_blocks,
                       total_blocks, reused_blocks * cache_->block_size());
     }
+    flush_spill_restores_();
     return reused_blocks;
 }
 
@@ -754,9 +790,11 @@ int KVCacheManager::reclaim_cached_block() {
     reclaimable_cached_count_--;
     cached_block_evictions_.fetch_add(1, std::memory_order_relaxed);
 
-    // Remove from hash tables.
+    // Remove from hash tables (spilling the KV to the host tier first when it is on).
     auto hash_it = block_id_to_hash_.find(block_id);
     if (hash_it != block_id_to_hash_.end()) {
+        if (host_spill_)
+            spill_block_(block_id, hash_it->second);
         block_hash_to_id_.erase(hash_it->second);
         block_id_to_hash_.erase(hash_it);
     }
@@ -1018,7 +1056,7 @@ bool KVCacheManager::enable_swa_snapshots() {
                    static_cast<size_t>(cap) * sizeof(KVCache::CopyDesc)) != cudaSuccess) {
         IMP_LOG_WARN("KVCacheManager: SWA snapshot desc alloc failed — snapshots disabled");
         if (h_swa_descs_) {
-            cudaFreeHost(h_swa_descs_);
+            IMP_CUDA_CHECK_LOG(cudaFreeHost(h_swa_descs_));
             h_swa_descs_ = nullptr;
         }
         swa_snap_bytes_ = 0;
@@ -1463,7 +1501,10 @@ int KVCacheManager::save_prefix_cache(const std::string& path, uint64_t model_fi
     }
 
     // Single sync to wait for all D2H transfers before writing to disk.
-    cudaStreamSynchronize(stream);
+    if (!stream_synced(stream, "Prefix cache save")) {
+        fclose(f);
+        return -1;
+    }
 
     int saved = 0;
     for (size_t bi = 0; bi < entries.size(); ++bi) {
@@ -1652,7 +1693,7 @@ int KVCacheManager::load_prefix_cache(const std::string& path, uint64_t model_fi
     }
 
     // Single sync to wait for all H2D transfers.
-    cudaStreamSynchronize(stream);
+    drop_unless_synced(stream, load_entries);
 
     // Register successfully loaded blocks. Free blocks with failed copies.
     int actual_loaded = 0;

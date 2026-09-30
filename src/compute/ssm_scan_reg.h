@@ -26,7 +26,7 @@ struct SsmScanArgs {
 
 // Register-resident scan, bit-identical to the legacy kernel at the same s_tiles.
 // Returns false (nothing launched) for shapes it does not cover; the caller falls back.
-bool ssm_scan_reg_launch(const SsmScanArgs& a, int s_tiles, bool fp16);
+[[nodiscard]] bool ssm_scan_reg_launch(const SsmScanArgs& a, int s_tiles, bool fp16);
 
 // Legacy per-token global-state kernel only (tests compare both paths bitwise).
 void ssm_scan_legacy_launch(const SsmScanArgs& a, bool fp16);

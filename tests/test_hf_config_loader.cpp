@@ -415,7 +415,7 @@ TEST_F(RopeScalingConfigTest, UnknownArchSetsFallbackFlag) {
 
 // AWQ detection (audit gap #16). Both nested-under-quantization_config
 // (HF standard) and standalone quant_config.json (older AutoAWQ) are
-// recognised. Detection-only — no kernel exists yet.
+// recognised. Parsing only; the variant rule lives in load_safetensors (#2205).
 TEST_F(RopeScalingConfigTest, AwqQuantConfigDetection) {
     write_config(R"({
         "architectures": ["LlamaForCausalLM"],
@@ -454,6 +454,50 @@ TEST_F(RopeScalingConfigTest, AwqQuantConfigDetection) {
     })");
     HFConfigLoader::AWQConfig acfg3;
     EXPECT_FALSE(HFConfigLoader::load_awq_config(tmp_dir_.string(), acfg3));
+}
+
+// GPTQ config (#2249): config.json quantization_config (HF/optimum, e.g. Qwen *-GPTQ-Int4) or
+// quantize_config.json; checkpoint_format from "checkpoint_format", "format" or is_marlin_format.
+TEST_F(RopeScalingConfigTest, GptqQuantConfigDetection) {
+    write_config(R"({"quantization_config": {"quant_method": "gptq", "bits": 4, "group_size": 128,
+                     "desc_act": false, "sym": true}})");
+    HFConfigLoader::GPTQConfig c1;
+    ASSERT_TRUE(HFConfigLoader::load_gptq_config(tmp_dir_.string(), c1));
+    EXPECT_EQ(c1.bits, 4);
+    EXPECT_EQ(c1.group_size, 128);
+    EXPECT_FALSE(c1.desc_act);
+    EXPECT_EQ(c1.checkpoint_format, "");
+
+    write_config(R"({"quantization_config": {"quant_method": "gptq", "bits": 4, "group_size": -1,
+                     "desc_act": true, "checkpoint_format": "gptq_v2"}})");
+    HFConfigLoader::GPTQConfig c2;
+    ASSERT_TRUE(HFConfigLoader::load_gptq_config(tmp_dir_.string(), c2));
+    EXPECT_EQ(c2.group_size, -1);
+    EXPECT_TRUE(c2.desc_act);
+    EXPECT_EQ(c2.checkpoint_format, "gptq_v2");
+
+    // AWQ in config.json is not GPTQ.
+    write_config(R"({"quantization_config": {"quant_method": "awq", "bits": 4}})");
+    HFConfigLoader::GPTQConfig c3;
+    EXPECT_FALSE(HFConfigLoader::load_gptq_config(tmp_dir_.string(), c3));
+
+    // quantize_config.json wins over config.json; GPTQModel "format" key; is_marlin_format.
+    {
+        std::ofstream f(tmp_dir_ / "quantize_config.json");
+        f << R"({"bits": 4, "group_size": 32, "format": "gptq_v2"})";
+    }
+    HFConfigLoader::GPTQConfig c4;
+    ASSERT_TRUE(HFConfigLoader::load_gptq_config(tmp_dir_.string(), c4));
+    EXPECT_EQ(c4.group_size, 32);
+    EXPECT_EQ(c4.checkpoint_format, "gptq_v2");
+    {
+        std::ofstream f(tmp_dir_ / "quantize_config.json");
+        f << R"({"bits": 4, "group_size": 128, "is_marlin_format": true})";
+    }
+    HFConfigLoader::GPTQConfig c5;
+    ASSERT_TRUE(HFConfigLoader::load_gptq_config(tmp_dir_.string(), c5));
+    EXPECT_EQ(c5.checkpoint_format, "marlin");
+    std::filesystem::remove(tmp_dir_ / "quantize_config.json");
 }
 
 // DeepSeek V2/V3 MLA detection (audit gap #17). MLA-specific config

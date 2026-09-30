@@ -15,6 +15,7 @@
 #include "exec/executor.h"
 #include "model/model.h"
 #include "runtime/engine.h"
+#include "runtime/engine_internal.h"
 #include "runtime/request.h"
 
 #include <cuda_fp16.h>
@@ -36,7 +37,7 @@ void Engine::mtp_unbind_(const char* why) {
     // The slot goes back to the pool with the tokens its cache covers, so a
     // follow-up request can resume over the shared prefix.
     if (mtp_active_.req >= 0 && mtp_ws_storage_ != nullptr) {
-        auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+        auto* ws = mtp_ws_storage_.get();
         const int slot = ws->cur_slot;
         if (slot >= 0 && slot < static_cast<int>(mtp_pool_.slot_history.size())) {
             mtp_pool_.slot_history[static_cast<size_t>(slot)] = mtp_active_.history;
@@ -63,7 +64,7 @@ void Engine::mtp_activate_(int req_id) {
     if (req_id >= 0 && it == mtp_pool_.binds.end())
         return;
     if (mtp_active_.req >= 0) {
-        mtp_active_.slot = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_)->cur_slot;
+        mtp_active_.slot = mtp_ws_storage_->cur_slot;
         const int req = mtp_active_.req;
         mtp_pool_.binds[req] = std::move(mtp_active_);
         mtp_active_ = MtpBind{};
@@ -76,13 +77,13 @@ void Engine::mtp_activate_(int req_id) {
     mtp_active_ = std::move(it->second);
     mtp_pool_.binds.erase(it);
     mtp_active_.req = req_id;
-    imp::mtp_select_slot(*static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_), mtp_active_.slot);
+    imp::mtp_select_slot(*mtp_ws_storage_, mtp_active_.slot);
 }
 
 int Engine::mtp_acquire_slot_(const Request& req) {
     if (mtp_ws_storage_ == nullptr)
         return -1;
-    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    auto* ws = mtp_ws_storage_.get();
     const int n_slots = std::max(1, ws->n_kv_slots);
     if (!mtp_pool_.initialized) {
         mtp_pool_.free_slots.clear();
@@ -142,7 +143,7 @@ void Engine::mtp_release_(int req_id) {
 
 void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs, const std::vector<int>& rows,
                                const std::vector<int>& emitted, cudaStream_t stream) {
-    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    auto* ws = mtp_ws_storage_.get();
     if (ws == nullptr || !model_ || !model_->mtp_.has_value() || !model_->mtp_->loaded)
         return;
     const int N = static_cast<int>(reqs.size());
@@ -311,7 +312,7 @@ std::vector<std::vector<int32_t>> Engine::mtp_take_chains_(const Request& req) {
 // chaining feed needs logits/argmax: lm_head GEMV dominates per-pair cost (~1 GiB read on Qwen3.6's 248k vocab).
 bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, int n_pairs,
                              bool chain_after) {
-    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    auto* ws = mtp_ws_storage_.get();
     if (ws == nullptr || n_pairs <= 0)
         return false;
     const int hidden_dim = model_->config_.d_model;
@@ -331,7 +332,8 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
     // diagnostics.mtp_prenorm_h: feed the head the POST-final-norm hidden
     // (upstream vLLM/HF taps the target's post-norm hidden; imp's executor
     // hidden_ is pre-norm). Covers every fed pair, not just the chain input.
-    if (runtime_config_.diagnostics.mtp_prenorm_h) {
+    // Not on an hc head (Qwen4Exp): its h_prev is the multi_hidden stream, fed un-normed (V:302-308).
+    if (runtime_config_.diagnostics.mtp_prenorm_h && ws->hc_count == 0) {
         // ws->d_prenorm_rows is sized once at enable time (executor's token cap,
         // bounding every prefill feed); a feed past it fails, and the caller
         // unbinds drafting for the request.
@@ -348,6 +350,7 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
         d_hidden_rows = ws->d_prenorm_rows;
     }
     const char* base = static_cast<const char*>(d_hidden_rows);
+    const int row_cols = imp::mtp_h_prev_cols(*ws);  // hc_count x d_model on an hc head
     int pred = -1;
     // Batched feed (dense heads): the per-pair loop reads the whole head's
     // weights once per token, costing prefill throughput badly at scale. The
@@ -357,7 +360,7 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
     if (n_feed >= 8 && ws->feed_rows_cap > 0) {
         while (j0 < n_feed) {
             const int m = std::min(ws->feed_rows_cap, n_feed - j0);
-            const void* rows = base + static_cast<size_t>(j0) * hidden_dim * sizeof(__half);
+            const void* rows = base + static_cast<size_t>(j0) * row_cols * sizeof(__half);
             if (!imp::mtp_feed_batch(tokens + j0, rows, m, *model_->mtp_, model_->tok_emb_,
                                      *ws, hidden_dim, decode_stream()))
                 break;  // unsupported head or transient failure, per-pair takes over
@@ -375,7 +378,7 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
                       ? std::min(cfg_w, imp::kMtpMaxTopW)
                       : 1;
     for (int j = j0; j < n_pairs; ++j) {
-        const void* h_j = base + static_cast<size_t>(j) * hidden_dim * sizeof(__half);
+        const void* h_j = base + static_cast<size_t>(j) * row_cols * sizeof(__half);
         const bool last = (j == n_pairs - 1);
         if (chain_after && last && device_chain) {
             // W > 1: the same launch also fills ws->d_topk (fast top-W, no
@@ -442,19 +445,18 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
         }
         int32_t h_chain[imp::kMtpMaxTopW * imp::kMtpMaxChainK];
         const size_t drain = (W > 1 ? static_cast<size_t>(W) * kStride : static_cast<size_t>(launched[0]));
-        if (cudaMemcpyAsync(h_chain, ws->d_chain_tokens, drain * sizeof(int32_t), cudaMemcpyDeviceToHost,
-                            stream) != cudaSuccess) {
-            ws->mtp_pos = pos_after;
-            return false;
-        }
-        // The head's top-1/top-2 logit margin rides the same sync (W floats)
+        // The head's top-1/top-2 logit margin rides the chain's sync (W floats)
         // - the branch gate below reads it.
         float h_topv[imp::kMtpMaxTopW] = {};
         bool have_topv = false;
         if (W > 1 && ws->d_topk_val != nullptr)
             have_topv = cudaMemcpyAsync(h_topv, ws->d_topk_val, static_cast<size_t>(W) * sizeof(float),
                                         cudaMemcpyDeviceToHost, stream) == cudaSuccess;
-        cudaStreamSynchronize(stream);
+        if (engine_internal::copy_d2h_sync(h_chain, ws->d_chain_tokens, drain * sizeof(int32_t), stream) !=
+            cudaSuccess) {
+            ws->mtp_pos = pos_after;
+            return false;
+        }
         for (int k = 0; k < launched[0]; ++k) {
             if (h_chain[k] < 0 || h_chain[k] >= vocab_size)
                 break;  // NaN-logits guard, keep the valid prefix
@@ -505,7 +507,7 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
         int prev = pred;
         for (int k = 1; k < K; ++k) {
             int p = -1;
-            if (!mtp_draft_one(prev, ws->d_h_final, hidden_dim, vocab_size, &p) || p < 0 ||
+            if (!mtp_draft_one(prev, imp::mtp_chain_hidden(*ws), hidden_dim, vocab_size, &p) || p < 0 ||
                 p >= vocab_size)
                 break;
             chain.push_back(p);
@@ -524,7 +526,7 @@ void Engine::mtp_post_verify_update_(const Request& req, int emitted, int row0) 
         mtp_activate_(req.id);
     if (mtp_active_.req != req.id || emitted <= 0)
         return;
-    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    auto* ws = mtp_ws_storage_.get();
     if (ws == nullptr)
         return;
     // Sync check: the cache must cover exactly the pre-step context
@@ -537,13 +539,13 @@ void Engine::mtp_post_verify_update_(const Request& req, int emitted, int row0) 
     // Row row0+j of this verify chunk produced emitted token j (row0 = winning
     // candidate's first row in a multi-candidate chunk, 0 linear): pairs are
     // exactly (emitted_j, h_row_{row0+j}). Must run before the hybrid partial-accept re-forward overwrites the hidden buffer.
-    Tensor h = executor_->view_hidden(row0 + emitted);
+    Tensor h = executor_->view_mtp_hidden(row0 + emitted);
     if (h.data == nullptr) {
         mtp_unbind_("no hidden view after verify");
         return;
     }
     const void* rows = static_cast<const char*>(h.data) +
-                       static_cast<size_t>(row0) * model_->config_.d_model * sizeof(__half);
+                       static_cast<size_t>(row0) * imp::mtp_h_prev_cols(*ws) * sizeof(__half);
     const int32_t* toks = req.output_tokens.data() + req.output_tokens.size() - emitted;
     if (!mtp_feed_pairs_(toks, rows, emitted, /*chain_after=*/req.status == RequestStatus::DECODING))
         mtp_unbind_("verify feed failed (kv cap or forward error)");
@@ -557,7 +559,7 @@ void Engine::mtp_prefill_feed_chunk(const Request& req, int offset, int chunk_le
         return;
     if (chunk_len <= 0)
         return;
-    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    auto* ws = mtp_ws_storage_.get();
     const auto& in = req.input_tokens;
 
     // (Re)bind on this request's first chunk: resume over the longest common
@@ -626,14 +628,13 @@ void Engine::mtp_prefill_feed_chunk(const Request& req, int offset, int chunk_le
     if (toks.empty())
         return;
 
-    Tensor h = executor_->view_hidden(chunk_len);
+    Tensor h = executor_->view_mtp_hidden(chunk_len);
     if (h.data == nullptr) {
         mtp_unbind_("no hidden view during prefill");
         return;
     }
-    const int hidden_dim = model_->config_.d_model;
     const char* rows = static_cast<const char*>(h.data) +
-                       static_cast<size_t>(start - offset) * hidden_dim * sizeof(__half);
+                       static_cast<size_t>(start - offset) * imp::mtp_h_prev_cols(*ws) * sizeof(__half);
     const bool last_chunk = next_token >= 0;
     if (!mtp_feed_pairs_(toks.data(), rows, static_cast<int>(toks.size()),
                          /*chain_after=*/last_chunk))
@@ -654,10 +655,6 @@ bool Engine::enable_mtp_spec_decode(int k) {
         IMP_LOG_ERROR("enable_mtp_spec_decode: model has no MTP head loaded");
         return false;
     }
-    if (!mtp_forward_implemented(*model_->mtp_)) {
-        IMP_LOG_WARN("enable_mtp_spec_decode: %s", kMtpForwardMissingLog);
-        return false;
-    }
     if (mtp_ws_storage_ != nullptr) {
         IMP_LOG_WARN("enable_mtp_spec_decode: already enabled, k=%d -> %d", mtp_spec_k_, k);
         mtp_spec_k_ = k;
@@ -675,12 +672,21 @@ bool Engine::enable_mtp_spec_decode(int k) {
     const bool head_moe_packed = head.router.data != nullptr && head.experts_gate_up_packed.data != nullptr;
     const bool head_moe_per_expert = head.router.data != nullptr && !head.experts_up.empty() &&
                                      head.experts_up[0].data != nullptr;
-    const bool head_moe = head_moe_packed || head_moe_per_expert;
+    // Qwen4Exp: per-expert FP8 gate/up/down, uploaded behind device pointer tables.
+    const bool head_moe_fp8 = head.router.data != nullptr && head.fp8_gate_up_tab != nullptr &&
+                              !head.experts_fp8.empty();
+    const bool head_moe = head_moe_packed || head_moe_per_expert || head_moe_fp8;
     const int n_experts = head_moe ? static_cast<int>(head.router.shape[0]) : 0;
     const int top_k = head_moe ? model_->config_.n_experts_active : 0;
     const int expert_d_ff = head_moe_packed       ? static_cast<int>(head.experts_gate_up_packed.shape[1]) / 2
                             : head_moe_per_expert ? static_cast<int>(head.experts_up[0].shape[0])
+                            : head_moe_fp8        ? static_cast<int>(head.experts_fp8[0].gate_proj.shape[0])
                                                   : 0;
+    if (head.layout == MtpLayout::Qwen4Exp && (!head_moe_fp8 || head.hc_count <= 0)) {
+        IMP_LOG_ERROR("enable_mtp_spec_decode: qwen4_exp head without device FP8 experts or hc width");
+        return false;
+    }
+    const int hc_lowrank = head.hc_count > 0 ? static_cast<int>(head.attn_hc.mix_down.shape[0]) : 0;
     // The shared expert is sized off gate_proj on the Qwen layout; the Nemotron
     // one is non-gated, so up_proj is the only tensor that carries the width.
     const int shared_d_ff = head.shared_expert_gate_proj.data != nullptr
@@ -729,22 +735,22 @@ bool Engine::enable_mtp_spec_decode(int k) {
         const int fit = static_cast<int>(budget / (row_bytes * static_cast<size_t>(n_kv_slots)));
         mtp_kv_max = std::clamp(fit, 2048, mtp_kv_max);
     }
-    auto* ws = new imp::MtpDraftWorkspace();
+    auto ws = std::make_unique<imp::MtpDraftWorkspace>();
     // set_alloc_phase(Serving) fires at the end of engine init, but this API
     // is exposed AFTER context creation and the server calls it before any
     // request: init traffic sitting on the wrong side of the boundary, not an
     // invariant breach. Labelled (not exempted) via AllocPhaseScope, so it stays visible in `make check-alloc-interpose` rather than masked.
     AllocPhaseScope mtp_alloc_phase(AllocPhase::Planning, "mtp workspace");
     if (!imp::mtp_workspace_allocate(*ws, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff,
-                                     mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max, n_kv_slots)) {
-        delete ws;
+                                     mtp_num_heads, mtp_num_kv_heads, mtp_head_dim, mtp_kv_max, n_kv_slots, head.hc_count,
+                                     hc_lowrank)) {
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
     }
     // Post-norm feed scratch (diagnostics.mtp_prenorm_h), inside the same
     // labelled init scope: sized to the executor's token cap, the widest feed
     // a prefill chunk can hand mtp_feed_pairs_.
-    if (runtime_config_.diagnostics.mtp_prenorm_h) {
+    if (runtime_config_.diagnostics.mtp_prenorm_h && head.hc_count == 0) {
         const int rows = std::max(1, executor_ ? executor_->max_tokens() : mtp_kv_max);
         const size_t bytes = static_cast<size_t>(rows) * hidden_dim * sizeof(__half);
         if (cudaMalloc(&ws->d_prenorm_rows, bytes) == cudaSuccess) {
@@ -819,10 +825,11 @@ bool Engine::enable_mtp_spec_decode(int k) {
     }
     // weight_offset matches the main model's rmsnorm calls (norm_weight_offset
     // from ModelConfig): 0.0 for Qwen3.5/3.6 (the +1 gamma=1+W is already baked
-    // in at upload, see upload_mtp_weights in weight_upload.cu), 1.0 for Gemma-3. Don't double-apply.
+    // in at upload, see upload_mtp_weights in weight_upload.cpp), 1.0 for Gemma-3. Don't double-apply.
     ws->arch_norm_offset = model_->config_.norm_weight_offset;
 
-    mtp_ws_storage_ = ws;
+    mtp_ws_storage_.reset(ws.release());
+    const imp::MtpDraftWorkspace& live = *mtp_ws_storage_;  // ws is null after release()
     mtp_spec_k_ = k;
     mtp_pool_.binds.clear();
     mtp_pool_.free_slots.clear();
@@ -833,8 +840,8 @@ bool Engine::enable_mtp_spec_decode(int k) {
         "d_ff_shared=%d, num_heads=%d/%d, head_dim=%d, kv_cap=%d x %d slot(s), rope=%g/%d/%s, "
         "mrope=[%d,%d,%d])",
         k, hidden_dim, vocab_size, n_experts, top_k, expert_d_ff, shared_d_ff, mtp_num_heads,
-        mtp_num_kv_heads, mtp_head_dim, mtp_kv_max, ws->n_kv_slots, ws->rope_theta, ws->rope_dim,
-        ws->rope_neox ? "neox" : "interleaved", ws->mrope_sec0, ws->mrope_sec1, ws->mrope_sec2);
+        mtp_num_kv_heads, mtp_head_dim, mtp_kv_max, live.n_kv_slots, live.rope_theta, live.rope_dim,
+        live.rope_neox ? "neox" : "interleaved", live.mrope_sec0, live.mrope_sec1, live.mrope_sec2);
     return true;
 }
 void Engine::mtp_accuracy_reset() noexcept {
@@ -856,7 +863,7 @@ void Engine::mtp_accuracy_reset() noexcept {
     mtp_pool_.slot_history.clear();
     mtp_pool_.initialized = false;
     if (mtp_ws_storage_) {
-        auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+        auto* ws = mtp_ws_storage_.get();
         imp::mtp_kv_reset(*ws);
         imp::mtp_select_slot(*ws, 0);
     }
@@ -872,7 +879,7 @@ bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev, int hidden_d
         IMP_LOG_ERROR("mtp_draft_one: MTP head not loaded");
         return false;
     }
-    auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+    auto* ws = mtp_ws_storage_.get();
     // Chain lm_head via the NVFP4 decode cache when available: full-vocab FP16
     // GEMV is the dominant per-draft cost (#847 lever 3). Draft-only precision
     // (verify stays lossless); falls back to FP16 GEMV with no cache entry (nvfp4_lm_head/_gdn off, or FP8 LM head).
@@ -890,7 +897,7 @@ bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev, int hidden_d
     const void* lm_fp8 = nullptr;
     const float* lm_fp8_scales = nullptr;
     if (executor_)
-        executor_->lm_head_fp8_view(lm_fp8, lm_fp8_scales);
+        (void)executor_->lm_head_fp8_view(lm_fp8, lm_fp8_scales);  // false: no FP8 head, pointers stay null
     return imp::mtp_draft_step(prev_token_id, d_h_prev, *model_->mtp_, model_->tok_emb_, model_->out_proj_,
                                *ws, hidden_dim, vocab_size, out_token_id, decode_stream(), out_topk_ids,
                                top_w, lm_nvfp4_p, d_prev_token, d_out_token, lm_fp8, lm_fp8_scales);

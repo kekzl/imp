@@ -1,6 +1,8 @@
 #pragma once
 
 #include "compute/warp_reduce.cuh"
+#include "core/cuda_errors.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cfloat>
 
@@ -10,6 +12,37 @@ static constexpr int BLOCK_SIZE = 256;
 static constexpr int WARP_SIZE = 32;
 
 static constexpr int MAX_TOP_K = 128;
+
+// Synchronous sampler readback: failed enqueue or sync throws (#2307); never token 0 in place of a sample.
+// Syncs the stream: not callable under graph capture.
+[[nodiscard]] inline int32_t sampler_readback_or_throw(const int32_t* d_token, cudaStream_t stream,
+                                                       const char* who) {
+    int32_t h_token = 0;
+    cuda_call_or_throw(cudaMemcpyAsync(&h_token, d_token, sizeof(int32_t), cudaMemcpyDeviceToHost, stream),
+                       who);
+    return synced_token_or_throw(cudaStreamSynchronize(stream), &h_token, who);
+}
+
+// Sampler launch status (#2310): a non-sticky launch error never reaches the later sync, which then
+// reads a stale d_result as the token. begin clears an unrelated stale error, so the cudaGetLastError()
+// passed to status right after a launch is that launch's own. No sync, capture-safe.
+inline void sampler_launch_begin(const char* who) {
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess)
+        IMP_LOG_WARN("%s: stale CUDA error cleared before the sampler launch: %s", who,
+                     cudaGetErrorString(e));
+}
+
+[[nodiscard]] inline cudaError_t sampler_launch_status(cudaError_t e, const char* who) {
+    if (e != cudaSuccess)
+        IMP_LOG_ERROR("%s: sampler kernel launch failed: %s", who, cudaGetErrorString(e));
+    return e;
+}
+
+// Launch chain: the first failure wins, a later launch's status never masks it.
+[[nodiscard]] inline cudaError_t first_launch_error(cudaError_t first, cudaError_t next) {
+    return first != cudaSuccess ? first : next;
+}
 
 // Per-TU cleanup helpers for file-scope persistent scratch that is split across
 // translation units. sampling_cleanup() (public) calls both.

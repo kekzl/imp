@@ -2,7 +2,7 @@
 // Does NOT integrate into the real attention path.
 // Reference: SageAttention3, thu-ml/SageAttention, cute_extension.h.
 
-#include "bench/attention_mxf4nvf4_probe.h"
+#include "attention_mxf4nvf4_probe.h"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstdio>

@@ -73,7 +73,7 @@
 //     mtp.layers.0.mlp.experts.{e}.{gate,up,down}_proj    512 experts, F8_E4M3
 //         .weight_scale_inv                 BF16 128x128 block scales
 //
-// Loaded and mapped only: no forward, speculative.mtp_k is forced to 0.
+// Draft forward: compute/mtp_forward_qwen4exp.cu; experts run through gemv_fp8_block_moe.
 // =============================================================================
 
 #include "core/tensor.h"
@@ -89,7 +89,7 @@ namespace imp {
 // Checkpoint tensor is part of an MTP head if named mtp.* or model.mtp.* (outer prefix
 // kept). One rule, two callers (load_shard's divert decision, the presence probe) - both
 // must ask this shared question to avoid the #1384/#1443 defect class of disagreeing answers.
-inline bool name_is_mtp_tensor(std::string_view name) {
+[[nodiscard]] inline bool name_is_mtp_tensor(std::string_view name) {
     return name.rfind("mtp.", 0) == 0 || name.rfind("model.mtp.", 0) == 0;
 }
 
@@ -100,7 +100,7 @@ inline constexpr const char* kMtpHeadKeyEhProj = "mtp.layers.0.eh_proj.weight";
 inline constexpr const char* kMtpHeadKeyFc = "mtp.fc.weight";
 inline constexpr const char* kMtpHeadKeyFcEmbedding = "mtp.fc_embedding.weight";
 
-inline bool name_is_mtp_head_key(std::string_view name) {
+[[nodiscard]] inline bool name_is_mtp_head_key(std::string_view name) {
     if (name.rfind("model.", 0) == 0)
         name.remove_prefix(6);
     return name == kMtpHeadKeyEhProj || name == kMtpHeadKeyFc || name == kMtpHeadKeyFcEmbedding;
@@ -112,7 +112,7 @@ enum class MtpLayout { None, Qwen, Nemotron, Qwen4Exp };
 // True when `model_dir` ships an MTP head, decided from tensor NAMES only: the
 // sidecar file, the shard index, or the single-file header. Reads no weight
 // byte, so it is cheap enough to run on a load that does not want the head.
-bool probe_mtp_head(const std::string& model_dir);
+[[nodiscard]] bool probe_mtp_head(const std::string& model_dir);
 
 // Phase 1.A leftover — kept as part of the new MtpHead struct for compatibility
 // with the existing Model::mtp_info_ field.
@@ -207,11 +207,20 @@ struct MtpHead {
     MtpHyperConnection attn_hc;
     MtpHyperConnection mlp_hc;
     MtpHyperConnection final_mixer;  // hyper_connection_mixer, replaces final_norm
-    Tensor indexer_qk_proj;          // QSA indexer
+    Tensor indexer_qk_proj;          // QSA indexer: host only, the draft attends densely (spec OPEN 3)
     Tensor indexer_q_norm;
     Tensor indexer_k_norm;
-    // Not uploaded: no FP8 block-scale MoE path yet (upload/dequant is a later step).
+    // Host-mapped checkpoint views; upload copies them into the device tables below.
     std::vector<MtpFp8Expert> experts_fp8;
+    // Device copies for gemv_fp8_block_moe: per-expert E4M3 allocations addressed through
+    // pointer tables (no multi-GiB slab), scales BF16 -> FP32 in one slab each.
+    //   gate_up: table [n_experts * 2] (gate, up), scales [n_experts * 2, d_ff_e / 128, hidden / 128]
+    //   down:    table [n_experts],     scales [n_experts, hidden / 128, d_ff_e / 128]
+    const uint8_t* const* fp8_gate_up_tab = nullptr;
+    const uint8_t* const* fp8_down_tab = nullptr;
+    const float* fp8_gate_up_scales = nullptr;
+    const float* fp8_down_scales = nullptr;
+    int hc_count = 0;  // Qwen4Exp: width of the hc stream the head reads and writes (hc_count x hidden)
 
     MtpLayout layout = MtpLayout::None;
 
@@ -219,13 +228,12 @@ struct MtpHead {
     bool loaded = false;
 };
 
-// False for a layout whose weights load but whose draft forward does not exist yet
-// (Qwen4Exp). Such a head must never upload or arm speculative.mtp_k.
-inline bool mtp_forward_implemented(const MtpHead& head) { return head.layout != MtpLayout::Qwen4Exp; }
-
-// Log line shared by every site that forces speculative.mtp_k to 0 for such a head.
-inline constexpr const char* kMtpForwardMissingLog =
-    "MTP head loaded, forward not implemented (layout qwen4_exp): speculative.mtp_k forced 0";
+// speculative.mtp_k=auto depth for this head: 0 = kMtpAutoK, < 0 = auto declines the head.
+// Qwen4Exp declines: decode 61.46 vs 61.94 tok/s spec off (k=1, 4 prompts x 3), head holds 2400 MiB VRAM.
+inline constexpr int kMtpAutoDeclines = -1;
+inline int mtp_auto_k_cap(const MtpHead& head) {
+    return head.layout == MtpLayout::Qwen4Exp ? kMtpAutoDeclines : 0;
+}
 
 // Maps a raw mtp.* tensor map (outer "model." already stripped) onto MtpHead fields.
 // Layout is keyed on the fusion projection name: eh_proj -> Nemotron, fc_embedding ->

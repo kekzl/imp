@@ -207,4 +207,20 @@ TEST(ChatTemplateGolden, GenerationPromptIsWhatTheGoldenPins) {
     EXPECT_TRUE(with.size() > without.size());
 }
 
+// #2269: HF apply_chat_template passes tools=None; transformers 5.17.0 renders this probe as
+// "[D][N]". gpt-oss (Unsloth template) keys its commentary-channel line on `tools is defined`.
+TEST(ChatTemplateGolden, ToolsDefinedAsNoneWithoutTools) {
+    const std::string probe =
+        "{% if tools is defined %}[D]{% endif %}{% if tools is none %}[N]{% endif %}"
+        "{% if tools %}[T]{% endif %}";
+    const std::string tpl_src = chat_goldens::k_chatml_template + probe;
+    Tokenizer tok = make_tokenizer(chat_goldens::k_chatml_bos, chat_goldens::k_chatml_eos, tpl_src);
+    ChatTemplate tpl;
+    ASSERT_TRUE(tpl.init(ChatTemplate::detect_family(tpl_src), tok, tpl_src));
+    ASSERT_TRUE(tpl.has_jinja());
+    const std::vector<ChatMessage> msgs = {{"user", "What is the capital of France?"}};
+    EXPECT_EQ(tpl.render_jinja(tok, msgs, /*add_generation_prompt=*/true),
+              chat_goldens::k_chatml_user_only + "[D][N]");
+}
+
 }  // namespace imp

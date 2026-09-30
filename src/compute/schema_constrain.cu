@@ -23,6 +23,10 @@ static constexpr size_t kMaxSchemaStackDepth = 192;
 // as unenforceable (#1567). Applies to `integer` only; `number` keeps its JSON-legal mantissa.
 static constexpr int kMaxIntegerDigits = 19;
 
+// Whitespace chars allowed before a forced envelope open literal: "\n\n" after </think>.
+// Unbounded, Phi-4 emitted tabs until max_tokens (#2273).
+static constexpr int kEnvelopeLeadWsMax = 2;
+
 // Effective item ceiling for an array frame: explicit maxItems wins; an enum-items array
 // without one caps at the enum's cardinality (repeating a member more than the enum has
 // carries no information; unbounded is the observed degeneration loop of a budget-closed
@@ -1305,7 +1309,7 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
             // Optional whitespace before the open literal (models emit "\n\n"
             // after </think>); inside the literal every char is forced.
             if (f.literal_pos == 0 && space)
-                return true;
+                return f.lead_ws++ < kEnvelopeLeadWsMax;
             if (f.literal_pos < static_cast<int>(f.literal_target.size()) &&
                 c == f.literal_target[f.literal_pos]) {
                 f.literal_pos++;

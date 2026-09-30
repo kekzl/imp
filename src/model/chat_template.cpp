@@ -664,15 +664,19 @@ static jinja::Value json_string_to_value(const std::string& json_str) {
         // A JSON number in (INT64_MAX, UINT64_MAX] survives the roundtrip as an integer and
         // std::stoll throws out_of_range; this file has no other catch, so it reached the request
         // path as a 500. Fall back to the double the value already is.
+        auto as_double = [&num_str] {
+            try {
+                return jinja::Value(std::stod(num_str));
+            } catch (const std::out_of_range&) {
+                return jinja::Value();
+            }
+        };
+        if (is_float)
+            return as_double();
         try {
-            if (!is_float)
-                return jinja::Value(static_cast<int64_t>(std::stoll(num_str)));
+            return jinja::Value(static_cast<int64_t>(std::stoll(num_str)));
         } catch (const std::out_of_range&) {
-        }
-        try {
-            return jinja::Value(std::stod(num_str));
-        } catch (const std::out_of_range&) {
-            return jinja::Value();
+            return as_double();
         }
     };
 
@@ -710,6 +714,8 @@ std::string ChatTemplate::render_jinja(const Tokenizer& tok, const std::vector<C
     // Build Jinja2 context
     jinja::Context ctx;
     ctx["messages"] = jinja::Value(build_jinja_messages(msgs, suppress_thinking));
+    // HF apply_chat_template passes tools=None: `tools is defined` holds without tools (#2269).
+    ctx["tools"] = jinja::Value();
     ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
     // Stamp enable_thinking only when the caller has an opinion: Qwen3 defaults undefined to an
     // open <think>, Gemma-4 to a pre-closed thought block. force_thinking opens a template's

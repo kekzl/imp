@@ -318,7 +318,8 @@ TEST_F(GroupedTileBench, Qwen36MoeShapes) {
             float ms = 0.f;
             while (ms < 1000.f) {
                 for (int i = 0; i < 20; ++i)
-                    imp::gemm_grouped_cutlass_3x_nvfp4(ne, ex.M.data(), s.N, s.K, ex.pA.data(),
+                    // timing loop: the launch status is not under test
+                    (void)imp::gemm_grouped_cutlass_3x_nvfp4(ne, ex.M.data(), s.N, s.K, ex.pA.data(),
                                                        ex.pSFA.data(), ex.pB.data(), ex.pSFB.data(),
                                                        ex.pD.data(), ex.alpha.data(), stream_);
                 cudaEventRecord(w1, stream_);
@@ -329,7 +330,8 @@ TEST_F(GroupedTileBench, Qwen36MoeShapes) {
             cudaEventDestroy(w1);
         }
         float t_prod = time_us([&] {
-            imp::gemm_grouped_cutlass_3x_nvfp4(ne, ex.M.data(), s.N, s.K, ex.pA.data(), ex.pSFA.data(),
+            // timing loop: the launch status is not under test
+            (void)imp::gemm_grouped_cutlass_3x_nvfp4(ne, ex.M.data(), s.N, s.K, ex.pA.data(), ex.pSFA.data(),
                                                ex.pB.data(), ex.pSFB.data(), ex.pD.data(), ex.alpha.data(),
                                                stream_);
         });

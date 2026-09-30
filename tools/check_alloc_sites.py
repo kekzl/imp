@@ -95,7 +95,7 @@ def in_string_literal(line: str, pos: int) -> bool:
     An API NAME can appear in a log message — `IMP_LOG_WARN("... slab
     cudaMalloc(%.1f MiB) failed")` matched the pattern and was counted as an
     allocation site for as long as this gate has existed. One phantom in the
-    tree today (pre_dequant_phase3_cutlass.cu), found by tools/alloc_census.py
+    tree today (pre_dequant_phase3_cutlass.cpp), found by tools/alloc_census.py
     failing to attribute it to any buffer. A gate whose number includes text is
     a gate that can be satisfied by editing a message.
     """

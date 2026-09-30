@@ -202,7 +202,7 @@ struct FusedSplitFixture {
 
     void apply() {
         imp::WeightMap wm(imp::ModelArch::LLAMA);
-        wm.apply_weights(model, tensors);
+        EXPECT_TRUE(wm.apply_weights(model, tensors));
     }
 };
 
@@ -337,6 +337,16 @@ TEST(NvFP4MergedScaleProvenance, FusedGroupGeometryIsAsserted) {
     // not a tolerance.
     g = fused_gate_up(plane);
     g.m[1].tensor_scale = std::nextafterf(g.m[0].tensor_scale, 1.0f);
+    EXPECT_FALSE(imp::merged_scale_group_ok(g, &err));
+    EXPECT_NE(err.find("tensor_scale"), std::string::npos) << err;
+
+    // Bits, not values: two Modelopt null-layer siblings (+0.0) pass, a -0.0 sibling was not
+    // copied from the base's scale and is refused although -0.0 == +0.0.
+    g = fused_gate_up(plane);
+    g.m[0].tensor_scale = 0.0f;
+    g.m[1].tensor_scale = 0.0f;
+    EXPECT_TRUE(imp::merged_scale_group_ok(g, &err)) << err;
+    g.m[1].tensor_scale = -0.0f;
     EXPECT_FALSE(imp::merged_scale_group_ok(g, &err));
     EXPECT_NE(err.find("tensor_scale"), std::string::npos) << err;
 

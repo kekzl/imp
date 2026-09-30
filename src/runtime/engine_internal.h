@@ -96,7 +96,8 @@ inline const int32_t* ple_step_context(int ctx_len, int32_t eos,
     out.assign(static_cast<size_t>(n_seq) * ctx_len, 0);
     for (int s = 0; s < n_seq; s++) {
         const Request& r = *rows[static_cast<size_t>(s)];
-        ngram_context_at(r.input_tokens.data(), static_cast<int>(r.input_tokens.size()),
+        // false = positions past the history are eos-filled, the documented contract (ngram_table.h).
+        (void)ngram_context_at(r.input_tokens.data(), static_cast<int>(r.input_tokens.size()),
                          r.output_tokens.data(), static_cast<int>(r.output_tokens.size()),
                          positions[static_cast<size_t>(s) * per_seq], ctx_len, eos,
                          out.data() + static_cast<size_t>(s) * ctx_len);
@@ -106,13 +107,55 @@ inline const int32_t* ple_step_context(int ctx_len, int32_t eos,
 
 // The decode step's host work (GraphExecutor::prepare_decode_step_host) with each row's PLE
 // context. True = PLE rows staged for this step (InferenceState::ple_host_ready).
-inline bool prepare_decode_step_host(GraphExecutor& ex, const Model& model,
+[[nodiscard]] inline bool prepare_decode_step_host(GraphExecutor& ex, const Model& model,
                                      const std::vector<std::shared_ptr<Request>>& rows, const Batch& batch,
                                      cudaStream_t stream) {
     const int32_t* ctx = ple_step_context(ex.ple_context_len(), model.config().ple_eos_token_id, rows,
                                           batch.positions, batch.total_tokens, ex.ngram_step_scratch());
     return ex.prepare_decode_step_host(batch.token_ids.data(), batch.total_tokens,
                                        static_cast<int>(rows.size()), ctx, stream);
+}
+
+// Residual decode buffers, allocated ONCE (#1648): a captured forward_logits graph bakes their
+// addresses. Failed alloc/init leaves a buffer unused (null, capacity 0 or an empty upload
+// cache), which engine_scheduler.cpp skips; ~Engine frees whatever was allocated.
+void alloc_residual_decode_buffers(int n, int*& d_slot, std::vector<int>& slot_uploaded, int*& d_meta,
+                                   int& meta_cap);
+
+// D2H copy, then stream sync; the first failure is returned.
+inline cudaError_t copy_d2h_sync(void* dst, const void* src, size_t bytes, cudaStream_t stream) {
+    const cudaError_t err = cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDeviceToHost, stream);
+    return err != cudaSuccess ? err : cudaStreamSynchronize(stream);
+}
+
+// Single-seq residual slot into d_buf[0], skipped while uploaded[0] already holds it.
+// False: upload failed, cache cleared (retried next step), d_buf unusable this step.
+[[nodiscard]] inline bool upload_residual_slot(int* d_buf, int slot, std::vector<int>& uploaded, cudaStream_t stream) {
+    if (!uploaded.empty() && uploaded[0] == slot)
+        return true;
+    const cudaError_t err = cudaMemcpyAsync(d_buf, &slot, sizeof(int), cudaMemcpyHostToDevice, stream);
+    if (err != cudaSuccess) {
+        uploaded.clear();
+        IMP_LOG_ERROR("residual slot upload failed: %s", cudaGetErrorString(err));
+        return false;
+    }
+    if (uploaded.empty())
+        uploaded.assign(1, -1);
+    uploaded[0] = slot;
+    return true;
+}
+
+// Multi-seq residual metadata: slots, counts, write_idxes as [n] arrays at stride `cap` from
+// base; the first failure is returned.
+inline cudaError_t upload_residual_meta(int* base, ptrdiff_t cap, const int* slots, const int* counts,
+                                        const int* widxes, int n, cudaStream_t stream) {
+    const size_t bytes = static_cast<size_t>(n) * sizeof(int);
+    cudaError_t err = cudaMemcpyAsync(base, slots, bytes, cudaMemcpyHostToDevice, stream);
+    if (err == cudaSuccess)
+        err = cudaMemcpyAsync(base + cap, counts, bytes, cudaMemcpyHostToDevice, stream);
+    if (err == cudaSuccess)
+        err = cudaMemcpyAsync(base + 2 * cap, widxes, bytes, cudaMemcpyHostToDevice, stream);
+    return err;
 }
 
 }  // namespace imp::engine_internal

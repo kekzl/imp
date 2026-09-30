@@ -26,7 +26,7 @@ void ngram_hash(const NGramHashParams& p, const int32_t* ctx, const int32_t* tok
 // Context of the token at position pos0: ctx[i] = seq[pos0 - ctx_len + i], eos before
 // position 0, where seq = in[0, n_in) then out[0, n_out). False (ctx eos-filled) when a
 // needed position lies past the history.
-inline bool ngram_context_at(const int32_t* in, int n_in, const int32_t* out, int n_out, int pos0,
+[[nodiscard]] inline bool ngram_context_at(const int32_t* in, int n_in, const int32_t* out, int n_out, int pos0,
                              int ctx_len, int32_t eos, int32_t* ctx) {
     bool ok = true;
     for (int i = 0; i < ctx_len; i++) {

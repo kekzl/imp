@@ -10,7 +10,7 @@ commit: 9cbb8004
 Companion doc to [`architecture.md`](ARCHITECTURE.md): which attention kernel runs for each (phase × dtype × layer) combination.
 
 - If this doc and the code disagree, the code wins.
-- Source of truth: `src/exec/executor_attention.cu` for the gate, `src/compute/attention_dispatch.cu` for the FMHA chain.
+- Source of truth: `src/exec/executor_attention.cu` for the gate, `src/compute/attention_dispatch.cpp` for the FMHA chain.
 
 > **Measured coverage (2026-06-07, [`docs/archive/roofline_2026_06_07.md`](../archive/roofline_2026_06_07.md)):** on hd=128 models (Qwen3 dense/MoE: Q8_0, Q4_K_M, NVFP4) the legacy materialized cuBLAS+softmax path is **0.0% of prefill time** at pp512-pp4096. FP16-QK FA2 (#525) covers the short range, FA2/FP8-FMHA the long range. Since #930/#932 hd=256 rides the FA2 port too (`attention.fa2_hd256`, default on).
 >
@@ -18,7 +18,7 @@ Companion doc to [`architecture.md`](ARCHITECTURE.md): which attention kernel ru
 
 ## Prefill - the gate
 
-**Read the code, not a snippet.** This section used to inline the dispatch source; the variables it named (`force_cublas_attn`, `s_matrix_fits`, `prefer_fmha`) no longer all exist, and the quoted logic was wrong about Gemma-4 for six weeks. Source of truth: `src/exec/executor_attention_prefill.cu` for the outer gate (two blocks: chunked and non-chunked), `src/compute/attention_dispatch.cu` for the FMHA chain.
+**Read the code, not a snippet.** This section used to inline the dispatch source; the variables it named (`force_cublas_attn`, `s_matrix_fits`, `prefer_fmha`) no longer all exist, and the quoted logic was wrong about Gemma-4 for six weeks. Source of truth: `src/exec/executor_attention_prefill.cu` for the outer gate (two blocks: chunked and non-chunked), `src/compute/attention_dispatch.cpp` for the FMHA chain.
 
 The outer gate is decided **per layer**, not per model (the part the old snippet got wrong). A Gemma-4 request takes FA2 on its hd=256 SWA layers and cuBLAS on its hd=512 global layers, in the same forward pass:
 
@@ -29,11 +29,11 @@ The outer gate is decided **per layer**, not per model (the part the old snippet
 | `hd == 512`, S-matrix too small for the whole chunk | `attention_cublas_prefill_sliced` (#1036) - cuBLAS in workspace-sized q-row slices; 3.4-3.9x faster than the fused hd=512 FMHA at Skv 8k/16k |
 | otherwise | `attention_prefill_dispatch` → the FMHA chain below |
 
-Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cu:65 if (has_sinks) {`: they route only to the two sink-capable tiers, in code order: (1) `fmha_sm120_fa2_prefill` with `fp16_qk=true` (gated by `attention.fmha_fa2 == "on"` and `fa2_fp16qk != "never"`), then (2) the FP16 WMMA FMHA `fmha_sm120_prefill` (gated by `fmha_sm120 != "never"`). If both decline (or both are off) the dispatch **throws** rather than falling through to a sink-blind kernel (#992).
+Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cpp:65 if (has_sinks) {`: they route only to the two sink-capable tiers, in code order: (1) `fmha_sm120_fa2_prefill` with `fp16_qk=true` (gated by `attention.fmha_fa2 == "on"` and `fa2_fp16qk != "never"`), then (2) the FP16 WMMA FMHA `fmha_sm120_prefill` (gated by `fmha_sm120 != "never"`). If both decline (or both are off) the dispatch **throws** rather than falling through to a sink-blind kernel (#992).
 
 Since #1205 the resolved path is **observable at runtime**: the engine logs one `Resolved dispatch: attn_prefill=… attn_decode=… moe_prefill=…` line after the first step that has seen both a prefill and a decode, recorded from inside the real dispatch rather than predicted.
 
-### FMHA chain (`src/compute/attention_dispatch.cu`, host model: `attention_dispatch_decision.h`)
+### FMHA chain (`src/compute/attention_dispatch.cpp`, host model: `attention_dispatch_decision.h`)
 
 Tried in order, first hit wins:
 

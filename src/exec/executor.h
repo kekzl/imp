@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/cuda_raii.h"
 #include "core/dispatch_policy.h"
 
 #include "model/model.h"
@@ -124,6 +125,13 @@ public:
                                 int chunk_len, double* d_nll, cudaStream_t stream,
                                 int32_t* d_match = nullptr);
 
+    // Prompt logprobs (#2207) for hidden_[0..n_rows): row r scores d_targets[r]; writes logprob,
+    // 1-based rank and top_n (id, logprob) per row. Enqueue only; overwrites logits_ like the above.
+    // d_logits [chunk_rows x vocab] FP32: one LM-head GEMM per chunk (#2257); null = per-batch driver.
+    void prompt_logprobs_partial(const int32_t* d_targets, int n_rows, int top_n, float* d_lp,
+                                 int32_t* d_rank, int32_t* d_top_ids, float* d_top_lp, float* d_logits,
+                                 int chunk_rows, cudaStream_t stream);
+
     // Embedding pooling (#1005): column-wise sum of hidden_[0..n_tokens) into
     // d_out[d_model] fp32. Runs after a chunk's forward while hidden_ still
     // holds it; engine accumulates chunk sums host-side for full-input pooling.
@@ -156,7 +164,7 @@ public:
     // FP16, e.g. MTP head output): the batched-decode W4A4 LM head, no output
     // norm applied. False (nothing written) when that head isn't built
     // (max_batch_size==1) or on a GEMM failure.
-    bool lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out, cudaStream_t stream);
+    [[nodiscard]] bool lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t* d_out, cudaStream_t stream);
 
     // Materializes the LM-head projection of hidden_[0..n_rows) into
     // d_out[n_rows,vocab_size] fp32 (same re-projection as greedy_argmax_all,
@@ -172,14 +180,15 @@ public:
     // decode. Enqueue-only per-row sampling into scratch slot slot_idx (no
     // readback/sync); returns false for sync-only modes (mirostat, logit_bias,
     // CUB top_k) without touching the row. Gather via collect_sampled_tokens.
-    bool sample_single_from_logits_async(const Tensor& logits, const InferenceState& state, int slot_idx,
+    [[nodiscard]] bool sample_single_from_logits_async(const Tensor& logits, const InferenceState& state, int slot_idx,
                                          cudaStream_t stream = nullptr);
+    // collect / gather: a failed row-sampler launch throws, never a stale slot as a token (#2310).
     const int32_t* collect_sampled_tokens(int n_slots, cudaStream_t stream = nullptr);
     // One-launch append of this step's sampled tokens (strided slots, ACTIVE
     // parity half) into per-request device penalty histories: row i maps
     // slot i -> hist[slots[i]*cap+offs[i]]; offs[i]<0 skips. Enqueue after the
     // row samplers, before the parity flip.
-    bool append_sampled_history(const PenaltyAppendArgs& args, int32_t* d_hist,
+    [[nodiscard]] bool append_sampled_history(const PenaltyAppendArgs& args, int32_t* d_hist,
                                 cudaStream_t stream = nullptr);
 
     // Parity-buffered sampling for pipelined batched decode: slot region,
@@ -190,12 +199,12 @@ public:
     // that event. Non-pipelined callers run at parity 0.
     void set_sample_parity(int parity) { sample_parity_ = parity & 1; }
     int sample_parity() const { return sample_parity_; }
-    bool gather_sampled_tokens_async(int n_slots, cudaStream_t stream = nullptr);
+    [[nodiscard]] bool gather_sampled_tokens_async(int n_slots, cudaStream_t stream = nullptr);
     const int32_t* wait_gathered_tokens(int parity);
     // Device pointer of slot 0 of the given parity set (the chain-advance
     // kernel reads sampled tokens strided by SAMPLE_SCRATCH_BYTES from here).
     const int32_t* sample_slot_base(int parity) const;
-    bool sample_pipeline_ready() const {
+    [[nodiscard]] bool sample_pipeline_ready() const {
         return d_sample_result_ && !h_sample_pinned_.empty() && !h_row_args_.empty() && d_row_args_ &&
                sample_gather_evt_[0] && sample_gather_evt_[1];
     }
@@ -205,13 +214,15 @@ public:
     // Async decode: forward reads the token from device memory (d_token_id),
     // samples, writes back to d_token_id. No host-device sync; returns
     // immediately. h_mapped is pinned memory for host polling of the token.
-    void forward_decode_async(const InferenceState& state, int32_t* d_token_id, int32_t* h_mapped,
-                              cudaStream_t stream = nullptr);
+    // Runs under graph capture, so no throw: false = sampler not enqueued, abort the capture (#2307).
+    [[nodiscard]] bool forward_decode_async(const InferenceState& state, int32_t* d_token_id,
+                                            int32_t* h_mapped, cudaStream_t stream = nullptr);
 
     // Constrained async sampling (pipelined constrained decode): applies
     // device-side banned-token + active json/schema mask, samples on device.
     // Writes to d_result (must be SAMPLE_SCRATCH_BYTES) and async-copies to
     // h_pinned. No host-device sync; order via an event.
+    // Eager (not captured): a sampler that enqueued nothing throws (#2307).
     void masked_sample_async(const InferenceState& state, const Tensor& logits, int32_t* d_result,
                              int32_t* h_pinned, cudaStream_t stream);
 
@@ -228,7 +239,7 @@ public:
     // Allocates the gemm_nvfp4 dequant workspace sized to the max NVFP4 weight.
     // Must run AFTER pre_dequant_weights(). Skips if no NVFP4 weights exist or
     // the largest exceeds the 512 MiB sanity cap; the fallback then lazy-cudaMallocs on non-captured streams.
-    bool allocate_nvfp4_dequant_workspace();
+    [[nodiscard]] bool allocate_nvfp4_dequant_workspace();
 
     // Builds a CUTLASS NVFP4 LM-head weight for batched decode (n>1): one
     // tensor-core GEMM (weight read once) instead of per-row/batched-M GEMV
@@ -278,7 +289,7 @@ public:
     // of a dequantable GGUF source. False when neither exists; prompt rows on
     // a GGUF source keep the full-precision dequant route. Single gate shared
     // by the dispatch block, sibling-pair dispatch and producer fusion.
-    bool smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out) const;
+    [[nodiscard]] bool smallm_weight_(const WeightHandle& h, NvFP4QuantResult& out) const;
     // Grow the small-M GEMM workspace to `need` bytes; a no-op while
     // `stream` is capturing (twin of ensure_smallm_xq_).
     void ensure_smallm_ws_(size_t need, cudaStream_t stream);
@@ -316,9 +327,9 @@ public:
     // tier (same sources the decode-path LM head uses). False when the LM head
     // isn't NVFP4-served; callers then keep the FP16 GEMV. Returned pointers borrow executor storage, do not
     // free.
-    bool lm_head_nvfp4_view(NvFP4QuantResult& out) const;
+    [[nodiscard]] bool lm_head_nvfp4_view(NvFP4QuantResult& out) const;
     // FP8 per-row LM head (gemm.nvfp4_lm_head=fp8) for the MTP draft chain; false when not built.
-    bool lm_head_fp8_view(const void*& weight, const float*& row_scales) const;
+    [[nodiscard]] bool lm_head_fp8_view(const void*& weight, const float*& row_scales) const;
 
     // Set KV layer mapping (must be called before forward pass for hybrid models)
     void set_kv_layer_map(std::vector<int> map) {
@@ -346,7 +357,7 @@ public:
 
     // FP8 KV append bakes inv_scale into a captured prefill graph: capturable once every layer is
     // calibrated; the generation moves when reset_kv_calibration() drops the scales.
-    bool kv_scales_calibrated() const {
+    [[nodiscard]] bool kv_scales_calibrated() const {
         return std::find(kv_calibrated_.begin(), kv_calibrated_.end(), false) == kv_calibrated_.end();
     }
     uint64_t kv_calibration_generation() const { return kv_calib_gen_; }
@@ -363,7 +374,7 @@ public:
     // Dual workspace for concurrent prefill/decode overlap.
     // allocate_decode_workspace: creates a second workspace for decode (up to max_batch tokens).
     // use_workspace(0) = prefill (default), use_workspace(1) = decode.
-    bool allocate_decode_workspace(cudaStream_t stream, int max_batch = 1) {
+    [[nodiscard]] bool allocate_decode_workspace(cudaStream_t stream, int max_batch = 1) {
         return ws_.allocate_decode_workspace(stream, max_batch);
     }
     // 0=prefill, 1=decode. Also swaps the collision-prone quant-scratch family
@@ -380,7 +391,7 @@ public:
     // q8_1/d8), sized for max_batch rows. set_overlap_prefill_active: marks a
     // prefill forward enqueued concurrently with an in-flight decode; the
     // smallm/producer-xq dispatch paths decline for it (scratch+tags are decode-owned under overlap).
-    bool allocate_decode_qscratch(int max_batch);
+    [[nodiscard]] bool allocate_decode_qscratch(int max_batch);
     void set_overlap_prefill_active(bool v) { overlap_prefill_active_ = v; }
 
     // Takes the small-M NVFP4 workspace + activation scratch for the largest
@@ -394,12 +405,12 @@ public:
     // samplers at a dedicated slot for the duration of an overlap prefill.
     void set_sample_slot_override(int32_t* slot) { sample_slot_override_ = slot; }
     bool has_gguf_nvfp4_overlay() const;
-    bool model_has_moe() const { return has_moe_; }
+    [[nodiscard]] bool model_has_moe() const { return has_moe_; }
 
     // Batched-decode residual accumulation eligibility (gemm.nvfp4_residual_beta1):
     // the o/down/GDN-out projection may run beta=1 into hidden when it will
     // take the smallm accumulate path. Shared by three call sites so the gates cannot drift apart.
-    bool residual_beta1_nvfp4_ok_(TensorID id, int n, const Tensor& h) const {
+    [[nodiscard]] bool residual_beta1_nvfp4_ok_(TensorID id, int n, const Tensor& h) const {
         if (!dispatch_policy().gemm.nvfp4_residual_beta1 || id == kInvalidTensorID)
             return false;
         if (n <= 1 || n > 32 || h.qtype != QType::F16)
@@ -420,13 +431,13 @@ public:
     // carry one distinct nonzero value (GDN/Mamba2 hybrids zero non-attention
     // layers). Uniform models are servable by the O(n) FA2/FMHA family; only
     // truly heterogeneous shapes (Gemma-4 dual head_dim 256/512) need the rectangular cuBLAS path.
-    bool attn_shapes_uniform() const;
+    [[nodiscard]] bool attn_shapes_uniform() const;
 
     // True when FP16-QK FA2 serves ALL prefill for this model (uniform shapes,
     // no learned sinks, hd=128 always / 256 behind fa2_hd256, fa2_fp16qk !=
     // "never"). Shared by the S-matrix allocator skip and workspace_estimate() so the two cannot drift
     // (#943).
-    bool fa2_serves_all_prefill() const;
+    [[nodiscard]] bool fa2_serves_all_prefill() const;
 
     // Largest prefill chunk at `offset` the chunked-attention dispatch can
     // serve without overflowing the cuBLAS S-matrix: n*(offset+n) <= s_cap^2
@@ -439,7 +450,10 @@ public:
     // replayable only when FP16-QK FA2 serves EVERY attention layer with
     // device-read lengths: uniform hd=128, no learned sinks, no MLA, no
     // LongRoPE, fa2_fp16qk not disabled.
-    bool chunk_capture_supported() const;
+    [[nodiscard]] bool chunk_capture_supported() const;
+    // Rows a captured verify chunk may carry when every MoE layer is host-resident NVFP4 served
+    // per row by the device expert cache (the captured decode path); 0 = not that layout.
+    int moe_host_rows_capture_max() const;
     // Persistent K/V scratch for the replayable chunked continuation
     // ([ctx_capacity,nkv,hd] FP16 each), replacing the per-layer
     // cudaMallocAsync whose size would bake the growing ctx_len into the
@@ -495,6 +509,11 @@ public:
 
     // Public view_tokens wrapper for external callers.
     Tensor view_hidden(int n_tokens) const { return view_tokens(hidden_, n_tokens); }
+    // h_prev rows for an MTP head: the hc streams [n, hc*d] on a gated-residual model (Qwen4Exp
+    // multi_hidden after the last combine, the final mixer leaves them untouched), else hidden_.
+    Tensor view_mtp_hidden(int n_tokens) const {
+        return hc_hidden_.data != nullptr ? view_tokens(hc_hidden_, n_tokens) : view_hidden(n_tokens);
+    }
 
     // Executor reads dispatch decisions from a DispatchPolicy owned by Engine
     // (the nine former RuntimeConfig sections; RuntimeConfig::current() is
@@ -552,7 +571,10 @@ private:
                                  const std::function<void(const Tensor&, int, int)>& consume);
     // FP8 per-row LM head (gemm.nvfp4_lm_head=fp8): final norm + gemv_fp8_rowscale_fp32 over h's rows
     // into lg (FP32). False = no FP8 head built; the caller keeps its own dispatch.
-    bool lm_head_fp8_(const Tensor& h, Tensor& lg, cudaStream_t stream);
+    [[nodiscard]] bool lm_head_fp8_(const Tensor& h, Tensor& lg, cudaStream_t stream);
+    // Prompt logprobs (#2257): LM head for hidden_[row0, row0 + csz) into lg (FP32, vocab slabs of
+    // slab_w columns, compute/prompt_logprobs_rows.h). False = no one-GEMM route, nothing written.
+    [[nodiscard]] bool prompt_lm_head_chunk_(int row0, int csz, float* lg, int& slab_w, cudaStream_t stream);
 
     // Spec-decode verify argmax partials (lazy, grows only; freed in
     // free_buffers).
@@ -607,15 +629,15 @@ private:
     Tensor hc_inj_;     // [max_tokens, hc] FP16, 2*sigmoid(inject(normed)/hc)
     Tensor hc_mixed_;   // [max_tokens, d] FP16, the block input kept for out = h - mixed
     Tensor hc_out_;     // [max_tokens, d] FP16, recovered block output
-    // Qwen4Exp PLE (executor_ple.cu): pinned staging for the gathered n-gram rows, the
+    // Qwen4Exp PLE (executor_ple.cpp): pinned staging for the gathered n-gram rows, the
     // n-gram id scratch. Sequence state (conv rows) is the SSM slab tail per slot.
     PinnedBuffer ple_host_;
     PinnedBuffer ple_readback_;  // token ids + first position of the chunk, D2H per forward
     Tensor ple_emb_dev_;         // [max_tokens, d] FP16, the gathered rows on the device
     std::vector<int64_t> ple_ids_;
     std::vector<int32_t> ple_step_ctx_;
-    cudaEvent_t ple_h2d_done_ = nullptr;
-    // Qwen4Exp QSA indexer (executor_qsa.cu): per QSA layer the raw index keys [ctx, 128]
+    CudaEvent ple_h2d_done_;
+    // Qwen4Exp QSA indexer (executor_qsa.cpp): per QSA layer the raw index keys [ctx, 128]
     // and block keys [ctx/ratio, 128] of the ONE sequence; token-sized GEMM/query buffers;
     // selection lists and a scratch paged K/V for qsa_rows_ query rows.
     struct QsaLayerState {
@@ -766,13 +788,13 @@ private:
     bool nvfp4_dequant_uncapturable_ = false;
 
 public:
-    bool nvfp4_dequant_uncapturable() const { return nvfp4_dequant_uncapturable_; }
+    [[nodiscard]] bool nvfp4_dequant_uncapturable() const { return nvfp4_dequant_uncapturable_; }
 
     // True when MoE prefill will run the legacy host-args fallback (no CUTLASS
     // NVFP4 grouped workspace, e.g. GGUF Q*_K MoE). That path reads routing on
     // the host (D2H+sync) and throws under active capture, so the scheduler
     // must not attempt prefill-graph capture at all (#874).
-    bool moe_prefill_uncapturable() const;
+    [[nodiscard]] bool moe_prefill_uncapturable() const;
 
 private:
     // Init-time weight-quantization pipeline (D2 extraction). Owns the build-only
@@ -813,8 +835,11 @@ private:
 
     // Pre-allocated sampling result buffers (avoids cudaMalloc/cudaFree per token).
     void apply_row_filters_(float* lp, int vocab, const InferenceState& state, cudaStream_t stream);
+    // nullptr only for an empty list; alloc or upload failure throws (#2313).
     const int32_t* banned_cache_(const InferenceState& state, cudaStream_t stream);
-    void flush_pending_topk_rows_(cudaStream_t stream);
+    // Flushes return the args-upload or launch status; != cudaSuccess = those rows
+    // hold stale tokens (#2310, #2313).
+    [[nodiscard]] cudaError_t flush_pending_topk_rows_(cudaStream_t stream);
     // Row-batched top-k/top-p staging: sample_single_from_logits_async stashes
     // eligible rows here instead of launching; collect_sampled_tokens uploads
     // args (one pinned H2D) and fires ONE partial + ONE finalize launch for
@@ -827,8 +852,8 @@ private:
     // Greedy + penalty row staging, same stash/flush contract as top-k above.
     // Flush order in the collectors is penalties -> greedy -> top-k, preserving
     // each row's own penalties-before-sampler order on the single stream.
-    void flush_pending_greedy_rows_(cudaStream_t stream);
-    void flush_pending_penalty_rows_(cudaStream_t stream);
+    [[nodiscard]] cudaError_t flush_pending_greedy_rows_(cudaStream_t stream);
+    [[nodiscard]] cudaError_t flush_pending_penalty_rows_(cudaStream_t stream);
     PinnedBuffer h_greedy_args_;              // pinned, 2 x sample_slots_ (parity halves)
     GreedyRowArgs* d_greedy_args_ = nullptr;  // device mirror
     int n_pending_greedy_rows_ = 0;
@@ -857,7 +882,7 @@ private:
                                           // (2 x sample_slots_ int32s, parity halves)
     int sample_slots_ = 0;                // batched sampling slots per parity set (= max_batch_size)
     int sample_parity_ = 0;               // active parity half for async enqueue/flush/gather
-    cudaEvent_t sample_gather_evt_[2] = {nullptr, nullptr};  // per-parity gather-done events
+    CudaEvent sample_gather_evt_[2];  // per-parity gather-done events
 
     // Pinned host buffer for logprobs extraction (D2H copy of logits)
     PinnedBuffer h_logits_pinned_;      // [vocab_size] pinned host memory (T5b)
@@ -945,39 +970,39 @@ private:
     // both routing to the smallm v2 kernel, run as one launch
     // (gemm_nvfp4_smallm_v2_pair_a4). False (and no-op) when either weight
     // would not take that route; caller then issues the two separate calls it would have anyway.
-    bool try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, const Tensor& input,
+    [[nodiscard]] bool try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, const Tensor& input,
                                    Tensor& out_a, Tensor& out_b, const GemmContext& ctx);
     // Batched-decode GDN alpha+beta projections in one narrow FP16 launch
     // (gdn.alpha_beta_smallm). False and no-op when a weight is not
     // FP16-resident or a shape doesn't fit; caller then issues its two calls.
-    bool try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_id, const Tensor& input, Tensor& alpha_out,
+    [[nodiscard]] bool try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_id, const Tensor& input, Tensor& alpha_out,
                                     Tensor& beta_out, cudaStream_t stream);
     // The NVFP4 view gemm_via_handle_ would hand the M=1 decode GEMV for this
     // weight (decode tier NVFP4 in wcache_.nvfp4, or native CUTLASS_NVFP4 via
     // its source bytes). false = that dispatch would not take the GEMV.
-    bool nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) const;
+    [[nodiscard]] bool nvfp4_decode_weight_(TensorID id, NvFP4QuantResult& out) const;
     // M=1 GDN launch fusion (gdn.m1_fused): in_proj+gate+alpha+beta in one
     // GEMV; out-proj adds the residual in its epilogue. False and no-op when a
     // weight/shape doesn't fit. alpha/beta land in ssm_dt_buf_ (alpha at 0,
     // beta at the 256-byte-aligned offset) for the scan to read.
-    bool try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj, Tensor& gate_out,
+    [[nodiscard]] bool try_gdn_input_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj, Tensor& gate_out,
                                  int n_heads, cudaStream_t stream, const NvFP4NormFoldIn& fold);
-    bool gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h) const;
+    [[nodiscard]] bool gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h) const;
     void gdn_out_residual_m1_(int layer, const TransformerLayer& ly, const Tensor& y, Tensor& h, cudaStream_t stream);
     // M=1 attention q|k|v in one NVFP4 GEMV launch on gated-attention models
     // (the ungated nvfp4_qkv path already does this). Same decline contract.
-    bool try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& q_out, Tensor& k_out,
+    [[nodiscard]] bool try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& q_out, Tensor& k_out,
                                 Tensor& v_out, cudaStream_t stream, const NvFP4NormFoldIn& fold);
     // General form: 2..3 weights on one input (attention q|k|v adds the
     // striped k/v shapes to q's single-stripe wave). Outputs must have row
     // stride N.
-    bool try_smallm_multi_dispatch_(const TensorID* ids, Tensor* const* outs, int count, const Tensor& input,
+    [[nodiscard]] bool try_smallm_multi_dispatch_(const TensorID* ids, Tensor* const* outs, int count, const Tensor& input,
                                     const GemmContext& ctx);
     // True when an M>1 dispatch of `id` is guaranteed to take the CUTLASS
     // NVFP4 prefill block (which quantizes input into shared activation
     // scratch). Gates the act-quant-hint dedupe at QKV/gate-up call sites;
     // must be CONSERVATIVE: false negative just re-quantizes, false positive skips with stale scratch.
-    bool prefill_routes_cutlass_nvfp4_(TensorID id, int M) const;
+    [[nodiscard]] bool prefill_routes_cutlass_nvfp4_(TensorID id, int M) const;
     // MoE forward-pass phase helpers. The per-call locals live in the
     // MoeFfnContext struct declared just above the GraphExecutor class.
     void moe_ffn_phase1_setup_(int layer, cudaStream_t stream);
@@ -988,7 +1013,7 @@ private:
     // NVFP4→FP16 batch dequant fallback (when CUTLASS 3.x grouped-NVFP4
     // can't fire). Predicate is checked internally; returns true if the
     // path ran.
-    bool try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
+    [[nodiscard]] bool try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     // Legacy MoE prefill path (D2H-sync + serial / batched-dequant /
     // pre-cached-FP16 dispatch). Unconditional — caller selects when no
     // other path matched.
@@ -996,12 +1021,12 @@ private:
     // CUTLASS 3.x NVFP4 BlockScaled grouped GEMM MoE prefill (device-args
     // / smallM / legacy host-args sub-variants). Predicate is checked
     // internally; returns true if the path ran.
-    bool try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
+    [[nodiscard]] bool try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     // Cheap precondition mirror for the device-args fast path, read upstream
     // of moe_gather to skip the gather when the path is guaranteed to fire (it
     // reads ctx.no via sorted_token_ids and doesn't need the gathered
     // intermediate). A mismatch costs at most one wasted gather, never wrong output.
-    bool moe_cutlass3x_will_use_device_args_(int layer, const MoeFfnContext& ctx) const;
+    [[nodiscard]] bool moe_cutlass3x_will_use_device_args_(int layer, const MoeFfnContext& ctx) const;
     // Optional shared expert (parallel dense FFN), called from run_moe_ffn
     // after routed experts wrote into h. Reads `no` (post-norm), adds its
     // result into `h` via elementwise_add. No-op when ly.w_up_shared is null
@@ -1026,31 +1051,35 @@ private:
                                    const Tensor& r, bool moe_use_fp32_residual,
                                    bool will_skip_residual_copy, bool& residual_fused,
                                    bool non_gated_experts);
+    // Host-resident NVFP4 experts, 2..kHostDecodeRowsMax rows: each row through the n == 1 path
+    // above (device expert cache, else host LRU; executor_forward_moe_nvfp4_host.cu).
+    [[nodiscard]] bool host_decode_rows_ok_(int layer, int n, int top_k) const;
+    void run_moe_decode_rows_host_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
 
     // Stages every expert of one host-resident NVFP4 layer into
     // moe_.layer_stage_buf, so prefill reads them from device memory instead
     // of two H2D per expert. Fills `out` with one view per projection; true when at least one was staged.
-    bool stage_nvfp4_layer_(int layer, cudaStream_t stream, const int32_t* expert_offsets,
+    [[nodiscard]] bool stage_nvfp4_layer_(int layer, cudaStream_t stream, const int32_t* expert_offsets,
                             StagedProj out[kExpertProjCount]);
 
     // Builds a CUTLASS device-args view over a layer staged by
     // stage_nvfp4_layer_, so a host-resident layer dispatches like a
     // device-resident one. False when the layer was not staged, a projection
     // could not build its SfAtom view, or the opt-in is off.
-    bool build_staged_device_args_(const MoeFfnContext& ctx, bool non_gated,
+    [[nodiscard]] bool build_staged_device_args_(const MoeFfnContext& ctx, bool non_gated,
                                    MoEWorkspace::PerLayerNvfp4DeviceArgsCache& out) const;
 
     // Stage a host-resident layer (once per MoE call, carried on ctx) and say
     // whether the staged copy can carry the CUTLASS prefill.
-    bool stage_layer_for_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
+    [[nodiscard]] bool stage_layer_for_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
 
     // Chunked staging: experts [e0, e0 + n) of p0 into slot 0 and p1 (-1 = none) into slot 1,
     // SfAtom view and the per-expert pointer entries [e0, e0 + n) of each projection filled.
-    bool stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1, const int32_t* expert_offsets,
+    [[nodiscard]] bool stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1, const int32_t* expert_offsets,
                             cudaStream_t stream);
     // The chunked CUTLASS prefill of a staged-in-blocks host layer: gemm(proj, e0, n) per block,
     // act_quantize between the gate+up and the down pass. False on any stage or GEMM failure.
-    bool run_staged_blocks_(int layer, cudaStream_t stream, const MoeFfnContext& ctx,
+    [[nodiscard]] bool run_staged_blocks_(int layer, cudaStream_t stream, const MoeFfnContext& ctx,
                             const std::function<bool(ExpertProj, int, int)>& gemm,
                             const std::function<void()>& act_quantize);
 
@@ -1063,8 +1092,8 @@ public:
     // (moe.device_expert_cache); no-op when the pool or the mapped pinned slabs are missing.
     // Returns true when every MoE layer whose experts stay on the host is served by it (a
     // captured decode step then replays correctly); the engine demotes graphs otherwise.
-    bool init_device_expert_cache();
-    bool device_expert_cache_covers_host_layers() const;
+    [[nodiscard]] bool init_device_expert_cache();
+    [[nodiscard]] bool device_expert_cache_covers_host_layers() const;
 
 private:
     // Computes MoE routing: gate logits (FP32 router fast-path for Gemma-4
@@ -1098,30 +1127,30 @@ private:
     // dequant scratch. TC variant uses gather-free sorted_token_ids
     // indirection; scalar variant materializes the gathered buffer. Fills
     // moe_.expert_{gate,up,swiglu,down}; true when the path was taken.
-    bool try_run_moe_q6k_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
+    [[nodiscard]] bool try_run_moe_q6k_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
                                  int ne, int expanded, bool non_gated_experts, QType up_qtype,
                                  const MoeRoutingResult& routing, const Tensor& no);
     // Fused Q4_K prefill: reads Q4_K weights directly, FP16 activations from
     // L1/L2 cache. Same interface as Q6_K but with Q4_K dequant logic.
-    bool try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
+    [[nodiscard]] bool try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
                                  int ne, int expanded, bool non_gated_experts, QType up_qtype,
                                  const MoeRoutingResult& routing, const Tensor& no);
     // Gemma-4 ggml MMVQ per-token prefill: FP16 batch dequant + a single
     // cublasGemmGroupedBatchedEx per projection (dequants all experts in one
     // shot). One D2H sync per layer for offsets (unavoidable for the grouped
     // GEMM API). Falls through to scatter; true when the path was taken.
-    bool try_run_moe_fp16_batch_prefill(int layer, cudaStream_t stream, int n, int d, int eff, int ne,
+    [[nodiscard]] bool try_run_moe_fp16_batch_prefill(int layer, cudaStream_t stream, int n, int d, int eff, int ne,
                                         int expanded, bool non_gated_experts, QType up_qtype,
                                         const MoeRoutingResult& routing);
     // FP8 batch prefill: Q6_K → FP8 dequant, per-expert FP16→FP8 quantize,
     // cuBLAS FP8 grouped GEMM → FP16. Falls back to FP16 batch when scales
     // unavailable. Used when FP16 batch buffer can't fit but FP8 can.
-    bool try_run_moe_fp8_batch_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
+    [[nodiscard]] bool try_run_moe_fp8_batch_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
                                        int ne, int expanded, bool non_gated_experts,
                                        QType up_qtype, const MoeRoutingResult& routing);
     void run_ssm(int layer, const InferenceState& state, cudaStream_t stream);
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
-    // Qwen4Exp gated residual (executor_gated_residual.cu). hc_read_ turns the hc streams into the
+    // Qwen4Exp gated residual (executor_gated_residual.cpp). hc_read_ turns the hc streams into the
     // block input in hidden_[n] (and the inject gates when `inject` is set); hc_write_ recovers the
     // block output from hidden_ (block convention: h = mixed + out) and injects it into the streams.
     void hc_read_(const Tensor& norm_w, const Tensor& down, const Tensor& up, const Tensor* inject, int n,
@@ -1129,17 +1158,17 @@ private:
     void hc_write_(int n, cudaStream_t stream);
     [[nodiscard]] bool hc_alloc_(int max_tokens);  // the seven hc_* buffers, no-op without gated_residual
     void hc_free_();
-    // Qwen4Exp PLE (executor_ple.cu): adds the n-gram block's output to the hc streams before
+    // Qwen4Exp PLE (executor_ple.cpp): adds the n-gram block's output to the hc streams before
     // the layer's attention hyper-connection. No-op family without model_->ngram_table().
     [[nodiscard]] bool ple_alloc_(int max_tokens);
     void ple_free_();
-    // Qwen4Exp QSA indexer (executor_qsa.cu). qsa_decode_ replaces the dense decode kernel
+    // Qwen4Exp QSA indexer (executor_qsa.cpp). qsa_decode_ replaces the dense decode kernel
     // for one sequence (false: caller runs dense); qsa_prefill_ recomputes the rows whose
     // selection is no longer all-true after the dense chunk attention.
-    bool qsa_layer_(int layer) const;
+    [[nodiscard]] bool qsa_layer_(int layer) const;
     QsaGeom qsa_geom_(int layer) const;
     [[nodiscard]] bool qsa_alloc_(int max_tokens);
-    bool qsa_ensure_ctx_(const InferenceState& state, cudaStream_t stream);
+    [[nodiscard]] bool qsa_ensure_ctx_(const InferenceState& state, cudaStream_t stream);
     void qsa_free_();
     // ctx_hint: highest context length any of these rows can reach (decode:
     // state.max_context_len, prefill: last position + 1). It only sizes the split-K
@@ -1147,7 +1176,7 @@ private:
     // different order than dense attention on the same bytes.
     void qsa_attend_rows_(int layer, const InferenceState& state, const void* q_rows, void* o_rows, int rows,
                           const int* bt, float scale, int ctx_hint, cudaStream_t stream);
-    bool qsa_decode_(int layer, const InferenceState& state, const Tensor& no, Tensor& qv, Tensor& ao,
+    [[nodiscard]] bool qsa_decode_(int layer, const InferenceState& state, const Tensor& no, Tensor& qv, Tensor& ao,
                      const int* bt, float scale, cudaStream_t stream);
     void qsa_prefill_(int layer, const InferenceState& state, int n, const Tensor& no, Tensor& qv, Tensor& ao,
                       const int* bt, float scale, cudaStream_t stream);
@@ -1166,7 +1195,7 @@ public:
     // per decode step with the host copies of the batch's token ids, n_seq sequences of
     // n/n_seq rows and ple_ctx [n_seq][ple_context_len()]. True = PLE rows staged (set
     // InferenceState::ple_host_ready); false without PLE or on a shape it does not serve.
-    bool prepare_decode_step_host(const int32_t* ids, int n, int n_seq, const int32_t* ple_ctx,
+    [[nodiscard]] bool prepare_decode_step_host(const int32_t* ids, int n, int n_seq, const int32_t* ple_ctx,
                                   cudaStream_t stream);
     // Tokens of n-gram context per PLE row (ngram_size - 1), 0 without PLE.
     int ple_context_len() const;
@@ -1180,11 +1209,11 @@ public:
 private:
 
     // Layer type detection (based on tensor presence)
-    bool layer_has_attention(int layer) const;
-    bool layer_has_ssm(int layer) const;
-    bool layer_has_gdn(int layer) const;
-    bool layer_has_moe(int layer) const;
-    bool layer_has_dense_ffn(int layer) const;
+    [[nodiscard]] bool layer_has_attention(int layer) const;
+    [[nodiscard]] bool layer_has_ssm(int layer) const;
+    [[nodiscard]] bool layer_has_gdn(int layer) const;
+    [[nodiscard]] bool layer_has_moe(int layer) const;
+    [[nodiscard]] bool layer_has_dense_ffn(int layer) const;
 
     // Writes computed K/V into KV cache blocks. Default call (row_begin=0,
     // n_rows=-1, null overrides) is the historical single-sequence path. The

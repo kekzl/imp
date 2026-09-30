@@ -414,7 +414,6 @@ __global__ void __launch_bounds__(256) moe_fused_permute_kernel(const int32_t* _
 // Strategy: thread 0 scans, then walks flat_idx ascending, appending to each expert's
 // bucket -> stable slot assignment. n_experts/total small enough for single-thread scatter.
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void __launch_bounds__(256) moe_fused_permute_deterministic_kernel(
     const int32_t* __restrict__ expert_indices, int n_tokens, int top_k, int n_experts,
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ sorted_flat_idx,
@@ -455,7 +454,9 @@ __global__ void __launch_bounds__(256) moe_fused_permute_deterministic_kernel(
     // flat indices routed to the same expert (#1546), making layout independent of scheduling.
     // One blockDim-sized chunk at a time, chunks in index order, threads counting only lower
     // thread ids -> identical layout to a full single-thread walk.
-    int32_t* s_chunk = smem + 2 * n_experts;  // [blockDim.x]
+    // #2218 bounded: 2 * n_experts < 49152 B / 4 = 12288 (smem bytes moe_routing.cu:602,720, no opt-in:
+    // launch fails above the 48 KiB default dynamic smem)
+    int32_t* s_chunk = smem + static_cast<ptrdiff_t>(2 * n_experts);  // [blockDim.x]
     const int block_n = static_cast<int>(blockDim.x);
     for (int base = 0; base < total; base += block_n) {
         const int idx = base + tid;
@@ -487,7 +488,6 @@ __global__ void __launch_bounds__(256) moe_fused_permute_deterministic_kernel(
         __syncthreads();
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ============================================================================
 // Helper to set up a Tensor descriptor

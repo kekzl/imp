@@ -52,7 +52,7 @@ Source: `src/core/qtype.h`.
 | OpenAI Responses `/v1/responses` | ✅ | the dialect Codex and the Agents SDK speak |
 | SSE streaming, per token, all three dialects | ✅ | one shared driver since v0.18.1 |
 | `/v1/embeddings` | ✅ | |
-| `/v1/rerank` (Cohere/Jina/vLLM shape) | 🟡 | the llama.cpp cross-check is opt-in behind `COMPARE_URL=` (`Makefile:407 --compare $(COMPARE_URL)`), so the default gate does not run it (#1680) |
+| `/v1/rerank` (Cohere/Jina/vLLM shape) | 🟡 | the llama.cpp cross-check is opt-in behind `COMPARE_URL=` (`Makefile:420 --compare $(COMPARE_URL)`), so the default gate does not run it (#1680) |
 | `/tokenize`, `/detokenize`, `/v1/models`, `/health`, `/metrics`, `/props`, `/info` | ✅ | |
 | `/admin/suspend`, `/admin/resume` | 🟡 | frees the GPU in seconds, resumes without re-reading weights. No gate exercises it (#1680) |
 | model swap on request (`server.model_swap`) | 🟡 | in-flight generations drain, never cancelled. No gate exercises it (#1680) |

@@ -271,8 +271,6 @@ namespace {
 
 class CudaMallocBackend final : public Backend {
 public:
-    MemError do_commit(Region&, size_t) override { return MemError::NotGrowable; }
-
     BackendStats stats() const override {
         std::lock_guard<std::mutex> lock(mu_);
         BackendStats s = stats_;
@@ -283,6 +281,8 @@ public:
     size_t capacity() const override { return vram_budget_bytes(); }
 
 protected:
+    MemError do_commit(Region&, size_t) override { return MemError::NotGrowable; }
+
     MemError do_acquire(size_t bytes, size_t alignment, RegionTag, void** out_base,
                         size_t* out_reserved) override {
         // cudaMalloc's own alignment is 256 B and in practice much larger;

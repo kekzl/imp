@@ -62,11 +62,14 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools,
     return prompt;
 }
 
-bool tool_choice_is_enforceable(imp::ChatTemplateFamily family, const json& tool_choice) {
+bool tool_choice_is_enforceable(imp::ChatTemplateFamily family, const json& tool_choice,
+                                bool gemma_native_tool_call) {
     if (tool_choice.is_object() && tool_choice.contains("function")) {
         if (tool_choice["function"].value("name", "").empty())
             return true;  // an object without a name forces nothing
-        return family == imp::ChatTemplateFamily::CHATML || family == imp::ChatTemplateFamily::LLAMA3;
+        return family == imp::ChatTemplateFamily::CHATML || family == imp::ChatTemplateFamily::LLAMA3 ||
+               family == imp::ChatTemplateFamily::HARMONY ||
+               (family == imp::ChatTemplateFamily::GEMMA && gemma_native_tool_call);
     }
     if (tool_choice.is_string() && tool_choice.get<std::string>() == "required")
         return family == imp::ChatTemplateFamily::CHATML;
@@ -113,12 +116,14 @@ std::vector<std::pair<std::string, std::string>> collect_tool_constraint(imp::Ch
     return out;
 }
 
-std::pair<std::string, std::string> collect_llama3_forced_tool(imp::ChatTemplateFamily family,
-                                                               const json& tools, const json& tool_choice) {
-    // Llama3 tool calls (<function=NAME>{JSON}</function>): body IS the arguments object, so only a
-    // FORCED single function maps onto the plain parameter schema here. "required"/auto would need a
-    // name-in-tag enum binding (follow-up); Gemma/Qwen3.6-XML bodies are non-JSON (separate grammar).
-    if (family != imp::ChatTemplateFamily::LLAMA3 || tools.empty())
+ForcedToolEnvelope collect_forced_bare_args_tool(imp::ChatTemplateFamily family, const json& tools,
+                                                 const json& tool_choice, bool gemma_native_tool_call) {
+    // The envelope carries the name, so the body IS the arguments object and only a FORCED single
+    // function maps onto the plain parameter schema. "required"/auto would need a name enum inside the
+    // header (follow-up). Gemma-4 gets a JSON body: tool_call_gemma.cpp parses it next to its own syntax.
+    using F = imp::ChatTemplateFamily;
+    const bool gemma4 = family == F::GEMMA && gemma_native_tool_call;
+    if ((family != F::LLAMA3 && family != F::HARMONY && !gemma4) || tools.empty())
         return {};
     if (!tool_choice.is_object() || !tool_choice.contains("function"))
         return {};
@@ -136,7 +141,19 @@ std::pair<std::string, std::string> collect_llama3_forced_tool(imp::ChatTemplate
         if (!fn.contains("parameters") || !fn["parameters"].is_object() ||
             !fn["parameters"].contains("properties") || fn["parameters"]["properties"].empty())
             return {};
-        return {forced, dump_safe(fn["parameters"])};
+        ForcedToolEnvelope out{forced, dump_safe(fn["parameters"]), "", ""};
+        if (family == F::LLAMA3) {
+            out.open = "<function=" + forced + ">";
+            out.close = "</function>";
+        } else if (family == F::HARMONY) {
+            // gpt-oss emits calls in this header form; split_harmony_channels reads it (#1716).
+            out.open = "<|channel|>commentary to=functions." + forced + " <|constrain|>json<|message|>";
+            out.close = "<|call|>";
+        } else {
+            out.open = "<|tool_call>call:" + forced;
+            out.close = "<tool_call|>";
+        }
+        return out;
     }
     return {};
 }
@@ -398,7 +415,7 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_llama3(
                 }
             }
         } catch (...) {
-            // not JSON — plain content
+            return {text, {}};  // not JSON: plain content
         }
         return {text, {}};
     }
@@ -597,6 +614,25 @@ ToolTagScan scan_tool_tag(const std::string& buf, imp::ChatTemplateFamily family
     return r;
 }
 
+// ChatML JSON body {"name": ..., "arguments": {...}}: true on a non-empty name, false on any
+// parse or type error (the caller then tries the Qwen3.6 XML layout).
+static bool parse_chatml_json_call(const std::string& body, ParsedToolCall& tc) {
+    try {
+        json j = json::parse(body);
+        tc.name = j.value("name", "");
+        if (j.contains("arguments")) {
+            tc.arguments = dump_safe(j["arguments"]);
+        } else {
+            json args = j;
+            args.erase("name");
+            tc.arguments = dump_safe(args);
+        }
+        return !tc.name.empty();
+    } catch (...) {
+        return false;
+    }
+}
+
 bool parse_stream_tool_body(const std::string& body, bool gemma_body, const std::string& fn_name,
                             ParsedToolCall& tc) {
     if (gemma_body)
@@ -615,21 +651,8 @@ bool parse_stream_tool_body(const std::string& body, bool gemma_body, const std:
     }
 
     // ChatML: classic JSON body first ...
-    try {
-        json j = json::parse(body);
-        tc.name = j.value("name", "");
-        if (j.contains("arguments")) {
-            tc.arguments = dump_safe(j["arguments"]);
-        } else {
-            json args = j;
-            args.erase("name");
-            tc.arguments = dump_safe(args);
-        }
-        if (!tc.name.empty())
-            return true;
-    } catch (...) {
-        // fall through to the Qwen3.6 XML layout
-    }
+    if (parse_chatml_json_call(body, tc))
+        return true;
     // ... then Qwen3.6's <function=NAME><parameter=K>V</parameter> layout.
     if (body.find("<function=") != std::string::npos && parse_qwen36_xml_call(body, tc))
         return true;

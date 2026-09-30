@@ -1,6 +1,7 @@
 #include "model/tokenizer.h"
 #include "core/logging.h"
 #include "model/json_util.h"  // shared JValue/JsonParser/jobj_find (was duplicated here)
+#include "model/unicode_class.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
@@ -423,342 +424,53 @@ static std::vector<std::string> gpt2_pre_tokenize(const std::string& text) {
     return result;
 }
 
-// Lightweight non-ASCII classifier for the regex-faithful pre-tokenizers: true when the
-// UTF-8 sequence at text[i] is PUNCTUATION/SYMBOL (not \p{L}/\p{N}), common typographic/
-// technical blocks only; everything else >=0x80 keeps the letter approximation. Without
-// this " ->\n" took the letter rule instead of the symbol run and diverged from canonical
-// segmentation (#657).
-static bool utf8_punct_symbol(const std::string& text, size_t i) {
-    const unsigned char c0 = static_cast<unsigned char>(text[i]);
-    uint32_t cp = 0;
-    if ((c0 & 0xE0) == 0xC0 && i + 1 < text.size()) {
-        cp = ((c0 & 0x1F) << 6) | (static_cast<unsigned char>(text[i + 1]) & 0x3F);
-    } else if ((c0 & 0xF0) == 0xE0 && i + 2 < text.size()) {
-        cp = ((c0 & 0x0F) << 12) | ((static_cast<unsigned char>(text[i + 1]) & 0x3F) << 6) |
-             (static_cast<unsigned char>(text[i + 2]) & 0x3F);
-    } else {
-        return false;  // 4-byte (emoji etc.) and malformed: keep letter approx
-    }
-    // Latin-1 punctuation/symbols: ¡ « ° ± § © … (excluding letters À-ÿ)
-    if ((cp >= 0xA0 && cp <= 0xBF) || cp == 0xD7 || cp == 0xF7)
-        return true;
-    // General punctuation … bullets, dashes, quotes (U+2000-206F), super/sub-
-    // scripts, currency, letterlike, arrows, math, technical, box drawing,
-    // geometric shapes, misc symbols, dingbats (… U+2BFF).
-    if (cp >= 0x2000 && cp <= 0x2BFF)
-        return true;
-    // CJK punctuation 。、「」 (U+3000-303F).
-    if (cp >= 0x3000 && cp <= 0x303F)
-        return true;
-    return false;
+namespace {
+
+bool jnum_true(const JValue* v) { return v && v->type == JType::NUMBER && v->num_val != 0.0; }
+
+// tokenizer.json added_tokens `lstrip` (bit 0) / `rstrip` (bit 1).
+uint8_t added_token_strip(const JValue& tok) {
+    return static_cast<uint8_t>((jnum_true(jobj_find(tok, "lstrip")) ? 1 : 0) |
+                                (jnum_true(jobj_find(tok, "rstrip")) ? 2 : 0));
 }
 
-// Faithful hand-rolled scan of the Qwen2 pre-tokenizer regex (canonical Qwen2/Qwen3
-// segmentation; llama.cpp LLAMA_VOCAB_PRE_TYPE_QWEN2):
-//   (?i:'s|'t|'re|'ve|'m|'ll|'d)        contractions
-//   | [^\r\n\p{L}\p{N}]?\p{L}+          one optional prefix char + letter run
-//   | \p{N}                             SINGLE digit
-//   |  ?[^\s\p{L}\p{N}]+[\r\n]*         optional space + SYMBOL RUN + newlines
-//   | \s*[\r\n]+ | \s+(?!\S) | \s+      whitespace variants
-// Routing through gpt2_pre_tokenize instead (single-char punctuation, digit-groups-of-3)
-// blocks cross-symbol BPE merges and mis-segments code/markdown (#657). \p{L} is
-// approximated as ASCII isalpha() or any non-ASCII byte. Shared with cl100k, which differs
-// only in the digit rule: cl100k groups up to three (\p{N}{1,3}; Phi-4/GPT-4 tiktoken).
-static std::vector<std::string> qwen2_like_pre_tokenize(const std::string& text, int max_digit_run) {
-    std::vector<std::string> result;
-    const size_t n = text.size();
-    auto utf8_step = [&](size_t k) -> size_t {
-        const unsigned char ck = static_cast<unsigned char>(text[k]);
-        size_t len = 1;
-        if ((ck & 0xE0) == 0xC0)
-            len = 2;
-        else if ((ck & 0xF0) == 0xE0)
-            len = 3;
-        else if ((ck & 0xF8) == 0xF0)
-            len = 4;
-        return (len <= n - k) ? len : 1;
-    };
-    // Position-aware \p{L} approximation: ASCII alpha, or a non-ASCII
-    // codepoint that is not a known punctuation/symbol block (→ — “ etc.).
-    auto is_letter_at = [&](size_t k) {
-        const unsigned char ck = static_cast<unsigned char>(text[k]);
-        if (ck < 128)
-            return std::isalpha(ck) != 0;
-        return !utf8_punct_symbol(text, k);
-    };
-    auto is_dig = [](unsigned char c) { return std::isdigit(c) != 0; };
-    auto is_ws = [](unsigned char c) {
-        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
-    };
-    auto is_nl = [](unsigned char c) { return c == '\n' || c == '\r'; };
-
-    size_t i = 0;
-    while (i < n) {
-        const unsigned char c = static_cast<unsigned char>(text[i]);
-
-        // 1. Contractions 's 't 're 've 'm 'll 'd (case-insensitive).
-        if (c == '\'' && i + 1 < n) {
-            const char c1 = static_cast<char>(std::tolower(static_cast<unsigned char>(text[i + 1])));
-            const char c2 =
-                (i + 2 < n) ? static_cast<char>(std::tolower(static_cast<unsigned char>(text[i + 2]))) : 0;
-            size_t clen = 0;
-            if (c1 == 's' || c1 == 't' || c1 == 'm' || c1 == 'd')
-                clen = 2;
-            else if ((c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e') || (c1 == 'l' && c2 == 'l'))
-                clen = 3;
-            if (clen > 0) {
-                result.push_back(text.substr(i, clen));
-                i += clen;
-                continue;
-            }
-        }
-
-        // 2. [^\r\n\p{L}\p{N}]?\p{L}+ — one optional non-letter/digit/newline
-        //    prefix CODEPOINT (space, tab, or punctuation) glued to a letter run.
-        {
-            size_t j = i;
-            if (!is_letter_at(i) && !is_dig(c) && !is_nl(c))
-                j = i + utf8_step(i);  // candidate prefix codepoint
-            if (j < n && is_letter_at(j)) {
-                size_t k = j;
-                while (k < n && is_letter_at(k))
-                    k += utf8_step(k);
-                result.push_back(text.substr(i, k - i));
-                i = k;
-                continue;
-            }
-        }
-
-        // 3. Digit rule: \p{N} (qwen2) or \p{N}{1,3} (cl100k).
-        if (is_dig(c)) {
-            size_t k = i;
-            while (k < n && k - i < static_cast<size_t>(max_digit_run) &&
-                   is_dig(static_cast<unsigned char>(text[k])))
-                k++;
-            result.push_back(text.substr(i, k - i));
-            i = k;
-            continue;
-        }
-
-        // 4. ' '?[^\s\p{L}\p{N}]+[\r\n]* — optional space + symbol run + newlines.
-        {
-            size_t j = i + (text[i] == ' ' ? 1 : 0);
-            size_t k = j;
-            while (k < n) {
-                const unsigned char ck = static_cast<unsigned char>(text[k]);
-                if (is_ws(ck) || is_dig(ck) || is_letter_at(k))
-                    break;
-                k += utf8_step(k);  // ASCII symbol or non-ASCII punct/symbol cp
-            }
-            if (k > j) {
-                while (k < n && is_nl(static_cast<unsigned char>(text[k])))
-                    k++;
-                result.push_back(text.substr(i, k - i));
-                i = k;
-                continue;
-            }
-        }
-
-        // 5.-7. Whitespace rules.
-        if (is_ws(c)) {
-            size_t k = i;
-            size_t last_nl = std::string::npos;
-            while (k < n && is_ws(static_cast<unsigned char>(text[k]))) {
-                if (is_nl(static_cast<unsigned char>(text[k])))
-                    last_nl = k;
-                k++;
-            }
-            if (last_nl != std::string::npos) {
-                // \s*[\r\n]+ — greedy up to the LAST newline in the run; any
-                // trailing spaces/tabs stay for the next match (they become
-                // the ' ?' / prefix of the following chunk).
-                result.push_back(text.substr(i, last_nl + 1 - i));
-                i = last_nl + 1;
-                continue;
-            }
-            if (k >= n) {
-                // \s+(?!\S) — trailing whitespace at end of text.
-                result.push_back(text.substr(i, k - i));
-                i = k;
-                continue;
-            }
-            if (k - i > 1) {
-                // \s+(?!\S) with backtracking: leave ONE space for the next
-                // chunk ("    return" → ["   ", " return"]).
-                result.push_back(text.substr(i, k - i - 1));
-                i = k - 1;
-                continue;
-            }
-            // \s+ — single whitespace char the letter/symbol rules didn't take
-            // (e.g. the space in " 5": digits don't absorb a leading space).
-            result.push_back(text.substr(i, 1));
-            i += 1;
-            continue;
-        }
-
-        // Unreachable in practice (every byte class is handled above).
-        result.push_back(text.substr(i, 1));
-        i += 1;
-    }
-    return result;
+// A Split step's pattern.Regex, "" when it has none.
+std::string split_regex(const JValue& pt) {
+    std::string rx;
+    const JValue* pat = jobj_find(pt, "pattern");
+    if (pat && pat->type == JType::OBJECT)
+        jobj_opt_string(*pat, "Regex", rx);
+    return rx;
 }
 
-std::vector<std::string> qwen2_pre_tokenize(const std::string& text) {
-    return qwen2_like_pre_tokenize(text, /*max_digit_run=*/1);
+// A pre-tokenizer Split step as a scanner step: "re:<regex>" for an Isolated, non-inverted regex
+// split, "!" for any other (not expressible).
+std::string split_step(const JValue& pt) {
+    std::string behavior;
+    jobj_opt_string(pt, "behavior", behavior);
+    const JValue* pat = jobj_find(pt, "pattern");
+    std::string rx;
+    const bool regex = pat && pat->type == JType::OBJECT && jobj_get_string(*pat, "Regex", rx);
+    return regex && behavior == "Isolated" && !jnum_true(jobj_find(pt, "invert")) ? "re:" + rx : "!";
 }
 
-std::vector<std::string> cl100k_pre_tokenize(const std::string& text) {
-    return qwen2_like_pre_tokenize(text, /*max_digit_run=*/3);
+// Family named by a Split step's regex (tokenizer_pretok.cpp), "" when none matches (gpt2, #657).
+// Case classes: o200k (contractions) or Nemotron-H (none, single digits); else digit triples:
+// cl100k; [\p{L}\p{M}]+ letter runs: Qwen3.5+; plain contraction list: qwen2.
+std::string pretok_family(const std::string& rx) {
+    const bool contractions = rx.find("'s|'t|'re|'ve|'m|'ll|'d") != std::string::npos;
+    if (rx.find("\\p{Lu}") != std::string::npos)
+        return contractions ? "o200k" : "nemotron";
+    if (!contractions)
+        return "";
+    if (rx.find("\\p{N}{1,3}") != std::string::npos)
+        return "cl100k";
+    if (rx.find("[\\p{L}\\p{M}]+") != std::string::npos)
+        return "qwen35";
+    return "qwen2";
 }
 
-// Faithful hand-rolled scan of the o200k_harmony pre-tokenizer regex (gpt-oss
-// tokenizer.json; llama.cpp pre type "gpt-4o"):
-//   [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?
-// | [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?
-//   | \p{N}{1,3}                       digit runs up to THREE
-//   |  ?[^\s\p{L}\p{N}]+[\r\n/]*       symbol run + trailing newlines/slashes
-//   | \s*[\r\n]+ | \s+(?!\S) | \s+     whitespace (same as qwen2)
-// vs qwen2: CASE-AWARE letter runs (upper-run then lower-run: "camelCase"->"camel|Case",
-// "HTTPSession" stays whole), contractions attach as a SUFFIX, digits group 1-3, symbol run
-// also includes '/'. \p{Lu} approximated as ASCII uppercase; non-ASCII bytes count as
-// lowercase-class letters (union segmentation unaffected since both classes include Lm/Lo/M).
-std::vector<std::string> o200k_pre_tokenize(const std::string& text) {
-    std::vector<std::string> result;
-    const size_t n = text.size();
-    auto is_upper = [](unsigned char c) { return c >= 'A' && c <= 'Z'; };
-    // Position-aware lowercase-class approximation: ASCII a-z, or a non-ASCII
-    // codepoint outside the known punctuation/symbol blocks.
-    auto is_lower_at = [&](size_t k) {
-        const unsigned char ck = static_cast<unsigned char>(text[k]);
-        if (ck < 128)
-            return ck >= 'a' && ck <= 'z';
-        return !utf8_punct_symbol(text, k);
-    };
-    auto is_letter_at = [&](size_t k) {
-        return is_upper(static_cast<unsigned char>(text[k])) || is_lower_at(k);
-    };
-    auto is_dig = [](unsigned char c) { return std::isdigit(c) != 0; };
-    auto is_ws = [](unsigned char c) {
-        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
-    };
-    auto is_nl = [](unsigned char c) { return c == '\n' || c == '\r'; };
-    auto utf8_step = [&](size_t k) -> size_t {
-        const unsigned char ck = static_cast<unsigned char>(text[k]);
-        size_t len = 1;
-        if ((ck & 0xE0) == 0xC0)
-            len = 2;
-        else if ((ck & 0xF0) == 0xE0)
-            len = 3;
-        else if ((ck & 0xF8) == 0xF0)
-            len = 4;
-        return (len <= n - k) ? len : 1;
-    };
-    // Optional contraction SUFFIX after a letter run: 's 't 'm 'd 're 've 'll.
-    auto contraction_len = [&](size_t k) -> size_t {
-        if (k >= n || text[k] != '\'' || k + 1 >= n)
-            return 0;
-        const char c1 = static_cast<char>(std::tolower(static_cast<unsigned char>(text[k + 1])));
-        const char c2 =
-            (k + 2 < n) ? static_cast<char>(std::tolower(static_cast<unsigned char>(text[k + 2]))) : 0;
-        if ((c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e') || (c1 == 'l' && c2 == 'l'))
-            return 3;
-        if (c1 == 's' || c1 == 't' || c1 == 'm' || c1 == 'd')
-            return 2;
-        return 0;
-    };
-
-    size_t i = 0;
-    while (i < n) {
-        const unsigned char c = static_cast<unsigned char>(text[i]);
-
-        // 1.+2. Case-aware letter rules: optional non-letter/digit/newline
-        //       prefix CODEPOINT, then upper-run + lower-run (≥1 letter
-        //       total), then an optional contraction suffix.
-        {
-            size_t j = i;
-            if (!is_letter_at(i) && !is_dig(c) && !is_nl(c))
-                j = i + utf8_step(i);  // candidate prefix codepoint
-            size_t k = j;
-            while (k < n && is_upper(static_cast<unsigned char>(text[k])))
-                k++;
-            while (k < n && is_lower_at(k))
-                k += utf8_step(k);
-            if (k > j) {
-                k += contraction_len(k);
-                result.push_back(text.substr(i, k - i));
-                i = k;
-                continue;
-            }
-        }
-
-        // 3. \p{N}{1,3} — digit runs of up to three.
-        if (is_dig(c)) {
-            size_t k = i;
-            while (k < n && k - i < 3 && is_dig(static_cast<unsigned char>(text[k])))
-                k++;
-            result.push_back(text.substr(i, k - i));
-            i = k;
-            continue;
-        }
-
-        // 4. ' '?[^\s\p{L}\p{N}]+[\r\n/]* — symbol run + trailing newlines/slashes.
-        {
-            size_t j = i + (text[i] == ' ' ? 1 : 0);
-            size_t k = j;
-            while (k < n) {
-                const unsigned char ck = static_cast<unsigned char>(text[k]);
-                if (is_ws(ck) || is_dig(ck) || is_letter_at(k))
-                    break;
-                k += utf8_step(k);  // ASCII symbol or non-ASCII punct/symbol cp
-            }
-            if (k > j) {
-                while (k < n) {
-                    const unsigned char ck = static_cast<unsigned char>(text[k]);
-                    if (!is_nl(ck) && ck != '/')
-                        break;
-                    k++;
-                }
-                result.push_back(text.substr(i, k - i));
-                i = k;
-                continue;
-            }
-        }
-
-        // 5.-7. Whitespace rules (identical to qwen2_pre_tokenize).
-        if (is_ws(c)) {
-            size_t k = i;
-            size_t last_nl = std::string::npos;
-            while (k < n && is_ws(static_cast<unsigned char>(text[k]))) {
-                if (is_nl(static_cast<unsigned char>(text[k])))
-                    last_nl = k;
-                k++;
-            }
-            if (last_nl != std::string::npos) {
-                result.push_back(text.substr(i, last_nl + 1 - i));
-                i = last_nl + 1;
-                continue;
-            }
-            if (k >= n) {
-                result.push_back(text.substr(i, k - i));
-                i = k;
-                continue;
-            }
-            if (k - i > 1) {
-                result.push_back(text.substr(i, k - i - 1));
-                i = k - 1;
-                continue;
-            }
-            result.push_back(text.substr(i, 1));
-            i += 1;
-            continue;
-        }
-
-        // Unreachable in practice (every byte class is handled above).
-        result.push_back(text.substr(i, 1));
-        i += 1;
-    }
-    return result;
-}
+}  // namespace
 
 // ---- Load vocabulary ----
 
@@ -795,7 +507,7 @@ bool Tokenizer::load(const std::string& path) {
 
     // Model type
     std::string model_type;
-    jobj_get_string(*model, "type", model_type);
+    jobj_opt_string(*model, "type", model_type);
 
     // Extract vocabulary from model.vocab
     const JValue* vocab = jobj_find(*model, "vocab");
@@ -909,6 +621,12 @@ bool Tokenizer::load(const std::string& path) {
             vocab_[id] = content;
             token_to_id_[content] = id;
             added_token_ids_[id] = true;
+            const uint8_t strip = added_token_strip(tok);
+            if (strip) {
+                if (id >= static_cast<int>(strip_flags_.size()))
+                    strip_flags_.resize(id + 1, 0);
+                strip_flags_[id] = strip;
+            }
             if (is_special)
                 token_types_[id] = 3;  // CONTROL (atomic-match + decode-skippable)
             else if (is_normalized_false)
@@ -937,7 +655,7 @@ bool Tokenizer::load(const std::string& path) {
     nfc_ = false;
     if (const JValue* norm = jobj_find(root, "normalizer"); norm && norm->type == JType::OBJECT) {
         std::string nt;
-        jobj_get_string(*norm, "type", nt);
+        jobj_opt_string(*norm, "type", nt);
         nfc_ = nt == "NFC";
         const JValue* seq = nt == "Sequence" ? jobj_find(*norm, "normalizers") : nullptr;
         if (seq && seq->type == JType::ARRAY) {
@@ -953,7 +671,7 @@ bool Tokenizer::load(const std::string& path) {
     const JValue* pre_tok = jobj_find(root, "pre_tokenizer");
     if (pre_tok && pre_tok->type == JType::OBJECT) {
         std::string pt_type;
-        jobj_get_string(*pre_tok, "type", pt_type);
+        jobj_opt_string(*pre_tok, "type", pt_type);
 
         if (pt_type == "ByteLevel") {
             type_ = "gpt2";
@@ -970,35 +688,25 @@ bool Tokenizer::load(const std::string& path) {
         } else if (pt_type == "Sequence") {
             // Check inner pre-tokenizers for ByteLevel or Metaspace
             const JValue* pretoks = jobj_find(*pre_tok, "pretokenizers");
+            // Steps for a regex list no family scanner covers (DeepSeek-V2); "!" = not expressible.
+            std::vector<std::string> split_steps;
+            bool byte_level_regex = false;
             if (pretoks && pretoks->type == JType::ARRAY) {
                 for (const auto& pt : pretoks->arr) {
                     if (pt.type != JType::OBJECT)
                         continue;
                     std::string inner_type;
-                    jobj_get_string(pt, "type", inner_type);
+                    jobj_opt_string(pt, "type", inner_type);
+                    if (inner_type == "Digits") {
+                        split_steps.push_back(jnum_true(jobj_find(pt, "individual_digits")) ? "digits:1"
+                                                                                            : "digits:0");
+                        continue;
+                    }
                     if (inner_type == "Split") {
-                        // HF tokenizer.json carries the literal pre-tokenizer regex in a Split step;
-                        // discriminate
-                        // families by regex fingerprint and route to the faithful scanners, or SafeTensors
-                        // models
-                        // fall to the gpt2 fallback's non-canonical segmentation (#657). "{1,3}" digit
-                        // grouping ->
-                        // o200k (check first: its regex also has the contraction list); contraction
-                        // alternation ->
-                        // qwen2.
-                        const JValue* pattern = jobj_find(pt, "pattern");
-                        std::string rx;
-                        if (pattern && pattern->type == JType::OBJECT)
-                            jobj_get_string(*pattern, "Regex", rx);
-                        // Fingerprints, most specific first: only o200k uses case classes (\p{Lu}); cl100k
-                        // shares
-                        // qwen2's rules except digit triples ({1,3}); plain contraction alternation -> qwen2.
-                        if (rx.find("\\p{Lu}") != std::string::npos)
-                            pre_tokenizer_ = "o200k";
-                        else if (rx.find("{1,3}") != std::string::npos)
-                            pre_tokenizer_ = "cl100k";
-                        else if (rx.find("'s|'t|'re|'ve|'m|'ll|'d") != std::string::npos)
-                            pre_tokenizer_ = "qwen2";
+                        split_steps.push_back(split_step(pt));
+                        const std::string family = pretok_family(split_regex(pt));
+                        if (!family.empty())
+                            pre_tokenizer_ = family;
                         continue;
                     }
                     if (inner_type == "ByteLevel") {
@@ -1008,6 +716,8 @@ bool Tokenizer::load(const std::string& path) {
                             add_space_prefix_ = (prefix->num_val != 0.0);
                         else
                             add_space_prefix_ = false;
+                        const JValue* ur = jobj_find(pt, "use_regex");
+                        byte_level_regex = !ur || ur->type != JType::NUMBER || ur->num_val != 0.0;
                         break;
                     }
                     if (inner_type == "Metaspace") {
@@ -1018,6 +728,15 @@ bool Tokenizer::load(const std::string& path) {
                         break;
                     }
                 }
+                if (pre_tokenizer_.empty() && !split_steps.empty() && !byte_level_regex && type_ == "gpt2") {
+                    split_seq_ = compile_split_sequence(split_steps);
+                    if (split_seq_)
+                        pre_tokenizer_ = "split-seq";
+                    else
+                        IMP_LOG_WARN(
+                            "tokenizer.json: pre-tokenizer regex list not supported, using the generic "
+                            "split");
+                }
             }
         }
     } else if (model_type == "BPE") {
@@ -1026,6 +745,23 @@ bool Tokenizer::load(const std::string& path) {
         add_space_prefix_ = false;
     } else if (model_type == "Unigram") {
         type_ = "spm";
+    }
+
+    // Gemma-4: BPE on raw UTF-8 with a Replace(" " -> "▁") normalizer and no ByteLevel step is
+    // the GGUF "gemma4" tokenizer. As "spm" it got score-based merges and a ▁ prefix.
+    if (model_type == "BPE" && type_ != "gpt2") {
+        const JValue* norm = jobj_find(root, "normalizer");
+        std::string nt, from, to;
+        if (norm && norm->type == JType::OBJECT && jobj_get_string(*norm, "type", nt) && nt == "Replace") {
+            const JValue* pat = jobj_find(*norm, "pattern");
+            if (pat && pat->type == JType::OBJECT)
+                jobj_opt_string(*pat, "String", from);
+            jobj_opt_string(*norm, "content", to);
+        }
+        if (from == " " && to == "\xe2\x96\x81") {
+            type_ = "gemma4";
+            add_space_prefix_ = false;
+        }
     }
 
     // For Unigram models, populate scores from model.vocab (array of [token, score])
@@ -1227,8 +963,13 @@ struct PieceChunk {
     std::string text;
     int32_t special_id = -1;
 };
+bool is_space_at(const std::string& s, size_t k, size_t* len) {
+    return (unicode::cp_class(unicode::decode_utf8_at(s, k, len)) & unicode::kSpace) != 0;
+}
+
 std::vector<PieceChunk> split_on_special(const std::string& text,
-                                         const std::vector<std::pair<std::string, int32_t>>& specials) {
+                                         const std::vector<std::pair<std::string, int32_t>>& specials,
+                                         const std::vector<uint8_t>& strip) {
     std::vector<PieceChunk> out;
     if (specials.empty()) {
         if (!text.empty())
@@ -1249,10 +990,22 @@ std::vector<PieceChunk> split_on_special(const std::string& text,
             if (i + L > text.size())
                 continue;
             if (std::memcmp(text.data() + i, piece.data(), L) == 0) {
-                if (i > cur)
-                    out.push_back({text.substr(cur, i - cur), -1});
+                const uint8_t st = id >= 0 && static_cast<size_t>(id) < strip.size() ? strip[id] : 0;
+                size_t left = i, len;
+                if (st & 1) {  // lstrip: drop the whitespace run before the token
+                    size_t k = cur;
+                    for (size_t p = cur; p < i; p += len)
+                        if (!is_space_at(text, p, &len))
+                            k = p + len;
+                    left = k;
+                }
+                if (left > cur)
+                    out.push_back({text.substr(cur, left - cur), -1});
                 out.push_back({"", id});
                 i += L;
+                if (st & 2)  // rstrip: drop the whitespace run after it
+                    while (i < text.size() && is_space_at(text, i, &len))
+                        i += len;
                 cur = i;
                 matched = true;
                 break;
@@ -1276,7 +1029,7 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
     // marker text as raw UTF-8, never emitting the trained single-token id. Recurses once with
     // the marker stripped so BPE runs on the clean substring.
     if (!special_pieces_.empty()) {
-        auto pieces = split_on_special(text, special_pieces_);
+        auto pieces = split_on_special(text, special_pieces_, strip_flags_);
         bool any_special = false;
         for (const auto& p : pieces)
             if (p.special_id >= 0) {
@@ -1556,7 +1309,7 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
     // 0. Pre-split on registered control / added tokens (e.g. <|tool_call>,
     //    <|channel>, <|tool>) so each is emitted as its single token id
     //    instead of being BPE'd as raw UTF-8.
-    auto pieces = split_on_special(text, special_pieces_);
+    auto pieces = split_on_special(text, special_pieces_, strip_flags_);
     std::vector<int32_t> out_ids;
     out_ids.reserve(text.size());
     for (const auto& p : pieces) {
@@ -1746,7 +1499,7 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
     // Pre-splits on registered control tokens: models like Qwen3.6/Hermes rely on
     // multi-character markers (e.g. <|im_start|>, <|tool_call>) the pre-tokenizer regex doesn't
     // always isolate cleanly; an explicit longest-match pass guarantees the round-trip.
-    auto pieces = split_on_special(text, special_pieces_);
+    auto pieces = split_on_special(text, special_pieces_, strip_flags_);
     std::vector<int32_t> out_ids;
     out_ids.reserve(text.size());
     std::unordered_map<std::string, std::vector<int32_t>> chunk_ids;  // per call: repeated words
@@ -1763,20 +1516,19 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
         std::vector<std::string> chunks;
         if (pre_tokenizer_ == "llama3" || pre_tokenizer_ == "llama-v3" || pre_tokenizer_ == "llama-bpe") {
             chunks = llama3_pre_tokenize(bpe_text);
-        } else if (pre_tokenizer_ == "qwen2" || pre_tokenizer_ == "qwen35") {
-            // Qwen2/Qwen3: canonical regex incl. symbol runs and single digits; the gpt2 fallback's
-            // per-char punctuation blocks canonical merges like "->", "():" (#657). "qwen35"
-            // (Qwen3.5/3.6 GGUFs) differs from qwen2 only by adding \p{M} to the letter run, already
-            // covered by is_letter_at; falling through to gpt2 instead over-split symbol runs.
+        } else if (pre_tokenizer_ == "qwen2") {
+            // The gpt2 fallback's per-char punctuation blocks merges like "->", "():" (#657).
             chunks = qwen2_pre_tokenize(bpe_text);
+        } else if (pre_tokenizer_ == "qwen35") {
+            chunks = qwen35_pre_tokenize(bpe_text);
         } else if (pre_tokenizer_ == "o200k" || pre_tokenizer_ == "gpt-4o") {
-            // gpt-oss / GPT-4o family (o200k_harmony): case-aware letter runs,
-            // digit triples, slash-aware symbol runs (#657).
             chunks = o200k_pre_tokenize(bpe_text);
+        } else if (pre_tokenizer_ == "nemotron") {
+            chunks = nemotron_pre_tokenize(bpe_text);
         } else if (pre_tokenizer_ == "cl100k") {
-            // GPT-4/tiktoken cl100k lineage (Phi-4): qwen2 rules with digit
-            // triples (#657).
             chunks = cl100k_pre_tokenize(bpe_text);
+        } else if (pre_tokenizer_ == "split-seq" && split_seq_) {
+            chunks = split_sequence_pre_tokenize(*split_seq_, bpe_text);
         } else {
             chunks = gpt2_pre_tokenize(bpe_text);
         }

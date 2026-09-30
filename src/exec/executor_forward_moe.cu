@@ -8,6 +8,7 @@
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_forward_moe_internal.h"
+#include "exec/executor_forward_moe_kernels.cuh"
 #include "exec/gemm_context.h"
 #include "exec/executor_debug.h"
 #include <atomic>
@@ -130,11 +131,11 @@ void GraphExecutor::moe_ffn_phase1_setup_(int layer, cudaStream_t stream) {
     // legacy-serial-fallback uninit read becomes a deterministic zero.
     // Enabled via moe.zero_workspace. Cheap (~1 MiB memset).
     if (dispatch_policy().moe.zero_workspace) {
-        cudaMemsetAsync(moe_.expert_gate.data, 0, moe_.expert_gate.nbytes(), stream);
-        cudaMemsetAsync(moe_.expert_up.data, 0, moe_.expert_up.nbytes(), stream);
-        cudaMemsetAsync(moe_.expert_swiglu.data, 0, moe_.expert_swiglu.nbytes(), stream);
-        cudaMemsetAsync(moe_.expert_down.data, 0, moe_.expert_down.nbytes(), stream);
-        cudaMemsetAsync(moe_.gathered.data, 0, moe_.gathered.nbytes(), stream);
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_gate.data, 0, moe_.expert_gate.nbytes(), stream));
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_up.data, 0, moe_.expert_up.nbytes(), stream));
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_swiglu.data, 0, moe_.expert_swiglu.nbytes(), stream));
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.expert_down.data, 0, moe_.expert_down.nbytes(), stream));
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.gathered.data, 0, moe_.gathered.nbytes(), stream));
     }
 }
 
@@ -454,6 +455,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                             will_skip_residual_copy, residual_fused);
         goto moe_after_experts;
     }
+    // Host-resident NVFP4 experts, 2..8 rows (a speculative verify, n = k + 1): row by row through
+    // the n == 1 host-expert path. The general path below stages whole layers over PCIe.
+    if (host_decode_rows_ok_(layer, n, top_k)) {
+        run_moe_decode_rows_host_(layer, stream, ctx);
+        goto moe_after_experts;
+    }
 
     // =========================================================================
     // GENERAL PATH: prefill or host-offloaded or non-Q6K/Q8_0 experts
@@ -545,11 +552,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 }
                 if (can_fp16_batch_nosync) {
                     dispatch_record::set_moe_prefill_outer(MoePrefillOuter::FP16_BATCH);
-                    try_run_moe_fp16_batch_prefill(layer, stream, n, d, eff, ne, expanded, non_gated_experts,
+                    // Always true: failures throw (moe_host_args_ok_or_throw).
+                    (void)try_run_moe_fp16_batch_prefill(layer, stream, n, d, eff, ne, expanded, non_gated_experts,
                                                    up_qtype, routing);
                 } else if (can_fp8_batch) {
                     dispatch_record::set_moe_prefill_outer(MoePrefillOuter::FP8_BATCH);
-                    try_run_moe_fp8_batch_prefill(layer, stream, n, d, eff, ne, expanded,
+                    // Always true: failures throw (moe_host_args_ok_or_throw).
+                    (void)try_run_moe_fp8_batch_prefill(layer, stream, n, d, eff, ne, expanded,
                                                   non_gated_experts, up_qtype, routing);
 
                     // Falls through to scatter (step 7)

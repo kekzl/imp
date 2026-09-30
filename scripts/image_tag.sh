@@ -24,7 +24,9 @@ tree_id() {
     local top idx rc
     top="$(git rev-parse --show-toplevel 2>/dev/null)" || return 1
     idx="$(mktemp)"
-    cp "$(git -C "$top" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || : > "$idx"
+    # -p keeps the index mtime: git's racy check hashes entries stat'd in the index's own second.
+    # A fresh mtime hid a same-second, same-size edit (#2287).
+    cp -p "$(git -C "$top" rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null || : > "$idx"
     GIT_INDEX_FILE="$idx" git -C "$top" add -A -- . >/dev/null 2>&1 \
         && GIT_INDEX_FILE="$idx" git -C "$top" write-tree
     rc=$?

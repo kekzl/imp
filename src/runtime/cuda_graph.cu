@@ -14,6 +14,15 @@
 
 namespace imp {
 
+namespace {
+// Teardown trim of the current device's graph memory pool: best effort, logged.
+void trim_graph_mem() {
+    int dev = 0;
+    IMP_CUDA_CHECK_VOID(cudaGetDevice(&dev));
+    IMP_CUDA_CHECK_LOG(cudaDeviceGraphMemTrim(dev));
+}
+}  // namespace
+
 // runtime.graph_capture_mode = "global" | "relaxed" (default) | "thread_local": selects the
 // cudaStreamCaptureMode used by CudaGraphCapture::begin_capture and the ConditionalRunner
 // body-graph capture. Probed at first call and cached.
@@ -311,7 +320,7 @@ void CudaGraphCapture::abort_capture() {
     (void)cudaStreamEndCapture(capture_stream_, &g);
     graph_diag::g_phase = graph_diag::Phase::NORMAL;
     if (g)
-        cudaGraphDestroy(g);
+        IMP_CUDA_CHECK_LOG(cudaGraphDestroy(g));
     (void)cudaGetLastError();  // clear the sticky capture-invalidated error
     capture_stream_ = nullptr;
 }
@@ -325,7 +334,7 @@ void abort_stream_capture(cudaStream_t stream) {
     cudaGraph_t g = nullptr;
     (void)cudaStreamEndCapture(stream, &g);
     if (g)
-        cudaGraphDestroy(g);
+        IMP_CUDA_CHECK_LOG(cudaGraphDestroy(g));
     (void)cudaGetLastError();
     IMP_LOG_WARN("abort_stream_capture: closed a stray open capture (stream %p)", (void*)stream);
 }
@@ -340,9 +349,7 @@ void CudaGraphCapture::reset() {
     // 128-expert MoE models) hold reserved VRAM until process exit, compounding across
     // re-captures. Trim is a no-op when the pool is already empty.
     if (had_exec) {
-        int dev = 0;
-        cudaGetDevice(&dev);
-        cudaDeviceGraphMemTrim(dev);
+        trim_graph_mem();
     }
 }
 
@@ -675,6 +682,56 @@ __global__ void post_decode_step_kernel(
     }
 }
 
+namespace {
+// Pre-capture sync, then capture into body; the first failure is returned.
+cudaError_t sync_then_begin_capture(cudaStream_t stream, cudaGraph_t body) {
+    const cudaError_t err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess)
+        return err;
+    return cudaStreamBeginCaptureToGraph(stream, body, nullptr, nullptr, 0, get_capture_mode());
+}
+}  // namespace
+
+bool CudaGraphConditionalRunner::capture_decode_body_(GraphExecutor* executor,
+                                                      const InferenceState& body_state, cudaStream_t stream) {
+    // 5a. Forward decode step: embedding → layers → norm → LM head → sample. Writes sampled
+    // token to d_token_id_. The h_mapped parameter receives a D2H copy each iteration
+    // (harmless scratch write; the real ring buffer write is in post_decode_step_kernel below).
+    // NOTE: h_mapped scratch must NOT alias h_step_counter_: poll_new_tokens reads the counter
+    // concurrently, and this per-iteration D2H copy would transiently overwrite it with a token id.
+    // false = no sampler in the body: every replay would emit the stale d_token_id_ (#2307).
+    const bool sampler_enqueued = executor->forward_decode_async(body_state, d_token_id_, h_decode_scratch_,
+                                                                 stream);
+
+    // 5b. Post-decode-step kernel: ring buffer write, counter increment, EOS check, think budget
+    post_decode_step_kernel<<<1, 1, 0, stream>>>(
+        d_token_id_, d_ring_buffer_, d_step_counter_mapped_, d_position_, d_context_len_, d_step_counter_,
+        config_.max_steps, config_.eos_id, d_stop_ids_, static_cast<int>(config_.stop_ids.size()),
+        d_think_limit_, config_.think_start_id, config_.think_end_id, config_.think_grace_tokens,
+        d_think_count_, d_in_think_, d_think_exit_step_, d_content_after_think_, d_stop_mask_active_,
+        config_.token_is_whitespace, config_.vocab_size, config_.ignore_eos ? 1 : 0, d_penalty_ring_,
+        penalty_prefix_len_, d_penalty_count_, d_step_limit_, d_burst_done_mapped_, handle_);
+    IMP_CUDA_CHECK_LAUNCH();
+
+    // 5c. Close the capture on every path; the body stays owned by graph_ (reset in cleanup()).
+    cudaGraph_t captured_body = nullptr;
+    const cudaError_t err = cudaStreamEndCapture(stream, &captured_body);
+    graph_diag::g_phase = graph_diag::Phase::NORMAL;
+    if (!sampler_enqueued) {
+        IMP_LOG_ERROR("ConditionalRunner: decode sampler not enqueued, falling back to per-step decode.");
+        return false;
+    }
+    if (err != cudaSuccess) {
+        IMP_LOG_ERROR(
+            "ConditionalRunner: capture failed — falling back to per-step decode "
+            "(up to 15x slower). Check for unsupported CUDA operations in the "
+            "forward pass. Error: %s",
+            cudaGetErrorString(err));
+        return false;
+    }
+    return true;
+}
+
 CudaGraphConditionalRunner::~CudaGraphConditionalRunner() { cleanup(); }
 
 bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceState& state_template,
@@ -687,7 +744,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
     // (non-diag) path to avoid perturbing CUDA error state in pre-launch phases.
     if (graph_diag::enabled()) {
         int v = 1;
-        cudaMemcpyToSymbol(d_graph_diag_enabled, &v, sizeof(int));
+        IMP_CUDA_CHECK_BOOL(cudaMemcpyToSymbol(d_graph_diag_enabled, &v, sizeof(int)));
     }
 
     cudaError_t err;
@@ -1032,10 +1089,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         cudaGraph_t body_graph = cond_params.conditional.phGraph_out[0];
 
         // 5. Capture decode body into body_graph via stream capture
-        cudaStreamSynchronize(stream);
-
-        err = cudaStreamBeginCaptureToGraph(stream, body_graph, nullptr, nullptr, 0,
-                                            get_capture_mode());
+        err = sync_then_begin_capture(stream, body_graph);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR(
                 "ConditionalRunner: capture failed — falling back to per-step decode "
@@ -1047,39 +1101,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
 
         graph_diag::g_phase = graph_diag::Phase::CAPTURE;
 
-        // 5a. Forward decode step: embedding → layers → norm → LM head → sample. Writes sampled
-        // token to d_token_id_. The h_mapped parameter receives a D2H copy each iteration
-        // (harmless scratch write; the real ring buffer write is in post_decode_step_kernel below).
-        // NOTE: h_mapped scratch must NOT alias h_step_counter_: poll_new_tokens reads the counter
-        // concurrently, and this per-iteration D2H copy would transiently overwrite it with a token id.
-        executor->forward_decode_async(body_state, d_token_id_, h_decode_scratch_, stream);
-
-        // 5b. Post-decode-step kernel: ring buffer write, counter increment, EOS check, think budget
-        post_decode_step_kernel<<<1, 1, 0, stream>>>(d_token_id_, d_ring_buffer_, d_step_counter_mapped_,
-                                                     d_position_, d_context_len_, d_step_counter_,
-                                                     config_.max_steps, config_.eos_id, d_stop_ids_,
-                                                     static_cast<int>(config_.stop_ids.size()),
-                                                     d_think_limit_, config_.think_start_id,
-                                                     config_.think_end_id, config_.think_grace_tokens,
-                                                     d_think_count_, d_in_think_, d_think_exit_step_,
-                                                     d_content_after_think_, d_stop_mask_active_,
-                                                     config_.token_is_whitespace, config_.vocab_size,
-                                                     config_.ignore_eos ? 1 : 0, d_penalty_ring_,
-                                                     penalty_prefix_len_, d_penalty_count_,
-                                                     d_step_limit_, d_burst_done_mapped_, handle_);
-        IMP_CUDA_CHECK_LAUNCH();
-
-        cudaGraph_t captured_body = nullptr;
-        err = cudaStreamEndCapture(stream, &captured_body);
-        graph_diag::g_phase = graph_diag::Phase::NORMAL;
-        if (err != cudaSuccess) {
-            IMP_LOG_ERROR(
-                "ConditionalRunner: capture failed — falling back to per-step decode "
-                "(up to 15x slower). Check for unsupported CUDA operations in the "
-                "forward pass. Error: %s",
-                cudaGetErrorString(err));
+        // 5a-5c. Decode forward + post-step kernel, then EndCapture (capture_decode_body_).
+        if (!capture_decode_body_(executor, body_state, stream))
             goto fail;
-        }
 
         // 5d. Convert kernel→kernel edges to PDL in the body graph
         if (pdl::is_available()) {
@@ -1279,7 +1303,7 @@ void CudaGraphConditionalRunner::finish_burst_blocking(cudaStream_t stream) {
 void CudaGraphConditionalRunner::cleanup() {
     // Ensure all GPU work referencing these resources has completed before freeing.
     if (launched_) {
-        cudaDeviceSynchronize();
+        IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
         launched_ = false;
     }
 
@@ -1321,9 +1345,7 @@ void CudaGraphConditionalRunner::cleanup() {
         h_decode_scratch_ = nullptr;
 
         if (had_exec) {
-            int dev = 0;
-            cudaGetDevice(&dev);
-            cudaDeviceGraphMemTrim(dev);
+            trim_graph_mem();
         }
         launched_ = false;
         last_read_step_ = 0;
@@ -1405,9 +1427,7 @@ void CudaGraphConditionalRunner::cleanup() {
     // Release the per-device graph memory pool (matches CudaGraphCapture::reset).
     // Keeps long-running sessions from holding stale graph reservations.
     if (had_exec) {
-        int dev = 0;
-        cudaGetDevice(&dev);
-        cudaDeviceGraphMemTrim(dev);
+        trim_graph_mem();
     }
 
     launched_ = false;

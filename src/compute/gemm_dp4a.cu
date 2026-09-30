@@ -1,6 +1,6 @@
 #include "compute/gemm.h"
 #include "compute/gemv_dp4a_traits.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 #include "core/qtype.h"
 #include "core/logging.h"
 
@@ -139,8 +139,8 @@ void quantize_fp16_to_q8_1(const half* x, block_q8_1* q8_1_out, float* d8_out, i
     int padded_blocks = ((K + 255) / 256) * 8;  // ceil(K/256) * (256/32)
     if (padded_blocks > n_blocks) {
         int pad_count = padded_blocks - n_blocks;
-        cudaMemsetAsync(q8_1_out + n_blocks, 0, pad_count * sizeof(block_q8_1), stream);
-        cudaMemsetAsync(d8_out + n_blocks, 0, pad_count * sizeof(float), stream);
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(q8_1_out + n_blocks, 0, pad_count * sizeof(block_q8_1), stream));
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d8_out + n_blocks, 0, pad_count * sizeof(float), stream));
     }
 }
 
@@ -631,9 +631,9 @@ void gemv_q3_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_w
 // carry no pdl_wait() and registering them raced (DegenerationTest.GreedyDeterminism,
 // AUDIT_arch_2026 A1-3/A2-1). Registration stays out until the kernels wait; the L1 carveout
 // (a scheduler hint) stays: GEMV kernels are bandwidth-bound with minimal SMEM.
-#define SET_MAXL1(...)                                                                \
-    cudaFuncSetAttribute(__VA_ARGS__, cudaFuncAttributePreferredSharedMemoryCarveout, \
-                         cudaSharedmemCarveoutMaxL1)
+#define SET_MAXL1(...)                                                                                   \
+    IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(__VA_ARGS__, cudaFuncAttributePreferredSharedMemoryCarveout, \
+                                            cudaSharedmemCarveoutMaxL1))
 
 void gemv_dp4a_set_l1_carveout() {
 // Kernels #1..#4 per (quant type, NR): basic + residual, FP32 output, QKV

@@ -24,7 +24,6 @@ __device__ __forceinline__ uint32_t q51_spread4(uint32_t bits) {
     return (((bits & 1u) | ((bits & 2u) << 7) | ((bits & 4u) << 14) | ((bits & 8u) << 21)) << 4);
 }
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM>
 __device__ __forceinline__ void load_kstep_q51(int tid, const int8_t* __restrict__ A,
                                                const __half* __restrict__ Asc,
@@ -43,14 +42,15 @@ __device__ __forceinline__ void load_kstep_q51(int tid, const int8_t* __restrict
                        A + static_cast<size_t>(base_m + row) * K + k_base + col, valid);
     }
     const int kb0 = k_base / 32;
+    // #2218 bounded: part = i % 3 <= 2: part * 16 <= 32 B
 #pragma unroll
     for (int i = tid; i < kBN * 3; i += kThreads) {
         const int row = i / 3;
         const int part = i % 3;
         const bool bvalid = (base_n_rows < 0) || (row < base_n_rows);
-        const uint8_t* blk =
-            Wq51 + (static_cast<size_t>(base_n + row) * blk_count + kb0) * 24 + part * 16;
-        cp_async_cg_16(&sBq[row][part * 16], blk, bvalid);
+        const uint8_t* blk = Wq51 + (static_cast<size_t>(base_n + row) * blk_count + kb0) * 24 +
+                             static_cast<ptrdiff_t>(part * 16);
+        cp_async_cg_16(&sBq[row][static_cast<ptrdiff_t>(part * 16)], blk, bvalid);
     }
 #pragma unroll
     for (int i = tid; i < BM; i += kThreads) {
@@ -59,11 +59,9 @@ __device__ __forceinline__ void load_kstep_q51(int tid, const int8_t* __restrict
         cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM, bool BETA1>
 __global__ void __launch_bounds__(kThreads)
     mmq_imma_q51_raw_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
@@ -106,6 +104,7 @@ __global__ void __launch_bounds__(kThreads)
     const int warp_n = warp_id % kWN;
     const int rl = lane >> 2;
     const int cl = lane & 3;
+    // #2218 bounded: kb = i & 1 or loop kb < 2 (:146, :159): kb * 24 <= 24; cl = lane & 3: cl * 4 <= 12
 
     __shared__ int8_t sA[kStages][BM][kRow];
     __shared__ uint8_t sBq[kStages][kBN][kQ51Row];
@@ -145,7 +144,7 @@ __global__ void __launch_bounds__(kThreads)
             for (int i = tid; i < kBN * 2; i += kThreads) {
                 const int row = i >> 1;
                 const int kb = i & 1;
-                const uint8_t* blk = &sBq[stage][row][kb * 24];
+                const uint8_t* blk = &sBq[stage][row][static_cast<ptrdiff_t>(kb * 24)];
                 __half d_h, m_h;
                 memcpy(&d_h, blk, 2);
                 memcpy(&m_h, blk + 2, 2);
@@ -176,11 +175,11 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
                 for (int nf = 0; nf < kNF; ++nf) {
                     const int bcol = warp_n * kTileN + nf * 8 + rl;
-                    const uint8_t* blk = &sBq[stage][bcol][kb * 24];
+                    const uint8_t* blk = &sBq[stage][bcol][static_cast<ptrdiff_t>(kb * 24)];
                     uint32_t qh;
                     memcpy(&qh, blk + 4, 4);
-                    const uint32_t qs_u32 =
-                        *reinterpret_cast<const uint32_t*>(blk + 8 + cl * 4);
+                    const uint32_t qs_u32 = *reinterpret_cast<const uint32_t*>(
+                        blk + 8 + static_cast<ptrdiff_t>(cl * 4));
                     // b0: elements cl*4..+3 (lows); b1: +16 (highs)
                     const uint32_t b0 = __vsub4((qs_u32 & 0x0F0F0F0Fu) |
                                                     q51_spread4((qh >> (cl * 4)) & 0xFu),
@@ -236,7 +235,6 @@ __global__ void __launch_bounds__(kThreads)
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Explicit instantiations launched by the dispatch in mmq_q8_imma.cu.
 template __global__ void mmq_imma_q51_raw_kernel<32, false>(const int8_t*, const __half*,

@@ -8,7 +8,7 @@
 #include "memory/engine_arena.h"
 #include <cuda_runtime.h>
 #include "core/pdl_device.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 
 namespace imp {
 

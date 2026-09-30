@@ -8,7 +8,7 @@
 
 #include "compute/gemm_f16_narrow_prefill.h"
 #include "core/logging.h"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 #include "core/pdl_device.cuh"
 
 #include <cstdint>
@@ -74,19 +74,19 @@ struct Smem {
 };
 
 // Stage (A rows of this row tile, W rows 0..n_total) for k-tile kt into stage buffer `s`.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int NPAD>
 __device__ __forceinline__ void load_stage(half* stage, const PrefillArgs& args, int row0, int kt) {
     half* As = stage;
     half* Ws = stage + Smem<NPAD>::kA;
     const int k0 = kt * kBK;
+    // #2218 bounded: r < max(kBM, NPAD) <= 128 (NPAD template 32..128, :311): r * kBK < 128 * 32 = 4096
     for (int c = threadIdx.x; c < kBM * kChunksPerRow; c += kThreads) {
         const int r = c / kChunksPerRow;
         const int kc = (c - r * kChunksPerRow) * kChunkHalves;
         const int gr = row0 + r;
         const bool valid = gr < args.M;
         const half* src = args.A + static_cast<size_t>(valid ? gr : 0) * args.K + k0 + kc;
-        cp_async_cg16_zero(As + r * kBK + kc, src, valid);
+        cp_async_cg16_zero(As + static_cast<ptrdiff_t>(r * kBK) + kc, src, valid);
     }
     for (int c = threadIdx.x; c < NPAD * kChunksPerRow; c += kThreads) {
         const int r = c / kChunksPerRow;
@@ -96,18 +96,18 @@ __device__ __forceinline__ void load_stage(half* stage, const PrefillArgs& args,
         const half* base = p1 ? args.W[1] : args.W[0];
         const int wr = valid ? (p1 ? r - args.N[0] : r) : 0;
         const half* src = (valid ? base : args.W[0]) + static_cast<size_t>(wr) * args.K + k0 + kc;
-        cp_async_cg16_zero(Ws + r * kBK + kc, src, valid);
+        cp_async_cg16_zero(Ws + static_cast<ptrdiff_t>(r * kBK) + kc, src, valid);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int NPAD>
 __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_prefill_kernel(PrefillArgs args) {
     constexpr int NF = NPAD / 16;
     constexpr int kStages = Smem<NPAD>::kStages;
     __shared__ __align__(16) unsigned char smem_raw[Smem<NPAD>::kBytes];
     half* stages = reinterpret_cast<half*>(smem_raw);
+    // #2218 bounded: kBM = 64, kBK = 32 (:22,23), NPAD template <= 128 (launch<128> :311), warp < 4:
+    // warp * 16 * NPAD < 8192, j * 16 * kBK < NPAD * kBK <= 4096, warp * 16 * kBK < 2048, kk/j * 16 < 128
 
     pdl_wait();
 
@@ -146,11 +146,13 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_prefill_kernel(Prefi
 #pragma unroll
         for (int kk = 0; kk < kBK / 16; ++kk) {
             wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
-            wmma::load_matrix_sync(a_frag, As + warp * 16 * kBK + kk * 16, kBK);
+            wmma::load_matrix_sync(
+                a_frag, As + static_cast<ptrdiff_t>(warp * 16 * kBK) + static_cast<ptrdiff_t>(kk * 16), kBK);
 #pragma unroll
             for (int j = 0; j < NF; ++j) {
                 wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
-                wmma::load_matrix_sync(b_frag, Ws + j * 16 * kBK + kk * 16, kBK);
+                wmma::load_matrix_sync(
+                    b_frag, Ws + static_cast<ptrdiff_t>(j * 16 * kBK) + static_cast<ptrdiff_t>(kk * 16), kBK);
                 wmma::mma_sync(acc[j], a_frag, b_frag, acc[j]);
             }
         }
@@ -163,7 +165,9 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_prefill_kernel(Prefi
     float* tile = reinterpret_cast<float*>(smem_raw);
 #pragma unroll
     for (int j = 0; j < NF; ++j)
-        wmma::store_matrix_sync(tile + warp * 16 * NPAD + j * 16, acc[j], NPAD, wmma::mem_row_major);
+        wmma::store_matrix_sync(tile + static_cast<ptrdiff_t>(warp * 16 * NPAD) +
+                                    static_cast<ptrdiff_t>(j * 16),
+                                acc[j], NPAD, wmma::mem_row_major);
     __syncwarp();
 
     if (args.split == 1) {
@@ -192,7 +196,6 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_prefill_kernel(Prefi
         ws[(static_cast<size_t>(ks) * M + m) * nt + c] = tile[(warp * 16 + r) * NPAD + c];
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Four columns per thread, every split's partial in flight before the first add. N0 % 8 == 0
 // keeps a float4 inside one pair.

@@ -62,7 +62,7 @@ TEST(CheckpointLimits, HugeLayerIndexInATensorNameIsDropped) {
     tensors["model.layers.2147483000.self_attn.q_proj.weight"] = fake_weight(backing.data());
 
     WeightMap wm(ModelArch::LLAMA);
-    wm.apply_weights(model, tensors);
+    EXPECT_TRUE(wm.apply_weights(model, tensors));
 
     // The hostile name must not have grown the layer vector. Before the fix
     // this was resize(2147483001), i.e. 18.9 TiB.
@@ -82,7 +82,7 @@ TEST(CheckpointLimits, HugeExpertIndexInATensorNameIsDropped) {
     tensors["model.layers.0.block_sparse_moe.experts.2000000000.w1.weight"] = fake_weight(backing.data());
 
     WeightMap wm(ModelArch::MIXTRAL);
-    wm.apply_weights(model, tensors);
+    EXPECT_FALSE(wm.apply_weights(model, tensors));  // only the dropped tensor: nothing servable
 
     ASSERT_EQ(model.layers_.size(), 1u);
     EXPECT_LE(model.layers_[0].expert_w_gate.size(), static_cast<size_t>(kMaxModelExperts));
@@ -100,7 +100,7 @@ TEST(CheckpointLimits, AnIndexThatFitsIsStillAccepted) {
     tensors["model.layers.3.self_attn.q_proj.weight"] = fake_weight(backing.data());
 
     WeightMap wm(ModelArch::LLAMA);
-    wm.apply_weights(model, tensors);
+    EXPECT_TRUE(wm.apply_weights(model, tensors));
 
     ASSERT_GE(model.layers_.size(), 4u);
     EXPECT_NE(model.layers_[3].wq.data, nullptr);
@@ -125,7 +125,7 @@ TEST(CheckpointLimits, AnAliasingLayerIndexDoesNotOverwriteLayerZero) {
     tensors["model.layers.4294967296.self_attn.q_proj.weight"] = fake_weight(backing.data());
 
     WeightMap wm(ModelArch::LLAMA);
-    wm.apply_weights(model, tensors);
+    EXPECT_FALSE(wm.apply_weights(model, tensors));  // only the dropped tensor: nothing servable
 
     ASSERT_EQ(model.layers_.size(), 1u);
     EXPECT_EQ(model.layers_[0].wq.data, nullptr);

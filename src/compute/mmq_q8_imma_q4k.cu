@@ -30,7 +30,6 @@ __device__ __forceinline__ void q4k_scale_min(int j, const uint8_t* q, uint32_t&
 
 constexpr int kQRow = 32 + 16;  // staged qs row: 32 B group + 16-B pad (bank stride 12 words)
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM>
 __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict__ A,
                                                const __half* __restrict__ Asc,
@@ -52,6 +51,7 @@ __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict
     const int ks = k_base / kBK;
     const int sblk = ks >> 2;          // super-block index along K
     const int grp = ks & 3;            // 32-byte nibble group within it
+    // #2218 bounded: grp = ks & 3 <= 3: grp * 32 <= 96 B (in-block offset)
 #pragma unroll
     for (int i = tid; i < kBN * 3; i += kThreads) {
         const int row = i / 3;
@@ -62,7 +62,7 @@ __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict
             cp_async_cg_16(&sBh[row][0], blk, bvalid);  // d, dmin, 12-B scales
         } else {
             const int off = (part - 1) * 16;
-            cp_async_cg_16(&sBq[row][off], blk + 16 + grp * 32 + off, bvalid);
+            cp_async_cg_16(&sBq[row][off], blk + 16 + static_cast<ptrdiff_t>(grp * 32) + off, bvalid);
         }
     }
     const int kb0 = k_base / 32;
@@ -73,11 +73,9 @@ __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict
         cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int BM, bool BETA1>
 __global__ void __launch_bounds__(kThreads)
     mmq_imma_q4k_raw_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
@@ -120,6 +118,7 @@ __global__ void __launch_bounds__(kThreads)
     const int warp_n = warp_id % kWN;
     const int rl = lane >> 2;
     const int cl = lane & 3;
+    // #2218 bounded: cl = lane & 3 <= 3: smem column cl * 4 <= 12
 
     __shared__ int8_t sA[kStages][BM][kRow];
     __shared__ uint8_t sBq[kStages][kBN][kQRow];
@@ -196,8 +195,8 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
                 for (int nf = 0; nf < kNF; ++nf) {
                     const int bcol = warp_n * kTileN + nf * 8 + rl;
-                    const uint32_t raw0 =
-                        *reinterpret_cast<const uint32_t*>(&sBq[stage][bcol][cl * 4]);
+                    const uint32_t raw0 = *reinterpret_cast<const uint32_t*>(
+                        &sBq[stage][bcol][static_cast<ptrdiff_t>(cl * 4)]);
                     const uint32_t raw1 =
                         *reinterpret_cast<const uint32_t*>(&sBq[stage][bcol][cl * 4 + 16]);
                     const uint32_t b0 = __vsub4((raw0 >> shift) & 0x0F0F0F0Fu, 0x08080808u);
@@ -250,7 +249,6 @@ __global__ void __launch_bounds__(kThreads)
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Explicit instantiations launched by the dispatch in mmq_q8_imma.cu.
 template __global__ void mmq_imma_q4k_raw_kernel<32, false>(const int8_t*, const __half*,

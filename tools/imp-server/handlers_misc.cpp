@@ -858,12 +858,10 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         // Run prefill (forward pass without generation)
         err = imp_prefill(state.ctx, tokens.data(), n_tokens);
         if (err != IMP_SUCCESS) {
-            imp_context_reset(state.ctx);
-            res.status = 500;
-            json error = {{"error",
-                           {{"message", std::string("Prefill failed: ") + imp_error_string(err)},
-                            {"type", "server_error"}}}};
-            res.set_content(dump_safe(error), "application/json");
+            std::string msg = std::string("Prefill failed: ") + imp_error_string(err);
+            if (const ImpError reset_err = imp_context_reset(state.ctx); reset_err != IMP_SUCCESS)
+                msg += std::string("; context reset failed: ") + imp_error_string(reset_err);
+            send_json_error(res, 500, "server_error", msg);
             return;
         }
 
@@ -879,12 +877,10 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         cudaError_t cuda_err = cudaMemcpy(h_hidden.data(), hidden_view.data, n_elements * sizeof(uint16_t),
                                           cudaMemcpyDeviceToHost);
         if (cuda_err != cudaSuccess) {
-            imp_context_reset(state.ctx);
-            res.status = 500;
-            json error = {{"error",
-                           {{"message", std::string("CUDA memcpy failed: ") + cudaGetErrorString(cuda_err)},
-                            {"type", "server_error"}}}};
-            res.set_content(dump_safe(error), "application/json");
+            std::string msg = std::string("CUDA memcpy failed: ") + cudaGetErrorString(cuda_err);
+            if (const ImpError reset_err = imp_context_reset(state.ctx); reset_err != IMP_SUCCESS)
+                msg += std::string("; context reset failed: ") + imp_error_string(reset_err);
+            send_json_error(res, 500, "server_error", msg);
             return;
         }
 
@@ -913,8 +909,12 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         data.push_back(
             {{"object", "embedding"}, {"embedding", embedding_field(embedding)}, {"index", input_idx}});
 
-        // Reset context for next input
-        imp_context_reset(state.ctx);
+        // Reset context for next input; a failed reset leaves stale KV for it, so fail the request.
+        if (const ImpError reset_err = imp_context_reset(state.ctx); reset_err != IMP_SUCCESS) {
+            send_json_error(res, 500, "server_error",
+                            std::string("Context reset failed: ") + imp_error_string(reset_err));
+            return;
+        }
     }
 
     auto t1 = std::chrono::steady_clock::now();

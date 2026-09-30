@@ -173,13 +173,13 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         cfg.multimodal_wrapper = true;
 
     // Core dimensions
-    jobj_get_int(eff, "hidden_size", cfg.d_model);
-    jobj_get_int(eff, "num_attention_heads", cfg.n_heads);
-    jobj_get_int(eff, "intermediate_size", cfg.d_ff);
-    jobj_get_int(eff, "num_hidden_layers", cfg.n_layers);
-    jobj_get_int(eff, "vocab_size", cfg.vocab_size);
-    jobj_get_int(eff, "max_position_embeddings", cfg.max_seq_len);
-    jobj_get_int(eff, "head_dim", cfg.head_dim);
+    jobj_opt_int(eff, "hidden_size", cfg.d_model);
+    jobj_opt_int(eff, "num_attention_heads", cfg.n_heads);
+    jobj_opt_int(eff, "intermediate_size", cfg.d_ff);
+    jobj_opt_int(eff, "num_hidden_layers", cfg.n_layers);
+    jobj_opt_int(eff, "vocab_size", cfg.vocab_size);
+    jobj_opt_int(eff, "max_position_embeddings", cfg.max_seq_len);
+    jobj_opt_int(eff, "head_dim", cfg.head_dim);
 
     // KV heads: default to n_heads (MHA) if not specified
     if (!jobj_get_int(eff, "num_key_value_heads", cfg.n_kv_heads)) {
@@ -199,20 +199,20 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
 
     // Norm epsilon: try rms_norm_eps first, then layer_norm_eps
     if (!jobj_get_float(eff, "rms_norm_eps", cfg.rms_norm_eps)) {
-        jobj_get_float(eff, "layer_norm_eps", cfg.rms_norm_eps);
+        jobj_opt_float(eff, "layer_norm_eps", cfg.rms_norm_eps);
     }
 
     // Newer HF configs (Qwen3.5/3.6, Qwen3-Next) nest rope_theta/partial_rotary_factor under
     // rope_parameters. Read top-level first, then override with rope_parameters.*. Otherwise
     // Qwen3.6 silently runs theta=10000 (1000x too small) with full-dim RoPE.
-    jobj_get_float(eff, "rope_theta", cfg.rope_theta);
+    jobj_opt_float(eff, "rope_theta", cfg.rope_theta);
     float partial_factor = 0.0f;
-    jobj_get_float(eff, "partial_rotary_factor", partial_factor);
+    jobj_opt_float(eff, "partial_rotary_factor", partial_factor);
     {
         const JValue* rope_params = jobj_find(eff, "rope_parameters");
         if (rope_params && rope_params->type == JType::OBJECT) {
-            jobj_get_float(*rope_params, "rope_theta", cfg.rope_theta);
-            jobj_get_float(*rope_params, "partial_rotary_factor", partial_factor);
+            jobj_opt_float(*rope_params, "rope_theta", cfg.rope_theta);
+            jobj_opt_float(*rope_params, "partial_rotary_factor", partial_factor);
         }
     }
 
@@ -263,14 +263,14 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     const JValue* rope_scaling = jobj_find(eff, "rope_scaling");
     if (rope_scaling && rope_scaling->type == JType::OBJECT) {
         std::string rope_type;
-        jobj_get_string(*rope_scaling, "type", rope_type);
+        jobj_opt_string(*rope_scaling, "type", rope_type);
         // Also check "rope_type" (some HF configs use this instead)
         if (rope_type.empty()) {
-            jobj_get_string(*rope_scaling, "rope_type", rope_type);
+            jobj_opt_string(*rope_scaling, "rope_type", rope_type);
         }
 
         float factor = 1.0f;
-        jobj_get_float(*rope_scaling, "factor", factor);
+        jobj_opt_float(*rope_scaling, "factor", factor);
 
         // imp convention (matches the GGUF loader / rope_forward): rope_freq_scale stores the
         // FACTOR (>1), the kernel applies 1/factor itself. Storing 1/factor here double-inverted
@@ -279,15 +279,15 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
             cfg.rope_freq_scale = factor;
         } else if (rope_type == "yarn") {
             cfg.rope_freq_scale = factor;
-            jobj_get_float(*rope_scaling, "attn_factor", cfg.yarn_attn_factor);
-            jobj_get_float(*rope_scaling, "beta_fast", cfg.yarn_beta_fast);
-            jobj_get_float(*rope_scaling, "beta_slow", cfg.yarn_beta_slow);
-            jobj_get_int(*rope_scaling, "original_max_position_embeddings", cfg.rope_n_ctx_orig);
+            jobj_opt_float(*rope_scaling, "attn_factor", cfg.yarn_attn_factor);
+            jobj_opt_float(*rope_scaling, "beta_fast", cfg.yarn_beta_fast);
+            jobj_opt_float(*rope_scaling, "beta_slow", cfg.yarn_beta_slow);
+            jobj_opt_int(*rope_scaling, "original_max_position_embeddings", cfg.rope_n_ctx_orig);
             // YaRN uses ext_factor=1.0 by default
             cfg.yarn_ext_factor = 1.0f;
         } else if (rope_type == "longrope" || rope_type == "long_rope") {
             // LongRoPE: per-dimension frequency scaling factors
-            jobj_get_int(*rope_scaling, "original_max_position_embeddings", cfg.rope_scaling_orig_max_pos);
+            jobj_opt_int(*rope_scaling, "original_max_position_embeddings", cfg.rope_scaling_orig_max_pos);
 
             const JValue* short_f = jobj_find(*rope_scaling, "short_factor");
             if (short_f && short_f->type == JType::ARRAY) {
@@ -309,11 +309,11 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
             // length, so short and long arrays carry identical values.
             float low_freq_factor = 1.0f, high_freq_factor = 4.0f;
             int orig_max_pos = 0;
-            jobj_get_float(*rope_scaling, "low_freq_factor", low_freq_factor);
-            jobj_get_float(*rope_scaling, "high_freq_factor", high_freq_factor);
-            jobj_get_int(*rope_scaling, "original_max_position_embeddings", orig_max_pos);
+            jobj_opt_float(*rope_scaling, "low_freq_factor", low_freq_factor);
+            jobj_opt_float(*rope_scaling, "high_freq_factor", high_freq_factor);
+            jobj_opt_int(*rope_scaling, "original_max_position_embeddings", orig_max_pos);
             if (orig_max_pos <= 0) {
-                jobj_get_int(eff, "original_max_position_embeddings", orig_max_pos);
+                jobj_opt_int(eff, "original_max_position_embeddings", orig_max_pos);
             }
 
             int hd = cfg.head_dim > 0 ? cfg.head_dim
@@ -381,13 +381,13 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     }
 
     // Sliding window attention
-    jobj_get_int(eff, "sliding_window", cfg.sliding_window);
+    jobj_opt_int(eff, "sliding_window", cfg.sliding_window);
 
     // Softcapping (Gemma-2/3)
-    jobj_get_float(eff, "attn_logit_softcapping", cfg.attn_logit_softcap);
-    jobj_get_float(eff, "final_logit_softcapping", cfg.final_logit_softcap);
+    jobj_opt_float(eff, "attn_logit_softcapping", cfg.attn_logit_softcap);
+    jobj_opt_float(eff, "final_logit_softcapping", cfg.final_logit_softcap);
     // Gemma 4 uses `final_logit_softcapping` same semantics.
-    jobj_get_float(root, "final_logit_softcapping", cfg.final_logit_softcap);
+    jobj_opt_float(root, "final_logit_softcapping", cfg.final_logit_softcap);
 
     // FFN activation
     std::string hidden_act;
@@ -404,14 +404,14 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     if (!jobj_get_int(eff, "num_local_experts", cfg.n_experts)) {
         if (!jobj_get_int(eff, "num_experts", cfg.n_experts)) {
             // DeepSeek-V2/V3: routed experts count (distinct from shared experts)
-            jobj_get_int(eff, "n_routed_experts", cfg.n_experts);
+            jobj_opt_int(eff, "n_routed_experts", cfg.n_experts);
         }
     }
     if (!jobj_get_int(eff, "num_experts_per_tok", cfg.n_experts_active)) {
-        jobj_get_int(eff, "top_k_experts", cfg.n_experts_active);
+        jobj_opt_int(eff, "top_k_experts", cfg.n_experts_active);
     }
     if (!jobj_get_int(eff, "moe_intermediate_size", cfg.expert_d_ff)) {
-        jobj_get_int(eff, "expert_intermediate_size", cfg.expert_d_ff);
+        jobj_opt_int(eff, "expert_intermediate_size", cfg.expert_d_ff);
     }
     // Shared (always-active) experts alongside routed experts (DeepSeek-V2/V3,
     // Nemotron-H). Parsed here for all architectures; the arch-specific blocks
@@ -459,18 +459,18 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         int lin_v_heads = 0, lin_v_hdim = 0;
         int lin_k_heads = 0, lin_k_hdim = 0;
         int lin_conv = 0;
-        jobj_get_int(eff, "linear_num_value_heads", lin_v_heads);
-        jobj_get_int(eff, "linear_value_head_dim", lin_v_hdim);
-        jobj_get_int(eff, "linear_num_key_heads", lin_k_heads);
-        jobj_get_int(eff, "linear_key_head_dim", lin_k_hdim);
-        jobj_get_int(eff, "linear_conv_kernel_dim", lin_conv);
+        jobj_opt_int(eff, "linear_num_value_heads", lin_v_heads);
+        jobj_opt_int(eff, "linear_value_head_dim", lin_v_hdim);
+        jobj_opt_int(eff, "linear_num_key_heads", lin_k_heads);
+        jobj_opt_int(eff, "linear_key_head_dim", lin_k_hdim);
+        jobj_opt_int(eff, "linear_conv_kernel_dim", lin_conv);
         // Qwen4Exp gated residual widths (absent on Qwen3.5/3.6: stay 0).
-        jobj_get_int(eff, "hc_count", cfg.hc_count);
-        jobj_get_int(eff, "hc_lowrank", cfg.hc_lowrank);
-        jobj_get_int(eff, "indexer_budget", cfg.qsa_budget);
-        jobj_get_int(eff, "indexer_compress_ratio", cfg.qsa_ratio);
+        jobj_opt_int(eff, "hc_count", cfg.hc_count);
+        jobj_opt_int(eff, "hc_lowrank", cfg.hc_lowrank);
+        jobj_opt_int(eff, "indexer_budget", cfg.qsa_budget);
+        jobj_opt_int(eff, "indexer_compress_ratio", cfg.qsa_ratio);
         if (cfg.hc_count > 0)
-            jobj_get_int(eff, "eos_token_id", cfg.ple_eos_token_id);
+            jobj_opt_int(eff, "eos_token_id", cfg.ple_eos_token_id);
         {
             std::string gate_act;
             if (jobj_get_string(eff, "output_gate_type", gate_act) && gate_act == "sigmoid")
@@ -510,9 +510,9 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         // forward to size the shared-expert FFN scratch and by diagnostic logs
         // for the main model. Key name differs from DeepSeek-style configs.
         int qwen_shared_d_ff = 0;
-        jobj_get_int(eff, "shared_expert_intermediate_size", qwen_shared_d_ff);
+        jobj_opt_int(eff, "shared_expert_intermediate_size", qwen_shared_d_ff);
         if (qwen_shared_d_ff == 0)
-            jobj_get_int(eff, "moe_shared_expert_intermediate_size", qwen_shared_d_ff);
+            jobj_opt_int(eff, "moe_shared_expert_intermediate_size", qwen_shared_d_ff);
         if (qwen_shared_d_ff > 0)
             cfg.expert_shared_d_ff = qwen_shared_d_ff;
     }
@@ -529,11 +529,11 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     if (cfg.arch == ModelArch::NEMOTRON_H_MOE) {
         int mamba_head_dim = 0, mamba_num_heads = 0, n_groups_v = 0;
         int ssm_state = 0, conv_k = 0;
-        jobj_get_int(eff, "mamba_head_dim", mamba_head_dim);
-        jobj_get_int(eff, "mamba_num_heads", mamba_num_heads);
-        jobj_get_int(eff, "n_groups", n_groups_v);
-        jobj_get_int(eff, "ssm_state_size", ssm_state);
-        jobj_get_int(eff, "conv_kernel", conv_k);
+        jobj_opt_int(eff, "mamba_head_dim", mamba_head_dim);
+        jobj_opt_int(eff, "mamba_num_heads", mamba_num_heads);
+        jobj_opt_int(eff, "n_groups", n_groups_v);
+        jobj_opt_int(eff, "ssm_state_size", ssm_state);
+        jobj_opt_int(eff, "conv_kernel", conv_k);
         if (mamba_head_dim > 0 && mamba_num_heads > 0)
             cfg.ssm_inner_size = mamba_head_dim * mamba_num_heads;
         if (ssm_state > 0)
@@ -549,21 +549,21 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         // total expert count, num_experts_per_tok is top_k (already read above),
         // moe_shared_expert_intermediate_size sizes the always-on shared expert.
         int n_routed = 0, n_shared = 0, shared_d_ff = 0;
-        jobj_get_int(eff, "n_routed_experts", n_routed);
-        jobj_get_int(eff, "n_shared_experts", n_shared);
+        jobj_opt_int(eff, "n_routed_experts", n_routed);
+        jobj_opt_int(eff, "n_shared_experts", n_shared);
         // moe_shared_expert_intermediate_size: DeepSeek / Qwen2-MoE naming.
         // shared_expert_intermediate_size: Qwen3.5 / 3.6 naming (used by their
         // shared-expert variant of GroupQuery MoE).
-        jobj_get_int(eff, "moe_shared_expert_intermediate_size", shared_d_ff);
+        jobj_opt_int(eff, "moe_shared_expert_intermediate_size", shared_d_ff);
         if (shared_d_ff == 0)
-            jobj_get_int(eff, "shared_expert_intermediate_size", shared_d_ff);
+            jobj_opt_int(eff, "shared_expert_intermediate_size", shared_d_ff);
         if (n_routed > 0 && cfg.n_experts == 0)
             cfg.n_experts = n_routed;
         if (n_shared > 0)
             cfg.n_experts_shared = n_shared;
         if (shared_d_ff > 0)
             cfg.expert_shared_d_ff = shared_d_ff;
-        jobj_get_float(eff, "routed_scaling_factor", cfg.expert_weights_scale);
+        jobj_opt_float(eff, "routed_scaling_factor", cfg.expert_weights_scale);
         // norm_topk_prob arrives as a bool (number 0/1 in our JSON parser)
         const JValue* ntp = jobj_find(eff, "norm_topk_prob");
         if (ntp && ntp->type == JType::NUMBER)
@@ -622,8 +622,8 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     if (cfg.arch == ModelArch::GEMMA4) {
         int global_head_dim = 0;
         int num_global_kv = 0;
-        jobj_get_int(eff, "global_head_dim", global_head_dim);
-        jobj_get_int(eff, "num_global_key_value_heads", num_global_kv);
+        jobj_opt_int(eff, "global_head_dim", global_head_dim);
+        jobj_opt_int(eff, "num_global_key_value_heads", num_global_kv);
 
         // rope params nested under rope_parameters.{full_attention,sliding_attention}
         const JValue* rp = jobj_find(eff, "rope_parameters");
@@ -632,10 +632,10 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
         if (rp && rp->type == JType::OBJECT) {
             const JValue* fa = jobj_find(*rp, "full_attention");
             if (fa && fa->type == JType::OBJECT)
-                jobj_get_float(*fa, "rope_theta", theta_full);
+                jobj_opt_float(*fa, "rope_theta", theta_full);
             const JValue* sa = jobj_find(*rp, "sliding_attention");
             if (sa && sa->type == JType::OBJECT)
-                jobj_get_float(*sa, "rope_theta", theta_swa);
+                jobj_opt_float(*sa, "rope_theta", theta_swa);
         }
         cfg.rope_theta = theta_full;
         cfg.rope_theta_swa = theta_swa;
@@ -704,12 +704,12 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     // kv_lora_rank > 0 is the unambiguous MLA indicator. When present, override
     // head_dim and rope_dim to match the decoupled-head layout.
     if (cfg.arch == ModelArch::DEEPSEEK) {
-        jobj_get_int(eff, "kv_lora_rank",        cfg.kv_lora_rank);
-        jobj_get_int(eff, "q_lora_rank",         cfg.q_lora_rank);     // absent/null -> stays 0
-        jobj_get_int(eff, "qk_rope_head_dim",    cfg.qk_rope_head_dim);
-        jobj_get_int(eff, "qk_nope_head_dim",    cfg.qk_nope_head_dim);
-        jobj_get_int(eff, "v_head_dim",          cfg.v_head_dim);
-        jobj_get_int(eff, "first_k_dense_replace", cfg.first_k_dense_replace);
+        jobj_opt_int(eff, "kv_lora_rank",        cfg.kv_lora_rank);
+        jobj_opt_int(eff, "q_lora_rank",         cfg.q_lora_rank);     // absent/null -> stays 0
+        jobj_opt_int(eff, "qk_rope_head_dim",    cfg.qk_rope_head_dim);
+        jobj_opt_int(eff, "qk_nope_head_dim",    cfg.qk_nope_head_dim);
+        jobj_opt_int(eff, "v_head_dim",          cfg.v_head_dim);
+        jobj_opt_int(eff, "first_k_dense_replace", cfg.first_k_dense_replace);
         if (cfg.is_mla()) {
             // Decoupled-head layout: each attention head has qk_nope_head_dim
             // non-RoPE dims plus qk_rope_head_dim RoPE dims.
@@ -762,7 +762,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     const JValue* vc = jobj_find(root, "vision_config");
     if (vc && vc->type == JType::OBJECT) {
         std::string vision_type;
-        jobj_get_string(*vc, "model_type", vision_type);
+        jobj_opt_string(*vc, "model_type", vision_type);
         // Which vision_config model_types use the Qwen3-VL tower layout. Shared with the
         // SafeTensors loader's keep-the-vision-tensors gate (vision_tower_supported()), which must
         // make this decision one step earlier.
@@ -804,7 +804,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     if (ac && ac->type == JType::OBJECT) {
         cfg.has_audio_config = true;
         std::string audio_type;
-        jobj_get_string(*ac, "model_type", audio_type);
+        jobj_opt_string(*ac, "model_type", audio_type);
         IMP_LOG_WARN(
             "Audio modality present (audio_config, model_type='%s') and unsupported. imp has no "
             "audio encoder: `model.embed_audio.*` tensors are dropped at load and audio input "
@@ -847,10 +847,10 @@ bool HFConfigLoader::load_generation_config(const std::string& model_dir, Genera
 
     // Sampling defaults. Each field is only overwritten if the JSON has it;
     // otherwise the struct's sentinel survives.
-    jobj_get_float(root, "temperature", cfg.temperature);
-    jobj_get_float(root, "top_p", cfg.top_p);
-    jobj_get_int(root, "top_k", cfg.top_k);
-    jobj_get_float(root, "repetition_penalty", cfg.repetition_penalty);
+    jobj_opt_float(root, "temperature", cfg.temperature);
+    jobj_opt_float(root, "top_p", cfg.top_p);
+    jobj_opt_int(root, "top_k", cfg.top_k);
+    jobj_opt_float(root, "repetition_penalty", cfg.repetition_penalty);
 
     // do_sample=false → force greedy. Authors set this when they want
     // deterministic output regardless of temperature.
@@ -907,7 +907,7 @@ std::string HFConfigLoader::load_chat_template(const std::string& model_dir) {
                 continue;
             if (jobj_get_string(entry, "template", chat_template) && !chat_template.empty()) {
                 std::string name;
-                jobj_get_string(entry, "name", name);
+                jobj_opt_string(entry, "name", name);
                 IMP_LOG_INFO("loaded chat_template (%s) from tokenizer_config.json (%zu chars)",
                              name.empty() ? "unnamed" : name.c_str(), chat_template.size());
                 return chat_template;
@@ -951,7 +951,7 @@ std::vector<HFConfigLoader::AddedToken> HFConfigLoader::load_added_tokens(const 
             continue;
         AddedToken tok;
         tok.id = std::atoi(id_str.c_str());
-        jobj_get_string(val, "content", tok.content);
+        jobj_opt_string(val, "content", tok.content);
         // "special" field — treat as bool via number (true=1.0, false=0.0)
         const JValue* sp = jobj_find(val, "special");
         tok.special = sp && sp->type == JType::NUMBER && sp->num_val != 0.0;
@@ -977,7 +977,7 @@ std::string extract_token_content(const JValue& v) {
         return v.str_val;
     if (v.type == JType::OBJECT) {
         std::string s;
-        jobj_get_string(v, "content", s);
+        jobj_opt_string(v, "content", s);
         return s;
     }
     return {};
@@ -1056,27 +1056,6 @@ bool HFConfigLoader::load_tokenizer_flags(const std::string& model_dir, Tokenize
     return true;
 }
 
-// ---- load_gptq_config ----
-
-bool HFConfigLoader::load_gptq_config(const std::string& model_dir, GPTQConfig& cfg) {
-    std::string path = model_dir + "/quantize_config.json";
-    JValue root;
-    if (!parse_json_file(path, root))
-        return false;
-
-    IMP_LOG_INFO("loading GPTQ config from %s", path.c_str());
-
-    jobj_get_int(root, "bits", cfg.bits);
-    jobj_get_int(root, "group_size", cfg.group_size);
-
-    const JValue* da = jobj_find(root, "desc_act");
-    cfg.desc_act = da && da->type == JType::NUMBER && da->num_val != 0.0;
-
-    IMP_LOG_INFO("  GPTQ: bits=%d group_size=%d desc_act=%s", cfg.bits, cfg.group_size,
-                 cfg.desc_act ? "true" : "false");
-    return true;
-}
-
 // ---- load_nvfp4_config ----
 
 namespace {
@@ -1096,7 +1075,7 @@ bool HFConfigLoader::probe_vision_tower(const std::string& model_dir) {
     if (!vc || vc->type != JType::OBJECT)
         return false;
     std::string vision_type;
-    jobj_get_string(*vc, "model_type", vision_type);
+    jobj_opt_string(*vc, "model_type", vision_type);
     return vision_tower_supported(vision_type);
 }
 
@@ -1130,7 +1109,7 @@ bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config
         // Read first so the per-tensor table below can override it: on a
         // MIXED_PRECISION export the group size belongs to the NVFP4 entries,
         // and a top-level value (if any) is the less specific statement.
-        jobj_get_int(*quant, "group_size", cfg.group_size);
+        jobj_opt_int(*quant, "group_size", cfg.group_size);
 
         // MIXED_PRECISION carries no top-level algorithm; quantized_layers maps each tensor to its
         // own. is_nvfp4_prequant is set only if NVFP4 is actually present (drives the MoE expert
@@ -1148,12 +1127,12 @@ bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config
                 (void)tensor_name;
                 std::string ta;
                 if (spec.type == JType::OBJECT)
-                    jobj_get_string(spec, "quant_algo", ta);
+                    jobj_opt_string(spec, "quant_algo", ta);
                 if (ta.find("NVFP4") != std::string::npos) {
                     cfg.n_nvfp4_tensors++;
                     // group_size rides on the NVFP4 entries, not the top level.
                     if (cfg.n_nvfp4_tensors == 1)
-                        jobj_get_int(spec, "group_size", cfg.group_size);
+                        jobj_opt_int(spec, "group_size", cfg.group_size);
                 } else if (ta.find("FP8") != std::string::npos) {
                     cfg.n_fp8_tensors++;
                 } else {
@@ -1250,7 +1229,7 @@ bool HFConfigLoader::load_mxfp4_config(const std::string& model_dir, MxFP4Config
         // Some exports nest the block size under a "weight" sub-object.
         const JValue* w = jobj_find(*qc, "weight");
         if (w && w->type == JType::OBJECT)
-            jobj_get_int(*w, "block_size", bs);
+            jobj_opt_int(*w, "block_size", bs);
     }
     if (bs > 0)
         cfg.block_size = bs;
@@ -1282,16 +1261,16 @@ bool HFConfigLoader::load_awq_config(const std::string& model_dir, AWQConfig& cf
         if (method != "awq" && method != "AWQ")
             return false;
 
-        jobj_get_int(*base, "bits", cfg.bits);
-        jobj_get_int(*base, "w_bit", cfg.bits);  // older AutoAWQ field name
-        jobj_get_int(*base, "group_size", cfg.group_size);
-        jobj_get_int(*base, "q_group_size", cfg.group_size);  // older field name
+        jobj_opt_int(*base, "bits", cfg.bits);
+        jobj_opt_int(*base, "w_bit", cfg.bits);  // older AutoAWQ field name
+        jobj_opt_int(*base, "group_size", cfg.group_size);
+        jobj_opt_int(*base, "q_group_size", cfg.group_size);  // older field name
 
         const JValue* zp = jobj_find(*base, "zero_point");
         if (zp && zp->type == JType::NUMBER)
             cfg.zero_point = (zp->num_val != 0.0);
 
-        jobj_get_string(*base, "version", cfg.version);
+        jobj_opt_string(*base, "version", cfg.version);
         return true;
     };
 

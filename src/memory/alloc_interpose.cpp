@@ -26,12 +26,14 @@
 #include <vector>
 
 extern "C" {
+// NOLINTBEGIN(bugprone-reserved-identifier): ld --wrap requires the __wrap_/__real_ names
 cudaError_t __real_cudaMalloc(void** devPtr, size_t size);
 cudaError_t __real_cudaFree(void* devPtr);
 cudaError_t __real_cudaMallocAsync(void** devPtr, size_t size, cudaStream_t stream);
 cudaError_t __real_cudaFreeAsync(void* devPtr, cudaStream_t stream);
 cudaError_t __real_cudaMallocHost(void** ptr, size_t size);
 cudaError_t __real_cudaHostAlloc(void** ptr, size_t size, unsigned int flags);
+// NOLINTEND(bugprone-reserved-identifier)
 }
 
 namespace {
@@ -168,7 +170,7 @@ Reporter g_reporter;
 }  // namespace
 
 #ifndef IMP_ALLOC_POISON_BYTE
-#define IMP_ALLOC_POISON_BYTE -1
+#define IMP_ALLOC_POISON_BYTE (-1)
 #endif
 
 // Canary (#2168): every new device allocation starts as IMP_ALLOC_POISON_BYTE instead of the
@@ -181,12 +183,13 @@ static void poison(void* p, size_t size, cudaStream_t stream, bool async) {
     if (async && cudaStreamIsCapturing(stream, &cs) == cudaSuccess && cs != cudaStreamCaptureStatusNone)
         return;
     if (async)
-        cudaMemsetAsync(p, IMP_ALLOC_POISON_BYTE, size, stream);
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(p, IMP_ALLOC_POISON_BYTE, size, stream));
     else
-        cudaMemset(p, IMP_ALLOC_POISON_BYTE, size);
+        IMP_CUDA_CHECK_LOG(cudaMemset(p, IMP_ALLOC_POISON_BYTE, size));
 }
 
 extern "C" {
+// NOLINTBEGIN(bugprone-reserved-identifier): ld --wrap requires the __wrap_/__real_ names
 
 cudaError_t __wrap_cudaMalloc(void** devPtr, size_t size) {
     record(g_dev_sync, size, imp::RegionTag::Other, __builtin_return_address(0), true);
@@ -220,4 +223,5 @@ cudaError_t __wrap_cudaHostAlloc(void** ptr, size_t size, unsigned int flags) {
     return __real_cudaHostAlloc(ptr, size, flags);
 }
 
+// NOLINTEND(bugprone-reserved-identifier)
 }  // extern "C"

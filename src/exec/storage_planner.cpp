@@ -100,7 +100,7 @@ StorageTier downgrade_one(StorageTier current, StorageTier floor, const KindCapa
     return current;
 }
 
-// Explicit kind overrides t.kind, which is UNKNOWN after weight_upload.cu creates fresh
+// Explicit kind overrides t.kind, which is UNKNOWN after weight_upload.cpp creates fresh
 // Tensor descriptors. The planner uses field position (L.wq -> WQ, etc.) rather than the
 // stored kind, so Phase 5 plan-driven allocation works even before kind preservation is
 // added to every upload path. t.qtype IS preserved, so the planner uses it for

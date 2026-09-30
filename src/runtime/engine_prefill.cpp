@@ -7,6 +7,7 @@
 #include "runtime/prefill_pacing.h"
 #include "runtime/config.h"
 #include "core/buffer.h"
+#include "core/cuda_errors.h"
 #include "compute/mtp_forward.h"
 #include "compute/dispatch_record.h"
 #include "model/image_placeholders.h"
@@ -691,7 +692,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                 } lt_reset;
                 executor_->forward_logits(state, logits_out, s);
             });
-            prefill_graph_runner_.execute(pf_stream);
+            // false only without a decode fn; capture/replay failures fall back to eager inside execute().
+            (void)prefill_graph_runner_.execute(pf_stream);
             if (logits_out.data == nullptr) {
                 logits_out = executor_->get_logits_view(/*n=*/1);
             }
@@ -729,6 +731,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset, chunk_len,
                                               ppl_capture_.d_nll, pf_stream, ppl_capture_.d_match);
         }
+        prompt_logprobs_chunk_(*req, offset, chunk_len, pf_stream);
 
         // Embedding pooling for this chunk (#1005): hidden_ still holds it.
         if (req->embedding_request)
@@ -826,19 +829,22 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             // (allocated at warmup when overlap is ready; shared slot is the serial-path default).
             int32_t* sample_slot =
                 d_prefill_sample_ ? d_prefill_sample_ : executor_->d_sample_result();
-            sample_greedy_device(last_logits, sample_slot, h_sample_pinned_.as<int32_t>(),
-                                 pf_stream);
+            const bool sample_enqueued = sample_greedy_device(last_logits, sample_slot,
+                                                              h_sample_pinned_.as<int32_t>(), pf_stream);
 
             if (!prefill_done_)
                 (void)prefill_done_.create();
-            cudaEventRecord(prefill_done_, pf_stream);
+            const cudaError_t rec_err = cudaEventRecord(prefill_done_, pf_stream);
 
             if (!pf_pool_used) {
                 free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa,
                                      d_context_lens, pf_stream);
             }
 
-            cudaEventSynchronize(prefill_done_);
+            // Unrecorded or failed event: h_sample_pinned_ was never written.
+            cuda_sync_or_throw(rec_err, "step_prefill_one event record");
+            cuda_sync_or_throw(cudaEventSynchronize(prefill_done_), "step_prefill_one");
+            sampler_enqueued_or_throw(sample_enqueued, "step_prefill_one");
             next_token = *h_sample_pinned_.as<int32_t>();
         } else if (req->logprobs) {
             executor_->forward_logits(state, prefill_logits_out, pf_stream);
@@ -891,6 +897,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             executor_->perplexity_nll_partial(ppl_capture_.d_tokens, ppl_capture_.n, offset, chunk_len,
                                               ppl_capture_.d_nll, pf_stream, ppl_capture_.d_match);
         }
+        prompt_logprobs_chunk_(*req, offset, chunk_len, pf_stream);
 
         req->output_tokens.push_back(next_token);
         track_think_state(*req, next_token);

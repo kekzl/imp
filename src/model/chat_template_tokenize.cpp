@@ -1,6 +1,7 @@
 // ChatTemplate: rendered text -> token ids (control-token split, transcript id splice).
 #include "model/chat_template.h"
 #include "core/logging.h"
+#include "model/unicode_class.h"
 
 #include <algorithm>
 
@@ -52,6 +53,11 @@ std::vector<int32_t> ChatTemplate::tokenize_rendered(const Tokenizer& tok,
             IMP_LOG_DEBUG("TranscriptIds: kept %zu forwarded ids over %zu bytes, tokenizing %zu tail bytes",
                           result.size(), pos, rendered.size() - pos);
     }
+    // Added tokens with lstrip/rstrip (Phi-4) swallow adjacent whitespace, as HF's encode of the
+    // whole render does.
+    auto space_at = [&](size_t k, size_t* len) {
+        return (unicode::cp_class(unicode::decode_utf8_at(rendered, k, len)) & unicode::kSpace) != 0;
+    };
     while (pos < rendered.size()) {
         // Try to match a control token at current position
         bool matched = false;
@@ -59,6 +65,10 @@ std::vector<int32_t> ChatTemplate::tokenize_rendered(const Tokenizer& tok,
             if (rendered.compare(pos, text.size(), text) == 0) {
                 result.push_back(id);
                 pos += text.size();
+                size_t len;
+                if (tok.strip_flags(id) & 2)
+                    while (pos < rendered.size() && space_at(pos, &len))
+                        pos += len;
                 matched = true;
                 break;
             }
@@ -68,15 +78,25 @@ std::vector<int32_t> ChatTemplate::tokenize_rendered(const Tokenizer& tok,
 
         // Collect text until the next control token
         size_t next = rendered.size();
+        int32_t next_id = -1;
         for (const auto& [text, id] : control_tokens_) {
             size_t found = rendered.find(text, pos);
             if (found != std::string::npos && found < next) {
                 next = found;
+                next_id = id;
             }
         }
 
         // Encode the text segment
-        std::string segment = rendered.substr(pos, next - pos);
+        size_t seg_end = next;
+        if (tok.strip_flags(next_id) & 1) {
+            seg_end = pos;
+            size_t len;
+            for (size_t p = pos; p < next; p += len)
+                if (!space_at(p, &len))
+                    seg_end = p + len;
+        }
+        std::string segment = rendered.substr(pos, seg_end - pos);
         if (!segment.empty()) {
             auto ids = tok.encode(segment, true);  // no_prefix=true for template segments
             result.insert(result.end(), ids.begin(), ids.end());

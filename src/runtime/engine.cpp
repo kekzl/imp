@@ -51,6 +51,29 @@ namespace imp {
 // File-local helpers live in runtime/engine_internal.h, shared by the
 // per-subsystem engine_*.cpp translation units.
 
+namespace engine_internal {
+void alloc_residual_decode_buffers(int n, int*& d_slot, std::vector<int>& slot_uploaded, int*& d_meta,
+                                   int& meta_cap) {
+    const std::vector<int> init_slots(n, -1), init_meta(3 * static_cast<size_t>(n), 0);
+    const size_t slot_bytes = init_slots.size() * sizeof(int), meta_bytes = init_meta.size() * sizeof(int);
+    slot_uploaded.assign(n, -1);
+    if (cudaMalloc(&d_slot, slot_bytes) != cudaSuccess)
+        d_slot = nullptr;
+    else if (cudaMemcpy(d_slot, init_slots.data(), slot_bytes, cudaMemcpyHostToDevice) != cudaSuccess)
+        slot_uploaded.clear();  // the first decode step uploads before use
+    if (cudaMalloc(&d_meta, meta_bytes) != cudaSuccess)
+        d_meta = nullptr;
+    else if (cudaMemcpy(d_meta, init_meta.data(), meta_bytes, cudaMemcpyHostToDevice) == cudaSuccess)
+        meta_cap = n;
+    if (!d_slot || slot_uploaded.empty() || meta_cap != n)
+        IMP_LOG_WARN("residual decode buffers: alloc/init failed (slot=%p, meta capacity %d of %d)",
+                     static_cast<void*>(d_slot), meta_cap, n);
+}
+}  // namespace engine_internal
+
+void MtpDraftWorkspaceDeleter::operator()(MtpDraftWorkspace* ws) const noexcept { delete ws; }
+void EncoderWorkspaceDeleter::operator()(EncoderWorkspace* ws) const noexcept { delete ws; }
+
 Engine::~Engine() {
     // Cross-model CUDA-error-leak guard: the CUDA error state is per primary
     // context, NOT per Engine, so a sticky error from this model's workload
@@ -108,10 +131,7 @@ Engine::~Engine() {
     // The constrained pipeline's pinned landing and event outlive one
     // pipeline (teardown keeps them); this is their one release.
     cpipe_.h_token.reset();
-    if (cpipe_.ev) {
-        IMP_CUDA_CHECK_LOG(cudaEventDestroy(cpipe_.ev));
-        cpipe_.ev = nullptr;
-    }
+    cpipe_.ev.reset();
     if (swa_snap_slab_) {
         IMP_CUDA_CHECK_LOG(cudaFree(swa_snap_slab_));
         swa_snap_slab_ = nullptr;
@@ -130,11 +150,11 @@ Engine::~Engine() {
         d_token_is_whitespace_ = nullptr;
     }
     if (d_kv_slot_buf_) {
-        cudaFree(d_kv_slot_buf_);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_kv_slot_buf_));
         d_kv_slot_buf_ = nullptr;
     }
     if (residual_meta_d_buf_) {
-        cudaFree(residual_meta_d_buf_);
+        IMP_CUDA_CHECK_LOG(cudaFree(residual_meta_d_buf_));
         residual_meta_d_buf_ = nullptr;
         residual_meta_capacity_ = 0;
     }
@@ -159,22 +179,15 @@ Engine::~Engine() {
         vram_alloc_.free(prefill_pool_);
         prefill_pool_ = nullptr;
     }
-    if (pf_staging_evt_) {
-        IMP_CUDA_CHECK_LOG(cudaEventDestroy(pf_staging_evt_));
-        pf_staging_evt_ = nullptr;
-    }
+    pf_staging_evt_.reset();
     // Encoder embedder workspace cleanup (#836)
     if (encoder_ws_storage_) {
-        auto* ews = static_cast<imp::EncoderWorkspace*>(encoder_ws_storage_);
-        imp::encoder_workspace_free(*ews);
-        delete ews;
-        encoder_ws_storage_ = nullptr;
+        imp::encoder_workspace_free(*encoder_ws_storage_);
+        encoder_ws_storage_.reset();
     }
     if (mtp_ws_storage_) {
-        auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
-        imp::mtp_workspace_free(*ws);
-        delete ws;
-        mtp_ws_storage_ = nullptr;
+        imp::mtp_workspace_free(*mtp_ws_storage_);
+        mtp_ws_storage_.reset();
         mtp_spec_k_ = 0;
     }
     // stream_, prefill_done_, decode_done_ cleaned up by CudaStream/CudaEvent RAII
@@ -189,13 +202,13 @@ bool Engine::encoder_embed(std::span<const int32_t> tokens, std::vector<float>& 
         IMP_LOG_ERROR("encoder_embed: no encoder workspace (not an encoder model?)");
         return false;
     }
-    auto* ews = static_cast<imp::EncoderWorkspace*>(encoder_ws_storage_);
+    auto* ews = encoder_ws_storage_.get();
     out.resize(model_->config_.d_model);
     return imp::encoder_embed(*model_, *ews, tokens, out.data(), stream_);
 }
 
 int Engine::encoder_max_tokens() const {
-    return encoder_ws_storage_ ? static_cast<const imp::EncoderWorkspace*>(encoder_ws_storage_)->max_tokens : 0;
+    return encoder_ws_storage_ ? encoder_ws_storage_->max_tokens : 0;
 }
 
 cudaStream_t Engine::prefill_stream() const {
@@ -571,12 +584,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // if none was set (library/test embeddings). Every Engine::* method reads
     // runtime_config_ from here on; engine_init_resolver_ helpers mutate it in place.
     runtime_config_ = take_pending_runtime_config();
-    // Library embeddings bypass tools/common/mtp_auto: same force-off for a head without a forward.
-    if (model_->mtp_.has_value() && !mtp_forward_implemented(*model_->mtp_) &&
-        runtime_config_.speculative.mtp_k != 0) {
-        runtime_config_.speculative.mtp_k = 0;
-        IMP_LOG_INFO("%s", kMtpForwardMissingLog);
-    }
 
     // Bridges the documented imp.conf [server]/[paths] keys into EngineConfig
     // (previously parsed into RuntimeConfig but never read, #541). A CLI flag /
@@ -749,7 +756,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // after warmup measures it.
         // A lazy arena is a tracked pool, not a named charge: naming its
         // reservation would count bytes not backed yet.
-        MemAccount::instance().set_named_charges(ctx_baseline_bytes, /*library=*/0,
+        MemAccount::instance().set_named_charges(ctx_baseline_bytes, /*library_bytes=*/0,
                                                  engine_arena().lazy() ? 0 : engine_arena().capacity(),
                                                  engine_arena().high_water());
     }
@@ -801,15 +808,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             IMP_LOG_ERROR("encoder: weight upload failed");
             return false;
         }
-        auto* ews = new imp::EncoderWorkspace();
+        auto ews = std::make_unique<imp::EncoderWorkspace>();
         int cap = model_->config_.max_seq_len > 0 ? model_->config_.max_seq_len : 2048;
         if (config_.max_seq_len > 0)
             cap = std::min(cap, config_.max_seq_len);
-        if (!imp::encoder_workspace_init(*ews, *model_, cap, stream_)) {
-            delete ews;
+        if (!imp::encoder_workspace_init(*ews, *model_, cap, stream_))
             return false;
-        }
-        encoder_ws_storage_ = ews;
+        encoder_ws_storage_.reset(ews.release());
         IMP_LOG_INFO("Encoder embedder ready (arch=%s, max_tokens=%d, d=%d)",
                      model_arch_name(model_->config_.arch), cap, model_->config_.d_model);
         return true;
@@ -824,6 +829,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     if (!init_kv_cache()) {
         return false;
     }
+    // Optional tier: false = off (budget 0, or WARN logged with the reason); serving runs without it.
+    (void)kv_manager_->enable_host_spill(static_cast<size_t>(std::max(0, runtime_config_.kv_cache.host_spill_mb))
+                                   << 20);
     MemAccount::instance().checkpoint("03_kv_cache");
     // Before warmup's graph prewarm: a captured decode step cannot allocate
     // the small-M scratches (#1897). Charged in the T2 arena demand above.

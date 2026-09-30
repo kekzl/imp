@@ -3,6 +3,7 @@
 
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
+#include "exec/executor_kernels.cuh"
 #include "exec/executor_helpers.h"
 #include "quant/fp8_quant.h"
 #include "core/logging.h"
@@ -15,7 +16,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <vector>
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 
 namespace imp {
 

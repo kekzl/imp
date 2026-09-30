@@ -1,4 +1,4 @@
-// Host-side routing decisions from attention-prefill (attention_dispatch.cu) and MoE-prefill
+// Host-side routing decisions from attention-prefill (attention_dispatch.cpp) and MoE-prefill
 // GEMM dispatch (executor_forward_moe_cutlass.cu), R2/P1.4: the #493 routing regression and
 // the #574 grouped-GEMM-vs-fallback path were both E2E-only. These pin the tables as a cheap
 // CPU diff.
@@ -276,7 +276,7 @@ TEST(AttnDispatchTable, SinksWithBothSinkTiersOffIsNone) {
 // makes the model name that same tier - or the production check cries wolf and gets muted.
 namespace {
 
-// What attention_dispatch.cu has filled in by the time `winner` commits: every
+// What attention_dispatch.cpp has filled in by the time `winner` commits: every
 // tier it walked past declined (false), the winner accepted, and tiers below
 // the winner were never evaluated so they stay false.
 AttnKernelSupport observed_when(AttnPrefillPath winner) {

@@ -2,7 +2,7 @@
 // ILP-hidden latency) vs mxf4nvf4_mma_bench's 1 warp/SM serial-chain latency-only measurement.
 // Feeds tools/roofline/config.json flop_per_cycle calibration (#595/#596).
 
-#include "bench/mma_peak_saturated.h"
+#include "mma_peak_saturated.h"
 #include <cuda_runtime.h>
 #include <cstdint>
 

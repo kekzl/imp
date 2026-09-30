@@ -39,5 +39,41 @@ TEST(CudaErrorsTest, SyncFailureThrowsNamingClassAndSite) {
     }
 }
 
+// #2211: a failed sampler readback sync fails the request; it never yields a token.
+TEST(CudaErrorsTest, SyncedTokenIsReadOnlyAfterSuccessfulSync) {
+    const int32_t h_token = 1234;
+    EXPECT_EQ(synced_token_or_throw(cudaSuccess, &h_token, "forward sampler readback"), 1234);
+    try {
+        const int32_t tok = synced_token_or_throw(cudaErrorLaunchFailure, &h_token, "forward sampler readback");
+        FAIL() << "a failed sync returned token " << tok;
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("forward sampler readback"), std::string::npos) << e.what();
+    }
+}
+
+// #2307: a failed sampler scratch alloc or readback enqueue throws; the sampler never returns token 0.
+TEST(CudaErrorsTest, FailedSamplerCallThrowsNamingClassAndSite) {
+    EXPECT_NO_THROW(cuda_call_or_throw(cudaSuccess, "sample_topk_topp scratch"));
+    try {
+        cuda_call_or_throw(cudaErrorMemoryAllocation, "sample_topk_topp scratch");
+        FAIL() << "a failed sampler call returned normally";
+    } catch (const std::runtime_error& e) {
+        const std::string what = e.what();
+        EXPECT_NE(what.find(cudaGetErrorString(cudaErrorMemoryAllocation)), std::string::npos) << what;
+        EXPECT_NE(what.find("sample_topk_topp scratch"), std::string::npos) << what;
+    }
+}
+
+// #2307: a sampler that enqueued nothing (CUB scratch unavailable) fails the request.
+TEST(CudaErrorsTest, UnenqueuedSamplerThrowsNamingSite) {
+    EXPECT_NO_THROW(sampler_enqueued_or_throw(true, "sample_tokens"));
+    try {
+        sampler_enqueued_or_throw(false, "sample_tokens");
+        FAIL() << "an unenqueued sampler returned normally";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("sample_tokens"), std::string::npos) << e.what();
+    }
+}
+
 }  // namespace
 }  // namespace imp

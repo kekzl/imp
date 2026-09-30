@@ -605,5 +605,32 @@ TEST(SchemaConstrainPropertyTest, PrefilteredMaskMatchesTokenLegal) {
     }
 }
 
+// #2273: forced envelope, Phi-4 emitted 15 tabs per token until max_tokens. Leading whitespace
+// before the open literal is capped at 2 chars, then '<' is the only legal char.
+TEST(SchemaEnvelope, ForcedOpenBoundsLeadingWhitespace) {
+    auto schema = build_tool_call_schema(
+        {{"set_reminder",
+          R"({"type":"object","properties":{"title":{"type":"string"},"minutes_from_now":{"type":"integer"}},)"
+          R"("required":["title","minutes_from_now"]})"}});
+    ASSERT_TRUE(schema != nullptr);
+    SchemaConstrainer sc;
+    sc.set_envelope("<tool_call>\n", "\n</tool_call>");
+    ASSERT_TRUE(sc.init_grammar_for_test(std::move(schema)));
+
+    EXPECT_TRUE(sc.token_legal("<tool_call>\n{"));
+    EXPECT_TRUE(sc.token_legal("\n\n<tool_call>\n{"));
+    EXPECT_FALSE(sc.token_legal("\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t"));
+    EXPECT_FALSE(sc.token_legal("\n\n\n"));
+
+    const std::vector<std::string> vocab = {"\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t", "  \n", "\n", "<",
+                                            "<tool_call>"};
+    auto m = sc.mask_for_test(vocab);
+    EXPECT_EQ(m, (std::vector<uint8_t>{0, 0, 1, 1, 1}));
+    sc.update(2);  // "\n"
+    sc.update(2);  // "\n": budget spent
+    m = sc.mask_for_test(vocab);
+    EXPECT_EQ(m, (std::vector<uint8_t>{0, 0, 0, 1, 1}));
+}
+
 }  // namespace
 }  // namespace imp

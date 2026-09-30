@@ -9,7 +9,7 @@ namespace imp {
 // CUTLASS 3.x NVFP4 BlockScaled Grouped GEMM for MoE (SM120).
 // Per-expert M varies, shared N and K across all experts.
 // Replaces CUTLASS 2.x GemmGrouped for NVFP4-quantized MoE expert weights.
-bool cutlass_grouped_3x_nvfp4_available();
+[[nodiscard]] bool cutlass_grouped_3x_nvfp4_available();
 
 // Per-expert inputs for grouped NVFP4xNVFP4 -> FP16 GEMM. Pointer fields are HOST
 // arrays of DEVICE pointers (length n_experts); dispatch copies them to device and
@@ -18,7 +18,7 @@ bool cutlass_grouped_3x_nvfp4_available();
 //   B_i [N,K] packed NVFP4 (per-expert); SFB_i SfAtom UE4M3 (per-expert)
 //   D_i [M_i,N] FP16 output RowMajor; alpha_i per-expert tensor_scale as GEMM alpha
 // K and N must be identical across all experts; M_i varies.
-bool gemm_grouped_cutlass_3x_nvfp4(
+[[nodiscard]] bool gemm_grouped_cutlass_3x_nvfp4(
     int n_experts,
     const int* host_M,  // [n_experts] M_i per expert
     int N, int K,
@@ -66,7 +66,7 @@ struct GroupedNvfp4DeviceArgs {
     void* base_D;                     // FP16 output base
 };
 
-bool gemm_grouped_cutlass_3x_nvfp4_device_args(
+[[nodiscard]] bool gemm_grouped_cutlass_3x_nvfp4_device_args(
     int n_experts,
     int N, int K,
     const GroupedNvfp4DeviceArgs& args,

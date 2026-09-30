@@ -10,6 +10,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "cutlass/cutlass.h"
@@ -92,7 +93,11 @@ bool cutlass_grouped_3x_nvfp4_available() {
     if (s_grp3x_available >= 0)
         return s_grp3x_available;
     cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
+    const cudaError_t err = cudaGetDeviceProperties(&prop, 0);
+    if (err != cudaSuccess) {
+        IMP_LOG_WARN("cutlass_grouped_3x: cudaGetDeviceProperties failed: %s", cudaGetErrorString(err));
+        return false;  // not cached: the next call queries again
+    }
     s_grp3x_available = (prop.major * 10 + prop.minor >= 120) ? 1 : 0;
     return s_grp3x_available;
 }
@@ -108,7 +113,8 @@ static size_t s_workspace_sz = 0;
 // update() (only recomputes params_ from new per-group pointers/strides), skipping the
 // CUDA driver roundtrip. Plus a (N,K)-keyed can_implement memo since alignment checks
 // don't depend on per-group M.
-static GrpGemm* s_gemm = nullptr;
+// Exit-time dtor is host-only (GemmUniversalAdapter holds POD params, no CUDA calls).
+static std::unique_ptr<GrpGemm> s_gemm;
 static bool s_gemm_initialized = false;
 static int s_can_impl_N = -1;
 static int s_can_impl_K = -1;
@@ -312,7 +318,7 @@ bool gemm_grouped_cutlass_3x_nvfp4(int n_experts, const int* host_M, int N, int 
     }
 
     if (s_gemm == nullptr) {
-        s_gemm = new GrpGemm();
+        s_gemm = std::make_unique<GrpGemm>();
     }
 
     // can_implement only validates host-side alignment, which depends on N, K,
@@ -367,10 +373,7 @@ void gemm_grouped_3x_nvfp4_cleanup() {
     s_staging_sz = 0;
     s_workspace = nullptr;
     s_workspace_sz = 0;
-    if (s_gemm) {
-        delete s_gemm;
-        s_gemm = nullptr;
-    }
+    s_gemm.reset();
     s_gemm_initialized = false;
     s_can_impl_N = -1;
     s_can_impl_K = -1;
@@ -503,7 +506,8 @@ namespace imp {
 // Persistent host shapes (max-M dummy) for can_implement validation.
 // can_implement only checks alignment (which depends on N, K and element
 // types — not on per-group M values), so any safely-aligned M works.
-static std::vector<GrpUnderlyingShape>* s_host_shapes_max = nullptr;
+// Host-only vector: exit-time destruction makes no CUDA call.
+static std::vector<GrpUnderlyingShape> s_host_shapes_max;
 
 bool gemm_grouped_cutlass_3x_nvfp4_device_args(
     int n_experts, int N, int K,
@@ -571,19 +575,17 @@ bool gemm_grouped_cutlass_3x_nvfp4_device_args(
     auto d_aPtrArr     = reinterpret_cast<float**>(d_base + o.aPtr);
 
     // Build/refresh persistent host_shapes for can_implement on first (N,K).
-    if (!s_host_shapes_max)
-        s_host_shapes_max = new std::vector<GrpUnderlyingShape>();
-    if ((int)s_host_shapes_max->size() < n_experts) {
+    if ((int)s_host_shapes_max.size() < n_experts) {
         // Dummy alignment-safe M (multiple of 128 covers all TMA alignments
         // we use). Actual per-expert M is on device via d_M_per.
-        s_host_shapes_max->assign(n_experts, GrpUnderlyingShape{128, N, K});
+        s_host_shapes_max.assign(n_experts, GrpUnderlyingShape{128, N, K});
     } else {
         // Refresh N, K (could change across calls — alignment depends on them).
         for (int i = 0; i < n_experts; ++i) {
-            (*s_host_shapes_max)[i] = GrpUnderlyingShape{128, N, K};
+            s_host_shapes_max[i] = GrpUnderlyingShape{128, N, K};
         }
     }
-    GrpUnderlyingShape* h_shapes = s_host_shapes_max->data();
+    GrpUnderlyingShape* h_shapes = s_host_shapes_max.data();
 
     // Launch the device-side staging-build kernel.
     build_grouped_3x_staging_kernel<<<(n_experts + 255) / 256, 256, 0, stream>>>(
@@ -628,7 +630,7 @@ bool gemm_grouped_cutlass_3x_nvfp4_device_args(
     }
 
     if (s_gemm == nullptr)
-        s_gemm = new GrpGemm();
+        s_gemm = std::make_unique<GrpGemm>();
 
     // can_implement memoized per (N, K). Uses the M=128 dummy host shapes —
     // can_implement only checks alignment, which depends on N/K, not M.

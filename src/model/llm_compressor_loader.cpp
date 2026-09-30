@@ -90,6 +90,15 @@ std::vector<std::string> parse_bracket_array(std::string_view body) {
     return out;
 }
 
+// std::stoi(s), or `fallback` on a malformed or out-of-range value (best-effort YAML parse).
+int stoi_or(const std::string& s, int fallback) {
+    try {
+        return std::stoi(s);
+    } catch (...) {
+        return fallback;
+    }
+}
+
 }  // namespace
 
 bool name_is_vision(const std::string& in) {
@@ -280,17 +289,11 @@ bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4C
 
         if (weights_indent >= 0) {
             if (sv.find("num_bits:") == 0) {
-                try {
-                    weights_num_bits = std::stoi(trim_value(sv.substr(9)));
-                } catch (...) {  // best-effort parse — keep default num_bits on malformed value
-                }
+                weights_num_bits = stoi_or(trim_value(sv.substr(9)), weights_num_bits);
             } else if (sv.find("type:") == 0) {
                 weights_type = trim_value(sv.substr(5));
             } else if (sv.find("group_size:") == 0) {
-                try {
-                    weights_group_size = std::stoi(trim_value(sv.substr(11)));
-                } catch (...) {  // best-effort parse — keep default group_size on malformed value
-                }
+                weights_group_size = stoi_or(trim_value(sv.substr(11)), weights_group_size);
             }
             continue;
         }
@@ -306,10 +309,7 @@ bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4C
                 ignore_list = parse_bracket_array(body);
             }
         } else if (sv.find("group_size:") == 0) {
-            try {
-                cfg.group_size = std::stoi(trim_value(sv.substr(11)));
-            } catch (...) {  // best-effort parse — keep default group_size on malformed value
-            }
+            cfg.group_size = stoi_or(trim_value(sv.substr(11)), cfg.group_size);
         }
     }
 
@@ -398,10 +398,10 @@ bool parse_compressed_tensors_config(const std::string& model_dir, imp::HFConfig
                 continue;
             int num_bits = 0, gs = 0;
             std::string type, strategy;
-            jobj_get_int(*w, "num_bits", num_bits);
-            jobj_get_int(*w, "group_size", gs);
-            jobj_get_string(*w, "type", type);
-            jobj_get_string(*w, "strategy", strategy);
+            jobj_opt_int(*w, "num_bits", num_bits);
+            jobj_opt_int(*w, "group_size", gs);
+            jobj_opt_string(*w, "type", type);
+            jobj_opt_string(*w, "strategy", strategy);
             if (num_bits == 4 && type == "float" && gs == 16 && strategy == "tensor_group") {
                 found_nvfp4 = true;
                 group_size = gs;
@@ -416,7 +416,7 @@ bool parse_compressed_tensors_config(const std::string& model_dir, imp::HFConfig
         // not silent - an unsupported compressed-tensors scheme otherwise arrives as "some
         // unquantized model".
         std::string fmt;
-        jobj_get_string(*qc, "format", fmt);
+        jobj_opt_string(*qc, "format", fmt);
         IMP_LOG_WARN(
             "config.json declares compressed-tensors (format=%s, weights=%s) but no NVFP4 group "
             "(4-bit float, group_size 16, tensor_group). Falling back to the on-wire dtype.",

@@ -27,7 +27,7 @@ void paged_attention_set_splitk_scratch(void* ptr, size_t size);
 // Token-tiled FP8 split-K kernel (attention_paged_fp8_tile.cu). Dispatched from
 // paged_attention_decode_fp8 for head_dim=128 / block_size % 16 == 0; writes the same
 // partial_out layout as the pipeline kernel (reduce kernel shared).
-bool paged_attention_splitk_fp8_tile_supported(int head_dim, int block_size);
+[[nodiscard]] bool paged_attention_splitk_fp8_tile_supported(int head_dim, int block_size);
 void paged_attention_splitk_fp8_tile_launch(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
                                             float* partial_out, const int* block_tables,
                                             const int* context_lens, int batch_size, int n_heads,
@@ -38,7 +38,7 @@ void paged_attention_splitk_fp8_tile_launch(const half* Q, const uint8_t* K_cach
 // GQA-batched tile variant: one block per KV head computes all G Q heads from a
 // shared smem tile (L2 KV traffic /G). Grid.y = n_kv_heads; the launcher's split
 // count should be raised accordingly (see paged_attention_decode_fp8).
-bool paged_attention_splitk_fp8_tile_gqa_supported(int head_dim, int block_size, int n_heads,
+[[nodiscard]] bool paged_attention_splitk_fp8_tile_gqa_supported(int head_dim, int block_size, int n_heads,
                                                    int n_kv_heads);
 int paged_attention_splitk_fp8_tile_gqa_splits(int batch_size, int n_heads, int n_kv_heads, int head_dim,
                                                int block_size, int max_context_len);
@@ -54,7 +54,7 @@ void paged_attention_splitk_fp8_tile_gqa_launch(const half* Q, const uint8_t* K_
 // K/V_cache:[num_blocks,n_kv_heads,block_size,hd] FP8_E4M3. kv_scale: per-tensor FP32
 // (val = fp8_val * kv_scale). NVFP4 4-token variant (attention.paged_nvfp4_multitok), HD=128/256,
 // E4M3 scales; num_splits>1 fills `partial` for the reduce. Returns false for unsupported shapes.
-bool paged_attention_decode_nvfp4_multitok_launch(const half* Q, const uint8_t* K_cache,
+[[nodiscard]] bool paged_attention_decode_nvfp4_multitok_launch(const half* Q, const uint8_t* K_cache,
                                                   const uint8_t* V_cache, const uint8_t* K_scales,
                                                   const uint8_t* V_scales, half* O, float* partial,
                                                   const int* block_tables, const int* context_lens,
@@ -66,7 +66,7 @@ bool paged_attention_decode_nvfp4_multitok_launch(const half* Q, const uint8_t* 
 // NVFP4 multitok with Q-head grouping: a CTA converts each K/V row once for heads_per_cta Q
 // heads of one KV head. HD=128/256. heads_per_cta 0=auto (largest of 4/3/2 dividing GQA ratio),
 // 1=not served. Returns false when the shape is not served.
-bool paged_attention_nvfp4_multitok_gqa_launch(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
+[[nodiscard]] bool paged_attention_nvfp4_multitok_gqa_launch(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
                                                const uint8_t* K_scales, const uint8_t* V_scales, half* O,
                                                float* partial, const int* block_tables,
                                                const int* context_lens, int batch_size, int n_heads,
@@ -89,7 +89,7 @@ void paged_attention_decode_fp8_multitok_hd128(const half* Q, const uint8_t* K_c
 // HD=128 FP8 decode, 16 lanes/KV row, heads_per_cta Q heads/CTA sharing KV loads. Called before
 // the four-token kernel when the knob is on and split-K is off; heads_per_cta 0=auto (largest of
 // 5/4/3/2/1 dividing the ratio). Returns false for unsupported shapes (HD!=128, ratio>16).
-bool paged_attention_fp8_multitok_gqa_launch(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
+[[nodiscard]] bool paged_attention_fp8_multitok_gqa_launch(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache,
                                              half* O, const int* block_tables, const int* context_lens,
                                              int batch_size, int n_heads, int n_kv_heads, int head_dim,
                                              int block_size, float scale, float kv_scale, int max_num_blocks,
@@ -100,7 +100,7 @@ int paged_attention_fp8_multitok_heads_per_cta(int head_dim, int n_q_per_kv, int
 // F16 decode, 4 tokens/warp iteration, heads_per_cta Q heads/CTA sharing KV loads (HD=128/256,
 // GQA ratio 1..8). Called when the knob is on, split-K is off and n_sinks==0; heads_per_cta
 // 0=auto (largest of 4/2/1 dividing the ratio, HD=256 caps at 2). Returns false otherwise.
-bool paged_attention_decode_f16_multitok_launch(const half* Q, const half* K_cache, const half* V_cache,
+[[nodiscard]] bool paged_attention_decode_f16_multitok_launch(const half* Q, const half* K_cache, const half* V_cache,
                                                 half* O, const int* block_tables, const int* context_lens,
                                                 int batch_size, int n_heads, int n_kv_heads, int head_dim,
                                                 int block_size, float scale, int max_num_blocks,
@@ -110,7 +110,7 @@ bool paged_attention_decode_f16_multitok_launch(const half* Q, const half* K_cac
 // Split-K instance of the F16 multitok kernel: grid (batch, n_kv_heads x
 // groups, num_splits), one (m, l, o) partial per head in the shared reduce
 // layout. Same shape rules as the plain launch; num_splits from the caller.
-bool paged_attention_splitk_f16_multitok_launch(const half* Q, const half* K_cache, const half* V_cache,
+[[nodiscard]] bool paged_attention_splitk_f16_multitok_launch(const half* Q, const half* K_cache, const half* V_cache,
                                                 float* partial, const int* block_tables,
                                                 const int* context_lens, int batch_size, int n_heads,
                                                 int n_kv_heads, int head_dim, int block_size, float scale,
@@ -125,7 +125,7 @@ int paged_attention_f16_multitok_heads_per_cta(int head_dim, int n_q_per_kv, int
 // F16 decode, 4 tokens/warp iteration, heads_per_cta Q heads/CTA sharing KV loads (HD=128/256,
 // GQA ratio 1..8). Called when the knob is on, split-K is off and n_sinks==0; heads_per_cta
 // 0=auto (largest of 4/2/1 dividing the ratio, HD=256 caps at 2). Returns false otherwise.
-bool paged_attention_decode_f16_multitok_launch(const half* Q, const half* K_cache, const half* V_cache,
+[[nodiscard]] bool paged_attention_decode_f16_multitok_launch(const half* Q, const half* K_cache, const half* V_cache,
                                                 half* O, const int* block_tables, const int* context_lens,
                                                 int batch_size, int n_heads, int n_kv_heads, int head_dim,
                                                 int block_size, float scale, int max_num_blocks,
@@ -222,13 +222,13 @@ void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size);
 // Single source of truth for whether paged DECODE applies attn sinks (gpt-oss #547) for a KV
 // dtype - a property of the kernels, not the model. Wire a new dtype here too, or the fallback
 // silently misses it (#1339, #1345). FP16 sinks since #547, FP8 since #1346.
-bool paged_attention_applies_sinks(QType kv_dtype);
+[[nodiscard]] bool paged_attention_applies_sinks(QType kv_dtype);
 
 // Which head_dims a KV dtype's paged DECODE launchers template for (#1674); same wire-a-dtype
 // contract as paged_attention_applies_sinks. Unknown dtype returns true (never refuse unchecked);
 // the resolver falls back to FP16 KV so an unserved head_dim (throws, SETTLED S-22) never reaches
 // a launcher.
-bool paged_attention_serves_head_dim(QType kv_dtype, int head_dim);
+[[nodiscard]] bool paged_attention_serves_head_dim(QType kv_dtype, int head_dim);
 
 // True only if FP8 KV gets the FAST paged decode kernels at this head_dim; otherwise
 // LAUNCH_FP8_FALLBACK runs silently. Fast kernels (fp8_multitok[_gqa].cu) are head_dim=128

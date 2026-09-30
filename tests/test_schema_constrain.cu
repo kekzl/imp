@@ -80,7 +80,7 @@ TEST(SchemaConstrainTest, PatternEnforcementMasksCorrectly) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "code", ":", "}", "D", "DEU", "abc"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2));
 
     auto schema = parse_json_schema(
         R"({"type":"object","properties":{"code":{"type":"string","pattern":"^[A-Z]{3}$"}},"required":["code"]})");
@@ -126,7 +126,7 @@ TEST(SchemaConstrainTest, ObjectOpenQuotePrefixedKeyMasked) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "}", "\"", "\"code", "\"Why", ":", "code"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2));
 
     auto schema = parse_json_schema(
         R"({"type":"object","properties":{"code":{"type":"string"}},"required":["code"]})");
@@ -195,7 +195,7 @@ TEST(SchemaConstrainTest, PrematureObjectCloseRejected) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "}", "{}", "\"", "code"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
     auto schema = parse_json_schema(
         R"({"type":"object","properties":{"code":{"type":"string"}},"required":["code"]})");
     ASSERT_TRUE(schema != nullptr);
@@ -218,7 +218,7 @@ TEST(SchemaConstrainTest, BackslashInKeyRejected) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "n", "\\", "\"\\n", "um"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
     auto schema = parse_json_schema(
         R"({"type":"object","properties":{"num":{"type":"string"}},"required":["num"]})");
     ASSERT_TRUE(schema != nullptr);
@@ -249,7 +249,7 @@ TEST(SchemaConstrainTest, TrailingCommaRejected) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "a", "x", ":", "}", ","};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
     auto schema = parse_json_schema(
         R"({"type":"object","properties":{"a":{"type":"string"}},"required":["a"]})");
     ASSERT_TRUE(schema != nullptr);
@@ -270,7 +270,7 @@ TEST(SchemaConstrainTest, IntegerLeadingZeroRejected) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "n", ":", "0", "5", "}"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
     auto schema = parse_json_schema(
         R"({"type":"object","properties":{"n":{"type":"integer"}},"required":["n"]})");
     ASSERT_TRUE(schema != nullptr);
@@ -292,7 +292,7 @@ TEST(SchemaConstrainTest, IntegerDigitRunCappedForcesClose) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "n", ":", "1", "0", "}"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
     auto schema = parse_json_schema(
         R"({"type":"object","properties":{"n":{"type":"integer"}},"required":["n"]})");
     ASSERT_TRUE(schema != nullptr);
@@ -321,7 +321,7 @@ TEST(SchemaConstrainTest, EnumAndIntegerComboTokensValidated) {
                                      "\"en\"", "\":\"", "\"x",  "5", "5.", "5.0",       "}"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
 
     // --- enum property ---
     {
@@ -388,7 +388,7 @@ TEST(SchemaConstrainTest, MaxItemsMasksCommaAtCap) {
     auto toks = array_vocab();
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
     auto schema = parse_json_schema(R"({"type":"object","properties":{"t":{"type":"array","maxItems":2,)"
                                     R"("items":{"type":"string"}}},"required":["t"]})");
     ASSERT_TRUE(schema != nullptr);
@@ -410,7 +410,7 @@ TEST(SchemaConstrainTest, EnumItemsArrayCappedAtCardinality) {
     auto toks = array_vocab();
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
     // Two-member enum, NO maxItems: effective cap = 2 (see effective_max_items).
     auto schema = parse_json_schema(R"({"type":"object","properties":{"t":{"type":"array",)"
                                     R"("items":{"type":"string","enum":["a","aa"]}}},"required":["t"]})");
@@ -428,7 +428,7 @@ TEST(SchemaConstrainTest, MinItemsBlocksPrematureClose) {
     auto toks = array_vocab();
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
     auto schema = parse_json_schema(R"({"type":"object","properties":{"t":{"type":"array","minItems":2,)"
                                     R"("items":{"type":"string"}}},"required":["t"]})");
     ASSERT_TRUE(schema != nullptr);
@@ -502,7 +502,7 @@ TEST(SchemaConstrainTest, RefNestedModelEnforced) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "inner", ":", "x", "5", "}"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
     auto schema = parse_json_schema(R"({"type":"object","properties":{"inner":{"$ref":"#/$defs/Inner"}},)"
                                     R"("required":["inner"],"$defs":{"Inner":{"type":"object",)"
                                     R"("properties":{"x":{"type":"integer"}},"required":["x"]}}})");
@@ -534,7 +534,7 @@ TEST(SchemaConstrainTest, RecursiveSchemaEnforced) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "v", ":", "1", ",", "kids", "[", "]"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, 1, 2));
     auto schema = parse_json_schema(R"({"$ref":"#/$defs/Node","$defs":{"Node":{"type":"object",)"
                                     R"("properties":{"v":{"type":"integer"},"kids":{"type":"array",)"
                                     R"("items":{"$ref":"#/$defs/Node"}}},"required":["v"]}}})");
@@ -580,7 +580,7 @@ TEST(SchemaConstrainTest, RawControlCharInStringMasked) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "code", ":", "}", "\"\n", "\"ok"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2));
 
     auto schema = parse_json_schema(
         R"({"type":"object","properties":{"code":{"type":"string"}},"required":["code"]})");
@@ -604,7 +604,7 @@ TEST(SchemaConstrainTest, ModelVocabLargerThanTokenizerMasksPadding) {
     std::vector<std::string> toks = {"<unk>", "<s>", "</s>", "{", "\"", "code", ":", "}"};
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2));
 
     auto schema = parse_json_schema(
         R"({"type":"object","properties":{"code":{"type":"string"}},"required":["code"]})");
@@ -641,7 +641,7 @@ static const std::vector<std::string> kForcedToks = {"<unk>", "<s>", "</s>", "{"
 // In-place init (SchemaConstrainer owns raw device buffers — not movable).
 static void init_forced_sc(Tokenizer& tok, SchemaConstrainer& sc, const char* schema_json) {
     std::vector<float> scores(kForcedToks.size(), 0.0f);
-    tok.load_vocab(kForcedToks, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(kForcedToks, scores, /*bos_id=*/1, /*eos_id=*/2));
     auto schema = parse_json_schema(schema_json);
     ASSERT_TRUE(schema != nullptr);
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
@@ -774,7 +774,7 @@ TEST(SchemaForcedTextTest, ConstraintManagerRouting) {
     SKIP_IF_NO_CUDA();
     Tokenizer tok;
     std::vector<float> scores(kForcedToks.size(), 0.0f);
-    tok.load_vocab(kForcedToks, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(kForcedToks, scores, /*bos_id=*/1, /*eos_id=*/2));
 
     // json_mode has no schema skeleton — must return 0.
     ConstraintManager jm;

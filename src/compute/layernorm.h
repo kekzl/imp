@@ -26,7 +26,7 @@ void rmsnorm_fp16_rowblock(const Tensor& x, const Tensor& weight, Tensor& out, i
 // micro-scales [rows,d/16] the small-M NVFP4 GEMM reads (plain layout, tensor_scale 1.0,
 // bit-identical to quantize_fp16_to_nvfp4_into on the stored FP16). Returns false outside the
 // fused envelope (F16, rows 2..64, d%256==0, d<=8192); caller falls back to rmsnorm().
-bool rmsnorm_nvfp4(const Tensor& x, const Tensor& weight, Tensor& out, uint8_t* xq_packed,
+[[nodiscard]] bool rmsnorm_nvfp4(const Tensor& x, const Tensor& weight, Tensor& out, uint8_t* xq_packed,
                    uint8_t* xq_scales, float eps = 1e-5f, cudaStream_t stream = nullptr,
                    float weight_offset = 0.0f);
 

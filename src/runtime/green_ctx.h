@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/cuda_raii.h"
 #include <cuda_runtime.h>
 
 namespace imp {
@@ -9,7 +10,7 @@ public:
     GreenContextManager() = default;
     ~GreenContextManager();
 
-    // Owns raw streams + green-context/resource handles destroyed in the dtor;
+    // Owns green-context/resource handles destroyed in the dtor;
     // a copy would alias them and double-free. Non-copyable (held by value /
     // unique_ptr, never copied).
     GreenContextManager(const GreenContextManager&) = delete;
@@ -21,7 +22,7 @@ public:
     void destroy();
 
     // Reconfigure SM split at runtime (requires destroy + reinit under the hood)
-    bool reconfigure(float new_prefill_sm_ratio);
+    [[nodiscard]] bool reconfigure(float new_prefill_sm_ratio);
 
     // Streams bound to SM partitions
     cudaStream_t prefill_stream() const { return prefill_stream_; }
@@ -37,8 +38,8 @@ public:
     float prefill_ratio() const { return prefill_ratio_; }
 
 private:
-    cudaStream_t prefill_stream_ = nullptr;
-    cudaStream_t decode_stream_ = nullptr;
+    CudaStream prefill_stream_;  // reset in destroy() before its green ctx
+    CudaStream decode_stream_;
     bool available_ = false;
     bool has_green_ctx_ = false;
 

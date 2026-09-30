@@ -8,6 +8,7 @@
 #include "compute/mmq_q8_imma.h"
 #include "core/cuda_static_reset.h"
 #include "exec/executor_forward_moe_internal.h"
+#include "exec/executor_forward_moe_kernels.cuh"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/executor_helpers.h"
 #include "exec/executor_kernels.h"
@@ -130,10 +131,11 @@ bool GraphExecutor::try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStre
 
     moe_host_args_capture_guard(stream);
     std::vector<int32_t> h_offsets(ctx.ne + 1);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), ctx.routing.expert_offsets.data,
-                                       static_cast<size_t>(ctx.ne + 1) * sizeof(int32_t),
-                                       cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
+    moe_host_args_ok_or_throw(cudaMemcpyAsync(h_offsets.data(), ctx.routing.expert_offsets.data,
+                                              static_cast<size_t>(ctx.ne + 1) * sizeof(int32_t),
+                                              cudaMemcpyDeviceToHost, stream),
+                              "nvfp4 dequant batch prefill");
+    moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "nvfp4 dequant batch prefill");
 
     char* buf                = static_cast<char*>(moe_.batch_dequant_buf);
     char* gathered_base      = static_cast<char*>(moe_.gathered.data);
@@ -199,9 +201,11 @@ namespace {
 void dump_top8_gate_logits(int layer, int n, int ne, const float* d_logits) {
     int last_tok = n - 1;
     std::vector<float> h_logits(ne);
-    cudaDeviceSynchronize();
-    cudaMemcpy(h_logits.data(), d_logits + last_tok * ne, ne * sizeof(float),
-               cudaMemcpyDeviceToHost);
+    if (!debug_cuda_ok(cudaDeviceSynchronize(), "dump_top8_gate_logits") ||
+        !debug_cuda_ok(cudaMemcpy(h_logits.data(), d_logits + last_tok * ne, ne * sizeof(float),
+                                  cudaMemcpyDeviceToHost),
+                       "dump_top8_gate_logits"))
+        return;
     std::vector<std::pair<float, int>> sorted;
     sorted.reserve(ne);
     for (int i = 0; i < ne; ++i) sorted.emplace_back(h_logits[i], i);
@@ -214,6 +218,42 @@ void dump_top8_gate_logits(int layer, int n, int ne, const float* d_logits) {
         top8 += buf;
     }
     IMP_LOG_DEBUG("[LOGITS] L%02d tok=%d top8_by_value: %s", layer, last_tok, top8.c_str());
+}
+
+// DEBUG_FWD: sum / L2 / first 3 router logits of the last token, layer 0.
+void dump_router_logits_l0(int n, int ne, const float* d_logits) {
+    std::vector<float> rl(ne);
+    const int last_tok = n - 1;
+    if (!debug_cuda_ok(cudaMemcpy(rl.data(), d_logits + last_tok * ne, ne * sizeof(float),
+                                  cudaMemcpyDeviceToHost),
+                       "router logits"))
+        return;
+    double rsum = 0, rss = 0;
+    for (auto v : rl) {
+        rsum += v;
+        rss += v * v;
+    }
+    IMP_LOG_DEBUG("[DEBUG_FWD] L0_router_logits[%d]: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f", last_tok, rsum,
+                  std::sqrt(rss), rl[0], rl[1], rl[2]);
+}
+
+// [ROUTE]: expert ids and weights of the last token (first 8 of top_k).
+void dump_routing_decision(int layer, int n, int top_k, const int32_t* d_idx, const float* d_wts) {
+    int last_tok = n - 1;
+    std::vector<int32_t> h_idx(top_k);
+    std::vector<float> h_wts(top_k);
+    if (!debug_cuda_ok(cudaMemcpy(h_idx.data(), d_idx + last_tok * top_k, top_k * sizeof(int32_t),
+                                  cudaMemcpyDeviceToHost),
+                       "ROUTE") ||
+        !debug_cuda_ok(cudaMemcpy(h_wts.data(), d_wts + last_tok * top_k, top_k * sizeof(float),
+                                  cudaMemcpyDeviceToHost),
+                       "ROUTE"))
+        return;
+    IMP_LOG_DEBUG(
+        "[ROUTE] L%02d tok=%d experts=[%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d] "
+        "weights=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]",
+        layer, last_tok, h_idx[0], h_idx[1], h_idx[2], h_idx[3], h_idx[4], h_idx[5], h_idx[6], h_idx[7],
+        h_wts[0], h_wts[1], h_wts[2], h_wts[3], h_wts[4], h_wts[5], h_wts[6], h_wts[7]);
 }
 
 }  // anonymous namespace
@@ -429,16 +469,18 @@ bool GraphExecutor::try_run_moe_fp8_batch_prefill(int layer, cudaStream_t stream
         size_t expert_fp8_sz = static_cast<size_t>(rows) * cols;
         moe_host_args_capture_guard(stream);
         std::vector<int32_t> h_offsets(ne + 1);
-        cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
-                        static_cast<size_t>(ne + 1) * sizeof(int32_t), cudaMemcpyDeviceToHost,
-                        stream);
+        moe_host_args_ok_or_throw(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+                                                  static_cast<size_t>(ne + 1) * sizeof(int32_t),
+                                                  cudaMemcpyDeviceToHost, stream),
+                                  "fp8 batch prefill");
         std::vector<float> h_act_scales(ne, 1.0f);
         if (moe_.d_fp8_scales) {
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_act_scales.data(), moe_.d_fp8_scales,
-                                               static_cast<size_t>(ne) * sizeof(float),
-                                               cudaMemcpyDeviceToHost, stream));
+            moe_host_args_ok_or_throw(cudaMemcpyAsync(h_act_scales.data(), moe_.d_fp8_scales,
+                                                      static_cast<size_t>(ne) * sizeof(float),
+                                                      cudaMemcpyDeviceToHost, stream),
+                                      "fp8 batch prefill");
         }
-        cudaStreamSynchronize(stream);
+        moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "fp8 batch prefill");
         std::vector<const void*> weight_ptrs(ne);
         for (int e = 0; e < ne; ++e)
             weight_ptrs[e] = fp8_weights + static_cast<size_t>(e) * expert_fp8_sz;
@@ -484,10 +526,11 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
         if (h_offsets.empty()) {
             moe_host_args_capture_guard(stream);
             h_offsets.resize(ne + 1);
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
-                                               static_cast<size_t>(ne + 1) * sizeof(int32_t),
-                                               cudaMemcpyDeviceToHost, stream));
-            cudaStreamSynchronize(stream);
+            moe_host_args_ok_or_throw(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+                                                      static_cast<size_t>(ne + 1) * sizeof(int32_t),
+                                                      cudaMemcpyDeviceToHost, stream),
+                                      "fp16 batch prefill");
+            moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "fp16 batch prefill");
         }
         return h_offsets.data();
     };
@@ -683,16 +726,8 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
             }
         }
 
-        if (debug_forward_enabled() && layer == 0) {
-            std::vector<float> rl(ne);
-            int last_tok = n - 1;
-            cudaMemcpy(rl.data(), static_cast<const float*>(gate_logits_f32.data) + last_tok * ne,
-                       ne * sizeof(float), cudaMemcpyDeviceToHost);
-            double rsum = 0, rss = 0;
-            for (auto v : rl) { rsum += v; rss += v * v; }
-            IMP_LOG_DEBUG("[DEBUG_FWD] L0_router_logits[%d]: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f",
-                          last_tok, rsum, std::sqrt(rss), rl[0], rl[1], rl[2]);
-        }
+        if (debug_forward_enabled() && layer == 0)
+            dump_router_logits_l0(n, ne, static_cast<const float*>(gate_logits_f32.data));
         if (dump_logits) dump_top8_gate_logits(layer, n, ne, static_cast<const float*>(gate_logits_f32.data));
         run_topk(gate_logits_f32);
     }
@@ -700,22 +735,9 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
     // Routing decision dump
     if (const std::string& drv = dispatch_policy().diagnostics.dump_routing_dir; !drv.empty()) {
         bool dump_all = (drv == "all");
-        if (layer == 0 || dump_all) {
-            int last_tok = n - 1;
-            std::vector<int32_t> h_idx(top_k);
-            std::vector<float> h_wts(top_k);
-            cudaMemcpy(h_idx.data(),
-                       static_cast<const int32_t*>(routing.expert_indices.data) + last_tok * top_k,
-                       top_k * sizeof(int32_t), cudaMemcpyDeviceToHost);
-            cudaMemcpy(h_wts.data(),
-                       static_cast<const float*>(routing.expert_weights.data) + last_tok * top_k,
-                       top_k * sizeof(float), cudaMemcpyDeviceToHost);
-            IMP_LOG_DEBUG(
-                "[ROUTE] L%02d tok=%d experts=[%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d] "
-                "weights=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]",
-                layer, last_tok, h_idx[0], h_idx[1], h_idx[2], h_idx[3], h_idx[4], h_idx[5], h_idx[6],
-                h_idx[7], h_wts[0], h_wts[1], h_wts[2], h_wts[3], h_wts[4], h_wts[5], h_wts[6], h_wts[7]);
-        }
+        if (layer == 0 || dump_all)
+            dump_routing_decision(layer, n, top_k, static_cast<const int32_t*>(routing.expert_indices.data),
+                                  static_cast<const float*>(routing.expert_weights.data));
     }
 
     // Per-launch expert imbalance (#1548), always on (not diagnostics-gated):
@@ -939,10 +961,11 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
     if (host_experts) {
         moe_host_args_capture_guard(stream);
         std::vector<int32_t> h_experts(top_k);
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_experts.data(), expert_indices,
-                                           static_cast<size_t>(top_k) * sizeof(int32_t),
-                                           cudaMemcpyDeviceToHost, stream));
-        cudaStreamSynchronize(stream);
+        moe_host_args_ok_or_throw(cudaMemcpyAsync(h_experts.data(), expert_indices,
+                                                  static_cast<size_t>(top_k) * sizeof(int32_t),
+                                                  cudaMemcpyDeviceToHost, stream),
+                                  "decode fast host experts");
+        moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "decode fast host experts");
 
         std::vector<int32_t> h_slots(static_cast<size_t>(kExpertProjCount) * top_k, -1);
         auto stage = [&](const Tensor& packed, ExpertProj proj, int off) -> bool {

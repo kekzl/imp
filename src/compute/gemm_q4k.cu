@@ -57,7 +57,6 @@ __device__ __forceinline__ void get_scale_min_q4k(const uint8_t* sc, int j,
 // (qs[i]>>4)&0xF if is_high else qs[i]&0xF. Q5_K additionally: qh bit at (2*chunk+is_high)
 // gives the 5th bit.
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <QKType BT>
 __global__ void __launch_bounds__(CTA_THREADS, 1)
 gemm_qk_dp4a_moe_fused_kernel(
@@ -90,9 +89,11 @@ gemm_qk_dp4a_moe_fused_kernel(
     const uint8_t* w_row = packed_weight + static_cast<size_t>(expert) * weight_stride +
                            static_cast<size_t>(n_col) * row_bytes;
 
+    // #2218 bounded: TILE_M * q8_per_row * 32, (mi * q8_per_row + q) * 32 < smem_bytes (gemm_q4k.cu:436)
+    // <= 101376 B (sm_120 opt-in max; the launch at :446 fails above it)
     extern __shared__ char smem_raw[];
     int8_t* smem_qs = reinterpret_cast<int8_t*>(smem_raw);
-    float* smem_d8 = reinterpret_cast<float*>(smem_raw + TILE_M * q8_per_row * 32);
+    float* smem_d8 = reinterpret_cast<float*>(smem_raw + static_cast<ptrdiff_t>(TILE_M * q8_per_row * 32));
 
     for (int m_base = 0; m_base < M_e; m_base += TILE_M) {
         const int m_count = min(TILE_M, M_e - m_base);
@@ -106,7 +107,8 @@ gemm_qk_dp4a_moe_fused_kernel(
                 const int tok = m_start + m_base + mi;
 
                 const block_q8_1& src = q8_base[tok * q8_per_row + qi];
-                int4* dst_qs = reinterpret_cast<int4*>(smem_qs + (mi * q8_per_row + qi) * 32);
+                int4* dst_qs = reinterpret_cast<int4*>(smem_qs +
+                                                       static_cast<ptrdiff_t>((mi * q8_per_row + qi) * 32));
                 int4 tmp0, tmp1;
                 memcpy(&tmp0, src.qs, 16);
                 memcpy(&tmp1, src.qs + 16, 16);
@@ -179,7 +181,7 @@ gemm_qk_dp4a_moe_fused_kernel(
 
             // M-loop
             for (int mi = 0; mi < m_count; mi++) {
-                const int8_t* qs_act = smem_qs + (mi * q8_per_row + q8_idx) * 32;
+                const int8_t* qs_act = smem_qs + static_cast<ptrdiff_t>((mi * q8_per_row + q8_idx) * 32);
                 int4* qs_v = reinterpret_cast<int4*>(const_cast<int8_t*>(qs_act));
                 int4 v0 = qs_v[0];
                 int4 v1 = qs_v[1];
@@ -222,14 +224,12 @@ gemm_qk_dp4a_moe_fused_kernel(
         __syncthreads();
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Dense (non-MoE) dp4a kernel: no expert offsets, grid over (N,1). sm_120 caps shared memory
 // at 99 KiB (101376 B), so TILE_M is smaller than the MoE kernel to fit the Q8_1 tile in budget.
 
 static constexpr int DENSE_TILE_M = 16;
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <QKType BT>
 __global__ void __launch_bounds__(CTA_THREADS, 1)
 gemm_qk_dp4a_dense_kernel(
@@ -254,9 +254,12 @@ gemm_qk_dp4a_dense_kernel(
     const size_t row_bytes = static_cast<size_t>(blocks_per_row) * Traits::BYTES;
     const uint8_t* w_row = packed_weight + static_cast<size_t>(n_col) * row_bytes;
 
+    // #2218 bounded: DENSE_TILE_M * q8_per_row * 32, (mi * q8_per_row + q) * 32 < smem_bytes (:400)
+    // <= 101376 B (sm_120 opt-in max; the launch at :412 fails above it)
     extern __shared__ char smem_raw[];
     int8_t* smem_qs = reinterpret_cast<int8_t*>(smem_raw);
-    float* smem_d8 = reinterpret_cast<float*>(smem_raw + DENSE_TILE_M * q8_per_row * 32);
+    float* smem_d8 = reinterpret_cast<float*>(smem_raw +
+                                              static_cast<ptrdiff_t>(DENSE_TILE_M * q8_per_row * 32));
 
     for (int m_base = 0; m_base < M; m_base += DENSE_TILE_M) {
         const int m_count = min(DENSE_TILE_M, M - m_base);
@@ -269,7 +272,8 @@ gemm_qk_dp4a_dense_kernel(
                 const int tok = m_base + mi;
 
                 const block_q8_1& src = q8_base[tok * q8_per_row + qi];
-                int4* dst_qs = reinterpret_cast<int4*>(smem_qs + (mi * q8_per_row + qi) * 32);
+                int4* dst_qs = reinterpret_cast<int4*>(smem_qs +
+                                                       static_cast<ptrdiff_t>((mi * q8_per_row + qi) * 32));
                 int4 tmp0, tmp1;
                 memcpy(&tmp0, src.qs, 16);
                 memcpy(&tmp1, src.qs + 16, 16);
@@ -333,7 +337,7 @@ gemm_qk_dp4a_dense_kernel(
             }
 
             for (int mi = 0; mi < m_count; mi++) {
-                const int8_t* qs_act = smem_qs + (mi * q8_per_row + q8_idx) * 32;
+                const int8_t* qs_act = smem_qs + static_cast<ptrdiff_t>((mi * q8_per_row + q8_idx) * 32);
                 int4* qs_v = reinterpret_cast<int4*>(const_cast<int8_t*>(qs_act));
                 int4 v0 = qs_v[0];
                 int4 v1 = qs_v[1];
@@ -374,7 +378,6 @@ gemm_qk_dp4a_dense_kernel(
         __syncthreads();
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launchers — dense dp4a
@@ -399,9 +402,9 @@ static void launch_dense_dp4a(const void* packed_weight, const block_q8_1* q8_ba
     static size_t smem_max_configured = 0;
     if (smem_bytes > smem_max_configured) {
         if (smem_bytes > static_cast<int64_t>(48) * 1024) {
-            cudaFuncSetAttribute(gemm_qk_dp4a_dense_kernel<BT>,
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 static_cast<int>(smem_bytes));
+            IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(gemm_qk_dp4a_dense_kernel<BT>,
+                                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                    static_cast<int>(smem_bytes)));
         }
         smem_max_configured = smem_bytes;
     }
@@ -434,9 +437,9 @@ static void launch_dp4a(const void* packed_weight, const block_q8_1* q8_base, co
 
     static bool smem_configured = false;
     if (!smem_configured && smem_bytes > static_cast<int64_t>(48) * 1024) {
-        cudaFuncSetAttribute(gemm_qk_dp4a_moe_fused_kernel<BT>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             static_cast<int>(smem_bytes));
+        IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(gemm_qk_dp4a_moe_fused_kernel<BT>,
+                                                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                static_cast<int>(smem_bytes)));
         smem_configured = true;
     }
 

@@ -8,11 +8,13 @@
 
 namespace imp {
 
+struct SplitSequence;  // tokenizer_pretok.cpp
+
 // #1606: largest token id a tokenizer.json may declare. Ids arrive as JSON doubles and
 // index vocab_/scores_/token_types_ directly, needing both bounds: below zero is an OOB
 // write, near INT_MAX the max_id+1 sizing wraps. 4M is ~16x the largest shipped vocabulary
 // (Gemma, ~256k).
-constexpr int64_t kMaxTokenId = 4 * 1024 * 1024;
+constexpr int64_t kMaxTokenId = int64_t{4} * 1024 * 1024;
 
 class Tokenizer {
 public:
@@ -20,10 +22,10 @@ public:
     ~Tokenizer() = default;
 
     // Load from standalone tokenizer file (SentencePiece .model or HuggingFace .json)
-    bool load(const std::string& path);
+    [[nodiscard]] bool load(const std::string& path);
 
     // Load vocabulary extracted from GGUF metadata
-    bool load_vocab(const std::vector<std::string>& tokens, const std::vector<float>& scores, int bos_id,
+    [[nodiscard]] bool load_vocab(const std::vector<std::string>& tokens, const std::vector<float>& scores, int bos_id,
                     int eos_id);
 
     // Load BPE merge rules (for GPT2-style tokenizers)
@@ -32,12 +34,12 @@ public:
     // Set tokenizer type: "spm" (SentencePiece) or "gpt2" (byte-level BPE)
     void set_type(const std::string& type) { type_ = type; }
     const std::string& type() const { return type_; }
-    bool nfc() const { return nfc_; }
+    [[nodiscard]] bool nfc() const { return nfc_; }
     void set_nfc(bool v) { nfc_ = v; }
 
     // Control BOS token prepending
     void set_add_bos(bool add) { add_bos_ = add; }
-    bool add_bos() const { return add_bos_; }
+    [[nodiscard]] bool add_bos() const { return add_bos_; }
 
     // Override the BOS token ID (default 1). Called by model loaders when the
     // model's BOS token is not in the hardcoded detection list (e.g. DeepSeek's
@@ -46,10 +48,13 @@ public:
 
     // Control SentencePiece leading-space prefix (▁)
     void set_add_space_prefix(bool add) { add_space_prefix_ = add; }
-    bool add_space_prefix() const { return add_space_prefix_; }
+    [[nodiscard]] bool add_space_prefix() const { return add_space_prefix_; }
 
-    // Pre-tokenizer type from GGUF metadata (e.g. "default", "llama3", "deepseek-llm")
-    void set_pre_tokenizer(const std::string& pre) { pre_tokenizer_ = pre; }
+    // Pre-tokenizer type from GGUF metadata (e.g. "default", "llama3", "deepseek-llm").
+    // "deepseek-r1-qwen": tokenizer.json regex and NFC equal Qwen2's, stored as "qwen2" (#2270).
+    void set_pre_tokenizer(const std::string& pre) {
+        pre_tokenizer_ = pre == "deepseek-r1-qwen" ? "qwen2" : pre;
+    }
     const std::string& pre_tokenizer() const { return pre_tokenizer_; }
 
     // Chat template string from GGUF metadata (Jinja2 format, used for detection)
@@ -104,6 +109,10 @@ public:
         build_special_pieces();
     }
     bool has_token_types() const { return !token_types_.empty(); }
+    // tokenizer.json added-token whitespace stripping: bit 0 lstrip, bit 1 rstrip.
+    uint8_t strip_flags(int32_t id) const {
+        return id >= 0 && static_cast<size_t>(id) < strip_flags_.size() ? strip_flags_[id] : 0;
+    }
     bool is_control_token(int id) const {
         return id >= 0 && id < static_cast<int>(token_types_.size()) && token_types_[id] == 3;
     }
@@ -174,6 +183,7 @@ private:
 
     std::string type_ = "spm";   // "spm" or "gpt2"
     std::string pre_tokenizer_;  // Pre-tokenizer type from GGUF tokenizer.ggml.pre
+    std::shared_ptr<const SplitSequence> split_seq_;  // pre_tokenizer_ == "split-seq"
     bool add_bos_ = true;
     bool add_space_prefix_ = true;           // SentencePiece ▁ prefix (false for Gemma)
     bool use_default_system_prompt_ = true;  // false → skip template's hardcoded default system
@@ -200,6 +210,9 @@ private:
     // Empty when the source carries no added_tokens array.
     std::vector<bool> added_token_ids_;
 
+    // Per-id `lstrip` (bit 0) / `rstrip` (bit 1) of tokenizer.json added_tokens: the match
+    // swallows adjacent whitespace (Phi-4 <|im_end|>). Empty when none sets them.
+    std::vector<uint8_t> strip_flags_;
     int32_t fim_meta_ids_[kFimRoles] = {-1, -1, -1, -1, -1, -1};
 
     // Cached special-token strings (CONTROL type) sorted by length descending, so encode_*
@@ -209,17 +222,20 @@ private:
     void build_special_pieces();
 };
 
-// Qwen2/Qwen3 pre-tokenizer scan (canonical regex segmentation; #657).
-// Exposed for unit tests — production use is inside Tokenizer::encode_*.
+// Regex pre-tokenizer scans (tokenizer_pretok.cpp; #657), one per tokenizer.json regex family.
+// qwen2: Qwen2/Qwen3; qwen35: letter runs include \p{M}; cl100k: digit triples (Phi-4, Llama 3);
+// o200k: case-aware letter runs (gpt-oss); nemotron: o200k without contractions, single digits.
 std::vector<std::string> qwen2_pre_tokenize(const std::string& text);
-
-// o200k pre-tokenizer scan (gpt-oss / GPT-4o family; #657). Case-aware letter
-// runs, digit triples, slash-aware symbol runs. Exposed for unit tests.
-std::vector<std::string> o200k_pre_tokenize(const std::string& text);
-
-// cl100k pre-tokenizer scan (GPT-4/tiktoken lineage, Phi-4; #657): qwen2
-// rules with digit groups of up to three. Exposed for unit tests.
+std::vector<std::string> qwen35_pre_tokenize(const std::string& text);
 std::vector<std::string> cl100k_pre_tokenize(const std::string& text);
+std::vector<std::string> o200k_pre_tokenize(const std::string& text);
+std::vector<std::string> nemotron_pre_tokenize(const std::string& text);
+
+// tokenizer.json pre-tokenizer given as a Sequence of Split(Isolated) regexes plus Digits
+// (DeepSeek-V2 / Coder-V2). Steps: "re:<regex>" or "digits:<individual 0|1>". Accepts only the
+// regex forms it can match exactly ([\s?]<class>[+], \s+$); nullptr otherwise.
+std::shared_ptr<const SplitSequence> compile_split_sequence(const std::vector<std::string>& steps);
+std::vector<std::string> split_sequence_pre_tokenize(const SplitSequence& seq, const std::string& text);
 
 // NFC as encode() applies it: table compositions of Latin/Greek/Cyrillic base + combining mark,
 // and algorithmic Hangul L+V(+T). Exposed for unit tests.

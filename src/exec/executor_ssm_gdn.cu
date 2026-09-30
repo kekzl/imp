@@ -1,6 +1,7 @@
 #include "core/dispatch_policy.h"
 #include "exec/executor.h"
 #include "exec/executor_kernels.h"
+#include "exec/executor_kernels.cuh"
 #include "exec/executor_debug.h"
 #include "exec/executor_helpers.h"
 #include "exec/gemm_context.h"
@@ -188,7 +189,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
         // x/B/C. n=1 decode needs no copy (pointer arithmetic); n>1 prefill de-interleaves via
         // cudaMemcpy2DAsync.
 
-        QType h_dtype = (state.ssm_state) ? state.ssm_state->h_dtype() : QType::F32;
+        QType h_dtype = state.ssm_state ? state.ssm_state->h_dtype() : QType::F32;
 
         if (n == 1) {
             // Decode: single token, just pass pointers directly into xBC_out row

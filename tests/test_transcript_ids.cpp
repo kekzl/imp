@@ -41,7 +41,7 @@ Tokenizer make_tokenizer() {
         scores.push_back(score);
     }
     Tokenizer tok;
-    tok.load_vocab(tokens, scores, kBos, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(tokens, scores, kBos, /*eos_id=*/2));
     // GGUF token types: UNKNOWN=2, CONTROL=3, BYTE=6, NORMAL=1. Control tokens are what
     // tokenize_rendered splits the render on.
     std::vector<int32_t> types(tokens.size(), 1);

@@ -52,7 +52,6 @@ __device__ __forceinline__ void cp_async_wait_group() {
 
 // Per-CTA async load of one K-block: 128 threads, each issues one A-load (16B) and B-load (8B).
 // A: 64x32=2048B = 128x16B via ca_16. B: 32x32=1024B = 128x8B via ca_8.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ void async_load_tile_mw(int tid, const int8_t* X_s8,
                                                    const int8_t* W_s8, int8_t (*sA)[kBlockK],
                                                    int8_t (*sB)[kBlockK], int base_m, int base_n,
@@ -61,7 +60,7 @@ __device__ __forceinline__ void async_load_tile_mw(int tid, const int8_t* X_s8,
     {
         const int row_in_tile = tid >> 1;      // 0..63
         const int col_off = (tid & 1) * 16;    // 0 or 16
-        const int8_t* src = X_s8 + (base_m + row_in_tile) * K + k_base + col_off;
+        const int8_t* src = X_s8 + static_cast<int64_t>(base_m + row_in_tile) * K + k_base + col_off;
         int8_t* dst = &sA[row_in_tile][col_off];
         cp_async_ca_16(dst, src);
     }
@@ -69,12 +68,11 @@ __device__ __forceinline__ void async_load_tile_mw(int tid, const int8_t* X_s8,
     {
         const int row_in_tile = tid >> 2;      // 0..31
         const int col_off = (tid & 3) * 8;     // 0, 8, 16, 24
-        const int8_t* src = W_s8 + (base_n + row_in_tile) * K + k_base + col_off;
+        const int8_t* src = W_s8 + static_cast<int64_t>(base_n + row_in_tile) * K + k_base + col_off;
         int8_t* dst = &sB[row_in_tile][col_off];
         cp_async_ca_8(dst, src);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // 4 warps per CTA, each warp doing WRM·WRN = 2·2 = 4 MMAs per K-block.
 __global__ void mmq_q4k_imma_tile_kernel(const int8_t* __restrict__ X_s8,
@@ -344,12 +342,12 @@ bool ensure_weight_cache(const void* W_q4k_blocks, int N, int K, cudaStream_t st
     const int subs = K / 32;
     if (cudaMalloc(&c.w_sym_s8, static_cast<size_t>(N) * K) != cudaSuccess) return false;
     if (cudaMalloc(&c.eff_alpha, static_cast<size_t>(N) * subs * sizeof(__half)) != cudaSuccess) {
-        cudaFree(c.w_sym_s8);
+        IMP_CUDA_CHECK_LOG(cudaFree(c.w_sym_s8));
         return false;
     }
     if (cudaMalloc(&c.eff_beta, static_cast<size_t>(N) * subs * sizeof(__half)) != cudaSuccess) {
-        cudaFree(c.w_sym_s8);
-        cudaFree(c.eff_alpha);
+        IMP_CUDA_CHECK_LOG(cudaFree(c.w_sym_s8));
+        IMP_CUDA_CHECK_LOG(cudaFree(c.eff_alpha));
         return false;
     }
     mmq_q4k_imma_reorder(W_q4k_blocks, N, K, c.w_sym_s8, c.eff_alpha, c.eff_beta, stream);

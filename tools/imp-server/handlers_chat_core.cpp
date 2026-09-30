@@ -92,6 +92,12 @@ void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_
     state.request_logger.log(record);
 }
 
+// Gemma-4 has the native <|tool_call> token; gemma-3 shares the GEMMA family without one.
+static bool gemma_native_tool_call_(const ChatRequestContext& ctx) {
+    return ctx.snap.tpl_family == imp::ChatTemplateFamily::GEMMA && ctx.snap.tok &&
+           ctx.snap.tok->find_token("<|tool_call>") >= 0;
+}
+
 // Enforced tool calling (#1002): derives the FSM constraint from the POST-snapshot template
 // (family+dialect), run after ensure_model_loaded so an auto-loaded/switched model gets its own
 // template's grammar rather than the parse-time guess.
@@ -125,17 +131,18 @@ static void collect_tool_enforcement_(ChatRequestContext& ctx) {
         ctx.snap.tpl_family == imp::ChatTemplateFamily::CHATML && ctx.snap.have_template &&
         ctx.snap.chat_tpl.tool_xml_dialect())
         ctx.params.tool_constraint_xml = true;
-    // Llama3 `<function=NAME>{args}</function>` forced function: constrain the
-    // bare parameter schema with a per-tool envelope (#1002). Only when the
-    // ChatML paths above found nothing (different family).
+    // Llama3 / Harmony / Gemma-4 forced function: the envelope names the function, the bare
+    // parameter schema is constrained between its literals (#1002, #2279). Only when the ChatML
+    // paths above found nothing (different family).
     if (ctx.params.tool_constraint_tools.empty()) {
-        auto [ln, lparams] = collect_llama3_forced_tool(ctx.snap.tpl_family, ctx.params.tools,
-                                                        ctx.params.tool_choice);
-        if (!ln.empty()) {
-            ctx.params.tool_constraint_tools = {{ln, lparams}};
+        ForcedToolEnvelope env = collect_forced_bare_args_tool(ctx.snap.tpl_family, ctx.params.tools,
+                                                               ctx.params.tool_choice,
+                                                               gemma_native_tool_call_(ctx));
+        if (!env.name.empty()) {
+            ctx.params.tool_constraint_tools = {{env.name, env.params}};
             ctx.params.tool_constraint_bare_args = true;
-            ctx.params.tool_envelope_open = "<function=" + ln + ">";
-            ctx.params.tool_envelope_close = "</function>";
+            ctx.params.tool_envelope_open = std::move(env.open);
+            ctx.params.tool_envelope_close = std::move(env.close);
         }
     }
 }
@@ -211,7 +218,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // #1592: refuse (400) tool_choice "required"/named-function when the family's template has no
     // tool-call grammar, rather than degrade to a prose hint with 200. Measured 0/40 across
     // gemma-3/gemma-4/gpt-oss (no grammar) vs 10/10 on Qwen3-4B ChatML (has one); "auto" is untouched.
-    if (ctx.params.has_tools && !tool_choice_is_enforceable(ctx.snap.tpl_family, ctx.params.tool_choice)) {
+    if (ctx.params.has_tools && !tool_choice_is_enforceable(ctx.snap.tpl_family, ctx.params.tool_choice,
+                                                            gemma_native_tool_call_(ctx))) {
         const char* fam = imp::chat_template_family_name(ctx.snap.tpl_family);
         const bool named = ctx.params.tool_choice.is_object();
         res.status = 400;
@@ -219,10 +227,11 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             {"error",
              {{"message", std::string("\"tool_choice\": ") + (named ? "a named function" : "\"required\"") +
                               " cannot be enforced on this model's chat template family (" + fam +
-                              "). \"required\" is enforced on chatml; a named function on chatml and "
-                              "llama3. On every other family it would degrade to a prompt hint and the "
-                              "model answers with prose instead of calling the tool. Send \"tool_choice\": "
-                              "\"auto\", or load a model whose template this server can constrain."},
+                              "). \"required\" is enforced on chatml; a named function on chatml, llama3, "
+                              "harmony (gpt-oss) and gemma with the <|tool_call> token (Gemma-4). On every "
+                              "other family it would degrade to a prompt hint and the model answers with "
+                              "prose instead of calling the tool. Send \"tool_choice\": \"auto\", or load a "
+                              "model whose template this server can constrain."},
               {"type", "invalid_request_error"},
               {"param", "tool_choice"},
               {"code", "tool_choice_unenforceable"}}}};
@@ -720,7 +729,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         auto t_prev_token = std::chrono::high_resolution_clock::now();  // last delivered token (ITL)
         for (;;) {
             // Request timeout, or the client hung up (no sink here to fail a write on).
-            if ((finish = nonstream_should_stop_(state, *server_req, ns_request_start, ctx.client_gone)))
+            finish = nonstream_should_stop_(state, *server_req, ns_request_start, ctx.client_gone);
+            if (finish)
                 break;
 
             // Read next token from the batching engine

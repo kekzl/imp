@@ -215,7 +215,7 @@ bool Engine::pipeline_staging_ensure_() {
                 d_bt_patch_off_[p] = d_bt_patch_val_[p] = d_hist_pos_[p] = nullptr;
             }
             if (d_pipe_hist_) {
-                cudaFree(d_pipe_hist_);
+                IMP_CUDA_CHECK_LOG(cudaFree(d_pipe_hist_));
                 d_pipe_hist_ = nullptr;
             }
             bt_patch_cap_ = -1;  // don't retry every step

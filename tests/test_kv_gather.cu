@@ -1,5 +1,6 @@
 #include "compute/kv_gather.h"
 #include "exec/executor_kernels.h"
+#include "exec/executor_kernels.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>

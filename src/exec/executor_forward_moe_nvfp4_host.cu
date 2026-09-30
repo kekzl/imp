@@ -244,10 +244,12 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
             halpha[e] = experts[e].tensor_scale;
         }
         const size_t off = static_cast<size_t>(p) * moe_.layer_stage_ptr_stride;
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_b_ptrs + off, hb.data(),
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_b_ptrs + off),
+                                           static_cast<const void*>(hb.data()),
                                            static_cast<size_t>(ne) * sizeof(const void*),
                                            cudaMemcpyHostToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_sfb_ptrs + off, hsfb.data(),
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_sfb_ptrs + off),
+                                           static_cast<const void*>(hsfb.data()),
                                            static_cast<size_t>(ne) * sizeof(const void*),
                                            cudaMemcpyHostToDevice, stream));
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_alpha + off, halpha.data(),
@@ -318,10 +320,12 @@ bool GraphExecutor::stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1,
             halpha[i] = experts[e0 + i].tensor_scale;
         }
         const size_t off = static_cast<size_t>(p) * moe_.layer_stage_ptr_stride + e0;
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_b_ptrs + off, hb.data(), n * sizeof(const void*),
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_b_ptrs + off),
+                                           static_cast<const void*>(hb.data()), n * sizeof(const void*),
                                            cudaMemcpyHostToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_sfb_ptrs + off, hsfb.data(),
-                                           n * sizeof(const void*), cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_sfb_ptrs + off),
+                                           static_cast<const void*>(hsfb.data()), n * sizeof(const void*),
+                                           cudaMemcpyHostToDevice, stream));
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_alpha + off, halpha.data(), n * sizeof(float),
                                            cudaMemcpyHostToDevice, stream));
     }
@@ -474,9 +478,10 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
         h_experts_fallback.resize(top_k);
         h_experts = h_experts_fallback.data();
     }
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_experts, expert_indices, readback_bytes,
-                                       cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
+    moe_host_args_ok_or_throw(cudaMemcpyAsync(h_experts, expert_indices, readback_bytes,
+                                              cudaMemcpyDeviceToHost, stream),
+                              "nvfp4 host experts");
+    moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "nvfp4 host experts");
 
     std::vector<int32_t> h_slots(static_cast<size_t>(kExpertProjCount) * top_k, -1);
 
@@ -541,7 +546,7 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
 
     const int32_t* gate_idx = moe_.d_slot_idx;
     const int32_t* up_idx = moe_.d_slot_idx + top_k;
-    const int32_t* down_idx = moe_.d_slot_idx + 2 * top_k;
+    const int32_t* down_idx = moe_.d_slot_idx + static_cast<ptrdiff_t>(2) * top_k;
 
     const NvFP4MoEQuantResult up_view =
         pool_view(layer_pool, slot_size, ms_off[std::to_underlying(ExpertProj::Up)], slot_scales,
@@ -580,6 +585,53 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
     moe_weighted_sum_residual(down_buf, expert_weights, res_ptr, h.data, d, top_k, stream);
     if (!has_shared_expert && !moe_use_fp32_residual)
         residual_fused = true;
+}
+
+// Rows a verify step may run through the per-row n == 1 path: MTP k <= 7. Past it the
+// per-row launches (7 per row per layer) cost more than they save; the staged path takes over.
+constexpr int kHostDecodeRowsMax = 8;
+
+bool GraphExecutor::host_decode_rows_ok_(int layer, int n, int top_k) const {
+    return n > 1 && n <= kHostDecodeRowsMax && compute_dtype_ == QType::F16 && !model_->profile().is_gpt_oss &&
+           nvfp4_host_decode_ready(model_->layer(layer), expert_cache_, moe_, top_k);
+}
+
+int GraphExecutor::moe_host_rows_capture_max() const {
+    const auto& cfg = model_->config();
+    bool any = false;
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        if (!layer_has_moe(i))
+            continue;
+        if (!host_decode_rows_ok_(i, 2, cfg.n_experts_active))
+            return 0;
+        any = true;
+    }
+    return any && device_expert_cache_covers_host_layers() ? kHostDecodeRowsMax : 0;
+}
+
+// Row r reads routing [r * top_k, (r + 1) * top_k) (token order: n > 1 routing sorts into separate
+// arrays) and writes its own row of h; the shared expert and residual follow in phase 8 for all rows.
+void GraphExecutor::run_moe_decode_rows_host_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
+    const size_t row_bytes = static_cast<size_t>(ctx.d) * ctx.es;
+    auto row = [&](const Tensor& t, int i) {
+        const int64_t shape[2] = {1, ctx.d};
+        return Tensor(static_cast<char*>(t.data) + i * row_bytes, t.qtype, 2, shape, true);
+    };
+    for (int i = 0; i < ctx.n; ++i) {
+        MoeRoutingResult rr = ctx.routing;
+        const int64_t rs[1] = {ctx.top_k};
+        rr.expert_indices = Tensor(static_cast<int32_t*>(ctx.routing.expert_indices.data) +
+                                       static_cast<ptrdiff_t>(i) * ctx.top_k,
+                                   QType::INT32, 1, rs, true);
+        rr.expert_weights = Tensor(static_cast<float*>(ctx.routing.expert_weights.data) +
+                                       static_cast<ptrdiff_t>(i) * ctx.top_k,
+                                   QType::F32, 1, rs, true);
+        Tensor no = row(ctx.no, i);
+        Tensor h = row(ctx.h, i);
+        Tensor r = row(ctx.r, i);
+        run_moe_decode_nvfp4_host(layer, stream, ctx.d, ctx.eff, ctx.top_k, rr, no, h, r, ctx.moe_use_fp32_residual,
+                                  ctx.will_skip_residual_copy, ctx.residual_fused, ctx.non_gated_experts);
+    }
 }
 
 }  // namespace imp

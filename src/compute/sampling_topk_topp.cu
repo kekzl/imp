@@ -33,7 +33,6 @@ namespace imp {
 // Phase 1: per-block max, sum, top_k logit candidates over a strided subset. Body shared
 // between the single-row kernel and the row-parallel batched wrapper (grid.y=row);
 // blockIdx.x/gridDim.x usage identical, so per-row results are bit-identical.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ void topk_partial_body(const float* __restrict__ logits, int vocab_size,
                                                   int top_k, float inv_temperature,
                                                   float* __restrict__ block_max_out,
@@ -42,11 +41,13 @@ __device__ __forceinline__ void topk_partial_body(const float* __restrict__ logi
                                                   int* __restrict__ cand_idx_out) {
     extern __shared__ char smem_raw[];
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    // #2218 bounded: NUM_WARPS * top_k <= 8 * 128 = 1024 (BLOCK_SIZE 256, sampling_internal.cuh:9; top_k
+    // <= MAX_TOP_K: sampling_topk_topp.cu:655,725,748, executor_sampling.cu:382)
     float* s_reduce = reinterpret_cast<float*>(smem_raw);  // BLOCK_SIZE
     float* s_gmax = s_reduce + BLOCK_SIZE;                 // 1
     float* s_gsum = s_gmax + 1;                            // 1
     float* s_warp_vals = s_gsum + 1;                       // NUM_WARPS * top_k
-    int* s_warp_idxs = reinterpret_cast<int*>(s_warp_vals + NUM_WARPS * top_k);
+    int* s_warp_idxs = reinterpret_cast<int*>(s_warp_vals + static_cast<ptrdiff_t>(NUM_WARPS * top_k));
 
     const int tid = threadIdx.x;
     const int gstride = blockDim.x * gridDim.x;
@@ -134,7 +135,6 @@ __device__ __forceinline__ void topk_partial_body(const float* __restrict__ logi
                       cand_val_out + static_cast<size_t>(blockIdx.x) * top_k,
                       cand_idx_out + static_cast<size_t>(blockIdx.x) * top_k);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 __global__ void topk_partial_kernel(const float* __restrict__ logits, int vocab_size, int top_k,
                                     float inv_temperature, float* __restrict__ block_max_out,
@@ -162,7 +162,6 @@ __global__ void topk_partial_rows_kernel(const TopkRowArgs* __restrict__ rows, i
 // block_reduce_topk over SAMPLE_NBLOCKS*top_k candidates read straight from global
 // (coalesced, no big smem staging); only the final top-p/sample is serial. Runs inside
 // graph capture.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float inv_temperature,
                                                    unsigned int seed, int n_blocks,
                                                    const float* __restrict__ block_max_in,
@@ -172,9 +171,12 @@ __device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float
                                                    int32_t* __restrict__ d_result) {
     extern __shared__ char smem_raw[];
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    // #2218 bounded: NUM_WARPS * top_k <= 8 * 128 = 1024 (BLOCK_SIZE 256, sampling_internal.cuh:9; top_k
+    // <= MAX_TOP_K: sampling_topk_topp.cu:655,725,748, executor_sampling.cu:382)
     float* s_warp_vals = reinterpret_cast<float*>(smem_raw);  // NUM_WARPS * top_k
-    int* s_warp_idxs = reinterpret_cast<int*>(s_warp_vals + NUM_WARPS * top_k);
-    float* s_val = reinterpret_cast<float*>(s_warp_idxs + NUM_WARPS * top_k);  // top_k
+    int* s_warp_idxs = reinterpret_cast<int*>(s_warp_vals + static_cast<ptrdiff_t>(NUM_WARPS * top_k));
+    float* s_val = reinterpret_cast<float*>(s_warp_idxs +
+                                            static_cast<ptrdiff_t>(NUM_WARPS * top_k));  // top_k
     int* s_idx = reinterpret_cast<int*>(s_val + top_k);                        // top_k
 
     const int tid = threadIdx.x;
@@ -269,7 +271,6 @@ __device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float
     }
     d_result[0] = static_cast<int32_t>(chosen);
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 __global__ void topk_finalize_kernel(int top_k, float top_p, float inv_temperature, unsigned int seed,
                                      const int* __restrict__ d_seed_salt, int n_blocks,
@@ -297,10 +298,11 @@ __global__ void topk_finalize_rows_kernel(const TopkRowArgs* __restrict__ rows, 
 
 // Launch the two-phase multi-block sampler. Scratch lives right after d_result
 // (caller guarantees >= SAMPLE_SCRATCH_BYTES). Both kernels are graph-capturable
-// (no allocation, fixed topology for a given vocab_size/top_k).
-static void launch_topk_topp_multiblock(const float* d_logits, int vocab_size, int top_k, float top_p,
-                                        float inv_temperature, unsigned int seed, int32_t* d_result,
-                                        cudaStream_t stream, const int* d_seed_salt = nullptr) {
+// (no allocation, fixed topology for a given vocab_size/top_k). Returns the launch status (#2310);
+// finalize is not launched after a failed partial.
+static cudaError_t launch_topk_topp_multiblock(const float* d_logits, int vocab_size, int top_k, float top_p,
+                                               float inv_temperature, unsigned int seed, int32_t* d_result,
+                                               cudaStream_t stream, const int* d_seed_salt = nullptr) {
     char* base = reinterpret_cast<char*>(d_result);
     float* block_max = reinterpret_cast<float*>(base + sizeof(int32_t));
     float* block_sum = block_max + SAMPLE_NBLOCKS;
@@ -315,17 +317,19 @@ static void launch_topk_topp_multiblock(const float* d_logits, int vocab_size, i
     size_t smem2 = static_cast<size_t>(NUM_WARPS) * top_k * (sizeof(float) + sizeof(int)) +
                    static_cast<size_t>(top_k) * (sizeof(float) + sizeof(int));
 
+    sampler_launch_begin("topk_multiblock");
     topk_partial_kernel<<<SAMPLE_NBLOCKS, BLOCK_SIZE, smem1, stream>>>(
         d_logits, vocab_size, top_k, inv_temperature, block_max, block_sum, cand_val, cand_idx);
-    IMP_CUDA_CHECK_LAUNCH();
+    if (const cudaError_t e = sampler_launch_status(cudaGetLastError(), "topk_multiblock"); e != cudaSuccess)
+        return e;
     topk_finalize_kernel<<<1, BLOCK_SIZE, smem2, stream>>>(top_k, top_p, inv_temperature, seed, d_seed_salt,
                                                            SAMPLE_NBLOCKS, block_max, block_sum, cand_val,
                                                            cand_idx, d_result);
-    IMP_CUDA_CHECK_LAUNCH();
+    return sampler_launch_status(cudaGetLastError(), "topk_multiblock");
 }
 
-void launch_topk_topp_rows(const TopkRowArgs* d_rows, int n_rows, int max_top_k, int vocab_size,
-                           cudaStream_t stream) {
+cudaError_t launch_topk_topp_rows(const TopkRowArgs* d_rows, int n_rows, int max_top_k, int vocab_size,
+                                  cudaStream_t stream) {
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     // Shared-memory sizes carved with the batch's max top_k — every block
     // carves with its OWN row's top_k, which is <= max_top_k.
@@ -334,10 +338,12 @@ void launch_topk_topp_rows(const TopkRowArgs* d_rows, int n_rows, int max_top_k,
     size_t smem2 = static_cast<size_t>(NUM_WARPS) * max_top_k * (sizeof(float) + sizeof(int)) +
                    static_cast<size_t>(max_top_k) * (sizeof(float) + sizeof(int));
     dim3 grid1(SAMPLE_NBLOCKS, n_rows);
+    sampler_launch_begin("topk_rows");
     topk_partial_rows_kernel<<<grid1, BLOCK_SIZE, smem1, stream>>>(d_rows, vocab_size);
-    IMP_CUDA_CHECK_LAUNCH();
+    if (const cudaError_t e = sampler_launch_status(cudaGetLastError(), "topk_rows"); e != cudaSuccess)
+        return e;
     topk_finalize_rows_kernel<<<n_rows, BLOCK_SIZE, smem2, stream>>>(d_rows, SAMPLE_NBLOCKS);
-    IMP_CUDA_CHECK_LAUNCH();
+    return sampler_launch_status(cudaGetLastError(), "topk_rows");
 }
 
 // CUB-based top-k for k > MAX_TOP_K (128): softmax with temperature scaling, CUB
@@ -556,7 +562,7 @@ __global__ void init_cub_max_sum_kernel(float* __restrict__ d_max_sum) {
 
 // CUB-based top-k for k > MAX_TOP_K, ENQUEUE ONLY: everything runs on `stream`, nothing
 // reads back or syncs, so callers queue one per sequence and gather with a single pinned
-// D2H at the end (#1654). Returns false when the scratch is unavailable.
+// D2H at the end (#1654). Returns false when the scratch is unavailable or a launch failed (#2310).
 // Was already async internally; only the trailing readback forced a sync (one host round
 // trip per sequence per step).
 static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, int top_k, float top_p,
@@ -568,12 +574,13 @@ static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, 
     }
 
     auto& sc = s_cub_scratch;
+    sampler_launch_begin("topk_cub");
 
     // Step 1: Compute softmax stats (max, then sum) entirely on device.
     // All intermediate values stay in d_max_sum — no D2H syncs needed.
     // d_max_sum[0] = global max, d_max_sum[1] = sum of exp.
     init_cub_max_sum_kernel<<<1, 1, 0, stream>>>(sc.d_max_sum);
-    IMP_CUDA_CHECK_LAUNCH();
+    cudaError_t launched = cudaGetLastError();  // chain: first failure checked before the sort
 
     int stats_blocks = std::min((vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE, 128);
 
@@ -582,7 +589,7 @@ static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, 
     // Phase 1: global max (result in d_max_sum[0]). atomicMax on the int-bitcast
     // of the max is order-independent and exact, so it is already deterministic.
     softmax_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, sc.d_max_sum);
-    IMP_CUDA_CHECK_LAUNCH();
+    launched = first_launch_error(launched, cudaGetLastError());
 
     // Phase 2: sum of exp, reading max from device memory (no D2H sync). Default multi-block
     // kernel sums via cross-block FP atomicAdd (order varies run-to-run); deterministic mode
@@ -590,12 +597,12 @@ static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, 
     if (deterministic) {
         softmax_sum_device_max_single_block_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
             d_logits, vocab_size, inv_temperature, sc.d_max_sum, sc.d_max_sum + 1);
-        IMP_CUDA_CHECK_LAUNCH();
+        launched = first_launch_error(launched, cudaGetLastError());
     } else {
         softmax_sum_device_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size,
                                                                                inv_temperature, sc.d_max_sum,
                                                                                sc.d_max_sum + 1);
-        IMP_CUDA_CHECK_LAUNCH();
+        launched = first_launch_error(launched, cudaGetLastError());
     }
 
     // Step 2: Compute probabilities reading max/sum from device memory (no D2H sync)
@@ -603,7 +610,8 @@ static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, 
     softmax_to_pairs_device_kernel<<<pair_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size,
                                                                            inv_temperature, sc.d_max_sum,
                                                                            sc.d_keys_in, sc.d_vals_in);
-    IMP_CUDA_CHECK_LAUNCH();
+    if (sampler_launch_status(first_launch_error(launched, cudaGetLastError()), "topk_cub") != cudaSuccess)
+        return false;
 
     // Sorts the whole vocabulary by probability descending (top_k = head of the result), not
     // cub::DeviceTopK::MaxPairs + radix-sort on the k survivors: MaxPairs failed
@@ -628,46 +636,46 @@ static bool sample_topk_topp_cub_enqueue(const float* d_logits, int vocab_size, 
     // Step 4: Top-p filter + sample from sorted top-k
     topp_sample_from_sorted_kernel<<<1, 1, 0, stream>>>(sc.d_keys_out, sc.d_vals_out, top_k, top_p, seed,
                                                         d_seed_salt, d_result);
-    IMP_CUDA_CHECK_LAUNCH();
-    return true;
+    return sampler_launch_status(cudaGetLastError(), "topk_cub") == cudaSuccess;
 }
 
 // Synchronous wrapper, for the callers that want the token in hand.
 static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int top_k, float top_p,
                                     float inv_temperature, unsigned int seed, int32_t* d_result,
                                     cudaStream_t stream) {
-    if (!sample_topk_topp_cub_enqueue(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result,
-                                      stream))
-        return 0;
-    int32_t h_result = 0;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
-    return h_result;
+    sampler_enqueued_or_throw(sample_topk_topp_cub_enqueue(d_logits, vocab_size, top_k, top_p,
+                                                           inv_temperature, seed, d_result, stream),
+                              "sample_topk_topp CUB");
+    return sampler_readback_or_throw(d_result, stream, "sample_topk_topp readback");
 }
+
+namespace {
+// Frees an internally allocated d_result on every exit, including a throw (#2307).
+struct OwnedSampleScratch {
+    int32_t* p;
+    bool owned;
+    ~OwnedSampleScratch() {
+        if (owned)
+            IMP_CUDA_CHECK_LOG(cudaFree(p));
+    }
+};
+}  // namespace
 
 // Shared implementation for both sample_topk_topp overloads.
 // When owns_result is true, d_result was allocated internally and will be freed.
 static int32_t sample_topk_topp_impl(const float* d_logits, int vocab_size, int top_k, float top_p,
                                      float inv_temperature, unsigned int seed, int32_t* d_result,
                                      bool owns_result, cudaStream_t stream) {
+    const OwnedSampleScratch scratch{d_result, owns_result};
     // For large top_k, use CUB radix sort path (no MAX_TOP_K limit)
-    if (top_k > MAX_TOP_K) {
-        int32_t result = sample_topk_topp_cub(d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
-                                              d_result, stream);
-        if (owns_result)
-            IMP_CUDA_CHECK_LOG(cudaFree(d_result));
-        return result;
-    }
+    if (top_k > MAX_TOP_K)
+        return sample_topk_topp_cub(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result,
+                                    stream);
 
-    launch_topk_topp_multiblock(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, stream);
-
-    int32_t h_result = 0;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
-
-    if (owns_result)
-        IMP_CUDA_CHECK_LOG(cudaFree(d_result));
-    return h_result;
+    cuda_call_or_throw(launch_topk_topp_multiblock(d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
+                                                   d_result, stream),
+                       "sample_topk_topp launch");
+    return sampler_readback_or_throw(d_result, stream, "sample_topk_topp readback");
 }
 
 int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float temperature, unsigned int seed,
@@ -682,10 +690,7 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float tem
     float inv_temperature = 1.0f / temperature;
 
     int32_t* d_result = nullptr;
-    if (cudaMalloc(&d_result, SAMPLE_SCRATCH_BYTES) != cudaSuccess) {
-        IMP_LOG_ERROR("sample_topk_topp: cudaMalloc failed");
-        return 0;
-    }
+    cuda_call_or_throw(cudaMalloc(&d_result, SAMPLE_SCRATCH_BYTES), "sample_topk_topp scratch");
 
     return sample_topk_topp_impl(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, true,
                                  stream);
@@ -725,11 +730,11 @@ bool sample_topk_topp_async(const Tensor& logits, int top_k, float top_p, float 
         return sample_topk_topp_cub_enqueue(d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
                                             d_result, stream);
 
-    launch_topk_topp_multiblock(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, stream);
-    return true;
+    return launch_topk_topp_multiblock(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result,
+                                       stream) == cudaSuccess;
 }
 
-void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p, float temperature,
+bool sample_topk_topp_device(const Tensor& logits, int top_k, float top_p, float temperature,
                              unsigned int seed, int32_t* d_result, int32_t* h_mapped, cudaStream_t stream,
                              const int* d_seed_salt) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
@@ -747,14 +752,18 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p, float
     if (top_k > MAX_TOP_K) {
         if (!sample_topk_topp_cub_enqueue(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result,
                                           stream, d_seed_salt))
-            return;
-    } else {
-        launch_topk_topp_multiblock(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result,
-                                    stream, d_seed_salt);
+            return false;
+    } else if (launch_topk_topp_multiblock(d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
+                                           d_result, stream, d_seed_salt) != cudaSuccess) {
+        return false;  // launch failed: no copy, *h_mapped never gets a stale token (#2310)
     }
 
-    // Async copy to mapped pinned memory — no sync needed.
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+    // Async copy to mapped pinned memory, no sync (capture-safe); false = *h_mapped is stale (#2307).
+    const cudaError_t err = cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost,
+                                            stream);
+    if (err != cudaSuccess)
+        IMP_LOG_ERROR("sample_topk_topp_device: token copy enqueue failed: %s", cudaGetErrorString(err));
+    return err == cudaSuccess;
 }
 
 // Free persistent CUB sort scratch. Called by sampling_cleanup().

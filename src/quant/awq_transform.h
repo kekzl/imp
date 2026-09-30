@@ -27,7 +27,7 @@ void awq_apply_matrix(std::vector<uint16_t>& fp16, int64_t N, int64_t K, const s
 // would leave a subtly wrong checkpoint. `offset`: on a unit-offset RMSNorm the kernel
 // applies (1+g), so dividing g divides the wrong thing; the offset arm stores (1+g)/s-1
 // instead. Biases and plain norms take the default.
-bool awq_apply_vector_div(unsigned char* bytes, size_t n_elems, const std::string& dtype,
+[[nodiscard]] bool awq_apply_vector_div(unsigned char* bytes, size_t n_elems, const std::string& dtype,
                           const std::vector<float>& div, NormOffset offset = NormOffset::Plain);
 
 }  // namespace imp

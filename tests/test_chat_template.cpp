@@ -83,7 +83,7 @@ static Tokenizer make_chat_tokenizer() {
     scores.push_back(0.0f);  // 278
 
     Tokenizer tok;
-    tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2));
     tok.set_type("spm");
     tok.set_add_bos(true);
     tok.set_add_space_prefix(false);
@@ -304,7 +304,7 @@ TEST(ChatTemplateInitTest, ChatMLMissingTokensFallsBack) {
     Tokenizer tok;
     std::vector<std::string> v = {"<unk>", "<s>", "</s>"};
     std::vector<float> s = {0, 0, 0};
-    tok.load_vocab(v, s, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(v, s, 1, 2));
     tok.set_type("spm");
 
     ChatTemplate tpl;
@@ -980,6 +980,29 @@ TEST(ChatTemplateTools, AToolParameterPastInt64MaxRendersInsteadOfThrowing) {
         auto ids = tpl.apply_with_tools(tok, msgs, ok);
         (void)ids;
     });
+}
+
+// HF tokenizes the whole render, so an added token's lstrip/rstrip (Phi-4 <|im_end|>) swallows the
+// newlines the template puts around it; the control-token split has to do the same.
+TEST(ChatTemplateTokenize, ControlTokenStripFlagsSwallowTemplateWhitespace) {
+    const std::string path = (std::filesystem::temp_directory_path() / "imp_chat_strip_tokenizer.json").string();
+    std::ofstream(path) << R"JSON({
+  "model": { "type": "BPE", "vocab": { "a": 0, "b": 1, "Ġ": 2, "Ċ": 3 }, "merges": [] },
+  "added_tokens": [
+    { "id": 10, "content": "<|im_start|>", "special": true, "normalized": false, "rstrip": true },
+    { "id": 11, "content": "<|im_end|>", "special": true, "normalized": false, "lstrip": true, "rstrip": true },
+    { "id": 12, "content": "<|sep|>", "special": true, "normalized": false }
+  ]
+})JSON";
+    Tokenizer tok;
+    ASSERT_TRUE(tok.load(path));
+    std::filesystem::remove(path);
+    tok.set_add_bos(false);
+    ChatTemplate tpl;
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::CHATML, tok,
+                         "{% for m in messages %}<|im_start|>\n{{ m.content }}\n<|im_end|>\n<|sep|>\n{% endfor %}"));
+    // <|sep|> strips nothing: the "\n" after it stays (id 3).
+    EXPECT_EQ(tpl.apply(tok, {{"user", "a"}}), (std::vector<int32_t>{10, 0, 11, 12, 3}));
 }
 
 }  // namespace

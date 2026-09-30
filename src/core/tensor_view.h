@@ -30,7 +30,7 @@ public:
     const void* data() const { return data_; }
     QType qtype() const { return dtype_; }
     int ndim() const { return ndim_; }
-    bool on_device() const { return on_device_; }
+    [[nodiscard]] bool on_device() const { return on_device_; }
     int64_t shape(int i) const { return shape_[i]; }
     int64_t stride(int i) const { return stride_[i]; }
 

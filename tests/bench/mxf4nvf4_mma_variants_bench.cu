@@ -2,7 +2,7 @@
 // mma_sm120_sparse.hpp), to find a variant beating the default mxf4nvf4.block_scale
 // vec::4X.m16n8k64.ue4m3 on QK^T throughput. Sparse variants need 2:4 metadata on A.
 
-#include "bench/mxf4nvf4_mma_variants_bench.h"
+#include "mxf4nvf4_mma_variants_bench.h"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstdio>

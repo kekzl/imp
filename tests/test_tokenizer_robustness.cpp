@@ -68,7 +68,7 @@ static Tokenizer make_byte_gpt2_tokenizer() {
         scores.push_back(0.0f);
     }
     Tokenizer tok;
-    tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2));
     tok.set_type("gpt2");
     tok.set_add_bos(false);
     tok.load_merges({});  // no merges → exactly one token per byte
@@ -253,7 +253,7 @@ TEST(TokenizerRobustness, LiteralMarkerWithControlIsPreSplit) {
     scores.push_back(0.0f);
 
     Tokenizer tok;
-    tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2));
     tok.set_type("gpt2");
     tok.set_add_bos(false);
     tok.load_merges({});
@@ -291,7 +291,7 @@ TEST(TokenizerRobustness, SpmByteFallbackNoCrashOnArbitraryBytes) {
     }
     (void)byte_base;
     Tokenizer tok;
-    tok.load_vocab(tokens, scores, 1, 2);
+    EXPECT_TRUE(tok.load_vocab(tokens, scores, 1, 2));
     tok.set_type("spm");
     tok.set_add_bos(false);
     tok.set_add_space_prefix(false);

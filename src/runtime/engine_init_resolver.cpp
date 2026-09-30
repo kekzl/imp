@@ -52,7 +52,7 @@ size_t approx_weight_footprint_bytes(const ModelConfig& mcfg, int host_expert_la
 }
 
 // How many MoE layers the loader will leave on the host. It uploads experts only while
-// they fit (weight_upload.cu decide_expert_layer_placement_), so a model whose full
+// they fit (weight_upload.cpp decide_expert_layer_placement_), so a model whose full
 // footprint exceeds the card ends up serving every MoE layer from the expert cache.
 // Without this the auto resolvers plan as if the experts were free and hand the KV pool
 // VRAM the expert cache needs: on Qwen3.8-Flash-Next that produced max_seq_len 131072
@@ -189,7 +189,8 @@ bool apply_rope_override(ModelConfig& mcfg, const RuntimeConfig::Rope& rope) {
 }
 
 void Engine::init_apply_rope_override_() {
-    apply_rope_override(model_->config_, runtime_config_.rope);
+    // false = override refused and logged (WARN/ERROR); the model keeps its own RoPE.
+    (void)apply_rope_override(model_->config_, runtime_config_.rope);
 }
 
 // KV cache dtype policy + FP8 KV NaN-bug deterministic-cuBLAS workaround +
@@ -391,7 +392,8 @@ void Engine::init_resolve_kv_dtype_policy_() {
 
     if (config_.max_batch_size <= 0) {
         size_t free_vram_now = 0, total_vram_now = 0;
-        vram_budget_mem_get_info(&free_vram_now, &total_vram_now);
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&free_vram_now, &total_vram_now);
         size_t approx_weight_bytes = approx_weight_footprint_bytes(
             mcfg, estimated_host_expert_layers(mcfg, runtime_config_.moe.force_host_experts, free_vram_now));
         // Weight-footprint tier: kept as a FLOOR so this never regresses
@@ -535,7 +537,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
         IMP_LOG_INFO("max_batch_size: %d (configured)", config_.max_batch_size);
     }
 
-    // Qwen4Exp QSA keeps ONE sequence's indexer keys (executor_qsa.cu): with attention.qsa a
+    // Qwen4Exp QSA keeps ONE sequence's indexer keys (executor_qsa.cpp): with attention.qsa a
     // second sequence would select blocks from the first one's keys. PLE state is per slot.
     if (model_ && model_->ngram_table() != nullptr && runtime_config_.attention.qsa &&
         config_.max_batch_size > 1) {
@@ -623,11 +625,13 @@ void Engine::init_resolve_fp8_prefill_() {
         IMP_LOG_INFO("FP8 prefill: disabled for native NVFP4 (CUTLASS NVFP4 GEMM used instead)");
     } else if (!config_.use_fp8_prefill && !runtime_config_.runtime.debug_raw && !no_fp8_prefill) {
         int sm_major = 0;
-        cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor, 0);
         int sm_minor = 0;
-        cudaDeviceGetAttribute(&sm_minor, cudaDevAttrComputeCapabilityMinor, 0);
+        const bool sm_ok = cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor, 0) == cudaSuccess &&
+                           cudaDeviceGetAttribute(&sm_minor, cudaDevAttrComputeCapabilityMinor, 0) == cudaSuccess;
         int sm = sm_major * 10 + sm_minor;
-        if (sm >= 120 && runtime_config_.attention.fp8_prefill != "always") {
+        if (!sm_ok) {
+            IMP_LOG_WARN("FP8 prefill: auto → DISABLED (compute capability query failed)");
+        } else if (sm >= 120 && runtime_config_.attention.fp8_prefill != "always") {
             IMP_LOG_INFO(
                 "FP8 prefill: auto → DISABLED on sm_%d (cuBLAS 13.4 FP8 returns "
                 "NOT_SUPPORTED at non-aligned M on consumer Blackwell; "
@@ -774,13 +778,13 @@ void Engine::init_resolve_quant_flags_() {
             // Prequant SafeTensors NVFP4 weights are already NVFP4 on disk:
             // Phase 3a/3b (Q*_K->NVFP4->CUTLASS) iterate `wcache_.nvfp4`,
             // which stays empty here, so they are no-ops. Phase 3-MoE
-            // (cache_moe_native_nvfp4 in executor_pre_dequant.cu) IS
+            // (cache_moe_native_nvfp4 in executor_pre_dequant.cpp) IS
             // load-bearing: it builds the contiguous per-layer expert buffer
             // that lights up the M=1 decode fast path and lets CUDA Graphs
             // capture decode without D2H expert_offsets sync.
             //
             // For Q*_K source weights the per-tensor convert->quantize loop
-            // in executor_pre_dequant.cu builds wcache_.nvfp4 per tensor; the
+            // in executor_pre_dequant.cpp builds wcache_.nvfp4 per tensor; the
             // per-layer head_dim (256 SWA / 512 global) is handled uniformly
             // since each entry carries its own (N, K) shape.
             IMP_LOG_INFO("Gemma 4: NVFP4 decode cache enabled (use_nvfp4_decode=%d, prequant=%d)",
@@ -878,7 +882,8 @@ void Engine::init_compute_max_seq_len_() {
     if (config_.max_seq_len <= 0) {
         int model_ctx = mcfg.max_seq_len;  // from GGUF metadata
         size_t free_vram = 0, total_vram = 0;
-        vram_budget_mem_get_info(&free_vram, &total_vram);
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&free_vram, &total_vram);
         int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
         // Hybrid models (Qwen3.5/3.6 GDN, Nemotron-H Mamba2) populate
         // n_kv_heads_per_layer with zeros for non-attention layers, which

@@ -70,6 +70,12 @@ RUN set -eu; \
     pin https://github.com/yhirose/cpp-httplib.git ${IMP_DEP_HTTPLIB_TAG}       ${IMP_DEP_HTTPLIB_SHA}       /deps/httplib; \
     pin https://github.com/nlohmann/json.git       ${IMP_DEP_NLOHMANN_JSON_TAG} ${IMP_DEP_NLOHMANN_JSON_SHA} /deps/json
 
+# clang-format + clang-tidy for `make format`, `make tidy`. Pin: scripts/install_llvm.sh.
+FROM toolchain AS lint
+COPY scripts/install_llvm.sh /tmp/install_llvm.sh
+RUN bash /tmp/install_llvm.sh clang-format clang-tidy \
+    && rm -rf /var/lib/apt/lists/* /tmp/install_llvm.sh
+
 FROM toolchain AS builder
 
 WORKDIR /src

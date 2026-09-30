@@ -13,8 +13,8 @@
 // the base's plane with the base's global scale (Qwen3.8-27B: w_up read 5.57 MB past
 // w_gate's plane, logged as a normal split).
 
+#include <bit>
 #include <cstdint>
-#include <cstring>
 #include <string>
 
 namespace imp {
@@ -43,7 +43,7 @@ inline int64_t fused_split_needed_rows(const FusedSplitRequest& r) {
 // fire in either direction (weight_map already slices per sibling): kept as the repair
 // path for a fused layout whose scale plane is NOT sliced per sibling, and to keep the
 // wrong repair impossible.
-inline bool fused_split_eligible(const FusedSplitRequest& r, std::string* why_not) {
+[[nodiscard]] inline bool fused_split_eligible(const FusedSplitRequest& r, std::string* why_not) {
     auto no = [&](const char* m) {
         if (why_not)
             *why_not = m;
@@ -92,7 +92,7 @@ struct MergedScaleGroup {
 // (two distinct allocations never share an address); offsets are checked only when the
 // fix-up arm actually wrote them, since a tidy allocator placing two planes adjacently
 // must not be refused.
-inline bool merged_scale_group_ok(const MergedScaleGroup& g, std::string* err) {
+[[nodiscard]] inline bool merged_scale_group_ok(const MergedScaleGroup& g, std::string* err) {
     auto fail = [&](const std::string& m) {
         if (err)
             *err = "layer " + std::to_string(g.layer) + " " + g.what + ": " + m;
@@ -110,8 +110,8 @@ inline bool merged_scale_group_ok(const MergedScaleGroup& g, std::string* err) {
     for (int i = 1; i < g.count; ++i) {
         // Bit equality, not a tolerance: the siblings were divided by ONE
         // weight_global_scale, so any difference means one of them was promoted
-        // against a scale the checkpoint never gave it.
-        if (std::memcmp(&g.m[i].tensor_scale, &g.m[0].tensor_scale, sizeof(float)) != 0)
+        // against a scale the checkpoint never gave it. -0.0 vs +0.0 is refused on purpose.
+        if (std::bit_cast<uint32_t>(g.m[i].tensor_scale) != std::bit_cast<uint32_t>(g.m[0].tensor_scale))
             return fail("sibling " + std::to_string(i) + " carries tensor_scale " +
                         std::to_string(g.m[i].tensor_scale) + " but the fused tensor's is " +
                         std::to_string(g.m[0].tensor_scale));

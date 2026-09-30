@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <vector>
 #include "core/pdl_device.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 
 namespace imp {
 
@@ -425,35 +425,42 @@ static int32_t sample_mirostat_v2_impl(const Tensor& logits, float temperature, 
     // Surprise value stored right after the token result
     float* d_surprise = reinterpret_cast<float*>(d_result + 1);
 
+    sampler_launch_begin("sample_mirostat_v2");
     mirostat_v2_sample_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, *mu, inv_temperature, seed,
                                                             d_result, d_surprise);
-    IMP_CUDA_CHECK_LAUNCH();
+    const cudaError_t launched = sampler_launch_status(cudaGetLastError(), "sample_mirostat_v2");
 
-    // Read results
+    // Read results; every failure frees an owned d_result, then throws with mu unchanged (#2307).
+    // Failed launch: no readback of a stale token (#2310).
     int32_t h_result = 0;
     float h_surprise = 0.0f;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-    IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(&h_surprise, d_surprise, sizeof(float), cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
+    cudaError_t tok_copy = cudaSuccess;
+    cudaError_t sur_copy = cudaSuccess;
+    cudaError_t synced = cudaSuccess;
+    if (launched == cudaSuccess) {
+        tok_copy = cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream);
+        sur_copy = cudaMemcpyAsync(&h_surprise, d_surprise, sizeof(float), cudaMemcpyDeviceToHost, stream);
+        synced = cudaStreamSynchronize(stream);
+    }
 
     if (owns_result)
         IMP_CUDA_CHECK_LOG(cudaFree(d_result));
+    cuda_call_or_throw(launched, "sample_mirostat_v2 launch");
+    cuda_call_or_throw(tok_copy, "sample_mirostat_v2 readback");
+    cuda_call_or_throw(sur_copy, "sample_mirostat_v2 surprise readback");
+    const int32_t token = synced_token_or_throw(synced, &h_result, "sample_mirostat_v2 readback");
 
     // Update mu: mu = mu - eta * (surprise - tau)
     *mu = *mu - eta * (h_surprise - tau);
 
-    return h_result;
+    return token;
 }
 
 int32_t sample_mirostat_v2(const Tensor& logits, float temperature, float tau, float eta, float* mu,
                            unsigned int seed, cudaStream_t stream) {
     // Allocate temp buffer: 4 bytes for token + 4 bytes for surprise
     int32_t* d_result = nullptr;
-    if (cudaMalloc(&d_result, 2 * sizeof(int32_t)) != cudaSuccess) {
-        IMP_LOG_ERROR("sample_mirostat_v2: cudaMalloc failed");
-        return 0;
-    }
+    cuda_call_or_throw(cudaMalloc(&d_result, 2 * sizeof(int32_t)), "sample_mirostat_v2 scratch");
     return sample_mirostat_v2_impl(logits, temperature, tau, eta, mu, seed, d_result, true, stream);
 }
 

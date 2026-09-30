@@ -310,8 +310,8 @@ TEST(CudaGraphRunnerTest, Invalidate) {
     runner.set_decode_fn([d_data](cudaStream_t s) { add_one_kernel<<<1, 1, 0, s>>>(d_data, 1); });
 
     // Warmup + capture
-    runner.execute(stream);
-    runner.execute(stream);
+    EXPECT_TRUE(runner.execute(stream));
+    EXPECT_TRUE(runner.execute(stream));
     EXPECT_TRUE(runner.is_ready());
 
     // Invalidate
@@ -319,9 +319,9 @@ TEST(CudaGraphRunnerTest, Invalidate) {
     EXPECT_FALSE(runner.is_ready());
 
     // Should restart warmup
-    runner.execute(stream);  // warmup again
+    EXPECT_TRUE(runner.execute(stream));  // warmup again
     EXPECT_FALSE(runner.is_ready());
-    runner.execute(stream);  // capture again
+    EXPECT_TRUE(runner.execute(stream));  // capture again
     EXPECT_TRUE(runner.is_ready());
 
     EXPECT_EQ(runner.capture_count(), 2);

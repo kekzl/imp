@@ -136,12 +136,17 @@ bool VisionPipeline::encode_image(const half* h_pixels, int n_pixels, cudaStream
     attrs.srcLocHint     = { cudaMemLocationTypeHostNumaCurrent, {0} };
     attrs.dstLocHint     = { cudaMemLocationTypeDevice, {0} };
     attrs.flags          = 0;
-    cudaMemcpyWithAttributesAsync(d_px, h_pixels, pixel_bytes, &attrs, stream);
+    const cudaError_t cp = cudaMemcpyWithAttributesAsync(d_px, h_pixels, pixel_bytes, &attrs, stream);
+    if (cp != cudaSuccess)
+        IMP_LOG_ERROR("Vision: pixel upload failed: %s", cudaGetErrorString(cp));
 
-    bool ok = encoder_->encode(d_px, d_embeddings_, stream);
-    cudaStreamSynchronize(stream);
+    bool ok = cp == cudaSuccess && encoder_->encode(d_px, d_embeddings_, stream);
+    if (const cudaError_t se = cudaStreamSynchronize(stream); se != cudaSuccess) {
+        IMP_LOG_ERROR("Vision: encode sync failed: %s", cudaGetErrorString(se));
+        ok = false;
+    }
     if (need_free)
-        cudaFree(d_px);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_px));
 
     if (ok) {
         has_input_ = true;
@@ -165,11 +170,16 @@ bool VisionPipeline::encode_to(const ImageData& img, half* out, cudaStream_t str
     // would recapture ~200 kernels every image), then copy to the caller buffer.
     if (!encode_image(img.pixels.data(), static_cast<int>(img.pixels.size()), stream))
         return false;
-    cudaMemcpyAsync(out, d_embeddings_, embeddings_bytes(), cudaMemcpyDeviceToDevice, stream);
-    cudaStreamSynchronize(stream);
+    cudaError_t e = cudaMemcpyAsync(out, d_embeddings_, embeddings_bytes(), cudaMemcpyDeviceToDevice, stream);
+    if (e == cudaSuccess)
+        e = cudaStreamSynchronize(stream);
     // encode_image sets the legacy global has_input_ flag as a side effect; the
     // per-request path doesn't use it, so clear it to avoid leaking global state.
     has_input_ = false;
+    if (e != cudaSuccess) {
+        IMP_LOG_ERROR("Vision: embedding copy failed: %s", cudaGetErrorString(e));
+        return false;
+    }
     return true;
 }
 

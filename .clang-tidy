@@ -3,9 +3,11 @@
 # SCOPE: host .cpp / .h translation units, plus the host side of .cu TUs: nvcc
 # flags are unreadable to clang, so tools/tidy_cu_db.py rewrites the .cu entries
 # of compile_commands.json to `clang -x cuda --cuda-host-only` (#2210). The CI
-# tidy job lints changed .cpp and .cu. For IDEs, clangd picks this file up.
+# tidy job lints changed .cpp and .cu, `make tidy` all of them (scripts/tidy_lane.sh). For IDEs,
+# clangd picks this file up.
 #
-# Advisory: WarningsAsErrors is empty, so findings surface but do not block. The
+# WarningsAsErrors = the checks that fail the lane (tools/check_tidy_findings.py, pins in
+# tools/tidy_baseline.toml); every other check is advisory. The
 # disabled checks below are calibrated against a full sweep (it reported ~2000
 # findings, ~85% of them low-value style churn). We keep the bugprone-* /
 # performance-* / clang-diagnostic-* signal and drop the cosmetic mass (const on
@@ -20,8 +22,42 @@
 #     metadata) where sign extension to int64 is the intended behavior.
 # (Intentional empty catches — try-parse-with-default — are left flagged; the
 #  bugprone-empty-catch check stays on as a guard for genuinely-new swallows.)
+#
+# Entries after -readability-simplify-boolean-expr: new in LLVM 23, disabled. Unique findings
+# over all 355 tidy-lane TUs (176 .cpp + 179 .cu host side), rule: > 20 or judgment -> off.
+#   bugprone-signed-bitwise                         LLVM 23: 1584 findings
+#   readability-trailing-comma                      LLVM 23: 364 findings
+#   readability-inconsistent-ifelse-braces          LLVM 23: 99 findings
+#   readability-redundant-typename                  LLVM 23: 72 findings
+#   bugprone-unchecked-string-to-number-conversion  LLVM 23: 52 findings
+#   readability-redundant-nested-if                 LLVM 23: 44 findings
+#   readability-redundant-lambda-parameter-list     LLVM 23: 32 findings
+#   performance-prefer-single-char-overloads        LLVM 23: 30 findings
+#   bugprone-throwing-static-initialization         LLVM 23: 28 findings
+#   misc-explicit-constructor                       LLVM 23: 16 findings, CUDA RAII handles convert implicitly
+#   readability-trivial-switch                      LLVM 23: 5 findings, single-case enum switches are extension points
+#   bugprone-random-generator-seed                  LLVM 23: 2 findings, constant seeds keep benches reproducible
+#   clang-diagnostic-cuda-compat                    LLVM 23: 1 finding, inline on a header __global__ is ODR-needed
+#   performance-faster-string-find                  deprecated in LLVM 23, alias of prefer-single-char-overloads
+# New in LLVM 23 and on (findings fixed): misc-override-with-different-visibility (5),
+# performance-use-std-move (6), readability-redundant-parentheses (5), readability-redundant-qualified-alias (2).
+#
+# clang-analyzer-* is listed explicitly: LLVM 23 dropped it from the built-in default Checks
+# (21: 'clang-diagnostic-*,clang-analyzer-*', 23: 'clang-diagnostic-*'), #2285. Same full-lane
+# rule; "device" = __global__/__device__ bodies analysed host-side with stub intrinsics.
+#   clang-analyzer-deadcode.DeadStores                   LLVM 23: 10 findings, 6 are MMA operands read only under __CUDA_ARCH__
+#   clang-analyzer-optin.performance.Padding             LLVM 23: 8 findings, member order is by role, reorder = layout churn
+#   clang-analyzer-security.ArrayBound                   LLVM 23: 6 findings, 5 device (thread/lane index unknown host-side)
+#   clang-analyzer-core.UndefinedBinaryOperatorResult    LLVM 23: 5 findings, 4 device, 1 excluded by ngram_size >= 2 at load
+#   clang-analyzer-core.CallAndMessage                   LLVM 23: 5 findings, 2 device, 3 vmm driver() pointers gated by DriverApi::ok
+#   clang-analyzer-core.uninitialized.Assign             LLVM 23: 2 findings, 1 in cuda_fp16.hpp (system header), 1 on a fully initialized array
+#   clang-analyzer-core.NonNullParamChecker              LLVM 23: 2 findings, device (gate is non-null for every gated kAct)
+#   clang-analyzer-optin.core.EnumCastOutOfRange         LLVM 23: 1 finding, QType(255) is the "unset" sentinel
+# On (findings fixed): clang-analyzer-unix.Stream (2), clang-analyzer-core.NullDereference (1),
+#   clang-analyzer-core.NullPointerArithm (2).
 
 Checks: >
+  clang-analyzer-*,
   bugprone-*,
   performance-*,
   misc-*,
@@ -53,8 +89,30 @@ Checks: >
   -readability-use-anyofallof,
   -readability-else-after-return,
   -readability-redundant-member-init,
-  -readability-simplify-boolean-expr
+  -readability-simplify-boolean-expr,
+  -bugprone-signed-bitwise,
+  -bugprone-throwing-static-initialization,
+  -bugprone-unchecked-string-to-number-conversion,
+  -misc-explicit-constructor,
+  -performance-prefer-single-char-overloads,
+  -readability-redundant-nested-if,
+  -readability-trailing-comma,
+  -readability-inconsistent-ifelse-braces,
+  -readability-redundant-typename,
+  -readability-redundant-lambda-parameter-list,
+  -readability-trivial-switch,
+  -bugprone-random-generator-seed,
+  -clang-diagnostic-cuda-compat,
+  -performance-faster-string-find,
+  -clang-analyzer-deadcode.DeadStores,
+  -clang-analyzer-optin.performance.Padding,
+  -clang-analyzer-security.ArrayBound,
+  -clang-analyzer-core.UndefinedBinaryOperatorResult,
+  -clang-analyzer-core.CallAndMessage,
+  -clang-analyzer-core.uninitialized.Assign,
+  -clang-analyzer-core.NonNullParamChecker,
+  -clang-analyzer-optin.core.EnumCastOutOfRange
 
-WarningsAsErrors: ''
+WarningsAsErrors: 'bugprone-*,clang-analyzer-*'
 HeaderFilterRegex: '(src|include/imp)/.*\.(h|hpp)$'
 FormatStyle: file

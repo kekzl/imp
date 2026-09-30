@@ -467,7 +467,7 @@ TEST(PrefixEquivTest, RandomisedWorkloadKeepsProbeAllocationAndPoolConsistent) {
             continue;
         }
         if (next(100) < 10) {
-            mgr->evict_cached_block();
+            (void)mgr->evict_cached_block();  // fuzz op: nothing to evict is a valid outcome
             continue;
         }
 

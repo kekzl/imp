@@ -60,14 +60,14 @@ struct PackedVec16 {
 // Quant kernel: each thread handles 16 elements (one scale group). Grid layout:
 //   blockIdx.x = token_block (BLOCK_SIZE=64 tokens), blockIdx.y = batch, blockIdx.z = head
 //   threadIdx.x = (token_within_block * NUM_THREADS_PER_TOKEN) + col_scale_group
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <uint32_t HEAD_DIM, uint32_t BLOCK_SIZE>
 __global__ void nvfp4_quant_hw_kernel(const half* __restrict__ input, uint8_t* __restrict__ nvfp4_out,
                                       uint8_t* __restrict__ sf_out, int batch_size, int n_heads, int n_tokens,
-                                      int stride_bz_input, int stride_h_input, int stride_seq_input,
-                                      int stride_bz_output, int stride_h_output, int stride_seq_output,
-                                      int stride_bz_output_sf, int stride_h_output_sf,
-                                      int stride_seq_output_sf) {
+                                      int64_t stride_bz_input, int64_t stride_h_input,
+                                      int64_t stride_seq_input, int64_t stride_bz_output,
+                                      int64_t stride_h_output, int64_t stride_seq_output,
+                                      int64_t stride_bz_output_sf, int64_t stride_h_output_sf,
+                                      int64_t stride_seq_output_sf) {
     constexpr uint32_t NUM_THREADS_PER_TOKEN = HEAD_DIM / CVT_FP4_ELTS_PER_THREAD;
     // head_dim=128 → 8 threads/token, head_dim=64 → 4 threads/token
     static_assert(HEAD_DIM == 64 || HEAD_DIM == 128, "Only 64 and 128 supported");
@@ -85,10 +85,12 @@ __global__ void nvfp4_quant_hw_kernel(const half* __restrict__ input, uint8_t* _
         reinterpret_cast<uint32_t&>(in_vec.elts[i]) = 0u;
     }
 
+    // #2218 bounded: (tid % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD < HEAD_DIM <= 128 (:73)
     if (token_id < n_tokens) {
         const half* src = input + batch_id * stride_bz_input + head_id * stride_h_input +
                           token_id * stride_seq_input +
-                          (threadIdx.x % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD;
+                          static_cast<ptrdiff_t>((threadIdx.x % NUM_THREADS_PER_TOKEN) *
+                                                 CVT_FP4_ELTS_PER_THREAD);
         in_vec = *reinterpret_cast<const PackedVec16<half>*>(src);
     }
 
@@ -132,8 +134,9 @@ __global__ void nvfp4_quant_hw_kernel(const half* __restrict__ input, uint8_t* _
         reinterpret_cast<uint64_t*>(dst)[0] = (static_cast<uint64_t>(e2m1_hi) << 32) | e2m1_lo;
     }
 
-    uint8_t* sf_base = sf_out + batch_id * stride_bz_output_sf + head_id * stride_h_output_sf +
-                       (token_id / 64) * 64 * stride_seq_output_sf;
+    uint8_t* sf_base = sf_out + static_cast<int64_t>(batch_id) * stride_bz_output_sf +
+                       static_cast<int64_t>(head_id) * stride_h_output_sf +
+                       static_cast<int64_t>(token_id / 64) * 64 * stride_seq_output_sf;
     uint32_t token_id_local = token_id % 64;
 
     if constexpr (CVT_FP4_ELTS_PER_THREAD == 16) {
@@ -152,17 +155,16 @@ __global__ void nvfp4_quant_hw_kernel(const half* __restrict__ input, uint8_t* _
         }
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Dequant kernel: inverse of the quant kernel above; one thread per 16-element group.
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <uint32_t HEAD_DIM, uint32_t BLOCK_SIZE>
 __global__ void nvfp4_dequant_hw_kernel(const uint8_t* __restrict__ nvfp4_in,
                                         const uint8_t* __restrict__ sf_in, half* __restrict__ output,
-                                        int batch_size, int n_heads, int n_tokens, int stride_bz_input,
-                                        int stride_h_input, int stride_seq_input, int stride_bz_output,
-                                        int stride_h_output, int stride_seq_output, int stride_bz_input_sf,
-                                        int stride_h_input_sf, int stride_seq_input_sf) {
+                                        int batch_size, int n_heads, int n_tokens, int64_t stride_bz_input,
+                                        int64_t stride_h_input, int64_t stride_seq_input,
+                                        int64_t stride_bz_output, int64_t stride_h_output,
+                                        int64_t stride_seq_output, int64_t stride_bz_input_sf,
+                                        int64_t stride_h_input_sf, int64_t stride_seq_input_sf) {
     constexpr uint32_t NUM_THREADS_PER_TOKEN = HEAD_DIM / CVT_FP4_ELTS_PER_THREAD;
     static_assert(HEAD_DIM == 64 || HEAD_DIM == 128, "Only 64 and 128 supported");
 
@@ -174,8 +176,9 @@ __global__ void nvfp4_dequant_hw_kernel(const uint8_t* __restrict__ nvfp4_in,
     if (token_id >= n_tokens)
         return;
 
-    const uint8_t* sf_base = sf_in + batch_id * stride_bz_input_sf + head_id * stride_h_input_sf +
-                             (token_id / 64) * 64 * stride_seq_input_sf;
+    const uint8_t* sf_base = sf_in + static_cast<int64_t>(batch_id) * stride_bz_input_sf +
+                             static_cast<int64_t>(head_id) * stride_h_input_sf +
+                             static_cast<int64_t>(token_id / 64) * 64 * stride_seq_input_sf;
     uint32_t token_id_local = token_id % 64;
     uint32_t col_id_local = threadIdx.x % NUM_THREADS_PER_TOKEN;
     uint32_t offset_local;
@@ -194,9 +197,10 @@ __global__ void nvfp4_dequant_hw_kernel(const uint8_t* __restrict__ nvfp4_in,
                          token_id * stride_seq_input +
                          (threadIdx.x % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD / 2;
 
+    // #2218 bounded: (tid % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD < HEAD_DIM <= 128 (:169)
     half* dst = output + batch_id * stride_bz_output + head_id * stride_h_output +
                 token_id * stride_seq_output +
-                (threadIdx.x % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD;
+                static_cast<ptrdiff_t>((threadIdx.x % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD);
 
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
@@ -207,13 +211,12 @@ __global__ void nvfp4_dequant_hw_kernel(const uint8_t* __restrict__ nvfp4_in,
         dst[i] = __float2half(v);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 bool nvfp4_quant_hw_fp16(const half* d_input, uint8_t* d_nvfp4, uint8_t* d_sf, int batch_size, int n_heads,
-                         int n_tokens, int head_dim, int stride_bz_input, int stride_h_input,
-                         int stride_seq_input, int stride_bz_output, int stride_h_output,
-                         int stride_seq_output, int stride_bz_output_sf, int stride_h_output_sf,
-                         int stride_seq_output_sf, cudaStream_t stream) {
+                         int n_tokens, int head_dim, int64_t stride_bz_input, int64_t stride_h_input,
+                         int64_t stride_seq_input, int64_t stride_bz_output, int64_t stride_h_output,
+                         int64_t stride_seq_output, int64_t stride_bz_output_sf, int64_t stride_h_output_sf,
+                         int64_t stride_seq_output_sf, cudaStream_t stream) {
     constexpr int BLOCK_SIZE = 64;  // tokens per threadblock
     if (head_dim != 64 && head_dim != 128) {
         IMP_LOG_ERROR("nvfp4_quant_hw: head_dim %d unsupported (only 64 / 128)", head_dim);
@@ -247,10 +250,10 @@ bool nvfp4_quant_hw_fp16(const half* d_input, uint8_t* d_nvfp4, uint8_t* d_sf, i
 }
 
 bool nvfp4_dequant_hw_fp16(const uint8_t* d_nvfp4, const uint8_t* d_sf, half* d_output, int batch_size,
-                           int n_heads, int n_tokens, int head_dim, int stride_bz_input, int stride_h_input,
-                           int stride_seq_input, int stride_bz_output, int stride_h_output,
-                           int stride_seq_output, int stride_bz_input_sf, int stride_h_input_sf,
-                           int stride_seq_input_sf, cudaStream_t stream) {
+                           int n_heads, int n_tokens, int head_dim, int64_t stride_bz_input,
+                           int64_t stride_h_input, int64_t stride_seq_input, int64_t stride_bz_output,
+                           int64_t stride_h_output, int64_t stride_seq_output, int64_t stride_bz_input_sf,
+                           int64_t stride_h_input_sf, int64_t stride_seq_input_sf, cudaStream_t stream) {
     constexpr int BLOCK_SIZE = 64;
     if (head_dim != 64 && head_dim != 128)
         return false;

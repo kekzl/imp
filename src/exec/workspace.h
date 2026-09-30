@@ -71,7 +71,7 @@ public:
     // --- moved lifecycle methods ---
     [[nodiscard]] bool allocate_persistent_workspace(int max_tokens);
     [[nodiscard]] bool allocate_shared_workspace(int max_tokens);
-    bool allocate_decode_workspace(cudaStream_t stream, int max_batch = 1);
+    [[nodiscard]] bool allocate_decode_workspace(cudaStream_t stream, int max_batch = 1);
     void use_workspace(int slot);
     [[nodiscard]] bool resize_workspace(int new_max_tokens, cudaStream_t stream);
     void compute_shared_sizes(int max_tokens);

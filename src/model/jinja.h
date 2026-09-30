@@ -60,7 +60,7 @@ public:
     bool is_number() const { return is_int() || is_double(); }
 
     // Accessors (unchecked — caller must verify type)
-    bool as_bool() const { return std::get<bool>(data_); }
+    [[nodiscard]] bool as_bool() const { return std::get<bool>(data_); }
     int64_t as_int() const { return std::get<int64_t>(data_); }
     double as_double() const { return std::get<double>(data_); }
     const std::string& as_string() const { return std::get<std::string>(data_); }
@@ -72,7 +72,7 @@ public:
     }
 
     // Truthiness (Python/Jinja2 rules)
-    bool truthy() const;
+    [[nodiscard]] bool truthy() const;
 
     // Convert to string for output
     std::string to_string() const;
@@ -104,7 +104,7 @@ public:
     void set(const std::string& name, Value val);
 
     // Check if value contains item (for 'in' operator)
-    bool contains(const Value& item) const;
+    [[nodiscard]] bool contains(const Value& item) const;
 
     // Size (alias for length)
     int64_t size() const { return length(); }
@@ -155,7 +155,7 @@ public:
     Template& operator=(const Template&) = delete;
 
     // Parse a Jinja2 template string. Returns true on success.
-    bool parse(const std::string& source);
+    [[nodiscard]] bool parse(const std::string& source);
 
     // Renders the parsed template; returns "" on error. A render exceeding the evaluation
     // budget (macro depth, loop iterations) is an error, not a crash: error() names the budget.

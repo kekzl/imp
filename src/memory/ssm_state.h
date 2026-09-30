@@ -73,6 +73,9 @@ public:
     void* conv_state_in(void* slab, int ssm_layer_idx) const {
         return static_cast<char*>(slab) + static_cast<size_t>(ssm_layer_idx) * per_layer_bytes_;
     }
+    void* extra_state_in(void* slab) const {
+        return extra_bytes_ ? static_cast<char*>(slab) + per_layer_bytes_ * n_ssm_layers_ : nullptr;
+    }
     void* h_state_in(void* slab, int ssm_layer_idx) const {
         return static_cast<char*>(slab) + static_cast<size_t>(ssm_layer_idx) * per_layer_bytes_ + conv_bytes_;
     }
@@ -100,9 +103,9 @@ public:
     // reserved, so graphs that step to it by id stay valid). Used once, after warmup, which
     // had touched every slot capturing the decode graphs. False when the slot was not
     // committed or the backend cannot decommit.
-    bool decommit_slot(int slot);
-    bool lazy() const { return lazy_; }
-    bool slot_committed(int slot) const;
+    [[nodiscard]] bool decommit_slot(int slot);
+    [[nodiscard]] bool lazy() const { return lazy_; }
+    [[nodiscard]] bool slot_committed(int slot) const;
     int committed_slots() const { return n_committed_; }
     // Physical bytes held right now (lazy: committed slots x stride; fixed:
     // the whole pool) and the address space reserved for the ceiling.
@@ -110,7 +113,7 @@ public:
     size_t reserved_bytes() const { return lazy_ ? region_.reserved() : committed_bytes(); }
 
 private:
-    bool init_lazy_(Backend& be, int n_slots);
+    [[nodiscard]] bool init_lazy_(Backend& be, int n_slots);
 
     VRAMAllocator* alloc_ = nullptr;
     void* pool_ = nullptr;

@@ -24,7 +24,7 @@
 #include <cuda_fp16.h>
 #include <type_traits>
 #include "core/pdl_device.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 
 namespace imp {
 namespace {
@@ -128,7 +128,6 @@ __device__ __forceinline__ void mma_mxf4nvf4(float acc[4], const uint32_t a[4], 
 // Everything from barrier init through the epilogue is identical to the shipped
 // single-tensor kernel. OutT: half (activations) or float (batched LM head logits, read as
 // float by samplers; single-stripe shapes only).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int kStages, typename OutT>
 __device__ __forceinline__ void smallm_v2_cta_body(
     const uint8_t* __restrict__ w_packed, const uint8_t* __restrict__ w_scales,
@@ -160,7 +159,10 @@ __device__ __forceinline__ void smallm_v2_cta_body(
     const int kt1 = min(k_tiles, kt0 + per_stripe);
     const int iters = kt1 - kt0;
 
-    auto stage_base = [&](int s) { return smem + s * kStageBytes; };
+    // #2218 bounded: s * kStageBytes < kStages * 15360 <= 92160 B (kStages template, max 6 at :600);
+    // r, a_row, n_row, sfa_row < kNR = 64: row * kNibStride < 9216 B; j * 16, c * 32, T0 * 4, c * 4 < 128 B
+    // (constexpr loop bounds)
+    auto stage_base = [&](int s) { return smem + static_cast<ptrdiff_t>(s * kStageBytes); };
 
     // Per-lane chunk assignments are fixed; only the K offset advances:
     //   w nibbles: 64 rows x 8 16B-chunks = 512 -> 16/lane
@@ -184,13 +186,15 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         for (int v = 0; v < 16; ++v) {
             const int c = lane + v * 32;
             const int r = c / 8, j = c % 8;
-            cp_async16(s_wn + r * kNibStride + j * 16,
-                       w_packed + (n_base + r) * w_row_bytes + k_nib_off + j * 16, 16);
+            cp_async16(s_wn + static_cast<ptrdiff_t>(r * kNibStride) + static_cast<ptrdiff_t>(j * 16),
+                       w_packed + (n_base + r) * w_row_bytes + k_nib_off + static_cast<ptrdiff_t>(j * 16),
+                       16);
         }
 #pragma unroll
         for (int v = 0; v < 2; ++v) {
             const int r = lane + v * 32;
-            cp_async16(s_wsf + r * kSfStride, w_scales + (n_base + r) * sf_row_bytes + k_sf_off, 16);
+            cp_async16(s_wsf + static_cast<ptrdiff_t>(r * kSfStride),
+                       w_scales + (n_base + r) * sf_row_bytes + k_sf_off, 16);
         }
     };
 
@@ -208,11 +212,12 @@ __device__ __forceinline__ void smallm_v2_cta_body(
             for (int v = 0; v < 8; ++v) {
                 const int c = lane + v * 32;
                 const int r = c / 8, j = c % 8;
-                cp_async16(s_xn + r * kNibStride + j * 16, xq_packed + r * w_row_bytes + k_nib_off + j * 16,
+                cp_async16(s_xn + static_cast<ptrdiff_t>(r * kNibStride) + static_cast<ptrdiff_t>(j * 16),
+                           xq_packed + r * w_row_bytes + k_nib_off + static_cast<ptrdiff_t>(j * 16),
                            r < M ? 16 : 0);
             }
-            cp_async16(s_xsf + lane * kSfStride, xq_scales + lane * sf_row_bytes + k_sf_off,
-                       lane < M ? 16 : 0);
+            cp_async16(s_xsf + static_cast<ptrdiff_t>(lane * kSfStride),
+                       xq_scales + lane * sf_row_bytes + k_sf_off, lane < M ? 16 : 0);
             // One async-arrive per lane covers every cp.async this lane issued
             // for the stage, the weights before the grid dependency included.
             cp_async_mbar_arrive(&bar_full[s]);
@@ -279,20 +284,23 @@ __device__ __forceinline__ void smallm_v2_cta_body(
 #pragma unroll
             for (int c = 0; c < kKT / 64; ++c) {
                 uint32_t a[4];
-                const uint8_t* xr = s_xn + a_row * kNibStride + T0 * 4 + c * 32;
+                const uint8_t* xr = s_xn + static_cast<ptrdiff_t>(a_row * kNibStride) +
+                                    static_cast<ptrdiff_t>(T0 * 4) + static_cast<ptrdiff_t>(c * 32);
                 a[0] = *reinterpret_cast<const uint32_t*>(xr);
-                a[1] = *reinterpret_cast<const uint32_t*>(xr + 8 * kNibStride);
+                a[1] = *reinterpret_cast<const uint32_t*>(xr + static_cast<ptrdiff_t>(8 * kNibStride));
                 a[2] = *reinterpret_cast<const uint32_t*>(xr + 16);
-                a[3] = *reinterpret_cast<const uint32_t*>(xr + 8 * kNibStride + 16);
-                const uint32_t sfa = *reinterpret_cast<const uint32_t*>(s_xsf + sfa_row * kSfStride + c * 4);
+                a[3] = *reinterpret_cast<const uint32_t*>(xr + static_cast<ptrdiff_t>(8 * kNibStride) + 16);
+                const uint32_t sfa = *reinterpret_cast<const uint32_t*>(
+                    s_xsf + static_cast<ptrdiff_t>(sfa_row * kSfStride) + static_cast<ptrdiff_t>(c * 4));
 #pragma unroll
                 for (int nf = 0; nf < 4; ++nf) {
                     const int n_row = warp_n * 32 + nf * 8 + T1;
-                    const uint8_t* wr = s_wn + n_row * kNibStride + T0 * 4 + c * 32;
+                    const uint8_t* wr = s_wn + static_cast<ptrdiff_t>(n_row * kNibStride) +
+                                        static_cast<ptrdiff_t>(T0 * 4) + static_cast<ptrdiff_t>(c * 32);
                     const uint32_t b0 = *reinterpret_cast<const uint32_t*>(wr);
                     const uint32_t b1 = *reinterpret_cast<const uint32_t*>(wr + 16);
-                    const uint32_t sfb = *reinterpret_cast<const uint32_t*>(s_wsf + n_row * kSfStride +
-                                                                            c * 4);
+                    const uint32_t sfb = *reinterpret_cast<const uint32_t*>(
+                        s_wsf + static_cast<ptrdiff_t>(n_row * kSfStride) + static_cast<ptrdiff_t>(c * 4));
                     mma_mxf4nvf4(acc[nf], a, b0, b1, sfa, sfb);
                 }
             }
@@ -343,7 +351,6 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         __stcs(&plane[static_cast<int64_t>(m) * N_out + n_base + n], s_out[i]);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // grid = (N/kNR, stripes). Each CTA walks a contiguous stripe of K-tiles for
 // its n-tile and writes one FP32 partial plane per stripe (stripe-exclusive

@@ -21,7 +21,7 @@ namespace imp {
 // constant into the per-expert tensor scale (gpt-oss's residual 2^-4 rescale on down).
 // h_tscales_out (optional): host copy of per-expert FP32 tensor scales for CUTLASS
 // per-expert weight registration.
-bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_scales, int ne,
+[[nodiscard]] bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_scales, int ne,
                                       int64_t n_rows_total, int64_t K, int row_offset, int row_stride,
                                       NvFP4MoEQuantResult& out, float extra_scale = 1.0f,
                                       std::vector<float>* h_tscales_out = nullptr);

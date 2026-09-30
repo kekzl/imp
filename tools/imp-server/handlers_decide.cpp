@@ -6,6 +6,7 @@
 #include "handlers.h"
 #include "handlers_internal.h"
 #include "runtime/snapshot_boundary.h"
+#include "score_waves.h"
 #include "utils.h"
 
 #include <algorithm>
@@ -21,7 +22,7 @@ constexpr int kMaxOptions = 16;  // letters A..P
 constexpr int kMaxScoreCandidates = 256;
 constexpr const char* kDefaultSystem = "Answer only with the letter of the correct option.";
 
-enum class ScoreMode { Serial, Direct };
+using imp::server::ScoreMode;
 
 struct ScoreJob {
     std::vector<int32_t> tokens;
@@ -41,7 +42,7 @@ void bad_request(httplib::Response& res, const std::string& msg, const char* par
     send_json_error(res, 400, "invalid_request_error", msg, param);
 }
 
-// auto -> serial. shared is specified in #2198 but needs engine work (ragged score rows).
+// auto -> serial.
 bool parse_mode(const json& body, httplib::Response& res, ScoreMode& mode) {
     mode = ScoreMode::Serial;
     if (!body.contains("mode"))
@@ -53,19 +54,19 @@ bool parse_mode(const json& body, httplib::Response& res, ScoreMode& mode) {
     const std::string m = body["mode"].get<std::string>();
     if (m == "auto" || m == "serial")
         return true;
-    if (m == "direct") {
-        mode = ScoreMode::Direct;
+    if (m == "direct" || m == "shared") {
+        mode = m == "direct" ? ScoreMode::Direct : ScoreMode::Shared;
         return true;
-    }
-    if (m == "shared") {
-        bad_request(res, "mode \"shared\" is not implemented yet, see #2198", "mode");
-        return false;
     }
     bad_request(res, "\"mode\" must be one of auto, serial, direct, shared (got \"" + m + "\")", "mode");
     return false;
 }
 
-const char* mode_name(ScoreMode m) { return m == ScoreMode::Direct ? "direct" : "serial"; }
+const char* mode_name(ScoreMode m) {
+    if (m == ScoreMode::Direct)
+        return "direct";
+    return m == ScoreMode::Shared ? "shared" : "serial";
+}
 
 // Thinking off for any template that can open a reasoning block: the score position must be
 // the first answer token. Harmony: suppress ends the prompt on the final channel.
@@ -98,17 +99,20 @@ std::shared_ptr<ServerRequest> make_score_request(const ScoreJob& job, bool dire
     r->snapshot_hint_tokens = direct ? 0 : job.shared_prefix;
     r->status = imp::RequestStatus::PENDING;
     auto sr = std::make_shared<ServerRequest>();
-    sr->request = r;
+    sr->request = std::move(r);
     return sr;
 }
 
-bool submit_one(ServerState& state, const std::shared_ptr<ServerRequest>& sr, httplib::Response& res) {
+// One queue insertion per wave: the worker admits the whole wave in one iteration, so the
+// ragged batch composition (and its numerics) does not depend on submission timing.
+bool submit_all(ServerState& state, const std::vector<std::shared_ptr<ServerRequest>>& srs,
+                httplib::Response& res) {
     std::lock_guard<std::timed_mutex> lock(state.mtx);
     if (!state.batching || !state.batching->is_running()) {
         send_json_error(res, 503, "server_error", "Scoring requires the batching worker");
         return false;
     }
-    state.batching->submit(sr);
+    state.batching->submit_all(srs);
     return true;
 }
 
@@ -142,36 +146,31 @@ bool collect_one(ServerRequest& sr, size_t n_ids, httplib::Response& res, ScoreO
     return true;
 }
 
-// serial: submit item k+1 after item k finished, so its prompt blocks are published and the
-// shared evidence prefix is a cache hit. direct: all at once, each bypassing the prefix cache.
-bool run_jobs(ServerState& state, const std::vector<ScoreJob>& jobs, ScoreMode mode, httplib::Response& res,
-              std::vector<ScoreOut>& out) {
-    out.assign(jobs.size(), {});
-    if (mode == ScoreMode::Serial) {
-        for (size_t i = 0; i < jobs.size(); i++) {
-            auto sr = make_score_request(jobs[i], false);
-            if (!submit_one(state, sr, res) || !collect_one(*sr, jobs[i].ids.size(), res, out[i]))
-                return false;
-        }
-        return true;
-    }
+// One wave: every job submitted at once, then all collected (score_waves.h).
+bool run_wave(ServerState& state, const std::vector<ScoreJob>& jobs, const std::vector<size_t>& wave,
+              ScoreMode mode, httplib::Response& res, std::vector<ScoreOut>& out) {
     std::vector<std::shared_ptr<ServerRequest>> submitted;
-    submitted.reserve(jobs.size());
-    for (const auto& job : jobs) {
-        submitted.push_back(make_score_request(job, true));
-        if (!submit_one(state, submitted.back(), res)) {
-            for (auto& s : submitted)
-                s->cancelled = true;
-            return false;
-        }
-    }
-    for (size_t i = 0; i < jobs.size(); i++) {
-        if (!collect_one(*submitted[i], jobs[i].ids.size(), res, out[i])) {
-            for (size_t j = i + 1; j < submitted.size(); j++)
+    submitted.reserve(wave.size());
+    for (const size_t i : wave)
+        submitted.push_back(make_score_request(jobs[i], mode == ScoreMode::Direct));
+    if (!submit_all(state, submitted, res))
+        return false;
+    for (size_t k = 0; k < wave.size(); k++) {
+        if (!collect_one(*submitted[k], jobs[wave[k]].ids.size(), res, out[wave[k]])) {
+            for (size_t j = k + 1; j < submitted.size(); j++)
                 submitted[j]->cancelled = true;
             return false;
         }
     }
+    return true;
+}
+
+bool run_jobs(ServerState& state, const std::vector<ScoreJob>& jobs, ScoreMode mode, httplib::Response& res,
+              std::vector<ScoreOut>& out) {
+    out.assign(jobs.size(), {});
+    for (const auto& wave : imp::server::score_waves(mode, jobs.size()))
+        if (!run_wave(state, jobs, wave, mode, res, out))
+            return false;
     return true;
 }
 
@@ -353,7 +352,7 @@ void handle_decide(const httplib::Request& req, httplib::Response& res, ServerSt
     }
     // Hybrid models restore only at a snapshotted block: without a save at the shared evidence
     // prefix, item 2+ diverge before item 1's prompt-end snapshot and reuse nothing.
-    if (mode == ScoreMode::Serial && jobs.size() >= 2) {
+    if (mode != ScoreMode::Direct && jobs.size() >= 2) {
         std::vector<std::vector<int32_t>> seqs;
         seqs.reserve(jobs.size());
         for (const auto& j : jobs)

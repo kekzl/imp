@@ -223,7 +223,8 @@ bool Engine::init_features() {
     sampling_preallocate_dry(config_.max_seq_len, decode_stream());
     // History-sized penalties (sampling_penalties.cu): per-row token counts,
     // sized like the sampling scratch (max_logit_tokens = max(batch, 8)).
-    sampling_preallocate_penalty_counts(std::max(config_.max_batch_size, 8), model_->config().vocab_size);
+    // false: WARN logged, penalties stay on the sweep kernels (sampling.h).
+    (void)sampling_preallocate_penalty_counts(std::max(config_.max_batch_size, 8), model_->config().vocab_size);
     // 4096 slots is 32 KiB and four times the server's own --max-logit-bias
     // default, so the fallback path in apply_logit_bias stays unreachable for
     // any request the server accepts (#1617).
@@ -423,7 +424,8 @@ void Engine::warmup() {
     // init only (AUDIT B41).
     MemAccount::instance().checkpoint("05a_pre_warmup_forward");
     size_t warm_free_before = 0;
-    vram_budget_mem_get_info(&warm_free_before, nullptr);
+    // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+    (void)vram_budget_mem_get_info(&warm_free_before, nullptr);
     const size_t imma_planes_before = mmq_q8_imma_plane_bytes_used();
 
     for (int prompt_len : {16, 32}) {
@@ -519,7 +521,7 @@ void Engine::warmup() {
     async_graph_req_ = nullptr;
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;
-    cudaDeviceSynchronize();
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
     {
         cudaError_t e = cudaGetLastError();
         if (e != cudaSuccess)
@@ -528,7 +530,7 @@ void Engine::warmup() {
     // Clear any stale CUDA errors from warmup (e.g. green context reconfigure
     // failure on consumer GPUs: the error propagates to cuBLAS otherwise).
     cudaGetLastError();
-    cudaDeviceSynchronize();  // ensure all weight upload/dequant kernels are done
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());  // ensure all weight upload/dequant kernels are done
 
     // Graph prewarm: capture the per-batch-size decode graph pool BEFORE the engine goes ready.
     // Continuous batching visits every batch size on the way up and down, and each never-seen
@@ -605,7 +607,7 @@ void Engine::warmup() {
         }
         while (kv_manager_->evict_cached_block()) {}
         decode_batch_pool_.reset_upload_cache();
-        cudaDeviceSynchronize();
+        IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
         const double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         IMP_LOG_INFO("graph prewarm: %d/%d decode graphs captured (%d steps, %.1f s)%s%s",
                      captured, n, steps, dt, missing.empty() ? "" : ", missing sizes:",

@@ -7,6 +7,7 @@
 #include "request_field_types.h"
 #include "utils.h"
 #include "completion_prompt.h"
+#include "prompt_logprobs.h"
 #include "fim_request.h"
 #include "stream_pipeline.h"
 #include "reasoning_split.h"
@@ -26,7 +27,6 @@ namespace {
 // response are three phases instead of one 593-LOC body (#1905 file-size gate).
 struct CompletionCtx {
     const std::string& prompt;
-    const std::vector<int32_t>& tokens;
     const std::vector<std::string>& stop_sequences;
     const std::string& comp_id;
     const std::string& snap_model_name;
@@ -43,6 +43,7 @@ struct CompletionCtx {
     bool snap_is_think_model;
     bool ignore_eos;
     bool infill;                        // POST /infill: llama.cpp `content` mirrors the text (#2201)
+    PromptLogprobsRequest plp;
     std::function<bool()> client_gone;  // req.is_connection_closed
 };
 
@@ -407,7 +408,8 @@ void nonstream_completion_response_(httplib::Response& res, ServerState& state, 
     double ttft_ms = -1.0;
     auto t_prev_token = t_start;  // last delivered token (ITL)
     for (;;) {
-        if ((finish = nonstream_should_stop_(state, *server_req, ns_comp_start, c.client_gone)))
+        finish = nonstream_should_stop_(state, *server_req, ns_comp_start, c.client_gone);
+        if (finish)
             break;
 
         TokenEvent evt{};
@@ -507,6 +509,13 @@ void nonstream_completion_response_(httplib::Response& res, ServerState& state, 
     json choice = {{"index", 0}, {"text", text}, {"finish_reason", openai_finish_reason(finish)}};
     if (!logprobs_obj.is_null()) {
         choice["logprobs"] = logprobs_obj;
+    }
+    const auto token_text = [snap_tok](int32_t id) { return snap_tok->decode_token(id); };
+    if (active_req &&
+        !attach_prompt_logprobs(choice, c.plp, *active_req, token_text, output_ids.size(), text)) {
+        send_json_error(res, 500, "server_error",
+                        "prompt logprobs incomplete: not every prompt token was scored");
+        return;
     }
 
     json response = {{"id", comp_id},
@@ -617,31 +626,15 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
     float mirostat_tau = body.value("mirostat_tau", 5.0f);
     float mirostat_eta = body.value("mirostat_eta", 0.1f);
 
-    // Completions API types `logprobs` as an integer (top-N count); Chat uses a
-    // bool `logprobs` + int `top_logprobs`. Accept both so a spec-compliant
-    // Completions client sending `logprobs: 5` isn't 400'd on a json type error.
     bool req_logprobs = false;
-    int top_logprobs = body.value("top_logprobs", 0);
-    if (body.contains("logprobs") && !body["logprobs"].is_null()) {
-        const auto& lp = body["logprobs"];
-        if (lp.is_boolean()) {
-            req_logprobs = lp.get<bool>();
-        } else if (lp.is_number_integer()) {
-            int n = lp.get<int>();
-            if (n > 0) {
-                req_logprobs = true;
-                top_logprobs = std::max(top_logprobs, n);
-            }
-        } else {
-            send_json_error(res, 400, "invalid_request_error",
-                            "\"logprobs\" must be an integer (Completions) or boolean");
-            return;
-        }
+    int top_logprobs = 0;
+    PromptLogprobsRequest plp;
+    if (const std::string err = parse_completions_logprobs(body, stream, echo, req_logprobs, top_logprobs,
+                                                           plp);
+        !err.empty()) {
+        send_json_error(res, 400, "invalid_request_error", err);
+        return;
     }
-    if (top_logprobs < 0)
-        top_logprobs = 0;
-    if (top_logprobs > 20)
-        top_logprobs = 20;
 
     // Parse stop sequences (same 16-entry cap as the chat parser).
     std::vector<std::string> stop_sequences;
@@ -798,6 +791,7 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
     imp_req->mirostat_eta = mirostat_eta;
     imp_req->logprobs = req_logprobs;
     imp_req->top_logprobs = top_logprobs;
+    imp_req->prompt_logprobs = plp.engine_top_n;
     imp_req->ignore_eos = body.value("ignore_eos", false);  // vLLM-style, see handlers_chat_params.cpp
     // With ignore_eos the engine keeps sampling past EOS; every EOS it emits
     // counts as an output token (vLLM semantics) but carries no text.
@@ -835,7 +829,7 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
     imp_req->status = imp::RequestStatus::PENDING;
 
     auto server_req = std::make_shared<ServerRequest>();
-    server_req->request = imp_req;
+    server_req->request = std::move(imp_req);
 
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
@@ -854,7 +848,6 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
     int64_t created = unix_timestamp();
 
     const CompletionCtx cctx{prompt,
-                             tokens,
                              stop_sequences,
                              comp_id,
                              snap_model_name,
@@ -871,6 +864,7 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
                              snap_is_think_model,
                              ignore_eos,
                              infill,
+                             plp,
                              req.is_connection_closed};
     if (stream) {
         stream_completion_response_(res, state, cctx, server_req);

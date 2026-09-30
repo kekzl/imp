@@ -50,7 +50,7 @@ permissions:
 jobs:
   build:
     name: Build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       code: ${{ steps.changes.outputs.code }}
       cpp: ${{ steps.changes.outputs.cpp }}
@@ -178,6 +178,9 @@ jobs:
       # Runs on docs-only PRs too: the docs and release-hygiene gates are exactly
       # the ones a docs-only change can break.
       - name: Static gates (blocking, before the build)
+        env:
+          # CCN pins may only shrink vs this commit (#2210); empty -> merge-base with origin/main.
+          IMP_GATE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: bash scripts/ci_static_gates.sh
 
       - name: Install build deps
@@ -327,7 +330,7 @@ jobs:
             build/test-e2e
             build/libimp.a
 
-  # clang-tidy (advisory, NON-REQUIRED) — split out of the Build job so it never
+  # clang-tidy (NON-REQUIRED check, hard on WarningsAsErrors findings, #2210) - split out of the Build job so it never
   # delays the merge-gating `Build` check (it was ~22 min of that job). Reuses the
   # Build job's cached build/ (compile_commands.json + FetchContent _deps such as
   # CUTLASS) via the same cache key, so no second CUDA configure is needed. Lints
@@ -340,7 +343,7 @@ jobs:
     name: clang-tidy
     needs: build
     if: needs.build.outputs.cpp == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     container:
       image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
     env:
@@ -359,7 +362,7 @@ jobs:
           # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
           rm -f /etc/apt/sources.list.d/cuda*.list
           apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash cmake g++ git python3 clang-tidy libcurl4-openssl-dev
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash cmake g++ git python3 libcurl4-openssl-dev
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # base SHA must be present for the changed-files diff
@@ -384,6 +387,9 @@ jobs:
       # job has carried this line since check-release.sh hit the same wall.
       - name: Trust the checkout (container UID differs from the runner's)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      # Pin, key fingerprint: scripts/install_llvm.sh.
+      - name: Install clang-tidy
+        run: bash scripts/install_llvm.sh clang-tidy
 
       # Setup is a hard step: a failure here fails the job. Only the lint findings
       # below are advisory (#2187: continue-on-error hid exit 128 on every run).
@@ -427,6 +433,8 @@ jobs:
               -DIMP_BUILD_TOOLS=ON -DIMP_BUILD_BENCH=OFF -DIMP_DISABLE_120F_FALLBACK=ON \
               -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null
           fi
+          # Generated header (imp-server main.cpp): a configure-only build/ lacks it, #2285.
+          cmake -DIN=tools/imp-server/webui/index.html -DOUT=build/generated/webui_asset.h -P cmake/embed_webui.cmake
           # nvcc entries -> clang host-only entries; a changed .cu absent from it would lint nothing.
           if [ ${#cu[@]} -gt 0 ]; then
             python3 tools/tidy_cu_db.py build/compile_commands.json build/tidy-cu
@@ -436,35 +444,17 @@ jobs:
           fi
           echo "linting ${#cpp[@]} changed .cpp + ${#cu[@]} .cu (host side):"; printf '  %s\n' "${cpp[@]}" "${cu[@]}" | sed '/^  $/d'
 
-      - name: clang-tidy (changed .cpp + .cu host side, advisory)
+      # Hard (#2210): scripts/tidy_lane.sh fails on a clang-tidy nonzero exit, on a .cu with
+      # a clang error (#2219's first run: 89 of 89, response-file includes lost) and on a
+      # WarningsAsErrors finding (.clang-tidy: bugprone-*, clang-analyzer-*) over its pin in
+      # tools/tidy_baseline.toml. Other checks print only. Full lane locally: `make tidy`.
+      - name: clang-tidy (changed .cpp + .cu host side)
         if: steps.files.outputs.count != '0'
-        continue-on-error: true  # advisory: findings only, setup failures fail the step above
+        env:
+          TIDY_LOGS: ${{ runner.temp }}/tidy
         run: |
-          mapfile -t cpp < "$RUNNER_TEMP/tidy_cpp.txt"
-          mapfile -t cu < "$RUNNER_TEMP/tidy_cu.txt"
-          mkdir -p "$RUNNER_TEMP/tidy"
-          : > "$RUNNER_TEMP/tidy_rc.txt"
-          # One clang-tidy process per file, nproc in parallel.
-          { printf 'build %s\n' "${cpp[@]}"; printf 'build/tidy-cu %s\n' "${cu[@]}"; } | grep -v ' $' |
-            xargs -P "$(nproc)" -L 1 sh -c 'clang-tidy -p "$0" --warnings-as-errors= "$1" \
-              > "$RUNNER_TEMP/tidy/$(echo "$1" | tr / _).log" 2>&1; echo "$? $1" >> "$RUNNER_TEMP/tidy_rc.txt"'
-          # Drop per-TU progress + cumulative count lines (CUTLASS/CUDA headers
-          # inflate the count into the hundreds of thousands).
-          cat "$RUNNER_TEMP"/tidy/*.log | grep -vE '^\[[0-9]+/[0-9]+\] Processing file|^[0-9]+ warnings generated\.$|^Suppressed [0-9]+ warnings|^Use -header-filter' || true
-          ran=$(wc -l < "$RUNNER_TEMP/tidy_rc.txt"); bad=$(grep -vc '^0 ' "$RUNNER_TEMP/tidy_rc.txt" || true)
-          echo "clang-tidy linted ${#cpp[@]} .cpp + ${#cu[@]} .cu file(s): $ran run, $bad with nonzero exit"
-          [ "$ran" -eq $(( ${#cpp[@]} + ${#cu[@]} )) ] && [ "$bad" -eq 0 ]
-
-      # Hard: a .cu that does not parse yields no findings (#2219's first run: 89 of 89,
-      # response-file includes lost). Findings stay advisory, parse errors do not.
-      - name: clang-tidy parsed every .cu (hard)
-        if: steps.files.outputs.count != '0'
-        run: |
-          shopt -s nullglob
-          logs=("$RUNNER_TEMP"/tidy/*.cu.log)
-          broken=$( { grep -l 'clang-diagnostic-error' "${logs[@]}" /dev/null || true; } | wc -l)
-          echo "${#logs[@]} .cu log(s), $broken with a clang error"
-          [ "$broken" -eq 0 ]
+          mapfile -t files < <(cat "$RUNNER_TEMP/tidy_cpp.txt" "$RUNNER_TEMP/tidy_cu.txt")
+          bash scripts/tidy_lane.sh "${files[@]}"
 
   # CPU-only API contract check (R3 / P2.6). The Python mock suite in tests/api/
   # exercises the HTTP schema, SSE envelope, error bodies and lifecycle against
@@ -476,7 +466,7 @@ jobs:
   # requires that exact check name.
   mock-api:
     name: Mock API contract
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -508,7 +498,7 @@ jobs:
     name: Real API contract (model-less)
     needs: build
     if: needs.build.outputs.code == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     container:
       image: ubuntu@sha256:513c074113a871b51a8d16ab445c88779d6452d937a164fb5cc479f32668a41d # 26.04
 
@@ -579,27 +569,14 @@ jobs:
   # for the same reason.
   lint:
     name: Lint
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Install clang-format
-        # ubuntu-24.04 is a non-container host runner — apt and /usr/local/bin
-        # need sudo (the CUDA Build job runs in a container as root, so it doesn't).
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang-format git curl ca-certificates
-          # Pinned to a commit, not to the release/18.x branch, and verified:
-          # this file is made executable on a runner that holds GITHUB_TOKEN
-          # (AUDIT_arch_2026 H-6). The commit is llvmorg-18.1.8, matching the
-          # clang-format apt installs above.
-          if ! command -v git-clang-format >/dev/null; then
-            curl -fsSL https://raw.githubusercontent.com/llvm/llvm-project/3b5b5c1ec4a3095ab096dd780e84d7ab81f3d7ff/clang/tools/clang-format/git-clang-format \
-              -o /tmp/git-clang-format
-            echo '8097d93cc4021768521a591d8107e11c9c593f226b580a65323ea17cbed6bce4  /tmp/git-clang-format' | sha256sum -c -
-            sudo install -m 0755 /tmp/git-clang-format /usr/local/bin/git-clang-format
-          fi
+        # Host runner: root via sudo. Pin, key fingerprint: scripts/install_llvm.sh (ships git-clang-format).
+        run: sudo bash scripts/install_llvm.sh clang-format
       - name: clang-format (changed lines)
         run: |
           base="${{ github.event.pull_request.base.sha }}"
@@ -632,9 +609,11 @@ jobs:
   # is documented in docs/audit/AUDIT_FILESIZE.md. See CLAUDE.md "File Layout & Size".
   filesize:
     name: File size
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # the CCN pin ratchet reads the base commit's baseline (#2210)
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -645,6 +624,8 @@ jobs:
       # keeps them a named check: "which gate failed" is worth a check name, and
       # the filter means there is one list rather than two that drift.
       - name: File-size gates (blocking)
+        env:
+          IMP_GATE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: bash scripts/ci_static_gates.sh filesize
 
   # The unlaned-GTest pin (tools/check_test_lanes.py). Its own check name:
@@ -652,7 +633,7 @@ jobs:
   # failures read as file-size problems (twice on 2026-08-25).
   testlanes:
     name: Test lanes
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -668,7 +649,7 @@ jobs:
   # to mirror. Ubuntu job, no toolchain, seconds.
   docs:
     name: Docs
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -681,7 +662,7 @@ jobs:
 
   hygiene:
     name: Release hygiene
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Release hygiene gate (blocking)
@@ -689,7 +670,7 @@ jobs:
 
   alloc-sites:
     name: Alloc sites
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -700,7 +681,7 @@ jobs:
 
   launchguards:
     name: Launch guards
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -728,7 +709,7 @@ jobs:
   # rather than a flag flip on the required one.
   ptx-fallback:
     name: PTX fallback
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     container:
       image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
     defaults:
@@ -832,7 +813,7 @@ jobs:
   # context) - so read it after a merge, not only before.
   sanitizers:
     name: Sanitizers
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     container:
       image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
     # Own ccache namespace: these objects are RelWithDebInfo + ASan/UBSan host
@@ -1025,7 +1006,7 @@ jobs:
     # configured nothing went unnoticed, since there was no way to run it
     # against a branch before it landed.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # Ubuntu 26.04 for its libstdc++: the tree's C++23 does not compile against
     # the libstdc++ 12 that silkeh/clang:18 ships (std::ranges over string_view),
     # and that image had no ninja and no nvcc either, so this job configured
@@ -1037,9 +1018,12 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            clang libclang-rt-dev cmake ninja-build git ca-certificates libcurl4-openssl-dev
+            cmake ninja-build git ca-certificates libcurl4-openssl-dev
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: "clang + libFuzzer (pin: scripts/install_llvm.sh)"
+        run: bash scripts/install_llvm.sh clang libclang-rt
 
       - name: Restore the corpus
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

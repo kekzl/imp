@@ -12,6 +12,6 @@ namespace imp {
 // (FP8 UE4M3 byte 0x38), writes 16x8 output per CUTLASS D-fragment layout.
 // Agreement with an FP32 reference matmul validates the CUTLASS (T32,V32)->(M16,K64)
 // operand layout against HW expectations.
-bool qkt_mxf4nvf4_validate(const half* d_Q, const half* d_K, float* d_D, cudaStream_t stream);
+[[nodiscard]] bool qkt_mxf4nvf4_validate(const half* d_Q, const half* d_K, float* d_D, cudaStream_t stream);
 
 }  // namespace imp

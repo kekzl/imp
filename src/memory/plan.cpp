@@ -9,7 +9,7 @@ namespace {
 
 constexpr double kMiB = 1024.0 * 1024.0;
 
-size_t mib(size_t bytes) { return bytes / (1024 * 1024); }
+size_t mib(size_t bytes) { return bytes / (size_t{1024} * 1024); }
 
 void push(std::vector<PlanLine>& v, const char* name, RegionTag tag, size_t bytes) {
     if (bytes > 0)

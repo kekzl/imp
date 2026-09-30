@@ -1,0 +1,711 @@
+// Pre-dequant Phase 3: NVFP4 decode-cache quantization. Multi-step quantization of
+// decode-side weights: candidate collection, two-pass mode-1/2 quantize, FP8 migration
+// of failed candidates, CUTLASS conversion, MXFP4-source conversion, MoE expert caching.
+// This file keeps the entry point + NVFP4 quantize helpers; FP8/CUTLASS/MXFP4/MoE live
+// in the sibling pre_dequant_phase3_*.cu files.
+
+#include "core/dispatch_policy.h"
+#include "exec/executor.h"
+#include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
+#include "memory/vram_query.h"
+#include "exec/quant_pipeline.h"
+#include "exec/pre_dequant_internal.h"
+#include "model/nvfp4_module_policy.h"
+#include "compute/gemm_cutlass_sm120.h"
+#include "compute/gemm_cutlass_mxfp4_sm120.h"
+#include "quant/dequant_gpu.h"
+#include "quant/gpt_oss_mxfp4_convert.h"
+#include "quant/fp8_quant.h"
+#include "quant/nvfp4_quant.h"
+#include "quant/nvfp4_gemm.h"
+#include "core/logging.h"
+#include "memory/vram_allocator.h"
+
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include <cuda_fp8.h>
+#include <algorithm>
+#include <cstdlib>
+#include <unordered_set>
+#include <cstring>
+#include <vector>
+
+namespace imp {
+
+using imp::pre_dequant_internal::deduct_budget;
+using imp::pre_dequant_internal::for_each_dense_weight;
+using imp::pre_dequant_internal::nvfp4_beneficial;
+using imp::pre_dequant_internal::nvfp4_lm_head_enabled;
+
+namespace {
+// Why a quantized LM head is not NVFP4-cached, for the skip log line.
+const char* lm_head_skip_reason(bool gdn_head_ok, bool fp8_head_built, const std::string& mode,
+                                QType head_qtype) {
+    if (!gdn_head_ok)
+        return "nvfp4_lm_head_gdn=false, GDN/SSM hybrid";
+    if (fp8_head_built)
+        return "FP8 head built, #2166";
+    if (lm_head_auto_keeps_source(lm_head_mode(mode), head_qtype))
+        return "auto keeps an 8-bit head at checkpoint precision, #2224";
+    return "gemm.nvfp4_lm_head off/auto net rule (#982)";
+}
+}  // namespace
+
+void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
+                                                     Nvfp4DecodeContext& dctx) {
+    // Dual-path mode: attention weights stay at FP8 for quality.
+    if (wcache_->dual_path_quant) {
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            if (L.wq.data)
+                dctx.exclude_ptrs.insert(L.wq.data);
+            if (L.wk.data)
+                dctx.exclude_ptrs.insert(L.wk.data);
+            if (L.wv.data)
+                dctx.exclude_ptrs.insert(L.wv.data);
+            if (L.wo.data)
+                dctx.exclude_ptrs.insert(L.wo.data);
+        }
+        IMP_LOG_INFO("Dual-path quant: excluding %zu attention weights from NVFP4 cache",
+                     dctx.exclude_ptrs.size());
+    }
+
+    // GDN/SSM models: exclude ssm_in/ssm_out projections from NVFP4 unconditionally. They
+    // feed the recurrent scan, which accumulates quantization error in state H across
+    // tokens; 4-bit degrades quality on 9B+ models. Superseded by the GGUF branch of
+    // gemm.fp8_ssm_proj (config.h). Native-NVFP4 SSM weights are handled identically by the
+    // phase0b register gate.
+    {
+        int n_ssm_excluded = 0;
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            if (L.ssm_in.data) {
+                dctx.exclude_ptrs.insert(L.ssm_in.data);
+                n_ssm_excluded++;
+            }
+            if (L.ssm_out.data) {
+                dctx.exclude_ptrs.insert(L.ssm_out.data);
+                n_ssm_excluded++;
+            }
+        }
+        if (n_ssm_excluded > 0)
+            IMP_LOG_INFO("GDN/SSM: excluding %d recurrent projections from NVFP4 cache", n_ssm_excluded);
+    }
+
+    const bool decode_all = dispatch_policy().gemm.nvfp4_decode_all;
+    auto collect_weight_nvfp4 = [&](const Tensor& w, QType qtype) {
+        if (!w.data)
+            return;
+        if (!nvfp4_beneficial(qtype, decode_all))
+            return;
+        if (wcache_->nvfp4.count(w.data))
+            return;
+        // Skip excluded weights (dual-path attention, GDN/SSM recurrent projections)
+        if (dctx.exclude_ptrs.count(w.data))
+            return;
+
+        int cols = static_cast<int>(w.shape[1]);
+        if (cols % 16 != 0)
+            return;
+
+        bool from_scratch = (wcache_->fp16.find(w.data) == wcache_->fp16.end());
+        if (from_scratch && (!dequant_gpu_supported(qtype) || !qscratch_->dequant))
+            return;
+        // gemma-3: the NVFP4 decode cache MUST be built from an FP16 companion
+        // (fp16_companion set on every NVFP4-tier entry); a from-scratch build corrupts gemma-3
+        // decode (token 0/<pad>, then illegal access). That guarantee is best-effort: when the
+        // FP16 cache hits its VRAM budget, a weight's companion may be absent and silently drop
+        // to from-scratch, re-triggering the bug. Skip those weights instead: they stay on the
+        // coherent dequant-at-decode path (bandwidth loss, never garbage).
+        if (from_scratch && model_->profile().is_gemma3)
+            return;
+        dctx.entries.push_back({w.data, w, qtype, from_scratch});
+    };
+
+    // LM head first: largest single weight (vocab x d_model), biggest bandwidth win. Same
+    // gates as the native-precision paths: gemm.nvfp4_lm_head opts out entirely; GDN/SSM
+    // hybrids keep the source-precision head unless nvfp4_lm_head_gdn. Must stay
+    // conditional: an unconditional call here silently voids both opt-outs on every
+    // quantized-source (GGUF) checkpoint.
+    {
+        const auto& prof = model_->profile();
+        const bool gdn_head_ok = !(prof.is_gdn || prof.is_ssm) ||
+                                 dispatch_policy().gemm.nvfp4_lm_head_gdn;
+        // This collector only serves QUANTIZED (GGUF) heads; a native BF16/F16 head routes
+        // through nvfp4_decode_cache_fp16_lm_head_ instead. Gate (and log) only for quantized
+        // sources to avoid a misleading "skipped" line on SafeTensors models.
+        const QType head_qtype = model_->out_proj_.qtype;
+        const bool quantized_head = head_qtype != QType::F16 && head_qtype != QType::BF16;
+        // #982 net rule for quantized heads — see nvfp4_lm_head_enabled().
+        // GDN/SSM hybrids defer to the gdn_head_ok gate above instead of the
+        // dense/MoE net rule (GOAL-listed nvfp4_lm_head_gdn trade).
+        const bool head_on = nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/true, head_qtype,
+                                                   prof.is_dense, cfg.d_model,
+                                                   /*is_gdn_hybrid=*/prof.is_gdn || prof.is_ssm,
+                                                   wcache_->lm_head_fp8.weight.data != nullptr);
+        if (quantized_head) {
+            if (head_on && gdn_head_ok)
+                collect_weight_nvfp4(model_->output_proj(), head_qtype);
+            else
+                IMP_LOG_INFO("NVFP4 LM head: skipped (%s)",
+                             lm_head_skip_reason(gdn_head_ok, wcache_->lm_head_fp8.weight.data != nullptr,
+                                                 dispatch_policy().gemm.nvfp4_lm_head, head_qtype));
+        }
+    }
+
+    // Dense attention + FFN: every tensor benefits every decode step.
+    for_each_dense_weight(*model_, cfg, [&](const Tensor& w, QType qtype) {
+        collect_weight_nvfp4(w, qtype);
+    });
+}
+
+void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cudaStream_t stream) {
+    // Native-precision head (checked below): auto → ON per the #982 net rule.
+    if (!nvfp4_lm_head_enabled(dispatch_policy(), /*quantized_source=*/false, model_->output_proj().qtype,
+                               model_->profile().is_dense, cfg.d_model, /*is_gdn_hybrid=*/false,
+                               wcache_->lm_head_fp8.weight.data != nullptr))
+        return;
+
+    const Tensor& lm = model_->output_proj();
+    // Only handle a native-precision (FP16/BF16) LM head that lives on device.
+    // A quantized-source LM head (Q*_K/Q8_0) is already routed through
+    // collect_candidates → nvfp4_beneficial, so skip it here.
+    if (!lm.data || !lm.on_device)
+        return;
+    if (lm.qtype != QType::F16 && lm.qtype != QType::BF16)
+        return;
+    if (lm.ndim != 2)
+        return;
+    const int rows = static_cast<int>(lm.shape[0]);  // vocab_size
+    const int cols = static_cast<int>(lm.shape[1]);  // d_model
+    if (cols % 16 != 0)
+        return;
+    // Already cached (e.g. tied embeddings already promoted, or re-entry).
+    if (wcache_->nvfp4.count(lm.data))
+        return;
+
+    // GDN/SSM-hybrid models: the LM head is quality-load-bearing for the recurrent state;
+    // NVFP4 there degrades coherence. Detect via any GDN/SSM layer. Opt-in override
+    // (gemm.nvfp4_lm_head_gdn) to re-measure the tradeoff.
+    if (!dispatch_policy().gemm.nvfp4_lm_head_gdn) {
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            if (L.ssm_in.data || L.ssm_out.data || L.gdn_gate.data) {
+                IMP_LOG_INFO("NVFP4 LM head: skipped (GDN/SSM-hybrid model)");
+                return;
+            }
+        }
+    }
+
+    float* d_absmax_buf = nullptr;
+    float* d_tscale_buf = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf, sizeof(float)));
+
+    Tensor fp16_view(lm.data, QType::F16, 2, lm.shape, /*on_device=*/true);
+    NvFP4QuantResult result;
+    quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf, d_tscale_buf, stream);
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+
+    float h_tscale = 1.0f;
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(&h_tscale, d_tscale_buf, sizeof(float), cudaMemcpyDeviceToHost));
+    result.tensor_scale = h_tscale;
+    result.N = rows;
+    result.K = cols;
+    wcache_->nvfp4[lm.data] = result;
+
+    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
+
+    // Bytes: FP4 data (2 per byte) + one FP8 scale per 16 elements, integer bytes as before.
+    const size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 + static_cast<size_t>(rows) * cols / 16;
+    const double nvfp4_mib = static_cast<double>(nvfp4_bytes) / (1024.0 * 1024.0);
+    IMP_LOG_INFO("NVFP4 LM head: quantized FP16 [%d x %d] → NVFP4 (%.1f MiB), decode GEMV fast path",
+                 rows, cols, nvfp4_mib);
+    // The checkpoint may have listed lm_head as a module to leave at source precision; imp
+    // re-quantizes it anyway (owner-accepted tradeoff, gemm.h). Deliberate override of the
+    // author's declaration, so it must be said out loud here rather than inferred from a
+    // missing line.
+    if (nvfp4_policy::module_is_ignored("lm_head", cfg.nvfp4_exclude_modules))
+        IMP_LOG_INFO("lm_head is in quantization_config.ignore; gemm.nvfp4_lm_head=auto "
+                     "re-quantizes it at load, set gemm.nvfp4_lm_head=false to serve it at "
+                     "checkpoint precision");
+}
+
+// Quantize the recipe-excluded BF16/FP16 GDN + attention projections of a native-NVFP4
+// hybrid into NVFP4 decode-cache entries, mirroring nvfp4_decode_cache_fp16_lm_head_
+// exactly (same guards: on device, F16/BF16, ndim 2, cols%16==0, not already cached).
+// Phase 4 then auto-routes M=1 decode through gemv_nvfp4 (decode_tier -> NVFP4); prefill
+// stays on the full-precision GEMM path. Opt-in via gemm.nvfp4_attn_proj (recipe-excluded
+// BF16 attention q/k/v/o, stateless within a step, low quality risk).
+// The analogous lever for BF16 GDN/Mamba in_proj/out_proj was removed: it regresses
+// decode there (the tuned FP16 GEMV beats NVFP4 GEMV for wide GDN-output shapes), so
+// keeping those projections FP16 is correct for speed, not just quality.
+void QuantPipeline::nvfp4_decode_cache_fp16_projections_(const ModelConfig& cfg,
+                                                         cudaStream_t stream) {
+    const bool do_attn = dispatch_policy().gemm.nvfp4_attn_proj;
+    if (!do_attn)
+        return;
+
+    float* d_absmax_buf = nullptr;
+    float* d_tscale_buf = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf, sizeof(float)));
+
+    int n_attn = 0;
+    size_t bytes_attn = 0;
+
+    // Quantize one native-precision (F16/BF16) device weight into wcache_->nvfp4.
+    // Returns the NVFP4 byte cost on success, 0 if skipped. Same guard set as the
+    // LM-head path; idempotent (skips weights already cached).
+    auto quantize_one = [&](const Tensor& w) -> size_t {
+        if (!w.data || !w.on_device)
+            return 0;
+        if (w.qtype != QType::F16 && w.qtype != QType::BF16)
+            return 0;  // already NVFP4/quantized, or a non-2-byte source
+        if (w.ndim != 2)
+            return 0;
+        const int rows = static_cast<int>(w.shape[0]);
+        const int cols = static_cast<int>(w.shape[1]);
+        if (cols % 16 != 0)
+            return 0;
+        if (wcache_->nvfp4.count(w.data))
+            return 0;  // already cached (e.g. re-entry)
+
+        Tensor fp16_view(w.data, QType::F16, 2, w.shape, /*on_device=*/true);
+        NvFP4QuantResult result;
+        quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf, d_tscale_buf, stream);
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+
+        float h_tscale = 1.0f;
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(&h_tscale, d_tscale_buf, sizeof(float), cudaMemcpyDeviceToHost));
+        result.tensor_scale = h_tscale;
+        result.N = rows;
+        result.K = cols;
+        wcache_->nvfp4[w.data] = result;
+        return static_cast<size_t>(rows) * cols / 2 + static_cast<size_t>(rows) * cols / 16;
+    };
+
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& L = model_->layer(i);
+        for (const Tensor* w : {&L.wq, &L.wk, &L.wv, &L.wo}) {
+            size_t b = quantize_one(*w);
+            if (b) {
+                n_attn++;
+                bytes_attn += b;
+            }
+        }
+    }
+
+    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
+
+    if (n_attn > 0)
+        IMP_LOG_INFO("NVFP4 attn proj: quantized %d BF16 q/k/v/o weights -> NVFP4 (%.1f MiB), decode GEMV fast path",
+                     n_attn, bytes_attn / (1024.0 * 1024.0));
+    else
+        IMP_LOG_INFO("NVFP4 attn proj: no eligible BF16 q/k/v/o (flag on but model has none)");
+}
+
+void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
+    const ModelConfig& cfg, const VRAMBudget& budget,
+    size_t& remaining_budget, cudaStream_t stream) {
+    if (wcache_->nvfp4_decode_mode <= 0)
+        return;
+    // diagnostics.no_nvfp4_decode_cache skips steps that BUILD decode-cache entries. It must
+    // NOT skip the CUTLASS/MXFP4 conversions further down: those only re-lay-out weights
+    // phase 0 already registered, populating wcache_->cutlass_nvfp4, which
+    // infer_tier_from_wcache reads to set prefill_tier. Returning early here took the whole
+    // CUTLASS prefill cache with it, silently moving dense FFN prefill from W4A4 to the
+    // gemm_nvfp4 W4A16 safety net.
+    const bool skip_decode_cache = dispatch_policy().diagnostics.no_nvfp4_decode_cache;
+    if (skip_decode_cache) {
+        IMP_LOG_INFO(
+            "NVFP4 decode cache DISABLED (diagnostics.no_nvfp4_decode_cache) — "
+            "decode runs on source-precision paths; the CUTLASS/MXFP4 prefill "
+            "conversions still run");
+    }
+
+    Nvfp4DecodeContext dctx;
+    dctx.mode_str = (wcache_->nvfp4_decode_mode == 1) ? "additive" : "only";
+
+    // Compute the shared mode-2 safety reserve once. Mode 1 keeps the upfront 10% headroom
+    // (vram_budget.cpp:47), so its arithmetic already protects against shared/system-memory
+    // fallback; the in-loop safety here is a backstop only. Mode 2 omits the upfront 10% to
+    // fit larger weight caches, so it uses the same formula the MoE expert path already
+    // uses: a KV-headroom estimate at 16K tokens plus a 256 MiB workspace cushion, clamped
+    // to [256 MiB, 1 GiB].
+    if (wcache_->nvfp4_decode_mode == 2) {
+        int n_attn_layers = 0;
+        for (int i = 0; i < cfg.n_layers; i++) {
+            if (model_->layer(i).wq.data != nullptr &&
+                model_->layer(i).gdn_gate.data == nullptr)
+                n_attn_layers++;
+        }
+        if (n_attn_layers == 0)
+            n_attn_layers = cfg.n_layers;
+        int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
+        int kv_heads = cfg.n_kv_heads > 0 ? cfg.n_kv_heads : cfg.n_heads;
+        constexpr int kKvFloorTokens = 16384;
+        size_t per_token_kv = static_cast<size_t>(n_attn_layers) * 2 *
+                              static_cast<size_t>(kv_heads) * static_cast<size_t>(hd) * 2;
+        size_t kv_reserve = static_cast<size_t>(kKvFloorTokens) * per_token_kv;
+        constexpr size_t kWorkspaceSafety = 256ULL * 1024 * 1024;
+        constexpr size_t kReserveCap = 1024ULL * 1024 * 1024;
+        constexpr size_t kReserveFloor = 256ULL * 1024 * 1024;
+        dctx.safety_reserve = std::clamp(kv_reserve + kWorkspaceSafety, kReserveFloor, kReserveCap);
+    }
+
+    nvfp4_decode_collect_candidates_(cfg, dctx);
+
+    // Aliases keep the body that hasn't been extracted yet readable.
+    using NvFP4Entry = Nvfp4DecodeContext::Entry;
+    std::vector<NvFP4Entry>& nvfp4_entries = dctx.entries;
+
+    if (!skip_decode_cache) {
+        if (wcache_->nvfp4_decode_mode == 2 && !nvfp4_entries.empty()) {
+            nvfp4_decode_quantize_mode2_(stream, dctx);
+        } else if (!nvfp4_entries.empty()) {
+            nvfp4_decode_quantize_mode1_(remaining_budget, stream, dctx);
+        }
+
+        if (wcache_->nvfp4_decode_mode == 2 && !wcache_->fp16.empty()) {
+            nvfp4_decode_free_fp16_and_migrate_fp8_(remaining_budget, stream, dctx);
+        }
+
+        if (budget.nvfp4_second_pass && !nvfp4_entries.empty()) {
+            nvfp4_decode_second_pass_(budget, stream, dctx);
+        }
+    }
+
+    // Native-NVFP4 models store the LM head in FP16/BF16: quantize it to an NVFP4
+    // decode-cache entry so decode uses the fast GEMV instead of a cuBLAS FP16 GEMV over
+    // vocab x d_model. Run after dense quantize so the entry is committed before CUTLASS
+    // convert.
+    if (!skip_decode_cache)
+        nvfp4_decode_cache_fp16_lm_head_(cfg, stream);
+
+    // Native-NVFP4 hybrids store some attention projections BF16 (recipe exclusion). Opt-in
+    // (gemm.nvfp4_attn_proj) quantizes q/k/v/o into the same NVFP4 decode cache. Run after
+    // the LM head, before CUTLASS convert, so these entries get the same block-scaled
+    // treatment.
+    if (!skip_decode_cache)
+        nvfp4_decode_cache_fp16_projections_(cfg, stream);
+
+    if (!wcache_->nvfp4.empty() && cutlass_sm120_nvfp4_available()) {
+        nvfp4_decode_convert_cutlass_(cfg, budget, remaining_budget, stream);
+    }
+
+    nvfp4_decode_convert_mxfp4_and_native_(cfg, stream);
+
+    if (qscratch_->mxfp4_act_sf != nullptr && cutlass_sm120_mxfp4_available()) {
+        nvfp4_decode_mxfp4_fp16_fallback_(cfg, stream);
+    }
+
+    if (model_->profile().is_gpt_oss)
+        gpt_oss_convert_moe_experts_(cfg, dctx);
+    if (!skip_decode_cache)
+        nvfp4_decode_cache_moe_experts_(cfg, budget, remaining_budget, stream, dctx);
+}
+
+// Mode 2 ("only") incremental NVFP4 quantize: process FP16-cached entries first (each
+// conversion nets VRAM since NVFP4 is roughly 28% of FP16), then from-scratch entries
+// until VRAM is exhausted. Frees each source FP16 entry immediately after its NVFP4
+// result is committed.
+void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4DecodeContext& dctx) {
+    using NvFP4Entry = Nvfp4DecodeContext::Entry;
+    auto& nvfp4_entries = dctx.entries;
+
+    // Sort: FP16-cached first (smallest first to bootstrap), then from-scratch.
+    std::stable_sort(nvfp4_entries.begin(), nvfp4_entries.end(),
+                     [](const NvFP4Entry& a, const NvFP4Entry& b) {
+                         if (a.from_scratch != b.from_scratch)
+                             return !a.from_scratch;
+                         size_t a_sz = static_cast<size_t>(a.weight.shape[0]) * a.weight.shape[1];
+                         size_t b_sz = static_cast<size_t>(b.weight.shape[0]) * b.weight.shape[1];
+                         return a_sz < b_sz;
+                     });
+
+    float* d_absmax_buf = nullptr;
+    float* d_tscale_buf = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf, sizeof(float)));
+
+    int actual_count = 0;
+    size_t actual_bytes = 0;
+    int actual_from_fp16 = 0;
+    int actual_from_scratch = 0;
+
+    for (auto& e : nvfp4_entries) {
+        int rows = static_cast<int>(e.weight.shape[0]);
+        int cols = static_cast<int>(e.weight.shape[1]);
+        size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
+                             static_cast<size_t>(rows) * cols / 16 + 4;
+
+        // Check actual free VRAM against the per-call safety reserve computed
+        // in pre_dequant_phase3_nvfp4_decode_ (see dctx.safety_reserve).
+        size_t free_mem = 0, total_mem = 0;
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&free_mem, &total_mem);
+        size_t nvfp4_safety = std::max(dctx.safety_reserve, static_cast<size_t>(1024 * 1024));
+        if (free_mem < nvfp4_bytes + nvfp4_safety) {
+            IMP_LOG_INFO(
+                "NVFP4 incremental: VRAM exhausted after %d tensors "
+                "(%.1f MiB, %.1f MiB free)",
+                actual_count, actual_bytes / (1024.0 * 1024.0), free_mem / (1024.0 * 1024.0));
+            break;
+        }
+
+        const half* fp16_ptr = nullptr;
+        void* tmp_buf = nullptr;
+
+        if (e.from_scratch) {
+            size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
+            void* dq_buf = qscratch_->dequant;
+            if (need > qscratch_->dequant_size) {
+                if (cudaMalloc(&tmp_buf, need) != cudaSuccess || !tmp_buf)
+                    continue;
+                dq_buf = tmp_buf;
+            }
+            dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
+            fp16_ptr = reinterpret_cast<const half*>(dq_buf);
+        } else {
+            auto it = wcache_->fp16.find(e.orig_ptr);
+            if (it == wcache_->fp16.end()) {
+                IMP_LOG_ERROR("NVFP4 cache: FP16 companion for %p [%dx%d] VANISHED between "
+                              "collection and quantize (erased by an earlier entry with the same "
+                              "source pointer?) — skipping entry instead of reading a stale iterator",
+                              e.orig_ptr, rows, cols);
+                continue;
+            }
+            fp16_ptr = reinterpret_cast<const half*>(it->second.data);
+        }
+
+        Tensor fp16_view(const_cast<half*>(fp16_ptr), QType::F16, 2, e.weight.shape, true);
+
+        NvFP4QuantResult result;
+        quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf, d_tscale_buf, stream);
+
+        // Sync immediately so we can read tensor_scale and free FP16
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+
+        float h_tscale;
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpy(&h_tscale, d_tscale_buf, sizeof(float), cudaMemcpyDeviceToHost));
+        result.tensor_scale = h_tscale;
+        wcache_->nvfp4[e.orig_ptr] = result;
+        actual_bytes += nvfp4_bytes;
+        actual_count++;
+
+        if (tmp_buf)
+            IMP_CUDA_CHECK_LOG(cudaFree(tmp_buf));
+
+        // Free FP16 cache entry to reclaim VRAM for next weight
+        if (!e.from_scratch) {
+            auto it = wcache_->fp16.find(e.orig_ptr);
+            if (it != wcache_->fp16.end()) {
+                size_t freed = it->second.nbytes();
+                IMP_LOG_DEBUG("NVFP4 cache: freeing FP16 companion %p (%zu B) after quantize",
+                              e.orig_ptr, freed);
+                vram_free(vram_alloc_, it->second.data);
+                wcache_->fp16.erase(it);
+                wcache_->fp16_bytes -= freed;
+                actual_from_fp16++;
+            }
+        } else {
+            actual_from_scratch++;
+        }
+    }
+
+    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
+
+    wcache_->nvfp4_bytes = actual_bytes;
+    IMP_LOG_INFO(
+        "NVFP4 decode cache: %d tensors, %.2f MiB "
+        "(%d from FP16, %d from scratch, mode: %s)",
+        actual_count, actual_bytes / (1024.0 * 1024.0), actual_from_fp16, actual_from_scratch,
+        dctx.mode_str);
+}
+
+// Mode 1 ("additive") batch NVFP4 quantize: pick entries fitting the remaining VRAM
+// budget, quantize via a single batched quantize_fp16_to_nvfp4_async pass, then commit
+// tensor_scales after one stream sync.
+void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaStream_t stream,
+                                                 Nvfp4DecodeContext& dctx) {
+    using NvFP4Entry = Nvfp4DecodeContext::Entry;
+    auto& nvfp4_entries = dctx.entries;
+    (void)remaining_budget;  // read-only here; budget bookkeeping done after MoE phase
+
+    size_t budget_used = 0;
+    int nvfp4_count = 0;
+    int nvfp4_from_scratch = 0;
+    bool budget_exhausted = false;
+
+    std::vector<NvFP4Entry> budgeted;
+    for (auto& e : nvfp4_entries) {
+        size_t rows = e.weight.shape[0], cols = e.weight.shape[1];
+        size_t nvfp4_bytes = rows * cols / 2 + rows * cols / 16 + 4;
+        if (budget_used + nvfp4_bytes > remaining_budget) {
+            if (!budget_exhausted) {
+                budget_exhausted = true;
+                IMP_LOG_INFO(
+                    "NVFP4 cache: VRAM budget reached after %d/%zu tensors "
+                    "(%.1f / %.1f MiB)",
+                    nvfp4_count, nvfp4_entries.size(), budget_used / (1024.0 * 1024.0),
+                    remaining_budget / (1024.0 * 1024.0));
+            }
+            continue;
+        }
+        budget_used += nvfp4_bytes;
+        nvfp4_count++;
+        if (e.from_scratch)
+            nvfp4_from_scratch++;
+        budgeted.push_back(e);
+    }
+
+    float* d_absmax_buf = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
+
+    float* d_tscales_all = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscales_all, budgeted.size() * sizeof(float)));
+
+    std::vector<void*> tmp_bufs;
+    for (size_t i = 0; i < budgeted.size(); i++) {
+        auto& e = budgeted[i];
+        const half* fp16_ptr = nullptr;
+        int rows = static_cast<int>(e.weight.shape[0]);
+        int cols = static_cast<int>(e.weight.shape[1]);
+
+        if (e.from_scratch) {
+            size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
+            void* dq_buf = qscratch_->dequant;
+            if (need > qscratch_->dequant_size) {
+                void* tmp = nullptr;
+                if (cudaMalloc(&tmp, need) != cudaSuccess || !tmp)
+                    continue;
+                dq_buf = tmp;
+                tmp_bufs.push_back(tmp);
+            }
+            dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
+            fp16_ptr = reinterpret_cast<const half*>(dq_buf);
+        } else {
+            auto it = wcache_->fp16.find(e.orig_ptr);
+            if (it == wcache_->fp16.end()) {
+                IMP_LOG_ERROR("NVFP4 cache (batch): FP16 companion for %p [%dx%d] VANISHED between "
+                              "collection and quantize — skipping entry",
+                              e.orig_ptr, rows, cols);
+                continue;
+            }
+            fp16_ptr = reinterpret_cast<const half*>(it->second.data);
+        }
+
+        Tensor fp16_view(const_cast<half*>(fp16_ptr), QType::F16, 2, e.weight.shape, true);
+
+        NvFP4QuantResult result;
+        quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf, d_tscales_all + i, stream);
+        wcache_->nvfp4[e.orig_ptr] = result;
+    }
+
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+    for (void* p : tmp_bufs)
+        IMP_CUDA_CHECK_LOG(cudaFree(p));
+
+    std::vector<float> h_tscales(budgeted.size());
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(h_tscales.data(), d_tscales_all, budgeted.size() * sizeof(float),
+                                  cudaMemcpyDeviceToHost));
+    for (size_t i = 0; i < budgeted.size(); i++) {
+        auto it = wcache_->nvfp4.find(budgeted[i].orig_ptr);
+        if (it != wcache_->nvfp4.end()) {
+            it->second.tensor_scale = h_tscales[i];
+        }
+    }
+
+    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_tscales_all));
+
+    wcache_->nvfp4_bytes = budget_used;
+    if (nvfp4_from_scratch > 0) {
+        IMP_LOG_INFO(
+            "NVFP4 decode cache: %d tensors, %.2f MiB (%d from FP16 cache, %d via dequant scratch, "
+            "mode: %s)",
+            nvfp4_count, budget_used / (1024.0 * 1024.0), nvfp4_count - nvfp4_from_scratch,
+            nvfp4_from_scratch, dctx.mode_str);
+    } else {
+        IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (mode: %s)", nvfp4_count,
+                     budget_used / (1024.0 * 1024.0), dctx.mode_str);
+    }
+}
+
+// NVFP4 second pass: after the FP16-free + FP8 migration phase frees VRAM,
+// re-attempt NVFP4 quantization for entries skipped earlier due to budget
+// pressure. Same per-tensor cudaMemGetInfo gate as mode 2.
+void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStream_t stream,
+                                              Nvfp4DecodeContext& dctx) {
+    (void)budget;
+    auto& nvfp4_entries = dctx.entries;
+
+    float* d_absmax_buf2 = nullptr;
+    float* d_tscale_buf2 = nullptr;
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf2, sizeof(float)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf2, sizeof(float)));
+
+    int second_count = 0;
+    size_t second_bytes = 0;
+
+    for (auto& e : nvfp4_entries) {
+        if (wcache_->nvfp4.count(e.orig_ptr))
+            continue;  // already cached
+        int rows = static_cast<int>(e.weight.shape[0]);
+        int cols = static_cast<int>(e.weight.shape[1]);
+        size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
+                             static_cast<size_t>(rows) * cols / 16 + 4;
+
+        size_t free_mem2 = 0, total_mem2 = 0;
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&free_mem2, &total_mem2);
+        size_t nvfp4_safety2 = vram_reserve_floor(total_mem2);
+        if (free_mem2 < nvfp4_bytes + nvfp4_safety2)
+            break;
+
+        // Dequant from quantized weights via scratch buffer
+        size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
+        void* dq_buf = qscratch_->dequant;
+        void* tmp_buf = nullptr;
+        if (!dequant_gpu_supported(e.qtype) || !qscratch_->dequant)
+            continue;
+        if (need > qscratch_->dequant_size) {
+            if (cudaMalloc(&tmp_buf, need) != cudaSuccess || !tmp_buf)
+                continue;
+            dq_buf = tmp_buf;
+        }
+        dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
+
+        Tensor fp16_view(reinterpret_cast<half*>(dq_buf), QType::F16, 2, e.weight.shape, true);
+        NvFP4QuantResult result;
+        quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf2, d_tscale_buf2, stream);
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+
+        float h_tscale;
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpy(&h_tscale, d_tscale_buf2, sizeof(float), cudaMemcpyDeviceToHost));
+        result.tensor_scale = h_tscale;
+        wcache_->nvfp4[e.orig_ptr] = result;
+        second_bytes += nvfp4_bytes;
+        second_count++;
+
+        if (tmp_buf)
+            IMP_CUDA_CHECK_LOG(cudaFree(tmp_buf));
+    }
+
+    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf2));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf2));
+
+    if (second_count > 0) {
+        wcache_->nvfp4_bytes += second_bytes;
+        IMP_LOG_INFO("NVFP4 second pass: %d additional tensors, %.2f MiB", second_count,
+                     second_bytes / (1024.0 * 1024.0));
+    }
+}
+
+}  // namespace imp

@@ -288,7 +288,8 @@ TEST(SmallMV2Pair, DISABLED_M1PipelineVsGemvBench) {
         cudaEventCreate(&t0); cudaEventCreate(&t1);
         for (int i = 0; i < 400; ++i) {
             imp::gemv_nvfp4_kpar(wcp[i % kCopies], d_x, d_y, sh.n, sh.k, nullptr);
-            imp::gemm_nvfp4_smallm_v2_a4(wcp[i % kCopies], xq, d_y, 1, sh.n, sh.k, nullptr, nullptr,
+            // timing loop: the launch status is not under test
+            (void)imp::gemm_nvfp4_smallm_v2_a4(wcp[i % kCopies], xq, d_y, 1, sh.n, sh.k, nullptr, nullptr,
                                          false);
         }
         cudaDeviceSynchronize();
@@ -301,7 +302,8 @@ TEST(SmallMV2Pair, DISABLED_M1PipelineVsGemvBench) {
             cudaEventRecord(t1); cudaEventSynchronize(t1); cudaEventElapsedTime(&ms_g, t0, t1);
             cudaEventRecord(t0);
             for (int i = 0; i < 200; ++i)
-                imp::gemm_nvfp4_smallm_v2_a4(wcp[i % kCopies], xq, d_y, 1, sh.n, sh.k, nullptr, nullptr,
+                // timing loop: the launch status is not under test
+                (void)imp::gemm_nvfp4_smallm_v2_a4(wcp[i % kCopies], xq, d_y, 1, sh.n, sh.k, nullptr, nullptr,
                                              false);
             cudaEventRecord(t1); cudaEventSynchronize(t1); cudaEventElapsedTime(&ms_v, t0, t1);
             const double us_g = ms_g * 1000.0 / 200.0, us_v = ms_v * 1000.0 / 200.0;

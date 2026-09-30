@@ -35,7 +35,7 @@ struct SentencePieceModel {
 // Parses a SentencePiece .model protobuf blob (data+size); true on a structurally valid
 // parse with at least one piece, `*err` set on failure. Wire-format-tolerant: unknown
 // fields/wire types are skipped without aborting.
-bool parse_sentencepiece_model(const void* data, size_t size, SentencePieceModel* out, std::string* err);
+[[nodiscard]] bool parse_sentencepiece_model(const void* data, size_t size, SentencePieceModel* out, std::string* err);
 
 // Convenience wrapper that opens `path`, mmaps it, and calls
 // parse_sentencepiece_model. Returns nullptr-equivalent (empty) result on

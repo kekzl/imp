@@ -35,7 +35,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: bench-serve bench-serve-mock chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks format format-check tidy sanitize asan coverage
+.PHONY: bench-serve bench-serve-mock chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -568,8 +568,9 @@ install-hooks:
 	@echo "  CI (Stage 2) runs 'ctest -L unit' — the CPU lane — automatically"
 
 # clang-format settings live in .clang-format. Host has no clang-format
-# installed (clean-host policy), so we run it in a throwaway container.
-CLANG_FORMAT_IMG ?= silkeh/clang:18
+# installed (clean-host policy), so we run it in the Dockerfile `lint` stage (LLVM pin: scripts/install_llvm.sh).
+LINT_IMG ?= imp:lint
+CLANG_FORMAT_IMG ?= $(LINT_IMG)
 CLANG_FORMAT_RUN = docker run --rm -v $(PWD):/work -w /work $(CLANG_FORMAT_IMG) clang-format
 CLANG_FORMAT_FILES = $$(find src include tools tests -name '*.cpp' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh')
 
@@ -692,28 +693,28 @@ check-dead-inline:
 check-log-fatal:
 	@python3 tools/check_log_fatal.py --list
 
-format:
+lint-image:
+	@docker build $(DEP_ARGS) --target lint -t $(LINT_IMG) . >/dev/null
+
+format: lint-image
 	@$(CLANG_FORMAT_RUN) -i --style=file $(CLANG_FORMAT_FILES)
 	@echo "clang-format applied"
 
 # Check formatting without modifying files. Exits non-zero on violation.
-format-check:
+format-check: lint-image
 	@$(CLANG_FORMAT_RUN) --dry-run -Werror --style=file $(CLANG_FORMAT_FILES)
 
-# clang-tidy over host C++ TUs and the host side of src/ .cu TUs (advisory: findings
-# surface, do not fail). Runs in the CUDA builder image so the CUDA headers are present;
-# clang-tidy is apt-installed on the fly. .cu entries are rewritten to clang host-only
-# commands by tools/tidy_cu_db.py (#2210). Configures first so build/compile_commands.json exists.
-CLANG_TIDY_FILES = $$(find src tools -name '*.cpp')
-CLANG_TIDY_CU_FILES = $$(grep -o "\"file\": \"[^\"]*/src/[^\"]*\"" build/tidy-cu/compile_commands.json | cut -d\" -f4)
-tidy:
-	@docker run --rm -v $(PWD):/work -w /work imp:builder bash -c '\
-	  apt-get update -qq && apt-get install -y -qq clang-tidy >/dev/null 2>&1; \
+# Full clang-tidy lane (#2210): every src/tools .cpp + the host side of every src/ .cu TU,
+# parallel, via scripts/tidy_lane.sh. Fails on a clang error, a nonzero clang-tidy exit or a
+# WarningsAsErrors finding (.clang-tidy) over its pin in tools/tidy_baseline.toml; CI runs the
+# same script on changed files. Configures first so build/compile_commands.json exists, then
+# generates build/generated/webui_asset.h (imp-server main.cpp includes it, #2285).
+tidy: lint-image
+	@docker run --rm -v $(PWD):/work -w /work $(LINT_IMG) bash -c '\
 	  test -f build/compile_commands.json || cmake --preset ci \
 	      -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest \
 	      -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
 	      -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
 	      -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json >/dev/null; \
-	  clang-tidy -p build --warnings-as-errors= $(CLANG_TIDY_FILES) || true; \
-	  python3 tools/tidy_cu_db.py build/compile_commands.json build/tidy-cu && \
-	  clang-tidy -p build/tidy-cu --warnings-as-errors= $(CLANG_TIDY_CU_FILES) || true'
+	  cmake -DIN=tools/imp-server/webui/index.html -DOUT=build/generated/webui_asset.h -P cmake/embed_webui.cmake && \
+	  bash scripts/tidy_lane.sh --all'

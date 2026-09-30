@@ -26,7 +26,7 @@ namespace {
 Tokenizer make_tokenizer(std::vector<std::string>& toks) {
     std::vector<float> scores(toks.size(), 0.0f);
     Tokenizer tok;
-    tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(toks, scores, /*bos_id=*/1, /*eos_id=*/2));
     return tok;
 }
 

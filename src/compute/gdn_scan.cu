@@ -9,7 +9,6 @@ namespace imp {
 // matmul (Yang et al. 2024).
 // Shared memory: s_k[CHUNK*SS], s_q[CHUNK*SS], s_reduce[HD]; at HD=SS=128, CHUNK=64 = 65 KiB,
 // needs the dynamic-shared-memory opt-in. Grid (n_heads), block (HD).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, int CHUNK, typename YOut>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
     const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
@@ -39,13 +38,15 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
         const float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
-            H_reg[s] = H_col[s * HD];
+            H_reg[s] = H_col[static_cast<ptrdiff_t>(s * HD)];
     }
 
+    // #2218 bounded: HD, SS, CHUNK template args (128/128/64, 64/64/64 dispatch below): smem offsets
+    // <= 2 * CHUNK * SS <= 16384 floats, H_col s * HD < SS * HD <= 16384, t_local * SS < CHUNK * SS <= 8192
     extern __shared__ float smem[];
     float* s_k = smem;                               // [CHUNK * SS]
-    float* s_q = smem + CHUNK * SS;                  // [CHUNK * SS]
-    float* s_reduce = smem + 2 * CHUNK * SS;         // [HD]
+    float* s_q = smem + static_cast<ptrdiff_t>(CHUNK * SS);           // [CHUNK * SS]
+    float* s_reduce = smem + static_cast<ptrdiff_t>(2 * CHUNK * SS);  // [HD]
 
     int t_chunk_start = 0;
     while (t_chunk_start < n_tokens) {
@@ -66,8 +67,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
         // Phase 2: L2-normalise K,Q per chunk token (sequential across tokens, parallel across SS).
         // Uses rsqrt(max(sum_sq,1e-12)), same formula as gdn_scan_fused_kernel, for bit-equivalent numerics.
         for (int t_local = 0; t_local < L; t_local++) {
-            float* k_row = s_k + t_local * SS;
-            float* q_row = s_q + t_local * SS;
+            float* k_row = s_k + static_cast<ptrdiff_t>(t_local * SS);
+            float* q_row = s_q + static_cast<ptrdiff_t>(t_local * SS);
 
             float k_sq = 0.0f, q_sq = 0.0f;
             for (int i = d; i < SS; i += HD) {
@@ -104,11 +105,11 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
         for (int t_local = 0; t_local < L; t_local++) {
             const int t_global = t_chunk_start + t_local;
             const float* row = conv_f32 + static_cast<size_t>(t_global) * conv_channels;
-            const float* V_base = row + 2 * BC_size;
+            const float* V_base = row + static_cast<int64_t>(2) * BC_size;
             const float v_d = V_base[h * HD + d];
 
-            const float* k_row = s_k + t_local * SS;
-            const float* q_row = s_q + t_local * SS;
+            const float* k_row = s_k + static_cast<ptrdiff_t>(t_local * SS);
+            const float* q_row = s_q + static_cast<ptrdiff_t>(t_local * SS);
 
             float alpha_h = __half2float(alpha_all[t_global * n_heads + h]);
             float dt_val = alpha_h + dtb_h;
@@ -150,10 +151,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
         float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
-            H_col[s * HD] = H_reg[s];
+            H_col[static_cast<ptrdiff_t>(s * HD)] = H_reg[s];
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Phase 2a WY-rep parallel delta-rule scan (Yang et al. 2024). Per L-token chunk:
 //   1. Cache K~,Q~ in shared memory (post L2 norm)
@@ -165,7 +165,6 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_kernel(
 //   6. H_L = D[0..L] H_0 + sum_t D[t+1..L] k~_t u_t^T
 // Cumulative decay D[a..b] = prod_{i=a..b-1} g_i in log-space (avoids underflow; g capped e^-20).
 // CHUNK=32: L^2 + L*HD scratch must fit the 100 KiB sm_120 opt-in cap (HD=SS=128 -> ~92 KiB).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int HD, int SS, int CHUNK>
 __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
     const float* __restrict__ conv_f32, const half* __restrict__ alpha_all,
@@ -190,19 +189,22 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
         const float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
-            H_reg[s] = H_col[s * HD];
+            H_reg[s] = H_col[static_cast<ptrdiff_t>(s * HD)];
     }
 
     // Shared memory layout (sized for CHUNK, SS, HD; opt-in dynamic smem).
+    // #2218 bounded: HD = SS = 128, CHUNK = 32 template args (only instantiation, dispatch below): smem
+    // CHUNK * SS = CHUNK * HD = 4096, CHUNK * CHUNK = 1024, H_col s * HD < 16384, t_loc * SS < 4096
     extern __shared__ float smem[];
     float* s_k = smem;                          // [CHUNK * SS]    normalized K
-    float* s_q = s_k + CHUNK * SS;              // [CHUNK * SS]    normalized Q
-    float* s_u = s_q + CHUNK * SS;              // [CHUNK * HD]    triangular-solve output
-    float* s_kh = s_u + CHUNK * HD;             // [CHUNK * HD]    K̃ H_0
-    float* s_qh = s_kh + CHUNK * HD;            // [CHUNK * HD]    Q̃ H_0
-    float* s_kk = s_qh + CHUNK * HD;            // [CHUNK * CHUNK] K̃ K̃^T (lower-tri only used)
-    float* s_qk = s_kk + CHUNK * CHUNK;         // [CHUNK * CHUNK] Q̃ K̃^T (lower-tri only used)
-    float* s_g = s_qk + CHUNK * CHUNK;          // [CHUNK]         per-token decay
+    float* s_q = s_k + static_cast<ptrdiff_t>(CHUNK * SS);    // [CHUNK * SS]    normalized Q
+    float* s_u = s_q + static_cast<ptrdiff_t>(CHUNK * SS);    // [CHUNK * HD]    triangular-solve output
+    float* s_kh = s_u + static_cast<ptrdiff_t>(CHUNK * HD);   // [CHUNK * HD]    K̃ H_0
+    float* s_qh = s_kh + static_cast<ptrdiff_t>(CHUNK * HD);  // [CHUNK * HD]    Q̃ H_0
+    float* s_kk = s_qh + static_cast<ptrdiff_t>(CHUNK * HD);  // [CHUNK * CHUNK] K̃ K̃^T (lower-tri only used)
+    float* s_qk = s_kk +
+                  static_cast<ptrdiff_t>(CHUNK * CHUNK);  // [CHUNK * CHUNK] Q̃ K̃^T (lower-tri only used)
+    float* s_g = s_qk + static_cast<ptrdiff_t>(CHUNK * CHUNK);  // [CHUNK]         per-token decay
     float* s_beta = s_g + CHUNK;                // [CHUNK]         per-token learning rate
     float* s_logD = s_beta + CHUNK;             // [CHUNK + 1]     cumulative log decay
     float* s_reduce = s_logD + CHUNK + 1;       // [HD]            block-reduction scratch
@@ -346,7 +348,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
                 const float logD_j1t1 = s_logD[t_loc + 1] - s_logD[j + 1];
                 y += expf(logD_j1t1) * s_qk[t_loc * L + j] * s_u[j * HD + d];
             }
-            y_out[static_cast<size_t>(t) * inner + h * HD + d] = __float2half(y * scale);
+            y_out[static_cast<size_t>(t) * inner + static_cast<size_t>(h) * HD + d] = __float2half(y * scale);
         }
 
         // Step 6: H_L = D[0..L]*H_0 + sum_t D[t+1..L] k~_t u_t^T. D[t+1..L] hoisted out of the (s,t)
@@ -365,7 +367,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
             }
             for (int t_loc = 0; t_loc < L; t_loc++) {
                 const float coef = s_g[t_loc] * s_u[t_loc * HD + d];
-                const float* k_row = s_k + t_loc * SS;
+                const float* k_row = s_k + static_cast<ptrdiff_t>(t_loc * SS);
 #pragma unroll
                 for (int s = 0; s < SS; s++) {
                     H_reg[s] += coef * k_row[s];
@@ -382,10 +384,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_kernel(
         float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
-            H_col[s * HD] = H_reg[s];
+            H_col[static_cast<ptrdiff_t>(s * HD)] = H_reg[s];
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // ---------------------------------------------------------------------------
 // Host launchers
@@ -425,9 +426,9 @@ static void gdn_scan_chunkwise_dispatch(const float* conv_f32, int conv_channels
             const size_t smem = (2 * CHUNK * SS + HD) * sizeof(float);
             static bool attr_set = false;
             if (!attr_set) {
-                cudaFuncSetAttribute(
+                IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(
                     reinterpret_cast<const void*>(&gdn_scan_chunkwise_kernel<HD, SS, CHUNK, YOut>),
-                    cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+                    cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024));
                 attr_set = true;
             }
             gdn_scan_chunkwise_kernel<HD, SS, CHUNK, YOut><<<n_heads, HD, smem, stream>>>(
@@ -531,9 +532,9 @@ void gdn_scan_chunkwise_wy_f32(const float* conv_f32, int conv_channels, const h
             // sm_120 caps cudaFuncAttributeMaxDynamicSharedMemorySize at 99 KiB (sharedMemPerBlockOptin
             // = 101376 B); above that returns cudaErrorInvalidValue and falls back to the 48 KiB
             // default, which fails launch since the ~89 KiB request exceeds it. Use 96 KiB.
-            cudaFuncSetAttribute(
+            IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(
                 reinterpret_cast<const void*>(&gdn_scan_chunkwise_wy_kernel<HD, SS, CHUNK>),
-                cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+                cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024));
             attr_set = true;
         }
         gdn_scan_chunkwise_wy_kernel<HD, SS, CHUNK><<<n_heads, HD, smem, stream>>>(

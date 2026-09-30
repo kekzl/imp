@@ -39,6 +39,13 @@ include(imp-deps)  # third-party dependency pins (single source; mirrored by Doc
 add_library(imp_warnings INTERFACE)
 target_compile_options(imp_warnings INTERFACE
     $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>)
+# #2211: a dropped [[nodiscard]] status is a build error. nvcc front end: diag 2809.
+target_compile_options(imp_warnings INTERFACE
+    $<$<COMPILE_LANGUAGE:CXX>:-Werror=unused-result>
+    $<$<COMPILE_LANGUAGE:CUDA>:--diag-error=2809>)
+# #2315: -Wunused-* is 0 across all first-party host TUs; errors keep it there.
+target_compile_options(imp_warnings INTERFACE
+    $<$<COMPILE_LANGUAGE:CXX>:-Werror=unused-parameter;-Werror=unused-variable;-Werror=unused-but-set-variable;-Werror=unused-but-set-parameter;-Werror=unused-function;-Werror=unused-local-typedefs;-Werror=unused-value;-Werror=unused-label>)
 
 # --- CUDA Toolkit ---
 find_package(CUDAToolkit 13.2 REQUIRED)
@@ -146,7 +153,7 @@ endif()
 # --- Core library sources ---
 set(IMP_CORE_SOURCES
     src/core/process_diag.cpp
-    src/core/pdl.cu
+    src/core/pdl.cpp
     src/core/tensor.cpp
     src/core/qtype.cpp
     src/core/buffer.cpp
@@ -166,16 +173,18 @@ set(IMP_MEMORY_SOURCES
     src/memory/block_pool.cpp
     src/memory/scratch_stack.cpp
     src/memory/plan.cpp
-    src/memory/vram_allocator.cu
-    src/memory/mem_account.cu
+    src/memory/vram_allocator.cpp
+    src/memory/mem_account.cpp
     src/memory/kv_cache.cu
     src/memory/kv_cache_manager.cpp
+    src/memory/kv_cache_manager_spill.cpp
+    src/memory/kv_host_spill.cpp
     src/memory/recurrent_snapshot_store.cpp
     src/memory/weight_snapshot.cpp
     src/memory/weight_cache_file.cpp
     src/memory/vram_query.cpp
-    src/memory/ssm_state.cu
-    src/memory/layer_offload.cu
+    src/memory/ssm_state.cpp
+    src/memory/layer_offload.cpp
 )
 
 set(IMP_MODEL_SOURCES
@@ -193,18 +202,23 @@ set(IMP_MODEL_SOURCES
     src/model/sentencepiece_loader.cpp
     src/model/json_util.cpp
     src/model/hf_config_loader.cpp
+    src/model/hf_gptq_config.cpp
+    src/model/awq_load.cpp
     src/model/mrope_positions.cpp
     src/model/image_placeholders.cpp
     src/model/hf_hub.cpp
     src/model/hf_fetch.cpp
     src/model/hf_fetch_repo.cpp
     src/model/weight_map.cpp
-    src/model/weight_upload.cu
+    src/model/weight_upload.cpp
     src/model/tokenizer.cpp
     src/model/fim.cpp
     src/model/tokenizer_nfc.cpp
+    src/model/tokenizer_pretok.cpp
+    src/model/unicode_class.cpp
+    src/model/unicode_nfc_data.cpp
     src/model/tensor_kind_name.cpp
-    src/model/tensor_kind_table.cu
+    src/model/tensor_kind_table.cpp
     src/model/tensor_kind_matcher.cpp
     src/model/chat_template.cpp
     src/model/chat_template_tokenize.cpp
@@ -232,19 +246,22 @@ set(IMP_QUANT_SOURCES
     src/quant/mxfp4_gemm.cu
     # src/quant/turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
     src/quant/dequant_gptq.cu
+    src/quant/dequant_awq.cu
+    src/quant/dequant_awq_host.cpp
+    src/quant/dequant_gptq_host.cpp
 )
 
 set(IMP_COMPUTE_SOURCES
     src/compute/dispatch_paths.cpp
-    src/compute/gemm.cu
+    src/compute/gemm.cpp
     src/compute/gemm_capture_fp16_sm120.cu
     src/compute/gemm_f16_narrow_smallm.cu
     src/compute/gemm_f16_narrow_prefill.cu
     src/compute/ffn_sparsity_probe.cu
     src/compute/ffn_sparsity_mask.cu
-    src/compute/weight_dispatch.cu
+    src/compute/weight_dispatch.cpp
     src/compute/gemm_dp4a.cu
-    src/compute/gemm_grouped.cu
+    src/compute/gemm_grouped.cpp
     src/compute/ggml_mmvq.cu
     src/compute/gemm_moe_fused.cu
     src/compute/gemm_moe_fused_tc.cu
@@ -266,7 +283,7 @@ set(IMP_COMPUTE_SOURCES
     # src/compute/attention_paged_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
     src/compute/attention_blackwell.cu
     src/compute/attention_cublas.cu
-    src/compute/attention_dispatch.cu
+    src/compute/attention_dispatch.cpp
     src/compute/rope.cu
     src/compute/layernorm.cu
     src/compute/layernorm_rowblock.cu
@@ -276,6 +293,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/embedding.cu
     src/compute/sampling.cu
     src/compute/rowwise_topm.cu
+    src/compute/prompt_logprobs_rows.cu
     src/compute/sampling_topk_topp.cu
     src/compute/sampling_penalties.cu
     src/compute/sampling_penalties_history.cu
@@ -287,7 +305,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_gemv_dtype.cu
     src/compute/gemv_fp8_rowscale_fp32.cu
     src/compute/gemm_moe_gemv.cu
-    src/compute/gemm_batched.cu
+    src/compute/gemm_batched.cpp
     src/compute/mmq_q8_imma_q4k.cu
     src/compute/mmq_q8_imma_q5k.cu
     src/compute/mmq_q8_imma_q6k.cu
@@ -357,7 +375,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/config.cpp
     src/runtime/spec_trace.cpp
     src/runtime/graph_eligibility.cpp
-    src/runtime/green_ctx.cu
+    src/runtime/green_ctx.cpp
     src/runtime/scheduler.cpp
     src/runtime/request.cpp
     src/runtime/batch.cpp
@@ -369,6 +387,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_graph_decode.cpp
     src/runtime/engine_scheduler.cpp
     src/runtime/engine_prefill.cpp
+    src/runtime/engine_prompt_logprobs.cpp
     src/runtime/engine_decode_pipeline.cpp
     src/runtime/engine_prefill_ragged.cpp
     src/runtime/engine_qwen3vl.cpp
@@ -390,6 +409,8 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/cuda_graph.cu
     src/runtime/presets.cpp
     src/compute/mtp_forward.cu
+    src/compute/mtp_forward_qwen4exp.cu
+    src/compute/gemv_fp8_block_moe.cu
     src/compute/mtp_topw.cu
     src/compute/encoder_forward.cu
 )
@@ -398,62 +419,63 @@ set(IMP_EXEC_SOURCES
     src/exec/storage_planner.cpp
     src/exec/executor.cu
     src/exec/executor_sampling.cu
-    src/exec/executor_gemm_smallm.cu
+    src/exec/executor_gemm_smallm.cpp
     src/exec/executor_norm_fold.cu
     src/exec/executor_kernels.cu
     src/exec/executor_kv_write_kernels.cu
     src/exec/sparse_attn_select.cu
     src/exec/executor_elementwise.cu
     src/exec/decode_pipeline_advance.cu
-    src/exec/pre_dequant_phase3_fp8.cu
-    src/exec/pre_dequant_phase3_cutlass.cu
-    src/exec/pre_dequant_phase3_gdn_prefill.cu
-    src/exec/pre_dequant_phase3_moe.cu
-    src/exec/executor_gemm_dispatch.cu
-    src/exec/executor_gemm_released.cu
+    src/exec/pre_dequant_phase3_fp8.cpp
+    src/exec/pre_dequant_phase3_cutlass.cpp
+    src/exec/pre_dequant_phase3_gdn_prefill.cpp
+    src/exec/pre_dequant_phase3_moe.cpp
+    src/exec/executor_gemm_dispatch.cpp
+    src/exec/executor_gemm_released.cpp
     src/exec/activation_calibrator.cu
-    src/exec/gemm_kernel_registry.cu
-    src/exec/gemm_kernel_cutlass_nvfp4.cu
-    src/exec/gemm_kernel_gguf.cu
-    src/exec/gemm_kernel_generic_dequant.cu
-    src/exec/gemm_scratch.cu
+    src/exec/gemm_kernel_registry.cpp
+    src/exec/gemm_kernel_cutlass_nvfp4.cpp
+    src/exec/gemm_kernel_gguf.cpp
+    src/exec/gemm_kernel_generic_dequant.cpp
+    src/exec/gemm_scratch.cpp
     src/exec/workspace_sizes.cpp
-    src/exec/executor_workspace.cu
-    src/exec/executor_workspace_buffers.cu
+    src/exec/executor_workspace.cpp
+    src/exec/executor_workspace_buffers.cpp
     src/exec/executor_kv_write.cu
-    src/exec/executor_pre_dequant.cu
-    src/exec/pre_dequant_phase0_nvfp4_loader.cu
-    src/exec/pre_dequant_phase1_fp16_cache.cu
-    src/exec/pre_dequant_phase2_fp8_cache.cu
-    src/exec/pre_dequant_fp8_lm_head.cu
-    src/exec/pre_dequant_phase3_nvfp4_decode.cu
-    src/exec/pre_dequant_phase3c_mxfp4.cu
-    src/exec/pre_dequant_phase4_tensor_registry.cu
-    src/exec/executor_workspace_config.cu
-    src/exec/executor_attention.cu
+    src/exec/executor_pre_dequant.cpp
+    src/exec/pre_dequant_phase0_nvfp4_loader.cpp
+    src/exec/pre_dequant_phase1_fp16_cache.cpp
+    src/exec/pre_dequant_phase2_fp8_cache.cpp
+    src/exec/pre_dequant_fp8_lm_head.cpp
+    src/exec/pre_dequant_phase3_nvfp4_decode.cpp
+    src/exec/pre_dequant_phase3c_mxfp4.cpp
+    src/exec/pre_dequant_phase4_tensor_registry.cpp
+    src/exec/executor_workspace_config.cpp
+    src/exec/executor_attention.cpp
     src/exec/executor_forward.cu
     src/exec/executor_perplexity.cu
-    src/exec/executor_lm_head_fp8.cu
+    src/exec/executor_prompt_logprobs.cu
+    src/exec/executor_lm_head_fp8.cpp
     src/exec/executor_lora.cu
     src/lora/lora_adapter.cpp
-    src/quant/gpt_oss_mxfp4_convert.cu
+    src/quant/gpt_oss_mxfp4_convert.cpp
     src/exec/executor_ffn.cu
     src/exec/executor_ssm_gdn.cu
-    src/exec/executor_gated_residual.cu
-    src/exec/executor_ple.cu
-    src/exec/executor_gdn_alpha_beta.cu
+    src/exec/executor_gated_residual.cpp
+    src/exec/executor_ple.cpp
+    src/exec/executor_gdn_alpha_beta.cpp
     src/exec/executor_forward_moe.cu
-    src/exec/executor_forward_moe_cutlass.cu
+    src/exec/executor_forward_moe_cutlass.cpp
     src/exec/executor_forward_moe_batch.cu
     src/exec/executor_forward_moe_nvfp4_host.cu
-    src/exec/executor_forward_moe_legacy.cu
+    src/exec/executor_forward_moe_legacy.cpp
     src/exec/expert_cache.cu
     src/exec/expert_cache_device.cu
-    src/exec/executor_qsa.cu
+    src/exec/executor_qsa.cpp
     src/compute/qsa_indexer.cu
-    src/exec/weight_handle.cu
-    src/exec/moe_workspace.cu
-    src/exec/quant_scratch.cu
+    src/exec/weight_handle.cpp
+    src/exec/moe_workspace.cpp
+    src/exec/quant_scratch.cpp
 )
 
 set(IMP_VISION_SOURCES
@@ -466,7 +488,7 @@ set(IMP_VISION_SOURCES
     src/vision/qwen3vl_vision_grid.cpp
     src/vision/qwen3vl_vision_upload.cpp
     src/vision/qwen3vl_encoder_kernels.cu
-    src/vision/qwen3vl_encoder.cu
+    src/vision/qwen3vl_encoder.cpp
     src/vision/qwen3vl_pipeline.cpp
     src/vision/image_processor.cpp
     src/vision/vision_encoder.cu
@@ -478,11 +500,22 @@ set(IMP_API_SOURCES
     src/api/imp_api_vision.cpp
     src/api/imp_api_suspend.cpp
     src/api/imp_api_admit.cpp
+    src/api/imp_api_token.cpp
 )
+
+# --- core/ layer target ---
+# core/ has 0 outgoing layer edges (tools/check_layering.py). Its include root holds only core/,
+# so a core TU that includes a higher layer ("memory/..", "exec/..") fails to compile (#2209).
+set(IMP_CORE_INCLUDE_ROOT ${CMAKE_CURRENT_BINARY_DIR}/imp_core_include)
+file(MAKE_DIRECTORY ${IMP_CORE_INCLUDE_ROOT})
+file(CREATE_LINK ${CMAKE_CURRENT_SOURCE_DIR}/src/core ${IMP_CORE_INCLUDE_ROOT}/core SYMBOLIC)
+add_library(imp_core STATIC ${IMP_CORE_SOURCES})
+target_include_directories(imp_core PUBLIC $<BUILD_INTERFACE:${IMP_CORE_INCLUDE_ROOT}>)
+target_link_libraries(imp_core PUBLIC CUDA::cudart PRIVATE imp_warnings)
+set_target_properties(imp_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # --- Main library target ---
 add_library(imp STATIC
-    ${IMP_CORE_SOURCES}
     ${IMP_MEMORY_SOURCES}
     ${IMP_MODEL_SOURCES}
     ${IMP_QUANT_SOURCES}
@@ -499,9 +532,9 @@ target_include_directories(imp
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests  # for tests/bench/ headers (test/bench TUs only)
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
 )
+# Third-party headers: SYSTEM keeps them out of imp_warnings' -Werror=unused-* (#2315).
+target_include_directories(imp SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
 
 # Single-source the runtime version string from the project version so
 # imp_version() / `imp-cli --version` can never drift from CMakeLists (#760).
@@ -509,6 +542,7 @@ target_compile_definitions(imp PRIVATE IMP_VERSION_STRING="${PROJECT_VERSION}")
 
 target_link_libraries(imp
     PUBLIC
+        imp_core
         CUDA::cudart
         CUDA::cuda_driver
         CUDA::cublas
@@ -528,12 +562,24 @@ if(IMP_USE_CUTLASS)
     target_compile_definitions(imp PRIVATE IMP_USE_CUTLASS=1)
 endif()
 
-# Enable separable compilation for device-side launches (PDL)
 set_target_properties(imp PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
     POSITION_INDEPENDENT_CODE ON
 )
+# rdc only where a kernel template is instantiated in one TU and launched from another (#2209 link test).
+set_source_files_properties(
+    src/quant/nvfp4_gemv_dense.cu
+    src/quant/nvfp4_gemv_fused.cu
+    src/compute/mmq_q8_imma_q4k.cu
+    src/compute/mmq_q8_imma_q51.cu
+    src/compute/mmq_q8_imma_q5k.cu
+    src/compute/mmq_q8_imma_q6k.cu
+    PROPERTIES COMPILE_OPTIONS "-rdc=true")
+# Moved from nvcc (host pass -std=c++23: no FMA contraction); g++ -march=x86-64-v3 contracted 6 sites here (#2209).
+set_source_files_properties(
+    src/exec/executor_attention.cpp
+    src/exec/executor_workspace_buffers.cpp
+    PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
 # --- Tools ---
 if(IMP_BUILD_TOOLS)
@@ -578,6 +624,7 @@ if(IMP_BUILD_TOOLS)
         add_executable(imp-bench
             tools/imp-bench/main.cpp
             tools/imp-bench/bench_gemm.cu
+            tools/imp-bench/bench_q8_imma.cu
             tools/imp-bench/bench_attention.cu
             tools/imp-bench/bench_e2e.cpp
         )
@@ -626,6 +673,7 @@ if(IMP_BUILD_SERVER)
     tools/common/mtp_auto.cpp
     tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
+        tools/imp-server/prompt_logprobs.cpp
         tools/imp-server/rate_limit.cpp
         tools/imp-server/logit_bias.cpp
         tools/imp-server/tool_call.cpp
@@ -715,11 +763,13 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-core SOURCES
         tests/test_cuda_errors.cpp
         tests/test_batch_verify_predicates.cpp
+        tests/test_forward_profile.cpp
         tests/test_lora_dims.cpp
         tests/test_fim.cpp
         tests/test_expert_cache_reinit.cpp
         tests/test_sparse_attn_geometry.cpp
         tests/test_tensor.cpp
+        tests/test_layer_offload_plan.cpp
         tests/test_tensor_kind_table.cpp
         tests/test_type_tables_golden.cpp
         tests/test_tensor_kind_matcher.cpp
@@ -736,6 +786,8 @@ if(IMP_BUILD_TESTS)
         tests/test_hf_config_loader.cpp
         tests/test_ngram_table.cpp
         tests/test_safetensors_loader.cpp
+        tests/test_dequant_awq.cpp
+        tests/test_dequant_gptq.cpp
         tests/test_safetensors_writer.cpp
         tests/test_awq_calibration.cpp
         tests/test_vision_loader_check.cpp
@@ -782,6 +834,8 @@ if(IMP_BUILD_TESTS)
         # Pre-cudaDeviceReset hook registry (#1207): self-registration replaced a
         # hand-maintained call list, so the new failure mode is an EMPTY registry.
         tests/test_cuda_static_reset.cpp
+        # GemmKernelRegistry holds its 10 keys when linked from libimp.a (#2317).
+        tests/test_gemm_kernel_registry_link.cpp
         # GBNF grammar engine (parser + pushdown simulator + UTF-8 assembly).
         # CPU-only by construction — see the file header.
         tests/test_gbnf_grammar.cpp
@@ -839,6 +893,8 @@ if(IMP_BUILD_TESTS)
     tests/test_mtp_presence.cpp
         # dispatch_mtp_head layout detection on synthetic name lists (Qwen4Exp 3101 names).
         tests/test_mtp_layout_dispatch.cpp
+        # mtp_draft_step returns false on attention weights without a V buffer (#2288).
+        tests/test_mtp_attn_guard.cpp
         tests/test_spec_gates.cpp
         # The per-request speculation contract (depth + decline reason), the
         # batch_rr drafter predicate and the NVFP4 dequant-cap arithmetic. All
@@ -894,9 +950,16 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_dispatch_rules.cpp
         # FP8 FMHA tile selector: every (Bq, head_dim) it can return has a kernel instance (#2195).
         tests/test_fmha_fp8_tile_select.cpp
+        # FP16 FMHA tile selector: same invariant for fmha_sm120_prefill (#2243).
+        tests/test_fmha_sm120_tile_select.cpp
+        # KV host spill tier slot bookkeeping (#2203); the byte round trip is in test-kv.
+        tests/test_kv_host_spill.cpp
         # The serving metadata pool's byte layout (invariant I2): every region
         # 256-aligned, disjoint and inside the one allocation the paths share.
         tests/test_serving_metadata_layout.cpp
+        # upload_weight's one traits-templated staging path vs the per-format uploaders it
+        # replaced (#2212): host bytes, alloc/copy/free order, result tensor, on a fake device.
+        tests/test_weight_upload_staging.cpp
     )
     if(IMP_BUILD_SERVER)
         # Anthropic /v1/messages transform tests reuse anthropic.cpp (json-only deps).
@@ -917,6 +980,8 @@ if(IMP_BUILD_TESTS)
             tests/test_spec_usage.cpp  # includes handlers_internal.h -> httplib.h
             tests/test_sse_stream_utils.cpp
             tests/test_logprobs_shapes.cpp
+            tools/imp-server/prompt_logprobs.cpp
+            tests/test_prompt_logprobs.cpp
             tests/test_tool_call.cpp
         tests/test_regex_constrain.cpp
             tests/test_tool_stream_filter.cpp
@@ -1003,6 +1068,7 @@ if(IMP_BUILD_TESTS)
         tests/test_sampling_advanced.cu
         tests/test_penalty_hist_append.cu
         tests/test_rowwise_topm.cu
+        tests/test_prompt_logprobs_rows.cu
         tests/test_executor_kernels.cu
         tests/test_hadamard.cu
         tests/test_mmq_q4k_imma_layout.cu
@@ -1030,6 +1096,8 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-quant SOURCES
         tests/test_quant.cu
         tests/test_quant_integration.cu
+        tests/test_dequant_awq_gpu.cu
+        tests/test_dequant_gptq_gpu.cu
         tests/test_gguf_dequant_ref.cu
         tests/test_gpt_oss_mxfp4_convert_ref.cu
         tests/test_nvfp4_quant.cu
@@ -1095,6 +1163,7 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_cache_write.cu
         tests/test_kv_gather.cu
         tests/test_kv_block_copy.cu
+        tests/test_kv_host_spill_gpu.cu
         tests/test_vmm_backend.cu
         tests/test_green_ctx.cu
         tests/test_capture_abort.cu
@@ -1164,11 +1233,15 @@ if(IMP_BUILD_TESTS)
         tests/test_warm_cache.cu
         tests/test_lora.cpp
         tests/test_prefix_cache_e2e.cpp
+        # #2257: prompt_logprobs chunk logits released after the pass (IMP_TEST_MODEL).
+        tests/test_prompt_logprobs_e2e.cpp
         # Chained recurrent restores: 30 growing turns against a cold prefill of
         # the same prompt, compared on the state slab rather than on tokens.
         tests/test_hybrid_restore_chain.cu
         # Engine-level batch invariance of the batched GDN decode: eight rows vs solo, greedy.
         tests/test_hybrid_batched_decode.cu
+        # #2198 shared scoring: rows restoring one recurrent snapshot in one ragged forward.
+        tests/test_hybrid_shared_score.cu
         # Row-batched sampler keeps each row's own banned list through the penalty stash (#2019).
         tests/test_sampler_row_bans.cu
         tests/test_batch_invariance.cu
@@ -1187,6 +1260,12 @@ if(IMP_BUILD_TESTS)
     # test_batching_engine_fault.cu drives the server BatchingEngine
     # (tools/imp-server/batching_engine.cpp, no httplib or json dependency).
     target_include_directories(test-e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
+    # Qwen4Exp MTP draft step vs the numpy reference of the vLLM math (tests/fixtures). Reads
+    # safetensors headers with nlohmann, which only the server build fetches.
+    if(TARGET nlohmann_json::nlohmann_json)
+        target_sources(test-e2e PRIVATE tests/test_mtp_qwen4exp_reference.cpp)
+        target_link_libraries(test-e2e PRIVATE nlohmann_json::nlohmann_json)
+    endif()
 
     # Opt-in real huggingface.co fetch (IMP_TEST_NETWORK=1); no ctest entry, CI has no network lane.
     imp_add_test_module(test-hf-network SOURCES tests/test_hf_fetch_network.cpp)
@@ -1338,7 +1417,7 @@ endif()
 # --- Install ---
 include(GNUInstallDirs)
 
-install(TARGETS imp
+install(TARGETS imp imp_core
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )

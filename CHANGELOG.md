@@ -5,11 +5,16 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- Qwen3.8-Flash-Next MTP drafting (`speculative.mtp_k=1`, auto declines it): hc-stream draft layer, FP8 block-scale experts (2400 MiB head), captured verify over host-resident experts (56.7 -> 27-36 ms/verify). Draft logits vs the vLLM math: max |dlogit| 0.0135 (band 0.11). Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
+- AWQ SafeTensors checkpoints (`quant_method: awq`, `bits: 4`, `zero_point: true`, `version: gemm`) load: q/k/v/o/gate/up/down dequantize to FP16 at upload in AutoAWQ packing order (`src/quant/dequant_awq.cu`); VRAM holds FP16 weights. GEMV, Marlin, other bit widths and `zero_point: false` stay refused at load (#2205, #2196).
+- C API `imp_prefill_token(ctx, &tok)`: the token `imp_prefill`/`imp_prefill_with_params` sampled; `imp_decode_step` returns the next one. GreedyLockTest locks now start with it: Qwen3-8B-Q8_0 `Q: What is 17 + 25?` matches llama.cpp in all 31 tokens (#2251).
+- `kv_cache.host_spill_mb` (default 0): prefix blocks the KV pool reclaims go to pinned host RAM and come back by H2D on a later hit. Qwen3-8B-Q8_0, 4482-token re-hit after eviction: TTFT 0.504 -> 0.274 s (device hit 0.220 s), output identical (#2203).
+- `/v1/completions` prompt logprobs (#2207): vLLM `prompt_logprobs: N` (0..20) and OpenAI `echo` + `logprobs`, gathered on device per prefill row; only rows x (2 + 2N) values reach the host (168 KiB scratch per 1k rows at N = 20). `stream: true` with either is a 400. Such requests skip prefix reuse and ragged prefill.
 - `--model hf://<org>/<repo>[:<file>.gguf]` (imp-server, imp-cli) downloads inside the container via libcurl into the HF cache (`HF_HOME=/models/huggingface` in the image): Range resume, LFS sha256 check, `HF_TOKEN`; a second start makes 0 requests (#2200).
 - `gemm.nvfp4_lm_head=fp8`: per-row FP8 E4M3 LM head (#2156, #2166), GDN hybrids included; one tensor-core kernel (32 rows per weight pass, row-count-invariant bits) serves decode, batch and `--perplexity`; the source head is freed after load. Qwen3-8B tg128 286.8 vs 300.9 tok/s (auto), c=32 6519 vs 6851 tok/s. Default stays `auto`.
-- Qwen3.8-Flash-Next MTP head: all 3101 `mtp.*` tensors load into `MtpHead` (qwen4_exp layout, FP8 experts host-mapped, FP8 shard mapped without `MAP_POPULATE`). No draft forward yet: `speculative.mtp_k` is forced to 0. Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
 
 ### Changed
+- `prompt_logprobs` LM head (#2257): one dequantized-head GEMM per chunk of min(rows, 1024, free VRAM / 2 / 4V) rows instead of 8-row dp4a batches, and one fused pass per row for logsumexp, rank and top-N (was 2 + N). Gate `scripts/accept_2257.sh`: 2048-token prefill with `prompt_logprobs=0` <= 1.30x off.
 - `check_doc_citations.py`: a moved anchor is a `DRIFT` warning (exit 0), `--fix` rewrites the line numbers; only a gone or ambiguous anchor fails (25-line window). Line drift broke main 3x on 2026-09-29 (#2231).
 - `gemm.nvfp4_lm_head=auto` now serves the LM head as per-row FP8 E4M3 where the head allows it (NVFP4 rule as fallback); `on` keeps NVFP4. PPL 45k: Qwen3-8B 11.1108 -> 10.7623, Qwen3-30B-A3B 11.8443 -> 11.3476, Flash-Next 4.6493 -> 4.4873; tg128 -4.7 % / -3.0 % (#2166, #2156).
 - Qwen3.8-Flash-Next decodes with max_batch_size > 1: PLE conv rows are a 180 KiB tail of each SSM slot and the n-gram context comes from each request's tokens, so batched rows no longer share one context. The clamp to 1 stays only with attention.qsa=true.
@@ -21,6 +26,16 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - `runtime.deterministic`: a prompt row of an MoE model no longer changes with its prefill chunk (FP32 row-order router GEMM, hd=512 prefill on the forward-scan FMHA). Gemma-4-26B-A4B NVFP4 first-token logprob at chunk 0/288/336: -0.0907 in all three (main -0.536/-0.408/-0.307); prefix resend probe 2/2 identical (#2167).
+- `--gpu-layers N < n_layers` fails engine load with the reason instead of a silent `nothing to offload` (#2291): Q8_0 layers were sized 0 B (block quant, now 205030400 B per Qwen3-8B layer) and upload leaves every layer in VRAM (#2298).
+- Forced `tool_choice` (named function) on gpt-oss (Harmony) and Gemma-4 is enforced instead of a 400 (#2279): envelope `to=functions.NAME` / `<|tool_call>call:NAME` + JSON args. Every 4xx logs one `HTTP <status> <method> <path>: <reason>` line.
+- Forced tool-call envelope: at most 2 whitespace chars before the open literal, then `<` is forced. Phi-4-reasoning-plus emitted tabs until `max_tokens` on degen_suite's forced `tool_choice` (#2273).
+- Jinja context defines `tools` as none without tools, like HF `apply_chat_template`: gpt-oss `--chat` parity 3/3 -> 0/3 mismatched (#2269).
+- GGUF pre `deepseek-r1-qwen` uses the Qwen2 pre-tokenizer and NFC: DeepSeek-R1-Distill-Qwen-1.5B Q4_K_M parity 842/1196 -> 0/1196 mismatched (#2270).
+- Tokenizer parity with HF `tokenizers` (`tools/tokenizer_parity/run.sh`, 1196 strings): Unicode classes in the regex pre-tokenizers, full NFC, Gemma-4 tokenizer.json as gemma4 BPE, added-token lstrip/rstrip. Mismatches: Gemma-4 NVFP4 1196 -> 0, Qwen3 544 -> 0, DeepSeek-V2 400 -> 0, Phi-4 142 -> 0, gpt-oss 123 -> 0.
+- Device index products (#2218, #2259): 180 int32 products that can pass 2^31 (token, row, KV-slot, split, weight and unvalidated SSM/GDN extents) multiply in int64; 381 keep int32 behind an explicit cast and a bound from a template constant or an enforced check. NVFP4 HW quant strides are int64. No kernel spills (max +8 regs).
+- FP16 FMHA prefill picks Bq only among instanced (Bq, head_dim) tiles. Off sm_120 smem limits, HD512 could select Bq=32 and HD256 Bq=16, both with no kernel, so the launch returned false. sm_120 choices unchanged (#2243).
+- GPTQ SafeTensors dequant reads qzeros as AutoGPTQ writes them (`[groups, N/8]`) with the v1 zero offset (`(z + 1) & 0xF`, `gptq_v2`: none); config also from `config.json`; other formats, `bits != 4`, bad shapes refused at load. Qwen2.5-0.5B-Instruct-GPTQ-Int4 per-row cosine vs BF16: 0.8373 -> 0.9901 (#2249).
+- Qwen3 dense GGUF: `kv_cache.dtype=auto` resolves to FP16 again; FP8 KV turned greedy output into "The capital of France is not Paris". Decode after 16k context 208.5 -> 182.6 tok/s (Qwen3-8B-Q8_0); `kv_cache.dtype=fp8` restores it (#2208).
 - `gemm.nvfp4_lm_head=auto` builds the FP8 head only from a 16-bit head; an 8-bit GGUF head (Q8_0) stays at checkpoint precision. Qwen3-8B-Q8_0 first token: This -0.674 (FP8) -> The -0.646, HF fp32 The -0.644 (#2224).
 - GDN hybrids with `gdn.state_bf16 = false` (FP32 state): a recurrent snapshot over a 65+ row scan threw `h_snap needs a single chunk`, and at exactly 64 rows the slab stayed unwritten. Snapshot scans now run the fused kernel over the whole range (#2214).
 - `runtime.deterministic`: cuBLAS `cublasGemm*Ex` calls used `CUBLAS_GEMM_AUTOTUNE`, which times algorithms once per process, so Gemma-4 NVFP4 answered in one of two ways per server (2 of 6 vs 4 of 6). Deterministic mode now takes `CUBLAS_GEMM_DEFAULT`: 12 of 12 processes identical.
@@ -29,6 +44,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Softmax MoE routing (Qwen3-30B-A3B, Qwen3.8-Flash-Next and every softmax-routed MoE): a warp could read another warp's partial sum as the softmax max, and top-k picked wrong experts (354 of 204800 routings in the new test). PPL is bit-identical across processes now: Qwen3-30B-A3B 13.0332 x3, Flash-Next 4.6353 x2.
 - Qwen3.8-Flash-Next: a prefix-cache resume did not restore the PLE conv rows and n-gram context, so a turn resumed from a snapshot continued the previous request's state. The recurrent snapshot carries the conv rows as a sidecar; the same turn 2 sent 3x: 2 distinct answers before, 1 after.
 - Qwen3.8-Flash-Next: after a graph-replayed decode, the next prefill reused the previous request's PLE n-gram rows, context and conv state, so greedy output depended on the prior request. Same prompt after 5 others: 5 distinct outputs before, 1 after; degen_suite kv-growth FAIL 1/1 -> 0/3.
+
+### Removed
+- `gemm.q8_imma_bm` and the Q8_0 IMMA tall tiles (BM 160 / 192): slower than BM=128 on every benched shape (#2267). Q8_0 IMMA prefill runs BM=128 only, the former default.
 
 ## [0.45.0] - 2026-09-27
 

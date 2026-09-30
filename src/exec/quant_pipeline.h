@@ -97,9 +97,9 @@ private:
     void pre_dequant_phase2_fp8_cache_(const ModelConfig& cfg, const VRAMBudget& budget,
                                        size_t& remaining_budget, cudaStream_t stream);
     // FP8 E4M3 decode sidecar for native-precision GDN/SSM projections
-    // (gemm.fp8_ssm_proj) — lives in pre_dequant_phase2_fp8_cache.cu.
+    // (gemm.fp8_ssm_proj) — lives in pre_dequant_phase2_fp8_cache.cpp.
     void pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg, cudaStream_t stream);
-    // Phase 2c: per-row FP8 E4M3 LM head (gemm.nvfp4_lm_head=fp8), pre_dequant_fp8_lm_head.cu.
+    // Phase 2c: per-row FP8 E4M3 LM head (gemm.nvfp4_lm_head=fp8), pre_dequant_fp8_lm_head.cpp.
     void fp8_lm_head_cache_(cudaStream_t stream);
     void pre_dequant_phase3_nvfp4_decode_(const ModelConfig& cfg, const VRAMBudget& budget,
                                           size_t& remaining_budget, cudaStream_t stream);
@@ -125,7 +125,7 @@ private:
     void nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg, const VRAMBudget& budget,
                                          size_t& remaining_budget, cudaStream_t stream,
                                          Nvfp4DecodeContext& dctx);
-    bool cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>& experts, cudaStream_t stream,
+    [[nodiscard]] bool cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>& experts, cudaStream_t stream,
                                  Nvfp4DecodeContext& dctx, bool& moe_budget_exhausted,
                                  size_t& moe_logical_avail);
     void gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx);

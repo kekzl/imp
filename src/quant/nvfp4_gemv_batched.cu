@@ -8,7 +8,7 @@
 
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_gemm_internal.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 
 #include <cuda_fp16.h>
 #include "core/pdl_device.cuh"
@@ -21,7 +21,6 @@ namespace {
 // across all MR rows (x[m] streams from L2). Removes the per-sequence weight re-read of the
 // batched decode LM head (a single M=1 GEMV per sequence re-read the whole ~389 MiB
 // LM-head matrix from HBM, the #2 decode GPU consumer at batch>1).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int MR>
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
@@ -46,6 +45,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
         // Decode the 16 FP4 weights ONCE and reuse across all MR activation rows
         // (the old per-row path re-decoded the weight byte per row — 16x cvt).
+        // #2218 bounded: b * 2 <= 14 (loop b < 8 literal, float wf[16] extent)
         float wf[16];
 #pragma unroll
         for (int b = 0; b < 8; ++b) {
@@ -54,7 +54,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
                 : "=r"(w_fp16x2)
                 : "r"(static_cast<uint32_t>(pb[b])));
             float2 wf2 = __half22float2(*reinterpret_cast<const half2*>(&w_fp16x2));
-            wf[b * 2] = wf2.x;
+            wf[static_cast<ptrdiff_t>(b * 2)] = wf2.x;
             wf[b * 2 + 1] = wf2.y;
         }
         float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
@@ -71,7 +71,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
 #pragma unroll
             for (int b = 0; b < 8; ++b) {
                 float2 xf = __half22float2(xh[b]);
-                d = __fmaf_rn(wf[b * 2], xf.x, d);
+                d = __fmaf_rn(wf[static_cast<ptrdiff_t>(b * 2)], xf.x, d);
                 d = __fmaf_rn(wf[b * 2 + 1], xf.y, d);
             }
             acc[m] = __fmaf_rn(d, cs, acc[m]);
@@ -88,7 +88,6 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
         __syncthreads();  // reuse warp_sums for the next activation row
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Batched twin of gemv_nvfp4_multirow_kernel, existing for NUMERICAL PARITY not speed: the
 // spec-verify chunk and M=1 decode compute the same projections with instruction-identical
@@ -151,7 +150,6 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_mb_kernel(
 // one block per weight row n, decoded once and reused across the MR rows of this launch.
 // kAcc adds into the existing output (cuBLAS beta=1 semantics) for the o/down residual-add
 // GEMMs (#1055).
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 template <int MR, bool kAcc = false>
 __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales, float tensor_scale,
@@ -176,13 +174,14 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
         float wf[16];
 #pragma unroll
+        // #2218 bounded: b * 2 <= 14 (loop b < 8 literal, float wf[16] extent)
         for (int b = 0; b < 8; ++b) {
             uint32_t w_fp16x2;
             asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"
                 : "=r"(w_fp16x2)
                 : "r"(static_cast<uint32_t>(pb[b])));
             float2 wf2 = __half22float2(*reinterpret_cast<const half2*>(&w_fp16x2));
-            wf[b * 2] = wf2.x;
+            wf[static_cast<ptrdiff_t>(b * 2)] = wf2.x;
             wf[b * 2 + 1] = wf2.y;
         }
         float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
@@ -199,7 +198,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
 #pragma unroll
             for (int b = 0; b < 8; ++b) {
                 float2 xf = __half22float2(xh[b]);
-                d = __fmaf_rn(wf[b * 2], xf.x, d);
+                d = __fmaf_rn(wf[static_cast<ptrdiff_t>(b * 2)], xf.x, d);
                 d = __fmaf_rn(wf[b * 2 + 1], xf.y, d);
             }
             acc[m] = __fmaf_rn(d, cs, acc[m]);
@@ -220,7 +219,6 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
         __syncthreads();  // reuse warp_sums for the next activation row
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 }  // namespace
 

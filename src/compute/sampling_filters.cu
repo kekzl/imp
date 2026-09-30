@@ -71,7 +71,6 @@ void apply_min_p(float* logits, int vocab_size, float min_p, cudaStream_t stream
 static constexpr int TYPICAL_NBUCKETS = 256;
 static_assert(BLOCK_SIZE == TYPICAL_NBUCKETS, "deterministic path maps one bucket per thread");
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_size, float typical_p,
                                        bool deterministic) {
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
@@ -169,7 +168,9 @@ __global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_siz
     if (deterministic) {
         // Ordered accumulation, no local frame: each warp owns one histogram row, lanes that hit
         // the same bucket in one iteration are summed in lane order and added by the lowest lane.
-        float* row = s_warp_buckets + warp_id * TYPICAL_NBUCKETS;
+        // #2218 bounded: warp_id < NUM_WARPS = BLOCK_SIZE / 32 = 8 (launch :251):
+        // warp_id * TYPICAL_NBUCKETS < 8 * 256 = 2048 (s_warp_buckets extent, :80)
+        float* row = s_warp_buckets + static_cast<ptrdiff_t>(warp_id * TYPICAL_NBUCKETS);
         for (int b = lane_id; b < TYPICAL_NBUCKETS; b += WARP_SIZE)
             row[b] = 0.0f;
         __syncwarp();
@@ -241,7 +242,6 @@ __global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_siz
             logits[i] = -FLT_MAX;
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 void apply_typical_p(float* logits, int vocab_size, float typical_p, cudaStream_t stream) {
     if (typical_p <= 0.0f || typical_p >= 1.0f)

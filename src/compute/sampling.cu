@@ -8,7 +8,7 @@
 #include <cuda_fp16.h>
 #include <cfloat>
 #include "core/pdl_device.cuh"
-#include "core/pdl.h"
+#include "core/pdl_launch.cuh"
 
 namespace imp {
 
@@ -212,99 +212,91 @@ int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
         if (auto slab = engine_arena().take_bytes(sizeof(int32_t)); !slab.empty()) {
             d_result = reinterpret_cast<int32_t*>(slab.data());
             s_greedy_result_owned = false;
-        } else if (cudaMalloc(&d_result, sizeof(int32_t)) != cudaSuccess) {
-            // Kept because the arena is closed in a bare unit test, and returning
-            // token 0 there would be a silently wrong sample rather than a loud
-            // failure. It runs at most once per process.
-            IMP_LOG_ERROR("sample_greedy: could not obtain the result scratch");
-            return 0;
         } else {
+            // cudaMalloc fallback: arena closed in a bare unit test; runs at most once per process.
+            cuda_call_or_throw(cudaMalloc(&d_result, sizeof(int32_t)), "sample_greedy result scratch");
             s_greedy_result_owned = true;
         }
         s_greedy_result = d_result;
     }
 
+    sampler_launch_begin("sample_greedy");
     argmax_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, d_result);
-    IMP_CUDA_CHECK_LAUNCH();
+    cuda_call_or_throw(sampler_launch_status(cudaGetLastError(), "sample_greedy"), "sample_greedy launch");
 
-    int32_t h_result = 0;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
-    return h_result;
+    return sampler_readback_or_throw(d_result, stream, "sample_greedy readback");
+}
+
+// Multi-block argmax into d_result[0], no readback. Scratch lives right after d_result:
+// [result(4B)] [partial_vals(ARGMAX_NBLOCKS*4B)] [partial_idxs(ARGMAX_NBLOCKS*4B)].
+// Returns the launch status (#2310); reduce is not launched after a failed partial. Capture-safe.
+static cudaError_t launch_argmax_multiblock(const float* d_logits, int vocab_size, int32_t* d_result,
+                                            cudaStream_t stream, const char* who) {
+    auto* base = reinterpret_cast<char*>(d_result);
+    auto* partial_vals = reinterpret_cast<float*>(base + sizeof(int32_t));
+    auto* partial_idxs = reinterpret_cast<int32_t*>(base + sizeof(int32_t) + ARGMAX_NBLOCKS * sizeof(float));
+
+    sampler_launch_begin(who);
+    argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, partial_vals,
+                                                                     partial_idxs);
+    if (const cudaError_t e = sampler_launch_status(cudaGetLastError(), who); e != cudaSuccess)
+        return e;
+    argmax_reduce_kernel<<<1, WARP_SIZE, 0, stream>>>(partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
+    return sampler_launch_status(cudaGetLastError(), who);
 }
 
 int32_t sample_greedy(const Tensor& logits, int32_t* d_result, cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
 
-    // Use multi-block argmax: scratch lives right after d_result.
-    // Layout: [result(4B)] [partial_vals(ARGMAX_NBLOCKS*4B)] [partial_idxs(ARGMAX_NBLOCKS*4B)]
-    auto* base = reinterpret_cast<char*>(d_result);
-    auto* partial_vals = reinterpret_cast<float*>(base + sizeof(int32_t));
-    auto* partial_idxs = reinterpret_cast<int32_t*>(base + sizeof(int32_t) + ARGMAX_NBLOCKS * sizeof(float));
-
-    argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, partial_vals,
-                                                                     partial_idxs);
-    IMP_CUDA_CHECK_LAUNCH();
-    argmax_reduce_kernel<<<1, WARP_SIZE, 0, stream>>>(partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
-    IMP_CUDA_CHECK_LAUNCH();
-
-    int32_t h_result = 0;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
-
-    return h_result;
+    cuda_call_or_throw(launch_argmax_multiblock(d_logits, vocab_size, d_result, stream, "sample_greedy"),
+                       "sample_greedy launch");
+    return sampler_readback_or_throw(d_result, stream, "sample_greedy readback");
 }
 
-void sample_greedy_async(const Tensor& logits, int32_t* d_result, cudaStream_t stream) {
+bool sample_greedy_async(const Tensor& logits, int32_t* d_result, cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
 
     // Same multi-block argmax as sample_greedy(d_result), minus the readback:
     // the batched decode path gathers all sequences' tokens with one pinned
     // D2H + one sync (see sampling.h).
-    auto* base = reinterpret_cast<char*>(d_result);
-    auto* partial_vals = reinterpret_cast<float*>(base + sizeof(int32_t));
-    auto* partial_idxs = reinterpret_cast<int32_t*>(base + sizeof(int32_t) + ARGMAX_NBLOCKS * sizeof(float));
-
-    argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, partial_vals,
-                                                                     partial_idxs);
-    IMP_CUDA_CHECK_LAUNCH();
-    argmax_reduce_kernel<<<1, WARP_SIZE, 0, stream>>>(partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
-    IMP_CUDA_CHECK_LAUNCH();
+    return launch_argmax_multiblock(d_logits, vocab_size, d_result, stream, "sample_greedy_async") ==
+           cudaSuccess;
 }
 
 // ===========================================================================
 // Async (device-side) sampling — no host sync
 // ===========================================================================
 
-void launch_greedy_rows(const GreedyRowArgs* d_rows, int n_rows, int vocab_size, cudaStream_t stream) {
+cudaError_t launch_greedy_rows(const GreedyRowArgs* d_rows, int n_rows, int vocab_size, cudaStream_t stream) {
     dim3 grid1(ARGMAX_NBLOCKS, n_rows);
+    sampler_launch_begin("launch_greedy_rows");
     pdl::enable_kernel(argmax_partial_rows_kernel);
     pdl::launch(argmax_partial_rows_kernel, grid1, dim3(BLOCK_SIZE), size_t(0), stream, d_rows, vocab_size);
-    IMP_CUDA_CHECK_LAUNCH();
+    if (const cudaError_t e = sampler_launch_status(cudaGetLastError(), "launch_greedy_rows");
+        e != cudaSuccess)
+        return e;
     pdl::enable_kernel(argmax_reduce_rows_kernel);
     pdl::launch(argmax_reduce_rows_kernel, dim3(n_rows), dim3(WARP_SIZE), size_t(0), stream, d_rows);
-    IMP_CUDA_CHECK_LAUNCH();
+    return sampler_launch_status(cudaGetLastError(), "launch_greedy_rows");
 }
 
-void sample_greedy_device(const Tensor& logits, int32_t* d_result, int32_t* h_mapped, cudaStream_t stream) {
+bool sample_greedy_device(const Tensor& logits, int32_t* d_result, int32_t* h_mapped, cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
 
-    // Multi-block argmax: scratch lives right after d_result.
-    auto* base = reinterpret_cast<char*>(d_result);
-    auto* partial_vals = reinterpret_cast<float*>(base + sizeof(int32_t));
-    auto* partial_idxs = reinterpret_cast<int32_t*>(base + sizeof(int32_t) + ARGMAX_NBLOCKS * sizeof(float));
+    // Launch failure: false before the copy, *h_mapped never gets a stale token (#2310).
+    if (launch_argmax_multiblock(d_logits, vocab_size, d_result, stream, "sample_greedy_device") !=
+        cudaSuccess)
+        return false;
 
-    argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, partial_vals,
-                                                                     partial_idxs);
-    IMP_CUDA_CHECK_LAUNCH();
-    argmax_reduce_kernel<<<1, WARP_SIZE, 0, stream>>>(partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
-    IMP_CUDA_CHECK_LAUNCH();
-
-    // Async copy to mapped pinned memory — no sync needed.
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+    // Async copy to mapped pinned memory, no sync (capture-safe); false = *h_mapped is stale (#2307).
+    const cudaError_t err = cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost,
+                                            stream);
+    if (err != cudaSuccess)
+        IMP_LOG_ERROR("sample_greedy_device: token copy enqueue failed: %s", cudaGetErrorString(err));
+    return err == cudaSuccess;
 }
 
 // ---------------------------------------------------------------------------

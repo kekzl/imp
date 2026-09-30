@@ -322,7 +322,7 @@ std::string sha256_file(const std::string& path) {
     std::vector<unsigned char> buf(size_t{8} << 20);
     size_t n;
     bool ok = true;
-    while ((n = std::fread(buf.data(), 1, buf.size(), f)) > 0)
+    while (!std::feof(f) && !std::ferror(f) && (n = std::fread(buf.data(), 1, buf.size(), f)) > 0)
         ok &= EVP_DigestUpdate(ctx.get(), buf.data(), n) == 1;
     ok &= !std::ferror(f);
     std::fclose(f);

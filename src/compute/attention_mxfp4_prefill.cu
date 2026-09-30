@@ -104,7 +104,6 @@ __device__ __forceinline__ int mxfp4_sfatom_offset(int row, int k_group, int n_k
 // Strided MXFP4 quantization: reads FP16 with arbitrary row stride (per-head access in
 // [seq,n_heads*hd] layout), outputs contiguous MXFP4 packed + SfAtom. One thread per 32-elem group.
 
-// NOLINTBEGIN(bugprone-implicit-widening-of-multiplication-result): int32 kernel index math, audit #2218
 __global__ void quantize_fp16_mxfp4_strided_kernel(const half* __restrict__ input,
                                                    int input_row_stride,  // in half elements, not bytes
                                                    uint8_t* __restrict__ packed_out,  // [M, K/2] contiguous
@@ -118,18 +117,21 @@ __global__ void quantize_fp16_mxfp4_strided_kernel(const half* __restrict__ inpu
 
     int row = mb_idx / K_groups;
     int k_group = mb_idx % K_groups;
-    int base = row * input_row_stride + k_group * kMxGroupSize;
+    const int64_t base =
+        static_cast<int64_t>(row) * input_row_stride + static_cast<int64_t>(k_group) * kMxGroupSize;
 
     // Load 32 FP16 values via vectorized half2 loads, track absmax
+    // #2218 bounded: i * 2 <= 30 < 32 (array extent vals[32] :124, constant loop bound i < 16 :128).
     float vals[32];
     float local_absmax = 0.0f;
     const half2* src_h2 = reinterpret_cast<const half2*>(input + base);
 #pragma unroll
     for (int i = 0; i < 16; i++) {
         half2 h2 = src_h2[i];
-        vals[i * 2] = __half2float(h2.x);
+        vals[static_cast<ptrdiff_t>(i * 2)] = __half2float(h2.x);
         vals[i * 2 + 1] = __half2float(h2.y);
-        local_absmax = fmaxf(local_absmax, fmaxf(fabsf(vals[i * 2]), fabsf(vals[i * 2 + 1])));
+        local_absmax = fmaxf(local_absmax,
+                             fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[i * 2 + 1])));
     }
 
     // UE8M0 scale = ceil_pow2(absmax / 6.0)
@@ -151,7 +153,6 @@ __global__ void quantize_fp16_mxfp4_strided_kernel(const half* __restrict__ inpu
         packed_out[packed_base + i / 2] = mxfp4_pack_pair_hw(s0, s1);
     }
 }
-// NOLINTEND(bugprone-implicit-widening-of-multiplication-result)
 
 // Fused scale + softcap + causal mask + softmax, in-place on FP16 S. One block per query row,
 // 3-pass online softmax (max, exp+sum, normalize).

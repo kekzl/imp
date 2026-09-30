@@ -244,7 +244,7 @@ TEST(RuntimeConfigTest, MaxSeqLenBindsAndYieldsToTheCliValue) {
 // model.cpp for the measured exclusions: QWEN36_MOE +1.47% real on the NVFP4 variant; LLAMA
 // gate-corpus baseline broken.
 TEST(RuntimeConfigTest, KvFp8NoHintDefaultSafeAllowlist) {
-    EXPECT_TRUE(kv_fp8_no_hint_default_safe(ModelArch::QWEN3));
+    EXPECT_FALSE(kv_fp8_no_hint_default_safe(ModelArch::QWEN3));  // #2208: greedy drift on Qwen3-8B-Q8_0
     EXPECT_TRUE(kv_fp8_no_hint_default_safe(ModelArch::QWEN3_MOE));
     EXPECT_FALSE(kv_fp8_no_hint_default_safe(ModelArch::LLAMA));
     EXPECT_FALSE(kv_fp8_no_hint_default_safe(ModelArch::QWEN36_MOE));
@@ -362,7 +362,7 @@ dtype = "fp16"
 )");
 
     RuntimeConfig cfg;
-    cfg.load_from_file(f.path);
+    EXPECT_TRUE(cfg.load_from_file(f.path));
     EXPECT_EQ(cfg.kv_cache.dtype, "fp16");
     set_(cfg, {"kv_cache.dtype=fp8"});
     EXPECT_EQ(cfg.kv_cache.dtype, "fp8");

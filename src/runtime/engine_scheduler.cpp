@@ -44,8 +44,11 @@ namespace imp {
 
 using engine_internal::build_logprob_info;
 using engine_internal::compute_step_seed;
+using engine_internal::copy_d2h_sync;
 using engine_internal::ensure_prefill_workspace;
 using engine_internal::free_prefill_buffers;
+using engine_internal::upload_residual_meta;
+using engine_internal::upload_residual_slot;
 
 // =====================================================================
 // step() — main inference loop
@@ -401,7 +404,8 @@ bool Engine::step_schedule() {
             target_ratio = 1.0f;
         }
         if (std::abs(target_ratio - green_ctx_.prefill_ratio()) > 0.1f) {
-            green_ctx_.reconfigure(target_ratio);
+            // false: init logged ERROR, is_available() is false, prefill/decode fall back to stream_.
+            (void)green_ctx_.reconfigure(target_ratio);
         }
     }
 
@@ -509,7 +513,7 @@ bool Engine::begin_perplexity_capture(std::span<const int32_t> tokens) {
         return false;
     }
     if (cudaMalloc(&ppl_capture_.d_nll, static_cast<size_t>(n) * sizeof(double)) != cudaSuccess) {
-        cudaFree(ppl_capture_.d_tokens);
+        IMP_CUDA_CHECK_LOG(cudaFree(ppl_capture_.d_tokens));
         ppl_capture_.d_tokens = nullptr;
         ppl_capture_.d_nll = nullptr;
         return false;
@@ -556,10 +560,10 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
         match_sum = 0;
         for (int i = first; i <= last; ++i)
             match_sum += h_match[i];
-        cudaFree(ppl_capture_.d_match);
+        IMP_CUDA_CHECK_LOG(cudaFree(ppl_capture_.d_match));
     }
-    cudaFree(ppl_capture_.d_tokens);
-    cudaFree(ppl_capture_.d_nll);
+    IMP_CUDA_CHECK_LOG(cudaFree(ppl_capture_.d_tokens));
+    IMP_CUDA_CHECK_LOG(cudaFree(ppl_capture_.d_nll));
     ppl_capture_ = PplCapture{};
 
     // IMP_PPL_DUMP=1: sparse per-position NLL (first 16, every 16th, tail).
@@ -1119,7 +1123,8 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
         for (int i = 0; i < N; i++) {
             int sid = valid_decode[i]->id;
             residual_meta_h_seq_ids_[i] = sid;
-            kv_manager_->allocate_residual_slot(sid);
+            // -1 handled downstream: residual_slot_of() < 0 skips the residual path for this seq.
+            (void)kv_manager_->allocate_residual_slot(sid);
         }
         if (N == 1) {
             // Single-seq path: kernel reads ring state from kv_manager's
@@ -1129,16 +1134,10 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
             state.kv_seq_id = valid_decode[0]->id;
             state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
             int slot_for_req = kv_manager_->residual_slot_of(valid_decode[0]->id);
-            if (d_kv_slot_buf_ != nullptr) {
-                if (d_kv_slot_last_uploaded_.empty() ||
-                    d_kv_slot_last_uploaded_[0] != slot_for_req) {
-                    cudaMemcpyAsync(d_kv_slot_buf_, &slot_for_req, sizeof(int),
-                                    cudaMemcpyHostToDevice, dec_stream);
-                    if (d_kv_slot_last_uploaded_.empty()) d_kv_slot_last_uploaded_.assign(1, -1);
-                    d_kv_slot_last_uploaded_[0] = slot_for_req;
-                }
+            // Failed upload: no slot buffer this step, retried next step.
+            if (d_kv_slot_buf_ != nullptr &&
+                upload_residual_slot(d_kv_slot_buf_, slot_for_req, d_kv_slot_last_uploaded_, dec_stream))
                 state.d_residual_seq_slots = d_kv_slot_buf_;
-            }
         } else {
             // Multi-seq path: build per-batch metadata arrays + upload to
             // a per-step device buffer.
@@ -1159,16 +1158,18 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
             if (residual_meta_d_buf_ != nullptr && N <= residual_meta_capacity_) {
                 int* base = residual_meta_d_buf_;
                 const ptrdiff_t stride = residual_meta_capacity_;
-                cudaMemcpyAsync(base + 0 * stride, residual_meta_h_slots_.data(), N * sizeof(int),
-                                cudaMemcpyHostToDevice, dec_stream);
-                cudaMemcpyAsync(base + 1 * stride, residual_meta_h_counts_.data(), N * sizeof(int),
-                                cudaMemcpyHostToDevice, dec_stream);
-                cudaMemcpyAsync(base + 2 * stride, residual_meta_h_widxes_.data(), N * sizeof(int),
-                                cudaMemcpyHostToDevice, dec_stream);
-                state.d_residual_seq_slots = base + 0 * stride;
-                state.d_residual_counts = base + 1 * stride;
-                state.d_residual_write_idxes = base + 2 * stride;
-                state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
+                if (const cudaError_t err = upload_residual_meta(
+                        base, stride, residual_meta_h_slots_.data(), residual_meta_h_counts_.data(),
+                        residual_meta_h_widxes_.data(), N, dec_stream);
+                    err == cudaSuccess) {
+                    state.d_residual_seq_slots = base + 0 * stride;
+                    state.d_residual_counts = base + 1 * stride;
+                    state.d_residual_write_idxes = base + 2 * stride;
+                    state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
+                } else {
+                    IMP_LOG_ERROR("residual metadata upload failed (%s); this step runs without it",
+                                  cudaGetErrorString(err));
+                }
             } else {
                 // Neither case is expected: the buffer is sized for
                 // max_batch_size at init and admission is clamped to it. Say
@@ -1198,7 +1199,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
     }
 
     // Recurrent state
-    fill_recurrent_state(*valid_decode[0], state, false, dec_stream);
+    (void)fill_recurrent_state(*valid_decode[0], state, false, dec_stream);  // reset=false cannot fail
 
     // Check if any request needs logprobs or constrained mode
     // ONE flag for "this batch is driven by a host-side constraint FSM":
@@ -1580,7 +1581,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         Tensor logits_out;
         graph_runner.set_decode_fn(
             [this, &state, &logits_out](cudaStream_t s) { executor_->forward_logits(state, logits_out, s); });
-        graph_runner.execute(dec_stream);
+        // false only without a decode fn; capture/replay failures fall back to eager inside execute().
+        (void)graph_runner.execute(dec_stream);
 
         if (logits_out.data == nullptr) {
             logits_out = executor_->get_logits_view(gpu_batch.n_sequences);
@@ -1695,7 +1697,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         // exactly covers the pre-step context. After an async-loop burst
         // (device-side tokens, no host hiddens) the cache is stale — skip
         // feeding so it never desynchronizes silently.
-        auto* ws_gate = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+        auto* ws_gate = mtp_ws_storage_.get();
         // A parked binding (batched verify serves several requests) becomes
         // the active one before the sync gate reads its cache position.
         if (mtp_bound(mtp_active_, mtp_pool_, valid_decode[0]->id))
@@ -1709,7 +1711,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                                 ws_gate->mtp_pos == cur_pos &&
                                 (ws_gate->max_seq_len <= 0 ||
                                  ws_gate->mtp_pos + mtp_req_k < ws_gate->max_seq_len);
-        Tensor h_view = executor_->view_hidden(1);  // [1, d_model] FP16
+        Tensor h_view = executor_->view_mtp_hidden(1);  // [1, d_model], or [1, hc * d_model] (Qwen4Exp)
         if (h_view.data != nullptr && mtp_synced) {
             const int hidden_dim = model_->config_.d_model;
             const int vocab_size = model_->config_.vocab_size;
@@ -1717,7 +1719,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             // Optional: apply the main model's output norm before passing
             // h_prev to MTP. Upstream vllm passes post-RMSNorm hidden states
             // in some MTP variants; gate by env so we can A/B.
-            const bool s_pre_norm_h = runtime_config_.diagnostics.mtp_prenorm_h;
+            const bool s_pre_norm_h = runtime_config_.diagnostics.mtp_prenorm_h && ws_gate->hc_count == 0;
             const void* h_for_mtp = h_view.data;
             if (void* normed = s_pre_norm_h ? mtp_prenorm_scratch(hidden_dim * sizeof(__half)) : nullptr) {
                 int64_t hd_shape[2] = {1, hidden_dim};
@@ -1740,7 +1742,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             // the first chain step's append should persist (it represents what
             // the main model actually does next). Roll back to mtp_pos_saved
             // after K-1 speculative steps so the real cache stays aligned.
-            auto* ws = static_cast<imp::MtpDraftWorkspace*>(mtp_ws_storage_);
+            auto* ws = mtp_ws_storage_.get();
             const int K = mtp_req_k;
             const int mtp_pos_before = ws->mtp_pos;
             int chain_prev_tok = next_token;
@@ -1773,10 +1775,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                     launched++;
                 }
                 int32_t h_chain[imp::kMtpMaxChainK];
-                if (launched > 0 && cudaMemcpyAsync(h_chain, ws->d_chain_tokens,
-                                                    static_cast<size_t>(launched) * sizeof(int32_t),
-                                                    cudaMemcpyDeviceToHost, decode_stream()) == cudaSuccess) {
-                    cudaStreamSynchronize(decode_stream());
+                if (launched > 0 && copy_d2h_sync(h_chain, ws->d_chain_tokens, static_cast<size_t>(launched) * sizeof(int32_t),
+                                                  decode_stream()) == cudaSuccess) {
                     for (int k = 0; k < launched; ++k) {
                         const int prediction = h_chain[k];
                         if (prediction < 0 || prediction >= vocab_size)
@@ -1812,7 +1812,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                         mtp_pool_.pending_prediction = prediction;
                     // Chain: next iter uses this prediction + the MTP's own h_final.
                     chain_prev_tok = prediction;
-                    chain_h_prev = ws->d_h_final;
+                    chain_h_prev = imp::mtp_chain_hidden(*ws);
                 }
             }
             // Roll back the speculative cache writes from K-1 chained steps.
@@ -2048,7 +2048,8 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
                 if (launch_limit == 0 || launch_limit > slice_left)
                     launch_limit = slice_left;
             }
-            try_launch_async_graph_loop(dreq, last_token, dec_stream, launch_limit);
+            // Opportunistic: false = not launched, the next step() decodes eagerly.
+            (void)try_launch_async_graph_loop(dreq, last_token, dec_stream, launch_limit);
         }
     }
 
@@ -2077,7 +2078,8 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             // device cache's take-over before each step (both in prepare_decode_step_host).
             model_->ngram_table() == nullptr && !experts_on_host_;
         if (pipeline_compatible && dreq->status == RequestStatus::DECODING && !dreq->output_tokens.empty()) {
-            try_launch_constrained_pipeline(dreq, dec_stream);
+            // Opportunistic: false = not launched, the next step() decodes eagerly.
+            (void)try_launch_constrained_pipeline(dreq, dec_stream);
         }
     }
 }

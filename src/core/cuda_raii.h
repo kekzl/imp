@@ -3,6 +3,8 @@
 #include <cuda_runtime.h>
 #include <utility>
 
+#include "core/logging.h"
+
 namespace imp {
 
 // RAII wrapper for cudaStream_t.
@@ -12,20 +14,44 @@ public:
     CudaStream() = default;
 
     // Create a stream with the given flags. Returns false from create() on failure.
-    [[nodiscard]] bool create(unsigned int flags = cudaStreamNonBlocking) {
-        if (stream_)
-            cudaStreamDestroy(stream_);
+    [[nodiscard]] bool create(unsigned int flags = cudaStreamNonBlocking) { return try_create(flags) == cudaSuccess; }
+
+    // create() that returns the CUDA error for logging.
+    [[nodiscard]] cudaError_t try_create(unsigned int flags = cudaStreamNonBlocking) {
+        reset();
         cudaError_t err = cudaStreamCreateWithFlags(&stream_, flags);
-        if (err != cudaSuccess) {
+        if (err != cudaSuccess)
             stream_ = nullptr;
-            return false;
-        }
-        return true;
+        return err;
+    }
+
+    // cudaStreamCreateWithPriority: lower number = higher priority.
+    [[nodiscard]] cudaError_t create_with_priority(unsigned int flags, int priority) {
+        reset();
+        cudaError_t err = cudaStreamCreateWithPriority(&stream_, flags, priority);
+        if (err != cudaSuccess)
+            stream_ = nullptr;
+        return err;
+    }
+
+    // Stream bound to a green context; must be reset() before that context is destroyed.
+    [[nodiscard]] cudaError_t create_on_ctx(cudaExecutionContext_t ctx, unsigned int flags, int priority) {
+        reset();
+        cudaError_t err = cudaExecutionCtxStreamCreate(&stream_, ctx, flags, priority);
+        if (err != cudaSuccess)
+            stream_ = nullptr;
+        return err;
+    }
+
+    // Destroy the held stream now (does not wait for queued work).
+    void reset() noexcept {
+        if (stream_)
+            IMP_CUDA_CHECK_LOG(cudaStreamDestroy(std::exchange(stream_, nullptr)));
     }
 
     ~CudaStream() {
         if (stream_)
-            cudaStreamDestroy(stream_);
+            IMP_CUDA_CHECK_LOG(cudaStreamDestroy(stream_));
     }
 
     CudaStream(const CudaStream&) = delete;
@@ -35,7 +61,7 @@ public:
     CudaStream& operator=(CudaStream&& o) noexcept {
         if (this != &o) {
             if (stream_)
-                cudaStreamDestroy(stream_);
+                IMP_CUDA_CHECK_LOG(cudaStreamDestroy(stream_));
             stream_ = std::exchange(o.stream_, nullptr);
         }
         return *this;
@@ -58,20 +84,26 @@ class CudaEvent {
 public:
     CudaEvent() = default;
 
-    [[nodiscard]] bool create(unsigned int flags = cudaEventDisableTiming) {
-        if (event_)
-            cudaEventDestroy(event_);
+    [[nodiscard]] bool create(unsigned int flags = cudaEventDisableTiming) { return try_create(flags) == cudaSuccess; }
+
+    // create() that returns the CUDA error for logging. cudaEventDefault = timing enabled.
+    [[nodiscard]] cudaError_t try_create(unsigned int flags = cudaEventDisableTiming) {
+        reset();
         cudaError_t err = cudaEventCreateWithFlags(&event_, flags);
-        if (err != cudaSuccess) {
+        if (err != cudaSuccess)
             event_ = nullptr;
-            return false;
-        }
-        return true;
+        return err;
+    }
+
+    // Destroy the held event now.
+    void reset() noexcept {
+        if (event_)
+            IMP_CUDA_CHECK_LOG(cudaEventDestroy(std::exchange(event_, nullptr)));
     }
 
     ~CudaEvent() {
         if (event_)
-            cudaEventDestroy(event_);
+            IMP_CUDA_CHECK_LOG(cudaEventDestroy(event_));
     }
 
     CudaEvent(const CudaEvent&) = delete;
@@ -81,7 +113,7 @@ public:
     CudaEvent& operator=(CudaEvent&& o) noexcept {
         if (this != &o) {
             if (event_)
-                cudaEventDestroy(event_);
+                IMP_CUDA_CHECK_LOG(cudaEventDestroy(event_));
             event_ = std::exchange(o.event_, nullptr);
         }
         return *this;
@@ -92,7 +124,7 @@ public:
     explicit operator bool() const noexcept { return event_ != nullptr; }
 
     // Convenience: ensure created, then record on stream.
-    bool record(cudaStream_t stream) {
+    [[nodiscard]] bool record(cudaStream_t stream) {
         if (!event_ && !create())
             return false;
         return cudaEventRecord(event_, stream) == cudaSuccess;
@@ -113,7 +145,7 @@ public:
 
     ~CudaGraph() {
         if (graph_)
-            cudaGraphDestroy(graph_);
+            IMP_CUDA_CHECK_LOG(cudaGraphDestroy(graph_));
     }
 
     CudaGraph(const CudaGraph&) = delete;
@@ -123,7 +155,7 @@ public:
     CudaGraph& operator=(CudaGraph&& o) noexcept {
         if (this != &o) {
             if (graph_)
-                cudaGraphDestroy(graph_);
+                IMP_CUDA_CHECK_LOG(cudaGraphDestroy(graph_));
             graph_ = std::exchange(o.graph_, nullptr);
         }
         return *this;
@@ -132,7 +164,7 @@ public:
     // Destroy the held graph (if any) and adopt `g`.
     void reset(cudaGraph_t g = nullptr) noexcept {
         if (graph_)
-            cudaGraphDestroy(graph_);
+            IMP_CUDA_CHECK_LOG(cudaGraphDestroy(graph_));
         graph_ = g;
     }
 
@@ -154,7 +186,7 @@ public:
 
     ~CudaGraphExec() {
         if (exec_)
-            cudaGraphExecDestroy(exec_);
+            IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(exec_));
     }
 
     CudaGraphExec(const CudaGraphExec&) = delete;
@@ -164,7 +196,7 @@ public:
     CudaGraphExec& operator=(CudaGraphExec&& o) noexcept {
         if (this != &o) {
             if (exec_)
-                cudaGraphExecDestroy(exec_);
+                IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(exec_));
             exec_ = std::exchange(o.exec_, nullptr);
         }
         return *this;
@@ -173,7 +205,7 @@ public:
     // Destroy the held exec (if any) and adopt `e`.
     void reset(cudaGraphExec_t e = nullptr) noexcept {
         if (exec_)
-            cudaGraphExecDestroy(exec_);
+            IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(exec_));
         exec_ = e;
     }
 

@@ -3,7 +3,7 @@
 // One formula for the recurrent (SSM/GDN) state footprint, and the message an operator
 // reads when the pool does not fit. The formula used to live twice and disagree:
 // runtime/vram_budget.cpp charged conv_channels*(conv_kernel-1)*4 with no alignment,
-// while memory/ssm_state.cu's allocator took
+// while memory/ssm_state.cpp's allocator took
 // align256(conv_channels*conv_kernel*4) + align256(h bytes) per layer, planning short of
 // what it actually allocates (the direction that oversubscribes the card, MEMORY.md D14).
 // The allocator's shape wins, because it is the one that reaches cudaMalloc. Header-only
@@ -69,7 +69,7 @@ inline size_t ssm_pool_bytes(const SsmStateGeometry& g, int slots, int reserved_
 // layers whose state slab is missing does not degrade: every GDN layer reads a null
 // pointer and the output is garbage for every request, while the only signal used to be
 // one WARN at startup. A dense model has no such layers and is unaffected.
-inline bool must_refuse_without_ssm_state(int n_ssm_layers, bool pool_init_ok) {
+[[nodiscard]] inline bool must_refuse_without_ssm_state(int n_ssm_layers, bool pool_init_ok) {
     return n_ssm_layers > 0 && !pool_init_ok;
 }
 

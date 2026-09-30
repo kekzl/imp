@@ -53,7 +53,8 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit) {
 
     {
         size_t f = 0, t = 0;
-        vram_budget_mem_get_info(&f, &t);
+        // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+        (void)vram_budget_mem_get_info(&f, &t);
         if (f < 256ULL * 1024 * 1024)
             return 0;
     }
@@ -201,7 +202,7 @@ std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req,
 
     // Recurrent state for SSM/GDN layers: pointers are constant for
     // single-sequence decode, so they're safe to bake into the graph.
-    fill_recurrent_state(*req, state_template, /*reset=*/false, stream);
+    (void)fill_recurrent_state(*req, state_template, /*reset=*/false, stream);  // reset=false cannot fail
     bind_mrope_single_(state_template, *req, stream);
 
     // Upload banned tokens for graph-captured logit masking
@@ -376,7 +377,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
 
     // Recurrent state for SSM/GDN layers: pointers are constant for
     // single-sequence decode, so they're safe to bake into the graph.
-    fill_recurrent_state(*req, state_template, /*reset=*/false, stream);
+    (void)fill_recurrent_state(*req, state_template, /*reset=*/false, stream);  // reset=false cannot fail
     bind_mrope_single_(state_template, *req, stream);
 
     // Upload banned tokens to device for graph-captured logit masking
@@ -476,7 +477,7 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
         p.h_token = PinnedBuffer::acquire(cuda_host_pinned_allocator(), sizeof(int32_t));
     ok = ok && !p.h_token.empty();
     if (ok && !p.ev)
-        ok = cudaEventCreateWithFlags(&p.ev, cudaEventDisableTiming) == cudaSuccess;
+        ok = p.ev.create(cudaEventDisableTiming);
     if (!ok) {
         teardown_constrained_pipeline(/*synchronize=*/false);
         return false;
@@ -518,7 +519,7 @@ bool Engine::try_launch_constrained_pipeline(std::shared_ptr<Request> req, cudaS
     st.n_sequences = 1;
     st.max_blocks_per_seq = max_blocks_per_seq;
     st.is_prefill = false;
-    fill_recurrent_state(*req, st, /*reset=*/false, stream);
+    (void)fill_recurrent_state(*req, st, /*reset=*/false, stream);  // reset=false cannot fail
     bind_mrope_single_(st, *req, stream);
     if (p.d_banned) {
         st.d_banned_tokens = p.d_banned;
@@ -611,7 +612,7 @@ int Engine::step_constrained_pipeline() {
         const int64_t vocab = model_->config().vocab_size;
         int64_t shape[2] = {1, vocab};
         row_logits = Tensor(p.d_frows + static_cast<size_t>(p.fnext - 2) * vocab, QType::F32, 2,
-                            shape, /*borrowed=*/true);
+                            shape, /*on_device=*/true);
         tick_logits = &row_logits;
     }
     executor_->masked_sample_async(p.state, *tick_logits, p.d_token, p.h_token.as<int32_t>(),
@@ -626,7 +627,8 @@ int Engine::step_constrained_pipeline() {
     bool more = (p.produced + 1 < p.budget) &&
                 (static_cast<int>(req->output_tokens.size()) + 1 < req->max_tokens);
     if (more && !consuming)
-        p.runner.execute(stream);
+        // false only without a decode fn; capture/replay failures fall back to eager inside execute().
+        (void)p.runner.execute(stream);
     p.forward_in_flight = more && !consuming;
 
     // 3. Wait only for the sampled token (GPU continues in forward N+1).
@@ -683,7 +685,8 @@ int Engine::step_constrained_pipeline() {
                                            stream));
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(p.d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice,
                                            stream));
-        p.runner.execute(stream);
+        // false only without a decode fn; capture/replay failures fall back to eager inside execute().
+        (void)p.runner.execute(stream);
         p.forward_in_flight = true;
         p.fdraft.clear();
         p.fnext = 0;

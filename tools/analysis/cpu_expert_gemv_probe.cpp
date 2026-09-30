@@ -75,7 +75,7 @@ void gemv_expert(const uint8_t* packed, const uint8_t* scales, const float* x, f
         for (int kb = 0; kb < kK / 16; ++kb) {
             const float sc = kFp8.v[s[kb]];
             float blk = 0.0f;
-            const uint8_t* wb = w + kb * 8;
+            const uint8_t* wb = w + static_cast<size_t>(kb) * 8;
             for (int j = 0; j < 8; ++j) {
                 const uint8_t byte = wb[j];
                 blk += kFp4[byte & 0xF] * x[kb * 16 + j * 2];

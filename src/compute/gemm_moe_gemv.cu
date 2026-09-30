@@ -1,5 +1,6 @@
 #include "compute/gemm.h"
 #include "compute/gemm_internal.cuh"
+#include "compute/gemm_internal_device.cuh"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>

@@ -3,7 +3,7 @@
 // CUTLASS always uses two descriptors for NVFP4 (sm120_blockscaled_mma_tma.hpp:298-311);
 // the FUSED variant here is hypothetical and benched against real TMA, not per-thread cp.async.
 
-#include "bench/tma_block_scale_bench.h"
+#include "tma_block_scale_bench.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cstdint>

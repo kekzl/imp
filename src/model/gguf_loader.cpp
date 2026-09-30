@@ -954,7 +954,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     // gpt-oss residual-stream 2^-4 rescale (#547): FP16 hidden overflows to inf/NaN without it.
     // RMSNorm/lm_head are scale-invariant so scaling every residual contributor is exact.
     // Handled elsewhere: embeddings (cfg.embed_scale), expert down weights (tensor_scales in
-    // pre_dequant_phase3_nvfp4_decode.cu). Handled here into fresh host_owned_buffers_ (GGUF
+    // pre_dequant_phase3_nvfp4_decode.cpp). Handled here into fresh host_owned_buffers_ (GGUF
     // mmap is read-only): attention Wo + o_bias, expert down bias.
     if (cfg.arch == ModelArch::GPT_OSS) {
         // gpt-oss's blk.N.post_attention_norm.weight is its PRE-FFN norm (llama convention routes
@@ -1075,13 +1075,16 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
     // Pre-tokenizer type (e.g. "default", "llama3", "deepseek-llm", "qwen2")
     auto it_pre = metadata.find("tokenizer.ggml.pre");
-    if (it_pre != metadata.end() && !it_pre->second.str_val.empty()) {
+    const bool has_pre = it_pre != metadata.end() && !it_pre->second.str_val.empty();
+    if (has_pre) {
         tokenizer->set_pre_tokenizer(it_pre->second.str_val);
         IMP_LOG_INFO("Tokenizer pre-tokenizer: %s", it_pre->second.str_val.c_str());
-        // GGUF drops tokenizer.json's normalizer; of the HF sources only Qwen's declares NFC.
-        if (tok_type != "bert")
-            tokenizer->set_nfc(it_pre->second.str_val == "qwen2" || it_pre->second.str_val == "qwen35");
     }
+    // GGUF drops tokenizer.json's normalizer; of the HF sources only Qwen's declares NFC. No pre key
+    // (Gemma-4) is not Qwen: NFC there composed "e" + U+0301 that HF keeps apart.
+    if (tok_type != "bert")
+        tokenizer->set_nfc(has_pre &&
+                           (tokenizer->pre_tokenizer() == "qwen2" || tokenizer->pre_tokenizer() == "qwen35"));
 
     // add_bos_token flag (Qwen3: 0, LLaMA: 1)
     auto it_add_bos = metadata.find("tokenizer.ggml.add_bos_token");
@@ -1138,7 +1141,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             return nullptr;
         }
 
-        tokenizer->load_vocab(tokens, scores, bos_id, eos_id);
+        // tokens is non-empty (branch condition) and load_vocab refuses only an empty vocab: cannot fail.
+        (void)tokenizer->load_vocab(tokens, scores, bos_id, eos_id);
 
         // Load BPE merge rules (for GPT2-style tokenizers and gemma4)
         if (tok_type == "gpt2" || tok_type == "gemma4") {

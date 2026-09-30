@@ -80,7 +80,7 @@ static Tokenizer make_spm_tokenizer() {
     }
 
     Tokenizer tok;
-    tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2));
     tok.set_type("spm");
     tok.set_add_bos(true);
     tok.set_add_space_prefix(true);
@@ -179,7 +179,7 @@ static Tokenizer make_gpt2_tokenizer() {
     scores.push_back(0.0f);
 
     Tokenizer tok;
-    tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2));
     tok.set_type("gpt2");
     tok.set_add_bos(false);
 
@@ -437,7 +437,7 @@ static Tokenizer make_byte_bpe(const std::vector<std::string>& extra, const std:
     for (const auto& e : extra)
         tokens.push_back(e);
     Tokenizer tok;
-    tok.load_vocab(tokens, std::vector<float>(tokens.size(), 0.0f), 0, 0);
+    EXPECT_TRUE(tok.load_vocab(tokens, std::vector<float>(tokens.size(), 0.0f), 0, 0));
     tok.set_type("gpt2");
     tok.set_add_bos(false);
     tok.load_merges(merges);
@@ -537,7 +537,7 @@ static Tokenizer make_gemma4_tokenizer() {
     }
 
     Tokenizer tok;
-    tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2);
+    EXPECT_TRUE(tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2));
     tok.set_type("gemma4");
     tok.set_add_bos(false);
     tok.set_add_space_prefix(false);  // Gemma handles ▁ internally
@@ -719,6 +719,15 @@ TEST(Qwen2PreTokenizeTest, Qwen35RoutesToQwen2NotGpt2) {
     EXPECT_NE(tok.encode("x->y", /*no_prefix=*/true), qwen2_ids);
 }
 
+// #2270: GGUF pre "deepseek-r1-qwen" (DeepSeek-R1-Distill-Qwen) is the Qwen2 regex + NFC.
+TEST(Qwen2PreTokenizeTest, DeepSeekR1QwenMapsToQwen2) {
+    Tokenizer tok = make_gpt2_tokenizer();
+    tok.set_pre_tokenizer("deepseek-r1-qwen");
+    EXPECT_EQ(tok.pre_tokenizer(), "qwen2");
+    tok.set_pre_tokenizer("qwen35");
+    EXPECT_EQ(tok.pre_tokenizer(), "qwen35");
+}
+
 // #657: expected chunks verified against HF tokenizers pre_tokenize_str on the gpt-oss-20b
 // tokenizer.json (rendered as plain space/newline here).
 
@@ -791,6 +800,117 @@ TEST(Cl100kPreTokenizeTest, DigitTriplesCaseBlindStandaloneContractions) {
               (Chunks{"a", "->", "b", " https", "://", "x", ".com", "/y"}));
 }
 
+// Unicode classes, not a non-ASCII-is-a-letter guess. Truths: HF tokenizers pre_tokenize_str on
+// Qwen3-0.6B, Qwen3.8-27B, Phi-4-reasoning-plus, gpt-oss-20b, Nemotron-3-Nano.
+#define EMOJI "\xf0\x9f\x98\x80"
+TEST(PreTokenizeUnicodeTest, EmojiIsASymbolNotALetter) {
+    EXPECT_EQ(qwen2_pre_tokenize(EMOJI ",ZX"), (Chunks{EMOJI ",", "ZX"}));
+    EXPECT_EQ(qwen2_pre_tokenize(EMOJI ".a"), (Chunks{EMOJI ".", "a"}));
+    EXPECT_EQ(qwen35_pre_tokenize(EMOJI ",ZX"), (Chunks{EMOJI ",", "ZX"}));
+    EXPECT_EQ(cl100k_pre_tokenize(EMOJI ",ZX"), (Chunks{EMOJI ",", "ZX"}));
+    EXPECT_EQ(o200k_pre_tokenize(EMOJI ".a"), (Chunks{EMOJI ".", "a"}));
+}
+
+TEST(PreTokenizeUnicodeTest, WhitespaceDigitsAndCjkPunctuation) {
+    EXPECT_EQ(qwen2_pre_tokenize("a\xc2\xa0"
+                                 "b"),
+              (Chunks{"a",
+                      "\xc2\xa0"
+                      "b"}));  // U+00A0 is \s
+    EXPECT_EQ(qwen2_pre_tokenize("x\xe2\x80\x89"
+                                 "y"),
+              (Chunks{"x",
+                      "\xe2\x80\x89"
+                      "y"}));  // U+2009
+    EXPECT_EQ(qwen2_pre_tokenize("  \xe3\x80\x80"
+                                 "x"),
+              (Chunks{"  ",
+                      "\xe3\x80\x80"
+                      "x"}));  // U+3000
+    // "²١٢": \p{N}, one per chunk under qwen2's single-digit rule.
+    EXPECT_EQ(qwen2_pre_tokenize("\xc2\xb2\xd9\xa1\xd9\xa2"), (Chunks{"\xc2\xb2", "\xd9\xa1", "\xd9\xa2"}));
+    // "中文，标点。": the fullwidth comma prefixes the next letter run.
+    EXPECT_EQ(qwen2_pre_tokenize("\xe4\xb8\xad\xe6\x96\x87\xef\xbc\x8c\xe6\xa0\x87\xe7\x82\xb9\xe3\x80\x82"),
+              (Chunks{"\xe4\xb8\xad\xe6\x96\x87", "\xef\xbc\x8c\xe6\xa0\x87\xe7\x82\xb9", "\xe3\x80\x82"}));
+}
+
+TEST(PreTokenizeUnicodeTest, MarksJoinLetterRunsOnlyInQwen35) {
+    // U+05D0 (Lo) + U+05B0 (Mn) + "x!": qwen2 splits at the mark, qwen35's [\p{L}\p{M}]+ keeps it.
+    EXPECT_EQ(qwen2_pre_tokenize("\xd7\x90\xd6\xb0x!"), (Chunks{"\xd7\x90", "\xd6\xb0x", "!"}));
+    EXPECT_EQ(qwen35_pre_tokenize("\xd7\x90\xd6\xb0x!"), (Chunks{"\xd7\x90\xd6\xb0x", "!"}));
+    EXPECT_EQ(qwen2_pre_tokenize("a\xd6\xb0!"), (Chunks{"a", "\xd6\xb0!"}));
+    EXPECT_EQ(qwen35_pre_tokenize("a\xd6\xb0!"), (Chunks{"a\xd6\xb0", "!"}));
+}
+
+TEST(PreTokenizeUnicodeTest, CasedRunsUseUnicodeCase) {
+    // "ÀbcÉF": non-ASCII uppercase opens a new run (it counted as lowercase before).
+    EXPECT_EQ(o200k_pre_tokenize("\xc3\x80"
+                                 "bc\xc3\x89"
+                                 "F"),
+              (Chunks{"\xc3\x80"
+                      "bc",
+                      "\xc3\x89"
+                      "F"}));
+    // "日ABC": Lo is in both case classes; alt 1 backtracks to end after it.
+    EXPECT_EQ(o200k_pre_tokenize("\xe6\x97\xa5"
+                                 "ABC"),
+              (Chunks{"\xe6\x97\xa5", "ABC"}));
+    EXPECT_EQ(nemotron_pre_tokenize("\xc3\x80"
+                                    "bc\xc3\x89"
+                                    "F"),
+              (Chunks{"\xc3\x80"
+                      "bc",
+                      "\xc3\x89"
+                      "F"}));
+    // Nemotron-H: no contraction alternative, single digits.
+    EXPECT_EQ(o200k_pre_tokenize("don't"), (Chunks{"don't"}));
+    EXPECT_EQ(nemotron_pre_tokenize("don't"), (Chunks{"don", "'t"}));
+    EXPECT_EQ(nemotron_pre_tokenize("12345"), (Chunks{"1", "2", "3", "4", "5"}));
+}
+#undef EMOJI
+
+// DeepSeek-V2-shaped Split sequence. Truths: HF tokenizers 0.23.2 pre_tokenize_str on
+// Sequence([Split(r, "isolated") for r in the steps] + [Digits(individual_digits=True)]).
+TEST(PreTokenizeSplitSequenceTest, MatchesHfOnDeepSeekShapedSteps) {
+    auto seq = compile_split_sequence({"re:[\r\n]", "re:\\s?[A-Za-z\xc3\x80-\xc3\xbf]+",
+                                       "re:\\s?[!-/:-~\xe3\x80\x80-\xe3\x80\x82]+", "re:\\s+$",
+                                       "re:[\xe4\xb8\x80-\xe9\xbe\xa5]+", "digits:1"});
+    ASSERT_NE(seq, nullptr);
+    auto split = [&](const std::string& s) { return split_sequence_pre_tokenize(*seq, s); };
+    EXPECT_EQ(split("  two leading"), (Chunks{" ", " two", " leading"}));
+    EXPECT_EQ(split("Hello, world!\n"), (Chunks{"Hello", ",", " world", "!", "\n"}));
+    EXPECT_EQ(split("x = 12345;  "), (Chunks{"x", " =", " ", "1", "2", "3", "4", "5", ";", "  "}));
+    EXPECT_EQ(split("\xe4\xb8\xad\xe6\x96\x87"
+                    "abc\xe3\x80\x82"),
+              (Chunks{"\xe4\xb8\xad\xe6\x96\x87", "abc", "\xe3\x80\x82"}));
+    EXPECT_EQ(split("caf\xc3\xa9  \xc3\xa9t\xc3\xa9  "),
+              (Chunks{"caf", "\xc3\xa9", " ", " \xc3\xa9", "t", "\xc3\xa9", "  "}));
+    EXPECT_EQ(split("a\xe3\x80\x80"
+                    "b"),
+              (Chunks{"a",
+                      "\xe3\x80\x80"
+                      "b"}));  // U+3000 is the \s of \s?
+    EXPECT_EQ(split("ab  \n  cd"), (Chunks{"ab", "  ", "\n", " ", " cd"}));
+    EXPECT_EQ(split(" \xc2\xb2x"), (Chunks{" ", "\xc2\xb2", "x"}));  // U+00B2 is a Digits piece
+}
+
+// Onig (Ruby syntax) $ also matches before any "\n", not only at the end.
+TEST(PreTokenizeSplitSequenceTest, TrailingSpaceDollarIsEndOfLine) {
+    auto seq = compile_split_sequence({"re:\\s+$"});
+    ASSERT_NE(seq, nullptr);
+    EXPECT_EQ(split_sequence_pre_tokenize(*seq, "ab  \ncd"), (Chunks{"ab", "  ", "\ncd"}));
+    EXPECT_EQ(split_sequence_pre_tokenize(*seq, "ab \t\n\ncd  "), (Chunks{"ab", " \t\n", "\ncd", "  "}));
+    EXPECT_EQ(split_sequence_pre_tokenize(*seq, "a  b"), (Chunks{"a  b"}));
+}
+
+TEST(PreTokenizeSplitSequenceTest, RefusesRegexItCannotMatchExactly) {
+    EXPECT_EQ(compile_split_sequence({"re:\\p{L}+"}), nullptr);
+    EXPECT_EQ(compile_split_sequence({"re:[^a-z]+"}), nullptr);
+    EXPECT_EQ(compile_split_sequence({"re:[a-z]+|[0-9]+"}), nullptr);
+    EXPECT_EQ(compile_split_sequence({"!"}), nullptr);
+    EXPECT_EQ(compile_split_sequence({}), nullptr);
+}
+
 // HF matches an added token atomically iff normalized=false (special only governs decode
 // -skipping). Qwen3's <think>/</think>/<tool_call> ship special=false, normalized=false and
 // MUST tokenize atomically, not BPE-split; a regression breaks the <think>-as-stop-token
@@ -850,6 +970,21 @@ TEST(NfcNormalize, LatinCombiningAndHangulJamoCompose) {
     EXPECT_EQ(nfc_normalize("\xed\x95\x9c"), "\xed\x95\x9c");
 }
 
+// Full UAX #15; truths from Python unicodedata.normalize("NFC").
+TEST(NfcNormalize, DecomposeReorderRecompose) {
+    EXPECT_EQ(nfc_normalize("u\xcc\x88\xcc\x81"), "\xc7\x98");          // u + U+0308 + U+0301 -> U+01D8
+    EXPECT_EQ(nfc_normalize("\xc3\xbc\xcc\x81"), "\xc7\x98");           // U+00FC + U+0301 -> U+01D8
+    EXPECT_EQ(nfc_normalize("e\xcc\xa3\xcc\x82"), "\xe1\xbb\x87");      // e + U+0323 + U+0302 -> U+1EC7
+    EXPECT_EQ(nfc_normalize("e\xcc\x82\xcc\xa3"), "\xe1\xbb\x87");      // marks out of canonical order
+    EXPECT_EQ(nfc_normalize("\xe2\x84\xa6"), "\xce\xa9");               // U+2126 OHM -> U+03A9 (singleton)
+    EXPECT_EQ(nfc_normalize("a\xcc\xa8\xcc\x81"), "\xc4\x85\xcc\x81");  // U+0105 + U+0301: no composite
+    EXPECT_EQ(nfc_normalize("\xe1\x84\x80\xe1\x85\xa1\xe1\x86\xa8"), "\xea\xb0\x81");  // L V T -> U+AC01
+    // A malformed byte passes through untouched next to a composing pair.
+    EXPECT_EQ(nfc_normalize("\xff"
+                            "e\xcc\x81"),
+              "\xff\xc3\xa9");
+}
+
 // HF: tokenizer.json without an NFC normalizer (gpt-oss, Nemotron, Phi-4: null; Gemma-4: Replace)
 // passes NFD input through; Qwen (NFC) composes.
 TEST(TokenizerNormalizer, NfcOnlyWhenTheJsonDeclaresIt) {
@@ -883,6 +1018,46 @@ TEST(TokenizerAddedTokens, NormalizedTrueIsNotPromoted) {
     // <plain>: normalized=true -> must NOT be matched as the atomic id 201.
     EXPECT_FALSE(contains_id(tok.encode("<plain>"), 201))
         << "normalized=true token should not be promoted to atomic matching";
+}
+
+// HF AddedToken lstrip/rstrip (Phi-4 <|im_end|>, <think>): the match swallows the adjacent
+// whitespace run. HF on Phi-4: "<think>\nreasoning\n</think>" -> [<think>, reason, ing, </think>].
+TEST(TokenizerAddedTokens, LstripRstripSwallowAdjacentWhitespace) {
+    std::string path = write_temp_tokenizer_json(R"JSON({
+  "model": { "type": "BPE", "vocab": { "a": 0, "b": 1, "Ġ": 2, "Ċ": 3 }, "merges": [] },
+  "added_tokens": [
+    { "id": 10, "content": "<s1>", "special": true, "normalized": false, "lstrip": true, "rstrip": true },
+    { "id": 11, "content": "<k1>", "special": true, "normalized": false }
+  ]
+})JSON");
+    Tokenizer tok;
+    ASSERT_TRUE(tok.load(path));
+    std::remove(path.c_str());
+    EXPECT_EQ(tok.strip_flags(10), 3);
+    EXPECT_EQ(tok.strip_flags(11), 0);
+    EXPECT_EQ(tok.encode("a \n<s1>\n b", true), (std::vector<int32_t>{0, 10, 1}));
+    EXPECT_EQ(tok.encode("a <k1> b", true), (std::vector<int32_t>{0, 2, 11, 2, 1}));
+}
+
+// Gemma-4 tokenizer.json (BPE on raw UTF-8, Replace " " -> U+2581, no ByteLevel) is the GGUF
+// "gemma4" tokenizer; as "spm" it prefixed a U+2581 and merged by score (31/196 HF mismatches).
+TEST(TokenizerNormalizer, Gemma4JsonIsTheGemma4Tokenizer) {
+    const auto load = [](const std::string& to) {
+        std::string path = write_temp_tokenizer_json(
+            R"JSON({"model": {"type": "BPE", "vocab": {"a": 0}, "merges": []},
+                    "normalizer": {"type": "Replace", "pattern": {"String": " "}, "content": ")JSON" +
+            to +
+            R"JSON("},
+                    "pre_tokenizer": {"type": "Split", "pattern": {"String": " "}, "behavior": "MergedWithPrevious"}})JSON");
+        Tokenizer tok;
+        EXPECT_TRUE(tok.load(path));
+        std::remove(path.c_str());
+        return tok;
+    };
+    Tokenizer gemma = load("\xe2\x96\x81");
+    EXPECT_EQ(gemma.type(), "gemma4");
+    EXPECT_FALSE(gemma.add_space_prefix());
+    EXPECT_NE(load("x").type(), "gemma4");
 }
 
 }  // namespace

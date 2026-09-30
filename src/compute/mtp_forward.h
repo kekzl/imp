@@ -207,7 +207,26 @@ struct MtpDraftWorkspace {
     // to the widest feed a prefill chunk can produce.
     void* d_prenorm_rows = nullptr;
     int prenorm_rows_cap = 0;
+
+    // Qwen4Exp hyper-connection scratch (hc_count > 0): the head reads and writes an hc stream
+    // [hc_count, hidden] instead of one hidden row. d_hc_x holds multi_hidden after a step.
+    int hc_count = 0;
+    int hc_lowrank = 0;
+    void* d_hc_x = nullptr;       // [hc * hidden] stream state, next step's h_prev
+    void* d_hc_normed = nullptr;  // [hc * hidden] grouped norm, also pre_fc_norm_hidden output
+    void* d_hc_mixw = nullptr;    // [hc * hidden] mix gate logits
+    void* d_hc_low = nullptr;     // [hc_lowrank]
+    void* d_hc_inj = nullptr;     // [hc] inject weights of the pending combine
 };
+
+// Width of one h_prev row: hidden_dim, or hc_count x hidden_dim on a Qwen4Exp head.
+inline int mtp_h_prev_cols(const MtpDraftWorkspace& ws) {
+    return ws.hc_count > 0 ? ws.hc_count * ws.hidden_dim : ws.hidden_dim;
+}
+// h_prev of the next chained step: the head's h_final, or its multi_hidden hc stream (Qwen4Exp).
+inline const void* mtp_chain_hidden(const MtpDraftWorkspace& ws) {
+    return ws.hc_count > 0 ? ws.d_hc_x : ws.d_h_final;
+}
 
 // Rows per batched prefill-feed pass (mtp_feed_batch). Bounds the batch
 // scratch above: ~61 MiB at Qwen3.8-27B dims (H=5120, d_ff=17408, 24 heads).
@@ -226,7 +245,7 @@ constexpr int kMtpFeedRows = 256;
 // fast top-W kernel fills ws.d_topk and rank 0 lands in d_out_token. Caller drains the
 // whole chain with one D2H+sync at the end.
 // Returns false on any precondition violation (mtp not loaded, null buffers).
-bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp, const Tensor& main_tok_emb,
+[[nodiscard]] bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp, const Tensor& main_tok_emb,
                     const Tensor& main_lm_head, MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
                     int* out_token_id, cudaStream_t stream, int* out_topk_ids = nullptr, int top_w = 0,
                     const NvFP4QuantResult* lm_head_nvfp4 = nullptr, const int32_t* d_prev_token = nullptr,
@@ -238,7 +257,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
 // over [0,mtp_pos+row+1)). Feed-only: no logits/argmax/sync. Advances ws.mtp_pos by n_rows.
 // Requires ws.feed_rows_cap>=n_rows (dense-MLP head w/ attention+KV cache).
 // h_tokens: host ptr (uploaded internally); d_hidden_rows: [n_rows,hidden_dim] FP16 device.
-bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_rows,
+[[nodiscard]] bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_rows,
                     const MtpHead& mtp, const Tensor& main_tok_emb,
                     MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream);
 // Ragged multi-slot feed (batched verify): row r = (h_tokens[r], d_hidden_all[h_src_rows[r]])
@@ -247,7 +266,7 @@ bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_ro
 // it). Writes final_norm of every row to ws.d_b_h_final[n_rows,H]; caller advances
 // mtp_pos/slot_pos. post_norm (optional): apply target's final norm before feed
 // (diagnostics.mtp_prenorm_h, upstream convention).
-bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, const int* h_src_rows,
+[[nodiscard]] bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, const int* h_src_rows,
                              int n_rows, const int* h_slots, const int* h_pos, const MtpHead& mtp,
                              const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim,
                              cudaStream_t stream, const Tensor* post_norm = nullptr,
@@ -264,9 +283,9 @@ void mtp_gather_rows(const void* d_src, const int* d_idx, void* d_dst, int cols,
 // Both break exact-value ties by lowest index within a pass; fast kernel's pass structure
 // can order EQUAL values differently across slice boundaries (test needs distinct values).
 // logits FP32 when fp32_logits (NVFP4 lm_head cache path), FP16 otherwise.
-bool mtp_topw_fast(const void* d_logits, bool fp32_logits, int vocab_size, int top_w, MtpDraftWorkspace& ws,
+[[nodiscard]] bool mtp_topw_fast(const void* d_logits, bool fp32_logits, int vocab_size, int top_w, MtpDraftWorkspace& ws,
                    cudaStream_t stream);
-bool mtp_topw_reference(const void* d_logits, bool fp32_logits, int vocab_size, int top_w,
+[[nodiscard]] bool mtp_topw_reference(const void* d_logits, bool fp32_logits, int vocab_size, int top_w,
                         MtpDraftWorkspace& ws, cudaStream_t stream);
 
 // Applies YaRN-aware mrope rotation to one MTP step's Q[n_heads,head_dim]/K[n_kv_heads,
@@ -282,11 +301,11 @@ void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head
 // Allocates the workspace from the VRAM allocator; caller keeps ws alive (typically
 // Engine, session lifetime). MoE buffers sized from n_experts/top_k/expert_d_ff/
 // shared_d_ff; pass 0 for any to disable the MoE block (back-compat 2-arg form).
-bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
+[[nodiscard]] bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size,
                             int n_experts = 0, int top_k = 0,
                             int expert_d_ff = 0, int shared_d_ff = 0,
                             int num_heads = 0, int num_kv_heads = 0, int head_dim = 0,
-                            int max_seq_len = 0, int n_kv_slots = 1);
+                            int max_seq_len = 0, int n_kv_slots = 1, int hc_count = 0, int hc_lowrank = 0);
 void mtp_workspace_free(MtpDraftWorkspace& ws);
 
 // Reset every MTP-side KV cache position (start of new sequences). The K/V

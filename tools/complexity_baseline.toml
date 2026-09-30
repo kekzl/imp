@@ -2,17 +2,23 @@
 #
 # Threshold 25: lizard's "hard to test" band; 203 functions in src/ exceeded it
 # on 467bd5f8 (lizard 1.17.31), 148 of them below the 200-LOC function-size warn.
-# This counter: 202 (lizard's #203 is the executor_attention_prefill.cu fragment,
+# This counter: 202 (lizard's #203 is the executor_attention_prefill.cpp fragment,
 # charged here to run_attention); 3789 of 3821 shared functions equal lizard's CCN.
 # Every entry is a CEILING: growth by 1 fails, shrinking is a NOTE.
-# Regenerate with `python3 tools/check_complexity.py --update` and say in the
-# PR body why a function was added or grew. Key: `path::signature`, as in
-# function_size_thresholds.toml. Lines below [baseline] are generated.
+# Pins only shrink: scripts/ci_static_gates.sh passes the base branch's copy as
+# --base-config; an added or raised pin fails (#2210). Lower pins with `--update`.
+# Key: `path::signature`, as in function_size_thresholds.toml. Lines below
+# [baseline] are generated.
 #
 # Pin changes (newest first):
-#   #2167: fmha_sm120_kernel 39 -> 42 (fixed_kv_order + masked-tile no-op), fmha_sm120_prefill
-#   re-keyed (new fixed_kv_order arg), run_attention 419 -> 425 (hd=512 row-invariant route),
-#   compute_moe_routing 50 -> 51 (row_invariant_router: gemm_gate_fp32_rows under deterministic)
+#   #2212 item 3 (mtp_feed per-row body shared): mtp_feed_rows_multislot 50 -> 30, mtp_feed_batch 35 -> 15
+#   (below threshold, entry removed); new mtp_feed_dense_rows 9 is under the threshold
+#   #2159 (HF tokenizer parity, written before the ratchet): Tokenizer::load 99 -> 116 (NFC normalizer,
+#   Split-sequence steps, added-token strip; 139 before helpers split out), encode_gpt2 41 -> 44,
+#   load_gguf 244 -> 245, new parse_class 27 (tokenizer_pretok.cpp regex class parser)
+#   #2177 (Qwen3.8-Flash-Next MTP draft forward, written before the ratchet): new mtp_emit_token 27,
+#   mtp_workspace_allocate 36; grew run_moe_ffn +1, ple_run_ +3, chunk_capture_supported +1,
+#   dispatch_mtp_head +4, engine_scheduler step +1, engine_spec_mtp +8/+1, engine_spec_ngram +3
 #   compute_vram_budget 92 -> 93: grew +1 by #2228 (#2224 qtype rule, lm_head_source_only branch)
 
 [thresholds]
@@ -30,9 +36,8 @@ skip_dirs = []
 "src/compute/attention_fmha_mxfp4_sm120.cu::bool fmha_sm120_mxfp4_prefill_paged(const Tensor& Q, Tensor& O, const half* k_fresh, const half* v_fresh, const uint8_t* k_data, const uint8_t* k_scales, const uint8_t* v_data, const uint8_t* v_scales, const int* block_table, int block_size, int seq_kv, int n_kv_heads, float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream, int q_offset, float promote_budget)" = 28
 "src/compute/attention_fmha_sm120.cu::__device__ __forceinline__ void fmha_sm120_fa2_body(const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O, int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal, int sliding_window, float softcap, int q_offset, const float* __restrict__ d_amax, const int* __restrict__ d_kv_len, bool heavy_first, const half* __restrict__ sinks)" = 98
 "src/compute/attention_fmha_sm120.cu::__global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O, int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal, int sliding_window, float softcap, int q_offset)" = 36
-"src/compute/attention_fmha_sm120.cu::__global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O, int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal, int sliding_window, float softcap, int q_offset, const half* __restrict__ sinks, bool fixed_kv_order)" = 42
-"src/compute/attention_fmha_sm120.cu::bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream, int q_offset, bool fp16_qk, const int* d_kv_len, const half* sinks)" = 55
-"src/compute/attention_fmha_sm120.cu::bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream, int q_offset, const half* sinks, bool fixed_kv_order)" = 30
+"src/compute/attention_fmha_sm120.cu::__global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O, int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal, int sliding_window, float softcap, int q_offset, const half* __restrict__ sinks)" = 39
+"src/compute/attention_fmha_sm120.cu::bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream, int q_offset, bool fp16_qk, const int* d_kv_len, const half* sinks)" = 52
 "src/compute/attention_paged.cu::__global__ void __launch_bounds__(1024) paged_attention_gqa_kernel(const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache, half* __restrict__ O, const int* __restrict__ block_tables, const int* __restrict__ context_lens, int batch_size, int n_heads, int n_kv_heads, int head_dim, int block_size, float scale, int max_context_len, int max_num_blocks, int n_q_per_kv, int warps_per_q, int sliding_window, int n_sinks, float softcap, const half* __restrict__ attn_sinks)" = 32
 "src/compute/attention_paged.cu::__global__ void paged_attention_decode_kernel_generic(const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache, half* __restrict__ O, const int* __restrict__ block_tables, const int* __restrict__ context_lens, int batch_size, int n_heads, int n_kv_heads, int head_dim, int v_head_dim, int block_size, float scale, int max_context_len, int max_num_blocks, int sliding_window, int n_sinks, float softcap)" = 27
 "src/compute/attention_paged.cu::__global__ void paged_attention_splitk_kernel(const half* __restrict__ Q, const half* __restrict__ K_cache, const half* __restrict__ V_cache, float* __restrict__ partial_out, const int* __restrict__ block_tables, const int* __restrict__ context_lens, int batch_size, int n_heads, int n_kv_heads, int block_size, float scale, int max_num_blocks, int num_splits, int sliding_window, int n_sinks, float softcap)" = 26
@@ -52,13 +57,13 @@ skip_dirs = []
 "src/compute/gdn_scan_chunkpar_pass.cu::__global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(float* __restrict__ ws_base, StateT* __restrict__ h_state, half* __restrict__ y_out, int strip_t0, int strip_tokens, int n_chunks, int n_heads, int load_statet, int store_statet)" = 37
 "src/compute/gdn_scan_tc.cu::__global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(const float* __restrict__ conv_f32, const half* __restrict__ alpha_all, const half* __restrict__ beta_all, const float* __restrict__ A_log, const float* __restrict__ dt_bias, float* __restrict__ h_state, half* __restrict__ y_out, int n_tokens, int n_heads, int n_groups, int conv_channels, int grouped_layout)" = 45
 "src/compute/gdn_scan_tc.cu::__global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(const float* __restrict__ conv_f32, const half* __restrict__ alpha_all, const half* __restrict__ beta_all, const float* __restrict__ A_log, const float* __restrict__ dt_bias, float* __restrict__ h_state, half* __restrict__ y_out, int n_tokens, int n_heads, int n_groups, int conv_channels, int grouped_layout)" = 37
-"src/compute/gemm.cu::static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry, const void* A_data, const void* B_data, size_t C_bytes, float alpha, float beta, bool is_int_compute, cudaStream_t stream, int M = 0, int N = 0, int K = 0, bool fp16_scale = false)" = 55
-"src/compute/gemm.cu::static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, cudaStream_t stream)" = 38
+"src/compute/gemm.cpp::static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry, const void* A_data, const void* B_data, size_t C_bytes, float alpha, float beta, bool is_int_compute, cudaStream_t stream, int M = 0, int N = 0, int K = 0, bool fp16_scale = false)" = 54
+"src/compute/gemm.cpp::static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, cudaStream_t stream)" = 38
 "src/compute/gemm_f16_narrow_prefill.cu::bool gemm_f16_narrow_prefill(const half* A, int M, int K, const half* W0, half* C0, int N0, const half* W1, half* C1, int N1, void* ws, size_t ws_bytes, cudaStream_t stream)" = 36
 "src/compute/gemm_f16_narrow_smallm.cu::__global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(NarrowArgs args)" = 28
-"src/compute/gemm_grouped.cu::void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, const void* const* b_ptrs, int K, int N, QType dtype, int n_experts, cudaStream_t stream, void** d_work_ptrs, QType output_dtype, const float* a_scales, const float* b_scales)" = 26
+"src/compute/gemm_grouped.cpp::void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, const void* const* b_ptrs, int K, int N, QType dtype, int n_experts, cudaStream_t stream, void** d_work_ptrs, QType output_dtype, const float* a_scales, const float* b_scales)" = 26
 "src/compute/gemm_grouped_nvfp4_smallM.cu::__global__ void smallM_kernel_v1(const void* const* __restrict__ d_A, const void* const* __restrict__ d_SFA, const void* const* __restrict__ d_B, const void* const* __restrict__ d_SFB, void* const* __restrict__ d_D, const float* __restrict__ d_alpha, const int* __restrict__ d_M_per_expert, const CUtensorMap* __restrict__ d_descs, int N, int K)" = 35
-"src/compute/gemm_grouped_nvfp4_smallM.cu::bool gemm_grouped_nvfp4_smallM(int n_experts, const int* host_M, int N, int K, const void* const* host_ptr_A, const void* const* host_ptr_SFA, const void* const* host_ptr_B, const void* const* host_ptr_SFB, void* const* host_ptr_D, const float* dev_alpha, cudaStream_t stream)" = 33
+"src/compute/gemm_grouped_nvfp4_smallM.cu::bool gemm_grouped_nvfp4_smallM(int n_experts, const int* host_M, int N, int K, const void* const* host_ptr_A, const void* const* host_ptr_SFA, const void* const* host_ptr_B, const void* const* host_ptr_SFB, void* const* host_ptr_D, const float* dev_alpha, cudaStream_t stream)" = 31
 "src/compute/gemv_fp8_rowscale_fp32.cu::__global__ void __launch_bounds__(kThreads) fp8_head_mma_kernel(const uint8_t* __restrict__ W, const float* __restrict__ row_scales, const half* __restrict__ x, float* __restrict__ y, int M, int K, int n_rows)" = 32
 "src/compute/json_constrain.cu::bool JsonGrammar::advance_char(char c)" = 94
 "src/compute/json_constrain.cu::uint16_t JsonGrammar::compute_allowed_mask() const" = 35
@@ -69,10 +74,10 @@ skip_dirs = []
 "src/compute/mmq_q8_imma.cu::bool gemm_common(const void* w_blocks, int qkind , const __half* x_f16, __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta, const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0, bool allow_splitk = true)" = 39
 "src/compute/moe_routing.cu::__global__ void gemv_gate_topk_fused_kernel(const half* __restrict__ W_gate, const half* __restrict__ x, int n_experts, int d_model, int top_k, int32_t* __restrict__ expert_indices, float* __restrict__ expert_weights, bool use_sigmoid, bool normalize_weights, const half* __restrict__ score_bias)" = 38
 "src/compute/moe_routing.cu::__global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_experts, int top_k, int32_t* __restrict__ expert_indices, float* __restrict__ expert_weights, bool use_sigmoid, bool normalize_weights, const half* __restrict__ score_bias)" = 34
-"src/compute/mtp_forward.cu::bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp, const Tensor& main_tok_emb, const Tensor& main_lm_head, MtpDraftWorkspace& ws, int hidden_dim, int vocab_size, int* out_token_id, cudaStream_t stream, int* out_topk_ids, int top_w, const NvFP4QuantResult* lm_head_nvfp4, const int32_t* d_prev_token, int32_t* d_out_token, const void* lm_head_fp8, const float* lm_head_fp8_scales)" = 94
-"src/compute/mtp_forward.cu::bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_rows, const MtpHead& mtp, const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream)" = 35
-"src/compute/mtp_forward.cu::bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, const int* h_src_rows, int n_rows, const int* h_slots, const int* h_pos, const MtpHead& mtp, const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream, const Tensor* post_norm, float post_norm_eps, float post_norm_offset)" = 50
-"src/compute/mtp_forward.cu::bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size, int n_experts, int top_k, int expert_d_ff, int shared_d_ff, int num_heads, int num_kv_heads, int head_dim, int max_seq_len, int n_kv_slots)" = 32
+"src/compute/mtp_forward.cu::bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp, const Tensor& main_tok_emb, const Tensor& main_lm_head, MtpDraftWorkspace& ws, int hidden_dim, int vocab_size, int* out_token_id, cudaStream_t stream, int* out_topk_ids, int top_w, const NvFP4QuantResult* lm_head_nvfp4, const int32_t* d_prev_token, int32_t* d_out_token, const void* lm_head_fp8, const float* lm_head_fp8_scales)" = 50
+"src/compute/mtp_forward.cu::bool mtp_emit_token(MtpDraftWorkspace& ws, const Tensor& main_lm_head, int hidden_dim, int vocab_size, int* out_token_id, cudaStream_t stream, int* out_topk_ids, int top_w, const NvFP4QuantResult* lm_head_nvfp4, int32_t* d_out_token, const void* lm_head_fp8, const float* lm_head_fp8_scales)" = 27
+"src/compute/mtp_forward.cu::bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, const int* h_src_rows, int n_rows, const int* h_slots, const int* h_pos, const MtpHead& mtp, const Tensor& main_tok_emb, MtpDraftWorkspace& ws, int hidden_dim, cudaStream_t stream, const Tensor* post_norm, float post_norm_eps, float post_norm_offset)" = 30
+"src/compute/mtp_forward.cu::bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size, int n_experts, int top_k, int expert_d_ff, int shared_d_ff, int num_heads, int num_kv_heads, int head_dim, int max_seq_len, int n_kv_slots, int hc_count, int hc_lowrank)" = 36
 "src/compute/sampling_filters.cu::__global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_size, float typical_p, bool deterministic)" = 35
 "src/compute/sampling_internal.cuh::__device__ __forceinline__ void block_reduce_topk(float* local_vals, int* local_idxs, int local_count, int top_k, float* s_warp_vals, int* s_warp_idxs, float* out_val, int* out_idx)" = 27
 "src/compute/schema_constrain.cu::bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const" = 240
@@ -80,56 +85,56 @@ skip_dirs = []
 "src/compute/schema_constrain.cu::uint16_t SchemaConstrainer::compute_category_mask() const" = 67
 "src/compute/schema_constrain_mask.cpp::void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask)" = 52
 "src/compute/ssm_scan_reg.cu::__global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __restrict__ B_in, const half* __restrict__ C_in, const half* __restrict__ dt_raw, const float* __restrict__ A_log, const float* __restrict__ D_skip, const float* __restrict__ dt_bias, void* __restrict__ h_state, half* __restrict__ y, const half* __restrict__ z, int n_tokens, int n_heads, int head_dim_ssm, int n_groups, const int* __restrict__ d_real_n, void* __restrict__ h_snap, const int* __restrict__ d_snap_n)" = 35
-"src/compute/weight_dispatch.cu::void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Tensor& y, float alpha, float beta, void* workspace, size_t workspace_bytes, cudaStream_t stream)" = 26
+"src/compute/weight_dispatch.cpp::void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Tensor& y, float alpha, float beta, void* workspace, size_t workspace_bytes, cudaStream_t stream)" = 26
 "src/core/qtype.cpp::size_t qtype_row_bytes(QType q, int64_t cols)" = 27
 "src/exec/executor.cu::int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)" = 41
-"src/exec/executor_attention.cu::void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaStream_t stream)" = 425
+"src/exec/executor_attention.cpp::void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaStream_t stream)" = 418
 "src/exec/executor_ffn.cu::void GraphExecutor::run_ffn(int layer, cudaStream_t stream)" = 164
-"src/exec/executor_forward.cu::void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream)" = 207
+"src/exec/executor_forward.cu::void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream)" = 206
 "src/exec/executor_forward_moe.cu::void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 26
 "src/exec/executor_forward_moe.cu::void GraphExecutor::moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 26
-"src/exec/executor_forward_moe.cu::void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream)" = 41
-"src/exec/executor_forward_moe_batch.cu::void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne, int top_k, const Tensor& router_in, bool fp32_gate_logits_ready, bool will_decode_fast, const void* router_bias_ptr, bool use_sigmoid, bool norm_weights, MoeRoutingResult& routing)" = 51
+"src/exec/executor_forward_moe.cu::void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream)" = 42
+"src/exec/executor_forward_moe_batch.cu::void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, int d, int ne, int top_k, const Tensor& router_in, bool fp32_gate_logits_ready, bool will_decode_fast, const void* router_bias_ptr, bool use_sigmoid, bool norm_weights, MoeRoutingResult& routing)" = 49
 "src/exec/executor_forward_moe_batch.cu::void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, int d, int eff, int top_k, const MoeRoutingResult& routing, const Tensor& no, Tensor& h, const Tensor& r, bool moe_use_fp32_residual, bool moe_fused_norm_q8, bool will_skip_residual_copy, bool& residual_fused)" = 72
-"src/exec/executor_forward_moe_cutlass.cu::bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 128
-"src/exec/executor_forward_moe_legacy.cu::void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 83
+"src/exec/executor_forward_moe_cutlass.cpp::bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 128
+"src/exec/executor_forward_moe_legacy.cpp::void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, MoeFfnContext& ctx)" = 83
 "src/exec/executor_forward_moe_nvfp4_host.cu::bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream, const int32_t* expert_offsets, StagedProj out[kExpertProjCount])" = 28
-"src/exec/executor_gemm_dispatch.cu::void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input, Tensor& output, const GemmContext& ctx)" = 150
-"src/exec/executor_gemm_dispatch.cu::void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx)" = 28
-"src/exec/executor_gemm_smallm.cu::bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* const* outs, int count, const Tensor& input, const GemmContext& ctx)" = 35
+"src/exec/executor_gemm_dispatch.cpp::void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input, Tensor& output, const GemmContext& ctx)" = 150
+"src/exec/executor_gemm_dispatch.cpp::void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx)" = 28
+"src/exec/executor_gemm_smallm.cpp::bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* const* outs, int count, const Tensor& input, const GemmContext& ctx)" = 35
 "src/exec/executor_kv_write.cu::void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaStream_t stream, int row_begin, int n_rows, const int* bt_flat, const int* bt_swa_flat, const int* positions_override)" = 53
 "src/exec/executor_perplexity.cu::void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, bool allow_cutlass, const std::function<void(const Tensor&, int, int)>& consume)" = 34
 "src/exec/executor_perplexity.cu::void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream, const int32_t* d_hist, int n_hist, const int32_t* d_draft, float rep_pen, float freq_pen, float pres_pen, int32_t* d_topm, int topm, const int32_t* d_banned, int n_banned, bool allow_cutlass, const int32_t* d_banned_alt, int n_banned_alt, const uint8_t* h_row_alt, const int32_t* const* h_row_hist, const int* h_row_hist_n, const float* h_row_pens)" = 30
-"src/exec/executor_ple.cu::void GraphExecutor::ple_run_(const InferenceState& state, int layer, int n, cudaStream_t stream)" = 26
+"src/exec/executor_ple.cpp::void GraphExecutor::ple_run_(const InferenceState& state, int layer, int n, cudaStream_t stream)" = 29
 "src/exec/executor_sampling.cu::bool GraphExecutor::sample_single_from_logits_async(const Tensor& logits, const InferenceState& state, int slot_idx, cudaStream_t stream)" = 56
 "src/exec/executor_sampling.cu::std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits, const InferenceState& state, cudaStream_t stream)" = 54
 "src/exec/executor_ssm_gdn.cu::void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t stream)" = 155
 "src/exec/executor_ssm_gdn.cu::void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t stream)" = 29
-"src/exec/executor_workspace.cu::bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, int max_batch_size, int max_seq_len, bool use_fp8_prefill, int use_nvfp4_decode, bool use_mxfp4_prefill)" = 48
-"src/exec/executor_workspace_buffers.cu::bool GraphExecutor::allocate_nvfp4_dequant_workspace()" = 30
-"src/exec/executor_workspace_buffers.cu::bool GraphExecutor::chunk_capture_supported() const" = 44
-"src/exec/executor_workspace_buffers.cu::int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) const" = 29
-"src/exec/executor_workspace_buffers.cu::void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant)" = 226
-"src/exec/executor_workspace_buffers.cu::void GraphExecutor::free_buffers()" = 66
+"src/exec/executor_workspace.cpp::bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, int max_batch_size, int max_seq_len, bool use_fp8_prefill, int use_nvfp4_decode, bool use_mxfp4_prefill)" = 46
+"src/exec/executor_workspace_buffers.cpp::bool GraphExecutor::allocate_nvfp4_dequant_workspace()" = 30
+"src/exec/executor_workspace_buffers.cpp::bool GraphExecutor::chunk_capture_supported() const" = 45
+"src/exec/executor_workspace_buffers.cpp::int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) const" = 29
+"src/exec/executor_workspace_buffers.cpp::void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant)" = 225
+"src/exec/executor_workspace_buffers.cpp::void GraphExecutor::free_buffers()" = 65
 "src/exec/expert_cache.cu::ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, ExpertCacheKey key, const void* src_host, size_t stamp_bytes, cudaStream_t stream, bool* hit)" = 26
 "src/exec/expert_cache.cu::int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fallback)" = 35
 "src/exec/expert_cache_device.cu::bool DeviceExpertCache::init(const Model& model, ExpertLRUCache& cache, VRAMAllocator* alloc, int top_k)" = 38
-"src/exec/pre_dequant_phase0_nvfp4_loader.cu::void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(const ModelConfig& cfg, cudaStream_t stream)" = 103
-"src/exec/pre_dequant_phase1_fp16_cache.cu::void QuantPipeline::pre_dequant_phase1_fp16_cache_(const ModelConfig& cfg, const VRAMBudget& budget, size_t& remaining_budget, cudaStream_t stream)" = 29
-"src/exec/pre_dequant_phase2_fp8_cache.cu::void QuantPipeline::pre_dequant_phase2_fp8_cache_(const ModelConfig& cfg, const VRAMBudget& budget, size_t& remaining_budget, cudaStream_t stream)" = 33
-"src/exec/pre_dequant_phase2_fp8_cache.cu::void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg, cudaStream_t stream)" = 40
-"src/exec/pre_dequant_phase3_cutlass.cu::void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const VRAMBudget& budget, size_t& remaining_budget, cudaStream_t stream)" = 36
-"src/exec/pre_dequant_phase3_cutlass.cu::void QuantPipeline::nvfp4_decode_convert_mxfp4_and_native_(const ModelConfig& cfg, cudaStream_t stream)" = 28
-"src/exec/pre_dequant_phase3_cutlass.cu::void QuantPipeline::nvfp4_decode_mxfp4_fp16_fallback_(const ModelConfig& cfg, cudaStream_t stream)" = 44
-"src/exec/pre_dequant_phase3_gdn_prefill.cu::void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg, cudaStream_t stream)" = 33
-"src/exec/pre_dequant_phase3_moe.cu::bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>& experts, cudaStream_t stream, Nvfp4DecodeContext& dctx, bool& moe_budget_exhausted, size_t& moe_logical_avail)" = 73
-"src/exec/pre_dequant_phase3_moe.cu::void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx)" = 32
-"src/exec/pre_dequant_phase3_moe.cu::void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg, const VRAMBudget& budget, size_t& remaining_budget, cudaStream_t stream, Nvfp4DecodeContext& dctx)" = 43
-"src/exec/pre_dequant_phase3_nvfp4_decode.cu::void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx)" = 28
-"src/exec/pre_dequant_phase3_nvfp4_decode.cu::void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(const ModelConfig& cfg, const VRAMBudget& budget, size_t& remaining_budget, cudaStream_t stream)" = 27
-"src/exec/pre_dequant_phase3c_mxfp4.cu::void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(const ModelConfig& cfg, cudaStream_t stream)" = 37
-"src/exec/pre_dequant_phase4_tensor_registry.cu::void QuantPipeline::pre_dequant_phase4_tensor_registry_(const ModelConfig& cfg, cudaStream_t stream)" = 109
-"src/exec/pre_dequant_phase4_tensor_registry.cu::void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(const ModelConfig& cfg, cudaStream_t stream)" = 54
+"src/exec/pre_dequant_phase0_nvfp4_loader.cpp::void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(const ModelConfig& cfg, cudaStream_t stream)" = 103
+"src/exec/pre_dequant_phase1_fp16_cache.cpp::void QuantPipeline::pre_dequant_phase1_fp16_cache_(const ModelConfig& cfg, const VRAMBudget& budget, size_t& remaining_budget, cudaStream_t stream)" = 29
+"src/exec/pre_dequant_phase2_fp8_cache.cpp::void QuantPipeline::pre_dequant_phase2_fp8_cache_(const ModelConfig& cfg, const VRAMBudget& budget, size_t& remaining_budget, cudaStream_t stream)" = 33
+"src/exec/pre_dequant_phase2_fp8_cache.cpp::void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg, cudaStream_t stream)" = 40
+"src/exec/pre_dequant_phase3_cutlass.cpp::void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const VRAMBudget& budget, size_t& remaining_budget, cudaStream_t stream)" = 36
+"src/exec/pre_dequant_phase3_cutlass.cpp::void QuantPipeline::nvfp4_decode_convert_mxfp4_and_native_(const ModelConfig& cfg, cudaStream_t stream)" = 28
+"src/exec/pre_dequant_phase3_cutlass.cpp::void QuantPipeline::nvfp4_decode_mxfp4_fp16_fallback_(const ModelConfig& cfg, cudaStream_t stream)" = 44
+"src/exec/pre_dequant_phase3_gdn_prefill.cpp::void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg, cudaStream_t stream)" = 33
+"src/exec/pre_dequant_phase3_moe.cpp::bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>& experts, cudaStream_t stream, Nvfp4DecodeContext& dctx, bool& moe_budget_exhausted, size_t& moe_logical_avail)" = 73
+"src/exec/pre_dequant_phase3_moe.cpp::void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx)" = 32
+"src/exec/pre_dequant_phase3_moe.cpp::void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg, const VRAMBudget& budget, size_t& remaining_budget, cudaStream_t stream, Nvfp4DecodeContext& dctx)" = 43
+"src/exec/pre_dequant_phase3_nvfp4_decode.cpp::void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx)" = 28
+"src/exec/pre_dequant_phase3_nvfp4_decode.cpp::void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(const ModelConfig& cfg, const VRAMBudget& budget, size_t& remaining_budget, cudaStream_t stream)" = 27
+"src/exec/pre_dequant_phase3c_mxfp4.cpp::void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(const ModelConfig& cfg, cudaStream_t stream)" = 37
+"src/exec/pre_dequant_phase4_tensor_registry.cpp::void QuantPipeline::pre_dequant_phase4_tensor_registry_(const ModelConfig& cfg, cudaStream_t stream)" = 109
+"src/exec/pre_dequant_phase4_tensor_registry.cpp::void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(const ModelConfig& cfg, cudaStream_t stream)" = 54
 "src/exec/sparse_attn_select.cu::__global__ void sparse_select_topk_kernel(const float* __restrict__ scores, const int* __restrict__ block_tables, const int* __restrict__ context_lens, int* __restrict__ sparse_bt, int* __restrict__ sparse_ctx, int block_size, int max_blocks_per_seq, int scores_stride, int budget_blocks, int sink_blocks, int recent_blocks, int engage_blocks, int table_blocks)" = 37
 "src/exec/workspace_sizes.cpp::ExecShape exec_shape_of(const Model& model)" = 34
 "src/exec/workspace_sizes.cpp::ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len)" = 44
@@ -139,7 +144,7 @@ skip_dirs = []
 "src/memory/weight_cache_file.cpp::std::unique_ptr<WeightSnapshot> weight_cache_load(const std::string& cache_path, const Model& model)" = 27
 "src/model/chat_template.cpp::bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, const std::string& jinja_str)" = 54
 "src/model/chat_template.cpp::static jinja::Value json_string_to_value(const std::string& json_str)" = 68
-"src/model/gguf_loader.cpp::std::unique_ptr<Model> load_gguf(const std::string& path)" = 244
+"src/model/gguf_loader.cpp::std::unique_ptr<Model> load_gguf(const std::string& path)" = 245
 "src/model/gguf_tensor_assign.cpp::bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, GgufWireType gtype)" = 91
 "src/model/hf_config_loader.cpp::bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg, std::unique_ptr<VisionModel>* out_vision_tower)" = 189
 "src/model/hf_config_loader.cpp::bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg)" = 32
@@ -154,36 +159,35 @@ skip_dirs = []
 "src/model/jinja.cpp::void tokenize_inner(std::vector<Token>& tokens, size_t& pos, const std::string& close_tag)" = 96
 "src/model/llm_compressor_loader.cpp::bool parse_compressed_tensors_config(const std::string& model_dir, imp::HFConfigLoader::NvFP4Config& cfg)" = 27
 "src/model/llm_compressor_loader.cpp::bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4Config& cfg)" = 37
-"src/model/mtp_head.cpp::MtpHead dispatch_mtp_head(const std::unordered_map<std::string, Tensor>& tm, const std::string& src, size_t bytes)" = 32
+"src/model/mtp_head.cpp::MtpHead dispatch_mtp_head(const std::unordered_map<std::string, Tensor>& tm, const std::string& src, size_t bytes)" = 36
 "src/model/ngram_table.cpp::std::unique_ptr<NGramTable> NGramTable::open(const std::string& model_dir, int layer, int eos_token_id)" = 48
 "src/model/safetensors_loader.cpp::static bool load_shard(const std::string& path, std::unordered_map<std::string, Tensor>& tensor_map, ShardInfo& shard, bool llm_compressor_format, bool keep_vision, imp::llm_compressor::TranslationCounters& counters, std::unordered_map<std::string, Tensor>* mtp_out = nullptr, bool sparse = false)" = 57
 "src/model/safetensors_loader.cpp::static bool load_sharded(const std::string& model_dir, std::unordered_map<std::string, Tensor>& tensor_map, std::vector<ShardInfo>& shards, bool keep_vision, std::unordered_map<std::string, Tensor>* mtp_out)" = 26
 "src/model/safetensors_loader.cpp::static void infer_config(ModelConfig& cfg, const std::unordered_map<std::string, Tensor>& tensors)" = 29
-"src/model/safetensors_loader.cpp::std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head)" = 133
+"src/model/safetensors_loader.cpp::std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head)" = 128
 "src/model/safetensors_writer.cpp::std::string write_safetensors(const std::string& path, const std::vector<SafeTensorsOut>& tensors, const std::vector<std::pair<std::string, std::string>>& metadata)" = 28
 "src/model/sentencepiece_loader.cpp::bool parse_sentencepiece_model(const void* data, size_t size, SentencePieceModel* out, std::string* err)" = 34
 "src/model/tensor_kind_matcher.cpp::TensorKind match_tensor_kind(std::string_view name)" = 79
 "src/model/tensor_kind_name.cpp::const char* tensor_kind_name(TensorKind k)" = 48
-"src/model/tokenizer.cpp::bool Tokenizer::load(const std::string& path)" = 99
+"src/model/tokenizer.cpp::bool Tokenizer::load(const std::string& path)" = 116
 "src/model/tokenizer.cpp::static std::vector<std::string> gpt2_pre_tokenize(const std::string& text)" = 28
 "src/model/tokenizer.cpp::static std::vector<std::string> llama3_pre_tokenize(const std::string& text)" = 42
-"src/model/tokenizer.cpp::static std::vector<std::string> qwen2_like_pre_tokenize(const std::string& text, int max_digit_run)" = 53
 "src/model/tokenizer.cpp::std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const" = 42
-"src/model/tokenizer.cpp::std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const" = 41
+"src/model/tokenizer.cpp::std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const" = 44
 "src/model/tokenizer.cpp::std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_prefix) const" = 37
-"src/model/tokenizer.cpp::std::vector<std::string> o200k_pre_tokenize(const std::string& text)" = 58
+"src/model/tokenizer_pretok.cpp::bool parse_class(const std::string& rx, size_t& i, std::vector<std::pair<uint32_t, uint32_t>>& out)" = 27
 "src/model/weight_map.cpp::bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string, Tensor>& tensors)" = 405
 "src/model/weight_map.cpp::std::string WeightMap::map_name(const std::string& name) const" = 126
-"src/model/weight_upload.cu::bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t expert_reserve_bytes, bool warm_cache, const std::string& warm_cache_dir)" = 116
-"src/model/weight_upload.cu::static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_layers, size_t expert_reserve_bytes, const UploadCtx& ctx)" = 85
-"src/model/weight_upload.cu::static bool upload_layer_attention_weights(TransformerLayer& L, int i, const UploadCtx& ctx)" = 37
-"src/model/weight_upload.cu::static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx& ctx)" = 72
-"src/model/weight_upload.cu::static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expert_bytes, size_t total_expert_bytes, size_t expert_reserve_bytes, int n_layers, std::vector<bool>& experts_upload_layer, bool is_nvfp4_prequant)" = 27
+"src/model/weight_upload.cpp::bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t expert_reserve_bytes, bool warm_cache, const std::string& warm_cache_dir)" = 111
+"src/model/weight_upload.cpp::static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_layers, size_t expert_reserve_bytes, const UploadCtx& ctx)" = 85
+"src/model/weight_upload.cpp::static bool upload_layer_attention_weights(TransformerLayer& L, int i, const UploadCtx& ctx)" = 37
+"src/model/weight_upload.cpp::static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx& ctx)" = 72
+"src/model/weight_upload.cpp::static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expert_bytes, size_t total_expert_bytes, size_t expert_reserve_bytes, int n_layers, std::vector<bool>& experts_upload_layer, bool is_nvfp4_prequant)" = 27
 "src/quant/nvfp4_gemm_smallm_v2.cu::__device__ __forceinline__ void smallm_v2_cta_body(const uint8_t* __restrict__ w_packed, const uint8_t* __restrict__ w_scales, const uint8_t* __restrict__ xq_packed, const uint8_t* __restrict__ xq_scales, float* __restrict__ ws_partials, OutT* __restrict__ y, float ts, int acc_flag, int M, int N_out, int K, int stripes, int n_base, int stripe, uint8_t* smem, uint64_t* bar_full, uint64_t* bar_empty)" = 30
 "src/runtime/config.cpp::bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::string& raw, bool* value_ok = nullptr)" = 28
 "src/runtime/cuda_graph.cu::__global__ void post_decode_step_kernel(const int32_t* __restrict__ d_token_id, int32_t* __restrict__ d_ring_buffer, int* __restrict__ d_ring_step_counter, int* __restrict__ d_position, int* __restrict__ d_context_len, int* __restrict__ d_step_counter, int max_steps, int eos_id, const int32_t* __restrict__ d_stop_ids, int n_stop_ids, const int* __restrict__ d_think_limit, int32_t think_start_id, int32_t think_end_id, int think_grace_tokens, int* __restrict__ d_think_count, int* __restrict__ d_in_think, int* __restrict__ d_think_exit_step, int* __restrict__ d_content_after_think, int* __restrict__ d_stop_mask_active, const uint8_t* __restrict__ d_token_is_whitespace, int vocab_size, int ignore_eos, int32_t* __restrict__ d_penalty_ring, int penalty_prefix_len, int* __restrict__ d_penalty_count, const int* __restrict__ d_step_limit, int* __restrict__ d_burst_done, cudaGraphConditionalHandle handle)" = 61
 "src/runtime/cuda_graph.cu::bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceState& state_template, int32_t first_token, Config config, cudaStream_t stream)" = 63
-"src/runtime/engine.cpp::bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config)" = 54
+"src/runtime/engine.cpp::bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config)" = 51
 "src/runtime/engine.cpp::std::string Engine::generate(const std::string& prompt, int max_tokens, float temperature, float top_p, int top_k, int seed, bool apply_chat_template, float min_p, float repetition_penalty, float frequency_penalty, float presence_penalty)" = 33
 "src/runtime/engine_decode_pipeline.cpp::void Engine::step_decode_pipeline_(cudaStream_t stream)" = 26
 "src/runtime/engine_graph_decode.cpp::bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t first_token, cudaStream_t stream, int step_limit)" = 51
@@ -191,27 +195,27 @@ skip_dirs = []
 "src/runtime/engine_graph_decode.cpp::int Engine::step_constrained_pipeline()" = 36
 "src/runtime/engine_init_resolver.cpp::void Engine::init_resolve_kv_dtype_policy_()" = 97
 "src/runtime/engine_init_resolver.cpp::void Engine::init_resolve_quant_flags_()" = 49
-"src/runtime/engine_kv_cache_init.cpp::bool Engine::init_kv_cache()" = 190
+"src/runtime/engine_kv_cache_init.cpp::bool Engine::init_kv_cache()" = 187
 "src/runtime/engine_prefill.cpp::bool Engine::prefill_upload_metadata_(std::shared_ptr<Request>& req, const std::vector<int>& block_table, const std::vector<int>& swa_block_table, int chunk_len, int offset, int ctx_len, cudaStream_t pf_stream, int32_t*& d_token_ids, int*& d_positions, int*& d_block_tables, int*& d_block_tables_swa, int*& d_context_lens, bool& pf_pool_used)" = 33
 "src/runtime/engine_prefill.cpp::void Engine::step_prefill(cudaStream_t stream)" = 42
 "src/runtime/engine_prefill.cpp::void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk, cudaStream_t pf_stream)" = 122
-"src/runtime/engine_prefill_ragged.cpp::void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, int effective_chunk, cudaStream_t stream, std::vector<std::shared_ptr<Request>>* riders)" = 63
+"src/runtime/engine_prefill_ragged.cpp::void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, int effective_chunk, cudaStream_t stream, std::vector<std::shared_ptr<Request>>* riders)" = 59
 "src/runtime/engine_scheduler.cpp::bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs)" = 33
 "src/runtime/engine_scheduler.cpp::bool Engine::step_impl_()" = 26
 "src/runtime/engine_scheduler.cpp::std::vector<int32_t> Engine::sample_decode_rows_(InferenceState& state, std::vector<std::shared_ptr<Request>>& valid_decode, const Tensor& logits, cudaStream_t dec_stream)" = 41
-"src/runtime/engine_scheduler.cpp::void Engine::decode_build_inference_state_(GPUBatch& gpu_batch, std::vector<std::shared_ptr<Request>>& valid_decode, int max_ctx, cudaStream_t dec_stream, InferenceState& state, bool& needs_logprobs, bool& needs_constrained)" = 32
+"src/runtime/engine_scheduler.cpp::void Engine::decode_build_inference_state_(GPUBatch& gpu_batch, std::vector<std::shared_ptr<Request>>& valid_decode, int max_ctx, cudaStream_t dec_stream, InferenceState& state, bool& needs_logprobs, bool& needs_constrained)" = 31
 "src/runtime/engine_scheduler.cpp::void Engine::step_decode(cudaStream_t dec_stream)" = 60
-"src/runtime/engine_scheduler.cpp::void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_decode, cudaStream_t dec_stream)" = 103
+"src/runtime/engine_scheduler.cpp::void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_decode, cudaStream_t dec_stream)" = 104
 "src/runtime/engine_scheduler.cpp::void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& valid_decode, const std::vector<int32_t>& tokens, const Tensor& decode_logits_out, bool needs_logprobs, bool needs_constrained, cudaStream_t dec_stream, bool allow_loop)" = 72
 "src/runtime/engine_spec_batch_verify.cpp::bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& batch, cudaStream_t stream)" = 97
 "src/runtime/engine_spec_capture.cpp::bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out, cudaStream_t stream)" = 35
-"src/runtime/engine_spec_mtp.cpp::bool Engine::enable_mtp_spec_decode(int k)" = 45
-"src/runtime/engine_spec_mtp.cpp::bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, int n_pairs, bool chain_after)" = 70
+"src/runtime/engine_spec_mtp.cpp::bool Engine::enable_mtp_spec_decode(int k)" = 53
+"src/runtime/engine_spec_mtp.cpp::bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, int n_pairs, bool chain_after)" = 71
 "src/runtime/engine_spec_mtp.cpp::void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs, const std::vector<int>& rows, const std::vector<int>& emitted, cudaStream_t stream)" = 35
 "src/runtime/engine_spec_mtp.cpp::void Engine::mtp_prefill_feed_chunk(const Request& req, int offset, int chunk_len, int next_token)" = 27
-"src/runtime/engine_spec_ngram.cpp::bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream, int min_draft)" = 235
+"src/runtime/engine_spec_ngram.cpp::bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream, int min_draft)" = 238
 "src/runtime/engine_spec_ngram.cpp::const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_think) const" = 35
-"src/runtime/engine_weight_upload.cpp::bool Engine::init_weights()" = 51
+"src/runtime/engine_weight_upload.cpp::bool Engine::init_weights()" = 50
 "src/runtime/engine_workspace_warmup.cpp::bool Engine::init_features()" = 43
 "src/runtime/engine_workspace_warmup.cpp::void Engine::build_banned_token_list()" = 37
 "src/runtime/engine_workspace_warmup.cpp::void Engine::warmup()" = 44

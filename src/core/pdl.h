@@ -2,6 +2,8 @@
 
 #include <cuda_runtime.h>
 
+#include "core/logging.h"
+
 namespace imp {
 
 namespace pdl {
@@ -23,36 +25,6 @@ bool is_enabled(const void* kernel_func);
 template <typename KernelFunc>
 void enable_kernel(KernelFunc func) {
     enable(reinterpret_cast<const void*>(func));
-}
-
-// PDL-aware kernel launch via cudaLaunchKernelEx with
-// ProgrammaticStreamSerialization; falls back to plain <<<>>> when PDL is
-// off/unavailable. Registration is the promise that a kernel calls
-// pdl_wait() before its first global access and pdl_trigger() after its
-// last input read (cuda_graph.cu only converts an edge when the CONSUMER is
-// registered); a kernel without pdl_wait() must never be registered.
-// Usage: pdl::launch(my_kernel, grid, block, smem, stream, arg1, arg2, ...);
-template <typename KernelFunc, typename... Args>
-void launch(KernelFunc func, dim3 grid, dim3 block, size_t smem, cudaStream_t stream, Args... args) {
-    const void* func_ptr = reinterpret_cast<const void*>(func);
-    if (is_enabled(func_ptr)) {
-        cudaLaunchConfig_t config = {};
-        config.gridDim = grid;
-        config.blockDim = block;
-        config.dynamicSmemBytes = smem;
-        config.stream = stream;
-
-        cudaLaunchAttribute attr = {};
-        attr.id = cudaLaunchAttributeProgrammaticStreamSerialization;
-        attr.val.programmaticStreamSerializationAllowed = 1;
-
-        config.attrs = &attr;
-        config.numAttrs = 1;
-
-        cudaLaunchKernelEx(&config, func, args...);
-    } else {
-        func<<<grid, block, smem, stream>>>(args...);
-    }
 }
 
 // RAII guard: enables PDL on construction, can disable on destruction.

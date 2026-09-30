@@ -13,14 +13,14 @@ namespace imp {
 // sinks (gpt-oss #547): optional [n_heads] FP16, virtual extra logit column with no V
 // contribution, folded into online-softmax init (m=sink, l=1). nullptr = off.
 // fixed_kv_order: forward KV scan for every Q tile; a row's bits then do not depend on its tile.
-bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
-                        bool causal, int sliding_window, float softcap, cudaStream_t stream, int q_offset = 0,
-                        const half* sinks = nullptr, bool fixed_kv_order = false);
+[[nodiscard]] bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                        bool causal, int sliding_window, float softcap, cudaStream_t stream,
+                        int q_offset = 0, const half* sinks = nullptr, bool fixed_kv_order = false);
 
 // FP8 variant: QK^T computed in FP8 E4M3 (m16n8k32) for 2x score throughput.
 // Q,K converted to FP8 on-the-fly in shared memory. PV stays FP16.
 // Requires SM120+ with CUTE_ARCH_F8F6F4_MMA_ENABLED.
-bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+[[nodiscard]] bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                             bool causal, int sliding_window, float softcap, cudaStream_t stream,
                             int q_offset = 0);
 
@@ -33,7 +33,7 @@ bool fmha_sm120_fp8_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
 // d_kv_len: optional device int overriding KV length (K.shape[1] is only buffer capacity);
 // kernel derives q_offset=seq_kv-seq_q. Grid depends only on seq_q, so a captured graph replays
 // correctly as context grows (#847). fp16_qk path only.
-bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+[[nodiscard]] bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                             bool causal, int sliding_window, float softcap, cudaStream_t stream,
                             int q_offset = 0, bool fp16_qk = false, const int* d_kv_len = nullptr,
                             const half* sinks = nullptr);

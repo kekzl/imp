@@ -28,6 +28,26 @@ want() {  # no filter = everything
     case " $SELECTED " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 }
 
+# Base for the CCN pin ratchet: IMP_GATE_BASE (CI: PR base sha), else merge-base with
+# origin/main. Set but unresolvable fails; no origin/main (tarball checkout) skips with a note.
+ccn_pins_vs_base() {
+    local base="${IMP_GATE_BASE:-}" tmp rc
+    case "$base" in *[!0]*) ;; *) base="" ;; esac  # push of a new ref: before = 000...0
+    if [ -z "$base" ]; then
+        if ! base="$(git merge-base HEAD origin/main 2>/dev/null)"; then
+            echo "        skip: no IMP_GATE_BASE and no origin/main to diff the CCN pins against"
+            return 0
+        fi
+    fi
+    tmp="$(mktemp)"
+    if ! git show "$base:tools/complexity_baseline.toml" > "$tmp" 2>/dev/null; then
+        echo "        IMP_GATE_BASE=$base: tools/complexity_baseline.toml unreadable at that commit"
+        rm -f "$tmp"; return 1
+    fi
+    python3 tools/check_complexity.py --base-config "$tmp"; rc=$?
+    rm -f "$tmp"; return "$rc"
+}
+
 SELECTED="$*"
 SELECT_ALL=0
 [ -z "$SELECTED" ] && SELECT_ALL=1
@@ -40,6 +60,8 @@ if want filesize; then
     run "that gate still parses what it must"   python3 tools/check_function_size.py --selftest
     run "CCN > 25 ratchet (#2210)"              python3 tools/check_complexity.py
     run "that gate still counts what it must"   python3 tools/check_complexity.py --selftest
+    run "CCN pins only shrink vs the base"      ccn_pins_vs_base
+    run "tidy findings gate still counts"       python3 tools/check_tidy_findings.py --selftest
     run "deterministic-mode sites vs the doc"   python3 tools/check_determinism_sites.py
     run "that gate still catches its drift"     python3 tools/check_determinism_sites.py --selftest
     run "header-inline definitions with no caller" python3 tools/check_dead_inline_accessors.py
@@ -98,6 +120,15 @@ if want alloc; then
     # 2026-09-05, one of them a use-after-free on the default model-swap path.
     run "lazy device statics re-arm"            python3 tools/check_static_reset.py
     run "that gate still classifies its cases"  python3 tools/check_static_reset.py --selftest
+    # #2213: stream/event create/destroy only in src/core/cuda_raii.h; allowlist 0.
+    run "CUDA stream/event sites via cuda_raii.h" python3 tools/check_cuda_raii_sites.py
+    run "that gate still matches its cases"     python3 tools/check_cuda_raii_sites.py --selftest
+    run "no deref of an owner after .release()" python3 tools/check_released_owner_use.py
+    run "that gate still matches its cases"     python3 tools/check_released_owner_use.py --selftest
+    run "discarded cudaError_t per file (#2211)" python3 tools/check_cuda_discards.py
+    run "that gate still counts its cases"      python3 tools/check_cuda_discards.py --selftest
+    run "header status bools [[nodiscard]] (#2211)" python3 tools/check_nodiscard_status.py
+    run "that gate still matches its cases"     python3 tools/check_nodiscard_status.py --selftest
 fi
 
 # Needs a BUILT artifact + cuobjdump (unlike every other gate here, which is source-derived).

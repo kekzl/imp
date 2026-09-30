@@ -3,7 +3,7 @@
 // Gate: ratio >=1.8x proceeds to Phase 2 production kernel; <1.5x defers (FP16-throttled).
 // Measures raw MMA-pipe throughput only, not a realistic tiled kernel's achievable rate.
 
-#include "bench/mmq_q4k_imma_bench.h"
+#include "mmq_q4k_imma_bench.h"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstdio>
