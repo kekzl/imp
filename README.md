@@ -44,7 +44,13 @@ Same RTX 5090, same model file, both engines on their defaults. **tokens/s** = h
 
 The smallest lead in that sweep was +3% (Qwen3-30B-A3B). All rows, and imp vs vLLM with many users at once: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
-**What CI defends:** every push measures one pinned model (Qwen3-8B Q8_0, speculation off, hence below the row above) and fails on an 8% move. **decode** = writing the answer, **prefill** = reading your prompt.
+**Bigger than the card: Qwen3.8-Flash-Next** (NVFP4). Its 56.25 GiB of experts stay in host RAM, the card caches the busiest ones: **65.31 tokens/s**. Full speed needs the experts plus 6 GiB free in host RAM (~62 GiB); with less, imp warns and serves from a slower path.
+
+[PROV: commit=80c3a110 date=2026-09-30 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4
+       path=host-resident-experts cmd=`scripts/accept_2272.sh` of #2326 n=4 prompts x 3 runs note=128 tokens greedy, mtp_k=0;
+       56.25 GiB = load log `NVFP4 experts (56.25 GiB) do not fit`, main 62431977; 6 GiB = kHeadroom in src/model/weight_upload.cpp]
+
+**What CI defends:** every push measures one pinned model (Qwen3-8B Q8_0, speculation off, hence below the row above) and fails on an 8% move (decode on the test host moves several percent between sessions with nothing changed: [`docs/PERF.md`](docs/PERF.md)). **decode** = writing the answer, **prefill** = reading your prompt.
 
 <!-- PERF:BEGIN -->
 | metric | value | threshold |
@@ -59,8 +65,6 @@ The smallest lead in that sweep was +3% (Qwen3-30B-A3B). All rows, and imp vs vL
        cuda=13.4 path=gguf-dp4a cmd=`make verify-fast` n=5x5]
 <!-- PERF:END -->
 
-Decode on the test host moves several percent between sessions with nothing changed, hence 8% and not 3%: [`docs/PERF.md`](docs/PERF.md).
-
 ## Which model should I pick?
 
 | You want | Take | Why |
@@ -69,6 +73,7 @@ Decode on the test host moves several percent between sessions with nothing chan
 | the fastest replies | **Qwen3-8B** Q8_0 | the fastest row above |
 | more knowledge, still fast | **Qwen3.6-35B-A3B** | mixture of experts: large, but only a small part works per token |
 | another model family | **gpt-oss-20b** or **Gemma-4-26B-A4B** | both in the table above |
+| the biggest model, and ~62 GiB of free RAM | **Qwen3.8-Flash-Next** NVFP4 | too big for 32 GB: the experts live in host RAM ([above](#how-fast-is-it)) |
 
 **Will it fit?** Weights plus the KV cache (the model's memory of the conversation) must fit in the card's 32 GB. imp sizes the context to what is left after the weights, and refuses at load a model whose experts do not fit instead of running it wrong. Every family that loads, with its size: [`docs/MODELS.md`](docs/MODELS.md).
 
