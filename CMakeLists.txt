@@ -532,8 +532,9 @@ target_include_directories(imp
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
 )
+# Third-party headers: SYSTEM keeps them out of imp_warnings' -Werror=unused-* (#2315).
+target_include_directories(imp SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
 
 # Single-source the runtime version string from the project version so
 # imp_version() / `imp-cli --version` can never drift from CMakeLists (#760).
