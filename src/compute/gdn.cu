@@ -77,20 +77,11 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     const int s_base = part * SS_PER;
     // Each thread holds SS_PER floats of one column of H[SS, HD].
     float H_reg[SS_PER];
-    // Single-sequence state was last written by this layer's scan one step (or chunk) earlier, never
-    // by the immediate predecessor: fetch it before the PDL wait. CSPLIT > 1 loads registers (220
-    // regs); at CSPLIT=1 that second load site spills (255 regs + 576 B stack), so it prefetches L2.
+    // Pre-wait: weights and L2 prefetch only (#2340); h_state is mutable, its registers load after pdl_wait.
     // #2218 bounded: HD, SS template args <= 128 (instantiations 64/128 only): (s_base + s) * HD < SS * HD
     // <= 16384, (i % kLines) * 128 < kLines * 128 <= 512 (kSeg <= 128 * 4 B), smem 2 * SS <= 256
     const bool state_early = seq_slots == nullptr;
-    if constexpr (CSPLIT > 1) {
-        if (state_early) {
-            const StateT* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
-#pragma unroll
-            for (int s = 0; s < SS_PER; s++)
-                H_reg[s] = static_cast<float>(H_col[static_cast<ptrdiff_t>((s_base + s) * HD)]);
-        }
-    } else if (state_early) {
+    if (state_early) {
         constexpr int kNT = HD * SPLIT / CSPLIT;
         constexpr int kSeg = (HD / CSPLIT) * static_cast<int>(sizeof(StateT));
         constexpr int kLines = (kSeg + 127) / 128;
@@ -148,7 +139,7 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     const float scale = rsqrtf(static_cast<float>(HD));
 
     // Load state into registers — the critical optimization.
-    if (CSPLIT == 1 || !state_early) {
+    {
         const StateT* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
 #pragma unroll
         for (int s = 0; s < SS_PER; s++)

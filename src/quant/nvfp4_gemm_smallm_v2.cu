@@ -149,7 +149,8 @@ __device__ __forceinline__ void smallm_v2_cta_body(
     // PDL: triggers at CTA start. The dependent grid launches once every CTA of this grid has
     // triggered or exited: on a multi-wave grid that's when the last wave has started (no
     // pending CTA loses a slot), on a single-wave grid it takes idle SMs immediately. Either
-    // way the dependent's producer warps fill their rings while this grid still runs.
+    // way the dependent's producer warps fill their rings while this grid still runs. Safe before
+    // this grid's own wait: dependents read only weights pre-wait (core/pdl_device.cuh, #2340).
     pdl_trigger();
 
     // Stripe of K-tiles owned by this CTA.
