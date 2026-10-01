@@ -78,6 +78,24 @@ QwenPatchifyConfig qwen_video_patchify_config();
 [[nodiscard]] bool qwen_patchify_video(std::span<const uint8_t* const> frames, int width, int height,
                                        const QwenPatchifyConfig& cfg, std::vector<QwenPatches>& out);
 
+// Decodes PNG/JPEG/... bytes to [h, w, 3] u8 (stb, 16384 px side cap). false on failure.
+[[nodiscard]] bool decode_rgb(std::span<const uint8_t> data, std::vector<uint8_t>& rgb, int& width,
+                              int& height);
+
+// InternVL (GotOcr2 processor, crop_to_patches false): one square tile. Resize to size x size with
+// Pillow 8-bit bicubic (== torchvision uint8 antialiased bicubic), rescale, normalise by
+// mean/std, patchify to [patches, 3*P*P] FP16 in raster patch order, (channel, row, col) inside a
+// patch: the flatten order of the Conv2d patch embedding. `resized` (optional) gets the u8 tile.
+struct InternVLPreprocessConfig {
+    int image_size = 448;
+    int patch_size = 14;
+    float mean[3] = {0.485f, 0.456f, 0.406f};
+    float std[3] = {0.229f, 0.224f, 0.225f};
+};
+[[nodiscard]] bool internvl_preprocess(const uint8_t* rgb, int width, int height,
+                                       const InternVLPreprocessConfig& cfg, std::vector<half>& patches,
+                                       std::vector<uint8_t>* resized = nullptr);
+
 // Load image from file, resize to target_size x target_size, normalize, convert to FP16 CHW.
 [[nodiscard]] bool load_and_preprocess_image(const std::string& path, int target_size, const float mean[3],
                                const float std[3], ImageData& out);

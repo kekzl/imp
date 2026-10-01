@@ -940,6 +940,7 @@ if(IMP_BUILD_TESTS)
         tests/test_weight_map_modality_skips.cpp
         tests/test_internvl_lm_names.cpp
         tests/test_internvl_vision.cpp
+        tests/test_internvl_preprocess.cpp
         tests/test_weight_map_out_norm_warn.cpp
         tests/test_mem_account_keyed.cpp
         tests/test_library_reserve_measurement.cpp

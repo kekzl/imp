@@ -241,6 +241,129 @@ bool qwen_patchify_video(std::span<const uint8_t* const> frames, int width, int 
     return true;
 }
 
+bool decode_rgb(std::span<const uint8_t> data, std::vector<uint8_t>& rgb, int& width, int& height) {
+    int ch = 0;
+    uint8_t* px = stbi_load_from_memory(data.data(), static_cast<int>(data.size()), &width, &height, &ch, 3);
+    if (!px)
+        return false;
+    rgb.assign(px, px + static_cast<size_t>(width) * height * 3);
+    stbi_image_free(px);
+    return true;
+}
+
+namespace {
+
+// Pillow ImagingResample, BICUBIC (a = -0.5), 8 bpc: separable, horizontal pass first, the
+// intermediate rounded and clamped to u8, 22-bit fixed-point weights. torchvision's uint8
+// antialiased bicubic (what GotOcr2 runs) is a port of the same code; a float resampler differs
+// by up to 18/255 at hard edges because it never clamps the intermediate.
+struct ResampleTaps {
+    std::vector<int> start, count;
+    std::vector<int32_t> weights;  // [out, ksize]
+    int ksize = 0;
+};
+
+double bicubic_filter(double x) {
+    constexpr double a = -0.5;
+    x = std::fabs(x);
+    if (x < 1.0)
+        return ((a + 2.0) * x - (a + 3.0)) * x * x + 1.0;
+    if (x < 2.0)
+        return (((x - 5.0) * x + 8.0) * x - 4.0) * a;
+    return 0.0;
+}
+
+ResampleTaps resample_taps(int in_size, int out_size) {
+    constexpr int kPrecisionBits = 32 - 8 - 2;
+    ResampleTaps t;
+    const double scale = static_cast<double>(in_size) / out_size;
+    const double filterscale = std::max(scale, 1.0);
+    const double support = 2.0 * filterscale;
+    t.ksize = static_cast<int>(std::ceil(support)) * 2 + 1;
+    t.start.resize(static_cast<size_t>(out_size));
+    t.count.resize(static_cast<size_t>(out_size));
+    t.weights.assign(static_cast<size_t>(out_size) * t.ksize, 0);
+    std::vector<double> k(static_cast<size_t>(t.ksize));
+    for (int xx = 0; xx < out_size; ++xx) {
+        const double center = (xx + 0.5) * scale;
+        const int xmin = std::max(static_cast<int>(center - support + 0.5), 0);
+        const int xmax = std::min(static_cast<int>(center + support + 0.5), in_size) - xmin;
+        double ww = 0.0;
+        for (int x = 0; x < xmax; ++x) {
+            k[x] = bicubic_filter((x + xmin - center + 0.5) / filterscale);
+            ww += k[x];
+        }
+        for (int x = 0; x < xmax; ++x) {
+            const double w = ww != 0.0 ? k[x] / ww : k[x];
+            t.weights[static_cast<size_t>(xx) * t.ksize + x] = static_cast<int32_t>(
+                w * (1 << kPrecisionBits) + (w < 0.0 ? -0.5 : 0.5));
+        }
+        t.start[xx] = xmin;
+        t.count[xx] = xmax;
+    }
+    return t;
+}
+
+uint8_t clip8(int64_t ss) {
+    constexpr int kPrecisionBits = 32 - 8 - 2;
+    const int64_t v = ss >> kPrecisionBits;
+    return static_cast<uint8_t>(std::clamp<int64_t>(v, 0, 255));
+}
+
+// [h, w, 3] u8 -> [oh, ow, 3] u8.
+void pil_resize_bicubic_u8(const uint8_t* in, int w, int h, uint8_t* out, int ow, int oh) {
+    constexpr int kPrecisionBits = 32 - 8 - 2;
+    const int64_t half = int64_t{1} << (kPrecisionBits - 1);
+    const ResampleTaps th = resample_taps(w, ow), tv = resample_taps(h, oh);
+    std::vector<uint8_t> mid(static_cast<size_t>(h) * ow * 3);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < ow; ++x)
+            for (int c = 0; c < 3; ++c) {
+                int64_t ss = half;
+                const int32_t* k = &th.weights[static_cast<size_t>(x) * th.ksize];
+                for (int i = 0; i < th.count[x]; ++i)
+                    ss += static_cast<int64_t>(in[(static_cast<size_t>(y) * w + th.start[x] + i) * 3 + c]) *
+                          k[i];
+                mid[(static_cast<size_t>(y) * ow + x) * 3 + c] = clip8(ss);
+            }
+    for (int y = 0; y < oh; ++y)
+        for (int x = 0; x < ow; ++x)
+            for (int c = 0; c < 3; ++c) {
+                int64_t ss = half;
+                const int32_t* k = &tv.weights[static_cast<size_t>(y) * tv.ksize];
+                for (int i = 0; i < tv.count[y]; ++i)
+                    ss += static_cast<int64_t>(mid[(static_cast<size_t>(tv.start[y] + i) * ow + x) * 3 + c]) *
+                          k[i];
+                out[(static_cast<size_t>(y) * ow + x) * 3 + c] = clip8(ss);
+            }
+}
+
+}  // namespace
+
+bool internvl_preprocess(const uint8_t* rgb, int width, int height, const InternVLPreprocessConfig& cfg,
+                         std::vector<half>& patches, std::vector<uint8_t>* resized) {
+    const int S = cfg.image_size, P = cfg.patch_size;
+    if (!rgb || width <= 0 || height <= 0 || S <= 0 || P <= 0 || S % P != 0)
+        return false;
+    std::vector<uint8_t> tile(static_cast<size_t>(S) * S * 3);
+    pil_resize_bicubic_u8(rgb, width, height, tile.data(), S, S);
+    const int side = S / P, features = 3 * P * P;
+    patches.assign(static_cast<size_t>(side) * side * features, __float2half(0.0f));
+    for (int pi = 0; pi < side * side; ++pi)
+        for (int c = 0; c < 3; ++c)
+            for (int y = 0; y < P; ++y)
+                for (int x = 0; x < P; ++x) {
+                    const int py = (pi / side) * P + y, px = (pi % side) * P + x;
+                    const float v = (tile[(static_cast<size_t>(py) * S + px) * 3 + c] / 255.0f -
+                                     cfg.mean[c]) /
+                                    cfg.std[c];
+                    patches[static_cast<size_t>(pi) * features + (c * P + y) * P + x] = __float2half(v);
+                }
+    if (resized)
+        *resized = std::move(tile);
+    return true;
+}
+
 bool load_and_preprocess_image(const std::string& path, int target_size, const float mean[3],
                                const float std[3], ImageData& out) {
     DecodedImage img;

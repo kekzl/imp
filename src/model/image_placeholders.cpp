@@ -106,6 +106,31 @@ std::vector<uint8_t> fold_video_pads(std::vector<int32_t>& tokens, int32_t image
     return types;
 }
 
+std::expected<void, std::string> expand_internvl_image_placeholders(std::vector<int32_t>& tokens,
+                                                                    int32_t context_id, int32_t start_id,
+                                                                    int32_t end_id, int n_images,
+                                                                    int tokens_per_image) {
+    const auto found = std::count(tokens.begin(), tokens.end(), context_id);
+    if (found != n_images)
+        return std::unexpected("prompt holds " + std::to_string(found) + " image placeholder(s) but " +
+                               std::to_string(n_images) + " image(s) were encoded");
+    if (tokens_per_image <= 0 || start_id < 0 || end_id < 0)
+        return std::unexpected("InternVL image tokens are not configured");
+    std::vector<int32_t> out;
+    out.reserve(tokens.size() + static_cast<size_t>(n_images) * (tokens_per_image + 1));
+    for (int32_t t : tokens) {
+        if (t != context_id) {
+            out.push_back(t);
+            continue;
+        }
+        out.push_back(start_id);
+        out.insert(out.end(), static_cast<size_t>(tokens_per_image), context_id);
+        out.push_back(end_id);
+    }
+    tokens = std::move(out);
+    return {};
+}
+
 size_t image_content_hash(std::span<const uint8_t> data) {
     size_t h = 0xcbf29ce484222325ULL;
     for (const uint8_t b : data) {

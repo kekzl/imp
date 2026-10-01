@@ -61,6 +61,13 @@ VideoPlaceholderLayout qwen_video_layout(int tokens_per_group, std::span<const d
 std::vector<uint8_t> fold_video_pads(std::vector<int32_t>& tokens, int32_t image_pad_id,
                                      int32_t video_pad_id);
 
+// InternVL (HF InternVLProcessor.replace_image_token, one tile per image): each context_id the
+// template rendered becomes start_id + tokens_per_image x context_id + end_id. Refuses when the
+// prompt's context_id count differs from n_images; tokens untouched on refusal.
+[[nodiscard]] std::expected<void, std::string> expand_internvl_image_placeholders(
+    std::vector<int32_t>& tokens, int32_t context_id, int32_t start_id, int32_t end_id, int n_images,
+    int tokens_per_image);
+
 // FNV-1a over an image's bytes. Used as the prefix cache's content salt, so a
 // hit needs the same tokens AND the same picture. Never returns 0 — that value
 // means "no image" to the cache, and an all-zero image must not claim it.
