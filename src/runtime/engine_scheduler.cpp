@@ -630,9 +630,10 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
     // Retired since the schedule (drain_decode_pipeline finished it and freed its KV):
     // append_block on a freed sequence returns -1, which read as exhaustion (#2361).
     if (decode_row_retired(req->status, req->output_tokens.size(), req->max_tokens)) {
-        IMP_LOG_INFO("decode: seq %d retired since the schedule (%s, out %zu of %d, %zu KV blocks held) - skipped",
-                     req->id, request_status_name(req->status), req->output_tokens.size(), req->max_tokens,
-                     kv_manager_->block_table(req->id).size());
+        IMP_LOG_INFO(
+            "decode: seq %d retired since the schedule (%s, out %zu of %d, %zu KV blocks held) - skipped",
+            req->id, request_status_name(req->status), req->output_tokens.size(), req->max_tokens,
+            kv_manager_->block_table(req->id).size());
         return false;
     }
     int ctx_len = req->context_len();
@@ -657,37 +658,7 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
             }
         }
         if (new_block < 0) {
-            // KV exhausted: append_block already reclaimed cached blocks, so
-            // the free pool AND all reclaimable cached blocks are empty.
-            // Reject-newest, not LRU eviction: every lru_order_ entry is LIVE
-            // and imp has no recompute path, so evicting one (a current-batch
-            // member, or a still-active sequence beyond max_batch_size) is a
-            // use-after-free once it runs. Cancel THIS sequence and leave the
-            // others' KV intact; StreamingLLM auto-enable (above) already
-            // handles the graceful case before we reach here. Log
-            // loudly: a silent cancel here surfaces as a bare API "internal
-            // error" that is expensive to attribute.
-            int pool_blocks = kv_cache_raw_ ? kv_cache_raw_->total_blocks() : 0;
-            IMP_LOG_ERROR(
-                "KV pool exhausted at decode: seq %d needs block %d but the %d-block pool has "
-                "0 free/reclaimable — cancelling this sequence (others keep their KV). The "
-                "pool was VRAM-clamped below the requested context; free VRAM, lower "
-                "max_seq_len, or halve KV with kv_cache.dtype=fp8 (--kv-fp8).",
-                req->id, blocks_needed, pool_blocks);
-            const auto st = kv_manager_->stats();
-            IMP_LOG_ERROR(
-                "KV pool exhausted at decode, seq %d: %d live sequences hold %d blocks (scheduler active %d), "
-                "cached %d (reclaimable %d, pinned %d), free %d, outstanding reservations %d; this seq holds %d, "
-                "ctx %d, out %zu of max_tokens %d (#2361)",
-                req->id, st.active_sequences, st.total_blocks, scheduler_->active_count(), st.cached_blocks,
-                kv_manager_->num_reclaimable_cached_blocks(), st.pinned_blocks, st.free_blocks,
-                kv_manager_->outstanding_reserved_blocks(), blocks_have, ctx_len, req->output_tokens.size(),
-                req->max_tokens);
-            kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
-            req->cancel_reason = CancelReason::KvCapacity;
-            cancel_sequence_(req);
-            req->status = RequestStatus::CANCELLED;
-            return false;
+            return decode_kv_exhausted_(req, blocks_needed, blocks_have, ctx_len);
         }
     }
 

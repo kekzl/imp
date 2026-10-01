@@ -54,7 +54,7 @@ const char* request_status_name(RequestStatus status);
 
 // A decode row whose generation ended after the step's batch was scheduled (a pipeline drain
 // finishes rows and frees their KV): no KV block to append, nothing to cancel (#2361).
-inline bool decode_row_retired(RequestStatus status, size_t n_output, int max_tokens) {
+[[nodiscard]] inline bool decode_row_retired(RequestStatus status, size_t n_output, int max_tokens) {
     return status == RequestStatus::FINISHED || status == RequestStatus::CANCELLED ||
            (max_tokens > 0 && n_output >= static_cast<size_t>(max_tokens));
 }

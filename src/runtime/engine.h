@@ -1510,6 +1510,8 @@ private:
     // step_decode sub-phase, one decoder: KV block for this step's token,
     // SWA window, StreamingLLM valves. False = cancelled, skip this step.
     [[nodiscard]] bool decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs);
+    [[nodiscard]] bool decode_kv_exhausted_(std::shared_ptr<Request>& req, int blocks_needed, int blocks_have,
+                                            int ctx_len);
     // One token per decode row of `logits` (row i = valid_decode[i]) with
     // each request's own sampling state (async batched sampler, device
     // penalty histories, per-row constraints, sync-only rows).
