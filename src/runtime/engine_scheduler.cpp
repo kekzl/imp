@@ -666,6 +666,15 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
                 "pool was VRAM-clamped below the requested context; free VRAM, lower "
                 "max_seq_len, or halve KV with kv_cache.dtype=fp8 (--kv-fp8).",
                 req->id, blocks_needed, pool_blocks);
+            const auto st = kv_manager_->stats();
+            IMP_LOG_ERROR(
+                "KV pool exhausted at decode, seq %d: %d live sequences hold %d blocks (scheduler active %d), "
+                "cached %d (reclaimable %d, pinned %d), free %d, outstanding reservations %d; this seq holds %d, "
+                "ctx %d, out %zu of max_tokens %d (#2361)",
+                req->id, st.active_sequences, st.total_blocks, scheduler_->active_count(), st.cached_blocks,
+                kv_manager_->num_reclaimable_cached_blocks(), st.pinned_blocks, st.free_blocks,
+                kv_manager_->outstanding_reserved_blocks(), blocks_have, ctx_len, req->output_tokens.size(),
+                req->max_tokens);
             kv_pressure_rejections_.fetch_add(1, std::memory_order_relaxed);
             req->cancel_reason = CancelReason::KvCapacity;
             cancel_sequence_(req);
