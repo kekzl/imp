@@ -21,5 +21,6 @@ model   exec/nvfp4_expert_offload.h             1   weight_upload.cpp applies th
 model   vision/qwen3vl_vision_config.h          1   the model loader owns the vision tower's config; model <-> vision is an ordering decision
 model   vision/qwen3vl_vision_load.h            1   weight_map.cpp maps the vision tower's tensors
 model   vision/vision_model.h                   2   model.cpp / hf_config_loader.cpp own the VisionModel
+model   vision/vision_family.h                  1   hf_config_loader.cpp asks the vision family registry which tower to parse
 quant   compute/gemm.h                          1   the one dispatch edge SETTLED G records: nvfp4_gemm.cu registers into the GEMM dispatch
 vision  runtime/cuda_graph.h                    1   CudaGraphRunner member for the encode graph; P0-2 priced in SETTLED H, not split out of cuda_graph.cu

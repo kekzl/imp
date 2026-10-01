@@ -1,4 +1,5 @@
 #include "vision/qwen3vl_vision_config.h"
+#include "vision/vision_family.h"
 
 #include <cmath>
 #include <optional>
@@ -28,15 +29,8 @@ std::optional<int> get_int(const JValue& v, const char* key) {
 }  // namespace
 
 bool vision_tower_supported(const std::string& vision_model_type) {
-    // Qwen3.6 (qwen3_5_moe) ships the same tower under a different name (333 model.visual.*
-    // tensors, a strict subset of Qwen3-VL's names, same 9 geometry fields, empty
-    // deepstack_visual_indexes). Qwen3.8 (qwen3_5, dense sibling) is the same tower again
-    // (checked field-by-field vs Qwen3.6-35B); only out_hidden_size differs (LM hidden size,
-    // not a tower property). Allowlist rather than a shape fingerprint on purpose: anything
-    // unrecognised must keep hitting the loud text-only path rather than being parsed on
-    // resemblance.
-    return vision_model_type == "qwen3_vl" || vision_model_type == "qwen3_5_moe" ||
-           vision_model_type == "qwen3_5";
+    // The registry (vision_family.cpp) holds the names; this answers "loadable in this build".
+    return vision_family_loadable(vision_family_of(vision_model_type));
 }
 
 std::expected<VisionConfig, std::string> parse_qwen3vl_vision_config(const JValue& vision_cfg) {
