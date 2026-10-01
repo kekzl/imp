@@ -136,7 +136,7 @@ curl -s http://localhost:8090/health | jq -c '{status,kv_blocks_total,kv_capacit
 - **Guess, then check.** A cheap drafter proposes the next tokens, the model checks them all in one pass and keeps what it agrees with: same answer, fewer passes.
 - **Many users at once:** requests share the card (continuous batching), a repeated prompt prefix is read once (prefix caching).
 
-What exists and what is tested: [`docs/FEATURES.md`](docs/FEATURES.md). The whole design: [`docs/internals/ARCHITECTURE.md`](docs/internals/ARCHITECTURE.md).
+What exists and what is tested: [`docs/FEATURES.md`](docs/FEATURES.md). The whole design: [`docs/internals/ARCHITECTURE.md`](docs/internals/ARCHITECTURE.md). Every doc by layer and reader: [`docs/README.md`](docs/README.md).
 
 ## Go deeper
 

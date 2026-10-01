@@ -157,7 +157,7 @@ reservations + WSL2/WDDM driver overhead** (baseline checkpoint 00 alone is
 
 The 1728 MiB `nvfp4_moe_ms_ref` is **not a duplicate** — #679 already frees the
 scattered per-expert source scales after the contiguous copy
-(`pre_dequant_phase3_moe.cpp:538 cudaFreeAsync(old_sc, stream)`, confirmed in the run log: "freed
+(`pre_dequant_phase3_moe.cpp:539 cudaFreeAsync(old_sc, stream)`, confirmed in the run log: "freed
 1728.00 MiB duplicated per-expert micro-scales"). Making the SafeTensors loader
 emit a contiguous scale slab would set `scales_contig=true` and skip the *copy*,
 but the scales must be resident for NVFP4 decode either way — it only removes a

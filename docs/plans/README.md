@@ -16,10 +16,10 @@ is the other direction: text moved OUT of the roadmap.
 | [2026-06-profiling-campaign](2026-06-profiling-campaign.md) | record, moved out of `docs/internals/PROFILING.md` 2026-09-23 | `docs/internals/PROFILING.md` |
 | [2026-07-22-token-recycling-spec-tree](2026-07-22-token-recycling-spec-tree.md) | CLOSED 2026-08-19, neutral to -7%, default off | roadmap Closed, "speculation tree" |
 | [2026-07-31-qwen3-vl-vision](2026-07-31-qwen3-vl-vision.md) | CLOSED 2026-08-11, shipped #1163-#1180 | roadmap Closed, "vision beyond Gemma" |
-| [2026-08-15-imp-quantize-roadmap](2026-08-15-imp-quantize-roadmap.md) | **OPEN**: items 2 (embedding opt-in), 3 (blocked on a model), 4 (stacked experts) | roadmap Open 6, Open 7 |
+| [2026-08-15-imp-quantize-roadmap](2026-08-15-imp-quantize-roadmap.md) | **OPEN**: items 2 (embedding opt-in), 4 (stacked experts); item 3 superseded 2026-10-01 (#2359) | roadmap Open 6, Open 7 (closed, archive) |
 | [2026-08-24-qwen38-port](2026-08-24-qwen38-port.md) | CLOSED 2026-08-27, all 8 items terminal | roadmap Closed, "Qwen3.8 port roadmap" |
 | [2026-08-27-prefill-decode-overlap](2026-08-27-prefill-decode-overlap.md) | CLOSED 2026-08-27, NEUTRAL both shapes, default off | roadmap lever ledger |
-| [2026-08-28-sparse-decode-attention](2026-08-28-sparse-decode-attention.md) | CLOSED 2026-08-30, SHIPPED opt-in (#1808, #1818, #1819) | roadmap Open 3 (the remainder) |
+| [2026-08-28-sparse-decode-attention](2026-08-28-sparse-decode-attention.md) | CLOSED 2026-08-30, SHIPPED opt-in (#1808, #1818, #1819) | roadmap Open 3 (closed 2026-10-01, archive) |
 | [2026-08-29-qwen38-long-context-posture](2026-08-29-qwen38-long-context-posture.md) | CLOSED 2026-08-31, both open items answered | roadmap lever ledger |
 | [2026-08-31-fp8-ssm-prefill](2026-08-31-fp8-ssm-prefill.md) | CLOSED 2026-08-31, REFUTED e2e, closed unmerged | roadmap prefill kernels |
 | [2026-08-31-mtp-multicandidate-hybrid](2026-08-31-mtp-multicandidate-hybrid.md) | CLOSED 2026-08-31, built and measured, gate not met | roadmap Closed, "speculation tree" |
@@ -27,3 +27,7 @@ is the other direction: text moved OUT of the roadmap.
 | [2026-09-04-lever-ledger-detail](2026-09-04-lever-ledger-detail.md) | record, moved out of the roadmap 2026-09-04 | - |
 | [2026-09-11-batched-mtp-verify](2026-09-11-batched-mtp-verify.md) | **OPEN**: stages 1-4 shipped opt-in (#1993), default off | CHANGELOG `speculative.batch_verify` |
 | [2026-09-12-factored-verify-spare](2026-09-12-factored-verify-spare.md) | **OPEN**: shipped opt-in (#1996-#1998, #2002), default off | CHANGELOG `speculative.factored_spare` |
+| [2026-09-16-open-rows-closed-detail](2026-09-16-open-rows-closed-detail.md) | record, moved out of the roadmap 2026-09-16 (Open rows 1, 2, 4, 7, 13, 14, 15) | - |
+| [2026-09-19-qwen4exp-port](2026-09-19-qwen4exp-port.md) | record, Qwen3.8-Flash-Next port shipped | CHANGELOG Qwen3.8-Flash-Next |
+| [2026-09-28-qwen4exp-mtp](2026-09-28-qwen4exp-mtp.md) | record, MTP draft-layer reference semantics; drafting shipped (#2272) | CHANGELOG `speculative.mtp_k` |
+| [2026-10-01-recurrent-state-paging-measured](2026-10-01-recurrent-state-paging-measured.md) | CLOSED 2026-10-01, DO NOT BUILD | roadmap Open 5 (archive) |
