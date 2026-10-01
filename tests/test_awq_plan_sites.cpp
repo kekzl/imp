@@ -243,3 +243,31 @@ TEST(AwqSites, TieMapMatchesTheProducerItFoldsInto) {
     EXPECT_EQ(tie_producer_len(TieMode::PerHeadDim, 100, heads), 0);
     EXPECT_TRUE(tie_map(TieMode::GqaValue, 24 * 128, Geometry{0, 6}).empty());
 }
+
+// Roadmap row 6: Qwen3-14B (n_rep 5) ABCD 12.2634 vs BD 9.9068 PPL; Qwen3-0.6B (n_rep 2) ABCD wins.
+TEST(AwqSites, DefaultGroupsDropAttentionOnWideGqa) {
+    EXPECT_STREQ(default_groups(1), kAwqAllGroups);
+    EXPECT_STREQ(default_groups(2), kAwqAllGroups);
+    EXPECT_STREQ(default_groups(4), kAwqAllGroups);
+    EXPECT_STREQ(default_groups(5), "BDEG");
+    EXPECT_STREQ(default_groups(6), "BDEG");
+    for (int64_t n_rep : {5, 6, 8})
+        EXPECT_FALSE(attention_groups_on_wide_gqa(default_groups(n_rep), n_rep));
+    EXPECT_TRUE(attention_groups_on_wide_gqa("ABCD", 5));
+    EXPECT_TRUE(attention_groups_on_wide_gqa("BCD", 6));
+    EXPECT_FALSE(attention_groups_on_wide_gqa("ABCD", 4));
+}
+
+// The wide-GQA default BDEG folds exactly the measured BD sites on a dense layer (Qwen3-14B).
+TEST(AwqSites, WideGqaDefaultIsBdOnADenseLayer) {
+    const std::string base = "model.layers.7.";
+    const auto bdeg = layer_fold_sites(attention_layer(base), base, NormConvention::Plain, kAwqWideGqaGroups);
+    const auto bd = layer_fold_sites(attention_layer(base), base, NormConvention::Plain, "BD");
+    ASSERT_EQ(bdeg.size(), bd.size());
+    for (size_t i = 0; i < bd.size(); i++) {
+        EXPECT_EQ(bdeg[i].group, bd[i].group);
+        EXPECT_EQ(bdeg[i].members, bd[i].members);
+        EXPECT_EQ(bdeg[i].producer, bd[i].producer);
+    }
+    EXPECT_EQ(bd.size(), 2u);
+}
