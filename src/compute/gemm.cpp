@@ -377,11 +377,12 @@ static bool keep_pin_chosen_at_other_m(GemmCacheEntry& entry, int64_t M, int64_t
     if (other_m) {
         const int n = s_pin_other_m_failures.fetch_add(1, std::memory_order_relaxed) + 1;
         if (n <= 5)
-            IMP_LOG_WARN("[gemm-algo] matmul failed at M=%ld K=%ld N=%ld with the pin chosen at "
-                         "M=%ld (same bucket) — this call takes the heuristic, the pin stays so "
-                         "calls at its own M keep answering identically (failure %d; total at "
-                         "gemm_cleanup)",
-                         (long)M, (long)K, (long)N, (long)entry.algo_M, n);
+            IMP_LOG_WARN(
+                "[gemm-algo] matmul failed at M=%ld K=%ld N=%ld with the pin chosen at "
+                "M=%ld (same bucket) — this call takes the heuristic, the pin stays so "
+                "calls at its own M keep answering identically (failure %d; total at "
+                "gemm_cleanup)",
+                (long)M, (long)K, (long)N, (long)entry.algo_M, n);
     }
     return other_m;
 }
@@ -713,9 +714,10 @@ void gemm_cleanup() {
     // otherwise, and the flag lives on the device (#1544).
     nvfp4_report_scale_clipping();
     if (const int f = s_pin_other_m_failures.exchange(0), x = s_exact_m_entries.exchange(0); f > 0 || x > 0)
-        IMP_LOG_INFO("[gemm-algo] %d matmul failure(s) with a pin chosen at another M; %d M(s) got an exact-M "
-                     "entry because the bucket pin failed cublasLtMatmulAlgoCheck",
-                     f, x);
+        IMP_LOG_INFO(
+            "[gemm-algo] %d matmul failure(s) with a pin chosen at another M; %d M(s) got an exact-M "
+            "entry because the bucket pin failed cublasLtMatmulAlgoCheck",
+            f, x);
     std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
     for (auto& [key, entry] : s_gemm_cache) {
         cublasLtMatrixLayoutDestroy(entry.Adesc);
