@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- Qwen3-VL video, CPU half (#2363): `qwen_patchify_video` (real frame pairs on the temporal axis), `expand_video_placeholders` (`<x.x seconds>` per pair), `qwen_build_mrope_positions_mm`. vs transformers 5.17.0: pixels 0 elements over 1 FP16 ulp, 113 prompt ids and 3x113 M-RoPE positions 0 diffs. Server/CLI wiring not yet.
+
 ### Fixed
 - VRAM ledger: a freed weight allocation leaves `WEIGHTS` (#2354); freed sources (27B F16 LM head 2425 MiB, Flash-Next GDN packs 6857 MiB) kept the whole-init residual at -495 / -3349 MiB. Now +1930 / +1823 MiB at warmup, so the library reserve is measured again.
 - Startup diagnostics state what runs (#2347): a rejected memory plan names the live pool (was "APPLIED", "Set runtime.max_seq_len=0"); no false out_norm WARN on Qwen4Exp; a negative ledger residual (27B -495 MiB) is no library-reserve measurement (was "measured 0 MiB", recorded for the next start).
