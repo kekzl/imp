@@ -100,10 +100,10 @@ bool KVCache::commit_minmax_(int from, int to) {
         MemAccount::instance().note("kv_cache_minmax", static_cast<std::ptrdiff_t>(added));
     if (!ok)
         return false;
-    for (int l = 0; l < n_layers_ && to > from; l++)
-        IMP_CUDA_CHECK_LOG(
-            cudaMemset(static_cast<char*>(minmax_pool_) + l * stride + from * minmax_block_bytes_, 0,
-                       static_cast<size_t>(to - from) * minmax_block_bytes_));
+    for (int l = 0; l < n_layers_ && to > from; l++) {
+        char* dst = static_cast<char*>(minmax_pool_) + l * stride + from * minmax_block_bytes_;
+        IMP_CUDA_CHECK_LOG(cudaMemset(dst, 0, static_cast<size_t>(to - from) * minmax_block_bytes_));
+    }
     if (to > from)
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(0));
     return true;

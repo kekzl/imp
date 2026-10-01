@@ -287,7 +287,7 @@ private:
     void* minmax_pool_ = nullptr;
     size_t minmax_block_bytes_ = 0;  // n_kv_heads * head_dim * 2 * sizeof(half)
     Region minmax_region_;           // growable pool only: committed with the KV blocks
-    bool commit_minmax_(int from, int to);
+    [[nodiscard]] bool commit_minmax_(int from, int to);
 
     // copy_blocks_device per-layer offset table (lazy device upload):
     // 6 size_t per layer {k_off, v_off, block_bytes, k_scale_off,
