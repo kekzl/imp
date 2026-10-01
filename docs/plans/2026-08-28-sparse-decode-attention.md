@@ -262,6 +262,49 @@ the requested `max_tokens` - assuming the request value made an 8192 budget read
 one. With the embedded MTP head on (the default for a single stream) the same arm spread 111 to 268
 tok/s between rounds, so speculation has to be off to price an attention-side knob.
 
+## Sparse prefill (2026-10-01)
+
+SHIPPED opt-in: `attention.sparse_prefill_topk_tokens` (0 = off), `sparse_prefill_rows` (16),
+`sparse_prefill_recent_tokens` (1024). Trigger: FMHA was 45.6 % of the Qwen3.8-27B pp77824 kernel
+window (bound 1.52x at 4x cheaper attention).
+
+| step | shape |
+|---|---|
+| select | once per continuation chunk per layer: score the past blocks for `rows` evenly spaced query rows (last row included), merge as max over rows of `score_r(b) - max_b score_r(b)`, top-k with sink + recent forced (same kernels as decode) |
+| attend | gather only the selected past pages (compacted, ascending), append the chunk, one FA2 pass with `q_offset` = selected past tokens; keys are post-RoPE, so compaction changes nothing else |
+| identity | past blocks <= budget: the dense table and `q_offset` (no launch) |
+| not this | the QSA dead end (dense FA2 chunk, then recompute rows): no dense pass |
+
+| budget | pp77824 tok/s | vs dense |
+|---|---:|---:|
+| dense | 6857.16 | - |
+| 4096 | 11311.44 | 1.65x |
+| 8192 | 10539.24 | 1.54x |
+| 16384 | 9347.64 | 1.36x |
+
+Shipped measurement at 8192 (1.54x clears the 1.26x gate with headroom for retrieval and PPL),
+3 alternating rounds, fresh process per run:
+
+| arm | pp77824 tok/s | FMHA ms (nsys, window) | selection launches |
+|---|---|---:|---:|
+| dense | 6835.55 / 6838.01 / 6828.79 | 5220.4 (45.5 %) | 0 |
+| sparse 8192 | 10529.05 / 10537.84 / 10524.38 | 1203.1 (16.4 %) | 528 per kernel (16 layers x 33 chunks); score 52.5 ms, select 9.1, merge 8.7 |
+
+| quality | dense | sparse 8192 |
+|---|---|---|
+| NIAH 5 depths x 81908 / 126908 tokens (`niah_check.py`) | 10/10 | 10/10 |
+| PPL `ppl_corpus_45k.txt` (13811 tokens), `runtime.deterministic=true` | 4.5842 (2 runs) | 4.5962 (+0.26 %) |
+
+Activity proof: `sparse prefill attention ACTIVE` in every sparse arm (prefill is not graph-captured,
+so the host line fires), and the nsys kernel counts above.
+
+```
+[PROV: commit=afd9b9c4 date=2026-10-01 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4 (NVFP4 KV)
+       cuda=13.4.1 image=scripts/build_image.sh of the branch n=3 alternating rounds
+       cmd=`imp-cli --bench --bench-pp 77824 --bench-reps 1 --max-tokens 8
+       --set speculative.ngram=false --set speculative.mtp_k=0 [--set attention.sparse_prefill_topk_tokens=8192]`]
+```
+
 ## Prefill attention share (2026-10-01)
 
 nsys, `imp-cli --bench --bench-pp N --bench-reps 1 --max-tokens 8`, mtp and n-gram off, graphs traced per node, window = NVTX `bench:pp`, attention = `fmha_sm120_fa2*` launches; bound = 1 / (1 - share x 0.75), the speedup if attention got 4x cheaper. Harness `tools/analysis/prefill_attn_share.sh`, image `86b079f2`.

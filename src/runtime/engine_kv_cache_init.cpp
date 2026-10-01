@@ -220,7 +220,8 @@ bool Engine::init_kv_cache() {
     // the plan prices it per block (#1103 silent-spill class, #2360). Same rule as the enable gate
     // below; per-layer geometry and SWA pools refuse it in enable_key_minmax.
     size_t sparse_minmax_bytes_per_layer = 0;
-    if (runtime_config_.attention.sparse_topk_tokens > 0 &&
+    if ((runtime_config_.attention.sparse_topk_tokens > 0 ||
+         runtime_config_.attention.sparse_prefill_topk_tokens > 0) &&
         !sparse_minmax_refusal(config_.kv_cache_dtype, mcfg.is_mla() && runtime_config_.attention.mla_absorb,
                                runtime_config_.speculative.token_recycling,
                                !config_.prefix_cache_path.empty()) &&
@@ -257,9 +258,15 @@ bool Engine::init_kv_cache() {
             probe.recurrent_snapshot_bytes = per_seq > 0 ? (budget / per_seq) * per_seq : 0;
         }
         if (executor_) {
-            probe.engine_persistent_bytes = executor_->workspace_estimate();
+            // allocate_workspaces() ran before distributable was read: charge only the part of the
+            // estimate not yet resident (Qwen3.8-27B: 887 estimated, 749 held, #2365).
+            const size_t est = executor_->workspace_estimate();
+            const size_t held = executor_->workspace_allocated();
+            probe.engine_persistent_bytes = est > held ? est - held : 0;
+            probe.engine_persistent_resident_bytes = held;
             probe.workspace_estimate_available = true;
         }
+        probe.kv_growable_ceiling_blocks = runtime_config_.kv_cache.growable ? vram_budget.kv_max_blocks : 0;
         probe.vision_tower_unmodelled = !config_.mmproj_path.empty();
         // Use config_.library_reserve_mb, NOT the runtime-config field: the
         // loader above writes the remembered measurement into the former only
@@ -679,19 +686,22 @@ bool Engine::init_kv_cache() {
     // sparse_minmax_refusal (shared with the plan charge above); enable_key_minmax also
     // refuses per-layer geometry; a growable pool grows the metadata with it. A refusal disables
     // the feature loudly.
-    if (runtime_config_.attention.sparse_topk_tokens > 0) {
+    if (runtime_config_.attention.sparse_topk_tokens > 0 ||
+        runtime_config_.attention.sparse_prefill_topk_tokens > 0) {
         const char* refuse = sparse_minmax_refusal(config_.kv_cache_dtype,
                                                    mcfg.is_mla() && runtime_config_.attention.mla_absorb,
                                                    runtime_config_.speculative.token_recycling,
                                                    !config_.prefix_cache_path.empty());
         if (refuse) {
-            IMP_LOG_WARN("attention.sparse_topk_tokens=%d ignored: %s",
-                         runtime_config_.attention.sparse_topk_tokens, refuse);
+            IMP_LOG_WARN("attention.sparse_topk_tokens=%d / sparse_prefill_topk_tokens=%d ignored: %s",
+                         runtime_config_.attention.sparse_topk_tokens,
+                         runtime_config_.attention.sparse_prefill_topk_tokens, refuse);
         } else if (!kv_cache_raw_->enable_key_minmax()) {
             IMP_LOG_WARN(
-                "attention.sparse_topk_tokens=%d ignored: metadata pool unavailable "
-                "(per-layer KV geometry or allocation failure)",
-                runtime_config_.attention.sparse_topk_tokens);
+                "attention.sparse_topk_tokens=%d / sparse_prefill_topk_tokens=%d ignored: metadata pool "
+                "unavailable (per-layer KV geometry or allocation failure)",
+                runtime_config_.attention.sparse_topk_tokens,
+                runtime_config_.attention.sparse_prefill_topk_tokens);
         }
     }
 

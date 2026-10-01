@@ -11,6 +11,7 @@
 #include "quant/turboquant_fp4.cuh"
 #include <cuda_fp8.h>
 #include <float.h>
+#include <algorithm>
 
 namespace imp {
 
@@ -259,9 +260,9 @@ __global__ void sparse_score_blocks_kernel(const half* __restrict__ q,
                                            const int* __restrict__ context_lens, float* __restrict__ scores,
                                            int n_heads, int n_kv_heads, int head_dim, int block_size,
                                            int max_blocks_per_seq, int scores_stride, int engage_blocks,
-                                           float std_coef) {
+                                           float std_coef, int q_stride, int bt_stride, int ctx_const) {
     const int seq = blockIdx.y;
-    const int ctx_len = context_lens[seq];
+    const int ctx_len = context_lens ? context_lens[seq] : ctx_const;
     const int n_blocks = (ctx_len + block_size - 1) / block_size;
     // Identity regime (selection copies the table verbatim) or a CTA past the
     // work: exit before the q smem staging - at short contexts the staging
@@ -270,7 +271,7 @@ __global__ void sparse_score_blocks_kernel(const half* __restrict__ q,
         return;
     const int q_elems = n_heads * head_dim;
     extern __shared__ half q_smem[];
-    const half* q_seq = q + (int64_t)seq * q_elems;
+    const half* q_seq = q + (int64_t)seq * q_stride;
     for (int i = threadIdx.x; i < q_elems; i += blockDim.x)
         q_smem[i] = q_seq[i];
     __syncthreads();
@@ -279,7 +280,7 @@ __global__ void sparse_score_blocks_kernel(const half* __restrict__ q,
     const int lane = threadIdx.x % kWarpSize;
     const int g = n_heads / n_kv_heads;
     const int row_elems = n_kv_heads * head_dim;
-    const int* bt = block_tables + (int64_t)seq * max_blocks_per_seq;
+    const int* bt = block_tables + (int64_t)seq * bt_stride;
     float* sc = scores + (int64_t)seq * scores_stride;
 
     for (int b = blockIdx.x * kScoreWarps + warp; b < n_blocks; b += gridDim.x * kScoreWarps) {
@@ -346,6 +347,44 @@ __global__ void sparse_score_blocks_kernel(const half* __restrict__ q,
             sc[b] = best;
     }
 }
+
+// Sparse prefill: one past-page selection per query chunk from sampled rows. A block's
+// chunk score is max over rows of (score_r(b) - max_b score_r(b)): the gap to each row's best
+// block, so a high-norm row does not outrank the others. One CTA, rows <= kMaxPrefillRows.
+constexpr int kMergeThreads = 1024;
+constexpr int kMaxPrefillRows = 64;
+
+__global__ void sparse_prefill_merge_rows_kernel(const float* __restrict__ scores, float* __restrict__ agg,
+                                                 int rows, int n_blocks, int stride) {
+    __shared__ float row_max[kMaxPrefillRows];
+    __shared__ float red[kMergeThreads / kWarpSize];
+    const int warp = threadIdx.x / kWarpSize;
+    const int lane = threadIdx.x % kWarpSize;
+    for (int r = 0; r < rows; r++) {
+        float m = -FLT_MAX;
+        for (int b = threadIdx.x; b < n_blocks; b += blockDim.x)
+            m = fmaxf(m, scores[(int64_t)r * stride + b]);
+        m = warp_reduce_max(m);
+        if (lane == 0)
+            red[warp] = m;
+        __syncthreads();
+        if (warp == 0) {
+            m = lane < (int)(blockDim.x / kWarpSize) ? red[lane] : -FLT_MAX;
+            m = warp_reduce_max(m);
+            if (lane == 0)
+                row_max[r] = m;
+        }
+        __syncthreads();
+    }
+    for (int b = threadIdx.x; b < n_blocks; b += blockDim.x) {
+        float best = -FLT_MAX;
+        for (int r = 0; r < rows; r++)
+            best = fmaxf(best, scores[(int64_t)r * stride + b] - row_max[r]);
+        agg[b] = best;
+    }
+}
+
+__global__ void sparse_prefill_set_len_kernel(int* __restrict__ len, int value) { *len = value; }
 
 // Top-k selection + compacted table build, one CTA per sequence. Selection key is
 // 64-bit: (monotone score bits << 32) | ~block_index, unique per block, so the radix
@@ -579,25 +618,12 @@ void sparse_update_key_minmax_all_layers(QType cache_dtype, const void* k_base, 
     }
 }
 
-void sparse_select_blocks(const half* q, const void* minmax_base, const int* block_tables,
-                          const int* context_lens, int n_seq, int n_heads, int n_kv_heads, int head_dim,
-                          int block_size, int max_blocks_per_seq, int budget_blocks, int sink_blocks,
-                          int recent_blocks, int engage_blocks, int table_blocks, float* scores_scratch,
-                          int* sparse_block_tables, int* sparse_context_lens, bool meanstd, float std_coef,
-                          cudaStream_t stream) {
-    // Fixed grid.x: work distribution adapts device-side via grid-stride, so a captured
-    // graph stays correct while the context grows during replay. 256 CTAs: fewer leaves the
-    // kernel latency-bound at low SM occupancy; the grid-stride loop makes the extra CTAs
-    // free at short ctx.
-    dim3 score_grid(256, n_seq);
-    const size_t q_smem = (size_t)n_heads * head_dim * sizeof(half);
-    auto* score_kern = meanstd ? sparse_score_blocks_kernel<ScoreMeanStd>
-                               : sparse_score_blocks_kernel<ScoreCornerBound>;
-    score_kern<<<score_grid, kScoreThreads, q_smem, stream>>>(
-        q, static_cast<const __half2*>(minmax_base), block_tables, context_lens, scores_scratch, n_heads,
-        n_kv_heads, head_dim, block_size, max_blocks_per_seq, max_blocks_per_seq, engage_blocks, std_coef);
-    IMP_CUDA_CHECK_LAUNCH();
+namespace {
 
+void launch_select_topk(int n_seq, const float* scores, const int* block_tables, const int* context_lens,
+                        int* sparse_block_tables, int* sparse_context_lens, int block_size,
+                        int max_blocks_per_seq, int budget_blocks, int sink_blocks, int recent_blocks,
+                        int engage_blocks, int table_blocks, cudaStream_t stream) {
     const int n_words = (max_blocks_per_seq + 31) / 32;
     const size_t sel_smem = (256 + 4 * (size_t)n_words + (size_t)max_blocks_per_seq) * sizeof(uint32_t);
     // 128k-context tables need ~35 KiB; opt in past the 48 KiB default ONLY
@@ -617,10 +643,84 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
                           cudaGetErrorString(err));
     }
     sparse_select_topk_kernel<<<n_seq, kSelectThreads, sel_smem, stream>>>(
-        scores_scratch, block_tables, context_lens, sparse_block_tables, sparse_context_lens, block_size,
+        scores, block_tables, context_lens, sparse_block_tables, sparse_context_lens, block_size,
         max_blocks_per_seq, max_blocks_per_seq, budget_blocks, sink_blocks, recent_blocks, engage_blocks,
         table_blocks);
     IMP_CUDA_CHECK_LAUNCH();
+}
+
+}  // namespace
+
+void sparse_select_blocks(const half* q, const void* minmax_base, const int* block_tables,
+                          const int* context_lens, int n_seq, int n_heads, int n_kv_heads, int head_dim,
+                          int block_size, int max_blocks_per_seq, int budget_blocks, int sink_blocks,
+                          int recent_blocks, int engage_blocks, int table_blocks, float* scores_scratch,
+                          int* sparse_block_tables, int* sparse_context_lens, bool meanstd, float std_coef,
+                          cudaStream_t stream) {
+    // Fixed grid.x: work distribution adapts device-side via grid-stride, so a captured
+    // graph stays correct while the context grows during replay. 256 CTAs: fewer leaves the
+    // kernel latency-bound at low SM occupancy; the grid-stride loop makes the extra CTAs
+    // free at short ctx.
+    dim3 score_grid(256, n_seq);
+    const size_t q_smem = (size_t)n_heads * head_dim * sizeof(half);
+    auto* score_kern = meanstd ? sparse_score_blocks_kernel<ScoreMeanStd>
+                               : sparse_score_blocks_kernel<ScoreCornerBound>;
+    score_kern<<<score_grid, kScoreThreads, q_smem, stream>>>(q, static_cast<const __half2*>(minmax_base),
+                                                              block_tables, context_lens, scores_scratch,
+                                                              n_heads, n_kv_heads, head_dim, block_size,
+                                                              max_blocks_per_seq, max_blocks_per_seq,
+                                                              engage_blocks, std_coef, n_heads * head_dim,
+                                                              max_blocks_per_seq, 0);
+    IMP_CUDA_CHECK_LAUNCH();
+
+    launch_select_topk(n_seq, scores_scratch, block_tables, context_lens, sparse_block_tables,
+                       sparse_context_lens, block_size, max_blocks_per_seq, budget_blocks, sink_blocks,
+                       recent_blocks, engage_blocks, table_blocks, stream);
+}
+
+int sparse_prefill_past_tokens(int past_len, int block_size, int budget_blocks) {
+    const int n_blocks = (past_len + block_size - 1) / block_size;
+    if (n_blocks <= budget_blocks)
+        return past_len;
+    return (budget_blocks - 1) * block_size + (past_len - (n_blocks - 1) * block_size);
+}
+
+int sparse_prefill_select_past(const half* q, int n_rows, int sample_rows, const void* minmax_layer,
+                               const int* past_block_table, int past_len, int n_heads, int n_kv_heads,
+                               int head_dim, int block_size, int capacity_blocks, int budget_blocks,
+                               int sink_blocks, int recent_blocks, bool meanstd, float std_coef,
+                               float* scores_scratch, float* agg_scratch, int* out_block_table,
+                               int* out_ctx_scratch, cudaStream_t stream) {
+    const int n_blocks = (past_len + block_size - 1) / block_size;
+    if (n_rows <= 0 || past_len <= 0 || n_blocks > capacity_blocks)
+        return -1;
+    const int rows = std::max(1, std::min({sample_rows, n_rows, kMaxPrefillRows}));
+    // Rows (i+1)*n/rows - 1: evenly spread over the chunk, the last row always in.
+    const int step = n_rows / rows;
+    const int first = n_rows - 1 - (rows - 1) * step;
+    const int q_elems = n_heads * head_dim;
+    if (n_blocks > budget_blocks) {
+        dim3 score_grid(256, rows);
+        const size_t q_smem = (size_t)q_elems * sizeof(half);
+        auto* score_kern = meanstd ? sparse_score_blocks_kernel<ScoreMeanStd>
+                                   : sparse_score_blocks_kernel<ScoreCornerBound>;
+        score_kern<<<score_grid, kScoreThreads, q_smem, stream>>>(
+            q + (int64_t)first * q_elems, static_cast<const __half2*>(minmax_layer), past_block_table,
+            nullptr, scores_scratch, n_heads, n_kv_heads, head_dim, block_size, capacity_blocks,
+            capacity_blocks, /*engage_blocks=*/0, std_coef, step * q_elems, /*bt_stride=*/0, past_len);
+        IMP_CUDA_CHECK_LAUNCH();
+        sparse_prefill_merge_rows_kernel<<<1, kMergeThreads, 0, stream>>>(scores_scratch, agg_scratch, rows,
+                                                                          n_blocks, capacity_blocks);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+    sparse_prefill_set_len_kernel<<<1, 1, 0, stream>>>(out_ctx_scratch, past_len);
+    IMP_CUDA_CHECK_LAUNCH();
+    // n_blocks <= budget: the select kernel's identity branch copies the table (dense equivalent).
+    launch_select_topk(1, agg_scratch, past_block_table, out_ctx_scratch, out_block_table,
+                       out_ctx_scratch + 1, block_size, capacity_blocks, budget_blocks, sink_blocks,
+                       recent_blocks,
+                       /*engage_blocks=*/budget_blocks, capacity_blocks, stream);
+    return sparse_prefill_past_tokens(past_len, block_size, budget_blocks);
 }
 
 }  // namespace imp

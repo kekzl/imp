@@ -4,6 +4,7 @@
 #include "vision/qwen3vl_vision_config.h"
 #include "vision/vision_model.h"
 #include "vision/vision_family.h"
+#include "model/multimodal_wrapper.h"
 #include "model/llm_compressor_loader.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
@@ -137,7 +138,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
                                      "' is not supported (imp runs causal decoder LMs; "
                                      "embedding encoders need pooling support)");
         }
-        cfg.arch = map_architecture(archs->arr[0].str_val);
+        cfg.arch = map_architecture(wrapped_lm_architecture(root, archs->arr[0].str_val));
         if (archs->arr.size() > 1) {
             std::string dropped;
             for (size_t i = 1; i < archs->arr.size(); i++) {

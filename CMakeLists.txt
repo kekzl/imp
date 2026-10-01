@@ -204,6 +204,7 @@ set(IMP_MODEL_SOURCES
     src/model/sentencepiece_loader.cpp
     src/model/json_util.cpp
     src/model/hf_config_loader.cpp
+    src/model/multimodal_wrapper.cpp
     src/model/hf_gptq_config.cpp
     src/model/awq_load.cpp
     src/model/mrope_positions.cpp
@@ -444,6 +445,7 @@ set(IMP_EXEC_SOURCES
     src/exec/workspace_sizes.cpp
     src/exec/executor_workspace.cpp
     src/exec/executor_workspace_buffers.cpp
+    src/exec/executor_sparse_prefill.cpp
     src/exec/executor_kv_write.cu
     src/exec/executor_pre_dequant.cpp
     src/exec/pre_dequant_phase0_nvfp4_loader.cpp
@@ -583,6 +585,7 @@ set_source_files_properties(
 set_source_files_properties(
     src/exec/executor_attention.cpp
     src/exec/executor_workspace_buffers.cpp
+    src/exec/executor_sparse_prefill.cpp
     PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
 # --- Tools ---
@@ -926,6 +929,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mla.cpp
         tests/test_weight_map_expert_gate.cpp
         tests/test_weight_map_modality_skips.cpp
+        tests/test_internvl_lm_names.cpp
         tests/test_weight_map_out_norm_warn.cpp
         tests/test_mem_account_keyed.cpp
         tests/test_library_reserve_measurement.cpp
@@ -1108,6 +1112,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_paged_nvfp4_tc_residual.cu
         tests/test_attention_chunked.cu
         tests/test_sparse_attn_select.cu
+        tests/test_sparse_prefill.cu
     )
 
     imp_add_test_module(test-quant SOURCES

@@ -524,6 +524,13 @@ sparse_min_ctx       = 12288
 sparse_score_meanstd = true
 # Offset weight for sparse_score_meanstd. 0 ranks on the mean alone.
 sparse_score_std_coef = 1.0
+# Sparse prefill: a continuation chunk attends to its own rows plus the top
+# N past tokens (one page selection per chunk, same page score). 0 = off.
+sparse_prefill_topk_tokens = 0
+# Query rows sampled per chunk to score the past pages (max 64).
+sparse_prefill_rows = 16
+# Past positions always kept for a continuation chunk (local context).
+sparse_prefill_recent_tokens = 1024
 
 [moe]
 # Expected per-expert overhead (% of expert size) before deciding to upload

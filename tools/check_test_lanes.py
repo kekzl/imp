@@ -366,9 +366,11 @@ def main():
     # 500 committed NVFP4 blocks must read above the spill threshold (#2366); needs a card.
     # 1183 -> 1185: SparseAttnE2E.MlaGeometryFullBudgetBitIdentical, MlaGeometrySmallBudgetKeepsTheNeedle
     # (test-attention, GPU): sparse decode at MLA head_dim 192 (roadmap row 3).
-    # 1185 -> 1186: MLAAttnOutput.PaddedSymmetricSplitKMatchesGeneric (GPU): MLA decode at HD 192
+    # 1185 -> 1188: SparsePrefillTest x2 + SparsePrefillGeometry.PastTokensKeepsTheTail (test-attention,
+    # GPU module): sparse prefill selection, compacted gather + FA2 bit-identity, mutation.
+    # 1188 -> 1189: MLAAttnOutput.PaddedSymmetricSplitKMatchesGeneric (GPU): MLA decode at HD 192
     # split-K + compaction vs the generic kernel (#2374).
-    PINNED = 1186
+    PINNED = 1189
 
     text = CMAKE.read_text()
     mods = module_sources(text)

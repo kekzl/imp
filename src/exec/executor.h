@@ -102,6 +102,8 @@ public:
     size_t workspace_estimate() const {
         return ws_.workspace_estimate(/*include_attn_scores=*/!fa2_serves_all_prefill());
     }
+    // What allocate_workspaces() already holds of that estimate.
+    size_t workspace_allocated() const { return ws_.allocated_bytes(); }
 
     // Run the full forward pass and return the sampled token ID.
     int32_t forward(const InferenceState& state, cudaStream_t stream = nullptr);
@@ -952,6 +954,17 @@ private:
 
     void allocate_auxiliary_buffers(
         bool skip_batch_dequant = false);  // dequant scratch, MoE staging, routing buffers
+    void allocate_sparse_prefill_scratch_();  // executor_sparse_prefill.cpp
+    // Past KV a continuation chunk attends to: the selected compacted table and its token count,
+    // or the dense table and q_offset (attention.sparse_prefill_topk_tokens off or not engaged).
+    struct SparsePrefillPast {
+        const int* table;
+        int past;
+    };
+    SparsePrefillPast sparse_prefill_pick_(const half* q, int n, KVCache* cache, int kv_layer,
+                                           const int* table, int q_offset, int nh, int nkv, int hd,
+                                           bool cap_replay, bool paged_kv_written, int sliding_window,
+                                           const void* sinks, cudaStream_t stream);
     void free_buffers();
 
     // Per-layer helpers
