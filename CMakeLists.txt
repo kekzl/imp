@@ -444,6 +444,7 @@ set(IMP_EXEC_SOURCES
     src/exec/workspace_sizes.cpp
     src/exec/executor_workspace.cpp
     src/exec/executor_workspace_buffers.cpp
+    src/exec/executor_sparse_prefill.cpp
     src/exec/executor_kv_write.cu
     src/exec/executor_pre_dequant.cpp
     src/exec/pre_dequant_phase0_nvfp4_loader.cpp
@@ -583,6 +584,7 @@ set_source_files_properties(
 set_source_files_properties(
     src/exec/executor_attention.cpp
     src/exec/executor_workspace_buffers.cpp
+    src/exec/executor_sparse_prefill.cpp
     PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
 # --- Tools ---
@@ -1108,6 +1110,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_paged_nvfp4_tc_residual.cu
         tests/test_attention_chunked.cu
         tests/test_sparse_attn_select.cu
+        tests/test_sparse_prefill.cu
     )
 
     imp_add_test_module(test-quant SOURCES

@@ -490,6 +490,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
+    allocate_sparse_prefill_scratch_();  // attention.sparse_prefill_topk_tokens (executor_sparse_prefill.cpp)
+
     // cuBLAS attention S-matrix workspace [n_heads, attn_seq, attn_seq] FP16; only the
     // materialized cuBLAS prefill fallback uses it. Skip when FP16-QK FA2 serves all prefill
     // (uniform per-layer shapes, no learned sinks, head_dim 128 or 256 with fa2_hd256).

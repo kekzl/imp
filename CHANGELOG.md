@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- Sparse prefill attention (`attention.sparse_prefill_topk_tokens`, default off): a continuation chunk attends to its own rows plus the top past pages, one selection per chunk, no dense pass. Qwen3.8-27B pp77824 at 8192: 6835.55 -> 10529.05 tok/s (1.54x, 3/3), NIAH 10/10, PPL +0.26 %. Record: `docs/plans/2026-08-28-sparse-decode-attention.md`.
 - Sparse decode attention on MLA models (#2372): only `attention.mla_absorb` stays refused. DeepSeek-V2-Lite NVFP4, budget 4096: decode 3.20 -> 23.03 tok/s at 32k, NIAH 10/10 dense and sparse (V2-Lite-Chat). Harnesses `tools/analysis/sparse_mla_ab.sh`, `prefill_attn_share.sh`.
 - Qwen3-VL video input (#2370): `{"type":"video","video":[frame URLs],"fps"|"timestamps"}` on `/v1/chat/completions`, `imp-cli --video-frames`; 2..768 client-sampled frames, no mp4 decoding. 8 red-panda frames: encoder relL2 5.48e-3 vs HF FP32, CLI and server name the red panda.
 - Qwen3-VL video, CPU half (#2363): `qwen_patchify_video` (real frame pairs on the temporal axis), `expand_video_placeholders` (`<x.x seconds>` per pair), `qwen_build_mrope_positions_mm`. vs transformers 5.17.0: pixels 0 elements over 1 FP16 ulp, 113 prompt ids and 3x113 M-RoPE positions 0 diffs. Server/CLI wiring not yet.
