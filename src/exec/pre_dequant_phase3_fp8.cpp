@@ -53,17 +53,13 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
                 total_fp8_bytes += e.n_elems;
             }
 
-            float* d_block_maxes = nullptr;
-            float* d_absmax = nullptr;
-            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_maxes, (size_t)max_grid * sizeof(float)));
-            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax, sizeof(float)));
-
-            float* d_scales_all = nullptr;
-            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scales_all, to_migrate.size() * sizeof(float)));
-
-            uint8_t* d_fp8_bulk = nullptr;
-            d_fp8_bulk = static_cast<uint8_t*>(
-                vram_alloc(vram_alloc_, total_fp8_bytes, "fp8_migration_cache"));
+            // Scratch + bulk; a failed scratch leaves the bulk null, so the loop below never runs (#2446).
+            const pre_dequant_internal::Fp8CacheBuffers bufs = pre_dequant_internal::alloc_fp8_cache_buffers(
+                vram_alloc_, max_grid, to_migrate.size(), total_fp8_bytes, "fp8_migration_cache");
+            float* d_block_maxes = bufs.block_maxes;
+            float* d_absmax = bufs.absmax;
+            float* d_scales_all = bufs.scales;
+            uint8_t* d_fp8_bulk = bufs.bulk;
             if (!d_fp8_bulk) {
                 cudaError_t e = cudaGetLastError();
                 IMP_LOG_WARN("FP8 migration cache alloc failed (%.1f MiB): %s",

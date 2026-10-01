@@ -13,6 +13,7 @@
 #include "quant/nvfp4_quant.h"
 #include "quant/fp8_utils.cuh"
 #include "core/cuda_static_reset.h"
+#include "core/cuda_errors.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -425,7 +426,7 @@ void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src, CutlassNvFP4Weight& d
     // Allocate SfAtom scale buffer
     size_t sf_bytes = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
     void* d_sf = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_sf, sf_bytes));
+    cuda_alloc_or_throw(cudaMalloc(&d_sf, sf_bytes), "convert_nvfp4_to_cutlass scales");
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));  // zero-init for padding
 
     // Convert scales to SfAtom layout (micro_scale only, tensor_scale deferred to GEMM alpha)

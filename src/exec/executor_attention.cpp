@@ -38,6 +38,7 @@
 #include "compute/mla_kv_assemble.h"
 #include "compute/mla_absorb.h"
 #include "exec/sparse_attn_select.h"
+#include "core/cuda_errors.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "core/pdl.h"
@@ -604,7 +605,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // alloc is amortised in the pool.
             void* compact_buf = nullptr;
             const size_t bytes = static_cast<size_t>(n) * mla_ao_cols * sizeof(half);
-            IMP_CUDA_CHECK_LOG(cudaMallocAsync(&compact_buf, bytes, stream));
+            cuda_alloc_or_throw(cudaMallocAsync(&compact_buf, bytes, stream),
+                                "MLA prefill output compaction");
             mla_compact_attn_output(static_cast<const half*>(ao.data),
                                     static_cast<half*>(compact_buf), n, nh, hd, vhd, stream);
             // Copy compacted result back into attn_out_ (dst pitch < src pitch,

@@ -186,6 +186,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/recurrent_snapshot_store.cpp
     src/memory/weight_snapshot.cpp
     src/memory/weight_cache_file.cpp
+    src/memory/device_alloc_all.cpp
     src/memory/vram_query.cpp
     src/memory/ssm_state.cpp
     src/memory/layer_offload.cpp
@@ -1268,6 +1269,7 @@ if(IMP_BUILD_TESTS)
         tests/test_engine_relaunch.cpp
         tests/test_serving_signals.cpp
         tests/test_batching_engine_fault.cu
+        tests/test_moe_alloc_failure.cu
         tools/imp-server/batching_engine.cpp
         tests/test_suspend_resume.cu
         tests/test_warm_cache.cu

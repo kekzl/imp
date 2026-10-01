@@ -1,6 +1,7 @@
 #include "compute/cublas_gemm_algo.h"
 #include "compute/attention_cublas.h"
 #include "core/cuda_static_reset.h"
+#include "core/cuda_errors.h"
 #include "core/logging.h"
 
 #include <cublas_v2.h>
@@ -314,7 +315,10 @@ static void ensure_attn_ptr_arrays(int n_heads) {
         return;
     if (s_attn_d_ptrs)
         IMP_CUDA_CHECK_LOG(cudaFree(static_cast<void*>(s_attn_d_ptrs)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_attn_d_ptrs, needed * sizeof(void*)));
+    s_attn_d_ptrs = nullptr;
+    s_attn_d_ptrs_capacity = 0;
+    cuda_alloc_or_throw(cudaMalloc(&s_attn_d_ptrs, needed * sizeof(void*)),
+                        "attention_cublas pointer arrays");
     s_attn_d_ptrs_capacity = needed;
 }
 

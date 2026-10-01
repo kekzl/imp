@@ -60,6 +60,20 @@ HostStageGeometry host_stage_geometry(int n_experts, bool staged_cutlass, int wa
     const int chunks = staged_cutlass ? std::clamp(want_chunks, 1, std::max(1, n_experts)) : 1;
     return {chunks, (n_experts + chunks - 1) / chunks, chunks > 1 ? 2 : kExpertProjCount};
 }
+
+// smallM prefill scratch: 2*ne pointers then 3*ne floats, one T2 take, no per-forward alloc (#2446).
+// A failed take leaves smallM_count 0, which turns the smallM branch off.
+void take_smallM_scratch(MoEWorkspace& moe, int n_experts) {
+    const size_t ne = static_cast<size_t>(n_experts);
+    auto sl = engine_arena().take_bytes(2 * ne * sizeof(void*) + 3 * ne * sizeof(float));
+    if (sl.empty()) {
+        IMP_LOG_WARN("smallM MoE prefill scratch unavailable from the T2 arena; smallM branch off");
+        return;
+    }
+    moe.smallM_ptrs = reinterpret_cast<void**>(sl.data());
+    moe.smallM_scales = reinterpret_cast<float*>(sl.data() + 2 * ne * sizeof(void*));
+    moe.smallM_count = n_experts;
+}
 }  // namespace
 
 void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
@@ -895,6 +909,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     IMP_LOG_WARN("CUTLASS 3.x SFA pointer array unavailable from the T2 arena");
                     moe_.cutlass3x_sfa_ptrs = nullptr;
                 }
+                take_smallM_scratch(moe_, cfg.n_experts);
                 IMP_LOG_INFO("CUTLASS 3.x MoE staging: %.2f MiB (packed=%.2f, sf=%.2f) max_expanded=%d",
                              (packed_sz + sf_sz) / (1024.0 * 1024.0), packed_sz / (1024.0 * 1024.0),
                              sf_sz / (1024.0 * 1024.0), max_expanded);

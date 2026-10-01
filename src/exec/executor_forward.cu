@@ -793,7 +793,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 int K = cfg.d_model;
                 void* w_fp16_dev = nullptr;
                 size_t fp16_bytes = static_cast<size_t>(N) * K * sizeof(half);
-                IMP_CUDA_CHECK_LOG(cudaMallocAsync(&w_fp16_dev, fp16_bytes, stream));
+                cuda_alloc_or_throw(cudaMallocAsync(&w_fp16_dev, fp16_bytes, stream),
+                                    "lm_dequant_fp16 LM head");
                 dequant_gpu(model_->output_proj().data, w_fp16_dev, out_qtype, N, K, stream);
                 int64_t w_shape[2] = {N, K};
                 Tensor w_fp16(w_fp16_dev, QType::F16, 2, w_shape, true);

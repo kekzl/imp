@@ -52,6 +52,26 @@ static void verify_against_moe_routing_model(ModelArch arch, const DispatchPolic
         moe_prefill_path_name(chosen), moe_prefill_path_name(modeled));
 }
 
+// smallM alpha for the active experts (M_per[e] > 0): D2H d_alpha [ne], compact on host, H2D into
+// d_out. Cheaper than the activation-scale D2H it replaced. False on a failed copy: d_out unwritten.
+static bool compact_smallM_alpha(const float* d_alpha, float* d_out, const std::vector<int>& M_per,
+                                 cudaStream_t stream) {
+    std::vector<float> h_alpha(M_per.size());
+    cudaError_t err = cudaMemcpyAsync(h_alpha.data(), d_alpha, h_alpha.size() * sizeof(float),
+                                      cudaMemcpyDeviceToHost, stream);
+    if (err == cudaSuccess)
+        err = cudaStreamSynchronize(stream);
+    size_t na = 0;
+    for (size_t e = 0; err == cudaSuccess && e < M_per.size(); ++e)
+        if (M_per[e] > 0)
+            h_alpha[na++] = h_alpha[e];
+    if (err == cudaSuccess)
+        err = cudaMemcpyAsync(d_out, h_alpha.data(), na * sizeof(float), cudaMemcpyHostToDevice, stream);
+    if (err != cudaSuccess)
+        IMP_LOG_ERROR("smallM alpha compaction failed: %s", cudaGetErrorString(err));
+    return err == cudaSuccess;
+}
+
 // ---------------------------------------------------------------------------
 bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t stream,
                                                           MoeFfnContext& ctx) {
@@ -412,10 +432,9 @@ bool smallM_done = false;
             native_up_ok && ly.nvfp4_moe_up_ptr->n_experts == ne;
         const bool down_ne_ok =
             native_down_ok && ly.nvfp4_moe_down_ptr->n_experts == ne;
-        const bool use_smallM = max_M > 0 && max_M <= smallM_threshold &&
-                                native_up_ok && native_down_ok &&
-                                native_gate_ok && up_ne_ok && down_ne_ok &&
-                                gate_ne_ok;
+        const bool scratch_ok = moe_.smallM_count >= ne;  // set only with both scratch pointers
+        const bool use_smallM = max_M > 0 && max_M <= smallM_threshold && native_up_ok && native_down_ok &&
+                                native_gate_ok && up_ne_ok && down_ne_ok && gate_ne_ok && scratch_ok;
         if (use_smallM) {
             if (layer == 0) {
                 IMP_LOG_INFO(
@@ -459,28 +478,25 @@ bool smallM_done = false;
             }
 
             std::vector<void*> act_packed_ptrs(ne), act_sf_ptrs(ne);
-            // d_act_tscales stays on device — no D2H sync.
-            float* d_act_tscales = nullptr;
+            // Workspace scratch (#2446), stream-ordered reuse across projections:
+            // [0,ne) act tensor scales, [ne,2ne) alpha, [2ne,3ne) compacted alpha.
+            float* d_act_tscales = moe_.smallM_scales;
+            float* d_alpha = moe_.smallM_scales + ne;
+            float* d_alpha_compact_dev = moe_.smallM_scales + 2 * static_cast<ptrdiff_t>(ne);
             if (ok) {
                 for (int e = 0; e < ne; ++e) {
                     act_packed_ptrs[e] = act_packed_base + packed_offs_du[e];
                     act_sf_ptrs[e] = act_sf_base + sf_offs_du[e];
                 }
 
-                // Allocate a transient device buffer for per-expert
-                // activation tensor_scales. Tiny — ne*4 bytes.
-                IMP_CUDA_CHECK_LOG(cudaMallocAsync(
-                    &d_act_tscales,
-                    static_cast<size_t>(ne) * sizeof(float), stream));
                 // Quantize gathered FP16 activations native row-major,
                 // and have the kernel emit per-expert tensor_scales.
-                imp::quantize_fp16_to_nvfp4_moe_native_with_scales(
-                    reinterpret_cast<const __half*>(gathered_base),
-                    act_packed_ptrs.data(), act_sf_ptrs.data(),
-                    d_act_tscales,
-                    static_cast<const int*>(routing.expert_offsets.data),
-                    expanded, d, ne, stream);
-                // No D2H sync — d_act_tscales stays on device.
+                ok = imp::quantize_fp16_to_nvfp4_moe_native_with_scales(
+                    reinterpret_cast<const __half*>(gathered_base), act_packed_ptrs.data(),
+                    act_sf_ptrs.data(), d_act_tscales, static_cast<const int*>(routing.expert_offsets.data),
+                    expanded, d, ne, moe_.smallM_ptrs, stream);
+                if (!ok)
+                    IMP_LOG_ERROR("smallM gate/up quantize failed; falling back to CUTLASS 3.x");
             }
 
             // Builds per-expert weight pointer arrays from the native
@@ -496,11 +512,7 @@ bool smallM_done = false;
                                 int K_in, int N_out) -> bool {
                 if (!W)  // no NVFP4 weights for this projection: fail, caller falls back
                     return false;
-                // Upload weight tensor_scales H2D once per projection.
                 // W->tensor_scales is already on device if non-null.
-                float* d_alpha = nullptr;
-                IMP_CUDA_CHECK_LOG(cudaMallocAsync(
-                    &d_alpha, static_cast<size_t>(ne) * sizeof(float), stream));
                 if (W->tensor_scales) {
                     // Compute alpha = act_ts * weight_ts on device.
                     imp::compute_moe_alpha_device(
@@ -516,18 +528,12 @@ bool smallM_done = false;
                 std::vector<int> active_M_local;
                 std::vector<const void*> hA, hSFA, hB, hSFB;
                 std::vector<void*> hD;
-                // alpha stays on device (no hAlpha): builds a device-indexed view of
-                // d_alpha for active experts, since gemm_grouped_nvfp4_smallM accepts a
-                // contiguous [n_experts] device array indexed by blockIdx.x, and needs it
-                // indexed by active-expert position instead.
-                std::vector<float> h_alpha_compact;
                 active_M_local.reserve(ne);
                 hA.reserve(ne);
                 hSFA.reserve(ne);
                 hB.reserve(ne);
                 hSFB.reserve(ne);
                 hD.reserve(ne);
-                h_alpha_compact.reserve(ne);
                 // Compacting alpha for active experts is only needed when some M_per[e]==0
                 // experts are skipped; reads d_alpha back only then, otherwise passes d_alpha directly.
                 bool all_active = true;
@@ -551,46 +557,21 @@ bool smallM_done = false;
                                      sizeof(half));
                 }
                 const int na = static_cast<int>(active_M_local.size());
-                if (na == 0) {
-                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_alpha, stream));
+                if (na == 0)
                     return true;
-                }
 
                 // d_alpha_active: compact device buffer for the na active
                 // experts. When all experts are active, d_alpha == d_alpha_active.
                 float* d_alpha_active = d_alpha;
-                float* d_alpha_compact_dev = nullptr;
                 if (!all_active) {
-                    // Compacting alpha: D2H the small d_alpha buffer (ne floats), compact,
-                    // H2D the compact array. Cheapest option; still eliminates the larger D2H of activation
-                    // scales.
-                    std::vector<float> h_alpha_full(ne);
-                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
-                        h_alpha_full.data(), d_alpha,
-                        static_cast<size_t>(ne) * sizeof(float),
-                        cudaMemcpyDeviceToHost, stream));
-                    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-                    for (int e = 0; e < ne; ++e)
-                        if (M_per[e] > 0)
-                            h_alpha_compact.push_back(h_alpha_full[e]);
-                    IMP_CUDA_CHECK_LOG(cudaMallocAsync(
-                        &d_alpha_compact_dev,
-                        static_cast<size_t>(na) * sizeof(float), stream));
-                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
-                        d_alpha_compact_dev, h_alpha_compact.data(),
-                        static_cast<size_t>(na) * sizeof(float),
-                        cudaMemcpyHostToDevice, stream));
+                    if (!compact_smallM_alpha(d_alpha, d_alpha_compact_dev, M_per, stream))
+                        return false;
                     d_alpha_active = d_alpha_compact_dev;
                 }
 
-                bool ret = imp::gemm_grouped_nvfp4_smallM(
-                    na, active_M_local.data(), N_out, K_in, hA.data(),
-                    hSFA.data(), hB.data(), hSFB.data(), hD.data(),
-                    d_alpha_active, stream);
-                if (d_alpha_compact_dev)
-                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_alpha_compact_dev, stream));
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_alpha, stream));
-                return ret;
+                return imp::gemm_grouped_nvfp4_smallM(na, active_M_local.data(), N_out, K_in, hA.data(),
+                                                      hSFA.data(), hB.data(), hSFB.data(), hD.data(),
+                                                      d_alpha_active, stream);
             };
 
             bool ok_gate = ok;
@@ -604,12 +585,6 @@ bool smallM_done = false;
                 ok_up = run_proj(ly.nvfp4_moe_up_ptr, act_packed_ptrs,
                                  act_sf_ptrs, d_act_tscales,
                                  expert_up_base, d, eff);
-            }
-
-            // Free gate/up activation scales (down will use a fresh d_act_tscales_dn).
-            if (d_act_tscales) {
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_act_tscales, stream));
-                d_act_tscales = nullptr;
             }
 
             if (ok && ok_gate && ok_up) {
@@ -641,24 +616,15 @@ bool smallM_done = false;
                     }
                     char* down_act = non_gated_experts ? expert_up_base
                                                         : expert_swiglu_base;
-                    // Re-quantize post-SwiGLU activations; keep scales on device.
-                    float* d_act_tscales_dn = nullptr;
-                    IMP_CUDA_CHECK_LOG(cudaMallocAsync(
-                        &d_act_tscales_dn,
-                        static_cast<size_t>(ne) * sizeof(float), stream));
-                    imp::quantize_fp16_to_nvfp4_moe_native_with_scales(
-                        reinterpret_cast<const __half*>(down_act),
-                        act_packed_ptrs.data(), act_sf_ptrs.data(),
-                        d_act_tscales_dn,
-                        static_cast<const int*>(routing.expert_offsets.data),
-                        expanded, eff, ne, stream);
-                    // No D2H sync — pass d_act_tscales_dn directly.
-                    bool ok_down =
-                        run_proj(ly.nvfp4_moe_down_ptr, act_packed_ptrs,
-                                 act_sf_ptrs, d_act_tscales_dn,
-                                 expert_down_base, eff, d);
-                    IMP_CUDA_CHECK_LOG(
-                        cudaFreeAsync(d_act_tscales_dn, stream));
+                    // Re-quantize post-SwiGLU activations into the same scale slot
+                    // (gate/up are done with it, stream-ordered).
+                    const bool ok_down = imp::quantize_fp16_to_nvfp4_moe_native_with_scales(
+                                             reinterpret_cast<const __half*>(down_act),
+                                             act_packed_ptrs.data(), act_sf_ptrs.data(), d_act_tscales,
+                                             static_cast<const int*>(routing.expert_offsets.data), expanded,
+                                             eff, ne, moe_.smallM_ptrs, stream) &&
+                                         run_proj(ly.nvfp4_moe_down_ptr, act_packed_ptrs, act_sf_ptrs,
+                                                  d_act_tscales, expert_down_base, eff, d);
                     if (ok_down) {
                         smallM_done = true;
                         // Again the outcome, not the gate: a smallM gate/up or
@@ -678,11 +644,6 @@ bool smallM_done = false;
                 IMP_LOG_ERROR(
                     "smallM gate/up dispatch failed; falling back to "
                     "CUTLASS 3.x");
-            }
-            // Free activation scales if not yet freed (early-exit paths).
-            if (d_act_tscales) {
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_act_tscales, stream));
-                d_act_tscales = nullptr;
             }
         }
     }
@@ -778,9 +739,10 @@ auto grouped_gemm = [&](const std::vector<TensorID>& weight_ids, char* c_base, i
     bool ok = gemm_grouped_cutlass_3x_nvfp4(na, active_M.data(), N_out, K_in, hA.data(),
                                             hSFA.data(), hB.data(), hSFB.data(),
                                             hD.data(), hAlpha.data(), stream);
+    // Last tier: an unwritten expert output fails the request instead of reaching the logits (#2446).
     if (!ok)
-        IMP_LOG_ERROR("CUTLASS 3.x grouped dispatch failed (K=%d N=%d ne=%d)", K_in,
-                      N_out, na);
+        throw std::runtime_error("CUTLASS 3.x grouped dispatch failed (K=" + std::to_string(K_in) +
+                                 " N=" + std::to_string(N_out) + " ne=" + std::to_string(na) + ")");
 };
 
 // Gate+Up share the same input (gathered_base, K_in=d) → quantize once,

@@ -376,7 +376,9 @@ def main():
     # 1192 -> 1193: CaptureAbort.KeepColdInvalidateRunsTheEagerStepFirst (test-kv, GPU) (#2396).
     # 1193 -> 1195: GgufRef.Q5_1_MoeDecodeDispatchGateUp, GgufRef.MoeDecodeDispatchRefusesUnsupportedQType
     # (test-quant, GPU) (#2444).
-    PINNED = 1195
+    # 1195 -> 1197: QuantizeMoeNative.FailedPointerUploadRefusesWithoutLaunch (test-quant, GPU),
+    # MoeAllocFailureTest.SmallMPrefillSurvivesFailedAsyncAlloc (test-e2e, GPU + checkpoint) (#2446).
+    PINNED = 1197
 
     text = CMAKE.read_text()
     mods = module_sources(text)

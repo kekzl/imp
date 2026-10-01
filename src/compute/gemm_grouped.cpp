@@ -1,7 +1,9 @@
 #include "compute/cublas_gemm_algo.h"
 #include "compute/gemm_grouped.h"
 #include "core/cuda_static_reset.h"
+#include "core/cuda_errors.h"
 #include "core/logging.h"
+#include "memory/device_alloc_all.h"
 
 #include <cublas_v2.h>
 #include <cublasLt.h>
@@ -227,9 +229,9 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
     }
 
     // Device pointer arrays: use pre-allocated or allocate once
-    void** d_A_ptrs;
-    void** d_B_ptrs;
-    void** d_C_ptrs;
+    void** d_A_ptrs = nullptr;
+    void** d_B_ptrs = nullptr;
+    void** d_C_ptrs = nullptr;
     bool owns_ptrs = false;
 
     if (d_work_ptrs && n_active <= n_experts) {
@@ -240,9 +242,10 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
     } else {
         // Allocate once for all groups (not per-group)
         size_t ptr_bytes = n_active * sizeof(void*);
-        IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_A_ptrs, ptr_bytes, stream));
-        IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_B_ptrs, ptr_bytes, stream));
-        IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_C_ptrs, ptr_bytes, stream));
+        cuda_alloc_or_throw(device_alloc_all_async(stream, dev_req(d_A_ptrs, ptr_bytes),
+                                                   dev_req(d_B_ptrs, ptr_bytes),
+                                                   dev_req(d_C_ptrs, ptr_bytes)),
+                            "gemm_moe_batched pointer arrays");
         owns_ptrs = true;
     }
 

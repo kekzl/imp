@@ -17,6 +17,7 @@
 #include "compute/layernorm.h"
 #include "compute/rowwise_topm.h"
 #include "core/logging.h"
+#include "memory/device_alloc_all.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
@@ -540,8 +541,12 @@ double GraphExecutor::perplexity_nll(std::span<const int32_t> tokens, cudaStream
 
     int32_t* d_tokens = nullptr;
     double* d_nll = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tokens, static_cast<size_t>(n) * sizeof(int32_t)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_nll, static_cast<size_t>(n) * sizeof(double)));
+    if (const cudaError_t err = device_alloc_all(dev_req(d_tokens, static_cast<size_t>(n) * sizeof(int32_t)),
+                                                 dev_req(d_nll, static_cast<size_t>(n) * sizeof(double)));
+        err != cudaSuccess) {  // nothing launched on a null buffer (#2446)
+        IMP_LOG_ERROR("perplexity_nll: device buffers (n=%d): %s", n, cudaGetErrorString(err));
+        return -1.0;
+    }
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_tokens, tokens.data(), static_cast<size_t>(n) * sizeof(int32_t),
                                        cudaMemcpyHostToDevice, stream));
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_nll, 0, static_cast<size_t>(n) * sizeof(double), stream));

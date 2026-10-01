@@ -56,6 +56,10 @@ inline constexpr const char* kEnvModelNvfp4 = "IMP_TEST_MODEL_NVFP4";
 // Default: /models/DeepSeek-V2-Lite (Docker bind-mount path).
 inline constexpr const char* kEnvModelDeepSeek = "IMP_TEST_MODEL_DEEPSEEK";
 
+// Native-NVFP4 MoE checkpoint for the smallM prefill alloc-failure test (#2446).
+// Default: /models/Qwen3-30B-A3B-NVFP4-Modelopt.
+inline constexpr const char* kEnvModelNvfp4Moe = "IMP_TEST_MODEL_NVFP4_MOE";
+
 // --- Accessors ------------------------------------------------------------
 
 // Value of env var `name`, or "" if unset. Caller decides whether "" means

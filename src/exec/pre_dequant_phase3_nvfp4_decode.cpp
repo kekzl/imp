@@ -19,6 +19,7 @@
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
 #include "core/logging.h"
+#include "memory/device_alloc_all.h"
 #include "memory/vram_allocator.h"
 
 #include <cuda_runtime.h>
@@ -48,6 +49,16 @@ const char* lm_head_skip_reason(bool gdn_head_ok, bool fp8_head_built, const std
     if (lm_head_auto_keeps_source(lm_head_mode(mode), head_qtype))
         return "auto keeps an 8-bit head at checkpoint precision, #2224";
     return "gemm.nvfp4_lm_head off/auto net rule (#982)";
+}
+
+// Scale scratch for one decode-cache pass. False (both null) when either allocation fails: the
+// caller skips the pass instead of quantizing through a null buffer (#2446).
+bool alloc_scale_scratch(float** a, size_t a_count, float** b, size_t b_count, const char* pass) {
+    if (device_alloc_all(dev_req(*a, a_count * sizeof(float)), dev_req(*b, b_count * sizeof(float))) ==
+        cudaSuccess)
+        return true;
+    IMP_LOG_WARN("%s: scale scratch alloc failed, pass skipped", pass);
+    return false;
 }
 }  // namespace
 
@@ -199,8 +210,8 @@ void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
 
     float* d_absmax_buf = nullptr;
     float* d_tscale_buf = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf, sizeof(float)));
+    if (!alloc_scale_scratch(&d_absmax_buf, 1, &d_tscale_buf, 1, "NVFP4 LM head"))
+        return;
 
     Tensor fp16_view(lm.data, QType::F16, 2, lm.shape, /*on_device=*/true);
     NvFP4QuantResult result;
@@ -249,8 +260,8 @@ void QuantPipeline::nvfp4_decode_cache_fp16_projections_(const ModelConfig& cfg,
 
     float* d_absmax_buf = nullptr;
     float* d_tscale_buf = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf, sizeof(float)));
+    if (!alloc_scale_scratch(&d_absmax_buf, 1, &d_tscale_buf, 1, "NVFP4 attention projections"))
+        return;
 
     int n_attn = 0;
     size_t bytes_attn = 0;
@@ -428,8 +439,8 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
 
     float* d_absmax_buf = nullptr;
     float* d_tscale_buf = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf, sizeof(float)));
+    if (!alloc_scale_scratch(&d_absmax_buf, 1, &d_tscale_buf, 1, "NVFP4 decode cache mode 2"))
+        return;
 
     int actual_count = 0;
     size_t actual_bytes = 0;
@@ -565,10 +576,9 @@ void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaS
     }
 
     float* d_absmax_buf = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
-
     float* d_tscales_all = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscales_all, budgeted.size() * sizeof(float)));
+    if (!alloc_scale_scratch(&d_absmax_buf, 1, &d_tscales_all, budgeted.size(), "NVFP4 decode cache mode 1"))
+        return;
 
     std::vector<void*> tmp_bufs;
     for (size_t i = 0; i < budgeted.size(); i++) {
@@ -647,8 +657,8 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
 
     float* d_absmax_buf2 = nullptr;
     float* d_tscale_buf2 = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf2, sizeof(float)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf2, sizeof(float)));
+    if (!alloc_scale_scratch(&d_absmax_buf2, 1, &d_tscale_buf2, 1, "NVFP4 second pass"))
+        return;
 
     int second_count = 0;
     size_t second_bytes = 0;
