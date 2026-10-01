@@ -242,12 +242,12 @@ bool qwen_patchify_video(std::span<const uint8_t* const> frames, int width, int 
 }
 
 bool decode_rgb(std::span<const uint8_t> data, std::vector<uint8_t>& rgb, int& width, int& height) {
-    int ch = 0;
-    uint8_t* px = stbi_load_from_memory(data.data(), static_cast<int>(data.size()), &width, &height, &ch, 3);
-    if (!px)
+    DecodedImage img;  // JPEG via libjpeg-turbo, bit-identical to Pillow (#2381)
+    if (!decode_image(data, img))
         return false;
-    rgb.assign(px, px + static_cast<size_t>(width) * height * 3);
-    stbi_image_free(px);
+    width = img.width;
+    height = img.height;
+    rgb = std::move(img.rgb);
     return true;
 }
 
