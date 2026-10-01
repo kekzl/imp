@@ -216,6 +216,16 @@ bool Engine::init_kv_cache() {
     // (B62/B65/B66). The residual clamp below can only shrink it further, never
     // grow it, so a plan wrong about the device cannot overcommit.
     int max_blocks = 0;
+    // Sparse decode key min/max pool: allocated after the sizing from the same block count, so
+    // the plan prices it per block (#1103 silent-spill class, #2360). Same rule as the enable gate
+    // below; per-layer geometry and SWA pools refuse it in enable_key_minmax.
+    size_t sparse_minmax_bytes_per_layer = 0;
+    if (runtime_config_.attention.sparse_topk_tokens > 0 &&
+        !sparse_minmax_refusal(config_.kv_cache_dtype, mcfg.is_mla(),
+                               runtime_config_.speculative.token_recycling,
+                               !config_.prefix_cache_path.empty()) &&
+        mcfg.head_dim_per_layer.empty() && !swa_sizing_active_)
+        sparse_minmax_bytes_per_layer = KVCache::minmax_block_bytes(mcfg.n_kv_heads, head_dim);
     {
         ShadowPlanProbe probe;
         probe.distributable_bytes = effective_free_vram();
@@ -266,6 +276,7 @@ bool Engine::init_kv_cache() {
         probe.min_kv_tokens = config_.min_kv_tokens;
         probe.kv_block_bytes_per_layer =
             kv_block_bytes_per_layer(config_.kv_cache_dtype, kv_bs, mcfg.n_kv_heads, head_dim);
+        probe.kv_meta_block_bytes_per_layer = sparse_minmax_bytes_per_layer;
 
         PlanResult plan = plan_memory(shadow_plan_input(probe));
         IMP_LOG_INFO("%s", shadow_plan_report(probe, plan, vram_budget.kv_max_blocks).c_str());
@@ -305,35 +316,24 @@ bool Engine::init_kv_cache() {
         }
     }
 
-    // Sparse decode attention's key min/max pool (nkv*hd*4 bytes/block/layer)
-    // is allocated AFTER this sizing and must be priced in: unpriced it is a
-    // silent 6-12% overcommit that spills on WSL2/WDDM rather than failing (#1103).
-    if (runtime_config_.attention.sparse_topk_tokens > 0) {
-        const QType kvt = config_.kv_cache_dtype;
-        const bool eligible = (kvt == QType::F16 || kvt == QType::FP8_E4M3) && !mcfg.is_mla() &&
-                              !runtime_config_.speculative.token_recycling &&
-                              config_.prefix_cache_path.empty() && mcfg.head_dim_per_layer.empty() &&
-                              !swa_sizing_active_;
-        if (eligible) {
-            const size_t kv_per_block =
-                static_cast<size_t>(n_kv_layers) *
-                kv_block_bytes_per_layer(kvt, kv_bs, mcfg.n_kv_heads, head_dim);
-            const size_t mm_per_block = static_cast<size_t>(n_kv_layers) * mcfg.n_kv_heads *
-                                        static_cast<size_t>(head_dim) * 4;  // (min,max) halves
-            if (config_.kv_cache_max_blocks > 0) {
-                IMP_LOG_WARN("attention.sparse_topk_tokens: the key min/max pool adds %.1f MiB ON TOP "
-                             "of the pinned kv_cache.max_blocks pool — pin with that headroom or "
-                             "WSL2/WDDM spills silently",
-                             static_cast<double>(mm_per_block) * max_blocks / (1024.0 * 1024.0));
-            } else {
-                // Auto-sized pools: charged post-plan like the BitDecoding
-                // residual buffer - deflating the block count here broke the
-                // admission guarantee. Pricing inside plan_memory is the open follow-up.
-                IMP_LOG_INFO("sparse decode attention: key min/max pool adds %.1f MiB after the KV "
-                             "sizing (%.2f%% of the K+V pool)",
-                             static_cast<double>(mm_per_block) * max_blocks / (1024.0 * 1024.0),
-                             kv_per_block > 0 ? 100.0 * mm_per_block / kv_per_block : 0.0);
-            }
+    // The plan sized auto pools with the metadata per block; a pinned pool is the operator's count.
+    if (sparse_minmax_bytes_per_layer > 0) {
+        const double mm_mib = static_cast<double>(sparse_minmax_bytes_per_layer) * n_kv_layers * max_blocks /
+                              (1024.0 * 1024.0);
+        const size_t kv_per_layer = kv_block_bytes_per_layer(config_.kv_cache_dtype, kv_bs, mcfg.n_kv_heads,
+                                                             head_dim);
+        if (config_.kv_cache_max_blocks > 0) {
+            IMP_LOG_WARN(
+                "attention.sparse_topk_tokens: the key min/max pool adds %.1f MiB ON TOP "
+                "of the pinned kv_cache.max_blocks pool - pin with that headroom or "
+                "WSL2/WDDM spills silently",
+                mm_mib);
+        } else {
+            IMP_LOG_INFO(
+                "sparse decode attention: key min/max pool %.1f MiB for %d blocks, priced in the KV "
+                "plan (%.2f%% of the K+V pool)",
+                mm_mib, max_blocks,
+                kv_per_layer > 0 ? 100.0 * sparse_minmax_bytes_per_layer / kv_per_layer : 0.0);
         }
     }
 
@@ -675,30 +675,22 @@ bool Engine::init_kv_cache() {
         }
     }
 
-    // attention.sparse_topk_tokens: per-block key min/max metadata pool.
-    // Gates: F16/FP8/NVFP4 KV only (NVFP4 unpacks nibbles + UE4M3 scale, #1818);
-    // non-MLA; token_recycling off (copy_blocks_device doesn't copy metadata);
-    // enable_key_minmax also refuses per-layer geometry and growable pools.
-    // A refused gate disables the feature loudly and changes nothing else.
+    // attention.sparse_topk_tokens: per-block key min/max metadata pool. Gate rule:
+    // sparse_minmax_refusal (shared with the plan charge above); enable_key_minmax also
+    // refuses per-layer geometry; a growable pool grows the metadata with it. A refusal disables
+    // the feature loudly.
     if (runtime_config_.attention.sparse_topk_tokens > 0) {
-        const QType kvt = config_.kv_cache_dtype;
-        const char* refuse = nullptr;
-        if (kvt != QType::F16 && kvt != QType::FP8_E4M3 && kvt != QType::NVFP4)
-            refuse = "KV dtype (needs f16, fp8 or nvfp4)";
-        else if (mcfg.is_mla())
-            refuse = "MLA model";
-        else if (runtime_config_.speculative.token_recycling)
-            refuse = "speculative.token_recycling";
-        else if (!config_.prefix_cache_path.empty())
-            refuse = "persistent prefix cache (disk-restored blocks bypass the KV write path and "
-                     "would carry empty metadata)";
+        const char* refuse = sparse_minmax_refusal(config_.kv_cache_dtype, mcfg.is_mla(),
+                                                   runtime_config_.speculative.token_recycling,
+                                                   !config_.prefix_cache_path.empty());
         if (refuse) {
             IMP_LOG_WARN("attention.sparse_topk_tokens=%d ignored: %s",
                          runtime_config_.attention.sparse_topk_tokens, refuse);
         } else if (!kv_cache_raw_->enable_key_minmax()) {
-            IMP_LOG_WARN("attention.sparse_topk_tokens=%d ignored: metadata pool unavailable "
-                         "(per-layer KV geometry, growable pool, or allocation failure)",
-                         runtime_config_.attention.sparse_topk_tokens);
+            IMP_LOG_WARN(
+                "attention.sparse_topk_tokens=%d ignored: metadata pool unavailable "
+                "(per-layer KV geometry or allocation failure)",
+                runtime_config_.attention.sparse_topk_tokens);
         }
     }
 

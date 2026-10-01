@@ -358,9 +358,11 @@ def main():
     # and smallM), hd=512 FMHA, same row in different batches or chunk offsets bit-equal (#2167).
     # 1178 -> 1179: RecurrentSnapshotStoreTest.KvChainSurvivesHostEvictionAndEraseReplaces (test-kv):
     # a snapshot keeps its KV chain through the host tier (#2174, cudaMalloc).
-    # 1179 -> 1180: KVCacheTest.ResidencyProbeReadsResidentOnASmallCommittedPrefix (test-kv, GPU):
+    # 1179 -> 1180: KVCacheGrowTest.KeyMinmaxGrowsWithThePool (test-kv): sparse decode metadata grows
+    # with a growable pool (#2360, VMM).
+    # 1180 -> 1181: KVCacheTest.ResidencyProbeReadsResidentOnASmallCommittedPrefix (test-kv, GPU):
     # 500 committed NVFP4 blocks must read above the spill threshold (#2366); needs a card.
-    PINNED = 1180
+    PINNED = 1181
 
     text = CMAKE.read_text()
     mods = module_sources(text)

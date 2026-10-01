@@ -16,40 +16,46 @@ recurrent-state slab or the KV pool bind admission? Paging the slabs pays only i
 
 ## Result
 
+Clean-card run (run 2, 07:32-07:41 UTC): before each arm gpu-busy-check rc=0 (2003 MiB, 0-1% util) and
+0 GPU containers. Residency by an independent signal, not the pool probe (it false-alarms on a small
+committed prefix, #2366): after init 22246 MiB used / 10333 MiB free (bs=32), 22460 / 10119 (bs=8);
+one 256-token decode 92.1 tok/s (bs=32), 92.5 (bs=8), against 91.2-91.7 for `--max-batch 8` with auto
+`max_seq_len`. The probe read 63 GB/s (bs=32) and 808 GB/s (bs=8) on these resident pools.
+
 | arm | L | prompt tokens | ssm MiB | KV blocks (plan / ceiling) | peak active | admitted at t0 | slab refusals | slab holds | KV-queued | max queue ms |
 |---|---|---|---:|---|---:|---:|---:|---:|---:|---:|
-| bs=32 | 8k | 8090-8533 | 2544 | 2048 / 12425 | 30 | 24 | 0 | 0 | 8 | 14993.3 |
-| bs=32 | 16k | 15988-16498 | 2544 | 2048 / 12425 | 19 | - | 0 | 0 | 20 | 37702.5 |
-| bs=32 | 30k | 29901-30235 | 2544 | 2048 / 12425 | 12 | 6 | 0 | 0 | 26 | 77663.7 |
-| bs=8 | 8k | 8089-8532 | 636 | 5753 / 16384 | 8 | - | 0 | 0 | 24 (batch cap) | 25908.4 |
-| bs=8 | 16k | 15987-16497 | 636 | 5753 / 16384 | 8 | - | 0 | 0 | 24 (batch cap) | 51669.3 |
-| bs=8 | 30k | 29900-30234 | 636 | 5753 / 16384 | 8 | - | 0 | 0 | 24 (batch cap; 4 samples at running 6-7 with waiting > 0) | 97656.9 |
+| bs=32 | 8k | 8090-8533 | 2544 | 2048 / 12425 | 31 | 24 | 0 | 0 | 8 | 14968.2 |
+| bs=32 | 16k | 15988-16498 | 2544 | 2048 / 12425 | 19 | - | 0 | 0 | 20 | 38957.5 |
+| bs=32 | 30k | 29901-30235 | 2544 | 2048 / 12425 | 11 | 6 | 0 | 0 | 26 | 79460.0 |
+| bs=8 | 8k | 8089-8532 | 636 | 5753 / 16384 | 8 | - | 0 | 0 | 24 (batch cap) | 26745.6 |
+| bs=8 | 16k | 15987-16497 | 636 | 5753 / 16384 | 8 | - | 0 | 0 | 24 (batch cap) | 51256.0 |
+| bs=8 | 30k | 29900-30234 | 636 | 5753 / 16384 | 8 | - | 0 | 0 | 24 (batch cap; 7 samples at running 6-7 with waiting > 0) | 94095.3 |
+
+Run 1 (06:52-06:59 UTC, a second session's job still on the card at its start) read the same slab
+refusals, slab holds, KV-queued counts, plan lines and demand; peak active 30 / 12 at bs=32 8k / 30k.
 
 Demand at 32 x L (sum of logged prompt + completion, 16-token blocks): 8k 266535 tokens = 16674 blocks,
 16k 523142 = 32711, 30k 961682 = 60124. Ceiling: 12425 blocks = 198800 tokens at 32 slabs,
 16384 blocks = 262144 tokens at 8 slabs. 24 fewer slabs free 1908 MiB and buy 3959 blocks = 63344
 tokens; demand exceeds the bs=8 ceiling too, at every length (16674 > 16384 at 8k).
 
-bs=32 peak active above "admitted at t0" (30 vs 24 at 8k, 12 vs 6 at 30k) comes after the
+bs=32 peak active above "admitted at t0" (31 vs 24 at 8k, 11 vs 6 at 30k) comes after the
 StreamingLLM valve armed (`KV cache >90% full ... auto-enabling StreamingLLM (sinks=4, window=4096)`,
-06:52:56, once): KV pressure, not the slab.
+once per run): KV pressure, not the slab.
 
 ## Decision
 
-CLOSED, DO NOT BUILD: 0 slab refusals and 0 slab holds at every length, KV-queued 8 / 20 / 26 at
-8k / 16k / 30k. KV binds first; paging all but 8 slabs would add 63344 tokens against a 266535-961682
-token demand.
+CLOSED, DO NOT BUILD: 0 slab refusals and 0 slab holds at every length in both runs, KV-queued
+8 / 20 / 26 at 8k / 16k / 30k. KV binds first; paging all but 8 slabs would add 63344 tokens against a
+266535-961682 token demand.
 
 ## Side finding
 
-bs=8: 8 sequences cancelled at decode (`KV pool exhausted at decode`, 2 in the 16k wave, 6 in the 30k
-wave), StreamingLLM never armed: #2361.
+bs=8 cancels sequences at decode (`KV pool exhausted at decode`) and StreamingLLM never arms: #2361.
+Run 1: 0 / 2 / 6 at 8k / 16k / 30k; run 2 on the clean card: 1 / 0 / 4.
 
-Both arms logged `KV cache: pool copy bandwidth 62 GB/s` (bs=32) / `304 GB/s` (bs=8), below the
-500 GB/s spill threshold: throughput and queue ms are not comparable to a clean card, admission
-counts are block arithmetic and unaffected.
-
-[PROV: commit=3a8a5bd9 date=2026-10-01 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4 cuda=13.4.1
-       image=imp:test-imp-r5-4aeeca55 (make build of 3a8a5bd9) n=1 wave of 32 per arm x length
-       cmd=`run_arm.sh 32` then `run_arm.sh 8`, 06:52-06:59 UTC; logs ~/.cache/imp/roadmap/R5/bs{32,8}/server.log,
-       sampler_{8k,16k,30k}.txt, client_{8k,16k,30k}.txt (ok=32 err=0 every wave)]
+[PROV: commit=03f38165 date=2026-10-01 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4 cuda=13.4.1
+       image=imp:r5-main (scripts/build_image.sh of 03f38165) n=1 wave of 32 per arm x length
+       cmd=`clean_both.sh` (gpu-busy-check + docker ps, then `run_arm.sh 32`, `run_arm.sh 8`), 07:32-07:41 UTC;
+       logs ~/.cache/imp/roadmap/R5/bs{32,8}/server.log, sampler_*.txt, client_*.txt (ok=32 err=0 every wave);
+       run 1: commit=3a8a5bd9, ~/.cache/imp/roadmap/R5/bs{32,8}_run1/]

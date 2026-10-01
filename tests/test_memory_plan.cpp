@@ -750,3 +750,49 @@ TEST(ShadowPlan, ReportsARejectionWithTheFullFailureText) {
     EXPECT_NE(r.find("Cannot fit"), std::string::npos)
         << "the operator needs the itemisation, not just the verdict";
 }
+
+// ── Per-block KV metadata (sparse decode key min/max, #2360) ──────────
+
+#include "memory/kv_cache.h"
+#include "runtime/vram_budget.h"
+
+// The pool KVCache::enable_key_minmax allocates after the sizing is charged per block:
+// the plan shrinks the block count instead of overcommitting by the metadata share.
+TEST(MemoryPlan, KvMetadataIsChargedPerBlock) {
+    auto in = dense_input();
+    in.budget_bytes = 16 * kGiB;  // residual-bound pool, see KvShrinksToTheResidual...
+    const auto bare = plan_memory(in);
+    ASSERT_TRUE(bare) << bare.failure.report();
+
+    in.limits.kv_meta_block_bytes_per_layer = KVCache::minmax_block_bytes(8, 128);
+    const auto priced = plan_memory(in);
+    ASSERT_TRUE(priced) << priced.failure.report();
+
+    const size_t kv_layer = in.limits.kv_block_bytes_per_layer;
+    const size_t meta_layer = in.limits.kv_meta_block_bytes_per_layer;
+    EXPECT_LT(priced.plan.kv.blocks, bare.plan.kv.blocks);
+    EXPECT_LE(static_cast<size_t>(priced.plan.kv.blocks) * (kv_layer + meta_layer),
+              static_cast<size_t>(bare.plan.kv.blocks) * kv_layer + kv_layer + meta_layer);
+    EXPECT_EQ(priced.plan.kv.meta_bytes,
+              static_cast<size_t>(priced.plan.kv.blocks) * meta_layer * in.model.n_kv_layers);
+    EXPECT_EQ(priced.plan.kv.bytes, kv_bytes_for(in, priced.plan.kv.blocks));
+    EXPECT_LE(priced.plan.total(), in.budget_bytes);
+    size_t sum = 0;
+    for (const auto& l : priced.plan.lines())
+        sum += l.bytes;
+    EXPECT_EQ(sum, priced.plan.total());
+    EXPECT_EQ(bare.plan.kv.meta_bytes, 0u);
+}
+
+// Qwen3.8-27B NVFP4 KV (block 32, 4 KV heads, head_dim 256): 4096 B metadata vs 36864 B K+V.
+TEST(MemoryPlan, SparseMinmaxRuleCoversEveryDtypeTheGateAdmits) {
+    EXPECT_EQ(KVCache::minmax_block_bytes(4, 256), 4096u);
+    EXPECT_EQ(kv_block_bytes_per_layer(QType::NVFP4, 32, 4, 256), 36864u);
+    for (QType t : {QType::F16, QType::FP8_E4M3, QType::NVFP4})
+        EXPECT_EQ(sparse_minmax_refusal(t, false, false, false), nullptr);
+    for (QType t : {QType::INT8, QType::INT4, QType::MXFP4_KV})
+        EXPECT_NE(sparse_minmax_refusal(t, false, false, false), nullptr);
+    EXPECT_NE(sparse_minmax_refusal(QType::NVFP4, true, false, false), nullptr);
+    EXPECT_NE(sparse_minmax_refusal(QType::NVFP4, false, true, false), nullptr);
+    EXPECT_NE(sparse_minmax_refusal(QType::NVFP4, false, false, true), nullptr);
+}

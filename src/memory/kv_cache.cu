@@ -363,52 +363,6 @@ void KVCache::open_swa_group_() {
                  swa_max_blocks_, n_swa_layers, max_blocks_, n_layers_ - n_swa_layers);
 }
 
-// ---------------------------------------------------------------------------
-// Sparse decode attention: per-block key min/max metadata pool
-// ---------------------------------------------------------------------------
-
-bool KVCache::enable_key_minmax() {
-    if (minmax_pool_)
-        return true;
-    // Scalar geometry only: the per-layer ctor leaves n_kv_heads_/head_dim_
-    // unset and the offset math below assumes a uniform stride.
-    if (!layer_block_bytes_.empty() || growable_)
-        return false;
-    minmax_block_bytes_ = static_cast<size_t>(n_kv_heads_) * head_dim_ * 2 * sizeof(half);
-    size_t total = static_cast<size_t>(n_layers_) * max_blocks_ * minmax_block_bytes_;
-    if (alloc_) {
-        minmax_pool_ = alloc_->allocate(total, "kv_cache_minmax");
-    } else {
-        cudaError_t err = cudaMalloc(&minmax_pool_, total);
-        if (err != cudaSuccess)
-            minmax_pool_ = nullptr;
-    }
-    if (!minmax_pool_) {
-        minmax_block_bytes_ = 0;
-        IMP_LOG_WARN("KVCache: key min/max pool allocation failed (%.1f MiB) - sparse decode "
-                     "attention disabled",
-                     static_cast<double>(total) / (1024.0 * 1024.0));
-        return false;
-    }
-    // Zero-init: never read before the slot-0 write initializes a block, but a
-    // deterministic pattern keeps a metadata-indexing bug loud instead of UB.
-    IMP_CUDA_CHECK_LOG(cudaMemset(minmax_pool_, 0, total));
-    IMP_LOG_INFO("KV cache key min/max metadata: %.1f MiB (%d layers x %d blocks)",
-                 static_cast<double>(total) / (1024.0 * 1024.0), n_layers_, max_blocks_);
-    return true;
-}
-
-void* KVCache::key_minmax_ptr(int layer, int block_id) {
-    IMP_CHECK(!accounting_only_,
-              "KVCache::key_minmax_ptr on an accounting-only cache: it holds no memory. "
-              "Build it with the normal constructor if the test needs bytes.");
-    if (!minmax_pool_)
-        return nullptr;
-    size_t offset = (static_cast<size_t>(layer) * max_blocks_ + static_cast<size_t>(block_id)) *
-                    minmax_block_bytes_;
-    return static_cast<char*>(minmax_pool_) + offset;
-}
-
 KVCache::~KVCache() {
     // The manager's referents still hold UNTRACKED references at this point
     // (they store ints). abandon() skips the outstanding-ref check; it goes
@@ -426,7 +380,12 @@ KVCache::~KVCache() {
             IMP_CUDA_CHECK_LOG(cudaFree(scale_pool_));
         scale_pool_ = nullptr;
     }
-    if (minmax_pool_) {
+    if (minmax_region_) {
+        MemAccount::instance().note("kv_cache_minmax",
+                                    -static_cast<std::ptrdiff_t>(minmax_region_.committed()));
+        minmax_region_.reset();
+        minmax_pool_ = nullptr;
+    } else if (minmax_pool_) {
         if (alloc_)
             alloc_->free(minmax_pool_);
         else
@@ -565,6 +524,9 @@ int KVCache::commit_blocks_(int blocks) {
     // waited on is these memsets, and growth is rare, so the sync costs nothing extra.
     if (blocks > first_new)
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(0));
+    // A block is usable only with its metadata backed too (sparse decode, #2360).
+    if (!commit_minmax_(first_new, blocks))
+        return committed_blocks_;
     committed_blocks_ = blocks;
     return blocks;
 }
@@ -612,6 +574,8 @@ size_t KVCache::bytes_per_block() const {
                                                      : layer_block_bytes_[static_cast<size_t>(l)];
         total += 2 * bb;  // K and V
     }
+    if (minmax_region_)
+        total += static_cast<size_t>(n_layers_) * minmax_block_bytes_;  // grows with the block
     return total;
 }
 
