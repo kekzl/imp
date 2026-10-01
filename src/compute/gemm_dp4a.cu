@@ -6,6 +6,8 @@
 
 #include <cuda_fp16.h>
 #include <cstdio>
+#include <stdexcept>
+#include <string>
 
 namespace imp {
 
@@ -626,43 +628,91 @@ void gemv_q3_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_w
                                               q8_1_stride, d8_stride, top_k, stream);
 }
 
+void gemv_q5_1_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
+                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
+                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
+                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
+                                      cudaStream_t stream) {
+    launch_gemv_dp4a_moe_gate_up<Q5_1_Traits>(static_cast<const uint8_t*>(gate_weights),
+                                              static_cast<const uint8_t*>(up_weights), expert_indices, q8_1,
+                                              d8, y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes,
+                                              q8_1_stride, d8_stride, top_k, stream);
+}
+
+// ---------------------------------------------------------------------------
+// MoE decode kernel selectors (#2444): one switch per family, nullptr = no arm.
+// ---------------------------------------------------------------------------
+namespace {
+
+MoeDp4aDecodeFn find_dp4a_decode(QType qt) {
+    switch (qt) {
+    case QType::Q6_K: return gemv_q6k_q8_1_moe_decode;
+    case QType::Q8_0: return gemv_q8_0_q8_1_moe_decode;
+    case QType::Q4_0: return gemv_q4_0_q8_1_moe_decode;
+    case QType::Q4_K: return gemv_q4_k_q8_1_moe_decode;
+    case QType::Q5_K: return gemv_q5_k_q8_1_moe_decode;
+    case QType::Q2_K: return gemv_q2_k_q8_1_moe_decode;
+    case QType::Q3_K: return gemv_q3_k_q8_1_moe_decode;
+    case QType::Q5_1: return gemv_q5_1_q8_1_moe_decode;
+    default: return nullptr;
+    }
+}
+
+MoeDp4aGateUpFn find_dp4a_gate_up(QType qt) {
+    switch (qt) {
+    case QType::Q6_K: return gemv_q6k_q8_1_moe_gate_up_fused;
+    case QType::Q8_0: return gemv_q8_0_q8_1_moe_gate_up_fused;
+    case QType::Q4_0: return gemv_q4_0_q8_1_moe_gate_up_fused;
+    case QType::Q4_K: return gemv_q4_k_q8_1_moe_gate_up_fused;
+    case QType::Q5_K: return gemv_q5_k_q8_1_moe_gate_up_fused;
+    case QType::Q2_K: return gemv_q2_k_q8_1_moe_gate_up_fused;
+    case QType::Q3_K: return gemv_q3_k_q8_1_moe_gate_up_fused;
+    case QType::Q5_1: return gemv_q5_1_q8_1_moe_gate_up_fused;
+    default: return nullptr;
+    }
+}
+
+MoeFp16DecodeFn find_fp16_decode(QType qt) {
+    switch (qt) {
+    case QType::Q6_K: return gemv_q6k_moe_decode;
+    case QType::Q8_0: return gemv_q8_0_moe_decode;
+    default: return nullptr;
+    }
+}
+
+MoeFp16GateUpFn find_fp16_gate_up(QType qt) {
+    switch (qt) {
+    case QType::Q6_K: return gemv_q6k_moe_gate_up_fused;
+    case QType::Q8_0: return gemv_q8_0_moe_gate_up_fused;
+    default: return nullptr;
+    }
+}
+
+template <typename Fn>
+Fn require(Fn fn, QType qt, const char* family) {
+    if (fn == nullptr)
+        throw std::invalid_argument(std::string("MoE decode: no ") + family + " kernel for qtype " +
+                                    qtype_name(qt));
+    return fn;
+}
+
+}  // namespace
+
 bool moe_dp4a_decode_supported(QType qt) {
-    return qt == QType::Q6_K || qt == QType::Q8_0 || qt == QType::Q4_0 || qt == QType::Q4_K ||
-           qt == QType::Q5_K || qt == QType::Q2_K || qt == QType::Q3_K || qt == QType::Q5_1 ||
-           qt == QType::NVFP4;
+    return find_dp4a_decode(qt) != nullptr && find_dp4a_gate_up(qt) != nullptr;
 }
-
-MoeDp4aDecodeFn moe_dp4a_decode_kernel(QType qt) {
-    return (qt == QType::Q6_K)   ? gemv_q6k_q8_1_moe_decode
-           : (qt == QType::Q4_0) ? gemv_q4_0_q8_1_moe_decode
-           : (qt == QType::Q4_K) ? gemv_q4_k_q8_1_moe_decode
-           : (qt == QType::Q5_K) ? gemv_q5_k_q8_1_moe_decode
-           : (qt == QType::Q2_K) ? gemv_q2_k_q8_1_moe_decode
-           : (qt == QType::Q3_K) ? gemv_q3_k_q8_1_moe_decode
-                                 : gemv_q8_0_q8_1_moe_decode;
-}
-
+MoeDp4aDecodeFn moe_dp4a_decode_kernel(QType qt) { return require(find_dp4a_decode(qt), qt, "dp4a decode"); }
 MoeDp4aGateUpFn moe_dp4a_gate_up_kernel(QType qt) {
-    return (qt == QType::Q6_K)   ? gemv_q6k_q8_1_moe_gate_up_fused
-           : (qt == QType::Q4_K) ? gemv_q4_k_q8_1_moe_gate_up_fused
-           : (qt == QType::Q5_K) ? gemv_q5_k_q8_1_moe_gate_up_fused
-           : (qt == QType::Q4_0) ? gemv_q4_0_q8_1_moe_gate_up_fused
-           : (qt == QType::Q2_K) ? gemv_q2_k_q8_1_moe_gate_up_fused
-           : (qt == QType::Q3_K) ? gemv_q3_k_q8_1_moe_gate_up_fused
-                                 : gemv_q8_0_q8_1_moe_gate_up_fused;
+    return require(find_dp4a_gate_up(qt), qt, "dp4a gate_up");
 }
-
-bool moe_fp16_decode_supported(QType qt) { return qt == QType::Q6_K || qt == QType::Q8_0; }
-
-MoeFp16DecodeFn moe_fp16_decode_kernel(QType qt) {
-    return (qt == QType::Q6_K) ? gemv_q6k_moe_decode : (qt == QType::Q8_0) ? gemv_q8_0_moe_decode : nullptr;
+bool moe_fp16_decode_supported(QType qt) {
+    return find_fp16_decode(qt) != nullptr && find_fp16_gate_up(qt) != nullptr;
 }
-
+MoeFp16DecodeFn moe_fp16_decode_kernel(QType qt) { return require(find_fp16_decode(qt), qt, "fp16 decode"); }
 MoeFp16GateUpFn moe_fp16_gate_up_kernel(QType qt) {
-    return (qt == QType::Q6_K)   ? gemv_q6k_moe_gate_up_fused
-           : (qt == QType::Q8_0) ? gemv_q8_0_moe_gate_up_fused
-                                 : nullptr;
+    return require(find_fp16_gate_up(qt), qt, "fp16 gate_up");
 }
+
 // L1 carveout for the dp4a GEMV template instantiations, called from GraphExecutor::init()
 // next to mxfp4_gemv_set_l1_carveout(), PDL or not. Was gemv_pdl_register()
 // (pdl::enable_kernel + SET_MAXL1); #1833 withdrew the PDL registration because these kernels

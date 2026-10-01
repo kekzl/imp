@@ -435,7 +435,8 @@ MoeExperts build_experts(QType qt, int E, int N, int K, Lcg& g) {
 
 void expect_moe_slot(const char* name, const std::vector<half>& y, int slot, const MoeExperts& m, int expert,
                      QType qt, const std::vector<half>& hx, int N, int K) {
-    std::vector<half> hy(y.begin() + static_cast<size_t>(slot) * N, y.begin() + static_cast<size_t>(slot + 1) * N);
+    const auto first = y.begin() + static_cast<ptrdiff_t>(slot) * N;
+    std::vector<half> hy(first, first + N);
     ASSERT_FALSE(any_nan_inf(hy)) << name;
     std::vector<double> wref, yref;
     ref_dequant_all(m.host[expert], N, K, qt, wref);
@@ -491,8 +492,8 @@ TEST(GgufRef, Q5_1_MoeDecodeDispatchGateUp) {
     // Fused gate+up (device-resident route).
     cudaMemset(y_gate, 0, TOP_K * N * sizeof(half));
     cudaMemset(y_up, 0, TOP_K * N * sizeof(half));
-    moe_dp4a_gate_up_kernel(qt)(gate.dev, up.dev, d_idx, q8, d8, y_gate, y_up, N, K, gate.stride, up.stride, 0,
-                                0, TOP_K, nullptr);
+    moe_dp4a_gate_up_kernel(qt)(gate.dev, up.dev, d_idx, q8, d8, y_gate, y_up, N, K, gate.stride, up.stride,
+                                /*q8_1_stride=*/0, /*d8_stride=*/0, TOP_K, nullptr);
     fetch();
     for (int s = 0; s < TOP_K; ++s) {
         expect_moe_slot("fused gate", hg, s, gate, h_idx[s], qt, hx, N, K);

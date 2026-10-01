@@ -1033,56 +1033,48 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
 
         size_t up_stride_bytes = pool_addressed ? slot_stride : expert_stride(ly.expert_up_packed, up_qtype);
 
+        float* d8 = qscratch_.d8_buf;
         if (!non_gated_experts) {
             const QType gate_qtype = ly.expert_gate_packed.qtype;
-            size_t gate_stride = pool_addressed ? slot_stride : expert_stride(ly.expert_gate_packed, gate_qtype);
-            if (pool_addressed) {
-                // gate and up sit in different slots, so the one-index fused
-                // kernel cannot express both. Two decodes still collapse
-                // 2*top_k weight launches into 2.
-                moe_dp4a_decode_kernel(gate_qtype)(gate_base, gate_idx, q8, qscratch_.d8_buf, gate_buf, eff, d,
-                                                   gate_stride, /*q8_1_stride=*/0, /*d8_stride=*/0, top_k,
-                                                   stream);
-                moe_dp4a_decode_kernel(up_qtype)(up_base, up_idx, q8, qscratch_.d8_buf, up_buf, eff, d,
-                                                 up_stride_bytes, /*q8_1_stride=*/0, /*d8_stride=*/0, top_k,
-                                                 stream);
+            size_t gate_stride =
+                pool_addressed ? slot_stride : expert_stride(ly.expert_gate_packed, gate_qtype);
+            if (pool_addressed || gate_qtype != up_qtype) {
+                // Pool: gate and up sit in different slots, the one-index fused kernel cannot
+                // express both. Mixed qtypes: the fused kernel decodes both with one format (#2444).
+                moe_dp4a_decode_kernel(gate_qtype)(gate_base, gate_idx, q8, d8, gate_buf, eff, d, gate_stride,
+                                                   /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+                moe_dp4a_decode_kernel(up_qtype)(up_base, up_idx, q8, d8, up_buf, eff, d, up_stride_bytes,
+                                                 /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
             } else {
-                moe_dp4a_gate_up_kernel(up_qtype)(gate_base, up_base, expert_indices, q8, qscratch_.d8_buf,
-                                                  gate_buf, up_buf, eff, d, gate_stride, up_stride_bytes,
+                moe_dp4a_gate_up_kernel(up_qtype)(gate_base, up_base, expert_indices, q8, d8, gate_buf,
+                                                  up_buf, eff, d, gate_stride, up_stride_bytes,
                                                   /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
             }
         } else {
-            moe_dp4a_decode_kernel(up_qtype)(up_base, up_idx, q8, qscratch_.d8_buf, up_buf, eff, d,
-                                             up_stride_bytes, /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+            moe_dp4a_decode_kernel(up_qtype)(up_base, up_idx, q8, d8, up_buf, eff, d, up_stride_bytes,
+                                             /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
         }
     } else {
-        // FP16 dequant fallback - only Q6_K / Q8_0 wired.
+        // FP16 dequant fallback: formats in moe_fp16_decode_supported (admission checks all three).
+        const void* gate_w = ly.expert_gate_packed.data;
+        const void* up_w = ly.expert_up_packed.data;
         size_t up_stride_bytes = expert_stride(ly.expert_up_packed, up_qtype);
         if (!non_gated_experts) {
-            size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);
-            if (up_qtype == QType::Q6_K) {
-                gemv_q6k_moe_gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                                           expert_indices, norm_ptr, gate_buf, up_buf, eff, d,
-                                           gate_stride, up_stride_bytes, /*x_stride=*/0, top_k, stream);
-            } else if (up_qtype == QType::Q8_0) {
-                gemv_q8_0_moe_gate_up_fused(ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                                            expert_indices, norm_ptr, gate_buf, up_buf, eff, d,
-                                            gate_stride, up_stride_bytes, /*x_stride=*/0, top_k, stream);
+            const QType gate_qtype = ly.expert_gate_packed.qtype;
+            size_t gate_stride = expert_stride(ly.expert_gate_packed, gate_qtype);
+            if (gate_qtype != up_qtype) {
+                moe_fp16_decode_kernel(gate_qtype)(gate_w, expert_indices, norm_ptr, gate_buf, eff, d,
+                                                   gate_stride, /*x_stride=*/0, top_k, stream);
+                moe_fp16_decode_kernel(up_qtype)(up_w, expert_indices, norm_ptr, up_buf, eff, d,
+                                                 up_stride_bytes, /*x_stride=*/0, top_k, stream);
             } else {
-                IMP_LOG_ERROR("MoE non-dp4a gate_up_fused: no kernel for qtype %d",
-                              std::to_underlying(up_qtype));
+                moe_fp16_gate_up_kernel(up_qtype)(gate_w, up_w, expert_indices, norm_ptr, gate_buf, up_buf,
+                                                  eff, d, gate_stride, up_stride_bytes, /*x_stride=*/0,
+                                                  top_k, stream);
             }
         } else {
-            if (up_qtype == QType::Q6_K) {
-                gemv_q6k_moe_decode(ly.expert_up_packed.data, expert_indices, norm_ptr, up_buf, eff, d,
-                                    up_stride_bytes, /*x_stride=*/0, top_k, stream);
-            } else if (up_qtype == QType::Q8_0) {
-                gemv_q8_0_moe_decode(ly.expert_up_packed.data, expert_indices, norm_ptr, up_buf, eff, d,
-                                     up_stride_bytes, /*x_stride=*/0, top_k, stream);
-            } else {
-                IMP_LOG_ERROR("MoE non-dp4a up projection: no kernel for qtype %d",
-                              std::to_underlying(up_qtype));
-            }
+            moe_fp16_decode_kernel(up_qtype)(up_w, expert_indices, norm_ptr, up_buf, eff, d, up_stride_bytes,
+                                             /*x_stride=*/0, top_k, stream);
         }
     }
 
@@ -1102,7 +1094,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
             relu_sqr_quantize_q8_1(up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
         }
         QType dqt = ly.expert_down_packed.qtype;
-        auto down_gemv = (dqt == QType::Q5_1) ? gemv_q5_1_q8_1_moe_decode : moe_dp4a_decode_kernel(dqt);
+        auto down_gemv = moe_dp4a_decode_kernel(dqt);
         size_t down_stride = pool_addressed ? slot_stride : expert_stride(ly.expert_down_packed, dqt);
         down_gemv(down_base, down_idx, q8, qscratch_.d8_buf, down_buf, d, eff, down_stride,
                   /*q8_1_stride=*/eff_q8_blocks, /*d8_stride=*/eff_q8_blocks, top_k, stream);
@@ -1111,16 +1103,9 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
                                 cfg.ffn_activation, stream);
         size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype);
         half* down_input = non_gated_experts ? up_buf : act_buf;
-        if (ly.expert_down_packed.qtype == QType::Q6_K) {
-            gemv_q6k_moe_decode(ly.expert_down_packed.data, expert_indices, down_input, down_buf, d, eff,
-                                down_stride, /*x_stride=*/eff, top_k, stream);
-        } else if (ly.expert_down_packed.qtype == QType::Q8_0) {
-            gemv_q8_0_moe_decode(ly.expert_down_packed.data, expert_indices, down_input, down_buf, d, eff,
-                                 down_stride, /*x_stride=*/eff, top_k, stream);
-        } else {
-            IMP_LOG_ERROR("MoE non-dp4a down projection: no kernel for qtype %d",
-                          std::to_underlying(ly.expert_down_packed.qtype));
-        }
+        moe_fp16_decode_kernel(ly.expert_down_packed.qtype)(ly.expert_down_packed.data, expert_indices,
+                                                            down_input, down_buf, d, eff, down_stride,
+                                                            /*x_stride=*/eff, top_k, stream);
     }
 
     // Fused weighted sum + FP16 output (+ residual if no shared expert)
