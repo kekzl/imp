@@ -328,3 +328,14 @@ The metadata gate refused every MLA model; the materialized decode reads the pag
 | 32000 | 3.18 / 3.20 / 3.20 | 22.75 / 23.03 / 23.00 | 7.18x |
 
 NIAH, 28k and 30k x 5 depths, DeepSeek-V2-Lite-Chat NVFP4 (the base model answers `<jupyter_code>` to the chat-framed probe in every arm): dense 10/10, sparse 1024 10/10, sparse 4096 10/10, one `sparse decode attention ACTIVE` line per sparse arm. Dense MLA decode itself is the slow part (48x under the KV-bandwidth ceiling at 32k): #2374.
+
+### MLA after the dense decode fix (2026-10-01, #2374)
+
+The dense MLA numbers above ran on `paged_attention_decode_kernel_generic` (98.9 % of decode, 28 GB/s). With HD 192 split-K plus compaction (#2374), same harness and model, 3 rounds:
+
+| ctx | dense tok/s | sparse 4096 tok/s | ratio |
+|---|---|---|---:|
+| 16000 | 182.45 / 180.49 / 181.81 | 247.99 / 249.95 / 253.77 | 1.38x |
+| 32000 | 111.22 / 112.38 / 111.35 | 259.95 / 235.40 / 244.98 | 2.21x |
+
+Sparse still wins on MLA; the 3.55x / 7.18x of the first table measured the slow dense kernel. NIAH result unchanged.
