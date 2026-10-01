@@ -140,8 +140,8 @@ TEST(InternVLEncoder, MatchesHfFp32PerStage) {
 }
 
 // The real InternVL3.5-2B tower (24 layers) on test_cat_pil.png (test_cat.jpg decoded by Pillow, lossless;
-// a JPEG input carries the stb vs libjpeg-turbo decode gap, #2381) through the pipeline imp serves with
-// (stb decode, Pillow-equivalent 448 resize, encoder, projector) vs HF FP32 on CPU
+// test_cat.jpg itself is checked at the end, decodes match Pillow since #2388) through the pipeline imp
+// serves with (decode_image, Pillow-equivalent 448 resize, encoder, projector) vs HF FP32 on CPU
 // (tools/internvl_fixture/run_real_ref.sh). Bound relL2 <= 1e-2 (orchestrator, 2026-10-01).
 TEST(InternVLEncoder, RealTowerCatMatchesHfFp32) {
     const char* dir = std::getenv("IMP_TEST_MODEL_INTERNVL");
@@ -238,6 +238,24 @@ TEST(InternVLEncoder, RealTowerCatMatchesHfFp32) {
     alloc.free(d_out2);
     std::printf("[internvl-real] test_cat relL2_vs_hf_fp32=%.4e (HF tile, imp encoder)\n", rl_hf_tile);
     EXPECT_LE(rl, 1e-2);
+
+    // test_cat.jpg: since #2388 JPEG decodes through libjpeg-turbo bit-identical to Pillow, so the
+    // PNG reference (Pillow's decode of this file) applies unchanged.
+    if (const char* jpg_path = std::getenv("IMP_TEST_IMAGE_CAT_JPG")) {
+        std::ifstream jf(jpg_path, std::ios::binary);
+        const std::vector<uint8_t> jbytes((std::istreambuf_iterator<char>(jf)),
+                                          std::istreambuf_iterator<char>());
+        QwenPatches jp;
+        ASSERT_TRUE(pipeline.preprocess(jbytes, jp));
+        half* d_j = static_cast<half*>(
+            alloc.allocate(static_cast<size_t>(tokens) * dim * sizeof(half), "internvl_jpg"));
+        ASSERT_TRUE(pipeline.encode_patches_to(jp, d_j, {}, shape, nullptr));
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        const double rl_jpg = rel_l2(read(d_j, static_cast<size_t>(tokens) * dim), ref);
+        alloc.free(d_j);
+        std::printf("[internvl-real] test_cat.jpg relL2_vs_hf_fp32=%.4e (imp decode + resize)\n", rl_jpg);
+        EXPECT_LE(rl_jpg, 1e-2);
+    }
 }
 
 }  // namespace

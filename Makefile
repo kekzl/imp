@@ -318,7 +318,8 @@ test-vision: build
 	$(GPU_LOCKED) bash tools/qwen3vl_video_fixture/red_panda_e2e.sh $(DOCKER_IMG)
 	@# InternVL3.5: encoder per stage vs HF FP32, then bus/cat/pizza through imp-cli and imp-server.
 	$(GPU_DOCKER) -v $(HOME)/models:/models -e IMP_TEST_MODEL_INTERNVL=/models/InternVL3_5-2B-HF \
-		-e IMP_TEST_IMAGE_CAT=/models/gemma-3-4b-vl/test_cat_pil.png $(DOCKER_IMG) test-e2e --gtest_filter="InternVLEncoder.*"
+		-e IMP_TEST_IMAGE_CAT=/models/gemma-3-4b-vl/test_cat_pil.png \
+		-e IMP_TEST_IMAGE_CAT_JPG=/models/gemma-3-4b-vl/test_cat.jpg $(DOCKER_IMG) test-e2e --gtest_filter="InternVLEncoder.*"
 	$(GPU_LOCKED) bash tools/internvl_fixture/internvl_e2e.sh $(DOCKER_IMG)
 
 # Full benchmark suite: all baseline models (requires GPU to be free)
