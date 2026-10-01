@@ -36,6 +36,12 @@ static int parse_int(const std::string& s) { return parse_index(s); }
 // Ensures model.layers_ has at least (idx+1) elements. idx comes from a tensor name, so it
 // is bounded before use: resize(idx+1) on an unchecked index is a file-sized allocation.
 // Caller has already rejected the name when this returns false.
+// Qwen4Exp carries no final norm: its hyper-connection mixer is the last step before lm_head and
+// the final rmsnorm is the identity (layernorm.cu). Missing only matters without a mixer (#2347).
+static bool final_norm_missing(const Model& model) {
+    return !model.output_norm().data && !model.hc_mixer_norm().data;
+}
+
 static bool ensure_layer(Model& model, int idx) {
     if (idx >= kMaxModelLayers) {
         IMP_LOG_WARN("WeightMap: layer index %d exceeds the %d-layer limit, tensor dropped", idx,
@@ -1482,7 +1488,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     if (!model.tok_emb_.data) {
         IMP_LOG_WARN("WeightMap: token embedding (tok_emb) was not found");
     }
-    if (!model.out_norm_.data) {
+    if (final_norm_missing(model)) {
         IMP_LOG_WARN("WeightMap: output norm (out_norm) was not found");
     }
     if (!model.out_proj_.data) {

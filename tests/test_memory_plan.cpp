@@ -605,6 +605,27 @@ TEST(ShadowPlan, CeilingAtZeroKvSeqsNamesTheContextThatFits) {
         << "the WARN was truncated by the emit buffer:\n" << r;
 }
 
+TEST(ShadowPlan, RejectedPlanReportsTheLivePoolNotApplied) {
+    // #2347, Flash-Next: the plan rejected, the pool used the live pass's 8192 blocks, yet the
+    // header said "APPLIED" and the ceiling read the rejected plan's 0 blocks: "all 1 seqs at
+    // <= 0 tokens ... Set runtime.max_seq_len=0".
+    auto p = hybrid_probe();
+    p.max_seq_len = 131072;
+    p.distributable_bytes = 1 * kMiB;
+    const auto res = plan_memory(shadow_plan_input(p));
+    ASSERT_FALSE(res) << "fixture must be rejected";
+    const std::string r = shadow_plan_report(p, res, /*live_kv_blocks=*/8192);
+    EXPECT_EQ(r.find("APPLIED"), std::string::npos) << r;
+    EXPECT_NE(r.find("REJECTED: the pool uses the live pass's 8192 blocks"), std::string::npos) << r;
+    const int ctx_all = 8192 * p.kv_block_size / p.max_batch_size;
+    EXPECT_NE(r.find("all 41 seqs at <= " + std::to_string(ctx_all) + " tokens"), std::string::npos) << r;
+    EXPECT_NE(r.find("(8192 blocks/seq)"), std::string::npos) << r;
+    EXPECT_EQ(r.find("max_seq_len=0"), std::string::npos) << r;
+    // The fixture charges the 3900 MiB constant, never a measurement (#2347).
+    EXPECT_EQ(r.find("library reserve (measured)"), std::string::npos) << r;
+    EXPECT_NE(r.find("library reserve (charged)"), std::string::npos) << r;
+}
+
 TEST(ShadowPlan, ChargesTheRecurrentSnapshotStoreAgainstTheKvPool) {
     // MEMORY.md D15: recurrent_snapshot_mb cudaMallocs AFTER the KV pool is sized; if the probe
     // field does not reach the plan, the pool is sized over those bytes unnoticed. Uses 64 MiB
