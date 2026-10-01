@@ -204,6 +204,7 @@ set(IMP_MODEL_SOURCES
     src/model/sentencepiece_loader.cpp
     src/model/json_util.cpp
     src/model/hf_config_loader.cpp
+    src/model/multimodal_wrapper.cpp
     src/model/hf_gptq_config.cpp
     src/model/awq_load.cpp
     src/model/mrope_positions.cpp

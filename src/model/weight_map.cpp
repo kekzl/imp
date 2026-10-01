@@ -1,11 +1,10 @@
 #include "model/weight_map.h"
+#include "model/multimodal_wrapper.h"
 #include "vision/qwen3vl_vision_load.h"
 #include "model/tensor_kind_matcher.h"
 #include "core/logging.h"
 #include "model/model_limits.h"
 #include <string>
-#include <string_view>
-#include <utility>
 #include <vector>
 #include <algorithm>
 #include <cstdlib>
@@ -337,39 +336,6 @@ static bool assign_gptq_field(TransformerLayer::GPTQWeight* gptq, const std::str
         return false;
     return true;
 }
-
-namespace {
-
-// Multimodal-wrapper tensors that are not LM weights: model.vision_tower. (Gemma-4),
-// model.visual. (Qwen3-VL, Qwen3.6), model.embed_vision. (Gemma-4 unified), vision_tower. and
-// multi_modal_projector. (InternVL, HF layout). Routed by the vision mapper when there is a tower.
-bool is_wrapper_vision_name(const std::string& n) {
-    static constexpr std::string_view kPrefixes[] = {"model.vision_tower.", "model.visual.",
-                                                     "model.embed_vision.", "vision_tower.",
-                                                     "multi_modal_projector."};
-    for (const std::string_view p : kPrefixes)
-        if (n.starts_with(p))
-            return true;
-    return false;
-}
-
-// The wrapper's LM names -> the bare text-model names: model.language_model.X (Qwen3-VL, Gemma-4)
-// and language_model.model.X (InternVL) -> model.X; language_model.lm_head.* -> lm_head.*;
-// language_model.embed_tokens.weight -> model.embed_tokens.weight.
-std::string strip_wrapper_lm_prefix(const std::string& n) {
-    static constexpr std::pair<std::string_view, std::string_view> kRenames[] = {
-        {"model.language_model.", "model."},
-        {"language_model.model.", "model."},
-        {"language_model.lm_head.", "lm_head."},
-        {"language_model.embed_tokens.", "model.embed_tokens."},
-    };
-    for (const auto& [from, to] : kRenames)
-        if (n.starts_with(from))
-            return std::string(to) + n.substr(from.size());
-    return n;
-}
-
-}  // namespace
 
 bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string, Tensor>& tensors) {
     if (tensors.empty()) {
