@@ -14,6 +14,7 @@
 #include <cmath>
 #include <float.h>
 #include <cstdint>
+#include <numeric>
 #include <vector>
 
 namespace imp {
@@ -768,6 +769,121 @@ TEST(SparseAttnE2E, IdentityTableBitIdentical) {
     cudaFree(d_o2);
     cudaFree(d_mm);
     cudaFree(d_scores);
+    cudaFree(d_sbt);
+    cudaFree(d_sctx);
+}
+
+// MLA materialized decode geometry (DeepSeek-V2-Lite: nh = nkv = 16, head_dim 192, tests/test_mla.cu):
+// metadata from the real update kernel, then (a) a budget covering every block is bit-identical to
+// dense, (b) a 6-block budget keeps the needle block whose keys align with q.
+struct MlaSparseFixture {
+    static constexpr int nh = 16, nkv = 16, hd = 192, n_blocks = 20, pool_blocks = 24, needle = 7;
+    static constexpr int ctx_len = n_blocks * kBS;
+    std::vector<half> k_h, v_h, q_h;
+    half *d_k = nullptr, *d_v = nullptr, *d_q = nullptr;
+    int *d_bt = nullptr, *d_ctx = nullptr, *d_pos = nullptr;
+    __half2* d_mm = nullptr;
+
+    MlaSparseFixture() {
+        const size_t cache_elems = static_cast<size_t>(pool_blocks) * kBS * nkv * hd;
+        k_h.assign(cache_elems, __float2half(0.f));
+        v_h.assign(cache_elems, __float2half(0.f));
+        q_h.resize(static_cast<size_t>(nh) * hd);
+        for (size_t i = 0; i < q_h.size(); i++)
+            q_h[i] = __float2half(fill_val(3, static_cast<int>(i % 191)) * 0.05f);
+        for (int p = 0; p < ctx_len; p++)
+            for (int e = 0; e < nkv * hd; e++) {
+                const size_t at = static_cast<size_t>(p / kBS) * kBS * nkv * hd + (p % kBS) * nkv * hd + e;
+                // nkv == nh: kv head e / hd reads query head e / hd, so the needle keys copy q.
+                k_h[at] = p / kBS == needle ? __float2half(__half2float(q_h[e]) * 4.0f)
+                                            : __float2half(fill_val(p, e) * 0.01f);
+                v_h[at] = __float2half(fill_val(p + 7, e) * 0.05f);
+            }
+        d_k = dmalloc<half>(cache_elems);
+        d_v = dmalloc<half>(cache_elems);
+        d_q = dmalloc<half>(q_h.size());
+        dcopy(d_k, k_h);
+        dcopy(d_v, v_h);
+        dcopy(d_q, q_h);
+        std::vector<int> bt_h(n_blocks);
+        std::iota(bt_h.begin(), bt_h.end(), 0);
+        d_bt = dmalloc<int>(bt_h.size());
+        dcopy(d_bt, bt_h);
+        d_ctx = dmalloc<int>(1);
+        dcopy(d_ctx, std::vector<int>{ctx_len});
+        std::vector<int> pos_h(ctx_len);
+        std::iota(pos_h.begin(), pos_h.end(), 0);
+        d_pos = dmalloc<int>(pos_h.size());
+        dcopy(d_pos, pos_h);
+        d_mm = dmalloc<__half2>(static_cast<size_t>(pool_blocks) * nkv * hd);
+        cudaMemset(d_mm, 0, static_cast<size_t>(pool_blocks) * nkv * hd * sizeof(__half2));
+        sparse_update_key_minmax(QType::F16, d_k, d_mm, d_pos, d_bt, nkv, hd, kBS, ctx_len,
+                                 /*max_blocks_per_seq=*/0, /*n_sequences=*/1, nullptr);
+    }
+    ~MlaSparseFixture() {
+        for (void* p : {static_cast<void*>(d_k), static_cast<void*>(d_v), static_cast<void*>(d_q),
+                        static_cast<void*>(d_bt), static_cast<void*>(d_ctx), static_cast<void*>(d_pos),
+                        static_cast<void*>(d_mm)})
+            cudaFree(p);
+    }
+    // Selects with `budget` blocks, returns the compacted table and its context length.
+    void select(int budget, std::vector<int>& table, int& ctx, int* d_sbt, int* d_sctx) {
+        float* d_scores = dmalloc<float>(32);
+        sparse_select_blocks(d_q, d_mm, d_bt, d_ctx, 1, nh, nkv, hd, kBS, n_blocks, budget, /*sink=*/1,
+                             /*recent=*/2, /*engage=*/budget, /*table=*/32, d_scores, d_sbt, d_sctx,
+                             /*meanstd=*/true, /*std_coef=*/1.0f, nullptr);
+        EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        table = dread(d_sbt, 32);
+        ctx = dread(d_sctx, 1)[0];
+        cudaFree(d_scores);
+    }
+};
+
+TEST(SparseAttnE2E, MlaGeometryFullBudgetBitIdentical) {
+    MlaSparseFixture f;
+    constexpr int nh = MlaSparseFixture::nh, hd = MlaSparseFixture::hd;
+    int64_t qd[4] = {1, 1, nh, hd};
+    int64_t cs[4] = {MlaSparseFixture::pool_blocks, kBS, MlaSparseFixture::nkv, hd};
+    Tensor Q(f.d_q, QType::F16, 4, qd, true);
+    Tensor K(f.d_k, QType::F16, 4, cs, true);
+    Tensor V(f.d_v, QType::F16, 4, cs, true);
+    half* d_o1 = dmalloc<half>(static_cast<size_t>(nh) * hd);
+    half* d_o2 = dmalloc<half>(static_cast<size_t>(nh) * hd);
+    Tensor O1(d_o1, QType::F16, 4, qd, true);
+    Tensor O2(d_o2, QType::F16, 4, qd, true);
+    const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
+    paged_attention_decode(Q, K, V, O1, f.d_bt, f.d_ctx, kBS, scale, MlaSparseFixture::ctx_len, 0, 0.0f,
+                           nullptr, MlaSparseFixture::n_blocks);
+
+    int* d_sbt = dmalloc<int>(32);
+    int* d_sctx = dmalloc<int>(1);
+    std::vector<int> table;
+    int ctx = 0;
+    f.select(/*budget=*/32, table, ctx, d_sbt, d_sctx);
+    EXPECT_EQ(ctx, MlaSparseFixture::ctx_len);
+    paged_attention_decode(Q, K, V, O2, d_sbt, d_sctx, kBS, scale, MlaSparseFixture::ctx_len, 0, 0.0f,
+                           nullptr, 32);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    auto o1 = dread(d_o1, static_cast<size_t>(nh) * hd);
+    auto o2 = dread(d_o2, static_cast<size_t>(nh) * hd);
+    for (size_t i = 0; i < o1.size(); i++)
+        ASSERT_EQ(__half_as_ushort(o1[i]), __half_as_ushort(o2[i])) << "bit mismatch at " << i;
+    for (void* p : {static_cast<void*>(d_o1), static_cast<void*>(d_o2), static_cast<void*>(d_sbt),
+                    static_cast<void*>(d_sctx)})
+        cudaFree(p);
+}
+
+TEST(SparseAttnE2E, MlaGeometrySmallBudgetKeepsTheNeedle) {
+    MlaSparseFixture f;
+    int* d_sbt = dmalloc<int>(32);
+    int* d_sctx = dmalloc<int>(1);
+    std::vector<int> table;
+    int ctx = 0;
+    f.select(/*budget=*/6, table, ctx, d_sbt, d_sctx);
+    EXPECT_EQ(ctx, 6 * kBS) << "6 of 20 blocks kept";
+    const auto kept = std::vector<int>(table.begin(), table.begin() + 6);
+    EXPECT_NE(std::find(kept.begin(), kept.end(), MlaSparseFixture::needle), kept.end())
+        << "the block whose keys align with q must survive a 6-block budget at head_dim 192";
     cudaFree(d_sbt);
     cudaFree(d_sctx);
 }
