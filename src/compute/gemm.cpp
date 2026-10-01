@@ -272,6 +272,10 @@ struct GemmCacheEntry {
 
 static std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash> s_gemm_cache;
 static std::mutex s_gemm_cache_mutex;
+// #2346: matmul failures with a pin chosen at another M, and Ms that got an exact-M entry instead.
+// Reported and reset by gemm_cleanup.
+static std::atomic<int> s_pin_other_m_failures{0};
+static std::atomic<int> s_exact_m_entries{0};
 
 // ---------------------------------------------------------------------------
 // cuBLASLt descriptor creation helpers
@@ -367,12 +371,13 @@ static bool keep_pin_chosen_at_other_m(GemmCacheEntry& entry, int64_t M, int64_t
             reselect_algo_for_entry(entry, M, K, N);
     }
     if (other_m) {
-        static int kept_count = 0;
-        if (++kept_count <= 5)
+        const int n = s_pin_other_m_failures.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 5)
             IMP_LOG_WARN("[gemm-algo] matmul failed at M=%ld K=%ld N=%ld with the pin chosen at "
                          "M=%ld (same bucket) — this call takes the heuristic, the pin stays so "
-                         "calls at its own M keep answering identically",
-                         (long)M, (long)K, (long)N, (long)entry.algo_M);
+                         "calls at its own M keep answering identically (failure %d; total at "
+                         "gemm_cleanup)",
+                         (long)M, (long)K, (long)N, (long)entry.algo_M, n);
     }
     return other_m;
 }
@@ -663,6 +668,10 @@ void gemm_cleanup() {
     // Say it before the caches go: a clipped activation scale is silent
     // otherwise, and the flag lives on the device (#1544).
     nvfp4_report_scale_clipping();
+    if (const int f = s_pin_other_m_failures.exchange(0), x = s_exact_m_entries.exchange(0); f > 0 || x > 0)
+        IMP_LOG_INFO("[gemm-algo] %d matmul failure(s) with a pin chosen at another M; %d M(s) got an exact-M "
+                     "entry because the bucket pin failed cublasLtMatmulAlgoCheck",
+                     f, x);
     std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
     for (auto& [key, entry] : s_gemm_cache) {
         cublasLtMatrixLayoutDestroy(entry.Adesc);
