@@ -331,5 +331,69 @@ TEST(QwenVideoLayout, RefusesMismatchedVideoInput) {
     EXPECT_FALSE(qwen_build_mrope_positions_mm(type, {}, {{0, 1, 2}}, 0));
 }
 
+// --- V3: the engine's form (fold + per-item grids) ------------------------------------------
+
+TEST(QwenVideoFold, RewritesVideoPadsAndKeepsTypes) {
+    std::vector<int32_t> toks{1, 7, 7, 2, 9, 9, 3};
+    const auto types = fold_video_pads(toks, 7, 9);
+    EXPECT_EQ(toks, (std::vector<int32_t>{1, 7, 7, 2, 7, 7, 3}));
+    EXPECT_EQ(types, (std::vector<uint8_t>{0, 1, 1, 0, 2, 2, 0}));
+
+    std::vector<int32_t> images_only{1, 7, 2};
+    EXPECT_TRUE(fold_video_pads(images_only, 7, 9).empty());
+    EXPECT_EQ(images_only, (std::vector<int32_t>{1, 7, 2})) << "no video: tokens untouched";
+}
+
+// What Engine::build_qwen_layout_ runs: video pads folded into image pads, one grid per encoded
+// item (image, frame pair, frame pair) in prompt order. Must equal HF get_rope_index.
+TEST(QwenVideoLayout, EngineItemPathMatchesHfGetRopeIndex) {
+    const V2 v = build_v2();
+    ASSERT_FALSE(v.expanded.empty()) << "missing fixture " << kDir;
+    std::vector<int32_t> folded = v.expanded;
+    const auto types = fold_video_pads(folded, v.image_pad, v.video_pad);
+    const auto want_type = ints(one(v.kv, "mm_token_type_ids"));
+    ASSERT_EQ(types.size(), want_type.size());
+    for (size_t i = 0; i < types.size(); ++i)
+        ASSERT_EQ(types[i], want_type[i]) << "token type at " << i;
+    EXPECT_EQ(std::count(folded.begin(), folded.end(), v.video_pad), 0);
+
+    std::vector<MRopeImageGrid> items{v.images[0]};
+    for (int g = 0; g < v.videos[0].groups; ++g)
+        items.push_back({v.videos[0].rows, v.videos[0].cols});
+    const auto r = qwen_build_mrope_positions_items(types, items, 0);
+    ASSERT_TRUE(r) << r.error();
+    const size_t n = types.size();
+    size_t diffs = 0;
+    for (int axis = 0; axis < 3; ++axis) {
+        const auto want = ints(one(v.kv, "pos" + std::to_string(axis)));
+        ASSERT_EQ(want.size(), n);
+        for (size_t i = 0; i < n; ++i)
+            diffs += (r->pos[axis * n + i] != want[i]);
+    }
+    EXPECT_EQ(diffs, 0u);
+    EXPECT_EQ(r->next_pos, std::stoi(one(v.kv, "next_pos").at(0)));
+
+    items.pop_back();
+    EXPECT_FALSE(qwen_build_mrope_positions_items(types, items, 0)) << "a missing frame pair must be refused";
+}
+
+TEST(QwenVideoLayout, LayoutHelperBuildsTheHfStamps) {
+    const V2 v = build_v2();
+    std::map<std::string, std::vector<int32_t>> table;
+    for (auto [it, end] = v.kv.equal_range("stamp"); it != end; ++it) {
+        std::string label = it->second.at(0);
+        std::replace(label.begin(), label.end(), '_', ' ');
+        table[label] = ints(std::vector<std::string>(it->second.begin() + 1, it->second.end()));
+    }
+    std::vector<double> secs;
+    for (const auto& s : one(v.kv, "frame_seconds"))
+        secs.push_back(std::strtod(s.c_str(), nullptr));
+    const auto layout = qwen_video_layout(6, secs, 2, [&](const std::string& s) { return table.at(s); });
+    ASSERT_EQ(layout.stamp_ids.size(), 2u);
+    EXPECT_EQ(layout.tokens_per_group, 6);
+    EXPECT_EQ(layout.stamp_ids[0], (std::vector<int32_t>{27, 15, 13, 16, 6486, 29}));
+    EXPECT_EQ(layout.stamp_ids[1], (std::vector<int32_t>{27, 16, 13, 17, 6486, 29}));
+}
+
 }  // namespace
 }  // namespace imp

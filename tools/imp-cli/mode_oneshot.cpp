@@ -10,6 +10,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -35,6 +37,45 @@ int run_oneshot(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGenerate
                 return imp::tools::exit_code_for(err);
             }
             fprintf(stderr, "Image loaded: %s\n", p);
+        }
+        // One client-sampled video, after the images: frame pairs join the pending list in order.
+        imp::VideoPlaceholderLayout video_layout;
+        if (!args.video_frames.empty()) {
+            auto fail = [&](const std::string& why) {
+                fprintf(stderr, "Error loading video: %s\n", why.c_str());
+                imp_context_free(ctx);
+                imp_model_free(model);
+                return 1;
+            };
+            if (!ctx->engine->has_qwen_vision())
+                return fail("--video-frames needs a Qwen3-VL model");
+            if (args.image_paths.empty())
+                ctx->engine->clear_image();
+            std::vector<std::vector<uint8_t>> bytes;
+            size_t hash = 0;
+            for (const auto& path : args.video_frames) {
+                std::ifstream f(path, std::ios::binary);
+                if (!f)
+                    return fail("cannot open frame '" + path + "'");
+                bytes.emplace_back((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                hash = imp::combine_image_hash(hash, imp::image_content_hash(bytes.back()));
+            }
+            std::vector<std::span<const uint8_t>> spans(bytes.begin(), bytes.end());
+            std::vector<double> seconds = args.video_timestamps;
+            if (seconds.empty())
+                for (size_t k = 0; k < bytes.size(); ++k)
+                    seconds.push_back(static_cast<double>(k) / args.video_fps);
+            if (seconds.size() != bytes.size() || !(args.video_fps > 0.0))
+                return fail("need one timestamp per frame, or --video-fps > 0");
+            std::vector<imp::QwenPatches> groups;
+            if (!ctx->engine->preprocess_video_qwen(spans, groups) || groups.empty())
+                return fail("could not preprocess " + std::to_string(bytes.size()) + " frames");
+            imp::Tokenizer* vtok = model->model->tokenizer();
+            video_layout = imp::qwen_video_layout(ctx->engine->image_tokens_of(groups[0]), seconds, 2,
+                                                  [&](const std::string& s) { return vtok->encode(s); });
+            fprintf(stderr, "Video loaded: %zu frames -> %zu frame pairs of %d tokens\n", bytes.size(),
+                    groups.size(), video_layout.tokens_per_group);
+            ctx->engine->add_pending_qwen_video(std::move(groups), hash);
         }
 
         imp::Tokenizer* tok = model->model->tokenizer();
@@ -62,15 +103,25 @@ int run_oneshot(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGenerate
             // Dynamic resolution: the template emits one <|image_pad|> per block since the count isn't
             // knowable until the image is resized. Render one block per image, then expand each to what
             // its own encoder pass produced.
-            const std::vector<int> counts = ctx->engine->pending_image_token_counts();
+            // Pending = the images first, then the video's frame pairs (one video block).
+            std::vector<int> counts = ctx->engine->pending_image_token_counts();
+            const bool has_video = !video_layout.stamp_ids.empty();
+            if (has_video)
+                counts.resize(counts.size() - video_layout.stamp_ids.size());
             std::string blocks;
             for (size_t i = 0; i < counts.size(); ++i)
                 blocks += "<|vision_start|><|image_pad|><|vision_end|>";
+            if (has_video)
+                blocks += "<|vision_start|><|video_pad|><|vision_end|>";
             std::vector<imp::ChatMessage> msgs = {{"user", blocks + args.prompt}};
             tokens = chat_tpl.apply(*tok, msgs);
             const int32_t pad_id = tok->find_token("<|image_pad|>");
-            const auto expanded = pad_id < 0 ? std::unexpected(std::string("tokenizer has no <|image_pad|>"))
-                                             : imp::expand_image_placeholders(tokens, pad_id, counts);
+            auto expanded = pad_id < 0 ? std::unexpected(std::string("tokenizer has no <|image_pad|>"))
+                                       : imp::expand_image_placeholders(tokens, pad_id, counts);
+            if (expanded && has_video)
+                expanded = imp::expand_video_placeholders(tokens, tok->find_token("<|video_pad|>"),
+                                                          tok->find_token("<|vision_start|>"),
+                                                          tok->find_token("<|vision_end|>"), {video_layout});
             if (!expanded) {
                 fprintf(stderr, "Error placing image tokens: %s\n", expanded.error().c_str());
                 imp_context_free(ctx);

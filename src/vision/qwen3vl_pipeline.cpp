@@ -221,6 +221,51 @@ bool Qwen3VLPipeline::preprocess(std::span<const uint8_t> data, QwenPatches& out
     return ok;
 }
 
+bool Qwen3VLPipeline::preprocess_video(std::span<const std::span<const uint8_t>> frames,
+                                       std::vector<QwenPatches>& out) const {
+    out.clear();
+    if (!tower_ || frames.empty())
+        return false;
+    std::vector<uint8_t*> rgb(frames.size(), nullptr);
+    auto free_all = [&] {
+        for (uint8_t* p : rgb)
+            if (p)
+                stbi_image_free(p);
+    };
+    int w0 = 0, h0 = 0;
+    for (size_t f = 0; f < frames.size(); ++f) {
+        int w = 0, h = 0, ch = 0;
+        rgb[f] = stbi_load_from_memory(frames[f].data(), static_cast<int>(frames[f].size()), &w, &h, &ch, 3);
+        if (!rgb[f]) {
+            IMP_LOG_ERROR("Qwen3-VL pipeline: could not decode video frame %zu (%zu bytes)", f,
+                          frames[f].size());
+            free_all();
+            return false;
+        }
+        if (f == 0) {
+            w0 = w;
+            h0 = h;
+        } else if (w != w0 || h != h0) {
+            IMP_LOG_ERROR("Qwen3-VL pipeline: video frame %zu is %dx%d, frame 0 is %dx%d", f, w, h, w0, h0);
+            free_all();
+            return false;
+        }
+    }
+    QwenPatchifyConfig cfg = qwen_video_patchify_config();
+    const QwenPatchifyConfig img = patchify_config();
+    cfg.patch_size = img.patch_size;
+    cfg.merge_size = img.merge_size;
+    cfg.temporal_patch_size = img.temporal_patch_size;
+    cfg.max_pixels = std::min<int64_t>(cfg.max_pixels, static_cast<int64_t>(frames.size()) * max_pixels());
+    std::vector<const uint8_t*> ptrs(rgb.begin(), rgb.end());
+    const bool ok = qwen_patchify_video(ptrs, w0, h0, cfg, out);
+    free_all();
+    if (!ok)
+        IMP_LOG_ERROR("Qwen3-VL pipeline: could not patchify %zu video frames of %dx%d", frames.size(), w0,
+                      h0);
+    return ok;
+}
+
 bool Qwen3VLPipeline::encode_patches_to(const QwenPatches& patches, half* d_out,
                                         const std::vector<half*>& d_deepstack, Qwen3VLImage& shape_out,
                                         cudaStream_t stream) {

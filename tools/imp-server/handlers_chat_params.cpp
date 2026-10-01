@@ -17,6 +17,7 @@
 #include "runtime/request.h"
 #include "memory/kv_cache.h"
 #include "model/hf_hub.h"
+#include "model/image_placeholders.h"
 #include "runtime/config.h"
 
 #include <algorithm>
@@ -37,6 +38,32 @@ extern thread_local bool g_in_anthropic_shim;
 // Reasoning a client sends back on a prior assistant message (OpenAI
 // reasoning_content; the Anthropic shim folds thinking blocks into it). Handed to
 // the Jinja template as message.reasoning_content; "" when absent.
+// data: URI or (with --allow-remote-images) http(s) URL -> bytes. A failure leaves `bytes` empty and
+// sets `error` once; the string never echoes the URL (#1610: distinguishable errors made this a port
+// scanner of the server's own network).
+static void read_vision_url(ServerState& state, const std::string& url, const char* what,
+                            std::vector<uint8_t>& bytes, std::string& error) {
+    const bool remote = url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+    if (url.rfind("data:", 0) == 0) {
+        auto comma = url.find(',');
+        if (comma != std::string::npos)
+            bytes = base64_decode(url.substr(comma + 1));
+    } else if (remote) {
+        // Off by default, bounded when on, no redirects (image_fetch.h).
+        auto fetched = imp_server::fetch_remote_image(url, state.default_args.allow_remote_images);
+        if (fetched.ok)
+            bytes = std::move(fetched.bytes);
+        else
+            IMP_LOG_WARN("%s not fetched: %s", what, fetched.detail.c_str());
+    }
+    if (bytes.empty() && error.empty())
+        error = (remote && !state.default_args.allow_remote_images)
+                    ? std::string("could not read ") + what +
+                          ": remote URLs are disabled on this server; send a data: URI, or start it with "
+                          "--allow-remote-images"
+                    : std::string("could not read ") + what;
+}
+
 static std::string prior_reasoning(const json& msg) {
     if (msg.contains("reasoning_content") && msg["reasoning_content"].is_string())
         return msg["reasoning_content"].get<std::string>();
@@ -413,40 +440,54 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                     // fetch below fails the request is rejected, so a half-read
                     // list never reaches the prompt builder.
                     ctx.params.images.emplace_back();
-                    std::vector<uint8_t>& image_bytes = ctx.params.images.back();
-                    if (url.rfind("data:", 0) == 0) {
-                        // Data URI: data:image/...;base64,...
-                        auto comma = url.find(',');
-                        if (comma != std::string::npos) {
-                            image_bytes = base64_decode(url.substr(comma + 1));
-                        }
-                    } else if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
-                        // #1610: this used to build an httplib client straight from the request's host,
-                        // follow
-                        // redirects, and buffer the response - an SSRF primitive on an
-                        // unauthenticated-by-default
-                        // endpoint. Off by default now, and bounded when on (image_fetch.h).
-                        auto fetched = imp_server::fetch_remote_image(url,
-                                                                      state.default_args.allow_remote_images);
-                        if (fetched.ok) {
-                            image_bytes = std::move(fetched.bytes);
-                        } else {
-                            IMP_LOG_WARN("image_url not fetched: %s", fetched.detail.c_str());
-                        }
+                    ctx.params.vision_order.push_back('i');
+                    read_vision_url(state, url, "image_url", ctx.params.images.back(),
+                                    ctx.params.image_error);
+                } else if (type == "video") {
+                    // {"type":"video","video":[frame URL, ...],"fps":F | "timestamps":[s, ...]}: frames the
+                    // client sampled itself (no decoder here). Frame k sits at k/F s or timestamps[k].
+                    const json frames = part.value("video", json());
+                    if (!frames.is_array() || frames.size() < 2 ||
+                        frames.size() > imp::Engine::kQwenVideoMaxFrames) {
+                        send_json_error(res, 400, "invalid_request_error",
+                                        "a video part needs \"video\": an array of 2.." +
+                                            std::to_string(imp::Engine::kQwenVideoMaxFrames) +
+                                            " frame image URLs");
+                        return false;
                     }
-                    // An unfetched scheme (file://, plain paths) and a failed request are both refused the
-                    // same way,
-                    // with ONE error string that does not echo the URL: distinguishable errors turned this
-                    // into a
-                    // port scanner of the server's own network.
-                    if (image_bytes.empty() && ctx.params.image_error.empty()) {
-                        const bool remote = url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
-                        ctx.params.image_error =
-                            (remote && !state.default_args.allow_remote_images)
-                                ? "could not read image_url: remote URLs are disabled on this "
-                                  "server; send a data: URI, or start it with --allow-remote-images"
-                                : "could not read image_url";
+                    ChatVideoInput v;
+                    if (part.contains("timestamps")) {
+                        const json& ts = part["timestamps"];
+                        if (!ts.is_array() || ts.size() != frames.size()) {
+                            send_json_error(res, 400, "invalid_request_error",
+                                            "video \"timestamps\" needs one number per frame");
+                            return false;
+                        }
+                        for (const auto& t : ts) {
+                            if (!t.is_number()) {
+                                send_json_error(res, 400, "invalid_request_error",
+                                                "video \"timestamps\" needs one number per frame");
+                                return false;
+                            }
+                            v.seconds.push_back(t.get<double>());
+                        }
+                    } else {
+                        const json fps_j = part.value("fps", json(imp::kQwenVideoDefaultFps));
+                        const double fps = fps_j.is_number() ? fps_j.get<double>() : -1.0;
+                        if (!(fps > 0.0)) {
+                            send_json_error(res, 400, "invalid_request_error", "video \"fps\" must be > 0");
+                            return false;
+                        }
+                        for (size_t k = 0; k < frames.size(); ++k)
+                            v.seconds.push_back(static_cast<double>(k) / fps);
                     }
+                    for (const auto& f : frames) {
+                        v.frames.emplace_back();
+                        read_vision_url(state, f.is_string() ? f.get<std::string>() : std::string(),
+                                        "video frame", v.frames.back(), ctx.params.image_error);
+                    }
+                    ctx.params.videos.push_back(std::move(v));
+                    ctx.params.vision_order.push_back('v');
                 }
             }
             ctx.params.chat_msgs.push_back({role, text_parts});
