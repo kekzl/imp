@@ -267,6 +267,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/ffn_sparsity_mask.cu
     src/compute/weight_dispatch.cpp
     src/compute/gemm_dp4a.cu
+    src/compute/moe_decode_select.cu
     src/compute/gemm_grouped.cpp
     src/compute/ggml_mmvq.cu
     src/compute/gemm_moe_fused.cu

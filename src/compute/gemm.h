@@ -311,10 +311,10 @@ using MoeFp16DecodeFn = void (*)(const void*, const int32_t*, const half*, half*
                                  cudaStream_t);
 using MoeFp16GateUpFn = void (*)(const void*, const void*, const int32_t*, const half*, half*, half*, int,
                                  int, size_t, size_t, int, int, cudaStream_t);
-bool moe_dp4a_decode_supported(QType qt);
+[[nodiscard]] bool moe_dp4a_decode_supported(QType qt);
 MoeDp4aDecodeFn moe_dp4a_decode_kernel(QType qt);
 MoeDp4aGateUpFn moe_dp4a_gate_up_kernel(QType qt);
-bool moe_fp16_decode_supported(QType qt);
+[[nodiscard]] bool moe_fp16_decode_supported(QType qt);
 MoeFp16DecodeFn moe_fp16_decode_kernel(QType qt);
 MoeFp16GateUpFn moe_fp16_gate_up_kernel(QType qt);
 

@@ -89,16 +89,15 @@ namespace {
 // exactly that shape, so run_moe_decode_fast can feed slot indices instead
 // of expert ids. Without it, a host-resident layer drops to the serial fallback (far more kernel launches per
 // layer).
-// nvfp4_host_ok: caller passes it only where run_moe_decode_fast takes that route (not gpt-oss).
-// dp4a: same predicate as run_moe_decode_fast's use_dp4a.
+// Mirrors run_moe_decode_fast: host NVFP4 route skips gpt-oss, dp4a = both Q8_1 scratch buffers set.
 static bool can_decode_fast(int n, const TransformerLayer& ly, void* dequant_buf, QType compute_dtype,
-                            bool host_pool_ok, bool nvfp4_host_ok, bool dp4a) {
+                            bool host_pool_ok, bool nvfp4_host_ready, bool is_gpt_oss, const QuantScratch& qs) {
     if (n != 1 || compute_dtype != QType::F16)
         return false;
     // Host-resident NVFP4 experts have no packed 3-D tensor to test — the slot
     // path addresses the per-expert tensors directly. Its own predicate has
     // already checked everything this one would.
-    if (nvfp4_host_ok)
+    if (nvfp4_host_ready && !is_gpt_oss)
         return true;
     const Tensor& up = ly.expert_up_packed;
     if (up.data == nullptr || dequant_buf == nullptr || !(up.on_device || host_pool_ok))
@@ -110,6 +109,7 @@ static bool can_decode_fast(int n, const TransformerLayer& ly, void* dequant_buf
         (non_gated || ly.nvfp4_moe_gate_ptr != nullptr))
         return true;
     // #2444: gate, up and down each need an arm in the sub-path that runs; the dispatch throws otherwise.
+    const bool dp4a = qs.q8_1_buf != nullptr && qs.d8_buf != nullptr;
     auto has_arm = dp4a ? moe_dp4a_decode_supported : moe_fp16_decode_supported;
     if (!non_gated && (ly.expert_gate_packed.data == nullptr || !has_arm(ly.expert_gate_packed.qtype)))
         return false;
@@ -197,9 +197,8 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
         can_decode_fast(ctx.n, ly, moe_.dequant_buf, compute_dtype_,
                         host_expert_pool_ready(ly.expert_up_packed, expert_cache_, moe_,
                                                model_->config().n_experts_active),
-                        !prof.is_gpt_oss && nvfp4_host_decode_ready(ly, expert_cache_, moe_,
-                                                                    model_->config().n_experts_active),
-                        qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr) &&
+                        nvfp4_host_decode_ready(ly, expert_cache_, moe_, model_->config().n_experts_active),
+                        prof.is_gpt_oss, qscratch_) &&
         ly.w_up_shared.data == nullptr;  // must not have shared expert for full residual fusion
 
     if (!ctx.will_skip_residual_copy) {
@@ -319,12 +318,10 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
     bool norm_weights = cfg.expert_weights_norm;
 
     ctx.up_qtype         = ly.expert_up_packed.qtype;
-    const bool nvfp4_host_ok =
-        !prof.is_gpt_oss && nvfp4_host_decode_ready(ly, expert_cache_, moe_, cfg.n_experts_active);
     ctx.will_decode_fast = can_decode_fast(
         ctx.n, ly, moe_.dequant_buf, compute_dtype_,
-        host_expert_pool_ready(ly.expert_up_packed, expert_cache_, moe_, cfg.n_experts_active), nvfp4_host_ok,
-        qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr);
+        host_expert_pool_ready(ly.expert_up_packed, expert_cache_, moe_, cfg.n_experts_active),
+        nvfp4_host_decode_ready(ly, expert_cache_, moe_, cfg.n_experts_active), prof.is_gpt_oss, qscratch_);
     compute_moe_routing(layer, stream, ctx.n, ctx.d, ctx.ne, ctx.top_k, router_in,
                         ctx.fp32_gate_logits_ready, ctx.will_decode_fast, router_bias_ptr,
                         use_sigmoid, norm_weights, ctx.routing);
