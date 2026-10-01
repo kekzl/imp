@@ -37,7 +37,8 @@ SmartResize qwen_smart_resize(int height, int width, int factor, int64_t min_pix
 //   TOKEN order is grouped by 2x2 MERGE BLOCK, not raster: (grid_h/merge, grid_w/merge,
 //   merge_h, merge_w) - the patch merger consumes four CONSECUTIVE tokens because of this;
 //   WITHIN a token the layout is (C,T,patch_h,patch_w), channel-major then temporal; for a
-//   still image the temporal axis is a plain REPEAT of the same spatial patch, not a 2nd frame.
+//   still image the temporal axis is a plain REPEAT of the same spatial patch (qwen_patchify_video
+//   puts a real frame pair there).
 // tokens == grid_h*grid_w; both even since smart_resize aligns to patch_size*merge_size.
 struct QwenPatches {
     std::vector<half> data;  // [tokens, channels * temporal * patch * patch]
@@ -61,6 +62,21 @@ struct QwenPatchifyConfig {
 // patchify. Returns false on a decode/size failure. `rgb` is [h, w, 3] u8.
 [[nodiscard]] bool qwen_patchify(const uint8_t* rgb, int width, int height, const QwenPatchifyConfig& cfg,
                    QwenPatches& out);
+
+// Qwen3VLVideoProcessor smart_resize: pixel bounds apply to t_bar*h*w, t_bar = num_frames rounded
+// (ties to even) to temporal_factor. A side below `factor` is first scaled up (int truncation).
+// `ok` false for num_frames < temporal_factor or aspect ratio > 200:1 (upstream raises).
+SmartResize qwen_video_smart_resize(int num_frames, int height, int width, int temporal_factor, int factor,
+                                    int64_t min_pixels, int64_t max_pixels);
+
+// Qwen/Qwen3-VL-*-Instruct video_preprocessor_config.json: min 4096, max 25165824 over t*h*w.
+QwenPatchifyConfig qwen_video_patchify_config();
+
+// Video frames -> one QwenPatches per frame pair (frames 2g, 2g+1 on the temporal axis; an odd
+// count repeats the last frame). Concatenated in order == HF pixel_values_videos; each group is
+// an image-shaped grid (HF splits video_grid_thw into t=1 rows). `frames` are [h, w, 3] u8, same size.
+[[nodiscard]] bool qwen_patchify_video(std::span<const uint8_t* const> frames, int width, int height,
+                                       const QwenPatchifyConfig& cfg, std::vector<QwenPatches>& out);
 
 // Load image from file, resize to target_size x target_size, normalize, convert to FP16 CHW.
 [[nodiscard]] bool load_and_preprocess_image(const std::string& path, int target_size, const float mean[3],
