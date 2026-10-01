@@ -271,9 +271,12 @@
         } else {
             dispatch_record::set_attn_decode(AttnDecodePath::FP16);
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
-            paged_attention_decode(q4, k_c, v_c, o4, attn_bt, attn_ctx_lens, kv_bs, scale,
-                                   state.max_context_len, layer_sliding_window, cfg.attn_logit_softcap,
-                                   stream, attn_max_blocks, layer_n_sinks, attn_sinks, vhd);
+            // MLA: V slots are hd wide, zero past vhd (mla_assemble_kv v_dst_head_dim=hd): symmetric decode
+            // (split-K, templated HD) into kk, dead after the KV write above, then compaction (#2374).
+            paged_attention_decode_mla_padded(q4, k_c, v_c, o4, static_cast<half*>(kk.data), kk.numel(),
+                                              attn_bt, attn_ctx_lens, kv_bs, scale, state.max_context_len,
+                                              layer_sliding_window, cfg.attn_logit_softcap, stream,
+                                              attn_max_blocks, layer_n_sinks, attn_sinks, vhd);
         }
         if (attn_sinks && !paged_attention_applies_sinks(cache_dtype)) {
             static bool warned_sinks_kv = false;

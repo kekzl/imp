@@ -775,6 +775,15 @@ __global__ void paged_attention_splitk_kernel(
                                       split_idx);
 }
 
+// Copies N halves as N/2 4-byte cp.async ops: the HD 64/192 lane offset is only 4-byte aligned
+// (8-byte cp.async faults, cudaErrorMisalignedAddress).
+template <int N>
+__device__ __forceinline__ void cp_async_4b_pairs(half* dst, const half* src) {
+#pragma unroll
+    for (int c = 0; c < N; c += 2)
+        cp_async_ca_4(dst + c, src + c);
+}
+
 // Pipelined Split-K: overlaps V[t]+K[t+1] loads with K[t]'s dot product via cp.async. Per-warp
 // smem: k_buf[2][HD]+v_buf[HD] = 3*HD halfs. Pipeline: cp.async V[t] and K[t+1] -> wait_group<1>
 // for K[t] -> dot while V[t]/K[t+1] in flight -> softmax update -> wait_group<0>, O += weight*V.
@@ -787,6 +796,7 @@ __global__ void paged_attention_splitk_pipeline_kernel(
     float scale, int max_num_blocks, int num_splits, int sliding_window, int n_sinks, float softcap) {
     static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
+    constexpr int kPairs = (ELEMS % 2 == 0) ? ELEMS : 2;  // 4-byte copy span; odd ELEMS (HD 96) keeps one
 
     const int batch_idx = blockIdx.x;
     const int head_idx = blockIdx.y;
@@ -898,9 +908,7 @@ __global__ void paged_attention_splitk_pipeline_kernel(
             if constexpr (ELEMS == 4) {
                 cp_async_ca_8(&k_buf0[lane_offset], &K_tok[lane_offset]);
             } else if constexpr (ELEMS < 8) {
-                // ELEMS==2 (head_dim=64): per-lane offset is only 4-byte
-                // aligned — 8-byte cp.async faults (cudaErrorMisalignedAddress).
-                cp_async_ca_4(&k_buf0[lane_offset], &K_tok[lane_offset]);
+                cp_async_4b_pairs<kPairs>(&k_buf0[lane_offset], &K_tok[lane_offset]);
             }
             cp_async_commit();
         }
@@ -930,8 +938,8 @@ __global__ void paged_attention_splitk_pipeline_kernel(
                 cp_async_ca_8(&v_buf[lane_offset], &V_tok[lane_offset]);
                 cp_async_ca_8(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
             } else if constexpr (ELEMS < 8) {
-                cp_async_ca_4(&v_buf[lane_offset], &V_tok[lane_offset]);
-                cp_async_ca_4(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
+                cp_async_4b_pairs<kPairs>(&v_buf[lane_offset], &V_tok[lane_offset]);
+                cp_async_4b_pairs<kPairs>(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
             }
             cp_async_commit();
 
@@ -1110,11 +1118,14 @@ void paged_attention_unsupported_head_dim(const char* fn, int head_dim) {
 
 bool paged_attention_serves_head_dim(QType kv_dtype, int head_dim) {
     // Per-dtype decode launcher head_dim support:
-    //   attention_paged.cu(F16)/attention_paged_fp8.cu: 64 96 128 256 512
+    //   attention_paged.cu(F16): 64 96 128 192 256 512 (192: MLA, #2374)
+    //   attention_paged_fp8.cu: 64 96 128 256 512
     //   attention_paged_int8.cu/int4.cu: 64 96 128 256
     //   attention_paged_nvfp4*.cu (incl. MXFP4_KV, A1-5): 64 128 256 512 (no 96)
     switch (kv_dtype) {
         case QType::F16:
+            return head_dim == 64 || head_dim == 96 || head_dim == 128 || head_dim == 192 ||
+                   head_dim == 256 || head_dim == 512;
         case QType::FP8_E4M3:
             return head_dim == 64 || head_dim == 96 || head_dim == 128 || head_dim == 256 || head_dim == 512;
         case QType::INT8:
@@ -1139,6 +1150,83 @@ void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int 
     paged_attention_reduce_kernel<<<grid, block, 0, stream>>>(partial, O, n_heads, head_dim, num_splits,
                                                               attn_sinks);
     IMP_CUDA_CHECK_LAUNCH();
+}
+
+// One warning per process: the generic kernel is scalar, one CTA per (batch, head), no split-K.
+static void warn_generic_decode_once(int head_dim, int v_head_dim, int n_heads, int n_kv_heads) {
+    static bool warned = false;
+    if (warned)
+        return;
+    warned = true;
+    IMP_LOG_WARN(
+        "paged_attention_decode: generic kernel (no split-K) for head_dim=%d v_head_dim=%d "
+        "n_heads=%d n_kv_heads=%d",
+        head_dim, v_head_dim, n_heads, n_kv_heads);
+}
+
+// MHA fallback of paged_attention_decode (moved verbatim): one CTA per (batch, head), templated
+// per head_dim; asymmetric V (vhd != head_dim) or an untemplated head_dim takes the generic kernel.
+static void launch_paged_decode_mha(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
+                                    const int* block_tables, const int* context_lens, int batch_size,
+                                    int n_heads, int n_kv_heads, int head_dim, int vhd, int block_size,
+                                    float scale, int max_context_len, int max_num_blocks, int sliding_window,
+                                    int n_sinks, float softcap, bool has_attn_sinks, size_t smem_bytes,
+                                    cudaStream_t stream) {
+    if (has_attn_sinks) {
+        static bool warned_sinks_mha = false;
+        if (!warned_sinks_mha) {
+            warned_sinks_mha = true;
+            IMP_LOG_WARN(
+                "paged_attention_decode: MHA fallback ignores learned attention sinks "
+                "(gpt-oss) - output will be wrong for this config");
+        }
+    }
+    const bool is_mla_asymmetric = (vhd != head_dim);
+    // MHA fallback: simple per-head kernel (templated + vectorized)
+    dim3 grid(batch_size, n_heads);
+    dim3 block(BLOCK_THREADS);
+
+#define LAUNCH_MHA(HD)                                                                                     \
+    paged_attention_decode_kernel<HD><<<grid, block, smem_bytes, stream>>>(                                \
+        reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K_cache.data),                \
+        reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data), block_tables,        \
+        context_lens, batch_size, n_heads, n_kv_heads, block_size, scale, max_context_len, max_num_blocks, \
+        sliding_window, n_sinks, softcap);                                                                 \
+    IMP_CUDA_CHECK_LAUNCH()
+
+    // Templated kernels write O at head_dim width: asymmetric V (MLA) takes the generic kernel.
+    switch (is_mla_asymmetric ? 0 : head_dim) {
+        case 64:
+            LAUNCH_MHA(64);
+            break;
+        case 96:
+            LAUNCH_MHA(96);
+            break;
+        case 128:
+            LAUNCH_MHA(128);
+            break;
+        case 192:
+            LAUNCH_MHA(192);
+            break;
+        case 256:
+            LAUNCH_MHA(256);
+            break;
+        case 512:
+            LAUNCH_MHA(512);
+            break;
+        default:
+            // Generic non-templated fallback for non-standard head_dim or asymmetric V
+            // (vhd != head_dim): reads only vhd elements per V slot.
+            warn_generic_decode_once(head_dim, vhd, n_heads, n_kv_heads);
+            paged_attention_decode_kernel_generic<<<grid, block, smem_bytes, stream>>>(
+                reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K_cache.data),
+                reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data), block_tables,
+                context_lens, batch_size, n_heads, n_kv_heads, head_dim, vhd, block_size, scale,
+                max_context_len, max_num_blocks, sliding_window, n_sinks, softcap);
+            IMP_CUDA_CHECK_LAUNCH();
+            break;
+    }
+#undef LAUNCH_MHA
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,6 +1362,9 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                 case 128:
                     LAUNCH_SPLITK_PIPE(128);
                     break;
+                case 192:
+                    LAUNCH_SPLITK_PIPE(192);
+                    break;
                 case 256:
                     LAUNCH_SPLITK_PIPE(256);
                     break;
@@ -1303,6 +1394,9 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                     break;
                 case 128:
                     LAUNCH_SPLITK(128);
+                    break;
+                case 192:
+                    LAUNCH_SPLITK(192);
                     break;
                 case 256:
                     LAUNCH_SPLITK(256);
@@ -1404,54 +1498,9 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
         // SUCCESSFUL split-K (num_splits>1, where the GQA `if` above is false),
         // double-dispatching attention over the same O.
     mha_fallback:
-        if (sinks_h) {
-            static bool warned_sinks_mha = false;
-            if (!warned_sinks_mha) {
-                warned_sinks_mha = true;
-                IMP_LOG_WARN("paged_attention_decode: MHA fallback ignores learned attention sinks "
-                             "(gpt-oss) — output will be wrong for this config");
-            }
-        }
-        // MHA fallback: simple per-head kernel (templated + vectorized)
-        dim3 grid(batch_size, n_heads);
-        dim3 block(BLOCK_THREADS);
-
-#define LAUNCH_MHA(HD)                                                                                     \
-    paged_attention_decode_kernel<HD><<<grid, block, smem_bytes, stream>>>(                                \
-        reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K_cache.data),                \
-        reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data), block_tables,        \
-        context_lens, batch_size, n_heads, n_kv_heads, block_size, scale, max_context_len, max_num_blocks, \
-        sliding_window, n_sinks, softcap);                                                                 \
-    IMP_CUDA_CHECK_LAUNCH()
-
-        switch (head_dim) {
-            case 64:
-                LAUNCH_MHA(64);
-                break;
-            case 96:
-                LAUNCH_MHA(96);
-                break;
-            case 128:
-                LAUNCH_MHA(128);
-                break;
-            case 256:
-                LAUNCH_MHA(256);
-                break;
-            case 512:
-                LAUNCH_MHA(512);
-                break;
-            default:
-                // Generic non-templated fallback for non-standard head_dim (e.g. tests or MLA)
-                // Pass vhd so the kernel reads only v_head_dim elements from each V slot.
-                paged_attention_decode_kernel_generic<<<grid, block, smem_bytes, stream>>>(
-                    reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K_cache.data),
-                    reinterpret_cast<const half*>(V_cache.data), reinterpret_cast<half*>(O.data),
-                    block_tables, context_lens, batch_size, n_heads, n_kv_heads, head_dim, vhd, block_size,
-                    scale, max_context_len, max_num_blocks, sliding_window, n_sinks, softcap);
-                IMP_CUDA_CHECK_LAUNCH();
-                break;
-        }
-#undef LAUNCH_MHA
+        launch_paged_decode_mha(Q, K_cache, V_cache, O, block_tables, context_lens, batch_size, n_heads,
+                                n_kv_heads, head_dim, vhd, block_size, scale, max_context_len, max_num_blocks,
+                                sliding_window, n_sinks, softcap, sinks_h != nullptr, smem_bytes, stream);
     }
 }
 }  // namespace imp

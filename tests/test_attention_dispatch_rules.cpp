@@ -46,4 +46,6 @@ TEST(AttentionDispatchRules, PagedDecodeRefusesMxfp4KvAtHeadDim96) {
     for (int hd : {64, 128, 256, 512})
         EXPECT_TRUE(paged_attention_serves_head_dim(QType::MXFP4_KV, hd)) << "hd=" << hd;
     EXPECT_TRUE(paged_attention_serves_head_dim(QType::F16, 96));
+    EXPECT_TRUE(paged_attention_serves_head_dim(QType::F16, 192));  // MLA (#2374)
+    EXPECT_FALSE(paged_attention_serves_head_dim(QType::FP8_E4M3, 192));
 }

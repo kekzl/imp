@@ -44,6 +44,7 @@ void imp::(anonymous namespace)::smallM_kernel_v1<64, 128, 256, 2>	sm_120a	56	28
 void imp::flash_attention_blackwell_kernel<64, 96>	sm_120a	56	16	0
 void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 8>	sm_120a	56	16	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<128>	sm_120a	56	16	0
+void imp::paged_attention_splitk_pipeline_kernel<192>	sm_120a	56	16	0
 void imp::flash_attention_blackwell_kernel<64, 256>	sm_120a	55	16	0
 void imp::paged_attention_splitk_int4_pipeline_kernel<64>	sm_120a	54	16	0
 void imp::flash_attention_blackwell_kernel<128, 64>	sm_120a	53	16	0
