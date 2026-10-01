@@ -59,6 +59,8 @@ public:
     void* shared() const { return shared_workspace_; }
     void* persistent() const { return persistent_workspace_; }
     size_t shared_size() const { return shared_workspace_size_; }
+    // Persistent + shared bytes currently held; resident before the KV plan reads free VRAM (#2365).
+    size_t allocated_bytes() const { return persistent_workspace_size_ + shared_workspace_size_; }
     int shared_max_tokens() const { return shared_workspace_max_tokens_; }
     int active() const { return active_workspace_; }
     bool has_decode_workspace() const { return decode_workspace_ != nullptr; }

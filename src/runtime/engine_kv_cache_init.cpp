@@ -257,9 +257,15 @@ bool Engine::init_kv_cache() {
             probe.recurrent_snapshot_bytes = per_seq > 0 ? (budget / per_seq) * per_seq : 0;
         }
         if (executor_) {
-            probe.engine_persistent_bytes = executor_->workspace_estimate();
+            // allocate_workspaces() ran before distributable was read: charge only the part of the
+            // estimate not yet resident (Qwen3.8-27B: 887 estimated, 749 held, #2365).
+            const size_t est = executor_->workspace_estimate();
+            const size_t held = executor_->workspace_allocated();
+            probe.engine_persistent_bytes = est > held ? est - held : 0;
+            probe.engine_persistent_resident_bytes = held;
             probe.workspace_estimate_available = true;
         }
+        probe.kv_growable_ceiling_blocks = runtime_config_.kv_cache.growable ? vram_budget.kv_max_blocks : 0;
         probe.vision_tower_unmodelled = !config_.mmproj_path.empty();
         // Use config_.library_reserve_mb, NOT the runtime-config field: the
         // loader above writes the remembered measurement into the former only
