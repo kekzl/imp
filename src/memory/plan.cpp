@@ -41,7 +41,8 @@ std::vector<PlanLine> MemoryPlan::lines() const {
     for (const auto& p : pools)
         push(v, p.name, p.tag, p.bytes);
     push(v, "CUDA context + driver", RegionTag::Other, context_reserve);
-    push(v, "library reserve (measured)", RegionTag::Other, library_reserve);
+    // "charged": the constant, an imp.conf pin or a cached measurement; the plan cannot tell (#2347).
+    push(v, "library reserve (charged)", RegionTag::Other, library_reserve);
     std::stable_sort(v.begin(), v.end(),
                      [](const PlanLine& a, const PlanLine& b) { return a.bytes > b.bytes; });
     return v;

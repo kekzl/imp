@@ -621,6 +621,9 @@ TEST(ShadowPlan, RejectedPlanReportsTheLivePoolNotApplied) {
     EXPECT_NE(r.find("all 41 seqs at <= " + std::to_string(ctx_all) + " tokens"), std::string::npos) << r;
     EXPECT_NE(r.find("(8192 blocks/seq)"), std::string::npos) << r;
     EXPECT_EQ(r.find("max_seq_len=0"), std::string::npos) << r;
+    // The fixture charges the 3900 MiB constant, never a measurement (#2347).
+    EXPECT_EQ(r.find("library reserve (measured)"), std::string::npos) << r;
+    EXPECT_NE(r.find("library reserve (charged)"), std::string::npos) << r;
 }
 
 TEST(ShadowPlan, ChargesTheRecurrentSnapshotStoreAgainstTheKvPool) {
