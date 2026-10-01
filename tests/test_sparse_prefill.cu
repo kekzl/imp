@@ -76,14 +76,14 @@ protected:
             pos[p] = p;
         int* d_pos = put(pos);
         mm_ = dalloc<__half2>(static_cast<size_t>(kCap) * kRow);
-        sparse_update_key_minmax_all_layers(QType::F16, k_, 0, nullptr, 0, mm_, 0, d_pos, bt_, nullptr, 1, kNkv,
-                                            kHd, kBS, kPast, kNBlocks, 1, /*meanstd=*/true, nullptr);
+        sparse_update_key_minmax_all_layers(QType::F16, k_, 0, nullptr, 0, mm_, 0, d_pos, bt_, nullptr, 1,
+                                            kNkv, kHd, kBS, kPast, kNBlocks, 1, /*meanstd=*/true, nullptr);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         cudaFree(d_pos);
         scores_ = dalloc<float>(64 * kCap);
         agg_ = dalloc<float>(kCap);
         tbl_ = dalloc<int>(kCap);
-        ctx_ = dalloc<int>(1);
+        ctx_ = dalloc<int>(2);
         kf_ = dalloc<half>(static_cast<size_t>(kPast + kN) * kRow);
         vf_ = dalloc<half>(static_cast<size_t>(kPast + kN) * kRow);
     }
@@ -99,9 +99,9 @@ protected:
         return d;
     }
     int select(int budget_blocks, int sink_blocks, int recent_blocks) {
-        return sparse_prefill_select_past(q_, kN, 16, mm_, bt_, kPast, kNh, kNkv, kHd, kBS, kCap, budget_blocks,
-                                          sink_blocks, recent_blocks, /*meanstd=*/true, 1.0f, scores_, agg_,
-                                          tbl_, ctx_, nullptr);
+        return sparse_prefill_select_past(q_, kN, 16, mm_, bt_, kPast, kNh, kNkv, kHd, kBS, kCap,
+                                          budget_blocks, sink_blocks, recent_blocks, /*meanstd=*/true, 1.0f,
+                                          scores_, agg_, tbl_, ctx_, nullptr);
     }
     // Gather `past` tokens through `table`, append the chunk, FA2 with q_offset = past.
     std::vector<uint16_t> attend(const int* table, int past) {
@@ -115,13 +115,15 @@ protected:
                   cudaSuccess);
         half* o = dalloc<half>(static_cast<size_t>(kN) * kNh * kHd);
         int64_t qs[4] = {1, kN, kNh, kHd}, ks[4] = {1, past + kN, kNkv, kHd};
-        Tensor Q(q_, QType::F16, 4, qs, true), K(kf_, QType::F16, 4, ks, true), V(vf_, QType::F16, 4, ks, true);
+        Tensor Q(q_, QType::F16, 4, qs, true), K(kf_, QType::F16, 4, ks, true),
+            V(vf_, QType::F16, 4, ks, true);
         Tensor O(o, QType::F16, 4, qs, true);
-        EXPECT_TRUE(fmha_sm120_fa2_prefill(Q, K, V, O, 1.0f / std::sqrt(static_cast<float>(kHd)), true, 0, 0.0f,
-                                           nullptr, past, /*fp16_qk=*/true));
+        EXPECT_TRUE(fmha_sm120_fa2_prefill(Q, K, V, O, 1.0f / std::sqrt(static_cast<float>(kHd)), true, 0,
+                                           0.0f, nullptr, past, /*fp16_qk=*/true));
         EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         std::vector<uint16_t> out(static_cast<size_t>(kN) * kNh * kHd);
-        EXPECT_EQ(cudaMemcpy(out.data(), o, out.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost), cudaSuccess);
+        EXPECT_EQ(cudaMemcpy(out.data(), o, out.size() * sizeof(uint16_t), cudaMemcpyDeviceToHost),
+                  cudaSuccess);
         cudaFree(o);
         return out;
     }
@@ -152,7 +154,8 @@ TEST_F(SparsePrefillTest, BudgetCoveringThePastIsBitIdenticalAndADroppedPageIsNo
 
     std::vector<int> dropped = table_host(kNBlocks);
     dropped.erase(dropped.begin() + kNeedleBlock);
-    ASSERT_EQ(cudaMemcpy(tbl_, dropped.data(), dropped.size() * sizeof(int), cudaMemcpyHostToDevice), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(tbl_, dropped.data(), dropped.size() * sizeof(int), cudaMemcpyHostToDevice),
+              cudaSuccess);
     const auto mutated = attend(tbl_, kPast - kBS);
     size_t diff = 0;
     for (size_t i = 0; i < dense.size(); i++)

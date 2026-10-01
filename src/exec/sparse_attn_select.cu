@@ -384,6 +384,8 @@ __global__ void sparse_prefill_merge_rows_kernel(const float* __restrict__ score
     }
 }
 
+__global__ void sparse_prefill_set_len_kernel(int* __restrict__ len, int value) { *len = value; }
+
 // Top-k selection + compacted table build, one CTA per sequence. Selection key is
 // 64-bit: (monotone score bits << 32) | ~block_index, unique per block, so the radix
 // threshold is exact, ties resolve to the LOWER block index, result is deterministic.
@@ -403,9 +405,9 @@ __global__ void sparse_select_topk_kernel(const float* __restrict__ scores,
                                           int* __restrict__ sparse_ctx, int block_size,
                                           int max_blocks_per_seq, int scores_stride, int budget_blocks,
                                           int sink_blocks, int recent_blocks, int engage_blocks,
-                                          int table_blocks, int ctx_const) {
+                                          int table_blocks) {
     const int seq = blockIdx.x;
-    const int ctx_len = context_lens ? context_lens[seq] : ctx_const;
+    const int ctx_len = context_lens[seq];
     const int n_blocks = (ctx_len + block_size - 1) / block_size;
     const int* bt = block_tables + (int64_t)seq * max_blocks_per_seq;
     int* out = sparse_bt + (int64_t)seq * table_blocks;
@@ -621,7 +623,7 @@ namespace {
 void launch_select_topk(int n_seq, const float* scores, const int* block_tables, const int* context_lens,
                         int* sparse_block_tables, int* sparse_context_lens, int block_size,
                         int max_blocks_per_seq, int budget_blocks, int sink_blocks, int recent_blocks,
-                        int engage_blocks, int table_blocks, int ctx_const, cudaStream_t stream) {
+                        int engage_blocks, int table_blocks, cudaStream_t stream) {
     const int n_words = (max_blocks_per_seq + 31) / 32;
     const size_t sel_smem = (256 + 4 * (size_t)n_words + (size_t)max_blocks_per_seq) * sizeof(uint32_t);
     // 128k-context tables need ~35 KiB; opt in past the 48 KiB default ONLY
@@ -643,7 +645,7 @@ void launch_select_topk(int n_seq, const float* scores, const int* block_tables,
     sparse_select_topk_kernel<<<n_seq, kSelectThreads, sel_smem, stream>>>(
         scores, block_tables, context_lens, sparse_block_tables, sparse_context_lens, block_size,
         max_blocks_per_seq, max_blocks_per_seq, budget_blocks, sink_blocks, recent_blocks, engage_blocks,
-        table_blocks, ctx_const);
+        table_blocks);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -663,15 +665,17 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
     const size_t q_smem = (size_t)n_heads * head_dim * sizeof(half);
     auto* score_kern = meanstd ? sparse_score_blocks_kernel<ScoreMeanStd>
                                : sparse_score_blocks_kernel<ScoreCornerBound>;
-    score_kern<<<score_grid, kScoreThreads, q_smem, stream>>>(
-        q, static_cast<const __half2*>(minmax_base), block_tables, context_lens, scores_scratch, n_heads,
-        n_kv_heads, head_dim, block_size, max_blocks_per_seq, max_blocks_per_seq, engage_blocks, std_coef,
-        n_heads * head_dim, max_blocks_per_seq, 0);
+    score_kern<<<score_grid, kScoreThreads, q_smem, stream>>>(q, static_cast<const __half2*>(minmax_base),
+                                                              block_tables, context_lens, scores_scratch,
+                                                              n_heads, n_kv_heads, head_dim, block_size,
+                                                              max_blocks_per_seq, max_blocks_per_seq,
+                                                              engage_blocks, std_coef, n_heads * head_dim,
+                                                              max_blocks_per_seq, 0);
     IMP_CUDA_CHECK_LAUNCH();
 
     launch_select_topk(n_seq, scores_scratch, block_tables, context_lens, sparse_block_tables,
                        sparse_context_lens, block_size, max_blocks_per_seq, budget_blocks, sink_blocks,
-                       recent_blocks, engage_blocks, table_blocks, 0, stream);
+                       recent_blocks, engage_blocks, table_blocks, stream);
 }
 
 int sparse_prefill_past_tokens(int past_len, int block_size, int budget_blocks) {
@@ -709,10 +713,13 @@ int sparse_prefill_select_past(const half* q, int n_rows, int sample_rows, const
                                                                           n_blocks, capacity_blocks);
         IMP_CUDA_CHECK_LAUNCH();
     }
+    sparse_prefill_set_len_kernel<<<1, 1, 0, stream>>>(out_ctx_scratch, past_len);
+    IMP_CUDA_CHECK_LAUNCH();
     // n_blocks <= budget: the select kernel's identity branch copies the table (dense equivalent).
-    launch_select_topk(1, agg_scratch, past_block_table, nullptr, out_block_table, out_ctx_scratch,
-                       block_size, capacity_blocks, budget_blocks, sink_blocks, recent_blocks,
-                       /*engage_blocks=*/budget_blocks, capacity_blocks, past_len, stream);
+    launch_select_topk(1, agg_scratch, past_block_table, out_ctx_scratch, out_block_table,
+                       out_ctx_scratch + 1, block_size, capacity_blocks, budget_blocks, sink_blocks,
+                       recent_blocks,
+                       /*engage_blocks=*/budget_blocks, capacity_blocks, stream);
     return sparse_prefill_past_tokens(past_len, block_size, budget_blocks);
 }
 

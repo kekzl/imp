@@ -57,7 +57,7 @@ int sparse_prefill_past_tokens(int past_len, int block_size, int budget_blocks);
 // each row's best block, writes the compacted ascending past table (sink/recent forced). Within
 // the budget it copies the table (dense equivalent). Returns the past token count to attend, or
 // -1 when the table exceeds capacity_blocks. Scratch: scores [64, capacity], agg [capacity],
-// out_block_table [capacity], out_ctx_scratch [1] (device).
+// out_block_table [capacity], out_ctx_scratch [2] (device).
 int sparse_prefill_select_past(const half* q, int n_rows, int sample_rows, const void* minmax_layer,
                                const int* past_block_table, int past_len, int n_heads, int n_kv_heads,
                                int head_dim, int block_size, int capacity_blocks, int budget_blocks,

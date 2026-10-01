@@ -94,7 +94,7 @@ struct QuantScratch {
     float* sp_prefill_scores = nullptr;  // [64, sp_prefill_cap_blocks]
     float* sp_prefill_agg = nullptr;     // [sp_prefill_cap_blocks]
     int* sp_prefill_table = nullptr;     // [sp_prefill_cap_blocks]
-    int* sp_prefill_ctx = nullptr;       // [1]
+    int* sp_prefill_ctx = nullptr;       // [2]
     int sp_prefill_budget_blocks = 0;
     int sp_prefill_sink_blocks = 0;
     int sp_prefill_recent_blocks = 0;

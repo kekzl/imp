@@ -490,43 +490,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // Sparse prefill scratch (attention.sparse_prefill_topk_tokens): one selection per chunk.
-    {
-        const auto& acfg = dispatch_policy().attention;
-        if (acfg.sparse_prefill_topk_tokens > 0) {
-            const int max_ctx_tokens = (mla_absorb_max_seq_ > 0) ? mla_absorb_max_seq_ : max_tokens_;
-            const SparseGeometry geo =
-                sparse_geometry(acfg.sparse_prefill_topk_tokens, acfg.sparse_sink_tokens,
-                                acfg.sparse_prefill_recent_tokens, 0, max_ctx_tokens, kv_block_size_);
-            const int cap = geo.max_ctx_blocks;
-            constexpr int kRows = 64;  // kMaxPrefillRows in sparse_attn_select.cu
-            const size_t sc_sz = (size_t)kRows * cap * sizeof(float);
-            auto sc = engine_arena().take_bytes(sc_sz);
-            auto agg = engine_arena().take_bytes((size_t)cap * sizeof(float));
-            auto tbl = engine_arena().take_bytes((size_t)cap * sizeof(int));
-            auto ctx = engine_arena().take_bytes(sizeof(int));
-            if (sc.empty() || agg.empty() || tbl.empty() || ctx.empty()) {
-                IMP_LOG_WARN("sparse prefill scratch unavailable from the T2 arena - feature disabled");
-            } else {
-                qscratch_.sp_prefill_scores = reinterpret_cast<float*>(sc.data());
-                qscratch_.sp_prefill_agg = reinterpret_cast<float*>(agg.data());
-                qscratch_.sp_prefill_table = reinterpret_cast<int*>(tbl.data());
-                qscratch_.sp_prefill_ctx = reinterpret_cast<int*>(ctx.data());
-                qscratch_.sp_prefill_budget_blocks = geo.budget_blocks;
-                qscratch_.sp_prefill_sink_blocks = geo.sink_blocks;
-                qscratch_.sp_prefill_recent_blocks = geo.recent_blocks;
-                qscratch_.sp_prefill_cap_blocks = cap;
-                qscratch_.sp_prefill_rows = std::clamp(acfg.sparse_prefill_rows, 1, kRows);
-                qscratch_.sparse_score_meanstd = acfg.sparse_score_meanstd;
-                qscratch_.sparse_score_std_coef = acfg.sparse_score_std_coef;
-                IMP_LOG_INFO("Sparse prefill attention: budget %d blocks (%d tokens), sink %d + recent %d "
-                             "blocks, %d query rows, score %s",
-                             geo.budget_blocks, geo.budget_blocks * kv_block_size_, geo.sink_blocks,
-                             geo.recent_blocks, qscratch_.sp_prefill_rows,
-                             acfg.sparse_score_meanstd ? "mean+std" : "minmax");
-            }
-        }
-    }
+    allocate_sparse_prefill_scratch_();  // attention.sparse_prefill_topk_tokens (executor_sparse_prefill.cpp)
 
     // cuBLAS attention S-matrix workspace [n_heads, attn_seq, attn_seq] FP16; only the
     // materialized cuBLAS prefill fallback uses it. Skip when FP16-QK FA2 serves all prefill

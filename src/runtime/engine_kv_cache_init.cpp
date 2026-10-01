@@ -220,7 +220,8 @@ bool Engine::init_kv_cache() {
     // the plan prices it per block (#1103 silent-spill class, #2360). Same rule as the enable gate
     // below; per-layer geometry and SWA pools refuse it in enable_key_minmax.
     size_t sparse_minmax_bytes_per_layer = 0;
-    if ((runtime_config_.attention.sparse_topk_tokens > 0 || runtime_config_.attention.sparse_prefill_topk_tokens > 0) &&
+    if ((runtime_config_.attention.sparse_topk_tokens > 0 ||
+         runtime_config_.attention.sparse_prefill_topk_tokens > 0) &&
         !sparse_minmax_refusal(config_.kv_cache_dtype, mcfg.is_mla(),
                                runtime_config_.speculative.token_recycling,
                                !config_.prefix_cache_path.empty()) &&
@@ -679,7 +680,8 @@ bool Engine::init_kv_cache() {
     // sparse_minmax_refusal (shared with the plan charge above); enable_key_minmax also
     // refuses per-layer geometry; a growable pool grows the metadata with it. A refusal disables
     // the feature loudly.
-    if (runtime_config_.attention.sparse_topk_tokens > 0 || runtime_config_.attention.sparse_prefill_topk_tokens > 0) {
+    if (runtime_config_.attention.sparse_topk_tokens > 0 ||
+        runtime_config_.attention.sparse_prefill_topk_tokens > 0) {
         const char* refuse = sparse_minmax_refusal(config_.kv_cache_dtype, mcfg.is_mla(),
                                                    runtime_config_.speculative.token_recycling,
                                                    !config_.prefix_cache_path.empty());
