@@ -7,6 +7,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Fixed
 - Startup diagnostics state what runs (#2347): a rejected memory plan names the live pool (was "APPLIED", "Set runtime.max_seq_len=0"); no false out_norm WARN on Qwen4Exp; a negative ledger residual (27B -495 MiB) is no library-reserve measurement (was "measured 0 MiB", recorded for the next start).
 - cuBLASLt: a GEMM algo pinned at one M is checked with `cublasLtMatmulAlgoCheck` before it runs at another M of its bucket; a failing M gets its own pin (#2346). Pin failures per run: Flash-Next startup + 3 prompts 446 -> 0, Qwen3.8-27B 28-request chat 288 -> 0; deterministic greedy output identical.
+- `chat_probe.py` repeat check reads 128 instead of 64 reasoning tokens (#2350): at 64 one Qwen3-8B-NVFP4 text came in 98 of 120 draws, so a correct sampler failed ~36 % of runs; at 128 the bound is 2.3e-5. Main 30/30 pass, fixed-seed control 3/3 FAIL.
 
 ## [0.46.0] - 2026-10-01
 

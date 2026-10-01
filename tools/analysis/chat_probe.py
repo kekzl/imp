@@ -10,7 +10,7 @@ Hard faults (one fails the run): special markers, a turn label (Human:/User:/Ass
 content, a reasoning opener in content, token/n-gram/char loops, empty content.
 Soft faults (two fail the run): reasoning opening with JSON or code, a turn label inside the
 reasoning. A correct sampler opens "hey babe!" reasoning with JSON at p = 0.08 (1/8 measured).
-Invariant: an open prompt sent 6 times without a seed (64 tokens, thinking on) must not return
+Invariant: an open prompt sent 6 times without a seed (128 tokens, thinking on) must not return
 the same reasoning 6 times; v0.41.0 returned 1 distinct of 6, v0.41.1 6 of 6 (thinking off: 4 vs 6).
 
 Stdlib only. Usage:
@@ -53,13 +53,17 @@ TURNS = [
 ]
 REPEAT_PROMPT = "Invent a name for a new cafe and describe it in one sentence."
 REPEATS = 6
+# 128, not 64: Qwen3-8B-NVFP4-cortecs reasoning is one text in 98 of 120 draws at 64 tokens, so 6 of 6
+# matched on a correct sampler in ~36 % of runs (#2350). At 128 the most frequent text is 4 of 120:
+# p_max <= 0.118 (99.9 % upper bound), P(6 identical) <= p_max^5 = 2.3e-5.
+REPEAT_TOKENS = 128
 SOFT_LIMIT = 2
 
 TURN_LABEL = re.compile(r"(^|\n)\s*(Human|User|Assistant)\s*:")
 STRUCTURED_OPENER = re.compile(r"^\s*(\{\s*\"|\[\s*\{|```|def |import |#include)")
 
 
-def webui_request(url, model, messages, timeout, max_tokens=512, thinking=True):
+def webui_request(url, model, messages, timeout, max_tokens=512, thinking=True, seed=None):
     body = {
         "model": model,
         "messages": messages,
@@ -69,6 +73,8 @@ def webui_request(url, model, messages, timeout, max_tokens=512, thinking=True):
         "max_tokens": max_tokens,
         "enable_thinking": thinking,
     }
+    if seed is not None:
+        body["seed"] = seed
     req = urllib.request.Request(url + "/v1/chat/completions", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     content, reasoning, finish = [], [], None
@@ -112,6 +118,8 @@ def main():
     ap.add_argument("--url", default="http://localhost:8080")
     ap.add_argument("--model", default=None, help="default: the loaded model from /v1/models")
     ap.add_argument("--timeout", type=float, default=120.0)
+    ap.add_argument("--repeat-seed", type=int, default=None,
+                    help="control only: send this seed with the repeats; the check must then FAIL")
     args = ap.parse_args()
     url = args.url.rstrip("/")
 
@@ -144,7 +152,8 @@ def main():
         soft_all += [f"turn {i}: {f}" for f in soft]
 
     outs = [webui_request(url, model, [{"role": "user", "content": REPEAT_PROMPT}], args.timeout,
-                          max_tokens=64, thinking=True)[1] for _ in range(REPEATS)]
+                          max_tokens=REPEAT_TOKENS, thinking=True, seed=args.repeat_seed)[1]
+            for _ in range(REPEATS)]
     identical = len(set(outs)) == 1 and len(outs[0]) >= 20
     print(f"[{'FAIL' if identical else 'ok  '}] {REPEATS} unseeded repeats: {len(set(outs))} distinct"
           f" | {outs[0].strip()[:60]!r}")
