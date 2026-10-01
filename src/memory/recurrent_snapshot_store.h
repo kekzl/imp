@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "memory/kv_chain_link.h"
+
 namespace imp {
 
 // One stored recurrent-state snapshot: the full per-sequence SSM/GDN state slab as it
@@ -19,6 +21,8 @@ struct RecurrentSnapshotEntry {
     int n_tokens = 0;
     void* data = nullptr;  // entry_bytes: a device buffer, or pinned host memory when on_host
     bool on_host = false;  // host-tier copy: restore with cudaMemcpyDefault (pinned H2D)
+    // KV blocks the saving forward attended to (#2174); restore requires them still bound.
+    std::vector<KvChainLink> kv_chain;
 };
 
 // Device-side LRU store of recurrent-state snapshots for hybrid (SSM/GDN) models. Dense
@@ -67,7 +71,10 @@ public:
     // straight into the host tier instead. Returns false only when no slab of either tier is
     // free or on a copy failure.
     // With a sidecar, `sidecar_src` (device, sidecar_bytes) lands at data + entry_bytes.
-    [[nodiscard]] bool save(size_t key, int n_tokens, const void* src, cudaStream_t stream, const void* sidecar_src = nullptr);
+    [[nodiscard]] bool save(size_t key, int n_tokens, const void* src, cudaStream_t stream,
+                            const void* sidecar_src = nullptr, std::vector<KvChainLink> kv_chain = {});
+    // Drop one entry (both tiers); a request holding it keeps it until release.
+    void erase(size_t key);
     // Saves that landed in the host tier because no device slab was free, and
     // saves dropped because no slab of either tier was.
     int host_direct_saves() const { return host_direct_saves_; }
@@ -89,12 +96,14 @@ private:
     void* acquire_buffer_(cudaStream_t stream);
     void* acquire_host_buffer_();
     void evict_device_lru_(cudaStream_t stream);
-    [[nodiscard]] bool save_to_host_(size_t key, int n_tokens, const void* src, const void* sidecar_src, cudaStream_t stream);
+    [[nodiscard]] bool save_to_host_(size_t key, int n_tokens, const void* src, const void* sidecar_src,
+                                     cudaStream_t stream, std::vector<KvChainLink> kv_chain);
     [[nodiscard]] bool copy_in_(void* buf, const void* src, const void* sidecar_src, cudaMemcpyKind kind,
                   cudaStream_t stream) const;
     int host_direct_saves_ = 0;
     int dropped_saves_ = 0;
-    std::shared_ptr<RecurrentSnapshotEntry> make_entry_(size_t key, int n_tokens, void* buf, bool on_host);
+    std::shared_ptr<RecurrentSnapshotEntry> make_entry_(size_t key, int n_tokens, void* buf, bool on_host,
+                                                        std::vector<KvChainLink> kv_chain);
 
     std::shared_ptr<BufferPool> pool_;
     size_t entry_bytes_ = 0;

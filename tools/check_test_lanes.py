@@ -356,7 +356,9 @@ def main():
     # GPU): sampler launch status, stale error cleared (#2310); needs a card.
     # 1174 -> 1178: PrefillRowInvariance x4 (test-quant): router logits, MoE act quantize (default
     # and smallM), hd=512 FMHA, same row in different batches or chunk offsets bit-equal (#2167).
-    PINNED = 1178
+    # 1178 -> 1179: RecurrentSnapshotStoreTest.KvChainSurvivesHostEvictionAndEraseReplaces (test-kv):
+    # a snapshot keeps its KV chain through the host tier (#2174, cudaMalloc).
+    PINNED = 1179
 
     text = CMAKE.read_text()
     mods = module_sources(text)

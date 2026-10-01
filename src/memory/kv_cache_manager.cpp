@@ -602,8 +602,7 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
             }
             // Host tier hit: restore the spilled KV and publish the block as computed (#2203).
             if (reuse_open && host_spill_ && restore_spilled_(block_hash, fresh.id())) {
-                block_hash_to_id_[block_hash] = fresh.id();
-                block_id_to_hash_[fresh.id()] = block_hash;
+                bind_(block_hash, fresh.id());
                 blocks.push(std::move(fresh));
                 hashes.push_back(block_hash);
                 parent_hash = block_hash;
@@ -678,8 +677,7 @@ void KVCacheManager::register_block_hashes(int seq_id, std::span<const int32_t> 
         if (b < static_cast<int>(hashes.size()) && hashes[b] != 0) {
             size_t existing_hash = hashes[b];
             if (block_hash_to_id_.find(existing_hash) == block_hash_to_id_.end()) {
-                block_hash_to_id_[existing_hash] = block_id;
-                block_id_to_hash_[block_id] = existing_hash;
+                bind_(existing_hash, block_id);
             }
             parent_hash = existing_hash;
             continue;
@@ -694,8 +692,7 @@ void KVCacheManager::register_block_hashes(int seq_id, std::span<const int32_t> 
         }
 
         if (block_hash_to_id_.find(block_hash) == block_hash_to_id_.end()) {
-            block_hash_to_id_[block_hash] = block_id;
-            block_id_to_hash_[block_id] = block_hash;
+            bind_(block_hash, block_id);
         } else if (block_hash_to_id_[block_hash] != block_id) {
             IMP_LOG_DEBUG(
                 "prefix cache: seq %d block %d hash %zx already maps to block %d (this one stays unhashed)",
@@ -704,6 +701,88 @@ void KVCacheManager::register_block_hashes(int seq_id, std::span<const int32_t> 
 
         parent_hash = block_hash;
     }
+}
+
+void KVCacheManager::bind_(size_t hash, int block_id) {
+    block_hash_to_id_[hash] = block_id;
+    block_id_to_hash_[block_id] = hash;
+    block_bind_serial_[block_id] = next_bind_serial_++;
+}
+
+void KVCacheManager::unbind_block_(int block_id) {
+    auto it = block_id_to_hash_.find(block_id);
+    if (it == block_id_to_hash_.end())
+        return;
+    if (auto h = block_hash_to_id_.find(it->second); h != block_hash_to_id_.end() && h->second == block_id)
+        block_hash_to_id_.erase(h);
+    block_id_to_hash_.erase(it);
+    block_bind_serial_.erase(block_id);
+}
+
+// A fresh block carries no binding: its KV is about to be rewritten.
+BlockRef KVCacheManager::allocate_block_ref_with_eviction() {
+    BlockRef ref = acquire_block_with_eviction_();
+    if (ref)
+        unbind_block_(ref.id());
+    return ref;
+}
+
+std::vector<KvChainLink> KVCacheManager::adopt_chain(int seq_id, std::span<const int32_t> tokens, int n_full,
+                                                     size_t content_salt, size_t tail_key) {
+    std::vector<KvChainLink> chain;
+    auto it = seq_blocks_.find(seq_id);
+    const int bs = cache_->block_size();
+    const int n_links = n_full + (tail_key != 0 ? 1 : 0);
+    if (!prefix_caching_enabled_ || it == seq_blocks_.end() || n_full < 0 ||
+        static_cast<int>(it->second.size()) < n_links || static_cast<int>(tokens.size()) < n_full * bs)
+        return chain;
+    chain.reserve(static_cast<size_t>(n_links));
+    size_t parent = content_salt;
+    for (int b = 0; b < n_links; ++b) {
+        size_t hash = tail_key;
+        if (b < n_full) {
+            hash = compute_block_hash(tokens.subspan(static_cast<size_t>(b) * bs, bs), parent);
+            parent = hash;
+        }
+        const int own = it->second.id_at(static_cast<size_t>(b));
+        if (own < 0)
+            return {};
+        auto hit = block_hash_to_id_.find(hash);
+        if (hit == block_hash_to_id_.end() || hit->second != own) {
+            if (hit != block_hash_to_id_.end()) {
+                const int old = hit->second;
+                if (pinned_blocks_.count(old) != 0)
+                    return {};  // a pinned prefix keeps its binding; no snapshot over it
+                IMP_LOG_DEBUG("prefix cache: snapshot chain of seq %d rebinds block %d hash %zx: %d -> %d",
+                              seq_id, b, hash, old, own);
+                unbind_block_(old);
+                // Held only by the cache: nobody can reach it now, return it to the pool.
+                if (auto c = cached_blocks_map_.find(old); c != cached_blocks_map_.end()) {
+                    cached_blocks_lru_.erase(c->second.lru_it);
+                    cached_blocks_map_.erase(c);
+                    reclaimable_cached_count_--;
+                }
+            }
+            unbind_block_(own);
+            bind_(hash, own);
+        }
+        chain.push_back({hash, own, block_bind_serial_[own]});
+    }
+    return chain;
+}
+
+bool KVCacheManager::chain_intact(std::span<const KvChainLink> chain) const {
+    if (chain.empty())
+        return false;
+    for (const auto& l : chain) {
+        auto hit = block_hash_to_id_.find(l.hash);
+        if (hit == block_hash_to_id_.end() || hit->second != l.block_id)
+            return false;
+        auto s = block_bind_serial_.find(l.block_id);
+        if (s == block_bind_serial_.end() || s->second != l.serial)
+            return false;
+    }
+    return true;
 }
 
 void KVCacheManager::register_partial_block(int seq_id, std::span<const int32_t> tokens, size_t key) {
@@ -721,8 +800,7 @@ void KVCacheManager::register_partial_block(int seq_id, std::span<const int32_t>
         return;
     if (block_hash_to_id_.find(key) != block_hash_to_id_.end())
         return;  // same transcript already cached
-    block_hash_to_id_[key] = block_id;
-    block_id_to_hash_[block_id] = key;
+    bind_(key, block_id);
 }
 
 int KVCacheManager::hold_cached_block(size_t key, int seq_id) {
@@ -805,7 +883,7 @@ int KVCacheManager::reclaim_cached_block() {
     return block_id;
 }
 
-BlockRef KVCacheManager::allocate_block_ref_with_eviction() {
+BlockRef KVCacheManager::acquire_block_with_eviction_() {
     BlockRef ref = cache_->acquire_block_ref();
     if (ref) {
         // A block the prefix cache still lists must never come off the free list: its
@@ -1700,8 +1778,7 @@ int KVCacheManager::load_prefix_cache(const std::string& path, uint64_t model_fi
             continue;  // dropping the entry's reference frees the block
         }
 
-        block_hash_to_id_[entry.hash] = entry.block_id;
-        block_id_to_hash_[entry.block_id] = entry.hash;
+        bind_(entry.hash, entry.block_id);
 
         cached_blocks_lru_.push_back(entry.block_id);
         reclaimable_cached_count_++;

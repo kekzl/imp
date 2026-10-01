@@ -260,5 +260,35 @@ TEST(RecurrentSnapshotStoreTest, SidecarTravelsWithTheSlabThroughBothTiers) {
     EXPECT_EQ(read_side(*e2), std::vector<uint8_t>(kSide, 0x6B));
 }
 
+// #2174: the KV chain a snapshot was saved with survives the move to the host tier, and
+// erase() drops an entry from either tier so a re-save can replace a stale pairing.
+TEST(RecurrentSnapshotStoreTest, KvChainSurvivesHostEvictionAndEraseReplaces) {
+    SKIP_IF_NO_CUDA();
+    RecurrentSnapshotStore store;
+    store.init(kEntryBytes, 1 * kEntryBytes, /*host_budget_bytes=*/1 * kEntryBytes);
+    DeviceSrc a(0x11), b(0x22), c(0x33);
+    const std::vector<KvChainLink> chain = {{101, 3, 7}, {202, 5, 9}};
+    ASSERT_TRUE(store.save(1, 32, a.d, nullptr, nullptr, chain));
+    ASSERT_TRUE(store.save(2, 64, b.d, nullptr));  // evicts 1 -> host
+    cudaStreamSynchronize(nullptr);
+    auto e1 = store.find(1);
+    ASSERT_NE(e1, nullptr);
+    EXPECT_TRUE(e1->on_host);
+    ASSERT_EQ(e1->kv_chain.size(), 2u);
+    EXPECT_EQ(e1->kv_chain[1].hash, 202u);
+    EXPECT_EQ(e1->kv_chain[1].block_id, 5);
+    EXPECT_EQ(e1->kv_chain[1].serial, 9u);
+    store.erase(1);
+    EXPECT_FALSE(store.contains(1));
+    store.erase(2);
+    EXPECT_FALSE(store.contains(2));
+    ASSERT_TRUE(store.save(1, 32, c.d, nullptr, nullptr, {{303, 4, 1}}));
+    auto e1b = store.find(1);
+    ASSERT_NE(e1b, nullptr);
+    ASSERT_EQ(e1b->kv_chain.size(), 1u);
+    EXPECT_EQ(e1b->kv_chain[0].hash, 303u);
+    EXPECT_EQ(ReadEntry(*e1b), std::vector<uint8_t>(kEntryBytes, 0x33));
+}
+
 }  // namespace
 }  // namespace imp
