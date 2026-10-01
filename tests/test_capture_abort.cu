@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 
 #include <stdexcept>
+#include <vector>
 
 #include "runtime/cuda_graph.h"
 
@@ -100,6 +101,43 @@ TEST(CaptureAbort, FirstReplayFailureStillExecutesTheStep) {
     EXPECT_TRUE(runner.execute(stream));
     EXPECT_EQ(calls, 3);
     EXPECT_EQ(runner.capture_count(), 1) << "must not retry capture after a failed first replay";
+
+    cudaFree(d);
+    cudaStreamDestroy(stream);
+}
+
+// #2396: the scheduler soft-invalidates on a batch size's first decode. A cold runner must keep its
+// eager step there, else the cuBLASLt probe for that M only ever runs inside the capture.
+TEST(CaptureAbort, KeepColdInvalidateRunsTheEagerStepFirst) {
+    SKIP_IF_NO_CUDA();
+    cudaStream_t stream;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+    int* d = nullptr;
+    ASSERT_EQ(cudaMalloc(&d, sizeof(int)), cudaSuccess);
+
+    std::vector<bool> capturing;
+    auto fn = [&](cudaStream_t s) {
+        touch_kernel<<<1, 1, 0, s>>>(d);
+        cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
+        cudaStreamIsCapturing(s, &st);
+        capturing.push_back(st != cudaStreamCaptureStatusNone);
+    };
+    CudaGraphRunner cold;  // warmup_steps_ = 1
+    cold.set_decode_fn(fn);
+    cold.invalidate_for_update_keep_cold();
+    ASSERT_TRUE(cold.execute(stream));
+    ASSERT_TRUE(cold.execute(stream));
+    ASSERT_EQ(capturing.size(), 2u);
+    EXPECT_FALSE(capturing[0]) << "first decode of a cold runner must run eager";
+    EXPECT_TRUE(capturing[1]);
+    EXPECT_EQ(cold.capture_count(), 1);
+
+    capturing.clear();  // a captured runner still skips the eager step, as invalidate_for_update
+    cold.invalidate_for_update_keep_cold();
+    ASSERT_TRUE(cold.execute(stream));
+    ASSERT_EQ(capturing.size(), 1u);
+    EXPECT_TRUE(capturing[0]);
+    EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
 
     cudaFree(d);
     cudaStreamDestroy(stream);

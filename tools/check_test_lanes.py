@@ -373,7 +373,8 @@ def main():
     # 1189 -> 1190: InternVLEncoder.MatchesHfFp32PerStage (test-e2e, GPU), run by make test-vision.
     # 1190 -> 1191: InternVLEncoder.RealTowerCatMatchesHfFp32 (test-e2e, GPU + checkpoint), run by make test-vision.
     # 1191 -> 1192: GemmCaptureProbe.ColdShapeInsideCaptureKeepsCaptureValid (test-compute, GPU) (#2396).
-    PINNED = 1192
+    # 1192 -> 1193: CaptureAbort.KeepColdInvalidateRunsTheEagerStepFirst (test-kv, GPU) (#2396).
+    PINNED = 1193
 
     text = CMAKE.read_text()
     mods = module_sources(text)

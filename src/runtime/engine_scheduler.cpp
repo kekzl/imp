@@ -1535,7 +1535,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             // Topology stable across max_blocks growth (same kernels, only
             // grid dims / params differ): cudaGraphExecUpdate handles this
             // without tearing down the exec + graph mem pool.
-            graph_runner.invalidate_for_update();
+            graph_runner.invalidate_for_update_keep_cold();
             last_decode_max_blocks_per_graph_[graph_idx] = bucketed_max_blocks;
         }
         // #948: the decode-attention LAUNCH topology derives from
@@ -1554,7 +1554,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         if (decode_graph_ctx_recapture(last_decode_max_ctx_per_graph_[graph_idx],
                                        last_decode_batch_key_per_graph_[graph_idx], max_ctx,
                                        decode_graph_batch_key_of(valid_decode), runtime_config_.runtime.deterministic))
-            graph_runner.invalidate_for_update();
+            graph_runner.invalidate_for_update_keep_cold();
         // Recurrent (SSM/GDN) state pointers are baked into the capture as
         // kernel params. A replay for a request in a DIFFERENT state slot
         // would read/write the previous sequence's state — possible whenever
@@ -1565,7 +1565,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             auto slot_it = recurrent_slot_of_.find(valid_decode[0]->id);
             const int slot = (slot_it != recurrent_slot_of_.end()) ? slot_it->second : -1;
             if (slot != decode_graph_recurrent_slot_) {
-                graph_runner.invalidate_for_update();
+                graph_runner.invalidate_for_update_keep_cold();
                 decode_graph_recurrent_slot_ = slot;
             }
         }

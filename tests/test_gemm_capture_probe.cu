@@ -12,7 +12,8 @@
 
 #include "compute/gemm.h"
 #include "core/tensor.h"
-#include "scoped_engine_arena.h"
+#include "memory/backend.h"
+#include "memory/engine_arena.h"
 #include "test_cuda_skip.h"
 
 namespace imp {
@@ -24,14 +25,29 @@ using namespace imp;
 TEST(GemmCaptureProbe, ColdShapeInsideCaptureKeepsCaptureValid) {
     SKIP_IF_NO_CUDA();
     constexpr int64_t M = 47, K = 5120, N = 48;
-    gemm_reset_static_cuda_state();  // drop statics a previous test set without an arena
+    // A binary-wide 64 MiB arena may be up (another file registers it): swap in one that holds the
+    // 64 MiB workspace + 32 MiB bench scratch, put the standing one back after (test_rowwise_topm).
+    struct ProbeArena {
+        bool had = engine_arena().is_open();
+        size_t had_bytes = had ? engine_arena().capacity() : 0;
+        bool ok = false;
+        ProbeArena() {
+            gemm_reset_static_cuda_state();  // statics may point into the standing arena
+            if (had)
+                engine_arena_close();
+            ok = engine_arena_open(cuda_malloc_backend(), 160ull << 20) == MemError::Ok;
+        }
+        ~ProbeArena() {
+            gemm_reset_static_cuda_state();  // statics point into the arena closing here
+            if (ok)
+                engine_arena_close();
+            if (had)
+                (void)engine_arena_open(cuda_malloc_backend(), had_bytes);
+        }
+    };
     {
-        ScopedEngineArena arena(160ull << 20);  // 64 MiB workspace + 32 MiB bench scratch
-        ASSERT_TRUE(arena.opened());
-        // Statics point into the arena: drop them before it closes, also on an ASSERT return.
-        struct ResetGemmStatics {
-            ~ResetGemmStatics() { gemm_reset_static_cuda_state(); }
-        } reset_gemm_statics;
+        ProbeArena arena;
+        ASSERT_TRUE(arena.ok);
         gemm_init();
 
         std::vector<__half> hA(M * K), hB(N * K);
