@@ -95,6 +95,24 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t str
     return err;
 }
 
+// Batch-shaped reserve (#2393): Pass 1 runs against the batch-1 reserve; a configured batch
+// that fits passes every check it passed before, one that does not is clamped, not aborted.
+static size_t pass1_upload_reserve(const UploadBatchFit& fit, size_t full_reserve) {
+    return (fit.configured <= 1 || g_cached_free_mem == 0) ? full_reserve
+                                                           : upload_reserve_bytes(fit.reserve, 1);
+}
+
+// After Pass 1: fit.fitted = the largest batch fitting the measured bytes; returns the reserve.
+static size_t fit_batch_after_pass1(UploadBatchFit& fit, size_t full_reserve) {
+    const size_t free_b = g_cached_free_mem, used = g_total_allocated;
+    const int b = free_b > 0 ? upload_fitting_batch(fit.reserve, fit.configured, free_b, used) : 0;
+    fit.fitted = (b >= 1 && b < fit.configured) ? b : fit.configured;
+    g_vram_reserve = fit.fitted < fit.configured ? upload_reserve_bytes(fit.reserve, b) : full_reserve;
+    if (fit.fitted < fit.configured)
+        IMP_LOG_WARN("%s", upload_batch_clamp_message(fit.reserve, fit.configured, b, free_b, used).c_str());
+    return g_vram_reserve;
+}
+
 // Double-buffered pinned staging for H2D transfers: on WSL2, mmap'd memory cannot be
 // pinned (cudaHostRegister fails/corrupts), so cudaMemcpyAsync from mmap'd memory falls
 // back to synchronous driver-side staging. Pre-allocates two pinned buffers and pipelines
@@ -1909,6 +1927,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
         IMP_LOG_DEBUG("VRAM at upload start: %.2f GiB free / %.2f GiB total",
                       free_mem / (1024.0 * 1024.0 * 1024.0), total_mem / (1024.0 * 1024.0 * 1024.0));
     }
+    g_vram_reserve = pass1_upload_reserve(upload_batch_fit_, expert_reserve_bytes);
 
     // Qwen3.5/3.6 SafeTensors stores block-norm gammas as deltas (gamma = 1+W).
     // GGUF stores the post-+1 values directly. We bake the +1 in during the
@@ -1963,6 +1982,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // Sync Pass 1 before measuring free VRAM for expert budget
     if (!sync_upload(stream, "pass-1"))
         return false;
+    expert_reserve_bytes = fit_batch_after_pass1(upload_batch_fit_, expert_reserve_bytes);
 
     // Reset cached VRAM state — the dense upload pass consumed an unknown amount
     // of VRAM (including CUDA driver overhead, page tables, alignment).

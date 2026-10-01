@@ -129,6 +129,66 @@ void retain_async_pool_memory() {
         IMP_CUDA_CHECK_LOG(cudaMemPoolSetAttribute(default_pool, cudaMemPoolAttrReleaseThreshold, &threshold));
     }
 }
+
+// The weight-upload reserve as a function of max_batch_size (memory/upload_reserve.h):
+// workspace + capped KV + SSM/GDN state slots + recurrent snapshot store + 256 MiB safety.
+UploadReserve upload_reserve_for(const Model& model, const EngineConfig& cfg, const RuntimeConfig& rc,
+                                 size_t workspace_bytes, int reserved_state_slots) {
+    const auto& mcfg = model.config();
+    UploadReserve r;
+    r.fixed_bytes = workspace_bytes + (256ULL << 20);
+    int head_dim_est = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
+    int est_bs = cfg.kv_block_size > 0 ? cfg.kv_block_size : kKVBlockSize;
+    int blocks_per_seq = (cfg.max_seq_len + est_bs - 1) / est_bs;
+    int n_attn = 0;
+    for (int i = 0; i < mcfg.n_layers; i++)
+        if (model.layer(i).wq.data != nullptr)
+            n_attn++;
+    if (n_attn == 0)
+        n_attn = mcfg.n_layers;
+    // Packing- and scale-aware K+V per-layer block bytes (#942): raw dtype_size()
+    // is 0 for NVFP4/MXFP4_KV and zeroed the KV headroom.
+    r.kv_bytes_per_seq = static_cast<size_t>(blocks_per_seq) * n_attn *
+                         kv_block_bytes_per_layer(cfg.kv_cache_dtype, est_bs, mcfg.n_kv_heads, head_dim_est);
+    size_t total_vram = 0, f = 0;
+    // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+    (void)vram_budget_mem_get_info(&f, &total_vram);
+    // MoE > 16 experts: all-GPU experts (decode fast path, graph capture) win over a big KV reserve.
+    r.kv_cap_bytes = total_vram / ((mcfg.n_experts > 16) ? 10 : 5);
+    if (mcfg.ssm_inner_size <= 0)
+        return r;
+    int n_ssm = 0;
+    for (int i = 0; i < mcfg.n_layers; i++)
+        if (model.layer(i).ssm_in.data != nullptr)
+            n_ssm++;
+    // memory/ssm_state_size.h, the header SSMState::init reads (MEMORY.md D14/D15).
+    const int n_heads = mcfg.ssm_dt_rank;
+    const SsmStateGeometry geom{n_ssm,
+                                mcfg.ssm_conv_channels(),
+                                mcfg.ssm_conv_kernel,
+                                n_heads,
+                                (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0,
+                                mcfg.ssm_state_size,
+                                cfg.ssm_state_dtype,
+                                model.ple_state_bytes()};
+    r.state_bytes_per_slot = ssm_bytes_per_slot(geom);
+    r.reserved_state_slots = reserved_state_slots;
+    // Recurrent-snapshot store (hybrid prefix caching): pre-allocated eagerly at KV-cache init.
+    if (cfg.use_prefix_caching || rc.server.prefix_cache)
+        r.fixed_bytes += static_cast<size_t>(std::max(rc.server.recurrent_snapshot_mb, 0)) << 20;
+    return r;
+}
+
+// Applies the batch weight upload fitted (#2393) to EngineConfig, the runtime config and the
+// admission cap, as clamp_max_batch_to_plan_ does. No-op when the configured batch fit.
+void apply_upload_batch_fit(int fitted, int& engine_batch, int& runtime_batch, Scheduler* sched) {
+    if (fitted < 1 || fitted >= engine_batch)
+        return;
+    engine_batch = fitted;
+    runtime_batch = std::min(runtime_batch, fitted);
+    if (sched)
+        sched->clamp_max_batch_size(fitted);
+}
 }  // namespace
 
 bool Engine::init_weights() {
@@ -199,71 +259,15 @@ bool Engine::init_weights() {
     retain_async_pool_memory();
 
     // Compute VRAM reserve for expert weight upload
-    size_t expert_reserve = executor_->workspace_estimate();
-    {
-        int head_dim_est = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
-        int est_bs = config_.kv_block_size > 0 ? config_.kv_block_size : kKVBlockSize;
-        int blocks_per_seq = (config_.max_seq_len + est_bs - 1) / est_bs;
-        int n_attn = 0;
-        for (int i = 0; i < mcfg.n_layers; i++)
-            if (model_->layer(i).wq.data != nullptr)
-                n_attn++;
-        if (n_attn == 0)
-            n_attn = mcfg.n_layers;
-        // Packing- and scale-aware K+V per-layer block bytes (#942): the raw
-        // dtype_size() this used to multiply by returns 0 for NVFP4/MXFP4_KV,
-        // which zeroed the KV headroom out of the expert-offload decision.
-        size_t kv_est = static_cast<size_t>(blocks_per_seq * config_.max_batch_size) * n_attn *
-                        kv_block_bytes_per_layer(config_.kv_cache_dtype, est_bs, mcfg.n_kv_heads,
-                                                 head_dim_est);
-        {
-            size_t total_vram = 0, f = 0;
-            // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-            (void)vram_budget_mem_get_info(&f, &total_vram);
-            // For large MoE models (128 experts), prefer fitting all experts on GPU
-            // over reserving huge KV cache. All-GPU experts enable the decode fast
-            // path (dp4a GEMV, no D2H sync) and CUDA graph capture.
-            size_t vram_frac = (mcfg.n_experts > 16) ? 10 : 5;
-            kv_est = std::min(kv_est, total_vram / vram_frac);
-        }
-        expert_reserve += kv_est;
-
-        if (mcfg.ssm_inner_size > 0) {
-            int n_ssm = 0;
-            for (int i = 0; i < mcfg.n_layers; i++)
-                if (model_->layer(i).ssm_in.data != nullptr)
-                    n_ssm++;
-            // Uses memory/ssm_state_size.h, the same header SSMState::init reads:
-            // an inline formula here undercounted (missing 256-byte alignment and
-            // verify slots), under-charging in the direction that oversubscribes the card (MEMORY.md D14/D15).
-            const int n_heads = mcfg.ssm_dt_rank;
-            const SsmStateGeometry geom{n_ssm,
-                                        mcfg.ssm_conv_channels(),
-                                        mcfg.ssm_conv_kernel,
-                                        n_heads,
-                                        (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0,
-                                        mcfg.ssm_state_size,
-                                        config_.ssm_state_dtype,
-                                        model_->ple_state_bytes()};
-            expert_reserve += ssm_pool_bytes(geom, config_.max_batch_size, spec_mc_reserved_slots_());
-            // Recurrent-snapshot store (hybrid prefix caching): its buffers
-            // are pre-allocated eagerly at KV-cache init, so the offload
-            // decision must leave room for them.
-            if (config_.use_prefix_caching || runtime_config_.server.prefix_cache) {
-                expert_reserve +=
-                    static_cast<size_t>(std::max(runtime_config_.server.recurrent_snapshot_mb, 0)) << 20;
-            }
-        }
-
-        size_t safety = 256ULL * 1024 * 1024;  // base safety
-        // Only add safety for features that will actually allocate VRAM.
-        // On tight VRAM models (Nemotron-30B), every MiB matters for expert coverage.
-        expert_reserve += safety;
-
-        IMP_LOG_INFO("Expert upload reserve: %.2f MiB (workspace=%.2f, kv=%.2f, ssm+safety=rest)",
-                     expert_reserve / (1024.0 * 1024.0), executor_->workspace_estimate() / (1024.0 * 1024.0),
-                     kv_est / (1024.0 * 1024.0));
-    }
+    model_->upload_batch_fit_ = UploadBatchFit{upload_reserve_for(*model_, config_, runtime_config_,
+                                                                  executor_->workspace_estimate(),
+                                                                  spec_mc_reserved_slots_()),
+                                               config_.max_batch_size, config_.max_batch_size};
+    const UploadReserve& upload_reserve = model_->upload_batch_fit_.reserve;
+    const size_t expert_reserve = upload_reserve_bytes(upload_reserve, config_.max_batch_size);
+    IMP_LOG_INFO("Expert upload reserve: %.2f MiB (workspace=%.2f, kv=%.2f, ssm+safety=rest)",
+                 expert_reserve / (1024.0 * 1024.0), executor_->workspace_estimate() / (1024.0 * 1024.0),
+                 upload_reserve_kv_bytes(upload_reserve, config_.max_batch_size) / (1024.0 * 1024.0));
 
     // Upload weights
     size_t free_before = 0, total_before = 0;
@@ -287,6 +291,9 @@ bool Engine::init_weights() {
         IMP_LOG_ERROR("Weight upload failed. Try a smaller quantization.");
         return false;
     }
+    apply_upload_batch_fit(model_->upload_batch_fit_.fitted, config_.max_batch_size,
+                           runtime_config_.runtime.max_batch_size, scheduler_.get());
+    model_->upload_batch_fit_ = {};
 
     if (upload_stream) {
         CudaEvent upload_done;

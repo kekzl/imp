@@ -4,6 +4,11 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- An explicit `runtime.max_batch_size` the weight-upload reserve cannot hold is clamped after Pass 1, with a WARN
+  naming configured and fitting batch and the per-slot state cost, instead of aborting the load: Qwen3.8-27B-NVFP4
+  at 64 slots failed `w_gate` of layer 59, now `clamped 64 -> 53` at upload, plan 53 -> 48, serves (#2393)
+
 ## [0.47.0] - 2026-10-01
 
 ### Added
