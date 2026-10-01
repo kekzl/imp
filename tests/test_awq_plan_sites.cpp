@@ -244,18 +244,25 @@ TEST(AwqSites, TieMapMatchesTheProducerItFoldsInto) {
     EXPECT_TRUE(tie_map(TieMode::GqaValue, 24 * 128, Geometry{0, 6}).empty());
 }
 
-// Roadmap row 6: Qwen3-14B (n_rep 5) ABCD 12.2634 vs BD 9.9068 PPL; Qwen3-0.6B (n_rep 2) ABCD wins.
-TEST(AwqSites, DefaultGroupsDropAttentionOnWideGqa) {
-    EXPECT_STREQ(default_groups(1), kAwqAllGroups);
-    EXPECT_STREQ(default_groups(2), kAwqAllGroups);
-    EXPECT_STREQ(default_groups(4), kAwqAllGroups);
-    EXPECT_STREQ(default_groups(5), "BDEG");
-    EXPECT_STREQ(default_groups(6), "BDEG");
-    for (int64_t n_rep : {5, 6, 8})
-        EXPECT_FALSE(attention_groups_on_wide_gqa(default_groups(n_rep), n_rep));
-    EXPECT_TRUE(attention_groups_on_wide_gqa("ABCD", 5));
-    EXPECT_TRUE(attention_groups_on_wide_gqa("BCD", 6));
-    EXPECT_FALSE(attention_groups_on_wide_gqa("ABCD", 4));
+// Roadmap row 6: Qwen3-14B (dense, n_rep 5) ABCD 12.2634 vs BD 9.9068 PPL; Qwen3-0.6B (n_rep 2)
+// ABCD wins; Qwen3.8-27B (GDN hybrid, n_rep 6) ABCD 4.5986 vs BDEG 4.6136, so hybrids keep all.
+TEST(AwqSites, DefaultGroupsDropAttentionOnDenseWideGqaOnly) {
+    for (bool hybrid : {false, true}) {
+        EXPECT_STREQ(default_groups(1, hybrid), kAwqAllGroups);
+        EXPECT_STREQ(default_groups(2, hybrid), kAwqAllGroups);
+        EXPECT_STREQ(default_groups(4, hybrid), kAwqAllGroups);
+    }
+    EXPECT_STREQ(default_groups(5, false), "BDEG");
+    EXPECT_STREQ(default_groups(6, false), "BDEG");
+    EXPECT_STREQ(default_groups(6, true), kAwqAllGroups) << "Qwen3.8-27B";
+    for (int64_t n_rep : {5, 6, 8}) {
+        EXPECT_FALSE(attention_groups_on_wide_gqa(default_groups(n_rep, false), n_rep, false));
+        EXPECT_FALSE(attention_groups_on_wide_gqa(default_groups(n_rep, true), n_rep, true));
+    }
+    EXPECT_TRUE(attention_groups_on_wide_gqa("ABCD", 5, false));
+    EXPECT_TRUE(attention_groups_on_wide_gqa("BCD", 6, false));
+    EXPECT_FALSE(attention_groups_on_wide_gqa("ABCD", 4, false));
+    EXPECT_FALSE(attention_groups_on_wide_gqa("ABCD", 6, true));
 }
 
 // The wide-GQA default BDEG folds exactly the measured BD sites on a dense layer (Qwen3-14B).

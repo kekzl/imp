@@ -60,7 +60,7 @@ struct Options {
     std::string in_dir, out_dir;
     std::string calib_file;  // --calib: activation statistics for AWQ scaling
     // --calib-groups: which AWQ scale groups run, for attributing a bad result.
-    // Empty = awq::default_groups(n_rep), resolved against config.json in build_plan.
+    // Empty = awq::default_groups(n_rep, hybrid), resolved in build_plan.
     std::string calib_groups;
     // AWQ search error weight: "abs" (mean|x|/s)^2, "sq" E[x^2]/s^2 (calibration_stats.h).
     // sq: Qwen3-0.6B ABCD -1.10 % PPL, Qwen3-14B BD +0.15 PPL; default abs.
@@ -944,7 +944,7 @@ int main(int argc, char** argv) {
             "\n      Score this checkpoint with --perplexity against the uncalibrated one"
             "\n      before using it; see docs/quantization.md.",
             plan.groups_scaled, plan.groups_rtn, plan.groups.c_str(),
-            awq::attention_groups_on_wide_gqa(plan.groups, plan.n_rep)
+            awq::attention_groups_on_wide_gqa(plan.groups, plan.n_rep, plan.hybrid)
                 ? "\n      NOTE: attention groups A/C on wide GQA (n_rep >= 5) measured HARMFUL:"
                   "\n      Qwen3-14B ABCD 12.2634 vs BD 9.9068 vs round-to-nearest 9.9849 PPL."
                   "\n      Omit --calib-groups to get the wide-GQA default."

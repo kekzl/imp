@@ -56,13 +56,14 @@ struct Plan {
     // Switched off via the group selector (own line: a longer name here would
     // re-align the comment column of every field above it).
     int groups_disabled = 0;
-    std::string groups;  // the selector that ran, explicit or default_groups(n_rep)
+    std::string groups;   // the selector that ran, explicit or default_groups(n_rep, hybrid)
+    bool hybrid = false;  // GDN (linear_attn) layers present
     int64_t n_rep = 1;
     std::vector<std::string> notes;
 };
 
 // Builds the transform from a calibration file and the checkpoint's own config.json. `groups`
-// selects which of A/B/C/D/E/G run (awq_sites.h), empty = default_groups(n_rep). Returns false
+// selects which of A/B/C/D/E/G run (awq_sites.h), empty = default_groups(n_rep, hybrid). Returns false
 // with `err` set when the architecture's pre-norm layout isn't one this transform is valid for.
 [[nodiscard]] std::expected<Plan, std::string> build_plan(
     const std::map<std::string, const RawTensor*>& index, const CalibrationStats& stats,

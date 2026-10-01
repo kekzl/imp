@@ -99,7 +99,7 @@ imp-cli --model ./Qwen3-1.7B-nvfp4 --prompt "Hello"
 | `--model <dir>` / `--out <dir>` | source checkpoint / destination |
 | `--calib <file>` | AWQ search using the calibration file; omit for round-to-nearest |
 | `--calib-weight abs\|sq` | search error weight, default `abs`; `sq` (2nd moment, needs an `IMPCAL02` file) is 1.10% better on Qwen3-0.6B, 0.15 PPL worse on Qwen3-14B `BD` |
-| `--calib-groups <letters>` | subset of `ABCDEG` (A=q/k/v, B=gate/up, C=o_proj, D=down_proj, E/G=GDN); default `ABCDEG` at `n_rep < 5`, `BDEG` at `n_rep >= 5` |
+| `--calib-groups <letters>` | subset of `ABCDEG` (A=q/k/v, B=gate/up, C=o_proj, D=down_proj, E/G=GDN); default `ABCDEG` at `n_rep < 5`, `BDEG` at `n_rep >= 5` on dense models (GDN hybrids keep `ABCDEG`: Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136) |
 | `--lm-head` | also quantize `lm_head` (free at runtime, see below) |
 | `--keep-attn-gate` | keep the fused Q+gate `q_proj` (Qwen3.5/Qwen3-Next) at source precision |
 | `--keep-gdn-proj [all\|in,gate,out]` | keep GDN `linear_attn` projections at source precision, bare flag = `all` |
@@ -186,7 +186,7 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
 | Qwen3-1.7B (2 shards) | 17.22 | 20.39 | **18.71** | +18.4% -> **+8.7%** |
 
 - Recovers about a quarter of the RTN gap on the 0.6B, nearly two fifths on the 1.7B; does not close it against BF16. **Hurts at 14B and wider** (24-27% worse than RTN, the wrong direction): attention vs FFN, not model size.
-- **Production rule, the code default since roadmap row 6 closed**: all groups on narrow GQA (`n_rep < 5`), attention groups A and C off on wide GQA (`n_rep >= 5`), `--calib-weight abs` on both. Qwen3-14B BF16 source, `ppl_corpus_45k.txt`, deterministic:
+- **Production rule, the code default since roadmap row 6 closed**: all groups on narrow GQA (`n_rep < 5`), attention groups A and C off on dense wide GQA (`n_rep >= 5`; GDN hybrids keep all, Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136, `docs/audit/AUDIT_qwen38_nvfp4.md`), `--calib-weight abs` on both. Qwen3-14B BF16 source, `ppl_corpus_45k.txt`, deterministic:
 
 | arm | RTN | ABCD `abs` | ABCD `sq` | BD `abs` | BD `sq` |
 |---|---:|---:|---:|---:|---:|
