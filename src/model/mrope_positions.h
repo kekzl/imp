@@ -56,4 +56,9 @@ struct MRopeVideoGrid {
     const std::vector<uint8_t>& token_type, const std::vector<MRopeImageGrid>& images,
     const std::vector<MRopeVideoGrid>& videos, int start_pos);
 
+// Engine form: `items` holds one grid per encoded item (image or video frame pair) in prompt order,
+// the k-th vision run of `token_type` takes items[k]. Refuses a run/item count mismatch.
+[[nodiscard]] std::expected<MRopePositions, std::string> qwen_build_mrope_positions_items(
+    const std::vector<uint8_t>& token_type, const std::vector<MRopeImageGrid>& items, int start_pos);
+
 }  // namespace imp

@@ -25,6 +25,7 @@
 #include "memory/vram_query.h"
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"
+#include "model/image_placeholders.h"
 #include "compute/ffn_sparsity_probe.h"
 #include "compute/gemm.h"
 #include "compute/mmq_q8_imma.h"
@@ -1047,6 +1048,11 @@ void Engine::add_request(std::shared_ptr<Request> req) {
             req->started_in_think = true;
             req->in_think_block = true;
         }
+        // Video: one pad id on the GPU path, types kept for M-RoPE. Before the salt and the
+        // prefix lookup, so every cache key sees the folded sequence.
+        if (qwen_video_pad_id_ >= 0 && (!req->qwen_patches.empty() || !qwen_pending_patches_.empty()))
+            req->qwen_token_types = fold_video_pads(req->input_tokens, qwen_image_pad_id_,
+                                                    qwen_video_pad_id_);
         req->prefix_salt = prefix_salt_(*req);
         scheduler_->add_request(std::move(req));
     }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tokenizer parity: imp token ids vs HF tokenizers (tokenizer.json) on a fixed 1196-string corpus.
+# Tokenizer parity: imp token ids vs HF tokenizers (tokenizer.json) on a fixed 1202-string corpus.
 # CPU only. Needs a dev build of the tree under test (make dev -> build-dev/libimp.a).
 #
 #   tools/tokenizer_parity/run.sh [--tree DIR] [--chat] [--diff] MODEL...
@@ -39,7 +39,7 @@ py() {  # py <args...>: parity.py in the pinned container, models mounted read-o
 docker run --rm -v "$TREE":/src -v "$HERE":/h:ro -v "$WORK":/w -w /src --entrypoint bash imp:toolchain -c \
     "g++ -O2 -std=gnu++23 -I/src/src -I/src/tools -I/src/include \
        -isystem /usr/local/cuda/targets/x86_64-linux/include /h/tok_dump.cpp -o /w/tok_dump \
-       -Wl,-rpath,/usr/local/cuda/targets/x86_64-linux/lib build-dev/libimp.a \
+       -Wl,-rpath,/usr/local/cuda/targets/x86_64-linux/lib build-dev/libimp.a build-dev/libimp_core.a \
        -L/usr/local/cuda/targets/x86_64-linux/lib -lcudart /usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so \
        -lcublas -lcublasLt -lculibos -lcudadevrt -lcudart_static -lrt -lpthread -ldl"
 echo "tree: $TREE @ $(git -C "$TREE" rev-parse --short HEAD)"

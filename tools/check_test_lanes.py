@@ -358,7 +358,9 @@ def main():
     # and smallM), hd=512 FMHA, same row in different batches or chunk offsets bit-equal (#2167).
     # 1178 -> 1179: RecurrentSnapshotStoreTest.KvChainSurvivesHostEvictionAndEraseReplaces (test-kv):
     # a snapshot keeps its KV chain through the host tier (#2174, cudaMalloc).
-    PINNED = 1179
+    # 1179 -> 1181: Qwen3VLPipelineTest.VideoFramePairsMatchHfReference (GPU) and
+    # Qwen3VLPipelineVideoStamps.TimestampIdsMatchHf (model tokenizer), test-e2e, run by make test-vision.
+    PINNED = 1181
 
     text = CMAKE.read_text()
     mods = module_sources(text)

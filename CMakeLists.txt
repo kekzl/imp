@@ -689,6 +689,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_completions.cpp
         tools/imp-server/fim_request.cpp
         tools/imp-server/handlers_chat_core.cpp
+        tools/imp-server/vision_parts.cpp
         tools/imp-server/handlers_chat_params.cpp
         tools/imp-server/image_fetch.cpp
         tools/imp-server/handlers_chat_stream.cpp

@@ -40,6 +40,27 @@ std::vector<double> qwen_video_group_seconds(std::span<const double> frame_secon
 // "<%.1f seconds>", the text tokenized into VideoPlaceholderLayout::stamp_ids.
 std::string qwen_video_timestamp_text(double seconds);
 
+// HF default when a video carries no fps (Qwen3VLProcessor.replace_video_token: fps 24).
+inline constexpr double kQwenVideoDefaultFps = 24.0;
+
+// A client video's layout: `groups` frame pairs of `tokens_per_group` tokens; frame k sits at
+// frame_seconds[k]; stamps tokenized with `encode` (no special tokens).
+template <typename Encode>
+VideoPlaceholderLayout qwen_video_layout(int tokens_per_group, std::span<const double> frame_seconds,
+                                         int temporal_patch_size, const Encode& encode) {
+    VideoPlaceholderLayout v;
+    v.tokens_per_group = tokens_per_group;
+    for (double s : qwen_video_group_seconds(frame_seconds, temporal_patch_size))
+        v.stamp_ids.push_back(encode(qwen_video_timestamp_text(s)));
+    return v;
+}
+
+// Rewrites every video_pad to image_pad and returns the HF mm_token_type_ids (0 text, 1 image,
+// 2 video) of the original sequence; empty when there was no video_pad (tokens untouched). Both pads
+// are replaced by encoder rows, so the GPU path counts one id; the types keep M-RoPE exact.
+std::vector<uint8_t> fold_video_pads(std::vector<int32_t>& tokens, int32_t image_pad_id,
+                                     int32_t video_pad_id);
+
 // FNV-1a over an image's bytes. Used as the prefix cache's content salt, so a
 // hit needs the same tokens AND the same picture. Never returns 0 — that value
 // means "no image" to the cache, and an all-zero image must not claim it.

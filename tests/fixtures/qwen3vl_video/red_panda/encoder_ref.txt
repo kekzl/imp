@@ -1,0 +1,6 @@
+frames 8 320 192
+grid_thw 4 20 12
+shape 240 2560
+relL2_hf_bf16_vs_fp32 9.843099e-02
+relL2_hf_fp16_vs_fp32 6.532274e-03
+relL2_stored_fp32_as_f16 2.076460e-04
