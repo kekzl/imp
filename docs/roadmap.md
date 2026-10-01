@@ -52,7 +52,6 @@ Ranked by what an agent workload notices first.
 
 | # | item | state | ref |
 |---|---|---|---|
-| 10 | one VL tower family | port-sized (InternVL/Pixtral); `vision_tower_supported()` names one layout, and a second model on the SAME tower cost two gates | #1379, #1384 |
 
 ## Not gaps
 
@@ -67,7 +66,7 @@ Moved on 2026-09-28 to [`archive/roadmap_ledger_2026_09_28.md`](archive/roadmap_
 | section | archive anchor |
 |---|---|
 | Open row 12 (closed 2026-09-16) | [Open rows closed before the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-before-the-move) |
-| Open rows 3, 5, 6, 8, 9, 11 (closed 2026-10-01) | [Open rows closed after the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) |
+| Open rows 3, 5, 6, 8, 9, 10, 11 (closed 2026-10-01) | [Open rows closed after the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) |
 | Closed | [Closed](archive/roadmap_ledger_2026_09_28.md#closed) |
 | The 2026 bar | [The 2026 bar](archive/roadmap_ledger_2026_09_28.md#the-2026-bar-assessed-2026-08-21) |
 | Lever ledger | [Lever ledger](archive/roadmap_ledger_2026_09_28.md#lever-ledger) |
