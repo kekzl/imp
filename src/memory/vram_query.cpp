@@ -83,6 +83,40 @@ size_t vram_own_used_bytes() {
     return baseline > free_b ? baseline - free_b : 0;
 }
 
+namespace {
+
+bool issue_copies(const DeviceCopy* copies, size_t n, cudaStream_t stream) {
+    for (size_t i = 0; i < n; i++)
+        if (cudaMemcpyAsync(copies[i].dst, copies[i].src, copies[i].bytes, cudaMemcpyDeviceToDevice,
+                            stream) != cudaSuccess)
+            return false;
+    return true;
+}
+
+// One graph launch, not n copy submissions: 32 x 2 MiB issued one by one read 128-605 GB/s
+// on a card with 30.8 GiB free (WSL2 submission gaps), 1218-1270 GB/s as a graph (#2366).
+// Empty exec = capture failed, the caller issues the copies plainly.
+CudaGraphExec capture_copies(const DeviceCopy* copies, size_t n, cudaStream_t stream) {
+    CudaGraphExec exec;
+    if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
+        (void)cudaGetLastError();
+        return exec;
+    }
+    const bool captured = issue_copies(copies, n, stream);
+    cudaGraph_t g = nullptr;
+    const bool ended = cudaStreamEndCapture(stream, &g) == cudaSuccess;
+    CudaGraph graph;
+    graph.reset(g);
+    cudaGraphExec_t e = nullptr;
+    if (captured && ended && g && cudaGraphInstantiate(&e, graph, 0) == cudaSuccess)
+        exec.reset(e);
+    else
+        (void)cudaGetLastError();
+    return exec;
+}
+
+}  // namespace
+
 double device_copy_bandwidth_gbps(const DeviceCopy* copies, size_t n, int warm_ms) {
     size_t total = 0;
     for (size_t i = 0; i < n; i++) {
@@ -99,31 +133,10 @@ double device_copy_bandwidth_gbps(const DeviceCopy* copies, size_t n, int warm_m
     // The copies used to run on the legacy stream, ordered after its pending work; keep that order.
     if (cudaStreamSynchronize(nullptr) != cudaSuccess)
         return 0.0;
-    auto issue = [&]() {
-        for (size_t i = 0; i < n; i++)
-            if (cudaMemcpyAsync(copies[i].dst, copies[i].src, copies[i].bytes, cudaMemcpyDeviceToDevice,
-                                stream) != cudaSuccess)
-                return false;
-        return true;
+    const CudaGraphExec exec = capture_copies(copies, n, stream);
+    auto launch = [&]() {
+        return exec ? cudaGraphLaunch(exec, stream) == cudaSuccess : issue_copies(copies, n, stream);
     };
-    // One graph launch, not n copy submissions: 32 x 2 MiB issued one by one read 128-605 GB/s
-    // on a card with 30.8 GiB free (WSL2 submission gaps), 1218-1270 GB/s as a graph (#2366).
-    CudaGraphExec exec;
-    {
-        cudaGraph_t g = nullptr;
-        if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) == cudaSuccess) {
-            const bool captured = issue();
-            const bool ended = cudaStreamEndCapture(stream, &g) == cudaSuccess;
-            CudaGraph graph;
-            graph.reset(g);
-            cudaGraphExec_t e = nullptr;
-            if (captured && ended && g && cudaGraphInstantiate(&e, graph, 0) == cudaSuccess)
-                exec.reset(e);
-        }
-        if (!exec)
-            (void)cudaGetLastError();  // plain issue below
-    }
-    auto launch = [&]() { return exec ? cudaGraphLaunch(exec, stream) == cudaSuccess : issue(); };
     // Warm the clocks: repeat the set until warm_ms of wall time has passed.
     bool ok = true;
     const auto warm_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(0, warm_ms));
