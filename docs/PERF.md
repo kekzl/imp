@@ -129,7 +129,8 @@ per step from two sequences up. Decode rows with 2..32 sequences now run the
 small-M NVFP4 GEMM on the decode overlay (`smallm_weight_`,
 `src/exec/executor_gemm_smallm.cpp`); prompt rows keep the dequant route.
 Same harness on Qwen3-8B-Q8_0 with the library reserve planned
-(`vram.library_reserve_mb=6782`, the value the start measures; a cold
+(`vram.library_reserve_mb=6782`, the value the start measured before the
+WEIGHTS ledger fix #2355; on 41b137ce it measures 1033 MiB, #2357; a cold
 `docker run --rm` start plans the 3900 MiB constant instead and reads the
 spill lottery of [`LIMITATIONS.md`](LIMITATIONS.md)), 64 requests per level,
 v0.36.0 image vs #1897:

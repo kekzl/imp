@@ -53,6 +53,7 @@ CLOSED, DO NOT BUILD: 0 slab refusals and 0 slab holds at every length in both r
 
 bs=8 cancels sequences at decode (`KV pool exhausted at decode`) and StreamingLLM never arms: #2361.
 Run 1: 0 / 2 / 6 at 8k / 16k / 30k; run 2 on the clean card: 1 / 0 / 4.
+Superseded 2026-10-01: the cancelled rows had already finished; the pipeline drain retired them and decode cancelled them as KV exhaustion (#2371 1ee8e3b9).
 
 [PROV: commit=03f38165 date=2026-10-01 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4 cuda=13.4.1
        image=imp:r5-main (scripts/build_image.sh of 03f38165) n=1 wave of 32 per arm x length

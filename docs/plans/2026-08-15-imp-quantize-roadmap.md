@@ -16,7 +16,7 @@ checkpoints can enter the tool at all, and which can come out small enough.
 |---|---|---|
 | 1 | read FP8 and F32 sources | LANDED 2026-08-15 |
 | 2 | embedding and lm_head opt-in | HALF: the `--dry-run` reporting half landed 2026-08-15 (Qwen3.8-27B 5.60 GiB unshrunk, 30% of the output) and the lm_head price is measured and documented 2026-08-16 (PPL 4.5707 -> 4.6158, +0.99%, for +10.4% decode; `--lm-head` + `--format vllm` refused because vLLM's `ParallelLMHead` takes no scales). The embedding opt-in is still not offered |
-| 3 | confirm `--calib-groups BD` above 14B | BLOCKED on a model, not on work: `--calib` correctly refuses `qwen3_5` (unit-offset norm), and no local BF16 checkpoint above 14B has a plain RMSNorm |
+| 3 | confirm `--calib-groups BD` above 14B | BLOCKED on a model, not on work: `--calib` correctly refuses `qwen3_5` (unit-offset norm), and no local BF16 checkpoint above 14B has a plain RMSNorm. Superseded 2026-10-01 (#2359 3fbc4891): measured at 14B (n_rep 5) instead, BD abs PPL 9.9068 vs RTN 9.9849; `--calib` without `--calib-groups` now defaults to `BDEG` at n_rep >= 5 |
 | 4 | stacked MoE experts | OPEN, tracked as `docs/roadmap.md` Open 7 (needs a per-model layout descriptor plus per-expert bias in loader and MoE forward) |
 
 Shipped alongside, from `roadmap.md` finding (i): `--format vllm` writes
@@ -240,4 +240,6 @@ the refusal message.
   resident; that is offload work.
 - **Replacing round-to-nearest as the default.** The measured record has
   `--calib` losing at 14B with the full group set, so the default is correct
-  until item 2 says otherwise.
+  until item 2 says otherwise. Superseded for `--calib` groups 2026-10-01
+  (#2359 3fbc4891): the `--calib` default is `BDEG` at n_rep >= 5; RTN stays
+  the default without `--calib`.

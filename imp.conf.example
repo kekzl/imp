@@ -319,8 +319,8 @@ kv_fraction       = 0.8
 # at 256 MiB absolute. Clamped to [0, 50]. Default 10 ≈ 3.2 GiB on a 32 GiB
 # card — lower to hand more VRAM to the KV pool.
 reserve_floor_pct = 10
-# What cuBLAS/CUTLASS claim on the FIRST forward pass, in MiB. -1 = the value
-# measured on this host (3900). This is a FIXED charge: it does not shrink
+# What cuBLAS/CUTLASS claim on the FIRST forward pass, in MiB. -1 = the 3900 MiB
+# constant (per-model measurements: 1033-1930 MiB, #2357). This is a FIXED charge: it does not shrink
 # because --vram-budget asked for a smaller slice of the card, so it floors the
 # reserve above, which is otherwise all percentages. Before that floor existed
 # a 16 GiB budget scaled the reserve to 1.6 GiB against a real 3.9 GiB and the
@@ -344,9 +344,9 @@ library_reserve_mb = -1
 # both log `library reserve: could not write` and re-measure every start.
 #   mkdir -p $HOME/.cache/imp && chown 1001 $HOME/.cache/imp
 #   docker run -v $HOME/.cache/imp:/cache ... --set vram.library_reserve_cache=/cache/library_reserve
-# Measured on Qwen3-14B-Q6_K, whose first forward actually claims 0 MiB: with
-# the path persisted the second start plans a 0 MiB reserve instead of 3900 and
-# hands the pools 639 MiB more to distribute.
+# Second start on a persisted path plans the measured reserve instead of 3900
+# (#2357): Qwen3.8-27B-NVFP4 1930 MiB (975 -> 2025 KV blocks), Qwen3-8B-Q8_0
+# 1033 MiB (KV ceiling 5617 -> 6606 blocks), Qwen3.8-Flash-Next-NVFP4 1796 MiB.
 library_reserve_cache =
 # Pinned staging ring for the weight upload: depth x chunk size in MiB.
 # Pinning host memory is expensive on WDDM, and the ring's cost is paid at every
@@ -492,9 +492,12 @@ attn_scores_mib      = 384
 # only the top-scoring KV blocks (per-block key min/max bound vs the query),
 # up to this many tokens per sequence, selected device-side per step.
 # 0 = off (default). Contexts at or below the budget are bit-identical to
-# dense. F16/FP8 KV, uniform geometry, non-growable pool, non-MLA; SWA /
-# StreamingLLM layers and spec verify chunks keep full attention. Costs a
-# metadata pool of ~12.5% (FP8 KV) / ~6.25% (F16 KV) of the K+V pool bytes.
+# dense. F16/FP8/NVFP4 KV, uniform geometry; refused with absorbed MLA
+# decode, speculative.token_recycling or the persistent prefix cache
+# (src/runtime/vram_budget.cpp sparse_minmax_refusal); SWA / StreamingLLM
+# layers and spec verify chunks keep full attention. Costs a metadata pool of
+# ~12.5% (FP8 KV) / ~6.25% (F16 KV) / 22.2% (NVFP4 KV, Qwen3.8-27B) of the K+V
+# pool bytes, planned and grown with a growable KV pool (#2364).
 # Design + gates: docs/plans/2026-08-28-sparse-decode-attention.md.
 sparse_topk_tokens   = 0
 # Qwen4Exp QSA indexer: learned block top-k over the context (exact below 2051 tokens).

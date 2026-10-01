@@ -12,9 +12,21 @@ numbers in [`BENCHMARKS.md`](BENCHMARKS.md), limitations in
 | Lifecycle | entries are closed, corrected or superseded in place, never deleted |
 | Citations | `scripts/check_doc_citations.py` requires `path:N anchor`; anchor on line N = ok, anchor moved (once in the file, or the one hit within 25 lines) = `DRIFT` warning, exit 0, `--fix` rewrites N; anchor gone or ambiguous = `DEAD` (#2231: line drift alone turned main red 3x on 2026-09-29; #2185: the existence-only check passed a `weight_map.cpp` cite eleven lines off until 2026-08-31 and two `Makefile` cites 16 and 81 lines off); a bare basename matching two files is resolved by the anchor, else reports `AMBIGUOUS` and passes, so cite the path; a stale `git worktree` checkout makes every basename ambiguous at once |
 
-Detail records: [`plans/2026-09-16-open-rows-closed-detail.md`](plans/2026-09-16-open-rows-closed-detail.md)
-(Open rows 1, 2, 4, 7, 13, 14, 15 as they stood when closed),
-[`plans/2026-09-04-lever-ledger-detail.md`](plans/2026-09-04-lever-ledger-detail.md)
+Detail records, one per closed Open row:
+
+| Open row | closed | row text | detail record |
+|---|---|---|---|
+| 1, 2, 4, 7, 13, 14, 15 | 2026-09-16 | [`plans/2026-09-16-open-rows-closed-detail.md`](plans/2026-09-16-open-rows-closed-detail.md) | same file |
+| 12 | 2026-09-16 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-before-the-move) | `gemm_cublas` pricing in [`plans/2026-09-04-lever-ledger-detail.md`](plans/2026-09-04-lever-ledger-detail.md), closure evidence in the row |
+| 3 | 2026-10-01 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`plans/2026-08-28-sparse-decode-attention.md`](plans/2026-08-28-sparse-decode-attention.md) |
+| 5 | 2026-10-01 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`plans/2026-10-01-recurrent-state-paging-measured.md`](plans/2026-10-01-recurrent-state-paging-measured.md) |
+| 6 | 2026-10-01 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`quantization.md`](quantization.md), #2359 |
+| 8 | 2026-10-01 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | owner decision, [`LIMITATIONS.md`](LIMITATIONS.md#model-specific-blockers), #2359 |
+| 9 | 2026-10-01 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`API_FEATURES.md`](API_FEATURES.md#video), #2363, #2370 |
+| 10 | 2026-10-01 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`MODELS.md`](MODELS.md#vision), #2375 .. #2389 |
+| 11 | 2026-10-01 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | owner decision, AUDIT B84, B36, #2359 |
+
+Older ledgers: [`plans/2026-09-04-lever-ledger-detail.md`](plans/2026-09-04-lever-ledger-detail.md)
 (serving and kernel rows, 08-25 .. 09-04),
 [`plans/2026-08-31-roadmap-ledger-detail.md`](plans/2026-08-31-roadmap-ledger-detail.md)
 (everything moved out on 2026-08-31).
@@ -36,7 +48,7 @@ Detail records: [`plans/2026-09-16-open-rows-closed-detail.md`](plans/2026-09-16
 | GDN hybrid @32 vs vLLM | AHEAD. Qwen3.8-27B 1807.9 vs 1447.8 tok/s (+24.9%, vLLM 0.27.1), 1833.8 vs 1410.7 (+30.0%, 0.28.0), @8 573.0 vs 495.8 (+15.6%), @32 x 1082-token prompts 873.4 vs 497.8 (+75.5%), 3/3 each |
 | dense NVFP4 @32 vs vLLM | PARITY OR AHEAD (2026-09-08). Qwen3-14B 38-token prompts 3948.9 vs 3817.6 (+3.4%, 2026-09-03); 982-token prompts 2491.2/2515.5/2482.6 vs 2485.9/2490.9/2497.7 (+0.2/+1.0/-0.6%, 2 of 3; was 1845.0 vs 2478.0 = 0.75x before the grouped FP8 decode attention, #1953) |
 | batch=1 | 99.5 tok/s spec-off (2026-09-10, `gdn.m1_fused`) = 89% of the ~112 tok/s roofline (14.5 GB/token at 1628 GB/s resident), was 87.4 = 78% on 2026-08-27; past it only through the MTP verify |
-| raw-speed half of [`GOAL.md`](GOAL.md) | MET: batch=1 decode +13-48% vs llama.cpp on every hero (2026-07-12 re-sweep), MoE prefill leads vLLM single-seq, cross-engine PPL parity measured. Everything open below is the agentic half |
+| raw-speed half of [`GOAL.md`](GOAL.md) | MET: batch=1 decode +13-48% vs llama.cpp on every hero (2026-07-12 re-sweep), MoE prefill leads vLLM single-seq, cross-engine PPL parity measured. Open is empty since 2026-10-01; the agentic-half rows are closed in the archive |
 | admission at fan-out | `auto` resolves 28 vs a pinned 32 (630 vs 936): admission, not rotation, and 28 sustain full rate under continuous arrival |
 | next engine-side post | the dense decode step at 32 streams after the grouped FP8 attention and the small-M launch work (ledger 2026-09-08, second row): the small-M GEMM class re-priced at 83% of resident bandwidth by launch durations (5.49 vs 4.56 ms floor per Qwen3-14B step BEFORE the PDL weight prefetch + q\|k\|v launch, which took ~0.3 ms of that), and the prefill forward at 80% of the FP4 peak (Open 2) |
 
@@ -48,7 +60,8 @@ from a 200-token-gen client. Rows with PROV in [`BENCHMARKS.md`](BENCHMARKS.md)
 
 ## Open
 
-Ranked by what an agent workload notices first.
+Ranked by what an agent workload notices first. No open rows since
+2026-10-01; rows 1-15 are closed (index above). A new row takes number 16.
 
 | # | item | state | ref |
 |---|---|---|---|

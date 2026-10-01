@@ -14,22 +14,23 @@ full text of each is in git history; the recipe for reading one is below.
 
 | file | subject | cited from |
 |---|---|---|
-| `prefill_gap_2026_06_07.md` | the prefill gap against llama.cpp | code (3) + docs |
-| `roofline_2026_06_07.md` | first roofline campaign | code (1) + docs |
-| `roofline_gptoss_2026_07_13.md` | roofline on gpt-oss | code (1) + docs |
-| `tile-fa2-dispatch-shelved.md` | the shelved tiled-FA2 dispatch | code (1) + docs |
-| `structural_debt_2026_07_07.md` | structure audit | docs |
-| `PERF_AUDIT_2026_07_23.md` | performance audit | `imp.conf.example` |
-| `ppl_parity_2026_07_12.md` | cross-engine perplexity parity | docs |
-| `vram_audit_2026_07_07.md` | VRAM accounting snapshot | docs |
-| `cpp23_migration_2026_07_08.md` | the C++23 move | docs |
-| `housekeeping_2026_06_13.md` | the consolidation pass described below | docs |
-| `benchmarks_pre_v0.44.md` | `docs/BENCHMARKS.md` before the 2026-09-23 prose cleanup, all superseded sweeps | `docs/BENCHMARKS.md` |
-| `memory_census_2026.md` | `MEMORY.md` census, design draft A2-A6, migration plan, implementation log | `docs/internals/MEMORY.md` |
-| `limitations_detail_2026.md` | MTP speculative-decoding investigation series | `docs/LIMITATIONS.md` |
-| `quantization_awq_findings.md` | AWQ findings, refuted quantization experiments | `docs/quantization.md` |
-| `kernels_refuted_2026.md` | refuted FA2 occupancy follow-up | `docs/internals/KERNELS.md` |
-| `roadmap_ledger_2026_09_28.md` | `docs/roadmap.md` closed rows, Closed, 2026 bar, lever ledger, batch=1, MoE offload, quantizer, competitive records, known limitations, shelved | `docs/roadmap.md` |
+| [`prefill_gap_2026_06_07.md`](prefill_gap_2026_06_07.md) | the prefill gap against llama.cpp | code (3) + docs |
+| [`roofline_2026_06_07.md`](roofline_2026_06_07.md) | first roofline campaign | code (1) + docs |
+| [`roofline_gptoss_2026_07_13.md`](roofline_gptoss_2026_07_13.md) | roofline on gpt-oss | code (1) + docs |
+| [`tile-fa2-dispatch-shelved.md`](tile-fa2-dispatch-shelved.md) | the shelved tiled-FA2 dispatch | code (1) + docs |
+| [`structural_debt_2026_07_07.md`](structural_debt_2026_07_07.md) | structure audit | docs |
+| [`PERF_AUDIT_2026_07_23.md`](PERF_AUDIT_2026_07_23.md) | performance audit | `imp.conf.example` |
+| [`ppl_parity_2026_07_12.md`](ppl_parity_2026_07_12.md) | cross-engine perplexity parity | docs |
+| [`vram_audit_2026_07_07.md`](vram_audit_2026_07_07.md) | VRAM accounting snapshot | docs |
+| [`cpp23_migration_2026_07_08.md`](cpp23_migration_2026_07_08.md) | the C++23 move | docs |
+| [`housekeeping_2026_06_13.md`](housekeeping_2026_06_13.md) | the consolidation pass described below | docs |
+| [`benchmarks_pre_v0.44.md`](benchmarks_pre_v0.44.md) | `docs/BENCHMARKS.md` before the 2026-09-23 prose cleanup, all superseded sweeps | `docs/BENCHMARKS.md` |
+| [`memory_census_2026.md`](memory_census_2026.md) | `MEMORY.md` census, design draft A2-A6, migration plan, implementation log | `docs/internals/MEMORY.md` |
+| [`limitations_detail_2026.md`](limitations_detail_2026.md) | MTP speculative-decoding investigation series | `docs/LIMITATIONS.md` |
+| [`quantization_awq_findings.md`](quantization_awq_findings.md) | AWQ findings, refuted quantization experiments | `docs/quantization.md` |
+| [`kernels_refuted_2026.md`](kernels_refuted_2026.md) | refuted FA2 occupancy follow-up | `docs/internals/KERNELS.md` |
+| [`roadmap_ledger_2026_09_28.md`](roadmap_ledger_2026_09_28.md) | `docs/roadmap.md` closed rows, Closed, 2026 bar, lever ledger, batch=1, MoE offload, quantizer, competitive records, known limitations, shelved | `docs/roadmap.md` |
+| [`performance_2026_05.md`](performance_2026_05.md) | 2026-05 prefill and KV-dtype comparison tables, moved out of `docs/PERF.md` 2026-09-05 (#1919) | `docs/PERF.md` |
 
 Moved here from `audit/` on 2026-08-11 so that `audit/` holds only the ledgers
 you are meant to consult. **`AUDIT_ARCH_2026_07_29.md` deliberately stayed in

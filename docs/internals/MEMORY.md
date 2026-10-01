@@ -184,7 +184,11 @@ A KV block has **two** refcount holders, not three (COW-fork does not exist, arc
 - `free_sequence()` moves its reference into the cache or lets it drop, no "skip the free" branches.
 - StreamingLLM eviction (`evict_middle_blocks()`) must keep the block-table *length* for kernel positional alignment, so `seq_blocks_` is `std::vector<std::optional<BlockRef>>`, `nullopt` the hole.
 
-**The KV-pressure valve counts reclaimable blocks (#1879).** Until 2026-09-03 the "pool over 90% full" check compared the free list against the blocks live sequences hold, so a pool one third full of reclaimable prefix-cache blocks read as full and every wave after the first ran eager (measured: 2387 -> 1443-1485 tok/s). Fixed by adding `num_reclaimable_cached_blocks()` to the comparison.
+**The KV-pressure valve counts reclaimable blocks (#1879).** Until 2026-09-03 the "pool over 90% full" check compared the free list against the blocks live sequences hold, so a pool one third full of reclaimable prefix-cache blocks read as full and every wave after the first ran eager (measured: 2387 -> 1458-1485 tok/s aggregate). Fixed by adding `num_reclaimable_cached_blocks()` to the comparison.
+
+[PROV: commit=008df44e date=2026-09-03 hw=RTX5090 model=Llama-3.2-3B-Q8_0 quant=Q8_0 cuda=unknown
+       path=gguf kv=F16 cmd=`tools/analysis/prefill_cap_conc_ab.sh` (32 streams, 1000-token prompts,
+       3 waves, fresh server per arm) n=1 per arm note=numbers from the #1879 PR body]
 
 ### A5.2 CUDA graph pool
 
