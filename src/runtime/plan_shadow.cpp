@@ -40,6 +40,7 @@ PlanInput shadow_plan_input(const ShadowPlanProbe& probe) {
     in.limits.max_seq_len = probe.max_seq_len;
     in.limits.kv_block_size = probe.kv_block_size;
     in.limits.kv_block_bytes_per_layer = probe.kv_block_bytes_per_layer;
+    in.limits.kv_meta_block_bytes_per_layer = probe.kv_meta_block_bytes_per_layer;
     in.limits.min_kv_tokens = probe.min_kv_tokens;
 
     in.engine_persistent_bytes = probe.engine_persistent_bytes;
@@ -98,6 +99,9 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
         emit("  KV: live pass %d blocks -> plan %d blocks, APPLIED (%.0f -> %.0f MiB)", live_kv_blocks,
              shadow.plan.kv.blocks, static_cast<double>(live_kv_blocks) * per_block / kMiB,
              shadow.plan.kv.bytes / kMiB);
+        if (shadow.plan.kv.meta_bytes)
+            emit("  KV key min/max metadata  %8.1f MiB (%d blocks, charged per block)",
+                 shadow.plan.kv.meta_bytes / kMiB, shadow.plan.kv.blocks);
     } else {
         emit("  plan REJECTS this configuration (live pass accepted it with %d KV blocks):",
              live_kv_blocks);

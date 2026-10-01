@@ -23,8 +23,8 @@ std::string fmt_lever(const char* key, long long from, long long to) {
 }  // namespace
 
 size_t MemoryPlan::total() const {
-    size_t sum = context_reserve + library_reserve + model_resident + optional_caches +
-                 engine_persistent + forward_scratch + kv.bytes + kv.swa_bytes;
+    size_t sum = context_reserve + library_reserve + model_resident + optional_caches + engine_persistent +
+                 forward_scratch + kv.bytes + kv.meta_bytes + kv.swa_bytes;
     for (const auto& p : pools)
         sum += p.bytes;
     return sum;
@@ -36,6 +36,7 @@ std::vector<PlanLine> MemoryPlan::lines() const {
     push(v, "optional weight caches", RegionTag::ModelResident, optional_caches);
     push(v, "KV pool", RegionTag::KvBlockPool, kv.bytes);
     push(v, "KV pool (SWA group)", RegionTag::SwaBlockPool, kv.swa_bytes);
+    push(v, "KV key min/max metadata", RegionTag::KvBlockPool, kv.meta_bytes);
     push(v, "engine-persistent", RegionTag::EnginePersistent, engine_persistent);
     push(v, "forward scratch", RegionTag::ForwardScratch, forward_scratch);
     for (const auto& p : pools)
@@ -131,7 +132,11 @@ PlanResult plan_memory(const PlanInput& in) {
                                  return s;
                              }();
 
-    const size_t per_block = per_layer * static_cast<size_t>(std::max(0, n_global_layers));
+    // A block costs its K+V plus any per-block metadata pool sized from the same count (#2360).
+    const size_t kv_per_block = per_layer * static_cast<size_t>(std::max(0, n_global_layers));
+    const size_t meta_per_block = in.limits.kv_meta_block_bytes_per_layer *
+                                  static_cast<size_t>(std::max(0, n_global_layers));
+    const size_t per_block = kv_per_block + meta_per_block;
     p.kv.blocks_per_seq = (seq + bs - 1) / bs;
 
     if (committed >= in.budget_bytes || per_block == 0) {
@@ -152,7 +157,8 @@ PlanResult plan_memory(const PlanInput& in) {
         const int want_blocks = p.kv.blocks_per_seq * batch;
         const int fits_blocks = static_cast<int>(kv_residual / per_block);
         p.kv.blocks = std::min(want_blocks, fits_blocks);
-        p.kv.bytes = static_cast<size_t>(p.kv.blocks) * per_block;
+        p.kv.bytes = static_cast<size_t>(p.kv.blocks) * kv_per_block;
+        p.kv.meta_bytes = static_cast<size_t>(p.kv.blocks) * meta_per_block;
     }
 
     const int floor_blocks =

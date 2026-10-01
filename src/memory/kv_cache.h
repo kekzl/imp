@@ -148,6 +148,10 @@ public:
     // Scalar-geometry pools only (the per-layer ctor refuses). Returns false when
     // ineligible or on allocation failure; every other behaviour is then unchanged.
     [[nodiscard]] bool enable_key_minmax();
+    // Bytes per (layer, block) of that pool; the memory plan charges the same figure (#2360).
+    [[nodiscard]] static constexpr size_t minmax_block_bytes(int n_kv_heads, int head_dim) {
+        return static_cast<size_t>(n_kv_heads) * static_cast<size_t>(head_dim) * 2 * 2;  // (min,max) half
+    }
     [[nodiscard]] bool key_minmax_enabled() const { return minmax_pool_ != nullptr; }
     void* key_minmax_ptr(int layer, int block_id);
 

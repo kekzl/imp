@@ -374,7 +374,7 @@ bool KVCache::enable_key_minmax() {
     // unset and the offset math below assumes a uniform stride.
     if (!layer_block_bytes_.empty() || growable_)
         return false;
-    minmax_block_bytes_ = static_cast<size_t>(n_kv_heads_) * head_dim_ * 2 * sizeof(half);
+    minmax_block_bytes_ = minmax_block_bytes(n_kv_heads_, head_dim_);
     size_t total = static_cast<size_t>(n_layers_) * max_blocks_ * minmax_block_bytes_;
     if (alloc_) {
         minmax_pool_ = alloc_->allocate(total, "kv_cache_minmax");
