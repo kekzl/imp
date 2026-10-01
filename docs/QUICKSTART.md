@@ -142,7 +142,7 @@ Commands: [README](../README.md#quickstart-qwen38-flash-next). Weights: 25 files
 
 | Item | Value |
 | --- | --- |
-| image | the Flash-Next fixes under [`CHANGELOG.md`](../CHANGELOG.md) `[Unreleased]` ship in the first release after v0.45.0; until then `make build` and `imp:test` in place of `ghcr.io/kekzl/imp:latest` |
+| image | `ghcr.io/kekzl/imp:latest`, v0.46.0 or later: the Flash-Next fixes ship in v0.46.0 ([`CHANGELOG.md`](../CHANGELOG.md) `[0.46.0]`) |
 | host RAM | test host 78 GiB: 74 GiB available before start, 9 GiB after load |
 | load | 97.7 s to `/health` ok, 65 s of it after `stay host-resident` in the log |
 | KV | starts at 1900 blocks (30400 tokens), grows toward 131072 tokens as VRAM frees |

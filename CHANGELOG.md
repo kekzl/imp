@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-10-01
+
 ### Added
 - `--gpu-layers N < n_layers`, dense GGUF: planned host layers keep their matmuls in pinned host RAM and stream per forward via `LayerOffloadManager` (slot reuse waits for the previous layer). Host layers skip pre_dequant caches. MoE, SSM/GDN, NVFP4-prequant refuse. A/B: `gemm.dense_weight_cache=false` (#2298).
 - Qwen3.8-Flash-Next MTP drafting (`speculative.mtp_k=1`, auto declines it: k=1 18.6 % slower than k=0, #2272): hc-stream draft layer, FP8 block-scale experts (2400 MiB head), captured verify over host-resident experts (56.7 -> 27-36 ms/verify). Draft logits vs the vLLM math: max |dlogit| 0.0135 (band 0.11). Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
@@ -29,6 +31,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - Transcript restore IMA (#2275): the lazy `copy_blocks_device` offset table was a legacy-stream `cudaMemcpy`, unordered before its kernel on the non-blocking stream; now on that stream. 150 ms upload delay: main 3/3 IMA, fix 0/3. Gate `tools/check_sync_device_writes.py`: 9 writes moved onto their stream, 4 drained.
+- Hybrid prefix-cache resend: a recurrent snapshot is restored only with the KV blocks of the forward that saved it (`adopt_chain`, bind serials). Before, a resend restored the snapshot over the previous turn's 4 of 18 blocks. degen_suite resend check hard again (#2174, #2331).
 - PDL: `gdn_scan_fused` and `ssm_conv1d_decode` no longer read recurrent/conv state before `pdl_wait` (L2 prefetch only); contract in `core/pdl_device.cuh` (#2340). Deterministic PPL identical both chunk modes, Qwen3.8-27B/Qwen3.6-35B; tg128 paired +0.23 %/-0.24 %.
 - `runtime.deterministic`: a prompt row of an MoE model no longer changes with its prefill chunk (FP32 row-order router GEMM, hd=512 prefill on the forward-scan FMHA). Gemma-4-26B-A4B NVFP4, 374-token prompt, first-token logprob at chunk 0/288/336: -0.7565 in all three (main -0.885/-0.930/-0.711). Default flags unchanged: PPL 45k 969.2153 = main (#2167).
 - `runtime.deterministic`: the decode graph re-captures when the request set changes (`src/runtime/decode_graph_ctx.h`). The pow2 context high-water mark outlived requests, so a repeat request replayed the prior capture's split-K count (ctx 129) at every step (Refs #2182).
