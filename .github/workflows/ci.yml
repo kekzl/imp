@@ -493,7 +493,7 @@ jobs:
   #
   # ubuntu:26.04 (GLIBC_2.43; the 24.04 runner cannot load the binary) + cudart/cuBLAS wheels,
   # not nvidia/cuda devel (4353 MB, 62 s init of a 92 s median job). ldd imp-server needs
-  # only libcudart.so.13, libcublas.so.13, libcublasLt.so.13 beyond libc/libstdc++.
+  # only libcudart.so.13, libcublas.so.13, libcublasLt.so.13 and libjpeg.so.8 (#2381) beyond libc/libstdc++.
   real-api:
     name: Real API contract (model-less)
     needs: build
@@ -515,7 +515,7 @@ jobs:
         run: |
           sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
           apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends python3 python3-venv curl ca-certificates
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends python3 python3-venv curl ca-certificates libjpeg-turbo8
           # Toolkit versions: cudart 13.4.49, cuBLAS 13.7.0.27 (440 MB, 4.5 s in run 36470329804).
           # Fetched in the background while pip runs; sha256-verified (H-6).
           mkdir -p /tmp/cuda-whl
