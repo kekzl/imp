@@ -215,6 +215,10 @@ public:
     // count the prompt must reserve for it.
     [[nodiscard]] bool preprocess_image_qwen(std::span<const uint8_t> data, QwenPatches& out) const;
     int image_tokens_of(const QwenPatches& patches) const;
+    static constexpr size_t kQwenVideoMaxFrames = 768;  // video: 2..768 frames -> 1 QwenPatches per pair
+    [[nodiscard]] bool preprocess_video_qwen(std::span<const std::span<const uint8_t>> frames,
+                                             std::vector<QwenPatches>& groups) const;
+    void add_pending_qwen_video(std::vector<QwenPatches> groups, size_t content_hash);  // CLI, after images
     bool has_qwen_vision() const noexcept { return qwen_vision_.is_ready(); }
     // Vision: set image for next generation. Returns false if no mmproj loaded.
     // `set_` replaces whatever was pending; `add_` appends, which only the
@@ -780,7 +784,7 @@ private:
     // question, "same tokens and same pictures?", and two requests differing
     // only in the order of two images must not share a prefix.
     size_t pending_image_hash_ = 0;
-    int32_t qwen_image_pad_id_ = -1;
+    int32_t qwen_image_pad_id_ = -1, qwen_video_pad_id_ = -1;
     // Constraint FSM state lives per-request (Request::constraints): a
     // single engine-global manager clobbers FSMs across concurrent
     // prefill/finish and drops enforcement at decode batch>1. The pool

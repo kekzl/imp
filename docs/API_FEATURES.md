@@ -206,7 +206,7 @@ Refusal rules:
 - Unreadable content part or block: `400` naming it, all three dialects.
 | Endpoint | Reads |
 |---|---|
-| `/v1/chat/completions`, `/v1/responses` | `text`, `image_url` |
+| `/v1/chat/completions`, `/v1/responses` | `text`, `image_url`; `video` on chat completions |
 | `/v1/messages` | `text`, `image` (base64 or url), `tool_use`, `tool_result`, `thinking` |
 
 - On `/v1/messages` the `system` field takes string or array of `text` blocks.
@@ -214,7 +214,24 @@ Refusal rules:
   Message same regardless of error, does not echo URL.
 - Model with unreadable vision tower: loads text-only, image request gets `400 vision_unavailable`.
 
-No video. `temporal_patch_size` is parsed but used only as a still-image repeat.
+## Video
+
+✅ on `/v1/chat/completions` for Qwen3-VL, as a `video` content part of frames the client sampled; no container decoding (mp4 is out by decision).
+
+```json
+{"type": "video", "video": ["data:image/png;base64,...", "data:image/png;base64,..."], "fps": 2}
+```
+
+| field | rule |
+|---|---|
+| `video` | 2..768 frame image URLs, same rules as `image_url` (data URI; `http(s)` only with `--allow-remote-images`), all frames the same size |
+| `fps` | frame k sits at k/`fps` seconds; default 24 (HF `Qwen3VLProcessor` fallback) |
+| `timestamps` | one number per frame, seconds; overrides `fps` |
+
+- Frames pair up on the temporal axis (odd count repeats the last frame); each pair becomes one `<x.x seconds><\|vision_start\|>` + tokens + `<\|vision_end\|>` group, as `Qwen3VLProcessor` emits it.
+- Resize bound: t*h*w in 4096..25165824 pixels (`video_preprocessor_config.json`), capped at frames x the per-image patch budget; `cap_pixels_per_frame` off (transformers 5.17.0 default).
+- `imp-cli`: `--video-frames a.png,b.png,... [--video-fps F | --video-timestamps s0,s1,...]`.
+- Wrong frame count, unreadable or mixed-size frames: `400`. Model without a Qwen3-VL tower: `400 vision_unavailable`.
 
 ## Fill-in-the-middle
 

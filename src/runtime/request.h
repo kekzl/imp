@@ -300,6 +300,10 @@ struct Request {
     // A vector rather than one image: kernels address embeddings by "the k-th image token in the
     // prompt", a global index across every picture, so concatenating in prompt order suffices.
     std::vector<std::shared_ptr<QwenPatches>> qwen_patches;
+    // HF mm_token_type_ids (0 text, 1 image, 2 video) of the prompt, set by Engine::add_request when
+    // it folded <|video_pad|> into <|image_pad|> (fold_video_pads); empty for image-only prompts.
+    // One video frame pair = one qwen_patches entry, in prompt order with the images.
+    std::vector<uint8_t> qwen_token_types;
     // Hash of this request's image bytes, seeded into the prefix cache's block chain: without it,
     // every image token shares the same id and a second request could inherit the first one's
     // picture. Zero is refused the cache entirely, so a missed plumbing site degrades to "no

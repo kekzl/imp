@@ -360,7 +360,9 @@ def main():
     # a snapshot keeps its KV chain through the host tier (#2174, cudaMalloc).
     # 1179 -> 1180: KVCacheGrowTest.KeyMinmaxGrowsWithThePool (test-kv): sparse decode metadata grows
     # with a growable pool (#2360, VMM).
-    PINNED = 1180
+    # 1180 -> 1182: Qwen3VLPipelineTest.VideoFramePairsMatchHfReference (GPU) and
+    # Qwen3VLPipelineVideoStamps.TimestampIdsMatchHf (model tokenizer), test-e2e, run by make test-vision.
+    PINNED = 1182
 
     text = CMAKE.read_text()
     mods = module_sources(text)

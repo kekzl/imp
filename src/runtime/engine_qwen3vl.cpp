@@ -255,6 +255,23 @@ bool Engine::preprocess_image_qwen(std::span<const uint8_t> data, QwenPatches& o
     return qwen_vision_.is_ready() && qwen_vision_.preprocess(data, out);
 }
 
+bool Engine::preprocess_video_qwen(std::span<const std::span<const uint8_t>> frames,
+                                   std::vector<QwenPatches>& groups) const {
+    if (!qwen_vision_.is_ready())
+        return false;
+    if (frames.size() < 2 || frames.size() > kQwenVideoMaxFrames) {
+        IMP_LOG_ERROR("Qwen3-VL: a video needs 2..%zu frames, got %zu", kQwenVideoMaxFrames, frames.size());
+        return false;
+    }
+    return qwen_vision_.preprocess_video(frames, groups);
+}
+
+void Engine::add_pending_qwen_video(std::vector<QwenPatches> groups, size_t content_hash) {
+    for (auto& g : groups)
+        qwen_pending_patches_.push_back(std::make_shared<QwenPatches>(std::move(g)));
+    pending_image_hash_ = combine_image_hash(pending_image_hash_, content_hash);
+}
+
 int Engine::image_tokens_of(const QwenPatches& patches) const {
     return qwen_vision_.merged_tokens_of(patches);
 }
@@ -349,32 +366,35 @@ bool Engine::encode_qwen_image_for_(Request& req, cudaStream_t stream) {
 // M-RoPE sequence. Kept apart from the encode because it is pure bookkeeping
 // over the token ids and fails for entirely different reasons.
 bool Engine::build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& shapes) {
-    std::vector<uint8_t> is_image(req.input_tokens.size(), 0);
+    // Token types: from add_request's fold when the prompt held a video, else image pads only.
+    std::vector<uint8_t> types = req.qwen_token_types;
+    if (types.size() != req.input_tokens.size()) {
+        types.assign(req.input_tokens.size(), kMRopeText);
+        for (size_t i = 0; i < req.input_tokens.size(); ++i)
+            if (req.input_tokens[i] == qwen_image_pad_id_)
+                types[i] = kMRopeImage;
+    }
     int found = 0;
-    for (size_t i = 0; i < req.input_tokens.size(); ++i)
-        if (req.input_tokens[i] == qwen_image_pad_id_) {
-            is_image[i] = 1;
-            ++found;
-        }
+    for (uint8_t t : types)
+        found += (t != kMRopeText);
     int expected = 0;
     for (const auto& s : shapes)
         expected += s.tokens;
     if (found != expected) {
         // The prompt and the encoder describe different images. Every position
         // after the mismatch would be shifted, so this is fatal, not tolerated.
-        IMP_LOG_ERROR("Qwen3-VL: prompt reserves %d image tokens but %zu image(s) produced %d", found,
-                      shapes.size(), expected);
+        IMP_LOG_ERROR("Qwen3-VL: prompt reserves %d image/video tokens but %zu encoded item(s) produced %d",
+                      found, shapes.size(), expected);
         return false;
     }
 
-    // One grid per image, in prompt order. `qwen_build_mrope_positions` walks
-    // the runs of image tokens and takes the next grid at each one, so a second
-    // picture continues the (t, h, w) sequence rather than restarting it.
-    std::vector<MRopeImageGrid> grids;
-    grids.reserve(shapes.size());
+    // One shape per image and per video frame pair, in prompt order: the k-th vision run takes
+    // shapes[k]. qwen_build_mrope_positions_mm then continues the (t, h, w) sequence across runs.
+    std::vector<MRopeImageGrid> items;
+    items.reserve(shapes.size());
     for (const auto& s : shapes)
-        grids.push_back({s.grid_rows, s.grid_cols});
-    const auto mrope = qwen_build_mrope_positions(is_image, grids, 0);
+        items.push_back({s.grid_rows, s.grid_cols});
+    const auto mrope = qwen_build_mrope_positions_items(types, items, 0);
     if (!mrope) {
         IMP_LOG_ERROR("Qwen3-VL: %s", mrope.error().c_str());
         return false;
@@ -399,8 +419,10 @@ bool Engine::build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& s
         IMP_LOG_INFO("Qwen3-VL: %d image tokens (%dx%d), position delta %d", expected, shapes[0].grid_rows,
                      shapes[0].grid_cols, req.mrope_pos_delta);
     else
-        IMP_LOG_INFO("Qwen3-VL: %zu images, %d image tokens total, position delta %d", shapes.size(),
-                     expected, req.mrope_pos_delta);
+        IMP_LOG_INFO(
+            "Qwen3-VL: %zu encoded items (%d video tokens), %d vision tokens total, position delta %d",
+            shapes.size(), static_cast<int>(std::count(types.begin(), types.end(), kMRopeVideo)), expected,
+            req.mrope_pos_delta);
     return true;
 }
 

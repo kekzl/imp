@@ -252,10 +252,38 @@ def _is_utf8(s):
         return False
 
 
+def test_video_is_used_or_refused(m):
+    """A `video` part (client frames) follows the same contract as an image: used or a 400."""
+    print("\nvideo parts — used or refused, never accepted and dropped")
+    base = {"model": m, "max_tokens": 1, "temperature": 0}
+    status, body = post("/v1/chat/completions",
+                        dict(base, messages=[{"role": "user", "content": "Describe this video."}]))
+    if status != 200:
+        check("baseline text request works", False, f"got {status}")
+        return
+    baseline_tokens = body.get("usage", {}).get("prompt_tokens", 0)
+    video = {"type": "video", "video": [PNG_1X1, PNG_1X1], "fps": 2}
+    status, body = post("/v1/chat/completions", dict(base, messages=[
+        {"role": "user", "content": [{"type": "text", "text": "Describe this video."}, video]}]))
+    if status == 400:
+        err = body.get("error", {}) if isinstance(body, dict) else {}
+        check("video refusal names the cause", err.get("code") == "vision_unavailable", str(err.get("code")))
+        return
+    check("accepted video answered with 200", status == 200, f"got {status}")
+    if status == 200:
+        check("the video actually reached the model",
+              body.get("usage", {}).get("prompt_tokens", 0) > baseline_tokens + 4,
+              f"prompt_tokens {body.get('usage', {}).get('prompt_tokens')} vs {baseline_tokens}")
+    status, body = post("/v1/chat/completions", dict(base, messages=[
+        {"role": "user", "content": [{"type": "video", "video": [PNG_1X1]}]}]))
+    check("a one-frame video is a 400", status == 400, f"got {status}")
+
+
 def main():
     m = model_name()
     print(f"server: {BASE}   model: {m}")
     test_image_is_used_or_refused(m)
+    test_video_is_used_or_refused(m)
     test_non_ascii_survives_json_schema(m)
     test_eos_is_masked_while_the_document_is_open(m)
     print()

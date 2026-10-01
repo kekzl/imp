@@ -90,4 +90,32 @@ std::expected<MRopePositions, std::string> qwen_build_mrope_positions_mm(
     return MRopePositions{std::move(pos), cur};
 }
 
+std::expected<MRopePositions, std::string> qwen_build_mrope_positions_items(
+    const std::vector<uint8_t>& token_type, const std::vector<MRopeImageGrid>& items, int start_pos) {
+    std::vector<MRopeImageGrid> images;
+    std::vector<MRopeVideoGrid> videos;
+    size_t next = 0;
+    for (size_t i = 0; i < token_type.size();) {
+        const uint8_t t = token_type[i];
+        if (t == kMRopeText) {
+            ++i;
+            continue;
+        }
+        while (i < token_type.size() && token_type[i] == t)
+            ++i;
+        if (next >= items.size())
+            return std::unexpected("more vision runs in the prompt than the " + std::to_string(items.size()) +
+                                   " encoded item(s)");
+        const MRopeImageGrid& g = items[next++];
+        if (t == kMRopeVideo)
+            videos.push_back({1, g.rows, g.cols});
+        else
+            images.push_back(g);
+    }
+    if (next != items.size())
+        return std::unexpected("prompt holds " + std::to_string(next) + " vision runs but " +
+                               std::to_string(items.size()) + " items were encoded");
+    return qwen_build_mrope_positions_mm(token_type, images, videos, start_pos);
+}
+
 }  // namespace imp

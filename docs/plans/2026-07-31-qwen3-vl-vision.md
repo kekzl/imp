@@ -154,10 +154,10 @@ Three things this plan listed as open have since closed:
 
 **Still open**, tracked as the remainder of gap 2 in [`../roadmap.md`](../roadmap.md):
 
-- **Videos.** `temporal_patch_size` exists but only as a still-image repeat: there
-  is no frame axis on `QwenPatches`, no temporal axis in M-RoPE (every image token
-  in a run shares one `t`), no `<|video_pad|>`, and no decoder — only `stb` is
-  vendored.
+- **Videos.** CLOSED 2026-10-01 (#2363, #2370): client-sampled frames, one
+  `QwenPatches` per frame pair, `<x.x seconds>` layout and HF `get_rope_index`
+  positions; no container decoding by decision. Request shape:
+  [`API_FEATURES.md`](../API_FEATURES.md#video).
 - **A second VL family.** There is no vision arch registry; `vision_type ==
   "qwen3_vl"` is one branch, and anything else logs "vision tower will be skipped"
   and runs text-only.

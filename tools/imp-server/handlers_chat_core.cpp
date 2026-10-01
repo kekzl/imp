@@ -5,6 +5,7 @@
 #include "runtime/engine.h"
 #include "handlers.h"
 #include "handlers_internal.h"
+#include "vision_parts.h"
 
 #include <tuple>
 #include "model/image_placeholders.h"
@@ -187,7 +188,14 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             ctx.snap.stop_token_ids.push_back(state.think_start_id);
         }
         model_has_vision = state.ctx && state.ctx->engine->has_vision();
-        ctx.snap.has_vision_request = !ctx.params.images.empty() && model_has_vision;
+        ctx.snap.has_vision_request = (!ctx.params.images.empty() || !ctx.params.videos.empty()) &&
+                                      model_has_vision;
+    }
+    if (!ctx.params.videos.empty() && !(state.ctx && state.ctx->engine->has_qwen_vision())) {
+        send_json_error(res, 400, "invalid_request_error",
+                        "This model cannot take video parts: video input needs a Qwen3-VL checkpoint.",
+                        nullptr, "vision_unavailable");
+        return false;
     }
 
     // Refuse (not silently drop) images when the loaded model has no vision tower: a fluent
@@ -281,27 +289,16 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         // one would slide every later picture onto the wrong placeholder.
         if (!ctx.params.image_error.empty())
             return fail(ctx.params.image_error);
-        // Salts the prefix cache so a hit needs the same pictures, not just the
-        // same token ids (every image token shares one id). Folded in order, so
-        // the same two images the other way round are a different key.
-        ctx.snap.vision_content_hash = 0;
-        for (const auto& bytes : ctx.params.images)
-            ctx.snap.vision_content_hash = imp::combine_image_hash(ctx.snap.vision_content_hash,
-                                                                   imp::image_content_hash(bytes));
+        // Salts the prefix cache so a hit needs the same pictures and frames, not just the same
+        // token ids (every image token shares one id). Folded in content order.
+        ctx.snap.vision_content_hash = vision_parts_hash(ctx.params);
         if (state.ctx->engine->has_qwen_vision()) {
-            // Dynamic resolution: patchify now (CPU only) so the token counts
-            // are known before the prompt is tokenized — each placeholder has
-            // to be expanded to exactly its own picture's count.
-            for (const auto& bytes : ctx.params.images) {
-                auto patches = std::make_shared<imp::QwenPatches>();
-                if (!state.ctx->engine->preprocess_image_qwen(bytes, *patches))
-                    return fail("Failed to process image");
-                const int tokens = state.ctx->engine->image_tokens_of(*patches);
-                if (tokens <= 0)
-                    return fail("Failed to process image");
-                ctx.snap.qwen_image_tokens.push_back(tokens);
-                ctx.snap.qwen_patches.push_back(std::move(patches));
-            }
+            // Dynamic resolution: patchify now (CPU only) so each placeholder expands to its own
+            // picture's (or frame pair's) token count before the prompt is tokenized.
+            if (const std::string err = qwen_preprocess_vision_parts(*state.ctx->engine, ctx.params,
+                                                                     ctx.snap);
+                !err.empty())
+                return fail(err);
         } else if (ctx.params.images.size() > 1) {
             // The mmproj tower encodes one image into a fixed token count and
             // has no notion of a second. Refusing beats answering about one of
@@ -394,9 +391,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         // Chat template renders one <|image_pad|> per image before sizes are known (smart_resize runs
         // after). Placed on the first user turn (the position the parser reliably tracks), rendered,
         // then each placeholder expands to its real token count.
-        std::string blocks;
-        for (size_t i = 0; i < ctx.snap.qwen_patches.size(); ++i)
-            blocks += "<|vision_start|><|image_pad|><|vision_end|>";
+        const std::string blocks = qwen_vision_blocks(ctx.params.vision_order);
         auto msgs = ctx.params.chat_msgs;
         for (auto& m : msgs)
             if (m.role == "user") {
@@ -405,10 +400,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             }
         ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, msgs, ctx.snap.suppress_thinking,
                                                   force_thinking, ctx.snap.reasoning_effort);
-        const int32_t pad_id = ctx.snap.tok->find_token("<|image_pad|>");
-        const auto expanded = pad_id < 0 ? std::unexpected(std::string("tokenizer has no <|image_pad|>"))
-                                         : imp::expand_image_placeholders(ctx.snap.tokens, pad_id,
-                                                                          ctx.snap.qwen_image_tokens);
+        const auto expanded = qwen_expand_vision_placeholders(ctx.snap);
         if (!expanded) {
             res.status = 400;
             json error = {{"error", {{"message", expanded.error()}, {"type", "invalid_request_error"}}}};
