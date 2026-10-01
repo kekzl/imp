@@ -5,7 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Fixed
-- cuBLASLt algo probe no longer times candidates inside a graph capture (#2396): a cold shape there takes a host-checked heuristic pick, and each batch size runs one eager step before its capture. Qwen3.8-27B bs=48: 47/48 -> 48/48 decode graphs, 48-stream 1537.2 -> 2015.6 tok/s.
+- cuBLASLt algo probe no longer times candidates inside a graph capture (#2396): a cold shape there takes a host-checked heuristic pick, and each batch size runs one eager step before its capture. Qwen3.8-27B bs=48: 47/48 -> 48/48 decode graphs, captured M=47/48 GEMMs use the benchmarked algo; 48-stream median 1528.7 / 1587.4 -> 1970.9 / 1967.2 tok/s.
 
 ## [0.47.0] - 2026-10-01
 
