@@ -507,15 +507,7 @@ bool Engine::init_kv_cache() {
     // The clamp above answers "what fits right now"; a growable pool keeps the
     // pre-clamp number as its ceiling and commits the clamped one, so a reading
     // skewed by another process still releasing VRAM is not final.
-    // enable_key_minmax refuses a growable pool: with sparse decode requested the pool stays
-    // fixed, or the feature is a no-op and the plan charge above pays for nothing (#2360).
-    const bool kv_growable = runtime_config_.kv_cache.growable && sparse_minmax_bytes_per_layer == 0;
-    if (runtime_config_.kv_cache.growable && !kv_growable)
-        IMP_LOG_INFO(
-            "KV cache: fixed pool of %d blocks, kv_cache.growable off: "
-            "attention.sparse_topk_tokens needs a fixed pool for its key min/max metadata",
-            max_blocks);
-    const int kv_ceiling_blocks = kv_growable ? kv_blocks_planned : 0;
+    const int kv_ceiling_blocks = runtime_config_.kv_cache.growable ? kv_blocks_planned : 0;
     // What the pool was actually built with; the retry loop below may lower it.
     int kv_ceiling_effective = kv_ceiling_blocks;
     if (kv_ceiling_blocks > 0) {
@@ -685,7 +677,8 @@ bool Engine::init_kv_cache() {
 
     // attention.sparse_topk_tokens: per-block key min/max metadata pool. Gate rule:
     // sparse_minmax_refusal (shared with the plan charge above); enable_key_minmax also
-    // refuses per-layer geometry and growable pools. A refusal disables the feature loudly.
+    // refuses per-layer geometry; a growable pool grows the metadata with it. A refusal disables
+    // the feature loudly.
     if (runtime_config_.attention.sparse_topk_tokens > 0) {
         const char* refuse = sparse_minmax_refusal(config_.kv_cache_dtype, mcfg.is_mla(),
                                                    runtime_config_.speculative.token_recycling,
@@ -694,9 +687,10 @@ bool Engine::init_kv_cache() {
             IMP_LOG_WARN("attention.sparse_topk_tokens=%d ignored: %s",
                          runtime_config_.attention.sparse_topk_tokens, refuse);
         } else if (!kv_cache_raw_->enable_key_minmax()) {
-            IMP_LOG_WARN("attention.sparse_topk_tokens=%d ignored: metadata pool unavailable "
-                         "(per-layer KV geometry, growable pool, or allocation failure)",
-                         runtime_config_.attention.sparse_topk_tokens);
+            IMP_LOG_WARN(
+                "attention.sparse_topk_tokens=%d ignored: metadata pool unavailable "
+                "(per-layer KV geometry or allocation failure)",
+                runtime_config_.attention.sparse_topk_tokens);
         }
     }
 

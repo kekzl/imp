@@ -104,7 +104,8 @@ public:
     double probe_residency();
     // K plus V bytes one block commits across every attention layer (the
     // scale planes are allocated for the ceiling up front and cost nothing at
-    // growth). What try_grow_to() prices a block at against free VRAM.
+    // growth), plus the key min/max metadata when it grows with the pool. What try_grow_to()
+    // prices a block at against free VRAM.
     size_t bytes_per_block() const;
 
     // Commit memory for at least `wanted` blocks and make them allocatable. Returns the
@@ -285,6 +286,8 @@ private:
     // Sparse decode attention key min/max metadata (see enable_key_minmax).
     void* minmax_pool_ = nullptr;
     size_t minmax_block_bytes_ = 0;  // n_kv_heads * head_dim * 2 * sizeof(half)
+    Region minmax_region_;           // growable pool only: committed with the KV blocks
+    bool commit_minmax_(int from, int to);
 
     // copy_blocks_device per-layer offset table (lazy device upload):
     // 6 size_t per layer {k_off, v_off, block_bytes, k_scale_off,
