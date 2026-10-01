@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-10-01
+Last reviewed: 2026-10-02
 
 Single-author, single-GPU experiment: "roadmap" means current focus, not
 schedule. Shipped work is in [`CHANGELOG.md`](../CHANGELOG.md), competitive
@@ -45,12 +45,14 @@ Rows 1-15 are closed (index below); new rows start at 16, ranked by what an agen
 | 16 | long sessions decode faster with no flag | sparse decode opt-in, Qwen3-8B 32k 160.3 -> 199.5 tok/s (+24.5 %) when on -> default on; flips only after NIAH + PPL on every hero model (GPU gate) | S | `docs/archive/roadmap_ledger_2026_09_28.md:18 199.5`, #2405 |
 | 17 | long-prompt ingest finishes sooner with no flag | sparse prefill opt-in, Qwen3.8-27B pp77824 6835.55 -> 10529.05 tok/s (1.54x), NIAH 10/10, PPL +0.26 % -> default on; flips only after NIAH + PPL on every hero model (GPU gate) | S | `CHANGELOG.md:18 10529.05`, #2406 |
 | 18 | an agent's next turn keeps its prefix hit while other sessions fill the KV pool | prefix eviction is session-blind -> request `session_id` pins that session's prefix blocks | S | [SGLang #29173](https://github.com/sgl-project/sglang/pull/29173), [TRT-LLM #16115](https://github.com/NVIDIA/TensorRT-LLM/pull/16115), #2407 |
-| 19 | overload is rejected by queued prompt tokens, not only by request count | admission gate is `max_concurrent` requests, 429 when full -> plus a `max_queued_tokens` bound | S | `tools/imp-server/handlers.h:299 max_concurrent`, `tools/imp-server/main.cpp:311 429`, [vLLM #49445](https://github.com/vllm-project/vllm/pull/49445), #2408 |
+| 19 | overload is rejected by queued prompt tokens, not only by request count | admission gate is `max_concurrent` requests, 429 when full -> plus a `max_queued_tokens` bound | S | `tools/imp-server/handlers.h:299 max_concurrent`, `tools/imp-server/main.cpp:312 stays 429`, [vLLM #49445](https://github.com/vllm-project/vllm/pull/49445), #2408 |
 | 20 | parallel agents sharing one system prompt hit the hybrid prefix cache | recurrent snapshots at block boundaries -> snapshot at the branch point; upstream hit rate 43.8 -> 60.8 % | M | [vLLM #37898](https://github.com/vllm-project/vllm/pull/37898), [SGLang #34565](https://github.com/sgl-project/sglang/pull/34565), #2409 |
 | 21 | Qwen3-Coder-Next runs on imp | arch falls back to GENERIC -> registry `qwen3_next` + MoE host offload | S | [HF](https://huggingface.co/Qwen/Qwen3-Coder-Next), `src/model/model.cpp:375 loading as GENERIC`, #2410 |
 | 22 | Devstral-Small-2 stays correct on long contexts | `Mistral3ForConditionalGeneration` maps to MISTRAL, `llama_4_scaling_beta` unread -> scaling applied; wrong long-context output suspected from code, not run | S | [HF](https://huggingface.co/mistralai/Devstral-Small-2-24B-Instruct-2512), `src/model/model.cpp:357 Mistral3ForConditionalGeneration`, #2411 |
 | 23 | Granite 4.2 runs on imp | arch falls back to GENERIC -> own arch with attention and residual multipliers | S | [HF](https://huggingface.co/ibm-granite/granite-4.2-30b), `src/model/model.cpp:375 loading as GENERIC`, #2412 |
 | 24 | toolkit fixes reach the image, grouped NVFP4 cuBLASLt re-probed | CUDA 13.4.1 -> 13.4.2; `cublasLtMatmulGrouped` NVFP4 returns zero algos on sm_120 -> probe result recorded | S | `Dockerfile:25 13.4.1-devel`, `docs/internals/SM120.md:113 cublasLtMatmulGrouped`, [13.4.2](https://hub.docker.com/r/nvidia/cuda/tags?name=13.4.2), #2413 |
+| 57 | server prefill of short prompts reaches the graphed path | server ragged prefill never graphed; Qwen3-30B-A3B-NVFP4 pp512 eager 20024.43 vs graphed 24708.99 tok/s, gap 19.0 % -> length-bucketed graphs for the ragged path | M | `tools/roofline/PERF_LOG.md:147 20024.43`, `tools/roofline/PERF_LOG.md:162 never reaches it`, #2435 |
+| 58 | a fresh container plans the measured library reserve | `--rm` server plans the 3900 MiB constant vs measured 1930 MiB, Qwen3.8-27B 975 vs 2025 KV blocks, gap 51.9 % -> measured reserve at first start | S | `docs/LIMITATIONS.md:57 3900 MiB constant`, #2436 |
 
 ## Next
 
@@ -73,6 +75,12 @@ Rows 1-15 are closed (index below); new rows start at 16, ranked by what an agen
 | 39 | users can verify the released image | no SBOM or attestation in the release workflow -> SBOM + signed provenance per tag | S | [`release-docker.yml`](../.github/workflows/release-docker.yml), #2428 |
 | 40 | vision agents can pass https image URLs | `CPPHTTPLIB_OPENSSL_SUPPORT` never defined, https fails -> httplib built with OpenSSL | M | `tools/imp-server/image_fetch.cpp:249 needs an imp built with OpenSSL`, #2429 |
 | 41 | build image carries current CMake fixes | CMake 4.3.1 -> 4.3.5 or 4.4.3 | S | `Dockerfile:38 cmake-4.3.1`, [v4.3.5](https://github.com/Kitware/CMake/releases/tag/v4.3.5), [v4.4.3](https://github.com/Kitware/CMake/releases/tag/v4.4.3), #2430 |
+| 59 | MoE long prompts keep the GPU busy | pp4096 nvfp4-q36-35b wall 185.5 vs kernel sum 125.5 ms, idle 32.4 %, gemma4-26b 27.7 %, cause unattributed -> re-measure on current tree first (inventory predates the serial prefill graph change), then close the idle | M | `tools/roofline/inventory/KERNELS.md:80 32.4 %`, `tools/roofline/inventory/KERNELS.md:81 27.7 %`, `tools/roofline/PERF_LOG.md:155 offset-0 chunk captured`, #2437 |
+| 60 | Gemma-4-26B Q4_K_M ingests prompts at llama.cpp speed | pp512 8946 vs llama.cpp 10749 tok/s, gap 16.8 %, Q5_1 raw IMMA 19.9 % of the cell; archive Q4_K refutation covers dense only -> pp512 >= 10749 | M | `docs/BENCHMARKS.md:84 10749`, `tools/roofline/inventory/KERNELS.md:58 19.9 %`, `docs/archive/roadmap_ledger_2026_09_28.md:355 Q4_K_M prefill gap`, #2438 |
+| 61 | Q4_K MoE decode reaches the NVFP4 rate | Qwen3-30B-A3B tg128 Q4_K_M 324.65 vs NVFP4 389.79 tok/s, gap 16.7 %, `moe_gate_up<Q4_K>` DRAM active 60.3 %, L2 prefetch and NR=2/4 refuted -> tg128 >= 370; distinct from row 56 (launch time) | L | `docs/scoreboard.tsv:21 324.65`, `docs/scoreboard.tsv:20 389.79`, `tools/roofline/PERF_LOG.md:26 60.3 %`, `tools/roofline/PERF_LOG.md:22 L2 prefetch`, `tools/roofline/PERF_LOG.md:23 NR = 2 / 4`, #2439 |
+| 62 | NVFP4 KV decode attention reads at the F16 rate | NVFP4 paged decode 614 GB/s vs F16 multitok 1644 GB/s, gap 62.7 %, conversion-bound -> >= 1200 GB/s | M | `docs/archive/roadmap_ledger_2026_09_28.md:143 614 GB/s`, `docs/plans/2026-09-04-lever-ledger-detail.md:49 1644 GB/s`, `docs/plans/2026-09-04-lever-ledger-detail.md:46 conversion-bound`, #2440 |
+| 63 | Q4_K MoE prefill IMMA kernel leaves the issue bound | `mmq_imma_q4k_raw_kernel` 47.0 % of q4k-q3-30b pp512, tensor pipe ~25 % of 969.3 TOPS, 229 regs -> scale epilogue, PTX `ldmatrix.m8n16.x?.s8.s4` (ISA 9.4 sec 9.7.16.5.15) for the nibble unpack; risk: ldmatrix.x4 on Q8 IMMA -6.7 % at 240 regs | M | `tools/roofline/inventory/KERNELS.md:36 47.0 %`, `tools/roofline/PERF_LOG.md:59 tensor pipe ~25 %`, `tools/roofline/peaks/PEAKS.md:58 969.3`, `src/compute/mmq_q8_imma_q4k.cu:202 __vsub4`, `tools/roofline/PERF_LOG.md:77 -6.7 %`, #2441 |
+| 64 | gpt-oss FA2 at hd=64 nears the FP16 tensor peak | FA2 hd=64 119.5 of 246 TFLOPS, 13.8 % of pp4096, occupancy 16.3 %, 151 regs -> 85 % of peak; distinct from the hd=128 price-out | M | `tools/roofline/PERF_LOG.md:175 119.5`, `tools/roofline/inventory/KERNELS.md:67 13.8 %`, `docs/archive/roadmap_ledger_2026_09_28.md:159 deeper in-CTA FA2 pipelining`, #2442 |
 
 ## Later
 
@@ -93,6 +101,10 @@ Rows 1-15 are closed (index below); new rows start at 16, ranked by what an agen
 | 54 | GPU tests run in CI | no GPU runner -> owner decision: self-hosted runner runs fork code | M | owner decision, no issue |
 | 55 | users get a binary without Docker | releases ship the Docker image only -> release binaries | M | [`release-docker.yml`](../.github/workflows/release-docker.yml), no issue |
 | 56 | GGUF MoE decode spends less host launch time | host graph launch -> device graph launch for GGUF MoE | L | `src/runtime/engine.h:1026 graph launch when possible`, no issue |
+| 65 | Q8_0 prompts get more of the INT8 tensor peak | pp512 `mmq_imma_kernel` tensor pipe 25.1 / 23.3 / 25.7 % vs 969.3 TOPS -> re-measure first, counters predate the +11.4 % change; related row 27 | M | `tools/roofline/PERF_LOG.md:69 25.1 / 23.3 / 25.7`, `tools/roofline/peaks/PEAKS.md:58 969.3`, `tools/roofline/PERF_LOG.md:84 +11.4 %`, no issue |
+| 66 | 32 streams reach first token without a p99 tail | Qwen3-8B-NVFP4 c=32 TTFT p99 238 ms, no ceiling measured -> ceiling measured | M | `docs/PERF.md:116 232 / 238`, no issue |
+| 67 | Mamba2 hybrids ingest long prompts faster | `ssm_scan_reg_kernel` 25.8 % of Nemotron pp4096 -> chunked SSD on tensor cores, gives up bit identity | L | `tools/roofline/inventory/KERNELS.md:69 25.8 %`, `tools/roofline/PERF_LOG.md:237 chunked SSD form`, no issue |
+| 68 | Flash-Next serves sooner after start | ready-to-serve 97.7 s, pinning step 67.15 s, no ceiling measured -> ceiling measured | M | `docs/QUICKSTART.md:143 97.7 s`, `CHANGELOG.md:59 67.15 s`, no issue |
 
 ## Not gaps
 
