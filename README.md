@@ -106,7 +106,7 @@ IMP_IMAGE=ghcr.io/kekzl/imp:latest STAGE_DIR=~/models/Qwen3.8-Flash-Next-NVFP4 s
 docker run -d --name imp-server --gpus all -v ~/models:/models -p 127.0.0.1:8090:8090 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --port 8090
 curl -s http://localhost:8090/health | jq -c '{status,kv_blocks_total,kv_capacity_tokens}'
 ```
-**Ready** after 97.7 s: `Server listening on http://0.0.0.0:8090` in `docker logs imp-server`, `/health` prints `{"status":"ok","kv_blocks_total":1900,"kv_capacity_tokens":30400}`. Image, RAM, measurements: [`docs/QUICKSTART.md`](docs/QUICKSTART.md#qwen38-flash-next).
+**Ready** after 97.7 s: `Server listening on http://0.0.0.0:8090` in `docker logs imp-server`, `/health` prints `{"status":"ok","kv_blocks_total":1900,"kv_capacity_tokens":30400}`. Image v0.46.0 or later; RAM, measurements: [`docs/QUICKSTART.md`](docs/QUICKSTART.md#qwen38-flash-next).
 ## Using it
 
 - **In the browser:** <http://localhost:8080>, the built-in chat.
