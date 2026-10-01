@@ -5,6 +5,7 @@
 #include "memory/vram_allocator.h"
 #include "model/model.h"
 #include "model/safetensors_loader.h"
+#include "model/tokenizer.h"
 #include "vision/image_processor.h"
 #include "vision/qwen3vl_pipeline.h"
 #include "vision/qwen3vl_vision_load.h"
@@ -18,6 +19,9 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -163,6 +167,93 @@ TEST_F(Qwen3VLPipelineTest, TokenCountMatchesTheResizedGrid) {
     EXPECT_EQ(img.grid_rows, sr.height / factor);
     EXPECT_EQ(img.grid_cols, sr.width / factor);
     EXPECT_EQ(img.tokens, (sr.height / factor) * (sr.width / factor));
+}
+
+// --- Video ---------------------------------------------------------------------------------
+
+const std::string kRedPanda = "tests/fixtures/qwen3vl_video/red_panda";
+
+std::vector<uint8_t> read_file(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+}
+
+// Raw 16-bit LE file -> floats; bf16 = high half of an fp32, f16 = IEEE half.
+std::vector<float> read_16bit(const std::string& path, bool bf16) {
+    const auto raw = read_file(path);
+    std::vector<float> out(raw.size() / 2);
+    for (size_t i = 0; i < out.size(); ++i) {
+        const uint16_t b = static_cast<uint16_t>(raw[2 * i] | (raw[2 * i + 1] << 8));
+        if (bf16) {
+            const uint32_t u = static_cast<uint32_t>(b) << 16;
+            std::memcpy(&out[i], &u, sizeof(float));
+        } else {
+            __half h;
+            std::memcpy(&h, &b, sizeof(b));
+            out[i] = __half2float(h);
+        }
+    }
+    return out;
+}
+
+double rel_l2(const std::vector<float>& a, const std::vector<float>& ref) {
+    double num = 0.0, den = 0.0;
+    for (size_t i = 0; i < ref.size(); ++i) {
+        num += (static_cast<double>(a[i]) - ref[i]) * (static_cast<double>(a[i]) - ref[i]);
+        den += static_cast<double>(ref[i]) * ref[i];
+    }
+    return std::sqrt(num / den);
+}
+
+// 8 frames of red-panda.mp4 at 192x320 (tools/qwen3vl_video_fixture/run_encoder_ref.sh): 4 frame
+// pairs, each encoded like an image, concatenated == HF's video merger output. Bound 1e-2 relL2 vs
+// the HF FP32 tower; HF's own BF16 run sits at 9.84e-2 from it, FP16 at 6.53e-3 (encoder_ref.txt).
+TEST_F(Qwen3VLPipelineTest, VideoFramePairsMatchHfReference) {
+    std::vector<std::vector<uint8_t>> frames;
+    for (int k = 1; k <= 8; ++k)
+        frames.push_back(read_file(kRedPanda + "/frame_" + std::to_string(k) + ".png"));
+    ASSERT_FALSE(frames.back().empty()) << "missing fixture " << kRedPanda;
+    std::vector<std::span<const uint8_t>> spans(frames.begin(), frames.end());
+    std::vector<QwenPatches> groups;
+    ASSERT_TRUE(pipeline_.preprocess_video(spans, groups));
+    ASSERT_EQ(groups.size(), 4u);
+    EXPECT_EQ(groups[0].grid_h, 20);
+    EXPECT_EQ(groups[0].grid_w, 12);
+
+    const int dim = pipeline_.embedding_dim();
+    const size_t per_group = static_cast<size_t>(pipeline_.merged_tokens_of(groups[0])) * dim;
+    half* d_out = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_out, per_group * groups.size() * sizeof(half)), cudaSuccess);
+    for (size_t g = 0; g < groups.size(); ++g) {
+        Qwen3VLImage shape;
+        ASSERT_TRUE(pipeline_.encode_patches_to(groups[g], d_out + g * per_group, {}, shape, nullptr));
+        EXPECT_EQ(shape.grid_rows, 10);
+        EXPECT_EQ(shape.grid_cols, 6);
+    }
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    const auto got = read_back(d_out, per_group * groups.size());
+    cudaFree(d_out);
+
+    const auto fp32 = read_16bit(kRedPanda + "/encoder_ref_fp32.f16", false);
+    const auto bf16 = read_16bit(kRedPanda + "/encoder_ref.bf16", true);
+    ASSERT_EQ(fp32.size(), got.size());
+    ASSERT_EQ(bf16.size(), got.size());
+    const double r32 = rel_l2(got, fp32), r16 = rel_l2(got, bf16);
+    std::printf("[video-encoder] tokens=%zu dim=%d relL2_vs_hf_fp32=%.4e relL2_vs_hf_bf16=%.4e\n",
+                got.size() / dim, dim, r32, r16);
+    RecordProperty("relL2_vs_hf_fp32", std::to_string(r32));
+    RecordProperty("relL2_vs_hf_bf16", std::to_string(r16));
+    EXPECT_LE(r32, 1e-2);
+}
+
+// "<x.x seconds>" goes through imp's tokenizer on the server and CLI paths: ids must equal HF's.
+TEST(Qwen3VLPipelineVideoStamps, TimestampIdsMatchHf) {
+    if (!model_dir())
+        GTEST_SKIP() << "IMP_TEST_MODEL_QWEN3VL not set";
+    Tokenizer tok;
+    ASSERT_TRUE(tok.load(std::string(model_dir()) + "/tokenizer.json"));
+    EXPECT_EQ(tok.encode("<0.1 seconds>"), (std::vector<int32_t>{27, 15, 13, 16, 6486, 29}));
+    EXPECT_EQ(tok.encode("<1.2 seconds>"), (std::vector<int32_t>{27, 16, 13, 17, 6486, 29}));
 }
 
 }  // namespace

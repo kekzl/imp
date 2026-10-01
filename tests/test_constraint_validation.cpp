@@ -208,6 +208,14 @@ TEST(ContentParts, UnknownTypeIsRejectedAndNamed) {
         << "the message must name the part it could not read";
 }
 
+// A `video` part of frame URLs passes; without the frame array it is rejected.
+TEST(ContentParts, VideoFramesAreAcceptedOnlyAsAnArray) {
+    EXPECT_TRUE(parts_ok(
+        json::array({{{"type", "video"}, {"video", json::array({"data:a", "data:b"})}, {"fps", 2}}})));
+    EXPECT_FALSE(parts_ok(json::array({{{"type", "video"}, {"video", "data:a"}}})));
+    EXPECT_FALSE(parts_ok(json::array({{{"type", "video"}}})));
+}
+
 // `{"type":"image_url"}` with the object missing took the same silent path.
 TEST(ContentParts, ImagePartWithoutTheObjectIsRejected) {
     EXPECT_FALSE(parts_ok(json::array({{{"type", "image_url"}}})));

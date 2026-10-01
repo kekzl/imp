@@ -206,6 +206,7 @@ bool Engine::init_features() {
             qwen_image_pad_id_ = model_->tokenizer()->find_token("<|image_pad|>");
             if (qwen_image_pad_id_ < 0)
                 IMP_LOG_WARN("Qwen3-VL: no <|image_pad|> in the tokenizer — images unavailable");
+            qwen_video_pad_id_ = model_->tokenizer()->find_token("<|video_pad|>");
         }
     }
 

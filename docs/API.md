@@ -22,7 +22,7 @@ all of them at once.
 
 | endpoint | status | notes |
 |---|---|---|
-| `POST /v1/chat/completions` | ✅ | the main one. Text and image content parts |
+| `POST /v1/chat/completions` | ✅ | the main one. Text, image and video (client frames) content parts |
 | `POST /v1/completions` | ✅ | legacy text completion. `prompt`: a string, a token-id list, or a one-element list of either; a batch of prompts is a 400, like `n > 1`. `suffix` = fill-in-the-middle, see [FIM](API_FEATURES.md#fill-in-the-middle) |
 | `POST /infill` | ✅ | llama.cpp fill-in-the-middle (`input_prefix`, `input_suffix`, `input_extra`, `prompt`), see [FIM](API_FEATURES.md#fill-in-the-middle) |
 | `POST /v1/messages` | ✅ | Anthropic. Real per-token SSE, `ping` keepalives |

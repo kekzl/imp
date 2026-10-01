@@ -89,6 +89,23 @@ std::string qwen_video_timestamp_text(double seconds) {
     return buf;
 }
 
+std::vector<uint8_t> fold_video_pads(std::vector<int32_t>& tokens, int32_t image_pad_id,
+                                     int32_t video_pad_id) {
+    if (video_pad_id < 0 || image_pad_id < 0 ||
+        std::find(tokens.begin(), tokens.end(), video_pad_id) == tokens.end())
+        return {};
+    std::vector<uint8_t> types(tokens.size(), 0);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        if (tokens[i] == image_pad_id) {
+            types[i] = 1;
+        } else if (tokens[i] == video_pad_id) {
+            types[i] = 2;
+            tokens[i] = image_pad_id;
+        }
+    }
+    return types;
+}
+
 size_t image_content_hash(std::span<const uint8_t> data) {
     size_t h = 0xcbf29ce484222325ULL;
     for (const uint8_t b : data) {
