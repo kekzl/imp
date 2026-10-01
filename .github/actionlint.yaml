@@ -1,0 +1,7 @@
+# actionlint: runner labels its bundled list does not know yet.
+# ubuntu-26.04: GitHub-hosted image every job uses. gpu, cuda: the self-hosted `Test` runner.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - gpu
+    - cuda
