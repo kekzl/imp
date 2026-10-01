@@ -56,25 +56,14 @@ struct Plan {
     // Switched off via the group selector (own line: a longer name here would
     // re-align the comment column of every field above it).
     int groups_disabled = 0;
+    std::string groups;  // the selector that ran, explicit or default_groups(n_rep)
+    int64_t n_rep = 1;
     std::vector<std::string> notes;
 };
 
-// The four groups of awq_plan.cpp, selectable so a bad result can be attributed to one instead
-// of "calibration". Default is all four (ABCD).
-// --calib measurably HELPS Qwen3-0.6B/1.7B and HURTS wide-GQA Qwen3-14B (9.93->12.60 PPL): the
-// harm is the ATTENTION groups (A, C) and mostly their interaction (A alone +0.65, C alone
-// +0.02, AxC +1.36 at n_rep=5); FFN groups (BD) are clean (BD -0.13, BDxC +0.03). Prefer "BD"
-// on wide-GQA models, the default on narrow-GQA ones.
-// C's n_rep dependence: its statistic (a max, tied across query heads sharing a KV head) is the
-// search's WEIGHT, so wide GQA makes the search minimise the wrong function.
-// E and G are the GDN sites of qwen3_5 hybrids (awq_sites.h), absent elsewhere so they change
-// nothing on a dense model; NOT yet measured on a hybrid - score any export using them against
-// its uncalibrated twin first.
-constexpr const char* kAwqAllGroups = "ABCDEG";
-
 // Builds the transform from a calibration file and the checkpoint's own config.json. `groups`
-// selects which of A/B/C/D run. Returns false with `err` set when the architecture's pre-norm
-// layout isn't one this transform is valid for.
+// selects which of A/B/C/D/E/G run (awq_sites.h), empty = default_groups(n_rep). Returns false
+// with `err` set when the architecture's pre-norm layout isn't one this transform is valid for.
 [[nodiscard]] std::expected<Plan, std::string> build_plan(
     const std::map<std::string, const RawTensor*>& index, const CalibrationStats& stats,
     const std::string& config_json_path, const std::string& groups, bool weight_sq = false);

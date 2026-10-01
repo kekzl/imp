@@ -60,11 +60,10 @@ struct Options {
     std::string in_dir, out_dir;
     std::string calib_file;  // --calib: activation statistics for AWQ scaling
     // --calib-groups: which AWQ scale groups run, for attributing a bad result.
-    std::string calib_groups = awq::kAwqAllGroups;
-    // Which activation moment weights the AWQ search's error: "abs" is the shipped
-    // (mean|x|/s)^2, "sq" the second moment E[x^2]/s^2 the layer's output error actually calls
-    // for (calibration_stats.h). Opt-in until measured against roadmap item 6, where --calib still
-    // hurts at wide GQA.
+    // Empty = awq::default_groups(n_rep), resolved against config.json in build_plan.
+    std::string calib_groups;
+    // AWQ search error weight: "abs" (mean|x|/s)^2, "sq" E[x^2]/s^2 (calibration_stats.h).
+    // sq: Qwen3-0.6B ABCD -1.10 % PPL, Qwen3-14B BD +0.15 PPL; default abs.
     bool calib_weight_sq = false;
     bool quantize_lm_head = false;  // imp has its own lm_head NVFP4 policy (#982)
     // Keep a fused Q+gate q_proj out of NVFP4. OFF by default: the gate half carries the #1273
@@ -402,7 +401,8 @@ int main(int argc, char** argv) {
             // An unknown letter here would silently select fewer groups than the
             // caller meant and quietly change what the checkpoint is — the same
             // shape as the `--set` unknown-key hole closed in #1186.
-            if (opt.calib_groups.find_first_not_of(awq::kAwqAllGroups) != std::string::npos) {
+            if (opt.calib_groups.empty() ||
+                opt.calib_groups.find_first_not_of(awq::kAwqAllGroups) != std::string::npos) {
                 fprintf(stderr, "imp-quantize: --calib-groups '%s' has a letter outside %s\n",
                         opt.calib_groups.c_str(), awq::kAwqAllGroups);
                 return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
@@ -557,7 +557,7 @@ int main(int argc, char** argv) {
         printf("AWQ: %d groups scaled, %d kept round-to-nearest, %d skipped", plan.groups_scaled,
                plan.groups_rtn, plan.groups_skipped);
         if (plan.groups_disabled > 0)
-            printf(", %d disabled (--calib-groups %s)", plan.groups_disabled, opt.calib_groups.c_str());
+            printf(", %d disabled (groups %s)", plan.groups_disabled, plan.groups.c_str());
         if (plan.channels_clamped > 0)
             printf(", %d norm channel(s) clamped to what the dtype can store", plan.channels_clamped);
         printf("\n");
@@ -937,16 +937,17 @@ int main(int argc, char** argv) {
         // improve on every group and still leave the model worse. On Qwen3-14B, two independently
         // produced calibration files gave PPL 9.93 (round-to-nearest) vs 12.60/12.29 (calibrated).
         // Attributed via --calib-groups: the harm is the ATTENTION groups on wide GQA, mostly their
-        // interaction (AxC +1.36); BD alone GAINS 0.13, so the warning names the way out.
+        // interaction (AxC +1.36); BD alone GAINS 0.13. The default drops A and C there; the note
+        // fires only when an explicit selector puts them back.
         printf(
-            "\n\nAWQ-calibrated: %d groups scaled, %d left at round-to-nearest.%s"
+            "\n\nAWQ-calibrated: %d groups scaled, %d left at round-to-nearest (groups %s).%s"
             "\n      Score this checkpoint with --perplexity against the uncalibrated one"
             "\n      before using it; see docs/quantization.md.",
-            plan.groups_scaled, plan.groups_rtn,
-            opt.calib_groups == std::string(awq::kAwqAllGroups)
-                ? "\n      NOTE: the full set is validated on Qwen3-0.6B/1.7B but measured HARMFUL"
-                  "\n      on Qwen3-14B (PPL 9.93 -> 12.3-12.6). The attention groups are the cause:"
-                  "\n      on wide-GQA models prefer --calib-groups BD (14B: 9.79, better than RTN)."
+            plan.groups_scaled, plan.groups_rtn, plan.groups.c_str(),
+            awq::attention_groups_on_wide_gqa(plan.groups, plan.n_rep)
+                ? "\n      NOTE: attention groups A/C on wide GQA (n_rep >= 5) measured HARMFUL:"
+                  "\n      Qwen3-14B ABCD 12.2634 vs BD 9.9068 vs round-to-nearest 9.9849 PPL."
+                  "\n      Omit --calib-groups to get the wide-GQA default."
                 : "");
     if (n_stacks_split)
         printf(", %zu expert stack(s) split into per-expert matrices", n_stacks_split);
