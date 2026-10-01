@@ -147,8 +147,9 @@ inline const char* kv_block_size_error(int block_size) {
     return nullptr;
 }
 
-// Times n device-to-device copies issued back to back on the legacy default stream, one
-// event pair around the batch, returning bandwidth in GB/s counting every byte twice
+// Times n device-to-device copies, captured as one CUDA graph on a private stream (plain
+// issue if capture fails) after the legacy stream drained, one event pair around the
+// batch, returning bandwidth in GB/s counting every byte twice
 // (read plus write). 0 when a copy cannot run.
 // This is the residency test the platform needs: on WSL2/WDDM a successful allocation
 // proves nothing, and a pool the driver spilled into host memory serves at a fraction of
