@@ -69,7 +69,7 @@ docker run --gpus all \
 Mount the cache volume. It holds two things; the second costs VRAM rather than time:
 
 - the transformed weights, so a second start skips the conversion: on Qwen3-14B-NVFP4, 7.9 s cold against 2.1 s warm;
-- the measured library reserve. Without it the memory plan charges a 3900 MiB constant on every start, out of the KV pool. Measured on Qwen3-14B-Q6_K: 0 MiB planned with the path mounted against 3900 MiB without, handing 639 MiB back to the pools per restart. On a model whose first forward claims almost nothing the gap is the whole constant; the server says so after its first forward ("library reserve MISMATCH").
+- the measured library reserve. Without it the memory plan charges a 3900 MiB constant on every start, out of the KV pool. Second `docker run --rm` on the volume against the first: Qwen3.8-27B-NVFP4 plans 1930 MiB instead of 3900 and starts with 2025 KV blocks (32400 tokens) instead of 975 (15600); Qwen3-8B-Q8_0 plans 1033 MiB, KV ceiling 5617 -> 6606 blocks. The first start says so after its first forward ("library reserve MISMATCH").
 
 A `docker run --rm` without this volume re-measures every start and never uses the answer.
 
