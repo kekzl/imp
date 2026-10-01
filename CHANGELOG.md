@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Fixed
+- cuBLASLt algo probe no longer times candidates inside a graph capture (#2396): a cold shape there takes a host-checked heuristic pick, and each batch size runs one eager step before its capture. Qwen3.8-27B bs=48: 47/48 -> 48/48 decode graphs, captured M=47/48 GEMMs use the benchmarked algo; 48-stream median 1528.7 / 1587.4 -> 1970.9 / 1967.2 tok/s.
 - An explicit `runtime.max_batch_size` the weight-upload reserve cannot hold is clamped after Pass 1, with a WARN
   naming configured and fitting batch and the per-slot state cost, instead of aborting the load: Qwen3.8-27B-NVFP4
   at 64 slots failed `w_gate` of layer 59, now `clamped 64 -> 53` at upload, plan 53 -> 48, serves (#2393)

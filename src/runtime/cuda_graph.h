@@ -92,6 +92,15 @@ public:
     // skips the warmup step on the next execute() since cuBLAS algorithms are already tuned.
     void invalidate_for_update();
 
+    // Same, but a runner that never ran keeps its eager warmup step: the first decode at a batch
+    // size probes cuBLASLt at that M outside the capture (#2396).
+    void invalidate_for_update_keep_cold() {
+        const bool cold = step_count_ == 0 && capture_count_ == 0;
+        invalidate_for_update();
+        if (cold)
+            step_count_ = 0;
+    }
+
     // Check if graph is ready for replay
     bool is_ready() const { return graph_.is_captured(); }
 
