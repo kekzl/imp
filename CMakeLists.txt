@@ -488,6 +488,7 @@ set(IMP_VISION_SOURCES
     src/vision/vision_loader_check.cpp
     src/vision/qwen3vl_vision_map.cpp
     src/vision/qwen3vl_vision_config.cpp
+    src/vision/vision_family.cpp
     src/vision/qwen3vl_vision_load.cpp
     src/vision/qwen3vl_vision_grid.cpp
     src/vision/qwen3vl_vision_upload.cpp
@@ -801,6 +802,7 @@ if(IMP_BUILD_TESTS)
         tests/test_vision_loader_check.cpp
         tests/test_qwen3vl_vision_map.cpp
         tests/test_qwen3vl_vision_config.cpp
+        tests/test_vision_family.cpp
         tests/test_qwen3vl_vision_load.cpp
         tests/test_qwen3vl_vision_grid.cpp
         tests/test_sentencepiece_loader.cpp
