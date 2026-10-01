@@ -700,6 +700,18 @@ TEST(KVCacheTest, ResidencyProbeCoversTheCommittedPrefixOfAGrowablePool) {
     EXPECT_GT(cache.probe_residency(), kKvPoolSpillGbps);
 }
 
+TEST(KVCacheTest, ResidencyProbeReadsResidentOnASmallCommittedPrefix) {
+    SKIP_IF_NO_CUDA();
+    // Qwen3.8-27B boot at max_batch_size=32, max_seq_len=32768: 500 of 12425 NVFP4 blocks committed,
+    // 16 layers x 4 kv heads x 256 -> 32 copies of 2 MiB. Issued one by one this read 63 GB/s (#2366).
+    KVCache cache(16, 4, 256, QType::NVFP4, 500, 16, nullptr, 12425);
+    if (!cache.growable())
+        GTEST_SKIP() << "no VMM backend on this device";
+    const double gbps = cache.probe_residency();
+    printf("residency probe, 500 committed NVFP4 blocks: %.0f GB/s\n", gbps);
+    EXPECT_GT(gbps, kKvPoolSpillGbps) << "a resident pool must not read as spilled for small copies";
+}
+
 // Transcript snapshot support: a finished sequence's PARTIAL last block is cached under the
 // engine's transcript key, a later sequence holds it across its own allocation (no reclaim
 // may hand it out first) and clones it into its own block at the same index.
