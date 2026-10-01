@@ -206,7 +206,8 @@ jobs:
           IMP_GATE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           # Every stream detached, or the step's `docker exec` waits for the child.
-          ( bash scripts/ci_static_gates.sh > "$RUNNER_TEMP/gates.log" 2>&1; echo $? > "$RUNNER_TEMP/gates.rc" ) \
+          # `|| rc=$?`: under `sh -e` a bare failing gate would end the subshell before the rc write.
+          ( rc=0; bash scripts/ci_static_gates.sh > "$RUNNER_TEMP/gates.log" 2>&1 || rc=$?; echo "$rc" > "$RUNNER_TEMP/gates.rc" ) \
             < /dev/null > /dev/null 2>&1 &
 
       - name: Install build deps
