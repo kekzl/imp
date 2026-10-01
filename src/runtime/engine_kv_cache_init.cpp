@@ -221,7 +221,7 @@ bool Engine::init_kv_cache() {
     // below; per-layer geometry and SWA pools refuse it in enable_key_minmax.
     size_t sparse_minmax_bytes_per_layer = 0;
     if (runtime_config_.attention.sparse_topk_tokens > 0 &&
-        !sparse_minmax_refusal(config_.kv_cache_dtype, mcfg.is_mla(),
+        !sparse_minmax_refusal(config_.kv_cache_dtype, mcfg.is_mla() && runtime_config_.attention.mla_absorb,
                                runtime_config_.speculative.token_recycling,
                                !config_.prefix_cache_path.empty()) &&
         mcfg.head_dim_per_layer.empty() && !swa_sizing_active_)
@@ -680,7 +680,8 @@ bool Engine::init_kv_cache() {
     // refuses per-layer geometry; a growable pool grows the metadata with it. A refusal disables
     // the feature loudly.
     if (runtime_config_.attention.sparse_topk_tokens > 0) {
-        const char* refuse = sparse_minmax_refusal(config_.kv_cache_dtype, mcfg.is_mla(),
+        const char* refuse = sparse_minmax_refusal(config_.kv_cache_dtype,
+                                                   mcfg.is_mla() && runtime_config_.attention.mla_absorb,
                                                    runtime_config_.speculative.token_recycling,
                                                    !config_.prefix_cache_path.empty());
         if (refuse) {

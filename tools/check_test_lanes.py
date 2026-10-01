@@ -364,7 +364,9 @@ def main():
     # Qwen3VLPipelineVideoStamps.TimestampIdsMatchHf (model tokenizer), test-e2e, run by make test-vision.
     # 1182 -> 1183: KVCacheTest.ResidencyProbeReadsResidentOnASmallCommittedPrefix (test-kv, GPU):
     # 500 committed NVFP4 blocks must read above the spill threshold (#2366); needs a card.
-    PINNED = 1183
+    # 1183 -> 1185: SparseAttnE2E.MlaGeometryFullBudgetBitIdentical, MlaGeometrySmallBudgetKeepsTheNeedle
+    # (test-attention, GPU): sparse decode at MLA head_dim 192 (roadmap row 3).
+    PINNED = 1185
 
     text = CMAKE.read_text()
     mods = module_sources(text)

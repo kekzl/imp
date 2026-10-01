@@ -633,13 +633,14 @@ size_t kv_block_bytes_per_layer(QType kv_dtype, int block_size, int n_kv_heads, 
     return (single_block_bytes + scale_per_block) * 2;  // K+V
 }
 
-const char* sparse_minmax_refusal(QType kv_dtype, bool mla, bool token_recycling,
+const char* sparse_minmax_refusal(QType kv_dtype, bool mla_absorb, bool token_recycling,
                                   bool persistent_prefix_cache) {
     // NVFP4 unpacks nibbles + UE4M3 scale into the metadata write (#1818).
     if (kv_dtype != QType::F16 && kv_dtype != QType::FP8_E4M3 && kv_dtype != QType::NVFP4)
         return "KV dtype (needs f16, fp8 or nvfp4)";
-    if (mla)
-        return "MLA model";
+    // Absorbed MLA decode reads mla_absorb_cache_, not the paged keys the metadata covers.
+    if (mla_absorb)
+        return "attention.mla_absorb (absorbed MLA decode bypasses the paged keys)";
     // copy_blocks_device does not copy metadata.
     if (token_recycling)
         return "speculative.token_recycling";
