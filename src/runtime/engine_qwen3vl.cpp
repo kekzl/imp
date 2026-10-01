@@ -389,8 +389,9 @@ bool Engine::build_qwen_layout_(Request& req, const std::vector<Qwen3VLImage>& s
     auto delta_buf = std::make_shared<Buffer>(Buffer::device(sizeof(int)));
     if (!*delta_buf)
         return false;
-    IMP_CUDA_CHECK_LOG(
-        cudaMemcpy(delta_buf->ptr(), &req.mrope_pos_delta, sizeof(int), cudaMemcpyHostToDevice));
+    // stream_: a legacy-stream copy is not ordered before the forward that reads it (#2275).
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(delta_buf->ptr(), &req.mrope_pos_delta, sizeof(int),
+                                       cudaMemcpyHostToDevice, stream_));
     req.mrope_delta_dev = std::move(delta_buf);
     req.vision_token_id = qwen_image_pad_id_;
     req.n_vision_tokens = expected;

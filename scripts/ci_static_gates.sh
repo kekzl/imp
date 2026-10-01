@@ -127,6 +127,8 @@ if want alloc; then
     run "that gate still matches its cases"     python3 tools/check_released_owner_use.py --selftest
     run "discarded cudaError_t per file (#2211)" python3 tools/check_cuda_discards.py
     run "that gate still counts its cases"      python3 tools/check_cuda_discards.py --selftest
+    run "sync legacy-stream device writes (#2275)" python3 tools/check_sync_device_writes.py
+    run "that gate still matches its cases"    python3 tools/check_sync_device_writes.py --selftest
     run "header status bools [[nodiscard]] (#2211)" python3 tools/check_nodiscard_status.py
     run "that gate still matches its cases"     python3 tools/check_nodiscard_status.py --selftest
 fi

@@ -198,7 +198,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
                                wmma::row_major>
                     a_frag;
                 wmma::load_matrix_sync(a_frag,
-                                       Q_tile + ri * SM120_WMMA_M * head_dim +
+                                       Q_tile + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim +
                                            static_cast<ptrdiff_t>(k * SM120_WMMA_K),
                                        head_dim);
 
@@ -206,14 +206,14 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
                                wmma::col_major>
                     b_frag;
                 wmma::load_matrix_sync(b_frag,
-                                       KV_tile + ci * SM120_WMMA_N * head_dim +
+                                       KV_tile + static_cast<ptrdiff_t>(ci) * SM120_WMMA_N * head_dim +
                                            static_cast<ptrdiff_t>(k * SM120_WMMA_K),
                                        head_dim);
 
                 wmma::mma_sync(acc, a_frag, b_frag, acc);
             }
 
-            wmma::store_matrix_sync(S_tile + ri * SM120_WMMA_M * Bkv +
+            wmma::store_matrix_sync(S_tile + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * Bkv +
                                         static_cast<ptrdiff_t>(ci * SM120_WMMA_N),
                                     acc, Bkv, wmma::mem_row_major);
         }
@@ -334,7 +334,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
 
                 wmma::fragment<wmma::accumulator, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, float> o_frag;
                 wmma::load_matrix_sync(o_frag,
-                                       O_acc + ri * SM120_WMMA_M * head_dim +
+                                       O_acc + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim +
                                            static_cast<ptrdiff_t>(di * SM120_WMMA_N),
                                        head_dim, wmma::mem_row_major);
 
@@ -343,7 +343,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
                                    wmma::row_major>
                         p_frag;
                     wmma::load_matrix_sync(p_frag,
-                                           P_half + ri * SM120_WMMA_M * Bkv +
+                                           P_half + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * Bkv +
                                                static_cast<ptrdiff_t>(k * SM120_WMMA_K),
                                            Bkv);
 
@@ -351,14 +351,14 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
                                    wmma::row_major>
                         v_frag;
                     wmma::load_matrix_sync(v_frag,
-                                           KV_tile + k * SM120_WMMA_N * head_dim +
+                                           KV_tile + static_cast<ptrdiff_t>(k) * SM120_WMMA_N * head_dim +
                                                static_cast<ptrdiff_t>(di * SM120_WMMA_N),
                                            head_dim);
 
                     wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
                 }
 
-                wmma::store_matrix_sync(O_acc + ri * SM120_WMMA_M * head_dim +
+                wmma::store_matrix_sync(O_acc + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim +
                                             static_cast<ptrdiff_t>(di * SM120_WMMA_N),
                                         o_frag, head_dim, wmma::mem_row_major);
             }
@@ -459,7 +459,7 @@ bool fmha_sm120_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tenso
         }                                                                                                \
         IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(KFN, cudaFuncAttributePreferredSharedMemoryCarveout,     \
                                                 cudaSharedmemCarveoutMaxShared));                        \
-        KFN<<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),                        \
+        (KFN)<<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),                      \
                                            reinterpret_cast<const half*>(K.data),                        \
                                            reinterpret_cast<const half*>(V.data),                        \
                                            reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv,   \
@@ -740,7 +740,8 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
                 // lane_id/4 within the 16-row tile, 4 consecutive FP8 values at col (lane_id%4)*4 + k*32.
                 uint32_t a0, a1, a2, a3;
                 {
-                    const uint8_t* q_base = Q_fp8 + ri * S_M * head_dim + static_cast<ptrdiff_t>(k * S_K);
+                    const uint8_t* q_base = Q_fp8 + static_cast<ptrdiff_t>(ri) * S_M * head_dim +
+                                            static_cast<ptrdiff_t>(k * S_K);
                     int row_in_tile = lane_id / 4;
                     int col_base = (lane_id % 4) * 4;
                     // Each register holds 4 FP8 values from the same row
@@ -758,7 +759,8 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
                 // row-major but MMA needs col-major B, so B[col,k] = K_fp8[ci*8+col][k*32+...] (K^T).
                 uint32_t b0, b1;
                 {
-                    const uint8_t* k_base = KV_fp8 + ci * S_N * head_dim + static_cast<ptrdiff_t>(k * S_K);
+                    const uint8_t* k_base = KV_fp8 + static_cast<ptrdiff_t>(ci) * S_N * head_dim +
+                                            static_cast<ptrdiff_t>(k * S_K);
                     int col_in_tile = lane_id / 4;
                     int k_base_offset = (lane_id % 4) * 4;
                     const uint32_t* k_ptr0 = reinterpret_cast<const uint32_t*>(
@@ -899,7 +901,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
 
                 wmma::fragment<wmma::accumulator, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, float> o_frag;
                 wmma::load_matrix_sync(o_frag,
-                                       O_acc + ri * SM120_WMMA_M * head_dim +
+                                       O_acc + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim +
                                            static_cast<ptrdiff_t>(di * SM120_WMMA_N),
                                        head_dim, wmma::mem_row_major);
 
@@ -908,7 +910,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
                                    wmma::row_major>
                         p_frag;
                     wmma::load_matrix_sync(p_frag,
-                                           P_half + ri * SM120_WMMA_M * Bkv +
+                                           P_half + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * Bkv +
                                                static_cast<ptrdiff_t>(k * SM120_WMMA_K),
                                            Bkv);
 
@@ -916,14 +918,14 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
                                    wmma::row_major>
                         v_frag;
                     wmma::load_matrix_sync(v_frag,
-                                           KV_fp16 + k * SM120_WMMA_N * head_dim +
+                                           KV_fp16 + static_cast<ptrdiff_t>(k) * SM120_WMMA_N * head_dim +
                                                static_cast<ptrdiff_t>(di * SM120_WMMA_N),
                                            head_dim);
 
                     wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
                 }
 
-                wmma::store_matrix_sync(O_acc + ri * SM120_WMMA_M * head_dim +
+                wmma::store_matrix_sync(O_acc + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim +
                                             static_cast<ptrdiff_t>(di * SM120_WMMA_N),
                                         o_frag, head_dim, wmma::mem_row_major);
             }
@@ -1495,26 +1497,31 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
             {
 #pragma unroll
                 for (int k = 0; k < KC; k++) {
-                    const uint8_t* qb = Q_fp8 + warp_id * 16 * QSTRIDE + static_cast<ptrdiff_t>(k * 32);
-                    uint32_t a0 = *reinterpret_cast<const uint32_t*>(qb + rl * QSTRIDE +
-                                                                     static_cast<ptrdiff_t>(cl * 2));
-                    uint32_t a1 = *reinterpret_cast<const uint32_t*>(qb + rl * QSTRIDE +
-                                                                     static_cast<ptrdiff_t>(cl * 2) + 16);
-                    uint32_t a2 = *reinterpret_cast<const uint32_t*>(qb + (rl + 8) * QSTRIDE +
-                                                                     static_cast<ptrdiff_t>(cl * 2));
-                    uint32_t a3 = *reinterpret_cast<const uint32_t*>(qb + (rl + 8) * QSTRIDE +
-                                                                     static_cast<ptrdiff_t>(cl * 2) + 16);
-                    const half* kb = K_cur + n * 8 * KVSTRIDE + static_cast<ptrdiff_t>(k * 32);
+                    const uint8_t* qb = Q_fp8 + static_cast<ptrdiff_t>(warp_id) * 16 * QSTRIDE +
+                                        static_cast<ptrdiff_t>(k * 32);
+                    uint32_t a0 = *reinterpret_cast<const uint32_t*>(
+                        qb + static_cast<ptrdiff_t>(rl) * QSTRIDE + static_cast<ptrdiff_t>(cl * 2));
+                    uint32_t a1 = *reinterpret_cast<const uint32_t*>(
+                        qb + static_cast<ptrdiff_t>(rl) * QSTRIDE + static_cast<ptrdiff_t>(cl * 2) + 16);
+                    uint32_t a2 = *reinterpret_cast<const uint32_t*>(
+                        qb + static_cast<ptrdiff_t>(rl + 8) * QSTRIDE + static_cast<ptrdiff_t>(cl * 2));
+                    uint32_t a3 = *reinterpret_cast<const uint32_t*>(
+                        qb + static_cast<ptrdiff_t>(rl + 8) * QSTRIDE + static_cast<ptrdiff_t>(cl * 2) + 16);
+                    const half* kb = K_cur + static_cast<ptrdiff_t>(n) * 8 * KVSTRIDE +
+                                     static_cast<ptrdiff_t>(k * 32);
                     uint32_t b0, b1;
                     if constexpr (FP8SCALED) {
-                        b0 = cvt_4xfp16_to_4xe4m3_scaled(kb + rl * KVSTRIDE + static_cast<ptrdiff_t>(cl * 2),
+                        b0 = cvt_4xfp16_to_4xe4m3_scaled(kb + static_cast<ptrdiff_t>(rl) * KVSTRIDE +
+                                                             static_cast<ptrdiff_t>(cl * 2),
                                                          fp8_inv_sk2);
-                        b1 = cvt_4xfp16_to_4xe4m3_scaled(kb + rl * KVSTRIDE + static_cast<ptrdiff_t>(cl * 2) +
-                                                             16,
+                        b1 = cvt_4xfp16_to_4xe4m3_scaled(kb + static_cast<ptrdiff_t>(rl) * KVSTRIDE +
+                                                             static_cast<ptrdiff_t>(cl * 2) + 16,
                                                          fp8_inv_sk2);
                     } else {
-                        b0 = cvt_4xfp16_to_4xe4m3(kb + rl * KVSTRIDE + static_cast<ptrdiff_t>(cl * 2));
-                        b1 = cvt_4xfp16_to_4xe4m3(kb + rl * KVSTRIDE + static_cast<ptrdiff_t>(cl * 2) + 16);
+                        b0 = cvt_4xfp16_to_4xe4m3(kb + static_cast<ptrdiff_t>(rl) * KVSTRIDE +
+                                                  static_cast<ptrdiff_t>(cl * 2));
+                        b1 = cvt_4xfp16_to_4xe4m3(kb + static_cast<ptrdiff_t>(rl) * KVSTRIDE +
+                                                  static_cast<ptrdiff_t>(cl * 2) + 16);
                     }
 #if __CUDA_ARCH__ >= 1200
                     asm volatile(

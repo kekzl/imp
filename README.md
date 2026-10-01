@@ -1,13 +1,16 @@
 <!--
 layer: L0
 audience: newcomers
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-09-30
+commit: 0ef52509
 -->
 
 <p align="center">
   <img src="docs/logo.svg" alt="imp" width="500">
 </p>
+
+<p align="center"><b>Run open LLMs on an NVIDIA RTX 5090 at the speed the card can do</b><br>
+one <code>docker run</code> · OpenAI and Anthropic API · built-in chat · Linux or WSL2</p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/kekzl/imp?style=flat&color=blue" alt="License"></a>
@@ -15,73 +18,39 @@ commit: 9cbb8004
   <img src="https://img.shields.io/badge/C++-23-00599C?style=flat&logo=cplusplus" alt="C++23">
 </p>
 
----
+imp is an inference engine written for exactly one chip, the RTX 5090 generation (`sm_120a`). It does not trade speed for portability: it computes on the card's native 4-bit (FP4) number format, where general engines fall back to slower paths.
 
-**imp is an LLM inference engine that targets exactly one chip: the NVIDIA RTX 5090.**
+- **Free and open source** (MIT).
+- **One card only:** RTX 5090 (32 GB, the tested one), 5080, 5070 Ti, RTX PRO 6000. No other GPU, no CPU mode, no multi-GPU. For breadth use [llama.cpp](https://github.com/ggerganov/llama.cpp), for many GPUs [vLLM](https://github.com/vllm-project/vllm): [who fits where](docs/PERF.md#competitive-standing).
+- **One author, no support rotation.** Issues are welcome, answers are not guaranteed.
 
-- From-scratch C++23/CUDA engine for consumer Blackwell (`sm_120a`): own GGUF and SafeTensors loaders, tokenizer, paged KV cache, kernels.
-- A server that speaks **both** the OpenAI and the Anthropic APIs natively - no shim for either.
-- Also a C library and a CLI, not only a server.
-- Not portable (no CPU path, no other GPU), not multi-GPU, not a supported product (one author, no SLO, no support rotation).
+> **Jump to:** [How fast?](#how-fast-is-it) · [Which model?](#which-model-should-i-pick) · [Install](#install) · [Using it](#using-it) · [Problems?](#something-went-wrong) · [How it works](#how-does-it-work) · [All the docs](#go-deeper)
 
-Who this fits, who should use [llama.cpp](https://github.com/ggerganov/llama.cpp) (breadth) or [vLLM](https://github.com/vllm-project/vllm) (scale-out) instead, and the numbers behind that call: [`docs/PERF.md`](docs/PERF.md#competitive-standing).
+## How fast is it?
 
-## Requirements
+Same RTX 5090, same model file, both engines on their defaults. **tokens/s** = how fast the answer appears (a token is about ¾ of a word).
 
-- `sm_120a` GPU only: RTX 5090 (32 GB, the tested one), 5080, 5070 Ti, or RTX PRO 6000. Nothing else works.
-- Docker with the NVIDIA Container Toolkit (`--gpus all`); the host needs no CUDA toolkit.
+| Model | imp | llama.cpp | imp ahead by |
+| --- | ---: | ---: | ---: |
+| **Qwen3-8B** (Q8_0) | 385.4 tokens/s | 160.1 tokens/s | +141% |
+| **Qwen3.6-35B-A3B** (Q4_K_M) | 287.9 tokens/s | 235.8 tokens/s | +22% |
+| **gpt-oss-20b** (MXFP4) | 382.7 tokens/s | 335.9 tokens/s | +14% |
+| **Gemma-4-26B-A4B** (Q4_K_M) | 245.0 tokens/s | 214.4 tokens/s | +14% |
 
-Full checklist, including the WSL2 `docker ps` caveat: [`docs/QUICKSTART.md`](docs/QUICKSTART.md#requirements).
+[PROV: commit=83cb5178 date=2026-08-30 hw=RTX5090 model=six-model-sweep quant=per-row cuda=13.3
+       path=gguf cmd=`make bench-competitive` n=6x2 note=imp defaults vs llama.cpp defaults, full
+       offload, flash attention on; spec-off measured for Qwen3-8B only
+       (`--set speculative.ngram=false`)]
 
-## 3-command quickstart
+The smallest lead in that sweep was +3% (Qwen3-30B-A3B). All rows, and imp vs vLLM with many users at once: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
-Worked example: **Qwen3.8-27B**, a 27B multimodal model quantized to NVFP4 so it fits one 5090 with room for a real context.
+**Bigger than the card: Qwen3.8-Flash-Next** (NVFP4). Its 56.25 GiB of experts stay in host RAM, the card caches the busiest ones: **65.31 tokens/s**. Full speed needs the experts plus 6 GiB free in host RAM (~62 GiB); with less, imp warns and serves from a slower path.
 
-**1. Build the image** (~6 min the first time, seconds after via ccache):
+[PROV: commit=80c3a110 date=2026-09-30 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4
+       path=host-resident-experts cmd=`scripts/accept_2272.sh` of #2326 n=4 prompts x 3 runs note=128 tokens greedy, mtp_k=0;
+       56.25 GiB = load log `NVFP4 experts (56.25 GiB) do not fit`, main 62431977; 6 GiB = kHeadroom in src/model/weight_upload.cpp]
 
-```bash
-make build
-```
-
-**2. Get the weights** (19.2 GiB, download only): [kekzle/Qwen3.8-27B-NVFP4-vllm](https://huggingface.co/kekzle/Qwen3.8-27B-NVFP4-vllm), an `imp-quantize --format vllm` export that also loads in vLLM.
-
-```bash
-scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4-vllm ~/models/Qwen3.8-27B-NVFP4-vllm
-```
-
-**3. Serve:**
-
-```bash
-docker run --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
-  -p 127.0.0.1:8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4-vllm
-```
-
-Open <http://localhost:8080> for the built-in chat UI, or `curl` `/v1/chat/completions` (model id is the file/directory basename, `GET /v1/models` lists it). The weights take 18.3 GiB on the card and answer at **~102 tok/s**, leaving ~7 GiB for the KV cache on a 32 GB 5090.
-
-[PROV: commit=f243179c date=2026-08-31 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4
-       cuda=13.3 path=nvfp4-safetensors n=2 image=ghcr.io/kekzl/imp:latest
-       cmd=`imp-cli --model … --prompt … --max-tokens 128 --temperature 0` (102.8/101.9 tok/s)]
-
-A GGUF or SafeTensors repo that loads as-is needs no staging: `--model hf://<org>/<repo>[:<file>.gguf]` downloads it inside the container into the mounted `/models` (HF cache layout, sha256-checked, resumable, `HF_TOKEN` for gated repos) and a restart loads it with no network request: [`docs/CONFIG.md`](docs/CONFIG.md#fetching-from-hugging-face).
-
-Full walkthrough (screenshot, other model formats, bringing your own BF16/FP8 checkpoint, the MTP head): [`docs/QUICKSTART.md`](docs/QUICKSTART.md). Quantizing it yourself, quality numbers: [`docs/quantization.md`](docs/quantization.md).
-
-## What works today
-
-Full matrix with per-item status: [`docs/FEATURES.md`](docs/FEATURES.md). ✅ = code path plus a gated test, 🟡 = code path, no test.
-
-| area | |
-|---|---|
-| **Models** | ✅ Qwen3 / 3.5 / 3.6 / 3.8 (dense, MoE, Gated-DeltaNet hybrids), LLaMA, Mistral, Mixtral, DeepSeek incl. V2 latent attention, Gemma-3 and Gemma-4, gpt-oss, Nemotron-H, nomic-bert embeddings. 🟡 Llama-4 |
-| **Vision** | ✅ Qwen3-VL and Qwen3.6-35B-A3B (tower in the checkpoint), Gemma-3/4 via `--mmproj`. No video |
-| **Quantisation** | ✅ NVFP4 (native, the primary path), MXFP4, GGUF Q2_K-Q8_0, IQ4_NL/XS, FP8 E4M3 weights and KV, INT8/INT4 KV |
-| **APIs** | ✅ OpenAI chat/completions/responses/embeddings, Anthropic `/v1/messages`, `/v1/rerank`, per-token SSE on all three dialects, tool calling, JSON-Schema / regex / GBNF constrained decoding, prefix caching with `cache_control` |
-| **Serving** | ✅ continuous batching, paged KV, model swap on request, suspend/resume to free the GPU, Prometheus `/metrics`, API-key auth |
-| **Engine** | ✅ NVFP4 block-scaled `mma.sync` GEMM/GEMV, FP8 `f8f6f4` attention scores, FlashAttention-2 prefill (hd 128 and 256), CUDA graphs on prefill and decode, Gated DeltaNet and Mamba2, speculative decoding |
-
-## What CI defends
-
-Every push measures this on one pinned model (Qwen3-8B Q8_0); the regression gate is 8 % either way. Full sweep across models, competitive numbers vs llama.cpp/vLLM (imp led llama.cpp +141 % down to +3 % across six models on 2026-08-30, imp led vLLM +25 % at 32 streams / -7.6 % on a dense checkpoint at the same width on 2026-09-02), and why the threshold is 8 % and not 3 %: [`docs/PERF.md`](docs/PERF.md). Per-model history with exact commands: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
+**What CI defends:** every push measures one pinned model (Qwen3-8B Q8_0, speculation off, hence below the row above) and fails on an 8% move (decode on the test host moves several percent between sessions with nothing changed: [`docs/PERF.md`](docs/PERF.md)). **decode** = writing the answer, **prefill** = reading your prompt.
 
 <!-- PERF:BEGIN -->
 | metric | value | threshold |
@@ -96,42 +65,85 @@ Every push measures this on one pinned model (Qwen3-8B Q8_0); the regression gat
        cuda=13.4 path=gguf-dp4a cmd=`make verify-fast` n=5x5]
 <!-- PERF:END -->
 
-Decode on this host moves several percent between sessions with nothing changed, and prefill moves more (the MoE path, not cuBLAS); that is why the thresholds are 8 % and not 3 %. Detail: [`docs/PERF.md`](docs/PERF.md).
+## Which model should I pick?
 
-Provenance for the headline numbers above: llama.cpp pinned by digest `ghcr.io/ggml-org/llama.cpp@sha256:c49f4d48…` (imp v0.33.0, 2026-08-30, `make bench-competitive`); vLLM run with `--gpu-memory-utilization 0.90 --max-model-len 16384 --max-num-seqs N` (`tools/analysis/vllm_conc_ab.sh`) - dense Qwen3-14B-NVFP4, 32 streams, after `attention.paged_fp8_multitok=4`: imp **3948.9** vs vLLM 3817.6 tok/s (+3.4 %).
+| You want | Take | Why |
+| --- | --- | --- |
+| **Not sure** | **Qwen3.8-27B** NVFP4 (the [install](#install) example) | reads text and images, fits one 5090 with room for a long context |
+| the fastest replies | **Qwen3-8B** Q8_0 | the fastest row above |
+| more knowledge, still fast | **Qwen3.6-35B-A3B** | mixture of experts: large, but only a small part works per token |
+| another model family | **gpt-oss-20b** or **Gemma-4-26B-A4B** | both in the table above |
+| the biggest model, and ~62 GiB of free RAM | **Qwen3.8-Flash-Next** NVFP4 | too big for 32 GB: the experts live in host RAM ([above](#how-fast-is-it)) |
+
+**Will it fit?** Weights plus the KV cache (the model's memory of the conversation) must fit in the card's 32 GB. imp sizes the context to what is left after the weights, and refuses at load a model whose experts do not fit instead of running it wrong. Every family that loads, with its size: [`docs/MODELS.md`](docs/MODELS.md).
+
+**Two file formats, no conversion step:** a **GGUF file** (as used by llama.cpp) or a **SafeTensors directory** in NVFP4 (NVIDIA Model Optimizer, llm-compressor, or imp's own `imp-quantize`). Your own BF16/FP8 checkpoint: [`docs/quantization.md`](docs/quantization.md).
+
+## Install
+
+**You need:** one of the cards above, Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html), Linux or Windows with WSL2. No CUDA toolkit on the host. Checklist: [`docs/QUICKSTART.md`](docs/QUICKSTART.md#requirements).
+
+```bash
+make build                                                     # 1. the image: minutes the first time, seconds after
+scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4-vllm ~/models/Qwen3.8-27B-NVFP4-vllm   # 2. weights, 19.2 GiB download
+docker run --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
+  -p 127.0.0.1:8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4-vllm   # 3. serve
+```
+
+The weights take 18.3 GiB on the card and answer at **~102 tokens/s**, leaving ~7 GiB for the conversation memory. Next time, the same `docker run`: the `imp-cache` volume keeps the converted weights, so a restart skips the conversion.
+
+[PROV: commit=f243179c date=2026-08-31 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4
+       cuda=13.3 path=nvfp4-safetensors n=2 image=ghcr.io/kekzl/imp:latest
+       cmd=`imp-cli --model … --prompt … --max-tokens 128 --temperature 0` (102.8/101.9 tok/s)]
+
+**Shortcut:** `--model hf://<org>/<repo>[:<file>.gguf]` downloads a repo inside the container into `/models` (resumable, checksummed, `HF_TOKEN` for gated repos): [`docs/CONFIG.md`](docs/CONFIG.md#fetching-from-hugging-face). Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
+
+## Using it
+
+- **In the browser:** <http://localhost:8080>, the built-in chat.
+- **Your apps and coding agents:** an "OpenAI-compatible" provider with base URL **`http://localhost:8080/v1`**; Anthropic apps: `http://localhost:8080/v1/messages`. The model id is the file or directory name (`GET /v1/models`).
+- **Tool calling, JSON output, streaming** on every API dialect; which fields work: [`docs/API.md`](docs/API.md).
+- **Thinking models:** the reasoning comes back in `reasoning_content`, the answer in `content`.
+- **Proxy, API key, metrics:** [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). **Without the server:** `imp-cli` in the image, or the C library (`include/imp/imp.h`).
+
+## Something went wrong?
+
+| You see | Do |
+| --- | --- |
+| replies much slower than the table above | something else is on the card: on WSL2 `nvidia-smi` does not show containers, check `docker ps`; then look for `graphs=1` in the log |
+| after a restart every prompt is cancelled, `/health` says `kv_pool_floored` | the old process still held the card at start: free the card, start again |
+| `503` | no model loaded or suspended: `GET /v1/models`, `POST /admin/resume` |
+| empty `content`, full `reasoning_content` | the model used its budget thinking: raise `max_tokens` |
+| nothing arrives until the answer is done | a reverse proxy buffers the stream: `proxy_buffering off` (nginx) |
+| `400 vision_unavailable` on an image | the checkpoint loaded text-only; which models see: [`docs/MODELS.md`](docs/MODELS.md) |
+
+**Still stuck?** The [full table](docs/TROUBLESHOOTING.md), or an issue with the server log.
+
+## How does it work?
+
+- **One chip, no compromises for others.** The RTX 5090 multiplies 4-bit numbers (NVFP4) directly; imp keeps weights in that format and computes on it, where portable engines unpack to 16 bits or skip the format.
+- **Everything is its own:** file loaders, tokenizer, the conversation memory (a paged KV cache shared between requests), the GPU kernels. No framework underneath.
+- **Replay, not re-launch.** Each answer step is recorded once as a CUDA graph and replayed, so the CPU does not hand the GPU thousands of small jobs per token.
+- **Guess, then check.** A cheap drafter proposes the next tokens, the model checks them all in one pass and keeps what it agrees with: same answer, fewer passes.
+- **Many users at once:** requests share the card (continuous batching), a repeated prompt prefix is read once (prefix caching).
+
+What exists and what is tested: [`docs/FEATURES.md`](docs/FEATURES.md). The whole design: [`docs/internals/ARCHITECTURE.md`](docs/internals/ARCHITECTURE.md).
 
 ## Go deeper
 
 | I want to … | Read |
 |---|---|
-| just run it | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) |
-| put it behind a proxy, with auth and metrics | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) |
-| know which API fields actually work | [`docs/API.md`](docs/API.md) |
-| know which models and quants load | [`docs/MODELS.md`](docs/MODELS.md) |
-| know how it works | [`docs/internals/ARCHITECTURE.md`](docs/internals/ARCHITECTURE.md) |
+| run it, step by step | [`docs/QUICKSTART.md`](docs/QUICKSTART.md) |
+| know which API fields work, which models load | [`docs/API.md`](docs/API.md), [`docs/MODELS.md`](docs/MODELS.md) |
 | know why it is this fast, or this slow | [`docs/PERF.md`](docs/PERF.md), [`docs/internals/BENCHMARKING.md`](docs/internals/BENCHMARKING.md) |
-| fix something that went wrong | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) |
 | understand or replace a kernel | [`docs/internals/KERNELS.md`](docs/internals/KERNELS.md) |
-| know why there is no multi-GPU, and the rest of where imp loses | [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md), [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) |
-| build from source, or contribute | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| know where imp loses, and why no multi-GPU | [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md), [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) |
+| build from source (`docker compose build imp-server`, tracks `main`), or contribute | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | work on it as an AI agent | [`CLAUDE.md`](CLAUDE.md) |
-
-## Build from source
-
-Tracks `main` rather than the latest release.
-
-```bash
-git clone https://github.com/kekzl/imp.git && cd imp
-docker compose build imp-server
-docker run --gpus all -v ./models:/models -v imp-cache:/home/imp/.cache/imp \
-  -p 127.0.0.1:8080:8080 imp:latest --model /models/your-model.gguf
-```
-
-Contributor workflow, build targets, test lanes: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## How this was built
 
-Every line of imp was written by an AI coding agent (Claude Code), across ~138k lines of engine C++/CUDA plus tooling and tests. The repository keeps its own audit trail of that: [`docs/audit/`](docs/audit/), [`docs/MISSION_JOURNAL.md`](docs/MISSION_JOURNAL.md).
+Every line of imp was written by an AI coding agent (Claude Code). The repository keeps its own audit trail: [`docs/audit/`](docs/audit/), [`docs/MISSION_JOURNAL.md`](docs/MISSION_JOURNAL.md).
 
 ## License
 

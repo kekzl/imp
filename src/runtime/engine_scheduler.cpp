@@ -519,14 +519,16 @@ bool Engine::begin_perplexity_capture(std::span<const int32_t> tokens) {
         ppl_capture_.d_nll = nullptr;
         return false;
     }
-    IMP_CUDA_CHECK_LOG(cudaMemcpy(ppl_capture_.d_tokens, tokens.data(),
-                                  static_cast<size_t>(n) * sizeof(int32_t), cudaMemcpyHostToDevice));
-    IMP_CUDA_CHECK_LOG(cudaMemset(ppl_capture_.d_nll, 0, static_cast<size_t>(n) * sizeof(double)));
+    // On the prefill stream that reads them: legacy-stream writes are not ordered before it (#2275).
+    const cudaStream_t s = prefill_stream();
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ppl_capture_.d_tokens, tokens.data(),
+                                       static_cast<size_t>(n) * sizeof(int32_t), cudaMemcpyHostToDevice, s));
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(ppl_capture_.d_nll, 0, static_cast<size_t>(n) * sizeof(double), s));
     // Greedy-agreement probe rides along for free (fused into the NLL max
     // pass); allocation failure just disables it.
     if (cudaMalloc(&ppl_capture_.d_match, static_cast<size_t>(n) * sizeof(int32_t)) == cudaSuccess) {
         IMP_CUDA_CHECK_LOG(
-            cudaMemset(ppl_capture_.d_match, 0, static_cast<size_t>(n) * sizeof(int32_t)));
+            cudaMemsetAsync(ppl_capture_.d_match, 0, static_cast<size_t>(n) * sizeof(int32_t), s));
     } else {
         ppl_capture_.d_match = nullptr;
     }
@@ -1125,7 +1127,7 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
             int sid = valid_decode[i]->id;
             residual_meta_h_seq_ids_[i] = sid;
             // -1 handled downstream: residual_slot_of() < 0 skips the residual path for this seq.
-            (void)kv_manager_->allocate_residual_slot(sid);
+            (void)kv_manager_->allocate_residual_slot(sid, dec_stream);
         }
         if (N == 1) {
             // Single-seq path: kernel reads ring state from kv_manager's

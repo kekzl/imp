@@ -926,8 +926,10 @@ void KVCache::copy_blocks_device(const int* srcs, const int* dsts, int n_pairs,
             d_copy_meta_ = nullptr;
             return;
         }
-        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_copy_meta_, meta.data(), meta.size() * sizeof(size_t),
-                                      cudaMemcpyHostToDevice));
+        // Upload on `stream`: a legacy-stream cudaMemcpy is not ordered before a kernel on a
+        // cudaStreamNonBlocking stream. Pageable source: staged before return, so `meta` may die.
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_copy_meta_, meta.data(), meta.size() * sizeof(size_t),
+                                           cudaMemcpyHostToDevice, stream));
     }
     KVCopyPairs pairs{};
     for (int i = 0; i < n_pairs; ++i) {

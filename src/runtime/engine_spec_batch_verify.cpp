@@ -75,10 +75,10 @@ int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int m
 }
 
 bool ensure_factored_rows(RuntimeConfig& cfg, const ModelConfig& mc, SSMState* ssm, VRAMAllocator& alloc,
-                          BatchVerifyState& bv);
+                          BatchVerifyState& bv, cudaStream_t stream);
 void free_factored_rows(VRAMAllocator& alloc, BatchVerifyState& bv);
 
-bool Engine::ensure_batch_verify_bufs_() {
+bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
     if (!batch_verify_wants_bufs(runtime_config_, model_.get(), config_.max_batch_size))
         return true;  // nothing to stage, and that is not a failure
     if (bv_.d_stage != nullptr)
@@ -113,7 +113,8 @@ bool Engine::ensure_batch_verify_bufs_() {
     bv_.cap_seq = cap_seq;
     bv_.cap_rows = cap_rows;
     bv_.table_cap = table_cap;
-    return ensure_factored_rows(runtime_config_, model_->config(), ssm_state_.get(), vram_alloc_, bv_);
+    return ensure_factored_rows(runtime_config_, model_->config(), ssm_state_.get(), vram_alloc_, bv_,
+                                stream);
 }
 
 // Factored spare pools (speculative.factored_spare), sized over the LIVE
@@ -124,8 +125,8 @@ bool factored_spare_active(const RuntimeConfig& cfg, const BatchVerifyState& bv)
     return cfg.speculative.factored_spare && bv.d_fac != nullptr;
 }
 
-bool ensure_factored_rows(RuntimeConfig& cfg, const ModelConfig& mc, SSMState* ssm,
-                          VRAMAllocator& alloc, BatchVerifyState& bv) {
+bool ensure_factored_rows(RuntimeConfig& cfg, const ModelConfig& mc, SSMState* ssm, VRAMAllocator& alloc,
+                          BatchVerifyState& bv, cudaStream_t stream) {
     if (!cfg.speculative.factored_spare || bv.d_fac != nullptr)
         return true;
     const int layers = ssm ? ssm->n_ssm_layers() : 0;
@@ -165,7 +166,8 @@ bool ensure_factored_rows(RuntimeConfig& cfg, const ModelConfig& mc, SSMState* s
         cfg.speculative.factored_spare = false;
         return true;
     }
-    IMP_CUDA_CHECK_LOG(cudaMemset(bv.d_fac, 0, fac_bytes));
+    // On the verify stream: a legacy-stream memset is not ordered before its kernels (#2275).
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(bv.d_fac, 0, fac_bytes, stream));
     IMP_LOG_INFO("speculative.factored_spare: %d layers x %d slots, %.1f MiB of rows + %.1f MiB of conv "
                  "taps (a spare slot pool would be %.1f MiB)",
                  layers, slots, fac_bytes / (1024.0 * 1024.0), tap_bytes / (1024.0 * 1024.0),
@@ -312,7 +314,7 @@ const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Requ
 bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& batch, cudaStream_t stream) {
     const auto verify_t0 = std::chrono::steady_clock::now();
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
-    if (!ensure_batch_verify_bufs_())
+    if (!ensure_batch_verify_bufs_(stream))
         return false;
     const int max_bs = std::min(runtime_config_.runtime.max_batch_size, bv_.cap_seq);
     std::vector<std::shared_ptr<Request>> reqs;

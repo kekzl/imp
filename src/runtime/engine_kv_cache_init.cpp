@@ -914,7 +914,7 @@ bool Engine::init_kv_cache() {
     // The "can the verify run" gate lives inside the callee: gating here on the
     // spare slot count left speculative.factored_spare permanently disabled
     // (it reserves none by design).
-    if (!ensure_batch_verify_bufs_())  // init-time staging
+    if (!ensure_batch_verify_bufs_(stream_))  // init-time staging
         IMP_LOG_WARN("spec-batch: staging buffers unavailable - batched verify stays off");
     {
         d_penalty_tokens_capacity_ = static_cast<size_t>(config_.max_seq_len);

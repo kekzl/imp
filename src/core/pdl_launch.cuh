@@ -10,9 +10,9 @@ namespace pdl {
 // PDL-aware kernel launch via cudaLaunchKernelEx with
 // ProgrammaticStreamSerialization; falls back to plain <<<>>> when PDL is
 // off/unavailable. Registration is the promise that a kernel calls
-// pdl_wait() before its first global access and pdl_trigger() after its
-// last input read (cuda_graph.cu only converts an edge when the CONSUMER is
-// registered); a kernel without pdl_wait() must never be registered.
+// pdl_wait() before its first access to mutable global memory (contract:
+// core/pdl_device.cuh; cuda_graph.cu only converts an edge when the CONSUMER
+// is registered); a kernel without pdl_wait() must never be registered.
 // Usage: pdl::launch(my_kernel, grid, block, smem, stream, arg1, arg2, ...);
 template <typename KernelFunc, typename... Args>
 void launch(KernelFunc func, dim3 grid, dim3 block, size_t smem, cudaStream_t stream, Args... args) {

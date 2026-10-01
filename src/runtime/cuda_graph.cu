@@ -744,7 +744,8 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
     // (non-diag) path to avoid perturbing CUDA error state in pre-launch phases.
     if (graph_diag::enabled()) {
         int v = 1;
-        IMP_CUDA_CHECK_BOOL(cudaMemcpyToSymbol(d_graph_diag_enabled, &v, sizeof(int)));
+        IMP_CUDA_CHECK_BOOL(cudaMemcpyToSymbolAsync(d_graph_diag_enabled, &v, sizeof(int), 0,
+                                                    cudaMemcpyHostToDevice, stream));
     }
 
     cudaError_t err;

@@ -15,12 +15,12 @@
 namespace imp {
 
 namespace {
-// Zero one residual slot's device ring state (write_idx, fill_count); false after logging.
-bool residual_slot_zeroed(int* widx, int* fc, int slot) {
-    const int zero = 0;
-    cudaError_t err = cudaMemcpy(widx + slot, &zero, sizeof(int), cudaMemcpyHostToDevice);
+// Zero one residual slot's device ring state (write_idx, fill_count) on the decode stream that
+// reads it: a legacy-stream write is not ordered before a non-blocking stream (#2275).
+bool residual_slot_zeroed(int* widx, int* fc, int slot, cudaStream_t stream) {
+    cudaError_t err = cudaMemsetAsync(widx + slot, 0, sizeof(int), stream);
     if (err == cudaSuccess)
-        err = cudaMemcpy(fc + slot, &zero, sizeof(int), cudaMemcpyHostToDevice);
+        err = cudaMemsetAsync(fc + slot, 0, sizeof(int), stream);
     if (err != cudaSuccess)
         IMP_LOG_ERROR("KVCacheManager: residual slot %d zero failed: %s", slot, cudaGetErrorString(err));
     return err == cudaSuccess;
@@ -162,15 +162,15 @@ bool KVCacheManager::enable_residual_buffer(int max_seqs, int residual_n, VRAMAl
     return true;
 }
 
-int KVCacheManager::allocate_residual_slot(int seq_id) {
+int KVCacheManager::allocate_residual_slot(int seq_id, cudaStream_t stream) {
     if (!residual_pool_) return -1;
     auto it = residual_seq_slot_.find(seq_id);
     if (it != residual_seq_slot_.end()) return it->second;
     if (residual_free_slots_.empty()) return -1;
     int slot = residual_free_slots_.back();
-    // Zero device-resident ring state for this slot. Synchronous — runs once
-    // per request admission, not on the hot decode path. Failed zero: slot stays free.
-    if (d_residual_widx_ && !residual_slot_zeroed(d_residual_widx_, d_residual_fc_, slot))
+    // Zero device-resident ring state for this slot, ordered before the decode step on
+    // `stream`. Once per request admission. Failed zero: slot stays free.
+    if (d_residual_widx_ && !residual_slot_zeroed(d_residual_widx_, d_residual_fc_, slot, stream))
         return -1;
     residual_free_slots_.pop_back();
     residual_seq_slot_[seq_id] = slot;
@@ -185,9 +185,7 @@ void KVCacheManager::release_residual_slot(int seq_id) {
     residual_free_slots_.push_back(slot);
     residual_seq_slot_.erase(it);
     seq_residual_state_.erase(seq_id);
-    // Best effort (logged): allocate_residual_slot re-zeroes the slot and checks.
-    if (d_residual_widx_)
-        (void)residual_slot_zeroed(d_residual_widx_, d_residual_fc_, slot);
+    // No zero here: a decode step may still read the slot; allocate_residual_slot zeroes on its stream.
 }
 
 int KVCacheManager::residual_slot_of(int seq_id) const {

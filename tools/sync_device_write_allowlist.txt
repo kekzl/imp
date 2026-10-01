@@ -1,0 +1,67 @@
+# tools/check_sync_device_writes.py (#2275): synchronous legacy-stream device writes, one line per site.
+# <path> <key> <init|debug|offline|synced>  # reason. Serving-path writes use *Async on the consumer stream.
+src/compute/attention_cublas.cu cudaMemcpy(d_ap init  # prewarm GEMM runs on the legacy stream (cublasSetStream nullptr)
+src/compute/attention_cublas.cu cudaMemcpy(d_bp init  # same legacy-stream prewarm GEMM
+src/compute/attention_cublas.cu cudaMemcpy(d_cp init  # same legacy-stream prewarm GEMM
+src/compute/attention_cublas.cu cudaMemset(d_a init  # same legacy-stream prewarm GEMM
+src/compute/attention_cublas.cu cudaMemset(d_b init  # same legacy-stream prewarm GEMM
+src/compute/constrain_device_buffers.h cudaMemcpy(d_token_categories_ synced  # cudaStreamSynchronize(nullptr) right after
+src/compute/ffn_sparsity_probe.cu cudaMemset(g_state.d_counters debug  # diagnostics probe reset, no later consumer
+src/compute/ffn_sparsity_probe.cu cudaMemset(slab.data() debug  # diagnostics probe counters
+src/compute/gemm_batched.cpp cudaMemcpy(d_sa offline  # gemm_cublaslt_fp8_probe, no caller
+src/compute/gemm_batched.cpp cudaMemcpy(d_sb offline  # gemm_cublaslt_fp8_probe, no caller
+src/compute/gemm_batched.cpp cudaMemset(d_a offline  # gemm_cublaslt_fp8_probe, no caller
+src/compute/gemm_batched.cpp cudaMemset(d_b offline  # gemm_cublaslt_fp8_probe, no caller
+src/compute/gemm_grouped_nvfp4_smallM.cu cudaMemset(s_dummy synced  # cudaStreamSynchronize(nullptr) right after
+src/compute/sampling_penalties_history.cu cudaMemset(slab.data() init  # preallocated at engine init, before the warmup device syncs
+src/core/buffer.cpp cudaMemset(data_ offline  # Buffer::zero, no caller
+src/exec/executor_attention_internal.h cudaMemcpy(k_flat+static_cast<ptrdiff_t>(b*kv_bs*nkv*hd) debug  # cuBLAS attention debug path
+src/exec/executor_attention_internal.h cudaMemcpy(v_flat+static_cast<ptrdiff_t>(b*kv_bs*nkv*hd) debug  # cuBLAS attention debug path
+src/exec/executor_attention_internal.h cudaMemset(k_flat debug  # cuBLAS attention debug path
+src/exec/executor_attention_internal.h cudaMemset(v_flat debug  # cuBLAS attention debug path
+src/exec/executor_qsa.cpp cudaMemcpy(d_bt debug  # attention.qsa_debug comparison rows
+src/exec/executor_qsa.cpp cudaMemcpy(d_ctx debug  # attention.qsa_debug comparison rows
+src/exec/executor_workspace_buffers.cpp cudaMemset(gdn_ab_prefill_ws_ init  # executor init, before the warmup device syncs
+src/exec/executor_workspace_buffers.cpp cudaMemset(gdn_ab_ws_ init  # executor init, before the warmup device syncs
+src/exec/executor_workspace_buffers.cpp cudaMemset(qscratch_.cutlass_act_sf init  # executor init, before the warmup device syncs
+src/exec/executor_workspace.cpp cudaMemcpy(*buf init  # GraphExecutor::init, Gemma-4 V-norm ones
+src/exec/executor_workspace.cpp cudaMemcpy(longrope_long_freqs_ init  # GraphExecutor::init
+src/exec/executor_workspace.cpp cudaMemcpy(longrope_short_freqs_ init  # GraphExecutor::init
+src/exec/expert_cache.cu cudaMemset(d_lookup_ init  # expert cache init and reinit_or_disable at pre-dequant
+src/exec/expert_cache.cu cudaMemset(d_lookup_ init  # expert cache init and reinit_or_disable at pre-dequant
+src/exec/expert_cache.cu cudaMemset(d_slot_scales_ init  # expert cache init
+src/exec/expert_cache_device.cu cudaMemcpy(d_src init  # device expert cache init
+src/exec/expert_cache_device.cu cudaMemset(d_clock init  # device expert cache init
+src/exec/expert_cache_device.cu cudaMemset(d_key init  # device expert cache init
+src/exec/expert_cache_device.cu cudaMemset(d_n_miss_ init  # device expert cache init
+src/exec/expert_cache_device.cu cudaMemset(d_slot_of init  # device expert cache init
+src/exec/expert_cache_device.cu cudaMemset(d_stamp init  # device expert cache init
+src/exec/expert_cache_device.cu cudaMemset(d_stats_ init  # device expert cache init
+src/exec/pre_dequant_phase4_tensor_registry.cpp cudaMemcpy(d_alpha init  # pre-dequant at load
+src/exec/pre_dequant_phase4_tensor_registry.cpp cudaMemcpy(static_cast<void*>(const_cast<void**>(d_B)) init  # pre-dequant at load
+src/exec/pre_dequant_phase4_tensor_registry.cpp cudaMemcpy(static_cast<void*>(const_cast<void**>(d_SFB)) init  # pre-dequant at load
+src/lora/lora_adapter.cpp cudaMemcpy(dev synced  # cudaStreamSynchronize(nullptr) right after
+src/memory/alloc_interpose.cpp cudaMemset(p debug  # IMP_ALLOC_POISON poison fill
+src/memory/kv_cache.cu cudaMemset(k_ptr(l,first_new) synced  # cudaStreamSynchronize(0) before capacity is published
+src/memory/kv_cache.cu cudaMemset(minmax_pool_ init  # KV cache construction
+src/memory/kv_cache.cu cudaMemset(pool_ init  # KV cache construction
+src/memory/kv_cache.cu cudaMemset(pool_ init  # KV cache construction (per-layer)
+src/memory/kv_cache.cu cudaMemset(scale_pool_ init  # KV cache construction
+src/memory/kv_cache.cu cudaMemset(scale_pool_ init  # KV cache construction (per-layer)
+src/memory/kv_cache.cu cudaMemset(v_ptr(l,first_new) synced  # cudaStreamSynchronize(0) before capacity is published
+src/memory/kv_cache_manager.cpp cudaMemset(d_residual_fc_ init  # enable_residual_buffer at KV init
+src/memory/kv_cache_manager.cpp cudaMemset(d_residual_widx_ init  # enable_residual_buffer at KV init
+src/memory/ssm_state.cpp cudaMemset(pool_ init  # SSM state construction
+src/quant/gpt_oss_mxfp4_convert.cpp cudaMemcpy(d_ms offline  # load-time weight conversion
+src/quant/gpt_oss_mxfp4_convert.cpp cudaMemcpy(d_packed offline  # load-time weight conversion
+src/quant/gpt_oss_mxfp4_convert.cpp cudaMemcpy(d_ts offline  # load-time weight conversion
+src/runtime/engine.cpp cudaMemcpy(d_meta init  # alloc_residual_decode_buffers at KV init
+src/runtime/engine.cpp cudaMemcpy(d_slot init  # alloc_residual_decode_buffers at KV init
+src/runtime/engine_kv_cache_init.cpp cudaMemset(d_ssm_seq_slots_ init  # KV init; the scheduler uploads the table before each batched step
+src/vision/qwen3vl_vision_upload.cpp cudaMemcpy(d synced  # cudaStreamSynchronize(nullptr) after the upload loop
+src/vision/vision_encoder.cu cudaMemcpy(d_pos_x_ init  # VisionEncoder::init
+src/vision/vision_encoder.cu cudaMemcpy(d_pos_y_ init  # VisionEncoder::init
+src/vision/vision_loader.cpp cudaMemcpy(d_ptr init  # mmproj tower upload at init
+src/vision/vision_loader.cpp cudaMemcpy(d_ptr init  # mmproj tower upload at init
+src/vision/vision_loader.cpp cudaMemcpy(d_ptr init  # mmproj tower upload at init
+src/vision/vision_loader.cpp cudaMemcpy(d_ptr init  # mmproj tower upload at init
