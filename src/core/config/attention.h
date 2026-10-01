@@ -136,6 +136,14 @@ struct Attention {
     // Offset weight for sparse_score_meanstd. Larger keeps more of the
     // spread, 0 ranks on the mean alone. Ignored by the corner bound.
     float sparse_score_std_coef = 1.0f;
+    // Sparse prefill: a continuation chunk attends to its own chunk densely plus the top
+    // sparse_prefill_topk_tokens past tokens, one page selection per chunk from
+    // sparse_prefill_rows sampled query rows (same page score). 0=off. Shares the key metadata
+    // pool and sink tokens with sparse decode; the last sparse_prefill_recent_tokens past
+    // positions are always kept.
+    int sparse_prefill_topk_tokens = 0;
+    int sparse_prefill_rows = 16;
+    int sparse_prefill_recent_tokens = 1024;
     // Qwen4Exp QSA indexer (learned block top-k over the attention context, exact below 2051
     // tokens). qsa=false: dense attention on every row (not the model above 2050 tokens).
     // qsa_force: run the selected path on every prefill row (correctness A/B vs dense).

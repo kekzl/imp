@@ -1106,6 +1106,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_paged_nvfp4_tc_residual.cu
         tests/test_attention_chunked.cu
         tests/test_sparse_attn_select.cu
+        tests/test_sparse_prefill.cu
     )
 
     imp_add_test_module(test-quant SOURCES

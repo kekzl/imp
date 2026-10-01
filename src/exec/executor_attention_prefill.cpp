@@ -127,9 +127,30 @@
                 // though the cache now already holds the current chunk too.
             }
 
-            const int gather_cap = cap_replay ? state.ctx_capacity : q_offset;
+            // Sparse prefill (attention.sparse_prefill_topk_tokens): this chunk attends to its own
+            // rows plus the selected past pages, compacted ascending; past keys are post-RoPE, so
+            // only the causal offset changes (att_off = selected past tokens).
+            const int* past_bt = layer_block_tables;
+            int att_off = q_offset;
+            const auto& spq = qscratch_;
+            if (!cap_replay && !paged_kv_written && spq.sp_prefill_budget_blocks > 0 &&
+                cache->key_minmax_enabled() && layer_sliding_window == 0 && attn_sinks == nullptr &&
+                nh / nkv <= 16 && (q_offset + kv_bs - 1) / kv_bs > spq.sp_prefill_budget_blocks) {
+                const int sel = sparse_prefill_select_past(
+                    static_cast<const half*>(qv.data), n, spq.sp_prefill_rows, cache->key_minmax_ptr(kv_layer, 0),
+                    layer_block_tables, q_offset, nh, nkv, hd, kv_bs, spq.sp_prefill_cap_blocks,
+                    spq.sp_prefill_budget_blocks, spq.sp_prefill_sink_blocks, spq.sp_prefill_recent_blocks,
+                    spq.sparse_score_meanstd, spq.sparse_score_std_coef, spq.sp_prefill_scores, spq.sp_prefill_agg,
+                    spq.sp_prefill_table, spq.sp_prefill_ctx, stream);
+                if (sel > 0) {
+                    past_bt = spq.sp_prefill_table;
+                    att_off = sel;
+                }
+            }
+            const int att_ctx = att_off + n;
+            const int gather_cap = cap_replay ? state.ctx_capacity : att_off;
             const int* d_past = cap_replay ? state.d_past_len : nullptr;
-            size_t full_bytes = (size_t)ctx_len * nkv * hd * sizeof(half);
+            size_t full_bytes = (size_t)att_ctx * nkv * hd * sizeof(half);
 
             half* k_full = nullptr;
             half* v_full = nullptr;
@@ -166,81 +187,81 @@
                     chunk_kv_split(kv_err, kv, full_bytes, &k_full, &v_full);
                 }
             }
-            // The append below offsets k_full/v_full by q_offset rows; a null buffer is UB (#2288).
+            // The append below offsets k_full/v_full by att_off rows; a null buffer is UB (#2288).
             require_chunk_kv(k_full, v_full);
 
-            // Gather past KV [0, q_offset) directly into k_full[0..q_offset], v_full[0..q_offset].
+            // Gather past KV [0, att_off) directly into k_full[0..att_off], v_full[0..att_off].
             if (kvt == QType::F16) {
                 paged_kv_gather_fp16(k_full, static_cast<const half*>(cache->k_ptr(kv_layer, 0)),
-                                     layer_block_tables, gather_cap, kv_bs, nkv, hd, stream, d_past);
+                                     past_bt, gather_cap, kv_bs, nkv, hd, stream, d_past);
                 paged_kv_gather_fp16(v_full, static_cast<const half*>(cache->v_ptr(kv_layer, 0)),
-                                     layer_block_tables, gather_cap, kv_bs, nkv, hd, stream, d_past);
+                                     past_bt, gather_cap, kv_bs, nkv, hd, stream, d_past);
             } else if (kvt == QType::FP8_E4M3) {
                 float kv_scale = (!kv_scales_.empty() && kv_layer < (int)kv_scales_.size())
                                      ? kv_scales_[kv_layer]
                                      : 1.0f;
                 paged_kv_gather_fp8_to_fp16(k_full,
                                             static_cast<const __nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
-                                            layer_block_tables, kv_scale, gather_cap, kv_bs, nkv, hd,
+                                            past_bt, kv_scale, gather_cap, kv_bs, nkv, hd,
                                             stream, d_past);
                 paged_kv_gather_fp8_to_fp16(v_full,
                                             static_cast<const __nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)),
-                                            layer_block_tables, kv_scale, gather_cap, kv_bs, nkv, hd,
+                                            past_bt, kv_scale, gather_cap, kv_bs, nkv, hd,
                                             stream, d_past);
             } else if (kvt == QType::NVFP4) {
                 paged_kv_gather_nvfp4_to_fp16(k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
                                               static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
-                                              layer_block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                              past_bt, gather_cap, kv_bs, nkv, hd, stream,
                                               d_past);
                 paged_kv_gather_nvfp4_to_fp16(v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
                                               static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
-                                              layer_block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                              past_bt, gather_cap, kv_bs, nkv, hd, stream,
                                               d_past);
             } else if (kvt == QType::MXFP4_KV) {
                 paged_kv_gather_mxfp4_kv_to_fp16(k_full,
                                                  static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
                                                  static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
-                                                 layer_block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                                 past_bt, gather_cap, kv_bs, nkv, hd, stream,
                                                  d_past);
                 paged_kv_gather_mxfp4_kv_to_fp16(v_full,
                                                  static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
                                                  static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
-                                                 layer_block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                                 past_bt, gather_cap, kv_bs, nkv, hd, stream,
                                                  d_past);
             } else if (kvt == QType::INT8) {  // symmetric 8-bit, per-head FP16 scale
                 paged_kv_gather_int8_to_fp16(k_full, static_cast<const int8_t*>(cache->k_ptr(kv_layer, 0)),
                                              static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
-                                             layer_block_tables, gather_cap, kv_bs, nkv, hd, stream, d_past);
+                                             past_bt, gather_cap, kv_bs, nkv, hd, stream, d_past);
                 paged_kv_gather_int8_to_fp16(v_full, static_cast<const int8_t*>(cache->v_ptr(kv_layer, 0)),
                                              static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
-                                             layer_block_tables, gather_cap, kv_bs, nkv, hd, stream, d_past);
+                                             past_bt, gather_cap, kv_bs, nkv, hd, stream, d_past);
             } else {  // INT4 — symmetric 4-bit with per-head FP16 scale
                 paged_kv_gather_int4_to_fp16(k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
                                              static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
-                                             layer_block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                             past_bt, gather_cap, kv_bs, nkv, hd, stream,
                                              d_past);
                 paged_kv_gather_int4_to_fp16(v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
                                              static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
-                                             layer_block_tables, gather_cap, kv_bs, nkv, hd, stream,
+                                             past_bt, gather_cap, kv_bs, nkv, hd, stream,
                                              d_past);
             }
 
-            // Append current chunk's K/V at offset q_offset.
+            // Append current chunk's K/V at offset att_off.
             if (cap_replay) {
                 kv_chunk_append_fp16(k_full, static_cast<const half*>(kk.data), state.d_past_len, n,
                                      nkv * hd, stream);
                 kv_chunk_append_fp16(v_full, static_cast<const half*>(vv.data), state.d_past_len, n,
                                      nkv * hd, stream);
             } else {
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(k_full + (size_t)q_offset * nkv * hd, kk.data,
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(k_full + (size_t)att_off * nkv * hd, kk.data,
                                                    (size_t)n * nkv * hd * sizeof(half),
                                                    cudaMemcpyDeviceToDevice, stream));
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(v_full + (size_t)q_offset * nkv * hd, vv.data,
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(v_full + (size_t)att_off * nkv * hd, vv.data,
                                                    (size_t)n * nkv * hd * sizeof(half),
                                                    cudaMemcpyDeviceToDevice, stream));
             }
 
-            int64_t kv_full_shape[2] = {(int64_t)(cap_replay ? state.ctx_capacity : ctx_len),
+            int64_t kv_full_shape[2] = {(int64_t)(cap_replay ? state.ctx_capacity : att_ctx),
                                         (int64_t)(nkv * hd)};
             Tensor k_full_t(k_full, QType::F16, 2, kv_full_shape, /*on_device=*/true);
             Tensor v_full_t(v_full, QType::F16, 2, kv_full_shape, /*on_device=*/true);
@@ -251,7 +272,7 @@
             // prompts. FP16 cuBLAS is the accuracy reference; FMHA stays gated behind
             // the S-matrix-capacity threshold. fp8-attention quality above the threshold: #511.
 
-            // #548: prefer the FP16-QK FA2 kernel at EVERY ctx_len for chunked
+            // #548: prefer the FP16-QK FA2 kernel at EVERY att_ctx for chunked
             // attention, not only below the threshold - O(n) memory like the fp8
             // family but no e4m3 score noise (the e4m3 FMHA family drifted
             // teacher-forced NLL badly on long-context chunks, gated by
@@ -262,17 +283,17 @@
                 // Replay mode is FA2-only; a decline throws rather than record a stale-length fallback.
                 fa2_prefill_for_replay(dispatch_policy(), qv, k_full_t, v_full_t, ao, n, state.ctx_capacity,
                                        nh, nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
-                                       q_offset, stream, state.context_lens, attn_sinks);
+                                       att_off, stream, state.context_lens, attn_sinks);
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
-            } else if (try_fa2_fp16qk_prefill(dispatch_policy(), qv, k_full_t, v_full_t, ao, n, ctx_len, nh,
+            } else if (try_fa2_fp16qk_prefill(dispatch_policy(), qv, k_full_t, v_full_t, ao, n, att_ctx, nh,
                                               nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
-                                              q_offset, stream, /*d_kv_len=*/nullptr, attn_sinks)) {
+                                              att_off, stream, /*d_kv_len=*/nullptr, attn_sinks)) {
                 // chunked prefill: FP16-QK FA2 (no S-matrix, no e4m3 noise); declines exactly where
                 // chunk_fa2_serves is false (fa2_serves_head_dim + fa2_fp16qk != never).
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
             } else if (try_hd512_row_invariant_prefill(dispatch_policy(), hd, qv, k_full_t, v_full_t, ao, n,
-                                                       ctx_len, nh, nkv, scale, layer_sliding_window,
-                                                       cfg.attn_logit_softcap, q_offset, stream,
+                                                       att_ctx, nh, nkv, scale, layer_sliding_window,
+                                                       cfg.attn_logit_softcap, att_off, stream,
                                                        attn_sinks)) {
                 // Same kernel as the single-shot prefill: a row matches in every chunk (#2167).
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FMHA_CHAIN);
@@ -283,12 +304,12 @@
                 // land here.
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS);
                 attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,
-                                         /*causal=*/true, cfg.attn_logit_softcap, q_offset, stream,
+                                         /*causal=*/true, cfg.attn_logit_softcap, att_off, stream,
                                          layer_sliding_window, attn_sinks);
             } else if (hd == 512 && !prefer_fmha && s_cap > 0 &&
                        attention_cublas_prefill_sliced(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd,
                                                        scale, /*causal=*/true, cfg.attn_logit_softcap,
-                                                       q_offset, stream, layer_sliding_window, attn_sinks)) {
+                                                       att_off, stream, layer_sliding_window, attn_sinks)) {
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS_SLICED);
                 // hd=512 S-matrix overflow (long ctx): cuBLAS in workspace-sized q-row
                 // slices, faster than the whole-chunk FMHA hd=512 fallback (the FMHA's
@@ -300,7 +321,7 @@
                 // hd=512 only when the workspace is too degraded even for 16-row cuBLAS
                 // slices. Learned sinks ride along (#992).
                 int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
-                int64_t kv4s[4] = {1, (int64_t)ctx_len, (int64_t)nkv, (int64_t)hd};
+                int64_t kv4s[4] = {1, (int64_t)att_ctx, (int64_t)nkv, (int64_t)hd};
                 int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
                 Tensor q4 = qv.reshape(4, q4s);
                 Tensor k4 = k_full_t.reshape(4, kv4s);
@@ -308,7 +329,7 @@
                 Tensor o4 = ao.reshape(4, o4s);
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FMHA_CHAIN);
                 attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
-                                           cfg.attn_logit_softcap, stream, dispatch_policy(), q_offset,
+                                           cfg.attn_logit_softcap, stream, dispatch_policy(), att_off,
                                            static_cast<const half*>(attn_sinks));
             }
 

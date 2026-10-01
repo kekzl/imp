@@ -90,6 +90,17 @@ struct QuantScratch {
     bool sparse_score_meanstd = false;
     float sparse_score_std_coef = 1.0f;
 
+    // --- Sparse prefill scratch (attention.sparse_prefill_topk_tokens); budget 0 = off ---
+    float* sp_prefill_scores = nullptr;  // [64, sp_prefill_cap_blocks]
+    float* sp_prefill_agg = nullptr;     // [sp_prefill_cap_blocks]
+    int* sp_prefill_table = nullptr;     // [sp_prefill_cap_blocks]
+    int* sp_prefill_ctx = nullptr;       // [1]
+    int sp_prefill_budget_blocks = 0;
+    int sp_prefill_sink_blocks = 0;
+    int sp_prefill_recent_blocks = 0;
+    int sp_prefill_cap_blocks = 0;
+    int sp_prefill_rows = 0;
+
     // Free all buffers.
     void free(VRAMAllocator* alloc);
 };

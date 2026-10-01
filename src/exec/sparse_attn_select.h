@@ -47,4 +47,22 @@ void sparse_select_blocks(const half* q, const void* minmax_base, const int* blo
                           int* sparse_block_tables, int* sparse_context_lens, bool meanstd, float std_coef,
                           cudaStream_t stream);
 
+// Sparse prefill (attention.sparse_prefill_topk_tokens): past tokens a continuation chunk attends
+// to under a budget_blocks page budget; the partial tail block always stays. past_len when
+// ceil(past_len/block_size) <= budget_blocks (identity).
+int sparse_prefill_past_tokens(int past_len, int block_size, int budget_blocks);
+
+// One page selection for a whole prefill chunk: scores past blocks against sample_rows rows of
+// q [n_rows, n_heads, head_dim] (evenly spaced, last row included), merges the rows by gap to
+// each row's best block, writes the compacted ascending past table (sink/recent forced). Within
+// the budget it copies the table (dense equivalent). Returns the past token count to attend, or
+// -1 when the table exceeds capacity_blocks. Scratch: scores [64, capacity], agg [capacity],
+// out_block_table [capacity], out_ctx_scratch [1] (device).
+int sparse_prefill_select_past(const half* q, int n_rows, int sample_rows, const void* minmax_layer,
+                               const int* past_block_table, int past_len, int n_heads, int n_kv_heads,
+                               int head_dim, int block_size, int capacity_blocks, int budget_blocks,
+                               int sink_blocks, int recent_blocks, bool meanstd, float std_coef,
+                               float* scores_scratch, float* agg_scratch, int* out_block_table,
+                               int* out_ctx_scratch, cudaStream_t stream);
+
 }  // namespace imp
