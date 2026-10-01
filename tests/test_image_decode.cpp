@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "png_test_util.h"
 #include "vision/image_decode.h"
 
 namespace imp {
@@ -82,6 +83,39 @@ TEST(ImageDecode, PngStaysOnStb) {
     EXPECT_EQ(img.width, 64);
     EXPECT_EQ(img.height, 64);
     EXPECT_EQ(img.rgb.size(), 64u * 64u * 3u);
+}
+
+TEST(ImageDecode, InMemoryPngDecodes) {
+    const std::vector<uint8_t> png = test::make_png_rgb({{{{1, 2, 3}}, {{4, 5, 6}}}});
+    DecodedImage img;
+    ASSERT_TRUE(decode_image(png, img));
+    EXPECT_EQ(img.width, 2);
+    EXPECT_EQ(img.height, 1);
+    EXPECT_EQ(img.rgb, (std::vector<uint8_t>{1, 2, 3, 4, 5, 6}));
+}
+
+// stb is compiled STBI_ONLY_PNG: GIF (CVE-2026-5185) and BMP are refused, not decoded (#2401).
+TEST(ImageDecode, GifIsRefused) {
+    // Valid 1x1 GIF89a, white pixel.
+    const std::vector<uint8_t> gif = {0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80,
+                                      0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00,
+                                      0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01,
+                                      0x00, 0x3B};
+    DecodedImage img;
+    EXPECT_FALSE(decode_image(gif, img));
+    EXPECT_TRUE(img.rgb.empty());
+}
+
+TEST(ImageDecode, BmpIsRefused) {
+    // Valid 1x1 24-bit BMP (BITMAPINFOHEADER), one red pixel, row padded to 4 bytes.
+    std::vector<uint8_t> bmp(58, 0);
+    const uint8_t head[] = {'B', 'M', 58, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0,
+                            1,   0,   0,  0, 1, 0, 0, 0, 1, 0, 24, 0, 0, 0, 0, 0, 4, 0};
+    std::copy(std::begin(head), std::end(head), bmp.begin());
+    bmp[56] = 0xFF;  // BGR: red
+    DecodedImage img;
+    EXPECT_FALSE(decode_image(bmp, img));
+    EXPECT_TRUE(img.rgb.empty());
 }
 
 TEST(ImageDecode, TruncatedJpegFails) {

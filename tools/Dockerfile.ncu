@@ -11,7 +11,8 @@
 # nvcc SILENTLY dropped `-std=c++23` (warning, not error) and recompiles inside the
 # image diverged from the C++23 CI build. Nsight Compute and nsys already ship in
 # this CUDA devel base.
-FROM nvidia/cuda:13.3.1-devel-ubuntu26.04
+# Same base as the Dockerfile toolchain stage (tag + digest), so recompiles match the build (#2404).
+FROM nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
 
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends libdw1t64 \

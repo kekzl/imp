@@ -120,6 +120,7 @@ Codes above 9 are unused; `imp-quantize` returns 1 for usage errors (was 2), sam
 --api-key "$IMP_API_KEY"      # bearer auth on the inference endpoints
 --metrics-require-auth        # fold /metrics behind the same key
 --trusted-proxy 10.0.0.5      # believe X-Forwarded-For from these peers only
+--cors-origins https://a.example  # browser origins allowed cross-origin (default: none)
 ```
 
 **No default credential, no default refusal.** Without `--api-key` every
@@ -144,8 +145,15 @@ ask for many units of it):
 | `--http-write-timeout` | 600 s | socket write, must outlast a stream |
 | `--http-keep-alive-max` | 100 | requests per connection |
 
-**CORS is wide open by design** (`Access-Control-Allow-Origin: *` plus an `OPTIONS` catch-all): the built-in web UI and browser clients call the API
-directly. imp does not do TLS; terminate TLS and enforce origin policy at a reverse proxy if reachable beyond your own network.
+**CORS is off by default** (#2402): no `Access-Control-Allow-*` headers, so only same-origin pages read responses. The built-in web UI is served by imp-server itself (same origin) and needs nothing.
+
+| `--cors-origins` | response header |
+|---|---|
+| unset | none |
+| `https://a.example,http://localhost:3000` | `Access-Control-Allow-Origin: <Origin>` + `Vary: Origin` on an exact match, nothing otherwise |
+| `*` | `Access-Control-Allow-Origin: *` (behaviour before #2402) |
+
+The web UI opened from disk or another host (`?api=`) is cross-origin: list its origin (`null` for `file://`). imp does not do TLS; terminate TLS at a reverse proxy if reachable beyond your own network.
 
 A minimal nginx front:
 

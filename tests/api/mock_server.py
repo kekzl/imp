@@ -85,8 +85,10 @@ class MockConfig:
     """Per-server configuration (avoids class variable pollution across instances)."""
     def __init__(self, latency_ms=5, fail_rate=0.0, oom=False, idle_unload_seconds=0, fim=True,
                  responses_store_ttl=3600.0, responses_store_max_entries=1000,
-                 responses_store_max_bytes=256 << 20, swap_models=None):
+                 responses_store_max_bytes=256 << 20, swap_models=None, cors_origins=""):
         self.latency_ms = latency_ms
+        # --cors-origins (#2402): same parse as utils.cpp parse_cors_origins.
+        self.cors_origins = [o.strip(" \t") for o in cors_origins.split(",") if o.strip(" \t")]
         # Loaded model has FIM tokens (#2201); False = /infill and `suffix` answer 400 fim_not_supported.
         self.fim = fim
         self.fail_rate = fail_rate
@@ -129,13 +131,22 @@ class MockHandler(BaseHTTPRequestHandler):
             if len(rid) > 128:
                 out += "..."
             self.send_header("X-Request-Id", out)
+        # main.cpp pre-routing + utils.cpp cors_allow_origin (#2402).
+        allowed = self.config.cors_origins
+        origin = self.headers.get("Origin", "")
+        acao = "*" if "*" in allowed else (origin if origin and origin in allowed else "")
+        if acao:
+            self.send_header("Access-Control-Allow-Origin", acao)
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        if allowed and acao != "*":
+            self.send_header("Vary", "Origin")
         super().end_headers()
 
     def _send_json(self, status: int, body: dict):
         data = json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -172,9 +183,6 @@ class MockHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()
 
     def do_GET(self):
@@ -778,7 +786,6 @@ class MockHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
 
@@ -1291,6 +1298,7 @@ def main():
     parser.add_argument("--oom", action="store_true")
     parser.add_argument("--idle-unload-seconds", type=str, default="0")
     parser.add_argument("--swap-model", action="append", default=[])
+    parser.add_argument("--cors-origins", type=str, default="")
     for flag in ("--responses-store-ttl", "--responses-store-max-entries", "--responses-store-max-mib"):
         parser.add_argument(flag, type=str, default=None)
     args = parser.parse_args()
@@ -1325,7 +1333,7 @@ def main():
                         responses_store_ttl=store["responses_store_ttl"],
                         responses_store_max_entries=store["responses_store_max_entries"],
                         responses_store_max_bytes=store["responses_store_max_mib"] << 20,
-                        swap_models=args.swap_model)
+                        swap_models=args.swap_model, cors_origins=args.cors_origins)
     handler_class = make_handler_class(config)
     server = ThreadedHTTPServer(("127.0.0.1", args.port), handler_class)
 

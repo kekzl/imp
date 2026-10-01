@@ -3,11 +3,9 @@
 # =============================================================================
 # Stage 1: Build imp from source
 # =============================================================================
-# Native CUDA 13.3 devel image: nvcc 13.3 (V13.3.73) is on PATH at
-# /usr/local/cuda (-> /usr/local/cuda-13.3) out of the box — no apt toolkit
-# install needed. The host driver (UMD 13.3) supports it. sm_120 gains the 13.3
-# ptxas/PTX-ISA-9.3 codegen; no new tensor-core HW (still mma.sync, no
-# tcgen05/wgmma).
+# Native CUDA 13.4.1 devel image: nvcc 13.4 (V13.4.59) is on PATH at
+# /usr/local/cuda (-> /usr/local/cuda-13.4) out of the box, no apt toolkit
+# install needed. sm_120: no new tensor-core HW (still mma.sync, no tcgen05/wgmma).
 # Ubuntu 26.04 LTS host userland → GCC 15.2 / libstdc++ 15. GCC 15 no longer
 # pulls <algorithm>/<numeric> in transitively through other headers, so it
 # catches the missing-include class of bugs at build time (see #903) that the
@@ -56,11 +54,11 @@ ENV CUDA_HOME=/usr/local/cuda
 # The tag is carried only as the human label and lands in /deps/PINS.
 ARG IMP_DEP_GOOGLETEST_TAG=v1.18.0
 ARG IMP_DEP_CUTLASS_TAG=v4.8.0
-ARG IMP_DEP_HTTPLIB_TAG=v0.56.0
+ARG IMP_DEP_HTTPLIB_TAG=v0.58.0
 ARG IMP_DEP_NLOHMANN_JSON_TAG=v3.12.0
 ARG IMP_DEP_GOOGLETEST_SHA=063de7e9578f82b369302001269680b4b1553359
 ARG IMP_DEP_CUTLASS_SHA=098de2a652cf8f00fd70b2df54051c7eccbb855a
-ARG IMP_DEP_HTTPLIB_SHA=278c2979e8c68468960c3073e28e1c51b098d6a4
+ARG IMP_DEP_HTTPLIB_SHA=4f3f9ef19be83ae97a5d9a059432dc00e445b7ab
 ARG IMP_DEP_NLOHMANN_JSON_SHA=55f93686c01528224f448c19128836e7df245f72
 RUN set -eu; \
     pin() { mkdir -p "$4"; git -C "$4" init -q; git -C "$4" fetch -q --depth=1 "$1" "$3"; \
@@ -132,7 +130,7 @@ RUN --mount=type=cache,id=imp-ccache,target=/ccache \
 # =============================================================================
 # Stage 2: Minimal runtime image
 # =============================================================================
-# Native CUDA 13.3 runtime image already ships the matching cudart + cuBLAS
+# Native CUDA 13.4.1 runtime image already ships the matching cudart + cuBLAS
 # (and transitive deps like libnvjitlink) at /usr/local/cuda; only the small
 # entrypoint/healthcheck helpers need adding.
 FROM nvidia/cuda:13.4.1-runtime-ubuntu26.04@sha256:1725dba28b39fd0c3c35665c98284b603bef7b30e8f7990a98d4c3cbb905016a

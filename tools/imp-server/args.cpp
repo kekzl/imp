@@ -55,6 +55,8 @@ void print_server_usage(const char* prog) {
             "  --max-input-tokens <n> Reject prompts longer than n tokens with HTTP 400 (0=unlimited)\n"
             "  --trusted-proxy <list> Comma-separated peer addresses whose X-Forwarded-For is\n"
             "                         believed for rate limiting (default: header ignored)\n"
+            "  --cors-origins <list>  Comma-separated browser origins allowed cross-origin, '*' = any\n"
+            "                         (default: none, same-origin only)\n"
             "  --max-n <n>            Cap on `n` completions per request (default 8, 0=unlimited)\n"
             "  --max-batch-items <n>  Cap on rerank documents / embeddings input (default 512)\n"
             "  --max-logit-bias <n>   Cap on logit_bias entries per request (default 1024)\n"
@@ -121,6 +123,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.max_input_tokens = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--trusted-proxy") == 0 && i + 1 < argc) {
             args.trusted_proxies = argv[++i];
+        } else if (std::strcmp(arg, "--cors-origins") == 0 && i + 1 < argc) {
+            args.cors_origins = argv[++i];
         } else if (std::strcmp(arg, "--max-n") == 0 && i + 1 < argc) {
             args.max_n = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--max-batch-items") == 0 && i + 1 < argc) {

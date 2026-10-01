@@ -319,6 +319,32 @@ bool api_key_matches(const std::string& authorization, const std::string& x_api_
     return false;
 }
 
+std::vector<std::string> parse_cors_origins(const std::string& list) {
+    std::vector<std::string> out;
+    size_t pos = 0;
+    while (pos <= list.size()) {
+        size_t comma = list.find(',', pos);
+        if (comma == std::string::npos)
+            comma = list.size();
+        const std::string one = list.substr(pos, comma - pos);
+        const size_t b = one.find_first_not_of(" \t");
+        if (b != std::string::npos)
+            out.push_back(one.substr(b, one.find_last_not_of(" \t") - b + 1));
+        pos = comma + 1;
+    }
+    return out;
+}
+
+std::string cors_allow_origin(const std::vector<std::string>& allowed, const std::string& origin) {
+    if (std::find(allowed.begin(), allowed.end(), "*") != allowed.end())
+        return "*";
+    if (origin.empty())
+        return {};
+    if (std::find(allowed.begin(), allowed.end(), origin) != allowed.end())
+        return origin;
+    return {};
+}
+
 std::string system_fingerprint(const std::string& model_name) {
     // FNV-1a over version + model. Not a security hash; it exists so a client
     // can tell "same backend" from "different backend" in one comparison.

@@ -2,8 +2,9 @@
 // 26000x26000 flat image decode to ~2 GiB of host RGB before any resize (AUDIT_arch_2026
 // F2-4). 16384 is far above every tower's useful input; both decoders refuse a larger picture.
 #define STBI_MAX_DIMENSIONS 16384
-// JPEG never reaches stb: its IDCT/upsampling differ from Pillow by up to 3/255 (#2381).
-#define STBI_NO_JPEG
+// stb decodes PNG only: JPEG goes to libjpeg-turbo (#2381), GIF/BMP/PSD/TGA/HDR/PIC/PNM are
+// not compiled (CVE-2026-5185 heap overflow in stbi__gif_load_next, stb <= 2.30, #2401).
+#define STBI_ONLY_PNG
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 

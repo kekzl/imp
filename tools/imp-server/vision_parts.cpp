@@ -36,7 +36,7 @@ std::string qwen_preprocess_vision_parts(imp::Engine& engine, const ChatRequestP
             std::vector<std::span<const uint8_t>> spans(v.frames.begin(), v.frames.end());
             std::vector<imp::QwenPatches> groups;
             if (!engine.preprocess_video_qwen(spans, groups) || groups.empty())
-                return "Failed to process video frames (same size, decodable images, 2.." +
+                return "Failed to process video frames (same size, JPEG or PNG, 2.." +
                        std::to_string(imp::Engine::kQwenVideoMaxFrames) + " frames)";
             const int per_group = engine.image_tokens_of(groups[0]);
             if (per_group <= 0)
@@ -51,10 +51,10 @@ std::string qwen_preprocess_vision_parts(imp::Engine& engine, const ChatRequestP
         }
         auto patches = std::make_shared<imp::QwenPatches>();
         if (!engine.preprocess_image_qwen(params.images[ni++], *patches))
-            return "Failed to process image";
+            return "Failed to process image (accepted formats: JPEG, PNG)";
         const int tokens = engine.image_tokens_of(*patches);
         if (tokens <= 0)
-            return "Failed to process image";
+            return "Failed to process image (accepted formats: JPEG, PNG)";
         snap.qwen_image_tokens.push_back(tokens);
         snap.qwen_patches.push_back(std::move(patches));
     }
