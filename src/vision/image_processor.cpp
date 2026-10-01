@@ -87,25 +87,20 @@ static bool preprocess_pixels(const uint8_t* rgb, int w, int h, int target_size,
     return true;
 }
 
-bool qwen_patchify(const uint8_t* rgb, int width, int height, const QwenPatchifyConfig& cfg,
-                   QwenPatches& out) {
-    if (!rgb || width <= 0 || height <= 0 || cfg.patch_size <= 0 || cfg.merge_size <= 0 ||
-        cfg.temporal_patch_size <= 0)
-        return false;
+namespace {
 
-    const int factor = cfg.patch_size * cfg.merge_size;
-    const SmartResize rs = qwen_smart_resize(height, width, factor, cfg.min_pixels, cfg.max_pixels);
-    if (!rs.ok)
-        return false;
+// Upstream resamples with PIL BICUBIC; Catmull-Rom is the closest filter stb offers. Not
+// bit-identical, and doesn't need to be: the resampling difference is far below what the
+// encoder is sensitive to. A frame already at the target size passes through unchanged.
+bool resize_rgb(const uint8_t* rgb, int width, int height, const SmartResize& rs, std::vector<uint8_t>& out) {
+    out.resize(static_cast<size_t>(rs.height) * rs.width * 3);
+    return stbir_resize(rgb, width, height, width * 3, out.data(), rs.width, rs.height, rs.width * 3,
+                        STBIR_RGB, STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, STBIR_FILTER_CATMULLROM) != nullptr;
+}
 
-    // Upstream resamples with PIL BICUBIC; Catmull-Rom is the closest filter stb offers. Not
-    // bit-identical, and doesn't need to be: the resampling difference is far below what the
-    // encoder is sensitive to.
-    std::vector<uint8_t> resized(static_cast<size_t>(rs.height) * rs.width * 3);
-    if (!stbir_resize(rgb, width, height, width * 3, resized.data(), rs.width, rs.height, rs.width * 3,
-                      STBIR_RGB, STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, STBIR_FILTER_CATMULLROM))
-        return false;
-
+// temporal[t] is the resized [h, w, 3] frame on temporal slot t (cfg.temporal_patch_size slots).
+void patchify_resized(std::span<const uint8_t* const> temporal, const SmartResize& rs,
+                      const QwenPatchifyConfig& cfg, QwenPatches& out) {
     const int P = cfg.patch_size, M = cfg.merge_size, T = cfg.temporal_patch_size;
     const int gh = rs.height / P, gw = rs.width / P;
     const int C = 3;
@@ -125,14 +120,15 @@ bool qwen_patchify(const uint8_t* rgb, int width, int height, const QwenPatchify
                     const int patch_col = bw * M + mw;
                     half* dst = out.data.data() + tok * out.features;
                     for (int c = 0; c < C; ++c) {
-                        for (int ph = 0; ph < P; ++ph) {
-                            const int y = patch_row * P + ph;
-                            for (int pw = 0; pw < P; ++pw) {
-                                const int x = patch_col * P + pw;
-                                const uint8_t raw = resized[(static_cast<size_t>(y) * rs.width + x) * 3 + c];
-                                const float v = (raw / 255.0f - cfg.mean[c]) / cfg.std[c];
-                                // The temporal axis is a repeat for a still image.
-                                for (int t = 0; t < T; ++t) {
+                        for (int t = 0; t < T; ++t) {
+                            const uint8_t* frame = temporal[static_cast<size_t>(t)];
+                            for (int ph = 0; ph < P; ++ph) {
+                                const int y = patch_row * P + ph;
+                                for (int pw = 0; pw < P; ++pw) {
+                                    const int x = patch_col * P + pw;
+                                    const uint8_t raw =
+                                        frame[(static_cast<size_t>(y) * rs.width + x) * 3 + c];
+                                    const float v = (raw / 255.0f - cfg.mean[c]) / cfg.std[c];
                                     const size_t idx = ((static_cast<size_t>(c) * T + t) * P + ph) * P + pw;
                                     dst[idx] = __float2half(v);
                                 }
@@ -142,6 +138,112 @@ bool qwen_patchify(const uint8_t* rgb, int width, int height, const QwenPatchify
                 }
             }
         }
+    }
+}
+
+bool patchify_config_ok(const QwenPatchifyConfig& cfg) {
+    return cfg.patch_size > 0 && cfg.merge_size > 0 && cfg.temporal_patch_size > 0;
+}
+
+}  // namespace
+
+bool qwen_patchify(const uint8_t* rgb, int width, int height, const QwenPatchifyConfig& cfg,
+                   QwenPatches& out) {
+    if (!rgb || width <= 0 || height <= 0 || !patchify_config_ok(cfg))
+        return false;
+
+    const int factor = cfg.patch_size * cfg.merge_size;
+    const SmartResize rs = qwen_smart_resize(height, width, factor, cfg.min_pixels, cfg.max_pixels);
+    if (!rs.ok)
+        return false;
+
+    std::vector<uint8_t> resized;
+    if (!resize_rgb(rgb, width, height, rs, resized))
+        return false;
+    // Still image: every temporal slot is the same frame.
+    const std::vector<const uint8_t*> temporal(static_cast<size_t>(cfg.temporal_patch_size), resized.data());
+    patchify_resized(temporal, rs, cfg, out);
+    return true;
+}
+
+SmartResize qwen_video_smart_resize(int num_frames, int height, int width, int temporal_factor, int factor,
+                                    int64_t min_pixels, int64_t max_pixels) {
+    SmartResize out;
+    if (num_frames <= 0 || height <= 0 || width <= 0 || factor <= 0 || temporal_factor <= 0 ||
+        num_frames < temporal_factor)
+        return out;
+    double h = height, w = width;
+    if (height < factor || width < factor) {
+        const double scale = std::max(static_cast<double>(factor) / height,
+                                      static_cast<double>(factor) / width);
+        h = std::trunc(height * scale);
+        w = std::trunc(width * scale);
+    }
+    if (std::max(h, w) / std::min(h, w) > 200.0) {
+        IMP_LOG_WARN("video smart_resize: aspect ratio %.0f:%.0f exceeds the 200:1 limit", std::max(h, w),
+                     std::min(h, w));
+        return out;
+    }
+
+    int64_t h_bar = round_to_factor(h, factor);
+    int64_t w_bar = round_to_factor(w, factor);
+    const int64_t t_bar = round_to_factor(num_frames, temporal_factor);
+    const double volume = static_cast<double>(num_frames) * h * w;
+
+    if (t_bar * h_bar * w_bar > max_pixels) {
+        const double beta = std::sqrt(volume / static_cast<double>(max_pixels));
+        h_bar = std::max<int64_t>(factor, static_cast<int64_t>(std::floor(h / beta / factor)) * factor);
+        w_bar = std::max<int64_t>(factor, static_cast<int64_t>(std::floor(w / beta / factor)) * factor);
+    } else if (t_bar * h_bar * w_bar < min_pixels) {
+        const double beta = std::sqrt(static_cast<double>(min_pixels) / volume);
+        h_bar = static_cast<int64_t>(std::ceil(h * beta / factor)) * factor;
+        w_bar = static_cast<int64_t>(std::ceil(w * beta / factor)) * factor;
+    }
+
+    out.height = static_cast<int>(h_bar);
+    out.width = static_cast<int>(w_bar);
+    out.ok = (out.height > 0 && out.width > 0);
+    return out;
+}
+
+QwenPatchifyConfig qwen_video_patchify_config() {
+    QwenPatchifyConfig cfg;
+    cfg.min_pixels = 4096;
+    cfg.max_pixels = 25165824;
+    return cfg;
+}
+
+bool qwen_patchify_video(std::span<const uint8_t* const> frames, int width, int height,
+                         const QwenPatchifyConfig& cfg, std::vector<QwenPatches>& out) {
+    out.clear();
+    if (frames.empty() || width <= 0 || height <= 0 || !patchify_config_ok(cfg))
+        return false;
+    for (const uint8_t* f : frames)
+        if (!f)
+            return false;
+
+    const int T = cfg.temporal_patch_size;
+    const int factor = cfg.patch_size * cfg.merge_size;
+    const SmartResize rs = qwen_video_smart_resize(static_cast<int>(frames.size()), height, width, T, factor,
+                                                   cfg.min_pixels, cfg.max_pixels);
+    if (!rs.ok)
+        return false;
+
+    std::vector<std::vector<uint8_t>> resized(frames.size());
+    for (size_t f = 0; f < frames.size(); ++f)
+        if (!resize_rgb(frames[f], width, height, rs, resized[f]))
+            return false;
+
+    // Odd tail: HF pads with copies of the last frame up to a multiple of T.
+    const size_t groups = (frames.size() + static_cast<size_t>(T) - 1) / static_cast<size_t>(T);
+    out.resize(groups);
+    std::vector<const uint8_t*> temporal(static_cast<size_t>(T));
+    for (size_t g = 0; g < groups; ++g) {
+        for (int t = 0; t < T; ++t)
+            temporal[static_cast<size_t>(t)] =
+                resized[std::min(g * static_cast<size_t>(T) + static_cast<size_t>(t), frames.size() - 1)]
+                    .data();
+        patchify_resized(temporal, rs, cfg, out[g]);
     }
     return true;
 }

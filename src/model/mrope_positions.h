@@ -39,4 +39,21 @@ struct MRopePositions {
 [[nodiscard]] std::expected<MRopePositions, std::string> qwen_build_mrope_positions(
     const std::vector<uint8_t>& is_image, const std::vector<MRopeImageGrid>& grids, int start_pos);
 
+// Token types as HF mm_token_type_ids: 0 text, 1 image, 2 video.
+inline constexpr uint8_t kMRopeText = 0, kMRopeImage = 1, kMRopeVideo = 2;
+
+// One video after the merger: `groups` frame pairs of rows*cols tokens each.
+struct MRopeVideoGrid {
+    int groups = 0;
+    int rows = 0;
+    int cols = 0;
+};
+
+// HF Qwen3VLModel.get_rope_index: each maximal run of equal non-text type takes the next grid of
+// that type. A video is split into `groups` t=1 grids (timestamps separate them), so each frame
+// pair is positioned like an image. Same refusals as above, per type.
+[[nodiscard]] std::expected<MRopePositions, std::string> qwen_build_mrope_positions_mm(
+    const std::vector<uint8_t>& token_type, const std::vector<MRopeImageGrid>& images,
+    const std::vector<MRopeVideoGrid>& videos, int start_pos);
+
 }  // namespace imp

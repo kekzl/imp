@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- Qwen3-VL video, CPU half (#2363): `qwen_patchify_video` (real frame pairs on the temporal axis), `expand_video_placeholders` (`<x.x seconds>` per pair), `qwen_build_mrope_positions_mm`. vs transformers 5.17.0: pixels 0 elements over 1 FP16 ulp, 113 prompt ids and 3x113 M-RoPE positions 0 diffs. Server/CLI wiring not yet.
+
 ### Changed
 - `imp-quantize --calib` without `--calib-groups` drops attention groups A/C at n_rep >= 5 (was all groups plus a warning). Qwen3-14B PPL: BD 9.9068, ABCD 12.2634, RTN 9.9849; `--calib-weight sq` stays opt-in (BD 10.0563). Roadmap rows 6, 8, 11 closed.
 

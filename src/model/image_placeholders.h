@@ -19,6 +19,27 @@ namespace imp {
                                                                          int32_t pad_id,
                                                                          const std::vector<int>& counts);
 
+// One video's prompt layout. HF Qwen3VLProcessor.replace_video_token: per frame pair g,
+// stamp_ids[g] (tokenized "<x.x seconds>") + vision_start + video_pad*tokens_per_group + vision_end.
+struct VideoPlaceholderLayout {
+    int tokens_per_group = 0;                     // merged rows * cols of one frame pair
+    std::vector<std::vector<int32_t>> stamp_ids;  // one per frame pair; size() = group count
+};
+
+// Replaces the k-th video_pad with videos[k]'s layout. The template's own vision_start/end around
+// the pad stay, so each group sits inside a second start/end pair, as upstream emits it. Refuses on
+// a count mismatch or an empty layout; tokens untouched on refusal.
+[[nodiscard]] std::expected<void, std::string> expand_video_placeholders(
+    std::vector<int32_t>& tokens, int32_t video_pad_id, int32_t vision_start_id, int32_t vision_end_id,
+    const std::vector<VideoPlaceholderLayout>& videos);
+
+// Per frame-pair timestamp: mean of the first and last frame time of the pair, odd tail padded with
+// the last frame (Qwen3VLProcessor._calculate_timestamps). frame_seconds = frame index / fps.
+std::vector<double> qwen_video_group_seconds(std::span<const double> frame_seconds, int temporal_patch_size);
+
+// "<%.1f seconds>", the text tokenized into VideoPlaceholderLayout::stamp_ids.
+std::string qwen_video_timestamp_text(double seconds);
+
 // FNV-1a over an image's bytes. Used as the prefix cache's content salt, so a
 // hit needs the same tokens AND the same picture. Never returns 0 — that value
 // means "no image" to the cache, and an all-zero image must not claim it.

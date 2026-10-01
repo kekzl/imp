@@ -917,6 +917,8 @@ if(IMP_BUILD_TESTS)
         tests/test_npy_writer.cpp
         tests/test_vision_preprocess.cpp
         tests/test_mrope_positions.cpp
+        # Qwen3-VL video: frame-pair patchify, layout, M-RoPE vs HF fixtures in tests/fixtures/qwen3vl_video.
+        tests/test_qwen3vl_video.cpp
         tests/test_mla.cpp
         tests/test_weight_map_expert_gate.cpp
         tests/test_weight_map_modality_skips.cpp

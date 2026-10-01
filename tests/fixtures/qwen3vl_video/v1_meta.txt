@@ -1,0 +1,12 @@
+grid_thw 2 2 4
+shape 16 1536
+resize 4 32 64 32 64
+resize 4 64 96 64 96
+resize 2 20 30 32 64
+resize 768 1080 1920 128 224
+resize 64 720 1280 448 832
+resize 2 10 500 32 1600
+resize 3 48 80 64 64
+resize 5 48 80 64 64
+resize 4 33 47 32 32
+resize 2 16 3200 32 6400
