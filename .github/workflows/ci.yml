@@ -292,7 +292,7 @@ jobs:
             -DIMP_DISABLE_120F_FALLBACK=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
+            "-DCMAKE_CUDA_COMPILER_LAUNCHER=sh;$PWD/scripts/ci_compile_slot.sh;ccache"
           # CMakeLists.txt pins arch=compute_120a,code=sm_120a directly via
           # gencode and sets CMAKE_CUDA_ARCHITECTURES=OFF. IMP_DISABLE_120F_FALLBACK=ON
           # builds the sm_120a SASS only (no compute_120f PTX fallback) — CI just
@@ -308,10 +308,12 @@ jobs:
 
       - name: Build
         if: steps.changes.outputs.code == 'true'
-        # -j from scripts/build_jobs.sh, not $(nproc): the four CUTLASS TUs peak at
-        # 5.2-7.9 GB each and start together, so -j4 OOM-kills a 16 GB runner on a
-        # cold ccache (exit 137, no diagnostic).
-        run: cmake --build build -j"$(bash scripts/build_jobs.sh)"
+        # -j$(nproc): scripts/ci_compile_slot.sh (CUDA launcher above) runs the five
+        # 5-8.6 GB CUTLASS TUs one at a time; build_jobs.sh's RAM cap (-j2 here) assumes
+        # they run together. memory.peak is the container's cgroup high-water mark.
+        run: |
+          cmake --build build -j"$(nproc)"
+          echo "nproc=$(nproc) cgroup memory.peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo n/a) B"
 
       # Per-kernel registers and local frame against the pin (#1549). Runs HERE
       # because this is the one place both halves exist: the built artifact and
