@@ -362,7 +362,9 @@ def main():
     # with a growable pool (#2360, VMM).
     # 1180 -> 1182: Qwen3VLPipelineTest.VideoFramePairsMatchHfReference (GPU) and
     # Qwen3VLPipelineVideoStamps.TimestampIdsMatchHf (model tokenizer), test-e2e, run by make test-vision.
-    PINNED = 1182
+    # 1182 -> 1183: KVCacheTest.ResidencyProbeReadsResidentOnASmallCommittedPrefix (test-kv, GPU):
+    # 500 committed NVFP4 blocks must read above the spill threshold (#2366); needs a card.
+    PINNED = 1183
 
     text = CMAKE.read_text()
     mods = module_sources(text)

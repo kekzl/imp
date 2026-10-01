@@ -83,6 +83,40 @@ size_t vram_own_used_bytes() {
     return baseline > free_b ? baseline - free_b : 0;
 }
 
+namespace {
+
+bool issue_copies(const DeviceCopy* copies, size_t n, cudaStream_t stream) {
+    for (size_t i = 0; i < n; i++)
+        if (cudaMemcpyAsync(copies[i].dst, copies[i].src, copies[i].bytes, cudaMemcpyDeviceToDevice,
+                            stream) != cudaSuccess)
+            return false;
+    return true;
+}
+
+// One graph launch, not n copy submissions: 32 x 2 MiB issued one by one read 128-605 GB/s
+// on a card with 30.8 GiB free (WSL2 submission gaps), 1218-1270 GB/s as a graph (#2366).
+// Empty exec = capture failed, the caller issues the copies plainly.
+CudaGraphExec capture_copies(const DeviceCopy* copies, size_t n, cudaStream_t stream) {
+    CudaGraphExec exec;
+    if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
+        (void)cudaGetLastError();
+        return exec;
+    }
+    const bool captured = issue_copies(copies, n, stream);
+    cudaGraph_t g = nullptr;
+    const bool ended = cudaStreamEndCapture(stream, &g) == cudaSuccess;
+    CudaGraph graph;
+    graph.reset(g);
+    cudaGraphExec_t e = nullptr;
+    if (captured && ended && g && cudaGraphInstantiate(&e, graph, 0) == cudaSuccess)
+        exec.reset(e);
+    else
+        (void)cudaGetLastError();
+    return exec;
+}
+
+}  // namespace
+
 double device_copy_bandwidth_gbps(const DeviceCopy* copies, size_t n, int warm_ms) {
     size_t total = 0;
     for (size_t i = 0; i < n; i++) {
@@ -93,31 +127,44 @@ double device_copy_bandwidth_gbps(const DeviceCopy* copies, size_t n, int warm_m
     if (total == 0)
         return 0.0;
     CudaEvent t0, t1;  // timing enabled for cudaEventElapsedTime
-    if (!t0.create(cudaEventDefault) || !t1.create(cudaEventDefault))
+    CudaStream stream;
+    if (!t0.create(cudaEventDefault) || !t1.create(cudaEventDefault) || !stream.create(cudaStreamNonBlocking))
         return 0.0;
-    auto issue = [&]() {
-        for (size_t i = 0; i < n; i++)
-            if (cudaMemcpyAsync(copies[i].dst, copies[i].src, copies[i].bytes, cudaMemcpyDeviceToDevice,
-                                nullptr) != cudaSuccess)
-                return false;
-        return true;
+    // The copies used to run on the legacy stream, ordered after its pending work; keep that order.
+    if (cudaStreamSynchronize(nullptr) != cudaSuccess)
+        return 0.0;
+    const CudaGraphExec exec = capture_copies(copies, n, stream);
+    auto launch = [&]() {
+        return exec ? cudaGraphLaunch(exec, stream) == cudaSuccess : issue_copies(copies, n, stream);
     };
     // Warm the clocks: repeat the set until warm_ms of wall time has passed.
     bool ok = true;
     const auto warm_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(0, warm_ms));
     for (int iter = 0; ok && iter < 100000 && std::chrono::steady_clock::now() < warm_end; iter++)
-        ok = issue() && cudaStreamSynchronize(nullptr) == cudaSuccess;
-    ok = ok && cudaEventRecord(t0, nullptr) == cudaSuccess && issue();
-    float ms = 0.0f;
-    ok = ok && cudaEventRecord(t1, nullptr) == cudaSuccess && cudaEventSynchronize(t1) == cudaSuccess &&
-         cudaEventElapsedTime(&ms, t0, t1) == cudaSuccess;
+        ok = launch() && cudaStreamSynchronize(stream) == cudaSuccess;
+    // Timed window >= 1 GiB of traffic (max 16 launches), best of 3: one 64 MiB launch read 365-1562
+    // GB/s on the same resident pool (#2366). A spilled pool cannot read high, so the max is safe.
+    constexpr size_t kTimedTraffic = size_t{1} << 30;
+    const int reps = static_cast<int>(std::clamp<size_t>(kTimedTraffic / (2 * total), 1, 16));
+    double best = 0.0;
+    for (int pass = 0; ok && pass < 3; pass++) {
+        ok = cudaEventRecord(t0, stream) == cudaSuccess;
+        for (int r = 0; ok && r < reps; r++)
+            ok = launch();
+        float ms = 0.0f;
+        ok = ok && cudaEventRecord(t1, stream) == cudaSuccess && cudaEventSynchronize(t1) == cudaSuccess &&
+             cudaEventElapsedTime(&ms, t0, t1) == cudaSuccess && ms > 0.0f;
+        if (ok)
+            best = std::max(best,
+                            2.0 * static_cast<double>(total) * reps / (static_cast<double>(ms) * 1e-3) / 1e9);
+    }
     t0.reset();
     t1.reset();
-    if (!ok || ms <= 0.0f) {
+    if (!ok || best <= 0.0) {
         (void)cudaGetLastError();  // leave nothing sticky for the next caller
         return 0.0;
     }
-    return 2.0 * static_cast<double>(total) / (static_cast<double>(ms) * 1e-3) / 1e9;
+    return best;
 }
 
 bool vram_budget_mem_get_info(size_t* free_bytes, size_t* total_bytes) {
