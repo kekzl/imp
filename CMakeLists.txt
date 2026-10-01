@@ -495,6 +495,9 @@ set(IMP_VISION_SOURCES
     src/vision/qwen3vl_vision_upload.cpp
     src/vision/qwen3vl_encoder_kernels.cu
     src/vision/qwen3vl_encoder.cpp
+    src/vision/internvl_vision.cpp
+    src/vision/internvl_encoder_kernels.cu
+    src/vision/internvl_encoder.cpp
     src/vision/qwen3vl_pipeline.cpp
     src/vision/image_processor.cpp
     src/vision/vision_encoder.cu
@@ -930,6 +933,7 @@ if(IMP_BUILD_TESTS)
         tests/test_weight_map_expert_gate.cpp
         tests/test_weight_map_modality_skips.cpp
         tests/test_internvl_lm_names.cpp
+        tests/test_internvl_vision.cpp
         tests/test_weight_map_out_norm_warn.cpp
         tests/test_mem_account_keyed.cpp
         tests/test_library_reserve_measurement.cpp
@@ -1277,6 +1281,7 @@ if(IMP_BUILD_TESTS)
         tests/test_vision_chunk_offset.cu
         tests/test_vision_golden.cu
         tests/test_qwen3vl_encoder.cu
+        tests/test_internvl_encoder.cu
         tests/test_qwen3vl_pipeline.cu
     )
 

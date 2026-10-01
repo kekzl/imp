@@ -370,7 +370,8 @@ def main():
     # GPU module): sparse prefill selection, compacted gather + FA2 bit-identity, mutation.
     # 1188 -> 1189: MLAAttnOutput.PaddedSymmetricSplitKMatchesGeneric (GPU): MLA decode at HD 192
     # split-K + compaction vs the generic kernel (#2374).
-    PINNED = 1189
+    # 1189 -> 1190: InternVLEncoder.MatchesHfFp32PerStage (test-e2e, GPU), run by make test-vision.
+    PINNED = 1190
 
     text = CMAKE.read_text()
     mods = module_sources(text)
