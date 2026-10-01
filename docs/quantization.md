@@ -197,9 +197,10 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
        cmd=`tools/analysis/awq_wide_gqa_ab.sh` harness_md5=31019ae9
        note=calibration stats from the RTN checkpoint (BF16 14B does not fit for --calibrate)]
 
-`sq` removes 64 % of the ABCD damage (12.2634 -> 10.7965) and still loses to RTN; on BD it costs 0.15.
-On a dense model the default `BDEG` folds the same sites as `BD` (E/G need GDN tensors; `WideGqaDefaultIsBdOnADenseLayer`).
-The threshold sits at the measured wide point (n_rep 5); n_rep 3-4 (Qwen3-8B, Qwen3-4B, Phi-4) is unmeasured and keeps all groups, as before.
+
+- `sq` removes 64 % of the ABCD damage (12.2634 -> 10.7965) and still loses to RTN; on BD it costs 0.15.
+- On a dense model the default `BDEG` folds the same sites as `BD` (E/G need GDN tensors; `WideGqaDefaultIsBdOnADenseLayer`).
+- The threshold sits at the measured wide point (n_rep 5); n_rep 3-4 (Qwen3-8B, Qwen3-4B, Phi-4) is unmeasured and keeps all groups, as before.
 - Uncalibrated `imp-quantize` already beats a published Modelopt export on the one locally comparable model (9.9252 vs 10.0301, Qwen3-14B).
 - Mechanism, refuted variants, the won't-fit calibration trick: [`archive/quantization_awq_findings.md`](archive/quantization_awq_findings.md).
 
