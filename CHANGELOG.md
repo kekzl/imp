@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- cuBLASLt: a GEMM algo pinned at one M is checked with `cublasLtMatmulAlgoCheck` before it runs at another M of its bucket; a failing M gets its own pin (#2346). Pin failures per run: Flash-Next startup + 3 prompts 446 -> 0, Qwen3.8-27B 28-request chat 288 -> 0; deterministic greedy output identical.
+
 ## [0.46.0] - 2026-10-01
 
 ### Added
