@@ -7,7 +7,7 @@
 #include "vision/qwen3vl_vision_grid.h"
 #include "vision/qwen3vl_vision_upload.h"
 
-#include "stb_image.h"
+#include "vision/image_decode.h"
 
 #include <cuda_runtime.h>
 
@@ -208,16 +208,14 @@ int Qwen3VLPipeline::deepstack_taps() const {
 bool Qwen3VLPipeline::preprocess(std::span<const uint8_t> data, QwenPatches& out) const {
     if (!tower_)
         return false;
-    int w = 0, h = 0, ch = 0;
-    uint8_t* rgb = stbi_load_from_memory(data.data(), static_cast<int>(data.size()), &w, &h, &ch, 3);
-    if (!rgb) {
+    DecodedImage img;
+    if (!decode_image(data, img)) {
         IMP_LOG_ERROR("Qwen3-VL pipeline: could not decode a %zu-byte image", data.size());
         return false;
     }
-    const bool ok = qwen_patchify(rgb, w, h, patchify_config(), out);
-    stbi_image_free(rgb);
+    const bool ok = qwen_patchify(img.rgb.data(), img.width, img.height, patchify_config(), out);
     if (!ok)
-        IMP_LOG_ERROR("Qwen3-VL pipeline: could not patchify a %dx%d image", w, h);
+        IMP_LOG_ERROR("Qwen3-VL pipeline: could not patchify a %dx%d image", img.width, img.height);
     return ok;
 }
 
@@ -226,28 +224,20 @@ bool Qwen3VLPipeline::preprocess_video(std::span<const std::span<const uint8_t>>
     out.clear();
     if (!tower_ || frames.empty())
         return false;
-    std::vector<uint8_t*> rgb(frames.size(), nullptr);
-    auto free_all = [&] {
-        for (uint8_t* p : rgb)
-            if (p)
-                stbi_image_free(p);
-    };
+    std::vector<DecodedImage> rgb(frames.size());
     int w0 = 0, h0 = 0;
     for (size_t f = 0; f < frames.size(); ++f) {
-        int w = 0, h = 0, ch = 0;
-        rgb[f] = stbi_load_from_memory(frames[f].data(), static_cast<int>(frames[f].size()), &w, &h, &ch, 3);
-        if (!rgb[f]) {
+        if (!decode_image(frames[f], rgb[f])) {
             IMP_LOG_ERROR("Qwen3-VL pipeline: could not decode video frame %zu (%zu bytes)", f,
                           frames[f].size());
-            free_all();
             return false;
         }
+        const int w = rgb[f].width, h = rgb[f].height;
         if (f == 0) {
             w0 = w;
             h0 = h;
         } else if (w != w0 || h != h0) {
             IMP_LOG_ERROR("Qwen3-VL pipeline: video frame %zu is %dx%d, frame 0 is %dx%d", f, w, h, w0, h0);
-            free_all();
             return false;
         }
     }
@@ -257,9 +247,11 @@ bool Qwen3VLPipeline::preprocess_video(std::span<const std::span<const uint8_t>>
     cfg.merge_size = img.merge_size;
     cfg.temporal_patch_size = img.temporal_patch_size;
     cfg.max_pixels = std::min<int64_t>(cfg.max_pixels, static_cast<int64_t>(frames.size()) * max_pixels());
-    std::vector<const uint8_t*> ptrs(rgb.begin(), rgb.end());
+    std::vector<const uint8_t*> ptrs;
+    ptrs.reserve(rgb.size());
+    for (const DecodedImage& d : rgb)
+        ptrs.push_back(d.rgb.data());
     const bool ok = qwen_patchify_video(ptrs, w0, h0, cfg, out);
-    free_all();
     if (!ok)
         IMP_LOG_ERROR("Qwen3-VL pipeline: could not patchify %zu video frames of %dx%d", frames.size(), w0,
                       h0);
@@ -340,15 +332,12 @@ bool Qwen3VLPipeline::encode_patches(const QwenPatches& patches, Qwen3VLImage& o
 }
 
 bool Qwen3VLPipeline::encode_file(const std::string& path, Qwen3VLImage& out, cudaStream_t stream) {
-    int w = 0, h = 0, ch = 0;
-    uint8_t* rgb = stbi_load(path.c_str(), &w, &h, &ch, 3);
-    if (!rgb) {
+    DecodedImage img;
+    if (!decode_image_file(path, img)) {
         IMP_LOG_ERROR("Qwen3-VL pipeline: could not read image '%s'", path.c_str());
         return false;
     }
-    const bool ok = encode_rgb(rgb, w, h, out, stream);
-    stbi_image_free(rgb);
-    return ok;
+    return encode_rgb(img.rgb.data(), img.width, img.height, out, stream);
 }
 
 }  // namespace imp

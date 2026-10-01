@@ -54,6 +54,8 @@ message(STATUS "CUDA ${CUDAToolkit_VERSION} detected")
 # hf:// model fetch (src/model/hf_fetch.cpp): HTTPS via libcurl, sha256 via libcrypto.
 find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+# JPEG decode bit-identical to Pillow (src/vision/image_decode.cpp, #2381): libjpeg-turbo.
+find_package(JPEG REQUIRED)
 
 # Target sm_120a (RTX 5090/PRO 6000, GB202): FP8 f8f6f4 MMA, NVFP4 block MMA, TMA-WS GEMM.
 # Fallback PTX compute_120f JIT-compiles for GB203, loses TMA-WS grouped GEMM (NVFP4 degraded).
@@ -500,6 +502,7 @@ set(IMP_VISION_SOURCES
     src/vision/internvl_encoder.cpp
     src/vision/qwen3vl_pipeline.cpp
     src/vision/image_processor.cpp
+    src/vision/image_decode.cpp
     src/vision/vision_encoder.cu
     src/vision/deepstack_inject.cu
 )
@@ -561,6 +564,7 @@ target_link_libraries(imp
         imp_warnings
         CURL::libcurl
         OpenSSL::Crypto
+        JPEG::JPEG
 )
 
 if(IMP_USE_CUTLASS)
@@ -926,6 +930,8 @@ if(IMP_BUILD_TESTS)
         tests/test_stream_pipeline.cpp
         tests/test_npy_writer.cpp
         tests/test_vision_preprocess.cpp
+        # JPEG decode == Pillow (libjpeg-turbo) bit for bit, fixtures in tests/fixtures/jpeg (#2381).
+        tests/test_image_decode.cpp
         tests/test_mrope_positions.cpp
         # Qwen3-VL video: frame-pair patchify, layout, M-RoPE vs HF fixtures in tests/fixtures/qwen3vl_video.
         tests/test_qwen3vl_video.cpp

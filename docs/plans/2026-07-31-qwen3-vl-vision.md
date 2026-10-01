@@ -209,9 +209,18 @@ bisection on 2026-07-31 (coherent vs cross-script garbage), and it is decisive
 in practice.
 
 Fixtures already in the tree: `tests/fixtures/vision_test_64.png` plus the
-gemma-3 test images under `~/models/gemma-3-4b-vl/` (`test_bus.jpg`,
-`test_cat.jpg`, `test_pizza.jpg`) — a model that names the bus, the cat and the
-pizza is passing. `IMP_VISION_GOLDEN_DUMP` can pin encoder outputs afterwards to
+gemma-3 test images under `~/models/gemma-3-4b-vl/` (host-local, check the sha256 before use;
+a model that names the bus, the cat and the pizza is passing):
+
+| file | bytes | sha256 |
+|---|---|---|
+| `test_bus.jpg` | 364491 | `1a6ca10c507f3fc6a5bfaf82e0fb79e5ae225c055d7ede587e82747583914be0` |
+| `test_cat.jpg` | 2833605 | `59ec9bf12a5b63e0913e986b9566b96228c9f8921fda4fb87bf2a7f9acff3dd2` |
+| `test_pizza.jpg` | 657369 | `062e7c2b19e72258d006573e350c430bd4621a80619dd205a078d6081efe5dc5` |
+
+`test_bus.jpg` was a 177-byte Wikimedia 404 text until 2026-10-01 (#2373); the replacement is
+Commons `File:Routemaster_RML2518_(JJD_518D),_2009_MMT_London_Bus_Day_(2).jpg` (Pimlico Badger,
+CC BY-SA 2.0), provenance in `~/models/gemma-3-4b-vl/test_bus.LICENSE.txt`. `IMP_VISION_GOLDEN_DUMP` can pin encoder outputs afterwards to
 catch regressions, but it is a self-golden and proves nothing about correctness
 on its own.
 
