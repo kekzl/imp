@@ -71,9 +71,9 @@ static bool preprocess_pixels(const uint8_t* rgb, int w, int h, int target_size,
     for (int c = 0; c < 3; c++) {
         float inv_std = 1.0f / std[c];
         for (int i = 0; i < n_pixels; i++) {
-            float val = static_cast<float>(resized[i * 3 + c]) / 255.0f;
+            float val = static_cast<float>(resized[(i * 3) + c]) / 255.0f;
             val = (val - mean[c]) * inv_std;
-            out.pixels[c * n_pixels + i] = __float2half(val);
+            out.pixels[(c * n_pixels) + i] = __float2half(val);
         }
     }
 
@@ -286,7 +286,10 @@ ResampleTaps resample_taps(int in_size, int out_size) {
     std::vector<double> k(static_cast<size_t>(t.ksize));
     for (int xx = 0; xx < out_size; ++xx) {
         const double center = (xx + 0.5) * scale;
+        // Truncating casts on purpose: Pillow does (int)(center -/+ support + 0.5); lround differs below 0.
+        // NOLINTNEXTLINE(bugprone-incorrect-roundings)
         const int xmin = std::max(static_cast<int>(center - support + 0.5), 0);
+        // NOLINTNEXTLINE(bugprone-incorrect-roundings)
         const int xmax = std::min(static_cast<int>(center + support + 0.5), in_size) - xmin;
         double ww = 0.0;
         for (int x = 0; x < xmax; ++x) {
@@ -334,7 +337,7 @@ void pil_resize_bicubic_u8(const uint8_t* in, int w, int h, uint8_t* out, int ow
                 for (int i = 0; i < tv.count[y]; ++i)
                     ss += static_cast<int64_t>(mid[(static_cast<size_t>(tv.start[y] + i) * ow + x) * 3 + c]) *
                           k[i];
-                out[(static_cast<size_t>(y) * ow + x) * 3 + c] = clip8(ss);
+                out[(((static_cast<size_t>(y) * ow) + x) * 3) + c] = clip8(ss);
             }
 }
 
@@ -353,11 +356,12 @@ bool internvl_preprocess(const uint8_t* rgb, int width, int height, const Intern
         for (int c = 0; c < 3; ++c)
             for (int y = 0; y < P; ++y)
                 for (int x = 0; x < P; ++x) {
-                    const int py = (pi / side) * P + y, px = (pi % side) * P + x;
-                    const float v = (tile[(static_cast<size_t>(py) * S + px) * 3 + c] / 255.0f -
+                    const int py = ((pi / side) * P) + y, px = ((pi % side) * P) + x;
+                    const float v = (tile[(((static_cast<size_t>(py) * S) + px) * 3) + c] / 255.0f -
                                      cfg.mean[c]) /
                                     cfg.std[c];
-                    patches[static_cast<size_t>(pi) * features + (c * P + y) * P + x] = __float2half(v);
+                    patches[(static_cast<size_t>(pi) * features) + (((static_cast<size_t>(c) * P) + y) * P) +
+                            x] = __float2half(v);
                 }
     if (resized)
         *resized = std::move(tile);
