@@ -1482,7 +1482,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     if (!model.tok_emb_.data) {
         IMP_LOG_WARN("WeightMap: token embedding (tok_emb) was not found");
     }
-    if (!model.out_norm_.data) {
+    // Qwen4Exp carries no final norm: its hyper-connection mixer is the last step before lm_head
+    // and the final rmsnorm is the identity (layernorm.cu). Missing only matters without a mixer.
+    if (!model.out_norm_.data && !model.hc_mixer_norm_.data) {
         IMP_LOG_WARN("WeightMap: output norm (out_norm) was not found");
     }
     if (!model.out_proj_.data) {

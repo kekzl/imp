@@ -297,9 +297,11 @@ bool Engine::init_kv_cache() {
             // explicit --vram-budget is installed (check further down, D8).
             // Otherwise falls back to the live pass (best-effort, not a refusal).
             max_blocks = vram_budget.kv_max_blocks;
-            IMP_LOG_WARN("KV blocks: the plan rejects this configuration — falling back to the "
-                         "live-derived %d blocks. The report above says what it could not fit.",
-                         max_blocks);
+            IMP_LOG_WARN(
+                "KV blocks: the plan rejects this configuration — the pool ceiling falls back to "
+                "the live pass's %d blocks (the 'KV cache:' lines below report what is committed "
+                "and usable). The report above says what the plan could not fit.",
+                max_blocks);
         }
     }
 

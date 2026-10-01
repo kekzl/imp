@@ -65,6 +65,8 @@ public:
     //   arena    - engine-persistent tier reservation (its high-water is what the planner
     //              should eventually use)
     size_t unattributed_bytes() const;
+    // The same residual unclamped: negative when the ledger counts more than the device holds.
+    int64_t unattributed_signed_bytes() const;
 
     void set_named_charges(size_t context_bytes, size_t library_bytes, size_t arena_bytes,
                            size_t arena_high_water);

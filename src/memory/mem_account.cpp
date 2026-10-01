@@ -131,6 +131,11 @@ void MemAccount::sample_once() {
 }
 
 size_t MemAccount::unattributed_bytes() const {
+    const int64_t r = unattributed_signed_bytes();
+    return r > 0 ? static_cast<size_t>(r) : 0;
+}
+
+int64_t MemAccount::unattributed_signed_bytes() const {
     size_t free_b = 0, total_b = 0;
     // The planner view hides what the lazy pools have charged but not committed (address
     // space, not device memory in use). Read the raw view in one call: the planner view plus
@@ -144,8 +149,7 @@ size_t MemAccount::unattributed_bytes() const {
         cur += p.current;
     const int64_t named = static_cast<int64_t>(named_context_) + static_cast<int64_t>(named_library_) +
                           static_cast<int64_t>(named_arena_);
-    const int64_t residual = static_cast<int64_t>(used) - cur - named;
-    return residual > 0 ? static_cast<size_t>(residual) : 0;
+    return static_cast<int64_t>(used) - cur - named;
 }
 
 void MemAccount::set_named_charges(size_t context_bytes, size_t library_bytes, size_t arena_bytes,

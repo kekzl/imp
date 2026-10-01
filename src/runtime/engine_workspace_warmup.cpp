@@ -463,10 +463,19 @@ void Engine::warmup() {
     // Take the larger: the window can only see a subset, so a window reading HIGHER means the
     // residual lost something to a pool still growing during warmup. Keep the bigger number
     // rather than under-charge the plan.
-    const size_t whole_init = MemAccount::instance().unattributed_bytes();
-    measured_library_reserve_ = (forward_window == SIZE_MAX) ? SIZE_MAX
-                                                             : std::max(forward_window, whole_init);
-    if (forward_window != SIZE_MAX) {
+    const int64_t residual = MemAccount::instance().unattributed_signed_bytes();
+    const size_t whole_init = residual > 0 ? static_cast<size_t>(residual) : 0;
+    measured_library_reserve_ =
+        engine_internal::library_reserve_measurement(forward_window, residual).value_or(SIZE_MAX);
+    if (forward_window != SIZE_MAX && residual < 0) {
+        // Neither reported as a measurement nor recorded: the next start keeps the plan's charge.
+        IMP_LOG_INFO(
+            "library reserve: not measured this start: the pool ledger is %.0f MiB above device "
+            "use (a pool counted twice), so the residual cannot show the libraries; the plan "
+            "keeps charging %.0f MiB and nothing is recorded",
+            -residual / (1024.0 * 1024.0),
+            engine_internal::library_reserve_charge(config_.library_reserve_mb) / (1024.0 * 1024.0));
+    } else if (forward_window != SIZE_MAX) {
         IMP_LOG_INFO(
             "library reserve: forward window %.0f MiB, whole-init %.0f MiB — charging %.0f MiB "
             "(AUDIT B79/B80)",
