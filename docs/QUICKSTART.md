@@ -136,6 +136,23 @@ ANTHROPIC_BASE_URL=http://localhost:8080 ANTHROPIC_API_KEY=dummy your-agent
 
 **C library.** `imp.h` exposes the engine directly. Reference: [`CONFIG.md`](CONFIG.md#c-api).
 
+## Qwen3.8-Flash-Next
+
+Commands: [README](../README.md#quickstart-qwen38-flash-next). Weights: 25 files from `nvidia/Qwen3.8-Flash-Next-NVFP4`; imp loads 9 shards and skips `model-00010-of-00010.safetensors` and `model-fp8-mtp-ple.safetensors` (MTP and vision only).
+
+| Item | Value |
+| --- | --- |
+| image | the Flash-Next fixes under [`CHANGELOG.md`](../CHANGELOG.md) `[Unreleased]` ship in the first release after v0.45.0; until then `make build` and `imp:test` in place of `ghcr.io/kekzl/imp:latest` |
+| host RAM | test host 78 GiB: 74 GiB available before start, 9 GiB after load |
+| load | 97.7 s to `/health` ok, 65 s of it after `stay host-resident` in the log |
+| KV | starts at 1900 blocks (30400 tokens), grows toward 131072 tokens as VRAM frees |
+| batch | one request at a time: `max_batch_size: auto → 1` (host-resident experts) |
+| long chat | 27 turns, 28 requests all `200`, up to 27241 tokens of context: decode median 64.2 tok/s, slowest turn 51.8 tok/s |
+
+[PROV: commit=78264274 date=2026-10-01 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4
+       path=host-resident-experts n=1 server start, 28 requests cmd=the README `docker run` with image
+       imp:test-imp-longchat-87847c8b (build of 78264274) note=RAM from `free -g` before start and after /health ok]
+
 ## Next
 
 | | |

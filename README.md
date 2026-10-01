@@ -24,7 +24,7 @@ imp is an inference engine written for exactly one chip, the RTX 5090 generation
 - **One card only:** RTX 5090 (32 GB, the tested one), 5080, 5070 Ti, RTX PRO 6000. No other GPU, no CPU mode, no multi-GPU. For breadth use [llama.cpp](https://github.com/ggerganov/llama.cpp), for many GPUs [vLLM](https://github.com/vllm-project/vllm): [who fits where](docs/PERF.md#competitive-standing).
 - **One author, no support rotation.** Issues are welcome, answers are not guaranteed.
 
-> **Jump to:** [How fast?](#how-fast-is-it) · [Which model?](#which-model-should-i-pick) · [Install](#install) · [Using it](#using-it) · [Problems?](#something-went-wrong) · [How it works](#how-does-it-work) · [All the docs](#go-deeper)
+> **Jump to:** [How fast?](#how-fast-is-it) · [Which model?](#which-model-should-i-pick) · [Install](#install) · [Flash-Next](#quickstart-qwen38-flash-next) · [Using it](#using-it) · [Problems?](#something-went-wrong) · [How it works](#how-does-it-work) · [All the docs](#go-deeper)
 
 ## How fast is it?
 
@@ -98,6 +98,15 @@ The weights take 18.3 GiB on the card and answer at **~102 tokens/s**, leaving ~
 
 **Shortcut:** `--model hf://<org>/<repo>[:<file>.gguf]` downloads a repo inside the container into `/models` (resumable, checksummed, `HF_TOKEN` for gated repos): [`docs/CONFIG.md`](docs/CONFIG.md#fetching-from-hugging-face). Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 
+## Quickstart: Qwen3.8-Flash-Next
+**You need:** RTX 5090, ~62 GiB free host RAM ([why](#how-fast-is-it)), 123.6 GiB disk for [`nvidia/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4).
+```bash
+docker pull ghcr.io/kekzl/imp:latest
+IMP_IMAGE=ghcr.io/kekzl/imp:latest STAGE_DIR=~/models/Qwen3.8-Flash-Next-NVFP4 scripts/stage-model.sh nvidia/Qwen3.8-Flash-Next-NVFP4 ~/models/Qwen3.8-Flash-Next-NVFP4
+docker run -d --name imp-server --gpus all -v ~/models:/models -p 127.0.0.1:8090:8090 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --port 8090
+curl -s http://localhost:8090/health | jq -c '{status,kv_blocks_total,kv_capacity_tokens}'
+```
+**Ready** after 97.7 s: `Server listening on http://0.0.0.0:8090` in `docker logs imp-server`, `/health` prints `{"status":"ok","kv_blocks_total":1900,"kv_capacity_tokens":30400}`. Image, RAM, measurements: [`docs/QUICKSTART.md`](docs/QUICKSTART.md#qwen38-flash-next).
 ## Using it
 
 - **In the browser:** <http://localhost:8080>, the built-in chat.

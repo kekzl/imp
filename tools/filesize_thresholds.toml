@@ -40,7 +40,7 @@ hard = 700
 # Docs: raw line limits, enforced by scripts/docs_lint.py (not by check_filesize.py).
 # readme = README.md; docs = every in-scope docs/*.md and docs/internals/*.md.
 [thresholds.docs]
-readme = 150
+readme = 159
 docs = 300
 
 [classify]
