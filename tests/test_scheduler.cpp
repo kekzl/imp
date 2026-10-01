@@ -1139,5 +1139,23 @@ TEST(SchedulerTest, AdmittedSequencesNeverRunThePoolDryAtDecode) {
     EXPECT_EQ(dry, 0) << "admission promised blocks the pool could not hand out at decode";
 }
 
+// #2361: a row the pipeline drain finished after the schedule is still in the step's decode
+// batch; its KV is freed, so append_block returns -1 and the engine cancelled it as "exhausted".
+TEST(SchedulerTest, DecodeRowRetiredSkipsDrainedRows) {
+    auto cache = KVCache::for_accounting(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16,
+                                         /*max_blocks=*/64);
+    KVCacheManager mgr(std::move(cache));
+    ASSERT_TRUE(mgr.allocate_blocks(7, 4));
+    mgr.free_sequence(7);
+    EXPECT_LT(mgr.append_block(7), 0) << "a freed sequence gets no block, with 64 free";
+    EXPECT_EQ(mgr.num_free_blocks(), 64);
+
+    EXPECT_TRUE(decode_row_retired(RequestStatus::FINISHED, 64, 64));
+    EXPECT_TRUE(decode_row_retired(RequestStatus::CANCELLED, 3, 64));
+    EXPECT_TRUE(decode_row_retired(RequestStatus::DECODING, 64, 64)) << "generation complete";
+    EXPECT_FALSE(decode_row_retired(RequestStatus::DECODING, 63, 64));
+    EXPECT_FALSE(decode_row_retired(RequestStatus::DECODING, 5000, 0)) << "0 = no max_tokens cap";
+}
+
 }  // namespace
 }  // namespace imp

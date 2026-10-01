@@ -627,6 +627,14 @@ bool Engine::end_perplexity_capture(double* out_ppl) {
 // and must not decode this step. Shared with the mixed prefill+decode step
 // (engine_prefill_ragged.cpp), so the two paths cannot drift.
 bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
+    // Retired since the schedule (drain_decode_pipeline finished it and freed its KV):
+    // append_block on a freed sequence returns -1, which read as exhaustion (#2361).
+    if (decode_row_retired(req->status, req->output_tokens.size(), req->max_tokens)) {
+        IMP_LOG_INFO("decode: seq %d retired since the schedule (%s, out %zu of %d, %zu KV blocks held) - skipped",
+                     req->id, request_status_name(req->status), req->output_tokens.size(), req->max_tokens,
+                     kv_manager_->block_table(req->id).size());
+        return false;
+    }
     int ctx_len = req->context_len();
     int blocks_needed = (ctx_len + kv_bs - 1) / kv_bs;
     const auto& block_table = kv_manager_->block_table(req->id);
