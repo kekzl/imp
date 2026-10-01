@@ -29,7 +29,7 @@ docker run --rm --gpus all -v "$MODELS":/models:ro -v "$FR":/fx:ro "$IMG" \
     --prompt "$PROMPT" --max-tokens 48 --temperature 0 >"$WORK/cli.out" 2>"$WORK/cli.err" || rc=1
 grep -E "Video loaded|Qwen3-VL: .*video" "$WORK/cli.err" || true
 # imp-cli interleaves log lines with the streamed answer on stdout: show the answer sentence.
-echo "CLI answer: $(tr '\n' ' ' <"$WORK/cli.out" | grep -oiE "[A-Za-z ,']*red panda[^.[]*\.?" | head -1)"
+echo "CLI answer: $(tr '\n' ' ' <"$WORK/cli.out" | grep -oiE "[A-Za-z]* ?red panda[^.[]*\.?" | head -1)"
 grep -qi "red panda" "$WORK/cli.out" || { echo "FAIL cli: no 'red panda'"; tail -5 "$WORK/cli.err"; rc=1; }
 
 docker run -d --name "$CTR" --gpus all -v "$MODELS":/models:ro -p "$PORT:$PORT" "$IMG" \
@@ -43,8 +43,8 @@ for k in 1 2 3 4 5 6 7 8; do
     printf 'data:image/png;base64,%s' "$(base64 -w0 "$FR/frame_$k.png")" >"$WORK/f$k.txt"
 done
 for k in 1 2 3 4 5 6 7 8; do jq -Rs . "$WORK/f$k.txt"; done | jq -s . >"$WORK/frames.json"
-jq -n --slurpfile fr "$WORK/frames.json" --arg p "$PROMPT" --arg ts "$TS" '($fr[0]) as $frames | {
-    max_tokens: 48, temperature: 0,
+jq -n --slurpfile fr "$WORK/frames.json" --arg p "$PROMPT" --arg ts "$TS" --arg m "$MODEL" '($fr[0]) as $frames | {
+    model: $m, max_tokens: 48, temperature: 0,
     messages: [{role: "user", content: [
         {type: "video", video: $frames, timestamps: ($ts | split(",") | map(tonumber))},
         {type: "text", text: $p}]}]}' >"$WORK/req.json"
