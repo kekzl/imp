@@ -98,8 +98,8 @@ imp-cli --model ./Qwen3-1.7B-nvfp4 --prompt "Hello"
 |---|---|
 | `--model <dir>` / `--out <dir>` | source checkpoint / destination |
 | `--calib <file>` | AWQ search using the calibration file; omit for round-to-nearest |
-| `--calib-weight abs\|sq` | search error weight, default `abs`; `sq` (2nd moment) is 1.10% better, needs `IMPCAL02` calibration file |
-| `--calib-groups <letters>` | restrict AWQ to a subset of `ABCD` (A=q/k/v, B=gate/up, C=o_proj, D=down_proj), production rule below |
+| `--calib-weight abs\|sq` | search error weight, default `abs`; `sq` (2nd moment, needs an `IMPCAL02` file) is 1.10% better on Qwen3-0.6B, 0.15 PPL worse on Qwen3-14B `BD` |
+| `--calib-groups <letters>` | subset of `ABCDEG` (A=q/k/v, B=gate/up, C=o_proj, D=down_proj, E/G=GDN); default `ABCDEG` at `n_rep < 5`, `BDEG` at `n_rep >= 5` |
 | `--lm-head` | also quantize `lm_head` (free at runtime, see below) |
 | `--keep-attn-gate` | keep the fused Q+gate `q_proj` (Qwen3.5/Qwen3-Next) at source precision |
 | `--keep-gdn-proj [all\|in,gate,out]` | keep GDN `linear_attn` projections at source precision, bare flag = `all` |
@@ -186,7 +186,20 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
 | Qwen3-1.7B (2 shards) | 17.22 | 20.39 | **18.71** | +18.4% -> **+8.7%** |
 
 - Recovers about a quarter of the RTN gap on the 0.6B, nearly two fifths on the 1.7B; does not close it against BF16. **Hurts at 14B and wider** (24-27% worse than RTN, the wrong direction): attention vs FFN, not model size.
-- **Production rule**: default `ABCD` on narrow-GQA models (`n_rep < 5`); `--calib-groups BD` on wide-GQA (`n_rep >= 5`), where it beats RTN (9.7922 vs 9.9252, Qwen3-14B) and full `ABCD` does not.
+- **Production rule, the code default since roadmap row 6 closed**: all groups on narrow GQA (`n_rep < 5`), attention groups A and C off on wide GQA (`n_rep >= 5`), `--calib-weight abs` on both. Qwen3-14B BF16 source, `ppl_corpus_45k.txt`, deterministic:
+
+| arm | RTN | ABCD `abs` | ABCD `sq` | BD `abs` | BD `sq` |
+|---|---:|---:|---:|---:|---:|
+| PPL | 9.9849 | 12.2634 | 10.7965 | **9.9068** | 10.0563 |
+
+[PROV: commit=c6135a26 date=2026-10-01 hw=RTX5090 model=Qwen3-14B quant=NVFP4 cuda=13.4.1
+       path=imp-quantize+imp-cli-perplexity n=1-per-arm-deterministic
+       cmd=`tools/analysis/awq_wide_gqa_ab.sh` harness_md5=31019ae9
+       note=calibration stats from the RTN checkpoint (BF16 14B does not fit for --calibrate)]
+
+`sq` removes 64 % of the ABCD damage (12.2634 -> 10.7965) and still loses to RTN; on BD it costs 0.15.
+On a dense model the default `BDEG` folds the same sites as `BD` (E/G need GDN tensors; `WideGqaDefaultIsBdOnADenseLayer`).
+The threshold sits at the measured wide point (n_rep 5); n_rep 3-4 (Qwen3-8B, Qwen3-4B, Phi-4) is unmeasured and keeps all groups, as before.
 - Uncalibrated `imp-quantize` already beats a published Modelopt export on the one locally comparable model (9.9252 vs 10.0301, Qwen3-14B).
 - Mechanism, refuted variants, the won't-fit calibration trick: [`archive/quantization_awq_findings.md`](archive/quantization_awq_findings.md).
 

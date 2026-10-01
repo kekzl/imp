@@ -24,6 +24,21 @@
 
 namespace imp::awq {
 
+// AWQ scale groups, selectable to attribute a bad result. E and G exist only on qwen3_5 GDN
+// hybrids and are unmeasured against an uncalibrated twin.
+constexpr const char* kAwqAllGroups = "ABCDEG";
+
+// Default when --calib-groups is absent: n_rep >= 5 drops attention groups A and C.
+// Qwen3-14B (n_rep 5): ABCD 12.2634, BD 9.9068, round-to-nearest 9.9849 PPL.
+constexpr int64_t kAwqWideGqaRep = 5;
+constexpr const char* kAwqWideGqaGroups = "BDEG";
+[[nodiscard]] inline const char* default_groups(int64_t n_rep) {
+    return n_rep >= kAwqWideGqaRep ? kAwqWideGqaGroups : kAwqAllGroups;
+}
+[[nodiscard]] inline bool attention_groups_on_wide_gqa(const std::string& groups, int64_t n_rep) {
+    return n_rep >= kAwqWideGqaRep && groups.find_first_of("AC") != std::string::npos;
+}
+
 // Which convention the block norms of an architecture follow.
 enum class NormConvention { Plain, UnitOffset };
 
