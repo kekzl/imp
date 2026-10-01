@@ -4,15 +4,17 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-10-01
+
 ### Added
 - InternVL3.5 vision (#2389, with #2375 #2382 #2384 #2387): InternVL3_5-2B-HF answers about images in `imp-cli --image` and the server; one 448 tile, 256 tokens per image. Real tower vs HF FP32: 6.35e-3 relL2 on test_cat; bus, cat, pizza named; `vision_sight_check` 8/8.
 - Sparse prefill attention (`attention.sparse_prefill_topk_tokens`, default off): a continuation chunk attends to its own rows plus the top past pages, one selection per chunk, no dense pass. Qwen3.8-27B pp77824 at 8192: 6835.55 -> 10529.05 tok/s (1.54x, 3/3), NIAH 10/10, PPL +0.26 %. Record: `docs/plans/2026-08-28-sparse-decode-attention.md`.
-- Sparse decode attention on MLA models (#2372): only `attention.mla_absorb` stays refused. DeepSeek-V2-Lite NVFP4, budget 4096: decode 3.20 -> 23.03 tok/s at 32k, NIAH 10/10 dense and sparse (V2-Lite-Chat). Harnesses `tools/analysis/sparse_mla_ab.sh`, `prefill_attn_share.sh`.
+- Sparse decode attention on MLA models (#2372): only `attention.mla_absorb` stays refused. DeepSeek-V2-Lite NVFP4, after #2385, dense vs sparse budget 4096 at 32k: 111.22/112.38/111.35 vs 259.95/235.40/244.98 tok/s (2.21x), 16k 1.38x (#2386); NIAH 10/10 dense and sparse (V2-Lite-Chat). Harnesses `tools/analysis/sparse_mla_ab.sh`, `prefill_attn_share.sh`.
 - Qwen3-VL video input (#2370): `{"type":"video","video":[frame URLs],"fps"|"timestamps"}` on `/v1/chat/completions`, `imp-cli --video-frames`; 2..768 client-sampled frames, no mp4 decoding. 8 red-panda frames: encoder relL2 5.48e-3 vs HF FP32, CLI and server name the red panda.
-- Qwen3-VL video, CPU half (#2363): `qwen_patchify_video` (real frame pairs on the temporal axis), `expand_video_placeholders` (`<x.x seconds>` per pair), `qwen_build_mrope_positions_mm`. vs transformers 5.17.0: pixels 0 elements over 1 FP16 ulp, 113 prompt ids and 3x113 M-RoPE positions 0 diffs. Server/CLI wiring not yet.
+- Qwen3-VL video, CPU half (#2363): `qwen_patchify_video` (real frame pairs on the temporal axis), `expand_video_placeholders` (`<x.x seconds>` per pair), `qwen_build_mrope_positions_mm`. vs transformers 5.17.0: pixels 0 elements over 1 FP16 ulp, 113 prompt ids and 3x113 M-RoPE positions 0 diffs. Wired into server and CLI by #2370.
 
 ### Changed
-- `imp-quantize --calib` without `--calib-groups` drops attention groups A/C on dense models at n_rep >= 5 (was all groups plus a warning); GDN hybrids keep all (Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136). Qwen3-14B PPL: BD 9.9068, ABCD 12.2634, RTN 9.9849; `--calib-weight sq` stays opt-in (BD 10.0563). Roadmap rows 6, 8, 11 closed.
+- `imp-quantize --calib` without `--calib-groups` drops attention groups A/C on dense models at n_rep >= 5 (was all groups plus a warning); GDN hybrids keep all (Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136). Qwen3-14B PPL: BD 9.9068, ABCD 12.2634, RTN 9.9849; `--calib-weight sq` stays opt-in (BD 10.0563). Roadmap rows 6, 8, 11 closed (#2359, #2392).
 
 ### Fixed
 - JPEG decode (#2381): libjpeg-turbo with Pillow's settings replaces stb for every vision family; RGB vs Pillow max diff 3/255 -> 0/255 on test_cat, test_bus and 6 fixtures (progressive, 4:2:0, 4:2:2, 4:4:4, gray, CMYK). PNG stays on stb.
@@ -20,6 +22,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - KV plan (#2365): executor workspaces already allocated before the plan reads free VRAM were charged again (Qwen3.8-27B: 887 MiB charged, 749 resident); plan KV 3192 -> 5370 blocks. A growable ceiling that serves `max_seq_len` prints a note, not "WARN: serves 0 of 28 slots" (123135-token request grew the pool to 9021 blocks).
 - DeepSeek-V2 EOS (#2377): the tokenizer kept its placeholder EOS id 2 (`#` in that vocab) ahead of `generation_config`'s 100001, so a reply stopped at the first `#` and the real EOS text `<｜end▁of▁sentence｜>` reached the client (30 of 30 NIAH answers). The first named EOS now replaces the placeholder.
 - Sparse decode key min/max pool (#2360): priced per block in the KV plan (was unpriced, NVFP4 not even logged) and grows with a growable KV pool; under the default growable pool it was never built (WARN, no-op). Qwen3.8-27B NVFP4 KV, 88241-token request: pool 775 -> 6291 blocks, sparse ACTIVE.
+- Decode: rows the pipeline drain retired after scheduling are skipped, not cancelled as "KV pool exhausted at decode" (#2361, #2371). `max_batch_size=8`, 32 long prompts: 5 finished requests were cancelled.
+- KV residency probe times one captured graph launch instead of n single copy submissions (#2366, #2369). Qwen3.8-27B boot: 63 GB/s and a false spill WARN on a resident pool; graph-pattern copies 1218-1270 GB/s.
 - VRAM ledger: a freed weight allocation leaves `WEIGHTS` (#2354); freed sources (27B F16 LM head 2425 MiB, Flash-Next GDN packs 6857 MiB) kept the whole-init residual at -495 / -3349 MiB. Now +1930 / +1823 MiB at warmup, so the library reserve is measured again.
 - Startup diagnostics state what runs (#2347): a rejected memory plan names the live pool (was "APPLIED", "Set runtime.max_seq_len=0"); no false out_norm WARN on Qwen4Exp; a negative ledger residual (27B -495 MiB) is no library-reserve measurement (was "measured 0 MiB", recorded for the next start).
 - cuBLASLt: a GEMM algo pinned at one M is checked with `cublasLtMatmulAlgoCheck` before it runs at another M of its bucket; a failing M gets its own pin (#2346). Pin failures per run: Flash-Next startup + 3 prompts 446 -> 0, Qwen3.8-27B 28-request chat 288 -> 0; deterministic greedy output identical.
