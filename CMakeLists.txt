@@ -921,6 +921,7 @@ if(IMP_BUILD_TESTS)
         tests/test_weight_map_expert_gate.cpp
         tests/test_weight_map_modality_skips.cpp
         tests/test_weight_map_out_norm_warn.cpp
+        tests/test_mem_account_keyed.cpp
         tests/test_library_reserve_measurement.cpp
         tests/test_weight_page_release.cpp
         tests/test_checkpoint_limits.cpp

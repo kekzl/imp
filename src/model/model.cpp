@@ -30,6 +30,7 @@ Model::~Model() {
     int free_fail = 0;
     cudaError_t first_err = cudaSuccess;
     for (void* ptr : gpu_allocations_) {
+        MemAccount::instance().note_free(ptr);
         if (ptr) {
             cudaError_t e = cudaFreeAsync(ptr, nullptr);
             if (e != cudaSuccess) {
@@ -108,6 +109,7 @@ void Model::release_gpu_allocation(void* ptr) {
     auto it = std::find(gpu_allocations_.begin(), gpu_allocations_.end(), ptr);
     if (it != gpu_allocations_.end()) {
         gpu_allocations_.erase(it);
+        MemAccount::instance().note_free(ptr);  // every caller frees it next (#2354)
         // Suspend-to-RAM: this source is about to be freed — its snapshot
         // record is no longer capturable (the tensor re-uploads cold at resume).
         if (upload_log_)

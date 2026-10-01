@@ -75,7 +75,7 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t str
         cudaError_t err = malloc_async_in_scope(ptr, size, stream);
         if (err == cudaSuccess) {
             g_total_allocated += size;
-            MemAccount::instance().note("WEIGHTS", static_cast<std::ptrdiff_t>(size));
+            MemAccount::instance().note_alloc("WEIGHTS", *ptr, size);  // uncharged by Model (#2354)
             if (g_upload_log)
                 g_upload_log->note_alloc(*ptr, size);
         }

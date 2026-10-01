@@ -109,6 +109,37 @@ void MemAccount::note(const char* pool, std::ptrdiff_t delta_bytes) {
         p.peak = p.current;
 }
 
+void MemAccount::note_alloc(const char* pool, const void* ptr, size_t bytes) {
+    if (!ptr || bytes == 0)
+        return;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        charges_[ptr] = Charge{pool, bytes};
+    }
+    note(pool, static_cast<std::ptrdiff_t>(bytes));
+}
+
+void MemAccount::note_free(const void* ptr) {
+    Charge c{};
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = charges_.find(ptr);
+        if (it == charges_.end())
+            return;
+        c = it->second;
+        charges_.erase(it);
+    }
+    note(c.pool, -static_cast<std::ptrdiff_t>(c.bytes));
+}
+
+int64_t MemAccount::pool_current(const char* pool) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (const auto& p : pools_)
+        if (p.name == pool)
+            return p.current;
+    return 0;
+}
+
 void MemAccount::checkpoint(const char* name) {
     size_t free_b = 0, total_b = 0;
     query_free_total(free_b, total_b);
