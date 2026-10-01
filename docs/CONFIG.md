@@ -46,6 +46,9 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `rope.orig_ctx` | `0` (auto) | native training context the factor applies to |
 | `moe.expert_cache_budget_pct` | `0` (auto) | host-expert cache budget; only relevant when MoE experts don't fit, see [`PERF.md`](PERF.md) |
 | `attention.sparse_topk_tokens` | `0` (off) | sparse attention token budget |
+| `attention.sparse_prefill_topk_tokens` | `0` (off) | sparse prefill: past tokens a continuation chunk attends to (own chunk dense), one page selection per chunk; Qwen3.8-27B pp77824 6836 -> 10529 tok/s at 8192 |
+| `attention.sparse_prefill_rows` | `16` | query rows per chunk that score the past pages (max 64) |
+| `attention.sparse_prefill_recent_tokens` | `1024` | past positions a continuation chunk always keeps |
 | `server.model_swap` | `true` | a request naming another model in the directory swaps to it |
 | `server.model_swap_drain_ms` | `60000` | drain budget for in-flight generations during a swap/shutdown |
 | `server.agent_scan_limit` | `256` | tokens held back to scan for `<think>` when tools are present (8 without tools) |
