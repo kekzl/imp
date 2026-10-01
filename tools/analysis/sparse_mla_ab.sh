@@ -4,7 +4,7 @@
 # Decode slope: same prompt at two generation lengths (ignore_eos), tok/s = (n2-n1)/(t2-t1),
 # so prefill cancels (docs/plans/2026-08-28-sparse-decode-attention.md, budget section).
 # A sparse arm without a `sparse decode attention ACTIVE` line aborts.
-# Usage: MODEL=DeepSeek-V2-Lite-NVFP4-imp IMG=imp:test tools/analysis/sparse_mla_ab.sh <outdir>
+# NIAH_ARMS=none skips NIAH. Usage: MODEL=DeepSeek-V2-Lite-NVFP4-imp IMG=imp:test tools/analysis/sparse_mla_ab.sh <outdir>
 set -u
 OUT=${1:?outdir}
 MODEL=${MODEL:?MODEL}
@@ -77,6 +77,7 @@ for r in $(seq 1 "$ROUNDS"); do
     done
 done
 
+[ "$NIAH_ARMS" = none ] && { echo ALLDONE; exit 0; }
 echo "### NIAH lengths=$NIAH_LENGTHS depths=$DEPTHS arms=$NIAH_ARMS"
 for b in ${NIAH_ARMS//,/ }; do
     tag="niah_b$b"

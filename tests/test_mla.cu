@@ -840,6 +840,86 @@ TEST(MLAAttnOutput, RealGeometryNkv16) {
     cudaFree(d_compact);
 }
 
+// #2374: MLA decode over the zero-padded V cache runs symmetric (HD 192, split-K) + compaction
+// and must match the asymmetric generic kernel. Tolerance 1e-2 abs, not bit-identity: split-K
+// sums the context in a different order (10 splits here), so FP32 accumulators differ.
+TEST(MLAAttnOutput, PaddedSymmetricSplitKMatchesGeneric) {
+    SKIP_IF_NO_CUDA();
+
+    static constexpr int nh = 16, nkv = 16, hd = 192, vhd = 128, bs = 16;
+    static constexpr int batch = 2, blocks_per_seq = 40, n_blocks = batch * blocks_per_seq;
+    const int ctx[batch] = {blocks_per_seq * bs - 5, 23 * bs + 3};
+
+    std::mt19937 rng(2374);
+    std::uniform_real_distribution<float> u(-1.f, 1.f);
+    const size_t cache_elems = static_cast<size_t>(n_blocks) * bs * nkv * hd;
+    std::vector<float> h_k(cache_elems), h_v(cache_elems), h_q(batch * nh * hd);
+    for (size_t i = 0; i < cache_elems; i++) {
+        h_k[i] = u(rng);
+        h_v[i] = (static_cast<int>(i % hd) < vhd) ? u(rng) : 0.f;  // zero tail, as mla_assemble_kv writes
+    }
+    for (auto& x : h_q)
+        x = u(rng);
+    // Seq 0 walks its blocks in reverse, seq 1 forward: block tables must be honoured.
+    std::vector<int> h_bt(batch * blocks_per_seq);
+    for (int b = 0; b < blocks_per_seq; b++) {
+        h_bt[b] = blocks_per_seq - 1 - b;
+        h_bt[blocks_per_seq + b] = blocks_per_seq + b;
+    }
+
+    Tensor K_c = make_gpu_fp16(h_k, {n_blocks, bs, nkv, hd});
+    Tensor V_c = make_gpu_fp16(h_v, {n_blocks, bs, nkv, hd});
+    Tensor Q = make_gpu_fp16(h_q, {batch, 1, nh, hd});
+    Tensor O_ref = alloc_gpu_fp16({batch, 1, nh, vhd});
+    Tensor O_fast = alloc_gpu_fp16({batch, 1, nh, vhd});
+    Tensor O_full = alloc_gpu_fp16({batch, nh, hd});
+    int* d_bt = nullptr;
+    int* d_cl = nullptr;
+    cudaMalloc(&d_bt, h_bt.size() * sizeof(int));
+    cudaMalloc(&d_cl, batch * sizeof(int));
+    cudaMemcpy(d_bt, h_bt.data(), h_bt.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_cl, ctx, batch * sizeof(int), cudaMemcpyHostToDevice);
+    const float scale = 1.0f / sqrtf(static_cast<float>(hd));
+    const int max_ctx = ctx[0];
+
+    // Reference: asymmetric call, the generic kernel (split-K is off for vhd != hd).
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    paged_attention_decode(Q, K_c, V_c, O_ref, d_bt, d_cl, bs, scale, max_ctx, 0, 0.0f, nullptr,
+                           blocks_per_seq, 0, nullptr, vhd);
+
+    // Fast path: symmetric HD 192 with split-K scratch for up to 64 splits.
+    void* d_splitk = nullptr;
+    const size_t splitk_bytes = static_cast<size_t>(batch) * nh * 64 * (2 + hd) * sizeof(float);
+    cudaMalloc(&d_splitk, splitk_bytes);
+    paged_attention_set_splitk_scratch(d_splitk, splitk_bytes);
+    paged_attention_decode_mla_padded(Q, K_c, V_c, O_fast, static_cast<half*>(O_full.data), O_full.numel(),
+                                      d_bt, d_cl, bs, scale, max_ctx, 0, 0.0f, nullptr, blocks_per_seq, 0,
+                                      nullptr, vhd);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    paged_attention_set_splitk_scratch(nullptr, 0);
+
+    auto ref = read_gpu_fp16(O_ref);
+    auto fast = read_gpu_fp16(O_fast);
+    float max_diff = 0.f;
+    for (size_t i = 0; i < ref.size(); i++) {
+        const float d = fabsf(ref[i] - fast[i]);
+        max_diff = std::max(max_diff, d);
+        EXPECT_NEAR(fast[i], ref[i], 1e-2f) << "i=" << i;
+    }
+    // Different summation order proves the split-K kernel ran, not the generic one.
+    EXPECT_GT(max_diff, 0.f) << "fast path bit-identical to the generic kernel: split-K did not engage";
+
+    free_gpu(K_c);
+    free_gpu(V_c);
+    free_gpu(Q);
+    free_gpu(O_ref);
+    free_gpu(O_fast);
+    free_gpu(O_full);
+    cudaFree(d_bt);
+    cudaFree(d_cl);
+    cudaFree(d_splitk);
+}
+
 // Phase 3 equivalence: mla_absorbed_decode must match the materialized formulation
 // (a mathematically equivalent reformulation). CPU fp32 materialized reference vs GPU
 // absorbed kernel, cosine similarity > 0.999 per head.
