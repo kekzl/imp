@@ -225,10 +225,11 @@ struct GemmCacheKey {
     cublasComputeType_t compute;
     int64_t M, K, N;
     bool has_scales;  // FP8 scale pointers present (affects opDesc attributes)
+    bool exact_m = false;  // M is exact: this M failed the bucket pin's algo check (#2346)
 
     bool operator==(const GemmCacheKey& o) const {
         return dtA == o.dtA && dtB == o.dtB && dtC == o.dtC && compute == o.compute && M == o.M && K == o.K &&
-               N == o.N && has_scales == o.has_scales;
+               N == o.N && has_scales == o.has_scales && exact_m == o.exact_m;
     }
 };
 
@@ -247,6 +248,7 @@ struct GemmCacheKeyHash {
         mix(static_cast<uint64_t>(k.K));
         mix(static_cast<uint64_t>(k.N));
         mix(static_cast<uint64_t>(k.has_scales));
+        mix(static_cast<uint64_t>(k.exact_m));
         return h;
     }
 };
@@ -268,6 +270,8 @@ struct GemmCacheEntry {
     // taken at one M can fail at another M in the same bucket; keeping the two apart is what
     // lets the failure path leave a pin that is still correct for its own M (2026-09-21).
     int64_t algo_M = 0;
+    // cublasLtMatmulAlgoCheck of the pin at each other M seen in the bucket (#2346).
+    std::unordered_map<int64_t, bool> pin_ok_at_m;
 };
 
 static std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash> s_gemm_cache;
@@ -380,6 +384,46 @@ static bool keep_pin_chosen_at_other_m(GemmCacheEntry& entry, int64_t M, int64_t
                          (long)M, (long)K, (long)N, (long)entry.algo_M, n);
     }
     return other_m;
+}
+
+// True when the bucket pin may run at this M. A pin is chosen at one M and is dimension-sensitive
+// (#2346: M=784 pin failed at M=816, M=16 pin at M=32); cublasLtMatmulAlgoCheck answers on the
+// host before the launch. Cached per M. Caller holds s_gemm_cache_mutex; layouts are at M.
+static bool pin_supports_m(cublasLtHandle_t lt, GemmCacheEntry& entry, int64_t M) {
+    if (!entry.has_algo || entry.algo_M == M)
+        return true;
+    auto it = entry.pin_ok_at_m.find(M);
+    if (it != entry.pin_ok_at_m.end())
+        return it->second;
+    cublasLtMatmulHeuristicResult_t res{};
+    const bool ok = cublasLtMatmulAlgoCheck(lt, entry.opDesc, entry.Bdesc, entry.Adesc, entry.Cdesc,
+                                            entry.Cdesc, &entry.algo, &res) == CUBLAS_STATUS_SUCCESS &&
+                    res.workspaceSize <= entry.workspace_size;
+    entry.pin_ok_at_m.emplace(M, ok);
+    if (!ok)
+        s_exact_m_entries.fetch_add(1, std::memory_order_relaxed);
+    return ok;
+}
+
+// The entry for this call: the bucket entry, or an exact-M entry chosen at M when the bucket pin
+// fails pin_supports_m. `make` builds and selects a new entry at M. Caller holds the mutex.
+template <class Make>
+static GemmCacheEntry* entry_for_m(cublasLtHandle_t lt, GemmCacheKey key, int64_t M, cudaDataType_t dtA,
+                                   cudaDataType_t dtC, int64_t K, int64_t N, Make&& make) {
+    auto it = s_gemm_cache.find(key);
+    if (it == s_gemm_cache.end())
+        it = s_gemm_cache.emplace(key, make()).first;
+    GemmCacheEntry* entry = &it->second;
+    if (entry->desc_M != M)
+        rebuild_layouts_for_m(*entry, dtA, dtC, (int)K, (int)M, (int)N);
+    if (pin_supports_m(lt, *entry, M))
+        return entry;
+    key.M = M;
+    key.exact_m = true;
+    auto ex = s_gemm_cache.find(key);
+    if (ex == s_gemm_cache.end())
+        ex = s_gemm_cache.emplace(key, make()).first;
+    return &ex->second;
 }
 
 // Set per-call FP8 scale pointers on a matmul descriptor.
@@ -784,10 +828,7 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
     GemmCacheEntry* entry = nullptr;
     {
         std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
-        auto it = s_gemm_cache.find(cache_key);
-        if (it != s_gemm_cache.end()) {
-            entry = &it->second;
-        } else {
+        entry = entry_for_m(lt, cache_key, M, cuda_dtype_A, cuda_dtype_C, K, N, [&] {
             GemmCacheEntry new_entry{};
             new_entry.desc_M = M;
             cudaDataType_t scale_type = (compute_type == CUBLAS_COMPUTE_32I)   ? CUDA_R_32I
@@ -801,16 +842,8 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
             benchmark_and_select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta,
                                       (compute_type == CUBLAS_COMPUTE_32I), stream, (int)M, (int)N, (int)K,
                                       use_fp16_acc);
-
-            auto [inserted_it, _] = s_gemm_cache.emplace(cache_key, new_entry);
-            entry = &inserted_it->second;
-        }
-
-        // Rebuild layout descriptors if actual M differs from cached M
-        // (bucketed key matched but exact M changed).
-        if (entry->desc_M != M) {
-            rebuild_layouts_for_m(*entry, cuda_dtype_A, cuda_dtype_C, (int)K, (int)M, (int)N);
-        }
+            return new_entry;
+        });
     }
 
     if (compute_type == CUBLAS_COMPUTE_32I) {
@@ -961,10 +994,7 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
     GemmCacheEntry* entry = nullptr;
     {
         std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
-        auto it = s_gemm_cache.find(cache_key);
-        if (it != s_gemm_cache.end()) {
-            entry = &it->second;
-        } else {
+        entry = entry_for_m(lt, cache_key, M, cuda_dtype_A, cuda_dtype_C, K, N, [&] {
             GemmCacheEntry new_entry{};
             new_entry.desc_M = M;
 
@@ -976,16 +1006,8 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
             size_t c_bytes = (size_t)M * N * dtype_size(C.qtype);
             benchmark_and_select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta, false, stream,
                                       (int)M, (int)N, (int)K);
-
-            auto [ins_it, _] = s_gemm_cache.emplace(cache_key, new_entry);
-            entry = &ins_it->second;
-        }
-
-        // Rebuild layout descriptors if actual M differs from cached M
-        // (bucketed key matched but exact M changed).
-        if (entry->desc_M != M) {
-            rebuild_layouts_for_m(*entry, cuda_dtype_A, cuda_dtype_C, (int)K, (int)M, (int)N);
-        }
+            return new_entry;
+        });
     }
 
     // Sets per-call scale pointers (vary by weight tensor, not cached) on the cached opDesc
