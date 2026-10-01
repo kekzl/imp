@@ -54,6 +54,14 @@ int main(int argc, char** argv) {
     }
     const imp::Tokenizer& tok = *m->tokenizer();
 
+    if (getenv("EOS")) {  // "@@EOS <eos_id> <eos_ids...>": the stop set a server would use (#2377)
+        printf("@@EOS %d", tok.eos_id());
+        for (int32_t id : tok.eos_ids())
+            printf(" %d", id);
+        printf("\n");
+        return 0;
+    }
+
     if (getenv("CHAT")) {
         auto family = imp::ChatTemplate::detect_family(tok.chat_template_str());
         if (family == imp::ChatTemplateFamily::RAW)
