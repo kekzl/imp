@@ -108,7 +108,7 @@
         // table + context lens; contexts at/below budget pass through bit-
         // identically. Covers plain decode AND spec verify chunks (already
         // per-row "sequences"). SWA/streaming layers keep full attention; the init
-        // gate limits it to F16/FP8 caches, non-MLA, uniform geometry.
+        // gate limits it to F16/FP8/NVFP4 caches, no absorbed MLA, uniform geometry.
         const int* attn_bt = layer_block_tables;
         const int* attn_ctx_lens = state.context_lens;
         int attn_max_blocks = state.max_blocks_per_seq;
