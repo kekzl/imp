@@ -51,6 +51,7 @@ struct ShadowPlanProbe {
     int kv_block_size = 16;
     int min_kv_tokens = 0;
     size_t kv_block_bytes_per_layer = 0;
+    size_t kv_meta_block_bytes_per_layer = 0;  // sparse decode key min/max, 0 = not built
 
     // Set for the things this probe does NOT model yet, so the report says so
     // instead of quietly implying full coverage.

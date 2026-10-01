@@ -53,7 +53,6 @@ Ranked by what an agent workload notices first.
 | # | item | state | ref |
 |---|---|---|---|
 | 3 | long context | HALF CLOSED. Quest-class top-k page selection opt-in: Qwen3-8B 32k 160.3 -> 199.5 tok/s (+24.5%), NVFP4-KV 77k 74.3 -> 100.2, concurrent 3x25k +27%, spec verify on the sparse table +28.2%. The retrieval price was the min/max corner bound, not the sparsity: the mean+std page score (`attention.sparse_score_meanstd`, default on since 2026-09-12) reads NIAH 10/10 on Qwen3.8-27B at every budget from 1024 to 8192, against 0/10, 1/10, 2/10 and 7/10 for the bound on the same binary, wall time neutral. NIAH is saturated there, so a small-budget selection refinement has no target on it, and the budget is not a speed lever either (sparse is +9% over dense, 1024 against 8192 inside the spread). Remaining: MLA models, prefill sparsity, StreamingLLM eviction as the only answer under KV-pool pressure (the valve arms on every KV dtype since 2026-09-16; before that F16 only, and an FP8/NVFP4 pool cancelled the request once it ran dry) | #1808, #1818, #1819, [plan](plans/2026-08-28-sparse-decode-attention.md) |
-| 5 | recurrent-state paging | the lever for 32-way concurrency at LONG context, not the limiter at 32 slots. Evicted snapshots reach a pinned host tier since 2026-09-02 (turn-2 TTFT at 8 sessions -50%) | `server.recurrent_snapshot_host_mb` |
 | 9 | no video | a project: decoder dependency (only `stb` vendored), frame axis, temporal M-RoPE, `<\|video_pad\|>` | |
 | 10 | one VL tower family | port-sized (InternVL/Pixtral); `vision_tower_supported()` names one layout, and a second model on the SAME tower cost two gates | #1379, #1384 |
 
@@ -70,7 +69,7 @@ Moved on 2026-09-28 to [`archive/roadmap_ledger_2026_09_28.md`](archive/roadmap_
 | section | archive anchor |
 |---|---|
 | Open row 12 (closed 2026-09-16) | [Open rows closed before the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-before-the-move) |
-| Open rows 6, 8, 11 (closed 2026-10-01) | [Open rows closed after the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) |
+| Open rows 5, 6, 8, 11 (closed 2026-10-01) | [Open rows closed after the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) |
 | Closed | [Closed](archive/roadmap_ledger_2026_09_28.md#closed) |
 | The 2026 bar | [The 2026 bar](archive/roadmap_ledger_2026_09_28.md#the-2026-bar-assessed-2026-08-21) |
 | Lever ledger | [Lever ledger](archive/roadmap_ledger_2026_09_28.md#lever-ledger) |

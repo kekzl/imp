@@ -12,6 +12,7 @@
 #include "memory/backend.h"
 #include "core/tensor.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -549,6 +550,32 @@ TEST(KVCacheGrowTest, GrowthStopsAtTheAllocatorHeadroom) {
     EXPECT_GT(got, 8);
     EXPECT_LE(got, 8 + 121);
     EXPECT_LT(got, 512) << "growth must stop at the headroom, not at the ceiling";
+}
+
+// Sparse decode metadata on a growable pool (#2360): it used to be refused, so the default
+// growable config made attention.sparse_topk_tokens a WARN-only no-op. Now it grows with the
+// pool: priced per block, backed and zeroed for every block the pool hands out.
+TEST(KVCacheGrowTest, KeyMinmaxGrowsWithThePool) {
+    SKIP_IF_NO_CUDA();
+    KVCache cache(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/8,
+                  /*block_size=*/16, /*alloc=*/nullptr, /*ceiling_blocks=*/512);
+    if (!cache.growable())
+        GTEST_SKIP() << "no VMM backend on this device";
+    const size_t kv_only = cache.bytes_per_block();
+    ASSERT_TRUE(cache.enable_key_minmax()) << "a growable pool must take the metadata pool";
+    EXPECT_EQ(cache.bytes_per_block(), kv_only + 2 * KVCache::minmax_block_bytes(4, 64));
+
+    const int got = cache.try_grow_to(64);
+    ASSERT_GE(got, 64);
+    const size_t mbb = KVCache::minmax_block_bytes(4, 64);
+    for (int l = 0; l < 2; l++) {
+        std::vector<uint8_t> host(mbb, 0xAB);
+        ASSERT_EQ(cudaMemcpy(host.data(), cache.key_minmax_ptr(l, got - 1), mbb, cudaMemcpyDeviceToHost),
+                  cudaSuccess)
+            << "the last grown block's metadata must be backed";
+        EXPECT_TRUE(std::all_of(host.begin(), host.end(), [](uint8_t b) { return b == 0; }))
+            << "fresh metadata starts zeroed";
+    }
 }
 
 // Residency probe (AUDIT_arch_2026 B-6): a pool WDDM spilled into host memory can't be

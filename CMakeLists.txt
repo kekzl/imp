@@ -177,6 +177,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/vram_allocator.cpp
     src/memory/mem_account.cpp
     src/memory/kv_cache.cu
+    src/memory/kv_cache_minmax.cu
     src/memory/kv_cache_manager.cpp
     src/memory/kv_cache_manager_spill.cpp
     src/memory/kv_host_spill.cpp
