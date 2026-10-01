@@ -261,3 +261,27 @@ is ~80% of it and every budget read ~13 s. And the slope must use the tokens act
 the requested `max_tokens` - assuming the request value made an 8192 budget read faster than a 1024
 one. With the embedded MTP head on (the default for a single stream) the same arm spread 111 to 268
 tok/s between rounds, so speculation has to be off to price an attention-side knob.
+
+## Prefill attention share (2026-10-01)
+
+nsys, `imp-cli --bench --bench-pp N --bench-reps 1 --max-tokens 8`, mtp and n-gram off, graphs traced per node, window = NVTX `bench:pp`, attention = `fmha_sm120_fa2*` launches; bound = 1 / (1 - share x 0.75), the speedup if attention got 4x cheaper. Harness `tools/analysis/prefill_attn_share.sh`, image `86b079f2`.
+
+| model | pp | kernels ms | attention ms (launches) | share | bound |
+|---|---:|---:|---:|---:|---:|
+| Qwen3-8B Q8_0 | 32768 | 3294.3 | 1283.1 (576) | 38.9 % | 1.41x |
+| Qwen3-8B Q8_0 | 77824 | 21696.7 | 16742.5 (1368) | 77.2 % | 2.37x, suspect: 12.2 vs 2.2 ms per launch for 2.4x the mean KV length, not explained |
+| Qwen3.8-27B NVFP4 | 32768 | 3495.3 | 944.3 (512) | 27.0 % | 1.25x |
+| Qwen3.8-27B NVFP4 | 77824 | 11339.8 | 5176.4 (1216) | 45.6 % | 1.52x |
+
+Decision rule fixed before the run: build prefill sparsity only if the bound is >= 1.15x on Qwen3.8-27B at 77k. It is 1.52x: the build is queued as its own unit. Earlier record: query-side QSA prefill measured slower (pp4503 650 vs 912 tok/s, CHANGELOG).
+
+## MLA (2026-10-01, #2372)
+
+The metadata gate refused every MLA model; the materialized decode reads the paged keys like any other model, only `attention.mla_absorb` bypasses them and stays refused. DeepSeek-V2-Lite NVFP4 (`imp-quantize`), F16 KV, `paged_fp16`, imp-server per arm, mtp, n-gram and prefix cache off; decode by slope (320 vs 64 `ignore_eos` tokens), 3 rounds; harness `tools/analysis/sparse_mla_ab.sh`.
+
+| ctx | dense tok/s | sparse 4096 tok/s | ratio |
+|---|---|---|---:|
+| 16000 | 6.44 / 6.47 / 6.50 | 22.99 / 23.15 / 22.91 | 3.55x |
+| 32000 | 3.18 / 3.20 / 3.20 | 22.75 / 23.03 / 23.00 | 7.18x |
+
+NIAH, 28k and 30k x 5 depths, DeepSeek-V2-Lite-Chat NVFP4 (the base model answers `<jupyter_code>` to the chat-framed probe in every arm): dense 10/10, sparse 1024 10/10, sparse 4096 10/10, one `sparse decode attention ACTIVE` line per sparse arm. Dense MLA decode itself is the slow part (48x under the KV-bandwidth ceiling at 32k): #2374.
