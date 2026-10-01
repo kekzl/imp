@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <limits>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
 
 #include "compute/gemm.h"
@@ -408,6 +409,119 @@ void q5_1_moe_single_expert(const void* W, const block_q8_1* q8, const float* d8
 }  // namespace
 
 TEST(GgufRef, Q5_1_GemvDp4aMoe) { run_dp4a_gemv("Q5_1", QType::Q5_1, 256, 1024, q5_1_moe_single_expert); }
+
+// #2444: the MoE decode dispatch picked the Q8_0 kernel for Q5_1 gate/up. Runs the kernels the
+// selectors return (decode for gate and up, fused gate+up) on 3 experts, top_k 2, ids {2, 0}.
+namespace {
+struct MoeExperts {
+    std::vector<std::vector<uint8_t>> host;  // one buffer per expert
+    void* dev = nullptr;                     // experts back to back
+    size_t stride = 0;
+};
+
+MoeExperts build_experts(QType qt, int E, int N, int K, Lcg& g) {
+    MoeExperts m;
+    std::vector<uint8_t> all;
+    for (int e = 0; e < E; ++e) {
+        std::vector<uint8_t> buf;
+        format_spec(qt).build(buf, N, K, g, NORMAL);
+        m.stride = buf.size();
+        all.insert(all.end(), buf.begin(), buf.end());
+        m.host.push_back(std::move(buf));
+    }
+    m.dev = to_device(all);
+    return m;
+}
+
+void expect_moe_slot(const char* name, const std::vector<half>& y, int slot, const MoeExperts& m, int expert,
+                     QType qt, const std::vector<half>& hx, int N, int K) {
+    std::vector<half> hy(y.begin() + static_cast<size_t>(slot) * N, y.begin() + static_cast<size_t>(slot + 1) * N);
+    ASSERT_FALSE(any_nan_inf(hy)) << name;
+    std::vector<double> wref, yref;
+    ref_dequant_all(m.host[expert], N, K, qt, wref);
+    ref_gemv(wref, hx, N, K, yref);
+    GemvStats s = gemv_eval(hy, yref);
+    printf("[moe %-12s slot %d expert %d] N=%d K=%d max_rel=%.3e rms_rel=%.3e\n", name, slot, expert, N, K,
+           s.max_rel_scaled, s.rms_rel);
+    // Same q8_1-activation band as run_dp4a_gemv.
+    EXPECT_LT(s.rms_rel, 1.5e-2) << name << " slot " << slot;
+    EXPECT_LT(s.max_rel_scaled, 5e-2) << name << " slot " << slot;
+}
+}  // namespace
+
+TEST(GgufRef, Q5_1_MoeDecodeDispatchGateUp) {
+    constexpr int E = 3, N = 256, K = 1024, TOP_K = 2;
+    const QType qt = QType::Q5_1;
+    ASSERT_TRUE(moe_dp4a_decode_supported(qt));
+    Lcg g(0x51E0u);
+    MoeExperts gate = build_experts(qt, E, N, K, g);
+    MoeExperts up = build_experts(qt, E, N, K, g);
+    std::vector<half> hx;
+    half* dx = random_x(K, g, hx);
+
+    const int32_t h_idx[TOP_K] = {2, 0};
+    int32_t* d_idx = nullptr;
+    cudaMalloc(&d_idx, sizeof(h_idx));
+    cudaMemcpy(d_idx, h_idx, sizeof(h_idx), cudaMemcpyHostToDevice);
+    const int q8_blocks = ((K + 255) / 256) * 8;
+    block_q8_1* q8 = nullptr;
+    float* d8 = nullptr;
+    cudaMalloc(&q8, q8_blocks * sizeof(block_q8_1));
+    cudaMalloc(&d8, q8_blocks * sizeof(float));
+    quantize_fp16_to_q8_1(dx, q8, d8, K, nullptr);
+    half *y_gate = nullptr, *y_up = nullptr;
+    cudaMalloc(&y_gate, TOP_K * N * sizeof(half));
+    cudaMalloc(&y_up, TOP_K * N * sizeof(half));
+    std::vector<half> hg(TOP_K * N), hu(TOP_K * N);
+    auto fetch = [&] {
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        cudaMemcpy(hg.data(), y_gate, hg.size() * sizeof(half), cudaMemcpyDeviceToHost);
+        cudaMemcpy(hu.data(), y_up, hu.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    };
+
+    // Separate decodes (pool-addressed and mixed-qtype route).
+    moe_dp4a_decode_kernel(qt)(gate.dev, d_idx, q8, d8, y_gate, N, K, gate.stride, 0, 0, TOP_K, nullptr);
+    moe_dp4a_decode_kernel(qt)(up.dev, d_idx, q8, d8, y_up, N, K, up.stride, 0, 0, TOP_K, nullptr);
+    fetch();
+    for (int s = 0; s < TOP_K; ++s) {
+        expect_moe_slot("decode gate", hg, s, gate, h_idx[s], qt, hx, N, K);
+        expect_moe_slot("decode up", hu, s, up, h_idx[s], qt, hx, N, K);
+    }
+
+    // Fused gate+up (device-resident route).
+    cudaMemset(y_gate, 0, TOP_K * N * sizeof(half));
+    cudaMemset(y_up, 0, TOP_K * N * sizeof(half));
+    moe_dp4a_gate_up_kernel(qt)(gate.dev, up.dev, d_idx, q8, d8, y_gate, y_up, N, K, gate.stride, up.stride, 0,
+                                0, TOP_K, nullptr);
+    fetch();
+    for (int s = 0; s < TOP_K; ++s) {
+        expect_moe_slot("fused gate", hg, s, gate, h_idx[s], qt, hx, N, K);
+        expect_moe_slot("fused up", hu, s, up, h_idx[s], qt, hx, N, K);
+    }
+
+    cudaFree(gate.dev);
+    cudaFree(up.dev);
+    cudaFree(dx);
+    cudaFree(d_idx);
+    cudaFree(q8);
+    cudaFree(d8);
+    cudaFree(y_gate);
+    cudaFree(y_up);
+}
+
+// #2444: a qtype without an arm is refused, never routed to a default kernel.
+TEST(GgufRef, MoeDecodeDispatchRefusesUnsupportedQType) {
+    for (QType qt : {QType::Q5_0, QType::Q4_1, QType::NVFP4, QType::F16}) {
+        EXPECT_FALSE(moe_dp4a_decode_supported(qt)) << qtype_name(qt);
+        EXPECT_THROW(moe_dp4a_decode_kernel(qt), std::invalid_argument) << qtype_name(qt);
+        EXPECT_THROW(moe_dp4a_gate_up_kernel(qt), std::invalid_argument) << qtype_name(qt);
+    }
+    for (QType qt : {QType::Q5_1, QType::Q4_K, QType::Q4_0}) {
+        EXPECT_FALSE(moe_fp16_decode_supported(qt)) << qtype_name(qt);
+        EXPECT_THROW(moe_fp16_decode_kernel(qt), std::invalid_argument) << qtype_name(qt);
+        EXPECT_THROW(moe_fp16_gate_up_kernel(qt), std::invalid_argument) << qtype_name(qt);
+    }
+}
 TEST(GgufRef, Q8_0_GemvDp4a) { run_dp4a_gemv("Q8_0", QType::Q8_0, 256, 1024, gemv_q8_0_q8_1); }
 // Q4_0 dp4a-GEMV vs fp64 reference surfaced AUDIT.md F1: Q4_0_Traits::dp4a_block read
 // nibbles INTERLEAVED (2k=low,2k+1=high) while standard ggml Q4_0 is SPLIT (e=low,e+16=high),

@@ -625,6 +625,44 @@ void gemv_q3_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_w
                                               d8, y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes,
                                               q8_1_stride, d8_stride, top_k, stream);
 }
+
+bool moe_dp4a_decode_supported(QType qt) {
+    return qt == QType::Q6_K || qt == QType::Q8_0 || qt == QType::Q4_0 || qt == QType::Q4_K ||
+           qt == QType::Q5_K || qt == QType::Q2_K || qt == QType::Q3_K || qt == QType::Q5_1 ||
+           qt == QType::NVFP4;
+}
+
+MoeDp4aDecodeFn moe_dp4a_decode_kernel(QType qt) {
+    return (qt == QType::Q6_K)   ? gemv_q6k_q8_1_moe_decode
+           : (qt == QType::Q4_0) ? gemv_q4_0_q8_1_moe_decode
+           : (qt == QType::Q4_K) ? gemv_q4_k_q8_1_moe_decode
+           : (qt == QType::Q5_K) ? gemv_q5_k_q8_1_moe_decode
+           : (qt == QType::Q2_K) ? gemv_q2_k_q8_1_moe_decode
+           : (qt == QType::Q3_K) ? gemv_q3_k_q8_1_moe_decode
+                                 : gemv_q8_0_q8_1_moe_decode;
+}
+
+MoeDp4aGateUpFn moe_dp4a_gate_up_kernel(QType qt) {
+    return (qt == QType::Q6_K)   ? gemv_q6k_q8_1_moe_gate_up_fused
+           : (qt == QType::Q4_K) ? gemv_q4_k_q8_1_moe_gate_up_fused
+           : (qt == QType::Q5_K) ? gemv_q5_k_q8_1_moe_gate_up_fused
+           : (qt == QType::Q4_0) ? gemv_q4_0_q8_1_moe_gate_up_fused
+           : (qt == QType::Q2_K) ? gemv_q2_k_q8_1_moe_gate_up_fused
+           : (qt == QType::Q3_K) ? gemv_q3_k_q8_1_moe_gate_up_fused
+                                 : gemv_q8_0_q8_1_moe_gate_up_fused;
+}
+
+bool moe_fp16_decode_supported(QType qt) { return qt == QType::Q6_K || qt == QType::Q8_0; }
+
+MoeFp16DecodeFn moe_fp16_decode_kernel(QType qt) {
+    return (qt == QType::Q6_K) ? gemv_q6k_moe_decode : (qt == QType::Q8_0) ? gemv_q8_0_moe_decode : nullptr;
+}
+
+MoeFp16GateUpFn moe_fp16_gate_up_kernel(QType qt) {
+    return (qt == QType::Q6_K)   ? gemv_q6k_moe_gate_up_fused
+           : (qt == QType::Q8_0) ? gemv_q8_0_moe_gate_up_fused
+                                 : nullptr;
+}
 // L1 carveout for the dp4a GEMV template instantiations, called from GraphExecutor::init()
 // next to mxfp4_gemv_set_l1_carveout(), PDL or not. Was gemv_pdl_register()
 // (pdl::enable_kernel + SET_MAXL1); #1833 withdrew the PDL registration because these kernels

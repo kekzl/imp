@@ -1033,45 +1033,27 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
 
         size_t up_stride_bytes = pool_addressed ? slot_stride : expert_stride(ly.expert_up_packed, up_qtype);
 
-        auto select_moe_gemv = [](QType qt) {
-            return (qt == QType::Q6_K)   ? gemv_q6k_q8_1_moe_decode
-                   : (qt == QType::Q4_0) ? gemv_q4_0_q8_1_moe_decode
-                   : (qt == QType::Q4_K) ? gemv_q4_k_q8_1_moe_decode
-                   : (qt == QType::Q5_K) ? gemv_q5_k_q8_1_moe_decode
-                   : (qt == QType::Q2_K) ? gemv_q2_k_q8_1_moe_decode
-                   : (qt == QType::Q3_K) ? gemv_q3_k_q8_1_moe_decode
-                                         : gemv_q8_0_q8_1_moe_decode;
-        };
-
         if (!non_gated_experts) {
-            size_t gate_stride = pool_addressed
-                                     ? slot_stride
-                                     : expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);
+            const QType gate_qtype = ly.expert_gate_packed.qtype;
+            size_t gate_stride = pool_addressed ? slot_stride : expert_stride(ly.expert_gate_packed, gate_qtype);
             if (pool_addressed) {
                 // gate and up sit in different slots, so the one-index fused
                 // kernel cannot express both. Two decodes still collapse
                 // 2*top_k weight launches into 2.
-                select_moe_gemv(ly.expert_gate_packed.qtype)(gate_base, gate_idx, q8, qscratch_.d8_buf,
-                                                             gate_buf, eff, d, gate_stride,
-                                                             /*q8_1_stride=*/0, /*d8_stride=*/0, top_k,
-                                                             stream);
-                select_moe_gemv(up_qtype)(up_base, up_idx, q8, qscratch_.d8_buf, up_buf, eff, d,
-                                          up_stride_bytes, /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+                moe_dp4a_decode_kernel(gate_qtype)(gate_base, gate_idx, q8, qscratch_.d8_buf, gate_buf, eff, d,
+                                                   gate_stride, /*q8_1_stride=*/0, /*d8_stride=*/0, top_k,
+                                                   stream);
+                moe_dp4a_decode_kernel(up_qtype)(up_base, up_idx, q8, qscratch_.d8_buf, up_buf, eff, d,
+                                                 up_stride_bytes, /*q8_1_stride=*/0, /*d8_stride=*/0, top_k,
+                                                 stream);
             } else {
-                auto gate_up_fused = (up_qtype == QType::Q6_K)   ? gemv_q6k_q8_1_moe_gate_up_fused
-                                     : (up_qtype == QType::Q4_K) ? gemv_q4_k_q8_1_moe_gate_up_fused
-                                     : (up_qtype == QType::Q5_K) ? gemv_q5_k_q8_1_moe_gate_up_fused
-                                     : (up_qtype == QType::Q4_0) ? gemv_q4_0_q8_1_moe_gate_up_fused
-                                     : (up_qtype == QType::Q2_K) ? gemv_q2_k_q8_1_moe_gate_up_fused
-                                     : (up_qtype == QType::Q3_K) ? gemv_q3_k_q8_1_moe_gate_up_fused
-                                                                 : gemv_q8_0_q8_1_moe_gate_up_fused;
-                gate_up_fused(gate_base, up_base, expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf, eff,
-                              d, gate_stride, up_stride_bytes,
-                              /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+                moe_dp4a_gate_up_kernel(up_qtype)(gate_base, up_base, expert_indices, q8, qscratch_.d8_buf,
+                                                  gate_buf, up_buf, eff, d, gate_stride, up_stride_bytes,
+                                                  /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
             }
         } else {
-            select_moe_gemv(up_qtype)(up_base, up_idx, q8, qscratch_.d8_buf, up_buf, eff, d, up_stride_bytes,
-                                      /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+            moe_dp4a_decode_kernel(up_qtype)(up_base, up_idx, q8, qscratch_.d8_buf, up_buf, eff, d,
+                                             up_stride_bytes, /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
         }
     } else {
         // FP16 dequant fallback - only Q6_K / Q8_0 wired.
@@ -1120,14 +1102,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
             relu_sqr_quantize_q8_1(up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
         }
         QType dqt = ly.expert_down_packed.qtype;
-        auto down_gemv = (dqt == QType::Q6_K) ? gemv_q6k_q8_1_moe_decode
-                       : (dqt == QType::Q4_0) ? gemv_q4_0_q8_1_moe_decode
-                       : (dqt == QType::Q4_K) ? gemv_q4_k_q8_1_moe_decode
-                       : (dqt == QType::Q5_K) ? gemv_q5_k_q8_1_moe_decode
-                       : (dqt == QType::Q2_K) ? gemv_q2_k_q8_1_moe_decode
-                       : (dqt == QType::Q3_K) ? gemv_q3_k_q8_1_moe_decode
-                       : (dqt == QType::Q5_1) ? gemv_q5_1_q8_1_moe_decode
-                                              : gemv_q8_0_q8_1_moe_decode;
+        auto down_gemv = (dqt == QType::Q5_1) ? gemv_q5_1_q8_1_moe_decode : moe_dp4a_decode_kernel(dqt);
         size_t down_stride = pool_addressed ? slot_stride : expert_stride(ly.expert_down_packed, dqt);
         down_gemv(down_base, down_idx, q8, qscratch_.d8_buf, down_buf, d, eff, down_stride,
                   /*q8_1_stride=*/eff_q8_blocks, /*d8_stride=*/eff_q8_blocks, top_k, stream);
