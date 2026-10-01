@@ -355,8 +355,20 @@ bool Engine::encode_qwen_image_for_(Request& req, cudaStream_t stream) {
     }
     req.qwen_patches.clear();  // host pixels no longer needed
 
-    if (!build_qwen_layout_(req, shapes))
+    // InternVL: plain 1-D positions, so the layout is only the splice id and the count.
+    if (qwen_vision_.is_internvl()) {
+        const auto found = std::count(req.input_tokens.begin(), req.input_tokens.end(), qwen_image_pad_id_);
+        if (found != total_tokens) {
+            IMP_LOG_ERROR("InternVL: prompt reserves %lld image tokens but %zu image(s) produced %d",
+                          static_cast<long long>(found), shapes.size(), total_tokens);
+            return false;
+        }
+        req.vision_token_id = qwen_image_pad_id_;
+        req.n_vision_tokens = total_tokens;
+        IMP_LOG_INFO("InternVL: %zu image(s), %d image tokens", shapes.size(), total_tokens);
+    } else if (!build_qwen_layout_(req, shapes)) {
         return false;
+    }
     req.vision_emb = std::move(emb);
     req.deepstack_emb = std::move(deep);
     return true;

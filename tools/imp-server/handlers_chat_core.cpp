@@ -391,7 +391,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         // Chat template renders one <|image_pad|> per image before sizes are known (smart_resize runs
         // after). Placed on the first user turn (the position the parser reliably tracks), rendered,
         // then each placeholder expands to its real token count.
-        const std::string blocks = qwen_vision_blocks(ctx.params.vision_order);
+        const std::string blocks = qwen_vision_blocks(ctx.params.vision_order, ctx.snap.vision_internvl);
         auto msgs = ctx.params.chat_msgs;
         for (auto& m : msgs)
             if (m.role == "user") {

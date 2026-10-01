@@ -9,12 +9,21 @@
 #include "vision/internvl_encoder.h"
 #include "vision/internvl_vision.h"
 #include "vision/qwen3vl_vision_upload.h"
+#include "model/model.h"
+#include "model/safetensors_loader.h"
+#include "vision/qwen3vl_pipeline.h"
+#include "vision/qwen3vl_vision_load.h"
+#include "vision/image_processor.h"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -128,6 +137,125 @@ TEST(InternVLEncoder, MatchesHfFp32PerStage) {
     for (half* d : taps.layers)
         alloc.free(d);
     qwen3vl_release_vision_tower(tower);
+}
+
+// The real InternVL3.5-2B tower (24 layers) on test_cat_pil.png (test_cat.jpg decoded by Pillow, lossless;
+// test_cat.jpg itself is checked at the end, decodes match Pillow since #2388) through the pipeline imp
+// serves with (decode_image, Pillow-equivalent 448 resize, encoder, projector) vs HF FP32 on CPU
+// (tools/internvl_fixture/run_real_ref.sh). Bound relL2 <= 1e-2 (orchestrator, 2026-10-01).
+TEST(InternVLEncoder, RealTowerCatMatchesHfFp32) {
+    const char* dir = std::getenv("IMP_TEST_MODEL_INTERNVL");
+    const char* cat = std::getenv("IMP_TEST_IMAGE_CAT");
+    if (!dir || !cat)
+        GTEST_SKIP() << "IMP_TEST_MODEL_INTERNVL / IMP_TEST_IMAGE_CAT not set";
+    // Reference files tests/fixtures/internvl/<stem>_*, default test_cat_pil (run_real_ref.sh names them by
+    // stem).
+    const std::string ref_stem = std::getenv("IMP_TEST_INTERNVL_REF_STEM")
+                                     ? std::getenv("IMP_TEST_INTERNVL_REF_STEM")
+                                     : "test_cat_pil";
+    auto model = load_safetensors(dir, /*load_mtp_head=*/false);
+    ASSERT_NE(model, nullptr);
+    ASSERT_NE(model->vision_tower, nullptr);
+    VisionModel& tower = *model->vision_tower;
+    ASSERT_TRUE(tower.config.is_internvl);
+    const size_t bytes = qwen3vl_vision_arena_bytes(tower, 0);
+    ScopedEngineArena arena(bytes + bytes / 8);
+    ASSERT_TRUE(arena.opened());
+    VRAMAllocator alloc;
+    ASSERT_TRUE(alloc.init(0.10f));
+    Qwen3VLPipeline pipeline;
+    ASSERT_TRUE(pipeline.init(tower, Qwen3VLPipeline::patch_budget(tower, 0)));
+
+    std::ifstream f(cat, std::ios::binary);
+    const std::vector<uint8_t> jpg((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    QwenPatches patches;
+    ASSERT_TRUE(pipeline.preprocess(jpg, patches));
+    const int tokens = pipeline.merged_tokens_of(patches), dim = pipeline.embedding_dim();
+    ASSERT_EQ(tokens, 256);
+    half* d_out = static_cast<half*>(
+        alloc.allocate(static_cast<size_t>(tokens) * dim * sizeof(half), "internvl_cat"));
+    ASSERT_NE(d_out, nullptr);
+    Qwen3VLImage shape;
+    ASSERT_TRUE(pipeline.encode_patches_to(patches, d_out, {}, shape, nullptr));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    const auto got = read(d_out, static_cast<size_t>(tokens) * dim);
+    alloc.free(d_out);
+
+    std::ifstream r(kDir + "/" + ref_stem + "_projector_fp32.f16", std::ios::binary);
+    std::vector<uint16_t> raw(static_cast<size_t>(tokens) * dim);
+    r.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(raw.size() * 2));
+    ASSERT_TRUE(r.good()) << "missing fixture " << kDir;
+    std::vector<float> ref(raw.size());
+    for (size_t i = 0; i < raw.size(); ++i) {
+        half h;
+        std::memcpy(&h, &raw[i], sizeof(h));
+        ref[i] = __half2float(h);
+    }
+    const double rl = rel_l2(got, ref);
+    std::printf("[internvl-real] test_cat tokens=%d dim=%d relL2_vs_hf_fp32=%.4e (imp decode + resize)\n",
+                tokens, dim, rl);
+
+    // Split the gap: imp's 448 tile vs HF's (decode + resize), and the encoder fed HF's own tile.
+    std::ifstream tf(kDir + "/" + ref_stem + "_pixels_448.u8", std::ios::binary);
+    const std::vector<uint8_t> hf_tile((std::istreambuf_iterator<char>(tf)),
+                                       std::istreambuf_iterator<char>());
+    ASSERT_EQ(hf_tile.size(), 3u * 448 * 448);
+    std::vector<uint8_t> rgb, tile;
+    int w = 0, h = 0;
+    ASSERT_TRUE(decode_rgb(jpg, rgb, w, h));
+    InternVLPreprocessConfig pc;
+    std::vector<half> unused;
+    ASSERT_TRUE(internvl_preprocess(rgb.data(), w, h, pc, unused, &tile));
+    int max_step = 0;
+    double sum_step = 0;
+    for (int c = 0; c < 3; ++c)
+        for (int y = 0; y < 448; ++y)
+            for (int x = 0; x < 448; ++x) {
+                const int d = std::abs(int(tile[(static_cast<size_t>(y) * 448 + x) * 3 + c]) -
+                                       int(hf_tile[(static_cast<size_t>(c) * 448 + y) * 448 + x]));
+                max_step = std::max(max_step, d);
+                sum_step += d;
+            }
+    std::printf("[internvl-real] tile imp vs hf: max %d/255, mean %.3f/255\n", max_step,
+                sum_step / (3.0 * 448 * 448));
+
+    QwenPatches hf_patches = patches;
+    for (int pi = 0; pi < 1024; ++pi)
+        for (int c = 0; c < 3; ++c)
+            for (int y = 0; y < 14; ++y)
+                for (int x = 0; x < 14; ++x) {
+                    const int py = (pi / 32) * 14 + y, px = (pi % 32) * 14 + x;
+                    const float v = (hf_tile[(static_cast<size_t>(c) * 448 + py) * 448 + px] / 255.0f -
+                                     pc.mean[c]) /
+                                    pc.std[c];
+                    hf_patches.data[static_cast<size_t>(pi) * 588 + (c * 14 + y) * 14 + x] = __float2half(v);
+                }
+    half* d_out2 = static_cast<half*>(
+        alloc.allocate(static_cast<size_t>(tokens) * dim * sizeof(half), "internvl_cat2"));
+    ASSERT_TRUE(pipeline.encode_patches_to(hf_patches, d_out2, {}, shape, nullptr));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    const double rl_hf_tile = rel_l2(read(d_out2, static_cast<size_t>(tokens) * dim), ref);
+    alloc.free(d_out2);
+    std::printf("[internvl-real] test_cat relL2_vs_hf_fp32=%.4e (HF tile, imp encoder)\n", rl_hf_tile);
+    EXPECT_LE(rl, 1e-2);
+
+    // test_cat.jpg: since #2388 JPEG decodes through libjpeg-turbo bit-identical to Pillow, so the
+    // PNG reference (Pillow's decode of this file) applies unchanged.
+    if (const char* jpg_path = std::getenv("IMP_TEST_IMAGE_CAT_JPG")) {
+        std::ifstream jf(jpg_path, std::ios::binary);
+        const std::vector<uint8_t> jbytes((std::istreambuf_iterator<char>(jf)),
+                                          std::istreambuf_iterator<char>());
+        QwenPatches jp;
+        ASSERT_TRUE(pipeline.preprocess(jbytes, jp));
+        half* d_j = static_cast<half*>(
+            alloc.allocate(static_cast<size_t>(tokens) * dim * sizeof(half), "internvl_jpg"));
+        ASSERT_TRUE(pipeline.encode_patches_to(jp, d_j, {}, shape, nullptr));
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        const double rl_jpg = rel_l2(read(d_j, static_cast<size_t>(tokens) * dim), ref);
+        alloc.free(d_j);
+        std::printf("[internvl-real] test_cat.jpg relL2_vs_hf_fp32=%.4e (imp decode + resize)\n", rl_jpg);
+        EXPECT_LE(rl_jpg, 1e-2);
+    }
 }
 
 }  // namespace
