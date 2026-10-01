@@ -65,6 +65,11 @@ struct CliArgs : CommonArgs {
     // --image, repeatable: images for vision, in the order given. Each one
     // gets its own placeholder in the prompt.
     std::vector<std::string> image_paths;
+    // --video-frames a.png,b.png,...: one client-sampled video (Qwen3-VL), placed after the images.
+    // Frame k sits at k / --video-fps seconds, or at --video-timestamps[k].
+    std::vector<std::string> video_frames;
+    double video_fps = 24.0;  // HF Qwen3VLProcessor fallback when a video has no fps
+    std::vector<double> video_timestamps;
 };
 
 CliArgs parse_args(int argc, char** argv);

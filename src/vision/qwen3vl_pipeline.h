@@ -71,6 +71,11 @@ public:
     // worker (an HTTP handler thread); tells the caller how many image tokens the prompt must
     // reserve, BEFORE any GPU work happens.
     [[nodiscard]] bool preprocess(std::span<const uint8_t> data, QwenPatches& out) const;
+    // Video, CPU only: decoded frames (same size, >= temporal_patch_size) -> one QwenPatches per
+    // frame pair, each encoded like an image. Pixel bound: min(25165824, frames * max_pixels()) over
+    // t*h*w, so one pair never exceeds the patch budget.
+    [[nodiscard]] bool preprocess_video(std::span<const std::span<const uint8_t>> frames,
+                                        std::vector<QwenPatches>& out) const;
     // Image tokens a patchified image becomes.
     int merged_tokens_of(const QwenPatches& p) const;
     // Bytes one request's embedding buffer needs (same for each DeepStack tap).

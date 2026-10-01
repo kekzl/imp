@@ -9,6 +9,7 @@
 #include "spec_usage_keys.h"
 
 #include "api/imp_internal.h"
+#include "model/image_placeholders.h"
 #include "vision/image_processor.h"
 #include "runtime/request.h"
 #include "runtime/spec_request.h"
@@ -26,6 +27,12 @@
 // ---------------------------------------------------------------------------
 
 // Body-parsed input parameters (no lock needed to populate).
+// One `video` content part: encoded frame images and the second each frame sits at.
+struct ChatVideoInput {
+    std::vector<std::vector<uint8_t>> frames;
+    std::vector<double> seconds;
+};
+
 struct ChatRequestParams {
     // Sampling
     float temperature = 0.7f, top_p = 0.95f, min_p = 0.0f, typical_p = 1.0f;
@@ -111,6 +118,10 @@ struct ChatRequestParams {
     // dropping one image would shift every later picture onto the wrong
     // placeholder, which reads as a coherent answer about the wrong thing.
     std::string image_error;
+    // Every `video` part, in prompt order (frames sampled by the client).
+    std::vector<ChatVideoInput> videos;
+    // Vision parts in content order: 'i' = next image, 'v' = next video.
+    std::string vision_order;
     std::string requested_model;
 };
 
@@ -141,6 +152,9 @@ struct ChatStateSnapshot {
     // Token count per image, in prompt order — the k-th placeholder expands to
     // the k-th entry, so this must stay parallel to `qwen_patches`.
     std::vector<int> qwen_image_tokens;
+    // One layout per video part, in prompt order; its frame pairs sit in `qwen_patches` at the
+    // video's position among the images.
+    std::vector<imp::VideoPlaceholderLayout> qwen_video_layouts;
     size_t vision_content_hash = 0;
     std::vector<int32_t> stop_token_ids;
     imp::ChatTemplateFamily tpl_family = imp::ChatTemplateFamily::CHATML;

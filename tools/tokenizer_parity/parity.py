@@ -31,6 +31,8 @@ LITERALS = [
     "Mixed123CASEWithNumbers456", "snake_case_identifier and camelCaseIdentifier",
     "The quick brown fox jumps over the lazy dog. " * 3,
     "’curly’ “quotes” — dash – en",
+    # Qwen3-VL video timestamps (Qwen3VLProcessor "<%.1f seconds>"), tokenized by imp per frame pair.
+    "<0.0 seconds>", "<0.1 seconds>", "<1.2 seconds>", "<4.3 seconds>", "<29.8 seconds>", "<125.5 seconds>",
 ]
 
 POOL_SMALL = "abcXYZ 019\n\t.,!?'\"-_éüß日本\U0001F600ʼ́ <>|/"

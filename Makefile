@@ -314,6 +314,8 @@ test-vision: build
 		-e IMP_TEST_MODEL_QWEN3VL=/models/Qwen3-VL-4B-Instruct \
 		-e IMP_TEST_IMAGE_ALT=/work/tests/fixtures/vision_test_green_bar.png \
 		$(DOCKER_IMG) test-e2e --gtest_filter="*Qwen3VLPipeline*"
+	@# Video: 8 client frames through imp-cli and imp-server, both answers must name a red panda.
+	$(GPU_LOCKED) bash tools/qwen3vl_video_fixture/red_panda_e2e.sh $(DOCKER_IMG)
 
 # Full benchmark suite: all baseline models (requires GPU to be free)
 bench: build check-gpu
