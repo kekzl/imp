@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
+#include <cstdint>
 #include <vector>
 
 namespace imp {
@@ -39,6 +40,13 @@ struct VisionConfig {
     // VISION blocks; the LM-side injection happens at LM layers 0..n-1, a
     // different index space entirely.
     std::vector<int> deepstack_indexes;
+
+    // InternVL (InternViT + pixel-shuffle projector): fixed image_size, CLS token + absolute
+    // position table [1 + num_patches, hidden], pre-LN blocks with per-channel layer scale,
+    // separate q/k/v (fused to wq/bq at load), merge_size 2 = downsample_ratio 0.5,
+    // projector LN(hidden*4) -> fc1 -> GELU(erf) -> fc2 in `merger`. LayerNorm eps per config.
+    bool is_internvl = false;
+    float layer_norm_eps = 1e-6f;
 };
 
 // Qwen3-VL patch merger: norm->fc1->GELU->fc2. Main merger normalises BEFORE the 2x2 concat
@@ -63,6 +71,8 @@ struct VisionLayerWeights {
     Tensor q_norm, k_norm;                 // per-head RMSNorm weights [head_dim]
     Tensor attn_post_norm, ffn_post_norm;  // sandwich post-norms [hidden]
     Tensor ffn_gate_w;                     // GeGLU gate [intermediate, hidden]
+    // InternVL layer scale: h += ls1 * attn(...), h += ls2 * mlp(...), per channel [hidden]
+    Tensor ls1, ls2;
 };
 
 struct VisionModel {
@@ -74,6 +84,11 @@ struct VisionModel {
 
     // Positional embedding
     Tensor position_embd;  // [num_patches, hidden_size]
+    Tensor cls_token;      // InternVL [hidden_size], prepended before the position table is added
+
+    // Host buffers the loader built (InternVL fused q|k|v): Tensors above may point into these
+    // until upload, so they live as long as the model.
+    std::vector<std::vector<uint8_t>> host_owned;
 
     // Post-encoder LayerNorm
     Tensor post_norm_w, post_norm_b;

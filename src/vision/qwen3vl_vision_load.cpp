@@ -1,4 +1,5 @@
 #include "vision/qwen3vl_vision_load.h"
+#include "vision/internvl_vision.h"
 
 #include "core/logging.h"
 #include "vision/qwen3vl_vision_map.h"
@@ -274,6 +275,10 @@ size_t qwen3vl_vision_tower_device_bytes(VisionModel& model) {
 
 void qwen3vl_visit_vision_tensors(VisionModel& model,
                                   const std::function<void(Tensor&, const std::string&)>& fn) {
+    if (model.config.is_internvl) {  // one visitor per family; upload/bytes/release share this entry
+        internvl_visit_vision_tensors(model, fn);
+        return;
+    }
     fn(model.patch_embd_w, "patch_embed.proj.weight");
     fn(model.patch_embd_b, "patch_embed.proj.bias");
     fn(model.position_embd, "pos_embed.weight");
