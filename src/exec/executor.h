@@ -102,6 +102,8 @@ public:
     size_t workspace_estimate() const {
         return ws_.workspace_estimate(/*include_attn_scores=*/!fa2_serves_all_prefill());
     }
+    // What allocate_workspaces() already holds of that estimate.
+    size_t workspace_allocated() const { return ws_.allocated_bytes(); }
 
     // Run the full forward pass and return the sampled token ID.
     int32_t forward(const InferenceState& state, cudaStream_t stream = nullptr);

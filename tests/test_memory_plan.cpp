@@ -605,6 +605,39 @@ TEST(ShadowPlan, CeilingAtZeroKvSeqsNamesTheContextThatFits) {
         << "the WARN was truncated by the emit buffer:\n" << r;
 }
 
+// #2365: a growable pool whose ceiling holds a full-length sequence is not a WARN: admission grows
+// the pool there (Qwen3.8-27B default boot: plan 3192 blocks, ceiling 13599, 8192 per sequence).
+TEST(ShadowPlan, GrowableCeilingServingOneSequenceIsANoteNotAWarn) {
+    auto p = hybrid_probe();
+    p.max_seq_len = 131072;
+    const auto res = plan_memory(shadow_plan_input(p));
+    ASSERT_TRUE(res) << res.failure.report();
+    ASSERT_EQ(res.plan.kv.blocks / res.plan.kv.blocks_per_seq, 0);
+    p.kv_growable_ceiling_blocks = res.plan.kv.blocks_per_seq + 16;
+    const std::string r = shadow_plan_report(p, res, /*live_kv_blocks=*/p.kv_growable_ceiling_blocks);
+    EXPECT_EQ(r.find("WARN"), std::string::npos) << r;
+    EXPECT_NE(r.find("growable ceiling (" + std::to_string(p.kv_growable_ceiling_blocks) +
+                     " blocks) serves 1"),
+              std::string::npos)
+        << r;
+    p.kv_growable_ceiling_blocks = res.plan.kv.blocks_per_seq - 1;  // ceiling too short as well
+    EXPECT_NE(shadow_plan_report(p, res, res.plan.kv.blocks).find("WARN"), std::string::npos);
+}
+
+// #2365: workspace bytes allocated before distributable is read are not charged a second time.
+TEST(ShadowPlan, ResidentWorkspaceIsNotChargedAgain) {
+    auto p = hybrid_probe();
+    const auto full = plan_memory(shadow_plan_input(p));
+    ASSERT_TRUE(full) << full.failure.report();
+    p.engine_persistent_resident_bytes = p.engine_persistent_bytes;
+    p.engine_persistent_bytes = 0;
+    const auto split = plan_memory(shadow_plan_input(p));
+    ASSERT_TRUE(split) << split.failure.report();
+    EXPECT_GT(split.plan.kv.blocks, full.plan.kv.blocks);
+    EXPECT_NE(shadow_plan_report(p, split, split.plan.kv.blocks).find("already resident, not charged again"),
+              std::string::npos);
+}
+
 TEST(ShadowPlan, RejectedPlanReportsTheLivePoolNotApplied) {
     // #2347, Flash-Next: the plan rejected, the pool used the live pass's 8192 blocks, yet the
     // header said "APPLIED" and the ceiling read the rejected plan's 0 blocks: "all 1 seqs at

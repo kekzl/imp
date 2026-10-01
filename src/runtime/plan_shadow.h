@@ -30,7 +30,8 @@ struct ShadowPlanProbe {
     size_t weight_cache_demand = 0;
     size_t mandatory_cache_bytes = 0;
     size_t ssm_state_bytes = 0;
-    size_t engine_persistent_bytes = 0;
+    size_t engine_persistent_bytes = 0;           // not yet resident when distributable is read
+    size_t engine_persistent_resident_bytes = 0;  // already allocated, inside distributable (report only)
     // Pools the plan reads from FeatureSet: server.recurrent_snapshot_mb
     // (256 MiB default) is cudaMalloc'd AFTER the KV pool is sized, so the
     // plan must account for it or size the KV pool over memory another
@@ -52,6 +53,7 @@ struct ShadowPlanProbe {
     int min_kv_tokens = 0;
     size_t kv_block_bytes_per_layer = 0;
     size_t kv_meta_block_bytes_per_layer = 0;  // sparse decode key min/max, 0 = not built
+    int kv_growable_ceiling_blocks = 0;        // growable pool ceiling, 0 = fixed pool
 
     // Set for the things this probe does NOT model yet, so the report says so
     // instead of quietly implying full coverage.
