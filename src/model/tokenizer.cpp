@@ -637,13 +637,8 @@ bool Tokenizer::load(const std::string& path) {
                 bos_id_ = id;
             }
             if (content == "</s>" || content == "<|end_of_text|>" || content == "<|endoftext|>" ||
-                content == "<|eot_id|>") {
-                if (eos_ids_.size() == 1 && eos_ids_[0] == 2) {
-                    // Replace default
-                    eos_ids_ = {static_cast<int32_t>(id)};
-                } else {
-                    add_eos_id(static_cast<int32_t>(id));
-                }
+                content == "<|eot_id|>" || content == "<｜end▁of▁sentence｜>") {
+                add_eos_id(static_cast<int32_t>(id));  // the first one replaces the {2} placeholder
             }
         }
 
@@ -803,6 +798,7 @@ bool Tokenizer::load_vocab(const std::vector<std::string>& tokens, const std::ve
     scores_.resize(vocab_.size(), 0.0f);
     bos_id_ = bos_id;
     eos_ids_ = {eos_id};
+    eos_is_default_ = false;
 
     token_to_id_.clear();
     token_to_id_.reserve(vocab_.size());

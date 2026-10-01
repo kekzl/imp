@@ -81,6 +81,11 @@ public:
     int eos_id() const { return eos_ids_.empty() ? 2 : eos_ids_[0]; }
     const std::vector<int32_t>& eos_ids() const { return eos_ids_; }
     void add_eos_id(int32_t id) {
+        if (eos_is_default_) {
+            eos_ids_ = {id};
+            eos_is_default_ = false;
+            return;
+        }
         for (int32_t eid : eos_ids_)
             if (eid == id)
                 return;
@@ -180,6 +185,9 @@ private:
     std::unordered_map<std::string, int32_t> token_to_id_;
     int bos_id_ = 1;
     std::vector<int32_t> eos_ids_ = {2};
+    // {2} is a placeholder until a source names the EOS; the first add_eos_id replaces it
+    // (DeepSeek-V2 id 2 is "#", #2377).
+    bool eos_is_default_ = true;
 
     std::string type_ = "spm";   // "spm" or "gpt2"
     std::string pre_tokenizer_;  // Pre-tokenizer type from GGUF tokenizer.ggml.pre
