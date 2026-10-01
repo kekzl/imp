@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace imp {
@@ -45,6 +46,12 @@ public:
     // Per-pool current + peak attribution. pool must be a string literal /
     // stable pointer (stored by value into a small fixed registry by name).
     void note(const char* pool, std::ptrdiff_t delta_bytes);
+
+    // Charge `bytes` to `pool` for one allocation, keyed by its pointer; note_free uncharges it
+    // (no-op for an uncharged pointer). For owners that free some of what they noted (#2354).
+    void note_alloc(const char* pool, const void* ptr, size_t bytes);
+    void note_free(const void* ptr);
+    int64_t pool_current(const char* pool) const;
 
     // Record a labeled device snapshot (cudaMemGetInfo). The delta vs the
     // previous checkpoint is the measured cost of the phase just completed.
@@ -104,6 +111,11 @@ private:
     std::atomic<bool> enabled_{false};
     mutable std::mutex mu_;
     std::vector<Pool> pools_;
+    struct Charge {
+        const char* pool;
+        size_t bytes;
+    };
+    std::unordered_map<const void*, Charge> charges_;  // note_alloc rows still charged
     std::vector<Checkpoint> checkpoints_;
     std::string dump_path_;
     size_t named_context_ = 0;
