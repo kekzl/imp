@@ -2,7 +2,8 @@
 # shellcheck disable=SC2016,SC2034 # check() evals its condition later; vars are read there
 # scripts/gpu_lock.sh and its use in scripts/require_free_gpu.sh, CPU only (no Docker, no GPU).
 # Wired into scripts/ci_static_gates.sh (group gpulock). Owners are simulated with
-# IMP_GPU_LOCK_OWNER; the lock file lives in a temp dir.
+# IMP_GPU_LOCK_OWNER; the lock file lives in a temp dir. Cross-script cases need the skill
+# script (GPU_LOCK_SKILL_SH, default ~/.claude/skills/gpu-stats/gpu-lock.sh); absent = skip.
 set -uo pipefail
 
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
@@ -18,6 +19,9 @@ cleanup() {
 }
 trap cleanup EXIT
 export IMP_GPU_LOCK="$T/lock"
+export IMP_GPU_LOCK_LEGACY="$T/legacy"
+unset GPU_LOCK_FILE
+SKILL_SH="${GPU_LOCK_SKILL_SH:-$HOME/.claude/skills/gpu-stats/gpu-lock.sh}"
 
 PASS=0 FAIL=0
 ok()  { PASS=$((PASS + 1)); echo "  ok    $1"; }
@@ -115,6 +119,86 @@ check "held by another worktree: exit 1 with holder line (exit $rc)" \
     '[ "$rc" = 1 ] && grep -q "worktree=/wt/b" <<<"$out"'
 out=$(PATH=/usr/bin:/bin IMP_GPU_LOCK_OWNER=/wt/b bash "$REQ_SH" "pre-commit" 2>&1); rc=$?
 check "held by this worktree: passes (exit $rc)" '[ "$rc" = 0 ]'
+
+as /wt/b release --force >/dev/null 2>&1
+
+# One lock with the gpu-stats skill script: same file, mutex and record format.
+startof() { sed 's/.*) //' "/proc/$1/stat" | awk '{print $20}'; }
+sk() { GPU_LOCK_FILE="$T/lock" GPU_BUSY_CHECK=/bin/true bash "$SKILL_SH" "$@"; }
+deadpid() { sleep 0 & DEAD=$!; wait "$DEAD"; }
+if [ ! -f "$SKILL_SH" ]; then
+    echo "== cross-script cases: SKIP, $SKILL_SH absent (set GPU_LOCK_SKILL_SH) =="
+else
+    echo "== cross A: repo holds, skill refuses =="
+    rm -f "$T/lock"; sleeper
+    as /wt/r acquire --pid "$LAST" "repo job" >/dev/null; rc=$?
+    out=$(sk acquire s p 5 1 fragen 2>&1); src=$?
+    echo "  ${out%%$'\n'*}"
+    check "repo acquire exit 0, skill acquire exit 1 REFUSED (exit $rc/$src)" \
+        '[ "$rc" = 0 ] && [ "$src" = 1 ] && grep -q "^REFUSED: held by /wt/r" <<<"$out"'
+    as /wt/r release >/dev/null
+
+    echo "== cross B: skill holds, repo refuses =="
+    sk acquire s p 5 1 fragen >/dev/null; rc=$?
+    as /wt/other check 2>/dev/null; crc=$?
+    as /wt/other run x -- touch "$T/ranB" 2>/dev/null; rrc=$?
+    check "skill acquire exit 0, repo check exit 1, repo run exit 1 (exit $rc/$crc/$rrc)" \
+        '[ "$rc" = 0 ] && [ "$crc" = 1 ] && [ "$rrc" = 1 ] && [ ! -e "$T/ranB" ]'
+    sk release s >/dev/null
+    check "skill release appends to the shared history" 'grep -q "released by s\] holder=s" "$T/lock.history"'
+
+    echo "== cross stale/expiry =="
+    sleeper; p=$LAST
+    as /wt/r acquire --pid "$p" "crashed" >/dev/null
+    kill "$p"; wait "$p" 2>/dev/null
+    out=$(sk acquire s2 p 5 1 fragen 2>&1); rc=$?
+    check "repo record with dead pid: skill acquire takes it (exit $rc)" \
+        '[ "$rc" = 0 ] && grep -q "^holder=s2$" "$T/lock" && ! grep -q "^pid=" "$T/lock"'
+    sk release s2 >/dev/null
+    sk acquire s3 p 0 1 fragen >/dev/null
+    sleeper
+    out=$(as /wt/r acquire --pid "$LAST" "after expiry" 2>&1); rc=$?
+    check "skill record with expected_minutes=0: repo acquire passes (exit $rc)" \
+        '[ "$rc" = 0 ] && grep -q "^worktree=/wt/r$" "$T/lock" && grep -q "cleared stale" <<<"$out"'
+    as /wt/r release >/dev/null
+
+    echo "== legacy $IMP_GPU_LOCK_LEGACY: live pid blocks both, file never written =="
+    sleeper
+    printf 'pid=%s\nstart=%s\nkeeper=0\nworktree=/wt/old\npurpose=old checkout\nsince=x\n' \
+        "$LAST" "$(startof "$LAST")" > "$IMP_GPU_LOCK_LEGACY"
+    sum0=$(cksum < "$IMP_GPU_LOCK_LEGACY")
+    as /wt/r acquire --pid "$LAST" "new" 2>/dev/null; arc=$?
+    as /wt/r check 2>/dev/null; crc=$?
+    out=$(sk acquire s p 5 1 fragen 2>&1); src=$?
+    check "repo acquire 1, repo check 1, skill acquire 1 (exit $arc/$crc/$src)" \
+        '[ "$arc" = 1 ] && [ "$crc" = 1 ] && [ "$src" = 1 ] && grep -q "legacy" <<<"$out" && [ ! -e "$T/lock" ]'
+    check "status names the legacy holder" '[[ "$(bash "$LOCK_SH" status)" == "held (legacy "*"worktree=/wt/old"* ]]'
+    check "legacy file unchanged" '[ "$(cksum < "$IMP_GPU_LOCK_LEGACY")" = "$sum0" ]'
+    deadpid
+    printf 'pid=%s\nstart=1\nworktree=/wt/old\n' "$DEAD" > "$IMP_GPU_LOCK_LEGACY"
+    sleeper
+    check "legacy with dead pid does not block" 'as /wt/r acquire --pid "$LAST" x >/dev/null'
+    as /wt/r release >/dev/null; rm -f "$IMP_GPU_LOCK_LEGACY"
+
+    echo "== mutex: 20 parallel acquires, 10 per script, exactly one wins (5 rounds) =="
+    rounds_ok=0
+    for round in 1 2 3 4 5; do
+        rm -f "$T/lock" "$T/go"; jobs_=()
+        gate() { while [ ! -e "$T/go" ]; do sleep 0.01; done; "$@"; }  # start all 20 together
+        for i in $(seq 1 10); do
+            sleeper
+            gate as "/wt/m$i" acquire --pid "$LAST" "race $i" >/dev/null 2>&1 & jobs_+=("$!")
+            gate sk acquire "m$i" "race $i" 5 1 fragen >/dev/null 2>&1 & jobs_+=("$!")
+        done
+        sleep 0.2; touch "$T/go"
+        zero=0 one=0
+        for j in "${jobs_[@]}"; do wait "$j"; case $? in 0) zero=$((zero + 1)) ;; 1) one=$((one + 1)) ;; esac; done
+        echo "    round $round: exit0=$zero exit1=$one holder=$(sed -n 's/^holder=//p' "$T/lock")"
+        [ "$zero" = 1 ] && [ "$one" = 19 ] && rounds_ok=$((rounds_ok + 1))
+        as /wt/x release --force >/dev/null 2>&1
+    done
+    check "5/5 rounds: 1 acquire exit 0, 19 exit 1 ($rounds_ok/5)" '[ "$rounds_ok" = 5 ]'
+fi
 
 echo "gpu_lock: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

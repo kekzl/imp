@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Fixed
+- One GPU lock per host: `scripts/gpu_lock.sh` and the gpu-stats skill's `gpu-lock.sh` share `/tmp/gpu-lock`, its `flock` mutex and one key=value record (pid liveness, else `started_epoch + expected_minutes`), so a holder taken through either refuses the other. A live pid in the old `/tmp/imp-gpu.lock` still refuses both; that file is only read.
 - cuBLASLt algo probe no longer times candidates inside a graph capture (#2396): a cold shape there takes a host-checked heuristic pick, and each batch size runs one eager step before its capture. Qwen3.8-27B bs=48: 47/48 -> 48/48 decode graphs, captured M=47/48 GEMMs use the benchmarked algo; 48-stream median 1528.7 / 1587.4 -> 1970.9 / 1967.2 tok/s.
 - An explicit `runtime.max_batch_size` the weight-upload reserve cannot hold is clamped after Pass 1, with a WARN
   naming configured and fitting batch and the per-slot state cost, instead of aborting the load: Qwen3.8-27B-NVFP4

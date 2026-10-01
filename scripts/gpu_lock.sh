@@ -7,16 +7,24 @@
 #   gpu_lock.sh status                         print the holder line or "free"
 #   gpu_lock.sh check                          exit 1 + holder line if another owner holds it
 #   gpu_lock.sh run <purpose> -- <cmd...>      hold it for the duration of cmd
-# Env: IMP_GPU_LOCK (file, default /tmp/imp-gpu.lock), IMP_GPU_LOCK_OWNER (default: git
-# toplevel of $PWD), IMP_GPU_LOCK_TTL (keeper lifetime in s, default 14400).
+# Env: IMP_GPU_LOCK (file, default GPU_LOCK_FILE, else /tmp/gpu-lock), IMP_GPU_LOCK_OWNER
+# (default: git toplevel of $PWD), IMP_GPU_LOCK_TTL (keeper lifetime in s, default 14400),
+# IMP_GPU_LOCK_LEGACY (old per-repo lock, read only, default /tmp/imp-gpu.lock).
 # Exit: 0 ok, 1 held by another owner, 2 usage error.
+#
+# Same file, mutex and record format as ~/.claude/skills/gpu-stats/gpu-lock.sh:
+# key=value lines; a record with pid= is held while that pid (same start time) lives,
+# one without pid= until started_epoch + expected_minutes*60. Mutex: flock on $LOCK.mutex.
 set -uo pipefail
 
-LOCK="${IMP_GPU_LOCK:-/tmp/imp-gpu.lock}"
+LOCK="${IMP_GPU_LOCK:-${GPU_LOCK_FILE:-/tmp/gpu-lock}}"
+LEGACY="${IMP_GPU_LOCK_LEGACY:-/tmp/imp-gpu.lock}"
+HIST="$LOCK.history"
 TTL="${IMP_GPU_LOCK_TTL:-14400}"
 OWNER="${IMP_GPU_LOCK_OWNER:-$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)}"
 
 die() { echo "gpu_lock: $*" >&2; exit 2; }
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 # Field 22 of /proc/<pid>/stat (start time in ticks): a recycled pid does not match it.
 # A zombie (state Z, unreaped under a PID 1 that never waits) counts as gone.
@@ -27,20 +35,39 @@ start_of() {
     awk '{print $20}' <<<"$s"
 }
 
-field() { sed -n "s/^$1=//p" "$LOCK" 2>/dev/null | head -1; }
+field_of() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
+field() { field_of "$LOCK" "$1"; }
 
-holder_line() {
-    printf 'pid=%s worktree=%s purpose="%s" since=%s\n' \
-        "$(field pid)" "$(field worktree)" "$(field purpose)" "$(field since)"
+line_of() {  # line_of <file>
+    printf 'pid=%s worktree=%s purpose="%s" since=%s holder=%s\n' \
+        "$(field_of "$1" pid)" "$(field_of "$1" worktree)" "$(field_of "$1" purpose)" \
+        "$(field_of "$1" since)" "$(field_of "$1" holder)"
+}
+holder_line() { line_of "$LOCK"; }
+
+# 0 = the record in <file> is held. pid= set: that pid alive with the same start time.
+# No pid=: now < started_epoch + expected_minutes*60; unparseable = expired.
+held_in() {
+    local f="$1" pid start cur ep mins
+    [ -s "$f" ] || return 1
+    pid="$(field_of "$f" pid)"
+    if [ -n "$pid" ]; then
+        case "$pid" in *[!0-9]*) return 1 ;; esac
+        start="$(field_of "$f" start)"
+        cur="$(start_of "$pid")" || return 1
+        [ -z "$start" ] || [ "$start" = "$cur" ]
+        return
+    fi
+    ep="$(field_of "$f" started_epoch)"; mins="$(field_of "$f" expected_minutes)"
+    case "$ep" in '' | *[!0-9]*) return 1 ;; esac
+    case "$mins" in '' | *[!0-9]*) return 1 ;; esac
+    [ "$(date +%s)" -lt $((ep + mins * 60)) ]
 }
 
-# 0 = the recorded holder is alive (same pid, same start time).
-holder_alive() {
-    local pid start now
-    pid="$(field pid)"; start="$(field start)"
-    case "$pid" in '' | *[!0-9]*) return 1 ;; esac
-    now="$(start_of "$pid")" || return 1
-    [ -z "$start" ] || [ "$start" = "$now" ]
+# 0 = the read-only legacy file holds a live pid of another worktree.
+legacy_held() {
+    [ "$LEGACY" != "$LOCK" ] && [ -n "$(field_of "$LEGACY" pid)" ] && held_in "$LEGACY" &&
+        [ "$(field_of "$LEGACY" worktree)" != "$OWNER" ]
 }
 
 # Serialises every read-modify-write of $LOCK; held for milliseconds only.
@@ -53,17 +80,27 @@ with_mutex() {
     return $rc
 }
 
-# Removes a dead holder. Caller holds the mutex.
+log_history() {  # log_history <event>
+    echo "[$(now) $1] holder=$(field holder) worktree=$(field worktree) purpose=$(field purpose) $(field history)" \
+        >> "$HIST" 2>/dev/null
+}
+
+# Removes a dead or expired holder. Caller holds the mutex.
 clear_stale() {
     [ -s "$LOCK" ] || return 0
-    holder_alive && return 0
-    echo "gpu_lock: cleared stale lock (holder gone): $(holder_line)" >&2
+    held_in "$LOCK" && return 0
+    echo "gpu_lock: cleared stale lock (holder gone or expired): $(holder_line)" >&2
+    log_history "cleared stale by $OWNER"
     rm -f "$LOCK"
 }
 
 do_acquire() {  # do_acquire <pid|""> <purpose>
-    local pid="$1" purpose="$2" keeper=0 tmp start
+    local pid="$1" purpose="$2" keeper=0 tmp start ts
     clear_stale
+    if legacy_held; then
+        echo "gpu_lock: GPU held by another session (legacy $LEGACY): $(line_of "$LEGACY")" >&2
+        return 1
+    fi
     if [ -s "$LOCK" ]; then
         if [ "$(field worktree)" = "$OWNER" ]; then
             echo "gpu_lock: already held by this worktree: $(holder_line)"
@@ -84,9 +121,10 @@ do_acquire() {  # do_acquire <pid|""> <purpose>
         keeper=1
     fi
     start="$(start_of "$pid")" || die "pid $pid is not running"
-    printf 'pid=%s\nstart=%s\nkeeper=%s\nworktree=%s\npurpose=%s\nsince=%s\n' \
-        "$pid" "$start" "$keeper" "$OWNER" "$purpose" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        > "$LOCK.tmp" && mv -f "$LOCK.tmp" "$LOCK"
+    ts="$(now)"
+    printf 'pid=%s\nstart=%s\nkeeper=%s\nworktree=%s\nholder=%s\npurpose=%s\nsince=%s\nstarted=%s\nstarted_epoch=%s\nexpected_minutes=%s\nvram_gb=?\nunterbrechbar=fragen\nhistory=[%s acquired by %s]\n' \
+        "$pid" "$start" "$keeper" "$OWNER" "$OWNER" "$purpose" "$ts" "$ts" "$(date +%s)" \
+        "$((TTL / 60))" "$ts" "$OWNER" > "$LOCK.tmp" && mv -f "$LOCK.tmp" "$LOCK"
     echo "gpu_lock: acquired: $(holder_line)"
 }
 
@@ -101,18 +139,25 @@ do_release() {  # do_release <pid|""> <force 0|1>
         echo "          (--force releases it anyway)" >&2
         return 1
     fi
-    [ "$(field keeper)" = "1" ] && holder_alive && kill "$(field pid)" 2>/dev/null
+    [ "$(field keeper)" = "1" ] && held_in "$LOCK" && kill "$(field pid)" 2>/dev/null
     echo "gpu_lock: released: $(holder_line)"
+    log_history "released by $OWNER"
     rm -f "$LOCK"
 }
 
 do_status() {
     clear_stale
-    if [ -s "$LOCK" ]; then echo "held: $(holder_line)"; else echo "free"; fi
+    if [ -s "$LOCK" ]; then echo "held: $(holder_line)"
+    elif legacy_held; then echo "held (legacy $LEGACY): $(line_of "$LEGACY")"
+    else echo "free"; fi
 }
 
 do_check() {
     clear_stale
+    if legacy_held; then
+        echo "GPU held by another session (legacy $LEGACY): $(line_of "$LEGACY")" >&2
+        return 1
+    fi
     [ -s "$LOCK" ] || return 0
     [ "$(field worktree)" = "$OWNER" ] && return 0
     echo "GPU held by another session: $(holder_line)" >&2
