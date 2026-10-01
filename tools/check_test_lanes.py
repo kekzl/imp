@@ -368,7 +368,9 @@ def main():
     # (test-attention, GPU): sparse decode at MLA head_dim 192 (roadmap row 3).
     # 1185 -> 1188: SparsePrefillTest x2 + SparsePrefillGeometry.PastTokensKeepsTheTail (test-attention,
     # GPU module): sparse prefill selection, compacted gather + FA2 bit-identity, mutation.
-    PINNED = 1188
+    # 1188 -> 1189: MLAAttnOutput.PaddedSymmetricSplitKMatchesGeneric (GPU): MLA decode at HD 192
+    # split-K + compaction vs the generic kernel (#2374).
+    PINNED = 1189
 
     text = CMAKE.read_text()
     mods = module_sources(text)

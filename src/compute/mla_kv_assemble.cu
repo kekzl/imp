@@ -7,6 +7,7 @@
 //   [n_tokens,n_heads,v_head_dim]
 
 #include "compute/mla_kv_assemble.h"
+#include "compute/attention_paged.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -136,6 +137,33 @@ void mla_compact_attn_output(const half* src, half* dst,
         reinterpret_cast<__half*>(dst),
         n_heads, head_dim, v_head_dim);
     IMP_CUDA_CHECK_LAUNCH();
+}
+
+void paged_attention_decode_mla_padded(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache,
+                                       Tensor& O, half* o_full, int64_t o_full_elems, const int* block_tables,
+                                       const int* context_lens, int block_size, float scale,
+                                       int max_context_len, int sliding_window, float softcap,
+                                       cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
+                                       const void* attn_sinks, int v_head_dim) {
+    const int64_t batch = Q.shape[0];
+    const int64_t n_heads = Q.shape[2];
+    const int64_t head_dim = Q.shape[3];
+    const bool padded = v_head_dim > 0 && v_head_dim != head_dim && n_heads == K_cache.shape[2] &&
+                        o_full != nullptr && o_full_elems >= batch * n_heads * head_dim;
+    if (!padded) {
+        paged_attention_decode(Q, K_cache, V_cache, O, block_tables, context_lens, block_size, scale,
+                               max_context_len, sliding_window, softcap, stream, max_blocks_per_seq, n_sinks,
+                               attn_sinks, v_head_dim);
+        return;
+    }
+    int64_t fd[4] = {batch, 1, n_heads, head_dim};
+    Tensor o_sym(o_full, O.qtype, 4, fd, /*on_device=*/true);
+    paged_attention_decode(Q, K_cache, V_cache, o_sym, block_tables, context_lens, block_size, scale,
+                           max_context_len, sliding_window, softcap, stream, max_blocks_per_seq, n_sinks,
+                           attn_sinks,
+                           /*v_head_dim=*/0);
+    mla_compact_attn_output(o_full, static_cast<half*>(O.data), static_cast<int>(batch),
+                            static_cast<int>(n_heads), static_cast<int>(head_dim), v_head_dim, stream);
 }
 
 }  // namespace imp

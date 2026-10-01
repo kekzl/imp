@@ -7,6 +7,9 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cstdint>
+
+#include "core/tensor.h"
 
 namespace imp {
 
@@ -41,5 +44,15 @@ void mla_compact_attn_output(const half* src, half* dst,
                              int n_tokens, int n_heads,
                              int head_dim, int v_head_dim,
                              cudaStream_t stream = nullptr);
+
+// F16 paged decode; MLA (v_head_dim < head_dim, V zero-padded to head_dim, n_heads == n_kv_heads,
+// o_full >= batch*n_heads*head_dim halfs, not aliasing O or Q): symmetric decode into o_full, then
+// compaction to O [batch,1,n_heads,v_head_dim] (#2374). Otherwise forwards to paged_attention_decode.
+void paged_attention_decode_mla_padded(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache,
+                                       Tensor& O, half* o_full, int64_t o_full_elems, const int* block_tables,
+                                       const int* context_lens, int block_size, float scale,
+                                       int max_context_len, int sliding_window, float softcap,
+                                       cudaStream_t stream, int max_blocks_per_seq, int n_sinks,
+                                       const void* attn_sinks, int v_head_dim);
 
 }  // namespace imp
