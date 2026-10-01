@@ -1,15 +1,8 @@
-// stb's default (1<<24/side, bounded only by w*h*3<=INT_MAX) lets a 700 KB PNG of a
-// 26000x26000 flat image decode to ~2 GiB of host RGB before any resize (AUDIT_arch_2026
-// F2-4). 16384 is far above every tower's useful input; a larger picture is refused by
-// stbi_load before the allocation.
-#define STBI_MAX_DIMENSIONS 16384
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
-
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize2.h"
 
 #include "vision/image_processor.h"
+#include "vision/image_decode.h"
 #include "core/logging.h"
 
 #include <algorithm>
@@ -249,12 +242,12 @@ bool qwen_patchify_video(std::span<const uint8_t* const> frames, int width, int 
 }
 
 bool decode_rgb(std::span<const uint8_t> data, std::vector<uint8_t>& rgb, int& width, int& height) {
-    int ch = 0;
-    uint8_t* px = stbi_load_from_memory(data.data(), static_cast<int>(data.size()), &width, &height, &ch, 3);
-    if (!px)
+    DecodedImage img;  // JPEG via libjpeg-turbo, bit-identical to Pillow (#2381)
+    if (!decode_image(data, img))
         return false;
-    rgb.assign(px, px + static_cast<size_t>(width) * height * 3);
-    stbi_image_free(px);
+    width = img.width;
+    height = img.height;
+    rgb = std::move(img.rgb);
     return true;
 }
 
@@ -373,34 +366,28 @@ bool internvl_preprocess(const uint8_t* rgb, int width, int height, const Intern
 
 bool load_and_preprocess_image(const std::string& path, int target_size, const float mean[3],
                                const float std[3], ImageData& out) {
-    int w, h, channels;
-    uint8_t* rgb = stbi_load(path.c_str(), &w, &h, &channels, 3);
-    if (!rgb) {
-        IMP_LOG_ERROR("Vision: failed to load image: %s (%s)", path.c_str(), stbi_failure_reason());
+    DecodedImage img;
+    if (!decode_image_file(path, img)) {
+        IMP_LOG_ERROR("Vision: failed to load image: %s", path.c_str());
         return false;
     }
 
-    IMP_LOG_INFO("Vision: loaded image %dx%d (%d channels) from %s", w, h, channels, path.c_str());
+    IMP_LOG_INFO("Vision: loaded image %dx%d from %s", img.width, img.height, path.c_str());
 
-    bool ok = preprocess_pixels(rgb, w, h, target_size, mean, std, out);
-    stbi_image_free(rgb);
-    return ok;
+    return preprocess_pixels(img.rgb.data(), img.width, img.height, target_size, mean, std, out);
 }
 
 bool load_and_preprocess_image_from_memory(std::span<const uint8_t> data, int target_size,
                                            const float mean[3], const float std[3], ImageData& out) {
-    int w, h, channels;
-    uint8_t* rgb = stbi_load_from_memory(data.data(), static_cast<int>(data.size()), &w, &h, &channels, 3);
-    if (!rgb) {
-        IMP_LOG_ERROR("Vision: failed to decode image from memory (%s)", stbi_failure_reason());
+    DecodedImage img;
+    if (!decode_image(data, img)) {
+        IMP_LOG_ERROR("Vision: failed to decode image from memory (%zu bytes)", data.size());
         return false;
     }
 
-    IMP_LOG_INFO("Vision: decoded image %dx%d from memory (%zu bytes)", w, h, data.size());
+    IMP_LOG_INFO("Vision: decoded image %dx%d from memory (%zu bytes)", img.width, img.height, data.size());
 
-    bool ok = preprocess_pixels(rgb, w, h, target_size, mean, std, out);
-    stbi_image_free(rgb);
-    return ok;
+    return preprocess_pixels(img.rgb.data(), img.width, img.height, target_size, mean, std, out);
 }
 
 }  // namespace imp

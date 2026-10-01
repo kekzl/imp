@@ -34,7 +34,7 @@ RUN { sed -i 's|archive.ubuntu.com|de.archive.ubuntu.com|g; s|security.ubuntu.co
     && rm -f /etc/apt/sources.list.d/cuda*.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        g++ git ninja-build ca-certificates python3 wget ccache libcurl4-openssl-dev \
+        g++ git ninja-build ca-certificates python3 wget ccache libcurl4-openssl-dev libjpeg-turbo8-dev \
     && wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v4.3.1/cmake-4.3.1-linux-x86_64.sh \
     && echo '85947732c8eb85fbc8eb56ff950e4f3db8fc36bf4259b89b74fc947d23534e4a  /tmp/cmake.sh' | sha256sum -c - \
     && sh /tmp/cmake.sh --skip-license --prefix=/usr/local \
@@ -153,10 +153,12 @@ LABEL imp.tree="${IMP_TREE_ID}"
 
 # curl and jq come from Ubuntu; the CUDA apt source is dropped first (see the toolchain stage).
 # libcurl4t64 is linked by imp-server/imp-cli for hf:// fetches (src/model/hf_fetch.cpp).
+# libjpeg-turbo8: JPEG decode bit-identical to Pillow (src/vision/image_decode.cpp, #2381).
 RUN rm -f /etc/apt/sources.list.d/cuda*.list \
     && apt-get update && apt-get install -y --no-install-recommends \
         curl \
         libcurl4t64 \
+        libjpeg-turbo8 \
         jq \
     && rm -rf /var/lib/apt/lists/*
 
