@@ -1,6 +1,7 @@
 #pragma once
 
 #include "memory/host_pinned.h"
+#include "memory/upload_reserve.h"
 #include "model/hf_config_loader.h"
 #include "model/model_config.h"
 #include "model/model_profile.h"
@@ -124,6 +125,8 @@ public:
     std::vector<TransformerLayer> layers_;
     // --gpu-layers plan read by upload_weights_gpu Pass 1: layer i's verbatim matmuls stay on host (#2298).
     std::vector<bool> upload_host_layers_;
+    // Batch-shaped upload reserve: Pass 1 fits the batch to the weights it uploaded (#2393).
+    UploadBatchFit upload_batch_fit_;
     std::unique_ptr<Tokenizer> tokenizer_;
 
     // MTP head storage, populated when model_mtp.safetensors sits next to the main weights
