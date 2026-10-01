@@ -4,6 +4,8 @@
 #include "core/logging.h"
 #include "model/model_limits.h"
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 #include <algorithm>
 #include <cstdlib>
@@ -336,6 +338,39 @@ static bool assign_gptq_field(TransformerLayer::GPTQWeight* gptq, const std::str
     return true;
 }
 
+namespace {
+
+// Multimodal-wrapper tensors that are not LM weights: model.vision_tower. (Gemma-4),
+// model.visual. (Qwen3-VL, Qwen3.6), model.embed_vision. (Gemma-4 unified), vision_tower. and
+// multi_modal_projector. (InternVL, HF layout). Routed by the vision mapper when there is a tower.
+bool is_wrapper_vision_name(const std::string& n) {
+    static constexpr std::string_view kPrefixes[] = {"model.vision_tower.", "model.visual.",
+                                                     "model.embed_vision.", "vision_tower.",
+                                                     "multi_modal_projector."};
+    for (const std::string_view p : kPrefixes)
+        if (n.starts_with(p))
+            return true;
+    return false;
+}
+
+// The wrapper's LM names -> the bare text-model names: model.language_model.X (Qwen3-VL, Gemma-4)
+// and language_model.model.X (InternVL) -> model.X; language_model.lm_head.* -> lm_head.*;
+// language_model.embed_tokens.weight -> model.embed_tokens.weight.
+std::string strip_wrapper_lm_prefix(const std::string& n) {
+    static constexpr std::pair<std::string_view, std::string_view> kRenames[] = {
+        {"model.language_model.", "model."},
+        {"language_model.model.", "model."},
+        {"language_model.lm_head.", "lm_head."},
+        {"language_model.embed_tokens.", "model.embed_tokens."},
+    };
+    for (const auto& [from, to] : kRenames)
+        if (n.starts_with(from))
+            return std::string(to) + n.substr(from.size());
+    return n;
+}
+
+}  // namespace
+
 bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string, Tensor>& tensors) {
     if (tensors.empty()) {
         IMP_LOG_ERROR("WeightMap: no tensors to apply");
@@ -365,35 +400,16 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     for (auto& [orig_name, tensor] : tensors) {
         std::string name = orig_name;
         if (needs_multimodal_strip) {
-            const std::string vt_prefix = "model.vision_tower.";
-            if (name.compare(0, vt_prefix.size(), vt_prefix) == 0) {
+            if (is_wrapper_vision_name(name)) {
                 ++skipped;  // not an LM weight; routed by the vision mapper when there is a tower
                 ++stats.vision;
                 continue;
             }
-            // Qwen3.6-VL also ships a separate visual tower under model.visual.* and an MTP head under
-            // mtp.*. Both arrive in distinct shards normally never loaded; drop them here if they ever
-            // appear in the main shard.
-            const std::string visual_prefix = "model.visual.";
-            if (name.compare(0, visual_prefix.size(), visual_prefix) == 0) {
-                // Routed into the vision tower below when there is one; still
-                // skipped here either way, since these are not LM weights.
-                ++skipped;
-                ++stats.vision;
-                continue;
-            }
-            // Gemma-4 unified multimodal: audio/vision embedders ship under model.embed_{audio,
-            // vision}.*, not under language_model/vision_tower. Not part of the text LM, so skipped,
-            // but counted apart: the audio half has no encoder anywhere in imp, a lost modality rather
-            // than a lost tensor.
+            // Gemma-4 unified multimodal: the audio embedder ships under model.embed_audio.*; no
+            // encoder anywhere in imp, a lost modality rather than a lost tensor, counted apart.
             if (name.compare(0, 18, "model.embed_audio.") == 0) {
                 ++skipped;
                 ++stats.audio;
-                continue;
-            }
-            if (name.compare(0, 19, "model.embed_vision.") == 0) {
-                ++skipped;
-                ++stats.vision;
                 continue;
             }
             if (name.compare(0, 4, "mtp.") == 0 ||
@@ -402,14 +418,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 ++stats.mtp;
                 continue;
             }
-            const std::string lm_prefix = "model.language_model.";
-            if (name.compare(0, lm_prefix.size(), lm_prefix) == 0) {
-                name = "model." + name.substr(lm_prefix.size());
-            }
-            // Also handle top-level aliases the wrapper introduces.
-            if (name == "model.embed_tokens.weight" || name == "language_model.embed_tokens.weight") {
-                name = "model.embed_tokens.weight";
-            }
+            name = strip_wrapper_lm_prefix(name);
         }
 
         // Nemotron-H uses backbone.embeddings/norm_f top-level and backbone.layers.N.mixer.<sub>

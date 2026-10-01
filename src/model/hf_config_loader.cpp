@@ -76,6 +76,19 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
 
 // ---- load_config ----
 
+// Wrappers whose language model is whatever text_config names (InternVL3.5 ships Qwen3 and
+// GPT-OSS LMs under one class): the arch comes from text_config.architectures[0].
+static std::string wrapped_lm_architecture(const JValue& root, const std::string& top_arch) {
+    if (top_arch != "InternVLForConditionalGeneration")
+        return top_arch;
+    const JValue* tc = jobj_find(root, "text_config");
+    const JValue* ta = tc ? jobj_find(*tc, "architectures") : nullptr;
+    if (!ta || ta->type != JType::ARRAY || ta->arr.empty())
+        return top_arch;
+    IMP_LOG_INFO("%s: language model from text_config: %s", top_arch.c_str(), ta->arr[0].str_val.c_str());
+    return ta->arr[0].str_val;
+}
+
 // Multimodal vision-tower detection from vision_config. Family from the registry
 // (vision_family.h); the SafeTensors keep-the-vision-tensors gate asks the same registry one step
 // earlier (vision_tower_supported()). Anything not parsed says so: no silent text-only degrade.
@@ -137,7 +150,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
                                      "' is not supported (imp runs causal decoder LMs; "
                                      "embedding encoders need pooling support)");
         }
-        cfg.arch = map_architecture(archs->arr[0].str_val);
+        cfg.arch = map_architecture(wrapped_lm_architecture(root, archs->arr[0].str_val));
         if (archs->arr.size() > 1) {
             std::string dropped;
             for (size_t i = 1; i < archs->arr.size(); i++) {
