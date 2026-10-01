@@ -57,8 +57,21 @@ bash scripts/image_tag.sh check "$IMG" || { echo "FAIL setup: $IMG is not this t
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/accept_2174.XXXXXX")"
 echo "logs: $WORK"
+# Flash-Next: the first docker rm -f fails after 10-12 s while the server frees ~66 GiB host RAM
+# (exits at 16-18 s), and the Exited container keeps the name; --init changes neither. Repeat rm -f.
+rm_ctr() {
+    for s in $(seq 0 2 60); do
+        docker rm -f "$CTR" >/dev/null 2>&1
+        if [ -z "$(docker ps -aq --filter "name=^/$CTR\$")" ]; then
+            [ "$s" -gt 0 ] && echo "  container $CTR gone after $((s / 2 + 1)) rm attempts"
+            return 0
+        fi
+        sleep 2
+    done
+    echo "  container $CTR still present after 31 rm attempts"; return 1
+}
 # shellcheck disable=SC2329  # invoked by the EXIT trap
-cleanup() { docker rm -f "$CTR" >/dev/null 2>&1 || true; }
+cleanup() { rm_ctr >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 FAILS=0
@@ -66,7 +79,7 @@ pass() { echo "PASS $*"; }
 fail() { echo "FAIL $*"; FAILS=$((FAILS + 1)); }
 
 start_server() {  # start_server <model in MODELS_DIR>: deterministic, FP16 KV, debug log; 1 on timeout
-    docker rm -f "$CTR" >/dev/null 2>&1 || true
+    rm_ctr || return 1
     docker run -d --name "$CTR" --gpus all -p "127.0.0.1:$PORT:8080" -v "$MODELS_DIR:/models:ro" \
         -e IMP_DETERMINISTIC=1 "$IMG" imp-server --host 0.0.0.0 --port 8080 --model "/models/$1" \
         --set runtime.deterministic=true --set kv_cache.dtype=fp16 --set diagnostics.log_level=debug \
@@ -106,7 +119,7 @@ for k in $(seq 1 "$FLASH_ROUNDS"); do
     probe_round "$FLASH" flash "$k" && ok=$((ok + 1))
 done
 echo "INFO flash $FLASH: $ok/$FLASH_ROUNDS rounds identical + restored + rebind seen"
-docker rm -f "$CTR" >/dev/null 2>&1 || true
+rm_ctr || true
 
 # ---- C2: hybrid restore suites (the hybrid container of `make test-e2e`) ----
 # HybridBatchedDecodeTest.* excluded: pre-existing IMA on main, #2275.
