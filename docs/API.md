@@ -79,7 +79,7 @@ identical request returns different output than against the OpenAI API.
 Two of these do not switch off the way the field name suggests:
 
 - **`top_k: 0` is not "off", it is 50.** Every sampling site spells
-`top_k > 0 ? top_k : 50` (`src/exec/executor.cu:210 state.top_k > 0`, `:289/340`, `src/runtime/engine_decode_pipeline.cpp:74 r.top_k > 0`).
+`top_k > 0 ? top_k : 50` (`src/exec/executor.cu:219 state.top_k > 0`, `:289/340`, `src/runtime/engine_decode_pipeline.cpp:74 r.top_k > 0`).
 
 - Zero and "unset" both land on 50, a *tighter* truncation than the 40 default.
 - Disabling top-k needs a value at or above the vocabulary size.
@@ -285,10 +285,10 @@ not, so a caller can check a prompt against server capacity without scraping
  "kv_ceiling_blocks": 16, "kv_pool_growable": false, "kv_pool_bandwidth_gbps": 1554.0}
 ```
 
-`kv_pool_bandwidth_gbps` is a device-to-device copy timed inside the pool at init, GB/s counting read plus write (also `imp_kv_pool_bandwidth_gbps` on `/metrics`).
+`kv_pool_bandwidth_gbps` is the pool's own device-to-device copies, captured as one CUDA graph and timed over at least 1 GiB of traffic (best of 3) at init, GB/s counting read plus write (also `imp_kv_pool_bandwidth_gbps` on `/metrics`). Before #2369 (5999fd92) the probe timed separate copy submissions and read 63-365 GB/s on resident small pools.
 
 - On WSL2/WDDM a successful allocation proves nothing: a pool the driver spilled into host memory serves at a sixth of the bandwidth with every other signal reading ok.
-- Resident memory on the reference card reads ~1500, a spilled pool ~240.
+- Resident memory on the reference card reads 1255-1809 (#2369), host-mapped memory 149-155.
 - Below 500 the server logs a WARN at load and keeps serving (the threshold is one driver on one card, so it is a gauge, not a refusal).
 - 0 = not measured (a pool too small to time).
 

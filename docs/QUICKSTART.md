@@ -110,11 +110,7 @@ curl -s http://localhost:8080/v1/chat/completions \
       }' | jq -r '.choices[0].message.content'
 ```
 
-Expected: an explanation of Rayleigh scattering, written at about 102 tok/s (the embedded MTP head is taken automatically on a single-stream run).
-
-[PROV: commit=f243179c date=2026-08-31 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4
-       cuda=13.3 path=nvfp4-safetensors n=2 image=ghcr.io/kekzl/imp:latest
-       cmd=`imp-cli --model … --prompt … --max-tokens 128 --temperature 0` (102.8/101.9 tok/s)]
+Expected: an explanation of Rayleigh scattering, written at the single-stream rate in [README Install](../README.md#install), which carries the PROV (the embedded MTP head is taken automatically on a single-stream run).
 
 ## 4. Or use the other surfaces
 
