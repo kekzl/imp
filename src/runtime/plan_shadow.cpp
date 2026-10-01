@@ -72,7 +72,10 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
         out += '\n';
     };
 
-    emit("memory plan (A7 step 2 — APPLIED: the KV block count below is what the pool uses):");
+    if (shadow.ok)
+        emit("memory plan (A7 step 2 — APPLIED: the KV block count below is what the pool uses):");
+    else
+        emit("memory plan (A7 step 2 — REJECTED: the pool uses the live pass's %d blocks):", live_kv_blocks);
     emit("  distributable            %8.0f MiB", probe.distributable_bytes / kMiB);
     emit("  weight-cache demand      %8.0f MiB  (same figure the live pass used)",
          probe.weight_cache_demand / kMiB);
@@ -114,28 +117,33 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
     // disagree, and state can be bought for slots KV cannot serve at full
     // context. Printed in both branches: a rejected plan is exactly when the
     // operator needs the binding ceiling.
+    // The pool the engine runs: the plan's on accept, the live pass's on reject (#2347: a rejected
+    // plan has 0 blocks and printed "Set runtime.max_seq_len=0").
     const int recurrent_seqs = probe.max_batch_size;
-    const int kv_seqs =
-        shadow.plan.kv.blocks_per_seq > 0 ? shadow.plan.kv.blocks / shadow.plan.kv.blocks_per_seq : 0;
+    const int pool_blocks = shadow.ok ? shadow.plan.kv.blocks : live_kv_blocks;
+    const int blocks_per_seq = shadow.ok && shadow.plan.kv.blocks_per_seq > 0 ? shadow.plan.kv.blocks_per_seq
+                               : probe.kv_block_size > 0
+                                   ? (probe.max_seq_len + probe.kv_block_size - 1) / probe.kv_block_size
+                                   : 0;
+    const int kv_seqs = blocks_per_seq > 0 ? pool_blocks / blocks_per_seq : 0;
     // The context at which ALL recurrent slots fit: pool tokens split N ways.
     // Without it, max_seq_len far above the KV ceiling reads "KV 0 seqs" and
     // gives no common target for either knob.
-    const int ctx_all = recurrent_seqs > 0
-                            ? shadow.plan.kv.blocks * probe.kv_block_size / recurrent_seqs
-                            : 0;
-    emit("  ceiling: recurrent %d seqs, KV %d seqs at max_seq_len %d (%d blocks/seq), all %d seqs at "
-         "<= %d tokens",
-         recurrent_seqs, kv_seqs, probe.max_seq_len, shadow.plan.kv.blocks_per_seq, recurrent_seqs,
-         ctx_all);
+    const int ctx_all = recurrent_seqs > 0 ? pool_blocks * probe.kv_block_size / recurrent_seqs : 0;
+    emit(
+        "  ceiling: recurrent %d seqs, KV %d seqs at max_seq_len %d (%d blocks/seq), all %d seqs at "
+        "<= %d tokens",
+        recurrent_seqs, kv_seqs, probe.max_seq_len, blocks_per_seq, recurrent_seqs, ctx_all);
     // Only where there IS per-slot state to over-buy. A dense pool that holds
     // fewer full-context sequences than max_batch_size is ordinary continuous
     // batching: nothing was pre-charged per slot, so nothing was wasted.
     if (probe.ssm_state_bytes > 0 && kv_seqs < recurrent_seqs)
-        emit("  WARN: the KV pool serves %d of the %d recurrent slots at max_seq_len %d; all %d fit "
-             "only up to %d tokens of context (%d blocks x %d). Set runtime.max_seq_len=%d, or "
-             "lower runtime.max_batch_size",
-             kv_seqs, recurrent_seqs, probe.max_seq_len, recurrent_seqs, ctx_all,
-             shadow.plan.kv.blocks, probe.kv_block_size, ctx_all);
+        emit(
+            "  WARN: the KV pool serves %d of the %d recurrent slots at max_seq_len %d; all %d fit "
+            "only up to %d tokens of context (%d blocks x %d). Set runtime.max_seq_len=%d, or "
+            "lower runtime.max_batch_size",
+            kv_seqs, recurrent_seqs, probe.max_seq_len, recurrent_seqs, ctx_all, pool_blocks,
+            probe.kv_block_size, ctx_all);
 
     // Say what is NOT modelled rather than implying full coverage.
     if (!probe.workspace_estimate_available)

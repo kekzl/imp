@@ -15,10 +15,12 @@
 #include "exec/executor.h"
 #include "core/logging.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace imp::engine_internal {
@@ -80,6 +82,15 @@ inline void ensure_prefill_workspace(GraphExecutor* executor) {
 inline size_t library_reserve_charge(int library_reserve_mb) {
     return library_reserve_mb < 0 ? kMeasuredLibraryReserveBytes
                                   : (static_cast<size_t>(library_reserve_mb) << 20);
+}
+
+// The library reserve this start measured: max(forward window, whole-init residual), the residual
+// being device use minus the pool ledger. None without a forward window, and none when the residual
+// is negative: the ledger then counts a pool twice and hides the libraries (#2347, 27B: -253 MiB).
+inline std::optional<size_t> library_reserve_measurement(size_t forward_window, int64_t residual) {
+    if (forward_window == SIZE_MAX || residual < 0)
+        return std::nullopt;
+    return std::max(forward_window, static_cast<size_t>(residual));
 }
 
 // PLE n-gram context of each decode-step sequence: its tokens at pos0-2, pos0-1 (pos0 = its

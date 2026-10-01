@@ -354,6 +354,27 @@ static size_t measure_library_forward_window(size_t free_before, size_t named_in
     return window > named_in_window ? window - named_in_window : 0;
 }
 
+// What this start measured, or why it measured nothing (negative residual: #2347).
+static void log_library_measurement(size_t forward_window, int64_t residual, size_t measured,
+                                    int library_reserve_mb) {
+    if (forward_window == SIZE_MAX)
+        return;
+    if (residual < 0) {
+        // Neither reported as a measurement nor recorded: the next start keeps the plan's charge.
+        IMP_LOG_INFO(
+            "library reserve: not measured this start: the pool ledger is %.0f MiB above device "
+            "use (a pool counted twice), so the residual cannot show the libraries; the plan "
+            "keeps charging %.0f MiB and nothing is recorded",
+            -residual / (1024.0 * 1024.0),
+            engine_internal::library_reserve_charge(library_reserve_mb) / (1024.0 * 1024.0));
+        return;
+    }
+    IMP_LOG_INFO(
+        "library reserve: forward window %.0f MiB, whole-init %.0f MiB — charging %.0f MiB "
+        "(AUDIT B79/B80)",
+        forward_window / (1024.0 * 1024.0), residual / (1024.0 * 1024.0), measured / (1024.0 * 1024.0));
+}
+
 // Report the charge against what the plan assumed, and name the value to pin.
 //
 // The caller takes max(forward_window, whole_init) and caches that: on the NVFP4 path the
@@ -463,16 +484,11 @@ void Engine::warmup() {
     // Take the larger: the window can only see a subset, so a window reading HIGHER means the
     // residual lost something to a pool still growing during warmup. Keep the bigger number
     // rather than under-charge the plan.
-    const size_t whole_init = MemAccount::instance().unattributed_bytes();
-    measured_library_reserve_ = (forward_window == SIZE_MAX) ? SIZE_MAX
-                                                             : std::max(forward_window, whole_init);
-    if (forward_window != SIZE_MAX) {
-        IMP_LOG_INFO(
-            "library reserve: forward window %.0f MiB, whole-init %.0f MiB — charging %.0f MiB "
-            "(AUDIT B79/B80)",
-            forward_window / (1024.0 * 1024.0), whole_init / (1024.0 * 1024.0),
-            measured_library_reserve_ / (1024.0 * 1024.0));
-    }
+    const int64_t residual = MemAccount::instance().unattributed_signed_bytes();
+    const size_t whole_init = residual > 0 ? static_cast<size_t>(residual) : 0;
+    measured_library_reserve_ =
+        engine_internal::library_reserve_measurement(forward_window, residual).value_or(SIZE_MAX);
+    log_library_measurement(forward_window, residual, measured_library_reserve_, config_.library_reserve_mb);
     // Only now is there a number to recommend: everything above decides it, and
     // the warning that names it has to come after, not before (#1746).
     report_library_reserve(measured_library_reserve_, forward_window, whole_init, config_.library_reserve_mb);
