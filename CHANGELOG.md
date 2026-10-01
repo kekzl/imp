@@ -8,7 +8,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `imp-quantize --calib` without `--calib-groups` drops attention groups A/C at n_rep >= 5 (was all groups plus a warning). Qwen3-14B PPL: BD 9.9068, ABCD 12.2634, RTN 9.9849; `--calib-weight sq` stays opt-in (BD 10.0563). Roadmap rows 6, 8, 11 closed.
 
 ### Fixed
-- KV plan prices the sparse decode key min/max pool per block (#2360): it was allocated after the sizing, unpriced (F16/FP8 logged, NVFP4 not even that). Qwen3.8-27B NVFP4 KV: 4096 B metadata per 36864 B K+V block-layer, 11.1 % overcommit before.
+- Sparse decode key min/max pool (#2360): priced per block in the KV plan (was unpriced; NVFP4 not even logged), and a requested `attention.sparse_topk_tokens` keeps the pool fixed: under the default growable pool it was never built (WARN, no-op). Qwen3.8-27B NVFP4 KV: 199.5 MiB = 22.2 % of K+V.
 - VRAM ledger: a freed weight allocation leaves `WEIGHTS` (#2354); freed sources (27B F16 LM head 2425 MiB, Flash-Next GDN packs 6857 MiB) kept the whole-init residual at -495 / -3349 MiB. Now +1930 / +1823 MiB at warmup, so the library reserve is measured again.
 - Startup diagnostics state what runs (#2347): a rejected memory plan names the live pool (was "APPLIED", "Set runtime.max_seq_len=0"); no false out_norm WARN on Qwen4Exp; a negative ledger residual (27B -495 MiB) is no library-reserve measurement (was "measured 0 MiB", recorded for the next start).
 - cuBLASLt: a GEMM algo pinned at one M is checked with `cublasLtMatmulAlgoCheck` before it runs at another M of its bucket; a failing M gets its own pin (#2346). Pin failures per run: Flash-Next startup + 3 prompts 446 -> 0, Qwen3.8-27B 28-request chat 288 -> 0; deterministic greedy output identical.
