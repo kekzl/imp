@@ -76,6 +76,11 @@ def _preflight(base: str, origin: str) -> httpx.Response:
                          timeout=5)
 
 
+def _vary(r: httpx.Response) -> set[str]:
+    """Vary tokens, lowercased: httplib adds Accept-Encoding on a compressed body."""
+    return {t.strip().lower() for t in r.headers.get("vary", "").split(",") if t.strip()}
+
+
 def _no_cors(r: httpx.Response):
     for h in ("access-control-allow-origin", "access-control-allow-methods",
               "access-control-allow-headers"):
@@ -89,14 +94,14 @@ class TestCorsOrigins:
     def test_default_sends_no_cors_headers(self, server):
         for r in (_get(server, A), _get(server, None), _preflight(server, A)):
             _no_cors(r)
-            assert "vary" not in r.headers
+            assert "origin" not in _vary(r)
         assert _preflight(server, A).status_code == 204
 
     @pytest.mark.parametrize("server", [("--cors-origins", A)], indirect=True)
     def test_listed_origin_is_echoed(self, server):
         for r in (_get(server, A), _preflight(server, A)):
             assert r.headers.get("access-control-allow-origin") == A, dict(r.headers)
-            assert r.headers.get("vary") == "Origin"
+            assert "origin" in _vary(r)
             assert "Authorization" in r.headers.get("access-control-allow-headers", "")
             assert "POST" in r.headers.get("access-control-allow-methods", "")
         assert _preflight(server, A).status_code == 204
@@ -105,10 +110,10 @@ class TestCorsOrigins:
     def test_unlisted_origin_gets_nothing(self, server):
         for r in (_get(server, B), _preflight(server, B), _get(server, None)):
             _no_cors(r)
-            assert r.headers.get("vary") == "Origin"
+            assert "origin" in _vary(r)
 
     @pytest.mark.parametrize("server", [("--cors-origins", "*")], indirect=True)
     def test_wildcard_restores_any_origin(self, server):
         for r in (_get(server, A), _get(server, B), _preflight(server, B), _get(server, None)):
             assert r.headers.get("access-control-allow-origin") == "*", dict(r.headers)
-            assert "vary" not in r.headers
+            assert "origin" not in _vary(r)
