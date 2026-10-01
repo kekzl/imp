@@ -10,26 +10,7 @@ numbers in [`BENCHMARKS.md`](BENCHMARKS.md), limitations in
 | Row form | fact + number + decision + ref, one row each |
 | Investigation | goes to `docs/plans/`, the PR body or `LIMITATIONS.md`, never into a table cell |
 | Lifecycle | entries are closed, corrected or superseded in place, never deleted |
-| Citations | `scripts/check_doc_citations.py` requires `path:N anchor`; anchor on line N = ok, anchor moved (once in the file, or the one hit within 25 lines) = `DRIFT` warning, exit 0, `--fix` rewrites N; anchor gone or ambiguous = `DEAD` (#2231: line drift alone turned main red 3x on 2026-09-29; #2185: the existence-only check passed a `weight_map.cpp` cite eleven lines off until 2026-08-31 and two `Makefile` cites 16 and 81 lines off); a bare basename matching two files is resolved by the anchor, else reports `AMBIGUOUS` and passes, so cite the path; a stale `git worktree` checkout makes every basename ambiguous at once |
-
-Detail records, one per closed Open row:
-
-| Open row | closed | row text | detail record |
-|---|---|---|---|
-| 1, 2, 4, 7, 13, 14, 15 | 2026-09-16 | [`plans/2026-09-16-open-rows-closed-detail.md`](plans/2026-09-16-open-rows-closed-detail.md) | same file |
-| 12 | 2026-09-16 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-before-the-move) | `gemm_cublas` pricing in [`plans/2026-09-04-lever-ledger-detail.md`](plans/2026-09-04-lever-ledger-detail.md), closure evidence in the row |
-| 3 | 2026-10-01 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`plans/2026-08-28-sparse-decode-attention.md`](plans/2026-08-28-sparse-decode-attention.md) |
-| 5 | 2026-10-01 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`plans/2026-10-01-recurrent-state-paging-measured.md`](plans/2026-10-01-recurrent-state-paging-measured.md) |
-| 6 | 2026-10-01 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`quantization.md`](quantization.md), #2359 |
-| 8 | 2026-10-01 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | owner decision, [`LIMITATIONS.md`](LIMITATIONS.md#model-specific-blockers), #2359 |
-| 9 | 2026-10-01 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`API_FEATURES.md`](API_FEATURES.md#video), #2363, #2370 |
-| 10 | 2026-10-01 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`MODELS.md`](MODELS.md#vision), #2375 .. #2389 |
-| 11 | 2026-10-01 | [archive](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | owner decision, AUDIT B84, B36, #2359 |
-
-Older ledgers: [`plans/2026-09-04-lever-ledger-detail.md`](plans/2026-09-04-lever-ledger-detail.md)
-(serving and kernel rows, 08-25 .. 09-04),
-[`plans/2026-08-31-roadmap-ledger-detail.md`](plans/2026-08-31-roadmap-ledger-detail.md)
-(everything moved out on 2026-08-31).
+| Citations | `scripts/check_doc_citations.py` needs `path:N anchor`: anchor on N = ok, moved = `DRIFT` (exit 0, `--fix`), gone or ambiguous = `DEAD`, bare basename on 2 files = `AMBIGUOUS` (passes), so cite the path; [history](archive/roadmap_ledger_2026_09_28.md#house-rule-history) |
 
 ## Direction
 
@@ -41,51 +22,48 @@ Older ledgers: [`plans/2026-09-04-lever-ledger-detail.md`](plans/2026-09-04-leve
 | Foundations (2026-05) | chunked-prefill FMHA + 256 MiB S-matrix, ctx ~4-6k to 32k+ (#453), multi-request decode batching (#454), StreamingLLM auto-enable on full KV (#455) |
 | Serving ground (2026-08) | warm weight cache (#956), suspend-to-RAM (#954), request-order independence (#957), gemma-3 IMA fix (#959) |
 
-## Standing position (2026-09-04)
+## Standing position
 
-| axis | state |
-|---|---|
-| GDN hybrid @32 vs vLLM | AHEAD. Qwen3.8-27B 1807.9 vs 1447.8 tok/s (+24.9%, vLLM 0.27.1), 1833.8 vs 1410.7 (+30.0%, 0.28.0), @8 573.0 vs 495.8 (+15.6%), @32 x 1082-token prompts 873.4 vs 497.8 (+75.5%), 3/3 each |
-| dense NVFP4 @32 vs vLLM | PARITY OR AHEAD (2026-09-08). Qwen3-14B 38-token prompts 3948.9 vs 3817.6 (+3.4%, 2026-09-03); 982-token prompts 2491.2/2515.5/2482.6 vs 2485.9/2490.9/2497.7 (+0.2/+1.0/-0.6%, 2 of 3; was 1845.0 vs 2478.0 = 0.75x before the grouped FP8 decode attention, #1953) |
-| batch=1 | 99.5 tok/s spec-off (2026-09-10, `gdn.m1_fused`) = 89% of the ~112 tok/s roofline (14.5 GB/token at 1628 GB/s resident), was 87.4 = 78% on 2026-08-27; past it only through the MTP verify |
-| raw-speed half of [`GOAL.md`](GOAL.md) | MET: batch=1 decode +13-48% vs llama.cpp on every hero (2026-07-12 re-sweep), MoE prefill leads vLLM single-seq, cross-engine PPL parity measured. Open is empty since 2026-10-01; the agentic-half rows are closed in the archive |
-| admission at fan-out | `auto` resolves 28 vs a pinned 32 (630 vs 936): admission, not rotation, and 28 sustain full rate under continuous arrival |
-| next engine-side post | the dense decode step at 32 streams after the grouped FP8 attention and the small-M launch work (ledger 2026-09-08, second row): the small-M GEMM class re-priced at 83% of resident bandwidth by launch durations (5.49 vs 4.56 ms floor per Qwen3-14B step BEFORE the PDL weight prefetch + q\|k\|v launch, which took ~0.3 ms of that), and the prefill forward at 80% of the FP4 peak (Open 2) |
+| axis | state | measured | ref |
+|---|---|---|---|
+| GDN hybrid @32 vs vLLM | AHEAD. Qwen3.8-27B 1807.9 vs 1447.8 tok/s (+24.9%, vLLM 0.27.1), 1833.8 vs 1410.7 (+30.0%, 0.28.0), @8 573.0 vs 495.8 (+15.6%), @32 x 1082-token prompts 873.4 vs 497.8 (+75.5%), 3 trials each | 2026-09-02 | [`BENCHMARKS.md`](BENCHMARKS.md#imp-vs-vllm-at-concurrency) runs 1-4 |
+| dense NVFP4 @32 vs vLLM | PARITY OR AHEAD. Qwen3-14B 38-token prompts 3948.9 vs 3817.6 (+3.4%, 2026-09-03); 982-token prompts +0.2/+1.0/-0.6% (was 0.75x before #1953) | 2026-09-08 | [`benchmarks_pre_v0.44.md`](archive/benchmarks_pre_v0.44.md) runs 8-10 |
+| batch=1 | 99.5 tok/s spec-off (`gdn.m1_fused`) vs the ~112 tok/s roofline (14.5 GB/token at 1628 GB/s resident), was 87.4 = 78% on 2026-08-27; past it only through the MTP verify | 2026-09-10 | `CHANGELOG.md` 0.39.0, [archive](archive/roadmap_ledger_2026_09_28.md#batch1) |
+| raw-speed half of [`GOAL.md`](GOAL.md) | MET: batch=1 decode +13-48% vs llama.cpp on every hero, MoE prefill leads vLLM single-seq, cross-engine PPL parity measured | 2026-07-12 | [`PERF.md`](PERF.md), [`GOAL.md`](GOAL.md) |
 
-Both engines measured on one client (`tools/analysis/vllm_conc_ab.sh`, 3
-alternating trials, same checkpoint); the "1.58x gap" and "~1.08x pinned" of
-2026-08-24/26 compared an imp number from this client against a vLLM number
-from a 200-token-gen client. Rows with PROV in [`BENCHMARKS.md`](BENCHMARKS.md)
-("re-measured on one client", runs 5-9).
+Method: both engines on one client (`tools/analysis/vllm_conc_ab.sh`), 3 alternating trials, same checkpoint; PROV rows in [`BENCHMARKS.md`](BENCHMARKS.md#imp-vs-vllm-at-concurrency). Superseded rows: [archive](archive/roadmap_ledger_2026_09_28.md#standing-position-rows-superseded-2026-10-01).
 
 ## Open
 
-Ranked by what an agent workload notices first. No open rows since
-2026-10-01; rows 1-15 are closed (index above). A new row takes number 16.
-
-| # | item | state | ref |
-|---|---|---|---|
+No open rows since 2026-10-01; rows 1-15 are closed (index below), a new row takes number 16, ranked by what an agent workload notices first.
 
 ## Not gaps
 
+Continuous batching, prefix caching, per-request LoRA, embeddings, the three API dialects, `/metrics`, suspend/resume, sampler surface.
 
-Explicitly NOT gaps: continuous batching, prefix caching, per-request LoRA,
-embeddings, the three API dialects, `/metrics`, suspend/resume, sampler surface
+## Closed rows and archive
 
-## Archive
+| closed row or section | closed or moved | archive anchor | detail record |
+|---|---|---|---|
+| Open 1, 2, 4, 7, 13, 14, 15 | 2026-09-16 | [Closed](archive/roadmap_ledger_2026_09_28.md#closed) | [`plans/2026-09-16-open-rows-closed-detail.md`](plans/2026-09-16-open-rows-closed-detail.md) |
+| Open 12 | 2026-09-16 | [Open rows closed before the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-before-the-move) | `gemm_cublas` pricing in [`plans/2026-09-04-lever-ledger-detail.md`](plans/2026-09-04-lever-ledger-detail.md), closure evidence in the row |
+| Open 3 | 2026-10-01 | [Open rows closed after the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`plans/2026-08-28-sparse-decode-attention.md`](plans/2026-08-28-sparse-decode-attention.md) |
+| Open 5 | 2026-10-01 | [Open rows closed after the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`plans/2026-10-01-recurrent-state-paging-measured.md`](plans/2026-10-01-recurrent-state-paging-measured.md) |
+| Open 6 | 2026-10-01 | [Open rows closed after the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`quantization.md`](quantization.md), #2359 |
+| Open 8 | 2026-10-01 | [Open rows closed after the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | owner decision, [`LIMITATIONS.md`](LIMITATIONS.md#model-specific-blockers), #2359 |
+| Open 9 | 2026-10-01 | [Open rows closed after the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`API_FEATURES.md`](API_FEATURES.md#video), #2363, #2370 |
+| Open 10 | 2026-10-01 | [Open rows closed after the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | [`MODELS.md`](MODELS.md#vision), #2375 .. #2389 |
+| Open 11 | 2026-10-01 | [Open rows closed after the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) | owner decision, AUDIT B84, B36, #2359 |
+| The 2026 bar | 2026-09-28 | [The 2026 bar](archive/roadmap_ledger_2026_09_28.md#the-2026-bar-assessed-2026-08-21) | same section |
+| Lever ledger | 2026-09-28 | [Lever ledger](archive/roadmap_ledger_2026_09_28.md#lever-ledger) | [`plans/2026-09-04-lever-ledger-detail.md`](plans/2026-09-04-lever-ledger-detail.md) (serving and kernel rows, 08-25 .. 09-04) |
+| Batch=1, MTP verify on a GDN hybrid | 2026-09-28 | [Batch=1](archive/roadmap_ledger_2026_09_28.md#batch1) | same section |
+| MoE host offload | 2026-09-28 | [MoE host offload](archive/roadmap_ledger_2026_09_28.md#moe-host-offload) | same section |
+| First-party NVFP4 quantizer | 2026-09-28 | [NVFP4 quantizer](archive/roadmap_ledger_2026_09_28.md#first-party-nvfp4-quantizer-experimental-calibration-ships) | same section |
+| Closed competitive records | 2026-09-28 | [records](archive/roadmap_ledger_2026_09_28.md#closed-competitive-records) | same section |
+| Known limitations | 2026-09-28 | [Known limitations](archive/roadmap_ledger_2026_09_28.md#known-limitations) | [`LIMITATIONS.md`](LIMITATIONS.md) |
+| Investigated and shelved | 2026-09-28 | [shelved](archive/roadmap_ledger_2026_09_28.md#investigated-and-shelved) | same section |
+| Citations rule history (#2231, #2185) | 2026-10-01 | [House rule history](archive/roadmap_ledger_2026_09_28.md#house-rule-history) | same section |
+| Standing position (2026-09-04) table | 2026-10-01 | [Standing position rows superseded 2026-10-01](archive/roadmap_ledger_2026_09_28.md#standing-position-rows-superseded-2026-10-01) | same section |
+| Everything moved out on 2026-08-31 | 2026-08-31 | - | [`plans/2026-08-31-roadmap-ledger-detail.md`](plans/2026-08-31-roadmap-ledger-detail.md) |
 
-Moved on 2026-09-28 to [`archive/roadmap_ledger_2026_09_28.md`](archive/roadmap_ledger_2026_09_28.md), text verbatim, relative links re-based with `../`:
-
-| section | archive anchor |
-|---|---|
-| Open row 12 (closed 2026-09-16) | [Open rows closed before the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-before-the-move) |
-| Open rows 3, 5, 6, 8, 9, 10, 11 (closed 2026-10-01) | [Open rows closed after the move](archive/roadmap_ledger_2026_09_28.md#open-rows-closed-after-the-move) |
-| Closed | [Closed](archive/roadmap_ledger_2026_09_28.md#closed) |
-| The 2026 bar | [The 2026 bar](archive/roadmap_ledger_2026_09_28.md#the-2026-bar-assessed-2026-08-21) |
-| Lever ledger | [Lever ledger](archive/roadmap_ledger_2026_09_28.md#lever-ledger) |
-| Batch=1, MTP verify on a GDN hybrid | [Batch=1](archive/roadmap_ledger_2026_09_28.md#batch1) |
-| MoE host offload | [MoE host offload](archive/roadmap_ledger_2026_09_28.md#moe-host-offload) |
-| First-party NVFP4 quantizer | [NVFP4 quantizer](archive/roadmap_ledger_2026_09_28.md#first-party-nvfp4-quantizer-experimental-calibration-ships) |
-| Closed competitive records | [records](archive/roadmap_ledger_2026_09_28.md#closed-competitive-records) |
-| Known limitations | [Known limitations](archive/roadmap_ledger_2026_09_28.md#known-limitations) |
-| Investigated and shelved | [shelved](archive/roadmap_ledger_2026_09_28.md#investigated-and-shelved) |
+Archive moves keep text verbatim, relative links re-based with `../`.
