@@ -2,6 +2,7 @@
 #include "common/exit_codes.h"
 #include "handlers.h"
 #include "client_error_log.h"
+#include "cors.h"
 #include "utils.h"
 #include "webui_asset.h"  // generated: IMP_WEBUI_HTML
 #include "model/hf_fetch.h"
@@ -192,6 +193,10 @@ static int run_server(int argc, char** argv) {
 
     // Store API key and limits in state
     state.api_key = args.api_key;
+    state.cors_origins = parse_cors_origins(args.cors_origins);
+    if (!state.cors_origins.empty())
+        printf("CORS: %zu allowed origin(s) (--cors-origins %s)\n", state.cors_origins.size(),
+               args.cors_origins.c_str());
     state.metrics_require_auth = args.metrics_require_auth;
     state.max_concurrent = args.max_concurrent;
     state.request_timeout = args.request_timeout;
@@ -241,9 +246,15 @@ static int run_server(int argc, char** argv) {
 
     // CORS headers + API key auth on every response
     svr.set_pre_routing_handler([&state](const httplib::Request& req, httplib::Response& res) {
-        res.set_header("Access-Control-Allow-Origin", "*");
-        res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-        res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        // No CORS headers unless --cors-origins allows the Origin (#2402); the web UI is same-origin.
+        const std::string acao = cors_allow_origin(state.cors_origins, req.get_header_value("Origin"));
+        if (!acao.empty()) {
+            res.set_header("Access-Control-Allow-Origin", acao);
+            res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+            res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        }
+        if (!state.cors_origins.empty() && acao != "*")
+            res.set_header("Vary", "Origin");
 
         // /metrics is exempt from auth/limits by default (stock Prometheus scrape works out of the box),
         // but leaks model name, d_model, and cumulative token counts - --metrics-require-auth folds it

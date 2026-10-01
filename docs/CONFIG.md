@@ -173,6 +173,7 @@ Both GGUF and SafeTensors accepted; `--model` is optional (model-less start, fir
 | `--models-dir <path>` | - | directory to scan for `.gguf` models (auto-load on select) |
 | `--lora NAME=PATH` | - | load a PEFT LoRA adapter, repeatable - see LoRA below |
 | `--api-key <key>` | - | require `Authorization: Bearer <key>` |
+| `--cors-origins <list>` | - (no CORS headers) | comma list of browser origins answered with `Access-Control-Allow-Origin` on an exact match (+ `Vary: Origin`); `*` = any origin. See [`DEPLOYMENT.md`](DEPLOYMENT.md#auth-and-exposure) |
 | `--max-concurrent <n>` | `64` (`0`=unlimited) | max simultaneous requests |
 | `--rate-limit <n>` | `0` (unlimited) | max requests/min per IP |
 | `--log-requests <path>` | off | append per-request JSONL with prompt + response content + timing |
@@ -279,5 +280,5 @@ imp/
 │   ├── imp-server/     OpenAI + Anthropic-compatible HTTP server
 │   └── imp-bench/      Standalone benchmarks
 ├── tests/              Google Test suite, 8 module binaries
-└── third_party/stb/    stb_image (image loading for vision)
+└── third_party/stb/    stb_image (PNG decode for vision; JPEG uses libjpeg-turbo)
 ```

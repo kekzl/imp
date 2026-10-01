@@ -307,7 +307,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         } else {
             auto img = std::make_shared<imp::ImageData>();
             if (!state.ctx->engine->preprocess_image(ctx.params.images[0], *img))
-                return fail("Failed to process image");
+                return fail("Failed to process image (accepted formats: JPEG, PNG)");
             ctx.snap.vision_image = std::move(img);
         }
     }

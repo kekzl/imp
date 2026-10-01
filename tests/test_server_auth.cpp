@@ -5,9 +5,11 @@
 // accept/reject assertions.
 
 #include <gtest/gtest.h>
+#include "cors.h"
 #include "utils.h"
 
 #include <string>
+#include <vector>
 
 TEST(BearerAuth, AcceptsCorrectToken) {
     EXPECT_TRUE(bearer_token_matches("Bearer secret123", "secret123"));
@@ -75,4 +77,30 @@ TEST(ApiKeyAuth, RejectsWhenNeitherMatches) {
 TEST(ApiKeyAuth, EmptyXApiKeyDoesNotMatchNonEmptyConfiguredKey) {
     // An absent x-api-key must never match by accident.
     EXPECT_FALSE(api_key_matches("", "", "secret123"));
+}
+
+// --cors-origins (#2402): default sends no CORS headers; exact match echoes; "*" restores any.
+TEST(CorsOrigins, DefaultAllowsNoOrigin) {
+    const auto none = parse_cors_origins("");
+    EXPECT_TRUE(none.empty());
+    EXPECT_EQ(cors_allow_origin(none, "https://a.example"), "");
+    EXPECT_EQ(cors_allow_origin(none, ""), "");
+}
+
+TEST(CorsOrigins, ExactMatchEchoesOrigin) {
+    const auto list = parse_cors_origins(" https://a.example , http://localhost:3000,,");
+    ASSERT_EQ(list, (std::vector<std::string>{"https://a.example", "http://localhost:3000"}));
+    EXPECT_EQ(cors_allow_origin(list, "https://a.example"), "https://a.example");
+    EXPECT_EQ(cors_allow_origin(list, "http://localhost:3000"), "http://localhost:3000");
+    EXPECT_EQ(cors_allow_origin(list, "https://b.example"), "");
+    EXPECT_EQ(cors_allow_origin(list, "https://a.example.evil"), "");
+    EXPECT_EQ(cors_allow_origin(list, "HTTPS://A.EXAMPLE"), "");
+    EXPECT_EQ(cors_allow_origin(list, ""), "");
+}
+
+TEST(CorsOrigins, WildcardAllowsAny) {
+    const auto list = parse_cors_origins("*");
+    EXPECT_EQ(cors_allow_origin(list, "https://b.example"), "*");
+    EXPECT_EQ(cors_allow_origin(list, ""), "*");
+    EXPECT_EQ(cors_allow_origin(parse_cors_origins("https://a.example,*"), "https://c.example"), "*");
 }

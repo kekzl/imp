@@ -16,7 +16,8 @@ struct DecodedImage {
 
 // The one image decoder of every vision family. JPEG: libjpeg-turbo with Pillow's settings
 // (ISLOW IDCT, fancy upsampling, Pillow's CMYK->RGB), bit-identical to Image.convert("RGB").
-// Other formats: stb_image. Either side <= 16384 px; false on any failure.
+// PNG: stb_image. Every other format is refused (#2401). Either side <= 16384 px; false on any
+// failure.
 [[nodiscard]] bool decode_image(std::span<const uint8_t> data, DecodedImage& out);
 [[nodiscard]] bool decode_image_file(const std::string& path, DecodedImage& out);
 

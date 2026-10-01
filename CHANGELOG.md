@@ -4,7 +4,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Security
+- Vision decode (#2401): stb_image is compiled `STBI_ONLY_PNG`, so the GIF decoder of CVE-2026-5185 (heap overflow in `stbi__gif_load_next`, stb <= 2.30, no upstream fix) is not in the binary. Accepted image formats: JPEG (libjpeg-turbo), PNG; GIF, BMP and every other format answer `400` naming them.
+- CORS (#2402): imp-server no longer sends `Access-Control-Allow-Origin: *`. New `--cors-origins <list>`: default no CORS headers (same-origin only), an exact Origin match is echoed with `Vary: Origin`, `*` restores the old behaviour. The built-in web UI is same-origin and unaffected.
+- cpp-httplib v0.56.0 -> v0.58.0 (#2403): v0.57.0 rejects control characters in the chunk-size line (request smuggling, yhirose/cpp-httplib#2585) and bounds the trailer declaration set (#2583).
+
 ### Fixed
+- `tools/Dockerfile.ncu` uses the build image's base, `nvidia/cuda:13.4.1-devel-ubuntu26.04` by digest (was 13.3.1 by tag), so profiling recompiles match the build (#2404).
 - One GPU lock per host: `scripts/gpu_lock.sh` and the gpu-stats skill's `gpu-lock.sh` share `/tmp/gpu-lock`, its `flock` mutex and one key=value record (pid liveness, else `started_epoch + expected_minutes`), so a holder taken through either refuses the other. A live pid in the old `/tmp/imp-gpu.lock` still refuses both; that file is only read.
 - cuBLASLt algo probe no longer times candidates inside a graph capture (#2396): a cold shape there takes a host-checked heuristic pick, and each batch size runs one eager step before its capture. Qwen3.8-27B bs=48: 47/48 -> 48/48 decode graphs, captured M=47/48 GEMMs use the benchmarked algo; 48-stream median 1528.7 / 1587.4 -> 1970.9 / 1967.2 tok/s.
 - An explicit `runtime.max_batch_size` the weight-upload reserve cannot hold is clamped after Pass 1, with a WARN

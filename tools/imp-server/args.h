@@ -40,6 +40,9 @@ struct ServerArgs : CommonArgs {
     // this the limit keys on a client-written string, so varying one header bypasses it and every
     // distinct value is a permanent tracker entry (#1614).
     std::string trusted_proxies;
+    // --cors-origins: comma list of browser origins allowed cross-origin; "*" = any. Empty
+    // (default) sends no Access-Control-Allow-* headers, same-origin only (#2402).
+    std::string cors_origins;
     // Per-request work multipliers. Each of these turns one HTTP request into
     // N units of engine work while counting as one against --rate-limit and
     // --max-concurrent (#1616).

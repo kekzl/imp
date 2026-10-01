@@ -194,6 +194,7 @@ Structured output disables thinking on its own: `json_mode`, `json_schema`, `too
 
 - Multiple images encoded in prompt order, max `--max-images-per-request` (default 8).
 - Picture wider or taller than 16384 px: `400`.
+- Formats: JPEG and PNG. GIF, BMP, WebP and every other format: `400` (#2401).
 
 `http(s)` URLs require `--allow-remote-images` (#1610); destination refused if loopback, link-local, RFC1918, CGNAT or ULA.
 
