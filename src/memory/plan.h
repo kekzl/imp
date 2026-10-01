@@ -62,6 +62,9 @@ struct ConcurrencyLimits {
     // K+V bytes of one block for ONE layer, packing- and scale-aware.
     // Single source: kv_block_bytes_per_layer() in runtime/vram_budget.h.
     size_t kv_block_bytes_per_layer = 0;
+    // Per-block metadata sized from the same block count (sparse decode key min/max,
+    // KVCache::minmax_block_bytes), 0 when that pool is not built.
+    size_t kv_meta_block_bytes_per_layer = 0;
     // Floor: the pool must hold at least this many tokens or long requests are
     // rejected at admission while /v1/models still advertises max_seq_len.
     int min_kv_tokens = 0;
@@ -106,6 +109,7 @@ struct KvPlan {
     int blocks_per_seq = 0;
     int swa_blocks = 0;
     size_t bytes = 0;
+    size_t meta_bytes = 0;  // blocks * kv_meta_block_bytes_per_layer * global layers
     size_t swa_bytes = 0;
     // True when the pool holds less than the min_kv_tokens floor: requests
     // longer than the pool are rejected at admission. Loud, not silent.
