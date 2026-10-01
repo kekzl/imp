@@ -1,6 +1,7 @@
 #include "compute/gemm.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include <atomic>
+#include "compute/gemm_algo_capture.h"
 #include "compute/gemm_capture_fp16_sm120.h"
 #include "core/cuda_raii.h"
 #include "core/cuda_static_reset.h"
@@ -21,6 +22,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <array>
+#include <span>
 #include <unordered_map>
 #include <mutex>
 #include <stdexcept>
@@ -272,6 +275,8 @@ struct GemmCacheEntry {
     int64_t algo_M = 0;
     // cublasLtMatmulAlgoCheck of the pin at each other M seen in the bucket (#2346).
     std::unordered_map<int64_t, bool> pin_ok_at_m;
+    // The algo a stream capture recorded for this entry is logged once (#2396).
+    bool capture_logged = false;
 };
 
 static std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash> s_gemm_cache;
@@ -709,6 +714,87 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     }
 }
 
+// True when `stream` is not capturing, so the probe may launch and time candidates (#2396).
+static bool probe_allowed_on(cudaStream_t stream) {
+    cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
+    const bool ok = cudaStreamIsCapturing(stream, &st) == cudaSuccess;
+    if (!ok)
+        (void)cudaGetLastError();  // the failed query's own error, not a launch error
+    return gemm_algo_probe_allowed(ok, st != cudaStreamCaptureStatusNone);
+}
+
+static int algo_tile_id(const cublasLtMatmulAlgo_t& algo) {
+    int tile = -1;
+    cublasLtMatmulAlgoConfigGetAttribute(&algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &tile, sizeof(tile), nullptr);
+    return tile;
+}
+
+// Cold shape inside a capture: heuristic order, first candidate cublasLtMatmulAlgoCheck accepts.
+// Host-only, no launch: probing there invalidated the capture and dropped the size's graph (#2396).
+static void select_algo_host_only(cublasLtHandle_t lt, GemmCacheEntry& entry, int64_t M, int64_t K,
+                                  int64_t N) {
+    cublasLtMatmulPreference_t pref = nullptr;
+    CUBLASLT_CHECK(cublasLtMatmulPreferenceCreate(&pref));
+    CUBLASLT_CHECK(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                                        &s_workspace_size, sizeof(s_workspace_size)));
+    cublasLtMatmulHeuristicResult_t results[kMaxAlgoCandidates];
+    int nresults = 0;
+    cublasLtMatmulAlgoGetHeuristic(lt, entry.opDesc, entry.Bdesc, entry.Adesc, entry.Cdesc, entry.Cdesc, pref,
+                                   kMaxAlgoCandidates, results, &nresults);
+    cublasLtMatmulPreferenceDestroy(pref);
+
+    std::array<GemmAlgoHostCheck, kMaxAlgoCandidates> checks{};
+    for (int i = 0; i < nresults; i++) {
+        cublasLtMatmulHeuristicResult_t res{};
+        checks[i].supported = cublasLtMatmulAlgoCheck(lt, entry.opDesc, entry.Bdesc, entry.Adesc, entry.Cdesc,
+                                                      entry.Cdesc, &results[i].algo,
+                                                      &res) == CUBLAS_STATUS_SUCCESS;
+        checks[i].workspace = res.workspaceSize;
+    }
+    const int pick = gemm_capture_safe_pick(std::span(checks.data(), (size_t)std::max(nresults, 0)),
+                                            s_workspace_size);
+    entry.benchmarked = false;
+    entry.algo_M = M;
+    entry.has_algo = pick >= 0;
+    entry.workspace_size = pick >= 0 ? checks[pick].workspace : 0;
+    if (pick >= 0)
+        entry.algo = results[pick].algo;
+    IMP_LOG_INFO(
+        "[gemm-algo] M=%ld K=%ld N=%ld first seen inside a stream capture: no timing, heuristic "
+        "cand[%d] of %d (host-checked, tile=%d)",
+        (long)M, (long)K, (long)N, pick, nresults, pick >= 0 ? algo_tile_id(entry.algo) : -1);
+}
+
+// Probe outside a capture, host-only pick inside one. Same signature as the probe.
+static void select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry, const void* A_data, const void* B_data,
+                        size_t C_bytes, float alpha, float beta, bool is_int_compute, cudaStream_t stream,
+                        int M, int N, int K, bool fp16_scale = false) {
+    if (probe_allowed_on(stream))
+        benchmark_and_select_algo(lt, entry, A_data, B_data, C_bytes, alpha, beta, is_int_compute, stream, M,
+                                  N, K, fp16_scale);
+    else
+        select_algo_host_only(lt, entry, M, K, N);
+}
+
+// Names the algo a capture records for this entry, once per entry. Caller holds the mutex.
+static void log_captured_algo_once(GemmCacheEntry& entry, cudaStream_t stream, int64_t M, int64_t K,
+                                   int64_t N) {
+    if (entry.capture_logged)
+        return;
+    cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(stream, &st) != cudaSuccess) {
+        (void)cudaGetLastError();
+        return;
+    }
+    if (st != cudaStreamCaptureStatusActive)
+        return;
+    entry.capture_logged = true;
+    IMP_LOG_INFO("[gemm-algo] captured GEMM M=%ld K=%ld N=%ld uses the %s algo (chosen at M=%ld, tile=%d)",
+                 (long)M, (long)K, (long)N,
+                 !entry.has_algo ? "default" : (entry.benchmarked ? "benchmarked" : "heuristic"),
+                 (long)entry.algo_M, entry.has_algo ? algo_tile_id(entry.algo) : -1);
+}
+
 void gemm_cleanup() {
     // Say it before the caches go: a clipped activation scale is silent
     // otherwise, and the flag lives on the device (#1544).
@@ -841,11 +927,11 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                                     cuda_dtype_C, (int)K, (int)M, (int)N);
 
             size_t c_bytes = (size_t)M * N * dtype_size(C.qtype);
-            benchmark_and_select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta,
-                                      (compute_type == CUBLAS_COMPUTE_32I), stream, (int)M, (int)N, (int)K,
-                                      use_fp16_acc);
+            select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta,
+                        (compute_type == CUBLAS_COMPUTE_32I), stream, (int)M, (int)N, (int)K, use_fp16_acc);
             return new_entry;
         });
+        log_captured_algo_once(*entry, stream, M, K, N);
     }
 
     if (compute_type == CUBLAS_COMPUTE_32I) {
@@ -1006,10 +1092,11 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
             set_gemm_scale_pointers(new_entry.opDesc, aScale, bScale);
 
             size_t c_bytes = (size_t)M * N * dtype_size(C.qtype);
-            benchmark_and_select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta, false, stream,
-                                      (int)M, (int)N, (int)K);
+            select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta, false, stream, (int)M, (int)N,
+                        (int)K);
             return new_entry;
         });
+        log_captured_algo_once(*entry, stream, M, K, N);
     }
 
     // Sets per-call scale pointers (vary by weight tensor, not cached) on the cached opDesc

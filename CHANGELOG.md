@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- cuBLASLt algo probe no longer times candidates inside a graph capture (#2396): a cold shape there takes a host-checked heuristic pick, and graph prewarm runs one eager step per size before its capture. Qwen3.8-27B bs=48 had lost the M=47/48 decode graphs. TODO GPU numbers.
+
 ## [0.47.0] - 2026-10-01
 
 ### Added

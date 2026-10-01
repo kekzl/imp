@@ -518,14 +518,10 @@ void Engine::warmup() {
         }
     }
 
-    for (int i = 0; i < kMaxGraphPoolSize; i++) {
+    // Runners stay cold through the prewarm ladder: each size runs one eager step (cuBLASLt probe at
+    // that M) before its capture, so no algo probe runs inside a capture (#2396). Marked warm below.
+    for (int i = 0; i < kMaxGraphPoolSize; i++)
         decode_graph_pool_[i].invalidate();
-        // The eager pre-capture warmup step is per-runner state, but what it exists for (cuBLAS
-        // autotuning, lazy workspace init) is per-process and already ran via the two warmup
-        // requests. Skip it so the first REAL request matches the captured-graph kernel mix of
-        // every later one (greedy request-order independence, docs/determinism.md).
-        decode_graph_pool_[i].mark_process_warm();
-    }
     decode_batch_pool_.reset_upload_cache();
     if (async_graph_runner_.is_setup())
         async_graph_runner_.cleanup();
@@ -575,7 +571,7 @@ void Engine::warmup() {
     if (runtime_config_.runtime.graph_prewarm && config_.use_cuda_graphs && prewarm_n > 1) {
         const auto t0 = std::chrono::steady_clock::now();
         const int n = prewarm_n;
-        const int anchor_budget = 2 * n + 8;
+        const int anchor_budget = 3 * n + 8;
         const int anchor_len = std::min(1000, std::max(16, config_.max_seq_len - std::max(64, anchor_budget)));
         std::vector<std::shared_ptr<Request>> reqs;
         reqs.reserve(n);
@@ -591,16 +587,16 @@ void Engine::warmup() {
             // The +4 base keeps the shortest request alive across the chunked-prefill window
             // where late requests still prefill while early ones already decode; a base of 2 let
             // the first request finish before the batch assembled fully, so size n never captured.
-            // Budgets step by 2: a size held for one decode step did not capture (Qwen3.8-27B:
-            // 16/28, every other size missing); two steps per size capture 28/28.
-            req->max_tokens = is_anchor ? anchor_budget : 2 * i + 4;
+            // Budgets step by 3: one decode step per size did not capture (Qwen3.8-27B: 16/28); a cold
+            // runner spends one step eager (#2396), so each size needs two plus one of slack.
+            req->max_tokens = is_anchor ? anchor_budget : 3 * i + 4;
             req->temperature = 0.0f;
             req->ignore_eos = true;
             scheduler_->add_request(req);
             reqs.push_back(std::move(req));
         }
-        // 2n+8 decode steps finish the whole ladder; prefill takes a few more.
-        const int step_budget = 6 * n + 32;
+        // 3n+8 decode steps finish the whole ladder; prefill takes a few more.
+        const int step_budget = 9 * n + 32;
         int steps = 0;
         auto unfinished = [&]() {
             for (const auto& r : reqs)
@@ -632,6 +628,11 @@ void Engine::warmup() {
                      captured, n, steps, dt, missing.empty() ? "" : ", missing sizes:",
                      missing.c_str());
     }
+    // The eager pre-capture step exists for per-process lazy init (cuBLASLt probe, workspaces), done
+    // by now for the sizes above. Skipping it lets the first REAL request run the captured-graph
+    // kernel mix of every later one (greedy request-order independence, docs/determinism.md).
+    for (int i = 0; i < kMaxGraphPoolSize; i++)
+        decode_graph_pool_[i].mark_process_warm();
     // Drop FP8 KV calibrated_ flags so the first real prefill re-runs absmax and promotes the
     // per-layer scale via high-water-mark: warmup's synthetic BOS tokens give an unrepresentative
     // K/V absmax. executor_kv_write.cu's high-water-mark logic (FP8 path) keeps the scale

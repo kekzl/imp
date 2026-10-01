@@ -843,6 +843,8 @@ if(IMP_BUILD_TESTS)
         tests/test_prompt_tail.cpp
         # Decode graph re-capture points (#2182): deterministic mode re-captures per request set.
         tests/test_decode_graph_ctx.cpp
+        # cuBLASLt algo choice under stream capture (#2396), header-only.
+        tests/test_gemm_algo_capture.cpp
         # Public C enums vs their internal counterparts (#1206). A test file may
         # include both sides, which is the only place the two hand-maintained
         # copies of the arch/dtype numbering can be tied together.
@@ -1089,6 +1091,7 @@ if(IMP_BUILD_TESTS)
         tests/test_embedding.cu
         tests/test_gemm.cu
         tests/test_gemm_capture_fp16_sm120.cu
+        tests/test_gemm_capture_probe.cu
         tests/test_gemm_f16_narrow_smallm.cu
         tests/test_gemm_f16_narrow_prefill.cu
         tests/test_gemm_dp4a.cu
