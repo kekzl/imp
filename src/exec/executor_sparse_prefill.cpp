@@ -74,7 +74,16 @@ GraphExecutor::SparsePrefillPast GraphExecutor::sparse_prefill_pick_(const half*
                                                 s.sparse_score_std_coef, s.sp_prefill_scores,
                                                 s.sp_prefill_agg, s.sp_prefill_table, s.sp_prefill_ctx,
                                                 stream);
-    return past > 0 ? SparsePrefillPast{s.sp_prefill_table, past} : dense;
+    if (past <= 0)
+        return dense;
+    // Activity proof (prefill is not graph-captured, so this fires where the selection runs).
+    static bool logged_active = false;
+    if (!logged_active) {
+        logged_active = true;
+        IMP_LOG_INFO("sparse prefill attention ACTIVE: past %d -> %d tokens at L%d", q_offset, past,
+                     kv_layer);
+    }
+    return SparsePrefillPast{s.sp_prefill_table, past};
 }
 
 }  // namespace imp
