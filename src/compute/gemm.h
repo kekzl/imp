@@ -295,6 +295,28 @@ void gemv_q3_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_w
                                       half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
                                       size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
                                       cudaStream_t stream = nullptr);
+void gemv_q5_1_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
+                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
+                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
+                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
+                                      cudaStream_t stream = nullptr);
+
+// MoE decode kernel selectors (#2444). supported() lists exactly the formats with an arm;
+// the kernel getters throw std::invalid_argument for any other qtype (no default arm).
+using MoeDp4aDecodeFn = void (*)(const void*, const int32_t*, const block_q8_1*, const float*, half*, int,
+                                 int, size_t, int, int, int, cudaStream_t);
+using MoeDp4aGateUpFn = void (*)(const void*, const void*, const int32_t*, const block_q8_1*, const float*,
+                                 half*, half*, int, int, size_t, size_t, int, int, int, cudaStream_t);
+using MoeFp16DecodeFn = void (*)(const void*, const int32_t*, const half*, half*, int, int, size_t, int, int,
+                                 cudaStream_t);
+using MoeFp16GateUpFn = void (*)(const void*, const void*, const int32_t*, const half*, half*, half*, int,
+                                 int, size_t, size_t, int, int, cudaStream_t);
+[[nodiscard]] bool moe_dp4a_decode_supported(QType qt);
+MoeDp4aDecodeFn moe_dp4a_decode_kernel(QType qt);
+MoeDp4aGateUpFn moe_dp4a_gate_up_kernel(QType qt);
+[[nodiscard]] bool moe_fp16_decode_supported(QType qt);
+MoeFp16DecodeFn moe_fp16_decode_kernel(QType qt);
+MoeFp16GateUpFn moe_fp16_gate_up_kernel(QType qt);
 
 // Max-L1 SMEM carveout on every dp4a GEMV kernel template instantiation.
 // Called from GraphExecutor::init(), independent of PDL: the kernels carry no

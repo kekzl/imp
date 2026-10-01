@@ -625,6 +625,18 @@ void gemv_q3_k_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_w
                                               d8, y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes,
                                               q8_1_stride, d8_stride, top_k, stream);
 }
+
+void gemv_q5_1_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
+                                      const int32_t* expert_indices, const block_q8_1* q8_1, const float* d8,
+                                      half* y_gate, half* y_up, int rows, int K, size_t gate_stride_bytes,
+                                      size_t up_stride_bytes, int q8_1_stride, int d8_stride, int top_k,
+                                      cudaStream_t stream) {
+    launch_gemv_dp4a_moe_gate_up<Q5_1_Traits>(static_cast<const uint8_t*>(gate_weights),
+                                              static_cast<const uint8_t*>(up_weights), expert_indices, q8_1,
+                                              d8, y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes,
+                                              q8_1_stride, d8_stride, top_k, stream);
+}
+
 // L1 carveout for the dp4a GEMV template instantiations, called from GraphExecutor::init()
 // next to mxfp4_gemv_set_l1_carveout(), PDL or not. Was gemv_pdl_register()
 // (pdl::enable_kernel + SET_MAXL1); #1833 withdrew the PDL registration because these kernels

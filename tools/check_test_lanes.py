@@ -374,7 +374,9 @@ def main():
     # 1190 -> 1191: InternVLEncoder.RealTowerCatMatchesHfFp32 (test-e2e, GPU + checkpoint), run by make test-vision.
     # 1191 -> 1192: GemmCaptureProbe.ColdShapeInsideCaptureKeepsCaptureValid (test-compute, GPU) (#2396).
     # 1192 -> 1193: CaptureAbort.KeepColdInvalidateRunsTheEagerStepFirst (test-kv, GPU) (#2396).
-    PINNED = 1193
+    # 1193 -> 1195: GgufRef.Q5_1_MoeDecodeDispatchGateUp, GgufRef.MoeDecodeDispatchRefusesUnsupportedQType
+    # (test-quant, GPU) (#2444).
+    PINNED = 1195
 
     text = CMAKE.read_text()
     mods = module_sources(text)
