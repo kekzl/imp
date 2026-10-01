@@ -406,5 +406,27 @@ TEST(TokenizerJsonHostileIds, WellFormedVocabStillLoads) {
     EXPECT_TRUE(tok.is_added_token(3));
 }
 
+// #2377: the {2} default is a placeholder. DeepSeek-V2 names its EOS only in generation_config
+// (100001) and its vocab id 2 is "#": appended behind the placeholder, "#" stopped every reply.
+TEST(TokenizerEos, FirstAddedEosReplacesThePlaceholder) {
+    Tokenizer tok;
+    tok.add_eos_id(100001);
+    EXPECT_EQ(tok.eos_id(), 100001);
+    EXPECT_FALSE(tok.is_eos(2));
+    EXPECT_EQ(tok.eos_ids().size(), 1u);
+    tok.add_eos_id(100002);
+    EXPECT_EQ(tok.eos_id(), 100001) << "later ids append";
+    EXPECT_TRUE(tok.is_eos(100002));
+}
+
+TEST(TokenizerEos, ANamedEosKeepsFirstPlace) {
+    Tokenizer tok;
+    ASSERT_TRUE(tok.load_vocab({"a", "b", "c", "d"}, {0.f, 0.f, 0.f, 0.f}, /*bos_id=*/1, /*eos_id=*/2));
+    tok.add_eos_id(3);
+    EXPECT_EQ(tok.eos_id(), 2);
+    EXPECT_TRUE(tok.is_eos(2));
+    EXPECT_TRUE(tok.is_eos(3));
+}
+
 }  // namespace
 }  // namespace imp
