@@ -57,17 +57,18 @@ bash scripts/image_tag.sh check "$IMG" || { echo "FAIL setup: $IMG is not this t
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/accept_2174.XXXXXX")"
 echo "logs: $WORK"
-# docker rm -f can return before the name is free (Flash-Next teardown): wait until it is gone.
+# Flash-Next: the first docker rm -f fails after 10-12 s while the server frees ~66 GiB host RAM
+# (exits at 16-18 s), and the Exited container keeps the name; --init changes neither. Repeat rm -f.
 rm_ctr() {
-    docker rm -f "$CTR" >/dev/null 2>&1 || true
-    for s in $(seq 0 120); do
+    for s in $(seq 0 2 60); do
+        docker rm -f "$CTR" >/dev/null 2>&1
         if [ -z "$(docker ps -aq --filter "name=^/$CTR\$")" ]; then
-            [ "$s" -gt 0 ] && echo "  container $CTR gone after $s s"
+            [ "$s" -gt 0 ] && echo "  container $CTR gone after $((s / 2 + 1)) rm attempts"
             return 0
         fi
-        sleep 1
+        sleep 2
     done
-    echo "  container $CTR still present after 120 s"; return 1
+    echo "  container $CTR still present after 31 rm attempts"; return 1
 }
 # shellcheck disable=SC2329  # invoked by the EXIT trap
 cleanup() { rm_ctr >/dev/null 2>&1 || true; }
