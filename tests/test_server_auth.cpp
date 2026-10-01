@@ -5,6 +5,7 @@
 // accept/reject assertions.
 
 #include <gtest/gtest.h>
+#include "cors.h"
 #include "utils.h"
 
 #include <string>

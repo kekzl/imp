@@ -2,6 +2,7 @@
 #include "common/exit_codes.h"
 #include "handlers.h"
 #include "client_error_log.h"
+#include "cors.h"
 #include "utils.h"
 #include "webui_asset.h"  // generated: IMP_WEBUI_HTML
 #include "model/hf_fetch.h"

@@ -87,7 +87,7 @@ class MockConfig:
                  responses_store_ttl=3600.0, responses_store_max_entries=1000,
                  responses_store_max_bytes=256 << 20, swap_models=None, cors_origins=""):
         self.latency_ms = latency_ms
-        # --cors-origins (#2402): same parse as utils.cpp parse_cors_origins.
+        # --cors-origins (#2402): same parse as cors.h parse_cors_origins.
         self.cors_origins = [o.strip(" \t") for o in cors_origins.split(",") if o.strip(" \t")]
         # Loaded model has FIM tokens (#2201); False = /infill and `suffix` answer 400 fim_not_supported.
         self.fim = fim
@@ -131,7 +131,7 @@ class MockHandler(BaseHTTPRequestHandler):
             if len(rid) > 128:
                 out += "..."
             self.send_header("X-Request-Id", out)
-        # main.cpp pre-routing + utils.cpp cors_allow_origin (#2402).
+        # main.cpp pre-routing + cors.h cors_allow_origin (#2402).
         allowed = self.config.cors_origins
         origin = self.headers.get("Origin", "")
         acao = "*" if "*" in allowed else (origin if origin and origin in allowed else "")

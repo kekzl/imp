@@ -211,13 +211,6 @@ const char* health_unservable_code(bool engine_faulted, bool kv_pool_floored);
 bool api_key_matches(const std::string& authorization, const std::string& x_api_key,
                      const std::string& api_key);
 
-// --cors-origins: comma list, whitespace trimmed, empty entries dropped (#2402).
-std::vector<std::string> parse_cors_origins(const std::string& list);
-
-// Access-Control-Allow-Origin for a request's Origin: "" = send no CORS headers (default, empty
-// list), "*" when the list holds "*", else `origin` on an exact, case-sensitive match.
-std::string cors_allow_origin(const std::vector<std::string>& allowed, const std::string& origin);
-
 // openai_finish_reason: maps the engine's "cancelled"/"capacity" (not in OpenAI's enum) onto
 // "length" - both used to ship verbatim on a 200, so a client switching on the enum fell to its
 // default branch and treated a failed generation as normal (#1590). "length" is what makes a

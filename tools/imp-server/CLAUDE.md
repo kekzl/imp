@@ -42,7 +42,7 @@ make test-agents-external # real aider / Claude Code / OpenAI Agents SDK
 ## Pitfalls
 
 - A test against the mock proves nothing about the server.
-- CORS is off unless `--cors-origins` lists the Origin (#2402); the built-in UI is same-origin. Policy: `cors_allow_origin` in `utils.cpp`, mirrored in `tests/api/mock_server.py`.
+- CORS is off unless `--cors-origins` lists the Origin (#2402); the built-in UI is same-origin. Policy: `cors_allow_origin` in `cors.h`, mirrored in `tests/api/mock_server.py`.
 
 ## Do not touch
 
