@@ -115,7 +115,7 @@ std::vector<const uint8_t*> ptrs(const std::vector<std::vector<uint8_t>>& frames
 
 TEST(QwenVideoPatchify, MatchesHfVideoProcessorWithinOneFp16Ulp) {
     const auto meta = read_kv(kDir + "/v1_meta.txt");
-    const auto ref = read_f32(kDir + "/v1_pixels.bin");
+    const auto ref = read_f32(kDir + "/v1_pixels.f32");
     const auto thw = ints(one(meta, "grid_thw"));
     ASSERT_EQ(thw.size(), 3u) << "missing fixture " << kDir;
     ASSERT_EQ(ref.size(), static_cast<size_t>(thw[0] * thw[1] * thw[2]) * 1536);
@@ -141,7 +141,7 @@ TEST(QwenVideoPatchify, MatchesHfVideoProcessorWithinOneFp16Ulp) {
 // Sensitivity of the fixture: a swapped pair must not pass, or the test above proves nothing
 // about the temporal axis.
 TEST(QwenVideoPatchify, FixtureRejectsFramesSwappedWithinAPair) {
-    const auto ref = read_f32(kDir + "/v1_pixels.bin");
+    const auto ref = read_f32(kDir + "/v1_pixels.f32");
     std::vector<std::vector<uint8_t>> frames;
     for (int f : {1, 0, 2, 3})
         frames.push_back(synth_frame(f, 32, 64));

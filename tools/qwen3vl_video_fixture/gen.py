@@ -1,7 +1,7 @@
 """Qwen3-VL video reference fixtures from the pinned HF processor (run.sh runs this in a container).
 
 Writes into OUT (argv[2]):
-  v1_pixels.bin  float32 LE pixel_values_videos of 4 synthetic 32x64 frames, [tokens, 1536]
+  v1_pixels.f32  float32 LE pixel_values_videos of 4 synthetic 32x64 frames, [tokens, 1536]
   v1_meta.txt    grid_thw of that video
   v2_layout.txt  1 image + 1 video (2 frame-pair groups): prompt ids before/after expansion,
                  mm_token_type_ids, get_rope_index positions, grids, timestamp token ids
@@ -51,7 +51,7 @@ def write_v1(out):
     frames = np.stack([synth_frame(f, 32, 64) for f in range(4)])  # (T, H, W, C)
     res = video_processor()(videos=[frames], return_tensors="pt", do_sample_frames=False)
     px = res["pixel_values_videos"].to(torch.float32).contiguous().numpy()
-    px.astype("<f4").tofile(f"{out}/v1_pixels.bin")
+    px.astype("<f4").tofile(f"{out}/v1_pixels.f32")
     with open(f"{out}/v1_meta.txt", "w") as fh:
         fh.write(f"grid_thw {ints(res['video_grid_thw'][0].tolist())}\n")
         fh.write(f"shape {px.shape[0]} {px.shape[1]}\n")
