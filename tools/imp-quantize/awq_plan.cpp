@@ -396,22 +396,26 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
         return std::unexpected("config.json is missing the layer/head geometry --calib needs");
     }
     const Geometry geo{head_dim, n_heads / n_kv_heads};
-    const std::string groups = groups_arg.empty() ? default_groups(geo.n_rep) : groups_arg;
-    plan.groups = groups;
-    plan.n_rep = geo.n_rep;
-    if (!groups_arg.empty() && groups_arg != default_groups(geo.n_rep))
-        plan.notes.push_back("group selector: " + groups + " (default here " + default_groups(geo.n_rep) +
-                             ") - a diagnostic subset, not a normal checkpoint");
-    else if (groups != kAwqAllGroups)
-        plan.notes.push_back("group selector: " + groups + " (n_rep " + std::to_string(geo.n_rep) +
-                             " >= " + std::to_string(kAwqWideGqaRep) + ": attention groups A, C off)");
-
     // Layer prefix comes off the checkpoint: hardcoding "model.layers." cost nothing visible on
     // a hybrid naming them model.language_model.layers.N (every group found zero members, export
     // labelled calibrated regardless).
     std::set<std::string> names;
-    for (const auto& [name, t] : index)
+    bool hybrid = false;  // GDN layers present: the wide-GQA default does not apply (Qwen3.8)
+    for (const auto& [name, t] : index) {
         names.insert(name);
+        hybrid = hybrid || name.find(".linear_attn.") != std::string::npos;
+    }
+    const char* dflt = default_groups(geo.n_rep, hybrid);
+    const std::string groups = groups_arg.empty() ? dflt : groups_arg;
+    plan.groups = groups;
+    plan.n_rep = geo.n_rep;
+    plan.hybrid = hybrid;
+    if (!groups_arg.empty() && groups_arg != dflt)
+        plan.notes.push_back("group selector: " + groups + " (default here " + dflt +
+                             ") - a diagnostic subset, not a normal checkpoint");
+    else if (groups != kAwqAllGroups)
+        plan.notes.push_back("group selector: " + groups + " (dense, n_rep " + std::to_string(geo.n_rep) +
+                             " >= " + std::to_string(kAwqWideGqaRep) + ": attention groups A, C off)");
     const std::string prefix = resolve_layer_prefix(names);
     if (prefix.empty()) {
         return std::unexpected("cannot find the per-layer tensor prefix in this checkpoint "

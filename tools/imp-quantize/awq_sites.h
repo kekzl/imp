@@ -28,15 +28,17 @@ namespace imp::awq {
 // hybrids and are unmeasured against an uncalibrated twin.
 constexpr const char* kAwqAllGroups = "ABCDEG";
 
-// Default when --calib-groups is absent: n_rep >= 5 drops attention groups A and C.
-// Qwen3-14B (n_rep 5): ABCD 12.2634, BD 9.9068, round-to-nearest 9.9849 PPL.
+// Default when --calib-groups is absent: n_rep >= 5 drops attention groups A and C on dense models;
+// GDN hybrids keep all. Qwen3-14B (dense, n_rep 5): ABCD 12.2634, BD 9.9068, RTN 9.9849 PPL;
+// Qwen3.8-27B (hybrid, n_rep 6): ABCD 4.5986, BDEG 4.6136.
 constexpr int64_t kAwqWideGqaRep = 5;
 constexpr const char* kAwqWideGqaGroups = "BDEG";
-[[nodiscard]] inline const char* default_groups(int64_t n_rep) {
-    return n_rep >= kAwqWideGqaRep ? kAwqWideGqaGroups : kAwqAllGroups;
+[[nodiscard]] inline const char* default_groups(int64_t n_rep, bool hybrid) {
+    return n_rep >= kAwqWideGqaRep && !hybrid ? kAwqWideGqaGroups : kAwqAllGroups;
 }
-[[nodiscard]] inline bool attention_groups_on_wide_gqa(const std::string& groups, int64_t n_rep) {
-    return n_rep >= kAwqWideGqaRep && groups.find_first_of("AC") != std::string::npos;
+[[nodiscard]] inline bool attention_groups_on_wide_gqa(const std::string& groups, int64_t n_rep,
+                                                       bool hybrid) {
+    return n_rep >= kAwqWideGqaRep && !hybrid && groups.find_first_of("AC") != std::string::npos;
 }
 
 // Which convention the block norms of an architecture follow.

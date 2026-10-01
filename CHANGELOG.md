@@ -14,7 +14,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Qwen3-VL video, CPU half (#2363): `qwen_patchify_video` (real frame pairs on the temporal axis), `expand_video_placeholders` (`<x.x seconds>` per pair), `qwen_build_mrope_positions_mm`. vs transformers 5.17.0: pixels 0 elements over 1 FP16 ulp, 113 prompt ids and 3x113 M-RoPE positions 0 diffs. Wired into server and CLI by #2370.
 
 ### Changed
-- `imp-quantize --calib` without `--calib-groups` drops attention groups A/C at n_rep >= 5 (was all groups plus a warning). Qwen3-14B PPL: BD 9.9068, ABCD 12.2634, RTN 9.9849; `--calib-weight sq` stays opt-in (BD 10.0563). Roadmap rows 6, 8, 11 closed.
+- `imp-quantize --calib` without `--calib-groups` drops attention groups A/C on dense models at n_rep >= 5 (was all groups plus a warning); GDN hybrids keep all (Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136). Qwen3-14B PPL: BD 9.9068, ABCD 12.2634, RTN 9.9849; `--calib-weight sq` stays opt-in (BD 10.0563). Roadmap rows 6, 8, 11 closed.
 
 ### Fixed
 - JPEG decode (#2381): libjpeg-turbo with Pillow's settings replaces stb for every vision family; RGB vs Pillow max diff 3/255 -> 0/255 on test_cat, test_bus and 6 fixtures (progressive, 4:2:0, 4:2:2, 4:4:4, gray, CMYK). PNG stays on stb.
