@@ -507,7 +507,15 @@ bool Engine::init_kv_cache() {
     // The clamp above answers "what fits right now"; a growable pool keeps the
     // pre-clamp number as its ceiling and commits the clamped one, so a reading
     // skewed by another process still releasing VRAM is not final.
-    const int kv_ceiling_blocks = runtime_config_.kv_cache.growable ? kv_blocks_planned : 0;
+    // enable_key_minmax refuses a growable pool: with sparse decode requested the pool stays
+    // fixed, or the feature is a no-op and the plan charge above pays for nothing (#2360).
+    const bool kv_growable = runtime_config_.kv_cache.growable && sparse_minmax_bytes_per_layer == 0;
+    if (runtime_config_.kv_cache.growable && !kv_growable)
+        IMP_LOG_INFO(
+            "KV cache: fixed pool of %d blocks, kv_cache.growable off: "
+            "attention.sparse_topk_tokens needs a fixed pool for its key min/max metadata",
+            max_blocks);
+    const int kv_ceiling_blocks = kv_growable ? kv_blocks_planned : 0;
     // What the pool was actually built with; the retry loop below may lower it.
     int kv_ceiling_effective = kv_ceiling_blocks;
     if (kv_ceiling_blocks > 0) {
