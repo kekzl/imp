@@ -252,9 +252,22 @@ slope between two generation lengths on the same 77k-token prompt, speculation o
 | sparse 1024 | 91.1 / 88.7 / 95.5 |
 | sparse 8192 | 96.2 / 87.4 / 89.9 |
 
-Sparse is worth about +9% over dense on this shape and 1024 against 8192 is inside the spread: only
-16 of this model's 64 layers are attention, so the pages read are a small share of a decode step.
-Configure the budget for retrieval headroom, not for speed.
+**Corrected 2026-10-01** (dead-end re-check S3; the table above ran before #2364, when the NVFP4
+metadata pool of the sparse arms was unpriced): same shape, image c43392b8, growable pool, pool probe
+1493-1608 GB/s resident in all 9 boots, `sparse decode attention ACTIVE` in every sparse arm, batch 4,
+harness `tools/analysis/sparse_mla_ab.sh`, log `~/imp-e2-s3.log`:
+
+| arm | decode tok/s |
+|---|---|
+| dense | 68.63 / 68.54 / 68.70 |
+| sparse 1024 | 87.72 / 88.75 / 87.25 |
+| sparse 8192 | 84.11 / 84.30 / 84.16 |
+
+Sparse 1024 is +28 % over dense (median 87.72 vs 68.63), and 1024 beats 8192 by 3.56 tok/s against a
+largest arm spread of 1.50: the budget is a small speed lever (+4.2 %). Rules fixed before the run.
+State before: "Sparse is worth about +9% over dense on this shape and 1024 against 8192 is inside the
+spread: only 16 of this model's 64 layers are attention, so the pages read are a small share of a
+decode step. Configure the budget for retrieval headroom, not for speed."
 
 **Two harness traps this cost.** A single wall-clock reading at a 77k prompt prices nothing: prefill
 is ~80% of it and every budget read ~13 s. And the slope must use the tokens actually emitted, not

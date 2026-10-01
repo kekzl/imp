@@ -24,7 +24,7 @@ start() {  # start <budget> <tag>
     docker rm -f imp-sparse-ab >/dev/null 2>&1
     docker run -d --name imp-sparse-ab --gpus all -p "127.0.0.1:$PORT:$PORT" -v "$HOME/models:/models" "$IMG" \
         imp-server --host 0.0.0.0 --port "$PORT" --model "/models/$MODEL" \
-        --set runtime.max_seq_len=40960 --set runtime.max_batch_size=4 \
+        --set runtime.max_seq_len=${MAX_SEQ_LEN:-40960} --set runtime.max_batch_size=4 \
         --set speculative.mtp_k=0 --set speculative.ngram=false --set server.prefix_cache=false \
         --set "attention.sparse_topk_tokens=$1" >/dev/null
     for _ in $(seq 1 120); do
@@ -48,9 +48,11 @@ stop() {  # stop <budget> <tag>: keeps the log, asserts ACTIVE on sparse arms
 }
 gen() {  # gen <prompt-json-file> <max_tokens> -> "completion_tokens seconds"
     local t0 t1 n
+    # Body via stdin: a 77k-token prompt as one argv entry exceeds the kernel's argument limit.
+    jq -c --argjson m "$2" '.max_tokens = $m' "$1" > "$1.body"
     t0=$(date +%s.%N)
     n=$(curl -s -m 1800 "http://127.0.0.1:$PORT/v1/completions" -H 'Content-Type: application/json' \
-        -d "$(jq -c --argjson m "$2" '.max_tokens = $m' "$1")" | jq -r '.usage.completion_tokens // 0')
+        -d @"$1.body" | jq -r '.usage.completion_tokens // 0')
     t1=$(date +%s.%N)
     echo "$n $(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.4f", b - a}')"
 }

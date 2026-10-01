@@ -886,6 +886,8 @@ if(IMP_BUILD_TESTS)
         tests/test_memory_backend.cpp
         tests/test_memory_allocators.cpp
         tests/test_memory_plan.cpp
+        # Weight-upload reserve and the batch it fits (#2393, header-only memory/upload_reserve.h).
+        tests/test_upload_reserve.cpp
         # PLE n-gram context from the token history (header-only, model/ngram_table.h).
         tests/test_ngram_context.cpp
         # Host-resident experts: auto max_batch_size 1, explicit batch warned (header-only).
