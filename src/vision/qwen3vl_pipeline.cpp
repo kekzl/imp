@@ -16,10 +16,24 @@
 
 namespace imp {
 
+namespace {
+
+InternVLPreprocessConfig internvl_pp_config(const VisionConfig& c) {
+    InternVLPreprocessConfig pc;
+    pc.image_size = c.image_size;
+    pc.patch_size = c.patch_size;
+    std::copy(c.image_mean, c.image_mean + 3, pc.mean);
+    std::copy(c.image_std, c.image_std + 3, pc.std);
+    return pc;
+}
+
+}  // namespace
+
 Qwen3VLPipeline::~Qwen3VLPipeline() { free_buffers(); }
 
 void Qwen3VLPipeline::free_buffers() {
     encoder_.reset();
+    internvl_encoder_.reset();
     // The tower's blocks live in the T2 arena and are not in allocs_; releasing its slots here
     // keeps a tower that outlives the arena from being read. allocs_ still holds this
     // pipeline's own scratch, sized from max_patches so it cannot be pre-charged to the arena
@@ -36,7 +50,8 @@ void Qwen3VLPipeline::free_buffers() {
 }
 
 size_t Qwen3VLPipeline::taken_bytes() const {
-    return taken_bytes_ + (encoder_ ? encoder_->taken_bytes() : 0);
+    return taken_bytes_ + (encoder_ ? encoder_->taken_bytes() : 0) +
+           (internvl_encoder_ ? internvl_encoder_->taken_bytes() : 0);
 }
 
 size_t qwen3vl_vision_arena_bytes(VisionModel& tower, int configured_max_patches) {
@@ -45,6 +60,8 @@ size_t qwen3vl_vision_arena_bytes(VisionModel& tower, int configured_max_patches
 }
 
 int Qwen3VLPipeline::patch_budget(const VisionModel& tower, int configured) {
+    if (tower.config.is_internvl)  // one fixed tile; runtime.vision_max_patches does not apply
+        return tower.config.num_patches;
     const int unit = tower.config.merge_size * tower.config.merge_size;
     int budget = configured > 0 ? configured : 4096;  // a 1024x1024 image at patch 16
     if (unit > 0)
@@ -63,7 +80,8 @@ size_t Qwen3VLPipeline::demand_bytes(const VisionModel& tower, int max_patches) 
     size_t total = static_cast<size_t>(max_patches) * features * sizeof(half);  // patches
     total += emb;                                                              // out
     total += emb * c.deepstack_indexes.size();                                 // deepstack taps
-    return total + Qwen3VLEncoder::demand_bytes(c, max_patches);
+    return total +
+           (c.is_internvl ? InternVLEncoder::demand_bytes(c) : Qwen3VLEncoder::demand_bytes(c, max_patches));
 }
 
 int64_t Qwen3VLPipeline::max_pixels() const {
@@ -76,8 +94,13 @@ int64_t Qwen3VLPipeline::max_pixels() const {
 bool Qwen3VLPipeline::init(VisionModel& tower, int max_patches, bool lazy) {
     free_buffers();
     const VisionConfig& c = tower.config;
-    if (!c.is_qwen3vl) {
-        IMP_LOG_ERROR("Qwen3-VL pipeline: the tower is not a Qwen3-VL vision model");
+    if (!c.is_qwen3vl && !c.is_internvl) {
+        IMP_LOG_ERROR("Qwen3-VL pipeline: the tower is neither a Qwen3-VL nor an InternVL vision model");
+        return false;
+    }
+    if (c.is_internvl && max_patches != c.num_patches) {
+        IMP_LOG_ERROR("InternVL pipeline: patch budget %d, the tile has %d patches", max_patches,
+                      c.num_patches);
         return false;
     }
     const int unit = c.merge_size * c.merge_size;
@@ -104,7 +127,7 @@ bool Qwen3VLPipeline::init(VisionModel& tower, int max_patches, bool lazy) {
 
 bool Qwen3VLPipeline::ensure_ready_() {
     std::lock_guard<std::mutex> lock(ready_mu_);
-    if (encoder_)
+    if (encoder_ || internvl_encoder_)
         return true;
     if (!configured_ || !tower_)
         return false;
@@ -132,8 +155,10 @@ bool Qwen3VLPipeline::build_() {
         uploaded_tower_ = true;
     }
 
-    encoder_ = std::make_unique<Qwen3VLEncoder>();
-    if (!encoder_->init(tower, max_patches)) {
+    const bool encoder_ok = c.is_internvl
+                                ? (internvl_encoder_ = std::make_unique<InternVLEncoder>())->init(tower)
+                                : (encoder_ = std::make_unique<Qwen3VLEncoder>())->init(tower, max_patches);
+    if (!encoder_ok) {
         free_buffers();
         return false;
     }
@@ -213,6 +238,17 @@ bool Qwen3VLPipeline::preprocess(std::span<const uint8_t> data, QwenPatches& out
         IMP_LOG_ERROR("Qwen3-VL pipeline: could not decode a %zu-byte image", data.size());
         return false;
     }
+    if (tower_->config.is_internvl) {
+        const VisionConfig& c = tower_->config;
+        if (!internvl_preprocess(img.rgb.data(), img.width, img.height, internvl_pp_config(c), out.data)) {
+            IMP_LOG_ERROR("InternVL pipeline: could not preprocess a %dx%d image", img.width, img.height);
+            return false;
+        }
+        out.grid_h = out.grid_w = c.pos_embed_grid;
+        out.tokens = c.num_patches;
+        out.features = 3 * c.patch_size * c.patch_size;
+        return true;
+    }
     const bool ok = qwen_patchify(img.rgb.data(), img.width, img.height, patchify_config(), out);
     if (!ok)
         IMP_LOG_ERROR("Qwen3-VL pipeline: could not patchify a %dx%d image", img.width, img.height);
@@ -222,7 +258,7 @@ bool Qwen3VLPipeline::preprocess(std::span<const uint8_t> data, QwenPatches& out
 bool Qwen3VLPipeline::preprocess_video(std::span<const std::span<const uint8_t>> frames,
                                        std::vector<QwenPatches>& out) const {
     out.clear();
-    if (!tower_ || frames.empty())
+    if (!tower_ || frames.empty() || tower_->config.is_internvl)  // InternVL video: not implemented
         return false;
     std::vector<DecodedImage> rgb(frames.size());
     int w0 = 0, h0 = 0;
@@ -285,6 +321,16 @@ bool Qwen3VLPipeline::encode_rgb(const uint8_t* rgb, int width, int height, Qwen
         return false;
     }
     QwenPatches patches;
+    if (tower_->config.is_internvl) {
+        const VisionConfig& c = tower_->config;
+        const InternVLPreprocessConfig pc = internvl_pp_config(c);
+        if (!internvl_preprocess(rgb, width, height, pc, patches.data))
+            return false;
+        patches.grid_h = patches.grid_w = c.pos_embed_grid;
+        patches.tokens = c.num_patches;
+        patches.features = 3 * c.patch_size * c.patch_size;
+        return encode_patches(patches, out, stream);
+    }
     if (!qwen_patchify(rgb, width, height, patchify_config(), patches)) {
         IMP_LOG_ERROR("Qwen3-VL pipeline: could not patchify a %dx%d image", width, height);
         return false;
@@ -307,6 +353,22 @@ bool Qwen3VLPipeline::encode_patches(const QwenPatches& patches, Qwen3VLImage& o
         return false;
     }
 
+    if (c.is_internvl) {
+        if (patches.tokens != c.num_patches) {
+            IMP_LOG_ERROR("InternVL pipeline: %d patches, the tile has %d", patches.tokens, c.num_patches);
+            return false;
+        }
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_patches_, patches.data.data(),
+                                           patches.data.size() * sizeof(half), cudaMemcpyHostToDevice,
+                                           stream));
+        if (!internvl_encoder_->encode(d_patches_, d_out_, stream))
+            return false;
+        out.grid_rows = out.grid_cols = c.pos_embed_grid / 2;
+        out.tokens = c.num_image_tokens;
+        out.d_embeddings = d_out_;
+        out.d_deepstack.clear();
+        return true;
+    }
     const auto built = qwen3vl_build_vision_grid(patches.grid_h, patches.grid_w, c.merge_size,
                                                  c.pos_embed_grid);
     if (!built) {

@@ -22,7 +22,7 @@ std::string qwen_preprocess_vision_parts(imp::Engine& engine, const ChatRequestP
                                          ChatStateSnapshot& snap);
 
 // One template block per part, content order: the template's own image and video blocks.
-std::string qwen_vision_blocks(const std::string& order);
+std::string qwen_vision_blocks(const std::string& order, bool internvl);
 
 // Expands image then video placeholders in snap.tokens.
 std::expected<void, std::string> qwen_expand_vision_placeholders(ChatStateSnapshot& snap);

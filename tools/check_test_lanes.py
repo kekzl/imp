@@ -371,7 +371,8 @@ def main():
     # 1188 -> 1189: MLAAttnOutput.PaddedSymmetricSplitKMatchesGeneric (GPU): MLA decode at HD 192
     # split-K + compaction vs the generic kernel (#2374).
     # 1189 -> 1190: InternVLEncoder.MatchesHfFp32PerStage (test-e2e, GPU), run by make test-vision.
-    PINNED = 1190
+    # 1190 -> 1191: InternVLEncoder.RealTowerCatMatchesHfFp32 (test-e2e, GPU + checkpoint), run by make test-vision.
+    PINNED = 1191
 
     text = CMAKE.read_text()
     mods = module_sources(text)

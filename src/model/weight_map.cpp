@@ -1,6 +1,5 @@
 #include "model/weight_map.h"
 #include "model/multimodal_wrapper.h"
-#include "vision/qwen3vl_vision_load.h"
 #include "model/tensor_kind_matcher.h"
 #include "core/logging.h"
 #include "model/model_limits.h"
@@ -1396,26 +1395,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             "encoder; this checkpoint runs as a text model and audio input cannot be sent.",
             stats.audio);
 
-    // Vision tower, when the config loader recognised one. Its weights ride in
-    // the same shard map as the LM's — that is why Model owns it — but they are
-    // routed by their own mapper, not by the LM matchers above.
-    if (model.vision_tower) {
-        const auto loaded = load_qwen3vl_vision_tensors(tensors, *model.vision_tower);
-        if (loaded) {
-            IMP_LOG_INFO("Vision tower: %d tensors assigned (%zu blocks, %zu deepstack mergers)",
-                         loaded->assigned, model.vision_tower->layers.size(),
-                         model.vision_tower->deepstack_mergers.size());
-        } else {
-            // Drop it rather than hand the encoder a tower with null slots:
-            // that would surface as a garbage embedding many layers later.
-            const auto& e = loaded.error();
-            IMP_LOG_WARN(
-                "Vision tower incomplete (%s; %d assigned, %d unknown, %d missing), "
-                "continuing text-only",
-                e.what.c_str(), e.stats.assigned, e.stats.unknown, e.stats.missing);
-            model.vision_tower.reset();
-        }
-    }
+    // Vision tower, when the config loader recognised one: same shard map as the LM, own mapper.
+    if (model.vision_tower)
+        load_vision_tower_weights(tensors, model);
 
     // A MoE model whose experts were all skipped loads, runs, and answers with garbage
     // (routing picks null-tensor experts; gpt-oss-20b BF16 logged "unrecognised layer weight"

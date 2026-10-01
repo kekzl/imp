@@ -1,0 +1,5 @@
+image_sha256 8a7112609a101aec1e52ffba0e60c9f5af656b156d8a9cc3a352c343a3ddc6b7
+shape 256 2048
+relL2_hf_bf16_vs_fp32 2.870027e-02
+relL2_hf_fp16_vs_fp32 3.192971e-03
+relL2_stored_fp32_as_f16 2.069966e-04

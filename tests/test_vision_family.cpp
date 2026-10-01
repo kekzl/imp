@@ -30,8 +30,7 @@ TEST(VisionFamily, RegistryMapsExactNames) {
 TEST(VisionFamily, LoadableOnlyWithAnEncoder) {
     EXPECT_TRUE(vision_family_loadable(VisionFamily::Qwen3VL));
     EXPECT_FALSE(vision_family_loadable(VisionFamily::None));
-    // Recognised, encoder not built yet: text-only with a WARN naming the family.
-    EXPECT_FALSE(vision_family_loadable(VisionFamily::InternVL));
+    EXPECT_TRUE(vision_family_loadable(VisionFamily::InternVL));
     EXPECT_STREQ(vision_family_name(VisionFamily::InternVL), "InternVL");
     EXPECT_STREQ(vision_family_name(VisionFamily::None), "none");
 }
@@ -48,7 +47,7 @@ TEST(VisionFamily, ProbeFollowsTheRegistry) {
     };
     EXPECT_TRUE(probe("qwen3_vl"));
     EXPECT_TRUE(probe("qwen3_5_moe"));
-    EXPECT_FALSE(probe("internvl_vision"));
+    EXPECT_TRUE(probe("internvl_vision"));
     EXPECT_FALSE(probe("pixtral"));
     std::ofstream(dir / "config.json") << R"({"model_type": "qwen3"})";
     EXPECT_FALSE(HFConfigLoader::probe_vision_tower(dir.string())) << "no vision_config: text-only";
@@ -77,7 +76,7 @@ TEST(VisionFamily, LoadConfigTextOnlyPathsWarn) {
     EXPECT_NE(err.find("pixtral"), std::string::npos) << err;
 
     EXPECT_FALSE(load(R"({"model_type": "internvl_vision", "hidden_size": 1024})", err));
-    EXPECT_NE(err.find("InternVL vision tower recognised"), std::string::npos) << err;
+    EXPECT_NE(err.find("InternVL vision_config rejected"), std::string::npos) << err;
 
     EXPECT_TRUE(load(R"({"model_type": "qwen3_vl", "depth": 24, "hidden_size": 1024, "num_heads": 16,
         "intermediate_size": 4096, "patch_size": 16, "spatial_merge_size": 2, "temporal_patch_size": 2,

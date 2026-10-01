@@ -40,8 +40,7 @@ const char* vision_family_name(VisionFamily f) {
 }
 
 bool vision_family_loadable(VisionFamily f) {
-    // InternVL: recognised, encoder not built yet (roadmap row 10, units T3-T5).
-    return f == VisionFamily::Qwen3VL;
+    return f == VisionFamily::Qwen3VL || f == VisionFamily::InternVL;
 }
 
 }  // namespace imp

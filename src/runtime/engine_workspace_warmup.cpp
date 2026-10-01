@@ -203,10 +203,12 @@ bool Engine::init_features() {
         if (!qwen_vision_.init(*model_->vision_tower, budget, engine_arena().lazy())) {
             IMP_LOG_WARN("Qwen3-VL vision tower failed to initialise — continuing text-only");
         } else if (model_->tokenizer()) {
-            qwen_image_pad_id_ = model_->tokenizer()->find_token("<|image_pad|>");
+            // InternVL splices at <IMG_CONTEXT> (1-D positions); Qwen3-VL at <|image_pad|> (M-RoPE).
+            const char* pad = qwen_vision_.image_splice_token();
+            qwen_image_pad_id_ = model_->tokenizer()->find_token(pad);
             if (qwen_image_pad_id_ < 0)
-                IMP_LOG_WARN("Qwen3-VL: no <|image_pad|> in the tokenizer — images unavailable");
-            qwen_video_pad_id_ = model_->tokenizer()->find_token("<|video_pad|>");
+                IMP_LOG_WARN("vision: no %s in the tokenizer, images unavailable", pad);
+            qwen_video_pad_id_ = model_->tokenizer()->find_token(qwen_vision_.video_splice_token());
         }
     }
 

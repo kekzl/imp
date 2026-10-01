@@ -108,16 +108,24 @@ int run_oneshot(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGenerate
             const bool has_video = !video_layout.stamp_ids.empty();
             if (has_video)
                 counts.resize(counts.size() - video_layout.stamp_ids.size());
+            const bool internvl = ctx->engine->vision_is_internvl();
             std::string blocks;
             for (size_t i = 0; i < counts.size(); ++i)
-                blocks += "<|vision_start|><|image_pad|><|vision_end|>";
+                blocks += internvl ? "<IMG_CONTEXT>\n" : "<|vision_start|><|image_pad|><|vision_end|>";
             if (has_video)
                 blocks += "<|vision_start|><|video_pad|><|vision_end|>";
             std::vector<imp::ChatMessage> msgs = {{"user", blocks + args.prompt}};
             tokens = chat_tpl.apply(*tok, msgs);
-            const int32_t pad_id = tok->find_token("<|image_pad|>");
-            auto expanded = pad_id < 0 ? std::unexpected(std::string("tokenizer has no <|image_pad|>"))
-                                       : imp::expand_image_placeholders(tokens, pad_id, counts);
+            const int32_t pad_id = tok->find_token(internvl ? "<IMG_CONTEXT>" : "<|image_pad|>");
+            auto expanded = pad_id < 0
+                                ? std::unexpected(std::string("tokenizer has no image placeholder token"))
+                            : internvl
+                                ? imp::expand_internvl_image_placeholders(tokens, pad_id,
+                                                                          tok->find_token("<img>"),
+                                                                          tok->find_token("</img>"),
+                                                                          static_cast<int>(counts.size()),
+                                                                          counts.empty() ? 0 : counts[0])
+                                : imp::expand_image_placeholders(tokens, pad_id, counts);
             if (expanded && has_video)
                 expanded = imp::expand_video_placeholders(tokens, tok->find_token("<|video_pad|>"),
                                                           tok->find_token("<|vision_start|>"),

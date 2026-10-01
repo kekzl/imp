@@ -6,6 +6,7 @@
 // Model (same checkpoint); this holds a reference, not ownership, uploading on first init.
 
 #include "vision/image_processor.h"  // QwenPatches
+#include "vision/internvl_encoder.h"
 #include "vision/qwen3vl_encoder.h"
 #include "vision/vision_model.h"
 
@@ -61,6 +62,11 @@ public:
     size_t taken_bytes() const;
 
     bool is_ready() const { return configured_; }
+    // InternVL tower (fixed tile, 1-D positions, <IMG_CONTEXT> layout) rather than Qwen3-VL.
+    [[nodiscard]] bool is_internvl() const { return tower_ && tower_->config.is_internvl; }
+    // Prompt token the embeddings splice at, and the video one ("" = no video on this tower).
+    const char* image_splice_token() const { return is_internvl() ? "<IMG_CONTEXT>" : "<|image_pad|>"; }
+    const char* video_splice_token() const { return is_internvl() ? "" : "<|video_pad|>"; }
     int max_patches() const { return max_patches_; }
     // Largest image, in pixels, this pipeline's patch budget allows.
     int64_t max_pixels() const;
@@ -103,6 +109,7 @@ private:
     VisionModel* tower_ = nullptr;
     size_t taken_bytes_ = 0;
     std::unique_ptr<Qwen3VLEncoder> encoder_;
+    std::unique_ptr<InternVLEncoder> internvl_encoder_;  // InternVL towers: fixed 448 tile
     int max_patches_ = 0;
     // Whether THIS pipeline uploaded the tower, and so has to invalidate it.
     bool uploaded_tower_ = false;
