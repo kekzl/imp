@@ -100,7 +100,8 @@ imp-cli --model ./Qwen3-1.7B-nvfp4 --prompt "Hello"
 | `--calib <file>` | AWQ search using the calibration file; omit for round-to-nearest |
 | `--calib-weight abs\|sq` | search error weight, default `abs`; `sq` (2nd moment, needs an `IMPCAL02` file) is 1.10% better on Qwen3-0.6B, 0.15 PPL worse on Qwen3-14B `BD` |
 | `--calib-groups <letters>` | subset of `ABCDEG` (A=q/k/v, B=gate/up, C=o_proj, D=down_proj, E/G=GDN); default `ABCDEG` at `n_rep < 5`, `BDEG` at `n_rep >= 5` on dense models (GDN hybrids keep `ABCDEG`: Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136) |
-| `--lm-head` | also quantize `lm_head` (free at runtime, see below) |
+| `--lm-head [fp8\|nvfp4\|source]` | how `lm_head` is written: `fp8` (default for `modelopt`) = the per-row FP8 head `auto` runs, served without load-time conversion; `nvfp4` (bare flag) = quantized like any Linear; `source` (default for `vllm`) = copied as is ([below](#what-stays-at-source-precision-qwen38-27b-bf16-source-5175-gib)) |
+| `--kv-hint auto\|fp8\|none` | `kv_cache_quant_algo` in `hf_quant_config.json` (`modelopt` only): `auto` (default) = `FP8` for `model_type` `qwen3` / `qwen3_moe`, the families with a measured FP8 KV PPL ([KV cache](#kv-cache-element-type)), else `null` |
 | `--keep-attn-gate` | keep the fused Q+gate `q_proj` (Qwen3.5/Qwen3-Next) at source precision |
 | `--keep-gdn-proj [all\|in,gate,out]` | keep GDN `linear_attn` projections at source precision, bare flag = `all` |
 | `--format modelopt\|vllm` | output tensor layout, see below |
@@ -129,7 +130,7 @@ multiplier directly, one convention's number under the other's name scales every
 | `embed_tokens` | 2 425 MiB | not possible, no NVFP4 lookup; +0.94% PPL if forced via exact round-trip (Qwen3-0.6B 29.4204 -> 29.6982) | - |
 | Vision tower | 875 MiB | loads at source precision only | - |
 | MTP draft head | 810 MiB | quantized: draft acceptance 81% -> 0 (#1428) | refused |
-| `lm_head` | 2 425 MiB | nothing extra (see below) | `--lm-head` |
+| `lm_head` | 2 425 MiB | written as the per-row FP8 head by default: 1 213.4 MiB, nothing converted at load (below) | `--lm-head` |
 
 `lm_head` is the exception: a native BF16 head is re-quantized at load anyway (default `auto` = FP8
 since #2166; the table below is the older NVFP4 default, `gemm.nvfp4_lm_head=on`; weights 17 920 -> 16 192 MiB, checkpoint
@@ -160,6 +161,22 @@ NVFP4 head bytes, FP16 activations on every row count (decode, batch, `--perplex
 | Qwen3-8B-Q8_0 | 11.1108 | 10.7623 | -4.7 % |
 | Qwen3-30B-A3B-NVFP4 | 11.8443 | 11.3476 | -3.0 % |
 | Qwen3.8-Flash-Next-NVFP4 | 4.6493 | 4.4873 | host-expert bound |
+
+`imp-quantize --lm-head fp8` (default for `--format modelopt`, #2479) writes this head on disk:
+
+- Tensors: `lm_head.weight` F8_E4M3 `[V, D]` + `lm_head.weight_row_scale` F32 `[V]`, codes from the runtime's own kernel on the loader's FP16 bits.
+- Load: served directly in every `gemm.nvfp4_lm_head` mode, log `checkpoint E4M3 per-row scales served directly, no load-time conversion`.
+- `lm_head` stays in `exclude_modules`, the embedding at source precision; a checkpoint without an `lm_head.weight` tensor (tied) has no head to write.
+- `--format vllm` keeps `source`: vLLM's `ParallelLMHead` takes no scales.
+
+| Qwen3-14B export | head on disk | PPL 45k, KV FP16 |
+|---|---:|---:|
+| `--lm-head source` (runtime builds the FP8 head at load) | 1483.8 MiB BF16 | 9.7350 |
+| `--lm-head fp8` (default) | 742.5 MiB | 9.7350 |
+
+[PROV: commit=1b9352fc date=2026-10-02 hw=RTX5090 model=Qwen3-14B quant=NVFP4-RTN cuda=13.4.1
+       path=imp-quantize+imp-cli-perplexity n=1-per-arm-deterministic
+       cmd=`imp-cli --perplexity ppl_45k.txt --set runtime.deterministic_gemm=true --set kv_cache.dtype=fp16`]
 
 ### Roles that must stay full precision
 
@@ -229,6 +246,11 @@ dtype = "auto"  # auto (default) | fp16 | fp8 | int8 | int4 | nvfp4 | mxfp4
 | `fp8` | forced FP8 E4M3 | default flipped to FP16 in PR #51 (FP8 silently broke Llama, Mistral, DeepSeek at first decode); verified coherent on Qwen3 dense, Qwen3.5/3.6 GDN, Llama-3.2 (warmup-calibration bug fixed in PR #89), Gemma-4 (dual-head_dim carve-out removed in PR #91); opt-in beyond the `auto` allowlist |
 | `int8` / `int4` | forced INT8 (dp4a attention) / INT4 | `int4` is VRAM pressure only: coherent, ~22% decode regression at 20K context |
 | `nvfp4` / `mxfp4` | forced FP4, E4M3 or UE8M0 micro-scales | chunked prefill via `paged_kv_gather_{nvfp4_to_fp16,mxfp4_kv_to_fp16}` |
+
+`imp-quantize --kv-hint auto` (default, #2480) declares the hint for the two families measured above:
+
+- `model_type` `qwen3` / `qwen3_moe`: `kv_cache_quant_algo: "FP8"`; every other family: `null`; `--kv-hint fp8|none` overrides.
+- Qwen3-14B NVFP4 export, `ppl_45k.txt`, deterministic: KV FP16 9.7350, KV FP8 under `auto` 9.7642 (+0.30 %).
 
 The `auto` allowlist and per-family quality gate (`kv_fp8_hint_default_safe` /
 `kv_fp8_no_hint_default_safe`, `src/model/model.cpp`) is what makes `fp8` safe to force elsewhere.
