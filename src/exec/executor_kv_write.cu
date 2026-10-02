@@ -6,6 +6,7 @@
 #include "exec/executor_kernels.cuh"
 #include "exec/executor_helpers.h"
 #include "quant/fp8_quant.h"
+#include "core/kv_dtype.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
@@ -81,6 +82,11 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
 
     int threads = std::min(row_elems, 256);
 
+    // Quantized write strides from kv_dtype_info(): packed data in bytes, scales in entries.
+    const QType kvq = cache->qtype();
+    const int packed_block_stride = static_cast<int>(kv_block_data_bytes(kvq, kv_block_size, nkv, hd));
+    const int scale_entry_stride = static_cast<int>(kv_block_scale_entries(kvq, kv_block_size, nkv, hd));
+
     bool use_fp8 = (cache->qtype() == QType::FP8_E4M3);
     bool use_int8 = (cache->qtype() == QType::INT8);
     bool use_int4 = (cache->qtype() == QType::INT4);
@@ -90,48 +96,41 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
         // NVFP4 quantized KV cache write — 2 FP4 values packed per byte, UE4M3 scale per group of 16
         Tensor kv = view_rows(k_, n);
         Tensor vv = view_rows(v_, n);
-        int nvfp4_block_stride = kv_block_size * nkv * hd / 2;            // bytes
-        int nvfp4_scale_block_stride = kv_block_size * nkv * (hd / 16);   // bytes (UE4M3)
         dim3 grid_nvfp4(n, 2);
         pdl::enable_kernel(write_kv_cache_nvfp4_kernel);
         pdl::launch(write_kv_cache_nvfp4_kernel, grid_nvfp4, dim3(256), size_t(0), stream,
-            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
-            block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
-            static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
-            static_cast<uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
-            static_cast<uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), nvfp4_block_stride,
-            nvfp4_scale_block_stride, nkv, hd, kv_block_size, n, wr_max_blocks,
-            wr_n_seq);
+                    static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
+                    block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
+                    static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
+                    static_cast<uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
+                    static_cast<uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), packed_block_stride,
+                    scale_entry_stride, nkv, hd, kv_block_size, n, wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (use_mxfp4_kv) {
         // MXFP4-KV quantized KV cache write — identical layout to NVFP4 but UE8M0 scales
         Tensor kv = view_rows(k_, n);
         Tensor vv = view_rows(v_, n);
-        int mxfp4_block_stride = kv_block_size * nkv * hd / 2;           // bytes (same as NVFP4)
-        int mxfp4_scale_block_stride = kv_block_size * nkv * (hd / 16);  // bytes (UE8M0)
         dim3 grid_mxfp4(n, 2);
         write_kv_cache_mxfp4_kv_kernel<<<grid_mxfp4, 256, 0, stream>>>(
-            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
-            block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
+            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions, block_tables,
+            static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
-            static_cast<uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), mxfp4_block_stride,
-            mxfp4_scale_block_stride, nkv, hd, kv_block_size, n, wr_max_blocks,
-            wr_n_seq);
+            static_cast<uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), packed_block_stride, scale_entry_stride,
+            nkv, hd, kv_block_size, n, wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (use_int4) {
         // INT4 quantized KV cache write — 2 values packed per byte, per-head scales
         Tensor kv = view_rows(k_, n);
         Tensor vv = view_rows(v_, n);
-        int int4_block_stride = kv_block_size * nkv * hd / 2;  // bytes (half the INT8 stride)
-        int scale_block_stride = kv_block_size * nkv;
+
         dim3 grid_int4(n, 2);
         write_kv_cache_int4_kernel<<<grid_int4, 256, 0, stream>>>(
-            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
-            block_tables, static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
+            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions, block_tables,
+            static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
             static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
             static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
-            static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)), int4_block_stride, scale_block_stride, nkv,
+            static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)), packed_block_stride, scale_entry_stride, nkv,
             hd, kv_block_size, n, wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (use_int8) {
@@ -139,14 +138,12 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
         Tensor kv = view_rows(k_, n);
         Tensor vv = view_rows(v_, n);
 
-        int scale_block_stride = kv_block_size * nkv;
         dim3 grid_int8(n, 2);  // blockIdx.y: 0=K, 1=V
         write_kv_cache_int8_kernel<<<grid_int8, 256, 0, stream>>>(
-            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions,
-            block_tables, static_cast<int8_t*>(cache->k_ptr(kv_layer, 0)),
-            static_cast<int8_t*>(cache->v_ptr(kv_layer, 0)),
+            static_cast<const half*>(kv.data), static_cast<const half*>(vv.data), positions, block_tables,
+            static_cast<int8_t*>(cache->k_ptr(kv_layer, 0)), static_cast<int8_t*>(cache->v_ptr(kv_layer, 0)),
             static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
-            static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)), block_stride, scale_block_stride, nkv, hd,
+            static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)), block_stride, scale_entry_stride, nkv, hd,
             kv_block_size, n, wr_max_blocks, wr_n_seq);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (use_fp8) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/kv_dtype.h"
 #include "core/tensor.h"
 #include "memory/block_pool.h"
 #include <cuda_runtime.h>
@@ -23,7 +24,7 @@ static constexpr double kKvPoolSpillGbps = 500.0;
 
 // NVFP4 / MXFP4_KV micro-block size: 16 FP4 elements share one scale byte.
 // All imp model head_dims (64/128/256/512) are multiples of 16.
-static constexpr int kNVFP4Group = 16;
+static constexpr int kNVFP4Group = kKvFp4Group;
 
 class KVCache {
 public:
@@ -286,7 +287,7 @@ private:
     // INT8/INT4/NVFP4/MXFP4_KV per-head scales.
     // Layout: 2x blocks per layer (K scales region + V scales region).
     void* scale_pool_ = nullptr;
-    size_t scale_block_bytes_ = 0;  // block_size * n_kv_heads * sizeof(half)
+    size_t scale_block_bytes_ = 0;  // kv_block_scale_bytes(dtype_, ...)
     // Growable pool only: scales commit with the KV blocks, not at the ceiling (#2483).
     Region scale_region_;
     // Scale pool of `total` bytes, laid out like k/v_scale_ptr; lazy when growable. Throws.

@@ -14,6 +14,7 @@
 #include "model/model_arch.h"
 #include "compute/attention_paged.h"
 #include "core/process_diag.h"
+#include "core/kv_dtype.h"
 #include "core/logging.h"
 #include "core/tensor.h"
 #include "core/config/lm_head_mode.h"
@@ -462,11 +463,8 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // The KV dtype is final here (init_resolve_kv_dtype_ runs before
             // this), so size with its real per-element cost instead of the
             // old FP16 guess: the NVFP4-KV default on QWEN35 is 4x smaller.
-            const QType kvd = config_.kv_cache_dtype;
-            const bool kv_4bit =
-                (kvd == QType::INT4 || kvd == QType::NVFP4 || kvd == QType::MXFP4_KV);
             size_t per_tok_elems = static_cast<size_t>(nkv) * hd * 2 * kv_layers;
-            size_t per_tok_kv = kv_4bit ? per_tok_elems / 2 : per_tok_elems * dtype_size(kvd);
+            size_t per_tok_kv = kv_data_bytes(config_.kv_cache_dtype, per_tok_elems);
             // Recurrent per-sequence state (GDN/Mamba2 hybrids): unlike KV it
             // does NOT clamp downstream. SSMState allocates max_batch_size x
             // per_seq up front, so it must be in the per-slot price or auto
@@ -921,15 +919,11 @@ void Engine::init_compute_max_seq_len_() {
                 kv_layer_count -= swa_layers;
             }
         }
-        auto kv = config_.kv_cache_dtype;
-        // All packed-4-bit KV dtypes: qtype_elem_bytes() cannot express half
-        // a byte and returns 0 for NVFP4/MXFP4_KV, which made
-        // kv_bytes_per_token 0 and max_by_vram fall through to the cap,
-        // ignoring VRAM entirely on the NVFP4-KV default.
-        bool packed_4bit = (kv == QType::INT4 || kv == QType::NVFP4 || kv == QType::MXFP4_KV);
+        // kv_data_bytes(), not dtype_size(): the latter is 0 for NVFP4/MXFP4_KV and let
+        // max_by_vram fall through to the cap.
         size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim * kv_layer_count *
                                2;  // K+V, per KV head, attention layers only
-        size_t kv_bytes_per_token = packed_4bit ? (per_tok_elems / 2) : (per_tok_elems * dtype_size(kv));
+        size_t kv_bytes_per_token = kv_data_bytes(config_.kv_cache_dtype, per_tok_elems);
         // The budget planner downstream targets kv_fraction (default 0.8) of
         // free VRAM for KV. Cap the auto-detect at 0.75x that (0.6 at the
         // default) so it doesn't undershoot what the planner can afford and
