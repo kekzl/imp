@@ -3,7 +3,7 @@
 # =============================================================================
 # Stage 1: Build imp from source
 # =============================================================================
-# Native CUDA 13.4.1 devel image: nvcc 13.4 (V13.4.59) is on PATH at
+# Native CUDA 13.4.2 devel image: nvcc 13.4 (V13.4.92) is on PATH at
 # /usr/local/cuda (-> /usr/local/cuda-13.4) out of the box, no apt toolkit
 # install needed. sm_120: no new tensor-core HW (still mma.sync, no tcgen05/wgmma).
 # Ubuntu 26.04 LTS host userland → GCC 15.2 / libstdc++ 15. GCC 15 no longer
@@ -20,7 +20,7 @@
 # Dockerfile built two different base layers on two different days. Refresh
 # with `docker buildx imagetools inspect nvidia/cuda:<tag>` (the index digest,
 # not a per-platform one) and keep the five ci.yml `image:` lines in step.
-FROM nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378 AS toolchain
+FROM nvidia/cuda:13.4.2-devel-ubuntu26.04@sha256:14fd494fd8496817a70700e4d2c52bd42de56c5d39c041bf8342814614d5fe56 AS toolchain
 
 ARG CMAKE_BUILD_TYPE=Release
 
@@ -130,10 +130,10 @@ RUN --mount=type=cache,id=imp-ccache,target=/ccache \
 # =============================================================================
 # Stage 2: Minimal runtime image
 # =============================================================================
-# Native CUDA 13.4.1 runtime image already ships the matching cudart + cuBLAS
+# Native CUDA 13.4.2 runtime image already ships the matching cudart + cuBLAS
 # (and transitive deps like libnvjitlink) at /usr/local/cuda; only the small
 # entrypoint/healthcheck helpers need adding.
-FROM nvidia/cuda:13.4.1-runtime-ubuntu26.04@sha256:1725dba28b39fd0c3c35665c98284b603bef7b30e8f7990a98d4c3cbb905016a
+FROM nvidia/cuda:13.4.2-runtime-ubuntu26.04@sha256:761af29727cf549d7938c7cbdce1e6fbf114a96dfbb799ac747395675d2b18f7
 
 # OCI image metadata — GHCR renders org.opencontainers.image.description on the
 # package page (https://github.com/kekzl/imp/pkgs/container/imp). Hardcoded here
