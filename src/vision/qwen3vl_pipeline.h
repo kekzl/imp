@@ -8,6 +8,7 @@
 #include "vision/image_processor.h"  // QwenPatches
 #include "vision/internvl_encoder.h"
 #include "vision/qwen3vl_encoder.h"
+#include "vision/vision_family.h"
 #include "vision/vision_model.h"
 
 #include <cstdint>
@@ -62,11 +63,12 @@ public:
     size_t taken_bytes() const;
 
     bool is_ready() const { return configured_; }
-    // InternVL tower (fixed tile, 1-D positions, <IMG_CONTEXT> layout) rather than Qwen3-VL.
+    // InternVL tower (fixed tile, 1-D positions, own prompt layout) rather than Qwen3-VL.
     [[nodiscard]] bool is_internvl() const { return tower_ && tower_->config.is_internvl; }
-    // Prompt token the embeddings splice at, and the video one ("" = no video on this tower).
-    const char* image_splice_token() const { return is_internvl() ? "<IMG_CONTEXT>" : "<|image_pad|>"; }
-    const char* video_splice_token() const { return is_internvl() ? "" : "<|video_pad|>"; }
+    // Prompt layout family; no tower reports None (Qwen3-VL layout, nothing rendered).
+    [[nodiscard]] VisionFamily family() const {
+        return !tower_ ? VisionFamily::None : is_internvl() ? VisionFamily::InternVL : VisionFamily::Qwen3VL;
+    }
     int max_patches() const { return max_patches_; }
     // Largest image, in pixels, this pipeline's patch budget allows.
     int64_t max_pixels() const;

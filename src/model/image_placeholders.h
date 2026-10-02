@@ -1,7 +1,7 @@
 #pragma once
 
 // Expands one image placeholder into the number of tokens the vision encoder actually
-// produced. Qwen-VL templates render exactly one <|image_pad|> since image size (post
+// produced. Qwen-VL templates render exactly one image pad since image size (post
 // smart_resize) is unknown at template time; expansion happens on tokens, not per-template.
 
 #include <cstdint>

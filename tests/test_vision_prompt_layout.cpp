@@ -1,5 +1,6 @@
 // Vision prompt layout golden: every registered vision family x (1 image, 3 images, video,
-// image+video+text), rendered on a toy vocab. Golden strings recorded on main a8ad2086.
+// image+video+text) through vision_prompt_blocks + expand_vision_prompt on a toy vocab.
+// Golden strings recorded on main a8ad2086 from the then hard-wired server branches.
 
 #include "model/image_placeholders.h"
 #include "vision/vision_family.h"
@@ -57,39 +58,6 @@ std::string toy_decode(const std::vector<int32_t>& ids) {
     return out;
 }
 
-// Verbatim copy of tools/imp-server/vision_parts.cpp on main a8ad2086 (qwen_vision_blocks,
-// qwen_expand_vision_placeholders), tokenizer lookups through toy_find.
-std::string main_blocks(const std::string& order, bool internvl) {
-    std::string blocks;
-    for (const char kind : order) {
-        if (internvl)
-            blocks += "<IMG_CONTEXT>\n";
-        else
-            blocks += kind == 'v' ? "<|vision_start|><|video_pad|><|vision_end|>"
-                                  : "<|vision_start|><|image_pad|><|vision_end|>";
-    }
-    return blocks;
-}
-
-std::expected<void, std::string> main_expand(bool internvl, std::vector<int32_t>& tokens,
-                                             const std::vector<int>& image_tokens,
-                                             const std::vector<VideoPlaceholderLayout>& videos) {
-    if (internvl) {
-        const int per_image = image_tokens.empty() ? 0 : image_tokens[0];
-        return expand_internvl_image_placeholders(tokens, toy_find("<IMG_CONTEXT>"), toy_find("<img>"),
-                                                  toy_find("</img>"), static_cast<int>(image_tokens.size()),
-                                                  per_image);
-    }
-    const int32_t pad_id = toy_find("<|image_pad|>");
-    if (pad_id < 0)
-        return std::unexpected(std::string("tokenizer has no <|image_pad|>"));
-    auto expanded = expand_image_placeholders(tokens, pad_id, image_tokens);
-    if (expanded && !videos.empty())
-        expanded = expand_video_placeholders(tokens, toy_find("<|video_pad|>"), toy_find("<|vision_start|>"),
-                                             toy_find("<|vision_end|>"), videos);
-    return expanded;
-}
-
 struct Case {
     const char* name;
     std::string order;  // 'i' image, 'v' video, prompt order
@@ -106,8 +74,8 @@ const std::vector<Case> kCases = {
 
 // Front-end flow: blocks before the user text, template render, then expansion.
 std::string render(VisionFamily family, const Case& c) {
-    const bool internvl = family == VisionFamily::InternVL;
-    if (internvl && c.order.find('v') != std::string::npos)
+    // Same gate as the server: a family without a video block refuses video parts.
+    if (vision_prompt_layout(family).video_block.empty() && c.order.find('v') != std::string::npos)
         return "error: video parts need a Qwen3-VL model; this InternVL model takes images only";
     std::vector<VideoPlaceholderLayout> videos;
     for (const char k : c.order)
@@ -118,9 +86,9 @@ std::string render(VisionFamily family, const Case& c) {
             videos.push_back(
                 qwen_video_layout(3, seconds, 2, [](const std::string& s) { return toy_encode(s); }));
         }
-    std::vector<int32_t> tokens = toy_encode("<|im_start|>user\n" + main_blocks(c.order, internvl) +
+    std::vector<int32_t> tokens = toy_encode("<|im_start|>user\n" + vision_prompt_blocks(family, c.order) +
                                              "Describe.<|im_end|>");
-    const auto r = main_expand(internvl, tokens, c.image_tokens, videos);
+    const auto r = expand_vision_prompt(family, tokens, toy_find, c.image_tokens, videos);
     return r ? toy_decode(tokens) : "error: " + r.error();
 }
 
