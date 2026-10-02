@@ -362,7 +362,8 @@ Explicit 0 is the opt-out.
 
 Gates, fixed before the run: NIAH (`niah_check.py`, 5 depths x 16k/32k/64k where the model
 context allows, 4096 answer tokens on the reasoning models) sparse >= dense; PPL
-(`imp-cli --perplexity`, `runtime.deterministic=true`) <= +0.5 % on `ppl_corpus_45k.txt`
+(`imp-cli --perplexity`, `runtime.deterministic=true`) <= +0.5 % (one-sided, replaced by the
+two-sided gate in #2529 below) on `ppl_corpus_45k.txt`
 (13.5k tokens) and on the first 110000 bytes of `calib_corpus.txt` (25.5k tokens); tg at
 pp32512 and pp32512 itself >= dense, median of 3 alternating rounds, fresh process per run,
 n-gram and MTP off. Decode sparsity has no PPL arm: teacher-forced PPL runs the prefill path
@@ -384,13 +385,68 @@ Every sparse arm logged its `ACTIVE` line except gpt-oss prefill and Gemma-4 (se
 
 | decision | decode (4096) | prefill |
 |---|---|---|
-| on | qwen3, qwen3moe, qwen35, qwen36moe, nemotron_h_moe, llama (Phi-4), gpt_oss | qwen3, qwen3moe, qwen35, nemotron_h_moe, llama at 8192; qwen36moe at 16384 |
-| off | gemma4: per-layer KV geometry refuses the metadata pool | qwen36moe at 8192 (PPL +0.67 %); gpt_oss (learned sinks, prefill selection never engages: pp -0.3 %); gemma4 |
+| on | qwen3, qwen3moe, qwen35, qwen36moe, nemotron_h_moe, llama (Phi-4), gpt_oss | superseded by the two-sided gate below (#2529): qwen35 8192; qwen3, qwen36moe 16384; qwen3moe, llama 24576 |
+| off | gemma4: per-layer KV geometry refuses the metadata pool | qwen36moe at 8192 (PPL +0.67 %); nemotron_h_moe (#2529); gpt_oss (learned sinks, prefill selection never engages: pp -0.3 %); gemma4 |
 
 Phi-4 dense fails 4 of the 5 32k cells at 4096 answer tokens (reasoning without an answer); the
 decode arm passes them. Qwen3.6-35B-A3B NIAH ran with `runtime.max_batch_size=1` (the auto batch
 of 26 recurrent slots left 1625 KV blocks, 32k/64k probes 503 in every arm). Gemma-4 dense NIAH was
 0/5 at 16k (#2519: SafeTensors global layers missed proportional RoPE; 5/5 since the fix); Llama-3.2-3B is dense-broken past 16k (#2520), so it cannot gate the llama family.
+
+### Two-sided prefill gate (2026-10-02, #2529)
+
+The +0.5 % bound only failed increases; Llama-3.2-3B (dense fixed by #2528) read -3.27 % at 8192.
+Gate now: |PPL delta| <= 0.5 % vs dense on windows [C/2, C-2] for C = 16384 and 32768
+(`diagnostics.ppl_first/ppl_last`), corpus = first 160000 bytes of the #2520 `long.txt`
+(38.2k to 40.0k tokens), `runtime.deterministic=true`, n-gram and MTP off. A changed budget also
+re-ran NIAH (sparse >= dense) and pp32512 (median of 3 alternating, >= dense) with decode sparse off
+in both arms. Budget >= context is identity: every 16k row of 16384 and 24576 equals dense.
+
+| model | family | budget | PPL 16k dense -> sparse | PPL 32k dense -> sparse | pass |
+|---|---|---|---|---|---|
+| Llama-3.2-3B Q8_0 | llama | 8192 | 6.4539 -> 6.3332 (-1.87 %) | 13.4171 -> 12.9788 (-3.27 %) | no |
+| | | 16384 | identity | 13.4171 -> 13.2550 (-1.21 %) | no |
+| | | 24576 | identity | 13.4171 -> 13.4002 (-0.13 %) | yes |
+| Phi-4-reasoning-plus NVFP4 | llama | 8192 | 2.5117 -> 2.5151 (+0.14 %) | 2.8675 -> 2.8244 (-1.50 %) | no |
+| | | 16384 | identity | 2.8675 -> 2.8334 (-1.19 %) | no |
+| | | 24576 | identity | 2.8675 -> 2.8632 (-0.15 %) | yes |
+| Qwen3-4B Q8_0 | qwen3 | 8192 | 9.8863 -> 9.8896 (+0.03 %) | 14.3093 -> 14.3095 (+0.00 %) | yes |
+| | | 16384 | identity | 14.3093 -> 14.2855 (-0.17 %) | yes |
+| Qwen3-8B Q8_0 | qwen3 | 8192 | 7.4424 -> 7.4686 (+0.35 %) | 11.3594 -> 11.4389 (+0.70 %) | no |
+| | | 16384 | identity | 11.3594 -> 11.3659 (+0.06 %) | yes |
+| Qwen3-14B Q6_K | qwen3 | 8192 | 4.2820 -> 4.2977 (+0.37 %) | 6.0408 -> 6.0319 (-0.15 %) | yes |
+| | | 16384 | identity | 6.0408 -> 6.0235 (-0.29 %) | yes |
+| Qwen3-Coder-30B-A3B NVFP4 | qwen3moe | 8192 | 1.7787 -> 1.7712 (-0.42 %) | 2.1710 -> 2.1320 (-1.80 %) | no |
+| | | 16384 | identity | 2.1710 -> 2.1348 (-1.67 %) | no |
+| | | 24576 | identity | 2.1710 -> 2.1698 (-0.06 %) | yes |
+| Qwen3.8-27B NVFP4 | qwen35 | 8192 | 2.6295 -> 2.6399 (+0.40 %) | 3.5418 -> 3.5513 (+0.27 %) | yes |
+| Qwen3.6-35B-A3B NVFP4 | qwen36moe | 16384 | identity | 1.1592 -> 1.1604 (+0.10 %) | yes |
+| Nemotron-3-Nano-30B-A3B NVFP4 | nemotron_h_moe | 8192 | 6.1427 -> 6.0631 (-1.30 %) | 8.2164 -> 8.0174 (-2.42 %) | no |
+| | | 16384 | identity | 8.2164 -> 8.1404 (-0.92 %) | no |
+| | | 24576 | not run | 8.2164 -> 8.1718 (-0.54 %) | no |
+| gpt-oss-20b MXFP4 | gpt_oss | 0 (never engages) | 16979.2805 both | 12832.8206 both | identity |
+
+gpt-oss reads ~1.7e4 on this prose in llama.cpp too (`llama-perplexity -c 16384`: 16377.62).
+
+Changed budgets, NIAH dense / sparse and pp32512 dense -> sparse (tok/s):
+
+| model | budget | NIAH | pp32512 |
+|---|---|---|---|
+| Qwen3-4B Q8_0 | 16384 | 15/15 / 15/15 | 13829.27 -> 15499.81 (+12.1 %) |
+| Qwen3-8B Q8_0 | 16384 | 10/10 / 10/10 | 10100.37 -> 10970.27 (+8.6 %) |
+| Qwen3-14B Q6_K | 16384 | 10/10 / 10/10 | 6640.71 -> 7112.65 (+7.1 %) |
+| Qwen3-Coder-30B-A3B NVFP4 | 24576 | 15/15 / 15/15 | 14928.13 -> 15270.51 (+2.3 %) |
+| Llama-3.2-3B Q8_0 | 24576 | 10/10 / 10/10 | 19999.44 -> 20311.74 (+1.6 %) |
+| Phi-4-reasoning-plus NVFP4 | 24576 | 6/10 / 7/10 | 12457.52 -> 12740.69 (+2.3 %) |
+
+Why sparse reads lower (Llama-3.2-3B, budget 8192, per-position NLL dumps,
+`diagnostics.ppl_dump=full`): the corpus switches from Pride and Prejudice to Shakespeare at
+row 27701. On the 5066 rows after the switch (31 % of the 32k window) sparse carries 59.2 % of the
+window's NLL drop. Same rows: dense 26.0767, sparse 24.4503 (-6.24 %), dense with the unrelated
+prefix cut away 21.4799 (-17.63 %). Dense is HF-exact (#2520), so the drop is the model being
+distracted by long unrelated context; page selection removes part of it. Before the switch
+(rows [16384, 27700]) sparse is -1.94 %; dropping the oldest 11540 tokens moves dense only
+-0.07 % (7396 tokens: +5.52 %), so plain truncation does not explain that part.
 
 Qwen3.8-27B pp77824 (#2406 acceptance), 3 alternating pairs: dense 6871.80 / 6873.68 / 6873.02,
 sparse 8192 10670.21 / 10670.54 / 10671.67 tok/s (1.55x).
