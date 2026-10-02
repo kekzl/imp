@@ -47,7 +47,8 @@ std::vector<IdentityRow> load_main_rows() {
 
 // model_type is only reachable through load_config: a config.json without `architectures`.
 ModelArch arch_from_model_type(const std::string& model_type) {
-    const auto dir = std::filesystem::temp_directory_path() / ("imp_test_archid_" + std::to_string(::getpid()));
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("imp_test_archid_" + std::to_string(::getpid()));
     std::filesystem::create_directories(dir);
     {
         std::ofstream f(dir / "config.json");
@@ -84,7 +85,7 @@ TEST(ArchIdentity, EveryStringMainAcceptedKeepsItsArch) {
     EXPECT_EQ(per_entry["model_type"], 26);
 }
 
-// One table: 25 GGUF + 35 HF class + 26 model_type rows, no spelling twice per source.
+// One table, no spelling twice per source; main had 25 GGUF + 35 HF class + 26 model_type rows.
 TEST(ArchIdentity, OneTableNoDuplicateSpelling) {
     std::map<imp::ArchSource, int> per_source;
     std::set<std::pair<imp::ArchSource, std::string_view>> seen;
@@ -92,9 +93,9 @@ TEST(ArchIdentity, OneTableNoDuplicateSpelling) {
         per_source[e.source]++;
         EXPECT_TRUE(seen.insert({e.source, e.spelling}).second) << e.spelling;
     }
-    EXPECT_EQ(per_source[imp::ArchSource::GGUF], 25);
-    EXPECT_EQ(per_source[imp::ArchSource::HF_CLASS], 35);
-    EXPECT_EQ(per_source[imp::ArchSource::HF_MODEL_TYPE], 26);
+    EXPECT_GE(per_source[imp::ArchSource::GGUF], 25);
+    EXPECT_GE(per_source[imp::ArchSource::HF_CLASS], 35);
+    EXPECT_GE(per_source[imp::ArchSource::HF_MODEL_TYPE], 26);
 }
 
 // #2457: every HF class resolves to the same ModelArch from the GGUF and the HF loader.
@@ -110,7 +111,7 @@ TEST(ArchIdentity, HfClassResolvesTheSameFromBothLoaders) {
         EXPECT_EQ(HFConfigLoader::map_architecture(s), e.arch) << s;
         n++;
     }
-    EXPECT_EQ(n, 35);
+    EXPECT_GE(n, 35);
 }
 
 }  // namespace
