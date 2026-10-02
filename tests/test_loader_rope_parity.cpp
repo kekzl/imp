@@ -256,3 +256,60 @@ TEST(LoaderRopeParity, Qwen3PlainRope) {
     EXPECT_DOUBLE_EQ(g.layers[0].theta, 1e6);
     EXPECT_FLOAT_EQ(g.layers[0].softmax_scale, 1.0f / std::sqrt(32.0f));
 }
+
+// Gemma-3 legacy keys: rope.local.freq_base + attention.sliding_window_pattern (GGUF) vs
+// rope_local_base_freq + sliding_window_pattern (config.json). Non-default 2e4 / 3: layers 2 and 5 global.
+TEST(LoaderRopeParity, Gemma3LocalTheta) {
+    imp::test::GgufStubSpec spec;
+    spec.arch = "gemma3";
+    spec.n_layers = 6;
+    spec.u32 = {{"attention.sliding_window_pattern", 3}, {"attention.sliding_window", 1024}};
+    spec.f32 = {{"rope.freq_base", 1e6f}, {"rope.local.freq_base", 2e4f}};
+    const std::string cfg = hf_config("Gemma3ForCausalLM", 6,
+                                      R"("rope_theta": 1000000.0, "rope_local_base_freq": 20000.0, )"
+                                      R"("sliding_window": 1024, "sliding_window_pattern": 3)");
+    RopeView g;
+    ASSERT_NO_FATAL_FAILURE(run_parity(spec, cfg, ModelArch::GEMMA3, &g));
+    EXPECT_DOUBLE_EQ(g.layers[0].theta, 2e4);
+    EXPECT_DOUBLE_EQ(g.layers[2].theta, 1e6);
+    EXPECT_DOUBLE_EQ(g.layers[5].theta, 1e6);
+}
+
+// Gemma-3 4B+ shape: linear factor 8 on global layers only, local keys absent on both sides
+// (llama.cpp GGUFs omit them; HF defaults: pattern 6, local theta 1e4).
+TEST(LoaderRopeParity, Gemma3GlobalLinearScaling) {
+    imp::test::GgufStubSpec spec;
+    spec.arch = "gemma3";
+    spec.n_layers = 6;
+    spec.u32 = {{"attention.sliding_window", 1024}};
+    spec.f32 = {{"rope.freq_base", 1e6f}, {"rope.scaling.factor", 8.0f}};
+    const std::string cfg = hf_config("Gemma3ForConditionalGeneration", 6,
+                                      R"("rope_theta": 1000000.0, "sliding_window": 1024, )"
+                                      R"("rope_scaling": {"rope_type": "linear", "factor": 8.0})");
+    RopeView g;
+    ASSERT_NO_FATAL_FAILURE(run_parity(spec, cfg, ModelArch::GEMMA3, &g));
+    EXPECT_DOUBLE_EQ(g.layers[0].theta, 1e4);
+    EXPECT_DOUBLE_EQ(g.layers[0].freq_scale, 1.0);
+    EXPECT_DOUBLE_EQ(g.layers[5].freq_scale, 8.0);
+}
+
+// Gemma-3 transformers 5 keys: layer_types + rope_parameters.{full,sliding}_attention.
+TEST(LoaderRopeParity, Gemma3LayerTypesRopeParameters) {
+    imp::test::GgufStubSpec spec;
+    spec.arch = "gemma3";
+    spec.n_layers = 6;
+    spec.u32 = {{"attention.sliding_window", 1024}};
+    spec.f32 = {{"rope.freq_base", 1e6f}, {"rope.scaling.factor", 8.0f}};
+    const std::string cfg =
+        hf_config("Gemma3ForCausalLM", 6,
+                  R"("sliding_window": 1024, "layer_types": ["sliding_attention", "sliding_attention", )"
+                  R"("sliding_attention", "sliding_attention", "sliding_attention", "full_attention"], )"
+                  R"("rope_parameters": {"full_attention": {"rope_type": "linear", "factor": 8.0, )"
+                  R"("rope_theta": 1000000.0}, "sliding_attention": {"rope_type": "default", )"
+                  R"("rope_theta": 10000.0}})");
+    RopeView g;
+    ASSERT_NO_FATAL_FAILURE(run_parity(spec, cfg, ModelArch::GEMMA3, &g));
+    EXPECT_DOUBLE_EQ(g.layers[0].theta, 1e4);
+    EXPECT_DOUBLE_EQ(g.layers[5].theta, 1e6);
+    EXPECT_DOUBLE_EQ(g.layers[5].freq_scale, 8.0);
+}
