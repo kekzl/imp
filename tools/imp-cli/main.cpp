@@ -165,16 +165,9 @@ int main(int argc, char** argv) {
     ImpConfig config = imp_config_default();
 
     // Sampling defaults: CLI flag > generation_config.json (SafeTensors only) >
-    // arch-family preset. Author-shipped values from generation_config.json are
-    // signalled by sentinel >= 0; sentinel <0 falls through to the family preset.
-    imp::SamplingDefaults sampling = imp::get_sampling_defaults(model->model->config().arch);
+    // arch-family preset; imp-server resolves the same way (#2462).
     const auto& gen = model->model->generation_config();
-    if (gen.temperature >= 0.0f)
-        sampling.temperature = gen.temperature;
-    if (gen.top_p >= 0.0f)
-        sampling.top_p = gen.top_p;
-    if (gen.top_k >= 0)
-        sampling.top_k = gen.top_k;
+    const imp::SamplingDefaults sampling = imp::resolve_sampling_defaults(model->model->config().arch, gen);
 
     // CLI flags override auto-detection (only when explicitly set)
     // CLI is single-request — always cap batch size to 1

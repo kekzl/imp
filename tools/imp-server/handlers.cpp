@@ -790,6 +790,9 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     if (state.max_seq_len <= 0)
         state.max_seq_len = config.max_seq_len;
 
+    state.sampling_defaults = imp::resolve_sampling_defaults(state.model->model->config().arch,
+                                                             state.model->model->generation_config());
+
     // Detect thinking model (DeepSeek R1, Qwen3 etc.) by checking for <think> token.
     // Only treat as think model if <think> is a special/added token (high vocab ID),
     // not a regular text piece. Nemotron has "<think>" at ID 12 as normal text.

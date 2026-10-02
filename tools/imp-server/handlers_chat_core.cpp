@@ -174,6 +174,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         ctx.snap.is_think_model = state.is_think_model;
         ctx.snap.think_start_id = state.think_start_id;
         ctx.snap.think_end_id = state.think_end_id;
+        ctx.params.apply_model_defaults(state.sampling_defaults);
         ctx.snap.channel_open_id = state.channel_open_id;
         ctx.snap.channel_close_id = state.channel_close_id;
         ctx.snap.channel_newline_id = state.channel_newline_id;
@@ -250,8 +251,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     }
 
     // Channel models (Gemma-4) degenerate more easily on casual prompts under default sampling;
-    // tighten the default when the caller doesn't specify a sampler param. Qwen3/DeepSeek keep
-    // 0.95/40/1.0 defaults.
+    // tighten the default when the caller doesn't specify a sampler param. Other models keep the
+    // arch preset (apply_model_defaults above).
     if (ctx.snap.channel_open_id >= 0) {
         if (!ctx.params.top_p_explicit)
             ctx.params.top_p = 0.9f;

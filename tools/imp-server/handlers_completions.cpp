@@ -569,6 +569,7 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
         snap_tok = state.tok;
         snap_model_name = state.model_name;
         snap_is_think_model = state.is_think_model;
+        p.apply_model_defaults(state.sampling_defaults);
         snap_channel_open_id = state.channel_open_id;
         snap_max_seq_len = state.max_seq_len;
     }
