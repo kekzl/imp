@@ -30,6 +30,7 @@ description: Use when opening, merging, or releasing a PR for imp - branching of
 ```bash
 git fetch origin && git switch -c <topic> origin/main
 # work; then:
+make preflight                                     # CPU only: static gates, tidy + format on changed lines, actionlint
 make verify-fast                                   # measures imp:test; rebuild first (make build)
 git push -u origin <topic>                         # scripts/pre-push.hook: static gates, require_free_gpu, verify-fast (perf gate only on PERF_RE)
 gh pr create --base main --title "<squash subject>" --body-file <file>
@@ -77,7 +78,8 @@ gh pr view <PR> --json mergeStateStatus,statusCheckRollup,reviewDecision
 | `gh pr checks` prints NOTHING and `mergeStateStatus=DIRTY` | conflict with `main`; GitHub runs no workflow on an unbuildable merge ref, so no CI, no auto-merge, no arming | rebase onto `origin/main`; force-push is gated, so push a fresh branch and reopen |
 | `mergeStateStatus=UNKNOWN` | not computed yet | query again; never build a mechanism on it (#1516 cost an hour) |
 | `Build` red on a refactor that deleted or renamed cited code | `citations` gate: anchor of a `file:line` gone or ambiguous in a living doc (#1783; line drift alone only warns since #2231) | `python3 scripts/check_doc_citations.py .`; drift: `--fix` |
-| `File size` / `Test lanes` red after adding a GPU test | unlaned-test pin | raise `PINNED` in `tools/check_test_lanes.py` with a reason; an allowlisted file past its pin ceiling (next multiple of 25): `python3 tools/check_filesize.py --update` |
+| `Test lanes` red | a test in no ctest entry, or a `ctest -L unit` test demoted vs the base (`tools/check_test_lanes.py` names it) | register the module/test in `CMakeLists.txt`; a new GPU test in a `gpu` module needs no edit |
+| `File size` red | an allowlisted file past its pin ceiling (next multiple of 25) | `python3 tools/check_filesize.py --update` |
 
 ## Cutting a tagged release
 

@@ -694,14 +694,15 @@ jobs:
           IMP_GATE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: bash scripts/ci_static_gates.sh filesize
 
-  # The unlaned-GTest pin (tools/check_test_lanes.py). Its own check name:
-  # it fires on every added GPU test, and inside the "File size" job its
-  # failures read as file-size problems (twice on 2026-08-25).
+  # Test-lane gate (tools/check_test_lanes.py): every test in a ctest lane, no unit-lane test
+  # demoted vs the merge-base. Own check name: inside "File size" its reds misread (2026-08-25).
   testlanes:
     name: Test lanes
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # the unit-lane demotion check reads the merge-base with origin/main
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"

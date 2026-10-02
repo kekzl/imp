@@ -41,11 +41,13 @@ Doc layers (L0 `README.md`, L1 `docs/*.md`, L2 `docs/internals/`, L3 `CLAUDE.md`
 
 ```
 make dev / make dev-test   # incremental (seconds) + the CI lane (ctest -L unit): iterate here
+make preflight             # CPU only, run before every push: all CI static gates, tidy + format on changed lines, actionlint
 make build                 # full image (minutes): anything measured or pushed
 make verify-fast           # pre-push gate, the only gate that runs a kernel against a check
 make verify                # full
 ```
 
+- **Run `make preflight` before push**, and before `git push --no-verify` above all: it is the CPU half of the hooks plus clang-tidy/clang-format/actionlint, which only CI ran before. Exit 0 = every row ok or skip.
 - `make test-unit` is a different binary from the CI lane: green there is not green in CI. CI has no GPU. Target list and CI job names: skill **building-and-testing**.
 - **Never bare `make format`.** CI checks changed lines only: format files you created; in edited files only your added lines.
 
