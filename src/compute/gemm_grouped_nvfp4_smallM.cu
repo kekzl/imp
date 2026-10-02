@@ -531,7 +531,7 @@ public:
     void add(T** dst, const S* src, size_t bytes) {
         const size_t off = (host_.size() + 127) / 128 * 128;
         host_.resize(off + bytes);
-        std::memcpy(host_.data() + off, src, bytes);
+        std::memcpy(host_.data() + off, static_cast<const void*>(src), bytes);
         *dst = reinterpret_cast<T*>(dev_ + off);
     }
     bool upload() {
