@@ -32,7 +32,7 @@ import sys
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 # Predictable vocabulary for mock responses
 MOCK_VOCAB = [
@@ -127,6 +127,26 @@ class MockConfig:
         self.prefill_ms = prefill_ms
         self.queued_tokens = 0
         self.q_lock = threading.Lock()
+        # POST /v1/requests/{id}/end_thinking (#2420): X-Request-Id -> end requested.
+        self.running = {}
+        self.running_lock = threading.Lock()
+
+    def running_add(self, rid: str):
+        if rid:
+            with self.running_lock:
+                self.running[rid] = False
+
+    def running_pop(self, rid: str) -> bool:
+        with self.running_lock:
+            return bool(self.running.pop(rid, False)) if rid else False
+
+    def end_thinking(self, rid: str) -> bool:
+        """False: no running request carries rid. Pending (held) requests answer "ending"."""
+        with self.running_lock:
+            if rid not in self.running:
+                return False
+            self.running[rid] = True
+            return True
 
 
 class MockHandler(BaseHTTPRequestHandler):
@@ -390,6 +410,13 @@ class MockHandler(BaseHTTPRequestHandler):
                 self._send_error(400, SESSION_ID_RULE, param="session_id")
             else:
                 self._send_json(200, {"id": sid, "object": "session", "closed": True})
+        elif re.fullmatch(r"/v1/requests/[^/]+/end_thinking", path):
+            rid = unquote(path[len("/v1/requests/"):-len("/end_thinking")])
+            if not self.config.end_thinking(rid):
+                self._send_error(404, f"No running request with id '{rid}'.", param="id",
+                                 code="request_not_found")
+            else:
+                self._send_json(200, {"id": rid, "object": "request.end_thinking", "status": "ending"})
         else:
             self._send_error(404, f"Unknown endpoint: {path}")
 
@@ -694,7 +721,12 @@ class MockHandler(BaseHTTPRequestHandler):
         # Count prompt tokens (rough: 1 token per 4 chars)
         prompt_text = " ".join(m.get("content", "") or "" for m in messages if isinstance(m.get("content"), str))
         prompt_tokens = max(1, len(prompt_text) // 4)
-        if not self._admit_queued(prompt_tokens):
+        # end_thinking (#2420): the client X-Request-Id names the request while --prefill-ms holds it.
+        rid = self.headers.get("X-Request-Id", "")
+        self.config.running_add(rid)
+        admitted = self._admit_queued(prompt_tokens)
+        thinking_ended = self.config.running_pop(rid)
+        if not admitted:
             return
 
         tokens = self._generate_tokens(seed, max_tokens)
@@ -702,8 +734,9 @@ class MockHandler(BaseHTTPRequestHandler):
         # Reasoning request must produce a reasoning channel, reasoning_tokens in usage, and
         # imp_finish_detail when budget exhausts before an answer (handlers_chat_core.cpp).
         # Tiny max_tokens is the real exhaustion case: content empty, reasoning non-empty.
+        # Ended before the first token: the closer comes first, every token is content.
         reasoning_tokens: list[str] = []
-        if body.get("reasoning_effort"):
+        if body.get("reasoning_effort") and not thinking_ended:
             n_reason = len(tokens) if max_tokens <= 8 else len(tokens) // 2
             reasoning_tokens, tokens = tokens[:n_reason], tokens[n_reason:]
         reasoning = "".join(reasoning_tokens)

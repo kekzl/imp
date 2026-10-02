@@ -1116,7 +1116,9 @@ if(IMP_BUILD_TESTS)
             fuzz/fuzz_tool_stream.cpp
             tests/test_base64.cpp
             # Request-field parsing golden, every dialect through its real parse path (#2461).
-            tests/test_sampling_params_golden.cpp)
+            tests/test_sampling_params_golden.cpp
+            # POST /v1/requests/{id}/end_thinking id registry on a never-started BatchingEngine (#2420).
+            tests/test_end_thinking.cpp)
         target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
                                                      ${CMAKE_CURRENT_SOURCE_DIR}/tools)
         # Server TUs come from the shared OBJECT libraries (#2498).

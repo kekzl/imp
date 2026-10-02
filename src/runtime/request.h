@@ -165,6 +165,9 @@ struct Request {
     // its own <|im_end|> instead of being padded or repeated. Reset false at every think exit.
     bool content_after_think = false;
     float think_budget = 0.0f;  // Fraction of max_tokens for reasoning (0=unlimited)
+    // Client asked to end the think block (#2420); set by the server worker between steps,
+    // the next eager step forces the closer (think_logic::end_think_due).
+    bool end_thinking = false;
     // gpt-oss Harmony answer-headroom force: when reasoning hits budget, forcing bare <|end|>
     // lets the model re-open the analysis channel, so the whole
     // <|end|><|start|>assistant<|channel|>final<|message|> opener is forced instead. Index into

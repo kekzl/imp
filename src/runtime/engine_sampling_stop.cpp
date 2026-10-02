@@ -76,6 +76,17 @@ void Engine::track_think_state(Request& req, int32_t token) const {
     }
 }
 
+bool Engine::think_end_due_(const Request& req) const {
+    return think_logic::end_think_due(req.end_thinking, req.in_think_block, think_end_id_) ||
+           think_logic::should_force_think_end(req.think_budget, think_end_id_, req.max_tokens,
+                                               req.output_tokens, think_start_id_, req.started_in_think,
+                                               runtime_config_.runtime.think_answer_reserve);
+}
+
+bool Engine::think_closer_pending_(const Request& req) const {
+    return req.harmony_force_idx >= 0 || think_end_due_(req);
+}
+
 bool Engine::should_stop(Request& req, int32_t token) const {
     if (req.ignore_eos)
         return false;
@@ -159,33 +170,16 @@ void Engine::fill_sampling_params(Request& req, InferenceState& state) const {
 
     // Force </think> via logit manipulation when the budget is exceeded: the
     // model generates it itself so it lands in the KV cache correctly. Scans
-    // output_tokens directly; injected <think> prefixes need started_in_think as the recount seed (think_stop_logic.h has the pure logic).
-    state.force_token = -1;
-    if (req.harmony_force_idx >= 0) {
-        // Mid-opener: keep forcing the Harmony final-channel sequence until it
-        // is fully emitted, then hand control back to the model (now committed
-        // to the answer channel).
-        if (req.harmony_force_idx < static_cast<int>(harmony_force_seq_.size())) {
-            state.force_token = harmony_force_seq_[req.harmony_force_idx];
-            req.harmony_force_idx++;
-        }
-        if (req.harmony_force_idx >= static_cast<int>(harmony_force_seq_.size()))
-            req.harmony_force_idx = -1;  // opener complete
-    } else if (think_logic::should_force_think_end(req.think_budget, think_end_id_, req.max_tokens,
-                                                   req.output_tokens, think_start_id_, req.started_in_think,
-                                                   runtime_config_.runtime.think_answer_reserve)) {
-        if (harmony_reasoning_ && !harmony_force_seq_.empty()) {
-            // Start forcing the full <|end|>…<|message|> opener (see above).
-            state.force_token = harmony_force_seq_[0];
-            req.harmony_force_idx = 1;
-        } else {
-            // <think> models: "\n" then </think>, the way the model ends reasoning on its own
-            // and the template renders a prior turn (reasoning + "\n</think>"). A bare forced
-            // </think> re-tokenizes one token off and the reply's KV is never reusable.
-            const bool nl_done = think_newline_id_ < 0 || req.output_tokens.back() == think_newline_id_;
-            state.force_token = nl_done ? think_end_id_ : think_newline_id_;
-        }
-    }
+    // output_tokens directly; injected <think> prefixes need started_in_think as the recount seed
+    // (think_stop_logic.h has the pure logic). Harmony forces the whole final-channel opener (bare <|end|>
+    // lets gpt-oss re-open analysis); <think> models force "\n" then </think>, as the template renders a
+    // prior turn, so the reply's KV stays reusable. Mid-opener steps keep forcing without a new decision.
+    const bool due = req.harmony_force_idx < 0 && think_end_due_(req);
+    state.force_token = think_logic::next_forced_closer(due, think_end_id_, think_newline_id_,
+                                                        harmony_force_seq_, harmony_reasoning_,
+                                                        req.output_tokens.empty() ? -1
+                                                                                  : req.output_tokens.back(),
+                                                        req.harmony_force_idx);
 
     // Sampler-side stop mask (think_logic::stop_mask_active): on steps where
     // should_stop would suppress a stop token, take it out of the logits

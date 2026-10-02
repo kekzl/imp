@@ -295,6 +295,8 @@ const char* Engine::batch_verify_refusal_(const std::vector<std::shared_ptr<Requ
                 continue;
             if (!batch_verify_row_ok(*r))
                 return "row_not_greedy_or_shaped";
+            if (think_closer_pending_(*r))
+                return "think_forcing_due";
             if (r->think_budget > 0.0f && r->in_think_block &&
                 think_logic::should_force_think_end(r->think_budget, think_end_id_, r->max_tokens,
                                                     r->output_tokens, think_start_id_, r->started_in_think,

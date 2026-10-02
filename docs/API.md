@@ -13,10 +13,9 @@ What the HTTP surface actually accepts.
 - Constrained decoding, tool calling, thinking/reasoning and images: [`API_FEATURES.md`](API_FEATURES.md).
 - Closed-choice scoring (`/v1/decide`, `/v1/score`): [`API_SCORING.md`](API_SCORING.md).
 
-**Two dialects, both native.** `/v1/messages` is implemented against the
-Anthropic wire format directly, no shim in either direction. All three
-dialects share one per-token streaming driver, so a streaming fix lands in
-all of them at once.
+**Two dialects, both native.** `/v1/messages` is implemented against the Anthropic wire format
+directly, no shim in either direction. All three dialects share one per-token streaming driver,
+so a streaming fix lands in all of them at once.
 
 ## Endpoints
 
@@ -37,6 +36,7 @@ all of them at once.
 | `GET /v1/models` | ✅ | loaded model plus the rest of the directory, each with `loaded: true|false`; the loaded entry carries `meta.reasoning_effort` `{values, default}` when its chat template names the list (Qwen3.8: `xhigh`, `medium`, `low`) |
 | `GET /health`, `/metrics`, `/props`, `/info` | ✅ | `/props` is the llama.cpp shape, `/info` the TGI one |
 | `POST /admin/suspend`, `/admin/resume` | ✅ | see [`DEPLOYMENT.md`](DEPLOYMENT.md). `--idle-unload-seconds N` (default 0 = off) suspends after N s without a request and resumes on the next one, see [Admin](#admin-idle-unload-and-lora) |
+| `POST /v1/requests/{id}/end_thinking` | ✅ | ends a pending or running request's think block; the answer continues on the same KV. `id`: completion / message / response id or the client `X-Request-Id`. See [`API_CONTROL.md`](API_CONTROL.md) |
 | `POST /admin/lora/load`, `/admin/lora/unload` | 🟡 | load or free a PEFT adapter at runtime, see [Admin](#admin-idle-unload-and-lora). Validation is gated in the API contract lanes; the device path runs only in `scripts/accept_2199.sh` (GPU) |
 | `GET /` | ✅ | built-in chat UI |
 

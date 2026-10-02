@@ -479,9 +479,11 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
         auto imp_req = build_imp_request_(ctx, ctx.snap.tokens, /*completion_idx=*/0,
                                           /*stream=*/true);
 
+        std::string msg_id = anth::make_message_id(static_cast<uint64_t>(state.next_id.fetch_add(1)));
         auto server_req = std::make_shared<ServerRequest>();
         server_req->request = std::move(imp_req);
         server_req->queued_lease = ctx.queued_lease;
+        server_req->public_ids = {msg_id, request_id, log_client_request_id};  // end_thinking (#2420)
         {
             std::lock_guard<std::timed_mutex> lock(state.mtx);
             if (!state.batching || !state.batching->is_running()) {
@@ -492,7 +494,6 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
             state.batching->submit(server_req);
         }
 
-        std::string msg_id = anth::make_message_id(static_cast<uint64_t>(state.next_id.fetch_add(1)));
         ctx.t_start = std::chrono::high_resolution_clock::now();
         const bool omit_thinking = anth::thinking_display_omitted(anth_body);
 
