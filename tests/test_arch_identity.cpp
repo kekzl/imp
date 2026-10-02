@@ -114,4 +114,16 @@ TEST(ArchIdentity, HfClassResolvesTheSameFromBothLoaders) {
     EXPECT_GE(n, 35);
 }
 
+// #2529: prefill budgets that passed |PPL delta| <= 0.5 % vs dense at 16k and 32k windows.
+TEST(ArchIdentity, SparsePrefillDefaultsMatchTheSymmetricGate) {
+    EXPECT_EQ(imp::sparse_prefill_default_tokens(ModelArch::QWEN35), 8192);
+    EXPECT_EQ(imp::sparse_prefill_default_tokens(ModelArch::QWEN3), 16384);
+    EXPECT_EQ(imp::sparse_prefill_default_tokens(ModelArch::QWEN36_MOE), 16384);
+    EXPECT_EQ(imp::sparse_prefill_default_tokens(ModelArch::QWEN3_MOE), 24576);
+    EXPECT_EQ(imp::sparse_prefill_default_tokens(ModelArch::LLAMA), 24576);
+    EXPECT_EQ(imp::sparse_prefill_default_tokens(ModelArch::NEMOTRON_H_MOE), 0);
+    EXPECT_EQ(imp::sparse_prefill_default_tokens(ModelArch::GPT_OSS), 0);
+    EXPECT_EQ(imp::sparse_decode_default_tokens(ModelArch::NEMOTRON_H_MOE), 4096);
+}
+
 }  // namespace

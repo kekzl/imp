@@ -299,19 +299,19 @@ int sparse_decode_default_tokens(ModelArch arch) {
     }
 }
 
-// Sparse prefill budget for attention.sparse_prefill_topk_tokens=-1 (#2406). Gate: NIAH >=
-// dense, PPL <= +0.5 %, pp32512 >= dense. qwen36moe: 8192 cost PPL +0.67 %, 16384 +0.05 %.
-// gpt_oss off: never engages (learned sinks on every layer).
+// Sparse prefill budget for attention.sparse_prefill_topk_tokens=-1 (#2406, #2529). Gate: |PPL
+// delta| <= 0.5 % vs dense at 16k and 32k windows, NIAH >= dense, pp32512 >= dense. 8192 failed
+// qwen3 (+0.70 %), qwen3moe (-1.80 %), llama (-3.27 %); nemotron_h_moe fails 24576 (-0.54 %).
 int sparse_prefill_default_tokens(ModelArch arch) {
     switch (arch) {
-        case ModelArch::QWEN3:
-        case ModelArch::QWEN3_MOE:
         case ModelArch::QWEN35:
-        case ModelArch::NEMOTRON_H_MOE:
-        case ModelArch::LLAMA:
             return 8192;
+        case ModelArch::QWEN3:
         case ModelArch::QWEN36_MOE:
             return 16384;
+        case ModelArch::QWEN3_MOE:
+        case ModelArch::LLAMA:
+            return 24576;
         default:
             return 0;
     }

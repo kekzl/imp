@@ -19,7 +19,9 @@
 #include <unistd.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <new>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -933,6 +935,28 @@ static bool gptq_refuses(Model& model, const std::unordered_map<std::string, Ten
     return false;
 }
 
+// Gemma 4 proportional RoPE: global layers read the table as rope_freqs, the slot the GGUF
+// path fills from rope_freqs.weight (64 rotated pairs of 256 at hd=512, #2519).
+static void install_gemma4_rope_freqs(Model& model, const ModelConfig& cfg) {
+    if (cfg.arch != ModelArch::GEMMA4 || cfg.rope_inv_freqs_global.empty())
+        return;
+    const size_t n = cfg.rope_inv_freqs_global.size();
+    auto* host = static_cast<float*>(std::malloc(n * sizeof(float)));
+    if (!host)
+        throw std::bad_alloc();
+    std::memcpy(host, cfg.rope_inv_freqs_global.data(), n * sizeof(float));
+    model.host_owned_buffers_.push_back(host);
+    int64_t shape[4] = {static_cast<int64_t>(n), 0, 0, 0};
+    int n_global = 0;
+    for (int i = 0; i < cfg.n_layers && i < static_cast<int>(cfg.swa_layers.size()); ++i) {
+        if (!cfg.swa_layers[i]) {
+            model.layers_[i].rope_freqs = Tensor(host, QType::F32, 1, shape, /*on_device=*/false);
+            n_global++;
+        }
+    }
+    IMP_LOG_INFO("Gemma 4: proportional RoPE table (%zu pairs) on %d global layers", n, n_global);
+}
+
 // generation_config.json (optional): sampling/EOS defaults; its EOS ids join the tokenizer's stop list.
 static void apply_generation_config(Model& model, const std::string& model_dir) {
     if (model_dir.empty())
@@ -1169,6 +1193,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     WeightMap wmap(cfg.arch);
     if (!wmap.apply_weights(*model, tensor_map))
         return nullptr;  // logged by apply_weights
+    install_gemma4_rope_freqs(*model, cfg);
     // 6a. Qwen4Exp PLE: the layer's projections came through the weight map, its n-gram table
     // (F8 shards + I64 hash buffers) is opened host-side. Missing table = unservable, refuse.
     for (size_t i = 0; i < model->layers_.size(); i++) {

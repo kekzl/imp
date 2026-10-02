@@ -845,6 +845,8 @@ if(IMP_BUILD_TESTS)
         tests/test_json_out.cpp
         tests/test_gguf_loader.cpp
         tests/test_gguf_llama3.cpp
+        # GGUF vs SafeTensors: same stub, same RoPE tables and attention scales (#2530).
+        tests/test_loader_rope_parity.cpp
         tests/test_gguf_silent_drops.cpp
         tests/test_gguf_fault_injection.cpp
         tests/test_fp_bits.cpp
