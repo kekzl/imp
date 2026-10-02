@@ -26,8 +26,7 @@ struct MoeRoutingBuffers {
     float* expert_weights = nullptr;       // [max_tokens * top_k]
     int32_t* sorted_token_ids = nullptr;   // [max_tokens * top_k * 2] (includes flat_idx)
     int32_t* expert_offsets = nullptr;     // [max_experts + 1]
-    int32_t* expert_counts = nullptr;      // [max_experts]
-    int32_t* expert_write_pos = nullptr;   // [max_experts]
+    int32_t* permute_scratch = nullptr;    // [moe_permute_scratch_ints(max_experts)] tile histograms
     int32_t* token_to_expanded = nullptr;  // [max_tokens * top_k] inverse map
 
     int max_tokens = 0;
@@ -38,6 +37,14 @@ struct MoeRoutingBuffers {
     void free();
     ~MoeRoutingBuffers();
 };
+
+// Stable token permute (#1546, #2465): flat idx i of expert e lands at expert_offsets[e] + rank of i
+// among earlier flat indices of e. Multi-CTA with scratch of moe_permute_scratch_ints(n_experts)
+// int32 (0 above 1024 experts); scratch == nullptr runs the single-CTA kernel, same layout.
+size_t moe_permute_scratch_ints(int n_experts);
+void moe_permute(const int32_t* expert_indices, int n_tokens, int top_k, int n_experts,
+                 int32_t* sorted_token_ids, int32_t* sorted_flat_idx, int32_t* expert_offsets,
+                 int32_t* token_to_expanded, int32_t* scratch, cudaStream_t stream = nullptr);
 
 void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& result,
                      cudaStream_t stream = nullptr, bool use_sigmoid = false, bool normalize_weights = true,
