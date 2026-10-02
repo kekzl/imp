@@ -52,8 +52,9 @@ public:
 
     // Pre-tokenizer type from GGUF metadata (e.g. "default", "llama3", "deepseek-llm").
     // "deepseek-r1-qwen": tokenizer.json regex and NFC equal Qwen2's, stored as "qwen2" (#2270).
+    // "tekken" (Mistral / Devstral-Small-2): the nemotron scan's regex exactly (#2411).
     void set_pre_tokenizer(const std::string& pre) {
-        pre_tokenizer_ = pre == "deepseek-r1-qwen" ? "qwen2" : pre;
+        pre_tokenizer_ = pre == "deepseek-r1-qwen" ? "qwen2" : pre == "tekken" ? "nemotron" : pre;
     }
     const std::string& pre_tokenizer() const { return pre_tokenizer_; }
 

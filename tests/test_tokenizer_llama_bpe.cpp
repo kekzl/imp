@@ -1,4 +1,5 @@
-// GGUF tokenizer.ggml.pre = llama-bpe (Llama 3) pre-tokenizes with the cl100k regex (#2520).
+// GGUF tokenizer.ggml.pre aliases: llama-bpe (Llama 3) uses the cl100k regex (#2520), tekken the nemotron
+// scan (#2411).
 #include "model/tokenizer.h"
 
 #include <gtest/gtest.h>
@@ -50,6 +51,18 @@ TEST(TokenizerLlamaBpeTest, UsesCl100kChunks) {
         EXPECT_EQ(tok.encode(" [`"), (std::vector<int32_t>{257})) << pre;
         EXPECT_EQ(tok.encode(".s"), (std::vector<int32_t>{258})) << pre;
     }
+}
+
+// GGUF pre "tekken" (Devstral-Small-2, #2411) is the nemotron scan; the gpt2 fallback split "_case"
+// and "/," apart (592 of 1202 parity records differed). Chunks: HF tokenizers on tokenizer.json.
+TEST(TokenizerLlamaBpeTest, TekkenUsesNemotronChunks) {
+    Tokenizer tok;
+    tok.set_pre_tokenizer("tekken");
+    EXPECT_EQ(tok.pre_tokenizer(), "nemotron");
+    using Chunks = std::vector<std::string>;
+    EXPECT_EQ(nemotron_pre_tokenize("snake_case and camelCase"),
+              (Chunks{"snake", "_case", " and", " camel", "Case"}));
+    EXPECT_EQ(nemotron_pre_tokenize("X/,c"), (Chunks{"X", "/,", "c"}));
 }
 
 }  // namespace
