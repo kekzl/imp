@@ -1222,6 +1222,12 @@ public:
         return static_cast<size_t>(expert_cache_.n_slots_) * expert_cache_.slot_size_;
     }
     int expert_cache_slots_per_layer() const { return expert_cache_.slots_per_layer_; }
+    int64_t expert_cache_misses() const { return expert_cache_.misses_; }
+    // Test hook: the state a failed T2 take of the q8_1/d8 scratch leaves (MoE decode -> FP16 arm).
+    void drop_dp4a_scratch_for_test() {
+        qscratch_.q8_1_buf = qscratch_decode_.q8_1_buf = nullptr;
+        qscratch_.d8_buf = qscratch_decode_.d8_buf = nullptr;
+    }
     std::vector<int32_t>& ngram_step_scratch() { return ple_step_ctx_; }  // [n_seq][ctx], engine-filled
 
 private:

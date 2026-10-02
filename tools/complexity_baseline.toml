@@ -11,6 +11,7 @@
 # [baseline] are generated.
 #
 # Pin changes (newest first):
+#   #2451 (tile log moved to log_tile_once): gemm_grouped_nvfp4_smallM 31 -> under the threshold, entry removed
 #   #2212 item 3 (mtp_feed per-row body shared): mtp_feed_rows_multislot 50 -> 30, mtp_feed_batch 35 -> 15
 #   (below threshold, entry removed); new mtp_feed_dense_rows 9 is under the threshold
 #   #2159 (HF tokenizer parity, written before the ratchet): Tokenizer::load 99 -> 116 (NFC normalizer,
@@ -63,7 +64,6 @@ skip_dirs = []
 "src/compute/gemm_f16_narrow_smallm.cu::__global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(NarrowArgs args)" = 28
 "src/compute/gemm_grouped.cpp::void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, const void* const* b_ptrs, int K, int N, QType dtype, int n_experts, cudaStream_t stream, void** d_work_ptrs, QType output_dtype, const float* a_scales, const float* b_scales)" = 26
 "src/compute/gemm_grouped_nvfp4_smallM.cu::__global__ void smallM_kernel_v1(const void* const* __restrict__ d_A, const void* const* __restrict__ d_SFA, const void* const* __restrict__ d_B, const void* const* __restrict__ d_SFB, void* const* __restrict__ d_D, const float* __restrict__ d_alpha, const int* __restrict__ d_M_per_expert, const CUtensorMap* __restrict__ d_descs, int N, int K)" = 35
-"src/compute/gemm_grouped_nvfp4_smallM.cu::bool gemm_grouped_nvfp4_smallM(int n_experts, const int* host_M, int N, int K, const void* const* host_ptr_A, const void* const* host_ptr_SFA, const void* const* host_ptr_B, const void* const* host_ptr_SFB, void* const* host_ptr_D, const float* dev_alpha, cudaStream_t stream)" = 31
 "src/compute/gemv_fp8_rowscale_fp32.cu::__global__ void __launch_bounds__(kThreads) fp8_head_mma_kernel(const uint8_t* __restrict__ W, const float* __restrict__ row_scales, const half* __restrict__ x, float* __restrict__ y, int M, int K, int n_rows)" = 32
 "src/compute/json_constrain.cu::bool JsonGrammar::advance_char(char c)" = 94
 "src/compute/json_constrain.cu::uint16_t JsonGrammar::compute_allowed_mask() const" = 35

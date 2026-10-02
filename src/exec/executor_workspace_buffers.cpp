@@ -17,6 +17,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
+#include "compute/gemm_grouped_nvfp4_smallM.h"  // smallM_table_bytes
 #include "compute/sampling.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
@@ -61,16 +62,20 @@ HostStageGeometry host_stage_geometry(int n_experts, bool staged_cutlass, int wa
     return {chunks, (n_experts + chunks - 1) / chunks, chunks > 1 ? 2 : kExpertProjCount};
 }
 
-// smallM prefill scratch: 2*ne pointers then 3*ne floats, one T2 take, no per-forward alloc (#2446).
+// smallM prefill scratch, one T2 take, no per-forward alloc (#2446, #2451): kernel tables
+// (smallM_table_bytes, at the 256 B take base), then 2*ne pointers, then 3*ne floats.
 // A failed take leaves smallM_count 0, which turns the smallM branch off.
 void take_smallM_scratch(MoEWorkspace& moe, int n_experts) {
     const size_t ne = static_cast<size_t>(n_experts);
-    auto sl = engine_arena().take_bytes(2 * ne * sizeof(void*) + 3 * ne * sizeof(float));
+    const size_t tables = smallM_table_bytes(n_experts);
+    auto sl = engine_arena().take_bytes(tables + 2 * ne * sizeof(void*) + 3 * ne * sizeof(float));
     if (sl.empty()) {
         IMP_LOG_WARN("smallM MoE prefill scratch unavailable from the T2 arena; smallM branch off");
         return;
     }
-    moe.smallM_ptrs = reinterpret_cast<void**>(sl.data());
+    moe.smallM_tables = sl.data();
+    moe.smallM_tables_bytes = tables;
+    moe.smallM_ptrs = reinterpret_cast<void**>(sl.data() + tables);
     moe.smallM_scales = reinterpret_cast<float*>(moe.smallM_ptrs + 2 * ne);  // floats follow the 2*ne pointers
     moe.smallM_count = n_experts;
 }

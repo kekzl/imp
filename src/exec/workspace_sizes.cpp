@@ -2,6 +2,7 @@
 
 #include "model/model.h"
 #include "quant/nvfp4_gemm.h"
+#include "compute/gemm_grouped_nvfp4_smallM.h"  // smallM_table_bytes
 
 #include <algorithm>
 #include <cstdio>
@@ -343,6 +344,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
                          + ne * sizeof(void*)          // cutlass3x_sfa_ptrs
                          + 2 * ne * sizeof(void*)      // smallM_ptrs (#2446)
                          + 3 * ne * sizeof(float)      // smallM_scales (#2446)
+                         + smallM_table_bytes(shape.n_experts)  // smallM kernel tables (#2451)
                          + 12 * kTakeAlign;            // per-take 256 B alignment
     }
 

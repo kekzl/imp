@@ -13,6 +13,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - cpp-httplib v0.56.0 -> v0.58.0 (#2403): v0.57.0 rejects control characters in the chunk-size line (request smuggling, yhirose/cpp-httplib#2585) and bounds the trailer declaration set (#2583).
 
 ### Fixed
+- MoE decode with host-resident experts and no dp4a scratch (failed T2 take of q8_1/d8) passed the host expert tensors to the FP16 decode kernels (#2447). The FP16 arm now reads the staged slot pool with slot indices and slot stride, like dp4a.
+- `gemm_grouped_nvfp4_smallM` allocated its pointer, M and descriptor tables with `cudaMallocAsync` on every call (#2451). The tables now go into a caller buffer, `MoEWorkspace::smallM_tables` from the T2 arena (`smallM_table_bytes(ne)`, charged in `moe_arrays`); alloc-interpose phase C pins 0 allocations on an NVFP4 MoE smallM prefill.
 - MoE decode ran the Q8_0 kernel on Q5_1 gate/up experts (NaN/Inf) and logged "no kernel for qtype" then continued on the FP16 fallback (#2444). Q5_1 gets decode and fused gate+up arms; selectors have no default arm and throw; admission checks gate, up and down; mixed gate/up qtypes run two decodes.
 - A failed device allocation no longer runs a kernel on a null buffer or returns a silently wrong token (#2446): smallM
   MoE scratch comes from the T2 arena, 50 log-only `cudaMalloc*` sites throw, return an error or skip their cache, a failed

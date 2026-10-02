@@ -571,7 +571,8 @@ bool smallM_done = false;
 
                 return imp::gemm_grouped_nvfp4_smallM(na, active_M_local.data(), N_out, K_in, hA.data(),
                                                       hSFA.data(), hB.data(), hSFB.data(), hD.data(),
-                                                      d_alpha_active, stream);
+                                                      d_alpha_active, moe_.smallM_tables,
+                                                      moe_.smallM_tables_bytes, stream);
             };
 
             bool ok_gate = ok;

@@ -12,6 +12,8 @@
 #include <vector>
 #include <cmath>
 #include <memory>
+#include <cstring>
+#include <random>
 
 namespace imp {
 namespace {
@@ -610,6 +612,119 @@ TEST(MoEExecutorTest, MixedMoEDense) {
 
     cudaFree(d_tokens);
     cudaFree(d_positions);
+    tm.cleanup();
+}
+
+// #2447: host-resident Q8_0 experts + no dp4a scratch -> FP16 decode arm. It must read the staged slot
+// pool, not the host tensor: forward 2 runs after the host bytes are zeroed, so a host read changes it.
+namespace host_experts {
+
+constexpr int kD = 256, kEff = 256, kNe = 4, kTopK = 2, kVocab = 256;
+constexpr size_t kQ8Block = 34;  // fp16 scale + 32 int8
+
+size_t q8_bytes(int64_t rows, int64_t cols) { return static_cast<size_t>(rows) * (cols / 32) * kQ8Block; }
+
+// Pinned + mapped, so a device read of the host tensor is legal and shows up as wrong logits, not a fault.
+Tensor host_q8_experts(int64_t rows, int64_t cols, std::mt19937& rng) {
+    const size_t bytes = kNe * q8_bytes(rows, cols);
+    void* p = nullptr;
+    EXPECT_EQ(cudaHostAlloc(&p, bytes, cudaHostAllocMapped | cudaHostAllocPortable), cudaSuccess);
+    std::normal_distribution<float> dist(0.0f, 0.5f);
+    auto* b = static_cast<uint8_t*>(p);
+    for (size_t off = 0; off < bytes; off += kQ8Block) {
+        const half s = __float2half(0.01f);
+        std::memcpy(b + off, &s, sizeof(s));
+        for (int j = 0; j < 32; ++j)
+            b[off + 2 + j] = static_cast<uint8_t>(static_cast<int8_t>(std::clamp(dist(rng) * 64.0f, -127.0f, 127.0f)));
+    }
+    int64_t shape[3] = {kNe, rows, cols};
+    return Tensor(p, QType::Q8_0, 3, shape, /*on_device=*/false);
+}
+
+void zero_scales(const Tensor& t) {
+    auto* b = static_cast<uint8_t*>(t.data);
+    const size_t bytes = kNe * q8_bytes(t.shape[1], t.shape[2]);
+    for (size_t off = 0; off < bytes; off += kQ8Block)
+        std::memset(b + off, 0, 2);
+}
+
+std::vector<float> decode_logits(GraphExecutor& ex) {
+    int32_t* d_tok = nullptr;
+    int* d_pos = nullptr;
+    const int32_t tok = 42;
+    const int pos = 0;
+    EXPECT_EQ(cudaMalloc(&d_tok, sizeof(tok)), cudaSuccess);
+    EXPECT_EQ(cudaMalloc(&d_pos, sizeof(pos)), cudaSuccess);
+    cudaMemcpy(d_tok, &tok, sizeof(tok), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_pos, &pos, sizeof(pos), cudaMemcpyHostToDevice);
+    InferenceState st;
+    st.token_ids = d_tok;
+    st.positions = d_pos;
+    st.n_tokens = 1;
+    st.is_prefill = true;
+    st.n_sequences = 1;
+    st.temperature = 0.0f;
+    Tensor logits;
+    ex.forward_logits(st, logits, nullptr);
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<float> h(static_cast<size_t>(logits.numel()));
+    cudaMemcpy(h.data(), logits.data, h.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d_tok);
+    cudaFree(d_pos);
+    return h;
+}
+
+float max_abs_diff(const std::vector<float>& a, const std::vector<float>& b) {
+    float m = 0.0f;
+    for (size_t i = 0; i < a.size() && i < b.size(); ++i)
+        m = std::max(m, std::fabs(a[i] - b[i]));
+    return m;
+}
+
+void init_host_expert_executor(GraphExecutor& ex, Model& model) {
+    init_executor_moe(ex, model);
+    ex.drop_dp4a_scratch_for_test();
+}
+
+}  // namespace host_experts
+
+TEST(MoEExecutorTest, HostExpertFp16DecodeReadsTheSlotPool) {
+    SKIP_IF_NO_CUDA();
+    using namespace host_experts;
+    auto tm = MoETestModel::create(kD, /*d_ff=*/kEff, kVocab, /*n_layers=*/1, /*n_heads=*/4, /*n_kv_heads=*/4,
+                                   kNe, kTopK, kEff);
+    std::mt19937 rng(7);
+    auto& ly = tm.model->layers_[0];
+    ly.expert_gate_packed = host_q8_experts(kEff, kD, rng);
+    ly.expert_up_packed = host_q8_experts(kEff, kD, rng);
+    ly.expert_down_packed = host_q8_experts(kD, kEff, rng);
+
+    std::vector<float> ref, after;
+    {
+        GraphExecutor ex;
+        ASSERT_NO_FATAL_FAILURE(init_host_expert_executor(ex, *tm.model));
+        ASSERT_GT(ex.expert_cache_slots_per_layer(), 0) << "no expert LRU cache: the host path is not reached";
+        ref = decode_logits(ex);
+        const int64_t misses = ex.expert_cache_misses();
+        ASSERT_EQ(misses, 3 * kTopK) << "decode did not stage the routed experts into the slot pool";
+        for (const Tensor* t : {&ly.expert_gate_packed, &ly.expert_up_packed, &ly.expert_down_packed})
+            zero_scales(*t);
+        after = decode_logits(ex);
+        EXPECT_EQ(ex.expert_cache_misses(), misses) << "second decode reloaded experts from the host";
+    }
+    // Control: zeroed host experts, fresh cache. The zeroing must be visible, else forward 2 proves nothing.
+    std::vector<float> zeroed;
+    {
+        GraphExecutor ex;
+        ASSERT_NO_FATAL_FAILURE(init_host_expert_executor(ex, *tm.model));
+        zeroed = decode_logits(ex);
+    }
+    ASSERT_EQ(ref.size(), static_cast<size_t>(kVocab));
+    EXPECT_GT(max_abs_diff(ref, zeroed), 1e-2f) << "control: zeroed experts did not change the logits";
+    EXPECT_LE(max_abs_diff(ref, after), 1e-6f) << "FP16 decode arm read the host tensor, not the slot pool";
+
+    for (const Tensor* t : {&ly.expert_gate_packed, &ly.expert_up_packed, &ly.expert_down_packed})
+        cudaFreeHost(t->data);
     tm.cleanup();
 }
 
