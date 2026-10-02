@@ -1,5 +1,6 @@
 #pragma once
 
+#include "model/hf_config_loader.h"
 #include "model/model_arch.h"
 
 namespace imp {
@@ -15,5 +16,8 @@ struct SamplingDefaults {
 // Get sampling defaults for a model architecture.
 // Returns family-appropriate temperature/top_p/top_k values.
 SamplingDefaults get_sampling_defaults(ModelArch arch);
+
+// CLI and server defaults (#2462): generation_config.json (field >= 0) over the arch preset.
+SamplingDefaults resolve_sampling_defaults(ModelArch arch, const HFConfigLoader::GenerationConfig& gen);
 
 }  // namespace imp

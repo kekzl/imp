@@ -71,9 +71,9 @@ identical request returns different output than against the OpenAI API.
 
 | field | imp | OpenAI | to get OpenAI's behaviour |
 |---|---|---|---|
-| `temperature` | 0.7 | 1.0 | send `"temperature": 1.0` |
-| `top_p` | 0.95 | 1.0 | send `"top_p": 1.0` |
-| `top_k` | 40 | (no field) | send `"top_k": 999999` (see below) |
+| `temperature` | model default: `generation_config.json`, else the arch preset (0.6; 1.0 on gpt_oss, qwen4exp), as `imp-cli` (#2462) | 1.0 | send `"temperature": 1.0` |
+| `top_p` | model default (0.95; 0.9 on gemma4, 1.0 on gpt_oss) | 1.0 | send `"top_p": 1.0` |
+| `top_k` | model default (20 on the Qwen and gemma4 presets, else 0 = 50) | (no field) | send `"top_k": 999999` (see below) |
 | `repetition_penalty` | 1.05 | (no field) | send `"repetition_penalty": 1.0` |
 
 Two of these do not switch off the way the field name suggests:
@@ -81,7 +81,7 @@ Two of these do not switch off the way the field name suggests:
 - **`top_k: 0` is not "off", it is 50.** Every sampling site spells
 `top_k > 0 ? top_k : 50` (`src/exec/executor.cu:219 state.top_k > 0`, `:289/340`, `src/runtime/engine_decode_pipeline.cpp:74 r.top_k > 0`).
 
-- Zero and "unset" both land on 50, a *tighter* truncation than the 40 default.
+- Zero and "unset" both land on 50.
 - Disabling top-k needs a value at or above the vocabulary size.
 - The dispatcher clamps to the full vocabulary (`engine_decode_pipeline.cpp:75 eff_top_k`).
 - **`repetition_penalty` has no OpenAI field**, so a strictly spec-compliant

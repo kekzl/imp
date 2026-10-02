@@ -4,6 +4,7 @@
 // below, one kSamplingKeys row (its `via` bits carry it through /v1/messages and /v1/responses),
 // one apply_to line. Member initializers are the server defaults.
 
+#include "runtime/presets.h"
 #include "runtime/request.h"
 
 #include <nlohmann/json.hpp>
@@ -26,7 +27,19 @@ struct SamplingFields {
     bool ignore_eos = false;    // vLLM-style: run to max_tokens, never stop on EOS (benchmarks)
     bool cache_prompt = false;  // pin the prompt's KV blocks (llama.cpp field, Anthropic cache_control)
     std::string session_id;     // agent session (#2407): pins the prompt blocks across turns
-    bool top_p_explicit = false, top_k_explicit = false, rep_pen_explicit = false;
+    bool temperature_explicit = false, top_p_explicit = false, top_k_explicit = false,
+         rep_pen_explicit = false;
+
+    // #2462: the loaded model's defaults (imp::resolve_sampling_defaults, as imp-cli) replace the
+    // member initializers for fields the request omitted. Call once the model is resolved.
+    void apply_model_defaults(const imp::SamplingDefaults& d) {
+        if (!temperature_explicit)
+            temperature = d.temperature;
+        if (!top_p_explicit)
+            top_p = d.top_p;
+        if (!top_k_explicit)
+            top_k = d.top_k;
+    }
 
     // Everything but seed and stream, which callers set per completion.
     void apply_to(imp::Request& r) const {
@@ -111,6 +124,7 @@ inline void parse_sampling_fields(const nlohmann::json& body, float default_thin
             },
             k.member);
     }
+    out.temperature_explicit = body.contains("temperature");
     out.top_p_explicit = body.contains("top_p");
     out.top_k_explicit = body.contains("top_k");
     out.rep_pen_explicit = body.contains("repetition_penalty");
