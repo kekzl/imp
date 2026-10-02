@@ -392,6 +392,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_init_resolver.cpp
     src/runtime/engine_weight_upload.cpp
     src/runtime/engine_kv_cache_init.cpp
+    src/runtime/engine_kv_replan.cpp
     src/runtime/engine_workspace_warmup.cpp
     src/runtime/engine_graph_decode.cpp
     src/runtime/engine_scheduler.cpp
@@ -415,6 +416,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/constraint_manager.cpp
     src/runtime/vram_budget.cpp
     src/runtime/plan_shadow.cpp
+    src/runtime/kv_replan.cpp
     src/runtime/cuda_graph.cu
     src/runtime/presets.cpp
     src/compute/mtp_forward.cu
@@ -901,6 +903,8 @@ if(IMP_BUILD_TESTS)
         # the lane CI runs — it used to be inline in engine_kv_cache_init.cpp,
         # unreachable without a GPU and a 22 GB checkpoint.
         tests/test_kv_residual_sizing.cpp
+        # KV re-sizing at the measured library reserve (#2436), pure.
+        tests/test_kv_replan.cpp
         tests/test_graph_slots.cpp
         # T5's engine-persistent half. The property that matters — freed exactly
         # once, never after a move — is ownership, not CUDA, so it belongs in the

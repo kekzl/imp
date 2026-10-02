@@ -324,6 +324,8 @@ bool Engine::init_kv_cache() {
                 "and usable). The report above says what the plan could not fit.",
                 max_blocks);
         }
+        kv_replan_arm(kv_replan_, probe, vram_budget, max_blocks, plan.ok,
+                      config_.library_reserve_mb < 0 && config_.kv_cache_max_blocks <= 0);
     }
 
     // The plan sized auto pools with the metadata per block; a pinned pool is the operator's count.
@@ -640,6 +642,7 @@ bool Engine::init_kv_cache() {
                          static_cast<double>(max_blocks) * kv_bs, planned);
         }
     }
+    kv_replan_set_pool(kv_replan_, per_block_total_bytes, kv_ceiling_blocks, kv_ceiling_effective);
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
     if (!max_seq_len_explicit_)

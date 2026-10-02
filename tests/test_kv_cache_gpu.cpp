@@ -584,6 +584,61 @@ TEST(KVCacheGrowTest, KeyMinmaxGrowsWithThePool) {
 // above the spill threshold - or the probe couldn't tell a real spill apart either. What a
 // lazy pool was charged for but hasn't committed is not spare, even though cudaMemGetInfo
 // reports it free (vram.lazy_commit).
+// raise_ceiling (#2436): warmup re-reserves the pool at the ceiling its own library measurement
+// allows. The stride moves, the committed count stays, growth passes the old ceiling and lands in
+// backed memory; refused while a block is held, at a smaller ceiling, and with key min/max on.
+TEST(KVCacheGrowTest, RaiseCeilingKeepsTheCommitAndGrowsPastTheOldCeiling) {
+    SKIP_IF_NO_CUDA();
+    KVCache cache(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::NVFP4, /*max_blocks=*/8,
+                  /*block_size=*/16, /*alloc=*/nullptr, /*ceiling_blocks=*/32);
+    if (!cache.growable())
+        GTEST_SKIP() << "no VMM backend on this device";
+    const int held = cache.allocate_block();
+    ASSERT_GE(held, 0);
+    EXPECT_FALSE(cache.raise_ceiling(64)) << "a held block's memory would move under it";
+    cache.free_block(held);
+    EXPECT_FALSE(cache.raise_ceiling(16)) << "never lowers";
+
+    ASSERT_TRUE(cache.raise_ceiling(64));
+    EXPECT_EQ(cache.ceiling_blocks(), 64);
+    EXPECT_EQ(cache.total_blocks(), 8);
+    EXPECT_TRUE(cache.growable());
+    const ptrdiff_t stride = static_cast<char*>(cache.k_ptr(1, 0)) - static_cast<char*>(cache.k_ptr(0, 0));
+    EXPECT_EQ(stride, static_cast<ptrdiff_t>(2 * 64 * cache.block_bytes()));
+
+    ASSERT_GE(cache.try_grow_to(48), 48) << "growth must pass the old 32-block ceiling";
+    const size_t bb = cache.block_bytes();
+    std::vector<uint8_t> host(bb, 0xAB);
+    ASSERT_EQ(cudaMemcpy(host.data(), cache.v_ptr(1, 47), bb, cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_TRUE(std::all_of(host.begin(), host.end(), [](uint8_t b) { return b == 0; }))
+        << "a block grown past the old ceiling is backed and zeroed";
+    uint8_t sc = 0xAB;
+    ASSERT_EQ(cudaMemcpy(&sc, cache.v_scale_ptr(1, 63), 1, cudaMemcpyDeviceToHost), cudaSuccess)
+        << "scale planes cover the new ceiling";
+    EXPECT_EQ(sc, 0);
+
+    KVCache mm(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/8,
+               /*block_size=*/16, /*alloc=*/nullptr, /*ceiling_blocks=*/32);
+    ASSERT_TRUE(mm.enable_key_minmax());
+    EXPECT_FALSE(mm.raise_ceiling(64)) << "the min/max pool is strided by the old ceiling";
+}
+
+// Per-layer geometry re-lays out every layer at the new stride.
+TEST(KVCacheGrowTest, RaiseCeilingRelaysPerLayerGeometry) {
+    SKIP_IF_NO_CUDA();
+    KVCache cache(/*n_layers=*/2, std::vector<int>{4, 2}, std::vector<int>{64, 128}, QType::NVFP4,
+                  /*max_blocks=*/8, /*block_size=*/16, /*alloc=*/nullptr, {}, 0, /*ceiling_blocks=*/32);
+    if (!cache.growable())
+        GTEST_SKIP() << "no VMM backend on this device";
+    ASSERT_TRUE(cache.raise_ceiling(64));
+    const ptrdiff_t l1 = static_cast<char*>(cache.k_ptr(1, 0)) - static_cast<char*>(cache.k_ptr(0, 0));
+    EXPECT_EQ(l1, static_cast<ptrdiff_t>(2 * 64 * cache.block_bytes(0)));
+    ASSERT_GE(cache.try_grow_to(40), 40);
+    std::vector<uint8_t> host(cache.block_bytes(1), 0xAB);
+    ASSERT_EQ(cudaMemcpy(host.data(), cache.k_ptr(1, 39), host.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_TRUE(std::all_of(host.begin(), host.end(), [](uint8_t b) { return b == 0; }));
+}
+
 TEST(KVCacheGrowTest, GrowthLeavesChargedButUncommittedBytesAlone) {
     SKIP_IF_NO_CUDA();
     KVCache cache(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/8,

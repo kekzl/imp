@@ -381,7 +381,8 @@ def main():
     # 1197 -> 1198: MoEExecutorTest.HostExpertFp16DecodeReadsTheSlotPool (test-moe-gdn, GPU) (#2447).
     # 1198 -> 1199: MoEMultiCtaPermute.MatchesTheSingleCtaKernelBitExact (test-moe-gdn, GPU) (#2465).
     # 1199 -> 1203: GptOssMoeFusedBias.* (4, test-moe-gdn, GPU) (#2466).
-    PINNED = 1203
+    # 1203 -> 1205: KVCacheGrowTest.RaiseCeiling* x2 (test-kv, GPU) (#2436).
+    PINNED = 1205
 
     text = CMAKE.read_text()
     mods = module_sources(text)

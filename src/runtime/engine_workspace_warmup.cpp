@@ -411,8 +411,8 @@ static void report_library_reserve(size_t charge, size_t forward_window, size_t 
         forward_window == SIZE_MAX ? 0.0 : forward_window / (1024.0 * 1024.0), whole_init / (1024.0 * 1024.0),
         charge > charged ? "The plan therefore under-reserved: caches and the KV pool were sized "
                            "against VRAM that the libraries then took."
-                         : "The plan therefore over-reserved: that much KV pool was set aside for "
-                           "nothing.",
+                         : "The plan therefore over-reserved; a start that charged the constant "
+                           "re-sizes the KV pool to the measurement next (#2436).",
         use_mib);
 }
 
@@ -517,6 +517,8 @@ void Engine::warmup() {
                          library_reserve_cache_path_.c_str());
         }
     }
+    // Before the invalidation below: a raised ceiling moves the pool every captured graph read.
+    apply_measured_library_reserve_();
 
     // Runners stay cold through the prewarm ladder: each size runs one eager step (cuBLASLt probe at
     // that M) before its capture, so no algo probe runs inside a capture (#2396). Marked warm below.
