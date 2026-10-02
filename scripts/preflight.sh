@@ -3,7 +3,8 @@
 #   static gates (scripts/ci_static_gates.sh), clang-tidy on changed TUs, git clang-format on
 #   changed lines, actionlint when .github/ changed. Exit 1 if any row is FAIL.
 # Host half resolves the base and starts imp:lint; `--inner` runs inside it.
-# Base: IMP_GATE_BASE, else merge-base HEAD origin/main. Diff = working tree + untracked vs base.
+# Base: IMP_GATE_BASE, else merge-base HEAD origin/main. Diff = working tree + untracked vs base,
+# or the staged tree with PREFLIGHT_STAGED=1 (pre-commit hook).
 set -uo pipefail
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
 
@@ -75,8 +76,6 @@ inner() {
 
 if [ "${1:-}" = "--inner" ]; then
     inner "$2"
-    # Written as root; the host half appends the actionlint row.
-    chmod a+rwx "$OUT"; chmod a+rw "$RES"
     exit 0
 fi
 
@@ -89,11 +88,31 @@ if [ -z "$BASE" ]; then
     BASE="$(git merge-base HEAD origin/main)" || { echo "preflight: no IMP_GATE_BASE and no origin/main"; exit 2; }
 fi
 COMMON="$(git rev-parse --path-format=absolute --git-common-dir)"
+
+# PREFLIGHT_STAGED=1 (pre-commit): check the tree being committed, not the working tree.
+# write-tree honours the hook's GIT_INDEX_FILE (commit -a, commit <paths>); the check runs in a
+# throwaway worktree under $COMMON holding HEAD + that tree, removed on exit.
+if [ "${PREFLIGHT_STAGED:-0}" = "1" ]; then
+    TREE="$(git write-tree)" || { echo "preflight: git write-tree failed (unmerged index?)"; exit 2; }
+    unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE GIT_PREFIX PREFLIGHT_STAGED
+    # 755: the actionlint image runs as user guest, mktemp's 700 hides the tree from it.
+    STAGED="$(mktemp -d "$COMMON/preflight-staged.XXXXXX")" && chmod 755 "$STAGED" || exit 2
+    # shellcheck disable=SC2064 # expand STAGED now
+    trap "git worktree remove --force '$STAGED' >/dev/null 2>&1 || rm -rf '$STAGED'; git worktree prune" EXIT
+    git worktree add -q --detach --no-checkout "$STAGED" HEAD \
+        && git -C "$STAGED" read-tree -u --reset "$TREE" \
+        || { echo "preflight: could not build the staged tree in $STAGED"; exit 2; }
+    echo "preflight: staged tree $(git rev-parse --short "$TREE") (unstaged and untracked files ignored)"
+    (cd "$STAGED" && IMP_GATE_BASE="$BASE" bash scripts/preflight.sh)
+    exit $?
+fi
+
 echo "preflight: base $(git rev-parse --short "$BASE"), $(changed_files "$BASE" | wc -l) changed file(s)"
 
 # Worktree and the main .git at their host paths: a linked worktree's .git file points there.
-# safe.directory: the container runs as root, the checkout belongs to the host user.
-docker run --rm -v "$PWD:$PWD" -w "$PWD" -v "$COMMON:$COMMON" \
+# Host uid/gid: no root-owned build-preflight/ or __pycache__/ left behind (#2501).
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
+    -v "$PWD:$PWD" -w "$PWD" -v "$COMMON:$COMMON" \
     -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
     -e PREFLIGHT_DIR="$OUT" "$IMG" bash scripts/preflight.sh --inner "$BASE"
 [ -f "$RES" ] || { echo "preflight: container produced no $RES"; exit 2; }
