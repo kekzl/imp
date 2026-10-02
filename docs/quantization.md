@@ -114,6 +114,8 @@ this, not `ppl_corpus_45k.txt`, imp's own scoring corpus). Block-scaled FP8 sour
 Qwen3.8's FP8 line) work: each weight, including ones kept at full precision, is widened with
 its `weight_scale_inv` grid before quantizing (on Qwen3.8-27B that is the MTP draft head, honesty there costs 350 MiB of output).
 
+Per-tensor-scale FP8 sources (Modelopt: scalar `weight_scale` + `input_scale`) are widened with that scalar; both scales are dropped (#2473).
+
 **Output layout (`--format`)**: `modelopt` (default) writes `.weight` (U8 packed) +
 `.weight_scale` (F8_E4M3) + `.weight_scale_2` (F32) declared in `hf_quant_config.json`, read by
 imp only; `vllm` (compressed-tensors) writes `.weight_packed` + `.weight_scale` +
