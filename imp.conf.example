@@ -785,6 +785,11 @@ prefix_cache         = true
 # requests, as percent of the KV pool. Oldest pins recycle FIFO. 0 = pin
 # requests are ignored.
 prefix_pin_budget_pct = 25
+# Requests carrying "session_id" pin their prompt blocks under that session
+# (same budget as above; each turn replaces the pin). A session idle this
+# many seconds is released; POST /v1/sessions/{id}/close releases at once.
+# 0 = no TTL (close or the pin budget only).
+session_ttl_s        = 600
 # Serve a model other than the loaded one by swapping to it instead of
 # answering 404 — agent harnesses drive a big model beside a small one and
 # 32 GB fits one at a time. The swap is serial: in-flight generations drain

@@ -119,6 +119,30 @@ void BatchingEngine::submit_all(const std::vector<std::shared_ptr<ServerRequest>
     queue_cv_.notify_one();
 }
 
+void BatchingEngine::close_session(std::string session_id) {
+    {
+        std::lock_guard<std::mutex> lock(session_mutex_);
+        session_closes_.push_back(std::move(session_id));
+    }
+    queue_cv_.notify_one();
+}
+
+void BatchingEngine::apply_session_ops_(imp::KVCacheManager* kv, int ttl_s) {
+    std::vector<std::string> closes;
+    {
+        std::lock_guard<std::mutex> lock(session_mutex_);
+        closes.swap(session_closes_);
+    }
+    for (const auto& id : closes)
+        (void)kv->close_session(id);
+    const auto now = std::chrono::steady_clock::now();
+    if (ttl_s <= 0 || now < next_session_sweep_)
+        return;
+    next_session_sweep_ = now + std::chrono::seconds(1);
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    (void)kv->expire_sessions(now_ms, static_cast<int64_t>(ttl_s) * 1000);
+}
+
 int BatchingEngine::queue_depth() const {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     return static_cast<int>(pending_queue_.size()) + static_cast<int>(active_requests_.size());
@@ -301,6 +325,7 @@ void BatchingEngine::worker_loop() {
                 }
             }
         }
+        apply_session_ops_(kv_mgr, engine->runtime_config().server.session_ttl_s);
 
         if (active_requests_.empty()) {
             decode_batch_last.store(0, std::memory_order_relaxed);

@@ -287,3 +287,13 @@ Two entry points, one generation path (#2201):
 | error type | OpenAI envelope `rate_limit_error`; `/v1/messages` Anthropic envelope `overloaded_error`. Same status and types as the `--max-concurrent` refusal |
 | empty queue | always admitted, even a prompt over `n`: its size is `--max-input-tokens`' job |
 | `/metrics` | `imp_queued_prompt_tokens` (gauge), tracked with the cap off too; refusals count in `imp_requests_rejected_total` |
+
+## Agent sessions (`session_id`)
+
+| item | behaviour |
+|---|---|
+| field | top-level `"session_id"` on chat, completions, `/v1/messages`, `/v1/responses` (#2407); 1-128 characters of `[A-Za-z0-9._:-]`, else 400 `param: "session_id"`. Anthropic `metadata.user_id` is not read (one user runs several sessions); `previous_response_id` implies no session |
+| pin | at finish, the full blocks of the prompt, replacing the session's previous pin, so turn N+1 keeps turn N's prefix hit while other sessions fill the pool. Unpinned cached blocks are reclaimed first (LRU); KV blocks only, no hybrid recurrent state |
+| budget | shared with `cache_prompt` / `cache_control`: `server.prefix_pin_budget_pct` (25 % of the pool, `0` = off). Over budget the least recently pinned owner is released; a new turn moves its session to the back |
+| release | `POST /v1/sessions/{id}/close` -> `{"id", "object": "session", "closed": true}`, 200 for any valid id, idempotent; `server.session_ttl_s` idle seconds (600, `0` = none); or the budget. A turn running at close re-pins at its finish |
+| `/metrics` | `imp_kv_sessions`, `imp_kv_session_pinned_blocks` (summed per session); `imp_kv_blocks_pinned` counts unique pinned blocks of both kinds |

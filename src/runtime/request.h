@@ -209,6 +209,9 @@ struct Request {
     // Pin boundary in tokens (#1046): -1 = whole prompt; >=0 = pin only the
     // first N prompt tokens' full blocks (Anthropic cache_control breakpoint).
     int pin_kv_prefix_tokens = -1;
+    // Agent session (#2407): at finish the prompt's full blocks replace this session's pin.
+    // Empty = no session. Released by close, server.session_ttl_s idle, or the pin budget.
+    std::string session_id;
 
     // SSE streaming request: the client consumes tokens as they are produced via the async
     // conditional graph loop. step_async_graph_resume polls the mapped ring buffer (device

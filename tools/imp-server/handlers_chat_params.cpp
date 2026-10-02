@@ -129,6 +129,10 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     }
 
     parse_sampling_fields(body, state.default_think_budget, ctx.params);
+    if (const std::string err = session_id_error(ctx.params, body); !err.empty()) {
+        send_json_error(res, 400, "invalid_request_error", err, "session_id");
+        return false;
+    }
     // "max_completion_tokens" (current OpenAI SDKs) takes precedence over the
     // deprecated "max_tokens"; without this, SDK requests silently ran with
     // the server default.

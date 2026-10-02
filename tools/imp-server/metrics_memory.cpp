@@ -99,9 +99,15 @@ if (state.ctx && state.ctx->engine) {
             out += "# TYPE imp_kv_blocks_reclaimable gauge\n";
             out += "imp_kv_blocks_reclaimable " +
                    std::to_string(mgr->num_reclaimable_cached_blocks()) + "\n";
-            out += "# HELP imp_kv_blocks_pinned Cached blocks pinned by cache_control\n";
+            out += "# HELP imp_kv_blocks_pinned Cached blocks pinned by cache_control or session_id\n";
             out += "# TYPE imp_kv_blocks_pinned gauge\n";
             out += "imp_kv_blocks_pinned " + std::to_string(mgr->num_pinned_blocks()) + "\n";
+            out += "# HELP imp_kv_session_pinned_blocks Blocks pinned by session_id, summed per session\n";
+            out += "# TYPE imp_kv_session_pinned_blocks gauge\n";
+            out += "imp_kv_session_pinned_blocks " + std::to_string(mgr->num_session_pinned_blocks()) + "\n";
+            out += "# HELP imp_kv_sessions Sessions holding a session_id prefix pin\n";
+            out += "# TYPE imp_kv_sessions gauge\n";
+            out += "imp_kv_sessions " + std::to_string(mgr->num_sessions()) + "\n";
             out += "# HELP imp_kv_blocks_live KV blocks held by LIVE SEQUENCES only — the number "
                    "that must return to baseline when the load stops\n";
             out += "# TYPE imp_kv_blocks_live gauge\n";

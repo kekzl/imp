@@ -74,6 +74,10 @@ bool parse_completions_request_params(const httplib::Request& req, httplib::Resp
 
     // Extract parameters
     parse_sampling_fields(body, state.default_think_budget, out);
+    if (const std::string err = session_id_error(out, body); !err.empty()) {
+        send_json_error(res, 400, "invalid_request_error", err, "session_id");
+        return false;
+    }
     // max_tokens only: max_completion_tokens is a chat/completions field (parse_max_tokens_field).
     out.max_tokens = body.value("max_tokens", state.default_max_tokens);
     out.echo = body.value("echo", false);

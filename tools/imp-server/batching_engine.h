@@ -17,6 +17,10 @@
 #include <thread>
 #include <vector>
 
+namespace imp {
+class KVCacheManager;
+}  // namespace imp
+
 // Token delivered from the worker thread to the HTTP handler.
 struct TokenEvent {
     int32_t token_id;
@@ -132,6 +136,9 @@ public:
     // iteration, so a /v1/decide shared wave has one batch composition (#2198).
     void submit_all(const std::vector<std::shared_ptr<ServerRequest>>& reqs);
 
+    // POST /v1/sessions/{id}/close (#2407). Thread-safe: the worker releases the pin before its next step.
+    void close_session(std::string session_id);
+
     // Returns the number of active + pending requests.
     int queue_depth() const;
 
@@ -187,4 +194,10 @@ private:
 
     // Active requests being processed by the engine
     std::vector<std::shared_ptr<ServerRequest>> active_requests_;
+
+    // Session closes (HTTP threads -> worker) and the TTL sweep, run at most once per second.
+    std::mutex session_mutex_;
+    std::vector<std::string> session_closes_;
+    std::chrono::steady_clock::time_point next_session_sweep_{};
+    void apply_session_ops_(imp::KVCacheManager* kv, int ttl_s);
 };

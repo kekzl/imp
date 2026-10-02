@@ -447,3 +447,7 @@ bool idle_unload_tick(ServerState& state);
 // POST /admin/lora/unload {"id"} or {"name"}. Both drain in-flight work first (#2199).
 void handle_lora_load(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_lora_unload(const httplib::Request& req, httplib::Response& res, ServerState& state);
+
+// POST /v1/sessions/{id}/close (#2407): releases the session_id prefix pin. Idempotent, 200 for any
+// valid id (unknown included); 400 when the id breaks the session_id rule.
+void handle_session_close(const httplib::Request& req, httplib::Response& res, ServerState& state);

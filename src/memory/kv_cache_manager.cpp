@@ -932,7 +932,9 @@ BlockRef KVCacheManager::acquire_block_with_eviction_() {
 
 // ─── Prefix block pinning ────────────────────────────────────────
 
-void KVCacheManager::pin_prefix(int seq_id, int num_blocks) {
+void KVCacheManager::pin_prefix(int seq_id, int num_blocks) { pin_blocks_as_(seq_id, seq_id, num_blocks); }
+
+void KVCacheManager::pin_blocks_as_(int owner, int seq_id, int num_blocks) {
     auto it = seq_blocks_.find(seq_id);
     if (it == seq_blocks_.end())
         return;
@@ -942,8 +944,8 @@ void KVCacheManager::pin_prefix(int seq_id, int num_blocks) {
         return;
 
     // Re-pinning replaces the owner's previous pin set.
-    if (pinned_seq_blocks_.contains(seq_id))
-        unpin_prefix(seq_id);
+    if (pinned_seq_blocks_.contains(owner))
+        unpin_prefix(owner);
 
     // Budget: cap the request to the budget, then unpin the oldest owners
     // (FIFO) until the new pin fits. Evicted pins degrade to normal cached
@@ -952,7 +954,10 @@ void KVCacheManager::pin_prefix(int seq_id, int num_blocks) {
         to_pin = std::min(to_pin, pin_budget_blocks_);
         while (static_cast<int>(pin_refcount_.size()) + to_pin > pin_budget_blocks_ &&
                !pin_fifo_.empty()) {
-            unpin_prefix(pin_fifo_.front());
+            const int victim = pin_fifo_.front();
+            unpin_prefix(victim);
+            if (victim < 0)
+                forget_session_owner_(victim);
         }
     }
 
@@ -978,10 +983,12 @@ void KVCacheManager::pin_prefix(int seq_id, int num_blocks) {
         return;
 
     int n_owned = static_cast<int>(owned.size());
-    pinned_seq_blocks_[seq_id] = std::move(owned);
-    pin_fifo_.push_back(seq_id);
+    pinned_seq_blocks_[owner] = std::move(owned);
+    pin_fifo_.push_back(owner);
+    if (owner < 0)
+        session_pinned_blocks_.fetch_add(n_owned, std::memory_order_relaxed);
 
-    IMP_LOG_DEBUG("PinPrefix: seq %d pinned %d blocks (%zu unique pinned total)", seq_id, n_owned,
+    IMP_LOG_DEBUG("PinPrefix: owner %d pinned %d blocks (%zu unique pinned total)", owner, n_owned,
                   pin_refcount_.size());
 }
 
@@ -1005,6 +1012,8 @@ void KVCacheManager::unpin_prefix(int seq_id) {
             reclaimable_cached_count_++;
     }
 
+    if (seq_id < 0)
+        session_pinned_blocks_.fetch_sub(static_cast<int>(it->second.size()), std::memory_order_relaxed);
     pinned_seq_blocks_.erase(it);
     pin_fifo_.remove(seq_id);
     IMP_LOG_DEBUG("UnpinPrefix: seq %d unpinned (%zu unique pinned remain)", seq_id,

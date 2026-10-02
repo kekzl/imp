@@ -36,6 +36,7 @@
     "repeat_last_n": 0,
     "repetition_penalty": 1.0499999523162842,
     "seed": -1,
+    "session_id": "",
     "spec_mtp_k": -1,
     "spec_override": -1,
     "stop": [],
@@ -1572,6 +1573,27 @@
     "json_mode": true
    }
   },
+  "{\"session_id\":\"\"}": {
+   "error": "\"session_id\" must be 1-128 characters of [A-Za-z0-9._:-]",
+   "status": 400
+  },
+  "{\"session_id\":\"a/b\"}": {
+   "error": "\"session_id\" must be 1-128 characters of [A-Za-z0-9._:-]",
+   "status": 400
+  },
+  "{\"session_id\":\"agent-1.turn:2_x\"}": {
+   "params": {
+    "session_id": "agent-1.turn:2_x"
+   }
+  },
+  "{\"session_id\":\"sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss\"}": {
+   "error": "\"session_id\" must be 1-128 characters of [A-Za-z0-9._:-]",
+   "status": 400
+  },
+  "{\"session_id\":7}": {
+   "error": "\"session_id\" must be a string, got number",
+   "status": 400
+  },
   "{\"speculative\":\"x\"}": {
    "error": "\"speculative\" must be a boolean or an object of the form {\"mtp_k\": N}",
    "status": 400
@@ -1673,6 +1695,7 @@
     "repeat_last_n": 0,
     "repetition_penalty": 1.0499999523162842,
     "seed": -1,
+    "session_id": "",
     "spec_mtp_k": -1,
     "spec_override": -1,
     "stop": [],
@@ -3163,6 +3186,27 @@
   "{\"response_format\":{\"type\":\"json_object\"}}": {
    "params": {}
   },
+  "{\"session_id\":\"\"}": {
+   "error": "\"session_id\" must be 1-128 characters of [A-Za-z0-9._:-]",
+   "status": 400
+  },
+  "{\"session_id\":\"a/b\"}": {
+   "error": "\"session_id\" must be 1-128 characters of [A-Za-z0-9._:-]",
+   "status": 400
+  },
+  "{\"session_id\":\"agent-1.turn:2_x\"}": {
+   "params": {
+    "session_id": "agent-1.turn:2_x"
+   }
+  },
+  "{\"session_id\":\"sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss\"}": {
+   "error": "\"session_id\" must be 1-128 characters of [A-Za-z0-9._:-]",
+   "status": 400
+  },
+  "{\"session_id\":7}": {
+   "error": "\"session_id\" must be a string, got number",
+   "status": 400
+  },
   "{\"speculative\":\"x\"}": {
    "error": "\"speculative\" must be a boolean or an object of the form {\"mtp_k\": N}",
    "status": 400
@@ -3273,6 +3317,7 @@
     "repeat_last_n": 0,
     "repetition_penalty": 1.0499999523162842,
     "seed": -1,
+    "session_id": "",
     "spec_mtp_k": -1,
     "spec_override": -1,
     "stop": [],
@@ -4426,6 +4471,27 @@
     "json_mode": true
    }
   },
+  "{\"session_id\":\"\"}": {
+   "error": "\"session_id\" must be 1-128 characters of [A-Za-z0-9._:-]",
+   "status": 400
+  },
+  "{\"session_id\":\"a/b\"}": {
+   "error": "\"session_id\" must be 1-128 characters of [A-Za-z0-9._:-]",
+   "status": 400
+  },
+  "{\"session_id\":\"agent-1.turn:2_x\"}": {
+   "params": {
+    "session_id": "agent-1.turn:2_x"
+   }
+  },
+  "{\"session_id\":\"sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss\"}": {
+   "error": "\"session_id\" must be 1-128 characters of [A-Za-z0-9._:-]",
+   "status": 400
+  },
+  "{\"session_id\":7}": {
+   "error": "\"session_id\" must be a string, got number",
+   "status": 400
+  },
   "{\"speculative\":\"x\"}": {
    "error": "\"speculative\" must be a boolean or an object of the form {\"mtp_k\": N}",
    "status": 400
@@ -4531,6 +4597,7 @@
     "repeat_last_n": 0,
     "repetition_penalty": 1.0499999523162842,
     "seed": -1,
+    "session_id": "",
     "spec_mtp_k": -1,
     "spec_override": -1,
     "stop": [],
@@ -5645,6 +5712,27 @@
   },
   "{\"response_format\":{\"type\":\"json_object\"}}": {
    "params": {}
+  },
+  "{\"session_id\":\"\"}": {
+   "error": "\"session_id\" must be 1-128 characters of [A-Za-z0-9._:-]",
+   "status": 400
+  },
+  "{\"session_id\":\"a/b\"}": {
+   "error": "\"session_id\" must be 1-128 characters of [A-Za-z0-9._:-]",
+   "status": 400
+  },
+  "{\"session_id\":\"agent-1.turn:2_x\"}": {
+   "params": {
+    "session_id": "agent-1.turn:2_x"
+   }
+  },
+  "{\"session_id\":\"sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss\"}": {
+   "error": "\"session_id\" must be 1-128 characters of [A-Za-z0-9._:-]",
+   "status": 400
+  },
+  "{\"session_id\":7}": {
+   "error": "\"session_id\" must be a string, got number",
+   "status": 400
   },
   "{\"speculative\":\"x\"}": {
    "error": "\"speculative\" must be a boolean or an object of the form {\"mtp_k\": N}",

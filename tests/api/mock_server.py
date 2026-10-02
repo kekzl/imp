@@ -26,6 +26,7 @@ import json
 import math
 import os
 import random
+import re
 import signal
 import sys
 import threading
@@ -42,6 +43,14 @@ MOCK_VOCAB = [
 ]
 
 MOCK_MODEL_ID = "mock-model-v1"
+# session_id (#2407): same rule and message as kSessionIdRule in tools/imp-server/sampling_fields.h.
+SESSION_ID_RULE = '"session_id" must be 1-128 characters of [A-Za-z0-9._:-]'
+
+
+def _session_id_valid(sid: str) -> bool:
+    return re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", sid) is not None
+
+
 MOCK_MAX_SEQ_LEN = 32768  # mirrors the server's context-length probes
 FIM_NOT_SUPPORTED = ("fill-in-the-middle is not supported by this model: its tokenizer has no FIM "
                      "prefix/suffix/middle tokens")
@@ -375,6 +384,12 @@ class MockHandler(BaseHTTPRequestHandler):
             self._handle_lora_load(raw_body)
         elif path == "/admin/lora/unload":
             self._handle_lora_unload(raw_body)
+        elif re.fullmatch(r"/v1/sessions/[^/]+/close", path):
+            sid = path[len("/v1/sessions/"):-len("/close")]
+            if not _session_id_valid(sid):
+                self._send_error(400, SESSION_ID_RULE, param="session_id")
+            else:
+                self._send_json(200, {"id": sid, "object": "session", "closed": True})
         else:
             self._send_error(404, f"Unknown endpoint: {path}")
 
@@ -420,6 +435,19 @@ class MockHandler(BaseHTTPRequestHandler):
                 self._send_error(400, '"n" must be between 1 and 4.')
                 return False
         if not self._validate_speculative(body):
+            return False
+        return self._validate_session_id(body)
+
+    def _validate_session_id(self, body: dict) -> bool:
+        """session_id (#2407): mirrors session_id_valid in tools/imp-server/sampling_fields.h."""
+        if "session_id" not in body:
+            return True
+        sid = body["session_id"]
+        if not isinstance(sid, str):
+            self._send_error(400, '"session_id" must be a string', param="session_id")
+            return False
+        if not _session_id_valid(sid):
+            self._send_error(400, SESSION_ID_RULE, param="session_id")
             return False
         return True
 
@@ -1060,6 +1088,8 @@ class MockHandler(BaseHTTPRequestHandler):
         store = enabled if store is None else store
         if store and not enabled:
             self._rs_error(400, "store=true is disabled on this server", "store")
+            return
+        if not self._validate_session_id(body):
             return
         new_input = body.get("input")
         items = [{"role": "user", "content": new_input}] if isinstance(new_input, str) else list(new_input or [])
