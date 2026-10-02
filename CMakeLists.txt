@@ -633,12 +633,16 @@ if(IMP_BUILD_TOOLS)
         tools/imp-quantize/checkpoint_out.cpp
         tools/imp-quantize/fp8_head.cpp
         tools/imp-quantize/options.cpp
+        tools/imp-quantize/recipe.cpp
         tools/imp-quantize/fp8_source.cpp
         tools/imp-quantize/awq_plan.cpp
         tools/imp-quantize/awq_sites.cpp
         tools/imp-quantize/quant_report.cpp
         tools/imp-quantize/awq.cu
     )
+    # Export recipe (#2481): the build's git tree id (build_image.sh), one TU so ccache keeps the rest.
+    set(IMP_TREE_ID "" CACHE STRING "git tree id recorded in imp-quantize export recipes")
+    set_source_files_properties(tools/imp-quantize/recipe.cpp PROPERTIES COMPILE_DEFINITIONS "IMP_TREE_ID=\"${IMP_TREE_ID}\"")
     target_link_libraries(imp-quantize PRIVATE imp imp_warnings)
     target_include_directories(imp-quantize PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
                                                    ${CMAKE_CURRENT_SOURCE_DIR}/tools)
@@ -1024,6 +1028,8 @@ if(IMP_BUILD_TESTS)
         # share a scale, a config.json with two quantization_config keys.
         tools/imp-quantize/checkpoint_out.cpp
         tools/imp-quantize/fp8_head.cpp
+        tools/imp-quantize/recipe.cpp
+        tests/test_quantize_recipe.cpp
         tests/test_quantize_checkpoint_out.cpp
         # Table of which consumers share an activation, which producer absorbs 1/s, and whether a
         # norm carries a unit offset: a pure function, so the CPU lane holds it. Wrong here means a

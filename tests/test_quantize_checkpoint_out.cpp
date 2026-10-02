@@ -575,7 +575,8 @@ TEST(QuantizeKvHint, AllowlistIsTheMeasuredFamiliesOnly) {
 TEST(QuantizeKvHint, LoaderReadsTheHintTheWriterDeclares) {
     for (const bool kv_fp8 : {true, false}) {
         TempDir d;
-        const auto wrote = write_modelopt_quant_config(d.path, {"lm_head"}, /*calibrated=*/false, kv_fp8);
+        const auto wrote = write_modelopt_quant_config(d.path, {"lm_head"}, /*calibrated=*/false, kv_fp8,
+                                                       "{}");
         ASSERT_TRUE(wrote) << wrote.error();
         imp::HFConfigLoader::NvFP4Config cfg;
         ASSERT_TRUE(imp::HFConfigLoader::load_nvfp4_config(d.path, cfg)) << d.read("hf_quant_config.json");

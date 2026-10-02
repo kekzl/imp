@@ -34,6 +34,8 @@ constexpr std::array<FusedSet, 4> kFusedSets = {{
     {"in_proj_ba", {"in_proj_b", "in_proj_a", nullptr}},
 }};
 
+}  // namespace
+
 // Minimal JSON string escape. Module names are plain identifiers today, but an
 // unescaped quote would produce a config.json no reader accepts, so this is not
 // left to the shape of the input.
@@ -69,6 +71,8 @@ std::string json_escape(const std::string& s) {
     }
     return out;
 }
+
+namespace {
 
 // Scanner over one JSON object's top level: enough of a parser to find where a key's VALUE
 // starts and ends in the source text, no more. Everything outside that span is copied byte for
@@ -447,13 +451,15 @@ bool kv_fp8_for_export(KvHint h, OutputFormat fmt, const std::string& model_type
 
 std::expected<void, std::string> write_modelopt_quant_config(const std::string& out_dir,
                                                              const std::vector<std::string>& excluded,
-                                                             bool calibrated, bool kv_fp8) {
+                                                             bool calibrated, bool kv_fp8,
+                                                             const std::string& recipe) {
     std::ofstream f(fs::path(out_dir) / "hf_quant_config.json");
     if (!f)
         return std::unexpected("cannot write hf_quant_config.json");
     f << "{\n"
       << "  \"producer\": { \"name\": \"imp-quantize\", \"version\": \"2\", \"calibration\": \""
-      << (calibrated ? "awq" : "none") << "\" },\n"
+      << (calibrated ? "awq" : "none") << "\",\n"
+      << "    \"recipe\": " << recipe << " },\n"
       << "  \"quantization\": {\n"
       << "    \"quant_algo\": \"NVFP4\",\n"
       << "    \"kv_cache_quant_algo\": " << (kv_fp8 ? "\"FP8\"" : "null") << ",\n"
@@ -466,6 +472,16 @@ std::expected<void, std::string> write_modelopt_quant_config(const std::string& 
     // the caller printed an empty line and exited 1.
     if (!f)
         return std::unexpected("write failed for hf_quant_config.json");
+    return {};
+}
+
+std::expected<void, std::string> write_recipe_json(const std::string& out_dir, const std::string& recipe) {
+    std::ofstream f(fs::path(out_dir) / "imp_recipe.json");
+    if (!f)
+        return std::unexpected("cannot write imp_recipe.json");
+    f << recipe << "\n";
+    if (!f)
+        return std::unexpected("write failed for imp_recipe.json");
     return {};
 }
 
