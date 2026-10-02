@@ -69,6 +69,13 @@ inline bool validate_declared_dimensions(const ModelConfig& cfg, std::string* er
         return fail("declared expert intermediate size", cfg.expert_d_ff, kMaxFfnDim);
     if (cfg.vocab_size < 0 || cfg.vocab_size > kMaxVocabSize)
         return fail("declared vocab size", cfg.vocab_size, kMaxVocabSize);
+    // Granite 3.x logits_scaling (e.g. 8.0): no logit divide on the output path, refused rather than
+    // served with every logit scaled wrong. Granite 4.2 declares 1.0.
+    if (cfg.logits_scaling != 1.0f) {
+        if (err)
+            *err = "logits_scaling " + std::to_string(cfg.logits_scaling) + " is not supported (only 1.0)";
+        return false;
+    }
     return true;
 }
 

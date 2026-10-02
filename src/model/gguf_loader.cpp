@@ -350,6 +350,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     };
 
     cfg.n_layers = static_cast<int>(get_uint("block_count"));
+    set_granite_multipliers_gguf(cfg, get_float);  // #2412, before the validator below
     // block_count is the file's claim about itself; capped here before per-layer arrays
     // (swa_layers, head_dim_per_layer) are sized from it. Expert count gets the same check
     // once read, before anything is sized from it.
