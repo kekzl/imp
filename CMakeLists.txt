@@ -1068,7 +1068,18 @@ if(IMP_BUILD_TESTS)
             # Only this target needs server sources (tool_call.h pulls nlohmann); the other five stay
             # unconditional below so make asan (-DIMP_BUILD_SERVER=OFF) still runs them.
             fuzz/fuzz_tool_stream.cpp
-            tests/test_base64.cpp)
+            tests/test_base64.cpp
+            # Request-field parsing golden, every dialect through its real parse path (#2461).
+            tools/imp-server/handlers_chat_params.cpp
+            tools/imp-server/handlers.cpp
+            tools/imp-server/handlers_chat_core.cpp
+            tools/imp-server/batching_engine.cpp
+            tools/imp-server/handlers_admin.cpp
+            tools/imp-server/handlers_chat.cpp
+            tools/imp-server/stream_driver.cpp
+            tools/imp-server/vision_parts.cpp
+            tools/imp-server/handlers_chat_stream.cpp
+            tests/test_sampling_params_golden.cpp)
         target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
                                                      ${CMAKE_CURRENT_SOURCE_DIR}/tools)
         target_link_libraries(test-core PRIVATE nlohmann_json::nlohmann_json httplib::httplib)
