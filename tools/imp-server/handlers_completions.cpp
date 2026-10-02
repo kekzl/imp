@@ -635,6 +635,10 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
         res.set_content(dump_safe(error), "application/json");
         return;
     }
+    auto queued_lease = admit_queued_tokens(req.path, res, state.queued_tokens, n_prompt_tokens,
+                                            state.max_queued_tokens);
+    if (!queued_lease)
+        return;
 
     int remaining = snap_max_seq_len - n_prompt_tokens;
     if (max_tokens > remaining)
@@ -673,6 +677,7 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
 
     auto server_req = std::make_shared<ServerRequest>();
     server_req->request = std::move(imp_req);
+    server_req->queued_lease = std::move(queued_lease);
 
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);

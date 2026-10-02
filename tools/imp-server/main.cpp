@@ -207,6 +207,7 @@ static int run_server(int argc, char** argv) {
     // --max-input-tokens <n>: reject prompts whose tokenized length exceeds
     // <n> with HTTP 400 before prefill (0 = disabled).
     state.max_input_tokens = args.max_input_tokens;
+    state.max_queued_tokens = args.max_queued_tokens;
     state.max_n = args.max_n;
     state.max_batch_items = args.max_batch_items;
     state.max_logit_bias = args.max_logit_bias;
@@ -552,6 +553,8 @@ static int run_server(int argc, char** argv) {
         printf("Rate limit: %d req/min per peer\n", state.rate_limiter.limit);
     if (state.max_input_tokens > 0)
         printf("Max input tokens: %d\n", state.max_input_tokens);
+    if (state.max_queued_tokens > 0)
+        printf("Max queued tokens: %lld\n", static_cast<long long>(state.max_queued_tokens));
     if (state.idle_unload_seconds.load() > 0)
         printf("Idle unload: suspend after %d s idle, resume on next request\n",
                state.idle_unload_seconds.load());

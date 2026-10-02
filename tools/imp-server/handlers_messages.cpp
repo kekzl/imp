@@ -460,6 +460,10 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
             res.set_content(dump_safe(out), "application/json");
             return;
         }
+        ctx.queued_lease = admit_queued_tokens(req.path, res, state.queued_tokens, ctx.snap.n_prompt_tokens,
+                                               state.max_queued_tokens);
+        if (!ctx.queued_lease)
+            return;
 
         // Restore Anthropic logging context (parse_chat_request_params set
         // these from the shim request; we log the outer Anthropic request).
@@ -477,6 +481,7 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
 
         auto server_req = std::make_shared<ServerRequest>();
         server_req->request = std::move(imp_req);
+        server_req->queued_lease = ctx.queued_lease;
         {
             std::lock_guard<std::timed_mutex> lock(state.mtx);
             if (!state.batching || !state.batching->is_running()) {
@@ -541,6 +546,8 @@ static void handle_messages_impl(const httplib::Request& req, httplib::Response&
             e["param"] = inner["param"];
         json out = {{"type", "error"}, {"error", std::move(e)}, {"request_id", request_id}};
         res.status = shim_res.status;
+        if (shim_res.has_header("Retry-After"))
+            res.set_header("Retry-After", shim_res.get_header_value("Retry-After"));
         res.set_content(dump_safe(out), "application/json");
         return;
     }

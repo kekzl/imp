@@ -53,6 +53,7 @@ void print_server_usage(const char* prog) {
             "  --request-timeout <s> Per-request timeout in seconds (default: 300, 0=unlimited)\n"
             "  --rate-limit <n>      Max requests/minute per IP (default: 0=unlimited)\n"
             "  --max-input-tokens <n> Reject prompts longer than n tokens with HTTP 400 (0=unlimited)\n"
+            "  --max-queued-tokens <n> 429 when queued prompt tokens + this prompt exceed n (0=off)\n"
             "  --trusted-proxy <list> Comma-separated peer addresses whose X-Forwarded-For is\n"
             "                         believed for rate limiting (default: header ignored)\n"
             "  --cors-origins <list>  Comma-separated browser origins allowed cross-origin, '*' = any\n"
@@ -121,6 +122,16 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.rate_limit = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--max-input-tokens") == 0 && i + 1 < argc) {
             args.max_input_tokens = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--max-queued-tokens") == 0 && i + 1 < argc) {
+            // Strict: a typo must not silently mean "off".
+            const char* v = argv[++i];
+            char* end = nullptr;
+            const long long n = std::strtoll(v, &end, 10);
+            if (end == v || *end != '\0' || n < 0) {
+                fprintf(stderr, "--max-queued-tokens expects an integer >= 0, got '%s'\n", v);
+                std::exit(1);
+            }
+            args.max_queued_tokens = n;
         } else if (std::strcmp(arg, "--trusted-proxy") == 0 && i + 1 < argc) {
             args.trusted_proxies = argv[++i];
         } else if (std::strcmp(arg, "--cors-origins") == 0 && i + 1 < argc) {

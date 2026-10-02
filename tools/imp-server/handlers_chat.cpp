@@ -36,6 +36,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         return;
     if (!snapshot_state_and_tokenize_(res, state, ctx))
         return;
+    // req.path keeps /v1/messages through the shim, so the refusal is already in its dialect.
+    ctx.queued_lease = admit_queued_tokens(req.path, res, state.queued_tokens, ctx.snap.n_prompt_tokens,
+                                           state.max_queued_tokens);
+    if (!ctx.queued_lease)
+        return;
 
     // Save input tokens for potential reuse with n > 1
     std::vector<int32_t> saved_tokens = ctx.snap.tokens;
@@ -46,6 +51,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     // Create a ServerRequest wrapper and submit to the batching engine
     auto server_req = std::make_shared<ServerRequest>();
     server_req->request = imp_req;
+    server_req->queued_lease = ctx.queued_lease;
 
     // Vision requests are now per-request (req->image, encoded by the worker on
     // admission) and flow through the normal batching path below — no blocking

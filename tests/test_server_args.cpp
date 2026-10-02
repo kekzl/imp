@@ -35,6 +35,7 @@ TEST(ServerArgs, DefaultsWhenNoFlags) {
     EXPECT_EQ(a.request_timeout, 300);
     EXPECT_EQ(a.rate_limit, 0);        // 0 = unlimited
     EXPECT_EQ(a.max_input_tokens, 0);  // 0 = unlimited
+    EXPECT_EQ(a.max_queued_tokens, 0);  // 0 = off (#2408)
     EXPECT_EQ(a.port, 8080);
 }
 
@@ -68,6 +69,11 @@ TEST(ServerArgsDeathTest, IdleUnloadSecondsRejectsGarbage) {
     EXPECT_EXIT(parse({"--idle-unload-seconds", "30s"}), ::testing::ExitedWithCode(1), "integer >= 0");
 }
 
+TEST(ServerArgsDeathTest, MaxQueuedTokensRejectsGarbage) {
+    EXPECT_EXIT(parse({"--max-queued-tokens", "-1"}), ::testing::ExitedWithCode(1), "integer >= 0");
+    EXPECT_EXIT(parse({"--max-queued-tokens", "64k"}), ::testing::ExitedWithCode(1), "integer >= 0");
+}
+
 TEST(ServerArgs, VramBudgetParsed) {
     EXPECT_EQ(parse({"--vram-budget", "4096"}).vram_budget_mb, 4096);
     EXPECT_EQ(parse({"--vram-budget", "0"}).vram_budget_mb, 0);
@@ -75,11 +81,12 @@ TEST(ServerArgs, VramBudgetParsed) {
 
 TEST(ServerArgs, ServerLimitFlagsParsed) {
     ServerArgs a = parse({"--max-concurrent", "8", "--request-timeout", "120", "--rate-limit", "30",
-                          "--max-input-tokens", "2000"});
+                          "--max-input-tokens", "2000", "--max-queued-tokens", "65536"});
     EXPECT_EQ(a.max_concurrent, 8);
     EXPECT_EQ(a.request_timeout, 120);
     EXPECT_EQ(a.rate_limit, 30);
     EXPECT_EQ(a.max_input_tokens, 2000);
+    EXPECT_EQ(a.max_queued_tokens, 65536);
 }
 
 TEST(ServerArgs, ZeroDisablesLimits) {

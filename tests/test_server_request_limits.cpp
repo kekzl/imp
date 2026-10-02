@@ -380,4 +380,116 @@ TEST(InflightGate, ConcurrentEntriesNeverExceedTheLimit) {
     EXPECT_EQ(g.inflight(), 0);
 }
 
+// ---------------------------------------------------------------------------
+// #2408 - --max-queued-tokens: admission by queued prompt tokens
+// ---------------------------------------------------------------------------
+
+TEST(QueuedTokenGate, AdmitsUnderAndAtTheCapRefusesOver) {
+    QueuedTokenGate g;
+    EXPECT_TRUE(g.try_reserve(600, 1000));
+    EXPECT_TRUE(g.try_reserve(400, 1000)) << "600 + 400 == cap is admitted";
+    EXPECT_FALSE(g.try_reserve(1, 1000)) << "1000 + 1 > cap";
+    EXPECT_EQ(g.queued(), 1000) << "a refused reservation must not be counted";
+    g.release(400);
+    EXPECT_TRUE(g.try_reserve(400, 1000));
+    EXPECT_EQ(g.queued(), 1000);
+}
+
+TEST(QueuedTokenGate, MixedSizesOneHugePromptBlocksSmallOnesBehindIt) {
+    QueuedTokenGate g;
+    EXPECT_TRUE(g.try_reserve(30000, 32768));
+    EXPECT_TRUE(g.try_reserve(2000, 32768));
+    EXPECT_FALSE(g.try_reserve(1000, 32768)) << "32000 + 1000 > 32768";
+    EXPECT_TRUE(g.try_reserve(768, 32768)) << "32000 + 768 == cap";
+    EXPECT_FALSE(g.try_reserve(1, 32768));
+    g.release(30000);
+    EXPECT_TRUE(g.try_reserve(20000, 32768)) << "2768 + 20000 fits once the big prompt left";
+    EXPECT_EQ(g.queued(), 22768);
+}
+
+TEST(QueuedTokenGate, EmptyQueueAdmitsAPromptOverTheCap) {
+    // A lone prompt over the cap would 429 forever; its size is --max-input-tokens' job.
+    QueuedTokenGate g;
+    EXPECT_TRUE(g.try_reserve(5000, 1000));
+    EXPECT_FALSE(g.try_reserve(1, 1000));
+}
+
+TEST(QueuedTokenGate, CapZeroIsOffButStillCounts) {
+    QueuedTokenGate g;
+    EXPECT_TRUE(g.try_reserve(1000000, 0));
+    EXPECT_TRUE(g.try_reserve(1000000, 0));
+    EXPECT_TRUE(g.try_reserve(5, -1)) << "negative means off";
+    EXPECT_EQ(g.queued(), 2000005) << "the /metrics gauge reads it with the cap off";
+}
+
+TEST(QueuedTokenGate, LeaseReleasesOnceAndOnDestruction) {
+    QueuedTokenGate g;
+    {
+        auto lease = reserve_queued_tokens(g, 700, 1000);
+        ASSERT_NE(lease, nullptr);
+        EXPECT_EQ(g.queued(), 700);
+        EXPECT_EQ(reserve_queued_tokens(g, 301, 1000), nullptr);
+        EXPECT_EQ(g.queued(), 700) << "a refused lease counts nothing";
+        lease->release();  // worker: first output token
+        EXPECT_EQ(g.queued(), 0);
+        lease->release();  // a second release must not go negative
+        EXPECT_EQ(g.queued(), 0);
+        auto second = reserve_queued_tokens(g, 900, 1000);
+        ASSERT_NE(second, nullptr);
+    }  // `second` destroyed without release(): handler exit before the first token
+    EXPECT_EQ(g.queued(), 0);
+}
+
+TEST(QueuedTokenGate, ConcurrentReservationsNeverExceedTheCap) {
+    // 64 threads x 100 tokens for a 1000-token cap: exactly 10 fit.
+    QueuedTokenGate g;
+    g.try_reserve(100, 1000);  // non-empty queue, so the empty-queue rule is out of play
+    std::atomic<int> admitted{0};
+    std::atomic<bool> go{false};
+    std::vector<std::thread> ts;
+    ts.reserve(64);
+    for (int i = 0; i < 64; i++) {
+        ts.emplace_back([&] {
+            while (!go.load())
+                std::this_thread::yield();
+            if (g.try_reserve(100, 1000))
+                admitted.fetch_add(1);
+        });
+    }
+    go.store(true);
+    for (auto& t : ts)
+        t.join();
+    EXPECT_EQ(admitted.load(), 9);
+    EXPECT_EQ(g.queued(), 1000);
+}
+
+TEST(QueuedTokenGate, RefusalIs429OverloadedWithRetryAfterInEachDialect) {
+    QueuedTokenGate g;
+    auto big = reserve_queued_tokens(g, 900, 1000);
+    auto keep = reserve_queued_tokens(g, 50, 1000);
+    for (const char* path : {"/v1/chat/completions", "/v1/completions", "/infill", "/v1/responses"}) {
+        httplib::Response res;
+        EXPECT_EQ(admit_queued_tokens(path, res, g, 100, 1000), nullptr) << path;
+        EXPECT_EQ(res.status, 429) << path;
+        EXPECT_EQ(res.get_header_value("Retry-After"), "1") << path;
+        const auto j = nlohmann::json::parse(res.body);
+        EXPECT_EQ(j["error"]["type"], "rate_limit_error") << path;
+        EXPECT_FALSE(j.contains("type")) << path << ": OpenAI envelope has no top-level type";
+    }
+    httplib::Response res;
+    EXPECT_EQ(admit_queued_tokens("/v1/messages", res, g, 100, 1000), nullptr);
+    EXPECT_EQ(res.status, 429);
+    EXPECT_EQ(res.get_header_value("Retry-After"), "1");
+    const auto j = nlohmann::json::parse(res.body);
+    EXPECT_EQ(j["type"], "error");
+    EXPECT_EQ(j["error"]["type"], "overloaded_error");
+    EXPECT_EQ(g.queued(), 950) << "refusals count nothing";
+    big.reset();  // the 900-token prompt reached its first token
+
+    httplib::Response ok;
+    auto lease = admit_queued_tokens("/v1/chat/completions", ok, g, 950, 1000);
+    ASSERT_NE(lease, nullptr) << "50 + 950 == cap";
+    EXPECT_FALSE(ok.has_header("Retry-After"));
+}
+
 }  // namespace

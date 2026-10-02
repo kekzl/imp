@@ -184,6 +184,7 @@ Both GGUF and SafeTensors accepted; `--model` is optional (model-less start, fir
 | `--think-budget <f>` | `0.5` (`0`=off) | fraction of `max_tokens` a reasoning model may spend thinking; force-closed at `max_tokens - max(reserve, max_tokens/4)`, paired with `runtime.think_answer_reserve` |
 | `--request-timeout <s>` | `300` (`0`=unlimited) | per-request timeout |
 | `--max-input-tokens <n>` | `0` (unlimited) | reject longer prompts with 400; also gates `/tokenize`, `/detokenize`, `/v1/messages/count_tokens` |
+| `--max-queued-tokens <n>` | `0` (off) | 429 + `Retry-After: 1` when queued prompt tokens (admitted, not yet past prefill) + this prompt exceed `n`; server flag only, no `imp.conf` key, like `--max-concurrent`. See [API_FEATURES.md](API_FEATURES.md#admission-by-queued-prompt-tokens) |
 | `--prefix-cache <path>` | off | persist the prefix cache across restarts |
 
 `--vram-budget` (above) lets several `imp-server` processes share one card:

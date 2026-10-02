@@ -479,6 +479,10 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
         g_in_anthropic_shim = false;
         if (!ok)
             return;  // parse/snapshot set an OpenAI-shaped error (same envelope)
+        ctx.queued_lease = admit_queued_tokens(req.path, res, state.queued_tokens, ctx.snap.n_prompt_tokens,
+                                               state.max_queued_tokens);
+        if (!ctx.queued_lease)
+            return;
 
         ctx.log_skip = false;
         ctx.log_endpoint = log_endpoint;
@@ -493,6 +497,7 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
 
         auto server_req = std::make_shared<ServerRequest>();
         server_req->request = std::move(imp_req);
+        server_req->queued_lease = ctx.queued_lease;
         {
             std::lock_guard<std::timed_mutex> lock(state.mtx);
             if (!state.batching || !state.batching->is_running()) {
@@ -533,6 +538,8 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
     if (shim_res.status >= 400) {
         // Same error envelope — forward as-is.
         res.status = shim_res.status;
+        if (shim_res.has_header("Retry-After"))
+            res.set_header("Retry-After", shim_res.get_header_value("Retry-After"));
         res.set_content(shim_res.body, "application/json");
         return;
     }
