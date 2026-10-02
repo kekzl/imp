@@ -12,7 +12,7 @@ description: Use when opening, merging, or releasing a PR for imp - branching of
 | 1 | Branch off fresh `origin/main`, `gh pr create --base main`, NEVER stack | `git fetch origin && git switch -c <topic> origin/main`. Stacking on a squash repo caused recovery-PR cascades. Fewer, batched PRs. |
 | 2 | `main` merges are SQUASH | PR title = final commit subject `... (#NNNN)`. |
 | 3 | Required check = `Build` (ruleset 14716423) | Static gates block inside it since #1527 (`scripts/ci_static_gates.sh`: filesize, lanes, entrypoint, alloc, kernels, launchguards, docs, citations, hygiene). Advisory: `Lint`, `Mock API contract`, `Real API contract (model-less)`, `clang-tidy`, `Sanitizers`. `Test lanes` is its own check (#1770). Read `gh pr checks <n>` after the merge too. |
-| 4 | One PR in flight at a time | Every merged PR dirties every open PR through `CHANGELOG.md`. Resolve, `git commit --no-verify` (the push hook gates the same tree), land serially. |
+| 4 | One PR in flight at a time | Every merged PR dirties every open PR through `CHANGELOG.md`. Resolve, `git commit` (hook: `make preflight`, ~20 s), land serially. |
 | 5 | Perf- or VRAM-moving change refreshes `tests/perf_baseline.json` IN THE SAME PR and says so | Gate 8% decode / 8% prefill / 10% `own_peak_mb`; `scripts/gen_perf_baseline.sh` (benchmark-cuda). |
 
 ## The auto-merge race
@@ -32,16 +32,15 @@ git fetch origin && git switch -c <topic> origin/main
 # work; then:
 make preflight                                     # CPU only: static gates, tidy + format on changed lines, actionlint
 make verify-fast                                   # measures imp:test; rebuild first (make build)
-git push -u origin <topic>                         # scripts/pre-push.hook: static gates, require_free_gpu, verify-fast (perf gate only on PERF_RE)
+git push -u origin <topic>                         # NO --no-verify. scripts/pre-push.hook: make preflight; GPU verify-fast only with IMP_HOOK_GPU=1
 gh pr create --base main --title "<squash subject>" --body-file <file>
 git log -1 --stat origin/main                      # after merge
 ```
 
 - `git push | tail` swallows the gate block (it prints BEFORE the git lines); read the full output.
-- A push while your own `verify-fast` runs collides on the GPU (the hook runs the perf gate on `CMakeLists.txt`/kernel diffs).
+- `IMP_HOOK_GPU=1 git push` while your own `verify-fast` runs collides on the GPU; without it the hook touches no GPU.
 - `docs_lint.py` writes `docs/audit/docs-rewrite/STALE.md` only with `--write-stale`; hooks and CI never touch it (#2194).
-- Roofline history pushes (`.json`) trigger the full hook: push docs+history with `--no-verify`.
-- Moving text from `docs/roadmap.md` to `docs/plans/` rewrites relative links (`](MODELS.md)` -> `](../MODELS.md)`); the hooks run no `hygiene`, CI `Release hygiene` catches it. Local: `docker run --rm -v $PWD:/src -w /src -e HOME=/tmp imp:toolchain bash -c 'git config --global --add safe.directory /src; bash scripts/ci_static_gates.sh hygiene docs citations'`.
+- Moving text from `docs/roadmap.md` to `docs/plans/` rewrites relative links (`](MODELS.md)` -> `](../MODELS.md)`); `make preflight` (both hooks) runs `hygiene`, CI `Release hygiene` too. Local: `docker run --rm -v $PWD:/src -w /src -e HOME=/tmp imp:toolchain bash -c 'git config --global --add safe.directory /src; bash scripts/ci_static_gates.sh hygiene docs citations'`.
 - PR monitors: `pgrep -f "<string>"` matches the monitor's own shell; stop an old monitor before starting a second on the same PR.
 
 ## The PR body

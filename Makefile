@@ -558,22 +558,19 @@ roofline-regress:
 		tools/roofline/roofline regress --baseline "$$(cat tools/roofline/history/BASELINE)" --run latest --threshold 5; \
 	else echo "no pinned baseline — run 'make roofline-pin' first"; fi
 
-# Install the local git hooks. Two-stage test gate:
-#   Stage 1 — pre-commit (GPU): runs the full GPU suite (make test-gpu) when
-#             staged sources change. CI has no GPU runner, so GPU correctness is
-#             gated here, locally, before the commit lands.
-#   pre-push: verify-fast. Correctness half always; the perf gate only when the
-#             diff touches a path that can move a number (see scripts/pre-push.hook).
-#   Stage 2 — CI (CPU): ctest -L unit, in .github/workflows/ci.yml (no hook).
+# Install the local git hooks into the shared hooks dir (core.hooksPath or .git/hooks, all worktrees).
+#   pre-commit, pre-push: make preflight (CPU, Docker, ~20 s). GPU tests / verify-fast only with
+#   IMP_HOOK_GPU=1; otherwise the hook prints the GPU command it skipped. HOOKS_DIR overrides the target.
+HOOKS_DIR ?= $(shell git rev-parse --path-format=absolute --git-path hooks)
 install-hooks:
-	@cp scripts/pre-commit.hook .git/hooks/pre-commit
-	@chmod +x .git/hooks/pre-commit
-	@cp scripts/pre-push.hook .git/hooks/pre-push
-	@chmod +x .git/hooks/pre-push
-	@echo "hooks installed:"
-	@echo "  pre-commit → Stage 1 GPU tests on staged src/tests changes (modules the diff reaches; full suite on core/include/build changes)"
-	@echo "  pre-push   → 'make verify-fast' on source changes (perf gate only for measured paths)"
-	@echo "  CI (Stage 2) runs 'ctest -L unit' — the CPU lane — automatically"
+	@mkdir -p $(HOOKS_DIR)
+	@cp scripts/pre-commit.hook $(HOOKS_DIR)/pre-commit
+	@chmod +x $(HOOKS_DIR)/pre-commit
+	@cp scripts/pre-push.hook $(HOOKS_DIR)/pre-push
+	@chmod +x $(HOOKS_DIR)/pre-push
+	@echo "hooks installed in $(HOOKS_DIR):"
+	@echo "  pre-commit, pre-push: make preflight (CPU); GPU step only with IMP_HOOK_GPU=1"
+	@echo "  CI runs ctest -L unit, the CPU lane"
 
 # clang-format settings live in .clang-format. Host has no clang-format
 # installed (clean-host policy), so we run it in the Dockerfile `lint` stage (LLVM pin: scripts/install_llvm.sh).
