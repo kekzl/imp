@@ -25,10 +25,23 @@ extern "C" bool gemm_grouped_nvfp4_smallM_software_ref(
     const void* const* host_ptr_A,   const void* const* host_ptr_SFA,
     const void* const* host_ptr_B,   const void* const* host_ptr_SFB,
     void* const* host_ptr_D,         const float* dev_alpha,
-    cudaStream_t stream);
+    void* dev_tables, size_t dev_tables_bytes, cudaStream_t stream);
 #endif
 
 namespace {
+
+// Device table buffer for gemm_grouped_nvfp4_smallM, grown on demand, process lifetime (#2451).
+void* smallm_tables(int ne) {
+    static void* p = nullptr;
+    static size_t cap = 0;
+    const size_t need = imp::smallM_table_bytes(ne);
+    if (need > cap) {
+        cudaFree(p);
+        p = nullptr;
+        cap = cudaMalloc(&p, need) == cudaSuccess ? need : 0;
+    }
+    return p;
+}
 
 bool has_sm120() {
     int dev = 0; cudaGetDevice(&dev);
@@ -186,7 +199,8 @@ static void run_smallm_single_expert(int M, int N, int K,
     cudaMalloc(&d_alpha, sizeof(float));
     cudaMemcpy(d_alpha, h_alpha, sizeof(float), cudaMemcpyHostToDevice);
     bool ok = imp::gemm_grouped_nvfp4_smallM(
-        1, M_per, N, K, A_arr, SFA_arr, B_arr, SFB_arr, D_arr, d_alpha, /*stream*/0);
+        1, M_per, N, K, A_arr, SFA_arr, B_arr, SFB_arr, D_arr, d_alpha, smallm_tables(1),
+        imp::smallM_table_bytes(1), /*stream*/0);
     ASSERT_TRUE(ok);
     cudaError_t err = cudaDeviceSynchronize();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
@@ -465,7 +479,8 @@ TEST(SmallMKernel, FourExpertsVaryingM) {
     cudaMemcpy(d_alpha, h_alpha.data(), ne * sizeof(float), cudaMemcpyHostToDevice);
     bool ok = imp::gemm_grouped_nvfp4_smallM(
         ne, M_per, N, K, A_arr.data(), SFA_arr.data(),
-        B_arr.data(), SFB_arr.data(), d_D.data(), d_alpha, /*stream*/0);
+        B_arr.data(), SFB_arr.data(), d_D.data(), d_alpha, smallm_tables(ne),
+        imp::smallM_table_bytes(ne), /*stream*/0);
     ASSERT_TRUE(ok);
     cudaError_t err = cudaDeviceSynchronize();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
@@ -660,10 +675,12 @@ TEST(SmallMKernel, HwMatchesSoftwareReference) {
     cudaMemcpy(d_alpha_sw, h_alpha_sw, sizeof(float), cudaMemcpyHostToDevice);
 
     bool ok_hw = imp::gemm_grouped_nvfp4_smallM(
-        1, M_per, N, K, A_arr, SFA_arr, B_arr, SFB_arr, D_arr_hw, d_alpha_sw, /*stream*/0);
+        1, M_per, N, K, A_arr, SFA_arr, B_arr, SFB_arr, D_arr_hw, d_alpha_sw, smallm_tables(1),
+        imp::smallM_table_bytes(1), /*stream*/0);
     ASSERT_TRUE(ok_hw);
     bool ok_sw = gemm_grouped_nvfp4_smallM_software_ref(
-        1, M_per, N, K, A_arr, SFA_arr, B_arr, SFB_arr, D_arr_sw, d_alpha_sw, /*stream*/0);
+        1, M_per, N, K, A_arr, SFA_arr, B_arr, SFB_arr, D_arr_sw, d_alpha_sw, smallm_tables(1),
+        imp::smallM_table_bytes(1), /*stream*/0);
     ASSERT_TRUE(ok_sw);
     cudaError_t err = cudaDeviceSynchronize();
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);

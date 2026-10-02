@@ -3,7 +3,8 @@
 # steady_state_allocations() only sees Backend-routed calls; the --wrap interposer closes that
 # gap for every direct allocation site. make check-alloc-interpose builds and runs this.
 # Phase A: batch>1 + NVFP4 residual KV + MTP chain. Phase B: MTP off, default KV, ragged prefill
-# + json_object constrained pipeline. Each phase has its own liveness check and pin.
+# + json_object constrained pipeline. Phase C: NVFP4 MoE smallM prefill (INTERPOSE_MODEL_NVFP4_MOE).
+# Each phase has its own liveness check and pin.
 set -uo pipefail
 
 BIN=${BIN:-build-interpose/imp-server}
@@ -106,8 +107,11 @@ PINNED_A=0
 # Phase B: 3 calls, 0.7 MiB, JsonConstrainer::init (src/compute/constrain_device_buffers.h):
 # per-json-request device tables built on the scheduler thread, not upload metadata.
 PINNED_B=3
+# Phases to run (INTERPOSE_PHASES, default all): a subset reruns one phase without the others.
+PHASES=${INTERPOSE_PHASES:-ABC}
 
 # ---------------------------------------------------------------- phase A
+if [[ $PHASES == *A* ]]; then
 LOG_A=$(mktemp /tmp/interpose.A.XXXXXX.log)
 start_server --set kv_cache.dtype=nvfp4 \
              --set kv_cache.bitdecoding_residual_tokens=128 \
@@ -131,8 +135,10 @@ if ! grep -q 'residual buffer enabled' "$LOG_A"; then
     exit 1
 fi
 verdict A "$LOG_A" "$PINNED_A"
+fi
 
 # ---------------------------------------------------------------- phase B
+if [[ $PHASES == *B* ]]; then
 LOG_B=$(mktemp /tmp/interpose.B.XXXXXX.log)
 start_server --set speculative.mtp_k=0
 # Ragged prefill needs two or more prompts in the SAME prefill step, which
@@ -161,4 +167,29 @@ if ! grep -q 'ConstrainedPipeline: launched' "$LOG_B"; then
     exit 1
 fi
 verdict B "$LOG_B" "$PINNED_B"
+fi
+
+# ---------------------------------------------------------------- phase C
+# NVFP4 MoE prefill on the smallM grouped GEMM (host-args tier: device args off). Pin 0 since
+# #2451: its pointer/M/descriptor tables come from the T2 arena, not a per-call cudaMallocAsync.
+if [[ $PHASES == *C* ]]; then
+PINNED_C=0
+MODEL=${INTERPOSE_MODEL_NVFP4_MOE:-/models/Qwen3-30B-A3B-NVFP4-Modelopt}
+M=$(basename "$MODEL")
+[ -d "$MODELS_DIR/$M" ] || { echo "FATAL: model not readable: $MODELS_DIR/$M" >&2; exit 1; }
+LOG_C=$(mktemp /tmp/interpose.C.XXXXXX.log)
+start_server --set speculative.mtp_k=0 --set moe.nvfp4_smallM=true --set moe.nvfp4_device_args=false
+for i in 1 2 3 4 5 6; do
+    chat "{\"model\":\"$M\",\"messages\":[{\"role\":\"user\",\"content\":\"Name three facts about topic $i.\"}],\"max_tokens\":32,\"temperature\":0}"
+done
+stop_server "$LOG_C"
+# Liveness: one layer-0 line per smallM prefill; 6 served requests must each add one.
+n_smallm=$(grep -c 'MoE prefill: smallM kernel branch' "$LOG_C")
+if [ "$n_smallm" -lt 6 ]; then
+    echo "FATAL(C): $n_smallm smallM prefills in the log, need >= 6 (one per request), so the" >&2
+    echo "       run did not exercise gemm_grouped_nvfp4_smallM. Check moe.nvfp4_smallM."     >&2
+    exit 1
+fi
+verdict C "$LOG_C" "$PINNED_C"
+fi
 exit 0

@@ -174,6 +174,8 @@ struct MoEWorkspace {
     float* smallM_scales = nullptr;
     void** smallM_ptrs = nullptr;
     int smallM_count = 0;
+    void* smallM_tables = nullptr;  // smallM_table_bytes(ne): per-call pointer/M/descriptor tables (#2451)
+    size_t smallM_tables_bytes = 0;
 
     // Free all separately allocated buffers (NOT the phase tensor views).
     void free(VRAMAllocator* alloc);

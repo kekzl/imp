@@ -10,6 +10,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 namespace imp {
 
@@ -520,31 +521,25 @@ __global__ void smallM_kernel_v1(
     }
 }
 
-// Device copies of host tables (#2211): upload() runs every cudaMallocAsync, then every H2D copy, in
-// add() order; false on the first error. Every allocation is freed on the stream at scope exit.
-class StreamScratch {
+// Host tables packed into the caller's device buffer (#2451): add() places each at the next
+// 128 B boundary, upload() is one H2D copy; false when the tables exceed the buffer or the copy fails.
+static_assert(sizeof(CUtensorMap) == kSmallMTensorMapBytes, "smallM_table_bytes() assumes a 128 B CUtensorMap");
+class TableUpload {
 public:
-    explicit StreamScratch(cudaStream_t s) : stream_(s) {}
-    StreamScratch(const StreamScratch&) = delete;
-    StreamScratch& operator=(const StreamScratch&) = delete;
-    ~StreamScratch() {
-        for (int i = 0; i < n_; ++i)
-            if (e_[i].dev) IMP_CUDA_CHECK_LOG(cudaFreeAsync(e_[i].dev, stream_));
-    }
+    TableUpload(void* dev, size_t cap, cudaStream_t s) : dev_(static_cast<char*>(dev)), cap_(cap), stream_(s) {}
     template <typename T, typename S>
     void add(T** dst, const S* src, size_t bytes) {
-        if (n_ < kMax) e_[n_++] = {reinterpret_cast<void**>(dst), static_cast<const void*>(src), bytes, nullptr};
-        else full_ = true;
+        const size_t off = (host_.size() + 127) / 128 * 128;
+        host_.resize(off + bytes);
+        std::memcpy(host_.data() + off, src, bytes);
+        *dst = reinterpret_cast<T*>(dev_ + off);
     }
     bool upload() {
-        cudaError_t err = full_ ? cudaErrorInvalidValue : cudaSuccess;
-        for (int i = 0; i < n_ && err == cudaSuccess; ++i) {
-            err = cudaMallocAsync(&e_[i].dev, e_[i].bytes, stream_);
-            if (err == cudaSuccess) *e_[i].dst = e_[i].dev;
-            else e_[i].dev = nullptr;
+        if (dev_ == nullptr || host_.size() > cap_) {
+            IMP_LOG_ERROR("[smallM] table buffer %zu B, need %zu B", dev_ ? cap_ : 0, host_.size());
+            return false;
         }
-        for (int i = 0; i < n_ && err == cudaSuccess; ++i)
-            err = cudaMemcpyAsync(e_[i].dev, e_[i].src, e_[i].bytes, cudaMemcpyHostToDevice, stream_);
+        const cudaError_t err = cudaMemcpyAsync(dev_, host_.data(), host_.size(), cudaMemcpyHostToDevice, stream_);
         if (err != cudaSuccess) {  // handled by returning false; clear the non-sticky error (#2446)
             IMP_LOG_ERROR("[smallM] table upload failed: %s", cudaGetErrorString(err));
             (void)cudaGetLastError();
@@ -553,12 +548,10 @@ public:
     }
 
 private:
-    struct Entry { void** dst; const void* src; size_t bytes; void* dev; };
-    static constexpr int kMax = 8;
+    char* dev_;
+    size_t cap_;
     cudaStream_t stream_;
-    Entry e_[kMax] = {};
-    int n_ = 0;
-    bool full_ = false;
+    std::vector<char> host_;
 };
 
 // Dynamic-smem opt-in once per flag; false = the launch would fail, so the caller reports false.
@@ -581,7 +574,7 @@ extern "C" bool gemm_grouped_nvfp4_smallM_software_ref(
     const void* const* host_ptr_A,   const void* const* host_ptr_SFA,
     const void* const* host_ptr_B,   const void* const* host_ptr_SFB,
     void* const* host_ptr_D,         const float* dev_alpha,
-    cudaStream_t stream) {
+    void* dev_tables, size_t dev_tables_bytes, cudaStream_t stream) {
     if (!gemm_grouped_nvfp4_smallM_available()) return false;
     if (n_experts <= 0 || N <= 0 || K <= 0) return false;
     if ((K % 128) != 0 || (N % 128) != 0) return false;
@@ -596,7 +589,7 @@ extern "C" bool gemm_grouped_nvfp4_smallM_software_ref(
     void** d_D = nullptr;
     int*   d_M = nullptr;
     const size_t ptr_bytes = sizeof(void*) * n_experts;
-    StreamScratch scratch(stream);
+    TableUpload scratch(dev_tables, dev_tables_bytes, stream);
     scratch.add(&d_A, host_ptr_A, ptr_bytes);     scratch.add(&d_SFA, host_ptr_SFA, ptr_bytes);
     scratch.add(&d_B, host_ptr_B, ptr_bytes);     scratch.add(&d_SFB, host_ptr_SFB, ptr_bytes);
     scratch.add(&d_D, host_ptr_D, ptr_bytes);     scratch.add(&d_M, host_M, sizeof(int) * n_experts);
@@ -801,7 +794,7 @@ bool gemm_grouped_nvfp4_smallM(
     const void* const* host_ptr_A,   const void* const* host_ptr_SFA,
     const void* const* host_ptr_B,   const void* const* host_ptr_SFB,
     void* const* host_ptr_D,         const float* dev_alpha,
-    cudaStream_t stream) {
+    void* dev_tables, size_t dev_tables_bytes, cudaStream_t stream) {
     if (!gemm_grouped_nvfp4_smallM_available()) return false;
     if (n_experts <= 0 || N <= 0 || K <= 0) return false;
     if ((K % 128) != 0 || (N % 128) != 0) return false;
@@ -856,7 +849,7 @@ bool gemm_grouped_nvfp4_smallM(
     int*   d_M = nullptr;
     CUtensorMap* d_descs = nullptr;
     const size_t ptr_bytes = sizeof(void*) * n_experts;
-    StreamScratch scratch(stream);  // freed on every return below
+    TableUpload scratch(dev_tables, dev_tables_bytes, stream);
     scratch.add(&d_A, host_ptr_A, ptr_bytes);     scratch.add(&d_SFA, host_ptr_SFA, ptr_bytes);
     scratch.add(&d_B, host_ptr_B, ptr_bytes);     scratch.add(&d_SFB, host_ptr_SFB, ptr_bytes);
     scratch.add(&d_D, host_ptr_D, ptr_bytes);     scratch.add(&d_M, host_M, sizeof(int) * n_experts);
