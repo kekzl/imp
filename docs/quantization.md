@@ -174,9 +174,10 @@ NVFP4 head bytes, FP16 activations on every row count (decode, batch, `--perplex
 | `--lm-head source` (runtime builds the FP8 head at load) | 1483.8 MiB BF16 | 9.7350 |
 | `--lm-head fp8` (default) | 742.5 MiB | 9.7350 |
 
-[PROV: commit=1b9352fc date=2026-10-02 hw=RTX5090 model=Qwen3-14B quant=NVFP4-RTN cuda=13.4.1
+[PROV: commit=07d5fc99 date=2026-10-02 hw=RTX5090 model=Qwen3-14B quant=NVFP4-RTN cuda=13.4.1
        path=imp-quantize+imp-cli-perplexity n=1-per-arm-deterministic
-       cmd=`imp-cli --perplexity ppl_45k.txt --set runtime.deterministic_gemm=true --set kv_cache.dtype=fp16`]
+       cmd=`imp-cli --perplexity ppl_45k.txt --set runtime.deterministic_gemm=true --set kv_cache.dtype=fp16`
+       note=measured on the same diff before the rebase onto 49236dfb (MoE permute only)]
 
 ### Roles that must stay full precision
 
