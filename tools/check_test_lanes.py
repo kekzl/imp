@@ -378,7 +378,8 @@ def main():
     # (test-quant, GPU) (#2444).
     # 1195 -> 1197: QuantizeMoeNative.FailedPointerUploadRefusesWithoutLaunch (test-quant, GPU),
     # MoeAllocFailureTest.SmallMPrefillSurvivesFailedAsyncAlloc (test-e2e, GPU + checkpoint) (#2446).
-    PINNED = 1197
+    # 1197 -> 1198: MoEExecutorTest.HostExpertFp16DecodeReadsTheSlotPool (test-moe-gdn, GPU) (#2447).
+    PINNED = 1198
 
     text = CMAKE.read_text()
     mods = module_sources(text)

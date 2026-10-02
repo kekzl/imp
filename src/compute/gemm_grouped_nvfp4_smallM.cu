@@ -789,6 +789,18 @@ static bool encode_expert_descs(CUtensorMap* descs, int n_experts, const int* ho
     return true;
 }
 
+// Logs the dispatched tile once per (TILE_M, TILE_K) pair.
+static void log_tile_once(int tile_m, int max_M, int n_experts, int N, int K) {
+    static int s_logged_tm[5][2] = {{0}};  // [tile_idx][use_tilek_256]
+    const int tm_log_idx = (tile_m == 16) ? 0 : (tile_m == 32) ? 1 : (tile_m == 64) ? 2 : 3;
+    const int tk_log_idx = ((K % 256) == 0) ? 1 : 0;
+    if (s_logged_tm[tm_log_idx][tk_log_idx])
+        return;
+    s_logged_tm[tm_log_idx][tk_log_idx] = 1;
+    IMP_LOG_INFO("smallM kernel: dispatch TILE_M=%d (max_M=%d) TILE_K=%d ne=%d N=%d K=%d", tile_m, max_M,
+                 tk_log_idx ? 256 : 128, n_experts, N, K);
+}
+
 bool gemm_grouped_nvfp4_smallM(
     int n_experts, const int* host_M, int N, int K,
     const void* const* host_ptr_A,   const void* const* host_ptr_SFA,
@@ -812,20 +824,7 @@ bool gemm_grouped_nvfp4_smallM(
     // 50-90% padded-row compute waste at typical Qwen3-Coder MoE shapes
     // (M_e ≈ 32-48 per expert, top-k=8 × 512 prefill / 128 experts).
     const int TILE_M_rt = detail::pick_m_tile(max_M);
-    {
-        // Log once per (TILE_M_rt, K) pair for diagnostic visibility.
-        static int s_logged_tm[5][2] = {{0}};  // [tile_idx][use_tilek_256]
-        const int tm_log_idx = (TILE_M_rt == 16) ? 0 :
-                               (TILE_M_rt == 32) ? 1 :
-                               (TILE_M_rt == 64) ? 2 : 3;
-        const int tk_log_idx = ((K % 256) == 0) ? 1 : 0;
-        if (!s_logged_tm[tm_log_idx][tk_log_idx]) {
-            s_logged_tm[tm_log_idx][tk_log_idx] = 1;
-            IMP_LOG_INFO(
-                "smallM kernel: dispatch TILE_M=%d (max_M=%d) TILE_K=%d ne=%d N=%d K=%d",
-                TILE_M_rt, max_M, ((K % 256) == 0) ? 256 : 128, n_experts, N, K);
-        }
-    }
+    log_tile_once(TILE_M_rt, max_M, n_experts, N, K);
     constexpr int TILE_N = 128;
     // Pick TILE_K=256 when K is divisible by 256 (more bytes per TMA stage,
     // amortizes pipeline overhead). Fall back to TILE_K=128 for K=128, 384,
