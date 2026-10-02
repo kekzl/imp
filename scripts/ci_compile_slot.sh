@@ -1,10 +1,14 @@
 #!/bin/sh
-# CI CUDA compiler launcher: a *cutlass*.cu TU holds one global lock, all other TUs run free.
-# Peak RSS, cold build, nvcc 13.4, 727 TUs: 5 cutlass TUs 4.97-8.56 GB, all others <= 1.27 GB.
-# -j4 with one heavy at a time <= 12.4 GB on the 16 GB runner; two heavy reach 16.0 GB.
+# CI CUDA compiler launcher. Peak RSS, cold build, nvcc 13.4, 727 TUs: the 5 TUs below
+# 4.97-8.56 GB, all others <= 1.27 GB. Lock A + lock B: <= 2 heavy at once, worst pair
+# 7.44 + 5.22 = 12.7 GB; the 8.56 GB bench holds both and runs alone.
+lock=/tmp/imp-heavy-tu
 for a in "$@"; do
     case "${a##*/}" in
-        *cutlass*.cu) exec flock "${IMP_HEAVY_TU_LOCK:-/tmp/imp-heavy-tu.lock}" "$@" ;;
+        gemm_cutlass_sm120.cu) exec flock "$lock.A" "$@" ;;
+        gemm_cutlass_grouped_3x.cu | gemm_cutlass_mxfp4_sm120.cu | gemm_cutlass_mxfp8_sm120.cu)
+            exec flock "$lock.B" "$@" ;;
+        test_cutlass_grouped_tile_bench.cu) exec flock "$lock.A" flock "$lock.B" "$@" ;;
     esac
 done
 exec "$@"

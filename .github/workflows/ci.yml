@@ -309,9 +309,9 @@ jobs:
 
       - name: Build
         if: steps.changes.outputs.code == 'true'
-        # -j$(nproc): scripts/ci_compile_slot.sh (CUDA launcher above) runs the five
-        # 5-8.6 GB CUTLASS TUs one at a time; build_jobs.sh's RAM cap (-j2 here) assumes
-        # they run together. memory.peak is the container's cgroup high-water mark.
+        # -j$(nproc): scripts/ci_compile_slot.sh (CUDA launcher above) keeps the five
+        # 5-8.6 GB CUTLASS TUs to <= 2 at once (12.7 GB worst pair); build_jobs.sh caps
+        # the runner at -j2. memory.peak is the container cgroup high-water mark.
         run: |
           cmake --build build -j"$(nproc)"
           echo "nproc=$(nproc) cgroup memory.peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo n/a) B"
