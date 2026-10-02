@@ -276,6 +276,42 @@ int kv_pin_context_cost_factor(ModelArch arch, QType pinned) {
     }
 }
 
+// Sparse decode budget for attention.sparse_topk_tokens=-1 (#2405). Gate: NIAH >= dense at
+// 16k/32k/64k, tg at 32k >= dense (3 pairs); tg32k gain +5.4 % (qwen36moe) to +55.6 %
+// (qwen3). gemma4 refuses the metadata pool (per-layer KV geometry).
+int sparse_decode_default_tokens(ModelArch arch) {
+    switch (arch) {
+        case ModelArch::QWEN3:
+        case ModelArch::QWEN3_MOE:
+        case ModelArch::QWEN35:
+        case ModelArch::QWEN36_MOE:
+        case ModelArch::NEMOTRON_H_MOE:
+        case ModelArch::LLAMA:
+        case ModelArch::GPT_OSS:
+            return 4096;
+        default:
+            return 0;
+    }
+}
+
+// Sparse prefill budget for attention.sparse_prefill_topk_tokens=-1 (#2406). Gate: NIAH >=
+// dense, PPL <= +0.5 %, pp32512 >= dense. qwen36moe: 8192 cost PPL +0.67 %, 16384 +0.05 %.
+// gpt_oss off: never engages (learned sinks on every layer).
+int sparse_prefill_default_tokens(ModelArch arch) {
+    switch (arch) {
+        case ModelArch::QWEN3:
+        case ModelArch::QWEN3_MOE:
+        case ModelArch::QWEN35:
+        case ModelArch::NEMOTRON_H_MOE:
+        case ModelArch::LLAMA:
+            return 8192;
+        case ModelArch::QWEN36_MOE:
+            return 16384;
+        default:
+            return 0;
+    }
+}
+
 int max_seq_len_operator_value(int preset, int file_key) {
     if (preset > 0)
         return preset;

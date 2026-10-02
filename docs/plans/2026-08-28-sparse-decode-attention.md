@@ -352,3 +352,61 @@ The dense MLA numbers above ran on `paged_attention_decode_kernel_generic` (98.9
 | 32000 | 111.22 / 112.38 / 111.35 | 259.95 / 235.40 / 244.98 | 2.21x |
 
 Sparse still wins on MLA; the 3.55x / 7.18x of the first table measured the slow dense kernel. NIAH result unchanged.
+
+## Default on per arch family (2026-10-02, #2405, #2406)
+
+`attention.sparse_topk_tokens` and `attention.sparse_prefill_topk_tokens` default to -1 (auto):
+`sparse_decode_default_tokens` / `sparse_prefill_default_tokens` (`src/model/model.cpp`) give the
+budget per `ModelArch`, 0 elsewhere; `init_resolve_sparse_attention_` logs the resolved value.
+Explicit 0 is the opt-out.
+
+Gates, fixed before the run: NIAH (`niah_check.py`, 5 depths x 16k/32k/64k where the model
+context allows, 4096 answer tokens on the reasoning models) sparse >= dense; PPL
+(`imp-cli --perplexity`, `runtime.deterministic=true`) <= +0.5 % on `ppl_corpus_45k.txt`
+(13.5k tokens) and on the first 110000 bytes of `calib_corpus.txt` (25.5k tokens); tg at
+pp32512 and pp32512 itself >= dense, median of 3 alternating rounds, fresh process per run,
+n-gram and MTP off. Decode sparsity has no PPL arm: teacher-forced PPL runs the prefill path
+(`--prefill-chunk-size 1` ran FMHA, 0 `sparse decode attention ACTIVE` lines).
+Every sparse arm logged its `ACTIVE` line except gpt-oss prefill and Gemma-4 (see decision); no dense arm logged one.
+
+| model | NIAH dense / dec / pre / both | PPL 45k dense -> pre | PPL long dense -> pre | tg32k dense -> dec | pp32512 dense -> pre |
+|---|---|---|---|---|---|
+| Qwen3-4B Q8_0 | 15/15 / 15/15 / 15/15 / 15/15 | 11.5332 -> 11.5584 (+0.22 %) | 10.9551 -> 10.9592 (+0.04 %) | 194.42 -> 284.51 (+46.3 %) | 13876.37 -> 18998.94 (+36.9 %) |
+| Qwen3-8B Q8_0 | 10/10 / 10/10 / 10/10 / 10/10 | 10.7522 -> 10.7853 (+0.31 %) | 9.1309 -> 9.1471 (+0.18 %) | 156.86 -> 207.85 (+32.5 %) | 10176.48 -> 12641.83 (+24.2 %) |
+| Qwen3-14B Q6_K | 10/10 / 10/10 / 10/10 / 10/10 | 9.2035 -> 9.2263 (+0.25 %) | 6.1084 -> 6.1333 (+0.41 %) | 86.19 -> 134.09 (+55.6 %) | 6636.09 -> 7956.77 (+19.9 %) |
+| Qwen3-Coder-30B-A3B NVFP4 | 15/15 / 15/15 / 15/15 / 15/15 | 9.8901 -> 9.8930 (+0.03 %) | 2.7671 -> 2.7649 (-0.08 %) | 213.63 -> 248.46 (+16.3 %) | 15009.60 -> 23087.63 (+53.8 %) |
+| Qwen3.8-27B NVFP4 | 15/15 / 15/15 / 15/15 / 15/15 | 4.5842 -> 4.5962 (+0.26 %) | 3.8139 -> 3.8214 (+0.20 %) | 81.42 -> 88.04 (+8.1 %) | 9438.01 -> 10881.41 (+15.3 %) |
+| Qwen3.6-35B-A3B NVFP4 (pre 8192) | 15/15 / 15/15 / 15/15 / 15/15 | 6.7750 -> 6.8202 (+0.67 %) | 1.5529 -> 1.5620 (+0.59 %) | 284.02 -> 299.28 (+5.4 %) | 24062.83 -> 28661.85 (+19.1 %) |
+| Nemotron-3-Nano-30B-A3B NVFP4 | 15/15 / 15/15 / 15/15 / 15/15 | 9.3707 -> 9.3749 (+0.04 %) | 7.9624 -> 7.8591 (-1.30 %) | 349.52 -> 383.61 (+9.8 %) | 35199.74 -> 38966.20 (+10.7 %) |
+| Phi-4-reasoning-plus NVFP4 | 6/10 / 10/10 / 6/10 / 8/10 | 12.9442 -> 12.9616 (+0.13 %) | 3.8711 -> 3.8672 (-0.10 %) | 110.13 -> 137.23 (+24.6 %) | 12538.86 -> 17545.39 (+39.9 %) |
+| gpt-oss-20b MXFP4 | 15/15 / 15/15 / 15/15 / 15/15 | 262.6413 -> 262.6413 (+0.00 %) | 7065.3958 -> 7065.3958 (+0.00 %) | 270.97 -> 330.60 (+22.0 %) | 25553.11 -> 25474.12 (-0.3 %) |
+| Qwen3.6-35B-A3B NVFP4 (pre 16384) | 15/15 / 15/15 / 15/15 / 15/15 | 6.7750 -> 6.7750 (identity, 13.5k < budget) | 1.5529 -> 1.5537 (+0.05 %) | 285.23 -> 299.97 (+5.2 %) | 24142.12 -> 25863.03 (+7.1 %) |
+
+| decision | decode (4096) | prefill |
+|---|---|---|
+| on | qwen3, qwen3moe, qwen35, qwen36moe, nemotron_h_moe, llama (Phi-4), gpt_oss | qwen3, qwen3moe, qwen35, nemotron_h_moe, llama at 8192; qwen36moe at 16384 |
+| off | gemma4: per-layer KV geometry refuses the metadata pool | qwen36moe at 8192 (PPL +0.67 %); gpt_oss (learned sinks, prefill selection never engages: pp -0.3 %); gemma4 |
+
+Phi-4 dense fails 4 of the 5 32k cells at 4096 answer tokens (reasoning without an answer); the
+decode arm passes them. Qwen3.6-35B-A3B NIAH ran with `runtime.max_batch_size=1` (the auto batch
+of 26 recurrent slots left 1625 KV blocks, 32k/64k probes 503 in every arm). Gemma-4 dense NIAH is
+0/5 at 16k (#2519); Llama-3.2-3B is dense-broken past 16k (#2520), so it cannot gate the llama family.
+
+Qwen3.8-27B pp77824 (#2406 acceptance), 3 alternating pairs: dense 6871.80 / 6873.68 / 6873.02,
+sparse 8192 10670.21 / 10670.54 / 10671.67 tok/s (1.55x).
+
+KV ceiling cost of the metadata pool (growable pool ceiling, server at `runtime.max_seq_len`
+81920): Qwen3-4B 8172 -> 7691 blocks (-5.9 %), Qwen3-8B 5809 -> 5467 (-5.9 %), Qwen3-Coder-30B
+8712 -> 7744 (-11.1 %), Phi-4 9473 -> 8420 (-11.1 %), gpt-oss-20b 27343 -> 25734 (-5.9 %);
+Qwen3.8-27B, Nemotron-3-Nano, Qwen3-14B unchanged (ceiling bound by `max_seq_len`).
+
+`copy_blocks_device` now copies the key min/max metadata, so the hybrid transcript snapshot
+(`server.transcript_snapshot`, default on) stays on with the pool; before, the pool turned it off.
+
+```
+[PROV: commit=7858db2d date=2026-10-02 hw=RTX5090 cuda=13.4.1 image=scripts/build_image.sh of main
+       n=3 alternating rounds, fresh process per run
+       cmd=`imp-cli --bench --bench-pp 32512 --bench-reps 1 --max-tokens 128 --max-seq-len 32768
+       --set speculative.ngram=false --set speculative.mtp_k=0
+       [--set attention.sparse_topk_tokens=4096 | --set attention.sparse_prefill_topk_tokens=8192]`]
+```

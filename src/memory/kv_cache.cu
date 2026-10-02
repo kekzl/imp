@@ -813,20 +813,24 @@ struct KVCopyPairs {
     int dst[KVCache::kCopyMaxPairs];
 };
 
-// grid: (n_layers, 4, n_pairs); blockIdx.y section: 0=K, 1=V, 2=K-scales,
-// 3=V-scales. meta layout per layer: {k_off, v_off, block_bytes,
-// k_scale_off, v_scale_off, scale_bytes}.
-__global__ void kv_block_copy_kernel(char* pool, char* spool, const size_t* __restrict__ meta,
-                                     KVCopyPairs pairs) {
+// grid: (n_layers, 5, n_pairs); blockIdx.y section: 0=K, 1=V, 2=K-scales,
+// 3=V-scales, 4=key min/max metadata (layer stride mstride). meta layout per layer:
+// {k_off, v_off, block_bytes, k_scale_off, v_scale_off, scale_bytes}.
+__global__ void kv_block_copy_kernel(char* pool, char* spool, char* mpool, size_t mbytes, size_t mstride,
+                                     const size_t* __restrict__ meta, KVCopyPairs pairs) {
     const size_t* m = meta + 6ull * blockIdx.x;
     const int sec = blockIdx.y;
-    char* base = (sec < 2) ? pool : spool;
-    if (base == nullptr)
+    char* base = (sec < 2) ? pool : (sec < 4) ? spool : mpool;
+    if (base == nullptr || m[2] == 0)
         return;
-    const size_t bytes = (sec < 2) ? m[2] : m[5];
+    const size_t bytes = (sec < 2) ? m[2] : (sec < 4) ? m[5] : mbytes;
     if (bytes == 0)
         return;
-    const size_t off = (sec == 0) ? m[0] : (sec == 1) ? m[1] : (sec == 2) ? m[3] : m[4];
+    const size_t off = (sec == 0)   ? m[0]
+                       : (sec == 1) ? m[1]
+                       : (sec == 2) ? m[3]
+                       : (sec == 3) ? m[4]
+                                    : static_cast<size_t>(blockIdx.x) * mstride;
     const char* s = base + off + static_cast<size_t>(pairs.src[blockIdx.z]) * bytes;
     char* d = base + off + static_cast<size_t>(pairs.dst[blockIdx.z]) * bytes;
     const bool vec_ok = bytes % 16 == 0 && (reinterpret_cast<uintptr_t>(s) % 16 == 0) &&
@@ -884,9 +888,11 @@ void KVCache::copy_blocks_device(const int* srcs, const int* dsts, int n_pairs,
         pairs.src[i] = srcs[i];
         pairs.dst[i] = dsts[i];
     }
-    dim3 grid(n_layers_, scale_pool_ ? 4 : 2, n_pairs);
-    kv_block_copy_kernel<<<grid, 256, 0, stream>>>(static_cast<char*>(pool_),
-                                                   static_cast<char*>(scale_pool_),
+    // Metadata rides along: a cloned block without it scores as empty pages (sparse attention).
+    dim3 grid(n_layers_, minmax_pool_ ? 5 : scale_pool_ ? 4 : 2, n_pairs);
+    kv_block_copy_kernel<<<grid, 256, 0, stream>>>(static_cast<char*>(pool_), static_cast<char*>(scale_pool_),
+                                                   static_cast<char*>(minmax_pool_), minmax_block_bytes_,
+                                                   static_cast<size_t>(max_blocks_) * minmax_block_bytes_,
                                                    static_cast<const size_t*>(d_copy_meta_), pairs);
     IMP_CUDA_CHECK_LAUNCH();
 }

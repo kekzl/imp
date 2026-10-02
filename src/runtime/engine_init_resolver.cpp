@@ -860,6 +860,34 @@ void Engine::init_resolve_kv_block_size_() {
     IMP_LOG_INFO("KV block size: auto -> %d (n_kv_heads=%d)", config_.kv_block_size, mcfg.n_kv_heads);
 }
 
+// attention.sparse_topk_tokens / sparse_prefill_topk_tokens = -1 (auto): the per-arch budget,
+// or 0 when the family is ungated or the metadata pool would be refused (no WARN for auto).
+void Engine::init_resolve_sparse_attention_() {
+    const auto& mcfg = model_->config();
+    auto& acfg = runtime_config_.attention;
+    const char* refuse = sparse_minmax_refusal(config_.kv_cache_dtype, mcfg.is_mla() && acfg.mla_absorb,
+                                               runtime_config_.speculative.token_recycling,
+                                               !config_.prefix_cache_path.empty());
+    if (!refuse && !mcfg.head_dim_per_layer.empty())
+        refuse = "per-layer KV geometry";
+    // The host spill tier refuses a cache with the metadata pool (kv_host_spill_supported).
+    if (!refuse && runtime_config_.kv_cache.host_spill_mb > 0)
+        refuse = "kv_cache.host_spill_mb";
+    const auto resolve = [&](const char* key, int& value, int family_tokens) {
+        if (value >= 0)
+            return;
+        value = refuse ? 0 : family_tokens;
+        if (value > 0)
+            IMP_LOG_INFO("attention.%s: auto -> %d (arch=%s)", key, value, model_arch_name(mcfg.arch));
+        else
+            IMP_LOG_INFO("attention.%s: auto -> 0 (arch=%s: %s)", key, model_arch_name(mcfg.arch),
+                         refuse ? refuse : "family not gated on");
+    };
+    resolve("sparse_topk_tokens", acfg.sparse_topk_tokens, sparse_decode_default_tokens(mcfg.arch));
+    resolve("sparse_prefill_topk_tokens", acfg.sparse_prefill_topk_tokens,
+            sparse_prefill_default_tokens(mcfg.arch));
+}
+
 void Engine::init_compute_max_seq_len_() {
     const auto& mcfg = model_->config();
     if (int v = runtime_config_.runtime.max_seq_len; v > 0) {

@@ -73,6 +73,33 @@ TEST(KVBlockCopy, FP8FanOutFromOneSource) {
     EXPECT_TRUE(blocks_equal(c, 0, 4));
 }
 
+// Key min/max metadata travels with the block: a transcript-snapshot clone must score like
+// its source under sparse attention (default on, #2405).
+TEST(KVBlockCopy, KeyMinmaxMetadataCopied) {
+    KVCache c(3, 2, 64, QType::FP8_E4M3, 8);
+    ASSERT_TRUE(c.enable_key_minmax());
+    const size_t mb = KVCache::minmax_block_bytes(2, 64);
+    std::vector<uint8_t> pat(mb), got(mb), other(mb, 0x33);
+    for (int l = 0; l < c.n_layers(); ++l) {
+        for (size_t i = 0; i < mb; ++i)
+            pat[i] = static_cast<uint8_t>(7 * l + i);
+        cudaMemcpy(c.key_minmax_ptr(l, 1), pat.data(), mb, cudaMemcpyHostToDevice);
+        cudaMemcpy(c.key_minmax_ptr(l, 5), other.data(), mb, cudaMemcpyHostToDevice);
+        cudaMemcpy(c.key_minmax_ptr(l, 6), other.data(), mb, cudaMemcpyHostToDevice);
+    }
+    const int src = 1, dst = 5;
+    c.copy_blocks_device(&src, &dst, 1, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    for (int l = 0; l < c.n_layers(); ++l) {
+        for (size_t i = 0; i < mb; ++i)
+            pat[i] = static_cast<uint8_t>(7 * l + i);
+        cudaMemcpy(got.data(), c.key_minmax_ptr(l, 5), mb, cudaMemcpyDeviceToHost);
+        EXPECT_EQ(got, pat) << "layer " << l;
+        cudaMemcpy(got.data(), c.key_minmax_ptr(l, 6), mb, cudaMemcpyDeviceToHost);
+        EXPECT_EQ(got, other) << "untouched block 6, layer " << l;
+    }
+}
+
 TEST(KVBlockCopy, UntouchedBlockStaysIntact) {
     KVCache c(2, 2, 64, QType::F16, 8);
     fill_block(c, 0, 5);

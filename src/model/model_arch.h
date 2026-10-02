@@ -44,6 +44,12 @@ const char* model_arch_name(ModelArch arch);
 // See model.cpp for per-family measurements.
 [[nodiscard]] bool kv_nvfp4_default_safe(ModelArch arch);
 
+// attention.sparse_topk_tokens / sparse_prefill_topk_tokens = -1 (auto): budget in tokens
+// for this family, 0 = stays dense. Only families that passed NIAH + PPL + tok/s on every
+// hero model get a budget (#2405, #2406; per-family numbers in model.cpp).
+[[nodiscard]] int sparse_decode_default_tokens(ModelArch arch);
+[[nodiscard]] int sparse_prefill_default_tokens(ModelArch arch);
+
 // How many times the auto default's KV bytes/token an explicit dtype pin costs; 0 or 1 =
 // free. Only families whose auto default is NVFP4 can lose here. A pin can invert without
 // the config changing: e.g. IMP_KV_FP8=1 doubled bytes/token once the default flipped to
