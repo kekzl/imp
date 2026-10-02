@@ -11,8 +11,9 @@
 //   NVFP4  grouped    the question
 //
 // Build and run (needs a GPU):
-//   docker run --rm --gpus all -v $PWD:/src -w /src nvidia/cuda:13.4.1-devel-ubuntu26.04 bash -c \
-//     'nvcc -O2 -arch=sm_120a tools/analysis/cublaslt_grouped_probe.cu -lcublasLt -o /tmp/probe && /tmp/probe'
+//   docker run --rm --gpus all -v $PWD:/src -w /src nvidia/cuda:13.4.2-devel-ubuntu26.04 bash -c \
+//     'nvcc -O2 -arch=sm_120a tools/analysis/cublaslt_grouped_probe.cu -lcublasLt -o /tmp/probe \
+//      && /tmp/probe'
 //
 // Exit code is 0 whatever the outcome: the printed table is the result, a zero row is a finding,
 // not an error.

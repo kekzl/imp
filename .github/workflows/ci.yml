@@ -60,7 +60,7 @@ jobs:
       # out of the box (matches the Dockerfile builder). No apt toolkit install.
       # Ubuntu 26.04 → GCC 15.2, so CI compiles on the same libstdc++ 15 as the
       # release image and catches missing-include regressions (#903) here.
-      image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
+      image: nvidia/cuda:13.4.2-devel-ubuntu26.04@sha256:14fd494fd8496817a70700e4d2c52bd42de56c5d39c041bf8342814614d5fe56
 
     env:
       # CUDA toolchain version — used by the verify step and cache keys. Kept in
@@ -79,7 +79,7 @@ jobs:
       # build tooling installs later, gated on the detection result.)
       #
       # python3 comes with it because the static gates below are python and this
-      # container has neither: `nvidia/cuda:13.4.1-devel-ubuntu26.04` ships no
+      # container has neither: `nvidia/cuda:13.4.2-devel-ubuntu26.04` ships no
       # python3 and no git. Without this the gate step fails "python3: not
       # found" on every PR, which is a false red on the one required check.
       # Every container job points apt at azure.archive.ubuntu.com: the runners
@@ -411,7 +411,7 @@ jobs:
     if: needs.build.outputs.cpp == 'true'
     runs-on: ubuntu-26.04
     container:
-      image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
+      image: nvidia/cuda:13.4.2-devel-ubuntu26.04@sha256:14fd494fd8496817a70700e4d2c52bd42de56c5d39c041bf8342814614d5fe56
     env:
       CUDA_VERSION: "13.4"
     # Default is `sh -e` (dash): `mapfile` and `< <(...)` fail there (#2187).
@@ -778,7 +778,7 @@ jobs:
     name: PTX fallback
     runs-on: ubuntu-26.04
     container:
-      image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
+      image: nvidia/cuda:13.4.2-devel-ubuntu26.04@sha256:14fd494fd8496817a70700e4d2c52bd42de56c5d39c041bf8342814614d5fe56
     defaults:
       run:
         shell: bash
@@ -882,7 +882,7 @@ jobs:
     name: Sanitizers
     runs-on: ubuntu-26.04
     container:
-      image: nvidia/cuda:13.4.1-devel-ubuntu26.04@sha256:fe678162c7114158e170f2f727a7582162a3a55d7090ed31fac04f2dbc173378
+      image: nvidia/cuda:13.4.2-devel-ubuntu26.04@sha256:14fd494fd8496817a70700e4d2c52bd42de56c5d39c041bf8342814614d5fe56
     # Own ccache namespace: these objects are RelWithDebInfo + ASan/UBSan host
     # flags, so nothing here is shareable with the `Build` (Release) or
     # `PTX fallback` stores and a shared dir would only evict theirs.
