@@ -3,7 +3,9 @@
 #include "quant/fp8_utils.cuh"
 #include "quant/nvfp4_pack.cuh"
 #include "core/tensor.h"
+#include "core/cuda_errors.h"
 #include "core/logging.h"
+#include "memory/device_alloc_all.h"
 #include "core/pdl_launch.cuh"
 #include "core/pdl_device.cuh"
 #include <cuda_runtime.h>
@@ -313,7 +315,7 @@ float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream, float* d_
     float* d_global_max = d_reusable_max;
     bool own_alloc = false;
     if (!d_global_max) {
-        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_global_max, sizeof(float)));
+        cuda_alloc_or_throw(cudaMalloc(&d_global_max, sizeof(float)), "calibrate_nvfp4_scales");
         own_alloc = true;
     }
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_global_max, 0, sizeof(float), stream));
@@ -363,8 +365,9 @@ void quantize_fp16_to_nvfp4_with_scale(const Tensor& input, float tensor_scale, 
 
     uint8_t* d_packed = nullptr;
     uint8_t* d_micro_scales = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_packed, N * (K / 2)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_micro_scales, N * (K / kMicroBlockSize)));
+    cuda_alloc_or_throw(device_alloc_all(dev_req(d_packed, N * (K / 2)),
+                                         dev_req(d_micro_scales, N * (K / kMicroBlockSize))),
+                        "quantize_fp16_to_nvfp4_with_scale");
 
     const int64_t total_micro_blocks = N * (K / kMicroBlockSize);
     const int num_blocks = (int)((total_micro_blocks + kBlockSize - 1) / kBlockSize);
@@ -449,8 +452,9 @@ void quantize_fp16_to_nvfp4_async(const Tensor& input, NvFP4QuantResult& result,
 
     uint8_t* d_packed = nullptr;
     uint8_t* d_micro_scales = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_packed, packed_bytes));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_micro_scales, micro_scale_bytes));
+    cuda_alloc_or_throw(device_alloc_all(dev_req(d_packed, packed_bytes),
+                                         dev_req(d_micro_scales, micro_scale_bytes)),
+                        "quantize_fp16_to_nvfp4_async");
 
     // Step 3: Fused quantize that reads absmax from device (no host sync!)
     int64_t total_micro_blocks = N * (K / kMicroBlockSize);
@@ -592,16 +596,14 @@ void quantize_packed_experts_to_nvfp4(const void* packed_ggml_data, QType qtype,
     uint8_t* d_packed = nullptr;
     uint8_t* d_micro_scales = nullptr;
     float* d_tensor_scales = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_packed, total_packed));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_micro_scales, total_ms));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tensor_scales, n_experts * sizeof(float)));
+    float* d_global_max = nullptr;  // absmax reduction scratch
+    cuda_alloc_or_throw(device_alloc_all(dev_req(d_packed, total_packed), dev_req(d_micro_scales, total_ms),
+                                         dev_req(d_tensor_scales, n_experts * sizeof(float)),
+                                         dev_req(d_global_max, sizeof(float))),
+                        "quantize_packed_experts_to_nvfp4");
 
     // Compute expert stride in source GGML data
     size_t src_expert_stride = static_cast<size_t>(eff) * qtype_row_bytes(qtype, K);
-
-    // Temporary device buffer for absmax reduction
-    float* d_global_max = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_global_max, sizeof(float)));
 
     int64_t n_elements = static_cast<int64_t>(eff) * K;
     int64_t total_micro_blocks = static_cast<int64_t>(eff) * (K / kMicroBlockSize);

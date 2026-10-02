@@ -6,7 +6,9 @@
 #include "compute/attention_mxfp4_prefill.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/cuda_static_reset.h"
+#include "core/cuda_errors.h"
 #include "core/logging.h"
+#include "memory/device_alloc_all.h"
 #include "core/process_diag.h"
 
 #include <cublas_v2.h>
@@ -290,17 +292,16 @@ static void ensure_workspace(int seq_q, int seq_kv, int hd) {
     size_t k_sf_bytes = cutlass_mxfp4_sf_size(seq_kv, hd);
     size_t s_bytes = (size_t)seq_q * seq_kv * sizeof(half);
 
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.q_packed, q_packed_bytes));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.q_sf, q_sf_bytes));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.k_packed, k_packed_bytes));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.k_sf, k_sf_bytes));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.s_matrix, s_bytes));
-
-    size_t gws = gemm_mxfp4_cutlass_sm120_workspace(seq_q, seq_kv, hd);
-    if (gws > 0) {
-        IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.gemm_ws, gws));
-        s_ws.gemm_ws_size = gws;
-    }
+    // Sizes stay 0 until every buffer exists: a failed grow throws and the next call retries (#2446).
+    s_ws.alloc_seq_q = s_ws.alloc_seq_kv = s_ws.alloc_hd = 0;
+    const size_t gws = gemm_mxfp4_cutlass_sm120_workspace(seq_q, seq_kv, hd);
+    cuda_alloc_or_throw(device_alloc_all(dev_req(s_ws.q_packed, q_packed_bytes),
+                                         dev_req(s_ws.q_sf, q_sf_bytes),
+                                         dev_req(s_ws.k_packed, k_packed_bytes),
+                                         dev_req(s_ws.k_sf, k_sf_bytes), dev_req(s_ws.s_matrix, s_bytes),
+                                         dev_req(s_ws.gemm_ws, gws)),
+                        "MXFP4 attention prefill workspace");
+    s_ws.gemm_ws_size = gws;
 
     s_ws.alloc_seq_q = seq_q;
     s_ws.alloc_seq_kv = seq_kv;

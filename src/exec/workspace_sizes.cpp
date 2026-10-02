@@ -332,16 +332,18 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     if (shape.n_experts > 0) {
         const size_t ne = static_cast<size_t>(shape.n_experts);
         out.moe_arrays = 3 * ne * sizeof(void*)        // d_work_ptrs
-                         + ne * sizeof(float)         // d_fp8_scales
-                         + ne * sizeof(int32_t)       // d_M_per
-                         + ne * sizeof(float)         // d_alpha_compact
-                         + sizeof(int32_t)            // d_na
-                         + (ne + 1) * sizeof(int64_t) // d_sfa_offsets
-                         + 2 * ne * sizeof(void*)     // d_B_ptrs_cache, d_SFB_ptrs_cache
-                         + ne * sizeof(float)         // d_alpha_full
-                         + ne * sizeof(void*)         // d_weight_ptrs
-                         + ne * sizeof(void*)         // cutlass3x_sfa_ptrs
-                         + 11 * kTakeAlign;                  // per-take 256 B alignment
+                         + ne * sizeof(float)          // d_fp8_scales
+                         + ne * sizeof(int32_t)        // d_M_per
+                         + ne * sizeof(float)          // d_alpha_compact
+                         + sizeof(int32_t)             // d_na
+                         + (ne + 1) * sizeof(int64_t)  // d_sfa_offsets
+                         + 2 * ne * sizeof(void*)      // d_B_ptrs_cache, d_SFB_ptrs_cache
+                         + ne * sizeof(float)          // d_alpha_full
+                         + ne * sizeof(void*)          // d_weight_ptrs
+                         + ne * sizeof(void*)          // cutlass3x_sfa_ptrs
+                         + 2 * ne * sizeof(void*)      // smallM_ptrs (#2446)
+                         + 3 * ne * sizeof(float)      // smallM_scales (#2446)
+                         + 12 * kTakeAlign;            // per-take 256 B alignment
     }
 
     // dp4a input staging, all three tenants of one sizing family. max_blocks = max(max_k/32,

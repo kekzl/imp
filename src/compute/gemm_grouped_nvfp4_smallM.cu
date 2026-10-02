@@ -545,7 +545,10 @@ public:
         }
         for (int i = 0; i < n_ && err == cudaSuccess; ++i)
             err = cudaMemcpyAsync(e_[i].dev, e_[i].src, e_[i].bytes, cudaMemcpyHostToDevice, stream_);
-        if (err != cudaSuccess) IMP_LOG_ERROR("[smallM] table upload failed: %s", cudaGetErrorString(err));
+        if (err != cudaSuccess) {  // handled by returning false; clear the non-sticky error (#2446)
+            IMP_LOG_ERROR("[smallM] table upload failed: %s", cudaGetErrorString(err));
+            (void)cudaGetLastError();
+        }
         return err == cudaSuccess;
     }
 

@@ -195,7 +195,8 @@ TEST(PrefillRowInvariance, SmallMNativeActivationQuantIndependentOfBatch) {
         cudaMalloc(&d_ts, sizeof(float));
         void* hp[1] = {packed};
         void* hs[1] = {sf};
-        quantize_fp16_to_nvfp4_moe_native_with_scales(d_src, hp, hs, d_ts, d_off, m_e, K, 1, nullptr);
+        EXPECT_TRUE(quantize_fp16_to_nvfp4_moe_native_with_scales(d_src, hp, hs, d_ts, d_off, m_e, K, 1,
+                                                                  /*d_ptr_scratch=*/nullptr, nullptr));
         cudaDeviceSynchronize();
         MoeQuantOut out;
         out.packed.resize(static_cast<size_t>(K) / 2);

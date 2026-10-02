@@ -3,10 +3,13 @@
 #include "compute/gemm_cutlass_sm120.h"  // cutlass_nvfp4_sf_size (host reference)
 #include "quant/nvfp4_quant.h"
 #include "core/tensor.h"
+#include "test_alloc_inject.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <vector>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -62,8 +65,8 @@ TEST(QuantizeMoeNative, SingleExpertMatchesReference) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    imp::quantize_fp16_to_nvfp4_moe_native(
-        d_src, h_packed_ptrs, h_sf_ptrs, d_offsets, M, K, ne, stream);
+    ASSERT_TRUE(
+        imp::quantize_fp16_to_nvfp4_moe_native(d_src, h_packed_ptrs, h_sf_ptrs, d_offsets, M, K, ne, stream));
     cudaStreamSynchronize(stream);
 
     // Retrieve native output.
@@ -134,8 +137,8 @@ TEST(QuantizeMoeNative, TwoExpertsIndependent) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    imp::quantize_fp16_to_nvfp4_moe_native(
-        d_src, d_packed, d_sf, d_offsets, total, K, ne, stream);
+    ASSERT_TRUE(
+        imp::quantize_fp16_to_nvfp4_moe_native(d_src, d_packed, d_sf, d_offsets, total, K, ne, stream));
     cudaStreamSynchronize(stream);
 
     // Verify expert 0 output is non-trivial (some non-zero packed bytes).
@@ -196,8 +199,7 @@ TEST(QuantizeMoeNative, EmptyExpertNocrash) {
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);
-    imp::quantize_fp16_to_nvfp4_moe_native(
-        d_src, d_packed, d_sf, d_offsets, M, K, ne, stream);
+    ASSERT_TRUE(imp::quantize_fp16_to_nvfp4_moe_native(d_src, d_packed, d_sf, d_offsets, M, K, ne, stream));
     EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
 
     cudaFree(d_src);
@@ -205,6 +207,65 @@ TEST(QuantizeMoeNative, EmptyExpertNocrash) {
     cudaFree(d_packed[1]); cudaFree(d_sf[1]);
     cudaFree(d_offsets);
     cudaStreamDestroy(stream);
+}
+
+// #2446: failed pointer-array allocation -> false, nothing launched; caller scratch -> no
+// allocation, so the same quantize runs on the exhausted pool. Child: a fault poisons the context.
+[[noreturn]] void quantize_under_exhausted_pool() {
+    const int M = 16, K = 32, ne = 1;
+    const size_t packed_bytes = static_cast<size_t>(M) * (K / 2);
+    std::vector<__half> h_src(M * K, __float2half(1.0f));
+    __half* d_src = nullptr;
+    void* d_packed = nullptr;
+    void* d_sf = nullptr;
+    int* d_offsets = nullptr;
+    float* d_ts = nullptr;
+    void** d_scratch = nullptr;
+    const int h_offsets[2] = {0, M};
+    if (cudaMalloc(&d_src, M * K * sizeof(__half)) != cudaSuccess ||
+        cudaMalloc(&d_packed, packed_bytes) != cudaSuccess ||
+        cudaMalloc(&d_sf, static_cast<size_t>(M) * (K / 16)) != cudaSuccess ||
+        cudaMalloc(&d_offsets, sizeof(h_offsets)) != cudaSuccess ||
+        cudaMalloc(&d_ts, sizeof(float)) != cudaSuccess ||
+        cudaMalloc(&d_scratch, 2 * ne * sizeof(void*)) != cudaSuccess ||
+        cudaMemcpy(d_src, h_src.data(), M * K * sizeof(__half), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemcpy(d_offsets, h_offsets, sizeof(h_offsets), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemset(d_packed, 0xAB, packed_bytes) != cudaSuccess)
+        std::_Exit(2);
+    void* h_pp[1] = {d_packed};
+    void* h_sp[1] = {d_sf};
+    std::vector<uint8_t> h_packed(packed_bytes);
+    auto packed_untouched = [&] {
+        if (cudaMemcpy(h_packed.data(), d_packed, packed_bytes, cudaMemcpyDeviceToHost) != cudaSuccess)
+            std::_Exit(9);
+        for (uint8_t b : h_packed)
+            if (b != 0xAB)
+                return false;
+        return true;
+    };
+    cudaStream_t stream = nullptr;
+    if (cudaStreamCreate(&stream) != cudaSuccess || !imp_test::exhaust_async_pool())
+        std::_Exit(3);
+
+    if (imp::quantize_fp16_to_nvfp4_moe_native(d_src, h_pp, h_sp, d_offsets, M, K, ne, stream))
+        std::_Exit(4);  // the allocating form must refuse
+    if (cudaStreamSynchronize(stream) != cudaSuccess || !packed_untouched())
+        std::_Exit(5);  // and must not have launched
+    if (!imp::quantize_fp16_to_nvfp4_moe_native_with_scales(d_src, h_pp, h_sp, d_ts, d_offsets, M, K, ne,
+                                                            d_scratch, stream))
+        std::_Exit(6);  // caller scratch: no allocation to fail
+    if (cudaStreamSynchronize(stream) != cudaSuccess || packed_untouched())
+        std::_Exit(7);
+    std::fprintf(stderr, "quantize alloc contract held\n");
+    std::_Exit(0);
+}
+
+TEST(QuantizeMoeNative, FailedPointerUploadRefusesWithoutLaunch) {
+    if (sm_major() < 12)
+        GTEST_SKIP() << "SM120 required";
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_EXIT(quantize_under_exhausted_pool(), ::testing::ExitedWithCode(0),
+                "quantize alloc contract held");
 }
 
 // compute_M_per_from_offsets_device: device-side per-expert token count, replacing the

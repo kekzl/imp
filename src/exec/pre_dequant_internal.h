@@ -8,6 +8,7 @@
 #include "exec/executor.h"
 #include "exec/executor_helpers.h"
 #include "exec/weight_handle.h"
+#include "memory/device_alloc_all.h"
 #include "memory/vram_allocator.h"
 #include "model/model.h"
 #include "model/layer_host_keep.h"
@@ -23,6 +24,24 @@
 #include <unordered_map>
 
 namespace imp::pre_dequant_internal {
+
+// FP8 cache buffers: scale scratch (block maxes [max_grid], absmax, scales [n]) all or none, then the
+// data bulk. Null bulk = pass skipped, never run on a null scratch (#2446); scratch freed by the caller.
+struct Fp8CacheBuffers {
+    float* block_maxes = nullptr;
+    float* absmax = nullptr;
+    float* scales = nullptr;
+    uint8_t* bulk = nullptr;
+};
+
+[[nodiscard]] inline Fp8CacheBuffers alloc_fp8_cache_buffers(VRAMAllocator* va, size_t max_grid, size_t n,
+                                                             size_t bulk_bytes, const char* tag) {
+    Fp8CacheBuffers b;
+    if (device_alloc_all(dev_req(b.block_maxes, max_grid * sizeof(float)), dev_req(b.absmax, sizeof(float)),
+                         dev_req(b.scales, n * sizeof(float))) == cudaSuccess)
+        b.bulk = static_cast<uint8_t*>(vram_alloc(va, bulk_bytes, tag));
+    return b;
+}
 
 // The per-row FP8 head (pre_dequant_fp8_lm_head.cpp) can serve this head: F16 or GPU-dequantable
 // source on device, F16 final norm (F16 hidden rows), d_model a multiple of 256.

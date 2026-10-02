@@ -1,7 +1,9 @@
 #include "runtime/batch.h"
 #include "memory/engine_arena.h"
 #include "memory/vram_allocator.h"
+#include "core/cuda_errors.h"
 #include "core/logging.h"
+#include "memory/device_alloc_all.h"
 #include <algorithm>
 #include <ranges>
 #include <cstring>
@@ -22,18 +24,19 @@ void GPUBatch::upload(const Batch& batch, cudaStream_t stream) {
     if (total_tokens <= 0 || n_sequences <= 0)
         return;
 
-    // Allocate device memory
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_token_ids, total_tokens * sizeof(int32_t)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_positions, total_tokens * sizeof(int)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_context_lens, n_sequences * sizeof(int)));
-
-    if (n_sequences > 1) {
-        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_seq_offsets, (n_sequences + 1) * sizeof(int)));
-    }
-
-    if (max_blocks_per_seq > 0) {
-        IMP_CUDA_CHECK_LOG(
-            cudaMalloc(&d_block_tables, static_cast<unsigned long>(n_sequences) * max_blocks_per_seq * sizeof(int)));
+    // Allocate device memory; any failure leaves none and throws before a copy (#2446).
+    const size_t offsets_bytes = n_sequences > 1 ? (n_sequences + 1) * sizeof(int) : 0;
+    const size_t tables_bytes = max_blocks_per_seq > 0
+                                    ? static_cast<size_t>(n_sequences) * max_blocks_per_seq * sizeof(int)
+                                    : 0;
+    if (const cudaError_t err = device_alloc_all(dev_req(d_token_ids, total_tokens * sizeof(int32_t)),
+                                                 dev_req(d_positions, total_tokens * sizeof(int)),
+                                                 dev_req(d_context_lens, n_sequences * sizeof(int)),
+                                                 dev_req(d_seq_offsets, offsets_bytes),
+                                                 dev_req(d_block_tables, tables_bytes));
+        err != cudaSuccess) {
+        free();
+        cuda_alloc_or_throw(err, "GPUBatch::upload");
     }
 
     // Async copy

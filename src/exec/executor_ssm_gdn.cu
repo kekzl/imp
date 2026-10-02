@@ -10,6 +10,7 @@
 #include "compute/activation.h"
 #include "compute/ssm.h"
 #include "compute/gdn.h"
+#include "core/cuda_errors.h"
 #include "core/logging.h"
 #include "core/pdl.h"
 
@@ -950,7 +951,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         // Allocate FP32 scratch via cudaMallocAsync (small: n * d_model * 4 bytes)
         size_t fp32_bytes = static_cast<size_t>(n) * cfg.d_model * sizeof(float);
         void* fp32_out = nullptr;
-        IMP_CUDA_CHECK_LOG(cudaMallocAsync(&fp32_out, fp32_bytes, stream));
+        cuda_alloc_or_throw(cudaMallocAsync(&fp32_out, fp32_bytes, stream), "GDN fp32 out-projection");
         int64_t out_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(cfg.d_model)};
         Tensor fp32_out_t(fp32_out, QType::F32, 2, out_shape, true);
 
