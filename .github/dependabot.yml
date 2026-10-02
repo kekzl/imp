@@ -10,21 +10,49 @@ updates:
         patterns:
           - "*"
 
-  # Docker base images (root + roofline plot tool).
-  # /tools/analysis is deliberately NOT scanned: its Dockerfiles build FROM
-  # local-only stages (imp:ciq, imp:builder-133), which Dependabot resolves
-  # as docker.io/library/imp and fails the whole docker update run with
-  # private_source_authentication_failure (run 29214173834, 2026-07-12).
-  # There is no external base image in that directory to update.
+  # Docker base images: every directory with a Dockerfile that pulls an external image.
+  # Dockerfile.ciq and Dockerfile.cutile build FROM local-only stages (imp:builder-133,
+  # imp:ciq); Dependabot resolves those as docker.io/library/imp and fails the whole run
+  # (private_source_authentication_failure, run 29214173834), so they are excluded.
   - package-ecosystem: "docker"
     directories:
       - "/"
+      - "/tools"
+      - "/tools/analysis"
+      - "/tools/roofline"
+    exclude-paths:
+      - "tools/analysis/Dockerfile.ciq"
+      - "tools/analysis/Dockerfile.cutile"
+    schedule:
+      interval: "weekly"
+    groups:
+      docker:
+        patterns:
+          - "*"
+
+  # Compose service images, tag + digest pinned. allow-list: imp:latest is built locally and
+  # would 401 on docker.io/library/imp; `ignore` does not help (checked after the registry call).
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    allow:
+      - dependency-name: "*open-webui/open-webui"
+      - dependency-name: "*prom/prometheus"
+      - dependency-name: "*grafana/grafana"
+    schedule:
+      interval: "weekly"
+    groups:
+      docker-compose:
+        patterns:
+          - "*"
+
+  # Python lock files: API test suite and roofline plot tool (pip-compile --generate-hashes)
+  - package-ecosystem: "pip"
+    directories:
+      - "/tests/api"
       - "/tools/roofline"
     schedule:
       interval: "weekly"
-
-  # Python deps for the API test suite
-  - package-ecosystem: "pip"
-    directory: "/tests/api"
-    schedule:
-      interval: "weekly"
+    groups:
+      pip:
+        patterns:
+          - "*"

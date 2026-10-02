@@ -35,6 +35,20 @@ The cache volume is not optional in a service context: without it every restart 
 - Raw quant payloads are never duplicated: near-zero size for raw-served GGUF/NVFP4-prequant, ~model-size for BF16-dense.
 - A stale cache (changed model file) is detected and ignored.
 
+## Verify the image
+
+Release images (from the first release after #2428) carry a keyless cosign signature, an SPDX SBOM and `mode=max` SLSA provenance.
+
+```sh
+cosign verify ghcr.io/kekzl/imp:<version> \
+  --certificate-identity-regexp '^https://github\.com/kekzl/imp/\.github/workflows/release-docker\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+docker buildx imagetools inspect ghcr.io/kekzl/imp:<version> --format '{{ json .SBOM }}'        # SPDX SBOM
+docker buildx imagetools inspect ghcr.io/kekzl/imp:<version> --format '{{ json .Provenance }}'  # SLSA provenance
+```
+
+Exit 0 from `cosign verify` = built by `release-docker.yml` from a `v*` tag of this repo. Pin the digest it prints (`ghcr.io/kekzl/imp@sha256:...`) in production.
+
 ## Configuration
 
 Three layers, later wins: `imp.conf` → `--config <file>` → `--set key=value`.
