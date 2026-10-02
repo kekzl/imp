@@ -71,6 +71,7 @@ jobs:
       CCACHE_COMPILERCHECK: content
       CCACHE_COMPRESS: "1"
       CCACHE_COMPRESSLEVEL: "6"
+      APT_DEBS: /github/home/apt-debs
 
     steps:
       # Minimal git up front so checkout below pulls real history and the
@@ -84,13 +85,29 @@ jobs:
       # Every container job points apt at azure.archive.ubuntu.com: the runners
       # sit in Azure, and archive.ubuntu.com:80 was unreachable for 13 min on
       # 2026-09-11 (run 34574274779: Build red, PTX fallback stalled in apt).
+      #
+      # .deb cache (APT_DEBS): the mirror served the 47 MB of debs at 58-197 kB/s
+      # in 4 of 38 green PR Builds (58-576 s per apt step); 2 first attempts died on deb fetch errors.
+      # `apt-get update` stays live; only debs whose version is cached skip the mirror.
+      - name: apt cache week
+        id: aptweek
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - name: Restore apt debs
+        id: aptdebs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /github/home/apt-debs
+          key: apt-debs-build-cuda${{ env.CUDA_VERSION }}-${{ steps.aptweek.outputs.week }}
+          restore-keys: |
+            apt-debs-build-cuda${{ env.CUDA_VERSION }}-
       - name: Install git and python3
         run: |
           sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
           # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
           rm -f /etc/apt/sources.list.d/cuda*.list
+          mkdir -p "$APT_DEBS/partial"
           apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends git python3
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Dir::Cache::Archives="$APT_DEBS" install -y --no-install-recommends git python3
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -177,22 +194,37 @@ jobs:
       # so `which gate failed` keeps a check name and there is one list, not two.
       # Runs on docs-only PRs too: the docs and release-hygiene gates are exactly
       # the ones a docs-only change can break.
-      - name: Static gates (blocking, before the build)
+      #
+      # Started in the background, joined by "Static gates (result)" below: same
+      # script, same exit code, still fails `Build`. Serial they cost a median
+      # 26 s of the required check; next to a -j2 compile on 4 vCPU they are free.
+      # The named gate jobs below still report a red gate within ~30 s.
+      - name: Static gates (blocking, started in the background)
+        id: gates
         env:
           # CCN pins may only shrink vs this commit (#2210); empty -> merge-base with origin/main.
           IMP_GATE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: bash scripts/ci_static_gates.sh
+        run: |
+          # Every stream detached, or the step's `docker exec` waits for the child.
+          # `|| rc=$?`: under `sh -e` a bare failing gate would end the subshell before the rc write.
+          ( rc=0; bash scripts/ci_static_gates.sh > "$RUNNER_TEMP/gates.log" 2>&1 || rc=$?; echo "$rc" > "$RUNNER_TEMP/gates.rc" ) \
+            < /dev/null > /dev/null 2>&1 &
 
       - name: Install build deps
         if: steps.changes.outputs.code == 'true'
         # The native CUDA devel image already provides nvcc on PATH at
         # /usr/local/cuda; only the non-CUDA build tooling needs installing.
+        # Mirror, sources and package lists come from "Install git and python3".
         run: |
-          sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
-          # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
-          rm -f /etc/apt/sources.list.d/cuda*.list
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends cmake g++ git python3 ccache libcurl4-openssl-dev libjpeg-turbo8-dev
+          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Dir::Cache::Archives="$APT_DEBS" install -y --no-install-recommends cmake g++ git python3 ccache libcurl4-openssl-dev libjpeg-turbo8-dev
+
+      # One ~46 MB entry per week and scope, written only on a key miss.
+      - name: Save apt debs
+        if: steps.changes.outputs.code == 'true' && steps.aptdebs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /github/home/apt-debs
+          key: apt-debs-build-cuda${{ env.CUDA_VERSION }}-${{ steps.aptweek.outputs.week }}
 
       - name: Verify nvcc version
         if: steps.changes.outputs.code == 'true'
@@ -205,9 +237,11 @@ jobs:
       # change that invalidates many TUs (typical refactor), ccache hits
       # on the TUs whose post-preprocessor content didn't actually change —
       # saves the slow nvcc ptxas pass for sm_120a.
+      # restore + explicit "Save ccache" at the end: the save (median 27 s) is
+      # skipped when the build missed nothing, 6 of 38 green PR Builds before.
       - name: Restore ccache
         if: steps.changes.outputs.code == 'true'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /github/home/.ccache
           key: ${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-ccache-${{ github.sha }}
@@ -259,7 +293,7 @@ jobs:
             -DIMP_DISABLE_120F_FALLBACK=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
+            "-DCMAKE_CUDA_COMPILER_LAUNCHER=sh;$PWD/scripts/ci_compile_slot.sh;ccache"
           # CMakeLists.txt pins arch=compute_120a,code=sm_120a directly via
           # gencode and sets CMAKE_CUDA_ARCHITECTURES=OFF. IMP_DISABLE_120F_FALLBACK=ON
           # builds the sm_120a SASS only (no compute_120f PTX fallback) — CI just
@@ -275,10 +309,12 @@ jobs:
 
       - name: Build
         if: steps.changes.outputs.code == 'true'
-        # -j from scripts/build_jobs.sh, not $(nproc): the four CUTLASS TUs peak at
-        # 5.2-7.9 GB each and start together, so -j4 OOM-kills a 16 GB runner on a
-        # cold ccache (exit 137, no diagnostic).
-        run: cmake --build build -j"$(bash scripts/build_jobs.sh)"
+        # -j$(nproc): scripts/ci_compile_slot.sh (CUDA launcher above) keeps the five
+        # 5-8.6 GB CUTLASS TUs to <= 2 at once (12.7 GB worst pair); build_jobs.sh caps
+        # the runner at -j2. memory.peak is the container cgroup high-water mark.
+        run: |
+          cmake --build build -j"$(nproc)"
+          echo "nproc=$(nproc) cgroup memory.peak=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo n/a) B"
 
       # Per-kernel registers and local frame against the pin (#1549). Runs HERE
       # because this is the one place both halves exist: the built artifact and
@@ -290,8 +326,13 @@ jobs:
         run: cuobjdump -res-usage build/libimp.a | python3 tools/kernel_resources.py -
 
       - name: ccache stats
+        id: ccstats
         if: steps.changes.outputs.code == 'true'
-        run: ccache -s
+        run: |
+          ccache -s | tee "$RUNNER_TEMP/ccache-stats.txt"
+          # Fail-open: an unparsable count saves.
+          misses="$(awk '/^ *Misses:/ {print $2; exit}' "$RUNNER_TEMP/ccache-stats.txt")"
+          echo "misses=${misses:-unknown}" >> "$GITHUB_OUTPUT"
 
       # Stage 2 (CI / CPU): run every CPU-runnable GTest. The `unit` ctest label
       # (unit_core, unit_text, the CPU subset of test-e2e, guard_e2e_lane_split)
@@ -302,7 +343,9 @@ jobs:
       # GPU job did), so e.g. the tool-call and Bearer-auth unit tests were dark.
       - name: Run CPU unit tests (ctest -L unit)
         if: steps.changes.outputs.code == 'true'
-        run: cd build && ctest -L unit --output-on-failure --timeout 120
+        # -j4: guard_verify_filter (11.8 s) and guard_makefile_filters (11.1 s) were
+        # 23 of 27 s serial; both only list gtests and write per-PID temp files.
+        run: cd build && ctest -L unit -j4 --output-on-failure --timeout 120
 
       # clang-tidy moved OUT of this job into the separate non-required `tidy` job
       # below. It was ~22 min of this ~26 min job and — being advisory
@@ -310,6 +353,29 @@ jobs:
       # ever failing it. The `tidy` job reuses this job's cached build/ for
       # compile_commands.json + _deps, lints only the PR's changed .cpp, and never
       # blocks merge.
+
+      # Joins the background gate run; its exit code is this step's. Runs after a
+      # failed compile too, so a red gate is never hidden behind a red build.
+      - name: Static gates (result)
+        if: ${{ !cancelled() && steps.gates.outcome == 'success' }}
+        run: |
+          i=0
+          while [ ! -f "$RUNNER_TEMP/gates.rc" ]; do
+            i=$((i + 1))
+            [ "$i" -le 900 ] || { echo "::error::static gates did not finish in 900 s"; cat "$RUNNER_TEMP/gates.log" 2>/dev/null; exit 1; }
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/gates.log"
+          rc="$(cat "$RUNNER_TEMP/gates.rc")"
+          [ "$rc" = 0 ] || echo "::error::scripts/ci_static_gates.sh exited $rc"
+          exit "$rc"
+
+      - name: Save ccache
+        if: steps.changes.outputs.code == 'true' && steps.ccstats.outputs.misses != '0'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /github/home/.ccache
+          key: ${{ runner.os }}-cuda${{ env.CUDA_VERSION }}-ccache-${{ github.sha }}
 
       - name: Upload build artifacts
         if: steps.changes.outputs.code == 'true'
