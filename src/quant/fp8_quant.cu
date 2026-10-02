@@ -2,7 +2,9 @@
 #include "quant/fp8_utils.cuh"
 #include "quant/fp8_row_quant.h"
 #include "core/tensor.h"
+#include "core/cuda_errors.h"
 #include "core/logging.h"
+#include "memory/device_alloc_all.h"
 #include "memory/engine_arena.h"
 
 #include <utility>
@@ -429,8 +431,9 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output, float* d_sca
 
     float* d_block_maxes = nullptr;
     float* d_scale_device = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_maxes, (size_t)grid * sizeof(float)));
-    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scale_device, sizeof(float)));
+    cuda_alloc_or_throw(device_alloc_all(dev_req(d_block_maxes, (size_t)grid * sizeof(float)),
+                                         dev_req(d_scale_device, sizeof(float))),
+                        "quantize_fp16_to_fp8_e4m3");
 
     absmax_reduce_kernel<<<grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input.data), d_block_maxes,
                                                           n);

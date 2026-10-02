@@ -6,6 +6,7 @@
 // cuda_error_is_unrecoverable(e): the class table; recoverable/unknown never stops the server.
 // cuda_clear_or_throw(where): pre-check; benign error cleared, sticky class throws.
 // cuda_sync_or_throw(err, where): failed sync means the host buffer was never written; always throws.
+// cuda_alloc_or_throw(err, where): failed allocation with no fallback; throws before a launch.
 // Throw lands in BatchingEngine::step()'s catch (or the C API boundary), which re-probes and decides.
 #include <cuda_runtime_api.h>
 #include <cstdint>
@@ -42,6 +43,16 @@ inline void cuda_sync_or_throw(cudaError_t err, const char* where) {
     if (err != cudaSuccess)
         throw std::runtime_error(std::string("CUDA sync failed (") + cudaGetErrorString(err) + ") in " +
                                  where + ": the sampled tokens were never written");
+}
+
+// Device allocation with no fallback: failure throws before any launch on the buffer (#2446).
+// An OOM is not sticky, so it is cleared and the next launch check does not report it again.
+inline void cuda_alloc_or_throw(cudaError_t err, const char* where) {
+    if (err == cudaSuccess)
+        return;
+    (void)cudaGetLastError();
+    throw std::runtime_error(std::string("CUDA allocation failed (") + cudaGetErrorString(err) + ") in " +
+                             where);
 }
 
 // Pinned sampler readback: *h_token after a successful sync, else throws; never a token the model did not sample.

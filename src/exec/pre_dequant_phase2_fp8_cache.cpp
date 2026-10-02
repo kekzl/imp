@@ -148,16 +148,13 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
                 total_fp8_bytes += e.n_elems;
             }
 
-            float* d_block_maxes = nullptr;
-            float* d_absmax = nullptr;
-            float* d_scales_all = nullptr;
-            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_maxes, (size_t)max_grid * sizeof(float)));
-            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax, sizeof(float)));
-            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scales_all, fp8_entries.size() * sizeof(float)));
-
-            // Bulk-allocate all FP8 data
-            uint8_t* d_fp8_bulk = static_cast<uint8_t*>(
-                vram_alloc(vram_alloc_, total_fp8_bytes, "fp8_weight_cache"));
+            // Scratch + bulk; a failed scratch leaves the bulk null, so the loop below never runs (#2446).
+            const pre_dequant_internal::Fp8CacheBuffers bufs = pre_dequant_internal::alloc_fp8_cache_buffers(
+                vram_alloc_, max_grid, fp8_entries.size(), total_fp8_bytes, "fp8_weight_cache");
+            float* d_block_maxes = bufs.block_maxes;
+            float* d_absmax = bufs.absmax;
+            float* d_scales_all = bufs.scales;
+            uint8_t* d_fp8_bulk = bufs.bulk;
             if (!d_fp8_bulk) {
                 cudaError_t e = cudaGetLastError();
                 IMP_LOG_WARN("FP8 weight cache bulk alloc failed (%.1f MiB): %s",

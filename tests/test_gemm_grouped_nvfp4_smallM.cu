@@ -160,7 +160,7 @@ static void run_smallm_single_expert(int M, int N, int K,
     int* d_off = nullptr; cudaMalloc(&d_off, sizeof(h_off));
     cudaMemcpy(d_off, h_off, sizeof(h_off), cudaMemcpyHostToDevice);
     void* h_pp[1] = {d_A_packed}; void* h_sp[1] = {d_A_sf};
-    imp::quantize_fp16_to_nvfp4_moe_native(d_A_fp16, h_pp, h_sp, d_off, M, K, 1, 0);
+    ASSERT_TRUE(imp::quantize_fp16_to_nvfp4_moe_native(d_A_fp16, h_pp, h_sp, d_off, M, K, 1, 0));
     cudaStreamSynchronize(0);
 
     // ----- Compute the per-expert tensor_scale for A.
@@ -436,8 +436,8 @@ TEST(SmallMKernel, FourExpertsVaryingM) {
     }
 
     // Quantize activations via moe_native (per-expert packed + SF buffers).
-    imp::quantize_fp16_to_nvfp4_moe_native(
-        d_A_fp16, d_packed.data(), d_sf.data(), d_offsets, total_M, K, ne, /*stream*/0);
+    ASSERT_TRUE(imp::quantize_fp16_to_nvfp4_moe_native(d_A_fp16, d_packed.data(), d_sf.data(), d_offsets,
+                                                       total_M, K, ne, /*stream*/ 0));
     cudaStreamSynchronize(0);
 
     // Compute per-expert tensor_scale for A (mirrors moe_native: absmax/6).
@@ -634,7 +634,7 @@ TEST(SmallMKernel, HwMatchesSoftwareReference) {
     int* d_off = nullptr; cudaMalloc(&d_off, sizeof(h_off));
     cudaMemcpy(d_off, h_off, sizeof(h_off), cudaMemcpyHostToDevice);
     void* h_pp[1] = {d_A_packed}; void* h_sp[1] = {d_A_sf};
-    imp::quantize_fp16_to_nvfp4_moe_native(d_A_fp16, h_pp, h_sp, d_off, M, K, 1, 0);
+    ASSERT_TRUE(imp::quantize_fp16_to_nvfp4_moe_native(d_A_fp16, h_pp, h_sp, d_off, M, K, 1, 0));
     cudaStreamSynchronize(0);
 
     float a_absmax = 0.f;

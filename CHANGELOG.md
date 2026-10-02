@@ -11,6 +11,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - MoE decode ran the Q8_0 kernel on Q5_1 gate/up experts (NaN/Inf) and logged "no kernel for qtype" then continued on the FP16 fallback (#2444). Q5_1 gets decode and fused gate+up arms; selectors have no default arm and throw; admission checks gate, up and down; mixed gate/up qtypes run two decodes.
+- A failed device allocation no longer runs a kernel on a null buffer or returns a silently wrong token (#2446): smallM
+  MoE scratch comes from the T2 arena, 50 log-only `cudaMalloc*` sites throw, return an error or skip their cache, a failed
+  last-tier MoE grouped GEMM throws. Before: Qwen3-30B-A3B smallM prefill on an exhausted async pool faulted.
 - `tools/Dockerfile.ncu` uses the build image's base, `nvidia/cuda:13.4.1-devel-ubuntu26.04` by digest (was 13.3.1 by tag), so profiling recompiles match the build (#2404).
 - One GPU lock per host: `scripts/gpu_lock.sh` and the gpu-stats skill's `gpu-lock.sh` share `/tmp/gpu-lock`, its `flock` mutex and one key=value record (pid liveness, else `started_epoch + expected_minutes`), so a holder taken through either refuses the other. A live pid in the old `/tmp/imp-gpu.lock` still refuses both; that file is only read.
 - cuBLASLt algo probe no longer times candidates inside a graph capture (#2396): a cold shape there takes a host-checked heuristic pick, and each batch size runs one eager step before its capture. Qwen3.8-27B bs=48: 47/48 -> 48/48 decode graphs, captured M=47/48 GEMMs use the benchmarked algo; 48-stream median 1528.7 / 1587.4 -> 1970.9 / 1967.2 tok/s.

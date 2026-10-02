@@ -141,36 +141,44 @@ __global__ void nvfp4_moe_native_fill_scales_kernel(float* __restrict__ d_tensor
 // ---------------------------------------------------------------------------
 // Host entry points
 // ---------------------------------------------------------------------------
-static void quantize_fp16_to_nvfp4_moe_native_impl(
-    const __half* src_fp16,
-    void* const* d_packed_ptrs,
-    void* const* d_sf_ptrs,
-    float* d_tensor_scales_opt,          // optional: nullptr to skip
-    const int* d_expert_offsets,
-    int expanded,
-    int K,
-    int n_experts,
-    cudaStream_t stream)
-{
+static bool quantize_fp16_to_nvfp4_moe_native_impl(
+    const __half* src_fp16, void* const* d_packed_ptrs, void* const* d_sf_ptrs,
+    float* d_tensor_scales_opt,  // optional: nullptr to skip
+    const int* d_expert_offsets, int expanded, int K, int n_experts,
+    void** d_ptr_scratch,  // [2*n_experts] device, or nullptr: allocate per call
+    cudaStream_t stream) {
     if (n_experts <= 0 || K <= 0 || expanded < 0)
-        return;
+        return true;
     if ((K % kNativeMicroBlockSize) != 0) {
         IMP_LOG_ERROR("quantize_fp16_to_nvfp4_moe_native: K=%d not divisible by 16", K);
-        return;
+        return false;
     }
     if (expanded == 0)
-        return;
+        return true;
 
-    // Copy per-expert pointer arrays to device (host arrays passed in).
-    void** d_packed_dev = nullptr;
-    void** d_sf_dev     = nullptr;
-    IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_packed_dev, sizeof(void*) * n_experts, stream));
-    IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_sf_dev,     sizeof(void*) * n_experts, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(d_packed_dev),
-                                       static_cast<const void*>(d_packed_ptrs), sizeof(void*) * n_experts,
-                                       cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(d_sf_dev), static_cast<const void*>(d_sf_ptrs),
-                                       sizeof(void*) * n_experts, cudaMemcpyHostToDevice, stream));
+    // Device copies of the per-expert pointer arrays. Any failure returns false before a launch (#2446).
+    const size_t ptr_bytes = sizeof(void*) * n_experts;
+    const bool owns = d_ptr_scratch == nullptr;
+    cudaError_t err = owns ? cudaMallocAsync(&d_ptr_scratch, 2 * ptr_bytes, stream) : cudaSuccess;
+    void** d_packed_dev = d_ptr_scratch;
+    void** d_sf_dev = d_ptr_scratch ? d_ptr_scratch + n_experts : nullptr;
+    auto release = [&] {
+        if (owns && d_ptr_scratch)
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(static_cast<void*>(d_ptr_scratch), stream));
+    };
+    if (err == cudaSuccess)
+        err = cudaMemcpyAsync(static_cast<void*>(d_packed_dev), static_cast<const void*>(d_packed_ptrs),
+                              ptr_bytes, cudaMemcpyHostToDevice, stream);
+    if (err == cudaSuccess)
+        err = cudaMemcpyAsync(static_cast<void*>(d_sf_dev), static_cast<const void*>(d_sf_ptrs), ptr_bytes,
+                              cudaMemcpyHostToDevice, stream);
+    if (err != cudaSuccess) {
+        IMP_LOG_ERROR("quantize_fp16_to_nvfp4_moe_native: pointer-array upload failed (%s); not launched",
+                      cudaGetErrorString(err));
+        (void)cudaGetLastError();  // allocation failure is not sticky
+        release();
+        return false;
+    }
 
     if (d_tensor_scales_opt) {
         int threads = 64;
@@ -192,39 +200,25 @@ static void quantize_fp16_to_nvfp4_moe_native_impl(
         IMP_CUDA_CHECK_LAUNCH();
     }
 
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(static_cast<void*>(d_packed_dev), stream));
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(static_cast<void*>(d_sf_dev), stream));
+    release();
+    return true;
 }
 
-void quantize_fp16_to_nvfp4_moe_native(
-    const __half* src_fp16,
-    void* const* d_packed_ptrs,
-    void* const* d_sf_ptrs,
-    const int* d_expert_offsets,
-    int expanded,
-    int K,
-    int n_experts,
-    cudaStream_t stream)
-{
-    quantize_fp16_to_nvfp4_moe_native_impl(
-        src_fp16, d_packed_ptrs, d_sf_ptrs, /*d_tensor_scales_opt=*/nullptr,
-        d_expert_offsets, expanded, K, n_experts, stream);
+bool quantize_fp16_to_nvfp4_moe_native(const __half* src_fp16, void* const* d_packed_ptrs,
+                                       void* const* d_sf_ptrs, const int* d_expert_offsets, int expanded,
+                                       int K, int n_experts, cudaStream_t stream) {
+    return quantize_fp16_to_nvfp4_moe_native_impl(src_fp16, d_packed_ptrs, d_sf_ptrs,
+                                                  /*d_tensor_scales_opt=*/nullptr, d_expert_offsets, expanded,
+                                                  K, n_experts, /*d_ptr_scratch=*/nullptr, stream);
 }
 
-void quantize_fp16_to_nvfp4_moe_native_with_scales(
-    const __half* src_fp16,
-    void* const* d_packed_ptrs,
-    void* const* d_sf_ptrs,
-    float* d_tensor_scales,
-    const int* d_expert_offsets,
-    int expanded,
-    int K,
-    int n_experts,
-    cudaStream_t stream)
-{
-    quantize_fp16_to_nvfp4_moe_native_impl(
-        src_fp16, d_packed_ptrs, d_sf_ptrs, d_tensor_scales,
-        d_expert_offsets, expanded, K, n_experts, stream);
+bool quantize_fp16_to_nvfp4_moe_native_with_scales(const __half* src_fp16, void* const* d_packed_ptrs,
+                                                   void* const* d_sf_ptrs, float* d_tensor_scales,
+                                                   const int* d_expert_offsets, int expanded, int K,
+                                                   int n_experts, void** d_ptr_scratch, cudaStream_t stream) {
+    return quantize_fp16_to_nvfp4_moe_native_impl(src_fp16, d_packed_ptrs, d_sf_ptrs, d_tensor_scales,
+                                                  d_expert_offsets, expanded, K, n_experts, d_ptr_scratch,
+                                                  stream);
 }
 
 // Element-wise product of two device float arrays. One thread per expert,

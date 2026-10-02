@@ -169,6 +169,12 @@ struct MoEWorkspace {
     uint8_t** cutlass3x_sfa_ptrs = nullptr;  // device [ne] uint8_t* array
     int cutlass3x_sfa_ptrs_count = 0;
 
+    // smallM NVFP4 prefill scratch (#2446), T2 arena, null = smallM branch off:
+    //   scales [3*ne] f32: act tensor scales | alpha | compacted alpha; ptrs [2*ne]: packed | sf
+    float* smallM_scales = nullptr;
+    void** smallM_ptrs = nullptr;
+    int smallM_count = 0;
+
     // Free all separately allocated buffers (NOT the phase tensor views).
     void free(VRAMAllocator* alloc);
 };
