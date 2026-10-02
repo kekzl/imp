@@ -389,8 +389,8 @@ Every sparse arm logged its `ACTIVE` line except gpt-oss prefill and Gemma-4 (se
 
 Phi-4 dense fails 4 of the 5 32k cells at 4096 answer tokens (reasoning without an answer); the
 decode arm passes them. Qwen3.6-35B-A3B NIAH ran with `runtime.max_batch_size=1` (the auto batch
-of 26 recurrent slots left 1625 KV blocks, 32k/64k probes 503 in every arm). Gemma-4 dense NIAH is
-0/5 at 16k (#2519); Llama-3.2-3B is dense-broken past 16k (#2520), so it cannot gate the llama family.
+of 26 recurrent slots left 1625 KV blocks, 32k/64k probes 503 in every arm). Gemma-4 dense NIAH was
+0/5 at 16k (#2519: SafeTensors global layers missed proportional RoPE; 5/5 since the fix); Llama-3.2-3B is dense-broken past 16k (#2520), so it cannot gate the llama family.
 
 Qwen3.8-27B pp77824 (#2406 acceptance), 3 alternating pairs: dense 6871.80 / 6873.68 / 6873.02,
 sparse 8192 10670.21 / 10670.54 / 10671.67 tok/s (1.55x).

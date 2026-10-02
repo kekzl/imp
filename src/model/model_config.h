@@ -36,6 +36,8 @@ struct ModelConfig {
     std::vector<int> n_heads_per_layer;     // Gemma 4: per-layer Q head count
     std::vector<uint8_t> swa_layers;        // Gemma 4: 1 = SWA layer, 0 = full attention
     float rope_theta_swa = 0.0f;            // Gemma 4: RoPE theta for SWA layers (default: rope_local_theta)
+    // Gemma 4 HF: full_attention inv freqs [global hd/2]; empty = plain theta RoPE.
+    std::vector<float> rope_inv_freqs_global;
 
     // Mamba2 SSM config
     int ssm_conv_kernel = 0;  // 4
