@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # GPU acceptance for #2407: session_id keeps an agent's turn-2 prefix hit under KV pressure.
 # Fixed KV pool; per arm: turn 1, filler prompts totalling 2x the pool, turn 2 (turn 1 + reply +
-# new message). C1 pinned arm (session_id): turn-2 cached_tokens >= turn-1 full-block tokens.
-# C2 unpinned arm: below that. C3 close: imp_kv_sessions 1 -> 0. Exit 0 only if all pass.
+# new message). Control arm: same prompt shape, no filler = the turn-2 hit without pressure.
+# C1 pinned arm (session_id): turn-2 cached_tokens >= control. C2 unpinned arm: below control.
+# C3 close: imp_kv_sessions 1 -> 0. Exit 0 only if all pass.
 # Usage: bash scripts/accept_2407.sh
 # Env: IMP_ACCEPT_MODEL (default Qwen3-8B-Q8_0.gguf), IMP_MODELS_DIR (default ~/models),
 #      IMP_TEST_IMG, IMP_ACCEPT_PORT (default 8407).
@@ -67,35 +68,52 @@ chat() {  # chat <messages-json> <session-or-empty> <out>
         curl -s -o "$3" -H 'Content-Type: application/json' -d @- "$BASE/v1/chat/completions"
 }
 
-arm() {  # arm <base> <session-or-empty>: prints "turn1_full_block_tokens turn2_cached_tokens"
-    local base=$1 sid=$2 m1 m2 reply p1 k=0 filled=0
+# arm <base> <session-or-empty> <fill 0|1>: prints "turn1_full_block_tokens turn2_cached_tokens".
+# Every base is 7 digits: all arms render the same token count (Qwen3: 12017).
+arm() {
+    local base=$1 sid=$2 fill=$3 m1 m2 reply p1 pf k=0 filled=0
     m1=$(jq -nc --arg t "$(words "$base" $((base + 1500)))" '[{role: "user", content: $t}]')
     chat "$m1" "$sid" "$ADIR/t1.json"
     p1=$(jq -r '.usage.prompt_tokens' "$ADIR/t1.json")
     reply=$(jq -r '.choices[0].message.content' "$ADIR/t1.json")
-    while [ "$filled" -lt $((2 * CAP)) ]; do  # filler: distinct ~8k-token prompts, no session
+    # Filler: distinct ~12k-token prompts (Qwen3 splits digits: 1501 numbers of 7 digits),
+    # under max_seq_len 16384, no session. A rejected filler aborts: no pressure, no verdict.
+    while [ "$fill" = 1 ] && [ "$filled" -lt $((2 * CAP)) ]; do
         k=$((k + 1))
-        chat "$(jq -nc --arg t "$(words $((base + 100000 * k)) $((base + 100000 * k + 4000)))" \
+        chat "$(jq -nc --arg t "$(words $((base + 100000 * k)) $((base + 100000 * k + 1500)))" \
             '[{role: "user", content: $t}]')" "" "$ADIR/f.json"
-        filled=$((filled + $(jq -r '.usage.prompt_tokens // 0' "$ADIR/f.json")))
-        [ "$k" -lt 400 ] || break
+        pf=$(jq -r '.usage.prompt_tokens // 0' "$ADIR/f.json")
+        [ "$pf" -gt 0 ] || { echo "FAIL setup: filler $k rejected: $(head -c 300 "$ADIR/f.json")" >&2; exit 1; }
+        filled=$((filled + pf))
     done
-    m2=$(jq -c --arg r "$reply" '. + [{role: "assistant", content: $r}, {role: "user", content: "Next."}]' <<<"$m1")
+    [ "$fill" = 0 ] || echo "arm '$sid': $k fillers, $filled tokens" >&2
+    # Turn-2 message >= 33 tokens past turn 1: reuse leaves kMinPromptChunkRows (33) rows to
+    # re-prefill (src/runtime/prompt_tail.h), so a shorter tail caps the hit below turn 1.
+    m2=$(jq -c --arg r "$reply" --arg n "Next. $(words 1 40)" \
+        '. + [{role: "assistant", content: $r}, {role: "user", content: $n}]' <<<"$m1")
     chat "$m2" "$sid" "$ADIR/t2.json"
     echo "$(((p1 / BS) * BS)) $(jq -r '.usage.prompt_tokens_details.cached_tokens // 0' "$ADIR/t2.json")"
 }
 
-read -r need_u got_u < <(arm 1 "")
-read -r need_p got_p < <(arm 5000000 "accept-2407")
-if [ "$got_p" -ge "$need_p" ] && [ "$need_p" -gt 0 ]; then
-    verdict C1-pinned-turn2-hit PASS "cached $got_p >= turn-1 full blocks $need_p"
+# Control, not turn-1 full blocks: a thinking prompt ends in <think>\n (2 tokens,
+# tools/imp-server/handlers_chat_core.cpp) that turn 2 does not render, so the shared prefix is shorter.
+out_c=$(arm 8000000 "" 0) || exit 1
+out_u=$(arm 3000000 "" 1) || exit 1
+out_p=$(arm 5000000 "accept-2407" 1) || exit 1
+read -r need_c ctrl <<<"$out_c"
+read -r _ got_u <<<"$out_u"
+read -r _ got_p <<<"$out_p"
+echo "control: turn-1 full blocks $need_c, turn-2 cached $ctrl without filler"
+[ "$ctrl" -gt 0 ] || { echo "FAIL setup: control turn 2 cached 0, prefix cache not reusing"; exit 1; }
+if [ "$got_p" -ge "$ctrl" ]; then
+    verdict C1-pinned-turn2-hit PASS "cached $got_p >= control $ctrl (turn-1 full blocks $need_c)"
 else
-    verdict C1-pinned-turn2-hit FAIL "cached $got_p < turn-1 full blocks $need_p"
+    verdict C1-pinned-turn2-hit FAIL "cached $got_p < control $ctrl (turn-1 full blocks $need_c)"
 fi
-if [ "$got_u" -lt "$need_u" ]; then
-    verdict C2-unpinned-lower PASS "cached $got_u < $need_u (filler evicted it)"
+if [ "$got_u" -lt "$ctrl" ]; then
+    verdict C2-unpinned-lower PASS "cached $got_u < control $ctrl (filler evicted it)"
 else
-    verdict C2-unpinned-lower FAIL "cached $got_u >= $need_u: filler did not evict, pressure not shown"
+    verdict C2-unpinned-lower FAIL "cached $got_u >= control $ctrl: filler did not evict, pressure not shown"
 fi
 s0=$(metric imp_kv_sessions)
 curl -s -X POST "$BASE/v1/sessions/accept-2407/close" >/dev/null
