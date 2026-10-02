@@ -167,6 +167,8 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
       alloc_(alloc),
       layer_is_swa_(layer_is_swa),
       swa_max_blocks_(swa_max_blocks) {
+    layer_nkv_ = n_kv_heads_per_layer;
+    layer_hd_ = head_dim_per_layer;
     // Before the layout: strides by layer_capacity_(l) = max_blocks_ for a full-attention
     // layer, and the stride must be the ceiling or growth would move every layer's data. If
     // the reservation is then declined, the stride reverts to the affordable size and
@@ -628,6 +630,42 @@ int KVCache::try_grow_to(int wanted) {
         have, got, static_cast<double>(got) * block_size_, region_.committed() / (1024.0 * 1024.0),
         max_blocks_);
     return got;
+}
+
+// The new pool is built whole before the old one is released, so a failure leaves the
+// serving pool untouched; peak is old + new committed blocks and scale planes.
+bool KVCache::raise_ceiling(int ceiling_blocks) {
+    const int usable = usable_blocks_.load(std::memory_order_acquire);
+    if (accounting_only_ || !growable_ || !region_ || ceiling_blocks <= max_blocks_ || minmax_pool_)
+        return false;
+    if (blocks_.live_blocks() != 0 || swa_blocks_.live_blocks() != 0)
+        return false;
+    std::unique_ptr<KVCache> fresh;
+    try {
+        fresh = layer_nkv_.empty()
+                    ? std::make_unique<KVCache>(n_layers_, n_kv_heads_, head_dim_, dtype_, usable,
+                                                block_size_, alloc_, ceiling_blocks)
+                    : std::make_unique<KVCache>(n_layers_, layer_nkv_, layer_hd_, dtype_, usable, block_size_,
+                                                alloc_, layer_is_swa_, swa_max_blocks_, ceiling_blocks);
+    } catch (const std::exception& e) {
+        IMP_LOG_WARN("KV cache: ceiling stays at %d blocks, a %d-block pool did not fit (%s)", max_blocks_,
+                     ceiling_blocks, e.what());
+        return false;
+    }
+    if (!fresh->growable_ || fresh->max_blocks_ != ceiling_blocks)
+        return false;  // reservation declined: fresh fell back to a fixed pool and frees it
+    // The id spaces stay: same usable count, all free. fresh's destructor frees the old pool.
+    std::swap(pool_, fresh->pool_);
+    std::swap(region_, fresh->region_);
+    std::swap(scale_pool_, fresh->scale_pool_);
+    std::swap(max_blocks_, fresh->max_blocks_);
+    std::swap(committed_blocks_, fresh->committed_blocks_);
+    std::swap(layer_k_offset_, fresh->layer_k_offset_);
+    std::swap(layer_v_offset_, fresh->layer_v_offset_);
+    std::swap(layer_k_scale_offset_, fresh->layer_k_scale_offset_);
+    std::swap(layer_v_scale_offset_, fresh->layer_v_scale_offset_);
+    std::swap(d_copy_meta_, fresh->d_copy_meta_);  // offsets moved with the stride
+    return true;
 }
 
 // ---------------------------------------------------------------------------

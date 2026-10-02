@@ -148,6 +148,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     // still respect what the allocator physically enforces: without this the KV pool was sized down
     // to 512 MiB while VRAMAllocator required 1630 MiB free, so cache builds failed mid-build (#1103).
     budget.reserve_bytes = std::max(budget.reserve_bytes, vram_allocator_headroom(total_vram));
+    budget.reserve_other_bytes = budget.reserve_bytes;
 
     // Library reserve (A1.5): cuBLAS/CUTLASS claim on the FIRST forward pass, not present in
     // free_vram. The charge is fixed regardless of --vram-budget scaling, so the floor must be
@@ -517,6 +518,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             IMP_LOG_INFO("VRAM budget: KV clamped %d → %d blocks to fit post-weight VRAM "
                          "(paged pool; concurrency bounded by scheduler admission)",
                          budget.kv_max_blocks, max_fit_blocks);
+            budget.kv_blocks_before_fit_clamp = budget.kv_max_blocks;
             budget.kv_max_blocks = max_fit_blocks;
         }
     }

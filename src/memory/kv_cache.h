@@ -114,6 +114,11 @@ public:
     // (measured ~1.18 ms per 256 MiB), so callers grow in coarse steps, not per block.
     int try_grow_to(int wanted);
 
+    // Re-reserve a growable pool at a larger ceiling, same committed blocks. Every pointer
+    // moves: only while no block is held and nothing captured one (init, #2436). False and
+    // unchanged when refused (fixed pool, held block, key min/max on) or the new pool fails.
+    [[nodiscard]] bool raise_ceiling(int ceiling_blocks);
+
     // Block allocation / deallocation
     int allocate_block();
     void free_block(int block_id);
@@ -260,6 +265,7 @@ private:
     // Per-layer KV shapes and offsets (for Gemma 4 dual attention geometry).
     // If empty, all layers use the scalar n_kv_heads_/head_dim_/block_bytes_.
     std::vector<size_t> layer_block_bytes_;  // block_size * nkv[l] * hd[l] * dtype_size
+    std::vector<int> layer_nkv_, layer_hd_;  // per-layer ctor inputs, kept for raise_ceiling()
     // Blocks layer l's own region holds. A sliding-window layer's region is
     // swa_max_blocks_, not max_blocks_, and anything that strides or writes
     // per layer has to respect that or it lands in the next layer's range.

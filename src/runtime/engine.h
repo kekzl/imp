@@ -19,6 +19,7 @@
 #include "runtime/suffix_draft.h"
 #include "runtime/token_recycle_draft.h"
 #include "runtime/vram_budget.h"
+#include "runtime/kv_replan.h"
 #include "memory/host_pinned.h"
 #include "memory/kv_cache.h"
 #include "memory/library_reserve_cache.h"
@@ -1077,6 +1078,9 @@ private:
     // init_kv_cache, consumed after warmup.
     LibraryReserveKey library_reserve_key_{};
     std::string library_reserve_cache_path_;
+    // Init KV sizing inputs; warmup re-sizes the pool at its own measurement (#2436).
+    KvReplanInput kv_replan_{};
+    void apply_measured_library_reserve_();
     // Launch the cached graph for state.n_tokens (or warm up / capture one).
     // Returns true when the forward ran (replay or captured+launched); false
     // means the caller runs the eager forward itself (warmup, capture or

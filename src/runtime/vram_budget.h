@@ -41,6 +41,10 @@ struct VRAMBudget {
     // applied. Equal to kv_max_blocks when no floor applied. Kept to distinguish computed
     // sizing from floor-inflated reports in engine_kv_cache_init.cpp divergence logs (#1747).
     int kv_blocks_pre_floor = 0;
+    // For re-sizing at a measured library reserve (#2436): the reserve before the library floor,
+    // and kv_max_blocks before the post-weight fit clamp (0 = that clamp did not bind).
+    size_t reserve_other_bytes = 0;
+    int kv_blocks_before_fit_clamp = 0;
     // SWA-aware sizing (kv_cache.swa_sizing): capacity of the dedicated
     // sliding-window block group (0 = feature off). Sized batch-shaped:
     // ceil(swa_live_tokens / block_size) + 1 blocks per sequence slot.
