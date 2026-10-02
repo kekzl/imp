@@ -52,7 +52,14 @@ make verify-fast    # Build + filtered tests + perf gate + peak-VRAM gate + smok
 make verify         # Full pre-merge gate (~5 min)
 ```
 
-`make install-hooks` installs two hooks: pre-commit runs `make test-gpu` when staged changes touch buildable sources; pre-push runs `verify-fast` when `src/`, `include/`, `tools/`, `tests/` or `scripts/` change, with the perf gate only when the diff touches a path that can move it (`src/{compute,exec,quant,runtime,model}/`, any `.cu`/`.cuh`, the build definition, or a baseline). A release always runs everything. Skip a single commit: `git commit --no-verify`.
+`make install-hooks` installs two hooks into the shared hooks dir (every worktree). Both run `make preflight` (CPU, Docker, ~20 s) and refuse the commit or push on a FAIL row or an unreachable Docker daemon; commit and push without `--no-verify`.
+
+GPU steps run only with `IMP_HOOK_GPU=1` (`scripts/hook_lib.sh`, under `require_free_gpu.sh` + `gpu_lock.sh`); without it the hook prints the command it skipped:
+
+- pre-commit: the test modules the staged buildable sources reach, or `make test-gpu` on `include/`, `src/core`, `src/api`, build-definition changes or with `IMP_PRECOMMIT_FULL=1`.
+- pre-push: `verify-fast` when `src/`, `include/`, `tools/`, `tests/` or `scripts/` change; perf gate only when the diff touches `src/{compute,exec,quant,runtime,model}/`, any `.cu`/`.cuh`, the build definition, or a baseline; `make verify-ab` on `src/compute`/`src/exec` diffs.
+
+`IMP_HOOK_GPU=1 IMP_HOOK_DRYRUN=1` prints the free-card check, lock and GPU command without running them. A release always runs everything.
 
 ### `make preflight`
 

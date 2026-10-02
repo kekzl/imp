@@ -1,8 +1,7 @@
 #!/bin/bash
-# Stage 1 of the two-stage gate (CI runs the CPU-only ctest -L unit lane, ci.yml).
-# Runs the FULL GPU suite locally since CI has no GPU runner; pre-push runs verify-fast (a
-# filtered subset + perf/smoke) instead. Fires only when staged changes touch buildable sources
-# (src/, include/, tools/, tests/, CMakeLists, *.cmake). Skip one commit: git commit --no-verify.
+# CPU: make preflight on every commit (Docker, ~20 s). GPU (IMP_HOOK_GPU=1 only): the test
+# modules the staged buildable sources reach, or make test-gpu on core/include/build changes.
+# Without IMP_HOOK_GPU=1 the hook prints the GPU command it skipped. CI has no GPU runner.
 set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
@@ -87,16 +86,12 @@ if [ "${1:-}" = "--attention-paths" ]; then
     exit 0
 fi
 
-# Cheap static gates run FIRST, before any early exit: an allowlist-pin drift or dead doc
-# citation used to surface only at push time or in CI, after the full build+suite already ran.
-# Placed before the buildable-source check since a docs-only commit is exactly the class the
-# early exit below skips; costs ~2s.
-if [ -x "$ROOT/scripts/ci_static_gates.sh" ] || [ -f "$ROOT/scripts/ci_static_gates.sh" ]; then
-    if ! bash "$ROOT/scripts/ci_static_gates.sh" filesize lanes entrypoint alloc launchguards layering docs citations; then
-        echo "pre-commit: static gates failed (see above) - fix or commit --no-verify" >&2
-        exit 1
-    fi
-fi
+HOOK=pre-commit
+# shellcheck source=scripts/hook_lib.sh
+. "$ROOT/scripts/hook_lib.sh"
+
+# CPU step on every commit, docs-only included: make preflight (~20 s, Docker, no GPU).
+hook_preflight || exit 1
 
 # Path prefix says WHERE, not WHETHER: tools/ and tests/ also hold Markdown (the CLAUDE.md
 # tree) and Python (gate/generator scripts) that reach neither the compiler nor the suite.
@@ -108,45 +103,18 @@ CHANGED=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null \
           || true)
 
 if [ -z "$CHANGED" ]; then
-    echo "pre-commit: no buildable source changes staged, skipping GPU tests"
+    echo "pre-commit: no buildable source changes staged, no GPU step"
     exit 0
 fi
-
-if ! command -v nvidia-smi >/dev/null 2>&1; then
-    echo "pre-commit: WARNING — no GPU detected on this host; cannot run Stage-1 GPU tests." >&2
-    echo "            Commit allowed, but run 'make test-gpu' on a 5090 box before pushing." >&2
-    exit 0
-fi
-
-# A co-tenant on the card makes this stage judge the host instead of the commit, after a
-# Docker build + full suite already ran. One rule, read by both pre-commit and pre-push.
-# Guarded: an installed hook may predate this script and must still run rather than die on it.
-if [ -x "$ROOT/scripts/require_free_gpu.sh" ]; then
-    "$ROOT/scripts/require_free_gpu.sh" "pre-commit (Stage 1 / GPU)" || exit 1
-fi
-# Hold the GPU lock (holder = this hook's pid) until exit; refused if another worktree holds it.
-if [ -f "$ROOT/scripts/gpu_lock.sh" ]; then
-    bash "$ROOT/scripts/gpu_lock.sh" acquire --pid $$ "pre-commit" >/dev/null || exit 1
-    trap 'bash "$ROOT/scripts/gpu_lock.sh" release --pid $$ >/dev/null' EXIT
-fi
-IMG="$(bash "$ROOT/scripts/image_tag.sh")"
 
 # shellcheck disable=SC2086 # CHANGED is a newline list of repo paths without spaces.
 MODULES="$(select_modules $CHANGED)"
 if [ "${IMP_PRECOMMIT_FULL:-0}" = "1" ] || echo " $MODULES" | grep -q " ALL"; then
-    echo "pre-commit (Stage 1 / GPU): staged source changes → make test-gpu (full suite)"
-    make -s test-gpu
+    hook_gpu "make -s test-gpu"
     exit $?
 fi
-echo "pre-commit (Stage 1 / GPU): staged source changes → make build + modules: $MODULES(IMP_PRECOMMIT_FULL=1 runs the full suite)"
-make -s build || exit 1
-bash "$ROOT/scripts/image_tag.sh" check "$IMG" || exit 1
-for mod in $MODULES; do
-    echo "pre-commit: $mod"
-    # Absolute path: gtest threadsafe death tests re-exec argv[0] with execv
-    # (no PATH search); a bare "test-e2e" fails DeviceFaultSignalTest.
-    # Cache volume = Makefile DOCKER_RUN's: warm weight cache survives --rm. Not the server's
-    # imp-cache (compose): library_reserve measured under a test must not size its KV pool.
-    docker run --rm --gpus all -v "$HOME/models:/models" \
-        -v "${IMP_TEST_CACHE_VOL:-imp-test-cache}:/home/imp/.cache/imp" "$IMG" "/usr/local/bin/$mod" || exit 1
-done
+# Absolute path: gtest threadsafe death tests re-exec argv[0] with execv (no PATH search).
+# Cache volume = Makefile DOCKER_RUN's: warm weight cache survives --rm.
+IMG="$(bash "$ROOT/scripts/image_tag.sh")"
+hook_gpu "make -s build && bash scripts/image_tag.sh check $IMG && for m in ${MODULES% }; do docker run --rm --gpus all -v \$HOME/models:/models -v ${IMP_TEST_CACHE_VOL:-imp-test-cache}:/home/imp/.cache/imp $IMG /usr/local/bin/\$m || exit 1; done"
+exit $?

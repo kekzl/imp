@@ -47,7 +47,7 @@ make verify-fast           # pre-push gate, the only gate that runs a kernel aga
 make verify                # full
 ```
 
-- **Run `make preflight` before push**, and before `git push --no-verify` above all: it is the CPU half of the hooks plus clang-tidy/clang-format/actionlint, which only CI ran before. Exit 0 = every row ok or skip.
+- **Commit and push WITHOUT `--no-verify`.** Both hooks (`make install-hooks`) run `make preflight` (CPU, Docker, ~20 s): all CI static gates, tidy + format on changed lines, actionlint. Exit 0 = every row ok or skip. GPU tests run only with `IMP_HOOK_GPU=1`; without it the hook prints the skipped GPU command.
 - `make test-unit` is a different binary from the CI lane: green there is not green in CI. CI has no GPU. Target list and CI job names: skill **building-and-testing**.
 - **Never bare `make format`.** CI checks changed lines only: format files you created; in edited files only your added lines.
 

@@ -1,12 +1,7 @@
 #!/bin/bash
-# Two tiers: correctness (gtests, degen smoke, graphs ON/OFF) runs on any source change - CI
-# has no GPU, so this is the only real-kernel correctness check. Throughput (perf gate) runs
-# only when the diff can move a number (kernel/dispatch trees, .cu/.cuh, build def, baseline);
-# else IMP_VERIFY_SKIP_PERF=1 (host decode drifts several percent between sessions).
-# Paired A/B (make verify-ab, AUDIT_arch_2026 H-3) replaces the single-arm gate on kernel diffs
-# (src/compute, src/exec): 8% single-arm threshold vs 2% mean paired delta; IMP_SKIP_AB=1 falls
-# back. docker build skips when the worktree image (scripts/image_tag.sh) already has the tree.
-# Override: git push --no-verify.
+# CPU: make preflight on every push (Docker, ~20 s). GPU (IMP_HOOK_GPU=1 only), on source
+# changes: verify-fast; perf gate only when the diff can move a number; kernel diffs (src/compute,
+# src/exec) get the paired A/B (make verify-ab, IMP_SKIP_AB=1 falls back). Unset: prints the command.
 set -uo pipefail
 
 # shellcheck disable=SC2034 # git passes <remote> <url>; kept for readers
@@ -54,32 +49,16 @@ while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
     echo "$FILES" | grep -qE '^src/(compute|exec)/' && NEEDS_ROOFLINE=1
 done
 
+HOOK=pre-push
+# shellcheck source=scripts/hook_lib.sh
+. "$ROOT/scripts/hook_lib.sh"
+
+# CPU step on every push, docs-only included: make preflight (~20 s, Docker, no GPU).
+hook_preflight || exit 1
+
 if [ "$NEEDS_VERIFY" -eq 0 ]; then
-    echo "pre-push: no source changes, skipping verify"
+    echo "pre-push: no source changes, no GPU step"
     exit 0
-fi
-
-# Cheap static gates first (seconds, no GPU, no build): everything that would otherwise
-# surface only in CI, one full roundtrip after the push already ran.
-# Only `kernels` (needs a built artifact) and `hygiene` (subsumes citations via
-# check-release.sh) stay CI-side.
-if [ -x "$ROOT/scripts/ci_static_gates.sh" ] || [ -f "$ROOT/scripts/ci_static_gates.sh" ]; then
-    if ! bash "$ROOT/scripts/ci_static_gates.sh" filesize lanes entrypoint alloc launchguards layering docs citations; then
-        echo "pre-push: static gates failed (see above) - fix or push --no-verify"
-        exit 1
-    fi
-fi
-
-# Both tiers below run kernels, so neither can judge anything on a busy card. Checked after
-# the "no source changes" exit above: a docs-only push must not wait for a card it never touches.
-# Guarded: an installed hook may predate this script and must still run rather than die on it.
-if [ -x "$ROOT/scripts/require_free_gpu.sh" ]; then
-    "$ROOT/scripts/require_free_gpu.sh" "pre-push" || exit 1
-fi
-# Hold the GPU lock (holder = this hook's pid) until exit; refused if another worktree holds it.
-if [ -f "$ROOT/scripts/gpu_lock.sh" ]; then
-    bash "$ROOT/scripts/gpu_lock.sh" acquire --pid $$ "pre-push" >/dev/null || exit 1
-    trap 'bash "$ROOT/scripts/gpu_lock.sh" release --pid $$ >/dev/null' EXIT
 fi
 
 # Roofline (per-kernel %-of-peak, tools/roofline/) has no automated arm: CI has no GPU runner
@@ -97,21 +76,13 @@ if [ "$NEEDS_ROOFLINE" -eq 1 ] && [ -s "$ROOT/tools/roofline/history/index.jsonl
     echo "          'make roofline-measure && make roofline-regress' if this diff should move a kernel class."
 fi
 
-if [ "$NEEDS_PERF" -eq 1 ]; then
-    # Kernel paths get the paired A/B (2% against origin/main, ~5min) and skip the single-arm perf
-    # gate, which cannot resolve below the host's own 4-8% session drift.
-    # Other measured paths (runtime, model, quant, cmake) keep the single-arm gate: their changes
-    # move a number rarely, and the A/B would cost every push 5min for it.
-    if [ "$NEEDS_ROOFLINE" -eq 1 ] && [ "${IMP_SKIP_AB:-0}" != "1" ]; then
-        echo "pre-push: kernel paths changed → make verify-fast (correctness) + paired A/B (make verify-ab)"
-        IMP_VERIFY_SKIP_PERF=1 make -s verify-fast || exit 1
-        make -s verify-ab; exit $?
-    fi
-    echo "pre-push: source changes touch the measured paths → make verify-fast (with perf gate)"
-    make -s verify-fast; exit $?
+# Kernel paths: paired A/B (2% vs origin/main, ~5 min) instead of the single-arm perf gate,
+# which cannot resolve below the host's 4-8% session drift. Other measured paths keep it.
+if [ "$NEEDS_PERF" -eq 1 ] && [ "$NEEDS_ROOFLINE" -eq 1 ] && [ "${IMP_SKIP_AB:-0}" != "1" ]; then
+    hook_gpu "IMP_VERIFY_SKIP_PERF=1 make -s verify-fast && make -s verify-ab"
+elif [ "$NEEDS_PERF" -eq 1 ]; then
+    hook_gpu "make -s verify-fast"
+else
+    hook_gpu "IMP_VERIFY_SKIP_PERF=1 make -s verify-fast"
 fi
-
-echo "pre-push: source changes outside the measured paths → make verify-fast (no perf gate)"
-echo "          run the perf gate anyway with: make verify-fast"
-export IMP_VERIFY_SKIP_PERF=1
-make -s verify-fast; exit $?
+exit $?
