@@ -466,10 +466,6 @@ bool Engine::transcript_snapshot_active_() const {
         return false;
     if (!runtime_config_.server.transcript_snapshot || !supports_chunked_prefill_())
         return false;
-    // copy_blocks_device leaves the key min/max metadata behind; a cloned tail block
-    // would score with stale pages.
-    if (kv_cache_raw_ && kv_cache_raw_->key_minmax_enabled())
-        return false;
     // Factored spare: the accepted draft row sits in the factor buffer, not the slab, so
     // the slab at finish is one token short of the transcript.
     if (factored_spare_active(runtime_config_, bv_))

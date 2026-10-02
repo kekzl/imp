@@ -1309,6 +1309,7 @@ private:
     void init_resolve_fp8_prefill_();
     void init_resolve_quant_flags_();
     void init_resolve_kv_block_size_();
+    void init_resolve_sparse_attention_();
     void init_compute_max_seq_len_();
 
     // Stable identity hash of the loaded model (config scalars + a sample of

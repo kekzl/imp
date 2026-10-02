@@ -45,8 +45,8 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `rope.factor` | `1.0` | context-extension factor; raises the detected window to `factor x orig_ctx`, e.g. `4.0` stretches 32k -> 128k |
 | `rope.orig_ctx` | `0` (auto) | native training context the factor applies to |
 | `moe.expert_cache_budget_pct` | `0` (auto) | host-expert cache budget; only relevant when MoE experts don't fit, see [`PERF.md`](PERF.md) |
-| `attention.sparse_topk_tokens` | `0` (off) | sparse attention token budget |
-| `attention.sparse_prefill_topk_tokens` | `0` (off) | sparse prefill: past tokens a continuation chunk attends to (own chunk dense), one page selection per chunk (record: `plans/2026-08-28-sparse-decode-attention.md`) |
+| `attention.sparse_topk_tokens` | `-1` (auto) | sparse decode token budget; auto = 4096 on qwen3, qwen3moe, qwen35, qwen36moe, nemotron_h_moe, llama, gpt_oss, else 0; `0` = off (#2405) |
+| `attention.sparse_prefill_topk_tokens` | `-1` (auto) | auto = 8192 on qwen3, qwen3moe, qwen35, nemotron_h_moe, llama, 16384 on qwen36moe, else 0; `0` = off (#2406). Sparse prefill: past tokens a continuation chunk attends to (own chunk dense), one page selection per chunk (record: `plans/2026-08-28-sparse-decode-attention.md`) |
 | `attention.sparse_prefill_rows` | `16` | query rows per chunk that score the past pages (max 64) |
 | `attention.sparse_prefill_recent_tokens` | `1024` | past positions a continuation chunk always keeps |
 | `server.prefix_pin_budget_pct` | `25` | share of the KV pool (0-100) that `cache_control` / `cache_prompt` pins and `session_id` pins may hold together; over budget the oldest pin is released; `0` = no pins of either kind (StreamingLLM sink blocks stay pinned) |

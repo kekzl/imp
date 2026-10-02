@@ -116,10 +116,10 @@ struct Attention {
     // prefill context on the fast path before falling back to FMHA (auto
     // fmha_prefill_threshold = cap+1). Auto-shrinks if the alloc fails. Default 384.
     int attn_scores_mib = 384;
-    // Sparse decode attention (Quest-class top-k page selection). 0=off; >0
-    // reads only the top-scoring KV blocks per step, bit-identical to dense at
-    // or below budget. v1 gates: F16/FP8 KV, uniform geometry, non-growable, non-MLA.
-    int sparse_topk_tokens = 0;
+    // Sparse decode attention (Quest-class top-k page selection). -1=auto (per-arch
+    // budget, sparse_decode_default_tokens), 0=off, >0 = budget in tokens; bit-identical
+    // to dense at or below budget.
+    int sparse_topk_tokens = -1;
     // Below this context length decode stays dense even when the budget is
     // exceeded: the selection's win only outgrows its overhead past ~12k on
     // the measured dense model (8k measured -7%, 16k +6%, 32k +25%).
@@ -138,10 +138,11 @@ struct Attention {
     float sparse_score_std_coef = 1.0f;
     // Sparse prefill: a continuation chunk attends to its own chunk densely plus the top
     // sparse_prefill_topk_tokens past tokens, one page selection per chunk from
-    // sparse_prefill_rows sampled query rows (same page score). 0=off. Shares the key metadata
+    // sparse_prefill_rows sampled query rows (same page score). -1=auto (per-arch budget,
+    // sparse_prefill_default_tokens), 0=off. Shares the key metadata
     // pool and sink tokens with sparse decode; the last sparse_prefill_recent_tokens past
     // positions are always kept.
-    int sparse_prefill_topk_tokens = 0;
+    int sparse_prefill_topk_tokens = -1;
     int sparse_prefill_rows = 16;
     int sparse_prefill_recent_tokens = 1024;
     // Qwen4Exp QSA indexer (learned block top-k over the attention context, exact below 2051

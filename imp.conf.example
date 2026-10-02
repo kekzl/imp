@@ -496,15 +496,18 @@ attn_scores_mib      = 384
 # Sparse decode attention (Quest-class top-k page selection): decode reads
 # only the top-scoring KV blocks (per-block key min/max bound vs the query),
 # up to this many tokens per sequence, selected device-side per step.
-# 0 = off (default). Contexts at or below the budget are bit-identical to
-# dense. F16/FP8/NVFP4 KV, uniform geometry; refused with absorbed MLA
-# decode, speculative.token_recycling or the persistent prefix cache
-# (src/runtime/vram_budget.cpp sparse_minmax_refusal); SWA / StreamingLLM
+# -1 = auto (default): 4096 on qwen3, qwen3moe, qwen35, qwen36moe,
+# nemotron_h_moe, llama, gpt_oss (NIAH + tok/s gate, #2405), 0 elsewhere.
+# 0 = off. Contexts at or below the budget are bit-identical to dense.
+# F16/FP8/NVFP4 KV, uniform geometry; refused with absorbed MLA decode,
+# speculative.token_recycling or the persistent prefix cache
+# (src/runtime/vram_budget.cpp sparse_minmax_refusal); auto also resolves 0 with
+# kv_cache.host_spill_mb > 0 (the spill tier refuses the pool); SWA / StreamingLLM
 # layers and spec verify chunks keep full attention. Costs a metadata pool of
 # ~12.5% (FP8 KV) / ~6.25% (F16 KV) / 22.2% (NVFP4 KV, Qwen3.8-27B) of the K+V
 # pool bytes, planned and grown with a growable KV pool (#2364).
 # Design + gates: docs/plans/2026-08-28-sparse-decode-attention.md.
-sparse_topk_tokens   = 0
+sparse_topk_tokens   = -1
 # Qwen4Exp QSA indexer: learned block top-k over the context (exact below 2051 tokens).
 # qsa_force runs the selected path on every prefill row (A/B against dense).
 # Off by default: at 4503 tokens it is slower and worse (decode 50.6 vs 54.1 tok/s,
@@ -533,8 +536,10 @@ sparse_score_meanstd = true
 # Offset weight for sparse_score_meanstd. 0 ranks on the mean alone.
 sparse_score_std_coef = 1.0
 # Sparse prefill: a continuation chunk attends to its own rows plus the top
-# N past tokens (one page selection per chunk, same page score). 0 = off.
-sparse_prefill_topk_tokens = 0
+# N past tokens (one page selection per chunk, same page score). -1 = auto
+# (default): 8192 on qwen3, qwen3moe, qwen35, nemotron_h_moe, llama, 16384 on
+# qwen36moe (NIAH + PPL + tok/s gate, #2406), 0 elsewhere. 0 = off.
+sparse_prefill_topk_tokens = -1
 # Query rows sampled per chunk to score the past pages (max 64).
 sparse_prefill_rows = 16
 # Past positions always kept for a continuation chunk (local context).
@@ -835,7 +840,7 @@ snapshot_min_prompt_tokens = 256
 # generation (prompt + reply, unaligned; the partial KV block is kept with
 # it): a next turn that resends the whole transcript restores there and
 # prefills only the new message. One slab copy plus a sync per finished
-# request. Off when the sparse key min/max pool is on.
+# request. The block clone carries the sparse key min/max metadata.
 transcript_snapshot = true
 # Every finished transcript keeps its token ids (256 entries); a next turn
 # that resends the reply verbatim tokenizes it with those ids, so a

@@ -326,7 +326,7 @@ struct RuntimeConfig {
         // block is kept with it), so the next turn that resends the whole
         // transcript restores there instead of at the prompt boundary and
         // prefills only the new message. Costs one slab copy plus a sync per
-        // finished request. Off when the sparse key min/max pool is on.
+        // finished request. The block clone carries the sparse key min/max metadata.
         bool transcript_snapshot = true;
         // Every finished transcript keeps its token ids (prompt + reply as forwarded,
         // 256 entries FIFO); a next turn that renders the reply verbatim tokenizes it
