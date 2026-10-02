@@ -61,7 +61,7 @@ services:
       retries: 10
 
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ghcr.io/open-webui/open-webui:v0.11.4@sha256:9591b13f13843c7721c2b8eaf7382846c81b3ffe126526d1888d1fed50c6a33f
     restart: unless-stopped
     ports:
       - "${WEBUI_PORT:-3000}:8080"
@@ -104,7 +104,7 @@ services:
         condition: service_healthy
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
     restart: unless-stopped
     ports:
       - "${PROMETHEUS_PORT:-9090}:9090"
@@ -121,7 +121,7 @@ services:
         condition: service_healthy
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
     restart: unless-stopped
     ports:
       - "${GRAFANA_PORT:-3002}:3000"

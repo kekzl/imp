@@ -1,5 +1,5 @@
 # CPU image for tools/analysis/gptq_ref_ppl.py (#2249). Target `hf` adds gptqmodel (--arm hf_gptq).
-FROM python:3.12-slim AS base
+FROM python:3.12-slim@sha256:dddfd7e07f9d15aeeca61529320492139d21cac7f0070c00609243e51e4e0016 AS base
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.14.0 \
  && pip install --no-cache-dir "transformers==4.57.6" safetensors numpy accelerate
 
