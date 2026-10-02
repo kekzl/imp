@@ -28,6 +28,7 @@ constexpr ArchSpelling kSpellings[] = {
 
     // MISTRAL
     {GGUF, "mistral", ModelArch::MISTRAL},
+    {GGUF, "mistral3", ModelArch::MISTRAL},  // Ministral 3 / Devstral-Small-2 (#2411)
     {HF_CLASS, "MistralForCausalLM", ModelArch::MISTRAL},
     {HF_CLASS, "Mistral3ForConditionalGeneration", ModelArch::MISTRAL},
     {HF_MODEL_TYPE, "mistral", ModelArch::MISTRAL},

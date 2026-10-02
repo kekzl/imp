@@ -3,6 +3,7 @@
 #include "compute/warp_reduce.cuh"
 #include "core/pdl_launch.cuh"
 #include "core/tensor.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -222,6 +223,34 @@ void rope_forward(Tensor& Q, Tensor& K, const int* positions, int head_dim, floa
         default:
             break;
     }
+}
+
+// Query temperature (HF get_llama_4_attn_scale): q *= 1 + scale * ln(1 + floor(pos / floor_len)).
+// One thread per element pair; positions < floor_len multiply by exactly 1.
+__global__ void q_position_temperature_kernel(__half* __restrict__ Q, const int* __restrict__ positions,
+                                              int n_tokens, int row_elems, float scale, int floor_len) {
+    const int t = blockIdx.x;
+    if (t >= n_tokens)
+        return;
+    const int pos = positions[t];
+    const float m = 1.0f +
+                    scale * logf(1.0f + floorf(static_cast<float>(pos) / static_cast<float>(floor_len)));
+    if (m == 1.0f)
+        return;
+    __half2* row = reinterpret_cast<__half2*>(Q + static_cast<int64_t>(t) * row_elems);
+    for (int i = threadIdx.x; i < row_elems / 2; i += blockDim.x) {
+        const float2 v = __half22float2(row[i]);
+        row[i] = __floats2half2_rn(v.x * m, v.y * m);
+    }
+}
+
+void q_position_temperature(__half* Q, const int* positions, int n_tokens, int n_heads, int head_dim,
+                            float scale, int floor_len, cudaStream_t stream) {
+    if (scale <= 0.0f || floor_len <= 0 || n_tokens <= 0)
+        return;
+    q_position_temperature_kernel<<<n_tokens, 256, 0, stream>>>(Q, positions, n_tokens, n_heads * head_dim,
+                                                                scale, floor_len);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // --------------------------------------------------------------------------

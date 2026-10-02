@@ -48,6 +48,12 @@ void qknorm_rope_fused(half* Q, half* K, const half* q_norm_weight, const half* 
                        float attn_factor = 1.0f, const float* corr_dims = nullptr,
                        const float* longrope_inv_freqs = nullptr, MRopeParams mrope = {}, int n_tokens = 1);
 
+// Llama-4 query temperature (Ministral 3 / Devstral-Small-2 llama_4_scaling_beta), after RoPE:
+// q *= 1 + scale * ln(1 + floor(pos / floor_len)). Q: [n_tokens, n_heads*head_dim] FP16, in place.
+// No-op when scale <= 0 or floor_len <= 0.
+void q_position_temperature(__half* Q, const int* positions, int n_tokens, int n_heads, int head_dim,
+                            float scale, int floor_len, cudaStream_t stream);
+
 // Precompute YaRN correction dimension boundaries: dims[0]=start (below: full NTK
 // interpolation), dims[1]=end (above: full extrapolation); linear ramp between.
 void rope_yarn_corr_dims(int n_dims, int n_ctx_orig, float freq_base, float beta_fast, float beta_slow,

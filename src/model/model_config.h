@@ -101,6 +101,10 @@ struct ModelConfig {
     float yarn_beta_fast = 32.0f;   // wavelength threshold for fast-rotating dims
     float yarn_beta_slow = 1.0f;    // wavelength threshold for slow-rotating dims
     int rope_n_ctx_orig = 0;        // original training context length (0 = use max_seq_len)
+    // Llama-4 query temperature (Ministral 3 llama_4_scaling_beta / GGUF attention.temperature_scale):
+    // q *= 1 + attn_temp_scale * ln(1 + floor(pos / attn_temp_floor)) after RoPE; 0 = off.
+    float attn_temp_scale = 0.0f;
+    int attn_temp_floor = 0;
 
     // LongRoPE per-dimension frequency scaling (Phi-4)
     std::vector<float> rope_short_factor;  // [rope_pairs] short-context factors
@@ -227,6 +231,28 @@ template <typename Get>
 void set_granite_multipliers_gguf(ModelConfig& cfg, const Get& get) {
     set_granite_multipliers(cfg, get("attention.scale", 0.0), get("embedding_scale", 1.0),
                             get("residual_scale", 1.0), get("logit_scale", 1.0));
+}
+
+// YaRN cos/sin factor when the checkpoint names mscale and mscale_all_dim (HF
+// _compute_yarn_parameters, llama.cpp yarn_log_multiplier): get_mscale(f, mscale) /
+// get_mscale(f, mscale_all_dim), divided by the 1 + 0.1 ln f the rope_yarn kernel applies itself.
+// Ministral 3 (1, 1) -> 1 / 1.387 at f 48. MLA keeps its own rule (hf_config_loader.cpp).
+inline void set_yarn_mscale_ratio(ModelConfig& cfg, float mscale, float mscale_all_dim) {
+    const float f = cfg.rope_freq_scale;
+    if (cfg.yarn_ext_factor <= 0.0f || f <= 1.0f || mscale <= 0.0f || mscale_all_dim <= 0.0f ||
+        cfg.arch == ModelArch::DEEPSEEK)
+        return;
+    auto get_mscale = [f](float m) { return 0.1f * m * std::log(f) + 1.0f; };
+    cfg.yarn_attn_factor = get_mscale(mscale) / get_mscale(mscale_all_dim) / get_mscale(1.0f);
+}
+
+// GGUF: yarn_log_multiplier (= mscale_all_dim, mscale 1 as llama.cpp assumes) and the Ministral 3
+// query temperature (attention.temperature_scale, floor = original context). After the YaRN keys.
+template <typename Get>
+void set_yarn_extras_gguf(ModelConfig& cfg, const Get& get) {
+    set_yarn_mscale_ratio(cfg, 1.0f, static_cast<float>(get("rope.scaling.yarn_log_multiplier", 0.0)));
+    cfg.attn_temp_scale = static_cast<float>(get("attention.temperature_scale", 0.0));
+    cfg.attn_temp_floor = cfg.rope_n_ctx_orig;
 }
 
 // Softmax scale for QK^T: config override (Granite attention_multiplier, 1/128 on 4.2), else

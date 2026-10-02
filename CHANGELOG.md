@@ -41,6 +41,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - cpp-httplib v0.56.0 -> v0.58.0 (#2403): v0.57.0 rejects control characters in the chunk-size line (request smuggling, yhirose/cpp-httplib#2585) and bounds the trailer declaration set (#2583).
 
 ### Fixed
+- Devstral-Small-2 / Ministral 3 (#2411): tekken pre-tokenizer, YaRN mscale ratio (1.0 not 1.387), `llama_4_scaling_beta` query temperature past 8192, GGUF `mistral3` arch. Q4_K_M dense PPL vs llama.cpp at 4k / 16k / 32k: 11.5692 / 7.0820 / 5.4277 vs 11.5807 / 7.0861 / 5.4338 (was 1653.98 / 1630.62 / 1349.17).
 - Sparse prefill default gate is two-sided (#2529): |PPL delta| <= 0.5 % vs dense at 16k and 32k windows. At 8192, 32k: Llama-3.2-3B -3.27 %, Qwen3-Coder-30B -1.80 %, Nemotron-3-Nano -2.42 %, Qwen3-8B +0.70 %. Now qwen3 16384, qwen3moe + llama 24576, nemotron_h_moe off.
 - Llama 3 GGUF (#2520): `rope_freqs.weight` (llama3 RoPE scaling) now feeds the RoPE tables; `llama-bpe` pre-tokenizes with the cl100k scanner and adds BOS, as llama.cpp. Llama-3.2-3B Q8_0: NIAH 16k/32k 0/10 -> 10/10, ppl_corpus_45k 256.12 -> 18.34; dense PPL at 16k/32k within 0.2% of HF FP32.
 - Gemma-4 SafeTensors checkpoints rotate only the first 64 of 256 RoPE pairs on hd=512 global layers (`partial_rotary_factor` 0.25, proportional RoPE), as the GGUF path did. Gemma-4-26B-A4B-it-NVFP4 NIAH 0/5 -> 5/5 at 16k and 0/5 -> 5/5 at 32k (#2519).

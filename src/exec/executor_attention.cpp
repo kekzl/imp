@@ -460,6 +460,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             }
         }
     }
+    // Llama-4 query temperature past attn_temp_floor (Ministral 3, #2411); no-op when off.
+    q_position_temperature(static_cast<half*>(qv.data), state.positions, n, nh, hd, cfg.attn_temp_scale,
+                           cfg.attn_temp_floor, stream);
 
     if (debug_attn_steps) {
         debug_tensor_stats("L0_step2_after_rope_q", qv, stream);
