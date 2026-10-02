@@ -49,7 +49,6 @@ EXPECTED = {
     "src/compute/cublas_gemm_algo.h": 1,
     "src/compute/sampling_topk_topp.cu": 1,
     "src/compute/sampling_filters.cu": 1,
-    "src/compute/moe_routing.cu": 2,
     "src/compute/moe_routing_permute.cu": 1,
 }
 
@@ -151,7 +150,6 @@ def selftest():
         "src/compute/cublas_gemm_algo.h": 1,
         "src/compute/sampling_topk_topp.cu": 1,
         "src/compute/sampling_filters.cu": 1,
-        "src/compute/moe_routing.cu": 2,
         "src/compute/moe_routing_permute.cu": 1,
     }
 
@@ -178,7 +176,7 @@ def selftest():
         ("branch lost the flag", (), {**base, "src/compute/gemm.cpp": 1}, 1),
         ("branch gained the flag", (), {**base, "src/compute/gemm.cpp": 3}, 1),
         ("file lost the flag", (), {k: v for k, v in base.items()
-                                    if k != "src/compute/moe_routing.cu"}, 1),
+                                    if k != "src/compute/moe_routing_permute.cu"}, 1),
     ]
 
     failures = 0
