@@ -210,6 +210,7 @@ set(IMP_MODEL_SOURCES
     src/model/sentencepiece_loader.cpp
     src/model/json_util.cpp
     src/model/hf_config_loader.cpp
+    src/model/hf_config_generic.cpp
     src/model/multimodal_wrapper.cpp
     src/model/hf_gptq_config.cpp
     src/model/awq_load.cpp
@@ -236,6 +237,10 @@ set(IMP_MODEL_SOURCES
     src/model/chat_template_families.cpp
     src/model/jinja.cpp
 )
+# Per-arch config.json hooks (#2537): a new arch adds a file here and a row in arch_registry.cpp.
+file(GLOB IMP_HF_CONFIG_HOOK_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/model/hf_config/*.cpp)
+list(SORT IMP_HF_CONFIG_HOOK_SOURCES)
+list(APPEND IMP_MODEL_SOURCES ${IMP_HF_CONFIG_HOOK_SOURCES})
 
 set(IMP_QUANT_SOURCES
     src/quant/dequant_gpu.cu

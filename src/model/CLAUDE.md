@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-23
-commit: 9b4a84e5
+verified: 2026-10-02
+commit: f91345c1
 -->
 
 # src/model - loaders, architectures, weight upload
@@ -23,7 +23,7 @@ GGUF and SafeTensors loading, the architecture registry, tensor-name mapping, up
 - `arch_registry.cpp`: checkpoint spelling -> `ModelArch`, read by `parse_model_arch` and the HF loader
 - `model.cpp`: per-arch config and sampling defaults, KV-FP8 safety lists
 - `gguf_loader.cpp` / `safetensors_loader.cpp`: the two formats
-- `hf_config_loader.cpp`: `config.json` parsing, arch detection
+- `hf_config_loader.cpp`: `config.json` arch detection + `load_config`; arch-independent keys in `hf_config_generic.cpp`, per-arch keys in `hf_config/<arch>.cpp`, one `kHfConfigHooks` row each in `arch_registry.cpp` (#2537)
 - `weight_map.cpp`, `tensor_kind_matcher.cpp`: tensor name -> role
 - `weight_upload.cpp`: device placement, expert offload decisions
 - `expert_placement.h`: the pure predicate for a servable MoE placement

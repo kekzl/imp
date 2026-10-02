@@ -1,4 +1,5 @@
 #include "model/arch_registry.h"
+#include "model/hf_config_hooks.h"
 
 namespace imp {
 
@@ -134,7 +135,35 @@ constexpr ArchSpelling kSpellings[] = {
     {HF_MODEL_TYPE, "granite", ModelArch::GRANITE},
 };
 
+struct HfConfigHookRow {
+    ModelArch arch;
+    HfConfigHook hook;
+};
+
+// config.json keys only one arch reads (#2537): one row per arch, hook in src/model/hf_config/.
+// Archs without a row use the generic parsers in hf_config_generic.cpp only.
+// clang-format off
+constexpr HfConfigHookRow kHfConfigHooks[] = {
+    {ModelArch::DEEPSEEK, parse_deepseek_config},
+    {ModelArch::NEMOTRON_H_MOE, parse_nemotron_h_config},
+    {ModelArch::QWEN35, parse_qwen_gdn_config},
+    {ModelArch::QWEN35_MOE, parse_qwen_gdn_config},
+    {ModelArch::QWEN36_MOE, parse_qwen_gdn_config},
+    {ModelArch::QWEN4_EXP, parse_qwen_gdn_config},
+    {ModelArch::GPT_OSS, parse_gpt_oss_config},
+    {ModelArch::GEMMA3, parse_gemma3_config},
+    {ModelArch::GEMMA4, parse_gemma4_config},
+};
+// clang-format on
+
 }  // namespace
+
+HfConfigHook find_hf_config_hook(ModelArch arch) {
+    for (const auto& e : kHfConfigHooks)
+        if (e.arch == arch)
+            return e.hook;
+    return nullptr;
+}
 
 std::span<const ArchSpelling> arch_spellings() { return kSpellings; }
 

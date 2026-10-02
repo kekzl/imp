@@ -1,19 +1,18 @@
 #include "model/hf_config_loader.h"
 #include "model/arch_registry.h"
+#include "model/hf_config_hooks.h"
 #include "model/json_util.h"
-#include "model/model_limits.h"
 #include "vision/qwen3vl_vision_config.h"
 #include "vision/vision_model.h"
 #include "model/multimodal_wrapper.h"
 #include "model/llm_compressor_loader.h"
 #include "core/logging.h"
-#include "core/process_diag.h"
 
-#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -35,145 +34,23 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
 
 namespace {
 
-// Granite multipliers (HF modeling_granite.py): embeddings * embedding_multiplier, residual
-// x + residual_multiplier * out, attention scale attention_multiplier, logits / logits_scaling.
-// RMSNorm is scale-invariant, so a residual stream run at 1/residual_multiplier with the plain
-// add is exact: both stream factors go into embed_scale. Absent keys are no-ops.
-void parse_granite_multipliers(const JValue& eff, ModelConfig& cfg) {
-    float attn = 0.0f, emb = 1.0f, res = 1.0f, logits = 1.0f;
-    jobj_opt_float(eff, "attention_multiplier", attn);
-    jobj_opt_float(eff, "embedding_multiplier", emb);
-    jobj_opt_float(eff, "residual_multiplier", res);
-    jobj_opt_float(eff, "logits_scaling", logits);
-    set_granite_multipliers(cfg, attn, emb, res, logits);
-}
-
-// RoPE scaling block: `rope_scaling`, else transformers 5 `rope_parameters` when it names a type
-// (Ministral 3 carries YaRN only there; a theta-only rope_parameters is not a scaling block).
-const JValue* rope_scaling_object(const JValue& eff) {
-    const JValue* rs = jobj_find(eff, "rope_scaling");
-    if (rs && rs->type == JType::OBJECT)
-        return rs;
-    const JValue* rp = jobj_find(eff, "rope_parameters");
-    if (rp && rp->type == JType::OBJECT && (jobj_find(*rp, "rope_type") || jobj_find(*rp, "type")))
-        return rp;
-    return nullptr;
-}
-
-// YaRN keys beyond factor / beta: mscale + mscale_all_dim (cos/sin factor ratio) and Ministral 3
-// llama_4_scaling_beta (query temperature past original_max_position_embeddings).
-void parse_yarn_extras(const JValue& rs, ModelConfig& cfg) {
-    float mscale = 0.0f, mscale_all_dim = 0.0f;
-    jobj_opt_float(rs, "mscale", mscale);
-    jobj_opt_float(rs, "mscale_all_dim", mscale_all_dim);
-    set_yarn_mscale_ratio(cfg, mscale, mscale_all_dim);
-    jobj_opt_float(rs, "llama_4_scaling_beta", cfg.attn_temp_scale);
-    cfg.attn_temp_floor = cfg.rope_n_ctx_orig;
-}
-
-// Gemma-3 vs Gemma 1/2 (all ModelArch::GEMMA3): architectures[0] or model_type names gemma3.
-bool is_gemma3_config(const JValue& root, const JValue& eff) {
-    const JValue* archs = jobj_find(root, "architectures");
-    if (archs && archs->type == JType::ARRAY && !archs->arr.empty() &&
-        archs->arr[0].str_val.rfind("Gemma3", 0) == 0)
-        return true;
-    std::string mt;
-    return (jobj_get_string(eff, "model_type", mt) || jobj_get_string(root, "model_type", mt)) &&
-           mt.rfind("gemma3", 0) == 0;
-}
-
-// Gemma3TextConfig defaults: rope_theta 1e6, rope_local_base_freq 1e4, sliding_window_pattern 6.
-// layer_types must be periodic (global at i % N == N-1): the executor resolves layers that way.
-bool parse_gemma3_rope(const JValue& eff, ModelConfig& cfg) {
-    float theta_global = 1e6f, theta_local = 1e4f;
-    jobj_opt_float(eff, "rope_theta", theta_global);
-    jobj_opt_float(eff, "rope_local_base_freq", theta_local);
-    const JValue* rp = jobj_find(eff, "rope_parameters");
-    if (rp && rp->type == JType::OBJECT) {
-        const JValue* fa = jobj_find(*rp, "full_attention");
-        if (fa && fa->type == JType::OBJECT) {
-            jobj_opt_float(*fa, "rope_theta", theta_global);
-            std::string type;
-            float factor = 1.0f;
-            jobj_opt_string(*fa, "rope_type", type);
-            jobj_opt_float(*fa, "factor", factor);
-            if (type == "linear") {
-                cfg.rope_freq_scale = factor;
-            } else if (!type.empty() && type != "default") {
-                cfg.rope_scaling_unhandled = true;
-                IMP_LOG_WARN("Gemma-3 rope_type \"%s\" unhandled: global layers UNSCALED", type.c_str());
-            }
-        }
-        const JValue* sa = jobj_find(*rp, "sliding_attention");
-        if (sa && sa->type == JType::OBJECT)
-            jobj_opt_float(*sa, "rope_theta", theta_local);
+// Encoder-only (BERT/RoBERTa/embedding) models have no causal LM head; the SafeTensors/HF
+// path must reject them like the GGUF loader does, or NomicBertModel falls through to the
+// generic decoder and hits a CUDA IMA on first request (#818).
+void reject_encoder_only(const std::string& name, const char* what) {
+    if (is_encoder_only_arch(name)) {
+        throw std::runtime_error(std::string("encoder-only ") + what + " '" + name +
+                                 "' is not supported (imp runs causal decoder LMs; "
+                                 "embedding encoders need pooling support)");
     }
-    cfg.rope_theta = theta_global;
-    cfg.rope_local_theta = theta_local;
-
-    int pattern = 6;
-    jobj_opt_int(eff, "sliding_window_pattern", pattern);
-    const JValue* lt = jobj_find(eff, "layer_types");
-    if (lt && lt->type == JType::ARRAY && !lt->arr.empty()) {
-        pattern = 0;
-        for (size_t i = 0; i < lt->arr.size() && pattern == 0; ++i)
-            if (lt->arr[i].str_val == "full_attention")
-                pattern = static_cast<int>(i) + 1;
-        if (pattern == 0)  // no full_attention entry: period n+1 keeps every layer local
-            pattern = static_cast<int>(lt->arr.size()) + 1;
-        bool periodic = true;
-        for (size_t i = 0; i < lt->arr.size() && periodic; ++i) {
-            const bool full = static_cast<int>(i % pattern) == pattern - 1;
-            periodic = lt->arr[i].str_val == (full ? "full_attention" : "sliding_attention");
-        }
-        if (!periodic)
-            pattern = 0;
-    }
-    if (pattern <= 0) {
-        IMP_LOG_ERROR("config.json: Gemma-3 layer_types / sliding_window_pattern is not every-Nth-global");
-        return false;
-    }
-    cfg.sliding_window_pattern = pattern;
-    IMP_LOG_INFO("  Gemma-3 RoPE: global theta %.0f (scale %.2f), local theta %.0f, every %d-th layer global",
-                 cfg.rope_theta, cfg.rope_freq_scale, cfg.rope_local_theta, pattern);
-    return true;
 }
 
-}  // namespace
-
-std::vector<float> proportional_rope_inv_freqs(float theta, int head_dim, float partial_factor) {
-    const int n_pairs = head_dim / 2;
-    const int n_rot = std::min(n_pairs,
-                               static_cast<int>(partial_factor * static_cast<float>(head_dim) / 2.0f));
-    std::vector<float> f(static_cast<size_t>(n_pairs), 0.0f);
-    for (int p = 0; p < n_rot; ++p)
-        f[p] = static_cast<float>(std::pow(static_cast<double>(theta), -2.0 * p / head_dim));
-    return f;
-}
-
-// ---- load_config ----
-
-bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
-                                 std::unique_ptr<VisionModel>* out_vision_tower) {
-    std::string path = model_dir + "/config.json";
-    JValue root;
-    if (!parse_json_file(path, root))
-        return false;
-
-    IMP_LOG_INFO("loading HF config from %s", path.c_str());
-
-    // Architecture detection: prefer "architectures" array, fall back to "model_type"
+// Architecture detection: prefer "architectures" array, fall back to "model_type".
+void detect_arch(const JValue& root, ModelConfig& cfg) {
     const JValue* archs = jobj_find(root, "architectures");
     if (archs && archs->type == JType::ARRAY && !archs->arr.empty()) {
-        // Encoder-only (BERT/RoBERTa/embedding) models have no causal LM head; the SafeTensors/HF
-        // path must reject them like the GGUF loader does, or NomicBertModel falls through to the
-        // generic decoder and hits a CUDA IMA on first request (#818).
-        if (is_encoder_only_arch(archs->arr[0].str_val)) {
-            throw std::runtime_error("encoder-only architecture '" + archs->arr[0].str_val +
-                                     "' is not supported (imp runs causal decoder LMs; "
-                                     "embedding encoders need pooling support)");
-        }
-        cfg.arch = map_architecture(wrapped_lm_architecture(root, archs->arr[0].str_val));
+        reject_encoder_only(archs->arr[0].str_val, "architecture");
+        cfg.arch = HFConfigLoader::map_architecture(wrapped_lm_architecture(root, archs->arr[0].str_val));
         if (archs->arr.size() > 1) {
             std::string dropped;
             for (size_t i = 1; i < archs->arr.size(); i++) {
@@ -181,672 +58,81 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
                     dropped += ", ";
                 dropped += archs->arr[i].str_val;
             }
-            IMP_LOG_WARN(
-                "config.json `architectures` has %zu entries; using '%s' and ignoring [%s]",
-                archs->arr.size(), archs->arr[0].str_val.c_str(), dropped.c_str());
+            IMP_LOG_WARN("config.json `architectures` has %zu entries; using '%s' and ignoring [%s]",
+                         archs->arr.size(), archs->arr[0].str_val.c_str(), dropped.c_str());
         }
-    } else {
-        // Fallback: map model_type string to arch
-        std::string model_type;
-        if (jobj_get_string(root, "model_type", model_type)) {
-            // Same encoder-only reject on the model_type path (e.g. a config with
-            // only `"model_type": "nomic_bert"` and no `architectures` array).
-            if (is_encoder_only_arch(model_type)) {
-                throw std::runtime_error("encoder-only model_type '" + model_type +
-                                         "' is not supported (imp runs causal decoder LMs; "
-                                         "embedding encoders need pooling support)");
-            }
-            if (auto a = find_arch(ArchSource::HF_MODEL_TYPE, model_type)) {
-                cfg.arch = *a;
-            } else {
-                IMP_LOG_WARN(
-                    "unknown model_type '%s' — falling back to GENERIC + "
-                    "tensor-name heuristics. If inference is incoherent, the "
-                    "architecture is likely unsupported.",
-                    model_type.c_str());
-                cfg.arch = ModelArch::GENERIC;
-            }
-        }
+        return;
     }
+    std::string model_type;
+    if (!jobj_get_string(root, "model_type", model_type))
+        return;
+    reject_encoder_only(model_type, "model_type");
+    if (auto a = find_arch(ArchSource::HF_MODEL_TYPE, model_type)) {
+        cfg.arch = *a;
+    } else {
+        IMP_LOG_WARN(
+            "unknown model_type '%s': falling back to GENERIC + tensor-name heuristics. If "
+            "inference is incoherent, the architecture is likely unsupported.",
+            model_type.c_str());
+        cfg.arch = ModelArch::GENERIC;
+    }
+}
 
-    // Multimodal wrappers (Gemma 3/4 ConditionalGeneration) nest the text-model
-    // hyperparameters under `text_config`. If present, use that as the effective
-    // root for all subsequent reads so we don't have to duplicate every lookup.
+// Audio modality: unlike vision, an omni checkpoint with a lost audio path said nothing
+// (roadmap Open 8). Test OBJECT not presence: Gemma-4-26B ships audio_config:null with no
+// audio tensor; audio_token_id is set regardless of an encoder, so it is not a signal either.
+void note_audio_config(const JValue& root, bool has_vision, ModelConfig& cfg) {
+    const JValue* ac = jobj_find(root, "audio_config");
+    if (!ac || ac->type != JType::OBJECT)
+        return;
+    cfg.has_audio_config = true;
+    std::string audio_type;
+    jobj_opt_string(*ac, "model_type", audio_type);
+    IMP_LOG_WARN(
+        "Audio modality present (audio_config, model_type='%s') and unsupported. imp has no "
+        "audio encoder: `model.embed_audio.*` tensors are dropped at load and audio input "
+        "cannot be sent. The model loads as text%s only (roadmap Open 8).",
+        audio_type.empty() ? "?" : audio_type.c_str(), has_vision ? "+vision" : "");
+}
+
+}  // namespace
+
+// ---- load_config ----
+
+// Generic parsers (hf_config_generic.cpp), then the one hook the arch registry holds for
+// cfg.arch (src/model/hf_config/, #2537).
+bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
+                                 std::unique_ptr<VisionModel>* out_vision_tower) {
+    std::string path = model_dir + "/config.json";
+    JValue root;
+    if (!parse_json_file(path, root))
+        return false;
+    IMP_LOG_INFO("loading HF config from %s", path.c_str());
+    detect_arch(root, cfg);
+
+    // Multimodal wrappers nest the text-model hyperparameters under `text_config`: that is the
+    // effective root for every read below, and marks the checkpoint as a wrapper (weight_map
+    // strips model.language_model. and drops the vision tower).
     const JValue* text_cfg = jobj_find(root, "text_config");
     const JValue& eff = (text_cfg && text_cfg->type == JType::OBJECT) ? *text_cfg : root;
-    // A nested text_config marks this checkpoint as a multimodal wrapper: weight_map strips
-    // model.language_model. and drops the vision tower. Derived from the file, not an arch
-    // allowlist; the text tower itself is an ordinary model.
-    if (text_cfg && text_cfg->type == JType::OBJECT)
+    if (&eff != &root)
         cfg.multimodal_wrapper = true;
 
-    // Core dimensions
-    jobj_opt_int(eff, "hidden_size", cfg.d_model);
-    jobj_opt_int(eff, "num_attention_heads", cfg.n_heads);
-    jobj_opt_int(eff, "intermediate_size", cfg.d_ff);
-    jobj_opt_int(eff, "num_hidden_layers", cfg.n_layers);
-    jobj_opt_int(eff, "vocab_size", cfg.vocab_size);
-    jobj_opt_int(eff, "max_position_embeddings", cfg.max_seq_len);
-    jobj_opt_int(eff, "head_dim", cfg.head_dim);
-
-    // KV heads: default to n_heads (MHA) if not specified
-    if (!jobj_get_int(eff, "num_key_value_heads", cfg.n_kv_heads)) {
-        cfg.n_kv_heads = cfg.n_heads;
-    }
-
-    // Every count above came out of the file and `head_dim` sizes the RoPE
-    // factor tables further down (AUDIT_arch_2026 F1-10); the SafeTensors
-    // loader checks again once the config is complete.
-    {
-        std::string dim_err;
-        if (!validate_declared_dimensions(cfg, &dim_err)) {
-            IMP_LOG_ERROR("config.json: %s", dim_err.c_str());
-            return false;
-        }
-    }
-
-    // Norm epsilon: try rms_norm_eps first, then layer_norm_eps
-    if (!jobj_get_float(eff, "rms_norm_eps", cfg.rms_norm_eps)) {
-        jobj_opt_float(eff, "layer_norm_eps", cfg.rms_norm_eps);
-    }
-
-    // Newer HF configs (Qwen3.5/3.6, Qwen3-Next) nest rope_theta/partial_rotary_factor under
-    // rope_parameters. Read top-level first, then override with rope_parameters.*. Otherwise
-    // Qwen3.6 silently runs theta=10000 (1000x too small) with full-dim RoPE.
-    jobj_opt_float(eff, "rope_theta", cfg.rope_theta);
-    float partial_factor = 0.0f;
-    jobj_opt_float(eff, "partial_rotary_factor", partial_factor);
-    {
-        const JValue* rope_params = jobj_find(eff, "rope_parameters");
-        if (rope_params && rope_params->type == JType::OBJECT) {
-            jobj_opt_float(*rope_params, "rope_theta", cfg.rope_theta);
-            jobj_opt_float(*rope_params, "partial_rotary_factor", partial_factor);
-        }
-    }
-
-    // M-RoPE section split. It lives under `rope_scaling` in older configs and
-    // under `rope_parameters` in newer ones (Qwen3-VL), so both are checked —
-    // reading only one silently leaves a multimodal model on single-axis RoPE.
-    for (const char* key : {"rope_scaling", "rope_parameters"}) {
-        const JValue* obj = jobj_find(eff, key);
-        if (!obj || obj->type != JType::OBJECT)
-            continue;
-        const JValue* sec = jobj_find(*obj, "mrope_section");
-        if (sec && sec->type == JType::ARRAY && sec->arr.size() == 3) {
-            bool ok = true;
-            int parsed[3] = {0, 0, 0};
-            for (size_t i = 0; i < 3; ++i) {
-                if (sec->arr[i].type != JType::NUMBER || sec->arr[i].as_int() < 0)
-                    ok = false;
-                else
-                    parsed[i] = static_cast<int>(sec->arr[i].as_int());
-            }
-            if (ok) {
-                for (int i = 0; i < 3; ++i)
-                    cfg.mrope_section[i] = parsed[i];
-            } else {
-                IMP_LOG_WARN("mrope_section under '%s' is malformed — ignoring it", key);
-            }
-        }
-        // Booleans arrive as NUMBER 0.0/1.0 from this parser.
-        const JValue* inter = jobj_find(*obj, "mrope_interleaved");
-        if (inter && inter->type == JType::NUMBER)
-            cfg.mrope_interleaved = inter->num_val != 0.0;
-    }
-    if (cfg.has_mrope()) {
-        IMP_LOG_INFO("M-RoPE section [%d, %d, %d]%s", cfg.mrope_section[0], cfg.mrope_section[1],
-                     cfg.mrope_section[2], cfg.mrope_interleaved ? " (interleaved)" : "");
-    }
-    if (partial_factor > 0.0f && partial_factor < 1.0f) {
-        int hd_for_rope = (cfg.head_dim > 0) ? cfg.head_dim
-                                             : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
-        if (hd_for_rope > 0) {
-            cfg.rope_dim = static_cast<int>(hd_for_rope * partial_factor);
-            IMP_LOG_INFO("Partial RoPE: partial_rotary_factor=%.3f head_dim=%d → rope_dim=%d", partial_factor,
-                         hd_for_rope, cfg.rope_dim);
-        }
-    }
-
-    // RoPE scaling (object with type, factor, and optional YaRN/LongRoPE params)
-    const JValue* rope_scaling = rope_scaling_object(eff);
-    if (rope_scaling && rope_scaling->type == JType::OBJECT) {
-        std::string rope_type;
-        jobj_opt_string(*rope_scaling, "type", rope_type);
-        // Also check "rope_type" (some HF configs use this instead)
-        if (rope_type.empty()) {
-            jobj_opt_string(*rope_scaling, "rope_type", rope_type);
-        }
-
-        float factor = 1.0f;
-        jobj_opt_float(*rope_scaling, "factor", factor);
-
-        // imp convention (matches the GGUF loader / rope_forward): rope_freq_scale stores the
-        // FACTOR (>1), the kernel applies 1/factor itself. Storing 1/factor here double-inverted
-        // YaRN for gpt-oss (#547): dims rotated factor^2=1024x too fast, mscale flipped 0.653 vs 1.347.
-        if (rope_type == "linear") {
-            cfg.rope_freq_scale = factor;
-        } else if (rope_type == "yarn") {
-            cfg.rope_freq_scale = factor;
-            jobj_opt_float(*rope_scaling, "attn_factor", cfg.yarn_attn_factor);
-            jobj_opt_float(*rope_scaling, "beta_fast", cfg.yarn_beta_fast);
-            jobj_opt_float(*rope_scaling, "beta_slow", cfg.yarn_beta_slow);
-            jobj_opt_int(*rope_scaling, "original_max_position_embeddings", cfg.rope_n_ctx_orig);
-            // YaRN uses ext_factor=1.0 by default
-            cfg.yarn_ext_factor = 1.0f;
-            parse_yarn_extras(*rope_scaling, cfg);
-        } else if (rope_type == "longrope" || rope_type == "long_rope") {
-            // LongRoPE: per-dimension frequency scaling factors
-            jobj_opt_int(*rope_scaling, "original_max_position_embeddings", cfg.rope_scaling_orig_max_pos);
-
-            const JValue* short_f = jobj_find(*rope_scaling, "short_factor");
-            if (short_f && short_f->type == JType::ARRAY) {
-                cfg.rope_short_factor.reserve(short_f->arr.size());
-                for (const auto& v : short_f->arr) {
-                    cfg.rope_short_factor.push_back(static_cast<float>(v.num_val));
-                }
-            }
-            const JValue* long_f = jobj_find(*rope_scaling, "long_factor");
-            if (long_f && long_f->type == JType::ARRAY) {
-                cfg.rope_long_factor.reserve(long_f->arr.size());
-                for (const auto& v : long_f->arr) {
-                    cfg.rope_long_factor.push_back(static_cast<float>(v.num_val));
-                }
-            }
-        } else if (rope_type == "llama3") {
-            // Llama-3.x per-frequency RoPE scaling reuses LongRoPE infra: one factor per rope-pair so
-            // freqs[i] = base_freq[i]/factor[i], matching the HF algorithm. Independent of sequence
-            // length, so short and long arrays carry identical values.
-            float low_freq_factor = 1.0f, high_freq_factor = 4.0f;
-            int orig_max_pos = 0;
-            jobj_opt_float(*rope_scaling, "low_freq_factor", low_freq_factor);
-            jobj_opt_float(*rope_scaling, "high_freq_factor", high_freq_factor);
-            jobj_opt_int(*rope_scaling, "original_max_position_embeddings", orig_max_pos);
-            if (orig_max_pos <= 0) {
-                jobj_opt_int(eff, "original_max_position_embeddings", orig_max_pos);
-            }
-
-            int hd = cfg.head_dim > 0 ? cfg.head_dim
-                                      : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
-            int rd = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
-            // rope_dim is head_dim scaled by a file-supplied
-            // partial_rotary_factor, so it gets its own ceiling here.
-            if (rd < 0 || rd > kMaxHeadDim) {
-                IMP_LOG_ERROR("config.json: rope dimension is %d, which exceeds the limit of %d", rd,
-                              kMaxHeadDim);
-                return false;
-            }
-            int pairs = rd / 2;
-            if (pairs > 0 && orig_max_pos > 0 && factor > 1.0f &&
-                high_freq_factor > low_freq_factor) {
-                const float low_wavelen = static_cast<float>(orig_max_pos) / low_freq_factor;
-                const float high_wavelen = static_cast<float>(orig_max_pos) / high_freq_factor;
-                const float two_pi = 6.28318530717958647692f;
-                cfg.rope_short_factor.resize(pairs);
-                cfg.rope_long_factor.resize(pairs);
-                for (int i = 0; i < pairs; i++) {
-                    const float base_freq =
-                        1.0f / std::pow(cfg.rope_theta, (2.0f * i) / static_cast<float>(rd));
-                    const float wavelen = two_pi / base_freq;
-                    float pair_factor;
-                    if (wavelen < high_wavelen) {
-                        pair_factor = 1.0f;
-                    } else if (wavelen > low_wavelen) {
-                        pair_factor = factor;
-                    } else {
-                        const float smooth =
-                            (static_cast<float>(orig_max_pos) / wavelen - low_freq_factor) /
-                            (high_freq_factor - low_freq_factor);
-                        pair_factor = factor / (1.0f - smooth + smooth * factor);
-                    }
-                    cfg.rope_short_factor[i] = pair_factor;
-                    cfg.rope_long_factor[i] = pair_factor;
-                }
-                cfg.rope_scaling_orig_max_pos = orig_max_pos;
-                IMP_LOG_INFO(
-                    "Llama-3 RoPE: factor=%.1f low=%.1f high=%.1f orig_max_pos=%d → %d freq pairs",
-                    factor, low_freq_factor, high_freq_factor, orig_max_pos, pairs);
-            } else {
-                IMP_LOG_WARN(
-                    "Llama-3 RoPE: skipping (pairs=%d orig_max_pos=%d factor=%.2f low=%.2f high=%.2f)",
-                    pairs, orig_max_pos, factor, low_freq_factor, high_freq_factor);
-            }
-        }
-        // "dynamic" uses the same factor as linear at runtime
-        else if (rope_type == "dynamic") {
-            cfg.rope_freq_scale = 1.0f / factor;
-        }
-        // An unhandled rope_type spelling left rope_freq_scale at 1.0 while reporting full context
-        // and rotating unscaled. Handles legacy spellings su/su_scaled (longrope rename),
-        // dynamic_ntk/ntk. "default"/"none" mean no scaling and fall through silently on purpose
-        // (Qwen3-VL-4B declares "default").
-        else if (!rope_type.empty() && rope_type != "default" && rope_type != "none") {
-            cfg.rope_scaling_unhandled = true;
-            IMP_LOG_WARN(
-                "rope_scaling type \"%s\" is not one of linear/yarn/longrope/llama3/dynamic: "
-                "ignored, so this model rotates UNSCALED and will degrade past its native "
-                "context window (declared max_position_embeddings=%d, factor=%.3f)",
-                rope_type.c_str(), cfg.max_seq_len, factor);
-        }
-    }
-
-    // Sliding window attention
-    jobj_opt_int(eff, "sliding_window", cfg.sliding_window);
-
-    // Softcapping (Gemma-2/3)
-    jobj_opt_float(eff, "attn_logit_softcapping", cfg.attn_logit_softcap);
-    jobj_opt_float(eff, "final_logit_softcapping", cfg.final_logit_softcap);
-    // Gemma 4 uses `final_logit_softcapping` same semantics.
-    jobj_opt_float(root, "final_logit_softcapping", cfg.final_logit_softcap);
-    parse_granite_multipliers(eff, cfg);
-
-    // FFN activation
-    std::string hidden_act;
-    if (jobj_get_string(eff, "hidden_act", hidden_act) ||
-        jobj_get_string(eff, "hidden_activation", hidden_act)) {
-        if (hidden_act == "silu" || hidden_act == "swiglu") {
-            cfg.ffn_activation = FFNActivation::SWIGLU;
-        } else if (hidden_act == "gelu" || hidden_act == "gelu_pytorch_tanh" || hidden_act == "geglu") {
-            cfg.ffn_activation = FFNActivation::GEGLU;
-        }
-    }
-
-    // MoE config
-    if (!jobj_get_int(eff, "num_local_experts", cfg.n_experts)) {
-        if (!jobj_get_int(eff, "num_experts", cfg.n_experts)) {
-            // DeepSeek-V2/V3: routed experts count (distinct from shared experts)
-            jobj_opt_int(eff, "n_routed_experts", cfg.n_experts);
-        }
-    }
-    if (!jobj_get_int(eff, "num_experts_per_tok", cfg.n_experts_active)) {
-        jobj_opt_int(eff, "top_k_experts", cfg.n_experts_active);
-    }
-    if (!jobj_get_int(eff, "moe_intermediate_size", cfg.expert_d_ff)) {
-        jobj_opt_int(eff, "expert_intermediate_size", cfg.expert_d_ff);
-    }
-    // Shared (always-active) experts alongside routed experts (DeepSeek-V2/V3,
-    // Nemotron-H). Parsed here for all architectures; the arch-specific blocks
-    // below may set additional fields.
-    {
-        int n_shared = 0;
-        if (jobj_get_int(eff, "n_shared_experts", n_shared) && n_shared > 0) {
-            cfg.n_experts_shared = n_shared;
-        }
-    }
-    // gpt-oss: no separate MoE intermediate key — intermediate_size IS the
-    // per-expert FFN width (2880); there is no dense FFN at all.
-    if (cfg.expert_d_ff == 0 && cfg.n_experts > 0 && cfg.arch == ModelArch::GPT_OSS) {
-        cfg.expert_d_ff = cfg.d_ff;
-    }
-
-    // Qwen3.5/3.6 GDN: HF exposes linear_* fields, mapped onto ssm_* slots read by
-    // executor_ssm_gdn.cu. Missing this leaves ssm_inner_size=0, conv_channels=0,
-    // ssm_proj_buf_ allocates 0 bytes: IMA on first GDN GEMM.
-    //   linear_value_head_dim x linear_num_value_heads -> ssm_inner_size
-    //   linear_key_head_dim                            -> ssm_state_size
-    //   linear_num_key_heads                           -> ssm_group_count
-    //   linear_num_value_heads                         -> ssm_dt_rank (n_heads)
-    //   linear_conv_kernel_dim                         -> ssm_conv_kernel
-    if (cfg.arch == ModelArch::QWEN36_MOE || cfg.arch == ModelArch::QWEN35_MOE ||
-        cfg.arch == ModelArch::QWEN35 || cfg.arch == ModelArch::QWEN4_EXP) {
-        // HF SafeTensors stores GDN heads in grouped order (heads 0..n_v_per_k-1 = group 0); the
-        // scan kernel's default g=h%n_groups assumes the GGUF tiled layout. Set grouped_layout=1
-        // for HF loads. Cross-converted checkpoints may ship tiled; override gdn.layout_override="tiled".
-        cfg.gdn_grouped_head_layout = true;
-        {
-            const std::string& v = process_diag_gdn_layout_override();
-            if (v == "tiled" || v == "TILED") {
-                cfg.gdn_grouped_head_layout = false;
-                IMP_LOG_INFO("GDN head layout: forced to TILED via gdn.layout_override=tiled");
-            } else if (v == "grouped" || v == "GROUPED") {
-                cfg.gdn_grouped_head_layout = true;
-                IMP_LOG_INFO("GDN head layout: forced to GROUPED via gdn.layout_override=grouped");
-            } else if (!v.empty()) {
-                IMP_LOG_WARN("gdn.layout_override='%s' not recognized (expected 'tiled' or 'grouped')",
-                             v.c_str());
-            }
-        }
-
-        int lin_v_heads = 0, lin_v_hdim = 0;
-        int lin_k_heads = 0, lin_k_hdim = 0;
-        int lin_conv = 0;
-        jobj_opt_int(eff, "linear_num_value_heads", lin_v_heads);
-        jobj_opt_int(eff, "linear_value_head_dim", lin_v_hdim);
-        jobj_opt_int(eff, "linear_num_key_heads", lin_k_heads);
-        jobj_opt_int(eff, "linear_key_head_dim", lin_k_hdim);
-        jobj_opt_int(eff, "linear_conv_kernel_dim", lin_conv);
-        // Qwen4Exp gated residual widths (absent on Qwen3.5/3.6: stay 0).
-        jobj_opt_int(eff, "hc_count", cfg.hc_count);
-        jobj_opt_int(eff, "hc_lowrank", cfg.hc_lowrank);
-        jobj_opt_int(eff, "indexer_budget", cfg.qsa_budget);
-        jobj_opt_int(eff, "indexer_compress_ratio", cfg.qsa_ratio);
-        if (cfg.hc_count > 0)
-            jobj_opt_int(eff, "eos_token_id", cfg.ple_eos_token_id);
-        {
-            std::string gate_act;
-            if (jobj_get_string(eff, "output_gate_type", gate_act) && gate_act == "sigmoid")
-                cfg.gdn_gate_sigmoid = true;
-        }
-
-        if (lin_v_heads > 0 && lin_v_hdim > 0) {
-            cfg.ssm_inner_size = lin_v_heads * lin_v_hdim;
-            cfg.ssm_dt_rank = lin_v_heads;
-        }
-        if (lin_k_hdim > 0)
-            cfg.ssm_state_size = lin_k_hdim;
-        if (lin_k_heads > 0)
-            cfg.ssm_group_count = lin_k_heads;
-        if (lin_conv > 0)
-            cfg.ssm_conv_kernel = lin_conv;
-
-        // layer_types[] decides per-layer GDN-vs-attention. The GGUF Qwen3.6 loader infers this
-        // from tensor presence; the HF side surfaces it explicitly so executor_workspace/ssm-state
-        // sizing picks the right layer count.
-        const JValue* lt = jobj_find(eff, "layer_types");
-        if (lt && lt->type == JType::ARRAY) {
-            cfg.n_kv_heads_per_layer.clear();
-            cfg.n_kv_heads_per_layer.reserve(lt->arr.size());
-            for (const auto& v : lt->arr) {
-                // 0 = no attention this layer (GDN), else cfg.n_kv_heads.
-                bool is_linear = (v.str_val == "linear_attention");
-                cfg.n_kv_heads_per_layer.push_back(is_linear ? 0 : cfg.n_kv_heads);
-            }
-        }
-
-        IMP_LOG_INFO("  GDN config: inner=%d state=%d groups=%d n_heads=%d conv_kernel=%d",
-                     cfg.ssm_inner_size, cfg.ssm_state_size, cfg.ssm_group_count, cfg.ssm_dt_rank,
-                     cfg.ssm_conv_kernel);
-
-        // Qwen3.5 / 3.6 MoE shared-expert intermediate size. Used by the MTP
-        // forward to size the shared-expert FFN scratch and by diagnostic logs
-        // for the main model. Key name differs from DeepSeek-style configs.
-        int qwen_shared_d_ff = 0;
-        jobj_opt_int(eff, "shared_expert_intermediate_size", qwen_shared_d_ff);
-        if (qwen_shared_d_ff == 0)
-            jobj_opt_int(eff, "moe_shared_expert_intermediate_size", qwen_shared_d_ff);
-        if (qwen_shared_d_ff > 0)
-            cfg.expert_shared_d_ff = qwen_shared_d_ff;
-    }
-
-    // Nemotron-H MoE: hybrid Mamba2+MoE+Attention. Parses hybrid_override_pattern to fill
-    // n_kv_heads_per_layer so executor_workspace sizes buffers per layer. Missing this leaves
-    // ssm_inner_size=0: SSM kernels read past allocated state, IMA on first prefill.
-    //   mamba_head_dim x mamba_num_heads -> ssm_inner_size
-    //   ssm_state_size                   -> ssm_state_size
-    //   n_groups                         -> ssm_group_count
-    //   mamba_num_heads                  -> ssm_dt_rank (n_heads)
-    //   conv_kernel                      -> ssm_conv_kernel
-    //   hybrid_override_pattern (M/E/*)  -> n_kv_heads_per_layer (0/0/n_kv)
-    if (cfg.arch == ModelArch::NEMOTRON_H_MOE) {
-        int mamba_head_dim = 0, mamba_num_heads = 0, n_groups_v = 0;
-        int ssm_state = 0, conv_k = 0;
-        jobj_opt_int(eff, "mamba_head_dim", mamba_head_dim);
-        jobj_opt_int(eff, "mamba_num_heads", mamba_num_heads);
-        jobj_opt_int(eff, "n_groups", n_groups_v);
-        jobj_opt_int(eff, "ssm_state_size", ssm_state);
-        jobj_opt_int(eff, "conv_kernel", conv_k);
-        if (mamba_head_dim > 0 && mamba_num_heads > 0)
-            cfg.ssm_inner_size = mamba_head_dim * mamba_num_heads;
-        if (ssm_state > 0)
-            cfg.ssm_state_size = ssm_state;
-        if (n_groups_v > 0)
-            cfg.ssm_group_count = n_groups_v;
-        if (mamba_num_heads > 0)
-            cfg.ssm_dt_rank = mamba_num_heads;
-        if (conv_k > 0)
-            cfg.ssm_conv_kernel = conv_k;
-
-        // Extended MoE config (DeepSeek-style routing): n_routed_experts is the
-        // total expert count, num_experts_per_tok is top_k (already read above),
-        // moe_shared_expert_intermediate_size sizes the always-on shared expert.
-        int n_routed = 0, n_shared = 0, shared_d_ff = 0;
-        jobj_opt_int(eff, "n_routed_experts", n_routed);
-        jobj_opt_int(eff, "n_shared_experts", n_shared);
-        // moe_shared_expert_intermediate_size: DeepSeek / Qwen2-MoE naming.
-        // shared_expert_intermediate_size: Qwen3.5 / 3.6 naming (used by their
-        // shared-expert variant of GroupQuery MoE).
-        jobj_opt_int(eff, "moe_shared_expert_intermediate_size", shared_d_ff);
-        if (shared_d_ff == 0)
-            jobj_opt_int(eff, "shared_expert_intermediate_size", shared_d_ff);
-        if (n_routed > 0 && cfg.n_experts == 0)
-            cfg.n_experts = n_routed;
-        if (n_shared > 0)
-            cfg.n_experts_shared = n_shared;
-        if (shared_d_ff > 0)
-            cfg.expert_shared_d_ff = shared_d_ff;
-        jobj_opt_float(eff, "routed_scaling_factor", cfg.expert_weights_scale);
-        // norm_topk_prob arrives as a bool (number 0/1 in our JSON parser)
-        const JValue* ntp = jobj_find(eff, "norm_topk_prob");
-        if (ntp && ntp->type == JType::NUMBER)
-            cfg.expert_weights_norm = (ntp->num_val != 0.0);
-
-        // hybrid_override_pattern: one char per layer. M=Mamba2 (no attention), E=MoE expert FFN
-        // (no attention), *=Attention layer.
-        std::string pat;
-        if (jobj_get_string(eff, "hybrid_override_pattern", pat) && !pat.empty()) {
-            cfg.n_kv_heads_per_layer.clear();
-            cfg.n_kv_heads_per_layer.reserve(pat.size());
-            int n_attn = 0, n_ssm = 0, n_moe = 0;
-            for (char c : pat) {
-                if (c == '*') {
-                    cfg.n_kv_heads_per_layer.push_back(cfg.n_kv_heads);
-                    ++n_attn;
-                } else {
-                    cfg.n_kv_heads_per_layer.push_back(0);
-                    if (c == 'M')
-                        ++n_ssm;
-                    else if (c == 'E')
-                        ++n_moe;
-                }
-            }
-            IMP_LOG_INFO("  Nemotron-H hybrid pattern: %d Mamba2 + %d MoE + %d Attention = %d layers",
-                         n_ssm, n_moe, n_attn, (int) pat.size());
-        }
-
-        IMP_LOG_INFO("  Nemotron-H SSM: inner=%d state=%d groups=%d n_heads=%d conv_kernel=%d",
-                     cfg.ssm_inner_size, cfg.ssm_state_size, cfg.ssm_group_count, cfg.ssm_dt_rank,
-                     cfg.ssm_conv_kernel);
-        IMP_LOG_INFO("  Nemotron-H MoE: n_experts=%d top_k=%d n_shared=%d shared_d_ff=%d "
-                     "scale=%.2f norm_topk=%d",
-                     cfg.n_experts, cfg.n_experts_active, cfg.n_experts_shared,
-                     cfg.expert_shared_d_ff, cfg.expert_weights_scale, (int) cfg.expert_weights_norm);
-    }
-
-    // gpt-oss: layer_types[] marks "sliding_attention" (window 128) on even layers,
-    // "full_attention" on odd. Uniform head_dim=64; per-head sink logits + per-expert biases
-    // are tensor-level (weight_map.cpp). Router: topk-then-softmax.
-    if (cfg.arch == ModelArch::GPT_OSS) {
-        const JValue* lt = jobj_find(eff, "layer_types");
-        if (lt && lt->type == JType::ARRAY) {
-            cfg.swa_layers.clear();
-            cfg.swa_layers.reserve(lt->arr.size());
-            for (const auto& v : lt->arr)
-                cfg.swa_layers.push_back(v.str_val == "sliding_attention" ? 1 : 0);
-        }
-        if (cfg.sliding_window <= 0)
-            cfg.sliding_window = 128;
-    }
-
-    // Gemma-4: layer_types[] gives SWA vs global; head_dim/global_head_dim and
-    // num_key_value_heads/num_global_key_value_heads define the dual geometry. Builds
-    // per-layer vectors so executor_attention.cu picks the right shape/theta per layer.
-    if (cfg.arch == ModelArch::GEMMA4) {
-        int global_head_dim = 0;
-        int num_global_kv = 0;
-        jobj_opt_int(eff, "global_head_dim", global_head_dim);
-        jobj_opt_int(eff, "num_global_key_value_heads", num_global_kv);
-
-        // rope params nested under rope_parameters.{full_attention,sliding_attention}
-        const JValue* rp = jobj_find(eff, "rope_parameters");
-        float theta_full = cfg.rope_theta > 0.0f ? cfg.rope_theta : 1e6f;
-        float theta_swa = 1e4f;
-        float partial_full = 0.0f;
-        if (rp && rp->type == JType::OBJECT) {
-            const JValue* fa = jobj_find(*rp, "full_attention");
-            if (fa && fa->type == JType::OBJECT) {
-                jobj_opt_float(*fa, "rope_theta", theta_full);
-                jobj_opt_float(*fa, "partial_rotary_factor", partial_full);
-            }
-            const JValue* sa = jobj_find(*rp, "sliding_attention");
-            if (sa && sa->type == JType::OBJECT)
-                jobj_opt_float(*sa, "rope_theta", theta_swa);
-        }
-        cfg.rope_theta = theta_full;
-        cfg.rope_theta_swa = theta_swa;
-        // partial_rotary_factor < 1 on full_attention: only the first factor*hd/2 pairs rotate.
-        // Unhandled, all 256 pairs of the hd=512 layers rotate and 16k NIAH drops to 0/5 (#2519).
-        const int hd_full = global_head_dim > 0 ? global_head_dim : cfg.head_dim;
-        cfg.rope_inv_freqs_global.clear();
-        if (partial_full > 0.0f && partial_full < 1.0f && hd_full > 0)
-            cfg.rope_inv_freqs_global = proportional_rope_inv_freqs(theta_full, hd_full, partial_full);
-
-        const JValue* lt = jobj_find(eff, "layer_types");
-        if (lt && lt->type == JType::ARRAY) {
-            cfg.swa_layers.clear();
-            cfg.head_dim_per_layer.clear();
-            cfg.n_kv_heads_per_layer.clear();
-            cfg.swa_layers.reserve(lt->arr.size());
-            cfg.head_dim_per_layer.reserve(lt->arr.size());
-            cfg.n_kv_heads_per_layer.reserve(lt->arr.size());
-            for (const auto& v : lt->arr) {
-                bool is_swa = (v.str_val == "sliding_attention");
-                cfg.swa_layers.push_back(is_swa ? 1 : 0);
-                cfg.head_dim_per_layer.push_back(
-                    is_swa ? cfg.head_dim : (global_head_dim > 0 ? global_head_dim : cfg.head_dim));
-                cfg.n_kv_heads_per_layer.push_back(
-                    is_swa ? cfg.n_kv_heads : (num_global_kv > 0 ? num_global_kv : cfg.n_kv_heads));
-            }
-            // Scalar head_dim = max per-layer head_dim, so KV-cache/attention workspace sizes for the
-            // largest head_dim, not the SWA-only value (matches the GGUF loader). Otherwise
-            // full-attention layers (head_dim=512) write past their stride into adjacent layer slots.
-            int max_hd = 0;
-            for (int v : cfg.head_dim_per_layer)
-                max_hd = std::max(max_hd, v);
-            if (max_hd > cfg.head_dim) {
-                IMP_LOG_INFO("Gemma 4 (HF): scalar head_dim %d → %d (max of per-layer)", cfg.head_dim,
-                             max_hd);
-                cfg.head_dim = max_hd;
-            }
-            // Same for n_kv_heads — sizing the cache for the largest layer.
-            int max_nkv = 0;
-            for (int v : cfg.n_kv_heads_per_layer)
-                max_nkv = std::max(max_nkv, v);
-            if (max_nkv > cfg.n_kv_heads) {
-                IMP_LOG_INFO("Gemma 4 (HF): scalar n_kv_heads %d → %d (max of per-layer)", cfg.n_kv_heads,
-                             max_nkv);
-                cfg.n_kv_heads = max_nkv;
-            }
-        }
-    }
-
-    // Gemma-3: every sliding_window_pattern-th layer (default 6) is global at rope_theta (1e6) plus
-    // rope_scaling; the rest run rope_local_base_freq (1e4) unscaled. transformers 5 spells these
-    // layer_types + rope_parameters.{full,sliding}_attention. Gemma 1/2 share the arch: skipped.
-    if (cfg.arch == ModelArch::GEMMA3 && is_gemma3_config(root, eff) && !parse_gemma3_rope(eff, cfg))
+    if (!parse_hf_core_dims(eff, cfg) || !parse_hf_rope(eff, cfg))
+        return false;
+    parse_hf_ffn(root, eff, cfg);
+    parse_hf_moe(eff, cfg);
+    parse_hf_tristate_flags(root, eff, cfg);
+    if (HfConfigHook hook = find_hf_config_hook(cfg.arch); hook && !hook(root, eff, cfg))
         return false;
 
-    // tie_word_embeddings: store as tri-state so the SafeTensors loader can
-    // cross-check the flag against actual lm_head.weight presence rather than
-    // tying purely on null-detection.
-    const JValue* tie = jobj_find(root, "tie_word_embeddings");
-    if (tie && tie->type == JType::NUMBER) {
-        cfg.tie_word_embeddings = (tie->num_val != 0.0) ? 1 : 0;
-        IMP_LOG_INFO("  tie_word_embeddings = %s",
-                     cfg.tie_word_embeddings == 1 ? "true" : "false");
-    }
-
-    // attention_bias / mlp_bias: tri-state so the loader can warn when the
-    // config promises bias but the SafeTensors export omits it.
-    const JValue* attn_bias = jobj_find(eff, "attention_bias");
-    if (attn_bias && attn_bias->type == JType::NUMBER) {
-        cfg.attention_bias = (attn_bias->num_val != 0.0) ? 1 : 0;
-    }
-    const JValue* mlp_bias = jobj_find(eff, "mlp_bias");
-    if (mlp_bias && mlp_bias->type == JType::NUMBER) {
-        cfg.mlp_bias = (mlp_bias->num_val != 0.0) ? 1 : 0;
-    }
-
-    // DeepSeek V2/V3 Multi-head Latent Attention (MLA) config.
-    // kv_lora_rank > 0 is the unambiguous MLA indicator. When present, override
-    // head_dim and rope_dim to match the decoupled-head layout.
-    if (cfg.arch == ModelArch::DEEPSEEK) {
-        jobj_opt_int(eff, "kv_lora_rank",        cfg.kv_lora_rank);
-        jobj_opt_int(eff, "q_lora_rank",         cfg.q_lora_rank);     // absent/null -> stays 0
-        jobj_opt_int(eff, "qk_rope_head_dim",    cfg.qk_rope_head_dim);
-        jobj_opt_int(eff, "qk_nope_head_dim",    cfg.qk_nope_head_dim);
-        jobj_opt_int(eff, "v_head_dim",          cfg.v_head_dim);
-        jobj_opt_int(eff, "first_k_dense_replace", cfg.first_k_dense_replace);
-        if (cfg.is_mla()) {
-            // Decoupled-head layout: each attention head has qk_nope_head_dim
-            // non-RoPE dims plus qk_rope_head_dim RoPE dims.
-            cfg.head_dim = cfg.qk_nope_head_dim + cfg.qk_rope_head_dim;
-            cfg.rope_dim = cfg.qk_rope_head_dim;
-            // YaRN mscale from rope_scaling. HF DeepSeek-V2 uses two mscale fields differently, must
-            // not conflate: softmax scale gets yarn_get_mscale(factor,mscale_all_dim)^2; rope cos/sin
-            // gets the ratio yarn_get_mscale(factor,mscale)/yarn_get_mscale(factor,mscale_all_dim).
-            // For V2-Lite both are 0.707 so the rope ratio is exactly 1.0; V3 may differ.
-            const JValue* rs = jobj_find(eff, "rope_scaling");
-            if (rs && rs->type == JType::OBJECT) {
-                float mscale = 1.0f, mscale_all_dim = 1.0f;
-                bool has_mscale = jobj_get_float(*rs, "mscale", mscale);
-                bool has_all_dim = jobj_get_float(*rs, "mscale_all_dim", mscale_all_dim);
-                // Softmax scale prefers mscale_all_dim, falls back to mscale.
-                cfg.mla_mscale = has_all_dim ? mscale_all_dim : (has_mscale ? mscale : 1.0f);
-                // RoPE ratio numerator is the raw mscale (fallback: mscale_all_dim
-                // → ratio 1.0, i.e. no rope scaling, which is HF's default when
-                // the two coincide).
-                cfg.mla_mscale_num = has_mscale ? mscale : cfg.mla_mscale;
-            }
-            IMP_LOG_INFO("  MLA: kv_lora_rank=%d q_lora_rank=%d "
-                         "qk_rope=%d qk_nope=%d v_head=%d head_dim=%d mla_mscale=%.4f",
-                         cfg.kv_lora_rank, cfg.q_lora_rank,
-                         cfg.qk_rope_head_dim, cfg.qk_nope_head_dim, cfg.v_head_dim,
-                         cfg.head_dim, cfg.mla_mscale);
-            // imp's rope_yarn kernel scales cos/sin by yarn_attn_factor*(1+0.1*log(rope_freq_scale)).
-            // HF DeepseekV2YarnRotaryEmbedding instead scales by the mscale RATIO
-            //   yarn_get_mscale(factor,mscale)/yarn_get_mscale(factor,mscale_all_dim),
-            //   where yarn_get_mscale(f,m)=0.1*m*ln(f)+1. Set yarn_attn_factor to match this ratio.
-            // Softmax scale is separate and unchanged: yarn_get_mscale(factor,mscale_all_dim)^2 via
-            // mla_attention_scale_multiplier.
-            if (cfg.yarn_ext_factor > 0.0f && cfg.rope_freq_scale > 1.0f) {
-                const float log_scale = std::log(cfg.rope_freq_scale);
-                const float ms_num = 0.1f * cfg.mla_mscale_num * log_scale + 1.0f;
-                const float ms_den = 0.1f * cfg.mla_mscale     * log_scale + 1.0f;
-                const float hf_rope_mscale = ms_num / ms_den;
-                const float imp_mscale = 0.1f * log_scale + 1.0f;
-                cfg.yarn_attn_factor = hf_rope_mscale / imp_mscale;
-                IMP_LOG_INFO("  MLA YaRN rope-mscale adjust: yarn_attn_factor=%.4f "
-                             "(hf_rope_mscale=%.4f, softmax_scale_mult=%.4f)",
-                             cfg.yarn_attn_factor, hf_rope_mscale, ms_den * ms_den);
-            }
-        }
-    }
-
     load_vision_tower_config(root, out_vision_tower);
-
-    // Audio modality: unlike vision, an omni checkpoint with a lost audio path said nothing
-    // (roadmap Open 8). Test OBJECT not presence: Gemma-4-26B ships audio_config:null with no
-    // audio tensor; audio_token_id is set regardless of an encoder, so it is not a signal either.
-    const JValue* ac = jobj_find(root, "audio_config");
-    if (ac && ac->type == JType::OBJECT) {
-        cfg.has_audio_config = true;
-        std::string audio_type;
-        jobj_opt_string(*ac, "model_type", audio_type);
-        IMP_LOG_WARN(
-            "Audio modality present (audio_config, model_type='%s') and unsupported. imp has no "
-            "audio encoder: `model.embed_audio.*` tensors are dropped at load and audio input "
-            "cannot be sent. The model loads as text%s only (roadmap Open 8).",
-            audio_type.empty() ? "?" : audio_type.c_str(),
-            (out_vision_tower && *out_vision_tower) ? "+vision" : "");
-    }
-
-    if (cfg.arch == ModelArch::GENERIC) {
+    note_audio_config(root, out_vision_tower && *out_vision_tower, cfg);
+    if (cfg.arch == ModelArch::GENERIC)
         cfg.arch_inferred_fallback = true;
-    }
-
     IMP_LOG_INFO("  arch=%s layers=%d d_model=%d heads=%d kv_heads=%d d_ff=%d vocab=%d",
                  model_arch_name(cfg.arch), cfg.n_layers, cfg.d_model, cfg.n_heads, cfg.n_kv_heads, cfg.d_ff,
                  cfg.vocab_size);
-
     return true;
 }
 
