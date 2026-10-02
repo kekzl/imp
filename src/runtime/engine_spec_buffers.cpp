@@ -141,6 +141,15 @@ bool Engine::spec_state_scratch_wanted_() const {
     return scfg.ngram || scfg.suffix || scfg.capture || mtp || mtp_spec_decode_enabled();
 }
 
+// KV plan charge for the scratch: 2 x (pool footprint / pool slots), 0 without recurrent state.
+size_t Engine::spec_state_scratch_plan_bytes_(size_t ssm_footprint_bytes, int reserved_slots) const {
+    const size_t slots = static_cast<size_t>(std::max(0, config_.max_batch_size)) +
+                         static_cast<size_t>(std::max(0, reserved_slots));
+    if (ssm_footprint_bytes == 0 || slots == 0 || !spec_state_scratch_wanted_())
+        return 0;
+    return 2 * (ssm_footprint_bytes / slots);
+}
+
 // Init-time allocation of the hybrid verify scratch; a no-op once sized or on a non-hybrid model.
 void Engine::prewarm_spec_state_scratch_() {
     if (!ssm_state_ || spec_state_scratch_ != nullptr)

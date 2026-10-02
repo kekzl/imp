@@ -1221,6 +1221,7 @@ private:
     [[nodiscard]] bool ensure_spec_state_scratch_();
     // True when a speculative mode can reach the hybrid verify (KV plan charge + init prewarm).
     [[nodiscard]] bool spec_state_scratch_wanted_() const;
+    [[nodiscard]] size_t spec_state_scratch_plan_bytes_(size_t ssm_footprint_bytes, int reserved_slots) const;
     void prewarm_spec_state_scratch_();
     int recurrent_slot_for_(int req_id) const;
     // ── Multi-candidate verify on a hybrid (roadmap gap 5, Stage 3) ──
