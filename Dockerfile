@@ -155,11 +155,13 @@ LABEL imp.tree="${IMP_TREE_ID}"
 # curl and jq come from Ubuntu; the CUDA apt source is dropped first (see the toolchain stage).
 # libcurl4t64 is linked by imp-server/imp-cli for hf:// fetches (src/model/hf_fetch.cpp).
 # libjpeg-turbo8: JPEG decode bit-identical to Pillow (src/vision/image_decode.cpp, #2381).
+# libssl3t64: https image_url (httplib SSLClient, HTTPLIB_REQUIRE_OPENSSL, #2429).
 RUN rm -f /etc/apt/sources.list.d/cuda*.list \
     && apt-get update && apt-get install -y --no-install-recommends \
         curl \
         libcurl4t64 \
         libjpeg-turbo8 \
+        libssl3t64 \
         jq \
     && rm -rf /var/lib/apt/lists/*
 
