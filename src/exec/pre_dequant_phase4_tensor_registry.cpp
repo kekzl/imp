@@ -562,8 +562,8 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
             skipped_shared_bytes += bytes;
             return false;
         }
-        if (wcache_->cutlass_nvfp4.count(t.data) > 0 ||
-            wcache_->nvfp4.count(t.data) > 0) {
+        if (wcache_->cutlass_nvfp4.count(t.data) > 0 || wcache_->nvfp4.count(t.data) > 0 ||
+            wcache_->lm_head_fp8.weight.data == t.data) {  // checkpoint FP8 head is served (#2479)
             ++skipped_shared_count;
             skipped_shared_bytes += bytes;
             return false;
@@ -665,33 +665,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
     if (mut_model->tok_emb_id != kInvalidTensorID)
         try_mark(mut_model->tok_emb_, mut_model->tok_emb_id);
 
-    // gemm.nvfp4_lm_head=fp8: forward_logits, for_each_lm_head_batch_ and the MTP draft read the FP8
-    // head (executor_lm_head_fp8.cpp), none reads the source; its bytes go to the expert cache
-    // minus the FP8 head built after the cache was sized. Kept when tied or keyed by another cache.
-    Tensor& head = mut_model->out_proj_;
-    if (wcache_->lm_head_fp8.weight.data && head.data && !head.dropped_source &&
-        head.data != model_->tok_emb_.data && mut_model->is_base_gpu_allocation(head.data) &&
-        !wcache_->nvfp4.count(head.data) && !wcache_->cutlass_nvfp4.count(head.data) &&
-        !wcache_->fp16.count(head.data) && !wcache_->fp8.count(head.data)) {
-        const size_t head_bytes = bytes_of(head);
-        const size_t head_pool_before = release_on_free_pool_reserved(ReleasePool::LmHead);
-        free_source(head);
-        if (mut_model->out_proj_id != kInvalidTensorID)
-            registry_->handle(mut_model->out_proj_id).source_released = true;  // handle GEMMs fail loudly
-        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-        const size_t pool_after = release_on_free_pool_reserved(ReleasePool::LmHead);
-        const size_t back = std::min(head_bytes, head_pool_before - std::min(head_pool_before, pool_after) +
-                                                     trim_device_mempool());
-        wcache_->lm_head_released_bytes = back - std::min(back, wcache_->lm_head_fp8_bytes);
-        IMP_LOG_INFO(
-            "FP8 LM head: freed the %s source (%.1f MiB, %.1f MiB back to the driver, %.1f MiB to the "
-            "expert cache after the %.1f MiB FP8 head)",
-            qtype_name(head.qtype), head_bytes / (1024.0 * 1024.0), back / (1024.0 * 1024.0),
-            wcache_->lm_head_released_bytes / (1024.0 * 1024.0),
-            wcache_->lm_head_fp8_bytes / (1024.0 * 1024.0));
-    } else if (wcache_->lm_head_fp8.weight.data && head.data && !head.dropped_source) {
-        IMP_LOG_INFO("FP8 LM head: source retained (tied, shared allocation, or keyed by another cache)");
-    }
+    release_fp8_lm_head_source_(stream, free_source);
 
     if (marked_count > 0) {
         // Source tensors are now freed (their .data is dangling). release_gpu_-
@@ -710,6 +684,42 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         IMP_LOG_INFO("Phase-4b: async pool reclaimed %.2f MiB (retained in pool)",
                      marked_bytes / (1024.0 * 1024.0));
     }
+}
+
+// gemm.nvfp4_lm_head=fp8: forward_logits, for_each_lm_head_batch_ and the MTP draft read the FP8
+// head (executor_lm_head_fp8.cpp), none reads the source; its bytes go to the expert cache
+// minus the FP8 head built after the cache was sized. Kept when tied or keyed by another cache.
+void QuantPipeline::release_fp8_lm_head_source_(cudaStream_t stream,
+                                                const std::function<void(Tensor&)>& free_source) {
+    auto* mut_model = const_cast<Model*>(model_);
+    Tensor& head = mut_model->out_proj_;
+    if (!wcache_->lm_head_fp8.weight.data || !head.data || head.dropped_source)
+        return;
+    if (wcache_->lm_head_fp8.weight.data == head.data) {  // checkpoint FP8 head (#2479)
+        IMP_LOG_INFO("FP8 LM head: the checkpoint head is the served head, nothing to free");
+        return;
+    }
+    if (head.data == model_->tok_emb_.data || !mut_model->is_base_gpu_allocation(head.data) ||
+        wcache_->nvfp4.count(head.data) || wcache_->cutlass_nvfp4.count(head.data) ||
+        wcache_->fp16.count(head.data) || wcache_->fp8.count(head.data)) {
+        IMP_LOG_INFO("FP8 LM head: source retained (tied, shared allocation, or keyed by another cache)");
+        return;
+    }
+    const size_t head_bytes = qtype_row_bytes(head.qtype, head.shape[1]) * static_cast<size_t>(head.shape[0]);
+    const size_t head_pool_before = release_on_free_pool_reserved(ReleasePool::LmHead);
+    free_source(head);
+    if (mut_model->out_proj_id != kInvalidTensorID)
+        registry_->handle(mut_model->out_proj_id).source_released = true;  // handle GEMMs fail loudly
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+    const size_t pool_after = release_on_free_pool_reserved(ReleasePool::LmHead);
+    const size_t back = std::min(head_bytes, head_pool_before - std::min(head_pool_before, pool_after) +
+                                                 trim_device_mempool());
+    wcache_->lm_head_released_bytes = back - std::min(back, wcache_->lm_head_fp8_bytes);
+    IMP_LOG_INFO(
+        "FP8 LM head: freed the %s source (%.1f MiB, %.1f MiB back to the driver, %.1f MiB to the "
+        "expert cache after the %.1f MiB FP8 head)",
+        qtype_name(head.qtype), head_bytes / (1024.0 * 1024.0), back / (1024.0 * 1024.0),
+        wcache_->lm_head_released_bytes / (1024.0 * 1024.0), wcache_->lm_head_fp8_bytes / (1024.0 * 1024.0));
 }
 
 }  // namespace imp

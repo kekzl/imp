@@ -54,6 +54,8 @@ public:
     const std::vector<PinnedBuffer>& host_pinned_allocs() const { return host_pinned_allocs_; }
     const Tensor& output_norm() const { return out_norm_; }
     const Tensor& output_proj() const { return out_proj_; }
+    // F32 [vocab] row scales of a per-row FP8 checkpoint head (kLmHeadRowScaleTensor), else null.
+    const Tensor& output_proj_row_scales() const { return out_proj_row_scales_; }
     const Tensor& hc_mixer_norm() const { return hc_mixer_norm_; }
     const Tensor& hc_mixer_down() const { return hc_mixer_down_; }
     const Tensor& hc_mixer_up() const { return hc_mixer_up_; }
@@ -112,6 +114,7 @@ public:
     ModelProfile profile_;
     HFConfigLoader::GenerationConfig generation_config_;
     Tensor tok_emb_, out_norm_, out_proj_;
+    Tensor out_proj_row_scales_;
     // Qwen4Exp: the final hyper-connection mixer folds the hc_count streams back to d_model
     // before out_norm_ (hc_norm [hc*d], down [lowrank, hc*d], up [hc*d, lowrank]; no inject).
     Tensor hc_mixer_norm_, hc_mixer_down_, hc_mixer_up_;

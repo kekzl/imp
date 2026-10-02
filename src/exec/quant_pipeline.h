@@ -3,9 +3,11 @@
 #include "core/dispatch_policy.h"
 
 #include "core/tensor.h"            // Tensor, QType (used by Nvfp4DecodeContext + signatures)
+#include "core/config/lm_head_mode.h"  // LmHeadMode
 #include "exec/storage_planner.h"   // StoragePlan, PlanHints, StorageTier
 #include "exec/weight_handle.h"      // WeightRegistry
 #include <cuda_runtime.h>
+#include <functional>
 #include <cstddef>
 #include <vector>
 #include <unordered_set>
@@ -101,6 +103,7 @@ private:
     void pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg, cudaStream_t stream);
     // Phase 2c: per-row FP8 E4M3 LM head (gemm.nvfp4_lm_head=fp8), pre_dequant_fp8_lm_head.cpp.
     void fp8_lm_head_cache_(cudaStream_t stream);
+    void adopt_checkpoint_fp8_lm_head_(LmHeadMode mode);  // per-row FP8 checkpoint head (#2479)
     void pre_dequant_phase3_nvfp4_decode_(const ModelConfig& cfg, const VRAMBudget& budget,
                                           size_t& remaining_budget, cudaStream_t stream);
     // Sub-phase helpers for pre_dequant_phase3_nvfp4_decode_. Each operates
@@ -132,6 +135,8 @@ private:
     void pre_dequant_phase3c_standalone_mxfp4_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase4_tensor_registry_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase4b_drop_redundant_sources_(const ModelConfig& cfg, cudaStream_t stream);
+    // Phase 4b: the FP8 head's 16-bit source, freed through the phase's one free site.
+    void release_fp8_lm_head_source_(cudaStream_t stream, const std::function<void(Tensor&)>& free_source);
 };
 
 }  // namespace imp

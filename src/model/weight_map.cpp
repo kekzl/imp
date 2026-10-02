@@ -1,6 +1,7 @@
 #include "model/weight_map.h"
 #include "model/multimodal_wrapper.h"
 #include "model/tensor_kind_matcher.h"
+#include "core/config/lm_head_mode.h"
 #include "core/logging.h"
 #include "model/model_limits.h"
 #include <string>
@@ -492,6 +493,12 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         if (name == "lm_head.weight") {
             model.out_proj_ = t;
             IMP_LOG_DEBUG("  assigned: %s -> out_proj", name.c_str());
+            ++assigned;
+            continue;
+        }
+        if (name == kLmHeadRowScaleTensor) {
+            model.out_proj_row_scales_ = t;
+            IMP_LOG_DEBUG("  assigned: %s -> out_proj row scales", name.c_str());
             ++assigned;
             continue;
         }

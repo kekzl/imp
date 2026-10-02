@@ -21,6 +21,10 @@ void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
     const LmHeadMode mode = lm_head_mode(dispatch_policy().gemm.nvfp4_lm_head);
     const Tensor& lm = model_->output_proj();
     const QType q = lm.qtype;
+    if (pre_dequant_internal::lm_head_checkpoint_fp8_rows(*model_)) {
+        adopt_checkpoint_fp8_lm_head_(mode);
+        return;
+    }
     if (!lm_head_mode_fp8(mode, q)) {
         if (lm_head_auto_keeps_source(mode, q))
             IMP_LOG_INFO("FP8 LM head: auto keeps the %s head at checkpoint precision (#2224)",
@@ -90,6 +94,27 @@ void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
         "FP8 LM head: [%d x %d] %s -> E4M3 per-row scales (%.1f MiB), all LM-head rows; "
         "source released after load if no path reads it",
         rows, cols, qtype_name(q), total / (1024.0 * 1024.0));
+}
+
+// A per-row FP8 checkpoint head (#2479) IS the served head: no allocation, no conversion, every
+// gemm.nvfp4_lm_head mode. Phase 4b keeps it (the cache borrows the source bytes).
+void QuantPipeline::adopt_checkpoint_fp8_lm_head_(LmHeadMode mode) {
+    const Tensor& lm = model_->output_proj();
+    const Tensor& sc = model_->output_proj_row_scales();
+    FP8CacheEntry e{};
+    e.weight = Tensor(lm.data, QType::FP8_E4M3, 2, lm.shape, true);
+    e.d_row_scales = static_cast<float*>(sc.data);
+    wcache_->lm_head_fp8 = e;
+    wcache_->lm_head_fp8_bulk = nullptr;
+    wcache_->lm_head_fp8_bytes = 0;
+    const double mib = ((static_cast<double>(lm.shape[0]) * lm.shape[1]) + sc.nbytes()) / (1024.0 * 1024.0);
+    IMP_LOG_INFO(
+        "FP8 LM head: [%lld x %lld] checkpoint E4M3 per-row scales served directly, no load-time "
+        "conversion (%.1f MiB)",
+        static_cast<long long>(lm.shape[0]), static_cast<long long>(lm.shape[1]), mib);
+    if (mode == LmHeadMode::Nvfp4)
+        IMP_LOG_INFO("FP8 LM head: gemm.nvfp4_lm_head=%s needs a 16-bit head; this checkpoint ships FP8",
+                     dispatch_policy().gemm.nvfp4_lm_head.c_str());
 }
 
 }  // namespace imp

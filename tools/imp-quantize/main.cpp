@@ -22,6 +22,8 @@
 #include "awq.h"
 #include "checkpoint_out.h"
 #include "expert_destack.h"
+#include "fp8_head.h"
+#include "options.h"
 #include "fp8_source.h"
 #include "quant_report.h"
 #include "tensor_policy.h"
@@ -33,6 +35,7 @@
 #include "model/safetensors_writer.h"
 #include "quant/awq_transform.h"
 #include "quant/calibration_stats.h"
+#include "quant/fp8_quant.h"
 #include "quant/nvfp4_quant.h"
 
 #include <cuda_fp16.h>
@@ -53,30 +56,9 @@
 
 namespace fs = std::filesystem;
 using namespace imp;
+using imp::quantize::Options;
 
 namespace {
-
-struct Options {
-    std::string in_dir, out_dir;
-    std::string calib_file;  // --calib: activation statistics for AWQ scaling
-    // --calib-groups: which AWQ scale groups run, for attributing a bad result.
-    // Empty = awq::default_groups(n_rep, hybrid), resolved in build_plan.
-    std::string calib_groups;
-    // AWQ search error weight: "abs" (mean|x|/s)^2, "sq" E[x^2]/s^2 (calibration_stats.h).
-    // sq: Qwen3-0.6B ABCD -1.10 % PPL, Qwen3-14B BD +0.15 PPL; default abs.
-    bool calib_weight_sq = false;
-    bool quantize_lm_head = false;  // imp has its own lm_head NVFP4 policy (#982)
-    // Keep a fused Q+gate q_proj out of NVFP4. OFF by default: the gate half carries the #1273
-    // divergence, but excluding it measured ~1.5% WORSE perplexity end to end. Opt-in since the
-    // trade may still favor models with a higher gate share than the one checkpoint measured.
-    bool keep_attn_gate = false;
-    // Keep GDN linear_attn projections at source precision ("all", or a list of in|gate|out; the
-    // Qwen3.6-35B recipe keeps all three), so the runtime's F16 GDN prefill path and
-    // gemm.nvfp4_gdn_proj_prefill apply to the export. Empty: quantize them like any Linear.
-    std::string keep_gdn_proj;
-    bool dry_run = false;
-    quantize::OutputFormat format = quantize::OutputFormat::Modelopt;
-};
 
 bool ends_with(const std::string& s, const std::string& suf) {
     return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
@@ -359,69 +341,8 @@ void report_card_fit(size_t bytes_out) {
 
 int main(int argc, char** argv) {
     Options opt;
-    for (int i = 1; i < argc; i++) {
-        std::string a = argv[i];
-        auto next = [&]() -> std::string { return (i + 1 < argc) ? argv[++i] : std::string(); };
-        if (a == "--model")
-            opt.in_dir = next();
-        else if (a == "--out")
-            opt.out_dir = next();
-        else if (a == "--lm-head")
-            opt.quantize_lm_head = true;
-        else if (a == "--keep-attn-gate")
-            opt.keep_attn_gate = true;
-        else if (a == "--keep-gdn-proj") {
-            // Optional value: a bare flag keeps all three roles.
-            const bool has_value = i + 1 < argc && argv[i + 1][0] != '-';
-            opt.keep_gdn_proj = has_value ? next() : "all";
-            if (!quantize::valid_keep_gdn_proj_selection(opt.keep_gdn_proj)) {
-                fprintf(stderr, "imp-quantize: --keep-gdn-proj '%s': expected all or a list of in|gate|out\n",
-                        opt.keep_gdn_proj.c_str());
-                return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
-            }
-        } else if (a == "--calib")
-            opt.calib_file = next();
-        else if (a == "--format") {
-            const std::string f = next();
-            if (!quantize::parse_output_format(f, opt.format)) {
-                fprintf(stderr, "imp-quantize: unknown --format '%s' (modelopt | vllm)\n", f.c_str());
-                return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
-            }
-        } else if (a == "--calib-weight") {
-            const std::string w = next();
-            if (w != "abs" && w != "sq") {
-                fprintf(stderr, "imp-quantize: unknown --calib-weight '%s' (abs | sq)\n", w.c_str());
-                return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
-            }
-            opt.calib_weight_sq = (w == "sq");
-        } else if (a == "--calib-groups") {
-            opt.calib_groups = next();
-            for (char& c : opt.calib_groups)
-                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-            // An unknown letter here would silently select fewer groups than the
-            // caller meant and quietly change what the checkpoint is — the same
-            // shape as the `--set` unknown-key hole closed in #1186.
-            if (opt.calib_groups.empty() ||
-                opt.calib_groups.find_first_not_of(awq::kAwqAllGroups) != std::string::npos) {
-                fprintf(stderr, "imp-quantize: --calib-groups '%s' has a letter outside %s\n",
-                        opt.calib_groups.c_str(), awq::kAwqAllGroups);
-                return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
-            }
-        } else if (a == "--dry-run")
-            opt.dry_run = true;
-        else if (a == "-h" || a == "--help") {
-            usage();
-            return 0;
-        } else {
-            fprintf(stderr, "unknown argument: %s\n", a.c_str());
-            usage();
-            return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
-        }
-    }
-    if (opt.in_dir.empty() || (opt.out_dir.empty() && !opt.dry_run)) {
-        usage();
-        return imp::tools::exit_code_for(IMP_ERROR_INVALID_ARG);
-    }
+    if (const auto exit_code = quantize::parse_args(argc, argv, opt))
+        return *exit_code;
     // States what this export IS before it starts: EXPERIMENTAL, previously said only in a
     // source comment and a doc heading where no operator would see it. The calibrated arm prints
     // the same line plus its sample count once the calibration file is read.
@@ -449,7 +370,8 @@ int main(int argc, char** argv) {
         }
         // Same reason: a combination that will not load where the caller is
         // aiming should be said now, not after the conversion.
-        if (const char* warn = quantize::portability_warning(opt.format, opt.quantize_lm_head))
+        if (const char* warn = quantize::portability_warning(opt.format,
+                                                             opt.lm_head != quantize::LmHeadExport::Source))
             fprintf(stderr, "note: %s\n\n", warn);
         fs::create_directories(opt.out_dir, ec);
         if (ec) {
@@ -704,6 +626,7 @@ int main(int argc, char** argv) {
         // FP8 weights this tool refuses: widened here, so the buffer must outlive
         // the descriptor that points at it.
         std::vector<std::vector<uint16_t>> widened_store;
+        std::vector<quantize::Fp8Head> head_store;  // the FP8 LM head; moves keep the buffers in place
         std::map<std::string, std::vector<quantize::DestackedMatrix>> stack_plans;
         size_t n_destacked = 0;
         if (!plan_shard_stacks(src, stacked_names, stack_layout, stack_plans, n_destacked))
@@ -794,6 +717,15 @@ int main(int argc, char** argv) {
                     return 1;
                 n_stacks_split++;
                 continue;
+            }
+            if (opt.lm_head == quantize::LmHeadExport::Fp8) {
+                const int head = quantize::emit_fp8_head(t, opt.dry_run, head_store, out, bytes_out);
+                if (head < 0)
+                    return 1;
+                if (head > 0) {
+                    excluded_modules.emplace_back("lm_head");  // not NVFP4: no scales expected
+                    continue;
+                }
             }
             std::string why;
             // Checked before should_quantize, which sees one tensor and cannot
@@ -906,9 +838,15 @@ int main(int argc, char** argv) {
         // Modelopt declares itself in a file of its own; compressed-tensors put
         // its declaration into the config.json copy_aux_files just patched, and
         // repeats it in recipe.yaml for readers that look only there.
+        const std::string mt = quantize::model_type_from_config(
+            (fs::path(opt.in_dir) / "config.json").string());
+        const bool kv_fp8 = quantize::kv_fp8_for_export(opt.kv_hint, opt.format, mt);  // #2480
+        printf("kv_cache_quant_algo: %s (model_type %s, --kv-hint %s, --format %s)\n",
+               kv_fp8 ? "FP8" : "null", mt.c_str(), quantize::kv_hint_name(opt.kv_hint),
+               quantize::format_name(opt.format));
         const auto declared = opt.format == quantize::OutputFormat::Modelopt
                                   ? quantize::write_modelopt_quant_config(opt.out_dir, excluded_modules,
-                                                                          calibrated)
+                                                                          calibrated, kv_fp8)
                                   : quantize::write_recipe_yaml(opt.out_dir, excluded_modules);
         if (!declared) {
             fprintf(stderr, "%s\n", declared.error().c_str());

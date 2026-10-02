@@ -486,4 +486,13 @@ template <class Dev>
     return upload_fmt<RawFmt>(w, qtype, raw_quant, weight_offset, dev);
 }
 
+// Per-row FP8 checkpoint head (#2479) the FP8 head GEMV serves: on-device F8_E4M3 [V, D % 256 == 0]
+// codes, F32 [V] row scales, F16 final norm. Anything else refuses the load.
+[[nodiscard]] inline bool lm_head_row_scales_ok(const Tensor& head, const Tensor& norm,
+                                                const Tensor& scales) {
+    return head.data && head.on_device && head.qtype == QType::FP8_E4M3 && head.ndim == 2 &&
+           head.shape[1] % 256 == 0 && scales.qtype == QType::F32 && scales.ndim == 1 &&
+           scales.shape[0] == head.shape[0] && (!norm.data || norm.qtype == QType::F16);
+}
+
 }  // namespace imp::wupload

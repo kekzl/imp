@@ -11,6 +11,7 @@
 #include "memory/mem_account.h"
 #include "quant/dequant_gpu.h"
 #include "quant/dequant_awq.h"
+#include "core/config/lm_head_mode.h"
 #include "core/cuda_raii.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
@@ -467,6 +468,23 @@ static bool upload_embeddings_and_output(Tensor& tok_emb, Tensor& out_norm, Tens
     }
 
     return true;
+}
+
+// Per-row FP8 checkpoint head (#2479): codes went up raw above, the F32 row scales follow as-is.
+static bool upload_lm_head_row_scales(const Tensor& head, const Tensor& norm, Tensor& sc,
+                                      const UploadCtx& ctx) {
+    if (!sc.data || sc.on_device)
+        return true;
+    void* d = wupload::lm_head_row_scales_ok(head, norm, sc)
+                  ? scale_to_device(sc.data, sc.nbytes(), ctx.stream, ctx.gpu_allocs)
+                  : nullptr;
+    if (!d)
+        IMP_LOG_ERROR("%s: refused or upload failed (head %s ndim %d, scales %s, norm %s)",
+                      kLmHeadRowScaleTensor, qtype_name(head.qtype), head.ndim, qtype_name(sc.qtype),
+                      qtype_name(norm.qtype));
+    sc.data = d ? d : sc.data;
+    sc.on_device = d != nullptr;
+    return d != nullptr;
 }
 
 // Qwen4Exp MTP experts: F8_E4M3 bytes go up unchanged, one allocation per expert (gate|up|down,
@@ -1947,6 +1965,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     if (!upload_embeddings_and_output(tok_emb_, out_norm_, out_proj_, ctx)) {
         return false;
     }
+    if (!upload_lm_head_row_scales(out_proj_, out_norm_, out_proj_row_scales_, ctx))
+        return false;
 
     // --- Encoder embedder extras (#836, nomic-bert) ---
     for (auto* t : {&tok_emb_norm_, &tok_emb_norm_bias_, &token_types_}) {

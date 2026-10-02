@@ -113,11 +113,26 @@ const char* portability_warning(OutputFormat fmt, bool quantize_lm_head);
     const std::string& in_dir, const std::string& out_dir, OutputFormat fmt,
     const std::vector<std::string>& excluded_modules, bool calibrated);
 
+// -- FP8 KV hint (#2480) ---------------------------------------------------
+
+// --kv-hint: auto = allowlist below, fp8 = always, none = null.
+enum class KvHint { Auto, Fp8, None };
+bool parse_kv_hint(const std::string& s, KvHint& out);
+
+// model_type values with a measured FP8 KV PPL (docs/quantization.md KV table): qwen3 (Qwen3-14B
+// +1.07 %), qwen3_moe (Qwen3-30B-A3B neutral). Everything else writes null.
+bool kv_fp8_hint_allowlisted(const std::string& model_type);
+bool kv_fp8_hint_on(KvHint h, const std::string& model_type);
+const char* kv_hint_name(KvHint h);
+// What the export declares: the hint for this family, modelopt only (imp reads it from
+// hf_quant_config.json; compressed-tensors has no field imp reads).
+bool kv_fp8_for_export(KvHint h, OutputFormat fmt, const std::string& model_type);
+
 // hf_quant_config.json — Modelopt's declaration. Not written for
 // compressed-tensors, where a second declaration in a DIFFERENT format is a way
-// for the two to disagree later.
+// for the two to disagree later. kv_fp8 writes kv_cache_quant_algo "FP8", else null.
 [[nodiscard]] std::expected<void, std::string> write_modelopt_quant_config(
-    const std::string& out_dir, const std::vector<std::string>& excluded, bool calibrated);
+    const std::string& out_dir, const std::vector<std::string>& excluded, bool calibrated, bool kv_fp8);
 
 // recipe.yaml, llm-compressor's record of the run, written beside the compressed-tensors
 // config block. Redundant on paper, worth it in practice: readers predating

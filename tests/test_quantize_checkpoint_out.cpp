@@ -4,6 +4,10 @@
 // quantization_config keys reads as unquantized (parsers keep the last one).
 
 #include "../tools/imp-quantize/checkpoint_out.h"
+#include "../tools/imp-quantize/fp8_head.h"
+
+#include "core/config/lm_head_mode.h"
+#include "model/weight_upload_traits.h"
 
 #include "model/hf_config_loader.h"
 
@@ -426,4 +430,158 @@ TEST(QuantizeCheckpointOut, RecipeSaysTheSameSchemeTheConfigDoes) {
     EXPECT_NE(y.find("targets: [Linear]"), std::string::npos);
     // Quoted: a bare re:... entry parses as a YAML mapping key, not a string.
     EXPECT_NE(y.find("'re:.*router'"), std::string::npos);
+}
+
+// ---- LM head export (#2479) ----------------------------------------------
+
+TEST(QuantizeFp8Head, ParsesModesAndDefaultsPerFormat) {
+    LmHeadExport h = LmHeadExport::Source;
+    ASSERT_TRUE(parse_lm_head_export("fp8", h));
+    EXPECT_EQ(h, LmHeadExport::Fp8);
+    ASSERT_TRUE(parse_lm_head_export("nvfp4", h));
+    EXPECT_EQ(h, LmHeadExport::Nvfp4);
+    ASSERT_TRUE(parse_lm_head_export("source", h));
+    EXPECT_EQ(h, LmHeadExport::Source);
+    EXPECT_FALSE(parse_lm_head_export("bf16", h));
+    EXPECT_EQ(h, LmHeadExport::Source);  // a refused name leaves the value alone
+    EXPECT_STREQ(lm_head_export_name(LmHeadExport::Fp8), "fp8");
+    // vLLM's ParallelLMHead takes no scales: the portable layout keeps the source head.
+    EXPECT_EQ(default_lm_head_export(OutputFormat::Modelopt), LmHeadExport::Fp8);
+    EXPECT_EQ(default_lm_head_export(OutputFormat::CompressedTensors), LmHeadExport::Source);
+}
+
+TEST(QuantizeFp8Head, WritableOnlyForTheTopLevelHeadTheGemvServes) {
+    uint16_t dummy = 0;
+    std::string why;
+    imp::RawTensor t{"lm_head.weight", "BF16", {151936, 5120}, &dummy, 0};
+    EXPECT_TRUE(fp8_head_writable(t, why)) << why;
+    t.dtype = "F16";
+    EXPECT_TRUE(fp8_head_writable(t, why)) << why;
+    t.shape = {151936, 1536};  // 1536 % 256 == 0
+    EXPECT_TRUE(fp8_head_writable(t, why)) << why;
+    t.shape = {151936, 2880};  // gpt-oss hidden: not a GEMV row width
+    EXPECT_FALSE(fp8_head_writable(t, why));
+    EXPECT_NE(why.find("256"), std::string::npos);
+    t.shape = {151936, 5120};
+    t.dtype = "F8_E4M3";
+    EXPECT_FALSE(fp8_head_writable(t, why));
+    t.dtype = "BF16";
+    t.name = "mtp.lm_head.weight";  // the runtime maps only lm_head.weight to out_proj
+    EXPECT_FALSE(fp8_head_writable(t, why));
+}
+
+TEST(QuantizeFp8Head, StagesTheBitsTheLoaderUploads) {
+    // 1.0, -2.5, BF16 max finite (-> FP16 inf), an FP16 subnormal, 0x0001 (underflow), 65520
+    const std::vector<uint16_t> bf16 = {0x3F80, 0xC020, 0x7F7F, 0x3800, 0x0001, 0x4780};
+    imp::RawTensor t{"lm_head.weight", "BF16", {2, 3}, bf16.data(), bf16.size() * 2};
+    const std::vector<uint16_t> got = head_fp16_as_loaded(t);
+
+    const int64_t shape[2] = {2, 3};
+    imp::Tensor w(const_cast<uint16_t*>(bf16.data()), imp::QType::BF16, 2, shape, false);
+    imp::wupload::StagePlan p;
+    ASSERT_TRUE(imp::wupload::Bf16Fmt::stage(w, imp::QType::BF16, false, 0.0f, p));
+    EXPECT_EQ(got, p.h16);  // the out_proj upload path, offset 0
+    EXPECT_EQ(got[0], 0x3C00);
+    EXPECT_EQ(got[1], 0xC100);
+
+    const std::vector<uint16_t> f16 = {0x3C00, 0x8001, 0x7BFF, 0x0000};
+    imp::RawTensor h{"lm_head.weight", "F16", {1, 4}, f16.data(), f16.size() * 2};
+    EXPECT_EQ(head_fp16_as_loaded(h), f16);  // F16 goes up as is
+
+    const std::vector<float> f32 = {1.0f, -0.5f, 3.0e-6f, 70000.0f};
+    imp::RawTensor f{"lm_head.weight", "F32", {1, 4}, f32.data(), f32.size() * 4};
+    const std::vector<uint16_t> f32_got = head_fp16_as_loaded(f);
+    ASSERT_EQ(f32_got.size(), 4u);
+    for (size_t i = 0; i < f32.size(); i++)
+        EXPECT_EQ(f32_got[i], imp::wupload::float_to_fp16(f32[i])) << i;
+}
+
+TEST(QuantizeFp8Head, WritesCodesAndRowScalesUnderTheLoaderNames) {
+    const std::vector<uint8_t> codes(4 * 256, 0x38);
+    const std::vector<float> scales = {0.5f, 0.25f, 1.0f, 2.0f};
+    const auto outs = fp8_head_outputs(4, 256, codes.data(), scales.data());
+    EXPECT_EQ(outs[0].name, "lm_head.weight");
+    EXPECT_EQ(outs[0].dtype, "F8_E4M3");
+    EXPECT_EQ(outs[0].shape, (std::vector<int64_t>{4, 256}));
+    EXPECT_EQ(outs[0].data, codes.data());
+    EXPECT_EQ(outs[0].nbytes, 4u * 256u);
+    // weight_map.cpp routes exactly this name to out_proj_row_scales_.
+    EXPECT_EQ(outs[1].name, imp::kLmHeadRowScaleTensor);
+    EXPECT_EQ(outs[1].dtype, "F32");
+    EXPECT_EQ(outs[1].shape, (std::vector<int64_t>{4}));
+    EXPECT_EQ(outs[1].data, scales.data());
+    EXPECT_EQ(outs[1].nbytes, 16u);
+    EXPECT_EQ(outs[0].nbytes + outs[1].nbytes, fp8_head_bytes(4, 256));
+}
+
+// The loader serves exactly what the writer emits, and refuses codes it cannot pair with scales.
+TEST(QuantizeFp8Head, LoaderAcceptsTheWrittenHeadOnly) {
+    uint8_t byte = 0;
+    const int64_t hs[2] = {4, 256}, ss[1] = {4}, bad_ss[1] = {3}, ns[1] = {256}, narrow[2] = {4, 128};
+    const imp::Tensor head(&byte, imp::QType::FP8_E4M3, 2, hs, true);
+    const imp::Tensor sc(&byte, imp::QType::F32, 1, ss, false);
+    const imp::Tensor norm(&byte, imp::QType::F16, 1, ns, true);
+    EXPECT_TRUE(imp::wupload::lm_head_row_scales_ok(head, norm, sc));
+    EXPECT_FALSE(imp::wupload::lm_head_row_scales_ok(head, norm,
+                                                     imp::Tensor(&byte, imp::QType::F32, 1, bad_ss, false)));
+    EXPECT_FALSE(
+        imp::wupload::lm_head_row_scales_ok(head, norm, imp::Tensor(&byte, imp::QType::F16, 1, ss, false)));
+    EXPECT_FALSE(
+        imp::wupload::lm_head_row_scales_ok(imp::Tensor(&byte, imp::QType::BF16, 2, hs, true), norm, sc));
+    EXPECT_FALSE(
+        imp::wupload::lm_head_row_scales_ok(imp::Tensor(&byte, imp::QType::FP8_E4M3, 2, narrow, true), norm,
+                                            sc));
+    EXPECT_FALSE(
+        imp::wupload::lm_head_row_scales_ok(head, imp::Tensor(&byte, imp::QType::BF16, 1, ns, true), sc));
+}
+
+TEST(QuantizeFp8Head, Qwen38HeadIsHalfTheBf16Bytes) {
+    // docs/roadmap.md row 104: 248320 x 5120, BF16 2425.0 MiB -> 1213.4 MiB.
+    const size_t fp8 = fp8_head_bytes(248320, 5120);
+    EXPECT_EQ(fp8, 1272391680u);
+    EXPECT_NEAR(fp8 / 1048576.0, 1213.4, 0.05);
+    EXPECT_NEAR(248320.0 * 5120 * 2 / 1048576.0, 2425.0, 0.05);
+}
+
+// ---- FP8 KV hint (#2480) -------------------------------------------------
+
+TEST(QuantizeKvHint, AllowlistIsTheMeasuredFamiliesOnly) {
+    EXPECT_TRUE(kv_fp8_hint_allowlisted("qwen3"));      // Qwen3-14B +1.07 %
+    EXPECT_TRUE(kv_fp8_hint_allowlisted("qwen3_moe"));  // Qwen3-30B-A3B neutral
+    for (const char* mt : {"", "llama", "qwen2", "qwen3_5", "qwen3_next", "deepseek_v2", "gemma3", "gpt_oss"})
+        EXPECT_FALSE(kv_fp8_hint_allowlisted(mt)) << mt;
+
+    KvHint h = KvHint::None;
+    ASSERT_TRUE(parse_kv_hint("auto", h));
+    EXPECT_EQ(h, KvHint::Auto);
+    ASSERT_TRUE(parse_kv_hint("fp8", h));
+    EXPECT_EQ(h, KvHint::Fp8);
+    ASSERT_TRUE(parse_kv_hint("none", h));
+    EXPECT_EQ(h, KvHint::None);
+    EXPECT_FALSE(parse_kv_hint("FP8", h));
+
+    EXPECT_TRUE(kv_fp8_hint_on(KvHint::Auto, "qwen3"));
+    EXPECT_FALSE(kv_fp8_hint_on(KvHint::Auto, "llama"));
+    EXPECT_TRUE(kv_fp8_hint_on(KvHint::Fp8, "llama"));
+    EXPECT_FALSE(kv_fp8_hint_on(KvHint::None, "qwen3"));
+
+    // compressed-tensors has no field imp reads the hint from: never declared there.
+    EXPECT_TRUE(kv_fp8_for_export(KvHint::Auto, OutputFormat::Modelopt, "qwen3_moe"));
+    EXPECT_FALSE(kv_fp8_for_export(KvHint::Auto, OutputFormat::CompressedTensors, "qwen3_moe"));
+    EXPECT_FALSE(kv_fp8_for_export(KvHint::Fp8, OutputFormat::CompressedTensors, "qwen3"));
+    EXPECT_STREQ(kv_hint_name(KvHint::None), "none");
+}
+
+TEST(QuantizeKvHint, LoaderReadsTheHintTheWriterDeclares) {
+    for (const bool kv_fp8 : {true, false}) {
+        TempDir d;
+        const auto wrote = write_modelopt_quant_config(d.path, {"lm_head"}, /*calibrated=*/false, kv_fp8);
+        ASSERT_TRUE(wrote) << wrote.error();
+        imp::HFConfigLoader::NvFP4Config cfg;
+        ASSERT_TRUE(imp::HFConfigLoader::load_nvfp4_config(d.path, cfg)) << d.read("hf_quant_config.json");
+        // engine_init_resolver.cpp compares against exactly "FP8"; null reads as empty.
+        EXPECT_EQ(cfg.kv_cache_quant_algo, kv_fp8 ? "FP8" : "") << d.read("hf_quant_config.json");
+        ASSERT_EQ(cfg.exclude_modules.size(), 1u);
+        EXPECT_EQ(cfg.exclude_modules[0], "lm_head");
+    }
 }
