@@ -1,7 +1,9 @@
 #include "gguf_stub.h"
 
+#include "model/safetensors_writer.h"
 #include "runtime/config.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -175,13 +177,25 @@ std::string generate_gguf_stub(const std::string& arch) { return generate_gguf_s
 
 std::string generate_gguf_stub(const std::string& arch, const std::vector<float>& rope_freqs,
                                const std::string& pre) {
+    GgufStubSpec spec;
+    spec.arch = arch;
+    spec.rope_freqs = rope_freqs;
+    spec.pre = pre;
+    return generate_gguf_stub(spec);
+}
+
+std::string generate_gguf_stub(const GgufStubSpec& spec) {
+    const std::string& arch = spec.arch;
+    const std::vector<float>& rope_freqs = spec.rope_freqs;
+    const std::string& pre = spec.pre;
+    const int n_layers = spec.n_layers > 0 ? spec.n_layers : N_LAYERS;
     // ---- 1. Build tensor list ----
     // GGUF dims are stored innermost-first. For a 2D weight [rows, cols] in our
     // convention, GGUF stores ne[0]=cols, ne[1]=rows.
 
     std::vector<TensorDesc> tensors;
 
-    auto add_2d = [&](const char* name, int rows, int cols, uint32_t type) {
+    auto add_2d = [&](const std::string& name, int rows, int cols, uint32_t type) {
         TensorDesc td;
         td.name = name;
         td.n_dims = 2;
@@ -194,7 +208,7 @@ std::string generate_gguf_stub(const std::string& arch, const std::vector<float>
         tensors.push_back(td);
     };
 
-    auto add_1d = [&](const char* name, int size, uint32_t type) {
+    auto add_1d = [&](const std::string& name, int size, uint32_t type) {
         TensorDesc td;
         td.name = name;
         td.n_dims = 1;
@@ -210,20 +224,22 @@ std::string generate_gguf_stub(const std::string& arch, const std::vector<float>
     // token_embd.weight [VOCAB, D_MODEL] FP16
     add_2d("token_embd.weight", VOCAB, D_MODEL, GGML_TYPE_F16);
 
-    // blk.0 attention
-    add_1d("blk.0.attn_norm.weight", D_MODEL, GGML_TYPE_F32);
-    // attn_q: [n_heads * head_dim, d_model] = [64, 64] for our config
-    add_2d("blk.0.attn_q.weight", N_HEADS * HEAD_DIM, D_MODEL, GGML_TYPE_F16);
-    add_2d("blk.0.attn_k.weight", N_HEADS * HEAD_DIM, D_MODEL, GGML_TYPE_F16);
-    add_2d("blk.0.attn_v.weight", N_HEADS * HEAD_DIM, D_MODEL, GGML_TYPE_F16);
-    // attn_output: [d_model, n_heads * head_dim]
-    add_2d("blk.0.attn_output.weight", D_MODEL, N_HEADS * HEAD_DIM, GGML_TYPE_F16);
+    for (int l = 0; l < n_layers; ++l) {
+        const std::string blk = "blk." + std::to_string(l) + ".";
+        // attention; attn_q: [n_heads * head_dim, d_model] = [64, 64] for our config
+        add_1d(blk + "attn_norm.weight", D_MODEL, GGML_TYPE_F32);
+        add_2d(blk + "attn_q.weight", N_HEADS * HEAD_DIM, D_MODEL, GGML_TYPE_F16);
+        add_2d(blk + "attn_k.weight", N_HEADS * HEAD_DIM, D_MODEL, GGML_TYPE_F16);
+        add_2d(blk + "attn_v.weight", N_HEADS * HEAD_DIM, D_MODEL, GGML_TYPE_F16);
+        // attn_output: [d_model, n_heads * head_dim]
+        add_2d(blk + "attn_output.weight", D_MODEL, N_HEADS * HEAD_DIM, GGML_TYPE_F16);
 
-    // blk.0 FFN
-    add_1d("blk.0.ffn_norm.weight", D_MODEL, GGML_TYPE_F32);
-    add_2d("blk.0.ffn_gate.weight", D_FF, D_MODEL, GGML_TYPE_F16);
-    add_2d("blk.0.ffn_up.weight", D_FF, D_MODEL, GGML_TYPE_F16);
-    add_2d("blk.0.ffn_down.weight", D_MODEL, D_FF, GGML_TYPE_F16);
+        // FFN
+        add_1d(blk + "ffn_norm.weight", D_MODEL, GGML_TYPE_F32);
+        add_2d(blk + "ffn_gate.weight", D_FF, D_MODEL, GGML_TYPE_F16);
+        add_2d(blk + "ffn_up.weight", D_FF, D_MODEL, GGML_TYPE_F16);
+        add_2d(blk + "ffn_down.weight", D_MODEL, D_FF, GGML_TYPE_F16);
+    }
 
     // output norm + output projection
     add_1d("output_norm.weight", D_MODEL, GGML_TYPE_F32);
@@ -262,7 +278,8 @@ std::string generate_gguf_stub(const std::string& arch, const std::vector<float>
     // feed_forward_length + head_count + head_count_kv + rope.dimension_count +
     // layer_norm_rms_epsilon + tokenizer.ggml.model + tokens + token_type +
     // scores + bos_token_id + eos_token_id = 16
-    uint64_t n_kv = pre.empty() ? 16 : 17;
+    uint64_t n_kv = 15 + (spec.rope_dimension_count ? 1 : 0) + (pre.empty() ? 0 : 1) + spec.u32.size() +
+                    spec.f32.size() + spec.i32_arrays.size();
 
     // ---- 5. Write GGUF file ----
     BinaryWriter w;
@@ -278,12 +295,19 @@ std::string generate_gguf_stub(const std::string& arch, const std::vector<float>
     w.write_kv_string("general.name", "stub");
     w.write_kv_u32(arch + ".context_length", CTX_LEN);
     w.write_kv_u32(arch + ".embedding_length", D_MODEL);
-    w.write_kv_u32(arch + ".block_count", N_LAYERS);
+    w.write_kv_u32(arch + ".block_count", static_cast<uint32_t>(n_layers));
     w.write_kv_u32(arch + ".feed_forward_length", D_FF);
     w.write_kv_u32(arch + ".attention.head_count", N_HEADS);
     w.write_kv_u32(arch + ".attention.head_count_kv", N_HEADS);
-    w.write_kv_u32(arch + ".rope.dimension_count", HEAD_DIM);
+    if (spec.rope_dimension_count)
+        w.write_kv_u32(arch + ".rope.dimension_count", HEAD_DIM);
     w.write_kv_f32(arch + ".attention.layer_norm_rms_epsilon", 1e-5f);
+    for (const auto& [k, v] : spec.u32)
+        w.write_kv_u32(arch + "." + k, v);
+    for (const auto& [k, v] : spec.f32)
+        w.write_kv_f32(arch + "." + k, v);
+    for (const auto& [k, v] : spec.i32_arrays)
+        w.write_kv_i32_array(arch + "." + k, v);
     w.write_kv_string("tokenizer.ggml.model", "gpt2");
     if (!pre.empty())
         w.write_kv_string("tokenizer.ggml.pre", pre);
@@ -369,6 +393,60 @@ std::string generate_gguf_stub(const std::string& arch, const std::vector<float>
     }
 
     return path;
+}
+
+std::string generate_hf_stub(const std::string& config_json, int n_layers) {
+    struct Desc {
+        std::string name;
+        std::vector<int64_t> shape;
+    };
+    std::vector<Desc> descs = {{"model.embed_tokens.weight", {VOCAB, D_MODEL}}};
+    for (int l = 0; l < n_layers; ++l) {
+        const std::string p = "model.layers." + std::to_string(l) + ".";
+        descs.push_back({p + "input_layernorm.weight", {D_MODEL}});
+        descs.push_back({p + "self_attn.q_proj.weight", {N_HEADS * HEAD_DIM, D_MODEL}});
+        descs.push_back({p + "self_attn.k_proj.weight", {N_HEADS * HEAD_DIM, D_MODEL}});
+        descs.push_back({p + "self_attn.v_proj.weight", {N_HEADS * HEAD_DIM, D_MODEL}});
+        descs.push_back({p + "self_attn.o_proj.weight", {D_MODEL, N_HEADS * HEAD_DIM}});
+        descs.push_back({p + "post_attention_layernorm.weight", {D_MODEL}});
+        descs.push_back({p + "mlp.gate_proj.weight", {D_FF, D_MODEL}});
+        descs.push_back({p + "mlp.up_proj.weight", {D_FF, D_MODEL}});
+        descs.push_back({p + "mlp.down_proj.weight", {D_MODEL, D_FF}});
+    }
+    descs.push_back({"model.norm.weight", {D_MODEL}});
+    descs.push_back({"lm_head.weight", {VOCAB, D_MODEL}});
+
+    size_t max_elems = 0;
+    for (const auto& d : descs) {
+        size_t n = 1;
+        for (int64_t s : d.shape)
+            n *= static_cast<size_t>(s);
+        max_elems = std::max(max_elems, n);
+    }
+    const std::vector<uint16_t> zeros(max_elems, 0);  // F16 zeros: RoPE parity reads no weights
+    std::vector<SafeTensorsOut> out;
+    for (const auto& d : descs) {
+        size_t n = 1;
+        for (int64_t s : d.shape)
+            n *= static_cast<size_t>(s);
+        out.push_back({d.name, "F16", d.shape, zeros.data(), n * sizeof(uint16_t)});
+    }
+
+    char dir_tmpl[] = "/tmp/imp_stub_XXXXXX";
+    if (!mkdtemp(dir_tmpl))
+        return "";
+    const std::string dir = std::string(dir_tmpl) + "/hf";
+    std::error_code ec;
+    std::filesystem::create_directory(dir, ec);
+    FILE* f = ec ? nullptr : fopen((dir + "/config.json").c_str(), "wb");
+    const bool cfg_ok = f && fwrite(config_json.data(), 1, config_json.size(), f) == config_json.size();
+    if (f)
+        fclose(f);
+    if (!cfg_ok || !write_safetensors(dir + "/model.safetensors", out).empty()) {
+        remove_gguf_stub(dir);
+        return "";
+    }
+    return dir;
 }
 
 std::string stub_cache_dir(const std::string& stub_path) {

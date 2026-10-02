@@ -1,5 +1,7 @@
 #pragma once
 #include <string>
+#include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace imp {
@@ -17,6 +19,23 @@ std::string generate_gguf_stub(const std::string& arch = "llama");
 // pre: tokenizer.ggml.pre value, omitted when empty.
 std::string generate_gguf_stub(const std::string& arch, const std::vector<float>& rope_freqs,
                                const std::string& pre = "");
+
+// Stub with n_layers blocks and extra arch-prefixed metadata ("rope.freq_base" -> "<arch>.rope.freq_base").
+struct GgufStubSpec {
+    std::string arch = "llama";
+    int n_layers = 1;
+    std::vector<float> rope_freqs;
+    std::string pre;                   // tokenizer.ggml.pre, omitted when empty
+    bool rope_dimension_count = true;  // false: omit <arch>.rope.dimension_count
+    std::vector<std::pair<std::string, uint32_t>> u32;
+    std::vector<std::pair<std::string, float>> f32;
+    std::vector<std::pair<std::string, std::vector<int32_t>>> i32_arrays;
+};
+std::string generate_gguf_stub(const GgufStubSpec& spec);
+
+// SafeTensors twin of the GGUF stub: /tmp/imp_stub_XXXXXX/hf/{config.json,model.safetensors}, HF
+// llama tensor names, same geometry. Returns the hf/ dir ("" on failure); remove_gguf_stub frees it.
+std::string generate_hf_stub(const std::string& config_json, int n_layers);
 
 // Stub layout: /tmp/imp_stub_XXXXXX/{model.gguf,warm/}. Warm-cache files of stub loads go to
 // warm/ (never the persistent imp-test-cache volume, #2192) and die with the dir.

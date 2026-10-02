@@ -403,6 +403,88 @@ TEST_F(Gemma4ModelTest, NoRepetitionDegeneration) {
                                         << " chars in output of " << text.size() << "): " << text;
 }
 
+// Gemma-4 SafeTensors (NVFP4) long-context RoPE guard (#2530): needle at ~4k tokens, past the
+// 1024-token sliding window, so only the 5 full_attention layers can retrieve it. Red before
+// #2527 (partial_rotary_factor dropped): 3/3 depths below fail there, 0/3 after.
+
+static const char* gemma4_nvfp4_model() { return std::getenv(imp_test::kEnvModelGemma4Nvfp4); }
+
+class Gemma4SafeTensorsTest : public ::testing::Test {
+protected:
+    static constexpr int kMaxSeq = 4608;
+
+    void SetUp() override {
+        path_ = gemma4_nvfp4_model();
+        if (!path_)
+            GTEST_SKIP() << "Set IMP_TEST_MODEL_GEMMA4_NVFP4 to run";
+        ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path_, imp_test::kEnvModelGemma4Nvfp4));
+
+        ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_SAFETENSORS, &model_), IMP_SUCCESS);
+        ASSERT_NE(model_, nullptr);
+
+        ImpConfig cfg = imp_config_default();
+        cfg.max_seq_len = kMaxSeq;
+        cfg.max_batch_size = 1;
+        ASSERT_EQ(imp_context_create(model_, &cfg, &ctx_), IMP_SUCCESS);
+    }
+
+    void TearDown() override {
+        if (ctx_)
+            imp_context_free(ctx_);
+        if (model_)
+            imp_model_free(model_);
+    }
+
+    const char* path_ = nullptr;
+    ImpModel model_ = nullptr;
+    ImpContext ctx_ = nullptr;
+};
+
+// Haystack as tools/analysis/niah_check.py builds it (length 4900, 222 filler sentences).
+static std::string niah_prompt(const std::string& needle, double depth) {
+    static const std::string kFiller =
+        "The quarterly logistics report notes routine warehouse throughput and "
+        "nominal transit times across the regional distribution network. ";
+    constexpr int kReps = 222;
+    const int at = static_cast<int>(kReps * depth);
+    std::string s;
+    for (int i = 0; i < kReps; ++i) {
+        if (i == at)
+            s += needle + " ";
+        s += kFiller;
+    }
+    return s +
+           " Question: What is the secret vault access code mentioned earlier? "
+           "Answer with ONLY the code, nothing else.";
+}
+
+TEST_F(Gemma4SafeTensorsTest, NeedleBeyondSlidingWindow) {
+    ImpGenerateParams params = imp_generate_params_default();
+    params.max_tokens = 128;
+    params.temperature = 0.0f;
+    params.apply_chat_template = 1;
+
+    for (const auto& [depth, code] : {std::pair{0.05, "ZEBRA-4900-05"}, std::pair{0.25, "ZEBRA-4900-25"},
+                                      std::pair{0.50, "ZEBRA-4900-50"}}) {
+        const std::string prompt = niah_prompt(std::string("The secret vault access code is ") + code + ".",
+                                               depth);
+
+        std::vector<int32_t> ids(kMaxSeq);
+        int n = 0;
+        ASSERT_EQ(imp_tokenize(model_, prompt.c_str(), ids.data(), &n, kMaxSeq), IMP_SUCCESS);
+        // Needle must sit beyond the 1024-token window from the question, or SWA layers reach it.
+        ASSERT_GT(n * (1.0 - depth), 1024.0) << "prompt " << n << " tokens, depth " << depth;
+
+        ASSERT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
+        char output[8192];
+        size_t len = 0;
+        ASSERT_EQ(imp_generate(ctx_, prompt.c_str(), &params, output, sizeof(output), &len), IMP_SUCCESS);
+        const std::string text(output, len);
+        EXPECT_NE(text.find(code), std::string::npos)
+            << "depth " << depth << " (" << n << " prompt tokens): want " << code << ", got: " << text;
+    }
+}
+
 // Gemma-4 + CUDA graphs regression guard: AsyncGraphLoop's forward_decode_async() was a
 // parallel reimplementation that diverged on Gemma-4 Q4_K_M (sampled <eos> at step 0,
 // terminating after ~3 tokens with garbage). Fixed by unifying it with forward_logits() (the
