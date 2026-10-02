@@ -318,6 +318,15 @@ MoeDp4aGateUpFn moe_dp4a_gate_up_kernel(QType qt);
 MoeFp16DecodeFn moe_fp16_decode_kernel(QType qt);
 MoeFp16GateUpFn moe_fp16_gate_up_kernel(QType qt);
 
+// MoE prefill selectors (#2459), same contract: supported() = has an arm, getters throw otherwise.
+using MoeFusedDp4aPrefillFn = void (*)(const void*, const block_q8_1*, const float*, void*, const int32_t*,
+                                       int, int, int, size_t, cudaStream_t);
+[[nodiscard]] bool moe_fused_dp4a_prefill_supported(QType qt);
+MoeFusedDp4aPrefillFn moe_fused_dp4a_prefill_kernel(QType qt);
+// qkind argument of mmq_imma_moe_gemm.
+[[nodiscard]] bool moe_imma_prefill_supported(QType qt);
+[[nodiscard]] int moe_imma_prefill_qkind(QType qt);
+
 // Max-L1 SMEM carveout on every dp4a GEMV kernel template instantiation.
 // Called from GraphExecutor::init(), independent of PDL: the kernels carry no
 // pdl_wait() and are not registered (AUDIT_arch_2026 A1-3 / A2-1).
