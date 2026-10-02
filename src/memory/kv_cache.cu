@@ -78,26 +78,7 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
             scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * sizeof(half);
         }
         // Always 2x: K scales region + V scales region (even for TURBOQUANT_LITE)
-        size_t scale_total = static_cast<size_t>(n_layers_) * max_blocks_ * 2 * scale_block_bytes_;
-        if (alloc_) {
-            scale_pool_ = alloc_->allocate(scale_total, "kv_cache_scales");
-        } else {
-            cudaError_t serr = cudaMalloc(&scale_pool_, scale_total);
-            if (serr != cudaSuccess)
-                scale_pool_ = nullptr;
-        }
-        if (!scale_pool_) {
-            if (alloc_)
-                alloc_->free(pool_);
-            else
-                IMP_CUDA_CHECK_LOG(cudaFree(pool_));
-            pool_ = nullptr;
-            char msg[256];
-            std::snprintf(msg, sizeof(msg), "KVCache: allocation failed for %s scale pool %.2f MiB",
-                          dtype_name(dtype), static_cast<double>(scale_total) / (1024.0 * 1024.0));
-            throw std::runtime_error(msg);
-        }
-        IMP_CUDA_CHECK_LOG(cudaMemset(scale_pool_, 0, scale_total));
+        alloc_scale_pool_(static_cast<size_t>(n_layers_) * max_blocks_ * 2 * scale_block_bytes_);
     }
 
     // Block ids + refcounts. Slots-only: this class keeps the memory (the
@@ -203,29 +184,8 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
         throw std::runtime_error("KVCache per-layer shape: INT8/INT4 scale pools not yet supported");
     }
 
-    if (dtype == QType::NVFP4 || dtype == QType::MXFP4_KV) {
-        const size_t sc_total = layout_layer_scales_(n_kv_heads_per_layer, head_dim_per_layer);
-        if (alloc_) {
-            scale_pool_ = alloc_->allocate(sc_total, "kv_cache_scales");
-        } else {
-            cudaError_t serr = cudaMalloc(&scale_pool_, sc_total);
-            if (serr != cudaSuccess)
-                scale_pool_ = nullptr;
-        }
-        if (!scale_pool_) {
-            if (alloc_)
-                alloc_->free(pool_);
-            else
-                IMP_CUDA_CHECK_LOG(cudaFree(pool_));
-            pool_ = nullptr;
-            char msg[256];
-            std::snprintf(msg, sizeof(msg),
-                          "KVCache(per-layer NVFP4): scale pool alloc failed for %.2f MiB",
-                          static_cast<double>(sc_total) / (1024.0 * 1024.0));
-            throw std::runtime_error(msg);
-        }
-        IMP_CUDA_CHECK_LOG(cudaMemset(scale_pool_, 0, sc_total));
-    }
+    if (dtype == QType::NVFP4 || dtype == QType::MXFP4_KV)
+        alloc_scale_pool_(layout_layer_scales_(n_kv_heads_per_layer, head_dim_per_layer));
 
     // `usable`, never max_blocks_: on a growable pool max_blocks_ is the
     // CEILING, and handing out an id whose memory is not committed yet faults
@@ -375,7 +335,12 @@ KVCache::~KVCache() {
         IMP_CUDA_CHECK_LOG(cudaFree(d_copy_meta_));
         d_copy_meta_ = nullptr;
     }
-    if (scale_pool_) {
+    if (scale_region_) {
+        MemAccount::instance().note("kv_cache_scales",
+                                    -static_cast<std::ptrdiff_t>(scale_region_.committed()));
+        scale_region_.reset();
+        scale_pool_ = nullptr;
+    } else if (scale_pool_) {
         if (alloc_)
             alloc_->free(scale_pool_);
         else
@@ -526,8 +491,8 @@ int KVCache::commit_blocks_(int blocks) {
     // waited on is these memsets, and growth is rare, so the sync costs nothing extra.
     if (blocks > first_new)
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(0));
-    // A block is usable only with its metadata backed too (sparse decode, #2360).
-    if (!commit_minmax_(first_new, blocks))
+    // A block is usable only with its scales and metadata backed too (#2483, #2360).
+    if (!commit_scales_(first_new, blocks) || !commit_minmax_(first_new, blocks))
         return committed_blocks_;
     committed_blocks_ = blocks;
     return blocks;
@@ -575,6 +540,8 @@ size_t KVCache::bytes_per_block() const {
         const size_t bb = layer_block_bytes_.empty() ? block_bytes_
                                                      : layer_block_bytes_[static_cast<size_t>(l)];
         total += 2 * bb;  // K and V
+        if (scale_region_ && !layer_is_swa(l))
+            total += 2 * scale_block_bytes(l);  // a windowed layer's plane commits whole at init
     }
     if (minmax_region_)
         total += static_cast<size_t>(n_layers_) * minmax_block_bytes_;  // grows with the block
@@ -658,6 +625,7 @@ bool KVCache::raise_ceiling(int ceiling_blocks) {
     std::swap(pool_, fresh->pool_);
     std::swap(region_, fresh->region_);
     std::swap(scale_pool_, fresh->scale_pool_);
+    std::swap(scale_region_, fresh->scale_region_);
     std::swap(max_blocks_, fresh->max_blocks_);
     std::swap(committed_blocks_, fresh->committed_blocks_);
     std::swap(layer_k_offset_, fresh->layer_k_offset_);

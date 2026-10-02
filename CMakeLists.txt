@@ -180,6 +180,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/mem_account.cpp
     src/memory/kv_cache.cu
     src/memory/kv_cache_minmax.cu
+    src/memory/kv_cache_scales.cu
     src/memory/kv_cache_manager.cpp
     src/memory/kv_cache_manager_spill.cpp
     src/memory/kv_cache_manager_session.cpp
