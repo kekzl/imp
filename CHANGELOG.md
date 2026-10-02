@@ -62,6 +62,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - An explicit `runtime.max_batch_size` the weight-upload reserve cannot hold is clamped after Pass 1, with a WARN
   naming configured and fitting batch and the per-slot state cost, instead of aborting the load: Qwen3.8-27B-NVFP4
   at 64 slots failed `w_gate` of layer 59, now `clamped 64 -> 53` at upload, plan 53 -> 48, serves (#2393)
+- Gemma-3 SafeTensors reads `rope_local_base_freq`, `sliding_window_pattern`, `layer_types` and
+  `rope_parameters.{full,sliding}_attention` (#2531): local layers ran theta 1e6 instead of 1e4 with no
+  local/global split. Loader parity test matches GGUF on 3 Gemma-3 configs.
 
 ## [0.47.0] - 2026-10-01
 
