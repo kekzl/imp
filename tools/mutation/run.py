@@ -53,6 +53,7 @@ MODEL_ENV = {
     'IMP_TEST_MODEL_LLAMA': '/models/Llama-3.2-3B-Instruct-Q8_0.gguf',
     'IMP_TEST_MODEL_GDN': '/models/Qwen3.5-4B-mxfp4.gguf',
     'IMP_TEST_MODEL_GEMMA4': '/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf',
+    'IMP_TEST_MODEL_GEMMA4_NVFP4': '/models/Gemma-4-26B-A4B-it-NVFP4',
     'IMP_TEST_MOE_MODEL': '/models/gpt-oss-20b-mxfp4.gguf',
     'IMP_TEST_MODEL_DEEPSEEK': '/models/DeepSeek-V2-Lite',
     # Qwen3VLPipelineTest calls load_safetensors() on a DIRECTORY — pointing it

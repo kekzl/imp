@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- Loader parity tests (#2530): `LoaderRopeParity` (test-core) loads one stub per arch (Gemma-4, Llama 3, Granite, Qwen3) through `load_gguf` and `load_safetensors` and compares per-layer RoPE tables and softmax scales. `Gemma4SafeTensorsTest` (test-e2e, `IMP_TEST_MODEL_GEMMA4_NVFP4`): needle at ~4k tokens on NVFP4, red before #2527.
 - Granite 4.2 (#2412): `GraniteForCausalLM` loads as its own arch; `attention_multiplier` (1/128) is the softmax scale, embedding / residual multipliers fold into the embedding scale. granite-4.2-8b `ppl_corpus_45k` 25.36 BF16, 27.17 NVFP4 (was 1380.74 as GENERIC); HF fp32 top-1 32/32.
 - imp-quantize export recipe (#2481): `producer.recipe` in hf_quant_config.json (imp_recipe.json for vllm) records imp version + git tree, every flag, calibration file sha256, samples and resolved groups. `make test-quantize-repro`: two Qwen3-0.6B `--calib` exports, 9 of 9 files sha256-equal.
 - `make preflight` (`scripts/preflight.sh`, CPU only, `imp:lint`): every `ci_static_gates.sh` gate, clang-tidy on changed TUs, `git clang-format` on changed lines, actionlint on a `.github/` change; one table, exit 1 on any FAIL. 19-22 s with no TU changed.

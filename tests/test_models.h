@@ -27,6 +27,8 @@ inline constexpr const char* kEnvGolden = "IMP_TEST_GOLDEN";
 // Architecture-specific overrides for the multi-model E2E suite.
 inline constexpr const char* kEnvModelGdn = "IMP_TEST_MODEL_GDN";
 inline constexpr const char* kEnvModelGemma4 = "IMP_TEST_MODEL_GEMMA4";
+// Gemma-4 SafeTensors dir (NVFP4) for the long-context RoPE guard (#2530).
+inline constexpr const char* kEnvModelGemma4Nvfp4 = "IMP_TEST_MODEL_GEMMA4_NVFP4";
 
 // Chunked-prefill calibration models. Deliberately distinct from kEnvModel:
 // the chunk-equality expectations are calibrated for these specific models.
