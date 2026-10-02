@@ -830,6 +830,8 @@ if(IMP_BUILD_TESTS)
 
     imp_add_test_module(test-core WITH_STUB SOURCES
         tests/test_cuda_errors.cpp
+        # MoE prefill selectors (#2459): table lookups, no kernel launch.
+        tests/test_moe_prefill_select.cpp
         tests/test_batch_verify_predicates.cpp
         tests/test_forward_profile.cpp
         tests/test_lora_dims.cpp
