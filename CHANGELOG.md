@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- imp-quantize reads per-tensor-scale FP8 sources (Modelopt scalar `weight_scale`, #2473): widened with the scalar, `weight_scale` and `input_scale` dropped. `--dry-run` on a synthetic Modelopt FP8 Qwen3-0.6B: 196 of 196 E4M3 weights quantized (was 0, all copied through).
 - `POST /v1/requests/{id}/end_thinking` (#2420): forces the reasoning closer (`</think>`, Harmony final-channel opener) at the next step, the answer continues on the same KV; id = response id or `X-Request-Id`, all dialects. 200 `ending`/`already_closed`, 404 unknown, `imp_think_end_requests_total`.
 - Loader parity tests (#2530): `LoaderRopeParity` (test-core) loads Gemma-4, Llama 3, Granite and Qwen3 stubs via `load_gguf` and `load_safetensors`, compares per-layer RoPE tables and softmax scales. `Gemma4SafeTensorsTest` (test-e2e): ~4k-token needle on NVFP4, red before #2527. GGUF Gemma-4 rope table now freed with the model (LSan).
 - Granite 4.2 (#2412): `GraniteForCausalLM` loads as its own arch; `attention_multiplier` (1/128) is the softmax scale, embedding / residual multipliers fold into the embedding scale. granite-4.2-8b `ppl_corpus_45k` 25.36 BF16, 27.17 NVFP4 (was 1380.74 as GENERIC); HF fp32 top-1 32/32.

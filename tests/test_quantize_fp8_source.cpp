@@ -8,6 +8,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -142,6 +144,67 @@ TEST(Fp8Source, AcceptsTheDtypeSpellingsExportersUse) {
     // E5M2 has a different exponent bias; decoding it as E4M3 would be silent.
     EXPECT_FALSE(is_fp8_e4m3_dtype("F8_E5M2"));
     EXPECT_FALSE(is_fp8_e4m3_dtype("BF16"));
+}
+
+// --- per-tensor scale (Modelopt FP8, #2473) ---------------------------------
+
+TEST(Fp8Source, PerTensorScaleMultipliesEveryElement) {
+    // 4x3 weight: no square block explains a 1-element grid, so only the per-tensor path reads it.
+    uint8_t w[12];
+    for (auto& b : w)
+        b = 0x40;  // 2.0
+    w[11] = 0xB8;  // -1.0
+    const float s[1] = {0.25f};
+    for (const std::vector<int64_t>& scale_shape : {std::vector<int64_t>{}, std::vector<int64_t>{1}}) {
+        const auto out = fp8_scaled_to_fp16(make("F8_E4M3", {4, 3}, w), make("F32", scale_shape, s));
+        ASSERT_TRUE(out) << out.error();
+        ASSERT_EQ(out->size(), 12u);
+        EXPECT_FLOAT_EQ(fp16_to_float((*out)[0]), 0.5f);
+        EXPECT_FLOAT_EQ(fp16_to_float((*out)[10]), 0.5f);
+        EXPECT_FLOAT_EQ(fp16_to_float((*out)[11]), -0.25f);
+    }
+    const uint16_t s_bf16[1] = {0x4040};  // 3.0
+    const auto bf = fp8_tensor_scaled_to_fp16(make("F8_E4M3", {4, 3}, w), make("BF16", {}, s_bf16));
+    ASSERT_TRUE(bf) << bf.error();
+    EXPECT_FLOAT_EQ(fp16_to_float((*bf)[0]), 6.0f);
+}
+
+TEST(Fp8Source, PerTensorRefusesAGridOrABadWeight) {
+    const uint8_t w[4] = {0x38, 0x38, 0x38, 0x38};
+    const float s[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    EXPECT_FALSE(fp8_tensor_scaled_to_fp16(make("F8_E4M3", {2, 2}, w), make("F32", {2, 2}, s)).has_value());
+    EXPECT_FALSE(fp8_tensor_scaled_to_fp16(make("BF16", {2, 2}, w), make("F32", {}, s)).has_value());
+    EXPECT_FALSE(fp8_tensor_scaled_to_fp16(make("F8_E4M3", {2, 2}, w), make("U8", {}, s)).has_value());
+}
+
+TEST(Fp8Source, PairsModeloptAndBlockScaledSources) {
+    const uint8_t w[4] = {};
+    const float s[1] = {1.0f};
+    auto named = [&](const std::string& name, const std::string& dtype, std::vector<int64_t> shape) {
+        RawTensor t = make(dtype, std::move(shape), dtype == "F32" ? static_cast<const void*>(s) : w);
+        t.name = name;
+        return t;
+    };
+    const std::vector<RawTensor> ts = {
+        named("m.q_proj.weight", "F8_E4M3", {2, 2}),   named("m.q_proj.weight_scale", "F32", {}),
+        named("m.q_proj.input_scale", "F32", {}),      named("m.up.weight", "F8_E4M3", {2, 2}),
+        named("m.up.weight_scale_inv", "F32", {1, 1}), named("m.down.weight", "F8_E4M3", {2, 2}),
+        named("m.norm.weight", "BF16", {2}),           named("m.gate.weight", "F8_E4M3", {2, 2}),
+        named("m.gate.weight_scale", "F32", {2, 1}),
+    };
+    std::map<std::string, const RawTensor*> by_name;
+    for (const auto& t : ts)
+        by_name[t.name] = &t;
+    const Fp8Pairing p = pair_fp8_scales(by_name);
+    EXPECT_EQ(p.n_tensor, 1u);
+    EXPECT_EQ(p.n_block, 1u);
+    ASSERT_EQ(p.scale_of.count("m.q_proj.weight"), 1u);
+    EXPECT_EQ(p.scale_of.at("m.q_proj.weight")->name, "m.q_proj.weight_scale");
+    EXPECT_EQ(p.scale_of.at("m.up.weight")->name, "m.up.weight_scale_inv");
+    EXPECT_EQ(p.consumed, (std::set<std::string>{"m.q_proj.weight_scale", "m.q_proj.input_scale",
+                                                 "m.up.weight_scale_inv"}));
+    // No scale, or a weight_scale that is not a scalar: copied through, never guessed.
+    EXPECT_EQ(p.unpaired, (std::vector<std::string>{"m.down.weight", "m.gate.weight"}));
 }
 
 }  // namespace
