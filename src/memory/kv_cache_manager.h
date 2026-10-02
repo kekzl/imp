@@ -168,6 +168,18 @@ public:
     // Cap on unique pin_prefix-pinned blocks. 0 = unlimited (default).
     void set_pin_budget_blocks(int blocks) { pin_budget_blocks_ = blocks; }
 
+    // ── Session pins (#2407, kv_cache_manager_session.cpp) ───────────
+    // One pin owner per session_id, same budget + FIFO as pin_prefix; each turn replaces the pin
+    // and moves the session to the FIFO back. Released by close_session, expire_sessions or budget.
+    void pin_session(const std::string& session_id, int seq_id, int num_blocks, int64_t now_ms);
+    // Returns blocks released; 0 for an unknown id.
+    int close_session(const std::string& session_id);
+    // Closes every session idle (no pin) for more than ttl_ms. ttl_ms <= 0: no-op. Returns count.
+    int expire_sessions(int64_t now_ms, int64_t ttl_ms);
+    // Sessions holding a pin, and the per-session sum of their pinned blocks. Safe from any thread.
+    int num_sessions() const { return num_sessions_.load(std::memory_order_relaxed); }
+    int num_session_pinned_blocks() const { return session_pinned_blocks_.load(std::memory_order_relaxed); }
+
     // Cached (unreferenced) blocks that are actually reclaimable, i.e.
     // excluding pinned blocks. O(1).
     int num_reclaimable_cached_blocks() const { return reclaimable_cached_count_; }
@@ -497,6 +509,20 @@ private:
     std::list<int> pin_fifo_;
     // Cap on unique pinned blocks (0 = unlimited).
     int pin_budget_blocks_ = 0;
+    // Session pins: owner ids are negative (request ids are >= 0), one per session_id.
+    struct SessionPin {
+        int owner;
+        int64_t last_pin_ms;
+    };
+    std::unordered_map<std::string, SessionPin> sessions_;
+    std::unordered_map<int, std::string> session_of_owner_;
+    int next_session_owner_ = -1;
+    std::atomic<int> num_sessions_{0};
+    std::atomic<int> session_pinned_blocks_{0};
+    // pin_prefix with a pin owner distinct from the sequence whose blocks are pinned.
+    void pin_blocks_as_(int owner, int seq_id, int num_blocks);
+    // Drops session bookkeeping for owner (after its pins are gone).
+    void forget_session_owner_(int owner);
 
     // seq_id -> total blocks promised at admission (prompt + max_tokens).
     // Only the part not yet held counts against can_allocate().

@@ -458,6 +458,10 @@ static int run_server(int argc, char** argv) {
         handle_lora_unload(req, res, state);
     });
 
+    svr.Post(R"(/v1/sessions/([^/]+)/close)", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_session_close(req, res, state);
+    });
+
     svr.Get("/metrics", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_metrics(req, res, state);
     });
@@ -605,6 +609,7 @@ static int run_server(int argc, char** argv) {
     printf("  POST   /admin/resume        Restore weights, serve again\n");
     printf("  POST   /admin/lora/load     Load a PEFT LoRA adapter {path, name?}\n");
     printf("  POST   /admin/lora/unload   Unload a LoRA adapter {id} or {name}\n");
+    printf("  POST   /v1/sessions/{id}/close  release a session_id prefix pin\n");
     printf("  GET    /metrics             Prometheus metrics\n");
     fflush(stdout);
 

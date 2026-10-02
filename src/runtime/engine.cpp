@@ -406,6 +406,16 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
             if (full_blocks > 0)
                 kv_manager_->pin_prefix(req->id, full_blocks);
         }
+        // session_id (#2407): the prompt's full blocks become the session's pin. Pin budget 0 = off.
+        if (!req->session_id.empty() && config_.prefix_pin_budget_pct > 0) {
+            const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch())
+                                       .count();
+            kv_manager_->pin_session(req->session_id, req->id,
+                                     static_cast<int>(req->input_tokens.size()) /
+                                         kv_manager_->kv_cache()->block_size(),
+                                     now_ms);
+        }
     }
     kv_manager_->free_sequence(req->id);
     release_recurrent_slot_(req->id);

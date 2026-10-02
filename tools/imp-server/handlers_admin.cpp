@@ -3,6 +3,7 @@
 // /admin/resume: reload from the snapshot; only weights stay warm, KV/graphs/cuBLAS rebuild.
 
 #include "handlers.h"
+#include "sampling_fields.h"
 #include "utils.h"
 
 #include <chrono>
@@ -393,4 +394,18 @@ void handle_lora_unload(const httplib::Request& req, httplib::Response& res, Ser
     printf("[lora] unloaded '%s' (id=%d)\n", name.c_str(), id);
     fflush(stdout);
     res.set_content(dump_safe(json{{"id", id}, {"name", name}, {"unloaded", true}}), "application/json");
+}
+
+void handle_session_close(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    const std::string id = req.matches.size() > 1 ? req.matches[1].str() : std::string();
+    if (!session_id_valid(id)) {
+        send_json_error(res, 400, "invalid_request_error", kSessionIdRule, "session_id");
+        return;
+    }
+    {
+        std::lock_guard<std::timed_mutex> lock(state.mtx);
+        if (state.batching)
+            state.batching->close_session(id);  // no engine (model-less, suspended): nothing is pinned
+    }
+    res.set_content(dump_safe(json{{"id", id}, {"object", "session"}, {"closed", true}}), "application/json");
 }

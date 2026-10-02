@@ -280,6 +280,8 @@ struct RuntimeConfig {
         bool prefix_cache = true;
         // Cap on cache_control/cache_prompt-pinned blocks, % of the KV pool.
         int prefix_pin_budget_pct = 25;
+        // session_id pins (#2407): released after this many idle seconds. 0 = close or budget only.
+        int session_ttl_s = 600;
         // Serve a model other than the loaded one by swapping to it instead
         // of answering 404. Swap is serial: in-flight generations drain
         // first (same contract as /admin/suspend), then the old model is

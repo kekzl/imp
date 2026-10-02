@@ -182,6 +182,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/kv_cache_minmax.cu
     src/memory/kv_cache_manager.cpp
     src/memory/kv_cache_manager_spill.cpp
+    src/memory/kv_cache_manager_session.cpp
     src/memory/kv_host_spill.cpp
     src/memory/recurrent_snapshot_store.cpp
     src/memory/weight_snapshot.cpp
@@ -808,6 +809,7 @@ if(IMP_BUILD_TESTS)
         tests/test_type_tables_golden.cpp
         tests/test_tensor_kind_matcher.cpp
         tests/test_kv_cache.cpp
+        tests/test_kv_session_pins.cpp
         tests/test_kv_accounting.cpp
         tests/test_json_out.cpp
         tests/test_gguf_loader.cpp

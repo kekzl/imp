@@ -39,6 +39,7 @@ inline std::string wrong_field_type_message(const std::string& raw_body) {
         {"echo", 'b'},
         {"model", 's'},
         {"encoding_format", 's'},
+        {"session_id", 's'},
         {"content", 's'},
         {"logprobs", 'l'},
         {"top_n", 'n'},

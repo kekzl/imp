@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
+#include <string>
 #include <type_traits>
 #include <variant>
 
@@ -24,6 +25,7 @@ struct SamplingFields {
     bool stream = false;
     bool ignore_eos = false;    // vLLM-style: run to max_tokens, never stop on EOS (benchmarks)
     bool cache_prompt = false;  // pin the prompt's KV blocks (llama.cpp field, Anthropic cache_control)
+    std::string session_id;     // agent session (#2407): pins the prompt blocks across turns
     bool top_p_explicit = false, top_k_explicit = false, rep_pen_explicit = false;
 
     // Everything but seed and stream, which callers set per completion.
@@ -48,6 +50,7 @@ struct SamplingFields {
         r.ignore_eos = ignore_eos;
         r.think_budget = think_budget;
         r.pin_kv_prefix = cache_prompt;
+        r.session_id = session_id;
     }
 };
 
@@ -57,7 +60,8 @@ inline constexpr uint8_t kViaMessages = 1, kViaResponses = 2;
 struct SamplingKey {
     const char* key;
     // monostate: passed through only, parsed elsewhere (speculative: parse_spec_field_).
-    std::variant<std::monostate, float SamplingFields::*, int SamplingFields::*, bool SamplingFields::*>
+    std::variant<std::monostate, float SamplingFields::*, int SamplingFields::*, bool SamplingFields::*,
+                 std::string SamplingFields::*>
         member;
     uint8_t via;
 };
@@ -86,6 +90,7 @@ inline constexpr SamplingKey kSamplingKeys[] = {
     {"think_budget", &SamplingFields::think_budget, 0},
     {"ignore_eos", &SamplingFields::ignore_eos, 0},
     {"cache_prompt", &SamplingFields::cache_prompt, 0},
+    {"session_id", &SamplingFields::session_id, kViaMessages | kViaResponses},
     {"speculative", std::monostate{}, kViaMessages | kViaResponses},
 };
 
@@ -116,4 +121,19 @@ inline void pass_sampling_keys(const nlohmann::json& from, uint8_t via, nlohmann
     for (const auto& k : kSamplingKeys)
         if ((k.via & via) != 0 && from.contains(k.key))
             to[k.key] = from[k.key];
+}
+
+// session_id (#2407): 1-128 chars of [A-Za-z0-9._:-], so it is also a /v1/sessions/{id}/close
+// path segment.
+inline constexpr const char* kSessionIdRule = "\"session_id\" must be 1-128 characters of [A-Za-z0-9._:-]";
+inline bool session_id_valid(const std::string& s) {
+    bool ok = !s.empty() && s.size() <= 128;
+    for (const char c : s)
+        ok = ok && ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' ||
+                    c == '_' || c == ':' || c == '-');
+    return ok;
+}
+// After parse_sampling_fields (type already checked). Empty when valid or absent.
+inline std::string session_id_error(const SamplingFields& f, const nlohmann::json& body) {
+    return !body.contains("session_id") || session_id_valid(f.session_id) ? std::string() : kSessionIdRule;
 }
