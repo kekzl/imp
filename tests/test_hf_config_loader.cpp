@@ -835,4 +835,58 @@ TEST_F(AudioConfigTest, AbsentKeyDoesNotMarkTheModality) {
     EXPECT_FALSE(cfg.has_audio_config);
 }
 
+class Gemma4RopeConfigTest : public AudioConfigTest {};
+
+// Gemma-4-26B-A4B full_attention: proportional RoPE, factor 0.25 at hd=512 rotates pairs
+// 0..63 at theta^(-2p/512) and leaves 64..255 unrotated (GGUF rope_freqs: 64 x 1, 192 x 1e30).
+TEST_F(Gemma4RopeConfigTest, FullAttentionProportionalRope) {
+    write_config(R"({
+        "architectures": ["Gemma4ForConditionalGeneration"],
+        "model_type": "gemma4",
+        "text_config": {
+            "model_type": "gemma4_text",
+            "hidden_size": 2816, "intermediate_size": 2112, "num_attention_heads": 16,
+            "num_hidden_layers": 6, "num_key_value_heads": 8, "num_global_key_value_heads": 2,
+            "head_dim": 256, "global_head_dim": 512, "sliding_window": 1024,
+            "layer_types": ["sliding_attention", "sliding_attention", "sliding_attention",
+                            "sliding_attention", "sliding_attention", "full_attention"],
+            "rope_parameters": {
+                "full_attention": {"partial_rotary_factor": 0.25, "rope_theta": 1000000.0,
+                                   "rope_type": "proportional"},
+                "sliding_attention": {"rope_theta": 10000.0, "rope_type": "default"}
+            }
+        }
+    })");
+
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    ASSERT_EQ(cfg.rope_inv_freqs_global.size(), 256u);
+    for (int p = 0; p < 256; ++p) {
+        const float want = p < 64 ? static_cast<float>(std::pow(1e6, -2.0 * p / 512.0)) : 0.0f;
+        EXPECT_FLOAT_EQ(cfg.rope_inv_freqs_global[p], want) << "pair " << p;
+    }
+    EXPECT_FLOAT_EQ(cfg.rope_theta, 1e6f);
+    EXPECT_FLOAT_EQ(cfg.rope_theta_swa, 1e4f);
+}
+
+// No partial_rotary_factor: no table, global layers keep plain theta RoPE.
+TEST_F(Gemma4RopeConfigTest, WithoutPartialFactorHasNoTable) {
+    write_config(R"({
+        "architectures": ["Gemma4ForConditionalGeneration"],
+        "model_type": "gemma4",
+        "text_config": {
+            "model_type": "gemma4_text",
+            "hidden_size": 2816, "intermediate_size": 2112, "num_attention_heads": 16,
+            "num_hidden_layers": 2, "num_key_value_heads": 8,
+            "head_dim": 256, "global_head_dim": 512,
+            "layer_types": ["sliding_attention", "full_attention"],
+            "rope_parameters": {"full_attention": {"rope_theta": 1000000.0}}
+        }
+    })");
+
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_TRUE(cfg.rope_inv_freqs_global.empty());
+}
+
 }  // namespace

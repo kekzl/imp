@@ -12,6 +12,10 @@ namespace imp {
 
 struct VisionModel;  // vision/vision_model.h — only a pointer is needed here
 
+// HF "proportional" RoPE (Gemma 4 full_attention): pair p < int(factor*hd/2) gets
+// theta^(-2p/hd), every other pair 0 (unrotated). hd=512, factor 0.25: 64 of 256 pairs.
+std::vector<float> proportional_rope_inv_freqs(float theta, int head_dim, float partial_factor);
+
 struct HFConfigLoader {
     // Loads config.json, populates ModelConfig; only overwrites fields present in the JSON.
     // out_vision_tower, when non-null and the checkpoint carries a supported vision tower,
