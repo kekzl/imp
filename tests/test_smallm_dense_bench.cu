@@ -17,6 +17,19 @@
 
 namespace {
 
+// Device table buffer for gemm_grouped_nvfp4_smallM, grown on demand, process lifetime (#2451).
+void* smallm_tables(int ne) {
+    static void* p = nullptr;
+    static size_t cap = 0;
+    const size_t need = imp::smallM_table_bytes(ne);
+    if (need > cap) {
+        cudaFree(p);
+        p = nullptr;
+        cap = cudaMalloc(&p, need) == cudaSuccess ? need : 0;
+    }
+    return p;
+}
+
 bool gpu_available() {
     int n = 0;
     return cudaGetDeviceCount(&n) == cudaSuccess && n > 0;
@@ -71,7 +84,8 @@ static bool run_dense(const imp::NvFP4QuantResult& a, const imp::NvFP4QuantResul
     const void* pb[1] = {b.packed_data};
     const void* psb[1] = {b.micro_scales};
     void* pd[1] = {d_out};
-    return imp::gemm_grouped_nvfp4_smallM(1, hM, N, K, pa, psa, pb, psb, pd, d_alpha, stream);
+    return imp::gemm_grouped_nvfp4_smallM(1, hM, N, K, pa, psa, pb, psb, pd, d_alpha, smallm_tables(1),
+                                          imp::smallM_table_bytes(1), stream);
 }
 
 TEST_F(SmallMDenseTest, MatchesHostReference) {

@@ -1056,24 +1056,24 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
         }
     } else {
         // FP16 dequant fallback: formats in moe_fp16_decode_supported (admission checks all three).
-        const void* gate_w = ly.expert_gate_packed.data;
-        const void* up_w = ly.expert_up_packed.data;
-        size_t up_stride_bytes = expert_stride(ly.expert_up_packed, up_qtype);
+        // Same bases, indices and strides as dp4a: host-resident experts are read from the slot pool (#2447).
+        size_t up_stride_bytes = pool_addressed ? slot_stride : expert_stride(ly.expert_up_packed, up_qtype);
         if (!non_gated_experts) {
             const QType gate_qtype = ly.expert_gate_packed.qtype;
-            size_t gate_stride = expert_stride(ly.expert_gate_packed, gate_qtype);
-            if (gate_qtype != up_qtype) {
-                moe_fp16_decode_kernel(gate_qtype)(gate_w, expert_indices, norm_ptr, gate_buf, eff, d,
+            size_t gate_stride =
+                pool_addressed ? slot_stride : expert_stride(ly.expert_gate_packed, gate_qtype);
+            if (pool_addressed || gate_qtype != up_qtype) {
+                moe_fp16_decode_kernel(gate_qtype)(gate_base, gate_idx, norm_ptr, gate_buf, eff, d,
                                                    gate_stride, /*x_stride=*/0, top_k, stream);
-                moe_fp16_decode_kernel(up_qtype)(up_w, expert_indices, norm_ptr, up_buf, eff, d,
+                moe_fp16_decode_kernel(up_qtype)(up_base, up_idx, norm_ptr, up_buf, eff, d,
                                                  up_stride_bytes, /*x_stride=*/0, top_k, stream);
             } else {
-                moe_fp16_gate_up_kernel(up_qtype)(gate_w, up_w, expert_indices, norm_ptr, gate_buf, up_buf,
-                                                  eff, d, gate_stride, up_stride_bytes, /*x_stride=*/0,
-                                                  top_k, stream);
+                moe_fp16_gate_up_kernel(up_qtype)(gate_base, up_base, expert_indices, norm_ptr, gate_buf,
+                                                  up_buf, eff, d, gate_stride, up_stride_bytes,
+                                                  /*x_stride=*/0, top_k, stream);
             }
         } else {
-            moe_fp16_decode_kernel(up_qtype)(up_w, expert_indices, norm_ptr, up_buf, eff, d, up_stride_bytes,
+            moe_fp16_decode_kernel(up_qtype)(up_base, up_idx, norm_ptr, up_buf, eff, d, up_stride_bytes,
                                              /*x_stride=*/0, top_k, stream);
         }
     }
@@ -1101,11 +1101,11 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
     } else {
         apply_expert_activation(gate_buf, up_buf, act_buf, non_gated_experts, top_k, eff, compute_dtype_,
                                 cfg.ffn_activation, stream);
-        size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype);
+        size_t down_stride =
+            pool_addressed ? slot_stride : expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype);
         half* down_input = non_gated_experts ? up_buf : act_buf;
-        moe_fp16_decode_kernel(ly.expert_down_packed.qtype)(ly.expert_down_packed.data, expert_indices,
-                                                            down_input, down_buf, d, eff, down_stride,
-                                                            /*x_stride=*/eff, top_k, stream);
+        moe_fp16_decode_kernel(ly.expert_down_packed.qtype)(down_base, down_idx, down_input, down_buf, d, eff,
+                                                            down_stride, /*x_stride=*/eff, top_k, stream);
     }
 
     // Fused weighted sum + FP16 output (+ residual if no shared expert)
