@@ -965,6 +965,7 @@ if(IMP_BUILD_TESTS)
         tests/test_rope_override.cpp
         tests/test_mrope_config.cpp
         tests/test_image_placeholders.cpp
+        tests/test_vision_prompt_layout.cpp
         tests/test_ngram_draft.cpp
     tests/test_mtp_presence.cpp
         # dispatch_mtp_head layout detection on synthetic name lists (Qwen4Exp 3101 names).
