@@ -537,8 +537,8 @@ sparse_score_meanstd = true
 sparse_score_std_coef = 1.0
 # Sparse prefill: a continuation chunk attends to its own rows plus the top
 # N past tokens (one page selection per chunk, same page score). -1 = auto
-# (default): 8192 on qwen3, qwen3moe, qwen35, nemotron_h_moe, llama, 16384 on
-# qwen36moe (NIAH + PPL + tok/s gate, #2406), 0 elsewhere. 0 = off.
+# (default): 8192 on qwen35, 16384 on qwen3 and qwen36moe, 24576 on qwen3moe
+# and llama (NIAH + two-sided PPL + tok/s gate, #2406, #2529), 0 elsewhere. 0 = off.
 sparse_prefill_topk_tokens = -1
 # Query rows sampled per chunk to score the past pages (max 64).
 sparse_prefill_rows = 16
