@@ -123,6 +123,15 @@ inverted (compressed-tensors reads `1 / weight_global_scale`, a divisor; Modelop
 multiplier directly, one convention's number under the other's name scales every weight by
 `absmax^2 / 36`); `input_activations` must stay `null`; everything at source precision must be listed in `ignore` (a missing module is one vLLM hunts absent scales for).
 
+### Recipe and reproducibility
+
+`producer.recipe` in `hf_quant_config.json` (`vllm`: `imp_recipe.json`) records `recipe_version` 1,
+`imp_version`, `imp_tree` (git tree id of the build, `unknown` outside `make build`), `format`,
+`lm_head`, `kv_hint`, `kv_cache_fp8`, the keep flags and `calibration` (`null`, or `--calib` file
+`file_sha256`, `model_id`, `samples`, `entries`, resolved `groups`, `weight`, `n_rep`, `hybrid`); no
+timestamps or output paths. Same binary + recipe + calibration file = byte-identical export: `make
+test-quantize-repro` (GPU, Qwen3-0.6B, two `--calib` exports, 9 of 9 files sha256-equal).
+
 ### What stays at source precision (Qwen3.8-27B, BF16 source 51.75 GiB)
 
 | Component | Size | Cost | Control |
