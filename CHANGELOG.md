@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- imp-quantize export recipe (#2481): `producer.recipe` in hf_quant_config.json (imp_recipe.json for vllm) records imp version + git tree, every flag, calibration file sha256, samples and resolved groups. `make test-quantize-repro`: two Qwen3-0.6B `--calib` exports, 9 of 9 files sha256-equal.
 - `make preflight` (`scripts/preflight.sh`, CPU only, `imp:lint`): every `ci_static_gates.sh` gate, clang-tidy on changed TUs, `git clang-format` on changed lines, actionlint on a `.github/` change; one table, exit 1 on any FAIL. 19-22 s with no TU changed.
 - Request field `session_id` on all four dialects (#2407): at finish the prompt's full KV blocks stay pinned for the session's next turn, inside the `cache_control` pin budget (least recently pinned released first). `POST /v1/sessions/{id}/close` or `server.session_ttl_s` (600) releases them. Gauges `imp_kv_sessions`, `imp_kv_session_pinned_blocks`.
 - `--max-queued-tokens <n>` (#2408, default 0 = off): imp-server answers 429 at once (`rate_limit_error`, `/v1/messages` `overloaded_error`, `Retry-After: 1`) when queued prompt tokens (admitted, not yet past prefill) plus the new prompt exceed `n`. Gauge `imp_queued_prompt_tokens` on `/metrics`.

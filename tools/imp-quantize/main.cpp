@@ -26,6 +26,7 @@
 #include "options.h"
 #include "fp8_source.h"
 #include "quant_report.h"
+#include "recipe.h"
 #include "tensor_policy.h"
 #include "usage.h"
 
@@ -450,6 +451,7 @@ int main(int argc, char** argv) {
     }
 
     awq::Plan plan;
+    quantize::Recipe recipe;  // #2481: written into the checkpoint
     // A dry run reports what would be quantized; the scale search costs a GPU
     // pass per layer and changes nothing it would report.
     if (!opt.calib_file.empty() && !opt.dry_run) {
@@ -467,6 +469,9 @@ int main(int argc, char** argv) {
         for (const auto& e : stats.entries)
             samples = std::max(samples, e.rows);
         printf("%s\n", quantize::experimental_banner(/*calibrated=*/true, samples).c_str());
+        recipe.calib_model_id = stats.model_id;
+        recipe.calib_samples = samples;
+        recipe.calib_entries = stats.entries.size();
         printf("AWQ calibration: %zu entries from %s\n", stats.entries.size(),
                stats.model_id.empty() ? opt.calib_file.c_str() : stats.model_id.c_str());
         auto built = awq::build_plan(index, stats, (fs::path(opt.in_dir) / "config.json").string(),
@@ -476,6 +481,9 @@ int main(int argc, char** argv) {
             return 1;
         }
         plan = std::move(*built);
+        recipe.calib_groups = plan.groups;
+        recipe.n_rep = plan.n_rep;
+        recipe.hybrid = plan.hybrid;
         printf("AWQ: %d groups scaled, %d kept round-to-nearest, %d skipped", plan.groups_scaled,
                plan.groups_rtn, plan.groups_skipped);
         if (plan.groups_disabled > 0)
@@ -844,10 +852,14 @@ int main(int argc, char** argv) {
         printf("kv_cache_quant_algo: %s (model_type %s, --kv-hint %s, --format %s)\n",
                kv_fp8 ? "FP8" : "null", mt.c_str(), quantize::kv_hint_name(opt.kv_hint),
                quantize::format_name(opt.format));
-        const auto declared = opt.format == quantize::OutputFormat::Modelopt
-                                  ? quantize::write_modelopt_quant_config(opt.out_dir, excluded_modules,
-                                                                          calibrated, kv_fp8)
-                                  : quantize::write_recipe_yaml(opt.out_dir, excluded_modules);
+        quantize::fill_recipe(recipe, opt, kv_fp8);
+        auto declared = opt.format == quantize::OutputFormat::Modelopt
+                            ? quantize::write_modelopt_quant_config(opt.out_dir, excluded_modules, calibrated,
+                                                                    kv_fp8,
+                                                                    quantize::recipe_json(recipe, "    "))
+                            : quantize::write_recipe_yaml(opt.out_dir, excluded_modules);
+        if (declared && opt.format != quantize::OutputFormat::Modelopt)
+            declared = quantize::write_recipe_json(opt.out_dir, quantize::recipe_json(recipe, ""));
         if (!declared) {
             fprintf(stderr, "%s\n", declared.error().c_str());
             return 1;

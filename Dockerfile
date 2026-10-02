@@ -90,6 +90,8 @@ RUN sed -i 's/-march=native/-march=x86-64-v3/g' cmake/CompilerFlags.cmake
 ARG IMP_BUILD_TESTS=OFF
 ARG IMP_BUILD_BENCH=OFF
 ARG IMP_EXTRA_CMAKE=
+# Recorded in imp-quantize export recipes (#2481); scripts/build_image.sh passes it.
+ARG IMP_TREE_ID=
 
 # ccache in a BuildKit cache mount. Content-addressed: a hit is keyed on the
 # preprocessed source, the flags and the compiler binary, so it IS the object a
@@ -108,6 +110,7 @@ RUN --mount=type=cache,id=imp-ccache,target=/ccache \
         -DIMP_BUILD_BENCH=${IMP_BUILD_BENCH} \
         -DIMP_BUILD_TOOLS=ON \
         -DIMP_BUILD_SERVER=ON \
+        -DIMP_TREE_ID=${IMP_TREE_ID} \
         ${IMP_EXTRA_CMAKE} \
         -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest \
         -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
