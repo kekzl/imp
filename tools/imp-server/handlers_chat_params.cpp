@@ -127,24 +127,11 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
         return false;
     }
 
-    ctx.params.temperature = body.value("temperature", 0.7f);
-    ctx.params.top_p_explicit = body.contains("top_p");
-    ctx.params.top_k_explicit = body.contains("top_k");
-    ctx.params.rep_pen_explicit = body.contains("repetition_penalty");
-    // repetition_penalty default 1.05: breaks pathological repetition loops (Qwen3.6-NVFP4 40-turn
-    // spirals) without disrupting valid structural repetition (JSON keys, markdown, code idioms).
-    // top_p default 0.95; pass 1.0 explicitly for deterministic sampling (validation/perf harnesses).
-    ctx.params.top_p = body.value("top_p", 0.95f);
-    ctx.params.top_k = body.value("top_k", 40);
+    parse_sampling_fields(body, state.default_think_budget, ctx.params);
     // "max_completion_tokens" (current OpenAI SDKs) takes precedence over the
     // deprecated "max_tokens"; without this, SDK requests silently ran with
     // the server default.
     ctx.params.max_tokens = parse_max_tokens_field(body, state.default_max_tokens);
-    ctx.params.seed = body.value("seed", -1);
-    // vLLM-compatible admission priority (lower = earlier). Also reachable
-    // from /v1/messages and /v1/responses via their body translations.
-    ctx.params.priority = body.value("priority", 0);
-    ctx.params.stream = body.value("stream", false);
     ctx.params.n_completions = body.value("n", 1);
     if (ctx.params.n_completions < 1)
         ctx.params.n_completions = 1;
@@ -168,22 +155,6 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
         return false;
     }
 
-    ctx.params.min_p = body.value("min_p", 0.0f);
-    ctx.params.typical_p = body.value("typical_p", 1.0f);
-    // Mild anti-repetition default; explicit request values still win.
-    ctx.params.repetition_penalty = body.value("repetition_penalty", 1.05f);
-    ctx.params.frequency_penalty = body.value("frequency_penalty", 0.0f);
-    ctx.params.presence_penalty = body.value("presence_penalty", 0.0f);
-    ctx.params.repeat_last_n = body.value("repeat_last_n", 0);
-    ctx.params.dry_multiplier = body.value("dry_multiplier", 0.0f);
-    ctx.params.dry_base = body.value("dry_base", 1.75f);
-    ctx.params.dry_allowed_length = body.value("dry_allowed_length", 2);
-    ctx.params.dry_penalty_last_n = body.value("dry_penalty_last_n", 0);
-    ctx.params.mirostat = body.value("mirostat", 0);
-    ctx.params.mirostat_tau = body.value("mirostat_tau", 5.0f);
-    ctx.params.mirostat_eta = body.value("mirostat_eta", 0.1f);
-    ctx.params.think_budget = body.value("think_budget", state.default_think_budget);
-
     // OpenAI caps stop sequences at 4; Anthropic /v1/messages does not, and its stop_sequences
     // convert through this parser - allow up to kMaxStopSequences=16 and warn when truncating.
     constexpr size_t kMaxStopSequences = 16;
@@ -195,10 +166,6 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     for (const auto& s : ctx.params.stop_sequences)
         ctx.params.max_stop_len = std::max(ctx.params.max_stop_len, s.size());
 
-    // vLLM-compatible `ignore_eos`: emit exactly max_tokens (benchmark clients
-    // that need equal token counts across arms). EOS and stop tokens are
-    // ignored, `max_tokens` still ends the request.
-    ctx.params.ignore_eos = body.value("ignore_eos", false);
     // Parse logprobs parameters
     if (const auto lp = body.find("logprobs"); lp != body.end() && !lp->is_null() && !lp->is_boolean()) {
         send_json_error(res, 400, "invalid_request_error",
@@ -313,9 +280,7 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
         ctx.params.include_usage = body["stream_options"].value("include_usage", false);
     }
 
-    // Prompt KV pinning: Anthropic cache_control (mapped to "cache_prompt"
-    // by anthropic_to_openai_body) or a direct llama.cpp-style field.
-    ctx.params.cache_prompt = body.value("cache_prompt", false);
+    // cache_prompt (parse_sampling_fields) pins the first cache_prefix_messages messages.
     if (body.contains("cache_prefix_messages") && body["cache_prefix_messages"].is_number_integer())
         ctx.params.cache_prefix_messages = body["cache_prefix_messages"].get<int>();
 

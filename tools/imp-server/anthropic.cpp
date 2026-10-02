@@ -2,6 +2,7 @@
 // See anthropic.h for the public surface.
 
 #include "anthropic.h"
+#include "sampling_fields.h"
 #include "spec_usage_keys.h"
 #include "utils.h"
 
@@ -342,19 +343,8 @@ json anthropic_to_openai_body(const json& anth) {
     // prefer to pass the user's intent through.
     if (anth.contains("max_tokens"))
         oai["max_tokens"] = anth["max_tokens"];
-    if (anth.contains("temperature"))
-        oai["temperature"] = anth["temperature"];
-    if (anth.contains("top_p"))
-        oai["top_p"] = anth["top_p"];
-    if (anth.contains("top_k"))
-        oai["top_k"] = anth["top_k"];
-    // imp extension: per-request speculative-decode contract, passed through
-    // verbatim in both forms (bool, or {"mtp_k": N}); the OpenAI parser
-    // validates it once for every dialect.
-    if (anth.contains("speculative"))
-        oai["speculative"] = anth["speculative"];
-    if (anth.contains("stream"))
-        oai["stream"] = anth["stream"];
+    // temperature, top_p, top_k, priority, stream, speculative: kSamplingKeys rows with kViaMessages.
+    pass_sampling_keys(anth, kViaMessages, oai);
     if (anth.contains("metadata") && anth["metadata"].is_object() && anth["metadata"].contains("user_id")) {
         oai["user"] = anth["metadata"]["user_id"];
     }
@@ -366,8 +356,7 @@ json anthropic_to_openai_body(const json& anth) {
     // same server honoured guided_regex on /v1/chat/completions and ignored it on /v1/messages, and
     // a malformed pattern went unrejected there too since admission never saw the field. Carried
     // through to fix both.
-    for (const char* key : {"guided_regex", "guided_grammar", "grammar", "response_format",
-                            "priority"})
+    for (const char* key : {"guided_regex", "guided_grammar", "grammar", "response_format"})
         if (anth.contains(key))
             oai[key] = anth[key];
 

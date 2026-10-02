@@ -9,6 +9,7 @@
 #include "completion_prompt.h"
 #include "prompt_logprobs.h"
 #include "fim_request.h"
+#include "completions_params.h"
 #include "stream_pipeline.h"
 #include "reasoning_split.h"
 
@@ -541,141 +542,17 @@ void nonstream_completion_response_(httplib::Response& res, ServerState& state, 
 
 // /v1/completions and POST /infill (#2201) share one path; `infill` switches the prompt fields.
 void completions_impl_(const httplib::Request& req, httplib::Response& res, ServerState& state, bool infill) {
-    // #1607: bound the nesting before any recursive parser sees it.
-    if (reject_body_too_deep(req, res))
+    CompletionRequestParams p;
+    if (!parse_completions_request_params(req, res, state, infill, p))
         return;
-    // Parse request body
-    json body;
-    try {
-        body = json::parse(req.body);
-        drop_null_fields(body);
-    } catch (const json::parse_error& e) {
-        send_json_error(res, 400, "invalid_request_error", std::string("Invalid JSON: ") + e.what());
-        return;
-    }
-
-    // Validate sampling parameters
-    if (!validate_sampling_params(body, res))
-        return;
-
-    // /v1/completions does not implement multi-choice generation. Reject n>1
-    // explicitly instead of validating n in [1,4] and then silently returning a
-    // single choice (only the chat endpoint honors n, via n_completions).
-    if (body.value("n", 1) > 1) {
-        send_json_error(res, 400, "invalid_request_error",
-                        "n>1 is not supported on /v1/completions; request one completion per call");
-        return;
-    }
-
-    // best_of: imp has no candidate-scoring path, so this field is refused (400) rather than
-    // silently ignored (#1598) - "best of 8" and "the first one" are different answers.
-    if (body.contains("best_of") && !body["best_of"].is_null()) {
-        if (!body["best_of"].is_number_integer()) {
-            send_json_error(res, 400, "invalid_request_error", "\"best_of\" must be an integer");
-            return;
-        }
-        if (body["best_of"].get<int>() > 1) {
-            send_json_error(res, 400, "invalid_request_error",
-                            "best_of>1 is not supported; imp generates no candidate set to choose from");
-            return;
-        }
-    }
-
-    // Extract prompt
-    std::string prompt;
-    std::vector<int32_t> prompt_ids;
-    FimRequest fim;
-    if (infill) {
-        if (const std::string err = parse_infill_fields(body, fim); !err.empty()) {
-            send_json_error(res, 400, "invalid_request_error", err);
-            return;
-        }
-        prompt = fim.input.prefix + fim.input.prompt;  // what `echo` returns
-    } else {
-        if (const std::string err = parse_completion_prompt(body, prompt, prompt_ids); !err.empty()) {
-            send_json_error(res, 400, "invalid_request_error", err, "prompt");
-            return;
-        }
-        if (const std::string err = parse_completion_suffix(body, prompt, !prompt_ids.empty(), fim);
-            !err.empty()) {
-            send_json_error(res, 400, "invalid_request_error", err, "suffix");
-            return;
-        }
-    }
-
-    // Extract parameters
-    float temperature = body.value("temperature", 0.7f);
-    float top_p = body.value("top_p", 0.95f);
-    int top_k = body.value("top_k", 40);
-    int max_tokens = body.value("max_tokens", state.default_max_tokens);
-    int seed = body.value("seed", -1);
-    int priority = body.value("priority", 0);  // vLLM-compatible, lower = earlier
-    bool stream = body.value("stream", false);
-    bool echo = body.value("echo", false);
-    float min_p = body.value("min_p", 0.0f);
-    float typical_p = body.value("typical_p", 1.0f);
-    float repetition_penalty = body.value("repetition_penalty", 1.05f);
-    float frequency_penalty = body.value("frequency_penalty", 0.0f);
-    float presence_penalty = body.value("presence_penalty", 0.0f);
-    int repeat_last_n = body.value("repeat_last_n", 0);
-    float dry_multiplier = body.value("dry_multiplier", 0.0f);
-    float dry_base = body.value("dry_base", 1.75f);
-    int dry_allowed_length = body.value("dry_allowed_length", 2);
-    int dry_penalty_last_n = body.value("dry_penalty_last_n", 0);
-    int mirostat = body.value("mirostat", 0);
-    float mirostat_tau = body.value("mirostat_tau", 5.0f);
-    float mirostat_eta = body.value("mirostat_eta", 0.1f);
-
-    bool req_logprobs = false;
-    int top_logprobs = 0;
-    PromptLogprobsRequest plp;
-    if (const std::string err = parse_completions_logprobs(body, stream, echo, req_logprobs, top_logprobs,
-                                                           plp);
-        !err.empty()) {
-        send_json_error(res, 400, "invalid_request_error", err);
-        return;
-    }
-
-    // Parse stop sequences (same 16-entry cap as the chat parser).
-    std::vector<std::string> stop_sequences;
-    if (parse_stop_field(body, 16, stop_sequences)) {
-        IMP_LOG_WARN("request sent %zu stop sequences; keeping the first 16", body["stop"].size());
-    }
-    size_t max_stop_len = 0;
-    for (const auto& s : stop_sequences)
-        max_stop_len = std::max(max_stop_len, s.size());
-
-    std::vector<std::pair<int32_t, float>> logit_bias;
-    if (const std::string err = parse_logit_bias(body, state.max_logit_bias, logit_bias); !err.empty()) {
-        send_json_error(res, 400, "invalid_request_error", err, "logit_bias");
-        return;
-    }
-
-    // Parse stream_options for include_usage
-    bool include_usage = false;
-    if (body.contains("stream_options") && body["stream_options"].is_object()) {
-        include_usage = body["stream_options"].value("include_usage", false);
-    }
-
-    // Log request received
-    std::string req_id = make_completion_id(state);
-    {
-        // Trace join, same contract as chat/completions (see
-        // parse_chat_request_params): client id echoed, server id otherwise.
-        const std::string cid = sanitize_for_echo(req.get_header_value("X-Request-Id"), 128);
-        res.set_header("X-Request-Id", cid.empty() ? req_id : cid);
-    }
-    IMP_LOG_INFO("[%s] completions: prompt_len=%zu stream=%s max_tokens=%d temp=%.2f", req_id.c_str(),
-                 prompt.size(), stream ? "true" : "false", max_tokens, temperature);
-
-    // Validate model field (required per OpenAI spec)
-    std::string requested_model = body.value("model", "");
-    if (requested_model.empty() && !infill) {  // llama.cpp /infill clients send no model
-        res.status = 400;
-        json err = {{"error", {{"message", "\"model\" is required"}, {"type", "invalid_request_error"}}}};
-        res.set_content(dump_safe(err), "application/json");
-        return;
-    }
+    std::string& prompt = p.prompt;
+    const std::vector<int32_t>& prompt_ids = p.prompt_ids;
+    FimRequest& fim = p.fim;
+    std::vector<std::string>& stop_sequences = p.stop_sequences;
+    size_t max_stop_len = p.max_stop_len;
+    int max_tokens = p.max_tokens;
+    std::string requested_model = p.requested_model;
+    const std::string& req_id = p.req_id;
 
     // Snapshot state fields under lock for thread-safe access
     imp::Tokenizer* snap_tok;
@@ -695,7 +572,7 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
         snap_channel_open_id = state.channel_open_id;
         snap_max_seq_len = state.max_seq_len;
     }
-    if (const std::string err = logit_bias_vocab_error(logit_bias, snap_tok->vocab_size()); !err.empty()) {
+    if (const std::string err = logit_bias_vocab_error(p.logit_bias, snap_tok->vocab_size()); !err.empty()) {
         send_json_error(res, 400, "invalid_request_error", err, "logit_bias");
         return;
     }
@@ -771,61 +648,27 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
     imp_req->trace_id = req_id;  // #1582: join the engine's log lines to this request
     imp_req->input_tokens = std::move(tokens);
     imp_req->max_tokens = max_tokens;
-    imp_req->temperature = temperature;
-    imp_req->top_p = top_p;
-    imp_req->top_k = top_k;
-    imp_req->seed = seed;
-    imp_req->priority = priority;
-    imp_req->min_p = min_p;
-    imp_req->typical_p = typical_p;
-    imp_req->repetition_penalty = repetition_penalty;
-    imp_req->frequency_penalty = frequency_penalty;
-    imp_req->presence_penalty = presence_penalty;
-    imp_req->repeat_last_n = repeat_last_n;
-    imp_req->dry_multiplier = dry_multiplier;
-    imp_req->dry_base = dry_base;
-    imp_req->dry_allowed_length = dry_allowed_length;
-    imp_req->dry_penalty_last_n = dry_penalty_last_n;
-    imp_req->mirostat = mirostat;
-    imp_req->mirostat_tau = mirostat_tau;
-    imp_req->mirostat_eta = mirostat_eta;
-    imp_req->logprobs = req_logprobs;
-    imp_req->top_logprobs = top_logprobs;
-    imp_req->prompt_logprobs = plp.engine_top_n;
-    imp_req->ignore_eos = body.value("ignore_eos", false);  // vLLM-style, see handlers_chat_params.cpp
+    p.apply_to(*imp_req);
+    imp_req->seed = p.seed;
+    imp_req->logprobs = p.req_logprobs;
+    imp_req->top_logprobs = p.top_logprobs;
+    imp_req->prompt_logprobs = p.plp.engine_top_n;
     // With ignore_eos the engine keeps sampling past EOS; every EOS it emits
     // counts as an output token (vLLM semantics) but carries no text.
     const bool ignore_eos = imp_req->ignore_eos;
-    imp_req->logit_bias = std::move(logit_bias);
-    imp_req->think_budget = body.value("think_budget", state.default_think_budget);
-    imp_req->pin_kv_prefix = body.value("cache_prompt", false);
-    // Same contract as /v1/chat/completions: bool, or {"mtp_k": N}.
-    {
-        const SpecFieldParse sp =
-            parse_spec_field_(body, state.armed_mtp_k.load(std::memory_order_relaxed));
-        if (!sp.ok) {
-            send_json_error(res, 400, "invalid_request_error", sp.error);
-            return;
-        }
-        apply_spec_contract_(*imp_req, sp.spec_override, sp.mtp_k,
-                             state.armed_mtp_k.load(std::memory_order_relaxed),
-                             state.mtp_head_present.load(std::memory_order_relaxed),
-                             state.mtp_head_loaded.load(std::memory_order_relaxed));
-    }
-    // Predicted Outputs (string-content form) on the completions route: the
-    // prediction only seeds the n-gram draft corpus, output is unchanged.
-    if (body.contains("prediction") && body["prediction"].is_object()) {
-        const auto& pred = body["prediction"];
-        if (pred.value("type", "content") == "content" && pred.contains("content") &&
-            pred["content"].is_string()) {
-            imp_req->prediction_tokens = snap_tok->encode(pred["content"].get<std::string>());
-            if (snap_max_seq_len > 0 &&
-                imp_req->prediction_tokens.size() > static_cast<size_t>(snap_max_seq_len))
-                imp_req->prediction_tokens.resize(snap_max_seq_len);
-        }
+    imp_req->logit_bias = std::move(p.logit_bias);
+    apply_spec_contract_(*imp_req, p.spec_override, p.spec_mtp_k,
+                         state.armed_mtp_k.load(std::memory_order_relaxed),
+                         state.mtp_head_present.load(std::memory_order_relaxed),
+                         state.mtp_head_loaded.load(std::memory_order_relaxed));
+    // Predicted Outputs (string-content form): seeds the n-gram draft corpus only, output unchanged.
+    if (p.has_prediction) {
+        imp_req->prediction_tokens = snap_tok->encode(p.prediction_text);
+        if (snap_max_seq_len > 0 && imp_req->prediction_tokens.size() > static_cast<size_t>(snap_max_seq_len))
+            imp_req->prediction_tokens.resize(snap_max_seq_len);
     }
     // Stream requests stay on per-step decode for real per-token SSE (#754).
-    imp_req->stream = stream;
+    imp_req->stream = p.stream;
     imp_req->status = imp::RequestStatus::PENDING;
 
     auto server_req = std::make_shared<ServerRequest>();
@@ -858,15 +701,15 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
                              remaining,
                              snap_channel_open_id,
                              max_stop_len,
-                             echo,
-                             include_usage,
-                             req_logprobs,
+                             p.echo,
+                             p.include_usage,
+                             p.req_logprobs,
                              snap_is_think_model,
                              ignore_eos,
                              infill,
-                             plp,
+                             p.plp,
                              req.is_connection_closed};
-    if (stream) {
+    if (p.stream) {
         stream_completion_response_(res, state, cctx, server_req);
     } else {
         nonstream_completion_response_(res, state, cctx, server_req);
