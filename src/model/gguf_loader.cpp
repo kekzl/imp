@@ -429,13 +429,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                          cfg.rope_scaling_orig_max_pos);
         }
 
-        // Compute mscale compensation (same as llama.cpp)
-        if (cfg.yarn_ext_factor != 0.0f && cfg.rope_freq_scale > 1.0f) {
-            float factor = cfg.rope_freq_scale;  // scaling factor
-            float mscale = 1.0f + 0.1f * logf(factor);
-            // Pre-compensate for the internal mscale that rope_yarn() also applies
-            cfg.yarn_attn_factor *= mscale / (1.0f + 0.1f * logf(factor));
-        }
+        set_yarn_extras_gguf(cfg, get_float);  // yarn_log_multiplier, temperature_scale (#2411)
     }
 
     // Gemma-specific: per-layer sliding window and local RoPE (metadata-dependent)

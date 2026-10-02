@@ -48,6 +48,29 @@ void parse_granite_multipliers(const JValue& eff, ModelConfig& cfg) {
     set_granite_multipliers(cfg, attn, emb, res, logits);
 }
 
+// RoPE scaling block: `rope_scaling`, else transformers 5 `rope_parameters` when it names a type
+// (Ministral 3 carries YaRN only there; a theta-only rope_parameters is not a scaling block).
+const JValue* rope_scaling_object(const JValue& eff) {
+    const JValue* rs = jobj_find(eff, "rope_scaling");
+    if (rs && rs->type == JType::OBJECT)
+        return rs;
+    const JValue* rp = jobj_find(eff, "rope_parameters");
+    if (rp && rp->type == JType::OBJECT && (jobj_find(*rp, "rope_type") || jobj_find(*rp, "type")))
+        return rp;
+    return nullptr;
+}
+
+// YaRN keys beyond factor / beta: mscale + mscale_all_dim (cos/sin factor ratio) and Ministral 3
+// llama_4_scaling_beta (query temperature past original_max_position_embeddings).
+void parse_yarn_extras(const JValue& rs, ModelConfig& cfg) {
+    float mscale = 0.0f, mscale_all_dim = 0.0f;
+    jobj_opt_float(rs, "mscale", mscale);
+    jobj_opt_float(rs, "mscale_all_dim", mscale_all_dim);
+    set_yarn_mscale_ratio(cfg, mscale, mscale_all_dim);
+    jobj_opt_float(rs, "llama_4_scaling_beta", cfg.attn_temp_scale);
+    cfg.attn_temp_floor = cfg.rope_n_ctx_orig;
+}
+
 }  // namespace
 
 // ---- load_config ----
@@ -207,7 +230,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     }
 
     // RoPE scaling (object with type, factor, and optional YaRN/LongRoPE params)
-    const JValue* rope_scaling = jobj_find(eff, "rope_scaling");
+    const JValue* rope_scaling = rope_scaling_object(eff);
     if (rope_scaling && rope_scaling->type == JType::OBJECT) {
         std::string rope_type;
         jobj_opt_string(*rope_scaling, "type", rope_type);
@@ -232,6 +255,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
             jobj_opt_int(*rope_scaling, "original_max_position_embeddings", cfg.rope_n_ctx_orig);
             // YaRN uses ext_factor=1.0 by default
             cfg.yarn_ext_factor = 1.0f;
+            parse_yarn_extras(*rope_scaling, cfg);
         } else if (rope_type == "longrope" || rope_type == "long_rope") {
             // LongRoPE: per-dimension frequency scaling factors
             jobj_opt_int(*rope_scaling, "original_max_position_embeddings", cfg.rope_scaling_orig_max_pos);

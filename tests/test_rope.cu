@@ -732,3 +732,36 @@ TEST(RoPETest, MtpMropeMatchesMainYarn) {
 
 }  // namespace
 }  // namespace imp
+
+// Llama-4 query temperature (#2411): q *= 1 + beta ln(1 + floor(pos / floor_len)), HF
+// get_llama_4_attn_scale; positions below floor_len unchanged bit for bit.
+TEST(RoPETest, QueryTemperatureMatchesHfFormula) {
+    const int n_heads = 2, hd = 8, row = n_heads * hd, floor_len = 8192;
+    const std::vector<int> pos = {0, 8191, 8192, 16383, 24576, 131071};
+    const int n = static_cast<int>(pos.size());
+    std::vector<__half> h(static_cast<size_t>(n) * row);
+    for (size_t i = 0; i < h.size(); ++i)
+        h[i] = __float2half(0.5f + 0.01f * static_cast<float>(i % 37));
+    __half* dq = nullptr;
+    int* dp = nullptr;
+    ASSERT_EQ(cudaMalloc(&dq, h.size() * sizeof(__half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&dp, pos.size() * sizeof(int)), cudaSuccess);
+    cudaMemcpy(dq, h.data(), h.size() * sizeof(__half), cudaMemcpyHostToDevice);
+    cudaMemcpy(dp, pos.data(), pos.size() * sizeof(int), cudaMemcpyHostToDevice);
+    imp::q_position_temperature(dq, dp, n, n_heads, hd, 0.1f, floor_len, nullptr);
+    std::vector<__half> out(h.size());
+    cudaMemcpy(out.data(), dq, out.size() * sizeof(__half), cudaMemcpyDeviceToHost);
+    cudaFree(dq);
+    cudaFree(dp);
+    for (int t = 0; t < n; ++t) {
+        const double m = 1.0 + 0.1 * std::log(1.0 + std::floor(static_cast<double>(pos[t]) / floor_len));
+        for (int i = 0; i < row; ++i) {
+            const size_t k = static_cast<size_t>(t) * row + i;
+            const double want = static_cast<double>(__half2float(h[k])) * m;
+            if (pos[t] < floor_len)
+                EXPECT_EQ(__half_as_ushort(out[k]), __half_as_ushort(h[k])) << "pos " << pos[t];
+            else
+                EXPECT_NEAR(__half2float(out[k]), want, 2e-3) << "pos " << pos[t] << " i " << i;
+        }
+    }
+}

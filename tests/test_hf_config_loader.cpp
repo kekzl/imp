@@ -457,6 +457,54 @@ TEST_F(RopeScalingConfigTest, GraniteMultipliers) {
     EXPECT_FLOAT_EQ(imp::attention_softmax_scale(llama, true, 256), 1.0f);
 }
 
+// Devstral-Small-2 / Ministral 3 (#2411): YaRN lives only in text_config.rope_parameters;
+// mscale = mscale_all_dim = 1 makes HF's cos/sin factor 1.0; llama_4_scaling_beta 0.1 past 8192.
+TEST_F(RopeScalingConfigTest, Ministral3YarnAndQueryTemperature) {
+    write_config(R"({
+        "architectures": ["Mistral3ForConditionalGeneration"], "model_type": "mistral3",
+        "text_config": {
+            "head_dim": 128, "hidden_size": 5120, "num_attention_heads": 32, "num_key_value_heads": 8,
+            "num_hidden_layers": 40, "model_type": "ministral3",
+            "rope_parameters": {"beta_fast": 32.0, "beta_slow": 1.0, "factor": 48.0,
+                "llama_4_scaling_beta": 0.1, "mscale": 1.0, "mscale_all_dim": 1.0,
+                "original_max_position_embeddings": 8192, "rope_theta": 100000000.0,
+                "rope_type": "yarn", "type": "yarn"}
+        }
+    })");
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_EQ(cfg.arch, imp::ModelArch::MISTRAL);
+    EXPECT_FLOAT_EQ(cfg.rope_theta, 1e8f);
+    EXPECT_FLOAT_EQ(cfg.rope_freq_scale, 48.0f);
+    EXPECT_FLOAT_EQ(cfg.yarn_ext_factor, 1.0f);
+    EXPECT_EQ(cfg.rope_n_ctx_orig, 8192);
+    // kernel applies 1 + 0.1 ln 48; HF wants get_mscale(48,1)/get_mscale(48,1) = 1.0
+    EXPECT_NEAR(cfg.yarn_attn_factor * (1.0f + 0.1f * std::log(48.0f)), 1.0f, 1e-6f);
+    EXPECT_FLOAT_EQ(cfg.attn_temp_scale, 0.1f);
+    EXPECT_EQ(cfg.attn_temp_floor, 8192);
+
+    // YaRN without mscale keys (gpt-oss shape): default get_mscale(factor), factor untouched.
+    write_config(R"({"architectures": ["GptOssForCausalLM"], "hidden_size": 2880,
+        "num_attention_heads": 64, "num_hidden_layers": 24,
+        "rope_scaling": {"factor": 32.0, "original_max_position_embeddings": 4096, "rope_type": "yarn"}})");
+    imp::ModelConfig oss;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), oss));
+    EXPECT_FLOAT_EQ(oss.yarn_attn_factor, 1.0f);
+    EXPECT_FLOAT_EQ(oss.attn_temp_scale, 0.0f);
+
+    // GGUF spelling: yarn_log_multiplier 1 and attention.temperature_scale 0.1.
+    imp::ModelConfig g;
+    g.rope_freq_scale = 48.0f;
+    g.yarn_ext_factor = 1.0f;
+    g.rope_n_ctx_orig = 8192;
+    imp::set_yarn_extras_gguf(g, [](const std::string& k, double def) {
+        return k == "rope.scaling.yarn_log_multiplier" ? 1.0 : k == "attention.temperature_scale" ? 0.1 : def;
+    });
+    EXPECT_FLOAT_EQ(g.yarn_attn_factor, cfg.yarn_attn_factor);
+    EXPECT_FLOAT_EQ(g.attn_temp_scale, 0.1f);
+    EXPECT_EQ(g.attn_temp_floor, 8192);
+}
+
 // AWQ detection (audit gap #16). Both nested-under-quantization_config
 // (HF standard) and standalone quant_config.json (older AutoAWQ) are
 // recognised. Parsing only; the variant rule lives in load_safetensors (#2205).
