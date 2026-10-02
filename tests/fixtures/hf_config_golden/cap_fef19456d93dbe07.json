@@ -1,0 +1,7 @@
+{
+            "architectures": ["Qwen3VLForConditionalGeneration"],
+            "hidden_size": 2560,
+            "num_attention_heads": 32,
+            "num_hidden_layers": 36,
+            "rope_scaling": {"rope_type": "none"}
+        }

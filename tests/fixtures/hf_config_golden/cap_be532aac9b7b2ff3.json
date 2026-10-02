@@ -1,0 +1,4 @@
+{"model_type": "llama", "num_hidden_layers": 1, "hidden_size": 8,
+                   "num_attention_heads": 1, "vocab_size": 8, "head_dim": 2147483647,
+                   "rope_scaling": {"rope_type": "llama3", "factor": 8.0, "low_freq_factor": 1.0,
+                                    "high_freq_factor": 4.0, "original_max_position_embeddings": 8192}}

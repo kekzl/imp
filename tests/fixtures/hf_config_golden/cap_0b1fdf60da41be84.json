@@ -1,0 +1,6 @@
+{
+        "architectures": ["GraniteForCausalLM"], "model_type": "granite",
+        "hidden_size": 4096, "num_attention_heads": 32, "num_key_value_heads": 8,
+        "num_hidden_layers": 40, "attention_multiplier": 0.0078125, "embedding_multiplier": 1.0,
+        "residual_multiplier": 1.0, "logits_scaling": 1.0
+    }

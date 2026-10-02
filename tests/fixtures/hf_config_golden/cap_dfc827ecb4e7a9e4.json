@@ -1,0 +1,3 @@
+{"architectures": ["GptOssForCausalLM"], "hidden_size": 2880,
+        "num_attention_heads": 64, "num_hidden_layers": 24,
+        "rope_scaling": {"factor": 32.0, "original_max_position_embeddings": 4096, "rope_type": "yarn"}}

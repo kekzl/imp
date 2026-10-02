@@ -1,0 +1,2 @@
+{"model_type": "llama", "num_hidden_layers": 1, "hidden_size": 32,
+               "num_attention_heads": 1, "vocab_size": 8, "quantization_config": {"quant_method": "awq", "bits": 4, "group_size": 32, "zero_point": true, "version": "marlin"}}

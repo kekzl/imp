@@ -1,0 +1,12 @@
+{
+        "architectures": ["Gemma3ForConditionalGeneration"],
+        "text_config": {
+            "hidden_size": 4096,
+            "num_attention_heads": 32,
+            "num_hidden_layers": 32
+        },
+        "vision_config": {
+            "model_type": "siglip_vision_model",
+            "hidden_size": 1152
+        }
+    }

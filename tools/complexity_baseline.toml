@@ -11,6 +11,8 @@
 # [baseline] are generated.
 #
 # Pin changes (newest first):
+#   #2537 (per-arch config.json hooks, generic parsers in hf_config_generic.cpp): load_config 189 -> 11
+#   (below threshold, entry removed)
 #   #2451 (tile log moved to log_tile_once): gemm_grouped_nvfp4_smallM 31 -> under the threshold, entry removed
 #   #2212 item 3 (mtp_feed per-row body shared): mtp_feed_rows_multislot 50 -> 30, mtp_feed_batch 35 -> 15
 #   (below threshold, entry removed); new mtp_feed_dense_rows 9 is under the threshold
@@ -146,7 +148,6 @@ skip_dirs = []
 "src/model/chat_template.cpp::static jinja::Value json_string_to_value(const std::string& json_str)" = 68
 "src/model/gguf_loader.cpp::std::unique_ptr<Model> load_gguf(const std::string& path)" = 245
 "src/model/gguf_tensor_assign.cpp::bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, GgufWireType gtype)" = 91
-"src/model/hf_config_loader.cpp::bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg, std::unique_ptr<VisionModel>* out_vision_tower)" = 189
 "src/model/hf_config_loader.cpp::bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg)" = 32
 "src/model/jinja.cpp::Value eval_binop(const BinOpExpr& bin)" = 62
 "src/model/jinja.cpp::Value eval_call(const CallExpr& call)" = 27
