@@ -71,7 +71,7 @@ void take_smallM_scratch(MoEWorkspace& moe, int n_experts) {
         return;
     }
     moe.smallM_ptrs = reinterpret_cast<void**>(sl.data());
-    moe.smallM_scales = reinterpret_cast<float*>(sl.data() + 2 * ne * sizeof(void*));
+    moe.smallM_scales = reinterpret_cast<float*>(moe.smallM_ptrs + 2 * ne);  // floats follow the 2*ne pointers
     moe.smallM_count = n_experts;
 }
 }  // namespace
