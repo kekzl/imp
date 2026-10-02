@@ -8,6 +8,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `imp-quantize` writes `lm_head` as the per-row FP8 head `auto` runs (`--lm-head fp8`, default for modelopt, #2479); the loader serves it with no load-time conversion. Qwen3-14B head 1483.8 -> 742.5 MiB, PPL 9.7350 both (KV FP16).
 - `imp-quantize` declares `kv_cache_quant_algo: FP8` for `qwen3` / `qwen3_moe` (`--kv-hint auto|fp8|none`, #2480), so `kv_cache.dtype=auto` runs FP8 KV there; other families stay `null`. Qwen3-14B PPL 9.7350 -> 9.7642 (+0.30 %).
 - CI `Build`: `-j$(nproc)`, the five CUTLASS TUs serialized by `scripts/ci_compile_slot.sh` (cold peak 11.8 of 16 GB); static gates in the background, still blocking; apt debs cached; `ctest -j4`; no ccache save on 0 misses. Build 477 -> 364 s on 72 misses, push -> Build green 222 -> 130 s median on 0 (#2448)
+- One arch table, `src/model/arch_registry.cpp`: GGUF ids, HF class names and HF `model_type` spellings -> `ModelArch` for both loaders, was 3 tables in 2 files (#2457). The 117 strings main accepted keep their arch; GGUF also maps `GptOssForCausalLM`, `Qwen3VL(Moe)ForConditionalGeneration`, `Gemma4UnifiedForConditionalGeneration` (was GENERIC).
+- CPU table test pins the arch-keyed `ModelProfile` fields, attention variant and SWA windows for all 17 `ModelArch` values; a new enumerator fails `ModelProfileTable.EveryArchHasOneRow` until its row is added (#2456).
 
 ### Performance
 - gpt-oss MoE prefill: gate/up biases and the clamped GLU fused into the NVFP4 act+quantize, the down bias into the scatter, output bytes unchanged (#2466). mxfp4-gptoss-20b pp4096 kernel sum 188.9 -> 162.0 ms (bias kernels 13.7 % -> 0); e2e pp4096 41532 -> 48392 tok/s, pp512 28863 -> 31481 (3 pairs).

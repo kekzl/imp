@@ -32,7 +32,7 @@ Model families with a known-working code path on `main`. Throughput numbers and 
 | [Qwen3-14B](https://huggingface.co/unsloth/Qwen3-14B-GGUF) | Q6_K | 12 GB | **158** | GGUF |
 | [Qwen3-14B](https://huggingface.co/nvidia/Qwen3-14B-NVFP4) | NVFP4 | 10 GB | 168 | SafeTensors (nvidia) |
 | [Qwen3-32B](https://huggingface.co/unsloth/Qwen3-32B-GGUF) | Q4_K_M | 19 GB | - | GGUF |
-| [Phi-4-reasoning-plus](https://huggingface.co/nvidia/Phi-4-reasoning-plus-NVFP4) | NVFP4 | 9.0 GB | 157 | SafeTensors (nvidia), fused projections. Phi-4 is an alias onto the LLaMA loader path (`src/model/model.cpp:330 {"phi3", ModelArch::LLAMA}`), not a separate loader; no dedicated gate (#1680) |
+| [Phi-4-reasoning-plus](https://huggingface.co/nvidia/Phi-4-reasoning-plus-NVFP4) | NVFP4 | 9.0 GB | 157 | SafeTensors (nvidia), fused projections. Phi-4 is an alias onto the LLaMA loader path (`src/model/arch_registry.cpp:15 {GGUF, "phi3", ModelArch::LLAMA}`), not a separate loader; no dedicated gate (#1680) |
 | [Gemma-4-12B](https://huggingface.co/AxionML/Gemma-4-12B-NVFP4) | NVFP4 | 11 GB | - | SafeTensors (Modelopt) - **dense** Gemma-4, `gemma4_unified` multimodal wrapper (nested `text_config`, `model.language_model.*` prefix, vision/audio embedders skipped). This export carries the embedders only: 0 `model.vision_tower.*` and no audio tower, so it serves as text even where a fuller release would see or hear ([LIMITATIONS](LIMITATIONS.md#model-specific-blockers)). FFN in NVFP4, attention BF16. |
 | [Llama-3.2-3B-Instruct](https://huggingface.co/unsloth/Llama-3.2-3B-Instruct-GGUF) | Q8_0 | 3.2 GB | 306 | GGUF |
 | [Mistral-Small-3.1-24B](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) | Q6_K | 19 GB | - | GGUF |

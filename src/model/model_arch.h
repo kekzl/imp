@@ -24,7 +24,7 @@ enum class ModelArch {
     GEMMA4,
     LLAMA4,
     NOMIC_BERT,  // encoder-only embedder (#836): bidirectional, post-LN, mean-pool
-    GENERIC,
+    GENERIC,     // stays last: tests/test_model_profile_table.cpp walks 0..GENERIC
 };
 
 const char* model_arch_name(ModelArch arch);

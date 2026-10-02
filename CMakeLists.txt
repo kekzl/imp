@@ -193,6 +193,7 @@ set(IMP_MEMORY_SOURCES
 )
 
 set(IMP_MODEL_SOURCES
+    src/model/arch_registry.cpp
     src/model/model.cpp
     src/model/model_profile.cpp
     src/model/ngram_table.cpp
@@ -808,6 +809,10 @@ if(IMP_BUILD_TESTS)
         tests/test_llm_compressor_loader.cpp
         tests/test_nvfp4_quant_contract.cpp
         tests/test_hf_config_loader.cpp
+        # One arch identity table, pinned against the strings main accepted (#2457).
+        tests/test_arch_identity.cpp
+        # Every ModelArch -> arch-keyed ModelProfile fields + SWA windows (#2456).
+        tests/test_model_profile_table.cpp
         tests/test_ngram_table.cpp
         tests/test_safetensors_loader.cpp
         tests/test_dequant_awq.cpp

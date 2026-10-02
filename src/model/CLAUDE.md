@@ -11,7 +11,7 @@ GGUF and SafeTensors loading, the architecture registry, tensor-name mapping, up
 
 ## Invariants
 
-- Architecture registry = `model_arch.h` + the string map in `model.cpp`. A new arch needs both, a loader branch and a chat template. Phi (`PhiForCausalLM`, `Phi3ForCausalLM`) maps onto `LLAMA` in `hf_config_loader.cpp`, no own arch.
+- Architecture registry = `model_arch.h` + `arch_registry.cpp`, the one table of GGUF / HF class / HF model_type spellings (#2457). A new arch needs both, a `kArchRegistry` row in `model.cpp`, a `tests/test_model_profile_table.cpp` row and a chat template. Phi (`PhiForCausalLM`, `Phi3ForCausalLM`) maps onto `LLAMA` there, no own arch.
 - A checkpoint this build cannot serve is refused at load, never loaded and served wrong (#1403).
 - A drop predicate and the function that executes it see the same condition (#1384, #1403).
 - Tensor names are translated in one place: two translation paths that disagree discard whole towers.
@@ -20,7 +20,8 @@ GGUF and SafeTensors loading, the architecture registry, tensor-name mapping, up
 ## Entry points
 
 - `model_arch.h`: the architecture enum
-- `model.cpp`: string map, per-arch sampling defaults, KV-FP8 safety lists
+- `arch_registry.cpp`: checkpoint spelling -> `ModelArch`, read by `parse_model_arch` and the HF loader
+- `model.cpp`: per-arch config and sampling defaults, KV-FP8 safety lists
 - `gguf_loader.cpp` / `safetensors_loader.cpp`: the two formats
 - `hf_config_loader.cpp`: `config.json` parsing, arch detection
 - `weight_map.cpp`, `tensor_kind_matcher.cpp`: tensor name -> role

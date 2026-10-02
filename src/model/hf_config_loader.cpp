@@ -1,4 +1,5 @@
 #include "model/hf_config_loader.h"
+#include "model/arch_registry.h"
 #include "model/json_util.h"
 #include "model/model_limits.h"
 #include "vision/qwen3vl_vision_config.h"
@@ -14,7 +15,6 @@
 #include <fstream>
 #include <sstream>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace imp {
@@ -22,54 +22,13 @@ namespace imp {
 // ---- Architecture mapping ----
 
 ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
-    static const std::unordered_map<std::string, ModelArch> arch_map = {
-        {"LlamaForCausalLM", ModelArch::LLAMA},
-        {"MistralForCausalLM", ModelArch::MISTRAL},
-        {"Mistral3ForConditionalGeneration", ModelArch::MISTRAL},
-        {"MixtralForCausalLM", ModelArch::MIXTRAL},
-        {"Qwen2ForCausalLM", ModelArch::QWEN3},
-        {"Qwen2MoeForCausalLM", ModelArch::QWEN3_MOE},
-        {"Qwen3ForCausalLM", ModelArch::QWEN3},
-        {"Qwen3MoeForCausalLM", ModelArch::QWEN3_MOE},
-        // Qwen3-VL: the text tower is a plain Qwen3; the wrapper nests it under
-        // `text_config` and `model.language_model.*` (handled generically below).
-        {"Qwen3VLForConditionalGeneration", ModelArch::QWEN3},
-        {"Qwen3VLMoeForConditionalGeneration", ModelArch::QWEN3_MOE},
-        {"Qwen3_5ForCausalLM", ModelArch::QWEN35},
-        {"Qwen3_5ForConditionalGeneration", ModelArch::QWEN35},
-        {"Qwen3_5MoeForCausalLM", ModelArch::QWEN36_MOE},
-        {"Qwen3_5MoeForConditionalGeneration", ModelArch::QWEN36_MOE},
-        {"Qwen4ExpForCausalLM", ModelArch::QWEN4_EXP},
-        {"Qwen4ExpForConditionalGeneration", ModelArch::QWEN4_EXP},
-        {"NemotronHForCausalLM", ModelArch::NEMOTRON_H_MOE},
-        {"Gemma2ForCausalLM", ModelArch::GEMMA3},
-        {"GemmaForCausalLM", ModelArch::GEMMA3},
-        {"Gemma3ForCausalLM", ModelArch::GEMMA3},
-        {"Gemma3ForConditionalGeneration", ModelArch::GEMMA3},
-        {"Gemma4ForCausalLM", ModelArch::GEMMA4},
-        {"Gemma4ForConditionalGeneration", ModelArch::GEMMA4},
-        {"Gemma4UnifiedForConditionalGeneration", ModelArch::GEMMA4},  // multimodal unified (text_config nested)
-        {"GptOssForCausalLM", ModelArch::GPT_OSS},
-        {"DeepseekV2ForCausalLM", ModelArch::DEEPSEEK},
-        {"DeepseekV3ForCausalLM", ModelArch::DEEPSEEK},
-        {"Llama4ForCausalLM", ModelArch::LLAMA4},
-        {"Llama4ForConditionalGeneration", ModelArch::LLAMA4},
-        {"PhiForCausalLM", ModelArch::LLAMA},
-        {"Phi3ForCausalLM", ModelArch::LLAMA},
-        {"Phi3SmallForCausalLM", ModelArch::LLAMA},
-        {"InternLM2ForCausalLM", ModelArch::LLAMA},
-        {"Starcoder2ForCausalLM", ModelArch::LLAMA},
-        {"CohereForCausalLM", ModelArch::LLAMA},
-    };
-
-    auto it = arch_map.find(hf_arch);
-    if (it != arch_map.end())
-        return it->second;
+    if (auto a = find_arch(ArchSource::HF_CLASS, hf_arch))
+        return *a;
 
     IMP_LOG_WARN(
         "unknown HF architecture '%s' — falling back to GENERIC + tensor-name "
         "heuristics. If inference is incoherent, the architecture is likely "
-        "unsupported. Add a class mapping in hf_config_loader.cpp.",
+        "unsupported. Add a class mapping in arch_registry.cpp.",
         hf_arch.c_str());
     return ModelArch::GENERIC;
 }
@@ -119,38 +78,8 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
                                          "' is not supported (imp runs causal decoder LMs; "
                                          "embedding encoders need pooling support)");
             }
-            // Common model_type values → architecture class names
-            static const std::unordered_map<std::string, std::string> type_to_class = {
-                {"llama", "LlamaForCausalLM"},
-                {"mistral", "MistralForCausalLM"},
-                {"mixtral", "MixtralForCausalLM"},
-                {"qwen2", "Qwen2ForCausalLM"},
-                {"qwen2_moe", "Qwen2MoeForCausalLM"},
-                {"qwen3", "Qwen3ForCausalLM"},
-                {"qwen3_moe", "Qwen3MoeForCausalLM"},
-                {"qwen3_5", "Qwen3_5ForCausalLM"},
-                {"qwen3_5_text", "Qwen3_5ForCausalLM"},
-                {"qwen3_5_moe", "Qwen3_5MoeForCausalLM"},
-                {"qwen3_5_moe_text", "Qwen3_5MoeForCausalLM"},
-                {"qwen4_exp", "Qwen4ExpForConditionalGeneration"},
-                {"qwen4_exp_text", "Qwen4ExpForCausalLM"},
-                {"nemotron_h", "NemotronHForCausalLM"},
-                {"gemma", "GemmaForCausalLM"},
-                {"gemma2", "Gemma2ForCausalLM"},
-                {"gemma3", "Gemma3ForCausalLM"},
-                {"gemma4", "Gemma4ForCausalLM"},
-                {"gemma4_unified", "Gemma4ForCausalLM"},
-                {"llama4", "Llama4ForCausalLM"},
-                {"deepseek_v2", "DeepseekV2ForCausalLM"},
-                {"deepseek_v3", "DeepseekV3ForCausalLM"},
-                {"phi", "PhiForCausalLM"},
-                {"phi3", "Phi3ForCausalLM"},
-                {"cohere", "CohereForCausalLM"},
-                {"starcoder2", "Starcoder2ForCausalLM"},
-            };
-            auto it = type_to_class.find(model_type);
-            if (it != type_to_class.end()) {
-                cfg.arch = map_architecture(it->second);
+            if (auto a = find_arch(ArchSource::HF_MODEL_TYPE, model_type)) {
+                cfg.arch = *a;
             } else {
                 IMP_LOG_WARN(
                     "unknown model_type '%s' — falling back to GENERIC + "

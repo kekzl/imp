@@ -1,0 +1,142 @@
+#include "model/arch_registry.h"
+
+namespace imp {
+
+namespace {
+
+using enum ArchSource;
+
+// Grouped by ModelArch. GGUF rows: llama.cpp general.architecture ids. HF_CLASS rows serve
+// both loaders. HF_MODEL_TYPE rows: config.json model_type when architectures is absent.
+constexpr ArchSpelling kSpellings[] = {
+    // LLAMA (Llama-shaped families without their own arch)
+    {GGUF, "llama", ModelArch::LLAMA},
+    {GGUF, "qwen2", ModelArch::LLAMA},
+    {GGUF, "phi3", ModelArch::LLAMA},
+    {HF_CLASS, "LlamaForCausalLM", ModelArch::LLAMA},
+    {HF_CLASS, "PhiForCausalLM", ModelArch::LLAMA},
+    {HF_CLASS, "Phi3ForCausalLM", ModelArch::LLAMA},
+    {HF_CLASS, "Phi3SmallForCausalLM", ModelArch::LLAMA},
+    {HF_CLASS, "InternLM2ForCausalLM", ModelArch::LLAMA},
+    {HF_CLASS, "Starcoder2ForCausalLM", ModelArch::LLAMA},
+    {HF_CLASS, "CohereForCausalLM", ModelArch::LLAMA},
+    {HF_MODEL_TYPE, "llama", ModelArch::LLAMA},
+    {HF_MODEL_TYPE, "phi", ModelArch::LLAMA},
+    {HF_MODEL_TYPE, "phi3", ModelArch::LLAMA},
+    {HF_MODEL_TYPE, "cohere", ModelArch::LLAMA},
+    {HF_MODEL_TYPE, "starcoder2", ModelArch::LLAMA},
+
+    // MISTRAL
+    {GGUF, "mistral", ModelArch::MISTRAL},
+    {HF_CLASS, "MistralForCausalLM", ModelArch::MISTRAL},
+    {HF_CLASS, "Mistral3ForConditionalGeneration", ModelArch::MISTRAL},
+    {HF_MODEL_TYPE, "mistral", ModelArch::MISTRAL},
+
+    // MIXTRAL
+    {GGUF, "mixtral", ModelArch::MIXTRAL},
+    {HF_CLASS, "MixtralForCausalLM", ModelArch::MIXTRAL},
+    {HF_MODEL_TYPE, "mixtral", ModelArch::MIXTRAL},
+
+    // DEEPSEEK
+    {GGUF, "deepseek", ModelArch::DEEPSEEK},
+    {GGUF, "deepseek2", ModelArch::DEEPSEEK},
+    {HF_CLASS, "DeepseekV2ForCausalLM", ModelArch::DEEPSEEK},
+    {HF_CLASS, "DeepseekV3ForCausalLM", ModelArch::DEEPSEEK},
+    {HF_MODEL_TYPE, "deepseek_v2", ModelArch::DEEPSEEK},
+    {HF_MODEL_TYPE, "deepseek_v3", ModelArch::DEEPSEEK},
+
+    // NEMOTRON_H_MOE
+    {GGUF, "nemotron_h_moe", ModelArch::NEMOTRON_H_MOE},
+    {HF_CLASS, "NemotronHForCausalLM", ModelArch::NEMOTRON_H_MOE},
+    {HF_MODEL_TYPE, "nemotron_h", ModelArch::NEMOTRON_H_MOE},
+
+    // QWEN3 (Qwen2 dense loads through it; Qwen3-VL text tower is a plain Qwen3)
+    {GGUF, "qwen3", ModelArch::QWEN3},
+    {HF_CLASS, "Qwen2ForCausalLM", ModelArch::QWEN3},
+    {HF_CLASS, "Qwen3ForCausalLM", ModelArch::QWEN3},
+    {HF_CLASS, "Qwen3VLForConditionalGeneration", ModelArch::QWEN3},
+    {HF_MODEL_TYPE, "qwen2", ModelArch::QWEN3},
+    {HF_MODEL_TYPE, "qwen3", ModelArch::QWEN3},
+
+    // QWEN3_MOE
+    {GGUF, "qwen3moe", ModelArch::QWEN3_MOE},
+    {HF_CLASS, "Qwen2MoeForCausalLM", ModelArch::QWEN3_MOE},
+    {HF_CLASS, "Qwen3MoeForCausalLM", ModelArch::QWEN3_MOE},
+    {HF_CLASS, "Qwen3VLMoeForConditionalGeneration", ModelArch::QWEN3_MOE},
+    {HF_MODEL_TYPE, "qwen2_moe", ModelArch::QWEN3_MOE},
+    {HF_MODEL_TYPE, "qwen3_moe", ModelArch::QWEN3_MOE},
+
+    // QWEN35
+    {GGUF, "qwen35", ModelArch::QWEN35},
+    {HF_CLASS, "Qwen3_5ForCausalLM", ModelArch::QWEN35},
+    {HF_CLASS, "Qwen3_5ForConditionalGeneration", ModelArch::QWEN35},
+    {HF_MODEL_TYPE, "qwen3_5", ModelArch::QWEN35},
+    {HF_MODEL_TYPE, "qwen3_5_text", ModelArch::QWEN35},
+
+    // QWEN35_MOE
+    {GGUF, "qwen35moe", ModelArch::QWEN35_MOE},
+
+    // QWEN36_MOE (HF ships Qwen3.6 MoE under the Qwen3_5Moe class names)
+    {GGUF, "qwen36moe", ModelArch::QWEN36_MOE},
+    {GGUF, "qwen3.6_moe", ModelArch::QWEN36_MOE},
+    {GGUF, "qwen3.6moe", ModelArch::QWEN36_MOE},
+    {HF_CLASS, "Qwen3_5MoeForCausalLM", ModelArch::QWEN36_MOE},
+    {HF_CLASS, "Qwen3_5MoeForConditionalGeneration", ModelArch::QWEN36_MOE},
+    {HF_MODEL_TYPE, "qwen3_5_moe", ModelArch::QWEN36_MOE},
+    {HF_MODEL_TYPE, "qwen3_5_moe_text", ModelArch::QWEN36_MOE},
+
+    // QWEN4_EXP
+    {GGUF, "qwen4exp", ModelArch::QWEN4_EXP},
+    {GGUF, "qwen4_exp", ModelArch::QWEN4_EXP},
+    {HF_CLASS, "Qwen4ExpForCausalLM", ModelArch::QWEN4_EXP},
+    {HF_CLASS, "Qwen4ExpForConditionalGeneration", ModelArch::QWEN4_EXP},
+    {HF_MODEL_TYPE, "qwen4_exp", ModelArch::QWEN4_EXP},
+    {HF_MODEL_TYPE, "qwen4_exp_text", ModelArch::QWEN4_EXP},
+
+    // GPT_OSS
+    {GGUF, "gpt_oss", ModelArch::GPT_OSS},
+    {GGUF, "gpt-oss", ModelArch::GPT_OSS},
+    {HF_CLASS, "GptOssForCausalLM", ModelArch::GPT_OSS},
+
+    // GEMMA3 (Gemma 1/2 load through it)
+    {GGUF, "gemma3", ModelArch::GEMMA3},
+    {GGUF, "gemma", ModelArch::GEMMA3},
+    {GGUF, "gemma2", ModelArch::GEMMA3},
+    {HF_CLASS, "GemmaForCausalLM", ModelArch::GEMMA3},
+    {HF_CLASS, "Gemma2ForCausalLM", ModelArch::GEMMA3},
+    {HF_CLASS, "Gemma3ForCausalLM", ModelArch::GEMMA3},
+    {HF_CLASS, "Gemma3ForConditionalGeneration", ModelArch::GEMMA3},
+    {HF_MODEL_TYPE, "gemma", ModelArch::GEMMA3},
+    {HF_MODEL_TYPE, "gemma2", ModelArch::GEMMA3},
+    {HF_MODEL_TYPE, "gemma3", ModelArch::GEMMA3},
+
+    // GEMMA4
+    {GGUF, "gemma4", ModelArch::GEMMA4},
+    {HF_CLASS, "Gemma4ForCausalLM", ModelArch::GEMMA4},
+    {HF_CLASS, "Gemma4ForConditionalGeneration", ModelArch::GEMMA4},
+    {HF_CLASS, "Gemma4UnifiedForConditionalGeneration", ModelArch::GEMMA4},
+    {HF_MODEL_TYPE, "gemma4", ModelArch::GEMMA4},
+    {HF_MODEL_TYPE, "gemma4_unified", ModelArch::GEMMA4},
+
+    // LLAMA4
+    {GGUF, "llama4", ModelArch::LLAMA4},
+    {HF_CLASS, "Llama4ForCausalLM", ModelArch::LLAMA4},
+    {HF_CLASS, "Llama4ForConditionalGeneration", ModelArch::LLAMA4},
+    {HF_MODEL_TYPE, "llama4", ModelArch::LLAMA4},
+
+    // NOMIC_BERT (encoder-only embedder, #836)
+    {GGUF, "nomic-bert", ModelArch::NOMIC_BERT},
+};
+
+}  // namespace
+
+std::span<const ArchSpelling> arch_spellings() { return kSpellings; }
+
+std::optional<ModelArch> find_arch(ArchSource source, std::string_view s) {
+    for (const auto& e : kSpellings)
+        if (e.source == source && e.spelling == s)
+            return e.arch;
+    return std::nullopt;
+}
+
+}  // namespace imp
