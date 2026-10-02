@@ -8,6 +8,8 @@
 #include "core/logging.h"
 
 #include <cmath>
+#include <cstdlib>
+#include <new>
 #include <string>
 #include <vector>
 #include <utility>
@@ -378,9 +380,12 @@ static void apply_gemma4_rope_freqs(Model& model) {
         float theta_global = cfg.rope_theta;  // 1e6 for Gemma 4
 
         // Precompute effective per-pair freq = theta^(-2*pair/hd)/divisor[pair]; the kernel reads
-        // these directly via longrope_inv_freqs, no further theta math. Leaked deliberately:
-        // 4 KB total, model-lifetime.
-        float* effective = new float[n_pairs];
+        // these directly via longrope_inv_freqs, no further theta math. Model-lifetime, freed
+        // in ~Model via host_owned_buffers_ (LSan, #2530).
+        auto* effective = static_cast<float*>(std::malloc(static_cast<size_t>(n_pairs) * sizeof(float)));
+        if (!effective)
+            throw std::bad_alloc();
+        model.host_owned_buffers_.push_back(effective);
         for (int p = 0; p < n_pairs; ++p) {
             float exp_p = -2.0f * static_cast<float>(p) / static_cast<float>(hd_global);
             float base_freq = std::pow(theta_global, exp_p);
