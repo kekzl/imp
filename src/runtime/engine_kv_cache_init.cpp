@@ -258,7 +258,8 @@ bool Engine::init_kv_cache() {
             probe.recurrent_snapshot_bytes = per_seq > 0 ? (budget / per_seq) * per_seq : 0;
         }
         // Hybrid verify state scratch (#2452): 2 x one sequence's recurrent state, taken at init.
-        probe.spec_decode_bytes = spec_state_scratch_plan_bytes_(vram_budget.ssm_footprint_bytes, ssm_reserved_slots);
+        probe.spec_decode_bytes = spec_state_scratch_plan_bytes_(vram_budget.ssm_footprint_bytes,
+                                                                 ssm_reserved_slots);
         if (executor_) {
             // allocate_workspaces() ran before distributable was read: charge only the part of the
             // estimate not yet resident (Qwen3.8-27B: 887 estimated, 749 held, #2365).
