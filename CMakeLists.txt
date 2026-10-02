@@ -707,6 +707,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/constraint_validation.cpp
         tools/imp-server/handlers_chat.cpp
         tools/imp-server/handlers_completions.cpp
+        tools/imp-server/handlers_completions_params.cpp
         tools/imp-server/fim_request.cpp
         tools/imp-server/handlers_chat_core.cpp
         tools/imp-server/vision_parts.cpp
@@ -1079,6 +1080,8 @@ if(IMP_BUILD_TESTS)
             tools/imp-server/stream_driver.cpp
             tools/imp-server/vision_parts.cpp
             tools/imp-server/handlers_chat_stream.cpp
+            tools/imp-server/handlers_completions_params.cpp
+            tools/imp-server/fim_request.cpp
             tests/test_sampling_params_golden.cpp)
         target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
                                                      ${CMAKE_CURRENT_SOURCE_DIR}/tools)

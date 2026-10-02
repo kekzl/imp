@@ -1645,6 +1645,1597 @@
    "params": {}
   }
  },
+ "completions": {
+  "<base>": {
+   "params": {
+    "cache_prompt": false,
+    "dry_allowed_length": 2,
+    "dry_base": 1.75,
+    "dry_multiplier": 0.0,
+    "dry_penalty_last_n": 0,
+    "echo": false,
+    "frequency_penalty": 0.0,
+    "ignore_eos": false,
+    "include_usage": false,
+    "logit_bias": [],
+    "logprobs": false,
+    "max_stop_len": 0,
+    "max_tokens": 8192,
+    "min_p": 0.0,
+    "mirostat": 0,
+    "mirostat_eta": 0.10000000149011612,
+    "mirostat_tau": 5.0,
+    "model": "m",
+    "prediction": null,
+    "presence_penalty": 0.0,
+    "priority": 0,
+    "prompt_logprobs": -1,
+    "repeat_last_n": 0,
+    "repetition_penalty": 1.0499999523162842,
+    "seed": -1,
+    "spec_mtp_k": -1,
+    "spec_override": -1,
+    "stop": [],
+    "stream": false,
+    "temperature": 0.699999988079071,
+    "think_budget": 0.5,
+    "top_k": 40,
+    "top_logprobs": 0,
+    "top_p": 0.949999988079071,
+    "typical_p": 1.0
+   }
+  },
+  "best_of=\"x\"": {
+   "error": "\"best_of\" must be an integer",
+   "status": 400
+  },
+  "best_of=-1": {
+   "params": {}
+  },
+  "best_of=-2147483648": {
+   "params": {}
+  },
+  "best_of=0": {
+   "params": {}
+  },
+  "best_of=1": {
+   "params": {}
+  },
+  "best_of=2.7": {
+   "error": "\"best_of\" must be an integer",
+   "status": 400
+  },
+  "best_of=2147483647": {
+   "error": "best_of>1 is not supported; imp generates no candidate set to choose from",
+   "status": 400
+  },
+  "best_of=3": {
+   "error": "best_of>1 is not supported; imp generates no candidate set to choose from",
+   "status": 400
+  },
+  "best_of=4294967297": {
+   "params": {}
+  },
+  "best_of=65": {
+   "error": "best_of>1 is not supported; imp generates no candidate set to choose from",
+   "status": 400
+  },
+  "best_of=7": {
+   "error": "best_of>1 is not supported; imp generates no candidate set to choose from",
+   "status": 400
+  },
+  "best_of=false": {
+   "error": "\"best_of\" must be an integer",
+   "status": 400
+  },
+  "cache_prompt=\"x\"": {
+   "error": "[json.exception.type_error.302] type must be boolean, but is string",
+   "status": 400
+  },
+  "cache_prompt=1": {
+   "error": "[json.exception.type_error.302] type must be boolean, but is number",
+   "status": 400
+  },
+  "cache_prompt=false": {
+   "params": {}
+  },
+  "cache_prompt=true": {
+   "params": {
+    "cache_prompt": true
+   }
+  },
+  "dry_allowed_length=\"x\"": {
+   "error": "[json.exception.type_error.302] type must be number, but is string",
+   "status": 400
+  },
+  "dry_allowed_length=-1": {
+   "params": {
+    "dry_allowed_length": -1
+   }
+  },
+  "dry_allowed_length=-2147483648": {
+   "params": {
+    "dry_allowed_length": -2147483648
+   }
+  },
+  "dry_allowed_length=0": {
+   "params": {
+    "dry_allowed_length": 0
+   }
+  },
+  "dry_allowed_length=1": {
+   "params": {
+    "dry_allowed_length": 1
+   }
+  },
+  "dry_allowed_length=2.7": {
+   "params": {}
+  },
+  "dry_allowed_length=2147483647": {
+   "params": {
+    "dry_allowed_length": 2147483647
+   }
+  },
+  "dry_allowed_length=3": {
+   "params": {
+    "dry_allowed_length": 3
+   }
+  },
+  "dry_allowed_length=4294967297": {
+   "params": {
+    "dry_allowed_length": 1
+   }
+  },
+  "dry_allowed_length=65": {
+   "params": {
+    "dry_allowed_length": 65
+   }
+  },
+  "dry_allowed_length=7": {
+   "params": {
+    "dry_allowed_length": 7
+   }
+  },
+  "dry_allowed_length=false": {
+   "params": {
+    "dry_allowed_length": 0
+   }
+  },
+  "dry_base=\"x\"": {
+   "error": "[json.exception.type_error.302] type must be number, but is string",
+   "status": 400
+  },
+  "dry_base=-0.5": {
+   "params": {
+    "dry_base": -0.5
+   }
+  },
+  "dry_base=0": {
+   "params": {
+    "dry_base": 0.0
+   }
+  },
+  "dry_base=0.5": {
+   "params": {
+    "dry_base": 0.5
+   }
+  },
+  "dry_base=1": {
+   "params": {
+    "dry_base": 1.0
+   }
+  },
+  "dry_base=1.0": {
+   "params": {
+    "dry_base": 1.0
+   }
+  },
+  "dry_base=100": {
+   "params": {
+    "dry_base": 100.0
+   }
+  },
+  "dry_base=2": {
+   "params": {
+    "dry_base": 2.0
+   }
+  },
+  "dry_base=2.5": {
+   "params": {
+    "dry_base": 2.5
+   }
+  },
+  "dry_base=[]": {
+   "error": "[json.exception.type_error.302] type must be number, but is array",
+   "status": 400
+  },
+  "dry_base=true": {
+   "params": {
+    "dry_base": 1.0
+   }
+  },
+  "dry_base={}": {
+   "error": "[json.exception.type_error.302] type must be number, but is object",
+   "status": 400
+  },
+  "dry_multiplier=\"x\"": {
+   "error": "[json.exception.type_error.302] type must be number, but is string",
+   "status": 400
+  },
+  "dry_multiplier=-0.5": {
+   "params": {
+    "dry_multiplier": -0.5
+   }
+  },
+  "dry_multiplier=0": {
+   "params": {}
+  },
+  "dry_multiplier=0.5": {
+   "params": {
+    "dry_multiplier": 0.5
+   }
+  },
+  "dry_multiplier=1": {
+   "params": {
+    "dry_multiplier": 1.0
+   }
+  },
+  "dry_multiplier=1.0": {
+   "params": {
+    "dry_multiplier": 1.0
+   }
+  },
+  "dry_multiplier=100": {
+   "params": {
+    "dry_multiplier": 100.0
+   }
+  },
+  "dry_multiplier=2": {
+   "params": {
+    "dry_multiplier": 2.0
+   }
+  },
+  "dry_multiplier=2.5": {
+   "params": {
+    "dry_multiplier": 2.5
+   }
+  },
+  "dry_multiplier=[]": {
+   "error": "[json.exception.type_error.302] type must be number, but is array",
+   "status": 400
+  },
+  "dry_multiplier=true": {
+   "params": {
+    "dry_multiplier": 1.0
+   }
+  },
+  "dry_multiplier={}": {
+   "error": "[json.exception.type_error.302] type must be number, but is object",
+   "status": 400
+  },
+  "dry_penalty_last_n=\"x\"": {
+   "error": "[json.exception.type_error.302] type must be number, but is string",
+   "status": 400
+  },
+  "dry_penalty_last_n=-1": {
+   "params": {
+    "dry_penalty_last_n": -1
+   }
+  },
+  "dry_penalty_last_n=-2147483648": {
+   "params": {
+    "dry_penalty_last_n": -2147483648
+   }
+  },
+  "dry_penalty_last_n=0": {
+   "params": {}
+  },
+  "dry_penalty_last_n=1": {
+   "params": {
+    "dry_penalty_last_n": 1
+   }
+  },
+  "dry_penalty_last_n=2.7": {
+   "params": {
+    "dry_penalty_last_n": 2
+   }
+  },
+  "dry_penalty_last_n=2147483647": {
+   "params": {
+    "dry_penalty_last_n": 2147483647
+   }
+  },
+  "dry_penalty_last_n=3": {
+   "params": {
+    "dry_penalty_last_n": 3
+   }
+  },
+  "dry_penalty_last_n=4294967297": {
+   "params": {
+    "dry_penalty_last_n": 1
+   }
+  },
+  "dry_penalty_last_n=65": {
+   "params": {
+    "dry_penalty_last_n": 65
+   }
+  },
+  "dry_penalty_last_n=7": {
+   "params": {
+    "dry_penalty_last_n": 7
+   }
+  },
+  "dry_penalty_last_n=false": {
+   "params": {}
+  },
+  "echo=\"x\"": {
+   "error": "\"echo\" must be a boolean, got string",
+   "status": 400
+  },
+  "echo=1": {
+   "error": "\"echo\" must be a boolean, got number",
+   "status": 400
+  },
+  "echo=false": {
+   "params": {}
+  },
+  "echo=true": {
+   "params": {
+    "echo": true
+   }
+  },
+  "frequency_penalty=\"x\"": {
+   "error": "\"frequency_penalty\" must be a number, got string",
+   "status": 400
+  },
+  "frequency_penalty=-0.5": {
+   "params": {
+    "frequency_penalty": -0.5
+   }
+  },
+  "frequency_penalty=0": {
+   "params": {}
+  },
+  "frequency_penalty=0.5": {
+   "params": {
+    "frequency_penalty": 0.5
+   }
+  },
+  "frequency_penalty=1": {
+   "params": {
+    "frequency_penalty": 1.0
+   }
+  },
+  "frequency_penalty=1.0": {
+   "params": {
+    "frequency_penalty": 1.0
+   }
+  },
+  "frequency_penalty=100": {
+   "error": "\"frequency_penalty\" must be between -2 and 2",
+   "status": 400
+  },
+  "frequency_penalty=2": {
+   "params": {
+    "frequency_penalty": 2.0
+   }
+  },
+  "frequency_penalty=2.5": {
+   "error": "\"frequency_penalty\" must be between -2 and 2",
+   "status": 400
+  },
+  "frequency_penalty=[]": {
+   "error": "\"frequency_penalty\" must be a number, got array",
+   "status": 400
+  },
+  "frequency_penalty=true": {
+   "params": {
+    "frequency_penalty": 1.0
+   }
+  },
+  "frequency_penalty={}": {
+   "error": "\"frequency_penalty\" must be a number, got object",
+   "status": 400
+  },
+  "ignore_eos=\"x\"": {
+   "error": "[json.exception.type_error.302] type must be boolean, but is string",
+   "status": 400
+  },
+  "ignore_eos=1": {
+   "error": "[json.exception.type_error.302] type must be boolean, but is number",
+   "status": 400
+  },
+  "ignore_eos=false": {
+   "params": {}
+  },
+  "ignore_eos=true": {
+   "params": {
+    "ignore_eos": true
+   }
+  },
+  "logprobs=\"x\"": {
+   "error": "\"logprobs\" must be an integer (Completions) or boolean",
+   "status": 400
+  },
+  "logprobs=1": {
+   "params": {
+    "logprobs": true,
+    "top_logprobs": 1
+   }
+  },
+  "logprobs=false": {
+   "params": {}
+  },
+  "logprobs=true": {
+   "params": {
+    "logprobs": true
+   }
+  },
+  "max_completion_tokens=\"x\"": {
+   "error": "\"max_completion_tokens\" must be a number, got string",
+   "status": 400
+  },
+  "max_completion_tokens=-1": {
+   "error": "\"max_completion_tokens\" must be at least 1",
+   "status": 400
+  },
+  "max_completion_tokens=-2147483648": {
+   "error": "\"max_completion_tokens\" must be at least 1",
+   "status": 400
+  },
+  "max_completion_tokens=0": {
+   "error": "\"max_completion_tokens\" must be at least 1",
+   "status": 400
+  },
+  "max_completion_tokens=1": {
+   "params": {}
+  },
+  "max_completion_tokens=2.7": {
+   "params": {}
+  },
+  "max_completion_tokens=2147483647": {
+   "params": {}
+  },
+  "max_completion_tokens=3": {
+   "params": {}
+  },
+  "max_completion_tokens=4294967297": {
+   "params": {}
+  },
+  "max_completion_tokens=65": {
+   "params": {}
+  },
+  "max_completion_tokens=7": {
+   "params": {}
+  },
+  "max_completion_tokens=false": {
+   "error": "\"max_completion_tokens\" must be at least 1",
+   "status": 400
+  },
+  "max_output_tokens=\"x\"": {
+   "params": {}
+  },
+  "max_output_tokens=-1": {
+   "params": {}
+  },
+  "max_output_tokens=-2147483648": {
+   "params": {}
+  },
+  "max_output_tokens=0": {
+   "params": {}
+  },
+  "max_output_tokens=1": {
+   "params": {}
+  },
+  "max_output_tokens=2.7": {
+   "params": {}
+  },
+  "max_output_tokens=2147483647": {
+   "params": {}
+  },
+  "max_output_tokens=3": {
+   "params": {}
+  },
+  "max_output_tokens=4294967297": {
+   "params": {}
+  },
+  "max_output_tokens=65": {
+   "params": {}
+  },
+  "max_output_tokens=7": {
+   "params": {}
+  },
+  "max_output_tokens=false": {
+   "params": {}
+  },
+  "max_tokens=\"x\"": {
+   "error": "\"max_tokens\" must be a number, got string",
+   "status": 400
+  },
+  "max_tokens=-1": {
+   "error": "\"max_tokens\" must be at least 1",
+   "status": 400
+  },
+  "max_tokens=-2147483648": {
+   "error": "\"max_tokens\" must be at least 1",
+   "status": 400
+  },
+  "max_tokens=0": {
+   "error": "\"max_tokens\" must be at least 1",
+   "status": 400
+  },
+  "max_tokens=1": {
+   "params": {
+    "max_tokens": 1
+   }
+  },
+  "max_tokens=2.7": {
+   "params": {
+    "max_tokens": 2
+   }
+  },
+  "max_tokens=2147483647": {
+   "params": {
+    "max_tokens": 2147483647
+   }
+  },
+  "max_tokens=3": {
+   "params": {
+    "max_tokens": 3
+   }
+  },
+  "max_tokens=4294967297": {
+   "params": {
+    "max_tokens": 1
+   }
+  },
+  "max_tokens=65": {
+   "params": {
+    "max_tokens": 65
+   }
+  },
+  "max_tokens=7": {
+   "params": {
+    "max_tokens": 7
+   }
+  },
+  "max_tokens=false": {
+   "error": "\"max_tokens\" must be at least 1",
+   "status": 400
+  },
+  "min_p=\"x\"": {
+   "error": "\"min_p\" must be a number, got string",
+   "status": 400
+  },
+  "min_p=-0.5": {
+   "error": "\"min_p\" must be between 0 and 1",
+   "status": 400
+  },
+  "min_p=0": {
+   "params": {}
+  },
+  "min_p=0.5": {
+   "params": {
+    "min_p": 0.5
+   }
+  },
+  "min_p=1": {
+   "params": {
+    "min_p": 1.0
+   }
+  },
+  "min_p=1.0": {
+   "params": {
+    "min_p": 1.0
+   }
+  },
+  "min_p=100": {
+   "error": "\"min_p\" must be between 0 and 1",
+   "status": 400
+  },
+  "min_p=2": {
+   "error": "\"min_p\" must be between 0 and 1",
+   "status": 400
+  },
+  "min_p=2.5": {
+   "error": "\"min_p\" must be between 0 and 1",
+   "status": 400
+  },
+  "min_p=[]": {
+   "error": "\"min_p\" must be a number, got array",
+   "status": 400
+  },
+  "min_p=true": {
+   "params": {
+    "min_p": 1.0
+   }
+  },
+  "min_p={}": {
+   "error": "\"min_p\" must be a number, got object",
+   "status": 400
+  },
+  "mirostat=\"x\"": {
+   "error": "[json.exception.type_error.302] type must be number, but is string",
+   "status": 400
+  },
+  "mirostat=-1": {
+   "params": {
+    "mirostat": -1
+   }
+  },
+  "mirostat=-2147483648": {
+   "params": {
+    "mirostat": -2147483648
+   }
+  },
+  "mirostat=0": {
+   "params": {}
+  },
+  "mirostat=1": {
+   "params": {
+    "mirostat": 1
+   }
+  },
+  "mirostat=2.7": {
+   "params": {
+    "mirostat": 2
+   }
+  },
+  "mirostat=2147483647": {
+   "params": {
+    "mirostat": 2147483647
+   }
+  },
+  "mirostat=3": {
+   "params": {
+    "mirostat": 3
+   }
+  },
+  "mirostat=4294967297": {
+   "params": {
+    "mirostat": 1
+   }
+  },
+  "mirostat=65": {
+   "params": {
+    "mirostat": 65
+   }
+  },
+  "mirostat=7": {
+   "params": {
+    "mirostat": 7
+   }
+  },
+  "mirostat=false": {
+   "params": {}
+  },
+  "mirostat_eta=\"x\"": {
+   "error": "[json.exception.type_error.302] type must be number, but is string",
+   "status": 400
+  },
+  "mirostat_eta=-0.5": {
+   "params": {
+    "mirostat_eta": -0.5
+   }
+  },
+  "mirostat_eta=0": {
+   "params": {
+    "mirostat_eta": 0.0
+   }
+  },
+  "mirostat_eta=0.5": {
+   "params": {
+    "mirostat_eta": 0.5
+   }
+  },
+  "mirostat_eta=1": {
+   "params": {
+    "mirostat_eta": 1.0
+   }
+  },
+  "mirostat_eta=1.0": {
+   "params": {
+    "mirostat_eta": 1.0
+   }
+  },
+  "mirostat_eta=100": {
+   "params": {
+    "mirostat_eta": 100.0
+   }
+  },
+  "mirostat_eta=2": {
+   "params": {
+    "mirostat_eta": 2.0
+   }
+  },
+  "mirostat_eta=2.5": {
+   "params": {
+    "mirostat_eta": 2.5
+   }
+  },
+  "mirostat_eta=[]": {
+   "error": "[json.exception.type_error.302] type must be number, but is array",
+   "status": 400
+  },
+  "mirostat_eta=true": {
+   "params": {
+    "mirostat_eta": 1.0
+   }
+  },
+  "mirostat_eta={}": {
+   "error": "[json.exception.type_error.302] type must be number, but is object",
+   "status": 400
+  },
+  "mirostat_tau=\"x\"": {
+   "error": "[json.exception.type_error.302] type must be number, but is string",
+   "status": 400
+  },
+  "mirostat_tau=-0.5": {
+   "params": {
+    "mirostat_tau": -0.5
+   }
+  },
+  "mirostat_tau=0": {
+   "params": {
+    "mirostat_tau": 0.0
+   }
+  },
+  "mirostat_tau=0.5": {
+   "params": {
+    "mirostat_tau": 0.5
+   }
+  },
+  "mirostat_tau=1": {
+   "params": {
+    "mirostat_tau": 1.0
+   }
+  },
+  "mirostat_tau=1.0": {
+   "params": {
+    "mirostat_tau": 1.0
+   }
+  },
+  "mirostat_tau=100": {
+   "params": {
+    "mirostat_tau": 100.0
+   }
+  },
+  "mirostat_tau=2": {
+   "params": {
+    "mirostat_tau": 2.0
+   }
+  },
+  "mirostat_tau=2.5": {
+   "params": {
+    "mirostat_tau": 2.5
+   }
+  },
+  "mirostat_tau=[]": {
+   "error": "[json.exception.type_error.302] type must be number, but is array",
+   "status": 400
+  },
+  "mirostat_tau=true": {
+   "params": {
+    "mirostat_tau": 1.0
+   }
+  },
+  "mirostat_tau={}": {
+   "error": "[json.exception.type_error.302] type must be number, but is object",
+   "status": 400
+  },
+  "n=\"x\"": {
+   "error": "\"n\" must be a number, got string",
+   "status": 400
+  },
+  "n=-1": {
+   "error": "\"n\" must be between 1 and 4.",
+   "status": 400
+  },
+  "n=-2147483648": {
+   "error": "\"n\" must be between 1 and 4.",
+   "status": 400
+  },
+  "n=0": {
+   "error": "\"n\" must be between 1 and 4.",
+   "status": 400
+  },
+  "n=1": {
+   "params": {}
+  },
+  "n=2.7": {
+   "error": "n>1 is not supported on /v1/completions; request one completion per call",
+   "status": 400
+  },
+  "n=2147483647": {
+   "error": "\"n\" must be between 1 and 4.",
+   "status": 400
+  },
+  "n=3": {
+   "error": "n>1 is not supported on /v1/completions; request one completion per call",
+   "status": 400
+  },
+  "n=4294967297": {
+   "params": {}
+  },
+  "n=65": {
+   "error": "\"n\" must be between 1 and 4.",
+   "status": 400
+  },
+  "n=7": {
+   "error": "\"n\" must be between 1 and 4.",
+   "status": 400
+  },
+  "n=false": {
+   "error": "\"n\" must be between 1 and 4.",
+   "status": 400
+  },
+  "presence_penalty=\"x\"": {
+   "error": "\"presence_penalty\" must be a number, got string",
+   "status": 400
+  },
+  "presence_penalty=-0.5": {
+   "params": {
+    "presence_penalty": -0.5
+   }
+  },
+  "presence_penalty=0": {
+   "params": {}
+  },
+  "presence_penalty=0.5": {
+   "params": {
+    "presence_penalty": 0.5
+   }
+  },
+  "presence_penalty=1": {
+   "params": {
+    "presence_penalty": 1.0
+   }
+  },
+  "presence_penalty=1.0": {
+   "params": {
+    "presence_penalty": 1.0
+   }
+  },
+  "presence_penalty=100": {
+   "error": "\"presence_penalty\" must be between -2 and 2",
+   "status": 400
+  },
+  "presence_penalty=2": {
+   "params": {
+    "presence_penalty": 2.0
+   }
+  },
+  "presence_penalty=2.5": {
+   "error": "\"presence_penalty\" must be between -2 and 2",
+   "status": 400
+  },
+  "presence_penalty=[]": {
+   "error": "\"presence_penalty\" must be a number, got array",
+   "status": 400
+  },
+  "presence_penalty=true": {
+   "params": {
+    "presence_penalty": 1.0
+   }
+  },
+  "presence_penalty={}": {
+   "error": "\"presence_penalty\" must be a number, got object",
+   "status": 400
+  },
+  "priority=\"x\"": {
+   "error": "\"priority\" must be a number, got string",
+   "status": 400
+  },
+  "priority=-1": {
+   "params": {
+    "priority": -1
+   }
+  },
+  "priority=-2147483648": {
+   "params": {
+    "priority": -2147483648
+   }
+  },
+  "priority=0": {
+   "params": {}
+  },
+  "priority=1": {
+   "params": {
+    "priority": 1
+   }
+  },
+  "priority=2.7": {
+   "params": {
+    "priority": 2
+   }
+  },
+  "priority=2147483647": {
+   "params": {
+    "priority": 2147483647
+   }
+  },
+  "priority=3": {
+   "params": {
+    "priority": 3
+   }
+  },
+  "priority=4294967297": {
+   "params": {
+    "priority": 1
+   }
+  },
+  "priority=65": {
+   "params": {
+    "priority": 65
+   }
+  },
+  "priority=7": {
+   "params": {
+    "priority": 7
+   }
+  },
+  "priority=false": {
+   "params": {}
+  },
+  "repeat_last_n=\"x\"": {
+   "error": "[json.exception.type_error.302] type must be number, but is string",
+   "status": 400
+  },
+  "repeat_last_n=-1": {
+   "params": {
+    "repeat_last_n": -1
+   }
+  },
+  "repeat_last_n=-2147483648": {
+   "params": {
+    "repeat_last_n": -2147483648
+   }
+  },
+  "repeat_last_n=0": {
+   "params": {}
+  },
+  "repeat_last_n=1": {
+   "params": {
+    "repeat_last_n": 1
+   }
+  },
+  "repeat_last_n=2.7": {
+   "params": {
+    "repeat_last_n": 2
+   }
+  },
+  "repeat_last_n=2147483647": {
+   "params": {
+    "repeat_last_n": 2147483647
+   }
+  },
+  "repeat_last_n=3": {
+   "params": {
+    "repeat_last_n": 3
+   }
+  },
+  "repeat_last_n=4294967297": {
+   "params": {
+    "repeat_last_n": 1
+   }
+  },
+  "repeat_last_n=65": {
+   "params": {
+    "repeat_last_n": 65
+   }
+  },
+  "repeat_last_n=7": {
+   "params": {
+    "repeat_last_n": 7
+   }
+  },
+  "repeat_last_n=false": {
+   "params": {}
+  },
+  "repetition_penalty=\"x\"": {
+   "error": "\"repetition_penalty\" must be a number, got string",
+   "status": 400
+  },
+  "repetition_penalty=-0.5": {
+   "error": "\"repetition_penalty\" must be greater than 0",
+   "status": 400
+  },
+  "repetition_penalty=0": {
+   "error": "\"repetition_penalty\" must be greater than 0",
+   "status": 400
+  },
+  "repetition_penalty=0.5": {
+   "params": {
+    "repetition_penalty": 0.5
+   }
+  },
+  "repetition_penalty=1": {
+   "params": {
+    "repetition_penalty": 1.0
+   }
+  },
+  "repetition_penalty=1.0": {
+   "params": {
+    "repetition_penalty": 1.0
+   }
+  },
+  "repetition_penalty=100": {
+   "params": {
+    "repetition_penalty": 100.0
+   }
+  },
+  "repetition_penalty=2": {
+   "params": {
+    "repetition_penalty": 2.0
+   }
+  },
+  "repetition_penalty=2.5": {
+   "params": {
+    "repetition_penalty": 2.5
+   }
+  },
+  "repetition_penalty=[]": {
+   "error": "\"repetition_penalty\" must be a number, got array",
+   "status": 400
+  },
+  "repetition_penalty=true": {
+   "params": {
+    "repetition_penalty": 1.0
+   }
+  },
+  "repetition_penalty={}": {
+   "error": "\"repetition_penalty\" must be a number, got object",
+   "status": 400
+  },
+  "seed=\"x\"": {
+   "error": "\"seed\" must be a number, got string",
+   "status": 400
+  },
+  "seed=-1": {
+   "params": {}
+  },
+  "seed=-2147483648": {
+   "params": {
+    "seed": -2147483648
+   }
+  },
+  "seed=0": {
+   "params": {
+    "seed": 0
+   }
+  },
+  "seed=1": {
+   "params": {
+    "seed": 1
+   }
+  },
+  "seed=2.7": {
+   "params": {
+    "seed": 2
+   }
+  },
+  "seed=2147483647": {
+   "params": {
+    "seed": 2147483647
+   }
+  },
+  "seed=3": {
+   "params": {
+    "seed": 3
+   }
+  },
+  "seed=4294967297": {
+   "params": {
+    "seed": 1
+   }
+  },
+  "seed=65": {
+   "params": {
+    "seed": 65
+   }
+  },
+  "seed=7": {
+   "params": {
+    "seed": 7
+   }
+  },
+  "seed=false": {
+   "params": {
+    "seed": 0
+   }
+  },
+  "stream=\"x\"": {
+   "error": "\"stream\" must be a boolean, got string",
+   "status": 400
+  },
+  "stream=1": {
+   "error": "\"stream\" must be a boolean, got number",
+   "status": 400
+  },
+  "stream=false": {
+   "params": {}
+  },
+  "stream=true": {
+   "params": {
+    "stream": true
+   }
+  },
+  "temperature=\"x\"": {
+   "error": "\"temperature\" must be a number, got string",
+   "status": 400
+  },
+  "temperature=-0.5": {
+   "error": "\"temperature\" must be between 0 and 2",
+   "status": 400
+  },
+  "temperature=0": {
+   "params": {
+    "temperature": 0.0
+   }
+  },
+  "temperature=0.5": {
+   "params": {
+    "temperature": 0.5
+   }
+  },
+  "temperature=1": {
+   "params": {
+    "temperature": 1.0
+   }
+  },
+  "temperature=1.0": {
+   "params": {
+    "temperature": 1.0
+   }
+  },
+  "temperature=100": {
+   "error": "\"temperature\" must be between 0 and 2",
+   "status": 400
+  },
+  "temperature=2": {
+   "params": {
+    "temperature": 2.0
+   }
+  },
+  "temperature=2.5": {
+   "error": "\"temperature\" must be between 0 and 2",
+   "status": 400
+  },
+  "temperature=[]": {
+   "error": "\"temperature\" must be a number, got array",
+   "status": 400
+  },
+  "temperature=true": {
+   "params": {
+    "temperature": 1.0
+   }
+  },
+  "temperature={}": {
+   "error": "\"temperature\" must be a number, got object",
+   "status": 400
+  },
+  "think_budget=\"x\"": {
+   "error": "\"think_budget\" must be a number, got string",
+   "status": 400
+  },
+  "think_budget=-0.5": {
+   "params": {
+    "think_budget": -0.5
+   }
+  },
+  "think_budget=0": {
+   "params": {
+    "think_budget": 0.0
+   }
+  },
+  "think_budget=0.5": {
+   "params": {}
+  },
+  "think_budget=1": {
+   "params": {
+    "think_budget": 1.0
+   }
+  },
+  "think_budget=1.0": {
+   "params": {
+    "think_budget": 1.0
+   }
+  },
+  "think_budget=100": {
+   "params": {
+    "think_budget": 100.0
+   }
+  },
+  "think_budget=2": {
+   "params": {
+    "think_budget": 2.0
+   }
+  },
+  "think_budget=2.5": {
+   "params": {
+    "think_budget": 2.5
+   }
+  },
+  "think_budget=[]": {
+   "error": "\"think_budget\" must be a number, got array",
+   "status": 400
+  },
+  "think_budget=true": {
+   "params": {
+    "think_budget": 1.0
+   }
+  },
+  "think_budget={}": {
+   "error": "\"think_budget\" must be a number, got object",
+   "status": 400
+  },
+  "top_k=\"x\"": {
+   "error": "\"top_k\" must be a number, got string",
+   "status": 400
+  },
+  "top_k=-1": {
+   "params": {
+    "top_k": -1
+   }
+  },
+  "top_k=-2147483648": {
+   "params": {
+    "top_k": -2147483648
+   }
+  },
+  "top_k=0": {
+   "params": {
+    "top_k": 0
+   }
+  },
+  "top_k=1": {
+   "params": {
+    "top_k": 1
+   }
+  },
+  "top_k=2.7": {
+   "params": {
+    "top_k": 2
+   }
+  },
+  "top_k=2147483647": {
+   "params": {
+    "top_k": 2147483647
+   }
+  },
+  "top_k=3": {
+   "params": {
+    "top_k": 3
+   }
+  },
+  "top_k=4294967297": {
+   "params": {
+    "top_k": 1
+   }
+  },
+  "top_k=65": {
+   "params": {
+    "top_k": 65
+   }
+  },
+  "top_k=7": {
+   "params": {
+    "top_k": 7
+   }
+  },
+  "top_k=false": {
+   "params": {
+    "top_k": 0
+   }
+  },
+  "top_logprobs=\"x\"": {
+   "error": "\"top_logprobs\" must be a number, got string",
+   "status": 400
+  },
+  "top_logprobs=-1": {
+   "params": {}
+  },
+  "top_logprobs=-2147483648": {
+   "params": {}
+  },
+  "top_logprobs=0": {
+   "params": {}
+  },
+  "top_logprobs=1": {
+   "params": {
+    "top_logprobs": 1
+   }
+  },
+  "top_logprobs=2.7": {
+   "params": {
+    "top_logprobs": 2
+   }
+  },
+  "top_logprobs=2147483647": {
+   "params": {
+    "top_logprobs": 20
+   }
+  },
+  "top_logprobs=3": {
+   "params": {
+    "top_logprobs": 3
+   }
+  },
+  "top_logprobs=4294967297": {
+   "params": {
+    "top_logprobs": 1
+   }
+  },
+  "top_logprobs=65": {
+   "params": {
+    "top_logprobs": 20
+   }
+  },
+  "top_logprobs=7": {
+   "params": {
+    "top_logprobs": 7
+   }
+  },
+  "top_logprobs=false": {
+   "params": {}
+  },
+  "top_p=\"x\"": {
+   "error": "\"top_p\" must be a number, got string",
+   "status": 400
+  },
+  "top_p=-0.5": {
+   "error": "\"top_p\" must be between 0 and 1",
+   "status": 400
+  },
+  "top_p=0": {
+   "params": {
+    "top_p": 0.0
+   }
+  },
+  "top_p=0.5": {
+   "params": {
+    "top_p": 0.5
+   }
+  },
+  "top_p=1": {
+   "params": {
+    "top_p": 1.0
+   }
+  },
+  "top_p=1.0": {
+   "params": {
+    "top_p": 1.0
+   }
+  },
+  "top_p=100": {
+   "error": "\"top_p\" must be between 0 and 1",
+   "status": 400
+  },
+  "top_p=2": {
+   "error": "\"top_p\" must be between 0 and 1",
+   "status": 400
+  },
+  "top_p=2.5": {
+   "error": "\"top_p\" must be between 0 and 1",
+   "status": 400
+  },
+  "top_p=[]": {
+   "error": "\"top_p\" must be a number, got array",
+   "status": 400
+  },
+  "top_p=true": {
+   "params": {
+    "top_p": 1.0
+   }
+  },
+  "top_p={}": {
+   "error": "\"top_p\" must be a number, got object",
+   "status": 400
+  },
+  "typical_p=\"x\"": {
+   "error": "\"typical_p\" must be a number, got string",
+   "status": 400
+  },
+  "typical_p=-0.5": {
+   "error": "\"typical_p\" must be greater than 0 and at most 1",
+   "status": 400
+  },
+  "typical_p=0": {
+   "error": "\"typical_p\" must be greater than 0 and at most 1",
+   "status": 400
+  },
+  "typical_p=0.5": {
+   "params": {
+    "typical_p": 0.5
+   }
+  },
+  "typical_p=1": {
+   "params": {}
+  },
+  "typical_p=1.0": {
+   "params": {}
+  },
+  "typical_p=100": {
+   "error": "\"typical_p\" must be greater than 0 and at most 1",
+   "status": 400
+  },
+  "typical_p=2": {
+   "error": "\"typical_p\" must be greater than 0 and at most 1",
+   "status": 400
+  },
+  "typical_p=2.5": {
+   "error": "\"typical_p\" must be greater than 0 and at most 1",
+   "status": 400
+  },
+  "typical_p=[]": {
+   "error": "\"typical_p\" must be a number, got array",
+   "status": 400
+  },
+  "typical_p=true": {
+   "params": {}
+  },
+  "typical_p={}": {
+   "error": "\"typical_p\" must be a number, got object",
+   "status": 400
+  },
+  "{\"cache_prompt\":true,\"dry_allowed_length\":3,\"dry_base\":2.0,\"dry_multiplier\":0.8,\"dry_penalty_last_n\":128,\"frequency_penalty\":0.3,\"ignore_eos\":true,\"min_p\":0.1,\"mirostat\":2,\"mirostat_eta\":0.2,\"mirostat_tau\":4.0,\"presence_penalty\":-0.3,\"priority\":-2,\"repeat_last_n\":64,\"repetition_penalty\":1.2,\"seed\":4,\"temperature\":0.2,\"think_budget\":0.25,\"top_k\":9,\"top_p\":0.5,\"typical_p\":0.9}": {
+   "params": {
+    "cache_prompt": true,
+    "dry_allowed_length": 3,
+    "dry_base": 2.0,
+    "dry_multiplier": 0.800000011920929,
+    "dry_penalty_last_n": 128,
+    "frequency_penalty": 0.30000001192092896,
+    "ignore_eos": true,
+    "min_p": 0.10000000149011612,
+    "mirostat": 2,
+    "mirostat_eta": 0.20000000298023224,
+    "mirostat_tau": 4.0,
+    "presence_penalty": -0.30000001192092896,
+    "priority": -2,
+    "repeat_last_n": 64,
+    "repetition_penalty": 1.2000000476837158,
+    "seed": 4,
+    "temperature": 0.20000000298023224,
+    "think_budget": 0.25,
+    "top_k": 9,
+    "top_p": 0.5,
+    "typical_p": 0.8999999761581421
+   }
+  },
+  "{\"chat_template_kwargs\":{\"enable_thinking\":false}}": {
+   "params": {}
+  },
+  "{\"enable_thinking\":true}": {
+   "params": {}
+  },
+  "{\"grammar\":\"root ::= \\\"a\\\"\"}": {
+   "params": {}
+  },
+  "{\"guided_regex\":\"[a-z]+\"}": {
+   "params": {}
+  },
+  "{\"logit_bias\":{\"5\":10}}": {
+   "params": {
+    "logit_bias": [
+     [
+      5,
+      10.0
+     ]
+    ]
+   }
+  },
+  "{\"logprobs\":true,\"top_logprobs\":-3}": {
+   "params": {
+    "logprobs": true
+   }
+  },
+  "{\"logprobs\":true,\"top_logprobs\":25}": {
+   "params": {
+    "logprobs": true,
+    "top_logprobs": 20
+   }
+  },
+  "{\"lora\":\"a\"}": {
+   "params": {}
+  },
+  "{\"metadata\":{\"user_id\":\"u\"}}": {
+   "params": {}
+  },
+  "{\"n\":2,\"stream\":true}": {
+   "error": "n>1 is not supported on /v1/completions; request one completion per call",
+   "status": 400
+  },
+  "{\"prediction\":{\"content\":\"abc\",\"type\":\"content\"}}": {
+   "params": {
+    "prediction": "abc"
+   }
+  },
+  "{\"reasoning\":{\"effort\":\"high\"}}": {
+   "params": {}
+  },
+  "{\"reasoning\":{\"effort\":\"low\"}}": {
+   "params": {}
+  },
+  "{\"reasoning_effort\":\"low\"}": {
+   "params": {}
+  },
+  "{\"response_format\":{\"type\":\"json_object\"}}": {
+   "params": {}
+  },
+  "{\"speculative\":\"x\"}": {
+   "error": "\"speculative\" must be a boolean or an object of the form {\"mtp_k\": N}",
+   "status": 400
+  },
+  "{\"speculative\":false}": {
+   "params": {
+    "spec_override": 0
+   }
+  },
+  "{\"speculative\":true}": {
+   "params": {
+    "spec_override": 1
+   }
+  },
+  "{\"speculative\":{\"mtp_k\":1}}": {
+   "params": {
+    "spec_mtp_k": 1
+   }
+  },
+  "{\"speculative\":{\"mtp_k\":99}}": {
+   "error": "\"speculative.mtp_k\" is 99, outside the accepted range 0..3 (the MTP chain depth this server armed)",
+   "status": 400
+  },
+  "{\"stop\":\"END\"}": {
+   "params": {
+    "max_stop_len": 3,
+    "stop": [
+     "END"
+    ]
+   }
+  },
+  "{\"stop\":5}": {
+   "params": {}
+  },
+  "{\"stop\":[\"a\",\"bcd\"]}": {
+   "params": {
+    "max_stop_len": 3,
+    "stop": [
+     "a",
+     "bcd"
+    ]
+   }
+  },
+  "{\"stop_sequences\":[\"a\",\"bcd\"]}": {
+   "params": {}
+  },
+  "{\"stream\":true,\"stream_options\":{\"include_usage\":true}}": {
+   "params": {
+    "include_usage": true,
+    "stream": true
+   }
+  },
+  "{\"stream_options\":{\"include_usage\":true}}": {
+   "params": {
+    "include_usage": true
+   }
+  },
+  "{\"temperature\":null}": {
+   "params": {}
+  },
+  "{\"text\":{\"format\":{\"type\":\"json_object\"}}}": {
+   "params": {}
+  },
+  "{\"thinking\":{\"budget_tokens\":32,\"type\":\"enabled\"}}": {
+   "params": {}
+  },
+  "{\"thinking\":{\"type\":\"disabled\"}}": {
+   "params": {}
+  },
+  "{\"top_k\":null,\"top_p\":null}": {
+   "params": {}
+  }
+ },
  "messages": {
   "<base>": {
    "params": {

@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include "anthropic.h"
+#include "completions_params.h"
 #include "handlers_internal.h"
 #include "request_field_types.h"
 #include "responses.h"
@@ -140,6 +141,55 @@ json run_responses(const json& body) {
     return run_chat_parse(oai, body.dump());
 }
 
+json run_completions(const json& body) {
+    httplib::Request req;
+    req.body = body.dump();
+    httplib::Response res;
+    CompletionRequestParams p;
+    try {
+        if (!parse_completions_request_params(req, res, test_state(), /*infill=*/false, p))
+            return error_of(res);
+    } catch (const nlohmann::json::exception& e) {
+        return json_exception_error(req.body, e);
+    }
+    return {{"params",
+             {{"temperature", p.temperature},
+              {"top_p", p.top_p},
+              {"top_k", p.top_k},
+              {"min_p", p.min_p},
+              {"typical_p", p.typical_p},
+              {"repetition_penalty", p.repetition_penalty},
+              {"frequency_penalty", p.frequency_penalty},
+              {"presence_penalty", p.presence_penalty},
+              {"repeat_last_n", p.repeat_last_n},
+              {"dry_multiplier", p.dry_multiplier},
+              {"dry_base", p.dry_base},
+              {"dry_allowed_length", p.dry_allowed_length},
+              {"dry_penalty_last_n", p.dry_penalty_last_n},
+              {"mirostat", p.mirostat},
+              {"mirostat_tau", p.mirostat_tau},
+              {"mirostat_eta", p.mirostat_eta},
+              {"think_budget", p.think_budget},
+              {"max_tokens", p.max_tokens},
+              {"seed", p.seed},
+              {"priority", p.priority},
+              {"stream", p.stream},
+              {"echo", p.echo},
+              {"logprobs", p.req_logprobs},
+              {"top_logprobs", p.top_logprobs},
+              {"prompt_logprobs", p.plp.engine_top_n},
+              {"include_usage", p.include_usage},
+              {"ignore_eos", p.ignore_eos},
+              {"cache_prompt", p.cache_prompt},
+              {"spec_override", p.spec_override},
+              {"spec_mtp_k", p.spec_mtp_k},
+              {"stop", p.stop_sequences},
+              {"max_stop_len", p.max_stop_len},
+              {"prediction", p.has_prediction ? json(p.prediction_text) : json()},
+              {"logit_bias", p.logit_bias},
+              {"model", p.requested_model}}}};
+}
+
 struct Dialect {
     const char* name;
     json base;
@@ -153,6 +203,7 @@ std::vector<Dialect> dialects() {
          {{"model", "m"}, {"max_tokens", 64}, {"messages", {{{"role", "user"}, {"content", "hi"}}}}},
          run_messages},
         {"responses", {{"model", "m"}, {"input", "hi"}}, run_responses},
+        {"completions", {{"model", "m"}, {"prompt", "hi"}}, run_completions},
     };
 }
 
