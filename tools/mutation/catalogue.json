@@ -385,7 +385,7 @@
    "file": "src/memory/kv_cache_manager.cpp",
    "desc": "StreamingLLM sink blocks are no longer pinned, so LRU reclaim can take them while the sequence is live.",
    "focus": "test-kv",
-   "find": "    if (sink_end_block > already)\n        pin_prefix(seq_id, sink_end_block);",
+   "find": "    if (sink_end_block > already)\n        pin_blocks_as_(seq_id, seq_id, sink_end_block, /*sink=*/true);",
    "replace": "    (void)already;  // [MUTANT] sink blocks left unpinned"
   },
   {

@@ -146,5 +146,36 @@ TEST(KVSessionPins, ShareTheCacheControlBudget) {
     EXPECT_EQ(mgr->num_session_pinned_blocks(), 3);
 }
 
+// #2503: budget 0 (server.prefix_pin_budget_pct = 0) = no cache_control pin and no session pin.
+// budget > 0: both pin. StreamingLLM sinks pin at 0 (correctness pin, not a cache pin).
+int PinnedAfterCacheControlAndSession(int budget_blocks) {
+    auto mgr = MakeManager(16);
+    mgr->set_prefix_caching_enabled(true);
+    mgr->set_pin_budget_blocks(budget_blocks);
+    const auto cc = Tokens(2, 100);
+    EXPECT_EQ(mgr->allocate_blocks_with_prefix(0, cc), 0);
+    mgr->register_block_hashes(0, cc);
+    mgr->pin_prefix(0, 2);
+    mgr->free_sequence(0);
+    SessionTurn(mgr.get(), 1, "A", 2, 900, 0);
+    EXPECT_EQ(mgr->num_sessions(), budget_blocks == 0 ? 0 : 1);
+    EXPECT_EQ(mgr->num_session_pinned_blocks(), budget_blocks == 0 ? 0 : 2);
+    return mgr->num_pinned_blocks();
+}
+
+TEST(KVSessionPins, BudgetZeroMeansNoPins) {
+    EXPECT_EQ(PinnedAfterCacheControlAndSession(0), 0);
+    EXPECT_EQ(PinnedAfterCacheControlAndSession(4), 4);
+    EXPECT_EQ(PinnedAfterCacheControlAndSession(3), 2);  // FIFO: cache_control pin released first
+}
+
+TEST(KVSessionPins, BudgetZeroKeepsStreamingSinkPins) {
+    auto mgr = MakeManager(32);
+    mgr->set_pin_budget_blocks(0);
+    ASSERT_TRUE(mgr->allocate_blocks(0, 20));
+    EXPECT_EQ(mgr->evict_middle_blocks(0, /*n_sink_tokens=*/4, /*n_window_tokens=*/64), 14);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 1);
+}
+
 }  // namespace
 }  // namespace imp

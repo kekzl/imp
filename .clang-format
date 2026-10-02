@@ -71,3 +71,7 @@ AttributeMacros:
   - __host__
   - __forceinline__
   - __launch_bounds__
+---
+# JSON (e.g. tools/mutation/catalogue.json) is data: git clang-format must not reformat or fail on it.
+Language: Json
+DisableFormat: true
