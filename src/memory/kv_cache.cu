@@ -4,6 +4,7 @@
 #include "memory/mem_account.h"
 #include "memory/vram_query.h"
 #include "core/graph_diag.h"
+#include "core/kv_dtype.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -13,6 +14,17 @@
 #include <cstring>
 
 namespace imp {
+
+namespace {
+
+// Scale bytes of one uniform-shape block; a PerGroup dtype needs head_dim % 16 == 0.
+size_t uniform_scale_block_bytes(QType dtype, int block_size, int n_kv_heads, int head_dim) {
+    if (!kv_scale_head_dim_ok(dtype, head_dim))
+        throw std::runtime_error("KVCache NVFP4: head_dim must be a multiple of 16");
+    return kv_block_scale_bytes(dtype, block_size, n_kv_heads, head_dim);
+}
+
+}  // namespace
 
 // Allocates one contiguous GPU buffer for all layers, all blocks, K+V slots.
 // Per layer: K blocks contiguous, then V blocks contiguous.
@@ -29,9 +41,7 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
       block_size_(block_size),
       dtype_(dtype),
       alloc_(alloc),
-      block_bytes_((dtype == QType::INT4 || dtype == QType::NVFP4 || dtype == QType::MXFP4_KV)
-                       ? (static_cast<size_t>(block_size_) * n_kv_heads * head_dim / 2)
-                       : (static_cast<size_t>(block_size_) * n_kv_heads * head_dim * dtype_size(dtype))) {
+      block_bytes_(kv_block_data_bytes(dtype, block_size, n_kv_heads, head_dim)) {
     // Growable: every offset below is computed from max_blocks_, so the CEILING
     // has to be the stride. What is initially usable is the block count the
     // caller could afford, tracked by the id space rather than by the layout.
@@ -62,22 +72,9 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int ma
     // Attribution comes from VRAMAllocator::allocate() now, under the "kv_cache"
     // tag — noting it here as well double-counted the pool.
 
-    // Allocate separate scale buffer for quantized KV cache modes.
-    //   INT8/INT4: 1 half (FP16) per head per token slot.
-    //   NVFP4/MXFP4_KV: 1 scale byte per kNVFP4Group=16 FP4 elems along head_dim.
-    bool needs_scales = (dtype == QType::INT8 || dtype == QType::INT4 || dtype == QType::NVFP4 ||
-                         dtype == QType::MXFP4_KV);
-    if (needs_scales) {
-        if (dtype == QType::NVFP4 || dtype == QType::MXFP4_KV) {
-            if (head_dim % kNVFP4Group != 0) {
-                throw std::runtime_error("KVCache NVFP4: head_dim must be a multiple of 16");
-            }
-            int n_groups_per_head = head_dim / kNVFP4Group;
-            scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * n_groups_per_head;
-        } else {
-            scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * sizeof(half);
-        }
-        // Always 2x: K scales region + V scales region (even for TURBOQUANT_LITE)
+    // Scale plane of a quantized KV dtype (layout: kv_dtype_info()); K region + V region.
+    if (kv_dtype_info(dtype).has_scales()) {
+        scale_block_bytes_ = uniform_scale_block_bytes(dtype, block_size_, n_kv_heads, head_dim);
         alloc_scale_pool_(static_cast<size_t>(n_layers_) * max_blocks_ * 2 * scale_block_bytes_);
     }
 
@@ -100,25 +97,11 @@ KVCache::KVCache(AccountingOnly, int n_layers, int n_kv_heads, int head_dim, QTy
       block_size_(block_size),
       dtype_(dtype),
       alloc_(nullptr),
-      block_bytes_((dtype == QType::INT4 || dtype == QType::NVFP4 || dtype == QType::MXFP4_KV)
-                       ? (static_cast<size_t>(block_size) * n_kv_heads * head_dim / 2)
-                       : (static_cast<size_t>(block_size) * n_kv_heads * head_dim * dtype_size(dtype))),
+      block_bytes_(kv_block_data_bytes(dtype, block_size, n_kv_heads, head_dim)),
       accounting_only_(true) {
-    // Geometry, including the checks: scale_block_bytes_ is arithmetic on the shape and the
-    // manager reads it, and the NVFP4 head_dim rule is a constraint on the shape rather than
-    // the allocation. Leaving either out would make this cache disagree with a real one
-    // about what it is.
-    const bool needs_scales = (dtype == QType::INT8 || dtype == QType::INT4 ||
-                               dtype == QType::NVFP4 || dtype == QType::MXFP4_KV);
-    if (needs_scales) {
-        if (dtype == QType::NVFP4 || dtype == QType::MXFP4_KV) {
-            if (head_dim % kNVFP4Group != 0)
-                throw std::runtime_error("KVCache NVFP4: head_dim must be a multiple of 16");
-            scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * (head_dim / kNVFP4Group);
-        } else {
-            scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * sizeof(half);
-        }
-    }
+    // Geometry incl. the head_dim check, same as the memory-backed constructor; only the pool is absent.
+    if (kv_dtype_info(dtype).has_scales())
+        scale_block_bytes_ = uniform_scale_block_bytes(dtype, block_size_, n_kv_heads, head_dim);
 
     // Same two lines the memory-backed constructor ends with, and nothing else:
     // open_slots() is documented as the mode where the caller owns the memory,
@@ -179,12 +162,12 @@ KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
         throw std::runtime_error("KVCache(per-layer): growable pool could not commit its initial blocks");
     }
 
-    // INT8/INT4 per-layer scales not yet supported in per-layer mode.
-    if (dtype == QType::INT8 || dtype == QType::INT4) {
+    // Per-layer mode lays out PerGroup scale planes only (INT8/INT4 PerHead: not yet).
+    if (kv_dtype_info(dtype).scale == KvScale::PerHead) {
         throw std::runtime_error("KVCache per-layer shape: INT8/INT4 scale pools not yet supported");
     }
 
-    if (dtype == QType::NVFP4 || dtype == QType::MXFP4_KV)
+    if (kv_dtype_info(dtype).has_scales())
         alloc_scale_pool_(layout_layer_scales_(n_kv_heads_per_layer, head_dim_per_layer));
 
     // `usable`, never max_blocks_: on a growable pool max_blocks_ is the
@@ -213,9 +196,9 @@ KVCache::KVCache(AccountingOnly, int n_layers, const std::vector<int>& n_kv_head
       layer_is_swa_(layer_is_swa),
       swa_max_blocks_(swa_max_blocks) {
     layout_layers_(n_kv_heads_per_layer, head_dim_per_layer);
-    if (dtype == QType::INT8 || dtype == QType::INT4)
+    if (kv_dtype_info(dtype).scale == KvScale::PerHead)
         throw std::runtime_error("KVCache per-layer shape: INT8/INT4 scale pools not yet supported");
-    if (dtype == QType::NVFP4 || dtype == QType::MXFP4_KV)
+    if (kv_dtype_info(dtype).has_scales())
         layout_layer_scales_(n_kv_heads_per_layer, head_dim_per_layer);
     if (blocks_.open_slots(max_blocks) != MemError::Ok)
         throw std::runtime_error("KVCache(per-layer): block id space init failed");
@@ -238,11 +221,8 @@ size_t KVCache::layout_layers_(const std::vector<int>& n_kv_heads_per_layer,
         layer_is_swa_.clear();
         swa_max_blocks_ = 0;
     }
-    const bool packed_4bit = (dtype_ == QType::INT4 || dtype_ == QType::NVFP4 || dtype_ == QType::MXFP4_KV);
-    const size_t elem_size = packed_4bit ? 0 : dtype_size(dtype_);  // 4-bit modes use /2 below
     auto bytes_per_block = [&](int nkv, int hd) -> size_t {
-        return packed_4bit ? (static_cast<size_t>(block_size_) * nkv * hd / 2)
-                           : (static_cast<size_t>(block_size_) * nkv * hd * elem_size);
+        return kv_block_data_bytes(dtype_, block_size_, nkv, hd);
     };
 
     layer_block_bytes_.assign(n_layers_, 0);
@@ -278,10 +258,8 @@ size_t KVCache::layout_layers_(const std::vector<int>& n_kv_heads_per_layer,
 
 size_t KVCache::layout_layer_scales_(const std::vector<int>& n_kv_heads_per_layer,
                                      const std::vector<int>& head_dim_per_layer) {
-    // Each layer's scale-block-bytes derives from its own (nkv * hd / kNVFP4Group) so layers
-    // with different head_dim (Gemma-4 SWA vs full-attention) get correctly-sized scale
-    // storage. MXFP4_KV uses the identical layout, same per-16-element group; only the scale
-    // byte semantics differ (UE8M0 vs E4M3), transparent here.
+    // Each layer's scale-block-bytes derives from its own (nkv, hd): Gemma-4 SWA and
+    // full-attention layers differ in head_dim. PerGroup dtypes only (callers refuse PerHead).
     layer_scale_block_bytes_.assign(n_layers_, 0);
     layer_k_scale_offset_.assign(n_layers_, 0);
     layer_v_scale_offset_.assign(n_layers_, 0);
@@ -294,9 +272,9 @@ size_t KVCache::layout_layer_scales_(const std::vector<int>& n_kv_heads_per_laye
             layer_v_scale_offset_[l] = srunning;
             continue;
         }
-        if (hd % kNVFP4Group != 0)
+        if (!kv_scale_head_dim_ok(dtype_, hd))
             throw std::runtime_error("KVCache per-layer NVFP4: head_dim must be a multiple of 16");
-        const size_t sbb = static_cast<size_t>(block_size_) * nkv * (hd / kNVFP4Group);
+        const size_t sbb = kv_block_scale_bytes(dtype_, block_size_, nkv, hd);
         layer_scale_block_bytes_[l] = sbb;
         layer_k_scale_offset_[l] = srunning;
         srunning += layer_capacity_(l) * sbb;
@@ -305,7 +283,7 @@ size_t KVCache::layout_layer_scales_(const std::vector<int>& n_kv_heads_per_laye
     }
     // For external queries, scalar fallback uses max-layer block bytes so
     // sizeof checks see a non-zero value.
-    scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads_ * (head_dim_ / kNVFP4Group);
+    scale_block_bytes_ = kv_block_scale_bytes(dtype_, block_size_, n_kv_heads_, head_dim_);
     return srunning;
 }
 

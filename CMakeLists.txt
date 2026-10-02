@@ -837,6 +837,7 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_cache.cpp
         tests/test_kv_session_pins.cpp
         tests/test_kv_accounting.cpp
+        tests/test_kv_dtype.cpp
         tests/test_json_out.cpp
         tests/test_gguf_loader.cpp
         tests/test_gguf_silent_drops.cpp
