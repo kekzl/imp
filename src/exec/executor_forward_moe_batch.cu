@@ -335,19 +335,7 @@ bool GraphExecutor::try_run_moe_q6k_prefill(int layer, cudaStream_t stream, int 
 static void fused_dp4a_for_qtype(QType qtype, const void* packed, const block_q8_1* q8,
                                  const float* d8, void* out, const int32_t* d_offsets,
                                  int N, int K, size_t stride_bytes, int ne, cudaStream_t stream) {
-    switch (qtype) {
-        case QType::Q4_K:
-            gemm_q4k_dp4a_moe_fused(packed, q8, d8, out, d_offsets, K, N, ne, stride_bytes, stream);
-            break;
-        case QType::Q5_K:
-            gemm_q5k_dp4a_moe_fused(packed, q8, d8, out, d_offsets, K, N, ne, stride_bytes, stream);
-            break;
-        case QType::Q6_K:
-            gemm_q6k_moe_fused(packed, q8, d8, out, d_offsets, K, N, ne, stride_bytes, stream);
-            break;
-        default:
-            break;
-    }
+    moe_fused_dp4a_prefill_kernel(qtype)(packed, q8, d8, out, d_offsets, K, N, ne, stride_bytes, stream);
 }
 
 bool GraphExecutor::try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int n, int d, int eff,
@@ -357,9 +345,7 @@ bool GraphExecutor::try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int 
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
 
-    auto is_fuseable = [](QType q) {
-        return q == QType::Q4_K || q == QType::Q5_K || q == QType::Q6_K;
-    };
+    auto is_fuseable = [](QType q) { return moe_fused_dp4a_prefill_supported(q); };
 
     bool can_fused = (ne > 16 && ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
                       ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
@@ -555,15 +541,9 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
                                   QType out_dtype = QType::F16) {
         int64_t rows = packed.shape[1];
         int64_t cols = packed.shape[2];
-        if (moe_imma && out_dtype == QType::F16 &&
-            (qtype == QType::Q8_0 || qtype == QType::Q4_K || qtype == QType::Q6_K || qtype == QType::Q5_1 ||
-             qtype == QType::Q5_K) &&
+        if (moe_imma && out_dtype == QType::F16 && moe_imma_prefill_supported(qtype) &&
             max_rows_per_expert > 0) {
-            const int qkind = qtype == QType::Q4_K   ? 1
-                              : qtype == QType::Q6_K ? 2
-                              : qtype == QType::Q5_1 ? 3
-                              : qtype == QType::Q5_K ? 4
-                                                     : 0;
+            const int qkind = moe_imma_prefill_qkind(qtype);
             if (mmq_imma_moe_gemm(packed.data, qkind,
                                   reinterpret_cast<const __half*>(a_base),
                                   reinterpret_cast<__half*>(c_base),
