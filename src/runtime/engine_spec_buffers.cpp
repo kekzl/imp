@@ -135,6 +135,34 @@ bool Engine::ensure_spec_state_scratch_() {
     return true;
 }
 
+bool Engine::spec_state_scratch_wanted_() const {
+    const auto& scfg = runtime_config_.speculative;
+    const bool mtp = scfg.mtp_k != 0 && model_ && model_->mtp_.has_value() && model_->mtp_->loaded;
+    return scfg.ngram || scfg.suffix || scfg.capture || mtp || mtp_spec_decode_enabled();
+}
+
+// KV plan charge for the scratch: 2 x (pool footprint / pool slots), 0 without recurrent state.
+size_t Engine::spec_state_scratch_plan_bytes_(size_t ssm_footprint_bytes, int reserved_slots) const {
+    const size_t slots = static_cast<size_t>(std::max(0, config_.max_batch_size)) +
+                         static_cast<size_t>(std::max(0, reserved_slots));
+    if (ssm_footprint_bytes == 0 || slots == 0 || !spec_state_scratch_wanted_())
+        return 0;
+    return 2 * (ssm_footprint_bytes / slots);
+}
+
+// Init-time allocation of the hybrid verify scratch; a no-op once sized or on a non-hybrid model.
+void Engine::prewarm_spec_state_scratch_() {
+    if (!ssm_state_ || spec_state_scratch_ != nullptr)
+        return;
+    if (!ensure_spec_state_scratch_())
+        return;
+    IMP_LOG_INFO("[spec] hybrid state scratch prewarmed: %.1f MiB (2 x %.1f MiB recurrent slot%s)",
+                 (spec_state_scratch_bytes_ + (spec_state_snap_ ? spec_state_scratch_bytes_ : 0)) /
+                     (1024.0 * 1024.0),
+                 spec_state_scratch_bytes_ / (1024.0 * 1024.0),
+                 spec_state_snap_ ? "" : ", snapshot slab failed");
+}
+
 int Engine::spec_mc_reserved_slots_() const {
     const auto& scfg = runtime_config_.speculative;
     if (scfg.mtp_tree_width <= 1 || scfg.mtp_k == 0)

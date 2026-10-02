@@ -747,6 +747,8 @@ bool Engine::enable_mtp_spec_decode(int k) {
         IMP_LOG_ERROR("enable_mtp_spec_decode: workspace alloc failed");
         return false;
     }
+    // Same labelled init scope: the hybrid verify scratch, unless init's prewarm already took it.
+    prewarm_spec_state_scratch_();
     // Post-norm feed scratch (diagnostics.mtp_prenorm_h), inside the same
     // labelled init scope: sized to the executor's token cap, the widest feed
     // a prefill chunk can hand mtp_feed_pairs_.

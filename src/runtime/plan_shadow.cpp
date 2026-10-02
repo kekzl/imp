@@ -147,7 +147,8 @@ std::string shadow_plan_report(const ShadowPlanProbe& probe, const PlanResult& s
         emit("  recurrent snapshots      %8.0f MiB  (server.recurrent_snapshot_mb)",
              probe.recurrent_snapshot_bytes / kMiB);
     if (probe.spec_decode_bytes)
-        emit("  speculative staging      %8.0f MiB", probe.spec_decode_bytes / kMiB);
+        emit("  speculative staging      %8.0f MiB  (hybrid verify state scratch, 2 x 1 slot)",
+             probe.spec_decode_bytes / kMiB);
     if (probe.residual_ring_bytes)
         emit("  residual FP16 ring       %8.0f MiB", probe.residual_ring_bytes / kMiB);
     if (probe.engine_persistent_bytes || probe.engine_persistent_resident_bytes)
