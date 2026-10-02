@@ -8,6 +8,7 @@
 #include "model/chat_template.h"
 #include "model/tokenizer.h"
 #include "runtime/config.h"
+#include "runtime/presets.h"
 
 #include <imp/imp.h>
 #include <httplib.h>
@@ -271,6 +272,7 @@ struct ServerState {
     int32_t channel_close_id = -1;      // <channel|>
     int32_t channel_newline_id = -1;    // '\n' used to terminate a channel header
     float default_think_budget = 0.5f;  // fraction of max_tokens for reasoning (0=disabled, 0.5=50%)
+    imp::SamplingDefaults sampling_defaults;  // loaded model (#2462): imp::resolve_sampling_defaults
     ServerMetrics metrics;
 
     // Continuous batching engine: runs inference in a background thread,
