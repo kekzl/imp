@@ -648,35 +648,17 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
     imp_req->trace_id = req_id;  // #1582: join the engine's log lines to this request
     imp_req->input_tokens = std::move(tokens);
     imp_req->max_tokens = max_tokens;
-    imp_req->temperature = p.temperature;
-    imp_req->top_p = p.top_p;
-    imp_req->top_k = p.top_k;
+    p.apply_to(*imp_req);
     imp_req->seed = p.seed;
-    imp_req->priority = p.priority;
-    imp_req->min_p = p.min_p;
-    imp_req->typical_p = p.typical_p;
-    imp_req->repetition_penalty = p.repetition_penalty;
-    imp_req->frequency_penalty = p.frequency_penalty;
-    imp_req->presence_penalty = p.presence_penalty;
-    imp_req->repeat_last_n = p.repeat_last_n;
-    imp_req->dry_multiplier = p.dry_multiplier;
-    imp_req->dry_base = p.dry_base;
-    imp_req->dry_allowed_length = p.dry_allowed_length;
-    imp_req->dry_penalty_last_n = p.dry_penalty_last_n;
-    imp_req->mirostat = p.mirostat;
-    imp_req->mirostat_tau = p.mirostat_tau;
-    imp_req->mirostat_eta = p.mirostat_eta;
     imp_req->logprobs = p.req_logprobs;
     imp_req->top_logprobs = p.top_logprobs;
     imp_req->prompt_logprobs = p.plp.engine_top_n;
-    imp_req->ignore_eos = p.ignore_eos;
     // With ignore_eos the engine keeps sampling past EOS; every EOS it emits
     // counts as an output token (vLLM semantics) but carries no text.
     const bool ignore_eos = imp_req->ignore_eos;
     imp_req->logit_bias = std::move(p.logit_bias);
-    imp_req->think_budget = p.think_budget;
-    imp_req->pin_kv_prefix = p.cache_prompt;
-    apply_spec_contract_(*imp_req, p.spec_override, p.spec_mtp_k, state.armed_mtp_k.load(std::memory_order_relaxed),
+    apply_spec_contract_(*imp_req, p.spec_override, p.spec_mtp_k,
+                         state.armed_mtp_k.load(std::memory_order_relaxed),
                          state.mtp_head_present.load(std::memory_order_relaxed),
                          state.mtp_head_loaded.load(std::memory_order_relaxed));
     // Predicted Outputs (string-content form): seeds the n-gram draft corpus only, output unchanged.

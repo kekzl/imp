@@ -1,4 +1,5 @@
 #include "responses.h"
+#include "sampling_fields.h"
 #include "spec_usage_keys.h"
 
 #include <cstdio>
@@ -185,16 +186,10 @@ json responses_to_openai_body(const json& rsp) {
         }
     }
 
-    if (rsp.contains("temperature"))
-        oai["temperature"] = rsp["temperature"];
-    if (rsp.contains("top_p"))
-        oai["top_p"] = rsp["top_p"];
+    // temperature, top_p, priority, stream, speculative: kSamplingKeys rows with kViaResponses.
+    pass_sampling_keys(rsp, kViaResponses, oai);
     if (rsp.contains("max_output_tokens"))
         oai["max_tokens"] = rsp["max_output_tokens"];
-    if (rsp.contains("priority"))  // imp/vLLM extension, lower = earlier
-        oai["priority"] = rsp["priority"];
-    if (rsp.contains("speculative"))  // imp extension, same as the chat and Anthropic shapes (C-9)
-        oai["speculative"] = rsp["speculative"];
 
     // reasoning.effort -> think budget (fraction of max_tokens for the think
     // phase; see --think-budget). minimal/low keep answers snappy.
@@ -210,8 +205,6 @@ json responses_to_openai_body(const json& rsp) {
             oai["think_budget"] = 0.8;
     }
 
-    if (rsp.contains("stream"))
-        oai["stream"] = rsp["stream"];
     return oai;
 }
 

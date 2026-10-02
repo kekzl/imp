@@ -6,6 +6,7 @@
 #include "handlers.h"
 #include "logit_bias.h"
 #include "reasoning_split.h"
+#include "sampling_fields.h"
 #include "spec_usage_keys.h"
 
 #include "api/imp_internal.h"
@@ -33,28 +34,10 @@ struct ChatVideoInput {
     std::vector<double> seconds;
 };
 
-struct ChatRequestParams {
-    // Sampling
-    float temperature = 0.7f, top_p = 0.95f, min_p = 0.0f, typical_p = 1.0f;
-    float repetition_penalty = 1.05f;
-    float frequency_penalty = 0.0f, presence_penalty = 0.0f;
-    float dry_multiplier = 0.0f, dry_base = 1.75f;
-    float mirostat_tau = 5.0f, mirostat_eta = 0.1f;
-    float think_budget = 0.0f;
-    int top_k = 40, max_tokens = 0, seed = -1, repeat_last_n = 0;
-    int dry_allowed_length = 2, dry_penalty_last_n = 0, mirostat = 0;
-    int n_completions = 1, top_logprobs = 0;
-    // Admission priority (vLLM-compatible "priority" body field): lower value
-    // schedules earlier, default 0. Strictly dominates the scheduler's
-    // shortest-first-with-aging order across classes.
-    int priority = 0;
-    bool stream = false, json_mode = false, req_logprobs = false, include_usage = false;
-    bool ignore_eos = false;  // vLLM-style: run to max_tokens, never stop on EOS (benchmarks)
-    bool top_p_explicit = false, top_k_explicit = false, rep_pen_explicit = false;
-    // Pin the prompt's KV blocks against eviction (Anthropic cache_control →
-    // mapped by anthropic_to_openai_body; also a direct llama.cpp-style
-    // "cache_prompt" body field on the OpenAI route).
-    bool cache_prompt = false;
+// Sampling fields (temperature, penalties, priority, stream, ...): SamplingFields, sampling_fields.h.
+struct ChatRequestParams : SamplingFields {
+    int max_tokens = 0, n_completions = 1, top_logprobs = 0;
+    bool json_mode = false, req_logprobs = false, include_usage = false;
     // cache_prefix_messages: leading chat-message count forming the cacheable prefix (-1 = whole
     // prompt). Set by anthropic_to_openai_body; shifted when a system message is injected in front
     // (tool-prompt fallback).

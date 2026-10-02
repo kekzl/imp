@@ -621,35 +621,17 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->lora_id = ctx.snap.lora_id;
     req->input_tokens = input_tokens;
     req->max_tokens = ctx.params.max_tokens;
-    req->temperature = ctx.params.temperature;
-    req->top_p = ctx.params.top_p;
-    req->top_k = ctx.params.top_k;
+    ctx.params.apply_to(*req);
     req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
-    req->pin_kv_prefix = ctx.params.cache_prompt;
     req->pin_kv_prefix_tokens = ctx.snap.pin_prefix_tokens;
     // Per-request speculation: the override, the MTP depth, and the reason a
     // decline happened, resolved by the same pure rule the engine uses
     // (spec_request.h) so the two cannot disagree about one request.
     apply_spec_contract_(*req, ctx.params.spec_override, ctx.params.spec_mtp_k, ctx.snap.mtp_armed_k,
                          ctx.snap.mtp_head_present, ctx.snap.mtp_head_loaded);
-    req->priority = ctx.params.priority;
     req->prediction_tokens = ctx.snap.prediction_tokens;
-    req->min_p = ctx.params.min_p;
-    req->typical_p = ctx.params.typical_p;
-    req->repetition_penalty = ctx.params.repetition_penalty;
-    req->frequency_penalty = ctx.params.frequency_penalty;
-    req->presence_penalty = ctx.params.presence_penalty;
-    req->repeat_last_n = ctx.params.repeat_last_n;
-    req->dry_multiplier = ctx.params.dry_multiplier;
-    req->dry_base = ctx.params.dry_base;
-    req->dry_allowed_length = ctx.params.dry_allowed_length;
-    req->dry_penalty_last_n = ctx.params.dry_penalty_last_n;
-    req->mirostat = ctx.params.mirostat;
-    req->mirostat_tau = ctx.params.mirostat_tau;
-    req->mirostat_eta = ctx.params.mirostat_eta;
     req->logprobs = ctx.params.req_logprobs;
     req->top_logprobs = ctx.params.top_logprobs;
-    req->ignore_eos = ctx.params.ignore_eos;
     req->json_mode = ctx.params.json_mode;
     req->json_schema = ctx.params.json_schema_str;
     req->regex_pattern = ctx.params.regex_pattern;
@@ -664,7 +646,6 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->tool_constraint_xml = ctx.params.tool_constraint_xml;
     req->tpl_family = ctx.snap.tpl_family;
     req->logit_bias = ctx.params.logit_bias;
-    req->think_budget = ctx.params.think_budget;
     // req->started_in_think = enable_thinking: without it the engine's think-budget enforcement
     // never sees an opener in the output and lets the model reason to max_tokens (content empty).
     req->started_in_think = ctx.snap.enable_thinking;

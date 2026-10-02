@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- imp-server reads the shared sampling fields through one parser, `parse_sampling_fields` (`sampling_fields.h`, #2461), for chat, completions, messages and responses; the `/v1/messages` and `/v1/responses` pass-through comes from the same table. Parsed values and 4xx unchanged: 353 bodies x 4 dialects, golden.
 - `imp-quantize` writes `lm_head` as the per-row FP8 head `auto` runs (`--lm-head fp8`, default for modelopt, #2479); the loader serves it with no load-time conversion. Qwen3-14B head 1483.8 -> 742.5 MiB, PPL 9.7350 both (KV FP16).
 - `imp-quantize` declares `kv_cache_quant_algo: FP8` for `qwen3` / `qwen3_moe` (`--kv-hint auto|fp8|none`, #2480), so `kv_cache.dtype=auto` runs FP8 KV there; other families stay `null`. Qwen3-14B PPL 9.7350 -> 9.7642 (+0.30 %).
 - CI `Build`: `-j$(nproc)`, the five CUTLASS TUs serialized by `scripts/ci_compile_slot.sh` (cold peak 11.8 of 16 GB); static gates in the background, still blocking; apt debs cached; `ctest -j4`; no ccache save on 0 misses. Build 477 -> 364 s on 72 misses, push -> Build green 222 -> 130 s median on 0 (#2448)

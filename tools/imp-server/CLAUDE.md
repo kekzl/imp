@@ -25,6 +25,7 @@ OpenAI, Anthropic and OpenAI-Responses dialects: thin wire-format adapters over 
 - `handlers_messages.cpp`: Anthropic wire format
 - `handlers_responses.cpp`: `/v1/responses`
 - `handlers_chat_params.cpp`: parameter parsing and validation
+- `sampling_fields.h`: the one sampling-field parser and dialect pass-through table; a new field is one row (#2461)
 - `webui/index.html`: embedded at build time by `cmake/embed_webui.cmake`
 
 ## Test

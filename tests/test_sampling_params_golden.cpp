@@ -1,6 +1,7 @@
 // Golden equivalence for request-field parsing (roadmap row 83, #2461): every case body goes through
 // each dialect's real parse path; the parsed params (diff vs the dialect's base body) or the 4xx
-// (status + message) must match tests/fixtures/sampling_golden.json. IMP_UPDATE_SAMPLING_GOLDEN=1 rewrites it.
+// (status + message) must match tests/fixtures/sampling_golden.json. IMP_UPDATE_SAMPLING_GOLDEN=1 rewrites
+// it.
 #include <gtest/gtest.h>
 
 #include "anthropic.h"
@@ -123,7 +124,8 @@ json run_messages(const json& body) {
     } catch (const std::exception& e) {
         const std::string field = wrong_field_type_message(body.dump());
         return {{"status", 400},
-                {"error", field.empty() ? std::string("Failed to transform Anthropic body: ") + e.what() : field}};
+                {"error",
+                 field.empty() ? std::string("Failed to transform Anthropic body: ") + e.what() : field}};
     }
     return run_chat_parse(oai, body.dump());
 }
@@ -210,16 +212,27 @@ std::vector<Dialect> dialects() {
 // Field values: set, boundary, out of range, wrong type. Integers stay inside int64 so no
 // float-to-int conversion is undefined.
 std::vector<std::pair<std::string, json>> cases() {
-    const std::vector<json> kFloatVals = {0.5, 0, -0.5, 1, 1.0, 2, 2.5, 100, "x", true, json::array(), json::object()};
-    const std::vector<json> kIntVals = {0, 1, -1, 3, 7, 2.7, 65, 2147483647, -2147483648LL, 4294967297LL, "x", false};
+    const std::vector<json> kFloatVals = {0.5, 0,   -0.5, 1,    1.0,           2,
+                                          2.5, 100, "x",  true, json::array(), json::object()};
+    const std::vector<json> kIntVals = {0,   1,    -1, 3, 7, 2.7, 65, 2147483647, -2147483648LL, 4294967297LL,
+                                        "x", false};
     const std::vector<json> kBoolVals = {true, false, 1, "x"};
-    const char* kFloatKeys[] = {"temperature",      "top_p",         "min_p",          "typical_p",
-                                "repetition_penalty", "frequency_penalty", "presence_penalty", "dry_multiplier",
-                                "dry_base",         "mirostat_tau",  "mirostat_eta",   "think_budget"};
-    const char* kIntKeys[] = {"top_k",          "seed",       "priority",           "repeat_last_n",
-                              "dry_allowed_length", "dry_penalty_last_n", "mirostat", "n",
-                              "top_logprobs",   "max_tokens", "max_completion_tokens", "max_output_tokens",
-                              "best_of"};
+    const char* kFloatKeys[] = {"temperature",
+                                "top_p",
+                                "min_p",
+                                "typical_p",
+                                "repetition_penalty",
+                                "frequency_penalty",
+                                "presence_penalty",
+                                "dry_multiplier",
+                                "dry_base",
+                                "mirostat_tau",
+                                "mirostat_eta",
+                                "think_budget"};
+    const char* kIntKeys[] = {
+        "top_k",    "seed", "priority",     "repeat_last_n", "dry_allowed_length",    "dry_penalty_last_n",
+        "mirostat", "n",    "top_logprobs", "max_tokens",    "max_completion_tokens", "max_output_tokens",
+        "best_of"};
     const char* kBoolKeys[] = {"stream", "ignore_eos", "cache_prompt", "echo", "logprobs"};
     std::vector<std::pair<std::string, json>> out;
     out.emplace_back("<base>", json::object());
@@ -264,11 +277,27 @@ std::vector<std::pair<std::string, json>> cases() {
         {{"text", {{"format", {{"type", "json_object"}}}}}},
         {{"prediction", {{"type", "content"}, {"content", "abc"}}}},
         {{"metadata", {{"user_id", "u"}}}},
-        {{"temperature", 0.2}, {"top_p", 0.5}, {"top_k", 9}, {"seed", 4}, {"priority", -2}, {"min_p", 0.1},
-         {"typical_p", 0.9}, {"repetition_penalty", 1.2}, {"frequency_penalty", 0.3}, {"presence_penalty", -0.3},
-         {"repeat_last_n", 64}, {"dry_multiplier", 0.8}, {"dry_base", 2.0}, {"dry_allowed_length", 3},
-         {"dry_penalty_last_n", 128}, {"mirostat", 2}, {"mirostat_tau", 4.0}, {"mirostat_eta", 0.2},
-         {"think_budget", 0.25}, {"ignore_eos", true}, {"cache_prompt", true}},
+        {{"temperature", 0.2},
+         {"top_p", 0.5},
+         {"top_k", 9},
+         {"seed", 4},
+         {"priority", -2},
+         {"min_p", 0.1},
+         {"typical_p", 0.9},
+         {"repetition_penalty", 1.2},
+         {"frequency_penalty", 0.3},
+         {"presence_penalty", -0.3},
+         {"repeat_last_n", 64},
+         {"dry_multiplier", 0.8},
+         {"dry_base", 2.0},
+         {"dry_allowed_length", 3},
+         {"dry_penalty_last_n", 128},
+         {"mirostat", 2},
+         {"mirostat_tau", 4.0},
+         {"mirostat_eta", 0.2},
+         {"think_budget", 0.25},
+         {"ignore_eos", true},
+         {"cache_prompt", true}},
     };
     for (const auto& m : kMisc)
         out.emplace_back(m.dump(), m);

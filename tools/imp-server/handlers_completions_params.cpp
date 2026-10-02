@@ -64,7 +64,8 @@ bool parse_completions_request_params(const httplib::Request& req, httplib::Resp
             send_json_error(res, 400, "invalid_request_error", err, "prompt");
             return false;
         }
-        if (const std::string err = parse_completion_suffix(body, out.prompt, !out.prompt_ids.empty(), out.fim);
+        if (const std::string err = parse_completion_suffix(body, out.prompt, !out.prompt_ids.empty(),
+                                                            out.fim);
             !err.empty()) {
             send_json_error(res, 400, "invalid_request_error", err, "suffix");
             return false;
@@ -72,30 +73,10 @@ bool parse_completions_request_params(const httplib::Request& req, httplib::Resp
     }
 
     // Extract parameters
-    out.temperature = body.value("temperature", 0.7f);
-    out.top_p = body.value("top_p", 0.95f);
-    out.top_k = body.value("top_k", 40);
+    parse_sampling_fields(body, state.default_think_budget, out);
+    // max_tokens only: max_completion_tokens is a chat/completions field (parse_max_tokens_field).
     out.max_tokens = body.value("max_tokens", state.default_max_tokens);
-    out.seed = body.value("seed", -1);
-    out.priority = body.value("priority", 0);  // vLLM-compatible, lower = earlier
-    out.stream = body.value("stream", false);
     out.echo = body.value("echo", false);
-    out.min_p = body.value("min_p", 0.0f);
-    out.typical_p = body.value("typical_p", 1.0f);
-    out.repetition_penalty = body.value("repetition_penalty", 1.05f);
-    out.frequency_penalty = body.value("frequency_penalty", 0.0f);
-    out.presence_penalty = body.value("presence_penalty", 0.0f);
-    out.repeat_last_n = body.value("repeat_last_n", 0);
-    out.dry_multiplier = body.value("dry_multiplier", 0.0f);
-    out.dry_base = body.value("dry_base", 1.75f);
-    out.dry_allowed_length = body.value("dry_allowed_length", 2);
-    out.dry_penalty_last_n = body.value("dry_penalty_last_n", 0);
-    out.mirostat = body.value("mirostat", 0);
-    out.mirostat_tau = body.value("mirostat_tau", 5.0f);
-    out.mirostat_eta = body.value("mirostat_eta", 0.1f);
-    out.ignore_eos = body.value("ignore_eos", false);  // vLLM-style, see handlers_chat_params.cpp
-    out.think_budget = body.value("think_budget", state.default_think_budget);
-    out.cache_prompt = body.value("cache_prompt", false);
 
     if (const std::string err = parse_completions_logprobs(body, out.stream, out.echo, out.req_logprobs,
                                                            out.top_logprobs, out.plp);
