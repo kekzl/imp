@@ -27,58 +27,27 @@ struct ToolDialect {
     }
 };
 
-// Resolves dialect-specific tool tags into token IDs (where the vocab has them
-// as single special tokens) plus char-level prefix/suffix fallbacks.
-//
-// ChatML/Hermes/Mistral: <tool_call>...</tool_call>  (single special tokens)
-// Gemma:                 <|tool_call>...<tool_call|> (single special tokens)
-// Llama3:                <function=...></function>   (multi-token, char fallback)
-// Other families fall through to ChatML defaults.
-ToolDialect resolve_tool_dialect(Tokenizer* tokenizer, ChatTemplateFamily family) {
+// Resolves the gate's tool tags into token IDs (gate.tokens: where the vocab has them as single
+// special tokens) plus char-level prefix/suffix fallbacks. Pair per dialect: server tool_call_dialect.h.
+ToolDialect resolve_tool_dialect(Tokenizer* tokenizer, const ToolCallGate& gate) {
     ToolDialect d;
     if (!tokenizer)
         return d;
-
-    auto add_token_if_present = [&](const std::string& s, std::vector<int32_t>& out) {
-        int32_t id = tokenizer->find_token(s);
-        if (id >= 0)
-            out.push_back(id);
-    };
-
-    switch (family) {
-        case ChatTemplateFamily::LLAMA3:
-            // <function=NAME> has dynamic NAME — char-prefix is the only path.
-            d.open_prefix = "<function=";
-            d.close_suffix = "</function>";
-            return d;
-
-        case ChatTemplateFamily::GEMMA:
-            d.open_prefix = "<|tool_call>";
-            d.close_suffix = "<tool_call|>";
-            add_token_if_present("<|tool_call>", d.open_tokens);
-            add_token_if_present("<tool_call|>", d.close_tokens);
-            return d;
-
-        case ChatTemplateFamily::CHATML:
-        case ChatTemplateFamily::MISTRAL_V3:
-        case ChatTemplateFamily::DEEPSEEK_R1:
-        case ChatTemplateFamily::PHI:
-        case ChatTemplateFamily::NEMOTRON:
-        case ChatTemplateFamily::LLAMA2:
-        case ChatTemplateFamily::RAW:
-        default:
-            d.open_prefix = "<tool_call>";
-            d.close_suffix = "</tool_call>";
-            add_token_if_present("<tool_call>", d.open_tokens);
-            add_token_if_present("</tool_call>", d.close_tokens);
-            return d;
+    d.open_prefix = gate.open;
+    d.close_suffix = gate.close;
+    if (gate.tokens) {
+        if (int32_t id = tokenizer->find_token(gate.open); id >= 0)
+            d.open_tokens.push_back(id);
+        if (int32_t id = tokenizer->find_token(gate.close); id >= 0)
+            d.close_tokens.push_back(id);
     }
+    return d;
 }
 
 }  // namespace
 
 void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, Tokenizer* tokenizer,
-                                bool has_tools, ChatTemplateFamily tpl_family, bool thinking_open) {
+                                bool has_tools, const ToolCallGate& tool_gate, bool thinking_open) {
     active_json_ = false;
     active_schema_ = false;
     // A pooled manager carries the previous request's flags; leaving these set
@@ -108,12 +77,11 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
 
     ToolDialect dialect;
     if (has_tools) {
-        dialect = resolve_tool_dialect(tokenizer, tpl_family);
+        dialect = resolve_tool_dialect(tokenizer, tool_gate);
         if (dialect.empty()) {
-            // Tokenizer surfaced none of the dialect tags AND the family had
-            // no char fallback — degrade to current "drop schema" behaviour.
-            IMP_LOG_INFO("ConstraintManager: no tool-tag dialect for family %d, dropping schema/json_mode",
-                         std::to_underlying(tpl_family));
+            // No tokenizer: no tag to resolve, degrade to the "drop schema" behaviour.
+            IMP_LOG_INFO("ConstraintManager: no tool-tag dialect for gate %s, dropping schema/json_mode",
+                         tool_gate.open.c_str());
             return;
         }
     }
@@ -192,7 +160,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
 bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::string, std::string>>& tools,
                                           const std::string& envelope_open, const std::string& envelope_close,
                                           Tokenizer* tokenizer, bool thinking_open, bool optional,
-                                          ChatTemplateFamily tpl_family, bool parallel, bool bare_args,
+                                          const ToolCallGate& tool_gate, bool parallel, bool bare_args,
                                           bool xml) {
     active_json_ = false;
     active_schema_ = false;
@@ -206,12 +174,12 @@ bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::strin
     // supported for now; other families fall back to the prompt hint.
     ToolDialect dialect;
     if (optional) {
-        dialect = resolve_tool_dialect(tokenizer, tpl_family);
+        dialect = resolve_tool_dialect(tokenizer, tool_gate);
         if (dialect.open_prefix != "<tool_call>") {
             IMP_LOG_INFO(
                 "ConstraintManager: strict optional tool call only on the ChatML "
-                "dialect (family %d) — keeping prompt-hint tool choice",
-                std::to_underlying(tpl_family));
+                "dialect (gate %s), keeping prompt-hint tool choice",
+                tool_gate.open.c_str());
             return false;
         }
     }

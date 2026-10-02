@@ -91,6 +91,7 @@ public:
                     close_tag_ = scan.close_tag;
                     fn_name_ = std::move(scan.fn_name);
                     gemma_body_ = scan.gemma_body;
+                    parse_body_ = scan.parse_body;
                     tag_buf_.clear();
                     reset_streaming_();
                     phase_ = Phase::BODY;
@@ -125,7 +126,10 @@ public:
                                                          : body.substr(bs, be - bs + 1);
 
                         Segment seg;
-                        if (parse_stream_tool_body(body, gemma_body_, fn_name_, seg.call)) {
+                        const bool parsed = parse_body_ ? parse_body_(body, fn_name_, seg.call)
+                                                        : parse_stream_tool_body(body, gemma_body_, fn_name_,
+                                                                                 seg.call);
+                        if (parsed) {
                             seg.kind = Segment::Kind::CALL;
                             r.push_back(std::move(seg));
                         } else {
@@ -141,6 +145,7 @@ public:
                     open_text_.clear();
                     fn_name_.clear();
                     gemma_body_ = false;
+                    parse_body_ = nullptr;
                     reset_streaming_();
                     phase_ = Phase::CONTENT;
                     trim_ws_ = true;  // drop cosmetic ws after the close marker
@@ -399,6 +404,7 @@ private:
     std::string close_tag_;  // BODY: expected close marker
     std::string fn_name_;    // BODY, Llama3: name from the open tag
     bool gemma_body_ = false;
+    decltype(ToolTagScan::parse_body) parse_body_ = nullptr;  // BODY: dialect body parser
     bool trim_ws_ = false;   // CONTENT: skip leading ws (right after a call)
 
     // Incremental-argument streaming state (BODY sub-state).

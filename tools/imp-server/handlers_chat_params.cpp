@@ -7,6 +7,7 @@
 #include "handlers_internal.h"
 #include "utils.h"
 #include "tool_call.h"
+#include "tool_call_dialect.h"
 #include "anthropic.h"
 #include "stream_pipeline.h"
 #include "image_fetch.h"
@@ -360,8 +361,8 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
             // Gemma's chat template skips standalone role=tool messages and expects tool_response markers
             // glued onto the assistant message that produced the call; ChatML/Llama3 templates render
             // standalone tool messages, so keep the push there.
-            if (ctx.snap.tpl_family == imp::ChatTemplateFamily::GEMMA && !ctx.params.chat_msgs.empty() &&
-                ctx.params.chat_msgs.back().role == "assistant") {
+            if (tool_call_dialect(ctx.snap.tpl_family).tool_response_joins_assistant &&
+                !ctx.params.chat_msgs.empty() && ctx.params.chat_msgs.back().role == "assistant") {
                 ctx.params.chat_msgs.back().content += content;
             } else {
                 ctx.params.chat_msgs.push_back({"tool", content});

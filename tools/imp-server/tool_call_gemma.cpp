@@ -1,4 +1,4 @@
-#include "tool_call.h"
+#include "tool_call_dialect.h"
 #include "utils.h"
 
 #include <cstring>
@@ -243,3 +243,119 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_gemma(
 
     return {content, calls};
 }
+
+namespace {
+
+// JSON value -> Gemma's format_argument() output (with escape_keys=False
+// for keys, since tool-call argument keys are bare identifiers in the
+// chat-template macro).
+std::string json_to_gemma_value(const json& v) {
+    if (v.is_string()) {
+        return std::string(kGemmaQuote) + v.get<std::string>() + kGemmaQuote;
+    }
+    if (v.is_boolean())
+        return v.get<bool>() ? "true" : "false";
+    if (v.is_null())
+        return "null";
+    if (v.is_number())
+        return dump_safe(v);
+    if (v.is_array()) {
+        std::string out = "[";
+        bool first = true;
+        for (const auto& item : v) {
+            if (!first)
+                out += ",";
+            out += json_to_gemma_value(item);
+            first = false;
+        }
+        out += "]";
+        return out;
+    }
+    if (v.is_object()) {
+        std::string out = "{";
+        bool first = true;
+        for (auto it = v.begin(); it != v.end(); ++it) {
+            if (!first)
+                out += ",";
+            out += it.key() + ":" + json_to_gemma_value(it.value());
+            first = false;
+        }
+        out += "}";
+        return out;
+    }
+    return dump_safe(v);
+}
+
+std::pair<std::string, std::vector<ParsedToolCall>> parse_gemma(const std::string& text,
+                                                                std::atomic<int>& next_id,
+                                                                const std::vector<std::string>&) {
+    return parse_tool_calls_gemma(text, next_id);
+}
+
+bool parse_gemma_body(const std::string& body, const std::string&, ParsedToolCall& tc) {
+    return parse_gemma_tool_call_body(body, tc);
+}
+
+// <|tool_call> (native, Gemma-4) or <tool_call> (the ChatML prompt this family is also given).
+ToolTagScan scan_gemma(const std::string& buf) {
+    ToolTagScan r = scan_tool_call_tag(buf, /*gemma_native=*/true);
+    if (r.gemma_body)
+        r.parse_body = parse_gemma_body;
+    return r;
+}
+
+void gemma_render_call(std::string& out, const std::string& name, const std::string& args, bool) {
+    json args_json = json::parse(args, nullptr, false);
+    std::string args_body;
+    if (!args_json.is_discarded() && args_json.is_object()) {
+        bool first = true;
+        for (auto it = args_json.begin(); it != args_json.end(); ++it) {
+            if (!first)
+                args_body += ",";
+            args_body += it.key() + ":" + json_to_gemma_value(it.value());
+            first = false;
+        }
+    }
+    out += "<|tool_call>call:";
+    out += name;
+    out += "{";
+    out += args_body;
+    out += "}<tool_call|>";
+}
+
+// Gemma's chat template reaches the role=tool branch only via forward-scan from a preceding
+// assistant-with-tool_calls message (template line ~215): the caller APPENDS this string to that
+// assistant message (tool_response_joins_assistant).
+std::string gemma_tool_response(const json& msg, const std::string& content) {
+    std::string name = msg.value("name", "tool");
+    return "<|tool_response>response:" + name + "{value:" + std::string(kGemmaQuote) + content + kGemmaQuote +
+           "}<tool_response|>";
+}
+
+// A forced tool_choice constrains a JSON body here; parse_gemma_tool_call_body accepts it (#2279).
+void gemma_forced_envelope(const std::string& name, std::string& open, std::string& close) {
+    open = "<|tool_call>call:" + name;
+    close = "<tool_call|>";
+}
+
+}  // namespace
+
+// Gemma-4 <|tool_call>call:NAME{...}<tool_call|>; gemma-3 shares the family without the native token,
+// so the forced envelope needs <|tool_call> in the vocab.
+extern const ToolCallDialect kGemmaToolDialect = {
+    .name = "gemma",
+    .prompt = chatml_tool_prompt,
+    .parse = parse_gemma,
+    .scan = scan_gemma,
+    .render_call = gemma_render_call,
+    .tool_response = gemma_tool_response,
+    .json_envelope_open = nullptr,
+    .json_envelope_close = nullptr,
+    .xml_body = false,
+    .forced_envelope = gemma_forced_envelope,
+    .native_token = "<|tool_call>",
+    .tool_response_joins_assistant = true,
+    .gate_open = "<|tool_call>",
+    .gate_close = "<tool_call|>",
+    .gate_tokens = true,
+};

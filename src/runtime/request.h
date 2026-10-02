@@ -6,6 +6,7 @@
 #include <string>
 #include <memory>
 #include "model/chat_template.h"
+#include "runtime/tool_call_gate.h"
 #include "runtime/spec_request.h"
 
 namespace imp {
@@ -254,7 +255,7 @@ struct Request {
     // gate enters tool-aware mode so the schema/JSON FSM mask does not block the model's
     // tool-tag opener (`<tool_call>`, `<|tool_call>`, `<function=`).
     bool has_tools = false;
-    ChatTemplateFamily tpl_family = ChatTemplateFamily::CHATML;
+    ToolCallGate tool_gate;  // tag pair the gate watches for (has_tools); server fills it per dialect
 
     // Enforced tool calling (#1002, tool_choice=required / forced function): when non-empty,
     // generation is constrained to ONE tool-call envelope (`tool_envelope_open` +
