@@ -31,6 +31,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - `server.prefix_pin_budget_pct = 0` turned `session_id` pins off but left `cache_control` / `cache_prompt` pins unbounded, since the KV cache manager read a 0 budget as unlimited (#2503). 0 now means no pins of either kind; StreamingLLM sink blocks still pin.
+- `make preflight` runs `imp:lint` as the host user: no root-owned `build-preflight/` or `__pycache__/`, `git worktree remove` works (#2501). The pre-commit hook checks the staged tree, unstaged edits no longer refuse a clean commit. Mock server stores a response before replying (#2500 LRU flake).
 - A start without a cached library-reserve measurement (`docker run --rm`, no volume) re-sizes the KV pool at warmup to the reserve it just measured (#2436): plan, commit and growable ceiling equal a cached start. Qwen3.8-27B-NVFP4 first start: 1475 -> 2150 blocks committed, ceiling 13599 -> 20603.
 - Hybrid speculative verify allocated its recurrent-state scratch (2 x one slot, 159 MiB on Qwen3.8-27B) with `cudaMalloc` on the first verify step while serving (#2452). It is now taken at init (spec prewarm, or MTP enable) and charged in the KV memory plan as `speculative staging`; alloc-interpose phase A pins 0 serving allocations.
 - MoE decode with host-resident experts and no dp4a scratch (failed T2 take of q8_1/d8) passed the host expert tensors to the FP16 decode kernels (#2447). The FP16 arm now reads the staged slot pool with slot indices and slot stride, like dp4a.

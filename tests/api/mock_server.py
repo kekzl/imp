@@ -1134,9 +1134,10 @@ class MockHandler(BaseHTTPRequestHandler):
                       "input_tokens_details": {"cached_tokens": 0},
                       "output_tokens_details": {"reasoning_tokens": 0}},
         }
-        self._send_json(200, response)
+        # Store before replying: a client request after this reply must see the entry (#2500).
         if store:
             self._rs_put(rid, {"input_items": items, "output_items": output, "response": response})
+        self._send_json(200, response)
 
     def _handle_responses_get(self, rid: str):
         entry = self._rs_get(rid)

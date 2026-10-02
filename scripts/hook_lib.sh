@@ -10,8 +10,11 @@ hook_preflight() {
         echo "$HOOK: make preflight runs in imp:lint; start Docker and retry." >&2
         return 1
     fi
+    # pre-commit checks the staged tree; pre-push the working tree.
+    local staged=0
+    [ "$HOOK" = pre-commit ] && staged=1
     echo "$HOOK: make preflight (CPU, Docker)"
-    make -s -C "$ROOT" preflight; rc=$?
+    PREFLIGHT_STAGED=$staged make -s -C "$ROOT" preflight; rc=$?
     echo "$HOOK: preflight exit $rc, $((SECONDS - t0)) s wall (incl. lint image check)"
     [ "$rc" -eq 0 ] || { echo "$HOOK: preflight failed (see table above), commit/push refused" >&2; return 1; }
 }
