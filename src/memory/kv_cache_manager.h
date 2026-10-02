@@ -165,7 +165,9 @@ public:
     // Number of blocks currently pinned across all sequences.
     int num_pinned_blocks() const;
 
-    // Cap on unique pin_prefix-pinned blocks. 0 = unlimited (default).
+    // Cap on unique pinned blocks (cache_control + session pins). 0 = no pins (#2503);
+    // kPinBudgetUnlimited (default, no engine config) = no cap. StreamingLLM sink pins ignore 0.
+    static constexpr int kPinBudgetUnlimited = -1;
     void set_pin_budget_blocks(int blocks) { pin_budget_blocks_ = blocks; }
 
     // ── Session pins (#2407, kv_cache_manager_session.cpp) ───────────
@@ -497,7 +499,7 @@ private:
 
     // Prefix pinning state: block IDs that are pinned and must never be evicted or freed.
     // Two writers: pin_prefix() (refcounted below) and evict_middle_blocks() (StreamingLLM
-    // sinks, registered through pin_prefix as well).
+    // sinks, registered through pin_blocks_as_ as well).
     std::unordered_set<int> pinned_blocks_;
     // Pin owner -> exact block IDs it pinned. Survives free_sequence()
     // (seq_blocks_ is erased there; pins usually belong to finished seqs).
@@ -507,8 +509,8 @@ private:
     std::unordered_map<int, int> pin_refcount_;
     // Pin owners in pin order; budget eviction unpins from the front.
     std::list<int> pin_fifo_;
-    // Cap on unique pinned blocks (0 = unlimited).
-    int pin_budget_blocks_ = 0;
+    // Cap on unique pinned blocks: 0 = no pins, kPinBudgetUnlimited = no cap.
+    int pin_budget_blocks_ = kPinBudgetUnlimited;
     // Session pins: owner ids are negative (request ids are >= 0), one per session_id.
     struct SessionPin {
         int owner;
@@ -520,7 +522,8 @@ private:
     std::atomic<int> num_sessions_{0};
     std::atomic<int> session_pinned_blocks_{0};
     // pin_prefix with a pin owner distinct from the sequence whose blocks are pinned.
-    void pin_blocks_as_(int owner, int seq_id, int num_blocks);
+    // sink = StreamingLLM sink pin: still pins at budget 0.
+    void pin_blocks_as_(int owner, int seq_id, int num_blocks, bool sink = false);
     // Drops session bookkeeping for owner (after its pins are gone).
     void forget_session_owner_(int owner);
 

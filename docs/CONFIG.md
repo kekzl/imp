@@ -49,6 +49,7 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `attention.sparse_prefill_topk_tokens` | `0` (off) | sparse prefill: past tokens a continuation chunk attends to (own chunk dense), one page selection per chunk (record: `plans/2026-08-28-sparse-decode-attention.md`) |
 | `attention.sparse_prefill_rows` | `16` | query rows per chunk that score the past pages (max 64) |
 | `attention.sparse_prefill_recent_tokens` | `1024` | past positions a continuation chunk always keeps |
+| `server.prefix_pin_budget_pct` | `25` | share of the KV pool (0-100) that `cache_control` / `cache_prompt` pins and `session_id` pins may hold together; over budget the oldest pin is released; `0` = no pins of either kind (StreamingLLM sink blocks stay pinned) |
 | `server.session_ttl_s` | `600` | a `session_id` prefix pin is released after this many idle seconds; `0` = only `POST /v1/sessions/{id}/close` or the pin budget release it ([API_FEATURES.md](API_FEATURES.md#agent-sessions-session_id)) |
 | `server.model_swap` | `true` | a request naming another model in the directory swaps to it |
 | `server.model_swap_drain_ms` | `60000` | drain budget for in-flight generations during a swap/shutdown |

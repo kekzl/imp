@@ -934,7 +934,9 @@ BlockRef KVCacheManager::acquire_block_with_eviction_() {
 
 void KVCacheManager::pin_prefix(int seq_id, int num_blocks) { pin_blocks_as_(seq_id, seq_id, num_blocks); }
 
-void KVCacheManager::pin_blocks_as_(int owner, int seq_id, int num_blocks) {
+void KVCacheManager::pin_blocks_as_(int owner, int seq_id, int num_blocks, bool sink) {
+    if (pin_budget_blocks_ == 0 && !sink)
+        return;  // server.prefix_pin_budget_pct = 0: no cache_control or session pins (#2503)
     auto it = seq_blocks_.find(seq_id);
     if (it == seq_blocks_.end())
         return;
@@ -1328,7 +1330,7 @@ int KVCacheManager::evict_middle_blocks(int seq_id, int n_sink_tokens, int n_win
     auto pit = pinned_seq_blocks_.find(seq_id);
     int already = (pit != pinned_seq_blocks_.end()) ? static_cast<int>(pit->second.size()) : 0;
     if (sink_end_block > already)
-        pin_prefix(seq_id, sink_end_block);
+        pin_blocks_as_(seq_id, seq_id, sink_end_block, /*sink=*/true);
 
     // Free middle blocks and replace with sentinel.
     int freed = 0;
