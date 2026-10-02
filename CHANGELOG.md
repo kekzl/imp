@@ -5,7 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
-- CI `Build` (the required check) compiles at `-j$(nproc)` with the five CUTLASS TUs (4.97-8.56 GB peak RSS) serialized by `scripts/ci_compile_slot.sh`; cold-build cgroup peak 11.8 GB of 16 GB. Static gates run in the background and still fail `Build`; apt debs are cached; `ctest -L unit -j4`; ccache is not saved on 0 misses. 72-miss probe: Build 477 -> 364 s; 0-miss PR: push -> Build green 222 -> 130 s median (#2448)
+- CI `Build`: `-j$(nproc)`, the five CUTLASS TUs serialized by `scripts/ci_compile_slot.sh` (cold peak 11.8 of 16 GB); static gates in the background, still blocking; apt debs cached; `ctest -j4`; no ccache save on 0 misses. Build 477 -> 364 s on 72 misses, push -> Build green 222 -> 130 s median on 0 (#2448)
 
 ### Security
 - Vision decode (#2401): stb_image is compiled `STBI_ONLY_PNG`, so the GIF decoder of CVE-2026-5185 (heap overflow in `stbi__gif_load_next`, stb <= 2.30, no upstream fix) is not in the binary. Accepted image formats: JPEG (libjpeg-turbo), PNG; GIF, BMP and every other format answer `400` naming them.
