@@ -185,15 +185,15 @@ bool device_args_done = false;
         // directly, computes SwiGLU/GeGLU/ReLU^2 in registers, writes only packed
         // FP4+SFA (M1, #604). Non-gated (RELU_SQR): gate is nullptr, reads `up`
         // only; unlike the legacy relu_sqr_inplace, this does NOT clobber `up`.
-        auto fused_act_quantize_device = [&](const char* gate_base,
-                                              const char* up_base, int K_in,
-                                              FFNActivation act_type) {
+        auto fused_act_quantize_device = [&](const char* gate_base, const char* up_base, int K_in,
+                                             FFNActivation act_type, const void* gate_bias = nullptr,
+                                             const void* up_bias = nullptr) {
             prep_sfa(K_in);
             imp::fused_act_quantize_fp16_to_nvfp4_cutlass_moe(
                 gate_base, up_base, moe_.cutlass3x_packed,
                 reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs),
-                static_cast<const int*>(routing.expert_offsets.data),
-                expanded, K_in, ne, act_type, stream);
+                static_cast<const int*>(routing.expert_offsets.data), expanded, K_in, ne, act_type, stream,
+                gate_bias, up_bias);
         };
 
         // Per-layer pre-cached arrays (Phase 3c-full Step 3): when ready, all
@@ -322,33 +322,23 @@ bool device_args_done = false;
             const char* gate_for_fused =
                 non_gated_experts ? nullptr : expert_gate_base;
             const auto* d_offs = static_cast<const int32_t*>(routing.expert_offsets.data);
-            if (model_->profile().is_gpt_oss) {
-                // gpt-oss (#547): biases before the clamped GLU, then a plain quantize; the
-                // fused kernel has neither. Same seams as the legacy path, no host read.
-                moe_add_expert_bias_sorted(expert_gate_base, ly.expert_gate_bias.data, d_offs, ne,
-                                           expanded, eff, stream);
-                moe_add_expert_bias_sorted(expert_up_base, ly.expert_up_bias.data, d_offs, ne, expanded,
-                                           eff, stream);
-                apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data, moe_.expert_swiglu.data,
-                                        non_gated_experts, expanded, eff, compute_dtype_, cfg.ffn_activation,
-                                        stream);
-                prep_sfa(eff);
-                imp::quantize_fp16_to_nvfp4_cutlass_moe(
-                    moe_.expert_swiglu.data, moe_.cutlass3x_packed,
-                    reinterpret_cast<uint8_t* const*>(moe_.cutlass3x_sfa_ptrs), d_offs, expanded, eff, ne,
-                    stream);
-            } else {
-                fused_act_quantize_device(gate_for_fused, expert_up_base, eff,
-                                          act_type);
-            }
+            const bool gpt_oss = model_->profile().is_gpt_oss;
+            // gpt-oss (#547, #2466): gate/up biases + clamped GLU fused into the quantize (cfg act is
+            // GPT_OSS_GLU); the down bias rides the fused scatter when phase 7 takes it.
+            fused_act_quantize_device(gate_for_fused, expert_up_base, eff, act_type, ly.expert_gate_bias.data,
+                                      ly.expert_up_bias.data);
             ok = dispatch_device(ly.expert_down_ids,
                                  da_cache.d_down_B_ptrs,
                                  da_cache.d_down_SFB_ptrs,
                                  da_cache.d_down_alpha,
                                  expert_down_base, eff, d);
-            if (ok && model_->profile().is_gpt_oss)
-                moe_add_expert_bias_sorted(expert_down_base, ly.expert_down_bias.data, d_offs, ne, expanded,
-                                           d, stream);
+            if (ok && gpt_oss) {
+                if (moe_scatter_can_add_down_bias(ctx, compute_dtype_))
+                    ctx.scatter_down_bias = ly.expert_down_bias.data;
+                else
+                    moe_add_expert_bias_sorted(expert_down_base, ly.expert_down_bias.data, d_offs, ne,
+                                               expanded, d, stream);
+            }
         }
         }
         if (ok) {

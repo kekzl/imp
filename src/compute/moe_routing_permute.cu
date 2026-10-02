@@ -274,14 +274,18 @@ void moe_weighted_sum_residual(const void* expert_outputs, const float* expert_w
 // Fused token-centric scatter + FP32->FP16 + residual add (prefill): one block per output
 // token reads its top_k expert rows via token_to_expanded, accumulates weighted sum in
 // FP32 registers, converts to FP16, optionally adds residual. No atomics, no pre-zero.
+// kBias (gpt-oss, #2466): FP16 add of bias[expert_indices[flat]] per row, as the sorted bias kernel.
 
+template <bool kBias>
 __global__ void moe_scatter_fused_residual_kernel(
     const half* __restrict__ expert_output,         // [expanded, d_model]
     const int32_t* __restrict__ token_to_expanded,  // [n_tokens * top_k]
     const float* __restrict__ expert_weights,       // [n_tokens * top_k]
     const half* residual,                           // [n_tokens, d_model] or nullptr
     half* output,                                   // [n_tokens, d_model]
-    int d_model, int top_k) {
+    int d_model, int top_k,
+    const half* __restrict__ expert_bias,          // [ne, d_model], kBias only
+    const int32_t* __restrict__ expert_indices) {  // [n_tokens * top_k], kBias only
     const int token = blockIdx.x;
     const int base_flat = token * top_k;
 
@@ -290,7 +294,11 @@ __global__ void moe_scatter_fused_residual_kernel(
         for (int k = 0; k < top_k; ++k) {
             int expanded_row = token_to_expanded[base_flat + k];
             float w = expert_weights[base_flat + k];
-            sum += w * __half2float(expert_output[static_cast<int64_t>(expanded_row) * d_model + col]);
+            half x = expert_output[static_cast<int64_t>(expanded_row) * d_model + col];
+            if constexpr (kBias)
+                x = __hadd(x,
+                           expert_bias[static_cast<int64_t>(expert_indices[base_flat + k]) * d_model + col]);
+            sum += w * __half2float(x);
         }
         if (residual)
             sum += __half2float(residual[static_cast<int64_t>(token) * d_model + col]);
@@ -300,11 +308,16 @@ __global__ void moe_scatter_fused_residual_kernel(
 
 void moe_scatter_fused_residual(const void* expert_output, const int32_t* token_to_expanded,
                                 const float* expert_weights, const void* residual, void* output, int n_tokens,
-                                int d_model, int top_k, cudaStream_t stream) {
+                                int d_model, int top_k, cudaStream_t stream, const void* expert_bias,
+                                const int32_t* expert_indices) {
+    IMP_CHECK(!expert_bias || expert_indices, "moe_scatter_fused_residual: expert_bias needs expert_indices");
     int threads = 256;
-    moe_scatter_fused_residual_kernel<<<n_tokens, threads, 0, stream>>>(
-        static_cast<const half*>(expert_output), token_to_expanded, expert_weights,
-        static_cast<const half*>(residual), static_cast<half*>(output), d_model, top_k);
+    auto* kernel = expert_bias ? moe_scatter_fused_residual_kernel<true>
+                               : moe_scatter_fused_residual_kernel<false>;
+    kernel<<<n_tokens, threads, 0, stream>>>(static_cast<const half*>(expert_output), token_to_expanded,
+                                             expert_weights, static_cast<const half*>(residual),
+                                             static_cast<half*>(output), d_model, top_k,
+                                             static_cast<const half*>(expert_bias), expert_indices);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

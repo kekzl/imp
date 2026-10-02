@@ -43,6 +43,8 @@ struct MoeFfnContext {
     // Routing result + transient buffers carried across phases
     MoeRoutingResult routing{};
     bool residual_fused = false;  // true when decode-fast / fused scatter already added residual
+    // gpt-oss down bias [ne,d] the expert path left for the fused scatter to add (#2466); null = none.
+    const void* scatter_down_bias = nullptr;
 
     // True if moe_gather already populated moe_.gathered for this call. Set false when the
     // CUTLASS3x device-args path will fire (it consumes sorted_token_ids directly, no
@@ -59,5 +61,11 @@ struct MoeFfnContext {
     // itself, gate+up then down; `staged` stays empty, so a legacy fallback runs unstaged.
     bool staged_blocks = false;
 };
+
+// Implies phase 7 takes the token-centric fused scatter, the only scatter adding scatter_down_bias.
+[[nodiscard]] inline bool moe_scatter_can_add_down_bias(const MoeFfnContext& ctx, QType compute_dtype) {
+    return ctx.routing.token_to_expanded != nullptr && compute_dtype == QType::F16 &&
+           ctx.routing.expert_indices.data != nullptr;
+}
 
 }  // namespace imp

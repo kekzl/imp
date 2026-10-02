@@ -82,10 +82,12 @@ void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing, T
 // moe_scatter + fp32_to_fp16_kernel + elementwise_add via token_to_expanded inverse map
 // (avoids atomicAdd contention).
 // expert_output[expanded,d_model] FP16; residual[n_tokens,d_model] FP16 or null;
-// output[n_tokens,d_model] FP16.
+// output[n_tokens,d_model] FP16. expert_bias [ne,d_model] FP16 (gpt-oss down bias, #2466) is added
+// per row before weighting; needs expert_indices [n_tokens*top_k].
 void moe_scatter_fused_residual(const void* expert_output, const int32_t* token_to_expanded,
                                 const float* expert_weights, const void* residual, void* output, int n_tokens,
-                                int d_model, int top_k, cudaStream_t stream = nullptr);
+                                int d_model, int top_k, cudaStream_t stream = nullptr,
+                                const void* expert_bias = nullptr, const int32_t* expert_indices = nullptr);
 
 // Fused weighted sum + FP16 output + optional residual add, used by run_moe_ffn.
 // expert_outputs: [top_k, d_model] FP16. expert_weights: [top_k] FP32 on device.
