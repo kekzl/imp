@@ -230,7 +230,7 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
 }
 
 bool Engine::spec_verify_gates_ok_(const Request& req, bool ignore_think) const {
-    return spec_verify_gate_refusal_(req, ignore_think) == nullptr;
+    return !think_closer_pending_(req) && spec_verify_gate_refusal_(req, ignore_think) == nullptr;
 }
 
 // Model-level gates, split out of spec_verify_gates_ok_ so spec_ngram_enabled_

@@ -470,3 +470,95 @@ TEST(StopMask, IgnoreEosNeverMasks) {
     EXPECT_FALSE(stop_mask_active(true, true, -1, 5, false, /*ignore_eos=*/true));
     EXPECT_FALSE(stop_mask_active(false, true, 10, 11, false, /*ignore_eos=*/true));
 }
+
+// Client end-of-think (#2420). EndThinkSim mirrors Engine::fill_sampling_params (force decision,
+// no budget) and track_think_state (single-id path); the model stub emits its own token unless forced.
+namespace {
+constexpr int32_t kReason = 100, kContent = 200, kNl = 10, kThinkEnd = 2;
+
+struct EndThinkSim {
+    int32_t end_id;
+    int32_t nl_id;
+    std::vector<int32_t> harmony_seq;
+    bool harmony;
+    bool in_think = true;
+    bool end_requested = false;
+    int harmony_idx = -1;
+    std::vector<int32_t> out;
+
+    int32_t step(int32_t model_tok) {
+        const bool due = harmony_idx < 0 && end_think_due(end_requested, in_think, end_id);
+        const int32_t f = next_forced_closer(due, end_id, nl_id, harmony_seq, harmony,
+                                             out.empty() ? -1 : out.back(), harmony_idx);
+        const int32_t t = f >= 0 ? f : model_tok;
+        out.push_back(t);
+        if (t == end_id)
+            in_think = false;
+        return t;
+    }
+    // Model keeps reasoning while in think, answers after.
+    void run(int n) {
+        for (int i = 0; i < n; ++i)
+            step(in_think ? kReason : kContent);
+    }
+};
+}  // namespace
+
+TEST(EndThinking, ChatMlForcesNewlineThenCloserAndContentContinues) {
+    EndThinkSim s{kThinkEnd, kNl, {}, false};
+    s.run(3);
+    s.end_requested = true;
+    s.run(4);
+    EXPECT_EQ(s.out, (std::vector<int32_t>{kReason, kReason, kReason, kNl, kThinkEnd, kContent, kContent}));
+    EXPECT_FALSE(s.in_think);
+}
+
+TEST(EndThinking, ChatMlAfterOwnNewlineForcesCloserAtOnce) {
+    EndThinkSim s{kThinkEnd, kNl, {}, false};
+    s.step(kNl);
+    s.end_requested = true;
+    s.run(2);
+    EXPECT_EQ(s.out, (std::vector<int32_t>{kNl, kThinkEnd, kContent}));
+}
+
+TEST(EndThinking, ChatMlBeforeFirstTokenForcesFromPromptSeed) {
+    // Flag set before admission: prompt ends on "<think>\n", no output yet (last_token -1).
+    EndThinkSim s{kThinkEnd, kNl, {}, false};
+    s.end_requested = true;
+    s.run(3);
+    EXPECT_EQ(s.out, (std::vector<int32_t>{kNl, kThinkEnd, kContent}));
+}
+
+TEST(EndThinking, HarmonyForcesWholeFinalChannelOpener) {
+    // <|end|><|start|>assistant<|channel|>final<|message|> as 5 ids; <|end|> is the closer.
+    const std::vector<int32_t> seq{kThinkEnd, 51, 52, 53, 54};
+    EndThinkSim s{kThinkEnd, -1, seq, true};
+    s.run(2);
+    s.end_requested = true;
+    s.run(7);
+    EXPECT_EQ(s.out, (std::vector<int32_t>{kReason, kReason, kThinkEnd, 51, 52, 53, 54, kContent, kContent}));
+    EXPECT_FALSE(s.in_think);
+    EXPECT_EQ(s.harmony_idx, -1);
+}
+
+TEST(EndThinking, WithoutRequestNothingIsForced) {
+    EndThinkSim s{kThinkEnd, kNl, {}, false};
+    s.run(5);
+    EXPECT_EQ(s.out, std::vector<int32_t>(5, kReason));
+    EXPECT_TRUE(s.in_think);
+}
+
+TEST(EndThinking, OutsideThinkBlockIsANoOp) {
+    EXPECT_FALSE(end_think_due(/*end_requested=*/true, /*in_think=*/false, kThinkEnd));
+    EndThinkSim s{kThinkEnd, kNl, {}, false};
+    s.in_think = false;
+    s.end_requested = true;
+    s.run(3);
+    EXPECT_EQ(s.out, std::vector<int32_t>(3, kContent));
+}
+
+TEST(EndThinking, NoCloserIdNeverForces) {
+    EXPECT_FALSE(end_think_due(true, true, /*think_end_id=*/-1));
+    EXPECT_TRUE(end_think_due(true, true, kThinkEnd));
+    EXPECT_FALSE(end_think_due(false, true, kThinkEnd));
+}

@@ -179,6 +179,8 @@ struct ServerMetrics {
     std::atomic<int64_t> tokens_completion_total{0};
     std::atomic<int64_t> tokens_cached_total{0};  // Prefix cache hits
     std::atomic<int64_t> requests_cancelled{0};   // Client-disconnect cancellations
+    // Requests flagged by POST /v1/requests/{id}/end_thinking (#2420).
+    std::atomic<int64_t> think_end_requests{0};
     // requests_timed_out: server-initiated --request-timeout, distinct from requests_cancelled
     // (client gone). Without this counter a timeout was invisible (finish_reason "length" either way, #1640).
     std::atomic<int64_t> requests_timed_out{0};
@@ -451,3 +453,8 @@ void handle_lora_unload(const httplib::Request& req, httplib::Response& res, Ser
 // POST /v1/sessions/{id}/close (#2407): releases the session_id prefix pin. Idempotent, 200 for any
 // valid id (unknown included); 400 when the id breaks the session_id rule.
 void handle_session_close(const httplib::Request& req, httplib::Response& res, ServerState& state);
+
+// POST /v1/requests/{id}/end_thinking (#2420): forces the reasoning closer of a pending or running
+// request named by its completion/message/response id or X-Request-Id. 200 status "ending" or
+// "already_closed" (idempotent), 404 unknown/finished, 409 model without a closer token.
+void handle_end_thinking(const httplib::Request& req, httplib::Response& res, ServerState& state);

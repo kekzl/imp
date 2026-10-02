@@ -96,6 +96,7 @@ void BatchingEngine::submit(std::shared_ptr<ServerRequest> req) {
         req->push_finish("internal_error");
         return;
     }
+    register_ids_(req);
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         pending_queue_.push_back(std::move(req));
@@ -112,11 +113,74 @@ void BatchingEngine::submit_all(const std::vector<std::shared_ptr<ServerRequest>
             r->push_finish("internal_error");
         return;
     }
+    for (const auto& r : reqs)
+        register_ids_(r);
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         pending_queue_.insert(pending_queue_.end(), reqs.begin(), reqs.end());
     }
     queue_cv_.notify_one();
+}
+
+void BatchingEngine::register_ids_(const std::shared_ptr<ServerRequest>& sr) {
+    if (sr->public_ids.empty())
+        return;
+    std::lock_guard<std::mutex> lock(ids_mutex_);
+    // Paths that finish without retire_ids_ (stop, fault, LoRA/image refusal) leave expired entries.
+    if (by_public_id_.size() >= 1024) {
+        std::erase_if(by_public_id_, [](const auto& kv) {
+            const auto p = kv.second.lock();
+            return !p || p->think_phase.load(std::memory_order_acquire) == ServerRequest::kThinkDone;
+        });
+    }
+    for (const auto& id : sr->public_ids) {
+        if (!id.empty())
+            by_public_id_[id] = sr;  // a reused client id names the newest request
+    }
+}
+
+void BatchingEngine::retire_ids_(const std::shared_ptr<ServerRequest>& sr) {
+    sr->think_phase.store(ServerRequest::kThinkDone, std::memory_order_release);
+    if (sr->public_ids.empty())
+        return;
+    std::lock_guard<std::mutex> lock(ids_mutex_);
+    for (const auto& id : sr->public_ids) {
+        const auto it = by_public_id_.find(id);
+        if (it == by_public_id_.end())
+            continue;
+        const auto p = it->second.lock();
+        if (!p || p == sr)
+            by_public_id_.erase(it);
+    }
+}
+
+BatchingEngine::EndThinking BatchingEngine::end_thinking(const std::string& id, bool* first_call) {
+    std::shared_ptr<ServerRequest> sr;
+    {
+        std::lock_guard<std::mutex> lock(ids_mutex_);
+        const auto it = by_public_id_.find(id);
+        if (it == by_public_id_.end())
+            return EndThinking::NotFound;
+        sr = it->second.lock();
+        if (!sr) {
+            by_public_id_.erase(it);
+            return EndThinking::NotFound;
+        }
+    }
+    switch (sr->think_phase.load(std::memory_order_acquire)) {
+        case ServerRequest::kThinkDone:
+            return EndThinking::NotFound;
+        case ServerRequest::kThinkOff:
+            return EndThinking::AlreadyClosed;
+        case ServerRequest::kThinkNoCloser:
+            return EndThinking::NoCloser;
+        default:
+            break;  // in a think block, or not admitted yet: the worker applies the flag
+    }
+    const bool was_set = sr->end_thinking.exchange(true, std::memory_order_acq_rel);
+    if (first_call)
+        *first_call = !was_set;
+    return EndThinking::Ending;
 }
 
 void BatchingEngine::close_session(std::string session_id) {
@@ -369,6 +433,12 @@ void BatchingEngine::worker_loop() {
         // Run one engine step. Wrapped in try/catch: a bug in any model/quant/cuda path that throws
         // mid-forward used to call std::terminate and kill the container, taking every other in-flight
         // request with it. Now cancels all active requests with a clear reason and keeps the worker alive.
+        // Client end-of-think (#2420): the engine reads request->end_thinking only on this thread.
+        for (auto& sr : active_requests_) {
+            if (!sr->request->end_thinking && sr->end_thinking.load(std::memory_order_acquire))
+                sr->request->end_thinking = true;
+        }
+
         {
             // What the engine is about to run together (#1580). Counted here rather than inside the
             // engine because the server already knows the set here, keeping the metric out of the
@@ -541,8 +611,13 @@ void BatchingEngine::worker_loop() {
                     }
                     staged.push_back({sr, -1, true, reason, /*finish_only=*/true});
                 }
+                retire_ids_(sr);
                 it = active_requests_.erase(it);
             } else {
+                sr->think_phase.store(!req->in_think_block               ? ServerRequest::kThinkOff
+                                      : engine->think_closer_available() ? ServerRequest::kThinkOn
+                                                                         : ServerRequest::kThinkNoCloser,
+                                      std::memory_order_release);
                 ++it;
             }
         }

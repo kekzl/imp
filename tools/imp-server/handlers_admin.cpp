@@ -409,3 +409,36 @@ void handle_session_close(const httplib::Request& req, httplib::Response& res, S
     }
     res.set_content(dump_safe(json{{"id", id}, {"object", "session"}, {"closed", true}}), "application/json");
 }
+
+void handle_end_thinking(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    const std::string id = req.matches.size() > 1 ? req.matches[1].str() : std::string();
+    auto r = BatchingEngine::EndThinking::NotFound;
+    bool first_call = false;
+    {
+        std::lock_guard<std::timed_mutex> lock(state.mtx);
+        if (state.batching)
+            r = state.batching->end_thinking(id, &first_call);  // no engine (model-less): nothing runs
+    }
+    switch (r) {
+        case BatchingEngine::EndThinking::NotFound:
+            send_json_error(res, 404, "invalid_request_error",
+                            "No running request with id '" + sanitize_for_echo(id, 128) + "'.", "id",
+                            "request_not_found");
+            return;
+        case BatchingEngine::EndThinking::NoCloser:
+            send_json_error(
+                res, 409, "invalid_request_error",
+                "The loaded model has no reasoning closer token; its think block cannot be ended.", "id",
+                "no_reasoning_closer");
+            return;
+        case BatchingEngine::EndThinking::Ending:
+            if (first_call)
+                state.metrics.think_end_requests++;
+            break;
+        case BatchingEngine::EndThinking::AlreadyClosed:
+            break;
+    }
+    const char* status = r == BatchingEngine::EndThinking::Ending ? "ending" : "already_closed";
+    res.set_content(dump_safe(json{{"id", id}, {"object", "request.end_thinking"}, {"status", status}}),
+                    "application/json");
+}

@@ -681,6 +681,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             imp_req = build_imp_request_(ctx, saved_tokens, ci, /*stream=*/false);
             server_req = std::make_shared<ServerRequest>();
             server_req->request = imp_req;
+            server_req->public_ids = {ctx.req_id, ctx.log_client_request_id};
             {
                 std::lock_guard<std::timed_mutex> lock(state.mtx);
                 if (!state.batching || !state.batching->is_running()) {
