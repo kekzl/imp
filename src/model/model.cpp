@@ -1,5 +1,6 @@
 #include "model/model.h"
 #include "model/model_arch.h"
+#include "model/arch_registry.h"
 #include "model/ngram_table.h"
 #include "core/logging.h"
 #include "memory/mem_account.h"  // trim_device_mempool
@@ -11,7 +12,6 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
-#include <unordered_map>
 
 #ifdef __linux__
 #include <sys/mman.h>
@@ -301,70 +301,11 @@ void model_arch_sampling_defaults(ModelArch arch, float& temperature, float& top
 }
 
 ModelArch parse_model_arch(const std::string& s) {
-    static const std::unordered_map<std::string, ModelArch> registry = {
-        // GGUF architecture strings
-        {"llama", ModelArch::LLAMA},
-        {"mistral", ModelArch::MISTRAL},
-        {"mixtral", ModelArch::MIXTRAL},
-        {"deepseek", ModelArch::DEEPSEEK},
-        {"deepseek2", ModelArch::DEEPSEEK},
-        {"nemotron_h_moe", ModelArch::NEMOTRON_H_MOE},
-        {"qwen3", ModelArch::QWEN3},
-        {"qwen3moe", ModelArch::QWEN3_MOE},
-        {"qwen35", ModelArch::QWEN35},
-        {"qwen35moe", ModelArch::QWEN35_MOE},
-        {"qwen36moe", ModelArch::QWEN36_MOE},
-        {"qwen3.6_moe", ModelArch::QWEN36_MOE},
-        {"qwen3.6moe", ModelArch::QWEN36_MOE},
-        {"qwen4exp", ModelArch::QWEN4_EXP},
-        {"qwen4_exp", ModelArch::QWEN4_EXP},
-        {"gpt_oss", ModelArch::GPT_OSS},
-        {"gpt-oss", ModelArch::GPT_OSS},
-        {"gemma3", ModelArch::GEMMA3},
-        {"gemma", ModelArch::GEMMA3},
-        {"gemma2", ModelArch::GEMMA3},
-        {"gemma4", ModelArch::GEMMA4},
-        {"llama4", ModelArch::LLAMA4},
-        {"nomic-bert", ModelArch::NOMIC_BERT},
-        {"qwen2", ModelArch::LLAMA},
-        {"phi3", ModelArch::LLAMA},
-        // HuggingFace architecture class names (from config.json "architectures")
-        {"LlamaForCausalLM", ModelArch::LLAMA},
-        {"MistralForCausalLM", ModelArch::MISTRAL},
-        {"MixtralForCausalLM", ModelArch::MIXTRAL},
-        {"Qwen2ForCausalLM", ModelArch::QWEN3},
-        {"Qwen2MoeForCausalLM", ModelArch::QWEN3_MOE},
-        {"Qwen3ForCausalLM", ModelArch::QWEN3},
-        {"Qwen3MoeForCausalLM", ModelArch::QWEN3_MOE},
-        {"Qwen3_5ForCausalLM", ModelArch::QWEN35},
-        {"Qwen3_5ForConditionalGeneration", ModelArch::QWEN35},
-        {"Qwen3_5MoeForCausalLM", ModelArch::QWEN36_MOE},
-        {"Qwen3_5MoeForConditionalGeneration", ModelArch::QWEN36_MOE},
-        {"Qwen4ExpForCausalLM", ModelArch::QWEN4_EXP},
-        {"Qwen4ExpForConditionalGeneration", ModelArch::QWEN4_EXP},
-        {"NemotronHForCausalLM", ModelArch::NEMOTRON_H_MOE},
-        {"Gemma2ForCausalLM", ModelArch::GEMMA3},
-        {"GemmaForCausalLM", ModelArch::GEMMA3},
-        {"Gemma3ForCausalLM", ModelArch::GEMMA3},
-        {"Gemma3ForConditionalGeneration", ModelArch::GEMMA3},
-        {"Gemma4ForCausalLM", ModelArch::GEMMA4},
-        {"Gemma4ForConditionalGeneration", ModelArch::GEMMA4},
-        {"DeepseekV2ForCausalLM", ModelArch::DEEPSEEK},
-        {"DeepseekV3ForCausalLM", ModelArch::DEEPSEEK},
-        {"Llama4ForCausalLM", ModelArch::LLAMA4},
-        {"Llama4ForConditionalGeneration", ModelArch::LLAMA4},
-        {"MistralForCausalLM", ModelArch::MISTRAL},
-        {"Mistral3ForConditionalGeneration", ModelArch::MISTRAL},
-        {"PhiForCausalLM", ModelArch::LLAMA},
-        {"Phi3ForCausalLM", ModelArch::LLAMA},
-        {"Phi3SmallForCausalLM", ModelArch::LLAMA},
-        {"InternLM2ForCausalLM", ModelArch::LLAMA},
-        {"Starcoder2ForCausalLM", ModelArch::LLAMA},
-        {"CohereForCausalLM", ModelArch::LLAMA},
-    };
-    auto it = registry.find(s);
-    if (it != registry.end())
-        return it->second;
+    // GGUF ids first, then HF class names (one table, arch_registry.cpp).
+    if (auto a = find_arch(ArchSource::GGUF, s))
+        return *a;
+    if (auto a = find_arch(ArchSource::HF_CLASS, s))
+        return *a;
 
     // Unrecognised architecture falls back to GENERIC (plausible output, not an error, #1206):
     // the registry maps known strings and a Llama-shaped checkpoint usually works through it.

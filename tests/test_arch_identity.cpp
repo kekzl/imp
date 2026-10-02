@@ -1,3 +1,4 @@
+#include "model/arch_registry.h"
 #include "model/hf_config_loader.h"
 #include "model/model_arch.h"
 #include "model/model_config.h"
@@ -9,8 +10,11 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 using imp::HFConfigLoader;
@@ -78,6 +82,35 @@ TEST(ArchIdentity, EveryStringMainAcceptedKeepsItsArch) {
     EXPECT_EQ(per_entry["gguf"], 56);
     EXPECT_EQ(per_entry["hf_class"], 35);
     EXPECT_EQ(per_entry["model_type"], 26);
+}
+
+// One table: 25 GGUF + 35 HF class + 26 model_type rows, no spelling twice per source.
+TEST(ArchIdentity, OneTableNoDuplicateSpelling) {
+    std::map<imp::ArchSource, int> per_source;
+    std::set<std::pair<imp::ArchSource, std::string_view>> seen;
+    for (const auto& e : imp::arch_spellings()) {
+        per_source[e.source]++;
+        EXPECT_TRUE(seen.insert({e.source, e.spelling}).second) << e.spelling;
+    }
+    EXPECT_EQ(per_source[imp::ArchSource::GGUF], 25);
+    EXPECT_EQ(per_source[imp::ArchSource::HF_CLASS], 35);
+    EXPECT_EQ(per_source[imp::ArchSource::HF_MODEL_TYPE], 26);
+}
+
+// #2457: every HF class resolves to the same ModelArch from the GGUF and the HF loader.
+// GptOssForCausalLM, Qwen3VL(Moe)ForConditionalGeneration and Gemma4UnifiedForConditionalGeneration
+// were GENERIC on the GGUF path before the merge.
+TEST(ArchIdentity, HfClassResolvesTheSameFromBothLoaders) {
+    int n = 0;
+    for (const auto& e : imp::arch_spellings()) {
+        if (e.source != imp::ArchSource::HF_CLASS)
+            continue;
+        const std::string s(e.spelling);
+        EXPECT_EQ(imp::parse_model_arch(s), e.arch) << s;
+        EXPECT_EQ(HFConfigLoader::map_architecture(s), e.arch) << s;
+        n++;
+    }
+    EXPECT_EQ(n, 35);
 }
 
 }  // namespace

@@ -193,6 +193,7 @@ set(IMP_MEMORY_SOURCES
 )
 
 set(IMP_MODEL_SOURCES
+    src/model/arch_registry.cpp
     src/model/model.cpp
     src/model/model_profile.cpp
     src/model/ngram_table.cpp
