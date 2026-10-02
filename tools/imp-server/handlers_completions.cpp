@@ -678,6 +678,7 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
     auto server_req = std::make_shared<ServerRequest>();
     server_req->request = std::move(imp_req);
     server_req->queued_lease = std::move(queued_lease);
+    server_req->public_ids = {req_id, res.get_header_value("X-Request-Id")};  // end_thinking (#2420)
 
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);

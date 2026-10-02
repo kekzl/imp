@@ -245,6 +245,9 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_requests_cancelled_total Requests cancelled by client disconnect\n";
     out += "# TYPE imp_requests_cancelled_total counter\n";
     out += "imp_requests_cancelled_total " + std::to_string(m.requests_cancelled.load()) + "\n";
+    out += "# HELP imp_think_end_requests_total Requests whose think block a client ended (end_thinking)\n";
+    out += "# TYPE imp_think_end_requests_total counter\n";
+    out += "imp_think_end_requests_total " + std::to_string(m.think_end_requests.load()) + "\n";
     out += "# HELP imp_requests_timed_out_total Requests the server ended at --request-timeout\n";
     out += "# TYPE imp_requests_timed_out_total counter\n";
     out += "imp_requests_timed_out_total " + std::to_string(m.requests_timed_out.load()) + "\n";

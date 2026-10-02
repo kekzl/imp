@@ -252,6 +252,8 @@ public:
     // Only valid when the loaded model is encoder-only (profile().is_encoder).
     [[nodiscard]] bool encoder_embed(std::span<const int32_t> tokens, std::vector<float>& out);
     bool is_encoder_model() const { return encoder_ws_storage_ != nullptr; }
+    // The model has a reasoning closer id the engine can force (</think> or Harmony <|end|>, #2420).
+    [[nodiscard]] bool think_closer_available() const noexcept { return think_end_id_ >= 0; }
     // Tokens one encoder_embed call can take, [CLS]/[SEP] included (0 = not an encoder).
     int encoder_max_tokens() const;
 
@@ -1377,6 +1379,10 @@ private:
     // Suppresses stop tokens while inside a think block (like llama.cpp).
     void track_think_state(Request& req, int32_t token) const;
     bool should_stop(Request& req, int32_t token) const;
+    // A forced think end is due this step: budget exhausted or the client ended the block (#2420).
+    [[nodiscard]] bool think_end_due_(const Request& req) const;
+    // think_end_due_ or a forced Harmony opener mid-way: only the eager step may run (#2420).
+    [[nodiscard]] bool think_closer_pending_(const Request& req) const;
 
     // Think token IDs (cached from chat template init, -1 if not a think model);
     // think_newline_id_ = the "\n" a forced think end emits before </think>.

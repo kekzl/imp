@@ -149,6 +149,7 @@ server default (`--think-budget`, 0.5) applies and these fields turn it off -
 | `thinking: {type: "enabled"\|"adaptive"}` | Anthropic | thinking on. **Required to get it at all on this dialect** (#1541); `adaptive` is what current SDKs send |
 | `thinking: {budget_tokens: N}` | Anthropic | converted to a fraction of `max_tokens`. `0` disables thinking outright |
 | `thinking: {display: "omitted"}` | Anthropic | the model still reasons; the `thinking` block is not returned, on either transport |
+| `POST /v1/requests/{id}/end_thinking` | all | ends a running request's think block, the answer continues: [`API_CONTROL.md`](API_CONTROL.md) |
 
 ### The reasoning budget, and what the answer gets
 

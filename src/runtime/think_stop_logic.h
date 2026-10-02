@@ -102,6 +102,37 @@ inline bool should_force_think_end(float think_budget, int32_t think_end_id, int
     return currently_thinking && n_reasoning >= limit;
 }
 
+// Client end-of-think (#2420, POST /v1/requests/{id}/end_thinking): forces the closer while the
+// block is open. A family without a closer id (think_end_id < 0) cannot be ended.
+[[nodiscard]] inline bool end_think_due(bool end_requested, bool in_think, int32_t think_end_id) {
+    return end_requested && in_think && think_end_id >= 0;
+}
+
+// Token the eager step forces once a think end is due (budget or client), -1 = none.
+// Harmony: the whole final-channel opener, one id per step (harmony_idx, -1 idle).
+// <think>: "\n" then </think>; last_token < 0 means no output yet.
+[[nodiscard]] inline int32_t next_forced_closer(bool due, int32_t think_end_id, int32_t newline_id,
+                                                const std::vector<int32_t>& harmony_seq, bool harmony,
+                                                int32_t last_token, int& harmony_idx) {
+    const int n = static_cast<int>(harmony_seq.size());
+    if (harmony_idx >= 0) {
+        int32_t force = -1;
+        if (harmony_idx < n)
+            force = harmony_seq[harmony_idx++];
+        if (harmony_idx >= n)
+            harmony_idx = -1;  // opener complete
+        return force;
+    }
+    if (!due)
+        return -1;
+    if (harmony && n > 0) {
+        harmony_idx = 1;
+        return harmony_seq[0];
+    }
+    const bool nl_done = newline_id < 0 || last_token == newline_id;
+    return nl_done ? think_end_id : newline_id;
+}
+
 // Fallback for tokenizers that ship <think>/</think> as added_tokens with
 // special=False (Qwen3.6, Qwen3-Coder NVFP4): no single token id, so markers
 // arrive split across BPE pieces, matched via a sliding decoded-text window (mirrors track_think_state on Request).

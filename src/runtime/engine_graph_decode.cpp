@@ -252,9 +252,9 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
     // sample a free token after the "\n", so the eager step forced "\n" again and the
     // block never closed (200-token single-stream reply, 663 chars of reasoning, no
     // answer, Qwen3.8-27B 2026-09-15). Covers every launch site, the burst hooks included.
-    if (think_logic::should_force_think_end(req->think_budget, think_end_id_, req->max_tokens,
-                                            req->output_tokens, think_start_id_, req->started_in_think,
-                                            runtime_config_.runtime.think_answer_reserve))
+    // A client end (#2420) and a Harmony opener mid-way belong to the eager step too: the device
+    // loop samples freely and would run past them.
+    if (think_closer_pending_(*req))
         return false;
 
     int remaining = prepare_graph_loop(req, step_limit);
@@ -587,11 +587,8 @@ int Engine::step_constrained_pipeline() {
     // Think-budget enforcement (mirrors fill_sampling_params): when the
     // reasoning budget is exhausted mid-think, force </think> this step.
     p.state.force_token = -1;
-    if (think_logic::should_force_think_end(req->think_budget, think_end_id_, req->max_tokens,
-                                            req->output_tokens, think_start_id_, req->started_in_think,
-                                            runtime_config_.runtime.think_answer_reserve)) {
+    if (think_end_due_(*req))
         p.state.force_token = think_end_id_;
-    }
     // Stop mask (mirrors fill_sampling_params): the host drives this sampler
     // per tick, so the list swap is enough, no device flag.
     p.state.d_banned_tokens = p.d_banned;

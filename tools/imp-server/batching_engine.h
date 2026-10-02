@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace imp {
@@ -54,8 +55,24 @@ struct ServerRequest {
     // or at finish, the destructor on every other path. Null = not counted.
     std::shared_ptr<QueuedTokenLease> queued_lease;
 
+    // POST /v1/requests/{id}/end_thinking (#2420). public_ids: completion/message/response id and
+    // the client X-Request-Id, set before submit. HTTP sets end_thinking; the worker copies it into
+    // request->end_thinking before its next step and publishes think_phase after each step.
+    enum ThinkPhase : int {
+        kThinkUnknown = -1,
+        kThinkOff = 0,
+        kThinkOn = 1,
+        kThinkNoCloser = 2,
+        kThinkDone = 3
+    };
+    std::vector<std::string> public_ids;
+    std::atomic<bool> end_thinking{false};
+    std::atomic<int> think_phase{kThinkUnknown};
+
     // Push a token event (called from worker thread)
     void push_token(int32_t token_id, bool is_last, const char* reason) {
+        if (is_last)
+            think_phase.store(kThinkDone, std::memory_order_release);
         std::lock_guard<std::mutex> lock(token_mutex);
         token_queue.push_back({token_id, is_last, reason});
         token_cv.notify_one();
@@ -63,6 +80,7 @@ struct ServerRequest {
 
     // Push a completion event with no token (called from worker thread)
     void push_finish(const char* reason) {
+        think_phase.store(kThinkDone, std::memory_order_release);
         std::lock_guard<std::mutex> lock(token_mutex);
         token_queue.push_back({-1, true, reason});
         token_cv.notify_one();
@@ -139,6 +157,13 @@ public:
     // POST /v1/sessions/{id}/close (#2407). Thread-safe: the worker releases the pin before its next step.
     void close_session(std::string session_id);
 
+    // POST /v1/requests/{id}/end_thinking (#2420). Thread-safe, idempotent. NotFound: no pending or
+    // running request carries `id`. Ending: flag set (also before admission). AlreadyClosed: not in a
+    // think block. NoCloser: in a think block the model has no closer id for.
+    enum class EndThinking { NotFound, Ending, AlreadyClosed, NoCloser };
+    // first_call: true when this call set the flag (a repeat returns Ending with false).
+    EndThinking end_thinking(const std::string& id, bool* first_call = nullptr);
+
     // Returns the number of active + pending requests.
     int queue_depth() const;
 
@@ -200,4 +225,10 @@ private:
     std::vector<std::string> session_closes_;
     std::chrono::steady_clock::time_point next_session_sweep_{};
     void apply_session_ops_(imp::KVCacheManager* kv, int ttl_s);
+
+    // public id -> request (#2420). Weak: a finished request expires; retire_ids_ drops it at finish.
+    std::mutex ids_mutex_;
+    std::unordered_map<std::string, std::weak_ptr<ServerRequest>> by_public_id_;
+    void register_ids_(const std::shared_ptr<ServerRequest>& sr);
+    void retire_ids_(const std::shared_ptr<ServerRequest>& sr);
 };

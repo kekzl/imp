@@ -498,6 +498,7 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
         auto server_req = std::make_shared<ServerRequest>();
         server_req->request = std::move(imp_req);
         server_req->queued_lease = ctx.queued_lease;
+        server_req->public_ids = {response_id, log_client_request_id};  // end_thinking (#2420)
         {
             std::lock_guard<std::timed_mutex> lock(state.mtx);
             if (!state.batching || !state.batching->is_running()) {
