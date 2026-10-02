@@ -7,6 +7,7 @@
 
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
+#include "memory/mem_account.h"
 #include "memory/vram_query.h"
 #include "memory/ssm_state.h"
 #include "memory/backend.h"
@@ -613,8 +614,8 @@ TEST(KVCacheGrowTest, RaiseCeilingKeepsTheCommitAndGrowsPastTheOldCeiling) {
     EXPECT_TRUE(std::all_of(host.begin(), host.end(), [](uint8_t b) { return b == 0; }))
         << "a block grown past the old ceiling is backed and zeroed";
     uint8_t sc = 0xAB;
-    ASSERT_EQ(cudaMemcpy(&sc, cache.v_scale_ptr(1, 63), 1, cudaMemcpyDeviceToHost), cudaSuccess)
-        << "scale planes cover the new ceiling";
+    ASSERT_EQ(cudaMemcpy(&sc, cache.v_scale_ptr(1, 47), 1, cudaMemcpyDeviceToHost), cudaSuccess)
+        << "a block grown past the old ceiling has its scales backed";
     EXPECT_EQ(sc, 0);
 
     KVCache mm(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/8,
@@ -637,6 +638,51 @@ TEST(KVCacheGrowTest, RaiseCeilingRelaysPerLayerGeometry) {
     std::vector<uint8_t> host(cache.block_bytes(1), 0xAB);
     ASSERT_EQ(cudaMemcpy(host.data(), cache.k_ptr(1, 39), host.size(), cudaMemcpyDeviceToHost), cudaSuccess);
     EXPECT_TRUE(std::all_of(host.begin(), host.end(), [](uint8_t b) { return b == 0; }));
+    std::vector<uint8_t> sc(cache.scale_block_bytes(1), 0xAB);
+    ASSERT_EQ(cudaMemcpy(sc.data(), cache.v_scale_ptr(1, 39), sc.size(), cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    EXPECT_TRUE(std::all_of(sc.begin(), sc.end(), [](uint8_t b) { return b == 0; }));
+}
+
+// Scale plane (#2483): committed with the KV blocks, not at the ceiling. Priced per block,
+// grown blocks backed and zeroed, written scales kept, released with the cache. 65536-block
+// ceiling: 64 MiB (INT8) / 256 MiB (NVFP4) reserved, 8 initial blocks commit 4 x 2 MiB granules.
+TEST(KVCacheGrowTest, ScalePlaneCommitsWithThePool) {
+    SKIP_IF_NO_CUDA();
+    MemAccount& acct = MemAccount::instance();
+    for (QType dt : {QType::NVFP4, QType::INT8}) {
+        SCOPED_TRACE(dtype_name(dt));
+        const int64_t base = acct.pool_current("kv_cache_scales");
+        {
+            KVCache cache(/*n_layers=*/2, /*n_kv_heads=*/8, /*head_dim=*/128, dt, /*max_blocks=*/8,
+                          /*block_size=*/16, /*alloc=*/nullptr, /*ceiling_blocks=*/65536);
+            if (!cache.growable())
+                GTEST_SKIP() << "no VMM backend on this device";
+            const size_t sbb = cache.scale_block_bytes();
+            const int64_t ceiling_bytes = static_cast<int64_t>(2 * 2 * 65536 * sbb);
+            const int64_t at_init = acct.pool_current("kv_cache_scales") - base;
+            EXPECT_GT(at_init, 0);
+            EXPECT_LE(at_init, int64_t{8} << 20) << "committed for 8 blocks, not the ceiling";
+            EXPECT_LT(at_init, ceiling_bytes);
+            EXPECT_EQ(cache.bytes_per_block(), 2 * 2 * (cache.block_bytes() + sbb));
+
+            const uint8_t mark = 0x5A;
+            ASSERT_EQ(cudaMemcpy(cache.k_scale_ptr(0, 3), &mark, 1, cudaMemcpyHostToDevice), cudaSuccess);
+            const int got = cache.try_grow_to(16384);
+            ASSERT_GE(got, 16384);
+            EXPECT_GT(acct.pool_current("kv_cache_scales") - base, at_init);
+            for (void* p : {cache.k_scale_ptr(1, got - 1), cache.v_scale_ptr(1, got - 1)}) {
+                std::vector<uint8_t> host(sbb, 0xAB);
+                ASSERT_EQ(cudaMemcpy(host.data(), p, sbb, cudaMemcpyDeviceToHost), cudaSuccess)
+                    << "the last grown block's scales must be backed";
+                EXPECT_TRUE(std::all_of(host.begin(), host.end(), [](uint8_t b) { return b == 0; }));
+            }
+            uint8_t back = 0;
+            ASSERT_EQ(cudaMemcpy(&back, cache.k_scale_ptr(0, 3), 1, cudaMemcpyDeviceToHost), cudaSuccess);
+            EXPECT_EQ(back, mark) << "growth must not re-zero a block already handed out";
+        }
+        EXPECT_EQ(acct.pool_current("kv_cache_scales"), base) << "released with the cache";
+    }
 }
 
 TEST(KVCacheGrowTest, GrowthLeavesChargedButUncommittedBytesAlone) {

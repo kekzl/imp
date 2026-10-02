@@ -102,9 +102,8 @@ public:
     // half, which belongs at init on a pool that is still all zero (the copy changes
     // nothing). A pool under ~100 MiB reads the L2.
     double probe_residency();
-    // K plus V bytes one block commits across every attention layer (the
-    // scale planes are allocated for the ceiling up front and cost nothing at
-    // growth), plus the key min/max metadata when it grows with the pool. What try_grow_to()
+    // K plus V bytes one block commits across every attention layer, plus the scale planes
+    // and key min/max metadata when they grow with the pool (#2483, #2360). What try_grow_to()
     // prices a block at against free VRAM.
     size_t bytes_per_block() const;
 
@@ -288,6 +287,11 @@ private:
     // Layout: 2x blocks per layer (K scales region + V scales region).
     void* scale_pool_ = nullptr;
     size_t scale_block_bytes_ = 0;  // block_size * n_kv_heads * sizeof(half)
+    // Growable pool only: scales commit with the KV blocks, not at the ceiling (#2483).
+    Region scale_region_;
+    // Scale pool of `total` bytes, laid out like k/v_scale_ptr; lazy when growable. Throws.
+    void alloc_scale_pool_(size_t total);
+    [[nodiscard]] bool commit_scales_(int from, int to);
 
     // Sparse decode attention key min/max metadata (see enable_key_minmax).
     void* minmax_pool_ = nullptr;

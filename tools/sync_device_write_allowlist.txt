@@ -45,13 +45,13 @@ src/memory/alloc_interpose.cpp cudaMemset(p debug  # IMP_ALLOC_POISON poison fil
 src/memory/kv_cache.cu cudaMemset(k_ptr(l,first_new) synced  # cudaStreamSynchronize(0) before capacity is published
 src/memory/kv_cache.cu cudaMemset(pool_ init  # KV cache construction
 src/memory/kv_cache.cu cudaMemset(pool_ init  # KV cache construction (per-layer)
-src/memory/kv_cache.cu cudaMemset(scale_pool_ init  # KV cache construction
-src/memory/kv_cache.cu cudaMemset(scale_pool_ init  # KV cache construction (per-layer)
 src/memory/kv_cache.cu cudaMemset(v_ptr(l,first_new) synced  # cudaStreamSynchronize(0) before capacity is published
 src/memory/kv_cache_manager.cpp cudaMemset(d_residual_fc_ init  # enable_residual_buffer at KV init
 src/memory/kv_cache_manager.cpp cudaMemset(d_residual_widx_ init  # enable_residual_buffer at KV init
 src/memory/kv_cache_minmax.cu cudaMemset(dst synced  # cudaStreamSynchronize(0) before commit_blocks_ publishes the blocks
 src/memory/kv_cache_minmax.cu cudaMemset(minmax_pool_ init  # KV cache construction (fixed metadata pool)
+src/memory/kv_cache_scales.cu cudaMemset(p+lo*sbb synced  # cudaStreamSynchronize(0) before commit_blocks_ publishes the blocks
+src/memory/kv_cache_scales.cu cudaMemset(scale_pool_ init  # KV cache construction (fixed scale pool)
 src/memory/ssm_state.cpp cudaMemset(pool_ init  # SSM state construction
 src/quant/gpt_oss_mxfp4_convert.cpp cudaMemcpy(d_ms offline  # load-time weight conversion
 src/quant/gpt_oss_mxfp4_convert.cpp cudaMemcpy(d_packed offline  # load-time weight conversion
