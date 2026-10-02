@@ -808,6 +808,10 @@ if(IMP_BUILD_TESTS)
         tests/test_llm_compressor_loader.cpp
         tests/test_nvfp4_quant_contract.cpp
         tests/test_hf_config_loader.cpp
+        # One arch identity table, pinned against the strings main accepted (#2457).
+        tests/test_arch_identity.cpp
+        # Every ModelArch -> arch-keyed ModelProfile fields + SWA windows (#2456).
+        tests/test_model_profile_table.cpp
         tests/test_ngram_table.cpp
         tests/test_safetensors_loader.cpp
         tests/test_dequant_awq.cpp
