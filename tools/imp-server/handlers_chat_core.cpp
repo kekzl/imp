@@ -11,6 +11,7 @@
 #include "model/image_placeholders.h"
 #include "utils.h"
 #include "tool_call.h"
+#include "tool_call_dialect.h"
 #include "anthropic.h"
 #include "stream_pipeline.h"
 #include "reasoning_split.h"
@@ -93,10 +94,11 @@ void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_
     state.request_logger.log(record);
 }
 
-// Gemma-4 has the native <|tool_call> token; gemma-3 shares the GEMMA family without one.
-static bool gemma_native_tool_call_(const ChatRequestContext& ctx) {
-    return ctx.snap.tpl_family == imp::ChatTemplateFamily::GEMMA && ctx.snap.tok &&
-           ctx.snap.tok->find_token("<|tool_call>") >= 0;
+// The dialect's native call token is in the vocab (Gemma-4 <|tool_call>; gemma-3 shares the GEMMA family
+// without it).
+static bool native_tool_token_(const ChatRequestContext& ctx) {
+    const char* native = tool_call_dialect(ctx.snap.tpl_family).native_token;
+    return native != nullptr && ctx.snap.tok && ctx.snap.tok->find_token(native) >= 0;
 }
 
 // Enforced tool calling (#1002): derives the FSM constraint from the POST-snapshot template
@@ -105,13 +107,14 @@ static bool gemma_native_tool_call_(const ChatRequestContext& ctx) {
 static void collect_tool_enforcement_(ChatRequestContext& ctx) {
     if (!ctx.params.has_tools)
         return;
-    // tool_choice=required / forced function on the ChatML <tool_call>
-    // dialect. Empty result = prompt-hint fallback.
+    const ToolCallDialect& dialect = tool_call_dialect(ctx.snap.tpl_family);
+    // tool_choice=required / forced function on a JSON-envelope dialect (ChatML <tool_call>).
+    // Empty result = prompt-hint fallback.
     ctx.params.tool_constraint_tools = collect_tool_constraint(ctx.snap.tpl_family, ctx.params.tools,
                                                                ctx.params.tool_choice);
     if (!ctx.params.tool_constraint_tools.empty()) {
-        ctx.params.tool_envelope_open = "<tool_call>\n";
-        ctx.params.tool_envelope_close = "\n</tool_call>";
+        ctx.params.tool_envelope_open = dialect.json_envelope_open;
+        ctx.params.tool_envelope_close = dialect.json_envelope_close;
     } else {
         // No forced/required constraint — try strict optional (OpenAI
         // strict:true with a model-chosen call): the envelope is not forced,
@@ -121,15 +124,14 @@ static void collect_tool_enforcement_(ChatRequestContext& ctx) {
                                                                           ctx.params.tool_choice);
         if (!ctx.params.tool_constraint_tools.empty()) {
             ctx.params.tool_constraint_optional = true;
-            ctx.params.tool_envelope_open = "<tool_call>\n";
-            ctx.params.tool_envelope_close = "\n</tool_call>";
+            ctx.params.tool_envelope_open = dialect.json_envelope_open;
+            ctx.params.tool_envelope_close = dialect.json_envelope_close;
         }
     }
     // Qwen-Coder/Qwen3.6 XML templates share the <tool_call> envelope but the BODY grammar is XML
     // (<function=NAME><parameter=KEY>, raw-text values): flag it so the engine builds the XML FSM,
     // not the JSON one, which masks newlines and mangles multi-line arguments.
-    if (!ctx.params.tool_constraint_tools.empty() &&
-        ctx.snap.tpl_family == imp::ChatTemplateFamily::CHATML && ctx.snap.have_template &&
+    if (!ctx.params.tool_constraint_tools.empty() && dialect.xml_body && ctx.snap.have_template &&
         ctx.snap.chat_tpl.tool_xml_dialect())
         ctx.params.tool_constraint_xml = true;
     // Llama3 / Harmony / Gemma-4 forced function: the envelope names the function, the bare
@@ -138,7 +140,7 @@ static void collect_tool_enforcement_(ChatRequestContext& ctx) {
     if (ctx.params.tool_constraint_tools.empty()) {
         ForcedToolEnvelope env = collect_forced_bare_args_tool(ctx.snap.tpl_family, ctx.params.tools,
                                                                ctx.params.tool_choice,
-                                                               gemma_native_tool_call_(ctx));
+                                                               native_tool_token_(ctx));
         if (!env.name.empty()) {
             ctx.params.tool_constraint_tools = {{env.name, env.params}};
             ctx.params.tool_constraint_bare_args = true;
@@ -226,8 +228,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // #1592: refuse (400) tool_choice "required"/named-function when the family's template has no
     // tool-call grammar, rather than degrade to a prose hint with 200. Measured 0/40 across
     // gemma-3/gemma-4/gpt-oss (no grammar) vs 10/10 on Qwen3-4B ChatML (has one); "auto" is untouched.
-    if (ctx.params.has_tools && !tool_choice_is_enforceable(ctx.snap.tpl_family, ctx.params.tool_choice,
-                                                            gemma_native_tool_call_(ctx))) {
+    if (ctx.params.has_tools &&
+        !tool_choice_is_enforceable(ctx.snap.tpl_family, ctx.params.tool_choice, native_tool_token_(ctx))) {
         const char* fam = imp::chat_template_family_name(ctx.snap.tpl_family);
         const bool named = ctx.params.tool_choice.is_object();
         res.status = 400;
@@ -644,7 +646,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->tool_constraint_parallel = ctx.params.parallel_tool_calls;
     req->tool_constraint_bare_args = ctx.params.tool_constraint_bare_args;
     req->tool_constraint_xml = ctx.params.tool_constraint_xml;
-    req->tpl_family = ctx.snap.tpl_family;
+    req->tool_gate = tool_call_gate(ctx.snap.tpl_family);
     req->logit_bias = ctx.params.logit_bias;
     // req->started_in_think = enable_thinking: without it the engine's think-budget enforcement
     // never sees an opener in the output and lets the model reason to max_tokens (content empty).

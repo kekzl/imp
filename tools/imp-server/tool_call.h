@@ -117,12 +117,14 @@ struct ToolTagScan {
     size_t content_len = 0;      // OPEN: bytes before the open marker (plain content)
     size_t body_start = 0;       // OPEN: offset where the tool-call body begins
     const char* close_tag = "";  // OPEN: expected close marker
-    bool gemma_body = false;     // OPEN: body uses the Gemma "call:NAME{...}" syntax
-    std::string fn_name;         // OPEN, Llama3: function name from the <function=NAME> tag
+    bool gemma_body = false;     // OPEN: body is not JSON (buffered, no incremental arg streaming)
+    std::string fn_name;         // OPEN: function name from the open marker (bare-args body)
+    // OPEN: dialect body parser; nullptr = parse_stream_tool_body (JSON / Qwen3.6 XML / bare args).
+    bool (*parse_body)(const std::string& body, const std::string& fn_name, ParsedToolCall& tc) = nullptr;
 };
 
-// Family markers: LLAMA3 -> "<function=NAME>"; GEMMA -> "<|tool_call>" (native)
-// or "<tool_call>" (ChatML fallback prompt); everything else -> "<tool_call>".
+// Open markers per dialect (tool_call_dialect.h registry): LLAMA3 "<function=NAME>", HARMONY
+// "to=functions.NAME", GEMMA "<|tool_call>" or "<tool_call>", every other family "<tool_call>".
 ToolTagScan scan_tool_tag(const std::string& buf, imp::ChatTemplateFamily family);
 
 // parse_stream_tool_body: body has its close marker already stripped. gemma_body selects Gemma

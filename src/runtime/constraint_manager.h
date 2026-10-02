@@ -6,7 +6,7 @@
 #include "compute/schema_constrain.h"
 #include "compute/json_schema.h"
 #include "model/tokenizer.h"
-#include "model/chat_template.h"
+#include "runtime/tool_call_gate.h"
 #include "core/logging.h"
 #include <memory>
 #include <string>
@@ -27,9 +27,9 @@ public:
     // tokenizer: needed for lazy init
     // has_tools: true enters tool-aware mode (schema/json mask applies only
     //   to free-text JSON, not tool bodies)
-    // tpl_family: selects which tool-tag dialect to look for (has_tools only)
+    // tool_gate: tool-tag pair the gate watches for (has_tools only)
     void prepare(bool json_mode, const std::string& json_schema, Tokenizer* tokenizer, bool has_tools = false,
-                 ChatTemplateFamily tpl_family = ChatTemplateFamily::CHATML, bool thinking_open = true);
+                 const ToolCallGate& tool_gate = {}, bool thinking_open = true);
 
     // Enforced tool calling (#1002): constrain generation to a tool-call
     // envelope with a TOOL_CALL schema FSM (see build_tool_call_schema).
@@ -40,7 +40,7 @@ public:
     // optional=true (OpenAI strict:true, model-chosen call): envelope NOT
     //   forced, the tool-aware preamble gate lets free text/a plain answer
     //   pass; only if the model emits the opener does the body FSM enforce
-    //   the arguments. `tpl_family` selects the dialect the gate watches for
+    //   the arguments. `tool_gate` is the tag pair the gate watches for
     //   (ChatML only for now, non-ChatML families decline).
     //
     // Returns false when the schemas are not enforceable; caller keeps the
@@ -54,10 +54,10 @@ public:
     //   XML dialect (<function=NAME><parameter=KEY>, raw-text values);
     //   XML_TOOL_CALL grammar enforces it (see build_xml_tool_call_schema).
     [[nodiscard]] bool prepare_tool_call(const std::vector<std::pair<std::string, std::string>>& tools,
-                           const std::string& envelope_open, const std::string& envelope_close,
-                           Tokenizer* tokenizer, bool thinking_open, bool optional = false,
-                           ChatTemplateFamily tpl_family = ChatTemplateFamily::CHATML, bool parallel = true,
-                           bool bare_args = false, bool xml = false);
+                                         const std::string& envelope_open, const std::string& envelope_close,
+                                         Tokenizer* tokenizer, bool thinking_open, bool optional = false,
+                                         const ToolCallGate& tool_gate = {}, bool parallel = true,
+                                         bool bare_args = false, bool xml = false);
 
     // Cache/pool key for a tool-call constraint — shared by the engine's
     // constraint pool lookup and the internal classified-table cache. The body

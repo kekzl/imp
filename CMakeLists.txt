@@ -688,6 +688,15 @@ if(IMP_BUILD_SERVER)
         COMMENT "Embedding web UI into imp-server"
         VERBATIM)
 
+    # Tool-call dialect registry and one file per dialect (#2464); shared by imp-server and test-core.
+    set(IMP_TOOL_CALL_SOURCES
+        tools/imp-server/tool_call.cpp
+        tools/imp-server/tool_call_dialect.cpp
+        tools/imp-server/tool_call_chatml.cpp
+        tools/imp-server/tool_call_llama3.cpp
+        tools/imp-server/tool_call_gemma.cpp
+        tools/imp-server/tool_call_harmony.cpp)
+
     add_executable(imp-server
         ${IMP_WEBUI_HEADER}
         tools/imp-server/main.cpp
@@ -698,8 +707,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/prompt_logprobs.cpp
         tools/imp-server/rate_limit.cpp
         tools/imp-server/logit_bias.cpp
-        tools/imp-server/tool_call.cpp
-        tools/imp-server/tool_call_gemma.cpp
+        ${IMP_TOOL_CALL_SOURCES}
         tools/imp-server/anthropic.cpp
         tools/imp-server/responses.cpp
         tools/imp-server/responses_store.cpp
@@ -1022,9 +1030,7 @@ if(IMP_BUILD_TESTS)
             tools/imp-server/responses.cpp
             tools/imp-server/responses_store.cpp
             tools/imp-server/utils.cpp
-            tools/imp-server/tool_call.cpp
-            tools/imp-server/tool_call_gemma.cpp
-        tools/imp-server/tool_call_gemma.cpp
+            ${IMP_TOOL_CALL_SOURCES}
             tools/imp-server/args.cpp
             tests/test_anthropic_transform.cpp
             tests/test_responses_transform.cpp
@@ -1038,6 +1044,7 @@ if(IMP_BUILD_TESTS)
         tests/test_regex_constrain.cpp
             tests/test_tool_stream_filter.cpp
             tests/test_tool_call_dialect_golden.cpp
+            tests/test_tool_call_dialect_registry.cpp
             tests/test_reasoning_reconcile.cpp
             tests/test_stream_reasoning_split.cpp
             tests/test_server_auth.cpp
