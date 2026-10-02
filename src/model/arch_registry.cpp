@@ -126,6 +126,11 @@ constexpr ArchSpelling kSpellings[] = {
 
     // NOMIC_BERT (encoder-only embedder, #836)
     {GGUF, "nomic-bert", ModelArch::NOMIC_BERT},
+
+    // GRANITE (#2412): GGUF multipliers in gguf_loader.cpp, HF in hf_config_loader.cpp
+    {GGUF, "granite", ModelArch::GRANITE},
+    {HF_CLASS, "GraniteForCausalLM", ModelArch::GRANITE},
+    {HF_MODEL_TYPE, "granite", ModelArch::GRANITE},
 };
 
 }  // namespace

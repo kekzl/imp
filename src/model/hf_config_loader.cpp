@@ -33,6 +33,23 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
     return ModelArch::GENERIC;
 }
 
+namespace {
+
+// Granite multipliers (HF modeling_granite.py): embeddings * embedding_multiplier, residual
+// x + residual_multiplier * out, attention scale attention_multiplier, logits / logits_scaling.
+// RMSNorm is scale-invariant, so a residual stream run at 1/residual_multiplier with the plain
+// add is exact: both stream factors go into embed_scale. Absent keys are no-ops.
+void parse_granite_multipliers(const JValue& eff, ModelConfig& cfg) {
+    float attn = 0.0f, emb = 1.0f, res = 1.0f, logits = 1.0f;
+    jobj_opt_float(eff, "attention_multiplier", attn);
+    jobj_opt_float(eff, "embedding_multiplier", emb);
+    jobj_opt_float(eff, "residual_multiplier", res);
+    jobj_opt_float(eff, "logits_scaling", logits);
+    set_granite_multipliers(cfg, attn, emb, res, logits);
+}
+
+}  // namespace
+
 // ---- load_config ----
 
 bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
@@ -318,6 +335,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
     jobj_opt_float(eff, "final_logit_softcapping", cfg.final_logit_softcap);
     // Gemma 4 uses `final_logit_softcapping` same semantics.
     jobj_opt_float(root, "final_logit_softcapping", cfg.final_logit_softcap);
+    parse_granite_multipliers(eff, cfg);
 
     // FFN activation
     std::string hidden_act;

@@ -1,7 +1,10 @@
 #include "model/hf_config_loader.h"
+#include "model/model_config.h"
+#include "model/model_limits.h"
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -411,6 +414,47 @@ TEST_F(RopeScalingConfigTest, UnknownArchSetsFallbackFlag) {
     ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg2));
     EXPECT_FALSE(cfg2.arch_inferred_fallback);
     EXPECT_EQ(cfg2.arch, imp::ModelArch::LLAMA);
+}
+
+// Granite (#2412): own arch, attention_multiplier replaces 1/sqrt(head_dim), the two residual-stream
+// multipliers fold into embed_scale, logits_scaling != 1 is refused by the dimension validator.
+TEST_F(RopeScalingConfigTest, GraniteMultipliers) {
+    // ibm-granite/granite-4.2-8b config.json, the fields that matter here.
+    write_config(R"({
+        "architectures": ["GraniteForCausalLM"], "model_type": "granite",
+        "hidden_size": 4096, "num_attention_heads": 32, "num_key_value_heads": 8,
+        "num_hidden_layers": 40, "attention_multiplier": 0.0078125, "embedding_multiplier": 1.0,
+        "residual_multiplier": 1.0, "logits_scaling": 1.0
+    })");
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_EQ(cfg.arch, imp::ModelArch::GRANITE);
+    EXPECT_FALSE(cfg.arch_inferred_fallback);
+    EXPECT_FLOAT_EQ(cfg.attn_scale, 0.0078125f);
+    EXPECT_FLOAT_EQ(imp::attention_softmax_scale(cfg, false, 128), 0.0078125f);
+    EXPECT_EQ(cfg.embed_scale, 0.0f);  // both multipliers 1.0: no embedding scale at all
+    std::string err;
+    EXPECT_TRUE(imp::validate_declared_dimensions(cfg, &err)) << err;
+
+    // Granite 3.x shape: embedding 12, residual 0.22, logits 8.
+    write_config(R"({
+        "architectures": ["GraniteForCausalLM"], "hidden_size": 2048, "num_attention_heads": 32,
+        "num_hidden_layers": 40, "attention_multiplier": 0.015625, "embedding_multiplier": 12.0,
+        "residual_multiplier": 0.22, "logits_scaling": 8.0
+    })");
+    imp::ModelConfig g3;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), g3));
+    EXPECT_FLOAT_EQ(g3.embed_scale, 12.0f / 0.22f);
+    EXPECT_FALSE(imp::validate_declared_dimensions(g3, &err));
+    EXPECT_NE(err.find("logits_scaling"), std::string::npos) << err;
+
+    // No multiplier keys: the default scale.
+    write_config(R"({"architectures": ["LlamaForCausalLM"], "hidden_size": 4096,
+        "num_attention_heads": 32, "num_hidden_layers": 32})");
+    imp::ModelConfig llama;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), llama));
+    EXPECT_FLOAT_EQ(imp::attention_softmax_scale(llama, false, 128), 1.0f / std::sqrt(128.0f));
+    EXPECT_FLOAT_EQ(imp::attention_softmax_scale(llama, true, 256), 1.0f);
 }
 
 // AWQ detection (audit gap #16). Both nested-under-quantization_config
