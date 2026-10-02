@@ -19,6 +19,10 @@ src/runtime/config.cpp. Example keys are `name = value` lines under the last
 `[section]` header in imp.conf.example, joined as `section.name`. The two sets
 must be equal.
 
+Expiry: a key whose comment block says "experimental" carries `expires: YYYY-MM-DD`
+in that block (a block covers the run of key lines below it, up to a blank line);
+a date before today fails. tests/test_config_bindings.cpp checks each key's binding.
+
 Usage:
     python3 tools/check_config_keys.py             # check (CI)
     python3 tools/check_config_keys.py --list      # every key with its side(s)
@@ -28,6 +32,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import pathlib
 import re
 import sys
@@ -36,10 +41,12 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONFIG_CPP = ROOT / "src" / "runtime" / "config.cpp"
 EXAMPLE = ROOT / "imp.conf.example"
 
-BIND_RE = re.compile(r'^\s*[BIFS]\("([a-z0-9_.]+)"', re.M)
+BIND_RE = re.compile(r'^\s*[BIFS]\("([A-Za-z0-9_.]+)"', re.M)
 DOTTED_RE = re.compile(r'dotted_key\s*==\s*"([a-z0-9_.]+)"')
 SECTION_RE = re.compile(r"^\[([a-z0-9_]+)\]")
-KEY_RE = re.compile(r"^([a-z0-9_]+)\s*=")
+KEY_RE = re.compile(r"^([A-Za-z0-9_]+)\s*=")
+EXPIRES_RE = re.compile(r"expires:\s*(\d{4}-\d{2}-\d{2})")
+EXPERIMENTAL_RE = re.compile(r"\bexperimental\b", re.I)
 
 
 def bound_keys(text: str) -> set[str]:
@@ -60,14 +67,60 @@ def example_keys(text: str) -> set[str]:
     return keys
 
 
+def key_comments(text: str) -> list[tuple[str, str]]:
+    """(section.key, comment block above its run of key lines); keys with no blank line between
+    them share the block written above the first."""
+    out: list[tuple[str, str]] = []
+    section = None
+    block: list[str] = []
+    prev_key = False
+    for line in text.splitlines():
+        m = SECTION_RE.match(line)
+        if m:
+            section, block, prev_key = m.group(1), [], False
+            continue
+        if line.startswith("#"):
+            if prev_key:
+                block = []
+            block.append(line)
+            prev_key = False
+            continue
+        m = KEY_RE.match(line)
+        if m and section:
+            out.append((f"{section}.{m.group(1)}", "\n".join(block)))
+            prev_key = True
+            continue
+        block, prev_key = [], False
+    return out
+
+
+def expiry_failures(text: str, today: dt.date) -> tuple[list[str], int]:
+    """An experimental key's block carries `expires: YYYY-MM-DD`, not before today."""
+    fails: list[str] = []
+    dated = 0
+    for key, block in key_comments(text):
+        m = EXPIRES_RE.search(block)
+        if m:
+            dated += 1
+            if dt.date.fromisoformat(m.group(1)) < today:
+                fails.append(f"{key} expired {m.group(1)}: remove the key or extend with a reason")
+        elif EXPERIMENTAL_RE.search(block):
+            fails.append(f"{key} is marked experimental without `expires: YYYY-MM-DD`")
+    return fails, dated
+
+
 def diff(bound: set[str], example: set[str]) -> tuple[list[str], list[str]]:
     return sorted(bound - example), sorted(example - bound)
 
 
 def check(list_all: bool) -> int:
     bound = bound_keys(CONFIG_CPP.read_text(encoding="utf-8"))
-    example = example_keys(EXAMPLE.read_text(encoding="utf-8"))
+    example_text = EXAMPLE.read_text(encoding="utf-8")
+    example = example_keys(example_text)
     missing, unbound = diff(bound, example)
+    expired, dated = expiry_failures(example_text, dt.date.today())
+    for f in expired:
+        print(f"FAIL: {f}")
     if list_all:
         for k in sorted(bound | example):
             side = "both" if k in bound and k in example else ("binder only" if k in bound else "example only")
@@ -76,11 +129,12 @@ def check(list_all: bool) -> int:
         print(f"FAIL: {k} is bound in src/runtime/config.cpp but absent from imp.conf.example")
     for k in unbound:
         print(f"FAIL: {k} is in imp.conf.example but no binder in src/runtime/config.cpp reads it")
-    if missing or unbound:
-        print(f"check_config_keys: {len(missing)} missing, {len(unbound)} unbound "
+    if missing or unbound or expired:
+        print(f"check_config_keys: {len(missing)} missing, {len(unbound)} unbound, {len(expired)} expiry "
               f"({len(bound)} bound, {len(example)} in the example)")
         return 1
-    print(f"PASS: imp.conf.example lists all {len(bound)} bound keys and nothing else")
+    print(f"PASS: imp.conf.example lists all {len(bound)} bound keys and nothing else; "
+          f"{dated} experimental key(s) dated, none expired")
     return 0
 
 
@@ -113,6 +167,30 @@ extra = "x"
         ("a bound key missing from the example is reported", missing == ["paths.delta"]),
         ("an example key with no binder is reported", unbound == ["paths.extra"]),
         ("a comment line is not a key", "runtime.#" not in ex and len(ex) == 5),
+        ("a binder key with upper case parses", bound_keys('    B("moe.nvfp4_smallM", x);') == {"moe.nvfp4_smallM"}),
+    ]
+    dated = '''
+[runtime]
+# Experimental fast path.
+fast = false
+# Experimental, expires: 2026-01-31.
+old = false
+old_twin = 1
+
+# experimental, expires: 2027-06-30
+fresh = false
+# Stable knob.
+plain = 1
+'''
+    today = dt.date(2026, 10, 2)
+    fails, n_dated = expiry_failures(dated, today)
+    cases += [
+        ("experimental without a date is reported", any(f.startswith("runtime.fast ") for f in fails)),
+        ("a past date is reported", any(f.startswith("runtime.old expired") for f in fails)),
+        ("a date covers its whole run of keys", any(f.startswith("runtime.old_twin expired") for f in fails)),
+        ("a future date passes", not any("runtime.fresh" in f for f in fails)),
+        ("an undated stable key passes", not any("runtime.plain" in f for f in fails) and len(fails) == 3),
+        ("dated keys are counted", n_dated == 3),
     ]
     bad = [name for name, ok in cases if not ok]
     for name, ok in cases:

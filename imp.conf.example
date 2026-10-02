@@ -11,6 +11,8 @@
 #   imp-cli --set kv_cache.dtype=fp8 --set runtime.cuda_graphs=never ...
 #
 # Lines starting with '#' are comments; section headers in [brackets].
+# An experimental key carries "expires: YYYY-MM-DD" in its comment block; past that
+# date tools/check_config_keys.py fails until the key is removed, promoted or extended.
 
 [runtime]
 # Force deterministic GEMM (cuBLASLt no_reduce_split). Slower but reproducible
@@ -201,6 +203,7 @@ allow_nondeterministic_fp8  = false
 # Restore the legacy auto-upgrade-to-FP8 behavior (off-by-default since 2026-04).
 fp8_auto_legacy             = false
 # BitDecoding TC path for NVFP4 paged-attention QK (experimental).
+# Experimental, expires: 2026-12-31 (remove or promote by then).
 bitdecoding_qk              = false
 
 # Growable KV pool: reserve address space for the pool this configuration asks
@@ -374,7 +377,9 @@ fp8_prefill          = "auto"
 fp8_fmha             = "never"
 # amax-scaled e4m3 QK conversion on the fp8-QK path (only takes effect when
 # fa2_fp16qk=never or declined). Experimental quality probe; default off.
+# Experimental, expires: 2026-12-31 (remove or promote by then).
 fp8_qk_scaled        = false
+
 fmha_sm120           = "auto"
 # Register-resident FA2 prefill kernel for long prefill (F16, head_dim=128).
 # Default "on" since PR #478; QK^T runs in f16 unless fa2_fp16qk=never AND
@@ -920,6 +925,7 @@ k                    = 16
 # emitted/verify vs the ~1.5x verify break-even (2026-07-23, single
 # request; the cross-request warm table is the open question — see
 # docs/archive/PERF_AUDIT_2026_07_23.md).
+# Experimental, expires: 2026-12-31 (remove or promote by then).
 token_recycling      = false
 recycle_slots        = 8
 recycle_depth        = 3

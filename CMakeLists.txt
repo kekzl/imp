@@ -864,6 +864,7 @@ if(IMP_BUILD_TESTS)
         tests/test_qwen3vl_vision_grid.cpp
         tests/test_sentencepiece_loader.cpp
         tests/test_config.cpp
+        tests/test_config_bindings.cpp
         tests/test_mtp_auto.cpp
         # mtp_auto.cpp and its sibling define symbols the two tests above and args.cpp need; pull
         # neither nlohmann nor httplib. Must build outside IMP_BUILD_SERVER so test-core still links
@@ -1107,6 +1108,9 @@ if(IMP_BUILD_TESTS)
         target_compile_definitions(test-core PRIVATE IMP_FUZZ_HAVE_TOOL_STREAM)
     endif()
     target_include_directories(test-core PRIVATE ${IMP_FUZZ_INCLUDE_DIR})
+    # test_config_bindings.cpp: one IMP_CONFIG_KEY line per imp.conf.example key.
+    include(config_key_table)
+    target_include_directories(test-core PRIVATE ${IMP_CONFIG_KEY_TABLE_DIR})
     # test_stream_pipeline.cpp includes the self-contained pure header
     # tools/imp-server/stream_pipeline.h (no httplib/json deps).
     target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
