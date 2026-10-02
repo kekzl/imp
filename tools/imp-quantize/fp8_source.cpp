@@ -12,6 +12,31 @@ namespace {
 
 int64_t ceil_div(int64_t a, int64_t b) { return b > 0 ? (a + b - 1) / b : 0; }
 
+// Every scale value as float, in whichever precision it was stored.
+std::expected<std::vector<float>, std::string> read_scales(const RawTensor& scale) {
+    std::vector<float> scales(static_cast<size_t>(scale.numel()));
+    const size_t elem = scale.dtype == "F32" ? 4 : 2;
+    if (scale.nbytes != 0 && scale.nbytes != scales.size() * elem)
+        return std::unexpected("scale " + scale.name + " holds " + std::to_string(scale.nbytes) +
+                               " bytes for " + std::to_string(scales.size()) + " values");
+    if (scale.dtype == "F32") {
+        std::memcpy(scales.data(), scale.data, scales.size() * sizeof(float));
+    } else if (scale.dtype == "BF16") {
+        const auto* s16 = static_cast<const uint16_t*>(scale.data);
+        for (size_t i = 0; i < scales.size(); i++)
+            scales[i] = bf16_to_float(s16[i]);
+    } else if (scale.dtype == "F16") {
+        // Not mis-read as BF16 (off by a factor); half_to_float renormalises subnormals (a hand-widened
+        // version was up to 1025x too large).
+        const auto* s16 = static_cast<const uint16_t*>(scale.data);
+        for (size_t i = 0; i < scales.size(); i++)
+            scales[i] = half_to_float(s16[i]);
+    } else {
+        return std::unexpected("unsupported scale dtype " + scale.dtype);
+    }
+    return scales;
+}
+
 }  // namespace
 
 bool is_fp8_e4m3_dtype(const std::string& dtype) {
@@ -70,26 +95,11 @@ std::expected<std::vector<uint16_t>, std::string> fp8_block_scaled_to_fp16(const
                                std::to_string(k) + "] against scale [" + std::to_string(scale_inv.shape[0]) +
                                "," + std::to_string(scale_inv.shape[1]) + "]");
 
-    // Read the scale grid once, in whichever precision it was stored.
-    const int64_t sr = scale_inv.shape[0], sc = scale_inv.shape[1];
-    std::vector<float> scales(static_cast<size_t>(sr * sc));
-    if (scale_inv.dtype == "F32") {
-        std::memcpy(scales.data(), scale_inv.data, scales.size() * sizeof(float));
-    } else if (scale_inv.dtype == "BF16") {
-        const auto* s16 = static_cast<const uint16_t*>(scale_inv.data);
-        for (size_t i = 0; i < scales.size(); i++)
-            scales[i] = bf16_to_float(s16[i]);
-    } else if (scale_inv.dtype == "F16") {
-        // Not seen in a released checkpoint yet, but cheap to accept correctly rather than mis-read
-        // as BF16 (off by a factor). A hand-widened version once got subnormals wrong (pasted the
-        // mantissa under a normal exponent instead of renormalising, up to 1025x too large), scaling
-        // its whole weight block wrong.
-        const auto* s16 = static_cast<const uint16_t*>(scale_inv.data);
-        for (size_t i = 0; i < scales.size(); i++)
-            scales[i] = half_to_float(s16[i]);
-    } else {
-        return std::unexpected("unsupported scale dtype " + scale_inv.dtype);
-    }
+    const int64_t sc = scale_inv.shape[1];
+    auto read = read_scales(scale_inv);
+    if (!read)
+        return std::unexpected(read.error());
+    const std::vector<float>& scales = *read;
 
     const auto* w = static_cast<const uint8_t*>(weight.data);
     std::vector<uint16_t> tmp(static_cast<size_t>(n * k));
@@ -102,6 +112,62 @@ std::expected<std::vector<uint16_t>, std::string> fp8_block_scaled_to_fp16(const
         }
     }
     return tmp;
+}
+
+bool is_per_tensor_scale(const RawTensor& scale) {
+    return scale.shape.empty() || (scale.shape.size() == 1 && scale.shape[0] == 1);
+}
+
+std::expected<std::vector<uint16_t>, std::string> fp8_tensor_scaled_to_fp16(const RawTensor& weight,
+                                                                            const RawTensor& scale) {
+    if (!is_fp8_e4m3_dtype(weight.dtype))
+        return std::unexpected("weight dtype " + weight.dtype + " is not E4M3");
+    if (weight.shape.size() != 2)
+        return std::unexpected("per-tensor FP8 needs a 2-D weight");
+    if (!is_per_tensor_scale(scale))
+        return std::unexpected("per-tensor FP8 needs a scalar scale, got rank " +
+                               std::to_string(scale.shape.size()));
+    auto read = read_scales(scale);
+    if (!read)
+        return std::unexpected(read.error());
+    const float s = (*read)[0];
+    const auto* w = static_cast<const uint8_t*>(weight.data);
+    std::vector<uint16_t> tmp(static_cast<size_t>(weight.numel()));
+    for (size_t i = 0; i < tmp.size(); i++)
+        tmp[i] = float_to_half(e4m3_to_float(w[i]) * s);
+    return tmp;
+}
+
+Fp8Pairing pair_fp8_scales(const std::map<std::string, const RawTensor*>& by_name) {
+    static const std::string kW = ".weight";
+    Fp8Pairing p;
+    for (const auto& [name, t] : by_name) {
+        if (!is_fp8_e4m3_dtype(t->dtype) || name.size() <= kW.size() ||
+            name.compare(name.size() - kW.size(), kW.size(), kW) != 0)
+            continue;
+        const std::string base = name.substr(0, name.size() - kW.size());
+        if (const auto it = by_name.find(base + ".weight_scale_inv"); it != by_name.end()) {
+            p.scale_of[name] = it->second;
+            p.consumed.insert(it->first);
+            p.n_block++;
+        } else if (const auto ts = by_name.find(base + ".weight_scale");
+                   ts != by_name.end() && is_per_tensor_scale(*ts->second)) {
+            p.scale_of[name] = ts->second;
+            p.consumed.insert(ts->first);
+            if (by_name.count(base + ".input_scale"))
+                p.consumed.insert(base + ".input_scale");
+            p.n_tensor++;
+        } else {
+            p.unpaired.push_back(name);
+        }
+    }
+    return p;
+}
+
+std::expected<std::vector<uint16_t>, std::string> fp8_scaled_to_fp16(const RawTensor& weight,
+                                                                     const RawTensor& scale) {
+    return is_per_tensor_scale(scale) ? fp8_tensor_scaled_to_fp16(weight, scale)
+                                      : fp8_block_scaled_to_fp16(weight, scale);
 }
 
 }  // namespace imp::quantize

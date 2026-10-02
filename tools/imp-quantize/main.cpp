@@ -143,7 +143,7 @@ std::expected<std::vector<uint16_t>, std::string> tensor_as_fp16(
     const RawTensor& t, const std::map<std::string, const RawTensor*>& fp8_scale_of, const awq::Plan& plan) {
     std::vector<uint16_t> out;
     if (const auto it = fp8_scale_of.find(t.name); it != fp8_scale_of.end()) {
-        auto widened = quantize::fp8_block_scaled_to_fp16(t, *it->second);
+        auto widened = quantize::fp8_scaled_to_fp16(t, *it->second);
         if (!widened)
             return std::unexpected(widened.error());
         out = std::move(*widened);
@@ -505,9 +505,9 @@ int main(int argc, char** argv) {
         }
     }
 
-    // FP8 sources (DeepSeek-V3, Qwen3.8's FP8 line) store an E4M3 weight beside a
-    // weight_scale_inv block grid; paired up front across shards since the two aren't guaranteed
-    // to share a file and should_quantize sees one tensor at a time. Scale tensors are then
+    // FP8 sources store an E4M3 weight beside a weight_scale_inv block grid (DeepSeek-V3, Qwen3.8 FP8)
+    // or a scalar weight_scale (Modelopt, #2473); paired up front across shards since the two aren't
+    // guaranteed to share a file and should_quantize sees one tensor at a time. Scale tensors are then
     // CONSUMED (once the weight is NVFP4 they describe nothing).
     std::map<std::string, const RawTensor*> fp8_scale_of;
     std::set<std::string> fp8_scale_names;
@@ -516,27 +516,19 @@ int main(int argc, char** argv) {
         for (const auto& src : opened)
             for (const auto& t : src->tensors())
                 by_name[t.name] = &t;
-        static const std::string kW = ".weight";
-        for (const auto& [name, t] : by_name) {
-            if (!quantize::is_fp8_e4m3_dtype(t->dtype) || !ends_with(name, kW))
-                continue;
-            const auto it = by_name.find(name.substr(0, name.size() - kW.size()) + ".weight_scale_inv");
-            if (it == by_name.end()) {
-                // Without its grid the tensor is unreadable, and the generic dtype exclusion would report it
-                // as merely "unsupported". Names which scale is missing: a scalar-scale FP8 export (Modelopt
-                // style) lands here and needs different handling.
-                fprintf(stderr,
-                        "note: %s is E4M3 but has no .weight_scale_inv beside it, so it is copied\n"
-                        "      through unquantized. Block-scaled FP8 is what this reads.\n",
-                        name.c_str());
-                continue;
-            }
-            fp8_scale_of[name] = it->second;
-            fp8_scale_names.insert(it->first);
-        }
-        if (!fp8_scale_of.empty())
-            printf("FP8 source: %zu block-scaled E4M3 tensor(s) will be widened before quantizing\n",
-                   fp8_scale_of.size());
+        quantize::Fp8Pairing pairing = quantize::pair_fp8_scales(by_name);
+        for (const auto& name : pairing.unpaired)
+            fprintf(stderr,
+                    "note: %s is E4M3 with neither .weight_scale_inv nor a scalar .weight_scale beside it,\n"
+                    "      so it is copied through unquantized.\n",
+                    name.c_str());
+        if (!pairing.scale_of.empty())
+            printf(
+                "FP8 source: %zu block-scaled + %zu per-tensor-scaled E4M3 tensor(s) will be widened before "
+                "quantizing\n",
+                pairing.n_block, pairing.n_tensor);
+        fp8_scale_of = std::move(pairing.scale_of);
+        fp8_scale_names = std::move(pairing.consumed);
     }
 
     // Fused layers share one tensor scale (checkpoint_out.h): an engine merging q/k/v into one
@@ -651,7 +643,7 @@ int main(int argc, char** argv) {
             // with scales of its own, so this tensor must not reach the output.
             if (fp8_scale_names.count(t.name)) {
                 if (opt.dry_run)
-                    printf("  DROP  %-58s FP8 block scale, consumed by its weight\n", t.name.c_str());
+                    printf("  DROP  %-58s FP8 scale, consumed by its weight\n", t.name.c_str());
                 continue;
             }
             const auto fp8_it = fp8_scale_of.find(t.name);
