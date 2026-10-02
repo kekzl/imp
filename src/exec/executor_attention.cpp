@@ -466,11 +466,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         debug_tensor_stats("L0_step2_after_rope_k", kk, stream);
     }
 
-    // Attention scale: standard archs 1/sqrt(head_dim); Gemma 4 = 1.0 (Q/K-norm
-    // absorb the per-element scaling, per llama.cpp f_attn_scale); MLA
-    // multiplies by YaRN mscale_adj^2, mscale_adj = 0.1*mscale_all_dim*ln(yarn_factor)+1.0.
-    float scale = prof.is_gemma4 ? 1.0f : (1.0f / std::sqrt(static_cast<float>(hd)));
-    if (cfg.is_mla()) scale *= mla_attention_scale_multiplier(cfg);
+    // Attention scale per arch (model_config.h attention_softmax_scale): Granite override,
+    // 1/sqrt(head_dim), Gemma 4 1.0, MLA times YaRN mscale_adj^2.
+    const float scale = attention_softmax_scale(cfg, prof.is_gemma4, hd);
 
     // gpt-oss learned attention sinks (#547): per-head logits acting as a
     // virtual extra softmax column. Only the cuBLAS prefill softmax and the

@@ -167,6 +167,7 @@ enum {
     kApiGptOss = 14,
     kApiNomicBert = 15,
     kApiQwen4Exp = 16,
+    kApiGranite = 17,
 };
 
 static constexpr ArchEntry kArchRegistry[] = {
@@ -202,6 +203,10 @@ static constexpr ArchEntry kArchRegistry[] = {
     // defaults unused (no LM head). Post-LN + pooling handled by the encoder
     // forward, not the decoder loop.
     {ModelArch::NOMIC_BERT, "nomic-bert", kApiNomicBert, 1, 0, -1, -1, false, false, 1.0f, 1.0f, 0},
+    // Granite 4.2: Llama RoPE convention (GGUF pre-permuted, SafeTensors forced NeoX), SwiGLU;
+    // multipliers from config.json / GGUF metadata
+    // (parse_granite_multipliers, gguf_loader.cpp), sampling from generation_config.
+    {ModelArch::GRANITE, "granite", kApiGranite, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
     {ModelArch::GENERIC, "generic", kApiGeneric, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
 };
 

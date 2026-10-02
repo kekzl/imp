@@ -24,6 +24,8 @@ struct ModelConfig {
     int head_dim = 0;  // 0 = infer as d_model / n_heads
     float rope_theta = 10000.0f, rms_norm_eps = 1e-5f, rope_freq_scale = 1.0f;
     float embed_scale = 0.0f;         // >0 = multiply embeddings by this (e.g. sqrt(d_model) for Gemma)
+    float attn_scale = 0.0f;          // >0 replaces 1/sqrt(head_dim) (Granite attention_multiplier)
+    float logits_scaling = 1.0f;      // Granite: logits / this; only 1.0 is served (model_limits.h)
     float norm_weight_offset = 0.0f;  // Gemma: 1.0 (norms use w+1 instead of w)
     int n_experts = 0, n_experts_active = 0, expert_d_ff = 0;
 
@@ -195,6 +197,43 @@ inline float mla_attention_scale_multiplier(const ModelConfig& cfg) {
         return 1.0f;
     const float mscale_adj = 0.1f * cfg.mla_mscale * std::log(cfg.rope_freq_scale) + 1.0f;
     return mscale_adj * mscale_adj;
+}
+
+// Granite embedding_multiplier / residual_multiplier as one embedding scale: RMSNorm is
+// scale-invariant, so a stream run at 1/residual with the plain add equals x + residual * out.
+// 0 (no scale) when both are 1.0 or residual is not positive.
+inline float residual_stream_embed_scale(float embedding, float residual) {
+    if (residual <= 0.0f || (embedding == 1.0f && residual == 1.0f))
+        return 0.0f;
+    return embedding / residual;
+}
+
+// Granite multipliers as the config fields the forward reads (HF config.json and GGUF share it).
+// Loaders call it before validate_declared_dimensions, so an unservable logits_scaling is refused.
+inline void set_granite_multipliers(ModelConfig& cfg, double attention, double embedding, double residual,
+                                    double logits) {
+    cfg.attn_scale = static_cast<float>(attention);
+    cfg.logits_scaling = static_cast<float>(logits);
+    if (const float s = residual_stream_embed_scale(static_cast<float>(embedding),
+                                                    static_cast<float>(residual));
+        s > 0.0f)
+        cfg.embed_scale = s;
+}
+
+// GGUF spelling (llama.cpp keys); `get(key, default)` reads the arch-prefixed metadata float.
+template <typename Get>
+void set_granite_multipliers_gguf(ModelConfig& cfg, const Get& get) {
+    set_granite_multipliers(cfg, get("attention.scale", 0.0), get("embedding_scale", 1.0),
+                            get("residual_scale", 1.0), get("logit_scale", 1.0));
+}
+
+// Softmax scale for QK^T: config override (Granite attention_multiplier, 1/128 on 4.2), else
+// 1/sqrt(head_dim), 1.0 on Gemma 4 (Q/K-norm absorbs it); MLA times mscale_adj^2.
+inline float attention_softmax_scale(const ModelConfig& cfg, bool gemma4, int head_dim) {
+    if (cfg.attn_scale > 0.0f)
+        return cfg.attn_scale;
+    const float base = gemma4 ? 1.0f : 1.0f / std::sqrt(static_cast<float>(head_dim));
+    return base * mla_attention_scale_multiplier(cfg);
 }
 
 // Forward declaration — full definition in quant/nvfp4_quant.h.

@@ -161,6 +161,12 @@ DtypeTableRow dtype_table_row(size_t i) {
 
 // ---- Architecture detection from weight names ----
 
+// Archs whose interleaved registry RoPE default relies on GGUF's Q/K pre-permutation.
+static bool gguf_permutes_qk(ModelArch a) {
+    return a == ModelArch::LLAMA || a == ModelArch::MISTRAL || a == ModelArch::MIXTRAL ||
+           a == ModelArch::LLAMA4 || a == ModelArch::GRANITE;
+}
+
 static ModelArch detect_arch_from_weights(const std::unordered_map<std::string, Tensor>& tensors) {
     bool has_block_sparse_moe = false;
     bool has_mlp_experts = false;
@@ -1124,10 +1130,8 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     // pre-permutes Q/K so interleaved reproduces NeoX; that permutation is NOT applied to
     // SafeTensors weights, so the interleaved default scrambles positions (coherent but
     // prompt-blind output). Force NeoX on the SafeTensors path; rope_neox=true arches unaffected.
-    if (cfg.arch == ModelArch::LLAMA || cfg.arch == ModelArch::MISTRAL || cfg.arch == ModelArch::MIXTRAL ||
-        cfg.arch == ModelArch::LLAMA4) {
+    if (gguf_permutes_qk(cfg.arch))
         cfg.rope_neox = true;
-    }
 
     IMP_LOG_INFO("Architecture: %s", model_arch_name(cfg.arch));
     IMP_LOG_INFO("Config: layers=%d d_model=%d d_ff=%d heads=%d kv_heads=%d vocab=%d ctx=%d", cfg.n_layers,
