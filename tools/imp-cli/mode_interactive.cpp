@@ -6,6 +6,7 @@
 #include "model/image_placeholders.h"
 #include "model/tokenizer.h"
 #include "runtime/engine.h"
+#include "vision/vision_family.h"
 
 #include <chrono>
 #include <cstdio>
@@ -102,16 +103,12 @@ int run_interactive(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGene
             const int pending_img_tokens = imp_pending_image_tokens(ctx);
             if (pending_img_tokens > 0) {
                 const std::vector<int> counts = ctx->engine->pending_image_token_counts();
-                std::string blocks;
-                for (size_t i = 0; i < counts.size(); ++i)
-                    blocks += "<|vision_start|><|image_pad|><|vision_end|>";
+                const imp::VisionFamily family = ctx->engine->vision_family();
                 std::vector<imp::ChatMessage> msgs = history;
-                msgs.back().content = blocks + msgs.back().content;
+                msgs.back().content = imp::vision_prompt_blocks(family, std::string(counts.size(), 'i')) +
+                                      msgs.back().content;
                 tokens = chat_tpl.apply(*tok, msgs);
-                const int32_t pad_id = tok->find_token("<|image_pad|>");
-                const auto expanded = pad_id < 0
-                                          ? std::unexpected(std::string("tokenizer has no <|image_pad|>"))
-                                          : imp::expand_image_placeholders(tokens, pad_id, counts);
+                const auto expanded = imp::expand_vision_prompt(family, tokens, *tok, counts, {});
                 if (!expanded) {
                     fprintf(stderr, "Error placing image tokens: %s\n", expanded.error().c_str());
                     history.pop_back();

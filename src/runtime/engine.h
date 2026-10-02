@@ -221,7 +221,7 @@ public:
                                              std::vector<QwenPatches>& groups) const;
     void add_pending_qwen_video(std::vector<QwenPatches> groups, size_t content_hash);  // CLI, after images
     bool has_qwen_vision() const noexcept { return qwen_vision_.is_ready(); }
-    [[nodiscard]] bool vision_is_internvl() const noexcept { return qwen_vision_.is_internvl(); }
+    [[nodiscard]] VisionFamily vision_family() const noexcept { return qwen_vision_.family(); }
     // Vision: set image for next generation. Returns false if no mmproj loaded.
     // `set_` replaces whatever was pending; `add_` appends, which only the
     // Qwen3-VL tower supports (the mmproj tower holds exactly one image).

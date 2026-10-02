@@ -390,10 +390,10 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
 
     // Tokenize with chat template (with image tokens if vision is active)
     if (ctx.snap.have_template && !ctx.snap.qwen_patches.empty()) {
-        // Chat template renders one <|image_pad|> per image before sizes are known (smart_resize runs
+        // Chat template renders one image pad per image before sizes are known (smart_resize runs
         // after). Placed on the first user turn (the position the parser reliably tracks), rendered,
         // then each placeholder expands to its real token count.
-        const std::string blocks = qwen_vision_blocks(ctx.params.vision_order, ctx.snap.vision_internvl);
+        const std::string blocks = imp::vision_prompt_blocks(ctx.snap.vision_family, ctx.params.vision_order);
         auto msgs = ctx.params.chat_msgs;
         for (auto& m : msgs)
             if (m.role == "user") {
@@ -402,7 +402,9 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             }
         ctx.snap.tokens = ctx.snap.chat_tpl.apply(*ctx.snap.tok, msgs, ctx.snap.suppress_thinking,
                                                   force_thinking, ctx.snap.reasoning_effort);
-        const auto expanded = qwen_expand_vision_placeholders(ctx.snap);
+        const auto expanded = imp::expand_vision_prompt(ctx.snap.vision_family, ctx.snap.tokens,
+                                                        *ctx.snap.tok, ctx.snap.qwen_image_tokens,
+                                                        ctx.snap.qwen_video_layouts);
         if (!expanded) {
             res.status = 400;
             json error = {{"error", {{"message", expanded.error()}, {"type", "invalid_request_error"}}}};

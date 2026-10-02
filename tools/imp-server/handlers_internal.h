@@ -12,6 +12,7 @@
 #include "api/imp_internal.h"
 #include "model/image_placeholders.h"
 #include "vision/image_processor.h"
+#include "vision/vision_family.h"
 #include "runtime/request.h"
 #include "runtime/spec_request.h"
 #include "memory/kv_cache.h"
@@ -138,8 +139,8 @@ struct ChatStateSnapshot {
     // One layout per video part, in prompt order; its frame pairs sit in `qwen_patches` at the
     // video's position among the images.
     std::vector<imp::VideoPlaceholderLayout> qwen_video_layouts;
-    // InternVL tower: <IMG_CONTEXT> blocks and <img>/</img> expansion instead of the Qwen3-VL layout.
-    bool vision_internvl = false;
+    // Prompt layout of the loaded tower (imp::vision_prompt_layout).
+    imp::VisionFamily vision_family = imp::VisionFamily::None;
     size_t vision_content_hash = 0;
     std::vector<int32_t> stop_token_ids;
     imp::ChatTemplateFamily tpl_family = imp::ChatTemplateFamily::CHATML;

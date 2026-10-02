@@ -26,8 +26,8 @@ size_t vision_parts_hash(ChatRequestParams& params) {
 
 std::string qwen_preprocess_vision_parts(imp::Engine& engine, const ChatRequestParams& params,
                                          ChatStateSnapshot& snap) {
-    snap.vision_internvl = engine.vision_is_internvl();
-    if (snap.vision_internvl && !params.videos.empty())
+    snap.vision_family = engine.vision_family();
+    if (imp::vision_prompt_layout(snap.vision_family).video_block.empty() && !params.videos.empty())
         return "video parts need a Qwen3-VL model; this InternVL model takes images only";
     size_t ni = 0, nv = 0;
     for (const char kind : params.vision_order) {
@@ -59,37 +59,4 @@ std::string qwen_preprocess_vision_parts(imp::Engine& engine, const ChatRequestP
         snap.qwen_patches.push_back(std::move(patches));
     }
     return {};
-}
-
-std::string qwen_vision_blocks(const std::string& order, bool internvl) {
-    std::string blocks;
-    for (const char kind : order) {
-        if (internvl)
-            blocks += "<IMG_CONTEXT>\n";  // InternVL chat_template.jinja: one context token + newline
-        else
-            blocks += kind == 'v' ? "<|vision_start|><|video_pad|><|vision_end|>"
-                                  : "<|vision_start|><|image_pad|><|vision_end|>";
-    }
-    return blocks;
-}
-
-std::expected<void, std::string> qwen_expand_vision_placeholders(ChatStateSnapshot& snap) {
-    if (snap.vision_internvl) {
-        const int per_image = snap.qwen_image_tokens.empty() ? 0 : snap.qwen_image_tokens[0];
-        return imp::expand_internvl_image_placeholders(snap.tokens, snap.tok->find_token("<IMG_CONTEXT>"),
-                                                       snap.tok->find_token("<img>"),
-                                                       snap.tok->find_token("</img>"),
-                                                       static_cast<int>(snap.qwen_image_tokens.size()),
-                                                       per_image);
-    }
-    const int32_t pad_id = snap.tok->find_token("<|image_pad|>");
-    if (pad_id < 0)
-        return std::unexpected(std::string("tokenizer has no <|image_pad|>"));
-    auto expanded = imp::expand_image_placeholders(snap.tokens, pad_id, snap.qwen_image_tokens);
-    if (expanded && !snap.qwen_video_layouts.empty())
-        expanded = imp::expand_video_placeholders(snap.tokens, snap.tok->find_token("<|video_pad|>"),
-                                                  snap.tok->find_token("<|vision_start|>"),
-                                                  snap.tok->find_token("<|vision_end|>"),
-                                                  snap.qwen_video_layouts);
-    return expanded;
 }
