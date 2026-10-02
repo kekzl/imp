@@ -661,6 +661,32 @@ if(IMP_BUILD_TOOLS)
     endif()
 endif()
 
+# Optional gcov instrumentation of the server TUs only (the CUDA imp lib is
+# left uninstrumented: nvcc cannot take --coverage). Measures real line
+# coverage of tools/imp-server/ over an E2E run. Off by default.
+option(IMP_COVERAGE "Instrument imp-server with gcov" OFF)
+
+# Server TUs linked by more than one target compile once, in an OBJECT library (#2498).
+# Same flags for every consumer: no test-only define may reach these TUs.
+function(imp_server_objects target)
+    add_library(${target} OBJECT ${ARGN})
+    target_link_libraries(${target} PUBLIC imp PRIVATE imp_warnings)
+    target_include_directories(${target} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
+                                                ${CMAKE_CURRENT_SOURCE_DIR}/tools
+                                                ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
+    if(IMP_COVERAGE)
+        target_compile_options(${target} PRIVATE --coverage -O0 -g)
+        target_link_options(${target} INTERFACE --coverage)
+    endif()
+endfunction()
+
+# BatchingEngine + candidate tokens: no httplib or json, so test-e2e links them without the server.
+if(IMP_BUILD_SERVER OR IMP_BUILD_TESTS)
+    imp_server_objects(imp_server_engine
+        tools/imp-server/batching_engine.cpp
+        tools/imp-server/candidate_tokens.cpp)
+endif()
+
 # --- Server ---
 if(IMP_BUILD_SERVER)
     FetchContent_Declare(httplib
@@ -698,12 +724,9 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/tool_call_gemma.cpp
         tools/imp-server/tool_call_harmony.cpp)
 
-    add_executable(imp-server
-        ${IMP_WEBUI_HEADER}
-        tools/imp-server/main.cpp
-    tools/common/args_common.cpp
-    tools/common/mtp_auto.cpp
-    tools/imp-server/args.cpp
+    # Server TUs test-core also links (test-core keeps only test sources).
+    imp_server_objects(imp_server_core
+        tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
         tools/imp-server/prompt_logprobs.cpp
         tools/imp-server/rate_limit.cpp
@@ -715,7 +738,6 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers.cpp
         tools/imp-server/constraint_validation.cpp
         tools/imp-server/handlers_chat.cpp
-        tools/imp-server/handlers_completions.cpp
         tools/imp-server/handlers_completions_params.cpp
         tools/imp-server/fim_request.cpp
         tools/imp-server/handlers_chat_core.cpp
@@ -724,28 +746,31 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/image_fetch.cpp
         tools/imp-server/handlers_chat_stream.cpp
         tools/imp-server/stream_driver.cpp
+        tools/imp-server/handlers_admin.cpp
+        tools/imp-server/tracing.cpp)
+    target_link_libraries(imp_server_core PUBLIC httplib::httplib nlohmann_json::nlohmann_json)
+
+    add_executable(imp-server
+        ${IMP_WEBUI_HEADER}
+        tools/imp-server/main.cpp
+    tools/common/args_common.cpp
+    tools/common/mtp_auto.cpp
+        tools/imp-server/handlers_completions.cpp
         tools/imp-server/handlers_messages.cpp
         tools/imp-server/handlers_responses.cpp
         tools/imp-server/handlers_misc.cpp
         tools/imp-server/metrics_memory.cpp
         tools/imp-server/handlers_rerank.cpp
         tools/imp-server/handlers_decide.cpp
-        tools/imp-server/candidate_tokens.cpp
-        tools/imp-server/handlers_admin.cpp
-        tools/imp-server/batching_engine.cpp
-        tools/imp-server/tracing.cpp
     )
-    target_link_libraries(imp-server PRIVATE imp httplib::httplib nlohmann_json::nlohmann_json imp_warnings)
+    target_link_libraries(imp-server PRIVATE imp_server_core imp_server_engine
+                                             imp httplib::httplib nlohmann_json::nlohmann_json imp_warnings)
     if(IMP_ALLOC_INTERPOSE)
         target_link_options(imp-server PRIVATE ${IMP_WRAP_LINK_FLAGS})
     endif()
     target_include_directories(imp-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
                                                  ${CMAKE_CURRENT_SOURCE_DIR}/tools
                                                   ${CMAKE_CURRENT_BINARY_DIR}/generated)
-    # Optional gcov instrumentation of the server TUs only (the CUDA imp lib is
-    # left uninstrumented — nvcc can't take --coverage). Measures real line
-    # coverage of tools/imp-server/ over an E2E run. Off by default.
-    option(IMP_COVERAGE "Instrument imp-server with gcov" OFF)
     if(IMP_COVERAGE)
         target_compile_options(imp-server PRIVATE --coverage -O0 -g)
         target_link_options(imp-server PRIVATE --coverage)
@@ -1028,19 +1053,12 @@ if(IMP_BUILD_TESTS)
         # test_sse_stream_utils.cpp covers SSE chunk envelopes + reasoning/channel splits in
         # tools/imp-server/utils.cpp (#557).
         target_sources(test-core PRIVATE
-            tools/imp-server/anthropic.cpp
-            tools/imp-server/responses.cpp
-            tools/imp-server/responses_store.cpp
-            tools/imp-server/utils.cpp
-            ${IMP_TOOL_CALL_SOURCES}
-            tools/imp-server/args.cpp
             tests/test_anthropic_transform.cpp
             tests/test_responses_transform.cpp
             tests/test_responses_store.cpp
             tests/test_spec_usage.cpp  # includes handlers_internal.h -> httplib.h
             tests/test_sse_stream_utils.cpp
             tests/test_logprobs_shapes.cpp
-            tools/imp-server/prompt_logprobs.cpp
             tests/test_prompt_logprobs.cpp
             tests/test_tool_call.cpp
         tests/test_regex_constrain.cpp
@@ -1053,21 +1071,16 @@ if(IMP_BUILD_TESTS)
             # The request `model` field is a name, never a path (AUDIT_arch_2026
             # F2-1): the two pure policy functions behind find_model_path().
             tests/test_model_name_policy.cpp
-            tools/imp-server/rate_limit.cpp
-            tools/imp-server/logit_bias.cpp
-            tools/imp-server/tracing.cpp
             tests/test_tracing.cpp
             tests/test_server_request_limits.cpp
             # Admission-time rejection of unenforceable constraints (#1256). The
             # alias coverage is the part that rots: a new spelling in the
             # parameter parser without a line here is a validation bypass.
-            tools/imp-server/constraint_validation.cpp
             tests/test_constraint_validation.cpp
             tests/test_server_args.cpp
             # SSRF destination classifier (#1610). Pure address arithmetic plus
             # getaddrinfo on literals, so it belongs in the CPU lane, which is
             # the only lane CI runs.
-            tools/imp-server/image_fetch.cpp
             tests/test_image_fetch.cpp
             # hf:// fetcher (#2200) against an in-process httplib mock hub on 127.0.0.1.
             tests/test_hf_fetch.cpp
@@ -1081,21 +1094,12 @@ if(IMP_BUILD_TESTS)
             fuzz/fuzz_tool_stream.cpp
             tests/test_base64.cpp
             # Request-field parsing golden, every dialect through its real parse path (#2461).
-            tools/imp-server/handlers_chat_params.cpp
-            tools/imp-server/handlers.cpp
-            tools/imp-server/handlers_chat_core.cpp
-            tools/imp-server/batching_engine.cpp
-            tools/imp-server/handlers_admin.cpp
-            tools/imp-server/handlers_chat.cpp
-            tools/imp-server/stream_driver.cpp
-            tools/imp-server/vision_parts.cpp
-            tools/imp-server/handlers_chat_stream.cpp
-            tools/imp-server/handlers_completions_params.cpp
-            tools/imp-server/fim_request.cpp
             tests/test_sampling_params_golden.cpp)
         target_include_directories(test-core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server
                                                      ${CMAKE_CURRENT_SOURCE_DIR}/tools)
-        target_link_libraries(test-core PRIVATE nlohmann_json::nlohmann_json httplib::httplib)
+        # Server TUs come from the shared OBJECT libraries (#2498).
+        target_link_libraries(test-core PRIVATE imp_server_core imp_server_engine
+                                                nlohmann_json::nlohmann_json httplib::httplib)
         set_source_files_properties(fuzz/fuzz_tool_stream.cpp
             PROPERTIES COMPILE_DEFINITIONS "IMP_FUZZ_NO_ENTRY")
         target_compile_definitions(test-core PRIVATE IMP_FUZZ_HAVE_TOOL_STREAM)
@@ -1287,7 +1291,6 @@ if(IMP_BUILD_TESTS)
         tests/test_tokenizer_qwen38.cpp
         # /v1/decide + /v1/score boundary guard on a real tokenizer.json (no GPU, model file).
         tests/test_candidate_tokens.cpp
-        tools/imp-server/candidate_tokens.cpp
         tests/test_fim_tokenizer.cpp
         tests/test_real_checkpoints.cpp
         tests/test_degeneration.cpp
@@ -1308,7 +1311,6 @@ if(IMP_BUILD_TESTS)
         tests/test_serving_signals.cpp
         tests/test_batching_engine_fault.cu
         tests/test_moe_alloc_failure.cu
-        tools/imp-server/batching_engine.cpp
         tests/test_suspend_resume.cu
         tests/test_warm_cache.cu
         tests/test_lora.cpp
@@ -1340,7 +1342,7 @@ if(IMP_BUILD_TESTS)
 
     # test_batching_engine_fault.cu drives the server BatchingEngine
     # (tools/imp-server/batching_engine.cpp, no httplib or json dependency).
-    target_include_directories(test-e2e PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-server)
+    target_link_libraries(test-e2e PRIVATE imp_server_engine)
     # Qwen4Exp MTP draft step vs the numpy reference of the vLLM math (tests/fixtures). Reads
     # safetensors headers with nlohmann, which only the server build fetches.
     if(TARGET nlohmann_json::nlohmann_json)
