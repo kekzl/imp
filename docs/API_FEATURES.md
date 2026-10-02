@@ -197,7 +197,7 @@ Structured output disables thinking on its own: `json_mode`, `json_schema`, `too
 - Picture wider or taller than 16384 px: `400`.
 - Formats: JPEG and PNG. GIF, BMP, WebP and every other format: `400` (#2401).
 
-`http(s)` URLs require `--allow-remote-images` (#1610); destination refused if loopback, link-local, RFC1918, CGNAT or ULA.
+`http(s)` URLs require `--allow-remote-images` (#1610); destination refused if loopback, link-local, RFC1918, CGNAT or ULA. `https` verifies the server certificate against the system CA bundle (a self-signed host is refused, #2429).
 
 - No redirects.
 - Body cap 32 MiB, 10 s read timeout.

@@ -704,6 +704,9 @@ if(IMP_BUILD_SERVER)
         GIT_TAG ${IMP_DEP_HTTPLIB_SHA}  # commit pin, cmake/imp-deps.cmake
         GIT_SHALLOW TRUE
     )
+    # https image_url (#2429): httplib's default is OpenSSL-if-found; a missing libssl-dev must fail
+    # the build, not compile the SSLClient out.
+    set(HTTPLIB_REQUIRE_OPENSSL ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(httplib)
 
     FetchContent_Declare(nlohmann_json

@@ -135,4 +135,11 @@ TEST(SsrfFetch, NonHttpSchemesAreNotFetched) {
     EXPECT_NE(r.detail.find("scheme"), std::string::npos) << r.detail;
 }
 
+// #2429: https image_url runs on httplib's OpenSSL client; without it every https URL is refused.
+TEST(SsrfFetch, HttpsClientIsCompiledIn) {
+#ifndef CPPHTTPLIB_OPENSSL_SUPPORT
+    FAIL() << "httplib built without CPPHTTPLIB_OPENSSL_SUPPORT: https image_url is refused";
+#endif
+}
+
 }  // namespace
