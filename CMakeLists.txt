@@ -626,6 +626,8 @@ if(IMP_BUILD_TOOLS)
         tools/imp-quantize/tensor_policy.cpp
         tools/imp-quantize/expert_destack.cpp
         tools/imp-quantize/checkpoint_out.cpp
+        tools/imp-quantize/fp8_head.cpp
+        tools/imp-quantize/options.cpp
         tools/imp-quantize/fp8_source.cpp
         tools/imp-quantize/awq_plan.cpp
         tools/imp-quantize/awq_sites.cpp
@@ -972,6 +974,7 @@ if(IMP_BUILD_TESTS)
         # reciprocal written the wrong way round, a fused group that does not
         # share a scale, a config.json with two quantization_config keys.
         tools/imp-quantize/checkpoint_out.cpp
+        tools/imp-quantize/fp8_head.cpp
         tests/test_quantize_checkpoint_out.cpp
         # Table of which consumers share an activation, which producer absorbs 1/s, and whether a
         # norm carries a unit offset: a pure function, so the CPU lane holds it. Wrong here means a

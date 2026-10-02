@@ -22,6 +22,10 @@ inline LmHeadMode lm_head_mode(const std::string& v) {
     return LmHeadMode::Auto;
 }
 
+// Per-row FP8 head on disk (imp-quantize, #2479): lm_head.weight F8_E4M3 [V, D] plus this F32 [V]
+// tensor, value = code * scale. Same layout quantize_fp8_rows_async builds at load.
+inline constexpr const char* kLmHeadRowScaleTensor = "lm_head.weight_row_scale";
+
 // LM-head source width. E4M3 (3 mantissa bits) is a loss against an 8-bit quantized head:
 // Qwen3-8B-Q8_0 first-token top-1 flips (#2224).
 enum class LmHeadSource { Float16Plus, Quant8, QuantNarrow };
@@ -52,6 +56,14 @@ inline LmHeadSource lm_head_source(QType q) {
 // auto serves an 8-bit quantized head at checkpoint precision: no FP8, no NVFP4 (#2224).
 [[nodiscard]] inline bool lm_head_auto_keeps_source(LmHeadMode m, QType src) {
     return m == LmHeadMode::Auto && lm_head_source(src) == LmHeadSource::Quant8;
+}
+
+// Budget view: a per-row FP8 checkpoint head (#2479) is served as is in every mode, nothing built.
+[[nodiscard]] inline bool lm_head_builds_fp8(LmHeadMode m, QType src, bool checkpoint_fp8_rows) {
+    return !checkpoint_fp8_rows && lm_head_mode_fp8(m, src);
+}
+[[nodiscard]] inline bool lm_head_serves_source(LmHeadMode m, QType src, bool checkpoint_fp8_rows) {
+    return checkpoint_fp8_rows || lm_head_auto_keeps_source(m, src);
 }
 
 }  // namespace imp

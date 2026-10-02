@@ -197,9 +197,10 @@ float export_tensor_scale(float absmax) {
 
 const char* portability_warning(OutputFormat fmt, bool quantize_lm_head) {
     if (fmt == OutputFormat::CompressedTensors && quantize_lm_head)
-        return "--lm-head with --format vllm: vLLM cannot load the result. Its ParallelLMHead\n"
+        return "--lm-head nvfp4|fp8 with --format vllm: vLLM cannot load the result. Its ParallelLMHead\n"
                "takes no scales, so loading stops at 'no module or parameter named\n"
-               "lm_head.weight_global_scale'. imp reads it fine and costs nothing EXTRA there,\n"
+               "lm_head.weight_global_scale' (or weight_row_scale). imp reads it fine and costs nothing "
+               "EXTRA there,\n"
                "because its default already quantizes a native head at load — but that also\n"
                "makes the trade irreversible (gemm.nvfp4_lm_head=off can no longer buy the\n"
                "0.99%% perplexity back). Use it with --format modelopt when the model would\n"
@@ -408,9 +409,45 @@ std::expected<void, std::string> copy_aux_files(const std::string& in_dir, const
     return {};
 }
 
+bool parse_kv_hint(const std::string& s, KvHint& out) {
+    if (s == "auto")
+        out = KvHint::Auto;
+    else if (s == "fp8")
+        out = KvHint::Fp8;
+    else if (s == "none")
+        out = KvHint::None;
+    else
+        return false;
+    return true;
+}
+
+bool kv_fp8_hint_allowlisted(const std::string& model_type) {
+    return model_type == "qwen3" || model_type == "qwen3_moe";
+}
+
+bool kv_fp8_hint_on(KvHint h, const std::string& model_type) {
+    return h == KvHint::Fp8 || (h == KvHint::Auto && kv_fp8_hint_allowlisted(model_type));
+}
+
+const char* kv_hint_name(KvHint h) {
+    switch (h) {
+        case KvHint::Auto:
+            return "auto";
+        case KvHint::Fp8:
+            return "fp8";
+        case KvHint::None:
+            return "none";
+    }
+    return "?";
+}
+
+bool kv_fp8_for_export(KvHint h, OutputFormat fmt, const std::string& model_type) {
+    return fmt == OutputFormat::Modelopt && kv_fp8_hint_on(h, model_type);
+}
+
 std::expected<void, std::string> write_modelopt_quant_config(const std::string& out_dir,
                                                              const std::vector<std::string>& excluded,
-                                                             bool calibrated) {
+                                                             bool calibrated, bool kv_fp8) {
     std::ofstream f(fs::path(out_dir) / "hf_quant_config.json");
     if (!f)
         return std::unexpected("cannot write hf_quant_config.json");
@@ -419,7 +456,7 @@ std::expected<void, std::string> write_modelopt_quant_config(const std::string& 
       << (calibrated ? "awq" : "none") << "\" },\n"
       << "  \"quantization\": {\n"
       << "    \"quant_algo\": \"NVFP4\",\n"
-      << "    \"kv_cache_quant_algo\": null,\n"
+      << "    \"kv_cache_quant_algo\": " << (kv_fp8 ? "\"FP8\"" : "null") << ",\n"
       << "    \"group_size\": 16,\n"
       << "    \"exclude_modules\": [";
     for (size_t i = 0; i < excluded.size(); i++)

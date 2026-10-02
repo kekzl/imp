@@ -52,6 +52,14 @@ struct Fp8CacheBuffers {
     return lm.data && lm.on_device && lm.ndim == 2 && src_ok && f16_compute && (lm.shape[1] % 256) == 0;
 }
 
+// The checkpoint ships the per-row FP8 head (#2479): E4M3 codes + F32 row scales on device. Shape,
+// F16 norm and d_model % 256 are refused at upload (upload_lm_head_row_scales).
+[[nodiscard]] inline bool lm_head_checkpoint_fp8_rows(const Model& m) {
+    const Tensor& lm = m.output_proj();
+    const Tensor& sc = m.output_proj_row_scales();
+    return lm.data && lm.on_device && lm.qtype == QType::FP8_E4M3 && sc.data && sc.on_device;
+}
+
 // This load builds the FP8 head: fp8, or auto with a 16-bit source (#2224), and the head is eligible.
 [[nodiscard]] inline bool fp8_lm_head_wanted(const DispatchPolicy& rc, const Model& m) {
     return lm_head_mode_fp8(lm_head_mode(rc.gemm.nvfp4_lm_head), m.output_proj().qtype) &&
