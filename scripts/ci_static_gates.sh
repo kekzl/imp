@@ -68,12 +68,11 @@ if want filesize; then
     run "FATAL logs that do not stop"           python3 tools/check_log_fatal.py --list
 fi
 
-# Own group so its failure carries its own CI check name: both 2026-08-25
-# "File size" reds were THIS pin (a new GPU test bumps the unlaned count),
-# and the job name sent two readers to the wrong mechanism.
+# Own group so its failure carries its own CI check name (2026-08-25: two reds misread as file size).
 if want lanes; then
     echo "== Test lanes =="
-    run "tests that run in no CI lane"          python3 tools/check_test_lanes.py --report
+    run "every test in a ctest lane, none demoted" python3 tools/check_test_lanes.py --report
+    run "that gate still catches its cases"     python3 tools/check_test_lanes.py --selftest
 fi
 
 # The container env -> argv translation. Belongs here on this file's own terms:

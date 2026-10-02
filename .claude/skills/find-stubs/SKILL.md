@@ -7,7 +7,7 @@ description: Use when asking whether something in imp is actually finished - hun
 
 Cheap and loud first, expensive and precise last: run 1 -> 5 -> 6; 3 and 4 are one-off sweeps. Every rung carries its baseline on imp (2026-09-02, `c3d9689e`; earlier 2026-08-19, `ad820790`); without one you read normal as a finding. Scope `src include tools`, `--glob '!build*'`.
 
-CI gates already covering rungs (`scripts/ci_static_gates.sh`, blocking in `Build`, hooks): `tools/check_dead_inline_accessors.py` (rung 3/4 for header inlines), `tools/check_test_lanes.py --report` (tests in NO CI lane, pinned; stronger than rung 6), `tools/check_launch_guards.py`, `tools/check_log_fatal.py` (FATAL logs that do not stop). Run them before hand-sweeping their territory.
+CI gates already covering rungs (`scripts/ci_static_gates.sh`, blocking in `Build`, hooks): `tools/check_dead_inline_accessors.py` (rung 3/4 for header inlines), `tools/check_test_lanes.py --report` (tests in no ctest entry fail; stronger than rung 6), `tools/check_launch_guards.py`, `tools/check_log_fatal.py` (FATAL logs that do not stop). Run them before hand-sweeping their territory.
 
 ## 1. Textual markers (5 minutes)
 
@@ -81,7 +81,7 @@ done
 ```bash
 rg -n 'DISABLED_' tests                                                            # 9, read all
 awk -f .claude/skills/find-stubs/tests_without_assertions.awk $(find tests -name '*.cpp' -o -name '*.cu')   # 16, all explained
-python3 tools/check_test_lanes.py --report                                         # 1054 in no CI lane (pinned), 1624 in ctest -L unit
+python3 tools/check_test_lanes.py --report                                         # per-module unit / no-CI macro counts, delta vs base
 rg -c 'GTEST_SKIP' tests | awk -F: '{s+=$2} END {print s}'                          # 208, mostly legitimate (no GPU, no model)
 ```
 

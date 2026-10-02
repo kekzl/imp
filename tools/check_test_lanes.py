@@ -1,450 +1,293 @@
 #!/usr/bin/env python3
-"""Pin the number of GTest cases that no CI lane runs, and fail when it grows past the pin.
+"""Every GTest macro runs in a declared ctest lane, and no CPU-lane test leaves the CPU lane.
 
 WHY THIS EXISTS
 ---------------
-`docs/DESIGN_DECISIONS.md` "No GPU runner in CI" is a decision with a stated
-reason, and this file does not argue with it. What was missing is that the
-decision's cost was never a number anywhere in the repo. The required check is
-the job named `Build`, whose test step is `ctest -L unit`; five whole binaries
-(test-compute, test-attention, test-quant, test-kv, test-moe-gdn) and the
-complement of the e2e unit filter carry the label `gpu` and execute only when a
-human runs `make verify-fast` or `make test-gpu` on a real card.
+`docs/DESIGN_DECISIONS.md` "No GPU runner in CI": the required check runs `ctest -L unit`;
+tests labelled `gpu` run only when a human runs `make verify-fast` / `make test-gpu`.
+This gate keeps that split explicit and fails on the two ways a test silently stops running in CI:
 
-So this asserts the size of that hole. Growing it stays allowed. Growing it
-without anyone noticing does not.
+  1. a test runs in NO ctest entry: its source is in no test module, its module has no add_test
+     (and is not in NO_CTEST below), or a filtered module's filter complement is not registered;
+  2. a test that ran in `ctest -L unit` at the base commit still exists but no longer does
+     (moved into a GPU module, dropped from `_unit_e2e_filter`). Deleting a test is not this.
+
+Lanes are derived from CMakeLists.txt (`add_test` + `set_tests_properties(... LABELS ...)`), so a
+new GPU test added to a `gpu`-labelled module needs no edit here. The unlaned count (tests whose
+only execution is a human on a card) is printed with its delta against the base, not pinned:
+the pin it replaced was hand-bumped by 16 of 35 commits on main since 2026-10-01
+and caught neither failure above.
 
 WHY IT READS SOURCES AND NOT A BUILD DIRECTORY
 ----------------------------------------------
-The obvious implementation counts `--gtest_list_tests` on the built binaries.
-That was the first implementation and it was wrong, for a reason worth writing
-down: a gate that counts by reading `build-dev/` inherits that directory's
-provenance, and a build directory is exactly the artefact whose provenance
-nobody checks. Measured 2026-08-21: an uncommitted file belonging to another
-session, registered in `CMakeLists.txt` but never committed, had been compiled
-into `test-quant`, and the count read 998 where the clean tree gives 995. Pinning
-998 would have baked a stranger's local diagnostic into a gate on `main`, where
-it would then fail on every clean checkout with a message pointing at the
-contributor's tests rather than at the bad pin.
+A build directory inherits whatever was compiled into it: on 2026-08-21 an uncommitted test
+registered only locally moved `--gtest_list_tests` from 995 to 998. Sources are what review sees.
 
-Reading sources removes the failure mode rather than mitigating it. A stray file
-that was never registered cannot move the number; a stray file that WAS
-registered shows up as a `CMakeLists.txt` diff in review, which is where it
-belongs.
-
-WHAT IT COUNTS, EXACTLY
------------------------
-**`TEST` / `TEST_F` / `TEST_P` macros in the test sources of each module**, which
-is not the same quantity as `--gtest_list_tests`. A `TEST_P` is one macro and
-runs once per instantiated value row, so the listed-test figure is larger: 995
-listed against 829 macros for the unlaned set on 2026-08-21. Both are honest
-readings of "tests no CI lane runs". This file pins the macro count because it is
-the one derivable from sources, and it says so in its own failure message so the
-two can never be read against each other by accident. The listed-test figure is
-recorded beside it in `docs/audit/DEBT_LEDGER_2026_08_21.md`.
+WHAT IT COUNTS
+--------------
+`TEST` / `TEST_F` / `TEST_P` macros, not `--gtest_list_tests` rows (a TEST_P runs once per value).
 
 Usage:
-    python3 tools/check_test_lanes.py           # gate
-    python3 tools/check_test_lanes.py --report  # the full per-module breakdown
+    python3 tools/check_test_lanes.py             # gate (base: IMP_GATE_BASE, else merge-base origin/main)
+    python3 tools/check_test_lanes.py --report    # per-module breakdown
+    python3 tools/check_test_lanes.py --selftest  # the gate still fails on both defect classes
 """
 import argparse
+import os
 import pathlib
 import re
+import subprocess
 import sys
+import tarfile
+import tempfile
+import io
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-CMAKE = ROOT / "CMakeLists.txt"
 
-# Binaries whose every test carries the ctest label `gpu` (CMakeLists.txt
-# add_test/set_tests_properties). test-e2e is split by a filter and handled
-# separately below.
-GPU_ONLY = ("test-compute", "test-attention", "test-quant", "test-kv", "test-moe-gdn")
-UNIT_ONLY = ("test-core", "test-text")
+# Test modules with no ctest entry on purpose: module -> reason. Anything else without one fails.
+NO_CTEST = {
+    "test-hf-network": "opt-in real huggingface.co fetch (IMP_TEST_NETWORK=1); CI has no network",
+}
 
 TEST_RE = re.compile(r"^\s*(TEST|TEST_F|TEST_P)\(\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*\)", re.M)
+SRC_RE = re.compile(r"tests/([A-Za-z0-9_/]+\.(?:cpp|cu))")
+
+
+def _call_body(text, start):
+    """Text of a CMake call from `start` (just past its open paren) to its matching close paren."""
+    depth, i = 1, start
+    while i < len(text) and depth:
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+        i += 1
+    return text[start:i - 1]
 
 
 def module_sources(text):
-    """-> {module: [tests/<file>, ...]}, from both registration forms.
-
-    `imp_add_test_module(<name> ... SOURCES ...)` is the common one, and
-    `target_sources(<name> PRIVATE ...)` is the one that is easy to miss: it adds
-    13 files to test-core, 271 macros' worth. A parse that only handles the first
-    form undercounts test-core and silently inflates the unlaned share.
-    """
+    """-> {module: [tests-relative source, ...]} from imp_add_test_module and target_sources."""
     mods = {}
-    for m in re.finditer(r"imp_add_test_module\(\s*(test-[a-z0-9-]+)", text):
-        name = m.group(1)
-        depth, i = 1, m.end()
-        while i < len(text) and depth:
-            if text[i] == "(":
-                depth += 1
-            elif text[i] == ")":
-                depth -= 1
-            i += 1
-        mods.setdefault(name, []).extend(re.findall(r"tests/([A-Za-z0-9_]+\.(?:cpp|cu))", text[m.end():i]))
-    for m in re.finditer(r"target_sources\(\s*(test-[a-z0-9-]+)", text):
-        name = m.group(1)
-        depth, i = 1, m.end()
-        while i < len(text) and depth:
-            if text[i] == "(":
-                depth += 1
-            elif text[i] == ")":
-                depth -= 1
-            i += 1
-        mods.setdefault(name, []).extend(re.findall(r"tests/([A-Za-z0-9_]+\.(?:cpp|cu))", text[m.end():i]))
+    for kw in ("imp_add_test_module", "target_sources"):
+        for m in re.finditer(kw + r"\(\s*(test-[a-z0-9-]+)", text):
+            mods.setdefault(m.group(1), []).extend(SRC_RE.findall(_call_body(text, m.end())))
     return {k: sorted(set(v)) for k, v in mods.items()}
 
 
-def unit_filter(text):
-    m = re.search(r'set\(_unit_e2e_filter\s+"([^"]+)"\)', text)
-    if not m:
-        print("ERROR: could not find _unit_e2e_filter in CMakeLists.txt", file=sys.stderr)
-        sys.exit(2)
-    return m.group(1).split(":")
+def cmake_vars(text):
+    return {m.group(1): m.group(2) for m in re.finditer(r'set\(\s*(\w+)\s+"([^"]*)"\s*\)', text)}
 
 
-def matches(patterns, fixture, name):
-    full = f"{fixture}.{name}"
-    for p in patterns:
-        if p.endswith(".*"):
-            if fixture == p[:-2]:
-                return True
-        elif p == full:
-            return True
-    return False
+def ctest_entries(text):
+    """-> [(module, labels, filter)] for each add_test whose COMMAND is a test module.
+
+    filter: None (whole binary), ("+", patterns) or ("-", patterns) from --gtest_filter.
+    """
+    labels = {}
+    for m in re.finditer(r"set_tests_properties\(", text):
+        body = _call_body(text, m.end())
+        lm = re.search(r'PROPERTIES\s+LABELS\s+"([^"]+)"', body)
+        if lm:
+            for name in body[:body.index("PROPERTIES")].split():
+                labels.setdefault(name, set()).update(lm.group(1).split(";"))
+    var = cmake_vars(text)
+    out = []
+    for m in re.finditer(r"add_test\(\s*NAME\s+(\S+)\s+COMMAND\s+(test-[a-z0-9-]+)\b", text):
+        body = _call_body(text, m.start() + len("add_test("))
+        filt = None
+        fm = re.search(r'--gtest_filter=(-?)([^"\s]+)', body)
+        if fm:
+            pats = re.sub(r"\$\{(\w+)\}", lambda v: var.get(v.group(1), v.group(0)), fm.group(2))
+            filt = ("-" if fm.group(1) else "+", pats.split(":"))
+        out.append((m.group(2), labels.get(m.group(1), set()), filt))
+    return out
+
+
+def glob_match(pattern, full):
+    rx = "^" + re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".") + "$"
+    return re.match(rx, full) is not None
+
+
+def runs(filt, full):
+    if filt is None:
+        return True
+    sign, pats = filt
+    hit = any(glob_match(p, full) for p in pats)
+    return hit if sign == "+" else not hit
 
 
 def macros(path):
     return TEST_RE.findall(path.read_text(errors="ignore"))
 
 
+def classify(root):
+    """-> (tests, errors, mods). tests: [(module, 'Fixture.Name', lane)], lane unit|gpu|none."""
+    text = (root / "CMakeLists.txt").read_text()
+    mods = module_sources(text)
+    entries = ctest_entries(text)
+    errors, tests = [], []
+
+    registered = {f for files in mods.values() for f in files}
+    included = set()
+    for f in registered:
+        p = root / "tests" / f
+        if p.exists():
+            included.update(re.findall(r'#include\s+"([^"]+\.(?:cpp|cu))"', p.read_text(errors="ignore")))
+    for p in sorted((root / "tests").rglob("*")):
+        if p.suffix not in (".cpp", ".cu") or not p.is_file():
+            continue
+        rel = p.relative_to(root / "tests").as_posix()
+        n = len(macros(p))
+        if n and rel not in registered and rel not in included and p.name not in included:
+            errors.append(f"tests/{rel}: {n} TEST macro(s) in no test module (CMakeLists.txt)")
+
+    for mod, files in sorted(mods.items()):
+        mine = [(lbl, flt) for m, lbl, flt in entries if m == mod]
+        if not mine and mod not in NO_CTEST:
+            errors.append(f"{mod}: test module with no add_test; label it unit or gpu in CMakeLists.txt "
+                          f"or list it in NO_CTEST in tools/check_test_lanes.py with a reason")
+        for f in files:
+            p = root / "tests" / f
+            if not p.exists():
+                continue
+            for _, fixture, name in macros(p):
+                full = f"{fixture}.{name}"
+                lanes = [lbl for lbl, flt in mine if runs(flt, full)]
+                if any("unit" in lbl for lbl in lanes):
+                    lane = "unit"
+                elif lanes:
+                    lane = "gpu"
+                else:
+                    lane = "none"
+                    if mine:
+                        errors.append(f"{mod}: {full} ({f}) matches no add_test filter of its module")
+                tests.append((mod, full, lane))
+    return tests, errors, mods
+
+
+def base_tree(base):
+    """Extract CMakeLists.txt + tests/ at `base` into a temp dir; None when git cannot."""
+    try:
+        blob = subprocess.run(["git", "-C", str(ROOT), "archive", base, "CMakeLists.txt", "tests"],
+                              check=True, capture_output=True).stdout
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(f"test-lanes: base {base} unreadable ({e})", file=sys.stderr)
+        return None
+    d = tempfile.TemporaryDirectory()
+    with tarfile.open(fileobj=io.BytesIO(blob)) as t:
+        t.extractall(d.name, filter="data")
+    return d
+
+
+def resolve_base():
+    base = os.environ.get("IMP_GATE_BASE", "")
+    if base and set(base) != {"0"}:
+        return base, True
+    try:
+        return subprocess.run(["git", "-C", str(ROOT), "merge-base", "HEAD", "origin/main"], check=True,
+                              capture_output=True, text=True).stdout.strip(), False
+    except (OSError, subprocess.CalledProcessError):
+        return None, False
+
+
+def demoted(base_tests, head_tests):
+    """Tests in the unit lane at base that still exist at HEAD outside the unit lane."""
+    base_unit = {t for _, t, lane in base_tests if lane == "unit"}
+    head_unit = {t for _, t, lane in head_tests if lane == "unit"}
+    head_all = {t for _, t, _ in head_tests}
+    return sorted((base_unit & head_all) - head_unit)
+
+
+def gate(root, base_root, report):
+    tests, errors, mods = classify(root)
+    unit = sum(1 for t in tests if t[2] == "unit")
+    gpu = sum(1 for t in tests if t[2] != "unit")
+    if report:
+        print(f"{'module':<16} {'unit':>6} {'no-CI':>6}")
+        for mod in mods:
+            u = sum(1 for m, _, lane in tests if m == mod and lane == "unit")
+            g = sum(1 for m, _, lane in tests if m == mod and lane != "unit")
+            print(f"{mod:<16} {u:>6} {g:>6}" + (f"  (NO_CTEST: {NO_CTEST[mod]})" if mod in NO_CTEST else ""))
+    delta = ""
+    if base_root is not None:
+        btests, _, _ = classify(base_root)
+        bgpu = sum(1 for t in btests if t[2] != "unit")
+        delta = f" (base {bgpu}, {gpu - bgpu:+d})"
+        for t in demoted(btests, tests):
+            errors.append(f"{t}: ran in `ctest -L unit` at the base, runs only outside CI now")
+    print(f"test-lanes: {unit} GTest macro(s) in `ctest -L unit`, {gpu} in no CI lane{delta}")
+    for e in errors:
+        print(f"FAIL: {e}")
+    return 1 if errors else 0
+
+
+def selftest():
+    cmake = """
+imp_add_test_module(test-core SOURCES tests/a.cpp)
+imp_add_test_module(test-gpu SOURCES tests/g.cu)
+imp_add_test_module(test-e2e SOURCES tests/e.cpp)
+set(_f "Keep.*")
+add_test(NAME unit_core COMMAND test-core)
+add_test(NAME unit_e2e COMMAND test-e2e "--gtest_filter=${_f}")
+add_test(NAME gpu_gpu COMMAND test-gpu)
+add_test(NAME gpu_e2e COMMAND test-e2e "--gtest_filter=-${_f}")
+set_tests_properties(unit_core unit_e2e PROPERTIES LABELS "unit")
+set_tests_properties(gpu_gpu gpu_e2e PROPERTIES LABELS "gpu")
+"""
+    files = {"a.cpp": "TEST(A, x) {}\n", "g.cu": "TEST(G, y) {}\n", "e.cpp": "TEST(Keep, z) {}\nTEST(Gpu, w) {}\n"}
+
+    def tree(cm, fs):
+        d = tempfile.TemporaryDirectory()
+        r = pathlib.Path(d.name)
+        (r / "tests").mkdir()
+        (r / "CMakeLists.txt").write_text(cm)
+        for k, v in fs.items():
+            (r / "tests" / k).write_text(v)
+        return d
+
+    cases = [
+        ("clean tree passes", cmake, files, 0),
+        ("new GPU test in a gpu module passes", cmake, {**files, "g.cu": files["g.cu"] + "TEST(G, n) {}\n"}, 0),
+        ("orphan test source fails", cmake, {**files, "o.cpp": "TEST(O, q) {}\n"}, 1),
+        ("module without add_test fails",
+         cmake + "imp_add_test_module(test-new SOURCES tests/n.cpp)\n", {**files, "n.cpp": "TEST(N, q) {}\n"}, 1),
+        ("CPU test moved to a gpu module fails", cmake, {**files, "a.cpp": "", "g.cu": files["g.cu"] + "TEST(A, x) {}\n"}, 1),
+        ("CPU fixture dropped from the e2e filter fails", cmake.replace('"Keep.*"', '"None.*"'), files, 1),
+    ]
+    bad = 0
+    with tree(cmake, files) as base:
+        for label, cm, fs, want in cases:
+            with tree(cm, fs) as head:
+                with open(os.devnull, "w") as null:
+                    old, sys.stdout = sys.stdout, null
+                    try:
+                        got = gate(pathlib.Path(head), pathlib.Path(base), False)
+                    finally:
+                        sys.stdout = old
+            ok = got == want
+            bad += not ok
+            print(f"  {'ok' if ok else 'FAIL'}  {label}: expected {want}, got {got}")
+    return 1 if bad else 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--report", action="store_true")
-    ap.add_argument("--pin", type=int, default=None,
-                    help="expected unlaned macro count (default: read PINNED below)")
+    ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
-
-    # 976 -> 979 (#1546): three GPU tests for the deterministic MoE combine
-    # and permute, a path that had none. They need a card because they run
-    # the kernels, so the unlaned count is the honest place for them.
-    # 979 -> 982 (#1548): three more, running the expert-imbalance kernel that
-    # ships against the host reference beside it. The reference's own four
-    # tests went into the CPU lane, which is why this only moved by three.
-    # 982 -> 983 (#1747): one GPU test pinning that the pre-floor KV figure
-    # survives the min_kv_tokens raise. VramBudget* is SKIP_IF_NO_CUDA by
-    # construction (AUDIT B64), so it cannot be anywhere else.
-    # 997 -> 999 (#this): two GPU tests for gemm_nvfp4_smallm (host-reference
-    # walk + bandwidth regression bar) — kernel tests, card required.
-    # 1001 -> 1007 (#1766): six GPU tests for the native mxf4nvf4 small-M
-    # GEMM v2 (host-reference correctness incl. accumulate + multi-stripe,
-    # shape-precondition rejects, bandwidth floor, tuning sweep) - GPU-only
-    # by nature, run via make test-gpu / verify-fast.
-    # 1007 -> 1008 (#1769): LayerNormTest.RMSNormRowBlockDecodeShapes, the
-    # row-block batched-decode RMSNorm against the CPU reference on three
-    # decode shapes - needs a GPU.
-    # 1020 -> 1021 (#1818): SparseMinMaxTest.Nvfp4NibblesAndGroupScales, the
-    # NVFP4 arm of the sparse key min/max metadata kernel against a host
-    # quantize/dequantize reference - runs a CUDA kernel, GPU-only.
-    # 1021 -> 1023: MtpTopWTest.{MatchesReferenceAndHostFp16,Fp32}, the
-    # two-pass serving top-W kernel (mtp_tree_width) against the probe's
-    # single-CTA kernel AND a host partial_sort - runs CUDA kernels, GPU-only.
-    # 1023 -> 1024: GdnBatchedScanTest.GroupedChunkCommitsAtRealRowAndSnapshotsGroupZero,
-    # the grouped verify chunk (W candidates as W scan sequences, per-group
-    # commit row, row-0 snapshot from group 0) against the single-sequence
-    # launcher - runs CUDA kernels, GPU-only.
-    # 1024 -> 1025: GdnBatchedScanTest.GroupedConvCommitsPerSlotAndSnapshotsGroupZero,
-    # the slot-table form of the fused prefill conv (same chunk geometry)
-    # against the single-sequence launcher - GPU-only.
-    # 1025 -> 1043: FmhaFA2Hd256Bkv32Test.* (14 tile-boundary cases of the
-    # HD=256 FA2 instance at Bkv=32) plus the two BenchVsWmma_Qwen38Shape
-    # variants, the Bkv32 Qwen3.6 bench and the Bkv32 pv-f32 bench - all
-    # launch the FA2 kernel, GPU-only.
-    # 1043 -> 1045: CutlassNvfp4StreamKTest.{MatchesDataParallel,BenchPp512Shapes},
-    # the stream-K tile scheduler of the CUTLASS NVFP4 prefill GEMM against the
-    # data-parallel tile - launches CUTLASS kernels, GPU-only.
-    # 1045 -> 1046: GroupedTileBench.Qwen36MoeShapes, tile-shape bench of the
-    # CUTLASS NVFP4 grouped GEMM on the MoE prefill geometry - launches CUTLASS
-    # kernels, GPU-only.
-    # 1046 -> 1051: FmhaFA2Dense2CtaTest.* (the Bq=128 TWOSLOT FA2 instance at
-    # two CTAs per SM: 1024-row causal/odd/sliding-window/chunked/magnitude) -
-    # launches the FA2 kernel, GPU-only.
-    # 1052 -> 1053: GDNScanTest.ChunkparMatchesFused48Heads, the chunk-parallel
-    # scan at the Qwen3.8-27B head count (192 state-pass CTAs) - launches the
-    # scan kernels, GPU-only.
-    # 1053 -> 1054: RecurrentSnapshotStoreTest.EvictedEntriesMoveToHostTierAndRestore,
-    # the pinned host tier of the recurrent snapshot store - cudaHostAlloc +
-    # async copies, GPU-only.
-    # 1054 -> 1074 (#this): the unit lane has no skips any more. 11 KVCache
-    # tests that need a pool moved to test-kv (test_kv_cache_gpu.cpp), the 8
-    # model-file tests and the growable-pool scheduler test to test-e2e outside
-    # the unit filter. Nothing changed hands: they never ran in CI before either.
-    # 1074 -> 1077 (#1865): FmhaFA2HeavyFirstTest, three byte-identity tests of
-    # the causal FA2 CTA order (natural vs heavy-first) - launch the kernel, GPU-only.
-    # 1077 -> 1078 (#1866): SSMConv1dTest.DecodeVectorisedBitExact, the vectorised
-    # conv1d decode path against a CPU fmaf reference - launches the kernel, GPU-only.
-    # 1078 -> 1080 (#1867): SamplingTest.PenaltyHistoryMatchesVocabSweep and
-    # PenaltyHistoryTiming, the history-sized penalty kernels vs the vocab sweep,
-    # GPU-only.
-    # 1080 -> 1082 (#1872): PagedFp8Multitok.MatchesReferenceAtSingleSplit and
-    # PagedFp8Decode.ServingShapeMicrobench (test_attention_paged_oracle.cu).
-    # 1082 -> 1084 (#this): PagedNvfp4Multitok.MatchesReferenceBothRoutes and
-    # PagedNvfp4TcDecode.LongContextMicrobench (test_attention_paged_oracle.cu).
-    # 1084 -> 1085 (#1877): PagedF16Decode.ServingShapeMicrobench (test_attention_paged_oracle.cu).
-    # 1085 -> 1081 (#1878): tests/test_cluster_launch.cu removed with the cluster GQA decode kernel.
-    # 1081 -> 1082 (#this): PagedF16Multitok.MatchesReferenceBothRoutes (test_attention_paged_oracle.cu).
-    # 1082 -> 1084 (#1899): VramBudgetReserve.ImmaPlanesAreChargedForQ8Weights and
-    # ImmaPlaneChargeYieldsToTheKvGuarantee - compute_vram_budget() reads total VRAM,
-    # so they live in test-e2e behind SKIP_IF_NO_CUDA (test_vram_budget_reserve.cpp).
-    # 1084 -> 1086 (AUDIT_arch_2026 dispatch #1): SamplingTest.LogitBiasRearmsAfterStaticReset
-    # and GreedyScratchRearmsAfterStaticReset - arena movement across reset_static_cuda_state(),
-    # GPU-only (test_sampling.cu).
-    # 1086 -> 1089 (AUDIT_arch_2026 dispatch #5): CudaFaultSignalTest x2 (test_cuda_fault_signal.cu,
-    # death test with a real illegal address) and DeviceFaultSignalTest (test_batching_engine_fault.cu,
-    # model-backed death test), all GPU-only.
-    # 1089 -> 1091 (AUDIT_arch_2026 dispatch #6): LoraHotSwap.AdapterShapesAreHeldAgainstTheModel and
-    # AdapterIsAPrefixCacheKeyAndAnAdmissionBarrier (test_lora.cpp, model-backed).
-    # 1091 -> 1094 (AUDIT_arch_2026 dispatch #7): ServingSignalsTest x3 (test_serving_signals.cpp,
-    # model-backed: capacity cancel, queue split, speculation counters).
-    # 1061 -> 1065 (AUDIT_arch_2026 dispatch #12): BatchInvarianceTest (model-backed) plus
-    # GgufDequantCoverage and the Q2_K / Q3_K dp4a GEMV goldens (GPU, no model).
-    # 1065 -> 1066: RecurrentSnapshotStoreTest.SaveLandsInHostTierWhileEveryDeviceSlabIsHeld
-    # (test-kv, GPU, no model).
-    # 1066 -> 1068: KVCacheManagerGrowTest.GrowsBeforeReclaimingCachedBlocks and
-    # KVCacheGrowTest.GrowthStopsAtTheAllocatorHeadroom (test-kv, GPU + VMM, no model).
-    # 1068 -> 1071 (AUDIT_arch_2026 B-6): KVCacheTest.ResidencyProbe* x3 (test-kv, GPU, no
-    # model: the device-vs-mapped-host bandwidth discriminator needs a real card).
-    # 1071 -> 1072 (AUDIT_arch_2026 F1-3, #1942): WarmCacheTest.HostileAllocIndexFallsBackToColdLoad
-    # (test-e2e, GPU + Qwen3-8B: a real cache file with one record index flipped).
-    # 1072 -> 1073 (AUDIT_arch_2026 C-3): ServingSignalsTest.GraphsComeBackWhenThePressureClearsWithoutEvictions
-    # (test-e2e, GPU + Qwen3-8B: the valve fires on a real pool and the replay after re-promotion is the proof).
-    # 1073 -> 1079 (AUDIT_arch_2026 I-4): SamplingAdvancedTest x6 (test-compute, GPU, no model): DRY,
-    # mirostat v2 and logit_bias at their kernel entry points, samplers that had no test in any lane.
-    # 1079 -> 1080 (roadmap Open 2, mixed prefill+decode step): RaggedPrefillTest.MixedDecodeRidersMatchSeparateSteps
-    # (test-e2e, GPU, synthetic dense model: riders vs separate steps, bit-identical under runtime.deterministic).
-    # 1083 -> 1084 (small-M pipeline race, roadmap ledger 2026-09-08): NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable
-    # (test-quant, GPU, no model: 200 launches per in-situ shape, single and multi kernel, bit-identical or red).
-    # 1087 -> 1088 (chained hybrid restores, MEMORY.md D16): HybridRestoreChainTest
-    # .HybridRestoreChainStateStaysClose (test-e2e, GPU + a GDN checkpoint: 30 growing
-    # turns on the recurrent prefix cache against a cold prefill of the same prompt,
-    # compared on the state slab rather than on the tokens).
-    # 1088 -> 1089 (NVFP4 loader quantization contract, Qwen3.8 harden dispatch P1):
-    # NvFP4MergedScaleSpread.SiblingsUseTheirOwnGlobalScale (test-quant, GPU, no model: two
-    # siblings with a 4x amax spread through the multi-sibling smallm v2 launch, each block
-    # against its own-scale spec reference).
-    # 1089 -> 1091 (per-request speculation + hd256 coverage): two GPU-lane tests that had
-    # no counterpart at all. MtpGreedyIdentityTest.MtpDoesNotChangeGreedyTokens (test-e2e, GPU +
-    # Qwen3.8-27B-NVFP4 with its MTP head: mtp_k=0 against mtp_k=2, parting only at a near-tie
-    # inside the SETTLED D-2 batch-shape envelope) and
-    # QkNormRopeFusedTest.MatchesNormThenStandaloneRope (test-compute, GPU, no model: the #1957
-    # fused kernel against host RMSNorm + the standalone RoPE kernel at n = 1/32/64; TEST_P counts
-    # once as a macro).
-    # 1091 -> 1093 (imp-quantize reaches qwen3_5): NvFP4ExportRoundTrip x2 (test-quant, GPU, no model):
-    # quantize like the exporter, decode by the format's own rule, bound the error; and the unit-offset
-    # norm fold through the quantizer. The fold's algebra stays in the CPU lane (AwqNormFold x6).
-    # 1093 -> 1094: PrefillFirstRowsReadThePreviousWindowNotTheCommit (test-moe-gdn, GPU, no model):
-    # rows 0..K-2 of the conv1d prefill against the CPU form over 300 launches.
-    # 1094 -> 1099: GemmF16NarrowSmallM x5 (test-compute, GPU, no model): the one-launch
-    # alpha/beta projection of batched GDN decode against a double CPU reference.
-    # 1104 -> 1105: InThinkStopMaskKeepsStopTokensOutOfTheContext (test-e2e, GPU, IMP_TEST_MODEL_GDN):
-    # logit_bias +100 on every stop id, the mask must still yield </think> plus content.
-    # 1105 -> 1108: VerifyGroupsCommitToSpareAndSnapshotInPlace, VerifyGroupsConvCommitsToSpareAndSnapshotsInPlace
-    # (test-moe-gdn, GPU, no model): the batched verify's per-group commit and snapshot slots;
-    # MultiSlotFeedMatchesPerSlotBatches (test-moe-gdn): the ragged multi-slot MTP feed vs per-slot batches.
-    # 1108 -> 1110: MeanStdMergesAcrossSpanAndDecodeSteps and
-    # OutlierPageLosesTheBudgetSlotToTheConsistentPage (test-attention, GPU, no model): the sparse page
-    # score's mean/std merge against a double CPU reference, and the ranking the corner bound gets wrong.
-    # 1110 -> 1111: FactoredSpareReproducesTheFullSpareAfterTheNextToken (test-moe-gdn, GPU, no model):
-    # the batched verify's drafted row carried as (g, k, delta) must leave the state after the FOLLOWING
-    # token bit-identical to the full spare slot.
-    # 1111 -> 1112: StashedTapAdvancesTheWindowLikeTheTwoRowCommit (test-compute, GPU, no model): the
-    # conv half of the same spare, tap stash plus window advance against the window definition.
-    # 1112 -> 1113: DeviceSaltDrawsLikeTheHostStepSeed (test-compute, GPU, no model): the graph decode's
-    # device seed salt must draw the host token of seed + salt on both sides of the k=128 split.
-    # 1113 -> 1116: transcript snapshot (hybrid finish-state restore): KVCacheManagerTest
-    # PartialBlockHoldAndClone (test-kv, GPU, no model), PrefixCacheE2ETest
-    # HybridTranscriptRestoreContinuesAtReplyEnd and HybridRestoreChainTest
-    # TranscriptRestoreStateStaysClose (test-e2e, GDN container of make test-e2e).
-    # 1116 -> 1117: HybridBatchedDecodeTest.RowsDecodeIndependentlyOfTheirOrder (test-e2e, GDN container of
-    # make test-e2e): engine-level batch invariance of the batched GDN decode.
-    # 1117 -> 1120: #2019 (row-batched sampler served one row another row's ban list):
-    # SamplerRowBansTest.StashedRowsKeepTheirOwnBanList (test-e2e, primary container), plus the two
-    # HybridBatchedDecodeTest instruments BatchedLogitDeltaVsSolo (A4 vs A16 logit delta vs solo)
-    # and ThinkCloseRepeatsBatchedVsSolo (server-shaped think-close repro), GDN container.
-    # 1120 -> 1126: GemmF16NarrowPrefill.* (test-compute): the prefill alpha/beta GEMM vs a double
-    # reference at M=33..4096, split 1 without workspace, determinism, refusals, bench vs cuBLAS.
-    # 1126 -> 1127 (roadmap open 3): one GPU test in test-e2e driving the
-    # StreamingLLM valve on a quantised (FP8) KV pool through the real
-    # BatchingEngine; needs a card and Qwen3-8B-Q8_0.
-    # 1127 -> 1128: SamplingTest.TypicalPDeterministicPathIsBitStableAndMatchesAtomicPath
-    # (test-compute): the ordered typical_p histogram under runtime.deterministic, 20 launches
-    # bit-stable and the same masked set as the atomic path.
-    # 1128 -> 1129 (#2046): GemmKernelRegistryTest.GenericDequantDeclinesWeightLargerThanScratch
-    # (test-compute): the generic dequant catch-all refuses a weight larger than the scratch.
-    # 1129 -> 1132: CutlassMxFP8Gemm.{MatchesFp32ReferenceWithinE4M3Budget,
-    # TinyWeightRowsAgainstCoherentActivationStayFinite,PartialSfAtomKTile} (test-quant): the
-    # MXFP8 GDN prefill GEMM against an FP32 reference, finite on 0.01-magnitude rows.
-    # 1132 -> 1133: MoERoutingWideTest.ExpertsAbove256AreCandidates (test-moe-gdn): a 512-expert
-    # router selects experts above index 255 (the one-expert-per-thread selection never did).
-    # 1137 -> 1138: QsaIndexer.SplitKBelowBudgetMatchesDensePaged (test-attention): the QSA
-    # selected path below the budget against dense paged WITH the split-K scratch the executor
-    # hands it, which is the configuration where passing the constant cap changed the order.
-    # 1138 -> 1139: QsaIndexer.SixteenRowGqaSplitKMatchesGqaKernel (test-attention): 16 rows x
-    # 24/2 heads engage split-K instead of the 32-CTA GQA kernel, output within 2e-3.
-    # 1121 -> 1122: SchemaConstrainTest.XmlToolCallEnumValueConstrained (needs CUDA for apply_mask).
-    # 1122 -> 1125: SSMScanTest.{RegisterScanBitIdenticalToLegacy,RegisterScanRefusesUnsupportedShape,
-    # RegisterScanMatchesDoubleReference} (test-moe-gdn): register Mamba2 scan vs the legacy kernel.
-    # 1125 -> 1126: GptOssSinkRef.Fa2Hd64SinkMatchesReference (test-attention): FA2 hd=64 with learned
-    # sinks vs the fp64 reference incl. chunk continuation (q_offset 1024) and SWA.
-    # 1126 -> 1127: DegenerationTest.PrefillGraphReplayMatchesEager (test-e2e gpu): eager, captured
-    # and replayed prefill graph give the same greedy tokens.
-    # 1127 -> 1128: MmqQ8Imma.MoeGroupedQ5K (test-quant): Q5_K MoE IMMA (BM 32 and 128) vs the ggml
-    # dequant formula.
-    # 1128 -> 1130: MmqQ8Imma.{Q6KDenseOddSuperblocksNRMSE,MoeGroupedQ6K} (test-quant): Q6_K 210-B
-    # blocks read in place vs the ggml formula (dense BM 128, MoE BM 32 and 128, odd superblock count).
-    # 1130 -> 1131: GptOssSinkRef.PagedDecodeHd64SinkMatchesReference (test-attention): F16 multitok
-    # decode at hd=64 with learned sinks vs fp64, split-K and single-split.
-    # 1131 -> 1132: GgufRef.Q5_1_GemvDp4aMoe (test-quant): Q5_1 dp4a MoE decode vs the fp64 ggml
-    # reference; red on main (interleaved nibble read, rms 0.297).
-    # 1132 -> 1134: GgufRef.{Q5_1,Q5_K}_GemvMmvq (test-quant): the two MMVQ launchers without an fp64
-    # reference; run_mmvq_gemv builds every format through format_spec.
-    # 1134 -> 1128: tests/test_mmq_q4k_hmma.cu (6, test-quant) removed with gemm.q4k_hmma_enabled (#2107).
-    # 1128 -> 1129: MmqQ8Imma.MoeGroupedGridBoundMatchesExactMaxRows (test-quant): the MoE grid sized
-    # from the bound rows/expert <= n matches the exact max; a grid from the tile hint fails.
-    # 1129 -> 1130: SchemaConstrainTest.XmlToolCallLiteralEnumValue (test-moe-gdn): a non-string enum
-    # member constrains an XML tool parameter; needs the tokenizer-backed mask (CUDA).
-    # 1130 -> 1132: NvFP4NormFold.MatchesRmsnormThenGemv{,WithWeightOffset} (test-quant): residual GEMV
-    # + folded consumer vs residual GEMV + rmsnorm + consumer, h bit-identical.
-    # 1135 -> 1136: RecurrentSnapshotStoreTest.SidecarTravelsWithTheSlabThroughBothTiers (test-kv):
-    # the PLE conv-row sidecar survives save, host-tier eviction and restore (cudaMalloc/HostAlloc).
-    # 1136 -> 1137: MoERoutingWideTest.SoftmaxTopKMatchesTheReferenceOnEveryLaunch (test-moe-gdn):
-    # the softmax top-k race needs the real kernel under launch contention (CUDA).
-    # 1137 -> 1139: FP8GemmTest.DequantizeRowsRoundTripsTheSidecar (test-compute) and
-    # CutlassMxFP8Gemm.DequantizeMatchesTheHostDecode (test-quant): rebuild kernels for freed GDN weights.
-    # 1139 -> 1142: ExpertCacheReinitTest x3 (test-moe-gdn): reinit_or_disable against a real
-    # VRAMAllocator and a live pool (cudaMalloc); the CPU-only case runs in test-core.
-    # 1142 -> 1143: FP8GemmTest.RowscaleFp32HeadMatchesReferenceAndIsRowCountInvariant (test-compute):
-    # FP8 LM-head GEMV (gemm.nvfp4_lm_head=fp8) vs fp64, bits equal for n_rows 1/3/11 (cudaMalloc).
-    # 1143 -> 1146: PLEBatched x3 (test-moe-gdn): per-sequence PLE conv rows, batched decode vs
-    # per-sequence bitwise, neighbour isolation, chunk vs token steps (kernels need a card).
-    # 1146 -> 1147: LayerNormTest.RMSNormNvfp4RefusesNullWeight (test-compute): the fused norm +
-    # NVFP4 quantize refuses a null weight (Qwen4Exp final norm, batched LM head).
-    # 1147 -> 1151: GdnVerifySnapshotTest x4 (test-moe-gdn): chunkwise f32/fp32out snapshot at 65 and
-    # 64 rows (#2214); GDN scan kernels need a card.
-    # 1151 -> 1152: FmhaFP8Test.DISABLED_BenchHD64VsFp16 (test-attention): HD64 FP8 vs FP16 FMHA
-    # timing for #2195; needs a card.
-    # 1152 -> 1154: FimRealTokenizer x2 (test-e2e): FIM ids + PSM prompt from real tokenizer files
-    # (#2201); they need a model dir, so they sit beside the tokenizer parity tests.
-    # 1154 -> 1162: CandidateTokenGuardTest x8 (test-e2e): /v1/decide boundary guard on the real Qwen3
-    # tokenizer.json (model file via IMP_TEST_TOKENIZER_QWEN3, no GPU).
-    # 1162 -> 1164: KVHostSpillGpuTest x2 TEST_P (test-kv): host spill tier round trip and its no-tier
-    # control on a device KVCache (#2203).
-    # 1164 -> 1165: DequantGptqGpu.KernelBitEqualToHostReference (test-quant): dequant_gptq4 kernel vs
-    # host reference (#2249); needs a card.
-    # 1165 -> 1166: HybridSharedScoreTest x1 (test-e2e, GPU): #2198 shared score rows restoring one
-    # recurrent snapshot in one ragged forward (IMP_TEST_MODEL_GDN).
-    # 1166 -> 1167: DequantAwqGpu.KernelBitEqualToHostReference (test-quant): dequant_awq4 kernel vs
-    # host reference (#2205); needs a card.
-    # 1167 -> 1171: PromptLogprobsRows x3 (test-compute, GPU): fused prompt-logprobs row kernel vs CPU
-    # reference; PromptLogprobsE2ETest x1 (test-e2e, IMP_TEST_MODEL): chunk logits released (#2257).
-    # 1171 -> 1172: MtpQwen4ExpReference.TwoDraftStepsMatchVllmMath (test-e2e): Qwen4Exp draft step
-    # vs the numpy reference fixture, needs the Flash-Next checkpoint and a card.
-    # 1172 -> 1173 -> 1172: Q8_0 IMMA BM=160/192 bit-exact test (test-quant) added and removed with the
-    # tall tiles (#2267, measured slower than BM=128).
-    # 1172 -> 1174: SamplingTest.FailedRowLaunchReturnsStatus, StaleErrorDoesNotFailSampler (test-compute,
-    # GPU): sampler launch status, stale error cleared (#2310); needs a card.
-    # 1174 -> 1178: PrefillRowInvariance x4 (test-quant): router logits, MoE act quantize (default
-    # and smallM), hd=512 FMHA, same row in different batches or chunk offsets bit-equal (#2167).
-    # 1178 -> 1179: RecurrentSnapshotStoreTest.KvChainSurvivesHostEvictionAndEraseReplaces (test-kv):
-    # a snapshot keeps its KV chain through the host tier (#2174, cudaMalloc).
-    # 1179 -> 1180: KVCacheGrowTest.KeyMinmaxGrowsWithThePool (test-kv): sparse decode metadata grows
-    # with a growable pool (#2360, VMM).
-    # 1180 -> 1182: Qwen3VLPipelineTest.VideoFramePairsMatchHfReference (GPU) and
-    # Qwen3VLPipelineVideoStamps.TimestampIdsMatchHf (model tokenizer), test-e2e, run by make test-vision.
-    # 1182 -> 1183: KVCacheTest.ResidencyProbeReadsResidentOnASmallCommittedPrefix (test-kv, GPU):
-    # 500 committed NVFP4 blocks must read above the spill threshold (#2366); needs a card.
-    # 1183 -> 1185: SparseAttnE2E.MlaGeometryFullBudgetBitIdentical, MlaGeometrySmallBudgetKeepsTheNeedle
-    # (test-attention, GPU): sparse decode at MLA head_dim 192 (roadmap row 3).
-    # 1185 -> 1188: SparsePrefillTest x2 + SparsePrefillGeometry.PastTokensKeepsTheTail (test-attention,
-    # GPU module): sparse prefill selection, compacted gather + FA2 bit-identity, mutation.
-    # 1188 -> 1189: MLAAttnOutput.PaddedSymmetricSplitKMatchesGeneric (GPU): MLA decode at HD 192
-    # split-K + compaction vs the generic kernel (#2374).
-    # 1189 -> 1190: InternVLEncoder.MatchesHfFp32PerStage (test-e2e, GPU), run by make test-vision.
-    # 1190 -> 1191: InternVLEncoder.RealTowerCatMatchesHfFp32 (test-e2e, GPU + checkpoint), run by make test-vision.
-    # 1191 -> 1192: GemmCaptureProbe.ColdShapeInsideCaptureKeepsCaptureValid (test-compute, GPU) (#2396).
-    # 1192 -> 1193: CaptureAbort.KeepColdInvalidateRunsTheEagerStepFirst (test-kv, GPU) (#2396).
-    # 1193 -> 1195: GgufRef.Q5_1_MoeDecodeDispatchGateUp, GgufRef.MoeDecodeDispatchRefusesUnsupportedQType
-    # (test-quant, GPU) (#2444).
-    # 1195 -> 1197: QuantizeMoeNative.FailedPointerUploadRefusesWithoutLaunch (test-quant, GPU),
-    # MoeAllocFailureTest.SmallMPrefillSurvivesFailedAsyncAlloc (test-e2e, GPU + checkpoint) (#2446).
-    # 1197 -> 1198: MoEExecutorTest.HostExpertFp16DecodeReadsTheSlotPool (test-moe-gdn, GPU) (#2447).
-    # 1198 -> 1199: MoEMultiCtaPermute.MatchesTheSingleCtaKernelBitExact (test-moe-gdn, GPU) (#2465).
-    # 1199 -> 1203: GptOssMoeFusedBias.* (4, test-moe-gdn, GPU) (#2466).
-    # 1203 -> 1205: KVCacheGrowTest.RaiseCeiling* x2 (test-kv, GPU) (#2436).
-    PINNED = 1205
-
-    text = CMAKE.read_text()
-    mods = module_sources(text)
-    patterns = unit_filter(text)
-
-    counts, unlaned, laned = {}, 0, 0
-    for mod, files in sorted(mods.items()):
-        n = 0
-        for f in files:
-            p = ROOT / "tests" / f
-            if p.exists():
-                n += len(macros(p))
-        counts[mod] = n
-        if mod in GPU_ONLY:
-            unlaned += n
-        elif mod in UNIT_ONLY:
-            laned += n
-
-    e2e_unit = e2e_gpu = 0
-    for f in mods.get("test-e2e", []):
-        p = ROOT / "tests" / f
-        if not p.exists():
-            continue
-        for _, fixture, name in macros(p):
-            if matches(patterns, fixture, name):
-                e2e_unit += 1
-            else:
-                e2e_gpu += 1
-    unlaned += e2e_gpu
-    laned += e2e_unit
-
-    if args.report:
-        print(f"{'module':<16} {'macros':>7}  lane")
-        for mod, n in counts.items():
-            lane = "gpu only" if mod in GPU_ONLY else ("unit" if mod in UNIT_ONLY else "split")
-            print(f"{mod:<16} {n:>7}  {lane}")
-        print(f"{'  test-e2e unit':<16} {e2e_unit:>7}  unit (filter)")
-        print(f"{'  test-e2e gpu':<16} {e2e_gpu:>7}  gpu only")
-        print(f"\n{'in a CI lane':<16} {laned:>7}")
-        print(f"{'in no CI lane':<16} {unlaned:>7}")
-        print(f"{'total':<16} {laned + unlaned:>7}")
-
-    pin = args.pin if args.pin is not None else PINNED
-    print(f"test-lanes: {unlaned} GTest macro(s) run in no CI lane (pinned {pin}); "
-          f"{laned} run in `ctest -L unit`")
-    if unlaned < pin:
-        # The direction worth having: a test moved into a CI lane. A note, not
-        # a failure, so it does not become a merge conflict on the next branch.
-        print(f"\nNOTE: {pin - unlaned} fewer unlaned macro(s) than pinned; lower PINNED to "
-              f"{unlaned} when convenient.")
-        return 0
-    if unlaned > pin:
-        print(f"\nFAIL: the unlaned GTest MACRO count is {unlaned}, pinned at {pin}.")
-        print("This counts TEST/TEST_F/TEST_P macros in sources. It is NOT the")
-        print("`--gtest_list_tests` figure, which is larger because a TEST_P runs")
-        print("once per instantiated value row. Do not compare the two.")
-        print("\nNot automatically a regression: it is the number of tests whose only")
-        print("execution is a human running `make verify-fast` / `make test-gpu` on a")
-        print("real card. If you added GPU tests, re-pin PINNED in this file and say")
-        print("so in the PR.")
+    if args.selftest:
+        return selftest()
+    base, explicit = resolve_base()
+    tmp = base_tree(base) if base else None
+    if base is None:
+        print("test-lanes: skip base comparison: no IMP_GATE_BASE and no origin/main")
+    elif tmp is None and explicit:
         return 1
-    return 0
+    try:
+        return gate(ROOT, pathlib.Path(tmp.name) if tmp else None, args.report)
+    finally:
+        if tmp:
+            tmp.cleanup()
 
 
 if __name__ == "__main__":

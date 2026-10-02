@@ -5,9 +5,11 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- `make preflight` (`scripts/preflight.sh`, CPU only, `imp:lint`): every `ci_static_gates.sh` gate, clang-tidy on changed TUs, `git clang-format` on changed lines, actionlint on a `.github/` change; one table, exit 1 on any FAIL. 19-22 s with no TU changed.
 - `--max-queued-tokens <n>` (#2408, default 0 = off): imp-server answers 429 at once (`rate_limit_error`, `/v1/messages` `overloaded_error`, `Retry-After: 1`) when queued prompt tokens (admitted, not yet past prefill) plus the new prompt exceed `n`. Gauge `imp_queued_prompt_tokens` on `/metrics`.
 
 ### Changed
+- `Test lanes` gate: lanes come from CMake `add_test` labels; fails on a test in no ctest entry or a `ctest -L unit` test demoted vs the merge-base. The hand-bumped `PINNED` count (edited by 16 of 35 commits on main since 2026-10-01) is gone; the no-CI count prints with its delta.
 - imp-server reads the shared sampling fields through one parser, `parse_sampling_fields` (`sampling_fields.h`, #2461), for chat, completions, messages and responses; the `/v1/messages` and `/v1/responses` pass-through comes from the same table. Parsed values and 4xx unchanged: 353 bodies x 4 dialects, golden.
 - `imp-quantize` writes `lm_head` as the per-row FP8 head `auto` runs (`--lm-head fp8`, default for modelopt, #2479); the loader serves it with no load-time conversion. Qwen3-14B head 1483.8 -> 742.5 MiB, PPL 9.7350 both (KV FP16).
 - `imp-quantize` declares `kv_cache_quant_algo: FP8` for `qwen3` / `qwen3_moe` (`--kv-hint auto|fp8|none`, #2480), so `kv_cache.dtype=auto` runs FP8 KV there; other families stay `null`. Qwen3-14B PPL 9.7350 -> 9.7642 (+0.30 %).

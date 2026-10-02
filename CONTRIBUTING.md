@@ -45,6 +45,7 @@ make dev       # incremental container build (seconds, Ninja) - iterate here
 
 ```bash
 make dev-test      # CPU unit lane against the dev build (seconds); mirrors CI's `ctest -L unit`
+make preflight     # CPU-only pre-push gate, no GPU, no build (see below)
 make test-gpu       # Full CUDA suite (~4-5 min; test-attention alone ~241s)
 make test-unit      # CPU-only filter against the full-image build (~5s) - a DIFFERENT binary from dev-test/CI
 make verify-fast    # Build + filtered tests + perf gate + peak-VRAM gate + smoke prompt
@@ -52,6 +53,19 @@ make verify         # Full pre-merge gate (~5 min)
 ```
 
 `make install-hooks` installs two hooks: pre-commit runs `make test-gpu` when staged changes touch buildable sources; pre-push runs `verify-fast` when `src/`, `include/`, `tools/`, `tests/` or `scripts/` change, with the perf gate only when the diff touches a path that can move it (`src/{compute,exec,quant,runtime,model}/`, any `.cu`/`.cuh`, the build definition, or a baseline). A release always runs everything. Skip a single commit: `git commit --no-verify`.
+
+### `make preflight`
+
+CPU only, in the `imp:lint` image, from the main checkout or a linked worktree (`scripts/preflight.sh`). Base: `IMP_GATE_BASE`, else `git merge-base HEAD origin/main`; the diff includes uncommitted and untracked files.
+
+| Row | Same check as CI | Runs when |
+|---|---|---|
+| `static gates` / `static: <gate>` | `scripts/ci_static_gates.sh` (first step of `Build`, plus `File size`, `Test lanes`, `Docs`) | always |
+| `clang-tidy` | `clang-tidy` job: `scripts/tidy_lane.sh` on changed `src`/`tools` `.cpp` and `src` `.cu`, `cmake --preset ci` database in `build-preflight/build` | a TU changed |
+| `clang-format` | `Lint` job: `git clang-format --diff <base>` (advisory in CI, a failure here) | always |
+| `actionlint` | workflow syntax, `rhysd/actionlint:1.7.12` | `.github/` changed |
+
+Exit 1 when any row is `FAIL`; logs in `build-preflight/`. Not covered: CodeQL, the compile, `ctest -L unit` (`make dev-test`), the kernel-resources gate without a `build-dev/libimp.a`.
 
 ## Benchmark
 
@@ -112,7 +126,7 @@ Body explains *why*, not *what* - the diff already says what changed.
 
 ## Pull requests
 
-- Run `make verify-fast` (or `make verify`) before pushing. CI is the source of truth, but failing local first wastes everyone's time.
+- Run `make preflight` (CPU, minutes) and `make verify-fast` (or `make verify`, GPU) before pushing. CI is the source of truth, but failing local first wastes everyone's time.
 - Release-touching PRs: `scripts/check-release.sh` runs the same gate plus a doc-link / secret / personal-path scan.
 - Perf-sensitive changes: include before/after numbers in the PR description (model, quant, `tg256` and/or `pp512`, hardware).
 - Don't reintroduce SM 8.0 / 9.0 / 10.0 code paths - removed deliberately, the build pins `arch=compute_120a,code=sm_120a` (`IMP_SM120_FLAGS` in `CMakeLists.txt`).

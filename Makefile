@@ -688,8 +688,8 @@ chat-goldens:
 alloc-pairs-list:
 	@python3 tools/check_alloc_pairs.py --list
 
-# How many GTest macros run in no CI lane (docs/DESIGN_DECISIONS.md "No GPU
-# runner in CI"). Source-derived, no build needed, no Docker.
+# Lane census + gate: every GTest macro in a ctest lane, none demoted from `ctest -L unit`
+# (docs/DESIGN_DECISIONS.md "No GPU runner in CI"). Source-derived, no build, no Docker.
 check-test-lanes:
 	@python3 tools/check_test_lanes.py --report
 
@@ -726,3 +726,9 @@ tidy: lint-image
 	      -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json >/dev/null; \
 	  cmake -DIN=tools/imp-server/webui/index.html -DOUT=build/generated/webui_asset.h -P cmake/embed_webui.cmake && \
 	  bash scripts/tidy_lane.sh --all'
+
+# Pre-push gate, CPU only (scripts/preflight.sh): every ci_static_gates.sh group, clang-tidy on
+# changed TUs, git clang-format on changed lines, actionlint on a .github change. No GPU, no build.
+.PHONY: preflight
+preflight: lint-image
+	@PREFLIGHT_IMG=$(LINT_IMG) bash scripts/preflight.sh

@@ -7,17 +7,18 @@
 #
 # Usage: scripts/tidy_lane.sh --all          # src/tools .cpp + every src .cu TU (make tidy)
 #        scripts/tidy_lane.sh FILE...        # these files; a .cu fragment lints its includer
-# Needs build/compile_commands.json (cmake configure) and clang-tidy on PATH.
-# Env: TIDY_LOGS (default build/tidy-logs), TIDY_JOBS (default nproc).
+# Needs $TIDY_BUILD/compile_commands.json (cmake configure) and clang-tidy on PATH.
+# Env: TIDY_BUILD (default build), TIDY_LOGS (default $TIDY_BUILD/tidy-logs), TIDY_JOBS (default nproc).
 set -uo pipefail
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
 
-LOGS="${TIDY_LOGS:-build/tidy-logs}"
+B="${TIDY_BUILD:-build}"
+LOGS="${TIDY_LOGS:-$B/tidy-logs}"
 JOBS="${TIDY_JOBS:-$(nproc)}"
-[ -f build/compile_commands.json ] || { echo "tidy_lane: build/compile_commands.json missing (configure first)"; exit 2; }
+[ -f "$B/compile_commands.json" ] || { echo "tidy_lane: $B/compile_commands.json missing (configure first)"; exit 2; }
 
-python3 tools/tidy_cu_db.py build/compile_commands.json build/tidy-cu || exit 2
-cu_db_files() { grep -o '"file": "[^"]*"' build/tidy-cu/compile_commands.json | cut -d'"' -f4 | sed "s|^$PWD/||; s|^/work/||; s|^/src/||"; }
+python3 tools/tidy_cu_db.py "$B/compile_commands.json" "$B/tidy-cu" || exit 2
+cu_db_files() { grep -o '"file": "[^"]*"' "$B/tidy-cu/compile_commands.json" | cut -d'"' -f4 | sed "s|^$PWD/||; s|^/work/||; s|^/src/||"; }
 
 # The src file that textually #include's $1 (a body fragment, not a TU), if any.
 includer_of() { grep -rlF --include='*.cu' --include='*.cpp' "#include \"${1#src/}\"" src; }
@@ -56,13 +57,13 @@ dbset="$(cu_db_files)"
 for f in "${cu[@]}"; do
     # Here-string, not `printf | grep -q`: grep -q exits at the match, printf takes EPIPE and
     # pipefail fails a found file (#1499; hit 1 of 141 on a full run).
-    grep -qxF "$f" <<< "$dbset" || { echo "tidy_lane: $f is not in build/tidy-cu/compile_commands.json"; exit 2; }
+    grep -qxF "$f" <<< "$dbset" || { echo "tidy_lane: $f is not in $B/tidy-cu/compile_commands.json"; exit 2; }
 done
 
 rm -rf "$LOGS"; mkdir -p "$LOGS"
 rc_file="$LOGS/.rc"; : > "$rc_file"
 echo "tidy_lane: ${#cpp[@]} .cpp + ${#cu[@]} .cu (host side), $JOBS jobs"
-{ printf 'build %s\n' "${cpp[@]}"; printf 'build/tidy-cu %s\n' "${cu[@]}"; } | grep -v ' $' |
+{ for f in "${cpp[@]}"; do echo "$B $f"; done; for f in "${cu[@]}"; do echo "$B/tidy-cu $f"; done; } | grep -v ' $' |
     xargs -P "$JOBS" -L 1 sh -c 'clang-tidy -p "$0" --warnings-as-errors="-*" "$1" \
         > "'"$LOGS"'/$(echo "$1" | tr / _).log" 2>&1; echo "$? $1" >> "'"$rc_file"'"'
 
