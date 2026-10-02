@@ -17,7 +17,17 @@ if [ "${1:-}" = "--selftest" ]; then
     st_pass=0; st_fail=0
 
     fixture() {  # writes a clean, passing tree into $tmp
-        rm -rf "$tmp"; mkdir -p "$tmp/cmake" "$tmp/.github/workflows" "$tmp/reqs"
+        rm -rf "$tmp"; mkdir -p "$tmp/cmake" "$tmp/.github/workflows" "$tmp/reqs" "$tmp/tools/analysis"
+        printf 'FROM example.com/helper:2.0@sha256:%s\nRUN pip install foo\n' \
+            5555555555555555555555555555555555555555555555555555555555555555 > "$tmp/tools/Dockerfile.agents"
+        printf 'FROM imp:ciq\n' > "$tmp/tools/analysis/Dockerfile.cutile"
+        cat > "$tmp/docker-compose.yml" <<'EOF'
+services:
+  imp:
+    image: imp:latest
+  web:
+    image: "example.com/web:3.0@sha256:6666666666666666666666666666666666666666666666666666666666666666"
+EOF
         cat > "$tmp/cmake/imp-deps.cmake" <<'EOF'
 set(IMP_DEP_FOO_TAG v1.0.0)
 set(IMP_DEP_FOO_SHA 0123456789abcdef0123456789abcdef01234567)
@@ -67,6 +77,12 @@ EOF
     fixture; st_case "clean fixture" ""
     fixture; sed -i 's|@sha256:1111[0-9a-f]*||' "$tmp/Dockerfile"
     st_case "image on a bare tag" "is tag-pinned"
+    fixture; sed -i 's|@sha256:5555[0-9a-f]*||' "$tmp/tools/Dockerfile.agents"
+    st_case "helper Dockerfile on a bare tag" "Dockerfile.agents:1 'example.com/helper:2.0' is tag-pinned"
+    fixture; sed -i 's|@sha256:6666[0-9a-f]*||' "$tmp/docker-compose.yml"
+    st_case "compose image on a bare tag" "docker-compose.yml:5 'example.com/web:3.0' is tag-pinned"
+    fixture; sed -i 's|imp:ciq|imp:unlisted|' "$tmp/tools/analysis/Dockerfile.cutile"
+    st_case "local image not in the exempt list" "'imp:unlisted' is tag-pinned"
     fixture; sed -i 's|@sha256:1111111111111111111111111111111111111111111111111111111111111111|@sha256:9999999999999999999999999999999999999999999999999999999999999999|' "$tmp/.github/workflows/w.yml"
     st_case "one tag, two digests" "one tag, one digest"
     fixture; sed -i '/sha256sum -c -/d; s|https://example.com/x.sh \\|https://example.com/x.sh|' "$tmp/Dockerfile"
@@ -208,15 +224,17 @@ fi
 # base images, single files, Python packages. All checks are textual and offline.
 # Scope: Dockerfiles and .github/workflows/; developer-only throwaway containers are excluded.
 note ""
-note "downloads (source: Dockerfiles + .github/workflows/)"
+note "downloads (source: Dockerfiles + .github/workflows/ + docker-compose*.yml)"
 
-# Developer harnesses excluded: tools/Dockerfile.{agents,agents-sdk,claude-code,ncu} and
-# tools/analysis/* build on one operator box, reach neither CI nor the published image.
-# A new Dockerfile anywhere else is in scope by default.
+# Developer harnesses (tools/Dockerfile.{agents,agents-sdk,claude-code,ncu}, tools/analysis/*)
+# are out of scope for 4b/4c only; 4a checks the FROM lines of every Dockerfile (#2516).
 DEV_HARNESS_RE='tools/(analysis/|Dockerfile\.(agents|agents-sdk|claude-code|ncu)$)'
-mapfile -t DOCKERFILES < <(find "$ROOT" -name 'Dockerfile*' -not -path '*/build*/*' \
-                                -not -path '*/.git/*' | grep -vE "$DEV_HARNESS_RE" | sort)
+mapfile -t ALL_DOCKERFILES < <(find "$ROOT" -name 'Dockerfile*' -not -path '*/build*/*' \
+                                    -not -path '*/.git/*' | sort)
+mapfile -t DOCKERFILES < <(printf '%s\n' "${ALL_DOCKERFILES[@]}" | grep -vE "$DEV_HARNESS_RE")
 mapfile -t WORKFLOWS < <(find "$ROOT/.github/workflows" -name '*.yml' | sort)
+mapfile -t COMPOSE_FILES < <(find "$ROOT" -maxdepth 3 -name 'docker-compose*.y*ml' \
+                                  -not -path '*/build*/*' -not -path '*/.git/*' | sort)
 
 # A shell or YAML command can span lines; a download and its checksum are one
 # such command. Fold continuations into one logical line, keyed by its first.
@@ -232,13 +250,12 @@ logical_lines() {
 # (Dockerfile and the five ci.yml image: lines are one decision, not two).
 declare -A IMG_DIGEST      # "repo:tag" -> digest, first sighting
 declare -A IMG_WHERE
+# Built locally (make, tools/analysis), never pulled. Explicit: a new imp:* tag is red until listed.
+LOCAL_IMAGES=" imp:latest imp:ciq imp:builder-133 scratch "
 n_images=0
 check_image_ref() {  # file line ref
     local file="$1" line="$2" ref="$3"
-    case "$ref" in
-        imp:*) return ;;          # built locally by make/roofline, never pulled
-        scratch) return ;;
-    esac
+    case "$LOCAL_IMAGES" in *" $ref "*) return ;; esac
     n_images=$((n_images + 1))
     if [[ "$ref" != *"@sha256:"* ]]; then
         bad "$(basename "$file"):$line '$ref' is tag-pinned - add an @sha256: digest (docker buildx imagetools inspect '$ref')"
@@ -257,7 +274,7 @@ check_image_ref() {  # file line ref
     fi
 }
 
-for f in "${DOCKERFILES[@]}"; do
+for f in "${ALL_DOCKERFILES[@]}"; do
     # Stage names defined in this file are internal refs, not registry pulls.
     stages="$(sed -nE 's/^FROM[[:space:]]+.*[[:space:]]+[Aa][Ss][[:space:]]+([A-Za-z0-9_.-]+).*/\1/p' "$f" | tr '\n' ' ')"
     while IFS=: read -r line ref; do
@@ -265,10 +282,11 @@ for f in "${DOCKERFILES[@]}"; do
         check_image_ref "$f" "$line" "$ref"
     done < <(grep -nE '^FROM[[:space:]]' "$f" | sed -E 's/^([0-9]+):FROM[[:space:]]+([^[:space:]]+).*/\1:\2/')
 done
-for f in "${WORKFLOWS[@]}"; do
+for f in "${WORKFLOWS[@]}" "${COMPOSE_FILES[@]}"; do
     while IFS=: read -r line ref; do
         check_image_ref "$f" "$line" "$ref"
-    done < <(grep -nE '^[[:space:]]*image:[[:space:]]' "$f" | sed -E 's/^([0-9]+):[[:space:]]*image:[[:space:]]*([^[:space:]#]+).*/\1:\2/')
+    done < <(grep -nE '^[[:space:]]*image:[[:space:]]' "$f" | tr -d "\"'" \
+             | sed -E 's/^([0-9]+):[[:space:]]*image:[[:space:]]*([^[:space:]#]+).*/\1:\2/')
 done
 printf '  %d image refs\n' "$n_images"
 
