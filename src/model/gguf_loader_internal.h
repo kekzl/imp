@@ -121,6 +121,13 @@ void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count,
 
 [[nodiscard]] bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, GgufWireType gtype);
 
+// Non-Gemma-4 top-level rope_freqs.weight (llama3 scaling): per-pair divisors moved into
+// cfg.rope_short_factor/rope_long_factor, freq[i] = theta^(-2i/rd) / rope_freqs[i] (#2520).
+void apply_gguf_rope_freq_factors(Model& model);
+
+// add_bos default for a gpt2 GGUF without tokenizer.ggml.add_bos_token: true for llama3/llama-bpe.
+[[nodiscard]] bool gguf_default_add_bos(const std::string& pre);
+
 // The reportable family of a tensor name: its first path segment with digit runs
 // collapsed to N, so a whole dropped subtree is one log line rather than one per
 // tensor. Exposed for the CPU lane.

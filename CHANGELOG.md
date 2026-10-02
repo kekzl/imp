@@ -39,6 +39,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - cpp-httplib v0.56.0 -> v0.58.0 (#2403): v0.57.0 rejects control characters in the chunk-size line (request smuggling, yhirose/cpp-httplib#2585) and bounds the trailer declaration set (#2583).
 
 ### Fixed
+- Llama 3 GGUF (#2520): `rope_freqs.weight` (llama3 RoPE scaling) now feeds the RoPE tables; `llama-bpe` pre-tokenizes with the cl100k scanner and adds BOS, as llama.cpp. Llama-3.2-3B Q8_0: NIAH 16k/32k 0/10 -> 10/10, ppl_corpus_45k 256.12 -> 18.34; dense PPL at 16k/32k within 0.2% of HF FP32.
 - Quantized-KV scale plane (#2483) commits with the KV blocks, not at the ceiling. Qwen3.8-27B-NVFP4 first start: 643.8 -> 130.0 MiB; R5 stress (128006-token prefill + 32 x 30k) max KV blocks 11408 -> 12185, peak VRAM 28163 -> 27813 MiB, 34/34 ok, 0 OOM.
 - `server.prefix_pin_budget_pct = 0` turned `session_id` pins off but left `cache_control` / `cache_prompt` pins unbounded, since the KV cache manager read a 0 budget as unlimited (#2503). 0 now means no pins of either kind; StreamingLLM sink blocks still pin.
 - `make preflight` runs `imp:lint` as the host user: no root-owned `build-preflight/` or `__pycache__/`, `git worktree remove` works (#2501). The pre-commit hook checks the staged tree, unstaged edits no longer refuse a clean commit. Mock server stores a response before replying (#2500 LRU flake).

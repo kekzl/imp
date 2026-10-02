@@ -933,6 +933,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             }
             IMP_LOG_INFO("Gemma 4: rope_freqs → %d effective freqs, %d global layers", n_pairs, n_global);
         }
+        apply_gguf_rope_freq_factors(*model);
 
         // Warn about config/tensor mismatches
         if (cfg.n_experts_shared > 0 && n_shared_exp == 0) {
@@ -1091,9 +1092,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     if (it_add_bos != metadata.end()) {
         tokenizer->set_add_bos(val_uint(it_add_bos->second) != 0);
     } else if (tok_type == "gpt2") {
-        // GPT2/BPE tokenizers (Qwen, etc.) typically don't use BOS.
-        // Default to false when metadata is absent.
-        tokenizer->set_add_bos(false);
+        // No add_bos_token key: BOS only for the Llama 3 family, as llama.cpp does (#2520).
+        tokenizer->set_add_bos(gguf_default_add_bos(tokenizer->pre_tokenizer()));
     }
 
     // Gemma-4: always add BOS regardless of GGUF metadata.

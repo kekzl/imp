@@ -4,6 +4,8 @@
 #include "model/gguf_loader.h"
 #include "model/gguf_loader_internal.h"
 #include "model/loader_assign.h"
+#include "model/model_arch.h"
+#include "core/logging.h"
 
 #include <string>
 #include <vector>
@@ -355,6 +357,33 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
     }
 
     return false;
+}
+
+bool gguf_default_add_bos(const std::string& pre) {
+    return pre == "llama3" || pre == "llama-v3" || pre == "llama-bpe";
+}
+
+void apply_gguf_rope_freq_factors(Model& model) {
+    ModelConfig& cfg = model.config_;
+    if (model.layers_.empty())
+        return;
+    Tensor& src = model.layers_[0].rope_freqs;
+    if (cfg.arch == ModelArch::GEMMA4 || src.data == nullptr || src.qtype != QType::F32 ||
+        !cfg.rope_long_factor.empty() || !cfg.rope_short_factor.empty())
+        return;
+    const int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
+    const int pairs = ((cfg.rope_dim > 0) ? cfg.rope_dim : hd) / 2;
+    if (pairs <= 0 || src.numel() != pairs) {
+        IMP_LOG_WARN("rope_freqs.weight: %lld factors, rope pairs %d: ignored", (long long)src.numel(),
+                     pairs);
+        return;
+    }
+    const float* f = static_cast<const float*>(src.data);
+    cfg.rope_short_factor.assign(f, f + pairs);
+    cfg.rope_long_factor.assign(f, f + pairs);
+    src = Tensor();
+    IMP_LOG_INFO("rope_freqs.weight: %d per-pair factors [%.3f..%.3f] -> RoPE frequency tables", pairs,
+                 cfg.rope_long_factor.front(), cfg.rope_long_factor.back());
 }
 
 }  // namespace imp
