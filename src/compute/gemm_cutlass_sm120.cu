@@ -9,6 +9,7 @@
 // [M,K/2] + SfAtom UE4M3 scales.
 
 #include "compute/gemm_cutlass_sm120.h"
+#include "compute/gpt_oss_glu.cuh"
 #include "model/model_config.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/fp8_utils.cuh"
@@ -599,7 +600,9 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
     uint8_t* __restrict__ packed_out,        // [expanded, K/2]
     uint8_t* const* __restrict__ sfa_bases,  // [ne]
     const int* __restrict__ offsets,         // [ne+1]
-    int expanded, int K, int ne, int n_k_tiles) {
+    int expanded, int K, int ne, int n_k_tiles,
+    const half* __restrict__ gate_bias,  // [ne, K], read only when kAct == GPT_OSS_GLU
+    const half* __restrict__ up_bias) {  // [ne, K], read only when kAct == GPT_OSS_GLU
     int mb_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int K_groups = K / kSFVecSize;
     if (mb_idx >= expanded * K_groups)
@@ -619,6 +622,7 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
     const int64_t row_off = static_cast<int64_t>(row) * K + static_cast<int64_t>(k_group) * kSFVecSize;
     const half2* up_h2 = reinterpret_cast<const half2*>(up + row_off);
     const half2* gate_h2 = (gate != nullptr) ? reinterpret_cast<const half2*>(gate + row_off) : nullptr;
+    const int64_t bias_off = static_cast<int64_t>(expert) * K + static_cast<int64_t>(k_group) * kSFVecSize;
 
     constexpr float kGeluSqrt2OverPi = 0.7978845608028654f;
     constexpr float kGeluCoeff = 0.044715f;
@@ -646,6 +650,11 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
                           (1.0f + tanhf(kGeluSqrt2OverPi * (g1 + kGeluCoeff * g1 * g1 * g1)));
             v0 = fminf(fmaxf(gelu0 * u0, -65504.0f), 65504.0f);
             v1 = fminf(fmaxf(gelu1 * u1, -65504.0f), 65504.0f);
+        } else if (kAct == 3) {  // GPT_OSS_GLU: FP16 bias add + FP16 GLU output, as the 4-launch path
+            const half2 g = __hadd2(gate_h2[i], reinterpret_cast<const half2*>(gate_bias + bias_off)[i]);
+            const half2 u = __hadd2(uh2, reinterpret_cast<const half2*>(up_bias + bias_off)[i]);
+            v0 = __half2float(__float2half_rn(gpt_oss_glu_elem(__half2float(g.x), __half2float(u.x))));
+            v1 = __half2float(__float2half_rn(gpt_oss_glu_elem(__half2float(g.y), __half2float(u.y))));
         } else {  // RELU_SQR — non_gated experts; gate is nullptr, up holds the input
             v0 = (u0 > 0.0f) ? (u0 * u0) : 0.0f;
             v1 = (u1 > 0.0f) ? (u1 * u1) : 0.0f;
@@ -664,47 +673,33 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
 void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const void* up_fp16,
                                                   void* dst_packed, uint8_t* const* d_sfa_bases,
                                                   const int* d_offsets, int expanded, int K, int ne,
-                                                  FFNActivation act_type, cudaStream_t stream) {
+                                                  FFNActivation act_type, cudaStream_t stream,
+                                                  const void* gate_bias_fp16, const void* up_bias_fp16) {
     IMP_CHECK(K % kSFVecSize == 0,
               "fused_act_quantize_fp16_to_nvfp4_cutlass_moe: K=%d must be multiple of %d", K, kSFVecSize);
+    const bool relu = act_type == FFNActivation::RELU_SQR;
+    const bool gpt_oss = act_type == FFNActivation::GPT_OSS_GLU;
+    IMP_CHECK(relu || gate_fp16 != nullptr,
+              "fused_act_quantize: gated activation requires a non-null gate tensor");
+    IMP_CHECK(!gpt_oss || (gate_bias_fp16 && up_bias_fp16),
+              "fused_act_quantize: GPT_OSS_GLU needs both biases");
     if (expanded == 0)
         return;
 
-    int K_groups = K / kSFVecSize;
-    int total_mb = expanded * K_groups;
-    int n_k_tiles = (K + kAtomKElems - 1) / kAtomKElems;
-
-    int threads = 256;
-    int blocks = (total_mb + threads - 1) / threads;
-
-    auto* gate_p = reinterpret_cast<const half*>(gate_fp16);
-    auto* up_p = reinterpret_cast<const half*>(up_fp16);
-    auto* dst_p = reinterpret_cast<uint8_t*>(dst_packed);
-
-    switch (act_type) {
-        case FFNActivation::SWIGLU:
-            IMP_CHECK(gate_p != nullptr,
-                      "fused_act_quantize: SWIGLU requires a non-null gate tensor");
-            fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<0>
-                <<<blocks, threads, 0, stream>>>(gate_p, up_p, dst_p, d_sfa_bases, d_offsets, expanded, K,
-                                                 ne, n_k_tiles);
-            IMP_CUDA_CHECK_LAUNCH();
-            break;
-        case FFNActivation::GEGLU:
-            IMP_CHECK(gate_p != nullptr,
-                      "fused_act_quantize: GEGLU requires a non-null gate tensor");
-            fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<1>
-                <<<blocks, threads, 0, stream>>>(gate_p, up_p, dst_p, d_sfa_bases, d_offsets, expanded, K,
-                                                 ne, n_k_tiles);
-            IMP_CUDA_CHECK_LAUNCH();
-            break;
-        case FFNActivation::RELU_SQR:
-            fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<2>
-                <<<blocks, threads, 0, stream>>>(nullptr, up_p, dst_p, d_sfa_bases, d_offsets, expanded, K,
-                                                 ne, n_k_tiles);
-            IMP_CUDA_CHECK_LAUNCH();
-            break;
-    }
+    const int n_k_tiles = (K + kAtomKElems - 1) / kAtomKElems;
+    const int threads = 256;
+    const int blocks = (expanded * (K / kSFVecSize) + threads - 1) / threads;
+    auto* kernel = act_type == FFNActivation::SWIGLU  ? fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<0>
+                   : act_type == FFNActivation::GEGLU ? fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<1>
+                   : gpt_oss                          ? fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<3>
+                                                      : fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<2>;
+    kernel<<<blocks, threads, 0, stream>>>(relu ? nullptr : static_cast<const half*>(gate_fp16),
+                                           static_cast<const half*>(up_fp16),
+                                           static_cast<uint8_t*>(dst_packed), d_sfa_bases, d_offsets,
+                                           expanded, K, ne, n_k_tiles,
+                                           static_cast<const half*>(gate_bias_fp16),
+                                           static_cast<const half*>(up_bias_fp16));
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // ---------------------------------------------------------------------------

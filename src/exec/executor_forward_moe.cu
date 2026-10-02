@@ -609,8 +609,9 @@ void GraphExecutor::moe_ffn_phase7_scatter_(int layer, cudaStream_t stream, MoeF
                                   ? ctx.r.data : nullptr;
         {
             moe_scatter_fused_residual(moe_.expert_down.data, ctx.routing.token_to_expanded,
-                                       static_cast<const float*>(ctx.routing.expert_weights.data),
-                                       res_ptr, ctx.h.data, ctx.n, ctx.d, ctx.top_k, stream);
+                                       static_cast<const float*>(ctx.routing.expert_weights.data), res_ptr,
+                                       ctx.h.data, ctx.n, ctx.d, ctx.top_k, stream, ctx.scatter_down_bias,
+                                       static_cast<const int32_t*>(ctx.routing.expert_indices.data));
         }
         if (!has_shared_expert && !ctx.moe_use_fp32_residual)
             ctx.residual_fused = true;

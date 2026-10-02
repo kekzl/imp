@@ -89,10 +89,14 @@ void quantize_fp16_to_nvfp4_cutlass_moe_gather(const void* src_fp16,
 //   SFA base pointers; d_offsets: [ne+1] cumulative row offsets; act_type: SWIGLU/GEGLU/RELU_SQR
 // Bit-identical to (apply_expert_activation + quantize_..._moe) on SWIGLU/GEGLU (both compute
 // the activation in float before quantization); RELU_SQR is also fused (gate ignored).
+// GPT_OSS_GLU needs gate/up biases [ne,K] FP16, other acts ignore them. Bit-identical to
+// bias_sorted x2 + gpt_oss_glu + quantize_..._moe (FP16 adds, FP16-rounded GLU output), #2466.
 void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const void* up_fp16,
                                                   void* dst_packed, uint8_t* const* d_sfa_bases,
                                                   const int* d_offsets, int expanded, int K, int ne,
-                                                  FFNActivation act_type, cudaStream_t stream);
+                                                  FFNActivation act_type, cudaStream_t stream,
+                                                  const void* gate_bias_fp16 = nullptr,
+                                                  const void* up_bias_fp16 = nullptr);
 
 // Runs CUTLASS sm_120 block-scaled NVFP4xNVFP4 GEMM: D = alpha*A@B^T. A (activation) [M,K]
 // NVFP4 RowMajor + SFA; B (weight) [N,K] NVFP4 RowMajor + SFB (micro_scale only); D [M,N] FP16

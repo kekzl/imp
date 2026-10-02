@@ -380,7 +380,8 @@ def main():
     # MoeAllocFailureTest.SmallMPrefillSurvivesFailedAsyncAlloc (test-e2e, GPU + checkpoint) (#2446).
     # 1197 -> 1198: MoEExecutorTest.HostExpertFp16DecodeReadsTheSlotPool (test-moe-gdn, GPU) (#2447).
     # 1198 -> 1199: MoEMultiCtaPermute.MatchesTheSingleCtaKernelBitExact (test-moe-gdn, GPU) (#2465).
-    PINNED = 1199
+    # 1199 -> 1203: GptOssMoeFusedBias.* (4, test-moe-gdn, GPU) (#2466).
+    PINNED = 1203
 
     text = CMAKE.read_text()
     mods = module_sources(text)

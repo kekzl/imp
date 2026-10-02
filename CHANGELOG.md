@@ -10,6 +10,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - CI `Build`: `-j$(nproc)`, the five CUTLASS TUs serialized by `scripts/ci_compile_slot.sh` (cold peak 11.8 of 16 GB); static gates in the background, still blocking; apt debs cached; `ctest -j4`; no ccache save on 0 misses. Build 477 -> 364 s on 72 misses, push -> Build green 222 -> 130 s median on 0 (#2448)
 
 ### Performance
+- gpt-oss MoE prefill: gate/up biases and the clamped GLU fused into the NVFP4 act+quantize, the down bias into the scatter, output bytes unchanged (#2466). mxfp4-gptoss-20b pp4096 kernel sum 188.9 -> 162.0 ms (bias kernels 13.7 % -> 0); e2e pp4096 41532 -> 48392 tok/s, pp512 28863 -> 31481 (3 pairs).
 - MoE token permute on one CTA per tile, layout bit-identical to the old single-CTA kernel, default path included (#2465). nvfp4-gemma4-26b permute pp4096 209.5 -> 4.7 us/call (12.0 % -> 0.30 % of kernel time); e2e pp4096 36163 -> 40213 tok/s, pp512 23271 -> 25729 (3 pairs). Routers above 1024 experts keep the single-CTA kernel.
 
 ### Security
