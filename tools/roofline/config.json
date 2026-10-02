@@ -271,7 +271,7 @@
     {
       "name": "moe_routing",
       "group": "misc",
-      "regex": "topk_gating|moe_align|expert_count|gather_expert|gemv_gate_fp32|moe_weighted_sum|moe_scatter_fused|moe_fused_permute|moe_gather|moe_compute_M|moe_add_logit_bias|moe_add_expert_bias"
+      "regex": "topk_gating|moe_align|expert_count|gather_expert|gemv_gate_fp32|moe_weighted_sum|moe_scatter_fused|moe_fused_permute|moe_permute_|moe_gather|moe_compute_M|moe_add_logit_bias|moe_add_expert_bias"
     },
     {
       "name": "kv_gather",

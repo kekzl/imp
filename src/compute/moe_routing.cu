@@ -2,7 +2,6 @@
 #include "compute/moe_routing_internal.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
-#include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cfloat>
@@ -353,142 +352,6 @@ __global__ void gemv_gate_topk_fused_kernel(const half* __restrict__ W_gate,  //
     }
 }
 
-// Fused count+scan+scatter (single launch), replaces 2x zero_int32 + count_tokens_per_expert
-// + exclusive_scan + scatter_token_ids_with_flat_idx (5 launches -> 1).
-// Single block; shared mem holds expert_counts + write_pos. Requires n_experts <= 1024.
-
-__global__ void __launch_bounds__(256) moe_fused_permute_kernel(const int32_t* __restrict__ expert_indices,
-                                                                int n_tokens, int top_k, int n_experts,
-                                                                int32_t* __restrict__ sorted_token_ids,
-                                                                int32_t* __restrict__ sorted_flat_idx,
-                                                                int32_t* __restrict__ expert_offsets,
-                                                                int32_t* __restrict__ token_to_expanded) {
-    // Dynamic shared memory: [n_experts] counts + [n_experts] write_pos
-    extern __shared__ int32_t smem[];
-    int32_t* s_counts = smem;
-    int32_t* s_write_pos = smem + n_experts;
-
-    const int tid = threadIdx.x;
-    const int total = n_tokens * top_k;
-
-    // Phase 1: Zero counts
-    for (int i = tid; i < n_experts; i += blockDim.x)
-        s_counts[i] = 0;
-    __syncthreads();
-
-    // Phase 2: Count tokens per expert (atomics in shared memory)
-    for (int i = tid; i < total; i += blockDim.x) {
-        int expert = expert_indices[i];
-        atomicAdd(&s_counts[expert], 1);
-    }
-    __syncthreads();
-
-    // Phase 3: Exclusive scan + write offsets to global memory (thread 0)
-    if (tid == 0) {
-        int32_t running = 0;
-        for (int i = 0; i < n_experts; i++) {
-            expert_offsets[i] = running;
-            s_write_pos[i] = 0;
-            running += s_counts[i];
-        }
-        expert_offsets[n_experts] = running;
-    }
-    __syncthreads();
-
-    // Phase 4: Scatter token IDs + flat indices (atomics on smem write_pos)
-    for (int idx = tid; idx < total; idx += blockDim.x) {
-        int token = idx / top_k;
-        int expert = expert_indices[idx];
-        int pos = atomicAdd(&s_write_pos[expert], 1);
-        int dest = expert_offsets[expert] + pos;
-        sorted_token_ids[dest] = token;
-        sorted_flat_idx[dest] = idx;
-        if (token_to_expanded)
-            token_to_expanded[idx] = dest;
-    }
-}
-
-// Deterministic fused count+scan+scatter (opt-in): default kernel's atomicAdd on
-// s_write_pos makes bucket order run-to-run varying, breaking reproducibility of the
-// gather/grouped-GEMM and FP accumulation order.
-// Strategy: thread 0 scans, then walks flat_idx ascending, appending to each expert's
-// bucket -> stable slot assignment. n_experts/total small enough for single-thread scatter.
-
-__global__ void __launch_bounds__(256) moe_fused_permute_deterministic_kernel(
-    const int32_t* __restrict__ expert_indices, int n_tokens, int top_k, int n_experts,
-    int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ sorted_flat_idx,
-    int32_t* __restrict__ expert_offsets, int32_t* __restrict__ token_to_expanded) {
-    extern __shared__ int32_t smem[];
-    int32_t* s_counts = smem;
-    int32_t* s_write_pos = smem + n_experts;
-
-    const int tid = threadIdx.x;
-    const int total = n_tokens * top_k;
-
-    // Phase 1: Zero counts
-    for (int i = tid; i < n_experts; i += blockDim.x)
-        s_counts[i] = 0;
-    __syncthreads();
-
-    // Phase 2: Count tokens per expert (atomics in shared memory — counts are
-    // order-independent, so this stays parallel).
-    for (int i = tid; i < total; i += blockDim.x) {
-        int expert = expert_indices[i];
-        atomicAdd(&s_counts[expert], 1);
-    }
-    __syncthreads();
-
-    // Phase 3: Exclusive scan + initialize write positions (thread 0).
-    if (tid == 0) {
-        int32_t running = 0;
-        for (int i = 0; i < n_experts; i++) {
-            expert_offsets[i] = running;
-            s_write_pos[i] = 0;
-            running += s_counts[i];
-        }
-        expert_offsets[n_experts] = running;
-    }
-    __syncthreads();
-
-    // Deterministic scatter: a token's slot within its expert bucket = its rank among earlier
-    // flat indices routed to the same expert (#1546), making layout independent of scheduling.
-    // One blockDim-sized chunk at a time, chunks in index order, threads counting only lower
-    // thread ids -> identical layout to a full single-thread walk.
-    // #2218 bounded: 2 * n_experts < 49152 B / 4 = 12288 (smem bytes moe_routing.cu:602,720, no opt-in:
-    // launch fails above the 48 KiB default dynamic smem)
-    int32_t* s_chunk = smem + static_cast<ptrdiff_t>(2 * n_experts);  // [blockDim.x]
-    const int block_n = static_cast<int>(blockDim.x);
-    for (int base = 0; base < total; base += block_n) {
-        const int idx = base + tid;
-        const int expert = (idx < total) ? expert_indices[idx] : -1;
-        s_chunk[tid] = expert;
-        __syncthreads();
-
-        if (idx < total) {
-            int rank = 0;
-            for (int j = 0; j < tid; j++)
-                rank += (s_chunk[j] == expert) ? 1 : 0;
-            const int dest = expert_offsets[expert] + s_write_pos[expert] + rank;
-            sorted_token_ids[dest] = idx / top_k;
-            sorted_flat_idx[dest] = idx;
-            if (token_to_expanded)
-                token_to_expanded[idx] = dest;
-        }
-        __syncthreads();
-
-        // Advance the write positions by what this chunk consumed, so the next
-        // chunk starts where this one ended.
-        const int chunk_n = (total - base) < block_n ? (total - base) : block_n;
-        for (int e = tid; e < n_experts; e += block_n) {
-            int c = 0;
-            for (int j = 0; j < chunk_n; j++)
-                c += (s_chunk[j] == e) ? 1 : 0;
-            s_write_pos[e] += c;
-        }
-        __syncthreads();
-    }
-}
-
 // ============================================================================
 // Helper to set up a Tensor descriptor
 // ============================================================================
@@ -574,10 +437,10 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
     }
     int32_t* d_sorted_flat_idx = d_sorted_token_ids + total_assignments;
 
-    // expert_offsets: [n_experts + 1] int32
+    // expert_offsets: [n_experts + 1] int32, then the permute's tile histograms (freed with it).
     int32_t* d_expert_offsets = nullptr;
-    if (!check_alloc(cudaMalloc(&d_expert_offsets, static_cast<size_t>(n_experts + 1) * sizeof(int32_t)),
-                     "expert_offsets")) {
+    const size_t offsets_ints = static_cast<size_t>(n_experts) + 1 + moe_permute_scratch_ints(n_experts);
+    if (!check_alloc(cudaMalloc(&d_expert_offsets, offsets_ints * sizeof(int32_t)), "expert_offsets")) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_expert_indices));
         IMP_CUDA_CHECK_LOG(cudaFree(d_expert_weights));
         IMP_CUDA_CHECK_LOG(cudaFree(d_sorted_token_ids));
@@ -596,22 +459,11 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
                                                                       static_cast<const half*>(score_bias));
     IMP_CUDA_CHECK_LAUNCH();
 
-    // ---- Fused count + scan + scatter (single kernel) ----
-    size_t smem_permute = static_cast<size_t>(n_experts) * 2 * sizeof(int32_t);
-    // The deterministic kernel parks one chunk of expert ids alongside.
-    size_t smem_permute_det = smem_permute + static_cast<size_t>(BLOCK_SIZE) * sizeof(int32_t);
-    if (process_diag_deterministic_gemm()) {
-        moe_fused_permute_deterministic_kernel<<<1, BLOCK_SIZE, smem_permute_det, stream>>>(
-            d_expert_indices, n_tokens, top_k, n_experts, d_sorted_token_ids, d_sorted_flat_idx,
-            d_expert_offsets, nullptr);
-        IMP_CUDA_CHECK_LAUNCH();
-    } else {
-        moe_fused_permute_kernel<<<1, BLOCK_SIZE, smem_permute, stream>>>(d_expert_indices, n_tokens, top_k,
-                                                                          n_experts, d_sorted_token_ids,
-                                                                          d_sorted_flat_idx, d_expert_offsets,
-                                                                          nullptr);
-        IMP_CUDA_CHECK_LAUNCH();
-    }
+    // ---- Stable count + scan + scatter ----
+    int32_t* d_permute_scratch = moe_permute_scratch_ints(n_experts) ? d_expert_offsets + n_experts + 1
+                                                                     : nullptr;
+    moe_permute(d_expert_indices, n_tokens, top_k, n_experts, d_sorted_token_ids, d_sorted_flat_idx,
+                d_expert_offsets, nullptr, d_permute_scratch, stream);
 
     // ---- Fill result struct ----
     result.expert_indices = make_tensor_2d(d_expert_indices, QType::INT32, n_tokens, top_k, true);
@@ -641,11 +493,10 @@ void MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
     size_t weights_sz = align256(static_cast<size_t>(total_assignments) * sizeof(float));
     size_t sorted_sz = align256(static_cast<size_t>(total_assignments) * 2 * sizeof(int32_t));
     size_t offsets_sz = align256(static_cast<size_t>(max_experts + 1) * sizeof(int32_t));
-    size_t counts_sz = align256(static_cast<size_t>(max_experts) * sizeof(int32_t));
-    size_t wpos_sz = align256(static_cast<size_t>(max_experts) * sizeof(int32_t));
+    size_t scratch_sz = align256(moe_permute_scratch_ints(max_experts) * sizeof(int32_t));
     size_t t2e_sz = align256(static_cast<size_t>(total_assignments) * sizeof(int32_t));
 
-    pool_size = indices_sz + weights_sz + sorted_sz + offsets_sz + counts_sz + wpos_sz + t2e_sz;
+    pool_size = indices_sz + weights_sz + sorted_sz + offsets_sz + scratch_sz + t2e_sz;
     cudaError_t err = cudaMalloc(&pool, pool_size);
     if (err != cudaSuccess) {
         pool = nullptr;
@@ -662,10 +513,8 @@ void MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
     ptr += sorted_sz;
     expert_offsets = reinterpret_cast<int32_t*>(ptr);
     ptr += offsets_sz;
-    expert_counts = reinterpret_cast<int32_t*>(ptr);
-    ptr += counts_sz;
-    expert_write_pos = reinterpret_cast<int32_t*>(ptr);
-    ptr += wpos_sz;
+    permute_scratch = scratch_sz ? reinterpret_cast<int32_t*>(ptr) : nullptr;
+    ptr += scratch_sz;
     token_to_expanded = reinterpret_cast<int32_t*>(ptr);
     ptr += t2e_sz;
 }
@@ -680,8 +529,7 @@ void MoeRoutingBuffers::free() {
     expert_weights = nullptr;
     sorted_token_ids = nullptr;
     expert_offsets = nullptr;
-    expert_counts = nullptr;
-    expert_write_pos = nullptr;
+    permute_scratch = nullptr;
     token_to_expanded = nullptr;
 }
 
@@ -716,22 +564,10 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& bu
 
     if (!skip_sorting) {
         int32_t* d_sorted_flat_idx = d_sorted_token_ids + total_assignments;
-        size_t smem_bytes = static_cast<size_t>(n_experts) * 2 * sizeof(int32_t);
-        size_t smem_bytes_det = smem_bytes + static_cast<size_t>(BLOCK_SIZE) * sizeof(int32_t);
-
-        if (process_diag_deterministic_gemm()) {
-            moe_fused_permute_deterministic_kernel<<<1, BLOCK_SIZE, smem_bytes_det, stream>>>(
-                d_expert_indices, n_tokens, top_k, n_experts, d_sorted_token_ids, d_sorted_flat_idx,
-                d_expert_offsets, buffers.token_to_expanded);
-            IMP_CUDA_CHECK_LAUNCH();
-        } else {
-            moe_fused_permute_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(d_expert_indices, n_tokens, top_k,
-                                                                            n_experts, d_sorted_token_ids,
-                                                                            d_sorted_flat_idx,
-                                                                            d_expert_offsets,
-                                                                            buffers.token_to_expanded);
-            IMP_CUDA_CHECK_LAUNCH();
-        }
+        // Scratch is sized for buffers.max_experts; a wider router takes the single-CTA kernel.
+        int32_t* scratch = n_experts <= buffers.max_experts ? buffers.permute_scratch : nullptr;
+        moe_permute(d_expert_indices, n_tokens, top_k, n_experts, d_sorted_token_ids, d_sorted_flat_idx,
+                    d_expert_offsets, buffers.token_to_expanded, scratch, stream);
     }
 
     // Fill result struct (no ownership -- memory belongs to buffers)

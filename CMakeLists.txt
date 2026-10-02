@@ -329,6 +329,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/schema_constrain.cu
     src/compute/schema_constrain_mask.cpp
     src/compute/moe_routing.cu
+    src/compute/moe_token_permute.cu
     src/compute/ssm.cu
     src/compute/ssm_scan_reg.cu
     src/compute/gated_residual.cu

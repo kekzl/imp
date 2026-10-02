@@ -716,6 +716,199 @@ TEST(MoEDeterministicPermute, LayoutMatchesTheSerialRule) {
     }
 }
 
+// #2465: the multi-CTA permute must reproduce the single-CTA kernel it replaced, slot for slot.
+// legacy_permute_kernel is its logic verbatim, comments dropped (7a4ad965 moe_routing.cu:417), kept as the
+// oracle.
+namespace {
+__global__ void __launch_bounds__(256) legacy_permute_kernel(const int32_t* __restrict__ expert_indices,
+                                                             int n_tokens, int top_k, int n_experts,
+                                                             int32_t* __restrict__ sorted_token_ids,
+                                                             int32_t* __restrict__ sorted_flat_idx,
+                                                             int32_t* __restrict__ expert_offsets,
+                                                             int32_t* __restrict__ token_to_expanded) {
+    extern __shared__ int32_t smem[];
+    int32_t* s_counts = smem;
+    int32_t* s_write_pos = smem + n_experts;
+    const int tid = threadIdx.x;
+    const int total = n_tokens * top_k;
+    for (int i = tid; i < n_experts; i += blockDim.x)
+        s_counts[i] = 0;
+    __syncthreads();
+    for (int i = tid; i < total; i += blockDim.x)
+        atomicAdd(&s_counts[expert_indices[i]], 1);
+    __syncthreads();
+    if (tid == 0) {
+        int32_t running = 0;
+        for (int i = 0; i < n_experts; i++) {
+            expert_offsets[i] = running;
+            s_write_pos[i] = 0;
+            running += s_counts[i];
+        }
+        expert_offsets[n_experts] = running;
+    }
+    __syncthreads();
+    int32_t* s_chunk = smem + static_cast<ptrdiff_t>(2 * n_experts);
+    const int block_n = static_cast<int>(blockDim.x);
+    for (int base = 0; base < total; base += block_n) {
+        const int idx = base + tid;
+        const int expert = (idx < total) ? expert_indices[idx] : -1;
+        s_chunk[tid] = expert;
+        __syncthreads();
+        if (idx < total) {
+            int rank = 0;
+            for (int j = 0; j < tid; j++)
+                rank += (s_chunk[j] == expert) ? 1 : 0;
+            const int dest = expert_offsets[expert] + s_write_pos[expert] + rank;
+            sorted_token_ids[dest] = idx / top_k;
+            sorted_flat_idx[dest] = idx;
+            if (token_to_expanded)
+                token_to_expanded[idx] = dest;
+        }
+        __syncthreads();
+        const int chunk_n = (total - base) < block_n ? (total - base) : block_n;
+        for (int e = tid; e < n_experts; e += block_n) {
+            int c = 0;
+            for (int j = 0; j < chunk_n; j++)
+                c += (s_chunk[j] == e) ? 1 : 0;
+            s_write_pos[e] += c;
+        }
+        __syncthreads();
+    }
+}
+
+struct PermuteOut {
+    std::vector<int32_t> tok, flat, offsets, t2e;
+};
+
+// Runs either kernel on device copies of `ids`; every output buffer starts as 0x7f bytes, so an
+// unwritten slot cannot match a written one.
+PermuteOut run_permute(const std::vector<int32_t>& ids, int n_tokens, int top_k, int n_experts, int mode) {
+    const size_t total = ids.size();
+    const size_t n_scratch = imp::moe_permute_scratch_ints(n_experts);
+    int32_t *d_ids = nullptr, *d_sorted = nullptr, *d_off = nullptr, *d_t2e = nullptr, *d_scratch = nullptr;
+    EXPECT_EQ(cudaMalloc(&d_ids, std::max<size_t>(total, 1) * sizeof(int32_t)), cudaSuccess);
+    EXPECT_EQ(cudaMalloc(&d_sorted, std::max<size_t>(total, 1) * 2 * sizeof(int32_t)), cudaSuccess);
+    EXPECT_EQ(cudaMalloc(&d_off, (n_experts + 1) * sizeof(int32_t)), cudaSuccess);
+    EXPECT_EQ(cudaMalloc(&d_t2e, std::max<size_t>(total, 1) * sizeof(int32_t)), cudaSuccess);
+    EXPECT_EQ(cudaMalloc(&d_scratch, std::max<size_t>(n_scratch, 1) * sizeof(int32_t)), cudaSuccess);
+    EXPECT_EQ(cudaMemcpy(d_ids, ids.data(), total * sizeof(int32_t), cudaMemcpyHostToDevice), cudaSuccess);
+    cudaMemset(d_sorted, 0x7f, std::max<size_t>(total, 1) * 2 * sizeof(int32_t));
+    cudaMemset(d_off, 0x7f, (n_experts + 1) * sizeof(int32_t));
+    cudaMemset(d_t2e, 0x7f, std::max<size_t>(total, 1) * sizeof(int32_t));
+    // Stale histograms from an earlier call must not leak into this one.
+    cudaMemset(d_scratch, 0x55, std::max<size_t>(n_scratch, 1) * sizeof(int32_t));
+    int32_t* d_flat = d_sorted + total;
+    if (mode == 0) {
+        const size_t smem = (static_cast<size_t>(n_experts) * 2 + 256) * sizeof(int32_t);
+        legacy_permute_kernel<<<1, 256, smem>>>(d_ids, n_tokens, top_k, n_experts, d_sorted, d_flat, d_off,
+                                                d_t2e);
+    } else {
+        imp::moe_permute(d_ids, n_tokens, top_k, n_experts, d_sorted, d_flat, d_off, d_t2e,
+                         mode == 1 ? (n_scratch ? d_scratch : nullptr) : nullptr, nullptr);
+    }
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    PermuteOut out;
+    out.tok.resize(total);
+    out.flat.resize(total);
+    out.offsets.resize(n_experts + 1);
+    out.t2e.resize(total);
+    cudaMemcpy(out.tok.data(), d_sorted, total * sizeof(int32_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(out.flat.data(), d_flat, total * sizeof(int32_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(out.offsets.data(), d_off, (n_experts + 1) * sizeof(int32_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(out.t2e.data(), d_t2e, total * sizeof(int32_t), cudaMemcpyDeviceToHost);
+    cudaFree(d_ids);
+    cudaFree(d_sorted);
+    cudaFree(d_off);
+    cudaFree(d_t2e);
+    cudaFree(d_scratch);
+    return out;
+}
+
+enum class Routing { Random, DistinctPerToken, OneExpert, LastExpert, Skewed };
+
+std::vector<int32_t> make_routing(int n_tokens, int top_k, int n_experts, Routing kind, uint32_t seed) {
+    std::mt19937 rng(seed);
+    std::vector<int32_t> ids(static_cast<size_t>(n_tokens) * top_k);
+    std::uniform_int_distribution<int> any(0, n_experts - 1);
+    std::vector<int32_t> perm(n_experts);
+    std::iota(perm.begin(), perm.end(), 0);
+    for (int t = 0; t < n_tokens; ++t) {
+        if (kind == Routing::DistinctPerToken)
+            std::shuffle(perm.begin(), perm.end(), rng);
+        for (int k = 0; k < top_k; ++k) {
+            int32_t e = 0;
+            switch (kind) {
+                case Routing::Random:
+                    e = any(rng);
+                    break;
+                case Routing::DistinctPerToken:
+                    e = perm[k];
+                    break;
+                case Routing::OneExpert:
+                    e = 3 % n_experts;
+                    break;
+                case Routing::LastExpert:
+                    e = n_experts - 1;
+                    break;
+                case Routing::Skewed:
+                    e = (rng() % 4 == 0) ? any(rng) : static_cast<int32_t>(rng() % 3);
+                    break;
+            }
+            ids[static_cast<size_t>(t) * top_k + k] = e;
+        }
+    }
+    return ids;
+}
+}  // namespace
+
+TEST(MoEMultiCtaPermute, MatchesTheSingleCtaKernelBitExact) {
+    struct Case {
+        int n_tokens, top_k, n_experts;
+        Routing kind;
+    };
+    const Case cases[] = {
+        {1, 1, 128, Routing::Random},
+        {1, 8, 128, Routing::DistinctPerToken},
+        {1, 2, 256, Routing::LastExpert},
+        {7, 1, 128, Routing::OneExpert},
+        {300, 4, 16, Routing::Random},
+        {512, 8, 128, Routing::DistinctPerToken},
+        {512, 2, 256, Routing::Skewed},
+        {4096, 1, 128, Routing::OneExpert},
+        {4096, 8, 128, Routing::DistinctPerToken},
+        {4096, 8, 128, Routing::OneExpert},
+        {4096, 2, 256, Routing::Random},
+        {4096, 8, 256, Routing::Skewed},
+        {4097, 8, 256, Routing::DistinctPerToken},
+        {16384, 8, 128, Routing::DistinctPerToken},
+        {40000, 8, 128, Routing::Skewed},
+        {2048, 10, 512, Routing::DistinctPerToken},
+        {1000, 8, 1024, Routing::Random},
+        {1000, 8, 1500, Routing::Random},
+    };
+    for (const auto& c : cases) {
+        SCOPED_TRACE(::testing::Message() << "n_tokens=" << c.n_tokens << " top_k=" << c.top_k
+                                          << " ne=" << c.n_experts << " kind=" << static_cast<int>(c.kind));
+        const auto ids = make_routing(c.n_tokens, c.top_k, c.n_experts, c.kind, 0x2465u + c.n_tokens);
+        const PermuteOut ref = run_permute(ids, c.n_tokens, c.top_k, c.n_experts, /*legacy=*/0);
+        for (int mode : {1, 2}) {  // 1 = multi-CTA with scratch, 2 = scratch == nullptr fallback
+            const PermuteOut got = run_permute(ids, c.n_tokens, c.top_k, c.n_experts, mode);
+            EXPECT_EQ(got.offsets, ref.offsets) << "mode " << mode;
+            EXPECT_EQ(got.tok, ref.tok) << "mode " << mode;
+            EXPECT_EQ(got.flat, ref.flat) << "mode " << mode;
+            EXPECT_EQ(got.t2e, ref.t2e) << "mode " << mode;
+        }
+        // The oracle itself: every slot written once, buckets ascending in flat index.
+        std::vector<int> seen(ids.size(), 0);
+        for (size_t s = 0; s < ref.flat.size(); ++s) {
+            ASSERT_GE(ref.flat[s], 0);
+            ASSERT_LT(static_cast<size_t>(ref.flat[s]), ids.size());
+            ++seen[ref.flat[s]];
+        }
+        EXPECT_EQ(std::count(seen.begin(), seen.end(), 1), static_cast<long>(ids.size()));
+    }
+}
+
 // #1548: recorded max(M_e) is what /metrics uses to tell a padding-bound layer from a
 // bandwidth-bound one. Checked against moe_imbalance.h run through the real kernel, not an
 // inert reference.
