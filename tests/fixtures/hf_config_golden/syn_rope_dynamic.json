@@ -1,0 +1,3 @@
+{"architectures": ["LlamaForCausalLM"], "hidden_size": 256, "num_attention_heads": 4, "num_hidden_layers": 2,
+ "vocab_size": 100, "intermediate_size": 512, "rope_scaling": {"type": "dynamic", "factor": 4.0},
+ "sliding_window": 4096, "attn_logit_softcapping": 50.0, "final_logit_softcapping": 30.0, "mlp_bias": true}

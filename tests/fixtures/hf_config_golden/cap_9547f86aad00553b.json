@@ -1,0 +1,8 @@
+{
+        "architectures": ["DeepseekV3ForCausalLM"],
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "num_hidden_layers": 32,
+        "kv_lora_rank": 512,
+        "q_lora_rank": 1536
+    }

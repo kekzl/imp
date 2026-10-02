@@ -1,0 +1,5 @@
+{
+        "architectures": ["GraniteForCausalLM"], "hidden_size": 2048, "num_attention_heads": 32,
+        "num_hidden_layers": 40, "attention_multiplier": 0.015625, "embedding_multiplier": 12.0,
+        "residual_multiplier": 0.22, "logits_scaling": 8.0
+    }

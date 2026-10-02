@@ -854,6 +854,8 @@ if(IMP_BUILD_TESTS)
         tests/test_llm_compressor_loader.cpp
         tests/test_nvfp4_quant_contract.cpp
         tests/test_hf_config_loader.cpp
+        # Golden ModelConfig dump per HF config fixture (#2537).
+        tests/test_hf_config_golden.cpp
         # One arch identity table, pinned against the strings main accepted (#2457).
         tests/test_arch_identity.cpp
         # Every ModelArch -> arch-keyed ModelProfile fields + SWA windows (#2456).

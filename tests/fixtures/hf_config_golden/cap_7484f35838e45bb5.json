@@ -1,0 +1,1 @@
+{"model_type": "cohere", "hidden_size": 4096, "num_attention_heads": 32, "num_hidden_layers": 32}

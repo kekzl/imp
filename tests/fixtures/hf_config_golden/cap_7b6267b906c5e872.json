@@ -1,0 +1,16 @@
+{
+        "architectures": ["Gemma4ForConditionalGeneration"],
+        "model_type": "gemma4_unified",
+        "audio_token_id": 258881,
+        "audio_config": {
+            "model_type": "gemma4_unified_audio",
+            "audio_embed_dim": 640
+        },
+        "text_config": {
+            "hidden_size": 3840,
+            "intermediate_size": 15360,
+            "num_attention_heads": 16,
+            "num_hidden_layers": 48,
+            "num_key_value_heads": 8
+        }
+    }
