@@ -130,7 +130,7 @@ The four latency histograms (`imp_request_duration_seconds`, `imp_ttft_seconds`,
 
 - A request cancelled or timed out before the worker admitted it contributes its wait to `imp_queue_time_seconds` as well.
 - `imp_queue_time_seconds` ends when the scheduler puts the request into its first batch: the wait behind `max_batch_size` and KV admission.
-- `imp_queue_waiting` / `imp_queue_running` split `imp_queue_depth` on the same boundary.
+- `imp_queue_waiting` / `imp_queue_running` split `imp_queue_depth` on the same boundary; `imp_queued_prompt_tokens` counts prompt tokens not yet past prefill (`--max-queued-tokens`, #2408).
 - Gate: `tests/test_server_metrics.py` in `make test-server`.
 - The serving KPI harness reads the histograms and counters back per concurrency level (`tools/analysis/serving_kpi.py`, definitions in [`internals/BENCHMARKING.md`](internals/BENCHMARKING.md)).
 

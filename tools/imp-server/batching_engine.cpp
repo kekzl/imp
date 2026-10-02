@@ -416,6 +416,9 @@ void BatchingEngine::worker_loop() {
                     std::chrono::duration<double, std::milli>(req->t_scheduled - sr->t_submit).count(),
                     std::memory_order_relaxed);
             }
+            // Prefill done (first token) or finished: the prompt is no longer queued work (#2408).
+            if ((had_new_tokens || is_done) && sr->queued_lease)
+                sr->queued_lease->release();
 
             // Deliver new tokens
             for (size_t i = sr->notified_count; i < current_count; i++) {

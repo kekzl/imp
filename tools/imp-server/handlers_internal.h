@@ -183,6 +183,8 @@ struct ChatRequestContext {
     // (queue, first token); filled where the numbers become known.
     RequestSpan trace;
     bool log_skip = false;
+    // --max-queued-tokens reservation (#2408), shared with the ServerRequest it is submitted as.
+    std::shared_ptr<QueuedTokenLease> queued_lease;
 };
 
 // gpt-oss: a whole-reply constraint starts in the final channel (harmony_skip_analysis).

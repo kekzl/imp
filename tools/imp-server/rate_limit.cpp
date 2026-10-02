@@ -1,7 +1,23 @@
 #include "rate_limit.h"
 
+#include "utils.h"
+
 #include <algorithm>
 #include <iterator>
+
+std::shared_ptr<QueuedTokenLease> admit_queued_tokens(const std::string& path, httplib::Response& res,
+                                                      QueuedTokenGate& gate, int64_t n, int64_t cap) {
+    auto lease = reserve_queued_tokens(gate, n, cap);
+    if (lease)
+        return lease;
+    // Same status and types as the --max-concurrent refusal (main.cpp), plus a retry hint.
+    send_dialect_error(res, path, 429, "rate_limit_error", "overloaded_error",
+                       "Server overloaded, queued prompt tokens over --max-queued-tokens (" +
+                           std::to_string(gate.queued()) + " queued + " + std::to_string(n) + " > " +
+                           std::to_string(cap) + ")");
+    res.set_header("Retry-After", std::to_string(kQueuedTokensRetryAfterSeconds));
+    return nullptr;
+}
 
 namespace {
 constexpr size_t kMaxKeyLen = 64;

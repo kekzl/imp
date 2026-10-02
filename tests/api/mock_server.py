@@ -85,7 +85,8 @@ class MockConfig:
     """Per-server configuration (avoids class variable pollution across instances)."""
     def __init__(self, latency_ms=5, fail_rate=0.0, oom=False, idle_unload_seconds=0, fim=True,
                  responses_store_ttl=3600.0, responses_store_max_entries=1000,
-                 responses_store_max_bytes=256 << 20, swap_models=None, cors_origins=""):
+                 responses_store_max_bytes=256 << 20, swap_models=None, cors_origins="",
+                 max_queued_tokens=0, prefill_ms=0):
         self.latency_ms = latency_ms
         # --cors-origins (#2402): same parse as cors.h parse_cors_origins.
         self.cors_origins = [o.strip(" \t") for o in cors_origins.split(",") if o.strip(" \t")]
@@ -111,6 +112,12 @@ class MockConfig:
         self.rs_evictions = 0
         self.rs_expired = 0
         self.rs_lock = threading.Lock()
+        # --max-queued-tokens (#2408), rate_limit.h QueuedTokenGate; --prefill-ms holds the
+        # reservation that long before the first token (the real server: until prefill ends).
+        self.max_queued_tokens = max_queued_tokens
+        self.prefill_ms = prefill_ms
+        self.queued_tokens = 0
+        self.q_lock = threading.Lock()
 
 
 class MockHandler(BaseHTTPRequestHandler):
@@ -168,6 +175,37 @@ class MockHandler(BaseHTTPRequestHandler):
         if code is not None:
             err["code"] = code
         self._send_json(status, {"error": err})
+
+    def _admit_queued(self, prompt_tokens: int) -> bool:
+        """--max-queued-tokens (#2408): reserve, hold for --prefill-ms, release; False = 429 sent.
+        Same rule as QueuedTokenGate: queued + n > cap refuses, an empty queue always admits."""
+        cfg = self.config
+        with cfg.q_lock:
+            cap, queued = cfg.max_queued_tokens, cfg.queued_tokens
+            refuse = cap > 0 and queued > 0 and queued + prompt_tokens > cap
+            if not refuse:
+                cfg.queued_tokens += prompt_tokens
+        if refuse:
+            msg = (f"Server overloaded, queued prompt tokens over --max-queued-tokens "
+                   f"({queued} queued + {prompt_tokens} > {cap})")
+            if urlparse(self.path).path.startswith("/v1/messages"):
+                body = {"type": "error", "error": {"type": "overloaded_error", "message": msg}}
+            else:
+                body = {"error": {"message": msg, "type": "rate_limit_error"}}
+            data = json.dumps(body).encode()
+            self.send_response(429)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Retry-After", "1")
+            self.end_headers()
+            self.wfile.write(data)
+            return False
+        try:
+            time.sleep(cfg.prefill_ms / 1000.0)
+        finally:
+            with cfg.q_lock:
+                cfg.queued_tokens -= prompt_tokens
+        return True
 
     def _check_model(self, model: str) -> bool:
         with self.config.lora_lock:
@@ -297,6 +335,9 @@ class MockHandler(BaseHTTPRequestHandler):
                 f"imp_responses_store_evictions_total {rs[2]}\n"
                 f"# TYPE imp_responses_store_expired_total counter\n"
                 f"imp_responses_store_expired_total {rs[3]}\n"
+                f"# HELP imp_queued_prompt_tokens Prompt tokens admitted and not yet past prefill\n"
+                f"# TYPE imp_queued_prompt_tokens gauge\n"
+                f"imp_queued_prompt_tokens {self.config.queued_tokens}\n"
             )
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -625,6 +666,8 @@ class MockHandler(BaseHTTPRequestHandler):
         # Count prompt tokens (rough: 1 token per 4 chars)
         prompt_text = " ".join(m.get("content", "") or "" for m in messages if isinstance(m.get("content"), str))
         prompt_tokens = max(1, len(prompt_text) // 4)
+        if not self._admit_queued(prompt_tokens):
+            return
 
         tokens = self._generate_tokens(seed, max_tokens)
         completion_tokens = len(tokens)
@@ -857,6 +900,8 @@ class MockHandler(BaseHTTPRequestHandler):
         tokens = self._generate_tokens(seed, max_tokens)
         content = "".join(tokens)
         prompt_tokens = max(1, len(prompt) // 4)
+        if not self._admit_queued(prompt_tokens):
+            return
         choice = {
             "index": 0,
             "text": (prompt + content) if body.get("echo") else content,
@@ -1043,6 +1088,8 @@ class MockHandler(BaseHTTPRequestHandler):
         digest = hashlib.sha256(json.dumps(convo).encode()).hexdigest()[:16]
         text = f"mock reply {digest} after {len(convo)} messages"
         in_tok = max(1, len(json.dumps(convo)) // 4)
+        if not self._admit_queued(in_tok):
+            return
         out_tok = len(text.split())
         metrics.add_tokens(in_tok, out_tok)
         rid = f"resp_mock{random.getrandbits(64):016x}"
@@ -1299,6 +1346,8 @@ def main():
     parser.add_argument("--idle-unload-seconds", type=str, default="0")
     parser.add_argument("--swap-model", action="append", default=[])
     parser.add_argument("--cors-origins", type=str, default="")
+    parser.add_argument("--max-queued-tokens", type=str, default="0")
+    parser.add_argument("--prefill-ms", type=int, default=0)
     for flag in ("--responses-store-ttl", "--responses-store-max-entries", "--responses-store-max-mib"):
         parser.add_argument(flag, type=str, default=None)
     args = parser.parse_args()
@@ -1310,6 +1359,14 @@ def main():
         idle = -1
     if idle < 0:
         print(f"--idle-unload-seconds expects an integer >= 0, got '{args.idle_unload_seconds}'",
+              file=sys.stderr, flush=True)
+        sys.exit(1)
+    try:
+        max_queued = int(args.max_queued_tokens)
+    except ValueError:
+        max_queued = -1
+    if max_queued < 0:
+        print(f"--max-queued-tokens expects an integer >= 0, got '{args.max_queued_tokens}'",
               file=sys.stderr, flush=True)
         sys.exit(1)
 
@@ -1333,7 +1390,8 @@ def main():
                         responses_store_ttl=store["responses_store_ttl"],
                         responses_store_max_entries=store["responses_store_max_entries"],
                         responses_store_max_bytes=store["responses_store_max_mib"] << 20,
-                        swap_models=args.swap_model, cors_origins=args.cors_origins)
+                        swap_models=args.swap_model, cors_origins=args.cors_origins,
+                        max_queued_tokens=max_queued, prefill_ms=args.prefill_ms)
     handler_class = make_handler_class(config)
     server = ThreadedHTTPServer(("127.0.0.1", args.port), handler_class)
 

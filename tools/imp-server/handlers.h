@@ -300,6 +300,8 @@ struct ServerState {
     int max_concurrent = 64;
     int request_timeout = 300;
     int max_input_tokens = 0;  // reject prompts longer than this many tokens (0=disabled)
+    // --max-queued-tokens (#2408): prompt tokens admitted and not yet prefilled (0=off).
+    int64_t max_queued_tokens = 0;
     int max_n = 8;             // cap on `n` completions (0=unlimited)
     int max_batch_items = 512;  // cap on rerank documents / embeddings input (0=unlimited)
     int max_logit_bias = 1024;  // cap on logit_bias entries (0=unlimited)
@@ -311,6 +313,8 @@ struct ServerState {
     // Admitted inference handlers right now (E-2); entered in pre-routing,
     // left in post-routing.
     InflightGate inflight;
+    // Prompt tokens of admitted requests until their first output token (#2408).
+    QueuedTokenGate queued_tokens;
 
     std::string rate_limit_key(const std::string& remote_addr, const std::string& xff) const {
         return rate_limiter.key(remote_addr, xff);

@@ -2,6 +2,7 @@
 
 #include "runtime/request.h"
 #include "api/imp_internal.h"
+#include "rate_limit.h"
 
 #include <cuda_runtime_api.h>
 
@@ -44,6 +45,10 @@ struct ServerRequest {
     // the same from outside.
     std::chrono::steady_clock::time_point t_submit{};
     std::atomic<double> queue_ms{-1.0};
+
+    // --max-queued-tokens reservation (#2408); the worker releases it at the first output token
+    // or at finish, the destructor on every other path. Null = not counted.
+    std::shared_ptr<QueuedTokenLease> queued_lease;
 
     // Push a token event (called from worker thread)
     void push_token(int32_t token_id, bool is_last, const char* reason) {

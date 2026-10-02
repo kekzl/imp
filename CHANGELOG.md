@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- `--max-queued-tokens <n>` (#2408, default 0 = off): imp-server answers 429 at once (`rate_limit_error`, `/v1/messages` `overloaded_error`, `Retry-After: 1`) when queued prompt tokens (admitted, not yet past prefill) plus the new prompt exceed `n`. Gauge `imp_queued_prompt_tokens` on `/metrics`.
+
 ### Changed
 - imp-server reads the shared sampling fields through one parser, `parse_sampling_fields` (`sampling_fields.h`, #2461), for chat, completions, messages and responses; the `/v1/messages` and `/v1/responses` pass-through comes from the same table. Parsed values and 4xx unchanged: 353 bodies x 4 dialects, golden.
 - `imp-quantize` writes `lm_head` as the per-row FP8 head `auto` runs (`--lm-head fp8`, default for modelopt, #2479); the loader serves it with no load-time conversion. Qwen3-14B head 1483.8 -> 742.5 MiB, PPL 9.7350 both (KV FP16).

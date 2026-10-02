@@ -274,3 +274,16 @@ Two entry points, one generation path (#2201):
 
 - Streaming responses are stored when `response.completed` / `response.incomplete` was written; a client that disconnects earlier stores nothing.
 - Token identity of a two-turn continuation against the stateless resend on a real model: `scripts/accept_2206.sh` (GPU).
+
+## Admission by queued prompt tokens
+
+`--max-queued-tokens <n>` bounds the prompt tokens admitted and not yet past prefill (#2408). Default `0`: off.
+
+| item | behaviour |
+|---|---|
+| counted | prompt tokens after templating and tokenization, from admission until the request's first output token (or its end) |
+| endpoints | `/v1/chat/completions`, `/v1/completions`, `/infill`, `/v1/messages`, `/v1/responses` |
+| refused | queued + this prompt > `n`: HTTP 429 at once, before prefill, with `Retry-After: 1` |
+| error type | OpenAI envelope `rate_limit_error`; `/v1/messages` Anthropic envelope `overloaded_error`. Same status and types as the `--max-concurrent` refusal |
+| empty queue | always admitted, even a prompt over `n`: its size is `--max-input-tokens`' job |
+| `/metrics` | `imp_queued_prompt_tokens` (gauge), tracked with the cap off too; refusals count in `imp_requests_rejected_total` |

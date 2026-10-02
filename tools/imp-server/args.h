@@ -35,6 +35,8 @@ struct ServerArgs : CommonArgs {
     int request_timeout = 300;      // --request-timeout: per-request timeout in seconds (0=unlimited)
     int rate_limit = 0;             // --rate-limit: max requests per minute per IP (0=unlimited)
     int max_input_tokens = 0;       // --max-input-tokens: reject prompts longer than this (0=unlimited)
+    // --max-queued-tokens (#2408): 429 past this many queued prompt tokens (0=off).
+    long long max_queued_tokens = 0;
     // --trusted-proxy: comma-separated addresses whose X-Forwarded-For this server believes.
     // Empty (default) ignores the header and uses the peer address as the rate-limit key; without
     // this the limit keys on a client-written string, so varying one header bypasses it and every

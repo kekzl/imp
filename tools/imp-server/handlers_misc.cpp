@@ -469,6 +469,10 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_queue_running Requests in the current prefill or decode batch\n";
     out += "# TYPE imp_queue_running gauge\n";
     out += "imp_queue_running " + std::to_string(running) + "\n";
+    // --max-queued-tokens (#2408) bounds this gauge; tracked with the cap off too.
+    out += "# HELP imp_queued_prompt_tokens Prompt tokens admitted and not yet past prefill\n";
+    out += "# TYPE imp_queued_prompt_tokens gauge\n";
+    out += "imp_queued_prompt_tokens " + std::to_string(state.queued_tokens.queued()) + "\n";
 
     res.set_content(out, "text/plain; version=0.0.4; charset=utf-8");
 }
