@@ -157,6 +157,7 @@ struct TensorDesc {
     uint64_t dims[4];  // GGUF order (innermost first)
     uint32_t type;     // GGML_TYPE_F16 or GGML_TYPE_F32
     size_t byte_size;
+    std::vector<float> f32_values;  // explicit F32 payload; empty = fill with 1.0
 };
 
 static size_t tensor_bytes(uint32_t type, const uint64_t* dims, uint32_t n_dims) {
@@ -170,7 +171,10 @@ static size_t tensor_bytes(uint32_t type, const uint64_t* dims, uint32_t n_dims)
     return n_elements * 4;  // fallback
 }
 
-std::string generate_gguf_stub(const std::string& arch) {
+std::string generate_gguf_stub(const std::string& arch) { return generate_gguf_stub(arch, {}); }
+
+std::string generate_gguf_stub(const std::string& arch, const std::vector<float>& rope_freqs,
+                               const std::string& pre) {
     // ---- 1. Build tensor list ----
     // GGUF dims are stored innermost-first. For a 2D weight [rows, cols] in our
     // convention, GGUF stores ne[0]=cols, ne[1]=rows.
@@ -224,6 +228,10 @@ std::string generate_gguf_stub(const std::string& arch) {
     // output norm + output projection
     add_1d("output_norm.weight", D_MODEL, GGML_TYPE_F32);
     add_2d("output.weight", VOCAB, D_MODEL, GGML_TYPE_F16);
+    if (!rope_freqs.empty()) {
+        add_1d("rope_freqs.weight", static_cast<int>(rope_freqs.size()), GGML_TYPE_F32);
+        tensors.back().f32_values = rope_freqs;
+    }
 
     // ---- 2. Compute tensor data offsets (relative to data section start) ----
     // Each tensor's data aligned to STUB_ALIGNMENT within the data section.
@@ -254,7 +262,7 @@ std::string generate_gguf_stub(const std::string& arch) {
     // feed_forward_length + head_count + head_count_kv + rope.dimension_count +
     // layer_norm_rms_epsilon + tokenizer.ggml.model + tokens + token_type +
     // scores + bos_token_id + eos_token_id = 16
-    uint64_t n_kv = 16;
+    uint64_t n_kv = pre.empty() ? 16 : 17;
 
     // ---- 5. Write GGUF file ----
     BinaryWriter w;
@@ -277,6 +285,8 @@ std::string generate_gguf_stub(const std::string& arch) {
     w.write_kv_u32(arch + ".rope.dimension_count", HEAD_DIM);
     w.write_kv_f32(arch + ".attention.layer_norm_rms_epsilon", 1e-5f);
     w.write_kv_string("tokenizer.ggml.model", "gpt2");
+    if (!pre.empty())
+        w.write_kv_string("tokenizer.ggml.pre", pre);
     w.write_kv_string_array("tokenizer.ggml.tokens", token_strings);
     w.write_kv_i32_array("tokenizer.ggml.token_type", token_types);
     w.write_kv_f32_array("tokenizer.ggml.scores", token_scores);
@@ -307,7 +317,7 @@ std::string generate_gguf_stub(const std::string& arch) {
         if (td.type == GGML_TYPE_F32) {
             // Norm weights: fill with 1.0
             for (uint64_t j = 0; j < n_elements; j++) {
-                float v = 1.0f;
+                float v = td.f32_values.empty() ? 1.0f : td.f32_values[j];
                 w.write_f32(v);
             }
         } else {

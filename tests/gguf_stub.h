@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 
 namespace imp {
 namespace test {
@@ -11,6 +12,11 @@ namespace test {
 // Weights: random FP16, ~200 KB total
 // Tokenizer: minimal BPE with 256 single-byte tokens
 std::string generate_gguf_stub(const std::string& arch = "llama");
+
+// Same stub plus a top-level F32 rope_freqs.weight holding these values (none when empty).
+// pre: tokenizer.ggml.pre value, omitted when empty.
+std::string generate_gguf_stub(const std::string& arch, const std::vector<float>& rope_freqs,
+                               const std::string& pre = "");
 
 // Stub layout: /tmp/imp_stub_XXXXXX/{model.gguf,warm/}. Warm-cache files of stub loads go to
 // warm/ (never the persistent imp-test-cache volume, #2192) and die with the dir.

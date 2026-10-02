@@ -1189,112 +1189,6 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
     return ids;
 }
 
-// ---- BPE Encode (GPT2 byte-level style) ----
-
-// Llama3 pre-tokenizer vs default: contractions split separately; spaces are individual
-// tokens (not attached to the following word); digits split individually (not groups of 3).
-
-static std::vector<std::string> llama3_pre_tokenize(const std::string& text) {
-    std::vector<std::string> result;
-    if (text.empty())
-        return result;
-
-    // Common English contractions that get their own tokens
-    static const char* contractions[] = {
-        "'s",
-        "'t",
-        "'re",
-        "'ve",
-        "'m",
-        "'ll",
-        "'d",
-        "\xe2\x80\x99s",
-        "\xe2\x80\x99t",
-        "\xe2\x80\x99re",
-        "\xe2\x80\x99"
-        "ve",
-        "\xe2\x80\x99"
-        "m",
-        "\xe2\x80\x99"
-        "ll",
-        "\xe2\x80\x99"
-        "d",
-    };
-
-    size_t i = 0;
-    while (i < text.size()) {
-        unsigned char c = static_cast<unsigned char>(text[i]);
-
-        // Check for contractions
-        bool found_contraction = false;
-        if (c == '\'' ||
-            (c == 0xe2 && i + 2 < text.size() && text[i + 1] == '\x80' && text[i + 2] == '\x99')) {
-            for (const char* ctr : contractions) {
-                size_t len = std::strlen(ctr);
-                if (i + len <= text.size() && text.compare(i, len, ctr) == 0) {
-                    result.push_back(text.substr(i, len));
-                    i += len;
-                    found_contraction = true;
-                    break;
-                }
-            }
-        }
-        if (found_contraction)
-            continue;
-
-        if (c == ' ' || c == '\t') {
-            // Space: attach to following word (like GPT2)
-            std::string chunk;
-            chunk += text[i++];
-            while (i < text.size()) {
-                unsigned char cc = static_cast<unsigned char>(text[i]);
-                if (cc == ' ' || cc == '\t' || cc == '\n' || cc == '\r')
-                    break;
-                if (std::ispunct(cc) && cc != '\'')
-                    break;
-                int len = 1;
-                if ((cc & 0xE0) == 0xC0)
-                    len = 2;
-                else if ((cc & 0xF0) == 0xE0)
-                    len = 3;
-                else if ((cc & 0xF8) == 0xF0)
-                    len = 4;
-                for (int j = 0; j < len && i < text.size(); j++)
-                    chunk += text[i++];
-            }
-            result.push_back(std::move(chunk));
-        } else if (c == '\n' || c == '\r') {
-            std::string chunk;
-            while (i < text.size() && (text[i] == '\n' || text[i] == '\r'))
-                chunk += text[i++];
-            result.push_back(std::move(chunk));
-        } else if (std::isalpha(c) || c >= 128) {
-            std::string chunk;
-            while (i < text.size()) {
-                unsigned char cc = static_cast<unsigned char>(text[i]);
-                if (!std::isalpha(cc) && cc < 128)
-                    break;
-                int len = 1;
-                if ((cc & 0xE0) == 0xC0)
-                    len = 2;
-                else if ((cc & 0xF0) == 0xE0)
-                    len = 3;
-                else if ((cc & 0xF8) == 0xF0)
-                    len = 4;
-                for (int j = 0; j < len && i < text.size(); j++)
-                    chunk += text[i++];
-            }
-            result.push_back(std::move(chunk));
-        } else if (std::isdigit(c)) {
-            // Digits: one at a time (llama3 splits individual digits)
-            result.push_back(std::string(1, text[i++]));
-        } else {
-            result.push_back(std::string(1, text[i++]));
-        }
-    }
-    return result;
-}
-
 // ---- Gemma-4 encode: SPM-style ▁ escaping + BPE merge ranks ----
 // Gemma-4 uses SentencePiece-style BPE: spaces→▁, no word-level pre-splitting
 // (only split on newlines), raw UTF-8 characters, BPE merges by rank.
@@ -1510,8 +1404,10 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
 
         // 1. Pre-tokenize into chunks (dispatch based on pre-tokenizer type)
         std::vector<std::string> chunks;
-        if (pre_tokenizer_ == "llama3" || pre_tokenizer_ == "llama-v3" || pre_tokenizer_ == "llama-bpe") {
-            chunks = llama3_pre_tokenize(bpe_text);
+        // GGUF llama-bpe is the Llama 3 tokenizer.json regex, i.e. cl100k (#2520).
+        if (pre_tokenizer_ == "llama3" || pre_tokenizer_ == "llama-v3" || pre_tokenizer_ == "llama-bpe" ||
+            pre_tokenizer_ == "cl100k") {
+            chunks = cl100k_pre_tokenize(bpe_text);
         } else if (pre_tokenizer_ == "qwen2") {
             // The gpt2 fallback's per-char punctuation blocks merges like "->", "():" (#657).
             chunks = qwen2_pre_tokenize(bpe_text);
@@ -1521,8 +1417,6 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
             chunks = o200k_pre_tokenize(bpe_text);
         } else if (pre_tokenizer_ == "nemotron") {
             chunks = nemotron_pre_tokenize(bpe_text);
-        } else if (pre_tokenizer_ == "cl100k") {
-            chunks = cl100k_pre_tokenize(bpe_text);
         } else if (pre_tokenizer_ == "split-seq" && split_seq_) {
             chunks = split_sequence_pre_tokenize(*split_seq_, bpe_text);
         } else {

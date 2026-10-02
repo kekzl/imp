@@ -4,7 +4,10 @@
 #include "model/gguf_loader.h"
 #include "model/gguf_loader_internal.h"
 #include "model/loader_assign.h"
+#include "model/model_arch.h"
+#include "core/logging.h"
 
+#include <cmath>
 #include <string>
 #include <vector>
 #include <utility>
@@ -355,6 +358,73 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
     }
 
     return false;
+}
+
+bool gguf_default_add_bos(const std::string& pre) {
+    return pre == "llama3" || pre == "llama-v3" || pre == "llama-bpe";
+}
+
+// Gemma-4: convert top-level rope_freqs (a per-pair frequency DIVISOR for global layers)
+// into precomputed effective frequencies, fanned to every global layer. The kernel's
+// longrope_inv_freqs expects ready-to-use values.
+static void apply_gemma4_rope_freqs(Model& model) {
+    const ModelConfig& cfg = model.config_;
+    if (cfg.arch == ModelArch::GEMMA4 && !cfg.swa_layers.empty() &&
+        model.layers_[0].rope_freqs.data != nullptr && model.layers_[0].rope_freqs.qtype == QType::F32) {
+        const Tensor& src = model.layers_[0].rope_freqs;
+        int n_pairs = static_cast<int>(src.shape[0]);  // hd/2 for global layer
+        int hd_global = n_pairs * 2;
+        const float* divisors = static_cast<const float*>(src.data);
+        float theta_global = cfg.rope_theta;  // 1e6 for Gemma 4
+
+        // Precompute effective per-pair freq = theta^(-2*pair/hd)/divisor[pair]; the kernel reads
+        // these directly via longrope_inv_freqs, no further theta math. Leaked deliberately:
+        // 4 KB total, model-lifetime.
+        float* effective = new float[n_pairs];
+        for (int p = 0; p < n_pairs; ++p) {
+            float exp_p = -2.0f * static_cast<float>(p) / static_cast<float>(hd_global);
+            float base_freq = std::pow(theta_global, exp_p);
+            effective[p] = base_freq / divisors[p];
+        }
+        int64_t shape[4] = {n_pairs, 0, 0, 0};
+        Tensor eff_tensor(effective, QType::F32, 1, shape, /*on_device=*/false);
+        int n_global = 0;
+        for (int i = 0; i < cfg.n_layers; ++i) {
+            bool is_swa = (i < (int)cfg.swa_layers.size() && cfg.swa_layers[i]);
+            if (!is_swa) {
+                model.layers_[i].rope_freqs = eff_tensor;
+                n_global++;
+            }
+        }
+        if (cfg.swa_layers[0]) {
+            model.layers_[0].rope_freqs = Tensor();
+        }
+        IMP_LOG_INFO("Gemma 4: rope_freqs → %d effective freqs, %d global layers", n_pairs, n_global);
+    }
+}
+
+void apply_gguf_rope_freq_factors(Model& model) {
+    ModelConfig& cfg = model.config_;
+    if (model.layers_.empty())
+        return;
+    apply_gemma4_rope_freqs(model);
+    Tensor& src = model.layers_[0].rope_freqs;
+    if (cfg.arch == ModelArch::GEMMA4 || src.data == nullptr || src.qtype != QType::F32 ||
+        !cfg.rope_long_factor.empty() || !cfg.rope_short_factor.empty())
+        return;
+    const int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
+    const int pairs = ((cfg.rope_dim > 0) ? cfg.rope_dim : hd) / 2;
+    if (pairs <= 0 || src.numel() != pairs) {
+        IMP_LOG_WARN("rope_freqs.weight: %lld factors, rope pairs %d: ignored", (long long)src.numel(),
+                     pairs);
+        return;
+    }
+    const float* f = static_cast<const float*>(src.data);
+    cfg.rope_short_factor.assign(f, f + pairs);
+    cfg.rope_long_factor.assign(f, f + pairs);
+    src = Tensor();
+    IMP_LOG_INFO("rope_freqs.weight: %d per-pair factors [%.3f..%.3f] -> RoPE frequency tables", pairs,
+                 cfg.rope_long_factor.front(), cfg.rope_long_factor.back());
 }
 
 }  // namespace imp

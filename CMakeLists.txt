@@ -823,7 +823,7 @@ if(IMP_BUILD_TESTS)
         PROPERTIES COMPILE_DEFINITIONS "IMP_FUZZ_NO_ENTRY")
     set(IMP_FUZZ_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/fuzz)
 
-    imp_add_test_module(test-core SOURCES
+    imp_add_test_module(test-core WITH_STUB SOURCES
         tests/test_cuda_errors.cpp
         tests/test_batch_verify_predicates.cpp
         tests/test_forward_profile.cpp
@@ -844,6 +844,7 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_dtype.cpp
         tests/test_json_out.cpp
         tests/test_gguf_loader.cpp
+        tests/test_gguf_llama3.cpp
         tests/test_gguf_silent_drops.cpp
         tests/test_gguf_fault_injection.cpp
         tests/test_fp_bits.cpp
@@ -1125,6 +1126,7 @@ if(IMP_BUILD_TESTS)
 
     imp_add_test_module(test-text SOURCES
         tests/test_tokenizer.cpp
+        tests/test_tokenizer_llama_bpe.cpp
         tests/test_tokenizer_robustness.cpp
         tests/test_chat_template.cpp
         tests/test_transcript_ids.cpp
