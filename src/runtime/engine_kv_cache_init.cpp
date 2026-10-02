@@ -257,6 +257,12 @@ bool Engine::init_kv_cache() {
             // (server.recurrent_snapshot_host_mb) is pinned HOST memory, not VRAM.
             probe.recurrent_snapshot_bytes = per_seq > 0 ? (budget / per_seq) * per_seq : 0;
         }
+        // Hybrid verify state scratch (#2452): 2 x one sequence's recurrent state, taken at init.
+        if (mcfg.ssm_inner_size > 0 && vram_budget.ssm_footprint_bytes > 0 && spec_state_scratch_wanted_()) {
+            const size_t slots = static_cast<size_t>(config_.max_batch_size) +
+                                 static_cast<size_t>(std::max(0, ssm_reserved_slots));
+            probe.spec_decode_bytes = slots > 0 ? 2 * (vram_budget.ssm_footprint_bytes / slots) : 0;
+        }
         if (executor_) {
             // allocate_workspaces() ran before distributable was read: charge only the part of the
             // estimate not yet resident (Qwen3.8-27B: 887 estimated, 749 held, #2365).
