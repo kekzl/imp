@@ -121,7 +121,7 @@ void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count,
 
 [[nodiscard]] bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, GgufWireType gtype);
 
-// Non-Gemma-4 top-level rope_freqs.weight (llama3 scaling): per-pair divisors moved into
+// Top-level rope_freqs.weight: Gemma-4 -> per-layer effective freqs; else (llama3) divisors into
 // cfg.rope_short_factor/rope_long_factor, freq[i] = theta^(-2i/rd) / rope_freqs[i] (#2520).
 void apply_gguf_rope_freq_factors(Model& model);
 
