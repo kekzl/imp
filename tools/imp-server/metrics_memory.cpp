@@ -122,6 +122,11 @@ if (state.ctx && state.ctx->engine) {
             out += "# TYPE imp_kv_blocks_reserved gauge\n";
             out += "imp_kv_blocks_reserved " + std::to_string(mgr->outstanding_reserved_blocks()) + "\n";
         }
+        out +=
+            "# HELP imp_kv_swaps_total Decoding requests whose KV went to host on a dry pool "
+            "instead of being cancelled (#2486)\n";
+        out += "# TYPE imp_kv_swaps_total counter\n";
+        out += "imp_kv_swaps_total " + std::to_string(state.ctx->engine->kv_swaps_out()) + "\n";
 
         // Speculative-decode metrics (#1321): without them a test can't tell whether the drafter ran -
         // the n-gram matcher only fires on repetitive context, so on ordinary prompts drafted stays 0
