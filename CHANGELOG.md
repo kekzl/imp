@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-10-03
+
 ### Added
 - FFN prefill graphs (#2435): every prefill the full prefill graph cannot take (ragged waves, continuation chunks, prefix hits) replays its FFN/MoE phase per (layer, padded rows) from a CUDA graph. Qwen3-30B-A3B-NVFP4 eager pp512 25.74-29.66 -> 17.71-18.35 ms; agent-turn TTFT 55.6-56.1 -> 51.0-52.7 ms.
 - imp-quantize reads per-tensor-scale FP8 sources (Modelopt scalar `weight_scale`, #2473): widened with the scalar, `weight_scale` and `input_scale` dropped. `--dry-run` on a synthetic Modelopt FP8 Qwen3-0.6B: 196 of 196 E4M3 weights quantized (was 0, all copied through).
