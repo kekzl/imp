@@ -96,7 +96,7 @@ Two of these do not switch off the way the field name suggests:
 | counter | what moves it |
 |---|---|
 | `imp_requests_timed_out_total` | the server ended a request at `--request-timeout`. The client sees `finish_reason: "length"`, which is also what a spent token budget produces - this counter is the only way to tell them apart |
-| `imp_kv_pressure_rejections_total` | a request was cancelled because the KV pool could not give it blocks (admission or mid-decode). Not incremented for a failed metadata allocation or a snapshot mismatch, which are different faults |
+| `imp_kv_pressure_rejections_total` | a request was cancelled because the KV pool could not give it blocks (admission or mid-decode). Not incremented for a failed metadata allocation or a snapshot mismatch, which are different faults. `imp_kv_swaps_total`: decoding requests that found the pool dry and moved their KV to pinned host instead (#2486) |
 | `imp_kv_pool_growths_total` | the growable pool committed more memory. A pool that keeps growing under load is the signal that arrives before it stops being able to |
 | `imp_streaming_kv_auto_enables_total` | the KV pool ran nearly full and StreamingLLM eviction switched itself on (every KV dtype; F16 only before v0.43). The same event demotes CUDA graphs; both are lifted again once a fifth of the pool is free, unless a sequence was actually evicted, which pins them for the rest of the process. `usage.prompt_tokens_details.evicted_tokens` is the per-request size, this is the rate |
 | `imp_prefix_cache_evictions_total` | a cached prefix block was reclaimed for a new allocation. Rising while `imp_tokens_cached_total` stalls means the pool is smaller than the working set |
@@ -135,7 +135,7 @@ The four latency histograms (`imp_request_duration_seconds`, `imp_ttft_seconds`,
 - The serving KPI harness reads the histograms and counters back per concurrency level (`tools/analysis/serving_kpi.py`, definitions in [`internals/BENCHMARKING.md`](internals/BENCHMARKING.md)).
 
 `imp_kv_blocks_reserved` (gauge) is what admission has promised to running
-requests for the rest of their generation and not yet written (#1635). Free
+requests for their expected generation (`runtime.admission_decode_tokens`, #2486) and not yet written (#1635). Free
 blocks minus this gauge is what the next request is admitted against, so a
 queue in front of a pool with free blocks is explained by this number and by
 nothing else in `/metrics`.

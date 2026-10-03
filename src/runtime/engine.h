@@ -363,6 +363,8 @@ public:
     uint64_t kv_pressure_rejections() const noexcept {
         return kv_pressure_rejections_.load(std::memory_order_relaxed);
     }
+    // Requests swapped to host instead of cancelled on a dry pool, process total (#2486).
+    uint64_t kv_swaps_out() const noexcept { return kv_swaps_out_.load(std::memory_order_relaxed); }
     // Steps whose decoders rode the ragged prefill forward
     // (runtime.prefill_mixed_decode); the test and /metrics read it.
     uint64_t mixed_decode_steps() const noexcept {
@@ -1532,6 +1534,15 @@ private:
     [[nodiscard]] bool decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs);
     [[nodiscard]] bool decode_kv_exhausted_(std::shared_ptr<Request>& req, int blocks_needed, int blocks_have,
                                             int ctx_len);
+    // KV swap (#2486, engine_kv_swap.cpp): out = KV to pinned host + SWAPPED, in = blocks back;
+    // false = nothing changed. wire: scheduler hook + admission mode. valve: never while swap answers.
+    [[nodiscard]] bool kv_swap_supported_() const;
+    void wire_kv_swap_();
+    [[nodiscard]] bool kv_valve_armed_(int free_blocks, int reclaimable, int pool_total, int unmet,
+                                       int live) const;
+    [[nodiscard]] bool kv_swap_out_(Request& req);
+    [[nodiscard]] bool kv_swap_in_(Request& req);
+    std::atomic<uint64_t> kv_swaps_out_{0};
     // One token per decode row of `logits` (row i = valid_decode[i]) with
     // each request's own sampling state (async batched sampler, device
     // penalty histories, per-row constraints, sync-only rows).

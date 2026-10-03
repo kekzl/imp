@@ -139,6 +139,13 @@ decode_pipeline      = true
 # logprobs, embeddings or rerank scoring keep the serial path, as do
 # Mamba2/MLA models, MTP, SWA sizing and residual KV.
 prefill_batch        = true
+# KV admission (#2486): decode tokens reserved per request. 0 = p90 of the
+# last 64 finished outputs (1024 before 8 finished, floor 256), -1 = the full
+# max_tokens, > 0 = fixed. Below max_tokens only with kv_swap = true.
+admission_decode_tokens = 0
+# A decoding request that finds the KV pool dry moves its KV to pinned host
+# memory and resumes once blocks free up, instead of being cancelled (#2486).
+kv_swap              = true
 # Engine warmup at init (two tiny requests, ~2-4 s on a 30B): primes cuBLAS
 # handles + L2 AND pre-arms the decode graph pool so the FIRST real request
 # takes the same graph-kernel path as every later one — without it greedy

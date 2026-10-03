@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <set>
 #include <thread>
 
 namespace {
@@ -245,6 +246,41 @@ TEST(ServingSignalsTest, SpeculationCountersReachTheRequest) {
     EXPECT_GT(req.spec_drafted, 0);
     EXPECT_GE(req.spec_accepted, 0);
     EXPECT_LE(req.spec_accepted, req.spec_drafted);
+    be.stop();
+}
+
+// #2486: admission reserves an expected length (fixed 32 tokens here), so two requests share
+// a pool that cannot hold both generations. The one that runs it dry swaps its KV to host and
+// comes back: both finish "length" with every token, none is cancelled.
+TEST(ServingSignalsTest, KvOverrunSwapsToHostInsteadOfCancelling) {
+    if (!model_exists())
+        GTEST_SKIP() << "Model not found: " << model_path();
+    Loaded m;
+    imp::RuntimeConfig rc;
+    rc.kv_cache.dtype = "fp16";
+    rc.runtime.admission_decode_tokens = 32;
+    imp::set_pending_runtime_config(rc);
+    // ~120-token prompts = 8 blocks each; 300 generated = 19 more; 2 x 27 > 40.
+    ASSERT_TRUE(m.open(/*max_batch_size=*/2, /*kv_blocks=*/40));
+    BatchingEngine be;
+    be.start(m.ctx);
+    Served a{make_request(m.ctx, long_prompt(), 300, 0.0f)};
+    Served b{make_request(m.ctx, long_prompt() + " Now name a tertiary color.", 300, 0.0f)};
+    be.submit(a.sr);
+    be.submit(b.sr);
+    ASSERT_TRUE(drain(a, 300000));
+    ASSERT_TRUE(drain(b, 300000));
+    EXPECT_GE(m.ctx->engine->kv_swaps_out(), 1u) << "the pool never ran dry: the test exercised nothing";
+    for (const Served* r : {&a, &b}) {
+        EXPECT_EQ(r->finish, "length");
+        EXPECT_EQ(r->tokens, 300);
+        EXPECT_EQ(r->sr->request->cancel_reason, imp::CancelReason::None);
+        // Garbage KV after a bad round trip loops on a token or two.
+        const auto& out = r->sr->request->output_tokens;
+        ASSERT_GE(out.size(), 100u);
+        std::set<int32_t> tail(out.end() - 100, out.end());
+        EXPECT_GE(tail.size(), 10u) << "degenerate tail after swap";
+    }
     be.stop();
 }
 

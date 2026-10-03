@@ -643,6 +643,9 @@ void Engine::maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> 
 // block for a live row. Cancels the row, returns false (the caller skips it).
 bool Engine::decode_kv_exhausted_(std::shared_ptr<Request>& req, int blocks_needed, int blocks_have,
                                   int ctx_len) {
+    // Admission reserved an expected length (#2486): overrun swaps to host, not cancel.
+    if (kv_swap_out_(*req))
+        return false;
     // KV exhausted: append_block already reclaimed cached blocks, so
     // the free pool AND all reclaimable cached blocks are empty.
     // Reject-newest, not LRU eviction: every lru_order_ entry is LIVE

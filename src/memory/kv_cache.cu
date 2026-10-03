@@ -929,4 +929,45 @@ void KVCache::batched_copy_device(const CopyDesc* d_descs, int n, cudaStream_t s
     IMP_CUDA_CHECK_LAUNCH();
 }
 
+size_t KVCache::swap_bytes_per_block() const {
+    size_t total = 0;
+    for (int l = 0; l < n_layers_; ++l) {
+        if (layer_is_swa(l))
+            continue;
+        total += 2 * block_bytes(l);
+        if (scale_pool_)
+            total += 2 * scale_block_bytes(l);
+        if (minmax_pool_)
+            total += minmax_block_bytes_;
+    }
+    return total;
+}
+
+void KVCache::swap_copy(const std::vector<int>& blocks, char* host_dev, CopyDesc* descs_host,
+                        const CopyDesc* descs_dev, bool to_host, cudaStream_t stream) {
+    int n = 0;
+    size_t off = 0;
+    auto add = [&](void* dev, size_t bytes) {
+        if (dev == nullptr || bytes == 0)
+            return;
+        char* host = host_dev + off;
+        descs_host[n++] = to_host ? CopyDesc{dev, host, bytes} : CopyDesc{host, dev, bytes};
+        off += bytes;
+    };
+    for (const int b : blocks) {
+        for (int l = 0; l < n_layers_; ++l) {
+            if (layer_is_swa(l))
+                continue;
+            add(k_ptr(l, b), block_bytes(l));
+            add(v_ptr(l, b), block_bytes(l));
+            if (scale_pool_) {
+                add(k_scale_ptr(l, b), scale_block_bytes(l));
+                add(v_scale_ptr(l, b), scale_block_bytes(l));
+            }
+            add(key_minmax_ptr(l, b), minmax_block_bytes_);
+        }
+    }
+    batched_copy_device(descs_dev, n, stream);
+}
+
 }  // namespace imp

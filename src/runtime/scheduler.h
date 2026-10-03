@@ -1,5 +1,6 @@
 #pragma once
 
+#include "runtime/decode_length_estimate.h"
 #include "runtime/request.h"
 #include <algorithm>
 #include <cstdint>
@@ -54,7 +55,26 @@ public:
     using AdmissionGateFn = std::function<bool()>;
     void set_admission_gate(AdmissionGateFn fn) { admission_gate_ = std::move(fn); }
 
+    // #2486: decode tokens reserved per admitted request (admission_decode_tokens: -1 =
+    // max_tokens, 0 = DecodeLengthEstimate, > 0 fixed). The engine passes -1 unless it can swap.
+    void set_admission_decode_mode(int mode) { admission_decode_mode_ = mode; }
+    // Brings a SWAPPED request's KV back (engine thread). True = it holds its blocks again.
+    using SwapInFn = std::function<bool(Request&)>;
+    void set_swap_in(SwapInFn fn) { swap_in_ = std::move(fn); }
+    [[nodiscard]] int reserve_decode_tokens(const Request& r) const {
+        return admission_decode_tokens(admission_decode_mode_, r.max_tokens, decode_estimate_);
+    }
+    [[nodiscard]] const DecodeLengthEstimate& decode_estimate() const { return decode_estimate_; }
+    [[nodiscard]] int swapped_count() const;
+
 private:
+    // Swap SWAPPED requests back in, oldest first; true while one still waits.
+    [[nodiscard]] bool swap_in_waiting_();
+    // Feeds FINISHED output lengths into decode_estimate_ (before schedule() erases them).
+    void record_finished_();
+    // Admission's decode promise for req (#1635), held until its blocks are written.
+    void hold_decode_reservation_(const Request& req);
+
     int max_batch_size_;
     bool pending_dirty_ = false;
     uint64_t round_ = 0;  // schedule() invocations, the clock the aging uses
@@ -63,6 +83,9 @@ private:
     KVCacheManager* kv_manager_ = nullptr;  // optional, for memory-aware scheduling
     PrefixReuseLimitFn prefix_reuse_limit_;  // optional, hybrid snapshot boundary
     AdmissionGateFn admission_gate_;         // optional, lazy recurrent-slot commit
+    SwapInFn swap_in_;                       // optional, KV swap-in (#2486)
+    int admission_decode_mode_ = -1;
+    DecodeLengthEstimate decode_estimate_;
 };
 
 }  // namespace imp

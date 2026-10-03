@@ -416,6 +416,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_spec_mtp.cpp
     src/runtime/engine_spec_batch_verify.cpp
     src/runtime/engine_sampling_stop.cpp
+    src/runtime/engine_kv_swap.cpp
     src/runtime/stop_mask.cpp
     src/runtime/ngram_draft.cpp
     src/runtime/suffix_draft.cpp
@@ -833,6 +834,8 @@ if(IMP_BUILD_TESTS)
 
     imp_add_test_module(test-core WITH_STUB SOURCES
         tests/test_cuda_errors.cpp
+        # KV admission by expected decode length, swapped requests first (#2486).
+        tests/test_kv_admission.cpp
         # MoE prefill selectors (#2459): table lookups, no kernel launch.
         tests/test_moe_prefill_select.cpp
         tests/test_batch_verify_predicates.cpp

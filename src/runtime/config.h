@@ -178,6 +178,13 @@ struct RuntimeConfig {
         // keep the serial path.
         bool prefill_batch = true;
 
+        // KV admission (#2486): decode tokens reserved per request. 0 = DecodeLengthEstimate
+        // (p90 of the last 64 finished outputs), -1 = max_tokens, > 0 = fixed. Below max_tokens
+        // only when kv_swap can catch an overrun (engine_kv_swap.cpp), else -1.
+        int admission_decode_tokens = 0;
+        // Dry KV pool at decode: swap the request's KV to pinned host and resume later, not cancel.
+        bool kv_swap = true;
+
         // Runs the paced prefill chunk CONCURRENT with the in-flight batched
         // decode step (prefill on the low-priority stream, decode in the
         // dual-workspace slot 1), instead of serially between two decode
