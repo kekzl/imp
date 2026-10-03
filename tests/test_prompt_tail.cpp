@@ -36,3 +36,12 @@ TEST(PromptTail, ShortPromptNoReuse) {
     EXPECT_EQ(prompt_reuse_cap_blocks(48, 16), 0);
     EXPECT_EQ(prompt_reuse_cap_blocks(49, 16), 1);
 }
+
+// The chunk grid a fresh prefill splits on; the hybrid branch point (#2409) floors to it.
+TEST(PromptTail, BasePrefillChunkIsResolvedCappedAndBlockFloored) {
+    EXPECT_EQ(base_prefill_chunk(2048, 4096, 16), 2048);
+    EXPECT_EQ(base_prefill_chunk(4096, 2048, 16), 2048) << "capped at executor max_tokens";
+    EXPECT_EQ(base_prefill_chunk(0, 2048, 16), 2048) << "0 = unchunked: max_tokens";
+    EXPECT_EQ(base_prefill_chunk(1000, 2048, 16), 992) << "whole KV blocks";
+    EXPECT_EQ(base_prefill_chunk(1000, 2048, 0), 1000) << "no KV manager: no floor";
+}

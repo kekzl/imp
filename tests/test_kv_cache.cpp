@@ -1386,7 +1386,8 @@ TEST(KVCacheTest, BytesPerBlockIsKPlusVOverAllLayers) {
 
 // #2174: a recurrent snapshot restores only with the KV blocks its forward wrote. Turn 1 caches
 // blocks 0-3; the turn-2 send recomputes them in fresh blocks and saves a snapshot over 18 blocks.
-// adopt_chain must rebind blocks 0-3 to the send's copies, so the resend reuses exactly those.
+// Turn 1's copies keep the hash binding, the send's copies become shadows (#2409), and a resend
+// given the chain reuses exactly the send's blocks.
 TEST(KVCacheManagerTest, SnapshotChainAdoptsTheSavingForwardsBlocks) {
     auto mgr = MakeManager(64);
     mgr->set_prefix_caching_enabled(true);
@@ -1409,14 +1410,21 @@ TEST(KVCacheManagerTest, SnapshotChainAdoptsTheSavingForwardsBlocks) {
     for (int b = 0; b < 18; ++b)
         EXPECT_EQ(chain[b].block_id, send0[b]) << "link " << b;
     EXPECT_TRUE(mgr->chain_intact(chain));
-    // Turn 1's copies were held by the cache only: released, not leaked.
-    EXPECT_EQ(mgr->num_cached_blocks(), 0);
+    // Turn 1's copies keep their binding and stay cached.
+    EXPECT_EQ(mgr->num_cached_blocks(), 4);
     mgr->register_block_hashes(1, turn2);
     mgr->free_sequence(1);
     EXPECT_TRUE(mgr->chain_intact(chain));
+    EXPECT_EQ(mgr->num_cached_blocks(), 4 + 18) << "the 4 shadows are cached like primaries";
 
-    // Resend: the reused prefix is exactly the snapshot's chain.
-    ASSERT_EQ(mgr->allocate_blocks_with_prefix(2, turn2, 18), 18);
+    // Without the chain the hash map would hand out turn 1's blocks 0-3.
+    ASSERT_EQ(mgr->allocate_blocks_with_prefix(3, turn2, 18), 18);
+    for (int b = 0; b < 4; ++b)
+        EXPECT_EQ(mgr->block_table(3)[b], turn1_blocks[b]) << "block " << b;
+    mgr->free_sequence(3);
+
+    // Resend with the chain: the reused prefix is exactly the snapshot's forward.
+    ASSERT_EQ(mgr->allocate_blocks_with_prefix(2, turn2, 18, 0, chain), 18);
     for (int b = 0; b < 18; ++b)
         EXPECT_EQ(mgr->block_table(2)[b], send0[b]) << "block " << b;
     for (int b = 0; b < 4; ++b)
@@ -1427,9 +1435,9 @@ TEST(KVCacheManagerTest, SnapshotChainAdoptsTheSavingForwardsBlocks) {
     mgr->free_sequence(2);
 }
 
-// Another forward rebinding a shared block, or a recycled block id rebound to the same hash,
-// breaks the chain: the snapshot must not restore against KV it was not computed with.
-TEST(KVCacheManagerTest, SnapshotChainBreaksOnRebindAndRecycle) {
+// Another forward of a shared prefix keeps both chains (#2409: the second one shadows); a
+// recycled block id rebound to the same hash breaks the chain.
+TEST(KVCacheManagerTest, SnapshotChainSurvivesSharedPrefixAndBreaksOnRecycle) {
     auto mgr = MakeManager(8);
     mgr->set_prefix_caching_enabled(true);
     std::vector<int32_t> a(40), b(40);
@@ -1443,10 +1451,13 @@ TEST(KVCacheManagerTest, SnapshotChainBreaksOnRebindAndRecycle) {
     ASSERT_EQ(mgr->allocate_blocks_with_prefix(1, b, 0), 0);  // same 2 blocks, own copies
     const auto chain_b = mgr->adopt_chain(1, b, 2, 0, 0);
     ASSERT_EQ(chain_b.size(), 2u);
-    EXPECT_FALSE(mgr->chain_intact(chain_a));
+    EXPECT_TRUE(mgr->chain_intact(chain_a)) << "the second forward must not break the first chain";
     EXPECT_TRUE(mgr->chain_intact(chain_b));
+    EXPECT_NE(chain_a[0].block_id, chain_b[0].block_id);
     mgr->free_sequence(0);
     mgr->free_sequence(1);
+    EXPECT_TRUE(mgr->chain_intact(chain_a));
+    EXPECT_TRUE(mgr->chain_intact(chain_b)) << "a freed shadow stays cached";
 
     // Recycle: every block reallocated fresh, then the same tokens bound again.
     std::vector<int32_t> filler(128);

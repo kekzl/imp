@@ -32,20 +32,12 @@ using engine_internal::build_logprob_info;
 using engine_internal::free_prefill_buffers;
 
 void Engine::step_prefill(cudaStream_t stream) {
-    int resolved = resolve_prefill_chunk_size_();
-    int effective_chunk = (resolved > 0) ? resolved : executor_->max_tokens();
     // Hard cap: chunk size must never exceed the executor's max_tokens (itself
     // capped to 2048 for SSM/GDN hybrids, executor_workspace.cu:240). Without
     // this a server-side prefill_chunk_size default overflows the workspace
     // (`n_tokens (X) exceeds max_tokens (Y)` -> reshape numel mismatch).
-    if (effective_chunk > executor_->max_tokens()) {
-        effective_chunk = executor_->max_tokens();
-    }
-    if (kv_manager_) {
-        int bs = kv_manager_->kv_cache()->block_size();
-        if (effective_chunk > bs)
-            effective_chunk = (effective_chunk / bs) * bs;
-    }
+    int effective_chunk = base_prefill_chunk(resolve_prefill_chunk_size_(), executor_->max_tokens(),
+                                             kv_manager_ ? kv_manager_->kv_cache()->block_size() : 0);
 
     // Decode-aware chunking: prefill and decode share one CUDA stream, so
     // every chunk forward inserts its latency (~40-80 ms at 2048) between two
@@ -213,7 +205,8 @@ bool Engine::prefill_allocate_kv_blocks_(std::shared_ptr<Request>& req, int kv_b
                                   ? hybrid_prefix_reuse_limit_(*req)
                                   : prompt_reuse_cap_blocks(total_input, kv_bs);
         prefix_reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens, max_reuse,
-                                                                 req->prefix_salt);
+                                                                 req->prefix_salt,
+                                                                 restore_chain_of(req->recurrent_restore));
         if (prefix_reused < 0) {
             // KV exhausted even after cached-block reclamation. The old fallback
             // evicted live sequences (every lru_order_ entry is live; no

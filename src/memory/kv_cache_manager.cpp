@@ -44,13 +44,8 @@ void drop_unless_synced(cudaStream_t s, Entries& entries) {
 }  // namespace
 
 void KVCacheManager::drop_stale_hash_if_last(int block_id) {
-    if (block_id >= 0 && cache_->ref_count(block_id) == 1) {
-        auto hit = block_id_to_hash_.find(block_id);
-        if (hit != block_id_to_hash_.end()) {
-            block_hash_to_id_.erase(hit->second);
-            block_id_to_hash_.erase(hit);
-        }
-    }
+    if (block_id >= 0 && cache_->ref_count(block_id) == 1)
+        unbind_block_(block_id);
 }
 
 void KVCacheManager::rollback_partial_allocation(int seq_id, SeqBlocks& blocks,
@@ -327,7 +322,7 @@ void KVCacheManager::free_sequence(int seq_id) {
                 n_inmap++;  // already listed by the cache: a stale entry, this block was reused
             else if (cache_->ref_count(block_id) != 1)
                 n_shared++;
-            else if (block_id_to_hash_.find(block_id) == block_id_to_hash_.end())
+            else if (!has_binding_(block_id))
                 n_unhashed++;
             else
                 n_cached++;
@@ -355,9 +350,8 @@ void KVCacheManager::free_sequence(int seq_id) {
 
         if (prefix_caching_enabled_ && cache_->ref_count(block_id) == 1) {
             // This sequence is the last reference. Check if the block is
-            // registered in the hash table for potential reuse.
-            auto hash_it = block_id_to_hash_.find(block_id);
-            if (hash_it != block_id_to_hash_.end()) {
+            // registered in the hash table (or as a shadow version) for potential reuse.
+            if (has_binding_(block_id)) {
                 // Move this sequence's reference into the cache.
                 if (cached_blocks_map_.find(block_id) == cached_blocks_map_.end()) {
                     cached_blocks_lru_.push_back(block_id);
@@ -513,8 +507,45 @@ int KVCacheManager::longest_cached_prefix_blocks(std::span<const int32_t> tokens
     return cached;
 }
 
+int KVCacheManager::reusable_block_(size_t block_hash, const KvChainLink* link) {
+    if (link != nullptr) {
+        const int cb = link->block_id;
+        const bool alive = cb >= 0 && (cached_blocks_map_.count(cb) != 0 || cache_->ref_count(cb) > 0);
+        return link->hash == block_hash && alive && chain_intact(std::span<const KvChainLink>(link, 1)) ? cb
+                                                                                                        : -1;
+    }
+    auto hit = block_hash_to_id_.find(block_hash);
+    if (hit == block_hash_to_id_.end())
+        return -1;
+    if (cache_->ref_count(hit->second) == 0 && cached_blocks_map_.count(hit->second) == 0) {
+        // Stale entry: the mapped block is free-listed (ref 0, not cached). Reusing it would
+        // double-own the block. Drop the entry loudly and treat as a miss.
+        IMP_LOG_WARN("prefix cache: stale hash entry for free block %d — dropping", hit->second);
+        block_id_to_hash_.erase(hit->second);
+        block_hash_to_id_.erase(hit);
+        return -1;
+    }
+    return hit->second;
+}
+
+void KVCacheManager::take_block_(SeqBlocks& blocks, int block_id) {
+    auto cached_it = cached_blocks_map_.find(block_id);
+    if (cached_it == cached_blocks_map_.end()) {
+        blocks.push(cache_->share_block(block_id));  // actively referenced by another sequence
+        return;
+    }
+    // The reference MOVES from the cache to this sequence. Leaving the LRU means leaving the
+    // reclaimable count; pinned blocks were never counted.
+    cached_blocks_lru_.erase(cached_it->second.lru_it);
+    blocks.push(std::move(cached_it->second.ref));
+    cached_blocks_map_.erase(cached_it);
+    if (pinned_blocks_.find(block_id) == pinned_blocks_.end())
+        reclaimable_cached_count_--;
+}
+
 int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int32_t> tokens,
-                                                int max_reuse_blocks, size_t content_salt) {
+                                                int max_reuse_blocks, size_t content_salt,
+                                                std::span<const KvChainLink> restore_chain) {
     const int num_tokens = static_cast<int>(tokens.size());
     if (num_tokens <= 0)
         return 0;
@@ -556,42 +587,20 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id, std::span<const int3
         if (prefix_caching_enabled_ && is_full_block) {
             size_t block_hash = compute_block_hash(tokens.subspan(block_start, block_tokens), parent_hash);
 
-            // Check if this block already exists in the hash table.
-            auto hit = reuse_open ? block_hash_to_id_.find(block_hash) : block_hash_to_id_.end();
-            if (hit != block_hash_to_id_.end() && cache_->ref_count(hit->second) == 0 &&
-                cached_blocks_map_.find(hit->second) == cached_blocks_map_.end()) {
-                // Stale entry: the mapped block is free-listed (ref 0, not
-                // cached). Reusing it would double-own the block. Drop the
-                // entry loudly and treat as a miss.
-                IMP_LOG_WARN("prefix cache: stale hash entry for free block %d — dropping", hit->second);
-                block_id_to_hash_.erase(hit->second);
-                block_hash_to_id_.erase(hit);
-                hit = block_hash_to_id_.end();
-            }
-            if (hit != block_hash_to_id_.end()) {
-                int cached_block = hit->second;
-
-                // Remove from cached LRU if it was unreferenced.
-                auto cached_it = cached_blocks_map_.find(cached_block);
-                if (cached_it != cached_blocks_map_.end()) {
-                    cached_blocks_lru_.erase(cached_it->second.lru_it);
-                    // The reference MOVES from the cache to this sequence.
-                    blocks.push(std::move(cached_it->second.ref));
-                    cached_blocks_map_.erase(cached_it);
-                    // Leaving the LRU means leaving the reclaimable count —
-                    // pinned blocks were never counted to begin with.
-                    if (pinned_blocks_.find(cached_block) == pinned_blocks_.end())
-                        reclaimable_cached_count_--;
-                } else {
-                    // Actively referenced by another sequence — share it.
-                    blocks.push(cache_->share_block(cached_block));
-                }
-
+            // A restore chain names the block (its snapshot's own forward, #2174); else the hash map.
+            const KvChainLink* link = b < static_cast<int>(restore_chain.size())
+                                          ? &restore_chain[static_cast<size_t>(b)]
+                                          : nullptr;
+            const int reuse_id = reuse_open ? reusable_block_(block_hash, link) : -1;
+            if (reuse_id >= 0) {
+                take_block_(blocks, reuse_id);
                 hashes.push_back(block_hash);
                 parent_hash = block_hash;
                 ++reused_blocks;
                 continue;
             }
+            if (link != nullptr)
+                reuse_open = false;  // the chain broke: a hash hit here would pair foreign KV
 
             // No device hit (or reuse closed) — allocate a fresh block.
             BlockRef fresh = allocate_block_ref_with_eviction();
@@ -706,16 +715,24 @@ void KVCacheManager::register_block_hashes(int seq_id, std::span<const int32_t> 
 void KVCacheManager::bind_(size_t hash, int block_id) {
     block_hash_to_id_[hash] = block_id;
     block_id_to_hash_[block_id] = hash;
+    // A shadow of the same hash promoted to primary keeps its serial: its chains stay intact.
+    if (auto s = shadow_id_to_hash_.find(block_id); s != shadow_id_to_hash_.end()) {
+        const bool same = s->second == hash;
+        shadow_id_to_hash_.erase(s);
+        if (same && block_bind_serial_.count(block_id) != 0)
+            return;
+    }
     block_bind_serial_[block_id] = next_bind_serial_++;
 }
 
 void KVCacheManager::unbind_block_(int block_id) {
-    auto it = block_id_to_hash_.find(block_id);
-    if (it == block_id_to_hash_.end())
-        return;
-    if (auto h = block_hash_to_id_.find(it->second); h != block_hash_to_id_.end() && h->second == block_id)
-        block_hash_to_id_.erase(h);
-    block_id_to_hash_.erase(it);
+    shadow_id_to_hash_.erase(block_id);
+    if (auto it = block_id_to_hash_.find(block_id); it != block_id_to_hash_.end()) {
+        if (auto h = block_hash_to_id_.find(it->second);
+            h != block_hash_to_id_.end() && h->second == block_id)
+            block_hash_to_id_.erase(h);
+        block_id_to_hash_.erase(it);
+    }
     block_bind_serial_.erase(block_id);
 }
 
@@ -748,23 +765,18 @@ std::vector<KvChainLink> KVCacheManager::adopt_chain(int seq_id, std::span<const
         if (own < 0)
             return {};
         auto hit = block_hash_to_id_.find(hash);
-        if (hit == block_hash_to_id_.end() || hit->second != own) {
-            if (hit != block_hash_to_id_.end()) {
-                const int old = hit->second;
-                if (pinned_blocks_.count(old) != 0)
-                    return {};  // a pinned prefix keeps its binding; no snapshot over it
-                IMP_LOG_DEBUG("prefix cache: snapshot chain of seq %d rebinds block %d hash %zx: %d -> %d",
-                              seq_id, b, hash, old, own);
-                unbind_block_(old);
-                // Held only by the cache: nobody can reach it now, return it to the pool.
-                if (auto c = cached_blocks_map_.find(old); c != cached_blocks_map_.end()) {
-                    cached_blocks_lru_.erase(c->second.lru_it);
-                    cached_blocks_map_.erase(c);
-                    reclaimable_cached_count_--;
-                }
-            }
+        if (hit == block_hash_to_id_.end()) {
             unbind_block_(own);
             bind_(hash, own);
+        } else if (auto s = shadow_id_to_hash_.find(own);
+                   hit->second != own && (s == shadow_id_to_hash_.end() || s->second != hash)) {
+            // Another forward's block keeps the binding (and its snapshots); this KV becomes a shadow.
+            unbind_block_(own);
+            shadow_id_to_hash_[own] = hash;
+            block_bind_serial_[own] = next_bind_serial_++;
+            IMP_LOG_DEBUG(
+                "prefix cache: snapshot chain of seq %d keeps block %d hash %zx as shadow %d (primary %d)",
+                seq_id, b, hash, own, hit->second);
         }
         chain.push_back({hash, own, block_bind_serial_[own]});
     }
@@ -776,7 +788,9 @@ bool KVCacheManager::chain_intact(std::span<const KvChainLink> chain) const {
         return false;
     for (const auto& l : chain) {
         auto hit = block_hash_to_id_.find(l.hash);
-        if (hit == block_hash_to_id_.end() || hit->second != l.block_id)
+        const bool primary = hit != block_hash_to_id_.end() && hit->second == l.block_id;
+        auto sh = shadow_id_to_hash_.find(l.block_id);
+        if (!primary && (sh == shadow_id_to_hash_.end() || sh->second != l.hash))
             return false;
         auto s = block_bind_serial_.find(l.block_id);
         if (s == block_bind_serial_.end() || s->second != l.serial)
@@ -867,13 +881,9 @@ int KVCacheManager::reclaim_cached_block() {
     cached_block_evictions_.fetch_add(1, std::memory_order_relaxed);
 
     // Remove from hash tables (spilling the KV to the host tier first when it is on).
-    auto hash_it = block_id_to_hash_.find(block_id);
-    if (hash_it != block_id_to_hash_.end()) {
-        if (host_spill_)
-            spill_block_(block_id, hash_it->second);
-        block_hash_to_id_.erase(hash_it->second);
-        block_id_to_hash_.erase(hash_it);
-    }
+    if (auto h = block_id_to_hash_.find(block_id); h != block_id_to_hash_.end() && host_spill_)
+        spill_block_(block_id, h->second);
+    unbind_block_(block_id);  // primary or shadow binding and its serial
 
     // Dropping the cache's reference is what returns the block to the pool —
     // there is no separate free_block() call any more.
@@ -893,10 +903,7 @@ BlockRef KVCacheManager::acquire_block_with_eviction_() {
                 "prefix cache: free list handed out block %d that the cache still lists "
                 "(ref_count %d, %zu cached) — dropping the stale entry",
                 ref.id(), cache_->ref_count(ref.id()), cached_blocks_lru_.size());
-            if (auto h = block_id_to_hash_.find(ref.id()); h != block_id_to_hash_.end()) {
-                block_hash_to_id_.erase(h->second);
-                block_id_to_hash_.erase(h);
-            }
+            unbind_block_(ref.id());
             cached_blocks_lru_.erase(stale->second.lru_it);
             if (pinned_blocks_.find(ref.id()) == pinned_blocks_.end())
                 reclaimable_cached_count_--;

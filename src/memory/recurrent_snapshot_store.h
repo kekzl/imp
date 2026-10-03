@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <list>
 #include <memory>
+#include <span>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -24,6 +25,11 @@ struct RecurrentSnapshotEntry {
     // KV blocks the saving forward attended to (#2174); restore requires them still bound.
     std::vector<KvChainLink> kv_chain;
 };
+
+// The restore's KV chain for allocate_blocks_with_prefix (empty without a restore).
+inline std::span<const KvChainLink> restore_chain_of(const std::shared_ptr<const RecurrentSnapshotEntry>& e) {
+    return e ? std::span<const KvChainLink>(e->kv_chain) : std::span<const KvChainLink>{};
+}
 
 // Device-side LRU store of recurrent-state snapshots for hybrid (SSM/GDN) models. Dense
 // models reuse KV blocks at block granularity; recurrent state is cumulative, so a

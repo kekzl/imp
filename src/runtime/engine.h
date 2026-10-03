@@ -1371,10 +1371,8 @@ private:
     // and sub-byte KV dtypes lacking gather kernels (INT4, TurboQuant).
     bool supports_chunked_prefill_() const;
 
-    // Resolves config_.prefill_chunk_size considering arch + KV dtype.
-    //   sentinel -1 → per-arch default (512 if supported, 0 otherwise)
-    //   explicit 0  → 0 (force single-chunk, always respected)
-    //   explicit >0 → that value if supported, else 0 with WARN
+    // config_.prefill_chunk_size by arch + KV dtype: -1 -> 2048 if chunked prefill is supported, else 0;
+    // 0 -> 0 (single chunk); > 0 -> that value if supported, else 0 with WARN.
     int resolve_prefill_chunk_size_() const;
 
     // Track <think>/<\/think> state and check if generation should stop.
