@@ -13,6 +13,8 @@ The one-page contract for how imp performance is measured and gated. Numbers tha
 
 - **Decode `tg128` (tokens/s)** is the headline and the A/B signal. Stable within a session.
 - **Prefill `pp512`** is reported but **not** used for A/B on its own: it varies far more than decode across process starts, and by model. Measured on one quiet host, three fresh processes per arm: **0.6-1.2 %** on the cuBLAS-FP16 prefill model (Qwen3-8B Q8_0), **37.6 %** on a fully resident NVFP4 MoE model (Qwen3-Coder-30B-A3B). cuBLAS algo re-timing, long blamed for this, measured **3.50 %** on its own over nine process starts. Treat prefill regressions as warnings; resolve them with a paired, alternating A/B rather than more reps.
+- **`--bench` times only graph-replay prefills** (#2525): warmup runs 3 prefills (FP8 KV calibrates, the shape arms, then captures), and every timed rep prints `pp rep N`. Qwen3-30B-A3B-NVFP4 pp512, 10 fresh processes: 25887.89..28483.46 tok/s (10.03 %) before, 31041.61..31624.79 (1.88 %) after.
+- **Eager prefill jitter is host-side** (#2538): with `runtime.prefill_graph=false` and `runtime.prefill_ffn_graph=false`, kernel sums stay 16.3..17.4 ms per rep while slow reps (39..55 ms) spend 20.75..35.27 ms in 1253 `cudaLaunchKernel` calls (p50 4.5 us with work queued, 36.9 us on an empty queue) and 2.3..3.3x longer in host code between calls; a CPU spinner alongside cut reps > 30 ms from 13/40 to 5/40. FFN graphs (default) bound it: 17.52..19.86 ms, per-run spread 4.8..12.9 % over 6 x 8 reps.
 
 ## How to measure (every run)
 

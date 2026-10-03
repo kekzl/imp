@@ -42,18 +42,23 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
 
     fprintf(stderr, "Benchmark: pp=%d, tg=%d, reps=%d\n", args.bench_pp, tg_tokens, args.bench_reps);
 
-    // Warmup: 1 full prefill+decode cycle (discarded)
-    fprintf(stderr, "Warmup...\n");
+    // Warmup: 1 prefill+decode cycle, then prefills until the prefill graph replays. FP8 KV calibrates
+    // on prefill 1, the graph arms on 2 and captures on 3, so timed reps start at replay (#2525:
+    // a timed eager or capture rep spread pp512 16843..24344 tok/s).
+    constexpr int kWarmupPrefills = 3;
+    fprintf(stderr, "Warmup... (%d prefills)\n", kWarmupPrefills);
     {
         NvtxRange r("bench:warmup");
-        if (const ImpError reset_err = imp_context_reset(ctx); reset_err != IMP_SUCCESS) {
-            fprintf(stderr, "Context reset error in warmup: %s\n", imp_error_string(reset_err));
-            return 1;
-        }
-        imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
-        for (int s = 0; s < tg_tokens; s++) {
-            int32_t tok = 0;
-            imp_decode_step(ctx, &bench_params, &tok);
+        for (int w = 0; w < kWarmupPrefills; w++) {
+            if (const ImpError reset_err = imp_context_reset(ctx); reset_err != IMP_SUCCESS) {
+                fprintf(stderr, "Context reset error in warmup: %s\n", imp_error_string(reset_err));
+                return 1;
+            }
+            imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
+            for (int s = 0; w == 0 && s < tg_tokens; s++) {
+                int32_t tok = 0;
+                imp_decode_step(ctx, &bench_params, &tok);
+            }
         }
     }
 
@@ -74,7 +79,9 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
             fprintf(stderr, "Prefill error on rep %d: %s\n", rep, imp_error_string(err));
             break;
         }
-        pp_total_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        const double rep_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        fprintf(stderr, "pp rep %d %8.3f ms\n", rep, rep_ms);
+        pp_total_ms += rep_ms;
     }
 
     // TG benchmark
