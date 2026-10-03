@@ -31,7 +31,7 @@ CPU tests run in `make dev-test`; new ones go to `test-core`. Anything touching 
 
 ## Pitfalls
 
-- `runtime.prefill_graph` defaults to `true` and covers serial offset-0 prefill only (not the ragged path); the legacy host-args MoE prefill and KV dtypes other than F16 / calibrated FP8 run eager (`engine_prefill.cpp`). Read `config.h`, not old comments.
+- `runtime.prefill_graph` defaults to `true` and covers serial offset-0 prefill only (not the ragged path); the legacy host-args MoE prefill and KV dtypes other than F16 / calibrated FP8 run eager (`engine_prefill.cpp`). Read `config.h`, not old comments. Every other prefill replays only its FFN/MoE phase from per-(layer, padded rows) graphs (`runtime.prefill_ffn_graph`, `exec/ffn_graph_cache.h`).
 - `kv_cache.swa_snapshot_mb` below one snapshot size disables prefix caching entirely, which is worse than 0.
 - Anything sized off free VRAM: pin `runtime.max_batch_size` for an A/B, or the arms differ.
 

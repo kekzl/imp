@@ -22,6 +22,7 @@
 #include "exec/expert_cache.h"
 #include "exec/expert_cache_device.h"
 #include "compute/qsa_indexer.h"
+#include "exec/ffn_graph_cache.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/inference_state.h"
 #include "exec/moe_ffn_context.h"
@@ -366,6 +367,9 @@ public:
 
     // Set layer offload manager (optional, for weight offloading)
     void set_offload_manager(LayerOffloadManager* mgr) { offload_mgr_ = mgr; }
+    // Piecewise FFN prefill graphs (#2435, executor_ffn_graph.cpp); replays for /metrics and tests.
+    void set_ffn_graphs_enabled(bool on, bool cuda_graphs);
+    [[nodiscard]] uint64_t ffn_graph_replays() const { return ffn_graphs_.replays(); }
 
     // Resize workspace for a different max token count (Phase 4: decode-mode optimization).
     // Uses cudaFreeAsync/cudaMallocAsync for near-instant resize via CUDA memory pool.
@@ -598,6 +602,12 @@ private:
     int max_logit_tokens_ = 0;     // max tokens needing LM head projection (= max(max_batch_size, 8))
     int kv_block_size_ = kKVBlockSize;  // real KV block size (set_kv_block_size)
     int cur_n_tokens_ = 0;         // set by forward_logits for use by run_ffn
+    FfnGraphCache ffn_graphs_;
+    bool ffn_graphs_enabled_ = false;
+    int ffn_graph_rows_ = 0;  // this forward's padded FFN rows, 0 = eager
+    // Per forward: padded rows when the FFN phase can replay a graph, else 0 (pads zeroed).
+    int ffn_graph_begin_(const InferenceState& state, int n, cudaStream_t stream);
+    void run_ffn_phase_(int layer, cudaStream_t stream);
     int cur_layer_ = -1;           // set by forward_logits; keys calibration entries
     int cur_decode_step_ = 0;      // set by forward_logits for debug dump tagging
     bool cur_force_fp16_ = false;  // set by forward_logits, bypasses FP8 GEMM paths

@@ -76,6 +76,9 @@ struct RuntimeConfig {
         // (not the ragged scheduler path): offset-0 chunks, F16 or calibrated FP8 KV, a shape
         // captured on its second consecutive sighting and kept across context resets.
         bool prefill_graph = true;
+        // Every other prefill (ragged waves, continuation chunks, prefix hits): the FFN/MoE phase
+        // replays per (layer, padded rows) from a graph, attention stays eager (#2435).
+        bool prefill_ffn_graph = true;
         // 0 = auto: engine sizes the decode batch from the model's weight
         // footprint (a >20 GiB MoE auto-picks 1). Positive value forces it.
         int max_batch_size = 0;
