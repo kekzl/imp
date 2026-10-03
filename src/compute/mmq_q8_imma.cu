@@ -483,14 +483,16 @@ bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* ou
 }
 
 bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __half* out_f16,
-                       const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N,
-                       int K, cudaStream_t stream, int rows_hint) {
+                       const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N, int K,
+                       cudaStream_t stream, int rows_hint, bool reuse_act) {
     if (N % 2 != 0) return false;
     if (K % ((qkind == 1 || qkind == 2 || qkind == 4) ? 256 : kBK) != 0)
         return false;
     if (h_max_rows <= 0 || expanded <= 0 || ne <= 0) return false;
+    imma_act_reuse_next(reuse_act);  // one-shot, consumed by this call's quantize
     const bool ok = gemm_common(w_blocks, qkind, x_f16, out_f16, /*M=*/0, N, K, stream, 0.0f,
                                 d_offsets, h_max_rows, expanded, ne, rows_hint);
+    imma_act_reuse_next(false);  // gemm_common may return before quantizing
     static bool logged = false;
     if (ok && !logged) {
         logged = true;
@@ -519,6 +521,7 @@ void mmq_q8_imma_release_all() {
     }
     g_imma_weights.clear();
     g_imma_act = ActScratch{};
+    imma_act_forget();
     // The plane budget is per-model: a swap re-plans it. Give the accounting
     // back what the frees returned, or the next model starts with the previous
     // one's bytes already charged.

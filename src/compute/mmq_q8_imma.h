@@ -46,9 +46,11 @@ namespace imp {
 // h_max_rows: upper bound on rows/expert, sizes grid.y (surplus CTAs exit on their offsets);
 // rows_hint (0 = h_max_rows) picks the tile: <96 selects BM=32 small-M (
 // pp512 top-8/128 routing averages ~32 rows/expert). qkind: 0=Q8_0, 1=Q4_K, 2=Q6_K, 3=Q5_1, 4=Q5_K.
+// reuse_act: x_f16 is unchanged since the previous call quantized it (gate then up, #2469); the
+// quantize is skipped only if that call was the last one on this scratch.
 [[nodiscard]] bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __half* out_f16,
-                       const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N, int K,
-                       cudaStream_t stream, int rows_hint = 0);
+                                     const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N,
+                                     int K, cudaStream_t stream, int rows_hint = 0, bool reuse_act = false);
 
 // Free cached weight planes + activation scratch (tests / teardown).
 void mmq_q8_imma_release_all();

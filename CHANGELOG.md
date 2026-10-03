@@ -16,6 +16,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `--max-queued-tokens <n>` (#2408, default 0 = off): imp-server answers 429 at once (`rate_limit_error`, `/v1/messages` `overloaded_error`, `Retry-After: 1`) when queued prompt tokens (admitted, not yet past prefill) plus the new prompt exceed `n`. Gauge `imp_queued_prompt_tokens` on `/metrics`.
 
 ### Changed
+- MoE IMMA prefill quantizes the gate/up input once (#2469): the up GEMM reuses the gate quantize. Qwen3-30B-A3B Q4_K_M pp4096: `quantize_act_fast_kernel` 2304 -> 1536 calls, 179.6..181.6 -> 95.7..95.8 ms (nsys, 3 reps); e2e +0.8..+6.4 %, 3/3 pairs; PPL unchanged (10.9587).
 - Executors branch on 19 `ModelProfile` capability traits (#2458), not `is_gemma4` / `is_gpt_oss`: 69 reads in 22 files replaced, the arch -> trait map lives only in `model_profile.cpp`. A new arch sets traits instead of editing executor branches.
 - KV admission reserves the expected decode length (#2486, p90 of recent outputs), not `max_tokens`; a dry pool swaps the request's KV to host instead of cancelling. Qwen3.8-27B-NVFP4, 32 streams, default max_tokens: 22 -> 32 started at t0, 1244/1291 -> 1852/2111 streamed chunks/s, TTFT max 138 -> 0.4 s, 0 cancels.
 - https `image_url` (#2429) is now a build requirement: `HTTPLIB_REQUIRE_OPENSSL` fails a build without libssl-dev instead of compiling the client out; `SsrfFetch.HttpsClientIsCompiledIn` (test-core) guards it. Shipped servers already fetched https (live probe: 958-byte PNG ok, self-signed host refused).

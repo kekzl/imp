@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 
 namespace imp {
 
@@ -234,17 +235,42 @@ bool imma_ensure_splitk(size_t floats, bool capturing) {
     return true;
 }
 
+namespace {
+struct LastQuant {
+    const __half* x = nullptr;
+    int M = 0, K = 0;
+    cudaStream_t stream = nullptr;
+    const int8_t* xs8 = nullptr;
+    uint64_t gen = 0;
+};
+LastQuant g_last_quant;  // guarded by g_imma_mtx
+thread_local bool t_reuse_next = false;
+}  // namespace
+
+void imma_act_reuse_next(bool on) { t_reuse_next = on; }
+
 void imma_quantize_act(const __half* x, int M, int K, cudaStream_t stream) {
-    // NO memoization: workspace buffers (moe gathered, layer activations) are REUSED across
-    // layers with the same pointer; a (ptr,M,K) memo served layer-1 activations to every
-    // later layer (PPL 31.6 -> 441k). Kernel costs ~7us; quantize unconditionally.
+    // No pointer memo: workspace buffers are REUSED across layers with the same pointer; a
+    // (ptr,M,K) memo served layer-1 activations to every later layer (PPL 31.6 -> 441k).
+    // Skipping needs the caller's imma_act_reuse_next() on top of the identity match.
+    const bool reuse = std::exchange(t_reuse_next, false);
+    if (reuse && imma_act_holds(x, M, K, stream))
+        return;
     const int total_warps = M * (K / 32);
     const int blocks = min(2048, (total_warps + 7) / 8);
     quantize_act_fast_kernel<<<blocks, 256, 0, stream>>>(x, M, K, g_imma_act.xs8, g_imma_act.xscale,
                                                          g_imma_act.xrowsum);
     IMP_CUDA_CHECK_LAUNCH();
+    g_last_quant = LastQuant{x, M, K, stream, g_imma_act.xs8, g_imma_act.gen};
 }
 
+bool imma_act_holds(const __half* x, int M, int K, cudaStream_t stream) {
+    const LastQuant& l = g_last_quant;
+    return l.xs8 != nullptr && l.x == x && l.M == M && l.K == K && l.stream == stream &&
+           l.xs8 == g_imma_act.xs8 && l.gen == g_imma_act.gen;
+}
+
+void imma_act_forget() { g_last_quant = LastQuant{}; }
 
 // Takes activation triple + split-K slice ONCE at the exec_t2_demand bound (A7 step 8),
 // called from Engine::init after the T2 arena opens. Without it, imma_ensure_act/
