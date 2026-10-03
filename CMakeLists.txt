@@ -481,6 +481,8 @@ set(IMP_EXEC_SOURCES
     src/lora/lora_adapter.cpp
     src/quant/gpt_oss_mxfp4_convert.cpp
     src/exec/executor_ffn.cu
+    src/exec/executor_ffn_graph.cpp
+    src/exec/ffn_graph_cache.cpp
     src/exec/executor_ssm_gdn.cu
     src/exec/executor_gated_residual.cpp
     src/exec/executor_ple.cpp
@@ -834,6 +836,8 @@ if(IMP_BUILD_TESTS)
 
     imp_add_test_module(test-core WITH_STUB SOURCES
         tests/test_cuda_errors.cpp
+        # FFN prefill graph buckets (#2435).
+        tests/test_ffn_graph_cache.cpp
         # KV admission by expected decode length, swapped requests first (#2486).
         tests/test_kv_admission.cpp
         # MoE prefill selectors (#2459): table lookups, no kernel launch.

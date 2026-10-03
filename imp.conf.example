@@ -36,6 +36,10 @@ graph_capture_mode   = "relaxed"
 # Capture prefill into a CUDA graph too (default ON since 2026-05-17).
 # Auto-disabled when the model's prefill path is uncapturable.
 prefill_graph        = true
+# Every other prefill (ragged waves, continuation chunks, prefix hits): the
+# FFN/MoE phase replays per (layer, padded rows) from a CUDA graph, attention
+# stays eager (#2435).
+prefill_ffn_graph    = true
 # Max concurrent sequences in a decode batch (server continuous batching).
 # 0 = auto: the engine sizes it from the model's weight footprint (a >20 GiB
 # MoE auto-picks 1). Set a positive value to force it (e.g. 4). The --max-batch

@@ -249,5 +249,33 @@ TEST_F(RaggedPrefillTest, MixedDecodeRidersMatchSeparateSteps) {
         EXPECT_EQ(mixed_out[i], plain_out[i]) << "request " << i << " diverged (mixed vs separate steps)";
 }
 
+// #2435: the FFN phase of a ragged wave (28 rows -> 32-row bucket) runs eager on the first
+// sighting, is captured on the second and replayed on the third. Capture and replay must be
+// bit-identical to the eager run of the same padded rows; a stale pointer or host-side state the
+// replay skips shows up as a diverging round.
+TEST_F(RaggedPrefillTest, FfnGraphReplayMatchesEagerRows) {
+    auto prompts = ragged_prompts();
+    auto tm = DenseTestModel::create(128, 512, 256, 2, 4, 4, 64);
+    gemm_init();
+    RuntimeConfig rc = ragged_runtime_config(/*prefill_batch=*/true);
+    rc.runtime.prefill_ffn_graph = true;
+    set_pending_runtime_config(rc);
+    EngineConfig cfg = ragged_engine_config();
+    cfg.use_cuda_graphs = true;
+    Engine engine;
+    ASSERT_TRUE(engine.init(tm.model, cfg));
+    const auto eager = run_batch(engine, prompts, 6);
+    EXPECT_EQ(engine.executor()->ffn_graph_replays(), 0u) << "first sighting must run eager";
+    const auto captured = run_batch(engine, prompts, 6);
+    const uint64_t after_capture = engine.executor()->ffn_graph_replays();
+    const auto replayed = run_batch(engine, prompts, 6);
+    EXPECT_GT(engine.executor()->ffn_graph_replays(), after_capture) << "third wave did not replay";
+    for (size_t i = 0; i < prompts.size(); ++i) {
+        EXPECT_EQ(captured[i], eager[i]) << "request " << i << ": captured wave diverged";
+        EXPECT_EQ(replayed[i], eager[i]) << "request " << i << ": replayed wave diverged";
+    }
+    tm.cleanup();
+}
+
 }  // namespace
 }  // namespace imp

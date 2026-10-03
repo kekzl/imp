@@ -849,6 +849,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     (void)kv_manager_->enable_host_spill(static_cast<size_t>(std::max(0, runtime_config_.kv_cache.host_spill_mb))
                                    << 20);
     wire_kv_swap_();
+    executor_->set_ffn_graphs_enabled(runtime_config_.runtime.prefill_ffn_graph, config_.use_cuda_graphs);
     MemAccount::instance().checkpoint("03_kv_cache");
     // Before warmup's graph prewarm: a captured decode step cannot allocate
     // the small-M scratches (#1897). Charged in the T2 arena demand above.

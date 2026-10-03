@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- FFN prefill graphs (#2435): every prefill the full prefill graph cannot take (ragged waves, continuation chunks, prefix hits) replays its FFN/MoE phase per (layer, padded rows) from a CUDA graph. Qwen3-30B-A3B-NVFP4 eager pp512 25.74-29.66 -> 17.71-18.35 ms; agent-turn TTFT 55.6-56.1 -> 51.0-52.7 ms.
 - imp-quantize reads per-tensor-scale FP8 sources (Modelopt scalar `weight_scale`, #2473): widened with the scalar, `weight_scale` and `input_scale` dropped. `--dry-run` on a synthetic Modelopt FP8 Qwen3-0.6B: 196 of 196 E4M3 weights quantized (was 0, all copied through).
 - `POST /v1/requests/{id}/end_thinking` (#2420): forces the reasoning closer (`</think>`, Harmony final-channel opener) at the next step, the answer continues on the same KV; id = response id or `X-Request-Id`, all dialects. 200 `ending`/`already_closed`, 404 unknown, `imp_think_end_requests_total`.
 - Loader parity tests (#2530): `LoaderRopeParity` (test-core) loads Gemma-4, Llama 3, Granite and Qwen3 stubs via `load_gguf` and `load_safetensors`, compares per-layer RoPE tables and softmax scales. `Gemma4SafeTensorsTest` (test-e2e): ~4k-token needle on NVFP4, red before #2527. GGUF Gemma-4 rope table now freed with the model (LSan).

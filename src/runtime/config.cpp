@@ -167,6 +167,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("runtime.gdn_batched_decode", cfg.runtime.gdn_batched_decode);
     B("runtime.decode_pipeline", cfg.runtime.decode_pipeline);
     B("runtime.prefill_batch", cfg.runtime.prefill_batch);
+    B("runtime.prefill_ffn_graph", cfg.runtime.prefill_ffn_graph);
     I("runtime.admission_decode_tokens", cfg.runtime.admission_decode_tokens);
     B("runtime.kv_swap", cfg.runtime.kv_swap);
     B("runtime.prefill_overlap", cfg.runtime.prefill_overlap);

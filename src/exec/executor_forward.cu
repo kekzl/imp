@@ -236,6 +236,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // their rows are draft tokens, so they count as decode rows here.
     cur_decode_rows_ = n > 1 && (!state.is_prefill || state.spec_verify_chunk);
     cur_per_row_lm_ = state.per_row_lm_head;
+    ffn_graph_rows_ = ffn_graph_begin_(state, n, stream);
 
     // Clears any stale CUDA error before the forward pass. A class that
     // cannot be cleared (device fault) throws instead of warning: the
@@ -450,14 +451,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             hc_read_(hly.hc_mlp_norm, hly.hc_mlp_down, hly.hc_mlp_up, &hly.hc_mlp_inject, n, stream);
         }
         // FFN: MoE, dense, or none (attention-only layers may have no FFN)
-        const bool skip_moe = dispatch_policy().moe.skip;
-        if (skip_moe) {
-            // Debug: skip all FFN/MoE to isolate attention bugs
-        } else if (layer_has_moe(i)) {
-            run_moe_ffn(i, stream);
-        } else if (layer_has_dense_ffn(i)) {
-            run_ffn(i, stream);
-        }
+        run_ffn_phase_(i, stream);  // graph-replayed on eligible prefills (executor_ffn_graph.cpp)
         if (model_->profile().gated_residual)
             hc_write_(n, stream);
         {
