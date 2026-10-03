@@ -102,8 +102,11 @@ public:
     // not enough for a multimodal prompt (every image token shares an id), so a hash of the
     // image content makes chains diverge from block 0; a hit then requires the same tokens
     // AND the same picture. 0 for text (unchanged behaviour).
+    // restore_chain (hybrid restore, #2409): the first links' blocks are reused as-is, never the
+    // hash map's binding, so the restored state meets the KV of its own forward (#2174).
     [[nodiscard]] int allocate_blocks_with_prefix(int seq_id, std::span<const int32_t> tokens,
-                                                  int max_reuse_blocks = -1, size_t content_salt = 0);
+                                                  int max_reuse_blocks = -1, size_t content_salt = 0,
+                                                  std::span<const KvChainLink> restore_chain = {});
 
     // Read-only probe: length (in blocks) of the longest fully-cached contiguous block
     // prefix for `tokens`, without allocating anything. Fills chain_hashes with the chained
@@ -131,11 +134,12 @@ public:
 
     // Recurrent-snapshot pairing (#2174): a snapshot restores only with the KV blocks its
     // forward attended to. adopt_chain binds seq_id's first n_full blocks (and, tail_key != 0,
-    // block n_full under tail_key) to their hashes, replacing another forward's binding, and
-    // returns the links; empty = a replaced binding is pinned, do not save the snapshot.
+    // block n_full under tail_key) to their hashes and returns the links. A hash already bound to
+    // another forward's block keeps that binding; this block becomes a shadow version (#2409), so
+    // another session re-forwarding a shared prefix no longer breaks this snapshot's chain.
     std::vector<KvChainLink> adopt_chain(int seq_id, std::span<const int32_t> tokens, int n_full,
                                          size_t content_salt, size_t tail_key);
-    // True when every link is still bound: same block, same bind serial.
+    // True when every link is still bound (primary or shadow): same block, same bind serial.
     [[nodiscard]] bool chain_intact(std::span<const KvChainLink> chain) const;
     int hold_cached_block(size_t key, int seq_id);
     [[nodiscard]] bool clone_held_block(int seq_id, int block_index, cudaStream_t stream);
@@ -410,6 +414,11 @@ private:
     // if empty.
     void rollback_partial_allocation(int seq_id, SeqBlocks& blocks, std::vector<size_t>& hashes,
                                      size_t original_size);
+    // Block to reuse for block_hash: the link's block if its chain holds, else the hash map's
+    // binding (stale entries dropped); -1 = miss.
+    int reusable_block_(size_t block_hash, const KvChainLink* link);
+    // Moves block_id's reference out of the cache LRU into blocks, or shares a live one.
+    void take_block_(SeqBlocks& blocks, int block_id);
 
     // Host spill (kv_cache_manager_spill.cpp): spill_block_ copies a reclaimed block out under its
     // chain hash and completes before returning (the block is reused next). restore_spilled_
@@ -477,8 +486,15 @@ private:
     // Serial of each block's current hash binding (bind_ bumps it); KvChainLink compares it.
     std::unordered_map<int, uint64_t> block_bind_serial_;
     uint64_t next_bind_serial_ = 1;
+    // Shadow versions (#2409): block_id -> hash for KV of a hash whose primary binding is another
+    // forward's block. Only snapshot chains reach them; cached and reclaimed like primaries.
+    std::unordered_map<int, size_t> shadow_id_to_hash_;
     void bind_(size_t hash, int block_id);
+    // Removes block_id's primary or shadow binding and its serial (no-op when unbound).
     void unbind_block_(int block_id);
+    [[nodiscard]] bool has_binding_(int block_id) const {
+        return block_id_to_hash_.count(block_id) != 0 || shadow_id_to_hash_.count(block_id) != 0;
+    }
 
     // LRU list of cached (unreferenced) block IDs. When a block's
     // ref_count drops to 0, it goes to the tail. Eviction pops from head.

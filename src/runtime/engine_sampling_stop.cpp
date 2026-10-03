@@ -5,6 +5,7 @@
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 #include "runtime/batch.h"
+#include "runtime/prompt_tail.h"
 #include "runtime/snapshot_boundary.h"
 #include "runtime/think_stop_logic.h"
 #include "model/chat_template.h"
@@ -416,6 +417,11 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
     // At least one token must remain to forward (the model needs logits).
     int max_b = std::min(cached, (total - 1) / bs);
     kv_manager_->release_held_block(req.id);
+    // Branch point (#2409): a restore below max_b re-forwards cached blocks; snapshot their end
+    // so the next prompt sharing them restores there. Floored to the prefill chunk grid: an
+    // off-grid split changes greedy output (Qwen3.8-27B-NVFP4, FP16 KV, deterministic: 4/4).
+    const int grid = base_prefill_chunk(resolve_prefill_chunk_size_(), executor_->max_tokens(), bs);
+    req.branch_point_tokens = grid > 0 ? (max_b * bs / grid) * grid : max_b * bs;
     for (int b = max_b; b >= 1; --b) {
         // Transcript snapshot (unaligned, saved at finish) before the aligned entry: it
         // reaches further into the same block. Its full blocks are the LAST cached ones (the
@@ -586,9 +592,10 @@ int Engine::snapshot_end_(const Request& req, int offset) const {
         return 0;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     // Hint only for the hybrid store: the SWA saver snapshots at the prompt's block floor, not snap_end.
-    return next_snapshot_boundary(static_cast<int>(req.input_tokens.size()), bs,
-                                  runtime_config_.server.snapshot_min_prompt_tokens,
-                                  ssm_state_ ? req.snapshot_hint_tokens : 0, offset);
+    return next_snapshot_boundary(
+        static_cast<int>(req.input_tokens.size()), bs, runtime_config_.server.snapshot_min_prompt_tokens,
+        ssm_state_ ? (req.snapshot_hint_tokens > 0 ? req.snapshot_hint_tokens : req.branch_point_tokens) : 0,
+        offset);
 }
 
 // Core save: snapshots the seq's live window at the block-floor of `tokens`.
