@@ -30,6 +30,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
     const auto is_done = [](const std::shared_ptr<Request>& r) {
         return r->status == RequestStatus::FINISHED || r->status == RequestStatus::CANCELLED;
     };
+    record_finished_();
     std::erase_if(active_, is_done);
     std::erase_if(pending_, is_done);
 
@@ -59,8 +60,9 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
         pending_dirty_ = false;
     }
 
-    // 3. Promote pending requests to prefill (up to max_batch_size_ budget)
-    {
+    // 3. Promote pending requests to prefill (up to max_batch_size_ budget). A swapped request
+    // comes back first and holds the queue: new admissions would take the blocks it waits for.
+    if (!swap_in_waiting_()) {
         auto it = pending_.begin();
         while (it != pending_.end() && static_cast<int>(active_.size()) < max_batch_size_) {
             auto& req = *it;
@@ -104,7 +106,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 // NOW, so an all-fits batch can still run the pool dry mid-generation.
                 // Clamped to the pool: a cache too small for prompt+max_tokens (16-block
                 // floor) degrades to prompt-only admission instead of queuing forever.
-                const int decode_blocks = (req->max_tokens + bs - 1) / bs + 1;
+                const int decode_blocks = (reserve_decode_tokens(*req) + bs - 1) / bs + 1;
                 const int pool_blocks = kv_manager_->kv_cache()->total_blocks();
                 int admit_blocks = std::min(blocks_needed + decode_blocks,
                                             std::max(blocks_needed, pool_blocks));
@@ -234,17 +236,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 }
             }
 
-            if (kv_manager_) {
-                // Hold the promise, do not just test it: without this the next request is
-                // admitted against blocks this one has not written yet (#1635). Decays as
-                // blocks are appended, dropped by free_sequence().
-                const int bs = kv_manager_->kv_cache()->block_size();
-                const int prompt_blocks = (req->context_len() + bs - 1) / bs;
-                const int decode_blocks = (req->max_tokens + bs - 1) / bs + 1;
-                const int pool_blocks = kv_manager_->kv_cache()->total_blocks();
-                kv_manager_->set_decode_reservation(req->id, std::min(prompt_blocks + decode_blocks,
-                                                                      std::max(prompt_blocks, pool_blocks)));
-            }
+            hold_decode_reservation_(*req);
 
             auto r = *it;
             it = pending_.erase(it);
@@ -297,6 +289,50 @@ std::vector<int> Scheduler::active_ids() const {
             ids.push_back(r->id);
     return ids;
 }
+void Scheduler::record_finished_() {
+    for (const auto& r : active_)
+        if (r->status == RequestStatus::FINISHED)
+            decode_estimate_.record(static_cast<int>(r->output_tokens.size()));
+}
+
+void Scheduler::hold_decode_reservation_(const Request& req) {
+    if (!kv_manager_)
+        return;
+    // Hold the promise, do not just test it: without this the next request is admitted against
+    // blocks this one has not written yet (#1635). Decays as blocks are appended, dropped by
+    // free_sequence().
+    const int bs = kv_manager_->kv_cache()->block_size();
+    const int prompt_blocks = (req.context_len() + bs - 1) / bs;
+    const int decode_blocks = (reserve_decode_tokens(req) + bs - 1) / bs + 1;
+    const int pool_blocks = kv_manager_->kv_cache()->total_blocks();
+    kv_manager_->set_decode_reservation(req.id, std::min(prompt_blocks + decode_blocks,
+                                                         std::max(prompt_blocks, pool_blocks)));
+}
+
+int Scheduler::swapped_count() const {
+    return static_cast<int>(
+        std::ranges::count_if(active_, [](const auto& r) { return r->status == RequestStatus::SWAPPED; }));
+}
+
+bool Scheduler::swap_in_waiting_() {
+    bool waiting = false;
+    for (auto& r : active_) {
+        if (r->status != RequestStatus::SWAPPED)
+            continue;
+        // FIFO in admission order: nothing jumps an older swapped request.
+        if (waiting || !swap_in_ || !kv_manager_ || !swap_in_(*r)) {
+            waiting = true;
+            continue;
+        }
+        r->status = RequestStatus::DECODING;
+        // Same promise as admission, for what is left of the expected length.
+        const int bs = kv_manager_->kv_cache()->block_size();
+        const int left = std::max(1, reserve_decode_tokens(*r) - static_cast<int>(r->output_tokens.size()));
+        kv_manager_->set_decode_reservation(r->id, (r->context_len() + left + bs - 1) / bs + 1);
+    }
+    return waiting;
+}
+
 int Scheduler::active_evicted_count() const {
     return static_cast<int>(std::ranges::count_if(active_, [](const auto& r) {
         return r->status != RequestStatus::FINISHED && r->status != RequestStatus::CANCELLED &&
@@ -309,7 +345,8 @@ int Scheduler::active_unmet_kv_blocks() const {
     const int bs = kv_manager_->kv_cache()->block_size();
     int unmet = 0;
     for (const auto& r : active_) {
-        if (r->status == RequestStatus::FINISHED || r->status == RequestStatus::CANCELLED)
+        if (r->status == RequestStatus::FINISHED || r->status == RequestStatus::CANCELLED ||
+            r->status == RequestStatus::SWAPPED)
             continue;
         unmet += kv_unmet_blocks(r->context_len(), r->max_tokens - static_cast<int>(r->output_tokens.size()),
                                  static_cast<int>(kv_manager_->block_table(r->id).size()), bs);

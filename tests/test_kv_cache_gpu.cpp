@@ -909,5 +909,63 @@ TEST(KVCacheManagerTest, PartialBlockHoldAndClone) {
     mgr->free_sequence(4);
 }
 
+// #2486: swap_copy round-trips a block's K, V and scale bytes through a mapped pinned image.
+namespace swap_rt {
+std::vector<uint8_t> read(void* dev, size_t bytes) {
+    std::vector<uint8_t> h(bytes);
+    if (dev != nullptr)
+        cudaMemcpy(h.data(), dev, bytes, cudaMemcpyDeviceToHost);
+    return h;
+}
+}  // namespace swap_rt
+
+TEST(KVCacheTest, SwapCopyRoundTripsBlocksThroughHost) {
+    SKIP_IF_NO_CUDA();
+    for (const QType dt : {QType::F16, QType::NVFP4}) {
+        KVCache cache(3, 2, 64, dt, 16);
+        const std::vector<int> src = {3, 5, 11};
+        const std::vector<int> dst = {2, 7, 9};
+        uint8_t v = 1;
+        for (const int b : src)
+            for (int l = 0; l < 3; ++l) {
+                cudaMemset(cache.k_ptr(l, b), v++, cache.block_bytes(l));
+                cudaMemset(cache.v_ptr(l, b), v++, cache.block_bytes(l));
+                if (cache.k_scale_ptr(l, b)) {
+                    cudaMemset(cache.k_scale_ptr(l, b), v++, cache.scale_block_bytes(l));
+                    cudaMemset(cache.v_scale_ptr(l, b), v++, cache.scale_block_bytes(l));
+                }
+            }
+        const size_t img = src.size() * cache.swap_bytes_per_block();
+        const size_t nd = src.size() * static_cast<size_t>(cache.swap_descs_per_block());
+        void* host = nullptr;
+        ASSERT_EQ(cudaHostAlloc(&host, img + nd * sizeof(KVCache::CopyDesc), cudaHostAllocMapped),
+                  cudaSuccess);
+        void* dev = nullptr;
+        ASSERT_EQ(cudaHostGetDevicePointer(&dev, host, 0), cudaSuccess);
+        auto* dh = reinterpret_cast<KVCache::CopyDesc*>(static_cast<char*>(host) + img);
+        auto* dd = reinterpret_cast<const KVCache::CopyDesc*>(static_cast<char*>(dev) + img);
+        cache.swap_copy(src, static_cast<char*>(dev), dh, dd, /*to_host=*/true, nullptr);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        cache.swap_copy(dst, static_cast<char*>(dev), dh, dd, /*to_host=*/false, nullptr);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        for (size_t i = 0; i < src.size(); ++i)
+            for (int l = 0; l < 3; ++l) {
+                const int s = src[i], d = dst[i];
+                EXPECT_EQ(swap_rt::read(cache.k_ptr(l, s), cache.block_bytes(l)),
+                          swap_rt::read(cache.k_ptr(l, d), cache.block_bytes(l)));
+                EXPECT_EQ(swap_rt::read(cache.v_ptr(l, s), cache.block_bytes(l)),
+                          swap_rt::read(cache.v_ptr(l, d), cache.block_bytes(l)));
+                if (cache.k_scale_ptr(l, s)) {
+                    EXPECT_EQ(swap_rt::read(cache.k_scale_ptr(l, s), cache.scale_block_bytes(l)),
+                              swap_rt::read(cache.k_scale_ptr(l, d), cache.scale_block_bytes(l)));
+                    EXPECT_EQ(swap_rt::read(cache.v_scale_ptr(l, s), cache.scale_block_bytes(l)),
+                              swap_rt::read(cache.v_scale_ptr(l, d), cache.scale_block_bytes(l)));
+                }
+            }
+        EXPECT_EQ(dt == QType::NVFP4, cache.k_scale_ptr(0, 0) != nullptr) << "NVFP4 must exercise scales";
+        cudaFreeHost(host);
+    }
+}
+
 }  // namespace
 }  // namespace imp

@@ -41,7 +41,9 @@ struct PromptLogprobs {
     std::vector<float> top_lp;     // [(n_prompt-1) * top_n]
 };
 
-enum class RequestStatus { PENDING, PREFILLING, DECODING, FINISHED, CANCELLED };
+// SWAPPED (#2486): a decoding request whose KV went to host memory when the pool ran dry;
+// holds no KV blocks, keeps its recurrent slot, resumes as DECODING once blocks free up.
+enum class RequestStatus { PENDING, PREFILLING, DECODING, FINISHED, CANCELLED, SWAPPED };
 
 // Why a CANCELLED request was cancelled. Most cancellations are indistinguishable to a
 // caller and stay `None`; the one actionable case (prompt needs more KV blocks than the
@@ -193,6 +195,8 @@ struct Request {
     // its own conversation freed to keep decoding). The engine only WARNs, which the caller
     // never sees; surfaced as usage.prompt_tokens_details.evicted_tokens (roadmap gap 6).
     int evicted_kv_tokens = 0;
+    // KV swapped to host while SWAPPED (#2486): engine-owned (engine_kv_swap.cpp), null otherwise.
+    std::shared_ptr<struct KvSwapState> kv_swap;
     // Hybrid (SSM/GDN) prefix caching: snapshot of the recurrent state at
     // exactly `cached_tokens` tokens, set at admission when the prompt prefix
     // matches a stored snapshot. Restored into the request's recurrent slot

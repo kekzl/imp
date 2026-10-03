@@ -707,7 +707,7 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
             reclaimable = kv_manager_->num_reclaimable_cached_blocks();
             pool_total = kv_cache_raw_->total_blocks();
         }
-        if (kv_pressure_demotes_graphs(st.free_blocks, reclaimable, pool_total, unmet)) {
+        if (kv_valve_armed_(st.free_blocks, reclaimable, pool_total, unmet, st.active_sequences)) {
             config_.streaming_kv_enabled = true;
             streaming_kv_auto_enables_.fetch_add(1, std::memory_order_relaxed);
             int n_sinks = (config_.streaming_kv_n_sinks > 0) ? config_.streaming_kv_n_sinks : 4;

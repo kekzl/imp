@@ -188,6 +188,15 @@ public:
     };
     static void batched_copy_device(const CopyDesc* d_descs, int n, cudaStream_t stream);
 
+    // KV swap (#2486): a block's host image = K, V, scales, key min/max of every non-SWA layer.
+    [[nodiscard]] size_t swap_bytes_per_block() const;
+    [[nodiscard]] int swap_descs_per_block() const { return 5 * n_layers_; }
+    // Copies `blocks` to (to_host) or from a host image in ONE batched_copy_device launch.
+    // host_dev: device view of mapped pinned memory, n * swap_bytes_per_block() bytes;
+    // descs_host/descs_dev: host and device views of n * swap_descs_per_block() CopyDesc.
+    void swap_copy(const std::vector<int>& blocks, char* host_dev, CopyDesc* descs_host,
+                   const CopyDesc* descs_dev, bool to_host, cudaStream_t stream);
+
     // Capacity queries
     int num_free_blocks() const;
     int total_blocks() const;

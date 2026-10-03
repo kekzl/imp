@@ -15,6 +15,8 @@ const char* request_status_name(RequestStatus status) {
             return "FINISHED";
         case CANCELLED:
             return "CANCELLED";
+        case SWAPPED:
+            return "SWAPPED";
         default:
             return "UNKNOWN";
     }
