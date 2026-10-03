@@ -1164,6 +1164,7 @@ if(IMP_BUILD_TESTS)
 
     imp_add_test_module(test-compute SOURCES
         tests/test_cuda_fault_signal.cu
+        tests/test_ffn_graph_cache_gpu.cu
         tests/test_rope.cu
         # The fused QK-norm + RoPE decode kernel (#1957) had no test reference
         # at all: nothing in the tree named qknorm_rope_fused.

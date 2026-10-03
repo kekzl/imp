@@ -49,6 +49,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - cpp-httplib v0.56.0 -> v0.58.0 (#2403): v0.57.0 rejects control characters in the chunk-size line (request smuggling, yhirose/cpp-httplib#2585) and bounds the trailer declaration set (#2583).
 
 ### Fixed
+- FFN prefill graphs (#2549): an FFN phase that refuses capture (host-args MoE prefill, e.g. `moe.nvfp4_smallM`) now runs eager and disables the cache instead of failing the prefill. `MoeAllocFailureTest.SmallMPrefillSurvivesFailedAsyncAlloc` red on main 5806ee32, green here.
 - MoE prefill kernel selection had silent defaults (#2459): the fused dp4a selector launched nothing for an unknown qtype, the IMMA `qkind` chain fell through to Q8_0. Both now throw, as decode since #2445; `MoePrefillSelect` (test-core) covers 10 refused qtypes.
 - Devstral-Small-2 / Ministral 3 (#2411): tekken pre-tokenizer, YaRN mscale ratio (1.0 not 1.387), `llama_4_scaling_beta` query temperature past 8192, GGUF `mistral3` arch. Q4_K_M dense PPL vs llama.cpp at 4k / 16k / 32k: 11.5692 / 7.0820 / 5.4277 vs 11.5807 / 7.0861 / 5.4338 (was 1653.98 / 1630.62 / 1349.17).
 - Sparse prefill default gate is two-sided (#2529): |PPL delta| <= 0.5 % vs dense at 16k and 32k windows. At 8192, 32k: Llama-3.2-3B -3.27 %, Qwen3-Coder-30B -1.80 %, Nemotron-3-Nano -2.42 %, Qwen3-8B +0.70 %. Now qwen3 16384, qwen3moe + llama 24576, nemotron_h_moe off.

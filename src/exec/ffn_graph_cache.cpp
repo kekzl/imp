@@ -3,6 +3,8 @@
 #include "compute/gemm.h"
 #include "core/logging.h"
 
+#include <exception>
+
 namespace imp {
 
 int FfnGraphCache::bucket_rows(int n) {
@@ -106,13 +108,17 @@ void FfnGraphCache::run(int layer, int rows, uint64_t generation, cudaStream_t s
     gemm_set_lt_capture_allowed(true);
     try {
         fn();
-    } catch (...) {
+    } catch (const std::exception& ex) {
+        // A path that refuses capture (moe_host_args_capture_guard, #2549): nothing ran, run eager.
+        // A real error throws again from the eager run.
         gemm_set_lt_capture_allowed(false);
         (void)cudaStreamEndCapture(stream, &graph);
         if (graph)
             IMP_CUDA_CHECK_LOG(cudaGraphDestroy(graph));
-        (void)cudaGetLastError();
-        throw;
+        IMP_LOG_WARN("FFN prefill graph capture refused at layer %d, %d rows: %s", layer, rows, ex.what());
+        disable_("capture", cudaErrorStreamCaptureUnsupported);
+        fn();
+        return;
     }
     gemm_set_lt_capture_allowed(false);
     err = cudaStreamEndCapture(stream, &graph);
