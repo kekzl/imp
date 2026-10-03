@@ -43,9 +43,31 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
     // Architecture identity: the single mapping from the arch enum to the
     // kernel/norm-selection booleans the executors read.
     p.is_gemma3 = cfg.arch == ModelArch::GEMMA3;
-    p.is_gemma4 = cfg.arch == ModelArch::GEMMA4;
-    p.is_gpt_oss = cfg.arch == ModelArch::GPT_OSS;
     p.is_llama4 = cfg.arch == ModelArch::LLAMA4;
+    const bool is_gemma4 = cfg.arch == ModelArch::GEMMA4;
+    const bool is_gpt_oss = cfg.arch == ModelArch::GPT_OSS;
+
+    p.sandwich_norms = is_gemma4;
+    p.fp32_residual_norms = is_gemma4;
+    p.sanitize_ffn_fp16 = is_gemma4;
+    p.scaled_router_norm = is_gemma4;
+    p.router_bias_is_expert_scale = is_gemma4;
+    p.expert_out_scale = is_gemma4;
+    p.per_layer_head_shapes = is_gemma4;
+    p.k_as_v_without_wv = is_gemma4;
+    p.v_rmsnorm = is_gemma4;
+    p.rope_full_head_dim = is_gemma4;
+    p.unit_softmax_scale = is_gemma4;
+    p.outlier_sensitive_logits = is_gemma4;
+
+    p.learned_attn_sinks = is_gpt_oss;
+    p.moe_expert_bias_glu = is_gpt_oss;
+    p.moe_router_logit_bias = is_gpt_oss;
+    p.experts_convert_at_predequant = is_gpt_oss;
+    p.fp8_attn_proj_full = is_gpt_oss;
+    p.residual_rescale_in_scales = is_gpt_oss;
+
+    p.deny_cublas_fp16_acc = p.is_gemma3 || is_gemma4 || is_gpt_oss;
     p.is_encoder = cfg.arch == ModelArch::NOMIC_BERT;
 
     // Attention variant: MLA and NoPE are mutually exclusive with SWA patterns. MLA checked
@@ -56,9 +78,9 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
         p.attn_variant = ModelProfile::AttnVariant::MLA;
     else if (cfg.rope_attn_disabled)
         p.attn_variant = ModelProfile::AttnVariant::NOPE;
-    else if (p.is_gemma4 && !cfg.swa_layers.empty())
+    else if (is_gemma4 && !cfg.swa_layers.empty())
         p.attn_variant = ModelProfile::AttnVariant::GEMMA4_SWA;
-    else if (p.is_gpt_oss && !cfg.swa_layers.empty())
+    else if (is_gpt_oss && !cfg.swa_layers.empty())
         p.attn_variant = ModelProfile::AttnVariant::GPTOSS_SWA;
     else
         p.attn_variant = ModelProfile::AttnVariant::STANDARD;

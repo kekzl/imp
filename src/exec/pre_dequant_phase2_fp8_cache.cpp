@@ -255,7 +255,7 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
     // to q/o as a conservative middle mode; "on" forces full q/k/v/o for any full-precision
     // attention weights.
     const std::string& ap = dispatch_policy().gemm.fp8_attn_proj;
-    const bool attn_full = ap == "on" || (ap == "auto" && model_->profile().is_gpt_oss);
+    const bool attn_full = ap == "on" || (ap == "auto" && model_->profile().fp8_attn_proj_full);
     const bool attn_qo = attn_full || ap == "qo";
     const bool attn_kv = attn_full;
     const bool attn_on = attn_qo || attn_kv;

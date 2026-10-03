@@ -16,6 +16,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `--max-queued-tokens <n>` (#2408, default 0 = off): imp-server answers 429 at once (`rate_limit_error`, `/v1/messages` `overloaded_error`, `Retry-After: 1`) when queued prompt tokens (admitted, not yet past prefill) plus the new prompt exceed `n`. Gauge `imp_queued_prompt_tokens` on `/metrics`.
 
 ### Changed
+- Executors branch on 19 `ModelProfile` capability traits (#2458), not `is_gemma4` / `is_gpt_oss`: 69 reads in 22 files replaced, the arch -> trait map lives only in `model_profile.cpp`. A new arch sets traits instead of editing executor branches.
 - KV admission reserves the expected decode length (#2486, p90 of recent outputs), not `max_tokens`; a dry pool swaps the request's KV to host instead of cancelling. Qwen3.8-27B-NVFP4, 32 streams, default max_tokens: 22 -> 32 started at t0, 1244/1291 -> 1852/2111 streamed chunks/s, TTFT max 138 -> 0.4 s, 0 cancels.
 - https `image_url` (#2429) is now a build requirement: `HTTPLIB_REQUIRE_OPENSSL` fails a build without libssl-dev instead of compiling the client out; `SsrfFetch.HttpsClientIsCompiledIn` (test-core) guards it. Shipped servers already fetched https (live probe: 958-byte PNG ok, self-signed host refused).
 - imp-server sampling defaults follow the model, as imp-cli (#2462): `generation_config.json`, else the arch preset, for `temperature` / `top_p` / `top_k` a request omits. Was 0.7 / 0.95 / 40 for every model; Qwen3 now 0.6 / 0.95 / 20. `SamplingDefaultsParity` (test-core) compares CLI and server over 18 archs.

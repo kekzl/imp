@@ -660,7 +660,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // Never host-offloaded at runtime, so the LRU cache must not be allocated (would shadow
             // the converted device experts -> garbage output).
             bool has_host_experts = false;
-            if (!model_->profile().is_gpt_oss) {
+            if (!model_->profile().experts_convert_at_predequant) {
                 for (int li = 0; li < model_->n_layers(); li++) {
                     const auto& L = model_->layer(li);
                     if ((L.expert_up_packed.data && !L.expert_up_packed.on_device) ||
@@ -1753,8 +1753,8 @@ bool GraphExecutor::fa2_serves_all_prefill() const {
     }
     const bool fa2_hd_ok = hd_for_attn == 128 ||
                            (hd_for_attn == 256 && dispatch_policy().attention.fa2_hd256);
-    return fa2_hd_ok && dispatch_policy().attention.fa2_fp16qk != "never" &&
-           attn_shapes_uniform() && !model_->profile().is_gpt_oss;
+    return fa2_hd_ok && dispatch_policy().attention.fa2_fp16qk != "never" && attn_shapes_uniform() &&
+           !model_->profile().learned_attn_sinks;
 }
 
 int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) const {
@@ -1764,7 +1764,7 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
     if (s_cap <= 0 || desired <= 0)
         return desired;
     const auto& cfg = model_->config();
-    const bool sinks = model_->profile().is_gpt_oss;
+    const bool sinks = model_->profile().learned_attn_sinks;
     const bool uniform = attn_shapes_uniform();
     const auto& att = dispatch_policy().attention;
     // Uniform attention head_dim (first nonzero per-layer value, else global).
@@ -1830,7 +1830,7 @@ bool GraphExecutor::chunk_capture_supported() const {
     const auto& cfg = model_->config();
     if (cfg.is_mla())
         return false;  // absorbed-decode latent cache writes are host-parameterized
-    if (model_->profile().is_gpt_oss)
+    if (model_->profile().learned_attn_sinks)
         return false;  // learned sinks — cuBLAS-only chunked attention
     if (longrope_short_freqs_ != nullptr)
         return false;  // host branch on max_context_len picks the freq table

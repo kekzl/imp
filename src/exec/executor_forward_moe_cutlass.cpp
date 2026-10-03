@@ -35,9 +35,9 @@ namespace imp {
 // must name the same winner. KNOWN LIMIT: a tier reordered ahead of the
 // winner that would have accepted stays invisible (chain short-circuits).
 // One-shot logging so a divergence cannot flood the serving log.
-static void verify_against_moe_routing_model(ModelArch arch, const DispatchPolicy& rcfg,
+static void verify_against_moe_routing_model(bool expert_bias_glu, const DispatchPolicy& rcfg,
                                              const MoePrefillWorkspace& obs, MoePrefillPath chosen) {
-    const MoePrefillPath modeled = select_moe_prefill_path(arch, rcfg, obs);
+    const MoePrefillPath modeled = select_moe_prefill_path(expert_bias_glu, rcfg, obs);
     if (modeled == chosen)
         return;
     static bool warned = false;
@@ -112,7 +112,8 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
                             moe_.cutlass3x_packed && moe_.cutlass3x_sf &&
                             (staged_covers || ids_cover);
     if (!obs.grouped_available) {
-        verify_against_moe_routing_model(cfg.arch, dispatch_policy(), obs, MoePrefillPath::LEGACY);
+        verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu, dispatch_policy(), obs,
+                                         MoePrefillPath::LEGACY);
         return false;
     }
 
@@ -322,7 +323,7 @@ bool device_args_done = false;
             const char* gate_for_fused =
                 non_gated_experts ? nullptr : expert_gate_base;
             const auto* d_offs = static_cast<const int32_t*>(routing.expert_offsets.data);
-            const bool gpt_oss = model_->profile().is_gpt_oss;
+            const bool gpt_oss = model_->profile().moe_expert_bias_glu;
             // gpt-oss (#547, #2466): gate/up biases + clamped GLU fused into the quantize (cfg act is
             // GPT_OSS_GLU); the down bias rides the fused scatter when phase 7 takes it.
             fused_act_quantize_device(gate_for_fused, expert_up_base, eff, act_type, ly.expert_gate_bias.data,
@@ -348,7 +349,8 @@ bool device_args_done = false;
             // host-args path below.
             obs.device_args_ready = true;
             dispatch_record::set_moe_prefill_tier(MoePrefillPath::DEVICE_ARGS);
-            verify_against_moe_routing_model(cfg.arch, dispatch_policy(), obs, MoePrefillPath::DEVICE_ARGS);
+            verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu, dispatch_policy(), obs,
+                                             MoePrefillPath::DEVICE_ARGS);
         } else {
             IMP_LOG_ERROR(
                 "device-args full path failed; falling back to legacy");
@@ -623,8 +625,8 @@ bool smallM_done = false;
                         obs.smallM_available = true;
                         obs.smallM_under_threshold = true;
                         dispatch_record::set_moe_prefill_tier(MoePrefillPath::SMALL_M);
-                        verify_against_moe_routing_model(cfg.arch, dispatch_policy(), obs,
-                                                         MoePrefillPath::SMALL_M);
+                        verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu,
+                                                         dispatch_policy(), obs, MoePrefillPath::SMALL_M);
                     } else {
                         IMP_LOG_ERROR(
                             "smallM down dispatch failed; falling back to "
@@ -643,7 +645,8 @@ bool smallM_done = false;
 if (!smallM_done) {
     dispatch_record::set_moe_prefill_tier(MoePrefillPath::GROUPED);
     obs.grouped_ready = true;
-    verify_against_moe_routing_model(cfg.arch, dispatch_policy(), obs, MoePrefillPath::GROUPED);
+    verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu, dispatch_policy(), obs,
+                                     MoePrefillPath::GROUPED);
     if (layer == 0)
         IMP_LOG_INFO("MoE prefill: CUTLASS 3.x NVFP4 grouped (n=%d, expanded=%d)", n, expanded);
 }
@@ -748,8 +751,8 @@ if (quantize_once(gathered_base, d, sfa_offs, sfa_bases)) {
 
 // gpt-oss (#547): per-expert biases on gate/up BEFORE activation (rows are
 // expert-sorted — same seam as the dequant batch path).
-const int32_t* gpt_oss_offsets =
-    model_->profile().is_gpt_oss ? static_cast<const int32_t*>(routing.expert_offsets.data)
+const int32_t* gpt_oss_offsets = model_->profile().moe_expert_bias_glu
+                                     ? static_cast<const int32_t*>(routing.expert_offsets.data)
                                      : nullptr;
 if (gpt_oss_offsets) {
     moe_add_expert_bias_sorted(expert_gate_base, ly.expert_gate_bias.data, gpt_oss_offsets, ne,

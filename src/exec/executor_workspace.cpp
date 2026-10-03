@@ -189,7 +189,7 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     norm_w_off_ = model.config().norm_weight_offset;
 
     // Gemma 4: allocate a ones buffer for V-normalization (no learned weight).
-    if (model.profile().is_gemma4 && !alloc_v_norm_ones(model, &v_norm_ones_buf_))
+    if (model.profile().v_rmsnorm && !alloc_v_norm_ones(model, &v_norm_ones_buf_))
         return false;
     use_pdl_ = use_pdl;
     wcache_.use_fp8 = use_fp8_prefill;

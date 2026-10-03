@@ -367,7 +367,7 @@ struct UploadCtx {
     // MXFP4->NVFP4 conversion runs at pre_dequant (needs the executor's wcache). True for
     // ModelArch::GPT_OSS so upload_packed_experts skips them instead of uploading raw MXFP4 the
     // executor cannot consume.
-    bool is_gpt_oss = false;
+    bool mxfp4_experts_deferred = false;
     // NVFP4-prequant SafeTensors: the MoE host-offload path does not support native-NVFP4
     // experts (they'd stay QType::INT8 packed and leak to the generic cuBLAS GEMM, status-15
     // garbage). Forces all experts on-device for these models so Phase-0 promotes them; see
@@ -1520,7 +1520,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             // them to NVFP4 and registers the CUTLASS grouped path. Uploading raw MXFP4 here would
             // leave them in a format no MoE kernel consumes (NaN); the F16-slice fallback also
             // mis-strides MXFP4 bytes.
-            if (ctx.is_gpt_oss && qtype == QType::MXFP4) {
+            if (ctx.mxfp4_experts_deferred && qtype == QType::MXFP4) {
                 IMP_LOG_DEBUG("  %s: gpt-oss MXFP4 experts kept host-resident for NVFP4 convert", name);
                 return true;
             }
@@ -1956,10 +1956,16 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                                     config_.arch == ModelArch::QWEN4_EXP)
                                        ? 1.0f
                                        : 0.0f;
-    const bool is_gpt_oss = (config_.arch == ModelArch::GPT_OSS);
-    UploadCtx ctx{compute_dtype,       stream,          gpu_allocations_, host_pinned_,
-                  host_pinned_allocs_, arch_norm_offset, is_gpt_oss,
-                  config_.is_nvfp4_prequant, this};
+    const bool mxfp4_experts_deferred = (config_.arch == ModelArch::GPT_OSS);
+    UploadCtx ctx{compute_dtype,
+                  stream,
+                  gpu_allocations_,
+                  host_pinned_,
+                  host_pinned_allocs_,
+                  arch_norm_offset,
+                  mxfp4_experts_deferred,
+                  config_.is_nvfp4_prequant,
+                  this};
 
     // --- Embeddings, output norm, output projection ---
     if (!upload_embeddings_and_output(tok_emb_, out_norm_, out_proj_, ctx)) {

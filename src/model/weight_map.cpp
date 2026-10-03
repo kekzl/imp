@@ -353,14 +353,14 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     // per class here, named in the summary.
     SkipStats stats{};
 
-    const bool is_gemma4 = (arch_ == ModelArch::GEMMA4);
-    const bool is_gemma4_moe = is_gemma4 && (model.config_.n_experts > 0);
+    const bool gemma4_layout = (arch_ == ModelArch::GEMMA4);
+    const bool gemma4_moe_layout = gemma4_layout && (model.config_.n_experts > 0);
     const bool is_qwen36_moe = (arch_ == ModelArch::QWEN36_MOE);
     const bool is_nemotron_h = (arch_ == ModelArch::NEMOTRON_H_MOE);
     // Multimodal "ForConditionalGeneration" wrappers (Gemma-4-VL, Qwen3.5-VL, Qwen3.6-VL) share
     // model.language_model.* / model.vision_tower.* (resp. model.visual.*) plus an mtp.* head.
     // Text-only variants ship bare model.* keys, so the strip is prefix-guarded and a no-op there.
-    const bool needs_multimodal_strip = is_gemma4 || is_qwen36_moe || (arch_ == ModelArch::QWEN35) ||
+    const bool needs_multimodal_strip = gemma4_layout || is_qwen36_moe || (arch_ == ModelArch::QWEN35) ||
                                         (arch_ == ModelArch::QWEN4_EXP) || model.config_.multimodal_wrapper;
 
     for (auto& [orig_name, tensor] : tensors) {
@@ -630,7 +630,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         // post_attention_layernorm.weight: Llama convention treats it as the pre-FFN norm; Gemma
         // 3/4 treats it as the sandwich norm applied AFTER attention output (routed separately in
         // the Gemma-4 block below).
-        if (!matched && !is_gemma4 && parts.size() >= 5 && parts[3] == "post_attention_layernorm" &&
+        if (!matched && !gemma4_layout && parts.size() >= 5 && parts[3] == "post_attention_layernorm" &&
             parts[4] == "weight") {
             layer.ffn_norm = t;
             matched = true;
@@ -639,7 +639,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         // Gemma-4 MoE: mlp.{gate,up,down}_proj.weight is the SHARED EXPERT, not dense MLP. Routes
         // to w_*_shared; must come before the generic dense-MLP branch (dense Gemma-4/31B falls
         // through to the standard w_gate/w_up/w_down path).
-        if (!matched && is_gemma4_moe && parts.size() >= 6 && parts[3] == "mlp" && parts[5] == "weight") {
+        if (!matched && gemma4_moe_layout && parts.size() >= 6 && parts[3] == "mlp" && parts[5] == "weight") {
             const std::string& proj = parts[4];
             if (proj == "gate_proj") {
                 layer.w_gate_shared = t;
@@ -659,7 +659,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         //   router.proj.weight    [n_exp,d]                -> moe_gate
         //   *_layernorm(_1|_2) variants                    -> ffn_{pre,post}_norm_{1,2}
         //   post_attention_layernorm.weight                -> post_attn_norm
-        if (!matched && is_gemma4) {
+        if (!matched && gemma4_layout) {
             // experts.gate_up_proj / experts.down_proj
             if (parts.size() >= 5 && parts[3] == "experts") {
                 if (parts[4] == "gate_up_proj") {

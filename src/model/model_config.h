@@ -256,11 +256,11 @@ void set_yarn_extras_gguf(ModelConfig& cfg, const Get& get) {
 }
 
 // Softmax scale for QK^T: config override (Granite attention_multiplier, 1/128 on 4.2), else
-// 1/sqrt(head_dim), 1.0 on Gemma 4 (Q/K-norm absorbs it); MLA times mscale_adj^2.
-inline float attention_softmax_scale(const ModelConfig& cfg, bool gemma4, int head_dim) {
+// 1/sqrt(head_dim), 1.0 with unit_scale (Gemma 4: Q/K-norm absorbs it); MLA times mscale_adj^2.
+inline float attention_softmax_scale(const ModelConfig& cfg, bool unit_scale, int head_dim) {
     if (cfg.attn_scale > 0.0f)
         return cfg.attn_scale;
-    const float base = gemma4 ? 1.0f : 1.0f / std::sqrt(static_cast<float>(head_dim));
+    const float base = unit_scale ? 1.0f : 1.0f / std::sqrt(static_cast<float>(head_dim));
     return base * mla_attention_scale_multiplier(cfg);
 }
 
