@@ -413,7 +413,7 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
         nvfp4_decode_mxfp4_fp16_fallback_(cfg, stream);
     }
 
-    if (model_->profile().is_gpt_oss)
+    if (model_->profile().experts_convert_at_predequant)
         gpt_oss_convert_moe_experts_(cfg, dctx);
     if (!skip_decode_cache)
         nvfp4_decode_cache_moe_experts_(cfg, budget, remaining_budget, stream, dctx);

@@ -592,7 +592,8 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
 constexpr int kHostDecodeRowsMax = 8;
 
 bool GraphExecutor::host_decode_rows_ok_(int layer, int n, int top_k) const {
-    return n > 1 && n <= kHostDecodeRowsMax && compute_dtype_ == QType::F16 && !model_->profile().is_gpt_oss &&
+    return n > 1 && n <= kHostDecodeRowsMax && compute_dtype_ == QType::F16 &&
+           !model_->profile().moe_expert_bias_glu &&
            nvfp4_host_decode_ready(model_->layer(layer), expert_cache_, moe_, top_k);
 }
 

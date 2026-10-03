@@ -85,7 +85,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // Gemma 4: derive per-layer n_heads/n_kv_heads from actual tensor shapes
     // (layer 0 SWA: 16Q/8KV hd=256; layer 5 global: 16Q/2KV hd=512).
     // Authoritative source is the loaded tensor shapes; per-layer config can lag.
-    if (prof.is_gemma4 && hd > 0 && ly.wq.data != nullptr) {
+    if (prof.per_layer_head_shapes && hd > 0 && ly.wq.data != nullptr) {
         int wq_out = static_cast<int>(ly.wq.shape[0]);
         if (wq_out > 0 && (wq_out % hd) == 0) {
             int nh_layer = wq_out / hd;
@@ -226,7 +226,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // Gemma 4: K=V sharing for global attention layers (wv==null): no V
     // projection exists, V is aliased from K. Copy K->V here so downstream
     // code (QK-norm, V-norm, KV-write, attention) sees a valid V tensor.
-    if (prof.is_gemma4 && ly.wv.data == nullptr && kk.data != nullptr && vv.data != nullptr) {
+    if (prof.k_as_v_without_wv && ly.wv.data == nullptr && kk.data != nullptr && vv.data != nullptr) {
         size_t kv_bytes = static_cast<size_t>(n) * nkv * hd * dtype_size(kk.qtype);
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(vv.data, kk.data, kv_bytes, cudaMemcpyDeviceToDevice, stream));
     }
@@ -234,7 +234,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // V-normalization (Gemma 4): per-head RMSNorm with NO learned weight.
     // Matches llama.cpp's `Vcur = ggml_rms_norm(Vcur, eps)` (gemma4-iswa.cpp:82).
     // Required for both K=V-shared global layers and standard SWA layers.
-    if (prof.is_gemma4 && v_norm_ones_buf_ != nullptr) {
+    if (prof.v_rmsnorm && v_norm_ones_buf_ != nullptr) {
         int64_t vflat_shape[4] = {static_cast<int64_t>(n) * nkv, hd, 0, 0};
         Tensor v_flat(vv.data, vv.qtype, 2, vflat_shape, true);
         int64_t ones_shape[4] = {hd, 0, 0, 0};
@@ -381,7 +381,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // head_dim; global layers' freq_factors (loaded as longrope_freqs) zero
         // out most pairs to realize the GGUF's partial-rotary schedule (ccss000000000000).
         int fused_rope_dim = cfg.rope_dim;
-        if (prof.is_gemma4) {
+        if (prof.rope_full_head_dim) {
             fused_rope_dim = hd;
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
@@ -444,7 +444,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // global layers' freq_factors (longrope_freqs) realize the
             // partial-rotary schedule from the GGUF.
             int layer_rope_dim = cfg.rope_dim;
-            if (prof.is_gemma4) {
+            if (prof.rope_full_head_dim) {
                 layer_rope_dim = hd;
             } else if (layer_rope_dim > hd || layer_rope_dim <= 0) {
                 layer_rope_dim = hd;  // safety clamp
@@ -471,12 +471,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
 
     // Attention scale per arch (model_config.h attention_softmax_scale): Granite override,
     // 1/sqrt(head_dim), Gemma 4 1.0, MLA times YaRN mscale_adj^2.
-    const float scale = attention_softmax_scale(cfg, prof.is_gemma4, hd);
+    const float scale = attention_softmax_scale(cfg, prof.unit_softmax_scale, hd);
 
     // gpt-oss learned attention sinks (#547): per-head logits acting as a
     // virtual extra softmax column. Only the cuBLAS prefill softmax and the
     // FP16 paged decode kernel understand them; prefill forces cuBLAS when sinks are present.
-    const void* attn_sinks = prof.is_gpt_oss ? ly.attn_sinks.data : nullptr;
+    const void* attn_sinks = prof.learned_attn_sinks ? ly.attn_sinks.data : nullptr;
 
     // MLA absorbed-decode (opt-in): populates the per-layer latent cache with
     // this step's RMSNorm'd latent + post-RoPE decoupled key for BOTH prefill
@@ -755,7 +755,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             if (layer == 0 && debug_attn_steps) {
                 debug_tensor_stats_all("L0_post_fp32accum_h", view_tokens(h, n), stream);
             }
-        } else if (has_post_attn_norm && prof.is_gemma4) {
+        } else if (has_post_attn_norm && prof.sandwich_norms) {
             // Gemma 4 sandwich norm: h = r + post_attn_norm(po).
             // Normalize attention output first, THEN add residual (HF reference order).
             rmsnorm(po, ly.post_attn_norm, po, model_->config().rms_norm_eps, stream, norm_w_off_);

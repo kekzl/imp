@@ -1,7 +1,6 @@
 #pragma once
 
 #include "compute/dispatch_paths.h"  // MoePrefillPath
-#include "model/model_arch.h"
 #include "core/dispatch_policy.h"
 
 // Pure host-side model of the MoE-prefill GEMM path selection in
@@ -31,13 +30,12 @@ struct MoePrefillWorkspace {
     bool staged_blocks = false;      // host-expert staged prefill (ctx.staged_blocks)
 };
 
-// Reproduces the path selection in try_run_moe_cutlass3x_nvfp4_prefill_. gpt-oss runs
-// device-args unstaged (bias + GPT_OSS_GLU + plain quantize, #2116); staged it stays off
-// device-args. smallM stays off for gpt-oss (#574/#547: no GLU-clamp/per-expert-bias hooks).
-inline MoePrefillPath select_moe_prefill_path(ModelArch arch, const DispatchPolicy& rcfg,
+// Reproduces the path selection in try_run_moe_cutlass3x_nvfp4_prefill_. expert_bias_glu
+// (ModelProfile::moe_expert_bias_glu, gpt-oss) runs device-args unstaged (bias + GPT_OSS_GLU + plain
+// quantize, #2116); staged it stays off device-args. smallM stays off for gpt-oss (#574/#547: no
+// GLU-clamp/per-expert-bias hooks).
+inline MoePrefillPath select_moe_prefill_path(bool expert_bias_glu, const DispatchPolicy& rcfg,
                                               const MoePrefillWorkspace& ws) {
-    const bool is_gpt_oss = (arch == ModelArch::GPT_OSS);
-
     // Function-entry gate: moe.no_cutlass3x or an unavailable/uncovered CUTLASS 3.x grouped
     // path makes try_run_... return false -> per-expert LEGACY fallback. Checked before
     // device-args, gating every CUTLASS tier including device-args.
@@ -46,13 +44,13 @@ inline MoePrefillPath select_moe_prefill_path(ModelArch arch, const DispatchPoli
 
     // Tier 1: device-args fast path. Gated by moe.nvfp4_device_args, off for staged
     // gpt-oss, requires the full device-args workspace.
-    if (rcfg.moe.nvfp4_device_args && !(is_gpt_oss && ws.staged_blocks) && ws.device_args_ready)
+    if (rcfg.moe.nvfp4_device_args && !(expert_bias_glu && ws.staged_blocks) && ws.device_args_ready)
         return MoePrefillPath::DEVICE_ARGS;
 
     // Tier 2: smallM path. Opt-in (moe.nvfp4_smallM), off for gpt-oss, only
     // when the kernel is available and the active token count is under the
     // smallM threshold.
-    if (rcfg.moe.nvfp4_smallM && !is_gpt_oss && ws.smallM_available && ws.smallM_under_threshold)
+    if (rcfg.moe.nvfp4_smallM && !expert_bias_glu && ws.smallM_available && ws.smallM_under_threshold)
         return MoePrefillPath::SMALL_M;
 
     // Tier 3: host-args grouped GEMM (gpt-oss adds per-expert bias seams).

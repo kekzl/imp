@@ -34,7 +34,7 @@
             // Per-layer rope_dim (same as prefill rope path above): Gemma 4
             // uses full hd; longrope_freqs encodes the partial-rotary schedule.
             int effective_rope_dim;
-            if (prof.is_gemma4) {
+            if (prof.rope_full_head_dim) {
                 effective_rope_dim = hd;
             } else {
                 effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;

@@ -478,7 +478,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
     // gpt-oss residual rescale (model.cpp registry, embed_scale 2^-4): the loader shifts the BF16
     // contributors (Wo, o_bias, expert down bias), an NVFP4 Wo or expert down projection carries
     // the factor in its tensor_scale, as the MXFP4 convert path's extra_scale does.
-    if (model_->profile().is_gpt_oss && cfg.embed_scale > 0.0f) {
+    if (model_->profile().residual_rescale_in_scales && cfg.embed_scale > 0.0f) {
         int n_rescaled = 0;
         for (int i = 0; i < cfg.n_layers; ++i) {
             TransformerLayer& L = mut_model->layer(i);

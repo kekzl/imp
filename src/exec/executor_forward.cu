@@ -502,7 +502,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 // Also scales the FP32 residual accumulator so the next layer's attention
                 // sees the correctly-scaled residual stream; without this the FP32 accum
                 // grows unbounded (layer_out_scale compensates residual growth, per llama's gemma4-iswa).
-                if (fp32_accum_buf_ && model_->profile().is_gemma4) {
+                if (fp32_accum_buf_ && model_->profile().fp32_residual_norms) {
                     int blocks_f32 = static_cast<int>((total + threads - 1) / threads);
                     scale_fp32_by_fp16ptr_kernel<<<blocks_f32, threads, 0, stream>>>(
                         static_cast<float*>(view_tokens(fp32_hidden_, n).data),
@@ -543,7 +543,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         // rmsnorm_fp32_accum_to_fp16_kernel when post_ffn_norm + fp32_accum_buf_
         // are active. A forced FP16->FP32 sync here would clobber that precision
         // and drift ~1-2%/layer; only sync when the MoE path did NOT go through the FP32 accum kernel.
-        if (fp32_accum_buf_ && model_->profile().is_gemma4 &&
+        if (fp32_accum_buf_ && model_->profile().fp32_residual_norms &&
             dispatch_policy().moe.force_fp16_sync) {
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             int64_t total = static_cast<int64_t>(n) * cfg.d_model;

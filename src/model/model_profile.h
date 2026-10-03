@@ -24,12 +24,32 @@ struct ModelProfile {
                                      // batched verify/prefill reads quantized
                                      // weights directly (no per-chunk dequant)
 
-    // Hot path (executor_attention/executor_forward_moe/...) keys many kernel/norm-selection
-    // branches off architecture. These booleans are the ONE place mapping the arch enum to
-    // those branches; every cfg.arch==ModelArch::X in the executors should read the flag here.
+    // Capability traits: executors branch on these, never on the arch enum. A new arch sets
+    // the ones it needs in derive_model_profile(); the arch -> trait map lives only there.
+    // Gemma-4 today:
+    bool sandwich_norms = false;               // post-attn and pre/post-FFN norms per branch
+    bool fp32_residual_norms = false;          // norms read the FP32 residual (fp32_accum_buf_)
+    bool sanitize_ffn_fp16 = false;            // clear inf/NaN in FFN output before post-norm
+    bool scaled_router_norm = false;           // router_in = rmsnorm(h) / sqrt(d) * gate_inp_scale
+    bool router_bias_is_expert_scale = false;  // moe_router_bias holds ffn_down_exps.scale: ignore
+    bool expert_out_scale = false;             // per-expert down scale folded into routing weights
+    bool per_layer_head_shapes = false;        // per-layer n_heads from wq rows, not config
+    bool k_as_v_without_wv = false;            // layers without wv alias V from K
+    bool v_rmsnorm = false;                    // unweighted per-head RMSNorm on V
+    bool rope_full_head_dim = false;           // rotate full hd; freq factors encode partial rotary
+    bool unit_softmax_scale = false;           // attention softmax scale 1.0
+    bool outlier_sensitive_logits = false;     // deterministic GEMM, MMVQ, no BOS warmup
+    // gpt-oss today:
+    bool learned_attn_sinks = false;             // sink logits: cuBLAS prefill, no FA2 / chunk capture
+    bool moe_expert_bias_glu = false;            // per-expert gate/up/down bias + clamped GLU
+    bool moe_router_logit_bias = false;          // linear router bias before softmax/top-k
+    bool experts_convert_at_predequant = false;  // MXFP4 experts stay on host until NVFP4 convert
+    bool fp8_attn_proj_full = false;             // gemm.fp8_attn_proj=auto caches q/k/v/o
+    bool residual_rescale_in_scales = false;     // embed_scale folded into NVFP4 Wo/down scales
+    // Gemma-3, Gemma-4, gpt-oss today:
+    bool deny_cublas_fp16_acc = false;  // FP16 residual overflow: cublas_fp16_acc=auto -> off
+
     bool is_gemma3 = false;
-    bool is_gemma4 = false;
-    bool is_gpt_oss = false;
     bool is_llama4 = false;
     // Encoder-only embedder (#836, nomic-bert): bidirectional attention,
     // post-LN with bias, no KV cache / LM head / sampling. Served by the

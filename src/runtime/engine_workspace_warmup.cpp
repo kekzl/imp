@@ -433,7 +433,7 @@ void Engine::warmup() {
     // Gemma-4 has outlier-heavy output_norm activations that amplify cuBLAS algo jitter: warming
     // up with BOS-filled buffers pins an algo that produces wrong logits under real inputs and
     // drives decode into backtick/markdown degeneration.
-    if (model_->profile().is_gemma4) {
+    if (model_->profile().outlier_sensitive_logits) {
         IMP_LOG_INFO("Warmup skipped (Gemma-4 algo-jitter protection)");
         return;
     }

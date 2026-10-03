@@ -145,6 +145,10 @@ TEST(AttnDispatchTable, FMHASm120AutoIsNotNever) {
 
 namespace {
 
+// ModelProfile::moe_expert_bias_glu: true for gpt-oss, false for e.g. Qwen3-MoE.
+constexpr bool kExpertBiasGlu = true;
+constexpr bool kPlainMoe = false;
+
 // Workspace with every tier's preconditions satisfied — the path is then
 // decided purely by the config + arch gates.
 MoePrefillWorkspace all_ready() {
@@ -161,14 +165,13 @@ MoePrefillWorkspace all_ready() {
 
 TEST(MoePrefillTable, DefaultPicksDeviceArgs) {
     // nvfp4_device_args=true (default), non-gpt-oss, workspace ready.
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, default_cfg(), all_ready()),
-              MoePrefillPath::DEVICE_ARGS);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, default_cfg(), all_ready()), MoePrefillPath::DEVICE_ARGS);
 }
 
 TEST(MoePrefillTable, GptOssUnstagedTakesDeviceArgs) {
     // #2116: unstaged gpt-oss runs device-args (bias + GPT_OSS_GLU + plain quantize). The
     // model said GROUPED/LEGACY and the dispatch logged "routing model disagrees" once per run.
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::GPT_OSS, default_cfg(), all_ready()),
+    EXPECT_EQ(select_moe_prefill_path(kExpertBiasGlu, default_cfg(), all_ready()),
               MoePrefillPath::DEVICE_ARGS);
 }
 
@@ -178,26 +181,26 @@ TEST(MoePrefillTable, GptOssStagedSkipsDeviceArgsAndSmallMTakesGrouped) {
     ws.staged_blocks = true;
     auto cfg = default_cfg();
     cfg.moe.nvfp4_smallM = true;  // would route others to smallM
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::GPT_OSS, cfg, ws), MoePrefillPath::GROUPED);
+    EXPECT_EQ(select_moe_prefill_path(kExpertBiasGlu, cfg, ws), MoePrefillPath::GROUPED);
 }
 
 TEST(MoePrefillTable, DeviceArgsDisabledFallsToGrouped) {
     auto cfg = default_cfg();
     cfg.moe.nvfp4_device_args = false;
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, all_ready()), MoePrefillPath::GROUPED);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, all_ready()), MoePrefillPath::GROUPED);
 }
 
 TEST(MoePrefillTable, DeviceArgsWorkspaceNotReadyFallsToGrouped) {
     auto ws = all_ready();
     ws.device_args_ready = false;
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, default_cfg(), ws), MoePrefillPath::GROUPED);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, default_cfg(), ws), MoePrefillPath::GROUPED);
 }
 
 TEST(MoePrefillTable, SmallMWhenOptedInAndUnderThreshold) {
     auto cfg = default_cfg();
     cfg.moe.nvfp4_device_args = false;  // so device-args doesn't win first
     cfg.moe.nvfp4_smallM = true;
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, all_ready()), MoePrefillPath::SMALL_M);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, all_ready()), MoePrefillPath::SMALL_M);
 }
 
 TEST(MoePrefillTable, SmallMOverThresholdFallsToGrouped) {
@@ -206,13 +209,13 @@ TEST(MoePrefillTable, SmallMOverThresholdFallsToGrouped) {
     cfg.moe.nvfp4_smallM = true;
     auto ws = all_ready();
     ws.smallM_under_threshold = false;  // too many tokens
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, ws), MoePrefillPath::GROUPED);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::GROUPED);
 }
 
 TEST(MoePrefillTable, NoCutlass3xFallsToLegacy) {
     auto cfg = default_cfg();
     cfg.moe.no_cutlass3x = true;
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, all_ready()), MoePrefillPath::LEGACY);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, all_ready()), MoePrefillPath::LEGACY);
 }
 
 TEST(MoePrefillTable, GroupedUnavailableFallsToLegacy) {
@@ -220,7 +223,7 @@ TEST(MoePrefillTable, GroupedUnavailableFallsToLegacy) {
     cfg.moe.nvfp4_device_args = false;
     auto ws = all_ready();
     ws.grouped_available = false;
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, ws), MoePrefillPath::LEGACY);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::LEGACY);
 }
 
 TEST(MoePrefillTable, GroupedNotReadyFallsToLegacy) {
@@ -228,14 +231,14 @@ TEST(MoePrefillTable, GroupedNotReadyFallsToLegacy) {
     cfg.moe.nvfp4_device_args = false;
     auto ws = all_ready();
     ws.grouped_ready = false;
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, ws), MoePrefillPath::LEGACY);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::LEGACY);
 }
 
 TEST(MoePrefillTable, GptOssNoCutlass3xFallsToLegacy) {
     // Even gpt-oss drops to legacy when the grouped kernel is unavailable.
     auto cfg = default_cfg();
     cfg.moe.no_cutlass3x = true;
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::GPT_OSS, cfg, all_ready()), MoePrefillPath::LEGACY);
+    EXPECT_EQ(select_moe_prefill_path(kExpertBiasGlu, cfg, all_ready()), MoePrefillPath::LEGACY);
 }
 
 // ---- #992: learned-sink pre-gate ------------------------------------------
@@ -424,9 +427,9 @@ TEST(MoeRoutingModelCoupling, EveryTierReplaysToItself) {
     const MoePrefillPath tiers[] = {MoePrefillPath::DEVICE_ARGS, MoePrefillPath::SMALL_M,
                                     MoePrefillPath::GROUPED, MoePrefillPath::LEGACY};
     for (MoePrefillPath t : tiers) {
-        EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, moe_observed_when(t)), t)
+        EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, moe_observed_when(t)), t)
             << "the dispatch would run " << moe_prefill_path_name(t) << " but the model replays to "
-            << moe_prefill_path_name(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, moe_observed_when(t)))
+            << moe_prefill_path_name(select_moe_prefill_path(kPlainMoe, cfg, moe_observed_when(t)))
             << " — verify_against_moe_routing_model() would fire on a correct dispatch";
     }
 }
@@ -436,7 +439,7 @@ TEST(MoeRoutingModelCoupling, EveryTierReplaysToItself) {
 TEST(MoeRoutingModelCoupling, GptOssReplaysToGrouped) {
     auto cfg = default_cfg();
     cfg.moe.nvfp4_smallM = true;
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::GPT_OSS, cfg, moe_observed_when(MoePrefillPath::GROUPED)),
+    EXPECT_EQ(select_moe_prefill_path(kExpertBiasGlu, cfg, moe_observed_when(MoePrefillPath::GROUPED)),
               MoePrefillPath::GROUPED);
 }
 
@@ -450,7 +453,7 @@ TEST(MoeTierPrecedence, DeviceArgsBeatsSmallM) {
     auto ws = all_ready();
     ASSERT_TRUE(cfg.moe.nvfp4_device_args && ws.device_args_ready);
     ASSERT_TRUE(ws.smallM_available && ws.smallM_under_threshold);
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, ws), MoePrefillPath::DEVICE_ARGS);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::DEVICE_ARGS);
 }
 
 TEST(MoeTierPrecedence, SmallMBeatsGrouped) {
@@ -459,7 +462,7 @@ TEST(MoeTierPrecedence, SmallMBeatsGrouped) {
     cfg.moe.nvfp4_smallM = true;
     auto ws = all_ready();
     ASSERT_TRUE(ws.smallM_available && ws.smallM_under_threshold && ws.grouped_ready);
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, ws), MoePrefillPath::SMALL_M);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::SMALL_M);
 }
 
 TEST(MoeTierPrecedence, GroupedBeatsLegacyWhenReady) {
@@ -468,7 +471,7 @@ TEST(MoeTierPrecedence, GroupedBeatsLegacyWhenReady) {
     auto ws = all_ready();
     ws.smallM_available = false;  // smallM out of the way
     ASSERT_TRUE(ws.grouped_available && ws.grouped_ready);
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, ws), MoePrefillPath::GROUPED);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::GROUPED);
 }
 
 // The entry gate short-circuits every CUTLASS tier, however ready they look.
@@ -477,7 +480,7 @@ TEST(MoeTierPrecedence, EntryGateBeatsEveryReadyTier) {
     cfg.moe.nvfp4_smallM = true;
     auto ws = all_ready();
     ws.grouped_available = false;  // the six early returns in the .cu
-    EXPECT_EQ(select_moe_prefill_path(ModelArch::QWEN3_MOE, cfg, ws), MoePrefillPath::LEGACY);
+    EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::LEGACY);
 }
 
 
