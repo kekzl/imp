@@ -536,19 +536,19 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
     const int rows_hint = 2 * ((expanded + ne - 1) / ne);
     const bool moe_imma = dispatch_policy().gemm.moe_imma_prefill;
 
-    auto batch_dequant_gemm = [&](const Tensor& packed, QType qtype, const char* a_base,
-                                  char* c_base, int K_dim, int N_dim,
-                                  QType out_dtype = QType::F16) {
+    auto batch_dequant_gemm = [&](const Tensor& packed, QType qtype, const char* a_base, char* c_base,
+                                  int K_dim, int N_dim, QType out_dtype = QType::F16,
+                                  bool reuse_act = false) {
         int64_t rows = packed.shape[1];
         int64_t cols = packed.shape[2];
         if (moe_imma && out_dtype == QType::F16 && moe_imma_prefill_supported(qtype) &&
             max_rows_per_expert > 0) {
             const int qkind = moe_imma_prefill_qkind(qtype);
-            if (mmq_imma_moe_gemm(packed.data, qkind,
-                                  reinterpret_cast<const __half*>(a_base),
+            if (mmq_imma_moe_gemm(packed.data, qkind, reinterpret_cast<const __half*>(a_base),
                                   reinterpret_cast<__half*>(c_base),
                                   static_cast<const int32_t*>(routing.expert_offsets.data),
-                                  max_rows_per_expert, expanded, ne, N_dim, K_dim, stream, rows_hint))
+                                  max_rows_per_expert, expanded, ne, N_dim, K_dim, stream, rows_hint,
+                                  reuse_act))
                 return;
         }
         size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
@@ -573,7 +573,9 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
                            expert_gate_base, d, eff);
     debug_dump("L0_moe_gate_out", moe_.expert_gate.data, expanded, eff);
 
-    batch_dequant_gemm(ly.expert_up_packed, up_qtype, gathered_base, expert_up_base, d, eff);
+    // Same gathered input as gate: its IMMA quantize is reused (#2469).
+    batch_dequant_gemm(ly.expert_up_packed, up_qtype, gathered_base, expert_up_base, d, eff, QType::F16,
+                       /*reuse_act=*/!non_gated_experts);
     debug_dump("L0_moe_up_out", moe_.expert_up.data, expanded, eff);
 
     apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data, moe_.expert_swiglu.data,

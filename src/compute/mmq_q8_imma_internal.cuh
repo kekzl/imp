@@ -142,6 +142,12 @@ extern SplitKScratch g_imma_splitk;
 [[nodiscard]] bool imma_ensure_act(int M, int K, bool capturing);
 [[nodiscard]] bool imma_ensure_splitk(size_t floats, bool capturing);
 void imma_quantize_act(const __half* x, int M, int K, cudaStream_t stream);
+// True if the last imma_quantize_act wrote (x, M, K) on `stream` into the current scratch.
+[[nodiscard]] bool imma_act_holds(const __half* x, int M, int K, cudaStream_t stream);
+void imma_act_forget();
+// Thread-local one-shot: this thread's next imma_quantize_act skips if imma_act_holds. Only a
+// caller that knows x is unchanged since that quantize may set it (#2469).
+void imma_act_reuse_next(bool on);
 
 }  // namespace imp
 
