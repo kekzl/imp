@@ -27,8 +27,8 @@ public:
     ~FfnGraphCache() { clear(); }
 
     // fn runs eagerly on the first sighting of (layer, rows), is captured on the second and replayed
-    // after. A generation change drops every graph; a capture or launch failure runs fn eagerly and
-    // disables the cache for the process.
+    // after. A generation change drops every graph; a capture or launch failure, or fn throwing
+    // under capture, runs fn eagerly and disables the cache for the process.
     void run(int layer, int rows, uint64_t generation, cudaStream_t stream, const std::function<void()>& fn);
     void clear();
 
