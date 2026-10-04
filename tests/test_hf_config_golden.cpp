@@ -188,7 +188,7 @@ TEST(HFConfigGolden, EveryFixtureMatchesItsGolden) {
         if (e.path().extension() == ".json")
             jsons.push_back(e.path());
     std::sort(jsons.begin(), jsons.end());
-    ASSERT_EQ(jsons.size(), 94u) << "corpus size changed: regenerate goldens on the base commit";
+    ASSERT_EQ(jsons.size(), 95u) << "corpus size changed: regenerate goldens on the base commit";
 
     const fs::path tmp = fs::temp_directory_path() / ("imp_hf_config_golden_" + std::to_string(::getpid()));
     const fs::path actual_dir = fs::temp_directory_path() / "imp_hf_config_golden";

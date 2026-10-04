@@ -1,5 +1,5 @@
 result=throw encoder-only architecture 'NomicBertModel' is not supported (imp runs causal decoder LMs; embedding encoders need pooling support)
-arch=17
+arch=18
 n_layers=0
 n_heads=0
 n_kv_heads=0

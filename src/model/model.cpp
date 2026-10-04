@@ -168,6 +168,7 @@ enum {
     kApiNomicBert = 15,
     kApiQwen4Exp = 16,
     kApiGranite = 17,
+    kApiQwen3Next = 18,
 };
 
 static constexpr ArchEntry kArchRegistry[] = {
@@ -207,6 +208,8 @@ static constexpr ArchEntry kArchRegistry[] = {
     // multipliers from config.json / GGUF metadata
     // (parse_granite_multipliers, gguf_loader.cpp), sampling from generation_config.
     {ModelArch::GRANITE, "granite", kApiGranite, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
+    // Qwen3-Coder-Next generation_config: temperature 1.0, top_p 0.95, top_k 40; Qwen3.6 router.
+    {ModelArch::QWEN3_NEXT, "qwen3next", kApiQwen3Next, -1, 0, -1, -1, false, true, 1.0f, 0.95f, 40},
     {ModelArch::GENERIC, "generic", kApiGeneric, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
 };
 

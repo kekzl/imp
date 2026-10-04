@@ -90,7 +90,7 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 | `--interactive` | off | interactive chat; refuses `--json` (a token stream is not one document) |
 | `--stop <str>` | - | repeatable, up to 4 |
 | `--chat-template <t>` | `auto` | `auto\|none\|chatml\|llama2\|llama3\|nemotron\|gemma\|deepseek_r1\|phi` |
-| `--temperature <f>` / `--top-p <f>` / `--top-k <n>` | model default | `generation_config.json`, else the arch preset (`src/model/model.cpp:185 0.6f, 0.95f, 20` on qwen3); `imp-server` resolves the same (#2462) |
+| `--temperature <f>` / `--top-p <f>` / `--top-k <n>` | model default | `generation_config.json`, else the arch preset (`src/model/model.cpp:186 0.6f, 0.95f, 20` on qwen3); `imp-server` resolves the same (#2462) |
 | `--min-p <f>` / `--typical-p <f>` | `0.0` (off) / `1.0` (off) | |
 | `--repeat-penalty <f>` / `--repeat-last-n <n>` | `1.0` (off) / `0` (all) | |
 | `--frequency-penalty <f>` / `--presence-penalty <f>` | `0.0` / `0.0` | |

@@ -1,4 +1,5 @@
 #include "model/weight_map.h"
+#include "model/gdn_fused_split.h"
 #include "model/multimodal_wrapper.h"
 #include "model/tensor_kind_matcher.h"
 #include "core/config/lm_head_mode.h"
@@ -1201,6 +1202,10 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                         matched = true;
                     } else if (proj == "in_proj_z") {
                         layer.gdn_gate = t;
+                        matched = true;
+                    } else if (proj == "in_proj_qkvz" || proj == "in_proj_ba") {  // Qwen3-Next
+                        if (!assign_gdn_fused_input(proj, t, model.config_, model.host_owned_buffers_, layer))
+                            return false;
                         matched = true;
                     } else if (proj == "out_proj") {
                         layer.ssm_out = t;

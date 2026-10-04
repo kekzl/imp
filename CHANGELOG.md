@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- Qwen3-Coder-Next (`Qwen3NextForCausalLM`) loads as `qwen3next` (#2410): fused `in_proj_qkvz` / `in_proj_ba` are split at load. RedHatAI NVFP4 with 48 host-resident MoE layers: PPL 6.0697 on `ppl_corpus.txt`, tg128 66.47 tok/s. qwen3next GGUFs are refused.
 - `imp-quantize --calib-groups` X/Y (#2476): MoE expert gate/up into an expert-only norm, per-expert down into up rows; `--calibrate` records per-expert statistics. Opt-in, no measured gain: Gemma-4-26B RTN rounding alone spreads PPL 16.7551..19.0110; gemma4 `--calib` needs a selector.
 
 ### Changed

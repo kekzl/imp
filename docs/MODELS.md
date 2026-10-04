@@ -69,6 +69,7 @@ GDN models use FP16 prefill instead of FP8 (~8% slower than FP8 dense, but elimi
 | [Qwen3-30B-A3B](https://huggingface.co/nvidia/Qwen3-30B-A3B-NVFP4) | NVFP4 | 16 GB | 307 | SafeTensors (Modelopt) |
 | [Qwen3.6-35B-A3B](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | Q4_K_M | 22 GB | 243 | GGUF |
 | [Qwen3.6-35B-A3B](https://huggingface.co/mmangkad/Qwen3.6-35B-A3B-NVFP4) | NVFP4 | 18 GB | 320 | SafeTensors (Modelopt); 257 → 320 since the #949 FP8 SSM-projection sidecar closed the FP16 GDN tax |
+| [Qwen3-Coder-Next-80B-A3B](https://huggingface.co/RedHatAI/Qwen3-Coder-Next-NVFP4) | NVFP4 | 21 GB + 36 GiB host | 66 (tg128) | SafeTensors (llm-compressor), `qwen3_next` (#2410): fused `in_proj_qkvz` / `in_proj_ba` split at load, 48 MoE layers host-resident. `ppl_corpus.txt` 6.0697 (deterministic). `imp-cli --bench` needs `runtime.cuda_graphs=never` (#2574) |
 | [Gemma-4-26B-A4B-it](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | Q4_K_M | 14 GB | 273 (tg128) | GGUF |
 | [Gemma-4-26B-A4B-it](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | Q5_K_M | 17 GB | 65 | GGUF, recommended for code-gen |
 | [Gemma-4-26B-A4B-it](https://huggingface.co/nvidia/Gemma-4-26B-A4B-NVFP4) | NVFP4 | 14 GB | 266 | SafeTensors (Modelopt). Quality note: the NVFP4 expert quant reads ~+48% prose PPL vs UD-Q4_K_M (checkpoint-intrinsic, both compute paths - audit 2026-07-13); at near-equal decode speed, prefer UD-Q4_K_M for quality. |
