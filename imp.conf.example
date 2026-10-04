@@ -273,6 +273,9 @@ swa_sizing                  = auto
 # run several hundred MiB (350 MiB on gemma-3-12b). A budget BELOW one snapshot
 # is worse than 0 — the store stays off and prefix caching is disabled with it,
 # so you lose both. The server logs the required size when this happens.
+# Plan 2 snapshots per concurrent session (prompt boundary + finish): 512 MiB
+# on gemma-3-12b is 1 slot and restored 0 of 4 turns for 2 sessions, 2048 MiB
+# (5 slots) restored 4 of 4 (#2565). Under 2 slots the server warns.
 swa_snapshot_mb             = 0
 # Host spill tier for the prefix cache (#2203): pinned host RAM in MiB. Blocks
 # the pool reclaims are copied here and restored by H2D on a later prefix hit
