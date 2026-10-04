@@ -5,7 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
-- `imp-quantize --calib-groups` X/Y (#2476): MoE expert gate/up into an expert-only norm, per-expert down into up rows; `--calibrate` records per-expert statistics. Opt-in: Gemma-4-26B RTN 16.9442 vs XY 17.1043 PPL; gemma4 `--calib` needs a selector.
+- `imp-quantize --calib-groups` X/Y (#2476): MoE expert gate/up into an expert-only norm, per-expert down into up rows; `--calibrate` records per-expert statistics. Opt-in, no measured gain: Gemma-4-26B RTN rounding alone spreads PPL 16.7551..19.0110; gemma4 `--calib` needs a selector.
 
 ### Changed
 - Allocator headroom 5 -> 4 % of VRAM (#2482), from a measurement: after the KV pool capped, Qwen3.8-27B 32-stream soaks grew device use by at most 608 MiB. The growable pool now reaches its ceiling, 12827 -> 13599 blocks.

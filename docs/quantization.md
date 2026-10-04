@@ -231,7 +231,7 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
 - On a dense model the default `BDEG` folds the same sites as `BD` (E/G need GDN tensors; `WideGqaDefaultIsBdOnADenseLayer`).
 - n_rep 4 measured (#2474): BDEG wins on Qwen3-4B and Qwen3-8B, threshold 5 -> 4 ([record](plans/2026-10-04-awq-groups-nrep4.md)); n_rep 3 unmeasured, keeps all groups; Phi-4 (`phi3`) is refused by `--calib`.
 - Uncalibrated `imp-quantize` already beats a published Modelopt export on the one locally comparable model (9.9252 vs 10.0301, Qwen3-14B).
-- Mechanism, refuted variants, the won't-fit calibration trick: [`archive/quantization_awq_findings.md`](archive/quantization_awq_findings.md). MoE experts (groups X, Y, opt-in: Gemma-4-26B RTN 16.9442 vs XY 17.1043 PPL): [`plans/2026-10-04-awq-moe-experts.md`](plans/2026-10-04-awq-moe-experts.md).
+- Mechanism, refuted variants, the won't-fit calibration trick: [`archive/quantization_awq_findings.md`](archive/quantization_awq_findings.md). MoE experts (groups X, Y, opt-in: on Gemma-4-26B inside the RTN rounding band, sd 4.63 %): [`plans/2026-10-04-awq-moe-experts.md`](plans/2026-10-04-awq-moe-experts.md).
 
 ## MXFP4 (GGUF)
 

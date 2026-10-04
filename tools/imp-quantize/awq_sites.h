@@ -31,7 +31,8 @@ namespace imp::awq {
 // AWQ scale groups, selectable to attribute a bad result. E and G exist only on qwen3_5 GDN
 // hybrids and are unmeasured against an uncalibrated twin.
 constexpr const char* kAwqAllGroups = "ABCDEGXY";
-// X/Y are opt-in: Gemma-4-26B, 14676 framed tokens, RTN 16.9442 vs X 17.2090, Y 17.3654, XY 17.1043.
+// X/Y are opt-in, no measured gain: Gemma-4-26B arms 17.10..17.37 PPL sit inside the RTN rounding band
+// 16.7551..19.0110 (8 tensor-scale shifts, sd 4.63 %, 14676 framed tokens).
 constexpr const char* kAwqDefaultGroups = "ABCDEG";
 
 // Default when --calib-groups is absent: n_rep >= 4 drops attention groups A and C on dense models;
