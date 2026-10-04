@@ -374,8 +374,9 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
         // Register input AND generated tokens, minus the final sampled token
         // (never forwarded, no KV entry; the spec-verify bonus token is the
         // same). Hashing the live reply KV turns the next agent turn's resend
-        // into a prefix-cache hit instead of a full re-prefill.
-        if (req->output_tokens.size() > 1) {
+        // into a prefix-cache hit instead of a full re-prefill. runtime.deterministic: prompt only, the
+        // reply's KV and state came from the decode kernels and a hit on them differs from a prefill.
+        if (req->output_tokens.size() > 1 && !runtime_config_.runtime.deterministic) {
             // Pipelined rows (drain): the chained step forwarded the final token
             // too, so its KV row and state are there and the span includes it.
             const size_t keep = bd_pipe_.draining_release ? 0 : 1;
