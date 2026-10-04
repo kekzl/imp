@@ -8,6 +8,7 @@
 #include "exec/gemm_context.h"
 #include "exec/gemm_dispatch_fallback.h"
 #include "exec/gemm_kernel_registry.h"
+#include "exec/weight_dequant.h"
 #include "exec/executor.h"
 #include "compute/weight_dispatch.h"
 #include "core/tensor_kind.h"
@@ -83,7 +84,7 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight,
             gemm(input, it->second, output, 1.0f, ctx.beta, ctx.stream);
             return;
         }
-        if (dequant_gpu_supported(qtype) && !weight.dropped_source && dequant_scratch_fits(qs, weight)) {
+        if (weight_dequant_supported(qtype) && !weight.dropped_source && dequant_scratch_fits(qs, weight)) {
             int rows = static_cast<int>(weight.shape[0]);
             int cols = static_cast<int>(weight.shape[1]);
             // The one degradation landing on the per-token path was silent
@@ -100,7 +101,7 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight,
                     ctx.beta, qtype_name(qtype), rows, cols,
                     static_cast<double>(rows) * cols * 2.0 / (1024.0 * 1024.0));
             }
-            dequant_gpu(weight.data, qs->dequant, qtype, rows, cols, ctx.stream);
+            dequant_weight_fp16(weight, qs->dequant, ctx.stream);
             Tensor w_fp16(qs->dequant, QType::F16, weight.ndim, weight.shape, true);
             gemm(input, w_fp16, output, 1.0f, ctx.beta, ctx.stream);
             return;
@@ -143,8 +144,8 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight,
         return;
     }
 
-    // Block-quant types (Q4_K, Q5_K, Q8_0, etc.): dequant to FP16 then cuBLAS.
-    if (dequant_gpu_supported(qtype)) {
+    // Block-quant types (Q4_K, Q5_K, Q8_0, etc.) and native FP8: dequant to FP16 then cuBLAS.
+    if (weight_dequant_supported(qtype)) {
         if (!dequant_scratch_fits(qs, weight)) {
             // gemm() has no block-quant arm: it would read the Q6_K/Q8_0 bytes as FP16 and run
             // past the allocation. Output stays untouched; the WARN above names the weight.
@@ -152,9 +153,7 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight,
                           (long)weight.shape[0], (long)weight.shape[1], qtype_name(qtype), M);
             return;
         }
-        int rows = static_cast<int>(weight.shape[0]);
-        int cols = static_cast<int>(weight.shape[1]);
-        dequant_gpu(weight.data, qs->dequant, qtype, rows, cols, ctx.stream);
+        dequant_weight_fp16(weight, qs->dequant, ctx.stream);
         Tensor w_fp16(qs->dequant, QType::F16, weight.ndim, weight.shape, true);
         gemm(input, w_fp16, output, 1.0f, 0.0f, ctx.stream);
         return;

@@ -6,6 +6,7 @@
 #include "exec/executor.h"
 #include "exec/attention_dispatch_rules.h"
 #include "exec/dequant_cap.h"
+#include "exec/weight_dequant.h"
 #include "memory/vram_query.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
@@ -176,18 +177,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // Dequant scratch for on-the-fly weight dequant. Every consumer guards with
-    // dequant_gpu_supported(qtype) (GGUF block quants only); SafeTensors F16/NVFP4 models
-    // skip this buffer entirely.
+    // On-the-fly weight dequant scratch (exec/weight_dequant.h, #2563). SafeTensors F16/NVFP4 models skip it.
     {
         size_t max_weight_elems = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
-            const auto& L = model_->layer(i);
-            for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.w_gate_shared,
-                                  &L.w_up_shared, &L.w_down_shared, &L.ssm_in, &L.ssm_out}) {
-                if (w->data && dequant_gpu_supported(w->qtype))
-                    max_weight_elems = std::max(max_weight_elems, static_cast<size_t>(w->numel()));
-            }
+            max_weight_elems = std::max(max_weight_elems, max_dequant_elems(model_->layer(i)));
         }
         if (max_weight_elems > 0) {
             qscratch_.dequant_size = max_weight_elems * sizeof(uint16_t);
@@ -289,7 +283,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
             for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.w_gate_shared,
-                                  &L.w_up_shared, &L.w_down_shared, &L.ssm_in, &L.ssm_out}) {
+                                  &L.w_up_shared, &L.w_down_shared, &L.ssm_in, &L.ssm_out, &L.gdn_gate}) {
                 if (w->data && w->ndim >= 2) {
                     max_k = std::max(max_k, static_cast<int>(w->shape[1]));
                 }
@@ -1140,7 +1134,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
             for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.w_gate_shared,
-                                  &L.w_up_shared, &L.w_down_shared, &L.ssm_in, &L.ssm_out}) {
+                                  &L.w_up_shared, &L.w_down_shared, &L.ssm_in, &L.ssm_out, &L.gdn_gate}) {
                 track_2d(*w);
             }
             // MoE expert weights are per-expert [N, K] 2D; the 3D packed buffers reshape to
