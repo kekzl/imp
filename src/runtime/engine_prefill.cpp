@@ -455,11 +455,10 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     }
 
     // Snapshot boundary (hybrid recurrent state / SWA window): end a chunk at a block-aligned
-    // prompt position so state there can be captured; hybrids keep >= kMinPromptChunkRows rows
-    // on both sides (snapshot_boundary.h, #2560).
+    // prompt position so state there can be captured; both sides keep >= kMinPromptChunkRows rows
+    // (snapshot_boundary.h, #2560, #2562).
     const int snap_end = snapshot_end_(*req, offset);
-    const int snap_chunk = snapshot_chunk_len(offset, chunk_len, is_last_chunk, snap_end,
-                                              ssm_state_ != nullptr);
+    const int snap_chunk = snapshot_chunk_len(offset, chunk_len, is_last_chunk, snap_end);
     if (snap_chunk != chunk_len) {
         chunk_len = snap_chunk;
         is_last_chunk = false;
@@ -749,7 +748,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // recurrent state / SWA window now, before the next chunk advances it.
         if (snap_end > 0 && req->prefill_offset == snap_end) {
             maybe_save_recurrent_snapshot_(*req, snap_end, pf_stream);
-            maybe_save_swa_snapshot_span_(req->id, req->input_tokens, pf_stream, /*hard_sync=*/false);
+            maybe_save_swa_snapshot_span_(req->id, req->input_tokens, pf_stream, /*hard_sync=*/false,
+                                          kMinPromptChunkRows);
         }
     } else if (!req->score_token_ids.empty()) {
         // Rerank scoring (/v1/rerank): a cross-encoder reads its verdict from
@@ -857,14 +857,6 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                 free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa,
                                      d_context_lens, pf_stream);
             }
-        }
-
-        // Block-aligned prompt: the snapshot boundary coincides with the last
-        // chunk's end, capture after the forward (sampling only reads logits,
-        // never the recurrent state; SWA window blocks aren't mutated until the first decode step).
-        if (snap_end == total_input) {
-            maybe_save_recurrent_snapshot_(*req, snap_end, pf_stream);
-            maybe_save_swa_snapshot_span_(req->id, req->input_tokens, pf_stream, /*hard_sync=*/false);
         }
 
         if (req->mirostat == 2)
