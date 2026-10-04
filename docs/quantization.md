@@ -99,7 +99,7 @@ imp-cli --model ./Qwen3-1.7B-nvfp4 --prompt "Hello"
 | `--model <dir>` / `--out <dir>` | source checkpoint / destination |
 | `--calib <file>` | AWQ search using the calibration file; omit for round-to-nearest |
 | `--calib-weight abs\|sq` | search error weight, default `abs`; `sq` (2nd moment, needs an `IMPCAL02` file) is 1.10% better on Qwen3-0.6B, 0.15 PPL worse on Qwen3-14B `BD` |
-| `--calib-groups <letters>` | subset of `ABCDEG` (A=q/k/v, B=gate/up, C=o_proj, D=down_proj, E/G=GDN); default `ABCDEG` at `n_rep < 5`, `BDEG` at `n_rep >= 5` on dense models (GDN hybrids keep `ABCDEG`: Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136) |
+| `--calib-groups <letters>` | subset of `ABCDEG` (A=q/k/v, B=gate/up, C=o_proj, D=down_proj, E/G=GDN); default `ABCDEG` at `n_rep < 4`, `BDEG` at `n_rep >= 4` on dense models (GDN hybrids keep `ABCDEG`: Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136) |
 | `--lm-head [fp8\|nvfp4\|source]` | how `lm_head` is written: `fp8` (default for `modelopt`) = the per-row FP8 head `auto` runs, served without load-time conversion; `nvfp4` (bare flag) = quantized like any Linear; `source` (default for `vllm`) = copied as is ([below](#what-stays-at-source-precision-qwen38-27b-bf16-source-5175-gib)) |
 | `--kv-hint auto\|fp8\|none` | `kv_cache_quant_algo` in `hf_quant_config.json` (`modelopt` only): `auto` (default) = `FP8` for `model_type` `qwen3` / `qwen3_moe`, the families with a measured FP8 KV PPL ([KV cache](#kv-cache-element-type)), else `null` |
 | `--keep-attn-gate` | keep the fused Q+gate `q_proj` (Qwen3.5/Qwen3-Next) at source precision |
@@ -215,7 +215,7 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
 | Qwen3-1.7B (2 shards) | 17.22 | 20.39 | **18.71** | +18.4% -> **+8.7%** |
 
 - Recovers about a quarter of the RTN gap on the 0.6B, nearly two fifths on the 1.7B; does not close it against BF16. **Hurts at 14B and wider** (24-27% worse than RTN, the wrong direction): attention vs FFN, not model size.
-- **Production rule, the code default since roadmap row 6 closed**: all groups on narrow GQA (`n_rep < 5`), attention groups A and C off on dense wide GQA (`n_rep >= 5`; GDN hybrids keep all, Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136, `docs/audit/AUDIT_qwen38_nvfp4.md`), `--calib-weight abs` on both. Qwen3-14B BF16 source, `ppl_corpus_45k.txt`, deterministic:
+- **Production rule, the code default since roadmap row 6 closed**: all groups on narrow GQA (`n_rep < 4`), attention groups A and C off on dense wide GQA (`n_rep >= 4`; GDN hybrids keep all, Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136, `docs/audit/AUDIT_qwen38_nvfp4.md`), `--calib-weight abs` on both. Qwen3-14B BF16 source, `ppl_corpus_45k.txt`, deterministic:
 
 | arm | RTN | ABCD `abs` | ABCD `sq` | BD `abs` | BD `sq` |
 |---|---:|---:|---:|---:|---:|
@@ -229,7 +229,7 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
 
 - `sq` removes 64 % of the ABCD damage (12.2634 -> 10.7965) and still loses to RTN; on BD it costs 0.15.
 - On a dense model the default `BDEG` folds the same sites as `BD` (E/G need GDN tensors; `WideGqaDefaultIsBdOnADenseLayer`).
-- The threshold sits at the measured wide point (n_rep 5); n_rep 3-4 (Qwen3-8B, Qwen3-4B, Phi-4) is unmeasured and keeps all groups, as before.
+- n_rep 4 measured (#2474): BDEG wins on Qwen3-4B and Qwen3-8B, threshold 5 -> 4 ([record](plans/2026-10-04-awq-groups-nrep4.md)); n_rep 3 unmeasured, keeps all groups; Phi-4 (`phi3`) is refused by `--calib`.
 - Uncalibrated `imp-quantize` already beats a published Modelopt export on the one locally comparable model (9.9252 vs 10.0301, Qwen3-14B).
 - Mechanism, refuted variants, the won't-fit calibration trick: [`archive/quantization_awq_findings.md`](archive/quantization_awq_findings.md).
 
