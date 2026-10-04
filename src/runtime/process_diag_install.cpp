@@ -64,6 +64,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.attention_fp8_qk_scaled = cfg.attention.fp8_qk_scaled;
     // runtime.deterministic: no stream-K. Picked by tile count (M), it moved chunk-split rows (#2556).
     d.nvfp4_cutlass_streamk = cfg.runtime.deterministic ? 0 : cfg.gemm.nvfp4_cutlass_streamk;
+    d.nvfp4_cublaslt_min_m = cfg.runtime.deterministic ? 0 : cfg.gemm.nvfp4_cublaslt_min_m;
     d.attention_mxfp4_mode = cfg.attention.mxfp4;
     d.mxfp4_blockscale = cfg.attention.mxfp4_blockscale;
     d.mxfp4_ksmooth = cfg.attention.mxfp4_ksmooth;
