@@ -3,16 +3,16 @@
 #include "compute/gemm.h"
 #include "core/logging.h"
 #include "core/tensor.h"
-#include "quant/dequant_gpu.h"
+#include "exec/weight_dequant.h"
 
 namespace imp {
 
 // Generic dequant->cuBLAS catch-all: fires after every tier-specific dispatcher
 // (MXFP4/NVFP4/CUTLASS/FP8/FP16 cache/GGUF small-M) returns NoMatch or PreconditionFail
 // and the weight qtype is dequantable. Strategy key (FP16, NONE, m_is_one=false): NONE
-// is qtype-agnostic, the handler reads weight.qtype and dispatches dequant_gpu itself.
+// is qtype-agnostic, the handler reads weight.qtype and dequantizes itself (exec/weight_dequant.h).
 // Preconditions: input/output/weight_payload/dequant_scratch non-null,
-// dequant_gpu_supported(weight.qtype). Failure returns PreconditionFail, falling through
+// weight_dequant_supported(weight.qtype). Failure returns PreconditionFail, falling through
 // to legacy gemm_dispatch_impl's final raw gemm() arm (FP16/BF16, no dequant).
 static GemmDispatchResult generic_dequant_kernel(const GemmKernelArgs& args) {
     IMP_CHECK(args.input != nullptr, "generic_dequant_kernel: input is null");
@@ -24,7 +24,7 @@ static GemmDispatchResult generic_dequant_kernel(const GemmKernelArgs& args) {
         return GemmDispatchResult::PreconditionFail;
 
     const Tensor& weight = *static_cast<const Tensor*>(args.weight_payload);
-    if (!dequant_gpu_supported(weight.qtype))
+    if (!weight_dequant_supported(weight.qtype))
         return GemmDispatchResult::PreconditionFail;
 
     // Mirror executor_kernels.cu:2315-2319 verbatim — dequant the raw quant
@@ -46,7 +46,7 @@ static GemmDispatchResult generic_dequant_kernel(const GemmKernelArgs& args) {
         }
         return GemmDispatchResult::PreconditionFail;
     }
-    dequant_gpu(weight.data, args.dequant_scratch, weight.qtype, rows, cols, args.stream);
+    dequant_weight_fp16(weight, args.dequant_scratch, args.stream);
     Tensor w_fp16(args.dequant_scratch, QType::F16, weight.ndim, weight.shape, /*on_device=*/true);
     gemm(*args.input, w_fp16, *args.output, /*alpha=*/1.0f, args.beta, args.stream);
     return GemmDispatchResult::Ok;

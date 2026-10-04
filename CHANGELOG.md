@@ -10,6 +10,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `imp-cli --bench` warms prefill until the graph replays (3 prefills) and prints each timed rep (#2525): Qwen3-30B-A3B-NVFP4 pp512 over 10 fresh processes 25887.89..28483.46 tok/s (10.03 %) -> 31041.61..31624.79 (1.88 %). Eager jitter cause and bound: `docs/internals/BENCHMARKING.md` (#2538).
 
 ### Fixed
+- Modelopt mixed NVFP4+FP8 checkpoints no longer die at warmup (#2563): an FP8 weight the FP16 cache budget left out (64 of 161 on Qwen3.8-27B) reached cuBLAS raw (status 15); the uncached GEMM fallback now dequantizes it with its per-tensor scale.
 - Hybrid prefix-cache snapshots keep >= 33 prompt rows on both sides of the split (#2560): the 1..16-row tail ran the M<=32 kernels. Qwen3.8-27B-NVFP4 deterministic, 2 x 3 turns: 12/12 replies equal to the cache off (was 7/12); hits 4368..4416 tokens.
 - Hybrid prefix cache across sessions sharing a prompt prefix (#2409, #2485): a new session's forward no longer breaks the others' snapshot chains (shadow KV versions), and a branch-point snapshot on the 2048 chunk grid lets later sessions skip the shared prefix. Qwen3.8-27B-NVFP4, 8 sessions: hits 0/30 -> 28/30, turn-2 TTFT 373.5..389.2 -> 44.0..44.8 ms.
 - `runtime.deterministic` output no longer depends on the prefill chunk size on hybrid GDN models (#2556): Qwen3.8-27B-NVFP4 chunk 2048/2112/2512/2560, 6/6 replies equal (was 1/6). Costs pp4096 -42 % in that mode (FP32 state, sequential scan).

@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_fp8.h>
 #include <vector>
 #include <cmath>
 #include <cstring>
@@ -834,6 +835,81 @@ TEST_F(GemmKernelRegistryTest, GenericDequantMatchesDirectPath) {
     cudaFree(d_scratch_registry);
     cudaFree(d_out_direct);
     cudaFree(d_out_registry);
+}
+
+// #2563: a native FP8 E4M3 weight (Modelopt mixed precision) without an FP16 copy takes the
+// generic dequant with its per-tensor scale; it reached cuBLAS raw (status 15) before.
+TEST_F(GemmKernelRegistryTest, GenericDequantNativeFp8AppliesTensorScale) {
+    constexpr int M = 16;
+    constexpr int N = 32;
+    constexpr int K = 64;
+    constexpr float kScale = 0.5f;
+
+    std::vector<__half> h_input(M * K);
+    std::vector<__nv_fp8_e4m3> h_w8(N * K);
+    std::vector<__half> h_w16(N * K);
+    for (int i = 0; i < M * K; ++i)
+        h_input[i] = __float2half((i % 9) * 0.125f - 0.5f);
+    for (int i = 0; i < N * K; ++i) {
+        h_w8[i] = __nv_fp8_e4m3((i % 11) * 0.25f - 1.25f);  // exact in E4M3
+        h_w16[i] = __float2half(static_cast<float>(h_w8[i]) * kScale);
+    }
+
+    __half* d_input = nullptr;
+    void* d_w8 = nullptr;
+    __half* d_w16 = nullptr;
+    void* d_scratch = nullptr;
+    __half* d_out_ref = nullptr;
+    __half* d_out = nullptr;
+    cudaMalloc(&d_input, sizeof(__half) * M * K);
+    cudaMalloc(&d_w8, N * K);
+    cudaMalloc(&d_w16, sizeof(__half) * N * K);
+    cudaMalloc(&d_scratch, sizeof(__half) * N * K);
+    cudaMalloc(&d_out_ref, sizeof(__half) * M * N);
+    cudaMalloc(&d_out, sizeof(__half) * M * N);
+    cudaMemcpy(d_input, h_input.data(), sizeof(__half) * M * K, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w8, h_w8.data(), N * K, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w16, h_w16.data(), sizeof(__half) * N * K, cudaMemcpyHostToDevice);
+
+    int64_t in_shape[2] = {M, K};
+    int64_t w_shape[2] = {N, K};
+    int64_t out_shape[2] = {M, N};
+    Tensor input(d_input, QType::F16, 2, in_shape, /*on_device=*/true);
+    Tensor w8(d_w8, QType::FP8_E4M3, 2, w_shape, /*on_device=*/true);
+    w8.tensor_scale = kScale;
+    Tensor w16(d_w16, QType::F16, 2, w_shape, /*on_device=*/true);
+    Tensor out_ref(d_out_ref, QType::F16, 2, out_shape, /*on_device=*/true);
+    Tensor out(d_out, QType::F16, 2, out_shape, /*on_device=*/true);
+    gemm(input, w16, out_ref, /*alpha=*/1.0f, /*beta=*/0.0f, stream_);
+
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &out;
+    args.stream = stream_;
+    args.weight_payload = &w8;
+    args.dequant_scratch = d_scratch;
+    args.dequant_scratch_size = sizeof(__half) * N * K;
+    GemmStrategy strat{StorageTier::FP16, QType::NONE, /*m_is_one=*/false};
+    EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
+    cudaStreamSynchronize(stream_);
+
+    std::vector<__half> h_ref(M * N), h_out(M * N);
+    cudaMemcpy(h_ref.data(), d_out_ref, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out.data(), d_out, sizeof(__half) * M * N, cudaMemcpyDeviceToHost);
+    int nonzero = 0;
+    for (int i = 0; i < M * N; ++i) {
+        nonzero += __half2float(h_ref[i]) != 0.0f;
+        EXPECT_EQ(__half_as_ushort(h_ref[i]), __half_as_ushort(h_out[i]))
+            << "i=" << i << " ref=" << __half2float(h_ref[i]) << " got=" << __half2float(h_out[i]);
+    }
+    EXPECT_GT(nonzero, M * N / 2);
+
+    cudaFree(d_input);
+    cudaFree(d_w8);
+    cudaFree(d_w16);
+    cudaFree(d_scratch);
+    cudaFree(d_out_ref);
+    cudaFree(d_out);
 }
 
 // Pin the GemmStrategy operator== contract — used by the linear-scan
