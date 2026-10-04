@@ -129,4 +129,8 @@ private:
     std::unordered_map<size_t, std::list<size_t>::iterator> host_lru_map_;
 };
 
+// SWA store init line; warns under 2 slots: a request saves at its prompt boundary and at finish, so
+// 1 slot restores nothing across sessions (#2565).
+void log_swa_snapshot_store(const RecurrentSnapshotStore& store, int budget_mb);
+
 }  // namespace imp
