@@ -72,11 +72,10 @@ inline int next_snapshot_boundary(int prompt_tokens, int block_size, int min_tok
 }
 
 // Length of the prefill chunk at `offset` given the snapshot boundary `snap_end` (0 = none). Both
-// sides of the split keep >= min_rows rows: a chunk ending min_rows short of the boundary, or no
-// split (the boundary is skipped); min_rows is kMinPromptChunkRows on a hybrid, else 1 (#2560).
-// `last`: the chunk ends the prompt.
-constexpr int snapshot_chunk_len(int offset, int chunk_len, bool last, int snap_end, bool hybrid) {
-    const int min_rows = hybrid ? kMinPromptChunkRows : 1;
+// sides of the split keep >= kMinPromptChunkRows rows: a chunk ending that many rows short of the
+// boundary, or no split (the boundary is skipped) (#2560, #2562). `last`: the chunk ends the prompt.
+constexpr int snapshot_chunk_len(int offset, int chunk_len, bool last, int snap_end) {
+    constexpr int min_rows = kMinPromptChunkRows;
     const int snap_rows = snap_end - offset;
     if (snap_rows >= min_rows && snap_rows < chunk_len)
         return snap_rows;

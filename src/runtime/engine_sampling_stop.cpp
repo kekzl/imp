@@ -569,8 +569,8 @@ int Engine::swa_prefix_reuse_limit_(Request& req) {
     const int total = static_cast<int>(req.input_tokens.size());
     std::vector<size_t> hashes;
     int cached = kv_manager_->longest_cached_prefix_blocks(req.input_tokens, hashes);
-    // At least one token must remain to forward (the model needs logits).
-    int max_b = std::min(cached, (total - 1) / bs);
+    // The re-prefilled tail is a prompt chunk: >= kMinPromptChunkRows rows (#2562).
+    int max_b = std::min(cached, prompt_reuse_cap_blocks(total, bs));
     for (int b = max_b; b >= 1; --b) {
         auto entry = swa_snapshots_->find(hashes[b - 1]);
         if (entry && entry->n_tokens == b * bs) {
@@ -592,25 +592,28 @@ int Engine::snapshot_end_(const Request& req, int offset) const {
         return 0;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     // Hint only for the hybrid store: the SWA saver snapshots at the prompt's block floor, not snap_end.
-    // Hybrid: >= kMinPromptChunkRows rows after the snapshot, the chunk a restore re-prefills (#2560).
+    // >= kMinPromptChunkRows rows after the snapshot, the chunk a restore re-prefills (#2560, #2562).
     return next_snapshot_boundary(
         static_cast<int>(req.input_tokens.size()), bs, runtime_config_.server.snapshot_min_prompt_tokens,
         ssm_state_ ? (req.snapshot_hint_tokens > 0 ? req.snapshot_hint_tokens : req.branch_point_tokens) : 0,
-        offset, ssm_state_ ? kMinPromptChunkRows : 1);
+        offset, kMinPromptChunkRows);
 }
 
 // Core save: snapshots the seq's live window at the block-floor of `tokens`.
 // Called at the prefill snapshot boundary (tokens = prompt) and at request
 // finish (prompt + generated-minus-final, same span finish_request_release_ uses): the finish save lets the NEXT agent turn reuse the whole transcript.
-void Engine::maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> tokens,
-                                           cudaStream_t stream, bool hard_sync) {
+void Engine::maybe_save_swa_snapshot_span_(int seq_id, std::span<const int32_t> tokens, cudaStream_t stream,
+                                           bool hard_sync, int tail_rows) {
     if (!swa_snapshots_ || !swa_snapshots_->enabled() || !swa_snap_slab_)
         return;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     // One block short of the length, not the plain block floor: the restore
     // caps at (total-1)/bs blocks (a restore must leave a token to forward)
-    // AND requires entry->n_tokens == b*bs, so a snapshot at the full aligned length could never match (same defect the hybrid path had, snapshot_boundary.h).
-    const int snap_end = snapshot_boundary(static_cast<int>(tokens.size()), bs, /*min_tokens=*/0);
+    // AND requires entry->n_tokens == b*bs, so a snapshot at the full aligned length could never match (same
+    // defect the hybrid path had, snapshot_boundary.h). tail_rows: kMinPromptChunkRows at the prefill
+    // boundary (snapshot_end_, #2562); 1 at finish, where the ring may no longer hold the window 33 rows
+    // back.
+    const int snap_end = snapshot_boundary(static_cast<int>(tokens.size()), bs, /*min_tokens=*/0, tail_rows);
     if (snap_end <= 0)
         return;
     size_t key = 0;

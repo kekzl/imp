@@ -14,6 +14,7 @@
 // the fp32_scan/ref_kernel GDN routes disable the path entirely.
 
 #include "runtime/prompt_tail.h"
+#include "runtime/snapshot_boundary.h"
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
@@ -217,8 +218,8 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
             is_last = false;
         }
         const int snap_end = snapshot_end_(*req, offset);
-        if (snap_end > offset && snap_end < offset + chunk_len) {
-            chunk_len = snap_end - offset;
+        if (const int c = snapshot_chunk_len(offset, chunk_len, is_last, snap_end); c != chunk_len) {
+            chunk_len = c;  // both sides >= kMinPromptChunkRows (#2562)
             is_last = false;
         }
         if (chunk_len > rows_left) {
@@ -466,7 +467,8 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
                       static_cast<int>(req->input_tokens.size()));
         if (g.snap_end > 0 && req->prefill_offset == g.snap_end) {
             maybe_save_recurrent_snapshot_(*req, g.snap_end, stream);
-            maybe_save_swa_snapshot_span_(req->id, req->input_tokens, stream, /*hard_sync=*/false);
+            maybe_save_swa_snapshot_span_(req->id, req->input_tokens, stream, /*hard_sync=*/false,
+                                          kMinPromptChunkRows);
         }
         if (g.is_last)
             ragged_finish_row_(req, logits_out.slice(s, s + 1), stream);

@@ -198,12 +198,11 @@ TEST(GraphEligibility, HybridSnapshotLeavesAPromptChunk) {
     EXPECT_EQ(next_snapshot_boundary(500, 16, 0, 420, 0, kMinPromptChunkRows), 416) << "hint floor";
     EXPECT_EQ(next_snapshot_boundary(500, 16, 0, 440, 0, kMinPromptChunkRows), 464)
         << "hint 432 is 32 rows before the prompt boundary 464";
-    EXPECT_EQ(snapshot_chunk_len(4096, 327, true, 4384, true), 288) << "split, 39 rows after";
-    EXPECT_EQ(snapshot_chunk_len(4384, 73, true, 4416, true), 73) << "32 rows before: no split";
-    EXPECT_EQ(snapshot_chunk_len(0, 2048, false, 2064, true), 2031) << "chunk ends 33 short";
-    EXPECT_EQ(snapshot_chunk_len(0, 2048, false, 2096, true), 2048) << "48 rows: grid chunk stays";
-    EXPECT_EQ(snapshot_chunk_len(4096, 327, true, 0, true), 327) << "no boundary";
-    EXPECT_EQ(snapshot_chunk_len(4096, 327, true, 4416, false), 320) << "SWA: 7-row tail kept";
+    EXPECT_EQ(snapshot_chunk_len(4096, 327, true, 4384), 288) << "split, 39 rows after";
+    EXPECT_EQ(snapshot_chunk_len(4384, 73, true, 4416), 73) << "32 rows before: no split";
+    EXPECT_EQ(snapshot_chunk_len(0, 2048, false, 2064), 2031) << "chunk ends 33 short";
+    EXPECT_EQ(snapshot_chunk_len(0, 2048, false, 2096), 2048) << "48 rows: grid chunk stays";
+    EXPECT_EQ(snapshot_chunk_len(4096, 327, true, 0), 327) << "no boundary";
     for (int bs : {16, 32})
         for (int n = 1; n <= 700; ++n)
             for (int hint : {0, 17, 255, 256, 300, 511, 699})
