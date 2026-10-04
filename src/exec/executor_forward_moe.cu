@@ -10,6 +10,7 @@
 #include "exec/executor_forward_moe_internal.h"
 #include "exec/executor_forward_moe_kernels.cuh"
 #include "exec/gemm_context.h"
+#include "exec/pre_dequant_internal.h"
 #include "exec/executor_debug.h"
 #include <atomic>
 #include "compute/embedding.h"
@@ -373,6 +374,10 @@ bool GraphExecutor::moe_prefill_uncapturable() const {
     if (!cutlass_grouped_3x_nvfp4_available())
         return true;
     if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf)
+        return true;
+    // Host-resident NVFP4 experts stage per chunk from host memory: a captured M=512 prefill
+    // faulted on replay (IMA / SIGSEGV, Qwen3-Coder-Next, Qwen3.6-35B force_host_experts, #2574).
+    if (pre_dequant_internal::has_host_resident_experts(*model_))
         return true;
     return false;
 }

@@ -700,8 +700,15 @@ bool CudaGraphConditionalRunner::capture_decode_body_(GraphExecutor* executor,
     // NOTE: h_mapped scratch must NOT alias h_step_counter_: poll_new_tokens reads the counter
     // concurrently, and this per-iteration D2H copy would transiently overwrite it with a token id.
     // false = no sampler in the body: every replay would emit the stale d_token_id_ (#2307).
-    const bool sampler_enqueued = executor->forward_decode_async(body_state, d_token_id_, h_decode_scratch_,
-                                                                 stream);
+    bool sampler_enqueued = false;
+    try {
+        sampler_enqueued = executor->forward_decode_async(body_state, d_token_id_, h_decode_scratch_, stream);
+    } catch (const std::exception& e) {  // close the capture, else ~Engine segfaults (#2572)
+        abort_stream_capture(stream);
+        graph_diag::g_phase = graph_diag::Phase::NORMAL;
+        IMP_LOG_ERROR("ConditionalRunner: forward threw during capture (%s), per-step decode", e.what());
+        return false;
+    }
 
     // 5b. Post-decode-step kernel: ring buffer write, counter increment, EOS check, think budget
     post_decode_step_kernel<<<1, 1, 0, stream>>>(
