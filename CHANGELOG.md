@@ -10,6 +10,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `imp-cli --bench` warms prefill until the graph replays (3 prefills) and prints each timed rep (#2525): Qwen3-30B-A3B-NVFP4 pp512 over 10 fresh processes 25887.89..28483.46 tok/s (10.03 %) -> 31041.61..31624.79 (1.88 %). Eager jitter cause and bound: `docs/internals/BENCHMARKING.md` (#2538).
 
 ### Fixed
+- `runtime.deterministic` with the prefix cache: a finished request publishes its prompt blocks only, not the decode-computed reply KV or transcript snapshot. gemma-3-12b Q4_K_M 2 x 3 turns: 6/6 replies equal to the cache off (was 5/6).
 - SWA snapshot store under 2 slots warns at start (#2565): gemma-3-12b with `kv_cache.swa_snapshot_mb=512` holds 1 snapshot (350 MiB) and restored 0 of 4 turns for 2 sessions; 2048 MiB (5 slots) restored 4 of 4. Sizing rule in `imp.conf.example`.
 - SWA window snapshots and the ragged prefill split keep >= 33 prompt rows after the boundary (#2562), like hybrids since #2560: gemma-3-12b Q4_K_M with `kv_cache.swa_snapshot_mb=512` saves prompt 3545 at 3504 (was 3536, a 9-row M<=32 tail).
 - Modelopt mixed NVFP4+FP8 checkpoints no longer die at warmup (#2563): an FP8 weight the FP16 cache budget left out (64 of 161 on Qwen3.8-27B) reached cuBLAS raw (status 15); the uncached GEMM fallback now dequantizes it with its per-tensor scale.
