@@ -254,12 +254,13 @@ bool kv_fp8_no_hint_default_safe(ModelArch arch) {
 
 // Arch families measured safe for default NVFP4 KV: a capacity gate (shrinks the KV cache
 // that bounds max_seq_len), not a speed one - distinct bar from the FP8 lists above.
-// QWEN35 only: ~+0.3% PPL cost buys ~2.7x max_model_len on a GDN hybrid's small
-// attention-only KV surface. kv_cache.dtype=fp16 opts out; QWEN36_MOE/QWEN35_MOE stay off
-// (FP8 KV already costs them +1.47% PPL there; NVFP4 KV unmeasured for them).
+// QWEN35 ~+0.3% PPL for ~2.7x max_model_len; QWEN36_MOE +0.09% (45k, deterministic) for a
+// 112336 -> 358176-token KV ceiling (#2415). Off: QWEN4_EXP +0.47%; QWEN3_NEXT ceiling only
+// +12% (131072 -> 147456). kv_cache.dtype=fp16 opts out.
 bool kv_nvfp4_default_safe(ModelArch arch) {
     switch (arch) {
         case ModelArch::QWEN35:
+        case ModelArch::QWEN36_MOE:
             return true;
         default:
             return false;

@@ -128,12 +128,11 @@ TEST(RuntimeConfigTest, KvFp8HintDefaultSafeAllowlist) {
 // (+0.15..0.18%), alternating arms; see model.cpp.
 TEST(RuntimeConfigTest, KvNvfp4DefaultSafeAllowlist) {
     EXPECT_TRUE(kv_nvfp4_default_safe(ModelArch::QWEN35));
-    // The MoE siblings are deliberately OFF: FP8 KV already costs QWEN36_MOE
-    // +1.47 % PPL because NVFP4 attention weights compound with a quantised KV,
-    // and NVFP4 KV is the more aggressive quantiser. Unmeasured there.
-    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN36_MOE));
-    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN4_EXP));  // unmeasured
-    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN35_MOE));
+    // Qwen3.6-35B-A3B-NVFP4: 6.7939 -> 6.7998 PPL (45k, deterministic), ceiling 3.2x (#2415).
+    EXPECT_TRUE(kv_nvfp4_default_safe(ModelArch::QWEN36_MOE));
+    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN4_EXP));   // +0.47 % PPL
+    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN3_NEXT));  // ceiling only +12 %
+    EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN35_MOE));  // unmeasured
     // Families the FP8 lists already serve must not be flipped by this gate.
     EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN3));
     EXPECT_FALSE(kv_nvfp4_default_safe(ModelArch::QWEN3_MOE));
