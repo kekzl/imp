@@ -1178,6 +1178,59 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
     }
 }
 
+// Block-scaled NVFP4 via cuBLASLt: TN, COMPUTE_32F, VEC16_UE4M3 on both sides. Same algo cache
+// and timed probe as gemm(); scale pointers are set per call like gemm_cublaslt's FP8 scales.
+bool gemm_nvfp4_cublaslt(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,
+                         float alpha, void* d_fp16, int M, int N, int K, cudaStream_t stream) {
+    cublasLtHandle_t lt = get_cublaslt_handle();
+    if (!lt)
+        return false;
+    // cuBLAS "A" operand is the weight (Bdesc of the row-major convention), "B" the activation.
+    auto set_scales = [&](cublasLtMatmulDesc_t desc) {
+        cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                       static_cast<const void*>(&w_sf), sizeof(w_sf));
+        cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                       static_cast<const void*>(&a_sf), sizeof(a_sf));
+    };
+    const GemmCacheKey cache_key{
+        CUDA_R_4F_E2M1, CUDA_R_4F_E2M1, CUDA_R_16F, CUBLAS_COMPUTE_32F, bucket_m(M), K, N, true};
+    GemmCacheEntry* entry = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
+        entry = entry_for_m(lt, cache_key, M, CUDA_R_4F_E2M1, CUDA_R_16F, K, N, [&] {
+            GemmCacheEntry new_entry{};
+            new_entry.desc_M = M;
+            create_gemm_descriptors(new_entry, CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_4F_E2M1, CUDA_R_4F_E2M1,
+                                    CUDA_R_16F, K, M, N);
+            const int32_t mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
+            for (auto attr : {CUBLASLT_MATMUL_DESC_A_SCALE_MODE, CUBLASLT_MATMUL_DESC_B_SCALE_MODE})
+                cublasLtMatmulDescSetAttribute(new_entry.opDesc, attr, &mode, sizeof(mode));
+            set_scales(new_entry.opDesc);
+            select_algo(lt, new_entry, a_data, w_data, (size_t)M * N * sizeof(half), alpha, 0.0f, false,
+                        stream, M, N, K);
+            return new_entry;
+        });
+        log_captured_algo_once(*entry, stream, M, K, N);
+    }
+    if (!entry->has_algo)
+        return false;
+    // Single GEMM stream, as in gemm_cublaslt: the shared opDesc takes this call's scales.
+    set_scales(entry->opDesc);
+    const float beta = 0.0f;
+    cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc, &alpha, w_data, entry->Bdesc, a_data, entry->Adesc,
+                                       &beta, d_fp16, entry->Cdesc, d_fp16, entry->Cdesc, &entry->algo,
+                                       s_workspace, entry->workspace_size, stream);
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        const bool pin_belongs_to_other_m = keep_pin_chosen_at_other_m(*entry, M, K, N);
+        set_scales(entry->opDesc);
+        st = cublasLtMatmul(lt, entry->opDesc, &alpha, w_data, entry->Bdesc, a_data, entry->Adesc, &beta,
+                            d_fp16, entry->Cdesc, d_fp16, entry->Cdesc,
+                            (pin_belongs_to_other_m || !entry->has_algo) ? nullptr : &entry->algo,
+                            s_workspace, pin_belongs_to_other_m ? 0 : entry->workspace_size, stream);
+    }
+    return st == CUBLAS_STATUS_SUCCESS;
+}
+
 // dtype GEMV kernels (fp8/q6k/q8_0) + gemv_fp8 live in gemm_gemv_dtype.cu. MoE
 // gate/decode/gate-up-fused GEMV kernels live in gemm_moe_gemv.cu. gemm_kv_batched /
 // gemm_pair_batched / gemm_cublaslt_fp8_probe live in gemm_batched.cu.

@@ -70,6 +70,8 @@ bool process_diag_fp8_qk_scaled() { return slot().attention_fp8_qk_scaled; }
 void process_diag_set_fp8_qk_scaled(bool v) { slot().attention_fp8_qk_scaled = v; }
 int process_diag_nvfp4_cutlass_streamk() { return slot().nvfp4_cutlass_streamk; }
 void process_diag_set_nvfp4_cutlass_streamk(int v) { slot().nvfp4_cutlass_streamk = v; }
+int process_diag_nvfp4_cublaslt_min_m() { return slot().nvfp4_cublaslt_min_m; }
+void process_diag_set_nvfp4_cublaslt_min_m(int v) { slot().nvfp4_cublaslt_min_m = v; }
 bool process_diag_force_splitk_fallback() { return slot().force_splitk_fallback; }
 void process_diag_set_force_splitk_fallback(bool v) { slot().force_splitk_fallback = v; }
 const std::string& process_diag_attention_mxfp4_mode() { return slot().attention_mxfp4_mode; }

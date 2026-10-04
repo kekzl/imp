@@ -1,8 +1,10 @@
 #include "exec/gemm_kernel_registry.h"
 
 #include "compute/gemm_cutlass_mxfp4_sm120.h"  // CutlassMxFP4Weight, gemm_mxfp4_cutlass_sm120 (QW7 dual-cache path)
+#include "compute/gemm.h"                      // gemm_nvfp4_cublaslt
 #include "compute/gemm_cutlass_sm120.h"  // CutlassNvFP4Weight, gemm_nvfp4_cutlass_sm120, quantize_fp16_to_nvfp4_cutlass
 #include "core/logging.h"
+#include "core/process_diag.h"
 #include "core/tensor.h"
 
 namespace imp {
@@ -68,6 +70,12 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     // tier) but kept because that is one edit away from not being true (#1547).
     if (args.beta != 0.0f)
         return GemmDispatchResult::PreconditionFail;
+    // gemm.nvfp4_cublaslt_min_m: cuBLASLt on the same SfAtom bytes from M >= min_m; CUTLASS on refusal.
+    const int lt_min_m = process_diag_nvfp4_cublaslt_min_m();
+    if (lt_min_m > 0 && M >= lt_min_m &&
+        gemm_nvfp4_cublaslt(args.cutlass_act_data, args.cutlass_act_sf, payload.data, payload.scale_factors,
+                            payload.tensor_scale, args.output->data, M, N, K, args.stream))
+        return GemmDispatchResult::Ok;
     bool ok = gemm_nvfp4_cutlass_sm120(args.cutlass_act_data, args.cutlass_act_sf, payload,
                                        args.output->data, M, N, K, args.cutlass_workspace,
                                        args.cutlass_workspace_size, args.stream);

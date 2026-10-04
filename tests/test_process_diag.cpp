@@ -50,6 +50,7 @@ RuntimeConfig make_non_default() {
     c.attention.fa2_dense_2cta = false;
     c.attention.fp8_qk_scaled = true;
     c.gemm.nvfp4_cutlass_streamk = 2;
+    c.gemm.nvfp4_cublaslt_min_m = 1024;
     c.attention.mxfp4 = "always";
     c.attention.mxfp4_blockscale = true;
     c.attention.mxfp4_ksmooth = true;
@@ -117,6 +118,7 @@ TEST(ProcessDiag, InstallTransfersEveryMirroredField) {
     EXPECT_FALSE(process_diag_fa2_dense_2cta());
     EXPECT_TRUE(process_diag_fp8_qk_scaled());
     EXPECT_EQ(process_diag_nvfp4_cutlass_streamk(), 2);
+    EXPECT_EQ(process_diag_nvfp4_cublaslt_min_m(), 1024);
     EXPECT_EQ(process_diag_attention_mxfp4_mode(), "always");
     EXPECT_TRUE(process_diag_mxfp4_blockscale());
     EXPECT_TRUE(process_diag_mxfp4_ksmooth());
@@ -159,6 +161,7 @@ TEST(ProcessDiag, DefaultConfigMatchesBuiltInDefaults) {
     EXPECT_EQ(process_diag_fa2_dense_2cta(), d.attention.fa2_dense_2cta);
     EXPECT_EQ(process_diag_fp8_qk_scaled(), d.attention.fp8_qk_scaled);
     EXPECT_EQ(process_diag_nvfp4_cutlass_streamk(), d.gemm.nvfp4_cutlass_streamk);
+    EXPECT_EQ(process_diag_nvfp4_cublaslt_min_m(), d.gemm.nvfp4_cublaslt_min_m);
     EXPECT_EQ(process_diag_attention_mxfp4_mode(), d.attention.mxfp4);
     EXPECT_EQ(process_diag_ffn_sparsity_probe(), d.ffn.sparsity_probe);
     EXPECT_EQ(process_diag_moe_mr_nr(), d.moe.mr_nr);

@@ -37,6 +37,12 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha = 1.
                    const float* aScale = nullptr, const float* bScale = nullptr,
                    cudaStream_t stream = nullptr);
 
+// Block-scaled NVFP4 GEMM via cuBLASLt (gemm.nvfp4_cublaslt_min_m): D[M,N] fp16 = alpha * A W^T, A/W packed
+// E2M1 row-major with CUTLASS SfAtom UE4M3 scales (same bytes as gemm_nvfp4_cutlass_sm120). False = not run.
+[[nodiscard]] bool gemm_nvfp4_cublaslt(const void* a_data, const void* a_sf, const void* w_data,
+                                       const void* w_sf, float alpha, void* d_fp16, int M, int N, int K,
+                                       cudaStream_t stream);
+
 // Probe whether cuBLASLt supports FP8 E4M3 GEMM on this GPU/driver.
 // Runs a tiny 8×64×8 FP8 matmul and returns true if cublasLtMatmul succeeds.
 [[nodiscard]] bool gemm_cublaslt_fp8_probe();

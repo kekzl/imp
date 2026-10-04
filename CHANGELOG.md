@@ -8,6 +8,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `imp-quantize --calib-groups` X/Y (#2476): MoE expert gate/up into an expert-only norm, per-expert down into up rows; `--calibrate` records per-expert statistics. Opt-in, no measured gain: Gemma-4-26B RTN rounding alone spreads PPL 16.7551..19.0110; gemma4 `--calib` needs a selector.
 
 ### Changed
+- Dense NVFP4 prefill GEMMs at M >= 2048 run on cuBLASLt block-scaled NVFP4 instead of CUTLASS (`gemm.nvfp4_cublaslt_min_m`, #2540): same SfAtom bytes, identical greedy output; GEMM per pass -7.7 % Qwen3-14B-NVFP4, -5.8 % Qwen3.8-27B; pp4096 +4.6..5.2 % / +2.5..3.1 %.
 - Allocator headroom 5 -> 4 % of VRAM (#2482), from a measurement: after the KV pool capped, Qwen3.8-27B 32-stream soaks grew device use by at most 608 MiB. The growable pool now reaches its ceiling, 12827 -> 13599 blocks.
 - `imp-quantize --calib` default drops attention groups A/C from n_rep 4 (was 5) on dense models (#2474): PPL ABCDEG vs BDEG, Qwen3-4B 14.9701 -> 14.1954, Qwen3-8B 11.7296 -> 11.4263.
 - `imp-cli --bench` warms prefill until the graph replays (3 prefills) and prints each timed rep (#2525): Qwen3-30B-A3B-NVFP4 pp512 over 10 fresh processes 25887.89..28483.46 tok/s (10.03 %) -> 31041.61..31624.79 (1.88 %). Eager jitter cause and bound: `docs/internals/BENCHMARKING.md` (#2538).

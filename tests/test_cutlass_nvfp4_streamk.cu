@@ -3,6 +3,7 @@
 // grid quantises to 0.94 waves (N=5120: 160 CTAs/170 SMs). Weight ring rotates 256MB to
 // defeat the 96MB L2 so the numbers read DRAM like real prefill. GPU required, skips without one.
 
+#include "compute/gemm.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_quant.h"
@@ -320,5 +321,45 @@ TEST_F(CutlassNvfp4StreamKTest, BenchPp512Shapes) {
         cudaFree(ws);
         for (auto& o : ops)
             o.release();
+    }
+}
+
+// gemm.nvfp4_cublaslt_min_m: cuBLASLt reads the same SfAtom bytes and must match the CUTLASS
+// data-parallel tile (#2540: bit-equal in all 48 isolated cells).
+TEST_F(CutlassNvfp4StreamKTest, CublasLtMatchesCutlass) {
+    gemm_init();
+    const Shape shapes[] = {{2048, 5120, 5120, "q_proj"},
+                            {300, 1024, 5120, "kv_odd_m"},
+                            {2048, 17408, 5120, "gate_up"}};
+    for (const auto& s : shapes) {
+        Operands op;
+        op.build(s.M, s.N, s.K, 2, stream_, /*random=*/true);
+        const size_t ws_bytes = gemm_nvfp4_cutlass_sm120_workspace(s.M, s.N, s.K);
+        void* ws = nullptr;
+        cudaMalloc(&ws, ws_bytes > 0 ? ws_bytes : 1);
+        half *y_cut = nullptr, *y_lt = nullptr;
+        cudaMalloc(&y_cut, (size_t)s.M * s.N * sizeof(half));
+        cudaMalloc(&y_lt, (size_t)s.M * s.N * sizeof(half));
+        ASSERT_TRUE(gemm_nvfp4_cutlass_sm120(op.act_data, op.act_sf, op.cw, y_cut, s.M, s.N, s.K, ws,
+                                             ws_bytes, stream_))
+            << s.name;
+        ASSERT_TRUE(gemm_nvfp4_cublaslt(op.act_data, op.act_sf, op.cw.data, op.cw.scale_factors,
+                                        op.cw.tensor_scale, y_lt, s.M, s.N, s.K, stream_))
+            << s.name;
+        ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+        std::vector<half> h_cut((size_t)s.M * s.N), h_lt((size_t)s.M * s.N);
+        cudaMemcpy(h_cut.data(), y_cut, h_cut.size() * sizeof(half), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_lt.data(), y_lt, h_lt.size() * sizeof(half), cudaMemcpyDeviceToHost);
+        size_t equal = 0;
+        for (size_t i = 0; i < h_cut.size(); ++i)
+            equal += std::memcmp(&h_cut[i], &h_lt[i], sizeof(half)) == 0;
+        const float rel = max_rel_diff(h_lt, h_cut);
+        printf("[cublaslt] %-8s M=%d N=%d K=%d  max_rel=%.2e  bit-equal %zu/%zu\n", s.name, s.M, s.N, s.K,
+               rel, equal, h_cut.size());
+        EXPECT_LT(rel, 2e-3f) << s.name;
+        cudaFree(ws);
+        cudaFree(y_cut);
+        cudaFree(y_lt);
+        op.release();
     }
 }
