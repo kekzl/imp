@@ -839,8 +839,7 @@ bool Engine::init_kv_cache() {
                 if (swa_snapshots_->enabled()) {
                     scheduler_->set_prefix_reuse_limit(
                         [this](Request& r) { return swa_prefix_reuse_limit_(r); });
-                    IMP_LOG_INFO("SWA snapshots: %d MiB budget, %zu KiB/snapshot, capacity %d",
-                                 budget_mb, slab_bytes >> 10, swa_snapshots_->capacity());
+                    log_swa_snapshot_store(*swa_snapshots_, budget_mb);
                 } else {
                     swa_snapshots_.reset();
                     IMP_CUDA_CHECK_LOG(cudaFree(swa_snap_slab_));

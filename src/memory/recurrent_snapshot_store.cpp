@@ -294,4 +294,15 @@ void RecurrentSnapshotStore::clear() {
     host_lru_map_.clear();
 }
 
+void log_swa_snapshot_store(const RecurrentSnapshotStore& store, int budget_mb) {
+    const size_t kib = store.entry_bytes() >> 10;
+    IMP_LOG_INFO("SWA snapshots: %d MiB budget, %zu KiB/snapshot, capacity %d", budget_mb, kib,
+                 store.capacity());
+    if (store.capacity() < 2)
+        IMP_LOG_WARN(
+            "SWA snapshots: capacity %d restores nothing across sessions; set "
+            "kv_cache.swa_snapshot_mb >= %zu (2 snapshots per concurrent session)",
+            store.capacity(), 2 * (kib >> 10));
+}
+
 }  // namespace imp
