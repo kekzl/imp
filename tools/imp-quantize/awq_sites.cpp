@@ -28,11 +28,35 @@ std::vector<std::string> strs(const std::vector<const char*>& in) {
     return std::vector<std::string>(in.begin(), in.end());
 }
 
+// The layer's per-expert name prefix ("<base>experts." Gemma-4 destacked, "<base>mlp.experts."
+// Qwen-MoE) and the expert indices that carry an up_proj, ascending.
+std::pair<std::string, std::vector<int64_t>> layer_experts(const std::set<std::string>& names,
+                                                           const std::string& base) {
+    for (const char* p : {"experts.", "mlp.experts."}) {
+        const std::string pre = base + p;
+        std::set<int64_t> ids;
+        for (auto it = names.lower_bound(pre); it != names.end() && it->compare(0, pre.size(), pre) == 0;
+             ++it) {
+            const size_t dot = it->find('.', pre.size());
+            if (dot == std::string::npos || dot == pre.size() ||
+                it->compare(dot, 15, ".up_proj.weight") != 0 || it->size() != dot + 15)
+                continue;
+            const std::string num = it->substr(pre.size(), dot - pre.size());
+            if (std::all_of(num.begin(), num.end(), [](unsigned char c) { return std::isdigit(c) != 0; }))
+                ids.insert(std::stoll(num));
+        }
+        if (!ids.empty())
+            return {pre, std::vector<int64_t>(ids.begin(), ids.end())};
+    }
+    return {};
+}
+
 }  // namespace
 
 std::optional<NormConvention> arch_norm_convention(const std::string& model_type) {
     // Plain: out = norm(x) * g. The four this tool has always accepted.
-    static const char* kPlain[] = {"qwen2", "qwen3", "llama", "mistral"};
+    // gemma4: imp applies the norm weight as stored (norm_weight_offset 0, no load-time +1).
+    static const char* kPlain[] = {"qwen2", "qwen3", "llama", "mistral", "gemma4", "gemma4_text"};
     // Unit offset: out = norm(x) * (1 + g). imp bakes the +1 at load for these
     // (src/model/weight_upload.cpp arch_norm_offset), so runtime norm_weight_offset stays 0 and the
     // fold must carry it. Spellings from src/model/hf_config_loader.cpp: a Qwen3.8 checkpoint
@@ -45,9 +69,12 @@ std::optional<NormConvention> arch_norm_convention(const std::string& model_type
     for (const char* a : kUnitOffset)
         if (model_type == a)
             return NormConvention::UnitOffset;
-    // Gemma-class lands here and stays refused, but for the honest reason: its
-    // block layout is not modelled, not because an offset cannot be folded.
+    // Gemma 2/3 land here and stay refused: their block layout is not modelled.
     return std::nullopt;
+}
+
+bool arch_normalizes_v(const std::string& model_type) {
+    return model_type == "gemma4" || model_type == "gemma4_text";
 }
 
 std::string resolve_layer_prefix(const std::set<std::string>& names) {
@@ -120,7 +147,7 @@ std::vector<int64_t> tie_map(TieMode tie, int64_t K, const Geometry& geo) {
 }
 
 std::vector<FoldSite> layer_fold_sites(const std::set<std::string>& names, const std::string& base,
-                                       NormConvention conv, const std::string& groups) {
+                                       NormConvention conv, const std::string& groups, bool v_normed) {
     const NormOffset block_norm = conv == NormConvention::UnitOffset ? NormOffset::Unit : NormOffset::Plain;
     const std::string attn = base + "self_attn.";
     const std::string gdn = base + "linear_attn.";
@@ -131,7 +158,8 @@ std::vector<FoldSite> layer_fold_sites(const std::set<std::string>& names, const
     std::vector<FoldSite> out;
 
     // ---- C: o_proj into v_proj's output rows. No norm, so no offset. ----
-    if (wants(groups, 'C') && has(names, attn + "o_proj.weight") && has(names, attn + "v_proj.weight")) {
+    if (wants(groups, 'C') && !v_normed && has(names, attn + "o_proj.weight") &&
+        has(names, attn + "v_proj.weight")) {
         FoldSite s;
         s.group = 'C';
         s.members = {attn + "o_proj.weight"};
@@ -154,6 +182,24 @@ std::vector<FoldSite> layer_fold_sites(const std::set<std::string>& names, const
         s.tie = TieMode::Identity;
         s.calib_keys = {"W_DOWN"};
         out.push_back(std::move(s));
+    }
+
+    // ---- Y: per expert, down_proj into that expert's up_proj rows (D, once per expert). ----
+    const auto [experts, expert_ids] = layer_experts(names, base);
+    if (wants(groups, 'Y')) {
+        for (const int64_t e : expert_ids) {
+            const std::string ex = experts + std::to_string(e) + ".";
+            if (!has(names, ex + "down_proj.weight") || !has(names, ex + "up_proj.weight"))
+                continue;
+            FoldSite s;
+            s.group = 'Y';
+            s.members = {ex + "down_proj.weight"};
+            s.producer = ex + "up_proj.weight";
+            s.kind = FoldKind::MatrixRows;
+            s.tie = TieMode::Identity;
+            s.calib_keys = {"EXPERT_DOWN." + std::to_string(e)};
+            out.push_back(std::move(s));
+        }
     }
 
     // E: out_proj into the GDN gated norm, PLAIN and tied across heads. linear_attn.norm is
@@ -219,14 +265,18 @@ std::vector<FoldSite> layer_fold_sites(const std::set<std::string>& names, const
         }
     }
 
-    // ---- B: gate/up into post_attention_layernorm. ----
-    if (wants(groups, 'B') && has(names, post_norm)) {
+    // ---- B: gate/up into the MLP pre-norm. A sandwich-norm block (Gemma-4) applies
+    // post_attention_layernorm to the attention OUTPUT; its MLP reads pre_feedforward_layernorm. ----
+    const std::string mlp_norm = has(names, base + "pre_feedforward_layernorm.weight")
+                                     ? base + "pre_feedforward_layernorm.weight"
+                                     : post_norm;
+    if (wants(groups, 'B') && has(names, mlp_norm)) {
         auto members = present(names, mlp, {"gate_proj.weight", "up_proj.weight"});
         if (!members.empty()) {
             FoldSite s;
             s.group = 'B';
             s.members = std::move(members);
-            s.producer = post_norm;
+            s.producer = mlp_norm;
             s.kind = FoldKind::NormVector;
             s.offset = block_norm;
             s.calib_keys = strs({"W_GATE", "W_UP"});
@@ -235,6 +285,27 @@ std::vector<FoldSite> layer_fold_sites(const std::set<std::string>& names, const
             s.scan_exempt = strs({"down_proj.weight"});
             out.push_back(std::move(s));
         }
+    }
+
+    // ---- X: every expert's gate/up into pre_feedforward_layernorm_2, one shared scale. Only that
+    // norm: post_attention_layernorm also feeds the router and the shared expert. ----
+    const std::string expert_norm = base + "pre_feedforward_layernorm_2.weight";
+    if (wants(groups, 'X') && has(names, expert_norm) && !expert_ids.empty()) {
+        FoldSite s;
+        s.group = 'X';
+        for (const int64_t e : expert_ids) {
+            const std::string ex = experts + std::to_string(e) + ".";
+            for (const char* p : {"gate_proj.weight", "up_proj.weight"})
+                if (has(names, ex + p))
+                    s.members.push_back(ex + p);
+        }
+        s.producer = expert_norm;
+        s.kind = FoldKind::NormVector;
+        s.offset = block_norm;
+        s.calib_keys = {"EXPERT_UP"};
+        s.scan_prefix = experts;
+        s.scan_exempt = strs({"down_proj.weight"});
+        out.push_back(std::move(s));
     }
 
     return out;

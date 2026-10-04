@@ -13,6 +13,10 @@
 // self_attn.v_proj rows (no norm); D mlp.down_proj<-mlp.up_proj rows (no norm); E
 // linear_attn.out_proj<-linear_attn.norm (PLAIN, no offset, tied across value heads).
 // conv1d, mtp.* and visual.* have no absorbing producer and are not sites.
+// MoE (2-D per-expert or destacked names): X experts.*.{gate,up}_proj<-pre_feedforward_layernorm_2,
+// one scale for all experts, only where that norm feeds nothing else (Gemma-4: the router reads
+// its own norm); Y experts.E.down_proj<-experts.E.up_proj rows, one group per expert.
+// Gemma-4 sandwich norms: B folds into pre_feedforward_layernorm, never post_attention_layernorm.
 
 #include "quant/awq_norm_fold.h"
 
@@ -26,7 +30,9 @@ namespace imp::awq {
 
 // AWQ scale groups, selectable to attribute a bad result. E and G exist only on qwen3_5 GDN
 // hybrids and are unmeasured against an uncalibrated twin.
-constexpr const char* kAwqAllGroups = "ABCDEG";
+constexpr const char* kAwqAllGroups = "ABCDEGXY";
+// X/Y are opt-in: Gemma-4-26B, 14676 framed tokens, RTN 16.9442 vs X 17.2090, Y 17.3654, XY 17.1043.
+constexpr const char* kAwqDefaultGroups = "ABCDEG";
 
 // Default when --calib-groups is absent: n_rep >= 4 drops attention groups A and C on dense models;
 // GDN hybrids keep all. PPL ABCDEG vs BDEG at n_rep 4: Qwen3-4B 14.9701 vs 14.1954, Qwen3-8B
@@ -35,7 +41,7 @@ constexpr const char* kAwqAllGroups = "ABCDEG";
 constexpr int64_t kAwqWideGqaRep = 4;
 constexpr const char* kAwqWideGqaGroups = "BDEG";
 [[nodiscard]] inline const char* default_groups(int64_t n_rep, bool hybrid) {
-    return n_rep >= kAwqWideGqaRep && !hybrid ? kAwqWideGqaGroups : kAwqAllGroups;
+    return n_rep >= kAwqWideGqaRep && !hybrid ? kAwqWideGqaGroups : kAwqDefaultGroups;
 }
 [[nodiscard]] inline bool attention_groups_on_wide_gqa(const std::string& groups, int64_t n_rep,
                                                        bool hybrid) {
@@ -48,6 +54,10 @@ enum class NormConvention { Plain, UnitOffset };
 // std::nullopt = an architecture whose norm convention this tool does not know,
 // which is refused rather than folded on a guess.
 std::optional<NormConvention> arch_norm_convention(const std::string& model_type);
+
+// v passes a scale-free per-head RMSNorm before attention (Gemma-4): a row fold into v_proj
+// (group C) is not an identity there, the norm divides the scale back out per head.
+bool arch_normalizes_v(const std::string& model_type);
 
 // The per-layer tensor-name prefix a checkpoint actually uses, "" when neither
 // form is present. Qwen3.8 nests the text model under model.language_model.
@@ -72,7 +82,7 @@ struct Geometry {
 };
 
 struct FoldSite {
-    char group = 0;                    // A B C D E G
+    char group = 0;                    // A B C D E G X Y
     std::vector<std::string> members;  // consumers, get the column scale
     std::string producer;              // absorbs 1/s
     std::string producer_bias;         // folded with the producer when present
@@ -94,7 +104,8 @@ int64_t tie_producer_len(TieMode tie, int64_t K, const Geometry& geo);
 // Sites of one layer, in search order: row folds first (their producers, v_proj/up_proj, are
 // norm-group members and must be searched against the weights they'll quantize). `groups`
 // selects by letter; a site whose members aren't all present in `names` is not returned.
+// `v_normed` (arch_normalizes_v) drops C.
 std::vector<FoldSite> layer_fold_sites(const std::set<std::string>& names, const std::string& base,
-                                       NormConvention conv, const std::string& groups);
+                                       NormConvention conv, const std::string& groups, bool v_normed = false);
 
 }  // namespace imp::awq

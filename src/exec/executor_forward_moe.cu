@@ -377,6 +377,11 @@ bool GraphExecutor::moe_prefill_uncapturable() const {
     return false;
 }
 
+// [calibration] keeps the gather: the per-expert statistics read moe_.gathered.
+bool GraphExecutor::moe_skip_gather_(int layer, const MoeFfnContext& ctx) const {
+    return !calib_ && moe_cutlass3x_will_use_device_args_(layer, ctx);
+}
+
 bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
                                                         const MoeFfnContext& ctx) const {
     if (dispatch_policy().moe.no_cutlass3x)
@@ -509,7 +514,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             // routing.sorted_token_ids in a fused gather+quantize kernel and never
             // touches moe_.gathered. Lazy gather in the legacy fallback catches the
             // rare case where the inner gate flips false at runtime.
-            if (moe_cutlass3x_will_use_device_args_(layer, ctx)) {
+            if (moe_skip_gather_(layer, ctx)) {
                 ctx.moe_gather_done = false;
             } else {
                 int64_t gath_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
@@ -566,6 +571,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     // Always true: failures throw (moe_host_args_ok_or_throw).
                     (void)try_run_moe_fp16_batch_prefill(layer, stream, n, d, eff, ne, expanded, non_gated_experts,
                                                    up_qtype, routing);
+                    ctx.experts_sorted_fp16 = true;
                 } else if (can_fp8_batch) {
                     dispatch_record::set_moe_prefill_outer(MoePrefillOuter::FP8_BATCH);
                     // Always true: failures throw (moe_host_args_ok_or_throw).
@@ -576,10 +582,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
                 } else if (try_run_moe_cutlass3x_nvfp4_prefill_(layer, stream, ctx)) {
                     dispatch_record::set_moe_prefill_outer(MoePrefillOuter::CUTLASS3X);
+                    ctx.experts_sorted_fp16 = true;
                     // Falls through to scatter (step 7)
 
                 } else if (try_run_moe_nvfp4_dequant_batch_prefill_(layer, stream, ctx)) {
                     dispatch_record::set_moe_prefill_outer(MoePrefillOuter::NVFP4_DEQUANT);
+                    ctx.experts_sorted_fp16 = true;
                     // Falls through to scatter (step 7)
 
                 } else {
@@ -590,10 +598,42 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }  // FP8/FP16 prefill scope
     }  // else branch of can_fused_q6k + fused Q6_K scope
 
+    calibrate_moe_experts_(layer, stream, ctx);
     moe_ffn_phase7_scatter_(layer, stream, ctx);
 
 moe_after_experts:
     moe_ffn_phase8_post_(layer, stream, ctx);
+}
+
+// Reads the expert-sorted buffers after the expert GEMMs and before the shared MLP reuses
+// moe_.expert_gate as scratch. The down input is recomputed into moe_.expert_swiglu (dead after
+// the down GEMM) because the fused CUTLASS act+quantize never materializes it.
+void GraphExecutor::calibrate_moe_experts_(int layer, cudaStream_t stream, const MoeFfnContext& ctx) {
+    if (!calib_)
+        return;
+    if (!ctx.experts_sorted_fp16 || compute_dtype_ != QType::F16 || ctx.expanded <= 0) {
+        if (layer == 0)
+            IMP_LOG_WARN(
+                "calibration: MoE prefill path leaves no expert-sorted FP16 buffers, "
+                "experts get no statistic");
+        return;
+    }
+    const int32_t* d_offsets = static_cast<const int32_t*>(ctx.routing.expert_offsets.data);
+    int64_t in_shape[2] = {static_cast<int64_t>(ctx.expanded), static_cast<int64_t>(ctx.d)};
+    calib_->accumulate(layer, TensorKind::EXPERT_UP,
+                       Tensor(moe_.gathered.data, QType::F16, 2, in_shape, true), stream);
+    // gpt-oss adds its gate/up bias inside the fused kernel on one path and in place on the
+    // others; non-gated relu^2 runs in place on some paths and fused on others. Neither buffer
+    // then holds one well-defined down input, so no down statistic.
+    if (model_->profile().moe_expert_bias_glu || ctx.non_gated_experts)
+        return;
+    apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data, moe_.expert_swiglu.data,
+                            /*non_gated=*/false, ctx.expanded, ctx.eff, compute_dtype_,
+                            model_->config().ffn_activation, stream);
+    int64_t act_shape[2] = {static_cast<int64_t>(ctx.expanded), static_cast<int64_t>(ctx.eff)};
+    calib_->accumulate_experts(layer, TensorKind::EXPERT_DOWN,
+                               Tensor(moe_.expert_swiglu.data, QType::F16, 2, act_shape, true), d_offsets,
+                               ctx.ne, stream);
 }
 
 // Phase 7: scatter expert outputs back to token positions. Fused path:

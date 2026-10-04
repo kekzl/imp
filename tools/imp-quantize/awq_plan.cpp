@@ -2,7 +2,8 @@
 // where the compensating 1/s folds, so the export stays a plain NVFP4 checkpoint.
 // Site table (awq_sites.h, from tensor names, CPU lane): A q,k,v<-input_layernorm; G
 // linear_attn.in_proj_*<-input_layernorm; B gate,up<-post_attention_layernorm; C o_proj<-v_proj
-// rows; D down_proj<-up_proj rows; E linear_attn.out_proj<-linear_attn.norm (tied across heads).
+// rows; D down_proj<-up_proj rows; E linear_attn.out_proj<-linear_attn.norm (tied across heads);
+// X expert gate,up<-pre_feedforward_layernorm_2 (one scale); Y expert down<-that expert's up rows.
 // Norm folds are exact algebraically; NOT exact is STORAGE near zero gain (BF16 half-ulp), so
 // every norm divisor passes through awq_clamp_norm_divisors (quant/awq_norm_fold.h).
 // C/D/E exact because attention is linear in v, SwiGLU is elementwise, GDN gate multiplies
@@ -58,8 +59,16 @@ struct Shape2 {
 
 // Fetches a matrix as FP16, with any already-decided row divisor applied so the
 // search sees the values that will actually be quantized.
-bool fetch_matrix(const std::map<std::string, const RawTensor*>& index, const Plan& plan,
-                  const std::string& name, std::vector<uint16_t>& out, Shape2& shape) {
+bool fetch_matrix(const std::map<std::string, const RawTensor*>& index, const StackedIndex& stacked,
+                  const Plan& plan, const std::string& name, std::vector<uint16_t>& out, Shape2& shape) {
+    if (const auto st = stacked.find(name); st != stacked.end()) {
+        shape.N = st->second.m.N;
+        shape.K = st->second.m.K;
+        out = quantize::destack_read(*st->second.stack, st->second.layout, st->second.m);
+        if (const auto rd = plan.row_div.find(name); rd != plan.row_div.end())
+            awq_apply_matrix(out, shape.N, shape.K, rd->second, {});
+        return true;
+    }
     auto it = index.find(name);
     if (it == index.end() || it->second->shape.size() != 2)
         return false;
@@ -183,9 +192,10 @@ bool site_statistic(const CalibrationStats& stats, int layer, const FoldSite& si
 // Runs one site: search, then record the column scales and the fold. Returns
 // the error text only on a hard error; a site that cannot run is reported
 // through `plan` and leaves the checkpoint untransformed at that site.
-std::expected<void, std::string> run_site(bool weight_sq, const std::map<std::string, const RawTensor*>& index,
-                                          const CalibrationStats& stats, int layer, const FoldSite& site,
-                                          Geometry geo, Plan& plan) {
+std::expected<void, std::string> run_site(bool weight_sq,
+                                          const std::map<std::string, const RawTensor*>& index,
+                                          const StackedIndex& stacked, const CalibrationStats& stats,
+                                          int layer, const FoldSite& site, Geometry geo, Plan& plan) {
     const std::string label = "layer " + std::to_string(layer) + " group " + std::string(1, site.group);
     auto skip = [&](const std::string& why) {
         plan.groups_skipped++;
@@ -199,7 +209,7 @@ std::expected<void, std::string> run_site(bool weight_sq, const std::map<std::st
     for (const auto& name : site.members) {
         std::vector<uint16_t> bits;
         Shape2 sh;
-        if (!fetch_matrix(index, plan, name, bits, sh)) {
+        if (!fetch_matrix(index, stacked, plan, name, bits, sh)) {
             skip("missing or unquantizable member " + name);
             return {};
         }
@@ -220,12 +230,20 @@ std::expected<void, std::string> run_site(bool weight_sq, const std::map<std::st
         return {};
     }
 
-    const auto pit = index.find(site.producer);
-    if (pit == index.end()) {
+    // A stacked producer (an expert up_proj inside its 3-D stack) is a matrix: rows only.
+    const RawTensor* producer = nullptr;
+    int64_t producer_rows = -1, producer_numel = 0;
+    if (const auto st = stacked.find(site.producer); st != stacked.end()) {
+        producer_rows = st->second.m.N;
+        producer_numel = st->second.m.N * st->second.m.K;
+    } else if (const auto pit = index.find(site.producer); pit != index.end()) {
+        producer = pit->second;
+        producer_rows = producer->shape.size() == 2 ? producer->shape[0] : -1;
+        producer_numel = producer->numel();
+    } else {
         skip("producer " + site.producer + " is not in this checkpoint");
         return {};
     }
-    const RawTensor& producer = *pit->second;
     // One producer, one fold. Two groups of the same layer folding into the
     // same tensor would leave the second one's divisor standing and the first
     // one's consumers scaled against a divisor nothing applied.
@@ -237,16 +255,15 @@ std::expected<void, std::string> run_site(bool weight_sq, const std::map<std::st
     // shared across the value heads, and reading its width off the tensor
     // avoids depending on which config key spells the linear-attention head.
     if (site.tie == TieMode::PerHeadDim)
-        geo.head_dim = producer.numel();
+        geo.head_dim = producer_numel;
     const int64_t plen = tie_producer_len(site.tie, K, geo);
     const std::vector<int64_t> tie = tie_map(site.tie, K, geo);
     if (plen <= 0 || tie.empty()) {
         skip("K = " + std::to_string(K) + " does not tie onto " + site.producer);
         return {};
     }
-    const bool producer_fits = site.kind == FoldKind::MatrixRows
-                                   ? (producer.shape.size() == 2 && producer.shape[0] == plen)
-                                   : (producer.numel() == plen);
+    const bool producer_fits = site.kind == FoldKind::MatrixRows ? producer_rows == plen
+                                                                 : (producer && producer_numel == plen);
     if (!producer_fits) {
         skip(site.producer + " has the wrong shape for this fold");
         return {};
@@ -285,20 +302,20 @@ std::expected<void, std::string> run_site(bool weight_sq, const std::map<std::st
 
     if (site.kind == FoldKind::NormVector) {
         std::vector<float> g;
-        if (!raw_to_float(producer, g)) {
-            skip("producer dtype " + producer.dtype + " cannot carry a fold");
+        if (!raw_to_float(*producer, g)) {
+            skip("producer dtype " + producer->dtype + " cannot carry a fold");
             return {};
         }
         NormFoldReport rep;
-        awq_clamp_norm_divisors(g.data(), g.size(), site.offset, producer.dtype, kNormFoldTol, div, rep);
+        awq_clamp_norm_divisors(g.data(), g.size(), site.offset, producer->dtype, kNormFoldTol, div, rep);
         plan.channels_clamped += static_cast<int>(rep.clamped);
         if (rep.clamped > 0) {
             char worst[96];
             std::snprintf(worst, sizeof(worst), "%.3f -> %.3f", double(rep.worst_clamp_from),
                           double(rep.worst_clamp_to));
             plan.notes.push_back(label + ": " + std::to_string(rep.clamped) + " of " +
-                                 std::to_string(rep.channels) + " channels clamped so " +
-                                 producer.dtype + " can carry the fold (worst " + worst + ")");
+                                 std::to_string(rep.channels) + " channels clamped so " + producer->dtype +
+                                 " can carry the fold (worst " + worst + ")");
         }
         // The consumer must be scaled by what the producer can actually store,
         // or the pair stops being inverse on exactly the channels that needed
@@ -341,7 +358,8 @@ std::vector<uint16_t> raw_to_fp16(const RawTensor& t) {
 std::expected<Plan, std::string> build_plan(const std::map<std::string, const RawTensor*>& index,
                                             const CalibrationStats& stats,
                                             const std::string& config_json_path,
-                                            const std::string& groups_arg, bool weight_sq) {
+                                            const std::string& groups_arg, bool weight_sq,
+                                            const StackedIndex& stacked) {
     Plan plan;
     if (groups_arg.find_first_not_of(kAwqAllGroups) != std::string::npos)
         return std::unexpected("--calib-groups '" + groups_arg + "' has a letter outside " +
@@ -405,6 +423,14 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
         names.insert(name);
         hybrid = hybrid || name.find(".linear_attn.") != std::string::npos;
     }
+    for (const auto& [name, m] : stacked)
+        names.insert(name);
+    // No group set beat RTN on Gemma-4-26B (ppl_corpus_45k in turn framing, 14676 tokens).
+    if (groups_arg.empty() && (model_type == "gemma4" || model_type == "gemma4_text"))
+        return std::unexpected(
+            "--calib on gemma4 has no default group set: every measured set was worse than round-to-nearest "
+            "(RTN 16.9442, ABD 17.1807, XY 17.1043, ABDXY 17.5810 PPL). Quantize without --calib, or pass "
+            "--calib-groups to run one anyway.");
     const char* dflt = default_groups(geo.n_rep, hybrid);
     const std::string groups = groups_arg.empty() ? dflt : groups_arg;
     plan.groups = groups;
@@ -413,7 +439,7 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
     if (!groups_arg.empty() && groups_arg != dflt)
         plan.notes.push_back("group selector: " + groups + " (default here " + dflt +
                              ") - a diagnostic subset, not a normal checkpoint");
-    else if (groups != kAwqAllGroups)
+    else if (groups != kAwqDefaultGroups)
         plan.notes.push_back("group selector: " + groups + " (dense, n_rep " + std::to_string(geo.n_rep) +
                              " >= " + std::to_string(kAwqWideGqaRep) + ": attention groups A, C off)");
     const std::string prefix = resolve_layer_prefix(names);
@@ -424,29 +450,37 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
     printf("AWQ: model_type %s, %s norm, layers under %s\n", model_type.c_str(),
            *conv == NormConvention::UnitOffset ? "unit-offset (1 + g)" : "plain", prefix.c_str());
 
+    const bool v_normed = arch_normalizes_v(model_type);
+    if (v_normed)
+        plan.notes.push_back("model_type " + model_type +
+                             " normalizes v per head: group C has no exact fold");
+    int moe_gate_up_rtn = 0;
     for (int64_t L = 0; L < n_layers; L++) {
         const std::string base = prefix + std::to_string(L) + ".";
-        const auto selected = layer_fold_sites(names, base, *conv, groups);
-        const auto all = layer_fold_sites(names, base, *conv, kAwqAllGroups);
+        const auto selected = layer_fold_sites(names, base, *conv, groups, v_normed);
+        const auto all = layer_fold_sites(names, base, *conv, kAwqAllGroups, v_normed);
         plan.groups_disabled += static_cast<int>(all.size() - selected.size());
         for (const auto& site : selected) {
-            const auto ran = run_site(weight_sq, index, stats, static_cast<int>(L), site, geo, plan);
+            const auto ran = run_site(weight_sq, index, stacked, stats, static_cast<int>(L), site, geo, plan);
             if (!ran)
                 return std::unexpected(ran.error());
         }
-        // A MoE layer's FFN weight is in per-expert tensors this planner doesn't group, so the
-        // experts (the bulk of the model) stay at round-to-nearest. Said explicitly rather than left
-        // silent, which would read as a technicality.
-        if (all.empty() && index.count(base + "mlp.experts.0.gate_proj.weight")) {
-            plan.notes.push_back("layer " + std::to_string(L) +
-                                 ": MoE experts NOT calibrated (per-expert groups are not "
-                                 "modelled yet) - they stay round-to-nearest");
-        }
+        // X needs a norm that feeds only the experts (pre_feedforward_layernorm_2); elsewhere the
+        // expert input norm also feeds the router and the expert gate/up stay round-to-nearest.
+        const auto has_group = [](const std::vector<FoldSite>& s, char g) {
+            return std::any_of(s.begin(), s.end(), [g](const FoldSite& f) { return f.group == g; });
+        };
+        if (has_group(all, 'Y') && !has_group(all, 'X'))
+            moe_gate_up_rtn++;
 
         if ((L + 1) % 8 == 0 || L + 1 == n_layers)
             printf("  AWQ search: layer %lld/%lld\n", (long long)L + 1, (long long)n_layers);
         fflush(stdout);
     }
+    if (moe_gate_up_rtn > 0)
+        plan.notes.push_back(std::to_string(moe_gate_up_rtn) +
+                             " MoE layer(s): expert gate/up stay round-to-nearest, their input norm also "
+                             "feeds the router (only expert down_proj is calibrated, group Y)");
 
     return plan;
 }

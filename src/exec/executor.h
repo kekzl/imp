@@ -1037,6 +1037,8 @@ private:
     void moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     void moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     void moe_ffn_phase7_scatter_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
+    // [calibration]: pooled expert-input statistic plus one down-input statistic per expert.
+    void calibrate_moe_experts_(int layer, cudaStream_t stream, const MoeFfnContext& ctx);
     void moe_ffn_phase8_post_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
     // NVFP4→FP16 batch dequant fallback (when CUTLASS 3.x grouped-NVFP4
     // can't fire). Predicate is checked internally; returns true if the
@@ -1055,6 +1057,7 @@ private:
     // reads ctx.no via sorted_token_ids and doesn't need the gathered
     // intermediate). A mismatch costs at most one wasted gather, never wrong output.
     [[nodiscard]] bool moe_cutlass3x_will_use_device_args_(int layer, const MoeFfnContext& ctx) const;
+    [[nodiscard]] bool moe_skip_gather_(int layer, const MoeFfnContext& ctx) const;
     // Optional shared expert (parallel dense FFN), called from run_moe_ffn
     // after routed experts wrote into h. Reads `no` (post-norm), adds its
     // result into `h` via elementwise_add. No-op when ly.w_up_shared is null
