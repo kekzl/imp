@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 using namespace imp;
@@ -39,12 +40,20 @@ struct Operands {
     half* d_w = nullptr;
     half* d_x = nullptr;
 
-    void build(int M, int N, int K, int seed, cudaStream_t stream) {
+    // random: LCG weights, activations over 2^-6..2^6. The default pattern and a narrow range sum
+    // exactly in FP32, so any K order gives the same bits.
+    void build(int M, int N, int K, int seed, cudaStream_t stream, bool random = false) {
         std::vector<half> h_w((size_t)N * K), h_x((size_t)M * K);
+        uint32_t lcg = 12345u + static_cast<uint32_t>(seed);
+        auto next = [&] {
+            lcg = lcg * 1664525u + 1013904223u;
+            return (static_cast<float>(lcg >> 8) / 16777216.0f - 0.5f) * 2.0f;
+        };
         for (size_t i = 0; i < h_w.size(); ++i)
-            h_w[i] = __float2half((float)((int)((i * 7 + seed) % 13) - 6) * 0.05f);
+            h_w[i] = __float2half(random ? next() : (float)((int)((i * 7 + seed) % 13) - 6) * 0.05f);
         for (size_t i = 0; i < h_x.size(); ++i)
-            h_x[i] = __float2half((float)((int)((i * 11 + 3) % 17) - 8) * 0.05f);
+            h_x[i] = __float2half(random ? next() * exp2f(6.0f * next())
+                                         : (float)((int)((i * 11 + 3) % 17) - 8) * 0.05f);
         cudaMalloc(&d_w, h_w.size() * sizeof(half));
         cudaMalloc(&d_x, h_x.size() * sizeof(half));
         cudaMemcpy(d_w, h_w.data(), h_w.size() * sizeof(half), cudaMemcpyHostToDevice);
@@ -154,6 +163,62 @@ TEST_F(CutlassNvfp4StreamKTest, MatchesDataParallel) {
         cudaFree(y_sk);
         cudaFree(ws);
         op.release();
+    }
+}
+
+// runtime.deterministic sets mode 0: a row's bits must not depend on M, the prefill chunk length
+// (#2556). Mode 1 picks stream-K by tile count, which sums K partials in another order: it must
+// differ at the engine case, else this test checks nothing.
+TEST_F(CutlassNvfp4StreamKTest, DataParallelRowsInvariantToM) {
+    const Shape shapes[] = {{0, 12288, 5120, "q_gate"},
+                            {0, 16384, 5120, "gdn_qkvz"},
+                            {0, 5120, 17408, "down"}};
+    const int small_m = 317;
+    for (const auto& s : shapes) {
+        for (int big_m : {2048, 2112}) {
+            Operands big, small;
+            big.build(big_m, s.N, s.K, 1, stream_, /*random=*/true);
+            small.build(small_m, s.N, s.K, 1, stream_, /*random=*/true);
+            const size_t tail = static_cast<size_t>(big_m - small_m);
+            cudaMemcpy(small.d_x, big.d_x + tail * s.K, static_cast<size_t>(small_m) * s.K * sizeof(half),
+                       cudaMemcpyDeviceToDevice);
+            quantize_fp16_to_nvfp4_cutlass(small.d_x, small.act_data, small.act_sf, small_m, s.K, stream_);
+            const size_t ws_bytes = std::max({gemm_nvfp4_cutlass_sm120_workspace(big_m, s.N, s.K),
+                                              gemm_nvfp4_cutlass_sm120_streamk_workspace(big_m, s.N, s.K),
+                                              gemm_nvfp4_cutlass_sm120_streamk_workspace(small_m, s.N, s.K)});
+            void* ws = nullptr;
+            half *y_big = nullptr, *y_small = nullptr;
+            cudaMalloc(&ws, ws_bytes > 0 ? ws_bytes : 1);
+            cudaMalloc(&y_big, static_cast<size_t>(big_m) * s.N * sizeof(half));
+            cudaMalloc(&y_small, static_cast<size_t>(small_m) * s.N * sizeof(half));
+            std::vector<half> h_small(static_cast<size_t>(small_m) * s.N),
+                h_dp(static_cast<size_t>(big_m) * s.N), h_sk(h_dp.size());
+            auto run = [&](int mode, std::vector<half>& out_big) {
+                process_diag_set_nvfp4_cutlass_streamk(mode);
+                EXPECT_TRUE(gemm_nvfp4_cutlass_sm120(big.act_data, big.act_sf, big.cw, y_big, big_m, s.N, s.K,
+                                                     ws, ws_bytes, stream_));
+                EXPECT_TRUE(gemm_nvfp4_cutlass_sm120(small.act_data, small.act_sf, small.cw, y_small, small_m,
+                                                     s.N, s.K, ws, ws_bytes, stream_));
+                EXPECT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+                cudaMemcpy(h_small.data(), y_small, h_small.size() * sizeof(half), cudaMemcpyDeviceToHost);
+                cudaMemcpy(out_big.data(), y_big, out_big.size() * sizeof(half), cudaMemcpyDeviceToHost);
+                return memcmp(h_small.data(), out_big.data() + tail * s.N, h_small.size() * sizeof(half)) ==
+                       0;
+            };
+            EXPECT_TRUE(run(0, h_dp)) << s.name << " M=" << big_m << ": data-parallel rows depend on M";
+            // Mode 1 takes stream-K at q_gate M=2048 (1536 tiles, tail 6), the #2556 engine case.
+            if (s.N == 12288 && big_m == 2048) {
+                run(1, h_sk);
+                EXPECT_NE(memcmp(h_dp.data(), h_sk.data(), h_dp.size() * sizeof(half)), 0)
+                    << "mode 1 matched data-parallel bitwise at q_gate M=2048";
+            }
+            process_diag_set_nvfp4_cutlass_streamk(0);
+            cudaFree(y_big);
+            cudaFree(y_small);
+            cudaFree(ws);
+            big.release();
+            small.release();
+        }
     }
 }
 

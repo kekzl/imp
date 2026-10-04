@@ -25,6 +25,8 @@ struct GDN {
     // (chunks x heads), full-device parallel; only a cheap per-head matmul
     // chain stays sequential. Applies to single-sequence prefill (n>=128),
     // HD=SS=128, either state dtype. Falls back silently if the workspace was not allocated.
+    // runtime.deterministic turns it, chunkwise_scan and state_bf16 off: blocks start at the
+    // chunk start, BF16 state rounds at chunk ends (#2556; Qwen3.8-27B pp4096 -42 %).
     bool chunkpar_scan = true;
     // Chunks (64 tokens each) per chunk-parallel strip: kernel 1 launches
     // strip*n_heads CTAs at one CTA/SM, so strip sets the wave quantization.

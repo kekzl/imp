@@ -73,7 +73,8 @@ struct GEMM {
     bool nvfp4_smallm = true;
     // Stream-K tile scheduler for the CUTLASS NVFP4 prefill GEMM (cooperative
     // 128x128 tile, N>2048): 0=off, 1=heuristic on grids with a short tail wave
-    // (>=1 wave, last wave <= half full), 2=forced at every shape. Output bit-identical.
+    // (>=1 wave, last wave <= half full), 2=forced at every shape. Not bit-identical to data-parallel
+    // (K-split partials sum in another order); runtime.deterministic forces 0 (#2556).
     int nvfp4_cutlass_streamk = 1;
     // Which small-M implementation the gate above dispatches: 1 = W4A16
     // dequant+HMMA kernel (kept for A/B), 2 = native mxf4nvf4 producer/consumer

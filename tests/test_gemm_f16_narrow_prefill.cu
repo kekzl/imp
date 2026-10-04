@@ -183,6 +183,34 @@ TEST(GemmF16NarrowPrefill, DeterministicAcrossLaunches) {
     }
 }
 
+// runtime.deterministic launches split 1 (no workspace): a row's bits must not depend on M, the
+// prefill chunk length (#2556). The split-K default must differ, else this test checks nothing.
+TEST(GemmF16NarrowPrefill, SplitOneRowsInvariantToM) {
+    const int K = 5120, N = 48, big_m = 147, small_m = 33;
+    Case big(big_m, N, N, K, 11u);
+    Case small(small_m, N, N, K, 12u);
+    const size_t row_off = static_cast<size_t>(big_m - small_m) * K * 2;
+    ASSERT_EQ(cudaMemcpy(small.dA.p, static_cast<char*>(big.dA.p) + row_off,
+                         static_cast<size_t>(small_m) * K * 2, cudaMemcpyDeviceToDevice),
+              cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(small.dW0.p, big.dW0.p, static_cast<size_t>(N) * K * 2, cudaMemcpyDeviceToDevice),
+              cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(small.dW1.p, big.dW1.p, static_cast<size_t>(N) * K * 2, cudaMemcpyDeviceToDevice),
+              cudaSuccess);
+    ASSERT_TRUE(big.run(nullptr, 0));
+    ASSERT_TRUE(small.run(nullptr, 0));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    const size_t tail = static_cast<size_t>(big_m - small_m) * N;
+    for (int pair = 0; pair < 2; ++pair) {
+        const auto b = big.out(pair), s = small.out(pair);
+        ASSERT_EQ(memcmp(b.data() + tail, s.data(), s.size() * 2), 0) << "pair " << pair;
+    }
+    const auto split1 = big.out(0);
+    ASSERT_TRUE(big.run());
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    EXPECT_NE(memcmp(split1.data(), big.out(0).data(), split1.size() * 2), 0) << "split-K matched split 1";
+}
+
 TEST(GemmF16NarrowPrefill, RefusesUnsupportedShapes) {
     Case c(64, 48, 48, 5120, 1u);
     const half* A = static_cast<const half*>(c.dA.p);

@@ -592,6 +592,19 @@ void Engine::init_resolve_ssm_dtype_() {
         config_.ssm_state_dtype = QType::F16;
         IMP_LOG_INFO("SSM state dtype: auto → FP16 (hybrid SSM model, state_size=%d)", mcfg.ssm_state_size);
     }
+    // runtime.deterministic: FP32 state + token-sequential fused scan, so output does not
+    // depend on the prefill chunk partition. BF16 state rounds at every chunk end; the
+    // chunkpar/chunkwise scans block 64 rows from the chunk start (#2556).
+    if (has_gdn_for_dtype && process_diag_deterministic() &&
+        (runtime_config_.gdn.state_bf16 || runtime_config_.gdn.chunkpar_scan ||
+         runtime_config_.gdn.chunkwise_scan)) {
+        runtime_config_.gdn.state_bf16 = false;
+        runtime_config_.gdn.chunkpar_scan = false;
+        runtime_config_.gdn.chunkwise_scan = false;
+        IMP_LOG_INFO(
+            "runtime.deterministic: GDN state FP32, fused scan (state_bf16, chunkpar_scan, "
+            "chunkwise_scan off)");
+    }
     // gdn.state_bf16: BF16 recurrent state for GDN (halves the state traffic
     // that dominates batched decode; FP32 arithmetic in registers). Only the
     // fused scan supports it, and only at HD=SS=128: the executor drops the
