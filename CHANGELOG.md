@@ -9,6 +9,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `imp-quantize --calib-groups` X/Y (#2476): MoE expert gate/up into an expert-only norm, per-expert down into up rows; `--calibrate` records per-expert statistics. Opt-in, no measured gain: Gemma-4-26B RTN rounding alone spreads PPL 16.7551..19.0110; gemma4 `--calib` needs a selector.
 
 ### Changed
+- `kv_cache.dtype=auto` resolves to NVFP4 on Qwen3.6-35B-A3B (QWEN36_MOE, #2415): KV ceiling 112336 -> 358176 tokens on a 32 GB card for +0.09 % PPL (6.7939 -> 6.7998); NIAH 9/9 to 52k tokens. `kv_cache.dtype=fp16` opts out.
 - Untied token embeddings live in mapped pinned host memory (`vram.host_token_embedding`, #2484): Qwen3.8-27B-NVFP4 WEIGHTS -2425 MiB, KV ceiling 13238 -> 21771 blocks; the freed budget lifts tg128 46.72..48.90 -> 54.68..55.51 tok/s on the Modelopt export. Greedy output identical.
 - Dense NVFP4 prefill GEMMs at M >= 2048 run on cuBLASLt block-scaled NVFP4 instead of CUTLASS (`gemm.nvfp4_cublaslt_min_m`, #2540): same SfAtom bytes, identical greedy output; GEMM per pass -7.7 % Qwen3-14B-NVFP4, -5.8 % Qwen3.8-27B; pp4096 +4.6..5.2 % / +2.5..3.1 %.
 - Allocator headroom 5 -> 4 % of VRAM (#2482), from a measurement: after the KV pool capped, Qwen3.8-27B 32-stream soaks grew device use by at most 608 MiB. The growable pool now reaches its ceiling, 12827 -> 13599 blocks.

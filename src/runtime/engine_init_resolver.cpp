@@ -237,9 +237,10 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // arms so a family on both lists gets the capacity trade;
             // head_dim/sink fallbacks below can still revert to FP16.
             config_.kv_cache_dtype = QType::NVFP4;
-            IMP_LOG_INFO("KV cache dtype: NVFP4 (auto — %s measured at +0.3%% PPL for 2.7x the "
-                         "context; set kv_cache.dtype=fp16 to opt out)",
-                         model_arch_name(mcfg.arch));
+            IMP_LOG_INFO(
+                "KV cache dtype: NVFP4 (auto: %s measured at <= +0.35%% PPL for 2.7-3.2x the "
+                "context; set kv_cache.dtype=fp16 to opt out)",
+                model_arch_name(mcfg.arch));
         } else if (kv_str == "auto" && mcfg.kv_cache_quant_hint == "FP8" &&
                    kv_fp8_hint_default_safe(mcfg.arch)) {
             config_.kv_cache_dtype = QType::FP8_E4M3;
