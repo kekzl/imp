@@ -31,6 +31,7 @@ const char* process_diag_graph_dump_dir() {
 bool process_diag_no_pdl() { return slot().no_pdl; }
 int process_diag_upload_ring_depth() { return slot().upload_ring_depth; }
 int process_diag_upload_ring_chunk_mib() { return slot().upload_ring_chunk_mib; }
+bool process_diag_host_token_embedding() { return slot().host_token_embedding; }
 bool process_diag_no_vision_graph() { return slot().no_vision_graph; }
 const std::string& process_diag_graph_capture_mode() { return slot().graph_capture_mode; }
 bool process_diag_prefill_graph_enabled() { return slot().prefill_graph_enabled; }

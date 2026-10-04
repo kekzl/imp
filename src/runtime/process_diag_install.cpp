@@ -40,6 +40,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.no_pdl = cfg.runtime.no_pdl;
     d.upload_ring_depth = cfg.vram.upload_ring_depth;
     d.upload_ring_chunk_mib = cfg.vram.upload_ring_chunk_mib;
+    d.host_token_embedding = cfg.vram.host_token_embedding;
     d.no_vision_graph = cfg.runtime.no_vision_graph;
     d.graph_capture_mode = cfg.runtime.graph_capture_mode;
     d.prefill_graph_enabled = cfg.runtime.prefill_graph;

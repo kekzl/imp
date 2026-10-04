@@ -368,9 +368,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // Binary dump: write the full FP16 hidden state to file
     if (!dispatch_policy().diagnostics.dump_hidden_dir.empty()) {
         std::vector<half> h_buf(static_cast<int64_t>(n) * cfg.d_model);
-        if (debug_cuda_ok(cudaMemcpy(h_buf.data(), h.data, h_buf.size() * sizeof(half),
-                                     cudaMemcpyDeviceToHost),
-                          "embed dump")) {
+        // `stream` is non-blocking: a bare cudaMemcpy read h before the lookup wrote it.
+        if (debug_sync_d2h(h_buf.data(), h.data, h_buf.size() * sizeof(half), stream, "embed dump")) {
             char fname[256];
             snprintf(fname, sizeof(fname), "/tmp/imp_embed_step%d.bin", decode_step);
             FILE* f = fopen(fname, "wb");

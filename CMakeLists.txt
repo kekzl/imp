@@ -222,6 +222,7 @@ set(IMP_MODEL_SOURCES
     src/model/weight_map.cpp
     src/model/host_expert_pin.cpp
     src/model/weight_upload.cpp
+    src/model/host_embedding.cpp
     src/model/tokenizer.cpp
     src/model/fim.cpp
     src/model/tokenizer_nfc.cpp
@@ -871,6 +872,8 @@ if(IMP_BUILD_TESTS)
         tests/test_llm_compressor_loader.cpp
         tests/test_nvfp4_quant_contract.cpp
         tests/test_hf_config_loader.cpp
+        # Host-placed token embedding: FP16 bits equal to the VRAM upload (#2484).
+        tests/test_host_embedding.cpp
         # Golden ModelConfig dump per HF config fixture (#2537).
         tests/test_hf_config_golden.cpp
         # One arch identity table, pinned against the strings main accepted (#2457).
