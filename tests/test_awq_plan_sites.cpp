@@ -246,12 +246,15 @@ TEST(AwqSites, TieMapMatchesTheProducerItFoldsInto) {
 
 // Roadmap row 6: Qwen3-14B (dense, n_rep 5) ABCD 12.2634 vs BD 9.9068 PPL; Qwen3-0.6B (n_rep 2)
 // ABCD wins; Qwen3.8-27B (GDN hybrid, n_rep 6) ABCD 4.5986 vs BDEG 4.6136, so hybrids keep all.
+// #2474: n_rep 4 BDEG wins too (Qwen3-4B 14.1954 vs 14.9701, Qwen3-8B 11.4263 vs 11.7296).
 TEST(AwqSites, DefaultGroupsDropAttentionOnDenseWideGqaOnly) {
     for (bool hybrid : {false, true}) {
         EXPECT_STREQ(default_groups(1, hybrid), kAwqAllGroups);
         EXPECT_STREQ(default_groups(2, hybrid), kAwqAllGroups);
-        EXPECT_STREQ(default_groups(4, hybrid), kAwqAllGroups);
+        EXPECT_STREQ(default_groups(3, hybrid), kAwqAllGroups) << "n_rep 3 unmeasured";
     }
+    EXPECT_STREQ(default_groups(4, false), "BDEG") << "Qwen3-4B, Qwen3-8B";
+    EXPECT_STREQ(default_groups(4, true), kAwqAllGroups);
     EXPECT_STREQ(default_groups(5, false), "BDEG");
     EXPECT_STREQ(default_groups(6, false), "BDEG");
     EXPECT_STREQ(default_groups(6, true), kAwqAllGroups) << "Qwen3.8-27B";
@@ -261,7 +264,8 @@ TEST(AwqSites, DefaultGroupsDropAttentionOnDenseWideGqaOnly) {
     }
     EXPECT_TRUE(attention_groups_on_wide_gqa("ABCD", 5, false));
     EXPECT_TRUE(attention_groups_on_wide_gqa("BCD", 6, false));
-    EXPECT_FALSE(attention_groups_on_wide_gqa("ABCD", 4, false));
+    EXPECT_TRUE(attention_groups_on_wide_gqa("ABCD", 4, false));
+    EXPECT_FALSE(attention_groups_on_wide_gqa("ABCD", 3, false));
     EXPECT_FALSE(attention_groups_on_wide_gqa("ABCD", 6, true));
 }
 

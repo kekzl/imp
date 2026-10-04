@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- `imp-quantize --calib` default drops attention groups A/C from n_rep 4 (was 5) on dense models (#2474): PPL ABCDEG vs BDEG, Qwen3-4B 14.9701 -> 14.1954, Qwen3-8B 11.7296 -> 11.4263.
 - `imp-cli --bench` warms prefill until the graph replays (3 prefills) and prints each timed rep (#2525): Qwen3-30B-A3B-NVFP4 pp512 over 10 fresh processes 25887.89..28483.46 tok/s (10.03 %) -> 31041.61..31624.79 (1.88 %). Eager jitter cause and bound: `docs/internals/BENCHMARKING.md` (#2538).
 
 ### Fixed

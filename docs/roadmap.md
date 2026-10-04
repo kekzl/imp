@@ -112,7 +112,7 @@ Rows 1-15 are closed (index below); new rows start at 16, ranked by what an agen
 | 103 | exports can store the token embedding as FP8 rows | embeddings always excluded from quantization: 2425 MiB on Qwen3.8-27B -> opt-in FP8 per-row embedding, PPL gate per family; overlaps row 94 | M | `src/model/nvfp4_module_policy.h:174 embed_tokens`, `docs/plans/2026-08-24-qwen38-port.md:208 2425.00 MiB`, #2478 |
 | 107 | stacked-expert checkpoints beyond gpt-oss and Gemma-4 quantize | 2 stacked layouts (computed: table rows), any other 3-D expert stack such as Llama-4 is refused -> shape-verified layout per family | M | `tools/imp-quantize/expert_destack.cpp:32 stacked_expert_layout`, `tools/imp-quantize/main.cpp:183 refusing:`, #2472 |
 | 108 | scalar-scale FP8 sources quantize | scalar `weight_scale` E4M3 weights pair and widen since 2026-10-03; `--dry-run` on a synthetic Modelopt FP8 Qwen3-0.6B: 196 of 196 quantized, 0 copied through (main: 0, exit 1) -> open: one real GPU export of a Modelopt FP8 checkpoint | S | `tools/imp-quantize/fp8_source.cpp:140 pair_fp8_scales`, `tools/imp-quantize/fp8_source.cpp:121 fp8_tensor_scaled_to_fp16`, `docs/quantization.md:117 Per-tensor-scale FP8 sources`, #2473 |
-| 109 | default calib groups at n_rep 3-4 rest on a measurement | threshold measured at n_rep 5; n_rep 3-4 (Qwen3-8B, Qwen3-4B, Phi-4) unmeasured, keeps all groups -> PPL A/B ABCDEG vs BDEG on the three | S | `docs/quantization.md:220 n_rep 3-4`, #2474 |
+| 109 | default calib groups at n_rep 3-4 rest on a measurement | CLOSED 2026-10-04: n_rep 4 BDEG beats ABCDEG (Qwen3-4B 14.1954 vs 14.9701, Qwen3-8B 11.4263 vs 11.7296 PPL), threshold 5 -> 4; Phi-4 (`phi3`) is refused by `--calib`; n_rep 3 unmeasured | S | `docs/quantization.md:232 n_rep 4 measured`, #2474 |
 
 ## Later
 
@@ -169,6 +169,7 @@ Continuous batching, prefix caching, per-request LoRA, embeddings, the three API
 | Next 38, 39, 41 | 2026-10-02 | closed in place, rows 38, 39, 41 under [Next](#next) | #2427, #2428, #2430 |
 | Next 73, 79 | 2026-10-03 | closed in place, rows 73, 79 under [Next](#next) | #2458, #2469 |
 | Now 20, Next 95 | 2026-10-04 | closed in place, row 20 under [Now](#now), row 95 under [Next](#next) | #2409, #2485 |
+| Next 109 | 2026-10-04 | closed in place, row 109 under [Next](#next) | #2474 |
 | The 2026 bar | 2026-09-28 | [The 2026 bar](archive/roadmap_ledger_2026_09_28.md#the-2026-bar-assessed-2026-08-21) | same section |
 | Lever ledger | 2026-09-28 | [Lever ledger](archive/roadmap_ledger_2026_09_28.md#lever-ledger) | [`plans/2026-09-04-lever-ledger-detail.md`](plans/2026-09-04-lever-ledger-detail.md) (serving and kernel rows, 08-25 .. 09-04) |
 | Batch=1, MTP verify on a GDN hybrid | 2026-09-28 | [Batch=1](archive/roadmap_ledger_2026_09_28.md#batch1) | same section |

@@ -28,10 +28,11 @@ namespace imp::awq {
 // hybrids and are unmeasured against an uncalibrated twin.
 constexpr const char* kAwqAllGroups = "ABCDEG";
 
-// Default when --calib-groups is absent: n_rep >= 5 drops attention groups A and C on dense models;
-// GDN hybrids keep all. Qwen3-14B (dense, n_rep 5): ABCD 12.2634, BD 9.9068, RTN 9.9849 PPL;
-// Qwen3.8-27B (hybrid, n_rep 6): ABCD 4.5986, BDEG 4.6136.
-constexpr int64_t kAwqWideGqaRep = 5;
+// Default when --calib-groups is absent: n_rep >= 4 drops attention groups A and C on dense models;
+// GDN hybrids keep all. PPL ABCDEG vs BDEG at n_rep 4: Qwen3-4B 14.9701 vs 14.1954, Qwen3-8B
+// 11.7296 vs 11.4263 (#2474); Qwen3-14B (n_rep 5): ABCD 12.2634, BD 9.9068; Qwen3.8-27B (hybrid):
+// ABCD 4.5986, BDEG 4.6136.
+constexpr int64_t kAwqWideGqaRep = 4;
 constexpr const char* kAwqWideGqaGroups = "BDEG";
 [[nodiscard]] inline const char* default_groups(int64_t n_rep, bool hybrid) {
     return n_rep >= kAwqWideGqaRep && !hybrid ? kAwqWideGqaGroups : kAwqAllGroups;
