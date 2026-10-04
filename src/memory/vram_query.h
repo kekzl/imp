@@ -73,8 +73,9 @@ size_t vram_reserved_uncommitted_bytes();
 // Headroom the VRAMAllocator enforces on every allocation >=16 MiB (can_allocate: free
 // >= bytes + headroom). A HARD constraint, not a policy knob: a plan leaving less free
 // than this cannot be executed, the allocation is simply refused. Engine::init and the
-// VRAM budget must agree on it (#1103).
-constexpr int kAllocatorHeadroomPct = 5;
+// VRAM budget must agree on it (#1103). 4 % = 1304 MiB on 32 GB: device growth after the KV pool
+// capped, Qwen3.8-27B 32 streams x 10 min: 44 MiB at one prompt length, 608 MiB at mixed lengths (#2482).
+constexpr int kAllocatorHeadroomPct = 4;
 
 inline size_t vram_allocator_headroom(size_t total_bytes) {
     return total_bytes * static_cast<size_t>(kAllocatorHeadroomPct) / 100;

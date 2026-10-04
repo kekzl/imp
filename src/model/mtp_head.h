@@ -262,8 +262,8 @@ MtpHead dispatch_mtp_head(const std::unordered_map<std::string, Tensor>& tm, con
 // So the term is one extra slab, not a margin: this returns 6204 MiB for that
 // head against 6200 measured. The allocator headroom the caller adds on top is
 // left to cover allocator waste, which is what it is for. Relying on it to
-// cover this would have held only on a large card: it is 5 % of the total, so
-// 1630 MiB on 32 GB but 819 MiB on 16 GB, and only 409 MiB for a process
+// cover this would have held only on a large card: it is 4 % of the total, so
+// 1304 MiB on 32 GB but 655 MiB on 16 GB, and only 327 MiB for a process
 // running under an 8 GB --vram-budget.
 //
 // Measured over three runs per arm, comparing device free consumed by the load

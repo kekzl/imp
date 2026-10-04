@@ -536,8 +536,8 @@ TEST(KVCacheManagerGrowTest, GrowsBeforeReclaimingCachedBlocks) {
 // Growth is priced against free VRAM above the allocator headroom, not the ceiling (the
 // ceiling was sized before the library reserve and forward scratch were claimed, and a VMM
 // commit past what's free spills silently on WDDM). A 4MiB virtual card with 32KiB blocks
-// (2 layers x K+V x 16 tokens x 4 heads x 64 dims x 2 bytes) affords 121 blocks above its 5%
-// headroom (3.8MiB/32KiB).
+// (2 layers x K+V x 16 tokens x 4 heads x 64 dims x 2 bytes) affords (4MiB - headroom)/32KiB
+// blocks above the headroom: 122 at 4%.
 TEST(KVCacheGrowTest, GrowthStopsAtTheAllocatorHeadroom) {
     SKIP_IF_NO_CUDA();
     KVCache cache(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/8,
@@ -548,8 +548,10 @@ TEST(KVCacheGrowTest, GrowthStopsAtTheAllocatorHeadroom) {
     vram_budget_install(4);
     const int got = cache.try_grow_to(512);
     vram_budget_install(0);
+    const size_t card = 4ull << 20;
+    const int affordable = static_cast<int>((card - vram_allocator_headroom(card)) / (32u * 1024));
     EXPECT_GT(got, 8);
-    EXPECT_LE(got, 8 + 121);
+    EXPECT_LE(got, 8 + affordable);
     EXPECT_LT(got, 512) << "growth must stop at the headroom, not at the ceiling";
 }
 
