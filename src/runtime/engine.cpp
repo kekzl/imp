@@ -707,8 +707,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             ctx_baseline_bytes = tot > f ? tot - f : 0;
     }
 
-    // 5% headroom: MoE models (30B Q6_K) need every MiB on 32GB. WSL2/WDDM has
-    // ~500 MiB driver overhead, 5% of 32GB = 1.6 GB covers it.
+    // Headroom kAllocatorHeadroomPct (vram_query.h): covers allocations after the KV pool
+    // capped (608 MiB measured, #2482) plus ~500 MiB WSL2/WDDM driver overhead.
     if (!vram_alloc_.init(kAllocatorHeadroomPct / 100.0f)) {
         IMP_LOG_ERROR("Failed to initialize VRAM allocator");
         return false;
