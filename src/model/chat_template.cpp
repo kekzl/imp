@@ -98,6 +98,8 @@ ChatTemplateFamily ChatTemplate::default_family_for_arch(ModelArch arch) {
             return ChatTemplateFamily::CHATML;
         case ModelArch::QWEN4_EXP:
             return ChatTemplateFamily::CHATML;
+        case ModelArch::QWEN3_NEXT:
+            return ChatTemplateFamily::CHATML;
         case ModelArch::GEMMA3:
             return ChatTemplateFamily::GEMMA;
         case ModelArch::GEMMA4:

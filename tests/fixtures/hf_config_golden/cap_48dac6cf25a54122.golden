@@ -1,5 +1,5 @@
 result=true
-arch=17
+arch=18
 n_layers=32
 n_heads=32
 n_kv_heads=32

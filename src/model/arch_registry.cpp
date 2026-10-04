@@ -133,6 +133,11 @@ constexpr ArchSpelling kSpellings[] = {
     {GGUF, "granite", ModelArch::GRANITE},
     {HF_CLASS, "GraniteForCausalLM", ModelArch::GRANITE},
     {HF_MODEL_TYPE, "granite", ModelArch::GRANITE},
+
+    // QWEN3_NEXT (#2410): fused in_proj_qkvz / in_proj_ba split in weight_map.cpp
+    {GGUF, "qwen3next", ModelArch::QWEN3_NEXT},  // refused by load_gguf
+    {HF_CLASS, "Qwen3NextForCausalLM", ModelArch::QWEN3_NEXT},
+    {HF_MODEL_TYPE, "qwen3_next", ModelArch::QWEN3_NEXT},
 };
 
 struct HfConfigHookRow {
@@ -150,6 +155,7 @@ constexpr HfConfigHookRow kHfConfigHooks[] = {
     {ModelArch::QWEN35_MOE, parse_qwen_gdn_config},
     {ModelArch::QWEN36_MOE, parse_qwen_gdn_config},
     {ModelArch::QWEN4_EXP, parse_qwen_gdn_config},
+    {ModelArch::QWEN3_NEXT, parse_qwen_gdn_config},
     {ModelArch::GPT_OSS, parse_gpt_oss_config},
     {ModelArch::GEMMA3, parse_gemma3_config},
     {ModelArch::GEMMA4, parse_gemma4_config},

@@ -25,6 +25,7 @@ enum class ModelArch {
     LLAMA4,
     NOMIC_BERT,  // encoder-only embedder (#836): bidirectional, post-LN, mean-pool
     GRANITE,     // GraniteForCausalLM: Llama block + attention/embedding/residual multipliers (#2412)
+    QWEN3_NEXT,  // Qwen3NextForCausalLM (Qwen3-Coder-Next): the QWEN36_MOE block, fused qkvz/ba GDN inputs
     GENERIC,     // stays last: tests/test_model_profile_table.cpp walks 0..GENERIC
 };
 

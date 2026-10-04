@@ -1958,7 +1958,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     const float arch_norm_offset = (config_.arch == ModelArch::QWEN35 ||
                                     config_.arch == ModelArch::QWEN35_MOE ||
                                     config_.arch == ModelArch::QWEN36_MOE ||
-                                    config_.arch == ModelArch::QWEN4_EXP)
+                                    config_.arch == ModelArch::QWEN4_EXP ||
+                                    config_.arch == ModelArch::QWEN3_NEXT)
                                        ? 1.0f
                                        : 0.0f;
     const bool mxfp4_experts_deferred = (config_.arch == ModelArch::GPT_OSS);

@@ -325,6 +325,9 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                                  "embedding encoders need pooling support — only "
                                  "nomic-bert is wired, #836)");
     }
+    // llama.cpp qwen3next GGUFs keep ssm_in fused under names imp does not split (#2410).
+    if (cfg.arch == ModelArch::QWEN3_NEXT)
+        throw std::runtime_error("qwen3next GGUF is not supported; load the SafeTensors checkpoint (#2410)");
 
     IMP_LOG_INFO("Architecture: %s -> %s", arch_str.c_str(), model_arch_name(cfg.arch));
 
