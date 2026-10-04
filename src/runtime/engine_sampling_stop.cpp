@@ -414,8 +414,8 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
     const int total = static_cast<int>(req.input_tokens.size());
     std::vector<size_t> hashes;
     int cached = kv_manager_->longest_cached_prefix_blocks(req.input_tokens, hashes);
-    // At least one token must remain to forward (the model needs logits).
-    int max_b = std::min(cached, (total - 1) / bs);
+    // The re-prefilled tail is a prompt chunk: >= kMinPromptChunkRows rows (#2560).
+    int max_b = std::min(cached, prompt_reuse_cap_blocks(total, bs));
     kv_manager_->release_held_block(req.id);
     // Branch point (#2409): a restore below max_b re-forwards cached blocks; snapshot their end
     // so the next prompt sharing them restores there. Floored to the prefill chunk grid: an
@@ -430,7 +430,7 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
         if (b == max_b && transcript_snapshot_active_()) {
             const int base = b * bs;
             const auto toks = std::span<const int32_t>(req.input_tokens);
-            for (int m = std::min(bs - 1, total - 1 - base); m >= 1; --m) {
+            for (int m = std::min(bs - 1, total - kMinPromptChunkRows - base); m >= 1; --m) {
                 const size_t key = transcript_tail_key(hashes[b - 1], toks.subspan(static_cast<size_t>(base), m));
                 auto entry = recurrent_snapshots_->find(key);
                 if (!entry || entry->n_tokens != base + m || !kv_manager_->chain_intact(entry->kv_chain))
@@ -592,10 +592,11 @@ int Engine::snapshot_end_(const Request& req, int offset) const {
         return 0;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     // Hint only for the hybrid store: the SWA saver snapshots at the prompt's block floor, not snap_end.
+    // Hybrid: >= kMinPromptChunkRows rows after the snapshot, the chunk a restore re-prefills (#2560).
     return next_snapshot_boundary(
         static_cast<int>(req.input_tokens.size()), bs, runtime_config_.server.snapshot_min_prompt_tokens,
         ssm_state_ ? (req.snapshot_hint_tokens > 0 ? req.snapshot_hint_tokens : req.branch_point_tokens) : 0,
-        offset);
+        offset, ssm_state_ ? kMinPromptChunkRows : 1);
 }
 
 // Core save: snapshots the seq's live window at the block-floor of `tokens`.
