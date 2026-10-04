@@ -202,6 +202,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("vram.library_reserve_mb", cfg.vram.library_reserve_mb);
     I("vram.upload_ring_depth", cfg.vram.upload_ring_depth);
     I("vram.upload_ring_chunk_mib", cfg.vram.upload_ring_chunk_mib);
+    B("vram.host_token_embedding", cfg.vram.host_token_embedding);
     S("vram.library_reserve_cache", cfg.vram.library_reserve_cache);
 
     // [attention]

@@ -380,6 +380,10 @@ library_reserve_cache =
 upload_ring_depth = 4
 upload_ring_chunk_mib = 4
 
+# Untied token embedding in mapped pinned host memory; the lookup reads one row per token
+# over PCIe. Tied tables (shared with the LM head) stay in VRAM. false = upload to VRAM.
+host_token_embedding = true
+
 [attention]
 # Each "auto" key picks the kernel automatically based on weight type +
 # context length. Override only for benchmarking or compatibility tests.

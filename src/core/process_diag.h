@@ -32,6 +32,7 @@ struct ProcessDiag {
     // Pinned staging ring for the weight upload (#1653).
     int upload_ring_depth = 4;
     int upload_ring_chunk_mib = 4;
+    bool host_token_embedding = true;  // vram.host_token_embedding (#2484)
     bool no_vision_graph = false;
     std::string graph_capture_mode = "relaxed";
     bool prefill_graph_enabled = true;
@@ -104,6 +105,8 @@ const char* process_diag_graph_dump_dir();    // nullptr when unset
 // upload pass and destroyed with it.
 int process_diag_upload_ring_depth();
 int process_diag_upload_ring_chunk_mib();
+// Untied token embedding in mapped pinned host memory instead of VRAM (#2484). Load-time only.
+[[nodiscard]] bool process_diag_host_token_embedding();
 [[nodiscard]] bool process_diag_no_vision_graph();
 // "global" | "relaxed" | "thread_local" (default "relaxed")
 const std::string& process_diag_graph_capture_mode();

@@ -6,6 +6,7 @@
 #include "model/expert_placement.h"
 #include "model/weight_upload_traits.h"
 #include "model/layer_host_keep.h"
+#include "model/host_embedding.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "model/gguf_loader.h"
 #include "memory/mem_account.h"
@@ -419,6 +420,10 @@ static bool upload_embeddings_and_output(Tensor& tok_emb, Tensor& out_norm, Tens
     // in-place by upload_weight if a host-side dequant occurs.
     const void* tok_emb_host_ptr = tok_emb.data;  // save for weight-tying check below
     const QType tok_emb_orig_qtype = tok_emb.qtype;
+    // Untied: the table only feeds embedding_lookup, which reads a mapped host view (#2484).
+    const bool tied_source = out_proj.data == tok_emb_host_ptr;
+    if (tok_emb.data && !tok_emb.on_device && !tied_source && process_diag_host_token_embedding())
+        (void)place_embedding_on_host(tok_emb, ctx.host_pinned_allocs);  // false: VRAM upload below
     if (tok_emb.data && !tok_emb.on_device) {
         const bool emb_raw = (tok_emb.qtype == QType::Q8_0 || tok_emb.qtype == QType::Q6_K);
         if (!upload_unquantized_weight(tok_emb, tok_emb.qtype, ctx.compute_dtype, ctx.stream, ctx.gpu_allocs,

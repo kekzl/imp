@@ -265,6 +265,9 @@ struct RuntimeConfig {
         // hence a configurable key rather than a constant.
         int upload_ring_depth = 4;
         int upload_ring_chunk_mib = 4;
+        // Untied token embedding lives in mapped pinned host memory, gathered per step over
+        // PCIe (#2484): 2425 MiB of VRAM on Qwen3.8-27B. Tied tables stay on the device.
+        bool host_token_embedding = true;
     } vram;
 
     cfg::Attention attention;
