@@ -9,6 +9,7 @@
 // prefix it saves is long.
 
 #include "memory/kv_cache_manager.h"
+#include "runtime/prompt_tail.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -45,30 +46,44 @@ inline size_t transcript_snapshot_key(std::span<const int32_t> tokens, int block
     return key;
 }
 
-// A restore has to leave at least one prompt token to forward (the model
-// needs logits), so the admission cap is (prompt_tokens - 1) / block_size
-// blocks (Engine::hybrid_prefix_reuse_limit_). A block-aligned prompt
-// therefore snapshots one block short of its length: at full length the
-// snapshot could never be matched, and every aligned prompt got zero reuse.
-inline int snapshot_boundary(int prompt_tokens, int block_size, int min_tokens) {
-    if (block_size <= 0 || prompt_tokens <= 1)
+// Largest block-aligned position leaving >= tail_rows prompt rows after it. tail_rows 1: a restore
+// needs one token to forward (a block-aligned prompt snapshots one block short of its length).
+// Hybrids pass kMinPromptChunkRows: the rows after the snapshot are a prompt chunk (#2560).
+inline int snapshot_boundary(int prompt_tokens, int block_size, int min_tokens, int tail_rows = 1) {
+    if (block_size <= 0 || tail_rows < 1 || prompt_tokens <= tail_rows)
         return 0;
-    const int end = ((prompt_tokens - 1) / block_size) * block_size;
+    const int end = ((prompt_tokens - tail_rows) / block_size) * block_size;
     return end >= min_tokens ? end : 0;
 }
 
 // Save position for the chunk starting at `offset`: the hint's block floor when it is a valid
 // boundary before the prompt one (shared prefix of /v1/decide items, #2198), else the prompt
 // boundary. A restore matches only a snapshot at an exact block, so the shared prefix needs its own.
+// The hint keeps >= tail_rows rows on both sides.
 inline int next_snapshot_boundary(int prompt_tokens, int block_size, int min_tokens, int hint_tokens,
-                                  int offset) {
-    const int end = snapshot_boundary(prompt_tokens, block_size, min_tokens);
+                                  int offset, int tail_rows = 1) {
+    const int end = snapshot_boundary(prompt_tokens, block_size, min_tokens, tail_rows);
     if (end > 0 && hint_tokens > 0) {
         const int h = (hint_tokens / block_size) * block_size;
-        if (h >= block_size && h >= min_tokens && h > offset && h < end)
+        if (h >= block_size && h >= min_tokens && h - offset >= tail_rows && end - h >= tail_rows)
             return h;
     }
     return end;
+}
+
+// Length of the prefill chunk at `offset` given the snapshot boundary `snap_end` (0 = none). Both
+// sides of the split keep >= min_rows rows: a chunk ending min_rows short of the boundary, or no
+// split (the boundary is skipped); min_rows is kMinPromptChunkRows on a hybrid, else 1 (#2560).
+// `last`: the chunk ends the prompt.
+constexpr int snapshot_chunk_len(int offset, int chunk_len, bool last, int snap_end, bool hybrid) {
+    const int min_rows = hybrid ? kMinPromptChunkRows : 1;
+    const int snap_rows = snap_end - offset;
+    if (snap_rows >= min_rows && snap_rows < chunk_len)
+        return snap_rows;
+    if (!last && snap_rows > chunk_len && snap_rows - chunk_len < min_rows &&
+        snap_rows - min_rows >= min_rows)
+        return snap_rows - min_rows;
+    return chunk_len;
 }
 
 // Length of the token prefix every sequence shares (0 for fewer than two sequences).

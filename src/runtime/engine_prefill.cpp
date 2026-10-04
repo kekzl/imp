@@ -2,6 +2,7 @@
 // (step_prefill_one), KV-block allocation and metadata upload.
 
 #include "runtime/prompt_tail.h"
+#include "runtime/snapshot_boundary.h"
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 #include "runtime/prefill_pacing.h"
@@ -453,13 +454,14 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         is_last_chunk = false;
     }
 
-    // Snapshot boundary (hybrid recurrent state / SWA window): end a chunk at
-    // the largest block-aligned prompt position so state there can be
-    // captured (only full blocks are cacheable). Extra tail chunk is at most
-    // block_size-1 tokens; prompts under server.snapshot_min_prompt_tokens skip the boundary (snapshot_boundary.h).
+    // Snapshot boundary (hybrid recurrent state / SWA window): end a chunk at a block-aligned
+    // prompt position so state there can be captured; hybrids keep >= kMinPromptChunkRows rows
+    // on both sides (snapshot_boundary.h, #2560).
     const int snap_end = snapshot_end_(*req, offset);
-    if (snap_end > offset && snap_end < offset + chunk_len) {
-        chunk_len = snap_end - offset;
+    const int snap_chunk = snapshot_chunk_len(offset, chunk_len, is_last_chunk, snap_end,
+                                              ssm_state_ != nullptr);
+    if (snap_chunk != chunk_len) {
+        chunk_len = snap_chunk;
         is_last_chunk = false;
     }
 
