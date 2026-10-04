@@ -9,6 +9,7 @@
 // diagonal approximation of output MSE (exact if channels were uncorrelated), same as the AWQ paper.
 
 #include "awq_sites.h"
+#include "expert_destack.h"
 #include "quant_report.h"
 
 #include "model/safetensors_raw.h"
@@ -62,12 +63,22 @@ struct Plan {
     std::vector<std::string> notes;
 };
 
+// A per-expert matrix the source stores inside a 3-D expert stack, keyed by the name the export
+// writes (`<prefix>.experts.<e>.<proj>.weight`): groups X/Y search and fold it like a 2-D tensor.
+struct StackedMatrix {
+    const RawTensor* stack = nullptr;
+    quantize::StackedExpertLayout layout;
+    quantize::DestackedMatrix m;
+};
+using StackedIndex = std::map<std::string, StackedMatrix>;
+
 // Builds the transform from a calibration file and the checkpoint's own config.json. `groups`
-// selects which of A/B/C/D/E/G run (awq_sites.h), empty = default_groups(n_rep, hybrid). Returns false
-// with `err` set when the architecture's pre-norm layout isn't one this transform is valid for.
+// selects which of A/B/C/D/E/G/X/Y run (awq_sites.h), empty = default_groups(n_rep, hybrid).
+// Error when the architecture's pre-norm layout isn't one this transform is valid for.
 [[nodiscard]] std::expected<Plan, std::string> build_plan(
     const std::map<std::string, const RawTensor*>& index, const CalibrationStats& stats,
-    const std::string& config_json_path, const std::string& groups, bool weight_sq = false);
+    const std::string& config_json_path, const std::string& groups, bool weight_sq = false,
+    const StackedIndex& stacked = {});
 
 // One matrix of a scale group, host-side FP16 bits, row-major [N, K].
 struct GroupMatrix {

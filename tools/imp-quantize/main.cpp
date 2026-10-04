@@ -240,8 +240,8 @@ using EmitFn = std::function<void(std::vector<SafeTensorsOut>&, std::vector<floa
 // written. Gate and up of one expert share a tensor scale, the fused-layer rule of
 // checkpoint_out.h (the loader merges them as vLLM merges w13). Dry run: forecast only.
 bool quantize_expert_stack(const RawTensor& t, const std::vector<quantize::DestackedMatrix>& ms,
-                           const quantize::StackedExpertLayout& layout, bool dry_run, ShardSinks& s,
-                           const EmitFn& emit) {
+                           const quantize::StackedExpertLayout& layout, const awq::Plan& plan, bool dry_run,
+                           ShardSinks& s, const EmitFn& emit) {
     if (dry_run) {
         printf("  QUANT %-58s %zu per-expert matrices [%lld,%lld]\n", t.name.c_str(), ms.size(),
                (long long)ms[0].N, (long long)ms[0].K);
@@ -266,14 +266,18 @@ bool quantize_expert_stack(const RawTensor& t, const std::vector<quantize::Desta
         return true;
     };
     for (size_t i = 0; i < ms.size(); ++i) {
-        const std::vector<uint16_t> h = quantize::destack_read(t, layout, ms[i]);
+        std::vector<uint16_t> h = quantize::destack_read(t, layout, ms[i]);
+        awq_apply_matrix(h, ms[i].N, ms[i].K, plan_vec(plan.row_div, ms[i].name),
+                         plan_vec(plan.col_scale, ms[i].name));
         if (ms[i].part == quantize::ExpertPart::Down) {
             if (!one(ms[i], h, 0.0f))
                 return false;
             continue;
         }
         // gate at i, its up at i + 1 (destack_plan orders them so)
-        const std::vector<uint16_t> up = quantize::destack_read(t, layout, ms[i + 1]);
+        std::vector<uint16_t> up = quantize::destack_read(t, layout, ms[i + 1]);
+        awq_apply_matrix(up, ms[i + 1].N, ms[i + 1].K, plan_vec(plan.row_div, ms[i + 1].name),
+                         plan_vec(plan.col_scale, ms[i + 1].name));
         const float shared = quantize::export_tensor_scale(
             std::max(quantize::fp16_absmax(h.data(), h.size()), quantize::fp16_absmax(up.data(), up.size())));
         if (!one(ms[i], h, shared) || !one(ms[i + 1], up, shared))
@@ -474,8 +478,19 @@ int main(int argc, char** argv) {
         recipe.calib_entries = stats.entries.size();
         printf("AWQ calibration: %zu entries from %s\n", stats.entries.size(),
                stats.model_id.empty() ? opt.calib_file.c_str() : stats.model_id.c_str());
+        // Expert stacks enter the plan under their per-expert export names (groups X, Y).
+        awq::StackedIndex stacked;
+        for (const auto& src : opened) {
+            std::map<std::string, std::vector<quantize::DestackedMatrix>> shard_plans;
+            size_t n_unused = 0;
+            if (!plan_shard_stacks(*src, stacked_names, stack_layout, shard_plans, n_unused))
+                return 1;
+            for (const auto& [stack_name, ms] : shard_plans)
+                for (const auto& m : ms)
+                    stacked[m.name] = {index.at(stack_name), stack_layout, m};
+        }
         auto built = awq::build_plan(index, stats, (fs::path(opt.in_dir) / "config.json").string(),
-                                     opt.calib_groups, opt.calib_weight_sq);
+                                     opt.calib_groups, opt.calib_weight_sq, stacked);
         if (!built) {
             fprintf(stderr, "%s\n", built.error().c_str());
             return 1;
@@ -493,10 +508,6 @@ int main(int argc, char** argv) {
         printf("\n");
         for (const auto& n : plan.notes)
             printf("  note: %s\n", n.c_str());
-        if (!stacked_names.empty())
-            printf(
-                "  note: expert stacks are quantized round-to-nearest (the planner has no per-expert "
-                "groups, as for every MoE)\n");
         if (plan.groups_scaled == 0) {
             fprintf(stderr,
                     "AWQ found no group worth scaling — refusing to write a checkpoint that\n"
@@ -713,7 +724,8 @@ int main(int argc, char** argv) {
             // An expert stack: quantized as its per-expert matrices (quantize_expert_stack).
             if (const auto sp = stack_plans.find(t.name); sp != stack_plans.end()) {
                 ShardSinks sinks{quant_store, scale_store, out, tensor_errors, bytes_out, n_quantized};
-                if (!quantize_expert_stack(t, sp->second, stack_layout, opt.dry_run, sinks, emit_quantized))
+                if (!quantize_expert_stack(t, sp->second, stack_layout, plan, opt.dry_run, sinks,
+                                           emit_quantized))
                     return 1;
                 n_stacks_split++;
                 continue;

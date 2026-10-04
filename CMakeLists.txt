@@ -1302,6 +1302,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gpt_oss_moe_fused_bias.cu
         tests/test_moe_executor.cu
         tests/test_expert_cache.cu
+        tests/test_activation_calibrator_experts.cu
         tests/test_gdn.cu
         tests/test_gdn_batched.cu
         tests/test_ple_batched.cu

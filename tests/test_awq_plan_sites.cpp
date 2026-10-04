@@ -249,15 +249,15 @@ TEST(AwqSites, TieMapMatchesTheProducerItFoldsInto) {
 // #2474: n_rep 4 BDEG wins too (Qwen3-4B 14.1954 vs 14.9701, Qwen3-8B 11.4263 vs 11.7296).
 TEST(AwqSites, DefaultGroupsDropAttentionOnDenseWideGqaOnly) {
     for (bool hybrid : {false, true}) {
-        EXPECT_STREQ(default_groups(1, hybrid), kAwqAllGroups);
-        EXPECT_STREQ(default_groups(2, hybrid), kAwqAllGroups);
-        EXPECT_STREQ(default_groups(3, hybrid), kAwqAllGroups) << "n_rep 3 unmeasured";
+        EXPECT_STREQ(default_groups(1, hybrid), kAwqDefaultGroups);
+        EXPECT_STREQ(default_groups(2, hybrid), kAwqDefaultGroups);
+        EXPECT_STREQ(default_groups(3, hybrid), kAwqDefaultGroups) << "n_rep 3 unmeasured";
     }
     EXPECT_STREQ(default_groups(4, false), "BDEG") << "Qwen3-4B, Qwen3-8B";
-    EXPECT_STREQ(default_groups(4, true), kAwqAllGroups);
+    EXPECT_STREQ(default_groups(4, true), kAwqDefaultGroups);
     EXPECT_STREQ(default_groups(5, false), "BDEG");
     EXPECT_STREQ(default_groups(6, false), "BDEG");
-    EXPECT_STREQ(default_groups(6, true), kAwqAllGroups) << "Qwen3.8-27B";
+    EXPECT_STREQ(default_groups(6, true), kAwqDefaultGroups) << "Qwen3.8-27B";
     for (int64_t n_rep : {5, 6, 8}) {
         EXPECT_FALSE(attention_groups_on_wide_gqa(default_groups(n_rep, false), n_rep, false));
         EXPECT_FALSE(attention_groups_on_wide_gqa(default_groups(n_rep, true), n_rep, true));
@@ -281,4 +281,118 @@ TEST(AwqSites, WideGqaDefaultIsBdOnADenseLayer) {
         EXPECT_EQ(bdeg[i].producer, bd[i].producer);
     }
     EXPECT_EQ(bd.size(), 2u);
+}
+
+namespace {
+
+// A Gemma-4-26B-A4B layer after destacking: sandwich norms, dense MLP beside 128 experts, the
+// router on its own norm. `full` = a full-attention layer (k_eq_v: no v_proj).
+std::set<std::string> gemma4_layer(const std::string& base, bool full, int n_experts = 4) {
+    std::set<std::string> n;
+    for (const char* p : {"self_attn.q_proj", "self_attn.k_proj", "self_attn.o_proj", "mlp.gate_proj",
+                          "mlp.up_proj", "mlp.down_proj", "router.proj"})
+        n.insert(base + p + ".weight");
+    if (!full)
+        n.insert(base + "self_attn.v_proj.weight");
+    for (const char* p :
+         {"input_layernorm", "post_attention_layernorm", "pre_feedforward_layernorm",
+          "post_feedforward_layernorm", "pre_feedforward_layernorm_2", "post_feedforward_layernorm_1",
+          "post_feedforward_layernorm_2", "self_attn.q_norm", "self_attn.k_norm"})
+        n.insert(base + p + ".weight");
+    for (int e = 0; e < n_experts; e++)
+        for (const char* p : {"gate_proj", "up_proj", "down_proj"})
+            n.insert(base + "experts." + std::to_string(e) + "." + p + ".weight");
+    return n;
+}
+
+}  // namespace
+
+TEST(AwqSites, ExpertGroupsAreOptIn) {
+    for (int64_t n_rep : {1, 4, 6})
+        for (bool hybrid : {false, true})
+            EXPECT_EQ(std::string(default_groups(n_rep, hybrid)).find_first_of("XY"), std::string::npos);
+    EXPECT_NE(std::string(kAwqAllGroups).find('X'), std::string::npos);
+    EXPECT_NE(std::string(kAwqAllGroups).find('Y'), std::string::npos);
+}
+
+TEST(AwqArch, Gemma4IsPlainAndNormalizesV) {
+    EXPECT_EQ(arch_norm_convention("gemma4"), NormConvention::Plain);
+    EXPECT_EQ(arch_norm_convention("gemma4_text"), NormConvention::Plain);
+    EXPECT_TRUE(arch_normalizes_v("gemma4_text"));
+    EXPECT_FALSE(arch_normalizes_v("qwen3"));
+}
+
+// post_attention_layernorm normalizes the attention OUTPUT on a sandwich block: folding the MLP
+// scale into it would divide the residual branch, not the MLP input.
+TEST(AwqSites, Gemma4MlpFoldsIntoPreFeedforwardNorm) {
+    const std::string base = "model.language_model.layers.0.";
+    const auto sites = layer_fold_sites(gemma4_layer(base, false), base, NormConvention::Plain, kAwqAllGroups,
+                                        /*v_normed=*/true);
+    const FoldSite* b = site_of(sites, 'B');
+    ASSERT_NE(b, nullptr);
+    EXPECT_EQ(b->producer, base + "pre_feedforward_layernorm.weight");
+    // v_norm divides a v_proj row scale back out per head.
+    EXPECT_EQ(site_of(sites, 'C'), nullptr);
+    ASSERT_NE(site_of(sites, 'A'), nullptr);
+    EXPECT_EQ(site_of(sites, 'A')->members.size(), 3u);
+}
+
+TEST(AwqSites, Gemma4FullAttentionLayerFoldsQAndKOnly) {
+    const std::string base = "model.language_model.layers.5.";
+    const auto sites = layer_fold_sites(gemma4_layer(base, true), base, NormConvention::Plain, kAwqAllGroups,
+                                        /*v_normed=*/true);
+    const FoldSite* a = site_of(sites, 'A');
+    ASSERT_NE(a, nullptr);
+    EXPECT_EQ(a->members.size(), 2u);
+    EXPECT_FALSE(has_member(*a, "v_proj.weight"));
+}
+
+TEST(AwqSites, Gemma4ExpertsGetOneSharedInputGroupAndOneDownGroupEach) {
+    const std::string base = "model.language_model.layers.2.";
+    const auto sites = layer_fold_sites(gemma4_layer(base, false, 3), base, NormConvention::Plain,
+                                        kAwqAllGroups, true);
+    const FoldSite* x = site_of(sites, 'X');
+    ASSERT_NE(x, nullptr);
+    EXPECT_EQ(x->members.size(), 6u);  // gate + up of 3 experts
+    EXPECT_EQ(x->producer, base + "pre_feedforward_layernorm_2.weight");
+    EXPECT_EQ(x->kind, FoldKind::NormVector);
+    EXPECT_FALSE(has_member(*x, "down_proj.weight"));
+    EXPECT_FALSE(has_member(*x, "router.proj.weight"));
+    EXPECT_EQ(x->calib_keys, std::vector<std::string>{"EXPERT_UP"});
+
+    std::vector<const FoldSite*> ys;
+    size_t x_pos = 0, last_y = 0;
+    for (size_t i = 0; i < sites.size(); i++) {
+        if (sites[i].group == 'Y') {
+            ys.push_back(&sites[i]);
+            last_y = i;
+        }
+        if (sites[i].group == 'X')
+            x_pos = i;
+    }
+    ASSERT_EQ(ys.size(), 3u);
+    // Y's producer (an expert up_proj) is an X member: row folds are searched first.
+    EXPECT_LT(last_y, x_pos);
+    EXPECT_EQ(ys[1]->members, std::vector<std::string>{base + "experts.1.down_proj.weight"});
+    EXPECT_EQ(ys[1]->producer, base + "experts.1.up_proj.weight");
+    EXPECT_EQ(ys[1]->kind, FoldKind::MatrixRows);
+    EXPECT_EQ(ys[1]->calib_keys, std::vector<std::string>{"EXPERT_DOWN.1"});
+}
+
+// Qwen-MoE experts read post_attention_layernorm together with the router and the shared expert:
+// no X there, the per-expert down groups still apply.
+TEST(AwqSites, ExpertsWithoutAnExclusiveNormGetDownGroupsOnly) {
+    const std::string base = "model.layers.1.";
+    std::set<std::string> n = {base + "input_layernorm.weight", base + "post_attention_layernorm.weight",
+                               base + "mlp.gate.weight"};
+    for (int e = 0; e < 2; e++)
+        for (const char* p : {"gate_proj", "up_proj", "down_proj"})
+            n.insert(base + "mlp.experts." + std::to_string(e) + "." + p + ".weight");
+    const auto sites = layer_fold_sites(n, base, NormConvention::UnitOffset, kAwqAllGroups);
+    EXPECT_EQ(site_of(sites, 'X'), nullptr);
+    EXPECT_EQ(site_of(sites, 'B'), nullptr);
+    int ys = 0;
+    for (const auto& s : sites)
+        ys += s.group == 'Y';
+    EXPECT_EQ(ys, 2);
 }

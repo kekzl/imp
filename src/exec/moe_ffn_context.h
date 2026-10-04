@@ -51,6 +51,9 @@ struct MoeFfnContext {
     // gathered intermediate needed); if that path falls back to legacy, moe_gather runs
     // lazily and flips this back to true. Default true so unchecked paths see it populated.
     bool moe_gather_done = true;
+    // The prefill path left gathered input and gate/up outputs expert-sorted in moe_ (FP16 batch,
+    // CUTLASS 3.x, NVFP4 dequant): the per-expert calibration statistics read them.
+    bool experts_sorted_fp16 = false;
 
     // Host-resident NVFP4 experts staged into the device buffer for THIS layer. Filled by
     // whichever prefill path reaches the layer first, reused by later ones: a layer
