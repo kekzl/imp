@@ -425,12 +425,14 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
     }
     for (const auto& [name, m] : stacked)
         names.insert(name);
-    // No group set beat RTN on Gemma-4-26B (ppl_corpus_45k in turn framing, 14676 tokens).
+    // No measured gain on Gemma-4-26B: every set inside the RTN rounding band (ppl_corpus_45k, turn-framed).
     if (groups_arg.empty() && (model_type == "gemma4" || model_type == "gemma4_text"))
         return std::unexpected(
-            "--calib on gemma4 has no default group set: every measured set was worse than round-to-nearest "
-            "(RTN 16.9442, ABD 17.1807, XY 17.1043, ABDXY 17.5810 PPL). Quantize without --calib, or pass "
-            "--calib-groups to run one anyway.");
+            "--calib on gemma4 has no default group set: no measured gain, every set (ABD 17.1807, XY "
+            "17.1043, "
+            "ABDXY 17.5810 PPL) lands inside the round-to-nearest rounding band 16.7551..19.0110 (8 "
+            "tensor-scale "
+            "shifts). Quantize without --calib, or pass --calib-groups to run one anyway.");
     const char* dflt = default_groups(geo.n_rep, hybrid);
     const std::string groups = groups_arg.empty() ? dflt : groups_arg;
     plan.groups = groups;
