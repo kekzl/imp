@@ -136,6 +136,16 @@ size_t VRAMAllocator::available() const {
     return (free_mem > headroom_) ? (free_mem - headroom_) : 0;
 }
 
+std::vector<std::pair<std::string, size_t>> VRAMAllocator::bytes_by_tag() const {
+    std::map<std::string, size_t> by_tag;
+    {
+        std::lock_guard<std::mutex> lock(map_mutex_);
+        for (const auto& [ptr, alloc] : alloc_map_)
+            by_tag[alloc.tag] += alloc.bytes;
+    }
+    return {by_tag.begin(), by_tag.end()};
+}
+
 void VRAMAllocator::report() const {
     std::lock_guard<std::mutex> lock(map_mutex_);
 
