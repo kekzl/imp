@@ -2,6 +2,8 @@
 #include "compute/moe_routing_internal.cuh"
 #include "compute/warp_reduce.cuh"
 #include "core/logging.h"
+#include "core/pdl_device.cuh"
+#include "core/pdl_launch.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cfloat>
@@ -21,6 +23,7 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_
     const int token = blockIdx.x;
     const int tid = threadIdx.x;
     const float* logits = gate_logits + static_cast<int64_t>(token) * n_experts;
+    pdl_wait();  // gate_logits is the router GEMV's output
 
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     __shared__ float s_warp[NUM_WARPS];
@@ -453,10 +456,10 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
                          static_cast<size_t>(top_k) * sizeof(float) +
                          static_cast<size_t>(top_k) * sizeof(int32_t);
 
-    topk_gating_kernel<<<n_tokens, BLOCK_SIZE, smem_gating, stream>>>(d_logits, n_experts, top_k,
-                                                                      d_expert_indices, d_expert_weights,
-                                                                      use_sigmoid, normalize_weights,
-                                                                      static_cast<const half*>(score_bias));
+    pdl::enable_kernel(topk_gating_kernel);
+    pdl::launch(topk_gating_kernel, dim3(n_tokens), dim3(BLOCK_SIZE), smem_gating, stream,
+                static_cast<const float*>(d_logits), n_experts, top_k, d_expert_indices, d_expert_weights,
+                use_sigmoid, normalize_weights, static_cast<const half*>(score_bias));
     IMP_CUDA_CHECK_LAUNCH();
 
     // ---- Stable count + scan + scatter ----
@@ -556,10 +559,10 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& bu
                          static_cast<size_t>(top_k) * sizeof(float) +
                          static_cast<size_t>(top_k) * sizeof(int32_t);
 
-    topk_gating_kernel<<<n_tokens, BLOCK_SIZE, smem_gating, stream>>>(d_logits, n_experts, top_k,
-                                                                      d_expert_indices, d_expert_weights,
-                                                                      use_sigmoid, normalize_weights,
-                                                                      static_cast<const half*>(score_bias));
+    pdl::enable_kernel(topk_gating_kernel);
+    pdl::launch(topk_gating_kernel, dim3(n_tokens), dim3(BLOCK_SIZE), smem_gating, stream,
+                static_cast<const float*>(d_logits), n_experts, top_k, d_expert_indices, d_expert_weights,
+                use_sigmoid, normalize_weights, static_cast<const half*>(score_bias));
     IMP_CUDA_CHECK_LAUNCH();
 
     if (!skip_sorting) {
