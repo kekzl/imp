@@ -9,10 +9,27 @@
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/mem_account.h"
+#include "memory/vram_allocator.h"
 #include "exec/executor.h"
 #include "runtime/engine.h"
 
 #include <string>
+
+// Per-tag split of the engine's VRAM allocator, and what imp_vram_own_bytes holds outside it
+// (arena, async mempools, library workspaces): roadmap row 97.
+static void append_allocator_tags(std::string& out, ServerState& state, size_t own_bytes) {
+    if (!state.ctx || !state.ctx->engine)
+        return;
+    const imp::VRAMAllocator& alloc = state.ctx->engine->vram_allocator();
+    out += "# HELP imp_vram_allocator_bytes Device bytes the VRAM allocator holds per allocation tag\n";
+    out += "# TYPE imp_vram_allocator_bytes gauge\n";
+    for (const auto& [tag, bytes] : alloc.bytes_by_tag())
+        out += "imp_vram_allocator_bytes{tag=\"" + tag + "\"} " + std::to_string(bytes) + "\n";
+    const size_t tracked = alloc.allocated();
+    out += "# HELP imp_vram_untracked_bytes imp_vram_own_bytes outside the VRAM allocator\n";
+    out += "# TYPE imp_vram_untracked_bytes gauge\n";
+    out += "imp_vram_untracked_bytes " + std::to_string(own_bytes > tracked ? own_bytes - tracked : 0) + "\n";
+}
 
 void append_memory_metrics(std::string& out, ServerState& state) {
 // Reports memory capacity AND occupancy per tier (invariant I7): a single "VRAM used" gauge
@@ -185,5 +202,6 @@ if (state.ctx && state.ctx->engine) {
     out += "# HELP imp_vram_own_peak_bytes High water of imp_vram_own_bytes\n";
     out += "# TYPE imp_vram_own_peak_bytes gauge\n";
     out += "imp_vram_own_peak_bytes " + std::to_string(b.own_peak_bytes) + "\n";
+    append_allocator_tags(out, state, b.own_bytes);
 }
 }

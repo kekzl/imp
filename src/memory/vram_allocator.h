@@ -5,6 +5,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -55,6 +56,8 @@ public:
 
     // Log a summary of all allocations grouped by tag.
     void report() const;
+    // Bytes held per allocation tag, sorted by tag (/metrics imp_vram_allocator_bytes, roadmap row 97).
+    [[nodiscard]] std::vector<std::pair<std::string, size_t>> bytes_by_tag() const;
 
 private:
     size_t total_ = 0;
