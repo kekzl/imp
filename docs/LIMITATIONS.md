@@ -33,7 +33,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | Cross-check vs llama.cpp is opt-in behind `COMPARE_URL=`; default `make test-rerank` skips it | `/v1/rerank` | set `COMPARE_URL=` | #1680 |
 | Implemented, ungated | `/admin/suspend`, `/admin/resume`, `server.model_swap` | none | #1680 |
 | SSE frames, usage accounting, `finish_reason`, tool-call streaming: CI's `Real API contract (model-less)` job deselects every token-producing test, no GPU runner | server generation contract | run `make test-server` on a carded machine | #1600, #1559 |
-| Perf gate benches `imp-cli`, which never enters the SSE writer, tool-argument filter or per-chunk JSON serialisation | `tools/imp-server/` per-request cost | none; needs a server-side benchmark harness | #1685 |
+| Perf gate benches `imp-cli`, which never enters the SSE writer, tool-argument filter or per-chunk JSON serialisation | `tools/imp-server/` per-request cost | `scripts/verify.sh` server gate since 2026-10-05: 8 streamed 128-token chats on the baseline model, 8 % under the pin in `tests/perf_baseline.json`; tool-argument filter and multi-turn not driven | #1685 |
 | One tree vs a pin measured weeks earlier; host moves 4-6 % between sessions; only recorded catch is -36 %, a real -7.3 % shipped at +0.33 % | perf regressions under 8 % | `make verify-ab` (paired, alternating vs `origin/main`); measures only the pin's shape (Qwen3-8B Q8_0, pp512/tg128) | [`internals/BENCHMARKING.md`](internals/BENCHMARKING.md) |
 | CI has no GPU runner; `roofline.yml` re-parses committed history and fires on `tools/roofline/**` edits only | kernel roofline regressions | `make roofline-measure` manually (pre-push hook reminds, cannot measure) | - |
 

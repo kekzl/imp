@@ -35,6 +35,7 @@ if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]
         -e IMP_VERIFY_SKIP_PERF="${IMP_VERIFY_SKIP_PERF:-0}" \
         -e IMP_VERIFY_SKIP_VRAM="${IMP_VERIFY_SKIP_VRAM:-0}" \
         -e IMP_VERIFY_SKIP_GRAPHS="${IMP_VERIFY_SKIP_GRAPHS:-0}" \
+        -e IMP_VERIFY_SKIP_SERVER="${IMP_VERIFY_SKIP_SERVER:-0}" \
         -e IMP_VERIFY_BASELINE="${IMP_VERIFY_BASELINE:-tests/perf_baseline.json}" \
         -e IMP_VERIFY_CHUNK_SIZE="${IMP_VERIFY_CHUNK_SIZE:-0}" \
         -e IMP_VERIFY_TRIALS="${IMP_VERIFY_TRIALS:-3}" \
@@ -597,6 +598,40 @@ look for new host syncs / cudaMalloc on the decode hot path"
             fi
         fi
         rm -f "$ERR_NG" "$ERR_G"
+    fi
+fi
+
+# Server-side throughput gate (roadmap row 44): the perf gate above benches imp-cli; this boots
+# imp-server on the baseline model and streams 8 concurrent 128-token chats (scripts/server_bench.sh),
+# so a regression in the SSE writer, admission or batched decode shows up per request.
+section "server throughput vs baseline"
+if [ "${IMP_VERIFY_SKIP_SERVER:-0}" = "1" ]; then
+    skip "server gate (IMP_VERIFY_SKIP_SERVER=1)"
+elif [ ! -f "$BASELINE" ] || ! command -v jq >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+    skip "server gate (no baseline, jq or curl)"
+else
+    BL_SRV=$(jq -r '.metrics.server.agg_tps_c8 // empty' "$BASELINE")
+    SRV_THR=$(jq -r '.thresholds.server_regression_pct // 8' "$BASELINE")
+    SRV_BIN="$(dirname "$BIN")/imp-server"
+    SRV_MODEL_PATH="$MODELS/$(jq -r '.model // empty' "$BASELINE")"
+    if [ -z "$BL_SRV" ]; then
+        skip "no .metrics.server.agg_tps_c8 in $BASELINE — run scripts/gen_perf_baseline.sh"
+    elif [ ! -x "$SRV_BIN" ] || [ ! -f "$SRV_MODEL_PATH" ]; then
+        skip "server gate (imp-server or model missing)"
+    else
+        model_gate_ran
+        read -r SRV_TPS SRV_MAX_MS < <(bash scripts/server_bench.sh "$SRV_BIN" "$SRV_MODEL_PATH" 8 128 || true)
+        if [ -z "${SRV_TPS:-}" ]; then
+            fail "server gate: scripts/server_bench.sh returned no number"
+        else
+            DELTA=$(awk -v a="$SRV_TPS" -v b="$BL_SRV" 'BEGIN{printf "%.2f", (a-b)/b*100}')
+            echo "  server c8 = $SRV_TPS tok/s, slowest request $SRV_MAX_MS ms  (baseline $BL_SRV, delta ${DELTA}%)"
+            if awk -v d="$DELTA" -v t="$SRV_THR" 'BEGIN{exit !(d < -t)}'; then
+                fail "server throughput regressed more than ${SRV_THR}%"
+            else
+                pass "server throughput within ${SRV_THR}% of baseline"
+            fi
+        fi
     fi
 fi
 
