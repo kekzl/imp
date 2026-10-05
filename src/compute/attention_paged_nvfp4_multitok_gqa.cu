@@ -51,6 +51,20 @@ struct GqaState {
     }
 };
 
+// V words + scales of tokens [t, t + TOK), clamped to n_tok - 1 (masked by p = 0 downstream).
+template <int TOK, int PACK>
+__device__ __forceinline__ void load_v_tokens(const uint8_t* __restrict__ V_lane,
+                                              const uint8_t* __restrict__ V_sc_lane, int t, int n_tok,
+                                              int kv_slot_stride, int sc_slot_stride, uint32_t (&vw)[TOK],
+                                              uint8_t (&vs)[TOK]) {
+#pragma unroll
+    for (int i = 0; i < TOK; i++) {
+        const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
+        vw[i] = load_packed<PACK>(V_lane + static_cast<int64_t>(ti) * kv_slot_stride);
+        vs[i] = __ldg(V_sc_lane + static_cast<int64_t>(ti) * sc_slot_stride);
+    }
+}
+
 // Tokens [first_tok, n_tok) of one block for this warp, TOK at a time, for
 // HPC heads. K/V nibbles and scales are loaded and converted once per token.
 template <int HEAD_DIM, int TOK, int HPC>
@@ -77,6 +91,17 @@ __device__ __forceinline__ void nvfp4_block_multitok_gqa(
             kw[i] = load_packed<PACK>(K_lane + static_cast<int64_t>(ti) * kv_slot_stride);
             ks[i] = __ldg(K_sc_lane + static_cast<int64_t>(ti) * sc_slot_stride);
         }
+        uint32_t vw[TOK];
+        uint8_t vs[TOK];
+        auto load_v = [&]() {
+            load_v_tokens<TOK, PACK>(V_lane, V_sc_lane, t, n_tok, kv_slot_stride, sc_slot_stride, vw, vs);
+        };
+        // V does not depend on the softmax: issue its loads with K's (one memory latency per step) where
+        // ptxas keeps it frame-free; HPC*ELEMS < 24 instances spill (24 B stack) and load V after the
+        // softmax.
+        constexpr bool kEarlyV = HPC * ELEMS >= 24;
+        if constexpr (kEarlyV)
+            load_v();
         float dot[HPC][TOK];
 #pragma unroll
         for (int i = 0; i < TOK; i++) {
@@ -127,14 +152,8 @@ __device__ __forceinline__ void nvfp4_block_multitok_gqa(
             st.l[h] = alpha[h] * st.l[h] + p_sum;
             st.m[h] = m_new;
         }
-        uint32_t vw[TOK];
-        uint8_t vs[TOK];
-#pragma unroll
-        for (int i = 0; i < TOK; i++) {
-            const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
-            vw[i] = load_packed<PACK>(V_lane + static_cast<int64_t>(ti) * kv_slot_stride);
-            vs[i] = __ldg(V_sc_lane + static_cast<int64_t>(ti) * sc_slot_stride);
-        }
+        if constexpr (!kEarlyV)
+            load_v();
 #pragma unroll
         for (int h = 0; h < HPC; h++)
 #pragma unroll
