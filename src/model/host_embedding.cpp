@@ -53,17 +53,18 @@ bool place_embedding_on_host(Tensor& emb, std::vector<PinnedBuffer>& pins) {
     const size_t n = static_cast<size_t>(emb.shape[0]) * static_cast<size_t>(emb.shape[1]);
     const size_t bytes = raw ? qtype_row_bytes(emb.qtype, emb.shape[1]) * static_cast<size_t>(emb.shape[0])
                              : n * sizeof(uint16_t);
-    PinnedBuffer buf = PinnedBuffer::acquire(cuda_host_pinned_allocator(), bytes, HostPinnedKind::Mapped);
+    PinnedBuffer buf = PinnedBuffer::acquire_filled(bytes, HostPinnedKind::Mapped, [&](void* host) {
+        if (raw)
+            std::memcpy(host, emb.data, bytes);
+        else
+            embedding_to_fp16(emb.data, emb.qtype, n, static_cast<uint16_t*>(host),
+                              std::max(1u, std::min(16u, std::thread::hardware_concurrency())));
+    });
     if (!buf || !buf.device()) {
         IMP_LOG_WARN("token embedding: %.1f MiB mapped pinned allocation failed, keeping it in VRAM",
                      bytes / (1024.0 * 1024.0));
         return false;
     }
-    if (raw)
-        std::memcpy(buf.data(), emb.data, bytes);
-    else
-        embedding_to_fp16(emb.data, emb.qtype, n, buf.as<uint16_t>(),
-                          std::max(1u, std::min(16u, std::thread::hardware_concurrency())));
     emb.data = buf.device();
     if (!raw)
         emb.qtype = QType::F16;

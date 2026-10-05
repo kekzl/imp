@@ -13,6 +13,7 @@
 // detail.
 
 #include <cstddef>
+#include <functional>
 #include <utility>
 
 namespace imp {
@@ -65,6 +66,12 @@ public:
     // Empty on failure — deliberately not an exception and not an abort.
     static PinnedBuffer acquire(HostPinnedAllocator& alloc, size_t bytes,
                                 HostPinnedKind kind = HostPinnedKind::Plain);
+
+    // Pageable memory, written by `fill`, then cudaHostRegister'd: the driver pins resident
+    // pages at 26-29 GB/s on WSL2 where cudaHostAlloc runs 1.0-1.1 GB/s; DMA and zero-copy
+    // reads are equal (57 / 53 GB/s). Empty on failure.
+    static PinnedBuffer acquire_filled(size_t bytes, HostPinnedKind kind,
+                                       const std::function<void(void*)>& fill);
 
     // Release the memory. Idempotent, and safe on a moved-from buffer.
     void reset();
