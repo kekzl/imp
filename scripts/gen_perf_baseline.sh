@@ -127,6 +127,11 @@ own_peak=$($CLI --model "$MODEL" --bench --bench-pp 128 --bench-reps 1 --max-tok
            | grep -oP 'own_peak=\K[0-9]+' | tail -1)
 own_peak=${own_peak:-0}
 
+# PPL drift gate pin (roadmap row 45): deterministic teacher-forced PPL, bit-stable run to run.
+ppl=$($CLI --model "$MODEL" --perplexity tools/analysis/ppl_corpus_45k.txt --set runtime.deterministic=true 2>&1 \
+      | grep -oP '^perplexity: \K[0-9.]+' | tail -1)
+ppl=${ppl:-0}
+
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 cat > "$OUTPUT" << EOF
@@ -153,12 +158,16 @@ cat > "$OUTPUT" << EOF
     "memory_mb": {
       "model_weights": $vram_weights,
       "own_peak_mb": $own_peak
+    },
+    "quality": {
+      "ppl_corpus_45k": $ppl
     }
   },
   "thresholds": {
     "decode_regression_pct": 8,
     "prefill_regression_pct": 8,
-    "vram_increase_pct": 10
+    "vram_increase_pct": 10,
+    "ppl_drift_pct": 0.5
   }
 }
 EOF
