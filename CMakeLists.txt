@@ -424,6 +424,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/stop_mask.cpp
     src/runtime/ngram_draft.cpp
     src/runtime/suffix_draft.cpp
+    src/runtime/spec_corpus.cpp
     src/runtime/token_recycle_draft.cpp
     src/vision/vision_pipeline.cpp
     src/runtime/constraint_manager.cpp

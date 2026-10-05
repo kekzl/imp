@@ -330,7 +330,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         const int out_indexed = std::clamp(idx.size() - pred_end, 0,
                                            static_cast<int>(req->output_tokens.size()));
         idx.append(std::span(req->output_tokens).subspan(static_cast<size_t>(out_indexed)));
-        nd = idx.draft(k, std::max(k, scfg.suffix_k_max));
+        nd = with_corpus_fallback(idx, spec_suffix_idx_, k, std::max(k, scfg.suffix_k_max));
     } else {
         std::vector<int32_t> history;
         history.reserve(req->input_tokens.size() + req->prediction_tokens.size() +

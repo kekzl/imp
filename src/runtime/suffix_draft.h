@@ -30,8 +30,13 @@ public:
     // copied from, one past the matched occurrence, for source-region
     // classification (prompt / prediction / prior output).
     [[nodiscard]] NgramDraft draft(int k, int k_max) const;
+    // Same, continuing the suffix of `query` from this index (a corpus, #2421). `start` = -1;
+    // negative history tokens separate documents and end a continuation.
+    [[nodiscard]] NgramDraft draft_from(std::span<const int32_t> query, int k, int k_max) const;
+    [[nodiscard]] std::span<const int32_t> tokens() const { return hist_; }
 
 private:
+    [[nodiscard]] NgramDraft draft_impl_(const int32_t* q, int qn, int k, int k_max, bool self) const;
     uint64_t gram_hash_at_(int end) const;  // hash of hist_[end - min_match_, end)
 
     int min_match_;
@@ -42,5 +47,13 @@ private:
     // histories (whitespace runs, repeated separators).
     std::unordered_map<uint64_t, std::vector<int32_t>> index_;
 };
+
+// Corpus index key in the engine's request-id -> index map (request ids count up from 0, #2421).
+inline constexpr int kNgramCorpusKey = -1;
+
+// idx's own draft, else the corpus continuation of idx's history (empty without a corpus).
+[[nodiscard]] NgramDraft with_corpus_fallback(const SuffixDraftIndex& idx,
+                                              const std::unordered_map<int, SuffixDraftIndex>& indexes, int k,
+                                              int k_max);
 
 }  // namespace imp

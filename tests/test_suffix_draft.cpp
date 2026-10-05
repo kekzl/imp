@@ -175,4 +175,24 @@ TEST(SuffixDraft, DraftStartClassifiesSourceRegion) {
     EXPECT_EQ(d.start, 3);  // one past the matched [10,11,12] occurrence
 }
 
+// Corpus drafting (#2421): the query's suffix is matched inside another index.
+TEST(SuffixDraft, CorpusContinuesAQueryAndStopsAtTheSeparator) {
+    // Two "files": [1 2 3 4 5 6], separator, [7 8 9 1 2 3 40 41].
+    auto corpus = make_index({1, 2, 3, 4, 5, 6, -1, 7, 8, 9, 1, 2, 3, 40, 41, -1});
+    const std::vector<int32_t> q = {50, 51, 7, 8, 9, 1, 2, 3};
+    const auto d = corpus.draft_from(q, 8, 8);
+    EXPECT_EQ(d.tokens, (std::vector<int32_t>{40, 41}));  // longest context wins, ends at the separator
+    EXPECT_EQ(d.start, -1);
+    // A suffix that only matches at the corpus end has no continuation.
+    EXPECT_TRUE(corpus.draft_from(std::vector<int32_t>{3, 40, 41}, 4, 4).empty());
+    EXPECT_TRUE(corpus.draft_from(std::vector<int32_t>{2, 3}, 4, 4).empty());  // shorter than min_match
+}
+
+TEST(SuffixDraft, SelfDraftUnchangedByTheQueryPath) {
+    const std::vector<int32_t> h = {5, 6, 7, 8, 9, 5, 6, 7};
+    auto idx = make_index(h);
+    EXPECT_EQ(idx.draft(4, 4).tokens, (std::vector<int32_t>{8, 9, 5, 6}));
+    EXPECT_EQ(idx.draft_from(h, 4, 4).tokens, (std::vector<int32_t>{8, 9, 5, 6}));
+}
+
 }  // namespace
