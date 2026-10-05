@@ -223,4 +223,23 @@ TEST(ChatTemplateGolden, ToolsDefinedAsNoneWithoutTools) {
               chat_goldens::k_chatml_user_only + "[D][N]");
 }
 
+// A RAW-family (checkpoint-own) template sees structured tool_calls and tool_call_id, the shape the
+// Cohere2 template renders as <|START_ACTION|> and resolves ids from.
+TEST(ChatTemplateGolden, RawTemplateSeesStructuredToolCalls) {
+    const std::string src =
+        "{% for m in messages %}{% if m.tool_calls %}{% for tc in m.tool_calls %}[{{ tc.id }} "
+        "{{ tc.function.name }} {{ tc.function.arguments|tojson }}]{% endfor %}{% elif m.role == 'tool' %}"
+        "({{ m.tool_call_id }}: {{ m.content }}){% else %}{{ m.content }}{% endif %}{% endfor %}";
+    Tokenizer tok = make_tokenizer(chat_goldens::k_chatml_bos, chat_goldens::k_chatml_eos, src);
+    ChatTemplate tpl;
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::RAW, tok, src));
+    std::vector<ChatMessage> msgs = {{"user", "hi"}};
+    msgs.push_back(
+        {"assistant", "", "",
+         R"([{"id":"c0","type":"function","function":{"name":"f","arguments":{"city":"Paris"}}}])"});
+    msgs.push_back({"tool", "sunny", "", "", "c0"});
+    EXPECT_EQ(tpl.render_jinja(tok, msgs, /*add_generation_prompt=*/false),
+              "hi[c0 f {\"city\": \"Paris\"}](c0: sunny)");
+}
+
 }  // namespace imp

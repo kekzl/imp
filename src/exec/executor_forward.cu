@@ -413,6 +413,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             hc_read_(hly.hc_attn_norm, hly.hc_attn_down, hly.hc_attn_up, &hly.hc_attn_inject, n, stream);
         }
 
+        parallel_block_step_(0, n, stream);
         // Attention, GDN, or SSM (mutually exclusive per layer).
         // GDN check first: GDN layers have ssm_in (from attn_qkv) but use delta rule.
         if (layer_has_gdn(i)) {
@@ -450,7 +451,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
             hc_read_(hly.hc_mlp_norm, hly.hc_mlp_down, hly.hc_mlp_up, &hly.hc_mlp_inject, n, stream);
         }
         // FFN: MoE, dense, or none (attention-only layers may have no FFN)
+        parallel_block_step_(1, n, stream);
         run_ffn_phase_(i, stream);  // graph-replayed on eligible prefills (executor_ffn_graph.cpp)
+        parallel_block_step_(2, n, stream);
         if (model_->profile().gated_residual)
             hc_write_(n, stream);
         {

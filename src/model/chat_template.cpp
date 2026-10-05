@@ -405,10 +405,12 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
 
 // Honor tokenizer_config.json use_default_system_prompt:false. When set and the caller gave
 // no system message, prepend an empty one so the template's default-injection branch never
-// fires (Mistral-Small-3.2 otherwise auto-injects ~600 tokens of boilerplate).
+// fires (Mistral-Small-3.2 otherwise auto-injects ~600 tokens of boilerplate). A RAW-family template
+// renders as HF does, and HF ignores the flag (Cohere2: the empty message became an extra system turn).
 static std::vector<ChatMessage> maybe_suppress_default_system(const Tokenizer& tok,
-                                                              const std::vector<ChatMessage>& messages) {
-    if (tok.use_default_system_prompt())
+                                                              const std::vector<ChatMessage>& messages,
+                                                              ChatTemplateFamily family) {
+    if (tok.use_default_system_prompt() || family == ChatTemplateFamily::RAW)
         return messages;
     if (!messages.empty() && messages.front().role == "system")
         return messages;
@@ -423,7 +425,7 @@ static std::vector<ChatMessage> maybe_suppress_default_system(const Tokenizer& t
 std::vector<int32_t> ChatTemplate::apply(const Tokenizer& tok, const std::vector<ChatMessage>& messages,
                                          bool suppress_thinking, bool force_thinking,
                                          const std::string& reasoning_effort) const {
-    auto eff_msgs = maybe_suppress_default_system(tok, messages);
+    auto eff_msgs = maybe_suppress_default_system(tok, messages, family_);
     // Prefer Jinja2 rendering when available (data-driven from GGUF).
     // Falls back to hardcoded families if Jinja rendering fails.
     if (use_jinja_ && jinja_tpl_) {
@@ -478,6 +480,8 @@ void ChatTemplate::harmony_open_final_(const Tokenizer& tok, std::vector<int32_t
 // Build Jinja2 messages array from ChatMessages
 // ---------------------------------------------------------------------------
 
+static jinja::Value json_string_to_value(const std::string& json_str);
+
 static jinja::Value::Array build_jinja_messages(const std::vector<ChatMessage>& msgs,
                                                 bool suppress_thinking) {
     jinja::Value::Array msg_arr;
@@ -491,6 +495,10 @@ static jinja::Value::Array build_jinja_messages(const std::vector<ChatMessage>& 
             {"content", jinja::Value(content)},
         });
         if (!m.reasoning_content.empty()) obj.set("reasoning_content", jinja::Value(m.reasoning_content));
+        if (!m.tool_calls_json.empty())
+            obj.set("tool_calls", json_string_to_value(m.tool_calls_json));
+        if (!m.tool_call_id.empty())
+            obj.set("tool_call_id", jinja::Value(m.tool_call_id));
         msg_arr.push_back(std::move(obj));
     }
     return msg_arr;
@@ -903,7 +911,7 @@ std::vector<int32_t> ChatTemplate::apply_with_tools(const Tokenizer& tok,
     // Try Jinja2 tools-aware path. Returns empty if Jinja2 is unavailable or
     // rendering fails, signaling the caller to fall back to text-based tool injection.
     if (use_jinja_ && jinja_tpl_ && !tools.empty()) {
-        auto eff_msgs = maybe_suppress_default_system(tok, messages);
+        auto eff_msgs = maybe_suppress_default_system(tok, messages, family_);
         auto tokens =
             apply_jinja_with_tools(tok, eff_msgs, tools, tool_choice, true, suppress_thinking,
                                    force_thinking, reasoning_effort);

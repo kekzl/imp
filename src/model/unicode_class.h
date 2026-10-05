@@ -17,6 +17,7 @@ enum : uint8_t {
     kNumber = 16,       // Nd, Nl, No
     kSpace = 32,        // White_Space
     kNfcUnstable = 64,  // NFC may change it: ccc != 0, composes as a second, or NFC(cp) != cp
+    kDecimal = 128,     // Nd (regex \d)
     kLetter = kUpper | kLower | kOtherLetter,
 };
 

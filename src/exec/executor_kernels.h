@@ -76,6 +76,9 @@ void decode_pipeline_advance(int n_rows, const int32_t* slot_tokens, size_t slot
 
 void elementwise_add_store(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t stream);
 
+// Cohere2 parallel block: h[i] += a[i] - b[i], FP16 storage, FP32 math.
+void parallel_residual_merge(half* h, const half* a, const half* b, int64_t n, cudaStream_t stream);
+
 void add_bias(Tensor& out, const Tensor& bias, cudaStream_t stream);
 
 // Fused 3-way bias add: out_a += bias_a, out_b += bias_b, out_c += bias_c in one launch.

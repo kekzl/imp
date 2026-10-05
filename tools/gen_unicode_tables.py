@@ -55,6 +55,8 @@ def bits(cp):
         b |= 8  # kMark
     if cat[0] == "N":
         b |= 16  # kNumber
+    if cat == "Nd":
+        b |= 128  # kDecimal (regex \d)
     if cp in WHITE_SPACE:
         b |= 32  # kSpace
     if nfc_unstable(cp):

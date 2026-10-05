@@ -364,7 +364,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         }
         // A token can end mid-character; hold the partial bytes until the next
         // one completes them, or the delta ships half a character as U+FFFD.
-        const std::string raw_piece = snap_tok->decode_token(token);
+        const std::string raw_piece = decode_chat_piece(*snap_tok, ctx.snap.output_aliases, token);
         const bool hm_marker = harmony && (raw_piece == "<|channel|>" || raw_piece == "<|message|>" ||
                                            raw_piece == "<|end|>" || raw_piece == "<|return|>" ||
                                            raw_piece == "<|start|>" || raw_piece == "<|call|>");

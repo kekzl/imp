@@ -74,6 +74,7 @@ struct ExecShape {
     int qk_nope_head_dim = 0;
     int v_head_dim = 0;
     bool mla_absorb = false;  // dispatch_policy().attention.mla_absorb
+    bool parallel_block = false;  // Cohere2: two [max_tokens, d_model] FP16 residual copies
     // Chunk-capture K/V scratch: the site takes the MAX over per-layer arrays rather than
     // config scalars (hybrids have layers with different kv-head counts), so carry both
     // maxima rather than n_kv_heads/head_dim, which would fit by luck on uniform models and
@@ -158,11 +159,13 @@ struct ExecT2Demand {
     // pre-dequant, and the bound is a few MiB. Unplanned, this buffer could land after the
     // KV pool on a full card and spill.
     size_t smallm_scratch = 0;
+    // Cohere2 parallel block: layer input + (input + attn), [max_tokens, d_model] FP16 each.
+    size_t parallel_block = 0;
 
     size_t total() const {
         return mmvq_scratch + nvfp4_dequant + sample_scratch + penalty_counts + moe_arrays + fp8_reduction +
                quant_scratch + splitk_scratch + mla_scratch + dry_penalty + cublas_workspace + grouped3x +
-               imma_scratch + smallm_scratch;
+               imma_scratch + smallm_scratch + parallel_block;
     }
 
     // "mmvq 21.1 + nvfp4 192.0 + sample 1.0 + moe 0.00 MiB". Lives here rather

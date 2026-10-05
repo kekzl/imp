@@ -761,6 +761,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/prompt_logprobs.cpp
         tools/imp-server/rate_limit.cpp
         tools/imp-server/logit_bias.cpp
+        tools/imp-server/output_markers.cpp
         ${IMP_TOOL_CALL_SOURCES}
         tools/imp-server/anthropic.cpp
         tools/imp-server/responses.cpp

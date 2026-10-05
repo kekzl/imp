@@ -441,6 +441,42 @@ TEST_F(RopeScalingConfigTest, Lfm2ShortConvAndMoe) {
     EXPECT_FLOAT_EQ(cfg.rope_theta, 1e6f);
 }
 
+// Cohere2-MoE: sliding layers RoPE + window, full layers NoPE except the dense prefix (pattern 1),
+// parallel block, sigmoid router without norm, prefix vs expert d_ff; shared experts refused.
+TEST_F(RopeScalingConfigTest, Cohere2LayerMapAndParallelBlock) {
+    write_config(R"({
+        "architectures": ["Cohere2MoeForCausalLM"], "model_type": "cohere2_moe",
+        "hidden_size": 2048, "num_attention_heads": 32, "num_key_value_heads": 4, "num_hidden_layers": 5,
+        "head_dim": 128, "rope_theta": 50000, "sliding_window": 4096, "rms_norm_eps": 1e-06,
+        "num_experts": 128, "num_experts_per_tok": 8, "intermediate_size": 768,
+        "prefix_dense_intermediate_size": 3072, "first_k_dense_replace": 1,
+        "prefix_dense_sliding_window_pattern": 1, "expert_selection_fn": "sigmoid", "norm_topk_prob": false,
+        "num_shared_experts": 0, "use_parallel_block": true,
+        "layer_types": ["full_attention", "sliding_attention", "sliding_attention", "sliding_attention",
+                        "full_attention"]
+    })");
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_EQ(cfg.arch, imp::ModelArch::COHERE2);
+    EXPECT_EQ(cfg.swa_layers, (std::vector<uint8_t>{0, 1, 1, 1, 0}));
+    EXPECT_EQ(cfg.nope_layers, (std::vector<uint8_t>{0, 0, 0, 0, 1}));
+    EXPECT_TRUE(cfg.parallel_block);
+    EXPECT_TRUE(cfg.moe_sigmoid_gating);
+    EXPECT_FALSE(cfg.expert_weights_norm);
+    EXPECT_EQ(cfg.first_k_dense_replace, 1);
+    EXPECT_EQ(cfg.d_ff, 3072);
+    EXPECT_EQ(cfg.expert_d_ff, 768);
+    EXPECT_EQ(cfg.sliding_window, 4096);
+    EXPECT_FLOAT_EQ(cfg.rms_norm_eps, 1e-6f);
+
+    write_config(R"({
+        "architectures": ["Cohere2MoeForCausalLM"], "hidden_size": 64, "num_attention_heads": 4,
+        "num_hidden_layers": 1, "num_shared_experts": 1, "layer_types": ["full_attention"]
+    })");
+    imp::ModelConfig bad;
+    EXPECT_FALSE(HFConfigLoader::load_config(tmp_dir_.string(), bad));
+}
+
 // Olmo-3: layer_types 3 sliding + 1 full -> pattern 4; local layers keep rope_theta; YaRN parsed.
 TEST_F(RopeScalingConfigTest, Olmo3LayerPatternAndYarn) {
     write_config(R"({

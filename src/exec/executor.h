@@ -347,6 +347,10 @@ public:
             return ly.ffn_norm;
         return ly.post_attn_norm.data != nullptr ? ly.post_attn_norm : ly.attn_norm;
     }
+    // Cohere2 parallel block (cfg.parallel_block): h + attn(norm(h)) + ffn(norm(h)).
+    // stage 0 before attention, 1 between attention and FFN, 2 after the FFN; no-op otherwise.
+    [[nodiscard]] bool take_parallel_block_buffers_();
+    void parallel_block_step_(int stage, int n, cudaStream_t stream);
     void norm_fold_begin_(int n, cudaStream_t stream);
     NvFP4NormFoldOut norm_fold_arm_(int layer, bool after_ffn, const Tensor& no);
     NvFP4NormFoldIn norm_fold_take_(const Tensor& norm_w, const Tensor& no, const Tensor& h, float eps);
@@ -817,6 +821,8 @@ private:
     void* mla_k_rope_buf_ = nullptr;  // [max_tokens, qk_rope_head_dim]
     void* mla_kv_b_buf_ = nullptr;    // [max_tokens, n_heads*(qk_nope_head_dim+v_head_dim)]
     void* mla_q_a_buf_ = nullptr;     // [max_tokens, q_lora_rank], q_lora models only
+    void* par_in_buf_ = nullptr;      // [max_tokens, d_model] FP16, parallel_block only: layer input
+    void* par_attn_buf_ = nullptr;    // [max_tokens, d_model] FP16, parallel_block only: input + attn
 
     // MLA absorbed-decode latent KV cache (opt-in attention.mla_absorb).
     // Per-layer slice [max_seq, kv_lora_rank+qk_rope_head_dim] FP16: cols

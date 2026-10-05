@@ -191,8 +191,19 @@ TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.moe_arrays +
                              d.fp8_reduction + d.quant_scratch + d.splitk_scratch + d.mla_scratch +
                              d.dry_penalty + d.cublas_workspace + d.grouped3x + d.imma_scratch +
-                             d.smallm_scratch);
+                             d.smallm_scratch + d.parallel_block);
     EXPECT_GT(d.total(), 0u);
+}
+
+// Cohere2 parallel block: two [max_tokens, d_model] FP16 takes, zero on every other model.
+TEST(ExecT2Demand, ParallelBlockChargesTwoResidualCopies) {
+    ExecShape s = dense_shape();
+    EXPECT_EQ(exec_t2_demand(s, 1024).parallel_block, 0u);
+    s.parallel_block = true;
+    const size_t one = static_cast<size_t>(exec_max_tokens(s, 1024)) * static_cast<size_t>(s.d_model) * 2;
+    const size_t got = exec_t2_demand(s, 1024).parallel_block;
+    EXPECT_GE(got, 2 * one);
+    EXPECT_LT(got, 2 * one + 4096);
 }
 
 // #1897: small-M NVFP4 scratch is the largest split-K workspace over dense projections plus

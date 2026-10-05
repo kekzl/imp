@@ -22,8 +22,8 @@ namespace imp::quantize {
 int add_lfm2_act_prescale(awq::Plan& plan, const std::map<std::string, const RawTensor*>& index,
                           const std::function<bool(const RawTensor&)>& quantized);
 
-// The call imp-quantize makes: model_type lfm2 / lfm2_moe / glm4_moe_lite, --format modelopt only
-// (compressed-tensors shares one tensor scale across q/k/v and gate/up, which an x8 / x64 producer would
+// The call imp-quantize makes: model_type lfm2 / lfm2_moe / glm4_moe_lite / cohere2_moe, --format modelopt
+// only (compressed-tensors shares one tensor scale across q/k/v and gate/up, which an x8 / x64 producer would
 // dominate); a tensor counts as quantized by the writer's own rule (gated q_proj, --keep-gdn-proj,
 // should_quantize).
 void apply_act_prescale(const Options& opt, const std::vector<std::unique_ptr<RawSafeTensors>>& opened,

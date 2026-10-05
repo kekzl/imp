@@ -5,6 +5,7 @@
 
 #include "args.h"
 #include "batching_engine.h"
+#include "output_markers.h"
 #include "model/chat_template.h"
 #include "model/tokenizer.h"
 #include "runtime/config.h"
@@ -265,6 +266,7 @@ struct ServerState {
     bool is_think_model = false;  // model has <think> token (DeepSeek R1 etc.)
     int32_t think_start_id = -1;  // <think> token ID (-1 if not present)
     int32_t think_end_id = -1;    // </think> token ID (-1 if not present)
+    OutputMarkerAliases output_aliases;  // Cohere2 control tokens decoded as <think>/<tool_call> (chat path)
     // Gemma-4 emits reasoning/answer structure as "<|channel>NAME...<channel|>" (NAME: thought,
     // analysis, final, ...; closing tag often omitted on short answers). Routed out of user content
     // by the state-machine filter in handlers.cpp.

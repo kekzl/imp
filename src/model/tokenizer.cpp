@@ -699,6 +699,7 @@ bool Tokenizer::load(const std::string& path) {
                     }
                     if (inner_type == "Split") {
                         split_steps.push_back(split_step(pt));
+                        digit_triples_right_ |= split_regex(pt) == kDigitTriplesRightRegex;
                         const std::string family = pretok_family(split_regex(pt));
                         if (!family.empty())
                             pre_tokenizer_ = family;
@@ -1382,6 +1383,37 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
     return out_ids;
 }
 
+std::vector<std::string> Tokenizer::pre_tokenize_family_(const std::string& bpe_text) const {
+    // GGUF llama-bpe is the Llama 3 tokenizer.json regex, i.e. cl100k (#2520).
+    if (pre_tokenizer_ == "llama3" || pre_tokenizer_ == "llama-v3" || pre_tokenizer_ == "llama-bpe" ||
+        pre_tokenizer_ == "cl100k")
+        return cl100k_pre_tokenize(bpe_text);
+    // The gpt2 fallback's per-char punctuation blocks merges like "->", "():" (#657).
+    if (pre_tokenizer_ == "qwen2")
+        return qwen2_pre_tokenize(bpe_text);
+    if (pre_tokenizer_ == "qwen35")
+        return qwen35_pre_tokenize(bpe_text);
+    if (pre_tokenizer_ == "o200k" || pre_tokenizer_ == "gpt-4o")
+        return o200k_pre_tokenize(bpe_text);
+    if (pre_tokenizer_ == "nemotron")
+        return nemotron_pre_tokenize(bpe_text);
+    if (pre_tokenizer_ == "split-seq" && split_seq_)
+        return split_sequence_pre_tokenize(*split_seq_, bpe_text);
+    return gpt2_pre_tokenize(bpe_text);
+}
+
+std::vector<std::string> Tokenizer::pre_tokenize_(const std::string& bpe_text) const {
+    if (!digit_triples_right_)
+        return pre_tokenize_family_(bpe_text);
+    std::vector<std::string> chunks;
+    for (const std::string& piece : digit_triples_right_split(bpe_text)) {
+        auto part = pre_tokenize_family_(piece);
+        chunks.insert(chunks.end(), std::make_move_iterator(part.begin()),
+                      std::make_move_iterator(part.end()));
+    }
+    return chunks;
+}
+
 std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
     if (text.empty() || vocab_.empty())
         return {};
@@ -1403,25 +1435,7 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
         const std::string& bpe_text = piece.text;
 
         // 1. Pre-tokenize into chunks (dispatch based on pre-tokenizer type)
-        std::vector<std::string> chunks;
-        // GGUF llama-bpe is the Llama 3 tokenizer.json regex, i.e. cl100k (#2520).
-        if (pre_tokenizer_ == "llama3" || pre_tokenizer_ == "llama-v3" || pre_tokenizer_ == "llama-bpe" ||
-            pre_tokenizer_ == "cl100k") {
-            chunks = cl100k_pre_tokenize(bpe_text);
-        } else if (pre_tokenizer_ == "qwen2") {
-            // The gpt2 fallback's per-char punctuation blocks merges like "->", "():" (#657).
-            chunks = qwen2_pre_tokenize(bpe_text);
-        } else if (pre_tokenizer_ == "qwen35") {
-            chunks = qwen35_pre_tokenize(bpe_text);
-        } else if (pre_tokenizer_ == "o200k" || pre_tokenizer_ == "gpt-4o") {
-            chunks = o200k_pre_tokenize(bpe_text);
-        } else if (pre_tokenizer_ == "nemotron") {
-            chunks = nemotron_pre_tokenize(bpe_text);
-        } else if (pre_tokenizer_ == "split-seq" && split_seq_) {
-            chunks = split_sequence_pre_tokenize(*split_seq_, bpe_text);
-        } else {
-            chunks = gpt2_pre_tokenize(bpe_text);
-        }
+        const std::vector<std::string> chunks = pre_tokenize_(bpe_text);
 
         std::vector<int32_t> all_ids;
         all_ids.reserve(bpe_text.size());  // rough estimate

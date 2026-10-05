@@ -427,6 +427,8 @@ bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
                       "load rather than running with a null KV projection buffer");
         return false;
     }
+    if (!take_parallel_block_buffers_())
+        return false;
     (void)experts_on_host;
 
     // Attribution is per-allocation in VRAMAllocator now. This used to note

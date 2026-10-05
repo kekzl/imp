@@ -69,11 +69,11 @@ std::string ExecT2Demand::describe() const {
         buf, sizeof(buf),
         "mmvq %.1f + nvfp4 %.1f + sample %.1f + pen %.1f + moe %.2f + fp8red %.2f + quant %.2f "
         "+ splitk %.2f + mla %.1f + dry %.2f + cublas %.1f + grp3x %.2f + imma %.1f + chunkcap %.1f "
-        "+ smallm %.2f MiB",
+        "+ smallm %.2f + par %.2f MiB",
         mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB, penalty_counts / kMiB,
         moe_arrays / kMiB, fp8_reduction / kMiB, quant_scratch / kMiB, splitk_scratch / kMiB,
         mla_scratch / kMiB, dry_penalty / kMiB, cublas_workspace / kMiB, grouped3x / kMiB,
-        imma_scratch / kMiB, chunk_capture / kMiB, smallm_scratch / kMiB);
+        imma_scratch / kMiB, chunk_capture / kMiB, smallm_scratch / kMiB, parallel_block / kMiB);
     return buf;
 }
 
@@ -114,6 +114,7 @@ ExecShape exec_shape_of(const Model& model) {
     s.qk_rope_head_dim = cfg.qk_rope_head_dim;
     s.qk_nope_head_dim = cfg.qk_nope_head_dim;
     s.v_head_dim = cfg.v_head_dim;
+    s.parallel_block = cfg.parallel_block;
     // max_batch_size, use_fp8_prefill and mla_absorb are filled by the caller: the model
     // knows neither the batch nor the runtime config. mla_absorb matters because the
     // absorbed latent cache is orders of magnitude larger than the MLA quartet, so the plan
@@ -466,6 +467,10 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
             out.mla_scratch += 2 * kTakeAlign;
         }
     }
+
+    // Parallel-block residual pair (take_parallel_block_buffers_): two takes, no degradation.
+    out.parallel_block = static_cast<size_t>(shape.parallel_block) * 2 *
+                         (static_cast<size_t>(t) * static_cast<size_t>(shape.d_model) * 2 + kTakeAlign);
 
     // FP8 activation reduction scratch. Mirrors the max_dim ladder and the grid
     // arithmetic in executor_workspace_buffers.cu exactly: kElemsPerThread=4,

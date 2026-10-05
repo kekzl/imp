@@ -71,6 +71,40 @@ static std::string prior_reasoning(const json& msg) {
     return "";
 }
 
+static std::string string_field(const json& msg, const char* key) {
+    return msg.contains(key) && msg[key].is_string() ? msg[key].get<std::string>() : std::string();
+}
+
+// Assistant turn carrying tool_calls. A RAW-family template is the checkpoint's own Jinja and renders
+// message.tool_calls itself (Cohere2 <|START_ACTION|>): structured, string arguments parsed to
+// objects as vLLM does. Family templates get the call replayed as text in their own dialect.
+static imp::ChatMessage assistant_tool_call_message(const json& msg, imp::ChatTemplateFamily family,
+                                                    bool tool_xml_dialect) {
+    std::string content_str;
+    // Array content (text parts) is valid OpenAI; get<std::string>() answered it with a raw 400.
+    if (msg.contains("content") && msg["content"].is_string())
+        content_str = msg["content"].get<std::string>();
+    else if (msg.contains("content"))
+        join_text_parts(msg["content"], content_str);
+    if (family != imp::ChatTemplateFamily::RAW) {
+        // XML-dialect templates (Qwen-Coder) must replay prior tool_calls in the XML shape the model
+        // itself emits: a JSON replay teaches the model the wrong dialect for its NEXT call.
+        return {"assistant",
+                reconstruct_tool_call_output(family, msg["tool_calls"], content_str, tool_xml_dialect),
+                prior_reasoning(msg)};
+    }
+    json calls = msg["tool_calls"];
+    for (auto& tc : calls) {
+        if (!tc.contains("function") || !tc["function"].contains("arguments") ||
+            !tc["function"]["arguments"].is_string())
+            continue;
+        json args = json::parse(tc["function"]["arguments"].get<std::string>(), nullptr, false);
+        if (!args.is_discarded())
+            tc["function"]["arguments"] = std::move(args);
+    }
+    return {"assistant", content_str, prior_reasoning(msg), dump_safe(calls)};
+}
+
 // Populates ctx.params/log_*/req_id/snap.tpl_family (early best-effort). Returns false with a
 // 400 JSON error on validation failure; true means proceed to state snapshot + tokenize.
 bool parse_chat_request_params(const httplib::Request& req, httplib::Response& res, ServerState& state,
@@ -369,21 +403,11 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                 !ctx.params.chat_msgs.empty() && ctx.params.chat_msgs.back().role == "assistant") {
                 ctx.params.chat_msgs.back().content += content;
             } else {
-                ctx.params.chat_msgs.push_back({"tool", content});
+                ctx.params.chat_msgs.push_back({"tool", content, "", "", string_field(msg, "tool_call_id")});
             }
         } else if (role == "assistant" && msg.contains("tool_calls")) {
-            // XML-dialect templates (Qwen-Coder) must replay prior tool_calls in the XML shape the model
-            // itself emits, not the ChatML JSON body - a JSON replay teaches the model the wrong dialect for
-            // its NEXT call, exactly what the armed XML grammar forbids.
-            std::string content_str;
-            // Array content (text parts) is valid OpenAI; get<std::string>() answered it with a raw 400.
-            if (msg.contains("content") && msg["content"].is_string())
-                content_str = msg["content"].get<std::string>();
-            else if (msg.contains("content"))
-                join_text_parts(msg["content"], content_str);
-            std::string reconstructed = reconstruct_tool_call_output(ctx.snap.tpl_family, msg["tool_calls"],
-                                                                     content_str, tool_xml_dialect);
-            ctx.params.chat_msgs.push_back({"assistant", reconstructed, prior_reasoning(msg)});
+            ctx.params.chat_msgs.push_back(
+                assistant_tool_call_message(msg, ctx.snap.tpl_family, tool_xml_dialect));
         } else if (msg.contains("content") && msg["content"].is_array()) {
             // OpenAI multimodal format: content is array of parts
             std::string text_parts;

@@ -804,6 +804,14 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
         state.think_start_id = is_special ? ts : -1;
         state.think_end_id = is_special ? te : -1;
         state.is_think_model = is_special;
+        // Cohere2: <|START_THINKING|>/<|END_THINKING|> sit below the 99 % band; the alias table
+        // decodes them as <think>/</think> on the chat path.
+        state.output_aliases = cohere_output_aliases(*state.tok);
+        if (!is_special && !state.output_aliases.empty()) {
+            state.think_start_id = state.output_aliases[0].id;
+            state.think_end_id = state.output_aliases[1].id;
+            state.is_think_model = true;
+        }
         if (state.is_think_model) {
             printf("Reasoning model: <think>=%d, </think>=%d\n", state.think_start_id, state.think_end_id);
         }

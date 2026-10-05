@@ -398,10 +398,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // M-RoPE active - the fused kernels take one position array per axis-blind rotation, which would
         // silently misrotate image tokens.
         const bool mrope_active = state.mrope.positions != nullptr || state.mrope.pos_delta != nullptr;
+        // NoPE: the whole arch (Nemotron-H) or this layer (Cohere2 full-attention layers).
+        const bool layer_rope = prof.attn_variant != AttnVariant::NOPE && !cfg.layer_nope(layer);
         bool can_fuse_rope_kv = (!state.is_prefill && n == 1 && qv.qtype == QType::F16 && state.kv_cache &&
-                                 state.kv_cache->qtype() == QType::F16 &&
-                                 prof.attn_variant != AttnVariant::NOPE && cfg.yarn_ext_factor <= 0.0f &&
-                                 !cfg.is_mla() && !mrope_active);
+                                 state.kv_cache->qtype() == QType::F16 && layer_rope &&
+                                 cfg.yarn_ext_factor <= 0.0f && !cfg.is_mla() && !mrope_active);
         // Per-layer rope_dim. Gemma 4: both SWA and global layers rotate the full
         // head_dim; global layers' freq_factors (loaded as longrope_freqs) zero
         // out most pairs to realize the GGUF's partial-rotary schedule (ccss000000000000).
@@ -416,7 +417,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // No row-count cap: a prompt row must take the same QK-norm arithmetic in a 14-row
         // tail chunk as in the full prefill (#2152). grid.y = n <= 65535.
         if (has_qk_norm && n <= 65535 && qk_norm_fusable_(ly, hd, n) && qv.qtype == QType::F16 &&
-            !no_qknorm_fused && prof.attn_variant != AttnVariant::NOPE) {
+            !no_qknorm_fused && layer_rope) {
             // Fused: QK-norm + RoPE in one kernel launch. Keeps norm
             // intermediate values in FP32 shared memory.
             qknorm_rope_fused(static_cast<half*>(qv.data), static_cast<half*>(kk.data),
@@ -452,7 +453,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // NoPE attention (Nemotron-H): position lives in the Mamba layers,
             // rotating Q/K here scrambles positional binding (bag-of-words
             // prompts). QK-norm above still applies; only the rotation is skipped.
-            if (prof.attn_variant != AttnVariant::NOPE) {
+            if (layer_rope) {
                 rope_forward(q4r_t, k4r_t, state.positions, hd, layer_rope_theta, layer_rope_freq_scale,
                              layer_rope_dim, cfg.rope_neox, cfg.yarn_ext_factor, cfg.yarn_attn_factor,
                              cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, stream, longrope_freqs,

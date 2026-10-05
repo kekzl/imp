@@ -171,6 +171,7 @@ enum {
     kApiQwen3Next = 18,
     kApiOlmo3 = 19,
     kApiLfm2 = 20,
+    kApiCohere2 = 21,
 };
 
 static constexpr ArchEntry kArchRegistry[] = {
@@ -216,6 +217,8 @@ static constexpr ArchEntry kArchRegistry[] = {
     {ModelArch::OLMO3, "olmo3", kApiOlmo3, -1, 0, -1, 1, false, false, 0.6f, 0.95f, 0},
     // LFM2-MoE: sigmoid router + expert bias, norm_topk_prob; generation_config sets no sampling.
     {ModelArch::LFM2, "lfm2", kApiLfm2, -1, 0, -1, -1, true, true, 0.3f, 0.95f, 0},
+    // Cohere2-MoE: interleaved RoPE (rotate_half on even/odd pairs), sigmoid router without norm.
+    {ModelArch::COHERE2, "cohere2moe", kApiCohere2, 0, 0, -1, -1, true, false, 0.3f, 0.95f, 0},
     {ModelArch::GENERIC, "generic", kApiGeneric, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
 };
 

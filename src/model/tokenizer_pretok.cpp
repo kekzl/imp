@@ -398,4 +398,44 @@ std::vector<std::string> split_sequence_pre_tokenize(const SplitSequence& seq, c
     return pieces;
 }
 
+std::vector<std::string> digit_triples_right_split(const std::string& text) {
+    // \w as Oniguruma's \b sees it (HF tokenizers): L, M, every N (2½ stays whole), Pc.
+    const auto is_word = [](uint32_t cp) {
+        constexpr uint32_t kPc[] = {'_',    0x203F, 0x2040, 0x2054, 0xFE33,
+                                    0xFE34, 0xFE4D, 0xFE4E, 0xFE4F, 0xFF3F};
+        return (cp_class(cp) & (unicode::kLetter | unicode::kMark | unicode::kNumber)) != 0 ||
+               std::find(std::begin(kPc), std::end(kPc), cp) != std::end(kPc);
+    };
+    std::vector<std::string> out;
+    size_t last = 0, k = 0, len = 0;
+    while (k < text.size()) {
+        if (!(cp_class(decode_utf8_at(text, k, &len)) & unicode::kDecimal)) {
+            k += len;
+            continue;
+        }
+        std::vector<size_t> starts;  // codepoint offsets of the \d run
+        size_t e = k;
+        while (e < text.size() && (cp_class(decode_utf8_at(text, e, &len)) & unicode::kDecimal)) {
+            starts.push_back(e);
+            e += len;
+        }
+        if (e < text.size() && is_word(decode_utf8_at(text, e, &len))) {
+            k = e;  // no \b after the run: no match anywhere inside it
+            continue;
+        }
+        if (k > last)
+            out.push_back(text.substr(last, k - last));
+        const size_t n = starts.size();
+        for (size_t g = (n % 3 == 0 ? 3 : n % 3); k < e; g += 3) {
+            const size_t end = g < n ? starts[g] : e;
+            out.push_back(text.substr(k, end - k));
+            k = end;
+        }
+        last = e;
+    }
+    if (last < text.size())
+        out.push_back(text.substr(last));
+    return out;
+}
+
 }  // namespace imp

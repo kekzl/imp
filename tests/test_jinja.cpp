@@ -835,3 +835,35 @@ TEST(JinjaFilterTest, SelectattrFiltersByTest) {
     EXPECT_EQ(run("{{ [1, 0, 2]|select|list|length }}"), "2");
     EXPECT_EQ(run("{{ [1, 0, 2]|reject|list|length }}"), "1");
 }
+
+// {% break %} / {% continue %} (Cohere2 tool-result grouping): the rest of the iteration is skipped,
+// break ends only the innermost loop.
+TEST(JinjaTest, BreakAndContinueControlTheInnermostLoop) {
+    auto run = [](const char* src) {
+        Template t;
+        EXPECT_TRUE(t.parse(src));
+        return t.render({});
+    };
+    EXPECT_EQ(run("{% for x in [1, 2, 3, 4] %}{% if x == 3 %}{% break %}{% endif %}{{ x }}{% endfor %}"),
+              "12");
+    EXPECT_EQ(run("{% for x in [1, 2, 3] %}{% if x == 2 %}{% continue %}{% endif %}{{ x }}{% endfor %}"),
+              "13");
+    EXPECT_EQ(
+        run("{% for a in [1, 2] %}{% for b in [7, 8, 9] %}{% if b == 8 %}{% break %}{% endif %}{{ a }}{{ b }}"
+            "{% endfor %};{% endfor %}"),
+        "17;27;");
+    EXPECT_EQ(run("{% for x in [1, 2] %}{% if x == 1 %}{% break %}{% endif %}{% endfor %}after"), "after");
+}
+
+// Dict literals (Cohere2 tool results: {"content": tool_msg.content}|tojson); they evaluated to their
+// first key before, so the model saw "0": "content" instead of the result.
+TEST(JinjaTest, DictLiteralsEvaluateToObjects) {
+    auto run = [](const char* src) {
+        Template t;
+        EXPECT_TRUE(t.parse(src));
+        return t.render({{"x", Value(std::string("abc"))}});
+    };
+    EXPECT_EQ(run("{{ {\"content\": x}|tojson }}"), "{\"content\": \"abc\"}");
+    EXPECT_EQ(run("{% set w = {\"a\": 1, \"b\": {\"c\": x},} %}{{ w.b.c }}"), "abc");
+    EXPECT_EQ(run("{{ {}|tojson }}"), "{}");
+}

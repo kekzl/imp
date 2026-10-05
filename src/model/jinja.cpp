@@ -260,6 +260,8 @@ enum class TokenType {
     COMMA,
     DOT,
     LBRACKET,
+    LBRACE,  // { of a dict literal
+    RBRACE,
     RBRACKET,
     LPAREN,
     RPAREN,
@@ -392,9 +394,57 @@ private:
             text.erase(i);
     }
 
+    // Quoted literal at pos (opening quote), escapes \n \t \r \\ \' \"; pos ends past the closing quote.
+    std::string lex_string_(size_t& pos) const {
+        char q = src_[pos++];
+        std::string s;
+        while (pos < src_.size() && src_[pos] != q) {
+            if (src_[pos] == '\\' && pos + 1 < src_.size()) {
+                pos++;
+                switch (src_[pos]) {
+                    case 'n':
+                        s += '\n';
+                        break;
+                    case 't':
+                        s += '\t';
+                        break;
+                    case 'r':
+                        s += '\r';
+                        break;
+                    case '\\':
+                        s += '\\';
+                        break;
+                    case '\'':
+                        s += '\'';
+                        break;
+                    case '"':
+                        s += '"';
+                        break;
+                    default:
+                        s += '\\';
+                        s += src_[pos];
+                        break;
+                }
+            } else {
+                s += src_[pos];
+            }
+            pos++;
+        }
+        if (pos < src_.size())
+            pos++;  // skip closing quote
+        return s;
+    }
+
     void tokenize_inner(std::vector<Token>& tokens, size_t& pos, const std::string& close_tag) {
         skip_ws(pos);
+        int brace_depth = 0;  // open dict literals: their '}' is not the start of "}}"
         while (pos < src_.size()) {
+            if (brace_depth > 0 && src_[pos] == '}') {
+                tokens.push_back({TokenType::RBRACE, "}"});
+                --brace_depth;
+                skip_ws(++pos);
+                continue;
+            }
             // Check for trim marker + close tag
             if (pos + close_tag.size() <= src_.size()) {
                 bool trim_r = false;
@@ -431,44 +481,16 @@ private:
                 }
             }
 
+            if (src_[pos] == '{') {
+                tokens.push_back({TokenType::LBRACE, "{"});
+                ++brace_depth;
+                skip_ws(++pos);
+                continue;
+            }
+
             // String literal
             if (src_[pos] == '\'' || src_[pos] == '"') {
-                char q = src_[pos++];
-                std::string s;
-                while (pos < src_.size() && src_[pos] != q) {
-                    if (src_[pos] == '\\' && pos + 1 < src_.size()) {
-                        pos++;
-                        switch (src_[pos]) {
-                            case 'n':
-                                s += '\n';
-                                break;
-                            case 't':
-                                s += '\t';
-                                break;
-                            case 'r':
-                                s += '\r';
-                                break;
-                            case '\\':
-                                s += '\\';
-                                break;
-                            case '\'':
-                                s += '\'';
-                                break;
-                            case '"':
-                                s += '"';
-                                break;
-                            default:
-                                s += '\\';
-                                s += src_[pos];
-                                break;
-                        }
-                    } else {
-                        s += src_[pos];
-                    }
-                    pos++;
-                }
-                if (pos < src_.size())
-                    pos++;  // skip closing quote
+                std::string s = lex_string_(pos);
                 tokens.push_back({TokenType::STRING, std::move(s)});
                 skip_ws(pos);
                 continue;
@@ -775,6 +797,12 @@ struct ForNode : Node {
     bool recursive = false;
 };
 
+// {% break %} / {% continue %} (jinja2.ext.loopcontrols, Cohere2 template).
+struct LoopCtlNode : Node {
+    explicit LoopCtlNode(bool brk) : is_break(brk) {}
+    bool is_break;
+};
+
 struct IfNode : Node {
     // Chain of (condition, body) pairs. Last may have null condition (else).
     struct Branch {
@@ -933,6 +961,13 @@ private:
             return parse_set();
         if (check(TokenType::IDENT, "macro"))
             return parse_macro();
+        if (check(TokenType::IDENT, "break") || check(TokenType::IDENT, "continue")) {
+            const bool brk = peek().value == "break";
+            advance();
+            if (check(TokenType::STMT_CLOSE))
+                advance();
+            return std::make_unique<LoopCtlNode>(brk);
+        }
         // {% generation %}/{% endgeneration %} mark the assistant span for training masks; they
         // contribute nothing to rendered text and HF's renderer ignores them too. No-op, not refusal.
         if (check(TokenType::IDENT, "generation") || check(TokenType::IDENT, "endgeneration")) {
@@ -1617,14 +1652,30 @@ private:
             return arr;
         }
 
-        // Dict literal
-        if (check(TokenType::IDENT) || check(TokenType::STRING)) {
-            // Could be dict, but we'd need { which isn't in our token stream.
-            // Dicts in Jinja use {} which conflicts with tags — only reachable in expressions.
-        }
+        if (check(TokenType::LBRACE))
+            return parse_dict_();
 
         // Fallback: empty
         return std::make_unique<LiteralExpr>(Value());
+    }
+
+    // {key: value, ...} (Cohere2 text_wrapper); trailing comma allowed.
+    std::unique_ptr<Expr> parse_dict_() {
+        advance();  // {
+        auto dict = std::make_unique<DictExpr>();
+        while (!at_end() && !check(TokenType::RBRACE)) {
+            auto key = parse_expr();
+            if (!check(TokenType::COLON))
+                break;
+            advance();
+            dict->entries.emplace_back(std::move(key), parse_expr());
+            if (!check(TokenType::COMMA))
+                break;
+            advance();
+        }
+        if (check(TokenType::RBRACE))
+            advance();
+        return dict;
     }
 
     const std::vector<Token>& tokens_;
@@ -1691,6 +1742,14 @@ private:
 
     int call_depth_ = 0;
     int64_t loop_iterations_ = 0;
+    int loop_ctl_ = 0;  // pending {% break %} (1) / {% continue %} (2): skips nodes until the for consumes it
+
+    // One loop iteration; false = a {% break %} ended the loop.
+    bool render_loop_body_(const std::vector<std::unique_ptr<Node>>& body, std::string& out) {
+        for (const auto& n : body)
+            render_node(*n, out);
+        return std::exchange(loop_ctl_, 0) != 1;
+    }
 
     struct CallDepthGuard {
         Evaluator& e;
@@ -1759,7 +1818,11 @@ private:
     }
 
     void render_node(const Node& node, std::string& out) {
-        if (auto* text = dynamic_cast<const TextNode*>(&node)) {
+        if (loop_ctl_ != 0)
+            return;
+        if (auto* ctl = dynamic_cast<const LoopCtlNode*>(&node)) {
+            loop_ctl_ = ctl->is_break ? 1 : 2;
+        } else if (auto* text = dynamic_cast<const TextNode*>(&node)) {
             out += text->text;
         } else if (auto* expr = dynamic_cast<const ExprNode*>(&node)) {
             Value val = eval(*expr->expr);
@@ -1812,8 +1875,8 @@ private:
                     set_var(node.var_name, Value(key));
                 }
 
-                for (auto& n : node.body)
-                    render_node(*n, out);
+                if (!render_loop_body_(node.body, out))
+                    break;
                 idx++;
             }
             pop_scope();
@@ -1865,8 +1928,8 @@ private:
                 set_var(node.var_name, arr[static_cast<size_t>(i)]);
             }
 
-            for (auto& n : node.body)
-                render_node(*n, out);
+            if (!render_loop_body_(node.body, out))
+                break;
         }
         pop_scope();
     }

@@ -174,6 +174,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         ctx.snap.is_think_model = state.is_think_model;
         ctx.snap.think_start_id = state.think_start_id;
         ctx.snap.think_end_id = state.think_end_id;
+        ctx.snap.output_aliases = state.output_aliases;
         ctx.params.apply_model_defaults(state.sampling_defaults);
         ctx.snap.channel_open_id = state.channel_open_id;
         ctx.snap.channel_close_id = state.channel_close_id;
@@ -522,7 +523,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         int start = std::max(0, n - max_tail_tokens);
         std::string tail_text;
         for (int i = start; i < n; ++i) {
-            tail_text += ctx.snap.tok->decode_token(ctx.snap.tokens[i]);
+            tail_text += decode_chat_piece(*ctx.snap.tok, ctx.snap.output_aliases, ctx.snap.tokens[i]);
         }
         return tail_text.find(needle) != std::string::npos;
     };
@@ -796,7 +797,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
 
             // Check text-level stop sequences
             if (!ctx.params.stop_sequences.empty()) {
-                const std::string piece = ctx.snap.tok->decode_token(token);
+                const std::string piece = decode_chat_piece(*ctx.snap.tok, ctx.snap.output_aliases, token);
                 output_text += piece;
                 if (stops_skip_reasoning && ctx.snap.tpl_family == imp::ChatTemplateFamily::HARMONY)
                     stop_content = split_harmony_channels(output_text, ctx.snap.suppress_thinking).content;
@@ -847,8 +848,9 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
 
         int n_output_tokens = static_cast<int>(output_ids.size()) + n_eos_counted;
         total_output_tokens += n_output_tokens;
-        std::string content = !ctx.params.stop_sequences.empty() ? output_text
-                                                                 : ctx.snap.tok->decode(output_ids);
+        std::string content = !ctx.params.stop_sequences.empty()
+                                  ? output_text
+                                  : decode_chat_output(*ctx.snap.tok, ctx.snap.output_aliases, output_ids);
         // max_tokens can stop mid-codepoint; the streaming path holds those
         // bytes back, so this one must drop them or the two transports return
         // different text for the same request (#1310).

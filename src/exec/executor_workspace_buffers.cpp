@@ -1652,6 +1652,8 @@ void GraphExecutor::free_buffers() {
     mla_k_rope_buf_ = nullptr;
     mla_kv_b_buf_ = nullptr;
     mla_q_a_buf_ = nullptr;
+    par_in_buf_ = nullptr;
+    par_attn_buf_ = nullptr;
     mla_absorb_cache_ = nullptr;
     mla_absorb_scores_ = nullptr;
     if (d_sample_result_) {

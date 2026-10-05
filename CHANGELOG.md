@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- North-Mini-Code runs with tool calls (`Cohere2MoeForCausalLM`): parallel attention + MoE block, NoPE full layers, `<|START_ACTION|>` calls, reasoning split. NVFP4 PPL 11.8222 vs HF BF16 11.2088; tokenizer 0/1202 ids off HF (13 before the right-aligned digit split).
 - GLM-4.7-Flash runs with tool calls (`Glm4MoeLiteForCausalLM`): DeepSeek MLA with q_lora, noaux_tc sigmoid router, the `<arg_key>` tool-call body. NVFP4 PPL 10.4301 vs HF BF16 9.7618; `imp-quantize` folds GLM activation pre-scales (35.35 without).
 - LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
 - `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
@@ -35,6 +36,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `imp-cli --bench` warms prefill until the graph replays (3 prefills) and prints each timed rep (#2525): Qwen3-30B-A3B-NVFP4 pp512 over 10 fresh processes 25887.89..28483.46 tok/s (10.03 %) -> 31041.61..31624.79 (1.88 %). Eager jitter cause and bound: `docs/internals/BENCHMARKING.md` (#2538).
 
 ### Fixed
+- Jinja chat templates: dict literals (`{"content": x}`) evaluated to their first key, `{% break %}`/`{% continue %}` failed to parse; checkpoint-own (RAW) templates now get structured `tool_calls` and `tool_call_id` and no injected empty system turn (North-Mini-Code chat prompts 0/3 off HF).
 - Every `generation_config.json` EOS id ends a completion as `stop` and its text is dropped; before, only the first did and GLM-4.7-Flash answered `391<|user|>` with finish `length`. A checkpoint template no family recognises renders as its own Jinja instead of raw concatenation.
 - Jinja chat templates: `selectattr`/`rejectattr`/`select`/`reject` filter instead of passing the list through. Olmo-3's default system turn was dropped (prompt 19 vs HF 47 tokens).
 - Modelopt FP8 checkpoints (`quant_algo` FP8) apply their per-tensor `weight_scale`: Phase 0 ran only for NVFP4 checkpoints, so `nvidia/Qwen3-8B-FP8` served NaN (first token -1, then an illegal access); now PPL 13.0714 on `ppl_4k.txt`. Executor teardown no longer frees the checkpoint's own FP8 tensors (252 double frees).
