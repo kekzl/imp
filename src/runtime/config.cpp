@@ -425,6 +425,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
 
     // [constrained]
     B("constrained.jump_ahead", cfg.constrained.jump_ahead);
+    B("constrained.jump_ahead_trust", cfg.constrained.jump_ahead_trust);
     I("constrained.jump_min_run", cfg.constrained.jump_min_run);
 
     // [ffn]
