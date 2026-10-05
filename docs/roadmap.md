@@ -129,7 +129,7 @@ Rows 1-15 are closed (index below); new rows start at 16, ranked by what an agen
 | 50 | video requests reach first token sooner | no video token pruning -> EVS-style pruning; upstream TTFT -33 % | M | [vLLM #48912](https://github.com/vllm-project/vllm/pull/48912), no issue |
 | 51 | Kimi-Linear runs on imp | KDA kernel missing | L | [HF](https://huggingface.co/moonshotai/Kimi-Linear-48B-A3B-Instruct), no issue |
 | 52 | Ling-3.0 runs on imp | KDA kernel missing | L | [HF](https://huggingface.co/inclusionAI/Ling-3.0-tiny), no issue |
-| 53 | Olmo-3.1 runs on imp | post-norm and SWA missing | S | [HF](https://huggingface.co/allenai/Olmo-3.1-32B-Instruct), no issue |
+| 53 | ~~Olmo-3.1 runs on imp~~ | closed 2026-10-05: `ModelArch::OLMO3` (post-norm-only block, QK-norm over all heads, 3:1 sliding/full with YaRN x8 on full layers). `ppl_corpus_45k` deterministic vs HF BF16 CPU: Olmo-3.1-32B-Instruct NVFP4 (imp-quantize, 18 GB) 12.6395 vs 12.2363, Olmo-3-7B-Instruct bf16 18.7245 vs 18.7333 | S | [HF](https://huggingface.co/allenai/Olmo-3.1-32B-Instruct), no issue |
 | 54 | GPU tests run in CI | no GPU runner -> owner decision: self-hosted runner runs fork code | M | owner decision, no issue |
 | 55 | users get a binary without Docker | releases ship the Docker image only -> release binaries | M | [`release-docker.yml`](../.github/workflows/release-docker.yml), no issue |
 | 56 | GGUF MoE decode spends less host launch time | host graph launch -> device graph launch for GGUF MoE | L | `src/runtime/engine.h:1026 graph launch when possible`, no issue |

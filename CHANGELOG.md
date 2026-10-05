@@ -5,7 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
-- Olmo-3 runs (`Olmo3ForCausalLM`, SafeTensors): post-norm-only block, QK-norm over all heads, 3:1 sliding/full layers with YaRN on the full ones. Olmo-3-7B-Instruct bf16 `ppl_corpus_45k` 18.7245 vs HF BF16 18.7333; GGUF is refused.
+- Olmo-3 and Olmo-3.1 run (`Olmo3ForCausalLM`, SafeTensors; GGUF refused): post-norm-only block, QK-norm over all heads, 3:1 sliding/full layers. `ppl_corpus_45k` vs HF BF16: 7B bf16 18.7245 vs 18.7333, 3.1-32B NVFP4 12.6395 vs 12.2363.
 - `make verify-fast` gates server throughput: imp-server streams 8 concurrent 128-token chats on the baseline model (`scripts/server_bench.sh`), 8 % under the pin (Qwen3-8B-Q8_0 1049.18 tok/s) fails (roadmap row 44).
 - `make verify-fast` gates PPL drift: deterministic PPL of the baseline model on `ppl_corpus_45k.txt` against a pin in `tests/perf_baseline.json` (Qwen3-8B-Q8_0 10.7522), 0.5 % tolerance (roadmap row 45).
 - `/metrics` splits the VRAM allocator by tag (`imp_vram_allocator_bytes{tag=...}`) and reports `imp_vram_untracked_bytes`, the own bytes outside it (roadmap row 97).
