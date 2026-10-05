@@ -145,7 +145,7 @@ Rows 1-15 are closed (index below); new rows start at 16, ranked by what an agen
 | 93 | dense Q8_0 weights live once in VRAM | raw Q8_0 stays beside the IMMA planes and the NVFP4 decode overlay: 2.75 B/elem (computed: 1.0625 raw + 1.125 planes + 0.5625 NVFP4) -> one resident copy per path | L | `src/compute/mmq_q8_imma_scratch.cu:25 qs plane[N][K] s8`, `src/exec/pre_dequant_phase4_tensor_registry.cpp:533 near-zero sources freed today`, no issue |
 | 97 | /metrics splits VRAM by allocator tag | the allocator keeps per-tag bytes and logs them; /metrics exports tiers and own bytes only -> per-tag gauge plus an untracked residual series | S | `src/memory/vram_allocator.cpp:143 by_tag`, `tools/imp-server/metrics_memory.cpp:21 imp_memory_reserved_bytes`, no issue |
 | 101 | NVFP4 and MXFP4 exports close more of the BF16 gap | best `--calib` export still +8.7 % vs BF16 on Qwen3-1.7B -> GPTQ / MR-GPTQ / rotation after AWQ | L | `docs/quantization.md:203 +8.7%`, no issue |
-| 102 | the BF16 gap is known for 14B and larger exports | gap measured on Qwen3-0.6B and Qwen3-1.7B only; a 14B BF16 source does not fit for `--calibrate` -> gap rows for 14B and up | M | `docs/quantization.md:202 Qwen3-0.6B`, `docs/quantization.md:215 BF16 14B does not fit`, no issue |
+| 102 | ~~the BF16 gap is known for 14B and larger exports~~ | closed 2026-10-05: BF16 reference from transformers on the CPU (`tools/analysis/hf_ppl_cpu.py`; Qwen3-1.7B 16.9035 vs imp 16.8827), `ppl_corpus_45k.txt`: Qwen3-14B 9.1961, NVFP4 RTN +8.6 %, `--calib` BD +7.7 %, Modelopt +6.8 %; Qwen3.8-27B 4.4247, imp RTN +3.7 %, Modelopt +3.0 %, vllm export +4.1 % | M | `docs/quantization.md:202 Qwen3-0.6B`, `docs/quantization.md:215 BF16 14B does not fit`, no issue |
 
 ## Not gaps
 
