@@ -139,6 +139,13 @@
             attn_ctx_lens = qscratch_.sparse_context_lens;
             attn_max_blocks = qscratch_.sparse_table_blocks;
         }
+        // NVFP4 split-K sizes on the context the kernel walks (#2440): past the engage length a sparse row
+        // holds the budget, below it the identity copy of the whole context.
+        const bool sparse_selects = attn_bt != layer_block_tables &&
+                                    state.max_context_len > qscratch_.sparse_engage_blocks* kv_bs;
+        const int attn_max_ctx = sparse_selects
+                                     ? std::min(state.max_context_len, qscratch_.sparse_budget_blocks* kv_bs)
+                                     : state.max_context_len;
 
         if (cache_dtype == QType::INT4) {
             dispatch_record::set_attn_decode(AttnDecodePath::INT4);
@@ -181,7 +188,7 @@
                 if (!residual_on) {
                     dispatch_record::set_attn_decode(AttnDecodePath::NVFP4_TC);
                     paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales, attn_bt,
-                                                    attn_ctx_lens, kv_bs, scale, state.max_context_len,
+                                                    attn_ctx_lens, kv_bs, scale, attn_max_ctx,
                                                     layer_sliding_window, cfg.attn_logit_softcap, stream,
                                                     attn_max_blocks);
                 } else {
@@ -217,12 +224,12 @@
                     }
                     dispatch_record::set_attn_decode(AttnDecodePath::NVFP4_TC);
                     paged_attention_decode_nvfp4_tc(q4, k_c, v_c, o4, k_scales, v_scales, attn_bt,
-                                                    attn_ctx_lens, kv_bs, scale, state.max_context_len,
+                                                    attn_ctx_lens, kv_bs, scale, attn_max_ctx,
                                                     layer_sliding_window, cfg.attn_logit_softcap, stream,
-                                                    attn_max_blocks, 0, k_res, v_res, res_count,
-                                                    res_n, res_widx, k_res_base, v_res_base,
-                                                    res_seq_stride_elems, state.d_residual_seq_slots,
-                                                    state.d_residual_counts, state.d_residual_write_idxes,
+                                                    attn_max_blocks, 0, k_res, v_res, res_count, res_n,
+                                                    res_widx, k_res_base, v_res_base, res_seq_stride_elems,
+                                                    state.d_residual_seq_slots, state.d_residual_counts,
+                                                    state.d_residual_write_idxes,
                                                     state.kv_manager->d_residual_fc_ptr(),
                                                     state.kv_manager->d_residual_widx_ptr());
                 }
@@ -230,10 +237,9 @@
                 paged_attention_decode_nvfp4(q4, k_c, v_c, o4,
                                              static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
                                              static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
-                                             attn_bt, attn_ctx_lens, kv_bs, scale,
-                                             state.max_context_len, layer_sliding_window,
-                                             cfg.attn_logit_softcap, stream, attn_max_blocks,
-                                             layer_n_sinks, attn_sinks);
+                                             attn_bt, attn_ctx_lens, kv_bs, scale, attn_max_ctx,
+                                             layer_sliding_window, cfg.attn_logit_softcap, stream,
+                                             attn_max_blocks, layer_n_sinks, attn_sinks);
             }
         } else if (cache_dtype == QType::MXFP4_KV) {
             dispatch_record::set_attn_decode(AttnDecodePath::MXFP4_KV);

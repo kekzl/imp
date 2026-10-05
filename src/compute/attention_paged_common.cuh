@@ -223,9 +223,12 @@ __device__ __forceinline__ void write_empty_split_sentinel(float* partial_out, i
 // (1 = no split-K), checked against the scratch buffer size.
 void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size);
 
+// split_units: CTAs per split when a kernel groups heads (0 = batch x n_heads); max_splits caps the
+// count, min_split_tokens the context share of one split (0 = none).
 static inline int compute_splitk_splits(int batch_size, int n_heads, int head_dim, int max_context_len,
-                                        int block_size, void** out_scratch_ptr) {
-    int total_blocks_nosplit = batch_size * n_heads;
+                                        int block_size, void** out_scratch_ptr, int split_units = 0,
+                                        int max_splits = 32, int min_split_tokens = 0) {
+    int total_blocks_nosplit = split_units > 0 ? split_units : batch_size * n_heads;
     int num_ctx_blocks = (max_context_len + block_size - 1) / block_size;
 
     void* scratch_ptr = nullptr;
@@ -241,7 +244,9 @@ static inline int compute_splitk_splits(int batch_size, int n_heads, int head_di
         int target_blocks = cta_per_sm * num_sms_cached;
         num_splits = (target_blocks + total_blocks_nosplit - 1) / total_blocks_nosplit;
         num_splits = min(num_splits, num_ctx_blocks);
-        num_splits = min(num_splits, 32);
+        num_splits = min(num_splits, max_splits);
+        if (min_split_tokens > 0)
+            num_splits = min(num_splits, max(1, max_context_len / min_split_tokens));
         num_splits = max(num_splits, 1);
 
         int partial_stride = 2 + head_dim;
