@@ -1,5 +1,6 @@
 #include "compute/gemm.h"
 #include "compute/gemv_dp4a_traits.cuh"
+#include "core/pdl_device.cuh"
 #include "core/pdl_launch.cuh"
 #include "core/qtype.h"
 #include "core/logging.h"
@@ -203,6 +204,7 @@ __global__ void rmsnorm_quantize_q8_1_kernel(
     const int lane = threadIdx.x & 31;
     const int warp_id = threadIdx.x >> 5;
     const int n_warps = blockDim.x >> 5;
+    pdl_wait();                            // x is the previous layer's hidden state
     const int n_q8_blocks = d_model >> 5;  // d_model / 32
 
     // Phase 1: loads x with warp-aligned Q8_1 block access (coalesced), caches in registers,
@@ -269,8 +271,9 @@ __global__ void rmsnorm_quantize_q8_1_kernel(
 void rmsnorm_quantize_q8_1(const half* x, const half* weight, block_q8_1* q8_out, float* d8_out,
                            half* norm_out, int d_model, float eps, cudaStream_t stream, float weight_offset) {
     const int threads = 1024;
-    rmsnorm_quantize_q8_1_kernel<<<1, threads, 0, stream>>>(x, weight, q8_out, d8_out, norm_out, d_model, eps,
-                                                            weight_offset);
+    pdl::enable_kernel(rmsnorm_quantize_q8_1_kernel);
+    pdl::launch(rmsnorm_quantize_q8_1_kernel, dim3(1), dim3(threads), size_t(0), stream, x, weight, q8_out,
+                d8_out, norm_out, d_model, eps, weight_offset);
     IMP_CUDA_CHECK_LAUNCH();
 }
 // dp4a GEMV template instantiations, consolidated from 33 hand-written kernels. See
