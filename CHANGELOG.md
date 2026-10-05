@@ -9,6 +9,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `imp-quantize --calib-groups` X/Y (#2476): MoE expert gate/up into an expert-only norm, per-expert down into up rows; `--calibrate` records per-expert statistics. Opt-in, no measured gain: Gemma-4-26B RTN rounding alone spreads PPL 16.7551..19.0110; gemma4 `--calib` needs a selector.
 
 ### Changed
+- `max_batch_size` auto prices 2048 instead of 4096 tokens per slot (roadmap row 66): FP16-KV models stop queueing clients at 32 streams. Qwen3-8B-NVFP4 24 -> 32 slots, TTFT p99 1268 -> 58 ms, 3937 -> 5086 tok/s; Qwen3-14B-Q6_K 17 -> 32, TTFT p99 4889 -> 284 ms.
 - NVFP4-KV decode attention sizes its split-K on the grouped kernel's CTAs at batch 1 and on the sparse budget past the engage length (#2440): Qwen3.6-35B tg128 at 64k 238.4 -> 258.8 tok/s with sparse off, 308.8 -> 317.6 at 8k; Qwen3.8-27B +1.2..1.7 %. 32 streams unchanged.
 - `kv_cache.dtype=auto` resolves to NVFP4 on Qwen3.6-35B-A3B (QWEN36_MOE, #2415): KV ceiling 112336 -> 358176 tokens on a 32 GB card for +0.09 % PPL (6.7939 -> 6.7998); NIAH 9/9 to 52k tokens. `kv_cache.dtype=fp16` opts out.
 - Untied token embeddings live in mapped pinned host memory (`vram.host_token_embedding`, #2484): Qwen3.8-27B-NVFP4 WEIGHTS -2425 MiB, KV ceiling 13238 -> 21771 blocks; the freed budget lifts tg128 46.72..48.90 -> 54.68..55.51 tok/s on the Modelopt export. Greedy output identical.

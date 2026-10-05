@@ -421,7 +421,9 @@ void Engine::init_resolve_kv_dtype_policy_() {
         size_t free_vram = 0, total_vram = 0;
         size_t headroom = 0;
         if (vram_budget_mem_get_info(&free_vram, &total_vram) && free_vram > 0) {
-            constexpr int kRefCtxTokens = 4096;  // per-slot serving context floor
+            // Per-slot serving context floor. 4096 at FP16 KV capped Qwen3-8B at 24 slots: 32 clients
+            // queued 2.4 s with 23 GB free (roadmap row 66); the paged pool and admission bound the rest.
+            constexpr int kRefCtxTokens = 2048;
             constexpr int kMaxAutoBatch = 32;
             constexpr double kKvHeadroomFrac = 0.6;  // rest: workspaces + long-ctx + safety
             // Weights are NOT in VRAM yet at resolver time (still host/mmap),
