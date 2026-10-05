@@ -29,6 +29,11 @@ namespace imp {
 
 // dispatch_gemv_residual: from executor_gemv_helpers.h
 
+// Down-projection context: the act-quant hint when the SwiGLU kernel already quantized `so`.
+static GemmContext prequant_hint(const GemmContext& ctx, bool prequant, const Tensor& so, int n) {
+    return prequant ? ctx.with_act_quant_hint(so.data, n, static_cast<int>(so.shape[1])) : ctx;
+}
+
 // ---------------------------------------------------------------------------
 // FFN sub-pass for one layer
 // ---------------------------------------------------------------------------
@@ -449,6 +454,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             IMP_CUDA_CHECK_LAUNCH();
         } else {
             // Non-dp4a paths: activation must produce FP16 intermediate in so.
+            bool down_prequant = false;  // scratch holds quantize(so) for the CUTLASS down (#2470)
             switch (cfg.ffn_activation) {
                 case FFNActivation::GEGLU:
                     geglu(go, uo, so, stream);
@@ -457,7 +463,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     // Producer fusion: quantize into the small-M scratch
                     // inside the activation kernel when down will take that
                     // route; falls back to plain swiglu.
-                    swiglu_for_smallm_(go, uo, so, ly.w_down_id, n, stream);
+                    down_prequant = swiglu_for_smallm_(go, uo, so, ly.w_down_id, n, stream);
                     break;
             }
             if (will_fuse_down_beta1 && !cur_force_fp16_ && wd_tier == StorageTier::FP8 &&
@@ -483,7 +489,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 // Dequant into scratch, then beta=1.0 GEMM directly into hidden (which holds residual)
                 gemm_via_handle_(ly.w_down_id, so, h, ctx.with_beta(1.0f));
             } else {
-                gemm_via_handle_(ly.w_down_id, so, fo, ctx);
+                gemm_via_handle_(ly.w_down_id, so, fo, prequant_hint(ctx, down_prequant, so, n));
                 if (has_post_ffn_norm && using_fp32_accum) {
                     // Post-FFN norm → FP32 accumulation (no D2D copy needed)
                     Tensor fp32_h = view_tokens(fp32_hidden_, n);
