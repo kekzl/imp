@@ -221,6 +221,7 @@ set(IMP_MODEL_SOURCES
     src/model/hf_fetch_repo.cpp
     src/model/weight_map.cpp
     src/model/gdn_fused_split.cpp
+    src/model/mxfp8_widen.cpp
     src/model/host_expert_pin.cpp
     src/model/weight_upload.cpp
     src/model/host_embedding.cpp
@@ -876,6 +877,7 @@ if(IMP_BUILD_TESTS)
         tests/test_hf_config_loader.cpp
         # Host-placed token embedding: FP16 bits equal to the VRAM upload (#2484).
         tests/test_host_embedding.cpp
+        tests/test_mxfp8_widen.cpp
         # Jump-ahead drafts from the request's own tokenization (roadmap row 46).
         tests/test_jump_draft.cpp
         # Qwen3-Next fused GDN inputs regrouped into the Qwen3.5 slots (#2410).

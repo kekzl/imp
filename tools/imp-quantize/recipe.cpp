@@ -26,6 +26,7 @@ void fill_recipe(Recipe& r, const Options& opt, bool kv_cache_fp8) {
     r.kv_cache_fp8 = kv_cache_fp8;
     r.keep_attn_gate = opt.keep_attn_gate;
     r.keep_gdn_proj = opt.keep_gdn_proj;
+    r.gdn_proj_format = opt.gdn_proj_mxfp8 ? "mxfp8" : "source";
     r.calibrated = !opt.calib_file.empty();
     if (r.calibrated) {
         r.calib_sha256 = hf::sha256_file(opt.calib_file);
@@ -47,6 +48,7 @@ std::string recipe_json(const Recipe& r, const std::string& indent) {
     j += in + "\"kv_cache_fp8\": " + boolean(r.kv_cache_fp8) + ",\n";
     j += in + "\"keep_attn_gate\": " + boolean(r.keep_attn_gate) + ",\n";
     j += in + "\"keep_gdn_proj\": " + str(r.keep_gdn_proj) + ",\n";
+    j += in + "\"gdn_proj_format\": " + str(r.gdn_proj_format) + ",\n";
     j += in + "\"calibration\": ";
     if (!r.calibrated) {
         j += "null\n";

@@ -239,6 +239,12 @@ TEST(GdnProjection, RolesFollowTheRuntimeFlagVocabulary) {
     EXPECT_EQ(gdn_projection_role(p + "out_proj.weight"), "out");
     EXPECT_EQ(gdn_projection_role(p + "norm.weight"), "");
     EXPECT_EQ(gdn_projection_role("model.layers.3.self_attn.o_proj.weight"), "");
+    // Mamba-2 mixer (Nemotron-H): in/out projections; its attention and expert leaves are not.
+    EXPECT_EQ(gdn_projection_role("backbone.layers.0.mixer.in_proj.weight"), "in");
+    EXPECT_EQ(gdn_projection_role("backbone.layers.0.mixer.out_proj.weight"), "out");
+    EXPECT_EQ(gdn_projection_role("backbone.layers.5.mixer.o_proj.weight"), "");
+    EXPECT_EQ(gdn_projection_role("backbone.layers.1.mixer.experts.0.up_proj.weight"), "");
+    EXPECT_EQ(gdn_projection_role("backbone.layers.0.mixer.in_proj.bias"), "");
 
     EXPECT_TRUE(keep_gdn_projection(p + "out_proj.weight", "all"));
     EXPECT_TRUE(keep_gdn_projection(p + "in_proj_qkv.weight", "in"));
