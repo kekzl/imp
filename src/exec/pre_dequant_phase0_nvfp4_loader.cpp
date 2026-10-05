@@ -103,9 +103,16 @@ void assert_merged_scale_provenance(const Model& model, const ModelConfig& cfg,
 
 }  // namespace
 
+// A Modelopt FP8 checkpoint (quant_algo FP8) is not NVFP4 prequant, but its F8_E4M3 weights
+// carry the scalar weight_scale in the same scratch map: without Phase 0 they ran at scale 1.0
+// (Qwen3-8B-FP8: NaN from layer 0). promote() only records the scalar for FP8 weights.
+static bool phase0_has_work(const ModelConfig& cfg, const Model& model) {
+    return cfg.is_nvfp4_prequant || !model.nvfp4_scratch_.empty();
+}
+
 void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
     const ModelConfig& cfg, cudaStream_t stream) {
-    if (!cfg.is_nvfp4_prequant)
+    if (!phase0_has_work(cfg, *model_))
         return;
 
     // SafeTensors loader + weight_map.cpp deposit each scale tensor into
