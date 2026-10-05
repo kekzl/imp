@@ -365,6 +365,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("server.agent_scan_limit", cfg.server.agent_scan_limit);
     I("server.recurrent_snapshot_mb", cfg.server.recurrent_snapshot_mb);
     I("server.recurrent_snapshot_host_mb", cfg.server.recurrent_snapshot_host_mb);
+    B("server.recurrent_snapshot_int8", cfg.server.recurrent_snapshot_int8);
     I("server.snapshot_min_prompt_tokens", cfg.server.snapshot_min_prompt_tokens);
     B("server.transcript_snapshot", cfg.server.transcript_snapshot);
     B("server.transcript_token_reuse", cfg.server.transcript_token_reuse);

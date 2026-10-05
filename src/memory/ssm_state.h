@@ -2,6 +2,7 @@
 
 #include "core/tensor.h"
 #include "memory/backend.h"
+#include "memory/ssm_state_size.h"
 #include <cuda_runtime.h>
 #include <vector>
 
@@ -87,6 +88,7 @@ public:
     int reserved_slot(int i) const { return (i >= 0 && i < n_reserved_) ? max_sequences_ + i : -1; }
     int n_ssm_layers() const { return n_ssm_layers_; }
     QType h_dtype() const { return h_dtype_; }
+    const SsmStateGeometry& geometry() const { return geom_; }  // init()'s, for the snapshot codec
     // Bytes of the recurrent h state per (sequence, layer). Read by the
     // diagnostics.dump_gdn_state_dir drift dump, which has to size a host
     // buffer for one layer's state without re-deriving the geometry.
@@ -124,6 +126,7 @@ private:
     QType h_dtype_ = QType::F32;
     size_t conv_bytes_ = 0;       // per (seq, layer) conv state
     size_t h_bytes_ = 0;          // per (seq, layer) h state
+    SsmStateGeometry geom_{};
     size_t per_layer_bytes_ = 0;  // conv_bytes_ + h_bytes_
     size_t per_seq_bytes_ = 0;    // per_layer_bytes_ * n_ssm_layers_ + align256(extra_bytes_)
     size_t extra_bytes_ = 0;      // per-slot tail after the layers

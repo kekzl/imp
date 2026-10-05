@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "memory/kv_chain_link.h"
+#include "memory/ssm_state_size.h"
 
 namespace imp {
 
@@ -56,7 +57,9 @@ public:
     // budget_bytes: total device memory cap; capacity = budget / entry_bytes.
     // host_budget_bytes: pinned host memory cap for evicted entries (0 = off).
     // sidecar_bytes: per-entry tail after the slab for state outside it (PLE conv rows), 0 = none.
-    void init(size_t entry_bytes, size_t budget_bytes, size_t host_budget_bytes = 0, size_t sidecar_bytes = 0);
+    // int8_geom: store entries packed by ssm_snapshot_int8 (#2419); entry_bytes stays the slab size.
+    void init(size_t entry_bytes, size_t budget_bytes, size_t host_budget_bytes = 0, size_t sidecar_bytes = 0,
+              const SsmStateGeometry* int8_geom = nullptr);
 
     bool enabled() const { return capacity_ > 0; }
     size_t entry_bytes() const { return entry_bytes_; }
@@ -81,6 +84,8 @@ public:
                             const void* sidecar_src = nullptr, std::vector<KvChainLink> kv_chain = {});
     // Drop one entry (both tiers); a request holding it keeps it until release.
     void erase(size_t key);
+    // Copy entry `e` into the slab `dst` on `stream` (unpacks an int8 entry; host tier via H2D).
+    [[nodiscard]] bool restore(const RecurrentSnapshotEntry& e, void* dst, cudaStream_t stream) const;
     // Saves that landed in the host tier because no device slab was free, and
     // saves dropped because no slab of either tier was.
     int host_direct_saves() const { return host_direct_saves_; }
@@ -114,7 +119,11 @@ private:
     std::shared_ptr<BufferPool> pool_;
     size_t entry_bytes_ = 0;
     size_t sidecar_bytes_ = 0;
-    size_t buf_bytes_ = 0;  // entry_bytes_ + sidecar_bytes_
+    size_t stored_bytes_ = 0;  // entry_bytes_, or the packed size with int8_
+    size_t buf_bytes_ = 0;     // stored_bytes_ + sidecar_bytes_
+    bool int8_ = false;
+    SsmStateGeometry geom_{};
+    void* scratch_ = nullptr;  // device, stored_bytes_: packs host saves, unpacks host restores
     int capacity_ = 0;
     int host_capacity_ = 0;
     int allocated_bufs_ = 0;  // pre-allocated at init (== capacity_)

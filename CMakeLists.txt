@@ -181,6 +181,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/kv_cache.cu
     src/memory/kv_cache_minmax.cu
     src/memory/kv_cache_scales.cu
+    src/memory/ssm_snapshot_int8.cu
     src/memory/kv_cache_manager.cpp
     src/memory/kv_cache_manager_spill.cpp
     src/memory/kv_cache_manager_session.cpp
@@ -875,6 +876,8 @@ if(IMP_BUILD_TESTS)
         tests/test_hf_config_loader.cpp
         # Host-placed token embedding: FP16 bits equal to the VRAM upload (#2484).
         tests/test_host_embedding.cpp
+        # Packed recurrent snapshots: int8 h rows, raw conv window and tail (#2419).
+        tests/test_ssm_snapshot_int8.cpp
         # Qwen3-Next fused GDN inputs regrouped into the Qwen3.5 slots (#2410).
         tests/test_gdn_fused_split.cpp
         # Golden ModelConfig dump per HF config fixture (#2537).
@@ -1296,6 +1299,7 @@ if(IMP_BUILD_TESTS)
         tests/test_vmm_backend.cu
         tests/test_green_ctx.cu
         tests/test_capture_abort.cu
+        tests/test_ssm_snapshot_int8_gpu.cu
         tests/test_prefix_cache_equiv.cpp
         tests/test_kv_cache_gpu.cpp
         tests/test_recurrent_snapshot_store.cpp

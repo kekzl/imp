@@ -327,6 +327,9 @@ struct RuntimeConfig {
         // slots): more concurrent multi-turn sessions keep their tail-only
         // prefill. 0 = off.
         int recurrent_snapshot_host_mb = 2048;
+        // Store recurrent snapshots with the h state as int8 rows + FP32 row scales (#2419):
+        // ~1.8x slots in both budgets; the conv window and per-slot tail stay exact.
+        bool recurrent_snapshot_int8 = false;
         // A prompt whose block-aligned prefix is shorter than this takes no
         // prefix-cache snapshot (recurrent slab or SWA window) and no
         // prefill split at the boundary, since the split costs every first

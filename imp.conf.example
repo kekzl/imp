@@ -853,6 +853,9 @@ recurrent_snapshot_mb = 256
 # (one H2D of one slab). Sessions beyond the device slot count keep their
 # tail-only prefill. 0 = off.
 recurrent_snapshot_host_mb = 2048
+# int8 h state (groups of 32 + FP32 scales) in the snapshot store: ~1.8x slots, but restores
+# moved the next token (top-1 flips 3 of 7 chained restores, #2419). Experimental, expires: 2026-11-05.
+recurrent_snapshot_int8 = false
 # Prompts whose block-aligned prefix is shorter than this take no snapshot
 # and no prefill split at the boundary (the split is two eager chunks plus a
 # sync: 35-token prompt TTFT floor 36 -> 22 ms unsplit on Qwen3.8-27B-NVFP4,

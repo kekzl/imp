@@ -43,6 +43,7 @@ bool SSMState::init(int n_ssm_layers, int max_sequences, int conv_channels, int 
     // plan charges the same header, so what is charged is what is taken.
     const SsmStateGeometry geom{n_ssm_layers_, conv_channels, conv_kernel,
                                 n_heads,       head_dim_ssm, state_size, h_dtype_, extra_bytes_per_slot};
+    geom_ = geom;
     extra_bytes_ = extra_bytes_per_slot;
     conv_bytes_ = ssm_conv_bytes_per_layer(geom);
     h_bytes_ = ssm_h_bytes_per_layer(geom);

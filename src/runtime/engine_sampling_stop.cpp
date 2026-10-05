@@ -376,10 +376,13 @@ bool Engine::fill_recurrent_state(const Request& req, InferenceState& state, boo
                                   n, req.id);
                     return false;
                 }
-                // cudaMemcpyDefault: the entry is a device slab or, from the
-                // store's host tier, pinned host memory (H2D on the stream).
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(slot), req.recurrent_restore->data,
-                                                   ssm_state_->per_seq_bytes(), cudaMemcpyDefault, stream));
+                // Device slab or pinned host-tier slab, packed or not: the store copies (H2D on the stream).
+                if (!recurrent_snapshots_->restore(*req.recurrent_restore, ssm_state_->seq_base(slot),
+                                                   stream)) {
+                    IMP_LOG_ERROR("RecurrentSnapshot: restore of %d tokens for req %d failed",
+                                  req.recurrent_restore->n_tokens, req.id);
+                    return false;
+                }
                 IMP_LOG_DEBUG("RecurrentSnapshot: restored %d-token state for req %d (slot %d, %s)",
                               req.recurrent_restore->n_tokens, req.id, slot,
                               req.recurrent_restore->on_host ? "host tier" : "device");

@@ -1,9 +1,12 @@
 #include "memory/recurrent_snapshot_store.h"
 #include "core/logging.h"
+#include "memory/ssm_snapshot_int8.h"
 
 namespace imp {
 
 RecurrentSnapshotStore::~RecurrentSnapshotStore() {
+    if (scratch_)
+        IMP_CUDA_CHECK_LOG(cudaFree(scratch_));
     if (!pool_)
         return;
     std::vector<void*> to_free, to_free_host;
@@ -21,14 +24,27 @@ RecurrentSnapshotStore::~RecurrentSnapshotStore() {
 }
 
 void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_t host_budget_bytes,
-                                  size_t sidecar_bytes) {
+                                  size_t sidecar_bytes, const SsmStateGeometry* int8_geom) {
     entry_bytes_ = entry_bytes;
     sidecar_bytes_ = sidecar_bytes;
-    buf_bytes_ = entry_bytes + sidecar_bytes;
+    stored_bytes_ = entry_bytes;
+    if (int8_geom) {
+        const size_t packed = ssm_snapshot_int8_layout(*int8_geom).total;
+        if (packed > 0 && packed < entry_bytes && cudaMalloc(&scratch_, packed) == cudaSuccess) {
+            int8_ = true;
+            geom_ = *int8_geom;
+            stored_bytes_ = packed;
+        } else {
+            IMP_LOG_WARN(
+                "RecurrentSnapshotStore: int8 packing unavailable for this state, storing %.1f MiB slabs",
+                entry_bytes / (1024.0 * 1024.0));
+        }
+    }
+    buf_bytes_ = stored_bytes_ + sidecar_bytes;
     int want = (entry_bytes > 0) ? static_cast<int>(budget_bytes / buf_bytes_) : 0;
     if (want <= 0) {
         IMP_LOG_INFO("RecurrentSnapshotStore: disabled (budget %.0f MiB < one %.1f MiB slot)",
-                     budget_bytes / (1024.0 * 1024.0), entry_bytes / (1024.0 * 1024.0));
+                     budget_bytes / (1024.0 * 1024.0), buf_bytes_ / (1024.0 * 1024.0));
         return;
     }
     // Allocate the buffers EAGERLY: engine init sizes weight caches, KV clamp and workspace
@@ -55,7 +71,7 @@ void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_
         IMP_LOG_ERROR(
             "RecurrentSnapshotStore: 0/%d slots x %.1f MiB allocated (budget %.0f MiB, %.0f MiB "
             "free) - hybrid prefix caching stays OFF; every turn re-prefills its whole prompt",
-            want, entry_bytes / (1024.0 * 1024.0), budget_bytes / (1024.0 * 1024.0),
+            want, buf_bytes_ / (1024.0 * 1024.0), budget_bytes / (1024.0 * 1024.0),
             free_bytes / (1024.0 * 1024.0));
         pool_.reset();
         return;
@@ -67,10 +83,11 @@ void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_
         IMP_LOG_WARN(
             "RecurrentSnapshotStore: only %d of %d slots x %.1f MiB allocated (budget %.0f MiB) - "
             "the device refused the rest; fewer snapshots means more full re-prefills",
-            capacity_, want, entry_bytes / (1024.0 * 1024.0), budget_bytes / (1024.0 * 1024.0));
+            capacity_, want, buf_bytes_ / (1024.0 * 1024.0), budget_bytes / (1024.0 * 1024.0));
     }
-    IMP_LOG_INFO("RecurrentSnapshotStore: %d/%d slots x %.1f MiB pre-allocated (budget %.0f MiB)",
-                 capacity_, want, entry_bytes / (1024.0 * 1024.0), budget_bytes / (1024.0 * 1024.0));
+    IMP_LOG_INFO("RecurrentSnapshotStore: %d/%d slots x %.1f MiB%s pre-allocated (budget %.0f MiB)",
+                 capacity_, want, buf_bytes_ / (1024.0 * 1024.0), int8_ ? " (int8 h state)" : "",
+                 budget_bytes / (1024.0 * 1024.0));
     // Host tier: pinned, so the eviction D2H and the restore H2D run as
     // stream-ordered async copies. Same eager policy, a failed pin caps it.
     const int want_host = static_cast<int>(host_budget_bytes / buf_bytes_);
@@ -83,7 +100,7 @@ void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_
     }
     if (want_host > 0) {
         IMP_LOG_INFO("RecurrentSnapshotStore: host tier %d/%d slots x %.1f MiB pinned (budget %.0f MiB)",
-                     host_capacity_, want_host, entry_bytes / (1024.0 * 1024.0),
+                     host_capacity_, want_host, buf_bytes_ / (1024.0 * 1024.0),
                      host_budget_bytes / (1024.0 * 1024.0));
         if (host_capacity_ < want_host)
             IMP_LOG_WARN(
@@ -216,9 +233,17 @@ void* RecurrentSnapshotStore::acquire_buffer_(cudaStream_t stream) {
 
 bool RecurrentSnapshotStore::copy_in_(void* buf, const void* src, const void* sidecar_src, cudaMemcpyKind kind,
                                       cudaStream_t stream) const {
-    if (cudaMemcpyAsync(buf, src, entry_bytes_, kind, stream) != cudaSuccess)
+    if (int8_) {
+        // Device slab: pack in place. Host slab: pack into the scratch, then D2H the packed bytes.
+        const bool to_device = kind == cudaMemcpyDeviceToDevice;
+        if (!ssm_snapshot_int8_encode(src, to_device ? buf : scratch_, geom_, stream))
+            return false;
+        if (!to_device && cudaMemcpyAsync(buf, scratch_, stored_bytes_, kind, stream) != cudaSuccess)
+            return false;
+    } else if (cudaMemcpyAsync(buf, src, entry_bytes_, kind, stream) != cudaSuccess) {
         return false;
-    return sidecar_bytes_ == 0 || cudaMemcpyAsync(static_cast<char*>(buf) + entry_bytes_, sidecar_src,
+    }
+    return sidecar_bytes_ == 0 || cudaMemcpyAsync(static_cast<char*>(buf) + stored_bytes_, sidecar_src,
                                                   sidecar_bytes_, kind, stream) == cudaSuccess;
 }
 
@@ -283,6 +308,18 @@ void RecurrentSnapshotStore::erase(size_t key) {
         host_lru_map_.erase(lit);
     }
     host_entries_.erase(key);
+}
+
+bool RecurrentSnapshotStore::restore(const RecurrentSnapshotEntry& e, void* dst, cudaStream_t stream) const {
+    if (!int8_)
+        return cudaMemcpyAsync(dst, e.data, entry_bytes_, cudaMemcpyDefault, stream) == cudaSuccess;
+    const void* packed = e.data;
+    if (e.on_host) {
+        if (cudaMemcpyAsync(scratch_, e.data, stored_bytes_, cudaMemcpyHostToDevice, stream) != cudaSuccess)
+            return false;
+        packed = scratch_;
+    }
+    return ssm_snapshot_int8_decode(packed, dst, geom_, stream);
 }
 
 void RecurrentSnapshotStore::clear() {

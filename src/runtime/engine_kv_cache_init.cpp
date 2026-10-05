@@ -806,8 +806,9 @@ bool Engine::init_kv_cache() {
                 recurrent_snapshots_ = std::make_unique<RecurrentSnapshotStore>();
                 recurrent_snapshots_->init(
                     ssm_state_->per_seq_bytes(), static_cast<size_t>(budget_mb) << 20,
-                    static_cast<size_t>(std::max(runtime_config_.server.recurrent_snapshot_host_mb, 0))
-                        << 20);
+                    static_cast<size_t>(std::max(runtime_config_.server.recurrent_snapshot_host_mb, 0)) << 20,
+                    /*sidecar_bytes=*/0,
+                    runtime_config_.server.recurrent_snapshot_int8 ? &ssm_state_->geometry() : nullptr);
                 if (recurrent_snapshots_->enabled()) {
                     scheduler_->set_prefix_reuse_limit(
                         [this](Request& r) { return hybrid_prefix_reuse_limit_(r); });
