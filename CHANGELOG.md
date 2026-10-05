@@ -10,6 +10,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `imp-quantize --calib-groups` X/Y (#2476): MoE expert gate/up into an expert-only norm, per-expert down into up rows; `--calibrate` records per-expert statistics. Opt-in, no measured gain: Gemma-4-26B RTN rounding alone spreads PPL 16.7551..19.0110; gemma4 `--calib` needs a selector.
 
 ### Changed
+- The split-K decode attention reduce kernel launches with PDL (#2471): Qwen3-30B-A3B-NVFP4 (FP8 KV) tg128 after an 8192-token prompt 289.7..290.8 -> 293.8..294.5 tok/s. A reduce in the last split CTA measured 274.4 tok/s and was dropped.
 - Dense NVFP4 prefill (M > 32) fuses SwiGLU with the down-projection input quantize (#2470): one kernel instead of two, bytes identical. Qwen3-14B-NVFP4 pp4096 156.4..156.6 -> 154.4..154.8 ms.
 - `constrained.jump_ahead` (opt-in) emits a schema-forced span in the draft's split and drafts from the request's own earlier split (`constrained.jump_ahead_trust`, roadmap row 46): Qwen3-14B-NVFP4 one-key array schema 155.4 -> 163.1 tok/s, 159.9 with jump-ahead off.
 - Host-resident NVFP4 experts and the host token embedding are copied into pageable memory, then `cudaHostRegister`ed instead of `cudaHostAlloc`ed (roadmap row 68): Qwen3.8-Flash-Next ready 80.4 / 86.2 -> 64.0 / 59.0 s, Qwen3-Coder-Next 58.9 -> 25.9..31.5 s, decode unchanged.

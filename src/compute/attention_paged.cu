@@ -4,6 +4,7 @@
 #include <string>
 #include "compute/attention_paged_common.cuh"
 #include "core/pdl_device.cuh"
+#include "core/pdl_launch.cuh"
 #include "compute/attention.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
@@ -1003,6 +1004,8 @@ __global__ void paged_attention_reduce_kernel(
     const int head_idx = blockIdx.y;
     const int tid = threadIdx.x;
 
+    pdl_wait();     // partials are the split-K phase 1 outputs (#2471)
+    pdl_trigger();  // scheduling only: o_proj prefetches its weights during the merge
     const int partial_stride = 2 + head_dim;
     const float* base = partial_out +
                         (int64_t)((batch_idx * n_heads + head_idx) * num_splits) * partial_stride;
@@ -1156,8 +1159,9 @@ void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int 
     // The reduce kernel has always applied the sink term; this launcher used to
     // hard-code nullptr, so every quantised-KV split-K path silently dropped it
     // (#1345). Callers that have no sinks still pass nullptr and are unchanged.
-    paged_attention_reduce_kernel<<<grid, block, 0, stream>>>(partial, O, n_heads, head_dim, num_splits,
-                                                              attn_sinks);
+    pdl::enable_kernel(paged_attention_reduce_kernel);
+    pdl::launch(paged_attention_reduce_kernel, grid, block, size_t(0), stream,
+                static_cast<const float*>(partial), O, n_heads, head_dim, num_splits, attn_sinks);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -1434,11 +1438,8 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
             num_splits = 1;  // re-dispatch below
         } else {
             // Phase 2: reduce partials
-            dim3 grid2(batch_size, n_heads);
-            dim3 block2(128);
-            paged_attention_reduce_kernel<<<grid2, block2, 0, stream>>>(
-                partial, reinterpret_cast<half*>(O.data), n_heads, head_dim, num_splits, sinks_h);
-            IMP_CUDA_CHECK_LAUNCH();
+            paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads,
+                                          head_dim, num_splits, stream, sinks_h);
         }
     }
 
