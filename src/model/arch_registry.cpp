@@ -46,6 +46,9 @@ constexpr ArchSpelling kSpellings[] = {
     {HF_CLASS, "DeepseekV3ForCausalLM", ModelArch::DEEPSEEK},
     {HF_MODEL_TYPE, "deepseek_v2", ModelArch::DEEPSEEK},
     {HF_MODEL_TYPE, "deepseek_v3", ModelArch::DEEPSEEK},
+    // GLM-4.7-Flash: DeepSeek-V3 MLA + noaux_tc MoE (rope_interleave default true)
+    {HF_CLASS, "Glm4MoeLiteForCausalLM", ModelArch::DEEPSEEK},
+    {HF_MODEL_TYPE, "glm4_moe_lite", ModelArch::DEEPSEEK},
 
     // NEMOTRON_H_MOE
     {GGUF, "nemotron_h_moe", ModelArch::NEMOTRON_H_MOE},

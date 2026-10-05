@@ -73,6 +73,36 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
     return true;
 }
 
+// GLM-4.x body: NAME<arg_key>K</arg_key><arg_value>V</arg_value>... The template writes strings raw
+// and everything else as JSON (`tojson if v is not string`), so a value that parses as JSON is JSON.
+bool parse_glm_arg_key_call(const std::string& body, ParsedToolCall& tc) {
+    const size_t first = body.find("<arg_key>");
+    const size_t name_end = first == std::string::npos ? body.size() : first;
+    const size_t a = body.find_first_not_of("\n\r\t ");
+    const size_t b = body.find_last_not_of("\n\r\t ", name_end == 0 ? 0 : name_end - 1);
+    if (a == std::string::npos || b == std::string::npos || a > b || a >= name_end)
+        return false;
+    tc.name = body.substr(a, b - a + 1);
+    json args = json::object();
+    size_t pos = first;
+    while (pos != std::string::npos) {
+        const size_t k0 = pos + 9;  // "<arg_key>"
+        const size_t k1 = body.find("</arg_key>", k0);
+        const size_t v0 = body.find("<arg_value>", k1 == std::string::npos ? k0 : k1);
+        const size_t v1 = v0 == std::string::npos ? v0 : body.find("</arg_value>", v0 + 11);
+        if (k1 == std::string::npos || v1 == std::string::npos)
+            return false;
+        const std::string key = body.substr(k0, k1 - k0);
+        const std::string val = body.substr(v0 + 11, v1 - v0 - 11);
+        json jv = json::parse(val, nullptr, false);
+        tc.raw_params.emplace_back(key, val);
+        args[key] = jv.is_discarded() ? json(val) : std::move(jv);
+        pos = body.find("<arg_key>", v1 + 12);
+    }
+    tc.arguments = dump_safe(args);
+    return true;
+}
+
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_chatml(
     const std::string& text, std::atomic<int>& next_tool_call_id) {
     std::vector<ParsedToolCall> calls;

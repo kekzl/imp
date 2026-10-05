@@ -540,7 +540,7 @@ void BatchingEngine::worker_loop() {
                         // (the handlers count it and drop its text).
                         reason = "length";
                     } else {
-                        if (token == tok->eos_id()) {
+                        if (tok->is_eos(token)) {  // every EOS id, incl. generation_config extras
                             reason = "stop";
                             is_stop_token = true;
                         } else {
@@ -600,7 +600,7 @@ void BatchingEngine::worker_loop() {
                                                                                         : "cancelled";
                     if (!req->output_tokens.empty() && !req->ignore_eos) {
                         int32_t last = req->output_tokens.back();
-                        if (last == tok->eos_id())
+                        if (tok->is_eos(last))
                             reason = "stop";
                         for (int32_t sid : stop_ids) {
                             if (last == sid) {

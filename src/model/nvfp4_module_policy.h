@@ -165,6 +165,7 @@ inline CompiledIgnoreEntry compile_ignore_entry(std::string_view raw) {
 //   vision tower loader reads F16/BF16/F32 only; an NVFP4 tower is unreadable
 //   MTP head     loader has no scale companions; quantized draft acceptance went 81%->0/24
 //   MLA latent   kv_a_proj_with_mqa/kv_b_proj are sliced/reshaped by the runtime (bisected)
+//                q_a_proj (q_lora down-proj) has no NVFP4 scale route; kept like kv_a_proj
 //   MoE router   FP4 across 16 shared scales flips the top-k pick (.gate.weight only)
 //   K % 16       the kernel's hard-coded micro-block size
 [[nodiscard]] inline bool role_excluded(const std::string& name, int64_t K, bool allow_lm_head, std::string& why_not) {
@@ -192,8 +193,8 @@ inline CompiledIgnoreEntry compile_ignore_entry(std::string_view raw) {
         why_not = "MTP draft head (its loader reads the weight by name, without scales)";
         return true;
     }
-    if (contains_(name, "kv_a_proj") || contains_(name, "kv_b_proj")) {
-        why_not = "MLA latent projection (runtime slices it - must stay full precision)";
+    if (contains_(name, "kv_a_proj") || contains_(name, "kv_b_proj") || contains_(name, "q_a_proj")) {
+        why_not = "MLA latent projection (runtime slices it, or q_lora down-proj: full precision)";
         return true;
     }
     // Gemma-4 spells the gating matrix `router.proj.weight` (weight_map.cpp -> moe_gate).

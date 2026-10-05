@@ -4,6 +4,7 @@
 #include "model/model_config.h"
 
 #include <cmath>
+#include <string>
 
 namespace imp {
 
@@ -49,6 +50,26 @@ void adjust_mla_yarn_attn_factor(ModelConfig& cfg) {
         cfg.yarn_attn_factor, hf_rope_mscale, ms_den * ms_den);
 }
 
+// V3-style router (DeepSeek-V3, GLM-4.7-Flash): scoring_func sigmoid or topk_method noaux_tc ->
+// sigmoid scores, e_score_correction_bias added for selection only, then norm_topk_prob and
+// routed_scaling_factor on the gathered weights. V2-Lite (softmax, greedy) sets none of these.
+void parse_deepseek_router(const JValue& eff, ModelConfig& cfg) {
+    std::string scoring, topk_method;
+    jobj_opt_string(eff, "scoring_func", scoring);
+    jobj_opt_string(eff, "topk_method", topk_method);
+    if (scoring == "sigmoid" || topk_method == "noaux_tc")
+        cfg.moe_sigmoid_gating = true;
+    jobj_opt_float(eff, "routed_scaling_factor", cfg.expert_weights_scale);
+    const JValue* ntp = jobj_find(eff, "norm_topk_prob");
+    if (ntp && ntp->type == JType::NUMBER)
+        cfg.expert_weights_norm = (ntp->num_val != 0.0);
+    int n_group = 1;
+    jobj_opt_int(eff, "n_group", n_group);
+    if (n_group > 1)
+        IMP_LOG_WARN("  DeepSeek router n_group=%d: grouped top-k is not modelled (all experts compete)",
+                     n_group);
+}
+
 }  // namespace
 
 // DeepSeek V2/V3 Multi-head Latent Attention (MLA) config.
@@ -61,6 +82,7 @@ bool parse_deepseek_config(const JValue& /*root*/, const JValue& eff, ModelConfi
     jobj_opt_int(eff, "qk_nope_head_dim", cfg.qk_nope_head_dim);
     jobj_opt_int(eff, "v_head_dim", cfg.v_head_dim);
     jobj_opt_int(eff, "first_k_dense_replace", cfg.first_k_dense_replace);
+    parse_deepseek_router(eff, cfg);
     if (!cfg.is_mla())
         return true;
     // Decoupled-head layout: each attention head has qk_nope_head_dim

@@ -123,6 +123,8 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         cache_weight(L.kv_a_proj, L.kv_a_proj.qtype, TensorKind::KV_A_PROJ);
         cache_weight(L.kv_a_layernorm, L.kv_a_layernorm.qtype, TensorKind::KV_A_NORM);
         cache_weight(L.kv_b_proj, L.kv_b_proj.qtype, TensorKind::KV_B_PROJ);
+        cache_weight(L.q_a_proj, L.q_a_proj.qtype, TensorKind::KV_A_PROJ);
+        cache_weight(L.q_a_layernorm, L.q_a_layernorm.qtype, TensorKind::KV_A_NORM);
     }
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model_->layer(i);

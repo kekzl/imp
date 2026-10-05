@@ -12,6 +12,15 @@ bool contains(std::string_view s, std::string_view needle) {
     return s.find(needle) != std::string_view::npos;
 }
 
+// MLA latent down-projections (kv_a_proj_with_mqa, q_lora q_a_proj): precision-sensitive, FP16 tier.
+bool is_mla_down_proj(std::string_view n) {
+    return contains(n, ".kv_a_proj_with_mqa.") || contains(n, ".kv_a_proj.") || contains(n, ".q_a_proj.");
+}
+
+bool is_mla_latent_norm(std::string_view n) {
+    return contains(n, ".kv_a_layernorm.") || contains(n, ".q_a_layernorm.");
+}
+
 }  // namespace
 
 TensorKind match_tensor_kind(std::string_view name) {
@@ -46,9 +55,9 @@ TensorKind match_tensor_kind(std::string_view name) {
             return TensorKind::QK_NORM_K;
         // MLA (DeepSeek-V2/V3): kv_a_proj_with_mqa, kv_a_layernorm, kv_b_proj
         // Check kv_a_proj_with_mqa before kv_a_proj to avoid prefix ambiguity.
-        if (contains(name, ".kv_a_proj_with_mqa.") || contains(name, ".kv_a_proj."))
+        if (is_mla_down_proj(name))
             return TensorKind::KV_A_PROJ;
-        if (contains(name, ".kv_a_layernorm."))
+        if (is_mla_latent_norm(name))
             return TensorKind::KV_A_NORM;
         if (contains(name, ".kv_b_proj."))
             return TensorKind::KV_B_PROJ;

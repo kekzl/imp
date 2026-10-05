@@ -110,6 +110,7 @@ ExecShape exec_shape_of(const Model& model) {
         s.head_dim_max = cfg.head_dim > 0 ? cfg.head_dim
                                           : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
     s.kv_lora_rank = cfg.kv_lora_rank;
+    s.q_lora_rank = cfg.q_lora_rank;
     s.qk_rope_head_dim = cfg.qk_rope_head_dim;
     s.qk_nope_head_dim = cfg.qk_nope_head_dim;
     s.v_head_dim = cfg.v_head_dim;
@@ -449,6 +450,9 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
                           (kva_out + static_cast<size_t>(shape.kv_lora_rank) +
                            static_cast<size_t>(shape.qk_rope_head_dim) + kvb_out);
         out.mla_scratch += 4 * kTakeAlign;  // four takes
+        // q_lora q_a take (V3, GLM); q_lora_rank 0 adds nothing.
+        const size_t q_lora = static_cast<size_t>(std::max(shape.q_lora_rank, 0));
+        out.mla_scratch += T * 2 * q_lora + kTakeAlign * static_cast<size_t>(q_lora > 0);
 
         // Absorbed-decode latent cache: sized from the FULL sequence length, NOT max_tokens
         // (mla_absorb_max_seq_ is deliberately uncapped where max_tokens_ clamps at 4096).

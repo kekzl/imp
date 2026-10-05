@@ -20,6 +20,7 @@
 
 #include "common/exit_codes.h"
 #include "act_prescale.h"
+#include "card_fit.h"
 #include "awq.h"
 #include "checkpoint_out.h"
 #include "expert_destack.h"
@@ -157,6 +158,45 @@ std::expected<std::vector<uint16_t>, std::string> tensor_as_fp16(
     return out;
 }
 
+// A tensor left at source precision: copied through, unless the plan folds into it. A 1-D producer
+// (RMSNorm weight, bias) takes AWQ's 1/s in its own dtype; a matrix the plan scales (the activation
+// pre-scale's kept producer, GLM kv_b_proj) is written as F16 with the fold. false = refused (printed).
+bool write_kept_tensor(const RawTensor& t, const awq::Plan& plan,
+                       const std::map<std::string, const RawTensor*>& fp8, bool dry_run,
+                       std::vector<std::vector<unsigned char>>& folded_store,
+                       std::vector<std::vector<uint16_t>>& widened_store, std::vector<SafeTensorsOut>& out) {
+    const void* data = t.data;
+    if (const auto vd = plan.vec_div.find(t.name); vd != plan.vec_div.end() && !dry_run) {
+        bool folded = false;
+        const auto off = plan.vec_offset.find(t.name);
+        folded_store.push_back(folded_copy(t, vd->second,
+                                           off == plan.vec_offset.end() ? NormOffset::Plain : off->second,
+                                           folded));
+        if (!folded) {
+            fprintf(stderr,
+                    "  %s: cannot fold the AWQ scale into a %s tensor of %lld elements "
+                    "— refusing to write a half-transformed checkpoint\n",
+                    t.name.c_str(), t.dtype.c_str(), (long long)t.numel());
+            return false;
+        }
+        data = folded_store.back().data();
+    }
+    if (dry_run || t.shape.size() != 2 ||
+        (!plan.row_div.contains(t.name) && !plan.col_scale.contains(t.name))) {
+        out.push_back({t.name, t.dtype, t.shape, data, t.nbytes});
+        return true;
+    }
+    auto h = tensor_as_fp16(t, fp8, plan);
+    if (!h) {
+        fprintf(stderr, "  %s: %s\n", t.name.c_str(), h.error().c_str());
+        return false;
+    }
+    widened_store.push_back(std::move(*h));
+    out.push_back({t.name, "F16", t.shape, widened_store.back().data(),
+                   widened_store.back().size() * sizeof(uint16_t)});
+    return true;
+}
+
 // 3-D expert stacks (gpt-oss, Gemma-4) are split into the per-expert 2-D matrices the loader
 // reads, by the model's layout descriptor (expert_destack.h). Without a descriptor the checkpoint
 // is refused before anything is written: the experts are the bulk of the bytes, a guessed layout
@@ -289,11 +329,6 @@ bool quantize_expert_stack(const RawTensor& t, const std::vector<quantize::Desta
     return true;
 }
 
-// What is gone from the card before imp allocates a single weight: kMeasuredLibraryReserveBytes
-// (src/memory/plan.h, re-measure after a CUDA/driver bump) and the CUDA primary context size
-// for this WSL2/WDDM box. Both are measurements, not headroom guesses.
-constexpr size_t kContextBytes = 1680ull * 1024 * 1024;
-
 // Where the bytes that did NOT shrink went, largest first: the compression ratio answers
 // "did it work", not "why is it still this big". Every line is a role deliberately left at
 // source precision, so the table doubles as what could be traded (e.g. the embedding pair is a
@@ -340,40 +375,6 @@ void push_mxfp8(const RawTensor& t, const std::vector<uint16_t>& h, bool dry_run
     imp::mxfp8_quantize(h.data(), N, K, q.data(), s.data());
     out.push_back({t.name, "F8_E4M3", {N, K}, q.data(), q.size()});
     out.push_back({t.name + "_scale", "U8", {N, K / imp::kMxfp8Block}, s.data(), s.size()});
-}
-
-// Reports the checkpoint against the target card by ON-DISK size, not a VRAM prediction: what
-// the engine resides is weights PLUS a scale-factor cache MINUS what the loader skips (vision
-// tower uploaded separately, MTP sidecar maybe unloaded). Measured on Qwen3.8-27B: 18.60 GiB
-// disk arrived as 16.08 GiB weights + 1.49 GiB CUTLASS scale cache - right order, wrong decimal.
-// mx_widen: bytes the loader adds when it widens MXFP8 projections to BF16 (#2475).
-void report_card_fit(size_t bytes_out, size_t mx_widen) {
-    size_t free_b = 0, total_b = 0;
-    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess || total_b == 0)
-        return;  // no device visible: the size line above still stands on its own
-    const double mib = 1024.0 * 1024.0;
-    const size_t overhead = kContextBytes + kMeasuredLibraryReserveBytes;
-    if (total_b <= overhead)
-        return;
-    const double budget = double(total_b - overhead) / mib;
-    const double ckpt = double(bytes_out + mx_widen) / mib;
-    const char* where = mx_widen > 0 ? "once widened" : "on disk";
-    if (mx_widen > 0)
-        printf("\nMXFP8 projections are widened to BF16 at load: +%.0f MiB counted below",
-               double(mx_widen) / mib);
-    printf("\ncard: %.0f MiB total, less %.0f context and %.0f library reserve leaves %.0f MiB",
-           double(total_b) / mib, kContextBytes / mib, kMeasuredLibraryReserveBytes / mib, budget);
-    if (ckpt >= budget)
-        printf(
-            "\n      this checkpoint is %.0f MiB %s and does NOT fit: %.0f MiB short before"
-            "\n      any KV cache or workspace",
-            ckpt, where, ckpt - budget);
-    else
-        printf(
-            "\n      this checkpoint is %.0f MiB %s, leaving %.0f MiB for the KV cache and"
-            "\n      workspaces. On-disk size is not the resident figure: a scale-factor cache is"
-            "\n      built on top, and a vision tower or MTP sidecar may load separately or not at all",
-            ckpt, where, budget - ckpt);
 }
 
 }  // namespace
@@ -549,7 +550,7 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    quantize::apply_lfm2_prescale(opt, opened, gated_q_proj, plan);
+    quantize::apply_act_prescale(opt, opened, gated_q_proj, plan);
 
     // FP8 sources store an E4M3 weight beside a weight_scale_inv block grid (DeepSeek-V3, Qwen3.8 FP8)
     // or a scalar weight_scale (Modelopt, #2473); paired up front across shards since the two aren't
@@ -820,26 +821,8 @@ int main(int argc, char** argv) {
                     std::string mod = t.name.substr(0, t.name.size() - strlen(".weight"));
                     excluded_modules.push_back(mod);
                 }
-                // Copied through — unless it is the producer AWQ folded 1/s
-                // into (an RMSNorm weight, or a bias on a scaled output).
-                const void* data = t.data;
-                auto vd = plan.vec_div.find(t.name);
-                if (vd != plan.vec_div.end() && !opt.dry_run) {
-                    bool folded = false;
-                    const auto off = plan.vec_offset.find(t.name);
-                    folded_store.push_back(folded_copy(
-                        t, vd->second, off == plan.vec_offset.end() ? NormOffset::Plain : off->second,
-                        folded));
-                    if (!folded) {
-                        fprintf(stderr,
-                                "  %s: cannot fold the AWQ scale into a %s tensor of %lld elements "
-                                "— refusing to write a half-transformed checkpoint\n",
-                                t.name.c_str(), t.dtype.c_str(), (long long)t.numel());
-                        return 1;
-                    }
-                    data = folded_store.back().data();
-                }
-                out.push_back({t.name, t.dtype, t.shape, data, t.nbytes});
+                if (!write_kept_tensor(t, plan, fp8_scale_of, opt.dry_run, folded_store, widened_store, out))
+                    return 1;
                 bytes_out += t.nbytes;
                 copied_bytes_by_reason[why] += t.nbytes;
                 n_copied++;
@@ -982,7 +965,7 @@ int main(int argc, char** argv) {
             fprintf(stderr, "\n%s\n", wrote.error().c_str());
     }
     report_copied_breakdown(copied_bytes_by_reason, bytes_out);
-    report_card_fit(bytes_out, mx_widen_bytes);
+    quantize::report_card_fit(bytes_out, mx_widen_bytes);
     printf("\n");
     return 0;
 }

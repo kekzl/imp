@@ -69,6 +69,7 @@ struct ExecShape {
     // n_layers is only read by the absorb term, which is per-layer.
     int n_layers = 0;
     int kv_lora_rank = 0;  // > 0 IS the is_mla() predicate (model_config.h)
+    int q_lora_rank = 0;   // > 0: q_a scratch [max_tokens, q_lora_rank] (V3, GLM)
     int qk_rope_head_dim = 0;
     int qk_nope_head_dim = 0;
     int v_head_dim = 0;

@@ -727,7 +727,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
 
             // Drops structural stop tokens that slip through: the engine's think-block implicit-close passes
             // one EOS-like token to recover from empty thinking, which must never reach user-visible content.
-            bool is_structural_stop = (token == ctx.snap.tok->eos_id());
+            bool is_structural_stop = (ctx.snap.tok->is_eos(token));
             if (!is_structural_stop && ctx.snap.have_template) {
                 for (int32_t stop_id : ctx.snap.stop_token_ids) {
                     if (token == stop_id) {
@@ -752,7 +752,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
 
             // Check stop conditions
             if (evt.is_last) {
-                if (token == ctx.snap.tok->eos_id()) {
+                if (ctx.snap.tok->is_eos(token)) {
                     finish = evt.finish_reason ? evt.finish_reason : "stop";
                     break;
                 }

@@ -901,3 +901,30 @@ TEST(StrictToolConstraint, UnnamedToolRefusesTheWholeSet) {
                                {"function", {{"name", ""}, {"strict", true}}}}});
     EXPECT_TRUE(collect_strict_tool_constraint(ChatTemplateFamily::CHATML, tools, "auto").empty());
 }
+
+// GLM-4.7-Flash body: strings raw, everything else JSON (template: tojson if v is not string).
+TEST(ToolCallGlm, ArgKeyBodyParsesThroughTheChatmlParser) {
+    std::atomic<int> next_id{0};
+    const std::string text =
+        "Let me check.\n<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value>"
+        "<arg_key>days</arg_key><arg_value>3</arg_value><arg_key>units</arg_key>"
+        "<arg_value>{\"temp\": \"C\"}</arg_value></tool_call>";
+    auto [content, calls] = parse_tool_calls_chatml(text, next_id);
+    EXPECT_EQ(content, "Let me check.");
+    ASSERT_EQ(calls.size(), 1u);
+    EXPECT_EQ(calls[0].name, "get_weather");
+    const json args = json::parse(calls[0].arguments);
+    EXPECT_EQ(args["city"], "Paris");
+    EXPECT_EQ(args["days"], 3);
+    EXPECT_EQ(args["units"]["temp"], "C");
+}
+
+TEST(ToolCallGlm, NoArgumentsAndMalformedPairs) {
+    ParsedToolCall tc;
+    EXPECT_FALSE(parse_glm_arg_key_call("<arg_key>x</arg_key><arg_value>1</arg_value>", tc));  // no name
+    EXPECT_FALSE(parse_glm_arg_key_call("f<arg_key>x</arg_key>", tc));                         // no value
+    ParsedToolCall ok;
+    ASSERT_TRUE(parse_glm_arg_key_call("list_files<arg_key>dir</arg_key><arg_value>/tmp</arg_value>", ok));
+    EXPECT_EQ(ok.name, "list_files");
+    EXPECT_EQ(json::parse(ok.arguments)["dir"], "/tmp");
+}

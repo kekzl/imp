@@ -291,7 +291,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         // Drops structural stop tokens that slip through: Engine::should_stop's think-block implicit-
         // close passes one EOS-like token through to recover from empty thinking, which must not render
         // as "<|im_end|>"/"<|endoftext|>" in user-visible content.
-        bool is_structural_stop = (token == snap_tok->eos_id());
+        bool is_structural_stop = (snap_tok->is_eos(token));
         if (!is_structural_stop && snap_have_template) {
             for (int32_t stop_id : snap_stop_token_ids) {
                 if (token == stop_id) {
@@ -321,7 +321,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
         if (evt.is_last) {
             // The engine marked this as the last token. Don't emit EOS/stop
             // tokens — they're structural, not content.
-            if (token == snap_tok->eos_id()) {
+            if (snap_tok->is_eos(token)) {
                 finish = evt.finish_reason ? evt.finish_reason : "stop";
                 break;
             }

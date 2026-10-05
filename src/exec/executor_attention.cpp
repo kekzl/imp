@@ -59,40 +59,6 @@ namespace imp {
 // (try_fa2_fp16qk_prefill, dispatch_gemv_qkv_fused, set_l2_persist_kv,
 //  clear_l2_persist) to keep this TU under the file-size gate.
 
-void GraphExecutor::qk_norm_separate_(const TransformerLayer& ly, Tensor& qv, Tensor& kk, int n, int nh,
-                                      int nkv, int hd, float eps, cudaStream_t stream) {
-    // Norm width from the weight's element count: heads*hd, a divisor of hd, else hd.
-    auto norm_dim = [hd](const Tensor& w, int heads) -> int {
-        const int wd = static_cast<int>(w.shape[0]);
-        if (wd == heads * hd)
-            return wd;
-        return (wd > 0 && wd < hd && hd % wd == 0) ? wd : hd;
-    };
-    auto apply = [&](Tensor& x, const Tensor& w, int heads) {
-        if (w.data == nullptr)
-            return;
-        const int d = norm_dim(w, heads);
-        int64_t flat[2] = {static_cast<int64_t>(n) * heads * hd / d, d};
-        Tensor view = x.reshape(2, flat);
-        rmsnorm(view, w, view, eps, stream, norm_w_off_);
-    };
-    apply(qv, ly.attn_q_norm, nh);
-    apply(kk, ly.attn_k_norm, nkv);
-}
-
-void GraphExecutor::quantize_attn_out_q8_(const Tensor& ao, int K, cudaStream_t stream) {
-    if (paged_attention_take_q8_epilogue())
-        return;
-    quantize_fp16_to_q8_1(static_cast<const half*>(ao.data), static_cast<block_q8_1*>(qscratch_.q8_1_buf),
-                          qscratch_.d8_buf, K, stream);
-}
-
-bool GraphExecutor::dp4a_qkv_route_(const TransformerLayer& ly, int n, const Tensor& no) const {
-    return n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr && no.qtype == QType::F16 &&
-           ly.wq.qtype == ly.wk.qtype && is_dp4a_qtype(ly.wq.qtype) && ly.wv.data != nullptr &&
-           is_dp4a_qtype(ly.wv.qtype);
-}
-
 void GraphExecutor::dp4a_qkv_(const TransformerLayer& ly, int layer, const Tensor& h, Tensor& no, Tensor& qv,
                               Tensor& kk, Tensor& vv, float eps, cudaStream_t stream) {
     auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);

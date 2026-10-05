@@ -293,6 +293,7 @@ struct TransformerLayer {
     // down-proj; kv_a_layernorm is RMSNorm on the 512-dim latent (never quantized); kv_b_proj
     // up-projects to 16*(128+128)=4096.
     Tensor kv_a_proj, kv_a_layernorm, kv_b_proj;
+    Tensor q_a_proj, q_a_layernorm;  // MLA q_lora_rank > 0 (V3, GLM): Q = wq(rmsnorm(q_a_proj(x)))
     Tensor q_bias, k_bias, v_bias;  // Attention biases (Qwen2)
     Tensor o_bias;                  // Output-projection bias (gpt-oss)
     Tensor attn_sinks;              // Per-head sink logits [n_heads] (gpt-oss)
@@ -365,6 +366,7 @@ struct TransformerLayer {
     TensorID wo_id = kInvalidTensorID;
     // MLA WeightRegistry indices
     TensorID kv_a_proj_id = kInvalidTensorID;
+    TensorID q_a_proj_id = kInvalidTensorID;
     TensorID kv_a_norm_id = kInvalidTensorID;
     TensorID kv_b_proj_id = kInvalidTensorID;
     TensorID w_gate_id = kInvalidTensorID;

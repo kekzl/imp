@@ -100,7 +100,8 @@ public:
     // True when the Jinja template teaches the Qwen-Coder/Qwen3.6 XML tool-call body
     // (<function=NAME><parameter=KEY>, raw-text values) instead of the ChatML JSON body.
     [[nodiscard]] bool tool_xml_dialect() const { return tool_xml_dialect_; }
-    bool is_raw() const { return family_ == ChatTemplateFamily::RAW; }
+    // No rendering at all: no family and no Jinja template (a RAW family can still render its own Jinja).
+    bool is_raw() const { return family_ == ChatTemplateFamily::RAW && !use_jinja_; }
     bool supports_tools() const;
     const std::string& default_system_message() const { return default_system_message_; }
 

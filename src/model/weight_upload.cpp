@@ -818,6 +818,21 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq, Tensor&
 // ---------------------------------------------------------------------------
 // upload_layer_attention_weights: wq/wk/wv/wo + norms + biases for one layer
 // ---------------------------------------------------------------------------
+// MLA (DeepSeek-V2/V3, GLM) RMSNorms on the latent after kv_a_proj and q_a_proj: uploaded with NO
+// offset (DeepSeek stores plain gamma, not the Qwen3.5/3.6 1+W delta). No-op for non-MLA layers.
+static bool upload_mla_latent_norms(TransformerLayer& L, int i, const UploadCtx& ctx) {
+    for (auto [norm, label] : {std::pair<Tensor*, const char*>{&L.kv_a_layernorm, "kv_a_layernorm"},
+                               {&L.q_a_layernorm, "q_a_layernorm"}}) {
+        if (norm->data && !norm->on_device &&
+            !upload_weight(*norm, QType::NONE, ctx.compute_dtype, ctx.stream, ctx.gpu_allocs, true, 0.0f,
+                           label, i)) {
+            IMP_LOG_ERROR("Failed to upload %s for layer %d", label, i);
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool upload_layer_attention_weights(TransformerLayer& L, int i, const UploadCtx& ctx) {
     // Attention weights — try regular upload first, fall back to GPTQ dequant
     UPLOAD_OR_FAIL(L.wq, L.wq.qtype, "wq", i, ctx);
@@ -829,6 +844,7 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
     // unconditionally for every architecture. kv_a_layernorm uploads separately (QK-norm section).
     UPLOAD_OR_FAIL(L.kv_a_proj, L.kv_a_proj.qtype, "kv_a_proj", i, ctx);
     UPLOAD_OR_FAIL(L.kv_b_proj, L.kv_b_proj.qtype, "kv_b_proj", i, ctx);
+    UPLOAD_OR_FAIL(L.q_a_proj, L.q_a_proj.qtype, "q_a_proj", i, ctx);
 
     // GPTQ fallback: if regular weight is missing but GPTQ tensors are present
     struct {
@@ -879,16 +895,8 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
             return false;
         }
     }
-    // MLA (DeepSeek-V2/V3) RMSNorm on the 512-dim latent after kv_a_proj: uploaded with NO
-    // offset (DeepSeek stores plain gamma, not the Qwen3.5/3.6 1+W delta). No-op for non-MLA
-    // layers.
-    if (L.kv_a_layernorm.data && !L.kv_a_layernorm.on_device) {
-        if (!upload_weight(L.kv_a_layernorm, QType::NONE, ctx.compute_dtype, ctx.stream, ctx.gpu_allocs,
-                           true, 0.0f, "kv_a_layernorm", i)) {
-            IMP_LOG_ERROR("Failed to upload kv_a_layernorm for layer %d", i);
-            return false;
-        }
-    }
+    if (!upload_mla_latent_norms(L, i, ctx))
+        return false;
     // Qwen4Exp gated residual: eight BF16 tensors per layer, uploaded with NO offset. hc_norm is
     // the (1 + W) delta like the other Qwen norms, but hc_grouped_rmsnorm applies the +1 itself.
     {

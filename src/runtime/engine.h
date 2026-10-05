@@ -1295,6 +1295,8 @@ private:
     void clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, int ssm_reserved_slots,
                                   int live_kv_blocks);
     [[nodiscard]] bool init_features();
+    // init(family), else an unrecognised checkpoint template (GLM-4.7) renders as its own Jinja.
+    [[nodiscard]] bool init_chat_template_(ChatTemplateFamily family, const Tokenizer& tok);
     void warmup();
     // Config-resolution helpers for the front half of init() — each one
     // mutates config_ / RuntimeConfig in place, then init() executes

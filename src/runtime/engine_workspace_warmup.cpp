@@ -36,6 +36,14 @@
 
 namespace imp {
 
+bool Engine::init_chat_template_(ChatTemplateFamily family, const Tokenizer& tok) {
+    const std::string& jinja = tok.chat_template_str();
+    if (chat_template_.init(family, tok, jinja))
+        return true;
+    return !jinja.empty() && ChatTemplate::detect_family(jinja) == ChatTemplateFamily::RAW &&
+           chat_template_.init(ChatTemplateFamily::RAW, tok, jinja);
+}
+
 bool Engine::init_features() {
     const auto& mcfg = model_->config();
 
@@ -94,7 +102,7 @@ bool Engine::init_features() {
                 IMP_LOG_INFO("No chat template in metadata, using %s default for %s",
                              chat_template_family_name(family), model_arch_name(mcfg.arch));
         }
-        if (family != ChatTemplateFamily::RAW && !chat_template_.init(family, *tok, tok->chat_template_str()))
+        if (family != ChatTemplateFamily::RAW && !init_chat_template_(family, *tok))
             // A failed template init leaves chat_template_ inert, so every /v1/chat/completions
             // request falls back to raw concatenation (no role markers), which looks like a
             // model-quality problem, not a load problem (#1206 marked init() [[nodiscard]]).

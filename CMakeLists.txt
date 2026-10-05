@@ -221,6 +221,7 @@ set(IMP_MODEL_SOURCES
     src/model/hf_fetch_repo.cpp
     src/model/weight_map.cpp
     src/model/lfm2_names.cpp
+    src/model/weight_map_arch.cpp
     src/model/gdn_fused_split.cpp
     src/model/mxfp8_widen.cpp
     src/model/host_expert_pin.cpp
@@ -481,6 +482,7 @@ set(IMP_EXEC_SOURCES
     src/exec/pre_dequant_phase4_tensor_registry.cpp
     src/exec/executor_workspace_config.cpp
     src/exec/executor_attention.cpp
+    src/exec/executor_attention_helpers.cpp
     src/exec/executor_forward.cu
     src/exec/executor_perplexity.cu
     src/exec/executor_prompt_logprobs.cu
@@ -616,6 +618,7 @@ set_source_files_properties(
 # Moved from nvcc (host pass -std=c++23: no FMA contraction); g++ -march=x86-64-v3 contracted 6 sites here (#2209).
 set_source_files_properties(
     src/exec/executor_attention.cpp
+    src/exec/executor_attention_helpers.cpp
     src/exec/executor_workspace_buffers.cpp
     src/exec/executor_sparse_prefill.cpp
     PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
@@ -647,6 +650,7 @@ if(IMP_BUILD_TOOLS)
         tools/imp-quantize/usage.cpp
         tools/imp-quantize/tensor_policy.cpp
         tools/imp-quantize/act_prescale.cpp
+        tools/imp-quantize/card_fit.cpp
         tools/imp-quantize/expert_destack.cpp
         tools/imp-quantize/checkpoint_out.cpp
         tools/imp-quantize/fp8_head.cpp

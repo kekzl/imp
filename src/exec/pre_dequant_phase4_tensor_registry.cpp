@@ -103,6 +103,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         L.kv_a_proj_id = register_tensor(L.kv_a_proj, TensorKind::KV_A_PROJ);
         L.kv_a_norm_id = register_tensor(L.kv_a_layernorm, TensorKind::KV_A_NORM);
         L.kv_b_proj_id = register_tensor(L.kv_b_proj, TensorKind::KV_B_PROJ);
+        L.q_a_proj_id = register_tensor(L.q_a_proj, TensorKind::KV_A_PROJ);  // q_lora down-proj
         L.w_gate_id = register_tensor(L.w_gate, TensorKind::W_GATE);
         L.w_up_id = register_tensor(L.w_up, TensorKind::W_UP);
         L.w_down_id = register_tensor(L.w_down, TensorKind::W_DOWN);
