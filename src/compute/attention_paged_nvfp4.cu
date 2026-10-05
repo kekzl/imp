@@ -408,9 +408,22 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
     size_t smem_bytes = NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
                         static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float);
 
+    // The grouped multitok kernel runs batch x n_heads / hpc CTAs per split: size the splits on that,
+    // or a 16/2 batch-1 launch filled 128 CTAs on 170 SMs (#2440).
+    int split_units = 0, max_splits = 32;
+    // Batch 1 only: at 32 x short context the extra splits and reduce lost 1.2..2.7 % aggregate.
+    if (batch_size == 1 && process_diag_paged_nvfp4_multitok() > 1 && process_diag_paged_nvfp4_hpc() != 1 &&
+        n_kv_heads > 0) {
+        const int hpc = paged_attention_nvfp4_multitok_heads_per_cta(head_dim, n_heads / n_kv_heads,
+                                                                     process_diag_paged_nvfp4_hpc());
+        if (hpc > 0) {
+            split_units = batch_size * (n_heads / hpc);
+            max_splits = 128;
+        }
+    }
     void* scratch_ptr = nullptr;
     int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
-                                           &scratch_ptr);
+                                           &scratch_ptr, split_units, max_splits, split_units > 0 ? 128 : 0);
 
     // attention.paged_nvfp4_multitok: four tokens per warp iteration for
     // HD=128/256 (attention_paged_nvfp4_multitok.cu), both routes.
