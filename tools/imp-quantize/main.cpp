@@ -19,6 +19,7 @@
 // claim; docs/quantization.md).
 
 #include "common/exit_codes.h"
+#include "act_prescale.h"
 #include "awq.h"
 #include "checkpoint_out.h"
 #include "expert_destack.h"
@@ -548,6 +549,7 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    quantize::apply_lfm2_prescale(opt, opened, gated_q_proj, plan);
 
     // FP8 sources store an E4M3 weight beside a weight_scale_inv block grid (DeepSeek-V3, Qwen3.8 FP8)
     // or a scalar weight_scale (Modelopt, #2473); paired up front across shards since the two aren't

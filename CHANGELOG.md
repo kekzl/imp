@@ -5,6 +5,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 - Olmo-3 and Olmo-3.1 run (`Olmo3ForCausalLM`, SafeTensors; GGUF refused): post-norm-only block, QK-norm over all heads, 3:1 sliding/full layers. `ppl_corpus_45k` vs HF BF16: 7B bf16 18.7245 vs 18.7333, 3.1-32B NVFP4 12.6395 vs 12.2363.
 - `make verify-fast` gates server throughput: imp-server streams 8 concurrent 128-token chats on the baseline model (`scripts/server_bench.sh`), 8 % under the pin (Qwen3-8B-Q8_0 1049.18 tok/s) fails (roadmap row 44).
 - `make verify-fast` gates PPL drift: deterministic PPL of the baseline model on `ppl_corpus_45k.txt` against a pin in `tests/perf_baseline.json` (Qwen3-8B-Q8_0 10.7522), 0.5 % tolerance (roadmap row 45).
@@ -46,6 +48,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.48.0] - 2026-10-03
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 - FFN prefill graphs (#2435): every prefill the full prefill graph cannot take (ragged waves, continuation chunks, prefix hits) replays its FFN/MoE phase per (layer, padded rows) from a CUDA graph. Qwen3-30B-A3B-NVFP4 eager pp512 25.74-29.66 -> 17.71-18.35 ms; agent-turn TTFT 55.6-56.1 -> 51.0-52.7 ms.
 - imp-quantize reads per-tensor-scale FP8 sources (Modelopt scalar `weight_scale`, #2473): widened with the scalar, `weight_scale` and `input_scale` dropped. `--dry-run` on a synthetic Modelopt FP8 Qwen3-0.6B: 196 of 196 E4M3 weights quantized (was 0, all copied through).
 - `POST /v1/requests/{id}/end_thinking` (#2420): forces the reasoning closer (`</think>`, Harmony final-channel opener) at the next step, the answer continues on the same KV; id = response id or `X-Request-Id`, all dialects. 200 `ending`/`already_closed`, 404 unknown, `imp_think_end_requests_total`.
@@ -121,6 +125,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.47.0] - 2026-10-01
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 - InternVL3.5 vision (#2389, with #2375 #2382 #2384 #2387): InternVL3_5-2B-HF answers about images in `imp-cli --image` and the server; one 448 tile, 256 tokens per image. Real tower vs HF FP32: 6.35e-3 relL2 on test_cat; bus, cat, pizza named; `vision_sight_check` 8/8.
 - Sparse prefill attention (`attention.sparse_prefill_topk_tokens`, default off): a continuation chunk attends to its own rows plus the top past pages, one selection per chunk, no dense pass. Qwen3.8-27B pp77824 at 8192: 6835.55 -> 10529.05 tok/s (1.54x, 3/3), NIAH 10/10, PPL +0.26 %. Record: `docs/plans/2026-08-28-sparse-decode-attention.md`.
 - Sparse decode attention on MLA models (#2372): only `attention.mla_absorb` stays refused. DeepSeek-V2-Lite NVFP4, after #2385, dense vs sparse budget 4096 at 32k: 111.22/112.38/111.35 vs 259.95/235.40/244.98 tok/s (2.21x), 16k 1.38x (#2386); NIAH 10/10 dense and sparse (V2-Lite-Chat). Harnesses `tools/analysis/sparse_mla_ab.sh`, `prefill_attn_share.sh`.
@@ -146,6 +152,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.46.0] - 2026-10-01
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 - `--gpu-layers N < n_layers`, dense GGUF: planned host layers keep their matmuls in pinned host RAM and stream per forward via `LayerOffloadManager` (slot reuse waits for the previous layer). Host layers skip pre_dequant caches. MoE, SSM/GDN, NVFP4-prequant refuse. A/B: `gemm.dense_weight_cache=false` (#2298).
 - Qwen3.8-Flash-Next MTP drafting (`speculative.mtp_k=1`, auto declines it: k=1 18.6 % slower than k=0, #2272): hc-stream draft layer, FP8 block-scale experts (2400 MiB head), captured verify over host-resident experts (56.7 -> 27-36 ms/verify). Draft logits vs the vLLM math: max |dlogit| 0.0135 (band 0.11). Spec: `docs/plans/2026-09-28-qwen4exp-mtp.md`.
 - AWQ SafeTensors checkpoints (`quant_method: awq`, `bits: 4`, `zero_point: true`, `version: gemm`) load: q/k/v/o/gate/up/down dequantize to FP16 at upload in AutoAWQ packing order (`src/quant/dequant_awq.cu`); VRAM holds FP16 weights. GEMV, Marlin, other bit widths and `zero_point: false` stay refused at load (#2205, #2196).
@@ -279,6 +287,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.44.0] - 2026-09-22
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 - Qwen4Exp QSA indexer (`attention.qsa`, default `false`; `src/compute/qsa_indexer.cu`, `src/exec/executor_qsa.cu`): the learned block top-k of Qwen3.8-Flash-Next's 12 attention layers. Per QSA layer a raw index-key cache and block keys (mean of 4, `k_layernorm`, RoPE at the block start); per query `sum_h relu(q_h . blk) / sqrt(128)`, the top 512 blocks plus the tail stay visible, the selected K/V rows are gathered into a scratch paged cache and attended with the paged decode kernel. Decode runs it on the device every step (captured graph replays it; below 2051 tokens the selection is every token in order, so the output is byte-identical to dense: `QsaIndexer.AllTrueSelectionMatchesDensePaged`); prefill recomputes the rows past 2050 after the dense FA2 chunk. Needle at 4503 tokens context retrieved with and without it; decode there 50.6 vs 54.1 tok/s dense, pp4503 650 vs 912 tok/s. PPL window 2048..4095 of `ppl_corpus_45k.txt`: llama.cpp (own QSA top-k, UD-Q4_K_XL) 4.5021, imp dense 4.6978, imp indexer 4.7558; `attention.qsa_force=true` on 1301 tokens (all-true selection through the paged kernel instead of FA2) moves PPL +0.44 %, the FA2-vs-paged numerics amplified by MoE routing. Not modelled: prefix-cache resume (no indexer keys for the resumed prefix, sequence stays dense) and batched decode (one sequence's key caches). `attention.qsa_rows` (16), `attention.qsa_debug` (in-situ FA2 vs paged-on-cache vs selected diffs). Default off: it loses on every axis measured here (`degen_suite.py` 48/50 on, 50/50 off). The "turn it on above ~8k context" advice was measured on 2026-09-22 and withdrawn: needle recall is intact at 4883 / 11283 / 23084 prompt tokens but slower in each (3.01 -> 2.35, 1.63 -> 0.96, 0.79 -> 0.50 tok/s), and 1024 generated tokens at 11283 context run 18.14 -> 15.88 tok/s (-12.5 %). 12 of 48 layers carry attention at 2 KiB of KV per token, so the dense read it replaces is ~0.19 ms of a 63 ms decode step (`docs/plans/2026-09-19-qwen4exp-port.md`).
 - Device-driven expert cache for host-resident NVFP4 MoE experts (`moe.device_expert_cache`, default `true`, needs `moe.pin_host_experts`): routing -> cache slots (per-layer LRU tables on the device) -> zero-copy gather of the misses from the mapped pinned slabs, no D2H and no host LRU per layer; the pool is handed back and forth with the host path through generations. With it the captured decode step replays correctly, so the `experts_on_host` graph demotion is lifted and the per-step graph pool captures (PLE models do their table gather in `prepare_decode_step_host` before each replay). Qwen3.8-Flash-Next-NVFP4 (56 GiB of experts on the host, 45 % cache budget), greedy, same text throughout: tg96 5.81 -> 53.0 tok/s, tg512 65.9 (hit rate 81.9 %) (`docs/plans/2026-09-19-qwen4exp-port.md`).
 
@@ -331,6 +341,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.43.0] - 2026-09-19
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 - `gemm.mxfp8_gdn_proj_prefill` (default `false`; `all` or a list of in|gate|out): MXFP8 prefill copies (E4M3, one UE8M0 scale per 32) of the F16 GDN projections on the CUTLASS sm_120 block-scaled GEMM, the W8A8 twin of the NVFP4 copies; a projection named in both flags takes MXFP8. Qwen3.8-27B (one `--keep-gdn-proj` export per role), deterministic 45k PPL vs the FP16 path: `in` +0.08 % (4.5683 -> 4.5718; NVFP4 +0.32 %), `gate` -0.51 % (4.5713 -> 4.5481; NVFP4 +0.01 %), `out` -0.18 % (4.5715 -> 4.5631; NVFP4 +0.47 %); pp4096 `in` 375.74 / 376.06 / 376.13 -> 353.70 / 353.52 / 353.49 ms (+6.0 %, 3/3). Qwen3.6-35B-A3B-NVFP4 pp4096 (3 pairs, FP8 sidecar off): `all` 146.48 / 145.62 / 145.73 -> 130.00 / 131.03 / 130.62 ms (+11.6 %), `in` 137.88 / 137.29 / 137.57 ms against NVFP4 `in` 135.13 / 133.63 / 133.62 (2.7 % behind). Opt-in for VRAM: the copies cost twice the NVFP4 bytes (Qwen3.6-35B `in` 495 MiB, `all` 990 MiB) and at stock flags `in` leaves the 35B's KV pool 50 blocks (NVFP4 `in`: 225). `CutlassMxFP8Gemm.*` (3 tests, `test-quant`) (#2051).
 - `imp-quantize --keep-gdn-proj [all|in,gate,out]`: GDN `linear_attn` projections stay at source precision (bare flag = all three, the Qwen3.6-35B-A3B-NVFP4 recipe), so the runtime's F16 GDN path (FP8 decode sidecar, `gemm.nvfp4_gdn_proj_prefill`) applies to an own export. Qwen3.8-27B BF16 -> `--format vllm`, `all`: 256 tensors quantized, 943 copied, 10 605 MiB of GDN projections kept, 27 GB, 4 min 10 s, and the checkpoint no longer fits 32 GB (upload 30 635 MiB, workspace refused); `in` keeps 5 GiB and loads (`GdnProjection.*`, 2 tests) (#2050).
 
@@ -359,6 +371,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.42.0] - 2026-09-16
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 - `gemm.nvfp4_gdn_proj_prefill` (default `false`; `all` or a list of in|gate|out): NVFP4 prefill copies of the F16 GDN projections of a native-NVFP4 hybrid, M>32 rows on the CUTLASS W4A4 GEMM instead of cuBLAS FP16 (290-345 TFLOPS on every shape, merged N included). Qwen3.6-35B `in,gate`: pp4096 146.66 / 147.18 / 146.18 -> 127.06 / 127.60 / 128.42 ms (+15.4%, 3 alternating pairs), PPL 6.8543 -> 6.9781 (+1.81%; `all` +4.25%), so it stays opt-in. Decode and M<=32 rows are untouched. Roadmap Open 12 closed.
 - `imp-quantize` splits 3-D expert stacks (gpt-oss `mlp.experts.gate_up_proj` [32, 2880, 5760], Gemma-4 `experts.gate_up_proj` [128, 1408, 2816]) into the per-expert 2-D matrices the loader reads, by a per-model_type layout descriptor (`tools/imp-quantize/expert_destack.cpp`); a model_type without one is refused as before. gpt-oss's 2^-4 residual rescale now lands in the NVFP4 tensor scales of Wo and the expert down projections (Phase 0) instead of refusing a non-BF16 Wo. gpt-oss-20b BF16 -> NVFP4: 12 820 MiB, PPL 179.23 vs 312.50 for the MXFP4 GGUF on `ppl_corpus_45k.txt` (roadmap item 7, `docs/quantization.md`).
 - `gdn.alpha_beta_prefill` (default false): the GDN alpha/beta projections at prefill (M > 32) run as one split-K FP16 tensor-core launch plus one fixed-order reduce (`gemm_f16_narrow_prefill`, FP32 accumulate, separate alpha/beta outputs so the scan is untouched) instead of two cuBLAS GEMMs. Qwen3.8-27B-NVFP4 pp512 (nsys, 3 alternating pairs): 12.3 + 4.2 us per GDN layer against 2 x 11.1-12.6 us, class 5.31 / 5.55 / 5.77 vs 9.25 / 9.71 / 12.56 ms over the bench window, ~0.6% of the forward; Qwen3.6-35B (K=2048, N=32): 5.2 + 2.7 vs 2 x (2.3 + 1.4) us, neutral. Opt-in because the PPL judge moves: the cuBLAS default accumulates in FP16 (`gemm.cublas_fp16_acc` auto) and reads 4.6242 on the 45k corpus, the new kernel 4.6404, cuBLAS forced to FP32 accumulate 4.6426 (all bit-reproducible); vs the fp64 reference both kernels sit at rms 7.4e-4 on the Qwen3.8 shape. `GemmF16NarrowPrefill.*` (6 tests: M=33..4096, split 1..32, determinism, refusals, bench).
@@ -398,6 +412,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.41.0] - 2026-09-13
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 - Activation calibration records the per-channel second moment `E[x^2]` alongside `mean|x|` (file magic `IMPCAL01` -> `IMPCAL02`; older files still load, with the second moment absent). `imp-quantize --calib-weight sq` weights the AWQ search's error by it instead of by `(mean|x|/s)^2`, which is what the layer's output error calls for. Measured on Qwen3-0.6B BF16 -> NVFP4: PPL 28.1125 (`abs`) against 27.8039 (`sq`), 1.10 % at identical search cost, RTN baseline 29.7342. Default stays `abs` because that model is narrow GQA and the open case in roadmap item 6 is wide GQA.
 - `speculative.factored_spare` (default off): the batched verify carries its drafted row as (g, k, delta) per head plus one conv tap instead of a second full recurrent slot, so the state pool stops carrying a duplicate. Qwen3.8-27B-NVFP4-vllm at `runtime.max_batch_size=32`, 32 streams: the slot-swapping form clamps to 18 slots with a 298-block KV pool and reads 1117/1105 tok/s, the factored form keeps 32 slots and 1429 blocks at 1761/1898 (with one draft per verify step, see Fixed). `degen_suite.py` 50/50. `docs/plans/2026-09-12-factored-verify-spare.md`.
 - `speculative.batch_verify` (default off): batched speculative verify on the GDN hybrid. Every decoding request forwards its last token plus one MTP draft in a single step; the 2-row recurrent state lands in a spare pool slot (one per batch slot, priced by the planner) and accept swaps slots instead of copying. Qwen3.8-27B-NVFP4-vllm, 8 unique greedy streams: 587-611 -> 704-767 tok/s, 15 streams 990-1057 -> 1099-1214; at 32 clients the spares do not fit (32 -> 18 slots, 1966 -> 1159). `docs/plans/2026-09-11-batched-mtp-verify.md`.
@@ -435,6 +451,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.39.0] - 2026-09-10
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - `imp-quantize` says what an export cost: an `experimental:` provenance line at the start, a
   summary line and `quant_report.json` at the end (per tensor max relative error and MSE decoded
@@ -618,6 +636,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.38.0] - 2026-09-07
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - `make verify-ab`: paired perf gate against `origin/main` (`scripts/verify_ab.sh`), red
   at a mean paired tg128 delta below -2 %; a planted -2.93 % regression read -1.05 % on the
@@ -770,6 +790,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.37.0] - 2026-09-04
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - Serving KPI harness `tools/analysis/serving_kpi.py`: TTFT / TPOT / ITL / E2E at p50-p99,
   goodput against an SLO pair, queue wait, KV and prefix-cache rates, J per 1k output tokens.
@@ -819,6 +841,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.35.0] - 2026-09-03
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - OpenTelemetry trace export for imp-server (`server.otlp_endpoint`, OTLP/HTTP
   JSON, off by default): one SERVER span per generation with queue / prefill /
@@ -899,6 +923,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.34.0] - 2026-09-02
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - GDN chunk-parallel scan, state-feeding GEMMs on 3xFP16 `mma.sync`
   m16n8k16 instead of 3xTF32 (both kernels), Y_A on plain tf32, operand
@@ -1106,6 +1132,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   default-off, so nothing changes unless you had opted in. (#1819)
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - Sparse decode attention (`attention.sparse_topk_tokens`, still default off)
   works on NVFP4 KV caches: the key min/max metadata kernel gained an NVFP4 arm
@@ -1144,6 +1172,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.32.0] - 2026-08-29
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - Sparse decode attention measured at concurrent long-context serving:
   3 streams x 25k ctx on Qwen3-8B-Q8_0 fp8-KV, aggregate decode 155.6 ->
@@ -1261,6 +1291,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   suppressed-thinking renders still emitted the reasoning preamble.
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - `speculative.verify_smallm` (default off): verify-chunk GEMMs through the
   small-M kernel; +3-6% isolated, +1-2% mixed pairs (inside trajectory
@@ -1337,6 +1369,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.30.0] - 2026-08-24
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Per-launch expert imbalance is recorded and readable while serving**
   (#1548). `max(M_e)` is what decides grouped-GEMM cost, because the kernel pads
@@ -2785,6 +2819,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.29.0] - 2026-08-21
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **MTP speculative decoding pays on Qwen3.8-27B-NVFP4: `speculative.mtp_k=1`
   measures +21.3 % decode** (104.31 against 86.03 tok/s). The default stays 0 for
@@ -2902,6 +2938,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [0.28.0] - 2026-08-17
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **The KV pool can grow into what it asked for (`kv_cache.growable`, off by
   default).** A server started while another process still holds the card sizes
@@ -3000,6 +3038,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   against 31.05.
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **`imp-quantize --format vllm` writes a checkpoint vLLM can serve.** The new
   layout is compressed-tensors `nvfp4-pack-quantized` (`.weight_packed` /
@@ -3050,6 +3090,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   of harmful.
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **FP8 sources verified end to end: an FP8-only release now runs where it could
   not before.** `Qwen/Qwen3.8-27B-FP8` does not load directly (weights 26 952
@@ -3176,6 +3218,8 @@ checkpoints load. 40 PRs since 0.24.0; the reasoning behind each entry is in the
 linked PR.
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Native FP8 weights load: `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` runs**,
   the first checkpoint here that ships them (45/45 on `degen_suite.py`; **362
@@ -3246,6 +3290,8 @@ linked PR.
 ## [0.24.0] - 2026-08-10
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **`imp-server` starts without `--model`**: model-less it answers `/health`,
   `/v1/models`, `/metrics` and the parameter-validation surface; the first
@@ -3292,6 +3338,8 @@ linked PR.
 ## [0.23.0] - 2026-08-07
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **`tools/analysis/layer_ab_diff.py`**: per-layer divergence between two runs of
   the same architecture, so a bad checkpoint can be traced to a *block* rather
@@ -3372,6 +3420,8 @@ The 2026-08-06 error-path campaign (#1252-#1265) is written up in
 ## [0.22.0] - 2026-08-05
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **`tools/analysis/vision_sight_check.py`**: answers "is this tower blind or
   just weak?" in ~2 minutes by scoring a counting battery against the **best
@@ -3415,6 +3465,8 @@ The 2026-08-06 error-path campaign (#1252-#1265) is written up in
 ## [0.21.0] - 2026-08-05
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **`diagnostics.log_level`** (`debug|info|warn|error|fatal`), debug logging
   could not be switched on at all: nothing called `log_set_level()`, so all 76
@@ -3597,6 +3649,8 @@ The 2026-08-06 error-path campaign (#1252-#1265) is written up in
 ## [0.20.0] - 2026-08-01
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Vision: Qwen3-VL**: imp describes images end to end, from `imp-cli --image`
   and from `/v1/chat/completions`. Dynamic resolution (a 1795x2397 photo becomes
@@ -3753,6 +3807,8 @@ diagnostics/robustness sweep. Decode measured neutral at every step
 (Qwen3-Coder-30B NVFP4 spec-OFF tg256 402.6 ± 0.3 tok/s).
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Post-launch CUDA error checks at 399 kernel-launch sites**: new
   `IMP_CUDA_CHECK_LAUNCH()` (cudaPeekAtLastError-based, so downstream propagation
@@ -3786,6 +3842,8 @@ diagnostics/robustness sweep. Decode measured neutral at every step
 ## [0.19.1] - 2026-07-17
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Per-layer attention routing for heterogeneous models** (Gemma-4 dual head_dim
   256/512): the hd=256 SWA majority rides FA2 f16-QK while hd=512 global layers
@@ -3840,6 +3898,8 @@ out of it; dense n-gram speculation now wins long context; batched serving
 861 → 1173 tok/s at 16 streams.
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Suspend to RAM** (`POST /admin/suspend` / `/admin/resume`), park the loaded
   weights in host RAM and free the GPU completely, then resume in seconds. Only
@@ -3949,6 +4009,8 @@ out of it; dense n-gram speculation now wins long context; batched serving
   (#952)
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **`gemm.fp8_ssm_proj` (default ON)**: FP8 E4M3 decode sidecar for the
   native-precision GDN/Mamba projections on NVFP4 hybrids: Qwen3.6-35B decode
@@ -3992,6 +4054,8 @@ out of it; dense n-gram speculation now wins long context; batched serving
 ## [0.18.0] - 2026-07-09
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Stage-1 HD=256 FA2 port** (`attention.fa2_hd256`, default off): the
   register-resident FA2 prefill kernel gains head_dim=256 instances (the
@@ -4067,6 +4131,8 @@ cache coverage and captured decode graphs under pure default config.
 ## [0.17.2] - 2026-07-08
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Context-window auto-detection across the three live conventions**, so
   OpenAI-compatible clients can stop keeping a hard-coded table: `GET /v1/models`
@@ -4096,6 +4162,8 @@ Toolchain-modernization release: the engine builds as **C++23** on an **Ubuntu
 verified neutral.
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **FP8 tile decode-attention kernels**: token-tiled FP8 split-K decode with K and
   V staged in one cp.async group, long-context decode **+51 %** (#899); a
@@ -4146,6 +4214,8 @@ KV-append-quant) is closed end to end with measurements on every branch. All new
 knobs are research scaffolds and ship **default-off**.
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **`attention.mxfp4_promote_budget`** (default 0): ThriftAttention-style outlier
   block promotion in the MXFP4 FMHA, where the top-scoring fraction of visible KV
@@ -4171,6 +4241,8 @@ suffix-speculation on Qwen3.6-27B prompt-echo **81 to 131 tok/s** (+61 % vs
 v0.16.0), 35B-A3B +10-15 %.
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Encoder/embedding-model support**: `nomic-bert` GGUF checkpoints load into a
   dedicated encoder path (bidirectional no-KV forward, BERT WordPiece tokenizer,
@@ -4260,6 +4332,8 @@ v0.16.0), 35B-A3B +10-15 %.
 ## [0.16.0] - 2026-07-02
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Hard per-process VRAM budget**: `--vram-budget <mb>`, `[runtime]
   vram_budget_mb`, and the previously-inert C-API field. All 19 sizing sites see a
@@ -4289,6 +4363,8 @@ v0.16.0), 35B-A3B +10-15 %.
 ## [0.15.0] - 2026-07-02
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Prefix caching for hybrid (SSM/GDN) models via recurrent-state snapshots.**
   Reused KV blocks alone cannot skip prefill on a recurrent model, so the engine
@@ -4320,6 +4396,8 @@ v0.16.0), 35B-A3B +10-15 %.
 ## [0.14.0] - 2026-07-02
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **OpenAI Predicted Outputs (`prediction`)**: client-supplied predicted
   completion text is tokenized into the n-gram draft corpus, never forwarded
@@ -4372,6 +4450,8 @@ v0.16.0), 35B-A3B +10-15 %.
 ## [0.13.0] - 2026-06-30
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **DeepSeek-V2 Multi-head Latent Attention (MLA)**, the first MLA architecture in
   imp. Stage A reconstructs the full K/V from the latent at projection time so
@@ -4438,6 +4518,8 @@ tight.
 ## [0.12.5] - 2026-06-26
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Adversarial degeneration prompt corpus**: 250 prompts across 8 categories
   (repetition, think-leak, special tokens, adherence, long context, multi-turn,
@@ -4481,6 +4563,8 @@ tight.
 ## [0.12.3] - 2026-06-25
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Agentic server hardening**: per-request speculative-decode toggle,
   inter-token-latency and cancellation metrics, prefix-cache safety under
@@ -4586,6 +4670,8 @@ v0.12.0. No kernel or perf changes.
 ## [0.12.0] - 2026-06-21
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **VRAM-aware auto `max_batch_size`, up to ~2.4x server throughput on MoE.** The
   old heuristic sized the concurrency cap by weight footprint alone, so a >20 GB
@@ -4623,6 +4709,8 @@ v0.12.0. No kernel or perf changes.
 ## [0.11.3] - 2026-06-17
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Stage-3 server test gate** (`make test-server`) boots a real `imp-server` and
   gates on the OpenAI and Anthropic wire batteries, plus a gcov coverage harness
@@ -4673,6 +4761,8 @@ v0.12.0. No kernel or perf changes.
 ## [0.11.2] - 2026-06-14
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - `tests/test_server_robustness.py`: a server-level battery asserting that
   malformed JSON, invalid UTF-8, non-object, wrong-type and missing-field input on
@@ -4690,6 +4780,8 @@ v0.12.0. No kernel or perf changes.
 ## [0.11.1] - 2026-06-14
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - `tests/test_server_0token_battery.py` and
   `tests/test_server_embed_chat_interleave.sh`: server-level regression coverage
@@ -4712,6 +4804,8 @@ llama.cpp/HF. Plus NVFP4 long-context prefill at-or-ahead of vLLM, FP8-KV honori
 the model hint, opt-in n-gram speculation, and full gpt-oss-20b GGUF MoE support.
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **N-gram prompt-lookup speculative decoding** (opt-in): draft tokens are matched
   from the prompt/context suffix and verified in a burst-hybrid loop, output stays
@@ -4796,6 +4890,8 @@ on the MoE/Q6_K heroes, a GeForce-Blackwell tensor-core-rate recalibration, and 
 roofline audit that mapped the remaining decode/prefill ceilings.
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **gpt-oss-20b**: MXFP4 experts converted to NVFP4 at load, attention sinks,
   Harmony channel split, YaRN/split-K/FP16-range fixes. CUTLASS grouped-GEMM
@@ -4896,6 +4992,8 @@ roofline audit that mapped the remaining decode/prefill ceilings.
   forward-pass NaN from cross-test cuBLAS state contamination (#445).
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Phi-4-reasoning-plus NVFP4**: fused `qkv_proj`/`gate_up_proj` support. (#429)
 - **Nemotron-Labs-3-Elastic-30B-A3B NVFP4**, a newer QAD quant, ~70 tok/s decode.
@@ -4929,6 +5027,8 @@ same VRAM), and chunked-prefill correctness closes the long-context cliff. The
 build target moves to `sm_120a`.
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **NVFP4 KV cache** (opt-in `--kv-nvfp4`): 4 bits per element plus a per-block
   scale takes 16k to **40k tokens at the same VRAM**, 3.9x compression against
@@ -5038,6 +5138,8 @@ sampling, multi-turn and short long-context. CUDA Graphs lit up for prequant
 SafeTensors.
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **Native function calling for Gemma-4 and Qwen3.6.** The root cause was a
   tokenizer bug, not missing parsers: multi-character markers like `<|tool_call>`
@@ -5121,6 +5223,8 @@ and the Qwen3.5/3.6 GDN family produce clean output on Blackwell, and CUDA 13.2.
 with stream priorities and mem-sync domains is live.
 
 ### Added
+- LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
+- `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 
 - **StreamingLLM smart KV cache**: attention sinks plus a sliding window, which
   keeps long-conversation coherence without unbounded VRAM growth. (#26)

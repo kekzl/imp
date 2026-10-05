@@ -170,6 +170,7 @@ enum {
     kApiGranite = 17,
     kApiQwen3Next = 18,
     kApiOlmo3 = 19,
+    kApiLfm2 = 20,
 };
 
 static constexpr ArchEntry kArchRegistry[] = {
@@ -213,6 +214,8 @@ static constexpr ArchEntry kArchRegistry[] = {
     {ModelArch::QWEN3_NEXT, "qwen3next", kApiQwen3Next, -1, 0, -1, -1, false, true, 1.0f, 0.95f, 40},
     // Olmo-3: post-norm only (norm=1 takes the FP32 residual accumulator); generation_config 0.6/0.95.
     {ModelArch::OLMO3, "olmo3", kApiOlmo3, -1, 0, -1, 1, false, false, 0.6f, 0.95f, 0},
+    // LFM2-MoE: sigmoid router + expert bias, norm_topk_prob; generation_config sets no sampling.
+    {ModelArch::LFM2, "lfm2", kApiLfm2, -1, 0, -1, -1, true, true, 0.3f, 0.95f, 0},
     {ModelArch::GENERIC, "generic", kApiGeneric, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
 };
 

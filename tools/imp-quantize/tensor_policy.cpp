@@ -55,9 +55,10 @@ std::string gdn_projection_role(const std::string& name) {
     static const std::string kWeight = ".weight";
     // Mamba-2 mixer (Nemotron-H, #2475): in_proj, out_proj; its attention and MoE layers share the
     // `.mixer.` prefix but not these leaves.
-    if (ends_with(name, ".mixer.in_proj.weight"))
+    // LFM2 short conv: conv.in_proj ([B | C | x]), conv.out_proj.
+    if (ends_with(name, ".mixer.in_proj.weight") || ends_with(name, ".conv.in_proj.weight"))
         return "in";
-    if (ends_with(name, ".mixer.out_proj.weight"))
+    if (ends_with(name, ".mixer.out_proj.weight") || ends_with(name, ".conv.out_proj.weight"))
         return "out";
     const size_t p = name.find(kMixer);
     if (p == std::string::npos || !ends_with(name, kWeight))

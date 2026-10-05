@@ -220,6 +220,7 @@ set(IMP_MODEL_SOURCES
     src/model/hf_fetch.cpp
     src/model/hf_fetch_repo.cpp
     src/model/weight_map.cpp
+    src/model/lfm2_names.cpp
     src/model/gdn_fused_split.cpp
     src/model/mxfp8_widen.cpp
     src/model/host_expert_pin.cpp
@@ -343,6 +344,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/moe_routing.cu
     src/compute/moe_token_permute.cu
     src/compute/ssm.cu
+    src/compute/shortconv.cu
     src/compute/ssm_scan_reg.cu
     src/compute/gated_residual.cu
     src/compute/ple.cu
@@ -490,6 +492,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_ffn_graph.cpp
     src/exec/ffn_graph_cache.cpp
     src/exec/executor_ssm_gdn.cu
+    src/exec/executor_shortconv.cpp
     src/exec/executor_gated_residual.cpp
     src/exec/executor_ple.cpp
     src/exec/executor_gdn_alpha_beta.cpp
@@ -643,6 +646,7 @@ if(IMP_BUILD_TOOLS)
         tools/imp-quantize/main.cpp
         tools/imp-quantize/usage.cpp
         tools/imp-quantize/tensor_policy.cpp
+        tools/imp-quantize/act_prescale.cpp
         tools/imp-quantize/expert_destack.cpp
         tools/imp-quantize/checkpoint_out.cpp
         tools/imp-quantize/fp8_head.cpp
@@ -877,6 +881,7 @@ if(IMP_BUILD_TESTS)
         tests/test_llm_compressor_loader.cpp
         tests/test_nvfp4_quant_contract.cpp
         tests/test_hf_config_loader.cpp
+        tests/test_lfm2_names.cpp
         # Host-placed token embedding: FP16 bits equal to the VRAM upload (#2484).
         tests/test_host_embedding.cpp
         tests/test_mxfp8_widen.cpp
@@ -1177,6 +1182,7 @@ if(IMP_BUILD_TESTS)
 
     imp_add_test_module(test-compute SOURCES
         tests/test_cuda_fault_signal.cu
+        tests/test_shortconv.cu
         tests/test_swiglu_quantize_cutlass.cu
         tests/test_ffn_graph_cache_gpu.cu
         tests/test_rope.cu

@@ -562,7 +562,7 @@ void Workspace::compute_shared_sizes(int max_tokens) {
         int inner = cfg.ssm_inner_size;
         int n_heads = cfg.ssm_dt_rank;
         int conv_channels = cfg.ssm_conv_channels();
-        int ssm_in_dim = inner + conv_channels + n_heads;
+        int ssm_in_dim = cfg.ssm_proj_dim();
 
         size_t proj_elem_size = *has_gdn_ ? sizeof(float) : es;
         int fused_total_out = conv_channels + inner + 2 * n_heads;

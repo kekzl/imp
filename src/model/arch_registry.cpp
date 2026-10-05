@@ -141,6 +141,11 @@ constexpr ArchSpelling kSpellings[] = {
     {GGUF, "olmo3", ModelArch::OLMO3},  // refused at load (gguf_loader.cpp)
     {HF_CLASS, "Olmo3ForCausalLM", ModelArch::OLMO3},
     {HF_MODEL_TYPE, "olmo3", ModelArch::OLMO3},
+    {GGUF, "lfm2", ModelArch::LFM2},  // refused at load (gguf_loader.cpp)
+    {HF_CLASS, "Lfm2ForCausalLM", ModelArch::LFM2},
+    {HF_CLASS, "Lfm2MoeForCausalLM", ModelArch::LFM2},
+    {HF_MODEL_TYPE, "lfm2", ModelArch::LFM2},
+    {HF_MODEL_TYPE, "lfm2_moe", ModelArch::LFM2},
 };
 
 struct HfConfigHookRow {
@@ -163,6 +168,7 @@ constexpr HfConfigHookRow kHfConfigHooks[] = {
     {ModelArch::GEMMA3, parse_gemma3_config},
     {ModelArch::GEMMA4, parse_gemma4_config},
     {ModelArch::OLMO3, parse_olmo3_config},
+    {ModelArch::LFM2, parse_lfm2_config},
 };
 // clang-format on
 
