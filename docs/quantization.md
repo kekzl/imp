@@ -213,8 +213,10 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
 |---|---:|---:|---:|---|
 | Qwen3-0.6B | 24.08 | 29.42 | **27.60** | +22.2% -> **+14.6%** |
 | Qwen3-1.7B (2 shards) | 17.22 | 20.39 | **18.71** | +18.4% -> **+8.7%** |
+| Qwen3-14B | 9.1961 (HF, CPU) | 9.9849 | **9.9068** (`BD`) | +8.6% -> **+7.7%** (Modelopt NVFP4 9.8183, +6.8%) |
+| Qwen3.8-27B | 4.4247 (HF, CPU) | 4.5882 (`--keep-gdn-proj in`) | - | +3.7% (Modelopt 4.5572, +3.0%; vllm export 4.6079, +4.1%) |
 
-- Recovers about a quarter of the RTN gap on the 0.6B, nearly two fifths on the 1.7B; does not close it against BF16. **Hurts at 14B and wider** (24-27% worse than RTN, the wrong direction): attention vs FFN, not model size.
+- 14B / 27B BF16: transformers on the CPU (`tools/analysis/hf_ppl_cpu.py`, neither fits the card), the token counts imp reads (13 537 / 13 811); on Qwen3-1.7B it reads 16.9035 vs imp 16.8827. Recovers about a quarter of the RTN gap on the 0.6B, nearly two fifths on the 1.7B; does not close it against BF16. **Hurts at 14B and wider** (24-27% worse than RTN, the wrong direction): attention vs FFN, not model size.
 - **Production rule, the code default since roadmap row 6 closed**: all groups on narrow GQA (`n_rep < 4`), attention groups A and C off on dense wide GQA (`n_rep >= 4`; GDN hybrids keep all, Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136, `docs/audit/AUDIT_qwen38_nvfp4.md`), `--calib-weight abs` on both. Qwen3-14B BF16 source, `ppl_corpus_45k.txt`, deterministic:
 
 | arm | RTN | ABCD `abs` | ABCD `sq` | BD `abs` | BD `sq` |
@@ -226,9 +228,7 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
        cmd=`tools/analysis/awq_wide_gqa_ab.sh` harness_md5=31019ae9
        note=calibration stats from the RTN checkpoint (BF16 14B does not fit for --calibrate)]
 
-
-- `sq` removes 64 % of the ABCD damage (12.2634 -> 10.7965) and still loses to RTN; on BD it costs 0.15.
-- On a dense model the default `BDEG` folds the same sites as `BD` (E/G need GDN tensors; `WideGqaDefaultIsBdOnADenseLayer`).
+- `sq` removes 64 % of the ABCD damage (12.2634 -> 10.7965) and still loses to RTN; on BD it costs 0.15. On a dense model the default `BDEG` folds the same sites as `BD` (E/G need GDN tensors; `WideGqaDefaultIsBdOnADenseLayer`).
 - n_rep 4 measured (#2474): BDEG wins on Qwen3-4B and Qwen3-8B, threshold 5 -> 4 ([record](plans/2026-10-04-awq-groups-nrep4.md)); n_rep 3 unmeasured, keeps all groups; Phi-4 (`phi3`) is refused by `--calib`.
 - Uncalibrated `imp-quantize` already beats a published Modelopt export on the one locally comparable model (9.9252 vs 10.0301, Qwen3-14B).
 - Mechanism, refuted variants, the won't-fit calibration trick: [`archive/quantization_awq_findings.md`](archive/quantization_awq_findings.md). MoE experts (groups X, Y, opt-in: on Gemma-4-26B inside the RTN rounding band, sd 4.63 %): [`plans/2026-10-04-awq-moe-experts.md`](plans/2026-10-04-awq-moe-experts.md).
