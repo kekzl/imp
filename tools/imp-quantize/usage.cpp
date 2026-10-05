@@ -67,6 +67,11 @@ void usage() {
         "                through its F16 GDN path (FP8 decode sidecar, opt-in NVFP4\n"
         "                prefill copies). Qwen3.8-27B: all = 10.6 GiB BF16 and the\n"
         "                checkpoint no longer fits 32 GB; in = 5 GiB fits.\n"
+        "  --gdn-proj-mxfp8\n"
+        "                write the kept GDN projections as MXFP8 (E4M3 + E8M0 scale\n"
+        "                per 32, `<m>.weight_scale` U8 [N,K/32]): half the BF16 bytes.\n"
+        "                The loader widens them to BF16. Implies --keep-gdn-proj all\n"
+        "                unless that flag names roles.\n"
         "  --dry-run    report what would be quantized and how large the result\n"
         "                will be, against what the card has left. Writes nothing.\n");
 }

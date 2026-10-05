@@ -103,7 +103,7 @@ imp-cli --model ./Qwen3-1.7B-nvfp4 --prompt "Hello"
 | `--lm-head [fp8\|nvfp4\|source]` | how `lm_head` is written: `fp8` (default for `modelopt`) = the per-row FP8 head `auto` runs, served without load-time conversion; `nvfp4` (bare flag) = quantized like any Linear; `source` (default for `vllm`) = copied as is ([below](#what-stays-at-source-precision-qwen38-27b-bf16-source-5175-gib)) |
 | `--kv-hint auto\|fp8\|none` | `kv_cache_quant_algo` in `hf_quant_config.json` (`modelopt` only): `auto` (default) = `FP8` for `model_type` `qwen3` / `qwen3_moe`, the families with a measured FP8 KV PPL ([KV cache](#kv-cache-element-type)), else `null` |
 | `--keep-attn-gate` | keep the fused Q+gate `q_proj` (Qwen3.5/Qwen3-Next) at source precision |
-| `--keep-gdn-proj [all\|in,gate,out]` | keep GDN `linear_attn` projections at source precision, bare flag = `all` |
+| `--keep-gdn-proj [all\|in,gate,out]` | keep GDN `linear_attn` and Mamba-2 `mixer.in_proj` / `out_proj` projections at source precision, bare flag = `all`; `--gdn-proj-mxfp8` writes them as MXFP8 (E4M3 + E8M0 `.weight_scale` U8 [N,K/32]), widened to BF16 at load |
 | `--format modelopt\|vllm` | output tensor layout, see below |
 | `--dry-run` | preview sizes without touching the GPU |
 
@@ -197,7 +197,7 @@ NVFP4 head bytes, FP16 activations on every row count (decode, batch, `--perplex
 | MLA latent projections (`kv_a_proj`, `kv_b_proj`) | runtime slices + reshapes both | always refused |
 | MoE router (`.gate.weight`) | FP4 changes the top-k pick | always refused |
 | fused Q+gate `q_proj` (Qwen3.5 / Qwen3-Next) | sigmoid-fed gate half, E2M1-sensitive; can't split | `--keep-attn-gate`, but excluding measured ~1.5% *worse* PPL |
-| GDN `linear_attn` in_proj_\* / out_proj | quantized by default | `--keep-gdn-proj [all\|in,gate,out]` |
+| GDN `linear_attn` in_proj_\* / out_proj, Mamba-2 `mixer.in_proj` / `out_proj` | quantized by default | `--keep-gdn-proj [all\|in,gate,out]`, `--gdn-proj-mxfp8` |
 | 3-D expert stacks (gpt-oss, Gemma-4) / fused `q+k+v_proj`, `gate+up_proj` | per-expert split, per-model_type descriptor / one merged linear needs one shared scale | automatic; unknown `model_type` refused |
 
 Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-expert bisection:

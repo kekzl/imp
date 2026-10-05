@@ -32,6 +32,7 @@
 
 #include "core/tensor.h"
 #include "memory/plan.h"
+#include "model/mxfp8_widen.h"
 #include "model/safetensors_raw.h"
 #include "model/safetensors_writer.h"
 #include "quant/awq_transform.h"
@@ -313,11 +314,39 @@ void report_copied_breakdown(const std::map<std::string, size_t>& by_reason, siz
         printf("\n      %8s   (%zu smaller reasons)", "", rows.size() - 5);
 }
 
+// --gdn-proj-mxfp8 (#2475): a kept GDN / Mamba projection whose K splits into 32-blocks.
+bool mxfp8_target(const Options& opt, const RawTensor& t) {
+    return opt.gdn_proj_mxfp8 && quantize::keep_gdn_projection(t.name, opt.keep_gdn_proj) &&
+           t.shape.size() == 2 && t.shape[1] % imp::kMxfp8Block == 0;
+}
+
+size_t mxfp8_bytes(const RawTensor& t) {
+    return static_cast<size_t>(t.numel() + t.numel() / imp::kMxfp8Block);
+}
+
+// E4M3 `<m>.weight` + E8M0 `<m>.weight_scale` from FP16 `h`; `store` owns the bytes.
+void push_mxfp8(const RawTensor& t, const std::vector<uint16_t>& h, bool dry_run,
+                std::vector<SafeTensorsOut>& out, std::vector<std::vector<uint8_t>>& store) {
+    const int64_t N = t.shape[0], K = t.shape[1];
+    if (dry_run) {
+        printf("  MXFP8 %-58s [%lld,%lld]\n", t.name.c_str(), (long long)N, (long long)K);
+        return;
+    }
+    store.emplace_back(static_cast<size_t>(N * K));
+    store.emplace_back(static_cast<size_t>(N * (K / imp::kMxfp8Block)));
+    std::vector<uint8_t>& q = store[store.size() - 2];
+    std::vector<uint8_t>& s = store.back();
+    imp::mxfp8_quantize(h.data(), N, K, q.data(), s.data());
+    out.push_back({t.name, "F8_E4M3", {N, K}, q.data(), q.size()});
+    out.push_back({t.name + "_scale", "U8", {N, K / imp::kMxfp8Block}, s.data(), s.size()});
+}
+
 // Reports the checkpoint against the target card by ON-DISK size, not a VRAM prediction: what
 // the engine resides is weights PLUS a scale-factor cache MINUS what the loader skips (vision
 // tower uploaded separately, MTP sidecar maybe unloaded). Measured on Qwen3.8-27B: 18.60 GiB
 // disk arrived as 16.08 GiB weights + 1.49 GiB CUTLASS scale cache - right order, wrong decimal.
-void report_card_fit(size_t bytes_out) {
+// mx_widen: bytes the loader adds when it widens MXFP8 projections to BF16 (#2475).
+void report_card_fit(size_t bytes_out, size_t mx_widen) {
     size_t free_b = 0, total_b = 0;
     if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess || total_b == 0)
         return;  // no device visible: the size line above still stands on its own
@@ -326,20 +355,24 @@ void report_card_fit(size_t bytes_out) {
     if (total_b <= overhead)
         return;
     const double budget = double(total_b - overhead) / mib;
-    const double ckpt = double(bytes_out) / mib;
+    const double ckpt = double(bytes_out + mx_widen) / mib;
+    const char* where = mx_widen > 0 ? "once widened" : "on disk";
+    if (mx_widen > 0)
+        printf("\nMXFP8 projections are widened to BF16 at load: +%.0f MiB counted below",
+               double(mx_widen) / mib);
     printf("\ncard: %.0f MiB total, less %.0f context and %.0f library reserve leaves %.0f MiB",
            double(total_b) / mib, kContextBytes / mib, kMeasuredLibraryReserveBytes / mib, budget);
     if (ckpt >= budget)
         printf(
-            "\n      this checkpoint is %.0f MiB on disk and does NOT fit: %.0f MiB short before"
+            "\n      this checkpoint is %.0f MiB %s and does NOT fit: %.0f MiB short before"
             "\n      any KV cache or workspace",
-            ckpt, ckpt - budget);
+            ckpt, where, ckpt - budget);
     else
         printf(
-            "\n      this checkpoint is %.0f MiB on disk, leaving %.0f MiB for the KV cache and"
+            "\n      this checkpoint is %.0f MiB %s, leaving %.0f MiB for the KV cache and"
             "\n      workspaces. On-disk size is not the resident figure: a scale-factor cache is"
             "\n      built on top, and a vision tower or MTP sidecar may load separately or not at all",
-            ckpt, budget - ckpt);
+            ckpt, where, budget - ckpt);
 }
 
 }  // namespace
@@ -612,16 +645,35 @@ int main(int argc, char** argv) {
     };
 
     size_t n_quantized = 0, n_copied = 0, n_stacks_split = 0;
-    // What every quantized tensor cost, measured on the bytes that were
-    // written. Costs no GPU: the packed nibbles and micro-scales are already
-    // on the host at this point.
-    std::vector<quantize::TensorError> tensor_errors;
-    size_t bytes_in = 0, bytes_out = 0;
+    size_t bytes_in = 0, bytes_out = 0, mx_widen_bytes = 0;
     // Where the bytes that did NOT shrink went: a checkpoint missing the card by a gigabyte is a
     // question about this table, not the ratio (e.g. the embedding pair alone is a quarter of the
     // output on a modern vocabulary, which the ratio never reveals).
     std::map<std::string, size_t> copied_bytes_by_reason;
     std::vector<std::string> excluded_modules;
+    // --gdn-proj-mxfp8 (#2475): 0 = not this tensor, 1 = written (store owns the bytes until the
+    // shard is written), -1 = error.
+    auto emit_mxfp8 = [&](const RawTensor& t, std::vector<SafeTensorsOut>& out,
+                          std::vector<std::vector<uint8_t>>& store) -> int {
+        if (!mxfp8_target(opt, t))
+            return 0;
+        const size_t bytes = mxfp8_bytes(t);
+        bytes_out += bytes;
+        copied_bytes_by_reason["GDN projection (--gdn-proj-mxfp8)"] += bytes;
+        mx_widen_bytes += static_cast<size_t>(t.numel()) * 2 - bytes;
+        n_copied++;
+        excluded_modules.push_back(t.name.substr(0, t.name.size() - strlen(".weight")));
+        const auto h = opt.dry_run ? std::vector<uint16_t>{} : tensor_as_fp16(t, fp8_scale_of, plan);
+        if (!h)
+            fprintf(stderr, "  %s: %s\n", t.name.c_str(), h.error().c_str());
+        else
+            push_mxfp8(t, *h, opt.dry_run, out, store);
+        return h ? 1 : -1;
+    };
+    // What every quantized tensor cost, measured on the bytes that were
+    // written. Costs no GPU: the packed nibbles and micro-scales are already
+    // on the host at this point.
+    std::vector<quantize::TensorError> tensor_errors;
     std::vector<std::pair<std::string, std::string>> tensor_to_shard;
 
     for (size_t shard_idx = 0; shard_idx < shards.size(); shard_idx++) {
@@ -637,6 +689,7 @@ int main(int argc, char** argv) {
         // FP8 weights this tool refuses: widened here, so the buffer must outlive
         // the descriptor that points at it.
         std::vector<std::vector<uint16_t>> widened_store;
+        std::vector<std::vector<uint8_t>> mx_store;  // --gdn-proj-mxfp8 bytes, same lifetime
         std::vector<quantize::Fp8Head> head_store;  // the FP8 LM head; moves keep the buffers in place
         std::map<std::string, std::vector<quantize::DestackedMatrix>> stack_plans;
         size_t n_destacked = 0;
@@ -669,6 +722,11 @@ int main(int argc, char** argv) {
                 const bool kept_gdn_fp8 = quantize::keep_gdn_projection(t.name, opt.keep_gdn_proj);
                 if (kept_gdn_fp8)
                     why_fp8 = "GDN projection (--keep-gdn-proj)";
+                if (const int mx = emit_mxfp8(t, out, mx_store); mx != 0) {
+                    if (mx < 0)
+                        return 1;
+                    continue;
+                }
                 if (kept_gdn_fp8 ||
                     quantize::fp8_source_action(t, gated_q_proj.count(t.name) != 0, opt.quantize_lm_head,
                                                 why_fp8) != quantize::Fp8SourceAction::Quantize) {
@@ -749,6 +807,11 @@ int main(int argc, char** argv) {
             else if (kept_gdn)
                 why = "GDN projection (--keep-gdn-proj)";
             if (gated || kept_gdn || !quantize::should_quantize(t, opt.quantize_lm_head, why)) {
+                if (const int mx = emit_mxfp8(t, out, mx_store); mx != 0) {
+                    if (mx < 0)
+                        return 1;
+                    continue;
+                }
                 if (ends_with(t.name, ".weight") && t.shape.size() >= 2) {
                     // Record real matrices we left alone so the runtime does not
                     // expect scales for them.
@@ -917,7 +980,7 @@ int main(int argc, char** argv) {
             fprintf(stderr, "\n%s\n", wrote.error().c_str());
     }
     report_copied_breakdown(copied_bytes_by_reason, bytes_out);
-    report_card_fit(bytes_out);
+    report_card_fit(bytes_out, mx_widen_bytes);
     printf("\n");
     return 0;
 }

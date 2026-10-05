@@ -32,6 +32,8 @@ struct Options {
     // Qwen3.6-35B recipe keeps all three), so the runtime's F16 GDN prefill path and
     // gemm.nvfp4_gdn_proj_prefill apply to the export. Empty: quantize them like any Linear.
     std::string keep_gdn_proj;
+    // Kept GDN projections written as MXFP8 (E4M3 + E8M0 per 32, #2475) instead of the source dtype.
+    bool gdn_proj_mxfp8 = false;
     bool dry_run = false;
     OutputFormat format = OutputFormat::Modelopt;
 };

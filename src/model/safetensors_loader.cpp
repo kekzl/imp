@@ -1,6 +1,7 @@
 #include "model/safetensors_loader.h"
 #include "model/model_limits.h"
 #include "model/model_arch.h"
+#include "model/mxfp8_widen.h"
 #include "model/weight_map.h"
 #include "model/hf_config_loader.h"
 #include "model/llm_compressor_loader.h"
@@ -1131,6 +1132,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     }
 
     ModelConfig& cfg = model->config_;
+    widen_mxfp8_pairs(tensor_map, model->host_owned_buffers_);
 
     // 1. Try config.json (authoritative for all hyperparams)
     bool has_config = HFConfigLoader::load_config(model_dir, cfg, &model->vision_tower);

@@ -81,7 +81,7 @@ TEST(QuantizeRecipe, JsonCarriesEveryFieldInFixedOrder) {
     ASSERT_TRUE(p.ok()) << text;
     EXPECT_EQ(keys(v), (std::vector<std::string>{"recipe_version", "imp_version", "imp_tree", "format",
                                                  "lm_head", "kv_hint", "kv_cache_fp8", "keep_attn_gate",
-                                                 "keep_gdn_proj", "calibration"}));
+                                                 "keep_gdn_proj", "gdn_proj_format", "calibration"}));
     EXPECT_EQ(member(v, "recipe_version")->as_int(), kRecipeVersion);
     EXPECT_EQ(member(v, "imp_tree")->str_val, "0123abcd");
     const JValue* c = member(v, "calibration");
