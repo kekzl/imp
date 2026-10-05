@@ -338,6 +338,28 @@ TEST(HostRegistration, EitherRegistersOrStaysEmptyAndSurvivesRelease) {
 // What NO lane here catches (verified by mutation): a build passing cudaHostAllocMapped for
 // BOTH kinds - PinnedBuffer only exposes a device view for Mapped, and under UVA the query
 // succeeds either way (see the HostPinnedKind comment in host_pinned.h).
+// acquire_filled (roadmap row 68): fill runs once, before the registration; without a device the
+// registration fails into an empty buffer, with one the buffer holds what fill wrote.
+TEST(PinnedBuffer, AcquireFilledRunsFillThenRegisters) {
+    int calls = 0;
+    EXPECT_TRUE(PinnedBuffer::acquire_filled(0, HostPinnedKind::Plain, [&calls](void*) { ++calls; }).empty());
+    EXPECT_EQ(calls, 0);
+    PinnedBuffer b = PinnedBuffer::acquire_filled(10000, HostPinnedKind::Mapped, [&calls](void* host) {
+        ++calls;
+        static_cast<unsigned char*>(host)[0] = 0x5A;
+        static_cast<unsigned char*>(host)[9999] = 0xA5;
+    });
+    EXPECT_EQ(calls, 1);
+    if (b.empty()) {
+        EXPECT_EQ(b.bytes(), 0u);
+        return;
+    }
+    EXPECT_EQ(b.bytes(), 10000u);
+    EXPECT_NE(b.device(), nullptr);
+    EXPECT_EQ(b.as<unsigned char>()[0], 0x5A);
+    EXPECT_EQ(b.as<unsigned char>()[9999], 0xA5);
+}
+
 TEST(PinnedBuffer, RealAllocatorEitherFailsCleanlyOrMapsOnlyWhenAsked) {
     HostPinnedAllocator& a = cuda_host_pinned_allocator();
 

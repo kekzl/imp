@@ -4,6 +4,8 @@
 
 #include <cuda_runtime.h>
 
+#include <cstdlib>
+
 namespace imp {
 
 namespace {
@@ -44,11 +46,64 @@ public:
     }
 };
 
+// Owner of acquire_filled buffers: aligned_alloc'd pages pinned in place, so free = unregister + free.
+class RegisteredHostAllocator final : public HostPinnedAllocator {
+public:
+    bool alloc(size_t, HostPinnedKind, void** out_host, void** out_device) override {
+        if (out_host)
+            *out_host = nullptr;
+        if (out_device)
+            *out_device = nullptr;
+        return false;  // acquire_filled only: pages must be written before they are registered
+    }
+    void free(void* host) override {
+        if (!host)
+            return;
+        IMP_CUDA_CHECK_LOG(cudaHostUnregister(host));
+        std::free(host);
+    }
+};
+
+RegisteredHostAllocator& registered_host_allocator() {
+    static RegisteredHostAllocator a;
+    return a;
+}
+
 }  // namespace
 
 HostPinnedAllocator& cuda_host_pinned_allocator() {
     static CudaHostPinnedAllocator a;
     return a;
+}
+
+PinnedBuffer PinnedBuffer::acquire_filled(size_t bytes, HostPinnedKind kind,
+                                          const std::function<void(void*)>& fill) {
+    PinnedBuffer out;
+    if (bytes == 0)
+        return out;
+    constexpr size_t kPage = 4096;
+    void* host = std::aligned_alloc(kPage, (bytes + kPage - 1) / kPage * kPage);
+    if (!host)
+        return out;
+    fill(host);
+    const unsigned flags = kind == HostPinnedKind::Mapped ? cudaHostRegisterMapped : cudaHostRegisterDefault;
+    if (const cudaError_t err = cudaHostRegister(host, bytes, flags); err != cudaSuccess) {
+        IMP_LOG_WARN("cudaHostRegister of a filled %.1f MiB buffer failed: %s", bytes / (1024.0 * 1024.0),
+                     cudaGetErrorString(err));
+        std::free(host);
+        return out;
+    }
+    void* device = nullptr;
+    if (kind == HostPinnedKind::Mapped && cudaHostGetDevicePointer(&device, host, 0) != cudaSuccess) {
+        IMP_CUDA_CHECK_LOG(cudaHostUnregister(host));
+        std::free(host);
+        return out;
+    }
+    out.owner_ = &registered_host_allocator();
+    out.host_ = host;
+    out.device_ = device;
+    out.bytes_ = bytes;
+    return out;
 }
 
 PinnedBuffer PinnedBuffer::acquire(HostPinnedAllocator& alloc, size_t bytes, HostPinnedKind kind) {

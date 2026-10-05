@@ -1,7 +1,7 @@
 #pragma once
 
 // Pins host-resident NVFP4 expert projections on worker threads: per projection one
-// cudaHostAlloc(Mapped) slab + memcpy from the mmap, 8 in parallel (#2336).
+// slab filled from the mmap, then cudaHostRegister(Mapped), 8 in parallel (#2336).
 
 #include "core/tensor.h"
 #include "memory/host_pinned.h"

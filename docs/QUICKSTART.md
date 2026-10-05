@@ -140,7 +140,7 @@ Commands: [README](../README.md#quickstart-qwen38-flash-next). Weights: 25 files
 | --- | --- |
 | image | `ghcr.io/kekzl/imp:latest`, v0.46.0 or later: the Flash-Next fixes ship in v0.46.0 ([`CHANGELOG.md`](../CHANGELOG.md) `[0.46.0]`) |
 | host RAM | test host 78 GiB: 74 GiB available before start, 9 GiB after load |
-| load | 97.7 s to `/health` ok, 65 s of it after `stay host-resident` in the log |
+| load | 59.0..64.0 s to `/health` ok, 28.9..32.0 s of it pinning the host experts (was 97.7 s / 65 s before roadmap row 68, 2026-10-05) |
 | KV | starts at 1900 blocks (30400 tokens), grows toward 131072 tokens as VRAM frees |
 | batch | one request at a time: `max_batch_size: auto → 1` (host-resident experts) |
 | long chat | 27 turns, 28 requests all `200`, up to 27241 tokens of context: decode median 64.2 tok/s, slowest turn 51.8 tok/s |
