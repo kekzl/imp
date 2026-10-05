@@ -966,6 +966,12 @@ recycle_min_streak   = 1
 # suffix_k_max. false = legacy single-most-recent scan.
 suffix               = true
 suffix_k_max         = 64
+# Corpus drafting: text files under this path (a file or a directory, read
+# up to 64 MiB, binary files skipped) form one engine-wide suffix index that
+# drafts when the request's own history has no match (needs suffix = true).
+# Empty = off.
+# Experimental, expires: 2026-12-31 (remove or promote by then).
+ngram_corpus         = ""
 # Shortest / longest suffix n-gram match searched. Longer min_match =
 # fewer but far more precise drafts (6 vs 3: +16% on code-edit, and the
 # number-table worst case shrinks from -13% to -2%).

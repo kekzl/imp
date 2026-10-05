@@ -101,6 +101,10 @@ struct Speculative {
     // suffix_k_max. false = legacy single-most-recent scan.
     bool suffix = true;
     int suffix_k_max = 64;
+    // Corpus drafting (#2421): text files under this path (file or directory, <= 64 MiB) form an
+    // engine-wide suffix index, asked when the request's own history has no match (speculative.suffix).
+    // "" = off.
+    std::string ngram_corpus;
     // Longer suffix matches trade draft frequency for precision, and precision
     // wins: a higher min_match cuts false n-gram matches (e.g. in number
     // tables) that never verify, at the cost of fewer drafts overall.

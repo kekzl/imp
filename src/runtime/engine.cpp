@@ -12,6 +12,7 @@
 #include "runtime/process_diag_install.h"
 #include "runtime/vram_budget.h"
 #include "runtime/batch.h"
+#include "runtime/spec_corpus.h"
 #include "compute/mtp_forward.h"
 #include "compute/rope.h"  // rope_yarn_corr_dims (MTP rope-scaling parity)
 #include "compute/encoder_forward.h"
@@ -895,6 +896,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // Model + profile + ssm_state_ are final here and none of the inputs can
     // change afterwards, so the answer is taken once, off the per-step path.
     spec_ngram_model_capable_flag_ = spec_ngram_model_capable_uncached_();
+    install_ngram_corpus(runtime_config_.speculative.ngram_corpus, model_->tokenizer(),
+                         runtime_config_.speculative.min_match, runtime_config_.speculative.max_match,
+                         spec_suffix_idx_);
 
     return true;
 }
