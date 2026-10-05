@@ -98,6 +98,11 @@ void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const v
                                                   const void* gate_bias_fp16 = nullptr,
                                                   const void* up_bias_fp16 = nullptr);
 
+// Dense prefill SwiGLU into out_fp16 [M,K] plus its CUTLASS NVFP4 quantize (dst_data [M,K/2],
+// dst_sf SfAtom): bit-identical to swiglu() + quantize_fp16_to_nvfp4_cutlass(out_fp16), #2470.
+void swiglu_quantize_fp16_to_nvfp4_cutlass(const void* gate_fp16, const void* up_fp16, void* out_fp16,
+                                           void* dst_data, void* dst_sf, int M, int K, cudaStream_t stream);
+
 // Runs CUTLASS sm_120 block-scaled NVFP4xNVFP4 GEMM: D = alpha*A@B^T. A (activation) [M,K]
 // NVFP4 RowMajor + SFA; B (weight) [N,K] NVFP4 RowMajor + SFB (micro_scale only); D [M,N] FP16
 // RowMajor; alpha = b.tensor_scale (compensates the deferred tensor_scale). Returns false if

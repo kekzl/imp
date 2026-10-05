@@ -10,6 +10,7 @@
 #include "quant/nvfp4_quant.h"
 #include "compute/layernorm.h"
 #include "compute/activation.h"
+#include "compute/gemm_cutlass_sm120.h"
 #include "quant/dequant_gpu.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
@@ -157,18 +158,26 @@ void GraphExecutor::rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor
         smallm_xq_from_producer_ = false;
 }
 
-void GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so,
-                                       TensorID consumer_id, int n, cudaStream_t stream) {
+bool GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so, TensorID consumer_id,
+                                       int n, cudaStream_t stream) {
     const int K = static_cast<int>(so.shape[1]);
+    // Prefill (#2470): the CUTLASS down GEMM's activation quantize rides in the SwiGLU kernel;
+    // so is still written, so a declining dispatch falls back on the same bytes.
+    if (n > 32 && K % 16 == 0 && so.qtype == QType::F16 && prefill_routes_cutlass_nvfp4_(consumer_id, n)) {
+        swiglu_quantize_fp16_to_nvfp4_cutlass(go.data, uo.data, so.data, qscratch_.cutlass_act_data,
+                                              qscratch_.cutlass_act_sf, n, K, stream);
+        return true;
+    }
     uint8_t* xq_scales = nullptr;
     uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales);
     if (xq_packed != nullptr && swiglu_quantize_nvfp4(go, uo, so, xq_packed, xq_scales, stream)) {
         smallm_producer_tag_(so.data, n, K);
-        return;
+        return false;
     }
     swiglu(go, uo, so, stream);
     if (smallm_xq_src_ == so.data && smallm_xq_src_m_ == n && smallm_xq_src_k_ == K)
         smallm_xq_from_producer_ = false;
+    return false;
 }
 
 bool GraphExecutor::try_smallm_pair_dispatch_(TensorID id_a, TensorID id_b, const Tensor& input,

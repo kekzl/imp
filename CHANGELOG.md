@@ -9,6 +9,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `imp-quantize --calib-groups` X/Y (#2476): MoE expert gate/up into an expert-only norm, per-expert down into up rows; `--calibrate` records per-expert statistics. Opt-in, no measured gain: Gemma-4-26B RTN rounding alone spreads PPL 16.7551..19.0110; gemma4 `--calib` needs a selector.
 
 ### Changed
+- Dense NVFP4 prefill (M > 32) fuses SwiGLU with the down-projection input quantize (#2470): one kernel instead of two, bytes identical. Qwen3-14B-NVFP4 pp4096 156.4..156.6 -> 154.4..154.8 ms.
 - `constrained.jump_ahead` (opt-in) emits a schema-forced span in the draft's split and drafts from the request's own earlier split (`constrained.jump_ahead_trust`, roadmap row 46): Qwen3-14B-NVFP4 one-key array schema 155.4 -> 163.1 tok/s, 159.9 with jump-ahead off.
 - Host-resident NVFP4 experts and the host token embedding are copied into pageable memory, then `cudaHostRegister`ed instead of `cudaHostAlloc`ed (roadmap row 68): Qwen3.8-Flash-Next ready 80.4 / 86.2 -> 64.0 / 59.0 s, Qwen3-Coder-Next 58.9 -> 25.9..31.5 s, decode unchanged.
 - `max_batch_size` auto prices 2048 instead of 4096 tokens per slot (roadmap row 66): FP16-KV models stop queueing clients at 32 streams. Qwen3-8B-NVFP4 24 -> 32 slots, TTFT p99 1268 -> 58 ms, 3937 -> 5086 tok/s; Qwen3-14B-Q6_K 17 -> 32, TTFT p99 4889 -> 284 ms.
