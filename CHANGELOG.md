@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-10-05
+
 ### Added
 - North-Mini-Code runs with tool calls (`Cohere2MoeForCausalLM`): parallel attention + MoE block, NoPE full layers, `<|START_ACTION|>` calls, reasoning split. NVFP4 PPL 11.8222 vs HF BF16 11.2088; tokenizer 0/1202 ids off HF (13 before the right-aligned digit split).
 - GLM-4.7-Flash runs with tool calls (`Glm4MoeLiteForCausalLM`): DeepSeek MLA with q_lora, noaux_tc sigmoid router, the `<arg_key>` tool-call body. NVFP4 PPL 10.4301 vs HF BF16 9.7618; `imp-quantize` folds GLM activation pre-scales (35.35 without).
