@@ -33,5 +33,6 @@ void parse_hf_tristate_flags(const JValue& root, const JValue& eff, ModelConfig&
 [[nodiscard]] bool parse_deepseek_config(const JValue& root, const JValue& eff, ModelConfig& cfg);
 [[nodiscard]] bool parse_olmo3_config(const JValue& root, const JValue& eff, ModelConfig& cfg);
 [[nodiscard]] bool parse_lfm2_config(const JValue& root, const JValue& eff, ModelConfig& cfg);
+[[nodiscard]] bool parse_cohere2_config(const JValue& root, const JValue& eff, ModelConfig& cfg);
 
 }  // namespace imp

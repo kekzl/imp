@@ -928,3 +928,25 @@ TEST(ToolCallGlm, NoArgumentsAndMalformedPairs) {
     EXPECT_EQ(ok.name, "list_files");
     EXPECT_EQ(json::parse(ok.arguments)["dir"], "/tmp");
 }
+
+// Cohere2 action body: a JSON array of {tool_call_id, tool_name, parameters}; every element is a call.
+TEST(ToolCallCohere, ActionArrayParsesThroughTheChatmlParser) {
+    std::atomic<int> next_id{0};
+    const std::string text =
+        "<tool_call>[\n    {\"tool_call_id\": \"0\", \"tool_name\": \"get_weather\", \"parameters\": "
+        "{\"city\": \"Paris\", \"days\": 3}},\n    {\"tool_call_id\": \"1\", \"tool_name\": \"ls\", "
+        "\"parameters\": {}}\n]</tool_call>";
+    auto [content, calls] = parse_tool_calls_chatml(text, next_id);
+    EXPECT_EQ(content, "");
+    ASSERT_EQ(calls.size(), 2u);
+    EXPECT_EQ(calls[0].name, "get_weather");
+    EXPECT_EQ(json::parse(calls[0].arguments)["days"], 3);
+    EXPECT_EQ(calls[1].name, "ls");
+    EXPECT_EQ(calls[1].arguments, "{}");
+    EXPECT_NE(calls[0].id, calls[1].id);
+
+    std::vector<ParsedToolCall> out;
+    EXPECT_FALSE(parse_cohere_action_calls("[]", out));
+    EXPECT_FALSE(parse_cohere_action_calls("[{\"name\": \"f\"}]", out));  // ChatML shape, not Cohere
+    EXPECT_TRUE(out.empty());
+}

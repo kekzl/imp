@@ -35,6 +35,12 @@ struct ModelConfig {
     std::vector<int> head_dim_per_layer;    // Gemma 4: different head_dim per layer type
     std::vector<int> n_heads_per_layer;     // Gemma 4: per-layer Q head count
     std::vector<uint8_t> swa_layers;        // Gemma 4: 1 = SWA layer, 0 = full attention
+    std::vector<uint8_t> nope_layers;       // Cohere2: 1 = no RoPE on this layer (full-attention layers)
+    bool parallel_block = false;            // Cohere2: h + attn(norm(h)) + mlp(norm(h)), one shared norm
+    [[nodiscard]] bool layer_nope(int layer) const {
+        return layer >= 0 && layer < static_cast<int>(nope_layers.size()) &&
+               nope_layers[static_cast<size_t>(layer)] != 0;
+    }
     float rope_theta_swa = 0.0f;            // Gemma 4: RoPE theta for SWA layers (default: rope_local_theta)
     // Gemma 4 HF: full_attention inv freqs [global hd/2]; empty = plain theta RoPE.
     std::vector<float> rope_inv_freqs_global;

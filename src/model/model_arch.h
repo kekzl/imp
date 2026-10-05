@@ -28,6 +28,7 @@ enum class ModelArch {
     QWEN3_NEXT,  // Qwen3NextForCausalLM (Qwen3-Coder-Next): the QWEN36_MOE block, fused qkvz/ba GDN inputs
     OLMO3,       // Olmo3ForCausalLM: post-norm-only block, full-width QK-norm, 3:1 sliding/full layers
     LFM2,        // Lfm2(Moe)ForCausalLM: gated short-conv layers (conv state in the SSM pool) + GQA layers
+    COHERE2,     // Cohere2MoeForCausalLM: parallel block, 3:1 SWA (RoPE) / full (NoPE) layers, sigmoid MoE
     GENERIC,     // stays last: tests/test_model_profile_table.cpp walks 0..GENERIC
 };
 

@@ -58,6 +58,16 @@ __global__ __launch_bounds__(256) void elementwise_add_fp16_kernel(half* __restr
     }
 }
 
+// Parallel-block residual merge: h[i] += a[i] - b[i] in FP32 (one rounding).
+__global__ __launch_bounds__(256) void parallel_residual_merge_fp16_kernel(half* __restrict__ h,
+                                                                           const half* __restrict__ a,
+                                                                           const half* __restrict__ b,
+                                                                           int64_t n) {
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n)
+        h[idx] = __float2half(__half2float(h[idx]) + (__half2float(a[idx]) - __half2float(b[idx])));
+}
+
 // Element-wise add-store: out[i] = a[i] + b[i], for FP16 data
 __global__ __launch_bounds__(256) void elementwise_add_store_fp16_kernel(const half* __restrict__ a,
                                                                          const half* __restrict__ b,
@@ -361,6 +371,13 @@ void rmsnorm_fp32_accum_to_fp16(const half* input, const half* norm_w, float* fp
 // PDL registration for elementwise_add_fp16_kernel (instrumented with pdl_wait()).
 void elementwise_add_pdl_register() {
     pdl::enable(reinterpret_cast<const void*>(&elementwise_add_fp16_kernel));
+}
+
+void parallel_residual_merge(half* h, const half* a, const half* b, int64_t n, cudaStream_t stream) {
+    constexpr int kThreads = 256;
+    const int blocks = static_cast<int>((n + kThreads - 1) / kThreads);
+    parallel_residual_merge_fp16_kernel<<<blocks, kThreads, 0, stream>>>(h, a, b, n);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Element-wise add-store: out[i] = a[i] + b[i] — avoids in-place + copy pattern

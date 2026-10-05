@@ -80,7 +80,7 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
         p.attn_variant = ModelProfile::AttnVariant::NOPE;
     else if (is_gemma4 && !cfg.swa_layers.empty())
         p.attn_variant = ModelProfile::AttnVariant::GEMMA4_SWA;
-    else if (is_gpt_oss && !cfg.swa_layers.empty())
+    else if ((is_gpt_oss || cfg.arch == ModelArch::COHERE2) && !cfg.swa_layers.empty())
         p.attn_variant = ModelProfile::AttnVariant::GPTOSS_SWA;
     else
         p.attn_variant = ModelProfile::AttnVariant::STANDARD;

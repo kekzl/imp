@@ -58,6 +58,12 @@ constexpr PairRule kGlmRules[] = {
     {".self_attn.kv_b_proj.weight", ".self_attn.o_proj.weight", 16.0f, Rows::MlaV, "", true},
 };
 
+// North-Mini-Code (cohere2_moe): dense mlp.down_proj input 11.74 % flushed (max 147, x16 < 448 x 6).
+// PPL 11.9865 none, 11.8222 dense x16, 12.3546 with v_proj/o_proj x16 too (o_proj 3.30 % flushed).
+constexpr PairRule kCohereRules[] = {
+    {".mlp.up_proj.weight", ".mlp.down_proj.weight", 16.0f, Rows::All, "", false},
+};
+
 struct MlaDims {
     int64_t nope = 0, v = 0;
 };
@@ -121,7 +127,12 @@ void apply_act_prescale(const Options& opt, const std::vector<std::unique_ptr<Ra
     const std::string mt = model_type_from_config(cfg_path);
     const bool lfm2 = mt == "lfm2" || mt == "lfm2_moe";
     const bool glm = mt == "glm4_moe_lite";
-    if ((!lfm2 && !glm) || opt.format != OutputFormat::Modelopt)
+    std::span<const PairRule> rules = lfm2 ? std::span<const PairRule>(kLfm2Rules) : kGlmRules;
+    if (mt == "cohere2_moe")
+        rules = kCohereRules;
+    else if (!lfm2 && !glm)
+        return;
+    if (opt.format != OutputFormat::Modelopt)
         return;
     MlaDims mla;
     JValue cfg;
@@ -138,8 +149,7 @@ void apply_act_prescale(const Options& opt, const std::vector<std::unique_ptr<Ra
         return gated_q_proj.count(t.name) == 0 && !keep_gdn_projection(t.name, opt.keep_gdn_proj) &&
                should_quantize(t, opt.quantize_lm_head, why);
     };
-    const int pairs = fold_rules(plan, index, lfm2 ? std::span<const PairRule>(kLfm2Rules) : kGlmRules, mla,
-                                 quantized);
+    const int pairs = fold_rules(plan, index, rules, mla, quantized);
     printf("activation pre-scale (%s): %d producer/consumer pairs folded\n", mt.c_str(), pairs);
 }
 

@@ -498,3 +498,22 @@ TEST(ToolStreamFilterUtf8, AsciiArgumentsAreUnchanged) {
     EXPECT_EQ(c.delta_concats[0], "{\"t\": \"plain ascii\"}");
     EXPECT_GT(c.n_arg_deltas, 1) << "the value should still stream incrementally";
 }
+
+// Cohere2 action array (decoded through the <|START_ACTION|> -> <tool_call> alias): one CALL per
+// element, whatever the chunking.
+TEST(ToolStreamFilterCohere, ActionArrayYieldsOneCallPerElement) {
+    const std::string body =
+        "Checking.<tool_call>[\n    {\"tool_call_id\": \"0\", \"tool_name\": \"get_weather\", "
+        "\"parameters\": "
+        "{\"city\": \"Paris\"}},\n    {\"tool_call_id\": \"1\", \"tool_name\": \"get_time\", \"parameters\": "
+        "{\"tz\": \"CET\"}}\n]</tool_call>";
+    for (size_t n : {1u, 3u, 7u, 1000u}) {
+        auto c = feed_chunks(ChatTemplateFamily::RAW, body, {n});
+        EXPECT_EQ(c.content, "Checking.") << "chunk=" << n;
+        ASSERT_EQ(c.calls.size(), 2u) << "chunk=" << n;
+        EXPECT_EQ(c.calls[0].name, "get_weather");
+        EXPECT_EQ(json::parse(c.calls[0].arguments)["city"], "Paris");
+        EXPECT_EQ(c.calls[1].name, "get_time");
+        EXPECT_EQ(c.n_streamed_calls, 0) << "array bodies are buffered";
+    }
+}

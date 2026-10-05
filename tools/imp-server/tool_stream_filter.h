@@ -126,10 +126,21 @@ public:
                                                          : body.substr(bs, be - bs + 1);
 
                         Segment seg;
-                        const bool parsed = parse_body_ ? parse_body_(body, fn_name_, seg.call)
-                                                        : parse_stream_tool_body(body, gemma_body_, fn_name_,
-                                                                                 seg.call);
-                        if (parsed) {
+                        std::vector<ParsedToolCall> action;  // Cohere2 array body: one CALL per element
+                        const bool is_action = !parse_body_ && !gemma_body_ && !body.empty() &&
+                                               body[0] == '[' && parse_cohere_action_calls(body, action);
+                        const bool parsed = is_action ||
+                                            (parse_body_ ? parse_body_(body, fn_name_, seg.call)
+                                                         : parse_stream_tool_body(body, gemma_body_, fn_name_,
+                                                                                  seg.call));
+                        if (is_action) {
+                            for (auto& a : action) {
+                                Segment s;
+                                s.kind = Segment::Kind::CALL;
+                                s.call = std::move(a);
+                                r.push_back(std::move(s));
+                            }
+                        } else if (parsed) {
                             seg.kind = Segment::Kind::CALL;
                             r.push_back(std::move(seg));
                         } else {

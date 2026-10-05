@@ -65,5 +65,21 @@ TEST(TokenizerLlamaBpeTest, TekkenUsesNemotronChunks) {
     EXPECT_EQ(nemotron_pre_tokenize("X/,c"), (Chunks{"X", "/,", "c"}));
 }
 
+// Cohere2 Split \d{1,3}(?=(?:\d{3})*\b): right-aligned triples before a word boundary; a run
+// followed by \w (Oniguruma: L, M, any N, Pc) stays whole for the family scan.
+TEST(DigitTriplesRightSplitTest, RightAlignedOnlyBeforeAWordBoundary) {
+    using Chunks = std::vector<std::string>;
+    EXPECT_EQ(digit_triples_right_split("x 1008|"), (Chunks{"x ", "1", "008", "|"}));
+    EXPECT_EQ(digit_triples_right_split("123456"), (Chunks{"123", "456"}));
+    EXPECT_EQ(digit_triples_right_split("v12ab 2\xC2\xBD"), (Chunks{"v12ab 2\xC2\xBD"}));  // 2½: ½ is \w
+    EXPECT_EQ(digit_triples_right_split("\t 9\xE2\x80\x8D"), (Chunks{"\t ", "9", "\xE2\x80\x8D"}));  // ZWJ
+    EXPECT_EQ(digit_triples_right_split("6\xD9\xA1"
+                                        "15."),
+              (Chunks{"6",
+                      "\xD9\xA1"
+                      "15",
+                      "."}));  // Arabic-Indic 1
+}
+
 }  // namespace
 }  // namespace imp

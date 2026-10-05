@@ -33,6 +33,10 @@ struct ChatMessage {
     // thinking blocks). Jinja templates decide whether to render it (Qwen3.8 keeps it by
     // default); the built-in families ignore it.
     std::string reasoning_content{};
+    // OpenAI tool_calls (JSON array, arguments as objects) and tool_call_id, passed to Jinja as
+    // message.tool_calls / message.tool_call_id; empty = absent.
+    std::string tool_calls_json{};
+    std::string tool_call_id{};
 };
 
 struct ToolFunction {

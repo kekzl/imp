@@ -36,8 +36,24 @@
 
 namespace imp {
 
+namespace {
+// Cohere2 reasoning markers (added tokens below the 99 % band): <|START_THINKING|> / <|END_THINKING|>.
+bool cohere_think_pair(const Tokenizer& tok, int32_t& ts, int32_t& te) {
+    const int32_t s = tok.find_token("<|START_THINKING|>");
+    const int32_t e = tok.find_token("<|END_THINKING|>");
+    if (s < 0 || e < 0 || !tok.is_added_token(s))
+        return false;
+    ts = s;
+    te = e;
+    return true;
+}
+}  // namespace
+
 bool Engine::init_chat_template_(ChatTemplateFamily family, const Tokenizer& tok) {
     const std::string& jinja = tok.chat_template_str();
+    // RAW without a checkpoint template: raw prompts, nothing to init. RAW with one (Cohere2): its Jinja.
+    if (family == ChatTemplateFamily::RAW && jinja.empty())
+        return true;
     if (chat_template_.init(family, tok, jinja))
         return true;
     return !jinja.empty() && ChatTemplate::detect_family(jinja) == ChatTemplateFamily::RAW &&
@@ -102,7 +118,7 @@ bool Engine::init_features() {
                 IMP_LOG_INFO("No chat template in metadata, using %s default for %s",
                              chat_template_family_name(family), model_arch_name(mcfg.arch));
         }
-        if (family != ChatTemplateFamily::RAW && !init_chat_template_(family, *tok))
+        if (!init_chat_template_(family, *tok))
             // A failed template init leaves chat_template_ inert, so every /v1/chat/completions
             // request falls back to raw concatenation (no role markers), which looks like a
             // model-quality problem, not a load problem (#1206 marked init() [[nodiscard]]).
@@ -134,6 +150,7 @@ bool Engine::init_features() {
             bool accept = think_logic::accept_think_token(
                 ts, ptok->has_token_types(), ptok->has_token_types() && ptok->is_special_token(ts),
                 ptok->is_added_token(ts), vocab);
+            accept = accept || cohere_think_pair(*ptok, ts, te);
             if (accept) {
                 think_start_id_ = ts;
                 think_end_id_ = te;

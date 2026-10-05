@@ -193,6 +193,9 @@ private:
     std::string type_ = "spm";   // "spm" or "gpt2"
     std::string pre_tokenizer_;  // Pre-tokenizer type from GGUF tokenizer.ggml.pre
     std::shared_ptr<const SplitSequence> split_seq_;  // pre_tokenizer_ == "split-seq"
+    bool digit_triples_right_ = false;  // Split kDigitTriplesRightRegex ahead of the family scan
+    std::vector<std::string> pre_tokenize_(const std::string& bpe_text) const;
+    std::vector<std::string> pre_tokenize_family_(const std::string& bpe_text) const;
     bool add_bos_ = true;
     bool add_space_prefix_ = true;           // SentencePiece ▁ prefix (false for Gemma)
     bool use_default_system_prompt_ = true;  // false → skip template's hardcoded default system
@@ -245,6 +248,11 @@ std::vector<std::string> nemotron_pre_tokenize(const std::string& text);
 // regex forms it can match exactly ([\s?]<class>[+], \s+$); nullptr otherwise.
 std::shared_ptr<const SplitSequence> compile_split_sequence(const std::vector<std::string>& steps);
 std::vector<std::string> split_sequence_pre_tokenize(const SplitSequence& seq, const std::string& text);
+
+// Split(Isolated) \d{1,3}(?=(?:\d{3})*\b) ahead of a family scan (Cohere2): a \d run followed by a word
+// boundary splits into right-aligned triples ("1008" -> "1" "008"); a run followed by \w stays whole.
+std::vector<std::string> digit_triples_right_split(const std::string& text);
+inline constexpr const char* kDigitTriplesRightRegex = "\\d{1,3}(?=(?:\\d{3})*\\b)";
 
 // NFC as encode() applies it: table compositions of Latin/Greek/Cyrillic base + combining mark,
 // and algorithmic Hangul L+V(+T). Exposed for unit tests.

@@ -123,6 +123,7 @@ struct ChatStateSnapshot {
     std::string model_name;
     bool is_think_model = false;
     int32_t think_start_id = -1, think_end_id = -1;
+    OutputMarkerAliases output_aliases;  // chat-path decode aliases (output_markers.h)
     int32_t channel_open_id = -1, channel_close_id = -1, channel_newline_id = -1;
     int max_seq_len = 0;
     bool has_vision_request = false;

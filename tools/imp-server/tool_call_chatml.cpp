@@ -103,6 +103,27 @@ bool parse_glm_arg_key_call(const std::string& body, ParsedToolCall& tc) {
     return true;
 }
 
+// Cohere2 action body: [{"tool_call_id": "0", "tool_name": NAME, "parameters": {...}}, ...].
+bool parse_cohere_action_calls(const std::string& body, std::vector<ParsedToolCall>& out) {
+    const json j = json::parse(body, nullptr, false);
+    if (j.is_discarded() || !j.is_array() || j.empty())
+        return false;
+    std::vector<ParsedToolCall> calls;
+    for (const auto& e : j) {
+        if (!e.is_object() || !e.contains("tool_name") || !e["tool_name"].is_string())
+            return false;
+        ParsedToolCall tc;
+        tc.name = e["tool_name"].get<std::string>();
+        tc.arguments = dump_safe(e.contains("parameters") ? e["parameters"] : json::object());
+        if (tc.name.empty())
+            return false;
+        calls.push_back(std::move(tc));
+    }
+    for (auto& tc : calls)
+        out.push_back(std::move(tc));
+    return true;
+}
+
 std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_chatml(
     const std::string& text, std::atomic<int>& next_tool_call_id) {
     std::vector<ParsedToolCall> calls;
@@ -154,7 +175,13 @@ std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_chatml(
         // Decodes the body through the shared streaming body-parser (ChatML JSON, then Qwen3.6 XML
         // fallback) so the streaming and non-streaming tool-call paths cannot drift. id set only on success.
         ParsedToolCall tc;
-        if (parse_stream_tool_body(body, /*gemma_body=*/false, /*fn_name=*/"", tc)) {
+        std::vector<ParsedToolCall> action;
+        if (!body.empty() && body[0] == '[' && parse_cohere_action_calls(body, action)) {
+            for (auto& a : action) {
+                a.id = "call_imp_" + std::to_string(next_tool_call_id.fetch_add(1));
+                calls.push_back(std::move(a));
+            }
+        } else if (parse_stream_tool_body(body, /*gemma_body=*/false, /*fn_name=*/"", tc)) {
             tc.id = "call_imp_" + std::to_string(next_tool_call_id.fetch_add(1));
             calls.push_back(std::move(tc));
         }

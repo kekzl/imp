@@ -98,6 +98,8 @@ std::vector<std::string> tool_names_from_request(const json& tools);
 bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc);
 // GLM-4.x NAME<arg_key>K</arg_key><arg_value>V</arg_value> body (GLM-4.7-Flash template).
 bool parse_glm_arg_key_call(const std::string& body, ParsedToolCall& tc);
+// Cohere2 <|START_ACTION|> body (a JSON array of {tool_name, parameters}); appends every call.
+bool parse_cohere_action_calls(const std::string& body, std::vector<ParsedToolCall>& out);
 
 // Parse a single Gemma-4 tool-call body ("call:NAME{key:value,...}", the
 // <|tool_call>/<tool_call|> markers already stripped). Fills tc.name and

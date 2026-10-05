@@ -149,6 +149,9 @@ constexpr ArchSpelling kSpellings[] = {
     {HF_CLASS, "Lfm2MoeForCausalLM", ModelArch::LFM2},
     {HF_MODEL_TYPE, "lfm2", ModelArch::LFM2},
     {HF_MODEL_TYPE, "lfm2_moe", ModelArch::LFM2},
+    {GGUF, "cohere2moe", ModelArch::COHERE2},  // refused at load (gguf_loader.cpp)
+    {HF_CLASS, "Cohere2MoeForCausalLM", ModelArch::COHERE2},
+    {HF_MODEL_TYPE, "cohere2_moe", ModelArch::COHERE2},
 };
 
 struct HfConfigHookRow {
@@ -172,6 +175,7 @@ constexpr HfConfigHookRow kHfConfigHooks[] = {
     {ModelArch::GEMMA4, parse_gemma4_config},
     {ModelArch::OLMO3, parse_olmo3_config},
     {ModelArch::LFM2, parse_lfm2_config},
+    {ModelArch::COHERE2, parse_cohere2_config},
 };
 // clang-format on
 
