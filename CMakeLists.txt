@@ -406,6 +406,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_kv_replan.cpp
     src/runtime/engine_workspace_warmup.cpp
     src/runtime/engine_graph_decode.cpp
+    src/runtime/jump_draft.cpp
     src/runtime/engine_scheduler.cpp
     src/runtime/engine_prefill.cpp
     src/runtime/engine_prompt_logprobs.cpp
@@ -877,6 +878,8 @@ if(IMP_BUILD_TESTS)
         # Host-placed token embedding: FP16 bits equal to the VRAM upload (#2484).
         tests/test_host_embedding.cpp
         tests/test_mxfp8_widen.cpp
+        # Jump-ahead drafts from the request's own tokenization (roadmap row 46).
+        tests/test_jump_draft.cpp
         # Qwen3-Next fused GDN inputs regrouped into the Qwen3.5 slots (#2410).
         tests/test_gdn_fused_split.cpp
         # Golden ModelConfig dump per HF config fixture (#2537).
@@ -1172,6 +1175,7 @@ if(IMP_BUILD_TESTS)
 
     imp_add_test_module(test-compute SOURCES
         tests/test_cuda_fault_signal.cu
+        tests/test_swiglu_quantize_cutlass.cu
         tests/test_ffn_graph_cache_gpu.cu
         tests/test_rope.cu
         # The fused QK-norm + RoPE decode kernel (#1957) had no test reference

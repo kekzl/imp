@@ -1,6 +1,7 @@
 #include "runtime/engine.h"
 #include "runtime/cuda_graph.h"
 #include "runtime/engine_internal.h"
+#include "runtime/jump_draft.h"
 #include "runtime/think_stop_logic.h"
 #include "memory/kv_cache.h"
 #include "model/chat_template.h"
@@ -13,6 +14,20 @@
 #include <vector>
 
 namespace imp {
+
+// Jump-ahead spans are grammar-forced TEXT: the draft's split is taken as is (roadmap row 46);
+// letting the model pick flipped between "_" and "_the" on every span and exited each chunk.
+static int32_t jump_forced_token(int32_t current, bool trust, bool consuming, int fnext, int frows,
+                                 const std::vector<int32_t>& fdraft, const std::vector<int32_t>& fpending,
+                                 int fpend_cursor) {
+    if (current >= 0 || !trust)
+        return current;
+    if (consuming && fnext <= frows)
+        return fdraft[static_cast<size_t>(fnext - 1)];
+    if (!consuming && !fpending.empty())
+        return fpending[static_cast<size_t>(fpend_cursor)];
+    return -1;
+}
 
 // CUDA graph decode helpers: async and conditional-graph variants for the
 // production decode path.
@@ -589,6 +604,9 @@ int Engine::step_constrained_pipeline() {
     p.state.force_token = -1;
     if (think_end_due_(*req))
         p.state.force_token = think_end_id_;
+    p.state.force_token = jump_forced_token(p.state.force_token, runtime_config_.constrained.jump_ahead_trust,
+                                            consuming, p.fnext, p.frows, p.fdraft, p.fpending,
+                                            p.fpend_cursor);
     // Stop mask (mirrors fill_sampling_params): the host drives this sampler
     // per tick, so the list swap is enough, no device flag.
     p.state.d_banned_tokens = p.d_banned;
@@ -742,7 +760,12 @@ void Engine::constrained_jump_probe_(std::shared_ptr<Request>& req) {
     Tokenizer* tok = model_->tokenizer();
     if (!tok)
         return;
-    std::vector<int32_t> draft = tok->encode(text, /*no_prefix=*/true);
+    // The model's own earlier split of the same span, else the canonical encode (roadmap row 46).
+    std::vector<int32_t> draft = jump_draft_from_history(
+        req->output_tokens, [tok](int32_t id) { return tok->decode_token(id); }, text, 1024,
+        kJumpFreeVerify + 2);
+    if (draft.empty())
+        draft = tok->encode(text, /*no_prefix=*/true);
     // The first kJumpFreeVerify tokens are confirmed for free; the chunk
     // needs >=2 more tokens to pay for itself, and jump_min_run is the
     // quality knob on top.

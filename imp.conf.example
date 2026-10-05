@@ -1085,6 +1085,10 @@ verify_smallm        = false
 # miss the canonical draft often enough that wasted chunk forwards cost
 # more than the consumed rows save (measured -3-5%, Q8 + NVFP4).
 jump_ahead           = false
+# With jump_ahead: emit each forced span in the draft's split (the grammar fixes the text)
+# instead of exiting where the model splits differently. Qwen3-14B-NVFP4, one-key array
+# schema: 159.9 -> 163.1 tok/s with it, 155.4 without (roadmap row 46).
+jump_ahead_trust     = true
 # Minimum draft length (tokens) worth the speculative chunk; shorter
 # forced spans stay on the per-token pipeline.
 jump_min_run         = 4

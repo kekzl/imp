@@ -702,6 +702,61 @@ void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const v
     IMP_CUDA_CHECK_LAUNCH();
 }
 
+// Dense SwiGLU + CUTLASS NVFP4 quantize: one thread per 16-value micro-block, FP16 math of
+// swiglu_fp16_kernel, quantized from the stored FP16 values (= quantize_fp16_nvfp4_cutlass_kernel).
+__global__ void swiglu_quantize_fp16_nvfp4_cutlass_kernel(const half* __restrict__ gate,
+                                                          const half* __restrict__ up, half* __restrict__ out,
+                                                          uint8_t* __restrict__ packed_out,
+                                                          uint8_t* __restrict__ sf_out, int M, int K,
+                                                          int n_k_tiles) {
+    const int k_groups = K / kSFVecSize;
+    const int64_t mb = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (mb >= static_cast<int64_t>(M) * k_groups)
+        return;
+    const int row = static_cast<int>(mb / k_groups);
+    const int k_group = static_cast<int>(mb % k_groups);
+    const int64_t base = mb * kSFVecSize;
+    float vals[kSFVecSize];
+    float amax = 0.0f;
+    float4 ov[2];
+#pragma unroll
+    for (int v = 0; v < 2; ++v) {
+        const float4 gv = reinterpret_cast<const float4*>(gate + base)[v];
+        const float4 uv = reinterpret_cast<const float4*>(up + base)[v];
+        const half2* g2 = reinterpret_cast<const half2*>(&gv);
+        const half2* u2 = reinterpret_cast<const half2*>(&uv);
+        half2* o2 = reinterpret_cast<half2*>(&ov[v]);
+#pragma unroll
+        for (int k = 0; k < 4; ++k) {
+            const float2 gf = __half22float2(g2[k]);
+            const float2 uf = __half22float2(u2[k]);
+            o2[k] = __float22half2_rn(
+                make_float2(gf.x / (1.0f + __expf(-gf.x)) * uf.x, gf.y / (1.0f + __expf(-gf.y)) * uf.y));
+            const float2 rf = __half22float2(o2[k]);
+            vals[v * 8 + k * 2] = rf.x;
+            vals[v * 8 + k * 2 + 1] = rf.y;
+            amax = fmaxf(amax, fmaxf(fabsf(rf.x), fabsf(rf.y)));
+        }
+    }
+    reinterpret_cast<float4*>(out + base)[0] = ov[0];
+    reinterpret_cast<float4*>(out + base)[1] = ov[1];
+    quantize_micro_block_nvfp4_from_vals(vals, amax, packed_out + static_cast<int64_t>(row) * (K / 2),
+                                         k_group, sf_out + sfatom_offset(row, k_group, n_k_tiles));
+}
+
+void swiglu_quantize_fp16_to_nvfp4_cutlass(const void* gate_fp16, const void* up_fp16, void* out_fp16,
+                                           void* dst_data, void* dst_sf, int M, int K, cudaStream_t stream) {
+    IMP_CHECK(K % kSFVecSize == 0, "swiglu_quantize_fp16_to_nvfp4_cutlass: K=%d must be multiple of %d", K,
+              kSFVecSize);
+    const int threads = 256;
+    const int blocks = static_cast<int>((static_cast<int64_t>(M) * (K / kSFVecSize) + threads - 1) / threads);
+    swiglu_quantize_fp16_nvfp4_cutlass_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const half*>(gate_fp16), static_cast<const half*>(up_fp16), static_cast<half*>(out_fp16),
+        static_cast<uint8_t*>(dst_data), static_cast<uint8_t*>(dst_sf), M, K,
+        (K + kAtomKElems - 1) / kAtomKElems);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 // ---------------------------------------------------------------------------
 // CUTLASS GEMM execution
 // ---------------------------------------------------------------------------

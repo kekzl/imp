@@ -419,6 +419,9 @@ struct RuntimeConfig {
         // per-token decode past a consumed span (same cross-path property
         // as spec-ngram verify).
         bool jump_ahead = false;
+        // With jump_ahead: emit a forced span in the draft's split instead of verifying the model's
+        // own split per token (same text, the grammar fixes it; roadmap row 46).
+        bool jump_ahead_trust = true;
         // Minimum draft length (tokens) worth the speculative chunk;
         // shorter forced spans stay on the per-token pipeline.
         int jump_min_run = 4;
