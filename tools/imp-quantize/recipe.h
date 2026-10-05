@@ -21,6 +21,7 @@ struct Recipe {
     bool kv_cache_fp8 = false;  // what the export declares
     bool keep_attn_gate = false;
     std::string keep_gdn_proj;  // "" = quantized like any Linear
+    std::string gdn_proj_format = "source";  // source | mxfp8 (kept GDN projections, #2475)
     // Calibration; the rest of this block is empty when calibrated is false.
     bool calibrated = false;
     std::string calib_sha256;    // of the --calib file

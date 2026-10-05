@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- `imp-quantize --gdn-proj-mxfp8` writes kept GDN and Mamba-2 projections as MXFP8, widened to BF16 at load (#2475); Mamba `mixer.in_proj` / `out_proj` follow `--keep-gdn-proj`. Qwen3.8-27B `all`: 26017 -> 20881 MiB on disk; `in` kept, PPL 5.1767 BF16 vs 5.1622 MXFP8.
 - Qwen3-Coder-Next (`Qwen3NextForCausalLM`) loads as `qwen3next` (#2410): fused `in_proj_qkvz` / `in_proj_ba` are split at load. RedHatAI NVFP4 with 48 host-resident MoE layers: PPL 6.0697 on `ppl_corpus.txt`, tg128 66.47 tok/s. qwen3next GGUFs are refused.
 - `imp-quantize --calib-groups` X/Y (#2476): MoE expert gate/up into an expert-only norm, per-expert down into up rows; `--calibrate` records per-expert statistics. Opt-in, no measured gain: Gemma-4-26B RTN rounding alone spreads PPL 16.7551..19.0110; gemma4 `--calib` needs a selector.
 
