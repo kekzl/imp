@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- `make verify-fast` gates server throughput: imp-server streams 8 concurrent 128-token chats on the baseline model (`scripts/server_bench.sh`), 8 % under the pin (Qwen3-8B-Q8_0 1049.18 tok/s) fails (roadmap row 44).
 - `make verify-fast` gates PPL drift: deterministic PPL of the baseline model on `ppl_corpus_45k.txt` against a pin in `tests/perf_baseline.json` (Qwen3-8B-Q8_0 10.7522), 0.5 % tolerance (roadmap row 45).
 - `/metrics` splits the VRAM allocator by tag (`imp_vram_allocator_bytes{tag=...}`) and reports `imp_vram_untracked_bytes`, the own bytes outside it (roadmap row 97).
 - `speculative.ngram_corpus` (opt-in): n-gram drafts from text files the prompt does not contain (#2421). Qwen3-14B-NVFP4 with the repo's `src/` as corpus, four code and prose turns: acceptance 6.2 -> 11.0 %, 162.4..162.9 -> 163.1..164.0 tok/s.

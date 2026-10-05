@@ -23,6 +23,9 @@
       "own_peak_mb": 20264,
       "own_peak_note": "peak device memory this PROCESS allocates after engine init (vram_own_peak_bytes), measured by the verify.sh peak-VRAM gate with --bench-pp 128 --bench-reps 1 --max-tokens 8 --mem-report. Excludes the CUDA primary context (~1680 MiB here) and any neighbour process, so unlike device peak_used it does not move for reasons unrelated to the change under test. Byte-identical across repeat runs."
     },
+    "server": {
+      "agg_tps_c8": 1049.18
+    },
     "quality": {
       "ppl_corpus_45k": 10.7522
     }
@@ -32,6 +35,7 @@
     "prefill_regression_pct": 8,
     "vram_increase_pct": 10,
     "paired_decode_regression_pct": 2,
+    "server_regression_pct": 8,
     "ppl_drift_pct": 0.5
   },
   "_note": "Re-pinned 2026-09-28 on purpose for #2166: gemm.nvfp4_lm_head=auto now serves the LM head as per-row FP8 E4M3 instead of NVFP4 (PPL 45k Qwen3-8B-Q8_0 11.1108 -> 10.7623 in #2176, 10.7491 on this tree). tg128 299.53 -> 282.97 (FP8 head reads 1.78x the NVFP4 head bytes), pp128 6169.20 -> 6132.05, pp512 14068.06 -> 14053.01, pp4096 16341.96 -> 16197.82, own_peak_mb 20644 -> 20264 (the Q8_0 source head is freed after load). Tree = main 702a9cd3 + this change (the generator wrote commit unknown for the uncommitted tree). Previous pin 2026-09-23 at 824140bd: Re-pinned 2026-09-23 at 824140bd (perf/q8-imma-lds: dense Q8_0 IMMA scale loads + BM=32 small grids, outputs bit-identical). Prefill moved on purpose: pp128 5031.75 -> 6169.20, pp512 12707.44 -> 14068.06, pp4096 15776.32 -> 16341.96; tg128 299.61 -> 299.53, own_peak_mb 20642 -> 20644 (unchanged within noise). Binary-copy A/B in the same session: pp512 12611.10 -> 14044.55, pp4096 14547.22 -> 15211.47 (5 / 3 pairs, all same sign). The generator wrote 824140bd-dirty (docs_lint regenerated STALE.md); no source differed. Previous pin 2026-09-17 at 6fe00f81: tg128 299.61, pp128 5031.75, pp512 12707.44, pp4096 15776.32, own_peak_mb 20642.",

@@ -127,6 +127,9 @@ own_peak=$($CLI --model "$MODEL" --bench --bench-pp 128 --bench-reps 1 --max-tok
            | grep -oP 'own_peak=\K[0-9]+' | tail -1)
 own_peak=${own_peak:-0}
 
+# Server gate pin (roadmap row 44): median of 3 runs of scripts/server_bench.sh, 8 clients x 128 tokens.
+srv_tps=$(for _ in 1 2 3; do bash scripts/server_bench.sh imp-server "$MODEL" 8 128 | cut -d" " -f1; done | sort -n | sed -n 2p)
+srv_tps=${srv_tps:-0}
 # PPL drift gate pin (roadmap row 45): deterministic teacher-forced PPL, bit-stable run to run.
 ppl=$($CLI --model "$MODEL" --perplexity tools/analysis/ppl_corpus_45k.txt --set runtime.deterministic=true 2>&1 \
       | grep -oP '^perplexity: \K[0-9.]+' | tail -1)
@@ -159,6 +162,9 @@ cat > "$OUTPUT" << EOF
       "model_weights": $vram_weights,
       "own_peak_mb": $own_peak
     },
+    "server": {
+      "agg_tps_c8": $srv_tps
+    },
     "quality": {
       "ppl_corpus_45k": $ppl
     }
@@ -167,6 +173,7 @@ cat > "$OUTPUT" << EOF
     "decode_regression_pct": 8,
     "prefill_regression_pct": 8,
     "vram_increase_pct": 10,
+    "server_regression_pct": 8,
     "ppl_drift_pct": 0.5
   }
 }
