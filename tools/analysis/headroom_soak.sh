@@ -2,8 +2,9 @@
 # headroom_soak.sh <img> <tag> <minutes> [imp-server args]: 32-stream long-context soak that drives the
 # growable KV pool to its cap, sampling device memory and KV blocks every second (#2482).
 # MIXED=1 draws a prompt length per wave (4k..60k chars) so new prefill shapes keep allocating.
-# Output: $OUT/<tag>/{samples.csv,waves.txt,server.log}; prints peak device used and the device
-# growth after the pool reached its maximum.
+# Output: $OUT/<tag>/{samples.csv,waves.txt,server.log,metrics_end.txt}; prints peak device used, the device
+# growth after the pool reached its maximum, and the soak assertions (row 43): KV blocks live after the
+# drain, failed requests, I2 serving-phase allocations, server ERROR lines, host RSS start -> end.
 set -uo pipefail
 img="$1" tag="$2" mins="$3"; shift 3
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -27,6 +28,7 @@ curl -sf "http://127.0.0.1:$port/health" > /dev/null || {
     done
 ) > "$out/samples.csv" &
 sampler=$!
+docker stats --no-stream --format '{{.MemUsage}}' imp-headroom-soak > "$out/rss_start.txt"
 end=$(($(date +%s) + mins * 60))
 w=0
 while [ "$(date +%s)" -lt "$end" ]; do
@@ -37,6 +39,10 @@ while [ "$(date +%s)" -lt "$end" ]; do
     docker run --rm --network host -v "$repo/tools:/tools:ro" -e TARGET_CHARS=$tc python:3.13-slim \
         python /tools/analysis/longctx_conc_client.py "$port" 32 256 "w$w" >> "$out/waves.txt" 2>&1
 done
+# Soak assertions (roadmap row 43): drained KV, serving-phase allocations, errors, host RSS.
+sleep 5
+curl -sf "http://127.0.0.1:$port/metrics" > "$out/metrics_end.txt"
+docker stats --no-stream --format '{{.MemUsage}}' imp-headroom-soak > "$out/rss_end.txt"
 docker logs imp-headroom-soak > "$out/server.log" 2>&1
 docker rm -f imp-headroom-soak > /dev/null
 kill $sampler 2>/dev/null
@@ -47,3 +53,8 @@ echo
 awk -F, '$2>max{max=$2} {tot=$3} END{print "peak used MiB", max, "of", tot, "-> min free MiB", tot-max}' "$out/samples.csv"
 awk -F, 'NR==FNR{if($6>k)k=$6; next} $6>=k && !t{t=1; u=$2} t{if($2>m)m=$2} END{print "max kv_blocks_total", k, "| device used at that point", u, "MiB, peak after", m, "MiB, growth", m-u, "MiB"}' \
     "$out/samples.csv" "$out/samples.csv"
+echo "kv_blocks_live after drain: $(awk '$1=="imp_kv_blocks_live"{print $2}' "$out/metrics_end.txt")" \
+    "| failed requests: $(grep -c '^ERR r' "$out/waves.txt")" \
+    "| I2 violations: $(grep -c 'I2 violation' "$out/server.log")" \
+    "| server ERROR lines: $(grep -c '\[ERROR\]' "$out/server.log")" \
+    "| host RSS: $(cut -d/ -f1 "$out/rss_start.txt") -> $(cut -d/ -f1 "$out/rss_end.txt")"
