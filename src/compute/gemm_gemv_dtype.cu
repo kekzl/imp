@@ -368,6 +368,7 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* 
 
     if (row >= M)
         return;
+    pdl_wait();  // x is the predecessor's output; A and row_scales are weights
     if constexpr (ROWSCALE)
         scale = row_scales[row];
 
@@ -542,10 +543,10 @@ void gemv_fp8(const Tensor& A, const Tensor& x, Tensor& y, float scale, cudaStre
     const int M = (int)A.shape[0];
     const int K = (int)A.shape[1];
 
-    gemv_fp8_e4m3_kernel<false>
-        <<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(A.data),
-                                                      static_cast<const half*>(x.data),
-                                                      static_cast<half*>(y.data), M, K, scale, nullptr);
+    pdl::enable_kernel(gemv_fp8_e4m3_kernel<false>);
+    pdl::launch(gemv_fp8_e4m3_kernel<false>, dim3(gemv_blocks(M)), dim3(kGemvThreads), size_t(0), stream,
+                static_cast<const uint8_t*>(A.data), static_cast<const half*>(x.data),
+                static_cast<half*>(y.data), M, K, scale, static_cast<const float*>(nullptr));
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -554,11 +555,10 @@ void gemv_fp8_rowscale(const Tensor& A, const Tensor& x, Tensor& y, const float*
     const int M = (int)A.shape[0];
     const int K = (int)A.shape[1];
 
-    gemv_fp8_e4m3_kernel<true>
-        <<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(A.data),
-                                                      static_cast<const half*>(x.data),
-                                                      static_cast<half*>(y.data), M, K, 0.0f,
-                                                      d_row_scales);
+    pdl::enable_kernel(gemv_fp8_e4m3_kernel<true>);
+    pdl::launch(gemv_fp8_e4m3_kernel<true>, dim3(gemv_blocks(M)), dim3(kGemvThreads), size_t(0), stream,
+                static_cast<const uint8_t*>(A.data), static_cast<const half*>(x.data),
+                static_cast<half*>(y.data), M, K, 0.0f, d_row_scales);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
