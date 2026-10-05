@@ -17,6 +17,11 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# The PPL drift gate reads the KPI corpus, rebuilt from git blobs (gitignored); the container has no
+# history, so the host builds it before any re-exec.
+[ -f "$ROOT/tools/analysis/ppl_corpus_45k.txt" ] ||
+    bash "$ROOT/tools/analysis/make_ppl_corpus.sh" "$ROOT/tools/analysis/ppl_corpus_45k.txt" >/dev/null 2>&1 || true
+
 # Auto re-exec into the worktree image when cmake is unavailable on the host (Clean-Host);
 # points IMP_VERIFY_BIN/TESTS at the image's prebuilt /usr/local/bin binaries. Refuses an image
 # built from another tree (image_tag.sh check). IMP_VERIFY_IN_DOCKER guards against re-exec loops.
@@ -36,6 +41,7 @@ if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]
         -e IMP_VERIFY_SKIP_VRAM="${IMP_VERIFY_SKIP_VRAM:-0}" \
         -e IMP_VERIFY_SKIP_GRAPHS="${IMP_VERIFY_SKIP_GRAPHS:-0}" \
         -e IMP_VERIFY_SKIP_SERVER="${IMP_VERIFY_SKIP_SERVER:-0}" \
+        -e IMP_VERIFY_SKIP_DRIFT="${IMP_VERIFY_SKIP_DRIFT:-0}" \
         -e IMP_VERIFY_BASELINE="${IMP_VERIFY_BASELINE:-tests/perf_baseline.json}" \
         -e IMP_VERIFY_CHUNK_SIZE="${IMP_VERIFY_CHUNK_SIZE:-0}" \
         -e IMP_VERIFY_TRIALS="${IMP_VERIFY_TRIALS:-3}" \
@@ -534,6 +540,42 @@ else
             fi
         fi
         rm -f "$ERR_V"
+    fi
+fi
+
+# Quantization / numerics drift gate (roadmap row 45): deterministic teacher-forced PPL of the
+# baseline model on tools/analysis/ppl_corpus_45k.txt against the pinned value. Deterministic mode
+# makes the NLL bit-stable run to run, so a move beyond thresholds.ppl_drift_pct is a numerics
+# change, not noise; an intentional one re-pins via scripts/gen_perf_baseline.sh.
+section "PPL drift vs baseline"
+DRIFT_CORPUS="tools/analysis/ppl_corpus_45k.txt"
+if [ "${IMP_VERIFY_SKIP_DRIFT:-0}" = "1" ]; then
+    skip "PPL drift gate (IMP_VERIFY_SKIP_DRIFT=1)"
+elif [ ! -f "$BASELINE" ] || ! command -v jq >/dev/null 2>&1 || [ ! -f "$DRIFT_CORPUS" ]; then
+    skip "PPL drift gate (no baseline, jq or corpus)"
+else
+    BL_PPL=$(jq -r '.metrics.quality.ppl_corpus_45k // empty' "$BASELINE")
+    PPL_THR=$(jq -r '.thresholds.ppl_drift_pct // 0.5' "$BASELINE")
+    DRIFT_MODEL_PATH="$MODELS/$(jq -r '.model // empty' "$BASELINE")"
+    if [ -z "$BL_PPL" ]; then
+        skip "no .metrics.quality.ppl_corpus_45k in $BASELINE — run scripts/gen_perf_baseline.sh"
+    elif [ ! -x "$BIN" ] || [ ! -f "$DRIFT_MODEL_PATH" ]; then
+        skip "PPL drift gate (binary or model missing)"
+    else
+        model_gate_ran
+        PPL=$("$BIN" --model "$DRIFT_MODEL_PATH" --perplexity "$DRIFT_CORPUS" --set runtime.deterministic=true \
+              2>&1 | grep -oP '^perplexity: \K[0-9.]+' | tail -1)
+        if [ -z "$PPL" ]; then
+            fail "PPL drift gate: no perplexity line from $BIN"
+        else
+            DELTA=$(awk -v a="$PPL" -v b="$BL_PPL" 'BEGIN{printf "%.3f", (a-b)/b*100}')
+            echo "  PPL ppl_corpus_45k = $PPL  (baseline $BL_PPL, delta ${DELTA}%)"
+            if awk -v d="$DELTA" -v t="$PPL_THR" 'BEGIN{exit !(d > t || d < -t)}'; then
+                fail "PPL drifted more than ${PPL_THR}% from the baseline"
+            else
+                pass "PPL within ${PPL_THR}% of baseline"
+            fi
+        fi
     fi
 fi
 
