@@ -327,6 +327,17 @@ public:
     // heads (Olmo-3). In place on qv/kk.
     void qk_norm_separate_(const TransformerLayer& ly, Tensor& qv, Tensor& kk, int n, int nh, int nkv, int hd,
                            float eps, cudaStream_t stream);
+    // ao reaches wo as the reduce wrote it: no output gate (Qwen3.5 sigmoid_mul), no MLA compaction.
+    [[nodiscard]] static bool attn_out_q8_epilogue_ok_(bool fuse_o_residual, bool out_gate, bool mla) {
+        return fuse_o_residual && !out_gate && !mla;
+    }
+    // Q8_1 of ao for the dp4a wo GEMV: taken from the reduce epilogue when it ran, else quantized here.
+    void quantize_attn_out_q8_(const Tensor& ao, int K, cudaStream_t stream);
+    // n == 1 dp4a QKV: q|k share a dp4a qtype, v any dp4a qtype (Q4_K_M: Q6_K attn_v on half the layers).
+    [[nodiscard]] bool dp4a_qkv_route_(const TransformerLayer& ly, int n, const Tensor& no) const;
+    // RMSNorm+Q8_1 once; q|k|v in one launch, or q|k plus a v GEMV on the same Q8_1 when v's qtype differs.
+    void dp4a_qkv_(const TransformerLayer& ly, int layer, const Tensor& h, Tensor& no, Tensor& qv, Tensor& kk,
+                   Tensor& vv, float eps, cudaStream_t stream);
     // Pre-FFN norm weight; Qwen3.5+ carries post_attn_norm instead of ffn_norm; null = identity.
     static const Tensor& ffn_norm_weight_(const TransformerLayer& ly) {
         if (ly.ffn_norm.data != nullptr || post_norm_only_(ly))

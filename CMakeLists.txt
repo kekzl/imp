@@ -288,6 +288,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_q4k.cu
     src/compute/kv_gather.cu
     src/compute/attention_paged.cu
+    src/compute/attention_paged_reduce.cu
     src/compute/attention_paged_fp8.cu
     src/compute/attention_paged_fp8_multitok.cu
     src/compute/attention_paged_fp8_multitok_gqa.cu

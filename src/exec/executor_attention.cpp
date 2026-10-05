@@ -80,6 +80,40 @@ void GraphExecutor::qk_norm_separate_(const TransformerLayer& ly, Tensor& qv, Te
     apply(kk, ly.attn_k_norm, nkv);
 }
 
+void GraphExecutor::quantize_attn_out_q8_(const Tensor& ao, int K, cudaStream_t stream) {
+    if (paged_attention_take_q8_epilogue())
+        return;
+    quantize_fp16_to_q8_1(static_cast<const half*>(ao.data), static_cast<block_q8_1*>(qscratch_.q8_1_buf),
+                          qscratch_.d8_buf, K, stream);
+}
+
+bool GraphExecutor::dp4a_qkv_route_(const TransformerLayer& ly, int n, const Tensor& no) const {
+    return n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr && no.qtype == QType::F16 &&
+           ly.wq.qtype == ly.wk.qtype && is_dp4a_qtype(ly.wq.qtype) && ly.wv.data != nullptr &&
+           is_dp4a_qtype(ly.wv.qtype);
+}
+
+void GraphExecutor::dp4a_qkv_(const TransformerLayer& ly, int layer, const Tensor& h, Tensor& no, Tensor& qv,
+                              Tensor& kk, Tensor& vv, float eps, cudaStream_t stream) {
+    auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+    const int K = static_cast<int>(ly.wq.shape[1]);
+    // LoRA reads the normed input: side-write norm_out.
+    half* lora_no = (lora_ && lora_->has_qkv(layer)) ? static_cast<half*>(no.data) : nullptr;
+    rmsnorm_quantize_q8_1(static_cast<const half*>(h.data), static_cast<const half*>(ly.attn_norm.data), q8,
+                          qscratch_.d8_buf, lora_no, K, eps, stream, norm_w_off_);
+    const int q_rows = static_cast<int>(ly.wq.shape[0]);
+    const int k_rows = static_cast<int>(ly.wk.shape[0]);
+    const int v_rows = static_cast<int>(ly.wv.shape[0]);
+    const bool v_same = ly.wv.qtype == ly.wq.qtype;
+    dispatch_gemv_qkv_fused(ly.wq.qtype, ly.wq.data, ly.wk.data, v_same ? ly.wv.data : nullptr, q8,
+                            qscratch_.d8_buf, static_cast<half*>(qv.data), static_cast<half*>(kk.data),
+                            v_same ? static_cast<half*>(vv.data) : nullptr, q_rows, k_rows,
+                            v_same ? v_rows : 0, K, stream);
+    if (!v_same)
+        dispatch_dp4a_gemv(ly.wv.qtype, ly.wv.data, q8, qscratch_.d8_buf, static_cast<half*>(vv.data), v_rows,
+                           K, stream);
+}
+
 // ---------------------------------------------------------------------------
 // Attention sub-pass for one layer
 // ---------------------------------------------------------------------------
@@ -207,6 +241,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 && n == 1 &&
                                  qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                                  h.qtype == QType::F16 && is_dp4a_qtype(ly.wo.qtype));
+    // The split-K reduce writes ao as Q8_1 too; quantize_attn_out_q8_ skips the quantize then.
+    paged_attention_arm_q8_epilogue(attn_out_q8_epilogue_ok_(will_fuse_o_residual, has_attn_output_gate,
+                                                             cfg.is_mla()),
+                                    qscratch_.q8_1_buf, qscratch_.d8_buf);
     bool will_fuse_o_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 && n > 1 &&
                               (wo_tier == StorageTier::FP16 || wo_tier == StorageTier::FP8));
     // Dequant beta=1 path: when force_fp16_gemm bypasses FP8, dequant weights on-the-fly
@@ -654,13 +692,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     } else if (will_fuse_o_residual) {
         int K_o = static_cast<int>(ly.wo.shape[1]);
         int M_o = static_cast<int>(ly.wo.shape[0]);
-        // Separate quant + K-parallel GEMV: higher warp occupancy than inline_quant.
-        // quantize_fp16_to_q8_1 is a lightweight kernel (~2 us for d_model=3072).
-        // The K-parallel GEMV achieves 48 warps/SM vs inline_quant's ~8 warps/SM.
-        const half* attn_fp16 = static_cast<const half*>(ao.data);
+        // Q8_1 of ao (reduce epilogue or a separate quantize), then the K-parallel GEMV + residual.
         const half* residual_ptr = static_cast<const half*>(h.data);
-        quantize_fp16_to_q8_1(attn_fp16, static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf, K_o,
-                              stream);
+        quantize_attn_out_q8_(ao, K_o, stream);
         dispatch_gemv_residual(ly.wo.qtype, ly.wo.data, static_cast<block_q8_1*>(qscratch_.q8_1_buf),
                                qscratch_.d8_buf, static_cast<half*>(h.data), residual_ptr, M_o, K_o, stream);
     } else if (will_fuse_o_beta1 && !cur_force_fp16_ && wo_tier == StorageTier::FP8 &&

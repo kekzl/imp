@@ -102,7 +102,6 @@
             }
             // No cudaFree: mla_*_buf_ are persistent workspace (graph-safe).
         } else {
-        auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
         // MXFP4 decode path: native MXFP4 GEMV with UE8M0 scales
         const WeightHandle* mxfp4_hwq = (ly.wq_id != kInvalidTensorID) ? &registry_.handle(ly.wq_id)
                                                                        : nullptr;
@@ -136,10 +135,8 @@
         bool nvfp4_qkv = (!has_attn_output_gate && n == 1 && wq_is_nvfp4 && wk_is_nvfp4 && wv_is_nvfp4);
         // Gemma-4: disable fused QKV when FP32 accum is active — the fused kernel
         // reads FP16 h instead of fp32_hidden_, losing precision through 128-expert routing.
-        bool fused_qkv = (!has_attn_output_gate && n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
-                          no.qtype == QType::F16 && ly.wq.qtype == ly.wk.qtype &&
-                          ly.wk.qtype == ly.wv.qtype && is_dp4a_qtype(ly.wq.qtype) &&
-                          !(using_fp32_accum && prof.fp32_residual_norms));
+        bool fused_qkv = (!has_attn_output_gate && !(using_fp32_accum && prof.fp32_residual_norms) &&
+                          dp4a_qkv_route_(ly, n, no));
         if (mxfp4_qkv) {
             // MXFP4 fused QKV: RMSNorm, optional Hadamard, then MXFP4 GEMV
             rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
@@ -200,20 +197,7 @@
                                  static_cast<half*>(qv.data), static_cast<half*>(kk.data),
                                  static_cast<half*>(vv.data), q_rows, k_rows, v_rows, K, stream, qkv_fold);
         } else if (fused_qkv) {
-            // Fused: RMSNorm + Q8_1 quantization in one kernel (no norm_out write)
-            int K = static_cast<int>(ly.wq.shape[1]);
-            // LoRA needs the normed projection input materialized — side-write
-            // norm_out (the kernel supports it; FFN's variant always does).
-            half* lora_no = (lora_ && lora_->has_qkv(layer)) ? static_cast<half*>(no.data) : nullptr;
-            rmsnorm_quantize_q8_1(static_cast<const half*>(h.data),
-                                  static_cast<const half*>(ly.attn_norm.data), q8, qscratch_.d8_buf,
-                                  lora_no, K, eps, stream, norm_w_off_);
-            int q_rows = static_cast<int>(ly.wq.shape[0]);
-            int k_rows = static_cast<int>(ly.wk.shape[0]);
-            int v_rows = static_cast<int>(ly.wv.shape[0]);
-            dispatch_gemv_qkv_fused(ly.wq.qtype, ly.wq.data, ly.wk.data, ly.wv.data, q8, qscratch_.d8_buf,
-                                    static_cast<half*>(qv.data), static_cast<half*>(kk.data),
-                                    static_cast<half*>(vv.data), q_rows, k_rows, v_rows, K, stream);
+            dp4a_qkv_(ly, layer, h, no, qv, kk, vv, eps, stream);
         } else {
             // Gemma-4 FP32 accum path: read the FP32 residual directly to avoid the
             // FP16 round-trip that drops ~1-2% precision per layer and drifts the

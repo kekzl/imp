@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "compute/attention_paged.h"
+#include "compute/gemm.h"
 
 #include "test_cuda_skip.h"
 
@@ -176,4 +177,66 @@ TEST(PagedAttentionReduce, StagedAndUnstagedPathsAreBitIdentical) {
         compared += got_staged.size();
     }
     EXPECT_GE(compared, 49000u) << "sweep shrank; the check loses its resolution";
+}
+
+// Q8_1 epilogue (#2439): the armed reduce writes qs, d and d8 bit-identical to
+// quantize_fp16_to_q8_1 over its own FP16 output; one-shot, and off when not armed.
+TEST(PagedAttentionReduce, Q8EpilogueMatchesSeparateQuantize) {
+    SKIP_IF_NO_CUDA();
+    for (int head_dim : {64, 128, 256}) {
+        constexpr int kHeads = 32, kSplits = 40;
+        const int K = kHeads * head_dim, nb = K / 32;
+        auto partial = make_partials(kHeads, head_dim, kSplits, kSplits, 4242u + head_dim);
+        float *d_partial = nullptr, *d8_epi = nullptr, *d8_ref = nullptr;
+        half* d_out = nullptr;
+        block_q8_1 *q8_epi = nullptr, *q8_ref = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_partial, partial.size() * sizeof(float)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_out, K * sizeof(half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&q8_epi, nb * sizeof(block_q8_1)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&q8_ref, nb * sizeof(block_q8_1)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d8_epi, nb * sizeof(float)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d8_ref, nb * sizeof(float)), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(d_partial, partial.data(), partial.size() * sizeof(float),
+                             cudaMemcpyHostToDevice),
+                  cudaSuccess);
+        ASSERT_EQ(cudaMemset(q8_epi, 0, nb * sizeof(block_q8_1)), cudaSuccess);
+        ASSERT_EQ(cudaMemset(q8_ref, 0, nb * sizeof(block_q8_1)), cudaSuccess);
+
+        paged_attention_arm_q8_epilogue(true, q8_epi, d8_epi);
+        paged_attention_launch_reduce(d_partial, d_out, 1, kHeads, head_dim, kSplits, nullptr, nullptr);
+        EXPECT_TRUE(paged_attention_take_q8_epilogue()) << "hd " << head_dim;
+        EXPECT_FALSE(paged_attention_take_q8_epilogue()) << "one-shot";
+        quantize_fp16_to_q8_1(d_out, q8_ref, d8_ref, K, nullptr);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+        std::vector<block_q8_1> a(nb), b(nb);
+        std::vector<float> da(nb), db(nb);
+        ASSERT_EQ(cudaMemcpy(a.data(), q8_epi, nb * sizeof(block_q8_1), cudaMemcpyDeviceToHost), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(b.data(), q8_ref, nb * sizeof(block_q8_1), cudaMemcpyDeviceToHost), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(da.data(), d8_epi, nb * sizeof(float), cudaMemcpyDeviceToHost), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(db.data(), d8_ref, nb * sizeof(float), cudaMemcpyDeviceToHost), cudaSuccess);
+        int nonzero = 0;
+        for (int i = 0; i < nb; ++i) {
+            ASSERT_EQ(std::memcmp(a[i].qs, b[i].qs, 32), 0) << "hd " << head_dim << " block " << i;
+            ASSERT_EQ(std::memcmp(&a[i].d, &b[i].d, sizeof(half)), 0) << "hd " << head_dim << " block " << i;
+            ASSERT_EQ(std::memcmp(&da[i], &db[i], sizeof(float)), 0) << "hd " << head_dim << " block " << i;
+            nonzero += (db[i] != 0.0f);
+        }
+        EXPECT_GT(nonzero, nb / 2) << "fixture degenerate";
+
+        // Not armed: the reduce leaves the Q8_1 buffer alone.
+        ASSERT_EQ(cudaMemset(q8_epi, 0x5A, nb * sizeof(block_q8_1)), cudaSuccess);
+        paged_attention_arm_q8_epilogue(false, q8_epi, d8_epi);
+        paged_attention_launch_reduce(d_partial, d_out, 1, kHeads, head_dim, kSplits, nullptr, nullptr);
+        EXPECT_FALSE(paged_attention_take_q8_epilogue());
+        ASSERT_EQ(cudaMemcpy(a.data(), q8_epi, nb * sizeof(block_q8_1), cudaMemcpyDeviceToHost), cudaSuccess);
+        EXPECT_EQ(static_cast<uint8_t>(a[0].qs[0]), 0x5Au);
+
+        cudaFree(d_partial);
+        cudaFree(d_out);
+        cudaFree(q8_epi);
+        cudaFree(q8_ref);
+        cudaFree(d8_epi);
+        cudaFree(d8_ref);
+    }
 }
