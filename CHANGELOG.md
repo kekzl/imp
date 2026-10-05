@@ -15,6 +15,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `imp-quantize --calib-groups` X/Y (#2476): MoE expert gate/up into an expert-only norm, per-expert down into up rows; `--calibrate` records per-expert statistics. Opt-in, no measured gain: Gemma-4-26B RTN rounding alone spreads PPL 16.7551..19.0110; gemma4 `--calib` needs a selector.
 
 ### Changed
+- GGUF decode launches fewer kernels: mixed-qtype QKV (Q4_K_M's Q6_K `attn_v`) shares one RMSNorm+Q8_1 pass, and the split-K attention reduce writes the dp4a `wo` input as Q8_1 (#2439). Qwen3-30B-A3B Q4_K_M tg128 346.7 -> 354.7 tok/s, 922 -> 802 launches per step.
 - `gemv_fp8_e4m3`, `topk_gating` and `rmsnorm_quantize_q8_1` launch with PDL (roadmap row 76): tg128 Qwen3-8B-FP8 169.3 -> 170.1, Qwen3-30B-A3B-Q4_K_M 346.0 -> 347.0, Qwen3-30B-A3B-NVFP4 374.0 -> 374.7 tok/s (means of 3 runs); deterministic greedy output identical.
 - The split-K decode attention reduce kernel launches with PDL (#2471): Qwen3-30B-A3B-NVFP4 (FP8 KV) tg128 after an 8192-token prompt 289.7..290.8 -> 293.8..294.5 tok/s. A reduce in the last split CTA measured 274.4 tok/s and was dropped.
 - Dense NVFP4 prefill (M > 32) fuses SwiGLU with the down-projection input quantize (#2470): one kernel instead of two, bytes identical. Qwen3-14B-NVFP4 pp4096 156.4..156.6 -> 154.4..154.8 ms.

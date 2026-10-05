@@ -244,4 +244,11 @@ void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int 
                                    int num_splits, cudaStream_t stream,
                                    const half* attn_sinks = nullptr);
 
+// One-shot Q8_1 epilogue for the next reduce launch (batch 1, head_dim % 32 == 0): the reduce also
+// writes O as Q8_1 blocks (qs, d) + d8, bit-identical to quantize_fp16_to_q8_1(O). arm=false clears.
+// Process-global like paged_attention_set_splitk_scratch: the decode caller arms and takes per layer.
+void paged_attention_arm_q8_epilogue(bool arm, void* q8_1_out, float* d8_out);
+// True when a reduce launch since the last arm wrote the Q8_1 epilogue; disarms.
+[[nodiscard]] bool paged_attention_take_q8_epilogue();
+
 }  // namespace imp
