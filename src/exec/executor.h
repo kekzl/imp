@@ -304,10 +304,34 @@ public:
     // Norm fold (quant/nvfp4_gemm.h), executor_norm_fold.cu. begin: per forward. arm: at an M=1
     // NVFP4 residual producer, targets the next norm. take: at that norm; ssq == nullptr means
     // run rmsnorm() as before.
-    // Pre-FFN norm weight; Qwen3.5+ carries post_attn_norm instead of ffn_norm.
+    // Olmo-3 block: no pre-norms, h += post_attn_norm(attn(h)); h += post_ffn_norm(mlp(h)).
+    [[nodiscard]] static bool post_norm_only_(const TransformerLayer& ly) {
+        return ly.attn_norm.data == nullptr && ly.ffn_norm.data == nullptr &&
+               ly.post_attn_norm.data != nullptr && ly.post_ffn_norm.data != nullptr;
+    }
+    // post_attn_norm applied to the attention output (Gemma sandwich, Olmo-3), not as the FFN input norm.
+    [[nodiscard]] static bool attn_post_norm_(const TransformerLayer& ly) {
+        return ly.post_attn_norm.data != nullptr && (ly.ffn_norm.data != nullptr || post_norm_only_(ly));
+    }
+    // h = r + post_attn_norm(po) (Gemma-4 sandwich, Olmo-3) instead of h = rmsnorm(po + r).
+    [[nodiscard]] static bool attn_norm_then_add_(const TransformerLayer& ly, bool sandwich_norms) {
+        return attn_post_norm_(ly) && (sandwich_norms || post_norm_only_(ly));
+    }
+    // Fused QK-norm+RoPE serves a per-head norm (weight hd), or a sub-head norm at n == 1.
+    // A norm over all heads (Olmo-3, weight heads*hd) takes qk_norm_separate_().
+    [[nodiscard]] static bool qk_norm_fusable_(const TransformerLayer& ly, int hd, int n) {
+        const int64_t wq = ly.attn_q_norm.shape[0], wk = ly.attn_k_norm.shape[0];
+        return (wq == hd && wk == hd) || (n == 1 && wq <= hd && wk <= hd);
+    }
+    // Separate QK RMSNorm: per head, per norm-dim chunk (Qwen3.5-27B-mxfp4: 256 of 512), or over all
+    // heads (Olmo-3). In place on qv/kk.
+    void qk_norm_separate_(const TransformerLayer& ly, Tensor& qv, Tensor& kk, int n, int nh, int nkv, int hd,
+                           float eps, cudaStream_t stream);
+    // Pre-FFN norm weight; Qwen3.5+ carries post_attn_norm instead of ffn_norm; null = identity.
     static const Tensor& ffn_norm_weight_(const TransformerLayer& ly) {
-        return ly.ffn_norm.data != nullptr ? ly.ffn_norm : ly.post_attn_norm.data != nullptr ? ly.post_attn_norm
-                                                                                              : ly.attn_norm;
+        if (ly.ffn_norm.data != nullptr || post_norm_only_(ly))
+            return ly.ffn_norm;
+        return ly.post_attn_norm.data != nullptr ? ly.post_attn_norm : ly.attn_norm;
     }
     void norm_fold_begin_(int n, cudaStream_t stream);
     NvFP4NormFoldOut norm_fold_arm_(int layer, bool after_ffn, const Tensor& no);

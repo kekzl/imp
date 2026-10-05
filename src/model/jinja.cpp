@@ -1643,6 +1643,24 @@ struct EvalBudgetExceeded : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
+// Test of select/reject/selectattr/rejectattr; empty test = truthiness, unknown test = false (logged).
+static bool select_test_passes(const std::string& test, const Value& v, const Value& arg) {
+    if (test.empty())
+        return v.truthy();
+    if (test == "equalto" || test == "eq" || test == "==" || test == "sameas")
+        return v == arg;
+    if (test == "ne" || test == "!=")
+        return !(v == arg);
+    if (test == "defined" || test == "undefined" || test == "none")
+        return v.is_none() == (test != "defined");
+    if (test == "string")
+        return v.is_string();
+    if (test == "in")
+        return arg.is_array() && std::ranges::any_of(arg.as_array(), [&](const Value& x) { return x == v; });
+    IMP_LOG_WARN("jinja: unsupported select test '%s'", test.c_str());
+    return false;
+}
+
 class Evaluator {
 public:
     // 256 mirrors the parse cap; the deepest macro chain in the zoo is 3.
@@ -2295,8 +2313,9 @@ private:
         if (f.name == "tojson") {
             return Value(value_to_json(val));
         }
-        if (f.name == "selectattr" || f.name == "rejectattr" || f.name == "map" || f.name == "select" ||
-            f.name == "reject" || f.name == "batch" || f.name == "slice" || f.name == "sort" ||
+        if (f.name == "selectattr" || f.name == "rejectattr" || f.name == "select" || f.name == "reject")
+            return select_filter_(f, val);
+        if (f.name == "map" || f.name == "batch" || f.name == "slice" || f.name == "sort" ||
             f.name == "unique" || f.name == "groupby") {
             // Unsupported filters — return value as-is
             IMP_LOG_WARN("jinja: unsupported filter '%s'", f.name.c_str());
@@ -2305,6 +2324,30 @@ private:
 
         IMP_LOG_WARN("jinja: unknown filter '%s'", f.name.c_str());
         return val;
+    }
+
+    // select/reject(test, arg) and selectattr/rejectattr(attr, test, arg); no test = truthiness.
+    // Olmo-3 counts system turns with messages|selectattr('role', 'equalto', 'system')|list|length.
+    Value select_filter_(const FilterExpr& f, const Value& val) {
+        if (!val.is_array())
+            return val;
+        const bool by_attr = f.name == "selectattr" || f.name == "rejectattr";
+        const bool keep = f.name == "selectattr" || f.name == "select";
+        std::vector<Value> args;
+        for (const auto& a : f.args)
+            args.push_back(eval(*a));
+        const size_t t0 = by_attr ? 1 : 0;
+        if (by_attr && (args.empty() || !args[0].is_string()))
+            return val;
+        const std::string test = args.size() > t0 && args[t0].is_string() ? args[t0].as_string() : "";
+        const Value arg = args.size() > t0 + 1 ? args[t0 + 1] : Value();
+        Value::Array out;
+        for (const auto& item : val.as_array()) {
+            const Value probe = by_attr ? (item.is_object() ? item.get(args[0].as_string()) : Value()) : item;
+            if (select_test_passes(test, probe, arg) == keep)
+                out.push_back(item);
+        }
+        return Value(std::move(out));
     }
 
     void register_macro(const MacroNode& node) { macros_[node.name] = &node; }

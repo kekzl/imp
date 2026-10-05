@@ -633,7 +633,8 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         // the Gemma-4 block below).
         if (!matched && !gemma4_layout && parts.size() >= 5 && parts[3] == "post_attention_layernorm" &&
             parts[4] == "weight") {
-            layer.ffn_norm = t;
+            // Olmo-3 has no pre-norms: this is the attention output norm.
+            (arch_ == ModelArch::OLMO3 ? layer.post_attn_norm : layer.ffn_norm) = t;
             matched = true;
         }
 

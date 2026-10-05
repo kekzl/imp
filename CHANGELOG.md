@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- Olmo-3 runs (`Olmo3ForCausalLM`, SafeTensors): post-norm-only block, QK-norm over all heads, 3:1 sliding/full layers with YaRN on the full ones. Olmo-3-7B-Instruct bf16 `ppl_corpus_45k` 18.7245 vs HF BF16 18.7333; GGUF is refused.
 - `make verify-fast` gates server throughput: imp-server streams 8 concurrent 128-token chats on the baseline model (`scripts/server_bench.sh`), 8 % under the pin (Qwen3-8B-Q8_0 1049.18 tok/s) fails (roadmap row 44).
 - `make verify-fast` gates PPL drift: deterministic PPL of the baseline model on `ppl_corpus_45k.txt` against a pin in `tests/perf_baseline.json` (Qwen3-8B-Q8_0 10.7522), 0.5 % tolerance (roadmap row 45).
 - `/metrics` splits the VRAM allocator by tag (`imp_vram_allocator_bytes{tag=...}`) and reports `imp_vram_untracked_bytes`, the own bytes outside it (roadmap row 97).
@@ -29,6 +30,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `imp-cli --bench` warms prefill until the graph replays (3 prefills) and prints each timed rep (#2525): Qwen3-30B-A3B-NVFP4 pp512 over 10 fresh processes 25887.89..28483.46 tok/s (10.03 %) -> 31041.61..31624.79 (1.88 %). Eager jitter cause and bound: `docs/internals/BENCHMARKING.md` (#2538).
 
 ### Fixed
+- Jinja chat templates: `selectattr`/`rejectattr`/`select`/`reject` filter instead of passing the list through. Olmo-3's default system turn was dropped (prompt 19 vs HF 47 tokens).
 - Modelopt FP8 checkpoints (`quant_algo` FP8) apply their per-tensor `weight_scale`: Phase 0 ran only for NVFP4 checkpoints, so `nvidia/Qwen3-8B-FP8` served NaN (first token -1, then an illegal access); now PPL 13.0714 on `ppl_4k.txt`. Executor teardown no longer frees the checkpoint's own FP8 tensors (252 double frees).
 - MoE models with host-resident NVFP4 experts no longer capture the serial prefill graph (`imp-cli --bench` faulted, exit 139); Qwen3-Coder-Next tg128 66.47 -> 252.11 tok/s with graphs on (#2574). A forward that throws in the decode-loop capture closes it, so BF16-expert MoE servers start (#2572).
 - `runtime.deterministic` with the prefix cache: a finished request publishes its prompt blocks only, not the decode-computed reply KV or transcript snapshot. gemma-3-12b Q4_K_M 2 x 3 turns: 6/6 replies equal to the cache off (was 5/6).

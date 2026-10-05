@@ -416,6 +416,36 @@ TEST_F(RopeScalingConfigTest, UnknownArchSetsFallbackFlag) {
     EXPECT_EQ(cfg2.arch, imp::ModelArch::LLAMA);
 }
 
+// Olmo-3: layer_types 3 sliding + 1 full -> pattern 4; local layers keep rope_theta; YaRN parsed.
+TEST_F(RopeScalingConfigTest, Olmo3LayerPatternAndYarn) {
+    write_config(R"({
+        "architectures": ["Olmo3ForCausalLM"], "model_type": "olmo3",
+        "hidden_size": 4096, "num_attention_heads": 32, "num_key_value_heads": 32,
+        "num_hidden_layers": 8, "rope_theta": 500000, "sliding_window": 4096,
+        "layer_types": ["sliding_attention", "sliding_attention", "sliding_attention", "full_attention",
+                        "sliding_attention", "sliding_attention", "sliding_attention", "full_attention"],
+        "rope_scaling": {"attention_factor": 1.2079441541679836, "beta_fast": 32.0, "beta_slow": 1.0,
+                         "factor": 8.0, "original_max_position_embeddings": 8192, "rope_type": "yarn"}
+    })");
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_EQ(cfg.arch, imp::ModelArch::OLMO3);
+    EXPECT_EQ(cfg.sliding_window_pattern, 4);
+    EXPECT_EQ(cfg.sliding_window, 4096);
+    EXPECT_FLOAT_EQ(cfg.rope_local_theta, 500000.0f);
+    EXPECT_FLOAT_EQ(cfg.rope_freq_scale, 8.0f);
+    EXPECT_FLOAT_EQ(cfg.yarn_ext_factor, 1.0f);
+    EXPECT_EQ(cfg.rope_n_ctx_orig, 8192);
+
+    // Not every-4th-full: refused rather than run with a wrong window map.
+    write_config(R"({
+        "architectures": ["Olmo3ForCausalLM"], "hidden_size": 64, "num_attention_heads": 4,
+        "num_hidden_layers": 3, "layer_types": ["sliding_attention", "full_attention", "full_attention"]
+    })");
+    imp::ModelConfig bad;
+    EXPECT_FALSE(HFConfigLoader::load_config(tmp_dir_.string(), bad));
+}
+
 // Granite (#2412): own arch, attention_multiplier replaces 1/sqrt(head_dim), the two residual-stream
 // multipliers fold into embed_scale, logits_scaling != 1 is refused by the dimension validator.
 TEST_F(RopeScalingConfigTest, GraniteMultipliers) {
