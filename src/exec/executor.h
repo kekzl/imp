@@ -335,6 +335,9 @@ public:
     void quantize_attn_out_q8_(const Tensor& ao, int K, cudaStream_t stream);
     // n == 1 dp4a QKV: q|k share a dp4a qtype, v any dp4a qtype (Q4_K_M: Q6_K attn_v on half the layers).
     [[nodiscard]] bool dp4a_qkv_route_(const TransformerLayer& ly, int n, const Tensor& no) const;
+    // MLA Q: wq(no), or with q_lora_rank > 0 (V3, GLM) wq(rmsnorm(q_a_proj(no), q_a_layernorm)).
+    void mla_q_projection_(const TransformerLayer& ly, const Tensor& no, Tensor& qv, int n, float eps,
+                           const GemmContext& ctx);
     // RMSNorm+Q8_1 once; q|k|v in one launch, or q|k plus a v GEMV on the same Q8_1 when v's qtype differs.
     void dp4a_qkv_(const TransformerLayer& ly, int layer, const Tensor& h, Tensor& no, Tensor& qv, Tensor& kk,
                    Tensor& vv, float eps, cudaStream_t stream);
@@ -813,6 +816,7 @@ private:
     void* mla_latent_buf_ = nullptr;  // [max_tokens, kv_lora_rank]
     void* mla_k_rope_buf_ = nullptr;  // [max_tokens, qk_rope_head_dim]
     void* mla_kv_b_buf_ = nullptr;    // [max_tokens, n_heads*(qk_nope_head_dim+v_head_dim)]
+    void* mla_q_a_buf_ = nullptr;     // [max_tokens, q_lora_rank], q_lora models only
 
     // MLA absorbed-decode latent KV cache (opt-in attention.mla_absorb).
     // Per-layer slice [max_seq, kv_lora_rank+qk_rope_head_dim] FP16: cols

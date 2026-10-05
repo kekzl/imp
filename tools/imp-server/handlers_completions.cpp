@@ -211,13 +211,13 @@ void stream_completion_response_(httplib::Response& res, ServerState& state, con
                 }
 
                 if (evt.is_last) {
-                    if (token == snap_tok->eos_id() && !ignore_eos) {
+                    if (snap_tok->is_eos(token) && !ignore_eos) {
                         finish = evt.finish_reason ? evt.finish_reason : "stop";
                         break;
                     }
                     finish = evt.finish_reason ? evt.finish_reason : "length";
                 }
-                if (ignore_eos && token == snap_tok->eos_id()) {
+                if (ignore_eos && snap_tok->is_eos(token)) {
                     n_output_tokens++;  // counted, no text
                     if (evt.is_last)
                         break;
@@ -440,13 +440,13 @@ void nonstream_completion_response_(httplib::Response& res, ServerState& state, 
         }
 
         if (evt.is_last) {
-            if (token == snap_tok->eos_id() && !ignore_eos) {
+            if (snap_tok->is_eos(token) && !ignore_eos) {
                 finish = evt.finish_reason ? evt.finish_reason : "stop";
                 break;
             }
             finish = evt.finish_reason ? evt.finish_reason : "length";
         }
-        if (ignore_eos && token == snap_tok->eos_id()) {
+        if (ignore_eos && snap_tok->is_eos(token)) {
             n_eos_counted++;  // counted in usage, kept out of the text
             if (evt.is_last)
                 break;

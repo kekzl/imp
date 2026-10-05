@@ -152,6 +152,8 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanH
         add_tensor(L.kv_a_proj, TensorKind::KV_A_PROJ, plan, next_id, total, hints);
         add_tensor(L.kv_a_layernorm, TensorKind::KV_A_NORM, plan, next_id, total, hints);
         add_tensor(L.kv_b_proj, TensorKind::KV_B_PROJ, plan, next_id, total, hints);
+        add_tensor(L.q_a_proj, TensorKind::KV_A_PROJ, plan, next_id, total, hints);  // q_lora down-proj
+        add_tensor(L.q_a_layernorm, TensorKind::KV_A_NORM, plan, next_id, total, hints);
         add_tensor(L.w_gate, TensorKind::W_GATE, plan, next_id, total, hints);
         add_tensor(L.w_up, TensorKind::W_UP, plan, next_id, total, hints);
         add_tensor(L.w_down, TensorKind::W_DOWN, plan, next_id, total, hints);

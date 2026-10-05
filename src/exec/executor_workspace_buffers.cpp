@@ -117,6 +117,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         alloc(&mla_latent_buf_, static_cast<size_t>(cfg.kv_lora_rank), "latent");
         alloc(&mla_k_rope_buf_, static_cast<size_t>(cfg.qk_rope_head_dim), "k_rope");
         alloc(&mla_kv_b_buf_, kvb_out, "kv_b");
+        if (cfg.q_lora_rank > 0)
+            alloc(&mla_q_a_buf_, static_cast<size_t>(cfg.q_lora_rank), "q_a");
         if (!mla_ok) {
             mla_scratch_unservable_ = true;
             return;
@@ -1649,6 +1651,7 @@ void GraphExecutor::free_buffers() {
     mla_latent_buf_ = nullptr;
     mla_k_rope_buf_ = nullptr;
     mla_kv_b_buf_ = nullptr;
+    mla_q_a_buf_ = nullptr;
     mla_absorb_cache_ = nullptr;
     mla_absorb_scores_ = nullptr;
     if (d_sample_result_) {

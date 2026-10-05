@@ -1,5 +1,5 @@
 #include "model/weight_map.h"
-#include "model/lfm2_names.h"
+#include "model/weight_map_arch.h"
 #include "model/gdn_fused_split.h"
 #include "model/multimodal_wrapper.h"
 #include "model/tensor_kind_matcher.h"
@@ -7,6 +7,7 @@
 #include "core/logging.h"
 #include "model/model_limits.h"
 #include <string>
+#include <string_view>
 #include <vector>
 #include <algorithm>
 #include <cstdlib>
@@ -365,6 +366,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
     const bool needs_multimodal_strip = gemma4_layout || is_qwen36_moe || (arch_ == ModelArch::QWEN35) ||
                                         (arch_ == ModelArch::QWEN4_EXP) || model.config_.multimodal_wrapper;
 
+    const int declared_layers = model.config_.n_layers;  // before MTP layers could extend it
     for (auto& [orig_name, tensor] : tensors) {
         std::string name = orig_name;
         if (needs_multimodal_strip) {
@@ -394,8 +396,11 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         // to model.layers.N.<self_attn|mamba|mlp>.<...> so the existing matchers pick them up;
         // otherwise every tensor falls through to "unrecognised", stays null, and the first forward
         // hits an IMA reading uninitialised memory.
-        if (arch_ == ModelArch::LFM2)
-            name = lfm2_canonical_name(name);
+        if (!arch_canonical_name(arch_, declared_layers, name)) {
+            ++skipped;
+            ++stats.mtp;
+            continue;
+        }
         if (is_nemotron_h) {
             if (name == "backbone.embeddings.weight") {
                 name = "model.embed_tokens.weight";
@@ -580,19 +585,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             } else if (proj == "o_proj") {
                 layer.wo = t;
                 matched = true;
-            } else if (proj == "kv_a_proj_with_mqa") {
-                // Packs latent(kv_lora_rank=512) + rope(qk_rope_head_dim=64) in one
-                // tensor. The split into latent vs rope happens at projection time
-                // (Task 2.3), not here.
-                layer.kv_a_proj = t;
-                matched = true;
-            } else if (proj == "kv_a_layernorm") {
-                // RMSNorm weight on the 512-dim latent. Norm weights are never
-                // quantized; leave as FP16/FP32.
-                layer.kv_a_layernorm = t;
-                matched = true;
-            } else if (proj == "kv_b_proj") {
-                layer.kv_b_proj = t;
+            } else if (assign_mla_tensor(layer, proj, t)) {
                 matched = true;
             } else if (proj == "qkv_proj") {
                 // Fused QKV (Phi-4): [Q+K+V, K_packed] → split into wq, wk, wv.

@@ -36,7 +36,7 @@
             const int kvb_out        = nh * (nope_dim + v_head_dim_mla);
 
             // 2. Q projection + reorder [nope|pe] -> [pe|nope] in-place.
-            gemm_via_handle_(ly.wq_id, no, qv, ctx);
+            mla_q_projection_(ly, no, qv, n, eps, ctx);
             mla_reorder_q(static_cast<half*>(qv.data), n, nh, nope_dim, rope_dim, stream);
 
             // kv_a scratch is pre-allocated (mla_*_buf_), NOT cudaMallocAsync'd here:
