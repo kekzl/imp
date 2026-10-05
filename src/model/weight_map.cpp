@@ -1,4 +1,5 @@
 #include "model/weight_map.h"
+#include "model/lfm2_names.h"
 #include "model/gdn_fused_split.h"
 #include "model/multimodal_wrapper.h"
 #include "model/tensor_kind_matcher.h"
@@ -393,6 +394,8 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         // to model.layers.N.<self_attn|mamba|mlp>.<...> so the existing matchers pick them up;
         // otherwise every tensor falls through to "unrecognised", stays null, and the first forward
         // hits an IMA reading uninitialised memory.
+        if (arch_ == ModelArch::LFM2)
+            name = lfm2_canonical_name(name);
         if (is_nemotron_h) {
             if (name == "backbone.embeddings.weight") {
                 name = "model.embed_tokens.weight";

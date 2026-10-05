@@ -55,6 +55,7 @@ constexpr ProfileRow kRows[] = {
     {ModelArch::GRANITE,          false, false, false,  false, false,   Variant::STANDARD,   kAll},
     {ModelArch::QWEN3_NEXT,       false, false, false,  false, false,   Variant::STANDARD,   kAll},
     {ModelArch::OLMO3,            false, false, false,  false, false,   Variant::STANDARD,   kAll},
+    {ModelArch::LFM2,             false, false, false,  false, false,   Variant::STANDARD,   kAll},
     {ModelArch::GENERIC,          false, false, false,  false, false,   Variant::STANDARD,   kAll},
 };
 // clang-format on

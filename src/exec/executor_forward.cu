@@ -418,11 +418,11 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         if (layer_has_gdn(i)) {
             run_gdn(i, state, stream);
         } else if (layer_has_ssm(i)) {
-            run_ssm(i, state, stream);
+            run_ssm_layer_(i, state, stream);
         } else if (layer_has_attention(i)) {
             run_attention(i, state, stream);
         } else if (layer_has_ssm(i)) {
-            run_ssm(i, state, stream);
+            run_ssm_layer_(i, state, stream);
         }
         // Layer-diff dump: Snapshot B — post-attention residual-added state (input to FFN).
         dump_tensor_npy("B_post_attn", view_tokens(h, n), stream, i, decode_step);

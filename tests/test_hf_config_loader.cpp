@@ -416,6 +416,31 @@ TEST_F(RopeScalingConfigTest, UnknownArchSetsFallbackFlag) {
     EXPECT_EQ(cfg2.arch, imp::ModelArch::LLAMA);
 }
 
+// LFM2-MoE: conv layers ride the SSM pool (inner = hidden, kernel = conv_L_cache, short conv), attention
+// layers from layer_types, num_dense_layers -> first_k_dense_replace, norm_eps read.
+TEST_F(RopeScalingConfigTest, Lfm2ShortConvAndMoe) {
+    write_config(R"({
+        "architectures": ["Lfm2MoeForCausalLM"], "model_type": "lfm2_moe",
+        "hidden_size": 2048, "num_attention_heads": 32, "num_key_value_heads": 8, "num_hidden_layers": 4,
+        "conv_L_cache": 3, "norm_eps": 1e-05, "num_dense_layers": 2, "num_experts": 32,
+        "num_experts_per_tok": 4, "moe_intermediate_size": 1792, "norm_topk_prob": true,
+        "routed_scaling_factor": 1.0, "rope_parameters": {"rope_theta": 1000000.0, "rope_type": "default"},
+        "layer_types": ["conv", "conv", "full_attention", "conv"]
+    })");
+    imp::ModelConfig cfg;
+    ASSERT_TRUE(HFConfigLoader::load_config(tmp_dir_.string(), cfg));
+    EXPECT_EQ(cfg.arch, imp::ModelArch::LFM2);
+    EXPECT_TRUE(cfg.ssm_short_conv);
+    EXPECT_EQ(cfg.ssm_inner_size, 2048);
+    EXPECT_EQ(cfg.ssm_conv_kernel, 3);
+    EXPECT_EQ(cfg.ssm_proj_dim(), 3 * 2048);
+    EXPECT_EQ(cfg.first_k_dense_replace, 2);
+    EXPECT_FLOAT_EQ(cfg.rms_norm_eps, 1e-5f);
+    EXPECT_TRUE(cfg.expert_weights_norm);
+    EXPECT_EQ(cfg.n_kv_heads_per_layer, (std::vector<int>{0, 0, 8, 0}));
+    EXPECT_FLOAT_EQ(cfg.rope_theta, 1e6f);
+}
+
 // Olmo-3: layer_types 3 sliding + 1 full -> pattern 4; local layers keep rope_theta; YaRN parsed.
 TEST_F(RopeScalingConfigTest, Olmo3LayerPatternAndYarn) {
     write_config(R"({

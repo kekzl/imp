@@ -49,6 +49,12 @@ struct ModelConfig {
     // not stored — the single source for what used to be hand-derived at
     // every SSM sizing/upload/assign site. 0 on non-SSM models.
     int ssm_conv_channels() const { return ssm_inner_size + 2 * ssm_group_count * ssm_state_size; }
+    // LFM2 short conv: in_proj emits [B | C | x] (3 x inner), conv over inner channels, no scan state.
+    bool ssm_short_conv = false;
+    // ssm_in output width: the shared sizing of ssm_proj_buf_ and the dequant scratch.
+    int ssm_proj_dim() const {
+        return ssm_short_conv ? 3 * ssm_inner_size : ssm_inner_size + ssm_conv_channels() + ssm_dt_rank;
+    }
     // Asymmetric-head GDN (n_v_heads > n_k_heads) head storage layout.
     //   false (default): tiled order, h % n_groups gives group_id (GGUF Qwen3.5/3.6).
     //   true: grouped order, h / n_v_per_k gives group_id (HF SafeTensors Qwen3.5/3.6).

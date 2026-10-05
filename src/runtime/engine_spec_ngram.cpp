@@ -238,7 +238,8 @@ bool Engine::spec_verify_gates_ok_(const Request& req, bool ignore_think) const 
 // depends on a request, so a false answer means "this model never speculates,
 // whatever the flag says".
 bool Engine::spec_ngram_model_capable_uncached_() const {
-    if (ssm_state_ && !runtime_config_.speculative.hybrid)
+    // LFM2 short conv writes no verify snapshot (run_shortconv): a rejected draft would keep its window.
+    if (ssm_state_ && (!runtime_config_.speculative.hybrid || model_->config().ssm_short_conv))
         return false;
     // GGUF-MoE verify re-dequants every activated expert per step, so these
     // stay on the async conditional-graph loop, as does everything when

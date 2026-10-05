@@ -1215,6 +1215,10 @@ private:
                                        int ne, int expanded, bool non_gated_experts,
                                        QType up_qtype, const MoeRoutingResult& routing);
     void run_ssm(int layer, const InferenceState& state, cudaStream_t stream);
+    // Recurrent non-GDN layer: LFM2 short conv (cfg.ssm_short_conv) or Mamba2.
+    void run_ssm_layer_(int layer, const InferenceState& state, cudaStream_t stream);
+    // LFM2 short-conv layer.
+    void run_shortconv(int layer, const InferenceState& state, cudaStream_t stream);
     void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
     // Qwen4Exp gated residual (executor_gated_residual.cpp). hc_read_ turns the hc streams into the
     // block input in hidden_[n] (and the inject gates when `inject` is set); hc_write_ recovers the

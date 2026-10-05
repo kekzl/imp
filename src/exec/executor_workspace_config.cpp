@@ -98,7 +98,7 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
     int inner = cfg.ssm_inner_size;
     int n_heads = cfg.ssm_dt_rank;
     int conv_channels = cfg.ssm_conv_channels();
-    int ssm_in_dim = inner + conv_channels + n_heads;
+    int ssm_in_dim = cfg.ssm_proj_dim();
     size_t es = dtype_size(compute_dtype_);
 
     char* ptr = static_cast<char*>(ws_.shared());

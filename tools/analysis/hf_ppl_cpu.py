@@ -22,6 +22,9 @@ tok = AutoTokenizer.from_pretrained(model_dir)
 with open(text_file, encoding="utf-8") as f:
     text = f.read()
 ids = tok(text, return_tensors="pt", add_special_tokens=False).input_ids
+# HF_PPL_BOS=1: prepend BOS as imp-cli --perplexity does for add_bos tokenizers (LFM2-8B-A1B 25.81 -> 20.24).
+if os.environ.get("HF_PPL_BOS") == "1" and tok.bos_token_id is not None:
+    ids = torch.cat([torch.tensor([[tok.bos_token_id]]), ids], dim=1)
 print(f"tokens {ids.shape[1]}", flush=True)
 # A VL wrapper (Qwen3.8 ships Qwen3_5ForConditionalGeneration) loads as image-text-to-text; the text
 # decoder and LM head are read through the generic accessors either way.

@@ -329,6 +329,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     if (cfg.arch == ModelArch::QWEN3_NEXT)
         throw std::runtime_error("qwen3next GGUF is not supported; load the SafeTensors checkpoint (#2410)");
     // The sliding/full layer pattern and the post-norm-only block are wired from config.json only.
+    if (cfg.arch == ModelArch::LFM2)
+        throw std::runtime_error("lfm2 GGUF is not supported; load the SafeTensors checkpoint");
     if (cfg.arch == ModelArch::OLMO3)
         throw std::runtime_error("olmo3 GGUF is not supported; load the SafeTensors checkpoint");
 

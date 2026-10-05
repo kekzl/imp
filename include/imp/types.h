@@ -43,6 +43,7 @@ typedef enum {
     IMP_ARCH_GRANITE = 17,
     IMP_ARCH_QWEN3_NEXT = 18,
     IMP_ARCH_OLMO3 = 19,
+    IMP_ARCH_LFM2 = 20,
 } ImpModelArch;
 
 typedef enum {
