@@ -169,6 +169,7 @@ enum {
     kApiQwen4Exp = 16,
     kApiGranite = 17,
     kApiQwen3Next = 18,
+    kApiOlmo3 = 19,
 };
 
 static constexpr ArchEntry kArchRegistry[] = {
@@ -210,6 +211,8 @@ static constexpr ArchEntry kArchRegistry[] = {
     {ModelArch::GRANITE, "granite", kApiGranite, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
     // Qwen3-Coder-Next generation_config: temperature 1.0, top_p 0.95, top_k 40; Qwen3.6 router.
     {ModelArch::QWEN3_NEXT, "qwen3next", kApiQwen3Next, -1, 0, -1, -1, false, true, 1.0f, 0.95f, 40},
+    // Olmo-3: post-norm only (norm=1 takes the FP32 residual accumulator); generation_config 0.6/0.95.
+    {ModelArch::OLMO3, "olmo3", kApiOlmo3, -1, 0, -1, 1, false, false, 0.6f, 0.95f, 0},
     {ModelArch::GENERIC, "generic", kApiGeneric, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
 };
 

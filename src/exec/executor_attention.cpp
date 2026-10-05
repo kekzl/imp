@@ -59,6 +59,27 @@ namespace imp {
 // (try_fa2_fp16qk_prefill, dispatch_gemv_qkv_fused, set_l2_persist_kv,
 //  clear_l2_persist) to keep this TU under the file-size gate.
 
+void GraphExecutor::qk_norm_separate_(const TransformerLayer& ly, Tensor& qv, Tensor& kk, int n, int nh,
+                                      int nkv, int hd, float eps, cudaStream_t stream) {
+    // Norm width from the weight's element count: heads*hd, a divisor of hd, else hd.
+    auto norm_dim = [hd](const Tensor& w, int heads) -> int {
+        const int wd = static_cast<int>(w.shape[0]);
+        if (wd == heads * hd)
+            return wd;
+        return (wd > 0 && wd < hd && hd % wd == 0) ? wd : hd;
+    };
+    auto apply = [&](Tensor& x, const Tensor& w, int heads) {
+        if (w.data == nullptr)
+            return;
+        const int d = norm_dim(w, heads);
+        int64_t flat[2] = {static_cast<int64_t>(n) * heads * hd / d, d};
+        Tensor view = x.reshape(2, flat);
+        rmsnorm(view, w, view, eps, stream, norm_w_off_);
+    };
+    apply(qv, ly.attn_q_norm, nh);
+    apply(kk, ly.attn_k_norm, nkv);
+}
+
 // ---------------------------------------------------------------------------
 // Attention sub-pass for one layer
 // ---------------------------------------------------------------------------
@@ -165,7 +186,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     // separate ffn_norm in run_ffn. When ffn_norm is absent (Qwen3.5),
     // post_attn_norm serves as the FFN input norm instead, not a sandwich norm;
     // without this check it would apply twice.
-    const bool has_post_attn_norm = (ly.post_attn_norm.data != nullptr && ly.ffn_norm.data != nullptr);
+    const bool has_post_attn_norm = attn_post_norm_(ly);
     // FP32 residual accumulator (Gemma-3 dense + Gemma-4 MoE post-norm architecture).
     // Kernel semantics: fp32_h += rmsnorm(po) * w. llama's build_norm(attn) + residual
     // is mathematically identical for both Gemma-3 and Gemma-4 (normalize-then-add).
@@ -387,14 +408,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             fused_rope_dim = hd;
         }
         const bool no_qknorm_fused = dispatch_policy().attention.no_qknorm_fused;
-        // Fused QK-norm+RoPE: one CTA per head x token, replacing three separate
-        // launches per layer. Applies the norm weight over the full head; sub-head norm
-        // layouts (norm dim < head_dim) stay on the separate path.
-        const bool full_head_norm = ly.attn_q_norm.data != nullptr && ly.attn_k_norm.data != nullptr &&
-                                    ly.attn_q_norm.shape[0] == hd && ly.attn_k_norm.shape[0] == hd;
+        // Fused QK-norm+RoPE: one CTA per head x token, replacing three separate launches per layer.
         // No row-count cap: a prompt row must take the same QK-norm arithmetic in a 14-row
         // tail chunk as in the full prefill (#2152). grid.y = n <= 65535.
-        if (has_qk_norm && n <= 65535 && (n == 1 || full_head_norm) && qv.qtype == QType::F16 &&
+        if (has_qk_norm && n <= 65535 && qk_norm_fusable_(ly, hd, n) && qv.qtype == QType::F16 &&
             !no_qknorm_fused && prof.attn_variant != AttnVariant::NOPE) {
             // Fused: QK-norm + RoPE in one kernel launch. Keeps norm
             // intermediate values in FP32 shared memory.
@@ -414,28 +431,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                              pairs, cfg.rope_neox, longrope_freqs, stream);
             rope_k_deferred = true;
         } else {
-            // Some archs (Qwen3.5-27B-mxfp4) ship attn_q_norm/attn_k_norm with a
-            // smaller dim than head_dim: the weight applies per norm_dim-sized chunk,
-            // so a 512-dim head with a 256-dim norm splits into two 256-dim sub-heads
-            // sharing the scale. Detected from the norm weight's element count; no-op when norm_dim==hd.
-            auto split_norm_dim = [hd](const Tensor& w) -> int {
-                int wd = (w.data != nullptr) ? static_cast<int>(w.shape[0]) : hd;
-                return (wd > 0 && wd < hd && hd % wd == 0) ? wd : hd;
-            };
-            if (ly.attn_q_norm.data != nullptr) {
-                int q_norm_dim = split_norm_dim(ly.attn_q_norm);
-                int64_t q_flat[2] = {static_cast<int64_t>(n) * nh * (hd / q_norm_dim),
-                                     static_cast<int64_t>(q_norm_dim)};
-                Tensor q_flat_view = qv.reshape(2, q_flat);
-                rmsnorm(q_flat_view, ly.attn_q_norm, q_flat_view, eps, stream, norm_w_off_);
-            }
-            if (ly.attn_k_norm.data != nullptr) {
-                int k_norm_dim = split_norm_dim(ly.attn_k_norm);
-                int64_t k_flat[2] = {static_cast<int64_t>(n) * nkv * (hd / k_norm_dim),
-                                     static_cast<int64_t>(k_norm_dim)};
-                Tensor k_flat_view = kk.reshape(2, k_flat);
-                rmsnorm(k_flat_view, ly.attn_k_norm, k_flat_view, eps, stream, norm_w_off_);
-            }
+            qk_norm_separate_(ly, qv, kk, n, nh, nkv, hd, eps, stream);
             int64_t q4r[4] = {1, n, nh, hd};
             int64_t k4r[4] = {1, n, nkv, hd};
             Tensor q4r_t = qv.reshape(4, q4r);
@@ -755,8 +751,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             if (layer == 0 && debug_attn_steps) {
                 debug_tensor_stats_all("L0_post_fp32accum_h", view_tokens(h, n), stream);
             }
-        } else if (has_post_attn_norm && prof.sandwich_norms) {
-            // Gemma 4 sandwich norm: h = r + post_attn_norm(po).
+        } else if (attn_norm_then_add_(ly, prof.sandwich_norms)) {
+            // Gemma 4 sandwich norm, Olmo-3 post-norm: h = r + post_attn_norm(po).
             // Normalize attention output first, THEN add residual (HF reference order).
             rmsnorm(po, ly.post_attn_norm, po, model_->config().rms_norm_eps, stream, norm_w_off_);
             elementwise_add_store(po, r, h, stream);

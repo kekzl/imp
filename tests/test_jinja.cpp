@@ -814,3 +814,24 @@ TEST(JinjaTest, LstripProbes) {
     ASSERT_TRUE(b.parse("A\n    {# c #}\nB"));
     EXPECT_EQ(b.render({}), "A\nB") << "indent before a comment";
 }
+
+// selectattr/rejectattr/select/reject filter, not pass through (Olmo-3 default-system guard).
+TEST(JinjaFilterTest, SelectattrFiltersByTest) {
+    auto msgs = Value::array({
+        Value::object({{"role", Value(std::string("user"))}, {"content", Value(std::string("a"))}}),
+        Value::object({{"role", Value(std::string("assistant"))}, {"content", Value(std::string("b"))}}),
+        Value::object({{"role", Value(std::string("user"))}}),
+    });
+    auto run = [&](const char* src) {
+        Template t;
+        EXPECT_TRUE(t.parse(src));
+        return t.render({{"messages", msgs}});
+    };
+    EXPECT_EQ(run("{{ messages|selectattr('role', 'equalto', 'system')|list|length }}"), "0");
+    EXPECT_EQ(run("{{ messages|selectattr('role', 'equalto', 'user')|list|length }}"), "2");
+    EXPECT_EQ(run("{{ messages|rejectattr('role', 'equalto', 'user')|list|length }}"), "1");
+    EXPECT_EQ(run("{{ messages|selectattr('content')|list|length }}"), "2");
+    EXPECT_EQ(run("{{ messages|rejectattr('content', 'defined')|list|length }}"), "1");
+    EXPECT_EQ(run("{{ [1, 0, 2]|select|list|length }}"), "2");
+    EXPECT_EQ(run("{{ [1, 0, 2]|reject|list|length }}"), "1");
+}
