@@ -1418,6 +1418,19 @@ void GraphExecutor::release_moe_batch_buf() {
     }
 }
 
+// An FP8 cache entry owns its weight bytes unless they sit in a bulk buffer (migrated, overflow,
+// SSM sidecar) or are the checkpoint's own FP8 tensor (native_source: the Model frees those).
+static bool fp8_entry_owns_weight(const FP8CacheEntry& e, const WeightCaches& wc) {
+    const auto p = reinterpret_cast<uintptr_t>(e.weight.data);
+    auto in = [p](const void* base, size_t size) {
+        const auto b = reinterpret_cast<uintptr_t>(base);
+        return base != nullptr && p >= b && p < b + size;
+    };
+    return !e.native_source && !in(wc.fp8_migrated_data, wc.fp8_migrated_data_size) &&
+           !in(wc.fp8_overflow_data, wc.fp8_overflow_data_size) &&
+           !in(wc.fp8_ssm_sidecar_data, wc.fp8_ssm_sidecar_data_size);
+}
+
 void GraphExecutor::free_buffers() {
     // T2 arena slabs (allocate_smallm_scratch) die with the arena.
     if (smallm_ws_ && !smallm_ws_arena_)
@@ -1559,26 +1572,7 @@ void GraphExecutor::free_buffers() {
         // FP8 cache (entries may point into bulk buffers — free entry data only if not in bulk)
         for (auto& [ptr, entry] : wcache_.fp8) {
             if (entry.weight.data) {
-                bool in_migrated = wcache_.fp8_migrated_data &&
-                                   reinterpret_cast<uintptr_t>(entry.weight.data) >=
-                                       reinterpret_cast<uintptr_t>(wcache_.fp8_migrated_data) &&
-                                   reinterpret_cast<uintptr_t>(entry.weight.data) <
-                                       reinterpret_cast<uintptr_t>(wcache_.fp8_migrated_data) +
-                                           wcache_.fp8_migrated_data_size;
-                bool in_overflow = wcache_.fp8_overflow_data &&
-                                   reinterpret_cast<uintptr_t>(entry.weight.data) >=
-                                       reinterpret_cast<uintptr_t>(wcache_.fp8_overflow_data) &&
-                                   reinterpret_cast<uintptr_t>(entry.weight.data) <
-                                       reinterpret_cast<uintptr_t>(wcache_.fp8_overflow_data) +
-                                           wcache_.fp8_overflow_data_size;
-                bool in_ssm_sidecar =
-                    wcache_.fp8_ssm_sidecar_data &&
-                    reinterpret_cast<uintptr_t>(entry.weight.data) >=
-                        reinterpret_cast<uintptr_t>(wcache_.fp8_ssm_sidecar_data) &&
-                    reinterpret_cast<uintptr_t>(entry.weight.data) <
-                        reinterpret_cast<uintptr_t>(wcache_.fp8_ssm_sidecar_data) +
-                            wcache_.fp8_ssm_sidecar_data_size;
-                if (!in_migrated && !in_overflow && !in_ssm_sidecar)
+                if (fp8_entry_owns_weight(entry, wcache_))
                     IMP_CUDA_CHECK_LOG(cudaFree(entry.weight.data));
             }
             if (entry.d_scale) {
