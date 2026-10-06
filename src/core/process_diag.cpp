@@ -60,6 +60,8 @@ int process_diag_paged_f16_hpc() { return slot().attention_paged_f16_hpc; }
 void process_diag_set_paged_f16_hpc(int v) { slot().attention_paged_f16_hpc = v; }
 int process_diag_paged_nvfp4_hpc() { return slot().attention_paged_nvfp4_hpc; }
 void process_diag_set_paged_nvfp4_hpc(int v) { slot().attention_paged_nvfp4_hpc = v; }
+int process_diag_paged_nvfp4_mma() { return slot().attention_paged_nvfp4_mma; }
+void process_diag_set_paged_nvfp4_mma(int v) { slot().attention_paged_nvfp4_mma = v; }
 int process_diag_paged_fp8_hpc() { return slot().attention_paged_fp8_hpc; }
 void process_diag_set_paged_fp8_hpc(int v) { slot().attention_paged_fp8_hpc = v; }
 void process_diag_set_fa2_dense_2cta(bool v) { slot().attention_fa2_dense_2cta = v; }

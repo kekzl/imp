@@ -422,6 +422,20 @@ void paged_attention_decode_nvfp4(const Tensor& Q, const Tensor& K_cache, const 
         }
     }
     void* scratch_ptr = nullptr;
+    if (const int mma_max_splits = process_diag_paged_nvfp4_mma(); mma_max_splits > 1 && n_kv_heads > 0) {
+        const int mma_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len,
+                                                     block_size, &scratch_ptr, batch_size * n_kv_heads,
+                                                     mma_max_splits, 64);
+        if (paged_attention_nvfp4_mma_launch(
+                reinterpret_cast<const half*>(Q.data), reinterpret_cast<const uint8_t*>(K_cache.data),
+                reinterpret_cast<const uint8_t*>(V_cache.data), K_scales, V_scales,
+                static_cast<float*>(scratch_ptr), block_tables, context_lens, batch_size, n_heads, n_kv_heads,
+                head_dim, block_size, scale, max_num_blocks, mma_splits, sliding_window, softcap, stream)) {
+            paged_attention_launch_reduce(static_cast<float*>(scratch_ptr), reinterpret_cast<half*>(O.data),
+                                          batch_size, n_heads, head_dim, mma_splits, stream, sinks_h);
+            return;
+        }
+    }
     int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
                                            &scratch_ptr, split_units, max_splits, split_units > 0 ? 128 : 0);
 

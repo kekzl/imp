@@ -57,6 +57,7 @@ struct ProcessDiag {
     int attention_paged_f16_multitok = 4;    // matches the config.h default
     int attention_paged_f16_hpc = 0;         // 0 = auto; tests sweep 1/2/4
     int attention_paged_nvfp4_hpc = 0;       // 0 = auto; tests sweep 1/2/3/4
+    int attention_paged_nvfp4_mma = 64;      // MMA decode kernel max splits (config.h default on), 0 = off
     int attention_paged_fp8_hpc = 0;        // 0 = auto; -1 = the per-head four-token kernel; tests sweep 1..5
     bool attention_fa2_heavy_first = true;  // matches the config.h default
     bool attention_fp8_qk_scaled = false;
@@ -151,6 +152,9 @@ int process_diag_paged_f16_hpc();  // F16 multitok Q heads per CTA, 0 = auto (te
 void process_diag_set_paged_f16_hpc(int v);
 int process_diag_paged_nvfp4_hpc();  // NVFP4 multitok Q heads per CTA, 0 = auto, 1 = per-head (tests only)
 void process_diag_set_paged_nvfp4_hpc(int v);
+int process_diag_paged_nvfp4_mma();  // NVFP4 MMA split-K decode max splits (attention.paged_nvfp4_mma), 0 =
+                                     // off
+void process_diag_set_paged_nvfp4_mma(int v);
 int process_diag_paged_fp8_hpc();  // FP8 grouped-kernel Q heads per CTA, 0 = auto, -1 = four-token kernel
                                    // (tests only)
 void process_diag_set_paged_fp8_hpc(int v);

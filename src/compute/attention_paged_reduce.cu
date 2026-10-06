@@ -13,7 +13,7 @@
 namespace imp {
 
 // Split-K Phase 2: reduces num_splits partial results into the final output. Grid:(batch,
-// n_heads), Block: 128 threads; each block merges one (batch,head) pair's partials.
+// n_heads, head_dim/128), Block: 128 threads; each block merges one 128-wide slice of a head.
 
 __global__ void paged_attention_reduce_kernel(
     const float* __restrict__ partial_out,  // [batch, n_heads, num_splits, (2+head_dim)]
@@ -90,9 +90,12 @@ __global__ void paged_attention_reduce_kernel(
         __syncthreads();
     }
 
-    // Step 3: Each thread handles a subset of head_dim elements
-    for (int d = tid; d < head_dim; d += blockDim.x) {
+    // Step 3: one head_dim element per thread; blockIdx.z = the blockDim.x slice (each slice recomputes
+    // gmax/gl in the same order). Unroll 8 keeps 8 partial loads in flight per thread.
+    const int d = blockIdx.z * blockDim.x + tid;
+    if (d < head_dim) {
         float o_val = 0.0f;
+#pragma unroll 32
         for (int s = 0; s < num_splits; s++) {
             float weight = staged ? s_w[s] : expf(base[static_cast<int64_t>(s) * partial_stride] - gmax);
             float o_s = base[s * partial_stride + 2 + d];
@@ -118,7 +121,7 @@ static Q8Epilogue g_q8_epi{nullptr, nullptr, false};
 
 void paged_attention_launch_reduce(float* partial, half* O, int batch_size, int n_heads, int head_dim,
                                    int num_splits, cudaStream_t stream, const half* attn_sinks) {
-    dim3 grid(batch_size, n_heads);
+    dim3 grid(batch_size, n_heads, (head_dim + 127) / 128);
     dim3 block(128);
     // The reduce kernel has always applied the sink term; this launcher used to
     // hard-code nullptr, so every quantised-KV split-K path silently dropped it
