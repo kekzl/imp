@@ -8,7 +8,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 MODEL=${MODEL:-/models/Qwen3.8-27B-NVFP4-vllm}
 ARM_A=${ARM_A:-}
 ARM_B=${ARM_B:---set gemm.nvfp4_smallm=true}
-PORT=${PORT:-8090}
+PORT=${PORT:-8097}  # 127.0.0.1:8090 is taken on this host (maria control room)
 CONC=${CONC:-32}
 WAVES=3
 TRIALS=${TRIALS:-3}
