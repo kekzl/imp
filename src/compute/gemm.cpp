@@ -94,11 +94,24 @@ static size_t s_workspace_size = 0;
 // cache miss, which fragments and can run while serving.
 static void* s_bench_scratch = nullptr;
 static size_t s_bench_scratch_size = 0;
+// Arena generation of both slices. reset()/close() bumps it: a slice from an older generation is
+// handed out again, and a stale workspace aliased the new bench scratch (cuBLASLt hang, #2611).
+static uint64_t s_slices_gen = 0;
 
 void gemm_init() {
     // Force handle creation early.
     get_cublas_handle();
     get_cublaslt_handle();
+
+    const uint64_t gen = engine_arena().generation();
+    const size_t prev_workspace_size = s_workspace_size;
+    if ((s_workspace || s_bench_scratch) && s_slices_gen != gen) {
+        s_workspace = nullptr;
+        s_workspace_size = 0;
+        s_bench_scratch = nullptr;
+        s_bench_scratch_size = 0;
+    }
+    s_slices_gen = gen;
 
     // T2 (A7 step 8). Both buffers are engine-lifetime and degrade cleanly to null: a
     // 0-byte workspace makes cuBLASLt's heuristic return only algos needing none, a null
@@ -134,10 +147,13 @@ void gemm_init() {
         }
     }
 
-    // Also let legacy cuBLAS API use the same workspace.
-    if (s_workspace) {
+    // Cached algos were picked against the old size and pass their own workspace_size per call.
+    if (s_workspace_size < prev_workspace_size)
+        gemm_cleanup();
+
+    // Also let legacy cuBLAS API use the same workspace; null after a dropped slice, never stale.
+    if (s_workspace || prev_workspace_size > 0)
         cublasSetWorkspace(get_cublas_handle(), s_workspace, s_workspace_size);
-    }
 
     if (!s_bench_scratch) {
         auto slab = engine_arena().take_bytes(kGemmBenchScratchBytes);
