@@ -1246,8 +1246,8 @@ TEST(PagedF16Decode, ServingShapeMicrobench) {
 }
 
 // NVFP4-TC paged decode microbench (hybrid's default decode attention): IMP_NVFP4_BENCH_
-// {BATCH=1,CTX=77000,HEADS=24,KV_HEADS=4,HD=256}. Random packed nibbles + finite UE4M3 scale
-// bytes; prints us/launch and bytes/sec. Finite-output check only.
+// {BATCH=1,CTX=77000,HEADS=24,KV_HEADS=4,HD=256,RING=KV copies, default >= 400 MB}. Random packed
+// nibbles + finite UE4M3 scale bytes; prints us/launch and bytes/sec. Finite-output check only.
 TEST(PagedNvfp4TcDecode, LongContextMicrobench) {
     auto env_int = [](const char* k, int d) {
         const char* v = std::getenv(k);
@@ -1284,8 +1284,10 @@ TEST(PagedNvfp4TcDecode, LongContextMicrobench) {
         s = s * 1664525u + 1013904223u;
         Vs[i] = (uint8_t)(0x30 + ((s >> 24) & 0x0F));
     }
-    // IMP_NVFP4_BENCH_RING=R: R KV copies, launch i reads copy i % R (R x KV > 96 MB L2 reads DRAM).
-    const int ring = std::max(1, env_int("IMP_NVFP4_BENCH_RING", 1));
+    // R KV copies, launch i reads copy i % R. Default: >= 400 MB so every launch reads DRAM, not the
+    // 96 MB L2 (77k 16/2 = 44 MB fits); IMP_NVFP4_BENCH_RING=1 = the L2-resident reading of #2440.
+    const size_t copy_bytes = 2 * (kv_bytes + sc_bytes);
+    const int ring = std::max(1, env_int("IMP_NVFP4_BENCH_RING", (int)((400u << 20) / copy_bytes + 1)));
     std::vector<int> bt((size_t)ring * batch * blocks_per_seq), ctx(batch, kv_len);
     for (int r = 0; r < ring; r++)
         for (int b = 0; b < batch; b++)
