@@ -6,11 +6,13 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <vector>
 
 #include "compute/gemm.h"
+#include "compute/gemm_internal.cuh"
 #include "core/tensor.h"
 #include "memory/backend.h"
 #include "memory/engine_arena.h"
@@ -22,29 +24,53 @@ void gemm_reset_static_cuda_state();  // gemm.cpp, the pre-cudaDeviceReset hook
 
 using namespace imp;
 
+namespace {
+
+// A binary-wide 64 MiB arena may be up (another file registers it): swap in one that holds the
+// 64 MiB workspace + 32 MiB bench scratch, put the standing one back after (test_rowwise_topm).
+struct ProbeArena {
+    bool had = engine_arena().is_open();
+    size_t had_bytes = had ? engine_arena().capacity() : 0;
+    bool ok = false;
+    ProbeArena() {
+        gemm_reset_static_cuda_state();  // statics may point into the standing arena
+        if (had)
+            engine_arena_close();
+        ok = engine_arena_open(cuda_malloc_backend(), 160ull << 20) == MemError::Ok;
+    }
+    ~ProbeArena() {
+        gemm_reset_static_cuda_state();  // statics point into the arena closing here
+        if (ok)
+            engine_arena_close();
+        if (had)
+            (void)engine_arena_open(cuda_malloc_backend(), had_bytes);
+    }
+};
+
+}  // namespace
+
+// #2611: the test listener rewinds the arena between tests; gemm_init() kept the old workspace,
+// the next tenant got the same bytes (in test-quant: the bench scratch, cuBLASLt hung).
+TEST(GemmCaptureProbe, WorkspaceRetakenAfterArenaReset) {
+    SKIP_IF_NO_CUDA();
+    ProbeArena arena;
+    ASSERT_TRUE(arena.ok);
+    gemm_init();
+    ASSERT_NE(gemm_internal_workspace(), nullptr);
+    engine_arena().reset();
+    gemm_init();
+    const auto* ws = static_cast<const std::byte*>(gemm_internal_workspace());
+    const size_t ws_bytes = gemm_internal_workspace_size();
+    ASSERT_NE(ws, nullptr);
+    auto next = engine_arena().take_bytes(1ull << 20);
+    ASSERT_FALSE(next.empty());
+    const bool overlaps = next.data() < ws + ws_bytes && ws < next.data() + next.size();
+    EXPECT_FALSE(overlaps) << "gemm workspace still points into a slice the reset arena handed out again";
+}
+
 TEST(GemmCaptureProbe, ColdShapeInsideCaptureKeepsCaptureValid) {
     SKIP_IF_NO_CUDA();
     constexpr int64_t M = 47, K = 5120, N = 48;
-    // A binary-wide 64 MiB arena may be up (another file registers it): swap in one that holds the
-    // 64 MiB workspace + 32 MiB bench scratch, put the standing one back after (test_rowwise_topm).
-    struct ProbeArena {
-        bool had = engine_arena().is_open();
-        size_t had_bytes = had ? engine_arena().capacity() : 0;
-        bool ok = false;
-        ProbeArena() {
-            gemm_reset_static_cuda_state();  // statics may point into the standing arena
-            if (had)
-                engine_arena_close();
-            ok = engine_arena_open(cuda_malloc_backend(), 160ull << 20) == MemError::Ok;
-        }
-        ~ProbeArena() {
-            gemm_reset_static_cuda_state();  // statics point into the arena closing here
-            if (ok)
-                engine_arena_close();
-            if (had)
-                (void)engine_arena_open(cuda_malloc_backend(), had_bytes);
-        }
-    };
     {
         ProbeArena arena;
         ASSERT_TRUE(arena.ok);
