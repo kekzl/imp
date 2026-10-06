@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include "compute/layernorm.h"
+#include "exec/executor_kernels.h"
 #include "quant/nvfp4_quant.h"
 #include "core/tensor.h"
 
@@ -499,6 +500,64 @@ TEST(LayerNormTest, RMSNormNvfp4ProducerBitIdentity) {
         free_gpu_tensor(d_w);
         free_gpu_tensor(d_out_ref);
         free_gpu_tensor(d_out_fused);
+    }
+}
+
+// #2414: add_rmsnorm_nvfp4 = elementwise_add_store(a, r, h) + r = h + rmsnorm_nvfp4(h), bit for bit
+// (h, r, FP16 out, packed nibbles, micro-scales).
+TEST(LayerNormTest, AddRMSNormNvfp4MatchesThreeLaunches) {
+    constexpr float eps = 1e-6f;
+    const int shapes[][2] = {{2, 2048}, {29, 5120}, {32, 8192}};
+    for (auto& sh : shapes) {
+        const int rows = sh[0], cols = sh[1];
+        std::vector<float> h_a((size_t)rows * cols), h_r(h_a.size()), h_w(cols);
+        for (size_t i = 0; i < h_a.size(); i++) {
+            h_a[i] = 0.013f * static_cast<float>((i * 29) % 97) - 0.6f;
+            h_r[i] = (i % 7 == 0) ? 900.0f : 0.021f * static_cast<float>((i * 41) % 89) - 0.9f;
+        }
+        for (int c = 0; c < cols; c++)
+            h_w[c] = 0.5f + 0.001f * static_cast<float>(c % 500);
+        Tensor d_a = make_gpu_tensor(h_a.data(), QType::F16, {rows, cols});
+        Tensor d_w = make_gpu_tensor(h_w.data(), QType::F16, {cols});
+        Tensor r_ref = make_gpu_tensor(h_r.data(), QType::F16, {rows, cols});
+        Tensor r_f = make_gpu_tensor(h_r.data(), QType::F16, {rows, cols});
+        Tensor h_ref = alloc_gpu_tensor(QType::F16, {rows, cols});
+        Tensor h_f = alloc_gpu_tensor(QType::F16, {rows, cols});
+        Tensor o_ref = alloc_gpu_tensor(QType::F16, {rows, cols});
+        Tensor o_f = alloc_gpu_tensor(QType::F16, {rows, cols});
+        const size_t pb = (size_t)rows * cols / 2, sb = (size_t)rows * cols / 16;
+        uint8_t *p_ref, *s_ref, *p_f, *s_f;
+        ASSERT_EQ(cudaMalloc(&p_ref, pb), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&s_ref, sb), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&p_f, pb), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&s_f, sb), cudaSuccess);
+        cudaMemset(p_f, 0xAA, pb);
+        cudaMemset(s_f, 0xAA, sb);
+
+        elementwise_add_store(d_a, r_ref, h_ref, nullptr);
+        cudaMemcpy(r_ref.data, h_ref.data, h_ref.nbytes(), cudaMemcpyDeviceToDevice);
+        ASSERT_TRUE(rmsnorm_nvfp4(h_ref, d_w, o_ref, p_ref, s_ref, eps, nullptr));
+        ASSERT_TRUE(add_rmsnorm_nvfp4(d_a, r_f, h_f, d_w, o_f, p_f, s_f, eps, nullptr));
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+        auto same = [](const void* x, const void* y, size_t n) {
+            std::vector<uint8_t> hx(n), hy(n);
+            cudaMemcpy(hx.data(), x, n, cudaMemcpyDeviceToHost);
+            cudaMemcpy(hy.data(), y, n, cudaMemcpyDeviceToHost);
+            return memcmp(hx.data(), hy.data(), n) == 0;
+        };
+        EXPECT_TRUE(same(h_ref.data, h_f.data, h_ref.nbytes())) << "h, rows=" << rows;
+        EXPECT_TRUE(same(r_ref.data, r_f.data, r_ref.nbytes())) << "residual save, rows=" << rows;
+        EXPECT_TRUE(same(o_ref.data, o_f.data, o_ref.nbytes())) << "FP16 out, rows=" << rows;
+        EXPECT_TRUE(same(p_ref, p_f, pb)) << "packed nibbles, rows=" << rows;
+        EXPECT_TRUE(same(s_ref, s_f, sb)) << "micro-scales, rows=" << rows;
+        // h aliasing its inputs is refused
+        EXPECT_FALSE(add_rmsnorm_nvfp4(d_a, r_f, r_f, d_w, o_f, p_f, s_f, eps, nullptr));
+
+        for (uint8_t* p : {p_ref, s_ref, p_f, s_f})
+            cudaFree(p);
+        for (Tensor* t : {&d_a, &d_w, &r_ref, &r_f, &h_ref, &h_f, &o_ref, &o_f})
+            free_gpu_tensor(*t);
     }
 }
 

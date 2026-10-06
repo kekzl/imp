@@ -123,7 +123,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     if (!will_fuse_down_residual && !will_fuse_down_beta1 && !will_fuse_down_dequant_beta1 &&
         !will_fuse_down_nvfp4 && !will_fuse_down_mxfp4 && !will_fuse_down_beta1_nvfp4 &&
         !using_fp32_accum) {
-        device_copy_async(r.data, h.data, h.nbytes(), stream);  // kernel copy — see device_copy_async
+        save_residual_(r, h, ffn_norm_w, no, n, stream);  // skipped when the producer saved it (#2414)
     }
 
     // GemmContext for all weight GEMM dispatches in this function.
@@ -503,8 +503,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     // Fused: 2 ops → 1 kernel
                     rmsnorm_add_residual(fo, ly.post_ffn_norm, r, h, eps, stream, norm_w_off_);
                 } else {
-                    // No post-norm: h = fo + residual (fused add-store, no copy)
-                    elementwise_add_store(fo, r, h, stream);
+                    // No post-norm: h = fo + residual, fused with the next layer's attn norm (#2414)
+                    ffn_residual_add_(layer, fo, r, h, no, n, eps, stream);
                 }
             }
         }

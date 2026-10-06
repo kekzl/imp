@@ -30,6 +30,13 @@ void rmsnorm_fp16_rowblock(const Tensor& x, const Tensor& weight, Tensor& out, i
                    uint8_t* xq_scales, float eps = 1e-5f, cudaStream_t stream = nullptr,
                    float weight_offset = 0.0f);
 
+// Residual add + residual save + rmsnorm_nvfp4 in one launch (#2414): h = a + r (FP16 __hadd2, as
+// elementwise_add_store), r = h, then rmsnorm_nvfp4(h). Bit-identical to the three calls. Same
+// envelope as rmsnorm_nvfp4; h, r, a and out distinct. Returns false outside it.
+[[nodiscard]] bool add_rmsnorm_nvfp4(const Tensor& a, Tensor& r, Tensor& h, const Tensor& weight, Tensor& out,
+                                     uint8_t* xq_packed, uint8_t* xq_scales, float eps, cudaStream_t stream,
+                                     float weight_offset = 0.0f);
+
 // RMSNorm with FP32 input and FP16 output. Used when the residual stream is
 // kept in FP32 (Gemma-4 post-norm arch) but the downstream GEMM wants FP16.
 // Avoids the FP32 → FP16 → RMSNorm rounding that would lose ~1-2% per layer.

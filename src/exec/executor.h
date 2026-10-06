@@ -301,6 +301,28 @@ public:
     // reading `no` (q/gate/GDN in); further readers skip via the act-quant hint.
     void rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor& no, TensorID consumer_id,
                              int n, float eps, cudaStream_t stream, float weight_offset);
+    // Producer-side residual fusion (#2414): h = a + r, r = h and the NEXT block's
+    // rmsnorm_for_smallm_(h, w, no) in one launch. The consumer then skips its residual copy and
+    // its norm (prenorm_matches_). False = caller runs elementwise_add_store as before.
+    [[nodiscard]] bool add_norm_for_smallm_(const Tensor& a, Tensor& r, Tensor& h, const Tensor& w,
+                                            Tensor& no, TensorID consumer_id, int n, float eps,
+                                            cudaStream_t stream);
+    [[nodiscard]] bool prenorm_matches_(const Tensor& w, const Tensor& no, int n) const {
+        return prenorm_out_ != nullptr && prenorm_out_ == no.data && prenorm_w_ == w.data && prenorm_n_ == n;
+    }
+    // No other writer of h between producer and consumer: no LoRA, gated residual, parallel
+    // block, FP32 residual or debug forward; small-M rows only.
+    [[nodiscard]] bool residual_fusion_ok_(int n) const;
+    // Block-start residual save r = h, skipped when the producer already wrote it for (norm_w, no, n).
+    void save_residual_(Tensor& r, const Tensor& h, const Tensor& norm_w, const Tensor& no, int n,
+                        cudaStream_t stream);
+    // FFN end, no post-norm: h = fo + r, fused with the next layer's residual save + attn norm when
+    // that layer is plain attention and nothing scales h in between.
+    void ffn_residual_add_(int layer, const Tensor& fo, Tensor& r, Tensor& h, Tensor& no, int n, float eps,
+                           cudaStream_t stream);
+    const void* prenorm_out_ = nullptr;
+    const void* prenorm_w_ = nullptr;
+    int prenorm_n_ = 0;
     // Norm fold (quant/nvfp4_gemm.h), executor_norm_fold.cu. begin: per forward. arm: at an M=1
     // NVFP4 residual producer, targets the next norm. take: at that norm; ssq == nullptr means
     // run rmsnorm() as before.

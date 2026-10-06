@@ -29,7 +29,15 @@ __global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const
 
     float4 v[kVecs];
     float sum_sq = 0.0f;
-    pdl_wait();     // first global read follows
+    // The norm weight is immutable: load it before the grid dependency, off the critical path.
+    float4 w_pre[kVecs];
+#pragma unroll
+    for (int j = 0; j < kVecs; ++j) {
+        const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
+        if (i < d_vec)
+            w_pre[j] = w_vec[i];
+    }
+    pdl_wait();     // first read of the predecessor's output follows
     pdl_trigger();  // scheduling only: the dependent GEMM prefetches its weights during this grid
 #pragma unroll
     for (int j = 0; j < kVecs; ++j) {
@@ -68,7 +76,7 @@ __global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const
     for (int j = 0; j < kVecs; ++j) {
         const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
         if (i < d_vec) {
-            const float4 wv = w_vec[i];
+            const float4 wv = w_pre[j];
             const half2* xh = reinterpret_cast<const half2*>(&v[j]);
             const half2* wh = reinterpret_cast<const half2*>(&wv);
             float4 result;
@@ -92,13 +100,15 @@ __global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const
 // quantizing post-rounding, since the separate quantize kernel reads the stored FP16 row).
 // Kills one quantize launch + one [M,K] FP16 re-read per consumer group (q/kv, gate/up, GDN
 // in/z). Caller guarantees d_model%256==0 (whole-warp pair activity per slice).
-template <int kVecs>
+// kAdd (#2414): x = a + r in FP16 (__hadd2, the add-store kernel's rounding) is stored to h and r
+// (residual save) and normalised from registers: add-store + residual copy + norm in one launch.
+template <int kVecs, bool kAdd = false>
 __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
                                                    const __half* __restrict__ weight,
-                                                   __half* __restrict__ out,
-                                                   uint8_t* __restrict__ xq_packed,
-                                                   uint8_t* __restrict__ xq_scales, int d_model,
-                                                   float eps, float weight_offset) {
+                                                   __half* __restrict__ out, uint8_t* __restrict__ xq_packed,
+                                                   uint8_t* __restrict__ xq_scales, int d_model, float eps,
+                                                   float weight_offset, const __half* __restrict__ add_a,
+                                                   __half* add_r, __half* __restrict__ add_h) {
     const int d_vec = d_model >> 3;
     const float4* x_vec = reinterpret_cast<const float4*>(x + static_cast<int64_t>(blockIdx.x) * d_model);
     const float4* w_vec = reinterpret_cast<const float4*>(weight);
@@ -106,13 +116,35 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
 
     float4 v[kVecs];
     float sum_sq = 0.0f;
-    pdl_wait();     // first global read follows
+    // The norm weight is immutable: load it before the grid dependency, off the critical path.
+    float4 w_pre[kVecs];
+#pragma unroll
+    for (int j = 0; j < kVecs; ++j) {
+        const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
+        if (i < d_vec)
+            w_pre[j] = w_vec[i];
+    }
+    pdl_wait();     // first read of the predecessor's output follows
     pdl_trigger();  // scheduling only: the dependent GEMM prefetches its weights during this grid
+    const int64_t row_off = static_cast<int64_t>(blockIdx.x) * d_model;
 #pragma unroll
     for (int j = 0; j < kVecs; ++j) {
         const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
         if (i < d_vec) {
-            v[j] = x_vec[i];
+            if constexpr (kAdd) {
+                const float4 av = reinterpret_cast<const float4*>(add_a + row_off)[i];
+                const float4 rv = reinterpret_cast<const float4*>(add_r + row_off)[i];
+                const half2* ah = reinterpret_cast<const half2*>(&av);
+                const half2* rh = reinterpret_cast<const half2*>(&rv);
+                half2* sh = reinterpret_cast<half2*>(&v[j]);
+#pragma unroll
+                for (int k = 0; k < 4; ++k)
+                    sh[k] = __hadd2(ah[k], rh[k]);
+                reinterpret_cast<float4*>(add_h + row_off)[i] = v[j];
+                reinterpret_cast<float4*>(add_r + row_off)[i] = v[j];
+            } else {
+                v[j] = x_vec[i];
+            }
             const half2* h = reinterpret_cast<const half2*>(&v[j]);
 #pragma unroll
             for (int k = 0; k < 4; ++k) {
@@ -151,7 +183,7 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
         float vals[8];
         float amax = 0.0f;
         if (active) {
-            const float4 wv = w_vec[i];
+            const float4 wv = w_pre[j];
             const half2* xh = reinterpret_cast<const half2*>(&v[j]);
             const half2* wh = reinterpret_cast<const half2*>(&wv);
             float4 result;
@@ -221,12 +253,44 @@ bool rmsnorm_nvfp4(const Tensor& x, const Tensor& weight, Tensor& out, uint8_t* 
         pdl::enable_kernel(rmsnorm_fp16_rowblock_nvfp4_kernel<1>);
         pdl::launch(rmsnorm_fp16_rowblock_nvfp4_kernel<1>, dim3(rows), dim3(512), 0, stream,
                     static_cast<const __half*>(x.data), static_cast<const __half*>(weight.data),
-                    static_cast<__half*>(out.data), xq_packed, xq_scales, d_model, eps, weight_offset);
+                    static_cast<__half*>(out.data), xq_packed, xq_scales, d_model, eps, weight_offset,
+                    static_cast<const __half*>(nullptr), static_cast<__half*>(nullptr),
+                    static_cast<__half*>(nullptr));
     } else {
         pdl::enable_kernel(rmsnorm_fp16_rowblock_nvfp4_kernel<2>);
         pdl::launch(rmsnorm_fp16_rowblock_nvfp4_kernel<2>, dim3(rows), dim3(512), 0, stream,
                     static_cast<const __half*>(x.data), static_cast<const __half*>(weight.data),
-                    static_cast<__half*>(out.data), xq_packed, xq_scales, d_model, eps, weight_offset);
+                    static_cast<__half*>(out.data), xq_packed, xq_scales, d_model, eps, weight_offset,
+                    static_cast<const __half*>(nullptr), static_cast<__half*>(nullptr),
+                    static_cast<__half*>(nullptr));
+    }
+    return true;
+}
+
+bool add_rmsnorm_nvfp4(const Tensor& a, Tensor& r, Tensor& h, const Tensor& weight, Tensor& out,
+                       uint8_t* xq_packed, uint8_t* xq_scales, float eps, cudaStream_t stream,
+                       float weight_offset) {
+    const int rows = static_cast<int>(h.shape[0]);
+    const int d_model = static_cast<int>(h.shape[1]);
+    if (weight.data == nullptr || h.qtype != QType::F16 || a.qtype != QType::F16 || r.qtype != QType::F16 ||
+        rows < 2 || rows > 64 || (d_model & 255) != 0 || (d_model >> 3) > 1024 || a.data == h.data ||
+        r.data == h.data || out.data == h.data)
+        return false;
+    const auto* ap = static_cast<const __half*>(a.data);
+    auto* rp = static_cast<__half*>(r.data);
+    auto* hp = static_cast<__half*>(h.data);
+    if ((d_model >> 3) <= 512) {
+        pdl::enable_kernel(rmsnorm_fp16_rowblock_nvfp4_kernel<1, true>);
+        pdl::launch(rmsnorm_fp16_rowblock_nvfp4_kernel<1, true>, dim3(rows), dim3(512), 0, stream,
+                    static_cast<const __half*>(nullptr), static_cast<const __half*>(weight.data),
+                    static_cast<__half*>(out.data), xq_packed, xq_scales, d_model, eps, weight_offset, ap, rp,
+                    hp);
+    } else {
+        pdl::enable_kernel(rmsnorm_fp16_rowblock_nvfp4_kernel<2, true>);
+        pdl::launch(rmsnorm_fp16_rowblock_nvfp4_kernel<2, true>, dim3(rows), dim3(512), 0, stream,
+                    static_cast<const __half*>(nullptr), static_cast<const __half*>(weight.data),
+                    static_cast<__half*>(out.data), xq_packed, xq_scales, d_model, eps, weight_offset, ap, rp,
+                    hp);
     }
     return true;
 }
