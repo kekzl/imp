@@ -60,6 +60,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.attention_fa2_dense_2cta = cfg.attention.fa2_dense_2cta;
     d.attention_paged_fp8_multitok = cfg.attention.paged_fp8_multitok;
     d.attention_paged_nvfp4_multitok = cfg.attention.paged_nvfp4_multitok;
+    d.attention_paged_nvfp4_mma = cfg.attention.paged_nvfp4_mma ? 64 : 0;
     d.attention_paged_f16_multitok = cfg.attention.paged_f16_multitok;
     d.attention_fa2_heavy_first = cfg.attention.fa2_heavy_first;
     d.attention_fp8_qk_scaled = cfg.attention.fp8_qk_scaled;

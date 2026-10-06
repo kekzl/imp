@@ -296,6 +296,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_paged_fp8_multitok_gqa.cu
     src/compute/attention_paged_nvfp4_multitok.cu
     src/compute/attention_paged_nvfp4_multitok_gqa.cu
+    src/compute/attention_paged_nvfp4_mma.cu
     src/compute/attention_paged_f16_multitok.cu
     src/compute/attention_paged_fp8_tile.cu
     src/compute/attention_paged_int8.cu

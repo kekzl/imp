@@ -454,6 +454,10 @@ paged_fp8_multitok   = 4
 # CTA (each row converted once): 1 x 32k 102 -> 74 us, 32 x 1100 93 -> 69 us.
 # 1 = scalar kernels.
 paged_nvfp4_multitok = 4
+# NVFP4 split-K decode on m16n8k16 tensor cores (GQA ratio 2..8, HD=128/256):
+# one CTA per KV head x split runs all its Q heads. Microbench 1 x 77k, NVFP4
+# KV read from DRAM: 16/2 heads 71.4 -> 39.3 us, 24/4 111.9 -> 61.9 us.
+paged_nvfp4_mma = true
 # The same for the F16 KV cache (HD=128/256, GQA ratio 1..8): four tokens per
 # warp iteration, each K/V row read once per CTA for up to four Q heads.
 # Microbench 32 x 1100: 32/8 heads HD=128 315 -> 98 us per launch (four heads

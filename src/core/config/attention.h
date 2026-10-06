@@ -58,6 +58,9 @@ struct Attention {
     // kernels grouping a KV head's Q heads per CTA (each row converted once);
     // 1 = the scalar kernels.
     int paged_nvfp4_multitok = 4;
+    // NVFP4 split-K decode on m16n8k16 tensor cores for GQA ratio 2..8 (HD=128/256): one CTA per
+    // (KV head, split) runs all its Q heads; false = the multitok kernels above.
+    bool paged_nvfp4_mma = true;
     // F16 paged decode (HD=128/256, GQA 1..8, non-split-K path): tokens per
     // warp iteration on the multitok kernel, sharing each KV row across a
     // CTA's Q heads. 1 = the cooperative and per-head split-K kernels.
