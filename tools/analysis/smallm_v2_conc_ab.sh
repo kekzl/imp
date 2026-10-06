@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# smallm_v2_conc_ab.sh - alternating A/B for gemm.nvfp4_smallm (off vs on)
+# smallm_v2_conc_ab.sh - alternating A/B of two --set lists (default: gemm.nvfp4_smallm off vs on)
+# Env: MODEL, ARM_A, ARM_B, CONC, TRIALS, PORT. Client runs in python:3.12-slim (host network).
 # 3 trials/arm, 3 waves/trial at CONC streams. mbs/seq pinned (free-VRAM swing).
 set -u
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"
-MODEL=/models/Qwen3.8-27B-NVFP4-vllm
-PORT=8090
+MODEL=${MODEL:-/models/Qwen3.8-27B-NVFP4-vllm}
+ARM_A=${ARM_A:-}
+ARM_B=${ARM_B:---set gemm.nvfp4_smallm=true}
+PORT=${PORT:-8090}
 CONC=${CONC:-32}
 WAVES=3
 TRIALS=${TRIALS:-3}
@@ -39,14 +42,14 @@ run_arm() {  # $1 = arm name, $2 = extra sets
         echo "GPU BUSY before $1 - aborting" | tee -a "$LOG"; exit 2; }
     start_server "$2" || exit 3
     echo "== arm $1 trial $3 ==" | tee -a "$LOG"
-    python3 "$HERE/conc_client.py" $PORT $CONC $WAVES "$1$3" 2>&1 | tee -a "$LOG"
+    docker run --rm --network host -e MODEL_NAME="$(basename "$MODEL")" -v "$HERE:/h:ro" python:3.12-slim python /h/conc_client.py $PORT $CONC $WAVES "$1$3" 2>&1 | tee -a "$LOG"
     docker rm -f imp-ab >/dev/null 2>&1
     sleep 3
 }
 
 for t in $(seq 1 $TRIALS); do
-    run_arm A "" "$t"
-    run_arm B "--set gemm.nvfp4_smallm=true" "$t"
+    run_arm A "$ARM_A" "$t"
+    run_arm B "$ARM_B" "$t"
 done
 echo "=== summary ===" | tee -a "$LOG"
 grep -H "MEDIAN\|== arm" "$LOG" | tail -40
