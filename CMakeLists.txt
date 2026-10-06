@@ -1295,6 +1295,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mmq_q8_imma_q5k.cu
         tests/test_mmq_q8_imma_q6k.cu
         tests/test_mmq_q8_imma_reuse.cu
+        tests/test_mmq_q8_imma_tail.cu
         tests/test_weight_dispatch.cu
     )
     if(IMP_USE_CUTLASS)

@@ -7,6 +7,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Changed
 - NVFP4 paged decode runs split-K on m16n8k16 tensor cores (`attention.paged_nvfp4_mma`, GQA 2..8, HD 128/256): one CTA per KV head runs all its Q heads (#2440). 1 x 77k, KV from DRAM: 16/2 71.4 -> 39.3 us, 24/4 111.9 -> 61.9 us; Qwen3.6-35B-A3B-NVFP4 tg128 at 8k 321.23 -> 327.40 tok/s.
 - The split-K paged decode reduce runs one CTA per 128-wide head_dim slice, summation order unchanged: 16/2 HD=256 at 128 splits 8.0 -> 5.0 us.
+- Dense Q8_0 IMMA prefill runs a last wave under half full as BM=32 tiles, bit-identical per row (#2416): q_o M=2048 294.2..298.6 -> 262.0..263.2 us; Qwen3-8B-Q8_0 pp4096 271.15 -> 268.59 ms.
 
 ## [0.49.0] - 2026-10-05
 

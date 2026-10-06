@@ -12,6 +12,7 @@
 #include "memory/mem_account.h"
 #include "core/cuda_static_reset.h"
 
+#include <algorithm>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
@@ -326,6 +327,40 @@ __global__ void mmq_splitk_finalize_kernel(const float* __restrict__ split_out, 
 using RawImmaKernel = void (*)(const int8_t*, const __half*, const float*, const uint8_t*, __half*, int, int,
                                int, const int32_t*, size_t);
 
+// Q8_0 plane launch, BM=128, beta 0. Wave tail (#2416): a dense last wave under half full (M=2048 q_o: 512
+// tiles = 3 x 170 + 2) runs its trailing row-blocks as BM=32 tiles; per output the k order is unchanged, so
+// rows are bit-identical at any M (#2152). q_o M=2048: 294.2..298.6 -> 262.0..263.2 us.
+void launch_q8_plane_dense(const WeightPlanes& w, __half* out_f16, int M, int N, int K, dim3 grid, int ne,
+                           const int32_t* d_offsets, size_t w_stride, size_t wsc_stride, int n_sms,
+                           cudaStream_t stream) {
+    const int tiles = static_cast<int>(grid.x * grid.y);
+    const int tail = n_sms > 0 ? tiles % n_sms : 0;
+    int rb_big = static_cast<int>(grid.y);
+    if (d_offsets == nullptr && tiles > n_sms && tail != 0 && 2 * tail <= n_sms)
+        rb_big = (tiles - tail) / static_cast<int>(grid.x);
+    // More than one BM=32 CTA per SM costs a full wave again (M=2176: 293 -> 296 us).
+    if ((static_cast<int>(grid.y) - rb_big) * static_cast<int>(grid.x) * 4 > n_sms)
+        rb_big = static_cast<int>(grid.y);
+    const int rows_big = d_offsets != nullptr ? M : std::min(M, rb_big * 128);
+    const dim3 gbig(grid.x, rb_big, ne);
+    mmq_imma_kernel<128, false, false>
+        <<<gbig, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
+                                        out_f16, rows_big, N, K, d_offsets, w_stride, wsc_stride);
+    IMP_CUDA_CHECK_LAUNCH();
+    if (d_offsets != nullptr || rows_big >= M)
+        return;
+    const size_t subs = static_cast<size_t>(K) / 32;
+    const int rows_small = M - rows_big;
+    const dim3 g32(grid.x, (rows_small + 31) / 32, ne);
+    mmq_imma_kernel<32, false, false>
+        <<<g32, kThreads, 0, stream>>>(g_imma_act.xs8 + static_cast<size_t>(rows_big) * K,
+                                       g_imma_act.xscale + rows_big * subs,
+                                       g_imma_act.xrowsum + rows_big * subs, w.qs, w.sc,
+                                       out_f16 + static_cast<size_t>(rows_big) * N, rows_small, N, K, nullptr,
+                                       w_stride, wsc_stride);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*/, const __half* x_f16,
                  __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
                  const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0,
@@ -446,10 +481,7 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
                                             out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
         IMP_CUDA_CHECK_LAUNCH();
     } else {
-        mmq_imma_kernel<128, false, false>
-            <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
-                                            out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
-        IMP_CUDA_CHECK_LAUNCH();
+        launch_q8_plane_dense(w, out_f16, M, N, K, grid, ne, d_offsets, w_stride, wsc_stride, n_sms, stream);
     }
     return true;
 }
