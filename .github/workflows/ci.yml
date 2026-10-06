@@ -582,11 +582,11 @@ jobs:
           sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
           apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
           apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends python3 python3-venv curl ca-certificates libjpeg-turbo8
-          # Toolkit versions: cudart 13.4.49, cuBLAS 13.7.0.27 (440 MB, 4.5 s in run 36470329804).
+          # Toolkit versions = the build image (13.4.2): cudart 13.4.92, cuBLAS 13.8.0.4 (439 MB).
           # Fetched in the background while pip runs; sha256-verified (H-6).
           mkdir -p /tmp/cuda-whl
-          curl -fsSL https://files.pythonhosted.org/packages/e6/cb/b5959bff298d114338aaf4bface538ca9f2a721c439618fb252162f6192e/nvidia_cuda_runtime-13.4.49-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl -o /tmp/cuda-whl/cudart.whl
-          curl -fsSL -w 'cublas wheel: %{size_download} B in %{time_total} s\n' https://files.pythonhosted.org/packages/da/b3/358ee3e2237d4d663cd7a50e4dae3b07bbc5c93bf1eab034c17d66b7e428/nvidia_cublas-13.7.0.27-py3-none-manylinux_2_27_x86_64.whl -o /tmp/cuda-whl/cublas.whl &
+          curl -fsSL https://files.pythonhosted.org/packages/98/8a/3431271f6344874b8f1ac03f16b3d679c91493f8da63f716160403e6d0a0/nvidia_cuda_runtime-13.4.92-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl -o /tmp/cuda-whl/cudart.whl
+          curl -fsSL -w 'cublas wheel: %{size_download} B in %{time_total} s\n' https://files.pythonhosted.org/packages/7a/38/bdd540bf511d2c9b6f9efc71a81c60cb88e295be0b9312b61d19bbed2212/nvidia_cublas-13.8.0.4-py3-none-manylinux_2_27_x86_64.whl -o /tmp/cuda-whl/cublas.whl &
           fetch=$!
           # A venv rather than --break-system-packages: the lock file pins the
           # whole transitive set, and pip cannot replace Debian's own copy of
@@ -594,8 +594,8 @@ jobs:
           python3 -m venv /tmp/api-venv
           /tmp/api-venv/bin/pip install -q -r tests/api/requirements.txt
           wait "$fetch"
-          echo '0b228cc646acda27e9b512b8b94417c3ff8b3d24a0ad9b1d6603dc6c2a908046  /tmp/cuda-whl/cudart.whl' | sha256sum -c -
-          echo '481adf76a6b7585a7a4cd5f53298589abe207415dd584887751b99baa85491d4  /tmp/cuda-whl/cublas.whl' | sha256sum -c -
+          echo '9641f797da20ce1dd8e779b6e96d08cf9ba564cec8e8225458811ee26423f3a5  /tmp/cuda-whl/cudart.whl' | sha256sum -c -
+          echo '9f17797dfcc048694461f4e47de17d2e3c25adf172ef723d2db0a07cd8744b89  /tmp/cuda-whl/cublas.whl' | sha256sum -c -
           python3 -m zipfile -e /tmp/cuda-whl/cudart.whl /tmp/cuda-libs
           python3 -m zipfile -e /tmp/cuda-whl/cublas.whl /tmp/cuda-libs
           echo "LD_LIBRARY_PATH=/tmp/cuda-libs/nvidia/cu13/lib" >> "$GITHUB_ENV"
