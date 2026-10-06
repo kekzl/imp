@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-10-03
+Last reviewed: 2026-10-06
 
 Single-author, single-GPU experiment: "roadmap" means current focus, not
 schedule. Shipped work is in [`CHANGELOG.md`](../CHANGELOG.md), competitive
@@ -146,6 +146,7 @@ Rows 1-15 are closed (index below); new rows start at 16, ranked by what an agen
 | 97 | ~~/metrics splits VRAM by allocator tag~~ | closed 2026-10-05: `imp_vram_allocator_bytes{tag=...}` from `VRAMAllocator::bytes_by_tag`, `imp_vram_untracked_bytes` = `imp_vram_own_bytes` minus the allocator's total (Qwen3-0.6B server: 12 tags) | S | `src/memory/vram_allocator.cpp` `bytes_by_tag`, `tools/imp-server/metrics_memory.cpp` `append_allocator_tags`, no issue |
 | 101 | NVFP4 and MXFP4 exports close more of the BF16 gap | best `--calib` export still +8.7 % vs BF16 on Qwen3-1.7B -> GPTQ / MR-GPTQ / rotation after AWQ | L | `docs/quantization.md:203 +8.7%`, no issue |
 | 102 | ~~the BF16 gap is known for 14B and larger exports~~ | closed 2026-10-05: BF16 reference from transformers on the CPU (`tools/analysis/hf_ppl_cpu.py`; Qwen3-1.7B 16.9035 vs imp 16.8827), `ppl_corpus_45k.txt`: Qwen3-14B 9.1961, NVFP4 RTN +8.6 %, `--calib` BD +7.7 %, Modelopt +6.8 %; Qwen3.8-27B 4.4247, imp RTN +3.7 %, Modelopt +3.0 %, vllm export +4.1 % | M | `docs/quantization.md:202 Qwen3-0.6B`, `docs/quantization.md:215 BF16 14B does not fit`, no issue |
+| 110 | Flash-Next keeps more of its experts in VRAM via an expert-pruned NVFP4 variant | 63.28 GiB experts vs 14.6 GiB cache (355 slots/layer), tg512 prose 70.24 tok/s at 84.0 % hits; 256 experts = 31.64 GiB (46 % cached), 128 = 15.82 GiB (resident with FP8 hc/attention/shared) -> simulate hit rate per kept set on a real-text trace first, then prune + judge PPL/degen vs 512, HF upload only on that result | L | `tools/analysis/expert_cache_sim.py`, #2158, #2613 |
 
 ## Not gaps
 
