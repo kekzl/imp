@@ -231,7 +231,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // Kernel copy, not cudaMemcpyAsync: a memcpy node has no programmatic
         // edge, so it cut the PDL chain add -> copy -> norm -> q GEMM once per
         // layer (the GEMM's weight prefetch overlaps the whole chain).
-        device_copy_async(r.data, h.data, h.nbytes(), stream);
+        save_residual_(r, h, ly.attn_norm, no, n, stream);  // skipped when the producer saved it (#2414)
     }
 
     // For Qwen3.5: Q projection writes to larger buffer (includes gate), then split
@@ -763,8 +763,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             add_rmsnorm_inplace(po, r, h, ly.post_attn_norm, model_->config().rms_norm_eps, stream,
                                 norm_w_off_);
         } else {
-            // Standard pre-norm: h = attn_out + residual
-            elementwise_add_store(po, r, h, stream);
+            // Standard pre-norm: h = attn_out + residual. Batched decode with a dense FFN: the
+            // add, the FFN residual save and the FFN norm run as one launch (#2414).
+            const bool fuse_ffn_norm = layer_has_dense_ffn(layer) && !layer_has_moe(layer) &&
+                                       ly.o_bias.data == nullptr && !debug_attn_steps;
+            if (!(fuse_ffn_norm && add_norm_for_smallm_(po, r, h, ffn_norm_weight_(ly), no, ly.w_gate_id, n,
+                                                        model_->config().rms_norm_eps, stream)))
+                elementwise_add_store(po, r, h, stream);
         }
     }
 

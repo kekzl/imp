@@ -9,6 +9,8 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
 #include "compute/layernorm.h"
+#include "exec/executor_debug.h"
+#include "exec/executor_kernels.h"
 #include "compute/activation.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "quant/dequant_gpu.h"
@@ -136,6 +138,12 @@ void GraphExecutor::smallm_producer_tag_(const void* out_data, int M, int K) {
 void GraphExecutor::rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor& no,
                                         TensorID consumer_id, int n, float eps, cudaStream_t stream,
                                         float weight_offset) {
+    // The producer already wrote no + the NVFP4 activations for this (no, w, n) (#2414).
+    if (prenorm_matches_(w, no, n)) {
+        prenorm_out_ = nullptr;
+        return;
+    }
+    prenorm_out_ = nullptr;
     // No pre-norm weight: the block input is already normalised upstream (Qwen4Exp gated
     // residual hands the block a mixed, hc_norm'ed stream), so the norm is the identity.
     // Without this a null weight reaches the kernel and the process dies on an illegal access.
@@ -156,6 +164,44 @@ void GraphExecutor::rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor
     // tag (same buffer, same shape, new values) — invalidate it.
     if (smallm_xq_src_ == no.data && smallm_xq_src_m_ == n && smallm_xq_src_k_ == K)
         smallm_xq_from_producer_ = false;
+}
+
+bool GraphExecutor::residual_fusion_ok_(int n) const {
+    return n >= 2 && n <= 32 && lora_ == nullptr && !model_->profile().gated_residual &&
+           !model_->config().parallel_block && fp32_accum_buf_ == nullptr && !debug_forward_enabled();
+}
+
+bool GraphExecutor::add_norm_for_smallm_(const Tensor& a, Tensor& r, Tensor& h, const Tensor& w, Tensor& no,
+                                         TensorID consumer_id, int n, float eps, cudaStream_t stream) {
+    if (w.data == nullptr || !residual_fusion_ok_(n))
+        return false;
+    const int K = static_cast<int>(h.shape[1]);
+    uint8_t* xq_scales = nullptr;
+    uint8_t* xq_packed = smallm_producer_xq_(consumer_id, n, K, stream, &xq_scales);
+    if (xq_packed == nullptr ||
+        !add_rmsnorm_nvfp4(a, r, h, w, no, xq_packed, xq_scales, eps, stream, norm_w_off_))
+        return false;
+    smallm_producer_tag_(no.data, n, K);
+    prenorm_out_ = no.data;
+    prenorm_w_ = w.data;
+    prenorm_n_ = n;
+    return true;
+}
+
+void GraphExecutor::save_residual_(Tensor& r, const Tensor& h, const Tensor& norm_w, const Tensor& no, int n,
+                                   cudaStream_t stream) {
+    if (!prenorm_matches_(norm_w, no, n))
+        device_copy_async(r.data, h.data, h.nbytes(), stream);  // kernel copy — see device_copy_async
+}
+
+void GraphExecutor::ffn_residual_add_(int layer, const Tensor& fo, Tensor& r, Tensor& h, Tensor& no, int n,
+                                      float eps, cudaStream_t stream) {
+    const int nl = layer + 1;
+    const bool fuse = nl < model_->config().n_layers && layer_has_attention(nl) && !layer_has_gdn(nl) &&
+                      !layer_has_ssm(nl) && model_->layer(layer).layer_out_scale.data == nullptr;
+    if (!(fuse && add_norm_for_smallm_(fo, r, h, model_->layer(nl).attn_norm, no, model_->layer(nl).wq_id, n,
+                                       eps, stream)))
+        elementwise_add_store(fo, r, h, stream);
 }
 
 bool GraphExecutor::swiglu_for_smallm_(const Tensor& go, const Tensor& uo, Tensor& so, TensorID consumer_id,
