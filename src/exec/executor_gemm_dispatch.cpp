@@ -78,6 +78,18 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight,
                           static_cast<int>(weight.shape[1]), ctx.stream, ctx.beta))
         return;
 
+    // Q8_0 with no FP16 cache (Qwen3.6 GGUF GDN projections, #2468): split the blocks into the
+    // dequant scratch (1.125 B per weight vs 2 B FP16) and run the plane IMMA kernel. No split-K:
+    // a prompt row keeps its bits at any chunk size (#2152).
+    if (ctx.q8_imma_uncached && qtype == QType::Q8_0 && !weight.dropped_source && M >= 2 &&
+        input.qtype == QType::F16 && output.qtype == QType::F16 && input.stride[0] == weight.shape[1] &&
+        output.stride[0] == weight.shape[0] &&
+        mmq_q8_imma_gemm_scratch(weight.data, qs->dequant, qs->dequant_size,
+                                 reinterpret_cast<const __half*>(input.data), reinterpret_cast<__half*>(output.data),
+                                 M, static_cast<int>(weight.shape[0]), static_cast<int>(weight.shape[1]), ctx.stream,
+                                 ctx.beta, /*allow_splitk=*/false))
+        return;
+
     if (ctx.beta != 0.0f) {
         auto it = wc->fp16.find(weight.data);
         if (it != wc->fp16.end()) {

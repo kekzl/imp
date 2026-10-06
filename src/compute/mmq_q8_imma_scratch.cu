@@ -38,6 +38,21 @@ __global__ void q8_split_kernel(const uint8_t* __restrict__ src, int8_t* __restr
     for (int i = 0; i < 32; ++i) dst[i] = static_cast<int8_t>(blk[2 + i]);
 }
 
+// Per-call split: one thread per 4-B qs word. Block b's quants start 2-aligned (b * 34 + 2), so a
+// word is two 2-B loads; word 0 of each block also writes its (d, 0) scale pair as one 4-B store.
+__global__ void q8_split_words_kernel(const uint8_t* __restrict__ src, uint32_t* __restrict__ qs_words,
+                                      uint32_t* __restrict__ sc_pairs, int64_t n_words) {
+    const int64_t w = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (w >= n_words)
+        return;
+    const int64_t b = w >> 3;
+    const int j = static_cast<int>(w & 7);
+    const auto* p = reinterpret_cast<const unsigned short*>(src + b * 34 + 2 + 4 * j);
+    qs_words[w] = static_cast<uint32_t>(__ldg(p)) | (static_cast<uint32_t>(__ldg(p + 1)) << 16);
+    if (j == 0)
+        sc_pairs[b] = __ldg(reinterpret_cast<const unsigned short*>(src + b * 34));  // beta half = 0
+}
+
 // Activation quantizer: 8 warps per block, grid-stride over (m, sub) pairs
 // (the shared 32-thread-block version ran at ~150 GB/s). Emits s8 + half
 // scale + float rowsum (the rowsum couples to the Q4_K β term; ~free here).
@@ -166,6 +181,14 @@ bool imma_ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool
     IMP_CUDA_CHECK_LAUNCH();
     g_imma_weights[src] = w;
     return true;
+}
+
+void imma_split_q8_transient(const void* src, const WeightPlanes& w, cudaStream_t stream) {
+    const int64_t n_words = static_cast<int64_t>(w.N) * w.K / 4;
+    q8_split_words_kernel<<<static_cast<unsigned>((n_words + 255) / 256), 256, 0, stream>>>(
+        static_cast<const uint8_t*>(src), reinterpret_cast<uint32_t*>(w.qs), reinterpret_cast<uint32_t*>(w.sc),
+        n_words);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // T2 (A7 step 8), closes AUDIT B13: these 3 buffers are kernel params baked into

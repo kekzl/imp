@@ -22,6 +22,9 @@ struct GEMM {
     // Q4_K dense prefill via the IMMA kernel for weights with no FP16 cache (dequant + cuBLAS
     // otherwise). gemma-3-12b Q4_K_M kernel time pp512 -5.2 %, pp4096 -1.2 %, PPL 9.9819 -> 9.9805.
     bool q4k_imma_prefill = true;
+    // Q8_0 weights with no FP16 cache: per-call split into the dequant scratch + the plane IMMA
+    // kernel instead of dequant to FP16 + cuBLAS (#2468).
+    bool q8_imma_uncached = true;
     // MoE batch prefill via the grouped IMMA kernel (one launch over all
     // experts, gridDim.z=expert, BM=32). Covers Q8_0/Q4_K expert tensors; Q6_K
     // down_proj stays on dequant->cuBLAS. Default on; false re-enables the

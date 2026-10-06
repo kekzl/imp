@@ -304,6 +304,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("gemm.no_mmvq", cfg.gemm.no_mmvq);
     B("gemm.no_mmvq_q8_0", cfg.gemm.no_mmvq_q8_0);
     B("gemm.q8_imma_enabled", cfg.gemm.q8_imma_enabled);
+    B("gemm.q8_imma_uncached", cfg.gemm.q8_imma_uncached);
     B("gemm.q4k_imma_prefill", cfg.gemm.q4k_imma_prefill);
     B("gemm.moe_imma_prefill", cfg.gemm.moe_imma_prefill);
     B("gemm.dense_weight_cache", cfg.gemm.dense_weight_cache);

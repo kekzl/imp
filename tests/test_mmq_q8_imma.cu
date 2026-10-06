@@ -9,11 +9,15 @@
 
 #include <cmath>
 #include <cstdint>
+#include <algorithm>
 #include <cstring>
 #include <random>
 #include <vector>
 
+#include "compute/gemm.h"
 #include "compute/mmq_q8_imma.h"
+#include "core/tensor.h"
+#include "exec/weight_dequant.h"
 #include "scoped_engine_arena.h"
 
 namespace imp {
@@ -559,6 +563,125 @@ TEST(MmqQ8Imma, DeclineShapes) {
     cudaFree(d_x);
     cudaFree(d_out);
     mmq_q8_imma_release_all();
+}
+
+// #2468: the per-call split into caller scratch feeds the same kernel as the cached plane, so the
+// output must be bit-identical; a scratch below imma_q8_plane_bytes declines.
+TEST(MmqQ8Imma, TransientScratchMatchesCachedPlane) {
+    for (const int M : {16, 200, 512}) {
+        const int N = 384, K = 2048;
+        std::vector<uint8_t> W;
+        gen_q8_weight(W, N, K, 91 + M);
+        std::vector<__half> x((size_t)M * K);
+        std::mt19937 rng(M);
+        std::normal_distribution<float> nd(0.0f, 1.0f);
+        for (auto& v : x)
+            v = __float2half(nd(rng));
+        uint8_t* d_w = nullptr;
+        void* d_scratch = nullptr;
+        __half *d_x = nullptr, *d_a = nullptr, *d_b = nullptr;
+        const size_t need = imma_q8_plane_bytes(N, K);
+        ASSERT_EQ(cudaMalloc(&d_w, W.size()), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_scratch, need), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_x, x.size() * sizeof(__half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_a, (size_t)M * N * sizeof(__half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_b, (size_t)M * N * sizeof(__half)), cudaSuccess);
+        cudaMemcpy(d_w, W.data(), W.size(), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_x, x.data(), x.size() * sizeof(__half), cudaMemcpyHostToDevice);
+        cudaMemset(d_scratch, 0x5A, need);  // stale bytes must not survive the split
+        ASSERT_TRUE(mmq_q8_imma_gemm(d_w, d_x, d_a, M, N, K, nullptr));
+        EXPECT_FALSE(mmq_q8_imma_gemm_scratch(d_w, d_scratch, need - 1, d_x, d_b, M, N, K, nullptr));
+        ASSERT_TRUE(mmq_q8_imma_gemm_scratch(d_w, d_scratch, need, d_x, d_b, M, N, K, nullptr));
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        std::vector<uint16_t> a((size_t)M * N), b((size_t)M * N);
+        cudaMemcpy(a.data(), d_a, a.size() * 2, cudaMemcpyDeviceToHost);
+        cudaMemcpy(b.data(), d_b, b.size() * 2, cudaMemcpyDeviceToHost);
+        EXPECT_EQ(a, b) << "M=" << M;
+        cudaFree(d_w);
+        cudaFree(d_scratch);
+        cudaFree(d_x);
+        cudaFree(d_a);
+        cudaFree(d_b);
+        mmq_q8_imma_release_all();
+    }
+}
+
+// #2468 bound: plane IMMA (weights pre-split, the best an in-place kernel can reach) vs the
+// uncached route (dequant_q8_0 to FP16 + cuBLAS) on the Qwen3.6 GDN Q8_0 shapes, weights rotated
+// over >= 400 MB so both read DRAM. Prints us per GEMM; no assertion on speed.
+TEST(MmqQ8Imma, BoundVsDequantCublas) {
+    struct Shape {
+        int N, K;
+    };
+    void* d_deq = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_deq, (size_t)8192 * 4096 * sizeof(__half)), cudaSuccess);
+    for (const Shape sh : {Shape{8192, 2048}, Shape{4096, 2048}, Shape{2048, 4096}}) {
+        std::vector<uint8_t> W;
+        gen_q8_weight(W, sh.N, sh.K, 7);
+        const int ring = (int)((400ull << 20) / W.size()) + 1;
+        std::vector<void*> d_w(ring);
+        for (auto& p : d_w) {
+            ASSERT_EQ(cudaMalloc(&p, W.size()), cudaSuccess);
+            cudaMemcpy(p, W.data(), W.size(), cudaMemcpyHostToDevice);
+        }
+        for (int M : {512, 1024, 2048, 4096}) {
+            std::vector<__half> x((size_t)M * sh.K);
+            std::mt19937 rng(M);
+            std::normal_distribution<float> nd(0.0f, 1.0f);
+            for (auto& v : x)
+                v = __float2half(nd(rng));
+            __half *d_x = nullptr, *d_out = nullptr;
+            ASSERT_EQ(cudaMalloc(&d_x, x.size() * sizeof(__half)), cudaSuccess);
+            ASSERT_EQ(cudaMalloc(&d_out, (size_t)M * sh.N * sizeof(__half)), cudaSuccess);
+            cudaMemcpy(d_x, x.data(), x.size() * sizeof(__half), cudaMemcpyHostToDevice);
+            int64_t xs[2] = {M, sh.K}, os[2] = {M, sh.N}, ws[2] = {sh.N, sh.K};
+            Tensor X(d_x, QType::F16, 2, xs, true), O(d_out, QType::F16, 2, os, true);
+            Tensor Wd(d_deq, QType::F16, 2, ws, true);
+            auto imma = [&](int i) { return mmq_q8_imma_gemm(d_w[i % ring], d_x, d_out, M, sh.N, sh.K, nullptr); };
+            auto transient = [&](int i) {
+                return mmq_q8_imma_gemm_scratch(d_w[i % ring], d_deq, (size_t)8192 * 4096 * sizeof(__half), d_x,
+                                                d_out, M, sh.N, sh.K, nullptr);
+            };
+            auto deq = [&](int i) {
+                Tensor Wq(d_w[i % ring], QType::Q8_0, 2, ws, true);
+                dequant_weight_fp16(Wq, d_deq, nullptr);
+                gemm(X, Wd, O, 1.0f, 0.0f, nullptr);
+                return true;
+            };
+            auto time_us = [&](auto&& fn) {
+                for (int i = 0; i < 2 * ring; i++)
+                    EXPECT_TRUE(fn(i));  // warm: planes built, clocks up
+                cudaEvent_t t0, t1;
+                cudaEventCreate(&t0);
+                cudaEventCreate(&t1);
+                std::vector<float> ms(5);
+                for (auto& m : ms) {
+                    cudaEventRecord(t0);
+                    for (int i = 0; i < 40; i++)
+                        fn(i);
+                    cudaEventRecord(t1);
+                    cudaEventSynchronize(t1);
+                    cudaEventElapsedTime(&m, t0, t1);
+                }
+                std::sort(ms.begin(), ms.end());
+                cudaEventDestroy(t0);
+                cudaEventDestroy(t1);
+                return 1000.0 * ms[2] / 40;
+            };
+            const double us_deq = time_us(deq);
+            const double us_tr = time_us(transient);
+            const double us_imma = time_us(imma);
+            printf("Q8Bound N=%d K=%d M=%d ring=%d: dequant+cuBLAS %.1f us, transient split+IMMA %.1f us, "
+                   "plane IMMA %.1f us\n",
+                   sh.N, sh.K, M, ring, us_deq, us_tr, us_imma);
+            cudaFree(d_x);
+            cudaFree(d_out);
+            mmq_q8_imma_release_all();
+        }
+        for (void* p : d_w)
+            cudaFree(p);
+    }
+    cudaFree(d_deq);
 }
 
 }  // namespace

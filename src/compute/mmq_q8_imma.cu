@@ -329,10 +329,12 @@ using RawImmaKernel = void (*)(const int8_t*, const __half*, const float*, const
 bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*/, const __half* x_f16,
                  __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
                  const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0,
-                 bool allow_splitk = true) {
+                 bool allow_splitk = true, const WeightPlanes* transient = nullptr) {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
     const bool capturing = imma_stream_capturing(stream);
-    if (qkind == 0 && !imma_ensure_weight(w_blocks, ne * N, K, stream, capturing))
+    if (transient != nullptr)
+        imma_split_q8_transient(w_blocks, *transient, stream);
+    else if (qkind == 0 && !imma_ensure_weight(w_blocks, ne * N, K, stream, capturing))
         return false;
     // qkinds 1-4 read raw blocks: nothing to prepare
     const int act_rows = d_offsets ? expanded : M;
@@ -394,7 +396,7 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
         return true;
     }
 
-    const auto& w = g_imma_weights[w_blocks];
+    const auto& w = transient != nullptr ? *transient : g_imma_weights[w_blocks];
     const size_t w_stride = static_cast<size_t>(N) * K;
     const size_t wsc_stride = static_cast<size_t>(N) * (K / 32) * 2;
 
@@ -465,6 +467,22 @@ bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_
     if (beta != 0.0f && beta != 1.0f) return false;
     return gemm_common(w_q8_blocks, 0, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1, 0,
                        allow_splitk);
+}
+
+bool mmq_q8_imma_gemm_scratch(const void* w_q8_blocks, void* scratch, size_t scratch_bytes, const __half* x_f16,
+                              __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
+                              bool allow_splitk) {
+    if (M < 2 || N % 2 != 0 || K % kBK != 0 || scratch == nullptr) return false;
+    if (beta != 0.0f && beta != 1.0f) return false;
+    const size_t qs_bytes = static_cast<size_t>(N) * K;  // K % 64: sc starts 64-B aligned
+    if (scratch_bytes < imma_q8_plane_bytes(N, K)) return false;
+    WeightPlanes w;
+    w.qs = static_cast<int8_t*>(scratch);
+    w.sc = reinterpret_cast<__half*>(static_cast<int8_t*>(scratch) + qs_bytes);
+    w.N = N;
+    w.K = K;
+    return gemm_common(w_q8_blocks, 0, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1, 0, allow_splitk,
+                       &w);
 }
 
 bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,

@@ -139,6 +139,9 @@ extern SplitKScratch g_imma_splitk;
 
 [[nodiscard]] bool imma_stream_capturing(cudaStream_t stream);
 [[nodiscard]] bool imma_ensure_weight(const void* src, int N, int K, cudaStream_t stream, bool capturing);
+// Per-call Q8_0 split into caller memory (no cache, no budget): w.qs / w.sc must hold
+// imma_q8_plane_bytes(N, K).
+void imma_split_q8_transient(const void* src, const WeightPlanes& w, cudaStream_t stream);
 [[nodiscard]] bool imma_ensure_act(int M, int K, bool capturing);
 [[nodiscard]] bool imma_ensure_splitk(size_t floats, bool capturing);
 void imma_quantize_act(const __half* x, int M, int K, cudaStream_t stream);

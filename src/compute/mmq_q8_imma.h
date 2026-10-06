@@ -29,6 +29,13 @@ namespace imp {
 [[nodiscard]] bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
                       cudaStream_t stream, float beta = 0.0f, bool allow_splitk = true);
 
+// Dense Q8_0 without a cached plane (#2468): splits the 34-B blocks into `scratch` per call
+// (imma_q8_plane_bytes(N, K) = 1.125 B per weight, under the 2-B FP16 dequant buffer), then the
+// plane kernel. Same declines as mmq_q8_imma_gemm, plus a short scratch.
+[[nodiscard]] bool mmq_q8_imma_gemm_scratch(const void* w_q8_blocks, void* scratch, size_t scratch_bytes,
+                                            const __half* x_f16, __half* out_f16, int M, int N, int K,
+                                            cudaStream_t stream, float beta = 0.0f, bool allow_splitk = true);
+
 // Dense Q4_K (new stack — distinct from the retired 2026-05 64x32 q4k_imma
 // kernel): same contract; K % 256 == 0 (Q4_K super-block).
 [[nodiscard]] bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
