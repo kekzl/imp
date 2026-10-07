@@ -29,6 +29,35 @@ __device__ __forceinline__ void q4k_scale_min(int j, const uint8_t* q, uint32_t&
     }
 }
 
+// Header -> (alpha, beta) per (col, kb) of K-step ks, one thread per entry.
+__device__ __forceinline__ void q4k_header_pass(int tid, int ks, const uint8_t (*sBh)[16],
+                                                __half2 (*sBab)[kQ4kSub]) {
+    const int j0 = (kQ4kSub * ks) & 7;  // first sub-block within the super-block
+#pragma unroll
+    for (int i = tid; i < kBN * kQ4kSub; i += kThreads) {
+        const int row = i >> 2;
+        const int kb = i & 3;
+        const uint8_t* h = &sBh[row][0];
+        __half d_h, dmin_h;
+        memcpy(&d_h, h, 2);
+        memcpy(&dmin_h, h + 2, 2);
+        uint32_t sc, mn;
+        q4k_scale_min(j0 + kb, h + 4, sc, mn);
+        const float a = __half2float(d_h) * static_cast<float>(sc);
+        const float b = 8.0f * a - __half2float(dmin_h) * static_cast<float>(mn);
+        sBab[row][kb] = __floats2half2_rn(a, b);
+    }
+}
+
+// Four 8x8 b16 tiles (8 rows x 16 B each); lane l addresses row (l & 7) of tile l >> 3.
+__device__ __forceinline__ void ldmatrix_x4(uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3,
+                                            const void* smem) {
+    const uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3)
+                 : "r"(s));
+}
+
 template <int BM>
 __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict__ A,
                                                const __half* __restrict__ Asc, const float* __restrict__ Ars,
@@ -85,6 +114,7 @@ __global__ void __launch_bounds__(kThreads)
     constexpr int kTileN = kBN / kWN;
     constexpr int kMF = kTileM / 16;
     constexpr int kNF = kTileN / 8;
+    constexpr bool kHoistB = kMF == 1;  // B fragments of all nf loaded once per nibble group
 
     int rows = M;
     size_t row_off = 0;
@@ -157,76 +187,76 @@ __global__ void __launch_bounds__(kThreads)
         }
         __syncthreads();
 
-        // header → (α, β) cooperative pass: one thread per (col, kb)
-        {
-            const int j0 = (kQ4kSub * ks) & 7;  // first sub-block within the super-block
-#pragma unroll
-            for (int i = tid; i < kBN * kQ4kSub; i += kThreads) {
-                const int row = i >> 2;
-                const int kb = i & 3;
-                const uint8_t* h = &sBh[stage][row][0];
-                __half d_h, dmin_h;
-                memcpy(&d_h, h, 2);
-                memcpy(&dmin_h, h + 2, 2);
-                uint32_t sc, mn;
-                q4k_scale_min(j0 + kb, h + 4, sc, mn);
-                const float a = __half2float(d_h) * static_cast<float>(sc);
-                const float b =
-                    8.0f * a - __half2float(dmin_h) * static_cast<float>(mn);
-                sBab[stage][row][kb] = __floats2half2_rn(a, b);
-            }
-        }
+        q4k_header_pass(tid, ks, sBh[stage], sBab[stage]);
         __syncthreads();
 
-#pragma unroll 2
-        for (int kb = 0; kb < kQ4kSub; ++kb) {
-            const int kc = kb * 32;
-            const int qoff = (kb >> 1) * 32;  // nibble group of this sub-block
-            const uint32_t shift = (kb & 1) * 4;
+#pragma unroll 1
+        for (int g = 0; g < kQ4kSub / 2; ++g) {  // nibble group: sub-blocks 2g (low) and 2g + 1 (high)
+            // B: one ldmatrix.x4 = raw words (k 0-15, k 16-31) of two n-fragments
+            uint32_t raw[kNF][2];
+            if constexpr (kHoistB) {
 #pragma unroll
-            for (int mf = 0; mf < kMF; ++mf) {
-                const int arow_lo = warp_m * kTileM + mf * 16 + rl;
-                const int arow_hi = arow_lo + 8;
-                const int acol = kc + cl * 4;
-                uint32_t a0 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol]);
-                uint32_t a1 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_hi][acol]);
-                uint32_t a2 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol + 16]);
-                uint32_t a3 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_hi][acol + 16]);
-                const float da_lo = __half2float(sAsc[stage][arow_lo][kb]);
-                const float da_hi = __half2float(sAsc[stage][arow_hi][kb]);
-                const float rs_lo = sArs[stage][arow_lo][kb];
-                const float rs_hi = sArs[stage][arow_hi][kb];
+                for (int nf = 0; nf < kNF; nf += 2) {
+                    const int m = lane >> 3;
+                    const int col = warp_n * kTileN + nf * 8 + (lane & 7) + (m >> 1) * 8;
+                    ldmatrix_x4(raw[nf][0], raw[nf][1], raw[nf + 1][0], raw[nf + 1][1],
+                                &sBq[stage][col][g * 32 + (m & 1) * 16]);
+                }
+            }
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int kb = 2 * g + h;
+                const uint32_t shift = h * 4;
+#pragma unroll
+                for (int mf = 0; mf < kMF; ++mf) {
+                    const int arow_lo = warp_m * kTileM + mf * 16 + rl;
+                    const int arow_hi = arow_lo + 8;
+                    // A: one ldmatrix.x4 = (rows 0-7, 8-15) x (k 0-15, 16-31) of the 16 x 32 fragment
+                    uint32_t a0, a1, a2, a3;
+                    {
+                        const int m = lane >> 3;
+                        const int row = warp_m * kTileM + mf * 16 + (lane & 7) + (m & 1) * 8;
+                        ldmatrix_x4(a0, a1, a2, a3, &sA[stage][row][kb * 32 + (m >> 1) * 16]);
+                    }
+                    const float da_lo = __half2float(sAsc[stage][arow_lo][kb]);
+                    const float da_hi = __half2float(sAsc[stage][arow_hi][kb]);
+                    const float rs_lo = sArs[stage][arow_lo][kb];
+                    const float rs_hi = sArs[stage][arow_hi][kb];
 
 #pragma unroll
-                for (int nf = 0; nf < kNF; ++nf) {
-                    const int bcol = warp_n * kTileN + nf * 8 + rl;
-                    const uint32_t raw0 = *reinterpret_cast<const uint32_t*>(
-                        &sBq[stage][bcol][static_cast<ptrdiff_t>(qoff + cl * 4)]);
-                    const uint32_t raw1 = *reinterpret_cast<const uint32_t*>(
-                        &sBq[stage][bcol][qoff + cl * 4 + 16]);
-                    const uint32_t b0 = __vsub4((raw0 >> shift) & 0x0F0F0F0Fu, 0x08080808u);
-                    const uint32_t b1 = __vsub4((raw1 >> shift) & 0x0F0F0F0Fu, 0x08080808u);
+                    for (int nf = 0; nf < kNF; ++nf) {
+                        if constexpr (!kHoistB) {
+                            const int bcol = warp_n * kTileN + nf * 8 +
+                                             rl;  // BM=128: scalar (hoisted = 254 regs)
+                            raw[nf][0] = *reinterpret_cast<const uint32_t*>(
+                                &sBq[stage][bcol][g * 32 + cl * 4]);
+                            raw[nf][1] = *reinterpret_cast<const uint32_t*>(
+                                &sBq[stage][bcol][g * 32 + cl * 4 + 16]);
+                        }
+                        const uint32_t b0 = __vsub4((raw[nf][0] >> shift) & 0x0F0F0F0Fu, 0x08080808u);
+                        const uint32_t b1 = __vsub4((raw[nf][1] >> shift) & 0x0F0F0F0Fu, 0x08080808u);
 
-                    int32_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+                        int32_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
 #if __CUDA_ARCH__ >= 800
-                    asm volatile(
-                        "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
-                        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-                        : "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3)
-                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(0), "r"(0),
-                          "r"(0), "r"(0));
+                        asm volatile(
+                            "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+                            "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+                            : "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3)
+                            : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(0), "r"(0), "r"(0),
+                              "r"(0));
 #endif
-                    const int ncol_lo = warp_n * kTileN + nf * 8 + cl * 2;
-                    const __half2 ab_lo = sBab[stage][ncol_lo][kb];
-                    const __half2 ab_hi = sBab[stage][ncol_lo + 1][kb];
-                    const float al = __half2float(__low2half(ab_lo));
-                    const float bl = __half2float(__high2half(ab_lo));
-                    const float ah = __half2float(__low2half(ab_hi));
-                    const float bh = __half2float(__high2half(ab_hi));
-                    acc[mf][nf][0] += da_lo * fmaf(al, static_cast<float>(c0), bl * rs_lo);
-                    acc[mf][nf][1] += da_lo * fmaf(ah, static_cast<float>(c1), bh * rs_lo);
-                    acc[mf][nf][2] += da_hi * fmaf(al, static_cast<float>(c2), bl * rs_hi);
-                    acc[mf][nf][3] += da_hi * fmaf(ah, static_cast<float>(c3), bh * rs_hi);
+                        const int ncol_lo = warp_n * kTileN + nf * 8 + cl * 2;
+                        const __half2 ab_lo = sBab[stage][ncol_lo][kb];
+                        const __half2 ab_hi = sBab[stage][ncol_lo + 1][kb];
+                        const float al = __half2float(__low2half(ab_lo));
+                        const float bl = __half2float(__high2half(ab_lo));
+                        const float ah = __half2float(__low2half(ab_hi));
+                        const float bh = __half2float(__high2half(ab_hi));
+                        acc[mf][nf][0] += da_lo * fmaf(al, static_cast<float>(c0), bl * rs_lo);
+                        acc[mf][nf][1] += da_lo * fmaf(ah, static_cast<float>(c1), bh * rs_lo);
+                        acc[mf][nf][2] += da_hi * fmaf(al, static_cast<float>(c2), bl * rs_hi);
+                        acc[mf][nf][3] += da_hi * fmaf(ah, static_cast<float>(c3), bh * rs_hi);
+                    }
                 }
             }
         }
