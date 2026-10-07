@@ -2,6 +2,8 @@
 // chunk continuation (q_offset > 0), and the declines the executor relies on.
 
 #include "compute/attention_ra2.h"
+#include "compute/ra2/ra2.cuh"
+#include "exec/workspace_sizes.h"
 #include "scoped_engine_arena.h"
 
 #include <cuda_fp16.h>
@@ -124,6 +126,19 @@ TEST(Ra2PrefillTest, MatchesReference_Hd256) { expect_close({320, 320, 8, 2, 256
 
 // Chunk continuation: Q rows start at position 512 of a 712-token context (FA2's q_offset contract).
 TEST(Ra2PrefillTest, ChunkContinuation) { expect_close({200, 712, 8, 2, 128}); }
+
+// The T2 plan (exec_ra2_workspace_bytes, CPU lane) must equal what the kernel carves.
+TEST(Ra2PrefillTest, PlannedWorkspaceMatchesTheCarve) {
+    const int shapes[][5] = {{320, 320, 8, 2, 64},
+                             {200, 712, 8, 2, 128},
+                             {4096, 131072, 32, 8, 128},
+                             {4096, 32768, 16, 2, 256}};
+    for (const auto& c : shapes) {
+        const ra2::Problem p{1, c[0], c[1], c[2], c[3], c[4], c[1] - c[0], true, 1.f};
+        EXPECT_EQ(exec_ra2_workspace_bytes(c[0], c[1], c[2], c[3], c[4]), ra2::workspace_bytes(p))
+            << c[0] << "x" << c[1];
+    }
+}
 
 TEST(Ra2PrefillTest, DeclinesUnsupported) {
     EXPECT_FALSE(run_case({128, 128, 8, 2, 96}).accepted);   // head dim
