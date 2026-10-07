@@ -312,7 +312,7 @@ __global__ void ssm_conv1d_prefill_kernel(
 // dst_slots (batched speculative verify): window read from seq_slots[seq], written to
 // dst_slots[seq]; nullptr = in place.
 __global__ void ssm_conv1d_commit_kernel(float* __restrict__ conv_state, const half* __restrict__ x_in,
-                                         int n_tokens, int channels, int kernel_size,
+                                         int n_tokens, int channels, int kernel_size, int64_t x_pitch,
                                          const int* __restrict__ d_real_n, const int* __restrict__ seq_slots,
                                          int64_t slot_stride, const int* __restrict__ dst_slots) {
     const int ch = blockIdx.x * blockDim.x + threadIdx.x;
@@ -334,7 +334,7 @@ __global__ void ssm_conv1d_commit_kernel(float* __restrict__ conv_state, const h
     float* dst = dst_state + static_cast<int64_t>(ch) * kernel_size;
     for (int k = 0; k < kernel_size; k++) {
         const int src_t = real_n - kernel_size + k;
-        dst[k] = (src_t >= 0) ? __half2float(x_in[static_cast<int64_t>(src_t) * channels + ch])
+        dst[k] = (src_t >= 0) ? __half2float(x_in[(static_cast<int64_t>(src_t) * x_pitch) + ch])
                               : src[src_t + kernel_size];
     }
 }
@@ -342,15 +342,22 @@ __global__ void ssm_conv1d_commit_kernel(float* __restrict__ conv_state, const h
 static void launch_conv1d_commit(void* conv_state, const half* x_in, int n_tokens, int channels,
                                  int kernel_size, const int* d_real_n, const int* seq_slots,
                                  int64_t slot_stride, int n_seq, cudaStream_t stream,
-                                 const int* dst_slots = nullptr) {
+                                 const int* dst_slots = nullptr, int64_t x_pitch = 0) {
     if (!conv_state || n_tokens <= 0 || n_seq <= 0)
         return;
     constexpr int kThreads = 256;
     dim3 grid((channels + kThreads - 1) / kThreads, n_seq);
     ssm_conv1d_commit_kernel<<<grid, kThreads, 0, stream>>>(static_cast<float*>(conv_state), x_in, n_tokens,
-                                                            channels, kernel_size, d_real_n, seq_slots,
+                                                            channels, kernel_size,
+                                                            x_pitch ? x_pitch : channels, d_real_n, seq_slots,
                                                             slot_stride, dst_slots);
     IMP_CUDA_CHECK_LAUNCH();
+}
+
+void ssm_conv1d_commit(void* conv_state, const half* x_in, int64_t pitch, int n_tokens, int channels,
+                       int conv_kernel, const int* d_real_n, cudaStream_t stream) {
+    launch_conv1d_commit(conv_state, x_in, n_tokens, channels, conv_kernel, d_real_n, nullptr, 0, 1, stream,
+                         nullptr, pitch);
 }
 
 void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weight, const Tensor& bias,

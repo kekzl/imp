@@ -38,6 +38,60 @@ static inline int get_ssm_layer(const std::vector<int>& ssm_layer_map, int layer
     return ssm_layer_map[layer];
 }
 
+// Prefill front end in one launch: conv1d + SiLU + x/B/C split straight from the projection
+// rows into the scan's planes (x -> x_out, B/C -> bc_out); replaces 4 copies and the SiLU.
+// Returns false when the separate kernels must run; xBC is then copied out to xbc_in.
+// The speculative conv snapshot keeps the separate kernels.
+static bool ssm_prefill_front_fused(const InferenceState& state, void* conv_st, bool fp16,
+                                    const half* xbc_src, int total_dim, const Tensor& w, const Tensor& b,
+                                    half* x_out, half* bc_out, void* xbc_in, size_t es, int n, int inner,
+                                    int bc, int conv_kernel, cudaStream_t stream) {
+    const int conv_channels = inner + (2 * bc);
+    const bool snap = state.spec_snap_slab && state.spec_prev_slab;
+    if (conv_st && fp16 && state.is_prefill && !snap &&
+        ssm_conv1d_prefill_silu_split(conv_st, xbc_src, total_dim, w, b, x_out, bc_out,
+                                      bc_out + (static_cast<size_t>(n) * bc), n, inner, bc, conv_kernel,
+                                      stream)) {
+        ssm_conv1d_commit(conv_st, xbc_src, total_dim, n, conv_channels, conv_kernel, state.d_chunk_len,
+                          stream);
+        return true;
+    }
+    IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(xbc_in, static_cast<size_t>(conv_channels) * es, xbc_src,
+                                         static_cast<size_t>(total_dim) * es,
+                                         static_cast<size_t>(conv_channels) * es, n, cudaMemcpyDeviceToDevice,
+                                         stream));
+    return false;
+}
+
+// Separate conv1d (prefill or decode) + SiLU over the full xBC output.
+static void ssm_conv_silu_separate(const InferenceState& state, void* conv_st, int ssm_idx,
+                                   const Tensor& xBC_in, Tensor& xBC_out, const Tensor& w, const Tensor& b,
+                                   int conv_kernel, cudaStream_t stream) {
+    if (conv_st) {
+        if (state.is_prefill) {
+            // Speculative verify: writes the conv window as of d_snap_n rows into the
+            // snapshot slab too, so a fully rejected draft can adopt state after the
+            // chunk's first row instead of re-forwarding. Same wiring the GDN path has
+            // had since #847; without it the slab stays uninitialised and engine_spec_ngram.cpp's matched==0
+            // fast path commits garbage.
+            void* conv_snap = (state.spec_snap_slab && state.ssm_state && ssm_idx >= 0)
+                                  ? state.ssm_state->conv_state_in(state.spec_snap_slab, ssm_idx)
+                                  : nullptr;
+            const void* conv_prev = (conv_snap && state.spec_prev_slab)
+                                        ? state.ssm_state->conv_state_in(state.spec_prev_slab, ssm_idx)
+                                        : nullptr;
+            ssm_conv1d_prefill(conv_st, xBC_in, w, b, xBC_out, conv_kernel, stream, state.d_chunk_len,
+                               conv_prev ? conv_snap : nullptr, conv_prev ? state.d_snap_n : nullptr,
+                               conv_prev);
+        } else {
+            ssm_conv1d_decode(conv_st, xBC_in, w, b, xBC_out, conv_kernel, stream);
+        }
+    }
+    // Mamba2 applies SiLU to the ENTIRE conv1d output (x, B and C), as
+    // causal_conv1d_fn(..., activation="silu").
+    silu_inplace(xBC_out, stream);
+}
+
 // ---------------------------------------------------------------------------
 // SSM (Mamba2) sub-pass for one layer
 // ---------------------------------------------------------------------------
@@ -116,11 +170,8 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
                                              src_pitch, static_cast<size_t>(inner) * es, n,
                                              cudaMemcpyDeviceToDevice, stream));
 
+        // xBC is copied out in step 4, unless the fused front end reads it from proj.
         xBC_in = view_tokens(ssm_xBC_buf_, n);
-        char* xBC_src = static_cast<char*>(proj.data) + static_cast<size_t>(inner) * es;
-        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(xBC_in.data, static_cast<size_t>(conv_channels) * es, xBC_src,
-                                             src_pitch, static_cast<size_t>(conv_channels) * es, n,
-                                             cudaMemcpyDeviceToDevice, stream));
 
         dt_buf = view_tokens(ssm_dt_buf_, n);
         char* dt_src = static_cast<char*>(proj.data) + static_cast<size_t>(inner + conv_channels) * es;
@@ -148,36 +199,22 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
                                state.ssm_tap_layer_stride * ssm_idx * 2,
                            conv_channels, conv_kernel, state.ssm_tap_slots, state.ssm_tap_n, stream);
 
-    if (conv_st) {
-        if (state.is_prefill) {
-            // Speculative verify: writes the conv window as of d_snap_n rows into the
-            // snapshot slab too, so a fully rejected draft can adopt state after the
-            // chunk's first row instead of re-forwarding. Same wiring the GDN path has
-            // had since #847; without it the slab stays uninitialised and engine_spec_ngram.cpp's matched==0
-            // fast path commits garbage.
-            void* conv_snap = (state.spec_snap_slab && state.ssm_state && ssm_idx >= 0)
-                                  ? state.ssm_state->conv_state_in(state.spec_snap_slab, ssm_idx)
-                                  : nullptr;
-            const void* conv_prev = (conv_snap && state.spec_prev_slab)
-                                        ? state.ssm_state->conv_state_in(state.spec_prev_slab, ssm_idx)
-                                        : nullptr;
-            ssm_conv1d_prefill(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b, xBC_out, conv_kernel,
-                               stream, state.d_chunk_len, conv_prev ? conv_snap : nullptr,
-                               conv_prev ? state.d_snap_n : nullptr, conv_prev);
-        } else {
-            ssm_conv1d_decode(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b, xBC_out, conv_kernel,
-                              stream);
-        }
-    }
+    const int BC_size = n_groups * ssize;
+    Tensor y_buf = view_tokens(ssm_y_buf_, n);
 
-    // 5. SiLU on full conv output (x, B, and C together).
-    //    Mamba2 applies SiLU to the ENTIRE conv1d output, not just x.
-    //    This matches causal_conv1d_fn(..., activation="silu").
-    silu_inplace(xBC_out, stream);
+    // 4-5. Conv1d + SiLU: one fused launch on prefill, separate kernels otherwise.
+    const bool front_fused =
+        !views_into_proj &&
+        ssm_prefill_front_fused(state, conv_st, compute_dtype_ == QType::F16,
+                                reinterpret_cast<const half*>(static_cast<char*>(proj.data) + (inner * es)),
+                                total_dim, ly.ssm_conv1d_w, ly.ssm_conv1d_b, static_cast<half*>(y_buf.data),
+                                static_cast<half*>(xBC_in.data), xBC_in.data, es, n, inner, BC_size,
+                                conv_kernel, stream);
+    if (!front_fused)
+        ssm_conv_silu_separate(state, conv_st, ssm_idx, xBC_in, xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
+                               conv_kernel, stream);
 
     // 6-7. Split conv output into x/B/C per token, run SSM scan.
-    int BC_size = n_groups * ssize;
-    Tensor y_buf = view_tokens(ssm_y_buf_, n);
 
     void* h_st = (state.ssm_state && ssm_idx >= 0) ? state.ssm_state->h_state(state.ssm_seq_id, ssm_idx)
                                                    : nullptr;
@@ -213,33 +250,14 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
                             static_cast<const half*>(z_buf.data), n_heads, head_dim_ssm, ssize, n_groups,
                             h_dtype, stream);
         } else {
-            // Prefill de-interleaves x/B/C from xBC_out into contiguous buffers before
-            // the single fused scan launch: x extracted into ssm_y_buf_ (overwritten
-            // by scan output after), B into xBC_in, C into the second half of xBC_in
-            // (ssm_xBC_buf_ already sized [n,conv_channels], reused since conv1d is done).
-
-            // x: extract [n, inner] from xBC_out with src_pitch=conv_channels*es
-            char* x_contig = static_cast<char*>(y_buf.data);  // temp, overwritten by scan
-            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(x_contig, static_cast<size_t>(inner) * es, xBC_out.data,
-                                                 static_cast<size_t>(conv_channels) * es,
-                                                 static_cast<size_t>(inner) * es, n, cudaMemcpyDeviceToDevice,
-                                                 stream));
-
-            // B: extract [n, BC_size] from offset inner in xBC_out
-            char* B_contig = static_cast<char*>(xBC_in.data);  // conv1d done, safe to reuse
-            char* B_src = static_cast<char*>(xBC_out.data) + static_cast<size_t>(inner) * es;
-            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(B_contig, static_cast<size_t>(BC_size) * es, B_src,
-                                                 static_cast<size_t>(conv_channels) * es,
-                                                 static_cast<size_t>(BC_size) * es, n,
-                                                 cudaMemcpyDeviceToDevice, stream));
-
-            // C: extract [n, BC_size] from offset inner+BC_size in xBC_out
-            char* C_contig = B_contig + static_cast<size_t>(n) * BC_size * es;
-            char* C_src = static_cast<char*>(xBC_out.data) + static_cast<size_t>(inner + BC_size) * es;
-            IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(C_contig, static_cast<size_t>(BC_size) * es, C_src,
-                                                 static_cast<size_t>(conv_channels) * es,
-                                                 static_cast<size_t>(BC_size) * es, n,
-                                                 cudaMemcpyDeviceToDevice, stream));
+            // Prefill: the scan takes contiguous planes, x in ssm_y_buf_ (overwritten by the
+            // scan output), B then C in ssm_xBC_buf_ (conv1d is done with it). The fused front
+            // end wrote them already; otherwise de-interleave xBC_out.
+            char* x_contig = static_cast<char*>(y_buf.data);
+            char* B_contig = static_cast<char*>(xBC_in.data);
+            char* C_contig = B_contig + (static_cast<size_t>(n) * BC_size * es);
+            if (!front_fused)
+                ssm_deinterleave_xbc(xBC_out, x_contig, B_contig, n, inner, BC_size, es, stream);
 
             // Build tensors for the fused scan
             int64_t x_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
