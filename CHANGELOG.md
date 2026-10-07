@@ -7,6 +7,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Security
 - cpp-httplib v0.58.0 -> v0.59.0 (#2615): an invalid `Content-Length` (`42, 42`, `+42`) answers 400 and closes the connection instead of parsing the body as the next request; control characters in the request-target answer 400 (RFC 9112 §3.2, §6.3).
 
+### Added
+- Host-resident NVFP4 experts that do not fit pinned host RAM run from a host expert tier: pinned LRU of expert units, parallel O_DIRECT pread, CUDA graphs on (`moe.host_expert_pool_mib`, #2621). Flash-Next-NVFP4 at `--memory=40g`: tg512 3.1..3.9 -> 37.4..38.7 tok/s, 4020-token prefill 67.7..69.8 -> 8.9..9.9 s.
+
 ### Fixed
 - `gemm_init()` re-takes the cuBLASLt workspace and bench scratch after an arena reset or close; a stale workspace aliased the new bench scratch and hung `test-quant` at `CutlassNvfp4StreamKTest.CublasLtMatchesCutlass` (> 45 min, now 258 tests in 80 s) (#2611).
 

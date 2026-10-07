@@ -94,3 +94,4 @@ imp::bench_separate	sm_120a	29	8	0
 imp::bench_tma_v_load	sm_120a	26	8	0
 imp::bench_fused	sm_120a	25	8	0
 imp::dequant_q3k_kernel	sm_120a	24	16	0
+imp::(anonymous namespace)::expert_tier_wait_kernel	sm_120a	24	8	0

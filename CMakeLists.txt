@@ -171,6 +171,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/engine_arena.cpp
     src/memory/graph_slots.cpp
     src/memory/host_task_pool.cpp
+    src/memory/host_expert_tier.cpp
     src/memory/host_pinned.cpp
     src/memory/library_reserve_cache.cpp
     src/memory/block_pool.cpp
@@ -506,6 +507,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_forward_moe_legacy.cpp
     src/exec/expert_cache.cu
     src/exec/expert_cache_device.cu
+    src/exec/expert_cache_device_tier.cpp
     src/exec/executor_qsa.cpp
     src/compute/qsa_indexer.cu
     src/exec/weight_handle.cpp
@@ -1006,6 +1008,8 @@ if(IMP_BUILD_TESTS)
         tests/test_host_pinned.cpp
         # HostTaskPool: load-time worker threads, every task runs before wait() returns.
         tests/test_host_task_pool.cpp
+        # HostExpertTier: expert-unit LRU filled by pread from the mapped checkpoint (#2621).
+        tests/test_host_expert_tier.cpp
         # Arena sizing arithmetic (A7 step 4b). Pure and Model-free via ExecShape,
         # so the numbers the T2 arena is reserved from are pinned in the lane CI
         # actually runs.

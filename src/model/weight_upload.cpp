@@ -64,6 +64,36 @@ static bool host_pin_ram_available(size_t bytes) {
 // cache needs a device view on every host-resident layer or it serves none of them.
 static bool g_pin_host_experts_fits = true;
 
+// False when the host-resident experts stay unpinned: host RAM short, or moe.host_expert_pool_mib
+// caps the host expert tier below them. Either way the tier serves them (#2621).
+static bool host_experts_pinnable(const std::vector<size_t>& layer_expert_bytes,
+                                  const std::vector<bool>& experts_upload_layer, int n_layers) {
+    size_t host_expert_bytes = 0;
+    for (int i = 0; i < n_layers; ++i)
+        if (!experts_upload_layer[i])
+            host_expert_bytes += layer_expert_bytes[i];
+    if (host_expert_bytes == 0)
+        return true;
+    const int pool_mib = process_diag_moe_host_expert_pool_mib();
+    if (pool_mib > 0 && (static_cast<size_t>(pool_mib) << 20) < host_expert_bytes) {
+        IMP_LOG_INFO(
+            "Host NVFP4 experts: not pinning %.2f GiB, moe.host_expert_pool_mib=%d caps the "
+            "host expert tier below them",
+            host_expert_bytes / (1024.0 * 1024.0 * 1024.0), pool_mib);
+        return false;
+    }
+    if (host_pin_ram_available(host_expert_bytes))
+        return true;
+    IMP_LOG_WARN(
+        "Host NVFP4 experts: not pinning %.2f GiB, host RAM available is %.2f GiB (6 GiB "
+        "headroom kept) - the host expert tier (moe.host_expert_pool_mib) pins what fits "
+        "and reads the rest from the checkpoint. Free host RAM or raise the container "
+        "memory limit.",
+        host_expert_bytes / (1024.0 * 1024.0 * 1024.0),
+        host_mem_available_bytes() / (1024.0 * 1024.0 * 1024.0));
+    return false;
+}
+
 // Allocations run through malloc_async_in_scope: weights Phase 4b may free (GDN projections)
 // are uploaded inside a ReleasePoolScope so every freed byte reaches the driver.
 static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t stream = nullptr) {
@@ -1481,23 +1511,8 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
     // This only reports; the refusal lives in GraphExecutor::verify_host_expert_placement(),
     // once both the promotion and the real cache exist.
     // One decision for the whole model, before the first projection is pinned.
-    g_pin_host_experts_fits = true;
-    if (ctx.is_nvfp4_prequant) {
-        size_t host_expert_bytes = 0;
-        for (int i = 0; i < n_layers; ++i)
-            if (!experts_upload_layer[i])
-                host_expert_bytes += layer_expert_bytes[i];
-        if (host_expert_bytes > 0 && !host_pin_ram_available(host_expert_bytes)) {
-            g_pin_host_experts_fits = false;
-            IMP_LOG_WARN(
-                "Host NVFP4 experts: not pinning %.2f GiB, host RAM available is %.2f GiB (6 GiB "
-                "headroom kept) — decode serves from the host LRU path, measured 2.5x slower. "
-                "Free host RAM or raise the container memory limit.",
-                host_expert_bytes / (1024.0 * 1024.0 * 1024.0),
-                host_mem_available_bytes() / (1024.0 * 1024.0 * 1024.0));
-        }
-    }
-
+    g_pin_host_experts_fits = !ctx.is_nvfp4_prequant ||
+                              host_experts_pinnable(layer_expert_bytes, experts_upload_layer, n_layers);
     if (expert_placement_needs_host_path(ctx.is_nvfp4_prequant, layer_expert_bytes,
                                          experts_upload_layer)) {
         const int host_layers = expert_placement_host_layers(layer_expert_bytes, experts_upload_layer);

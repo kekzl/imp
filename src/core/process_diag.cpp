@@ -92,6 +92,7 @@ void process_diag_set_verify_row_parity(bool v) { slot().verify_row_parity = v; 
 int process_diag_moe_expert_overhead_pct() { return slot().moe_expert_overhead_pct; }
 int process_diag_moe_force_host_experts() { return slot().moe_force_host_experts; }
 bool process_diag_moe_pin_host_experts() { return slot().moe_pin_host_experts; }
+int process_diag_moe_host_expert_pool_mib() { return slot().moe_host_expert_pool_mib; }
 const std::string& process_diag_gdn_layout_override() { return slot().gdn_layout_override; }
 
 }  // namespace imp
