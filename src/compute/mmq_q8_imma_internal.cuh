@@ -93,6 +93,19 @@ constexpr size_t q5k_smem_bytes(int BM) {
             static_cast<size_t>(BM) * 2 * sizeof(float) + static_cast<size_t>(kBN) * 2 * sizeof(__half2));
 }
 
+// Q4_K raw kernel: 128-K step (4 sub-blocks, 3 barriers per 16 MMAs per warp, #2441).
+constexpr int kQ4kBK = 128;
+constexpr int kQ4kSub = kQ4kBK / 32;
+constexpr int kQ4kRow = kQ4kBK + kPad;  // 144-B stride: rl-lane A reads conflict-free
+constexpr int kQ4kQRow = 64 + 16;       // two 32-B nibble groups + pad
+constexpr size_t q4k_smem_bytes(int BM) {
+    return static_cast<size_t>(kStages) *
+           (static_cast<size_t>(BM) * kQ4kRow + static_cast<size_t>(kBN) * kQ4kQRow +
+            static_cast<size_t>(kBN) * 16 + static_cast<size_t>(BM) * kQ4kSub * sizeof(float) +
+            static_cast<size_t>(kBN) * kQ4kSub * sizeof(__half2) +
+            static_cast<size_t>(BM) * kQ4kSub * sizeof(__half));
+}
+
 constexpr size_t q6k_smem_bytes(int BM) {
     return static_cast<size_t>(kStages) *
            (static_cast<size_t>(BM) * kRow + static_cast<size_t>(kBN) * kQlRow +

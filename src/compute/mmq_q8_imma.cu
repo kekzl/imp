@@ -327,6 +327,27 @@ __global__ void mmq_splitk_finalize_kernel(const float* __restrict__ split_out, 
 using RawImmaKernel = void (*)(const int8_t*, const __half*, const float*, const uint8_t*, __half*, int, int,
                                int, const int32_t*, size_t);
 
+struct RawImmaSet {
+    RawImmaKernel k32, k128b, k128;
+    size_t smem32, smem128;
+};
+
+// Kernel triple + dynamic smem per raw qkind (1 = Q4_K, 3 = Q5_1, 4 = Q5_K); false = smem opt-in failed.
+bool raw_imma_set(int qkind, RawImmaSet& s) {
+    static bool smem_set4 = false, smem_set5 = false;
+    if (qkind == 3) {
+        s = {mmq_imma_q51_raw_kernel<32, false>, mmq_imma_q51_raw_kernel<128, true>,
+             mmq_imma_q51_raw_kernel<128, false>, 0, 0};
+        return true;
+    }
+    const bool q5k = qkind == 4;
+    s = q5k ? RawImmaSet{mmq_imma_q5k_raw_kernel<32, false>, mmq_imma_q5k_raw_kernel<128, true>,
+                         mmq_imma_q5k_raw_kernel<128, false>, q5k_smem_bytes(32), q5k_smem_bytes(128)}
+            : RawImmaSet{mmq_imma_q4k_raw_kernel<32, false>, mmq_imma_q4k_raw_kernel<128, true>,
+                         mmq_imma_q4k_raw_kernel<128, false>, q4k_smem_bytes(32), q4k_smem_bytes(128)};
+    return ensure_raw_smem(q5k ? smem_set5 : smem_set4, s.k32, s.k128b, s.k128, s.smem32, s.smem128);
+}
+
 // Q8_0 plane launch, BM=128, beta 0. Wave tail (#2416): a dense last wave under half full (M=2048 q_o: 512
 // tiles = 3 x 170 + 2) runs its trailing row-blocks as BM=32 tiles; per output the k order is unchanged, so
 // rows are bit-identical at any M (#2152). q_o M=2048: 294.2..298.6 -> 262.0..263.2 us.
@@ -383,29 +404,15 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
     if (qkind == 1 || qkind == 3 || qkind == 4) {
         // Raw-read kernels (Q4_K, Q5_1, Q5_K): zero extra weight VRAM, one argument list.
         const size_t w_stride_blocks = static_cast<size_t>(N) * (K / (qkind == 3 ? 32 : 256));
-        RawImmaKernel k32 = mmq_imma_q4k_raw_kernel<32, false>, k128b = mmq_imma_q4k_raw_kernel<128, true>,
-                      k128 = mmq_imma_q4k_raw_kernel<128, false>;
-        size_t smem32 = 0, smem128 = 0;
-        if (qkind == 3) {
-            k32 = mmq_imma_q51_raw_kernel<32, false>;
-            k128b = mmq_imma_q51_raw_kernel<128, true>;
-            k128 = mmq_imma_q51_raw_kernel<128, false>;
-        } else if (qkind == 4) {
-            k32 = mmq_imma_q5k_raw_kernel<32, false>;
-            k128b = mmq_imma_q5k_raw_kernel<128, true>;
-            k128 = mmq_imma_q5k_raw_kernel<128, false>;
-            smem32 = q5k_smem_bytes(32);
-            smem128 = q5k_smem_bytes(128);
-            static bool smem_set5 = false;
-            if (!ensure_raw_smem(smem_set5, k32, k128b, k128, smem32, smem128))
-                return false;
-        }
-        RawImmaKernel k = small_m ? k32 : (beta == 1.0f ? k128b : k128);
-        k<<<grid, kThreads, small_m ? smem32 : smem128, stream>>>(g_imma_act.xs8, g_imma_act.xscale,
-                                                                  g_imma_act.xrowsum,
-                                                                  static_cast<const uint8_t*>(w_blocks),
-                                                                  out_f16, M, N, K, d_offsets,
-                                                                  w_stride_blocks);
+        RawImmaSet s{};
+        if (!raw_imma_set(qkind, s))
+            return false;
+        RawImmaKernel k = small_m ? s.k32 : (beta == 1.0f ? s.k128b : s.k128);
+        k<<<grid, kThreads, small_m ? s.smem32 : s.smem128, stream>>>(g_imma_act.xs8, g_imma_act.xscale,
+                                                                      g_imma_act.xrowsum,
+                                                                      static_cast<const uint8_t*>(w_blocks),
+                                                                      out_f16, M, N, K, d_offsets,
+                                                                      w_stride_blocks);
         IMP_CUDA_CHECK_LAUNCH();
         return true;
     }
