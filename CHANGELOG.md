@@ -11,6 +11,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `gemm_init()` re-takes the cuBLASLt workspace and bench scratch after an arena reset or close; a stale workspace aliased the new bench scratch and hung `test-quant` at `CutlassNvfp4StreamKTest.CublasLtMatchesCutlass` (> 45 min, now 258 tests in 80 s) (#2611).
 
 ### Changed
+- Batched decode below the sparse-attention engage length skips the two block-selection kernels that only copied the block table, output unchanged (#2414): Qwen3-14B-NVFP4, 32 streams, 4133.8..4225.4 -> 4350.0..4374.3 tok/s, layer 159.3 -> 152.9 us.
 - NVFP4 paged decode runs split-K on m16n8k16 tensor cores (`attention.paged_nvfp4_mma`, GQA 2..8, HD 128/256): one CTA per KV head runs all its Q heads (#2440). 1 x 77k, KV from DRAM: 16/2 71.4 -> 39.3 us, 24/4 111.9 -> 61.9 us; Qwen3.6-35B-A3B-NVFP4 tg128 at 8k 321.23 -> 327.40 tok/s.
 - The split-K paged decode reduce runs one CTA per 128-wide head_dim slice, summation order unchanged: 16/2 HD=256 at 128 splits 8.0 -> 5.0 us.
 - Batched decode fuses the residual add, the residual save and the next block's RMSNorm + NVFP4 quantize into one launch, bit-identical (#2414): 17 -> 13 launches per Qwen3-14B-NVFP4 layer; 32 streams 1893.0 -> 1925.9 tok/s (medians of 6 pairs).
