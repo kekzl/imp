@@ -28,7 +28,8 @@ struct Arena {
 std::vector<char> pattern(size_t n, int seed) {
     std::vector<char> v(n);
     for (size_t i = 0; i < n; ++i)
-        v[i] = static_cast<char>(seed * 131 + i * 7);
+        v[i] = static_cast<char>(
+            ((i + 1 + static_cast<uint64_t>(seed) * 1000003ull) * 0x9E3779B97F4A7C15ull) >> 56);
     return v;
 }
 
@@ -155,6 +156,39 @@ TEST(HostExpertTier, LoadsFromMappedFileAtAlignedAndUnalignedOffsets) {
     const auto s = tier.stats();
     EXPECT_EQ(s.copies, 0u);
     EXPECT_EQ(s.direct_reads + s.buffered_reads, 6u);
+    munmap(map, file_bytes);
+    unlink(path);
+}
+
+// Units of ~0.9 MiB, as on Flash-Next, at a 16-aligned and an odd file offset.
+TEST(HostExpertTier, LoadsLargeUnits) {
+    char path[] = "/tmp/imp_host_expert_tier_mc_XXXXXX";
+    const int fd = mkstemp(path);
+    ASSERT_GE(fd, 0);
+    const size_t file_bytes = 4u << 20;
+    const std::vector<char> data = pattern(file_bytes, 3);
+    ASSERT_EQ(write(fd, data.data(), file_bytes), static_cast<ssize_t>(file_bytes));
+    void* map = mmap(nullptr, file_bytes, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    ASSERT_NE(map, MAP_FAILED);
+    const char* m = static_cast<const char*>(map);
+
+    constexpr size_t pb = 900000, mb = 5000;
+    const size_t unit = HostExpertTier::unit_bytes(pb, mb);
+    Arena arena(unit * 2);
+    const size_t offs[2][2] = {{8192 + 16, 3000000}, {1500001, 3100003}};
+    HostExpertTier tier(arena.p, arena.p, arena.bytes, unit, 2, 8);
+    for (int k = 0; k < 2; ++k)
+        tier.set_source(k, {m + offs[k][0], pb, m + offs[k][1], mb});
+    HostExpertTier::UnitView v[2];
+    const int keys[] = {0, 1};
+    ASSERT_TRUE(tier.acquire(keys, 2, v));
+    for (int k = 0; k < 2; ++k) {
+        EXPECT_EQ(0, std::memcmp(v[k].packed, data.data() + offs[k][0], pb)) << "key " << k;
+        EXPECT_EQ(0, std::memcmp(v[k].ms, data.data() + offs[k][1], mb)) << "key " << k;
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(v[k].packed) % 16, 0u) << "key " << k;
+    }
+    EXPECT_EQ(tier.stats().copies, 0u);
     munmap(map, file_bytes);
     unlink(path);
 }
