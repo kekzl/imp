@@ -1088,7 +1088,8 @@ TEST(PagedF16Multitok, MatchesReferenceBothRoutes) {
     struct Shape {
         int n_heads, n_kv_heads, head_dim;
     };
-    for (const Shape sh : {Shape{32, 8, 128}, Shape{16, 8, 256}, Shape{24, 8, 128}, Shape{64, 8, 64}}) {
+    for (const Shape sh :
+         {Shape{32, 8, 128}, Shape{16, 8, 256}, Shape{24, 8, 128}, Shape{64, 8, 64}, Shape{16, 2, 512}}) {
         const float scale = 1.0f / std::sqrt((float)sh.head_dim);
         for (int force_fallback : {0, 1}) {
             process_diag_set_force_splitk_fallback(force_fallback != 0);
@@ -1149,7 +1150,7 @@ TEST(PagedF16Multitok, MatchesReferenceBothRoutes) {
 }
 
 // F16 paged decode microbench (default KV dtype for Q8_0 GGUFs / unquantized checkpoints):
-// IMP_F16_BENCH_{BATCH=32,CTX=1100,HEADS=32,KV_HEADS=8}, HD=128. Split-K scratch registered
+// IMP_F16_BENCH_{BATCH=32,CTX=1100,HEADS=32,KV_HEADS=8,HD=128}. Split-K scratch registered
 // like the engine. Timing only.
 TEST(PagedF16Decode, ServingShapeMicrobench) {
     auto env_int = [](const char* k, int d) {

@@ -2,7 +2,7 @@
 // A lane holds HEAD_DIM/32 contiguous elements, loads TOK rows straight from global before any
 // reduction; the K row is converted once and dotted against HPC Q heads. Grid: n_kv_heads x
 // (n_q_per_kv/HPC) CTAs/sequence. Softmax state is unnormalized (m,l,o), normalized once at the
-// end so the cross-warp merge is unchanged. HD=64/128/256; sliding window + StreamingLLM sentinel
+// end so the cross-warp merge is unchanged. HD=64/128/256/512; sliding window + StreamingLLM sentinel
 // as in the FP8 kernel; sink-token geometry stays on the cooperative kernel.
 // Split-K instance (batch x heads below the CTA target): walks its block share and writes one
 // (m,l,o) partial/head for the shared reduce kernel.
@@ -33,6 +33,24 @@ template <>
 struct LaneVec<8> {
     using type = uint4;
 };
+// HD=512: 16 halves per lane as two 16-byte loads.
+struct alignas(16) Uint4x2 {
+    uint4 a, b;
+};
+template <>
+struct LaneVec<16> {
+    using type = Uint4x2;
+};
+
+template <typename Vec>
+__device__ __forceinline__ Vec ldcs_lane(const Vec* p) {
+    return __ldcs(p);
+}
+template <>
+__device__ __forceinline__ Uint4x2 ldcs_lane<Uint4x2>(const Uint4x2* p) {
+    const uint4* q = reinterpret_cast<const uint4*>(p);
+    return Uint4x2{__ldcs(q), __ldcs(q + 1)};
+}
 
 template <int ELEMS>
 __device__ __forceinline__ void lane_vec_to_float(const typename LaneVec<ELEMS>::type& v, float* out) {
@@ -40,7 +58,7 @@ __device__ __forceinline__ void lane_vec_to_float(const typename LaneVec<ELEMS>:
 #pragma unroll
     for (int i = 0; i < ELEMS / 2; i++) {
         const float2 f = __half22float2(h2[i]);
-        // #2218 bounded: 2 * i < ELEMS <= 8 (LaneVec<ELEMS> defined for 2 / 4 / 8 only, :22-35).
+        // #2218 bounded: 2 * i < ELEMS <= 16 (LaneVec<ELEMS> defined for 2 / 4 / 8 / 16 only, :22-52).
         out[static_cast<ptrdiff_t>(2 * i)] = f.x;
         out[2 * i + 1] = f.y;
     }
@@ -95,7 +113,8 @@ __device__ __forceinline__ void f16_block_multitok(const half* __restrict__ K_bl
 #pragma unroll
         for (int i = 0; i < TOK; i++) {
             const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
-            kp[i] = __ldcs(reinterpret_cast<const Vec*>(K_block + static_cast<int64_t>(ti) * kv_slot_stride));
+            kp[i] = ldcs_lane(
+                reinterpret_cast<const Vec*>(K_block + static_cast<int64_t>(ti) * kv_slot_stride));
         }
         float dot[HPC][TOK];
 #pragma unroll
@@ -147,7 +166,8 @@ __device__ __forceinline__ void f16_block_multitok(const half* __restrict__ K_bl
 #pragma unroll
         for (int i = 0; i < TOK; i++) {
             const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
-            vp[i] = __ldcs(reinterpret_cast<const Vec*>(V_block + static_cast<int64_t>(ti) * kv_slot_stride));
+            vp[i] = ldcs_lane(
+                reinterpret_cast<const Vec*>(V_block + static_cast<int64_t>(ti) * kv_slot_stride));
         }
 #pragma unroll
         for (int h = 0; h < HPC; h++)
@@ -188,7 +208,8 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_f16_mult
     int n_heads, int n_kv_heads, int n_q_per_kv, int block_size, float scale, int max_num_blocks,
     int sliding_window, float softcap, const half* __restrict__ attn_sinks) {
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
-    static_assert(ELEMS == 2 || ELEMS == 4 || ELEMS == 8, "HD=64 / 128 / 256 (u32 / uint2 / uint4 per lane)");
+    static_assert(ELEMS == 2 || ELEMS == 4 || ELEMS == 8 || ELEMS == 16,
+                  "HD=64 / 128 / 256 / 512 (u32 / uint2 / uint4 / 2x uint4 per lane)");
 
     const int batch_idx = blockIdx.x;
     const int groups_per_kv = n_q_per_kv / HPC;
@@ -227,7 +248,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_f16_mult
         if (tok_start + n_tok > ctx_len)
             n_tok = ctx_len - tok_start;
         const int first_tok = (tok_start < effective_start) ? (effective_start - tok_start) : 0;
-        // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 256 (static_assert:191) = 2^20 (model_limits.h:24)
+        // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 (static_assert:209) = 2^21 (model_limits.h:24)
         f16_block_multitok<HEAD_DIM, TOK, HPC>(K_cache + (int64_t)phys_block * kv_block_stride +
                                                    static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
                                                V_cache + (int64_t)phys_block * kv_block_stride +
@@ -257,7 +278,8 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_f16_mult
     const int* __restrict__ context_lens, int n_heads, int n_kv_heads, int n_q_per_kv, int block_size,
     float scale, int max_num_blocks, int num_splits, int sliding_window, float softcap) {
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
-    static_assert(ELEMS == 2 || ELEMS == 4 || ELEMS == 8, "HD=64 / 128 / 256 (u32 / uint2 / uint4 per lane)");
+    static_assert(ELEMS == 2 || ELEMS == 4 || ELEMS == 8 || ELEMS == 16,
+                  "HD=64 / 128 / 256 / 512 (u32 / uint2 / uint4 / 2x uint4 per lane)");
 
     const int batch_idx = blockIdx.x;
     const int groups_per_kv = n_q_per_kv / HPC;
@@ -310,7 +332,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_f16_mult
         if (tok_start + n_tok > ctx_len)
             n_tok = ctx_len - tok_start;
         const int first_tok = (tok_start < effective_start) ? (effective_start - tok_start) : 0;
-        // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 256 (static_assert:260) = 2^20 (model_limits.h:24)
+        // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 (static_assert:279) = 2^21 (model_limits.h:24)
         f16_block_multitok<HEAD_DIM, TOK, HPC>(K_cache + (int64_t)phys_block * kv_block_stride +
                                                    static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
                                                V_cache + (int64_t)phys_block * kv_block_stride +
@@ -366,18 +388,20 @@ void launch_f16_splitk_multitok(const half* Q, const half* K_cache, const half* 
 }  // namespace
 
 int paged_attention_f16_multitok_heads_per_cta(int head_dim, int n_q_per_kv, int requested) {
-    if (head_dim != 64 && head_dim != 128 && head_dim != 256)
+    if (head_dim != 64 && head_dim != 128 && head_dim != 256 && head_dim != 512)
         return 0;
     if (n_q_per_kv < 1 || n_q_per_kv > 8)
         return 0;
     // Heads per CTA: the largest of 4 / 2 / 1 that divides the GQA ratio, or
-    // the caller's choice when it divides. HD=256 caps at 2 (register budget).
+    // the caller's choice when it divides. HD=256 caps at 2, HD=512 at 2 (register budget).
     int hpc = requested;
     if (hpc != 1 && hpc != 2 && hpc != 4)
         hpc = 0;
+    if (head_dim == 512 && hpc == 4)
+        hpc = 0;
     if (hpc == 0 || n_q_per_kv % hpc != 0) {
         hpc = (n_q_per_kv % 4 == 0) ? 4 : (n_q_per_kv % 2 == 0) ? 2 : 1;
-        if (head_dim == 256 && hpc > 2)
+        if (head_dim >= 256 && hpc > 2)
             hpc = 2;
     }
     return hpc;
@@ -411,6 +435,11 @@ bool paged_attention_decode_f16_multitok_launch(const half* Q, const half* K_cac
             LAUNCH_F16_MT(128, 2);
         else
             LAUNCH_F16_MT(128, 1);
+    } else if (head_dim == 512) {
+        if (hpc == 2)
+            LAUNCH_F16_MT(512, 2);
+        else
+            LAUNCH_F16_MT(512, 1);
     } else {
         if (hpc == 4)
             LAUNCH_F16_MT(256, 4);
@@ -451,6 +480,11 @@ bool paged_attention_splitk_f16_multitok_launch(const half* Q, const half* K_cac
             LAUNCH_F16_SK_MT(128, 2);
         else
             LAUNCH_F16_SK_MT(128, 1);
+    } else if (head_dim == 512) {
+        if (hpc == 2)
+            LAUNCH_F16_SK_MT(512, 2);
+        else
+            LAUNCH_F16_SK_MT(512, 1);
     } else {
         if (hpc == 4)
             LAUNCH_F16_SK_MT(256, 4);
