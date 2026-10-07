@@ -634,7 +634,7 @@ pin_host_experts     = false
 device_expert_cache  = true
 # Host expert tier (#2621): when host RAM cannot pin every host-resident NVFP4 expert, an LRU
 # of pinned expert units is filled from the checkpoint by parallel pread and feeds the device
-# expert cache (CUDA graphs stay on). 0 = host RAM available minus 6 GiB, N = cap in MiB (a cap
+# expert cache (CUDA graphs stay on). 0 = host RAM available minus max(6 GiB, 10 % of RAM), N = cap in MiB (a cap
 # below the host-resident experts skips pinning them, so the tier serves even with RAM to spare),
 # -1 = off (decode falls back to the host LRU path).
 host_expert_pool_mib = 0

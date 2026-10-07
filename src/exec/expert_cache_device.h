@@ -92,8 +92,8 @@ public:
 
     // Builds the per-layer tables for every MoE layer whose experts are host-resident,
     // NVFP4-promoted and pinned in a MAPPED slab of `model`. Unpinned layers go to the host
-    // expert tier when set_host_pool_mib() >= 0 (0 = host RAM available minus 6 GiB, else the cap).
-    // False (and no layer ready) when no layer qualifies; the host path then serves.
+    // expert tier when set_host_pool_mib() >= 0 (0 = host RAM available minus max(6 GiB, 10 % RAM), else the
+    // cap). False (and no layer ready) when no layer qualifies; the host path then serves.
     [[nodiscard]] bool init(const Model& model, ExpertLRUCache& cache, VRAMAllocator* alloc, int top_k);
     // moe.host_expert_pool_mib, read by the next init(): -1 = no tier (default).
     void set_host_pool_mib(int mib) { host_pool_mib_ = mib; }

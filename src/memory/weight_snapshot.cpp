@@ -1,6 +1,7 @@
 #include "memory/weight_snapshot.h"
 #include "core/logging.h"
 #include "model/model.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -120,12 +121,13 @@ size_t WeightUploadLog::live_bytes() const {
 // /proc/meminfo
 // ---------------------------------------------------------------------------
 
-size_t parse_meminfo_available(std::string_view meminfo_text) {
-    // Line format: "MemAvailable:   123456 kB"
-    size_t pos = meminfo_text.find("MemAvailable:");
+namespace {
+// Line format: "<key>   123456 kB"; `key` includes the colon.
+size_t parse_meminfo_field(std::string_view meminfo_text, std::string_view key) {
+    size_t pos = meminfo_text.find(key);
     if (pos == std::string_view::npos)
         return 0;
-    const char* p = meminfo_text.data() + pos + strlen("MemAvailable:");
+    const char* p = meminfo_text.data() + pos + key.size();
     const char* end = meminfo_text.data() + meminfo_text.size();
     while (p < end && (*p == ' ' || *p == '\t'))
         ++p;
@@ -137,6 +139,36 @@ size_t parse_meminfo_available(std::string_view meminfo_text) {
         any = true;
     }
     return any ? kb * 1024 : 0;
+}
+}  // namespace
+
+size_t parse_meminfo_available(std::string_view meminfo_text) {
+    return parse_meminfo_field(meminfo_text, "MemAvailable:");
+}
+
+size_t parse_meminfo_total(std::string_view meminfo_text) {
+    return parse_meminfo_field(meminfo_text, "MemTotal:");
+}
+
+size_t parse_cgroup_limit(std::string_view limit_text) {
+    if (limit_text.find("max") != std::string_view::npos)
+        return 0;  // cgroup v2 "no limit"
+    size_t v = 0;
+    bool any = false;
+    for (const char c : limit_text) {
+        if (c >= '0' && c <= '9') {
+            v = v * 10 + static_cast<size_t>(c - '0');
+            any = true;
+        } else if (any) {
+            break;
+        }
+    }
+    return (any && v > 0 && v < (1ULL << 50)) ? v : 0;  // v1 writes a huge number for "no limit"
+}
+
+size_t host_ram_headroom_bytes(size_t total_bytes) {
+    constexpr size_t kFloor = 6ull << 30;
+    return std::max(kFloor, total_bytes / 10);
 }
 
 size_t parse_cgroup_headroom(std::string_view limit_text, std::string_view current_text,
@@ -214,6 +246,19 @@ size_t host_mem_available_bytes() {
         return from_meminfo;
     return (from_meminfo && from_meminfo < capped) ? from_meminfo : capped;
 }
+
+// MemTotal, or the cgroup limit when it is smaller (a capped container's real total).
+size_t host_mem_total_bytes() {
+    const size_t from_meminfo = parse_meminfo_total(read_small_file("/proc/meminfo"));
+    size_t limit = parse_cgroup_limit(read_small_file("/sys/fs/cgroup/memory.max"));
+    if (limit == 0)
+        limit = parse_cgroup_limit(read_small_file("/sys/fs/cgroup/memory/memory.limit_in_bytes"));
+    if (limit == 0)
+        return from_meminfo;
+    return (from_meminfo && from_meminfo < limit) ? from_meminfo : limit;
+}
+
+size_t host_ram_headroom_bytes() { return host_ram_headroom_bytes(host_mem_total_bytes()); }
 
 // ---------------------------------------------------------------------------
 // WeightSnapshot

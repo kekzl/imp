@@ -76,8 +76,8 @@ struct MoE {
     // src/exec/expert_cache_device.h.
     bool device_expert_cache = true;
     // Host expert tier for unpinned host-resident NVFP4 experts (#2621): pinned LRU of expert
-    // units filled by pread from the checkpoint. 0 = host RAM available - 6 GiB, N = cap MiB (below the
-    // experts: they are not pinned, the tier serves), -1 = off.
+    // units filled by pread from the checkpoint. 0 = host RAM available - max(6 GiB, 10 % RAM), N = cap MiB
+    // (below the experts: they are not pinned, the tier serves), -1 = off.
     int host_expert_pool_mib = 0;
     // Threshold M for smallM kernel (clamped to [0,128]).
     int nvfp4_smallM_threshold = 64;

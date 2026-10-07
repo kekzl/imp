@@ -62,6 +62,24 @@ TEST(CgroupHeadroomTest, LimitMinusNonReclaimable) {
     EXPECT_EQ(parse_cgroup_headroom("8589934592\n", "", ""), 8ull << 30);
 }
 
+TEST(MeminfoParseTest, ParsesMemTotalAndCgroupLimit) {
+    EXPECT_EQ(imp::parse_meminfo_total("MemTotal:       81788928 kB\nMemAvailable: 1 kB\n"),
+              81788928ull * 1024);
+    EXPECT_EQ(imp::parse_meminfo_total("MemAvailable: 1 kB\n"), 0u);
+    EXPECT_EQ(imp::parse_cgroup_limit("25769803776\n"), 24ull << 30);
+    EXPECT_EQ(imp::parse_cgroup_limit("max\n"), 0u);
+    EXPECT_EQ(imp::parse_cgroup_limit("9223372036854771712\n"), 0u);  // v1 "no limit"
+    EXPECT_EQ(imp::parse_cgroup_limit(""), 0u);
+}
+
+TEST(HostRamHeadroomTest, SixGiBFloorOrTenPercent) {
+    EXPECT_EQ(imp::host_ram_headroom_bytes(0), 6ull << 30);            // total unknown
+    EXPECT_EQ(imp::host_ram_headroom_bytes(32ull << 30), 6ull << 30);  // 3.2 GiB < floor
+    EXPECT_EQ(imp::host_ram_headroom_bytes(60ull << 30), 6ull << 30);  // exactly the floor
+    EXPECT_EQ(imp::host_ram_headroom_bytes(128ull << 30), (128ull << 30) / 10);
+    EXPECT_EQ(imp::host_ram_headroom_bytes(256ull << 30), (256ull << 30) / 10);
+}
+
 // Fake "device" allocations — the log never dereferences them.
 struct FakeAllocs {
     alignas(16) uint8_t a1[256];
