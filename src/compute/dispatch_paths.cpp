@@ -34,6 +34,8 @@ const char* attn_prefill_outer_name(AttnPrefillOuter p) {
             return "fmha_chain";
         case AttnPrefillOuter::RA2:
             return "ra2_fp4";
+        case AttnPrefillOuter::APA:
+            return "apa";
     }
     return "?";
 }

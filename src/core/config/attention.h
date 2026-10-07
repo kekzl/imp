@@ -53,6 +53,11 @@ struct Attention {
     // RA2 prefill (compute/ra2/): INT8 QK^T, NVFP4 P x two-term NVFP4 V, quantized per call; hd 64/128/256,
     // causal, no window/softcap/sinks, declines under runtime.deterministic. Lossy, so opt-in.
     bool ra2_prefill = false;
+    // APA prefill (compute/ra2/apa/): all-FP4 pass 1 sends hot KV tiles (tile share of the running row sum
+    // > apa_eps) to an exact FP16 pass 2; hd 128, causal, same declines as ra2. 0 = off. Tried before
+    // ra2_prefill when kv_len >= apa_min_kv.
+    float apa_eps = 0.0f;
+    int apa_min_kv = 0;
     // FP8 paged decode (HD=128): tokens per warp iteration. 4 = multitok
     // kernels (Q heads of a KV head grouped per CTA, 16-lanes-per-row layout),
     // 1 = the plain per-head kernel serves shapes multitok does not.

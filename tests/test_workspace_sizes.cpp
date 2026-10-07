@@ -191,7 +191,7 @@ TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.moe_arrays +
                              d.fp8_reduction + d.quant_scratch + d.splitk_scratch + d.mla_scratch +
                              d.dry_penalty + d.cublas_workspace + d.grouped3x + d.imma_scratch +
-                             d.smallm_scratch + d.parallel_block + d.ra2_scratch);
+                             d.smallm_scratch + d.parallel_block + d.ra2_scratch + d.apa_scratch);
     EXPECT_GT(d.total(), 0u);
 }
 
@@ -199,6 +199,26 @@ TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
 TEST(ExecRa2WorkspaceBytes, FollowsTheCarveLayout) {
     // amax 256 + ksum 4096 + HeadScale 256 + Qr 393216 + Qq 12582912 + KV 8 * 512 * 17424
     EXPECT_EQ(exec_ra2_workspace_bytes(4096, 32768, 24, 8, 128), 84349440u);
+}
+
+// apa::carve for B = 1: 4096 queries x 24 heads, 32768 keys x 8 kv heads, hd 128 (9216 B per 64-token tile).
+TEST(ExecApaWorkspaceBytes, FollowsTheCarveLayout) {
+    // amax 256 + ksum 4096 + HeadScale 256 + Qr 393216 + Qq 6291456 + Qs 786432 + KV 8 * 512 * 9216
+    // + masks 395520 (64 q blocks x 12 warps x 16 words, ready, tickets) + part 50331648 + ml 786432
+    EXPECT_EQ(exec_apa_workspace_bytes(4096, 32768, 24, 8, 128), 96738048u);
+}
+
+// APA prefill workspace: charged only with attention.apa_eps > 0 and hd 128.
+TEST(ExecT2Demand, ApaScratchIsChargedOnlyWhenApaIsOnAtHd128) {
+    ExecShape s = dense_shape();
+    s.n_heads = 24;
+    s.kv_heads_max = 8;
+    s.head_dim_max = 128;
+    EXPECT_EQ(exec_t2_demand(s, 32768).apa_scratch, 0u) << "opt-in tier, off by default";
+    s.apa_prefill = true;
+    EXPECT_EQ(exec_t2_demand(s, 32768).apa_scratch, exec_apa_workspace_bytes(4096, 32768, 24, 8, 128) + 256);
+    s.head_dim_max = 64;
+    EXPECT_EQ(exec_t2_demand(s, 32768).apa_scratch, 0u) << "the kernel declines hd != 128";
 }
 
 // RA2 prefill workspace: charged only with attention.ra2_prefill, at (max_tokens, max_seq_len).

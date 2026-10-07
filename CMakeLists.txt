@@ -374,6 +374,7 @@ if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_mxfp4_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_ra2.cu)
+    list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_apa.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_hw.cu)
     # Bench/probe TUs were relocated to tests/bench/ (P3 §10 #12, P5 §3).
