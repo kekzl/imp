@@ -39,6 +39,25 @@ void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in, const Tensor& weig
                         void* conv_snap = nullptr, const int* d_snap_n = nullptr,
                         const void* conv_prev = nullptr);
 
+// Mamba2 prefill front end in one launch (ssm_conv_split.cu): conv1d + SiLU on the xBC
+// columns of rows with stride pitch, written as contiguous x [n, inner], B and C [n, bc].
+// Bit-identical to ssm_conv1d_prefill + silu_inplace + split. No conv-state commit (call
+// ssm_conv1d_commit after). Returns false (nothing launched) for K != 4 or misaligned input.
+[[nodiscard]] bool ssm_conv1d_prefill_silu_split(const void* conv_state, const half* x_in, int64_t pitch,
+                                                 const Tensor& weight, const Tensor& bias, half* x_out,
+                                                 half* b_out, half* c_out, int n_tokens, int inner, int bc,
+                                                 int conv_kernel, cudaStream_t stream);
+
+// Prefill: x/B/C columns of a [n, inner + 2*bc] conv output into contiguous planes
+// (x -> x_dst [n, inner], B then C -> bc_dst [2][n, bc]); es = element size in bytes.
+void ssm_deinterleave_xbc(const Tensor& xBC_out, void* x_dst, void* bc_dst, int n, int inner, int bc,
+                          size_t es, cudaStream_t stream);
+
+// Conv window commit for rows with stride pitch: window = last conv_kernel inputs before
+// d_real_n (or n_tokens); shorter chunks shift in the previous window.
+void ssm_conv1d_commit(void* conv_state, const half* x_in, int64_t pitch, int n_tokens, int channels,
+                       int conv_kernel, const int* d_real_n, cudaStream_t stream);
+
 // Fused conv1d + SiLU + FP32 output for prefill (GDN layers).
 // Replaces 3 separate kernels (conv → SiLU → FP16→FP32) with one launch.
 // d_real_n: see ssm_conv1d_prefill.

@@ -100,14 +100,22 @@ jobs:
           key: apt-debs-build-cuda${{ env.CUDA_VERSION }}-${{ steps.aptweek.outputs.week }}
           restore-keys: |
             apt-debs-build-cuda${{ env.CUDA_VERSION }}-
+      # Mirror fallback in every apt step: azure first, archive.ubuntu.com and kernel.org when it
+      # fails (azure.archive.ubuntu.com:80 timed out on 2026-10-07, Build red in "Install build deps").
       - name: Install git and python3
         run: |
-          sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
           # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
           rm -f /etc/apt/sources.list.d/cuda*.list
           mkdir -p "$APT_DEBS/partial"
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Dir::Cache::Archives="$APT_DEBS" install -y --no-install-recommends git python3
+          ok=0
+          for m in azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org; do
+            sed -i -E "s#http://[a-z.]+/ubuntu/?#http://$m/ubuntu/#" /etc/apt/sources.list.d/ubuntu.sources
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+              && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Dir::Cache::Archives="$APT_DEBS" install -y --no-install-recommends git python3 \
+              && { ok=1; break; }
+            echo "::warning::apt via $m failed, trying the next mirror"
+          done
+          [ "$ok" = 1 ]
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -214,9 +222,19 @@ jobs:
         if: steps.changes.outputs.code == 'true'
         # The native CUDA devel image already provides nvcc on PATH at
         # /usr/local/cuda; only the non-CUDA build tooling needs installing.
-        # Mirror, sources and package lists come from "Install git and python3".
+        # Starts on the mirror "Install git and python3" settled on, falls back like it.
         run: |
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Dir::Cache::Archives="$APT_DEBS" install -y --no-install-recommends cmake g++ git python3 ccache libcurl4-openssl-dev libjpeg-turbo8-dev
+          ok=0
+          for m in "" azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org; do
+            if [ -n "$m" ]; then
+              sed -i -E "s#http://[a-z.]+/ubuntu/?#http://$m/ubuntu/#" /etc/apt/sources.list.d/ubuntu.sources
+              apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || continue
+            fi
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Dir::Cache::Archives="$APT_DEBS" install -y --no-install-recommends cmake g++ git python3 ccache libcurl4-openssl-dev libjpeg-turbo8-dev \
+              && { ok=1; break; }
+            echo "::warning::apt via ${m:-the current mirror} failed, trying the next mirror"
+          done
+          [ "$ok" = 1 ]
 
       # One ~46 MB entry per week and scope, written only on a key miss.
       - name: Save apt debs
@@ -424,11 +442,17 @@ jobs:
       - name: Install deps
         shell: sh
         run: |
-          sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
           # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
           rm -f /etc/apt/sources.list.d/cuda*.list
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash cmake g++ git python3 libcurl4-openssl-dev libjpeg-turbo8-dev
+          ok=0
+          for m in azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org; do
+            sed -i -E "s#http://[a-z.]+/ubuntu/?#http://$m/ubuntu/#" /etc/apt/sources.list.d/ubuntu.sources
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+              && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash cmake g++ git python3 libcurl4-openssl-dev libjpeg-turbo8-dev \
+              && { ok=1; break; }
+            echo "::warning::apt via $m failed, trying the next mirror"
+          done
+          [ "$ok" = 1 ]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # base SHA must be present for the changed-files diff
@@ -579,9 +603,15 @@ jobs:
 
       - name: Install python and the CUDA runtime libs
         run: |
-          sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends python3 python3-venv curl ca-certificates libjpeg-turbo8
+          ok=0
+          for m in azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org; do
+            sed -i -E "s#http://[a-z.]+/ubuntu/?#http://$m/ubuntu/#" /etc/apt/sources.list.d/ubuntu.sources
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+              && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends python3 python3-venv curl ca-certificates libjpeg-turbo8 \
+              && { ok=1; break; }
+            echo "::warning::apt via $m failed, trying the next mirror"
+          done
+          [ "$ok" = 1 ]
           # Toolkit versions = the build image (13.4.2): cudart 13.4.92, cuBLAS 13.8.0.4 (439 MB).
           # Fetched in the background while pip runs; sha256-verified (H-6).
           mkdir -p /tmp/cuda-whl
@@ -792,11 +822,17 @@ jobs:
       - name: Install toolchain
         shell: sh
         run: |
-          sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
           # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
           rm -f /etc/apt/sources.list.d/cuda*.list
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash git python3 cmake g++ ccache ca-certificates libcurl4-openssl-dev libjpeg-turbo8-dev
+          ok=0
+          for m in azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org; do
+            sed -i -E "s#http://[a-z.]+/ubuntu/?#http://$m/ubuntu/#" /etc/apt/sources.list.d/ubuntu.sources
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+              && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash git python3 cmake g++ ccache ca-certificates libcurl4-openssl-dev libjpeg-turbo8-dev \
+              && { ok=1; break; }
+            echo "::warning::apt via $m failed, trying the next mirror"
+          done
+          [ "$ok" = 1 ]
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -902,11 +938,17 @@ jobs:
       - name: Install toolchain
         shell: sh
         run: |
-          sed -i 's|http://archive.ubuntu.com/|http://azure.archive.ubuntu.com/|; s|http://security.ubuntu.com/|http://azure.archive.ubuntu.com/|' /etc/apt/sources.list.d/ubuntu.sources
           # The CUDA apt source is dropped first: its index shipped malformed on 2026-09-16 and nothing here comes from it.
           rm -f /etc/apt/sources.list.d/cuda*.list
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update
-          apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash git python3 cmake ninja-build ccache ca-certificates libcurl4-openssl-dev libjpeg-turbo8-dev
+          ok=0
+          for m in azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org; do
+            sed -i -E "s#http://[a-z.]+/ubuntu/?#http://$m/ubuntu/#" /etc/apt/sources.list.d/ubuntu.sources
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+              && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends bash git python3 cmake ninja-build ccache ca-certificates libcurl4-openssl-dev libjpeg-turbo8-dev \
+              && { ok=1; break; }
+            echo "::warning::apt via $m failed, trying the next mirror"
+          done
+          [ "$ok" = 1 ]
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
