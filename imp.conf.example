@@ -458,12 +458,13 @@ paged_nvfp4_multitok = 4
 # one CTA per KV head x split runs all its Q heads. Microbench 1 x 77k, NVFP4
 # KV read from DRAM: 16/2 heads 71.4 -> 39.3 us, 24/4 111.9 -> 61.9 us.
 paged_nvfp4_mma = true
-# The same for the F16 KV cache (HD=128/256, GQA ratio 1..8): four tokens per
+# The same for the F16 KV cache (HD=64/128/256/512, GQA ratio 1..8): four tokens per
 # warp iteration, each K/V row read once per CTA for up to four Q heads.
 # Microbench 32 x 1100: 32/8 heads HD=128 315 -> 98 us per launch (four heads
 # per CTA), 16/8 HD=256 665 -> 178 us (two); 32 x 4096: 1165 -> 327 and
 # 2445 -> 643 us, i.e. the resident-bandwidth ceiling; single stream (split-K)
-# 32/8 HD=128 at 32k 197 -> 109 us, 64k 375 -> 203 us. 1 = the per-head kernels.
+# 32/8 HD=128 at 32k 197 -> 109 us, 64k 375 -> 203 us; Gemma-4 global layers
+# (16/2 HD=512): tg after an 8192-token prompt 232.0 -> 248.9 tok/s. 1 = the per-head kernels.
 paged_f16_multitok   = 4
 # Prefill chunk length (tokens) at/above which attention routes to FMHA
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
