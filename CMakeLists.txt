@@ -372,6 +372,7 @@ if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/quantize_fp16_nvfp4_moe_native.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_mxfp4_sm120.cu)
+    list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_ra2.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_hw.cu)
     # Bench/probe TUs were relocated to tests/bench/ (P3 §10 #12, P5 §3).
@@ -1235,6 +1236,7 @@ if(IMP_BUILD_TESTS)
         tests/test_fmha_fp8.cu
         tests/test_attention_mxfp4.cu
         tests/test_attention_fmha_mxfp4.cu
+        tests/test_attention_ra2.cu
         tests/test_paged_attention.cu
         tests/test_attention_paged_oracle.cu
         tests/test_qsa_indexer.cu

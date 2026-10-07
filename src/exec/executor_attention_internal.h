@@ -10,6 +10,7 @@
 #include "exec/executor_gemv_helpers.h"
 #include "compute/attention_cublas.h"
 #include "compute/attention_fmha_sm120.h"
+#include "compute/attention_ra2.h"
 #include "core/logging.h"
 #include "exec/inference_state.h"
 #include "memory/kv_cache.h"
@@ -64,6 +65,19 @@ namespace imp {
     Tensor o4 = o.reshape(4, q4s);
     return fmha_sm120_fa2_prefill(q4, k4, v4, o4, scale, /*causal=*/true, sliding_window, softcap, stream,
                                   q_offset, /*fp16_qk=*/true, d_kv_len, static_cast<const half*>(sinks));
+}
+
+// RA2 FP4 prefill (attention.ra2_prefill, opt-in): tried before FA2. Declines what the kernel does
+// not model (sliding window, softcap, sinks), runtime.deterministic (float atomics in its K/V
+// stats), and shapes or scratch ra2 rejects; the caller then walks its usual chain.
+[[nodiscard]] static bool try_ra2_prefill(const DispatchPolicy& rcfg, const Tensor& q, const Tensor& k,
+                                          const Tensor& v, Tensor& o, int n, int kv_len, int nh, int nkv,
+                                          int hd, float scale, int sliding_window, float softcap,
+                                          int q_offset, cudaStream_t stream, const void* sinks) {
+    if (!rcfg.attention.ra2_prefill || sliding_window > 0 || softcap != 0.0f || sinks != nullptr ||
+        process_diag_deterministic())
+        return false;
+    return attention_ra2_prefill(q, k, v, o, n, kv_len, nh, nkv, hd, scale, q_offset, stream);
 }
 
 // hd=512 prefill whose rows do not depend on n or q_offset (#2167): the WMMA FMHA with a forward

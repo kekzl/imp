@@ -26,6 +26,7 @@ enum class AttnPrefillOuter {
     CUBLAS,         // attention_cublas_prefill — materialized S-matrix
     CUBLAS_SLICED,  // attention_cublas_prefill_sliced — hd=512 S-matrix overflow (#1036)
     FMHA_CHAIN,     // attention_prefill_dispatch → AttnPrefillPath
+    RA2,            // try_ra2_prefill: FP4 prefill, opt-in attention.ra2_prefill
 };
 
 // Paged-decode kernel family, selected by the KV cache dtype

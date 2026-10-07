@@ -264,6 +264,10 @@
                                        nh, nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
                                        att_off, stream, state.context_lens, attn_sinks);
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
+            } else if (try_ra2_prefill(dispatch_policy(), qv, k_full_t, v_full_t, ao, n, att_ctx, nh, nkv, hd,
+                                       scale, layer_sliding_window, cfg.attn_logit_softcap, att_off, stream,
+                                       attn_sinks)) {
+                dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::RA2);
             } else if (try_fa2_fp16qk_prefill(dispatch_policy(), qv, k_full_t, v_full_t, ao, n, att_ctx, nh,
                                               nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
                                               att_off, stream, /*d_kv_len=*/nullptr, attn_sinks)) {
@@ -350,9 +354,13 @@
         // softmax mask); the historic hd=256+window failure was root-caused to
         // the fp8-QK kernel's raw e4m3 conversion (#511), now opt-in only - the
         // FP16 WMMA kernel serving hd=256 is PPL-identical to cuBLAS.
-        if (try_fa2_fp16qk_prefill(dispatch_policy(), qv, kk, vv, ao, n, n, nh, nkv, hd, scale,
-                                   layer_sliding_window, cfg.attn_logit_softcap, /*q_offset=*/0, stream,
-                                   /*d_kv_len=*/nullptr, attn_sinks)) {
+        if (try_ra2_prefill(dispatch_policy(), qv, kk, vv, ao, n, n, nh, nkv, hd, scale, layer_sliding_window,
+                            cfg.attn_logit_softcap, /*q_offset=*/0, stream, attn_sinks)) {
+            dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::RA2);
+        } else if (try_fa2_fp16qk_prefill(dispatch_policy(), qv, kk, vv, ao, n, n, nh, nkv, hd, scale,
+                                          layer_sliding_window, cfg.attn_logit_softcap, /*q_offset=*/0,
+                                          stream,
+                                          /*d_kv_len=*/nullptr, attn_sinks)) {
             // handled by FA2 f16 — no S-matrix needed (hd 128/256, incl. Gemma-4 SWA)
             dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
         } else if (try_hd512_row_invariant_prefill(dispatch_policy(), hd, qv, kk, vv, ao, n, n, nh, nkv,
