@@ -1199,6 +1199,10 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
             int max_useful_splits = num_ctx_blocks / 4;
             num_splits = min(num_splits, max(max_useful_splits, 1));
             num_splits = min(num_splits, 64);
+            // A multitok instance at 1 CTA/SM (HD=512 x 2 heads, 148 regs) fits one wave of
+            // num_sms CTAs: 2 * num_sms CTAs ran 3 waves (170 + 170 + 4 for 8 x 43).
+            if (mt_hpc > 0 && paged_attention_f16_multitok_splitk_ctas_per_sm(head_dim, mt_hpc) == 1)
+                num_splits = min(num_splits, num_sms / total_blocks_nosplit);
             num_splits = max(num_splits, 1);
         }
 
