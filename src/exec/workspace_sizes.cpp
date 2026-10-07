@@ -64,17 +64,17 @@ void for_each_weight(const Model& model, F&& f) {
 
 std::string ExecT2Demand::describe() const {
     constexpr double kMiB = 1024.0 * 1024.0;
-    char buf[480];
+    char buf[512];
     std::snprintf(
         buf, sizeof(buf),
         "mmvq %.1f + nvfp4 %.1f + sample %.1f + pen %.1f + moe %.2f + fp8red %.2f + quant %.2f "
         "+ splitk %.2f + mla %.1f + dry %.2f + cublas %.1f + grp3x %.2f + imma %.1f + chunkcap %.1f "
-        "+ smallm %.2f + par %.2f + ra2 %.1f MiB",
+        "+ smallm %.2f + par %.2f + ra2 %.1f + apa %.1f MiB",
         mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB, penalty_counts / kMiB,
         moe_arrays / kMiB, fp8_reduction / kMiB, quant_scratch / kMiB, splitk_scratch / kMiB,
         mla_scratch / kMiB, dry_penalty / kMiB, cublas_workspace / kMiB, grouped3x / kMiB,
         imma_scratch / kMiB, chunk_capture / kMiB, smallm_scratch / kMiB, parallel_block / kMiB,
-        ra2_scratch / kMiB);
+        ra2_scratch / kMiB, apa_scratch / kMiB);
     return buf;
 }
 
@@ -260,6 +260,27 @@ size_t exec_ra2_workspace_bytes(int sq, int skv, int nh, int nkv, int hd) {
     const size_t ntkv = (static_cast<size_t>(skv) + 63) / 64, tile = 136 * d + 16;
     return al(bhk * 3 * 4) + al(bhk * d * 4) + al(bhk * 12) + al(rows * 4) + al(rows * d) +
            al(bhk * ntkv * tile);
+}
+
+size_t exec_apa_workspace_bytes(int sq, int skv, int nh, int nkv, int hd) {
+    // apa::carve: amax[3], ksum[hd], HeadScale{q,k,v}, Qr + Qq + Qs per packed row, KV blobs, pass-1 masks
+    // (12 warps x W words per 192-row q block) + ready + 2 tickets, FP32 partials + (m, l) per row
+    auto al = [](size_t x) { return (x + 255) & ~size_t(255); };
+    const size_t bhk = static_cast<size_t>(nkv), rows = static_cast<size_t>(sq) * nh,
+                 d = static_cast<size_t>(hd);
+    const size_t ntkv = (static_cast<size_t>(skv) + 63) / 64, words = (ntkv + 31) / 32;
+    const size_t nqb = (rows / bhk + 191) / 192;
+    return al(bhk * 3 * 4) + al(bhk * d * 4) + al(bhk * 12) + al(rows * 4) + al(rows * d / 2) +
+           al(rows * d / 16) + al(bhk * ntkv * 72 * d) + al((bhk * nqb * (12 * words + 1) + 2) * 4) +
+           al(rows * d * 4) + al(rows * 8);
+}
+
+// APA prefill workspace, taken once at this bound (attention_apa_set_workspace_bound); hd 128 only.
+static size_t apa_scratch_demand(const ExecShape& shape, int t, int max_seq_len) {
+    if (!shape.apa_prefill || shape.n_heads <= 0 || shape.kv_heads_max <= 0 || shape.head_dim_max != 128)
+        return 0;
+    const int skv = (max_seq_len > 0) ? max_seq_len : shape.max_seq_len_cfg;
+    return exec_apa_workspace_bytes(t, skv, shape.n_heads, shape.kv_heads_max, 128) + kTakeAlign;
 }
 
 // RA2 prefill workspace, taken once at this bound (attention_ra2_set_workspace_bound): prefill
@@ -460,6 +481,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
         out.grouped3x = kExecGrouped3xStagingBytes + kExecGrouped3xWorkspaceBytes + 2 * kTakeAlign;
 
     out.ra2_scratch = ra2_scratch_demand(shape, t, max_seq_len);
+    out.apa_scratch = apa_scratch_demand(shape, t, max_seq_len);
 
     // MLA QKV scratch. kv_lora_rank > 0 IS is_mla(). Sized for max_tokens and, unlike every
     // other tenant here, has NO degradation contract: executor_attention_qkv.cu dereferences
@@ -530,12 +552,14 @@ int exec_max_tokens(const Model& model, int max_seq_len) {
 int exec_max_weight_k(const Model& model) { return exec_max_weight_k(exec_shape_of(model)); }
 
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size, bool use_fp8_prefill,
-                            bool mla_absorb, int capture_ctx_cap, int kv_block_size, bool ra2_prefill) {
+                            bool mla_absorb, int capture_ctx_cap, int kv_block_size, bool ra2_prefill,
+                            bool apa_prefill) {
     ExecShape shape = exec_shape_of(model);
     shape.max_batch_size = max_batch_size;
     shape.use_fp8_prefill = use_fp8_prefill;
     shape.mla_absorb = mla_absorb;
     shape.ra2_prefill = ra2_prefill;
+    shape.apa_prefill = apa_prefill;
     shape.capture_ctx_cap = capture_ctx_cap;
     shape.kv_block_size = kv_block_size;
     return exec_t2_demand(shape, max_seq_len);
