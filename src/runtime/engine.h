@@ -1460,6 +1460,8 @@ private:
     // one format. Idempotent: calling it once graphs are already off keeps the
     // original reason and logs nothing further.
     void demote_graphs_(GraphDemotionReason reason);
+    // NVFP4 prequant MoE: logs decode-cache coverage, demotes graphs on an uncovered device layer.
+    void check_moe_decode_cache_coverage_();
     // Lifts a mid-run demotion (engine_scheduler.cpp). Init-time reasons stay.
     void promote_graphs_();
 

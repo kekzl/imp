@@ -927,4 +927,52 @@ void Engine::teardown_constrained_pipeline(bool synchronize) {
     p.jumped_tokens = 0;
 }
 
+void Engine::check_moe_decode_cache_coverage_() {
+    const auto& mcfg = model_->config();
+    // Coverage check: for prequant MoE, the nvfp4_moe decode cache is
+    // all-or-nothing (mirrors executor_forward_moe.cu nvfp4_covers_layer). One
+    // uncovered layer falls to host-args legacy, which throws under graph capture.
+    if (mcfg.is_nvfp4_prequant && mcfg.n_experts > 0) {
+        int moe_layers = 0, covered = 0, uncovered_on_device = 0;
+        for (int i = 0; i < mcfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            bool has_experts = L.expert_up_packed.data != nullptr ||
+                               (!L.expert_w_up.empty() && L.expert_w_up[0].data != nullptr);
+            if (!has_experts)
+                continue;
+            moe_layers++;
+            bool ok = L.nvfp4_moe_up_ptr != nullptr && L.nvfp4_moe_down_ptr != nullptr;
+            if (ok && L.expert_gate_packed.data != nullptr)
+                ok = L.nvfp4_moe_gate_ptr != nullptr;
+            if (ok)
+                covered++;
+            else if (!L.expert_w_up.empty() && L.expert_w_up[0].on_device)
+                uncovered_on_device++;  // host-resident layers go to the device expert cache instead
+        }
+        // #2180: an uncovered device-resident layer decodes on the legacy path, whose replay faulted.
+        if (uncovered_on_device > 0)
+            demote_graphs_(GraphDemotionReason::MoeDecodeCacheIncomplete);
+        // Host-resident uncovered layers are capture-safe when the device expert cache serves them.
+        const bool host_rest_cached = uncovered_on_device == 0 &&
+                                      executor_->device_expert_cache_covers_host_layers();
+        if (moe_layers > 0 && covered == moe_layers) {
+            IMP_LOG_INFO(
+                "NVFP4 decode caches: FULL (%d/%d MoE layers) — decode graph "
+                "capture eligible",
+                covered, moe_layers);
+        } else if (moe_layers > 0 && host_rest_cached) {
+            IMP_LOG_INFO(
+                "NVFP4 decode caches: %d/%d MoE layers, the other %d served by the device "
+                "expert cache - decode graph capture eligible",
+                covered, moe_layers, moe_layers - covered);
+        } else if (moe_layers > 0) {
+            IMP_LOG_WARN(
+                "NVFP4 decode caches: PARTIAL (%d/%d MoE layers covered): decode graph "
+                "capture aborts unless the device expert cache serves the host-resident "
+                "layers. Remedies: lower runtime.max_seq_len / max_batch_size, [vram] knobs.",
+                covered, moe_layers);
+        }
+    }
+}
+
 }  // namespace imp

@@ -870,40 +870,7 @@ bool Engine::init_kv_cache() {
 
     IMP_CUDA_CHECK_BOOL(cudaStreamSynchronize(stream_));
 
-    // Coverage check: for prequant MoE, the nvfp4_moe decode cache is
-    // all-or-nothing (mirrors executor_forward_moe.cu nvfp4_covers_layer). One
-    // uncovered layer falls to host-args legacy, which throws under graph capture.
-    if (mcfg.is_nvfp4_prequant && mcfg.n_experts > 0) {
-        int moe_layers = 0, covered = 0, uncovered_on_device = 0;
-        for (int i = 0; i < mcfg.n_layers; i++) {
-            const auto& L = model_->layer(i);
-            bool has_experts = L.expert_up_packed.data != nullptr ||
-                               (!L.expert_w_up.empty() && L.expert_w_up[0].data != nullptr);
-            if (!has_experts)
-                continue;
-            moe_layers++;
-            bool ok = L.nvfp4_moe_up_ptr != nullptr && L.nvfp4_moe_down_ptr != nullptr;
-            if (ok && L.expert_gate_packed.data != nullptr)
-                ok = L.nvfp4_moe_gate_ptr != nullptr;
-            if (ok)
-                covered++;
-            else if (!L.expert_w_up.empty() && L.expert_w_up[0].on_device)
-                uncovered_on_device++;  // host-resident layers go to the device expert cache instead
-        }
-        // #2180: an uncovered device-resident layer decodes on the legacy path, whose replay faulted.
-        if (uncovered_on_device > 0)
-            demote_graphs_(GraphDemotionReason::MoeDecodeCacheIncomplete);
-        if (moe_layers > 0 && covered == moe_layers) {
-            IMP_LOG_INFO("NVFP4 decode caches: FULL (%d/%d MoE layers) — decode graph "
-                         "capture eligible",
-                         covered, moe_layers);
-        } else if (moe_layers > 0) {
-            IMP_LOG_WARN("NVFP4 decode caches: PARTIAL (%d/%d MoE layers covered): decode graph "
-                         "capture aborts unless the device expert cache serves the host-resident "
-                         "layers. Remedies: lower runtime.max_seq_len / max_batch_size, [vram] knobs.",
-                         covered, moe_layers);
-        }
-    }
+    check_moe_decode_cache_coverage_();
 
     // Pre-allocate the gemm_nvfp4 fallback dequant workspace, sized from
     // wcache_.nvfp4 (populated above, so must come AFTER pre_dequant_weights).
