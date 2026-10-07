@@ -608,6 +608,9 @@ void Engine::init_resolve_ssm_dtype_() {
             "runtime.deterministic: GDN state FP32, fused scan (state_bf16, chunkpar_scan, "
             "chunkwise_scan off)");
     }
+    // The Mamba2 SSD scan blocks 64 rows from the chunk start, same partition dependence.
+    if (process_diag_deterministic())
+        runtime_config_.gdn.ssd_scan = false;
     // gdn.state_bf16: BF16 recurrent state for GDN (halves the state traffic
     // that dominates batched decode; FP32 arithmetic in registers). Only the
     // fused scan supports it, and only at HD=SS=128: the executor drops the

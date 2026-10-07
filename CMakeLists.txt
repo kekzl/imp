@@ -349,6 +349,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/ssm.cu
     src/compute/shortconv.cu
     src/compute/ssm_scan_reg.cu
+    src/compute/ssm_scan_ssd.cu
     src/compute/gated_residual.cu
     src/compute/ple.cu
     src/compute/gdn_factor.cu
@@ -1343,6 +1344,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mtp_topw.cu
         tests/test_ssm.cu
         tests/test_ssm_scan_reg.cu
+        tests/test_ssm_scan_ssd.cu
         tests/test_json_constrain.cu
         tests/test_schema_constrain.cu
         tests/test_tool_call_constrain.cu

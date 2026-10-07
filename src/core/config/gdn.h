@@ -28,6 +28,10 @@ struct GDN {
     // runtime.deterministic turns it, chunkwise_scan and state_bf16 off: blocks start at the
     // chunk start, BF16 state rounds at chunk ends (#2556; Qwen3.8-27B pp4096 -42 %).
     bool chunkpar_scan = true;
+    // Mamba2 prefill scan in the chunked SSD form (fp16 tensor-core GEMMs per 64-token chunk,
+    // fp32 accumulate) for chunks >= 128 tokens at state 128; off = ssm_scan_reg.
+    // runtime.deterministic turns it off (chunk-partition dependent).
+    bool ssd_scan = true;
     // Chunks (64 tokens each) per chunk-parallel strip: kernel 1 launches
     // strip*n_heads CTAs at one CTA/SM, so strip sets the wave quantization.
     // 0 = auto (strip in [4,16], fullest last wave); 1..16 pins it.
