@@ -452,6 +452,52 @@ bool paged_attention_decode_f16_multitok_launch(const half* Q, const half* K_cac
     return true;
 }
 
+namespace {
+template <int HEAD_DIM, int HPC>
+int splitk_occupancy() {
+    static const int occ = [] {
+        const size_t smem = NUM_WARPS * sizeof(float) * 2 +
+                            static_cast<int64_t>(NUM_WARPS) * HEAD_DIM * sizeof(float);
+        int n = 0;
+        if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &n, paged_attention_splitk_f16_multitok_kernel<HEAD_DIM, 4, HPC>, BLOCK_THREADS, smem) !=
+            cudaSuccess)
+            n = 0;
+        return n;
+    }();
+    return occ;
+}
+}  // namespace
+
+int paged_attention_f16_multitok_splitk_ctas_per_sm(int head_dim, int hpc) {
+    switch (head_dim * 8 + hpc) {
+        case 64 * 8 + 1:
+            return splitk_occupancy<64, 1>();
+        case 64 * 8 + 2:
+            return splitk_occupancy<64, 2>();
+        case 64 * 8 + 4:
+            return splitk_occupancy<64, 4>();
+        case 128 * 8 + 1:
+            return splitk_occupancy<128, 1>();
+        case 128 * 8 + 2:
+            return splitk_occupancy<128, 2>();
+        case 128 * 8 + 4:
+            return splitk_occupancy<128, 4>();
+        case 256 * 8 + 1:
+            return splitk_occupancy<256, 1>();
+        case 256 * 8 + 2:
+            return splitk_occupancy<256, 2>();
+        case 256 * 8 + 4:
+            return splitk_occupancy<256, 4>();
+        case 512 * 8 + 1:
+            return splitk_occupancy<512, 1>();
+        case 512 * 8 + 2:
+            return splitk_occupancy<512, 2>();
+        default:
+            return 0;
+    }
+}
+
 bool paged_attention_splitk_f16_multitok_launch(const half* Q, const half* K_cache, const half* V_cache,
                                                 float* partial, const int* block_tables,
                                                 const int* context_lens, int batch_size, int n_heads,

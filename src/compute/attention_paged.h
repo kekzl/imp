@@ -126,9 +126,12 @@ int paged_attention_fp8_multitok_heads_per_cta(int head_dim, int n_q_per_kv, int
                                                 float softcap, int heads_per_cta, cudaStream_t stream);
 
 // Q heads per CTA the F16 multitok kernels will use for this shape (0 =
-// shape not served): the largest of 4 / 2 / 1 dividing the GQA ratio, HD=256
+// shape not served): the largest of 4 / 2 / 1 dividing the GQA ratio, HD=256/512
 // capped at 2; `requested` (1/2/4) wins when it divides.
 int paged_attention_f16_multitok_heads_per_cta(int head_dim, int n_q_per_kv, int requested);
+
+// Resident CTAs per SM of the F16 split-K multitok instance for (head_dim, hpc); 0 = not served.
+int paged_attention_f16_multitok_splitk_ctas_per_sm(int head_dim, int hpc);
 
 // F16 decode, 4 tokens/warp iteration, heads_per_cta Q heads/CTA sharing KV loads (HD=128/256,
 // GQA ratio 1..8). Called when the knob is on, split-K is off and n_sinks==0; heads_per_cta

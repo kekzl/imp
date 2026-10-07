@@ -11,6 +11,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `gemm_init()` re-takes the cuBLASLt workspace and bench scratch after an arena reset or close; a stale workspace aliased the new bench scratch and hung `test-quant` at `CutlassNvfp4StreamKTest.CublasLtMatchesCutlass` (> 45 min, now 258 tests in 80 s) (#2611).
 
 ### Changed
+- F16 split-K decode caps the split count at one wave when the multitok instance fits 1 CTA/SM (HD=512 x 2 heads): Gemma-4 global layers 1 x 8192 ran 8 x 43 CTAs in 3 waves, now 8 x 21 (34.0 us); Gemma-4-26B-A4B-NVFP4 tg at 8k 247.44..248.91 -> 248.52..250.40 tok/s (3 pairs).
 - F16 paged decode at head_dim 512 (Gemma-4 global layers) runs the multitok kernel, two Q heads per CTA sharing each KV row, instead of the per-head split-K pipeline (#2467): Gemma-4-26B-A4B-NVFP4 tg after an 8192-token prompt 231.96..232.15 -> 248.89..248.94 tok/s (3 pairs).
 - Batched decode below the sparse-attention engage length skips the two block-selection kernels that only copied the block table, output unchanged (#2414): Qwen3-14B-NVFP4, 32 streams, 4133.8..4225.4 -> 4350.0..4374.3 tok/s, layer 159.3 -> 152.9 us.
 - NVFP4 paged decode runs split-K on m16n8k16 tensor cores (`attention.paged_nvfp4_mma`, GQA 2..8, HD 128/256): one CTA per KV head runs all its Q heads (#2440). 1 x 77k, KV from DRAM: 16/2 71.4 -> 39.3 us, 24/4 111.9 -> 61.9 us; Qwen3.6-35B-A3B-NVFP4 tg128 at 8k 321.23 -> 327.40 tok/s.
