@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-10-07
+
 ### Security
 - cpp-httplib v0.58.0 -> v0.59.0 (#2615): an invalid `Content-Length` (`42, 42`, `+42`) answers 400 and closes the connection instead of parsing the body as the next request; control characters in the request-target answer 400 (RFC 9112 §3.2, §6.3).
 
