@@ -191,8 +191,27 @@ TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.moe_arrays +
                              d.fp8_reduction + d.quant_scratch + d.splitk_scratch + d.mla_scratch +
                              d.dry_penalty + d.cublas_workspace + d.grouped3x + d.imma_scratch +
-                             d.smallm_scratch + d.parallel_block);
+                             d.smallm_scratch + d.parallel_block + d.ra2_scratch);
     EXPECT_GT(d.total(), 0u);
+}
+
+// ra2::carve for B = 1: 4096 queries x 24 heads, 32768 keys x 8 kv heads, hd 128 (17424 B per 64-token tile).
+TEST(ExecRa2WorkspaceBytes, FollowsTheCarveLayout) {
+    // amax 256 + ksum 4096 + HeadScale 256 + Qr 393216 + Qq 12582912 + KV 8 * 512 * 17424
+    EXPECT_EQ(exec_ra2_workspace_bytes(4096, 32768, 24, 8, 128), 84349440u);
+}
+
+// RA2 prefill workspace: charged only with attention.ra2_prefill, at (max_tokens, max_seq_len).
+TEST(ExecT2Demand, Ra2ScratchIsChargedOnlyWhenRa2PrefillIsOn) {
+    ExecShape s = dense_shape();
+    s.n_heads = 24;
+    s.kv_heads_max = 8;
+    s.head_dim_max = 128;
+    EXPECT_EQ(exec_t2_demand(s, 32768).ra2_scratch, 0u) << "opt-in tier, off by default";
+    s.ra2_prefill = true;
+    const size_t on = exec_t2_demand(s, 32768).ra2_scratch;
+    EXPECT_EQ(on, exec_ra2_workspace_bytes(4096, 32768, 24, 8, 128) + 256) << "queries clamp at max_tokens";
+    EXPECT_GT(exec_t2_demand(s, 65536).ra2_scratch, on) << "KV blobs scale with the context";
 }
 
 // Cohere2 parallel block: two [max_tokens, d_model] FP16 takes, zero on every other model.

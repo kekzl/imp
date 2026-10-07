@@ -74,6 +74,7 @@ struct ExecShape {
     int qk_nope_head_dim = 0;
     int v_head_dim = 0;
     bool mla_absorb = false;  // dispatch_policy().attention.mla_absorb
+    bool ra2_prefill = false;     // dispatch_policy().attention.ra2_prefill
     bool parallel_block = false;  // Cohere2: two [max_tokens, d_model] FP16 residual copies
     // Chunk-capture K/V scratch: the site takes the MAX over per-layer arrays rather than
     // config scalars (hybrids have layers with different kv-head counts), so carry both
@@ -161,11 +162,14 @@ struct ExecT2Demand {
     size_t smallm_scratch = 0;
     // Cohere2 parallel block: layer input + (input + attn), [max_tokens, d_model] FP16 each.
     size_t parallel_block = 0;
+    // RA2 prefill workspace (compute/attention_ra2.cu) at (max_tokens, max_seq_len): Q packing + KV
+    // blobs of 136*hd+16 B per 64 tokens per kv head. Charged only when attention.ra2_prefill is on.
+    size_t ra2_scratch = 0;
 
     size_t total() const {
         return mmvq_scratch + nvfp4_dequant + sample_scratch + penalty_counts + moe_arrays + fp8_reduction +
                quant_scratch + splitk_scratch + mla_scratch + dry_penalty + cublas_workspace + grouped3x +
-               imma_scratch + smallm_scratch + parallel_block;
+               imma_scratch + smallm_scratch + parallel_block + ra2_scratch;
     }
 
     // "mmvq 21.1 + nvfp4 192.0 + sample 1.0 + moe 0.00 MiB". Lives here rather
@@ -188,7 +192,8 @@ int exec_max_weight_k(const Model& model);
 // passes them rather than this header reaching for a global (there is no process-global
 // RuntimeConfig, it is per-Engine by design).
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size, bool use_fp8_prefill,
-                            bool mla_absorb = false, int capture_ctx_cap = 0, int kv_block_size = 0);
+                            bool mla_absorb = false, int capture_ctx_cap = 0, int kv_block_size = 0,
+                            bool ra2_prefill = false);
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size);
 
 // Batch defaults to 1 (i.e. the max_logit_tokens floor of 8).
@@ -202,6 +207,10 @@ ExecShape exec_shape_of(const Model& model);
 int exec_max_tokens(const ExecShape& shape, int max_seq_len);
 int exec_max_weight_k(const ExecShape& shape);
 ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len);
+
+// ra2::workspace_bytes (compute/ra2/ra2.cuh carve) for B = 1, replicated for the CPU lane;
+// test_attention_ra2.cu pins the two equal.
+size_t exec_ra2_workspace_bytes(int sq, int skv, int nh, int nkv, int hd);
 
 // Columns the SSM z buffer must hold: serves the recurrent z/gate projection
 // (ssm_inner_size) AND the attention output gate, which borrows the same allocation. On

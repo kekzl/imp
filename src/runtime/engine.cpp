@@ -28,6 +28,7 @@
 #include "model/chat_template.h"
 #include "model/image_placeholders.h"
 #include "compute/ffn_sparsity_probe.h"
+#include "compute/attention_ra2.h"
 #include "compute/gemm.h"
 #include "compute/mmq_q8_imma.h"
 #include "compute/gemm_capture_fp16_sm120.h"
@@ -731,7 +732,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                     : 0;
         const auto d = exec_t2_demand(*model_, config_.max_seq_len, config_.max_batch_size,
                                       config_.use_fp8_prefill, runtime_config_.attention.mla_absorb,
-                                      capture_cap, config_.kv_block_size);
+                                      capture_cap, config_.kv_block_size,
+                                      runtime_config_.attention.ra2_prefill);
         // The Qwen3-VL tower is engine-lifetime and an arena tenant but uploads
         // during warmup, so its demand must be read off the model's shapes here.
         // Gemma's mmproj tower stays outside the arena for now (docs/audit/SETTLED.md F-12).
@@ -758,6 +760,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         const MemError arena_err = engine_arena_open(arena_lazy ? *vmm_backend() : cuda_malloc_backend(), cap,
                                                      arena_lazy);
         if (arena_err == MemError::Ok) {
+            attention_ra2_set_workspace_bound(d.ra2_scratch);
             IMP_LOG_INFO("engine arena demand: %s + vision %.1f + batchpool %.2f MiB -> %.1f MiB reserved",
                          d.describe().c_str(), vision_bytes / (1024.0 * 1024.0),
                          batch_pool_bytes / (1024.0 * 1024.0), cap / (1024.0 * 1024.0));
