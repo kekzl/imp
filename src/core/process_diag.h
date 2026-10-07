@@ -79,6 +79,7 @@ struct ProcessDiag {
     int moe_expert_overhead_pct = 10;
     int moe_force_host_experts = 0;
     bool moe_pin_host_experts = false;
+    int moe_host_expert_pool_mib = 0;
 
     // GDN
     std::string gdn_layout_override;
@@ -201,6 +202,8 @@ int process_diag_moe_force_host_experts();
 // Copy host-resident NVFP4 experts into pinned host memory at load (a trade:
 // +14.7 % prefill for 4.6x model-load time — see dispatch_policy.h).
 [[nodiscard]] bool process_diag_moe_pin_host_experts();
+// moe.host_expert_pool_mib: a cap below the host-resident experts skips pinning them (tier serves).
+[[nodiscard]] int process_diag_moe_host_expert_pool_mib();
 
 // GDN: layout override read at model-load time by hf_config_loader (no
 // per-Engine context at that point in the loader pipeline).
