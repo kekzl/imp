@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- `attention.ra2_prefill` (opt-in): FP4 prefill tier, INT8 QK^T + two-term NVFP4 PV, hd 64/128/256, GQA, chunk continuation. pp 9142 Qwen3-8B Q8_0 13656 -> 14046 tok/s, Llama-3.2-3B Q8_0 pp 8720 29163 -> 32616 tok/s (median of 3); PPL change within +0.1 % on 3 models (#RA2PR).
+
 ### Security
 - cpp-httplib v0.58.0 -> v0.59.0 (#2615): an invalid `Content-Length` (`42, 42`, `+42`) answers 400 and closes the connection instead of parsing the body as the next request; control characters in the request-target answer 400 (RFC 9112 §3.2, §6.3).
 

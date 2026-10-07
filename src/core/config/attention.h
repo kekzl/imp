@@ -50,6 +50,9 @@ struct Attention {
     // __launch_bounds__(256, 2) pins 128 registers (137 unconstrained, 40 B
     // local frame per the ptxas baseline). Default on.
     bool fa2_dense_2cta = true;
+    // RA2 prefill (compute/ra2/): INT8 QK^T, NVFP4 P x two-term NVFP4 V, quantized per call; hd 64/128/256,
+    // causal, no window/softcap/sinks, declines under runtime.deterministic. Lossy, so opt-in.
+    bool ra2_prefill = false;
     // FP8 paged decode (HD=128): tokens per warp iteration. 4 = multitok
     // kernels (Q heads of a KV head grouped per CTA, 16-lanes-per-row layout),
     // 1 = the plain per-head kernel serves shapes multitok does not.

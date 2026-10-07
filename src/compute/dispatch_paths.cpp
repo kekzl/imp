@@ -32,6 +32,8 @@ const char* attn_prefill_outer_name(AttnPrefillOuter p) {
             return "cublas_sliced";
         case AttnPrefillOuter::FMHA_CHAIN:
             return "fmha_chain";
+        case AttnPrefillOuter::RA2:
+            return "ra2_fp4";
     }
     return "?";
 }

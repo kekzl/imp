@@ -25,7 +25,7 @@ const AttnPrefillPath kAllPrefillTiers[] = {
 };
 const AttnPrefillOuter kAllPrefillOuter[] = {
     AttnPrefillOuter::UNSET,         AttnPrefillOuter::FA2_FP16QK, AttnPrefillOuter::CUBLAS,
-    AttnPrefillOuter::CUBLAS_SLICED, AttnPrefillOuter::FMHA_CHAIN,
+    AttnPrefillOuter::CUBLAS_SLICED, AttnPrefillOuter::FMHA_CHAIN, AttnPrefillOuter::RA2,
 };
 const AttnDecodePath kAllDecode[] = {
     AttnDecodePath::UNSET, AttnDecodePath::FP16,  AttnDecodePath::FP8,      AttnDecodePath::INT8,

@@ -436,6 +436,12 @@ hd512_prefill        = "auto"
 # to 128 registers): FA2 kernel -10% at pp4096 on Qwen3-14B-NVFP4, output
 # bit-identical. Default on; false restores the single-CTA instance.
 fa2_dense_2cta       = true
+# RA2 prefill (compute/ra2/): INT8 QK^T + NVFP4 P x two-term NVFP4 V, Q/K/V
+# quantized per call. hd 64/128/256, causal; declines sliding window, softcap,
+# sinks, graph replay and runtime.deterministic. pp ~9k: Qwen3-8B Q8_0 +2.9 %,
+# Llama-3.2-3B Q8_0 +11.8 %; PPL (45k corpus) 10.7522 -> 10.6795, 18.2760 ->
+# 18.2939. Lossy, opt-in.
+ra2_prefill          = false
 # Causal FA2 CTA order: heaviest q-tiles first (a causal q-tile attends 2..32
 # KV tiles at 4096 tokens; natural order started the heaviest last). Kernel
 # sum pp4096: Qwen3-14B-NVFP4 223.532/224.010/223.556 -> 220.748/221.213/221.309 ms
