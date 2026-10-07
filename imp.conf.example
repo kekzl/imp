@@ -656,6 +656,9 @@ chunkwise_scan       = true
 # plus a cheap sequential state pass, instead of 32 CTAs walking every token.
 # Single-sequence prefill (n >= 128), HD=SS=128, either state dtype.
 chunkpar_scan        = true
+# Mamba2 prefill scan in the chunked SSD form (fp16 tensor-core GEMMs per
+# 64-token chunk) for chunks >= 128 tokens at state 128; false = per-token scan.
+ssd_scan             = true
 # Chunks (64 tokens) per chunk-parallel strip: 0 = auto (fullest kernel-1
 # wave for the model's head count on this GPU), 1..16 pins it.
 chunkpar_strip       = 0

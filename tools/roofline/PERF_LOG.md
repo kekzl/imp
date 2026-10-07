@@ -235,3 +235,27 @@ kernel=nsys kernel means (inventory.sh) ncu=ncu_cell.sh full e2e=inventory/ab_be
 | Control, 5 pairs (Qwen3-8B Q8_0, no SSM) | pp512 12260 -> 12267, tg128 299.21 -> 299.38 |
 
 Verdict: kept. Remaining limit: 2048 warps of parallelism in the bit-identical formulation; the next step is the chunked SSD form on tensor cores, which gives up bit identity with the per-token FP16 state rounding.
+
+## 2026-10-07 · Mamba2 SSM scan: chunked SSD on fp16 tensor cores
+
+[PROV: commit=52765756+branch perf/ssm-chunked-scan date=2026-10-07 hw=RTX5090 clocks=live
+kernel=nsys cuda_gpu_kern_sum, pp4096 graphs off (harness md5 ee48eda9) e2e=one imp-cli binary, `--set gdn.ssd_scan` per arm, alternating (md5 cbd3627b) ppl=45k corpus (md5 9ce8c6a4)]
+
+Per 64-token chunk: G = C B^T, M = G * exp(cs_t - cs_s) * dt_s (causal), Y = M X + exp(cs_t) C H, H = exp(cs_last) H + B^T (w x). Fp16 `mma.sync` m16n8k16, fp32 accumulate; M, H and w x as hi/lo fp16 pairs, power-of-2 row/chunk scales keep them in fp16 range.
+
+| Iteration | Change | us per 2048-token call (Nemotron pp4096) |
+|---|---|---:|
+| 0 | `ssm_scan_reg_kernel` (row above) | 478 |
+| 1 | SSD, grid (heads, head_dim / 32) = 128 CTAs, 165 regs | 216 |
+| 2 | head_dim / 16 = 256 CTAs at 2 CTAs/SM, w x formed in registers (smem 66.8 -> 46.6 KB) | 196 |
+| 3 | next chunk's B/C/x/dt staged in registers during the math, one barrier fewer per chunk (239 regs, 0 spill) | 177 |
+
+| Check | Result |
+|---|---|
+| vs double reference (hd 64/128, FP16/FP32 state, gate, padded real_n, B/C x8 past the fp16 range) | y < 2e-3, FP32 state < 1e-5 (`SSMScanSsdTest.MatchesDoubleReference`) |
+| Nemotron-3-Nano PPL, deterministic, 2 runs per arm (probe build with the SSD allowed in deterministic mode) | 9.3707 -> 9.3738 |
+| e2e A/B, 3 pairs, medians (Nemotron-3-Nano) | pp4096 45141 -> 53519 tok/s (+18.6 %), pp512 28232 -> 31482 (+11.5 %), tg128 406.79 -> 406.50 |
+| e2e A/B, 3 pairs (Nemotron-3.5-Lightning) | pp4096 40581 -> 47127 (+16.1 %), tg128 380.25 -> 380.57 |
+| greedy 400 tokens, 1.5k-token retrieval prompt, both arms | needle found, coherent |
+
+Verdict: kept, default on. Remaining limit: 32 chunks serial per CTA (ncu at iteration 2: issue 16.8 %, long_scoreboard 2.85 / barrier 1.55 per issue); next lever = sequence-parallel state passing.
