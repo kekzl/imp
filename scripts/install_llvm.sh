@@ -14,7 +14,20 @@ LLVM_KEY_FPR=6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
 [ "$#" -gt 0 ] || { echo "usage: $0 clang-format|clang-tidy|clang|libclang-rt ..." >&2; exit 2; }
 [ "$(id -u)" = "0" ] || { echo "$0: needs root" >&2; exit 2; }
 
-apt_get() { apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 "$@"; }
+# A failed apt call switches the Ubuntu mirror and retries: azure, archive.ubuntu.com and
+# kernel.org each failed alone on 2026-09-11 / 2026-10-07 (same list as .github/workflows/ci.yml).
+apt_get() {
+    local m
+    apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 "$@" && return 0
+    [ -f /etc/apt/sources.list.d/ubuntu.sources ] || return 1
+    for m in azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org; do
+        echo "install_llvm: apt-get $1 failed, Ubuntu mirror -> $m" >&2
+        sed -i -E "s#http://[a-z.]+/ubuntu/?#http://$m/ubuntu/#" /etc/apt/sources.list.d/ubuntu.sources
+        apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -qq &&
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 "$@" && return 0
+    done
+    return 1
+}
 
 # shellcheck disable=SC1091
 codename="$(. /etc/os-release && echo "${VERSION_CODENAME:?}")"
