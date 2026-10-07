@@ -114,20 +114,28 @@ void DeviceExpertCache::tier_fill_(int layer) {
     const int n = *reinterpret_cast<volatile int*>(tier_n_miss_);
     if (n <= 0)
         return;
-    int keys[kMaxEntries];
+    int keys[kMaxEntries], victims[kMaxEntries];
     HostExpertTier::UnitView views[kMaxEntries];
+    HostExpertTier::MutView wb[kMaxEntries];
     const int base = layer * 3 * n_experts_;
-    for (int i = 0; i < n; ++i)
+    for (int i = 0; i < n; ++i) {
         keys[i] = base + tier_misses_[i].key;
-    if (!tier_->acquire(keys, n, views)) {
+        victims[i] = tier_misses_[i].victim_key >= 0 ? base + tier_misses_[i].victim_key : -1;
+    }
+    // Exclusive with VRAM: hits leave the tier, victims are written back into it (#2621).
+    if (!tier_->exchange(keys, n, views, victims, wb)) {
         IMP_LOG_ERROR("Host expert tier: %d misses exceed %d units on layer %d", n, tier_->units(), layer);
-        for (int i = 0; i < n; ++i)
+        for (int i = 0; i < n; ++i) {
             tier_misses_[i].packed = tier_misses_[i].ms = nullptr;
+            tier_misses_[i].wb_packed = tier_misses_[i].wb_ms = nullptr;
+        }
         return;
     }
     for (int i = 0; i < n; ++i) {
         tier_misses_[i].packed = views[i].packed;
         tier_misses_[i].ms = views[i].ms;
+        tier_misses_[i].wb_packed = wb[i].packed;
+        tier_misses_[i].wb_ms = wb[i].ms;
     }
     std::atomic_thread_fence(std::memory_order_release);
 }
@@ -180,6 +188,13 @@ const DevExpertSrc* DeviceExpertCache::tier_stage_src_(int layer, const int32_t*
         projs = {p0};
     if (p1 >= 0)
         projs.push_back(p1);
+    // Experts in a VRAM slot stage from there: the exclusive tier does not hold them.
+    const DevExpertLayer& L = layers_[layer];
+    std::vector<int32_t> slot_of(static_cast<size_t>(3) * ne);
+    if (cudaMemcpy(slot_of.data(), L.slot_of, slot_of.size() * sizeof(int32_t), cudaMemcpyDeviceToHost) !=
+        cudaSuccess)
+        return nullptr;
+    std::memset(tier_stage_src_h_, 0, static_cast<size_t>(3) * ne * sizeof(DevExpertSrc));
     std::vector<int> keys, idx;
     const int base = layer * 3 * ne;
     for (int p : projs) {
@@ -188,6 +203,13 @@ const DevExpertSrc* DeviceExpertCache::tier_stage_src_(int layer, const int32_t*
         for (int e = std::max(0, e0); e < std::min(ne, e0 + n); ++e) {
             if (offs[e + 1] == offs[e])
                 continue;
+            const int s = slot_of[static_cast<size_t>(p) * ne + e];
+            if (s >= 0) {
+                const char* slot = L.pool + static_cast<size_t>(s) * L.slot_bytes;
+                tier_stage_src_h_[p * ne + e] =
+                    DevExpertSrc{slot, slot + ms_off_[static_cast<size_t>(layer) * 3 + p], 0.0f};
+                continue;
+            }
             keys.push_back(base + p * ne + e);
             idx.push_back(p * ne + e);
         }
@@ -195,7 +217,6 @@ const DevExpertSrc* DeviceExpertCache::tier_stage_src_(int layer, const int32_t*
     std::vector<HostExpertTier::UnitView> views(keys.size());
     if (!keys.empty() && !tier_->acquire(keys.data(), static_cast<int>(keys.size()), views.data(), true))
         return nullptr;
-    std::memset(tier_stage_src_h_, 0, static_cast<size_t>(3) * ne * sizeof(DevExpertSrc));
     for (size_t i = 0; i < keys.size(); ++i)
         tier_stage_src_h_[idx[i]] = DevExpertSrc{views[i].packed, views[i].ms, 0.0f};
     return tier_stage_src_d_;

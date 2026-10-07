@@ -17,7 +17,8 @@
 // Tiered layers (experts not pinned: host RAM short, #2621): sources live in a HostExpertTier,
 // an LRU of pinned mapped units read from the checkpoint with parallel pread. The resolve
 // kernel writes misses with their key and posts a mailbox request, a host thread fills the
-// source pointers and acks, the gather runs.
+// source pointers and acks, the gather runs. Exclusive: a unit lives in VRAM or in the tier;
+// the gather writes each victim slot back into the tier before it overwrites it.
 
 #include "exec/expert_cache.h"
 #include "exec/moe_workspace.h"
@@ -47,8 +48,11 @@ struct DevExpertSrc {
 struct DevMissEntry {
     const char* packed;
     const char* ms;
-    char* dst;    // slot base in the pool
-    int32_t key;  // proj * n_experts + expert (tiered layers: the host node fills packed/ms)
+    char* dst;        // slot base in the pool
+    char* wb_packed;  // tiered: host unit the slot's old occupant is written back to, or null
+    char* wb_ms;
+    int32_t key;         // proj * n_experts + expert (tiered layers: the tier thread fills packed/ms)
+    int32_t victim_key;  // old occupant of dst, -1 = empty slot
 };
 
 // One layer's tables, passed to the kernels by value.

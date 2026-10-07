@@ -103,8 +103,13 @@ __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __r
                 L.key_of_slot[victim] = key;
                 L.stamp[victim] = s_clock;
                 L.slot_scales[victim] = L.src[key].scale;
-                misses[s_nmiss] = DevMissEntry{L.src[key].packed, L.src[key].ms,
-                                               L.pool + static_cast<size_t>(victim) * L.slot_bytes, key};
+                misses[s_nmiss] = DevMissEntry{L.src[key].packed,
+                                               L.src[key].ms,
+                                               L.pool + static_cast<size_t>(victim) * L.slot_bytes,
+                                               nullptr,
+                                               nullptr,
+                                               key,
+                                               old};
                 ++s_nmiss;
             }
             // victim < 0 cannot happen: slots >= 3 * top_k is checked at init.
@@ -215,17 +220,26 @@ __global__ void expert_cache_gather_kernel(const DevMissEntry* __restrict__ miss
         return;  // tiered source the host node could not provide (logged there)
     const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
     const size_t t0 = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    // Tiered write-back: the same thread reads the old element before it stores the new one.
     {
         const int4* s = reinterpret_cast<const int4*>(m.packed);
         int4* d = reinterpret_cast<int4*>(m.dst);
-        for (size_t j = t0; j < packed_bytes / 16; j += stride)
+        int4* w = reinterpret_cast<int4*>(m.wb_packed);
+        for (size_t j = t0; j < packed_bytes / 16; j += stride) {
+            if (w)
+                w[j] = d[j];
             d[j] = s[j];
+        }
     }
     {
         const int4* s = reinterpret_cast<const int4*>(m.ms);
         int4* d = reinterpret_cast<int4*>(m.dst + ms_off);
-        for (size_t j = t0; j < ms_bytes / 16; j += stride)
+        int4* w = reinterpret_cast<int4*>(m.wb_ms);
+        for (size_t j = t0; j < ms_bytes / 16; j += stride) {
+            if (w)
+                w[j] = d[j];
             d[j] = s[j];
+        }
     }
 }
 
@@ -525,12 +539,13 @@ void DeviceExpertCache::destroy() {
         if (s.hits + s.misses > 0)
             IMP_LOG_INFO(
                 "Host expert tier stats: %llu hits, %llu misses (%.1f%% hit rate), %.2f GiB read in %.1f s "
-                "(%llu direct, %llu buffered, %llu mapped copies)",
+                "(%llu direct, %llu buffered, %llu mapped copies), %llu VRAM write-backs",
                 static_cast<unsigned long long>(s.hits), static_cast<unsigned long long>(s.misses),
                 100.0 * static_cast<double>(s.hits) / static_cast<double>(s.hits + s.misses),
                 s.bytes_read / (1024.0 * 1024.0 * 1024.0), s.read_ms / 1000.0,
                 static_cast<unsigned long long>(s.direct_reads),
-                static_cast<unsigned long long>(s.buffered_reads), static_cast<unsigned long long>(s.copies));
+                static_cast<unsigned long long>(s.buffered_reads), static_cast<unsigned long long>(s.copies),
+                static_cast<unsigned long long>(s.writebacks));
     }
     if (tier_thread_.joinable()) {
         tier_stop_.store(true, std::memory_order_release);

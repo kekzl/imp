@@ -234,10 +234,115 @@ void HostExpertTier::load_(int u, int key) {
     stats_.copies += copies;
 }
 
+void HostExpertTier::load_all_(const std::vector<std::pair<int, int>>& loads) {
+    if (loads.empty())
+        return;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (loads.size() == 1) {
+        load_(loads[0].first, loads[0].second);
+    } else {
+        for (const auto& [u, k] : loads)
+            pool_.submit([this, u = u, k = k] { load_(u, k); });
+        pool_.wait();
+    }
+    stats_.read_ms +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+int HostExpertTier::victim_() {
+    int u = tail_;
+    while (u >= 0 && epoch_[u] == epoch_now_)
+        u = prev_[u];
+    return u;
+}
+
+// The GPU gathered these units into VRAM during the previous step, which ended before this call.
+void HostExpertTier::release_leaving_() {
+    for (const int u : leaving_) {
+        if (key_of_[u] >= 0)
+            unit_of_[key_of_[u]] = -1;
+        key_of_[u] = -1;
+        // Free units go to the cold end: the next victim_() takes them first.
+        unlink_(u);
+        prev_[u] = tail_;
+        next_[u] = -1;
+        if (tail_ >= 0)
+            next_[tail_] = u;
+        tail_ = u;
+        if (head_ < 0)
+            head_ = u;
+    }
+    leaving_.clear();
+}
+
+bool HostExpertTier::exchange(const int* in_keys, int n, UnitView* src, const int* out_keys, MutView* wb) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!files_bound_)
+        bind_files();
+    release_leaving_();
+    ++epoch_now_;
+    int n_victims = 0;
+    for (int i = 0; i < n; ++i)
+        n_victims += out_keys[i] >= 0 ? 1 : 0;
+    if (n > n_units_ - n_lru_ || n + n_victims > n_lru_)
+        return false;
+
+    std::vector<int> unit_of_miss(static_cast<size_t>(n));
+    std::vector<std::pair<int, int>> loads;
+    uint64_t hits = 0;
+    int next_scratch = n_lru_;
+    for (int i = 0; i < n; ++i) {
+        const int k = in_keys[i];
+        int u = unit_of_[k];
+        if (u >= 0) {
+            ++hits;
+            epoch_[u] = epoch_now_;  // no victim below may take it
+            leaving_.push_back(u);
+        } else {
+            u = next_scratch++;
+            loads.emplace_back(u, k);
+        }
+        unit_of_miss[static_cast<size_t>(i)] = u;
+    }
+    load_all_(loads);
+    stats_.hits += hits;
+    stats_.misses += loads.size();
+    for (int i = 0; i < n; ++i) {
+        const int u = unit_of_miss[static_cast<size_t>(i)];
+        const size_t b = static_cast<size_t>(u) * unit_;
+        src[i] = UnitView{dev_ + b + packed_off_[u], dev_ + b + ms_off_[u]};
+    }
+    for (int i = 0; i < n; ++i) {
+        wb[i] = MutView{nullptr, nullptr};
+        const int k = out_keys[i];
+        if (k < 0)
+            continue;
+        if (unit_of_[k] >= 0) {  // still here (a prefill scan does not evict): no copy needed
+            touch_(unit_of_[k]);
+            continue;
+        }
+        const int u = victim_();
+        if (key_of_[u] >= 0)
+            unit_of_[key_of_[u]] = -1;
+        key_of_[u] = k;
+        unit_of_[k] = u;
+        epoch_[u] = epoch_now_;
+        touch_(u);
+        const size_t pk_reg = packed_region(unit_, ms_region_bytes(src_[k].ms_bytes));
+        packed_off_[u] = 0;
+        ms_off_[u] = static_cast<uint32_t>(pk_reg);
+        char* base = dev_ + static_cast<size_t>(u) * unit_;
+        wb[i] = MutView{base, base + pk_reg};
+        ++stats_.writebacks;
+    }
+    return true;
+}
+
 bool HostExpertTier::acquire(const int* keys, int n, UnitView* out, bool transient) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!files_bound_)
         bind_files();
+    release_leaving_();
     ++epoch_now_;
     // Distinct keys must fit: units used by this call are never evicted by it. Transient calls
     // count only the keys that miss, against the scratch units. Passes run in input order.
@@ -276,9 +381,7 @@ bool HostExpertTier::acquire(const int* keys, int n, UnitView* out, bool transie
         if (transient) {
             u = next_scratch++;
         } else {
-            u = tail_;  // LRU victim; the capacity check keeps it outside this call
-            while (epoch_[u] == epoch_now_)
-                u = prev_[u];
+            u = victim_();  // the capacity check keeps it outside this call
             if (key_of_[u] >= 0)
                 unit_of_[key_of_[u]] = -1;
             key_of_[u] = k;
@@ -288,18 +391,7 @@ bool HostExpertTier::acquire(const int* keys, int n, UnitView* out, bool transie
         }
         loads.emplace_back(u, k);
     }
-    if (!loads.empty()) {
-        const auto t0 = std::chrono::steady_clock::now();
-        if (loads.size() == 1) {
-            load_(loads[0].first, loads[0].second);
-        } else {
-            for (const auto& [u, k] : loads)
-                pool_.submit([this, u = u, k = k] { load_(u, k); });
-            pool_.wait();
-        }
-        stats_.read_ms +=
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    }
+    load_all_(loads);
     stats_.hits += hits;
     stats_.misses += loads.size();
     for (int i = 0; i < n; ++i) {

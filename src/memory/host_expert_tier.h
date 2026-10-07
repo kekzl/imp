@@ -61,8 +61,13 @@ public:
         const char* packed;  // device views of the unit's bytes
         const char* ms;
     };
+    struct MutView {
+        char* packed;  // device views a write-back fills; null = no write-back
+        char* ms;
+    };
     struct Stats {
-        uint64_t hits = 0, misses = 0, bytes_read = 0, direct_reads = 0, buffered_reads = 0, copies = 0;
+        uint64_t hits = 0, misses = 0, bytes_read = 0, direct_reads = 0, buffered_reads = 0, copies = 0,
+                 writebacks = 0;
         double read_ms = 0;
     };
 
@@ -88,14 +93,24 @@ public:
     // Scratch views stay valid until the next transient acquire.
     [[nodiscard]] bool acquire(const int* keys, int n, UnitView* out, bool transient = false);
 
+    // Exclusive decode step: a unit lives in VRAM or here, not both. in_keys[0..n) are distinct
+    // VRAM misses; a resident one hands out its unit (src[i]) and leaves the tier at the next
+    // call, a missing one loads into scratch. out_keys[i] is the VRAM victim miss i replaces
+    // (-1 = empty slot): it gets an LRU unit the GPU writes it back into (wb[i]; null when none
+    // or already resident). False when scratch or LRU units do not suffice.
+    [[nodiscard]] bool exchange(const int* in_keys, int n, UnitView* src, const int* out_keys, MutView* wb);
+
     // Resolves sources to file ranges (once; acquire() calls it lazily).
     void bind_files(const std::string* maps_text = nullptr);
     Stats stats() const;
 
 private:
     void load_(int unit, int key);
+    void load_all_(const std::vector<std::pair<int, int>>& loads);  // (unit, key), on the pool
     void touch_(int unit);
     void unlink_(int unit);
+    void release_leaving_();      // units handed to VRAM by the last exchange() become free
+    [[nodiscard]] int victim_();  // LRU tail not used by the current call
 
     char* host_;
     char* dev_;
@@ -109,6 +124,7 @@ private:
     std::vector<int32_t> prev_, next_;           // LRU list, head_ = most recent
     std::vector<uint32_t> epoch_;                // [n_units], acquire() call that last used the unit
     std::vector<uint32_t> packed_off_, ms_off_;  // [n_units] data offsets inside the unit
+    std::vector<int32_t> leaving_;               // units handed out by the last exchange()
     int head_ = -1, tail_ = -1;
     uint32_t epoch_now_ = 0;
     bool files_bound_ = false;

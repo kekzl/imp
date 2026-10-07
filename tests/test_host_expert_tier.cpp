@@ -121,6 +121,62 @@ TEST(HostExpertTier, TransientAcquireUsesScratchAndKeepsTheLru) {
         EXPECT_EQ(0, std::memcmp(v[i].packed, pk[lru[i]].data(), pb)) << "key " << lru[i];
 }
 
+TEST(HostExpertTier, ExchangeMovesHitsOutAndTakesVictimsIn) {
+    constexpr size_t pb = 4096, mb = 256;
+    const size_t unit = HostExpertTier::unit_bytes(pb, mb);
+    Arena arena(unit * 7);
+    constexpr int kKeys = 10;
+    std::vector<std::vector<char>> pk, ms;
+    for (int k = 0; k < kKeys; ++k) {
+        pk.push_back(pattern(pb, k));
+        ms.push_back(pattern(mb, 30 + k));
+    }
+    HostExpertTier tier(arena.p, arena.p, arena.bytes, unit, kKeys, 2, /*scratch_units=*/3);
+    ASSERT_EQ(tier.units(), 4);
+    for (int k = 0; k < kKeys; ++k)
+        tier.set_source(k, {pk[k].data(), pb, ms[k].data(), mb});
+    HostExpertTier::UnitView v[3];
+    const int warm[] = {0, 1};
+    ASSERT_TRUE(tier.acquire(warm, 2, v));
+    const auto s0 = tier.stats();
+
+    // VRAM misses 0 (here) and 5 (not here); 5 replaces VRAM victim 7, 0 an empty slot.
+    const int in[] = {0, 5};
+    const int out[] = {-1, 7};
+    HostExpertTier::MutView wb[2];
+    ASSERT_TRUE(tier.exchange(in, 2, v, out, wb));
+    EXPECT_EQ(0, std::memcmp(v[0].packed, pk[0].data(), pb));
+    EXPECT_EQ(0, std::memcmp(v[1].packed, pk[5].data(), pb));
+    EXPECT_EQ(0, std::memcmp(v[1].ms, ms[5].data(), mb));
+    EXPECT_EQ(wb[0].packed, nullptr);
+    ASSERT_NE(wb[1].packed, nullptr);
+    std::memcpy(wb[1].packed, pk[7].data(), pb);  // what the GPU writes back
+    std::memcpy(wb[1].ms, ms[7].data(), mb);
+    EXPECT_EQ(tier.stats().hits, s0.hits + 1);
+    EXPECT_EQ(tier.stats().misses, s0.misses + 1);
+    EXPECT_EQ(tier.stats().writebacks, 1u);
+
+    // 7 is resident from the write-back, 0 left with the step, 1 stayed.
+    const int k7[] = {7};
+    ASSERT_TRUE(tier.acquire(k7, 1, v));
+    EXPECT_EQ(0, std::memcmp(v[0].packed, pk[7].data(), pb));
+    EXPECT_EQ(0, std::memcmp(v[0].ms, ms[7].data(), mb));
+    EXPECT_EQ(tier.stats().misses, s0.misses + 1);
+    const int k1[] = {1};
+    ASSERT_TRUE(tier.acquire(k1, 1, v));
+    EXPECT_EQ(tier.stats().misses, s0.misses + 1);
+    const int k0[] = {0};
+    ASSERT_TRUE(tier.acquire(k0, 1, v));
+    EXPECT_EQ(tier.stats().misses, s0.misses + 2);
+
+    // Four misses exceed three scratch units.
+    const int many[] = {2, 3, 4, 6};
+    const int none[] = {-1, -1, -1, -1};
+    HostExpertTier::UnitView v4[4];
+    HostExpertTier::MutView wb4[4];
+    EXPECT_FALSE(tier.exchange(many, 4, v4, none, wb4));
+}
+
 TEST(HostExpertTier, LoadsFromMappedFileAtAlignedAndUnalignedOffsets) {
     char path[] = "/tmp/imp_host_expert_tier_XXXXXX";
     const int fd = mkstemp(path);
