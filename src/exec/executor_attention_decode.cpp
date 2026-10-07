@@ -112,9 +112,12 @@
         const int* attn_bt = layer_block_tables;
         const int* attn_ctx_lens = state.context_lens;
         int attn_max_blocks = state.max_blocks_per_seq;
+        // max_context_len bounds every row (a captured graph holds its pow2 high-water mark): at or
+        // below the engage length the selection is an identity copy, so skip both kernels (6.7 us
+        // per layer at 32 streams, Qwen3-14B-NVFP4).
         if (qscratch_.sparse_budget_blocks > 0 && cache->key_minmax_enabled() &&
-            layer_sliding_window <= 0 && layer_n_sinks <= 0 &&
-            n == n_seq && n_seq <= qscratch_.sparse_max_rows && attn_max_blocks > 0 &&
+            state.max_context_len > qscratch_.sparse_engage_blocks * kv_bs && layer_sliding_window <= 0 &&
+            layer_n_sinks <= 0 && n == n_seq && n_seq <= qscratch_.sparse_max_rows && attn_max_blocks > 0 &&
             attn_max_blocks <= qscratch_.sparse_max_ctx_blocks && nh / nkv <= 16) {
             // Proof-of-activity for A/B arms: the selection itself is decided
             // device-side, but max_context_len is a host value - once it
