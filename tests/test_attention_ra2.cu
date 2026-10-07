@@ -1,7 +1,9 @@
 // RA2 FP4 prefill (compute/attention_ra2.cu) against an FP32 CPU oracle: GQA, hd 64/128/256, odd n,
 // chunk continuation (q_offset > 0), and the declines the executor relies on.
 
+#include "compute/attention_apa.h"
 #include "compute/attention_ra2.h"
+#include "compute/ra2/apa/apa.cuh"
 #include "compute/ra2/ra2.cuh"
 #include "exec/workspace_sizes.h"
 #include "scoped_engine_arena.h"
@@ -18,6 +20,7 @@ namespace {
 
 struct Ra2Case {
     int n, kv_len, nh, nkv, hd;
+    float apa_eps = 0.f;  // > 0: attention_apa_prefill with this eps instead of RA2
 };
 
 // Causal attention, Q row i at position q_offset + i (q_offset = kv_len - n), FP32 throughout.
@@ -84,8 +87,10 @@ Ra2Result run_case(const Ra2Case& c) {
     const float scale = 1.f / std::sqrt((float)c.hd);
 
     Ra2Result r;
-    r.accepted = attention_ra2_prefill(tq, tk, tv, to, c.n, c.kv_len, c.nh, c.nkv, c.hd, scale,
-                                       c.kv_len - c.n, nullptr);
+    r.accepted = c.apa_eps > 0.f ? attention_apa_prefill(tq, tk, tv, to, c.n, c.kv_len, c.nh, c.nkv, c.hd,
+                                                         scale, c.kv_len - c.n, c.apa_eps, nullptr)
+                                 : attention_ra2_prefill(tq, tk, tv, to, c.n, c.kv_len, c.nh, c.nkv, c.hd,
+                                                         scale, c.kv_len - c.n, nullptr);
     if (r.accepted) {
         EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
         std::vector<half> ho(nq);
@@ -143,6 +148,31 @@ TEST(Ra2PrefillTest, PlannedWorkspaceMatchesTheCarve) {
 TEST(Ra2PrefillTest, DeclinesUnsupported) {
     EXPECT_FALSE(run_case({128, 128, 8, 2, 96}).accepted);   // head dim
     EXPECT_FALSE(run_case({128, 128, 6, 4, 128}).accepted);  // nh % nkv != 0
+}
+
+// APA: eps 1e-9 sends every tile to the exact FP16 pass 2 (FP16-accumulated QK and PV, FP32 softmax),
+// eps 1e30 none (pure FP4 pass 1, RA2 tolerance), 1e-2 a mix; chunk continuation as above.
+TEST(ApaPrefillTest, AllHotIsExact) {
+    const Ra2Result r = run_case({320, 320, 8, 2, 128, 1e-9f});
+    ASSERT_TRUE(r.accepted);
+    EXPECT_EQ(r.nonfinite, 0u);
+    EXPECT_GE(r.cos, 0.9999);
+    EXPECT_LE(r.rel_l1, 0.02);
+}
+TEST(ApaPrefillTest, AllColdMatchesReference) { expect_close({320, 320, 8, 2, 128, 1e30f}); }
+TEST(ApaPrefillTest, MixedMatchesReference) { expect_close({320, 320, 8, 2, 128, 1e-2f}); }
+TEST(ApaPrefillTest, ChunkContinuation) { expect_close({200, 712, 8, 2, 128, 1e-2f}); }
+TEST(ApaPrefillTest, DeclinesUnsupported) {
+    EXPECT_FALSE(run_case({128, 128, 8, 2, 64, 1e-2f}).accepted);   // hd 128 only
+    EXPECT_FALSE(run_case({128, 128, 6, 4, 128, 1e-2f}).accepted);  // nh % nkv != 0
+}
+TEST(ApaPrefillTest, PlannedWorkspaceMatchesTheCarve) {
+    const int shapes[][4] = {{320, 320, 8, 2}, {200, 712, 8, 2}, {4096, 131072, 32, 8}, {4096, 32768, 24, 8}};
+    for (const auto& c : shapes) {
+        const apa::Problem p{1, c[0], c[1], c[2], c[3], 128, c[1] - c[0], true, 1.f};
+        EXPECT_EQ(exec_apa_workspace_bytes(c[0], c[1], c[2], c[3], 128), apa::workspace_bytes(p))
+            << c[0] << "x" << c[1];
+    }
 }
 
 }  // namespace

@@ -217,6 +217,8 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("attention.fa2_hd256_bkv", cfg.attention.fa2_hd256_bkv);
     B("attention.fa2_dense_2cta", cfg.attention.fa2_dense_2cta);
     B("attention.ra2_prefill", cfg.attention.ra2_prefill);
+    F("attention.apa_eps", cfg.attention.apa_eps);
+    I("attention.apa_min_kv", cfg.attention.apa_min_kv);
     I("attention.paged_fp8_multitok", cfg.attention.paged_fp8_multitok);
     I("attention.paged_nvfp4_multitok", cfg.attention.paged_nvfp4_multitok);
     B("attention.paged_nvfp4_mma", cfg.attention.paged_nvfp4_mma);

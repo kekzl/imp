@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- `attention.apa_eps` / `apa_min_kv` (opt-in): APA prefill, FP4 pass 1 plus exact FP16 pass 2 for hot KV tiles, one launch, hd 128. Llama-3.2-3B Q8_0 106451-token prompt: fa2 6870.78, ra2 5210.04, apa 5379.87 ms. PPL vs FA2: Llama-3.2-3B +0.011 (RA2 -0.023), Qwen3-8B -0.001 (RA2 -0.079) (#2635).
 - `attention.ra2_prefill` (opt-in): FP4 prefill tier, INT8 QK^T + two-term NVFP4 PV, hd 64/128/256, GQA, chunk continuation. pp 9142 Qwen3-8B Q8_0 13656 -> 14046 tok/s, Llama-3.2-3B Q8_0 pp 8720 29163 -> 32616 tok/s (median of 3); PPL change within +0.1 % on 3 models (#2628).
 
 ### Changed
