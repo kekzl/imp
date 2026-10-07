@@ -13,13 +13,25 @@
 // The pool, its slot layout and the per-slot scale mirror are the host cache's; the two
 // paths hand the pool back and forth through generations: whoever finds the other's
 // generation moved invalidates its own view (every slot empty) before touching a slot.
+//
+// Tiered layers (experts not pinned: host RAM short, #2621): sources live in a HostExpertTier,
+// an LRU of pinned mapped units read from the checkpoint with parallel pread. The resolve
+// kernel writes misses with their key and posts a mailbox request, a host thread fills the
+// source pointers and acks, the gather runs. Exclusive: a unit lives in VRAM or in the tier;
+// the gather writes each victim slot back into the tier before it overwrites it.
 
 #include "exec/expert_cache.h"
 #include "exec/moe_workspace.h"
+#include "memory/host_expert_tier.h"
+#include "memory/host_pinned.h"
 
 #include <cuda_runtime.h>
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <thread>
 #include <vector>
 
 namespace imp {
@@ -36,7 +48,11 @@ struct DevExpertSrc {
 struct DevMissEntry {
     const char* packed;
     const char* ms;
-    char* dst;  // slot base in the pool
+    char* dst;        // slot base in the pool
+    char* wb_packed;  // tiered: host unit the slot's old occupant is written back to, or null
+    char* wb_ms;
+    int32_t key;         // proj * n_experts + expert (tiered layers: the tier thread fills packed/ms)
+    int32_t victim_key;  // old occupant of dst, -1 = empty slot
 };
 
 // One layer's tables, passed to the kernels by value.
@@ -56,6 +72,17 @@ struct DevExpertLayer {
 
 inline constexpr int kDevExpertMaxTopK = 32;  // 3 * top_k <= 96 entries per step
 
+// GPU <-> host handshake for tiered decode layers, in mapped pinned memory. The resolve kernel
+// posts req_seq; the tier thread fills the misses' sources and acks; a one-thread kernel spins
+// on ack_seq before the gather. Replaces a graph host node (~1 ms per layer under WDDM).
+struct TierMailbox {
+    uint32_t req_seq;  // GPU-written
+    int32_t layer;
+    uint32_t pad0[14];
+    uint32_t ack_seq;  // host-written, own cache line
+    uint32_t pad1[15];
+};
+
 class DeviceExpertCache {
 public:
     DeviceExpertCache() = default;
@@ -64,9 +91,12 @@ public:
     ~DeviceExpertCache() { destroy(); }
 
     // Builds the per-layer tables for every MoE layer whose experts are host-resident,
-    // NVFP4-promoted and pinned in a MAPPED slab of `model`. False (and no layer ready)
-    // when any of that does not hold; the host path then serves the layer.
+    // NVFP4-promoted and pinned in a MAPPED slab of `model`. Unpinned layers go to the host
+    // expert tier when set_host_pool_mib() >= 0 (0 = host RAM available minus 6 GiB, else the cap).
+    // False (and no layer ready) when no layer qualifies; the host path then serves.
     [[nodiscard]] bool init(const Model& model, ExpertLRUCache& cache, VRAMAllocator* alloc, int top_k);
+    // moe.host_expert_pool_mib, read by the next init(): -1 = no tier (default).
+    void set_host_pool_mib(int mib) { host_pool_mib_ = mib; }
     void destroy();
 
     [[nodiscard]] bool layer_ready(int layer) const {
@@ -100,8 +130,23 @@ public:
     // Per-projection micro-scale offset within a slot (same layout the host path uses).
     size_t ms_off(int layer, int proj) const { return ms_off_[static_cast<size_t>(layer) * 3 + proj]; }
 
+    [[nodiscard]] bool layer_tiered(int layer) const {
+        return layer >= 0 && layer < static_cast<int>(tiered_.size()) && tiered_[layer];
+    }
+
 private:
     void invalidate_(cudaStream_t stream);
+    enum class LayerSource { None, Pinned, Tier };
+    LayerSource layer_sources_(const Model& model, int l, size_t slot_size, std::vector<DevExpertSrc>& src);
+    [[nodiscard]] bool layer_layout_uniform_(size_t b) const;
+    [[nodiscard]] bool init_tier_(const Model& model, const std::vector<char>& tiered, int top_k,
+                                  int host_pool_mib);
+    void tier_fill_(int layer);
+    void tier_serve_();  // mailbox thread: one request per tiered decode layer, in order
+    // Tiered prefill staging: makes the touched units of [e0, e0 + n) x {p0, p1} (p1 = -1: none;
+    // p0 = -1: all three) resident and returns the device view of a source table, or null.
+    const DevExpertSrc* tier_stage_src_(int layer, const int32_t* expert_offsets, int e0, int n, int p0,
+                                        int p1, cudaStream_t stream);
 
     ExpertLRUCache* cache_ = nullptr;
     VRAMAllocator* alloc_ = nullptr;
@@ -116,6 +161,30 @@ private:
     unsigned long long* d_stats_ = nullptr;  // [2]
     uint64_t seen_host_generation_ = 0;
     int layers_ready_ = 0;
+
+    // Host expert tier (tiered layers only).
+    std::vector<char> tiered_;  // [n_layers]
+    std::unique_ptr<HostExpertTier> tier_;
+    PinnedBuffer tier_arena_;              // mapped units
+    PinnedBuffer tier_io_;                 // mapped: misses, n_miss, stage source table, mailbox
+    DevMissEntry* tier_misses_ = nullptr;  // host view
+    int* tier_n_miss_ = nullptr;
+    DevExpertSrc* tier_stage_src_h_ = nullptr;
+    TierMailbox* tier_mb_ = nullptr;
+    DevMissEntry* tier_misses_d_ = nullptr;  // device views
+    int* tier_n_miss_d_ = nullptr;
+    DevExpertSrc* tier_stage_src_d_ = nullptr;
+    TierMailbox* tier_mb_d_ = nullptr;
+    uint32_t* d_tier_seq_ = nullptr;  // device: last posted request
+    std::thread tier_thread_;
+    std::atomic<bool> tier_stop_{false};
+    int n_experts_ = 0;
+    int host_pool_mib_ = -1;
+    struct TierTiming {
+        unsigned long long calls = 0;
+        double busy_ms = 0, gap_ms = 0;  // serving requests / between consecutive requests
+    };
+    TierTiming tier_timing_;
 };
 
 }  // namespace imp

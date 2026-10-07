@@ -80,11 +80,13 @@ void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C, const Te
 // h_snap/d_snap_n: second state output at d_snap_n rows alongside the committed one
 // (mirrors the GDN scan's snapshot, gdn.cu) - needed when a rejected speculative draft
 // falls back to the state after the chunk's first row.
+// ssd: chunked SSD tensor-core scan where it covers the shape (gdn.ssd_scan, ssm_scan_ssd.h).
 void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C, const Tensor& dt,
                       const Tensor& A_log, const Tensor& D, const Tensor& dt_bias, void* h_state, Tensor& y,
                       const void* z, int n_tokens, int n_heads, int head_dim_ssm, int state_size,
                       int n_groups, QType h_dtype = QType::F32, cudaStream_t stream = nullptr,
-                      const int* d_real_n = nullptr, void* h_snap = nullptr, const int* d_snap_n = nullptr);
+                      const int* d_real_n = nullptr, void* h_snap = nullptr, const int* d_snap_n = nullptr,
+                      bool ssd = false);
 
 // Group RMSNorm: normalizes each of n_groups groups independently. x:[n_tokens,dim]
 // (dim=n_groups*group_size); weight:[dim]; out same shape as x.

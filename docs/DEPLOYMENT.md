@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-10-07
+commit: 52765756
 -->
 
 # Deployment
@@ -249,6 +249,7 @@ model and invariants: [`internals/MEMORY.md`](internals/MEMORY.md).
 
 - Before that it held the whole file resident: Qwen3.8-27B-NVFP4-vllm read 21.53 GiB of `VmRSS` (18.48 GiB mapping, 1.01 GiB anonymous) while `docker stats` showed 3.2 GiB, because the cgroup does not account a shared file mapping the way `ps` does.
 - Weights left on host by an offload placement refault on demand and are counted again while being read.
+- Host-resident NVFP4 experts that do not fit host RAM minus 6 GiB stay unpinned: the host expert tier pins `moe.host_expert_pool_mib` (0 = that remainder) as anonymous memory, holds what VRAM does not, and reads misses with O_DIRECT, outside the page cache (#2621).
 
 ## Serving more than one model
 

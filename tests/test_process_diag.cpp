@@ -62,6 +62,7 @@ RuntimeConfig make_non_default() {
     c.moe.mr_nr = 32;
     c.moe.expert_overhead_pct = 42;
     c.moe.force_host_experts = 7;
+    c.moe.host_expert_pool_mib = 12345;
 
     c.gdn.layout_override = "blocked";
     return c;
@@ -130,6 +131,7 @@ TEST(ProcessDiag, InstallTransfersEveryMirroredField) {
     EXPECT_EQ(process_diag_moe_mr_nr(), 32);
     EXPECT_EQ(process_diag_moe_expert_overhead_pct(), 42);
     EXPECT_EQ(process_diag_moe_force_host_experts(), 7);
+    EXPECT_EQ(process_diag_moe_host_expert_pool_mib(), 12345);
 
     EXPECT_EQ(process_diag_gdn_layout_override(), "blocked");
 }
@@ -167,6 +169,7 @@ TEST(ProcessDiag, DefaultConfigMatchesBuiltInDefaults) {
     EXPECT_EQ(process_diag_moe_mr_nr(), d.moe.mr_nr);
     EXPECT_EQ(process_diag_moe_expert_overhead_pct(), d.moe.expert_overhead_pct);
     EXPECT_EQ(process_diag_moe_force_host_experts(), d.moe.force_host_experts);
+    EXPECT_EQ(process_diag_moe_host_expert_pool_mib(), d.moe.host_expert_pool_mib);
     EXPECT_EQ(process_diag_gdn_layout_override(), d.gdn.layout_override);
 
     // "auto" (the default) maps to OFF — the arch resolvers promote it later.

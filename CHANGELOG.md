@@ -7,13 +7,19 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Added
 - `attention.ra2_prefill` (opt-in): FP4 prefill tier, INT8 QK^T + two-term NVFP4 PV, hd 64/128/256, GQA, chunk continuation. pp 9142 Qwen3-8B Q8_0 13656 -> 14046 tok/s, Llama-3.2-3B Q8_0 pp 8720 29163 -> 32616 tok/s (median of 3); PPL change within +0.1 % on 3 models (#2628).
 
+## [0.50.0] - 2026-10-07
+
 ### Security
 - cpp-httplib v0.58.0 -> v0.59.0 (#2615): an invalid `Content-Length` (`42, 42`, `+42`) answers 400 and closes the connection instead of parsing the body as the next request; control characters in the request-target answer 400 (RFC 9112 §3.2, §6.3).
+
+### Added
+- Host-resident NVFP4 experts that do not fit pinned host RAM run from a host expert tier: pinned LRU of expert units, exclusive with the VRAM expert cache, parallel O_DIRECT pread, CUDA graphs on (`moe.host_expert_pool_mib`, #2621). Flash-Next-NVFP4 at `--memory=40g`: tg512 3.1..3.9 -> 46.9..60.0 tok/s, 4020-token prefill 67.7..69.8 -> 6.8..7.7 s.
 
 ### Fixed
 - `gemm_init()` re-takes the cuBLASLt workspace and bench scratch after an arena reset or close; a stale workspace aliased the new bench scratch and hung `test-quant` at `CutlassNvfp4StreamKTest.CublasLtMatchesCutlass` (> 45 min, now 258 tests in 80 s) (#2611).
 
 ### Changed
+- Mamba2 prefill scan runs in the chunked SSD form on fp16 tensor cores (`gdn.ssd_scan`, chunks >= 128 tokens): scan 478 -> 177 us per 2048 rows; Nemotron-3-Nano pp4096 45141 -> 53519 tok/s, pp512 28232 -> 31482 (3 pairs); deterministic PPL 9.3707 -> 9.3738.
 - Q4_K MoE IMMA prefill loads A and B fragments with `ldmatrix.x4`, output bit-identical (#2441): Qwen3-30B-A3B-Q4_K_M kernel sum pp512 163.6..169.5 -> 153.8..154.8 ms, pp2048 397.1..410.7 -> 380.4..388.1 ms (3 pairs each).
 - Q4_K MoE IMMA prefill steps K by 128 (4 sub-blocks per 3 barriers, was 64), output bit-identical (#2441): Qwen3-30B-A3B-Q4_K_M pp512 kernel sum 185.6..186.4 -> 147.2..150.2 ms, pp512 13112..13173 -> 14553..14947 tok/s (3 pairs).
 - F16 split-K decode caps the split count at one wave when the multitok instance fits 1 CTA/SM (HD=512 x 2 heads): Gemma-4 global layers 1 x 8192 ran 8 x 43 CTAs in 3 waves, now 8 x 21 (34.0 us); Gemma-4-26B-A4B-NVFP4 tg at 8k 247.44..248.91 -> 248.52..250.40 tok/s (3 pairs).

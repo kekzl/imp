@@ -7,7 +7,7 @@ set(IMP_PROJECT_LANGUAGES C CXX CUDA)
 if(IMP_FUZZERS_CPU_ONLY)
     set(IMP_PROJECT_LANGUAGES C CXX)
 endif()
-project(imp LANGUAGES ${IMP_PROJECT_LANGUAGES} VERSION 0.49.0)
+project(imp LANGUAGES ${IMP_PROJECT_LANGUAGES} VERSION 0.50.0)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -171,6 +171,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/engine_arena.cpp
     src/memory/graph_slots.cpp
     src/memory/host_task_pool.cpp
+    src/memory/host_expert_tier.cpp
     src/memory/host_pinned.cpp
     src/memory/library_reserve_cache.cpp
     src/memory/block_pool.cpp
@@ -348,6 +349,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/ssm.cu
     src/compute/shortconv.cu
     src/compute/ssm_scan_reg.cu
+    src/compute/ssm_scan_ssd.cu
     src/compute/gated_residual.cu
     src/compute/ple.cu
     src/compute/gdn_factor.cu
@@ -507,6 +509,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_forward_moe_legacy.cpp
     src/exec/expert_cache.cu
     src/exec/expert_cache_device.cu
+    src/exec/expert_cache_device_tier.cpp
     src/exec/executor_qsa.cpp
     src/compute/qsa_indexer.cu
     src/exec/weight_handle.cpp
@@ -1007,6 +1010,8 @@ if(IMP_BUILD_TESTS)
         tests/test_host_pinned.cpp
         # HostTaskPool: load-time worker threads, every task runs before wait() returns.
         tests/test_host_task_pool.cpp
+        # HostExpertTier: expert-unit LRU filled by pread from the mapped checkpoint (#2621).
+        tests/test_host_expert_tier.cpp
         # Arena sizing arithmetic (A7 step 4b). Pure and Model-free via ExecShape,
         # so the numbers the T2 arena is reserved from are pinned in the lane CI
         # actually runs.
@@ -1341,6 +1346,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mtp_topw.cu
         tests/test_ssm.cu
         tests/test_ssm_scan_reg.cu
+        tests/test_ssm_scan_ssd.cu
         tests/test_json_constrain.cu
         tests/test_schema_constrain.cu
         tests/test_tool_call_constrain.cu
