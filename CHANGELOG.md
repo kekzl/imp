@@ -11,6 +11,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `gemm_init()` re-takes the cuBLASLt workspace and bench scratch after an arena reset or close; a stale workspace aliased the new bench scratch and hung `test-quant` at `CutlassNvfp4StreamKTest.CublasLtMatchesCutlass` (> 45 min, now 258 tests in 80 s) (#2611).
 
 ### Changed
+- Q4_K MoE IMMA prefill loads A and B fragments with `ldmatrix.x4`, output bit-identical (#2441): Qwen3-30B-A3B-Q4_K_M kernel sum pp512 163.6..169.5 -> 153.8..154.8 ms, pp2048 397.1..410.7 -> 380.4..388.1 ms (3 pairs each).
 - Q4_K MoE IMMA prefill steps K by 128 (4 sub-blocks per 3 barriers, was 64), output bit-identical (#2441): Qwen3-30B-A3B-Q4_K_M pp512 kernel sum 185.6..186.4 -> 147.2..150.2 ms, pp512 13112..13173 -> 14553..14947 tok/s (3 pairs).
 - F16 split-K decode caps the split count at one wave when the multitok instance fits 1 CTA/SM (HD=512 x 2 heads): Gemma-4 global layers 1 x 8192 ran 8 x 43 CTAs in 3 waves, now 8 x 21 (34.0 us); Gemma-4-26B-A4B-NVFP4 tg at 8k 247.44..248.91 -> 248.52..250.40 tok/s (3 pairs).
 - F16 paged decode at head_dim 512 (Gemma-4 global layers) runs the multitok kernel, two Q heads per CTA sharing each KV row, instead of the per-head split-K pipeline (#2467): Gemma-4-26B-A4B-NVFP4 tg after an 8192-token prompt 231.96..232.15 -> 248.89..248.94 tok/s (3 pairs).

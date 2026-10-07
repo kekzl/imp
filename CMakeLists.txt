@@ -1293,6 +1293,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mmq_q4k_imma_gemm.cu
         tests/test_mmq_q8_imma.cu
         tests/test_mmq_q8_imma_q5k.cu
+        tests/test_mmq_q8_imma_q4k_moe.cu
         tests/test_mmq_q8_imma_q6k.cu
         tests/test_mmq_q8_imma_reuse.cu
         tests/test_mmq_q8_imma_tail.cu
