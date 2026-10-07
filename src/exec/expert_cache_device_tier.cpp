@@ -36,13 +36,13 @@ bool DeviceExpertCache::init_tier_(const Model& model, const std::vector<char>& 
     const size_t need = static_cast<size_t>(n_tiered) * 3 * ne * unit;
     // Floor: one whole layer (touched-only prefill staging) plus one decode step.
     const size_t floor_b = (static_cast<size_t>(3) * ne + 3 * static_cast<size_t>(top_k)) * unit;
-    constexpr size_t kHeadroom = 6ull << 30;
     size_t budget = 0;
     if (host_pool_mib > 0) {
         budget = static_cast<size_t>(host_pool_mib) << 20;
     } else {
         const size_t avail = host_mem_available_bytes();
-        budget = avail > kHeadroom ? avail - kHeadroom : 0;
+        const size_t headroom = host_ram_headroom_bytes();  // max(6 GiB, 10 % RAM)
+        budget = avail > headroom ? avail - headroom : 0;
     }
     // LRU for every unit plus the prefill scratch (one layer) is the most the tier can use.
     size_t bytes = std::min(budget, need + static_cast<size_t>(3) * ne * unit) / unit * unit;

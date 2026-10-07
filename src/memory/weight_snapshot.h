@@ -230,7 +230,15 @@ void weight_snapshot_disarm(const WeightSnapshot* snap);
 // reports the host's figure inside a memory-capped container. Parsers separated for
 // unit testing; parse_cgroup_headroom returns 0 for "no limit".
 size_t host_mem_available_bytes();
+// MemTotal, or the cgroup limit when smaller (0 if unknown).
+size_t host_mem_total_bytes();
+// Host RAM kept free when pinning: max(6 GiB, 10 % of the total). 0 = total unknown -> 6 GiB.
+size_t host_ram_headroom_bytes(size_t total_bytes);
+size_t host_ram_headroom_bytes();
 size_t parse_meminfo_available(std::string_view meminfo_text);
+size_t parse_meminfo_total(std::string_view meminfo_text);
+// cgroup memory.max / memory.limit_in_bytes in bytes; 0 for "max" or the v1 no-limit value.
+size_t parse_cgroup_limit(std::string_view limit_text);
 size_t parse_cgroup_headroom(std::string_view limit_text, std::string_view current_text,
                              std::string_view stat_text);
 

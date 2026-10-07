@@ -49,13 +49,12 @@ static WeightUploadLog* g_upload_log = nullptr;
 static WeightSnapshot* g_warm = nullptr;
 
 // Pinned pages are not reclaimable, so pinning past what /proc/meminfo reports does not
-// slow the host down, it kills the process. 6 GiB headroom: the PLE n-gram table is
-// mmap'd and only needs page cache it can lose, but the allocator, the CUDA driver and
-// the request path still need room. host_mem_available_bytes() is weight_snapshot.h's.
+// slow the host down, it kills the process. Headroom max(6 GiB, 10 % RAM): the PLE n-gram
+// table is mmap'd and only needs page cache it can lose, but the allocator, the CUDA driver
+// and the request path still need room. Both helpers are weight_snapshot.h's.
 static bool host_pin_ram_available(size_t bytes) {
-    constexpr size_t kHeadroom = 6ull << 30;
     const size_t avail = host_mem_available_bytes();
-    return avail == 0 || avail > bytes + kHeadroom;
+    return avail == 0 || avail > bytes + host_ram_headroom_bytes();
 }
 
 // Whether the WHOLE set of host-resident NVFP4 experts fits in pinned memory. Decided once
@@ -85,12 +84,13 @@ static bool host_experts_pinnable(const std::vector<size_t>& layer_expert_bytes,
     if (host_pin_ram_available(host_expert_bytes))
         return true;
     IMP_LOG_WARN(
-        "Host NVFP4 experts: not pinning %.2f GiB, host RAM available is %.2f GiB (6 GiB "
+        "Host NVFP4 experts: not pinning %.2f GiB, host RAM available is %.2f GiB (%.2f GiB "
         "headroom kept) - the host expert tier (moe.host_expert_pool_mib) pins what fits "
         "and reads the rest from the checkpoint. Free host RAM or raise the container "
         "memory limit.",
         host_expert_bytes / (1024.0 * 1024.0 * 1024.0),
-        host_mem_available_bytes() / (1024.0 * 1024.0 * 1024.0));
+        host_mem_available_bytes() / (1024.0 * 1024.0 * 1024.0),
+        host_ram_headroom_bytes() / (1024.0 * 1024.0 * 1024.0));
     return false;
 }
 

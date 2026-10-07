@@ -7,6 +7,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Added
 - `attention.ra2_prefill` (opt-in): FP4 prefill tier, INT8 QK^T + two-term NVFP4 PV, hd 64/128/256, GQA, chunk continuation. pp 9142 Qwen3-8B Q8_0 13656 -> 14046 tok/s, Llama-3.2-3B Q8_0 pp 8720 29163 -> 32616 tok/s (median of 3); PPL change within +0.1 % on 3 models (#2628).
 
+### Changed
+- Host RAM kept free when pinning host-resident experts and sizing the host expert tier is max(6 GiB, 10 % of total RAM; a cgroup limit counts as the total) instead of a flat 6 GiB: a 128 GiB host keeps 12.8 GiB free; Flash-Next-NVFP4 at `--memory=64g` logs 6.40 GiB (#2621).
+
 ## [0.50.0] - 2026-10-07
 
 ### Security
