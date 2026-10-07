@@ -1,6 +1,6 @@
 // Q4_K RAW-read IMMA prefill kernel (sm_120a). Split out of mmq_q8_imma.cu
 // (recompile-blast-radius gate); tile constants/cp.async in mmq_q8_imma_internal.cuh,
-// kernel template declared there, launched from mmq_q8_imma.cu dispatch. Byte-identical to original.
+// kernel template declared there, launched from mmq_q8_imma.cu dispatch.
 
 #include "compute/mmq_q8_imma_internal.cuh"
 
@@ -12,8 +12,9 @@ namespace {
 
 // Q4_K RAW-read kernel: reads GGUF 144-B super-blocks directly, zero extra weight VRAM
 // (plane-repack duplicated all expert weights, hit 32-GB wall on Qwen3-30B MoE: pp512
-// 8x slower under UVM paging). One 64-wide K-step = one 32-byte nibble group per B row
-// (sub-block pair = low/high nibbles); B-fragment fetch = one u32 load + shift/mask/vsub4.
+// 8x slower under UVM paging). One 128-wide K-step = 4 sub-blocks = two 32-byte nibble groups
+// per B row (sub-block pair = low/high nibbles), 3 barriers per 16 MMAs per warp (#2441);
+// B-fragment fetch = one u32 load + shift/mask/vsub4.
 // alpha/beta computed from staged 16-B block headers after tile lands (alpha=d*sc6,
 // beta=8*alpha-dmin*m6; same algebra as mmq_q4k_imma_reorder, see mmq_q4k_imma_layout.h).
 
@@ -28,49 +29,45 @@ __device__ __forceinline__ void q4k_scale_min(int j, const uint8_t* q, uint32_t&
     }
 }
 
-constexpr int kQRow = 32 + 16;  // staged qs row: 32 B group + 16-B pad (bank stride 12 words)
-
 template <int BM>
 __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict__ A,
-                                               const __half* __restrict__ Asc,
-                                               const float* __restrict__ Ars,
-                                               const uint8_t* __restrict__ Wq4k, int base_n,
-                                               int N, int sblk_count, int8_t (*sA)[kRow],
-                                               uint8_t (*sBq)[kQRow], uint8_t (*sBh)[16],
-                                               __half (*sAsc)[2], float (*sArs)[2], int base_m,
-                                               int M, int K, int subs, int k_base,
-                                               int base_n_rows) {
+                                               const __half* __restrict__ Asc, const float* __restrict__ Ars,
+                                               const uint8_t* __restrict__ Wq4k, int base_n, int sblk_count,
+                                               int8_t (*sA)[kQ4kRow], uint8_t (*sBq)[kQ4kQRow],
+                                               uint8_t (*sBh)[16], __half (*sAsc)[kQ4kSub],
+                                               float (*sArs)[kQ4kSub], int base_m, int M, int K, int subs,
+                                               int k_base, int base_n_rows) {
 #pragma unroll
-    for (int i = tid; i < BM * 4; i += kThreads) {
-        const int row = i >> 2;
-        const int col = (i & 3) * 16;
+    for (int i = tid; i < BM * (kQ4kBK / 16); i += kThreads) {
+        const int row = i >> 3;
+        const int col = (i & 7) * 16;
         const bool valid = (base_m + row) < M;
         cp_async_cg_16(&sA[row][col],
                        A + static_cast<size_t>(base_m + row) * K + k_base + col, valid);
     }
-    const int ks = k_base / kBK;
-    const int sblk = ks >> 2;          // super-block index along K
-    const int grp = ks & 3;            // 32-byte nibble group within it
-    // #2218 bounded: grp = ks & 3 <= 3: grp * 32 <= 96 B (in-block offset)
+    const int ks = k_base / kQ4kBK;
+    const int sblk = ks >> 1;  // super-block index along K
+    const int half = ks & 1;   // 64-byte nibble-group pair within it
+    // #2218 bounded: half = ks & 1 <= 1: half * 64 <= 64 B (in-block offset)
 #pragma unroll
-    for (int i = tid; i < kBN * 3; i += kThreads) {
-        const int row = i / 3;
-        const int part = i % 3;
+    for (int i = tid; i < kBN * 5; i += kThreads) {
+        const int row = i / 5;
+        const int part = i % 5;
         const bool bvalid = (base_n_rows < 0) || (row < base_n_rows);
         const uint8_t* blk = Wq4k + (static_cast<size_t>(base_n + row) * sblk_count + sblk) * 144;
         if (part == 0) {
             cp_async_cg_16(&sBh[row][0], blk, bvalid);  // d, dmin, 12-B scales
         } else {
             const int off = (part - 1) * 16;
-            cp_async_cg_16(&sBq[row][off], blk + 16 + static_cast<ptrdiff_t>(grp * 32) + off, bvalid);
+            cp_async_cg_16(&sBq[row][off], blk + 16 + static_cast<ptrdiff_t>(half * 64) + off, bvalid);
         }
     }
     const int kb0 = k_base / 32;
 #pragma unroll
     for (int i = tid; i < BM; i += kThreads) {
         const bool valid = (base_m + i) < M;
-        cp_async_ca_4(&sAsc[i][0], Asc + static_cast<size_t>(base_m + i) * subs + kb0, valid);
-        cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
+        cp_async_ca_8(&sAsc[i][0], Asc + static_cast<size_t>(base_m + i) * subs + kb0, valid);
+        cp_async_cg_16(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
     }
 }
 
@@ -120,12 +117,20 @@ __global__ void __launch_bounds__(kThreads)
     const int cl = lane & 3;
     // #2218 bounded: cl = lane & 3 <= 3: smem column cl * 4 <= 12
 
-    __shared__ int8_t sA[kStages][BM][kRow];
-    __shared__ uint8_t sBq[kStages][kBN][kQRow];
-    __shared__ uint8_t sBh[kStages][kBN][16];
-    __shared__ __half sAsc[kStages][BM][2];
-    __shared__ float sArs[kStages][BM][2];
-    __shared__ __half2 sBab[kStages][kBN][2];  // (α, β) per (col, kb)
+    // Dynamic smem (q4k_smem_bytes): two 128-K stages exceed the 48 KB static cap at BM=128.
+    extern __shared__ __align__(16) uint8_t smem_raw[];
+    size_t off = 0;
+    auto* sA = reinterpret_cast<int8_t (*)[BM][kQ4kRow]>(smem_raw + off);
+    off += static_cast<size_t>(kStages) * BM * kQ4kRow;
+    auto* sBq = reinterpret_cast<uint8_t (*)[kBN][kQ4kQRow]>(smem_raw + off);
+    off += static_cast<size_t>(kStages) * kBN * kQ4kQRow;
+    auto* sBh = reinterpret_cast<uint8_t (*)[kBN][16]>(smem_raw + off);
+    off += static_cast<size_t>(kStages) * kBN * 16;
+    auto* sArs = reinterpret_cast<float (*)[BM][kQ4kSub]>(smem_raw + off);
+    off += static_cast<size_t>(kStages) * BM * kQ4kSub * sizeof(float);
+    auto* sBab = reinterpret_cast<__half2(*)[kBN][kQ4kSub]>(smem_raw + off);  // (alpha, beta) per (col, kb)
+    off += static_cast<size_t>(kStages) * kBN * kQ4kSub * sizeof(__half2);
+    auto* sAsc = reinterpret_cast<__half(*)[BM][kQ4kSub]>(smem_raw + off);
 
     float acc[kMF][kNF][4];
 #pragma unroll
@@ -134,18 +139,17 @@ __global__ void __launch_bounds__(kThreads)
         for (int j = 0; j < kNF; ++j)
             acc[i][j][0] = acc[i][j][1] = acc[i][j][2] = acc[i][j][3] = 0.0f;
 
-    const int ksteps = K / kBK;
-    load_kstep_q4k<BM>(tid, A, Asc, Ars, W, base_n, N, sblk_count, sA[0], sBq[0], sBh[0],
-                       sAsc[0], sArs[0], base_m, rows, K, subs, 0, n_rem);
+    const int ksteps = K / kQ4kBK;
+    load_kstep_q4k<BM>(tid, A, Asc, Ars, W, base_n, sblk_count, sA[0], sBq[0], sBh[0], sAsc[0], sArs[0],
+                       base_m, rows, K, subs, 0, n_rem);
     cp_async_commit();
 
     for (int ks = 0; ks < ksteps; ++ks) {
         const int stage = ks & 1;
         if (ks + 1 < ksteps) {
             const int nstage = (ks + 1) & 1;
-            load_kstep_q4k<BM>(tid, A, Asc, Ars, W, base_n, N, sblk_count, sA[nstage],
-                               sBq[nstage], sBh[nstage], sAsc[nstage], sArs[nstage], base_m, rows,
-                               K, subs, (ks + 1) * kBK, n_rem);
+            load_kstep_q4k<BM>(tid, A, Asc, Ars, W, base_n, sblk_count, sA[nstage], sBq[nstage], sBh[nstage],
+                               sAsc[nstage], sArs[nstage], base_m, rows, K, subs, (ks + 1) * kQ4kBK, n_rem);
             cp_async_commit();
             cp_async_wait_group<1>();
         } else {
@@ -155,11 +159,11 @@ __global__ void __launch_bounds__(kThreads)
 
         // header → (α, β) cooperative pass: one thread per (col, kb)
         {
-            const int j0 = (2 * ks) & 7;  // sub-block within the super-block
+            const int j0 = (kQ4kSub * ks) & 7;  // first sub-block within the super-block
 #pragma unroll
-            for (int i = tid; i < kBN * 2; i += kThreads) {
-                const int row = i >> 1;
-                const int kb = i & 1;
+            for (int i = tid; i < kBN * kQ4kSub; i += kThreads) {
+                const int row = i >> 2;
+                const int kb = i & 3;
                 const uint8_t* h = &sBh[stage][row][0];
                 __half d_h, dmin_h;
                 memcpy(&d_h, h, 2);
@@ -174,10 +178,11 @@ __global__ void __launch_bounds__(kThreads)
         }
         __syncthreads();
 
-#pragma unroll
-        for (int kb = 0; kb < 2; ++kb) {
+#pragma unroll 2
+        for (int kb = 0; kb < kQ4kSub; ++kb) {
             const int kc = kb * 32;
-            const uint32_t shift = kb * 4;
+            const int qoff = (kb >> 1) * 32;  // nibble group of this sub-block
+            const uint32_t shift = (kb & 1) * 4;
 #pragma unroll
             for (int mf = 0; mf < kMF; ++mf) {
                 const int arow_lo = warp_m * kTileM + mf * 16 + rl;
@@ -196,9 +201,9 @@ __global__ void __launch_bounds__(kThreads)
                 for (int nf = 0; nf < kNF; ++nf) {
                     const int bcol = warp_n * kTileN + nf * 8 + rl;
                     const uint32_t raw0 = *reinterpret_cast<const uint32_t*>(
-                        &sBq[stage][bcol][static_cast<ptrdiff_t>(cl * 4)]);
-                    const uint32_t raw1 =
-                        *reinterpret_cast<const uint32_t*>(&sBq[stage][bcol][cl * 4 + 16]);
+                        &sBq[stage][bcol][static_cast<ptrdiff_t>(qoff + cl * 4)]);
+                    const uint32_t raw1 = *reinterpret_cast<const uint32_t*>(
+                        &sBq[stage][bcol][qoff + cl * 4 + 16]);
                     const uint32_t b0 = __vsub4((raw0 >> shift) & 0x0F0F0F0Fu, 0x08080808u);
                     const uint32_t b1 = __vsub4((raw1 >> shift) & 0x0F0F0F0Fu, 0x08080808u);
 
