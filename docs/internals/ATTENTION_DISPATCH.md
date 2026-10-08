@@ -24,6 +24,7 @@ The outer gate is decided **per layer**, not per model (the part the old snippet
 
 | Condition (per layer) | Path |
 |---|---|
+| `attention.apa_eps > 0` (default on), `hd == 128`, no window, softcap or sinks, `kv_len >= attention.apa_min_kv`, `n >= 256` rows, not `runtime.deterministic` | APA (`try_apa_paged_prefill` on an FP16 cache in chunked prefill, else `try_fp4_prefill`) - FP4 pass 1, exact FP16 pass 2 over hot KV tiles |
 | no learned sinks, and `hd == 128` or (`hd == 256` and `attention.fa2_hd256`), and `fa2_fp16qk != "never"` | `try_fa2_fp16qk_prefill` - FP16-QK FA2, O(n) memory, primary path |
 | S-matrix fits and below the FMHA threshold | `attention_cublas_prefill` - materialized `[nh, n, ctx]` FP16 S-matrix |
 | `hd == 512`, S-matrix too small for the whole chunk | `attention_cublas_prefill_sliced` (#1042) - cuBLAS in workspace-sized q-row slices; 3.4-3.9x faster than the fused hd=512 FMHA at Skv 8k/16k |

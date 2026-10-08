@@ -70,11 +70,12 @@ namespace imp {
                                   q_offset, /*fp16_qk=*/true, d_kv_len, static_cast<const half*>(sinks));
 }
 
-// APA serves every length unless RA2 is on too: then RA2 below attention.apa_min_kv (faster there), APA
-// above (dense prefill per chunk APA/RA2 1.13 at kv 26624, 0.94 at 43008).
+// APA serves kv_len >= attention.apa_min_kv (below: RA2 if on, else FA2) and n >= kApaMinRows: small
+// chunks (spec verify, lookahead) would requantize the whole past per call.
+constexpr int kApaMinRows = 256;
 template <typename A>
-[[nodiscard]] static bool apa_serves_kv(const A& a, int kv_len) {
-    return !a.ra2_prefill || kv_len >= a.apa_min_kv;
+[[nodiscard]] static bool apa_serves(const A& a, int n, int kv_len) {
+    return a.apa_eps > 0.0f && kv_len >= a.apa_min_kv && n >= kApaMinRows;
 }
 
 // Chunked prefill: gather past paged KV [0, gather_cap) of the cache dtype into flat FP16 k_full / v_full.
@@ -126,23 +127,24 @@ static void gather_past_kv_fp16(KVCache* cache, int kv_layer, half* k_full, half
 
 // APA on the paged FP16 cache in chunked prefill, no gather: past keys [0, att_off) through past_bt, the
 // current chunk from kk / vv. Gates as try_fp4_prefill's APA arm, plus FP16 cache and no capture replay.
+// owner: request id whose tile cache this chunk may continue (-1 = uncached: compacted past, multi-seq).
 [[nodiscard]] static bool try_apa_paged_prefill(const DispatchPolicy& rcfg, bool cap_replay, const Tensor& q,
                                                 KVCache* cache, int kv_layer, const int* past_bt, int kv_bs,
                                                 const Tensor& kk, const Tensor& vv, int att_off, Tensor& o,
                                                 int n, int nh, int nkv, int hd, float scale,
                                                 int sliding_window, float softcap, cudaStream_t stream,
-                                                const void* sinks) {
+                                                const void* sinks, int owner) {
     const auto& a = rcfg.attention;
-    if (cap_replay || a.apa_eps <= 0.0f || cache->qtype() != QType::F16 || !apa_serves_kv(a, att_off + n) ||
-        sliding_window > 0 || softcap != 0.0f || sinks != nullptr || process_diag_deterministic())
+    if (cap_replay || cache->qtype() != QType::F16 || !apa_serves(a, n, att_off + n) || sliding_window > 0 ||
+        softcap != 0.0f || sinks != nullptr || process_diag_deterministic())
         return false;
     return attention_apa_prefill_paged(q, static_cast<const half*>(cache->k_ptr(kv_layer, 0)),
                                        static_cast<const half*>(cache->v_ptr(kv_layer, 0)), past_bt, kv_bs,
                                        kk, vv, att_off, o, n, att_off + n, nh, nkv, hd, scale, att_off,
-                                       a.apa_eps, kv_layer, stream);
+                                       a.apa_eps, kv_layer, owner, stream);
 }
 
-// Opt-in FP4 prefill tiers, tried before FA2: APA (attention.apa_eps > 0, apa_serves_kv), then
+// FP4 prefill tiers, tried before FA2: APA (attention.apa_eps > 0, apa_serves), then
 // RA2 (attention.ra2_prefill). Both decline what the kernels do not model (sliding window, softcap,
 // sinks), runtime.deterministic (RA2: float atomics; APA: reruns are bit-identical but rows depend on the
 // chunking, which that mode pins), and shapes or scratch they reject;
@@ -156,7 +158,7 @@ static void gather_past_kv_fp16(KVCache* cache, int kv_layer, half* k_full, half
     if ((!a.ra2_prefill && a.apa_eps <= 0.0f) || sliding_window > 0 || softcap != 0.0f || sinks != nullptr ||
         process_diag_deterministic())
         return AttnPrefillOuter::UNSET;
-    if (a.apa_eps > 0.0f && apa_serves_kv(a, kv_len) &&
+    if (apa_serves(a, n, kv_len) &&
         attention_apa_prefill(q, k, v, o, n, kv_len, nh, nkv, hd, scale, q_offset, a.apa_eps, stream))
         return AttnPrefillOuter::APA;
     if (a.ra2_prefill && attention_ra2_prefill(q, k, v, o, n, kv_len, nh, nkv, hd, scale, q_offset, stream))

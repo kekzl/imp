@@ -247,7 +247,7 @@ TEST(ApaPrefillTest, PagedMatchesFlat) {
     const float scale = 1.f / std::sqrt((float)hd);
     ASSERT_TRUE(attention_apa_prefill(tq, tk, tv, t1, n, kv, nh, nkv, hd, scale, tail, 1e-2f, nullptr));
     ASSERT_TRUE(attention_apa_prefill_paged(tq, dpk, dpv, dbt, bs, kt, vt, tail, t2, n, kv, nh, nkv, hd,
-                                            scale, tail, 1e-2f, /*kv_layer=*/-1, nullptr));
+                                            scale, tail, 1e-2f, /*kv_layer=*/-1, /*owner=*/-1, nullptr));
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     std::vector<half> h1(nq), h2(nq);
     cudaMemcpy(h1.data(), o1, nq * 2, cudaMemcpyDeviceToHost);
@@ -265,17 +265,45 @@ TEST(ApaPrefillTest, PagedMatchesFlat) {
     const int64_t ts0[2] = {0, (int64_t)row};
     Tensor kt0(dk, QType::F16, 2, ts0, true), vt0(dv, QType::F16, 2, ts0, true);
     ASSERT_TRUE(attention_apa_prefill_paged(tq, dpk, dpv, dbt, bs, kt0, vt0, tail, t2, n, tail, nh, nkv, hd,
-                                            scale, tail - n, 1e-2f, /*kv_layer=*/0, nullptr));
+                                            scale, tail - n, 1e-2f, /*kv_layer=*/0, /*owner=*/1, nullptr));
     ASSERT_TRUE(attention_apa_prefill_paged(tq, dpk, dpv, dbt, bs, kt, vt, tail, t2, n, kv, nh, nkv, hd,
-                                            scale, tail, 1e-2f, /*kv_layer=*/0, nullptr));
+                                            scale, tail, 1e-2f, /*kv_layer=*/0, /*owner=*/1, nullptr));
+    auto cos_vs_flat = [&] {
+        EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        cudaMemcpy(h2.data(), o2, nq * 2, cudaMemcpyDeviceToHost);
+        double d = 0, a2 = 0, b2 = 0;
+        for (size_t i = 0; i < nq; ++i) {
+            const double a = __half2float(h1[i]), b = __half2float(h2[i]);
+            d += a * b, a2 += a * a, b2 += b * b;
+        }
+        return d / std::sqrt(a2 * b2);
+    };
+    EXPECT_GE(cos_vs_flat(), 0.999) << "cached tiles";
+
+    // Another request (owner 2) at the same length on other keys: all keys but the fingerprint's (0, len/2,
+    // len-1) negated. Its tiles must not serve owner 3. eps 0.5: tiles cold, so stale tiles would show.
+    ASSERT_TRUE(attention_apa_prefill(tq, tk, tv, t1, n, kv, nh, nkv, hd, scale, tail, 0.5f, nullptr));
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-    cudaMemcpy(h2.data(), o2, nq * 2, cudaMemcpyDeviceToHost);
-    dot = na = nb = 0;
-    for (size_t i = 0; i < nq; ++i) {
-        const double a = __half2float(h1[i]), b = __half2float(h2[i]);
-        dot += a * b, na += a * a, nb += b * b;
-    }
-    EXPECT_GE(dot / std::sqrt(na * nb), 0.999) << "cached tiles";
+    cudaMemcpy(h1.data(), o1, nq * 2, cudaMemcpyDeviceToHost);
+    std::vector<half> pk2(pk), pv2(pv);
+    for (int i = 0; i < nblk; ++i)
+        for (int s = 0; s < bs; ++s)
+            if (const int key = i * bs + s; key != 0 && key != tail / 2 && key != tail - 1)
+                for (size_t e = 0; e < row; ++e) {
+                    const size_t at = (bt[i] * bs + s) * row + e;
+                    pk2[at] = __float2half(-__half2float(pk[at]));
+                    pv2[at] = __float2half(-__half2float(pv[at]));
+                }
+    cudaMemcpy(dpk, pk2.data(), tail * row * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(dpv, pv2.data(), tail * row * 2, cudaMemcpyHostToDevice);
+    ASSERT_TRUE(attention_apa_prefill_paged(tq, dpk, dpv, dbt, bs, kt0, vt0, tail, t2, n, tail, nh, nkv, hd,
+                                            scale, tail - n, 0.5f, /*kv_layer=*/0, /*owner=*/2, nullptr));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    cudaMemcpy(dpk, pk.data(), tail * row * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(dpv, pv.data(), tail * row * 2, cudaMemcpyHostToDevice);
+    ASSERT_TRUE(attention_apa_prefill_paged(tq, dpk, dpv, dbt, bs, kt, vt, tail, t2, n, kv, nh, nkv, hd,
+                                            scale, tail, 0.5f, /*kv_layer=*/0, /*owner=*/3, nullptr));
+    EXPECT_GE(cos_vs_flat(), 0.999) << "owner change restarts the cache";
     attention_apa_set_kv_states(0, 0, 0);
     for (void* p :
          {(void*)dq, (void*)dk, (void*)dv, (void*)dpk, (void*)dpv, (void*)o1, (void*)o2, (void*)dbt})

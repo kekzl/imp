@@ -576,6 +576,22 @@ else
                 pass "PPL within ${PPL_THR}% of baseline"
             fi
         fi
+        # runtime.deterministic declines APA, so the gate above never sees it: same corpus with APA on
+        # every chunk of >= 256 rows (apa_min_kv 0). Qwen3-8B Q8_0: 10.7489 vs FA2 10.7522.
+        APA_PPL=$("$BIN" --model "$DRIFT_MODEL_PATH" --perplexity "$DRIFT_CORPUS" --set attention.apa_min_kv=0 \
+                  2>&1 | grep -oP '^perplexity: \K[0-9.]+' | tail -1)
+        APA_THR=$(jq -r '.thresholds.apa_ppl_pct // 0.2' "$BASELINE")
+        if [ -z "$APA_PPL" ]; then
+            fail "APA PPL gate: no perplexity line from $BIN"
+        else
+            DELTA=$(awk -v a="$APA_PPL" -v b="$BL_PPL" 'BEGIN{printf "%.3f", (a-b)/b*100}')
+            echo "  PPL ppl_corpus_45k, APA = $APA_PPL  (baseline $BL_PPL, delta ${DELTA}%)"
+            if awk -v d="$DELTA" -v t="$APA_THR" 'BEGIN{exit !(d > t || d < -t)}'; then
+                fail "APA PPL differs more than ${APA_THR}% from the baseline"
+            else
+                pass "APA PPL within ${APA_THR}% of baseline"
+            fi
+        fi
     fi
 fi
 

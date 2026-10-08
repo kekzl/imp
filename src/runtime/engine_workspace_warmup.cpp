@@ -18,6 +18,7 @@
 #include "runtime/config.h"
 #include "runtime/engine_internal.h"
 #include "runtime/think_stop_logic.h"
+#include "compute/attention_apa.h"
 #include "compute/sampling.h"
 #include "compute/mmq_q8_imma.h"  // mmq_q8_imma_plane_bytes_used
 #include "memory/engine_arena.h"
@@ -668,6 +669,9 @@ void Engine::warmup() {
     // prefill, and real prefill widens it further when needed.
     if (executor_)
         executor_->reset_kv_calibration();
+    const ModelConfig& mc = model_->config();
+    attention_apa_warmup(mc.n_heads, mc.n_kv_heads, mc.head_dim, mc.d_model,
+                         runtime_config_.attention.apa_eps, stream_);
     // The prewarm above ran a slot per batch row; the lazy slab hands the pages back so
     // serving starts at zero committed slots.
     IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());

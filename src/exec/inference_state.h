@@ -148,6 +148,9 @@ struct InferenceState {
     // 0 means single-chunk prefill or first chunk of a chunked prefill.
     // > 0 means a follow-up chunk: tokens [0, prefill_offset) are already in the KV cache.
     int prefill_offset = 0;
+    // Request id of a single-sequence prefill (unique per request), -1 otherwise. Owner key of the APA
+    // tile cache: a chunk reuses cached tiles only when the same request quantized them.
+    int prefill_req_id = -1;
 
     // Sampling parameters
     float temperature = 1.0f;

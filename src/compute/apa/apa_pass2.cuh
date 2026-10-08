@@ -1,10 +1,11 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_pass2.cuh (v0.2.0, 502705a); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_pass2.cuh (v0.3.0, e71624b); change there first, then copy.
 // APA pass 2: exact FP16 attention over the hot tiles of pass 1, merged with its cold-tile partials.
 // CTA = same packed rows as pass 1; it streams the union of its warps' hot tiles, each warp computes only
-// its own. QK^T and PV on mma.sync m16n8k16 (f16 x f16 -> f32), online softmax in fp32 (log2 domain).
+// its own. QK^T and PV on mma.sync m16n8k16 (f16 x f16 -> f16 accumulate), online softmax in fp32 (log2
+// domain).
 #pragma once
 #include <type_traits>
 
@@ -44,9 +45,69 @@ __device__ __forceinline__ uint32_t load_h2(const T* p) {  // two consecutive el
 constexpr int P2_SMEM = 2 * BKV * 128 * 2;  // K + V tile, D = 128 FP16
 constexpr int P2_ROWB = 128 * 2;
 
-// Per-warp exact state: O as half2 ([dt][0] row lo cols T0*2,+1, [dt][1] row hi), max and sum (log2).
+// O accumulator, 16 n8 tiles x (row lo cols T0*2,+1 | row hi). APA_P2_F32O 0: half2, f16 across tiles
+// (full-rate HMMA). 1: fp32 across tiles, f16 per 16-token k-step; all-exact lc_122880_1 cos min 0.988660 ->
+// 0.999997, attn +14 to 25 % at eps 5e-3 (register spills).
+#ifndef APA_P2_F32O
+#define APA_P2_F32O 0
+#endif
+struct OAcc {
+#if APA_P2_F32O
+    float v[16][4];
+    __device__ __forceinline__ void zero() {
+#pragma unroll
+        for (int i = 0; i < 16; ++i)
+            v[i][0] = v[i][1] = v[i][2] = v[i][3] = 0.f;
+    }
+    __device__ __forceinline__ void scale(float a_lo, float a_hi) {
+#pragma unroll
+        for (int i = 0; i < 16; ++i)
+            v[i][0] *= a_lo, v[i][1] *= a_lo, v[i][2] *= a_hi, v[i][3] *= a_hi;
+    }
+    __device__ __forceinline__ float2 get(int dt, int half) const {
+        return make_float2(v[dt][2 * half], v[dt][2 * half + 1]);
+    }
+    // n8 tiles 2dp, 2dp+1 += P V (one k-step)
+    __device__ __forceinline__ void mma2(int dp, const uint32_t* pa, const uint32_t* vb) {
+        uint32_t t[2][2] = {{0u, 0u}, {0u, 0u}};
+        mma_f16h(t[0], pa, vb[0], vb[1]);
+        mma_f16h(t[1], pa, vb[2], vb[3]);
+#pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            const float2 lo = __half22float2(*reinterpret_cast<const __half2*>(&t[j][0]));
+            const float2 hi = __half22float2(*reinterpret_cast<const __half2*>(&t[j][1]));
+            v[2 * dp + j][0] += lo.x, v[2 * dp + j][1] += lo.y, v[2 * dp + j][2] += hi.x,
+                v[2 * dp + j][3] += hi.y;
+        }
+    }
+#else
+    uint32_t v[16][2];
+    __device__ __forceinline__ void zero() {
+#pragma unroll
+        for (int i = 0; i < 16; ++i)
+            v[i][0] = v[i][1] = 0u;
+    }
+    __device__ __forceinline__ void scale(float a_lo, float a_hi) {
+        const __half2 al = __float2half2_rn(a_lo), ah = __float2half2_rn(a_hi);
+#pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            *reinterpret_cast<__half2*>(&v[i][0]) = __hmul2(*reinterpret_cast<const __half2*>(&v[i][0]), al);
+            *reinterpret_cast<__half2*>(&v[i][1]) = __hmul2(*reinterpret_cast<const __half2*>(&v[i][1]), ah);
+        }
+    }
+    __device__ __forceinline__ float2 get(int dt, int half) const {
+        return __half22float2(*reinterpret_cast<const __half2*>(&v[dt][half]));
+    }
+    __device__ __forceinline__ void mma2(int dp, const uint32_t* pa, const uint32_t* vb) {
+        mma_f16h(v[2 * dp], pa, vb[0], vb[1]);
+        mma_f16h(v[2 * dp + 1], pa, vb[2], vb[3]);
+    }
+#endif
+};
+
+// Per-warp exact state: O, max and sum (log2).
 struct Rows2 {
-    uint32_t oh[16][2];
+    OAcc o;
     float m_lo, m_hi, l_lo, l_hi;
 };
 
@@ -196,14 +257,7 @@ __device__ __forceinline__ void softmax16(Rows2& w, float (&s)[8][4], float mx_l
     w.l_lo *= a_lo;
     w.l_hi *= a_hi;
     if (a_lo != 1.f || a_hi != 1.f) {
-        const __half2 al = __float2half2_rn(a_lo), ah = __float2half2_rn(a_hi);
-#pragma unroll
-        for (int i = 0; i < 16; ++i) {
-            *reinterpret_cast<__half2*>(&w.oh[i][0]) = __hmul2(*reinterpret_cast<const __half2*>(&w.oh[i][0]),
-                                                               al);
-            *reinterpret_cast<__half2*>(&w.oh[i][1]) = __hmul2(*reinterpret_cast<const __half2*>(&w.oh[i][1]),
-                                                               ah);
-        }
+        w.o.scale(a_lo, a_hi);
     }
 #pragma unroll
     for (int nt = 0; nt < 8; ++nt) {
@@ -217,8 +271,7 @@ __device__ __forceinline__ void softmax16(Rows2& w, float (&s)[8][4], float mx_l
 }
 
 // O += P V: P A-fragment per 16-token k-step from the S C-fragments, V via ldmatrix.trans.
-__device__ __forceinline__ void pv16(uint32_t (&oh)[16][2], const float (&s)[8][4], uint32_t vbase, int lm_i,
-                                     int lm_r) {
+__device__ __forceinline__ void pv16(Rows2& w, const float (&s)[8][4], uint32_t vbase, int lm_i, int lm_r) {
 #pragma unroll
     for (int kk = 0; kk < 4; ++kk) {
         const uint32_t pa[4] = {pack_h2(s[2 * kk][0], s[2 * kk][1]), pack_h2(s[2 * kk][2], s[2 * kk][3]),
@@ -229,8 +282,7 @@ __device__ __forceinline__ void pv16(uint32_t (&oh)[16][2], const float (&s)[8][
             const int r = kk * 16 + (lm_i & 1) * 8 + lm_r, ch = 2 * dp + (lm_i >> 1);
             uint32_t vb[4];
             ldsm_x4_t(vb, vbase + r * P2_ROWB + ((ch ^ (r & 7)) << 4));
-            mma_f16h(oh[2 * dp], pa, vb[0], vb[1]);
-            mma_f16h(oh[2 * dp + 1], pa, vb[2], vb[3]);
+            w.o.mma2(dp, pa, vb);
         }
     }
 }
@@ -250,7 +302,7 @@ __device__ __forceinline__ void merge_row(const Rows2& w, int half, const Pass1O
 #pragma unroll
     for (int dt = 0; dt < 16; ++dt) {
         const float2 a = *reinterpret_cast<const float2*>(part + dt * 8);
-        const float2 ov = __half22float2(*reinterpret_cast<const __half2*>(&w.oh[dt][half]));
+        const float2 ov = w.o.get(dt, half);
         store2(dst + dt * 8, (w1 * a.x + w2 * ov.x) * inv, (w1 * a.y + w2 * ov.y) * inv);
     }
 }
@@ -284,9 +336,7 @@ __device__ __forceinline__ void pass2_group(const T* __restrict__ Q, const RS rs
     float sh_lo, sh_hi;
     row_shift(qa, p1.ksum + (size_t)bhk * 128, qmul, T0, sh_lo, sh_hi);
     Rows2 w;
-#pragma unroll
-    for (int i = 0; i < 16; ++i)
-        w.oh[i][0] = w.oh[i][1] = 0u;
+    w.o.zero();
     w.m_lo = w.m_hi = -INFINITY;
     w.l_lo = w.l_hi = 0.f;
     bool mine_any = false;
@@ -322,7 +372,7 @@ __device__ __forceinline__ void pass2_group(const T* __restrict__ Q, const RS rs
         asm volatile("cp.async.wait_group 1;\n" ::: "memory");  // V(t)
         gsync();
         if (mine)
-            pv16(w.oh, s, vbase, lm_i, lm_r);
+            pv16(w, s, vbase, lm_i, lm_r);
         gsync();  // V buffer free
         load_tile<NW>(vbase, rs, true, tn, ro, tid);
         t = tn;
