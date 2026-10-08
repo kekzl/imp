@@ -83,7 +83,7 @@ same GGUF files, same day, `-fa 1 -ngl 999 -r 5`. Command:
 | `3dd945d5` | Qwen3-14B (Q6_K) | **6617** | 6522 | imp +1.5% |
 | `84790dac` | Gemma-4-26B-A4B MoE (Q4_K_M) | **8946** | 10749 | 1.20x behind |
 | `#617` | Qwen3-8B (Q8_0) | **12131** | 13724 | 1.13x behind |
-| `62d96a0e` | Qwen3.6-35B-A3B hybrid (Q4_K_M) | **5165** | 8027 | 1.55x behind (GDN share quality-locked FP16) |
+| `476bbeee` | Qwen3.6-35B-A3B hybrid (UD-Q4_K_M) | **13618** | 8027 | 2026-10-08, CUDA 13.4.2, 3 runs 13618-13628 vs the 2026-06-07 llama.cpp figure; was 5165 at `62d96a0e`; on main `--bench-pp 512` aborted (16-block KV pool) |
 
 **Pre-2026-07-26 prefill figures read high**: prefix caching went default-on in #758 and
 `imp-cli --bench` repeats the same prompt, so reps partly measured cache hits; #1061 disabled it
