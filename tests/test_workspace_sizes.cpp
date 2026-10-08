@@ -206,7 +206,8 @@ TEST(ExecRa2WorkspaceBytes, FollowsTheCarveLayout) {
 TEST(ExecApaWorkspaceBytes, FollowsTheCarveLayout) {
     // amax 256 + ksum 4096 + HeadScale 256 + Qr 393216 + Qq 6291456 + Qs 786432 + KV 8 * 512 * 9216
     // + masks 395520 (64 q blocks x 12 warps x 16 words, ready, tickets) + part 50331648 + ml 786432
-    EXPECT_EQ(exec_apa_workspace_bytes(4096, 32768, 24, 8, 128), 96738048u);
+    // + K column-sum chunks 8 * 32 * 128 * 4
+    EXPECT_EQ(exec_apa_workspace_bytes(4096, 32768, 24, 8, 128), 96869120u);
 }
 
 // APA prefill workspace: charged only with attention.apa_eps > 0 and hd 128.

@@ -264,7 +264,8 @@ size_t exec_ra2_workspace_bytes(int sq, int skv, int nh, int nkv, int hd) {
 
 size_t exec_apa_workspace_bytes(int sq, int skv, int nh, int nkv, int hd) {
     // apa::carve: amax[3], ksum[hd], HeadScale{q,k,v}, Qr + Qq + Qs per packed row, KV blobs, pass-1 masks
-    // (12 warps x W words per 192-row q block) + ready + 2 tickets, FP32 partials + (m, l) per row
+    // (12 warps x W words per 192-row q block) + ready + 2 tickets, FP32 partials + (m, l) per row, K
+    // column-sum chunks (16 tiles each)
     auto al = [](size_t x) { return (x + 255) & ~size_t(255); };
     const size_t bhk = static_cast<size_t>(nkv), rows = static_cast<size_t>(sq) * nh,
                  d = static_cast<size_t>(hd);
@@ -272,7 +273,7 @@ size_t exec_apa_workspace_bytes(int sq, int skv, int nh, int nkv, int hd) {
     const size_t nqb = (rows / bhk + 191) / 192;
     return al(bhk * 3 * 4) + al(bhk * d * 4) + al(bhk * 12) + al(rows * 4) + al(rows * d / 2) +
            al(rows * d / 16) + al(bhk * ntkv * 72 * d) + al((bhk * nqb * (12 * words + 1) + 2) * 4) +
-           al(rows * d * 4) + al(rows * 8);
+           al(rows * d * 4) + al(rows * 8) + al(bhk * ((ntkv + 15) / 16) * d * 4);
 }
 
 // APA prefill workspace, taken once at this bound (attention_apa_set_workspace_bound); hd 128 only.
