@@ -220,7 +220,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len);
 // ra2::workspace_bytes (compute/ra2/ra2.cuh carve) for B = 1, replicated for the CPU lane;
 // test_attention_ra2.cu pins the two equal.
 size_t exec_ra2_workspace_bytes(int sq, int skv, int nh, int nkv, int hd);
-// apa::workspace_bytes (compute/ra2/apa/apa.cuh carve) for B = 1, same contract.
+// apa::workspace_bytes (compute/apa/apa.cuh carve) for B = 1, same contract.
 size_t exec_apa_workspace_bytes(int sq, int skv, int nh, int nkv, int hd);
 // apa::kv_state_bytes(1, nkv, hd, cap_tokens), same contract.
 size_t exec_apa_kv_state_bytes(int nkv, int hd, int cap_tokens);

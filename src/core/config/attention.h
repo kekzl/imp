@@ -53,7 +53,7 @@ struct Attention {
     // RA2 prefill (compute/ra2/): INT8 QK^T, NVFP4 P x two-term NVFP4 V, quantized per call; hd 64/128/256,
     // causal, no window/softcap/sinks, declines under runtime.deterministic. Lossy, so opt-in.
     bool ra2_prefill = false;
-    // APA prefill (compute/ra2/apa/): FP4 pass 1, hot KV tiles (share of the running row sum > apa_eps) to
+    // APA prefill (compute/apa/): FP4 pass 1, hot KV tiles (share of the running row sum > apa_eps) to
     // exact FP16 pass 2; hd 128, causal, declines as ra2. 0 = off. Serves every length; with ra2_prefill on
     // too, only kv_len >= apa_min_kv (RA2 below; dense per chunk APA/RA2 1.13 at kv 26624, 0.94 at 43008).
     float apa_eps = 0.0f;

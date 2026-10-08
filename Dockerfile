@@ -144,7 +144,7 @@ FROM nvidia/cuda:13.4.2-runtime-ubuntu26.04@sha256:761af29727cf549d7938c7cbdce1e
 LABEL org.opencontainers.image.title="imp" \
       org.opencontainers.image.description="LLM inference engine in C++/CUDA for NVIDIA Blackwell sm_120 (RTX 5090/5080/5070 Ti, RTX PRO 6000). Native NVFP4 + GGUF, OpenAI/Anthropic-compatible server. Written entirely by Claude Code." \
       org.opencontainers.image.source="https://github.com/kekzl/imp" \
-      org.opencontainers.image.licenses="MIT AND Apache-2.0"
+      org.opencontainers.image.licenses="MIT AND Apache-2.0 AND MPL-2.0"
 
 # Fingerprint of the tree + build args this image was built from (empty for a
 # dirty tree). scripts/build_image.sh reads it back to skip a rebuild of the

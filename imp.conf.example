@@ -442,7 +442,7 @@ fa2_dense_2cta       = true
 # Llama-3.2-3B Q8_0 +11.8 %; PPL (45k corpus) 10.7522 -> 10.6795, 18.2760 ->
 # 18.2939. Lossy, opt-in.
 ra2_prefill          = false
-# APA prefill (compute/ra2/apa/): two passes in one launch. Pass 1 is all-FP4 and
+# APA prefill (compute/apa/): two passes in one launch. Pass 1 is all-FP4 and
 # sends a KV tile to pass 2 (exact FP16, log-sum-exp merge) when its share of the
 # running row sum exceeds apa_eps. hd 128, causal, same declines as ra2_prefill;
 # serves every length; with ra2_prefill on too, only kv_len >= apa_min_kv (RA2

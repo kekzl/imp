@@ -1,5 +1,8 @@
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
+// MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
+// Vendored from kekzl/apa include/apa/apa_attn.cuh (28603b9); change there first, then copy.
 // APA pass 1: all-FP4 flash attention that diverts hot tiles (mass share > eps of the running row sum) to
-// Vendored from kekzl/ra2 src/apa/apa_attn.cuh (85f508e); change there first, then copy.
 // pass 2 (exact FP16). Cold tiles finish here; warps with hot tiles export (o, m, l) for the merge.
 #pragma once
 #include "apa_common.cuh"
@@ -19,8 +22,8 @@ struct Pass1Out {
         ksum;  // [bhk][D] K column mean (finalized): pass 1 scores are q.(k - kmean), pass 2 must match
 };
 
-// Lazy row max: m may lag the true row max by up to TAU (-DRA2_EXACT_MAX: exact).
-#ifndef RA2_EXACT_MAX
+// Lazy row max: m may lag the true row max by up to TAU (-DAPA_EXACT_MAX: exact).
+#ifndef APA_EXACT_MAX
 constexpr float TAU = 4.f;
 #else
 constexpr float TAU = 0.f;

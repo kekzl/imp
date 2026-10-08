@@ -1,8 +1,11 @@
-// RA2: FP4 (NVFP4) flash attention prefill for sm_120a. Host API (header-only).
-// Vendored from kekzl/ra2 src/apa/apa.cuh (85f508e); change there first, then copy.
-// Q/O [B][Sq][H][D] (FP16 or BF16), K/V flat [B][Skv][Hkv][D] or paged (imp layout, FP16 or NVFP4).
-// Head dim 64/128/256, GQA (H % Hkv == 0), causal with q_offset (position of Q row 0), any Sq/Skv.
-// Returns false (declines) for unsupported problems, like imp's attention tiers.
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
+// MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
+// Vendored from kekzl/apa include/apa/apa.cuh (28603b9); change there first, then copy.
+// APA (adaptive-precision attention) prefill for sm_120a, host API (header-only). Pass 1: all-FP4 flash
+// attention; a KV tile whose share of the running row sum exceeds eps goes to pass 2 (exact FP16), merged by
+// log-sum-exp. Attention: hd 128, causal (q_offset = position of Q row 0), GQA (H % Hkv == 0). Q/O
+// [B][Sq][H][D] FP16; K/V flat [B][Skv][Hkv][D] or a paged FP16 pool + flat tail. false = declined.
 #pragma once
 #include <cuda_runtime.h>
 
@@ -111,11 +114,11 @@ template <int D>
 struct Launch;
 template <>
 struct Launch<64> {
-#ifndef RA2_NW64
-#define RA2_NW64 16
-#define RA2_ST64 6
+#ifndef APA_NW64
+#define APA_NW64 16
+#define APA_ST64 6
 #endif
-    static constexpr int NW = RA2_NW64, ST = RA2_ST64;
+    static constexpr int NW = APA_NW64, ST = APA_ST64;
 };
 template <>
 struct Launch<128> {

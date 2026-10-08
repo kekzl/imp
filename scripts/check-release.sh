@@ -247,14 +247,16 @@ if [ -f LICENSE ] && grep -q "MIT" LICENSE && grep -q "MIT" README.md; then
 else
     fail "LICENSE missing or README license claim mismatched"
 fi
-# nvfp4_quant_hw.cu (Apache-2.0, adapted from SageAttention) requires its license text in
-# every distribution (AUDIT_arch_2026 H-7). Four-way pin: file, content, OCI label, README pointer.
+# nvfp4_quant_hw.cu (Apache-2.0, adapted from SageAttention) and src/compute/apa/ (MPL-2.0, kekzl/apa)
+# require their license text in every distribution (AUDIT_arch_2026 H-7).
+# Four-way pin: file, content, OCI label, README pointer.
 if [ -f THIRD_PARTY_LICENSES.md ] && grep -q "Apache License" THIRD_PARTY_LICENSES.md \
    && grep -q "SageAttention" THIRD_PARTY_LICENSES.md \
-   && grep -q 'image.licenses="MIT AND Apache-2.0"' Dockerfile \
+   && grep -q "Mozilla Public License" THIRD_PARTY_LICENSES.md && grep -q "kekzl/apa" THIRD_PARTY_LICENSES.md \
+   && grep -q 'image.licenses="MIT AND Apache-2.0 AND MPL-2.0"' Dockerfile \
    && grep -q "THIRD_PARTY_LICENSES.md" Dockerfile \
    && grep -q "THIRD_PARTY_LICENSES.md" README.md; then
-    pass "THIRD_PARTY_LICENSES.md carries the Apache-2.0 text; Dockerfile label + COPY and README point at it"
+    pass "THIRD_PARTY_LICENSES.md carries the Apache-2.0 and MPL-2.0 texts; Dockerfile label + COPY and README point at it"
 else
     fail "THIRD_PARTY_LICENSES.md missing or incomplete, or the Dockerfile label / COPY / README pointer do not name it"
 fi
