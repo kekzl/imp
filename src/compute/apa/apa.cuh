@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa.cuh (v0.2.0, 502705a); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa.cuh (v0.3.0, e71624b); change there first, then copy.
 // APA (adaptive-precision attention) prefill for sm_120a, host API (header-only). Pass 1: all-FP4 flash
 // attention; a KV tile whose share of the running row sum exceeds eps goes to pass 2 (exact FP16), merged by
 // log-sum-exp. Attention: hd 128, causal (q_offset = position of Q row 0), GQA (H % Hkv == 0). Q/O
@@ -14,7 +14,7 @@
 
 // Version of this header set (kekzl/apa); see CHANGELOG.md.
 #define APA_VERSION_MAJOR 0
-#define APA_VERSION_MINOR 2
+#define APA_VERSION_MINOR 3
 #define APA_VERSION_PATCH 0
 
 namespace apa {
@@ -59,6 +59,9 @@ struct Workspace {
     int kvcap;           // KV / hs / ksum from a KvState of this many tiles (0: own, ntkv)
     float* kpart;        // [bhk][nchunk][D] K column sums per stats chunk (deterministic mean)
     int nchunk;
+#ifdef APA_DBG
+    float4* dbg = nullptr;  // [rows] pass-1 row state (bench APA_FULL); nullptr: not written
+#endif
     size_t bytes;
 };
 inline size_t tile_bytes(int D) {
@@ -222,7 +225,11 @@ inline cudaError_t launch_d128(const T* Q, const RS& rs, T* O, const Problem& p,
         e = cudaMemsetAsync(w.ticket, 0, 8, st);
     if (e != cudaSuccess)
         return e;
+#ifdef APA_DBG
+    const Pass1Out out{eps, w.W, w.warp_hot, w.ready, w.part, w.ml, w.ksum, w.dbg};
+#else
     const Pass1Out out{eps, w.W, w.warp_hot, w.ready, w.part, w.ml, w.ksum};
+#endif
     // per instantiation: SM count (pass-2 workers, one CTA per SM) and the device the smem opt-in was set on
     static int nsm = 0, attr_dev = -1;
     int dev = 0;

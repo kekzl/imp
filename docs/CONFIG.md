@@ -49,6 +49,9 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `attention.sparse_prefill_topk_tokens` | `-1` (auto) | auto = 8192 on qwen35, 16384 on qwen3 and qwen36moe, 24576 on qwen3moe and llama, else 0; `0` = off (#2406, #2529). Sparse prefill: past tokens a continuation chunk attends to (own chunk dense), one page selection per chunk (record: `plans/2026-08-28-sparse-decode-attention.md`) |
 | `attention.sparse_prefill_rows` | `16` | query rows per chunk that score the past pages (max 64) |
 | `attention.sparse_prefill_recent_tokens` | `1024` | past positions a continuation chunk always keeps |
+| `attention.apa_eps` | `0.01` | APA prefill (hd 128, causal, no window/softcap/sinks, not `runtime.deterministic`): FP4 pass 1, KV tiles whose share of the running row sum exceeds eps get an exact FP16 pass 2. `0` = off (FA2) |
+| `attention.apa_min_kv` | `8192` | APA serves chunks with `kv_len >= apa_min_kv` and >= 256 rows; FA2 (RA2 when `ra2_prefill`) below. With `ra2_prefill`, 40960 is the measured split |
+| `attention.apa_tile_cache` | `false` | per-layer FP4 tiles reused across prefill chunks of one request; T2 arena n_layers x 72*hd B per 64 tokens per kv head at max_seq_len (Llama-3.2-3B at 108k: 3.7 GiB) |
 | `server.prefix_pin_budget_pct` | `25` | share of the KV pool (0-100) that `cache_control` / `cache_prompt` pins and `session_id` pins may hold together; over budget the oldest pin is released; `0` = no pins of either kind (StreamingLLM sink blocks stay pinned) |
 | `server.session_ttl_s` | `600` | a `session_id` prefix pin is released after this many idle seconds; `0` = only `POST /v1/sessions/{id}/close` or the pin budget release it ([API_FEATURES.md](API_FEATURES.md#agent-sessions-session_id)) |
 | `server.model_swap` | `true` | a request naming another model in the directory swaps to it |

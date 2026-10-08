@@ -135,10 +135,11 @@
                                                                  nkv, hd, cap_replay, paged_kv_written,
                                                                  layer_sliding_window, attn_sinks, stream);
             // APA straight from the FP16 paged cache: no gather, no K/V scratch (FP16 cache only, so the
-            // NVFP4 branch above has not written this chunk).
+            // NVFP4 branch above has not written this chunk). Tile cache only over the uncompacted past.
             if (try_apa_paged_prefill(dispatch_policy(), cap_replay, qv, cache, kv_layer, past_bt, kv_bs, kk,
                                       vv, att_off, ao, n, nh, nkv, hd, scale, layer_sliding_window,
-                                      cfg.attn_logit_softcap, stream, attn_sinks)) {
+                                      cfg.attn_logit_softcap, stream, attn_sinks,
+                                      att_off == q_offset ? state.prefill_req_id : -1)) {
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::APA);
                 write_kv_cache(layer, state, stream, row_begin, n, bt_flat, bt_swa_flat, seq_positions);
                 return;

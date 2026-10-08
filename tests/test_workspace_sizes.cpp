@@ -222,7 +222,7 @@ TEST(ExecT2Demand, ApaKvStatesScaleWithLayersAndContext) {
     s.kv_heads_max = 8;
     s.head_dim_max = 128;
     s.n_layers = 28;
-    EXPECT_EQ(exec_t2_demand(s, 32768).apa_kv_states, 0u) << "opt-in tier, off by default";
+    EXPECT_EQ(exec_t2_demand(s, 32768).apa_kv_states, 0u) << "apa_prefill unset (attention.apa_eps 0)";
     s.apa_prefill = true;
     EXPECT_EQ(exec_t2_demand(s, 32768).apa_kv_states, 0u) << "attention.apa_tile_cache off";
     s.apa_tile_cache = true;
@@ -238,7 +238,7 @@ TEST(ExecT2Demand, ApaScratchIsChargedOnlyWhenApaIsOnAtHd128) {
     s.n_heads = 24;
     s.kv_heads_max = 8;
     s.head_dim_max = 128;
-    EXPECT_EQ(exec_t2_demand(s, 32768).apa_scratch, 0u) << "opt-in tier, off by default";
+    EXPECT_EQ(exec_t2_demand(s, 32768).apa_scratch, 0u) << "apa_prefill unset (attention.apa_eps 0)";
     s.apa_prefill = true;
     EXPECT_EQ(exec_t2_demand(s, 32768).apa_scratch, exec_apa_workspace_bytes(4096, 32768, 24, 8, 128) + 256);
     s.head_dim_max = 64;
