@@ -166,6 +166,85 @@ TEST(ApaPrefillTest, DeclinesUnsupported) {
     EXPECT_FALSE(run_case({128, 128, 8, 2, 64, 1e-2f}).accepted);   // hd 128 only
     EXPECT_FALSE(run_case({128, 128, 6, 4, 128, 1e-2f}).accepted);  // nh % nkv != 0
 }
+// Paged FP16 cache (shuffled 16-slot blocks for keys [0, 512), current chunk flat): same output as the
+// flat call on the same K/V up to the float-atomic order of the K/V stats.
+TEST(ApaPrefillTest, PagedMatchesFlat) {
+    ScopedEngineArena arena(64ull << 20);
+    constexpr int n = 200, kv = 712, nh = 8, nkv = 2, hd = 128, bs = 16, tail = kv - n, nblk = tail / bs;
+    const size_t row = (size_t)nkv * hd, nq = (size_t)n * nh * hd;
+    std::mt19937 rng(99);
+    std::normal_distribution<float> nd(0.f, 1.f);
+    std::vector<half> hq(nq), hk(kv * row), hv(kv * row);
+    for (auto* v : {&hq, &hk, &hv})
+        for (auto& x : *v)
+            x = __float2half(nd(rng));
+    std::vector<int> bt(nblk);
+    for (int i = 0; i < nblk; ++i)
+        bt[i] = (i * 7) % nblk;  // 7 and 32 coprime: a permutation
+    std::vector<half> pk(tail * row), pv(tail * row);
+    for (int i = 0; i < nblk; ++i)
+        for (size_t e = 0; e < bs * row; ++e) {
+            pk[bt[i] * bs * row + e] = hk[i * bs * row + e];
+            pv[bt[i] * bs * row + e] = hv[i * bs * row + e];
+        }
+    half *dq, *dk, *dv, *dpk, *dpv, *o1, *o2;
+    int* dbt;
+    ASSERT_EQ(cudaMalloc(&dq, nq * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&dk, kv * row * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&dv, kv * row * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&dpk, tail * row * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&dpv, tail * row * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&o1, nq * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&o2, nq * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&dbt, nblk * 4), cudaSuccess);
+    cudaMemcpy(dq, hq.data(), nq * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(dk, hk.data(), kv * row * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(dv, hv.data(), kv * row * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(dpk, pk.data(), tail * row * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(dpv, pv.data(), tail * row * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(dbt, bt.data(), nblk * 4, cudaMemcpyHostToDevice);
+    const int64_t qs[2] = {n, (int64_t)nh * hd}, ks[2] = {kv, (int64_t)row}, ts[2] = {n, (int64_t)row};
+    Tensor tq(dq, QType::F16, 2, qs, true), tk(dk, QType::F16, 2, ks, true), tv(dv, QType::F16, 2, ks, true);
+    Tensor t1(o1, QType::F16, 2, qs, true), t2(o2, QType::F16, 2, qs, true);
+    Tensor kt(dk + tail * row, QType::F16, 2, ts, true), vt(dv + tail * row, QType::F16, 2, ts, true);
+    const float scale = 1.f / std::sqrt((float)hd);
+    ASSERT_TRUE(attention_apa_prefill(tq, tk, tv, t1, n, kv, nh, nkv, hd, scale, tail, 1e-2f, nullptr));
+    ASSERT_TRUE(attention_apa_prefill_paged(tq, dpk, dpv, dbt, bs, kt, vt, tail, t2, n, kv, nh, nkv, hd,
+                                            scale, tail, 1e-2f, /*kv_layer=*/-1, nullptr));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<half> h1(nq), h2(nq);
+    cudaMemcpy(h1.data(), o1, nq * 2, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h2.data(), o2, nq * 2, cudaMemcpyDeviceToHost);
+    double dot = 0, na = 0, nb = 0;
+    for (size_t i = 0; i < nq; ++i) {
+        const double a = __half2float(h1[i]), b = __half2float(h2[i]);
+        dot += a * b, na += a * a, nb += b * b;
+    }
+    EXPECT_GE(dot / std::sqrt(na * nb), 0.9999);
+
+    // Tile cache of layer 0: chunk [312, 512) quantizes tiles 0..7, chunk [512, 712) only 8..11 (stats frozen
+    // at 512 keys). Same output as the flat call up to those stats.
+    attention_apa_set_kv_states(1, nkv, 1024);
+    const int64_t ts0[2] = {0, (int64_t)row};
+    Tensor kt0(dk, QType::F16, 2, ts0, true), vt0(dv, QType::F16, 2, ts0, true);
+    ASSERT_TRUE(attention_apa_prefill_paged(tq, dpk, dpv, dbt, bs, kt0, vt0, tail, t2, n, tail, nh, nkv, hd,
+                                            scale, tail - n, 1e-2f, /*kv_layer=*/0, nullptr));
+    ASSERT_TRUE(attention_apa_prefill_paged(tq, dpk, dpv, dbt, bs, kt, vt, tail, t2, n, kv, nh, nkv, hd,
+                                            scale, tail, 1e-2f, /*kv_layer=*/0, nullptr));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    cudaMemcpy(h2.data(), o2, nq * 2, cudaMemcpyDeviceToHost);
+    dot = na = nb = 0;
+    for (size_t i = 0; i < nq; ++i) {
+        const double a = __half2float(h1[i]), b = __half2float(h2[i]);
+        dot += a * b, na += a * a, nb += b * b;
+    }
+    EXPECT_GE(dot / std::sqrt(na * nb), 0.999) << "cached tiles";
+    attention_apa_set_kv_states(0, 0, 0);
+    for (void* p :
+         {(void*)dq, (void*)dk, (void*)dv, (void*)dpk, (void*)dpv, (void*)o1, (void*)o2, (void*)dbt})
+        cudaFree(p);
+}
+
 TEST(ApaPrefillTest, PlannedWorkspaceMatchesTheCarve) {
     const int shapes[][4] = {{320, 320, 8, 2}, {200, 712, 8, 2}, {4096, 131072, 32, 8}, {4096, 32768, 24, 8}};
     for (const auto& c : shapes) {
@@ -173,6 +252,8 @@ TEST(ApaPrefillTest, PlannedWorkspaceMatchesTheCarve) {
         EXPECT_EQ(exec_apa_workspace_bytes(c[0], c[1], c[2], c[3], 128), apa::workspace_bytes(p))
             << c[0] << "x" << c[1];
     }
+    for (int cap : {712, 32768, 131072})
+        EXPECT_EQ(exec_apa_kv_state_bytes(8, 128, cap), apa::kv_state_bytes(1, 8, 128, cap)) << cap;
 }
 
 }  // namespace

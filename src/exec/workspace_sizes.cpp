@@ -69,12 +69,12 @@ std::string ExecT2Demand::describe() const {
         buf, sizeof(buf),
         "mmvq %.1f + nvfp4 %.1f + sample %.1f + pen %.1f + moe %.2f + fp8red %.2f + quant %.2f "
         "+ splitk %.2f + mla %.1f + dry %.2f + cublas %.1f + grp3x %.2f + imma %.1f + chunkcap %.1f "
-        "+ smallm %.2f + par %.2f + ra2 %.1f + apa %.1f MiB",
+        "+ smallm %.2f + par %.2f + ra2 %.1f + apa %.1f + apakv %.1f MiB",
         mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB, penalty_counts / kMiB,
         moe_arrays / kMiB, fp8_reduction / kMiB, quant_scratch / kMiB, splitk_scratch / kMiB,
         mla_scratch / kMiB, dry_penalty / kMiB, cublas_workspace / kMiB, grouped3x / kMiB,
         imma_scratch / kMiB, chunk_capture / kMiB, smallm_scratch / kMiB, parallel_block / kMiB,
-        ra2_scratch / kMiB, apa_scratch / kMiB);
+        ra2_scratch / kMiB, apa_scratch / kMiB, apa_kv_states / kMiB);
     return buf;
 }
 
@@ -283,6 +283,25 @@ static size_t apa_scratch_demand(const ExecShape& shape, int t, int max_seq_len)
     return exec_apa_workspace_bytes(t, skv, shape.n_heads, shape.kv_heads_max, 128) + kTakeAlign;
 }
 
+size_t exec_apa_kv_state_bytes(int nkv, int hd, int cap_tokens) {
+    // apa::kv_state_carve: tiles [nkv][cap][72*hd], HeadScale{q,k,v}, K mean, 48-float fingerprint, redo flag
+    auto al = [](size_t x) { return (x + 255) & ~size_t(255); };
+    const size_t bhk = static_cast<size_t>(nkv), d = static_cast<size_t>(hd);
+    const size_t cap = (static_cast<size_t>(cap_tokens) + 63) / 64;
+    return al(bhk * cap * 72 * d) + al(bhk * 12) + al(bhk * d * 4) + al(size_t(48) * 4) + al(4);
+}
+
+// APA tile caches: one 256-B-aligned KvState per layer at the context length (attention_apa_set_kv_states).
+static void apa_kv_state_demand(const ExecShape& shape, int max_seq_len, ExecT2Demand& out) {
+    if (!shape.apa_prefill || !shape.apa_tile_cache || shape.kv_heads_max <= 0 || shape.head_dim_max != 128 ||
+        shape.n_layers <= 0)
+        return;
+    out.apa_kv_cap = (max_seq_len > 0) ? max_seq_len : shape.max_seq_len_cfg;
+    const size_t stride = (exec_apa_kv_state_bytes(shape.kv_heads_max, 128, out.apa_kv_cap) + 255) &
+                          ~size_t(255);
+    out.apa_kv_states = stride * static_cast<size_t>(shape.n_layers) + kTakeAlign;
+}
+
 // RA2 prefill workspace, taken once at this bound (attention_ra2_set_workspace_bound): prefill
 // chunks are <= max_tokens queries over <= max_seq_len keys, and the size grows in both.
 static size_t ra2_scratch_demand(const ExecShape& shape, int t, int max_seq_len) {
@@ -482,6 +501,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
 
     out.ra2_scratch = ra2_scratch_demand(shape, t, max_seq_len);
     out.apa_scratch = apa_scratch_demand(shape, t, max_seq_len);
+    apa_kv_state_demand(shape, max_seq_len, out);
 
     // MLA QKV scratch. kv_lora_rank > 0 IS is_mla(). Sized for max_tokens and, unlike every
     // other tenant here, has NO degradation contract: executor_attention_qkv.cu dereferences
@@ -553,13 +573,14 @@ int exec_max_weight_k(const Model& model) { return exec_max_weight_k(exec_shape_
 
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size, bool use_fp8_prefill,
                             bool mla_absorb, int capture_ctx_cap, int kv_block_size, bool ra2_prefill,
-                            bool apa_prefill) {
+                            bool apa_prefill, bool apa_tile_cache) {
     ExecShape shape = exec_shape_of(model);
     shape.max_batch_size = max_batch_size;
     shape.use_fp8_prefill = use_fp8_prefill;
     shape.mla_absorb = mla_absorb;
     shape.ra2_prefill = ra2_prefill;
     shape.apa_prefill = apa_prefill;
+    shape.apa_tile_cache = apa_tile_cache;
     shape.capture_ctx_cap = capture_ctx_cap;
     shape.kv_block_size = kv_block_size;
     return exec_t2_demand(shape, max_seq_len);
