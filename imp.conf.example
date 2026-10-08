@@ -445,7 +445,9 @@ ra2_prefill          = false
 # APA prefill (compute/ra2/apa/): two passes in one launch. Pass 1 is all-FP4 and
 # sends a KV tile to pass 2 (exact FP16, log-sum-exp merge) when its share of the
 # running row sum exceeds apa_eps. hd 128, causal, same declines as ra2_prefill;
-# tried before it when kv_len >= apa_min_kv. 0 = off. Lossy, opt-in.
+# serves every length; with ra2_prefill on too, only kv_len >= apa_min_kv (RA2
+# below). 0 = off. Lossy, opt-in. Default sparse prefill, 106451 tokens: FA2
+# 6661.95 ms, APA 5310.78 ms.
 # Llama-3.2-3B Q8_0 dense prefill (sparse_prefill_topk_tokens=0), per chunk
 # APA/RA2: 1.13 at kv 26624, 0.98 at 34816, 0.94 at 43008, 0.73 at 100352;
 # 106451-token prompt 7164.74 ms vs RA2 7881.77, FA2 11659.35.
