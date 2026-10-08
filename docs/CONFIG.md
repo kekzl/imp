@@ -40,6 +40,7 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `kv_cache.host_spill_mb` | `0` | pinned host RAM (MiB) for prefix blocks the pool reclaims; a later prefix hit restores them by H2D instead of re-prefill. Off by default; needs prefix caching, refused with SWA layers or sparse key metadata; `/metrics` `imp_kv_host_spill_*` |
 | `vram.kv_fraction` (imp.conf `[vram]` section) | `0.8` | KV share of post-reserve VRAM |
 | `vram.reserve_floor_pct` | `10` | free-VRAM headroom floor as % of total |
+| `vram.library_reserve_cache` | `""` | file for the measured first-forward charge (empty = `$XDG_CACHE_HOME/imp/library_reserve`, else `~/.cache/imp/library_reserve`; `off` = disabled). A later start of the same model plans with it instead of the constant. In a container mount the path (the image runs as `imp`: `/home/imp/.cache/imp`) or point this key at a mounted file |
 | `vram.library_reserve_mb` | `-1` (auto) | floor for the measured cuBLAS/CUTLASS first-forward charge (-1 charges the 3900 MiB constant; per-model first-forward measurements 1033-1930 MiB, #2357); since #1109 the planner's reserve is floored at it - before that, shrinking the budget shrank the reserve and left the constant uncovered |
 | `rope.scaling` (imp.conf `[rope]` section) | `""` (off) | `yarn` \| `linear`, runtime RoPE-scaling override, mirrors the model's declared `rope_scaling` metadata |
 | `rope.factor` | `1.0` | context-extension factor; raises the detected window to `factor x orig_ctx`, e.g. `4.0` stretches 32k -> 128k |

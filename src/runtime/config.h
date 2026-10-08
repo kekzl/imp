@@ -252,7 +252,8 @@ struct RuntimeConfig {
         //   -1 = built-in measured constant (default)
         //    0 = charge nothing (driver/toolkit where it does not apply)
         //   >0 = measured value for THIS host, MiB
-        // Advisory only: feeds the shadow plan logged next to the live budget.
+        // Plan input since B69: the KV plan charges it; warmup re-plans KV at this start's measurement
+        // (#2436), weight caches and IMMA planes keep the charge.
         int library_reserve_mb = -1;
         // Where to remember what the first forward ACTUALLY claimed, so a
         // later start on the same model charges the measured value instead
