@@ -1,5 +1,5 @@
 // APA common (all-FP4 base from ra2 1d72da2): Cfg<D>, layouts, PTX helpers (sm_120a).
-// Vendored from kekzl/ra2 src/apa/apa_common.cuh (6823545); change there first, then copy.
+// Vendored from kekzl/ra2 src/apa/apa_common.cuh (85f508e); change there first, then copy.
 #pragma once
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -133,6 +133,7 @@ __device__ __forceinline__ void bulk_g2s(uint32_t dst, const void* src, uint32_t
 // Packed Q rows per (b, kv head): row r = position r / G, q head hk*G + r % G (R = Sq * G rows).
 struct Dims {
     int B, Sq, Skv, H, Hkv, G, R, ntkv, q_offset;
+    int kvcap;  // KV blob stride in tiles per (b, kv head): ntkv, or a persistent KvState capacity
 };
 
 __device__ __forceinline__ float to_f(__half x) { return __half2float(x); }

@@ -452,6 +452,9 @@ ra2_prefill          = false
 # Recommended eps 0.005 (PPL Llama-3.2-3B 17.3476, Qwen3-8B 10.7903 vs FA2 17.3644, 10.7974).
 apa_eps              = 0
 apa_min_kv           = 40960
+# Tile cache across chunks (chunked prefill quantizes only new keys): 106451-token
+# dense prefill 7155.16 -> 6474.33 ms; arena +3.7 GiB at --max-seq-len 108000.
+apa_tile_cache       = true
 # Causal FA2 CTA order: heaviest q-tiles first (a causal q-tile attends 2..32
 # KV tiles at 4096 tokens; natural order started the heaviest last). Kernel
 # sum pp4096: Qwen3-14B-NVFP4 223.532/224.010/223.556 -> 220.748/221.213/221.309 ms

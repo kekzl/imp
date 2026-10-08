@@ -1,5 +1,5 @@
 // RA2 prep: KV readers (flat / paged FP16 / paged NVFP4), K/V stats, quantization into tile blobs, Q packing.
-// Vendored from kekzl/ra2 src/apa/apa_prep.cuh (6823545); change there first, then copy.
+// Vendored from kekzl/ra2 src/apa/apa_prep.cuh (85f508e); change there first, then copy.
 #pragma once
 #include "apa_common.cuh"
 
@@ -11,9 +11,18 @@ template <typename T>
 struct FlatKV {
     const T* k;
     const T* v;
+    // Row s of K or V (D contiguous elements); pass 2 copies rows as 16 B chunks.
+    __device__ __forceinline__ const T* row(bool isv, int b, int s, int hk, const Dims& dm, int D) const {
+        return (isv ? v : k) + (((size_t)b * dm.Skv + s) * dm.Hkv + hk) * D;
+    }
+    // Pass-2 tile loads: 32-bit element offset of row s (same for K and V), resolved by at().
+    __device__ __forceinline__ uint32_t row_off(int b, int s, int hk, const Dims& dm, int D) const {
+        return (uint32_t)(((b * dm.Skv + s) * dm.Hkv + hk) * D);
+    }
+    __device__ __forceinline__ const T* at(bool isv, uint32_t off) const { return (isv ? v : k) + off; }
     __device__ __forceinline__ void load16(bool isv, int b, int s, int hk, int d0, const Dims& dm, int D,
                                            float* x) const {
-        const T* p = (isv ? v : k) + (((size_t)b * dm.Skv + s) * dm.Hkv + hk) * D + d0;
+        const T* p = row(isv, b, s, hk, dm, D) + d0;
         const uint4 u0 = *reinterpret_cast<const uint4*>(p), u1 = *reinterpret_cast<const uint4*>(p + 8);
         const T* e0 = reinterpret_cast<const T*>(&u0);
         const T* e1 = reinterpret_cast<const T*>(&u1);
@@ -29,16 +38,41 @@ struct PagedF16KV {
     const __half* v;
     const int* block_table;
     int bs, max_blocks;
+    // Tokens s >= tail come from flat kt/vt [B][Skv - tail][Hkv][D] (imp: the chunk not yet in the cache).
+    const __half* kt = nullptr;
+    const __half* vt = nullptr;
+    int tail = 0x7fffffff;
+    int bs_shift = -1;  // log2(bs) when bs is a power of two (no integer division per row)
+    // Row s of K or V (D contiguous halves), nullptr for a hole.
+    __device__ __forceinline__ const __half* row(bool isv, int b, int s, int hk, const Dims& dm,
+                                                 int D) const {
+        if (s >= tail)
+            return (isv ? vt : kt) + (((size_t)b * (dm.Skv - tail) + s - tail) * dm.Hkv + hk) * D;
+        const int bi = bs_shift >= 0 ? s >> bs_shift : s / bs, si = bs_shift >= 0 ? s & (bs - 1) : s % bs;
+        const int blk = block_table[(size_t)b * max_blocks + bi];
+        return blk < 0 ? nullptr : (isv ? v : k) + (((size_t)blk * bs + si) * dm.Hkv + hk) * D;
+    }
+    // Pass-2 tile loads: 31-bit element offset of row s, bit 31 = tail buffer, ~0u = hole; resolved by at().
+    __device__ __forceinline__ uint32_t row_off(int b, int s, int hk, const Dims& dm, int D) const {
+        if (s >= tail)
+            return 0x80000000u | (uint32_t)(((b * (dm.Skv - tail) + s - tail) * dm.Hkv + hk) * D);
+        const int bi = bs_shift >= 0 ? s >> bs_shift : s / bs, si = bs_shift >= 0 ? s & (bs - 1) : s % bs;
+        const int blk = __ldg(block_table + b * max_blocks + bi);
+        return blk < 0 ? ~0u : (uint32_t)(((blk * bs + si) * dm.Hkv + hk) * D);
+    }
+    __device__ __forceinline__ const __half* at(bool isv, uint32_t off) const {
+        return ((off >> 31) ? (isv ? vt : kt) : (isv ? v : k)) + (off & 0x7fffffffu);
+    }
     __device__ __forceinline__ void load16(bool isv, int b, int s, int hk, int d0, const Dims& dm, int D,
                                            float* x) const {
-        const int blk = block_table[(size_t)b * max_blocks + s / bs];
-        if (blk < 0) {
+        const __half* r = row(isv, b, s, hk, dm, D);
+        if (r == nullptr) {
 #pragma unroll
             for (int i = 0; i < 16; ++i)
                 x[i] = 0.f;
             return;
         }
-        const __half* p = (isv ? v : k) + (((size_t)blk * bs + s % bs) * dm.Hkv + hk) * D + d0;
+        const __half* p = r + d0;
         const uint4 u0 = *reinterpret_cast<const uint4*>(p), u1 = *reinterpret_cast<const uint4*>(p + 8);
         const __half* e0 = reinterpret_cast<const __half*>(&u0);
         const __half* e1 = reinterpret_cast<const __half*>(&u1);
@@ -81,7 +115,10 @@ struct PagedNvfp4KV {
 // ---------------------------------------------------------------- stats: K mean, K/V amax per (b, kv head)
 // grid (ntkv, Hkv, B), 256 threads. amax[bhk*3 + {1:k, 2:v}] as uint bits, ksum[bhk*D + d].
 template <int D, typename Reader>
-__global__ void __launch_bounds__(256) stats_kernel(Reader rd, Dims dm, unsigned* amax, float* ksum) {
+__global__ void __launch_bounds__(256) stats_kernel(Reader rd, Dims dm, unsigned* amax, float* ksum,
+                                                    const int* redo = nullptr) {
+    if (redo != nullptr && *redo == 0)
+        return;  // KvState still valid: stats stay frozen
     constexpr int G16 = D / 16;
     __shared__ float ks_s[D];
     const int b = blockIdx.z, hk = blockIdx.y, bhk = b * dm.Hkv + hk, tid = threadIdx.x;
@@ -119,27 +156,52 @@ __global__ void __launch_bounds__(256) stats_kernel(Reader rd, Dims dm, unsigned
 }
 
 // ---------------------------------------------------------------- KV quantization into tile blobs
-// grid (ntkv, Hkv, B), 256 threads. Tokens >= Skv are zero (masked in attention).
-// K is mean-centred per channel (softmax-invariant). Global scales bound |x| so block scales fit UE4M3.
+// grid (B * Hkv), D threads: ksum -> K mean in place (count n), head scales kg / vg from the maxima,
+// widened by headroom (> 1 when later keys reuse the scales: persistent KvState, values up to headroom x).
+template <int D>
+__global__ void __launch_bounds__(D) finalize_stats_kernel(const unsigned* __restrict__ amax,
+                                                           float* __restrict__ kmean,
+                                                           HeadScale* __restrict__ hs, int n, float headroom,
+                                                           const int* redo = nullptr) {
+    if (redo != nullptr && *redo == 0)
+        return;
+    __shared__ float red[D];
+    const int bhk = blockIdx.x, d = threadIdx.x;
+    const float m = kmean[bhk * D + d] / n;
+    kmean[bhk * D + d] = m;
+    red[d] = fabsf(m);
+    __syncthreads();
+    for (int o = D / 2; o; o >>= 1) {
+        if (d < o)
+            red[d] = fmaxf(red[d], red[d + o]);
+        __syncthreads();
+    }
+    if (d == 0) {
+        const float kg = headroom * fmaxf(__uint_as_float(amax[bhk * 3 + 1]) + red[0], 1e-20f) / P_SCALE;
+        const float vg = headroom * fmaxf(__uint_as_float(amax[bhk * 3 + 2]), 1e-20f) / P_SCALE;
+        hs[bhk] = {1.f, kg, vg};
+    }
+}
+
+// grid (ntkv - t0, Hkv, B): tiles t0.. into KV (stride kvcap tiles per (b, kv head)) with the finalized
+// K mean (mean-centred K, softmax-invariant) and head scales; tokens >= Skv are zero (masked in attention).
 template <int D, typename Reader>
-__global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const unsigned* __restrict__ amax,
-                                                       const float* __restrict__ ksum,
-                                                       uint8_t* __restrict__ KV, HeadScale* __restrict__ hs) {
+__global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const float* __restrict__ kmean_g,
+                                                       const HeadScale* __restrict__ hs,
+                                                       uint8_t* __restrict__ KV, int t0, int t_keep = 0,
+                                                       const int* redo = nullptr) {
     using C = Cfg<D>;
     __shared__ __half vt[BKV][D + 2];  // V / vg (|x| <= 2688 fits FP16)
     __shared__ float kmean[D];
-    const int b = blockIdx.z, hk = blockIdx.y, bhk = b * dm.Hkv + hk, tile = blockIdx.x, tid = threadIdx.x;
+    const int b = blockIdx.z, hk = blockIdx.y, bhk = b * dm.Hkv + hk, tile = t0 + blockIdx.x,
+              tid = threadIdx.x;
+    if (tile < t_keep && redo != nullptr && *redo == 0)
+        return;  // cached tile of a still-valid KvState
     for (int d = tid; d < D; d += 256)
-        kmean[d] = ksum[bhk * D + d] / dm.Skv;
+        kmean[d] = kmean_g[bhk * D + d];
     __syncthreads();
-    float mmax = 0.f;
-    for (int d = 0; d < D; ++d)
-        mmax = fmaxf(mmax, fabsf(kmean[d]));
-    const float kg = fmaxf(__uint_as_float(amax[bhk * 3 + 1]) + mmax, 1e-20f) / P_SCALE;
-    const float vg = fmaxf(__uint_as_float(amax[bhk * 3 + 2]), 1e-20f) / P_SCALE;
-    if (tile == 0 && tid == 0)
-        hs[bhk] = {1.f, kg, vg};
-    uint8_t* blob = KV + ((size_t)bhk * dm.ntkv + tile) * C::TILE;
+    const float kg = hs[bhk].k, vg = hs[bhk].v;
+    uint8_t* blob = KV + ((size_t)bhk * dm.kvcap + tile) * C::TILE;
 
     for (int p = tid; p < BKV * C::G16; p += 256) {
         const int r = p / C::G16, g = p % C::G16, s = tile * BKV + r;
@@ -185,6 +247,40 @@ __global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const
         blob[C::K_BYTES + C::V_BYTES + C::KS_BYTES + (d & 7) * (D / 2) + (d >> 3) * 4 + g] =
             sb;  // [T1][dt][4]
     }
+}
+
+// ---------------------------------------------------------------- KvState validity (incremental prep)
+// grid (B * Hkv), D threads: zero the stat accumulators when redo is set.
+template <int D>
+__global__ void __launch_bounds__(D) reset_stats_kernel(unsigned* amax, float* kmean, const int* redo) {
+    if (*redo == 0)
+        return;
+    kmean[blockIdx.x * D + threadIdx.x] = 0.f;
+    if (threadIdx.x < 3)
+        amax[blockIdx.x * 3 + threadIdx.x] = 0u;
+}
+
+// One warp. Fingerprint = first 16 K channels of (b 0, kv head 0) at keys 0, len / 2, len - 1 (48 floats).
+// check: redo = (stored fingerprint of len != current keys); write: store the fingerprint of len.
+template <int D, typename Reader>
+__global__ void __launch_bounds__(32) kv_fingerprint_kernel(Reader rd, Dims dm, float* fp, int len, int* redo,
+                                                            bool check) {
+    const int lane = threadIdx.x, pos[3] = {0, len / 2, len - 1};
+    float x[16];
+    bool diff = false;
+    if (lane < 3) {
+        rd.load16(false, 0, pos[lane], 0, 0, dm, D, x);
+#pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            if (check)
+                diff |= fp[lane * 16 + i] != x[i];
+            else
+                fp[lane * 16 + i] = x[i];
+        }
+    }
+    diff = __any_sync(~0u, diff);
+    if (check && lane == 0)
+        *redo = diff ? 1 : 0;
 }
 
 // ---------------------------------------------------------------- Q packing + quantization
