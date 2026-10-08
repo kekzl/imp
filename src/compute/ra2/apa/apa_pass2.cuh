@@ -1,5 +1,5 @@
 // APA pass 2: exact FP16 attention over the hot tiles of pass 1, merged with its cold-tile partials.
-// Vendored from kekzl/ra2 src/apa/apa_pass2.cuh (add7bd8); change there first, then copy.
+// Vendored from kekzl/ra2 src/apa/apa_pass2.cuh (6823545); change there first, then copy.
 // CTA = same packed rows as pass 1; it streams the union of its warps' hot tiles, each warp computes only
 // its own. QK^T and PV on mma.sync m16n8k16 (f16 x f16 -> f32), online softmax in fp32 (log2 domain).
 #pragma once

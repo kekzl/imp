@@ -1,5 +1,5 @@
 // APA common (all-FP4 base from ra2 1d72da2): Cfg<D>, layouts, PTX helpers (sm_120a).
-// Vendored from kekzl/ra2 src/apa/apa_common.cuh (add7bd8); change there first, then copy.
+// Vendored from kekzl/ra2 src/apa/apa_common.cuh (6823545); change there first, then copy.
 #pragma once
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
