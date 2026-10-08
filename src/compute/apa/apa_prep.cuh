@@ -1,5 +1,8 @@
-// RA2 prep: KV readers (flat / paged FP16 / paged NVFP4), K/V stats, quantization into tile blobs, Q packing.
-// Vendored from kekzl/ra2 src/apa/apa_prep.cuh (85f508e); change there first, then copy.
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
+// MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
+// Vendored from kekzl/apa include/apa/apa_prep.cuh (28603b9); change there first, then copy.
+// APA prep: KV readers (flat / paged FP16 / paged NVFP4), K/V stats, quantization into tile blobs, Q packing.
 #pragma once
 #include "apa_common.cuh"
 

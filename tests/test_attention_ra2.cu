@@ -3,7 +3,7 @@
 
 #include "compute/attention_apa.h"
 #include "compute/attention_ra2.h"
-#include "compute/ra2/apa/apa.cuh"
+#include "compute/apa/apa.cuh"
 #include "compute/ra2/ra2.cuh"
 #include "exec/workspace_sizes.h"
 #include "scoped_engine_arena.h"

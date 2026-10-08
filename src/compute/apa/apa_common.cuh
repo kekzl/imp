@@ -1,5 +1,8 @@
+// This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
+// MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
+// Vendored from kekzl/apa include/apa/apa_common.cuh (28603b9); change there first, then copy.
 // APA common (all-FP4 base from ra2 1d72da2): Cfg<D>, layouts, PTX helpers (sm_120a).
-// Vendored from kekzl/ra2 src/apa/apa_common.cuh (85f508e); change there first, then copy.
 #pragma once
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>

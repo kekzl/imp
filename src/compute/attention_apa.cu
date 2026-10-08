@@ -1,6 +1,6 @@
 #include "compute/attention_apa.h"
 
-#include "compute/ra2/apa/apa.cuh"
+#include "compute/apa/apa.cuh"
 #include "core/cuda_static_reset.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
