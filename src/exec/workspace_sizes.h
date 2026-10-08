@@ -76,6 +76,7 @@ struct ExecShape {
     bool mla_absorb = false;  // dispatch_policy().attention.mla_absorb
     bool ra2_prefill = false;     // dispatch_policy().attention.ra2_prefill
     bool apa_prefill = false;     // dispatch_policy().attention.apa_eps > 0
+    bool apa_tile_cache = false;  // and attention.apa_tile_cache
     bool parallel_block = false;  // Cohere2: two [max_tokens, d_model] FP16 residual copies
     // Chunk-capture K/V scratch: the site takes the MAX over per-layer arrays rather than
     // config scalars (hybrids have layers with different kv-head counts), so carry both
@@ -170,11 +171,14 @@ struct ExecT2Demand {
     // blobs of 72*hd B per 64 tokens per kv head, FP32 cold partials per row. Charged when attention.apa_eps
     // > 0.
     size_t apa_scratch = 0;
+    // APA per-layer tile caches (KvState) for chunked prefill: n_layers x kv_state_bytes at max_seq_len.
+    size_t apa_kv_states = 0;
+    int apa_kv_cap = 0;  // tokens per KvState (the effective max_seq_len), for attention_apa_set_kv_states
 
     size_t total() const {
         return mmvq_scratch + nvfp4_dequant + sample_scratch + penalty_counts + moe_arrays + fp8_reduction +
                quant_scratch + splitk_scratch + mla_scratch + dry_penalty + cublas_workspace + grouped3x +
-               imma_scratch + smallm_scratch + parallel_block + ra2_scratch + apa_scratch;
+               imma_scratch + smallm_scratch + parallel_block + ra2_scratch + apa_scratch + apa_kv_states;
     }
 
     // "mmvq 21.1 + nvfp4 192.0 + sample 1.0 + moe 0.00 MiB". Lives here rather
@@ -198,7 +202,7 @@ int exec_max_weight_k(const Model& model);
 // RuntimeConfig, it is per-Engine by design).
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size, bool use_fp8_prefill,
                             bool mla_absorb = false, int capture_ctx_cap = 0, int kv_block_size = 0,
-                            bool ra2_prefill = false, bool apa_prefill = false);
+                            bool ra2_prefill = false, bool apa_prefill = false, bool apa_tile_cache = false);
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size);
 
 // Batch defaults to 1 (i.e. the max_logit_tokens floor of 8).
@@ -218,6 +222,8 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len);
 size_t exec_ra2_workspace_bytes(int sq, int skv, int nh, int nkv, int hd);
 // apa::workspace_bytes (compute/ra2/apa/apa.cuh carve) for B = 1, same contract.
 size_t exec_apa_workspace_bytes(int sq, int skv, int nh, int nkv, int hd);
+// apa::kv_state_bytes(1, nkv, hd, cap_tokens), same contract.
+size_t exec_apa_kv_state_bytes(int nkv, int hd, int cap_tokens);
 
 // Columns the SSM z buffer must hold: serves the recurrent z/gate projection
 // (ssm_inner_size) AND the attention output gate, which borrows the same allocation. On

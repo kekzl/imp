@@ -5,13 +5,14 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
-- `attention.apa_eps` / `apa_min_kv` (opt-in): APA prefill, FP4 pass 1 plus exact FP16 pass 2 for hot KV tiles, one launch, hd 128. Llama-3.2-3B Q8_0 106451-token prompt: fa2 6870.78, ra2 5210.04, apa 5379.87 ms. PPL vs FA2: Llama-3.2-3B +0.011 (RA2 -0.023), Qwen3-8B -0.001 (RA2 -0.079) (#2635).
+- `attention.apa_eps` / `apa_min_kv` (opt-in): APA prefill, FP4 pass 1 plus exact FP16 pass 2 for hot KV tiles, hd 128, kv >= 40960. Llama-3.2-3B Q8_0 106451 tokens dense: fa2 11659.35, ra2 7881.77, apa 7164.74, apa+ra2 7048.30 ms. PPL vs FA2: Llama +0.011 (RA2 -0.023), Qwen3-8B -0.001 (RA2 -0.079) (#2635).
 - `attention.ra2_prefill` (opt-in): FP4 prefill tier, INT8 QK^T + two-term NVFP4 PV, hd 64/128/256, GQA, chunk continuation. pp 9142 Qwen3-8B Q8_0 13656 -> 14046 tok/s, Llama-3.2-3B Q8_0 pp 8720 29163 -> 32616 tok/s (median of 3); PPL change within +0.1 % on 3 models (#2628).
 
 ### Fixed
 - GGUF MoE layers get an NVFP4 decode cache only when gate, up and down all qualify; a lone Q5_K/Q6_K down was never read. Qwen3.6-35B-A3B UD-Q4_K_M: 5760 MiB freed, `--bench-pp 512` aborted on a 16-block KV pool, now 13618 tok/s; Qwen3-30B-A3B Q4_K_M: 2592 MiB freed (#2637).
 
 ### Changed
+- APA (`attention.apa_eps`): serves every length unless `ra2_prefill` is on too; chunked prefill reads the paged FP16 cache and keeps per-layer FP4 tiles (`attention.apa_tile_cache`). Llama-3.2-3B Q8_0, 106451 tokens, default sparse prefill: FA2 6661.95 ms, APA 0.005 5300.33 ms; PPL 17.3501 vs 17.3644 (#2636).
 - `attention.ra2_prefill` workspace is planned in the T2 arena at (max_tokens, max_seq_len) and taken once; long prompts no longer decline for lack of arena space. Llama-3.2-3B Q8_0 at 32k context: arena +80.4 MiB, 13337-token prompt on ra2_fp4 instead of fa2_fp16qk, pp 535.86 -> 507.82 / 464.55 ms (#2633).
 - Host RAM kept free when pinning host-resident experts and sizing the host expert tier is max(6 GiB, 10 % of total RAM; a cgroup limit counts as the total) instead of a flat 6 GiB: a 128 GiB host keeps 12.8 GiB free; Flash-Next-NVFP4 at `--memory=64g` logs 6.40 GiB (#2621).
 
