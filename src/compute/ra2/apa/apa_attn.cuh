@@ -1,5 +1,5 @@
 // APA pass 1: all-FP4 flash attention that diverts hot tiles (mass share > eps of the running row sum) to
-// Vendored from kekzl/ra2 src/apa/apa_attn.cuh (add7bd8); change there first, then copy.
+// Vendored from kekzl/ra2 src/apa/apa_attn.cuh (6823545); change there first, then copy.
 // pass 2 (exact FP16). Cold tiles finish here; warps with hot tiles export (o, m, l) for the merge.
 #pragma once
 #include "apa_common.cuh"
@@ -284,6 +284,15 @@ __device__ __forceinline__ void p1_epilogue(const Rows<Cfg<D>::DT>& w, bool any_
     }
 }
 
+// Pass-1 tile order (APA_ORDER 1): sink tile 0, then the diagonal backwards, so the heavy tiles enter the
+// running row sum first and the hot test judges middle tiles against a near-final sum. 0 = ascending.
+#ifndef APA_ORDER
+#define APA_ORDER 1
+#endif
+__device__ __forceinline__ int tile_at(int i, int ntiles) {
+    return (APA_ORDER == 0 || i == 0) ? i : ntiles - i;
+}
+
 // Bulk-copy pipeline (thread 0 = producer): STAGES slots, full/empty mbarriers.
 template <int NW, int STAGES, int TILE>
 __device__ __forceinline__ void pipe_init(uint32_t full0, uint32_t empty0, uint32_t sbase, const uint8_t* kv,
@@ -299,7 +308,7 @@ __device__ __forceinline__ void pipe_init(uint32_t full0, uint32_t empty0, uint3
     if (threadIdx.x == 0) {
         for (int s = 0; s < STAGES && s < ntiles; ++s) {
             mbar_expect_tx(full0 + s * 8, TILE);
-            bulk_g2s(sbase + s * TILE, kv + (size_t)s * TILE, TILE, full0 + s * 8);
+            bulk_g2s(sbase + s * TILE, kv + (size_t)tile_at(s, ntiles) * TILE, TILE, full0 + s * 8);
         }
     }
 }
@@ -367,10 +376,10 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
     bool any_hot = false;  // warp-uniform
     uint32_t* whot = out.warp_hot + ((size_t)(bhk * nqb + qb) * NW + warp) * out.W;
 
-    for (int t = 0; t < ntiles; ++t) {
-        const int st = t % STAGES;
+    for (int i = 0; i < ntiles; ++i) {
+        const int st = i % STAGES, t = tile_at(i, ntiles);
         const uint32_t stage = sbase + st * TILE;
-        mbar_wait(full0 + st * 8, (t / STAGES) & 1);
+        mbar_wait(full0 + st * 8, (i / STAGES) & 1);
         if (valid && (!CAUSAL || t * BKV <= p_wmax) &&  // warp-uniform
             tile_step<D, CAUSAL>(w, q, stage, smem + st * TILE, t * BKV, dm, out.eps)) {
             if (lane == 0)
@@ -378,10 +387,10 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
             any_hot = true;
         }
         mbar_arrive(empty0 + st * 8);
-        if (threadIdx.x == 0 && t + STAGES < ntiles) {
-            mbar_wait(empty0 + st * 8, (t / STAGES) & 1);
+        if (threadIdx.x == 0 && i + STAGES < ntiles) {
+            mbar_wait(empty0 + st * 8, (i / STAGES) & 1);
             mbar_expect_tx(full0 + st * 8, TILE);
-            bulk_g2s(stage, kv + (size_t)(t + STAGES) * TILE, TILE, full0 + st * 8);
+            bulk_g2s(stage, kv + (size_t)tile_at(i + STAGES, ntiles) * TILE, TILE, full0 + st * 8);
         }
     }
 

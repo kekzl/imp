@@ -1,5 +1,5 @@
 // RA2 prep: KV readers (flat / paged FP16 / paged NVFP4), K/V stats, quantization into tile blobs, Q packing.
-// Vendored from kekzl/ra2 src/apa/apa_prep.cuh (add7bd8); change there first, then copy.
+// Vendored from kekzl/ra2 src/apa/apa_prep.cuh (6823545); change there first, then copy.
 #pragma once
 #include "apa_common.cuh"
 

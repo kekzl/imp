@@ -1,5 +1,5 @@
 // RA2: FP4 (NVFP4) flash attention prefill for sm_120a. Host API (header-only).
-// Vendored from kekzl/ra2 src/apa/apa.cuh (add7bd8); change there first, then copy.
+// Vendored from kekzl/ra2 src/apa/apa.cuh (6823545); change there first, then copy.
 // Q/O [B][Sq][H][D] (FP16 or BF16), K/V flat [B][Skv][Hkv][D] or paged (imp layout, FP16 or NVFP4).
 // Head dim 64/128/256, GQA (H % Hkv == 0), causal with q_offset (position of Q row 0), any Sq/Skv.
 // Returns false (declines) for unsupported problems, like imp's attention tiers.
