@@ -54,13 +54,13 @@ struct Attention {
     // causal, no window/softcap/sinks, declines under runtime.deterministic. Lossy, so opt-in.
     bool ra2_prefill = false;
     // APA prefill (compute/apa/): FP4 pass 1, hot KV tiles (share of the running row sum > apa_eps) to
-    // exact FP16 pass 2; hd 128, causal, declines as ra2. 0 = off. Serves every length; with ra2_prefill on
-    // too, only kv_len >= apa_min_kv (RA2 below; dense per chunk APA/RA2 1.13 at kv 26624, 0.94 at 43008).
-    float apa_eps = 0.0f;
-    int apa_min_kv = 40960;
+    // exact FP16 pass 2; hd 128, causal, declines as ra2; 0 = off. Serves kv_len >= apa_min_kv (FA2, or RA2
+    // when on, below) and chunks of >= 256 rows. With ra2_prefill, apa_min_kv 40960 is the measured split.
+    float apa_eps = 0.01f;
+    int apa_min_kv = 8192;
     // Per-layer FP4 tile cache across prefill chunks: a chunk quantizes only its new keys. T2 arena
-    // n_layers x 72*hd B per 64 tokens per kv head at max_seq_len (Llama-3.2-3B 108k: 3.7 GiB).
-    bool apa_tile_cache = true;
+    // n_layers x 72*hd B per 64 tokens per kv head at max_seq_len (Llama-3.2-3B 108k: 3.7 GiB). Opt-in.
+    bool apa_tile_cache = false;
     // FP8 paged decode (HD=128): tokens per warp iteration. 4 = multitok
     // kernels (Q heads of a KV head grouped per CTA, 16-lanes-per-row layout),
     // 1 = the plain per-head kernel serves shapes multitok does not.

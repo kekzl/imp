@@ -184,11 +184,13 @@ __device__ __forceinline__ void mbar_wait(uint32_t bar, uint32_t parity) {
         "r"(parity)
         : "memory");
 }
+// Destination shared::cta: the shared::cluster form compiles to a driver syscall on sm_120a
+// (__cuda_syscall_cp_async_bulk_unicast), which reserves 14448 B stack per thread, about 3.5 GB.
 __device__ __forceinline__ void bulk_g2s(uint32_t dst, const void* src, uint32_t bytes, uint32_t bar) {
-    asm volatile(
-        "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(dst),
-        "l"(src), "r"(bytes), "r"(bar)
-        : "memory");
+    asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(
+                     dst),
+                 "l"(src), "r"(bytes), "r"(bar)
+                 : "memory");
 }
 
 // Problem geometry shared by prep and attention. Q/O: [B][Sq][H][D]; GQA group G = H / Hkv.

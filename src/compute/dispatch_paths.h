@@ -27,7 +27,7 @@ enum class AttnPrefillOuter {
     CUBLAS_SLICED,  // attention_cublas_prefill_sliced — hd=512 S-matrix overflow (#1036)
     FMHA_CHAIN,     // attention_prefill_dispatch → AttnPrefillPath
     RA2,            // try_ra2_prefill: FP4 prefill, opt-in attention.ra2_prefill
-    APA,            // try_apa_prefill: two-pass adaptive precision, opt-in attention.apa_eps
+    APA,            // try_apa_prefill: two-pass adaptive precision, hd 128, kv >= attention.apa_min_kv
 };
 
 // Paged-decode kernel family, selected by the KV cache dtype

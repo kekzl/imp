@@ -178,7 +178,8 @@ struct ExecT2Demand {
     size_t total() const {
         return mmvq_scratch + nvfp4_dequant + sample_scratch + penalty_counts + moe_arrays + fp8_reduction +
                quant_scratch + splitk_scratch + mla_scratch + dry_penalty + cublas_workspace + grouped3x +
-               imma_scratch + smallm_scratch + parallel_block + ra2_scratch + apa_scratch + apa_kv_states;
+               imma_scratch + chunk_capture + smallm_scratch + parallel_block + ra2_scratch + apa_scratch +
+               apa_kv_states;
     }
 
     // "mmvq 21.1 + nvfp4 192.0 + sample 1.0 + moe 0.00 MiB". Lives here rather

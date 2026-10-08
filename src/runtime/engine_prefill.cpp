@@ -575,6 +575,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     state.max_blocks_per_seq = 0;
     state.is_prefill = true;
     state.prefill_offset = offset;  // absolute pos of state.positions[0]
+    state.prefill_req_id = req->id;
     state.kv_manager = kv_manager_.get();
     if (kv_manager_ && kv_manager_->residual_enabled()) {
         // Slot lookup happens inside KVCacheManager::residual_k_ptr; if no

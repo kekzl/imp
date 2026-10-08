@@ -187,12 +187,16 @@ TEST(ExecT2Demand, ExpertDFfFallsBackToDFfWhenUnset) {
 
 TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     ExecShape s = dense_shape();
+    s.capture_ctx_cap = 4096;  // chunk-capture K/V charged: total() left it out, 128 MiB short at 32768
+    s.kv_heads_max = 8;
+    s.head_dim_max = 128;
     const ExecT2Demand d = exec_t2_demand(s, 1024);
-    EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.moe_arrays +
-                             d.fp8_reduction + d.quant_scratch + d.splitk_scratch + d.mla_scratch +
-                             d.dry_penalty + d.cublas_workspace + d.grouped3x + d.imma_scratch +
-                             d.smallm_scratch + d.parallel_block + d.ra2_scratch + d.apa_scratch +
-                             d.apa_kv_states);
+    EXPECT_GT(d.chunk_capture, 0u);
+    EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.penalty_counts +
+                             d.moe_arrays + d.fp8_reduction + d.quant_scratch + d.splitk_scratch +
+                             d.mla_scratch + d.dry_penalty + d.cublas_workspace + d.grouped3x +
+                             d.imma_scratch + d.chunk_capture + d.smallm_scratch + d.parallel_block +
+                             d.ra2_scratch + d.apa_scratch + d.apa_kv_states);
     EXPECT_GT(d.total(), 0u);
 }
 
@@ -218,7 +222,7 @@ TEST(ExecT2Demand, ApaKvStatesScaleWithLayersAndContext) {
     s.kv_heads_max = 8;
     s.head_dim_max = 128;
     s.n_layers = 28;
-    EXPECT_EQ(exec_t2_demand(s, 32768).apa_kv_states, 0u) << "opt-in tier, off by default";
+    EXPECT_EQ(exec_t2_demand(s, 32768).apa_kv_states, 0u) << "apa_prefill unset (attention.apa_eps 0)";
     s.apa_prefill = true;
     EXPECT_EQ(exec_t2_demand(s, 32768).apa_kv_states, 0u) << "attention.apa_tile_cache off";
     s.apa_tile_cache = true;
@@ -234,7 +238,7 @@ TEST(ExecT2Demand, ApaScratchIsChargedOnlyWhenApaIsOnAtHd128) {
     s.n_heads = 24;
     s.kv_heads_max = 8;
     s.head_dim_max = 128;
-    EXPECT_EQ(exec_t2_demand(s, 32768).apa_scratch, 0u) << "opt-in tier, off by default";
+    EXPECT_EQ(exec_t2_demand(s, 32768).apa_scratch, 0u) << "apa_prefill unset (attention.apa_eps 0)";
     s.apa_prefill = true;
     EXPECT_EQ(exec_t2_demand(s, 32768).apa_scratch, exec_apa_workspace_bytes(4096, 32768, 24, 8, 128) + 256);
     s.head_dim_max = 64;

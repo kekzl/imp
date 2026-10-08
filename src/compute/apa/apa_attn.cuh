@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_attn.cuh (v0.2.0, 502705a); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_attn.cuh (v0.3.0, e71624b); change there first, then copy.
 // APA pass 1: all-FP4 flash attention that diverts hot tiles (mass share > eps of the running row sum) to
 // pass 2 (exact FP16). Cold tiles finish here; warps with hot tiles export (o, m, l) for the merge.
 #pragma once
@@ -20,6 +20,9 @@ struct Pass1Out {
     float2* ml;       // [rows]: (m, sum over cold tiles of p), log2 domain
     const float*
         ksum;  // [bhk][D] K column mean (finalized): pass 1 scores are q.(k - kmean), pass 2 must match
+#ifdef APA_DBG
+    float4* dbg;  // [rows]: (m, lambda, l_cold, max tile share at test time), lambda / l_cold in ml units
+#endif
 };
 
 // Lazy row max: m may lag the true row max by up to TAU (-DAPA_EXACT_MAX: exact).
@@ -39,6 +42,9 @@ struct Rows {
     float ol[4];         // P.1 over cold tiles (row sums via a ones tile)
     float m_lo, m_hi;    // running max, log2 domain
     float la_lo, la_hi;  // running row sum over ALL tiles (hot ones too)
+#ifdef APA_DBG
+    float ms_lo, ms_hi;  // max tile share l_t / (lambda + l_t) at test time
+#endif
 };
 
 template <int D>
@@ -109,13 +115,28 @@ __device__ __forceinline__ void group_max(const float (&s)[8][4], float (&gm)[4]
         gm[i] = fmaxf(gm[i], __shfl_xor_sync(~0u, gm[i], 1));
 }
 
-// Row-max update: full reduction + rescale only when a lane exceeds m + TAU and a row max moved.
+// Hot tiles lift the cold frame m to at most (tile max - HOT_DROP), log2: a hot sink does not push cold P
+// below the UE4M3 scale floor (E2M1 zero). 0 = frame always at the running max (APA 0.2.0).
+#ifndef APA_HOT_DROP
+#define APA_HOT_DROP 32
+#endif
+constexpr float HOT_DROP = APA_HOT_DROP;
+
+// Candidate row max: full reduction only when a lane exceeds m + TAU; no rescale.
 template <int DT>
-__device__ __forceinline__ void update_max(Rows<DT>& w, float mx_lo, float mx_hi) {
+__device__ __forceinline__ void cand_max(const Rows<DT>& w, float mx_lo, float mx_hi, float& c_lo,
+                                         float& c_hi) {
+    c_lo = w.m_lo;
+    c_hi = w.m_hi;
     if (TAU > 0.f && !__any_sync(~0u, mx_lo > w.m_lo + TAU || mx_hi > w.m_hi + TAU))
         return;
-    mx_lo = fmaxf(w.m_lo, fmaxf(mx_lo, __shfl_xor_sync(~0u, mx_lo, 2)));
-    mx_hi = fmaxf(w.m_hi, fmaxf(mx_hi, __shfl_xor_sync(~0u, mx_hi, 2)));
+    c_lo = fmaxf(w.m_lo, fmaxf(mx_lo, __shfl_xor_sync(~0u, mx_lo, 2)));
+    c_hi = fmaxf(w.m_hi, fmaxf(mx_hi, __shfl_xor_sync(~0u, mx_hi, 2)));
+}
+
+// Move o, ol, la to frame mx >= m (scale 2^(m - mx)).
+template <int DT>
+__device__ __forceinline__ void update_max(Rows<DT>& w, float mx_lo, float mx_hi) {
     if (!__any_sync(~0u, mx_lo != w.m_lo || mx_hi != w.m_hi))
         return;
     const float a_lo = (mx_lo == w.m_lo) ? 1.f : ex2(w.m_lo - mx_lo);
@@ -222,21 +243,35 @@ __device__ __forceinline__ bool tile_step(Rows<Cfg<D>::DT>& w, const WarpQ<D>& q
         const int lim_hi = CAUSAL ? min(q.pos_hi, dm.Skv - 1) : dm.Skv - 1;
         mask_tile(s, j0 + q.T0 * 2, lim_lo, lim_hi);
     }
-    float gm[4];
+    float gm[4], c_lo, c_hi;
     group_max(s, gm);
-    update_max(w, fmaxf(gm[0], gm[2]) * q.c_lo, fmaxf(gm[1], gm[3]) * q.c_hi);
+    cand_max(w, fmaxf(gm[0], gm[2]) * q.c_lo, fmaxf(gm[1], gm[3]) * q.c_hi, c_lo, c_hi);
     float bias[4];
     uint32_t kb[4], pa[4];
-    p_scales(gm, w.m_lo, w.m_hi, q.c_lo, q.c_hi, bias, kb);
+    p_scales(gm, c_lo, c_hi, q.c_lo, q.c_hi, bias, kb);
     exp_scores(s, q.c_lo, q.c_hi, bias);
     pack_p(s, pa);
     const uint32_t psf = p_scale_word(kb, q.T0);
-    float tl[4] = {0.f, 0.f, 0.f, 0.f};  // tile row sums from P.1: every lane holds its rows' sums
+    float tl[4] = {0.f, 0.f, 0.f, 0.f};  // tile row sums from P.1 (frame c): every lane holds its rows' sums
     mma_fp4(tl, pa, ONES, ONES, psf, SF_ONE);
+    const float a_lo = (c_lo == w.m_lo) ? 1.f : ex2(w.m_lo - c_lo),
+                a_hi = (c_hi == w.m_hi) ? 1.f : ex2(w.m_hi - c_hi);
+#ifdef APA_DBG
+    w.ms_lo = fmaxf(w.ms_lo, tl[0] / (w.la_lo * a_lo + tl[0]));  // 0/0 (masked row) is NaN: fmaxf keeps ms
+    w.ms_hi = fmaxf(w.ms_hi, tl[2] / (w.la_hi * a_hi + tl[2]));
+#endif
+    if (__any_sync(~0u, tl[0] > eps * (w.la_lo * a_lo + tl[0]) || tl[2] > eps * (w.la_hi * a_hi + tl[2]))) {
+        const float f_lo = fmaxf(w.m_lo, c_lo - HOT_DROP), f_hi = fmaxf(w.m_hi, c_hi - HOT_DROP);
+        const float b_lo = (f_lo == c_lo) ? 1.f : ex2(c_lo - f_lo),
+                    b_hi = (f_hi == c_hi) ? 1.f : ex2(c_hi - f_hi);
+        update_max(w, f_lo, f_hi);
+        w.la_lo += tl[0] * b_lo;  // up to 2^HOT_DROP x tile sum: fp32 range
+        w.la_hi += tl[2] * b_hi;
+        return true;
+    }
+    update_max(w, c_lo, c_hi);
     w.la_lo += tl[0];
     w.la_hi += tl[2];
-    if (__any_sync(~0u, tl[0] > eps * w.la_lo || tl[2] > eps * w.la_hi))
-        return true;
 #pragma unroll
     for (int i = 0; i < 4; ++i)
         w.ol[i] += tl[i];
@@ -254,6 +289,15 @@ __device__ __forceinline__ void p1_epilogue(const Rows<Cfg<D>::DT>& w, bool any_
     const int R = dm.R, G = dm.G, r_hi = r_lo + 8;
     const bool ok_lo = r_lo < R, ok_hi = r_hi < R;
     const size_t qb_row = (size_t)(b * dm.Hkv + hk) * R;
+#ifdef APA_DBG
+    if (T0 == 0 && out.dbg != nullptr) {
+        constexpr float u = (TAU > 0.f ? 16.f : 1.f) / 1536.f;
+        if (ok_lo)
+            out.dbg[qb_row + r_lo] = make_float4(w.m_lo, w.la_lo * u, w.ol[0] * u, w.ms_lo);
+        if (ok_hi)
+            out.dbg[qb_row + r_hi] = make_float4(w.m_hi, w.la_hi * u, w.ol[2] * u, w.ms_hi);
+    }
+#endif
     if (any_hot) {
         constexpr float kUnscale = (TAU > 0.f ? 16.f : 1.f) / 1536.f;
         const float f = scv * kUnscale;
@@ -377,6 +421,9 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
     w.ol[0] = w.ol[1] = w.ol[2] = w.ol[3] = 0.f;
     w.m_lo = w.m_hi = -INFINITY;
     w.la_lo = w.la_hi = 0.f;
+#ifdef APA_DBG
+    w.ms_lo = w.ms_hi = 0.f;
+#endif
     bool any_hot = false;  // warp-uniform
     uint32_t* whot = out.warp_hot + ((size_t)(bhk * nqb + qb) * NW + warp) * out.W;
 

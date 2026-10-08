@@ -9,9 +9,11 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `attention.ra2_prefill` (opt-in): FP4 prefill tier, INT8 QK^T + two-term NVFP4 PV, hd 64/128/256, GQA, chunk continuation. pp 9142 Qwen3-8B Q8_0 13656 -> 14046 tok/s, Llama-3.2-3B Q8_0 pp 8720 29163 -> 32616 tok/s (median of 3); PPL change within +0.1 % on 3 models (#2628).
 
 ### Fixed
+- `cp.async.bulk` into `shared::cluster` (ra2 attention, NVFP4 small-M grouped GEMM) compiled to a driver syscall that kept about 3.5 GB of local memory after the first launch; now `shared::cta`. The T2 arena plan counts the chunk-capture K/V (128 MiB short at `capture_ctx_cap` 32768).
 - GGUF MoE layers get an NVFP4 decode cache only when gate, up and down all qualify; a lone Q5_K/Q6_K down was never read. Qwen3.6-35B-A3B UD-Q4_K_M: 5760 MiB freed, `--bench-pp 512` aborted on a 16-block KV pool, now 13618 tok/s; Qwen3-30B-A3B Q4_K_M: 2592 MiB freed (#2637).
 
 ### Changed
+- APA prefill on by default (`attention.apa_eps` 0.01, `apa_min_kv` 8192, chunks >= 256 rows; tile cache opt-in, keyed by request), APA 0.3.0. Default sparse prefill: Llama-3.2-3B Q8_0 106451 tokens 6746.01 -> 4824.90 ms, Qwen3-8B Q8_0 33727 tokens 3227.40 -> 2848.55 ms; PPL ppl_corpus_45k Qwen3-8B 10.7522 -> 10.7549.
 - APA 0.2.0 ([kekzl/apa](https://github.com/kekzl/apa)): K column sums in a fixed order, reruns bit-identical (PPL Llama-3.2-3B 17.3423 twice); default sparse prefill 106451 tokens 5308.63 -> 5241.18 ms (#2639).
 - APA moved to its own repository, [kekzl/apa](https://github.com/kekzl/apa), MPL-2.0; vendored as `src/compute/apa/` with its licence headers, notice and licence text in `THIRD_PARTY_LICENSES.md`; image label `MIT AND Apache-2.0 AND MPL-2.0` (#2638).
 - APA (`attention.apa_eps`): serves every length unless `ra2_prefill` is on too; chunked prefill reads the paged FP16 cache and keeps per-layer FP4 tiles (`attention.apa_tile_cache`). Llama-3.2-3B Q8_0, 106451 tokens, default sparse prefill: FA2 6661.95 ms, APA 0.005 5300.33 ms; PPL 17.3501 vs 17.3644 (#2636).

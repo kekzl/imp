@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_common.cuh (v0.2.0, 502705a); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_common.cuh (v0.3.0, e71624b); change there first, then copy.
 // APA common (all-FP4 base from ra2 1d72da2): Cfg<D>, layouts, PTX helpers (sm_120a).
 #pragma once
 #include <cuda_bf16.h>
@@ -126,11 +126,14 @@ __device__ __forceinline__ void mbar_wait(uint32_t bar, uint32_t parity) {
         "r"(parity)
         : "memory");
 }
+// shared::cta destination: the shared::cluster form compiles on sm_120a to a driver syscall
+// (__cuda_syscall_cp_async_bulk_unicast) that raises the stack limit to 14448 B/thread, about 3.5 GB local
+// memory.
 __device__ __forceinline__ void bulk_g2s(uint32_t dst, const void* src, uint32_t bytes, uint32_t bar) {
-    asm volatile(
-        "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(dst),
-        "l"(src), "r"(bytes), "r"(bar)
-        : "memory");
+    asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(
+                     dst),
+                 "l"(src), "r"(bytes), "r"(bar)
+                 : "memory");
 }
 
 // Problem geometry shared by prep and attention. Q/O: [B][Sq][H][D]; GQA group G = H / Hkv.

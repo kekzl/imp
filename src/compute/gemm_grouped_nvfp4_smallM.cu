@@ -63,15 +63,17 @@ __device__ __forceinline__ void mbarrier_wait(uint64_t* bar, uint32_t phase) {
         "}\n"
         :: "r"(s), "r"(phase));
 }
-// 2-D bulk-tensor load. Emits UTMALDG on SM120.
+// 2-D bulk-tensor load. Emits UTMALDG on SM120. Destination shared::cta: the shared::cluster form compiles
+// to a driver syscall (__cuda_syscall_cp_async_bulk_tensor_2d_tile_unicast), which reserves 14448 B stack
+// per thread, about 3.5 GB of local memory.
 __device__ __forceinline__ void cp_async_bulk_tensor_2d(
     void* smem_dst, const void* desc, int x, int y, uint64_t* mbar) {
     uint32_t s_dst = static_cast<uint32_t>(__cvta_generic_to_shared(smem_dst));
     uint32_t s_bar = static_cast<uint32_t>(__cvta_generic_to_shared(mbar));
     asm volatile(
-        "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes "
-        "[%0], [%1, {%2, %3}], [%4];\n"
-        :: "r"(s_dst), "l"(desc), "r"(x), "r"(y), "r"(s_bar)
+        "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+        "[%0], [%1, {%2, %3}], [%4];\n" ::"r"(s_dst),
+        "l"(desc), "r"(x), "r"(y), "r"(s_bar)
         : "memory");
 }
 
