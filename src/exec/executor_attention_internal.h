@@ -70,6 +70,13 @@ namespace imp {
                                   q_offset, /*fp16_qk=*/true, d_kv_len, static_cast<const half*>(sinks));
 }
 
+// APA serves every length unless RA2 is on too: then RA2 below attention.apa_min_kv (faster there), APA
+// above (dense prefill per chunk APA/RA2 1.13 at kv 26624, 0.94 at 43008).
+template <typename A>
+[[nodiscard]] static bool apa_serves_kv(const A& a, int kv_len) {
+    return !a.ra2_prefill || kv_len >= a.apa_min_kv;
+}
+
 // Chunked prefill: gather past paged KV [0, gather_cap) of the cache dtype into flat FP16 k_full / v_full.
 static void gather_past_kv_fp16(KVCache* cache, int kv_layer, half* k_full, half* v_full, const int* past_bt,
                                 int gather_cap, int kv_bs, int nkv, int hd,
@@ -126,7 +133,7 @@ static void gather_past_kv_fp16(KVCache* cache, int kv_layer, half* k_full, half
                                                 int sliding_window, float softcap, cudaStream_t stream,
                                                 const void* sinks) {
     const auto& a = rcfg.attention;
-    if (cap_replay || a.apa_eps <= 0.0f || cache->qtype() != QType::F16 || att_off + n < a.apa_min_kv ||
+    if (cap_replay || a.apa_eps <= 0.0f || cache->qtype() != QType::F16 || !apa_serves_kv(a, att_off + n) ||
         sliding_window > 0 || softcap != 0.0f || sinks != nullptr || process_diag_deterministic())
         return false;
     return attention_apa_prefill_paged(q, static_cast<const half*>(cache->k_ptr(kv_layer, 0)),
@@ -135,7 +142,7 @@ static void gather_past_kv_fp16(KVCache* cache, int kv_layer, half* k_full, half
                                        a.apa_eps, kv_layer, stream);
 }
 
-// Opt-in FP4 prefill tiers, tried before FA2: APA (attention.apa_eps > 0, kv_len >= apa_min_kv), then
+// Opt-in FP4 prefill tiers, tried before FA2: APA (attention.apa_eps > 0, apa_serves_kv), then
 // RA2 (attention.ra2_prefill). Both decline what the kernels do not model (sliding window, softcap,
 // sinks), runtime.deterministic (float atomics in the K/V stats), and shapes or scratch they reject;
 // UNSET = the caller walks its usual chain.
@@ -148,7 +155,7 @@ static void gather_past_kv_fp16(KVCache* cache, int kv_layer, half* k_full, half
     if ((!a.ra2_prefill && a.apa_eps <= 0.0f) || sliding_window > 0 || softcap != 0.0f || sinks != nullptr ||
         process_diag_deterministic())
         return AttnPrefillOuter::UNSET;
-    if (a.apa_eps > 0.0f && kv_len >= a.apa_min_kv &&
+    if (a.apa_eps > 0.0f && apa_serves_kv(a, kv_len) &&
         attention_apa_prefill(q, k, v, o, n, kv_len, nh, nkv, hd, scale, q_offset, a.apa_eps, stream))
         return AttnPrefillOuter::APA;
     if (a.ra2_prefill && attention_ra2_prefill(q, k, v, o, n, kv_len, nh, nkv, hd, scale, q_offset, stream))
