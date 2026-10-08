@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_prep.cuh (28603b9); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_prep.cuh (v0.2.0, 502705a); change there first, then copy.
 // APA prep: KV readers (flat / paged FP16 / paged NVFP4), K/V stats, quantization into tile blobs, Q packing.
 #pragma once
 #include "apa_common.cuh"
@@ -116,35 +116,44 @@ struct PagedNvfp4KV {
 };
 
 // ---------------------------------------------------------------- stats: K mean, K/V amax per (b, kv head)
-// grid (ntkv, Hkv, B), 256 threads. amax[bhk*3 + {1:k, 2:v}] as uint bits, ksum[bhk*D + d].
+// grid (ceil(ntkv / STATS_TILES), Hkv, B), 256 threads. amax[bhk*3 + {1:k, 2:v}] as uint bits (atomicMax),
+// kpart[bhk][chunk][D] K column sums of the chunk.
 template <int D, typename Reader>
-__global__ void __launch_bounds__(256) stats_kernel(Reader rd, Dims dm, unsigned* amax, float* ksum,
+__global__ void __launch_bounds__(256) stats_kernel(Reader rd, Dims dm, unsigned* amax, float* kpart,
                                                     const int* redo = nullptr) {
     if (redo != nullptr && *redo == 0)
         return;  // KvState still valid: stats stay frozen
-    constexpr int G16 = D / 16;
-    __shared__ float ks_s[D];
+    constexpr int G16 = D / 16, RSTEP = 256 / G16, NWARP = 8;
+    __shared__ float red[NWARP][D];
     const int b = blockIdx.z, hk = blockIdx.y, bhk = b * dm.Hkv + hk, tid = threadIdx.x;
-    for (int d = tid; d < D; d += 256)
-        ks_s[d] = 0.f;
-    __syncthreads();
-    float ak = 0.f, av = 0.f;
-    for (int p = tid; p < BKV * G16; p += 256) {
-        const int s = blockIdx.x * BKV + p / G16, g = p % G16;
-        if (s >= dm.Skv)
-            continue;
-        float x[16];
+    const int g = tid % G16, s0 = blockIdx.x * STATS_TILES * BKV, s1 = min(s0 + STATS_TILES * BKV, dm.Skv);
+    // Column sums in a fixed order (deterministic): registers over this thread's rows, then lanes of the same
+    // channel group (xor G16 .. 16), then the 8 warps in order. Maxima are order-free (atomicMax).
+    float acc[16], x[16], ak = 0.f, av = 0.f;
+#pragma unroll
+    for (int i = 0; i < 16; ++i)
+        acc[i] = 0.f;
+    for (int s = s0 + tid / G16; s < s1; s += RSTEP) {
         rd.load16(false, b, s, hk, g * 16, dm, D, x);
 #pragma unroll
         for (int i = 0; i < 16; ++i) {
             ak = fmaxf(ak, fabsf(x[i]));
-            atomicAdd(&ks_s[g * 16 + i], x[i]);
+            acc[i] += x[i];
         }
         rd.load16(true, b, s, hk, g * 16, dm, D, x);
 #pragma unroll
         for (int i = 0; i < 16; ++i)
             av = fmaxf(av, fabsf(x[i]));
     }
+#pragma unroll
+    for (int o = G16; o < 32; o <<= 1)
+#pragma unroll
+        for (int i = 0; i < 16; ++i)
+            acc[i] += __shfl_xor_sync(~0u, acc[i], o);
+    if ((tid & 31) < G16)
+#pragma unroll
+        for (int i = 0; i < 16; ++i)
+            red[tid >> 5][g * 16 + i] = acc[i];
     for (int o = 16; o; o >>= 1) {
         ak = fmaxf(ak, __shfl_xor_sync(~0u, ak, o));
         av = fmaxf(av, __shfl_xor_sync(~0u, av, o));
@@ -154,15 +163,22 @@ __global__ void __launch_bounds__(256) stats_kernel(Reader rd, Dims dm, unsigned
         atomicMax(&amax[bhk * 3 + 2], __float_as_uint(av));
     }
     __syncthreads();
-    for (int d = tid; d < D; d += 256)
-        atomicAdd(&ksum[bhk * D + d], ks_s[d]);
+    for (int d = tid; d < D; d += 256) {
+        float sum = 0.f;
+#pragma unroll
+        for (int w = 0; w < NWARP; ++w)
+            sum += red[w][d];
+        kpart[((size_t)bhk * gridDim.x + blockIdx.x) * D + d] = sum;
+    }
 }
 
 // ---------------------------------------------------------------- KV quantization into tile blobs
-// grid (B * Hkv), D threads: ksum -> K mean in place (count n), head scales kg / vg from the maxima,
-// widened by headroom (> 1 when later keys reuse the scales: persistent KvState, values up to headroom x).
+// grid (B * Hkv), D threads: K mean = sum of the kpart chunks in order / n, head scales kg / vg from the
+// maxima, widened by headroom (> 1 when later keys reuse the scales: persistent KvState, values up to
+// headroom x).
 template <int D>
 __global__ void __launch_bounds__(D) finalize_stats_kernel(const unsigned* __restrict__ amax,
+                                                           const float* __restrict__ kpart, int nchunk,
                                                            float* __restrict__ kmean,
                                                            HeadScale* __restrict__ hs, int n, float headroom,
                                                            const int* redo = nullptr) {
@@ -170,7 +186,10 @@ __global__ void __launch_bounds__(D) finalize_stats_kernel(const unsigned* __res
         return;
     __shared__ float red[D];
     const int bhk = blockIdx.x, d = threadIdx.x;
-    const float m = kmean[bhk * D + d] / n;
+    float sum = 0.f;  // stats_kernel chunks in order: deterministic
+    for (int c = 0; c < nchunk; ++c)
+        sum += kpart[((size_t)bhk * nchunk + c) * D + d];
+    const float m = sum / n;
     kmean[bhk * D + d] = m;
     red[d] = fabsf(m);
     __syncthreads();
@@ -253,12 +272,11 @@ __global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const
 }
 
 // ---------------------------------------------------------------- KvState validity (incremental prep)
-// grid (B * Hkv), D threads: zero the stat accumulators when redo is set.
-template <int D>
-__global__ void __launch_bounds__(D) reset_stats_kernel(unsigned* amax, float* kmean, const int* redo) {
+// grid (B * Hkv), 32 threads: zero the K / V maxima when redo is set.
+template <int D>  // template: header-only, one instance per TU
+__global__ void __launch_bounds__(32) reset_stats_kernel(unsigned* amax, const int* redo) {
     if (*redo == 0)
         return;
-    kmean[blockIdx.x * D + threadIdx.x] = 0.f;
     if (threadIdx.x < 3)
         amax[blockIdx.x * 3 + threadIdx.x] = 0u;
 }

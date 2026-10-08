@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_pass2.cuh (28603b9); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_pass2.cuh (v0.2.0, 502705a); change there first, then copy.
 // APA pass 2: exact FP16 attention over the hot tiles of pass 1, merged with its cold-tile partials.
 // CTA = same packed rows as pass 1; it streams the union of its warps' hot tiles, each warp computes only
 // its own. QK^T and PV on mma.sync m16n8k16 (f16 x f16 -> f32), online softmax in fp32 (log2 domain).

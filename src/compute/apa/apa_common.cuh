@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_common.cuh (28603b9); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_common.cuh (v0.2.0, 502705a); change there first, then copy.
 // APA common (all-FP4 base from ra2 1d72da2): Cfg<D>, layouts, PTX helpers (sm_120a).
 #pragma once
 #include <cuda_bf16.h>
@@ -13,6 +13,7 @@
 namespace apa {
 
 constexpr int BKV = 64;                 // tokens per KV tile
+constexpr int STATS_TILES = 16;         // KV tiles per stats_kernel block (one K column-sum chunk)
 constexpr float P_SCALE = 448.f * 6.f;  // global scales map |x| max to E2M1 6 * UE4M3 448
 constexpr float LOG2E = 1.4426950408889634f;
 

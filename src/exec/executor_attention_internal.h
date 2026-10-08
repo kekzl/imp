@@ -144,7 +144,8 @@ static void gather_past_kv_fp16(KVCache* cache, int kv_layer, half* k_full, half
 
 // Opt-in FP4 prefill tiers, tried before FA2: APA (attention.apa_eps > 0, apa_serves_kv), then
 // RA2 (attention.ra2_prefill). Both decline what the kernels do not model (sliding window, softcap,
-// sinks), runtime.deterministic (float atomics in the K/V stats), and shapes or scratch they reject;
+// sinks), runtime.deterministic (RA2: float atomics; APA: reruns are bit-identical but rows depend on the
+// chunking, which that mode pins), and shapes or scratch they reject;
 // UNSET = the caller walks its usual chain.
 [[nodiscard]] static AttnPrefillOuter try_fp4_prefill(const DispatchPolicy& rcfg, const Tensor& q,
                                                       const Tensor& k, const Tensor& v, Tensor& o, int n,

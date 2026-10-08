@@ -150,6 +150,43 @@ TEST(Ra2PrefillTest, DeclinesUnsupported) {
     EXPECT_FALSE(run_case({128, 128, 6, 4, 128}).accepted);  // nh % nkv != 0
 }
 
+// APA 0.2.0: K column sums in a fixed order, so reruns of the same call are bit-identical.
+TEST(ApaPrefillTest, RerunsAreBitIdentical) {
+    ScopedEngineArena arena(64ull << 20);
+    constexpr int n = 320, kv = 1024, nh = 8, nkv = 2, hd = 128;
+    const size_t nq = (size_t)n * nh * hd, nk = (size_t)kv * nkv * hd;
+    std::mt19937 rng(7);
+    std::normal_distribution<float> nd(0.f, 1.f);
+    std::vector<half> hq(nq), hk(nk), hv(nk), h0(nq), h1(nq);
+    for (auto* v : {&hq, &hk, &hv})
+        for (auto& x : *v)
+            x = __float2half(nd(rng));
+    half *dq, *dk, *dv, *dout;
+    ASSERT_EQ(cudaMalloc(&dq, nq * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&dk, nk * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&dv, nk * 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&dout, nq * 2), cudaSuccess);
+    cudaMemcpy(dq, hq.data(), nq * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(dk, hk.data(), nk * 2, cudaMemcpyHostToDevice);
+    cudaMemcpy(dv, hv.data(), nk * 2, cudaMemcpyHostToDevice);
+    const int64_t qs[2] = {n, (int64_t)nh * hd}, ks[2] = {kv, (int64_t)nkv * hd};
+    Tensor tq(dq, QType::F16, 2, qs, true), tk(dk, QType::F16, 2, ks, true), tv(dv, QType::F16, 2, ks, true);
+    Tensor to(dout, QType::F16, 2, qs, true);
+    size_t diff = 0;
+    for (int run = 0; run < 3; ++run) {
+        ASSERT_TRUE(attention_apa_prefill(tq, tk, tv, to, n, kv, nh, nkv, hd, 1.f / std::sqrt((float)hd),
+                                          kv - n, 5e-3f, nullptr));
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        cudaMemcpy(run ? h1.data() : h0.data(), dout, nq * 2, cudaMemcpyDeviceToHost);
+        if (run)
+            for (size_t i = 0; i < nq; ++i)
+                diff += __half_as_ushort(h0[i]) != __half_as_ushort(h1[i]);
+    }
+    EXPECT_EQ(diff, 0u);
+    for (void* p : {(void*)dq, (void*)dk, (void*)dv, (void*)dout})
+        cudaFree(p);
+}
+
 // APA: eps 1e-9 sends every tile to the exact FP16 pass 2 (FP16-accumulated QK and PV, FP32 softmax),
 // eps 1e30 none (pure FP4 pass 1, RA2 tolerance), 1e-2 a mix; chunk continuation as above.
 TEST(ApaPrefillTest, AllHotIsExact) {

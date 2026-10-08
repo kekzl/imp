@@ -73,7 +73,6 @@ imp::(anonymous namespace)::ple_conv_shift_kernel	sm_120a	40	128	0
 imp::paged_attention_decode_kernel_generic	sm_120a	40	128	0
 imp::rowwise_topm_reduce_kernel	sm_120a	40	64	0
 imp::(anonymous namespace)::ple_conv_add_kernel	sm_120a	40	32	0
-void apa::stats_kernel<256, apa::PagedNvfp4KV>	sm_120a	40	32	0
 void imp::gemv_dp4a_fp32_batched_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	40	16	0
 void imp::gemv_dp4a_fp32_kernel<imp::DequantTraits<(imp::DPQTag)6>, 1>	sm_120a	40	16	0
 void imp::gemv_dp4a_fp32_kernel<imp::DequantTraits<(imp::DPQTag)6>, 2>	sm_120a	40	16	0

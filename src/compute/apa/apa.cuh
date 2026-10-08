@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa.cuh (28603b9); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa.cuh (v0.2.0, 502705a); change there first, then copy.
 // APA (adaptive-precision attention) prefill for sm_120a, host API (header-only). Pass 1: all-FP4 flash
 // attention; a KV tile whose share of the running row sum exceeds eps goes to pass 2 (exact FP16), merged by
 // log-sum-exp. Attention: hd 128, causal (q_offset = position of Q row 0), GQA (H % Hkv == 0). Q/O
@@ -11,6 +11,11 @@
 
 #include "apa_pass2.cuh"
 #include "apa_prep.cuh"
+
+// Version of this header set (kekzl/apa); see CHANGELOG.md.
+#define APA_VERSION_MAJOR 0
+#define APA_VERSION_MINOR 2
+#define APA_VERSION_PATCH 0
 
 namespace apa {
 
@@ -38,7 +43,7 @@ inline Dims make_dims(const Problem& p) {
     return Dims{p.B, p.Sq, p.Skv, p.H, p.Hkv, G, p.Sq * G, ntkv, p.q_offset, ntkv};
 }
 
-// Workspace carve-up (256 B aligned): amax, ksum, hs, Qr, Qq, Qs, KV blobs.
+// Workspace carve-up (256 B aligned): amax, ksum, hs, Qr, Qq, Qs, KV blobs, masks, part, ml, kpart.
 struct Workspace {
     unsigned* amax;
     float* ksum;
@@ -52,6 +57,8 @@ struct Workspace {
     float2* ml;          // [rows] (m, l) of the partials
     int W, nqb;          // mask words per warp / CTA, q blocks per (b, kv head)
     int kvcap;           // KV / hs / ksum from a KvState of this many tiles (0: own, ntkv)
+    float* kpart;        // [bhk][nchunk][D] K column sums per stats chunk (deterministic mean)
+    int nchunk;
     size_t bytes;
 };
 inline size_t tile_bytes(int D) {
@@ -88,6 +95,8 @@ inline Workspace carve(const Problem& p, void* base, bool own_kv = true) {
     w.ticket = w.ready + bhk * w.nqb;
     w.part = reinterpret_cast<float*>(take(rows * p.D * 4));
     w.ml = reinterpret_cast<float2*>(take(rows * 8));
+    w.nchunk = (dm.ntkv + STATS_TILES - 1) / STATS_TILES;
+    w.kpart = reinterpret_cast<float*>(take(bhk * w.nchunk * p.D * 4));
     w.bytes = off;
     return w;
 }
@@ -136,15 +145,14 @@ inline cudaError_t prep_d(const T* Q, const Reader& rd, const Problem& p, const 
     const Dims dm = make_dims(p);
     const size_t bhk = (size_t)p.B * p.Hkv;
     cudaError_t e = cudaMemsetAsync(w.amax, 0, bhk * 3 * 4, st);
-    if (e == cudaSuccess)
-        e = cudaMemsetAsync(w.ksum, 0, bhk * D * 4, st);
     if (e != cudaSuccess)
         return e;
     const dim3 gkv(dm.ntkv, p.Hkv, p.B);
-    stats_kernel<D, Reader><<<gkv, 256, 0, st>>>(rd, dm, w.amax, w.ksum);
+    stats_kernel<D, Reader><<<dim3(w.nchunk, p.Hkv, p.B), 256, 0, st>>>(rd, dm, w.amax, w.kpart);
     if ((e = cudaPeekAtLastError()) != cudaSuccess)
         return e;
-    finalize_stats_kernel<D><<<(unsigned)bhk, D, 0, st>>>(w.amax, w.ksum, w.hs, p.Skv, 1.f);
+    finalize_stats_kernel<D>
+        <<<(unsigned)bhk, D, 0, st>>>(w.amax, w.kpart, w.nchunk, w.ksum, w.hs, p.Skv, 1.f);
     if ((e = cudaPeekAtLastError()) != cudaSuccess)
         return e;
     quant_kv_kernel<D, Reader><<<gkv, 256, 0, st>>>(rd, dm, w.ksum, w.hs, w.KV, 0);
@@ -215,18 +223,20 @@ inline cudaError_t launch_d128(const T* Q, const RS& rs, T* O, const Problem& p,
     if (e != cudaSuccess)
         return e;
     const Pass1Out out{eps, w.W, w.warp_hot, w.ready, w.part, w.ml, w.ksum};
-    static int nsm = 0;  // pass-2 workers: one CTA per SM (each loops over group items)
-    if (nsm == 0) {
-        int dev = 0;
-        if ((e = cudaGetDevice(&dev)) == cudaSuccess)
-            e = cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
-        if (e != cudaSuccess)
-            return e;
-    }
+    // per instantiation: SM count (pass-2 workers, one CTA per SM) and the device the smem opt-in was set on
+    static int nsm = 0, attr_dev = -1;
+    int dev = 0;
+    if ((e = cudaGetDevice(&dev)) != cudaSuccess)
+        return e;
+    if (nsm == 0 && (e = cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev)) != cudaSuccess)
+        return e;
     const int n1 = (with_pass1 && eps >= 0.f) ? (int)bhk * w.nqb : 0;
     auto k = apa_kernel<CAUSAL, T, RS>;
-    if ((e = cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, smem)) != cudaSuccess)
-        return e;
+    if (attr_dev != dev) {
+        if ((e = cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, smem)) != cudaSuccess)
+            return e;
+        attr_dev = dev;
+    }
     k<<<n1 + nsm, NW * 32, smem, st>>>(w.Qq, w.Qs, w.Qr, w.KV, w.hs, Q, rs, O, dm, p.scale * LOG2E, out, n1,
                                        w.nqb, w.ticket);
     return cudaPeekAtLastError();
@@ -355,21 +365,21 @@ inline cudaError_t prep_incremental(const T* Q, const Reader& rd, const Problem&
     const int* gate = restart ? nullptr : st.redo;
     cudaError_t e = cudaSuccess;
     if (restart) {
-        if ((e = cudaMemsetAsync(w.amax, 0, bhk * 3 * 4, s)) == cudaSuccess)
-            e = cudaMemsetAsync(st.kmean, 0, bhk * D * 4, s);
+        e = cudaMemsetAsync(w.amax, 0, bhk * 3 * 4, s);
     } else {
         kv_fingerprint_kernel<D, Reader><<<1, 32, 0, s>>>(rd, dm, st.fp, st.len, st.redo, true);
         if ((e = cudaPeekAtLastError()) == cudaSuccess)
-            reset_stats_kernel<D><<<bhk, D, 0, s>>>(w.amax, st.kmean, st.redo);
+            reset_stats_kernel<D><<<bhk, 32, 0, s>>>(w.amax, st.redo);
         if (e == cudaSuccess)
             e = cudaPeekAtLastError();
     }
     if (e != cudaSuccess)
         return e;
-    stats_kernel<D, Reader><<<gkv, 256, 0, s>>>(rd, dm, w.amax, st.kmean, gate);
+    stats_kernel<D, Reader><<<dim3(w.nchunk, p.Hkv, p.B), 256, 0, s>>>(rd, dm, w.amax, w.kpart, gate);
     if ((e = cudaPeekAtLastError()) != cudaSuccess)
         return e;
-    finalize_stats_kernel<D><<<bhk, D, 0, s>>>(w.amax, st.kmean, st.hs, p.Skv, KV_HEADROOM, gate);
+    finalize_stats_kernel<D>
+        <<<bhk, D, 0, s>>>(w.amax, w.kpart, w.nchunk, st.kmean, st.hs, p.Skv, KV_HEADROOM, gate);
     if ((e = cudaPeekAtLastError()) != cudaSuccess)
         return e;
     quant_kv_kernel<D, Reader>
