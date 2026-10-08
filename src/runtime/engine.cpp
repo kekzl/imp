@@ -731,12 +731,16 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                                       config_.max_seq_len)
                                            : runtime_config_.speculative.capture_ctx_cap)
                                     : 0;
+        const auto& acfg = runtime_config_.attention;
+        const ApaPlanBounds apa_b = exec_apa_plan_bounds(resolve_prefill_chunk_size_(),
+                                                         acfg.sparse_prefill_topk_tokens,
+                                                         acfg.sparse_sink_tokens,
+                                                         acfg.sparse_prefill_recent_tokens,
+                                                         config_.kv_block_size);
         const auto d = exec_t2_demand(*model_, config_.max_seq_len, config_.max_batch_size,
-                                      config_.use_fp8_prefill, runtime_config_.attention.mla_absorb,
-                                      capture_cap, config_.kv_block_size,
-                                      runtime_config_.attention.ra2_prefill,
-                                      runtime_config_.attention.apa_eps > 0.0f,
-                                      runtime_config_.attention.apa_tile_cache);
+                                      config_.use_fp8_prefill, acfg.mla_absorb, capture_cap,
+                                      config_.kv_block_size, acfg.ra2_prefill, acfg.apa_eps > 0.0f,
+                                      acfg.apa_tile_cache, apa_b.rows, apa_b.keys);
         // The Qwen3-VL tower is engine-lifetime and an arena tenant but uploads
         // during warmup, so its demand must be read off the model's shapes here.
         // Gemma's mmproj tower stays outside the arena for now (docs/audit/SETTLED.md F-12).

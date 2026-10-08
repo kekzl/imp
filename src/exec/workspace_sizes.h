@@ -77,6 +77,8 @@ struct ExecShape {
     bool ra2_prefill = false;     // dispatch_policy().attention.ra2_prefill
     bool apa_prefill = false;     // dispatch_policy().attention.apa_eps > 0
     bool apa_tile_cache = false;  // and attention.apa_tile_cache
+    int apa_rows = 0;             // exec_apa_plan_bounds: query rows per APA call, 0 = max_tokens
+    int apa_keys = 0;             // keys per APA call, 0 = max_seq_len
     bool parallel_block = false;  // Cohere2: two [max_tokens, d_model] FP16 residual copies
     // Chunk-capture K/V scratch: the site takes the MAX over per-layer arrays rather than
     // config scalars (hybrids have layers with different kv-head counts), so carry both
@@ -203,7 +205,17 @@ int exec_max_weight_k(const Model& model);
 // RuntimeConfig, it is per-Engine by design).
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size, bool use_fp8_prefill,
                             bool mla_absorb = false, int capture_ctx_cap = 0, int kv_block_size = 0,
-                            bool ra2_prefill = false, bool apa_prefill = false, bool apa_tile_cache = false);
+                            bool ra2_prefill = false, bool apa_prefill = false, bool apa_tile_cache = false,
+                            int apa_rows = 0, int apa_keys = 0);
+
+// APA plan bounds: a chunked prefill (chunk > 0) calls APA with n <= chunk rows; under sparse prefill
+// (sparse_prefill_tokens > 0) with kv <= budget blocks (sinks and recent included) + chunk. 0 = unbounded
+// (max_tokens / max_seq_len). A call over the planned workspace declines to FA2.
+struct ApaPlanBounds {
+    int rows = 0, keys = 0;
+};
+ApaPlanBounds exec_apa_plan_bounds(int prefill_chunk, int sparse_prefill_tokens, int sink_tokens,
+                                   int recent_tokens, int kv_block_size);
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size);
 
 // Batch defaults to 1 (i.e. the max_logit_tokens floor of 8).

@@ -245,6 +245,28 @@ TEST(ExecT2Demand, ApaScratchIsChargedOnlyWhenApaIsOnAtHd128) {
     EXPECT_EQ(exec_t2_demand(s, 32768).apa_scratch, 0u) << "the kernel declines hd != 128";
 }
 
+// APA plan bounds: rows = prefill chunk, keys = sparse budget blocks (sinks + recent included) + chunk.
+TEST(ExecT2Demand, ApaScratchFollowsTheChunkAndTheSparseBudget) {
+    EXPECT_EQ(exec_apa_plan_bounds(0, 16384, 16, 1024, 16).rows, 0) << "no chunking: max_tokens";
+    EXPECT_EQ(exec_apa_plan_bounds(2048, 0, 16, 1024, 16).keys, 0) << "dense: max_seq_len";
+    const ApaPlanBounds b = exec_apa_plan_bounds(2048, 16384, 16, 1024, 16);
+    EXPECT_EQ(b.rows, 2048);
+    EXPECT_EQ(b.keys, 16384 + 2048);
+    EXPECT_EQ(exec_apa_plan_bounds(2048, 512, 16, 1024, 16).keys, (1 + 64 + 1) * 16 + 2048)
+        << "budget raised to sink + recent + 1 blocks";
+    ExecShape s = dense_shape();
+    s.n_heads = 32;
+    s.kv_heads_max = 8;
+    s.head_dim_max = 128;
+    s.apa_prefill = true;
+    s.apa_rows = b.rows;
+    s.apa_keys = b.keys;
+    EXPECT_EQ(exec_t2_demand(s, 110000).apa_scratch, exec_apa_workspace_bytes(2048, 18432, 32, 8, 128) + 256);
+    s.n_heads = 136;  // G 17: sparse prefill keeps the dense past, keys stay at max_seq_len
+    EXPECT_EQ(exec_t2_demand(s, 110000).apa_scratch,
+              exec_apa_workspace_bytes(2048, 110000, 136, 8, 128) + 256);
+}
+
 // RA2 prefill workspace: charged only with attention.ra2_prefill, at (max_tokens, max_seq_len).
 TEST(ExecT2Demand, Ra2ScratchIsChargedOnlyWhenRa2PrefillIsOn) {
     ExecShape s = dense_shape();

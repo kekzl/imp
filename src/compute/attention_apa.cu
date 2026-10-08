@@ -40,8 +40,14 @@ static uint8_t* ensure_apa_workspace(size_t need) {
     }
     if (s_apa_ws != nullptr && need <= s_apa_ws_cap)
         return s_apa_ws;
-    if (s_apa_ws != nullptr && s_apa_ws_bound > 0)  // planned slab taken: no second take outside the plan
+    if (s_apa_ws != nullptr && s_apa_ws_bound > 0) {  // planned slab taken: no second take outside the plan
+        static bool warned_over = false;              // e.g. kv beyond the sparse prefill bound (dense past)
+        if (!warned_over)
+            IMP_LOG_WARN("apa prefill: call needs %.2f MiB, planned %.2f MiB, declining (FA2 serves)",
+                         need / (1024.0 * 1024.0), s_apa_ws_cap / (1024.0 * 1024.0));
+        warned_over = true;
         return nullptr;
+    }
     const size_t take = std::max(need, s_apa_ws_bound);
     auto slab = engine_arena().take_bytes(take);
     if (slab.empty()) {

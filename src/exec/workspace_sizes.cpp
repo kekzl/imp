@@ -3,6 +3,7 @@
 #include "model/model.h"
 #include "quant/nvfp4_gemm.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"  // smallM_table_bytes
+#include "exec/sparse_attn_geometry.h"          // exec_apa_plan_bounds
 
 #include <algorithm>
 #include <cstdio>
@@ -280,8 +281,26 @@ size_t exec_apa_workspace_bytes(int sq, int skv, int nh, int nkv, int hd) {
 static size_t apa_scratch_demand(const ExecShape& shape, int t, int max_seq_len) {
     if (!shape.apa_prefill || shape.n_heads <= 0 || shape.kv_heads_max <= 0 || shape.head_dim_max != 128)
         return 0;
-    const int skv = (max_seq_len > 0) ? max_seq_len : shape.max_seq_len_cfg;
-    return exec_apa_workspace_bytes(t, skv, shape.n_heads, shape.kv_heads_max, 128) + kTakeAlign;
+    const int rows = shape.apa_rows > 0 ? std::min(t, shape.apa_rows) : t;
+    int skv = (max_seq_len > 0) ? max_seq_len : shape.max_seq_len_cfg;
+    if (shape.apa_keys > 0 && shape.n_heads / shape.kv_heads_max <= 16)  // sparse prefill declines G > 16
+        skv = std::min(skv, shape.apa_keys);
+    return exec_apa_workspace_bytes(rows, skv, shape.n_heads, shape.kv_heads_max, 128) + kTakeAlign;
+}
+
+ApaPlanBounds exec_apa_plan_bounds(int prefill_chunk, int sparse_prefill_tokens, int sink_tokens,
+                                   int recent_tokens, int kv_block_size) {
+    ApaPlanBounds b;
+    if (prefill_chunk <= 0)
+        return b;
+    b.rows = prefill_chunk;
+    if (sparse_prefill_tokens > 0) {
+        const int bs = kv_block_size > 0 ? kv_block_size : 16;
+        const SparseGeometry g = sparse_geometry(sparse_prefill_tokens, sink_tokens, recent_tokens, 0,
+                                                 sparse_prefill_tokens, bs);
+        b.keys = g.budget_blocks * bs + prefill_chunk;
+    }
+    return b;
 }
 
 size_t exec_apa_kv_state_bytes(int nkv, int hd, int cap_tokens) {
@@ -574,7 +593,7 @@ int exec_max_weight_k(const Model& model) { return exec_max_weight_k(exec_shape_
 
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_size, bool use_fp8_prefill,
                             bool mla_absorb, int capture_ctx_cap, int kv_block_size, bool ra2_prefill,
-                            bool apa_prefill, bool apa_tile_cache) {
+                            bool apa_prefill, bool apa_tile_cache, int apa_rows, int apa_keys) {
     ExecShape shape = exec_shape_of(model);
     shape.max_batch_size = max_batch_size;
     shape.use_fp8_prefill = use_fp8_prefill;
@@ -582,6 +601,8 @@ ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_s
     shape.ra2_prefill = ra2_prefill;
     shape.apa_prefill = apa_prefill;
     shape.apa_tile_cache = apa_tile_cache;
+    shape.apa_rows = apa_rows;
+    shape.apa_keys = apa_keys;
     shape.capture_ctx_cap = capture_ctx_cap;
     shape.kv_block_size = kv_block_size;
     return exec_t2_demand(shape, max_seq_len);
