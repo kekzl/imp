@@ -191,7 +191,8 @@ TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.moe_arrays +
                              d.fp8_reduction + d.quant_scratch + d.splitk_scratch + d.mla_scratch +
                              d.dry_penalty + d.cublas_workspace + d.grouped3x + d.imma_scratch +
-                             d.smallm_scratch + d.parallel_block + d.ra2_scratch + d.apa_scratch);
+                             d.smallm_scratch + d.parallel_block + d.ra2_scratch + d.apa_scratch +
+                             d.apa_kv_states);
     EXPECT_GT(d.total(), 0u);
 }
 
@@ -209,6 +210,24 @@ TEST(ExecApaWorkspaceBytes, FollowsTheCarveLayout) {
 }
 
 // APA prefill workspace: charged only with attention.apa_eps > 0 and hd 128.
+// APA tile caches: n_layers x one 256-B-aligned KvState at the context length, only with APA on.
+TEST(ExecT2Demand, ApaKvStatesScaleWithLayersAndContext) {
+    ExecShape s = dense_shape();
+    s.n_heads = 24;
+    s.kv_heads_max = 8;
+    s.head_dim_max = 128;
+    s.n_layers = 28;
+    EXPECT_EQ(exec_t2_demand(s, 32768).apa_kv_states, 0u) << "opt-in tier, off by default";
+    s.apa_prefill = true;
+    EXPECT_EQ(exec_t2_demand(s, 32768).apa_kv_states, 0u) << "attention.apa_tile_cache off";
+    s.apa_tile_cache = true;
+    const ExecT2Demand d = exec_t2_demand(s, 32768);
+    // tiles 8 * 512 * 9216 + HeadScale 256 + mean 4096 + fingerprint 256 + flag 256, per layer
+    EXPECT_EQ(exec_apa_kv_state_bytes(8, 128, 32768), 37753600u);
+    EXPECT_EQ(d.apa_kv_states, 28u * 37753600u + 256);
+    EXPECT_EQ(d.apa_kv_cap, 32768);
+}
+
 TEST(ExecT2Demand, ApaScratchIsChargedOnlyWhenApaIsOnAtHd128) {
     ExecShape s = dense_shape();
     s.n_heads = 24;

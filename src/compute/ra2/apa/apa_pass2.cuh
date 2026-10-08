@@ -1,5 +1,5 @@
 // APA pass 2: exact FP16 attention over the hot tiles of pass 1, merged with its cold-tile partials.
-// Vendored from kekzl/ra2 src/apa/apa_pass2.cuh (6823545); change there first, then copy.
+// Vendored from kekzl/ra2 src/apa/apa_pass2.cuh (85f508e); change there first, then copy.
 // CTA = same packed rows as pass 1; it streams the union of its warps' hot tiles, each warp computes only
 // its own. QK^T and PV on mma.sync m16n8k16 (f16 x f16 -> f32), online softmax in fp32 (log2 domain).
 #pragma once
@@ -60,15 +60,15 @@ __device__ __forceinline__ void load_q16(uint32_t (&qa)[8][4], const T* ql, cons
 }
 
 // Pass 1 scores are q.(k - kmean): row shift q.kmean * qmul from the lane's 32 Q elements + quad sum.
-__device__ __forceinline__ void row_shift(const uint32_t (&qa)[8][4], const float* ksum, float inv_n,
-                                          float qmul, int T0, float& sh_lo, float& sh_hi) {
+__device__ __forceinline__ void row_shift(const uint32_t (&qa)[8][4], const float* kmean, float qmul, int T0,
+                                          float& sh_lo, float& sh_hi) {
     sh_lo = sh_hi = 0.f;
 #pragma unroll
     for (int k = 0; k < 8; ++k)
 #pragma unroll
         for (int hlf = 0; hlf < 2; ++hlf) {
             const int c = k * 16 + hlf * 8 + T0 * 2;
-            const float k0 = ksum[c] * inv_n, k1 = ksum[c + 1] * inv_n;
+            const float k0 = kmean[c], k1 = kmean[c + 1];
             const __half2 a = *reinterpret_cast<const __half2*>(&qa[k][hlf * 2]);
             const __half2 bq = *reinterpret_cast<const __half2*>(&qa[k][hlf * 2 + 1]);
             sh_lo += __low2float(a) * k0 + __high2float(a) * k1;
@@ -111,17 +111,32 @@ __device__ __forceinline__ int next_tile(const uint32_t* whot0, int W, int t, in
     return -1;
 }
 
-// Tile t (64 rows x 16 chunks of 16 B, zero past Skv) into base; one cp.async group (empty when t < 0).
-template <int NW, typename T>
-__device__ __forceinline__ void load_tile(uint32_t base, const T* src0, int t, int tid, const Dims& dm, int b,
-                                          int hk) {
-    if (t >= 0)
-        for (int c = tid; c < BKV * 16; c += NW * 32) {
-            const int r = c >> 4, ch = c & 15, j = t * BKV + r;
-            const bool in = j < dm.Skv;
-            const size_t src = (((size_t)b * dm.Skv + (in ? j : 0)) * dm.Hkv + hk) * 128 + ch * 8;
-            cp_async16(base + r * P2_ROWB + ((ch ^ (r & 7)) << 4), src0 + src, in);
+// K (isv = false) or V tile t (64 rows x 16 chunks of 16 B; zero past Skv and in holes) into base, rows from
+// the reader rs (FlatKV<__half>, PagedF16KV); one cp.async group (empty when t < 0).
+// Row offsets of this thread's PER rows of tile t (32-bit, ~0u = past Skv or hole), shared by the K and V
+// loads; computed one step ahead so paged block-table loads leave the critical path.
+template <int NW, typename RS>
+__device__ __forceinline__ void tile_offsets(uint32_t (&ro)[BKV * 16 / (NW * 32)], const RS rs, int t,
+                                             int tid, const Dims& dm, int b, int hk) {
+#pragma unroll
+    for (int k = 0; k < BKV * 16 / (NW * 32); ++k) {
+        const int j = t * BKV + (tid >> 4) + k * (NW * 2);
+        ro[k] = (t >= 0 && j < dm.Skv) ? rs.row_off(b, j, hk, dm, 128) : ~0u;
+    }
+}
+template <int NW, typename RS>
+__device__ __forceinline__ void load_tile(uint32_t base, const RS rs, bool isv, int t,
+                                          const uint32_t (&ro)[BKV * 16 / (NW * 32)], int tid) {
+    constexpr int PER = BKV * 16 / (NW * 32);
+    const int ch = tid & 15;
+    if (t >= 0) {
+#pragma unroll
+        for (int k = 0; k < PER; ++k) {
+            const int r = (tid >> 4) + k * (NW * 2);
+            const bool in = ro[k] != ~0u;
+            cp_async16(base + r * P2_ROWB + ((ch ^ (r & 7)) << 4), rs.at(isv, in ? ro[k] : 0u) + ch * 8, in);
         }
+    }
     asm volatile("cp.async.commit_group;\n" ::: "memory");
 }
 
@@ -240,11 +255,10 @@ __device__ __forceinline__ void merge_row(const Rows2& w, int half, const Pass1O
 // Group = NW warps (threads tid 0..NW*32-1, named barrier bar, P2_SMEM bytes at smem) = pass-1 warps
 // sub*NW .. sub*NW+NW-1 of pass-1 CTA qb (NW1 warps). K(t+1) loads under PV(t), V(t+1) under QK(t+1);
 // cp.async groups in issue order K, V, K, V...
-template <int NW1, int NW, bool CAUSAL, typename T>
-__device__ __forceinline__ void pass2_group(const T* __restrict__ Q, const T* __restrict__ K,
-                                            const T* __restrict__ V, T* __restrict__ O, const Dims& dm,
-                                            float qmul, const Pass1Out& p1, int b, int hk, int nqb, int qb,
-                                            int sub, int tid, int bar, uint8_t* smem) {
+template <int NW1, int NW, bool CAUSAL, typename T, typename RS>
+__device__ __forceinline__ void pass2_group(const T* __restrict__ Q, const RS rs, T* __restrict__ O,
+                                            const Dims& dm, float qmul, const Pass1Out& p1, int b, int hk,
+                                            int nqb, int qb, int sub, int tid, int bar, uint8_t* smem) {
     const int bhk = b * dm.Hkv + hk, R = dm.R, G = dm.G, crow0 = (qb * NW1 + sub * NW) * 16;
     if (crow0 >= R)
         return;
@@ -265,7 +279,7 @@ __device__ __forceinline__ void pass2_group(const T* __restrict__ Q, const T* __
     uint32_t qa[8][4];
     load_q16(qa, q_row(r_lo), q_row(r_hi));
     float sh_lo, sh_hi;
-    row_shift(qa, p1.ksum + (size_t)bhk * 128, 1.f / dm.Skv, qmul, T0, sh_lo, sh_hi);
+    row_shift(qa, p1.ksum + (size_t)bhk * 128, qmul, T0, sh_lo, sh_hi);
     Rows2 w;
 #pragma unroll
     for (int i = 0; i < 16; ++i)
@@ -282,10 +296,13 @@ __device__ __forceinline__ void pass2_group(const T* __restrict__ Q, const T* __
     const int lm_i = lane >> 3, lm_r = lane & 7;
     const int t_end = min(dm.ntkv, CAUSAL ? p_cmax / BKV + 1 : dm.ntkv);
     int t = next_tile<NW>(whot0, p1.W, -1, t_end);
-    load_tile<NW>(kbase, K, t, tid, dm, b, hk);
-    load_tile<NW>(vbase, V, t, tid, dm, b, hk);
+    uint32_t ro[BKV * 16 / (NW * 32)];
+    tile_offsets<NW>(ro, rs, t, tid, dm, b, hk);
+    load_tile<NW>(kbase, rs, false, t, ro, tid);
+    load_tile<NW>(vbase, rs, true, t, ro, tid);
     while (t >= 0) {
         const int tn = next_tile<NW>(whot0, p1.W, t, t_end), j0 = t * BKV;
+        tile_offsets<NW>(ro, rs, tn, tid, dm, b, hk);           // in flight under QK(t)
         asm volatile("cp.async.wait_group 1;\n" ::: "memory");  // K(t)
         gsync();
         const bool mine = valid && (!CAUSAL || j0 <= p_wmax) && ((whot[t >> 5] >> (t & 31)) & 1u);
@@ -298,13 +315,13 @@ __device__ __forceinline__ void pass2_group(const T* __restrict__ Q, const T* __
             softmax16(w, s, mx_lo, mx_hi);
         }
         gsync();  // K buffer free
-        load_tile<NW>(kbase, K, tn, tid, dm, b, hk);
+        load_tile<NW>(kbase, rs, false, tn, ro, tid);
         asm volatile("cp.async.wait_group 1;\n" ::: "memory");  // V(t)
         gsync();
         if (mine)
             pv16(w.oh, s, vbase, lm_i, lm_r);
         gsync();  // V buffer free
-        load_tile<NW>(vbase, V, tn, tid, dm, b, hk);
+        load_tile<NW>(vbase, rs, true, tn, ro, tid);
         t = tn;
     }
     if (!valid || !mine_any)
@@ -323,12 +340,11 @@ __device__ __forceinline__ void pass2_group(const T* __restrict__ Q, const T* __
 // block, the rest run pass 2 on a pass-1 q block as 3 groups of 4 warps. Tickets go to running CTAs in order,
 // so the pass-1 item a pass-2 CTA waits on is resident (no deadlock); pass 2 fills the SMs of pass 1's last
 // wave.
-template <bool CAUSAL, typename T>
+template <bool CAUSAL, typename T, typename RS>
 __global__ void __launch_bounds__(384, 1) apa_kernel(
     const uint8_t* __restrict__ Qq, const uint8_t* __restrict__ Qs, const float* __restrict__ Qr,
-    const uint8_t* __restrict__ KV, const HeadScale* __restrict__ hs, const T* __restrict__ Q,
-    const T* __restrict__ K, const T* __restrict__ V, T* __restrict__ O, Dims dm, float qmul, Pass1Out p1,
-    int n1, int nqb, uint32_t* ticket) {
+    const uint8_t* __restrict__ KV, const HeadScale* __restrict__ hs, const T* __restrict__ Q, RS rs,
+    T* __restrict__ O, Dims dm, float qmul, Pass1Out p1, int n1, int nqb, uint32_t* ticket) {
     constexpr int NW = 12, P2W = 4;
     extern __shared__ __align__(128) uint8_t smem[];
     __shared__ int item_s;
@@ -356,7 +372,7 @@ __global__ void __launch_bounds__(384, 1) apa_kernel(
         if (gi >= SUB * n2)
             return;
         const int j = gi / SUB, jx = j % nqb, jhk = (j / nqb) % dm.Hkv, jb = j / (nqb * dm.Hkv);
-        pass2_group<NW, P2W, CAUSAL, T>(Q, K, V, O, dm, qmul, p1, jb, jhk, nqb, CAUSAL ? nqb - 1 - jx : jx,
+        pass2_group<NW, P2W, CAUSAL, T>(Q, rs, O, dm, qmul, p1, jb, jhk, nqb, CAUSAL ? nqb - 1 - jx : jx,
                                         gi % SUB, tid, 1 + g, smem + g * P2_SMEM);
     }
 }

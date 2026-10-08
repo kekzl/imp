@@ -1,5 +1,5 @@
 // APA pass 1: all-FP4 flash attention that diverts hot tiles (mass share > eps of the running row sum) to
-// Vendored from kekzl/ra2 src/apa/apa_attn.cuh (6823545); change there first, then copy.
+// Vendored from kekzl/ra2 src/apa/apa_attn.cuh (85f508e); change there first, then copy.
 // pass 2 (exact FP16). Cold tiles finish here; warps with hot tiles export (o, m, l) for the merge.
 #pragma once
 #include "apa_common.cuh"
@@ -12,10 +12,11 @@ struct Pass1Out {
     float eps;
     int W;
     uint32_t* warp_hot;
-    uint32_t* ready;    // [bhk * nqb + qb] != 0: pass-1 CTA finished (release); pass 2 acquires it
-    float* part;        // [rows][D]: sum over cold tiles of p * v, p relative to m
-    float2* ml;         // [rows]: (m, sum over cold tiles of p), log2 domain
-    const float* ksum;  // [bhk][D] K column sums: pass 1 scores are q.(k - kmean), pass 2 must match
+    uint32_t* ready;  // [bhk * nqb + qb] != 0: pass-1 CTA finished (release); pass 2 acquires it
+    float* part;      // [rows][D]: sum over cold tiles of p * v, p relative to m
+    float2* ml;       // [rows]: (m, sum over cold tiles of p), log2 domain
+    const float*
+        ksum;  // [bhk][D] K column mean (finalized): pass 1 scores are q.(k - kmean), pass 2 must match
 };
 
 // Lazy row max: m may lag the true row max by up to TAU (-DRA2_EXACT_MAX: exact).
@@ -350,7 +351,7 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
     const int p_wmax = dm.q_offset + min(row0 + 15, R - 1) / G;
     const int p_cmax = dm.q_offset + (min((qb + 1) * BQ, R) - 1) / G;  // last position in the CTA
     const int ntiles = CAUSAL ? min((p_cmax + BKV) / BKV, dm.ntkv) : dm.ntkv;
-    const uint8_t* kv = KV + (size_t)bhk * dm.ntkv * TILE;
+    const uint8_t* kv = KV + (size_t)bhk * dm.kvcap * TILE;
     const uint32_t sbase = (uint32_t)__cvta_generic_to_shared(smem);
     const uint32_t full0 = (uint32_t)__cvta_generic_to_shared(full);
     const uint32_t empty0 = (uint32_t)__cvta_generic_to_shared(empty);

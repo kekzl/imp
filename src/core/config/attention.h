@@ -58,6 +58,9 @@ struct Attention {
     // apa_min_kv (dense prefill per chunk APA/RA2: 1.13 at kv 26624, 0.98 at 34816, 0.94 at 43008).
     float apa_eps = 0.0f;
     int apa_min_kv = 40960;
+    // Per-layer FP4 tile cache across prefill chunks: a chunk quantizes only its new keys. T2 arena
+    // n_layers x 72*hd B per 64 tokens per kv head at max_seq_len (Llama-3.2-3B 108k: 3.7 GiB).
+    bool apa_tile_cache = true;
     // FP8 paged decode (HD=128): tokens per warp iteration. 4 = multitok
     // kernels (Q heads of a KV head grouped per CTA, 16-lanes-per-row layout),
     // 1 = the plain per-head kernel serves shapes multitok does not.

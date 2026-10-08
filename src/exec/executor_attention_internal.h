@@ -13,6 +13,7 @@
 #include "compute/attention_apa.h"
 #include "compute/attention_ra2.h"
 #include "compute/dispatch_paths.h"  // AttnPrefillOuter
+#include "compute/kv_gather.h"
 #include "core/logging.h"
 #include "exec/inference_state.h"
 #include "memory/kv_cache.h"
@@ -67,6 +68,71 @@ namespace imp {
     Tensor o4 = o.reshape(4, q4s);
     return fmha_sm120_fa2_prefill(q4, k4, v4, o4, scale, /*causal=*/true, sliding_window, softcap, stream,
                                   q_offset, /*fp16_qk=*/true, d_kv_len, static_cast<const half*>(sinks));
+}
+
+// Chunked prefill: gather past paged KV [0, gather_cap) of the cache dtype into flat FP16 k_full / v_full.
+static void gather_past_kv_fp16(KVCache* cache, int kv_layer, half* k_full, half* v_full, const int* past_bt,
+                                int gather_cap, int kv_bs, int nkv, int hd,
+                                const std::vector<float>& kv_scales, cudaStream_t stream, const int* d_past) {
+    const QType kvt = cache->qtype();
+    if (kvt == QType::F16) {
+        paged_kv_gather_fp16(k_full, static_cast<const half*>(cache->k_ptr(kv_layer, 0)), past_bt, gather_cap,
+                             kv_bs, nkv, hd, stream, d_past);
+        paged_kv_gather_fp16(v_full, static_cast<const half*>(cache->v_ptr(kv_layer, 0)), past_bt, gather_cap,
+                             kv_bs, nkv, hd, stream, d_past);
+    } else if (kvt == QType::FP8_E4M3) {
+        const float kv_scale = kv_layer < (int)kv_scales.size() ? kv_scales[kv_layer] : 1.0f;
+        paged_kv_gather_fp8_to_fp16(k_full, static_cast<const __nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
+                                    past_bt, kv_scale, gather_cap, kv_bs, nkv, hd, stream, d_past);
+        paged_kv_gather_fp8_to_fp16(v_full, static_cast<const __nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)),
+                                    past_bt, kv_scale, gather_cap, kv_bs, nkv, hd, stream, d_past);
+    } else if (kvt == QType::NVFP4) {
+        paged_kv_gather_nvfp4_to_fp16(k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
+                                      static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)), past_bt,
+                                      gather_cap, kv_bs, nkv, hd, stream, d_past);
+        paged_kv_gather_nvfp4_to_fp16(v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
+                                      static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), past_bt,
+                                      gather_cap, kv_bs, nkv, hd, stream, d_past);
+    } else if (kvt == QType::MXFP4_KV) {
+        paged_kv_gather_mxfp4_kv_to_fp16(k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
+                                         static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
+                                         past_bt, gather_cap, kv_bs, nkv, hd, stream, d_past);
+        paged_kv_gather_mxfp4_kv_to_fp16(v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
+                                         static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)),
+                                         past_bt, gather_cap, kv_bs, nkv, hd, stream, d_past);
+    } else if (kvt == QType::INT8) {  // symmetric 8-bit, per-head FP16 scale
+        paged_kv_gather_int8_to_fp16(k_full, static_cast<const int8_t*>(cache->k_ptr(kv_layer, 0)),
+                                     static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)), past_bt,
+                                     gather_cap, kv_bs, nkv, hd, stream, d_past);
+        paged_kv_gather_int8_to_fp16(v_full, static_cast<const int8_t*>(cache->v_ptr(kv_layer, 0)),
+                                     static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)), past_bt,
+                                     gather_cap, kv_bs, nkv, hd, stream, d_past);
+    } else {  // INT4: symmetric 4-bit with per-head FP16 scale
+        paged_kv_gather_int4_to_fp16(k_full, static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
+                                     static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)), past_bt,
+                                     gather_cap, kv_bs, nkv, hd, stream, d_past);
+        paged_kv_gather_int4_to_fp16(v_full, static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
+                                     static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)), past_bt,
+                                     gather_cap, kv_bs, nkv, hd, stream, d_past);
+    }
+}
+
+// APA on the paged FP16 cache in chunked prefill, no gather: past keys [0, att_off) through past_bt, the
+// current chunk from kk / vv. Gates as try_fp4_prefill's APA arm, plus FP16 cache and no capture replay.
+[[nodiscard]] static bool try_apa_paged_prefill(const DispatchPolicy& rcfg, bool cap_replay, const Tensor& q,
+                                                KVCache* cache, int kv_layer, const int* past_bt, int kv_bs,
+                                                const Tensor& kk, const Tensor& vv, int att_off, Tensor& o,
+                                                int n, int nh, int nkv, int hd, float scale,
+                                                int sliding_window, float softcap, cudaStream_t stream,
+                                                const void* sinks) {
+    const auto& a = rcfg.attention;
+    if (cap_replay || a.apa_eps <= 0.0f || cache->qtype() != QType::F16 || att_off + n < a.apa_min_kv ||
+        sliding_window > 0 || softcap != 0.0f || sinks != nullptr || process_diag_deterministic())
+        return false;
+    return attention_apa_prefill_paged(q, static_cast<const half*>(cache->k_ptr(kv_layer, 0)),
+                                       static_cast<const half*>(cache->v_ptr(kv_layer, 0)), past_bt, kv_bs,
+                                       kk, vv, att_off, o, n, att_off + n, nh, nkv, hd, scale, att_off,
+                                       a.apa_eps, kv_layer, stream);
 }
 
 // Opt-in FP4 prefill tiers, tried before FA2: APA (attention.apa_eps > 0, kv_len >= apa_min_kv), then
