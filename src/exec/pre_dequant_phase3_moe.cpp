@@ -8,6 +8,7 @@
 #include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
+#include "exec/moe_nvfp4_cache_rule.h"
 #include "exec/pre_dequant_internal.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "quant/dequant_gpu.h"
@@ -303,61 +304,14 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
     // budget covers one layer's overhead.
     size_t moe_logical_avail = moe_budget;
 
-    const bool decode_all_moe = dispatch_policy().gemm.nvfp4_decode_all;
-    auto cache_moe_expert_nvfp4 = [&](const Tensor& packed, QType qtype) {
-        if (!packed.data)
-            return;
-        if (!nvfp4_beneficial(qtype, decode_all_moe))
-            return;
-        if (wcache_->nvfp4_moe.count(packed.data))
-            return;
-        if (moe_budget_exhausted)
-            return;
-        if (!packed.on_device)
-            return;
-        if (packed.ndim < 3)
-            return;
-
-        int ne = static_cast<int>(packed.shape[0]);
-        int rows = static_cast<int>(packed.shape[1]);
-        int cols = static_cast<int>(packed.shape[2]);
-        if (cols % 16 != 0)
-            return;
-        if (!dequant_gpu_supported(qtype) || !qscratch_->dequant)
-            return;
-
-        size_t nvfp4_bytes = static_cast<size_t>(ne) * rows * cols / 2 +
-                             static_cast<size_t>(ne) * rows * cols / 16 +
-                             static_cast<size_t>(ne) * sizeof(float);
-
-        if (dctx.nvfp4_moe_total + nvfp4_bytes > moe_budget) {
-            moe_budget_exhausted = true;
-            IMP_LOG_INFO(
-                "NVFP4 MoE cache: VRAM budget reached after %d MoE tensors "
-                "(%.1f / %.1f MiB)",
-                dctx.nvfp4_moe_count, dctx.nvfp4_moe_total / (1024.0 * 1024.0), moe_budget / (1024.0 * 1024.0));
-            return;
-        }
-
-        NvFP4MoEQuantResult result;
-        quantize_packed_experts_to_nvfp4(packed.data, qtype, ne, rows, cols, qscratch_->dequant, result,
-                                         stream);
-
-        wcache_->nvfp4_moe[packed.data] = result;
-        dctx.nvfp4_moe_total += nvfp4_bytes;
-        dctx.nvfp4_moe_count++;
-    };
-
     // NVFP4-prequant SafeTensors path: experts arrive as per-expert tensors with NVFP4
     // qtype + .scales/.tensor_scale sidecars (Phase 0); the 3D expert_*_packed tensors are
-    // NULL (loader only stamps them for GGUF and Gemma-4). Without this branch,
-    // cache_moe_expert_nvfp4 early-returns at !packed.data and the legacy FP16 dequant +
-    // cuBLAS fallback fires per layer per token, killing CUDA Graphs.
+    // NULL (loader only stamps them for GGUF and Gemma-4). Without this branch the legacy
+    // FP16 dequant + cuBLAS fallback fires per layer per token, killing CUDA Graphs.
     // Allocate one contiguous packed_data + micro_scales + tensor_scales buffer per layer
     // per projection, copy per-expert pointers in, stamp packed.data so wcache lookups and
     // the consumer dispatch wire up automatically. Free the per-expert allocations inline
     // after each layer's copy: keeping both would peak VRAM beyond budget.
-
     for (int i = 0; i < cfg.n_layers; i++) {
         // Need mutable access to expert_*_packed for cache_moe_native_nvfp4
         // to stamp the contiguous buffer pointer. const_cast follows the
@@ -386,13 +340,15 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
         // GGUF/re-quant path: only run when native didn't populate. For GGUF NVFP4-target
         // models the source qtype is Q*_K/Q8_0 and packed.data is non-null; for prequant
         // SafeTensors all three native calls already succeeded and these are no-ops.
-        if (!g)
-            cache_moe_expert_nvfp4(L.expert_gate_packed, L.expert_gate_packed.qtype);
-        if (!u)
-            cache_moe_expert_nvfp4(L.expert_up_packed, L.expert_up_packed.qtype);
-        if (!d)
-            cache_moe_expert_nvfp4(L.expert_down_packed, L.expert_down_packed.qtype);
+        if (!moe_budget_exhausted && !(g && u && d))
+            cache_moe_layer_gguf_(i, {&L.expert_gate_packed, &L.expert_up_packed, &L.expert_down_packed},
+                                  {g, u, d}, moe_budget, stream, dctx, moe_budget_exhausted);
     }
+    if (dctx.nvfp4_moe_partial_skipped > 0)
+        IMP_LOG_INFO(
+            "NVFP4 MoE cache: skipped %d MoE layers whose gate/up/down are not all eligible "
+            "(a partial layer is never read)",
+            dctx.nvfp4_moe_partial_skipped);
 
     if (dctx.nvfp4_moe_count > 0) {
         wcache_->nvfp4_moe_bytes = dctx.nvfp4_moe_total;
@@ -792,6 +748,55 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
         }
 
         return true;
+}
+
+// GGUF re-quant path for one MoE layer: the projections not cached yet are quantized to NVFP4
+// only when the whole layer qualifies (moe_nvfp4_cache_rule.h) and fits the budget.
+void QuantPipeline::cache_moe_layer_gguf_(int layer, std::array<const Tensor*, 3> gud,
+                                          std::array<bool, 3> cached, size_t moe_budget, cudaStream_t stream,
+                                          Nvfp4DecodeContext& dctx, bool& moe_budget_exhausted) {
+    const bool decode_all = dispatch_policy().gemm.nvfp4_decode_all;
+    std::array<MoeProjCacheState, 3> st{};
+    for (int p = 0; p < 3; ++p) {
+        const Tensor& t = *gud[p];
+        const bool cacheable = t.data && nvfp4_beneficial(t.qtype, decode_all) &&
+                               !wcache_->nvfp4_moe.count(t.data) && t.on_device && t.ndim >= 3 &&
+                               t.shape[2] % 16 == 0 && dequant_gpu_supported(t.qtype) && qscratch_->dequant;
+        st[p] = MoeProjCacheState{t.data != nullptr || cached[p], cached[p], !cached[p] && cacheable};
+    }
+    if (!moe_layer_cache_whole(st[0], st[1], st[2])) {
+        if (gud[1]->data || gud[2]->data)
+            dctx.nvfp4_moe_partial_skipped++;
+        return;
+    }
+    auto nvfp4_bytes = [](const Tensor& t) {
+        const size_t ne = static_cast<size_t>(t.shape[0]);
+        const size_t elems = ne * static_cast<size_t>(t.shape[1]) * static_cast<size_t>(t.shape[2]);
+        return elems / 2 + elems / 16 + ne * sizeof(float);
+    };
+    size_t layer_bytes = 0;
+    for (int p = 0; p < 3; ++p)
+        if (st[p].cacheable)
+            layer_bytes += nvfp4_bytes(*gud[p]);
+    if (dctx.nvfp4_moe_total + layer_bytes > moe_budget) {
+        moe_budget_exhausted = true;
+        IMP_LOG_INFO(
+            "NVFP4 MoE cache: VRAM budget reached at layer %d after %d MoE tensors (%.1f / %.1f MiB)", layer,
+            dctx.nvfp4_moe_count, dctx.nvfp4_moe_total / (1024.0 * 1024.0), moe_budget / (1024.0 * 1024.0));
+        return;
+    }
+    for (int p = 0; p < 3; ++p) {
+        if (!st[p].cacheable)
+            continue;
+        const Tensor& t = *gud[p];
+        NvFP4MoEQuantResult result;
+        quantize_packed_experts_to_nvfp4(t.data, t.qtype, static_cast<int>(t.shape[0]),
+                                         static_cast<int>(t.shape[1]), static_cast<int>(t.shape[2]),
+                                         qscratch_->dequant, result, stream);
+        wcache_->nvfp4_moe[t.data] = result;
+        dctx.nvfp4_moe_total += nvfp4_bytes(t);
+        dctx.nvfp4_moe_count++;
+    }
 }
 
 }  // namespace imp

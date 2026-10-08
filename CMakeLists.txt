@@ -864,6 +864,8 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_admission.cpp
         # MoE prefill selectors (#2459): table lookups, no kernel launch.
         tests/test_moe_prefill_select.cpp
+        # GGUF MoE NVFP4 decode cache: whole layer or nothing.
+        tests/test_moe_nvfp4_cache_rule.cpp
         tests/test_batch_verify_predicates.cpp
         tests/test_forward_profile.cpp
         tests/test_lora_dims.cpp

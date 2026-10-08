@@ -7,6 +7,7 @@
 #include "exec/storage_planner.h"   // StoragePlan, PlanHints, StorageTier
 #include "exec/weight_handle.h"      // WeightRegistry
 #include <cuda_runtime.h>
+#include <array>
 #include <functional>
 #include <cstddef>
 #include <vector>
@@ -42,6 +43,7 @@ struct Nvfp4DecodeContext {
     int    nvfp4_moe_count = 0;         // populated by the MoE-cache phase
     size_t nvfp4_moe_total = 0;
     size_t nvfp4_moe_ms_freed = 0;      // duplicated per-expert micro-scales freed (borrow path)
+    int nvfp4_moe_partial_skipped = 0;  // GGUF MoE layers left uncached: not all projections eligible
     // Shared VRAM safety reserve for mode 2 paths (dense incremental, CUTLASS NVFP4, MoE
     // expert caching), computed once from the model's actual attention layout. Replaces the
     // previous total_mem/10 heuristic, which over-reserved and starved the dense NVFP4
@@ -131,6 +133,10 @@ private:
     [[nodiscard]] bool cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>& experts, cudaStream_t stream,
                                  Nvfp4DecodeContext& dctx, bool& moe_budget_exhausted,
                                  size_t& moe_logical_avail);
+    // GGUF re-quant of one MoE layer {gate, up, down}: whole layer or nothing.
+    void cache_moe_layer_gguf_(int layer, std::array<const Tensor*, 3> gud, std::array<bool, 3> cached,
+                               size_t moe_budget, cudaStream_t stream, Nvfp4DecodeContext& dctx,
+                               bool& moe_budget_exhausted);
     void gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx);
     void pre_dequant_phase3c_standalone_mxfp4_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase4_tensor_registry_(const ModelConfig& cfg, cudaStream_t stream);
