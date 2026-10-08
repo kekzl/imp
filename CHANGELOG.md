@@ -9,7 +9,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `attention.ra2_prefill` (opt-in): FP4 prefill tier, INT8 QK^T + two-term NVFP4 PV, hd 64/128/256, GQA, chunk continuation. pp 9142 Qwen3-8B Q8_0 13656 -> 14046 tok/s, Llama-3.2-3B Q8_0 pp 8720 29163 -> 32616 tok/s (median of 3); PPL change within +0.1 % on 3 models (#2628).
 
 ### Fixed
-- GGUF MoE layers get an NVFP4 decode cache only when gate, up and down all qualify; a lone Q5_K/Q6_K down was never read. Qwen3.6-35B-A3B UD-Q4_K_M: 5760 MiB freed, `--bench-pp 512` aborted on a 16-block KV pool, now 13618 tok/s; Qwen3-30B-A3B Q4_K_M: 2592 MiB freed.
+- GGUF MoE layers get an NVFP4 decode cache only when gate, up and down all qualify; a lone Q5_K/Q6_K down was never read. Qwen3.6-35B-A3B UD-Q4_K_M: 5760 MiB freed, `--bench-pp 512` aborted on a 16-block KV pool, now 13618 tok/s; Qwen3-30B-A3B Q4_K_M: 2592 MiB freed (#2637).
 
 ### Changed
 - `attention.ra2_prefill` workspace is planned in the T2 arena at (max_tokens, max_seq_len) and taken once; long prompts no longer decline for lack of arena space. Llama-3.2-3B Q8_0 at 32k context: arena +80.4 MiB, 13337-token prompt on ra2_fp4 instead of fa2_fp16qk, pp 535.86 -> 507.82 / 464.55 ms (#2633).
