@@ -5,6 +5,7 @@
 #include "core/qtype.h"
 #include "memory/kv_cache.h"
 #include "runtime/vram_budget.h"
+#include "model/model_config.h"
 
 #include <gtest/gtest.h>
 
@@ -109,6 +110,42 @@ TEST(KvDtypeGolden, PerLayerRefusesPerHeadScales) {
         SCOPED_TRACE(qtype_name(q));
         EXPECT_THROW(KVCache::for_accounting(3, kNkv, kHd, q, 4, 16), std::runtime_error);
     }
+}
+
+// Planner block bytes vs the per-layer pool, Gemma-4-26B geometry: 25 layers {nkv 8, hd 256},
+// 5 layers {nkv 2, hd 512}. n_layers x mean covers the pool and rounds up by < n_layers bytes.
+TEST(KvDtypeGolden, PlannerMeanMatchesPerLayerPool) {
+    ModelConfig mcfg;
+    mcfg.n_layers = 30;
+    mcfg.n_kv_heads = 8;
+    for (int l = 0; l < 30; l++) {
+        const bool global = l % 6 == 5;
+        mcfg.n_kv_heads_per_layer.push_back(global ? 2 : 8);
+        mcfg.head_dim_per_layer.push_back(global ? 512 : 256);
+    }
+    for (QType q : {QType::F16, QType::FP8_E4M3, QType::NVFP4}) {
+        SCOPED_TRACE(qtype_name(q));
+        auto c = KVCache::for_accounting(30, mcfg.n_kv_heads_per_layer, mcfg.head_dim_per_layer, q, 4, 16);
+        size_t pool = 0;
+        for (int l = 0; l < 30; l++)
+            pool += 2 * (c->block_bytes(l) + c->scale_block_bytes(l));
+        const size_t mean = kv_block_bytes_layer_mean(mcfg, q, 16, 512, /*swa_sizing=*/false);
+        EXPECT_GE(30 * mean, pool);
+        EXPECT_LT(30 * mean - pool, 30u);
+        EXPECT_LT(mean, kv_block_bytes_per_layer(q, 16, 8, 512));
+    }
+    // F16: 3.4375 MiB per 16-token block vs 7.5 MiB at the max shape.
+    EXPECT_EQ(kv_block_bytes_layer_mean(mcfg, QType::F16, 16, 512, false), (3604480u + 29) / 30);
+    const size_t max_shape = kv_block_bytes_per_layer(QType::F16, 16, 8, 512);
+    EXPECT_EQ(kv_block_bytes_layer_mean(mcfg, QType::F16, 16, 512, /*swa_sizing=*/true), max_shape);
+    EXPECT_EQ(kv_block_bytes_layer_mean(mcfg, QType::INT8, 16, 512, false),
+              kv_block_bytes_per_layer(QType::INT8, 16, 8, 512));
+    ModelConfig hybrid = mcfg;
+    hybrid.n_kv_heads_per_layer[3] = 0;  // non-attention layer: pool skips it, max shape stays
+    EXPECT_EQ(kv_block_bytes_layer_mean(hybrid, QType::F16, 16, 512, false), max_shape);
+    ModelConfig uniform = mcfg;
+    uniform.head_dim_per_layer.clear();
+    EXPECT_EQ(kv_block_bytes_layer_mean(uniform, QType::F16, 16, 512, false), max_shape);
 }
 
 // The descriptor itself, against the predicate sets main open-coded:
