@@ -162,9 +162,9 @@ TEST_F(NvFP4SmallMV2Test, BandwidthAboveStarvationFloor) {
     // Weight bytes dominate: N*K/2 nibbles + N*K/16 scales = 14.75 MB.
     const double bytes = (double)N * K / 2 + (double)N * K / 16;
     const double floor_us = bytes / 1792e9 * 1e6;  // 8.2 us
-    // Same data, fresh buffers per attempt: the time is placement-bistable (10.5-12.9 vs 21-32 us
-    // per allocation, clocks 2917/13801 MHz in both), so one allocation is a lottery, not a gate.
-    std::vector<DeviceQuant> keep;  // attempts stay allocated, so each one gets new placement
+    // The time is bimodal over minutes (10.3-14.9 vs 19-32 us, clocks 2917/13801 MHz in both; 0 of 132
+    // slow later on the same box): one attempt is a lottery, best of up to 3 is the gate.
+    std::vector<DeviceQuant> keep;  // attempts stay allocated: fresh buffers each time
     double best_pct = 0.0, best_us = 0.0;
     for (int attempt = 0; attempt < 3 && best_pct <= 40.0; ++attempt) {
         keep.emplace_back();
