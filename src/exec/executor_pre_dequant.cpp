@@ -161,8 +161,10 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // MemAccount per-pool attribution (vram_audit diagnostic): the caches
     // above allocate via raw cudaMallocAsync, invisible to VRAMAllocator, so
     // note the build totals here — one note per cache family.
-    MemAccount::instance().note("WEIGHT_CACHE_FP16",
-                                static_cast<std::ptrdiff_t>(wcache_->fp16_bytes));
+    // Phase 1 allocates the FP16 cache through VRAMAllocator ("fp16_weight_cache"), which names
+    // its own charges: noting it here too counted it twice (Qwen3-30B-A3B Q4_K_M: 1680 MiB).
+    if (!vram_alloc_)
+        MemAccount::instance().note("WEIGHT_CACHE_FP16", static_cast<std::ptrdiff_t>(wcache_->fp16_bytes));
     // Minus the SSM sidecar: it is the one FP8 cache that goes through
     // VRAMAllocator, which names its own charges now, so including it here
     // counted it twice.
