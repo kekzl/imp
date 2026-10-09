@@ -1,6 +1,8 @@
 #include "runtime/vram_budget.h"
 #include "runtime/engine.h"  // EngineConfig full definition
 #include "exec/storage_planner.h"
+#include "exec/moe_nvfp4_cache_rule.h"
+#include "quant/dequant_gpu.h"           // dequant_gpu_supported
 #include "compute/gemm_cutlass_sm120.h"  // cutlass_nvfp4_sf_size (SfAtom padding)
 #include "compute/mmq_q8_imma.h"         // imma_q8_plane_bytes
 #include "core/kv_dtype.h"
@@ -12,6 +14,53 @@
 #include <cuda_runtime.h>
 
 namespace imp {
+
+size_t gguf_moe_nvfp4_cache_bytes(const Model& model, bool decode_all, int nvfp4_decode_mode) {
+    const auto& mcfg = model.config();
+    if (mcfg.is_nvfp4_prequant || nvfp4_decode_mode <= 0)
+        return 0;
+    // Same per-tensor test and whole-layer rule as phase 3-moe (cache_moe_layer_gguf_).
+    auto state = [&](const Tensor& t) {
+        const bool ok = t.data && nvfp4_beneficial(t.qtype, decode_all) && t.on_device && t.ndim >= 3 &&
+                        t.shape[2] % 16 == 0 && dequant_gpu_supported(t.qtype);
+        return MoeProjCacheState{t.data != nullptr, false, ok};
+    };
+    size_t total = 0;
+    for (int i = 0; i < mcfg.n_layers; i++) {
+        const auto& L = model.layer(i);
+        if (!moe_layer_cache_whole(state(L.expert_gate_packed), state(L.expert_up_packed),
+                                   state(L.expert_down_packed)))
+            continue;
+        for (const Tensor* t : {&L.expert_gate_packed, &L.expert_up_packed, &L.expert_down_packed})
+            if (t->data)
+                total += moe_nvfp4_packed_bytes(t->shape[0], t->shape[1], t->shape[2]);
+    }
+    return total;
+}
+
+size_t planned_post_cache_reserve(const VRAMBudget& budget, size_t total_vram) {
+    if (budget.kv_plan_bytes == 0)
+        return 0;
+    return budget.kv_plan_bytes + 256ULL * 1024 * 1024 + vram_allocator_headroom(total_vram) +
+           budget.library_reserve_bytes + budget.imma_plane_bytes + budget.ssm_footprint_bytes;
+}
+
+void apply_plan_to_weight_caches(VRAMBudget& budget, const PlanResult& plan, size_t distributable,
+                                 bool nvfp4_prequant) {
+    if (!plan.ok || nvfp4_prequant)
+        return;
+    size_t total_vram = 0;
+    (void)vram_budget_mem_get_info(nullptr, &total_vram);
+    // The plan leaves no allocator headroom; KV growth keeps it free (kv_cache.cu).
+    const size_t headroom = vram_allocator_headroom(total_vram);
+    const size_t planned = plan.plan.total();
+    const size_t slack = distributable > planned ? distributable - planned : 0;
+    const size_t shortfall = headroom > slack ? headroom - slack : 0;
+    budget.weight_cache_grant_bytes = plan.plan.optional_caches > shortfall
+                                          ? plan.plan.optional_caches - shortfall
+                                          : 0;
+    budget.kv_plan_bytes = plan.plan.kv.bytes + plan.plan.kv.meta_bytes + plan.plan.kv.swa_bytes;
+}
 
 NativeCacheDemand compute_native_cache_demand(const Model& model) {
     NativeCacheDemand d;
@@ -596,7 +645,11 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
 
     // Publish the demand figure this pass actually used, so the A7 step-2b
     // comparison feeds plan_memory() the same number instead of re-deriving it.
-    budget.weight_cache_estimate_bytes = nvfp4_estimate + cutlass_sf_estimate;
+    // GGUF MoE experts join the plan demand only: phase 3-moe builds after the FP16 cache is freed,
+    // so charging them to nvfp4_estimate starved the phase-1 FP16 cache (Qwen3-30B decode_all).
+    budget.weight_cache_estimate_bytes = nvfp4_estimate + cutlass_sf_estimate +
+                                         gguf_moe_nvfp4_cache_bytes(model, decode_all,
+                                                                    config.use_nvfp4_decode);
     budget.ssm_footprint_bytes = ssm_footprint;
 
     const char* strat_name = (budget.strategy == VRAMBudget::FP8_PREFILL_NVFP4_DECODE)

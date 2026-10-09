@@ -14,6 +14,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `cp.async.bulk` into `shared::cluster` (ra2 attention, NVFP4 small-M grouped GEMM) compiled to a driver syscall that kept about 3.5 GB of local memory after the first launch; now `shared::cta`. The T2 arena plan counts the chunk-capture K/V (128 MiB short at `capture_ctx_cap` 32768).
 - GGUF MoE layers get an NVFP4 decode cache only when gate, up and down all qualify; a lone Q5_K/Q6_K down was never read. Qwen3.6-35B-A3B UD-Q4_K_M: 5760 MiB freed, `--bench-pp 512` aborted on a 16-block KV pool, now 13618 tok/s; Qwen3-30B-A3B Q4_K_M: 2592 MiB freed (#2637).
 - The GGUF NVFP4 MoE decode cache charges the library reserve and the IMMA Q8_0 planes before sizing from free VRAM. Qwen3-30B-A3B Q4_K_M with `gemm.nvfp4_decode_all=true`: a 13537-token `--perplexity` run failed on KV capacity, now 10.9769; cache 8748 -> 4860 MiB in a fresh container (#2644).
+- GGUF mode-2 NVFP4 caches (dense, CUTLASS SF, MoE) leave the planned KV pool free and stop at the plan's cache grant, which now counts GGUF MoE experts. Devstral-Small-2-24B Q4_K_M `gemm.nvfp4_decode_all=true`: a 13915-token `--perplexity` failed on KV capacity, now mean NLL 1.8999; tg128 unchanged with a measured library reserve.
 
 ### Changed
 - APA 0.6.1 (kekzl/apa 015301f): cheaper block scale search in prep. PPL ppl_corpus_45k 0.6.0 -> 0.6.1, eps 0.01: Qwen3-8B 10.7971 -> 10.7953, Llama-3.2-3B 17.3704 -> 17.3663. Llama 106451 tokens, eps 0.01, mean of 4: sparse prefill 5004.42 -> 4990.53 ms, dense 6739.59 -> 6728.63 ms.

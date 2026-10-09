@@ -339,6 +339,7 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
 
     Nvfp4DecodeContext dctx;
     dctx.mode_str = (wcache_->nvfp4_decode_mode == 1) ? "additive" : "only";
+    dctx.cache_grant = budget.weight_cache_grant_bytes;  // SIZE_MAX unless a GGUF plan applied
 
     // Compute the shared mode-2 safety reserve once. Mode 1 keeps the upfront 10% headroom
     // (vram_budget.cpp:47), so its arithmetic already protects against shared/system-memory
@@ -365,6 +366,10 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
         constexpr size_t kReserveCap = 1024ULL * 1024 * 1024;
         constexpr size_t kReserveFloor = 256ULL * 1024 * 1024;
         dctx.safety_reserve = std::clamp(kv_reserve + kWorkspaceSafety, kReserveFloor, kReserveCap);
+        // GGUF with a plan: the capped 16K estimate refused Devstral-24B decode_all a 13.9k prompt.
+        size_t free_mem = 0, total_mem = 0;
+        (void)vram_budget_mem_get_info(&free_mem, &total_mem);
+        dctx.safety_reserve = std::max(dctx.safety_reserve, planned_post_cache_reserve(budget, total_mem));
     }
 
     nvfp4_decode_collect_candidates_(cfg, dctx);
@@ -466,6 +471,12 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
                 actual_count, actual_bytes / (1024.0 * 1024.0), free_mem / (1024.0 * 1024.0));
             break;
         }
+        if (actual_bytes + nvfp4_bytes > dctx.cache_grant) {
+            IMP_LOG_INFO("NVFP4 incremental: plan grant reached after %d tensors (%.1f / %.1f MiB)",
+                         actual_count, actual_bytes / (1024.0 * 1024.0),
+                         dctx.cache_grant / (1024.0 * 1024.0));
+            break;
+        }
 
         const half* fp16_ptr = nullptr;
         void* tmp_buf = nullptr;
@@ -532,6 +543,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
     IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
 
     wcache_->nvfp4_bytes = actual_bytes;
+    dctx.nvfp4_dense_bytes = actual_bytes;
     IMP_LOG_INFO(
         "NVFP4 decode cache: %d tensors, %.2f MiB "
         "(%d from FP16, %d from scratch, mode: %s)",

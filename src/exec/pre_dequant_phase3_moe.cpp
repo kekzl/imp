@@ -295,6 +295,11 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
                 moe_budget = guaranteed;
             }
         }
+        // GGUF: the plan's cache grant, less what the dense mode-2 cache already took.
+        const size_t grant_left = dctx.cache_grant > dctx.nvfp4_dense_bytes
+                                      ? dctx.cache_grant - dctx.nvfp4_dense_bytes
+                                      : 0;
+        moe_budget = std::min(moe_budget, grant_left);
     } else {
         moe_budget = (remaining_budget > wcache_->nvfp4_bytes) ? (remaining_budget - wcache_->nvfp4_bytes)
                                                               : 0;
