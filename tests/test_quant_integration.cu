@@ -2034,5 +2034,50 @@ TEST(QuantIntegrationTest, ModelTeardownTrimsAsyncPool) {
                             << " MiB of trimmable slack after model teardown (not trimmed)";
 }
 
+// Gemma-4 fused ffn_gate_up_exps [n_exp, 2*eff, d]: upload splits it into gate and up and frees
+// the fused buffer (the in-place compaction kept a dead back half: 4 GiB on Gemma-4-26B).
+TEST(QuantIntegrationTest, FusedGateUpExpertsSplitAndFreeTheSource) {
+    SKIP_IF_NO_CUDA();
+    constexpr int kNe = 4, kEff = 64, kD = 32;
+    constexpr size_t kRow = 34;  // one Q8_0 block per row of 32
+    auto model = make_test_model(kD, /*d_ff=*/64, /*n_heads=*/4, /*n_kv_heads=*/4, /*n_layers=*/1,
+                                 /*vocab_size=*/32, /*use_q4_0=*/false);
+    auto& cfg = model->config_;
+    cfg.n_experts = kNe;
+    cfg.n_experts_active = 2;
+    cfg.expert_d_ff = kEff;
+    std::vector<uint8_t> fused(static_cast<size_t>(kNe) * 2 * kEff * kRow);
+    for (size_t i = 0; i < fused.size(); ++i)
+        fused[i] = static_cast<uint8_t>((i * 131 + 7) & 0xff);
+    std::vector<uint8_t> down(static_cast<size_t>(kNe) * kD * (kEff / 32) * kRow, 0x11);
+    auto& ly = model->layers_[0];
+    int64_t fshape[3] = {kNe, 2 * kEff, kD};
+    int64_t dshape[3] = {kNe, kD, kEff};
+    ly.expert_gate_packed = Tensor(fused.data(), QType::Q8_0, 3, fshape, false);
+    ly.expert_up_packed = Tensor();
+    ly.expert_down_packed = Tensor(down.data(), QType::Q8_0, 3, dshape, false);
+
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    ASSERT_TRUE(ly.expert_gate_packed.on_device);
+    ASSERT_TRUE(ly.expert_up_packed.on_device);
+    ASSERT_EQ(ly.expert_gate_packed.shape[1], kEff);
+    ASSERT_EQ(ly.expert_up_packed.shape[1], kEff);
+    const size_t half = static_cast<size_t>(kEff) * kRow;
+    std::vector<uint8_t> gate(kNe * half), up(kNe * half);
+    ASSERT_EQ(cudaMemcpy(gate.data(), ly.expert_gate_packed.data, gate.size(), cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(up.data(), ly.expert_up_packed.data, up.size(), cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    for (int e = 0; e < kNe; ++e) {
+        EXPECT_EQ(std::memcmp(gate.data() + e * half, fused.data() + 2 * e * half, half), 0)
+            << "gate, expert " << e;
+        EXPECT_EQ(std::memcmp(up.data() + e * half, fused.data() + (2 * e + 1) * half, half), 0)
+            << "up, expert " << e;
+    }
+    EXPECT_EQ(release_on_free_pool_reserved(ReleasePool::ExpertSplit), 0u)
+        << "the fused gate_up buffer was not returned to the driver";
+}
+
 }  // namespace
 }  // namespace imp
