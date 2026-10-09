@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_prep.cuh (v0.6.0, cd9d04a); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_prep.cuh (v0.6.1, 015301f); change there first, then copy.
 // APA prep: KV readers (flat / paged FP16 / paged NVFP4), K/V stats, quantization into tile blobs, Q packing.
 #pragma once
 #include "apa_common.cuh"
