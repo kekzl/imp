@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_prep.cuh (v0.4.0, e5776cc); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_prep.cuh (v0.5.0, 5ea10ca); change there first, then copy.
 // APA prep: KV readers (flat / paged FP16 / paged NVFP4), K/V stats, quantization into tile blobs, Q packing.
 #pragma once
 #include "apa_common.cuh"
@@ -320,7 +320,8 @@ __global__ void __launch_bounds__(32) kv_fingerprint_kernel(Reader rd, Dims dm, 
 
 // ---------------------------------------------------------------- Q packing + quantization
 // grid (ceil(R/64), Hkv, B), 256 threads. Q [B][Sq][H][D] -> packed rows per (b, kv head):
-// Qq [bhk][R][D/2], Qs [bhk][R][D/16], Qr [bhk][R]; qmul = softmax scale * log2(e).
+// Qq [2][bhk][R][D/2], Qs [2][bhk][R][D/16] (term 1, term 2 = residual), Qr [bhk][R]; qmul = softmax scale *
+// log2(e).
 template <int D, typename T>
 __global__ void __launch_bounds__(256) quant_q_kernel(const T* __restrict__ Q, Dims dm, float qmul,
                                                       uint8_t* __restrict__ Qq, uint8_t* __restrict__ Qs,
@@ -354,6 +355,14 @@ __global__ void __launch_bounds__(256) quant_q_kernel(const T* __restrict__ Q, D
             x[i] /= qr;
         uint2 w;
         const uint8_t sb = quant16(x, w);
+        float
+            xr[16];  // second E2M1 term: residual of the first in the same row scale, stored after the first
+        dequant16(w, sb, xr);
+#pragma unroll
+        for (int i = 0; i < 16; ++i)
+            xr[i] = x[i] - xr[i];
+        uint2 w2;
+        const uint8_t sb2 = quant16(xr, w2);
         if (!ok)
             continue;
         const size_t row = (size_t)bhk * dm.R + r;
@@ -361,6 +370,9 @@ __global__ void __launch_bounds__(256) quant_q_kernel(const T* __restrict__ Q, D
             Qr[row] = qr;
         *reinterpret_cast<uint2*>(Qq + row * (D / 2) + g * 8) = w;
         Qs[row * (D / 16) + g] = sb;
+        const size_t rows = (size_t)dm.B * dm.Hkv * dm.R;
+        *reinterpret_cast<uint2*>(Qq + (rows + row) * (D / 2) + g * 8) = w2;
+        Qs[(rows + row) * (D / 16) + g] = sb2;
     }
 }
 
