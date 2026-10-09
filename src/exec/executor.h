@@ -704,7 +704,6 @@ private:
     Tensor hc_low_;     // [max_tokens, hc_lowrank] FP16
     Tensor hc_inj_;     // [max_tokens, hc] FP16, 2*sigmoid(inject(normed)/hc)
     Tensor hc_mixed_;   // [max_tokens, d] FP16, the block input kept for out = h - mixed
-    Tensor hc_out_;     // [max_tokens, d] FP16, recovered block output
     // Qwen4Exp PLE (executor_ple.cpp): pinned staging for the gathered n-gram rows, the
     // n-gram id scratch. Sequence state (conv rows) is the SSM slab tail per slot.
     PinnedBuffer ple_host_;
