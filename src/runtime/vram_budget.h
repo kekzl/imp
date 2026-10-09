@@ -70,6 +70,9 @@ struct VRAMBudget {
     // (0 when none, or IMMA prefill paths off). Charged as overhead here AND handed to
     // mmq_q8_imma_set_plane_budget(): uncharged, the spill victim was a per-start lottery (#1899).
     size_t imma_plane_bytes = 0;
+    // Library claim of the first forward (measured or the cold-start constant): absent from live
+    // free VRAM until then, so phases sizing from cudaMemGetInfo must charge it.
+    size_t library_reserve_bytes = 0;
 };
 
 // Pure computation: plan VRAM allocation split between KV cache, FP8 prefill
