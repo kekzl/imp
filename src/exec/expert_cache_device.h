@@ -45,6 +45,14 @@ struct DevExpertSrc {
     float scale;         // per-tensor scale
 };
 
+// Prefill staging reads resident keys from their VRAM slot. slot_of == null: host sources only.
+struct StageSlots {
+    const int32_t* slot_of = nullptr;  // [3 * n_experts], -1 = not resident
+    const char* pool = nullptr;
+    size_t slot_bytes = 0;
+    size_t ms_off = 0;  // uniform across projections (layer_layout_uniform_)
+};
+
 struct DevMissEntry {
     const char* packed;
     const char* ms;
@@ -136,6 +144,8 @@ public:
 
 private:
     void invalidate_(cudaStream_t stream);
+    // Empty for tiered layers (tier_stage_src_ resolves slots) and while the host path owns the pool.
+    [[nodiscard]] StageSlots stage_slots_(int layer) const;
     enum class LayerSource { None, Pinned, Tier };
     LayerSource layer_sources_(const Model& model, int l, size_t slot_size, std::vector<DevExpertSrc>& src);
     [[nodiscard]] bool layer_layout_uniform_(size_t b) const;

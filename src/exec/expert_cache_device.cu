@@ -132,16 +132,28 @@ __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __r
     }
 }
 
+// Prefill staging source for key: its VRAM slot when resident (no PCIe read), else src[key].
+__device__ __forceinline__ DevExpertSrc stage_src(const DevExpertSrc* __restrict__ src, StageSlots v,
+                                                  int key) {
+    DevExpertSrc s = src[key];
+    const int slot = v.slot_of ? v.slot_of[key] : -1;
+    if (slot >= 0) {
+        s.packed = v.pool + static_cast<size_t>(slot) * v.slot_bytes;
+        s.ms = s.packed + v.ms_off;
+    }
+    return s;
+}
+
 // grid (blocks_per_expert, n_experts, 3): block (x, e, p) copies its share of expert e's
 // projection p into the stage buffer when the routing touched e (prefill staging).
 __global__ void expert_stage_touched_kernel(const DevExpertSrc* __restrict__ src,
                                             const int32_t* __restrict__ expert_offsets,
-                                            char* __restrict__ stage_buf, size_t proj_bytes,
-                                            size_t pb, size_t mb, int n_experts) {
+                                            char* __restrict__ stage_buf, size_t proj_bytes, size_t pb,
+                                            size_t mb, int n_experts, StageSlots slots) {
     const int e = blockIdx.y, p = blockIdx.z;
     if (expert_offsets[e + 1] == expert_offsets[e])
         return;
-    const DevExpertSrc s = src[p * n_experts + e];
+    const DevExpertSrc s = stage_src(src, slots, p * n_experts + e);
     if (!s.packed || !s.ms)
         return;
     char* base = stage_buf + static_cast<size_t>(p) * proj_bytes;
@@ -167,12 +179,13 @@ __global__ void expert_stage_touched_kernel(const DevExpertSrc* __restrict__ src
 __global__ void expert_stage_touched_range_kernel(const DevExpertSrc* __restrict__ src,
                                                   const int32_t* __restrict__ expert_offsets,
                                                   char* __restrict__ stage_buf, size_t proj_bytes, size_t pb,
-                                                  size_t mb, int n_experts, int e0, int2 proj_of_slot) {
+                                                  size_t mb, int n_experts, int e0, int2 proj_of_slot,
+                                                  StageSlots slots) {
     const int i = blockIdx.y, e = e0 + i, z = blockIdx.z;
     const int p = z == 0 ? proj_of_slot.x : proj_of_slot.y;
     if (e >= n_experts || expert_offsets[e + 1] == expert_offsets[e])
         return;
-    const DevExpertSrc s = src[p * n_experts + e];
+    const DevExpertSrc s = stage_src(src, slots, p * n_experts + e);
     if (!s.packed || !s.ms)
         return;
     char* base = stage_buf + static_cast<size_t>(z) * proj_bytes;
@@ -447,6 +460,13 @@ void DeviceExpertCache::take_over(cudaStream_t stream) {
     cache_->device_dirty_ = true;
 }
 
+StageSlots DeviceExpertCache::stage_slots_(int layer) const {
+    if (layer_tiered(layer) || !cache_ || cache_->host_generation_ != seen_host_generation_)
+        return {};
+    const DevExpertLayer& L = layers_[layer];
+    return {L.slot_of, L.pool, L.slot_bytes, ms_off_[static_cast<size_t>(layer) * 3 + 1]};
+}
+
 bool DeviceExpertCache::stage_touched(int layer, const int32_t* expert_offsets, char* stage_buf,
                                       size_t proj_bytes, size_t pb, size_t mb,
                                       cudaStream_t stream) {
@@ -467,7 +487,7 @@ bool DeviceExpertCache::stage_touched(int layer, const int32_t* expert_offsets, 
         return false;
     const dim3 grid(16, L.n_experts, 3);
     expert_stage_touched_kernel<<<grid, 256, 0, stream>>>(src, expert_offsets, stage_buf, proj_bytes, pb, mb,
-                                                          L.n_experts);
+                                                          L.n_experts, stage_slots_(layer));
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }
@@ -495,7 +515,7 @@ bool DeviceExpertCache::stage_touched_range(int layer, const int32_t* expert_off
     const dim3 grid(16, n, proj1 < 0 ? 1 : 2);
     expert_stage_touched_range_kernel<<<grid, 256, 0, stream>>>(src, expert_offsets, stage_buf, proj_bytes,
                                                                 pb, mb, L.n_experts, e0,
-                                                                make_int2(proj0, proj1));
+                                                                make_int2(proj0, proj1), stage_slots_(layer));
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }
