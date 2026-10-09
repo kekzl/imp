@@ -163,7 +163,7 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(const Request& req
 std::vector<int32_t> Engine::try_graph_loop_decode(std::shared_ptr<Request> req, int32_t first_token,
                                                    cudaStream_t stream) {
     // PLE: per-step host n-gram rows (prepare_decode_step_host), a replayed loop never stages them.
-    if (model_->ngram_table() != nullptr)
+    if (graph_loop_blocked_(*req, false))
         return {};
     int remaining = prepare_graph_loop(req);
     if (remaining <= 0)
@@ -254,7 +254,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
                                          cudaStream_t stream, int step_limit) {
     // Models with per-step host work (PLE n-gram rows from a host table, device expert
     // cache take-over from the host LRU) decode on the per-step graph pool instead.
-    if (model_->ngram_table() != nullptr || experts_on_host_)
+    if (graph_loop_blocked_(*req, true))
         return false;
     // Constrained requests (json_mode / json_schema / enforced tool call) can
     // NEVER run here: the loop samples device-side with no FSM mask. Guards the

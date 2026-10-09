@@ -1903,7 +1903,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
     // Distribute sampled tokens back to requests
     for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {
         auto& req = valid_decode[i];
-        int32_t next_token = tokens[i];
+        int32_t next_token = req->take_forced(tokens[i]);
 
         req->output_tokens.push_back(next_token);
         track_think_state(*req, next_token);

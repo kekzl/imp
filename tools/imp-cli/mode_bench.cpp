@@ -32,6 +32,13 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
     std::vector<int32_t> tokens(args.bench_pp);
     for (int i = 0; i < args.bench_pp; i++)
         tokens[i] = i % vocab_size;
+    const int tg_tokens = args.max_tokens;
+    // Teacher forcing: tg decode inputs = the file tokens after the prompt (text position pp + k).
+    std::vector<int32_t> forced;
+    if (args.bench_teacher_force && args.bench_prompt_file.empty()) {
+        fprintf(stderr, "Error: --bench-teacher-force needs --bench-prompt-file\n");
+        return 1;
+    }
     // Real text: the decode continues a prompt the model understands, so the routed experts (and
     // a host-resident MoE's cache hit rate) no longer follow a degenerate continuation of 0..pp-1.
     if (!args.bench_prompt_file.empty()) {
@@ -41,9 +48,10 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
             return 1;
         }
         const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        std::vector<int32_t> ids(static_cast<size_t>(args.bench_pp));
+        const int cap = args.bench_pp + (args.bench_teacher_force ? tg_tokens + 1 : 0);
+        std::vector<int32_t> ids(static_cast<size_t>(cap));
         int n_ids = 0;
-        err = imp_tokenize(model, text.c_str(), ids.data(), &n_ids, args.bench_pp);
+        err = imp_tokenize(model, text.c_str(), ids.data(), &n_ids, cap);
         if (err != IMP_SUCCESS || n_ids == 0) {
             fprintf(stderr, "Error: --bench-prompt-file %s gave no tokens (%s)\n",
                     args.bench_prompt_file.c_str(), imp_error_string(err));
@@ -53,9 +61,12 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
             tokens[i] = ids[i % n_ids];
         fprintf(stderr, "Benchmark prompt: %s, %d tokens%s\n", args.bench_prompt_file.c_str(), n_ids,
                 n_ids < args.bench_pp ? " (repeated to pp)" : "");
+        if (args.bench_teacher_force) {
+            forced.resize(static_cast<size_t>(tg_tokens) + 1);  // [0] replaces the prefill token
+            for (int k = 0; k <= tg_tokens; k++)
+                forced[k] = ids[(args.bench_pp + k) % n_ids];
+        }
     }
-
-    int tg_tokens = args.max_tokens;
 
     // Greedy decode params for deterministic benchmarking
     ImpGenerateParams bench_params = imp_generate_params_default();
@@ -64,6 +75,9 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
     // +1 because imp_prefill already produces the first output token;
     // without this the request hits max_tokens one decode step early.
     bench_params.max_tokens = tg_tokens + 1;
+    // Teacher forcing reads its count after the last step: one spare token keeps the request open.
+    if (args.bench_teacher_force)
+        bench_params.max_tokens += 1;
 
     fprintf(stderr, "Benchmark: pp=%d, tg=%d, reps=%d\n", args.bench_pp, tg_tokens, args.bench_reps);
 
@@ -80,6 +94,8 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
                 return 1;
             }
             imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
+            if (w == 0 && !forced.empty())  // warm the per-step path the forced tg reps take
+                (void)imp_set_forced_decode(ctx, forced.data(), static_cast<int>(forced.size()));
             for (int s = 0; w == 0 && s < tg_tokens; s++) {
                 int32_t tok = 0;
                 imp_decode_step(ctx, &bench_params, &tok);
@@ -121,6 +137,12 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
             fprintf(stderr, "Prefill error on tg rep %d: %s\n", rep, imp_error_string(err));
             break;
         }
+        if (!forced.empty())
+            err = imp_set_forced_decode(ctx, forced.data(), static_cast<int>(forced.size()));
+        if (err != IMP_SUCCESS) {
+            fprintf(stderr, "Teacher forcing error on tg rep %d: %s\n", rep, imp_error_string(err));
+            break;
+        }
         auto t0 = std::chrono::high_resolution_clock::now();
         {
             NvtxRange r("bench:tg");
@@ -135,6 +157,18 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
         if (err != IMP_SUCCESS) {
             fprintf(stderr, "Decode error on rep %d: %s\n", rep, imp_error_string(err));
             break;
+        }
+        // Every decode input must have come from the file; a path that bypassed the substitution
+        // would decode its own tokens and the rep would not be comparable.
+        if (!forced.empty()) {
+            const int n_forced = imp_forced_decode_count(ctx);
+            if (n_forced != tg_tokens + 1) {
+                fprintf(stderr, "Error: teacher forcing covered %d of %d tg inputs on rep %d\n", n_forced - 1,
+                        tg_tokens, rep);
+                return 1;
+            }
+            if (rep == 0)
+                fprintf(stderr, "Teacher-forced %d of %d tg inputs\n", n_forced - 1, tg_tokens);
         }
         tg_total_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
     }

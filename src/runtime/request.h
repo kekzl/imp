@@ -73,6 +73,15 @@ struct Request {
     std::vector<int32_t> input_tokens;
     std::vector<int32_t> output_tokens;
 
+    // Teacher-forced decode (imp_set_forced_decode): the per-step decode emits forced_decode[i]
+    // instead of its i-th sampled token. Pipeline, graph loop and speculation stay off meanwhile.
+    std::vector<int32_t> forced_decode;
+    size_t forced_pos = 0;
+    [[nodiscard]] bool forcing() const { return forced_pos < forced_decode.size(); }
+    [[nodiscard]] int32_t take_forced(int32_t sampled) {
+        return forcing() ? forced_decode[forced_pos++] : sampled;
+    }
+
     int max_tokens = 256;
     float temperature = 1.0f;
     float top_p = 1.0f;
