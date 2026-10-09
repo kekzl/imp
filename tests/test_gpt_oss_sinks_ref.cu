@@ -377,6 +377,36 @@ TEST(GptOssSinkRef, Fa2Hd64SinkMatchesReference) {
     }
 }
 
+// attention.fa2_dense_2cta at hd=64: the 2-CTA wrapper runs the same body, so output is
+// byte-identical to the 1-CTA instance (777 rows x 64 heads = 448 CTAs, Bq=128 band).
+TEST(GptOssSinkRef, Fa2Hd64TwoCtaByteIdentical) {
+    const SinkCfg cfgs[] = {
+        {"gptoss_heads_full", 777, 777, 64, 8, 64, 0, true},
+        {"gptoss_heads_swa", 777, 777, 64, 8, 64, 128, true},
+        {"chunk2_full", 300, 1324, 64, 8, 64, 0, true},
+    };
+    for (const auto& c : cfgs) {
+        auto Q = lcg_fill_f16(0x4001u, static_cast<size_t>(c.q_len) * c.n_heads * c.head_dim, 2.0f);
+        auto K = lcg_fill_f16(0x5002u, static_cast<size_t>(c.kv_len) * c.n_kv_heads * c.head_dim, 2.0f);
+        auto V = lcg_fill_f16(0x6003u, static_cast<size_t>(c.kv_len) * c.n_kv_heads * c.head_dim, 2.0f);
+        std::vector<double> sink(c.n_heads);
+        for (int h = 0; h < c.n_heads; h++)
+            sink[h] = -1.5 + 0.5 * (h % 7);
+        std::vector<double> out[2];
+        for (int two_cta = 0; two_cta < 2; two_cta++) {
+            process_diag_set_fa2_dense_2cta(two_cta == 1);
+            out[two_cta] = run_kernel_fmha(Q, K, V, sink, c.q_len, c.kv_len, c.n_heads, c.n_kv_heads,
+                                           c.head_dim, c.causal, c.sliding_window, /*fa2=*/true);
+        }
+        process_diag_set_fa2_dense_2cta(true);
+        ASSERT_EQ(out[0].size(), out[1].size());
+        size_t diff = 0;
+        for (size_t i = 0; i < out[0].size(); i++)
+            diff += out[0][i] != out[1][i];
+        EXPECT_EQ(diff, 0u) << c.name << ": 2-CTA hd=64 instance differs from the 1-CTA instance";
+    }
+}
+
 // Paged F16 decode at the gpt-oss geometry (64/8 heads, hd=64) with learned sinks: the multitok
 // kernel (split-K and single-split) against the fp64 reference, and against the per-head kernels
 // it replaced (attention.paged_f16_multitok=1).
