@@ -95,6 +95,8 @@ void print_usage(const char* prog) {
         "  --bench               Synthetic benchmark mode (like llama-bench)\n"
         "  --bench-pp <n>        Synthetic prompt token count (default: 512)\n"
         "  --bench-reps <n>      Repetitions to average (default: 3)\n"
+        "  --bench-prompt-file <path>  Tokenize this text as the --bench prompt, repeated or cut\n"
+        "                        to --bench-pp (default: token ids 0..pp-1). Pins speculative.ngram=false\n"
         "  --perplexity <file>   Compute teacher-forced perplexity over a text file and exit\n"
         "  --calibrate <out>     With --perplexity: also write activation-calibration\n"
         "                        statistics to <out> (input for imp-quantize --calib)\n"
@@ -206,6 +208,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.bench_pp = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--bench-reps") == 0 && i + 1 < argc) {
             args.bench_reps = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--bench-prompt-file") == 0 && i + 1 < argc) {
+            args.bench_prompt_file = argv[++i];
         } else if (std::strcmp(arg, "--image") == 0 && i + 1 < argc) {
             args.image_paths.push_back(argv[++i]);
         } else if (std::strcmp(arg, "--video-frames") == 0 && i + 1 < argc) {
@@ -321,6 +325,14 @@ if (args.bench) {
             mtp_set = true;
     if (!mtp_set && runtime_cfg.speculative.mtp_k < 0)
         runtime_cfg.speculative.mtp_k = 0;
+    // A real-text bench prompt repeats n-grams, so n-gram drafts would fold acceptance into tg.
+    // An explicit --set speculative.ngram=... still wins.
+    bool ngram_set = false;
+    for (const auto& ov : args.config_overrides)
+        if (ov.rfind("speculative.ngram=", 0) == 0)
+            ngram_set = true;
+    if (!ngram_set && !args.bench_prompt_file.empty())
+        runtime_cfg.speculative.ngram = false;
     // Graph-captured verify (#847) changes verify-step timing (and pads
     // chunks) — keep the canonical baseline on the eager verify path.
     // An explicit --set speculative.capture=… still wins.

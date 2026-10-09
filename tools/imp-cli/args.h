@@ -62,6 +62,7 @@ struct CliArgs : CommonArgs {
     bool bench = false;                       // --bench: synthetic benchmark mode
     int bench_pp = 512;                       // --bench-pp: synthetic prompt token count
     int bench_reps = 3;                       // --bench-reps: repetitions to average
+    std::string bench_prompt_file;            // --bench-prompt-file: text prompt, repeated to bench_pp
     // --image, repeatable: images for vision, in the order given. Each one
     // gets its own placeholder in the prompt.
     std::vector<std::string> image_paths;
