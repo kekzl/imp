@@ -115,6 +115,7 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 | `--stream-sinks <n>` / `--stream-window <n>` | `4` / model's `sliding_window` | |
 | `--token-trace` | off | `[tok=ID 'piece']` marker on stderr for every generated token, not just the first ten |
 | `--bench` / `--bench-pp <n>` / `--bench-reps <n>` | off / `512` / `3` | synthetic benchmark mode (matches llama-bench methodology) |
+| `--bench-prompt-file <path>` | unset (prompt = token ids 0..pp-1) | `--bench` prompt from a text file, repeated or cut to `--bench-pp`; pins `speculative.ngram=false`. Flash-Next-NVFP4, 3 processes each: expert cache hit rate 88.6-98.7 % synthetic, 82.7-84.7 % text |
 | `--perplexity <file>` / `--calibrate <out>` | - | teacher-forced perplexity over a text file (deterministic eval harness, PR #481); `--calibrate` also writes activation-calibration stats (input for `imp-quantize --calib`) |
 
 KV-cache VRAM reservation: `--max-seq-len`/`--min-kv-tokens` control it; auto targets ~60% of free VRAM for KV, sized for the actual KV dtype after model-specific overrides (Gemma-4 keeps FP8 KV: `src/runtime/engine_init_resolver.cpp:800 FP8 KV is safe on Gemma-4`). `--min-kv-tokens` overrides the defensive 80% cap, trading FP16 weight-cache capacity for more context - e.g. for a long-context prompt: `--min-kv-tokens 14000 --prompt "$(cat long.txt)"`.

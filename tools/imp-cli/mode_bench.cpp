@@ -7,6 +7,9 @@
 #include <nvtx3/nvToolsExt.h>
 
 #include <chrono>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <cstdio>
 #include <vector>
 
@@ -29,6 +32,28 @@ int run_bench(ImpContext ctx, ImpModel model, const CliArgs& args, const std::st
     std::vector<int32_t> tokens(args.bench_pp);
     for (int i = 0; i < args.bench_pp; i++)
         tokens[i] = i % vocab_size;
+    // Real text: the decode continues a prompt the model understands, so the routed experts (and
+    // a host-resident MoE's cache hit rate) no longer follow a degenerate continuation of 0..pp-1.
+    if (!args.bench_prompt_file.empty()) {
+        std::ifstream in(args.bench_prompt_file, std::ios::binary);
+        if (!in) {
+            fprintf(stderr, "Error: cannot open --bench-prompt-file %s\n", args.bench_prompt_file.c_str());
+            return 1;
+        }
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::vector<int32_t> ids(static_cast<size_t>(args.bench_pp));
+        int n_ids = 0;
+        err = imp_tokenize(model, text.c_str(), ids.data(), &n_ids, args.bench_pp);
+        if (err != IMP_SUCCESS || n_ids == 0) {
+            fprintf(stderr, "Error: --bench-prompt-file %s gave no tokens (%s)\n",
+                    args.bench_prompt_file.c_str(), imp_error_string(err));
+            return 1;
+        }
+        for (int i = 0; i < args.bench_pp; i++)
+            tokens[i] = ids[i % n_ids];
+        fprintf(stderr, "Benchmark prompt: %s, %d tokens%s\n", args.bench_prompt_file.c_str(), n_ids,
+                n_ids < args.bench_pp ? " (repeated to pp)" : "");
+    }
 
     int tg_tokens = args.max_tokens;
 
