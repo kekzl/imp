@@ -25,17 +25,19 @@ void GraphExecutor::hc_read_(const Tensor& norm_w, const Tensor& down, const Ten
     Tensor h = view_tokens(hidden_, n);
     Tensor mixed = view_tokens(hc_mixed_, n);
 
-    hc_grouped_rmsnorm(hw, norm_w, normed, hc, d, cfg.rms_norm_eps, stream);
-    gemm(normed, down, low, 1.0f, 0.0f, stream);  // [n, hc*d] x [lowrank, hc*d]^T
-    hc_silu_div(low, hc, stream);
-    gemm(low, up, mixw, 1.0f, 0.0f, stream);  // [n, lowrank] x [hc*d, lowrank]^T
-    hc_mix(mixw, normed, h, hc, d, stream);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(mixed.data, h.data, h.nbytes(), cudaMemcpyDeviceToDevice, stream));
-    if (inject != nullptr) {
-        Tensor inj = view_tokens(hc_inj_, n);
-        gemm(normed, *inject, inj, 1.0f, 0.0f, stream);  // [n, hc*d] x [hc, hc*d]^T
-        hc_inject_weights(inj, hc, stream);
+    Tensor inj = view_tokens(hc_inj_, n);
+    // n = 1: norm + down + inject + activations in one kernel (8 -> 3 launches per hc_read).
+    if (!hc_read_decode(hw, norm_w, down, inject, normed, low, inj, hc, d, cfg.rms_norm_eps, stream)) {
+        hc_grouped_rmsnorm(hw, norm_w, normed, hc, d, cfg.rms_norm_eps, stream);
+        gemm(normed, down, low, 1.0f, 0.0f, stream);  // [n, hc*d] x [lowrank, hc*d]^T
+        hc_silu_div(low, hc, stream);
+        if (inject != nullptr) {
+            gemm(normed, *inject, inj, 1.0f, 0.0f, stream);  // [n, hc*d] x [hc, hc*d]^T
+            hc_inject_weights(inj, hc, stream);
+        }
     }
+    gemm(low, up, mixw, 1.0f, 0.0f, stream);  // [n, lowrank] x [hc*d, lowrank]^T
+    hc_mix(mixw, normed, h, hc, d, stream, &mixed);
 }
 
 bool GraphExecutor::hc_alloc_(int max_tokens) {
@@ -61,17 +63,17 @@ bool GraphExecutor::hc_alloc_(int max_tokens) {
     };
     const bool ok = mk(hc_hidden_, hc * d, "hc_hidden") && mk(hc_normed_, hc * d, "hc_normed") &&
                     mk(hc_mixw_, hc * d, "hc_mixw") && mk(hc_low_, cfg.hc_lowrank, "hc_low") &&
-                    mk(hc_inj_, hc, "hc_inj") && mk(hc_mixed_, d, "hc_mixed") && mk(hc_out_, d, "hc_out");
+                    mk(hc_inj_, hc, "hc_inj") && mk(hc_mixed_, d, "hc_mixed");
     if (ok)
         IMP_LOG_INFO("gated residual: hc=%d lowrank=%d, %d streams x %d wide, %.1f MiB for %d tokens", hc,
                      cfg.hc_lowrank, hc, d,
-                     (3.0 * hc * d + cfg.hc_lowrank + hc + 2.0 * d) * max_tokens * es / (1024.0 * 1024.0),
+                     (3.0 * hc * d + cfg.hc_lowrank + hc + 1.0 * d) * max_tokens * es / (1024.0 * 1024.0),
                      max_tokens);
     return ok;
 }
 
 void GraphExecutor::hc_free_() {
-    for (Tensor* t : {&hc_hidden_, &hc_normed_, &hc_mixw_, &hc_low_, &hc_inj_, &hc_mixed_, &hc_out_}) {
+    for (Tensor* t : {&hc_hidden_, &hc_normed_, &hc_mixw_, &hc_low_, &hc_inj_, &hc_mixed_}) {
         if (t->data != nullptr) {
             vram_free(vram_alloc_, t->data);
             t->data = nullptr;
@@ -83,11 +85,9 @@ void GraphExecutor::hc_write_(int n, cudaStream_t stream) {
     const auto& cfg = model_->config();
     Tensor h = view_tokens(hidden_, n);
     Tensor mixed = view_tokens(hc_mixed_, n);
-    Tensor out = view_tokens(hc_out_, n);
     Tensor inj = view_tokens(hc_inj_, n);
     Tensor hw = view_tokens(hc_hidden_, n);
-    hc_sub(h, mixed, out, stream);
-    hc_inject_add(hw, out, inj, cfg.hc_count, cfg.d_model, stream);
+    hc_write(hw, h, mixed, inj, cfg.hc_count, cfg.d_model, stream);
 }
 
 }  // namespace imp
