@@ -30,8 +30,8 @@ void hc_mix(const Tensor& mixw, const Tensor& normed, Tensor& out, int hc, int d
             Tensor* out2 = nullptr);
 
 // n = 1: grouped_rmsnorm + low = silu(normed @ down^T / hc) + inj = 2*sigmoid(normed @ inject^T / hc) in
-// one kernel, bit-identical to the separate kernels. False (nothing launched): n != 1, hc > 8,
-// hc*d % 16 != 0, hc*d > 24576 or a non-FP16 operand.
+// one kernel, bit-identical to the separate kernels. False (nothing launched): n != 1, hc > 8, d % 8,
+// hc*d % 16, hc*d > 24576, an x/w/normed pointer not 16-byte aligned or a non-FP16 operand.
 [[nodiscard]] bool hc_read_decode(const Tensor& x, const Tensor& w, const Tensor& down, const Tensor* inject,
                                   Tensor& normed, Tensor& low, Tensor& inj, int hc, int d, float eps,
                                   cudaStream_t stream);

@@ -4,6 +4,8 @@
 
 #include <cuda_fp16.h>
 
+#include <cstdint>
+
 #include "compute/gemm_internal_device.cuh"
 #include "core/logging.h"
 
@@ -64,19 +66,22 @@ __global__ void hc_read_decode_kernel(const half* __restrict__ x, const half* __
     const int K = hc * d;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
 
-    float part[kMaxHc];
+    // Per-stream sums in hc_grouped_rmsnorm_kernel's order (thread t: j = t, t + 256, ...); the
+    // streams' loads issue together so each j step costs one load latency, not hc.
+    float part[kMaxHc] = {};
+    for (int j = threadIdx.x; j < d; j += kThreads) {
+        float v[kMaxHc];
 #pragma unroll
-    for (int s = 0; s < kMaxHc; ++s) {
-        float sum = 0.0f;
-        if (s < hc)
-            for (int j = threadIdx.x; j < d; j += blockDim.x) {
-                const float v = __half2float(x[static_cast<size_t>(s) * d + j]);
-                sum += v * v;
-            }
-        for (int off = 16; off > 0; off >>= 1)
-            sum += __shfl_xor_sync(0xffffffffu, sum, off);
-        part[s] = sum;
+        for (int s = 0; s < kMaxHc; ++s)
+            v[s] = s < hc ? __half2float(x[static_cast<size_t>(s) * d + j]) : 0.0f;
+#pragma unroll
+        for (int s = 0; s < kMaxHc; ++s)
+            part[s] += v[s] * v[s];
     }
+#pragma unroll
+    for (int s = 0; s < kMaxHc; ++s)
+        for (int off = 16; off > 0; off >>= 1)
+            part[s] += __shfl_xor_sync(0xffffffffu, part[s], off);
     if (lane == 0)
         for (int s = 0; s < hc; ++s)
             red[s][warp] = part[s];
@@ -90,12 +95,21 @@ __global__ void hc_read_decode_kernel(const half* __restrict__ x, const half* __
                 inv[s] = rsqrtf(v / static_cast<float>(d) + eps);
         }
     __syncthreads();
-    for (int j = threadIdx.x; j < K; j += blockDim.x) {
-        const int s = j / d;
-        const half v = __float2half(__half2float(x[j]) * inv[s] * (1.0f + __half2float(w[j])));
-        s_x[j] = v;
+    // 8 halves per thread step (d % 8 == 0: one stream per vector), elementwise as in the norm kernel.
+    for (int j = threadIdx.x * 8; j < K; j += kThreads * 8) {
+        const float sc = inv[j / d];
+        const float4 xv = *reinterpret_cast<const float4*>(x + j);
+        const float4 wv = *reinterpret_cast<const float4*>(w + j);
+        const half* xh = reinterpret_cast<const half*>(&xv);
+        const half* wh = reinterpret_cast<const half*>(&wv);
+        float4 ov;
+        half* oh = reinterpret_cast<half*>(&ov);
+#pragma unroll
+        for (int q = 0; q < 8; ++q)
+            oh[q] = __float2half(__half2float(xh[q]) * sc * (1.0f + __half2float(wh[q])));
+        *reinterpret_cast<float4*>(s_x + j) = ov;
         if (blockIdx.x == 0)
-            normed[j] = v;
+            *reinterpret_cast<float4*>(normed + j) = ov;
     }
     __syncthreads();
 
@@ -263,8 +277,10 @@ bool hc_read_decode(const Tensor& x, const Tensor& w, const Tensor& down, const 
     const int lowrank = static_cast<int>(down.shape[0]);
     const int n_inj = inject ? static_cast<int>(inject->shape[0]) : 0;
     const size_t smem = static_cast<size_t>(K) * sizeof(half);
-    if (x.shape[0] != 1 || hc > kMaxHc || K % 16 != 0 || smem > size_t{48} * 1024 ||
-        down.qtype != QType::F16 || (inject && inject->qtype != QType::F16) || x.qtype != QType::F16 ||
+    const auto a16 = [](const void* p) { return (reinterpret_cast<uintptr_t>(p) & 15) == 0; };
+    if (x.shape[0] != 1 || hc > kMaxHc || K % 16 != 0 || d % 8 != 0 || !a16(x.data) || !a16(w.data) ||
+        !a16(normed.data) || smem > size_t{48} * 1024 || down.qtype != QType::F16 ||
+        (inject && inject->qtype != QType::F16) || x.qtype != QType::F16 || w.qtype != QType::F16 ||
         down.shape[1] != K || (inject && inject->shape[1] != K))
         return false;
     const int blocks = (lowrank + n_inj + kThreads / 32 - 1) / (kThreads / 32);

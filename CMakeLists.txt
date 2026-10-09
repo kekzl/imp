@@ -1212,6 +1212,7 @@ if(IMP_BUILD_TESTS)
         tests/test_activation.cu
         tests/test_embedding.cu
         tests/test_gemm.cu
+        tests/test_gated_residual_decode.cu
         tests/test_gemm_capture_fp16_sm120.cu
         tests/test_gemm_capture_probe.cu
         tests/test_gemm_f16_narrow_smallm.cu
