@@ -142,7 +142,7 @@ size_t trim_device_mempool();
 // a cudaFreeAsync'd block goes back to the driver at the next sync instead of sharing a
 // chunk with long-lived allocations. One pool per class Phase 4b (or the FP8 LM head) may free, so a class
 // that stays live does not pin the chunks of one that is freed.
-enum class ReleasePool { GdnPacks = 0, GdnSources = 1, LmHead = 2 };
+enum class ReleasePool { GdnPacks = 0, GdnSources = 1, LmHead = 2, ExpertSplit = 3 };
 cudaMemPool_t release_on_free_pool(ReleasePool which);
 // Its reserved bytes (cudaMemPoolAttrReservedMemCurrent), 0 without a pool.
 size_t release_on_free_pool_reserved(ReleasePool which);
