@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-10-09
+commit: 7e720263
 -->
 
 # Benchmarks
@@ -73,23 +73,21 @@ Commands: `imp-cli --bench` for the first three, `imp-server --max-batch 8
 
 ## GGUF prefill (pp512, INT8-IMMA family, default on since #617)
 
-All rows 2026-06-07, CUDA 13.3, 10 reps, fresh container per run; llama.cpp = build `19e92c3`,
-same GGUF files, same day, `-fa 1 -ngl 999 -r 5`. Command:
-`imp-cli --model <gguf> --bench --bench-pp 512 --bench-reps 10`.
+2026-10-09, `7e720263`, CUDA 13.4, `imp-cli --model <gguf> --bench --bench-pp 512 --bench-reps 10`, fresh
+container, 3 alternating runs per engine, median (range); llama.cpp `b10524` (digest in
+`scripts/bench_competitive.sh`), same GGUF, same day, `-fa 1 -ngl 999 -r 5 -n 0`.
 
-| Commit | Model (quant) | imp tok/s | llama.cpp | verdict |
-|---|---|---:|---:|---|
-| `62d96a0e` | Qwen3-30B-A3B MoE (Q4_K_M) | **9970** | 9288 | imp +7% |
-| `3dd945d5` | Qwen3-14B (Q6_K) | **6617** | 6522 | imp +1.5% |
-| `84790dac` | Gemma-4-26B-A4B MoE (Q4_K_M) | **8946** | 10749 | 1.20x behind |
-| `#617` | Qwen3-8B (Q8_0) | **12131** | 13724 | 1.13x behind |
-| `476bbeee` | Qwen3.6-35B-A3B hybrid (UD-Q4_K_M) | **13618** | 8027 | 2026-10-08, CUDA 13.4.2, 3 runs 13618-13628 vs the 2026-06-07 llama.cpp figure; was 5165 at `62d96a0e`; on main `--bench-pp 512` aborted (16-block KV pool) |
+| Model (quant) | imp tok/s | llama.cpp | verdict | 2026-06-07 imp / llama.cpp |
+|---|---:|---:|---|---|
+| Qwen3-30B-A3B MoE (Q4_K_M) | **15206** (15142-15256) | 9787 (9681-10209) | imp 1.55x | 9970 / 9288 |
+| Qwen3-14B (Q6_K) | **6820** (6810-6850) | 6732 (6718-6745) | imp +1.3% | 6617 / 6522 |
+| Gemma-4-26B-A4B MoE (UD-Q4_K_M) | **13765** (13761-13778) | 10912 (10678-11457) | imp 1.26x | 8946 / 10749 |
+| Qwen3-8B (Q8_0) | **14195** (13953-14583) | 14258 (13644-14286) | parity (-0.4%) | 12131 / 13724 |
+| Qwen3.6-35B-A3B hybrid (UD-Q4_K_M) | **13603** (13259-13618) | 8468 (8403-8529) | imp 1.61x | 5165 at `62d96a0e` / 8027 |
 
-**Pre-2026-07-26 prefill figures read high**: prefix caching went default-on in #758 and
-`imp-cli --bench` repeats the same prompt, so reps partly measured cache hits; #1061 disabled it
-for one-shot CLI runs; Qwen3-8B Q8_0 pp512 went 12131 (above, pre-flip) -> 14515 pinned
-2026-07-15 (cache hits) -> 12407 re-pinned 2026-07-26 (cache off again, current band, see
-[`PERF.md`](PERF.md)). Decode unaffected; bisect evidence: [archive](archive/benchmarks_pre_v0.44.md).
+**Gemma-4 pp depends on context**: the command decodes 8192 tokens (context 9792), the KV guarantee
+caps the IMMA Q8_0 prefill planes 1765 -> 0 MiB (#2652); `--max-tokens 128` keeps them: 15050.
+**2026-06-07 column reads high** (prefix-cache hits, #758 -> #1061): [archive](archive/benchmarks_pre_v0.44.md).
 
 ## NVFP4 SafeTensors decode (tg256)
 
