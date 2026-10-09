@@ -13,6 +13,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - The VRAM ledger counted the FP16 weight cache twice (Qwen3-30B-A3B Q4_K_M: 1680 MiB), so the residual went negative and the library reserve was never measured; it now records 94 MiB instead of charging the 3900 MiB constant.
+- Gemma-4 GGUF upload split the fused gate_up experts in place and kept the dead half: 26B UD-Q4_K_M weights 20134 -> 16050 MiB, the upload VRAM warning ("another process is holding the card") is gone.
 - Ragged prefill (`runtime.prefill_batch`) wrote the K/V of the 2nd+ sequence from the wrong workspace rows on per-layer KV geometry (Gemma-4): concurrent requests decoded each other's context. Gemma-4-26B `degen_suite` 36/37 -> 37/37 (`ple-isolation`).
 - Gemma-4 KV planning prices the per-layer pool (3.4375 instead of 7.5 MiB per F16 block) and warmup records the library reserve (922 instead of 3900 MiB). 26B UD-Q4_K_M: a 15000-token prompt was cancelled (616-block pool), now served; pp512 13765 -> 15007.
 - `cp.async.bulk` into `shared::cluster` (ra2 attention, NVFP4 small-M grouped GEMM) compiled to a driver syscall that kept about 3.5 GB of local memory after the first launch; now `shared::cta`. The T2 arena plan counts the chunk-capture K/V (128 MiB short at `capture_ctx_cap` 32768).

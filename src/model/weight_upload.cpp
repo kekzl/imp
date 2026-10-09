@@ -19,6 +19,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
+#include <optional>
 #include <vector>
 #include <cstdlib>
 #include <cstring>
@@ -40,6 +41,7 @@ namespace imp {
 // per-tensor, to avoid hundreds of cudaMemGetInfo roundtrips.
 static size_t g_cached_free_mem = 0;
 static size_t g_total_allocated = 0;
+static size_t g_upload_freed = 0;  // release_upload_alloc bytes this pass; trimmed at the end
 static size_t g_vram_reserve = 0;  // set from Engine's computed reserve
 
 // Suspend-to-RAM (memory/weight_snapshot.h): active upload log + armed warm
@@ -125,6 +127,19 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t str
     if (err == cudaSuccess && g_upload_log)
         g_upload_log->note_alloc(*ptr, size);
     return err;
+}
+
+// Frees a checked_cuda_malloc allocation of this pass and drops it from gpu_allocs, the WEIGHTS
+// ledger, the snapshot log and the pass budget.
+static void release_upload_alloc(std::vector<void*>& gpu_allocs, void* ptr, size_t size,
+                                 cudaStream_t stream) {
+    std::erase(gpu_allocs, ptr);
+    MemAccount::instance().note_free(ptr);
+    if (g_upload_log)
+        g_upload_log->evict_ptr(ptr);
+    g_total_allocated = g_total_allocated > size ? g_total_allocated - size : 0;
+    g_upload_freed += size;
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(ptr, stream));
 }
 
 // Batch-shaped reserve (#2393): Pass 1 runs against the batch-1 reserve; a configured batch
@@ -1665,9 +1680,16 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             return true;
         };
 
-        if (!upload_packed_experts(L.expert_gate_packed, L.expert_gate_packed.qtype, L.expert_w_gate,
-                                   "expert_gate_exps"))
-            return false;
+        {
+            // Fused gate_up (Gemma 4) is freed by the split below: its own release-on-free pool, so
+            // the freed chunks leave the process instead of parking beside live weights (1134 MiB).
+            std::optional<ReleasePoolScope> split_scope;
+            if (L.expert_up_packed.data == nullptr && L.expert_gate_packed.ndim >= 3)
+                split_scope.emplace(ReleasePool::ExpertSplit);
+            if (!upload_packed_experts(L.expert_gate_packed, L.expert_gate_packed.qtype, L.expert_w_gate,
+                                       "expert_gate_exps"))
+                return false;
+        }
 
         // Gemma 4: splits the fused ffn_gate_up_exps [n_exp,2*n_ff_exp,d_model] (rows [0,n_ff_exp)
         // = gate, [n_ff_exp,2*n_ff_exp) = up) into separate gate/up packed tensors via cudaMemcpy2D
@@ -1729,9 +1751,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             size_t row_bytes = qtype_row_bytes(L.expert_gate_packed.qtype, cols);
             size_t half_raw = static_cast<size_t>(n_exp) * half_rows * row_bytes;
 
-            // Memory-efficient split: allocates only ONE half-sized buffer for the up half, copies it
-            // out, then reuses the fused buffer in-place for the gate half (rows already at the front).
-            // Peak overhead 0.5x fused instead of 1.0x for a two-buffer split.
+            // Two half buffers, fused freed after the copies: transient 1.0x fused, resident 1.0x.
             void* up_buf = nullptr;
             cudaError_t e2 = checked_cuda_malloc(&up_buf, half_raw, ctx.stream);
             if (e2 != cudaSuccess) {
@@ -1752,34 +1772,50 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(up_buf, ctx.stream));
                 return false;
             }
-            // Compacts the gate half in-place: row e (offset e*src_pitch) moves to e*dst_pitch. With
-            // dst_pitch < src_pitch expert e+1's dst overlaps expert e's src region, so experts are
-            // walked forward and copied one at a time rather than as a single overlapping 2D launch.
-            for (int64_t e = 1; e < n_exp; ++e) {  // e=0 already at the right offset
-                cudaError_t cp_e = cudaMemcpyAsync(const_cast<char*>(src_base) + e * dst_pitch,
-                                                   src_base + e * src_pitch, dst_pitch,
-                                                   cudaMemcpyDeviceToDevice, ctx.stream);
-                if (cp_e != cudaSuccess) {
-                    IMP_LOG_ERROR("Gemma 4: gate compact memcpy failed (layer %d, expert %ld): %s", i,
-                                  (long)e, cudaGetErrorString(cp_e));
-                    IMP_CUDA_CHECK_LOG(cudaFreeAsync(up_buf, ctx.stream));
+            // Gate half into its own buffer, then the fused buffer is freed. The in-place fallback
+            // keeps the fused allocation with a dead back half (Gemma-4-26B: 30 x 136 MiB).
+            void* gate_buf = L.expert_gate_packed.data;
+            void* gate_own = nullptr;
+            if (checked_cuda_malloc(&gate_own, half_raw, ctx.stream) == cudaSuccess) {
+                cp = cudaMemcpy2DAsync(gate_own, dst_pitch, src_base, src_pitch, dst_pitch, n_exp,
+                                       cudaMemcpyDeviceToDevice, ctx.stream);
+                if (cp != cudaSuccess) {
+                    IMP_LOG_ERROR("Gemma 4: gate split memcpy failed (layer %d): %s", i,
+                                  cudaGetErrorString(cp));
+                    ctx.gpu_allocs.push_back(gate_own);  // ctx.gpu_allocs is the model's: freed with it
+                    ctx.gpu_allocs.push_back(up_buf);
                     return false;
+                }
+                release_upload_alloc(ctx.gpu_allocs, gate_buf, 2 * half_raw, ctx.stream);
+                gate_buf = gate_own;
+                ctx.gpu_allocs.push_back(gate_own);
+            } else {
+                // Compacts the gate half in-place: row e (offset e*src_pitch) moves to e*dst_pitch.
+                // With dst_pitch < src_pitch expert e+1's dst overlaps expert e's src region, so
+                // experts are walked forward and copied one at a time, not as one 2D launch.
+                for (int64_t e = 1; e < n_exp; ++e) {  // e=0 already at the right offset
+                    cudaError_t cp_e = cudaMemcpyAsync(const_cast<char*>(src_base) + e * dst_pitch,
+                                                       src_base + e * src_pitch, dst_pitch,
+                                                       cudaMemcpyDeviceToDevice, ctx.stream);
+                    if (cp_e != cudaSuccess) {
+                        IMP_LOG_ERROR("Gemma 4: gate compact memcpy failed (layer %d, expert %ld): %s", i,
+                                      (long)e, cudaGetErrorString(cp_e));
+                        IMP_CUDA_CHECK_LOG(cudaFreeAsync(up_buf, ctx.stream));
+                        return false;
+                    }
                 }
             }
 
-            // The fused source buffer was just compacted IN PLACE — a weight
-            // snapshot taken later would capture post-split bytes the resume
-            // replay would split again. Suspend is unsupported for this model.
+            // The fused source buffer was compacted in place or freed: a weight snapshot taken later
+            // would capture post-split bytes the resume replay would split again. Suspend is
+            // unsupported for this model.
             if (ctx.model)
                 ctx.model->mark_device_sources_mutated();
 
-            // Reuse fused buffer (now compacted to half size) as gate_packed.
             int64_t split_shape[4] = {n_exp, half_rows, cols, 0};
-            void* gate_buf = L.expert_gate_packed.data;
             L.expert_gate_packed = Tensor(gate_buf, L.expert_gate_packed.qtype, 3, split_shape, true);
             L.expert_up_packed = Tensor(up_buf, L.expert_gate_packed.qtype, 3, split_shape, true);
             L.expert_up_packed.qtype = L.expert_gate_packed.qtype;
-            // gate_buf is already in ctx.gpu_allocs from the original upload.
             ctx.gpu_allocs.push_back(up_buf);
             IMP_LOG_INFO("Gemma 4: split fused gate_up_exps layer %d (n_ff_exp=%ld, %.1f MiB each)", i,
                          (long)half_rows, half_raw / (1024.0 * 1024.0));
@@ -1910,6 +1946,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     }
 
     IMP_LOG_INFO("Uploading model weights to GPU (%d layers)...", n_layers());
+    g_upload_freed = 0;
 
     // Initialize pinned staging for fast H2D (especially on WSL2 where mmap can't be pinned).
     // StagingGuard provides RAII cleanup on all exit paths (including early return false).
@@ -2341,6 +2378,11 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // Final sync
     if (!sync_upload(stream, "final"))
         return false;
+    if (g_upload_freed > 0)
+        IMP_LOG_INFO(
+            "Weight upload: freed %.1f MiB of fused expert sources, split pool still reserves %.1f MiB",
+            g_upload_freed / (1024.0 * 1024.0),
+            release_on_free_pool_reserved(ReleasePool::ExpertSplit) / (1024.0 * 1024.0));
 
     gpu_weights_ready_ = true;
     last_warm_hits_ = g_warm ? g_warm->hits() : 0;
