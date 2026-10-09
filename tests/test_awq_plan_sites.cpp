@@ -396,3 +396,61 @@ TEST(AwqSites, ExpertsWithoutAnExclusiveNormGetDownGroupsOnly) {
         ys += s.group == 'Y';
     EXPECT_EQ(ys, 2);
 }
+
+// DeepSeek-V2-Lite (MLA, q_lora_rank null): names from its model.safetensors.index.json.
+static std::set<std::string> deepseek_v2_attention(const std::string& base) {
+    std::set<std::string> n = {base + "input_layernorm.weight", base + "post_attention_layernorm.weight"};
+    for (const char* p : {"q_proj", "kv_a_proj_with_mqa", "kv_a_layernorm", "kv_b_proj", "o_proj"})
+        n.insert(base + "self_attn." + p + ".weight");
+    return n;
+}
+
+TEST(AwqArch, DeepseekV2IsPlain) {
+    ASSERT_TRUE(arch_norm_convention("deepseek_v2").has_value());
+    EXPECT_EQ(*arch_norm_convention("deepseek_v2"), NormConvention::Plain);
+    EXPECT_FALSE(arch_normalizes_v("deepseek_v2"));
+}
+
+TEST(AwqSites, DeepseekV2MlaFoldsQAndKvAIntoInputNormAndKvBIntoLatentNorm) {
+    const std::string base = "model.layers.0.";
+    auto n = deepseek_v2_attention(base);
+    for (const char* p : {"gate_proj", "up_proj", "down_proj"})
+        n.insert(base + "mlp." + p + ".weight");
+    const auto sites = layer_fold_sites(n, base, NormConvention::Plain, kAwqAllGroups);
+    const FoldSite* a = site_of(sites, 'A');
+    ASSERT_NE(a, nullptr);
+    EXPECT_EQ(a->members.size(), 2u);
+    EXPECT_TRUE(has_member(*a, "self_attn.q_proj.weight"));
+    EXPECT_TRUE(has_member(*a, "self_attn.kv_a_proj_with_mqa.weight"));
+    EXPECT_EQ(a->offset, NormOffset::Plain);
+    const FoldSite* k = site_of(sites, 'K');
+    ASSERT_NE(k, nullptr);
+    EXPECT_EQ(k->producer, base + "self_attn.kv_a_layernorm.weight");
+    ASSERT_EQ(k->members.size(), 1u);
+    EXPECT_TRUE(has_member(*k, "self_attn.kv_b_proj.weight"));
+    EXPECT_EQ(k->calib_keys, std::vector<std::string>{"KV_B_PROJ"});
+    // No v_proj: group C has nothing to fold; dense layer 0 keeps B and D.
+    EXPECT_EQ(site_of(sites, 'C'), nullptr);
+    EXPECT_NE(site_of(sites, 'B'), nullptr);
+    EXPECT_NE(site_of(sites, 'D'), nullptr);
+}
+
+TEST(AwqSites, DeepseekV2MoeLayerHasNoMlpNormFold) {
+    // post_attention_layernorm feeds the router, the routed and the shared experts: no B, no X.
+    const std::string base = "model.layers.1.";
+    auto n = deepseek_v2_attention(base);
+    n.insert(base + "mlp.gate.weight");
+    for (const char* p : {"gate_proj", "up_proj", "down_proj"}) {
+        n.insert(base + "mlp.shared_experts." + std::string(p) + ".weight");
+        for (int e = 0; e < 2; e++)
+            n.insert(base + "mlp.experts." + std::to_string(e) + "." + p + ".weight");
+    }
+    const auto sites = layer_fold_sites(n, base, NormConvention::Plain, kAwqAllGroups);
+    EXPECT_EQ(site_of(sites, 'B'), nullptr);
+    EXPECT_EQ(site_of(sites, 'X'), nullptr);
+    EXPECT_NE(site_of(sites, 'K'), nullptr);
+    int ys = 0;
+    for (const auto& s : sites)
+        ys += s.group == 'Y';
+    EXPECT_EQ(ys, 2);
+}

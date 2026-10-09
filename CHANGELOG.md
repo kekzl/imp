@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- `imp-quantize --calib` supports `deepseek_v2` (MLA + MoE): q_proj + kv_a_proj fold into input_layernorm, new opt-in group K folds kv_b_proj into kv_a_layernorm. DeepSeek-V2-Lite NVFP4 PPL (ppl_corpus_45k): RTN 9.6015, `--calib` 9.5250, `ABCDK` 9.5092, BF16 9.0616 (#2654).
 - `imp_set_forced_decode` / `imp_forced_decode_count` (C API) and `imp-cli --bench-teacher-force`: teacher-forced decode, every tg input comes from `--bench-prompt-file` (the text after the prompt), so builds decode the same token sequence; the forced request decodes per step (no pipeline, graph loop or speculation).
 - `imp-cli --bench-prompt-file <path>`: the `--bench` prompt from a text file, repeated or cut to `--bench-pp`, `speculative.ngram` pinned off; Flash-Next-NVFP4 expert cache hit rate over 3 processes 82.7-84.7 % against 88.6-98.7 % on the synthetic prompt.
 - `attention.apa_eps` / `apa_min_kv` (opt-in): APA prefill, FP4 pass 1 plus exact FP16 pass 2 for hot KV tiles, hd 128, kv >= 40960. Llama-3.2-3B Q8_0 106451 tokens dense: fa2 11659.35, ra2 7881.77, apa 7164.74, apa+ra2 7048.30 ms. PPL vs FA2: Llama +0.011 (RA2 -0.023), Qwen3-8B -0.001 (RA2 -0.079) (#2635).
