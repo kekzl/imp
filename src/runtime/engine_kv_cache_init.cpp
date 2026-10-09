@@ -284,8 +284,8 @@ bool Engine::init_kv_cache() {
         probe.max_seq_len = config_.max_seq_len;
         probe.kv_block_size = kv_bs;
         probe.min_kv_tokens = config_.min_kv_tokens;
-        probe.kv_block_bytes_per_layer =
-            kv_block_bytes_per_layer(config_.kv_cache_dtype, kv_bs, mcfg.n_kv_heads, head_dim);
+        probe.kv_block_bytes_per_layer = kv_block_bytes_layer_mean(mcfg, config_.kv_cache_dtype, kv_bs,
+                                                                   head_dim, swa_sizing_active_);
         probe.kv_meta_block_bytes_per_layer = sparse_minmax_bytes_per_layer;
 
         PlanResult plan = plan_memory(shadow_plan_input(probe));
@@ -335,8 +335,8 @@ bool Engine::init_kv_cache() {
     if (sparse_minmax_bytes_per_layer > 0) {
         const double mm_mib = static_cast<double>(sparse_minmax_bytes_per_layer) * n_kv_layers * max_blocks /
                               (1024.0 * 1024.0);
-        const size_t kv_per_layer = kv_block_bytes_per_layer(config_.kv_cache_dtype, kv_bs, mcfg.n_kv_heads,
-                                                             head_dim);
+        const size_t kv_per_layer = kv_block_bytes_layer_mean(mcfg, config_.kv_cache_dtype, kv_bs, head_dim,
+                                                              swa_sizing_active_);
         if (config_.kv_cache_max_blocks > 0) {
             IMP_LOG_WARN(
                 "attention.sparse_topk_tokens: the key min/max pool adds %.1f MiB ON TOP "
@@ -408,9 +408,9 @@ bool Engine::init_kv_cache() {
     // KV takes the MEASURED residual, not a predicted one: this can only shrink
     // the pool relative to the budget's projection, never grow it, so it cannot
     // overcommit, and keeps the allocator headroom free for later allocations.
-    const size_t per_block_total_bytes =
-        static_cast<size_t>(n_kv_layers) *
-        kv_block_bytes_per_layer(config_.kv_cache_dtype, kv_bs, mcfg.n_kv_heads, head_dim);
+    const size_t per_block_total_bytes = static_cast<size_t>(n_kv_layers) *
+                                         kv_block_bytes_layer_mean(mcfg, config_.kv_cache_dtype, kv_bs,
+                                                                   head_dim, swa_sizing_active_);
     // Ceiling for a growable pool: starts at the plan's commit (may be less than
     // the live-derived kv_max_blocks due to conservative reserves) and grows
     // toward the live figure under admission pressure - without this max() growable
@@ -550,7 +550,7 @@ bool Engine::init_kv_cache() {
     {
         QType kv_dtype = config_.kv_cache_dtype;
         size_t total_kv = static_cast<size_t>(n_kv_layers) * max_blocks *
-                          kv_block_bytes_per_layer(kv_dtype, kv_bs, mcfg.n_kv_heads, head_dim);
+                          kv_block_bytes_layer_mean(mcfg, kv_dtype, kv_bs, head_dim, swa_sizing_active_);
         IMP_LOG_INFO(
             "KV cache: %d blocks (%.0f tokens), %.2f MiB, dtype=%s "
             "(layers=%d/%d, kv_heads=%d, head_dim=%d, block_size=%d)",
@@ -623,8 +623,8 @@ bool Engine::init_kv_cache() {
                 }
                 const int next = std::max(kKVFloorBlocks, attempt_blocks / 2);
                 const double short_mib = static_cast<double>(n_kv_layers) * (attempt_blocks - next) *
-                                         kv_block_bytes_per_layer(config_.kv_cache_dtype, kv_bs,
-                                                                  mcfg.n_kv_heads, head_dim) /
+                                         kv_block_bytes_layer_mean(mcfg, config_.kv_cache_dtype, kv_bs,
+                                                                   head_dim, swa_sizing_active_) /
                                          (1024.0 * 1024.0);
                 IMP_LOG_WARN(
                     "KV cache: %d blocks did not fit (planned %d), retrying at %d blocks "

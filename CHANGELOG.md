@@ -12,6 +12,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `attention.ra2_prefill` (opt-in): FP4 prefill tier, INT8 QK^T + two-term NVFP4 PV, hd 64/128/256, GQA, chunk continuation. pp 9142 Qwen3-8B Q8_0 13656 -> 14046 tok/s, Llama-3.2-3B Q8_0 pp 8720 29163 -> 32616 tok/s (median of 3); PPL change within +0.1 % on 3 models (#2628).
 
 ### Fixed
+- Gemma-4 KV planning prices the per-layer pool (3.4375 instead of 7.5 MiB per F16 block) and warmup records the library reserve (922 instead of 3900 MiB). 26B UD-Q4_K_M: a 15000-token prompt was cancelled (616-block pool), now served; pp512 13765 -> 15007.
 - `cp.async.bulk` into `shared::cluster` (ra2 attention, NVFP4 small-M grouped GEMM) compiled to a driver syscall that kept about 3.5 GB of local memory after the first launch; now `shared::cta`. The T2 arena plan counts the chunk-capture K/V (128 MiB short at `capture_ctx_cap` 32768).
 - GGUF MoE layers get an NVFP4 decode cache only when gate, up and down all qualify; a lone Q5_K/Q6_K down was never read. Qwen3.6-35B-A3B UD-Q4_K_M: 5760 MiB freed, `--bench-pp 512` aborted on a 16-block KV pool, now 13618 tok/s; Qwen3-30B-A3B Q4_K_M: 2592 MiB freed (#2637).
 - The GGUF NVFP4 MoE decode cache charges the library reserve and the IMMA Q8_0 planes before sizing from free VRAM. Qwen3-30B-A3B Q4_K_M with `gemm.nvfp4_decode_all=true`: a 13537-token `--perplexity` run failed on KV capacity, now 10.9769; cache 8748 -> 4860 MiB in a fresh container (#2644).
