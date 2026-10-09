@@ -49,6 +49,9 @@ struct Nvfp4DecodeContext {
     // previous total_mem/10 heuristic, which over-reserved and starved the dense NVFP4
     // cache.
     size_t safety_reserve = 0;
+    // GGUF mode 2: VRAMBudget::weight_cache_grant_bytes, shared by the dense and MoE NVFP4 caches.
+    size_t cache_grant = static_cast<size_t>(-1);
+    size_t nvfp4_dense_bytes = 0;  // dense mode-2 NVFP4 bytes built, charged against cache_grant
 };
 
 // Init-time weight-quantization pipeline, extracted from GraphExecutor (D2). Runs once

@@ -296,6 +296,9 @@ bool Engine::init_kv_cache() {
             ssm_reserved_slots = spec_mc_reserved_slots_() + batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size);
         }
 
+        // Mode-2 weight caches stop at the plan's grant and leave its KV pool free (vram_budget.h).
+        apply_plan_to_weight_caches(vram_budget, plan, probe.distributable_bytes, mcfg.is_nvfp4_prequant);
+
         if (config_.kv_cache_max_blocks > 0) {
             max_blocks = config_.kv_cache_max_blocks;  // operator pin wins over both
         } else if (plan.ok) {

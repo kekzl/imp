@@ -48,6 +48,9 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
         // already delivers its decode win; the CUTLASS path stays conservative until the
         // capture-failure root cause is understood.
         size_t kCtReserve = vram_reserve_floor(total_mem);
+        // GGUF with a plan: also leave the planned KV pool and later claims (975 MiB of SF took
+        // the 35 blocks a Devstral-24B 13.9k prompt needed).
+        kCtReserve = std::max(kCtReserve, planned_post_cache_reserve(budget, total_mem));
         ct_budget = (free_mem > kCtReserve) ? (free_mem - kCtReserve) : 0;
         // Prequant models: the plan grants the SF slab its measured demand, so the budget is
         // floored at it even when cudaMemGetInfo under-reports free (async frees reclaim late on

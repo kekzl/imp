@@ -28,6 +28,23 @@ struct NativeCacheDemand {
 // tensors) and post-upload alike. Returns all-zero for non-prequant models.
 NativeCacheDemand compute_native_cache_demand(const Model& model);
 
+// NVFP4 bytes phase 3-moe builds for a GGUF model's device-resident experts (whole layers only).
+// 0 for NVFP4-prequant checkpoints (their native cache is mandatory_moe_bytes).
+size_t gguf_moe_nvfp4_cache_bytes(const Model& model, bool decode_all, int nvfp4_decode_mode);
+
+struct VRAMBudget;
+// VRAM a mode-2 weight cache built from live free VRAM must leave free for what lands after it:
+// the planned KV pool + 256 MiB workspace, the allocator headroom KV growth keeps, the library
+// claim, the IMMA planes and the SSM slab. 0 when no plan applied (kv_plan_bytes == 0).
+size_t planned_post_cache_reserve(const VRAMBudget& budget, size_t total_vram);
+
+struct PlanResult;
+// GGUF only (no-op for NVFP4-prequant or a rejected plan): sets kv_plan_bytes to the plan's KV
+// pool and weight_cache_grant_bytes to optional_caches minus the allocator headroom the plan's
+// slack against `distributable` leaves uncovered.
+void apply_plan_to_weight_caches(VRAMBudget& budget, const PlanResult& plan, size_t distributable,
+                                 bool nvfp4_prequant);
+
 // VRAM budget for weight cache allocation (computed by Engine::plan_vram_budget).
 struct VRAMBudget {
     enum Strategy { FP8_PREFILL_NVFP4_DECODE, NVFP4_DECODE_ONLY, FP16_ONLY };
@@ -73,6 +90,11 @@ struct VRAMBudget {
     // Library claim of the first forward (measured or the cold-start constant): absent from live
     // free VRAM until then, so phases sizing from cudaMemGetInfo must charge it.
     size_t library_reserve_bytes = 0;
+    // plan_memory()'s optional_caches: what the mode-2 NVFP4 caches (dense + GGUF MoE) may take
+    // in total. Set after the plan; SIZE_MAX when no plan applies (live-free sizing only).
+    size_t weight_cache_grant_bytes = static_cast<size_t>(-1);
+    // plan_memory()'s KV pool (global + SWA + per-block metadata); 0 when no plan applies.
+    size_t kv_plan_bytes = 0;
 };
 
 // Pure computation: plan VRAM allocation split between KV cache, FP8 prefill

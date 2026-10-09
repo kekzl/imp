@@ -15,6 +15,7 @@
 #include "model/model_config.h"
 #include "runtime/engine.h"
 #include "exec/storage_planner.h"
+#include "exec/moe_nvfp4_cache_rule.h"
 #include "runtime/vram_budget.h"
 
 #include <algorithm>
@@ -800,4 +801,51 @@ TEST(VramBudgetReserve, ImmaPlaneChargeYieldsToTheKvGuarantee) {
     ASSERT_GT(demand, 7 * GiB / 2) << "shape no longer tight enough to test the cap";
     EXPECT_LT(b.imma_plane_bytes, demand) << "the cap did not fire";
     EXPECT_GE(b.kv_max_blocks, config.min_kv_tokens / 16) << "the planes were allowed to eat the KV floor";
+}
+
+// planned_post_cache_reserve: what a live-free-sized mode-2 cache leaves free once a plan applied.
+TEST(VramBudgetReserve, PlannedPostCacheReserveSumsLaterClaims) {
+    const size_t MiB = 1024ull * 1024;
+    VRAMBudget b;
+    EXPECT_EQ(planned_post_cache_reserve(b, 32579 * MiB), 0u) << "no plan, no planned reserve";
+    b.kv_plan_bytes = 2178 * MiB;
+    b.library_reserve_bytes = 543 * MiB;
+    b.imma_plane_bytes = 100 * MiB;
+    b.ssm_footprint_bytes = 34 * MiB;
+    EXPECT_EQ(planned_post_cache_reserve(b, 32579 * MiB),
+              (2178 + 256 + 543 + 100 + 34) * MiB + vram_allocator_headroom(32579 * MiB));
+}
+
+// GGUF MoE NVFP4 demand (gguf_moe_nvfp4_cache_bytes): whole eligible layers only, so the plan's
+// cache grant covers exactly what phase 3-moe may build.
+TEST(VramBudgetReserve, GgufMoeNvfp4DemandCountsWholeLayersOnly) {
+    Model m;
+    m.config_.n_layers = 2;
+    auto experts = [](QType qt, int64_t rows, int64_t cols, uintptr_t s) {
+        Tensor t = make_weight(TensorKind::W_GATE, rows, cols, qt, s);
+        t.ndim = 3;
+        t.shape[0] = 8;  // experts
+        t.shape[1] = rows;
+        t.shape[2] = cols;
+        t.on_device = true;
+        return t;
+    };
+    TransformerLayer whole;  // all Q6_K: eligible
+    whole.expert_gate_packed = experts(QType::Q6_K, 768, 2048, 11);
+    whole.expert_up_packed = experts(QType::Q6_K, 768, 2048, 12);
+    whole.expert_down_packed = experts(QType::Q6_K, 2048, 768, 13);
+    TransformerLayer partial;  // UD-Q4_K_M shape: Q4_K gate/up, Q6_K down
+    partial.expert_gate_packed = experts(QType::Q4_K, 768, 2048, 21);
+    partial.expert_up_packed = experts(QType::Q4_K, 768, 2048, 22);
+    partial.expert_down_packed = experts(QType::Q6_K, 2048, 768, 23);
+    m.layers_.push_back(std::move(whole));
+    m.layers_.push_back(std::move(partial));
+
+    const size_t per_tensor = moe_nvfp4_packed_bytes(8, 768, 2048);
+    EXPECT_EQ(gguf_moe_nvfp4_cache_bytes(m, /*decode_all=*/false, 2), 3 * per_tensor);
+    EXPECT_EQ(gguf_moe_nvfp4_cache_bytes(m, /*decode_all=*/true, 2), 6 * per_tensor);
+    EXPECT_EQ(gguf_moe_nvfp4_cache_bytes(m, /*decode_all=*/true, 0), 0u) << "no NVFP4 decode, no cache";
+
+    m.layers_[0].expert_up_packed.on_device = false;  // host-resident experts are not cached
+    EXPECT_EQ(gguf_moe_nvfp4_cache_bytes(m, /*decode_all=*/false, 2), 0u);
 }
