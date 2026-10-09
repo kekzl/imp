@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_prep.cuh (v0.3.0, e71624b); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_prep.cuh (v0.4.0, e5776cc); change there first, then copy.
 // APA prep: KV readers (flat / paged FP16 / paged NVFP4), K/V stats, quantization into tile blobs, Q packing.
 #pragma once
 #include "apa_common.cuh"
@@ -117,16 +117,18 @@ struct PagedNvfp4KV {
 
 // ---------------------------------------------------------------- stats: K mean, K/V amax per (b, kv head)
 // grid (ceil(ntkv / STATS_TILES), Hkv, B), 256 threads. amax[bhk*3 + {1:k, 2:v}] as uint bits (atomicMax),
-// kpart[bhk][chunk][D] K column sums of the chunk.
+// kpart[bhk][chunk][D] K column sums of the chunk. stride > 1: block x reads chunk x * stride only (sampled
+// stats).
 template <int D, typename Reader>
 __global__ void __launch_bounds__(256) stats_kernel(Reader rd, Dims dm, unsigned* amax, float* kpart,
-                                                    const int* redo = nullptr) {
+                                                    const int* redo = nullptr, int stride = 1) {
     if (redo != nullptr && *redo == 0)
         return;  // KvState still valid: stats stay frozen
     constexpr int G16 = D / 16, RSTEP = 256 / G16, NWARP = 8;
     __shared__ float red[NWARP][D];
     const int b = blockIdx.z, hk = blockIdx.y, bhk = b * dm.Hkv + hk, tid = threadIdx.x;
-    const int g = tid % G16, s0 = blockIdx.x * STATS_TILES * BKV, s1 = min(s0 + STATS_TILES * BKV, dm.Skv);
+    const int g = tid % G16, s0 = blockIdx.x * stride * STATS_TILES * BKV,
+              s1 = min(s0 + STATS_TILES * BKV, dm.Skv);
     // Column sums in a fixed order (deterministic): registers over this thread's rows, then lanes of the same
     // channel group (xor G16 .. 16), then the 8 warps in order. Maxima are order-free (atomicMax).
     float acc[16], x[16], ak = 0.f, av = 0.f;
@@ -181,7 +183,7 @@ __global__ void __launch_bounds__(D) finalize_stats_kernel(const unsigned* __res
                                                            const float* __restrict__ kpart, int nchunk,
                                                            float* __restrict__ kmean,
                                                            HeadScale* __restrict__ hs, int n, float headroom,
-                                                           const int* redo = nullptr) {
+                                                           const int* redo = nullptr, bool pow2 = false) {
     if (redo != nullptr && *redo == 0)
         return;
     __shared__ float red[D];
@@ -201,7 +203,12 @@ __global__ void __launch_bounds__(D) finalize_stats_kernel(const unsigned* __res
     if (d == 0) {
         const float kg = headroom * fmaxf(__uint_as_float(amax[bhk * 3 + 1]) + red[0], 1e-20f) / P_SCALE;
         const float vg = headroom * fmaxf(__uint_as_float(amax[bhk * 3 + 2]), 1e-20f) / P_SCALE;
-        hs[bhk] = {1.f, kg, vg};
+        auto up2 =
+            [](float x) {  // next power of two >= x (positive normal x): rounding stays a pure exponent shift
+                const uint32_t u = __float_as_uint(x);
+                return __uint_as_float((u & 0x7FFFFFu) ? (u & 0x7F800000u) + 0x800000u : u);
+            };
+        hs[bhk] = {1.f, pow2 ? up2(kg) : kg, pow2 ? up2(vg) : vg};
     }
 }
 
@@ -211,7 +218,7 @@ template <int D, typename Reader>
 __global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const float* __restrict__ kmean_g,
                                                        const HeadScale* __restrict__ hs,
                                                        uint8_t* __restrict__ KV, int t0, int t_keep = 0,
-                                                       const int* redo = nullptr) {
+                                                       const int* redo = nullptr, int* ovf = nullptr) {
     using C = Cfg<D>;
     __shared__ __half vt[BKV][D + 2];  // V / vg (|x| <= 2688 fits FP16)
     __shared__ float kmean[D];
@@ -224,6 +231,7 @@ __global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const
     __syncthreads();
     const float kg = hs[bhk].k, vg = hs[bhk].v;
     uint8_t* blob = KV + ((size_t)bhk * dm.kvcap + tile) * C::TILE;
+    float amx = 0.f;  // largest |x| of a 16-block (ovf: > P_SCALE saturates the UE4M3 scale)
 
     for (int p = tid; p < BKV * C::G16; p += 256) {
         const int r = p / C::G16, g = p % C::G16, s = tile * BKV + r;
@@ -251,7 +259,9 @@ __global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const
             for (int i = 0; i < 16; ++i)
                 x[i] = 0.f;
         }
-        const uint8_t sb = quant16(x, w);
+        float am;
+        const uint8_t sb = quant16(x, w, &am);
+        amx = fmaxf(amx, am);
         *reinterpret_cast<uint2*>(blob + r * C::RB + k_swz<D>(r, g >> 1) * 16 + (g & 1) * 8) = w;
         blob[C::K_BYTES + C::V_BYTES + (r & 7) * (D / 2) + (r >> 3) * (D / 16) + g] = sb;  // [T1][nt][D/16]
     }
@@ -264,11 +274,15 @@ __global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const
 #pragma unroll
         for (int i = 0; i < 16; ++i)
             x[i] = __half2float(vt[slot_token(g * 16 + i)][d]);
-        const uint8_t sb = quant16(x, w);
+        float am;
+        const uint8_t sb = quant16(x, w, &am);
+        amx = fmaxf(amx, am);
         *reinterpret_cast<uint2*>(blob + C::K_BYTES + d * 32 + v_swz(d, g >> 1) * 16 + (g & 1) * 8) = w;
         blob[C::K_BYTES + C::V_BYTES + C::KS_BYTES + (d & 7) * (D / 2) + (d >> 3) * 4 + g] =
             sb;  // [T1][dt][4]
     }
+    if (ovf != nullptr && __syncthreads_or(!(amx <= P_SCALE)) && tid == 0)
+        atomicOr(ovf, 1);  // NaN / inf too
 }
 
 // ---------------------------------------------------------------- KvState validity (incremental prep)

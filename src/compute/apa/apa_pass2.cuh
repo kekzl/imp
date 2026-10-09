@@ -1,11 +1,11 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_pass2.cuh (v0.3.0, e71624b); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_pass2.cuh (v0.4.0, e5776cc); change there first, then copy.
 // APA pass 2: exact FP16 attention over the hot tiles of pass 1, merged with its cold-tile partials.
-// CTA = same packed rows as pass 1; it streams the union of its warps' hot tiles, each warp computes only
-// its own. QK^T and PV on mma.sync m16n8k16 (f16 x f16 -> f16 accumulate), online softmax in fp32 (log2
-// domain).
+// CTA = same packed rows as pass 1 (12 warps); it streams the union of its warps' hot tiles, each warp
+// computes only its own. QK^T and PV on mma.sync m16n8k16 (f16 x f16 -> f16 accumulate), online softmax in
+// fp32 (log2 domain).
 #pragma once
 #include <type_traits>
 
@@ -175,35 +175,6 @@ __device__ __forceinline__ int next_tile(const uint32_t* whot0, int W, int t, in
     return -1;
 }
 
-// K (isv = false) or V tile t (64 rows x 16 chunks of 16 B; zero past Skv and in holes) into base, rows from
-// the reader rs (FlatKV<__half>, PagedF16KV); one cp.async group (empty when t < 0).
-// Row offsets of this thread's PER rows of tile t (32-bit, ~0u = past Skv or hole), shared by the K and V
-// loads; computed one step ahead so paged block-table loads leave the critical path.
-template <int NW, typename RS>
-__device__ __forceinline__ void tile_offsets(uint32_t (&ro)[BKV * 16 / (NW * 32)], const RS rs, int t,
-                                             int tid, const Dims& dm, int b, int hk) {
-#pragma unroll
-    for (int k = 0; k < BKV * 16 / (NW * 32); ++k) {
-        const int j = t * BKV + (tid >> 4) + k * (NW * 2);
-        ro[k] = (t >= 0 && j < dm.Skv) ? rs.row_off(b, j, hk, dm, 128) : ~0u;
-    }
-}
-template <int NW, typename RS>
-__device__ __forceinline__ void load_tile(uint32_t base, const RS rs, bool isv, int t,
-                                          const uint32_t (&ro)[BKV * 16 / (NW * 32)], int tid) {
-    constexpr int PER = BKV * 16 / (NW * 32);
-    const int ch = tid & 15;
-    if (t >= 0) {
-#pragma unroll
-        for (int k = 0; k < PER; ++k) {
-            const int r = (tid >> 4) + k * (NW * 2);
-            const bool in = ro[k] != ~0u;
-            cp_async16(base + r * P2_ROWB + ((ch ^ (r & 7)) << 4), rs.at(isv, in ? ro[k] : 0u) + ch * 8, in);
-        }
-    }
-    asm volatile("cp.async.commit_group;\n" ::: "memory");
-}
-
 // S = Q K^T (f16 accumulate, as imp's FA2 fa2_f16acc): B from K rows (n = token), x4 = 2 k-steps.
 __device__ __forceinline__ void qk16(float (&s)[8][4], const uint32_t (&qa)[8][4], uint32_t kbase, int lm_i,
                                      int lm_r) {
@@ -307,23 +278,80 @@ __device__ __forceinline__ void merge_row(const Rows2& w, int half, const Pass1O
     }
 }
 
-// Group = NW warps (threads tid 0..NW*32-1, named barrier bar, P2_SMEM bytes at smem) = pass-1 warps
-// sub*NW .. sub*NW+NW-1 of pass-1 CTA qb (NW1 warps). K(t+1) loads under PV(t), V(t+1) under QK(t+1);
-// cp.async groups in issue order K, V, K, V...
-template <int NW1, int NW, bool CAUSAL, typename T, typename RS>
-__device__ __forceinline__ void pass2_group(const T* __restrict__ Q, const RS rs, T* __restrict__ O,
-                                            const Dims& dm, float qmul, const Pass1Out& p1, int b, int hk,
-                                            int nqb, int qb, int sub, int tid, int bar, uint8_t* smem) {
-    const int bhk = b * dm.Hkv + hk, R = dm.R, G = dm.G, crow0 = (qb * NW1 + sub * NW) * 16;
+// Pass 2 per q block with all NW warps: the union of their hot tiles streams through P2S_STG K/V stages; any
+// warp that finds the next stage free claims and loads it; every warp passes every step, computing only its
+// own tiles. vs 3 groups of 4 warps with bar.sync (<= 0.3.0): 1.2 to 3.1 % less attention time at eps 0.005 /
+// 0.01.
+constexpr int P2S_STG = 3;
+constexpr uint32_t P2S_DONE = ~0u;
+struct P2Stream {
+    uint64_t full[P2S_STG];   // count 32: the claimant warp's cp.async.mbarrier.arrive.noinc
+    uint64_t empty[P2S_STG];  // count NW * 32: every lane after each union step
+    unsigned long long
+        claim;  // low: next union step to load (P2S_DONE: none), high: its predecessor tile + 1
+};
+
+// Claim and load union step k (stage k % P2S_STG) if that stage's previous use is consumed. Warp-collective.
+template <int NW, typename RS>
+__device__ __forceinline__ void p2s_refill(P2Stream& ps, uint8_t* smem, const RS& rs, const uint32_t* whot0,
+                                           int W, int t_end, const Dims& dm, int b, int hk, int lane) {
+    unsigned long long c = 0;
+    int tn = -1;
+    bool ok = false;
+    if (lane == 0) {
+        c = *reinterpret_cast<volatile unsigned long long*>(&ps.claim);
+        const uint32_t k = (uint32_t)c;
+        if (k != P2S_DONE) {
+            const uint32_t s = k % P2S_STG, use = k / P2S_STG;
+            if (use == 0 || mbar_test((uint32_t)__cvta_generic_to_shared(&ps.empty[s]), (use - 1) & 1)) {
+                tn = next_tile<NW>(whot0, W, (int)(c >> 32) - 1, t_end);
+                const unsigned long long nc = tn < 0 ? (unsigned long long)P2S_DONE
+                                                     : ((unsigned long long)(tn + 1) << 32) | (k + 1);
+                ok = tn >= 0 && atomicCAS(&ps.claim, c, nc) == c;
+                if (tn < 0)
+                    atomicCAS(&ps.claim, c, nc);
+            }
+        }
+    }
+    if (!__shfl_sync(~0u, ok, 0))
+        return;
+    const uint32_t k = __shfl_sync(~0u, (uint32_t)c, 0), s = k % P2S_STG;
+    tn = __shfl_sync(~0u, tn, 0);
+    const uint32_t base = (uint32_t)__cvta_generic_to_shared(smem) + s * P2_SMEM;
+    // 64 rows x 16 chunks of K and V by cp.async (zeros past Skv / holes); lane: chunk lane & 15 of rows lane
+    // / 16 + 2i row offsets first (lane: rows lane, lane + 32; paged: two independent block-table loads),
+    // then shuffled
+    const int ch = lane & 15, j0 = tn * BKV;
+    const uint32_t ro0 = j0 + lane < dm.Skv ? rs.row_off(b, j0 + lane, hk, dm, 128) : ~0u;
+    const uint32_t ro1 = j0 + lane + 32 < dm.Skv ? rs.row_off(b, j0 + lane + 32, hk, dm, 128) : ~0u;
+#pragma unroll 4
+    for (int i = 0; i < BKV / 2; ++i) {
+        const int r = (lane >> 4) + 2 * i;
+        const uint32_t ro = __shfl_sync(~0u, i < BKV / 4 ? ro0 : ro1, r & 31);
+        const uint32_t dst = base + r * P2_ROWB + ((ch ^ (r & 7)) << 4);
+        const bool in = ro != ~0u;
+        cp_async16(dst, rs.at(false, in ? ro : 0u) + ch * 8, in);
+        cp_async16(dst + BKV * P2_ROWB, rs.at(true, in ? ro : 0u) + ch * 8, in);
+    }
+    const uint32_t bar = (uint32_t)__cvta_generic_to_shared(&ps.full[s]);
+    asm volatile("cp.async.mbarrier.arrive.noinc.shared::cta.b64 [%0];" ::"r"(bar) : "memory");
+}
+
+// Pass 2 of q block qb with all NW warps (pass-1 warp w = warp w here). u: union steps of this CTA so far
+// (ring position, same in every thread), advanced by this q block's union length.
+template <int NW, bool CAUSAL, typename T, typename RS>
+__device__ __forceinline__ void pass2_cta(const T* __restrict__ Q, const RS rs, T* __restrict__ O,
+                                          const Dims& dm, float qmul, const Pass1Out& p1, int b, int hk,
+                                          int nqb, int qb, P2Stream& ps, uint8_t* smem, uint32_t& u) {
+    const int bhk = b * dm.Hkv + hk, R = dm.R, G = dm.G, crow0 = qb * NW * 16, tid = threadIdx.x;
     if (crow0 >= R)
         return;
-    auto gsync = [&] { asm volatile("bar.sync %0, %1;" ::"r"(bar), "r"(NW * 32) : "memory"); };
     const int warp = tid >> 5, lane = tid & 31, T0 = lane & 3, row0 = crow0 + warp * 16;
-    const uint32_t* whot0 = p1.warp_hot + ((size_t)(bhk * nqb + qb) * NW1 + sub * NW) * p1.W;
+    const uint32_t* whot0 = p1.warp_hot + (size_t)(bhk * nqb + qb) * NW * p1.W;
     const uint32_t* whot = whot0 + warp * p1.W;
     const bool valid = row0 < R;
-    const int p_wmax = dm.q_offset + min(row0 + 15, R - 1) / G;          // last position of this warp
-    const int p_cmax = dm.q_offset + (min(crow0 + NW * 16, R) - 1) / G;  // of the group
+    const int p_wmax = dm.q_offset + min(row0 + 15, R - 1) / G;
+    const int p_cmax = dm.q_offset + (min(crow0 + NW * 16, R) - 1) / G;
     const int r_lo = row0 + (lane >> 2), r_hi = r_lo + 8;
     const int lim_lo = CAUSAL ? min(dm.q_offset + min(r_lo, R - 1) / G, dm.Skv - 1) : dm.Skv - 1;
     const int lim_hi = CAUSAL ? min(dm.q_offset + min(r_hi, R - 1) / G, dm.Skv - 1) : dm.Skv - 1;
@@ -343,42 +371,35 @@ __device__ __forceinline__ void pass2_group(const T* __restrict__ Q, const RS rs
 
     if (tid == 0)
         wait_ready(p1.ready + bhk * nqb + qb);
-    gsync();
-    const uint32_t kbase = (uint32_t)__cvta_generic_to_shared(smem);
-    const uint32_t vbase = kbase + BKV * P2_ROWB;
+    __syncthreads();
     const int lm_i = lane >> 3, lm_r = lane & 7;
     const int t_end = min(dm.ntkv, CAUSAL ? p_cmax / BKV + 1 : dm.ntkv);
-    int t = next_tile<NW>(whot0, p1.W, -1, t_end);
-    uint32_t ro[BKV * 16 / (NW * 32)];
-    tile_offsets<NW>(ro, rs, t, tid, dm, b, hk);
-    load_tile<NW>(kbase, rs, false, t, ro, tid);
-    load_tile<NW>(vbase, rs, true, t, ro, tid);
-    while (t >= 0) {
-        const int tn = next_tile<NW>(whot0, p1.W, t, t_end), j0 = t * BKV;
-        tile_offsets<NW>(ro, rs, tn, tid, dm, b, hk);           // in flight under QK(t)
-        asm volatile("cp.async.wait_group 1;\n" ::: "memory");  // K(t)
-        gsync();
-        const bool mine = valid && (!CAUSAL || j0 <= p_wmax) && ((whot[t >> 5] >> (t & 31)) & 1u);
-        float s[8][4];
-        if (mine) {
-            mine_any = true;
-            qk16(s, qa, kbase, lm_i, lm_r);
-            float mx_lo = w.m_lo, mx_hi = w.m_hi;
-            scale_mask16(s, qmul, sh_lo, sh_hi, j0 + T0 * 2, lim_lo, lim_hi, mx_lo, mx_hi);
-            softmax16(w, s, mx_lo, mx_hi);
+    const uint32_t sbase = (uint32_t)__cvta_generic_to_shared(smem);
+    for (int t = next_tile<NW>(whot0, p1.W, -1, t_end); t >= 0;
+         t = next_tile<NW>(whot0, p1.W, t, t_end), ++u) {
+        const uint32_t s = u % P2S_STG, ph = (u / P2S_STG) & 1;
+        const uint32_t fb = (uint32_t)__cvta_generic_to_shared(&ps.full[s]);
+        for (;;) {  // warp-uniform: lane 0 tests, the warp loads stages meanwhile
+            if (__shfl_sync(~0u, lane == 0 ? (int)mbar_test(fb, ph) : 0, 0))
+                break;
+            p2s_refill<NW>(ps, smem, rs, whot0, p1.W, t_end, dm, b, hk, lane);
         }
-        gsync();  // K buffer free
-        load_tile<NW>(kbase, rs, false, tn, ro, tid);
-        asm volatile("cp.async.wait_group 1;\n" ::: "memory");  // V(t)
-        gsync();
-        if (mine)
-            pv16(w, s, vbase, lm_i, lm_r);
-        gsync();  // V buffer free
-        load_tile<NW>(vbase, rs, true, tn, ro, tid);
-        t = tn;
+        mbar_wait(fb, ph);  // acquire in every lane (phase already complete)
+        const int j0 = t * BKV;
+        if (valid && (!CAUSAL || j0 <= p_wmax) && ((whot[t >> 5] >> (t & 31)) & 1u)) {
+            mine_any = true;
+            float sc[8][4];
+            qk16(sc, qa, sbase + s * P2_SMEM, lm_i, lm_r);
+            float mx_lo = w.m_lo, mx_hi = w.m_hi;
+            scale_mask16(sc, qmul, sh_lo, sh_hi, j0 + T0 * 2, lim_lo, lim_hi, mx_lo, mx_hi);
+            softmax16(w, sc, mx_lo, mx_hi);
+            pv16(w, sc, sbase + s * P2_SMEM + BKV * P2_ROWB, lm_i, lm_r);
+        }
+        mbar_arrive((uint32_t)__cvta_generic_to_shared(&ps.empty[s]));
+        p2s_refill<NW>(ps, smem, rs, whot0, p1.W, t_end, dm, b, hk, lane);
     }
     if (!valid || !mine_any)
-        return;  // pass 1 wrote the output of warps without hot tiles
+        return;
     w.l_lo += __shfl_xor_sync(~0u, w.l_lo, 1);
     w.l_lo += __shfl_xor_sync(~0u, w.l_lo, 2);
     w.l_hi += __shfl_xor_sync(~0u, w.l_hi, 1);
@@ -390,15 +411,15 @@ __device__ __forceinline__ void pass2_group(const T* __restrict__ Q, const RS rs
 }
 
 // Both passes in one launch (hd 128, 12 warps). Each CTA takes a ticket: tickets < n1 run pass 1 on a q
-// block, the rest run pass 2 on a pass-1 q block as 3 groups of 4 warps. Tickets go to running CTAs in order,
-// so the pass-1 item a pass-2 CTA waits on is resident (no deadlock); pass 2 fills the SMs of pass 1's last
+// block, the rest run pass 2 on whole pass-1 q blocks (pass2_cta). Tickets go to running CTAs in order, so
+// the pass-1 item a pass-2 CTA waits on is resident (no deadlock); pass 2 fills the SMs of pass 1's last
 // wave.
 template <bool CAUSAL, typename T, typename RS>
 __global__ void __launch_bounds__(384, 1) apa_kernel(
     const uint8_t* __restrict__ Qq, const uint8_t* __restrict__ Qs, const float* __restrict__ Qr,
     const uint8_t* __restrict__ KV, const HeadScale* __restrict__ hs, const T* __restrict__ Q, RS rs,
     T* __restrict__ O, Dims dm, float qmul, Pass1Out p1, int n1, int nqb, uint32_t* ticket) {
-    constexpr int NW = 12, P2W = 4;
+    constexpr int NW = 12;
     extern __shared__ __align__(128) uint8_t smem[];
     __shared__ int item_s;
     if (threadIdx.x == 0)
@@ -411,22 +432,30 @@ __global__ void __launch_bounds__(384, 1) apa_kernel(
         pass1_cta<128, NW, 6, CAUSAL, T>(Qq, Qs, Qr, KV, hs, O, dm, p1, b, hk, qb, nqb, smem);
         return;
     }
-    // pass-2 worker: each 4-warp group pulls (q block, sub) items from ticket[1] until 3 * n2 are taken
-    constexpr int SUB = NW / P2W;
-    __shared__ int gitem[SUB];
-    const int g = threadIdx.x / (P2W * 32), tid = threadIdx.x - g * P2W * 32, n2 = nqb * dm.Hkv * dm.B;
-    for (;;) {
-        if (tid == 0)
-            gitem[g] = (int)atomicAdd(ticket + 1, 1u);
-        asm volatile("bar.sync %0, %1;" ::"r"(1 + g), "r"(P2W * 32) : "memory");
-        const int gi = gitem[g];
-        asm volatile("bar.sync %0, %1;" ::"r"(1 + g), "r"(P2W * 32)
-                     : "memory");  // read before the next write
-        if (gi >= SUB * n2)
+    // pass-2 worker: whole q blocks from ticket[1], all 12 warps on one tile stream
+    __shared__ P2Stream ps;
+    if (threadIdx.x == 0) {
+#pragma unroll
+        for (int s = 0; s < P2S_STG; ++s) {
+            mbar_init((uint32_t)__cvta_generic_to_shared(&ps.full[s]), 32);
+            mbar_init((uint32_t)__cvta_generic_to_shared(&ps.empty[s]), NW * 32);
+        }
+        asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+    }
+    uint32_t u = 0;
+    for (const int n2 = nqb * dm.Hkv * dm.B;;) {
+        __syncthreads();  // previous q block done in every warp: claim and item_s are free
+        if (threadIdx.x == 0) {
+            item_s = (int)atomicAdd(ticket + 1, 1u);
+            ps.claim = u;  // next union step u, predecessor tile -1
+        }
+        __syncthreads();
+        const int j = item_s;
+        if (j >= n2)
             return;
-        const int j = gi / SUB, jx = j % nqb, jhk = (j / nqb) % dm.Hkv, jb = j / (nqb * dm.Hkv);
-        pass2_group<NW, P2W, CAUSAL, T>(Q, rs, O, dm, qmul, p1, jb, jhk, nqb, CAUSAL ? nqb - 1 - jx : jx,
-                                        gi % SUB, tid, 1 + g, smem + g * P2_SMEM);
+        const int jx = j % nqb, jhk = (j / nqb) % dm.Hkv, jb = j / (nqb * dm.Hkv);
+        pass2_cta<NW, CAUSAL, T>(Q, rs, O, dm, qmul, p1, jb, jhk, nqb, CAUSAL ? nqb - 1 - jx : jx, ps, smem,
+                                 u);
     }
 }
 
