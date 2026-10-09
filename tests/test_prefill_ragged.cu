@@ -126,6 +126,44 @@ TEST_F(RaggedPrefillTest, MatchesSerialDense) {
         EXPECT_EQ(ragged_out[i], serial_out[i]) << "request " << i << " diverged (ragged vs serial)";
 }
 
+// Per-layer KV geometry (Gemma-4 dual shape): layer 1 keeps 2 of 4 KV heads, so its K/V rows
+// are packed at half the workspace width; rows of sequences 2+ must reach their own blocks.
+static test::DenseTestModel per_layer_kv_model() {
+    auto tm = DenseTestModel::create(128, 512, 256, 2, 4, 4, 64);
+    auto& cfg = tm.model->config_;
+    const int hd = cfg.d_model / cfg.n_heads;
+    cfg.n_kv_heads_per_layer = {4, 2};
+    cfg.head_dim_per_layer = {hd, hd};
+    std::mt19937 rng(7);
+    auto& ly = tm.model->layers_[1];
+    for (Tensor* w : {&ly.wk, &ly.wv}) {
+        for (auto& t : tm.all_tensors)
+            if (t.data == w->data)
+                t = Tensor();
+        test::free_tensor(*w);
+        *w = test::make_random_weight(2 * hd, cfg.d_model, rng);
+        tm.all_tensors.push_back(*w);
+    }
+    return tm;
+}
+
+TEST_F(RaggedPrefillTest, MatchesSerialPerLayerKvHeads) {
+    auto prompts = ragged_prompts();
+    std::vector<std::vector<int32_t>> out[2];
+    for (int ragged = 0; ragged < 2; ++ragged) {
+        auto tm = per_layer_kv_model();
+        gemm_init();
+        set_pending_runtime_config(ragged_runtime_config(/*prefill_batch=*/ragged == 1));
+        Engine engine;
+        ASSERT_TRUE(engine.init(tm.model, ragged_engine_config()));
+        out[ragged] = run_batch(engine, prompts, 6);
+        tm.cleanup();
+    }
+    ASSERT_EQ(out[0].size(), out[1].size());
+    for (size_t i = 0; i < out[0].size(); ++i)
+        EXPECT_EQ(out[1][i], out[0][i]) << "request " << i << " diverged (ragged vs serial)";
+}
+
 TEST_F(RaggedPrefillTest, RepeatBatchIdentical) {
     auto tm = DenseTestModel::create(128, 512, 256, 2, 4, 4, 64);
     gemm_init();
