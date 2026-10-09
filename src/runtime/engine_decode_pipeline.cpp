@@ -61,7 +61,7 @@ bool Engine::pipeline_row_eligible_(const Request& r) const {
     if (r.logprobs || r.json_mode || !r.json_schema.empty() || !r.regex_pattern.empty() ||
         !r.grammar.empty() || r.constraints)
         return false;
-    if (r.mirostat != 0 || !r.logit_bias.empty())
+    if (r.mirostat != 0 || !r.logit_bias.empty() || r.forcing())
         return false;
     // rep/freq/presence penalties ARE supported (device-side history — the
     // server defaults to repetition_penalty 1.05, so the common serving row

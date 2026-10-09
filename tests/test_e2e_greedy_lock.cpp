@@ -17,6 +17,8 @@
 #include "test_models.h"
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -187,6 +189,54 @@ TEST_F(GreedyLockTest, FrozenSequences) {
     if (n_locks == 0)
         GTEST_SKIP() << "no greedy locks recorded for model '" << base
                      << "' — generate with IMP_LOCK_PRINT=1 and add to tests/refs/e2e_greedy_locks.h";
+}
+
+// imp_set_forced_decode: the decode emits the forced tokens AND consumes them as inputs. The
+// unforced step after " Paris. The capital of Germany is" must answer " Berlin", which only
+// holds if the forced text reached the KV cache.
+TEST_F(GreedyLockTest, TeacherForcedDecodeFeedsForcedTokens) {
+    const char* prompt = "The capital of France is";
+    const char* full = "The capital of France is Paris. The capital of Germany is";
+    const char* answer = "The capital of France is Paris. The capital of Germany is Berlin";
+    auto tok = [&](const char* s) {
+        std::vector<int32_t> v(256);
+        int n = 0;
+        EXPECT_EQ(imp_tokenize(model_, s, v.data(), &n, 256), IMP_SUCCESS);
+        v.resize(n);
+        return v;
+    };
+    const auto p = tok(prompt), f = tok(full), a = tok(answer);
+    ASSERT_GT(f.size(), p.size() + 1);
+    ASSERT_GT(a.size(), f.size());
+    ASSERT_TRUE(std::equal(p.begin(), p.end(), f.begin())) << "prompt is not a token prefix";
+    const std::vector<int32_t> forced(f.begin() + static_cast<std::ptrdiff_t>(p.size()), f.end());
+    const int32_t berlin = a[f.size()];
+
+    ImpGenerateParams params = imp_generate_params_default();
+    params.temperature = 0.0f;
+    params.top_k = 1;
+    params.max_tokens = static_cast<int>(forced.size()) + 8;
+    ASSERT_EQ(imp_context_reset(ctx_), IMP_SUCCESS);
+    ASSERT_EQ(imp_prefill_with_params(ctx_, p.data(), static_cast<int>(p.size()), &params), IMP_SUCCESS);
+    ASSERT_EQ(imp_set_forced_decode(ctx_, forced.data(), static_cast<int>(forced.size())), IMP_SUCCESS);
+    int32_t first = -1;
+    ASSERT_EQ(imp_prefill_token(ctx_, &first), IMP_SUCCESS);
+    EXPECT_EQ(first, forced[0]);
+
+    std::vector<int32_t> got{first};
+    for (size_t i = 1; i < forced.size(); i++) {
+        int32_t t = -1;
+        ASSERT_EQ(imp_decode_step(ctx_, &params, &t), IMP_SUCCESS);
+        got.push_back(t);
+    }
+    EXPECT_EQ(got, forced);
+    EXPECT_EQ(imp_forced_decode_count(ctx_), static_cast<int>(forced.size()));
+
+    int32_t next = -1;
+    ASSERT_EQ(imp_decode_step(ctx_, &params, &next), IMP_SUCCESS);
+    EXPECT_EQ(next, berlin) << "got " << detok({next});
+    EXPECT_EQ(imp_set_forced_decode(ctx_, forced.data(), static_cast<int>(forced.size())),
+              IMP_ERROR_INVALID_ARG);  // only right after prefill
 }
 
 }  // namespace

@@ -1622,6 +1622,11 @@ private:
     // step_limit > 0 books KV for that burst only; 0 books the whole
     // remaining generation (the synchronous generate() loop, which runs it).
     int prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit = 0);
+    // Graph loop refused: PLE host n-gram rows, host-resident experts (async loop only) and
+    // teacher-forced requests (the host substitutes every token) decode per step.
+    [[nodiscard]] bool graph_loop_blocked_(const Request& r, bool experts_matter) const {
+        return model_->ngram_table() != nullptr || (experts_matter && experts_on_host_) || r.forcing();
+    }
 
     // Build InferenceState + CudaGraphConditionalRunner::Config for graph loop.
     CudaGraphConditionalRunner::Config build_graph_config(const Request& req, int remaining) const;

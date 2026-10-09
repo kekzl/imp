@@ -755,6 +755,28 @@ ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
     return imp_prefill_with_params(ctx, tokens, n_tokens, nullptr);
 }
 
+ImpError imp_set_forced_decode(ImpContext ctx, const int32_t* tokens, int n_tokens) {
+    if (!ctx || !tokens || n_tokens <= 0)
+        return IMP_ERROR_INVALID_ARG;
+    return imp::api_guard("imp_set_forced_decode", [&]() -> ImpError {
+        auto& req = ctx->active_request;
+        // Only between imp_prefill and the first imp_decode_step (prefill emitted exactly one token).
+        if (!req || req->output_tokens.size() != 1 || ctx->consumed_output != 1)
+            return IMP_ERROR_INVALID_ARG;
+        req->forced_decode.assign(tokens, tokens + n_tokens);
+        req->output_tokens.back() = req->forced_decode[0];
+        ctx->prefill_token = req->forced_decode[0];
+        req->forced_pos = 1;
+        return IMP_SUCCESS;
+    });
+}
+
+int imp_forced_decode_count(ImpContext ctx) {
+    if (!ctx || !ctx->active_request)
+        return -1;
+    return static_cast<int>(ctx->active_request->forced_pos);
+}
+
 ImpError imp_perplexity(ImpContext ctx, const int32_t* tokens, int n_tokens, double* out_ppl) {
     if (!ctx || !tokens || n_tokens < 2 || !out_ppl) {
         return IMP_ERROR_INVALID_ARG;

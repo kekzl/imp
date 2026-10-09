@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- `imp_set_forced_decode` / `imp_forced_decode_count` (C API) and `imp-cli --bench-teacher-force`: teacher-forced decode, every tg input comes from `--bench-prompt-file` (the text after the prompt), so builds decode the same token sequence; the forced request decodes per step (no pipeline, graph loop or speculation).
 - `imp-cli --bench-prompt-file <path>`: the `--bench` prompt from a text file, repeated or cut to `--bench-pp`, `speculative.ngram` pinned off; Flash-Next-NVFP4 expert cache hit rate over 3 processes 82.7-84.7 % against 88.6-98.7 % on the synthetic prompt.
 - `attention.apa_eps` / `apa_min_kv` (opt-in): APA prefill, FP4 pass 1 plus exact FP16 pass 2 for hot KV tiles, hd 128, kv >= 40960. Llama-3.2-3B Q8_0 106451 tokens dense: fa2 11659.35, ra2 7881.77, apa 7164.74, apa+ra2 7048.30 ms. PPL vs FA2: Llama +0.011 (RA2 -0.023), Qwen3-8B -0.001 (RA2 -0.079) (#2635).
 - `attention.ra2_prefill` (opt-in): FP4 prefill tier, INT8 QK^T + two-term NVFP4 PV, hd 64/128/256, GQA, chunk continuation. pp 9142 Qwen3-8B Q8_0 13656 -> 14046 tok/s, Llama-3.2-3B Q8_0 pp 8720 29163 -> 32616 tok/s (median of 3); PPL change within +0.1 % on 3 models (#2628).

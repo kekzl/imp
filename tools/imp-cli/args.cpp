@@ -97,6 +97,8 @@ void print_usage(const char* prog) {
         "  --bench-reps <n>      Repetitions to average (default: 3)\n"
         "  --bench-prompt-file <path>  Tokenize this text as the --bench prompt, repeated or cut\n"
         "                        to --bench-pp (default: token ids 0..pp-1). Pins speculative.ngram=false\n"
+        "  --bench-teacher-force With --bench-prompt-file: tg decode inputs are the file tokens after\n"
+        "                        the prompt, so every build decodes the same sequence\n"
         "  --perplexity <file>   Compute teacher-forced perplexity over a text file and exit\n"
         "  --calibrate <out>     With --perplexity: also write activation-calibration\n"
         "                        statistics to <out> (input for imp-quantize --calib)\n"
@@ -208,6 +210,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.bench_pp = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--bench-reps") == 0 && i + 1 < argc) {
             args.bench_reps = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--bench-teacher-force") == 0) {
+            args.bench_teacher_force = true;
         } else if (std::strcmp(arg, "--bench-prompt-file") == 0 && i + 1 < argc) {
             args.bench_prompt_file = argv[++i];
         } else if (std::strcmp(arg, "--image") == 0 && i + 1 < argc) {

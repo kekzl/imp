@@ -161,6 +161,13 @@ ImpError imp_prefill_token(ImpContext ctx, int32_t* out_token);
 // the end-of-stream signal for callers that keep stepping.
 ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_t* out_token);
 
+// Teacher-forced decode for the active request (after imp_prefill, before any imp_decode_step):
+// tokens[0] replaces the token prefill emitted, tokens[i] the i-th decoded token, so every decode
+// input comes from tokens. The request decodes per step (no pipeline, graph loop or speculation)
+// while forcing. imp_forced_decode_count: tokens forced so far, tokens[0] included (-1 = no request).
+ImpError imp_set_forced_decode(ImpContext ctx, const int32_t* tokens, int n_tokens);
+int imp_forced_decode_count(ImpContext ctx);
+
 // Teacher-forced perplexity over tokens[0..n_tokens-1]: resets context, runs a SINGLE-CHUNK
 // prefill (all-position hidden survives), applies the LM head to every position.
 // Requires n_tokens <= the model's max prefill length; *out_ppl < 0 on failure.
