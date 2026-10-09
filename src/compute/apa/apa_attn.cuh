@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_attn.cuh (v0.4.0, e5776cc); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_attn.cuh (v0.5.0, 5ea10ca); change there first, then copy.
 // APA pass 1: all-FP4 flash attention that diverts hot tiles (mass share > eps of the running row sum) to
 // pass 2 (exact FP16). Cold tiles finish here; warps with hot tiles export (o, m, l) for the merge.
 #pragma once
@@ -63,13 +63,16 @@ __device__ __forceinline__ void load_q(uint32_t (&qa)[Cfg<D>::KSTEPS][4], uint32
     }
 }
 
-// S = Q K^T (raw; log2 score = s * c), all K fragments + scales of the tile preloaded (hd 128).
-// K scales: lane T1 reads D/2 contiguous bytes = rows nt*8+T1 (D/16 B each); word nt*KST + ks.
+// S = Q K^T (raw; log2 score = s * c), all K fragments + scales of the tile preloaded (hd 128). Q enters as
+// two E2M1 terms (qa, qa2: the residual of the first in the same row scale), one accumulator: FP4 rounding of
+// Q decided the worst rows (AUDIT.md, Phase 6; lc_65536_0 min cos 0.773 -> 0.985). K scales: lane T1 reads
+// D/2 contiguous bytes = rows nt*8+T1 (D/16 B each); word nt*KST + ks.
 template <int D>
 __device__ __forceinline__ void qk_tile(float (&s)[8][4], const uint32_t (&qa)[Cfg<D>::KSTEPS][4],
                                         const uint32_t (&qsf)[Cfg<D>::KSTEPS], uint32_t stage,
                                         const uint8_t* sgen, const uint32_t (&k_lane)[Cfg<D>::CPR / 4],
-                                        int T1) {
+                                        int T1, const uint32_t (&qa2)[Cfg<D>::KSTEPS][4],
+                                        const uint32_t (&qsf2)[Cfg<D>::KSTEPS]) {
     using C = Cfg<D>;
     constexpr int KST = C::KSTEPS;
     const uint8_t* ksb = sgen + C::K_BYTES + C::V_BYTES + T1 * (D / 2);
@@ -89,6 +92,11 @@ __device__ __forceinline__ void qk_tile(float (&s)[8][4], const uint32_t (&qa)[C
 #pragma unroll
         for (int nt = 0; nt < 8; ++nt)
             mma_fp4(s[nt], qa[ks], kf[nt][2 * ks], kf[nt][2 * ks + 1], qsf[ks], ksw[nt * KST + ks]);
+#pragma unroll
+    for (int ks = 0; ks < KST; ++ks)
+#pragma unroll
+        for (int nt = 0; nt < 8; ++nt)
+            mma_fp4(s[nt], qa2[ks], kf[nt][2 * ks], kf[nt][2 * ks + 1], qsf2[ks], ksw[nt * KST + ks]);
 }
 
 // Causal diagonal / KV tail: col > lim -> -inf.
@@ -166,9 +174,14 @@ __device__ __forceinline__ void p_scales(const float (&gm)[4], float m_lo, float
     for (int i = 0; i < 4; ++i) {
         const float m = (i & 1) ? m_hi : m_lo;
         const float u = fminf(fmaxf(fmaf(gm[i], (i & 1) ? c_hi : c_lo, (8.f - TAU) - m), -6.f), 8.f);
-        const float v = __fadd_ru(u, 12582919.f);  // 1.5*2^23 + 7: ceil(u) + 7 in the low mantissa bits
-        kb[i] = (__float_as_uint(v) - 0x4B400000u) << 3;
-        bias[i] = (LOG2_PS - TAU - m) - (v - 12582919.f);  // P' <= 6 also when m lags by TAU
+        // scale 2^floor(u) * (1 + mi / 8) >= 2^u, mi = ceil((2^frac - 1) * 8) in 0..8 (8 carries into the
+        // exponent code): the group maximum lands near E2M1 6, not anywhere in (3, 6] as with a power of two
+        // (AUDIT.md, Phase 7)
+        const float vd = __fadd_rd(u, 12582919.f);  // floor(u) + 7 in the low mantissa bits
+        const float fl = vd - 12582919.f;
+        const float mm = __fadd_ru((ex2(u - fl) - 1.f) * 8.f, 12582912.f);
+        kb[i] = ((__float_as_uint(vd) - 0x4B400000u) << 3) + (__float_as_uint(mm) - 0x4B400000u);
+        bias[i] = (LOG2_PS - TAU - m) - (fl + lg2(1.f + (mm - 12582912.f) * 0.125f));
     }
 }
 
@@ -226,6 +239,7 @@ __device__ __forceinline__ void pv_tile(float (&o)[Cfg<D>::DT][4], const uint32_
 template <int D>
 struct WarpQ {
     uint32_t qa[Cfg<D>::KSTEPS][4], qsf[Cfg<D>::KSTEPS];
+    uint32_t qa2[Cfg<D>::KSTEPS][4], qsf2[Cfg<D>::KSTEPS];  // residual Q term
     uint32_t k_lane[Cfg<D>::CPR / 4], v_lane;
     float c_lo, c_hi;  // log2 score = s * c (per row)
     int T0, T1, pos_lo, pos_hi, p_wmin;
@@ -237,7 +251,7 @@ template <int D, bool CAUSAL>
 __device__ __forceinline__ bool tile_step(Rows<Cfg<D>::DT>& w, const WarpQ<D>& q, uint32_t stage,
                                           const uint8_t* sgen, int j0, const Dims& dm, float eps) {
     float s[8][4];
-    qk_tile<D>(s, q.qa, q.qsf, stage, sgen, q.k_lane, q.T1);
+    qk_tile<D>(s, q.qa, q.qsf, stage, sgen, q.k_lane, q.T1, q.qa2, q.qsf2);
     if ((CAUSAL && j0 + BKV - 1 > q.p_wmin) || j0 + BKV > dm.Skv) {
         const int lim_lo = CAUSAL ? min(q.pos_lo, dm.Skv - 1) : dm.Skv - 1;
         const int lim_hi = CAUSAL ? min(q.pos_hi, dm.Skv - 1) : dm.Skv - 1;
@@ -410,6 +424,8 @@ __device__ __forceinline__ void pass1_cta(const uint8_t* __restrict__ Qq, const 
     const HeadScale sc = hs[bhk];
     WarpQ<D> q;
     warp_q_init<D>(q, Qq, Qs, Qr, sc.k, q_lo, q_hi, lane);
+    const size_t qrows = (size_t)dm.B * dm.Hkv * dm.R;  // residual Q term after the first in Qq / Qs
+    load_q<D>(q.qa2, q.qsf2, Qq + qrows * (D / 2), Qs + qrows * (D / 16), q_lo, q_hi, q.T0);
     q.pos_lo = dm.q_offset + r_lo / G;
     q.pos_hi = dm.q_offset + (r_lo + 8) / G;
     q.p_wmin = dm.q_offset + min(row0, R - 1) / G;

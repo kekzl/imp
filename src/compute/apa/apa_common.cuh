@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_common.cuh (v0.4.0, e5776cc); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_common.cuh (v0.5.0, 5ea10ca); change there first, then copy.
 // APA common (all-FP4 base from ra2 1d72da2): Cfg<D>, layouts, PTX helpers (sm_120a).
 #pragma once
 #include <cuda_bf16.h>
@@ -72,6 +72,16 @@ __device__ __forceinline__ float e4m3_dec(uint8_t b) {
 }
 
 // 16 values -> 8 E2M1 bytes + UE4M3 block scale (x already divided by the global scale).
+// Values an E2M1 x UE4M3 block (quant16 output) stands for, as the MMA reads them.
+__device__ __forceinline__ void dequant16(uint2 w, uint8_t sb, float* x) {
+    constexpr float kE2M1[8] = {0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f};
+    const float sc = e4m3_dec(sb);
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        const uint32_t nib = ((i < 8 ? w.x : w.y) >> (4 * (i & 7))) & 0xF;
+        x[i] = (nib & 8 ? -kE2M1[nib & 7] : kE2M1[nib & 7]) * sc;
+    }
+}
 __device__ __forceinline__ uint8_t quant16(const float* x, uint2& w, float* am_out = nullptr) {
     float am = 0.f;
 #pragma unroll
@@ -108,6 +118,11 @@ __device__ __forceinline__ void ldsm_x4(uint32_t* r, uint32_t addr) {
 __device__ __forceinline__ float ex2(float x) {
     float y;
     asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+    return y;
+}
+__device__ __forceinline__ float lg2(float x) {
+    float y;
+    asm("lg2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
     return y;
 }
 
