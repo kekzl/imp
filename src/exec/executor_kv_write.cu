@@ -21,6 +21,21 @@
 
 namespace imp {
 
+// Row-range view into a shared K/V workspace, starting at row_begin. Per-layer shapes: run_attention
+// narrowed K/V to nkv*hd columns, so rows are packed at that width (Gemma-4 ragged prefill read
+// sequence 2+ rows at the 4096-column workspace width).
+static Tensor kv_rows_view(Tensor t, const ModelConfig& cfg, int row_begin, int row_elems) {
+    const bool per_layer_shapes = !cfg.head_dim_per_layer.empty() || !cfg.n_kv_heads_per_layer.empty();
+    if (per_layer_shapes && t.shape[1] != row_elems) {
+        t.shape[1] = row_elems;
+        t.compute_strides();
+    }
+    if (row_begin > 0)
+        t.data = static_cast<char*>(t.data) +
+                 static_cast<size_t>(row_begin) * t.shape[1] * dtype_size(t.qtype);
+    return t;
+}
+
 void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaStream_t stream,
                                    int row_begin, int n_rows, const int* bt_flat,
                                    const int* bt_swa_flat, const int* positions_override) {
@@ -52,16 +67,6 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
     } else if (state.block_tables_swa != nullptr && layer_swa) {
         block_tables = state.block_tables_swa;
     }
-    // Row-range view into the shared K/V workspaces: same [rows, cols] layout,
-    // starting at row_begin instead of 0.
-    auto view_rows = [&](const Tensor& buf, int rows) -> Tensor {
-        Tensor t = view_tokens(buf, rows);
-        if (row_begin > 0) {
-            t.data = static_cast<char*>(t.data) +
-                     static_cast<size_t>(row_begin) * t.shape[1] * dtype_size(t.qtype);
-        }
-        return t;
-    };
     // Per-layer shape support (Gemma 4 dual attention geometry)
     int nkv, hd;
     if (!cfg.n_kv_heads_per_layer.empty() && layer < (int)cfg.n_kv_heads_per_layer.size() &&
@@ -79,6 +84,9 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state, cudaS
     const int kv_block_size = cache->block_size();
     int row_elems = nkv * hd;
     int block_stride = kv_block_size * row_elems;
+    auto view_rows = [&](const Tensor& buf, int rows) -> Tensor {
+        return kv_rows_view(view_tokens(buf, rows), cfg, row_begin, row_elems);
+    };
 
     int threads = std::min(row_elems, 256);
 
