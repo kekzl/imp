@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_common.cuh (v0.3.0, e71624b); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_common.cuh (v0.4.0, e5776cc); change there first, then copy.
 // APA common (all-FP4 base from ra2 1d72da2): Cfg<D>, layouts, PTX helpers (sm_120a).
 #pragma once
 #include <cuda_bf16.h>
@@ -72,11 +72,13 @@ __device__ __forceinline__ float e4m3_dec(uint8_t b) {
 }
 
 // 16 values -> 8 E2M1 bytes + UE4M3 block scale (x already divided by the global scale).
-__device__ __forceinline__ uint8_t quant16(const float* x, uint2& w) {
+__device__ __forceinline__ uint8_t quant16(const float* x, uint2& w, float* am_out = nullptr) {
     float am = 0.f;
 #pragma unroll
     for (int i = 0; i < 16; ++i)
         am = fmaxf(am, fabsf(x[i]));
+    if (am_out != nullptr)
+        *am_out = am;
     const uint8_t sb = e4m3_enc(am / 6.f);
     const float inv = 1.f / fmaxf(e4m3_dec(sb), 1.f / 512);
     float q[16];
@@ -125,6 +127,16 @@ __device__ __forceinline__ void mbar_wait(uint32_t bar, uint32_t parity) {
         " @!p bra W;\n}" ::"r"(bar),
         "r"(parity)
         : "memory");
+}
+__device__ __forceinline__ bool mbar_test(uint32_t bar, uint32_t parity) {  // non-blocking: phase parity done
+    uint32_t ok;
+    asm volatile(
+        "{\n .reg .pred p;\n mbarrier.test_wait.parity.shared::cta.b64 p, [%1], %2;\n selp.u32 %0, 1, 0, "
+        "p;\n}"
+        : "=r"(ok)
+        : "r"(bar), "r"(parity)
+        : "memory");
+    return ok != 0u;
 }
 // shared::cta destination: the shared::cluster form compiles on sm_120a to a driver syscall
 // (__cuda_syscall_cp_async_bulk_unicast) that raises the stack limit to 14448 B/thread, about 3.5 GB local

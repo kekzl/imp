@@ -311,7 +311,9 @@ TEST(ApaPrefillTest, PagedMatchesFlat) {
 }
 
 TEST(ApaPrefillTest, PlannedWorkspaceMatchesTheCarve) {
-    const int shapes[][4] = {{320, 320, 8, 2}, {200, 712, 8, 2}, {4096, 131072, 32, 8}, {4096, 32768, 24, 8}};
+    // {64, 1024, 64, 64}: amax[3 * 64] is 768 B, the ovf word moves the next carve offset by 256 B.
+    const int shapes[][4] = {
+        {320, 320, 8, 2}, {200, 712, 8, 2}, {4096, 131072, 32, 8}, {4096, 32768, 24, 8}, {64, 1024, 64, 64}};
     for (const auto& c : shapes) {
         const apa::Problem p{1, c[0], c[1], c[2], c[3], 128, c[1] - c[0], true, 1.f};
         EXPECT_EQ(exec_apa_workspace_bytes(c[0], c[1], c[2], c[3], 128), apa::workspace_bytes(p))

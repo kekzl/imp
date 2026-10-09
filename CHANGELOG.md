@@ -14,6 +14,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Changed
 - APA prefill on by default (`attention.apa_eps` 0.01, `apa_min_kv` 8192, chunks >= 256 rows; tile cache opt-in, keyed by request), APA 0.3.0. Default sparse prefill: Llama-3.2-3B Q8_0 106451 tokens 6746.01 -> 4824.90 ms, Qwen3-8B Q8_0 33727 tokens 3227.40 -> 2848.55 ms; PPL ppl_corpus_45k Qwen3-8B 10.7522 -> 10.7549.
+- APA 0.4.0 (kekzl/apa e5776cc): sampled prep stats, power-of-two head scales, overflow redo, tile cache restat at 1.125x. PPL ppl_corpus_45k 0.3.0 -> 0.4.0 (FA2): Qwen3-8B 10.7973 -> 10.8063 (10.7974), Llama-3.2-3B 17.3614 -> 17.3599 (17.3644). Prefill 106451 tokens Llama-3.2-3B: change within run noise.
 - APA 0.2.0 ([kekzl/apa](https://github.com/kekzl/apa)): K column sums in a fixed order, reruns bit-identical (PPL Llama-3.2-3B 17.3423 twice); default sparse prefill 106451 tokens 5308.63 -> 5241.18 ms (#2639).
 - APA moved to its own repository, [kekzl/apa](https://github.com/kekzl/apa), MPL-2.0; vendored as `src/compute/apa/` with its licence headers, notice and licence text in `THIRD_PARTY_LICENSES.md`; image label `MIT AND Apache-2.0 AND MPL-2.0` (#2638).
 - APA (`attention.apa_eps`): serves every length unless `ra2_prefill` is on too; chunked prefill reads the paged FP16 cache and keeps per-layer FP4 tiles (`attention.apa_tile_cache`). Llama-3.2-3B Q8_0, 106451 tokens, default sparse prefill: FA2 6661.95 ms, APA 0.005 5300.33 ms; PPL 17.3501 vs 17.3644 (#2636).

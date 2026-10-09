@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_attn.cuh (v0.3.0, e71624b); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_attn.cuh (v0.4.0, e5776cc); change there first, then copy.
 // APA pass 1: all-FP4 flash attention that diverts hot tiles (mass share > eps of the running row sum) to
 // pass 2 (exact FP16). Cold tiles finish here; warps with hot tiles export (o, m, l) for the merge.
 #pragma once
