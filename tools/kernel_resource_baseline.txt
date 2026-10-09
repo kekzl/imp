@@ -36,7 +36,7 @@ void imp::paged_attention_splitk_fp8_tile_kernel<128>	sm_120a	96	32	0
 void imp::paged_attention_splitk_fp8_tile_gqa_kernel<128>	sm_120a	80	32	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<512>	sm_120a	79	16	0
 void imp::paged_attention_splitk_pipeline_kernel<512>	sm_120a	79	16	0
-void apa::quant_kv_kernel<256, apa::PagedNvfp4KV>	sm_120a	73	32	0
+void apa::quant_kv_kernel<256, apa::PagedNvfp4KV>	sm_120a	74	32	0
 void imp::(anonymous namespace)::smallM_kernel_v1<128, 128, 128, 3>	sm_120a	66	528	0
 void imp::(anonymous namespace)::smallM_kernel_v1<32, 128, 128, 3>	sm_120a	64	144	0
 void imp::flash_attention_blackwell_kernel<128, 96>	sm_120a	64	16	0

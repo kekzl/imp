@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_common.cuh (v0.5.0, 5ea10ca); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_common.cuh (v0.6.0, cd9d04a); change there first, then copy.
 // APA common (all-FP4 base from ra2 1d72da2): Cfg<D>, layouts, PTX helpers (sm_120a).
 #pragma once
 #include <cuda_bf16.h>
@@ -71,7 +71,6 @@ __device__ __forceinline__ float e4m3_dec(uint8_t b) {
     return __half2float(__half(h));
 }
 
-// 16 values -> 8 E2M1 bytes + UE4M3 block scale (x already divided by the global scale).
 // Values an E2M1 x UE4M3 block (quant16 output) stands for, as the MMA reads them.
 __device__ __forceinline__ void dequant16(uint2 w, uint8_t sb, float* x) {
     constexpr float kE2M1[8] = {0.f, 0.5f, 1.f, 1.5f, 2.f, 3.f, 4.f, 6.f};
@@ -82,6 +81,26 @@ __device__ __forceinline__ void dequant16(uint2 w, uint8_t sb, float* x) {
         x[i] = (nib & 8 ? -kE2M1[nib & 7] : kE2M1[nib & 7]) * sc;
     }
 }
+
+// Squared error of 16 values in E2M1 at scale 1 / inv, in units of the scale (ranks candidates; f16x2 math).
+__device__ __forceinline__ float blk_err(const float* x, float inv) {
+    __half2 e = __float2half2_rn(0.f);
+#pragma unroll
+    for (int i = 0; i < 16; i += 2) {
+        const float a = x[i] * inv, b = x[i + 1] * inv;
+        uint32_t q;
+        asm("{\n .reg .b8 t;\n cvt.rn.satfinite.e2m1x2.f32 t, %2, %1;\n cvt.rn.f16x2.e2m1x2 %0, t;\n}"
+            : "=r"(q)
+            : "f"(a), "f"(b));
+        const __half2 d = __hsub2(*reinterpret_cast<const __half2*>(&q), __floats2half2_rn(a, b));
+        e = __hfma2(d, d, e);
+    }
+    return __low2float(e) + __high2float(e);
+}
+
+// 16 values -> 8 E2M1 bytes + UE4M3 block scale (x already divided by the global scale). Block scale: the
+// code in nearest(amax / 6) - 2 .. + 6 with the least squared error (AUDIT.md, Phase 9: lc_122880_2 at 8192
+// keys, min cos 0.883 -> 0.988); ties keep the earlier candidate.
 __device__ __forceinline__ uint8_t quant16(const float* x, uint2& w, float* am_out = nullptr) {
     float am = 0.f;
 #pragma unroll
@@ -89,7 +108,22 @@ __device__ __forceinline__ uint8_t quant16(const float* x, uint2& w, float* am_o
         am = fmaxf(am, fabsf(x[i]));
     if (am_out != nullptr)
         *am_out = am;
-    const uint8_t sb = e4m3_enc(am / 6.f);
+    uint8_t sb = e4m3_enc(am / 6.f);
+    if (am > 0.f) {
+        constexpr int kOff[] = {0, -1, 1, -2, 2, 3, 4, 5, 6};
+        const int c0 = sb;
+        float best = INFINITY;
+#pragma unroll
+        for (int k = 0; k < 9; ++k) {
+            const int c = c0 + kOff[k];
+            if (c < 1 || c > 0x7E)
+                continue;
+            const float sc = fmaxf(e4m3_dec((uint8_t)c), 1.f / 512);
+            const float e = blk_err(x, 1.f / sc) * sc * sc;
+            if (e < best)
+                best = e, sb = (uint8_t)c;
+        }
+    }
     const float inv = 1.f / fmaxf(e4m3_dec(sb), 1.f / 512);
     float q[16];
 #pragma unroll

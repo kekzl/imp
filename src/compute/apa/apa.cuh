@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa.cuh (v0.5.0, 5ea10ca); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa.cuh (v0.6.0, cd9d04a); change there first, then copy.
 // APA (adaptive-precision attention) prefill for sm_120a, host API (header-only). Pass 1: all-FP4 flash
 // attention; a KV tile whose share of the running row sum exceeds eps goes to pass 2 (exact FP16), merged by
 // log-sum-exp. Attention: hd 128, causal (q_offset = position of Q row 0), GQA (H % Hkv == 0). Q/O
@@ -14,7 +14,7 @@
 
 // Version of this header set (kekzl/apa); see CHANGELOG.md.
 #define APA_VERSION_MAJOR 0
-#define APA_VERSION_MINOR 5
+#define APA_VERSION_MINOR 6
 #define APA_VERSION_PATCH 0
 
 namespace apa {
