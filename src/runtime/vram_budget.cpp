@@ -321,8 +321,9 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     available = (available > overhead) ? (available - overhead) : 0;
 
     int bs = config.kv_block_size > 0 ? config.kv_block_size : kKVBlockSize;
-    const size_t per_layer_block_bytes =
-        kv_block_bytes_per_layer(config.kv_cache_dtype, bs, mcfg.n_kv_heads, head_dim);
+    const size_t per_layer_block_bytes = kv_block_bytes_layer_mean(mcfg, config.kv_cache_dtype, bs, head_dim,
+                                                                   std::min(swa_live_tokens, n_swa_layers) >
+                                                                       0);
 
     // SWA-aware sizing (kv_cache.swa_sizing): sliding-window layers hold a fixed live span
     // (window + slack + burst/chunk peak) per sequence slot, charged batch-shaped up front like
@@ -674,6 +675,28 @@ size_t kv_block_bytes_per_layer(QType kv_dtype, int block_size, int n_kv_heads, 
     return (kv_block_data_bytes(kv_dtype, block_size, n_kv_heads, head_dim) +
             kv_block_scale_bytes(kv_dtype, block_size, n_kv_heads, head_dim)) *
            2;
+}
+
+size_t kv_block_bytes_layer_mean(const ModelConfig& mcfg, QType kv_dtype, int block_size, int head_dim,
+                                 bool swa_sizing) {
+    const size_t max_shape = kv_block_bytes_per_layer(kv_dtype, block_size, mcfg.n_kv_heads, head_dim);
+    const int n = mcfg.n_layers;
+    if (swa_sizing || n <= 0 || static_cast<int>(mcfg.head_dim_per_layer.size()) != n ||
+        kv_dtype == QType::INT8 || kv_dtype == QType::INT4)
+        return max_shape;
+    size_t sum = 0;
+    for (int l = 0; l < n; l++) {
+        int nkv = mcfg.n_kv_heads;
+        if (l < static_cast<int>(mcfg.n_kv_heads_per_layer.size())) {
+            if (mcfg.n_kv_heads_per_layer[l] == 0)
+                return max_shape;  // non-attention layer: the pool skips it, n_kv_layers < n_layers
+            if (mcfg.n_kv_heads_per_layer[l] > 0)
+                nkv = mcfg.n_kv_heads_per_layer[l];
+        }
+        const int hd = mcfg.head_dim_per_layer[l] > 0 ? mcfg.head_dim_per_layer[l] : head_dim;
+        sum += kv_block_bytes_per_layer(kv_dtype, block_size, nkv, hd);
+    }
+    return std::min(max_shape, (sum + n - 1) / n);
 }
 
 const char* sparse_minmax_refusal(QType kv_dtype, bool mla_absorb, bool token_recycling,

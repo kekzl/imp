@@ -147,6 +147,12 @@ inline PreDequantBudget split_pre_dequant_budget(size_t free_vram, size_t reserv
 // counts INT4 at 1 byte/elem, and omits the per-token or per-16-element-group scale overhead.
 size_t kv_block_bytes_per_layer(QType kv_dtype, int block_size, int n_kv_heads, int head_dim);
 
+// Mean of kv_block_bytes_per_layer over the layers, rounded up, as the per-layer pool lays them
+// out (head_dim_per_layer set, every layer attention, no SWA sizing, not INT8/INT4); else the max
+// shape. Gemma-4-26B F16: 3.4375 MiB per block over 30 layers vs 7.5 MiB at the max shape.
+size_t kv_block_bytes_layer_mean(const ModelConfig& mcfg, QType kv_dtype, int block_size, int head_dim,
+                                 bool swa_sizing);
+
 // attention.sparse_topk_tokens metadata gate: nullptr = the key min/max pool is built, else the
 // reason it is refused. One rule for the plan charge and the enable gate (#2360).
 const char* sparse_minmax_refusal(QType kv_dtype, bool mla_absorb, bool token_recycling,
