@@ -18,6 +18,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - APA moved to its own repository, [kekzl/apa](https://github.com/kekzl/apa), MPL-2.0; vendored as `src/compute/apa/` with its licence headers, notice and licence text in `THIRD_PARTY_LICENSES.md`; image label `MIT AND Apache-2.0 AND MPL-2.0` (#2638).
 - APA (`attention.apa_eps`): serves every length unless `ra2_prefill` is on too; chunked prefill reads the paged FP16 cache and keeps per-layer FP4 tiles (`attention.apa_tile_cache`). Llama-3.2-3B Q8_0, 106451 tokens, default sparse prefill: FA2 6661.95 ms, APA 0.005 5300.33 ms; PPL 17.3501 vs 17.3644 (#2636).
 - `attention.ra2_prefill` workspace is planned in the T2 arena at (max_tokens, max_seq_len) and taken once; long prompts no longer decline for lack of arena space. Llama-3.2-3B Q8_0 at 32k context: arena +80.4 MiB, 13337-token prompt on ra2_fp4 instead of fa2_fp16qk, pp 535.86 -> 507.82 / 464.55 ms (#2633).
+- Prefill staging of host-resident NVFP4 experts copies keys the device expert cache holds from their VRAM slot instead of over PCIe: Flash-Next-NVFP4 pp512 621.20 -> 496.92 ms (824 -> 1030 tok/s), staging kernel time -22 %.
 - Host RAM kept free when pinning host-resident experts and sizing the host expert tier is max(6 GiB, 10 % of total RAM; a cgroup limit counts as the total) instead of a flat 6 GiB: a 128 GiB host keeps 12.8 GiB free; Flash-Next-NVFP4 at `--memory=64g` logs 6.40 GiB (#2621).
 
 ## [0.50.0] - 2026-10-07
