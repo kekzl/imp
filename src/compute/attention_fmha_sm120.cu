@@ -1813,6 +1813,20 @@ static size_t compute_smem_fa2(int Bq, int head_dim, bool fp16_qk, int Bkv, bool
            + slots * Bkv * kvstride * sizeof(half);         // V_buf f16 (padded)
 }
 
+// hd=64: the hd=128 fp16-qk bands, f32 accumulators (f16acc/pv_f16 flags do not apply), Bkv=64.
+// attention.fa2_dense_2cta: 2 x 36864 B dbuf smem fits one SM; the bound caps 163 -> 128 regs.
+static decltype(&fmha_sm120_fa2_kernel<128, 128>) fa2_hd64_kernel(long blocks_128, int sm_count, int& Bq,
+                                                                  bool& twoslot) {
+    Bq = blocks_128 >= (long)sm_count ? 128 : 64;
+    twoslot = Bq == 64 && blocks_128 >= (long)(sm_count / 2);
+    if (Bq == 128)
+        return imp::process_diag_fa2_dense_2cta()
+                   ? fmha_sm120_fa2_kernel_2cta<128, 64, true, false, 64, false, false, false>
+                   : fmha_sm120_fa2_kernel<128, 64, true, false, 64>;
+    return twoslot ? fmha_sm120_fa2_kernel<64, 64, true, false, 64, true>
+                   : fmha_sm120_fa2_kernel<64, 64, true, false, 64>;
+}
+
 // FP8SCALED per-chunk operand amax buffer (persistent 2-float device buffer,
 // lazily created below; file-scope so the reset hook can free it).
 static float* s_d_amax = nullptr;
@@ -1914,14 +1928,9 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
                             : fmha_sm120_fa2_kernel<64, 256, true, false, 64, true>;
         }
     } else if (head_dim == 64) {
-        // hd=64: the hd=128 fp16-qk bands, f32 accumulators (f16acc/pv_f16 flags do not apply).
         f16acc = pv_f16 = false;
         Bkv = 64;
-        Bq = blocks_128 >= (long)sm_count ? 128 : 64;
-        twoslot = Bq == 64 && blocks_128 >= (long)(sm_count / 2);
-        kern = Bq == 128 ? fmha_sm120_fa2_kernel<128, 64, true, false, 64>
-               : twoslot ? fmha_sm120_fa2_kernel<64, 64, true, false, 64, true>
-                         : fmha_sm120_fa2_kernel<64, 64, true, false, 64>;
+        kern = fa2_hd64_kernel(blocks_128, sm_count, Bq, twoslot);
     } else if (fp16_qk) {
         if (blocks_128 >= (long)sm_count) {
             Bq = 128, Bkv = 64;

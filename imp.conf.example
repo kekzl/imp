@@ -434,7 +434,9 @@ fa2_hd256_bkv        = 64
 hd512_prefill        = "auto"
 # Dense hd=128 Bq=128 FA2 at two CTAs per SM (TWOSLOT tile + kernel pinned
 # to 128 registers): FA2 kernel -10% at pp4096 on Qwen3-14B-NVFP4, output
-# bit-identical. Default on; false restores the single-CTA instance.
+# bit-identical. hd=64 Bq=128 (gpt-oss, double buffer): 163 -> 128 registers,
+# kernel -13 % at pp4096 on gpt-oss-20b. Default on; false restores the
+# single-CTA instances.
 fa2_dense_2cta       = true
 # RA2 prefill (compute/ra2/): INT8 QK^T + NVFP4 P x two-term NVFP4 V, Q/K/V
 # quantized per call. hd 64/128/256, causal; declines sliding window, softcap,
