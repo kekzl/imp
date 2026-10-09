@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_common.cuh (v0.6.0, cd9d04a); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_common.cuh (v0.6.1, 015301f); change there first, then copy.
 // APA common (all-FP4 base from ra2 1d72da2): Cfg<D>, layouts, PTX helpers (sm_120a).
 #pragma once
 #include <cuda_bf16.h>
@@ -82,25 +82,27 @@ __device__ __forceinline__ void dequant16(uint2 w, uint8_t sb, float* x) {
     }
 }
 
-// Squared error of 16 values in E2M1 at scale 1 / inv, in units of the scale (ranks candidates; f16x2 math).
-__device__ __forceinline__ float blk_err(const float* x, float inv) {
+// Squared error of 16 values (x in f16x2) in E2M1 at scale 1 / inv, in units of the scale: F2FP e2m1x2 <->
+// f16x2 round trip, f16x2 arithmetic (ranks candidates only).
+__device__ __forceinline__ float blk_err(const __half2* xh, float inv) {
+    const __half2 iv = __float2half2_rn(inv);
     __half2 e = __float2half2_rn(0.f);
 #pragma unroll
-    for (int i = 0; i < 16; i += 2) {
-        const float a = x[i] * inv, b = x[i + 1] * inv;
+    for (int i = 0; i < 8; ++i) {
+        const __half2 a = __hmul2(xh[i], iv);
         uint32_t q;
-        asm("{\n .reg .b8 t;\n cvt.rn.satfinite.e2m1x2.f32 t, %2, %1;\n cvt.rn.f16x2.e2m1x2 %0, t;\n}"
+        asm("{\n .reg .b8 t;\n cvt.rn.satfinite.e2m1x2.f16x2 t, %1;\n cvt.rn.f16x2.e2m1x2 %0, t;\n}"
             : "=r"(q)
-            : "f"(a), "f"(b));
-        const __half2 d = __hsub2(*reinterpret_cast<const __half2*>(&q), __floats2half2_rn(a, b));
+            : "r"(*reinterpret_cast<const uint32_t*>(&a)));
+        const __half2 d = __hsub2(*reinterpret_cast<const __half2*>(&q), a);
         e = __hfma2(d, d, e);
     }
     return __low2float(e) + __high2float(e);
 }
 
 // 16 values -> 8 E2M1 bytes + UE4M3 block scale (x already divided by the global scale). Block scale: the
-// code in nearest(amax / 6) - 2 .. + 6 with the least squared error (AUDIT.md, Phase 9: lc_122880_2 at 8192
-// keys, min cos 0.883 -> 0.988); ties keep the earlier candidate.
+// code in nearest(amax / 6) + {0, -1, 1, -2, 3, 4, 5, 6} with the least squared error (AUDIT.md, Phase 9 /
+// 10: lc_122880_2 at 8192 keys, min cos 0.883 -> 0.988); ties keep the earlier candidate.
 __device__ __forceinline__ uint8_t quant16(const float* x, uint2& w, float* am_out = nullptr) {
     float am = 0.f;
 #pragma unroll
@@ -110,16 +112,20 @@ __device__ __forceinline__ uint8_t quant16(const float* x, uint2& w, float* am_o
         *am_out = am;
     uint8_t sb = e4m3_enc(am / 6.f);
     if (am > 0.f) {
-        constexpr int kOff[] = {0, -1, 1, -2, 2, 3, 4, 5, 6};
+        constexpr int kOff[] = {0, -1, 1, -2, 3, 4, 5, 6};
+        __half2 xh[8];
+#pragma unroll
+        for (int i = 0; i < 8; ++i)
+            xh[i] = __floats2half2_rn(x[2 * i], x[2 * i + 1]);
         const int c0 = sb;
         float best = INFINITY;
 #pragma unroll
-        for (int k = 0; k < 9; ++k) {
+        for (int k = 0; k < 8; ++k) {
             const int c = c0 + kOff[k];
             if (c < 1 || c > 0x7E)
                 continue;
             const float sc = fmaxf(e4m3_dec((uint8_t)c), 1.f / 512);
-            const float e = blk_err(x, 1.f / sc) * sc * sc;
+            const float e = blk_err(xh, 1.f / sc) * sc * sc;
             if (e < best)
                 best = e, sb = (uint8_t)c;
         }
