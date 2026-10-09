@@ -30,7 +30,7 @@ namespace imp::awq {
 
 // AWQ scale groups, selectable to attribute a bad result. E and G exist only on qwen3_5 GDN
 // hybrids and are unmeasured against an uncalibrated twin.
-constexpr const char* kAwqAllGroups = "ABCDEGXY";
+constexpr const char* kAwqAllGroups = "ABCDEGKXY";
 // X/Y are opt-in, no measured gain: Gemma-4-26B arms 17.10..17.37 PPL sit inside the RTN rounding band
 // 16.7551..19.0110 (8 tensor-scale shifts, sd 4.63 %, 14676 framed tokens).
 constexpr const char* kAwqDefaultGroups = "ABCDEG";

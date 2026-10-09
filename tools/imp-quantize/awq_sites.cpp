@@ -56,7 +56,9 @@ std::pair<std::string, std::vector<int64_t>> layer_experts(const std::set<std::s
 std::optional<NormConvention> arch_norm_convention(const std::string& model_type) {
     // Plain: out = norm(x) * g. The four this tool has always accepted.
     // gemma4: imp applies the norm weight as stored (norm_weight_offset 0, no load-time +1).
-    static const char* kPlain[] = {"qwen2", "qwen3", "llama", "mistral", "gemma4", "gemma4_text"};
+    // deepseek_v2: plain RMSNorm, MLA attention (kv_a_layernorm on the latent), no load-time offset.
+    static const char* kPlain[] = {"qwen2",  "qwen3",       "llama",      "mistral",
+                                   "gemma4", "gemma4_text", "deepseek_v2"};
     // Unit offset: out = norm(x) * (1 + g). imp bakes the +1 at load for these
     // (src/model/weight_upload.cpp arch_norm_offset), so runtime norm_weight_offset stays 0 and the
     // fold must carry it. Spellings from src/model/hf_config_loader.cpp: a Qwen3.8 checkpoint
@@ -223,9 +225,11 @@ std::vector<FoldSite> layer_fold_sites(const std::set<std::string>& names, const
         out.push_back(std::move(s));
     }
 
-    // ---- A: q/k/v into input_layernorm. ----
+    // ---- A: q/k/v (MLA: q_proj + kv_a_proj_with_mqa) into input_layernorm. ----
     if (wants(groups, 'A') && has(names, in_norm)) {
-        auto members = present(names, attn, {"q_proj.weight", "k_proj.weight", "v_proj.weight"});
+        auto members = present(names, attn,
+                               {"q_proj.weight", "k_proj.weight", "v_proj.weight",
+                                "kv_a_proj_with_mqa.weight"});
         if (!members.empty()) {
             FoldSite s;
             s.group = 'A';
@@ -233,12 +237,28 @@ std::vector<FoldSite> layer_fold_sites(const std::set<std::string>& names, const
             s.producer = in_norm;
             s.kind = FoldKind::NormVector;
             s.offset = block_norm;
-            s.calib_keys = strs({"WQ", "WK", "WV"});
+            s.calib_keys = strs({"WQ", "WK", "WV", "KV_A_PROJ"});
             s.scan_prefix = attn;
-            // o_proj reads the attention output, not this norm.
-            s.scan_exempt = strs({"o_proj.weight"});
+            // o_proj reads the attention output; MLA kv_b_proj reads kv_a_layernorm (group K).
+            s.scan_exempt = strs({"o_proj.weight", "kv_b_proj.weight", "kv_a_layernorm.weight"});
             out.push_back(std::move(s));
         }
+    }
+
+    // ---- K: MLA kv_b_proj into kv_a_layernorm, the RMSNorm on the 512-dim latent. ----
+    if (wants(groups, 'K') && has(names, attn + "kv_a_layernorm.weight") &&
+        has(names, attn + "kv_b_proj.weight")) {
+        FoldSite s;
+        s.group = 'K';
+        s.members = {attn + "kv_b_proj.weight"};
+        s.producer = attn + "kv_a_layernorm.weight";
+        s.kind = FoldKind::NormVector;
+        s.offset = block_norm;
+        s.calib_keys = {"KV_B_PROJ"};
+        s.scan_prefix = attn;
+        // Every other attention projection reads input_layernorm or the attention output.
+        s.scan_exempt = strs({"q_proj.weight", "kv_a_proj_with_mqa.weight", "o_proj.weight"});
+        out.push_back(std::move(s));
     }
 
     // G: the four GDN in-projections into the same input_layernorm, all-or-none: folding the norm

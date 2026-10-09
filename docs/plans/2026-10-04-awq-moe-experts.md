@@ -45,3 +45,13 @@ RTN with every tensor scale multiplied by f (same rounding quality, mean MSE 1.0
        note=per-token NLL via diagnostics.ppl_dump=full; activation counters from an experimental build]
 
 Decision: X/Y opt-in (`kAwqDefaultGroups` = `ABCDEG`, `tools/imp-quantize/awq_sites.h`); `gemma4` refuses `--calib` without `--calib-groups` (no measured gain). A Gemma-4 quantization verdict needs the method's mean over several tensor-scale shifts, not one export.
+
+## DeepSeek-V2 MLA (#2477, 2026-10-09)
+
+- DeepSeek-V2-Lite (`deepseek_v2`, #2477): A folds `q_proj` + `kv_a_proj_with_mqa` into `input_layernorm`; K (opt-in, `--calib-groups ABCDK`) folds MLA `kv_b_proj` into `kv_a_layernorm`; MoE layers get no B or X, `post_attention_layernorm` also feeds the router and the shared experts. `--calibrate` on the BF16 source with the first 90 000 bytes of `calib_corpus.txt` (the full corpus is 37 921 tokens, above the 2096-block pool).
+- DeepSeek-V2-Lite, ppl_corpus_45k (14 955 tokens), deterministic: BF16 9.0616, RTN 9.6015, `--calib` (default, 29 groups) 9.5250, `ABCDK` (56 groups) 9.5092. K stays opt-in: one run each, MoE PPL noise not measured for this model (Gemma-4: sd 4.63 %).
+
+[PROV: commit=42b83a69 date=2026-10-09 hw=RTX5090 model=DeepSeek-V2-Lite quant=NVFP4 cuda=13.4.2
+       path=imp-quantize+imp-cli-perplexity n=1-per-arm-deterministic
+       cmd=`imp-cli --perplexity <calib_corpus first 90000 bytes> --calibrate`, `imp-quantize [--calib] [--calib-groups ABCDK]`, `imp-cli --perplexity ppl_corpus_45k --set runtime.deterministic=true`
+       note=dev build of feat/awq-calib-deepseek-v2 on that commit]
