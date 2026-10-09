@@ -158,6 +158,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         const size_t lib_reserve = config.library_reserve_mb < 0
                                        ? kMeasuredLibraryReserveBytes
                                        : (static_cast<size_t>(config.library_reserve_mb) << 20);
+        budget.library_reserve_bytes = lib_reserve;
         if (lib_reserve > budget.reserve_bytes) {
             IMP_LOG_INFO("VRAM budget: reserve floored at the library charge %.0f -> %.0f MiB",
                          budget.reserve_bytes / (1024.0 * 1024.0),

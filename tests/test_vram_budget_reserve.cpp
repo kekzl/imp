@@ -469,6 +469,12 @@ TEST(VramBudgetReserve, ReserveIsFlooredAtTheLibraryCharge) {
     VRAMBudget b_dflt = compute_vram_budget(m, dflt, 32, 128, 8 * GiB);
     EXPECT_GE(b_dflt.reserve_bytes, kMeasuredLibraryReserveBytes)
         << "an unset library_reserve_mb must still charge the measured constant";
+
+    // Exposed on its own: phase 3-moe charges it against live free VRAM (max'd into
+    // reserve_bytes it is lost whenever the allocator headroom is larger).
+    EXPECT_EQ(b_none.library_reserve_bytes, 0u);
+    EXPECT_EQ(b_chg.library_reserve_bytes, 6000ull << 20);
+    EXPECT_EQ(b_dflt.library_reserve_bytes, kMeasuredLibraryReserveBytes);
 }
 
 // V8 plan sufficiency ("no tier exceeded"): replaces a wrong live<=plan assertion that
