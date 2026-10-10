@@ -97,6 +97,8 @@ struct WeightCaches {
     // Mode: 0=off, 1=additive, 2=only
     std::unordered_map<const void*, NvFP4QuantResult> nvfp4;
     size_t nvfp4_bytes = 0;
+    // FP16 LM head re-quantized to NVFP4: ledger only, outside nvfp4_bytes (budget input).
+    size_t nvfp4_lm_head_bytes = 0;
     int nvfp4_decode_mode = 0;
 
     // Per-expert NVFP4

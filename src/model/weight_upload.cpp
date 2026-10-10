@@ -2201,6 +2201,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                 if (cudaMallocAsync(&slab, static_cast<size_t>(N) * e_ms, stream) != cudaSuccess)
                     return;
                 gpu_allocations_.push_back(slab);  // single base alloc; ~Model frees it once
+                // Raw cudaMallocAsync, so no tag claims it (gpt-oss-20b NVFP4: 72 slabs, 1139 MiB).
+                MemAccount::instance().note_alloc("WEIGHTS", slab, static_cast<size_t>(N) * e_ms);
                 moe_scale_slabs += upload_scale_slab(slab, grp, e_ms, stream, scale_count);
             };
             for (size_t i = 0; i < layers_.size(); ++i) {

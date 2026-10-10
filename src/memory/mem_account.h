@@ -103,6 +103,7 @@ private:
         std::string name;
         size_t free_bytes = 0;
         size_t used_bytes = 0;  // total - free
+        int64_t tracked_bytes = 0;  // sum of pools_ current at this instant
     };
 
     Pool& pool_locked(const char* name);

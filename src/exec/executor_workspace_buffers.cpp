@@ -1531,6 +1531,7 @@ void GraphExecutor::free_buffers() {
             free_nvfp4_result(result);
         wcache_.nvfp4.clear();
         wcache_.nvfp4_bytes = 0;
+        wcache_.nvfp4_lm_head_bytes = 0;
         // NVFP4 MoE expert cache
         for (auto& [ptr, result] : wcache_.nvfp4_moe)
             free_nvfp4_moe_result(result);

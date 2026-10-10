@@ -230,6 +230,7 @@ void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
 
     // Bytes: FP4 data (2 per byte) + one FP8 scale per 16 elements, integer bytes as before.
     const size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 + static_cast<size_t>(rows) * cols / 16;
+    wcache_->nvfp4_lm_head_bytes = nvfp4_bytes;  // raw allocation, no tag (gpt-oss-20b: 310 MiB)
     const double nvfp4_mib = static_cast<double>(nvfp4_bytes) / (1024.0 * 1024.0);
     IMP_LOG_INFO("NVFP4 LM head: quantized FP16 [%d x %d] → NVFP4 (%.1f MiB), decode GEMV fast path",
                  rows, cols, nvfp4_mib);
