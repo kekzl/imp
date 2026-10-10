@@ -319,7 +319,8 @@ struct CudaUploadDev {
         return d;
     }
     int copy(void* dst, const void* src, size_t n) { return h2d_copy(dst, src, n, stream); }
-    void release(void* d) { IMP_CUDA_CHECK_LOG(cudaFreeAsync(d, stream)); }
+    // Uncharges WEIGHTS too: a bare cudaFreeAsync left Qwen3-30B's 166.9 MiB dequant source noted.
+    void release(void* d, size_t n) { release_upload_alloc(gpu_allocs, d, n, stream); }
     void track(void* d) { gpu_allocs.push_back(d); }
     void dequant(const void* raw, void* out, QType qtype, int rows, int cols) {
         dequant_gpu(raw, out, qtype, rows, cols, stream);

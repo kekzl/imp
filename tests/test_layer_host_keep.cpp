@@ -110,7 +110,7 @@ struct StubDevice {
         uploaded_src.insert(src);
         return 0;
     }
-    void release(void*) {}
+    void release(void*, size_t) {}
     void track(void*) {}
     void dequant(const void*, void*, QType, int, int) {}
     const char* err_str(int) { return "stub"; }

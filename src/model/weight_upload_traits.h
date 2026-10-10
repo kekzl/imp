@@ -390,7 +390,7 @@ struct RawFmt {
 };
 
 // Device side of a StagePlan. Dev: void* alloc(size_t) (nullptr = fail), int copy(dst, src, n)
-// (0 = ok, result only logged), release(void*), track(void*) (-> gpu_allocs),
+// (0 = ok, result only logged), release(void*, size_t), track(void*) (-> gpu_allocs),
 // dequant(raw, out, qtype, rows, cols) (dequant + sync), const char* err_str(int).
 template <class Dev>
 [[nodiscard]] bool commit_gpu_dequant(Tensor& w, QType qtype, const StagePlan& p, Dev& dev) {
@@ -400,11 +400,11 @@ template <class Dev>
     dev.copy(d_raw, p.src[0], p.bytes[0]);
     void* d_fp16 = dev.alloc(p.dequant_bytes);
     if (!d_fp16) {
-        dev.release(d_raw);
+        dev.release(d_raw, p.bytes[0]);
         return false;
     }
     dev.dequant(d_raw, d_fp16, qtype, static_cast<int>(w.shape[0]), static_cast<int>(w.shape[1]));
-    dev.release(d_raw);
+    dev.release(d_raw, p.bytes[0]);
     dev.track(d_fp16);
     w = Tensor(d_fp16, p.qtype, p.ndim, p.shape, true);
     return true;
@@ -435,7 +435,7 @@ template <class Dev>
         d[i] = dev.alloc(p.bytes[i]);
         if (!d[i]) {
             for (int j = 0; j < i; ++j)
-                dev.release(d[j]);
+                dev.release(d[j], p.bytes[j]);
             return false;
         }
         const int e = dev.copy(d[i], p.src[i], p.bytes[i]);

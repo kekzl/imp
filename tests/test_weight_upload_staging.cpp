@@ -82,7 +82,7 @@ struct FakeDevice {
         ev.push_back(std::move(e));
         return k == fail_copy_at ? 700 : 0;
     }
-    void release(void* d) { ev.push_back(event('R', index_of(d))); }
+    void release(void* d, size_t) { ev.push_back(event('R', index_of(d))); }
     std::vector<void*> tracked;  // = gpu_allocs
     void track(void* d) { tracked.push_back(d); }
     void dequant(const void* raw, void* out, QType q, int rows, int cols) {
@@ -115,7 +115,7 @@ inline cudaError_t h2d_copy(void* dst, const void* src, size_t n, cudaStream_t) 
     return g_old_dev->copy(dst, src, n);
 }
 inline cudaError_t cudaFreeAsync(void* d, cudaStream_t) {
-    g_old_dev->release(d);
+    g_old_dev->release(d, 0);
     return cudaSuccess;
 }
 inline cudaError_t cudaStreamSynchronize(cudaStream_t) { return cudaSuccess; }
