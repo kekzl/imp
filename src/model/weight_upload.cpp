@@ -246,12 +246,13 @@ static bool sync_upload(cudaStream_t stream, const char* what) {
     return e == cudaSuccess;
 }
 
-// Device copy of a host scale tensor. Any allocation goes into `allocs`; nullptr on failure.
+// Device copy of a host scale tensor. Any allocation goes into `allocs` and `WEIGHTS`; nullptr on failure.
 static void* scale_to_device(const void* src, size_t bytes, cudaStream_t stream, std::vector<void*>& allocs) {
     void* d_ptr = nullptr;
     if (cudaMallocAsync(&d_ptr, bytes, stream) != cudaSuccess)
         return nullptr;
     allocs.push_back(d_ptr);
+    MemAccount::instance().note_alloc("WEIGHTS", d_ptr, bytes);  // uncharged by Model (#2354)
     const cudaError_t e = cudaMemcpyAsync(d_ptr, src, bytes, cudaMemcpyHostToDevice, stream);
     if (e != cudaSuccess)
         IMP_LOG_ERROR("scale upload: cudaMemcpyAsync %zu bytes: %s", bytes, cudaGetErrorString(e));
