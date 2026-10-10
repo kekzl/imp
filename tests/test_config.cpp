@@ -101,6 +101,20 @@ TEST(RuntimeConfigTest, SwaSizingTriState) {
     EXPECT_EQ(cfg.kv_cache.swa_snapshot_mb, 512);
 }
 
+// One gate for the max_seq_len resolver and init_kv_cache: auto + prefix caching + a snapshot
+// budget sizes SWA, so the resolver must exclude windowed layers too (Gemma-4: 15254 tokens).
+TEST(RuntimeConfigTest, SwaSizingWantedCoversSnapshotBudget) {
+    RuntimeConfig cfg;
+    EXPECT_TRUE(cfg.kv_cache.swa_sizing_wanted(false));
+    EXPECT_FALSE(cfg.kv_cache.swa_sizing_wanted(true));
+    set_(cfg, {"kv_cache.swa_snapshot_mb=512"});
+    EXPECT_TRUE(cfg.kv_cache.swa_sizing_wanted(true));
+    set_(cfg, {"kv_cache.swa_sizing=off"});
+    EXPECT_FALSE(cfg.kv_cache.swa_sizing_wanted(false));
+    set_(cfg, {"kv_cache.swa_sizing=on", "kv_cache.swa_snapshot_mb=0"});
+    EXPECT_TRUE(cfg.kv_cache.swa_sizing_wanted(true));
+}
+
 // The long-context FP8-KV quality gate (kv_cache.dtype=auto): only arch families
 // empirically verified safe honor the model author's kv_cache_quant_algo=FP8 hint
 // by default. Keep this allowlist conservative — see model.cpp for the evidence.
