@@ -952,9 +952,7 @@ void Engine::init_compute_max_seq_len_() {
         // (use_prefix_caching is final before this resolver runs). The final
         // gate is resolved in init_kv_cache; a decline there clamps
         // conservatively, never OOMs.
-        const auto swa_mode = runtime_config_.kv_cache.swa_sizing_mode();
-        if (swa_mode == SwaSizingMode::On ||
-            (swa_mode == SwaSizingMode::Auto && !config_.use_prefix_caching)) {
+        if (runtime_config_.kv_cache.swa_sizing_wanted(config_.use_prefix_caching)) {
             int swa_layers = 0;
             for (int l = 0; l < mcfg.n_layers; l++)
                 if (layer_swa_window(mcfg, model_->profile(), l) > 0)

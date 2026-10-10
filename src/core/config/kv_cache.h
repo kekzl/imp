@@ -78,5 +78,13 @@ struct KVCache {
             return SwaSizingMode::On;
         return SwaSizingMode::Off;
     }
+
+    // Mode gate shared by the max_seq_len resolver and init_kv_cache: auto yields to prefix
+    // caching unless a snapshot budget lets the two coexist.
+    [[nodiscard]] bool swa_sizing_wanted(bool prefix_caching) const {
+        const SwaSizingMode m = swa_sizing_mode();
+        return m == SwaSizingMode::On ||
+               (m == SwaSizingMode::Auto && (!prefix_caching || swa_snapshot_mb > 0));
+    }
 };
 }  // namespace imp::cfg

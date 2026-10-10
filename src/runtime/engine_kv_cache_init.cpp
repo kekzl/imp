@@ -124,8 +124,7 @@ bool Engine::init_kv_cache() {
             off_reason = "green contexts (cross-stream block reuse unordered)";
         else if (runtime_config_.runtime.deterministic)
             off_reason = "deterministic mode (unbounded graph loop would be burst-chunked)";
-        else if (swa_mode == SwaSizingMode::Auto && config_.use_prefix_caching &&
-                 runtime_config_.kv_cache.swa_snapshot_mb <= 0)
+        else if (!runtime_config_.kv_cache.swa_sizing_wanted(config_.use_prefix_caching))
             off_reason = "auto mode yields to prefix caching (freed window blocks cannot back "
                          "prefix reuse; set kv_cache.swa_snapshot_mb to combine, or "
                          "kv_cache.swa_sizing=on to force the KV savings)";
