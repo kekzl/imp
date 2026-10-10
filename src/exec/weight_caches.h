@@ -102,10 +102,16 @@ struct WeightCaches {
     // Per-expert NVFP4
     std::unordered_map<const void*, NvFP4MoEQuantResult> nvfp4_moe;
     size_t nvfp4_moe_bytes = 0;
+    // Part of nvfp4_moe_bytes VRAMAllocator already noted under its own tag (native MoE cache):
+    // the WEIGHT_CACHE_NVFP4 note excludes it.
+    size_t nvfp4_moe_noted_bytes = 0;
 
     // --- CUTLASS sm_120 block-scaled NVFP4 ---
     std::unordered_map<const void*, CutlassNvFP4Weight> cutlass_nvfp4;
     size_t cutlass_nvfp4_bytes = 0;
+    // Part of cutlass_nvfp4_bytes VRAMAllocator already noted (MoE SfAtom slabs): the
+    // WEIGHT_CACHE_CUTLASS_SF note excludes it (gpt-oss-20b GGUF: 1164 MiB counted twice).
+    size_t cutlass_nvfp4_noted_bytes = 0;
     // NVFP4 PREFILL copies of full-precision GDN projections (gemm.nvfp4_gdn_proj_prefill),
     // keyed by the F16 source pointer; the source stays the M=1 / M<=32 path. The packed
     // data is owned by the quant results here (micro-scales already freed), the SfAtom

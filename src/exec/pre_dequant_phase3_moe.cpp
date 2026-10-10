@@ -30,6 +30,14 @@ namespace imp {
 
 using imp::pre_dequant_internal::nvfp4_beneficial;
 
+namespace {
+// Bytes VRAMAllocator noted itself: vram_alloc_force with an allocator, raw cudaMalloc without.
+size_t allocator_noted(const VRAMAllocator* alloc, size_t bytes) { return alloc ? bytes : 0; }
+size_t moe_result_bytes(const NvFP4MoEQuantResult& r) {
+    return static_cast<size_t>(r.n_experts) * (r.expert_stride_packed + r.expert_stride_ms + sizeof(float));
+}
+}  // namespace
+
 // Cache MoE expert weights, done after FP16 free so mode 2 has full budget. Two
 // sub-paths: cache_moe_native_nvfp4 (NVFP4-prequant SafeTensors, per-expert tensors
 // consolidated into one contiguous buffer per layer per projection) and
@@ -146,6 +154,8 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
         install(g, L.expert_gate_packed);
         install(u, L.expert_up_packed);
         install(d, L.expert_down_packed);
+        // gpt_oss_convert_experts_to_nvfp4 allocates with raw cudaMalloc: no tag names these bytes.
+        wcache_->nvfp4_moe_bytes += moe_result_bytes(g) + moe_result_bytes(u) + moe_result_bytes(d);
 
         // Per-expert CUTLASS_NVFP4 registration (#547 prefill): without it, covers_ids() rejects
         // the CUTLASS 3.x grouped path and prefill falls to the dequant->FP16->cuBLAS batch
@@ -204,6 +214,7 @@ void QuantPipeline::gpt_oss_convert_moe_experts_(const ModelConfig& cfg, Nvfp4De
                 wcache_->cutlass_nvfp4[data_slice] = cw;
             }
             wcache_->cutlass_nvfp4_bytes += sfatom_total;
+            wcache_->cutlass_nvfp4_noted_bytes += allocator_noted(vram_alloc_, sfatom_total);
             return true;
         };
         bool ct_ok = register_cutlass(g, L.expert_w_gate, g_ts) &&
@@ -359,9 +370,9 @@ void QuantPipeline::nvfp4_decode_cache_moe_experts_(const ModelConfig& cfg,
             dctx.nvfp4_moe_partial_skipped);
 
     if (dctx.nvfp4_moe_count > 0) {
-        wcache_->nvfp4_moe_bytes = dctx.nvfp4_moe_total;
+        wcache_->nvfp4_moe_bytes += dctx.nvfp4_moe_total;  // += keeps the gpt-oss conversion bytes
         IMP_LOG_INFO("NVFP4 MoE cache: %d tensors, %.2f MiB", dctx.nvfp4_moe_count,
-                     dctx.nvfp4_moe_total / (1024.0 * 1024.0));
+                     wcache_->nvfp4_moe_bytes / (1024.0 * 1024.0));
         if (dctx.nvfp4_moe_ms_freed > 0)
             IMP_LOG_INFO("NVFP4 MoE cache: freed %.2f MiB duplicated per-expert micro-scales "
                          "(contiguous ms_ref copies are now the single source)",
@@ -630,6 +641,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
 
         wcache_->nvfp4_moe[d_packed] = r;
         dctx.nvfp4_moe_total += add_bytes;
+        wcache_->nvfp4_moe_noted_bytes += allocator_noted(vram_alloc_, add_bytes);
         dctx.nvfp4_moe_count++;
 
         // Free per-expert GPU allocations now: the legacy fallback path can no longer fire for
@@ -744,6 +756,7 @@ bool QuantPipeline::cache_moe_native_nvfp4_(Tensor& packed, std::vector<Tensor>&
                 }
                 IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                 wcache_->cutlass_nvfp4_bytes += sfatom_total;
+                wcache_->cutlass_nvfp4_noted_bytes += allocator_noted(vram_alloc_, sfatom_total);
                 moe_logical_avail = (moe_logical_avail > sfatom_total)
                                         ? (moe_logical_avail - sfatom_total)
                                         : 0;
