@@ -171,8 +171,9 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     MemAccount::instance().note("WEIGHT_CACHE_FP8",
                                 static_cast<std::ptrdiff_t>(wcache_->fp8_bytes - wcache_->fp8_sidecar_bytes));
     MemAccount::instance().note("WEIGHT_CACHE_NVFP4",
-                                static_cast<std::ptrdiff_t>(wcache_->nvfp4_bytes + wcache_->nvfp4_moe_bytes -
-                                                            wcache_->nvfp4_moe_noted_bytes));
+                                static_cast<std::ptrdiff_t>(
+                                    wcache_->nvfp4_bytes + wcache_->nvfp4_lm_head_bytes +
+                                    wcache_->nvfp4_moe_bytes - wcache_->nvfp4_moe_noted_bytes));
     MemAccount::instance().note("WEIGHT_CACHE_CUTLASS_SF",
                                 static_cast<std::ptrdiff_t>(wcache_->cutlass_nvfp4_bytes +
                                                             wcache_->cutlass_mxfp4_bytes -

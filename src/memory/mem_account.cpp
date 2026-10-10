@@ -147,7 +147,10 @@ void MemAccount::checkpoint(const char* name) {
     if (!enabled_.load(std::memory_order_relaxed))
         return;
     std::lock_guard<std::mutex> lock(mu_);
-    checkpoints_.push_back(Checkpoint{name, free_b, total_b - free_b});
+    int64_t tracked = 0;
+    for (const auto& p : pools_)
+        tracked += p.current;
+    checkpoints_.push_back(Checkpoint{name, free_b, total_b - free_b, tracked});
 }
 
 void MemAccount::sample_once() {
@@ -283,14 +286,19 @@ void MemAccount::report(const char* phase_label) {
 
     if (!checkpoints_.empty()) {
         emit("--- lifecycle checkpoints (phase delta = measured cost) ---");
-        emit("%-26s %12s %12s %12s", "checkpoint", "used_MiB", "free_MiB", "delta_MiB");
+        // named_MiB: pool-note delta over the phase; unnamed_MiB = delta - named, what no tag claims.
+        emit("%-26s %12s %12s %12s %12s %12s", "checkpoint", "used_MiB", "free_MiB", "delta_MiB", "named_MiB",
+             "unnamed_MiB");
         size_t prev_used = 0;
+        int64_t prev_tracked = 0;
         bool first = true;
         for (const auto& c : checkpoints_) {
             double delta = first ? 0.0 : (double(c.used_bytes) - double(prev_used)) / kMiB;
-            emit("%-26s %12.1f %12.1f %12.1f", c.name.c_str(), c.used_bytes / kMiB,
-                 c.free_bytes / kMiB, delta);
+            double named = first ? 0.0 : double(c.tracked_bytes - prev_tracked) / kMiB;
+            emit("%-26s %12.1f %12.1f %12.1f %12.1f %12.1f", c.name.c_str(), c.used_bytes / kMiB,
+                 c.free_bytes / kMiB, delta, named, delta - named);
             prev_used = c.used_bytes;
+            prev_tracked = c.tracked_bytes;
             first = false;
         }
     }
