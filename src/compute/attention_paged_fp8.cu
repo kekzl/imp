@@ -418,6 +418,8 @@ void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Te
                         static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float);
 
     // ---- Split-K decision ----
+    // batch x n_heads on purpose, not the grouped hd128 kernel's batch x n_kv CTAs: counting those
+    // splits batch 9..42 too: Qwen3-14B 32 streams -4.5 % (947-token prompts), -2.3 % (38), 3/3 pairs.
     void* scratch_ptr = nullptr;
     int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
                                            &scratch_ptr);
