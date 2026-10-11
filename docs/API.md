@@ -87,7 +87,7 @@ Two of these do not switch off the way the field name suggests:
 - **`repetition_penalty` has no OpenAI field**, so a strictly spec-compliant
   client cannot switch it off. Sending the non-OpenAI field with value `1.0`
   disables it: the engine skips the penalty pass when all three penalties are
-  neutral (`src/runtime/engine_sampling_stop.cpp:202 needs_penalties = (req.repetition_penalty != 1.0f`).
+  neutral (`src/runtime/engine_sampling_stop.cpp:197 needs_penalties = (req.repetition_penalty != 1.0f`).
 
 ### Metrics for what the server decided
 
