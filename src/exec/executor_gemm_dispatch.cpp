@@ -683,10 +683,12 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                                    M >= 2 && input.stride[0] == h.shape[1] &&
                                    output.stride[0] == h.shape[0];
         if (ctx.q8_imma_enabled && h.source_qtype == QType::Q8_0 && imma_eligible) {
+            // q/k/v share one input: k and v skip the quantize q wrote (tag-checked in the callee).
+            const bool reuse_act = ctx.act_quant_hint_matches(input.data, M, static_cast<int>(h.shape[1]));
             if (mmq_q8_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
                                  reinterpret_cast<__half*>(output.data), M, static_cast<int>(h.shape[0]),
                                  static_cast<int>(h.shape[1]), ctx.stream, ctx.beta,
-                                 /*allow_splitk=*/cur_decode_rows_))
+                                 /*allow_splitk=*/cur_decode_rows_, reuse_act))
                 return;
         }
         if (ctx.q4k_imma_prefill && h.source_qtype == QType::Q4_K && imma_eligible) {

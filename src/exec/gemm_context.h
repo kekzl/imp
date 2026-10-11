@@ -97,6 +97,12 @@ struct GemmContext {
         c.act_quant_hint_k = k;
         return c;
     }
+
+    // True when the call site marked exactly (data, m, k) as already quantized.
+    [[nodiscard]] bool act_quant_hint_matches(const void* data, int m, int k) const {
+        return act_quant_hint_data != nullptr && act_quant_hint_data == data && act_quant_hint_m == m &&
+               act_quant_hint_k == k;
+    }
 };
 
 }  // namespace imp

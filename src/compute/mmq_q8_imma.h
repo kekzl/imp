@@ -26,8 +26,15 @@ namespace imp {
 // Dense Q8_0: out[M,N] = x·W^T (beta=0) or += (beta=1).
 // Declines: M < 2, N % 2, K % 64, beta ∉ {0,1}, capture-guarded miss.
 // allow_splitk=false: no M<=32 split-K, so a row matches its value at any M (prompt rows, #2152).
-[[nodiscard]] bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
-                      cudaStream_t stream, float beta = 0.0f, bool allow_splitk = true);
+// reuse_act: x is unchanged since this thread's last IMMA quantize; it is skipped when that quantize
+// wrote exactly (x, M, K, stream) into the current scratch (q/k/v share one input, #2416).
+[[nodiscard]] bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M,
+                                    int N, int K, cudaStream_t stream, float beta = 0.0f,
+                                    bool allow_splitk = true, bool reuse_act = false);
+
+// Drops the last-quantize tag: a caller about to rely on reuse_act clears it first, so a tag left by
+// an earlier layer on the same workspace pointer can never be matched.
+void mmq_imma_act_forget();
 
 // Dense Q4_K (new stack — distinct from the retired 2026-05 64x32 q4k_imma
 // kernel): same contract; K % 256 == 0 (Q4_K super-block).

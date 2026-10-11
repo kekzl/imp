@@ -44,30 +44,48 @@ __global__ void q8_split_kernel(const uint8_t* __restrict__ src, int8_t* __restr
 __global__ void quantize_act_fast_kernel(const __half* __restrict__ X, int M, int K,
                                          int8_t* __restrict__ xs8, __half* __restrict__ xscale,
                                          float* __restrict__ xrowsum) {
-    const int subs = K / 32;
-    const int total = M * subs;
+    // Four lanes per 32-value block (16-B loads, 8-B stores); rows are contiguous (stride K), so
+    // block b starts at b * 32. Per-element math unchanged: bit-identical to one warp per block (#2416).
+    const size_t total = static_cast<size_t>(M) * (K / 32);
     const int lane = threadIdx.x & 31;
-    const int warp = (blockIdx.x * (blockDim.x >> 5)) + (threadIdx.x >> 5);
-    const int nwarps = gridDim.x * (blockDim.x >> 5);
-    for (int idx = warp; idx < total; idx += nwarps) {
-        const int m = idx / subs;
-        const int s = idx - m * subs;
-        const size_t off = static_cast<size_t>(m) * K + static_cast<size_t>(s) * 32;
-        const float v = __half2float(X[off + lane]);
-        float amax = fabsf(v);
+    const int quad = lane & 3;
+    const size_t warp = (static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5;
+    const size_t nwarps = (static_cast<size_t>(gridDim.x) * blockDim.x) >> 5;
+    for (size_t base = warp * 8; base < total; base += nwarps * 8) {  // warp-uniform trip count
+        const size_t b = base + (lane >> 2);
+        const bool valid = b < total;
+        const size_t off = b * 32 + static_cast<size_t>(quad) * 8;
+        uint4 raw = make_uint4(0u, 0u, 0u, 0u);
+        if (valid)
+            raw = *reinterpret_cast<const uint4*>(X + off);
+        const __half* h = reinterpret_cast<const __half*>(&raw);
+        float v[8];
+        float amax = 0.0f;
 #pragma unroll
-        for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFFu, amax, o));
+        for (int i = 0; i < 8; ++i) {
+            v[i] = __half2float(h[i]);
+            amax = fmaxf(amax, fabsf(v[i]));
+        }
+        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFFu, amax, 1));
+        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFFu, amax, 2));
         const float inv = (amax > 0.0f) ? (127.0f / amax) : 0.0f;
-        int q = __float2int_rn(v * inv);
-        q = max(-127, min(127, q));
-        xs8[off + lane] = static_cast<int8_t>(q);
-        int sq = q;
+        uint32_t packed[2] = {0u, 0u};
+        int sq = 0;
 #pragma unroll
-        for (int o = 16; o > 0; o >>= 1) sq += __shfl_xor_sync(0xFFFFFFFFu, sq, o);
-        if (lane == 0) {
-            xscale[static_cast<size_t>(m) * subs + s] =
-                __float2half((amax > 0.0f) ? (amax / 127.0f) : 0.0f);
-            xrowsum[static_cast<size_t>(m) * subs + s] = static_cast<float>(sq);
+        for (int i = 0; i < 8; ++i) {
+            int q = __float2int_rn(v[i] * inv);
+            q = max(-127, min(127, q));
+            sq += q;
+            packed[i >> 2] |= (static_cast<uint32_t>(q) & 0xFFu) << ((i & 3) * 8);
+        }
+        sq += __shfl_xor_sync(0xFFFFFFFFu, sq, 1);
+        sq += __shfl_xor_sync(0xFFFFFFFFu, sq, 2);
+        if (!valid)
+            continue;
+        *reinterpret_cast<uint2*>(xs8 + off) = make_uint2(packed[0], packed[1]);
+        if (quad == 0) {
+            xscale[b] = __float2half((amax > 0.0f) ? (amax / 127.0f) : 0.0f);
+            xrowsum[b] = static_cast<float>(sq);
         }
     }
 }
@@ -256,7 +274,7 @@ void imma_quantize_act(const __half* x, int M, int K, cudaStream_t stream) {
     const bool reuse = std::exchange(t_reuse_next, false);
     if (reuse && imma_act_holds(x, M, K, stream))
         return;
-    const int total_warps = M * (K / 32);
+    const int total_warps = (M * (K / 32) + 7) / 8;  // 8 blocks of 32 per warp
     const int blocks = min(2048, (total_warps + 7) / 8);
     quantize_act_fast_kernel<<<blocks, 256, 0, stream>>>(x, M, K, g_imma_act.xs8, g_imma_act.xscale,
                                                          g_imma_act.xrowsum);

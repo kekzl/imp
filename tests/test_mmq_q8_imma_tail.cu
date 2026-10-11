@@ -79,6 +79,101 @@ TEST(MmqQ8Imma, WaveTailRowsBitIdenticalAcrossM) {
     mmq_q8_imma_release_all();
 }
 
+// #2416 128-K step: N=1024 M=128 is a dense small grid (8 tiles, 64-K BM=32 kernel), M=4096 runs the 128-K
+// BM=128 kernel; first 128 rows must match bit for bit (#2152). beta 1 = __hadd2(C, beta-0 tile).
+TEST(MmqQ8Imma, K128StepRowsBitIdenticalToK64) {
+    const int N = 1024, K = 1024, M_small = 128, M_big = 4096;
+    std::vector<uint8_t> W;
+    gen_q8_weight(W, N, K, 91);
+    std::vector<__half> x((size_t)M_big * K), c((size_t)M_big * N);
+    std::mt19937 rng(91);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    for (auto& v : x)
+        v = __float2half(nd(rng));
+    for (auto& v : c)
+        v = __float2half(nd(rng));
+    uint8_t* d_w = nullptr;
+    __half *d_x = nullptr, *d_a = nullptr, *d_b = nullptr, *d_c = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_w, W.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_x, x.size() * sizeof(__half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_a, (size_t)M_small * N * sizeof(__half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_b, (size_t)M_big * N * sizeof(__half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_c, c.size() * sizeof(__half)), cudaSuccess);
+    cudaMemcpy(d_w, W.data(), W.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x, x.data(), x.size() * sizeof(__half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_c, c.data(), c.size() * sizeof(__half), cudaMemcpyHostToDevice);
+    ASSERT_TRUE(mmq_q8_imma_gemm(d_w, d_x, d_a, M_small, N, K, nullptr, 0.0f, false));
+    ASSERT_TRUE(mmq_q8_imma_gemm(d_w, d_x, d_b, M_big, N, K, nullptr, 0.0f, false));
+    ASSERT_TRUE(mmq_q8_imma_gemm(d_w, d_x, d_c, M_big, N, K, nullptr, 1.0f, false));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<__half> a((size_t)M_small * N), b((size_t)M_big * N), cb((size_t)M_big * N);
+    cudaMemcpy(a.data(), d_a, a.size() * 2, cudaMemcpyDeviceToHost);
+    cudaMemcpy(b.data(), d_b, b.size() * 2, cudaMemcpyDeviceToHost);
+    cudaMemcpy(cb.data(), d_c, cb.size() * 2, cudaMemcpyDeviceToHost);
+    size_t diff_rows = 0, diff_beta = 0;
+    for (size_t i = 0; i < a.size(); i++)
+        diff_rows += std::memcmp(&a[i], &b[i], 2) != 0;
+    for (size_t i = 0; i < b.size(); i++) {
+        const __half want = __hadd(c[i], b[i]);
+        diff_beta += std::memcmp(&want, &cb[i], 2) != 0;
+    }
+    EXPECT_EQ(diff_rows, 0u) << "128-K BM=128 rows differ from the 64-K BM=32 kernel";
+    EXPECT_EQ(diff_beta, 0u) << "beta 1 is not __hadd2(C, beta-0 result)";
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
+    mmq_q8_imma_release_all();
+}
+
+// #2416 q/k/v quantize reuse: reuse_act skips only a quantize of the same (x, M, K) since the last
+// mmq_imma_act_forget(). Same pointer, new content after a forget must re-quantize (a workspace reused
+// across layers served layer-1 activations otherwise).
+TEST(MmqQ8Imma, ReuseActHonoursForget) {
+    const int N = 1024, K = 1024, M = 256;
+    std::vector<uint8_t> W;
+    gen_q8_weight(W, N, K, 13);
+    std::vector<__half> x1((size_t)M * K), x2((size_t)M * K);
+    std::mt19937 rng(13);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    for (auto& v : x1)
+        v = __float2half(nd(rng));
+    for (auto& v : x2)
+        v = __float2half(nd(rng));
+    uint8_t* d_w = nullptr;
+    __half *d_x = nullptr, *d_ref = nullptr, *d_out = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_w, W.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_x, x1.size() * sizeof(__half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_ref, (size_t)M * N * sizeof(__half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_out, (size_t)M * N * sizeof(__half)), cudaSuccess);
+    cudaMemcpy(d_w, W.data(), W.size(), cudaMemcpyHostToDevice);
+    std::vector<uint16_t> ref((size_t)M * N), got((size_t)M * N);
+    // reference: x2 quantized fresh
+    cudaMemcpy(d_x, x2.data(), x2.size() * sizeof(__half), cudaMemcpyHostToDevice);
+    ASSERT_TRUE(mmq_q8_imma_gemm(d_w, d_x, d_ref, M, N, K, nullptr, 0.0f, false));
+    // x1 quantized, then the same pointer overwritten with x2 behind a forget
+    cudaMemcpy(d_x, x1.data(), x1.size() * sizeof(__half), cudaMemcpyHostToDevice);
+    ASSERT_TRUE(mmq_q8_imma_gemm(d_w, d_x, d_out, M, N, K, nullptr, 0.0f, false));
+    cudaMemcpy(d_x, x2.data(), x2.size() * sizeof(__half), cudaMemcpyHostToDevice);
+    mmq_imma_act_forget();
+    ASSERT_TRUE(mmq_q8_imma_gemm(d_w, d_x, d_out, M, N, K, nullptr, 0.0f, false, /*reuse_act=*/true));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    cudaMemcpy(ref.data(), d_ref, ref.size() * 2, cudaMemcpyDeviceToHost);
+    cudaMemcpy(got.data(), d_out, got.size() * 2, cudaMemcpyDeviceToHost);
+    EXPECT_EQ(std::memcmp(ref.data(), got.data(), ref.size() * 2), 0) << "reuse after forget served stale x1";
+    // a second call on unchanged x2 with reuse_act reads the quantize just written: same bits
+    ASSERT_TRUE(mmq_q8_imma_gemm(d_w, d_x, d_out, M, N, K, nullptr, 0.0f, false, /*reuse_act=*/true));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    cudaMemcpy(got.data(), d_out, got.size() * 2, cudaMemcpyDeviceToHost);
+    EXPECT_EQ(std::memcmp(ref.data(), got.data(), ref.size() * 2), 0) << "reuse on unchanged x differs";
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_ref);
+    cudaFree(d_out);
+    mmq_q8_imma_release_all();
+}
+
 // #2416 bench: dense Q8_0 IMMA at Qwen3-8B q_o (N = K = 4096) around the 3-wave boundary (480 / 512 /
 // 1024 tiles on 170 SMs). Two activation buffers alternate so every call pays the memoized activation
 // quantize. Prints us per GEMM; no speed assert.

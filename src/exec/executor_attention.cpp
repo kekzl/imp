@@ -25,6 +25,7 @@
 #include "compute/attention_paged.h"
 #include "compute/dispatch_record.h"  // resolved-path recording (#1205)
 #include "compute/kv_gather.h"
+#include "compute/mmq_q8_imma.h"
 #include "compute/moe_routing.h"
 #include "compute/sampling.h"
 #include "compute/ssm.h"

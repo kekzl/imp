@@ -334,6 +334,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/mmq_q8_imma_q5k.cu
     src/compute/mmq_q8_imma_q6k.cu
     src/compute/mmq_q8_imma_q51.cu
+    src/compute/mmq_q8_imma_k128.cu
     src/compute/moe_routing_permute.cu
     src/compute/softmax.cu
     src/compute/regex_constrain.cu
