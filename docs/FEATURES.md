@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-10-11
+commit: debbdd98
 -->
 
 # Feature matrix
@@ -52,7 +52,7 @@ Source: `src/core/qtype.h`.
 | OpenAI Responses `/v1/responses` | ✅ | the dialect Codex and the Agents SDK speak |
 | SSE streaming, per token, all three dialects | ✅ | one shared driver since v0.18.1 |
 | `/v1/embeddings` | ✅ | |
-| `/v1/rerank` (Cohere/Jina/vLLM shape) | 🟡 | the llama.cpp cross-check is opt-in behind `COMPARE_URL=` (`Makefile:427 --compare $(COMPARE_URL)`), so the default gate does not run it (#1680) |
+| `/v1/rerank` (Cohere/Jina/vLLM shape) | 🟡 | the llama.cpp cross-check is opt-in behind `COMPARE_URL=` (`Makefile:432 --compare $(COMPARE_URL)`), so the default gate does not run it (#1680) |
 | `/tokenize`, `/detokenize`, `/v1/models`, `/health`, `/metrics`, `/props`, `/info` | ✅ | |
 | `/admin/suspend`, `/admin/resume` | 🟡 | frees the GPU in seconds, resumes without re-reading weights. No gate exercises it (#1680) |
 | model swap on request (`server.model_swap`) | 🟡 | in-flight generations drain, never cancelled. No gate exercises it (#1680) |
@@ -72,8 +72,10 @@ Source: `src/core/qtype.h`.
 |---|---|---|
 | NVFP4 block-scaled `mma.sync` GEMM/GEMV | ✅ | |
 | FP8 `f8f6f4` attention scores | ✅ | |
-| TMA bulk-tensor loads | ✅ | `gemm_grouped_nvfp4_smallM.cu:65 Emits UTMALDG`, emits UTMALDG |
-| FlashAttention-2 style prefill, hd=128 and hd=256 | ✅ | default since #930 |
+| TMA bulk-tensor loads | ✅ | `gemm_grouped_nvfp4_smallM.cu:66 Emits UTMALDG`, emits UTMALDG |
+| FlashAttention-2 style prefill, hd=64, hd=128 and hd=256 | ✅ | default since #930; hd=64 at two CTAs per SM (`attention.fa2_dense_2cta`, #2656) |
+| APA prefill (FP4 pass 1, exact FP16 pass 2 for hot KV tiles) | ✅ default on, hd=128 | `attention.apa_eps` 0.01 (`0` = off), `apa_min_kv` 8192; Llama-3.2-3B Q8_0 106451 tokens 6746.01 -> 4824.90 ms (#2640). Source: [kekzl/apa](https://github.com/kekzl/apa), MPL-2.0 |
+| RA2 prefill (INT8 QK^T, two-term NVFP4 PV) | ✅ opt-in | `attention.ra2_prefill`; hd 64/128/256, GQA; PPL within +0.1 % on 3 models (#2628) |
 | Paged KV cache | ✅ | default block `n=16`; the geometry is per-configuration |
 | Growable KV pool | ✅ opt-in | `kv_cache.growable`: reserves address space for the planned pool, commits what the card can spare, grows on demand. Needs CUDA virtual memory management |
 | Sparse decode attention (top-k page selection) | ✅ default on (7 arch families) | `attention.sparse_topk_tokens` (auto per arch, `0` = off): decode reads only the top-scoring KV blocks, bit-identical at ctx <= budget. Page score defaults to the page mean plus its standard deviation (`attention.sparse_score_meanstd`); the Quest min/max corner bound is the opt-out. F16/FP8 KV; gates in [`plans/2026-08-28-sparse-decode-attention.md`](plans/2026-08-28-sparse-decode-attention.md) |

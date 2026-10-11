@@ -21,7 +21,7 @@ before timing, `CUBLAS_WORKSPACE_CONFIG=:4096:8`. Decode (tg) is the reliable A/
 (pp) varies up to 2.6x across container restarts (cuBLAS autotuning) and is not tabulated for
 comparisons.
 
-**Toolchain (current: `v0.50.0`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.4.2.
+**Toolchain (current: `v0.51.0`):** C++23, Ubuntu 26.04 / GCC 15.2, CUDA 13.4.2.
 
 The CI-gated canonical baseline lives in [`tests/perf_baseline.json`](../tests/perf_baseline.json)
 (8% decode / 8% prefill regression gate, 10% peak-VRAM ceiling); pinned values, thresholds and
@@ -48,7 +48,7 @@ against llama.cpp defaults, full offload, flash attention on.
        (`--set speculative.ngram=false`)]
 
 The spec-off column exists because `imp-cli --bench` builds a strictly-increasing synthetic
-prompt (`tools/imp-cli/mode_bench.cpp:31 tokens[i] = i % vocab_size`) that the n-gram drafter's own generation can loop
+prompt (`tools/imp-cli/mode_bench.cpp:34 tokens[i] = i % vocab_size`) that the n-gram drafter's own generation can loop
 into: a decode A/B that leaves speculation on can measure whether a checkpoint happens to loop,
 not only the verify path. Reproduce with `make bench-competitive` (competitor image pinned by
 digest in [`scripts/bench_competitive.sh`](../scripts/bench_competitive.sh), not by tag); two
