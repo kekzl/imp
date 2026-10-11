@@ -18,8 +18,7 @@ namespace {
 
 constexpr int kWarps = 4;
 constexpr int kThreads = kWarps * 32;
-constexpr int kNT = 4;  // n8 tiles per block (every warp): 32 vocab rows
-constexpr int kRowsPerBlock = kNT * 8;
+constexpr int kNTDefault = 8;     // n8 tiles per block: 64 vocab rows (32: 637.5 -> 578.0 us, #2680)
 constexpr int kRowsPerPass = 32;  // activation rows per launch (2 m16 tiles)
 
 __device__ __forceinline__ uint32_t e4m3x2_to_f16x2(uint32_t two_codes) {
@@ -43,7 +42,7 @@ __device__ __forceinline__ uint32_t word(const uint4& v, int i) {
 }
 
 // One 64-wide K chunk: 4 MMA k-steps over kNT weight tiles and MT activation tiles.
-template <int MT>
+template <int MT, int kNT>
 __device__ __forceinline__ void mma_chunk(float (&acc)[MT][kNT][4], const uint4 (&wr)[kNT],
                                           const uint4* const (&xp)[MT][2], const bool (&x_ok)[MT][2], int k0,
                                           int t) {
@@ -81,13 +80,13 @@ __device__ __forceinline__ void mma_chunk(float (&acc)[MT][kNT][4], const uint4 
     }
 }
 
-// One block = 32 vocab rows; its 4 warps each take a quarter of K (split-K 4 regardless of n,
-// so a wave holds ~4.6x more work units than one-warp-per-32-rows: 1.13 -> target 1.6 TB/s).
-// K is walked in 64-wide chunks; lane (g = lane/4, t = lane%4) holds physical k 16t..16t+15 of
-// its weight row (16 B) and activation rows. MMA step s maps logical k {2t,2t+1 | 2t+8,2t+9} to
-// physical 16t+4s+{0,1 | 2,3} for A and B alike, so the dot product is unchanged.
-// Row r's MMA chain and the fixed w0+w1+w2+w3 reduction never depend on n_rows (#2152 rule).
-template <int MT>
+// One block = kNT * 8 vocab rows and re-reads all of x from L2; its 4 warps each take a quarter
+// of K (split-K 4 regardless of n, so a wave holds ~4.6x more work units than one-warp-per-32-rows: 1.13 ->
+// target 1.6 TB/s). K is walked in 64-wide chunks; lane (g = lane/4, t = lane%4) holds physical k 16t..16t+15
+// of its weight row (16 B) and activation rows. MMA step s maps logical k {2t,2t+1 | 2t+8,2t+9} to physical
+// 16t+4s+{0,1 | 2,3} for A and B alike, so the dot product is unchanged. Row r's MMA chain and the fixed
+// w0+w1+w2+w3 reduction never depend on n_rows (#2152 rule).
+template <int MT, int kNT, int kU>
 __global__ void __launch_bounds__(kThreads) fp8_head_mma_kernel(const uint8_t* __restrict__ W,
                                                                 const float* __restrict__ row_scales,
                                                                 const half* __restrict__ x,
@@ -99,7 +98,7 @@ __global__ void __launch_bounds__(kThreads) fp8_head_mma_kernel(const uint8_t* _
     const int warp = threadIdx.x >> 5;
     const int g = lane >> 2;
     const int t = lane & 3;
-    const int n_base = blockIdx.x * kRowsPerBlock;
+    const int n_base = blockIdx.x * kNT * 8;
     const int k_len = K / kWarps;
     const int k_begin = warp * k_len;
 
@@ -134,7 +133,6 @@ __global__ void __launch_bounds__(kThreads) fp8_head_mma_kernel(const uint8_t* _
     const uint4 zero = make_uint4(0u, 0u, 0u, 0u);
     // kU chunks of weights in flight per warp; the tail runs one chunk at a time. Same per-chunk
     // math and chunk order either way.
-    constexpr int kU = 4;
     const int k_end = k_begin + k_len;
     int k0 = k_begin;
     for (; k0 + kU * 64 <= k_end; k0 += kU * 64) {
@@ -146,14 +144,14 @@ __global__ void __launch_bounds__(kThreads) fp8_head_mma_kernel(const uint8_t* _
                 wr[u][j] = w_ok[j] ? __ldcs(wp[j] + ((k0 + 64 * u) >> 4) + t) : zero;
 #pragma unroll
         for (int u = 0; u < kU; ++u)
-            mma_chunk<MT>(acc, wr[u], xp, x_ok, k0 + 64 * u, t);
+            mma_chunk<MT, kNT>(acc, wr[u], xp, x_ok, k0 + 64 * u, t);
     }
     for (; k0 < k_end; k0 += 64) {
         uint4 wr[kNT];
 #pragma unroll
         for (int j = 0; j < kNT; ++j)
             wr[j] = w_ok[j] ? __ldcs(wp[j] + (k0 >> 4) + t) : zero;
-        mma_chunk<MT>(acc, wr, xp, x_ok, k0, t);
+        mma_chunk<MT, kNT>(acc, wr, xp, x_ok, k0, t);
     }
 
     if (warp > 0) {
@@ -198,25 +196,47 @@ __global__ void __launch_bounds__(kThreads) fp8_head_mma_kernel(const uint8_t* _
     }
 }
 
-}  // namespace
-
-bool gemv_fp8_rowscale_fp32(const void* W_fp8, const float* d_row_scales, const half* x, float* y, int M,
-                            int K, int n_rows, cudaStream_t stream) {
+template <int kNT, int kU>
+bool launch_fp8_head(const void* W_fp8, const float* d_row_scales, const half* x, float* y, int M, int K,
+                     int n_rows, cudaStream_t stream) {
     if (!W_fp8 || !d_row_scales || !x || !y || M <= 0 || K <= 0 || (K % (64 * kWarps)) != 0 || n_rows <= 0)
         return false;
     const auto* W = static_cast<const uint8_t*>(W_fp8);
-    const int blocks = (M + kRowsPerBlock - 1) / kRowsPerBlock;
+    const int blocks = (M + kNT * 8 - 1) / (kNT * 8);
     for (int r0 = 0; r0 < n_rows; r0 += kRowsPerPass) {
         const int nb = std::min(kRowsPerPass, n_rows - r0);
         const half* xr = x + static_cast<int64_t>(r0) * K;
         float* yr = y + static_cast<int64_t>(r0) * M;
         if (nb <= 16)
-            fp8_head_mma_kernel<1><<<blocks, kThreads, 0, stream>>>(W, d_row_scales, xr, yr, M, K, nb);
+            fp8_head_mma_kernel<1, kNT, kU>
+                <<<blocks, kThreads, 0, stream>>>(W, d_row_scales, xr, yr, M, K, nb);
         else
-            fp8_head_mma_kernel<2><<<blocks, kThreads, 0, stream>>>(W, d_row_scales, xr, yr, M, K, nb);
+            fp8_head_mma_kernel<2, kNT, kU>
+                <<<blocks, kThreads, 0, stream>>>(W, d_row_scales, xr, yr, M, K, nb);
         IMP_CUDA_CHECK_LAUNCH();
     }
     return true;
+}
+
+}  // namespace
+
+bool gemv_fp8_rowscale_fp32(const void* W_fp8, const float* d_row_scales, const half* x, float* y, int M,
+                            int K, int n_rows, cudaStream_t stream) {
+    return launch_fp8_head<kNTDefault, 2>(W_fp8, d_row_scales, x, y, M, K, n_rows, stream);
+}
+
+// Tuning hook (tests only): kNT * 8 vocab rows per block. Every variant keeps the per-row MMA
+// chain and warp reduction order, so outputs are bit-identical to the default.
+bool gemv_fp8_rowscale_fp32_tuned(const void* W_fp8, const float* d_row_scales, const half* x, float* y,
+                                  int M, int K, int n_rows, int nt, cudaStream_t stream) {
+    switch (nt) {
+        case 4:
+            return launch_fp8_head<4, 4>(W_fp8, d_row_scales, x, y, M, K, n_rows, stream);
+        case 8:
+            return launch_fp8_head<8, 2>(W_fp8, d_row_scales, x, y, M, K, n_rows, stream);
+        default:
+            return false;
+    }
 }
 
 }  // namespace imp

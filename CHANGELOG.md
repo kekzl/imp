@@ -27,6 +27,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - GGUF mode-2 NVFP4 caches (dense, CUTLASS SF, MoE) leave the planned KV pool free and stop at the plan's cache grant, which now counts GGUF MoE experts. Devstral-Small-2-24B Q4_K_M `gemm.nvfp4_decode_all=true`: a 13915-token `--perplexity` failed on KV capacity, now mean NLL 1.8999; tg128 unchanged with a measured library reserve (#2652).
 
 ### Changed
+- FP8 LM head: 64 vocab rows per block instead of 32, halving activation re-reads from L2; bit-identical. Qwen3-14B head at 29 rows 637.5 -> 578.0 us; 32-stream aggregate 3/3 pairs +18.8..+31.1 tok/s (#2680).
 - Q8_0 IMMA prefill: residual-add GEMMs (o_proj, down) get the BM=32 wave tail and read the residual tile up front; bit-identical. Qwen3-8B o_proj M=2048 292.9..293.6 -> 248.8..249.1 us, pp2048 18190..18218 -> 18717..18742 tok/s (#2416, #2675).
 - Q8_0 dense IMMA prefill: 128-K step with ldmatrix, q/k/v share one activation quantize, 16-B quantize loads; bit-identical. pp4096 IMMA vs FP16 route (3 rounds): Qwen3-8B 17014..17354 vs 16138..16332, Qwen3-4B 29357..29494 vs 27986..28253 tok/s (#2416, #2668).
 - FA2 prefill at head_dim 64 (gpt-oss) runs two CTAs per SM under `attention.fa2_dense_2cta` (163 -> 128 regs, 8 B stack, output byte-identical). gpt-oss-20b pp4096: kernel 283.2 -> 246.4 us/call (nsys), e2e 48945 -> 50138 tok/s (median of 5 pairs, 5/5).

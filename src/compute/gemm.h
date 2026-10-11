@@ -60,6 +60,10 @@ void gemv_fp8_rowscale(const Tensor& A, const Tensor& x, Tensor& y, const float*
 // Tensor-core (mma m16n8k16), one weight pass per 32 rows; row bits independent of n_rows. K % 256 == 0.
 [[nodiscard]] bool gemv_fp8_rowscale_fp32(const void* W_fp8, const float* d_row_scales, const half* x, float* y, int M, int K,
                             int n_rows, cudaStream_t stream = nullptr);
+// Tests only: nt * 8 vocab rows per block (nt in {4, 8}; 8 = the default), bit-identical output.
+[[nodiscard]] bool gemv_fp8_rowscale_fp32_tuned(const void* W_fp8, const float* d_row_scales, const half* x,
+                                                float* y, int M, int K, int n_rows, int nt,
+                                                cudaStream_t stream = nullptr);
 
 // Fused quantized GEMV: dequant + dot product in one pass (no intermediate FP16 buffer).
 // W: raw quantized bytes [M rows, K cols], x: [K] FP16, y: [M] FP16.
