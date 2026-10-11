@@ -888,3 +888,25 @@ call on plain chat with Llama-3.2. imp's gap was Llama-3.2 tool calls (fixed).
 **Scope:** three model families, four budgets, 8-turn sessions, 3-5 repetitions,
 one llama.cpp build, GGUF only. vLLM/SGLang not covered (different weight format,
 more VRAM needed).
+
+## Moved from BENCHMARKS.md on 2026-10-11 (superseded by "Qwen3.8-27B, three engines")
+
+## Qwen3.8-27B, the quickstart model
+
+The model the [README](../../README.md) and [`QUICKSTART.md`](../QUICKSTART.md) walk a first-time
+reader through: `imp-quantize` output from the FP8 release (`Qwen/Qwen3.8-27B-FP8`, 28.75 GiB
+in, 18.80 GiB out), which `scripts/stage-model.sh` produces.
+
+[PROV: commit=52efa361 date=2026-08-16 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4-FP8-export
+       cuda=13.3 path=nvfp4-decode cmd=`imp-cli --model <dir> --bench --bench-pp <16|512>
+       --bench-reps 10 --max-tokens 128` n=3-processes]
+
+| metric | tok/s | spread across processes |
+|---|---:|---|
+| decode tg128 | **87.36** | 87.34 / 87.36 / 87.39, 0.06% |
+| prefill pp512 | **7565.65** | 7503 / 7566 / 7577, 0.98% |
+
+Weights land at 17.9 GiB resident, ~7.7 GiB left for KV on a 32 GB card. Bounded by weight
+bandwidth, not the LM head (2.4 GiB of the 17.9, served from the NVFP4 decode cache, a trade
+measured at +10.4% decode for +0.99% perplexity, see [`quantization.md`](../quantization.md)).
+

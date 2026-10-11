@@ -130,24 +130,26 @@ rows, ratios carry that cross-day caveat).
 imp also wins TTFT/pp512 outright (2.1-3.4x, vLLM has a flat-cost small-M regime). Decode
 (tg256 @ctx2048): 14B 159, 30B-A3B ~317.
 
-## Qwen3.8-27B, the quickstart model
+## Qwen3.8-27B, three engines
 
-The model the [README](../README.md) and [`QUICKSTART.md`](QUICKSTART.md) walk a first-time
-reader through: `imp-quantize` output from the FP8 release (`Qwen/Qwen3.8-27B-FP8`, 28.75 GiB
-in, 18.80 GiB out), which `scripts/stage-model.sh` produces.
+Fresh server per arm, each engine on its defaults (imp `--max-concurrent N --set runtime.max_batch_size=N`,
+vLLM `--max-num-seqs N --max-model-len 16384`, llama.cpp `-ngl 999 -fa on -np N -c N*4096`), 300-token
+greedy answers with `ignore_eos`, aggregate = completion tokens / wall, values = the two trial medians.
 
-[PROV: commit=52efa361 date=2026-08-16 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4-FP8-export
-       cuda=13.3 path=nvfp4-decode cmd=`imp-cli --model <dir> --bench --bench-pp <16|512>
-       --bench-reps 10 --max-tokens 128` n=3-processes]
+[PROV: commit=54921da6 date=2026-10-11 hw=RTX5090 model=Qwen3.8-27B quant=per-row cuda=13.4.2
+       path=server-api cmd=`tools/analysis/engine3_conc.sh` n=2 trials x 3 waves note=vllm/vllm-openai:v0.31.0
+       sha256 c1c9f6fd, ghcr.io/ggml-org/llama.cpp:server-cuda sha256 9d835c2f, GGUF ggml-org Q4_K_M sha256 c600de03]
 
-| metric | tok/s | spread across processes |
-|---|---:|---|
-| decode tg128 | **87.36** | 87.34 / 87.36 / 87.39, 0.06% |
-| prefill pp512 | **7565.65** | 7503 / 7566 / 7577, 0.98% |
+| engine | checkpoint | 1 stream tok/s | 32 streams tok/s |
+|---|---|---:|---:|
+| imp | Qwen3.8-27B-NVFP4-vllm | **91.0 / 93.7** | **1977.0 / 1963.5** |
+| vLLM 0.31.0 | Qwen3.8-27B-NVFP4-vllm | 70.0 / 68.9 | 1449.4 / 1354.8 |
+| llama.cpp | Qwen3.8-27B-Q4_K_M.gguf | 63.0 / 61.8 | 166.8 / 162.0 |
+| imp | Qwen3.8-27B-Q4_K_M.gguf | 58.0 / 60.7 | 107.4 / 107.0 |
 
-Weights land at 17.9 GiB resident, ~7.7 GiB left for KV on a 32 GB card. Bounded by weight
-bandwidth, not the LM head (2.4 GiB of the 17.9, served from the NVFP4 decode cache, a trade
-measured at +10.4% decode for +0.99% perplexity, see [`quantization.md`](quantization.md)).
+imp on the GGUF holds 7 recurrent slots at 19822.3 MiB of weights and a batch-7 step costs ~4x a batch-1
+step ([#2688](https://github.com/kekzl/imp/issues/2688)). Unsloth's `UD-Q4_K_M` does not load: 4 IQ3_S
+tensors ([#2687](https://github.com/kekzl/imp/issues/2687)).
 
 ## imp vs vLLM at concurrency
 
