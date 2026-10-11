@@ -127,6 +127,49 @@ TEST(MmqQ8Imma, K128StepRowsBitIdenticalToK64) {
     mmq_q8_imma_release_all();
 }
 
+// #2416 beta 1 with the wave tail (o_proj shape, M=2048: 15 BM=128 row-blocks + BM=32 rows 1920..2047):
+// every element equals __hadd(C, beta-0 result).
+TEST(MmqQ8Imma, WaveTailBeta1IsHaddOfBeta0) {
+    const int N = 4096, K = 1024, M = 2048;
+    std::vector<uint8_t> W;
+    gen_q8_weight(W, N, K, 31);
+    std::vector<__half> x((size_t)M * K), c((size_t)M * N);
+    std::mt19937 rng(31);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    for (auto& v : x)
+        v = __float2half(nd(rng));
+    for (auto& v : c)
+        v = __float2half(nd(rng));
+    uint8_t* d_w = nullptr;
+    __half *d_x = nullptr, *d_b = nullptr, *d_c = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_w, W.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_x, x.size() * sizeof(__half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_b, c.size() * sizeof(__half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_c, c.size() * sizeof(__half)), cudaSuccess);
+    cudaMemcpy(d_w, W.data(), W.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x, x.data(), x.size() * sizeof(__half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_c, c.data(), c.size() * sizeof(__half), cudaMemcpyHostToDevice);
+    ASSERT_TRUE(mmq_q8_imma_gemm(d_w, d_x, d_b, M, N, K, nullptr, 0.0f, false));
+    ASSERT_TRUE(mmq_q8_imma_gemm(d_w, d_x, d_c, M, N, K, nullptr, 1.0f, false));
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<__half> b(c.size()), cb(c.size());
+    cudaMemcpy(b.data(), d_b, b.size() * 2, cudaMemcpyDeviceToHost);
+    cudaMemcpy(cb.data(), d_c, cb.size() * 2, cudaMemcpyDeviceToHost);
+    size_t diff_head = 0, diff_tail = 0;
+    for (size_t i = 0; i < c.size(); i++) {
+        const __half want = __hadd(c[i], b[i]);
+        if (std::memcmp(&want, &cb[i], 2) != 0)
+            (i >= (size_t)1920 * N ? diff_tail : diff_head)++;
+    }
+    EXPECT_EQ(diff_head, 0u) << "BM=128 rows: beta 1 != C + beta-0";
+    EXPECT_EQ(diff_tail, 0u) << "BM=32 tail rows: beta 1 != C + beta-0";
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_b);
+    cudaFree(d_c);
+    mmq_q8_imma_release_all();
+}
+
 // #2416 q/k/v quantize reuse: reuse_act skips only a quantize of the same (x, M, K) since the last
 // mmq_imma_act_forget(). Same pointer, new content after a forget must re-quantize (a workspace reused
 // across layers served layer-1 activations otherwise).
