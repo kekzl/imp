@@ -106,6 +106,12 @@ constexpr size_t q4k_smem_bytes(int BM) {
             static_cast<size_t>(BM) * kQ4kSub * sizeof(__half));
 }
 
+// Q8_0 dense plane GEMM, 128-K step (mmq_q8_imma_k128.cu). bm 32 or 128 (beta1 only at 128);
+// false = shape or smem opt-in unsupported, nothing launched.
+[[nodiscard]] bool launch_q8_k128(const int8_t* xs8, const __half* xscale, const int8_t* w_qs,
+                                  const __half* w_sc, __half* out, int M, int N, int K, int bm, bool beta1,
+                                  dim3 grid, cudaStream_t stream);
+
 constexpr size_t q6k_smem_bytes(int BM) {
     return static_cast<size_t>(kStages) *
            (static_cast<size_t>(BM) * kRow + static_cast<size_t>(kBN) * kQlRow +

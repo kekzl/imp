@@ -275,6 +275,14 @@
                         (ly.wv.data == nullptr || prefill_routes_cutlass_nvfp4_(ly.wv_id, n))) {
                         kv_ctx = ctx.with_act_quant_hint(no.data, n,
                                                          static_cast<int>(no.shape[1]));
+                    } else if (n > 32 && ctx.q8_imma_enabled && ly.wv.data != nullptr &&
+                               registry_.handle(ly.wq_id).source_qtype == QType::Q8_0 &&
+                               registry_.handle(ly.wk_id).source_qtype == QType::Q8_0 &&
+                               registry_.handle(ly.wv_id).source_qtype == QType::Q8_0) {
+                        // Q8_0 IMMA prefill: same dedupe through the IMMA activation scratch. The tag is
+                        // cleared first, so k/v reuse only a quantize q's own dispatch wrote (#2416).
+                        mmq_imma_act_forget();
+                        kv_ctx = ctx.with_act_quant_hint(no.data, n, static_cast<int>(no.shape[1]));
                     }
                     // Batched decode on the small-M NVFP4 path: q|k|v as one
                     // launch (the 16-tile k/v shapes ride q's wave instead of
