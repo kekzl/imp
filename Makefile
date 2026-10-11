@@ -178,7 +178,7 @@ test-gpu-suite:
 	@# until 2026-09-05 and ran "0 tests, PASSED" on every commit
 	@# (AUDIT_arch_2026 I-7; guard_makefile_filters now pins every filter here).
 	docker run --rm -v $(HOME)/models:/models \
-		-e IMP_TEST_MODEL_QWEN38=/models/Qwen3.8-27B \
+		-e IMP_TEST_MODEL_QWEN38=/models/Qwen3.8-27B-NVFP4-vllm \
 		$(DOCKER_IMG) test-e2e --gtest_filter="*Qwen38TokenizerParity*"
 	@# Everything else that reads IMP_TEST_MODEL* skips here by design: this
 	@# target carries no model env (DOCKER_RUN has none), so "full suite" means
