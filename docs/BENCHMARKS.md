@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-09
-commit: 7e720263
+verified: 2026-10-11
+commit: 54921da6
 -->
 
 # Benchmarks
@@ -35,17 +35,17 @@ against llama.cpp defaults, full offload, flash attention on.
 
 | Model (shared quant) | imp default | imp spec-off | llama.cpp | imp lead |
 |---|---:|---:|---:|---:|
-| Qwen3-8B Q8_0 | **385.4** | 284.6 | 160.1 | +141% (+78% spec-off) |
-| Qwen3-14B Q6_K | **162.5** | | 114.8 | +42% |
-| Qwen3.6-35B-A3B UD-Q4_K_M | **287.9** | | 235.8 | +22% |
-| gpt-oss-20b MXFP4 | **382.7** | | 335.9 | +14% |
-| Gemma-4-26B-A4B UD-Q4_K_M | **245.0** | | 214.4 | +14% |
-| Qwen3-30B-A3B Q4_K_M (non-hero) | 305.5 | | 295.7 | +3% |
+| Qwen3-8B Q8_0 | **397.51** | 278.42 | 152.74 | +160% (+82% spec-off) |
+| Qwen3-14B Q6_K | **167.43** | 168.65 | 112.84 | +48% (+49% spec-off) |
+| Qwen3.6-35B-A3B UD-Q4_K_M | **317.41** | 319.01 | 220.09 | +44% (+45% spec-off) |
+| Gemma-4-26B-A4B UD-Q4_K_M | **262.71** | 262.32 | 212.49 | +24% (+23% spec-off) |
+| gpt-oss-20b MXFP4 | **391.52** | 397.67 | 317.11 | +23% (+25% spec-off) |
+| Qwen3-30B-A3B Q4_K_M (non-hero) | 357.23 | 359.23 | 303.53 | +18% (+18% spec-off) |
 
-[PROV: commit=83cb5178 date=2026-08-30 hw=RTX5090 model=six-model-sweep quant=per-row cuda=13.3
-       path=gguf cmd=`make bench-competitive` n=6x2 note=imp defaults vs llama.cpp defaults, full
-       offload, flash attention on; spec-off measured for Qwen3-8B only
-       (`--set speculative.ngram=false`)]
+[PROV: commit=54921da6 date=2026-10-11 hw=RTX5090 model=six-model-sweep quant=per-row cuda=13.4.2
+       path=gguf cmd=`make bench-competitive` (v0.51.0 release gate, 11 idle service containers up)
+       note=imp defaults vs llama.cpp defaults, full offload, flash attention on; spec-off =
+       `--set speculative.ngram=false`. Previous sweep 83cb5178 (2026-08-30): Qwen3-8B 385.4 vs 160.1]
 
 The spec-off column exists because `imp-cli --bench` builds a strictly-increasing synthetic
 prompt (`tools/imp-cli/mode_bench.cpp:34 tokens[i] = i % vocab_size`) that the n-gram drafter's own generation can loop

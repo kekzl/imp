@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
-"""Regenerate the <!-- PERF:BEGIN --> blocks from the pinned baseline.
+"""Regenerate the <!-- PERF:BEGIN --> block in docs/PERF.md from tests/perf_baseline.json.
 
-The dispatch specifies `benchmarks/results/*.json` as the source. That directory
-does not exist in this tree; the pinned, CI-defended figures live in
-`tests/perf_baseline.json`, which is also what `make verify-fast` compares
-against. Generating from anywhere else would let the README and the gate drift
-apart, which is the exact failure the generated block is meant to prevent.
+Source is the file `make verify-fast` compares against, so the doc and the gate cannot drift.
 
 Usage:  python3 scripts/sync_docs.py [--check]
 """
@@ -18,7 +14,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "tests" / "perf_baseline.json"
-TARGETS = ["README.md", "docs/PERF.md"]
+TARGETS = ["docs/PERF.md"]
 
 BEGIN = "<!-- PERF:BEGIN -->"
 END = "<!-- PERF:END -->"
