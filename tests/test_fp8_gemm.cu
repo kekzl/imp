@@ -411,7 +411,7 @@ TEST_F(FP8GemmTest, RowscaleFp32HeadMatchesReferenceAndIsRowCountInvariant) {
         }
     }
     // Every row-tile variant reproduces the default bits (same per-row MMA chain).
-    for (int nt : {8}) {
+    for (int nt : {4}) {
         std::vector<float> out(y_elems);
         cudaMemset(d_y, 0xff, y_elems * sizeof(float));
         for (int r = 0; r < N; r += 32)

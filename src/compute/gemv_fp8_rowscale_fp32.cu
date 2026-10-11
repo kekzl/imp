@@ -18,7 +18,7 @@ namespace {
 
 constexpr int kWarps = 4;
 constexpr int kThreads = kWarps * 32;
-constexpr int kNTDefault = 4;     // n8 tiles per block (every warp): 32 vocab rows
+constexpr int kNTDefault = 8;     // n8 tiles per block: 64 vocab rows (32: 637.5 -> 578.0 us, #2680)
 constexpr int kRowsPerPass = 32;  // activation rows per launch (2 m16 tiles)
 
 __device__ __forceinline__ uint32_t e4m3x2_to_f16x2(uint32_t two_codes) {
@@ -222,7 +222,7 @@ bool launch_fp8_head(const void* W_fp8, const float* d_row_scales, const half* x
 
 bool gemv_fp8_rowscale_fp32(const void* W_fp8, const float* d_row_scales, const half* x, float* y, int M,
                             int K, int n_rows, cudaStream_t stream) {
-    return launch_fp8_head<kNTDefault, 4>(W_fp8, d_row_scales, x, y, M, K, n_rows, stream);
+    return launch_fp8_head<kNTDefault, 2>(W_fp8, d_row_scales, x, y, M, K, n_rows, stream);
 }
 
 // Tuning hook (tests only): kNT * 8 vocab rows per block. Every variant keeps the per-row MMA
