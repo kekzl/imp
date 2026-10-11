@@ -570,4 +570,145 @@ TEST_F(NvFP4SmallMV2Test, RepeatedLaunchesBitwiseStable) {
     }
 }
 
+__global__ void ring_read_kernel(const uint4* __restrict__ src, size_t n, uint4* __restrict__ sink) {
+    uint4 acc = make_uint4(0u, 0u, 0u, 0u);
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
+         i += (size_t)gridDim.x * blockDim.x) {
+        const uint4 v = __ldcs(src + i);
+        acc.x ^= v.x;
+        acc.y ^= v.y;
+        acc.z ^= v.z;
+        acc.w ^= v.w;
+    }
+    if ((acc.x ^ acc.y ^ acc.z ^ acc.w) == 0x12345678u)
+        *sink = acc;
+}
+
+// Pure-read ceiling per launch size: the same bytes as each GEMM, 8-copy ring, back-to-back launches.
+TEST_F(NvFP4SmallMV2Test, RingReadCeiling) {
+    if (getenv("IMP_SMALLM_V2_SWEEP") == nullptr)
+        GTEST_SKIP() << "set IMP_SMALLM_V2_SWEEP=1 to run the ring sweep";
+    constexpr int kRing = 8;
+    const size_t sizes[] = {(size_t)5120 * 5120 * 9 / 16, (size_t)5120 * 17408 * 9 / 16,
+                            (size_t)7168 * 5120 * 9 / 16, (size_t)34816 * 5120 * 9 / 16};
+    uint4* sink = nullptr;
+    ASSERT_EQ(cudaMalloc(&sink, sizeof(uint4)), cudaSuccess);
+    cudaEvent_t t0, t1;
+    cudaEventCreate(&t0);
+    cudaEventCreate(&t1);
+    for (size_t bytes : sizes) {
+        std::vector<void*> ring(kRing);
+        for (auto& p : ring) {
+            ASSERT_EQ(cudaMalloc(&p, bytes), cudaSuccess);
+            ASSERT_EQ(cudaMemset(p, 1, bytes), cudaSuccess);
+        }
+        const size_t n = bytes / 16;
+        for (int blocks : {80, 170, 340, 680}) {
+            auto call = [&](int i) {
+                ring_read_kernel<<<blocks, 512>>>(static_cast<const uint4*>(ring[i % kRing]), n, sink);
+            };
+            for (int i = 0; i < 4000; ++i)
+                call(i);
+            double best = 1e30;
+            for (int r = 0; r < 5; ++r) {
+                float ms = 0.0f;
+                cudaEventRecord(t0);
+                for (int i = 0; i < 800; ++i)
+                    call(i);
+                cudaEventRecord(t1);
+                ASSERT_EQ(cudaEventSynchronize(t1), cudaSuccess);
+                cudaEventElapsedTime(&ms, t0, t1);
+                best = std::min(best, ms * 1000.0 / 800);
+            }
+            printf("[ READ     ] %.1f MB blocks=%d: %.2f us/call, %.0f GB/s, floor %.2f us\n", bytes / 1e6,
+                   blocks, best, bytes / best / 1e3, bytes / 1628e3);
+        }
+        for (auto p : ring)
+            cudaFree(p);
+    }
+    cudaFree(sink);
+    cudaEventDestroy(t0);
+    cudaEventDestroy(t1);
+}
+
+// DRAM-resident sweep over the Qwen3-14B decode shapes (#2414): 8 weight copies rotate so no
+// launch reads L2-resident weights; reports us/call and GB/s against the 1628 GB/s floor.
+TEST_F(NvFP4SmallMV2Test, RingSweepQwen3_14B) {
+    if (getenv("IMP_SMALLM_V2_SWEEP") == nullptr)
+        GTEST_SKIP() << "set IMP_SMALLM_V2_SWEEP=1 to run the ring sweep";
+    const int M = getenv("IMP_SMALLM_V2_M") ? atoi(getenv("IMP_SMALLM_V2_M")) : 29;
+    constexpr int kRing = 8;
+    struct Shape {
+        const char* name;
+        int N, K;
+    };
+    const Shape shapes[] = {{"o", 5120, 5120},
+                            {"down", 5120, 17408},
+                            {"qkv", 7168, 5120},
+                            {"gate|up", 34816, 5120}};
+    cudaEvent_t t0, t1;
+    cudaEventCreate(&t0);
+    cudaEventCreate(&t1);
+    for (const Shape& sh : shapes) {
+        std::mt19937 rng(23);
+        std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+        std::vector<__half> w_h((size_t)sh.N * sh.K), x_h((size_t)M * sh.K);
+        for (auto& v : w_h)
+            v = __float2half(dist(rng));
+        for (auto& v : x_h)
+            v = __float2half(dist(rng));
+        DeviceQuant W, X;
+        W.quantize(w_h, sh.N, sh.K);
+        X.quantize(x_h, M, sh.K);
+        const size_t pb = (size_t)sh.N * sh.K / 2, sb = (size_t)sh.N * sh.K / 16;
+        imp::NvFP4QuantResult ring[kRing];
+        for (auto& r : ring) {
+            r = W.q;
+            r.owned = false;
+            ASSERT_EQ(cudaMalloc(&r.packed_data, pb), cudaSuccess);
+            ASSERT_EQ(cudaMalloc(&r.micro_scales, sb), cudaSuccess);
+            ASSERT_EQ(cudaMemcpy(r.packed_data, W.q.packed_data, pb, cudaMemcpyDeviceToDevice), cudaSuccess);
+            ASSERT_EQ(cudaMemcpy(r.micro_scales, W.q.micro_scales, sb, cudaMemcpyDeviceToDevice),
+                      cudaSuccess);
+        }
+        void *d_y = nullptr, *d_ws = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_y, (size_t)M * sh.N * sizeof(__half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_ws, (size_t)8 * 32 * sh.N * sizeof(float)), cudaSuccess);
+        const double floor_us = (double)(pb + sb) / 1628e9 * 1e6;
+        for (int sp : {1, 2, 4}) {
+            if (sp > 1 && sh.N / 64 >= 160)
+                continue;
+            auto call = [&](int i) {
+                return imp::gemm_nvfp4_smallm_v2_a4_tuned(ring[i % kRing], X.q, static_cast<half*>(d_y), M,
+                                                          sh.N, sh.K, d_ws, nullptr, false, 6, sp);
+            };
+            for (int i = 0; i < 4000; ++i)  // >1 s clock ramp
+                ASSERT_TRUE(call(i));
+            double best = 1e30;
+            for (int r = 0; r < 5; ++r) {
+                float ms = 0.0f;
+                cudaEventRecord(t0);
+                for (int i = 0; i < 800; ++i)
+                    (void)call(i);  // timing loop: launch status is not under test
+                cudaEventRecord(t1);
+                ASSERT_EQ(cudaEventSynchronize(t1), cudaSuccess);
+                cudaEventElapsedTime(&ms, t0, t1);
+                best = std::min(best, ms * 1000.0 / 800);
+            }
+            printf(
+                "[ RING     ] %-7s M=%d N=%d K=%d stripes=%d ctas=%d: %.2f us/call, %.0f GB/s, floor %.2f "
+                "us\n",
+                sh.name, M, sh.N, sh.K, sp, sh.N / 64 * sp, best, (pb + sb) / best / 1e3, floor_us);
+        }
+        for (auto& r : ring) {
+            cudaFree(r.packed_data);
+            cudaFree(r.micro_scales);
+        }
+        cudaFree(d_y);
+        cudaFree(d_ws);
+    }
+    cudaEventDestroy(t0);
+    cudaEventDestroy(t1);
+}
+
 }  // namespace
