@@ -46,7 +46,7 @@ Bump `verified:`/`commit:` on every content edit. Legacy `---` YAML still accept
 
 | Information | Owner |
 |---|---|
-| any number | `docs/PERF.md` (README embeds a GENERATED extract) |
+| any number | `docs/PERF.md` (its PERF block is GENERATED) |
 | what exists, with status | `docs/FEATURES.md` |
 | what does not / untested | `docs/LIMITATIONS.md` |
 | absent on purpose | `docs/DESIGN_DECISIONS.md` |
@@ -61,7 +61,7 @@ L0/L1 throughput figures carry `[PROV: commit=<sha7> date=<YYYY-MM-DD> hw=RTX509
 
 ## Generated blocks
 
-`README.md` and `docs/PERF.md` `<!-- PERF:BEGIN -->` / `<!-- PERF:END -->`: hand edits fail CI. `python3 scripts/sync_docs.py` regenerates from `tests/perf_baseline.json`; `--check` is what CI runs.
+`docs/PERF.md` `<!-- PERF:BEGIN -->` / `<!-- PERF:END -->`: hand edits fail CI. `python3 scripts/sync_docs.py` regenerates from `tests/perf_baseline.json`; `--check` is what CI runs.
 
 ## Before you push
 

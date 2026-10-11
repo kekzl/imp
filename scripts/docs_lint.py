@@ -433,7 +433,7 @@ def check_generated_blocks(errors: list) -> None:
         return
     data = json.loads(BASELINE.read_text())
     decode = data["metrics"]["decode_tps"]["tg128"]
-    for rel in ("README.md", "docs/PERF.md"):
+    for rel in ("docs/PERF.md",):
         path = ROOT / rel
         if not path.exists():
             continue
