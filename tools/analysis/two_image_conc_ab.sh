@@ -4,7 +4,7 @@
 # The "two-image A/B" of the benchmark-cuda skill for a CODE change (vs smallm_v2_conc_ab.sh,
 # which flips a config flag on one image).
 # Usage: IMG_A=imp:ab-base IMG_B=imp:test bash tools/analysis/two_image_conc_ab.sh
-# [CONC=32] [TRIALS=3] [WAVES=3] [EXTRA="--set x=y"].
+# [CONC=32] [TRIALS=3] [WAVES=3] [PLEN=filler prompt tokens] [EXTRA="--set x=y"].
 set -u
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -47,7 +47,7 @@ run_arm() {  # $1 = arm name, $2 = image, $3 = trial
     start_server "$2" || exit 3
     echo "== arm $1 ($2) trial $3 ==" | tee -a "$LOG"
     docker run --rm --network host -e MODEL_NAME="$(basename "$MODEL")" -v "$HERE:/h:ro" python:3.12-slim \
-        python /h/conc_client.py $PORT $CONC $WAVES "$1$3" 2>&1 | tee -a "$LOG"
+        python /h/conc_client.py $PORT $CONC $WAVES "$1$3" ${PLEN:-} 2>&1 | tee -a "$LOG"
     docker rm -f imp-ab2 >/dev/null 2>&1
     sleep 3
 }
