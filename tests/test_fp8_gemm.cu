@@ -410,12 +410,72 @@ TEST_F(FP8GemmTest, RowscaleFp32HeadMatchesReferenceAndIsRowCountInvariant) {
             max_rel = std::max(max_rel, std::fabs(got - acc) / std::max(mag, 1e-30));
         }
     }
+    // Every row-tile variant reproduces the default bits (same per-row MMA chain).
+    for (int nt : {8}) {
+        std::vector<float> out(y_elems);
+        cudaMemset(d_y, 0xff, y_elems * sizeof(float));
+        for (int r = 0; r < N; r += 32)
+            EXPECT_TRUE(gemv_fp8_rowscale_fp32_tuned(d_q, d_s, hx + static_cast<size_t>(r) * K,
+                                                     d_y + static_cast<size_t>(r) * M, M, K,
+                                                     std::min(32, N - r), nt, stream_));
+        EXPECT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+        cudaMemcpy(out.data(), d_y, y_elems * sizeof(float), cudaMemcpyDeviceToHost);
+        EXPECT_EQ(0, std::memcmp(all.data(), out.data(), y_elems * sizeof(float))) << "nt=" << nt;
+    }
     printf("[fp8 head mma] M=%d K=%d N=%d max_rel=%.3e\n", M, K, N, max_rel);
     EXPECT_TRUE(finite) << "unwritten or non-finite logit";
     // FP32 accumulation over K=2560 terms: error <= ~K * 2^-24 of sum|w*x| (1.5e-4); layout bugs are O(1).
     EXPECT_LT(max_rel, 1.5e-4) << "FP8 head GEMM diverges from the fp64 dot over its own codes";
     for (void* p : {d_w, d_q, d_x})
         cudaFree(p);
+    cudaFree(d_s);
+    cudaFree(d_y);
+}
+
+// Qwen3-14B FP8 head (151936 x 5120, 778 MB > L2) at 29 rows: us/call per row tile vs 1628 GB/s.
+TEST_F(FP8GemmTest, RowscaleFp32HeadRowTileSweep) {
+    if (getenv("IMP_FP8_HEAD_SWEEP") == nullptr)
+        GTEST_SKIP() << "set IMP_FP8_HEAD_SWEEP=1 to run the head sweep";
+    constexpr int M = 151936, K = 5120;
+    const int N = getenv("IMP_FP8_HEAD_ROWS") ? atoi(getenv("IMP_FP8_HEAD_ROWS")) : 29;
+    void *d_w = nullptr, *d_q = nullptr, *d_x = nullptr;
+    float *d_s = nullptr, *d_y = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_w, static_cast<size_t>(M) * K * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_q, static_cast<size_t>(M) * K), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_x, static_cast<size_t>(N) * K * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_s, M * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_y, static_cast<size_t>(N) * M * sizeof(float)), cudaSuccess);
+    cudaMemset(d_w, 0x2a, static_cast<size_t>(M) * K * sizeof(half));
+    cudaMemset(d_x, 0x2a, static_cast<size_t>(N) * K * sizeof(half));
+    quantize_fp8_rows_async(d_w, d_q, M, K, d_s, stream_);
+    cudaFree(d_w);
+    const half* hx = static_cast<const half*>(d_x);
+    const double floor_us = (static_cast<double>(M) * K + M * 4.0) / 1628e3;
+    cudaEvent_t t0, t1;
+    cudaEventCreate(&t0);
+    cudaEventCreate(&t1);
+    for (int nt : {4, 8}) {
+        for (int i = 0; i < 2000; ++i)  // >1 s clock ramp
+            ASSERT_TRUE(gemv_fp8_rowscale_fp32_tuned(d_q, d_s, hx, d_y, M, K, N, nt, stream_));
+        double best = 1e30;
+        for (int r = 0; r < 5; ++r) {
+            float ms = 0.0f;
+            cudaEventRecord(t0, stream_);
+            for (int i = 0; i < 200; ++i)
+                (void)gemv_fp8_rowscale_fp32_tuned(d_q, d_s, hx, d_y, M, K, N, nt, stream_);  // timing loop
+            cudaEventRecord(t1, stream_);
+            ASSERT_EQ(cudaEventSynchronize(t1), cudaSuccess);
+            cudaEventElapsedTime(&ms, t0, t1);
+            best = std::min(best, ms * 1000.0 / 200);
+        }
+        printf(
+            "[ HEAD     ] M=%d K=%d rows=%d nt=%d (%d rows/block): %.1f us/call, %.0f GB/s, floor %.1f us\n",
+            M, K, N, nt, nt * 8, best, (static_cast<double>(M) * K + M * 4.0) / best / 1e3, floor_us);
+    }
+    cudaEventDestroy(t0);
+    cudaEventDestroy(t1);
+    cudaFree(d_q);
+    cudaFree(d_x);
     cudaFree(d_s);
     cudaFree(d_y);
 }
