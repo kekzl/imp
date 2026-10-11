@@ -348,6 +348,41 @@ bool raw_imma_set(int qkind, RawImmaSet& s) {
     return ensure_raw_smem(q5k ? smem_set5 : smem_set4, s.k32, s.k128b, s.k128, s.smem32, s.smem128);
 }
 
+// Row-blocks of a dense grid that run as BM=128 tiles; the rest (a last wave under half full, at most one
+// BM=32 CTA per SM) runs as BM=32 tiles (#2416).
+int q8_rows_big(dim3 grid, int M, int n_sms) {
+    const int tiles = static_cast<int>(grid.x * grid.y);
+    const int tail = n_sms > 0 ? tiles % n_sms : 0;
+    int rb_big = static_cast<int>(grid.y);
+    if (tiles > n_sms && tail != 0 && 2 * tail <= n_sms)
+        rb_big = (tiles - tail) / static_cast<int>(grid.x);
+    // More than one BM=32 CTA per SM costs a full wave again (M=2176: 293 -> 296 us).
+    if ((static_cast<int>(grid.y) - rb_big) * static_cast<int>(grid.x) * 4 > n_sms)
+        rb_big = static_cast<int>(grid.y);
+    return std::min(M, rb_big * 128);
+}
+
+// Dense 128-K launch with the BM=32 wave tail, beta 0 or 1; false = refused, nothing launched.
+bool launch_q8_k128_split(const WeightPlanes& w, __half* out_f16, int M, int N, int K, dim3 grid, int n_sms,
+                          bool beta1, cudaStream_t stream) {
+    const int rows_big = q8_rows_big(grid, M, n_sms);
+    const dim3 gbig(grid.x, (rows_big + 127) / 128, 1);
+    if (!launch_q8_k128(g_imma_act.xs8, g_imma_act.xscale, w.qs, w.sc, out_f16, rows_big, N, K, 128, beta1,
+                        gbig, stream))
+        return false;
+    if (rows_big < M) {
+        const size_t subs = static_cast<size_t>(K) / 32;
+        const int rows_small = M - rows_big;
+        const dim3 g32(grid.x, (rows_small + 31) / 32, 1);
+        if (!launch_q8_k128(g_imma_act.xs8 + static_cast<size_t>(rows_big) * K,
+                            g_imma_act.xscale + rows_big * subs, w.qs, w.sc,
+                            out_f16 + static_cast<size_t>(rows_big) * N, rows_small, N, K, 32, beta1, g32,
+                            stream))
+            IMP_LOG_ERROR("mmq imma q8 k128: BM=32 tail launch refused after the BM=128 launch");
+    }
+    return true;
+}
+
 // Q8_0 plane launch, BM=128, beta 0. Wave tail (#2416): a dense last wave under half full (M=2048 q_o: 512
 // tiles = 3 x 170 + 2) runs its trailing row-blocks as BM=32 tiles; per output the k order is unchanged, so
 // rows are bit-identical at any M (#2152). q_o M=2048: 294.2..298.6 -> 262.0..263.2 us.
@@ -367,15 +402,8 @@ void launch_q8_plane_dense(const WeightPlanes& w, __half* out_f16, int M, int N,
     const size_t subs = static_cast<size_t>(K) / 32;
     const int rows_small = M - rows_big;
     const dim3 g32(grid.x, (rows_small + 31) / 32, ne);
-    if (d_offsets == nullptr && launch_q8_k128(g_imma_act.xs8, g_imma_act.xscale, w.qs, w.sc, out_f16,
-                                               rows_big, N, K, 128, false, gbig, stream)) {
-        if (rows_big < M && !launch_q8_k128(g_imma_act.xs8 + static_cast<size_t>(rows_big) * K,
-                                            g_imma_act.xscale + rows_big * subs, w.qs, w.sc,
-                                            out_f16 + static_cast<size_t>(rows_big) * N, rows_small, N, K, 32,
-                                            false, g32, stream))
-            IMP_LOG_ERROR("mmq imma q8 k128: BM=32 tail launch refused after the BM=128 launch");
+    if (d_offsets == nullptr && launch_q8_k128_split(w, out_f16, M, N, K, grid, n_sms, false, stream))
         return;
-    }
     mmq_imma_kernel<128, false, false>
         <<<gbig, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
                                         out_f16, rows_big, N, K, d_offsets, w_stride, wsc_stride);
@@ -492,8 +520,7 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
                                            out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (beta == 1.0f) {
-        if (d_offsets == nullptr && launch_q8_k128(g_imma_act.xs8, g_imma_act.xscale, w.qs, w.sc, out_f16, M,
-                                                   N, K, 128, true, grid, stream))
+        if (d_offsets == nullptr && launch_q8_k128_split(w, out_f16, M, N, K, grid, n_sms, true, stream))
             return true;
         mmq_imma_kernel<128, true, false>
             <<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,

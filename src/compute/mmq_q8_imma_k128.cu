@@ -56,6 +56,51 @@ __device__ __forceinline__ void load_kstep_q8k128(
                        (base_n_rows < 0) || (i < base_n_rows));
 }
 
+// Fragment layout of a thread's accumulators: rows row0 + mf * 16 (+8), cols col0 + nf * 8 (+1).
+template <int MF, int NF>
+__device__ __forceinline__ void load_residual(__half2 (&cres)[MF][NF][2], const __half* __restrict__ out,
+                                              int row0, int col0, int M, int N) {
+#pragma unroll
+    for (int mf = 0; mf < MF; ++mf) {
+        const int r = row0 + mf * 16;
+#pragma unroll
+        for (int nf = 0; nf < NF; ++nf) {
+            const int col = col0 + nf * 8;
+            const bool cok = col + 1 < N;
+            cres[mf][nf][0] = cok && r < M
+                                  ? *reinterpret_cast<const __half2*>(&out[static_cast<size_t>(r) * N + col])
+                                  : __half2{};
+            cres[mf][nf][1] = cok && r + 8 < M ? *reinterpret_cast<const __half2*>(
+                                                     &out[static_cast<size_t>(r + 8) * N + col])
+                                               : __half2{};
+        }
+    }
+}
+
+// FP16 store, M-tail predicated (N is a multiple of kBN); beta 1 adds the prefetched residual.
+template <int MF, int NF, bool BETA1>
+__device__ __forceinline__ void store_tile(const float (&acc)[MF][NF][4], const __half2 (&cres)[MF][NF][2],
+                                           __half* __restrict__ out, int row0, int col0, int M, int N) {
+#pragma unroll
+    for (int mf = 0; mf < MF; ++mf) {
+#pragma unroll
+        for (int nf = 0; nf < NF; ++nf) {
+            const int col = col0 + nf * 8;
+            if (col + 1 >= N)
+                continue;
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int r = row0 + mf * 16 + h * 8;
+                if (r >= M)
+                    continue;
+                const __half2 v = __floats2half2_rn(acc[mf][nf][2 * h], acc[mf][nf][2 * h + 1]);
+                *reinterpret_cast<__half2*>(
+                    &out[static_cast<size_t>(r) * N + col]) = BETA1 ? __hadd2(cres[mf][nf][h], v) : v;
+            }
+        }
+    }
+}
+
 template <int BM, bool BETA1>
 __global__ void __launch_bounds__(kThreads) mmq_imma_q8k128_kernel(
     const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale, const int8_t* __restrict__ W_s8,
@@ -103,6 +148,13 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q8k128_kernel(
 #pragma unroll
         for (int j = 0; j < kNF; ++j)
             acc[i][j][0] = acc[i][j][1] = acc[i][j][2] = acc[i][j][3] = 0.0f;
+    // This thread's fragment origin in the output: rows row0 + mf * 16 (+8), cols col0 + nf * 8 (+1).
+    const int row0 = base_m + warp_m * kTileM + rl;
+    const int col0 = base_n + warp_n * kTileN + cl * 2;
+    // beta 1: the residual tile is read up front, its latency hidden under the K loop (same __hadd2 below).
+    __half2 cres[kMF][kNF][2];
+    if constexpr (BETA1)
+        load_residual<kMF, kNF>(cres, out, row0, col0, M, N);
 
     const int ksteps = K / kK8BK;
     load_kstep_q8k128<BM>(tid, X_s8, x_scale, B, Bsc, sA[0], sB[0], sAsc[0], sBsc[0], base_m, M, K, subs, 0,
@@ -167,28 +219,7 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q8k128_kernel(
         __syncthreads();
     }
 
-    // Epilogue: FP16 store, M-tail predicated (N is a multiple of kBN).
-#pragma unroll
-    for (int mf = 0; mf < kMF; ++mf) {
-        const int row_lo = base_m + warp_m * kTileM + mf * 16 + rl;
-        const int row_hi = row_lo + 8;
-#pragma unroll
-        for (int nf = 0; nf < kNF; ++nf) {
-            const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
-            if (col + 1 >= N)
-                continue;
-            if (row_lo < M) {
-                __half2* p = reinterpret_cast<__half2*>(&out[static_cast<size_t>(row_lo) * N + col]);
-                const __half2 v = __floats2half2_rn(acc[mf][nf][0], acc[mf][nf][1]);
-                *p = BETA1 ? __hadd2(*p, v) : v;
-            }
-            if (row_hi < M) {
-                __half2* p = reinterpret_cast<__half2*>(&out[static_cast<size_t>(row_hi) * N + col]);
-                const __half2 v = __floats2half2_rn(acc[mf][nf][2], acc[mf][nf][3]);
-                *p = BETA1 ? __hadd2(*p, v) : v;
-            }
-        }
-    }
+    store_tile<kMF, kNF, BETA1>(acc, cres, out, row0, col0, M, N);
 }
 
 template <typename Kernel>
@@ -204,17 +235,18 @@ bool k128_smem_opt_in(Kernel k, size_t bytes) {
 
 bool launch_q8_k128(const int8_t* xs8, const __half* xscale, const int8_t* w_qs, const __half* w_sc,
                     __half* out, int M, int N, int K, int bm, bool beta1, dim3 grid, cudaStream_t stream) {
-    if (K % kK8BK != 0 || (bm != 32 && bm != 128) || (bm == 32 && beta1))
+    if (K % kK8BK != 0 || (bm != 32 && bm != 128))
         return false;
     static const bool smem_ok = k128_smem_opt_in(mmq_imma_q8k128_kernel<32, false>, q8k128_smem_bytes(32)) &&
+                                k128_smem_opt_in(mmq_imma_q8k128_kernel<32, true>, q8k128_smem_bytes(32)) &&
                                 k128_smem_opt_in(mmq_imma_q8k128_kernel<128, false>,
                                                  q8k128_smem_bytes(128)) &&
                                 k128_smem_opt_in(mmq_imma_q8k128_kernel<128, true>, q8k128_smem_bytes(128));
     if (!smem_ok)
         return false;
     if (bm == 32) {
-        mmq_imma_q8k128_kernel<32, false>
-            <<<grid, kThreads, q8k128_smem_bytes(32), stream>>>(xs8, xscale, w_qs, w_sc, out, M, N, K);
+        const auto k32 = beta1 ? mmq_imma_q8k128_kernel<32, true> : mmq_imma_q8k128_kernel<32, false>;
+        k32<<<grid, kThreads, q8k128_smem_bytes(32), stream>>>(xs8, xscale, w_qs, w_sc, out, M, N, K);
         IMP_CUDA_CHECK_LAUNCH();
     } else if (beta1) {
         mmq_imma_q8k128_kernel<128, true>
