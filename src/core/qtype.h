@@ -25,6 +25,7 @@ enum class QType : uint16_t {
     Q6_K = 14,
     Q8_K = 15,
     IQ4_NL = 20,
+    IQ3_S = 21,
     IQ4_XS = 23,
     BF16 = 30,
     MXFP4 = 31,
@@ -57,6 +58,7 @@ enum class QType : uint16_t {
         case QType::Q3_K:
         case QType::Q2_K:
             return decode_all;
+        case QType::IQ3_S:
         case QType::IQ4_NL:
         case QType::IQ4_XS:
             // i-quants have no dp4a/MMVQ decode kernel: without the NVFP4 decode cache
@@ -89,6 +91,7 @@ static_assert(static_cast<uint16_t>(QType::Q4_K) == 12, "QType::Q4_K wire value"
 static_assert(static_cast<uint16_t>(QType::Q6_K) == 14, "QType::Q6_K wire value");
 static_assert(static_cast<uint16_t>(QType::Q8_0) == 8, "QType::Q8_0 wire value");
 static_assert(static_cast<uint16_t>(QType::IQ4_NL) == 20, "QType::IQ4_NL wire value");
+static_assert(static_cast<uint16_t>(QType::IQ3_S) == 21, "QType::IQ3_S wire value");
 static_assert(static_cast<uint16_t>(QType::IQ4_XS) == 23, "QType::IQ4_XS wire value");
 static_assert(static_cast<uint16_t>(QType::BF16) == 30, "QType::BF16 wire value");
 static_assert(static_cast<uint16_t>(QType::MXFP4) == 31, "QType::MXFP4 wire value");

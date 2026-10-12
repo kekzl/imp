@@ -359,7 +359,15 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         return def;
     };
 
-    cfg.n_layers = static_cast<int>(get_uint("block_count"));
+    // block_count includes the MTP (nextn) blocks after the decoder stack; run as a decoder
+    // layer, Qwen3.8-27B UD-Q4_K_M read PPL 4.94 vs 4.32 in llama.cpp.
+    const uint64_t block_count = get_uint("block_count");
+    const uint64_t decoder_layers = gguf_decoder_layers(block_count, get_uint("nextn_predict_layers", 0));
+    if (decoder_layers != block_count)
+        IMP_LOG_INFO("GGUF: %llu MTP (nextn) block(s) after the decoder stack not run: %llu decoder layers",
+                     static_cast<unsigned long long>(block_count - decoder_layers),
+                     static_cast<unsigned long long>(decoder_layers));
+    cfg.n_layers = static_cast<int>(decoder_layers);
     set_granite_multipliers_gguf(cfg, get_float);  // #2412, before the validator below
     // block_count is the file's claim about itself; capped here before per-layer arrays
     // (swa_layers, head_dim_per_layer) are sized from it. Expert count gets the same check

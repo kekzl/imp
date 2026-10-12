@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace imp {
@@ -42,13 +43,13 @@ constexpr auto kWireRows = std::to_array<WireTypeInfo>({
     {GgufWireType::Q5_K, "Q5_K", 256, 176, QType::Q5_K},
     {GgufWireType::Q6_K, "Q6_K", 256, 210, QType::Q6_K},
     {GgufWireType::Q8_K, "Q8_K", 256, 292, QType::Q8_K},
-    // IQ1/IQ2/IQ3 i-quants: no native QType yet.
+    // IQ1/IQ2/IQ3_XXS i-quants: no native QType yet; parse_tensor_infos refuses them.
     {GgufWireType::IQ2_XXS, "IQ2_XXS", 256, 66, QType::NONE},
     {GgufWireType::IQ2_XS, "IQ2_XS", 256, 74, QType::NONE},
     {GgufWireType::IQ3_XXS, "IQ3_XXS", 256, 98, QType::NONE},
     {GgufWireType::IQ1_S, "IQ1_S", 256, 50, QType::NONE},
     {GgufWireType::IQ4_NL, "IQ4_NL", 32, 18, QType::IQ4_NL},
-    {GgufWireType::IQ3_S, "IQ3_S", 256, 110, QType::NONE},
+    {GgufWireType::IQ3_S, "IQ3_S", 256, 110, QType::IQ3_S},
     {GgufWireType::IQ2_S, "IQ2_S", 256, 82, QType::NONE},
     {GgufWireType::IQ4_XS, "IQ4_XS", 256, 136, QType::IQ4_XS},
     {GgufWireType::I8, "I8", 1, 1, QType::INT8},
@@ -237,13 +238,14 @@ void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count, std::vector
             info.dims[d] = 1;
         }
         info.type = static_cast<GgufWireType>(reader.read_u32());
-        // Q8_1 (wire type 9) is llama.cpp's activation format, not a weight storage type: imp has
-        // no dequant/kernel/registry entry for it (AUDIT_arch_2026 G-8). Refused like n_dims>4 above.
-        if (info.type == GgufWireType::Q8_1) {
+        // A known-size wire type with no QType (Q8_1, IQ1/IQ2/IQ3_XXS, I16/I64/F64) has no
+        // weight path: refused here, not at upload (G-8; #2687 failed late on IQ3_S).
+        if (gguf_type_size(info.type) != 0 && gguf_type_to_qtype(info.type) == QType::NONE) {
             IMP_LOG_ERROR(
-                "GGUF tensor '%s' is stored as Q8_1 (an activation format, "
-                "no weight path) - refusing the file",
-                info.name.c_str());
+                "GGUF tensor '%s' is stored as %s (ggml type %u), which this build cannot load - "
+                "refusing the file; pick a quant of this model without %s tensors",
+                info.name.c_str(), gguf_type_name(info.type), std::to_underlying(info.type),
+                gguf_type_name(info.type));
             reader.fail();
             break;
         }

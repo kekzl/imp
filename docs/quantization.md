@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-10-12
+commit: aeff0434
 -->
 
 # Quantization
@@ -17,7 +17,7 @@ numbers [`PERF.md`](PERF.md) and [`BENCHMARKS.md`](BENCHMARKS.md), loader/GEMM i
 | Format | Bits / weight | Source | Used for |
 |---|---:|---|---|
 | Q8_0 / Q6_K / Q5_K_M / Q4_K_M / Q4_0 | 8.0 / 6.5 / 5.5 / 4.5 / 4.5 | GGUF | dp4a GEMV decode + cuBLAS prefill |
-| IQ4_NL / IQ4_XS | 4.5 / 4.25 | GGUF | dequant->FP16 cache decode + dequant->cuBLAS prefill (no dp4a/MMVQ kernels) |
+| IQ4_NL / IQ4_XS / IQ3_S | 4.5 / 4.25 / 3.44 | GGUF | dequant->FP16 cache decode + dequant->cuBLAS prefill (no dp4a/MMVQ kernels) |
 | FP8 E4M3 | 8.0 | runtime | KV cache (opt-in), prefill weight cache |
 | INT8 | 8.0 | runtime | KV cache (opt-in) |
 | INT4 | 4.0 | runtime | KV cache (long-ctx, opt-in) |
@@ -291,7 +291,7 @@ Quick guidance, not a benchmark:
   Gemma-4 (use Q5_K_M or Q8_0 there). **Q6_K** is in between, good MoE pick on Qwen3-Coder-30B.
 - **IQ4_NL / IQ4_XS**: load and run since #556 via the dequant path (FP16-cache decode like
   Q4_K, dequant->cuBLAS prefill), for community-quant compatibility; at equal VRAM prefer
-  Q4_K_M (dedicated dp4a/MMVQ kernels). IQ1/IQ2/IQ3 families unsupported.
+  Q4_K_M (dp4a/MMVQ kernels). IQ3_S too (UD mixes, #2687); IQ1/IQ2/IQ3_XXS refused at load.
 - **NVFP4** (SafeTensors prequant): highest decode throughput on prequant-aware models (per-model
   numbers: [`BENCHMARKS.md`](BENCHMARKS.md)); requires AWQ/SmoothQuant calibration, only Modelopt
   fully tested.
