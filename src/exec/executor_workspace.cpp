@@ -118,6 +118,11 @@ void GraphExecutor::dump_moe_expert_trace_() {
             rc = cudaMemcpy(t.data(), moe_.expert_trace, n * sizeof(int), cudaMemcpyDeviceToHost);
         const int rec = 1 + moe_.trace_top_k;
         size_t records = (rc == cudaSuccess) ? n / rec : 0;
+        std::vector<float> w(records * moe_.trace_top_k, 0.0f);
+        if (!w.empty())
+            rc = cudaMemcpy(w.data(), moe_.trace_weights, w.size() * sizeof(float), cudaMemcpyDeviceToHost);
+        if (rc != cudaSuccess)
+            records = 0;
         FILE* f = path.empty() ? nullptr : fopen(path.c_str(), "w");
         if (!f) {
             IMP_LOG_WARN("moe expert trace: cannot open %s for writing", path.c_str());
@@ -131,6 +136,13 @@ void GraphExecutor::dump_moe_expert_trace_() {
                     fprintf(f, "%s%d", j ? "," : "", t[r * rec + j]);
                 fprintf(f, "]%s\n", r + 1 < records ? "," : "");
             }
+            fprintf(f, "  ],\n  \"weights\": [\n");
+            for (size_t r = 0; r < records; r++) {
+                fprintf(f, "    [");
+                for (int j = 0; j < moe_.trace_top_k; j++)
+                    fprintf(f, "%s%.6g", j ? "," : "", static_cast<double>(w[r * moe_.trace_top_k + j]));
+                fprintf(f, "]%s\n", r + 1 < records ? "," : "");
+            }
             fprintf(f, "  ]\n}\n");
             fclose(f);
             IMP_LOG_INFO("moe expert trace: %zu records (top_k=%d)%s -> %s", records, moe_.trace_top_k,
@@ -139,9 +151,10 @@ void GraphExecutor::dump_moe_expert_trace_() {
     } else {
         IMP_LOG_WARN("moe expert trace: cursor readback failed (%s)", cudaGetErrorString(rc));
     }
-    vram_free(vram_alloc_, moe_.expert_trace);
+    vram_free(vram_alloc_, moe_.expert_trace);  // also frees trace_weights (same allocation)
     vram_free(vram_alloc_, moe_.trace_cursor);
     moe_.expert_trace = nullptr;
+    moe_.trace_weights = nullptr;
     moe_.trace_cursor = nullptr;
 }
 

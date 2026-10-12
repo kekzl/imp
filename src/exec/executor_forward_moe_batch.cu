@@ -612,9 +612,11 @@ __global__ void moe_expert_hist_kernel(const int32_t* __restrict__ expert_indice
 // Per-token expert trace: one record per (token,layer) = [layer, e0..e_{k-1}],
 // appended at an atomically claimed offset so concurrent claims stay whole.
 // Capacity is checked before the claim commits; overrunning would corrupt the trace tail.
-__global__ void moe_expert_trace_kernel(const int32_t* __restrict__ expert_indices, int* __restrict__ trace,
-                                        unsigned int* __restrict__ cursor, unsigned long long capacity,
-                                        int top_k, int layer) {
+// Routing weights land at weights[record * top_k + j], same record order.
+__global__ void moe_expert_trace_kernel(const int32_t* __restrict__ expert_indices,
+                                        const float* __restrict__ expert_weights, int* __restrict__ trace,
+                                        float* __restrict__ weights, unsigned int* __restrict__ cursor,
+                                        unsigned long long capacity, int top_k, int layer) {
     if (threadIdx.x != 0 || blockIdx.x != 0)
         return;
     unsigned int rec = 1u + static_cast<unsigned int>(top_k);
@@ -622,8 +624,11 @@ __global__ void moe_expert_trace_kernel(const int32_t* __restrict__ expert_indic
     if (static_cast<unsigned long long>(off) + rec > capacity)
         return;  // full: stop appending, the reader sees a short trace
     trace[off] = layer;
-    for (int j = 0; j < top_k; j++)
+    unsigned int w_off = (off / rec) * static_cast<unsigned int>(top_k);
+    for (int j = 0; j < top_k; j++) {
         trace[off + 1 + j] = expert_indices[j];
+        weights[w_off + j] = expert_weights[j];
+    }
 }
 
 // Row-invariant FP32 router GEMM under runtime.deterministic: a prompt token routes the same in every
@@ -791,11 +796,15 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
             // 8M ints ~= 32 MiB: 512 tokens x 48 layers x (1+8) is 221k, so this
             // holds a very long run before the capacity guard bites.
             moe_.trace_capacity = 8u << 20;
+            // One allocation: capacity ints of records, then capacity floats of routing
+            // weights (records * top_k < capacity, so every record's weights fit).
             moe_.expert_trace = static_cast<int*>(
-                vram_alloc(vram_alloc_, moe_.trace_capacity * sizeof(int), "moe_expert_trace"));
+                vram_alloc(vram_alloc_, moe_.trace_capacity * (sizeof(int) + sizeof(float)),
+                           "moe_expert_trace"));
             moe_.trace_cursor = static_cast<unsigned int*>(
                 vram_alloc(vram_alloc_, sizeof(unsigned int), "moe_trace_cursor"));
             if (moe_.expert_trace != nullptr && moe_.trace_cursor != nullptr) {
+                moe_.trace_weights = reinterpret_cast<float*>(moe_.expert_trace + moe_.trace_capacity);
                 IMP_CUDA_CHECK_LOG(cudaMemsetAsync(moe_.trace_cursor, 0, sizeof(unsigned int), stream));
                 moe_.trace_top_k = top_k;
                 IMP_LOG_INFO("moe expert trace: recording -> %s",
@@ -810,7 +819,8 @@ void GraphExecutor::compute_moe_routing(int layer, cudaStream_t stream, int n, i
         }
         if (moe_.expert_trace != nullptr && top_k == moe_.trace_top_k) {
             moe_expert_trace_kernel<<<1, 32, 0, stream>>>(
-                static_cast<const int32_t*>(routing.expert_indices.data), moe_.expert_trace,
+                static_cast<const int32_t*>(routing.expert_indices.data),
+                static_cast<const float*>(routing.expert_weights.data), moe_.expert_trace, moe_.trace_weights,
                 moe_.trace_cursor, static_cast<unsigned long long>(moe_.trace_capacity), top_k, layer);
             IMP_CUDA_CHECK_LAUNCH();
         }
