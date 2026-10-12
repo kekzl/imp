@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- GGUF Q8_0 weights without a cache (GDN/attention projections of Q4_K_M mixes) run batched decode rows through a dp4a kernel reading the blocks in place instead of a whole-weight dequant + cuBLAS per step: Qwen3.8-27B Q4_K_M at 32 streams 105.2-105.3 -> 143.3-143.4 tok/s (#2688).
+
 ### Added
 - GGUF IQ3_S (ggml type 21): GPU dequant, bit-exact vs gguf-py on the 4 IQ3_S tensors of Unsloth's Qwen3.8-27B UD-Q4_K_M, which now loads. IQ1/IQ2/IQ3_XXS and other types without a path are refused at parse, naming type and tensor (#2687).
 
