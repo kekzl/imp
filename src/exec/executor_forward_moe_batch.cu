@@ -885,6 +885,8 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
     // per-slot mirror, indexed by the same id as the weight. Layout: nvfp4_expert_offload.h.
     if (!use_nvfp4_moe && !model_->profile().moe_expert_bias_glu &&
         nvfp4_host_decode_ready(ly, expert_cache_, moe_, top_k)) {
+        if (dev_expert_cache_.layer_ready(layer))
+            (void)fork_shared_expert_(layer, stream, d, no);  // joined in phase 8
         run_moe_decode_nvfp4_host(layer, stream, d, eff, top_k, routing, no, h, r,
                                   moe_use_fp32_residual, will_skip_residual_copy, residual_fused,
                                   non_gated_experts);
@@ -1112,31 +1114,41 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
 
 void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n, int d,
                                           float eps, const Tensor& no, Tensor& h) {
-    const auto& cfg = model_->config();
-    const auto& ly = model_->layer(layer);
-
     // DIAGNOSTIC: moe.no_shared_mlp config flag (was IMP_NO_SHARED_MLP env).
     static const bool s_no_shared_mlp = dispatch_policy().moe.no_shared_mlp;
-    if (ly.w_up_shared.data == nullptr || s_no_shared_mlp) return;
+    if (model_->layer(layer).w_up_shared.data == nullptr || s_no_shared_mlp)
+        return;
+    if (join_shared_expert_(stream, n, d, h))
+        return;
+    // Reuse moe_.expert_gate, moe_.expert_up, moe_.expert_swiglu, moe_.expert_down as scratch.
+    Tensor sh_down = shared_expert_core_(layer, stream, n, d, eps, no, moe_.expert_gate.data,
+                                         moe_.expert_up.data, moe_.expert_swiglu.data, moe_.expert_down.data);
+    elementwise_add(h, sh_down, stream);
+}
+
+Tensor GraphExecutor::shared_expert_core_(int layer, cudaStream_t stream, int n, int d, float eps,
+                                          const Tensor& no, void* gate_buf, void* up_buf, void* act_buf,
+                                          void* down_buf) {
+    const auto& cfg = model_->config();
+    const auto& ly = model_->layer(layer);
 
     int eff_shared = static_cast<int>(ly.w_up_shared.shape[0]);
     bool shared_gated = (ly.w_gate_shared.data != nullptr);
 
-    // Reuse moe_.expert_gate, moe_.expert_up, moe_.expert_swiglu as scratch.
     int64_t sh_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(eff_shared)};
-    Tensor sh_up(moe_.expert_up.data, compute_dtype_, 2, sh_shape, true);
-    Tensor sh_swiglu(moe_.expert_swiglu.data, compute_dtype_, 2, sh_shape, true);
+    Tensor sh_up(up_buf, compute_dtype_, 2, sh_shape, true);
+    Tensor sh_swiglu(act_buf, compute_dtype_, 2, sh_shape, true);
 
-    // Down projection output: [n, d_model]. Reuse moe_.expert_down.
+    // Down projection output: [n, d_model].
     int64_t sh_down_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
-    Tensor sh_down(moe_.expert_down.data, compute_dtype_, 2, sh_down_shape, true);
+    Tensor sh_down(down_buf, compute_dtype_, 2, sh_down_shape, true);
 
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, dispatch_policy(), cur_force_fp16_,
                                  model_->config().overrides.gemma4.force_mmvq);
     gemm_via_handle_(ly.w_up_shared_id, no, sh_up, ctx);
 
     if (shared_gated) {
-        Tensor sh_gate(moe_.expert_gate.data, compute_dtype_, 2, sh_shape, true);
+        Tensor sh_gate(gate_buf, compute_dtype_, 2, sh_shape, true);
         gemm_via_handle_(ly.w_gate_shared_id, no, sh_gate, ctx);
         if (cfg.ffn_activation == FFNActivation::GEGLU)
             geglu(sh_gate, sh_up, sh_swiglu, stream);
@@ -1148,7 +1160,7 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
     }
 
     if (layer == 0) {
-        Tensor sh_gate_raw(moe_.expert_gate.data, compute_dtype_, 2, sh_shape, true);
+        Tensor sh_gate_raw(gate_buf, compute_dtype_, 2, sh_shape, true);
         debug_tensor_stats_all("L0_sh_up_raw", sh_up, stream);
         debug_tensor_stats_all("L0_sh_gate_raw", sh_gate_raw, stream);
         debug_tensor_stats_all("L0_sh_swiglu", sh_swiglu, stream);
@@ -1186,7 +1198,7 @@ void GraphExecutor::run_shared_expert_ffn(int layer, cudaStream_t stream, int n,
         ly.shared_expert_gate_inp.on_device && compute_dtype_ == QType::F16) {
         shared_expert_gate_scale(no.data, ly.shared_expert_gate_inp.data, sh_down.data, n, d, d, stream);
     }
-    elementwise_add(h, sh_down, stream);
+    return sh_down;
 }
 
 }  // namespace imp

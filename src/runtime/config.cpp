@@ -284,6 +284,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("moe.nvfp4_device_args", cfg.moe.nvfp4_device_args);
     B("moe.nvfp4_smallM", cfg.moe.nvfp4_smallM);
     B("moe.device_expert_cache", cfg.moe.device_expert_cache);
+    B("moe.shared_expert_overlap", cfg.moe.shared_expert_overlap);
     I("moe.host_expert_pool_mib", cfg.moe.host_expert_pool_mib);
     I("moe.nvfp4_smallM_threshold", cfg.moe.nvfp4_smallM_threshold);
     I("moe.mr_nr", cfg.moe.mr_nr);

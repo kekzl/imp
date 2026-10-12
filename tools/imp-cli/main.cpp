@@ -161,6 +161,8 @@ int main(int argc, char** argv) {
         runtime_cfg, mtp_k, model->model->mtp_.has_value() && model->model->mtp_->loaded,
         args.mtp_spec_decode_k,
         model->model->mtp_.has_value() ? imp::mtp_auto_k_cap(*model->model->mtp_) : 0);
+    if (mtp_k <= 0)
+        model->model->decline_mtp_head();
 
     ImpConfig config = imp_config_default();
 

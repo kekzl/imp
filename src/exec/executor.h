@@ -822,6 +822,15 @@ private:
     size_t expert_cache_slot_raw_ = 0;
     bool expert_cache_nvfp4_slots_ = false;
     DeviceExpertCache dev_expert_cache_;  // decode: routing -> slots -> gather, all on device
+    struct ShexpOverlap {
+        CudaStream stream;
+        CudaEvent fork;
+        CudaEvent join;
+        char* buf = nullptr;  // gate | up | act ([eff] each) | down ([d]), compute dtype
+        int eff = 0;
+        int d = 0;
+        bool pending = false;  // forked, phase 8 has not joined yet
+    } shexp_overlap_;
 
     // Pre-allocated dequant scratch for the gemm_nvfp4 fallback (M>1 only).
     // True when nvfp4_dequant_ws_buf_ came from the engine-persistent arena
@@ -1130,6 +1139,15 @@ private:
     // or the runtime opt-out is set.
     void run_shared_expert_ffn(int layer, cudaStream_t stream, int n, int d,
                                float eps, const Tensor& no, Tensor& h);
+    // Shared expert up to its gated down output in the given [n, eff] / [n, d] scratch, no add.
+    Tensor shared_expert_core_(int layer, cudaStream_t stream, int n, int d, float eps, const Tensor& no,
+                               void* gate_buf, void* up_buf, void* act_buf, void* down_buf);
+    // moe.shared_expert_overlap (executor_forward_moe_nvfp4_host.cu): fork runs the shared expert
+    // on shexp_overlap_.stream; join waits for it and does the add. False = not forked.
+    void init_shexp_overlap_();
+    void free_shexp_overlap_();
+    [[nodiscard]] bool fork_shared_expert_(int layer, cudaStream_t stream, int d, const Tensor& no);
+    [[nodiscard]] bool join_shared_expert_(cudaStream_t stream, int n, int d, Tensor& h);
     // MoE decode fast-path (n=1, device-resident packed experts): dispatches
     // all top_k experts in a single kernel per projection (NVFP4 and dp4a/FP16
     // sub-paths handled internally). Sets residual_fused=true when the

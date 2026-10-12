@@ -118,7 +118,76 @@ bool GraphExecutor::init_device_expert_cache() {
     if (!dev_expert_cache_.init(*model_, expert_cache_, vram_alloc_, top_k))
         IMP_LOG_INFO("Device expert cache: not built (no host-resident NVFP4 layer in a mapped "
                      "pinned slab, or the pool is too small); the host LRU path serves decode");
+    init_shexp_overlap_();
     return device_expert_cache_covers_host_layers();
+}
+
+void GraphExecutor::init_shexp_overlap_() {
+    free_shexp_overlap_();
+    const auto& prof = model_->profile();
+    if (!dispatch_policy().moe.shared_expert_overlap || dispatch_policy().moe.no_shared_mlp ||
+        compute_dtype_ != QType::F16 || prof.sandwich_norms || prof.sanitize_ffn_fp16)
+        return;
+    const auto& cfg = model_->config();
+    int eff = 0;
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        const auto& ly = model_->layer(i);
+        if (dev_expert_cache_.layer_ready(i) && ly.w_up_shared.data != nullptr)
+            eff = std::max(eff, static_cast<int>(ly.w_up_shared.shape[0]));
+    }
+    if (eff == 0)
+        return;
+    auto& o = shexp_overlap_;
+    const size_t bytes = (3 * static_cast<size_t>(eff) + cfg.d_model) * sizeof(half);
+    o.buf = static_cast<char*>(vram_alloc(vram_alloc_, bytes, "shexp_overlap"));
+    if (o.buf == nullptr || !o.stream.create() || !o.fork.create() || !o.join.create()) {
+        IMP_LOG_WARN("moe.shared_expert_overlap: side stream setup failed, shared expert stays serial");
+        free_shexp_overlap_();
+        return;
+    }
+    o.eff = eff;
+    o.d = cfg.d_model;
+    IMP_LOG_INFO(
+        "moe.shared_expert_overlap: decode shared expert (eff %d) runs beside the expert miss gather", eff);
+}
+
+void GraphExecutor::free_shexp_overlap_() {
+    auto& o = shexp_overlap_;
+    o.stream.reset();
+    o.fork.reset();
+    o.join.reset();
+    vram_free(vram_alloc_, o.buf);
+    o.buf = nullptr;
+    o.eff = o.d = 0;
+    o.pending = false;
+}
+
+bool GraphExecutor::fork_shared_expert_(int layer, cudaStream_t stream, int d, const Tensor& no) {
+    auto& o = shexp_overlap_;
+    const auto& ly = model_->layer(layer);
+    if (!o.stream || o.pending || ly.w_up_shared.data == nullptr || no.shape[0] != 1 || d != o.d ||
+        ly.w_up_shared.shape[0] > o.eff)
+        return false;
+    const size_t e = static_cast<size_t>(o.eff) * sizeof(half);
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(o.fork, stream));
+    IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(o.stream, o.fork, 0));
+    (void)shared_expert_core_(layer, o.stream, 1, d, model_->config().rms_norm_eps, no, o.buf, o.buf + e,
+                              o.buf + 2 * e, o.buf + 3 * e);
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(o.join, o.stream));
+    o.pending = true;
+    return true;
+}
+
+bool GraphExecutor::join_shared_expert_(cudaStream_t stream, int n, int d, Tensor& h) {
+    auto& o = shexp_overlap_;
+    if (!o.pending)
+        return false;
+    o.pending = false;
+    IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(stream, o.join, 0));
+    const int64_t shape[2] = {n, d};
+    Tensor sh_down(o.buf + 3 * static_cast<size_t>(o.eff) * sizeof(half), compute_dtype_, 2, shape, true);
+    elementwise_add(h, sh_down, stream);
+    return true;
 }
 
 bool GraphExecutor::device_expert_cache_covers_host_layers() const {

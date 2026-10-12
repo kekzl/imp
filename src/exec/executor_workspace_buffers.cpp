@@ -1434,6 +1434,7 @@ static bool fp8_entry_owns_weight(const FP8CacheEntry& e, const WeightCaches& wc
 }
 
 void GraphExecutor::free_buffers() {
+    free_shexp_overlap_();
     // T2 arena slabs (allocate_smallm_scratch) die with the arena.
     if (smallm_ws_ && !smallm_ws_arena_)
         IMP_CUDA_CHECK_LOG(cudaFree(smallm_ws_));

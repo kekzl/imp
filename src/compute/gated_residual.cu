@@ -53,13 +53,14 @@ __global__ void hc_grouped_rmsnorm_kernel(const half* __restrict__ x, const half
 }
 
 // Decode (n = 1) hc_read front end: grouped RMSNorm + [down; inject] GEMV + silu / 2*sigmoid.
-// grid ceil((lowrank + n_inj) / 8), 256 threads, smem = K halves. Same op order as
-// hc_grouped_rmsnorm_kernel + gemv_fp16_kernel (sm_120 path) + the epilogue kernels: bit-identical.
+// grid ceil((lowrank + n_inj) / rows_per_block), 256 threads, smem = K halves; warps past
+// rows_per_block only help the norm. Same op order as hc_grouped_rmsnorm_kernel +
+// gemv_fp16_kernel (sm_120 path) + the epilogue kernels: bit-identical.
 __global__ void hc_read_decode_kernel(const half* __restrict__ x, const half* __restrict__ w,
                                       const half* __restrict__ down, const half* __restrict__ inject,
                                       half* __restrict__ normed, half* __restrict__ low,
                                       half* __restrict__ inj, int hc, int d, int lowrank, int n_inj,
-                                      float eps, float inv_hc) {
+                                      float eps, float inv_hc, int rows_per_block) {
     extern __shared__ __align__(16) half s_x[];
     __shared__ float red[kMaxHc][kThreads / 32];
     __shared__ float inv[kMaxHc];
@@ -113,8 +114,8 @@ __global__ void hc_read_decode_kernel(const half* __restrict__ x, const half* __
     }
     __syncthreads();
 
-    const int row = blockIdx.x * (kThreads / 32) + warp;
-    if (row >= lowrank + n_inj)
+    const int row = blockIdx.x * rows_per_block + warp;
+    if (warp >= rows_per_block || row >= lowrank + n_inj)
         return;
     const half* A_row = row < lowrank ? down + static_cast<size_t>(row) * K
                                       : inject + static_cast<size_t>(row - lowrank) * K;
@@ -283,13 +284,15 @@ bool hc_read_decode(const Tensor& x, const Tensor& w, const Tensor& down, const 
         (inject && inject->qtype != QType::F16) || x.qtype != QType::F16 || w.qtype != QType::F16 ||
         down.shape[1] != K || (inject && inject->shape[1] != K))
         return false;
-    const int blocks = (lowrank + n_inj + kThreads / 32 - 1) / (kThreads / 32);
+    // 8 rows per block put the Flash-Next shape (328 rows) on 41 of 170 SMs: 11.4 us for 6.7 MB.
+    constexpr int kRowsPerBlock = 2;
+    const int blocks = (lowrank + n_inj + kRowsPerBlock - 1) / kRowsPerBlock;
     hc_read_decode_kernel<<<blocks, kThreads, smem, stream>>>(
         static_cast<const half*>(x.data), static_cast<const half*>(w.data),
         static_cast<const half*>(down.data), inject ? static_cast<const half*>(inject->data) : nullptr,
         static_cast<half*>(normed.data), static_cast<half*>(low.data),
         inject ? static_cast<half*>(inj.data) : nullptr, hc, d, lowrank, n_inj, eps,
-        1.0f / static_cast<float>(hc));
+        1.0f / static_cast<float>(hc), kRowsPerBlock);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
 }

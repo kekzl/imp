@@ -7,6 +7,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Added
 - `diagnostics.moe_expert_trace` also writes each pick's routing weight; `tools/analysis/expert_prune_sim.py` scores expert-pruned keep sets on it. Flash-Next at 128 of 512 experts keeps 52.9 % of the routing weight on held-out text, so pruning is dropped (#2613).
 
+### Changed
+- Qwen3.8-Flash-Next-NVFP4 decode 81.0 -> 87.2 tok/s (tg512, 3 prompts, 6 of 6 pairs): the declined MTP head is not uploaded (353 -> 386 expert slots/layer), the shared expert runs beside the miss gather (`moe.shared_expert_overlap`), faster expert-cache resolve. Output bits unchanged.
+
 ## [0.52.1] - 2026-10-12
 
 ### Changed
