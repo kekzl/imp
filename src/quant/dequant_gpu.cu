@@ -22,6 +22,7 @@ bool dequant_gpu_supported(QType qtype) {
         case QType::Q4_K:
         case QType::Q5_K:
         case QType::Q8_K:
+        case QType::IQ3_S:
         case QType::IQ4_NL:
         case QType::IQ4_XS:
             return true;
@@ -573,6 +574,47 @@ __global__ void dequant_iq4_xs_kernel(const uint8_t* __restrict__ src, half* __r
     dst[idx] = __float2half(val);
 }
 
+// IQ3_S GPU dequant, 110 bytes per 256 elements: d[2] fp16, qs[64] grid index low bits,
+// qh[8] grid index bit 8, signs[32] one bit per element, scales[4] two 4-bit scales per byte.
+// Element i: ib = i/32, l = (i%32)/8, h = (i%8)/4; grid = kIq3sGrid[qs[8ib+2l+h] | qh bit << 8];
+// val = d*(1+2*scale nibble ib)*grid byte (i%4)*(sign bit (i%8) of signs[4ib+l] ? -1 : 1).
+
+__device__ __constant__ uint32_t kIq3sGridGpu[512] = {
+#include "quant/iq3s_grid.inc"
+};
+
+__global__ void dequant_iq3_s_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
+                                     int cols) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total = static_cast<int64_t>(rows) * cols;
+    if (idx >= total)
+        return;
+
+    int row = static_cast<int>(idx / cols);
+    int col = static_cast<int>(idx % cols);
+    int blk = col / 256;
+    int i = col % 256;
+    int blocks_per_row = cols / 256;
+
+    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 110;
+    half d_val = *reinterpret_cast<const half*>(block_ptr);
+    const uint8_t* qs = block_ptr + 2;
+    const uint8_t* qh = block_ptr + 66;
+    const uint8_t* signs = block_ptr + 74;
+    const uint8_t* scales = block_ptr + 106;
+
+    int ib = i / 32;
+    int l = (i & 31) / 8;
+    int h = (i & 7) / 4;
+    int grid_idx = qs[ib * 8 + 2 * l + h] | (((qh[ib] >> (2 * l + h)) & 1) << 8);
+    int mag = (kIq3sGridGpu[grid_idx] >> (8 * (i & 3))) & 0xFF;
+    int sc = (scales[ib / 2] >> (4 * (ib & 1))) & 0xF;
+    float sign = ((signs[ib * 4 + l] >> (i & 7)) & 1) ? -1.0f : 1.0f;
+
+    float val = __half2float(d_val) * static_cast<float>(1 + 2 * sc) * static_cast<float>(mag) * sign;
+    dst[idx] = __float2half(val);
+}
+
 // Q6_K -> FP8 E4M3 dequant: same block decoding as dequant_q6k_v2_kernel, writes FP8 E4M3
 // instead of FP16 via dequant_q6k_element(). Q6_K values are |val|<10, well within E4M3's
 // 448 max, so scale=1.0 with saturating conversion is safe. One CTA per 256-element
@@ -669,6 +711,7 @@ void dequant_gpu(const void* src, void* dst, QType qtype, int rows, int cols, cu
             DEQUANT_CASE(Q4_K, dequant_q4k_kernel)
             DEQUANT_CASE(Q5_K, dequant_q5k_kernel)
             DEQUANT_CASE(Q8_K, dequant_q8k_kernel)
+            DEQUANT_CASE(IQ3_S, dequant_iq3_s_kernel)
             DEQUANT_CASE(IQ4_NL, dequant_iq4_nl_kernel)
             DEQUANT_CASE(IQ4_XS, dequant_iq4_xs_kernel)
 

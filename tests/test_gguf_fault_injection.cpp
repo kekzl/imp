@@ -473,6 +473,14 @@ TEST(GgufFaultInjection, Q8_1WeightTypeIsRefusedAtParse) {
     EXPECT_EQ(load_buf(g.buf), nullptr) << "a Q8_1 weight tensor must refuse the file";
 }
 
+// Wire type 16 = IQ2_XXS: known size, no QType. Refused at parse; IQ3_S (21) reached upload
+// and failed there with "Try a smaller quantization" (#2687).
+TEST(GgufFaultInjection, IQuantWithoutPathIsRefusedAtParse) {
+    GgufBytes g = build_valid_gguf();
+    patch_u32(g.buf, g.off_tensor_type, 16);
+    EXPECT_EQ(load_buf(g.buf), nullptr) << "an IQ2_XXS weight tensor must refuse the file";
+}
+
 // n_dims=5 with five dim words: the unfixed parser read the first four, skipped the fifth,
 // passed the bounds check (16 floats), and the loader's shape loop then wrote shape[4] and
 // read dims[4] - one stack slot and one struct field past the end - before the Tensor

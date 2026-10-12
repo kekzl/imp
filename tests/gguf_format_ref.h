@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "core/qtype.h"
+#include "iq3s_grid_ref.h"
 
 namespace imp {
 namespace gguf_ref {
@@ -201,6 +202,40 @@ inline void ref_dequant_iq4_xs(const uint8_t* blk, double* out) {
             out[ib * 32 + j] = dl * static_cast<double>(kRefIq4nlValues[qs[ib * 16 + j] & 0xF]);
             out[ib * 32 + j + 16] = dl * static_cast<double>(kRefIq4nlValues[(qs[ib * 16 + j] >> 4) & 0xF]);
         }
+    }
+}
+
+// IQ3_S: 110 bytes / 256 elems. [ d:f16 | qs:u8[64] | qh:u8[8] | signs:u8[32] | scales:u8[4] ].
+// Loop structure of ggml dequantize_row_iq3_s: per pair of 32-sub-blocks one scale byte,
+// per 8 elements two grid lookups (qs | qh bit << 8) and one sign byte.
+inline void ref_dequant_iq3_s(const uint8_t* blk, double* out) {
+    half d;
+    std::memcpy(&d, blk, 2);
+    const uint8_t* qs = blk + 2;
+    const uint8_t* qh = blk + 66;
+    const uint8_t* signs = blk + 74;
+    const uint8_t* scales = blk + 106;
+    double dd = f16_to_f64(d);
+    double* y = out;
+    for (int ib32 = 0; ib32 < 8; ib32 += 2) {
+        for (int half_ = 0; half_ < 2; ++half_) {
+            int sc = half_ == 0 ? (scales[ib32 / 2] & 0xF) : (scales[ib32 / 2] >> 4);
+            double db = dd * static_cast<double>(1 + 2 * sc);
+            for (int l = 0; l < 4; ++l) {
+                uint32_t g1 = kRefIq3sGrid[qs[2 * l + 0] | ((qh[half_] << (8 - 2 * l)) & 256)];
+                uint32_t g2 = kRefIq3sGrid[qs[2 * l + 1] | ((qh[half_] << (7 - 2 * l)) & 256)];
+                for (int j = 0; j < 4; ++j) {
+                    double m1 = static_cast<double>((g1 >> (8 * j)) & 0xFF);
+                    double m2 = static_cast<double>((g2 >> (8 * j)) & 0xFF);
+                    y[j + 0] = db * m1 * ((signs[l] & (1u << j)) ? -1.0 : 1.0);
+                    y[j + 4] = db * m2 * ((signs[l] & (1u << (j + 4))) ? -1.0 : 1.0);
+                }
+                y += 8;
+            }
+            qs += 8;
+            signs += 4;
+        }
+        qh += 2;
     }
 }
 
@@ -500,6 +535,23 @@ inline void build_iq4_xs(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleM
         }
 }
 
+inline void build_iq3_s(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMode mode) {
+    int bpr = K / 256;
+    buf.resize((size_t)N * bpr * 110);
+    for (int r = 0; r < N; ++r)
+        for (int b = 0; b < bpr; ++b) {
+            uint8_t* bp = buf.data() + ((size_t)r * bpr + b) * 110;
+            half d = pick_d(g, mode);
+            std::memcpy(bp, &d, 2);
+            // qs, qh, signs: full range (all 512 grid rows, every sign bit).
+            for (int i = 0; i < 104; ++i)
+                bp[2 + i] = g.byte();
+            // scales: 0xFF = both 4-bit scales 15 (factor 31) under MAXMAG, else LCG.
+            for (int i = 0; i < 4; ++i)
+                bp[106 + i] = (mode == MAXMAG) ? 0xFF : g.byte();
+        }
+}
+
 // Q8_K's scale is a full float, not an f16 half — its own picker.
 inline float pick_d_f32(Lcg& g, ScaleMode mode) {
     switch (mode) {
@@ -653,6 +705,7 @@ const FormatSpec kFormats[] = {
     {QType::Q8_K, "Q8_K", 292, 256, ref_dequant_q8_k, build_q8_k},
     {QType::IQ4_NL, "IQ4_NL", 18, 32, ref_dequant_iq4_nl, build_iq4_nl},
     {QType::IQ4_XS, "IQ4_XS", 136, 256, ref_dequant_iq4_xs, build_iq4_xs},
+    {QType::IQ3_S, "IQ3_S", 110, 256, ref_dequant_iq3_s, build_iq3_s},
 };
 
 inline const FormatSpec& format_spec(QType qt) {
