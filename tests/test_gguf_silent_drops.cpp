@@ -96,5 +96,14 @@ TEST(GgufSilentDrops, NameFamilyCollapsesASubtree) {
     EXPECT_EQ(gguf_name_family(""), "(empty)");
 }
 
+// Qwen3.8-27B UD-Q4_K_M: block_count 65, nextn_predict_layers 1 -> 64 decoder layers; the
+// MTP block ran as layer 65 before (PPL 4.94 vs 4.32 in llama.cpp).
+TEST(GgufSilentDrops, NextnBlocksAreNotDecoderLayers) {
+    EXPECT_EQ(gguf_decoder_layers(65, 1), 64u);
+    EXPECT_EQ(gguf_decoder_layers(64, 0), 64u);
+    EXPECT_EQ(gguf_decoder_layers(2, 2), 2u);  // nothing left: claim ignored
+    EXPECT_EQ(gguf_decoder_layers(0, 1), 0u);
+}
+
 }  // namespace
 }  // namespace imp
