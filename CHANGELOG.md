@@ -10,6 +10,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Changed
 - Qwen3.8-Flash-Next-NVFP4 decode 81.0 -> 87.2 tok/s (tg512, 3 prompts, 6 of 6 pairs): the declined MTP head is not uploaded (353 -> 386 expert slots/layer), the shared expert runs beside the miss gather (`moe.shared_expert_overlap`), faster expert-cache resolve. Output bits unchanged.
 - Host-resident NVFP4 experts: the auto expert-cache budget takes the KV room a shorter `runtime.max_seq_len` leaves unused. Flash-Next at 32768 tokens: 386 -> 441 slots/layer, tg512 88.3 -> 92.6 tok/s (5 of 6 pairs); default context unchanged.
+- cpp-httplib v0.59.0 -> v0.60.1: a `Range` suffix longer than the body answers 206 with the whole body instead of 416 (RFC 9110 §14.1.2); SSE client clears `Last-Event-ID` on an empty `id`. imp's image fetch keeps `set_follow_location(false)`, so the redirect fixes do not reach it.
 
 ## [0.52.1] - 2026-10-12
 
