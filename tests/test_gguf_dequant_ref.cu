@@ -201,7 +201,7 @@ using GgufDequantFormats = ::testing::Types<
     QTypeTag<QType::Q8_0>, QTypeTag<QType::Q4_0>, QTypeTag<QType::Q4_1>, QTypeTag<QType::Q5_0>,
     QTypeTag<QType::Q5_1>, QTypeTag<QType::Q2_K>, QTypeTag<QType::Q3_K>, QTypeTag<QType::Q4_K>,
     QTypeTag<QType::Q5_K>, QTypeTag<QType::Q6_K>, QTypeTag<QType::Q8_K>, QTypeTag<QType::IQ4_NL>,
-    QTypeTag<QType::IQ4_XS>>;
+    QTypeTag<QType::IQ4_XS>, QTypeTag<QType::IQ3_S>>;
 
 inline const char* qtype_name(QType qt) { return format_spec(qt).name; }
 
@@ -224,10 +224,10 @@ TYPED_TEST(GgufDequant, AllScaleModes) {
 // longer accepts is dead test weight. Both directions fail here.
 TEST(GgufDequantCoverage, EverySupportedFormatHasAReference) {
     // Every wire-stable QType, whether or not imp dequantizes it.
-    const QType kAllWireTypes[] = {QType::F32,    QType::F16,  QType::Q4_0, QType::Q4_1, QType::Q5_0,
-                                   QType::Q5_1,   QType::Q8_0, QType::Q8_1, QType::Q2_K, QType::Q3_K,
-                                   QType::Q4_K,   QType::Q5_K, QType::Q6_K, QType::Q8_K, QType::IQ4_NL,
-                                   QType::IQ4_XS, QType::BF16, QType::MXFP4};
+    const QType kAllWireTypes[] = {QType::F32,    QType::F16,   QType::Q4_0, QType::Q4_1, QType::Q5_0,
+                                   QType::Q5_1,   QType::Q8_0,  QType::Q8_1, QType::Q2_K, QType::Q3_K,
+                                   QType::Q4_K,   QType::Q5_K,  QType::Q6_K, QType::Q8_K, QType::IQ4_NL,
+                                   QType::IQ4_XS, QType::IQ3_S, QType::BF16, QType::MXFP4};
     for (QType qt : kAllWireTypes) {
         bool has_ref = false;
         for (const FormatSpec& f : kFormats)

@@ -109,13 +109,13 @@ KindCapabilities effective_capabilities(TensorKind k, QType source_qtype) {
     // NVFP4 overlay only benefits Q5_K/Q6_K/Q8_0/Q8_K (>=5.5 bits/elem source). Sub-5-bit GGUF
     // formats (Q4_K, Q4_0, Q5_0, Q5_1, Q3_K, Q2_K) are same-bit-width representation changes:
     // no compression win, possible quality risk. Mirrors nvfp4_beneficial(qtype).
-    const bool nvfp4_overlay_ok =
-        (source_qtype == QType::Q8_0 || source_qtype == QType::Q8_K ||
-         source_qtype == QType::Q6_K || source_qtype == QType::Q5_K ||
-         // i-quants: no dp4a/MMVQ kernels — the NVFP4 decode cache is the
-         // only fast decode path, so the overlay is allowed despite the
-         // similar bit-width (mirror nvfp4_beneficial).
-         source_qtype == QType::IQ4_NL || source_qtype == QType::IQ4_XS);
+    const bool nvfp4_overlay_ok = (source_qtype == QType::Q8_0 || source_qtype == QType::Q8_K ||
+                                   source_qtype == QType::Q6_K || source_qtype == QType::Q5_K ||
+                                   // i-quants: no dp4a/MMVQ kernels — the NVFP4 decode cache is the
+                                   // only fast decode path, so the overlay is allowed despite the
+                                   // similar bit-width (mirror nvfp4_beneficial).
+                                   source_qtype == QType::IQ3_S || source_qtype == QType::IQ4_NL ||
+                                   source_qtype == QType::IQ4_XS);
 
     if (!nvfp4_overlay_ok) {
         cap.supported = cap.supported & ~mask(StorageTier::NVFP4) &

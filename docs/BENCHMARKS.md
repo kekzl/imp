@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-11
-commit: 54921da6
+verified: 2026-10-12
+commit: aeff0434
 -->
 
 # Benchmarks
@@ -148,8 +148,8 @@ greedy answers with `ignore_eos`, aggregate = completion tokens / wall, values =
 | imp | Qwen3.8-27B-Q4_K_M.gguf | 58.0 / 60.7 | 107.4 / 107.0 |
 
 imp on the GGUF holds 7 recurrent slots at 19822.3 MiB of weights and a batch-7 step costs ~4x a batch-1
-step ([#2688](https://github.com/kekzl/imp/issues/2688)). Unsloth's `UD-Q4_K_M` does not load: 4 IQ3_S
-tensors ([#2687](https://github.com/kekzl/imp/issues/2687)).
+step ([#2688](https://github.com/kekzl/imp/issues/2688)). Unsloth's `UD-Q4_K_M` (4 IQ3_S tensors, one MTP block) loads since
+[#2687](https://github.com/kekzl/imp/issues/2687): ppl_corpus_45k PPL 4.4504 vs 4.4623 for the ggml-org Q4_K_M (llama.cpp 4.3196 / 4.3308).
 
 ## imp vs vLLM at concurrency
 

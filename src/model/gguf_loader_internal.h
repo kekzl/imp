@@ -125,6 +125,12 @@ void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count,
 // cfg.rope_short_factor/rope_long_factor, freq[i] = theta^(-2i/rd) / rope_freqs[i] (#2520).
 void apply_gguf_rope_freq_factors(Model& model);
 
+// Decoder layers = block_count minus the MTP (nextn) blocks appended after the stack;
+// a nextn of 0 or >= block_count leaves block_count (#2687 follow-up).
+[[nodiscard]] constexpr uint64_t gguf_decoder_layers(uint64_t block_count, uint64_t nextn) {
+    return (nextn > 0 && nextn < block_count) ? block_count - nextn : block_count;
+}
+
 // add_bos default for a gpt2 GGUF without tokenizer.ggml.add_bos_token: true for llama3/llama-bpe.
 [[nodiscard]] bool gguf_default_add_bos(const std::string& pre);
 
