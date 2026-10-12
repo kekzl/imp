@@ -622,6 +622,9 @@ expert_cache_debug_parity = false
 #  50%  -> 244            , 96.2%    , 51.86
 # Raise it when the KV pool and weight caches do not need the room; the
 # default stays conservative because they usually do.
+# Auto (0) on host-resident NVFP4 experts also takes the KV room a runtime.max_seq_len x
+# max_batch_size below the default context leaves unused: Flash-Next at 32768 x 1 +2304 MiB,
+# 386 -> 441 slots/layer, tg512 88.3 -> 92.6 tok/s.
 expert_cache_budget_pct = 15
 # Async H2D prefetch of next layer's top-K (proj, expert) pairs under
 # host-offload (0 = off; sensible 3..16).
