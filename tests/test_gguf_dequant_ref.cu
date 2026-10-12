@@ -23,6 +23,7 @@
 #include "compute/gemm.h"
 #include "compute/ggml_mmvq.h"
 #include "compute/gemm_q8_0_dense.h"
+#include "compute/gemm_q4k.h"
 #include "quant/dequant_gpu.h"
 #include "gguf_format_ref.h"
 
@@ -547,11 +548,12 @@ TEST(GgufRef, Q5_K_GemvMmvq) { run_mmvq_gemv("Q5_K", QType::Q5_K, 256, 1024, ggm
 
 // Dense Q8_0 dp4a at decode M (#2688): every row against the fp64 reference, across the three
 // row tiles (K 1024 -> 16, 6144 -> 8, 12288 -> 4), a ragged last tile and the beta=1 residual add.
-static void run_q8_0_dense(int M, int N, int K, float beta) {
-    ASSERT_GT(gemm_q8_0_dp4a_dense_tile_m(K), 0);
+using DenseRowsFn = bool (*)(const void*, const half*, half*, void*, float*, int, int, int, float,
+                             cudaStream_t);
+static void run_dense_rows(QType qt, DenseRowsFn fn, int M, int N, int K, float beta) {
     Lcg g(0x51u + static_cast<uint32_t>(M * 131 + K));
     std::vector<uint8_t> buf;
-    format_spec(QType::Q8_0).build(buf, N, K, g, NORMAL);
+    format_spec(qt).build(buf, N, K, g, NORMAL);
     void* dW = to_device(buf);
     std::vector<half> hx;
     half* dx = random_x(M * K, g, hx);
@@ -566,14 +568,14 @@ static void run_q8_0_dense(int M, int N, int K, float beta) {
     float* dd8 = nullptr;
     cudaMalloc(&dq8, blocks * sizeof(block_q8_1));
     cudaMalloc(&dd8, blocks * sizeof(float));
-    ASSERT_TRUE(gemm_q8_0_dp4a_dense(dW, dx, dy, dq8, dd8, M, N, K, beta, nullptr));
+    ASSERT_TRUE(fn(dW, dx, dy, dq8, dd8, M, N, K, beta, nullptr));
     cudaDeviceSynchronize();
     std::vector<half> hy(hinit.size());
     cudaMemcpy(hy.data(), dy, hy.size() * sizeof(half), cudaMemcpyDeviceToHost);
     ASSERT_FALSE(any_nan_inf(hy));
 
     std::vector<double> wref;
-    ref_dequant_all(buf, N, K, QType::Q8_0, wref);
+    ref_dequant_all(buf, N, K, qt, wref);
     for (int m = 0; m < M; ++m) {
         std::vector<half> xr(hx.begin() + static_cast<ptrdiff_t>(m) * K,
                              hx.begin() + static_cast<ptrdiff_t>(m + 1) * K);
@@ -597,11 +599,19 @@ static void run_q8_0_dense(int M, int N, int K, float beta) {
 TEST(GgufRef, Q8_0_DenseDp4aDecodeRows) {
     for (int K : {1024, 6144, 12288})
         for (int M : {2, 7, 21})
-            run_q8_0_dense(M, 264, K, 0.0f);
-    run_q8_0_dense(7, 264, 6144, 1.0f);
+            run_dense_rows(QType::Q8_0, gemm_q8_0_dp4a_dense, M, 264, K, 0.0f);
+    run_dense_rows(QType::Q8_0, gemm_q8_0_dp4a_dense, 7, 264, 6144, 1.0f);
     EXPECT_EQ(gemm_q8_0_dp4a_dense_tile_m(1024), 16);
     EXPECT_EQ(gemm_q8_0_dp4a_dense_tile_m(6144), 8);
     EXPECT_EQ(gemm_q8_0_dp4a_dense_tile_m(12288), 4);
+}
+
+// Q4_K decode rows (#2688): K 1024 / 6144 / 17408 = tiles 16 / 8 / 4 (17408 = Qwen3.8 d_ff, ffn_down).
+TEST(GgufRef, Q4_K_DenseDp4aDecodeRows) {
+    for (int K : {1024, 6144, 17408})
+        for (int M : {2, 7, 21})
+            run_dense_rows(QType::Q4_K, gemm_q4k_dp4a_dense_rows, M, 264, K, 0.0f);
+    run_dense_rows(QType::Q4_K, gemm_q4k_dp4a_dense_rows, 7, 264, 17408, 1.0f);
 }
 
 }  // namespace imp
