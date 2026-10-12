@@ -649,6 +649,9 @@ pin_host_experts     = false
 # Decode on host-resident NVFP4 experts: routing -> cache slots -> zero-copy gather of
 # the misses, all on the device (no per-layer D2H + host LRU). Needs pin_host_experts.
 device_expert_cache  = true
+# Decode on the device expert cache: the shared expert FFN runs on a side stream while the
+# layer's expert misses cross PCIe; output bits unchanged (the add stays in its place).
+shared_expert_overlap = true
 # Host expert tier (#2621): when host RAM cannot pin every host-resident NVFP4 expert, an LRU
 # of pinned expert units is filled from the checkpoint by parallel pread and feeds the device
 # expert cache (CUDA graphs stay on). 0 = host RAM available minus max(6 GiB, 10 % of RAM), N = cap in MiB (a cap

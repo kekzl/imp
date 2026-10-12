@@ -719,6 +719,8 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
         state.model->model->mtp_.has_value() ? imp::mtp_auto_k_cap(*state.model->model->mtp_) : 0);
     // The enable call below takes the RESOLVED depth, not the requested one.
     mtp_k = state.runtime_config.speculative.mtp_k;
+    if (mtp_k <= 0)
+        state.model->model->decline_mtp_head();
 
     // Re-stash the runtime config before each Engine construction so take_pending_runtime_config()
     // picks it up: a runtime model load rebuilds the Engine and consumes the pending slot.

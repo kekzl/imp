@@ -142,6 +142,15 @@ public:
     // decode sitting switched off, instead of requiring a startup-log grep.
     bool mtp_head_available_unloaded_ = false;
 
+    // speculative.mtp_k resolved to 0 after the head loaded (auto declines Qwen4Exp): drop it
+    // before the GPU upload so its VRAM (2560 MiB on Flash-Next) goes to the expert cache.
+    void decline_mtp_head() {
+        if (mtp_.has_value()) {
+            mtp_.reset();
+            mtp_head_available_unloaded_ = true;
+        }
+    }
+
     // Load-time scratch for NVFP4 prequant scale tensors, keyed "L{idx}.{slot}" (dense),
     // "L{idx}.expert_w_{kind}.{e}" (per-expert), "out_proj" (LM head). Cleared after Phase 0's
     // promote() copies scale pointers onto each weight's .scales/.tensor_scale. Empty for GGUF

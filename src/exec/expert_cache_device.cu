@@ -21,17 +21,102 @@ namespace {
 
 constexpr int kResolveThreads = 256;
 constexpr int kMaxEntries = 3 * kDevExpertMaxTopK;
+constexpr int kResolveSmemSlots = 4096;  // 16 KiB of stamps; larger layers scan global memory
+
+// (stamp, slot) lexicographic min: the least recently used slot, ties to the lower index.
+__device__ __forceinline__ void argmin_merge(uint32_t& bestv, int& best, uint32_t ov, int ob) {
+    if (ob >= 0 && (best < 0 || ov < bestv || (ov == bestv && ob < best))) {
+        bestv = ov;
+        best = ob;
+    }
+}
+
+__device__ __forceinline__ void warp_argmin(uint32_t& bestv, int& best) {
+    for (int off = 16; off > 0; off >>= 1) {
+        const uint32_t ov = __shfl_xor_sync(0xffffffffu, bestv, off);
+        const int ob = __shfl_xor_sync(0xffffffffu, best, off);
+        argmin_merge(bestv, best, ov, ob);
+    }
+}
+
+// Block-wide LRU victim among slots not stamped this step; the result is valid on thread 0.
+// Warp shuffles, then one 8-entry pass: 1 barrier (the shared-memory tree took 9, 11.8 us per
+// Flash-Next layer).
+__device__ __forceinline__ int lru_victim(const DevExpertLayer& L, const uint32_t* s_stamp,
+                                          bool stamps_in_smem, uint32_t clock, int* s_best,
+                                          uint32_t* s_bestv) {
+    const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+    int best = -1;
+    uint32_t bestv = UINT_MAX;
+    for (int s = tid; s < L.slots; s += kResolveThreads) {
+        const uint32_t v = stamps_in_smem ? s_stamp[s] : L.stamp[s];
+        if (v != clock && v < bestv) {
+            bestv = v;
+            best = s;
+        }
+    }
+    warp_argmin(bestv, best);
+    if (lane == 0) {
+        s_best[warp] = best;
+        s_bestv[warp] = bestv;
+    }
+    __syncthreads();
+    if (warp == 0) {
+        best = lane < kResolveThreads / 32 ? s_best[lane] : -1;
+        bestv = lane < kResolveThreads / 32 ? s_bestv[lane] : UINT_MAX;
+        warp_argmin(bestv, best);
+    }
+    return best;
+}
+
+// Miss bookkeeping for entry i, one thread per miss: victims are distinct slots and their old keys
+// are resident, so no miss key aliases another's old key, and the dependent loads (key_of_slot,
+// src) overlap instead of queueing on thread 0.
+__device__ __forceinline__ void commit_miss(const DevExpertLayer& L, int key, int victim, int ord,
+                                            uint32_t clock, DevMissEntry* misses) {
+    const int old = L.key_of_slot[victim];
+    const DevExpertSrc src = L.src[key];
+    if (old >= 0)
+        L.slot_of[old] = -1;
+    L.slot_of[key] = victim;
+    L.key_of_slot[victim] = key;
+    L.stamp[victim] = clock;
+    L.slot_scales[victim] = src.scale;
+    misses[ord] = DevMissEntry{src.packed, src.ms,  L.pool + static_cast<size_t>(victim) * L.slot_bytes,
+                               nullptr,    nullptr, key,
+                               old};
+}
+
+// Thread 0, after the last miss: publish the count, post tiered layers, count hits and misses.
+__device__ __forceinline__ void resolve_finish(const DevExpertLayer& L, int n, int nmiss, int* n_miss_out,
+                                               TierMailbox* mb, uint32_t* tier_seq, int layer) {
+    *n_miss_out = nmiss;
+    if (mb) {  // tiered layer: misses are in mapped memory, post them to the tier thread
+        const uint32_t s = *tier_seq + 1;
+        *tier_seq = s;
+        mb->layer = layer;
+        __threadfence_system();
+        *reinterpret_cast<volatile uint32_t*>(&mb->req_seq) = s;
+        __threadfence_system();
+    }
+    atomicAdd(&L.stats[0], static_cast<unsigned long long>(n - nmiss));
+    atomicAdd(&L.stats[1], static_cast<unsigned long long>(nmiss));
+}
 
 // One block. Phase 1: every routed (proj, expert) looks itself up; hits restamp their slot.
 // Phase 2: misses, in order, each take the least recently stamped slot not used this step.
+// Phase 3: one thread per miss updates the tables and writes its gather entry.
 __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __restrict__ expert_indices,
                                             int top_k, int32_t* __restrict__ slot_idx_out,
                                             DevMissEntry* __restrict__ misses, int* __restrict__ n_miss_out,
                                             TierMailbox* mb, uint32_t* tier_seq, int layer) {
     __shared__ int s_key[kMaxEntries];
     __shared__ int s_miss[kMaxEntries];
-    __shared__ int s_best[kResolveThreads];
-    __shared__ uint32_t s_bestv[kResolveThreads];
+    __shared__ int s_victim[kMaxEntries];
+    __shared__ int s_ord[kMaxEntries];  // miss ordinal in the gather list
+    __shared__ int s_best[kResolveThreads / 32];
+    __shared__ uint32_t s_bestv[kResolveThreads / 32];
+    __shared__ uint32_t s_stamp[kResolveSmemSlots];
     __shared__ uint32_t s_clock;
     __shared__ int s_nmiss;
 
@@ -45,91 +130,51 @@ __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __r
 
     if (tid < n) {
         const int proj = tid / top_k;
-        const int e = expert_indices[tid - proj * top_k];
-        const int key = proj * L.n_experts + e;
+        const int key = proj * L.n_experts + expert_indices[tid - proj * top_k];
         s_key[tid] = key;
         const int s = L.slot_of[key];
+        s_miss[tid] = s < 0;
         if (s >= 0) {
             L.stamp[s] = s_clock;
             slot_idx_out[tid] = s;
-            s_miss[tid] = 0;
-        } else {
-            s_miss[tid] = 1;
         }
     }
+    __syncthreads();
+
+    // Stamps in shared memory for the victim scans (hits restamped above are visible after the barrier).
+    const bool stamps_in_smem = L.slots <= kResolveSmemSlots;
+    if (stamps_in_smem)
+        for (int s = tid; s < L.slots; s += kResolveThreads)
+            s_stamp[s] = L.stamp[s];
     __syncthreads();
 
     for (int i = 0; i < n; ++i) {
         if (!s_miss[i])
             continue;
-        // argmin stamp over the layer's slots, excluding slots stamped this step.
-        int best = -1;
-        uint32_t bestv = UINT_MAX;
-        for (int s = tid; s < L.slots; s += kResolveThreads) {
-            const uint32_t v = L.stamp[s];
-            if (v != s_clock && v < bestv) {
-                bestv = v;
-                best = s;
-            }
-        }
-        s_best[tid] = best;
-        s_bestv[tid] = bestv;
-        __syncthreads();
-        // Tree-reduce the per-thread argmins. This was a serial scan of all kResolveThreads
-        // entries on thread 0, once per miss: 30 x 256 single-threaded iterations per layer,
-        // 1.10 ms per token over 48 layers. Ties go to the lower slot index; any slot holding
-        // the minimum stamp is an LRU victim, so the pick stays correct either way.
-        for (int off = kResolveThreads / 2; off > 0; off >>= 1) {
-            if (tid < off) {
-                const int o = tid + off;
-                const bool take = s_best[o] >= 0 &&
-                                  (s_best[tid] < 0 || s_bestv[o] < s_bestv[tid] ||
-                                   (s_bestv[o] == s_bestv[tid] && s_best[o] < s_best[tid]));
-                if (take) {
-                    s_bestv[tid] = s_bestv[o];
-                    s_best[tid] = s_best[o];
-                }
-            }
-            __syncthreads();
-        }
+        const int best = lru_victim(L, s_stamp, stamps_in_smem, s_clock, s_best, s_bestv);
         if (tid == 0) {
-            const int victim = s_best[0];
-            const int key = s_key[i];
-            if (victim >= 0) {
-                const int old = L.key_of_slot[victim];
-                if (old >= 0)
-                    L.slot_of[old] = -1;
-                L.slot_of[key] = victim;
-                L.key_of_slot[victim] = key;
-                L.stamp[victim] = s_clock;
-                L.slot_scales[victim] = L.src[key].scale;
-                misses[s_nmiss] = DevMissEntry{L.src[key].packed,
-                                               L.src[key].ms,
-                                               L.pool + static_cast<size_t>(victim) * L.slot_bytes,
-                                               nullptr,
-                                               nullptr,
-                                               key,
-                                               old};
-                ++s_nmiss;
-            }
             // victim < 0 cannot happen: slots >= 3 * top_k is checked at init.
-            slot_idx_out[i] = victim;
+            s_victim[i] = best;
+            if (best >= 0) {
+                if (stamps_in_smem)
+                    s_stamp[best] = s_clock;
+                else
+                    L.stamp[best] = s_clock;
+                s_ord[i] = s_nmiss++;
+            }
         }
         __syncthreads();
     }
-    if (tid == 0) {
-        *n_miss_out = s_nmiss;
-        if (mb) {  // tiered layer: misses are in mapped memory, post them to the tier thread
-            const uint32_t s = *tier_seq + 1;
-            *tier_seq = s;
-            mb->layer = layer;
-            __threadfence_system();
-            *reinterpret_cast<volatile uint32_t*>(&mb->req_seq) = s;
-            __threadfence_system();
-        }
-        atomicAdd(&L.stats[0], static_cast<unsigned long long>(n - s_nmiss));
-        atomicAdd(&L.stats[1], static_cast<unsigned long long>(s_nmiss));
+    if (tid < n && s_miss[tid]) {
+        if (s_victim[tid] >= 0)
+            commit_miss(L, s_key[tid], s_victim[tid], s_ord[tid], s_clock, misses);
+        slot_idx_out[tid] = s_victim[tid];
+        if (mb)
+            __threadfence_system();  // tiered: the host thread reads this entry after the mailbox post
     }
+    __syncthreads();
+    if (tid == 0)
+        resolve_finish(L, n, s_nmiss, n_miss_out, mb, tier_seq, layer);
 }
 
 // Prefill staging source for key: its VRAM slot when resident (no PCIe read), else src[key].
