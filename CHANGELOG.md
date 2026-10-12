@@ -4,8 +4,10 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.52.1] - 2026-10-12
+
 ### Changed
-- Host expert tier (host RAM too small to pin all NVFP4 experts): prefill reads land in free tier units instead of throw-away scratch, so the next prompt hits them. Qwen3.8-Flash-Next-NVFP4 pp512 at a 64 GiB host 1972-2016 -> 581-588 ms, 32 GiB 2047 -> 595 ms; tier hit rate 33 -> 84 %.
+- Host expert tier (host RAM too small to pin all NVFP4 experts): prefill reads land in free tier units instead of throw-away scratch, so the next prompt hits them. Qwen3.8-Flash-Next-NVFP4 pp512 at a 64 GiB host 1972-2016 -> 581-588 ms, 32 GiB 2047 -> 595 ms; tier hit rate 33 -> 84 % (#2700).
 
 ## [0.52.0] - 2026-10-12
 
