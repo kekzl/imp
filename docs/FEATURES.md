@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-11
-commit: debbdd98
+verified: 2026-10-12
+commit: aeff0434
 -->
 
 # Feature matrix
@@ -36,6 +36,7 @@ Source: `src/core/qtype.h`.
 | Q4_K, Q5_K, Q6_K | ✅ |
 | Q2_K, Q3_K, Q8_K | 🟡 dequant path, no gate reads a checkpoint in these (#1680) |
 | IQ4_NL, IQ4_XS | ✅ |
+| IQ3_S | 🟡 dequant path, golden-tested; Unsloth UD mixes (#2687) |
 | F32, F16, BF16 | ✅ |
 | NVFP4 (two-level block scaling) | ✅ the primary weight path |
 | MXFP4 | ✅ gpt-oss experts, converted to NVFP4 at load |

@@ -4,6 +4,12 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- GGUF IQ3_S (ggml type 21): GPU dequant, bit-exact vs gguf-py on the 4 IQ3_S tensors of Unsloth's Qwen3.8-27B UD-Q4_K_M, which now loads. IQ1/IQ2/IQ3_XXS and other types without a path are refused at parse, naming type and tensor (#2687).
+
+### Fixed
+- GGUF MTP (nextn) blocks after the decoder stack ran as an extra decoder layer: Qwen3.8-27B UD-Q4_K_M ppl_corpus_45k PPL 4.9379 -> 4.4504 (ggml-org Q4_K_M 4.4623; llama.cpp 4.3196 / 4.3308) (#2687).
+
 ## [0.51.0] - 2026-10-11
 
 ### Added
