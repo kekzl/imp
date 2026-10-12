@@ -594,6 +594,8 @@ public:
     // Workspace sizing that converts a token count into a block count needs
     // this and not kKVBlockSize - the two differ on n_kv_heads <= 4 models.
     void set_kv_block_size(int n) noexcept { kv_block_size_ = n > 0 ? n : kKVBlockSize; }
+    // KV dtype the engine will build the pool with; sizes the expert cache's share of unused KV room.
+    void set_kv_cache_dtype(QType q) noexcept { kv_plan_dtype_ = q; }
 
     // Activation calibration ([calibration] enabled): collects per-input-
     // channel activation magnitudes off gemm_via_handle_ for an offline
@@ -822,6 +824,11 @@ private:
     size_t expert_cache_slot_raw_ = 0;
     bool expert_cache_nvfp4_slots_ = false;
     DeviceExpertCache dev_expert_cache_;  // decode: routing -> slots -> gather, all on device
+    // Expert cache auto budget: KV bytes a context shorter than the model default leaves unused.
+    QType kv_plan_dtype_ = QType::F16;
+    int kv_ctx_tokens_ = 0;  // engine max_seq_len as init() got it
+    int kv_ctx_batch_ = 0;   // engine max_batch_size, 0 = unknown
+    [[nodiscard]] size_t expert_cache_ctx_slack_bytes_() const;
     struct ShexpOverlap {
         CudaStream stream;
         CudaEvent fork;

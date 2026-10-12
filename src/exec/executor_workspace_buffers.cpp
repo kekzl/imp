@@ -723,6 +723,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                         nvfp4_host_experts ? kExpertCacheAutoPctHostResident : 15;
                     budget = budget / 100 * auto_pct;
                     budget = budget > stage_reserve ? budget - stage_reserve : 0;
+                    if (nvfp4_host_experts && free_mem > safety + budget)
+                        budget += std::min(expert_cache_ctx_slack_bytes_(), free_mem - safety - budget);
                 }
                 const auto& mcfg = model_->config();
                 bool debug_parity = dispatch_policy().moe.expert_cache_debug_parity;
