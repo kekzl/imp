@@ -5,6 +5,7 @@
 # Usage: bash tools/analysis/engine3_conc.sh [CONCS="1 32"] [TRIALS=2] [WAVES=3]
 # [NVFP4=Qwen3.8-27B-NVFP4-vllm] [GGUF=Qwen3.8-27B-UD-Q4_K_M.gguf] [IMG_IMP=imp:test]
 # [IMG_VLLM=vllm/vllm-openai:v0.31.0] [IMG_LLAMA=ghcr.io/ggml-org/llama.cpp:server-cuda]
+# [ARMS="imp-gguf llama-gguf"] [IMP_SET=key=value, one extra --set on the imp arms]
 set -u
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -40,7 +41,7 @@ start() {  # $1 = arm, $2 = conc
         imp-nvfp4|imp-gguf)
             local m=$NVFP4; [ "$1" = imp-gguf ] && m=$GGUF
             docker run "${common[@]}" "$IMG_IMP" imp-server --model "/models/$m" --host 0.0.0.0 \
-                --port "$PORT" --max-concurrent "$2" --set "runtime.max_batch_size=$2" >/dev/null
+                --port "$PORT" --max-concurrent "$2" --set "runtime.max_batch_size=$2" ${IMP_SET:+--set "$IMP_SET"} >/dev/null
             wait_healthy 600 ;;
         vllm-nvfp4)
             docker run "${common[@]}" --ipc=host -e VLLM_WSL2_ENABLE_PIN_MEMORY=1 "$IMG_VLLM" \
@@ -72,10 +73,10 @@ run_arm() {  # $1 = arm, $2 = conc, $3 = trial
     sleep 5
 }
 
-ARMS=(imp-nvfp4 vllm-nvfp4 imp-gguf llama-gguf)
+read -r -a ARMS <<< "${ARMS:-imp-nvfp4 vllm-nvfp4 imp-gguf llama-gguf}"
 for c in $CONCS; do
     for t in $(seq 1 "$TRIALS"); do
-        if [ $((t % 2)) -eq 1 ]; then order=("${ARMS[@]}"); else order=(llama-gguf imp-gguf vllm-nvfp4 imp-nvfp4); fi
+        order=(); for a in "${ARMS[@]}"; do if [ $((t % 2)) -eq 1 ]; then order+=("$a"); else order=("$a" "${order[@]}"); fi; done
         for a in "${order[@]}"; do run_arm "$a" "$c" "$t"; done
     done
 done

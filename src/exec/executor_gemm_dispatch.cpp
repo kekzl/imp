@@ -26,6 +26,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/mxfp4_gemm.h"
 #include "compute/ggml_mmvq.h"
+#include "compute/gemm_q8_0_dense.h"
 #include "compute/mmq_q8_imma.h"
 #include "compute/hadamard.h"
 #include "core/pdl.h"
@@ -56,26 +57,54 @@ static bool dequant_scratch_fits(const QuantScratch* qs, const Tensor& weight) {
     return false;
 }
 
+// Block-quant weight read in place (Q8_0 dp4a, Q4_K IMMA) instead of a per-call dequant to FP16
+// + cuBLAS. Q8_0: decode rows only (Q4_K_M GGUF GDN/attention projections, #2688), prompt rows
+// keep cuBLAS. Q4_K: any M >= 2 (tier Undefined on gemma-3: every dense Q4_K weight).
+static bool uncached_in_place(const Tensor& input, const Tensor& weight, Tensor& output,
+                              const GemmContext& ctx, bool decode_rows) {
+    const int M = static_cast<int>(input.shape[0]);
+    if (weight.dropped_source || M < 2 || input.qtype != QType::F16 || output.qtype != QType::F16 ||
+        input.stride[0] != weight.shape[1] || output.stride[0] != weight.shape[0])
+        return false;
+    const auto* x = reinterpret_cast<const __half*>(input.data);
+    auto* y = reinterpret_cast<__half*>(output.data);
+    const int N = static_cast<int>(weight.shape[0]);
+    const int K = static_cast<int>(weight.shape[1]);
+    if (weight.qtype == QType::Q8_0) {
+        // Decode rows only, M <= 64 (weight re-read per 16/8/4-row tile); prompt rows keep cuBLAS.
+        // The plane IMMA path declines here: it prepares a weight copy, refused under graph capture.
+        const auto* qs = ctx.qscratch;
+        const size_t blocks = static_cast<size_t>(M) * (K / 32);
+        const bool ok = decode_rows && M <= 64 && qs && qs->q8_1_prefill_buf && qs->d8_prefill_buf &&
+                        blocks * sizeof(block_q8_1) <= qs->q8_1_prefill_bytes &&
+                        blocks * sizeof(float) <= qs->d8_prefill_bytes &&
+                        gemm_q8_0_dp4a_dense(weight.data, x, y, qs->q8_1_prefill_buf, qs->d8_prefill_buf, M,
+                                             N, K, ctx.beta, ctx.stream);
+        static bool s_logged[2][2] = {};  // [decode_rows][ok]: activity proof per outcome, once each
+        if (!s_logged[decode_rows][ok]) {
+            s_logged[decode_rows][ok] = true;
+            IMP_LOG_INFO("uncached Q8_0 GEMM M=%d N=%d K=%d beta=%.0f decode_rows=%d: %s", M, N, K, ctx.beta,
+                         decode_rows, ok ? "dp4a in place" : "dequant + cuBLAS");
+        }
+        return ok;
+    }
+    if (weight.qtype == QType::Q4_K)
+        return ctx.q4k_imma_prefill && mmq_q4k_imma_gemm(weight.data, x, y, M, N, K, ctx.stream, ctx.beta);
+    return false;
+}
+
 // Uncached fallback: safety net for weights without a WeightHandle
 // (kInvalidTensorID, budget-exhausted) and for M=1 beta!=0 residual-add.
-void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight,
-                                            Tensor& output, const GemmContext& ctx) {
+void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, Tensor& output,
+                                     const GemmContext& ctx, bool decode_rows) {
     const auto* wc = ctx.wcache;
     const auto* qs = ctx.qscratch;
     if (!wc || !qs)
         return;
 
     const QType qtype = weight.qtype;
-
-    // Q4_K with no FP16 cache (tier Undefined on gemma-3: every dense Q4_K weight): IMMA
-    // reads the blocks in place instead of a per-call dequant to FP16 + cuBLAS.
     const int M = static_cast<int>(input.shape[0]);
-    if (ctx.q4k_imma_prefill && qtype == QType::Q4_K && !weight.dropped_source && M >= 2 &&
-        input.qtype == QType::F16 && output.qtype == QType::F16 && input.stride[0] == weight.shape[1] &&
-        output.stride[0] == weight.shape[0] &&
-        mmq_q4k_imma_gemm(weight.data, reinterpret_cast<const __half*>(input.data),
-                          reinterpret_cast<__half*>(output.data), M, static_cast<int>(weight.shape[0]),
-                          static_cast<int>(weight.shape[1]), ctx.stream, ctx.beta))
+    if (uncached_in_place(input, weight, output, ctx, decode_rows))
         return;
 
     if (ctx.beta != 0.0f) {
@@ -359,7 +388,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         weight.kind = h.kind;
         weight.scales = h.source_scales;
         weight.tensor_scale = h.source_tensor_scale;
-        gemm_dispatch_uncached_fallback(input, weight, output, ctx);
+        gemm_dispatch_uncached_fallback(input, weight, output, ctx, cur_decode_rows_);
         return;
     }
 
@@ -645,7 +674,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 weight.kind = h.kind;
                 weight.scales = h.source_scales;
                 weight.tensor_scale = h.source_tensor_scale;
-                gemm_dispatch_uncached_fallback(input, weight, output, ctx);
+                gemm_dispatch_uncached_fallback(input, weight, output, ctx, cur_decode_rows_);
                 return;
             }
         }
@@ -703,7 +732,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // shapes; the fusion saving only dominates in the MoE regime (high dequant tax), where Q6_K-IMMA
         // ships instead.
         Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
-        gemm_dispatch_uncached_fallback(input, weight, output, ctx);
+        gemm_dispatch_uncached_fallback(input, weight, output, ctx, cur_decode_rows_);
         return;
     }
 

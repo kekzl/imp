@@ -22,6 +22,7 @@
 
 #include "compute/gemm.h"
 #include "compute/ggml_mmvq.h"
+#include "compute/gemm_q8_0_dense.h"
 #include "quant/dequant_gpu.h"
 #include "gguf_format_ref.h"
 
@@ -543,5 +544,64 @@ TEST(GgufRef, Q4_K_GemvMmvq) { run_mmvq_gemv("Q4_K", QType::Q4_K, 256, 1024, ggm
 // Q5_1 / Q5_K MMVQ had no reference (the Q5_1 dp4a trait read its nibbles interleaved, #2101).
 TEST(GgufRef, Q5_1_GemvMmvq) { run_mmvq_gemv("Q5_1", QType::Q5_1, 256, 1024, ggml_mmvq_q5_1); }
 TEST(GgufRef, Q5_K_GemvMmvq) { run_mmvq_gemv("Q5_K", QType::Q5_K, 256, 1024, ggml_mmvq_q5k); }
+
+// Dense Q8_0 dp4a at decode M (#2688): every row against the fp64 reference, across the three
+// row tiles (K 1024 -> 16, 6144 -> 8, 12288 -> 4), a ragged last tile and the beta=1 residual add.
+static void run_q8_0_dense(int M, int N, int K, float beta) {
+    ASSERT_GT(gemm_q8_0_dp4a_dense_tile_m(K), 0);
+    Lcg g(0x51u + static_cast<uint32_t>(M * 131 + K));
+    std::vector<uint8_t> buf;
+    format_spec(QType::Q8_0).build(buf, N, K, g, NORMAL);
+    void* dW = to_device(buf);
+    std::vector<half> hx;
+    half* dx = random_x(M * K, g, hx);
+    std::vector<half> hinit(static_cast<size_t>(M) * N);
+    for (auto& v : hinit)
+        v = __float2half(beta == 1.0f ? g.unit() : 0.0f);
+    half* dy = nullptr;
+    cudaMalloc(&dy, hinit.size() * sizeof(half));
+    cudaMemcpy(dy, hinit.data(), hinit.size() * sizeof(half), cudaMemcpyHostToDevice);
+    const size_t blocks = static_cast<size_t>(M) * (K / 32);
+    void* dq8 = nullptr;
+    float* dd8 = nullptr;
+    cudaMalloc(&dq8, blocks * sizeof(block_q8_1));
+    cudaMalloc(&dd8, blocks * sizeof(float));
+    ASSERT_TRUE(gemm_q8_0_dp4a_dense(dW, dx, dy, dq8, dd8, M, N, K, beta, nullptr));
+    cudaDeviceSynchronize();
+    std::vector<half> hy(hinit.size());
+    cudaMemcpy(hy.data(), dy, hy.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    ASSERT_FALSE(any_nan_inf(hy));
+
+    std::vector<double> wref;
+    ref_dequant_all(buf, N, K, QType::Q8_0, wref);
+    for (int m = 0; m < M; ++m) {
+        std::vector<half> xr(hx.begin() + static_cast<ptrdiff_t>(m) * K,
+                             hx.begin() + static_cast<ptrdiff_t>(m + 1) * K);
+        std::vector<double> yref;
+        ref_gemv(wref, xr, N, K, yref);
+        std::vector<half> yr(N);
+        for (int n = 0; n < N; ++n)
+            yr[n] = __float2half(__half2float(hy[static_cast<size_t>(m) * N + n]) -
+                                 __half2float(hinit[static_cast<size_t>(m) * N + n]));
+        GemvStats s = gemv_eval(yr, yref);
+        EXPECT_LT(s.rms_rel, 1.5e-2) << "M=" << M << " K=" << K << " beta=" << beta << " row " << m;
+        EXPECT_LT(s.max_rel_scaled, 5e-2) << "M=" << M << " K=" << K << " beta=" << beta << " row " << m;
+    }
+    cudaFree(dW);
+    cudaFree(dx);
+    cudaFree(dy);
+    cudaFree(dq8);
+    cudaFree(dd8);
+}
+
+TEST(GgufRef, Q8_0_DenseDp4aDecodeRows) {
+    for (int K : {1024, 6144, 12288})
+        for (int M : {2, 7, 21})
+            run_q8_0_dense(M, 264, K, 0.0f);
+    run_q8_0_dense(7, 264, 6144, 1.0f);
+    EXPECT_EQ(gemm_q8_0_dp4a_dense_tile_m(1024), 16);
+    EXPECT_EQ(gemm_q8_0_dp4a_dense_tile_m(6144), 8);
+    EXPECT_EQ(gemm_q8_0_dp4a_dense_tile_m(12288), 4);
+}
 
 }  // namespace imp
