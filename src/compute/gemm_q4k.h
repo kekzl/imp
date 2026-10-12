@@ -32,4 +32,10 @@ void gemm_q5k_dp4a_dense(const void* packed_q5k, const half* activations, half* 
                           void* q8_scratch, float* d8_scratch,
                           int M, int N, int K, cudaStream_t stream = nullptr);
 
+// Q4_K dense dp4a for decode rows: any K % 256 (16/8/4-row activation tile by K), beta 0 or 1
+// (out += for 1). False (nothing launched) when no tile fits or beta is neither (#2688).
+[[nodiscard]] bool gemm_q4k_dp4a_dense_rows(const void* packed_q4k, const half* activations, half* output,
+                                            void* q8_scratch, float* d8_scratch, int M, int N, int K,
+                                            float beta, cudaStream_t stream);
+
 }  // namespace imp

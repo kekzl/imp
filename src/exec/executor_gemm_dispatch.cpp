@@ -57,40 +57,52 @@ static bool dequant_scratch_fits(const QuantScratch* qs, const Tensor& weight) {
     return false;
 }
 
-// Block-quant weight read in place (Q8_0 dp4a, Q4_K IMMA) instead of a per-call dequant to FP16
-// + cuBLAS. Q8_0: decode rows only (Q4_K_M GGUF GDN/attention projections, #2688), prompt rows
-// keep cuBLAS. Q4_K: any M >= 2 (tier Undefined on gemma-3: every dense Q4_K weight).
-static bool uncached_in_place(const Tensor& input, const Tensor& weight, Tensor& output,
-                              const GemmContext& ctx, bool decode_rows) {
+// Q8_0 / Q4_K decode rows (M <= 64): dp4a on the GGUF blocks in place, weight read once per
+// 16/8/4-row activation tile (#2688). Q8_0's plane IMMA declines under graph capture (weight
+// copy) and Q4_K's IMMA tile is 128 rows, so both cost a whole-weight pass per few rows before.
+static bool dp4a_decode_rows(const Tensor& input, const Tensor& weight, Tensor& output,
+                             const GemmContext& ctx) {
+    const auto* qs = ctx.qscratch;
     const int M = static_cast<int>(input.shape[0]);
-    if (weight.dropped_source || M < 2 || input.qtype != QType::F16 || output.qtype != QType::F16 ||
-        input.stride[0] != weight.shape[1] || output.stride[0] != weight.shape[0])
+    const int N = static_cast<int>(weight.shape[0]);
+    const int K = static_cast<int>(weight.shape[1]);
+    const size_t blocks = static_cast<size_t>(M) * (K / 32);
+    if (M > 64 || !qs || !qs->q8_1_prefill_buf || !qs->d8_prefill_buf ||
+        blocks * sizeof(block_q8_1) > qs->q8_1_prefill_bytes || blocks * sizeof(float) > qs->d8_prefill_bytes)
         return false;
     const auto* x = reinterpret_cast<const __half*>(input.data);
     auto* y = reinterpret_cast<__half*>(output.data);
-    const int N = static_cast<int>(weight.shape[0]);
-    const int K = static_cast<int>(weight.shape[1]);
-    if (weight.qtype == QType::Q8_0) {
-        // Decode rows only, M <= 64 (weight re-read per 16/8/4-row tile); prompt rows keep cuBLAS.
-        // The plane IMMA path declines here: it prepares a weight copy, refused under graph capture.
-        const auto* qs = ctx.qscratch;
-        const size_t blocks = static_cast<size_t>(M) * (K / 32);
-        const bool ok = decode_rows && M <= 64 && qs && qs->q8_1_prefill_buf && qs->d8_prefill_buf &&
-                        blocks * sizeof(block_q8_1) <= qs->q8_1_prefill_bytes &&
-                        blocks * sizeof(float) <= qs->d8_prefill_bytes &&
-                        gemm_q8_0_dp4a_dense(weight.data, x, y, qs->q8_1_prefill_buf, qs->d8_prefill_buf, M,
-                                             N, K, ctx.beta, ctx.stream);
-        static bool s_logged[2][2] = {};  // [decode_rows][ok]: activity proof per outcome, once each
-        if (!s_logged[decode_rows][ok]) {
-            s_logged[decode_rows][ok] = true;
-            IMP_LOG_INFO("uncached Q8_0 GEMM M=%d N=%d K=%d beta=%.0f decode_rows=%d: %s", M, N, K, ctx.beta,
-                         decode_rows, ok ? "dp4a in place" : "dequant + cuBLAS");
-        }
-        return ok;
+    const bool ok = weight.qtype == QType::Q8_0
+                        ? gemm_q8_0_dp4a_dense(weight.data, x, y, qs->q8_1_prefill_buf, qs->d8_prefill_buf, M,
+                                               N, K, ctx.beta, ctx.stream)
+                        : gemm_q4k_dp4a_dense_rows(weight.data, x, y, qs->q8_1_prefill_buf,
+                                                   qs->d8_prefill_buf, M, N, K, ctx.beta, ctx.stream);
+    static bool s_logged[2] = {};  // activity proof per outcome, once each
+    if (!s_logged[ok]) {
+        s_logged[ok] = true;
+        IMP_LOG_INFO("uncached %s decode rows M=%d N=%d K=%d beta=%.0f: %s", qtype_name(weight.qtype), M, N,
+                     K, ctx.beta, ok ? "dp4a in place" : "declined");
     }
-    if (weight.qtype == QType::Q4_K)
-        return ctx.q4k_imma_prefill && mmq_q4k_imma_gemm(weight.data, x, y, M, N, K, ctx.stream, ctx.beta);
-    return false;
+    return ok;
+}
+
+// Block-quant weight read in place instead of a per-call dequant to FP16 + cuBLAS: decode rows
+// via dp4a (above); Q4_K prompt rows via IMMA (tier Undefined on gemma-3: every dense Q4_K weight).
+static bool uncached_in_place(const Tensor& input, const Tensor& weight, Tensor& output,
+                              const GemmContext& ctx, bool decode_rows) {
+    const int M = static_cast<int>(input.shape[0]);
+    const bool q8 = weight.qtype == QType::Q8_0;
+    const bool q4k = weight.qtype == QType::Q4_K;
+    if (!(q8 || q4k) || weight.dropped_source || M < 2 || input.qtype != QType::F16 ||
+        output.qtype != QType::F16 || input.stride[0] != weight.shape[1] ||
+        output.stride[0] != weight.shape[0])
+        return false;
+    if (decode_rows && dp4a_decode_rows(input, weight, output, ctx))
+        return true;
+    return q4k && ctx.q4k_imma_prefill &&
+           mmq_q4k_imma_gemm(weight.data, reinterpret_cast<const __half*>(input.data),
+                             reinterpret_cast<__half*>(output.data), M, static_cast<int>(weight.shape[0]),
+                             static_cast<int>(weight.shape[1]), ctx.stream, ctx.beta);
 }
 
 // Uncached fallback: safety net for weights without a WeightHandle
