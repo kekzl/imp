@@ -4,16 +4,19 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
-### Changed
-- GGUF Q8_0 weights without a cache (GDN/attention projections of Q4_K_M mixes) run batched decode rows through a dp4a kernel reading the blocks in place instead of a whole-weight dequant + cuBLAS per step: Qwen3.8-27B Q4_K_M at 32 streams 105.2-105.3 -> 143.3-143.4 tok/s (#2688).
-- GGUF Q4_K weights without a cache run batched decode rows through the dense dp4a kernel (16/8/4-row tile by K, beta 0/1) instead of the 128-row IMMA tile: Qwen3.8-27B Q4_K_M at 32 streams 143.9-145.3 -> 154.7-155.9 tok/s (#2688).
-- GGUF Q8_0 weights decode in place at M=1 too, and `gemm.fp8_ssm_proj` no longer copies Q8_0 GDN projections to FP8 (5280 MiB on Qwen3.8-27B Q4_K_M): tg128 60.02 -> 76.90-77.00 tok/s, 32 streams 157.2 -> 243.5-244.6 tok/s (#2688).
+## [0.52.0] - 2026-10-12
 
 ### Added
-- GGUF IQ3_S (ggml type 21): GPU dequant, bit-exact vs gguf-py on the 4 IQ3_S tensors of Unsloth's Qwen3.8-27B UD-Q4_K_M, which now loads. IQ1/IQ2/IQ3_XXS and other types without a path are refused at parse, naming type and tensor (#2687).
+- GGUF IQ3_S (ggml type 21): GPU dequant, bit-exact vs gguf-py on the 4 IQ3_S tensors of Unsloth's Qwen3.8-27B UD-Q4_K_M, which now loads. IQ1/IQ2/IQ3_XXS and other types without a path are refused at parse, naming type and tensor (#2694).
+
+### Changed
+- GGUF Q8_0 weights without a cache (GDN/attention projections of Q4_K_M mixes) run batched decode rows through a dp4a kernel reading the blocks in place instead of a whole-weight dequant + cuBLAS per step: Qwen3.8-27B Q4_K_M at 32 streams 105.2-105.3 -> 143.3-143.4 tok/s (#2695).
+- GGUF Q4_K weights without a cache run batched decode rows through the dense dp4a kernel (16/8/4-row tile by K, beta 0/1) instead of the 128-row IMMA tile: Qwen3.8-27B Q4_K_M at 32 streams 143.9-145.3 -> 154.7-155.9 tok/s (#2696).
+- GGUF Q8_0 weights decode in place at M=1 too, and `gemm.fp8_ssm_proj` no longer copies Q8_0 GDN projections to FP8 (5280 MiB on Qwen3.8-27B Q4_K_M): tg128 60.02 -> 76.90-77.00 tok/s, 32 streams 157.2 -> 243.5-244.6 tok/s (#2697).
+- Dependencies: open-webui v0.12.0 in `docker-compose.yml`, node image digest in `tools/Dockerfile.claude-code`, five GitHub Actions bumps (#2691, #2692, #2693).
 
 ### Fixed
-- GGUF MTP (nextn) blocks after the decoder stack ran as an extra decoder layer: Qwen3.8-27B UD-Q4_K_M ppl_corpus_45k PPL 4.9379 -> 4.4504 (ggml-org Q4_K_M 4.4623; llama.cpp 4.3196 / 4.3308) (#2687).
+- GGUF MTP (nextn) blocks after the decoder stack ran as an extra decoder layer: Qwen3.8-27B UD-Q4_K_M ppl_corpus_45k PPL 4.9379 -> 4.4504 (ggml-org Q4_K_M 4.4623; llama.cpp 4.3196 / 4.3308) (#2694).
 
 ## [0.51.0] - 2026-10-11
 
