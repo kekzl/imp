@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- `diagnostics.moe_expert_trace` also writes each pick's routing weight; `tools/analysis/expert_prune_sim.py` scores expert-pruned keep sets on it. Flash-Next at 128 of 512 experts keeps 52.9 % of the routing weight on held-out text, so pruning is dropped (#2613).
+
 ## [0.52.1] - 2026-10-12
 
 ### Changed

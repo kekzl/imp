@@ -57,6 +57,7 @@ struct MoEWorkspace {
     // [layer, e0..e_{top_k-1}], one per (token, layer), in stream order. Decode only: a
     // prefill call would append n*top_k at once and break the fixed record stride.
     int* expert_trace = nullptr;
+    float* trace_weights = nullptr;        // [record * top_k + j], tail of the expert_trace allocation
     unsigned int* trace_cursor = nullptr;  // device counter, in ints
     size_t trace_capacity = 0;             // ints
     int trace_top_k = 0;
