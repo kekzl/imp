@@ -24,6 +24,7 @@
 #include "compute/moe_routing.h"
 #include "quant/nvfp4_gemm.h"
 #include "core/logging.h"
+#include "core/kv_dtype.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -703,6 +704,26 @@ void GraphExecutor::run_moe_decode_rows_host_(int layer, cudaStream_t stream, Mo
         run_moe_decode_nvfp4_host(layer, stream, ctx.d, ctx.eff, ctx.top_k, rr, no, h, r, ctx.moe_use_fp32_residual,
                                   ctx.will_skip_residual_copy, ctx.residual_fused, ctx.non_gated_experts);
     }
+}
+
+// KV bytes the engine's context leaves unused against the auto default (model context, capped at
+// 131072 tokens): max_seq_len x max_batch_size below it. 0 when the batch is unknown or the context
+// is the default. Flash-Next (12 attention layers, FP16 KV, 24 KiB/token) at 32768 x 1: 2304 MiB.
+size_t GraphExecutor::expert_cache_ctx_slack_bytes_() const {
+    const auto& cfg = model_->config();
+    const long long dflt = std::min(cfg.max_seq_len > 0 ? cfg.max_seq_len : 131072, 131072);
+    const long long need = static_cast<long long>(kv_ctx_tokens_) * kv_ctx_batch_;
+    if (kv_ctx_batch_ <= 0 || kv_ctx_tokens_ <= 0 || need >= dflt)
+        return 0;
+    size_t elems = 0;  // K + V elements per token over the attention layers
+    for (int i = 0; i < cfg.n_layers; ++i)
+        if (model_->layer(i).wq.data != nullptr && model_->layer(i).gdn_gate.data == nullptr)
+            elems += 2ULL * (cfg.n_kv_heads > 0 ? cfg.n_kv_heads : cfg.n_heads) *
+                     (cfg.head_dim > 0 ? cfg.head_dim : cfg.d_model / std::max(cfg.n_heads, 1));
+    const size_t slack = static_cast<size_t>(dflt - need) * kv_data_bytes(kv_plan_dtype_, elems);
+    IMP_LOG_INFO("Expert cache: +%.0f MiB of KV room unused at %d x %d tokens (default %lld)",
+                 slack / (1024.0 * 1024.0), kv_ctx_tokens_, kv_ctx_batch_, dflt);
+    return slack;
 }
 
 }  // namespace imp

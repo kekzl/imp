@@ -277,6 +277,8 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     // serializing the verify LM head into one full-weight GEMV per row; >=4
     // rows lets the batched-M GEMV reuse each weight read across MR=4 rows.
     max_logit_tokens_ = std::max({max_batch_size, 8, 1});
+    kv_ctx_tokens_ = effective_seq_len;
+    kv_ctx_batch_ = std::max(max_batch_size, 0);
 
     // Wires the scratch-arena component with the live context it sizes
     // against (pointers to GraphExecutor members, e.g. has_gdn_ read live:
