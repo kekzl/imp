@@ -121,6 +121,42 @@ TEST(HostExpertTier, TransientAcquireUsesScratchAndKeepsTheLru) {
         EXPECT_EQ(0, std::memcmp(v[i].packed, pk[lru[i]].data(), pb)) << "key " << lru[i];
 }
 
+// A transient scan fills FREE LRU units (they stay resident: the next prefill hits them) and
+// never evicts: with no free unit left the rest goes to scratch, the resident keys survive.
+TEST(HostExpertTier, TransientMissesFillFreeUnitsOnly) {
+    constexpr size_t pb = 4096, mb = 256;
+    const size_t unit = HostExpertTier::unit_bytes(pb, mb);
+    Arena arena(unit * 6);
+    constexpr int kKeys = 8;
+    std::vector<std::vector<char>> pk, ms;
+    for (int k = 0; k < kKeys; ++k) {
+        pk.push_back(pattern(pb, k));
+        ms.push_back(pattern(mb, 50 + k));
+    }
+    HostExpertTier tier(arena.p, arena.p, arena.bytes, unit, kKeys, 2, /*scratch_units=*/2);
+    ASSERT_EQ(tier.units(), 4);
+    for (int k = 0; k < kKeys; ++k)
+        tier.set_source(k, {pk[k].data(), pb, ms[k].data(), mb});
+    HostExpertTier::UnitView v[4];
+    const int decode[] = {0, 1};
+    ASSERT_TRUE(tier.acquire(decode, 2, v));  // 2 of 4 LRU units used, 2 free
+    const auto s0 = tier.stats();
+
+    // 5, 6 take the two free units; 7 finds none free and goes to scratch.
+    const int scan[] = {5, 6, 7};
+    ASSERT_TRUE(tier.acquire(scan, 3, v, /*transient=*/true));
+    for (int i = 0; i < 3; ++i)
+        EXPECT_EQ(0, std::memcmp(v[i].packed, pk[scan[i]].data(), pb)) << "key " << scan[i];
+    EXPECT_EQ(tier.stats().misses, s0.misses + 3);
+
+    // 0, 1 (decode set) and 5, 6 (kept from the scan) are resident: no read.
+    const int all[] = {0, 1, 5, 6};
+    ASSERT_TRUE(tier.acquire(all, 4, v));
+    EXPECT_EQ(tier.stats().misses, s0.misses + 3);
+    for (int i = 0; i < 4; ++i)
+        EXPECT_EQ(0, std::memcmp(v[i].packed, pk[all[i]].data(), pb)) << "key " << all[i];
+}
+
 TEST(HostExpertTier, ExchangeMovesHitsOutAndTakesVictimsIn) {
     constexpr size_t pb = 4096, mb = 256;
     const size_t unit = HostExpertTier::unit_bytes(pb, mb);
