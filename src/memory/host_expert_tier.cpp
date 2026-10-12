@@ -357,7 +357,11 @@ bool HostExpertTier::acquire(const int* keys, int n, UnitView* out, bool transie
         order.push_back(keys[i]);
         need += (!transient || unit_of_[keys[i]] < 0) ? 1 : 0;
     }
-    if (need > (transient ? n_units_ - n_lru_ : n_lru_))
+    int cap = transient ? n_units_ - n_lru_ : n_lru_;
+    // Transient misses also fit free LRU units, which sit contiguous at the cold end.
+    for (int u = tail_; transient && need > cap && u >= 0 && key_of_[u] < 0; u = prev_[u])
+        ++cap;
+    if (need > cap)
         return false;
 
     std::vector<std::pair<int, int>> loads;  // (unit, key)
@@ -378,7 +382,10 @@ bool HostExpertTier::acquire(const int* keys, int n, UnitView* out, bool transie
         int& u = slot_of_key[k];
         if (u >= 0)
             continue;
-        if (transient) {
+        // Transient: a free LRU unit keeps the read (evicts nothing); scratch only when none is
+        // free. Scratch-only: Flash-Next at a 64 GiB host, 55.5 GiB tier, 33 % hits, 160 GiB pread per run.
+        const int fv = transient ? victim_() : -1;
+        if (transient && (fv < 0 || key_of_[fv] >= 0)) {
             u = next_scratch++;
         } else {
             u = victim_();  // the capacity check keeps it outside this call
