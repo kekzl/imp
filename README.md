@@ -1,8 +1,8 @@
 <!--
 layer: L0
 audience: newcomers
-verified: 2026-10-11
-commit: 54921da6
+verified: 2026-10-12
+commit: 95a448b7
 -->
 
 <p align="center">
@@ -31,7 +31,8 @@ General-purpose engines run on every GPU, so none of them is built around yours.
        cuda=13.4.2 path=server-api cmd=`tools/analysis/engine3_conc.sh` n=2 trials x 3 waves, range of the trial medians
        note=300-token greedy answers, ignore_eos; llama.cpp image server-cuda sha256 9d835c2f]
 
-imp and vLLM read the same NVFP4 checkpoint, llama.cpp the Q4_K_M GGUF. On that GGUF imp is behind llama.cpp today (58.0-60.7 and 107.0-107.4 tokens/s, [#2688](https://github.com/kekzl/imp/issues/2688)): for Qwen3.8 on imp, take the NVFP4 checkpoint.
+imp and vLLM read the same NVFP4 checkpoint, llama.cpp the Q4_K_M GGUF. On that same GGUF imp leads too: **72.7-73.4** vs 60.5-61.0 tokens/s for one user, **240.0-244.4** vs 154.5-155.1 for 32 users at once.
+[PROV: commit=95a448b7 date=2026-10-12 hw=RTX5090 model=Qwen3.8-27B quant=Q4_K_M (ggml-org GGUF, both engines) cuda=13.4.2 path=server-api cmd=`ARMS="imp-gguf llama-gguf" tools/analysis/engine3_conc.sh` n=2 trials x 3 waves note=same harness as above; #2688]
 
 ### Qwen3.8-Flash-Next: four times bigger than the card
 

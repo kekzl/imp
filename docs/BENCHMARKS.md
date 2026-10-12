@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-10-12
-commit: aeff0434
+commit: 95a448b7
 -->
 
 # Benchmarks
@@ -145,10 +145,10 @@ greedy answers with `ignore_eos`, aggregate = completion tokens / wall, values =
 | imp | Qwen3.8-27B-NVFP4-vllm | **91.0 / 93.7** | **1977.0 / 1963.5** |
 | vLLM 0.31.0 | Qwen3.8-27B-NVFP4-vllm | 70.0 / 68.9 | 1449.4 / 1354.8 |
 | llama.cpp | Qwen3.8-27B-Q4_K_M.gguf | 63.0 / 61.8 | 166.8 / 162.0 |
-| imp | Qwen3.8-27B-Q4_K_M.gguf | 58.0 / 60.7 | 107.4 / 107.0 |
+| imp `95a448b7` (2026-10-12) | Qwen3.8-27B-Q4_K_M.gguf | **72.7 / 73.4** | **244.4 / 240.0** |
 
-imp on the GGUF holds 7 recurrent slots at 19822.3 MiB of weights and a batch-7 step costs ~4x a batch-1
-step ([#2688](https://github.com/kekzl/imp/issues/2688)). Unsloth's `UD-Q4_K_M` (4 IQ3_S tensors, one MTP block) loads since
+Same harness 2026-10-12 (`ARMS="imp-gguf llama-gguf"`): llama.cpp 61.0 / 60.5 and 154.5 / 155.1; imp at v0.51.0 read
+58.0 / 60.7 and 107.4 / 107.0 ([#2688](https://github.com/kekzl/imp/issues/2688): uncached Q8_0 dequantized per step, 128-row Q4_K tile, 5280 MiB FP8 copy). `UD-Q4_K_M` loads since
 [#2687](https://github.com/kekzl/imp/issues/2687): ppl_corpus_45k PPL 4.4504 vs 4.4623 for the ggml-org Q4_K_M (llama.cpp 4.3196 / 4.3308).
 
 ## imp vs vLLM at concurrency
