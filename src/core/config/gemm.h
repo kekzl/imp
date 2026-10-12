@@ -109,8 +109,8 @@ struct GEMM {
     // in_proj/out_proj (where NVFP4 above regresses): halves FP16 GEMV bytes
     // with dense byte-aligned loads, lower quality risk than 4-bit into the
     // recurrent scan. M=1 decode only (per-row scales); prefill/M>1 keep FP16.
-    // GGUF hybrids: also covers Q8_0-source ssm_in/gdn_gate/ssm_out. Sub-8-bit
-    // sources excluded. Default on.
+    // F16 sources only: GGUF Q8_0 projections decode in place via dp4a (#2688, the copy cost
+    // 5280 MiB on Qwen3.8-27B Q4_K_M). Default on.
     bool fp8_ssm_proj = true;
     // NVFP4 PREFILL copies of the full-precision GDN projections: M>32 rows run the CUTLASS
     // block-scaled GEMM (W4A4) instead of cuBLAS FP16 (~320 TFLOPS on sm_120, 35-40% of peak).

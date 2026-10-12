@@ -241,10 +241,9 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
 // slice); NVFP4 regresses on these wide GDN shapes, so FP8 halves the bytes instead.
 // Serves only the M=1 decode GEMV; prefill/verify keep full precision and the recurrent
 // scan state stays FP16, so the exposure is one 8-bit weight read per token.
-// GGUF hybrids: recurrent projections are excluded from the NVFP4 decode cache (phase 3
-// quality lock) and land nowhere else; UD quants keep them at Q8_0, so an FP8 copy costs
-// the same bytes but runs the tuned rowscale GEMV. Only >=8-bit sources qualify: on 4/5/6
-// bit sources FP8 would increase decode bytes and stack rounding on a coarser lattice.
+// GGUF hybrids: Q8_0 recurrent projections are read in place by the dp4a kernel at every decode
+// M (#2688); an FP8 copy cost 5280 MiB on Qwen3.8-27B Q4_K_M (66 recurrent slots) and decoded
+// 1.2 % slower at batch 1. Only F16 sources qualify.
 void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
                                                          cudaStream_t stream) {
     const bool ssm_on = dispatch_policy().gemm.fp8_ssm_proj;
@@ -267,7 +266,6 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
         size_t n_elems;
         int rows;
         int cols;
-        QType src_qtype;  // F16 = quantize in place; else dequant to scratch first
     };
     std::vector<Entry> entries;
     size_t total_bytes = 0;
@@ -292,12 +290,9 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
              {in_side, gate_side, ssm_out_side, q_side, k_side, v_side, o_side}) {
             if (!w || !w->data || !w->on_device)
                 continue;
-            // F16 (native residents; BF16 converted at upload) quantizes straight from the resident
-            // weight, the calibration kernel reads __half. Q8_0 (GGUF) dequants into the shared
-            // scratch first.
-            const bool f16_src = w->qtype == QType::F16;
-            const bool q8_src = w->qtype == QType::Q8_0 && qscratch_->dequant != nullptr;
-            if (!f16_src && !q8_src)
+            // F16 only (native residents; BF16 converted at upload): quantized straight from the
+            // resident weight, the calibration kernel reads __half.
+            if (w->qtype != QType::F16)
                 continue;
             if (wcache_->fp8.count(w->data) || wcache_->nvfp4.count(w->data) ||
                 wcache_->cutlass_nvfp4.count(w->data))
@@ -305,10 +300,7 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
             size_t n = static_cast<size_t>(w->shape[0]) * w->shape[1];
             if (n == 0 || (w->shape[1] % 16) != 0)
                 continue;
-            if (q8_src && n * sizeof(half) > qscratch_->dequant_size)
-                continue;
-            entries.push_back({w->data, n, static_cast<int>(w->shape[0]),
-                               static_cast<int>(w->shape[1]), w->qtype});
+            entries.push_back({w->data, n, static_cast<int>(w->shape[0]), static_cast<int>(w->shape[1])});
             total_bytes += n;
         }
     }
@@ -340,13 +332,7 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
 
     size_t offset = 0, row_offset = 0;
     for (const auto& e : entries) {
-        const void* f16_src = e.ptr;
-        if (e.src_qtype != QType::F16) {
-            // Serialized on `stream`, so the shared scratch is safe to reuse
-            // across entries: each dequant completes before the next overwrites it.
-            dequant_gpu(e.ptr, qscratch_->dequant, e.src_qtype, e.rows, e.cols, stream);
-            f16_src = qscratch_->dequant;
-        }
+        const void* f16_src = e.ptr;  // F16 only (see the phase 2b comment)
         quantize_fp8_rows_async(f16_src, d_bulk + offset, e.rows, e.cols,
                                 d_row_scales + row_offset, stream);
         int64_t fp8_shape[4] = {e.rows, e.cols, 0, 0};

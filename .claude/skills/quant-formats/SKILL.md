@@ -16,7 +16,7 @@ Sources of truth: `docs/quantization.md` (formats, choosing a quant), `docs/inte
 | Prefill | cuBLAS on dequanted source | CUTLASS NVFP4 GEMM (+ stream-K, #1841) |
 | Priority | legacy; community MXFP4 quality bugs: do not sink time | the strategic path |
 
-- GGUF -> NVFP4 decode cache at init; `nvfp4_beneficial` weights skip the FP16 cache; GDN/SSM projections excluded (quality lock) and served by `gemm.fp8_ssm_proj` (default on, native F16 and GGUF-Q8_0 since #962). `gemm.nvfp4_attn_proj` opt-in.
+- GGUF -> NVFP4 decode cache at init; `nvfp4_beneficial` weights skip the FP16 cache; GDN/SSM projections excluded (quality lock) and served by `gemm.fp8_ssm_proj` (default on, native F16 only); GGUF Q8_0 projections decode in place via `gemm_q8_0_dp4a_dense` at every M (#2688: the FP8 copy cost 5280 MiB = 66 recurrent slots on Qwen3.8-27B Q4_K_M). `gemm.nvfp4_attn_proj` opt-in.
 - gpt-oss native MXFP4 experts convert to NVFP4 at load.
 - `wcache_.nvfp4` is NOT a GGUF predicate (native models fill it too); GGUF = registry scan on `dequant_gpu_supported(source)` (#1792 trap).
 

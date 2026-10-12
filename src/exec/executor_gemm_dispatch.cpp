@@ -93,13 +93,14 @@ static bool uncached_in_place(const Tensor& input, const Tensor& weight, Tensor&
     const int M = static_cast<int>(input.shape[0]);
     const bool q8 = weight.qtype == QType::Q8_0;
     const bool q4k = weight.qtype == QType::Q4_K;
-    if (!(q8 || q4k) || weight.dropped_source || M < 2 || input.qtype != QType::F16 ||
+    if (!(q8 || q4k) || weight.dropped_source || M < 1 || input.qtype != QType::F16 ||
         output.qtype != QType::F16 || input.stride[0] != weight.shape[1] ||
         output.stride[0] != weight.shape[0])
         return false;
-    if (decode_rows && dp4a_decode_rows(input, weight, output, ctx))
+    // Q8_0 at M=1 too: the token GEMV for GGUF GDN projections without the FP8 sidecar.
+    if ((decode_rows || (q8 && M == 1)) && dp4a_decode_rows(input, weight, output, ctx))
         return true;
-    return q4k && ctx.q4k_imma_prefill &&
+    return q4k && M >= 2 && ctx.q4k_imma_prefill &&
            mmq_q4k_imma_gemm(weight.data, reinterpret_cast<const __half*>(input.data),
                              reinterpret_cast<__half*>(output.data), M, static_cast<int>(weight.shape[0]),
                              static_cast<int>(weight.shape[1]), ctx.stream, ctx.beta);
