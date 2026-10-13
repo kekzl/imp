@@ -20,7 +20,7 @@ namespace imp {
 namespace {
 
 constexpr int kResolveThreads = 256;
-constexpr int kMaxEntries = 3 * kDevExpertMaxTopK;
+constexpr int kMaxEntries = 3 * kDevExpertMaxTopK * kDevExpertMaxRows;
 constexpr int kResolveSmemSlots = 4096;  // 16 KiB of stamps; larger layers scan global memory
 
 // (stamp, slot) lexicographic min: the least recently used slot, ties to the lower index.
@@ -87,6 +87,14 @@ __device__ __forceinline__ void commit_miss(const DevExpertLayer& L, int key, in
                                old};
 }
 
+// First of entries [0, j) routing expert e (an earlier row routed it too), -1 if none.
+__device__ __forceinline__ int first_entry_of(const int32_t* __restrict__ expert_indices, int j, int e) {
+    for (int q = 0; q < j; ++q)
+        if (expert_indices[q] == e)
+            return q;
+    return -1;
+}
+
 // Thread 0, after the last miss: publish the count, post tiered layers, count hits and misses.
 __device__ __forceinline__ void resolve_finish(const DevExpertLayer& L, int n, int nmiss, int* n_miss_out,
                                                TierMailbox* mb, uint32_t* tier_seq, int layer) {
@@ -103,17 +111,20 @@ __device__ __forceinline__ void resolve_finish(const DevExpertLayer& L, int n, i
     atomicAdd(&L.stats[1], static_cast<unsigned long long>(nmiss));
 }
 
-// One block. Phase 1: every routed (proj, expert) looks itself up; hits restamp their slot.
-// Phase 2: misses, in order, each take the least recently stamped slot not used this step.
-// Phase 3: one thread per miss updates the tables and writes its gather entry.
+// One block for n_rows decode rows: expert_indices [n_rows * top_k], slot_idx_out [3][n_rows * top_k].
+// Phase 1: every routed (proj, expert) looks itself up; an expert an earlier entry already routed aliases
+// that entry; hits restamp their slot. Phase 2: misses, in order, each take the least recently stamped
+// slot not used this step. Phase 3: one thread per miss updates the tables and writes its gather entry.
+// entry_miss (optional, [n_rows * top_k]): 1 where any projection of (row, k) waits for the gather.
 __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __restrict__ expert_indices,
-                                            int top_k, int32_t* __restrict__ slot_idx_out,
+                                            int top_k, int n_rows, int32_t* __restrict__ slot_idx_out,
                                             DevMissEntry* __restrict__ misses, int* __restrict__ n_miss_out,
-                                            TierMailbox* mb, uint32_t* tier_seq, int layer) {
+                                            TierMailbox* mb, uint32_t* tier_seq, int layer,
+                                            int32_t* __restrict__ entry_miss) {
     __shared__ int s_key[kMaxEntries];
-    __shared__ int s_miss[kMaxEntries];
-    __shared__ int s_victim[kMaxEntries];
-    __shared__ int s_ord[kMaxEntries];  // miss ordinal in the gather list
+    __shared__ int s_miss[kMaxEntries];    // 1 miss, 0 hit, -1 alias
+    __shared__ int s_victim[kMaxEntries];  // slot of a hit or a miss
+    __shared__ int s_ord[kMaxEntries];     // miss ordinal in the gather list; alias: the entry it copies
     __shared__ int s_best[kResolveThreads / 32];
     __shared__ uint32_t s_bestv[kResolveThreads / 32];
     __shared__ uint32_t s_stamp[kResolveSmemSlots];
@@ -121,22 +132,35 @@ __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __r
     __shared__ int s_nmiss;
 
     const int tid = threadIdx.x;
-    const int n = 3 * top_k;
+    const int nk = n_rows * top_k;
+    const int n = 3 * nk;
     if (tid == 0) {
         s_clock = ++(*L.clock);
         s_nmiss = 0;
     }
+    if (entry_miss)
+        for (int j = tid; j < nk; j += kResolveThreads)
+            entry_miss[j] = 0;
     __syncthreads();
 
-    if (tid < n) {
-        const int proj = tid / top_k;
-        const int key = proj * L.n_experts + expert_indices[tid - proj * top_k];
-        s_key[tid] = key;
+    for (int i = tid; i < n; i += kResolveThreads) {
+        const int proj = i / nk;
+        const int j = i - proj * nk;
+        const int e = expert_indices[j];
+        const int key = proj * L.n_experts + e;
+        s_key[i] = key;
+        const int first = first_entry_of(expert_indices, j, e);
+        if (first >= 0) {
+            s_miss[i] = -1;
+            s_ord[i] = proj * nk + first;
+            continue;
+        }
         const int s = L.slot_of[key];
-        s_miss[tid] = s < 0;
+        s_miss[i] = s < 0;
+        s_victim[i] = s;
         if (s >= 0) {
             L.stamp[s] = s_clock;
-            slot_idx_out[tid] = s;
+            slot_idx_out[i] = s;
         }
     }
     __syncthreads();
@@ -149,11 +173,11 @@ __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __r
     __syncthreads();
 
     for (int i = 0; i < n; ++i) {
-        if (!s_miss[i])
+        if (s_miss[i] != 1)
             continue;
         const int best = lru_victim(L, s_stamp, stamps_in_smem, s_clock, s_best, s_bestv);
         if (tid == 0) {
-            // victim < 0 cannot happen: slots >= 3 * top_k is checked at init.
+            // victim < 0 cannot happen: slots >= 3 * top_k * n_rows is checked by the caller.
             s_victim[i] = best;
             if (best >= 0) {
                 if (stamps_in_smem)
@@ -165,12 +189,20 @@ __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __r
         }
         __syncthreads();
     }
-    if (tid < n && s_miss[tid]) {
-        if (s_victim[tid] >= 0)
-            commit_miss(L, s_key[tid], s_victim[tid], s_ord[tid], s_clock, misses);
-        slot_idx_out[tid] = s_victim[tid];
-        if (mb)
-            __threadfence_system();  // tiered: the host thread reads this entry after the mailbox post
+    for (int i = tid; i < n; i += kResolveThreads) {
+        if (s_miss[i] == 1) {
+            if (s_victim[i] >= 0)
+                commit_miss(L, s_key[i], s_victim[i], s_ord[i], s_clock, misses);
+            slot_idx_out[i] = s_victim[i];
+            if (entry_miss)
+                entry_miss[i % nk] = 1;
+            if (mb)
+                __threadfence_system();  // tiered: the host thread reads this entry after the mailbox post
+        } else if (s_miss[i] < 0) {
+            slot_idx_out[i] = s_victim[s_ord[i]];
+            if (entry_miss && s_miss[s_ord[i]] == 1)
+                entry_miss[i % nk] = 1;
+        }
     }
     __syncthreads();
     if (tid == 0)
@@ -266,7 +298,7 @@ __global__ void expert_tier_wait_kernel(const TierMailbox* mb, const uint32_t* t
     __threadfence_system();
 }
 
-// grid (blocks_per_copy, kMaxEntries): block y copies miss y, packed block then micro-scales.
+// grid (blocks_per_copy, routed entries): block y copies miss y, packed block then micro-scales.
 __global__ void expert_cache_gather_kernel(const DevMissEntry* __restrict__ misses,
                                            const int* __restrict__ n_miss, size_t packed_bytes,
                                            size_t ms_bytes, size_t ms_off) {
@@ -301,75 +333,7 @@ __global__ void expert_cache_gather_kernel(const DevMissEntry* __restrict__ miss
     }
 }
 
-// Device view of a pointer inside one of the model's mapped pinned slabs, or null.
-const char* device_view(const Model& model, const void* host_ptr) {
-    const char* p = static_cast<const char*>(host_ptr);
-    for (const PinnedBuffer& pin : model.host_pinned_allocs()) {
-        const char* b = static_cast<const char*>(pin.data());
-        if (!b || !pin.device() || p < b || p >= b + pin.bytes())
-            continue;
-        return static_cast<const char*>(pin.device()) + (p - b);
-    }
-    return nullptr;
-}
-
 }  // namespace
-
-// One miss list, one size triple per layer: gate, up and down must share the slot layout
-// (N x K and K x N have the same byte counts; a gated model always does). `b` = layer * 3.
-bool DeviceExpertCache::layer_layout_uniform_(size_t b) const {
-    for (int p = 0; p < 3; ++p) {
-        if (packed_bytes_[b + p] == 0)
-            continue;  // absent gate projection
-        if (packed_bytes_[b + p] != packed_bytes_[b + 1] || ms_bytes_[b + p] != ms_bytes_[b + 1] ||
-            ms_off_[b + p] != ms_off_[b + 1])
-            return false;
-    }
-    return true;
-}
-
-// One layer's source table entries and slot sizes. Pinned: device views of the mapped slabs.
-// Tier: every expert host-resident but not all in a mapped slab, and the tier is allowed.
-DeviceExpertCache::LayerSource DeviceExpertCache::layer_sources_(const Model& model, int l, size_t slot_size,
-                                                                 std::vector<DevExpertSrc>& src) {
-    const int ne = n_experts_;
-    const TransformerLayer& ly = model.layer(l);
-    if (ly.expert_w_up.empty() || !ly.expert_w_up[0].data || ly.expert_w_up[0].on_device)
-        return LayerSource::None;
-    const std::vector<Tensor>* projs[3] = {&ly.expert_w_gate, &ly.expert_w_up, &ly.expert_w_down};
-    bool unpinned = false;  // some expert outside a mapped slab: tier candidate
-    const size_t b = static_cast<size_t>(l) * 3;
-    for (int p = 0; p < 3; ++p) {
-        const std::vector<Tensor>& ex = *projs[p];
-        if (p == 0 && (ex.empty() || !ex[0].data))
-            continue;  // non-gated model
-        if (!nvfp4_host_experts_servable(ex) || static_cast<int>(ex.size()) != ne)
-            return LayerSource::None;
-        const auto layout = nvfp4_slot_layout(ex[0].shape[0], ex[0].shape[1] * 2);
-        if (layout.slot_bytes() == 0 || layout.slot_bytes() > slot_size || layout.packed_bytes % 16 != 0 ||
-            layout.ms_bytes % 16 != 0 || layout.packed_off() % 16 != 0)
-            return LayerSource::None;
-        ms_off_[b + p] = layout.packed_off();
-        packed_bytes_[b + p] = layout.packed_bytes;
-        ms_bytes_[b + p] = layout.ms_bytes;
-        for (int e = 0; e < ne; ++e) {
-            const char* dp = unpinned ? nullptr : device_view(model, ex[e].data);
-            const char* dm = unpinned ? nullptr : device_view(model, ex[e].scales);
-            unpinned = unpinned || !dp || !dm;
-            src[(b + p) * ne + e] = DevExpertSrc{dp, dm, ex[e].tensor_scale};
-        }
-    }
-    if (!layer_layout_uniform_(b))
-        return LayerSource::None;
-    if (!unpinned)
-        return LayerSource::Pinned;
-    if (host_pool_mib_ < 0)
-        return LayerSource::None;  // the host LRU path keeps this layer
-    // A partly pinned layer goes fully to the tier: one source kind per layer.
-    for (size_t i = b * ne; i < (b + 3) * ne; ++i)
-        src[i].packed = src[i].ms = nullptr;
-    return LayerSource::Tier;
-}
 
 bool DeviceExpertCache::init(const Model& model, ExpertLRUCache& cache, VRAMAllocator* alloc,
                              int top_k) {
@@ -565,18 +529,31 @@ bool DeviceExpertCache::stage_touched_range(int layer, const int32_t* expert_off
     return true;
 }
 
-void DeviceExpertCache::resolve_and_stage(int layer, const int32_t* expert_indices, int top_k,
+void DeviceExpertCache::resolve_and_stage(int layer, const int32_t* expert_indices, int top_k, int n_rows,
                                           int32_t* slot_idx_out, cudaStream_t stream) {
+    resolve(layer, expert_indices, top_k, n_rows, slot_idx_out, nullptr, stream);
+    gather(layer, top_k, n_rows, stream);
+}
+
+void DeviceExpertCache::resolve(int layer, const int32_t* expert_indices, int top_k, int n_rows,
+                                int32_t* slot_idx_out, int32_t* entry_miss, cudaStream_t stream) {
     take_over(stream);
     const DevExpertLayer& L = layers_[layer];
     const bool tier = layer_tiered(layer);
+    IMP_CHECK(n_rows >= 1 && n_rows <= (tier ? 1 : kDevExpertMaxRows) && L.slots >= 3 * top_k * n_rows,
+              "expert cache resolve: %d rows at top_k %d exceed layer %d (%d slots, tiered %d)", n_rows,
+              top_k, layer, L.slots, static_cast<int>(tier));
     DevMissEntry* misses = tier ? tier_misses_d_ : d_misses_;
     int* n_miss = tier ? tier_n_miss_d_ : d_n_miss_;
-    expert_cache_resolve_kernel<<<1, kResolveThreads, 0, stream>>>(L, expert_indices, top_k, slot_idx_out,
-                                                                   misses, n_miss,
+    expert_cache_resolve_kernel<<<1, kResolveThreads, 0, stream>>>(L, expert_indices, top_k, n_rows,
+                                                                   slot_idx_out, misses, n_miss,
                                                                    tier ? tier_mb_d_ : nullptr, d_tier_seq_,
-                                                                   layer);
+                                                                   layer, entry_miss);
     IMP_CUDA_CHECK_LAUNCH();
+}
+
+void DeviceExpertCache::gather(int layer, int top_k, int n_rows, cudaStream_t stream) {
+    const bool tier = layer_tiered(layer);
     if (tier) {  // the tier thread makes the missed units resident and fills their sources
         expert_tier_wait_kernel<<<1, 1, 0, stream>>>(tier_mb_d_, d_tier_seq_);
         IMP_CUDA_CHECK_LAUNCH();
@@ -585,9 +562,10 @@ void DeviceExpertCache::resolve_and_stage(int layer, const int32_t* expert_indic
     // the gather takes the up projection's sizes, identical for the three in every NVFP4 MoE
     // seen so far (N x K and K x N have the same byte counts).
     const size_t i = static_cast<size_t>(layer) * 3 + 1;
-    const dim3 grid(16, kMaxEntries);
-    expert_cache_gather_kernel<<<grid, 256, 0, stream>>>(misses, n_miss, packed_bytes_[i], ms_bytes_[i],
-                                                         ms_off_[i]);
+    const dim3 grid(16, 3 * top_k * n_rows);
+    expert_cache_gather_kernel<<<grid, 256, 0, stream>>>(tier ? tier_misses_d_ : d_misses_,
+                                                         tier ? tier_n_miss_d_ : d_n_miss_, packed_bytes_[i],
+                                                         ms_bytes_[i], ms_off_[i]);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

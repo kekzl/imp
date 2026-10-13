@@ -225,6 +225,7 @@ set(IMP_MODEL_SOURCES
     src/model/weight_map_arch.cpp
     src/model/gdn_fused_split.cpp
     src/model/mxfp8_widen.cpp
+    src/model/host_expert_fit.cpp
     src/model/host_expert_pin.cpp
     src/model/weight_upload.cpp
     src/model/host_embedding.cpp
@@ -510,6 +511,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_forward_moe_cutlass.cpp
     src/exec/executor_forward_moe_batch.cu
     src/exec/executor_forward_moe_nvfp4_host.cu
+    src/exec/executor_moe_decode_overlap.cpp
     src/exec/executor_forward_moe_legacy.cpp
     src/exec/expert_cache.cu
     src/exec/expert_cache_device.cu

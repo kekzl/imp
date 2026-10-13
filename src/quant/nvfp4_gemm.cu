@@ -78,7 +78,8 @@ __global__ void gemv_nvfp4_moe_decode_kernel(const uint8_t* packed_data, const u
                                              const float* tensor_scales, const int32_t* expert_indices,
                                              const half* x, half* y, int rows, int K,
                                              size_t expert_stride_packed, size_t expert_stride_ms,
-                                             int x_stride, int blocks_per_expert);
+                                             int x_stride, int blocks_per_expert, int x_group,
+                                             const int32_t* entry_flags, int want);
 __global__ void gemv_nvfp4_moe_gate_up_fused_kernel(
     const uint8_t* gate_packed, const uint8_t* gate_ms, const float* gate_ts, const uint8_t* up_packed,
     const uint8_t* up_ms, const float* up_ts, const int32_t* expert_indices, const half* x, half* y_gate,

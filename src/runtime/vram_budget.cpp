@@ -15,6 +15,13 @@
 
 namespace imp {
 
+// Sequences the KV pool ceiling covers: kv_ceiling_seqs (host NVFP4 experts keep one context for
+// all rows, exec/expert_batch_policy.h), 0 = max_batch_size.
+static int kv_pool_seqs(const EngineConfig& config) {
+    return config.kv_ceiling_seqs > 0 ? std::min(config.kv_ceiling_seqs, config.max_batch_size)
+                                      : config.max_batch_size;
+}
+
 size_t gguf_moe_nvfp4_cache_bytes(const Model& model, bool decode_all, int nvfp4_decode_mode) {
     const auto& mcfg = model.config();
     if (mcfg.is_nvfp4_prequant || nvfp4_decode_mode <= 0)
@@ -347,7 +354,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     size_t per_block_total = per_layer_block_bytes * n_global_layers;
 
     int blocks_per_seq = (config.max_seq_len + bs - 1) / bs;
-    int needed_blocks = blocks_per_seq * config.max_batch_size;
+    int needed_blocks = blocks_per_seq * kv_pool_seqs(config);
 
     // Cap the IMMA plane grant at what is left after one full sequence (or the min-KV floor):
     // demand is 1.125x Q8_0 weight bytes with no shape guarantee it fits (e.g. ~16 GiB planes

@@ -1,6 +1,8 @@
-// Host expert tier half of the device expert cache (#2621): pool sizing, the mailbox thread
-// that serves tiered decode misses, and tiered prefill staging. Kernels: expert_cache_device.cu.
+// Host expert tier half of the device expert cache (#2621): which layers a mapped pinned slab or the
+// tier serves, pool sizing, the mailbox thread that serves tiered decode misses, and tiered prefill
+// staging. Kernels: expert_cache_device.cu.
 #include "exec/expert_cache_device.h"
+#include "exec/nvfp4_expert_offload.h"
 #include "core/logging.h"
 #include "memory/weight_snapshot.h"
 #include "model/model.h"
@@ -17,8 +19,75 @@ namespace imp {
 
 namespace {
 constexpr int kMaxEntries = 3 * kDevExpertMaxTopK;
+
+// Device view of a pointer inside one of the model's mapped pinned slabs, or null.
+const char* device_view(const Model& model, const void* host_ptr) {
+    const char* p = static_cast<const char*>(host_ptr);
+    for (const PinnedBuffer& pin : model.host_pinned_allocs()) {
+        const char* b = static_cast<const char*>(pin.data());
+        if (!b || !pin.device() || p < b || p >= b + pin.bytes())
+            continue;
+        return static_cast<const char*>(pin.device()) + (p - b);
+    }
+    return nullptr;
+}
 }  // namespace
 
+// One miss list, one size triple per layer: gate, up and down must share the slot layout
+// (N x K and K x N have the same byte counts; a gated model always does). `b` = layer * 3.
+bool DeviceExpertCache::layer_layout_uniform_(size_t b) const {
+    for (int p = 0; p < 3; ++p) {
+        if (packed_bytes_[b + p] == 0)
+            continue;  // absent gate projection
+        if (packed_bytes_[b + p] != packed_bytes_[b + 1] || ms_bytes_[b + p] != ms_bytes_[b + 1] ||
+            ms_off_[b + p] != ms_off_[b + 1])
+            return false;
+    }
+    return true;
+}
+
+// One layer's source table entries and slot sizes. Pinned: device views of the mapped slabs.
+// Tier: every expert host-resident but not all in a mapped slab, and the tier is allowed.
+DeviceExpertCache::LayerSource DeviceExpertCache::layer_sources_(const Model& model, int l, size_t slot_size,
+                                                                 std::vector<DevExpertSrc>& src) {
+    const int ne = n_experts_;
+    const TransformerLayer& ly = model.layer(l);
+    if (ly.expert_w_up.empty() || !ly.expert_w_up[0].data || ly.expert_w_up[0].on_device)
+        return LayerSource::None;
+    const std::vector<Tensor>* projs[3] = {&ly.expert_w_gate, &ly.expert_w_up, &ly.expert_w_down};
+    bool unpinned = false;  // some expert outside a mapped slab: tier candidate
+    const size_t b = static_cast<size_t>(l) * 3;
+    for (int p = 0; p < 3; ++p) {
+        const std::vector<Tensor>& ex = *projs[p];
+        if (p == 0 && (ex.empty() || !ex[0].data))
+            continue;  // non-gated model
+        if (!nvfp4_host_experts_servable(ex) || static_cast<int>(ex.size()) != ne)
+            return LayerSource::None;
+        const auto layout = nvfp4_slot_layout(ex[0].shape[0], ex[0].shape[1] * 2);
+        if (layout.slot_bytes() == 0 || layout.slot_bytes() > slot_size || layout.packed_bytes % 16 != 0 ||
+            layout.ms_bytes % 16 != 0 || layout.packed_off() % 16 != 0)
+            return LayerSource::None;
+        ms_off_[b + p] = layout.packed_off();
+        packed_bytes_[b + p] = layout.packed_bytes;
+        ms_bytes_[b + p] = layout.ms_bytes;
+        for (int e = 0; e < ne; ++e) {
+            const char* dp = unpinned ? nullptr : device_view(model, ex[e].data);
+            const char* dm = unpinned ? nullptr : device_view(model, ex[e].scales);
+            unpinned = unpinned || !dp || !dm;
+            src[(b + p) * ne + e] = DevExpertSrc{dp, dm, ex[e].tensor_scale};
+        }
+    }
+    if (!layer_layout_uniform_(b))
+        return LayerSource::None;
+    if (!unpinned)
+        return LayerSource::Pinned;
+    if (host_pool_mib_ < 0)
+        return LayerSource::None;  // the host LRU path keeps this layer
+    // A partly pinned layer goes fully to the tier: one source kind per layer.
+    for (size_t i = b * ne; i < (b + 3) * ne; ++i)
+        src[i].packed = src[i].ms = nullptr;
+    return LayerSource::Tier;
+}
 bool DeviceExpertCache::init_tier_(const Model& model, const std::vector<char>& tiered, int top_k,
                                    int host_pool_mib) {
     const int n_layers = static_cast<int>(tiered.size());

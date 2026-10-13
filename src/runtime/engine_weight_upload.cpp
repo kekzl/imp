@@ -7,6 +7,7 @@
 #include "runtime/vram_budget.h"
 #include "core/cuda_raii.h"
 #include "core/logging.h"
+#include "exec/expert_batch_policy.h"
 #include "memory/ssm_state_size.h"
 #include "model/layer_host_keep.h"
 #include "memory/vram_query.h"
@@ -294,6 +295,16 @@ bool Engine::init_weights() {
     }
     apply_upload_batch_fit(model_->upload_batch_fit_.fitted, config_.max_batch_size,
                            runtime_config_.runtime.max_batch_size, scheduler_.get());
+    if (const int b = batch_after_host_expert_pin(config_.max_batch_size,
+                                                  runtime_config_.runtime.max_batch_size <= 0,
+                                                  model_->upload_batch_fit_.host_experts_unpinned);
+        b != config_.max_batch_size) {
+        IMP_LOG_INFO(
+            "max_batch_size: auto %d -> %d (host experts unpinned, the host expert tier runs one row)",
+            config_.max_batch_size, b);
+        apply_upload_batch_fit(b, config_.max_batch_size, runtime_config_.runtime.max_batch_size,
+                               scheduler_.get());
+    }
     model_->upload_batch_fit_ = {};
 
     if (upload_stream) {

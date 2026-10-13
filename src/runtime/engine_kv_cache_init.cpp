@@ -8,7 +8,7 @@
 #include "memory/library_reserve_cache.h"
 #include "memory/plan.h"
 #include "memory/ssm_state_size.h"
-#include "runtime/expert_batch_policy.h"
+#include "exec/expert_batch_policy.h"
 #include "runtime/plan_shadow.h"
 #include "exec/executor.h"
 #include "memory/kv_cache.h"
@@ -203,6 +203,9 @@ bool Engine::init_kv_cache() {
 
     // Reserved pool slots: mc verify W-1 + batched-verify spares (recomputed after the clamp).
     int ssm_reserved_slots = spec_mc_reserved_slots_() + batch_verify_spare_slots(runtime_config_, model_.get(), config_.max_batch_size);
+    config_.kv_ceiling_seqs = kv_ceiling_seqs(config_.max_batch_size,
+                                              experts_on_host_ && executor_ &&
+                                                  executor_->expert_cache_nvfp4_slots());
     auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim, effective_free_vram(),
                                            swa_live_tokens, n_swa_layers, &native_cache_demand(),
                                            ssm_reserved_slots, runtime_config_.gemm.q8_imma_enabled,
@@ -399,6 +402,7 @@ bool Engine::init_kv_cache() {
     if (!executor_->init_device_expert_cache() && experts_on_host_)
         demote_graphs_(GraphDemotionReason::ExpertsOnHost);
     if (const std::string w = host_expert_batch_warning(config_.max_batch_size, experts_on_host_,
+                                                        executor_->device_expert_cache_tiered(),
                                                         executor_->expert_cache_bytes(),
                                                         executor_->expert_cache_slots_per_layer());
         !w.empty())

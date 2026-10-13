@@ -150,11 +150,14 @@ struct MoEWorkspace {
     const void** layer_stage_sfb_ptrs = nullptr;  // [kExpertProjCount * n_experts]
     float* layer_stage_alpha = nullptr;           // [kExpertProjCount * n_experts]
 
-    // Slot indices for the host-offload decode path: [3*top_k] int32, one block per
+    // Slot indices for the host-offload decode path: [3 * kDevExpertMaxRows * top_k] int32, one block per
     // projection (gate, up, down). Fused MoE decode kernels address an expert as
     // base + idx*stride; idx is the expert's LRU-cache slot, not its id.
     int32_t* d_slot_idx = nullptr;
     int d_slot_idx_count = 0;
+    // Per-entry miss flags ([kDevExpertMaxRows * top_k] int32) behind the slot indices:
+    // the hit GEMVs skip them.
+    [[nodiscard]] int32_t* entry_miss() const { return d_slot_idx ? d_slot_idx + d_slot_idx_count : nullptr; }
     // Pinned landing zone for the per-layer routing readback (top_k int32). A D2H into a
     // std::vector is a staged pageable copy: 245 us of copy-engine time per layer on WSL2.
     PinnedBuffer h_routing_readback;

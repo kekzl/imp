@@ -79,6 +79,9 @@ struct MoE {
     // while the layer's misses are gathered, into its own scratch; phase 8 joins and adds, so
     // the add order and the output bits are unchanged.
     bool shared_expert_overlap = true;
+    // Decode on the device expert cache: the miss gather runs on a side stream while the routed
+    // experts that hit run their GEMVs; the misses follow once the gather lands. Output bits unchanged.
+    bool expert_gather_overlap = true;
     // Host expert tier for unpinned host-resident NVFP4 experts (#2621): pinned LRU of expert
     // units filled by pread from the checkpoint. 0 = host RAM available - max(6 GiB, 10 % RAM), N = cap MiB
     // (below the experts: they are not pinned, the tier serves), -1 = off.

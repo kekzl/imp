@@ -12,22 +12,27 @@
 
 namespace imp {
 
-// M=1 F16 keeps its FP8 row-scale sidecar GEMV (ssm_out decode); everything else rebuilds the F16
-// weight in the scratch from the MXFP8 prefill copy (gate, out) or the pack's FP8 rows (in).
+// M <= 32 F16 reads the FP8 row-scale sidecar; everything else rebuilds the F16 weight in the scratch
+// from the MXFP8 prefill copy (gate, out) or the pack's FP8 rows (in).
 void GraphExecutor::released_source_gemm_(const WeightHandle& h, const Tensor& input, Tensor& output,
                                           const GemmContext& ctx) {
     const int M = static_cast<int>(input.shape[0]);
-    // M <= 4 (verify chunk): the M=1 GEMV per row, same bits as decode; 4 FP8 weight reads stay under
-    // the rebuild's ~5 B/elem (FP8 read + F16 write + F16 read).
-    if (M <= 4 && ctx.beta == 0.0f && output.qtype == QType::F16 && input.qtype == QType::F16) {
+    if (M <= 32 && ctx.beta == 0.0f && output.qtype == QType::F16 && input.qtype == QType::F16) {
         const FP8CacheEntry* e = nullptr;
         if (const auto fp8 = wcache_.fp8.find(h.source_data); fp8 != wcache_.fp8.end())
             e = &fp8->second;
         else if (const auto v = wcache_.released_fp8_view.find(h.source_data);
                  v != wcache_.released_fp8_view.end())
             e = &v->second;
-        if (e && e->d_row_scales) {
-            const int64_t K = input.shape[1], N = output.shape[1];
+        const int64_t K = input.shape[1], N = output.shape[1];
+        // Decode and spec verify (M <= 8): the M=1 GEMV per row, same bits as decode. Batch decode and
+        // short prefill: one weight pass for all M rows.
+        if (e && e->d_row_scales && M > 1 && !(cur_spec_verify_ && M <= 8) &&
+            gemv_fp8_rowscale_f16(e->weight.data, e->d_row_scales, static_cast<const half*>(input.data),
+                                  static_cast<half*>(output.data), static_cast<int>(N), static_cast<int>(K),
+                                  M, ctx.stream))
+            return;
+        if (e && e->d_row_scales && (M <= 4 || (cur_spec_verify_ && M <= 8))) {
             for (int r = 0; r < M; ++r) {
                 const int64_t xs[2] = {1, K}, ys[2] = {1, N};
                 const Tensor x(static_cast<char*>(input.data) + r * K * sizeof(half), QType::F16, 2, xs,

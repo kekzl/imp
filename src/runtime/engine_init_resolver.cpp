@@ -22,7 +22,8 @@
 #include "memory/kv_cache.h"
 #include "memory/plan.h"
 #include "memory/ssm_state_size.h"
-#include "runtime/expert_batch_policy.h"
+#include "model/host_expert_fit.h"
+#include "exec/expert_batch_policy.h"
 #include "runtime/plan_shadow.h"
 #include "runtime/scheduler.h"
 
@@ -62,6 +63,13 @@ int estimated_host_expert_layers(const ModelConfig& mcfg, int forced, size_t fre
     if (forced > 0 || mcfg.n_experts <= 0)
         return std::max(0, std::min(forced, mcfg.n_layers));
     return approx_weight_footprint_bytes(mcfg, 0) > free_vram ? mcfg.n_layers : 0;
+}
+
+// Whether the upload will pin the host-resident experts (weight_upload.cpp host_experts_pinnable),
+// from the loaded expert tensors: all of them count, the upload may still keep some on the card.
+bool host_pins_experts(const Model& model, int host_expert_pool_mib) {
+    const size_t bytes = model_host_expert_bytes(model);
+    return !host_expert_pool_caps(bytes, host_expert_pool_mib) && host_ram_holds(bytes);
 }
 
 }  // namespace
@@ -523,11 +531,15 @@ void Engine::init_resolve_kv_dtype_policy_() {
         }
         const int host_layers =
             estimated_host_expert_layers(mcfg, runtime_config_.moe.force_host_experts, free_vram_now);
-        if (auto_batch_for_host_experts(auto_batch, host_layers) != auto_batch) {
-            IMP_LOG_INFO("max_batch_size: auto → 1 (expert cache budget: %d MoE layer(s) host-resident; "
-                         "VRAM-derived value was %d, set runtime.max_batch_size to override)",
-                         host_layers, auto_batch);
-            auto_batch = 1;
+        const bool host_pins = host_layers > 0 && model_ &&
+                               host_pins_experts(*model_, runtime_config_.moe.host_expert_pool_mib);
+        if (const int b = auto_batch_for_host_experts(auto_batch, host_layers, host_pins); b != auto_batch) {
+            IMP_LOG_INFO(
+                "max_batch_size: auto → %d (%d MoE layer(s) host-resident, %s; VRAM-derived value "
+                "was %d, set runtime.max_batch_size to override)",
+                b, host_layers,
+                host_pins ? "device expert cache batches the decode rows" : "host expert tier", auto_batch);
+            auto_batch = b;
         }
         config_.max_batch_size = auto_batch;
         IMP_LOG_INFO("max_batch_size: auto → %d (approx_weights=%.1f GB, post-load headroom=%.1f GB, "
