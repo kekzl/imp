@@ -82,11 +82,12 @@ public:
                                           const std::string& reasoning_effort = "") const;
 
     // Build token ID vector with image tokens inserted before the first user message.
-    // Produces: <boi> <img_soft_token>*n_image_tokens <eoi> \n {text}
+    // Produces: <boi> <img_soft_token>*n_image_tokens <eoi> \n {text}, the block once per image
+    // (n_images, content order, blocks separated by \n).
     std::vector<int32_t> apply_with_image(const Tokenizer& tok, const std::vector<ChatMessage>& messages,
                                           int n_image_tokens, bool suppress_thinking = false,
                                           bool force_thinking = false,
-                                          const std::string& reasoning_effort = "") const;
+                                          const std::string& reasoning_effort = "", int n_images = 1) const;
 
     const std::vector<int32_t>& stop_token_ids() const { return stop_token_ids_; }
     ChatTemplateFamily family() const { return family_; }

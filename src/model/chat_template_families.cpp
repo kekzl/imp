@@ -393,8 +393,8 @@ std::vector<int32_t> ChatTemplate::apply_harmony(const Tokenizer& tok,
 std::vector<int32_t> ChatTemplate::apply_with_image(const Tokenizer& tok,
                                                     const std::vector<ChatMessage>& messages,
                                                     int n_image_tokens, bool suppress_thinking,
-                                                    bool force_thinking,
-                                                    const std::string& reasoning_effort) const {
+                                                    bool force_thinking, const std::string& reasoning_effort,
+                                                    int n_images) const {
     // Currently only Gemma family supports vision tokens.
     // For other families, fall back to text-only apply.
     if (family_ != ChatTemplateFamily::GEMMA || boi_id_ < 0 || eoi_id_ < 0 || img_soft_token_id_ < 0) {
@@ -435,11 +435,17 @@ std::vector<int32_t> ChatTemplate::apply_with_image(const Tokenizer& tok,
             auto role_ids = tok.encode(role + "\n");
             tokens.insert(tokens.end(), role_ids.begin(), role_ids.end());
 
-            // Image token block: <boi> <img_soft>*N <eoi> \n
-            tokens.push_back(boi_id_);
-            for (int i = 0; i < n_image_tokens; i++)
-                tokens.push_back(img_soft_token_id_);
-            tokens.push_back(eoi_id_);
+            // One image token block per picture, in content order: <boi> <img_soft>*N <eoi>,
+            // blocks separated by \n. One picture renders exactly as before.
+            const auto sep_ids = tok.encode("\n");
+            for (int img = 0; img < n_images; img++) {
+                if (img > 0)
+                    tokens.insert(tokens.end(), sep_ids.begin(), sep_ids.end());
+                tokens.push_back(boi_id_);
+                for (int i = 0; i < n_image_tokens; i++)
+                    tokens.push_back(img_soft_token_id_);
+                tokens.push_back(eoi_id_);
+            }
 
             auto text_ids = tok.encode("\n" + msg.content);
             tokens.insert(tokens.end(), text_ids.begin(), text_ids.end());

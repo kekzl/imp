@@ -280,7 +280,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // tools_via_jinja tracks whether we'll attempt the Jinja2 tools path
     ctx.snap.tools_via_jinja = !ctx.snap.tool_defs.empty();
 
-    // Vision (per-request, F-A5): CPU-preprocess into ctx.snap.vision_image, no engine pause and no
+    // Vision (per-request, F-A5): CPU-preprocess into ctx.snap.vision_images, no engine pause and no
     // global image state. Batch worker encodes+binds per-request on admission so vision batches like text.
     if (ctx.snap.has_vision_request) {
         auto fail = [&](const std::string& why) {
@@ -303,16 +303,16 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                                                                      ctx.snap);
                 !err.empty())
                 return fail(err);
-        } else if (ctx.params.images.size() > 1) {
-            // The mmproj tower encodes one image into a fixed token count and
-            // has no notion of a second. Refusing beats answering about one of
-            // the pictures as if it were all of them.
-            return fail("this model accepts one image per request");
         } else {
-            auto img = std::make_shared<imp::ImageData>();
-            if (!state.ctx->engine->preprocess_image(ctx.params.images[0], *img))
-                return fail("Failed to process image (accepted formats: JPEG, PNG)");
-            ctx.snap.vision_image = std::move(img);
+            // mmproj tower: a fixed token count per picture, one block each, encoded back to back.
+            for (const auto& bytes : ctx.params.images) {
+                auto img = std::make_shared<imp::ImageData>();
+                if (!state.ctx->engine->preprocess_image(bytes, *img))
+                    return fail("Failed to process image " +
+                                std::to_string(ctx.snap.vision_images.size() + 1) +
+                                " (accepted formats: JPEG, PNG)");
+                ctx.snap.vision_images.push_back(std::move(img));
+            }
         }
     }
 
@@ -414,9 +414,11 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             return false;
         }
     } else if (ctx.snap.have_template && ctx.snap.has_vision_request) {
-        ctx.snap.tokens = ctx.snap.chat_tpl.apply_with_image(*ctx.snap.tok, ctx.params.chat_msgs, 256,
+        ctx.snap.tokens = ctx.snap.chat_tpl.apply_with_image(*ctx.snap.tok, ctx.params.chat_msgs,
+                                                             state.ctx->engine->vision_image_tokens(),
                                                              ctx.snap.suppress_thinking, force_thinking,
-                                                             ctx.snap.reasoning_effort);
+                                                             ctx.snap.reasoning_effort,
+                                                             static_cast<int>(ctx.snap.vision_images.size()));
     } else if (ctx.snap.have_template && ctx.snap.tools_via_jinja) {
         std::string tc_str = ctx.params.tool_choice.is_string() ? ctx.params.tool_choice.get<std::string>()
                                                                 : "auto";
@@ -621,7 +623,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     // joined to this HTTP request (#1582). With n>1 several engine requests
     // share one completion id, which is what the response says too.
     req->trace_id = ctx.req_id;
-    req->image = ctx.snap.vision_image;         // per-request vision (null for text)
+    req->images = ctx.snap.vision_images;       // per-request vision (empty for text)
     req->qwen_patches = ctx.snap.qwen_patches;  // dynamic-resolution route (empty otherwise)
     req->vision_content_hash = ctx.snap.vision_content_hash;
     req->lora_id = ctx.snap.lora_id;

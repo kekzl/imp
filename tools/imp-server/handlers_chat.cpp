@@ -54,7 +54,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     server_req->queued_lease = ctx.queued_lease;
     server_req->public_ids = {ctx.req_id, ctx.log_client_request_id};  // end_thinking (#2420)
 
-    // Vision requests are now per-request (req->image, encoded by the worker on
+    // Vision requests are now per-request (req->images, encoded by the worker on
     // admission) and flow through the normal batching path below — no blocking
     // C-API fallback, no engine pause.
 

@@ -460,17 +460,21 @@ bool Engine::attach_qwen_image_(Request& req) {
 }
 
 bool Engine::encode_image_for(Request& req) {
-    if (!req.image || !vision_.is_available())
+    if (req.images.empty() || !vision_.is_available())
         return false;
-    auto buf = std::make_shared<Buffer>(Buffer::device(vision_.embeddings_bytes()));
+    // One block of rows per picture, in prompt order: the k-th image token of the prompt takes
+    // row k (launch_replace_vision_embeddings, across prefill chunks via vision_emb_offset).
+    const size_t per_image = vision_.embeddings_bytes();
+    auto buf = std::make_shared<Buffer>(Buffer::device(per_image * req.images.size()));
     if (!*buf)
         return false;
-    if (!vision_.encode_to(*req.image, buf->as<half>(), stream_))
-        return false;
+    for (size_t i = 0; i < req.images.size(); ++i)
+        if (!vision_.encode_to(*req.images[i], buf->as<half>() + i * (per_image / sizeof(half)), stream_))
+            return false;
     req.vision_emb = std::move(buf);
     req.vision_token_id = vision_.soft_token_id();
-    req.n_vision_tokens = vision_.num_image_tokens();
-    req.image.reset();  // host pixels no longer needed after encode
+    req.n_vision_tokens = vision_.num_image_tokens() * static_cast<int>(req.images.size());
+    req.images.clear();  // host pixels no longer needed after encode
     return true;
 }
 

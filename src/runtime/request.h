@@ -306,11 +306,11 @@ struct Request {
     // Logit bias: token_id -> bias value, added to logits before sampling
     std::vector<std::pair<int32_t, float>> logit_bias;
 
-    // Vision (multimodal), per-request binding. `image` carries CPU-preprocessed pixels; the
-    // batch worker encodes it into `vision_emb` (device [n_vision_tokens, d_model] fp16) on
-    // admission and clears `image`. step_prefill_one binds vision_emb at offset==0; shared_ptr
-    // auto-frees on the last reference. Null for text-only requests.
-    std::shared_ptr<ImageData> image;
+    // Vision (multimodal), per-request binding. `images` carries CPU-preprocessed pixels in
+    // prompt order; the batch worker encodes them back to back into `vision_emb` (device
+    // [n_vision_tokens, d_model] fp16) on admission and clears `images`. step_prefill_one binds
+    // vision_emb at offset==0; shared_ptr auto-frees on the last reference. Empty for text.
+    std::vector<std::shared_ptr<ImageData>> images;
     std::shared_ptr<Buffer> vision_emb;
     int32_t vision_token_id = -1;
     int n_vision_tokens = 0;
@@ -360,7 +360,7 @@ struct Request {
     // shares one id); direct mode (#2198) never reuses; embeddings mean-pool (#2245) and prompt
     // logprobs (#2207) score every input row.
     [[nodiscard]] bool prefix_reuse_allowed() const {
-        const bool has_image = image || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
+        const bool has_image = !images.empty() || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
         return (!has_image || vision_content_hash != 0) && !bypass_prefix_cache && !embedding_request &&
                prompt_logprobs < 0;
     }
@@ -368,7 +368,7 @@ struct Request {
     // May this request be a row of the cross-sequence ragged prefill? Score rows yes: the
     // epilogue reads their compacted last row (#2198 shared). Engine::prefill_ragged_req_ok_.
     [[nodiscard]] bool ragged_prefill_allowed() const {
-        const bool has_vision = image || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
+        const bool has_vision = !images.empty() || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
         const bool wants_constraints = json_mode || !json_schema.empty() || !tool_constraint_tools.empty() ||
                                        !regex_pattern.empty() || !grammar.empty();
         return !has_vision && !embedding_request && !logprobs && prompt_logprobs < 0 && !wants_constraints;

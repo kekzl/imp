@@ -612,7 +612,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     }
 
     if (req->vision_emb && offset == 0) {
-        // Per-request (server batched path): the worker encoded req->image into
+        // Per-request (server batched path): the worker encoded req->images into
         // req->vision_emb on admission, so vision batches with text.
         state.vision_embeddings = req->vision_emb->as<half>();
         state.vision_token_id = req->vision_token_id;
@@ -909,7 +909,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             req->status = RequestStatus::DECODING;
             // Publish under the same salt these blocks were looked up with, so
             // they can only ever be offered to a prompt with the same picture.
-            const bool had_image = req->n_vision_tokens > 0 || req->image || req->vision_emb;
+            const bool had_image = req->n_vision_tokens > 0 || !req->images.empty() || req->vision_emb;
             if (kv_manager_->prefix_caching_enabled() && (!had_image || req->vision_content_hash != 0)) {
                 kv_manager_->register_block_hashes(req->id, req->input_tokens, req->prefix_salt);
             }

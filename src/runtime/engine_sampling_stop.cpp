@@ -408,7 +408,7 @@ int Engine::hybrid_prefix_reuse_limit_(Request& req) {
         return 0;
     // Vision prompts: image content is not represented in the token ids the
     // hash covers, so never match snapshots across them.
-    if (req.vision_emb || req.image || vision_.has_input())
+    if (req.vision_emb || !req.images.empty() || vision_.has_input())
         return 0;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     const int total = static_cast<int>(req.input_tokens.size());
@@ -479,7 +479,7 @@ void Engine::maybe_save_transcript_snapshot_(const Request& req, std::span<const
         return;
     if (req.recurrent_slab_ahead)  // slab holds rows past the transcript (spec_hybrid_slab_at_row)
         return;
-    if (req.vision_emb || req.image || req.n_vision_tokens > 0 || vision_.has_input())
+    if (req.vision_emb || !req.images.empty() || req.n_vision_tokens > 0 || vision_.has_input())
         return;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     const int n = static_cast<int>(forwarded.size());
@@ -563,7 +563,7 @@ int Engine::swa_prefix_reuse_limit_(Request& req) {
     // Restoring means starting prefill at offset > 0: a chunked continuation.
     if (!supports_chunked_prefill_())
         return 0;
-    if (req.vision_emb || req.image || vision_.has_input())
+    if (req.vision_emb || !req.images.empty() || vision_.has_input())
         return 0;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     const int total = static_cast<int>(req.input_tokens.size());
@@ -588,7 +588,7 @@ int Engine::snapshot_end_(const Request& req, int offset) const {
         return 0;
     if (!supports_chunked_prefill_())
         return 0;
-    if (req.vision_emb || req.image || vision_.has_input())
+    if (req.vision_emb || !req.images.empty() || vision_.has_input())
         return 0;
     const int bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     // Hint only for the hybrid store: the SWA saver snapshots at the prompt's block floor, not snap_end.
