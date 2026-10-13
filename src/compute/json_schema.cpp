@@ -368,22 +368,14 @@ private:
     // defines as silently ignored.
     static bool is_unenforceable_keyword(const std::string& k) {
         static const char* kUnenforceable[] = {
-            "minimum",
-            "maximum",
-            "exclusiveMinimum",
-            "exclusiveMaximum",
             "multipleOf",
-            "allOf",
             "not",
             "uniqueItems",
             "patternProperties",
             "propertyNames",
-            "prefixItems",
             "contains",
             "minContains",
             "maxContains",
-            "minProperties",
-            "maxProperties",
             "dependentRequired",
             "dependentSchemas",
             "if",
@@ -415,6 +407,362 @@ private:
         return SchemaType::STRING;  // default fallback
     }
 
+    // What one schema object said besides its node fields; finish_node() reads it.
+    struct ObjectState {
+        bool has_type = false;
+        // Distinguishes "additionalProperties: false" from the keyword being
+        // absent, which JSON Schema defines as true.
+        bool saw_additional_properties = false;
+        bool string_keyword = false;  // pattern / minLength / maxLength
+        bool nullable = false;        // OpenAPI "nullable": true
+        bool draft4_excl_lo = false;  // Draft 4 "exclusiveMinimum": true
+        bool draft4_excl_hi = false;
+        std::vector<SchemaType> types;  // "type": [...] with more than one member
+        std::vector<std::unique_ptr<SchemaNode>> all_of;
+    };
+
+    // '[' schema, ... ']'
+    void parse_schema_list(std::vector<std::unique_ptr<SchemaNode>>& out) {
+        skip_ws();
+        if (!expect('[')) {
+            fail("expected an array of schemas");
+            return;
+        }
+        skip_ws();
+        while (!eof() && peek() != ']') {
+            auto sub = parse_schema_object();
+            if (sub)
+                out.push_back(std::move(sub));
+            skip_ws();
+            if (peek() != ',')
+                break;
+            pos_++;
+            skip_ws();
+        }
+        if (!expect(']'))
+            fail("schema array is not closed");
+    }
+
+    // '{' "name": schema, ... '}' (properties, $defs)
+    void parse_schema_map(std::vector<std::pair<std::string, std::unique_ptr<SchemaNode>>>& out) {
+        skip_ws();
+        if (!expect('{')) {
+            fail("expected an object of schemas");
+            return;
+        }
+        skip_ws();
+        while (!eof() && peek() != '}') {
+            std::string name = parse_string();
+            skip_ws();
+            if (!expect(':')) {
+                fail("expected ':' after a schema name");
+                return;
+            }
+            auto sub = parse_schema_object();
+            if (sub)
+                out.emplace_back(std::move(name), std::move(sub));
+            skip_ws();
+            if (peek() != ',')
+                break;
+            pos_++;
+            skip_ws();
+        }
+        if (!expect('}'))
+            fail("schema object is not closed");
+    }
+
+    // enum members: strings go to enum_values, scalars to enum_literals (emitted verbatim); an
+    // object or array member has no FSM representation (#1564).
+    void parse_enum_members(SchemaNode& node) {
+        skip_ws();
+        if (!expect('[')) {
+            fail("enum is not an array");
+            return;
+        }
+        skip_ws();
+        while (!eof() && peek() != ']') {
+            std::string lit;
+            if (peek() == '"') {
+                node.enum_values.push_back(parse_string());
+            } else if (parse_scalar_literal(lit)) {
+                node.enum_literals.push_back(std::move(lit));
+            } else {
+                fail("enum members must be strings, numbers, booleans or null");
+                return;
+            }
+            skip_ws();
+            if (peek() != ',')
+                break;
+            pos_++;
+            skip_ws();
+        }
+        if (!expect(']'))
+            fail("enum array is not closed");
+    }
+
+    // "type": "x" or ["x", "y"]; the node takes the first, ObjectState keeps a longer list.
+    void parse_type(SchemaNode& node, ObjectState& st) {
+        skip_ws();
+        if (peek() != '[') {
+            node.type = type_from_string(parse_string());
+            return;
+        }
+        for (const std::string& t : parse_string_array())
+            st.types.push_back(type_from_string(t));
+        if (st.types.empty()) {
+            fail("type array is empty");
+            return;
+        }
+        node.type = st.types.front();
+        if (st.types.size() == 1)
+            st.types.clear();
+    }
+
+    // minLength / maxLength / minItems / maxItems / minProperties / maxProperties.
+    bool parse_count_keyword(const std::string& key, SchemaNode& node, ObjectState& st) {
+        int* slot = key == "minLength"       ? &node.min_length
+                    : key == "maxLength"     ? &node.max_length
+                    : key == "minItems"      ? &node.min_items
+                    : key == "maxItems"      ? &node.max_items
+                    : key == "minProperties" ? &node.min_properties
+                    : key == "maxProperties" ? &node.max_properties
+                                             : nullptr;
+        if (!slot)
+            return false;
+        long v = 0;
+        if (parse_int(v))
+            *slot = static_cast<int>(v);
+        st.string_keyword |= slot == &node.min_length || slot == &node.max_length;
+        return true;
+    }
+
+    // minimum / maximum / exclusiveMinimum / exclusiveMaximum (Draft 4 boolean form included).
+    bool parse_bound_keyword(const std::string& key, SchemaNode& node, ObjectState& st) {
+        const bool lo = key == "minimum" || key == "exclusiveMinimum";
+        const bool hi = key == "maximum" || key == "exclusiveMaximum";
+        if (!lo && !hi)
+            return false;
+        const bool excl = key[0] == 'e';
+        skip_ws();
+        if (excl && (peek() == 't' || peek() == 'f')) {
+            (lo ? st.draft4_excl_lo : st.draft4_excl_hi) = parse_bool();
+            return true;
+        }
+        std::string lit;
+        Decimal d;
+        if (!parse_scalar_literal(lit) || !parse_decimal(lit, d)) {
+            fail("'" + key + "' is not a number");
+            skip_value();
+            return true;
+        }
+        if (lo)
+            node.bounds.tighten_lo(d, excl);
+        else
+            node.bounds.tighten_hi(d, excl);
+        return true;
+    }
+
+    // "items": a schema, or true (any item) / false (none past prefixItems).
+    void parse_items(SchemaNode& node) {
+        skip_ws();
+        if (peek() == 't' || peek() == 'f')
+            node.items_false = !parse_bool();
+        else
+            node.items = parse_schema_object();
+    }
+
+    // "additionalProperties": a boolean, or the value schema of undeclared keys.
+    void parse_additional(SchemaNode& node) {
+        skip_ws();
+        if (peek() == 't' || peek() == 'f') {
+            node.additional_properties = parse_bool();
+            return;
+        }
+        node.additional_properties = true;
+        node.additional_schema = parse_schema_object();
+    }
+
+    void parse_ref(SchemaNode& node, ObjectState& st) {
+        std::string ref = parse_string();
+        std::string name;
+        if (ref == "#") {
+            name = "#";
+        } else if (ref.rfind("#/$defs/", 0) == 0) {
+            name = ref.substr(8);
+        } else if (ref.rfind("#/definitions/", 0) == 0) {
+            name = ref.substr(14);
+        }
+        if (name.empty() || name.find('/') != std::string::npos) {
+            // External refs / deep JSON pointers — unsupported; fail the
+            // parse so the caller declines constrained decoding.
+            IMP_LOG_WARN("JSON schema: unsupported $ref '%s'", ref.c_str());
+            ref_error_ = true;
+            return;
+        }
+        node.type = SchemaType::REF;
+        node.ref_name = name;
+        st.has_type = true;
+    }
+
+    // #1567: const is enum with one member, and the FSM already has that path. Same member types
+    // as enum.
+    void parse_const(SchemaNode& node) {
+        skip_ws();
+        std::string lit;
+        if (peek() == '"') {
+            node.enum_values.push_back(parse_string());
+        } else if (parse_scalar_literal(lit)) {
+            node.enum_literals.push_back(std::move(lit));
+        } else {
+            fail("const must be a string, number, boolean or null");
+            return;
+        }
+        node.type = SchemaType::ENUM;
+    }
+
+    // Combinator and structure keywords; false = not one of them.
+    bool parse_structure_keyword(const std::string& key, SchemaNode& node, ObjectState& st) {
+        if (key == "properties") {
+            parse_schema_map(node.properties);
+            if (!st.has_type)
+                node.type = SchemaType::OBJECT;
+        } else if (key == "items" || key == "prefixItems") {
+            if (key == "items")
+                parse_items(node);
+            else
+                parse_schema_list(node.prefix_items);
+            if (!st.has_type)
+                node.type = SchemaType::ARRAY;
+        } else if (key == "additionalProperties") {
+            st.saw_additional_properties = true;
+            parse_additional(node);
+        } else if (key == "anyOf" || key == "oneOf") {
+            // oneOf reads as anyOf: exclusivity is not enforced (disjoint unions are the common case).
+            parse_schema_list(node.any_of);
+        } else if (key == "allOf") {
+            parse_schema_list(st.all_of);
+        } else if (key == "$defs" || key == "definitions") {
+            parse_schema_map(collected_defs_);
+        } else {
+            return false;
+        }
+        return true;
+    }
+
+    // allOf members fold into the node: one $ref, `{}`, a bare required list, or object schemas
+    // whose properties merge. Anything else is a 400 (an intersection the FSM cannot express).
+    void merge_all_of(SchemaNode& node, ObjectState& st) {
+        const bool lone_ref = st.all_of.size() == 1 && st.all_of[0]->type == SchemaType::REF;
+        if (lone_ref && !st.has_type && node.properties.empty()) {
+            node.type = SchemaType::REF;  // Pydantic {"allOf": [{"$ref": ...}], "description": ...}
+            node.ref_name = st.all_of[0]->ref_name;
+            st.has_type = true;
+            return;
+        }
+        // Declared properties close an object unless additionalProperties opens it (imp default).
+        bool additional = st.saw_additional_properties ? node.additional_properties : node.properties.empty();
+        for (auto& sub : st.all_of) {
+            for (auto& req : sub->required)
+                node.required.push_back(req);
+            if (sub->type == SchemaType::ANY)
+                continue;
+            if (sub->type != SchemaType::OBJECT || (st.has_type && node.type != SchemaType::OBJECT)) {
+                fail("allOf: only object members, a required list or one $ref are enforceable");
+                return;
+            }
+            for (auto& [name, prop] : sub->properties) {
+                for (const auto& [mine, _] : node.properties)
+                    if (mine == name) {
+                        fail("allOf: property '" + name + "' declared twice");
+                        return;
+                    }
+                node.properties.emplace_back(name, std::move(prop));
+            }
+            additional = additional && sub->additional_properties;
+            if (sub->additional_schema && !node.additional_schema)
+                node.additional_schema = std::move(sub->additional_schema);
+            node.min_properties = std::max(node.min_properties, sub->min_properties);
+            if (sub->max_properties >= 0)
+                node.max_properties = node.max_properties < 0
+                                          ? sub->max_properties
+                                          : std::min(node.max_properties, sub->max_properties);
+            node.type = SchemaType::OBJECT;
+            st.has_type = true;
+        }
+        node.additional_properties = additional;
+        st.saw_additional_properties = true;
+    }
+
+    // A type array, or OpenAPI nullable: the node becomes anyOf over one copy per type.
+    void expand_types(SchemaNode& node, const ObjectState& st) {
+        std::vector<std::unique_ptr<SchemaNode>> alts;
+        for (const SchemaType t : st.types) {
+            auto alt = node.clone();
+            alt->type = t;
+            if (t == SchemaType::OBJECT && alt->properties.empty() && !st.saw_additional_properties)
+                alt->additional_properties = true;
+            alts.push_back(std::move(alt));
+        }
+        if (st.nullable) {
+            if (alts.empty())
+                alts.push_back(node.clone());
+            alts.push_back(std::make_unique<SchemaNode>());
+            alts.back()->type = SchemaType::NULL_TYPE;
+        }
+        node.any_of = std::move(alts);
+        node.type = SchemaType::ANY_OF;
+    }
+
+    // anyOf beside a type or properties: an alternative that only adds `required` inherits that
+    // base (anyOf [A, B] next to base reads as anyOf [base + A, base + B]).
+    static void finish_any_of(SchemaNode& node, const ObjectState& st) {
+        const bool has_base = st.has_type || !node.properties.empty();
+        for (auto& alt : node.any_of) {
+            if (!has_base || alt->type != SchemaType::ANY)
+                continue;
+            auto merged = node.clone();
+            merged->any_of.clear();
+            for (const auto& req : alt->required)
+                merged->required.push_back(req);
+            if (merged->type == SchemaType::OBJECT && merged->properties.empty() &&
+                !st.saw_additional_properties)
+                merged->additional_properties = true;  // #1729, as finish_node applies it
+            alt = std::move(merged);
+        }
+        node.type = SchemaType::ANY_OF;
+    }
+
+    void finish_node(SchemaNode& node, ObjectState& st) {
+        if (st.draft4_excl_lo && node.bounds.has_lo)
+            node.bounds.lo_excl = true;
+        if (st.draft4_excl_hi && node.bounds.has_hi)
+            node.bounds.hi_excl = true;
+        if (!st.all_of.empty())
+            merge_all_of(node, st);
+        // Enum takes precedence over a co-declared "type" (JSON key order is not
+        // significant; {"type":"string","enum":[...]} must not demote back to a
+        // free string, which the constrainer would then accept any value for).
+        if (node.has_enum() && node.type != SchemaType::REF) {
+            node.type = SchemaType::ENUM;
+            st.types.clear();
+        } else if (!node.any_of.empty() && node.type != SchemaType::REF) {
+            finish_any_of(node, st);
+        } else if (!st.has_type && node.type == SchemaType::STRING) {
+            // No type and no structure: the keywords present imply one, else any value.
+            node.type = st.string_keyword                                          ? SchemaType::STRING
+                        : node.bounds.active()                                     ? SchemaType::NUMBER
+                        : st.saw_additional_properties || node.min_properties >= 0 ? SchemaType::OBJECT
+                                                                                   : SchemaType::ANY;
+        }
+        // #1729: an object with no properties/additionalProperties defaults to
+        // free-form (`true`), else the FSM's only legal doc is {}. Not applied
+        // when properties ARE declared - that would loosen tool-schema strictness.
+        if (node.type == SchemaType::OBJECT && node.properties.empty() && !st.saw_additional_properties)
+            node.additional_properties = true;
+        if (st.types.size() > 1 || st.nullable)
+            expand_types(node, st);
+    }
+
     std::unique_ptr<SchemaNode> parse_schema_object() {
         // #1609: one frame per nesting level, from an unauthenticated request
         // body. 10^5 nested "items" objects overflow the worker thread's stack.
@@ -431,238 +779,74 @@ private:
         }
 
         auto node = std::make_unique<SchemaNode>();
-        bool has_type = false;
-        // Distinguishes "additionalProperties: false" from the keyword being
-        // absent, which JSON Schema defines as true.
-        bool saw_additional_properties = false;
-
+        ObjectState st;
         skip_ws();
-        if (peek() == '}') {
-            pos_++;
-            return node;
-        }
-
-        while (!eof()) {
+        while (!eof() && peek() != '}') {
             std::string key = parse_string();
             skip_ws();
             if (!expect(':'))
                 break;
 
             if (key == "type") {
-                std::string type_str = parse_string();
-                node->type = type_from_string(type_str);
-                has_type = true;
-            } else if (key == "properties") {
-                skip_ws();
-                if (expect('{')) {
-                    skip_ws();
-                    while (!eof() && peek() != '}') {
-                        std::string prop_name = parse_string();
-                        skip_ws();
-                        if (!expect(':')) {
-                            fail("expected ':' after a property name");
-                            break;
-                        }
-                        auto prop_schema = parse_schema_object();
-                        if (prop_schema) {
-                            node->properties.emplace_back(std::move(prop_name), std::move(prop_schema));
-                        }
-                        skip_ws();
-                        if (peek() == ',') {
-                            pos_++;
-                            skip_ws();
-                            continue;
-                        }
-                        break;
-                    }
-                    expect('}');
-                }
-                if (!has_type)
-                    node->type = SchemaType::OBJECT;
+                parse_type(*node, st);
+                st.has_type = true;
             } else if (key == "pattern") {
                 node->pattern = parse_string();
-            } else if (key == "minLength") {
-                long v = 0;
-                if (parse_int(v))
-                    node->min_length = static_cast<int>(v);
-            } else if (key == "maxLength") {
-                long v = 0;
-                if (parse_int(v))
-                    node->max_length = static_cast<int>(v);
+                st.string_keyword = true;
             } else if (key == "required") {
                 node->required = parse_string_array();
-            } else if (key == "additionalProperties") {
-                saw_additional_properties = true;
-                // #1564: parse_bool() doesn't consume on a non-bool value, leaving pos_
-                // stuck and dropping every key after this one (constraint_manager.cpp:138).
-                // Consume the value either way.
-                skip_ws();
-                if (peek() == 't' || peek() == 'f') {
-                    node->additional_properties = parse_bool();
-                } else {
-                    // The schema form ({"type": "..."}) is legal (Pydantic Dict[str, T]).
-                    // imp does not enforce a schema on extra keys, so this reads as
-                    // permissive `true` - weaker, not wrong.
-                    skip_value();
-                    node->additional_properties = true;
-                }
-            } else if (key == "items") {
-                node->items = parse_schema_object();
-                if (!has_type)
-                    node->type = SchemaType::ARRAY;
-            } else if (key == "minItems") {
-                long v = 0;
-                if (parse_int(v))
-                    node->min_items = static_cast<int>(v);
-            } else if (key == "maxItems") {
-                long v = 0;
-                if (parse_int(v))
-                    node->max_items = static_cast<int>(v);
             } else if (key == "enum") {
-                skip_ws();
-                if (!expect('[')) {
-                    fail("enum is not an array");
-                } else {
-                    skip_ws();
-                    while (!eof() && peek() != ']') {
-                        // Strings go to enum_values, scalars to enum_literals (emitted verbatim);
-                        // an object or array member has no FSM representation (#1564).
-                        std::string lit;
-                        if (peek() == '"') {
-                            node->enum_values.push_back(parse_string());
-                        } else if (parse_scalar_literal(lit)) {
-                            node->enum_literals.push_back(std::move(lit));
-                        } else {
-                            fail("enum members must be strings, numbers, booleans or null");
-                            break;
-                        }
-                        skip_ws();
-                        if (peek() == ',') {
-                            pos_++;
-                            skip_ws();
-                            continue;
-                        }
-                        break;
-                    }
-                    if (!parse_error_ && !expect(']'))
-                        fail("enum array is not closed");
-                }
+                parse_enum_members(*node);
                 node->type = SchemaType::ENUM;
-            } else if (key == "$ref") {
-                std::string ref = parse_string();
-                std::string name;
-                if (ref == "#") {
-                    name = "#";
-                } else if (ref.rfind("#/$defs/", 0) == 0) {
-                    name = ref.substr(8);
-                } else if (ref.rfind("#/definitions/", 0) == 0) {
-                    name = ref.substr(14);
-                }
-                if (name.empty() || name.find('/') != std::string::npos) {
-                    // External refs / deep JSON pointers — unsupported; fail the
-                    // parse so the caller declines constrained decoding.
-                    IMP_LOG_WARN("JSON schema: unsupported $ref '%s'", ref.c_str());
-                    ref_error_ = true;
-                } else {
-                    node->type = SchemaType::REF;
-                    node->ref_name = name;
-                    has_type = true;
-                }
-            } else if (key == "$defs" || key == "definitions") {
-                skip_ws();
-                if (expect('{')) {
-                    skip_ws();
-                    while (!eof() && peek() != '}') {
-                        std::string def_name = parse_string();
-                        skip_ws();
-                        if (!expect(':'))
-                            break;
-                        auto def_schema = parse_schema_object();
-                        if (def_schema)
-                            collected_defs_.emplace_back(std::move(def_name), std::move(def_schema));
-                        skip_ws();
-                        if (peek() == ',') {
-                            pos_++;
-                            skip_ws();
-                            continue;
-                        }
-                        break;
-                    }
-                    expect('}');
-                }
-            } else if (key == "anyOf" || key == "oneOf") {
-                skip_ws();
-                if (expect('[')) {
-                    skip_ws();
-                    while (!eof() && peek() != ']') {
-                        auto sub = parse_schema_object();
-                        if (sub)
-                            node->any_of.push_back(std::move(sub));
-                        skip_ws();
-                        if (peek() == ',') {
-                            pos_++;
-                            skip_ws();
-                            continue;
-                        }
-                        break;
-                    }
-                    expect(']');
-                }
-                node->type = SchemaType::ANY_OF;
             } else if (key == "const") {
-                // #1567: const is enum with one member, and the FSM already
-                // has that path. Same member types as enum above.
-                skip_ws();
-                std::string lit;
-                if (peek() == '"') {
-                    node->enum_values.push_back(parse_string());
-                    node->type = SchemaType::ENUM;
-                } else if (parse_scalar_literal(lit)) {
-                    node->enum_literals.push_back(std::move(lit));
-                    node->type = SchemaType::ENUM;
-                } else {
-                    fail("const must be a string, number, boolean or null");
-                }
-            } else if (is_unenforceable_keyword(key)) {
-                // #1567: these are assertions, not annotations - dropping one answers a
-                // bounded request with an unbounded grammar. docs/API.md: "A constraint
-                // imp cannot compile is a 400, not an unconstrained answer."
-                fail("schema keyword '" + key + "' is not enforceable by this build");
-                skip_value();
-            } else {
-                // Skip unknown fields and pure annotations ($schema, title, description,
-                // examples, default, format - an annotation in Draft 2020-12 unless the
-                // format-assertion vocabulary is in use, which imp does not claim).
+                parse_const(*node);
+            } else if (key == "$ref") {
+                parse_ref(*node, st);
+            } else if (key == "nullable") {
+                st.nullable = parse_bool();
+            } else if (!parse_structure_keyword(key, *node, st) && !parse_count_keyword(key, *node, st) &&
+                       !parse_bound_keyword(key, *node, st)) {
+                // #1567: an assertion keyword is not an annotation - dropping one answers a
+                // bounded request with an unbounded grammar. docs/API.md: "A constraint imp
+                // cannot compile is a 400, not an unconstrained answer." Unknown fields and pure
+                // annotations ($schema, title, description, examples, default, format) are skipped.
+                if (is_unenforceable_keyword(key))
+                    fail("schema keyword '" + key + "' is not enforceable by this build");
                 skip_value();
             }
 
             skip_ws();
-            if (peek() == ',') {
-                pos_++;
-                skip_ws();
-                continue;
-            }
-            break;
+            if (peek() != ',')
+                break;
+            pos_++;
+            skip_ws();
         }
         if (!expect('}'))
             fail("schema object is not closed; a value before this point was not consumed");
-
-        // Enum takes precedence over a co-declared "type" (JSON key order is not
-        // significant; {"type":"string","enum":[...]} must not demote back to a
-        // free string, which the constrainer would then accept any value for).
-        if (node->has_enum() && node->type != SchemaType::REF)
-            node->type = SchemaType::ENUM;
-
-        // #1729: an object with no properties/additionalProperties defaults to
-        // free-form (`true`), else the FSM's only legal doc is {}. Not applied
-        // when properties ARE declared - that would loosen tool-schema strictness.
-        if (node->type == SchemaType::OBJECT && node->properties.empty() &&
-            !saw_additional_properties)
-            node->additional_properties = true;
-
+        finish_node(*node, st);
         return node;
     }
 };
+
+// Calls fn on every child schema of `node` (properties, items, prefixItems, anyOf,
+// additionalProperties, defs) until fn returns false; returns false then.
+template <typename Node, typename Fn>
+static bool for_each_child(Node* node, Fn&& fn) {
+    for (auto& [name, prop] : node->properties)
+        if (!fn(prop.get()))
+            return false;
+    for (SchemaNode* single : {node->items.get(), node->additional_schema.get()})
+        if (single && !fn(single))
+            return false;
+    for (auto* list : {&node->prefix_items, &node->any_of})
+        for (auto& sub : *list)
+            if (!fn(sub.get()))
+                return false;
+    for (auto& [name, def] : node->defs)
+        if (!fn(def.get()))
+            return false;
+    return true;
+}
 
 // Recursively compile any `pattern` fields into NFAs. Unsupported patterns
 // leave pattern_nfa null (enforcement is then skipped for that node).
@@ -678,14 +862,10 @@ static void compile_patterns(SchemaNode* node) {
                          node->pattern.c_str());
         }
     }
-    for (auto& [name, prop] : node->properties)
-        compile_patterns(prop.get());
-    if (node->items)
-        compile_patterns(node->items.get());
-    for (auto& sub : node->any_of)
-        compile_patterns(sub.get());
-    for (auto& [name, def] : node->defs)
-        compile_patterns(def.get());
+    for_each_child(node, [](SchemaNode* child) {
+        compile_patterns(child);
+        return true;
+    });
 }
 
 // Resolve a REF chain against the root defs table. Defensive guard against
@@ -721,18 +901,7 @@ static bool validate_refs(const SchemaNode* root, const SchemaNode* node) {
         IMP_LOG_WARN("JSON schema: unresolvable $ref '%s'", node->ref_name.c_str());
         return false;
     }
-    for (auto& [name, prop] : node->properties)
-        if (!validate_refs(root, prop.get()))
-            return false;
-    if (node->items && !validate_refs(root, node->items.get()))
-        return false;
-    for (auto& sub : node->any_of)
-        if (!validate_refs(root, sub.get()))
-            return false;
-    for (auto& [name, def] : node->defs)
-        if (!validate_refs(root, def.get()))
-            return false;
-    return true;
+    return for_each_child(node, [root](const SchemaNode* child) { return validate_refs(root, child); });
 }
 
 std::unique_ptr<SchemaNode> parse_json_schema(const std::string& json) {
@@ -775,6 +944,10 @@ std::unique_ptr<SchemaNode> SchemaNode::clone() const {
     c->pattern_nfa = pattern_nfa;  // shared; compiled NFA is immutable
     c->min_items = min_items;
     c->max_items = max_items;
+    c->items_false = items_false;
+    c->min_properties = min_properties;
+    c->max_properties = max_properties;
+    c->bounds = bounds;
     c->ref_name = ref_name;
     for (auto& [name, def] : defs)
         c->defs.emplace_back(name, def->clone());
@@ -782,6 +955,10 @@ std::unique_ptr<SchemaNode> SchemaNode::clone() const {
         c->properties.emplace_back(name, prop->clone());
     if (items)
         c->items = items->clone();
+    if (additional_schema)
+        c->additional_schema = additional_schema->clone();
+    for (auto& sub : prefix_items)
+        c->prefix_items.push_back(sub->clone());
     for (auto& sub : any_of)
         c->any_of.push_back(sub->clone());
     return c;
@@ -797,14 +974,10 @@ static void rewrite_refs(SchemaNode* node, const std::map<std::string, std::stri
         if (it != rename.end())
             node->ref_name = it->second;
     }
-    for (auto& [n, prop] : node->properties)
-        rewrite_refs(prop.get(), rename);
-    if (node->items)
-        rewrite_refs(node->items.get(), rename);
-    for (auto& sub : node->any_of)
-        rewrite_refs(sub.get(), rename);
-    for (auto& [n, def] : node->defs)
-        rewrite_refs(def.get(), rename);
+    for_each_child(node, [&rename](SchemaNode* child) {
+        rewrite_refs(child, rename);
+        return true;
+    });
 }
 
 // Shared per-tool loop: parses each tool's schema, hoists its $defs into
@@ -901,572 +1074,6 @@ std::unique_ptr<SchemaNode> build_xml_tool_call_schema(
     // root itself; parameter keys/required come from defs[chosen_tool].
     root->enum_values = std::move(names);
     return root;
-}
-
-// RegexNfa: Thompson-construction NFA over bytes for the supported regex
-// subset. All host-side; never compiled into device code.
-
-int RegexNfa::new_state() {
-    // #1608: {n,m} clones multiply state count, the resource a hostile pattern
-    // spends. Past kMaxStates the parse errors; returning the last valid index
-    // keeps in-flight add_edge()/add_epsilon() calls in bounds.
-    if (states_.size() >= kMaxStates) {
-        error_ = true;
-        return states_.empty() ? 0 : static_cast<int>(states_.size()) - 1;
-    }
-    states_.emplace_back();
-    return static_cast<int>(states_.size()) - 1;
-}
-
-void RegexNfa::add_epsilon(int from, int to) {
-    NfaEdge e;
-    e.to = to;
-    e.is_epsilon = true;
-    states_[from].edges.push_back(std::move(e));
-}
-
-void RegexNfa::add_edge(int from, int to, const std::vector<uint8_t>& cls) {
-    NfaEdge e;
-    e.to = to;
-    e.is_epsilon = false;
-    e.char_class = cls;
-    states_[from].edges.push_back(std::move(e));
-}
-
-bool RegexNfa::make_shorthand(char esc, std::vector<uint8_t>& cls) {
-    cls.assign(256, 0);
-    auto set_digit = [&](bool neg) {
-        for (int c = 0; c < 256; c++) {
-            bool d = (c >= '0' && c <= '9');
-            cls[c] = (d != neg) ? 1 : 0;
-        }
-    };
-    auto set_word = [&](bool neg) {
-        for (int c = 0; c < 256; c++) {
-            bool w = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
-            cls[c] = (w != neg) ? 1 : 0;
-        }
-    };
-    auto set_space = [&](bool neg) {
-        for (int c = 0; c < 256; c++) {
-            bool s = (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v');
-            cls[c] = (s != neg) ? 1 : 0;
-        }
-    };
-    switch (esc) {
-        case 'd':
-            set_digit(false);
-            return true;
-        case 'D':
-            set_digit(true);
-            return true;
-        case 'w':
-            set_word(false);
-            return true;
-        case 'W':
-            set_word(true);
-            return true;
-        case 's':
-            set_space(false);
-            return true;
-        case 'S':
-            set_space(true);
-            return true;
-        default:
-            return false;
-    }
-}
-
-// atom := '(' alt ')' | '[' class ']' | '.' | escape | literal
-bool RegexNfa::parse_atom(Frag& out) {
-    if (pos_ >= src_->size()) {
-        error_ = true;
-        return false;
-    }
-    char c = (*src_)[pos_];
-
-    if (c == '(') {
-        pos_++;  // consume '('
-        // `(?:...)` is non-capturing; nothing here captures and backreferences are
-        // refused upstream, so skip the marker and parse the body as an ordinary
-        // group. A silently wrong compiled pattern is the one failure mode to avoid.
-        if (pos_ + 1 < src_->size() && (*src_)[pos_] == '?' && (*src_)[pos_ + 1] == ':')
-            pos_ += 2;
-        if (!parse_alt(out))
-            return false;
-        if (pos_ >= src_->size() || (*src_)[pos_] != ')') {
-            error_ = true;
-            return false;
-        }
-        pos_++;  // consume ')'
-        return true;
-    }
-
-    if (c == '[') {
-        return parse_class(out);
-    }
-
-    if (c == ')' || c == '|') {
-        // empty atom — caller handles
-        error_ = true;
-        return false;
-    }
-
-    std::vector<uint8_t> cls(256, 0);
-
-    if (c == '.') {
-        pos_++;
-        for (int i = 0; i < 256; i++)
-            cls[i] = (i == '\n') ? 0 : 1;  // any except newline
-    } else if (c == '\\') {
-        pos_++;
-        if (pos_ >= src_->size()) {
-            error_ = true;
-            return false;
-        }
-        char esc = (*src_)[pos_++];
-        std::vector<uint8_t> sc;
-        if (make_shorthand(esc, sc)) {
-            cls = std::move(sc);
-        } else {
-            // escaped literal (\. \\ \+ \{ etc.) — also map common control escapes
-            unsigned char lit;
-            switch (esc) {
-                case 'n':
-                    lit = '\n';
-                    break;
-                case 't':
-                    lit = '\t';
-                    break;
-                case 'r':
-                    lit = '\r';
-                    break;
-                case 'f':
-                    lit = '\f';
-                    break;
-                case 'v':
-                    lit = '\v';
-                    break;
-                default:
-                    lit = static_cast<unsigned char>(esc);
-                    break;
-            }
-            cls[lit] = 1;
-        }
-    } else if (c == '^' || c == '$') {
-        // Anchors: JSON-Schema pattern matching is treated as whole-string here
-        // (token masking cannot enforce sub-string matches), so a leading ^ /
-        // trailing $ are no-ops. Emit an epsilon fragment.
-        pos_++;
-        int s = new_state();
-        int a = new_state();
-        add_epsilon(s, a);
-        out.start = s;
-        out.accept = a;
-        return true;
-    } else {
-        // literal byte
-        pos_++;
-        cls[static_cast<unsigned char>(c)] = 1;
-    }
-
-    int s = new_state();
-    int a = new_state();
-    add_edge(s, a, cls);
-    out.start = s;
-    out.accept = a;
-    return true;
-}
-
-// class := '[' '^'? ( range | shorthand | char )+ ']'
-bool RegexNfa::parse_class(Frag& out) {
-    pos_++;  // consume '['
-    bool negate = false;
-    if (pos_ < src_->size() && (*src_)[pos_] == '^') {
-        negate = true;
-        pos_++;
-    }
-    std::vector<uint8_t> cls(256, 0);
-    bool any = false;
-
-    while (pos_ < src_->size() && (*src_)[pos_] != ']') {
-        char c = (*src_)[pos_];
-        if (c == '\\') {
-            pos_++;
-            if (pos_ >= src_->size()) {
-                error_ = true;
-                return false;
-            }
-            char esc = (*src_)[pos_++];
-            std::vector<uint8_t> sc;
-            if (make_shorthand(esc, sc)) {
-                for (int i = 0; i < 256; i++)
-                    if (sc[i])
-                        cls[i] = 1;
-                any = true;
-                continue;
-            }
-            unsigned char lit;
-            switch (esc) {
-                case 'n':
-                    lit = '\n';
-                    break;
-                case 't':
-                    lit = '\t';
-                    break;
-                case 'r':
-                    lit = '\r';
-                    break;
-                default:
-                    lit = static_cast<unsigned char>(esc);
-                    break;
-            }
-            cls[lit] = 1;
-            any = true;
-            continue;
-        }
-        // range a-z ?
-        if (pos_ + 2 < src_->size() && (*src_)[pos_ + 1] == '-' && (*src_)[pos_ + 2] != ']') {
-            unsigned char lo = static_cast<unsigned char>(c);
-            unsigned char hi = static_cast<unsigned char>((*src_)[pos_ + 2]);
-            pos_ += 3;
-            if (lo > hi) {
-                error_ = true;
-                return false;
-            }
-            for (int i = lo; i <= hi; i++)
-                cls[i] = 1;
-            any = true;
-        } else {
-            cls[static_cast<unsigned char>(c)] = 1;
-            pos_++;
-            any = true;
-        }
-    }
-
-    if (pos_ >= src_->size() || (*src_)[pos_] != ']' || !any) {
-        error_ = true;
-        return false;
-    }
-    pos_++;  // consume ']'
-
-    if (negate) {
-        for (int i = 0; i < 256; i++)
-            cls[i] = cls[i] ? 0 : 1;
-    }
-
-    int s = new_state();
-    int a = new_state();
-    add_edge(s, a, cls);
-    out.start = s;
-    out.accept = a;
-    return true;
-}
-
-// repeat := atom ('*' | '+' | '?' | '{n}' | '{n,}' | '{n,m}')?
-bool RegexNfa::parse_repeat(Frag& out) {
-    // Snapshot the atom's source start here so {n,m} can re-parse the exact
-    // source span of *this* atom (parse_atom may advance pos_ arbitrarily for
-    // groups / classes).
-    size_t atom_begin = pos_;
-    Frag atom{};
-    if (!parse_atom(atom))
-        return false;
-
-    if (pos_ >= src_->size())
-        return (out = atom, true);
-
-    char q = (*src_)[pos_];
-
-    if (q == '*' || q == '+' || q == '?') {
-        pos_++;
-        int s = new_state();
-        int a = new_state();
-        if (q == '*') {
-            add_epsilon(s, atom.start);
-            add_epsilon(s, a);
-            add_epsilon(atom.accept, atom.start);
-            add_epsilon(atom.accept, a);
-        } else if (q == '+') {
-            add_epsilon(s, atom.start);
-            add_epsilon(atom.accept, atom.start);
-            add_epsilon(atom.accept, a);
-        } else {  // '?'
-            add_epsilon(s, atom.start);
-            add_epsilon(s, a);
-            add_epsilon(atom.accept, a);
-        }
-        out.start = s;
-        out.accept = a;
-        return true;
-    }
-
-    if (q == '{') {
-        // {n} {n,} {n,m}
-        size_t save = pos_;
-        pos_++;  // consume '{'
-        long n = 0, m = -1;
-        auto scan_int = [&](long& out_val) -> bool {
-            long v = 0;
-            bool any = false;
-            while (pos_ < src_->size() && (*src_)[pos_] >= '0' && (*src_)[pos_] <= '9') {
-                // #1608: `v = v*10 + d` over an unbounded digit run is signed
-                // overflow, i.e. UB, before it is ever compared to a limit.
-                // Saturate at the repeat cap; the caller rejects from there.
-                if (v <= kMaxRepeat)
-                    v = v * 10 + ((*src_)[pos_] - '0');
-                pos_++;
-                any = true;
-            }
-            if (any)
-                out_val = v;
-            return any;
-        };
-        bool has_n = scan_int(n);
-        bool comma = false;
-        if (pos_ < src_->size() && (*src_)[pos_] == ',') {
-            comma = true;
-            pos_++;
-            long mm = 0;
-            if (scan_int(mm))
-                m = mm;  // {n,m}; else {n,} -> m stays -1 (unbounded)
-        }
-        if (!has_n || pos_ >= src_->size() || (*src_)[pos_] != '}') {
-            // Not a valid quantifier — treat '{' as literal: rewind.
-            pos_ = save;
-            return (out = atom, true);
-        }
-        pos_++;  // consume '}'
-        if (!comma)
-            m = n;  // {n}
-
-        // #1608: n is a clone count; unbounded n costs one parse+alloc per clone
-        // on an HTTP worker thread at admission time. Capped at kMaxRepeat.
-        if (n > kMaxRepeat || m > kMaxRepeat) {
-            error_ = true;
-            return false;
-        }
-
-        // Build: n mandatory copies, then either unbounded (*) or (m-n) optional.
-        int s = new_state();
-        int cur = s;
-        // We need fresh copies of the atom sub-pattern. Re-parse its exact
-        // source span [atom_begin, save) for each additional copy. `save` is
-        // the position right after the atom (the '{').
-        std::string atom_src = src_->substr(atom_begin, save - atom_begin);
-
-        auto clone_atom = [&](Frag& f) -> bool {
-            const std::string* prev_src = src_;
-            size_t prev_pos = pos_;
-            bool prev_err = error_;
-            // Parse the captured atom text in isolation.
-            std::string local = atom_src;
-            src_ = &local;
-            pos_ = 0;
-            error_ = false;
-            bool ok = parse_repeat(f);  // atom may itself be a repeat-free atom
-            // #1608: the clone's error must survive the restore, else new_state()'s
-            // state-budget signal is lost and nested `(((a{100}){100}){100})` isn't stopped.
-            bool inner_err = error_;
-            src_ = prev_src;
-            pos_ = prev_pos;
-            error_ = prev_err || inner_err;
-            return ok && !inner_err;
-        };
-
-        // first mandatory copy is the already-built `atom`
-        long built = 0;
-        if (n >= 1) {
-            add_epsilon(cur, atom.start);
-            cur = atom.accept;
-            built = 1;
-        } else {
-            // n == 0: atom is optional/unbounded from the start
-        }
-
-        for (long i = built; i < n; i++) {
-            Frag f{};
-            if (!clone_atom(f))
-                return false;
-            add_epsilon(cur, f.start);
-            cur = f.accept;
-        }
-
-        int a = new_state();
-        if (m < 0) {
-            // {n,} -> after n mandatory, a Kleene star of the atom
-            Frag f{};
-            if (!clone_atom(f))
-                return false;
-            int ls = new_state();
-            add_epsilon(cur, ls);
-            add_epsilon(ls, f.start);
-            add_epsilon(ls, a);
-            add_epsilon(f.accept, f.start);
-            add_epsilon(f.accept, a);
-        } else {
-            // {n,m} -> (m-n) optional copies
-            for (long i = n; i < m; i++) {
-                Frag f{};
-                if (!clone_atom(f))
-                    return false;
-                add_epsilon(cur, f.start);
-                add_epsilon(cur, a);  // optional: skip the rest
-                cur = f.accept;
-            }
-            add_epsilon(cur, a);
-        }
-        out.start = s;
-        out.accept = a;
-        return true;
-    }
-
-    out = atom;
-    return true;
-}
-
-// concat := repeat*
-bool RegexNfa::parse_concat(Frag& out) {
-    int s = new_state();
-    int cur = s;
-    bool any = false;
-    while (pos_ < src_->size() && (*src_)[pos_] != '|' && (*src_)[pos_] != ')') {
-        Frag f{};
-        if (!parse_repeat(f))
-            return false;
-        add_epsilon(cur, f.start);
-        cur = f.accept;
-        any = true;
-    }
-    if (!any) {
-        // empty concatenation matches empty string
-        int a = new_state();
-        add_epsilon(s, a);
-        out.start = s;
-        out.accept = a;
-        return true;
-    }
-    out.start = s;
-    out.accept = cur;
-    return true;
-}
-
-// alt := concat ('|' concat)*
-bool RegexNfa::parse_alt(Frag& out) {
-    // #1609: parse_atom() recurses into parse_alt() for a group, so '(' costs
-    // one stack frame per byte. parse_alt is the single point closing the
-    // mutual recursion, so one depth guard here covers all four functions.
-    if (depth_ >= kMaxDepth) {
-        error_ = true;
-        return false;
-    }
-    depth_++;
-    struct Pop {
-        int& d;
-        ~Pop() { d--; }
-    } pop{depth_};
-
-    Frag first{};
-    if (!parse_concat(first))
-        return false;
-    if (pos_ >= src_->size() || (*src_)[pos_] != '|') {
-        out = first;
-        return true;
-    }
-    int s = new_state();
-    int a = new_state();
-    add_epsilon(s, first.start);
-    add_epsilon(first.accept, a);
-    while (pos_ < src_->size() && (*src_)[pos_] == '|') {
-        pos_++;  // consume '|'
-        Frag next{};
-        if (!parse_concat(next))
-            return false;
-        add_epsilon(s, next.start);
-        add_epsilon(next.accept, a);
-    }
-    out.start = s;
-    out.accept = a;
-    return true;
-}
-
-bool RegexNfa::compile(const std::string& pattern) {
-    states_.clear();
-    compiled_ = false;
-    error_ = false;
-    depth_ = 0;
-    src_ = &pattern;
-    pos_ = 0;
-
-    Frag root{};
-    if (!parse_alt(root)) {
-        src_ = nullptr;
-        return false;
-    }
-    // Must have consumed the whole pattern.
-    if (pos_ != pattern.size() || error_) {
-        src_ = nullptr;
-        return false;
-    }
-    src_ = nullptr;
-
-    start_ = root.start;
-    accept_ = root.accept;
-    states_[accept_].accepting = true;
-    compiled_ = true;
-    return true;
-}
-
-void RegexNfa::epsilon_closure(std::vector<int>& set) const {
-    std::vector<int> stack(set.begin(), set.end());
-    std::vector<uint8_t> in(states_.size(), 0);
-    for (int s : set)
-        in[s] = 1;
-    while (!stack.empty()) {
-        int s = stack.back();
-        stack.pop_back();
-        for (const auto& e : states_[s].edges) {
-            if (e.is_epsilon && !in[e.to]) {
-                in[e.to] = 1;
-                set.push_back(e.to);
-                stack.push_back(e.to);
-            }
-        }
-    }
-    std::sort(set.begin(), set.end());
-}
-
-std::vector<int> RegexNfa::start_set() const {
-    std::vector<int> set;
-    if (!compiled_)
-        return set;
-    set.push_back(start_);
-    epsilon_closure(set);
-    return set;
-}
-
-std::vector<int> RegexNfa::step(const std::vector<int>& states, unsigned char c) const {
-    std::vector<int> next;
-    if (!compiled_)
-        return next;
-    std::vector<uint8_t> in(states_.size(), 0);
-    for (int s : states) {
-        for (const auto& e : states_[s].edges) {
-            if (!e.is_epsilon && e.char_class[c] && !in[e.to]) {
-                in[e.to] = 1;
-                next.push_back(e.to);
-            }
-        }
-    }
-    epsilon_closure(next);
-    return next;
-}
-
-bool RegexNfa::accepts(const std::vector<int>& states) const {
-    for (int s : states)
-        if (states_[s].accepting)
-            return true;
-    return false;
 }
 
 }  // namespace imp

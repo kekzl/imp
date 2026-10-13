@@ -13,16 +13,6 @@
 
 namespace imp {
 
-// Max simulated frame-stack depth: each {/[ nesting level holds ~2 frames (container +
-// value), so 192 frames ~= 96 nesting levels. Reachable only via recursive $ref schemas;
-// hitting the cap forces closure (still schema-valid for any finite nesting).
-static constexpr size_t kMaxSchemaStackDepth = 192;
-
-// Digits an `integer` may run to (#1540): int64 is 19 digits, past which no caller can
-// read the value back. `maximum` would be the precise bound but is refused at parse time
-// as unenforceable (#1567). Applies to `integer` only; `number` keeps its JSON-legal mantissa.
-static constexpr int kMaxIntegerDigits = 19;
-
 // Whitespace chars allowed before a forced envelope open literal: "\n\n" after </think>.
 // Unbounded, Phi-4 emitted tabs until max_tokens (#2273).
 static constexpr int kEnvelopeLeadWsMax = 2;
@@ -35,11 +25,15 @@ static constexpr int kEnvelopeLeadWsMax = 2;
 static int effective_max_items(const SchemaNode* root, const SchemaNode* array_node) {
     if (!array_node)
         return INT_MAX;
+    // "items": false after prefixItems is a hard ceiling, not a heuristic.
+    const int prefix = static_cast<int>(array_node->prefix_items.size());
+    if (array_node->items_false)
+        return array_node->max_items >= 0 ? std::min(array_node->max_items, prefix) : prefix;
     if (array_node->max_items >= 0)
         return array_node->max_items;
     const SchemaNode* items = resolve_schema_ref(root, array_node->items.get());
     if (items && items->type == SchemaType::ENUM && items->has_enum())
-        return static_cast<int>(items->enum_values.size() + items->enum_literals.size());
+        return prefix + static_cast<int>(items->enum_values.size() + items->enum_literals.size());
     return INT_MAX;
 }
 
@@ -195,15 +189,6 @@ static bool tool_call_key_available(const std::string& key, const std::set<std::
     return key == "arguments" && !emitted.count("arguments");
 }
 
-// additionalProperties:true (and bare {"type":"object"}, JSON Schema treats them the
-// same): undeclared keys are legal with undescribed values. Parsed since #1564 but read
-// by nothing until #1729 - the FSM treated every object as additionalProperties:false,
-// so a free-form object could only ever be {}.
-// TOOL_CALL is excluded: its two keys are ORDERED and arguments bind a chosen tool's
-// schema, so an extra key there is a desync, not an extension.
-static bool object_allows_additional(const SchemaNode* n) {
-    return n && n->type == SchemaType::OBJECT && n->additional_properties;
-}
 
 bool SchemaConstrainer::is_valid_key_prefix(const SchemaNode* obj, const std::string& prefix,
                                             const std::set<std::string>& emitted) const {
@@ -251,73 +236,15 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
 
     const auto& f = top();
     switch (f.phase) {
-        case SchemaPhase::VALUE_START: {
+        case SchemaPhase::VALUE_START:
             // No insignificant whitespace: a reasoning model whose top token is a newline would
             // otherwise stall forever (whitespace is always re-allowed, never forcing progress).
             // Compact JSON only; whitespace inside string values is CAT_STRING_CHAR, untouched.
-            uint16_t mask = 0;
-            if (!f.node)
-                return mask | CAT_VALUE_START;
-            switch (f.node->type) {
-                case SchemaType::OBJECT:
-                case SchemaType::TOOL_CALL:
-                    mask |= CAT_OPEN_BRACE;
-                    break;
-                case SchemaType::ARRAY:
-                    mask |= CAT_OPEN_BRACKET;
-                    break;
-                case SchemaType::STRING:
-                    mask |= CAT_QUOTE;
-                    break;
-                case SchemaType::NUMBER:
-                case SchemaType::INTEGER:
-                    mask |= CAT_NUMBER_START;
-                    break;
-                case SchemaType::BOOLEAN:
-                    mask |= CAT_TRUE_START | CAT_FALSE_START;
-                    break;
-                case SchemaType::NULL_TYPE:
-                    mask |= CAT_NULL_START;
-                    break;
-                case SchemaType::ENUM:
-                    if (!f.node->enum_values.empty())
-                        mask |= CAT_QUOTE;
-                    for (const auto& v : f.node->enum_literals)
-                        mask |= v[0] == 't'   ? CAT_TRUE_START
-                                : v[0] == 'f' ? CAT_FALSE_START
-                                : v[0] == 'n' ? CAT_NULL_START
-                                              : CAT_NUMBER_START;
-                    break;
-                case SchemaType::XML_TOOL_CALL:
-                    // '<' (and tolerated leading whitespace) span categories —
-                    // per-token simulation decides, like the XML phases below.
-                    return 0xFFFF;
-                case SchemaType::ANY_OF:
-                    mask |= CAT_VALUE_START;
-                    break;
-                default:
-                    mask |= CAT_VALUE_START;
-                    break;
-            }
-            return mask;
-        }
+            return value_start_categories(f.node);
 
-        case SchemaPhase::OBJECT_OPEN: {
-            uint16_t mask = CAT_QUOTE;  // " for key (compact JSON, no whitespace)
-            // Allow } only if all required keys are emitted
-            bool all_required = true;
-            if (f.node) {
-                for (auto& req : f.node->required) {
-                    if (!f.emitted_keys.count(req)) {
-                        all_required = false;
-                        break;
-                    }
-                }
-            }
-            if (all_required)
-                mask |= CAT_CLOSE_BRACE;
-            return mask;
-        }
+        case SchemaPhase::OBJECT_OPEN:
+            // '"' for a key (compact JSON, no whitespace); '}' once required / minProperties are met.
+            return static_cast<uint16_t>(CAT_QUOTE | (object_may_close(f) ? CAT_CLOSE_BRACE : 0));
 
         case SchemaPhase::OBJECT_KEY:
             return CAT_STRING_CHAR | CAT_QUOTE;  // token_allow handles key constraining
@@ -328,54 +255,14 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
         case SchemaPhase::OBJECT_COLON:
             return CAT_COLON;
 
-        case SchemaPhase::OBJECT_AFTER_VALUE: {
-            uint16_t mask = CAT_COMMA;
-            bool all_required = true;
-            if (f.node) {
-                for (auto& req : f.node->required) {
-                    if (!f.emitted_keys.count(req)) {
-                        all_required = false;
-                        break;
-                    }
-                }
-            }
-            if (all_required)
-                mask |= CAT_CLOSE_BRACE;
-            return mask;
-        }
+        case SchemaPhase::OBJECT_AFTER_VALUE:
+            return static_cast<uint16_t>(CAT_COMMA | (object_may_close(f) ? CAT_CLOSE_BRACE : 0));
 
         case SchemaPhase::ARRAY_OPEN: {
-            // minItems > 0: the empty array may not close yet.
-            uint16_t mask = (f.node && f.node->min_items > 0) ? 0 : CAT_CLOSE_BRACKET;
-            // Allow value start for first item ($ref items resolve first)
-            const SchemaNode* items = f.node ? resolve_schema_ref(schema_.get(), f.node->items.get())
-                                             : nullptr;
-            if (items) {
-                switch (items->type) {
-                    case SchemaType::STRING:
-                        mask |= CAT_QUOTE;
-                        break;
-                    case SchemaType::NUMBER:
-                    case SchemaType::INTEGER:
-                        mask |= CAT_NUMBER_START;
-                        break;
-                    case SchemaType::BOOLEAN:
-                        mask |= CAT_TRUE_START | CAT_FALSE_START;
-                        break;
-                    case SchemaType::OBJECT:
-                        mask |= CAT_OPEN_BRACE;
-                        break;
-                    case SchemaType::ARRAY:
-                        mask |= CAT_OPEN_BRACKET;
-                        break;
-                    default:
-                        mask |= CAT_VALUE_START;
-                        break;
-                }
-            } else {
-                mask |= CAT_VALUE_START;
-            }
-            return mask;
+            // minItems > 0: the empty array may not close yet. First item: prefixItems[0] or items.
+            const SchemaNode* first = item_schema(f.node, 0);
+            return static_cast<uint16_t>(((f.node && f.node->min_items > 0) ? 0 : CAT_CLOSE_BRACKET) |
+                                         (first ? value_start_categories(first) : 0));
         }
 
         case SchemaPhase::ARRAY_AFTER_ITEM: {
@@ -408,7 +295,6 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
             // run to max_tokens leaving the JSON unterminated. At the cap, drop continue-number so the
             // number must close: a valid (if large) JSON number, not a runaway. Cap (40) exceeds any
             // real int64 (<=19) / double (~17 sig) value.
-            constexpr int kMaxNumberDigits = 40;
             if (f.string_len < kMaxNumberDigits)
                 m |= CAT_NUMBER_CONT;
             return m;
@@ -438,9 +324,11 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
             return 0xFFFF;
 
         case SchemaPhase::FREE_VALUE:
-            // Every category can start or continue an undescribed value; which
-            // one is legal here is the grammar's business, and sim_advance asks
-            // it per token. Same delegation as the XML phases above.
+        case SchemaPhase::ANY_OF_BRANCHES:
+        case SchemaPhase::BRANCH_END:
+            // Every category can start or continue an undescribed value (or one of several anyOf
+            // branches); which one is legal is the grammar's business, and sim_advance asks it
+            // per token. Same delegation as the XML phases above.
             return 0xFFFF;
 
         case SchemaPhase::DONE:
@@ -763,20 +651,6 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
     return static_cast<int>(out.size());
 }
 
-// After a value frame pops, advance the parent frame's phase. Shared by the
-// transition simulator below.
-static void sim_fixup_parent(std::vector<SchemaFrame>& stk) {
-    if (stk.empty())
-        return;
-    SchemaFrame& parent = stk.back();
-    if (parent.phase == SchemaPhase::OBJECT_COLON)
-        parent.phase = SchemaPhase::OBJECT_AFTER_VALUE;
-    else if (parent.phase == SchemaPhase::ARRAY_OPEN || parent.phase == SchemaPhase::ARRAY_AFTER_ITEM) {
-        parent.phase = SchemaPhase::ARRAY_AFTER_ITEM;
-        parent.item_count++;  // one completed item per child-frame pop
-    }
-}
-
 // Transition simulator: single source of truth for the schema grammar. Drives both the
 // real update path (on stack_) and per-token mask legality (on a cloned stack). Returns
 // false on any illegal transition, rejecting a multi-char token spanning phase
@@ -786,30 +660,6 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
         return false;  // trailing content after the root value completed
 
     SchemaFrame& f = stk.back();
-    auto push_value = [&](const SchemaNode* node) {
-        SchemaFrame nf;
-        nf.node = resolve_schema_ref(schema_.get(), node);
-        nf.phase = SchemaPhase::VALUE_START;
-        stk.push_back(std::move(nf));
-    };
-    auto required_satisfied = [](const SchemaFrame& fr) {
-        if (!fr.node)
-            return true;
-        for (auto& req : fr.node->required)
-            if (!fr.emitted_keys.count(req))
-                return false;
-        return true;
-    };
-    auto has_unemitted_property = [](const SchemaFrame& fr) {
-        if (!fr.node)
-            return true;  // unknown object — can't tell, allow another key
-        if (object_allows_additional(fr.node))
-            return true;  // an undeclared key can always follow a comma
-        for (auto& [name, _] : fr.node->properties)
-            if (!fr.emitted_keys.count(name))
-                return true;
-        return false;
-    };
     const bool space = std::isspace(static_cast<unsigned char>(c)) != 0;
 
     switch (f.phase) {
@@ -826,7 +676,7 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                     // refuse to open deeper than ~96 levels (any finite nesting
                     // still satisfies the schema, so this only forces closure).
                     if (c == '{') {
-                        if (stk.size() >= kMaxSchemaStackDepth)
+                        if (schema_stack_depth(stk) >= kMaxSchemaStackDepth)
                             return false;
                         f.phase = SchemaPhase::OBJECT_OPEN;
                         return true;
@@ -834,7 +684,7 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                     return false;
                 case SchemaType::ARRAY:
                     if (c == '[') {
-                        if (stk.size() >= kMaxSchemaStackDepth)
+                        if (schema_stack_depth(stk) >= kMaxSchemaStackDepth)
                             return false;
                         f.phase = SchemaPhase::ARRAY_OPEN;
                         return true;
@@ -858,15 +708,7 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                     return false;
                 case SchemaType::NUMBER:
                 case SchemaType::INTEGER:
-                    if (c == '-' || (c >= '0' && c <= '9')) {
-                        f.phase = SchemaPhase::NUMBER_VALUE;
-                        f.string_len = (c >= '0' && c <= '9') ? 1 : 0;  // digit count
-                        f.num_leading_zero = (c == '0');                // "0..." forbids more int digits
-                        f.num_frac = f.num_exp = f.num_sign_ok = false;
-                        f.num_need_digit = (c == '-');  // a bare '-' still owes a digit
-                        return true;
-                    }
-                    return false;
+                    return number_start(f, c);
                 case SchemaType::BOOLEAN:
                     if (c == 't') {
                         f.phase = SchemaPhase::LITERAL_VALUE;
@@ -899,13 +741,17 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                     f.enum_buffer.clear();
                     return enum_literal_step(stk, c);
                 case SchemaType::ANY_OF:
-                    // anyOf is hard to constrain precisely — accept as free string.
-                    f.phase = SchemaPhase::STRING_VALUE;
-                    return true;
+                    // One branch per alternative until the first chars tell them apart.
+                    return any_of_start(stk, c);
+                case SchemaType::ANY:
+                    // Undescribed value: the JSON grammar owns it (#1729).
+                    stk.pop_back();
+                    push_free_value(stk);
+                    return sim_advance(stk, c);
                 case SchemaType::TOOL_CALL:
                     // Tool-call body — an object with ordered keys (#1002).
                     if (c == '{') {
-                        if (stk.size() >= kMaxSchemaStackDepth)
+                        if (schema_stack_depth(stk) >= kMaxSchemaStackDepth)
                             return false;
                         f.phase = SchemaPhase::OBJECT_OPEN;
                         return true;
@@ -932,13 +778,13 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
             if (c == '}') {
                 // After a comma a key is mandatory — closing here is a trailing
                 // comma. Otherwise close only once required keys are present.
-                if (f.after_comma || !required_satisfied(f))
+                if (f.after_comma || !object_may_close(f))
                     return false;
                 stk.pop_back();
                 sim_fixup_parent(stk);
                 return true;
             }
-            if (c == '"') {
+            if (c == '"' && object_may_add_key(f)) {
                 f.phase = SchemaPhase::OBJECT_KEY;
                 f.key_buffer.clear();
                 f.after_comma = false;
@@ -1006,22 +852,9 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                         }
                     }
                 }
-                // No declared property for this key means it came in through
-                // additionalProperties: its value is undescribed, so hand it to
-                // the JSON grammar instead of to this FSM.
-                if (!prop && object_allows_additional(f.node)) {
-                    SchemaFrame nf;
-                    nf.node = nullptr;
-                    nf.phase = SchemaPhase::FREE_VALUE;
-                    // Seeded in AFTER_COLON, not START: START accepts only '{' and '[', while an undescribed
-                    // value may be any JSON value. AFTER_COLON pushes AFTER_VALUE for every value form, so
-                    // that single stack entry is this frame's completion marker.
-                    nf.free_grammar.reset();
-                    nf.free_grammar.current_state = JsonState::AFTER_COLON;
-                    stk.push_back(std::move(nf));
-                    return true;
-                }
-                push_value(prop);
+                // No declared property: the key came in through additionalProperties, whose
+                // schema (or, without one, the JSON grammar) takes the value.
+                push_property_value(stk, prop);
                 return true;
             }
             return false;
@@ -1073,14 +906,14 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
             if (space)
                 return true;
             if (c == ',') {
-                if (!has_unemitted_property(f))
+                if (!object_may_add_key(f))
                     return false;  // no more keys possible — comma would dangle
                 f.phase = SchemaPhase::OBJECT_OPEN;
                 f.after_comma = true;
                 return true;
             }
             if (c == '}') {
-                if (!required_satisfied(f))
+                if (!object_may_close(f))
                     return false;
                 stk.pop_back();
                 sim_fixup_parent(stk);
@@ -1093,14 +926,14 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
             if (space)
                 return true;
             if (c == ',') {
-                if (!has_unemitted_property(f))
+                if (!object_may_add_key(f))
                     return false;  // every property emitted — comma would dangle
                 f.phase = SchemaPhase::OBJECT_OPEN;
                 f.after_comma = true;
                 return true;
             }
             if (c == '}') {
-                if (!required_satisfied(f))
+                if (!object_may_close(f))
                     return false;
                 stk.pop_back();
                 sim_fixup_parent(stk);
@@ -1119,11 +952,10 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 sim_fixup_parent(stk);
                 return true;
             }
-            if (f.node && f.node->items) {
-                push_value(f.node->items.get());
-                return sim_advance(stk, c);  // process first-item char in new frame
-            }
-            return true;  // array without an items schema — accept opaquely
+            // First item: prefixItems[0], items, or (no items schema) any value.
+            if (!push_array_item(stk, 0))
+                return false;
+            return sim_advance(stk, c);  // process first-item char in new frame
         }
 
         case SchemaPhase::ARRAY_AFTER_ITEM: {
@@ -1137,9 +969,7 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 // comma rather than deadlock; the mask mirrors this).
                 if (f.item_count >= max_items && can_close)
                     return false;
-                if (f.node && f.node->items)
-                    push_value(f.node->items.get());
-                return true;
+                return push_array_item(stk, f.item_count);
             }
             if (c == ']') {
                 if (!can_close && f.item_count < max_items)
@@ -1199,65 +1029,14 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
             return true;
         }
 
-        case SchemaPhase::NUMBER_VALUE: {
-            const bool is_int = f.node && f.node->type == SchemaType::INTEGER;
-            if (c >= '0' && c <= '9') {
-                if (f.string_len == 0) {  // first digit (came after a leading '-')
-                    f.num_leading_zero = (c == '0');
-                    f.string_len = 1;
-                    f.num_need_digit = false;
-                    return true;
-                }
-                if (f.num_leading_zero)
-                    return false;  // JSON forbids leading zeros: `0` then digit
-                // #1540: an unconstrained `integer` had no digit bound, so above temperature 0 the sampler
-                // could emit dozens of digits. int64 is 19 digits, past which no caller can read the value
-                // back; `maximum` would be precise but is refused at parse time as unenforceable (#1567),
-                // so this is the floor keeping output usable.
-                // FSM masks further digits rather than erroring: at 19 digits the value is complete and
-                // legal, so the model's next legal tokens are the ones that close it.
-                if (is_int && f.string_len >= kMaxIntegerDigits)
-                    return false;
-                f.string_len++;
-                f.num_need_digit = false;
-                f.num_sign_ok = false;
-                return true;
-            }
-            if (!is_int && (c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-')) {
-                bool ok = false;
-                if (c == '.') {
-                    ok = !f.num_frac && !f.num_exp && !f.num_need_digit;
-                    if (ok) {
-                        f.num_frac = true;
-                        f.num_need_digit = true;
-                    }
-                } else if (c == 'e' || c == 'E') {
-                    ok = !f.num_exp && !f.num_need_digit;
-                    if (ok) {
-                        f.num_exp = true;
-                        f.num_sign_ok = true;
-                        f.num_need_digit = true;
-                    }
-                } else {  // '+' / '-'
-                    ok = f.num_sign_ok;
-                    if (ok) {
-                        f.num_sign_ok = false;
-                        f.num_need_digit = true;
-                    }
-                }
-                if (!ok)
-                    return false;
-                f.num_leading_zero = false;  // fractional/exponent part — int rule done
-                return true;
-            }
-            // Any other char ends the number — legal only if >=1 digit was seen
-            // and the number does not still owe one ("3.", "1e", "-").
-            if (f.string_len == 0 || f.num_need_digit)
-                return false;
-            stk.pop_back();
-            sim_fixup_parent(stk);
-            return sim_advance(stk, c);  // reprocess the terminator in the parent
-        }
+        case SchemaPhase::NUMBER_VALUE:
+            return number_step(stk, c);
+
+        case SchemaPhase::ANY_OF_BRANCHES:
+            return any_of_step(stk, c);
+
+        case SchemaPhase::BRANCH_END:
+            return false;  // a branch reduced to this has finished its value (any_of_step)
 
         case SchemaPhase::LITERAL_VALUE: {
             if (f.literal_pos >= static_cast<int>(f.literal_target.size()))
@@ -1319,7 +1098,7 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                     f.phase = SchemaPhase::ENVELOPE_CLOSE;
                     f.literal_target = envelope_close_;
                     f.literal_pos = 0;
-                    push_value(f.node);
+                    push_schema_value(stk, resolve_schema_ref(schema_.get(), f.node));
                 }
                 return true;
             }

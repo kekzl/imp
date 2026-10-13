@@ -6,6 +6,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Added
 - `diagnostics.moe_expert_trace` also writes each pick's routing weight; `tools/analysis/expert_prune_sim.py` scores expert-pruned keep sets on it. Flash-Next at 128 of 512 experts keeps 52.9 % of the routing weight on held-out text, so pruning is dropped (#2613).
+- JSON Schema `minimum`/`maximum`/`exclusive*` (exact decimal), `prefixItems`, `additionalProperties` schemas, `min`/`maxProperties`, type arrays, `nullable` and `allOf` over objects or one `$ref` are enforced; keywords answered with 400: 21 -> 13.
 
 ### Changed
 - Qwen3.8-Flash-Next-NVFP4 decode 81.0 -> 87.2 tok/s (tg512, 3 prompts, 6 of 6 pairs): the declined MTP head is not uploaded (353 -> 386 expert slots/layer), the shared expert runs beside the miss gather (`moe.shared_expert_overlap`), faster expert-cache resolve. Output bits unchanged.
@@ -14,6 +15,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Qwen3.8-Flash-Next-NVFP4 decodes up to 8 requests per step: `max_batch_size` auto 1 -> 8 with pinned host experts, one expert-cache resolve and GEMV set for all rows, the miss gather beside the hit GEMVs (`moe.expert_gather_overlap`), KV ceiling one context. 8 streams 81.0 -> 162.2 tok/s, single stream 86.5 -> 86.1.
 - GDN projections at 5-32 decode rows read the FP8 decode rows (`gemv_fp8_rowscale_f16`) instead of a per-step F16 rebuild; output bits change at batch 5 and up (batch invariance is out of scope, `docs/determinism.md`).
 - Flash-Next GDN in/gate/out keep one VRAM copy: prefill runs the MXFP8 GEMM on the FP8 decode rows (`gemm.mxfp8_gdn_proj_prefill=fp8rows`, auto with host experts), 1556 MiB of NVFP4/MXFP8 copies gone; free VRAM beyond the KV ceiling goes to the expert cache. 386 -> 422 slots/layer, tg512 88.8 -> 91.4 tok/s, pp4096 flat, KV still reaches 131072 tokens.
+
+### Fixed
+- JSON Schema `anyOf`/`oneOf` (every Pydantic `Optional[T]`) was generated as a free string (`"age": "34"`) that failed validation; the alternatives now run side by side until the first chars decide. A schema without a type (`Any`) takes any JSON value; an array without `items` took one char per item (`[12]` illegal).
 
 ## [0.52.1] - 2026-10-12
 

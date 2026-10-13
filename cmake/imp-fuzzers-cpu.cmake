@@ -1,4 +1,4 @@
-# CPU-only libFuzzer build: parser targets + the 4 TUs they need, no CUDA language, no deps fetched.
+# CPU-only libFuzzer build: parser targets + the 6 TUs they need, no CUDA language, no deps fetched.
 # Full build (IMP_FUZZERS=ON) links against imp and adds file-format/tool-stream targets (loader,
 # httplib). Commands: fuzz/README.md.
 
@@ -11,6 +11,8 @@ set(IMP_FUZZ_SANITIZE -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointe
 
 add_library(imp_fuzz_parsers OBJECT
     ${CMAKE_CURRENT_SOURCE_DIR}/src/compute/json_schema.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/compute/json_number_bounds.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/compute/regex_nfa.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/compute/gbnf_grammar.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/compute/gbnf_parser.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/logging.cpp)
