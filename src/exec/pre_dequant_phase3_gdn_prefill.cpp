@@ -55,17 +55,102 @@ bool eligible_f16_projection(const Tensor& w) {
            w.shape[1] % 64 == 0 && w.shape[0] % 16 == 0;
 }
 
+struct RowViews {
+    int n = 0;
+    size_t bytes = 0;
+    int64_t max_k = 0, max_n = 0;
+};
+
+// fp8rows: an MXFP8 view of w.shape[0] rows of an FP8 row-scale entry from row0. Owns only its
+// SFB (row power of two) and col_scale (residual in [1, 2)), one allocation.
+void borrow_fp8_rows(WeightCaches& wc, VRAMAllocator* alloc, const Tensor& w, const FP8CacheEntry& e,
+                     int64_t row0, cudaStream_t stream, RowViews& out) {
+    if (!eligible_f16_projection(w) || wc.cutlass_mxfp8_prefill.count(w.data) || !e.d_row_scales ||
+        e.weight.shape[1] != w.shape[1] || row0 + w.shape[0] > e.weight.shape[0])
+        return;
+    CutlassMxFP8Weight cw;
+    cw.N = w.shape[0];
+    cw.K = w.shape[1];
+    cw.borrowed_data = true;
+    cw.data = static_cast<char*>(e.weight.data) + row0 * cw.K;
+    cw.sf_bytes = cutlass_mxfp8_sf_size(static_cast<int>(cw.N), static_cast<int>(cw.K));
+    const size_t sf_aligned = (cw.sf_bytes + 255) & ~size_t{255};
+    const size_t bytes = sf_aligned + cw.N * sizeof(float);
+    cw.scale_factors = vram_alloc(alloc, bytes, "mxfp8_rows_sf");
+    if (!cw.scale_factors)
+        return;
+    float* col_scale = reinterpret_cast<float*>(static_cast<char*>(cw.scale_factors) + sf_aligned);
+    mxfp8_sf_from_row_scales(e.d_row_scales + row0, cw.scale_factors, col_scale, static_cast<int>(cw.N),
+                             static_cast<int>(cw.K), stream);
+    cw.col_scale = col_scale;
+    wc.cutlass_mxfp8_prefill[w.data] = cw;
+    out.n++;
+    out.bytes += bytes;
+    out.max_k = std::max(out.max_k, w.shape[1]);
+    out.max_n = std::max(out.max_n, w.shape[0]);
+}
+
+// Pack rows: [0, conv_channels) ssm_in, then the gdn_gate rows; ssm_out has its own entry.
+RowViews borrow_gdn_fp8_rows(const Model& model, int n_layers, WeightCaches& wc, VRAMAllocator* alloc,
+                             cudaStream_t stream) {
+    RowViews v;
+    for (int i = 0; i < n_layers; i++) {
+        const auto& L = model.layer(i);
+        if (!L.ssm_in.data || !L.gdn_gate.data)
+            continue;
+        const auto pk = L.gdn_input_packed.data ? wc.fp8.find(L.gdn_input_packed.data) : wc.fp8.end();
+        if (pk != wc.fp8.end() && L.gdn_packed_conv_channels == L.ssm_in.shape[0] &&
+            L.gdn_packed_inner == L.gdn_gate.shape[0]) {
+            borrow_fp8_rows(wc, alloc, L.ssm_in, pk->second, 0, stream, v);
+            borrow_fp8_rows(wc, alloc, L.gdn_gate, pk->second, L.ssm_in.shape[0], stream, v);
+        }
+        if (const auto so = wc.fp8.find(L.ssm_out.data); so != wc.fp8.end())
+            borrow_fp8_rows(wc, alloc, L.ssm_out, so->second, 0, stream, v);
+    }
+    return v;
+}
+
+// Activation scratch for the MXFP8 route: E4M3 [max_tokens, max_K] plus SfAtom scales and the
+// CUTLASS workspace, sized once at the largest projection. A refusal leaves every field zero.
+void alloc_mxfp8_act_scratch(QuantScratch& qs, VRAMAllocator* alloc, int max_tokens, int64_t max_k,
+                             int64_t max_n) {
+    qs.mxfp8_act_data_size = static_cast<size_t>(max_tokens) * max_k;
+    qs.mxfp8_act_sf_size = cutlass_mxfp8_sf_size(max_tokens, static_cast<int>(max_k));
+    qs.mxfp8_workspace_size = gemm_mxfp8_cutlass_sm120_workspace(max_tokens, static_cast<int>(max_n),
+                                                                 static_cast<int>(max_k));
+    qs.mxfp8_act_data = vram_alloc(alloc, qs.mxfp8_act_data_size, "mxfp8_act_data");
+    qs.mxfp8_act_sf = vram_alloc(alloc, qs.mxfp8_act_sf_size, "mxfp8_act_sf");
+    qs.mxfp8_workspace = qs.mxfp8_workspace_size > 0
+                             ? vram_alloc(alloc, qs.mxfp8_workspace_size, "mxfp8_workspace")
+                             : nullptr;
+    if (!qs.mxfp8_act_data || !qs.mxfp8_act_sf || (qs.mxfp8_workspace_size > 0 && !qs.mxfp8_workspace)) {
+        IMP_LOG_WARN("GDN MXFP8 prefill: activation scratch (%.1f MiB) refused, the copies stay unused",
+                     (qs.mxfp8_act_data_size + qs.mxfp8_act_sf_size + qs.mxfp8_workspace_size) /
+                         (1024.0 * 1024.0));
+        if (qs.mxfp8_act_data)
+            vram_free(alloc, qs.mxfp8_act_data);
+        if (qs.mxfp8_act_sf)
+            vram_free(alloc, qs.mxfp8_act_sf);
+        if (qs.mxfp8_workspace)
+            vram_free(alloc, qs.mxfp8_workspace);
+        qs.mxfp8_act_data = qs.mxfp8_act_sf = qs.mxfp8_workspace = nullptr;
+        qs.mxfp8_act_data_size = qs.mxfp8_act_sf_size = qs.mxfp8_workspace_size = 0;
+    }
+}
+
 }  // namespace
 
 void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg, cudaStream_t stream) {
     const auto& gemm_cfg = dispatch_policy().gemm;
     ProjSelection nv = parse_projection_selection(gemm_cfg.nvfp4_gdn_proj_prefill,
                                                   "gemm.nvfp4_gdn_proj_prefill");
-    // "auto": gate,out copies with host-resident experts, where Phase 4b frees the F16 sources.
+    // "auto" with host-resident experts = "fp8rows": in/gate/out run the MXFP8 GEMM on the FP8
+    // decode sidecar's own rows (no second copy), and Phase 4b frees the F16 sources.
     std::string mx_spec = gemm_cfg.mxfp8_gdn_proj_prefill;
     if (mx_spec == "auto")
-        mx_spec = pre_dequant_internal::has_host_resident_experts(*model_) ? "gate,out" : "false";
-    ProjSelection mx = parse_projection_selection(mx_spec, "gemm.mxfp8_gdn_proj_prefill");
+        mx_spec = pre_dequant_internal::has_host_resident_experts(*model_) ? "fp8rows" : "false";
+    const bool fp8rows = mx_spec == "fp8rows";
+    ProjSelection mx = parse_projection_selection(fp8rows ? "all" : mx_spec, "gemm.mxfp8_gdn_proj_prefill");
     if (!nv.any() && !mx.any())
         return;
     if (nv.any() && !cutlass_sm120_nvfp4_available()) {
@@ -133,16 +218,25 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
         mx_max_n = std::max(mx_max_n, w.shape[0]);
     };
 
-    // A projection named in both flags gets the MXFP8 copy only.
+    // A projection named in both flags gets the MXFP8 copy only; a borrowed view takes neither.
     auto place = [&](const Tensor& w, bool want_mx, bool want_nv) {
-        if (!eligible_f16_projection(w))
+        if (!eligible_f16_projection(w) || wcache_->cutlass_mxfp8_prefill.count(w.data))
             return;  // native NVFP4 / FP8 projections already have their own prefill route
+        if (fp8rows)
+            return;  // no FP8 rows for this projection: it keeps the F16 route
         if (want_mx)
             quantize_mxfp8(w);
         else if (want_nv)
             quantize_nvfp4(w);
     };
 
+    if (fp8rows) {
+        const RowViews v = borrow_gdn_fp8_rows(*model_, cfg.n_layers, *wcache_, vram_alloc_, stream);
+        n_mx += v.n;
+        mx_bytes += v.bytes;
+        mx_max_k = std::max(mx_max_k, v.max_k);
+        mx_max_n = std::max(mx_max_n, v.max_n);
+    }
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model_->layer(i);
         if (!L.ssm_in.data || !L.gdn_gate.data)
@@ -164,35 +258,13 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
         IMP_LOG_INFO("GDN NVFP4 prefill: no eligible F16 GDN projection (flag on, model has none)");
 
     if (n_mx > 0) {
-        // Activation scratch for the MXFP8 route: E4M3 [max_tokens, max_K] plus SfAtom scales and
-        // the CUTLASS workspace, sized once at the largest copied projection.
         auto& qs = *qscratch_;
-        qs.mxfp8_act_data_size = static_cast<size_t>(max_tokens_) * mx_max_k;
-        qs.mxfp8_act_sf_size = cutlass_mxfp8_sf_size(max_tokens_, static_cast<int>(mx_max_k));
-        qs.mxfp8_workspace_size = gemm_mxfp8_cutlass_sm120_workspace(max_tokens_, static_cast<int>(mx_max_n),
-                                                                     static_cast<int>(mx_max_k));
-        qs.mxfp8_act_data = vram_alloc(vram_alloc_, qs.mxfp8_act_data_size, "mxfp8_act_data");
-        qs.mxfp8_act_sf = vram_alloc(vram_alloc_, qs.mxfp8_act_sf_size, "mxfp8_act_sf");
-        qs.mxfp8_workspace = qs.mxfp8_workspace_size > 0
-                                 ? vram_alloc(vram_alloc_, qs.mxfp8_workspace_size, "mxfp8_workspace")
-                                 : nullptr;
-        if (!qs.mxfp8_act_data || !qs.mxfp8_act_sf || (qs.mxfp8_workspace_size > 0 && !qs.mxfp8_workspace)) {
-            IMP_LOG_WARN("GDN MXFP8 prefill: activation scratch (%.1f MiB) refused, the copies stay unused",
-                         (qs.mxfp8_act_data_size + qs.mxfp8_act_sf_size + qs.mxfp8_workspace_size) /
-                             (1024.0 * 1024.0));
-            if (qs.mxfp8_act_data)
-                vram_free(vram_alloc_, qs.mxfp8_act_data);
-            if (qs.mxfp8_act_sf)
-                vram_free(vram_alloc_, qs.mxfp8_act_sf);
-            if (qs.mxfp8_workspace)
-                vram_free(vram_alloc_, qs.mxfp8_workspace);
-            qs.mxfp8_act_data = qs.mxfp8_act_sf = qs.mxfp8_workspace = nullptr;
-            qs.mxfp8_act_data_size = qs.mxfp8_act_sf_size = qs.mxfp8_workspace_size = 0;
-        }
+        alloc_mxfp8_act_scratch(qs, vram_alloc_, max_tokens_, mx_max_k, mx_max_n);
         IMP_LOG_INFO(
-            "GDN MXFP8 prefill: %d F16 in/gate/out projections -> MXFP8 (%.1f MiB), M>32 rows on the "
+            "GDN MXFP8 prefill: %d F16 in/gate/out projections -> %s (%.1f MiB), M>32 rows on the "
             "CUTLASS GEMM; activation scratch %.1f MiB",
-            n_mx, mx_bytes / (1024.0 * 1024.0),
+            n_mx, fp8rows ? "views of the FP8 sidecar rows, scales only" : "MXFP8 copies",
+            mx_bytes / (1024.0 * 1024.0),
             (qs.mxfp8_act_data_size + qs.mxfp8_act_sf_size + qs.mxfp8_workspace_size) / (1024.0 * 1024.0));
     } else if (mx.any()) {
         IMP_LOG_INFO("GDN MXFP8 prefill: no eligible F16 GDN projection (flag on, model has none)");

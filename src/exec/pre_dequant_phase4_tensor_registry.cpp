@@ -592,8 +592,8 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
     }
     // GDN bytes no path reads any more:
     // - the F16 input pack: only n == 1 reads it, through its FP8 row-scale sidecar (decode tier FP8);
-    // - with host-resident experts, the F16 ssm_in / gdn_gate / ssm_out once M > 32 has its NVFP4 (in)
-    //   and MXFP8 (gate, out) copy: smaller M rebuild them from those copies (released_source_gemm_).
+    // - with host-resident experts, the F16 ssm_in / gdn_gate / ssm_out: M > 32 takes an NVFP4 / MXFP8
+    //   prefill copy where one exists, everything else rebuilds from the FP8 rows (released_source_gemm_).
     const bool host_experts = pre_dequant_internal::has_host_resident_experts(*model_);
     auto bytes_of = [](const Tensor& t) { return qtype_row_bytes(t.qtype, t.shape[1]) * static_cast<size_t>(t.shape[0]); };
     auto releasable = [&](const Tensor& t, TensorID id) {
@@ -618,10 +618,13 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
             free_source(p);
             ++dropped_packs;
         }
+        // Each released projection needs a copy to rebuild from: in and gate are rows of the pack's
+        // FP8 sidecar, out has its own FP8 sidecar; the NVFP4 / MXFP8 prefill copies are optional.
+        const auto out_fp8 = wcache_->fp8.find(L.ssm_out.data);
+        const bool out_view = out_fp8 != wcache_->fp8.end() && out_fp8->second.d_row_scales != nullptr;
         const bool copies = pack_sidecar && L.gdn_packed_conv_channels == L.ssm_in.shape[0] &&
-                            wcache_->cutlass_nvfp4_prefill.count(L.ssm_in.data) != 0 &&
-                            wcache_->cutlass_mxfp8_prefill.count(L.gdn_gate.data) != 0 &&
-                            wcache_->cutlass_mxfp8_prefill.count(L.ssm_out.data) != 0;
+                            L.gdn_packed_inner == L.gdn_gate.shape[0] &&
+                            (out_view || wcache_->cutlass_mxfp8_prefill.count(L.ssm_out.data) != 0);
         if (!host_experts || !copies || !releasable(L.ssm_in, L.ssm_in_id) ||
             !releasable(L.gdn_gate, L.gdn_gate_id) || !releasable(L.ssm_out, L.ssm_out_id))
             continue;
@@ -633,10 +636,19 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
             if (!wcache_->released_f16_scratch)
                 break;
         }
-        FP8CacheEntry view = pk->second;  // pack rows [0, conv_channels) are ssm_in
-        const int64_t in_shape[2] = {L.ssm_in.shape[0], L.ssm_in.shape[1]};
-        view.weight = Tensor(pk->second.weight.data, QType::FP8_E4M3, 2, in_shape, true);
-        wcache_->released_fp8_view[L.ssm_in.data] = view;
+        // Pack rows: [0, conv_channels) ssm_in, then inner rows of gdn_gate.
+        auto pack_rows = [&](const Tensor& t, int64_t row0) {
+            FP8CacheEntry view = pk->second;
+            const int64_t shape[2] = {t.shape[0], t.shape[1]};
+            view.weight = Tensor(static_cast<char*>(pk->second.weight.data) + row0 * t.shape[1],
+                                 QType::FP8_E4M3, 2, shape, true);
+            view.d_row_scales = pk->second.d_row_scales + row0;
+            wcache_->released_fp8_view[t.data] = view;
+        };
+        pack_rows(L.ssm_in, 0);
+        pack_rows(L.gdn_gate, L.ssm_in.shape[0]);
+        if (out_view)
+            wcache_->released_fp8_view[L.ssm_out.data] = out_fp8->second;
         for (auto [t, id] : {std::pair{&L.ssm_in, L.ssm_in_id}, std::pair{&L.gdn_gate, L.gdn_gate_id},
                              std::pair{&L.ssm_out, L.ssm_out_id}}) {
             wcache_->dropped_gdn_bytes += bytes_of(*t);

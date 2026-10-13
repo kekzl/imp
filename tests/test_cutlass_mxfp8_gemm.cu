@@ -4,6 +4,7 @@
 // activation against 0.01-magnitude weight rows, docs/plans/2026-08-31-fp8-ssm-prefill.md).
 
 #include "compute/gemm_cutlass_mxfp8_sm120.h"
+#include "quant/fp8_quant.h"
 
 #include <gtest/gtest.h>
 
@@ -214,4 +215,82 @@ TEST(CutlassMxFP8Gemm, DequantizeMatchesTheHostDecode) {
     EXPECT_LT(std::sqrt(err / ref), 0.05) << "rebuild outside E4M3 rounding of the source";
     for (void* p : {d_src, d_back, q1, sf1})
         cudaFree(p);
+}
+
+// The GDN prefill view of an FP8 row-scale sidecar (gemm.mxfp8_gdn_proj_prefill=fp8rows): B is
+// the sidecar's own E4M3 rows, SFB the row's power of two, col_scale the residual in [1, 2).
+// Coherent activation against 0.01-magnitude rows (the case that broke the FP8 SSM_IN attempt)
+// must stay finite and within the E4M3 budget; the rebuild equals the per-row FP8 decode.
+TEST(CutlassMxFP8Gemm, Fp8RowSidecarViewMatchesReference) {
+    const Problem p = make_problem(/*M=*/96, /*N=*/384, /*K=*/1024, 0.01f, true, 13u);
+    std::vector<half> a_h(p.a.size()), w_h(p.w.size());
+    for (size_t i = 0; i < p.a.size(); i++)
+        a_h[i] = __float2half(p.a[i]);
+    for (size_t i = 0; i < p.w.size(); i++)
+        w_h[i] = __float2half(p.w[i]);
+    void *d_a, *d_w, *d_out, *d_q, *d_back, *act, *act_sf, *sf, *ws = nullptr;
+    float *row_scales, *col_scale;
+    const size_t sf_w = cutlass_mxfp8_sf_size(p.N, p.K), sf_a = cutlass_mxfp8_sf_size(p.M, p.K);
+    const size_t ws_bytes = gemm_mxfp8_cutlass_sm120_workspace(p.M, p.N, p.K);
+    ASSERT_EQ(cudaMalloc(&d_a, a_h.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_w, w_h.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_back, w_h.size() * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_out, static_cast<size_t>(p.M) * p.N * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_q, w_h.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&act, a_h.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&act_sf, sf_a), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&sf, sf_w), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&row_scales, p.N * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&col_scale, p.N * sizeof(float)), cudaSuccess);
+    if (ws_bytes)
+        ASSERT_EQ(cudaMalloc(&ws, ws_bytes), cudaSuccess);
+    cudaMemcpy(d_a, a_h.data(), a_h.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w, w_h.data(), w_h.size() * sizeof(half), cudaMemcpyHostToDevice);
+    quantize_fp8_rows_async(d_w, d_q, p.N, p.K, row_scales, nullptr);
+    mxfp8_sf_from_row_scales(row_scales, sf, col_scale, p.N, p.K, nullptr);
+    CutlassMxFP8Weight w;
+    w.data = d_q;
+    w.scale_factors = sf;
+    w.col_scale = col_scale;
+    w.borrowed_data = true;
+    w.N = p.N;
+    w.K = p.K;
+    quantize_fp16_to_mxfp8_cutlass(d_a, act, act_sf, p.M, p.K, nullptr);
+    ASSERT_TRUE(gemm_mxfp8_cutlass_sm120(act, act_sf, w, d_out, p.M, p.N, p.K, ws, ws_bytes, nullptr));
+    dequantize_mxfp8_cutlass_to_fp16(w, d_back, nullptr);
+    void* d_rows = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_rows, w_h.size() * sizeof(half)), cudaSuccess);
+    dequantize_fp8_rows_async(d_q, row_scales, d_rows, p.N, p.K, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    std::vector<half> out_h(static_cast<size_t>(p.M) * p.N), back(w_h.size()), rows(w_h.size());
+    cudaMemcpy(out_h.data(), d_out, out_h.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(back.data(), d_back, back.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(rows.data(), d_rows, rows.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    std::vector<float> d(out_h.size()), ref(out_h.size(), 0.0f);
+    for (size_t i = 0; i < out_h.size(); i++) {
+        d[i] = __half2float(out_h[i]);
+        ASSERT_TRUE(std::isfinite(d[i]));
+    }
+    for (int m = 0; m < p.M; m++)
+        for (int n = 0; n < p.N; n++) {
+            double acc = 0.0;
+            for (int k = 0; k < p.K; k++)
+                acc += static_cast<double>(__half2float(a_h[static_cast<size_t>(m) * p.K + k])) *
+                       __half2float(w_h[static_cast<size_t>(n) * p.K + k]);
+            ref[static_cast<size_t>(m) * p.N + n] = static_cast<float>(acc);
+        }
+    EXPECT_LT(rel_rms(d, ref), 0.05);
+    int off = 0;
+    for (size_t i = 0; i < back.size(); i++) {
+        const float a = __half2float(back[i]), b = __half2float(rows[i]);
+        if (std::fabs(a - b) > 1e-3f * std::fabs(b) + 1e-8f)
+            ++off;
+    }
+    EXPECT_EQ(off, 0) << "view rebuild differs from the FP8 row decode";
+    for (void* q : {d_a, d_w, d_out, d_q, d_back, d_rows, act, act_sf, sf, static_cast<void*>(row_scales),
+                    static_cast<void*>(col_scale)})
+        cudaFree(q);
+    if (ws)
+        cudaFree(ws);
 }

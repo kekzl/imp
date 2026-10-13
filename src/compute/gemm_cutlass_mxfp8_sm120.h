@@ -24,7 +24,16 @@ struct CutlassMxFP8Weight {
     int64_t K = 0;
     size_t data_bytes = 0;
     size_t sf_bytes = 0;
+    // Row-scaled view of an FP8 row-scale sidecar: data borrowed (never freed here), SFB holds
+    // each row's power of two, col_scale[n] the residual factor in [1, 2) applied to D column n.
+    const float* col_scale = nullptr;
+    bool borrowed_data = false;
 };
+
+// SfAtom UE8M0 [rows, K] + col_scale[rows] for E4M3 rows quantized with one FP32 scale per row:
+// SFB = 2^floor(log2 row_scale), col_scale = row_scale / SFB. dst_sf holds cutlass_mxfp8_sf_size.
+void mxfp8_sf_from_row_scales(const float* row_scales, void* dst_sf, float* dst_col_scale, int rows, int K,
+                              cudaStream_t stream);
 
 // SfAtom buffer size for (rows x K) at SFVecSize 32 (128-row x 4-group atoms).
 size_t cutlass_mxfp8_sf_size(int rows, int K);

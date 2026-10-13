@@ -829,6 +829,8 @@ private:
     int kv_ctx_tokens_ = 0;  // engine max_seq_len as init() got it
     int kv_ctx_batch_ = 0;   // engine max_batch_size, 0 = unknown
     [[nodiscard]] size_t expert_cache_ctx_slack_bytes_() const;
+    [[nodiscard]] size_t expert_cache_free_slack_bytes_() const;
+    [[nodiscard]] size_t kv_bytes_per_token_() const;
     struct ShexpOverlap {
         CudaStream stream;
         CudaEvent fork;
