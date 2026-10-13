@@ -142,7 +142,7 @@ Commands: [README](../README.md#quickstart-qwen38-flash-next). Weights: 25 files
 | host RAM | test host 78 GiB: 74 GiB available before start, 9 GiB after load |
 | load | 59.0..64.0 s to `/health` ok, 28.9..32.0 s of it pinning the host experts (was 97.7 s / 65 s before roadmap row 68, 2026-10-05) |
 | KV | starts at 2025 blocks (32400 tokens), grows to 131072 tokens (8192 blocks) on a 110580-token prompt |
-| batch | one request at a time: `max_batch_size: auto → 1` (host-resident experts) |
+| batch | up to 8 requests per decode step: `max_batch_size: auto → 8` with the host experts pinned (`→ 1` on the host expert tier); the KV pool stays one 131072-token context, shared by the rows |
 | long chat | 27 turns, 28 requests all `200`, up to 27241 tokens of context: decode median 64.2 tok/s, slowest turn 51.8 tok/s |
 
 [PROV: commit=78264274 date=2026-10-01 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4

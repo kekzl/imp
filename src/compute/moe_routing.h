@@ -92,8 +92,10 @@ void moe_scatter_fused_residual(const void* expert_output, const int32_t* token_
 // Fused weighted sum + FP16 output + optional residual add, used by run_moe_ffn.
 // expert_outputs: [top_k, d_model] FP16. expert_weights: [top_k] FP32 on device.
 // residual: [d_model] FP16 (or nullptr to skip). output: [d_model] FP16.
+// n_rows > 1: every tensor gains a leading row dimension, rows are independent (same bits as n_rows 1).
 void moe_weighted_sum_residual(const void* expert_outputs, const float* expert_weights, const void* residual,
-                               void* output, int d_model, int top_k, cudaStream_t stream = nullptr);
+                               void* output, int d_model, int top_k, cudaStream_t stream = nullptr,
+                               int n_rows = 1);
 
 // Fused gate GEMV + softmax/sigmoid + top-k (decode M=1); replaces gemv_gate_fp32 +
 // moe_topk_gating(skip_sorting=true). W_gate[n_experts,d_model] FP16, x[d_model] FP16.

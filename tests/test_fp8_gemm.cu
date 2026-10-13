@@ -432,6 +432,58 @@ TEST_F(FP8GemmTest, RowscaleFp32HeadMatchesReferenceAndIsRowCountInvariant) {
     cudaFree(d_y);
 }
 
+// FP16 twin (GDN projections at 2 <= M <= 32): every output equals the FP32 head's value rounded to
+// FP16, for the narrow (kNT 2: 2560 rows), mid (kNT 4) and wide (kNT 8) launch, at 8 and 29 rows.
+TEST_F(FP8GemmTest, RowscaleF16MatchesFp32HeadRounded) {
+    constexpr int K = 2560, NMAX = 29;
+    for (int M : {2560, 12160, 24320}) {
+        std::vector<half> w(static_cast<size_t>(M) * K), x(static_cast<size_t>(NMAX) * K);
+        uint32_t s = 31u + static_cast<uint32_t>(M);
+        auto rnd = [&s] {
+            s = s * 1664525u + 1013904223u;
+            return static_cast<float>(s >> 8) / 16777216.0f - 0.5f;
+        };
+        for (size_t i = 0; i < w.size(); ++i)
+            w[i] = __float2half(0.02f * static_cast<float>(1 + (i / K) % 9) * rnd());
+        for (auto& v : x)
+            v = __float2half(4.0f * rnd());
+        void *d_w = nullptr, *d_q = nullptr, *d_x = nullptr, *d_h = nullptr;
+        float *d_s = nullptr, *d_y = nullptr;
+        const size_t y_elems = static_cast<size_t>(NMAX) * M;
+        ASSERT_EQ(cudaMalloc(&d_w, w.size() * sizeof(half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_q, w.size()), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_x, x.size() * sizeof(half)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_s, M * sizeof(float)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_y, y_elems * sizeof(float)), cudaSuccess);
+        ASSERT_EQ(cudaMalloc(&d_h, y_elems * sizeof(half)), cudaSuccess);
+        cudaMemcpy(d_w, w.data(), w.size() * sizeof(half), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_x, x.data(), x.size() * sizeof(half), cudaMemcpyHostToDevice);
+        quantize_fp8_rows_async(d_w, d_q, M, K, d_s, stream_);
+        const half* hx = static_cast<const half*>(d_x);
+        for (int n : {8, NMAX}) {
+            cudaMemset(d_h, 0xff, y_elems * sizeof(half));  // NaN fill: an unwritten output fails below
+            ASSERT_TRUE(gemv_fp8_rowscale_fp32(d_q, d_s, hx, d_y, M, K, n, stream_));
+            ASSERT_TRUE(gemv_fp8_rowscale_f16(d_q, d_s, hx, static_cast<half*>(d_h), M, K, n, stream_));
+            ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+            std::vector<float> f32(static_cast<size_t>(n) * M);
+            std::vector<half> f16(static_cast<size_t>(n) * M);
+            cudaMemcpy(f32.data(), d_y, f32.size() * sizeof(float), cudaMemcpyDeviceToHost);
+            cudaMemcpy(f16.data(), d_h, f16.size() * sizeof(half), cudaMemcpyDeviceToHost);
+            size_t bad = 0;
+            for (size_t i = 0; i < f32.size(); ++i) {
+                const half ref = __float2half(f32[i]);
+                bad += std::memcmp(&ref, &f16[i], sizeof(half)) != 0;
+            }
+            EXPECT_EQ(bad, 0u) << "M=" << M << " n=" << n
+                               << ": FP16 outputs differ from the rounded FP32 head";
+        }
+        for (void* p : {d_w, d_q, d_x, d_h})
+            cudaFree(p);
+        cudaFree(d_s);
+        cudaFree(d_y);
+    }
+}
+
 // Qwen3-14B FP8 head (151936 x 5120, 778 MB > L2) at 29 rows: us/call per row tile vs 1628 GB/s.
 TEST_F(FP8GemmTest, RowscaleFp32HeadRowTileSweep) {
     if (getenv("IMP_FP8_HEAD_SWEEP") == nullptr)

@@ -25,6 +25,7 @@ struct UploadBatchFit {
     UploadReserve reserve;
     int configured = 0;  // <= 1: no clamp, the reserve stays fixed
     int fitted = 0;      // configured, or the clamp
+    bool host_experts_unpinned = false;  // NVFP4 host experts left to the host expert tier (RAM short)
 };
 
 inline size_t upload_reserve_kv_bytes(const UploadReserve& r, int batch) {

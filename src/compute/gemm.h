@@ -60,6 +60,10 @@ void gemv_fp8_rowscale(const Tensor& A, const Tensor& x, Tensor& y, const float*
 // Tensor-core (mma m16n8k16), one weight pass per 32 rows; row bits independent of n_rows. K % 256 == 0.
 [[nodiscard]] bool gemv_fp8_rowscale_fp32(const void* W_fp8, const float* d_row_scales, const half* x, float* y, int M, int K,
                             int n_rows, cudaStream_t stream = nullptr);
+// FP16-output twin, same row bits independent of n_rows: GDN projections at 2 <= M <= 32 read the
+// FP8 sidecar once instead of rebuilding the F16 weight per call.
+[[nodiscard]] bool gemv_fp8_rowscale_f16(const void* W_fp8, const float* d_row_scales, const half* x, half* y,
+                                         int M, int K, int n_rows, cudaStream_t stream = nullptr);
 // Tests only: nt * 8 vocab rows per block (nt in {4, 8}; 8 = the default), bit-identical output.
 [[nodiscard]] bool gemv_fp8_rowscale_fp32_tuned(const void* W_fp8, const float* d_row_scales, const half* x,
                                                 float* y, int M, int K, int n_rows, int nt,

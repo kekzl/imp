@@ -11,6 +11,8 @@
 # [baseline] are generated.
 #
 # Pin changes (newest first):
+#   batch-decode PR (split-K reduce and epilogue moved to helpers, kernel templated on the output type):
+#   fp8_head_mma_kernel 32 -> under the threshold, entry removed
 #   #2537 (per-arch config.json hooks, generic parsers in hf_config_generic.cpp): load_config 189 -> 11
 #   (below threshold, entry removed)
 #   #2451 (tile log moved to log_tile_once): gemm_grouped_nvfp4_smallM 31 -> under the threshold, entry removed
@@ -66,7 +68,6 @@ skip_dirs = []
 "src/compute/gemm_f16_narrow_smallm.cu::__global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(NarrowArgs args)" = 28
 "src/compute/gemm_grouped.cpp::void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, const void* const* b_ptrs, int K, int N, QType dtype, int n_experts, cudaStream_t stream, void** d_work_ptrs, QType output_dtype, const float* a_scales, const float* b_scales)" = 26
 "src/compute/gemm_grouped_nvfp4_smallM.cu::__global__ void smallM_kernel_v1(const void* const* __restrict__ d_A, const void* const* __restrict__ d_SFA, const void* const* __restrict__ d_B, const void* const* __restrict__ d_SFB, void* const* __restrict__ d_D, const float* __restrict__ d_alpha, const int* __restrict__ d_M_per_expert, const CUtensorMap* __restrict__ d_descs, int N, int K)" = 35
-"src/compute/gemv_fp8_rowscale_fp32.cu::__global__ void __launch_bounds__(kThreads) fp8_head_mma_kernel(const uint8_t* __restrict__ W, const float* __restrict__ row_scales, const half* __restrict__ x, float* __restrict__ y, int M, int K, int n_rows)" = 32
 "src/compute/json_constrain.cu::bool JsonGrammar::advance_char(char c)" = 94
 "src/compute/json_constrain.cu::uint16_t JsonGrammar::compute_allowed_mask() const" = 35
 "src/compute/json_schema.cpp::bool RegexNfa::parse_repeat(Frag& out)" = 32

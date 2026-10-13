@@ -78,7 +78,8 @@ struct DevExpertLayer {
     int slots;
 };
 
-inline constexpr int kDevExpertMaxTopK = 32;  // 3 * top_k <= 96 entries per step
+inline constexpr int kDevExpertMaxTopK = 32;  // 3 * top_k <= 96 entries per row
+inline constexpr int kDevExpertMaxRows = 8;   // decode rows one resolve serves (non-tiered layers)
 
 // GPU <-> host handshake for tiered decode layers, in mapped pinned memory. The resolve kernel
 // posts req_seq; the tier thread fills the misses' sources and acks; a one-thread kernel spins
@@ -110,12 +111,18 @@ public:
     [[nodiscard]] bool layer_ready(int layer) const {
         return layer >= 0 && layer < static_cast<int>(layers_.size()) && layers_[layer].src;
     }
-    // Resolves the layer's routed experts to slots (staging the misses), on `stream`:
-    // writes 3 * top_k slot indices to `slot_idx_out` (gate, up, down blocks) and the
-    // per-slot scales, then copies the misses into the pool. Takes the pool over from the
-    // host path if that one moved since the last call.
-    void resolve_and_stage(int layer, const int32_t* expert_indices, int top_k,
+    // Resolves the layer's routed experts of n_rows decode rows to slots (staging each missed
+    // expert once), on `stream`: writes 3 * top_k * n_rows slot indices to `slot_idx_out` (gate, up,
+    // down blocks, row-major inside) and the per-slot scales, then copies the misses into the pool.
+    // n_rows > 1 needs a non-tiered layer and slots >= 3 * top_k * n_rows. Takes the pool over from
+    // the host path if that one moved since the last call.
+    void resolve_and_stage(int layer, const int32_t* expert_indices, int top_k, int n_rows,
                            int32_t* slot_idx_out, cudaStream_t stream);
+    // The two halves, for a gather on its own stream: resolve also writes entry_miss[n_rows * top_k]
+    // (optional) = 1 where (row, k) has a projection the gather still copies. gather after resolve.
+    void resolve(int layer, const int32_t* expert_indices, int top_k, int n_rows, int32_t* slot_idx_out,
+                 int32_t* entry_miss, cudaStream_t stream);
+    void gather(int layer, int top_k, int n_rows, cudaStream_t stream);
     // Takes the pool over from the host LRU path if that one filled slots since the last
     // call (forgets every slot, on `stream`). resolve_and_stage does this itself when it
     // runs on the host; a graph replay does not, so the engine calls it before each replayed
@@ -166,7 +173,7 @@ private:
     std::vector<size_t> ms_bytes_;         // [n_layers * 3]
     void* tables_ = nullptr;               // one device allocation for every table
     size_t tables_bytes_ = 0;
-    DevMissEntry* d_misses_ = nullptr;     // [3 * kDevExpertMaxTopK]
+    DevMissEntry* d_misses_ = nullptr;  // [3 * kDevExpertMaxTopK * kDevExpertMaxRows]
     int* d_n_miss_ = nullptr;
     unsigned long long* d_stats_ = nullptr;  // [2]
     uint64_t seen_host_generation_ = 0;

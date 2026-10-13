@@ -2,6 +2,7 @@
 #include "memory/vram_query.h"
 #include "memory/weight_snapshot.h"
 #include "memory/weight_cache_file.h"
+#include "model/host_expert_fit.h"
 #include "model/host_expert_pin.h"
 #include "model/expert_placement.h"
 #include "model/weight_upload_traits.h"
@@ -51,13 +52,7 @@ static WeightUploadLog* g_upload_log = nullptr;
 static WeightSnapshot* g_warm = nullptr;
 
 // Pinned pages are not reclaimable, so pinning past what /proc/meminfo reports does not
-// slow the host down, it kills the process. Headroom max(6 GiB, 10 % RAM): the PLE n-gram
-// table is mmap'd and only needs page cache it can lose, but the allocator, the CUDA driver
-// and the request path still need room. Both helpers are weight_snapshot.h's.
-static bool host_pin_ram_available(size_t bytes) {
-    const size_t avail = host_mem_available_bytes();
-    return avail == 0 || avail > bytes + host_ram_headroom_bytes();
-}
+// slow the host down, it kills the process: host_ram_holds keeps max(6 GiB, 10 % RAM).
 
 // Whether the WHOLE set of host-resident NVFP4 experts fits in pinned memory. Decided once
 // per upload (upload_expert_weights) and read by both the weight and the micro-scale slab
@@ -76,14 +71,14 @@ static bool host_experts_pinnable(const std::vector<size_t>& layer_expert_bytes,
     if (host_expert_bytes == 0)
         return true;
     const int pool_mib = process_diag_moe_host_expert_pool_mib();
-    if (pool_mib > 0 && (static_cast<size_t>(pool_mib) << 20) < host_expert_bytes) {
+    if (host_expert_pool_caps(host_expert_bytes, pool_mib)) {
         IMP_LOG_INFO(
             "Host NVFP4 experts: not pinning %.2f GiB, moe.host_expert_pool_mib=%d caps the "
             "host expert tier below them",
             host_expert_bytes / (1024.0 * 1024.0 * 1024.0), pool_mib);
         return false;
     }
-    if (host_pin_ram_available(host_expert_bytes))
+    if (host_ram_holds(host_expert_bytes))
         return true;
     IMP_LOG_WARN(
         "Host NVFP4 experts: not pinning %.2f GiB, host RAM available is %.2f GiB (%.2f GiB "
@@ -1330,7 +1325,7 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
 // Pass 1: non-expert per-layer weights. model.upload_host_layers_ (--gpu-layers) layers keep their
 // verbatim matmuls on host, pinned when the whole set fits host RAM (layer_host_keep.h).
 static bool upload_pass1_layers(Model& model, const UploadCtx& ctx) {
-    const bool pin_ok = host_pin_ram_available(host_keep_bytes(model, &dequant_gpu_supported));
+    const bool pin_ok = host_ram_holds(host_keep_bytes(model, &dequant_gpu_supported));
     auto pin = [&](size_t bytes) -> void* {
         PinnedBuffer buf = pin_ok ? PinnedBuffer::acquire(cuda_host_pinned_allocator(), bytes) : PinnedBuffer();
         void* p = buf.data();
@@ -1345,39 +1340,14 @@ static bool upload_pass1_layers(Model& model, const UploadCtx& ctx) {
 }
 
 // upload_expert_weights (Pass 2): handles packed 3D and per-expert 2D expert tensors.
-// Phase 1 computes per-layer expert-tensor byte cost (packed 3-D plus per-expert 2-D
-// NVFP4 llm-compressor tensors), filling layer_expert_bytes and returning total_expert_bytes.
+// Phase 1 fills layer_expert_bytes (host_expert_fit.h) and returns total_expert_bytes.
 static size_t compute_expert_layer_costs_(const std::vector<TransformerLayer>& layers, int n_layers,
                                           std::vector<size_t>& layer_expert_bytes) {
     size_t total_expert_bytes = 0;
     layer_expert_bytes.assign(n_layers, 0);
     for (int i = 0; i < n_layers; ++i) {
-        const TransformerLayer& L = layers[i];
-        auto add_packed = [&](const Tensor& p, QType qt) {
-            if (!p.data || p.ndim < 3 || !dequant_gpu_supported(qt))
-                return;
-            size_t row_bytes = qtype_row_bytes(qt, p.shape[2]);
-            size_t bytes = static_cast<size_t>(p.shape[0]) * p.shape[1] * row_bytes;
-            layer_expert_bytes[i] += bytes;
-            total_expert_bytes += bytes;
-        };
-        add_packed(L.expert_gate_packed, L.expert_gate_packed.qtype);
-        add_packed(L.expert_up_packed, L.expert_up_packed.qtype);
-        add_packed(L.expert_down_packed, L.expert_down_packed.qtype);
-
-        // Also account for per-expert 2D tensors (e.g. NVFP4 llm-compressor format).
-        // These are NOT packed 3D, so add_packed misses them.
-        auto add_2d_expert = [&](const std::vector<Tensor>& vt) {
-            for (const auto& t : vt) {
-                if (!t.data || t.on_device || t.ndim < 2)
-                    continue;
-                layer_expert_bytes[i] += t.nbytes();
-                total_expert_bytes += t.nbytes();
-            }
-        };
-        add_2d_expert(L.expert_w_gate);
-        add_2d_expert(L.expert_w_up);
-        add_2d_expert(L.expert_w_down);
+        layer_expert_bytes[i] = layer_host_expert_bytes(layers[i]);
+        total_expert_bytes += layer_expert_bytes[i];
     }
     return total_expert_bytes;
 }
@@ -2088,6 +2058,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     if (!upload_expert_weights(layers_, n_layers(), expert_reserve_bytes, ctx)) {
         return false;
     }
+    upload_batch_fit_.host_experts_unpinned = !g_pin_host_experts_fits;
 
     // Upload NVFP4 pre-quantized scale tensors. Single scratch map keyed by
     // canonical slot name; replaced the per-layer NvFP4PreQuantWeight slots.

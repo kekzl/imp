@@ -5,6 +5,7 @@
 
 #include "exec/executor.h"
 #include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
+#include "exec/expert_batch_policy.h"
 #include "memory/mem_account.h"
 #include "memory/vram_query.h"
 #include "memory/vram_allocator.h"
@@ -28,6 +29,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         return;
     quant_pipeline_.build(*model_, dispatch_policy(), *vram_alloc_, budget, stream,
                           wcache_, qscratch_, registry_, hints_, moe_, max_tokens_);
+    ssm_pool_bytes_ = budget.ssm_footprint_bytes;
     regrow_expert_cache_();
 }
 
@@ -86,24 +88,27 @@ size_t GraphExecutor::kv_bytes_per_token_() const {
     return kv_data_bytes(kv_plan_dtype_, elems);
 }
 
-// Free VRAM a regrow may take: free now minus the KV pool at its ceiling (context x batch), the
-// allocator headroom and a 1536 MiB tail for what init and serving still commit (Flash-Next at a
-// 110k-token prompt: 1101-1220 MiB over 3 starts). 0 when the batch is unknown.
+// Free VRAM a regrow may take: free now minus the KV pool at its ceiling (context x
+// kv_ceiling_seqs), the allocator headroom, the lazy state slots past the first (Flash-Next 59.8 MiB
+// each) and a 1536 MiB tail for what init and serving still commit (Flash-Next at a 110k-token
+// prompt, batch 1: 1101-1220 MiB over 3 starts). 0 when the batch is unknown.
 size_t GraphExecutor::expert_cache_free_slack_bytes_() const {
     if (kv_ctx_batch_ <= 0 || kv_ctx_tokens_ <= 0)
         return 0;
     size_t free_mem = 0, total_mem = 0;
     (void)vram_budget_mem_get_info(&free_mem, &total_mem);  // failure zeroes both: no slack
     constexpr size_t kTail = 1536ULL << 20;
-    const size_t kv = static_cast<size_t>(kv_ctx_tokens_) * kv_ctx_batch_ * kv_bytes_per_token_();
-    const size_t keep = kv + (vram_alloc_ ? vram_alloc_->headroom() : 0) + kTail;
+    const size_t kv = static_cast<size_t>(kv_ctx_tokens_) * kv_ceiling_seqs(kv_ctx_batch_, true) *
+                      kv_bytes_per_token_();
+    const size_t state = ssm_pool_bytes_ / static_cast<size_t>(kv_ctx_batch_) * (kv_ctx_batch_ - 1);
+    const size_t keep = kv + state + (vram_alloc_ ? vram_alloc_->headroom() : 0) + kTail;
     return free_mem > keep ? free_mem - keep : 0;
 }
 
 size_t GraphExecutor::expert_cache_ctx_slack_bytes_() const {
     const auto& cfg = model_->config();
     const long long dflt = std::min(cfg.max_seq_len > 0 ? cfg.max_seq_len : 131072, 131072);
-    const long long need = static_cast<long long>(kv_ctx_tokens_) * kv_ctx_batch_;
+    const long long need = static_cast<long long>(kv_ctx_tokens_) * kv_ceiling_seqs(kv_ctx_batch_, true);
     if (kv_ctx_batch_ <= 0 || kv_ctx_tokens_ <= 0 || need >= dflt)
         return 0;
     const size_t slack = static_cast<size_t>(dflt - need) * kv_bytes_per_token_();

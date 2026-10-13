@@ -61,6 +61,7 @@ struct EngineConfig {
     int max_batch_size = 0;       // 0 = auto (engine detects from model size vs VRAM)
     int max_seq_len = 0;          // 0 = auto (engine detects from model metadata + VRAM)
     int kv_cache_max_blocks = 0;  // 0 = auto
+    int kv_ceiling_seqs = 0;      // KV pool ceiling in max_seq_len sequences, 0 = max_batch_size
     bool use_green_contexts = false;
     float green_ctx_prefill_ratio = 0.8f;
     bool use_cuda_graphs = true;

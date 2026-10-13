@@ -249,6 +249,12 @@ __global__ void moe_weighted_sum_residual_kernel(const half* __restrict__ expert
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= d_model)
         return;
+    const int r = blockIdx.y;
+    expert_outputs += static_cast<size_t>(r) * top_k * d_model;
+    expert_weights += static_cast<size_t>(r) * top_k;
+    if (residual)
+        residual += static_cast<size_t>(r) * d_model;
+    output += static_cast<size_t>(r) * d_model;
 
     float sum = 0.0f;
     for (int k = 0; k < top_k; ++k) {
@@ -260,9 +266,9 @@ __global__ void moe_weighted_sum_residual_kernel(const half* __restrict__ expert
 }
 
 void moe_weighted_sum_residual(const void* expert_outputs, const float* expert_weights, const void* residual,
-                               void* output, int d_model, int top_k, cudaStream_t stream) {
+                               void* output, int d_model, int top_k, cudaStream_t stream, int n_rows) {
     int threads = 256;
-    int blocks = (d_model + threads - 1) / threads;
+    const dim3 blocks((d_model + threads - 1) / threads, n_rows);
     moe_weighted_sum_residual_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(expert_outputs),
                                                                      expert_weights,
                                                                      static_cast<const half*>(residual),

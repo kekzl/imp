@@ -119,75 +119,8 @@ bool GraphExecutor::init_device_expert_cache() {
         IMP_LOG_INFO("Device expert cache: not built (no host-resident NVFP4 layer in a mapped "
                      "pinned slab, or the pool is too small); the host LRU path serves decode");
     init_shexp_overlap_();
+    init_gather_overlap_();
     return device_expert_cache_covers_host_layers();
-}
-
-void GraphExecutor::init_shexp_overlap_() {
-    free_shexp_overlap_();
-    const auto& prof = model_->profile();
-    if (!dispatch_policy().moe.shared_expert_overlap || dispatch_policy().moe.no_shared_mlp ||
-        compute_dtype_ != QType::F16 || prof.sandwich_norms || prof.sanitize_ffn_fp16)
-        return;
-    const auto& cfg = model_->config();
-    int eff = 0;
-    for (int i = 0; i < cfg.n_layers; ++i) {
-        const auto& ly = model_->layer(i);
-        if (dev_expert_cache_.layer_ready(i) && ly.w_up_shared.data != nullptr)
-            eff = std::max(eff, static_cast<int>(ly.w_up_shared.shape[0]));
-    }
-    if (eff == 0)
-        return;
-    auto& o = shexp_overlap_;
-    const size_t bytes = (3 * static_cast<size_t>(eff) + cfg.d_model) * sizeof(half);
-    o.buf = static_cast<char*>(vram_alloc(vram_alloc_, bytes, "shexp_overlap"));
-    if (o.buf == nullptr || !o.stream.create() || !o.fork.create() || !o.join.create()) {
-        IMP_LOG_WARN("moe.shared_expert_overlap: side stream setup failed, shared expert stays serial");
-        free_shexp_overlap_();
-        return;
-    }
-    o.eff = eff;
-    o.d = cfg.d_model;
-    IMP_LOG_INFO(
-        "moe.shared_expert_overlap: decode shared expert (eff %d) runs beside the expert miss gather", eff);
-}
-
-void GraphExecutor::free_shexp_overlap_() {
-    auto& o = shexp_overlap_;
-    o.stream.reset();
-    o.fork.reset();
-    o.join.reset();
-    vram_free(vram_alloc_, o.buf);
-    o.buf = nullptr;
-    o.eff = o.d = 0;
-    o.pending = false;
-}
-
-bool GraphExecutor::fork_shared_expert_(int layer, cudaStream_t stream, int d, const Tensor& no) {
-    auto& o = shexp_overlap_;
-    const auto& ly = model_->layer(layer);
-    if (!o.stream || o.pending || ly.w_up_shared.data == nullptr || no.shape[0] != 1 || d != o.d ||
-        ly.w_up_shared.shape[0] > o.eff)
-        return false;
-    const size_t e = static_cast<size_t>(o.eff) * sizeof(half);
-    IMP_CUDA_CHECK_LOG(cudaEventRecord(o.fork, stream));
-    IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(o.stream, o.fork, 0));
-    (void)shared_expert_core_(layer, o.stream, 1, d, model_->config().rms_norm_eps, no, o.buf, o.buf + e,
-                              o.buf + 2 * e, o.buf + 3 * e);
-    IMP_CUDA_CHECK_LOG(cudaEventRecord(o.join, o.stream));
-    o.pending = true;
-    return true;
-}
-
-bool GraphExecutor::join_shared_expert_(cudaStream_t stream, int n, int d, Tensor& h) {
-    auto& o = shexp_overlap_;
-    if (!o.pending)
-        return false;
-    o.pending = false;
-    IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(stream, o.join, 0));
-    const int64_t shape[2] = {n, d};
-    Tensor sh_down(o.buf + 3 * static_cast<size_t>(o.eff) * sizeof(half), compute_dtype_, 2, shape, true);
-    elementwise_add(h, sh_down, stream);
-    return true;
 }
 
 bool GraphExecutor::device_expert_cache_covers_host_layers() const {
@@ -201,6 +134,13 @@ bool GraphExecutor::device_expert_cache_covers_host_layers() const {
             return false;
     }
     return true;
+}
+
+bool GraphExecutor::device_expert_cache_tiered() const {
+    for (int i = 0; i < model_->config().n_layers; ++i)
+        if (dev_expert_cache_.layer_tiered(i))
+            return true;
+    return false;
 }
 
 bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
@@ -508,12 +448,11 @@ NvFP4MoEQuantResult pool_view(char* layer_pool, size_t slot_size, size_t ms_off,
 
 }  // namespace
 
-void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, int d, int eff,
-                                              int top_k, const MoeRoutingResult& routing,
-                                              const Tensor& no, Tensor& h, const Tensor& r,
-                                              bool moe_use_fp32_residual,
+void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, int d, int eff, int top_k,
+                                              const MoeRoutingResult& routing, const Tensor& no, Tensor& h,
+                                              const Tensor& r, bool moe_use_fp32_residual,
                                               bool will_skip_residual_copy, bool& residual_fused,
-                                              bool non_gated_experts) {
+                                              bool non_gated_experts, int n_rows) {
     const auto& cfg = model_->config();
     const auto& ly = model_->layer(layer);
 
@@ -521,19 +460,20 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
     const float* expert_weights = static_cast<const float*>(routing.expert_weights.data);
 
     half* norm_ptr = static_cast<half*>(no.data);
-    half* gate_buf = static_cast<half*>(moe_.expert_gate.data);   // [top_k, eff]
-    half* up_buf = static_cast<half*>(moe_.expert_up.data);       // [top_k, eff]
-    half* act_buf = static_cast<half*>(moe_.expert_swiglu.data);  // [top_k, eff]
-    half* down_buf = static_cast<half*>(moe_.expert_down.data);   // [top_k, d]
+    half* gate_buf = static_cast<half*>(moe_.expert_gate.data);   // [n_rows * top_k, eff]
+    half* up_buf = static_cast<half*>(moe_.expert_up.data);       // [n_rows * top_k, eff]
+    half* act_buf = static_cast<half*>(moe_.expert_swiglu.data);  // [n_rows * top_k, eff]
+    half* down_buf = static_cast<half*>(moe_.expert_down.data);   // [n_rows * top_k, d]
 
     size_t ms_off[kExpertProjCount] = {0, 0, 0};
     const bool use_dev = dev_expert_cache_.layer_ready(layer);
+    IMP_CHECK(use_dev || n_rows == 1,
+              "MoE NVFP4 host decode: %d rows need the device expert cache (layer %d)", n_rows, layer);
+    bool overlap = false;
     if (use_dev) {
         // Routing -> slots -> gather on the device; nothing of this layer's staging touches
         // the host (expert_cache_device.h).
-        for (int p = 0; p < kExpertProjCount; ++p)
-            ms_off[p] = dev_expert_cache_.ms_off(layer, p);
-        dev_expert_cache_.resolve_and_stage(layer, expert_indices, top_k, moe_.d_slot_idx, stream);
+        overlap = stage_dev_experts_(layer, expert_indices, top_k, n_rows, non_gated_experts, ms_off, stream);
     } else {
     // Establishing residency needs the routing on the host, so this path pays
     // one D2H + sync per layer - the same one the GGUF slot path pays, and the
@@ -614,9 +554,11 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
     const size_t slot_size = expert_cache_.slot_size_;
     const int slots_per_layer = expert_cache_.slots_per_layer_;
 
+    // nk slots per projection; slot j reads input row j / top_k (x_stride d, the same row for n_rows 1).
+    const int nk = n_rows * top_k;
     const int32_t* gate_idx = moe_.d_slot_idx;
-    const int32_t* up_idx = moe_.d_slot_idx + top_k;
-    const int32_t* down_idx = moe_.d_slot_idx + static_cast<ptrdiff_t>(2) * top_k;
+    const int32_t* up_idx = moe_.d_slot_idx + nk;
+    const int32_t* down_idx = moe_.d_slot_idx + static_cast<ptrdiff_t>(2) * nk;
 
     const NvFP4MoEQuantResult up_view =
         pool_view(layer_pool, slot_size, ms_off[std::to_underlying(ExpertProj::Up)], slot_scales,
@@ -632,27 +574,40 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
         // gate and up sit in DIFFERENT slots, so the one-index fused gate+up
         // kernel cannot express both. Two decodes still collapse 2*top_k
         // weight launches into 2 - the same trade the GGUF slot path makes.
-        gemv_nvfp4_moe_decode(gate_view, gate_idx, norm_ptr, gate_buf, eff, d, /*x_stride=*/0, top_k,
-                              stream);
-        gemv_nvfp4_moe_decode(up_view, up_idx, norm_ptr, up_buf, eff, d, /*x_stride=*/0, top_k, stream);
-        apply_expert_activation(gate_buf, up_buf, act_buf, /*non_gated=*/false, top_k, eff,
-                                compute_dtype_, cfg.ffn_activation, stream);
-        gemv_nvfp4_moe_decode(down_view, down_idx, act_buf, down_buf, d, eff, /*x_stride=*/eff, top_k,
-                              stream);
+        // flags != null: only entries with flags[j] == want (0 = all three projections hit).
+        // The activation covers all nk entries in both passes: it writes act_buf, never its inputs.
+        auto gated = [&](const int32_t* flags, int want) {
+            gemv_nvfp4_moe_decode(gate_view, gate_idx, norm_ptr, gate_buf, eff, d, /*x_stride=*/d, nk, stream,
+                                  /*x_group=*/top_k, flags, want);
+            gemv_nvfp4_moe_decode(up_view, up_idx, norm_ptr, up_buf, eff, d, /*x_stride=*/d, nk, stream,
+                                  /*x_group=*/top_k, flags, want);
+            apply_expert_activation(gate_buf, up_buf, act_buf, /*non_gated=*/false, nk, eff, compute_dtype_,
+                                    cfg.ffn_activation, stream);
+            const int x_group = 1;  // down reads its own entry's activation row
+            gemv_nvfp4_moe_decode(down_view, down_idx, act_buf, down_buf, d, eff, /*x_stride=*/eff, nk,
+                                  stream, x_group, flags, want);
+        };
+        if (overlap) {
+            gated(moe_.entry_miss(), 0);
+            IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(stream, gather_overlap_.gathered, 0));
+            gated(moe_.entry_miss(), 1);
+        } else {
+            gated(nullptr, 0);
+        }
     } else {
-        gemv_nvfp4_moe_decode(up_view, up_idx, norm_ptr, up_buf, eff, d, /*x_stride=*/0, top_k, stream);
-        int64_t act_shape[2] = {static_cast<int64_t>(top_k), static_cast<int64_t>(eff)};
+        gemv_nvfp4_moe_decode(up_view, up_idx, norm_ptr, up_buf, eff, d, /*x_stride=*/d, nk, stream,
+                              /*x_group=*/top_k);
+        int64_t act_shape[2] = {static_cast<int64_t>(nk), static_cast<int64_t>(eff)};
         Tensor up_t(up_buf, compute_dtype_, 2, act_shape, true);
         relu_sqr_inplace(up_t, stream);
-        gemv_nvfp4_moe_decode(down_view, down_idx, up_buf, down_buf, d, eff, /*x_stride=*/eff, top_k,
-                              stream);
+        gemv_nvfp4_moe_decode(down_view, down_idx, up_buf, down_buf, d, eff, /*x_stride=*/eff, nk, stream);
     }
 
     const bool has_shared_expert = (ly.w_up_shared.data != nullptr);
     const void* res_ptr = (has_shared_expert || moe_use_fp32_residual)
                               ? nullptr
                               : (will_skip_residual_copy ? h.data : r.data);
-    moe_weighted_sum_residual(down_buf, expert_weights, res_ptr, h.data, d, top_k, stream);
+    moe_weighted_sum_residual(down_buf, expert_weights, res_ptr, h.data, d, top_k, stream, n_rows);
     if (!has_shared_expert && !moe_use_fp32_residual)
         residual_fused = true;
 }
@@ -683,6 +638,17 @@ int GraphExecutor::moe_host_rows_capture_max() const {
 // Row r reads routing [r * top_k, (r + 1) * top_k) (token order: n > 1 routing sorts into separate
 // arrays) and writes its own row of h; the shared expert and residual follow in phase 8 for all rows.
 void GraphExecutor::run_moe_decode_rows_host_(int layer, cudaStream_t stream, MoeFfnContext& ctx) {
+    // All rows in one resolve (each missed expert gathered once) and one GEMV set: 8 rows took
+    // 8 x (resolve + gather + 3 GEMV + activation + sum) launches per layer.
+    const int nk3 = kExpertProjCount * ctx.n * ctx.top_k;
+    if (dev_expert_cache_.layer_ready(layer) && !dev_expert_cache_.layer_tiered(layer) &&
+        ctx.n <= kDevExpertMaxRows && expert_cache_.slots_per_layer_ >= nk3 && moe_.d_slot_idx_count >= nk3) {
+        (void)fork_shared_expert_(layer, stream, ctx.d, ctx.no);  // joined in phase 8
+        run_moe_decode_nvfp4_host(layer, stream, ctx.d, ctx.eff, ctx.top_k, ctx.routing, ctx.no, ctx.h, ctx.r,
+                                  ctx.moe_use_fp32_residual, ctx.will_skip_residual_copy, ctx.residual_fused,
+                                  ctx.non_gated_experts, ctx.n);
+        return;
+    }
     const size_t row_bytes = static_cast<size_t>(ctx.d) * ctx.es;
     auto row = [&](const Tensor& t, int i) {
         const int64_t shape[2] = {1, ctx.d};

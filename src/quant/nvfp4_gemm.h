@@ -140,9 +140,12 @@ void gemv_nvfp4_geglu_residual(const NvFP4QuantResult& A, const half* gate, cons
 // needed).
 
 // MoE decode GEMV: y[expert_slot, rows] = W[expert_id, :, :] @ x[expert_slot, :]
-// x_stride: 0 = shared input across experts, K = per-expert input.
+// Slot j reads input row j / x_group at x + row * x_stride: x_stride 0 = shared input, K with x_group 1
+// = per-expert input, K with x_group = top_k = one input row per token (batch decode).
+// entry_flags (optional): slot j runs only when entry_flags[j] == want (hits beside the miss gather).
 void gemv_nvfp4_moe_decode(const NvFP4MoEQuantResult& w, const int32_t* expert_indices, const half* x,
-                           half* y, int rows, int K, int x_stride, int top_k, cudaStream_t stream);
+                           half* y, int rows, int K, int x_stride, int top_k, cudaStream_t stream,
+                           int x_group = 1, const int32_t* entry_flags = nullptr, int want = 0);
 
 // Fused gate+up MoE GEMV: two weight matrices, shared input, separate outputs.
 void gemv_nvfp4_moe_gate_up_fused(const NvFP4MoEQuantResult& gate, const NvFP4MoEQuantResult& up,

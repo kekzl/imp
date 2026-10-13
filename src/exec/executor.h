@@ -828,6 +828,7 @@ private:
     QType kv_plan_dtype_ = QType::F16;
     int kv_ctx_tokens_ = 0;  // engine max_seq_len as init() got it
     int kv_ctx_batch_ = 0;   // engine max_batch_size, 0 = unknown
+    size_t ssm_pool_bytes_ = 0;  // VRAMBudget::ssm_footprint_bytes: lazy state slots, committed while serving
     [[nodiscard]] size_t expert_cache_ctx_slack_bytes_() const;
     [[nodiscard]] size_t expert_cache_free_slack_bytes_() const;
     [[nodiscard]] size_t kv_bytes_per_token_() const;
@@ -840,6 +841,12 @@ private:
         int d = 0;
         bool pending = false;  // forked, phase 8 has not joined yet
     } shexp_overlap_;
+    // moe.expert_gather_overlap: the miss gather on its own stream, the hit GEMVs beside it.
+    struct GatherOverlap {
+        CudaStream stream;
+        CudaEvent resolved;
+        CudaEvent gathered;
+    } gather_overlap_;
 
     // Pre-allocated dequant scratch for the gemm_nvfp4 fallback (M>1 only).
     // True when nvfp4_dequant_ws_buf_ came from the engine-persistent arena
@@ -1155,6 +1162,7 @@ private:
     // on shexp_overlap_.stream; join waits for it and does the add. False = not forked.
     void init_shexp_overlap_();
     void free_shexp_overlap_();
+    void init_gather_overlap_();  // moe.expert_gather_overlap
     [[nodiscard]] bool fork_shared_expert_(int layer, cudaStream_t stream, int d, const Tensor& no);
     [[nodiscard]] bool join_shared_expert_(cudaStream_t stream, int n, int d, Tensor& h);
     // MoE decode fast-path (n=1, device-resident packed experts): dispatches
@@ -1166,17 +1174,21 @@ private:
                              const Tensor& no, Tensor& h, const Tensor& r,
                              bool moe_use_fp32_residual, bool moe_fused_norm_q8,
                              bool will_skip_residual_copy, bool& residual_fused);
-    // Decode step for a layer whose NVFP4 experts live on host: stages routed
-    // experts into the LRU cache's slot pool, runs ordinary fused NVFP4 GEMVs
+    // Device expert cache staging of n_rows rows; true = the gather runs on gather_overlap_.stream and
+    // the GEMVs of entries that missed wait on gather_overlap_.gathered (moe_.entry_miss() flags them).
+    [[nodiscard]] bool stage_dev_experts_(int layer, const int32_t* expert_indices, int top_k, int n_rows,
+                                          bool non_gated_experts, size_t* ms_off, cudaStream_t stream);
+    // Decode step for a layer whose NVFP4 experts live on host: stages the routed experts of n_rows
+    // rows (n_rows > 1: device expert cache only) into the LRU cache's slot pool, runs fused NVFP4 GEMVs
     // against it. Called only when run_moe_decode_fast's dispatch predicate
     // (nvfp4_expert_offload.h) confirms every precondition holds.
     void run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, int d, int eff, int top_k,
                                    const MoeRoutingResult& routing, const Tensor& no, Tensor& h,
-                                   const Tensor& r, bool moe_use_fp32_residual,
-                                   bool will_skip_residual_copy, bool& residual_fused,
-                                   bool non_gated_experts);
-    // Host-resident NVFP4 experts, 2..kHostDecodeRowsMax rows: each row through the n == 1 path
-    // above (device expert cache, else host LRU; executor_forward_moe_nvfp4_host.cu).
+                                   const Tensor& r, bool moe_use_fp32_residual, bool will_skip_residual_copy,
+                                   bool& residual_fused, bool non_gated_experts, int n_rows = 1);
+    // Host-resident NVFP4 experts, 2..kHostDecodeRowsMax rows: one resolve + gather + GEMV set for all
+    // rows on the device expert cache, else each row through the n == 1 path
+    // (executor_forward_moe_nvfp4_host.cu).
     [[nodiscard]] bool host_decode_rows_ok_(int layer, int n, int top_k) const;
     void run_moe_decode_rows_host_(int layer, cudaStream_t stream, MoeFfnContext& ctx);
 
@@ -1218,6 +1230,10 @@ public:
     // captured decode step then replays correctly); the engine demotes graphs otherwise.
     [[nodiscard]] bool init_device_expert_cache();
     [[nodiscard]] bool device_expert_cache_covers_host_layers() const;
+    // Any MoE layer served from the host expert tier (decode rows run one at a time there).
+    [[nodiscard]] bool device_expert_cache_tiered() const;
+    // Expert cache holds native NVFP4 host experts (the device expert cache path).
+    [[nodiscard]] bool expert_cache_nvfp4_slots() const { return expert_cache_nvfp4_slots_; }
 
 private:
     // Computes MoE routing: gate logits (FP32 router fast-path for Gemma-4

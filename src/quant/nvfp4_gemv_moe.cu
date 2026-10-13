@@ -20,8 +20,11 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_moe_decode_kernel
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales,
     const float* __restrict__ tensor_scales, const int32_t* __restrict__ expert_indices,
     const half* __restrict__ x, half* __restrict__ y, int rows, int K, size_t expert_stride_packed,
-    size_t expert_stride_ms, int x_stride, int blocks_per_expert) {
+    size_t expert_stride_ms, int x_stride, int blocks_per_expert, int x_group,
+    const int32_t* __restrict__ entry_flags, int want) {
     const int expert_slot = blockIdx.x / blocks_per_expert;
+    if (entry_flags && entry_flags[expert_slot] != want)
+        return;
     const int row = blockIdx.x % blocks_per_expert;
     if (row >= rows)
         return;
@@ -33,7 +36,7 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_moe_decode_kernel
     const uint8_t* W = packed_data + (size_t)expert_id * expert_stride_packed;
     const uint8_t* MS = micro_scales + (size_t)expert_id * expert_stride_ms;
     float ts = tensor_scales[expert_id];
-    const half* xi = x + (size_t)expert_slot * x_stride;
+    const half* xi = x + (size_t)(expert_slot / x_group) * x_stride;
 
     __shared__ SmemKpar smem;
 
@@ -130,12 +133,17 @@ __global__ void gemv_nvfp4_moe_gate_up_mr_kernel(
 
 // Multi-row MoE NVFP4 decode (single weight matrix, e.g., non-gated up or down).
 template <int NR>
-__global__ void gemv_nvfp4_moe_decode_mr_kernel(
-    const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales,
-    const float* __restrict__ tensor_scales, const int32_t* __restrict__ expert_indices,
-    const half* __restrict__ x, half* __restrict__ y, int rows, int K, size_t expert_stride_packed,
-    size_t expert_stride_ms, int x_stride, int blocks_per_expert) {
+__global__ void gemv_nvfp4_moe_decode_mr_kernel(const uint8_t* __restrict__ packed_data,
+                                                const uint8_t* __restrict__ micro_scales,
+                                                const float* __restrict__ tensor_scales,
+                                                const int32_t* __restrict__ expert_indices,
+                                                const half* __restrict__ x, half* __restrict__ y, int rows,
+                                                int K, size_t expert_stride_packed, size_t expert_stride_ms,
+                                                int x_stride, int blocks_per_expert, int x_group,
+                                                const int32_t* __restrict__ entry_flags, int want) {
     const int expert_slot = blockIdx.x / blocks_per_expert;
+    if (entry_flags && entry_flags[expert_slot] != want)
+        return;
     const int local_block = blockIdx.x % blocks_per_expert;
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
@@ -150,7 +158,7 @@ __global__ void gemv_nvfp4_moe_decode_mr_kernel(
     const uint8_t* W = packed_data + (size_t)expert_id * expert_stride_packed + (size_t)row * (K / 2);
     const uint8_t* MS = micro_scales + (size_t)expert_id * expert_stride_ms + (size_t)row * n_mb;
     float ts = tensor_scales[expert_id];
-    const half* xi = x + (size_t)expert_slot * x_stride;
+    const half* xi = x + (size_t)(expert_slot / x_group) * x_stride;
 
     float acc = warp_k_loop(W, MS, ts, n_mb, lane, [&] __device__(const uint8_t* pb, int off) {
         return dot_micro_block(pb, xi, off);
@@ -184,30 +192,46 @@ static int resolve_mr_nr() {
 // warps.
 template <int NR>
 static void launch_mr_decode(const NvFP4MoEQuantResult& w, const int32_t* expert_indices, const half* x,
-                             half* y, int rows, int K, int x_stride, int top_k, cudaStream_t stream) {
+                             half* y, int rows, int K, int x_stride, int top_k, cudaStream_t stream,
+                             int x_group, const int32_t* entry_flags, int want) {
     int blocks_per_expert = (rows + NR - 1) / NR;
     int total_blocks = top_k * blocks_per_expert;
     pdl::launch(gemv_nvfp4_moe_decode_mr_kernel<NR>, dim3(total_blocks), dim3(NR * 32), size_t(0), stream,
                 reinterpret_cast<const uint8_t*>(w.packed_data),
-                reinterpret_cast<const uint8_t*>(w.micro_scales), w.tensor_scales, expert_indices, x, y,
-                rows, K, w.expert_stride_packed, w.expert_stride_ms, x_stride, blocks_per_expert);
+                reinterpret_cast<const uint8_t*>(w.micro_scales), w.tensor_scales, expert_indices, x, y, rows,
+                K, w.expert_stride_packed, w.expert_stride_ms, x_stride, blocks_per_expert, x_group,
+                entry_flags, want);
 }
 
 void gemv_nvfp4_moe_decode(const NvFP4MoEQuantResult& w, const int32_t* expert_indices, const half* x,
-                           half* y, int rows, int K, int x_stride, int top_k, cudaStream_t stream) {
+                           half* y, int rows, int K, int x_stride, int top_k, cudaStream_t stream,
+                           int x_group, const int32_t* entry_flags, int want) {
     if (use_moe_multirow(K)) {
         switch (resolve_mr_nr()) {
-            case 4:  launch_mr_decode<4>(w, expert_indices, x, y, rows, K, x_stride, top_k, stream); break;
-            case 16: launch_mr_decode<16>(w, expert_indices, x, y, rows, K, x_stride, top_k, stream); break;
-            case 32: launch_mr_decode<32>(w, expert_indices, x, y, rows, K, x_stride, top_k, stream); break;
-            default: launch_mr_decode<8>(w, expert_indices, x, y, rows, K, x_stride, top_k, stream); break;
+            case 4:
+                launch_mr_decode<4>(w, expert_indices, x, y, rows, K, x_stride, top_k, stream, x_group,
+                                    entry_flags, want);
+                break;
+            case 16:
+                launch_mr_decode<16>(w, expert_indices, x, y, rows, K, x_stride, top_k, stream, x_group,
+                                     entry_flags, want);
+                break;
+            case 32:
+                launch_mr_decode<32>(w, expert_indices, x, y, rows, K, x_stride, top_k, stream, x_group,
+                                     entry_flags, want);
+                break;
+            default:
+                launch_mr_decode<8>(w, expert_indices, x, y, rows, K, x_stride, top_k, stream, x_group,
+                                    entry_flags, want);
+                break;
         }
     } else {
         int total_blocks = top_k * rows;
         pdl::launch(gemv_nvfp4_moe_decode_kernel, dim3(total_blocks), dim3(kKparThreads), size_t(0), stream,
                     reinterpret_cast<const uint8_t*>(w.packed_data),
                     reinterpret_cast<const uint8_t*>(w.micro_scales), w.tensor_scales, expert_indices, x, y,
-                    rows, K, w.expert_stride_packed, w.expert_stride_ms, x_stride, rows);
+                    rows, K, w.expert_stride_packed, w.expert_stride_ms, x_stride, rows, x_group, entry_flags,
+                    want);
     }
 }
 
