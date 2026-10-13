@@ -403,12 +403,66 @@ bool GraphExecutor::ensure_verify_scratch(bool with_penalties) {
     return true;
 }
 
-void GraphExecutor::prewarm_verify_scratch() {
+namespace {
+size_t verify_sample_args_bytes(int rows) {
+    return (static_cast<size_t>(rows) * sizeof(TopkRowArgs) + 255) & ~size_t{255};
+}
+}  // namespace
+
+// Grows before any row of a call uses it (pick_verify_rows_ asks for the call's n_rows), and the
+// verify step syncs its stream per call, so the released buffer has no kernel in flight.
+bool GraphExecutor::ensure_verify_sample_scratch(int rows) {
+    if (rows <= verify_sample_rows_cap_)
+        return true;
+    if (vram_alloc_ == nullptr)
+        return false;
+    verify_sample_rows_cap_ = 0;
+    verify_sample_scratch_ = VramOwned<char>(*vram_alloc_,
+                                             verify_sample_args_bytes(rows) +
+                                                 static_cast<size_t>(rows) * SAMPLE_SCRATCH_BYTES,
+                                             "verify_sample_rows");
+    h_verify_sample_args_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
+                                                  static_cast<size_t>(rows) * sizeof(TopkRowArgs));
+    if (!verify_sample_scratch_ || h_verify_sample_args_.empty())
+        return false;
+    verify_sample_rows_cap_ = rows;
+    return true;
+}
+
+void GraphExecutor::prewarm_verify_scratch(int sample_rows) {
     if (!initialized_)
         return;
     // Penalties included unconditionally: the buffer is one int per vocab entry
     // (~0.6 MiB) and whether a request sets a penalty is not knowable at init.
     (void)ensure_verify_scratch(/*with_penalties=*/true);
+    (void)ensure_verify_sample_scratch(sample_rows);
+}
+
+void GraphExecutor::pick_verify_rows_(const Tensor& lg, int row0, int csz, int n_rows, int32_t* d_out,
+                                      cudaStream_t stream) {
+    const int V = model_->config().vocab_size;
+    if (verify_sampling_ && ensure_verify_sample_scratch(n_rows)) {
+        auto* d_args = reinterpret_cast<TopkRowArgs*>(verify_sample_scratch_.get());
+        char* slots = verify_sample_scratch_.get() + verify_sample_args_bytes(verify_sample_rows_cap_);
+        const cudaError_t e = sample_verify_rows(static_cast<float*>(lg.data), csz, V, *verify_sampling_,
+                                                 row0, h_verify_sample_args_.as<TopkRowArgs>() + row0,
+                                                 d_args + row0,
+                                                 slots + static_cast<size_t>(row0) * SAMPLE_SCRATCH_BYTES,
+                                                 d_out + row0, stream);
+        if (e == cudaSuccess)
+            return;
+        IMP_LOG_ERROR("sampled verify rows %d..%d: %s, argmax instead", row0, row0 + csz,
+                      cudaGetErrorString(e));
+    }
+    const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
+    float* pvals = static_cast<float*>(verify_argmax_scratch_);
+    int* pidxs = reinterpret_cast<int*>(pvals + static_cast<size_t>(mb) * kArgmaxSplits);
+    dim3 grid(csz, kArgmaxSplits);
+    rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(static_cast<const float*>(lg.data), V, pvals,
+                                                            pidxs);
+    IMP_CUDA_CHECK_LAUNCH();
+    rowwise_argmax_reduce_kernel<<<1, 32, 0, stream>>>(pvals, pidxs, csz, d_out + row0);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
@@ -422,11 +476,8 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
         return;
     }
     const int V = model_->config().vocab_size;
-    const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
     if (!ensure_verify_scratch(/*with_penalties=*/false))
         return;
-    float* pvals = static_cast<float*>(verify_argmax_scratch_);
-    int* pidxs = reinterpret_cast<int*>(pvals + static_cast<size_t>(mb) * kArgmaxSplits);
 
     const bool penalties = (rep_pen != 1.0f || freq_pen != 0.0f || pres_pen != 0.0f) &&
                            d_hist != nullptr && d_draft != nullptr;
@@ -473,12 +524,7 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
                 launch_ban_logits(static_cast<float*>(lg.data) + static_cast<size_t>(r) * V, ban, nb, V,
                                   stream);
         }
-        dim3 grid(csz, kArgmaxSplits);
-        rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(
-            static_cast<const float*>(lg.data), V, pvals, pidxs);
-        IMP_CUDA_CHECK_LAUNCH();
-        rowwise_argmax_reduce_kernel<<<1, 32, 0, stream>>>(pvals, pidxs, csz, d_out + row0);
-        IMP_CUDA_CHECK_LAUNCH();
+        pick_verify_rows_(lg, row0, csz, n_rows, d_out, stream);
         if (d_topm && topm > 0)
             rowwise_topm(static_cast<const float*>(lg.data), csz, V, topm,
                          d_topm + static_cast<int64_t>(row0) * topm, stream);

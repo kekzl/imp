@@ -553,7 +553,7 @@ void Engine::mtp_post_verify_update_(const Request& req, int emitted, int row0) 
 
 void Engine::mtp_prefill_feed_chunk(const Request& req, int offset, int chunk_len,
                                     int next_token) {
-    if (!mtp_spec_decode_enabled() || mtp_ws_storage_ == nullptr)
+    if (!mtp_feed_wanted_(req))
         return;
     if (!model_ || !model_->mtp_.has_value() || !model_->mtp_->loaded)
         return;

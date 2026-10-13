@@ -443,6 +443,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
 
     // [speculative]
     B("speculative.ngram", cfg.speculative.ngram);
+    B("speculative.sampled", cfg.speculative.sampled);
     I("speculative.draft_ctx_cap", cfg.speculative.draft_ctx_cap);
     I("speculative.shallow_draft_ctx", cfg.speculative.shallow_draft_ctx);
     B("speculative.verify_decode_attn", cfg.speculative.verify_decode_attn);
