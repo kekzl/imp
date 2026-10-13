@@ -193,7 +193,7 @@ Structured output disables thinking on its own: `json_mode`, `json_schema`, `too
 
 ✅ on `/v1/chat/completions`, as `image_url` content parts.
 
-- Multiple images encoded in prompt order, max `--max-images-per-request` (default 8).
+- Multiple images encoded in prompt order, max `--max-images-per-request` (default 8): Qwen3-VL / InternVL and the mmproj towers (Gemma-3, Gemma-4), which take a fixed 256 tokens per picture. All pictures ride the first user turn, in content order.
 - Picture wider or taller than 16384 px: `400`.
 - Formats: JPEG and PNG. GIF, BMP, WebP and every other format: `400` (#2401).
 

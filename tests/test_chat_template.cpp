@@ -779,6 +779,32 @@ TEST(ChatTemplateVisionTest, ImageGoesOnFirstUserTurnInMultiTurn) {
     EXPECT_EQ(std::count(ids.begin(), ids.end(), EOI), 1);
 }
 
+// Several pictures: one block each on the first user turn, in content order, all before the
+// text; one picture renders exactly as before the n_images parameter existed.
+TEST(ChatTemplateVisionTest, GemmaSeveralImagesRenderOneBlockEach) {
+    Tokenizer tok = make_chat_tokenizer();
+    ChatTemplate tpl;
+    ASSERT_TRUE(tpl.init(ChatTemplateFamily::GEMMA, tok));
+
+    std::vector<ChatMessage> msgs = {{"system", "Answer briefly."}, {"user", "Compare them."}};
+    auto ids = tpl.apply_with_image(tok, msgs, /*n_image_tokens=*/4, false, false, "", /*n_images=*/3);
+
+    EXPECT_EQ(std::count(ids.begin(), ids.end(), BOI), 3);
+    EXPECT_EQ(std::count(ids.begin(), ids.end(), EOI), 3);
+    EXPECT_EQ(std::count(ids.begin(), ids.end(), IMG_SOFT), 12);
+    // Every soft token sits inside a <boi> ... <eoi> pair.
+    int open = 0;
+    for (int32_t id : ids) {
+        if (id == BOI)
+            open++;
+        else if (id == EOI)
+            open--;
+        else if (id == IMG_SOFT)
+            EXPECT_EQ(open, 1);
+    }
+    EXPECT_EQ(tpl.apply_with_image(tok, msgs, 4, false, false, "", 1), tpl.apply_with_image(tok, msgs, 4));
+}
+
 // A conversation with no user message at all must not lose the block silently —
 // it has nowhere to go, and a text-only prompt beside an encoded image is the
 // exact failure this test file now guards.

@@ -239,6 +239,8 @@ public:
     // shares the encoder workspace). False when no vision model or image.
     [[nodiscard]] bool preprocess_image(std::span<const uint8_t> data, ImageData& out);
     [[nodiscard]] bool encode_image_for(Request& req);
+    // Soft tokens one picture takes in the prompt (mmproj tower; 0 without one).
+    [[nodiscard]] int vision_image_tokens() const noexcept { return vision_.num_image_tokens(); }
 
     // Enable MTP-based speculative decoding. K = draft length (1-4 typical).
     // Requires model->mtp_->loaded. Allocates the MTP workspace via the VRAM

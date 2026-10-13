@@ -82,7 +82,7 @@ Gated in the release bar.
 | Reasoning channel | `reasoning_content` split from `content`, `think_budget` honoured (0 disables), gpt-oss Harmony parsed (#768) |
 | Long-context loops | Prefix cache default-ON multi-turn (#763), `cache_control` pinning, auto max_seq_len to 64k (#771), `kv_cache.dtype=auto` honours FP8 hints (Qwen3, #704) |
 | Concurrency, fan-out, reliability | Per-request vision/spec/sampling state, heterogeneous requests batch together (#774, #770); batched sampler + tensor-core lm_head (#745/#746/#748) moved concurrent decode 472 -> 767 tok/s @16; clean request cancel, ITL/cancel/queue metrics (#770), bounded decode bursts, fail-fast on bad input |
-| Multimodal | Vision (Gemma-3/4-VL, Qwen3-VL) through the normal batched path (#774); Qwen3-VL adds dynamic resolution + DeepStack (#1163-#1180), one image per request |
+| Multimodal | Vision (Gemma-3/4-VL, Qwen3-VL) through the normal batched path (#774); Qwen3-VL adds dynamic resolution + DeepStack (#1163-#1180); several images per request on both towers |
 
 ## What imp is NOT
 

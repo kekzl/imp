@@ -127,10 +127,10 @@ struct ChatStateSnapshot {
     int32_t channel_open_id = -1, channel_close_id = -1, channel_newline_id = -1;
     int max_seq_len = 0;
     bool has_vision_request = false;
-    // Per-request vision (F-A5): CPU-preprocessed image pixels, copied to
-    // req->image at every request-build site. The batch worker encodes + binds
-    // it per-request (no engine pause). Null for text-only requests.
-    std::shared_ptr<imp::ImageData> vision_image;
+    // Per-request vision (F-A5): CPU-preprocessed image pixels in content order, copied to
+    // req->images at every request-build site. The batch worker encodes + binds them
+    // per-request (no engine pause). Empty for text-only requests.
+    std::vector<std::shared_ptr<imp::ImageData>> vision_images;
     // Qwen3-VL: dynamic-resolution images are patchified CPU-side before tokenizing (token counts
     // must be known up front to reserve exact placeholder counts per image, hence a list).
     std::vector<std::shared_ptr<imp::QwenPatches>> qwen_patches;

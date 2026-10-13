@@ -373,7 +373,7 @@ void BatchingEngine::worker_loop() {
                     // workspace, must not run concurrently with step()). Result lands in request->vision_emb;
                     // the
                     // request then batches with text like any other, no engine pause.
-                    if (sr->request->image && !engine->encode_image_for(*sr->request)) {
+                    if (!sr->request->images.empty() && !engine->encode_image_for(*sr->request)) {
                         sr->request->status = imp::RequestStatus::CANCELLED;
                         sr->push_finish("image_encode_failed");
                         continue;
@@ -568,7 +568,7 @@ void BatchingEngine::worker_loop() {
                     // (server.transcript_token_reuse). The engine's own finish-time release runs
                     // a step later under the pipeline, after a fast client already sent turn 2.
                     if (req->status == imp::RequestStatus::FINISHED && !req->ignore_eos &&
-                        req->n_vision_tokens == 0 && !req->image && !req->vision_emb &&
+                        req->n_vision_tokens == 0 && req->images.empty() && !req->vision_emb &&
                         engine->runtime_config().server.transcript_token_reuse) {
                         if (const auto& store = engine->chat_template().transcript_store()) {
                             std::vector<int32_t> ids(req->input_tokens);

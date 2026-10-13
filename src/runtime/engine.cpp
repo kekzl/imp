@@ -372,7 +372,7 @@ void Engine::finish_request_release_(std::shared_ptr<Request>& req) {
     // Publish under the salt the prefill looked these blocks up with (image
     // hash, adapter); an image request without a hash was refused the cache
     // at prefill and must not enter it here either.
-    const bool had_image = req->n_vision_tokens > 0 || req->image || req->vision_emb;
+    const bool had_image = req->n_vision_tokens > 0 || !req->images.empty() || req->vision_emb;
     if (kv_manager_->prefix_caching_enabled() && (!had_image || req->vision_content_hash != 0)) {
         // Register input AND generated tokens, minus the final sampled token
         // (never forwarded, no KV entry; the spec-verify bonus token is the
