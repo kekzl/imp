@@ -11,10 +11,14 @@
 namespace imp::cfg {
 
 struct Speculative {
-    // Prompt-lookup speculation (batch-1, greedy, dense), default on. Switches
+    // Prompt-lookup speculation (batch-1, dense), default on. Switches
     // the HISTORY MATCHER only; entering the verify step is decided by
     // spec_any_drafter (runtime/spec_gates.h), which asks all three sources.
     bool ngram = true;
+    // Sampled requests (temperature > 0, top_k != 1) verify too: each chunk row draws with the eager
+    // sampler's seed, a draft token is accepted while the draw equals it (exact, compute/sampling.h).
+    // Off = greedy requests only.
+    bool sampled = true;
     // Context cap for dense chunk-verify drafting (#964): past this context,
     // drafting is gated per step. MoE-NVFP4 and GDN-hybrid requests are exempt
     // (deep drafts pay for themselves). Superseded in practice by the

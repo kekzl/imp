@@ -8,6 +8,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `diagnostics.moe_expert_trace` also writes each pick's routing weight; `tools/analysis/expert_prune_sim.py` scores expert-pruned keep sets on it. Flash-Next at 128 of 512 experts keeps 52.9 % of the routing weight on held-out text, so pruning is dropped (#2613).
 - JSON Schema `minimum`/`maximum`/`exclusive*` (exact decimal), `prefixItems`, `additionalProperties` schemas, `min`/`maxProperties`, type arrays, `nullable` and `allOf` over objects or one `$ref` are enforced; keywords answered with 400: 21 -> 13. 8 Pydantic schemas x 2 temperatures on Qwen3-4B Q8_0: 0/16 -> 16/16 answers validate.
 - Gemma-3/4 vision (mmproj tower) takes several images per request, one block each in content order (was HTTP 400 past the first): Gemma-3-4B and Gemma-4-26B-A4B name 1, 2 and 3 pictures in order, 4/4 checks each; one picture renders and answers as before.
+- Sampled requests (`temperature > 0`) speculate on dense models (`speculative.sampled`): each verify row draws with the eager per-token seed, a draft token stays while the draw equals it. Qwen3-14B-NVFP4 at temperature 0.7, code edit: 167.6 -> 190.9 tok/s, prose flat. MoE and GDN hybrids stay greedy-only.
 
 ### Changed
 - Qwen3.8-Flash-Next-NVFP4 decode 81.0 -> 87.2 tok/s (tg512, 3 prompts, 6 of 6 pairs): the declined MTP head is not uploaded (353 -> 386 expert slots/layer), the shared expert runs beside the miss gather (`moe.shared_expert_overlap`), faster expert-cache resolve. Output bits unchanged.
@@ -19,6 +20,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - JSON Schema `anyOf`/`oneOf` (every Pydantic `Optional[T]`) was generated as a free string (`"age": "34"`) that failed validation; the alternatives now run side by side until the first chars decide. A schema without a type (`Any`) takes any JSON value; an array without `items` took one char per item (`[12]` illegal).
+- With an MTP head armed, a request that never verifies (sampled on a GDN hybrid) no longer binds the head and decodes on the graph loop instead of the eager path: Qwen3.8-27B-NVFP4, `max_batch_size=1`, temperature 0.7: 70.8 -> 93.3 tok/s.
 
 ## [0.52.1] - 2026-10-12
 

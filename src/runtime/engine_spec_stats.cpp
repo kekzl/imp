@@ -21,13 +21,14 @@ namespace imp {
 // step_spec_verify_ (file-size allowlist ceiling, not an exemption: counting
 // isn't what makes it long). `from_mtp` reflects what step_spec_verify_
 // actually used to fill the chunk, not what was configured.
-void Engine::spec_stats_record_(bool from_mtp, long long drafted, long long accepted,
-                                long long emitted, double wall_ms) noexcept {
+void Engine::spec_stats_record_(bool from_mtp, long long drafted, long long accepted, long long emitted,
+                                double wall_ms, bool sampled) noexcept {
     spec_stats_.verify_steps++;
     spec_stats_.drafted += drafted;
     spec_stats_.accepted += accepted;
     spec_stats_.emitted += emitted;
     spec_stats_.verify_wall_ms += wall_ms;
+    spec_stats_.sampled += sampled ? 1 : 0;
     SpecSourceStats& src = from_mtp ? spec_stats_.mtp : spec_stats_.other;
     src.verify_steps++;
     src.drafted += drafted;
@@ -39,17 +40,14 @@ void Engine::spec_stats_record_(bool from_mtp, long long drafted, long long acce
 void Engine::log_spec_stats_() const {
     if (spec_stats_.verify_steps + spec_stats_.miss_steps == 0)
         return;
-    IMP_LOG_INFO("[spec-ngram] verify_steps=%lld miss_steps=%lld drafted=%lld accepted=%lld "
-                 "(%.1f%%) emitted=%lld (%.2f tok/verify, %.2f ms/verify)",
-                 spec_stats_.verify_steps, spec_stats_.miss_steps, spec_stats_.drafted,
-                 spec_stats_.accepted,
-                 spec_stats_.drafted ? 100.0 * spec_stats_.accepted / spec_stats_.drafted : 0.0,
-                 spec_stats_.emitted,
-                 spec_stats_.verify_steps
-                     ? static_cast<double>(spec_stats_.emitted) / spec_stats_.verify_steps
-                     : 0.0,
-                 spec_stats_.verify_steps ? spec_stats_.verify_wall_ms / spec_stats_.verify_steps
-                                          : 0.0);
+    IMP_LOG_INFO(
+        "[spec-ngram] verify_steps=%lld miss_steps=%lld drafted=%lld accepted=%lld "
+        "(%.1f%%) emitted=%lld (%.2f tok/verify, %.2f ms/verify) sampled=%lld",
+        spec_stats_.verify_steps, spec_stats_.miss_steps, spec_stats_.drafted, spec_stats_.accepted,
+        spec_stats_.drafted ? 100.0 * spec_stats_.accepted / spec_stats_.drafted : 0.0, spec_stats_.emitted,
+        spec_stats_.verify_steps ? static_cast<double>(spec_stats_.emitted) / spec_stats_.verify_steps : 0.0,
+        spec_stats_.verify_steps ? spec_stats_.verify_wall_ms / spec_stats_.verify_steps : 0.0,
+        spec_stats_.sampled);
     // Per source, so a run with the documented MTP pair (mtp_k=2,
     // ngram=false) can be told from one the matcher carried. Same series as
     // /metrics imp_spec_mtp_* / imp_spec_ngram_*.

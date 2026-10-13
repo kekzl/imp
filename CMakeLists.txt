@@ -324,6 +324,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/sampling_penalties.cu
     src/compute/sampling_penalties_history.cu
     src/compute/sampling_filters.cu
+    src/compute/sampling_verify_rows.cpp
     src/compute/gdn_scan.cu
     src/compute/gdn_scan_chunkpar.cu
     src/compute/gdn_scan_chunkpar_pass.cu
@@ -431,6 +432,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_qwen3vl.cpp
     src/runtime/engine_spec_ngram.cpp
     src/runtime/engine_spec_stats.cpp
+    src/runtime/engine_spec_sampled.cpp
     src/runtime/engine_spec_buffers.cpp
     src/runtime/engine_spec_capture.cpp
     src/runtime/engine_spec_mtp.cpp
@@ -1233,6 +1235,7 @@ if(IMP_BUILD_TESTS)
         tests/test_softmax.cu
         tests/test_sampling.cu
         tests/test_sampling_advanced.cu
+        tests/test_sampling_verify_rows.cu
         tests/test_penalty_hist_append.cu
         tests/test_rowwise_topm.cu
         tests/test_prompt_logprobs_rows.cu

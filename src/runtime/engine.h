@@ -350,6 +350,7 @@ public:
         long long drafted = 0;       // draft tokens proposed
         long long accepted = 0;      // draft tokens accepted
         long long emitted = 0;       // tokens emitted by verify steps
+        long long sampled = 0;       // verify steps that drew rows (speculative.sampled)
         double verify_wall_ms = 0;   // host wall inside step_spec_verify_ (verify steps only)
         SpecSourceStats mtp{};       // verify steps the MTP head drafted
         SpecSourceStats other{};     // every non-MTP drafter
@@ -1162,6 +1163,22 @@ private:
     // engine_spec_ngram.cpp for why the reason is a string and not a bool.
     const char* spec_verify_gate_refusal_(const Request& req, bool ignore_think = false) const;
     [[nodiscard]] bool spec_verify_gates_ok_(const Request& req, bool ignore_think = false) const;
+    // Sampled verify (speculative.sampled), engine_spec_sampled.cpp. Refusal: nullptr = verify may run.
+    const char* spec_sampling_refusal_(const Request& req) const;
+    // Multi-candidate chunks: refused under penalties (not replicated) and sampling (draws per candidate).
+    [[nodiscard]] bool spec_mc_refused_(const Request& req) const;
+    // Arms executor_->set_verify_sampling for the chunk starting at this step; false (armed off) when greedy.
+    [[nodiscard]] bool spec_arm_verify_sampling_(const Request& req);
+    // MTP binds at prefill only a request that can verify: a never-verifying one would pay the eager MTP
+    // path for nothing (sampled, Qwen3.8-27B-NVFP4: 70.8 vs 93.5 tok/s).
+    [[nodiscard]] bool mtp_feed_wanted_(const Request& req) const {
+        return mtp_spec_decode_enabled() && mtp_ws_storage_ != nullptr &&
+               spec_sampling_refusal_(req) == nullptr;
+    }
+    // The MTP head is bound to this request: its per-step feed needs every token on the host (no async loop).
+    [[nodiscard]] bool mtp_holds_eager_(const Request& req) const {
+        return mtp_spec_decode_enabled() && mtp_bound(mtp_active_, mtp_pool_, req.id);
+    }
     [[nodiscard]] bool spec_burst_launch_ok_(const Request& req) const;
     int spec_effective_miss_burst_(const Request& req) const;
     void spec_maybe_rearm_(Request& req) const;
@@ -1170,7 +1187,7 @@ private:
     void log_spec_stats_() const;
     // One verify step's tally, aggregate plus per draft source.
     void spec_stats_record_(bool from_mtp, long long drafted, long long accepted, long long emitted,
-                            double wall_ms) noexcept;
+                            double wall_ms, bool sampled = false) noexcept;
     // Per-request suffix index (speculative.suffix): lazily built over
     // input ++ prediction, extended with output tokens as they land.
     // Erased when the request finishes.

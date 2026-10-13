@@ -5,6 +5,7 @@
 
 #include "model/model.h"
 #include "memory/host_pinned.h"
+#include "memory/vram_owned.h"
 #include "memory/kv_cache.h"
 #include "memory/ssm_state.h"
 #include "memory/layer_offload.h"
@@ -43,6 +44,7 @@
 #include <unordered_map>
 #include <utility>
 #include <list>
+#include <optional>
 
 namespace imp {
 
@@ -152,6 +154,10 @@ public:
     // h_row_alt[row]!=0, in place of d_banned.
     // h_row_hist/h_row_pens: per-row penalty histories for a batched chunk's
     // mixed-request rows, applied before the ban and argmax. Exclusive with d_hist.
+    // set_verify_sampling(s): until reset with nullptr, row r draws from s instead of the argmax.
+    void set_verify_sampling(const VerifySampling* s) {
+        verify_sampling_ = s ? std::optional(*s) : std::nullopt;
+    }
     void greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t stream,
                            const int32_t* d_hist = nullptr, int n_hist = 0,
                            const int32_t* d_draft = nullptr, float rep_pen = 1.0f,
@@ -534,7 +540,9 @@ public:
     // per-vocab penalty counts), sized from init-time constants so the engine
     // pre-warms it instead of letting the first verify step allocate while serving.
     [[nodiscard]] bool ensure_verify_scratch(bool with_penalties);
-    void prewarm_verify_scratch();
+    // Sampled-verify rows: TopkRowArgs + SAMPLE_SCRATCH_BYTES per row (~64.5 KiB).
+    [[nodiscard]] bool ensure_verify_sample_scratch(int rows);
+    void prewarm_verify_scratch(int sample_rows = 0);
     // Bumped whenever the shared forward workspace is reallocated. A captured
     // verify graph holds raw pointers into it — the engine invalidates its
     // graphs when this changes.
@@ -647,6 +655,9 @@ private:
     // Prompt logprobs (#2257): LM head for hidden_[row0, row0 + csz) into lg (FP32, vocab slabs of
     // slab_w columns, compute/prompt_logprobs_rows.h). False = no one-GEMM route, nothing written.
     [[nodiscard]] bool prompt_lm_head_chunk_(int row0, int csz, float* lg, int& slab_w, cudaStream_t stream);
+    // greedy_argmax_all's per-batch pick: argmax, or a draw per row under set_verify_sampling.
+    void pick_verify_rows_(const Tensor& lg, int row0, int csz, int n_rows, int32_t* d_out,
+                           cudaStream_t stream);
 
     // Spec-decode verify argmax partials (lazy, grows only; freed in
     // free_buffers).
@@ -656,6 +667,12 @@ private:
     // the shared history (lazy; freed in free_buffers).
     int32_t* verify_pen_counts_ = nullptr;
     int verify_pen_counts_cap_ = 0;
+    // Sampled verify: device [rows x TopkRowArgs (256-aligned) | rows x SAMPLE_SCRATCH_BYTES], pinned args
+    // twin.
+    std::optional<VerifySampling> verify_sampling_;
+    VramOwned<char> verify_sample_scratch_;
+    PinnedBuffer h_verify_sample_args_;
+    int verify_sample_rows_cap_ = 0;
 
     // Activation calibration collector — null unless [calibration] enabled.
     std::unique_ptr<ActivationCalibrator> calib_;

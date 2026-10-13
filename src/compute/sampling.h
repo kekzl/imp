@@ -70,6 +70,29 @@ struct TopkRowArgs {
 [[nodiscard]] cudaError_t launch_topk_topp_rows(const TopkRowArgs* d_rows, int n_rows, int max_top_k,
                                                 int vocab_size, cudaStream_t stream = nullptr);
 
+// top_k the eager sampler runs for a request's top_k: 0 means 50, past the vocab means the vocab.
+constexpr int sample_effective_top_k(int top_k, int vocab_size) {
+    const int k = top_k > 0 ? top_k : 50;
+    return k > vocab_size ? vocab_size : k;
+}
+
+// Sampled speculative verify: row r draws with seed (seed0 + r) & 0x7fffffff, the eager sampler's
+// seed for that output index. Filter order as the eager chain: min_p, typical_p, top_k/top_p/temperature.
+struct VerifySampling {
+    float temperature = 1.0f;
+    float top_p = 1.0f;
+    float min_p = 0.0f;
+    float typical_p = 0.0f;
+    int top_k = 50;  // sample_effective_top_k, <= SAMPLE_MAX_TOP_K
+    int seed0 = 0;   // engine_internal::compute_step_seed at the chunk's first row
+};
+// Rows [row0, row0 + n_rows) of the chunk: d_logits [n_rows x vocab] fp32 (filtered in place) ->
+// d_out[n_rows]. h_args/d_args: n_rows TopkRowArgs (pinned / device); d_slots: n_rows x SAMPLE_SCRATCH_BYTES.
+[[nodiscard]] cudaError_t sample_verify_rows(float* d_logits, int n_rows, int vocab_size,
+                                             const VerifySampling& s, int row0, TopkRowArgs* h_args,
+                                             TopkRowArgs* d_args, void* d_slots, int32_t* d_out,
+                                             cudaStream_t stream = nullptr);
+
 // Row-parallel batched GREEDY argmax (temperature-0 twin of the top-k stash): one partial
 // launch (grid ARGMAX_NBLOCKS x n_rows) + one reduce launch (grid n_rows) replace n
 // serialized launch pairs. Per-row geometry/scratch layout match sample_greedy_async:

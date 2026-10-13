@@ -9,13 +9,13 @@
 // backward scan (ngram_draft). Verify replays [t0, d1..dK] as a
 // teacher-forced continuation chunk through the standard chunked-prefill
 // forward (KV written in place), applies the tier-aware LM head to every
-// chunk position (executor greedy_argmax_all), and accepts the longest
-// prefix where the model's greedy token equals the draft. Rejected draft KV
+// chunk position (executor greedy_argmax_all), and accepts the longest prefix
+// where the greedy (sampled request: drawn) token equals the draft. Rejected draft KV
 // entries are dropped via KVCacheManager::rollback: safe because draft
 // blocks were appended this step and are never content-hashed (prefix
 // hashing only covers prompt prefill blocks).
 //
-// Phase 1 scope (gated in spec_verify_gates_ok_): batch-1, greedy sampling,
+// Phase 1 scope (gated in spec_verify_gates_ok_): batch-1, greedy or sampled (engine_spec_sampled.cpp),
 // no penalties/logit_bias/DRY/mirostat, no logprobs, no json/schema
 // constraints, no think budget, chunked-prefill-capable archs only. The
 // verify loop runs eager; the async conditional graph loop stays off while
@@ -166,9 +166,9 @@ bool Engine::spec_burst_launch_ok_(const Request& req) const {
 // re-deriving this function from a log line.
 const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_think) const {
     if (req.spec_ngram_given_up) return "given_up";
-    // Greedy sampling only: verify compares argmax tokens.
-    const bool greedy = (req.temperature <= 0.0f || req.top_k == 1);
-    if (!greedy) return "sampling_not_greedy";
+    // Greedy: verify compares argmax tokens; sampled: drawn tokens (engine_spec_sampled.cpp).
+    if (const char* why = spec_sampling_refusal_(req))
+        return why;
     // rep/freq/presence penalties are replicated in the verify
     // (greedy_argmax_all) for the unbounded window; a bounded repeat_last_n
     // window slides per chunk row and is not replicated: stay eager there.
@@ -373,8 +373,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // hedges the chain's weakest link. v1 shares the TR route's
         // preconditions (the hybrid case is Stage 3 of
         // docs/plans/2026-08-31-mtp-multicandidate-hybrid.md).
-        const bool mtp_pen = req->repetition_penalty != 1.0f || req->frequency_penalty != 0.0f ||
-                             req->presence_penalty != 0.0f;
+        const bool mc_refused = spec_mc_refused_(*req);
         // Hybrids take the route through the grouped recurrent chunk (Stage
         // 3): W candidates as W scan sequences on W slots, see the hybrid
         // block below and spec_mc_hybrid_ok_ for what it needs.
@@ -382,7 +381,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         const bool mtp_mc_ok = scfg.verify_decode_attn &&
                                (ssm_state_ == nullptr || spec_mc_hybrid_ok_(mtp_w)) &&
                                !model_->profile().is_moe && !model_->config().is_mla() &&
-                               !swa_sizing_active_ && !mtp_pen;
+                               !swa_sizing_active_ && !mc_refused;
         if (mtp_w > 1 && mtp_mc_ok) {
             auto chains = mtp_take_chains_(*req);
             if (chains.size() > 1) {
@@ -408,16 +407,13 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // does not pay for the verify.
     if (runtime_config_.speculative.token_recycling && !experts_on_host_ && mc.empty()) {
         spec_recycle_feed_(*req);
-        const bool penalties_active = req->repetition_penalty != 1.0f ||
-                                      req->frequency_penalty != 0.0f ||
-                                      req->presence_penalty != 0.0f;
+        const bool mc_refused = spec_mc_refused_(*req);
         // Route (a) preconditions: per-row block tables exist only on the
         // decode-attn verify route; the grouped rows are incompatible with
         // the linear-draft penalty replication and the MTP row consumer.
         const bool mc_route_ok = scfg.verify_decode_attn && ssm_state_ == nullptr &&
                                  !model_->profile().is_moe && !model_->config().is_mla() &&
-                                 !swa_sizing_active_ && !penalties_active &&
-                                 !mtp_spec_decode_enabled();
+                                 !swa_sizing_active_ && !mc_refused && !mtp_spec_decode_enabled();
         if (draft.empty()) {
             const int width = std::min(8, std::max(1, scfg.recycle_width));
             // Row budget: width * (1 + depth) <= 17 (the mid capture bucket)
@@ -907,9 +903,12 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     const bool mask = stop_mask_active(*req, think_end_id_);
     const int32_t* d_ban = mask ? stop_mask_.device(vram_alloc_, stream) : banned_tokens_device_(stream);
     const int n_ban = !d_ban ? 0 : mask ? stop_mask_.n() : static_cast<int>(banned_token_ids_.size());
+    const bool sampled = spec_arm_verify_sampling_(
+        *req);  // rows draw instead of argmax (engine_spec_sampled.cpp)
     executor_->greedy_argmax_all(chunk_len, d_spec_argmax_, stream, d_hist, n_hist, d_spec_tokens_ + 1,
                                  req->repetition_penalty, req->frequency_penalty, req->presence_penalty,
                                  recycle_m > 0 ? d_spec_topm_ : nullptr, recycle_m, d_ban, n_ban);
+    executor_->set_verify_sampling(nullptr);
     // One D2H covers [argmax | topm] (contiguous block, #1055); without the
     // harvest only the argmax prefix is copied.
     const size_t d2h_ints =
@@ -1159,10 +1158,10 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         }
     }
 
-    spec_stats_record_(draft_from_mtp, K, matched, emitted,
-                       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
-                                                                 verify_t0)
-                           .count());
+    spec_stats_record_(
+        draft_from_mtp, K, matched, emitted,
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - verify_t0).count(),
+        sampled);
     // (request-end stats logging lives in finish_request)
 
     // Acceptance economics: structured-but-mutating content (number tables,

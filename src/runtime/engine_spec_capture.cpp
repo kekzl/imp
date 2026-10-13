@@ -68,7 +68,7 @@ void Engine::prewarm_spec_scratch_() {
                      chunk_cap, table_cap);
         return;
     }
-    executor_->prewarm_verify_scratch();
+    executor_->prewarm_verify_scratch(scfg.sampled ? chunk_cap : 0);
     // Hybrid verify state scratch: 2 x one recurrent slot, charged in the KV plan (#2452).
     prewarm_spec_state_scratch_();
     IMP_LOG_INFO("[spec] scratch prewarmed: chunk_cap=%d table_cap=%d ctx_cap=%d", chunk_cap,

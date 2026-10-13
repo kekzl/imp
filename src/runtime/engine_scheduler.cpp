@@ -1950,10 +1950,10 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         const bool async_compatible = dreq->logit_bias.empty() && dreq->mirostat == 0 &&
                                       dreq->dry_multiplier == 0.0f && dreq->min_p == 0.0f &&
                                       dreq->typical_p >= 1.0f &&
-                                      // MTP telemetry hooks the per-step path; the async
-                                      // conditional-graph loop bypasses it. Stay eager when MTP is on
-                                      // so accuracy measurement covers the whole generation.
-                                      !mtp_spec_decode_enabled() &&
+                                      // MTP feed + telemetry hook the per-step path; the async
+                                      // conditional-graph loop bypasses it. Stay eager while the head
+                                      // is bound to this request (a never-verifying one is not bound).
+                                      !mtp_holds_eager_(*dreq) &&
                                       // n-gram speculation: the loop runs in bounded bursts
                                       // (miss_burst) so the host can probe for drafts between
                                       // bursts; with miss_burst=0 the loop stays blocked while

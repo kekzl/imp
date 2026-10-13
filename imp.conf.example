@@ -975,6 +975,10 @@ mmproj               = ""
 # disables the async decode graph loop while on. Wins on repetition-heavy
 # (agent/code/RAG) workloads; ~neutral on free-form prose. Default-ON.
 ngram                = true
+# Sampled requests (temperature > 0) speculate too: each verify row draws with the eager seed and a
+# draft token is kept while the draw equals it (exact for one token per row). Dense models only: MoE
+# and GDN-hybrid verify chunks shift the distribution (docs/LIMITATIONS.md). false = greedy only.
+sampled              = true
 # Context cap for DENSE chunk-verify drafting (#964): the captured verify
 # costs ~2.1x a decode step at 2k ctx and ~5.2x at 16k (FA2 tile over the
 # pow2 ctx tier), so dense speculation (~2 tok/verify) is net-negative past
