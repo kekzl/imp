@@ -416,18 +416,16 @@ TEST(SchemaIntegerBound, NumberIsNotBounded) {
 
 // #1567: thirteen standard assertion keywords were accepted and dropped by
 // skip_value(). A caller that bounds its output was answered as if it had not.
+// minimum/maximum/exclusive*, prefixItems, min/maxProperties and mergeable allOf are
+// enforced since (test_schema_keywords.cpp).
 TEST(SchemaUnenforceableKeywords, AssertionKeywordsAreRefused) {
     const char* refused[] = {
-        R"({"type":"integer","minimum":1,"maximum":5})",
-        R"({"type":"integer","exclusiveMinimum":0})",
         R"({"type":"number","multipleOf":2})",
         R"({"allOf":[{"type":"string"}]})",
         R"({"not":{"type":"string"}})",
         R"({"type":"array","uniqueItems":true})",
         R"({"type":"object","patternProperties":{"^a":{"type":"string"}}})",
         R"({"type":"object","propertyNames":{"pattern":"^a"}})",
-        R"({"type":"array","prefixItems":[{"type":"string"}]})",
-        R"({"type":"object","minProperties":1})",
     };
     for (const char* s : refused) {
         EXPECT_EQ(parse_json_schema(s), nullptr) << "must be refused, not silently dropped: " << s;
