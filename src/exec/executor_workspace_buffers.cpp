@@ -1555,8 +1555,9 @@ void GraphExecutor::free_buffers() {
         wcache_.cutlass_nvfp4_prefill_src.clear();
         wcache_.cutlass_nvfp4_prefill_bytes = 0;
         for (auto& [ptr, cw] : wcache_.cutlass_mxfp8_prefill) {
-            vram_free(vram_alloc_, cw.data);
-            vram_free(vram_alloc_, cw.scale_factors);
+            if (!cw.borrowed_data)
+                vram_free(vram_alloc_, cw.data);
+            vram_free(vram_alloc_, cw.scale_factors);  // a borrowed view's col_scale lives in this block
         }
         wcache_.cutlass_mxfp8_prefill.clear();
         wcache_.cutlass_mxfp8_prefill_bytes = 0;

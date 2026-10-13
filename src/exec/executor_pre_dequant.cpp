@@ -7,6 +7,8 @@
 #include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "memory/mem_account.h"
 #include "memory/vram_query.h"
+#include "memory/vram_allocator.h"
+#include "core/kv_dtype.h"
 #include "exec/pre_dequant_internal.h"
 #include "exec/quant_pipeline.h"
 #include "core/logging.h"
@@ -34,11 +36,17 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 // is re-created with those bytes on top: everything allocated after sees the same free VRAM.
 void GraphExecutor::regrow_expert_cache_() {
     const size_t freed = wcache_.dropped_gdn_released_bytes + wcache_.lm_head_released_bytes;
-    if (freed == 0 || expert_cache_budget_ == 0 || expert_cache_.n_slots_ == 0)
+    if (expert_cache_budget_ == 0 || expert_cache_.n_slots_ == 0)
+        return;
+    // Native-NVFP4 host experts also take measured free VRAM beyond the KV ceiling: prefill copies
+    // a pipeline did not build stay free otherwise (Flash-Next GDN fp8rows: 924 MiB idle).
+    const size_t slack = expert_cache_nvfp4_slots_ ? expert_cache_free_slack_bytes_() : 0;
+    const size_t grow = std::max(freed, slack);
+    if (grow == 0)
         return;
     const auto& mcfg = model_->config();
     const int before = expert_cache_.slots_per_layer_;
-    const size_t budget = expert_cache_budget_ + freed;
+    const size_t budget = expert_cache_budget_ + grow;
     const size_t got = expert_cache_.reinit_or_disable(
         expert_cache_slot_raw_, budget, expert_cache_budget_, vram_alloc_, mcfg.n_layers, mcfg.n_experts,
         dispatch_policy().moe.expert_cache_debug_parity, expert_cache_nvfp4_slots_);
@@ -58,10 +66,50 @@ void GraphExecutor::regrow_expert_cache_() {
     }
     expert_cache_budget_ = budget;
     IMP_LOG_INFO(
-        "Expert LRU cache: %d -> %d slots/layer with %.1f MiB of freed weights (GDN %.1f, LM head %.1f)",
-        before, expert_cache_.slots_per_layer_, freed / (1024.0 * 1024.0),
+        "Expert LRU cache: %d -> %d slots/layer with %.1f MiB (freed weights %.1f: GDN %.1f, LM head %.1f; "
+        "free beyond the KV ceiling %.1f)",
+        before, expert_cache_.slots_per_layer_, grow / (1024.0 * 1024.0), freed / (1024.0 * 1024.0),
         wcache_.dropped_gdn_released_bytes / (1024.0 * 1024.0),
-        wcache_.lm_head_released_bytes / (1024.0 * 1024.0));
+        wcache_.lm_head_released_bytes / (1024.0 * 1024.0), slack / (1024.0 * 1024.0));
+}
+
+// KV bytes the engine's context leaves unused against the auto default (model context, capped at
+// 131072 tokens): max_seq_len x max_batch_size below it. 0 when the batch is unknown or the context
+// is the default. Flash-Next (12 attention layers, FP16 KV, 24 KiB/token) at 32768 x 1: 2304 MiB.
+size_t GraphExecutor::kv_bytes_per_token_() const {
+    const auto& cfg = model_->config();
+    size_t elems = 0;  // K + V elements per token over the attention layers
+    for (int i = 0; i < cfg.n_layers; ++i)
+        if (model_->layer(i).wq.data != nullptr && model_->layer(i).gdn_gate.data == nullptr)
+            elems += 2ULL * (cfg.n_kv_heads > 0 ? cfg.n_kv_heads : cfg.n_heads) *
+                     (cfg.head_dim > 0 ? cfg.head_dim : cfg.d_model / std::max(cfg.n_heads, 1));
+    return kv_data_bytes(kv_plan_dtype_, elems);
+}
+
+// Free VRAM a regrow may take: free now minus the KV pool at its ceiling (context x batch), the
+// allocator headroom and a 1536 MiB tail for what init and serving still commit (Flash-Next at a
+// 110k-token prompt: 1101-1220 MiB over 3 starts). 0 when the batch is unknown.
+size_t GraphExecutor::expert_cache_free_slack_bytes_() const {
+    if (kv_ctx_batch_ <= 0 || kv_ctx_tokens_ <= 0)
+        return 0;
+    size_t free_mem = 0, total_mem = 0;
+    (void)vram_budget_mem_get_info(&free_mem, &total_mem);  // failure zeroes both: no slack
+    constexpr size_t kTail = 1536ULL << 20;
+    const size_t kv = static_cast<size_t>(kv_ctx_tokens_) * kv_ctx_batch_ * kv_bytes_per_token_();
+    const size_t keep = kv + (vram_alloc_ ? vram_alloc_->headroom() : 0) + kTail;
+    return free_mem > keep ? free_mem - keep : 0;
+}
+
+size_t GraphExecutor::expert_cache_ctx_slack_bytes_() const {
+    const auto& cfg = model_->config();
+    const long long dflt = std::min(cfg.max_seq_len > 0 ? cfg.max_seq_len : 131072, 131072);
+    const long long need = static_cast<long long>(kv_ctx_tokens_) * kv_ctx_batch_;
+    if (kv_ctx_batch_ <= 0 || kv_ctx_tokens_ <= 0 || need >= dflt)
+        return 0;
+    const size_t slack = static_cast<size_t>(dflt - need) * kv_bytes_per_token_();
+    IMP_LOG_INFO("Expert cache: +%.0f MiB of KV room unused at %d x %d tokens (default %lld)",
+                 slack / (1024.0 * 1024.0), kv_ctx_tokens_, kv_ctx_batch_, dflt);
+    return slack;
 }
 
 void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAllocator& alloc,
