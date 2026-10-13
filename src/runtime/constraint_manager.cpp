@@ -44,6 +44,13 @@ ToolDialect resolve_tool_dialect(Tokenizer* tokenizer, const ToolCallGate& gate)
     return d;
 }
 
+// Free-form object schema ({"type":"object"}, no properties / enum / value schema / property
+// count): the any-JSON constrainer takes it, same language at lower cost.
+bool free_form_object(const SchemaNode* res) {
+    return res && res->type == SchemaType::OBJECT && res->properties.empty() && !res->has_enum() &&
+           !res->additional_schema && res->min_properties < 0 && res->max_properties < 0;
+}
+
 }  // namespace
 
 void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, Tokenizer* tokenizer,
@@ -107,8 +114,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
     if (use_schema) {
         auto probe = parse_json_schema(json_schema);
         const SchemaNode* probe_res = probe ? resolve_schema_ref(probe.get(), probe.get()) : nullptr;
-        if (probe_res && probe_res->type == SchemaType::OBJECT && probe_res->properties.empty() &&
-            !probe_res->has_enum()) {
+        if (free_form_object(probe_res)) {
             IMP_LOG_INFO("ConstraintManager: free-form object schema → any-JSON constrainer");
             use_schema = false;
             json_mode = true;

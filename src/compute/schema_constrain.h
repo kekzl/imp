@@ -49,6 +49,12 @@ enum class SchemaPhase : uint8_t {
     // `additionalProperties`, or a tool whose parameters are free-form.
     // Driven by an embedded JsonGrammar rather than this FSM (#1729).
     FREE_VALUE,
+    // anyOf with more than one alternative still matching: each lives in its own sub-stack
+    // (SchemaFrame::branches); one survivor is spliced back into the main stack.
+    ANY_OF_BRANCHES,
+    // Bottom of a branch sub-stack: accepts nothing, so a branch reduced to it has finished
+    // its value (schema_constrain_steps.cpp).
+    BRANCH_END,
     DONE
 };
 
@@ -120,7 +126,34 @@ struct SchemaFrame {
     bool num_exp = false;         // an 'e'/'E' has been consumed
     bool num_sign_ok = false;     // '+'/'-' legal only right after 'e'/'E'
     bool num_need_digit = false;  // a digit is required next
+    std::string num_text;         // the number so far, read by minimum/maximum (json_number_bounds.h)
+
+    // ANY_OF_BRANCHES: one sub-stack per live alternative, BRANCH_END frame at the bottom.
+    std::vector<std::vector<SchemaFrame>> branches;
+    // BRANCH_END: depth of the stack the branch grew from, so the nesting cap counts it.
+    size_t depth_base = 0;
 };
+
+// Nesting cap of the frame stack: recursive $ref schemas allow unbounded nesting; refusing to
+// open deeper only forces closure (any finite nesting still satisfies the schema).
+inline constexpr size_t kMaxSchemaStackDepth = 192;
+// Nesting depth of `stk`, branch sub-stacks counted from where they grew.
+inline size_t schema_stack_depth(const std::vector<SchemaFrame>& stk) {
+    return stk.size() + (stk.empty() ? 0 : stk.front().depth_base);
+}
+// Digits an `integer` may run to (#1540): int64 is 19 digits, past which no caller can read the
+// value back. A `number` stops at 40 (#751): past any real int64 / double, it caps a degenerate
+// digit loop that would otherwise run to max_tokens.
+inline constexpr int kMaxIntegerDigits = 19;
+inline constexpr int kMaxNumberDigits = 40;
+// After a value frame pops, advance the parent frame's phase.
+void sim_fixup_parent(std::vector<SchemaFrame>& stk);
+// Object takes undeclared keys (additionalProperties true or a schema; never TOOL_CALL).
+[[nodiscard]] bool object_allows_additional(const SchemaNode* n);
+// Pushes a FREE_VALUE frame: a value the schema does not describe, parsed by JsonGrammar.
+void push_free_value(std::vector<SchemaFrame>& stk);
+// Pushes a VALUE_START frame for an already resolved (non-REF) node.
+void push_schema_value(std::vector<SchemaFrame>& stk, const SchemaNode* resolved);
 
 class SchemaConstrainer {
 public:
@@ -157,6 +190,8 @@ public:
     // transition and nothing trails past the root close. Catches multi-char tokens spanning
     // phase transitions (`{}`, `":"`, `0.98`) that the first-char category mask misses.
     [[nodiscard]] bool token_legal(const std::string& text) const;
+    // Test hook: `text` is legal and completes the root value (the stack drains).
+    [[nodiscard]] bool completes_for_test(const std::string& text) const;
 
     // Reset for a new generation with the same schema.
     void reset();
@@ -283,6 +318,27 @@ private:
     // True if the current string can legally close: regex accepts and length
     // constraints satisfied.
     bool can_close_string(const SchemaFrame& f, const std::vector<int>& states, int len) const;
+
+    // schema_constrain_steps.cpp: phase steps sim_advance delegates to.
+    // anyOf at VALUE_START: one branch sub-stack per alternative, then the first char.
+    [[nodiscard]] bool any_of_start(std::vector<SchemaFrame>& stk, char c) const;
+    // ANY_OF_BRANCHES: feed every branch; drop the dead, splice a lone survivor, pop when done.
+    [[nodiscard]] bool any_of_step(std::vector<SchemaFrame>& stk, char c) const;
+    // NUMBER / INTEGER at VALUE_START and inside NUMBER_VALUE (digit caps, RFC 8259, bounds).
+    [[nodiscard]] static bool number_start(SchemaFrame& f, char c);
+    [[nodiscard]] bool number_step(std::vector<SchemaFrame>& stk, char c) const;
+    // Resolved schema of array item `index` (prefixItems, items, any value); null when the schema
+    // allows no item there.
+    [[nodiscard]] const SchemaNode* item_schema(const SchemaNode* arr, int index) const;
+    [[nodiscard]] bool push_array_item(std::vector<SchemaFrame>& stk, int index) const;
+    // Pushes the value frame of the key just closed: `prop` when declared, else the
+    // additionalProperties schema or any value.
+    void push_property_value(std::vector<SchemaFrame>& stk, const SchemaNode* prop) const;
+    // Category mask of a value of `node` at its first char.
+    [[nodiscard]] static uint16_t value_start_categories(const SchemaNode* node);
+    // Object frame may close ('}') / take another key (',').
+    [[nodiscard]] static bool object_may_close(const SchemaFrame& f);
+    [[nodiscard]] static bool object_may_add_key(const SchemaFrame& f);
 };
 
 }  // namespace imp

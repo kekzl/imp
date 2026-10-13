@@ -17,7 +17,7 @@ post-validation.
 | form | status |
 |---|---|
 | `response_format: {"type": "json_object"}` | ✅ |
-| `response_format: {"type": "json_schema", ...}` | ✅ whole-token validated. An `integer` is bounded at 19 digits (int64's width): unbounded, the sampler could stay in the digit state above temperature 0 and emit a 40-digit population (#1540). `enum`/`const` members may be strings, numbers, booleans or `null`; a non-string member is emitted exactly as written (`1.0` does not match `1`) |
+| `response_format: {"type": "json_schema", ...}` | ✅ whole-token validated. An `integer` is bounded at 19 digits (int64's width): unbounded, the sampler could stay in the digit state above temperature 0 and emit a 40-digit population (#1540). `enum`/`const` members may be strings, numbers, booleans or `null`; a non-string member is emitted exactly as written (`1.0` does not match `1`). Pydantic / Zod shapes: `anyOf`/`oneOf`, type arrays and `nullable` (`Optional[T]`), `$ref`/`$defs`, `allOf` over objects or one `$ref`, `prefixItems` (tuples), `additionalProperties` schemas (`Dict[str, T]`), `minProperties`/`maxProperties`, `minimum`/`maximum`/`exclusive*` (exact decimal); a schema without a type (`Any`) and an array without `items` take any JSON value |
 | `response_format: {"type": "regex"}` / `guided_regex` | ✅ |
 | `response_format: {"type": "grammar"}` / `grammar` / `guided_grammar` | ✅ GBNF, a pushdown simulator, so recursive and bracket-balanced formats work |
 

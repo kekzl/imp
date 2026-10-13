@@ -11,6 +11,9 @@
 # [baseline] are generated.
 #
 # Pin changes (newest first):
+#   JSON-Schema keywords PR (keyword groups and phase steps moved to helpers): parse_schema_object
+#   71 -> 19 (entry removed), sim_advance 240 -> 202, compute_category_mask 67 -> 39;
+#   RegexNfa::parse_repeat 32 moved with RegexNfa from json_schema.cpp to regex_nfa.cpp
 #   batch-decode PR (split-K reduce and epilogue moved to helpers, kernel templated on the output type):
 #   fp8_head_mma_kernel 32 -> under the threshold, entry removed
 #   #2537 (per-arch config.json hooks, generic parsers in hf_config_generic.cpp): load_config 189 -> 11
@@ -70,8 +73,7 @@ skip_dirs = []
 "src/compute/gemm_grouped_nvfp4_smallM.cu::__global__ void smallM_kernel_v1(const void* const* __restrict__ d_A, const void* const* __restrict__ d_SFA, const void* const* __restrict__ d_B, const void* const* __restrict__ d_SFB, void* const* __restrict__ d_D, const float* __restrict__ d_alpha, const int* __restrict__ d_M_per_expert, const CUtensorMap* __restrict__ d_descs, int N, int K)" = 35
 "src/compute/json_constrain.cu::bool JsonGrammar::advance_char(char c)" = 94
 "src/compute/json_constrain.cu::uint16_t JsonGrammar::compute_allowed_mask() const" = 35
-"src/compute/json_schema.cpp::bool RegexNfa::parse_repeat(Frag& out)" = 32
-"src/compute/json_schema.cpp::std::unique_ptr<SchemaNode> parse_schema_object()" = 71
+"src/compute/regex_nfa.cpp::bool RegexNfa::parse_repeat(Frag& out)" = 32
 "src/compute/json_schema.cpp::void skip_value()" = 27
 "src/compute/mmq_q8_imma.cu::__global__ void __launch_bounds__(kThreads) mmq_imma_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale, const float* __restrict__ x_rowsum, const int8_t* __restrict__ W_s8, const __half* __restrict__ w_sc, __half* __restrict__ out, int M, int N, int K, const int32_t* __restrict__ expert_offsets, size_t w_stride, size_t wsc_stride, float* __restrict__ split_out = nullptr, int ks_per_split = 0)" = 34
 "src/compute/mmq_q8_imma.cu::bool gemm_common(const void* w_blocks, int qkind , const __half* x_f16, __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta, const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0, bool allow_splitk = true)" = 39
@@ -83,9 +85,9 @@ skip_dirs = []
 "src/compute/mtp_forward.cu::bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_size, int n_experts, int top_k, int expert_d_ff, int shared_d_ff, int num_heads, int num_kv_heads, int head_dim, int max_seq_len, int n_kv_slots, int hc_count, int hc_lowrank)" = 36
 "src/compute/sampling_filters.cu::__global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_size, float typical_p, bool deterministic)" = 35
 "src/compute/sampling_internal.cuh::__device__ __forceinline__ void block_reduce_topk(float* local_vals, int* local_idxs, int local_count, int top_k, float* s_warp_vals, int* s_warp_idxs, float* out_val, int* out_idx)" = 27
-"src/compute/schema_constrain.cu::bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const" = 240
+"src/compute/schema_constrain.cu::bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const" = 202
 "src/compute/schema_constrain.cu::int SchemaConstrainer::forced_text(std::string& out, int max_chars) const" = 69
-"src/compute/schema_constrain.cu::uint16_t SchemaConstrainer::compute_category_mask() const" = 67
+"src/compute/schema_constrain.cu::uint16_t SchemaConstrainer::compute_category_mask() const" = 39
 "src/compute/schema_constrain_mask.cpp::void SchemaConstrainer::compute_token_allow_mask(uint16_t cat_mask)" = 52
 "src/compute/ssm_scan_reg.cu::__global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __restrict__ B_in, const half* __restrict__ C_in, const half* __restrict__ dt_raw, const float* __restrict__ A_log, const float* __restrict__ D_skip, const float* __restrict__ dt_bias, void* __restrict__ h_state, half* __restrict__ y, const half* __restrict__ z, int n_tokens, int n_heads, int head_dim_ssm, int n_groups, const int* __restrict__ d_real_n, void* __restrict__ h_snap, const int* __restrict__ d_snap_n)" = 35
 "src/compute/weight_dispatch.cpp::void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Tensor& y, float alpha, float beta, void* workspace, size_t workspace_bytes, cudaStream_t stream)" = 26

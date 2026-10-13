@@ -345,8 +345,11 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gbnf_parser.cpp
     src/compute/json_constrain.cu
     src/compute/json_schema.cpp
+    src/compute/json_number_bounds.cpp
+    src/compute/regex_nfa.cpp
     src/compute/schema_constrain.cu
     src/compute/schema_constrain_mask.cpp
+    src/compute/schema_constrain_steps.cpp
     src/compute/moe_routing.cu
     src/compute/moe_token_permute.cu
     src/compute/ssm.cu
@@ -1159,6 +1162,8 @@ if(IMP_BUILD_TESTS)
             # (make asan) still compiles test-core, even though both files use nlohmann as oracle.
             tests/test_json_constrain_property.cpp
             tests/test_schema_constrain_property.cpp
+            tests/test_schema_keywords.cpp
+            tests/test_json_number_bounds.cpp
             # Only this target needs server sources (tool_call.h pulls nlohmann); the other five stay
             # unconditional below so make asan (-DIMP_BUILD_SERVER=OFF) still runs them.
             fuzz/fuzz_tool_stream.cpp

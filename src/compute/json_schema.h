@@ -1,5 +1,7 @@
 #pragma once
 
+#include "compute/json_number_bounds.h"
+
 #include <string>
 #include <vector>
 #include <memory>
@@ -99,8 +101,9 @@ enum class SchemaType {
     OBJECT,
     ARRAY,
     ENUM,
-    ANY_OF,
-    REF,  // $ref to a $defs/definitions entry (or "#" = schema root)
+    ANY_OF,  // anyOf / oneOf / a type array / nullable: one branch must match
+    ANY,     // no type and no type-implying keyword (`{}`, Pydantic Any): any JSON value
+    REF,     // $ref to a $defs/definitions entry (or "#" = schema root)
     // Tool-call body {"name":"<tool>","arguments":{...}} (#1002): an OBJECT-like node with
     // ORDERED keys (name before arguments) whose "arguments" schema resolves dynamically to the
     // chosen tool's parameter schema. properties = [(name, ENUM over tool names), (arguments, free
@@ -122,12 +125,24 @@ struct SchemaNode {
     std::vector<std::pair<std::string, std::unique_ptr<SchemaNode>>> properties;
     std::vector<std::string> required;
     bool additional_properties = false;
+    // additionalProperties as a schema (Pydantic Dict[str, T]): the value schema of undeclared
+    // keys; null = undescribed. minProperties / maxProperties: -1 = unset.
+    std::unique_ptr<SchemaNode> additional_schema;
+    int min_properties = -1;
+    int max_properties = -1;
 
     // ARRAY
     std::unique_ptr<SchemaNode> items;
+    // prefixItems (Pydantic tuple): position i < size takes prefix_items[i], later ones `items`;
+    // items_false ("items": false) forbids later positions.
+    std::vector<std::unique_ptr<SchemaNode>> prefix_items;
+    bool items_false = false;
     // ARRAY constraints (JSON Schema "minItems" / "maxItems"). -1 = unset.
     int min_items = -1;
     int max_items = -1;
+
+    // NUMBER / INTEGER: minimum / maximum / exclusiveMinimum / exclusiveMaximum.
+    NumberBounds bounds;
 
     // ENUM: string members (content without quotes) and non-string members as their raw JSON
     // text ("1", "-2.5", "true", "null"), emitted verbatim.
