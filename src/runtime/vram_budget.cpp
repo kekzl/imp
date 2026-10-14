@@ -441,6 +441,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         hints.prefer_nvfp4_decode = (config.use_nvfp4_decode > 0);
         hints.dual_path_attn_fp8_ffn_nvfp4 = config.dual_path_quant;
         hints.prefer_fp8 = config.use_fp8_prefill;
+        hints.q4k_in_place = config.q4k_in_place;
         StoragePlan plan = plan_storage(model, mcfg, hints);
         IMP_LOG_INFO(
             "VRAM budget: planner projects %.1f MiB (%zu entries), heuristic "

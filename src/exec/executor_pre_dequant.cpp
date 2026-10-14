@@ -165,6 +165,7 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // plan-vs-actual parity diagnostic runs in Phase 4. Per-phase cache SIZING
     // stays with the heuristic budget (a separate unconstrained plan feeds the #875 weight-cache reserve).
     hints_->vram_budget_bytes = remaining_budget;
+    hints_->q4k_in_place = rcfg.gemm.q4k_in_place && rcfg.gemm.q4k_imma_prefill;
     storage_plan_ = plan_storage(*model_, cfg, *hints_);
     apply_arch_rules_(storage_plan_, cfg);
     if (storage_plan_.failed) {

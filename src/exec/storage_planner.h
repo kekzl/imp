@@ -19,6 +19,9 @@ struct PlanHints {
     bool dual_path_attn_fp8_ffn_nvfp4 = false;
     // When true, prefer FP8 over FP16 for weight cache (mirrors WeightCaches::use_fp8).
     bool prefer_fp8 = false;
+    // gemm.q4k_in_place && gemm.q4k_imma_prefill: on a non-MoE model a Q4_K projection the plan
+    // would copy to FP16/FP8 stays Undefined (GGUF blocks read in place, 0 bytes).
+    bool q4k_in_place = false;
     size_t vram_budget_bytes = 0;
 };
 

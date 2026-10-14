@@ -11,6 +11,11 @@ namespace imp {
 
 namespace {
 
+bool is_dense_layer_proj(TensorKind k) {
+    return k == TensorKind::WQ || k == TensorKind::WK || k == TensorKind::WV || k == TensorKind::WO ||
+           k == TensorKind::W_GATE || k == TensorKind::W_UP || k == TensorKind::W_DOWN;
+}
+
 int64_t bytes_for_tier(int64_t rows, int64_t cols, StorageTier tier) {
     int64_t n = rows * cols;
     switch (tier) {
@@ -121,6 +126,9 @@ void add_tensor(const Tensor& t, TensorKind kind, StoragePlan& plan, TensorID& n
     // fall back to required_floor.
     if (!mask_contains(cap.supported, tier))
         tier = cap.required_floor;
+    if (hints.q4k_in_place && t.qtype == QType::Q4_K && is_dense_layer_proj(kind) &&
+        (tier == StorageTier::FP16 || tier == StorageTier::FP8))
+        tier = StorageTier::Undefined;
 
     int64_t rows = (t.ndim > 0 ? t.shape[0] : 1);
     int64_t cols = (t.ndim > 1 ? t.shape[1] : 1);
@@ -132,7 +140,11 @@ void add_tensor(const Tensor& t, TensorKind kind, StoragePlan& plan, TensorID& n
 
 }  // namespace
 
-StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanHints& hints) {
+StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanHints& hints_in) {
+    // q4k_in_place is dense-only: MoE attention Q4_K prefills faster from the FP16 copy
+    // (Qwen3-30B-A3B: 1776 MiB, pp512 16050 vs 13749 tok/s in place).
+    PlanHints hints = hints_in;
+    hints.q4k_in_place = hints_in.q4k_in_place && model.profile().is_dense;
     StoragePlan plan;
     TensorID next_id = 0;
     size_t total = 0;
@@ -198,7 +210,7 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanH
             for (size_t idx = 0; idx < plan.entries.size(); ++idx) {
                 auto& e = plan.entries[idx];
                 const auto cap = effective_capabilities(e.kind, e.source_qtype);
-                if (e.tier == cap.required_floor)
+                if (e.tier == cap.required_floor || e.tier == StorageTier::Undefined)
                     continue;
                 StorageTier next = downgrade_one(e.tier, cap.required_floor, cap);
                 if (next == e.tier)

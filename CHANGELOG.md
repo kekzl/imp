@@ -11,6 +11,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Sampled requests (`temperature > 0`) speculate on dense models (`speculative.sampled`): each verify row draws with the eager per-token seed, a draft token stays while the draw equals it. Qwen3-14B-NVFP4 at temperature 0.7, code edit: 167.6 -> 190.9 tok/s, prose flat. MoE and GDN hybrids stay greedy-only.
 
 ### Changed
+- Dense (non-MoE) Q4_K weights keep no FP16 copy: prefill IMMA and decode dp4a read the GGUF blocks (`gemm.q4k_in_place`). gemma-3-12b Q4_K_M: 28445 -> 12626 MiB after load, KV start 125 -> 825 blocks, pp512 and tg unchanged, PPL 9.9778 -> 9.9900 (FP8 KV both arms).
 - Modelopt FP8 checkpoints prefill FP8 x FP8 (cuBLASLt, the checkpoint's input_scale) instead of an FP16 copy of each weight (`gemm.fp8_native_prefill`). Qwen3-8B-FP8: 22810 -> 9574 MiB after load, pp512 19082 -> 31510, pp2048 20479 -> 30416 tok/s, tg flat, PPL 10.7418 -> 10.7654.
 - Qwen3.8-Flash-Next-NVFP4 decode 81.0 -> 87.2 tok/s (tg512, 3 prompts, 6 of 6 pairs): the declined MTP head is not uploaded (353 -> 386 expert slots/layer), the shared expert runs beside the miss gather (`moe.shared_expert_overlap`), faster expert-cache resolve. Output bits unchanged.
 - Host-resident NVFP4 experts: the auto expert-cache budget takes the KV room a shorter `runtime.max_seq_len` leaves unused. Flash-Next at 32768 tokens: 386 -> 441 slots/layer, tg512 88.3 -> 92.6 tok/s (5 of 6 pairs); default context unchanged.
