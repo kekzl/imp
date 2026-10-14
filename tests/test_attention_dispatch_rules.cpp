@@ -39,7 +39,7 @@ TEST(AttentionDispatchRules, OnlyUnservedHeadDimsNeedTheSmatrix) {
 }
 
 // A dtype outside paged_attention_serves_head_dim's switch defeated the #1674 guard:
-// kv_cache.dtype=mxfp4 at head_dim=96 passed init and threw at first decode (AUDIT_arch_2026
+// kv_cache.dtype=mxfp4 at head_dim=96 passed init and threw at first decode (AUDIT_ARCH_2026
 // A1-5). MXFP4_KV shares NVFP4's template set (64/128/256/512), no 96.
 TEST(AttentionDispatchRules, PagedDecodeRefusesMxfp4KvAtHeadDim96) {
     EXPECT_FALSE(paged_attention_serves_head_dim(QType::MXFP4_KV, 96));

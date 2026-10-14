@@ -38,7 +38,7 @@ int imp_fuzz_safetensors(const uint8_t* data, size_t size);
 // an out-of-bounds vector write during load).
 int imp_fuzz_tokenizer_json(const uint8_t* data, size_t size);
 
-// GGUF loader, against a real file (AUDIT_arch_2026 F1-1: `n_dims > 4` was a
+// GGUF loader, against a real file (AUDIT_ARCH_2026 F1-1: `n_dims > 4` was a
 // stack write in the loader; F1-5/F1-7/F1-11 the same class in metadata).
 int imp_fuzz_gguf(const uint8_t* data, size_t size);
 

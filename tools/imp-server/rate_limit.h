@@ -13,7 +13,7 @@
 #include <unordered_map>
 #include <vector>
 
-// InflightGate: atomic in-flight admission (AUDIT_arch_2026 E-2) - a raw queue-depth read then
+// InflightGate: atomic in-flight admission (AUDIT_ARCH_2026 E-2) - a raw queue-depth read then
 // admit let N workers reading "63 in flight" simultaneously all pass. Pre-routing hook enters,
 // post-routing hook (same thread) leaves. Header-only so the CPU lane can drive it.
 class InflightGate {

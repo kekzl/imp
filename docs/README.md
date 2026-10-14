@@ -28,7 +28,7 @@ Gate: `scripts/docs_lint.py` (frontmatter, links, anchors, provenance, prose rul
 | [`API_SCORING.md`](API_SCORING.md) | `/v1/decide` and `/v1/score`: request, modes, token guards |
 | [`API_CONTROL.md`](API_CONTROL.md) | `POST /v1/requests/{id}/end_thinking`: end a running request's think block |
 | [`MODELS.md`](MODELS.md) | which checkpoints and quants load, and what each needs |
-| [`quantization.md`](quantization.md) | formats, KV cache dtype, choosing a quant, `imp-quantize` |
+| [`QUANTIZATION.md`](QUANTIZATION.md) | formats, KV cache dtype, choosing a quant, `imp-quantize` |
 | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | symptom, cause, fix |
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | build, test, PR rules |
 
@@ -43,7 +43,7 @@ Nothing else in the tree states these; everything else links here.
 | [`FEATURES.md`](FEATURES.md) | what exists, with ✅ / 🟡 / ⚪ status |
 | [`LIMITATIONS.md`](LIMITATIONS.md) | what does not exist, or exists untested |
 | [`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md) | what is absent on purpose, with the measurement |
-| [`determinism.md`](determinism.md) | reproducibility guarantees and limits |
+| [`DETERMINISM.md`](DETERMINISM.md) | reproducibility guarantees and limits |
 | [`GOAL.md`](GOAL.md) | mission, hero models, release bars |
 
 ## Internals (L2)
@@ -59,14 +59,14 @@ Nothing else in the tree states these; everything else links here.
 | [`internals/BENCHMARKING.md`](internals/BENCHMARKING.md) | the measurement contract |
 | [`internals/CPP23.md`](internals/CPP23.md) | C++23 in use, host/device line |
 | [`internals/PROFILING.md`](internals/PROFILING.md) | nsys and ncu commands on this host |
-| [`internals/vision_gemma4v_spec.md`](internals/vision_gemma4v_spec.md) | the Gemma-4 vision encoder, as implemented |
+| [`internals/VISION_GEMMA4V_SPEC.md`](internals/VISION_GEMMA4V_SPEC.md) | the Gemma-4 vision encoder, as implemented |
 
 ## Records (append-only, not linted)
 
 | Record | Content |
 |---|---|
-| [`roadmap.md`](roadmap.md) | gap list with how each gap was measured or refuted |
-| [`MISSION_JOURNAL.md`](MISSION_JOURNAL.md), [`vram_audit.md`](vram_audit.md) | dated journals |
+| [`ROADMAP.md`](ROADMAP.md) | gap list with how each gap was measured or refuted |
+| [`MISSION_JOURNAL.md`](MISSION_JOURNAL.md), [`VRAM_AUDIT.md`](VRAM_AUDIT.md) | dated journals |
 | [`plans/`](plans/README.md) | one record per campaign, each ending in its verdict |
 | [`audit/`](audit/README.md) | audit records; the index says which are live ledgers |
-| [`archive/`](archive/) | superseded sweeps and investigations (`benchmarks_pre_v0.44.md`, `memory_census_2026.md`, `limitations_detail_2026.md`, `quantization_awq_findings.md`, `kernels_refuted_2026.md`) |
+| [`archive/`](archive/) | superseded sweeps and investigations (`BENCHMARKS_PRE_V0.44.md`, `MEMORY_CENSUS_2026.md`, `LIMITATIONS_DETAIL_2026.md`, `QUANTIZATION_AWQ_FINDINGS.md`, `KERNELS_REFUTED_2026.md`) |

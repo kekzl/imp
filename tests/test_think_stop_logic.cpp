@@ -432,7 +432,7 @@ TEST(GracePeriod, RealTextPieceIsContent) {
 
 // A stop token that should_stop suppresses still lands in the context; on Qwen3.8-27B a
 // near-tie inside the think block then picks <|endoftext|> and the model starts a new
-// document, leaving an empty answer (AUDIT_qwen38_nvfp4 P3). Mask removes stop ids from
+// document, leaving an empty answer (AUDIT_QWEN38_NVFP4 P3). Mask removes stop ids from
 // logits BEFORE sampling wherever suppression would apply; in-think only while a budget can
 // force </think>, after close only during the bounded grace window.
 

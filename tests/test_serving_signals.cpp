@@ -1,4 +1,4 @@
-// AUDIT_arch_2026 dispatch #7 (C-1,C-5,C-6), through the server's real BatchingEngine: a
+// AUDIT_ARCH_2026 dispatch #7 (C-1,C-5,C-6), through the server's real BatchingEngine: a
 // decode that runs the KV pool dry must finish "capacity", never "cancelled" (client-gone);
 // queue_ms/waiting-running split are visible during max_batch_size/KV admission wait;
 // per-request speculation counters reach the request object. Requires IMP_TEST_MODEL.
@@ -181,7 +181,7 @@ TEST(ServingSignalsTest, QuantizedKvPressureArmsTheValveAndTheRequestFinishes) {
     EXPECT_GT(engine->streaming_kv_evicted_blocks(), 0u) << "armed, but nothing was evicted";
     EXPECT_GT(r.sr->request->evicted_kv_tokens, 0);
 
-    // AUDIT_arch_2026 C-3: the evicting sequence is gone, so the next request must find the
+    // AUDIT_ARCH_2026 C-3: the evicting sequence is gone, so the next request must find the
     // valve lifted and keep its whole context. A process-lifetime eviction count used to pin
     // StreamingLLM for every later request (a 40k prompt then lost 36784 tokens).
     // ~120 + 150 tokens: past the 164-token eviction threshold, inside the 24-block pool.

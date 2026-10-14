@@ -104,7 +104,7 @@ def main():
             check(abs(pos["logprob"] - top[0].get("logprob", -99)) <= EPS,
                   f"{tag} chosen logprob {pos['logprob']} != top1 {top[0].get('logprob')}")
 
-    # AUDIT_arch_2026 E-3: logprobs are of the PROCESSED distribution (docs/API.md). Biasing the
+    # AUDIT_ARCH_2026 E-3: logprobs are of the PROCESSED distribution (docs/API.md). Biasing the
     # greedy first token out of existence must put the new greedy token at top-1 and drop the
     # biased one from top-k; raw logprobs would still show the biased token as top-1.
     first = lp["content"][0]["token"]

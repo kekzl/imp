@@ -15,7 +15,7 @@ api > runtime > vision > exec > lora > model > compute > quant > memory > core
 This is an order, not a DAG the tree satisfies. With one node per layer the include
 graph is a single 8-node strongly connected component; only `core` (includes nothing
 outside itself) and `api` (a pure source) sit outside it. File-level include cycles: zero
-(AUDIT_arch_2026 P0, Tarjan over the resolved include graph). On 2026-09-05 there were 88
+(AUDIT_ARCH_2026 P0, Tarjan over the resolved include graph). On 2026-09-05 there were 88
 backward include lines, 64 of them four dependency-free headers that sat in `runtime/` and
 `compute/` by accident; dispatch #14 moved them to `core/` (`pdl.h`, `pdl_device.cuh`,
 `process_diag.h`, `graph_diag.h`) and `storage_planner` to `exec/`, which left 24 lines:
@@ -56,7 +56,7 @@ its pin, or a stale pin.
   (`cuda_graph.cu`, `engine_graph_decode.cpp`), spec-ngram, `RuntimeConfig`.
 - **api** — `imp_api.cpp` C-ABI boundary (every `ImpError` entry point runs
   under `imp::api_guard()` or an inline try/catch; nothing throws across the
-  ABI). Gated by `tools/check_api_guard.py` since AUDIT_arch_2026 G-10, when 4
+  ABI). Gated by `tools/check_api_guard.py` since AUDIT_ARCH_2026 G-10, when 4
   of 23 had no catch and this line said "all".
 - **tools/imp-server** — httplib server, `handlers.cpp` (~4600 LOC, OpenAI +
   Anthropic), `BatchingEngine` (the HTTP→GPU bridge).

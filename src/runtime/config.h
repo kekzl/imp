@@ -107,7 +107,7 @@ struct RuntimeConfig {
         // (requests decoding) once that ratio exceeds 1, clamped to the full
         // chunk (prefill_pacing.h). W = how many waiters one decoder's
         // smoothness is worth, 0 = off. Higher W favors decoder ITL over
-        // ingest TTFT (docs/roadmap.md, Server and latency).
+        // ingest TTFT (docs/ROADMAP.md, Server and latency).
         int prefill_cap_fairness = 4;
         // Caps the NUMBER of prefill chunk forwards per engine step while
         // other sequences are DECODING (#1643); the size cap above bounds
@@ -124,7 +124,7 @@ struct RuntimeConfig {
         // (sampled by the decode sampler) instead of a separate decode
         // forward. Dense models only; a decoder the ragged path does not
         // admit (vision, logprobs, constraints, MTP) keeps the whole batch
-        // on the separate decode step (docs/roadmap.md, Server and latency).
+        // on the separate decode step (docs/ROADMAP.md, Server and latency).
         bool prefill_mixed_decode = true;
         // Lets GDN hybrids into the mixed step: a decoding row rides the ragged
         // prefill as a one-token continuation chunk (its live slot, the chunked-
@@ -312,7 +312,7 @@ struct RuntimeConfig {
         // a pre-closed think block, and the held prefix keeps a model that
         // reasons anyway from streaming that as the answer
         // (stream_driver.cpp). Paid only on a prose reply
-        // (AUDIT_arch_2026 E-4); lower it on a model that never reasons.
+        // (AUDIT_ARCH_2026 E-4); lower it on a model that never reasons.
         // Plain chat requests hold a fixed 8 tokens and release on the first word.
         int agent_scan_limit = 256;
         // Device budget, MiB, for recurrent-state snapshots: what makes

@@ -1,5 +1,5 @@
 // =============================================================================
-// AUDIT_arch_2026 D-2: what joining a batch costs on the NATIVE NVFP4 path.
+// AUDIT_ARCH_2026 D-2: what joining a batch costs on the NATIVE NVFP4 path.
 //
 // WHY THIS EXISTS
 //   M=1 decode is served by `gemv_nvfp4_kpar` with FP16 activations (W4A16)
@@ -27,7 +27,7 @@
 //   here for exactly that reason — it must read zero, or the M=32 number means
 //   nothing (SETTLED: "a test whose input cannot reach the defect is worthless").
 //   Not a batch-invariance guarantee either: imp deliberately has none
-//   (docs/determinism.md). It is the missing NUMBER behind that scope decision.
+//   (docs/DETERMINISM.md). It is the missing NUMBER behind that scope decision.
 // =============================================================================
 
 #include <gtest/gtest.h>
@@ -473,7 +473,7 @@ TEST(BatchInvarianceTest, NativeNvfp4DecodeSoloVsBatched) {
         << "): the solo baseline is too unstable for the batched numbers to mean anything";
 
     // Regression fence on NLL delta (docs/PERF.md "Batch invariance"), not an invariance claim
-    // (imp guarantees none, docs/determinism.md): fails only if the gap grows by an order of
+    // (imp guarantees none, docs/DETERMINISM.md): fails only if the gap grows by an order of
     // magnitude, the signature of a broken activation-quant step or wrong smallM tile.
     EXPECT_LT(std::fabs(measured_a4.nll_delta), 0.15)
         << "mean NLL moved by " << measured_a4.nll_delta << " between M=1 and M=32";

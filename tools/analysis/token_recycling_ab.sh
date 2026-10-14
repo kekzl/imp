@@ -1,7 +1,7 @@
 #!/bin/bash
 # token_recycling on/off A/B, alternating arms, fresh process each. Defaults to Qwen3-14B-Q6_K
 # (the model the roadmap's -7% verdict used, for comparability). Prints CSV:
-# arm,round,tokens,ms,tok_s,drafted,accepted,verifies. Results: docs/roadmap.md, gap 5.
+# arm,round,tokens,ms,tok_s,drafted,accepted,verifies. Results: docs/ROADMAP.md, gap 5.
 # Usage: bash tools/analysis/token_recycling_ab.sh [ROUNDS=3] [RECYCLE_MODEL=...].
 set -uo pipefail
 IMG=${IMP_IMAGE:-imp:test}

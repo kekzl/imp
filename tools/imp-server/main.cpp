@@ -39,7 +39,7 @@ static bool is_inference_endpoint(const std::string& path) {
 
 // Set by the pre-routing hook when it entered the in-flight gate for this
 // request, cleared by the post-routing hook; httplib runs both on the worker
-// thread that serves the request (AUDIT_arch_2026 E-2).
+// thread that serves the request (AUDIT_ARCH_2026 E-2).
 static thread_local bool t_inflight_entered = false;
 
 // is_rate_limited_endpoint: a WIDER set than --max-concurrent (which protects the engine) -
@@ -185,7 +185,7 @@ static int run_server(int argc, char** argv) {
     // worker for the whole generation, and the httplib default (max(8,cores-1)) queued the tail
     // of a 32-stream burst 4-7s late (2026-08-25). +8 covers health/admin while every stream slot is held.
     // Task queue is bounded at exactly one pool's worth; past that httplib closes the connection at
-    // once (AUDIT_arch_2026 E-2: an unbounded queue hung 9/10 requests with no timer instead of 429).
+    // once (AUDIT_ARCH_2026 E-2: an unbounded queue hung 9/10 requests with no timer instead of 429).
     svr.new_task_queue = [&args] {
         const size_t workers = static_cast<size_t>(args.max_concurrent) + 8;
         return new httplib::ThreadPool(workers, /*max_n=*/0, /*mqr=*/workers);
@@ -265,7 +265,7 @@ static int run_server(int argc, char** argv) {
             return httplib::Server::HandlerResponse::Unhandled;
 
         // Shutting down: a request httplib accepted before the listener stopped
-        // is refused rather than started into the teardown (AUDIT_arch_2026 E-6).
+        // is refused rather than started into the teardown (AUDIT_ARCH_2026 E-6).
         if (g_draining.load(std::memory_order_relaxed) && is_inference_endpoint(req.path)) {
             send_dialect_error(res, req.path, 503, "server_error", "overloaded_error",
                                "Server is shutting down");
@@ -288,7 +288,7 @@ static int run_server(int argc, char** argv) {
 
         // The in-flight depth read takes state.mtx, which a model swap or /admin/suspend can hold for
         // minutes: a blocking acquire here parked every arriving worker inside the load-shedding guard
-        // until the thread pool was gone (AUDIT_arch_2026 F2-3). A lock timeout means "engine busy", 503.
+        // until the thread pool was gone (AUDIT_ARCH_2026 F2-3). A lock timeout means "engine busy", 503.
         if (state.max_concurrent > 0 && is_inference_endpoint(req.path)) {
             // A swap or suspend holds `mtx` for its whole duration and says so in an atomic, so
             // the one case worth shedding for is readable without touching the lock. An idle
@@ -317,7 +317,7 @@ static int run_server(int argc, char** argv) {
                 return httplib::Server::HandlerResponse::Handled;
             }
             // The depth read above is check-then-submit (a race let N workers all read "63 in flight" and
-            // all get admitted, AUDIT_arch_2026 E-2). This gate counts admitted handlers atomically instead;
+            // all get admitted, AUDIT_ARCH_2026 E-2). This gate counts admitted handlers atomically instead;
             // the post-routing hook on the same thread releases it.
             if (!state.inflight.try_enter(state.max_concurrent)) {
                 send_dialect_error(res, req.path, 429, "rate_limit_error", "overloaded_error",
@@ -640,7 +640,7 @@ static int run_server(int argc, char** argv) {
     if (state.batching) {
         // Drains in-flight generations before engine teardown (stop() would cancel them) - same
         // contract/budget as a model swap. A drain that exhausts its budget falls through to cancel
-        // (AUDIT_arch_2026 E-6); docker-compose.yml's stop_grace_period must cover this so
+        // (AUDIT_ARCH_2026 E-6); docker-compose.yml's stop_grace_period must cover this so
         // `docker stop` doesn't SIGKILL a draining server.
         {
             std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::seconds(5));

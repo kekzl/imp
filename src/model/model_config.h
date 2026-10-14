@@ -198,7 +198,7 @@ struct ModelConfig {
     // Model-specific runtime knobs formerly on the global RuntimeConfig singleton (Phase 5
     // Track A). Only writer is engine_init_resolver for GEMMA4; no config surface. Six
     // bring-up bisect flags with no writer since #319 were deleted with their branches
-    // (AUDIT_arch_2026 G-7).
+    // (AUDIT_ARCH_2026 G-7).
     struct Overrides {
         struct Gemma4 {
             bool force_mmvq = false;

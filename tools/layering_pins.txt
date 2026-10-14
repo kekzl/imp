@@ -2,7 +2,7 @@
 # reason it is tolerated. tools/check_layering.py fails on an unlisted backward
 # edge, on a count above its ceiling, and on a stale line (edge gone).
 # Layer order: api > runtime > vision > exec > lora > model > compute > quant > memory > core.
-# Baseline 2026-09-06 (AUDIT_arch_2026 dispatch #14): 88 lines -> 24, four headers
+# Baseline 2026-09-06 (AUDIT_ARCH_2026 dispatch #14): 88 lines -> 24, four headers
 # moved to core/, storage_planner to exec/. What is left is the vram_budget.h
 # forward-declare trade and placement the audit's SCC simulation showed no move
 # repairs (memory <-> model, model <-> vision, vision <-> runtime,

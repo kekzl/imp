@@ -1,4 +1,4 @@
-// Three shipped samplers with no test in any lane (AUDIT_arch_2026 I-4): DRY, mirostat v2,
+// Three shipped samplers with no test in any lane (AUDIT_ARCH_2026 I-4): DRY, mirostat v2,
 // logit_bias. Each driven at the kernel entry point (sampling.h) against a host copy of the
 // same arithmetic on small vocabularies. GPU lane (test-compute).
 #include <gtest/gtest.h>

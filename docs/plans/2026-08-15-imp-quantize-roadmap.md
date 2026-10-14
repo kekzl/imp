@@ -6,7 +6,7 @@ BF16/FP16 SafeTensors checkpoint whose experts, if any, are stored one 2-D
 tensor per expert. Everything else is refused or excluded.
 
 **Status:** gap list with measurements, not a schedule. Written 2026-08-15
-against `a5ba92aa`. Builds on [`roadmap.md`](../roadmap.md) gap 1, which carries
+against `a5ba92aa`. Builds on [`ROADMAP.md`](../ROADMAP.md) gap 1, which carries
 the quantization-quality history; this document is about *coverage*: which
 checkpoints can enter the tool at all, and which can come out small enough.
 
@@ -17,9 +17,9 @@ checkpoints can enter the tool at all, and which can come out small enough.
 | 1 | read FP8 and F32 sources | LANDED 2026-08-15 |
 | 2 | embedding and lm_head opt-in | HALF: the `--dry-run` reporting half landed 2026-08-15 (Qwen3.8-27B 5.60 GiB unshrunk, 30% of the output) and the lm_head price is measured and documented 2026-08-16 (PPL 4.5707 -> 4.6158, +0.99%, for +10.4% decode; `--lm-head` + `--format vllm` refused because vLLM's `ParallelLMHead` takes no scales). The embedding opt-in is still not offered |
 | 3 | confirm `--calib-groups BD` above 14B | BLOCKED on a model, not on work: `--calib` correctly refuses `qwen3_5` (unit-offset norm), and no local BF16 checkpoint above 14B has a plain RMSNorm. Superseded 2026-10-01 (#2359 3fbc4891): measured at 14B (n_rep 5) instead, BD abs PPL 9.9068 vs RTN 9.9849; `--calib` without `--calib-groups` now defaults to `BDEG` at n_rep >= 5 |
-| 4 | stacked MoE experts | OPEN, tracked as `docs/roadmap.md` Open 7 (needs a per-model layout descriptor plus per-expert bias in loader and MoE forward) |
+| 4 | stacked MoE experts | OPEN, tracked as `docs/ROADMAP.md` Open 7 (needs a per-model layout descriptor plus per-expert bias in loader and MoE forward) |
 
-Shipped alongside, from `roadmap.md` finding (i): `--format vllm` writes
+Shipped alongside, from `ROADMAP.md` finding (i): `--format vllm` writes
 compressed-tensors `nvfp4-pack-quantized`, vLLM 0.27.1 loads and generates
 (2026-08-16).
 
@@ -207,7 +207,7 @@ gpt-oss (whose HF release is already MXFP4, so it is not itself a candidate).
 The obvious idea, "split the stack into the per-expert 2-D layout the loader
 already reads", is worth stating precisely because it is *half* right. The
 target layout is real and proven: the local `Gemma-4-26B-A4B-it-NVFP4` is
-46 110 per-expert tensors. But `roadmap.md` line 52 already recorded why this is
+46 110 per-expert tensors. But `ROADMAP.md` line 52 already recorded why this is
 not a quantizer-only change: gpt-oss-style stacks carry **per-expert biases**
 (`experts.down_proj_bias`, `experts.gate_up_proj_bias`, both confirmed in the
 header scan) which the loader and the MoE forward do not support, and the fused

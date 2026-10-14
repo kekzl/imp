@@ -12,7 +12,7 @@ CUDA version and quant**, and **the exact command**; re-run the command on the s
 reproduce. The commit SHA is authoritative, tagged releases snapshot a SHA; every sweep this file
 superseded (older competitive re-sweeps, the imp-vs-vLLM concurrency progression, the
 batched-decode optimization history) moved verbatim to
-[`archive/benchmarks_pre_v0.44.md`](archive/benchmarks_pre_v0.44.md).
+[`archive/BENCHMARKS_PRE_V0.44.md`](archive/BENCHMARKS_PRE_V0.44.md).
 
 **Hardware (constant across all runs):** single RTX 5090 (GB202, 32 GB GDDR7, water-cooled,
 never thermally throttled), Ryzen host, WSL2, Docker; **method:** greedy (temp = 0), CUDA Graphs
@@ -30,7 +30,7 @@ methodology: [`PERF.md`](PERF.md). Refresh via `scripts/gen_perf_baseline.sh`.
 ## Decode vs llama.cpp (dense GGUF)
 
 Same card, same GGUF, same flags, decode tok/s; imp defaults (n-gram speculation on; dense Q8_0 / Q6_K
-decode through an NVFP4 copy, level with llama.cpp at source precision: [cost](quantization.md#choosing-a-quant))
+decode through an NVFP4 copy, level with llama.cpp at source precision: [cost](QUANTIZATION.md#choosing-a-quant))
 against llama.cpp defaults, full offload, flash attention on.
 
 | Model (shared quant) | imp default | imp spec-off | llama.cpp | imp lead |
@@ -53,7 +53,7 @@ into: a decode A/B that leaves speculation on can measure whether a checkpoint h
 not only the verify path. Reproduce with `make bench-competitive` (competitor image pinned by
 digest in [`scripts/bench_competitive.sh`](../scripts/bench_competitive.sh), not by tag); two
 earlier sweeps (2026-07-12, 2026-08-21) with the full acceptance-mechanism analysis and a
-bimodal-drafter case study: [archive](archive/benchmarks_pre_v0.44.md).
+bimodal-drafter case study: [archive](archive/BENCHMARKS_PRE_V0.44.md).
 
 ## Feature validations (decode)
 
@@ -87,7 +87,7 @@ container, 3 alternating runs per engine, median (range); llama.cpp `b10524` (di
 
 **Gemma-4 pp depends on context**: the command decodes 8192 tokens (context 9792), the KV guarantee
 caps the IMMA Q8_0 prefill planes 1765 -> 0 MiB (#2652); `--max-tokens 128` keeps them: 15050.
-**2026-06-07 column reads high** (prefix-cache hits, #758 -> #1061): [archive](archive/benchmarks_pre_v0.44.md).
+**2026-06-07 column reads high** (prefix-cache hits, #758 -> #1061): [archive](archive/BENCHMARKS_PRE_V0.44.md).
 
 ## NVFP4 SafeTensors decode (tg256)
 
@@ -111,7 +111,7 @@ scales) and register for the CUTLASS grouped-GEMM prefill (pp512 ~16-19k tok/s);
 on cuBLAS. On `sm_120`, native NVFP4 decode is effectively uncontested: vLLM falls back to
 Marlin (its NVFP4 path gates on an opcode family consumer Blackwell lacks, see
 [`internals/ARCHITECTURE.md`](internals/ARCHITECTURE.md)); llama.cpp has no native NVFP4 path;
-per-row superseding evidence: [archive](archive/benchmarks_pre_v0.44.md).
+per-row superseding evidence: [archive](archive/BENCHMARKS_PRE_V0.44.md).
 
 ## NVFP4 prefill (FP16-QK FA2 primary hd=128 prefill, #687)
 
@@ -181,7 +181,7 @@ prompts favour vLLM; single-stream imp leads 17-22% on both checkpoints (native 
 vLLM's Marlin dequant-to-BF16 fallback, no native FP4 path on `sm_120`). The 32-stream GDN-hybrid
 aggregate moved 81.5 -> 1807.9 tok/s across this branch's levers; runs 8-9 and the profiling
 breakdown that attributed the gap (GEMM class, GPU idle, launch density):
-[archive](archive/benchmarks_pre_v0.44.md).
+[archive](archive/BENCHMARKS_PRE_V0.44.md).
 
 ## Long context (pp8192 / tg512 @ 16k ctx)
 
@@ -201,7 +201,7 @@ FP8-KV is worth **+39..41%** at 16k on Qwen3-8B; auto-engages on hint-less GGUF 
 (`kv_fp8_no_hint_default_safe` allowlist). **128K single-chunk prefill** (2026-07-24, `d8bc45a8`):
 Qwen3-14B NVFP4 `pp131072 = 3792 tok/s` (34.6s TTFT, `--prefill-chunk-size 0
 --max-seq-len 140000`); auto `max_seq_len` ceiling is 128K since that commit; discovery-day
-(pre-fix) numbers and the #963/#964/#967/#968/#969 root causes: [archive](archive/benchmarks_pre_v0.44.md).
+(pre-fix) numbers and the #963/#964/#967/#968/#969 root causes: [archive](archive/BENCHMARKS_PRE_V0.44.md).
 
 ## Concurrent serving throughput (batched decode)
 
@@ -218,7 +218,7 @@ Aggregate throughput = sum of completion tokens / wall-clock across N concurrent
 time; NVFP4 LM head 18% -> 7% (per-sequence M=1 GEMV loop -> batched-M). Single-stream decode is
 unchanged by design, both fixes touch only the n>1 path; full optimization sequence (pipelined
 batched decode, row-parallel sampling, CUTLASS LM head) and the vLLM reference details:
-[archive](archive/benchmarks_pre_v0.44.md).
+[archive](archive/BENCHMARKS_PRE_V0.44.md).
 
 ### F16 KV decode attention at 32 streams (2026-09-03)
 
@@ -297,4 +297,4 @@ Qwen3-8B-Q8_0 GGUF on both engines, same prompts, `temperature=0`, 5 reps per ca
 **Scope**: three model families, four budgets, 8-turn sessions, 3-5 repetitions, one llama.cpp
 build, GGUF only; a non-thinking-model control (Llama-3.2-3B) found and fixed an imp tool-call
 regression along the way; vLLM/SGLang not covered. Full per-budget tables and the control-run
-detail: [archive](archive/benchmarks_pre_v0.44.md).
+detail: [archive](archive/BENCHMARKS_PRE_V0.44.md).

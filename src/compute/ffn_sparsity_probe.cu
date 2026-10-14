@@ -59,7 +59,7 @@ void ensure_init_locked() {
 
 // The counters are an arena slice: ~Engine flushes the log, closes the arena,
 // then runs the hooks. Without the re-arm `initialized` stayed true and the
-// next engine's probe wrote into the closed arena (AUDIT_arch_2026 B-2).
+// next engine's probe wrote into the closed arena (AUDIT_ARCH_2026 B-2).
 void ffn_sparsity_probe_reset_static_cuda_state() {
     std::lock_guard<std::mutex> lk(g_state.mu);
     g_state.initialized = false;

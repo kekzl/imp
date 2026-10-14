@@ -72,7 +72,7 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
     }
 
     // --max-input-tokens applies here as on every prompt-taking route
-    // (AUDIT_arch_2026 F2-9): the byte bound refuses before the merge walk,
+    // (AUDIT_ARCH_2026 F2-9): the byte bound refuses before the merge walk,
     // the token check after it.
     if (!prompt_within_input_budget(res, content.size(), state.max_input_tokens, "content"))
         return;
@@ -365,7 +365,7 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
         "imp_queue_time_seconds",
         "Seconds from submit to the scheduler's first batch (the wait behind max_batch_size and KV)",
         m.queue_time);
-    // The same series per endpoint (AUDIT_arch_2026 E-7), every endpoint
+    // The same series per endpoint (AUDIT_ARCH_2026 E-7), every endpoint
     // emitted even at zero so a panel can be built before traffic arrives.
     emit_header("imp_endpoint_requests_total", "Completed generation requests per endpoint", "counter");
     for (int e = 0; e < ServerMetrics::kEndpointCount; ++e) {
@@ -465,7 +465,7 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "# HELP imp_queue_depth Current number of active and pending requests\n";
     out += "# TYPE imp_queue_depth gauge\n";
     out += "imp_queue_depth " + std::to_string(queue) + "\n";
-    // The split the depth hides (AUDIT_arch_2026 C-5): a request behind
+    // The split the depth hides (AUDIT_ARCH_2026 C-5): a request behind
     // max_batch_size or KV admission is waiting, one in a batch is running.
     out += "# HELP imp_queue_waiting Requests submitted and not yet in a prefill or decode batch\n";
     out += "# TYPE imp_queue_waiting gauge\n";

@@ -581,7 +581,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
 
 // `runtime.prefill_graph` is default-on. Capture in engine_prefill.cpp needs an append without a
 // per-chunk host absmax sync: F16, and FP8 once its per-layer scales are calibrated. On the other
-// quantized KV dtypes the flag could never fire (AUDIT_arch_2026 C-10): resolved off here, once,
+// quantized KV dtypes the flag could never fire (AUDIT_ARCH_2026 C-10): resolved off here, once,
 // after the KV dtype is final.
 void Engine::init_resolve_prefill_graph_() {
     // FP8 KV captures once its per-layer scales are calibrated (engine_prefill.cpp gates on that).
@@ -926,7 +926,7 @@ void Engine::init_compute_max_seq_len_() {
     if (int v = runtime_config_.runtime.max_seq_len; v > 0) {
         // config.h: a CLI value wins over the file. --max-seq-len / a C-API
         // value is already in config_.max_seq_len; the key fills only an
-        // unset one (AUDIT_arch_2026 G-5).
+        // unset one (AUDIT_ARCH_2026 G-5).
         const int preset = config_.max_seq_len;
         config_.max_seq_len = max_seq_len_operator_value(preset, v);
         if (config_.max_seq_len == v)

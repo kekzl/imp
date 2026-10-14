@@ -68,7 +68,7 @@ int kv_pin_context_cost_factor(ModelArch arch, QType pinned);
 
 // max_seq_len from its two operator surfaces: preset (--max-seq-len/C-API) and file_key
 // (runtime.max_seq_len). Rule: preset>0 wins, else file_key, else 0 (auto) - CLI beats
-// file (AUDIT_arch_2026 G-5, the resolver used to let the file key overwrite the flag).
+// file (AUDIT_ARCH_2026 G-5, the resolver used to let the file key overwrite the flag).
 int max_seq_len_operator_value(int preset, int file_key);
 
 // C API enum value for this architecture.

@@ -450,7 +450,7 @@ TEST(GgufFaultInjection, ZeroAlignmentMetadata) {
     EXPECT_TRUE(load_is_clean(g.buf));
 }
 
-// ---- AUDIT_arch_2026 F1: the header fields that had no ceiling ----
+// ---- AUDIT_ARCH_2026 F1: the header fields that had no ceiling ----
 
 constexpr uint32_t T_ARRAY_TYPE = 9;
 
@@ -465,7 +465,7 @@ TEST(GgufFaultInjection, NDimsAboveFourIsRefused) {
 
 // Wire type 9 = Q8_1 (llama.cpp's activation format): no dequant, kernel, or registry entry
 // exists for it, and the 1:1 map to QType::Q8_1 let such a tensor load and reach dispatch
-// with no path (AUDIT_arch_2026 G-8). An unknown type is SKIPPED (unknown size); Q8_1 has a
+// with no path (AUDIT_ARCH_2026 G-8). An unknown type is SKIPPED (unknown size); Q8_1 has a
 // known size, so it must be REFUSED instead.
 TEST(GgufFaultInjection, Q8_1WeightTypeIsRefusedAtParse) {
     GgufBytes g = build_valid_gguf();

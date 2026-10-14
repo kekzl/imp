@@ -40,7 +40,7 @@ git log -1 --stat origin/main                      # after merge
 - `git push | tail` swallows the gate block (it prints BEFORE the git lines); read the full output.
 - `IMP_HOOK_GPU=1 git push` while your own `verify-fast` runs collides on the GPU; without it the hook touches no GPU.
 - `docs_lint.py` writes `docs/audit/docs-rewrite/STALE.md` only with `--write-stale`; hooks and CI never touch it (#2194).
-- Moving text from `docs/roadmap.md` to `docs/plans/` rewrites relative links (`](MODELS.md)` -> `](../MODELS.md)`); `make preflight` (both hooks) runs `hygiene`, CI `Release hygiene` too. Local: `docker run --rm -v $PWD:/src -w /src -e HOME=/tmp imp:toolchain bash -c 'git config --global --add safe.directory /src; bash scripts/ci_static_gates.sh hygiene docs citations'`.
+- Moving text from `docs/ROADMAP.md` to `docs/plans/` rewrites relative links (`](MODELS.md)` -> `](../MODELS.md)`); `make preflight` (both hooks) runs `hygiene`, CI `Release hygiene` too. Local: `docker run --rm -v $PWD:/src -w /src -e HOME=/tmp imp:toolchain bash -c 'git config --global --add safe.directory /src; bash scripts/ci_static_gates.sh hygiene docs citations'`.
 - PR monitors: `pgrep -f "<string>"` matches the monitor's own shell; stop an old monitor before starting a second on the same PR.
 
 ## The PR body

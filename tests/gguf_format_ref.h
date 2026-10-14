@@ -3,7 +3,7 @@
 // checks every format against. Per format: a byte-level LCG builder (never imp's quantizer)
 // and an fp64 reference dequant from ggml-common.h/ggml-quants.c (never imp).
 // kFormats ties both per QType; a format with no row here is an untested numerics path
-// (how Q3_K's high-bit-plane bug shipped, AUDIT_arch_2026 D-5).
+// (how Q3_K's high-bit-plane bug shipped, AUDIT_ARCH_2026 D-5).
 
 #include <cuda_fp16.h>
 
@@ -239,7 +239,7 @@ inline void ref_dequant_iq3_s(const uint8_t* blk, double* out) {
     }
 }
 
-// AUDIT_arch_2026 D-5: six more GGUF formats with no independent reference before this;
+// AUDIT_ARCH_2026 D-5: six more GGUF formats with no independent reference before this;
 // same independence rule as above (layout from ggml-common.h, arithmetic from ggml-quants.c).
 
 // Q4_1: 20 bytes / 32 elems. [ d:f16 | m:f16 | qs:u8[16] ]. Asymmetric 4-bit:
@@ -681,7 +681,7 @@ inline void build_q8_k(std::vector<uint8_t>& buf, int N, int K, Lcg& g, ScaleMod
 }
 // FormatSpec: block geometry + byte builder + fp64 reference, one row per QType the GGUF
 // loader accepts. A format added to dequant_gpu with no row here is an untested kernel
-// rather than a visible gap (AUDIT_arch_2026 D-5).
+// rather than a visible gap (AUDIT_ARCH_2026 D-5).
 struct FormatSpec {
     QType qt;
     const char* name;

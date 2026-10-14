@@ -152,7 +152,7 @@ Three things this plan listed as open have since closed:
   embeddings again in the second chunk, because both vision kernels scan the
   chunk they are handed rather than the prompt.
 
-**Still open**, tracked as the remainder of gap 2 in [`../roadmap.md`](../roadmap.md):
+**Still open**, tracked as the remainder of gap 2 in [`../ROADMAP.md`](../ROADMAP.md):
 
 - **Videos.** CLOSED 2026-10-01 (#2363, #2370): client-sampled frames, one
   `QwenPatches` per frame pair, `<x.x seconds>` layout and HF `get_rope_index`
@@ -233,6 +233,6 @@ text model, DeepStack taps after the first `n_deepstack` layers. Gate
 `make test-vision` (until 2026-08-11 the pipeline test ran from no target,
 fixed).
 
-Not in this plan's scope and still open in `docs/roadmap.md`: video (Open 9,
+Not in this plan's scope and still open in `docs/ROADMAP.md`: video (Open 9,
 decoder dependency, frame axis, temporal M-RoPE, `<|video_pad|>`) and a second
 tower family (Open 10, `vision_tower_supported()` names one layout).

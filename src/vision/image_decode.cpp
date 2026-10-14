@@ -1,5 +1,5 @@
 // stb's default (1<<24/side, bounded only by w*h*3<=INT_MAX) lets a 700 KB PNG of a
-// 26000x26000 flat image decode to ~2 GiB of host RGB before any resize (AUDIT_arch_2026
+// 26000x26000 flat image decode to ~2 GiB of host RGB before any resize (AUDIT_ARCH_2026
 // F2-4). 16384 is far above every tower's useful input; both decoders refuse a larger picture.
 #define STBI_MAX_DIMENSIONS 16384
 // stb decodes PNG only: JPEG goes to libjpeg-turbo (#2381), GIF/BMP/PSD/TGA/HDR/PIC/PNM are

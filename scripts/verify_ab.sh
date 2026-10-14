@@ -5,7 +5,7 @@
 # -7.3% regression once shipped at +0.33%, #1270).
 # Arm A = origin/main built into imp:ab-<sha> (ab_base_image.sh), arm B = imp:test (this tree).
 # Alternates pairs (A B, B A, ...), one process per arm run, reports delta per pair and mean
-# over pairs (AUDIT_arch_2026 H-3).
+# over pairs (AUDIT_ARCH_2026 H-3).
 # Usage: scripts/verify_ab.sh [IMG_A] [IMG_B]. AB_PAIRS=3, AB_THRESHOLD_PCT=<n>,
 # MODELS_DIR=$HOME/models, IMP_VERIFY_BASELINE, IMP_VERIFY_CHUNK_SIZE=0, AB_MODEL=<file>,
 # AB_EXTRA="--set k=v..." (applied to both arms). Exit 1 when mean paired decode delta is below

@@ -241,7 +241,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     // Clears any stale CUDA error before the forward pass. A class that
     // cannot be cleared (device fault) throws instead of warning: the
     // previous step's tokens are already stale and every launch below would fail the same way
-    // (AUDIT_arch_2026 D-1).
+    // (AUDIT_ARCH_2026 D-1).
     {
         cudaError_t e_ = cuda_clear_or_throw("forward");
         if (e_ != cudaSuccess)
@@ -777,7 +777,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                 debug_tensor_rows("after_final_rmsnorm_row", no_last, stream);
                 debug_tensor_rows("h_last_row", h_last, stream);
             }
-            // Bisect kept as diagnostics.lm_dequant_fp16 (AUDIT_arch_2026 A2-9):
+            // Bisect kept as diagnostics.lm_dequant_fp16 (AUDIT_ARCH_2026 A2-9):
             // bypasses the fused rmsnorm_quantize_q8_1+dp4a GEMV, dequants output_proj
             // to FP16, runs cuBLAS FP16 into FP32 logits. A llama-matching top logit
             // here isolates the dp4a path as wrong; the same wrong logit implicates the hidden state or

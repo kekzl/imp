@@ -83,4 +83,4 @@ mechanism is hardware: sm_120 has no green-context SM partitioning, so the two
 streams displace each other instead of overlapping. Kept, gated and logged, for
 hardware where partitioning is real; degen_suite 50/0 on the ON arm.
 
-Standing row: `docs/roadmap.md` "prefill concurrent with decode".
+Standing row: `docs/ROADMAP.md` "prefill concurrent with decode".

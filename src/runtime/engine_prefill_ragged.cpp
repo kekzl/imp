@@ -327,7 +327,7 @@ void Engine::step_prefill_ragged_(std::vector<std::shared_ptr<Request>>& reqs, i
 
     // Device metadata from the serving metadata pool (engine_kv_cache_init.cpp):
     // fixed regions for max_seq_len rows and max_batch_size tables, so a wave
-    // uploads without allocating (invariant I2, AUDIT_arch_2026 B-4). The wave
+    // uploads without allocating (invariant I2, AUDIT_ARCH_2026 B-4). The wave
     // is bounded by the row budget and batch size, so the allocs below are a
     // fallback for a pool that failed at init, not for an oversized wave.
     // RAII, not a manual cleanup call: forward_logits and the sampling

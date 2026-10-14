@@ -1,6 +1,6 @@
 #pragma once
 
-// Request `model` field allowlist (AUDIT_arch_2026 F2-1=F1-4): a name never reaches the
+// Request `model` field allowlist (AUDIT_ARCH_2026 F2-1=F1-4): a name never reaches the
 // filesystem as a path. Basename - looked up only among --models-dir entries. HfRepoId -
 // "org/repo" (exactly one '/', no leading '/'/'.'/'~', no file extension), resolved only from
 // the HF cache and must resolve inside it. Everything else (paths, "..", multi-segment) is

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Dependency-pin gate, catches: (1) DRIFT between cmake/imp-deps.cmake and Dockerfile ARG
-# defaults; (2) a TAG that does not exist upstream; (3) UPSTREAM MUTATION (AUDIT_arch_2026 H-8):
+# defaults; (2) a TAG that does not exist upstream; (3) UPSTREAM MUTATION (AUDIT_ARCH_2026 H-8):
 # every dep carries TAG+SHA, --online checks TAG still resolves to SHA; (4) UNVERIFIED DOWNLOADS
-# (AUDIT_arch_2026 H-6): image digests, sha256 for files, hash-pinned pip locks.
+# (AUDIT_ARCH_2026 H-6): image digests, sha256 for files, hash-pinned pip locks.
 # Reads the real sources, no copy of the truth. Usage: check_dep_pins.sh [--online|--selftest].
 set -uo pipefail
 
@@ -220,7 +220,7 @@ else
     printf '  %d uses: lines\n' "$n_actions"
 fi
 
-# What the build downloads (AUDIT_arch_2026 H-6) beyond the four FetchContent deps: container
+# What the build downloads (AUDIT_ARCH_2026 H-6) beyond the four FetchContent deps: container
 # base images, single files, Python packages. All checks are textual and offline.
 # Scope: Dockerfiles and .github/workflows/; developer-only throwaway containers are excluded.
 note ""
@@ -245,7 +245,7 @@ logical_lines() {
          END { if (buf != "") print start ":" buf }' "$1"
 }
 
-# 4a. Container images: a tag is a mutable ref (AUDIT_arch_2026 H-8, one layer down). Every
+# 4a. Container images: a tag is a mutable ref (AUDIT_ARCH_2026 H-8, one layer down). Every
 # external image must carry @sha256:, and the same tag must carry the same digest everywhere
 # (Dockerfile and the five ci.yml image: lines are one decision, not two).
 declare -A IMG_DIGEST      # "repo:tag" -> digest, first sighting

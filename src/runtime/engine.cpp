@@ -294,7 +294,7 @@ int Engine::lora_load(const std::string& path) {
         return 0;
     // The adapter's declared widths become kernel extents (K is read from the
     // projection input, N written to its output), so they are held against
-    // the base model here, not discovered on device (AUDIT_arch_2026 F1-6).
+    // the base model here, not discovered on device (AUDIT_ARCH_2026 F1-6).
     if (model_) {
         const auto& cfg = model_->config();
         const int hd = cfg.head_dim > 0 ? cfg.head_dim : cfg.d_model / std::max(cfg.n_heads, 1);
@@ -341,7 +341,7 @@ bool Engine::lora_unload(int id) {
 
 // Seed of the prefix-cache hash chain: the image it carries and the adapter it
 // runs under. Two prompts with the same tokens but a different image or LoRA
-// adapter must never share KV (AUDIT_arch_2026 E-1). 0 for plain text/base model.
+// adapter must never share KV (AUDIT_ARCH_2026 E-1). 0 for plain text/base model.
 // Computed once at admission; five call sites read it and must agree.
 size_t Engine::prefix_salt_(const Request& req) const {
     size_t salt = req.vision_content_hash;

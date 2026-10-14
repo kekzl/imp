@@ -99,7 +99,7 @@ struct Diagnostics {
     bool vram_audit = false;
     // Optional append-only file the VRAM audit table is mirrored into.
     std::string vram_audit_dump;
-    // Finished bisect kept as a diagnostic (AUDIT_arch_2026 A2-9): LM head runs
+    // Finished bisect kept as a diagnostic (AUDIT_ARCH_2026 A2-9): LM head runs
     // dequant->FP16->cuBLAS instead of the fused Q8_1 GEMV, isolating a wrong
     // top logit from a wrong hidden state. Never on in serving.
     bool lm_dequant_fp16 = false;

@@ -111,4 +111,4 @@ After any server-side inference change run the **check-degeneration** battery (s
 
 ## Known structural debt
 
-Server layer flagged in `docs/archive/structural_debt_2026_07_07.md`: issues #888-#897 (admission-control bypass, `/health` lock contention, SSE-loop drift). Check them before filing new findings.
+Server layer flagged in `docs/archive/STRUCTURAL_DEBT_2026_07_07.md`: issues #888-#897 (admission-control bypass, `/health` lock contention, SSE-loop drift). Check them before filing new findings.

@@ -1,4 +1,4 @@
-// AUDIT_arch_2026 D-1: the sticky-error class table and the sync check that
+// AUDIT_ARCH_2026 D-1: the sticky-error class table and the sync check that
 // turn a device fault into a host signal (src/core/cuda_errors.h). CPU lane:
 // cudaGetErrorString needs no device.
 #include <gtest/gtest.h>

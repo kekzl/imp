@@ -646,7 +646,7 @@ class MockHandler(BaseHTTPRequestHandler):
             return
         # The server's per-request caps at their defaults (handlers_chat_params.cpp:
         # kMaxMessages, --max-logit-bias, --max-images-per-request). The nomodel
-        # lane asserts them on both ends (AUDIT_arch_2026 F2-5).
+        # lane asserts them on both ends (AUDIT_ARCH_2026 F2-5).
         if len(messages) > 10000:
             self._send_error(400, "messages array exceeds maximum of 10000 entries")
             return

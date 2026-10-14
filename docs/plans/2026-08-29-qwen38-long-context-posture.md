@@ -288,5 +288,5 @@ prose (2026-08-30) and the entrypoint env surface was answered as drift
 with a trade in it was reversed by #1817, which made 4-bit KV 2.3% faster than
 8-bit instead of 13.5% slower.
 
-Standing rows: `docs/roadmap.md` "NVFP4 paged-decode load width (M=1)" and the
+Standing rows: `docs/ROADMAP.md` "NVFP4 paged-decode load width (M=1)" and the
 2026 bar row on container configuration.

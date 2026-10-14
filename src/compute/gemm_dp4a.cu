@@ -644,7 +644,7 @@ void gemv_q5_1_q8_1_moe_gate_up_fused(const void* gate_weights, const void* up_w
 // next to mxfp4_gemv_set_l1_carveout(), PDL or not. Was gemv_pdl_register()
 // (pdl::enable_kernel + SET_MAXL1); #1833 withdrew the PDL registration because these kernels
 // carry no pdl_wait() and registering them raced (DegenerationTest.GreedyDeterminism,
-// AUDIT_arch_2026 A1-3/A2-1). Registration stays out until the kernels wait; the L1 carveout
+// AUDIT_ARCH_2026 A1-3/A2-1). Registration stays out until the kernels wait; the L1 carveout
 // (a scheduler hint) stays: GEMV kernels are bandwidth-bound with minimal SMEM.
 #define SET_MAXL1(...)                                                                                   \
     IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(__VA_ARGS__, cudaFuncAttributePreferredSharedMemoryCarveout, \

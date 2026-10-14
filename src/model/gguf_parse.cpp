@@ -225,7 +225,7 @@ void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count, std::vector
         info.n_dims = reader.read_u32();
         // GGML_MAX_DIMS is 4 and `dims` has 4 slots. This used to skip the
         // extra words and keep going, and the loader then wrote `n_dims`
-        // entries into a 4-element stack array (AUDIT_arch_2026 F1-1).
+        // entries into a 4-element stack array (AUDIT_ARCH_2026 F1-1).
         if (info.n_dims > 4) {
             reader.fail();
             break;

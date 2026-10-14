@@ -217,7 +217,7 @@ PlanResult plan_memory(const PlanInput& in) {
     }
     if (p.kv.bytes > 0) {
         // FP8 KV halves the pool; the accuracy trade is per-family (see
-        // docs/vram_audit.md 2026-06-12 Lever C), so it is offered, not applied.
+        // docs/VRAM_AUDIT.md 2026-06-12 Lever C), so it is offered, not applied.
         f.levers.push_back(PlanLever{std::string("kv_cache.dtype f16 -> fp8"), p.kv.bytes / 2});
     }
     if (p.optional_caches > 0)

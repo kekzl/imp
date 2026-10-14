@@ -3,7 +3,7 @@
 // 128x128x128 cooperative tile pads a 16-row expert to 128 rows (8x MMA work), roofline
 // 1d5b9230 reads 55% of DRAM bandwidth. Tries smaller N tiles, deeper K, pingpong schedule
 // (builder rejects M=64: SF atom is 128 rows); the 32-row-tile v2 kernel is refuted by
-// routing skew (docs/roadmap.md). GPU required, skips without one; decision data, not a gate.
+// routing skew (docs/ROADMAP.md). GPU required, skips without one; decision data, not a gate.
 
 #include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/gemm_cutlass_sm120.h"
