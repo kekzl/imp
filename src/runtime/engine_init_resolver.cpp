@@ -700,6 +700,7 @@ void Engine::init_resolve_quant_flags_() {
     // NVFP4 decode mode
     config_.nvfp4_decode_all = runtime_config_.gemm.nvfp4_decode_all;
     config_.q8_drop_source = runtime_config_.gemm.q8_drop_source;
+    config_.q4k_in_place = runtime_config_.gemm.q4k_in_place && runtime_config_.gemm.q4k_imma_prefill;
     const LmHeadMode head_mode = lm_head_mode(runtime_config_.gemm.nvfp4_lm_head);
     const bool head_fp8_rows = model_->output_proj_row_scales().data != nullptr;  // #2479
     config_.fp8_lm_head = lm_head_builds_fp8(head_mode, model_->output_proj().qtype, head_fp8_rows);

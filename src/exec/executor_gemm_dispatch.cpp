@@ -97,8 +97,9 @@ static bool uncached_in_place(const Tensor& input, const Tensor& weight, Tensor&
         output.qtype != QType::F16 || input.stride[0] != weight.shape[1] ||
         output.stride[0] != weight.shape[0])
         return false;
-    // Q8_0 at M=1 too: the token GEMV for GGUF GDN projections without the FP8 sidecar.
-    if ((decode_rows || (q8 && M == 1)) && dp4a_decode_rows(input, weight, output, ctx))
+    // M=1 too: the token GEMV for GGUF GDN projections without the FP8 sidecar (Q8_0) and for
+    // Q4_K weights without an FP16 tier (gemm.q4k_in_place).
+    if ((decode_rows || M == 1) && dp4a_decode_rows(input, weight, output, ctx))
         return true;
     return q4k && M >= 2 && ctx.q4k_imma_prefill &&
            mmq_q4k_imma_gemm(weight.data, reinterpret_cast<const __half*>(input.data),
@@ -231,6 +232,32 @@ void gguf_source_fallback(const WeightHandle& h, const Tensor& input, Tensor& ou
 
 // Last route of gemm_via_handle_. A GGUF source with an SfAtom-less CUTLASS_NVFP4 entry (Phase 3 G3)
 // has no CUTLASS form for the M=1 beta != 0 call that lands here: the source serves it.
+// M=1 GEMV on the quantized source (dp4a/MMVQ via the kernel registry). False when the source is
+// 16-bit, absent, or the registry declines.
+static bool source_gemv(const WeightHandle& h, const Tensor& input, Tensor& output, const GemmContext& ctx) {
+    const auto* qs = ctx.qscratch;
+    if (!qs || h.source_qtype == QType::NONE || h.source_qtype == QType::F16 ||
+        h.source_qtype == QType::BF16 || h.source_data == nullptr || output.qtype == QType::F32 ||
+        input.stride[0] != h.shape[1])
+        return false;
+    Tensor src(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
+    GemmKernelArgs args{};
+    args.input = &input;
+    args.output = &output;
+    args.stream = ctx.stream;
+    args.weight_payload = &src;
+    args.q8_1_buf = qs->q8_1_buf;
+    args.d8_buf = qs->d8_buf;
+    args.dequant_scratch = qs->dequant;
+    args.dequant_scratch_size = qs->dequant_size;
+    args.force_mmvq = ctx.force_mmvq;
+    args.no_mmvq = ctx.gemm_no_mmvq;
+    args.no_mmvq_q8_0 = ctx.gemm_no_mmvq_q8_0;
+    args.no_dp4a_gemv = ctx.gemm_no_dp4a_gemv;
+    GemmStrategy strat{StorageTier::FP16, h.source_qtype, true};
+    return GemmKernelRegistry::instance().dispatch(strat, args) == GemmDispatchResult::Ok;
+}
+
 static void gemm_handle_last_route(const WeightHandle& h, const Tensor& input, Tensor& output,
                                    const GemmContext& ctx, bool decode_rows, void* ws, size_t ws_size) {
     if (h.primary_tier == StorageTier::CUTLASS_NVFP4 && h.payload.cutlass_nvfp4.sf == nullptr &&
@@ -437,6 +464,10 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     }
 
     if (h.primary_tier == StorageTier::Undefined) {
+        // Q4_K token GEMV without an FP16 tier (gemm.q4k_in_place): the same kernel the FP16 tier runs.
+        if (h.source_qtype == QType::Q4_K && input.shape[0] == 1 && ctx.beta == 0.0f &&
+            source_gemv(h, input, output, ctx))
+            return;
         Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
         // Preserve semantic identity + NVFP4 scale sidecars so the uncached
         // fallback can (a) diagnose which weight leaked and (b) route packed
@@ -508,32 +539,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 imp::gemv_dispatch(h, input, output, ctx.stream);
                 return;
             case StorageTier::FP16: {
-                if (h.source_qtype != QType::NONE && h.source_qtype != QType::F16 &&
-                    h.source_qtype != QType::BF16 && h.source_data != nullptr &&
-                    output.qtype != QType::F32 &&
-                    input.stride[0] == h.shape[1]) {
-                    const auto* qs = ctx.qscratch;
-                    if (qs) {
-                        Tensor src(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
-                        GemmKernelArgs args{};
-                        args.input = &input;
-                        args.output = &output;
-                        args.stream = ctx.stream;
-                        args.weight_payload = &src;
-                        args.q8_1_buf = qs->q8_1_buf;
-                        args.d8_buf = qs->d8_buf;
-                        args.dequant_scratch = qs->dequant;
-                        args.dequant_scratch_size = qs->dequant_size;
-                        args.force_mmvq = ctx.force_mmvq;
-                        args.no_mmvq = ctx.gemm_no_mmvq;
-                        args.no_mmvq_q8_0 = ctx.gemm_no_mmvq_q8_0;
-                        args.no_dp4a_gemv = ctx.gemm_no_dp4a_gemv;
-                        GemmStrategy strat{StorageTier::FP16, h.source_qtype, true};
-                        if (GemmKernelRegistry::instance().dispatch(strat, args) ==
-                            GemmDispatchResult::Ok)
-                            return;
-                    }
-                }
+                if (source_gemv(h, input, output, ctx))
+                    return;
                 imp::gemv_dispatch(h, input, output, ctx.stream);
                 return;
             }

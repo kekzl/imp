@@ -379,6 +379,52 @@ TEST(StoragePlanner, Q4KSourceDoesNotPickNVFP4UnderPreferHint) {
     EXPECT_EQ(gate_count, 3) << "expected 3 FFN entries (gate, up, down)";
 }
 
+// gemm.q4k_in_place: dense Q4_K projections stay Undefined at 0 bytes (FP16 floor and the WK/WV
+// FP8 floor alike); a Q6_K projection and the Q4_K LM head keep their tiers. Budget too small for
+// one FP16 copy: the plan must not fail on weights it no longer copies.
+TEST(StoragePlanner, Q4KInPlaceHintKeepsDenseProjectionsUncopied) {
+    Model m;
+    m.config_.n_layers = 1;
+
+    TransformerLayer L;
+    L.wk = make_tensor_stub(TensorKind::WK, 2048, 2048, 0x1000, QType::Q4_K);
+    L.wo = make_tensor_stub(TensorKind::WO, 2048, 2048, 0x2000, QType::Q4_K);
+    L.w_gate = make_tensor_stub(TensorKind::W_GATE, 2048, 2048, 0x3000, QType::Q4_K);
+    L.w_down = make_tensor_stub(TensorKind::W_DOWN, 2048, 2048, 0x4000, QType::Q6_K);
+    m.layers_.push_back(std::move(L));
+
+    PlanHints hints;
+    hints.prefer_nvfp4_decode = true;
+    hints.q4k_in_place = true;
+    hints.vram_budget_bytes = size_t{2048} * 2048 * 2 / 2;
+
+    StoragePlan plan = plan_storage(m, m.config_, hints);
+    int in_place = 0;
+    for (const auto& e : plan.entries) {
+        if (e.source_qtype == QType::Q4_K) {
+            EXPECT_EQ(e.tier, StorageTier::Undefined) << "kind " << static_cast<int>(e.kind);
+            EXPECT_EQ(e.bytes, 0);
+            in_place++;
+        } else if (e.kind == TensorKind::W_DOWN) {
+            EXPECT_EQ(e.tier, StorageTier::NVFP4);
+        }
+    }
+    EXPECT_EQ(in_place, 3);
+    EXPECT_FALSE(plan.failed) << plan.failure_reason;
+
+    // Hint off, or a MoE model (attention prefills faster from the copy): Q4_K keeps its tier.
+    hints.vram_budget_bytes = size_t{100} * 1024 * 1024 * 1024;
+    hints.q4k_in_place = false;
+    for (const auto& e : plan_storage(m, m.config_, hints).entries)
+        if (e.source_qtype == QType::Q4_K)
+            EXPECT_NE(e.tier, StorageTier::Undefined) << "hint off, kind " << static_cast<int>(e.kind);
+    hints.q4k_in_place = true;
+    m.profile_.is_dense = false;
+    for (const auto& e : plan_storage(m, m.config_, hints).entries)
+        if (e.source_qtype == QType::Q4_K)
+            EXPECT_NE(e.tier, StorageTier::Undefined) << "MoE, kind " << static_cast<int>(e.kind);
+}
+
 TEST(StoragePlanner, Q6KSourcePreservesNVFP4UnderPreferHint) {
     // Q6_K-source WQ: with prefer_nvfp4_decode=true, NVFP4 IS the right pick
     // (>5.5 bits → compression win). Sanity check that the refinement only

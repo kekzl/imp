@@ -116,6 +116,8 @@ struct EngineConfig {
     bool nvfp4_decode_all = false, fp8_lm_head = false, lm_head_source_only = false;
     // gemm.q8_drop_source: the planner credits the Q8_0 sources Phase 4c frees for their IMMA planes.
     bool q8_drop_source = false;
+    // gemm.q4k_in_place && gemm.q4k_imma_prefill: the planner prices dense Q4_K weights at 0 (no FP16 copy).
+    bool q4k_in_place = false;
 
     // Minimum KV cache tokens. Budget planner guarantees at least this many
     // tokens of KV capacity before allocating weight caches. 0 = auto.
