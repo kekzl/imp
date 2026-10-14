@@ -22,7 +22,7 @@ static constexpr int kKparThreads = kKparWarps * 32;  // 128
 // K-par decode GEMVs use __launch_bounds__(kKparThreads) with NO min-blocks term.
 // (kKparThreads,12) forces ptxas to 40 registers (fills the 1536-thread SM exactly);
 // without it registers rise to 42 (10 CTAs/SM instead of 12), costing decode +0.7..+1.9%
-// across measured models (AUDIT_arch_2026 dispatch #11). (kKparThreads,16) is infeasible on
+// across measured models (AUDIT_ARCH_2026 dispatch #11). (kKparThreads,16) is infeasible on
 // this SM and compiles to the same SASS; do not write it back.
 
 // Multi-row kernel: 8 warps, NR rows per block for small-K models.

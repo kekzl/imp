@@ -339,7 +339,7 @@ TEST(LatencyLadder, NegativeObservationsClampToZero) {
     EXPECT_EQ(h.sum_us.load(), 0);
 }
 
-// AUDIT_arch_2026 E-2: --max-concurrent admitted on a queue-depth read with
+// AUDIT_ARCH_2026 E-2: --max-concurrent admitted on a queue-depth read with
 // nothing between the read and the submit. The gate is one atomic.
 TEST(InflightGate, RefusesTheLimitPlusOneAndAdmitsAgainAfterLeave) {
     InflightGate g;

@@ -2,7 +2,7 @@
 """Cross-engine agentic-quality comparison (imp vs any OpenAI-compatible server).
 
 imp can prove it is faster; it could not prove it is more *reliable* for agent
-work (docs/roadmap.md gap 7). Speed is published per hero model, but nothing
+work (docs/ROADMAP.md gap 7). Speed is published per hero model, but nothing
 measured whether the JSON contract or a tool call survives — against another
 engine, same model, same requests.
 

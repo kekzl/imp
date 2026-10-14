@@ -910,7 +910,7 @@ TEST(SamplingTest, PenaltyHistoryTiming) {
 
 // logit_bias arena slots must be re-taken after reset hooks run: ~Engine closes the arena
 // then runs hooks, so a capacity guard surviving them hands the next engine a pointer into
-// released memory (AUDIT_arch_2026 B-1, via server.model_swap). Mutation: drop
+// released memory (AUDIT_ARCH_2026 B-1, via server.model_swap). Mutation: drop
 // sampling_penalties.cu's hook and the second preallocate short-circuits on stale capacity.
 TEST(SamplingTest, LogitBiasRearmsAfterStaticReset) {
     ASSERT_TRUE(engine_arena().is_open());

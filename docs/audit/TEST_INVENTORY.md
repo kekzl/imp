@@ -3,7 +3,7 @@
 Date: 2026-08-08 · Commit: `ad067d76` (v0.23.0, `main`) · Box: RTX 5090 / WSL2 /
 CUDA 13.3.1 · Build: `build-dev` (incremental, identical codegen to `make build`)
 
-**Record, not current state (AUDIT_arch_2026 I-9, 2026-09-05).** Everything below
+**Record, not current state (AUDIT_ARCH_2026 I-9, 2026-09-05).** Everything below
 describes `ad067d76`. Superseded since: gtest macros 2 125 -> 2 710 on 2026-09-05
 (`python3 tools/check_test_lanes.py --report` prints the live per-lane count);
 the Stage-1 GPU pre-commit hook IS installed (md5-identical, 2026-09-02); CI

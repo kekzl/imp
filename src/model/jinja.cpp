@@ -1689,7 +1689,7 @@ private:
 // Evaluation is bounded like parsing (kMaxParseDepth), except macro self-recursion
 // (eval_call->call_macro->render_node->eval->eval_call, no node-depth stop) and
 // range(10000000000) materializing one Value per element. Both come from the checkpoint's
-// chat_template (AUDIT_arch_2026 F1-9); evaluator throws, render() returns "" + error().
+// chat_template (AUDIT_ARCH_2026 F1-9); evaluator throws, render() returns "" + error().
 struct EvalBudgetExceeded : std::runtime_error {
     using std::runtime_error::runtime_error;
 };

@@ -58,15 +58,15 @@ EXCLUDED_PREFIXES = (
 EXCLUDED_FILES = {
     "CHANGELOG.md",          # append-only
     "docs/MISSION_JOURNAL.md",  # append-only
-    "docs/vram_audit.md",    # append-only, says so in its own title
+    "docs/VRAM_AUDIT.md",    # append-only, says so in its own title
     "AUDIT.md",              # running findings log
     # Verbatim licence text (Apache-2.0 body + upstream notices): not
     # documentation, must not be reworded for a lint rule.
     "THIRD_PARTY_LICENSES.md",
-    # roadmap.md is a dated research record (a gap list, not a schedule): its numbers narrate how
+    # ROADMAP.md is a dated research record (a gap list, not a schedule): its numbers narrate how
     # each gap was measured or refuted, so PROV-block stripping would destroy the record.
     # Reader-facing distillation (LIMITATIONS.md/DESIGN_DECISIONS.md/PERF.md) IS linted.
-    "docs/roadmap.md",
+    "docs/ROADMAP.md",
 }
 EXCLUDED_SUBSTRINGS = (".pytest_cache/", "node_modules/")
 
@@ -227,7 +227,7 @@ def approx_tokens(text: str) -> int:
 
 
 # Layer is a property of the PATH (docs-layers table), not the header: a docs/ file declaring
-# L2 would demote its own provenance errors to warnings (AUDIT_arch_2026 J-7).
+# L2 would demote its own provenance errors to warnings (AUDIT_ARCH_2026 J-7).
 # Paths outside the four homes keep whatever layer they declare.
 def _layer_for_path(rel: str):
     if rel == "README.md":

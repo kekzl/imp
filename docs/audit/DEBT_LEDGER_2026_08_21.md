@@ -6,7 +6,7 @@ failure mode it produces, and the command that would prove it closed.
 
 Read with [`SETTLED.md`](SETTLED.md), [`../LIMITATIONS.md`](../LIMITATIONS.md),
 [`../DESIGN_DECISIONS.md`](../DESIGN_DECISIONS.md), [`../../AUDIT.md`](../../AUDIT.md) and
-[`../roadmap.md`](../roadmap.md). Section 3 lists what those already killed, so the next
+[`../ROADMAP.md`](../ROADMAP.md). Section 3 lists what those already killed, so the next
 pass does not re-chase it.
 
 Convention: **OPEN** = verified against the code today. **CLOSED** = the doc said open, the
@@ -585,9 +585,9 @@ and the naming asymmetry is what would make the next sweep report it.
 | `runtime.cuda_graphs=never` inert on dense models | `AUDIT.md` G1 - FIXED 2026-08-20 (#1502) |
 | `--vram-budget` overrun; the peak-VRAM gate that was declared and never implemented | `AUDIT.md` B37/B38/B39 - measured and shipped |
 | "Device sync per layer in `attention_cublas.cu`"; F-17; F-4's count | `SETTLED.md` §E - the findings were themselves wrong |
-| MTP: six drafter-accuracy hypotheses, MoE draft head, unfused verify chunk, the repair forward, the async conditional-graph loop | `roadmap.md` "Buried, so they are not re-run" (`:407-461`) |
-| Launch-count framing; the 22.3 % CUTLASS share | `roadmap.md` "Withdrawn by their author" (`:462`) |
-| Draft-model speculation, FFN contextual sparsity, BitDecoding, NVFP4 GEMV tuning, FMHA rewrites, cuTile, CompileIQ ptxas tuning | `roadmap.md` "Investigated and shelved" (`:923`) |
+| MTP: six drafter-accuracy hypotheses, MoE draft head, unfused verify chunk, the repair forward, the async conditional-graph loop | `ROADMAP.md` "Buried, so they are not re-run" (`:407-461`) |
+| Launch-count framing; the 22.3 % CUTLASS share | `ROADMAP.md` "Withdrawn by their author" (`:462`) |
+| Draft-model speculation, FFN contextual sparsity, BitDecoding, NVFP4 GEMV tuning, FMHA rewrites, cuTile, CompileIQ ptxas tuning | `ROADMAP.md` "Investigated and shelved" (`:923`) |
 | "No GPU runner in CI is debt" | `DESIGN_DECISIONS.md:72` - a decision with a stated cost, not debt. Item 4 is about the *unstated count*, not the decision |
 | Splitting a file because it is large | `codebase-audit` skill - split on conflation, and only with a concrete recompile cost |
 
@@ -747,7 +747,7 @@ layer. That is the unfused graph, in numbers.
 time are pooled with decode in the profile and were not separated. And the same
 architecture gives 3.79x on NVFP4 against 8.4x on Q6_K for the same model at the same
 chunk width; that factor of 3.4 has no mechanism. A host round trip per verify (argmax +
-D2H + rollback, priced in `roadmap.md`) is a candidate for part of the 38.1 ms and does not
+D2H + rollback, priced in `ROADMAP.md`) is a candidate for part of the 38.1 ms and does not
 appear in a kernel profile at all, but it is untested and does not explain a quant gap.
 
 **Named candidate for the quant gap, with the control that settles it**, so whoever picks

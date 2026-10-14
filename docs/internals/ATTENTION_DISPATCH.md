@@ -12,7 +12,7 @@ Companion doc to [`architecture.md`](ARCHITECTURE.md): which attention kernel ru
 - If this doc and the code disagree, the code wins.
 - Source of truth: `src/exec/executor_attention.cu` for the gate, `src/compute/attention_dispatch.cpp` for the FMHA chain.
 
-> **Measured coverage (2026-06-07, [`docs/archive/roofline_2026_06_07.md`](../archive/roofline_2026_06_07.md)):** on hd=128 models (Qwen3 dense/MoE: Q8_0, Q4_K_M, NVFP4) the legacy materialized cuBLAS+softmax path is **0.0% of prefill time** at pp512-pp4096. FP16-QK FA2 (#525) covers the short range, FA2/FP8-FMHA the long range. Since #930/#932 hd=256 rides the FA2 port too (`attention.fa2_hd256`, default on).
+> **Measured coverage (2026-06-07, [`docs/archive/ROOFLINE_2026_06_07.md`](../archive/ROOFLINE_2026_06_07.md)):** on hd=128 models (Qwen3 dense/MoE: Q8_0, Q4_K_M, NVFP4) the legacy materialized cuBLAS+softmax path is **0.0% of prefill time** at pp512-pp4096. FP16-QK FA2 (#525) covers the short range, FA2/FP8-FMHA the long range. Since #930/#932 hd=256 rides the FA2 port too (`attention.fa2_hd256`, default on).
 >
 > **This does NOT generalise to Gemma-4** (2026-08-02 audit, F-16). Its global layers are hd=512 and take `attention_cublas_prefill`, or `attention_cublas_prefill_sliced` (#1036) when the S-matrix overflows, *by design and by measurement*: both beat the SMEM-capped fused hd=512 kernel ([`docs/audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md`](../audit/gemma4_attn_routing_2026_07_16/PERF_LOG.md)). On an advertised model the "legacy" path is the *default* prefill path for half the layer stack, and the 384 MiB `attn_scores` workspace is retained for it.
 
@@ -58,7 +58,7 @@ The previously-archived variants (`attention_fmha_sm120_cluster.cu`, `attention_
 Per-arch default `prefill_chunk_size = 2048` (512 until 2026-06-11; larger chunks halve/quarter per-chunk weight re-reads, NVFP4-MoE pp4096 +77%) for full-attention models (Qwen3, Llama, Mistral), hybrid GDN+MoE / Mamba2+MoE (Qwen3.5/3.6, Nemotron-H), and Gemma-4.
 
 - Past chunks' K/V are read from the paged cache via `paged_kv_gather_*` and concatenated with the current chunk; the result hits the dispatch gate above with `q_offset`-aware causal masking.
-- See `src/exec/executor_attention.cu` chunked-prefill branch, `Engine::resolve_prefill_chunk_size_()`, and "Chunked prefill scope" in `docs/roadmap.md`.
+- See `src/exec/executor_attention.cu` chunked-prefill branch, `Engine::resolve_prefill_chunk_size_()`, and "Chunked prefill scope" in `docs/ROADMAP.md`.
 
 ## Decode - switch on cache_dtype
 

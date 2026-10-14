@@ -536,7 +536,7 @@
    "id": "M59",
    "category": "scheduling",
    "file": "src/runtime/scheduler.cpp",
-   "desc": "An aged request that cannot get its KV blocks no longer holds the queue: shorter requests that fit keep passing it (AUDIT_arch_2026 C-2).",
+   "desc": "An aged request that cannot get its KV blocks no longer holds the queue: shorter requests that fit keep passing it (AUDIT_ARCH_2026 C-2).",
    "focus": "test-e2e",
    "find": "                    // Otherwise: not enough memory right now. An aged head\n                    // keeps the queue; anyone else lets smaller requests by.\n                    if (aged)\n                        break;\n                    ++it;",
    "replace": "                    // Otherwise: not enough memory right now. An aged head\n                    // keeps the queue; anyone else lets smaller requests by.\n                    // [MUTANT] aged hold removed\n                    ++it;"
@@ -545,7 +545,7 @@
    "id": "M60",
    "category": "loader",
    "file": "src/memory/weight_snapshot.h",
-   "desc": "Warm-cache record index unchecked: a file-supplied data_alloc indexes past the alloc table and the garbage becomes a device pointer (AUDIT_arch_2026 F1-3).",
+   "desc": "Warm-cache record index unchecked: a file-supplied data_alloc indexes past the alloc table and the garbage becomes a device pointer (AUDIT_ARCH_2026 F1-3).",
    "focus": "test-core",
    "find": "    if (rec.data_alloc < 0 || rec.data_alloc >= n_allocs)",
    "replace": "    if (false)  // [MUTANT] data_alloc range check removed"
@@ -554,7 +554,7 @@
    "id": "M61",
    "category": "loader",
    "file": "src/model/sentencepiece_loader.cpp",
-   "desc": "SentencePiece length guard back to the pointer-sum form: a 64-bit length near 2^64 wraps below end_ and passes (AUDIT_arch_2026 F1-8).",
+   "desc": "SentencePiece length guard back to the pointer-sum form: a 64-bit length near 2^64 wraps below end_ and passes (AUDIT_ARCH_2026 F1-8).",
    "focus": "test-core",
    "find": "        if (len > static_cast<uint64_t>(end_ - data_)) {",
    "replace": "        if (data_ + len > end_) {  // [MUTANT] wrapping pointer sum"
@@ -563,7 +563,7 @@
    "id": "M62",
    "category": "loader",
    "file": "src/model/jinja.cpp",
-   "desc": "Jinja macro call depth unbounded: a self-calling macro in a chat template recurses until SIGSEGV (AUDIT_arch_2026 F1-9).",
+   "desc": "Jinja macro call depth unbounded: a self-calling macro in a chat template recurses until SIGSEGV (AUDIT_ARCH_2026 F1-9).",
    "focus": "test-core",
    "find": "        CallDepthGuard depth(*this);\n        push_scope();",
    "replace": "        // [MUTANT] call depth guard removed\n        push_scope();"
@@ -572,7 +572,7 @@
    "id": "M63",
    "category": "loader",
    "file": "src/model/json_util.cpp",
-   "desc": "JSON node budget removed: a 128 MiB header of `0,` expands to ~6.6 GiB of tree (AUDIT_arch_2026 F1-10).",
+   "desc": "JSON node budget removed: a 128 MiB header of `0,` expands to ~6.6 GiB of tree (AUDIT_ARCH_2026 F1-10).",
    "focus": "test-core",
    "find": "    if (depth_ > kMaxDepth || ++nodes_ > max_nodes_) {",
    "replace": "    if (depth_ > kMaxDepth) {  // [MUTANT] node budget removed"
@@ -590,7 +590,7 @@
    "id": "M65",
    "category": "loader",
    "file": "src/model/model_limits.h",
-   "desc": "head_dim ceiling removed: a config.json head_dim of 2^31-1 sizes two 8.6 GiB rope tables before any check (AUDIT_arch_2026 F1-10).",
+   "desc": "head_dim ceiling removed: a config.json head_dim of 2^31-1 sizes two 8.6 GiB rope tables before any check (AUDIT_ARCH_2026 F1-10).",
    "focus": "test-core",
    "find": "    if (cfg.head_dim < 0 || cfg.head_dim > kMaxHeadDim)",
    "replace": "    if (false)  // [MUTANT] head_dim ceiling removed"

@@ -7,7 +7,7 @@ include/imp/imp.h is a C ABI: an exception escaping an `ImpError imp_*()` is
 undefined behaviour at the boundary, and std::bad_alloc / std::system_error are
 reachable from the container and CUDA-handle work every entry point does. The
 convention was 20 hand-copied try/catch blocks in src/api/*.cpp; on 2026-09-05
-four entry points had none (AUDIT_arch_2026 G-10). `imp::api_guard()`
+four entry points had none (AUDIT_ARCH_2026 G-10). `imp::api_guard()`
 (src/api/imp_internal.h) is the shared form; an inline `try {` still counts.
 
 WHAT IT CHECKS

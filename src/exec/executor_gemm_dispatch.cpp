@@ -131,7 +131,7 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
             int rows = static_cast<int>(weight.shape[0]);
             int cols = static_cast<int>(weight.shape[1]);
             // The one degradation landing on the per-token path was silent
-            // (AUDIT_arch_2026 A2-8): every decode step here dequantizes and copies
+            // (AUDIT_ARCH_2026 A2-8): every decode step here dequantizes and copies
             // the whole weight before the GEMM. Warned once per process, with the size, so a trace can catch
             // it.
             static bool s_warned_full_dequant = false;

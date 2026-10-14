@@ -8,7 +8,7 @@
 namespace imp {
 
 // Minimal SafeTensors writer, the missing half of safetensors_loader: lets imp PRODUCE
-// checkpoints instead of only consuming Modelopt/llm-compressor exports (docs/roadmap.md
+// checkpoints instead of only consuming Modelopt/llm-compressor exports (docs/ROADMAP.md
 // gap 1). Layout: [8-byte LE header length][header JSON][tensor data]; header maps
 // name->{dtype,shape,data_offsets:[start,end)} relative to the data block start, padded to
 // 8-byte alignment. dtype is a SafeTensors wire name the loader accepts; NVFP4 weights are

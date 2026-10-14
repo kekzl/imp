@@ -665,7 +665,7 @@ void sampling_cleanup_dry() {
 // Same shape as sampling_cleanup_dry(): slots are arena-owned, only the guard is
 // re-armed. Without this a second engine kept the first one's s_bias_buf_cap, so
 // sampling_preallocate_logit_bias short-circuited and wrote into the closed arena's
-// address range (AUDIT_arch_2026 B-1).
+// address range (AUDIT_ARCH_2026 B-1).
 void sampling_cleanup_bias() {
     s_bias_tokens_buf = nullptr;
     s_bias_values_buf = nullptr;

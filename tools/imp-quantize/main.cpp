@@ -16,7 +16,7 @@
 // runtime.deterministic_gemm since a non-deterministic calib file flips probes randomly.
 // A published export isn't automatically better: on Qwen3-14B (same weights/corpus) this tool
 // without --calib read PPL 9.9252 vs a Modelopt export's 10.0301 (one model, not a general
-// claim; docs/quantization.md).
+// claim; docs/QUANTIZATION.md).
 
 #include "common/exit_codes.h"
 #include "act_prescale.h"
@@ -944,7 +944,7 @@ int main(int argc, char** argv) {
         printf(
             "\n\nAWQ-calibrated: %d groups scaled, %d left at round-to-nearest (groups %s).%s"
             "\n      Score this checkpoint with --perplexity against the uncalibrated one"
-            "\n      before using it; see docs/quantization.md.",
+            "\n      before using it; see docs/QUANTIZATION.md.",
             plan.groups_scaled, plan.groups_rtn, plan.groups.c_str(),
             awq::attention_groups_on_wide_gqa(plan.groups, plan.n_rep, plan.hybrid)
                 ? "\n      NOTE: attention groups A/C on wide GQA (n_rep >= 5) measured HARMFUL:"

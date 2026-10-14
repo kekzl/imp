@@ -18,13 +18,13 @@
 # Force deterministic GEMM (cuBLASLt no_reduce_split). Slower but reproducible
 # (decode cost measured below this host's noise floor; ~2-4 % on large-M FP16).
 # It does NOT make a prefix-cache hit bit-equal to a fresh prefill — for that
-# use server.prefix_cache = false (#1314, docs/determinism.md).
+# use server.prefix_cache = false (#1314, docs/DETERMINISM.md).
 deterministic_gemm   = false
 # Full reproducibility mode for temp=0 evals: deterministic MoE routing /
 # expert-scatter and top-k sampling kernels, implies deterministic_gemm.
 # Greedy output becomes bit-identical across runs/contexts (DetEvalE2ETest).
 # Guarantees + known limits (ties, top_k>128, typical_p, GDN cross-context):
-# docs/determinism.md.
+# docs/DETERMINISM.md.
 # Legacy env: IMP_DETERMINISTIC=1. Costs a little throughput; off by default.
 deterministic        = false
 # CUDA Graph capture: "auto" picks per-model based on architecture support;
@@ -154,7 +154,7 @@ kv_swap              = true
 # handles + L2 AND pre-arms the decode graph pool so the FIRST real request
 # takes the same graph-kernel path as every later one — without it greedy
 # output can flip between the first and later requests on near-tie logits
-# (docs/determinism.md). ON by default; set false in dev/CI where init time
+# (docs/DETERMINISM.md). ON by default; set false in dev/CI where init time
 # matters more than reproducibility.
 warmup               = true
 # Override the model's max_seq_len (0 = auto-detect). Auto-detection caps at
@@ -840,7 +840,7 @@ fp8_native_prefill   = true
 # There is no [gemma4] section. The one per-model Gemma-4 override left
 # (ModelConfig::Overrides::Gemma4::force_mmvq, src/model/model_config.h) is set
 # by the engine init resolver; the six writer-less bisect flags that used to sit
-# next to it were deleted (AUDIT_arch_2026 G-7).
+# next to it were deleted (AUDIT_ARCH_2026 G-7).
 # Native small-M (2..32 rows) NVFP4 GEMM for batched decode instead of the
 # multi-row GEMV: 32 streams 992.5 -> 1151.7 tok/s on Qwen3.8-27B-NVFP4 (+16 %).
 nvfp4_smallm         = true

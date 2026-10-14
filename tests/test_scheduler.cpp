@@ -1018,7 +1018,7 @@ TEST(SchedulerTest, AgingStillBoundsStarvationWithinAClass) {
     EXPECT_TRUE(long_admitted);
 }
 
-// AUDIT_arch_2026 C-2: aging fixed sort order, not the allocator. A 4-block pool holds one
+// AUDIT_ARCH_2026 C-2: aging fixed sort order, not the allocator. A 4-block pool holds one
 // decoder (1+1 reserved); a 48-token request needs 4 and can't fit while it runs, a 16-token
 // one needs 2 and can - a fresh short request every round starved the long one indefinitely.
 // Once aged, the long request holds the queue: no short request passes it, it goes first

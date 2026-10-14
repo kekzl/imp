@@ -223,7 +223,7 @@ pool, so neither arm was sparse. The startup line
 selection; only `sparse decode attention ACTIVE` proves the selection. The A/B
 script treats a zero count as an abort.
 
-Follow-ups live in `docs/roadmap.md` Open 3, not here: MLA models, prefill
+Follow-ups live in `docs/ROADMAP.md` Open 3, not here: MLA models, prefill
 sparsity, and StreamingLLM eviction as the only answer under KV-pool pressure.
 
 ## Budget floor under the mean+std score (2026-09-12)

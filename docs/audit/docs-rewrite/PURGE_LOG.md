@@ -23,7 +23,7 @@ that lost things.
 | dispatch §6.3 | "`/v1/messages` streaming is synthetic (TTFT == total latency)" | **not written into the docs.** Refuted: one shared per-token driver since v0.18.1; `handlers_messages.cpp:146` emits real `content_block_delta` |
 | dispatch §6.3 | "no per-request spec-decode toggle" | **not written in.** `handlers_chat_params.cpp:246`, shipped v0.12.3 |
 | dispatch §6.3 | "no `cache_control`" | **not written in.** Four call sites, per-breakpoint pin boundary shipped v0.19.2 (#1046) |
-| dispatch §2.7 | decode 290-295 tok/s on Qwen3-Coder-30B-A3B, "~1.4x behind vLLM", README headline ~200 tok/s | **not written in.** Dated "May 2026"; the in-tree 2026-07-12 sweep reads that model at 389 tok/s and `roadmap.md` records imp ahead of vLLM on MoE single-sequence prefill. Copying these would have published a regression that did not happen |
+| dispatch §2.7 | decode 290-295 tok/s on Qwen3-Coder-30B-A3B, "~1.4x behind vLLM", README headline ~200 tok/s | **not written in.** Dated "May 2026"; the in-tree 2026-07-12 sweep reads that model at 389 tok/s and `ROADMAP.md` records imp ahead of vLLM on MoE single-sequence prefill. Copying these would have published a regression that did not happen |
 | dispatch §4 | "Phi-4" as a model architecture | corrected rather than copied: `model.cpp:316` maps `"phi3"` onto `ModelArch::LLAMA`. Documented as an alias |
 | dispatch §2.6 | "`1258 tok/s`, `20x behind vLLM` must be removed" | **already done in June 2026.** Zero live hits; only the archived purge record mentions them. The linter keeps them out |
 
@@ -32,7 +32,7 @@ that lost things.
 | kept | reason |
 |---|---|
 | German prompts in `tools/analysis/degen_corpus.jsonl` | they are multilingual degeneration *fixtures*. Translating them deletes the test. Not a §2.4 violation |
-| `docs/roadmap.md`'s 32 unprovenanced figures | it is a dated research record whose numbers *are* the narrative of what was measured or refuted. Excluded from the linter; the reader-facing distillation is `LIMITATIONS.md` / `DESIGN_DECISIONS.md` / `PERF.md`, which are linted |
+| `docs/ROADMAP.md`'s 32 unprovenanced figures | it is a dated research record whose numbers *are* the narrative of what was measured or refuted. Excluded from the linter; the reader-facing distillation is `LIMITATIONS.md` / `DESIGN_DECISIONS.md` / `PERF.md`, which are linted |
 | every file in `docs/archive/` and `docs/audit/` | records, not documentation |
 
 ## 2026-08-14 — the 2.6x prefill variance

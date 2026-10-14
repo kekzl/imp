@@ -52,7 +52,7 @@ inline int compute_step_seed(const Request& req) {
 // sampler drew from, after penalties, logit_bias, bans, the constraint mask,
 // min_p and typical_p (executor_sampling.cu applies them in place). vLLM
 // calls this `processed_logprobs`; a masked token reads as probability 0
-// (AUDIT_arch_2026 E-3, documented in docs/API.md).
+// (AUDIT_ARCH_2026 E-3, documented in docs/API.md).
 inline TokenLogprobInfo build_logprob_info(const float* h_logits, int vocab_size, int32_t sampled_token,
                                            int top_logprobs, Tokenizer* tok) {
     LogprobResult lp_result;

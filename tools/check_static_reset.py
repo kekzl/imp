@@ -12,7 +12,7 @@ hook keeps its guard armed over released memory, and the SECOND engine in the
 process (server.model_swap, default on) uses it. That is a silent device
 use-after-free: no IMP_CUDA_CHECK sees a write into a re-mapped region.
 
-Registration is a convention. Measured 2026-09-05 (AUDIT_arch_2026 B-1..B-3):
+Registration is a convention. Measured 2026-09-05 (AUDIT_ARCH_2026 B-1..B-3):
 15 TUs registered, 6 did not, one of them the logit_bias arena slots that every
 `logit_bias` request after a model swap wrote through.
 

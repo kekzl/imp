@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gate: the deterministic-mode kernel sites match what docs/determinism.md says.
+"""Gate: the deterministic-mode kernel sites match what docs/DETERMINISM.md says.
 
 WHY THIS EXISTS
 ---------------
@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DOC = ROOT / "docs" / "determinism.md"
+DOC = ROOT / "docs" / "DETERMINISM.md"
 READER = "process_diag_deterministic_gemm()"
 
 # Files the doc's known-limit 5 enumerates as reading the determinism flag; keep this list and
@@ -109,11 +109,11 @@ def evaluate(found, expected, doc):
         problems.append(
             "these files no longer read " + READER + ": " + ", ".join(sorted(missing)) +
             "\n  Either restore the site or drop it from EXPECTED here AND from "
-            "known limit 5 in docs/determinism.md.")
+            "known limit 5 in docs/DETERMINISM.md.")
     if extra:
         problems.append(
             "new deterministic-mode site(s): " + ", ".join(sorted(extra)) +
-            "\n  Add them to EXPECTED here and name them in docs/determinism.md, "
+            "\n  Add them to EXPECTED here and name them in docs/DETERMINISM.md, "
             "so the documented coverage keeps matching the code.")
     if moved:
         problems.append(
@@ -126,7 +126,7 @@ def evaluate(found, expected, doc):
     # claim a reader acts on.
     for needed in ("gemm_cutlass_grouped_3x.cu", "process_diag_deterministic_gemm"):
         if needed not in doc:
-            problems.append(f"docs/determinism.md no longer mentions `{needed}`; "
+            problems.append(f"docs/DETERMINISM.md no longer mentions `{needed}`; "
                             "known limit 5 is what tells an operator which weight "
                             "paths the mode covers.")
 
@@ -217,7 +217,7 @@ def main():
         return 1
 
     print(f"determinism sites: {sum(found.values())} read(s) in {len(found)} file(s), "
-          "matching docs/determinism.md")
+          "matching docs/DETERMINISM.md")
     return 0
 
 

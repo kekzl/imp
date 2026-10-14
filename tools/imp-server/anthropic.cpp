@@ -112,7 +112,7 @@ void push_assistant_turn(json& out, const json& anth_msg) {
             std::string th = block.value("thinking", "");
             // The signature is a digest of the text this server emitted with the block
             // (thinking_signature); never read on the way back in, so an edited/fabricated chain of
-            // thought was replayed as the model's own (AUDIT_arch_2026 E-8). A block carrying one must
+            // thought was replayed as the model's own (AUDIT_ARCH_2026 E-8). A block carrying one must
             // match it; a block without one is taken as-is.
             const std::string sig = block.value("signature", "");
             if (!sig.empty() && sig != thinking_signature(th))

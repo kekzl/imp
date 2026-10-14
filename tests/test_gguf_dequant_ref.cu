@@ -1,7 +1,7 @@
 // TEST_AUDIT(retired) Phase 2.6 risk #8: every GGUF dequant kernel + dp4a/MMVQ GEMVs vs the
 // format-derived fp64 reference in gguf_format_ref.h - the class-A anchor (test_mmvq.cu
 // compares imp's MMVQ against imp's dp4a, a class-B tautology). Six formats had no reference
-// until AUDIT_arch_2026 D-5; Q3_K turned out to read the wrong high-bit plane in both kernels.
+// until AUDIT_ARCH_2026 D-5; Q3_K turned out to read the wrong high-bit plane in both kernels.
 // Independence: gguf_format_ref.h owns both halves; edge cases (d=0, all-63/all-0 6-bit
 // scales, max-magnitude scale halfs, NaN d-half) come from its ScaleMode set, hard no-NaN/Inf
 // guard.
@@ -196,7 +196,7 @@ template <typename T>
 class GgufDequant : public ::testing::Test {};
 
 // Every QType dequant_gpu_supported() accepts; six (Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q8_K)
-// shipped with no numerical check at any level until AUDIT_arch_2026 D-5.
+// shipped with no numerical check at any level until AUDIT_ARCH_2026 D-5.
 // DequantSupportedFormatsAllHaveAReference fails if a seventh is ever accepted with none.
 using GgufDequantFormats = ::testing::Types<
     QTypeTag<QType::Q8_0>, QTypeTag<QType::Q4_0>, QTypeTag<QType::Q4_1>, QTypeTag<QType::Q5_0>,
@@ -238,7 +238,7 @@ TEST(GgufDequantCoverage, EverySupportedFormatHasAReference) {
             << "QType " << static_cast<unsigned>(qt)
             << ": dequant_gpu_supported=" << dequant_gpu_supported(qt) << " but reference=" << has_ref
             << ". A dequant path without an independent reference is untested "
-               "numerics (AUDIT_arch_2026 D-5); a reference without a path is dead weight.";
+               "numerics (AUDIT_ARCH_2026 D-5); a reference without a path is dead weight.";
     }
 }
 

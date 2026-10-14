@@ -1,5 +1,5 @@
 #!/bin/sh
-# AUDIT_arch_2026 I-7: every --gtest_filter literal in the Makefile must match >=1 test in
+# AUDIT_ARCH_2026 I-7: every --gtest_filter literal in the Makefile must match >=1 test in
 # the binary named on the same line. gtest treats a matchless pattern as success (0 tests,
 # PASSED); this repo paid for that three times (#1299, #1575, #1586).
 # Reads literals out of the Makefile, lists tests via --gtest_list_tests (no GPU needed).

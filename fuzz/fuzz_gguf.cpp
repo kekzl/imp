@@ -1,4 +1,4 @@
-// GGUF loader against a real file (AUDIT_arch_2026 F1-12): load_gguf() builds the host-side
+// GGUF loader against a real file (AUDIT_ARCH_2026 F1-12): load_gguf() builds the host-side
 // Model over the mmap and stops before upload, so no GPU is needed.
 
 #include "fuzz_targets.h"

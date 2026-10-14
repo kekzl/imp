@@ -86,13 +86,13 @@ public:
         return active_grammar_ ? grammar_constrainer_.get() : nullptr;
     }
 
-    // Constrain output to a regular expression (docs/roadmap.md gap 4). The
+    // Constrain output to a regular expression (docs/ROADMAP.md gap 4). The
     // engine behind it is the same RegexNfa that backs JSON-Schema `pattern`.
     // Returns false on an unsupported/malformed pattern — the caller then
     // declines constrained decoding rather than enforcing a wrong grammar.
     [[nodiscard]] bool prepare_regex(const std::string& pattern, Tokenizer* tokenizer, bool thinking_open = true);
 
-    // Constrain output to a GBNF grammar (docs/roadmap.md gap 8). Same contract
+    // Constrain output to a GBNF grammar (docs/ROADMAP.md gap 8). Same contract
     // as prepare_regex one step up the Chomsky hierarchy: the engine is a
     // pushdown simulator, so recursive and balanced formats are expressible.
     // Returns false on a grammar that does not compile — the caller then

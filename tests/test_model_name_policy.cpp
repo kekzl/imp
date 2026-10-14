@@ -1,4 +1,4 @@
-// Request `model` field is a name, never a path (AUDIT_arch_2026 F2-1); find_model_path()
+// Request `model` field is a name, never a path (AUDIT_ARCH_2026 F2-1); find_model_path()
 // used to fall through to resolve_model_auto() for any name containing '/', so a request
 // naming a readable .gguf loaded it and evicted the resident model.
 // Mutation: drop the leading-'/' rule -> AbsolutePathIsRejected fails; drop trailing-slash

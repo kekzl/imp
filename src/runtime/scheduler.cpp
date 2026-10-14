@@ -67,7 +67,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
         while (it != pending_.end() && static_cast<int>(active_.size()) < max_batch_size_) {
             auto& req = *it;
             // Aging's allocator half: nothing behind an aged head is admitted in a
-            // round it could not get blocks in (AUDIT_arch_2026 C-2), else shorter
+            // round it could not get blocks in (AUDIT_ARCH_2026 C-2), else shorter
             // requests starve it on a pool that's nearly but never quite full. Only
             // the aged head holds the queue; infeasible still cancels, unaged still yields to what fits.
             const bool aged = now - req->enqueued_round >= static_cast<uint64_t>(kAgingRounds);

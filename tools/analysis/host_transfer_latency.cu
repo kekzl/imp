@@ -1,4 +1,4 @@
-// What one MoE-layer host round trip costs on this box (docs/roadmap.md, CPU-resident cold
+// What one MoE-layer host round trip costs on this box (docs/ROADMAP.md, CPU-resident cold
 // experts). Splits the round trip into the two transfers and the launch sitting between them:
 // the cold-expert path has NO GPU kernel there, so launch overhead must not be billed to the
 // transfer.

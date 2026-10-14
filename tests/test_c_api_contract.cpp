@@ -1,4 +1,4 @@
-// C-API contract: hostile ImpConfig values through imp_context_create (AUDIT_arch_2026
+// C-API contract: hostile ImpConfig values through imp_context_create (AUDIT_ARCH_2026
 // G-3/G-4). Public header is the ABI-stable boundary and neither shipping binary drives its
 // config fields through it directly, so this file does. CPU-only: every case refuses before
 // a model or the GPU is touched.

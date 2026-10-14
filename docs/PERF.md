@@ -208,7 +208,7 @@ about 2850 MHz SM, 13801 MHz memory, ~500 W; a depressed host reads 8-15 % low
 (#526), and held VRAM (`nvidia-smi --query-gpu=memory.used` against the
 ~1.3-1.6 GiB WSLg baseline) is ruled out before that explanation; the 2026-05
 prefill and KV-dtype comparison tables live in
-[`archive/performance_2026_05.md`](archive/performance_2026_05.md) as a record.
+[`archive/PERFORMANCE_2026_05.md`](archive/PERFORMANCE_2026_05.md) as a record.
 
 To refresh the baseline after a change that intentionally moves performance:
 `scripts/gen_perf_baseline.sh`, and say so in the PR. A baseline refreshed
@@ -238,7 +238,7 @@ that part of #1403 stands.
        note=warm; a cold run of the same build reads 20.99 rather than 49.60]
 
 #1669: the withdrawn row read four different figures across this file and
-`roadmap.md` for one measurement; the checkpoint is not on this host to
+`ROADMAP.md` for one measurement; the checkpoint is not on this host to
 re-run.
 
 **Warm and cold differ by 2.4x on this path**: a figure from it must say

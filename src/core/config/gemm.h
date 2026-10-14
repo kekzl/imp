@@ -31,7 +31,7 @@ struct GEMM {
     // MoE batch prefill via the grouped IMMA kernel (one launch over all
     // experts, gridDim.z=expert, BM=32). Covers Q8_0/Q4_K expert tensors; Q6_K
     // down_proj stays on dequant->cuBLAS. Default on; false re-enables the
-    // per-expert fallback arms. Re-measure by 2026-12-01 (AUDIT_arch_2026 A1-2).
+    // per-expert fallback arms. Re-measure by 2026-12-01 (AUDIT_ARCH_2026 A1-2).
     bool moe_imma_prefill = true;
     // pre_dequant phases 1 (FP16 cache, fused KV / gate+up) and 2 (FP8 cache) for per-layer
     // dense weights. false: every dense weight runs its source route, as --gpu-layers host

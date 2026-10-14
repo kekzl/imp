@@ -390,7 +390,8 @@ bool Engine::init_weights() {
             // `moe.allow_graphs_under_offload` skips this guard but buys nothing:
             // every MoE path serving host-resident experts reads routing on the
             // host, and moe_host_args_capture_guard throws unconditionally under
-            // capture. Kept as the escape hatch for the day routing + residency resolve device-side (docs/roadmap.md).
+            // capture. Kept as the escape hatch for the day routing + residency resolve device-side
+            // (docs/ROADMAP.md).
             if (runtime_config_.moe.allow_graphs_under_offload) {
                 IMP_LOG_WARN(
                     "moe.allow_graphs_under_offload=true: the graphs-off guard is skipped, but "
