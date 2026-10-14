@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-10-14
+commit: e48ff0d5
 -->
 
 # imp Memory Architecture
@@ -209,6 +209,7 @@ Shared from the T2 arena, sized by the plan, per-process (not per-handle, not pe
 - The grouped-GEMM reserve was guesswork at 512 MiB against a measured 152 320 B (170 SMs x 896 B persistent-scheduler state), now 1 MiB, freeing 488 MiB on every MoE model.
 - The lazy CUTLASS growth path (`cudaFree`+`cudaMalloc` at GEMM time, unsafe under graph capture) is deleted: `gemm_nvfp4_cutlass_sm120_workspace(M, N, K)` pre-sizes, the planner takes the max over the model's shape set.
 - The FP32 LM head caller needs 0 bytes at every shape measured, pinned by the `CutlassWorkspaceContract` test suite.
+- A workspace exists only for a path the default dispatch runs (#2716): no cuBLAS S-matrix when FA2 serves every layer (hd 64 incl. learned sinks, 128, 256); no MoE batch dequant buffer when CUTLASS grouped (NVFP4/MXFP4) or the MoE IMMA kernel (K-quants except Q8_0) serves every expert, a decline dequants into a `vram_alloc` temporary; MMVQ scratch one row, every GGUF strategy is `m_is_one`.
 
 ### A5.4 Vision tower
 
@@ -221,6 +222,12 @@ Resident: loaded during `init_features()`/warmup whenever `--mmproj` is given, o
 ### A5.5 Speculative decoding
 
 Draft/verify staging and `spec_graphs_` are T2, sized by the plan from `speculative.k`/`suffix_k_max`/MTP depth, invalidated together. Per-request spec toggling must not resize anything: buffers are planned for the config's maximum `k` and stay unused when a request does not qualify.
+
+### A5.6 Weight forms: one resident copy
+
+- A second form of a weight stays only while a default path reads it: Q8_0 planes free the source (`gemm.q8_drop_source`), Q4_K and FP8 prefill from their own bytes (`gemm.q4k_in_place`, `gemm.fp8_native_prefill`), GDN prefills on its FP8 decode rows (`gemm.mxfp8_gdn_proj_prefill`), GGUF dense keeps no SfAtom.
+- Per-PR numbers (#2711-#2717): root `AUDIT.md`, 2026-10-14.
+- Freed bytes return only through a release-on-free pool; a planner credit lands after the weight-cache reserve or the KV ceiling falls (#2712).
 
 ---
 

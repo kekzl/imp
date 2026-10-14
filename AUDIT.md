@@ -233,3 +233,58 @@ branch (`cf6fb43f`). It floors the mode-2 reserve at the `VRAMAllocator`'s 5 %
 headroom, which the planner previously undercut by 1118 MiB on a 32 GB card. All
 A1 numbers were measured **with** it applied. It reached `main` as the first
 commit of #1106, which is the PR that closed #1103 — there was never a second one.
+
+---
+
+## 2026-10-14: static VRAM audit (24 candidates)
+
+Base `main` def6fcd0. 24 candidates from code reading (file:line, MiB computed from shapes),
+then measured per model with `diagnostics.vram_audit=true`. Closed by #2711-#2717.
+
+### CONFIRMED and fixed
+
+| # | Finding | Fix | Measured |
+|---|---|---|---|
+| 1 | Q8_0 source kept beside its IMMA prefill planes | #2712 `gemm.q8_drop_source` | Qwen3-8B-Q8_0 server 27320 -> 19484 MiB |
+| 2 | GGUF dense CUTLASS SfAtom: GGUF M>1 never reaches CUTLASS | #2711 | Qwen3-14B-Q6_K -787.5 MiB |
+| 3 | LM-head source beside the NVFP4 head every head path reads | #2711 (untied heads; a tied head keeps the shared source) | Qwen3.8-27B Q4_K_M -994.6 MiB |
+| 5 | GDN F16 + FP8 rows + NVFP4 prefill copy on VRAM-resident hybrids | #2717 fp8rows default | Qwen3.6-35B-A3B-NVFP4 27962 -> 25849 MiB |
+| 10, 11, 12, 13 | Ledger misses (GDN NVFP4 prefill copy, snapshot slots, checked_cuda_malloc fallback, build totals not un-noted) read as library reserve, charged twice by the reserve cache | #2713 | Qwen3.5-4B reserve 6866 -> 213 MiB |
+| 16 | MMVQ scratch sized max_tokens rows; every GGUF strategy is `m_is_one` | #2716 | Qwen3-14B 153 MiB -> 38 KiB |
+| 17 | MoE batch dequant buffer unread with MoE IMMA / CUTLASS grouped | #2716 | gpt-oss 506, Qwen3-30B-A3B 384, Gemma-4 484 MiB |
+| 18 | cuBLAS S-matrix allocated for hd64 + sinks that FA2 serves | #2716 | gpt-oss 378 MiB |
+| - | FP16 copy of dense Q4_K weights (gemma-3) | #2715 `gemm.q4k_in_place` | 28445 -> 12626 MiB |
+| - | FP16 copy of FP8 checkpoint weights | #2714 `gemm.fp8_native_prefill` | Qwen3-8B-FP8 22810 -> 9574 MiB |
+
+### REFUTED
+
+- 19 NVFP4 dequant workspace (170 MiB): the graph-safe M>1 decline buffer, by design.
+- 20 split-K scratch: arena demand 16.5-32 MiB measured, not the computed 65-81.
+- 21-23 2 MiB allocation granularity (100-500 MiB computed): RESIDUAL (unattributed) is
+  68-72 MiB per model in total (Qwen3-14B-Q6_K, gpt-oss, Llama-3.2-3B Q8_0, Qwen3-14B-NVFP4).
+- #959 as a live bug: with both gemma-3 rules off the from-scratch NVFP4 decode cache is
+  coherent (49 tensors, degen_suite 33/0). The 3060 MiB FP16 companions never reach the peak
+  (sampler 11118 MiB < 12760 MiB used after load). Dropping the rule only moves the tied LM
+  head to NVFP4 (+546 MiB, tg +2.1 %), so the rule stays.
+
+### OPEN
+
+- 4 NVFP4 LM-head SfAtom built twice (35-76 MiB), not re-checked after #2711.
+- 6 Nemotron MTP per-expert FP16 originals after restack (2434 MiB computed): model not local.
+- 7 gemma-3 Q8_0/Q6_K mode 1 per-weight FP16 beside fused, budget-cut: unmeasured.
+- 8 encoder weights (NOMIC_BERT) as FP16 copies, 115 MiB: unmeasured.
+- 9 dense MXFP4 GGUF linear scales copy (6.25 % of FP4): unmeasured.
+- 14 Phase 4b `cudaFreeAsync` into the default pool without a trim: partly covered by the
+  release-on-free pools of #2712.
+- 15 executor workspaces sized for 4096 tokens while the prefill chunk is 2048 (~220-250 MiB):
+  the chunk is resolved after executor init, and non-chunked archs need 4096. Deferred.
+- 24 stacked reserves (library 3900 + 4 % + 256 + 10 % floor + kv_fraction 0.8).
+
+### GOTCHAS
+
+- `IMP_DETERMINISTIC=1` builds no NVFP4 decode cache (0 tensors): a byte or logprob A/B
+  under it never runs an NVFP4 decode path.
+- Freeing 484 MiB can move another plan: Gemma-4 GGUF's Q8_0 IMMA planes fit once the MoE
+  buffer is gone (main capped them 1765 -> 0 MiB), so its output changes for that reason.
+- A freed weight needs a release-on-free pool, and a planner credit must land after the
+  weight-cache reserve, or the KV ceiling falls (#2712).

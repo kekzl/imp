@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-10-14
+commit: e48ff0d5
 -->
 
 # imp - Architecture
@@ -100,7 +100,7 @@ Entry points, all in `include/imp/imp.h`, dispatched via `src/api/imp_api.cpp`:
 
 | Limitation | Affected | Detail |
 |---|---|---|
-| cuBLAS attention path allocates ~384 MiB S-matrix workspace (`attention.attn_scores_mib`) | legacy cuBLAS fallback configs only (heterogeneous per-layer shapes, learned sinks, opted-out hd=256) | FA2 is primary for hd=128 (#687) and hd=256 (#932); S-matrix is skipped at init on FA2-served configs |
+| cuBLAS attention path allocates ~384 MiB S-matrix workspace (`attention.attn_scores_mib`) | legacy cuBLAS fallback configs only (heterogeneous per-layer shapes such as Gemma-4 hd 256/512, MLA, opted-out hd=256) | FA2 is primary for hd=64 incl. learned sinks, hd=128 (#687) and hd=256 (#932); S-matrix is skipped at init on FA2-served configs (gpt-oss -378 MiB, #2716) |
 | `process_diag` is a process-wide config snapshot (`src/core/process_diag.h`) | multi-`Engine` process with different diagnostics/attention-variant settings per Engine | `RuntimeConfig` itself is per-Engine; the leaf-utility diagnostics cache is seeded once per process |
 
 Also owned by [`docs/LIMITATIONS.md`](../LIMITATIONS.md).

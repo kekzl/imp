@@ -325,10 +325,9 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
         }
     }
 
-    // gemma-3: the NVFP4 decode cache must be built FROM an FP16 companion
-    // copy, not from scratch (from-scratch corrupts decode: first step emits
-    // token 0/<pad>, then IMA). Encoded as an fp16_companion flag on every
-    // NVFP4-tier entry so the plan-driven Phase 1 preserves the same backing copy.
+    // gemma-3 (#959): NVFP4-tier entries get an FP16 companion; Phase 3 skips from-scratch
+    // builds, which keeps the tied LM head on Q6_K (NVFP4 head: +546 MiB, tg +2.1 %). The
+    // from-scratch <pad>/IMA corruption no longer reproduces (degen_suite 33/0, 2026-10-14).
     if (model_->profile().is_gemma3) {
         for (auto& e : plan.entries) {
             if (e.tier == StorageTier::NVFP4)

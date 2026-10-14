@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-10-14
+commit: e48ff0d5
 -->
 
 # Attention dispatch
@@ -108,4 +108,4 @@ Naive FP32 SWA path is archived ([`archive/README.md`](../archive/README.md); so
 
 ## Known wounds
 
-- **~384 MiB cuBLAS S-matrix workspace** (default `attention.attn_scores_mib`, `executor_workspace_buffers.cu`). Caps maximum context length for the legacy cuBLAS fallback (FA2 is the primary path for hd 128 since #687 and hd 256 since #932; the S-matrix is skipped entirely at init on FA2-served configs). Phase 5 Track E (the six-variant tiled streaming softmax) was **closed**, not deferred: code removed in PR #358. Reopens only if a regression specifically attributes to the workspace cap.
+- **~384 MiB cuBLAS S-matrix workspace** (default `attention.attn_scores_mib`, `executor_workspace_buffers.cu`). Caps maximum context length for the legacy cuBLAS fallback (FA2 is the primary path for hd 64 incl. learned sinks, hd 128 since #687 and hd 256 since #932; the S-matrix is skipped entirely at init on FA2-served configs, #2716). Phase 5 Track E (the six-variant tiled streaming softmax) was **closed**, not deferred: code removed in PR #358. Reopens only if a regression specifically attributes to the workspace cap.
