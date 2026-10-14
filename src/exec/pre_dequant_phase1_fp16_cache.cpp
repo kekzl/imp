@@ -42,8 +42,8 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
     //   - Phase 3 owns nvfp4_beneficial weights (Q8_0/Q6_K/Q5_K) -> NVFP4 tier, not FP16
     //     (the #428/#434 starvation guard, now structural).
     //   - FP8 unavailable -> FP8-floor kinds fall back to FP16.
-    //   - gemma-3: NVFP4-tier weights get fp16_companion so the Phase-3 decode cache is
-    //     built FROM the FP16 copy, not from scratch (the <pad>/IMA corruption guard).
+    //   - gemma-3: NVFP4-tier weights get fp16_companion; the Phase-3 decode cache builds from
+    //     that copy (#959, see executor_pre_dequant.cpp).
     auto cache_weight = [&](const Tensor& w, QType qtype, TensorKind kind) {
         (void)kind;
         // A weight already FP8 on disk (Modelopt MIXED_PRECISION) is not something dequant_gpu

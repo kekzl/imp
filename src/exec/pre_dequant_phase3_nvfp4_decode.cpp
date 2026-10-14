@@ -122,12 +122,8 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
         bool from_scratch = (wcache_->fp16.find(w.data) == wcache_->fp16.end());
         if (from_scratch && (!dequant_gpu_supported(qtype) || !qscratch_->dequant))
             return;
-        // gemma-3: the NVFP4 decode cache MUST be built from an FP16 companion
-        // (fp16_companion set on every NVFP4-tier entry); a from-scratch build corrupts gemma-3
-        // decode (token 0/<pad>, then illegal access). That guarantee is best-effort: when the
-        // FP16 cache hits its VRAM budget, a weight's companion may be absent and silently drop
-        // to from-scratch, re-triggering the bug. Skip those weights instead: they stay on the
-        // coherent dequant-at-decode path (bandwidth loss, never garbage).
+        // gemma-3 (#959): from-scratch entries are skipped; with companions on every NVFP4-tier
+        // entry this drops only the tied LM head (no companion), which stays Q6_K.
         if (from_scratch && model_->profile().is_gemma3)
             return;
         dctx.entries.push_back({w.data, w, qtype, from_scratch});

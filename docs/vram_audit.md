@@ -296,3 +296,8 @@ the engine's F16 default is deliberate); this run validates only Qwen3-Coder-30B
 It is best understood as a **context-capacity** lever here, since the F16 KV is
 already small (1536 MiB) and min-sized — FP8 lets the requested 8×4096 actually
 fit rather than reclaiming idle VRAM.
+
+## 2026-10-14: static audit, per-candidate results in root AUDIT.md
+
+- Lever B is superseded for FA2-served configs: since #687/#932 FA2 is the primary prefill path, and #2716 skips the S-matrix for hd 64 + learned sinks too (gpt-oss -378 MiB, pp512 34282 -> 34633, pp2048 57005 -> 56214 tok/s). Gemma-4 hd 512 and MLA still read it.
+- Weight forms and workspaces closed by #2711-#2717: table in `docs/internals/MEMORY.md` A5.6, refuted and open rows in `AUDIT.md`.
