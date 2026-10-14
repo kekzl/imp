@@ -1402,6 +1402,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_prefill_cache_knob.cpp
         tests/test_gguf_dead_weight_forms.cpp
         tests/test_q8_drop_source_e2e.cpp
+        tests/test_vram_ledger_e2e.cpp
         tests/test_spec_capture_fidelity.cpp
         # MTP must not change greedy output. The fidelity test above gates the
         # captured graph, not the speculation; this gates the accept path.
