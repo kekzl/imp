@@ -99,7 +99,8 @@ check "keeper past TTL: lock reads free" '[ "$(bash "$LOCK_SH" status 2>/dev/nul
 as /wt/a acquire "session" >/dev/null
 kpid=$(sed -n 's/^pid=//p' "$T/lock")
 as /wt/a release >/dev/null
-sleep 0.1
+# SIGTERM delivery on a loaded CI runner took > 0.1 s once (main cb591619): poll up to 2 s.
+for _ in $(seq 1 40); do running "$kpid" || break; sleep 0.05; done
 check "release kills the keeper" '! running "$kpid"'
 
 echo "== run =="
