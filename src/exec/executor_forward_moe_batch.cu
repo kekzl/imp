@@ -15,6 +15,7 @@
 #include "exec/gemm_context.h"
 #include "exec/executor_debug.h"
 #include <atomic>
+#include <stdexcept>
 #include "compute/embedding.h"
 #include "compute/ggml_mmvq.h"
 #include "compute/layernorm.h"
@@ -552,13 +553,26 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
                 return;
         }
         size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
-        dequant_gpu(static_cast<const uint8_t*>(packed.data), buf, qtype,
-                    ne * static_cast<int>(rows), static_cast<int>(cols), stream);
+        const int32_t* offsets = host_offsets();  // syncs: this path is never captured
+        // imma_serves_all keeps no persistent buffer: an IMMA decline dequants into a temporary.
+        void* tmp = nullptr;
+        if (buf == nullptr) {
+            tmp = vram_alloc(vram_alloc_, static_cast<size_t>(ne) * expert_fp16_sz, "moe_imma_decline");
+            if (tmp == nullptr)
+                throw std::runtime_error("MoE IMMA decline: no VRAM for the FP16 dequant buffer");
+        }
+        char* dst = buf != nullptr ? buf : static_cast<char*>(tmp);
+        dequant_gpu(static_cast<const uint8_t*>(packed.data), dst, qtype, ne * static_cast<int>(rows),
+                    static_cast<int>(cols), stream);
         std::vector<const void*> b_ptrs(ne);
         for (int e = 0; e < ne; ++e)
-            b_ptrs[e] = buf + static_cast<size_t>(e) * expert_fp16_sz;
-        gemm_moe_batched(a_base, c_base, host_offsets(), b_ptrs.data(), K_dim, N_dim,
-                         QType::F16, ne, stream, moe_.d_work_ptrs, out_dtype);
+            b_ptrs[e] = dst + static_cast<size_t>(e) * expert_fp16_sz;
+        gemm_moe_batched(a_base, c_base, offsets, b_ptrs.data(), K_dim, N_dim, QType::F16, ne, stream,
+                         moe_.d_work_ptrs, out_dtype);
+        if (tmp != nullptr) {
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));  // the GEMM reads tmp
+            vram_free(vram_alloc_, tmp);
+        }
     };
 
     auto debug_dump = [&](const char* name, void* data, int rows, int cols) {

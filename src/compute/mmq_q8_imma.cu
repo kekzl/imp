@@ -571,8 +571,8 @@ bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* ou
 bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __half* out_f16,
                        const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N, int K,
                        cudaStream_t stream, int rows_hint, bool reuse_act) {
-    if (N % 2 != 0) return false;
-    if (K % ((qkind == 1 || qkind == 2 || qkind == 4) ? 256 : kBK) != 0)
+    static_assert(kBK == 64, "mmq_imma_moe_shape_ok hardcodes kBK");
+    if (!mmq_imma_moe_shape_ok(qkind, N, K))
         return false;
     if (h_max_rows <= 0 || expanded <= 0 || ne <= 0) return false;
     imma_act_reuse_next(reuse_act);  // one-shot, consumed by this call's quantize

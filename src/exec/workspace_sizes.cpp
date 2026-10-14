@@ -320,8 +320,8 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     if (t <= 0 || max_k <= 0)
         return out;
 
-    // gemm_scratch.cpp: per_call = max_tokens * ceil(K/32) * 36, need = 2x.
-    out.mmvq_scratch = static_cast<size_t>(t) * ((static_cast<size_t>(max_k) + 31) / 32) * 36 * 2;
+    // gemm_scratch.cpp: per_call = ceil(K/32) * 36 for the one row MMVQ serves (m_is_one), need = 2x.
+    out.mmvq_scratch = ((static_cast<size_t>(max_k) + 31) / 32) * 36 * 2;
 
     // executor_workspace_buffers.cu: the largest dequant target at or below the
     // 512 MiB cap. Targets above the cap are served by the uncapturable path,

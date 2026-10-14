@@ -534,14 +534,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                                                       ly.expert_down_packed.shape[1] *
                                                                           ly.expert_down_packed.shape[2])) *
                                          sizeof(half);
-                bool can_fp16_batch_nosync = (moe_.batch_dequant_buf != nullptr &&
-                                              moe_.batch_dequant_buf_size >=
-                                                  static_cast<size_t>(ne) * fp16_per_expert &&
-                                              moe_.d_weight_ptrs && moe_.d_weight_ptrs_count >= ne &&
-                                              ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
-                                              ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
-                                              dequant_gpu_supported(up_qtype) &&
-                                              dequant_gpu_supported(ly.expert_down_packed.qtype));
+                bool can_fp16_batch_nosync = moe_.fp16_batch_buffer_ok(static_cast<size_t>(ne) *
+                                                                       fp16_per_expert) &&
+                                             moe_.d_weight_ptrs && moe_.d_weight_ptrs_count >= ne &&
+                                             ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
+                                             ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
+                                             dequant_gpu_supported(up_qtype) &&
+                                             dequant_gpu_supported(ly.expert_down_packed.qtype);
                 if (can_fp16_batch_nosync && !non_gated_experts)
                     can_fp16_batch_nosync = (ly.expert_gate_packed.data && ly.expert_gate_packed.on_device &&
                                              dequant_gpu_supported(ly.expert_gate_packed.qtype));
