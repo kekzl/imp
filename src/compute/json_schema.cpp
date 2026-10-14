@@ -13,6 +13,8 @@ namespace imp {
 // Minimal JSON parser for schema documents (no external deps): objects, arrays, strings,
 // numbers, booleans, null. No comments, no trailing commas.
 
+namespace {
+
 class SchemaParser {
 public:
     SchemaParser(const char* data, size_t len) : data_(data), len_(len), pos_(0) {}
@@ -827,6 +829,7 @@ private:
         return node;
     }
 };
+}  // namespace
 
 // Calls fn on every child schema of `node` (properties, items, prefixItems, anyOf,
 // additionalProperties, defs) until fn returns false; returns false then.

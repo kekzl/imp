@@ -247,6 +247,8 @@ Value Value::make_object() { return Value(std::make_shared<std::map<std::string,
 
 namespace detail {
 
+namespace {
+
 enum class TokenType {
     TEXT,
     EXPR_OPEN,   // {{
@@ -694,6 +696,7 @@ private:
 
     const std::string& src_;
 };
+}  // namespace
 
 // ============================================================================
 // AST nodes
@@ -702,6 +705,8 @@ private:
 struct Expr {
     virtual ~Expr() = default;
 };
+
+namespace {
 
 struct LiteralExpr : Expr {
     Value value;
@@ -772,11 +777,14 @@ struct ArrayExpr : Expr {
 struct DictExpr : Expr {
     std::vector<std::pair<std::unique_ptr<Expr>, std::unique_ptr<Expr>>> entries;
 };
+}  // namespace
 
 // Statement/template nodes
 struct Node {
     virtual ~Node() = default;
 };
+
+namespace {
 
 struct TextNode : Node {
     std::string text;
@@ -2926,6 +2934,7 @@ private:
     std::vector<Scope> scopes_;
     std::map<std::string, const MacroNode*> macros_;
 };
+}  // namespace
 
 }  // namespace detail
 

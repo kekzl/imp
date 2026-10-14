@@ -159,6 +159,7 @@ static size_t fit_batch_after_pass1(UploadBatchFit& fit, size_t full_reserve) {
     return g_vram_reserve;
 }
 
+namespace {
 // Double-buffered pinned staging for H2D transfers: on WSL2, mmap'd memory cannot be
 // pinned (cudaHostRegister fails/corrupts), so cudaMemcpyAsync from mmap'd memory falls
 // back to synchronous driver-side staging. Pre-allocates two pinned buffers and pipelines
@@ -226,6 +227,7 @@ struct PinnedStager {
         }
     }
 };
+}  // namespace
 
 // Active stager for current upload pass (nullptr = use plain cudaMemcpyAsync)
 static PinnedStager* g_stager = nullptr;
@@ -304,6 +306,7 @@ static bool is_wsl2() {
 using wupload::float_to_fp16;
 using wupload::fp16_to_float;
 
+namespace {
 // upload_weight: uploads one weight tensor from host (mmap) to GPU. Q4_0 splits into
 // packed_nibbles [N,K/2] + scales [N,K/32] on GPU (dtype->INT4). Q8_0/Q6_K raw_quant=true
 // uploads raw bytes (executor dequants on-the-fly before GEMM); raw_quant=false dequants to
@@ -329,6 +332,7 @@ struct CudaUploadDev {
     static bool dequant_supported(QType qtype) { return dequant_gpu_supported(qtype); }
     static const char* err_str(int e) { return cudaGetErrorString(static_cast<cudaError_t>(e)); }
 };
+}  // namespace
 
 // Warm-restore hooks: route the snapshot's device allocs through the same
 // budget-checked allocator and staged H2D copy as a cold upload.
@@ -398,6 +402,7 @@ static bool upload_unquantized_weight(Tensor& weight, QType qtype, QType compute
     return upload_weight(weight, qtype, compute_dtype, stream, gpu_allocs, raw_quant, 0.0f, wname, wlayer);
 }
 
+namespace {
 // Bundles the repeated parameters needed by all upload helpers, passed by reference to
 // avoid more than 8 params on every helper call.
 struct UploadCtx {
@@ -424,6 +429,7 @@ struct UploadCtx {
     // expert split) to mark the model suspend-unsupported.
     Model* model = nullptr;
 };
+}  // namespace
 
 // UPLOAD_OR_FAIL / UPLOAD_UNQUANT_OR_FAIL: reduces the per-weight boilerplate of
 // upload_weight() + error log + early return.

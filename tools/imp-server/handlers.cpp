@@ -180,6 +180,7 @@ void handle_ready(const httplib::Request& /*req*/, httplib::Response& res, Serve
     res.set_content(dump_safe(body), "application/json");
 }
 
+namespace {
 // Recursively find all model files in a directory, returning (display_name, full_path) pairs.
 // Finds both .gguf files and SafeTensors directories (containing model.safetensors[.index.json]).
 // Resolves symlinks and rejects any path that escapes the base directory (path traversal).
@@ -236,6 +237,7 @@ std::vector<std::pair<std::string, std::string>> scan_model_files(const std::str
     std::sort(results.begin(), results.end());
     return results;
 }
+}  // namespace
 
 void handle_models(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
     json data = json::array();
