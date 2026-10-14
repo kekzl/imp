@@ -144,8 +144,8 @@ private:
     void pre_dequant_phase3c_standalone_mxfp4_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase4_tensor_registry_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase4b_drop_redundant_sources_(const ModelConfig& cfg, cudaStream_t stream);
-    // Phase 4b: the FP8 head's 16-bit source, freed through the phase's one free site.
-    void release_fp8_lm_head_source_(cudaStream_t stream, const std::function<void(Tensor&)>& free_source);
+    // Phase 4b: the source of an FP8 or NVFP4 served LM head, freed through the phase's one free site.
+    void release_lm_head_source_(cudaStream_t stream, const std::function<void(Tensor&)>& free_source);
 };
 
 }  // namespace imp
