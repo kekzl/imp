@@ -54,16 +54,13 @@ int current_sm_count() {
 //   A[BM][kBK] s8, M-tail zero-filled; B[kBN][kBK] s8, weight rows always full (N % kBN == 0)
 //   Asc[BM][2] half / Ars[BM][2] float: activation scale/rowsum, d-plane cols (kb0, kb0+1)
 //   Bsc[2][kBN][2] half: weight (α, β) per kb col, kb-major
-template <int BM, bool WB>
+template <int BM, bool WB, int BN = kBN>
 __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A,
-                                           const __half* __restrict__ Asc,
-                                           const float* __restrict__ Ars,
-                                           const int8_t* __restrict__ B,
-                                           const __half* __restrict__ Bsc, int8_t (*sA)[kRow],
-                                           int8_t (*sB)[kRow], __half (*sAsc)[2],
-                                           float (*sArs)[2], __half (*sBsc)[kBN][2], int base_m,
-                                           int M, int K, int subs, int k_base,
-                                           int base_n_rows) {
+                                           const __half* __restrict__ Asc, const float* __restrict__ Ars,
+                                           const int8_t* __restrict__ B, const __half* __restrict__ Bsc,
+                                           int8_t (*sA)[kRow], int8_t (*sB)[kRow], __half (*sAsc)[2],
+                                           float (*sArs)[2], __half (*sBsc)[BN][2], int base_m, int M, int K,
+                                           int subs, int k_base, int base_n_rows) {
 #pragma unroll
     for (int i = tid; i < BM * 4; i += kThreads) {
         const int row = i >> 2;
@@ -73,7 +70,7 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
                        A + static_cast<size_t>(base_m + row) * K + k_base + col, valid);
     }
 #pragma unroll
-    for (int i = tid; i < kBN * 4; i += kThreads) {
+    for (int i = tid; i < BN * 4; i += kThreads) {
         const int row = i >> 2;
         const int col = (i & 3) * 16;
         cp_async_cg_16(&sB[row][col], B + static_cast<size_t>(row) * K + k_base + col,
@@ -88,7 +85,7 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
             cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
     }
 #pragma unroll
-    for (int i = tid; i < kBN * 2; i += kThreads) {
+    for (int i = tid; i < BN * 2; i += kThreads) {
         // kb-major [kb][n][2]: one fragment's two columns read as one 8-B word
         const int n = i >> 1, kb = i & 1;
         cp_async_ca_4(&sBsc[kb][n][0], Bsc + (static_cast<size_t>(n) * subs + kb0 + kb) * 2,
@@ -103,18 +100,17 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
 // Each split writes ks_per_split K-steps to split_out[z][M][N]; mmq_splitk_finalize_kernel reduces in fixed
 // order (bit-reproducible) and applies beta/residual.
 template <int BM, bool BETA1, bool WB /* weight beta term (Q4_K); false = pure alpha (Q8_0) */,
-          bool SPLITK = false>
-__global__ void __launch_bounds__(kThreads)
-    mmq_imma_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
-                    const float* __restrict__ x_rowsum, const int8_t* __restrict__ W_s8,
-                    const __half* __restrict__ w_sc, __half* __restrict__ out, int M, int N,
-                    int K, const int32_t* __restrict__ expert_offsets, size_t w_stride,
-                    size_t wsc_stride, float* __restrict__ split_out = nullptr,
-                    int ks_per_split = 0) {
+          bool SPLITK = false, int BN = kBN /* N tile; 32 for small-M prompt rows, same k order */>
+__global__ void __launch_bounds__(kThreads) mmq_imma_kernel(
+    const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale, const float* __restrict__ x_rowsum,
+    const int8_t* __restrict__ W_s8, const __half* __restrict__ w_sc, __half* __restrict__ out, int M, int N,
+    int K, const int32_t* __restrict__ expert_offsets, size_t w_stride, size_t wsc_stride,
+    float* __restrict__ split_out = nullptr, int ks_per_split = 0) {
     constexpr int kWM = (BM == 128) ? 4 : 2;  // warp grid
     constexpr int kWN = (BM == 128) ? 2 : 4;
+    static_assert(BN % (8 * kWN) == 0, "BN must give every warp whole n8 fragments");
     constexpr int kTileM = BM / kWM;       // 32 / 16
-    constexpr int kTileN = kBN / kWN;      // 64 / 32
+    constexpr int kTileN = BN / kWN;       // 64 / 32 at BN 128
     constexpr int kMF = kTileM / 16;       // 2 / 1
     constexpr int kNF = kTileN / 8;        // 8 / 4
     static_assert(kWM * kWN * 32 == kThreads, "warp grid must fill the CTA");
@@ -129,9 +125,9 @@ __global__ void __launch_bounds__(kThreads)
         rows = o1 - o0;
     }
     const int base_m = blockIdx.y * BM;
-    const int base_n = blockIdx.x * kBN;
+    const int base_n = blockIdx.x * BN;
     if (base_m >= rows || rows == 0) return;
-    const int n_rem = (N - base_n >= kBN) ? -1 : (N - base_n);  // -1 = full tile
+    const int n_rem = (N - base_n >= BN) ? -1 : (N - base_n);  // -1 = full tile
 
     const int subs = K / 32;
     const int8_t* A = X_s8 + row_off * K;
@@ -151,10 +147,10 @@ __global__ void __launch_bounds__(kThreads)
     const int cl = lane & 3;   // 0..3
 
     __shared__ int8_t sA[kStages][BM][kRow];
-    __shared__ int8_t sB[kStages][kBN][kRow];
+    __shared__ int8_t sB[kStages][BN][kRow];
     __shared__ __half sAsc[kStages][BM][2];
     __shared__ float sArs[kStages][BM][2];
-    __shared__ __half sBsc[kStages][2][kBN][2];
+    __shared__ __half sBsc[kStages][2][BN][2];
 
     float acc[kMF][kNF][4];
 #pragma unroll
@@ -172,17 +168,16 @@ __global__ void __launch_bounds__(kThreads)
         if (ks_begin >= ks_end)
             return;
     }
-    load_kstep<BM, WB>(tid, A, Asc, Ars, B, Bsc, sA[0], sB[0], sAsc[0], sArs[0], sBsc[0],
-                       base_m, rows, K, subs, ks_begin * kBK, n_rem);
+    load_kstep<BM, WB, BN>(tid, A, Asc, Ars, B, Bsc, sA[0], sB[0], sAsc[0], sArs[0], sBsc[0], base_m, rows, K,
+                           subs, ks_begin * kBK, n_rem);
     cp_async_commit();
 
     for (int ks = ks_begin; ks < ks_end; ++ks) {
         const int stage = (ks - ks_begin) & 1;
         if (ks + 1 < ks_end) {
             const int nstage = (ks + 1 - ks_begin) & 1;
-            load_kstep<BM, WB>(tid, A, Asc, Ars, B, Bsc, sA[nstage], sB[nstage], sAsc[nstage],
-                               sArs[nstage], sBsc[nstage], base_m, rows, K, subs, (ks + 1) * kBK,
-                               n_rem);
+            load_kstep<BM, WB, BN>(tid, A, Asc, Ars, B, Bsc, sA[nstage], sB[nstage], sAsc[nstage],
+                                   sArs[nstage], sBsc[nstage], base_m, rows, K, subs, (ks + 1) * kBK, n_rem);
             cp_async_commit();
             cp_async_wait_group<1>();
         } else {
@@ -279,7 +274,7 @@ __global__ void __launch_bounds__(kThreads)
             }
         }
     } else {
-        // Epilogue: FP16 store, M-tail predicated (N is a multiple of kBN).
+        // Epilogue: FP16 store, M-tail predicated (N is a multiple of BN).
 #pragma unroll
         for (int mf = 0; mf < kMF; ++mf) {
             const int row_lo = base_m + warp_m * kTileM + mf * 16 + rl;
@@ -419,6 +414,44 @@ void launch_q8_plane_dense(const WeightPlanes& w, __half* out_f16, int M, int N,
     IMP_CUDA_CHECK_LAUNCH();
 }
 
+// BM=32 Q8_0 plane grids; false = none applies (caller runs BM=128). Every output keeps its k order.
+bool launch_q8_small_grid(const WeightPlanes& w, __half* out_f16, int M, int N, int K, dim3 grid,
+                          int grid_m_rows, int ne, bool small_m, const int32_t* d_offsets, float beta,
+                          size_t w_stride, size_t wsc_stride, int n_sms, cudaStream_t stream) {
+    const int m_tiles32 = (grid_m_rows + 31) / 32;
+    // Small-M prompt rows (no split-K, #2152): N/128 CTAs under one wave read the weight at a fraction of
+    // DRAM bandwidth (Qwen3-8B Q8_0 pp2..64: ~15 ms vs 4.9 ms decode). BN=32 = 4x the CTAs.
+    // Under one wave and M <= 64 only: the k128 BN=128 kernel wins at M=128 (16.7 vs 19.0 ms) and on
+    // gate/up at 96..191 tiles (pp40 11.8 vs 14.0 ms).
+    if (d_offsets == nullptr && N % 32 == 0 && M <= 64 && static_cast<int>(grid.x) * m_tiles32 < n_sms) {
+        const dim3 gn(N / 32, m_tiles32, 1);
+        if (beta == 1.0f) {
+            mmq_imma_kernel<32, true, false, false, 32>
+                <<<gn, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs,
+                                              w.sc, out_f16, M, N, K, nullptr, w_stride, wsc_stride);
+            IMP_CUDA_CHECK_LAUNCH();
+        } else {
+            mmq_imma_kernel<32, false, false, false, 32>
+                <<<gn, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs,
+                                              w.sc, out_f16, M, N, K, nullptr, w_stride, wsc_stride);
+            IMP_CUDA_CHECK_LAUNCH();
+        }
+        return true;
+    }
+    // Dense grid whose BM=32 version still fits one wave (k/v projections: 32 -> 128 CTAs at M=512,
+    // N=1024); 64-68 CTA grids lose to the 1.5-wave tail.
+    const bool dense_small_grid = d_offsets == nullptr && beta == 0.0f &&
+                                  static_cast<int>(grid.x * grid.y) * 4 <= n_sms;
+    if (!small_m && !dense_small_grid)
+        return false;
+    const dim3 g32(grid.x, m_tiles32, ne);
+    mmq_imma_kernel<32, false, false><<<g32, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale,
+                                                                    g_imma_act.xrowsum, w.qs, w.sc, out_f16,
+                                                                    M, N, K, d_offsets, w_stride, wsc_stride);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
+
 bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*/, const __half* x_f16,
                  __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
                  const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0,
@@ -507,19 +540,12 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
         }
     }
 
-    // Dense grid whose BM=32 version still fits one wave (k/v projections: 32 -> 128 CTAs at M=512,
-    // N=1024); 64-68 CTA grids lose to the 1.5-wave tail. Each output keeps its k order: bit-identical.
     static const int n_sms = current_sm_count();
-    const bool dense_small_grid =
-        d_offsets == nullptr && beta == 0.0f && static_cast<int>(grid.x * grid.y) * 4 <= n_sms;
     // plane path = Q8_0 only since the raw-read kernels: pure-alpha (WB=false)
-    if (small_m || dense_small_grid) {
-        const dim3 g32(grid.x, (grid_m_rows + 31) / 32, ne);
-        mmq_imma_kernel<32, false, false>
-            <<<g32, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w.qs, w.sc,
-                                           out_f16, M, N, K, d_offsets, w_stride, wsc_stride);
-        IMP_CUDA_CHECK_LAUNCH();
-    } else if (beta == 1.0f) {
+    if (launch_q8_small_grid(w, out_f16, M, N, K, grid, grid_m_rows, ne, small_m, d_offsets, beta, w_stride,
+                             wsc_stride, n_sms, stream))
+        return true;
+    if (beta == 1.0f) {
         if (d_offsets == nullptr && launch_q8_k128_split(w, out_f16, M, N, K, grid, n_sms, true, stream))
             return true;
         mmq_imma_kernel<128, true, false>
