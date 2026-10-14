@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-07
-commit: 52765756
+verified: 2026-10-15
+commit: c0211fea
 -->
 
 # Deployment
@@ -224,6 +224,7 @@ that never finish a body - cap connections per peer at the proxy.
 | is the server busy or slow | `imp_queue_time_seconds` is the admission wait, prefill excluded (#1580). A rising queue time with flat request duration is load; the reverse is the model |
 | how much batching is happening | `rate(imp_decode_batch_rows_total[5m]) / rate(imp_decode_batch_steps_total[5m])`, and `imp_decode_batch_max` since start (#1580) |
 | did the server break, or refuse | `imp_requests_failed_total` is 5xx. Every refusal this server is designed to make is a **4xx**, and those are `imp_requests_rejected_total` (#1579). Two series because they want different alerts |
+| how much power does the card draw | `imp_gpu_power_watts` (gauge) and `imp_gpu_energy_joules_total` (counter) for CUDA device 0, via NVML (`tools/imp-server/metrics_power.cpp`, `dlopen`, absent without `libnvidia-ml.so.1`). Energy is the driver counter, else power integrated every 100 ms. Energy of one request = the counter difference across it, whole card |
 
 `monitoring/grafana/dashboards/imp.json` plots the percentiles from those
 histograms. The `stat` panels beside them show the last value only, which
