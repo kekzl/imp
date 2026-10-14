@@ -19,6 +19,17 @@ const cases = [
   ["prose over rule is not a table", "a | b\n---\nnext", (o) => !o.includes("<table>")],
   ["table then text", "| A |\n|---|\n| 1 |\n\nafter", (o) => o.includes("</table>") && o.includes("after")],
   ["heading", "## Title\nbody", (o) => o.includes("<h4>Title</h4>")],
+  ["inline math", "so $x^2 + \\alpha$ holds", (o) => o.includes('class="math"') && o.includes("<sup>2</sup>") && o.includes("α")],
+  ["dollar amounts stay text", "costs $5 and $10 today", (o) => !o.includes('class="math"') && o.includes("$5 and $10")],
+  ["display math frac", "$$\\frac{a}{b}$$", (o) => o.includes("math display") && o.includes('class="frac"')],
+  ["paren math", "\\(\\sqrt{2} \\le 2\\)", (o) => o.includes("√") && o.includes("≤")],
+  ["math stays escaped", "$<img src=x onerror=alert(1)>$", (o) => !o.includes("<img") && o.includes("&lt;img")],
+  ["math star not italic", "$a*b*c$", (o) => !o.includes("<em>")],
+  ["math inside code stays code", "`$x^2$`", (o) => !o.includes('class="math"')],
+  ["highlight keyword", "```js\nconst x = 1; // one\n```", (o) => o.includes('<span class="tk-k">const</span>') && o.includes('<span class="tk-c">// one</span>') && o.includes('<span class="tk-n">1</span>')],
+  ["highlight escapes", "```html\n<script>alert(1)</script>\n```", (o) => !o.includes("<script>") && o.includes("&lt;")],
+  ["highlight string with lt", "```python\ns = \"a < b\"\n```", (o) => o.includes('<span class="tk-s">"a &lt; b"</span>')],
+  ["plain fence not highlighted", "```\nif x\n```", (o) => !o.includes("tk-")],
 ];
 let fails = 0;
 for (const [name, src, ok] of cases) {

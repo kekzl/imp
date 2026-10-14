@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- Web UI redesign in the logo's colours with an imp mascot: saved conversations, sampling panel, edit/continue, logprobs view, end thinking, structured output, images, `/tokenize` count, `/metrics` tab, GPU joules per answer. `drive.js features` on the dev mock: 16/16 checks pass.
+
 ## [0.53.0] - 2026-10-14
 
 ### Added
