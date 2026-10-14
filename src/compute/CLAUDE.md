@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-23
-commit: 9b4a84e5
+verified: 2026-10-15
+commit: 2a127345
 -->
 
 # src/compute - CUDA kernels
@@ -21,11 +21,11 @@ Attention, GEMM/GEMV, norms, sampling, SSM/GDN scans. `sm_120a` only; the hot pa
 - `attention_dispatch.cpp`: prefill FMHA chain per (dtype x layer)
 - `attention_fmha_sm120.cu`: register-resident FA2, the default prefill path
 - `attention_paged_*.cu`: paged decode kernels, one per KV dtype
-- `gemm.cu`: generic dispatch and the packed-weight guard
+- `gemm.cpp`: generic dispatch and the packed-weight guard
 - `gemm_cutlass_grouped_3x.cu`: MoE prefill, the primary NVFP4 GEMM path
 - `gdn_scan.cu`, `gdn_scan_tc.cu`: Gated DeltaNet recurrent scans
 
-Decode-attention variant selection lives one level up: `src/exec/executor_attention_decode.cu` (`dispatch_record::set_attn_decode`). Prefill gate: `src/exec/executor_attention.cu`.
+Decode-attention variant selection lives one level up: `src/exec/executor_attention_decode.cpp` (`dispatch_record::set_attn_decode`). Prefill gate: `src/exec/executor_attention_prefill.cpp`.
 
 ## Test
 

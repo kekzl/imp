@@ -59,9 +59,9 @@ Pair with `sm120-cuda-expert` (levers) and `docs/internals/BENCHMARKING.md` (mea
 | Decoder ITL under concurrent ingest | `scripts/bench_prefill_latency.py` |
 | Serving KPIs per concurrency, per-token ITL p50/p90/p95/p99/max | `tools/analysis/serving_kpi.py --levels 1,8,32 [--process-workers]` |
 | Cold start: container start, load start, ready, first token (ms, N repeats) | `scripts/bench_cold_start.sh` |
-| Per-config sweep MBU/MFU/TTFT/TBT | `bench/bench.py` |
+| Per-config sweep MBU/MFU/TTFT/TBT | `tools/bench/bench.py` |
 | Single kernel wall-clock | `cudaEvent` in the launcher (below) |
-| Per-kernel metrics, stalls | `ncu` (below); wrapper `bench/profile.sh` |
+| Per-kernel metrics, stalls | `ncu` (below); wrapper `tools/bench/profile.sh` |
 | Timeline, launch gaps, graphs | `nsys` (below) |
 | Full roofline sweep | `make roofline-measure` (`tools/roofline/`, README there); pin `make roofline-pin`, `roofline-regress`; history `tools/roofline/history/` |
 | imp vs llama.cpp | `make bench-competitive` (`scripts/bench_competitive.sh`, writes `/tmp/bench_competitive.tsv`) |

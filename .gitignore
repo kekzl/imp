@@ -85,7 +85,7 @@ dumps/
 # Benchmark / validation outputs (regeneratable)
 tests/api/test_outputs/
 benchmarks/results/
-bench/results/
+tools/bench/results/
 bench_results.txt
 bench_fp8_kv*.sh
 bench_int8_kv*.sh
