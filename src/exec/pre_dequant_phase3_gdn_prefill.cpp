@@ -144,11 +144,12 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
     const auto& gemm_cfg = dispatch_policy().gemm;
     ProjSelection nv = parse_projection_selection(gemm_cfg.nvfp4_gdn_proj_prefill,
                                                   "gemm.nvfp4_gdn_proj_prefill");
-    // "auto" with host-resident experts = "fp8rows": in/gate/out run the MXFP8 GEMM on the FP8
-    // decode sidecar's own rows (no second copy), and Phase 4b frees the F16 sources.
+    // "auto" = "fp8rows": in/gate/out run the MXFP8 GEMM on the FP8 decode sidecar's own rows (no
+    // second copy), and Phase 4b frees the F16 sources. Qwen3.6-35B-A3B: 26496 -> 23804 MiB, PPL
+    // 6.7998 -> 6.7308, pp2048 -4.7 %.
     std::string mx_spec = gemm_cfg.mxfp8_gdn_proj_prefill;
     if (mx_spec == "auto")
-        mx_spec = pre_dequant_internal::has_host_resident_experts(*model_) ? "fp8rows" : "false";
+        mx_spec = "fp8rows";
     const bool fp8rows = mx_spec == "fp8rows";
     ProjSelection mx = parse_projection_selection(fp8rows ? "all" : mx_spec, "gemm.mxfp8_gdn_proj_prefill");
     if (!nv.any() && !mx.any())
@@ -222,15 +223,16 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
     auto place = [&](const Tensor& w, bool want_mx, bool want_nv) {
         if (!eligible_f16_projection(w) || wcache_->cutlass_mxfp8_prefill.count(w.data))
             return;  // native NVFP4 / FP8 projections already have their own prefill route
-        if (fp8rows)
-            return;  // no FP8 rows for this projection: it keeps the F16 route
-        if (want_mx)
+        // fp8rows without FP8 rows for this projection (Qwen3.5-4B GGUF): NVFP4 per its own flag,
+        // no MXFP8 copy (pp2048 -6.9 % on the F16 route).
+        if (want_mx && !fp8rows)
             quantize_mxfp8(w);
         else if (want_nv)
             quantize_nvfp4(w);
     };
 
     if (fp8rows) {
+        wcache_->gdn_fp8rows = true;
         const RowViews v = borrow_gdn_fp8_rows(*model_, cfg.n_layers, *wcache_, vram_alloc_, stream);
         n_mx += v.n;
         mx_bytes += v.bytes;

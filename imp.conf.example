@@ -787,8 +787,10 @@ nvfp4_gdn_proj_prefill = "in"
 # in +6%, all +11.6%. Opt-in: 495 MiB (in) / 990 MiB (all) of copies leave
 # Qwen3.6-35B's KV pool 50 blocks at stock flags (NVFP4 in, 270 MiB: 225).
 # "fp8rows": no copy, in/gate/out run the MXFP8 GEMM on the FP8 decode
-# sidecar's own rows and the F16 sources are freed. "auto" = fp8rows with
-# host-resident experts (Flash-Next 386 -> 422 expert slots/layer).
+# sidecar's own rows and the F16 sources are freed. "auto" = fp8rows
+# (Flash-Next 386 -> 422 expert slots/layer; Qwen3.6-35B-A3B 26496 -> 23804
+# MiB after load, 45k PPL 6.7998 -> 6.7308, pp2048 -4.7 %). With fp8rows only
+# projections without FP8 decode rows get nvfp4_gdn_proj_prefill copies.
 mxfp8_gdn_proj_prefill = "auto"
 # FP8 E4M3 decode sidecar for FULL-PRECISION attention projections, same
 # per-row-scale mechanism as fp8_ssm_proj, decode-only (#984).

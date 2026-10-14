@@ -127,6 +127,7 @@ struct GEMM {
     // M<=32 and M=1 keep FP16 / the FP8 sidecar. Measured: in pp4096 +7.7% (Qwen3.6-35B),
     // +12.3% (Qwen3.8-27B, BF16 in_proj export) for PPL (45k corpus) +0.68% / +0.32..0.56%;
     // gate +0.60%, out +1.98%, all +4.25% PPL on Qwen3.6-35B stay opt-in (roadmap Open 12).
+    // Builds only for projections without FP8 decode rows while the MXFP8 route below is fp8rows (default).
     std::string nvfp4_gdn_proj_prefill = "in";
     // MXFP8 (E4M3, UE8M0 per 32) prefill copies of the same projections on the CUTLASS
     // block-scaled GEMM: 3 mantissa bits per element against NVFP4's 1, twice the copy bytes.
@@ -135,8 +136,8 @@ struct GEMM {
     // Qwen3.6-35B in +6%, all +11.6%. Opt-in: 495 MiB (in) / 990 MiB (all) of copies on
     // Qwen3.6-35B leave its KV pool 50 blocks at stock flags (NVFP4 in, 270 MiB: 225).
     // "fp8rows": no copy, in/gate/out run this GEMM on the FP8 decode sidecar's own rows (SFB = row
-    // power of two, residual per column), Phase 4b frees the F16 sources. "auto" = fp8rows when the
-    // experts are host-resident (Flash-Next: 1556 MiB of copies gone, 386 -> 422 slots/layer).
+    // power of two, residual per column), Phase 4b frees the F16 sources. "auto" = fp8rows
+    // (Flash-Next 386 -> 422 slots/layer; Qwen3.6-35B-A3B 26496 -> 23804 MiB, PPL -1.0 %, pp2048 -4.7 %).
     std::string mxfp8_gdn_proj_prefill = "auto";
     // FP8 decode sidecar for full-precision attention projections (wq/wk/wv/wo),
     // same per-row-scale mechanism as fp8_ssm_proj, decode-only (M=1).

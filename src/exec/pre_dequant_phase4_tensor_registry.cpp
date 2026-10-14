@@ -597,7 +597,8 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
     }
     // GDN bytes no path reads any more:
     // - the F16 input pack: only n == 1 reads it, through its FP8 row-scale sidecar (decode tier FP8);
-    // - with host-resident experts, the F16 ssm_in / gdn_gate / ssm_out: M > 32 takes an NVFP4 / MXFP8
+    // - with host-resident experts or GDN fp8rows, the F16 ssm_in / gdn_gate / ssm_out: M > 32 takes an NVFP4
+    // / MXFP8
     //   prefill copy where one exists, everything else rebuilds from the FP8 rows (released_source_gemm_).
     const bool host_experts = pre_dequant_internal::has_host_resident_experts(*model_);
     auto bytes_of = [](const Tensor& t) { return qtype_row_bytes(t.qtype, t.shape[1]) * static_cast<size_t>(t.shape[0]); };
@@ -630,7 +631,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         const bool copies = pack_sidecar && L.gdn_packed_conv_channels == L.ssm_in.shape[0] &&
                             L.gdn_packed_inner == L.gdn_gate.shape[0] &&
                             (out_view || wcache_->cutlass_mxfp8_prefill.count(L.ssm_out.data) != 0);
-        if (!host_experts || !copies || !releasable(L.ssm_in, L.ssm_in_id) ||
+        if (!(host_experts || wcache_->gdn_fp8rows) || !copies || !releasable(L.ssm_in, L.ssm_in_id) ||
             !releasable(L.gdn_gate, L.gdn_gate_id) || !releasable(L.ssm_out, L.ssm_out_id))
             continue;
         const size_t largest = std::max({bytes_of(L.ssm_in), bytes_of(L.gdn_gate), bytes_of(L.ssm_out)});
