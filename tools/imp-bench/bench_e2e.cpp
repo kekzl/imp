@@ -17,8 +17,10 @@ namespace imp {
 // Build a synthetic FP16 model for benchmarking
 // ---------------------------------------------------------------------------
 
+// host_store owns the host bytes behind every returned non-owning Tensor; it must outlive the model.
 static std::unique_ptr<Model> make_bench_model(int d_model, int d_ff, int n_heads, int n_kv_heads,
-                                               int n_layers, int vocab_size, int max_seq_len) {
+                                               int n_layers, int vocab_size, int max_seq_len,
+                                               std::vector<std::vector<uint16_t>>& host_store) {
     auto model = std::make_unique<Model>();
     auto& cfg = model->config_;
     cfg.arch = ModelArch::LLAMA;
@@ -35,9 +37,9 @@ static std::unique_ptr<Model> make_bench_model(int d_model, int d_ff, int n_head
     int head_dim = d_model / n_heads;
 
     // Helper: create an FP16 weight tensor on host filled with small random values.
-    auto make_fp16_weight = [](int rows, int cols, std::mt19937& rng) -> Tensor {
+    auto make_fp16_weight = [&host_store](int rows, int cols, std::mt19937& rng) -> Tensor {
         size_t n = static_cast<size_t>(rows) * cols;
-        auto* buf = new uint16_t[n];
+        uint16_t* buf = host_store.emplace_back(n).data();
         std::uniform_real_distribution<float> dist(-0.01f, 0.01f);
         for (size_t i = 0; i < n; ++i) {
             buf[i] = float_to_half(dist(rng));
@@ -47,8 +49,8 @@ static std::unique_ptr<Model> make_bench_model(int d_model, int d_ff, int n_head
     };
 
     // Helper: create 1D FP16 norm weight on host (all 1.0).
-    auto make_norm_weight = [](int dim) -> Tensor {
-        auto* buf = new uint16_t[dim];
+    auto make_norm_weight = [&host_store](int dim) -> Tensor {
+        uint16_t* buf = host_store.emplace_back(static_cast<size_t>(dim)).data();
         uint16_t one = float_to_half(1.0f);
         for (int i = 0; i < dim; ++i)
             buf[i] = one;
@@ -139,7 +141,9 @@ bool bench_e2e() {
     gemm_init();
 
     // Build and upload model
-    auto model = make_bench_model(d_model, d_ff, n_heads, n_kv_heads, n_layers, vocab_size, max_seq_len);
+    std::vector<std::vector<uint16_t>> host_store;  // declared before model: outlives it
+    auto model = make_bench_model(d_model, d_ff, n_heads, n_kv_heads, n_layers, vocab_size, max_seq_len,
+                                  host_store);
     if (!model->upload_weights_gpu(QType::F16, nullptr)) {
         printf("bench_e2e: failed to upload weights to GPU\n");
         return false;  // measured nothing (#1584)
