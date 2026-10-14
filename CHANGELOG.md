@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.53.0] - 2026-10-14
+
 ### Added
 - `diagnostics.moe_expert_trace` also writes each pick's routing weight; `tools/analysis/expert_prune_sim.py` scores expert-pruned keep sets on it. Flash-Next at 128 of 512 experts keeps 52.9 % of the routing weight on held-out text, so pruning is dropped (#2613).
 - JSON Schema `minimum`/`maximum`/`exclusive*` (exact decimal), `prefixItems`, `additionalProperties` schemas, `min`/`maxProperties`, type arrays, `nullable` and `allOf` over objects or one `$ref` are enforced; keywords answered with 400: 21 -> 13. 8 Pydantic schemas x 2 temperatures on Qwen3-4B Q8_0: 0/16 -> 16/16 answers validate.
