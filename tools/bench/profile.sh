@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Nsight Compute profiling for imp. Usage: ./bench/profile.sh <model_path> [prompt_tokens] [gen_tokens]
-# Output: bench/results/imp_profile.ncu-rep. Requires Nsight Compute (ncu).
+# Nsight Compute profiling for imp. Usage: ./tools/bench/profile.sh <model_path> [prompt_tokens] [gen_tokens]
+# Output: tools/bench/results/imp_profile.ncu-rep. Requires Nsight Compute (ncu).
 
 set -euo pipefail
 
