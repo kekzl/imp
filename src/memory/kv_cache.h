@@ -52,6 +52,8 @@ public:
             VRAMAllocator* alloc, const std::vector<char>& layer_is_swa = {}, int swa_max_blocks = 0,
             int ceiling_blocks = 0);
     ~KVCache();
+    KVCache(const KVCache&) = delete;
+    KVCache& operator=(const KVCache&) = delete;
 
     // Accounting-only cache: block ids, ref counts, geometry, NO VRAM. Everything not
     // touching bytes (id space, free list, refcounts, block-size arithmetic) behaves

@@ -82,10 +82,13 @@ struct StFile {
     uint64_t file_size = 0;
     uint64_t data_offset = 0;  // 8 + header_size
     JValue root;
+    StFile() = default;
     ~StFile() {
         if (fd >= 0)
             ::close(fd);
     }
+    StFile(const StFile&) = delete;
+    StFile& operator=(const StFile&) = delete;
     bool open(const std::string& path) {
         fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
         if (fd < 0) {

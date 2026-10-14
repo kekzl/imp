@@ -652,12 +652,14 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int t
 namespace {
 // Frees an internally allocated d_result on every exit, including a throw (#2307).
 struct OwnedSampleScratch {
-    int32_t* p;
-    bool owned;
+    int32_t* const p;  // const members: copy assignment is implicitly deleted
+    const bool owned;
+    OwnedSampleScratch(int32_t* ptr, bool is_owned) : p(ptr), owned(is_owned) {}
     ~OwnedSampleScratch() {
         if (owned)
             IMP_CUDA_CHECK_LOG(cudaFree(p));
     }
+    OwnedSampleScratch(const OwnedSampleScratch&) = delete;
 };
 }  // namespace
 

@@ -23,6 +23,8 @@ class SSMState {
 public:
     SSMState() = default;
     ~SSMState();
+    SSMState(const SSMState&) = delete;
+    SSMState& operator=(const SSMState&) = delete;
 
     // h_dtype: F32 (default) or F16 for h_state storage. n_reserved: extra slots past
     // max_sequences the scheduler never hands out, scratch for multi-candidate speculative
