@@ -74,7 +74,7 @@ No open row; closed rows are indexed below. A new row takes the next free number
 | 118 | a server-side ban holds for multi-token phrases | `logit_bias` bans single token ids -> regex or phrase list; on a match the KV rolls back to the phrase start (the speculative-verify rollback) and resamples without the phrase's first token | M | `src/runtime/engine_sampling_stop.cpp:156 state.logit_bias`, no issue |
 | 119 | dense models past 32 GB decode at usable speed | `--gpu-layers` streams host layers once per forward, speculation verifies one draft chain (`tree_mask`, `draft_tree`: 0 matches in `src/`) -> a draft tree verified per streamed pass (SpecExec) spreads the PCIe transfer over more accepted tokens | L | `src/model/layer_host_keep.h:2 --gpu-layers Pass 1`, no issue |
 | 120 | Gemma-4 takes audio input | the loader reads `audio_config`, no encoder, input type or tokenizer route exists -> audio encoder plus an `input_audio` content part | L | `src/model/model_config.h:150 imp has no audio path at all`, no issue |
-| 121 | the Web UI shows watts and joules per answer | 0 matches for `nvml` in `src/` -> NVML power in `/metrics`, joules per turn next to tok/s and TTFT | S | no issue |
+| 121 | the Web UI shows watts and joules per answer | `/metrics` carries `imp_gpu_power_watts` and `imp_gpu_energy_joules_total` (NVML driver counter; 60-token Qwen3-4B chat = 18.4 J) -> joules per turn next to tok/s and TTFT in the Web UI | S | `tools/imp-server/metrics_power.cpp` |
 
 ## Not gaps
 
