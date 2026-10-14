@@ -302,6 +302,7 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res, Ser
     out += "imp_last_ttft_ms " + std::to_string(m.last_ttft_ms.load()) + "\n";
 
     append_memory_metrics(out, state);
+    append_power_metrics(out);
 
     // Emits a Prometheus histogram (cumulative _bucket{le=...}, _sum, _count; seconds). `labels` is
     // the label set without the trailing `le` (empty for the unlabelled totals).
