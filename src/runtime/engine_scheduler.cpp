@@ -461,8 +461,9 @@ bool Engine::supports_chunked_prefill_() const {
     }
     // KV dtypes wired through paged_kv_gather: FP16, FP8_E4M3, NVFP4, MXFP4_KV,
     // INT4, INT8. TurboQuant variants would need their own gather kernels.
-    if (kv_cache_raw_) {
-        QType kvt = kv_cache_raw_->qtype();
+    // Before the pool exists (executor init sizes its workspaces from the chunk), the configured dtype.
+    {
+        QType kvt = kv_cache_raw_ ? kv_cache_raw_->qtype() : config_.kv_cache_dtype;
         if (kvt != QType::F16 && kvt != QType::FP8_E4M3 && kvt != QType::NVFP4 && kvt != QType::MXFP4_KV &&
             kvt != QType::INT4 && kvt != QType::INT8)
             return false;

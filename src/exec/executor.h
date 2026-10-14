@@ -604,6 +604,9 @@ public:
     void set_kv_block_size(int n) noexcept { kv_block_size_ = n > 0 ? n : kKVBlockSize; }
     // KV dtype the engine will build the pool with; sizes the expert cache's share of unused KV room.
     void set_kv_cache_dtype(QType q) noexcept { kv_plan_dtype_ = q; }
+    // Resolved prefill chunk (0 = unchunked): init() sizes per-forward workspaces for
+    // max(chunk, 2048) rows instead of 4096 (Qwen3-14B-Q6_K: -363 MiB).
+    void set_prefill_chunk(int n) noexcept { prefill_chunk_ = n; }
 
     // Activation calibration ([calibration] enabled): collects per-input-
     // channel activation magnitudes off gemm_via_handle_ for an offline
@@ -639,6 +642,7 @@ private:
     void* v_norm_ones_buf_ = nullptr;  // Gemma 4: ones buffer for V-norm (no learned weight)
     bool initialized_ = false;
     int max_tokens_ = 0;
+    int prefill_chunk_ = 0;  // set_prefill_chunk
 
     // Shared eval-side LM-head driver: applies the tier-aware LM head to
     // hidden_[0..n_rows) in batches of max_logit_tokens_, calling

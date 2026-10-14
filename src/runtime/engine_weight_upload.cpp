@@ -215,6 +215,7 @@ bool Engine::init_weights() {
     // BLOCKS, and the conversion from a token count needs the real block size.
     executor_->set_kv_block_size(config_.kv_block_size);
     executor_->set_kv_cache_dtype(config_.kv_cache_dtype);
+    executor_->set_prefill_chunk(resolve_prefill_chunk_size_());
     {
         int eff_batch = config_.max_batch_size;
         if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl, eff_batch, config_.max_seq_len,

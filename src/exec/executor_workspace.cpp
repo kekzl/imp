@@ -188,6 +188,13 @@ bool alloc_v_norm_ones(const Model& model, void** buf) {
     IMP_LOG_INFO("Gemma 4: allocated V-norm ones buffer (%d halfs)", hd_max);
     return true;
 }
+
+// Rows per forward: min(seq, 4096). Chunked prefill never forwards more than the chunk; the
+// 2048 floor keeps decode batches and batched verify in range when the chunk is set small.
+int forward_rows(int seq_len, int prefill_chunk) {
+    const int rows = seq_len > 0 ? std::min(seq_len, 4096) : 4096;
+    return prefill_chunk > 0 ? std::min(rows, std::max(prefill_chunk, 2048)) : rows;
+}
 }  // namespace
 
 bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, int max_batch_size,
@@ -248,10 +255,7 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
 
     // Use engine-provided max_seq_len if given, otherwise fall back to model config.
     int effective_seq_len = (max_seq_len > 0) ? max_seq_len : cfg.max_seq_len;
-    max_tokens_ = std::min(effective_seq_len, 4096);
-    if (max_tokens_ <= 0) {
-        max_tokens_ = 4096;
-    }
+    max_tokens_ = forward_rows(effective_seq_len, prefill_chunk_);
     // Full sequence-length capacity for the MLA absorbed latent KV cache
     // (Phase 3). Unlike max_tokens_ (per-forward, capped at 4096), this is the
     // max cached context the latent cache must hold.
