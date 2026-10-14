@@ -216,24 +216,35 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
 
     // MemAccount per-pool attribution (vram_audit diagnostic): the caches
     // above allocate via raw cudaMallocAsync, invisible to VRAMAllocator, so
-    // note the build totals here — one note per cache family.
+    // note the build totals here — one note per cache family; ~QuantPipeline takes them back
+    // (a second engine in the process read 70 GiB of stale WEIGHT_CACHE_NVFP4 and measured no reserve).
+    auto note_total = [&](const char* pool, size_t bytes) {
+        MemAccount::instance().note(pool, static_cast<std::ptrdiff_t>(bytes));
+        noted_totals_.emplace_back(pool, bytes);
+    };
     // Phase 1 allocates the FP16 cache through VRAMAllocator ("fp16_weight_cache"), which names
     // its own charges: noting it here too counted it twice (Qwen3-30B-A3B Q4_K_M: 1680 MiB).
     if (!vram_alloc_)
-        MemAccount::instance().note("WEIGHT_CACHE_FP16", static_cast<std::ptrdiff_t>(wcache_->fp16_bytes));
+        note_total("WEIGHT_CACHE_FP16", wcache_->fp16_bytes);
     // Minus the SSM sidecar: it is the one FP8 cache that goes through
     // VRAMAllocator, which names its own charges now, so including it here
     // counted it twice.
-    MemAccount::instance().note("WEIGHT_CACHE_FP8",
-                                static_cast<std::ptrdiff_t>(wcache_->fp8_bytes - wcache_->fp8_sidecar_bytes));
-    MemAccount::instance().note("WEIGHT_CACHE_NVFP4",
-                                static_cast<std::ptrdiff_t>(
-                                    wcache_->nvfp4_bytes + wcache_->nvfp4_lm_head_bytes +
-                                    wcache_->nvfp4_moe_bytes - wcache_->nvfp4_moe_noted_bytes));
-    MemAccount::instance().note("WEIGHT_CACHE_CUTLASS_SF",
-                                static_cast<std::ptrdiff_t>(wcache_->cutlass_nvfp4_bytes +
-                                                            wcache_->cutlass_mxfp4_bytes -
-                                                            wcache_->cutlass_nvfp4_noted_bytes));
+    note_total("WEIGHT_CACHE_FP8", wcache_->fp8_bytes - wcache_->fp8_sidecar_bytes);
+    note_total("WEIGHT_CACHE_NVFP4", wcache_->nvfp4_bytes + wcache_->nvfp4_lm_head_bytes +
+                                         wcache_->nvfp4_moe_bytes - wcache_->nvfp4_moe_noted_bytes);
+    // Minus the native MXFP4 data compacted in place in the GGUF source buffers: WEIGHTS holds it.
+    note_total("WEIGHT_CACHE_CUTLASS_SF", wcache_->cutlass_nvfp4_bytes + wcache_->cutlass_mxfp4_bytes -
+                                              wcache_->cutlass_mxfp4_inplace_bytes -
+                                              wcache_->cutlass_nvfp4_noted_bytes);
+    // Raw allocations no tag claimed, so they read as library reserve: the GDN NVFP4 prefill copy
+    // (Qwen3.5-4B MXFP4: 270 MiB) and the MXFP4 FP16 decode fallback bulk (same model: 8020 MiB).
+    note_total("WEIGHT_CACHE_GDN_PREFILL", wcache_->cutlass_nvfp4_prefill_bytes);
+    note_total("WEIGHT_CACHE_MXFP4_FP16", wcache_->fp16_bulk_data_size);
+}
+
+QuantPipeline::~QuantPipeline() {
+    for (const auto& [pool, bytes] : noted_totals_)
+        MemAccount::instance().note(pool, -static_cast<std::ptrdiff_t>(bytes));
 }
 
 // NVFP4 view of the LM head for the MTP draft chain — mirrors the decode-path

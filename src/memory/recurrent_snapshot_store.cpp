@@ -1,11 +1,15 @@
 #include "memory/recurrent_snapshot_store.h"
 #include "core/logging.h"
+#include "memory/mem_account.h"
 
 namespace imp {
 
 RecurrentSnapshotStore::~RecurrentSnapshotStore() {
     if (!pool_)
         return;
+    MemAccount::instance().note("recurrent_snapshots",
+                                -static_cast<std::ptrdiff_t>(static_cast<size_t>(allocated_bufs_) *
+                                                             buf_bytes_));
     std::vector<void*> to_free, to_free_host;
     {
         std::lock_guard<std::mutex> lk(pool_->mu);
@@ -45,6 +49,11 @@ void RecurrentSnapshotStore::init(size_t entry_bytes, size_t budget_bytes, size_
         allocated_bufs_++;
     }
     capacity_ = allocated_bufs_;
+    // The plan charges these slots (recurrent_snapshot_bytes); unnoted they also read as library
+    // reserve, charged a second time on the next start (Qwen3.6-35B-A3B GGUF server: 4 x 63.8 MiB).
+    MemAccount::instance().note("recurrent_snapshots",
+                                static_cast<std::ptrdiff_t>(static_cast<size_t>(allocated_bufs_) *
+                                                            buf_bytes_));
     if (capacity_ == 0) {
         // Was a silent `return`. The caller reads enabled() == false and turns hybrid prefix
         // caching off with a message about the BUDGET, which was not the problem: the budget

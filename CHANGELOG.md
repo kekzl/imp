@@ -23,6 +23,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Fixed
 - JSON Schema `anyOf`/`oneOf` (every Pydantic `Optional[T]`) was generated as a free string (`"age": "34"`) that failed validation; the alternatives now run side by side until the first chars decide. A schema without a type (`Any`) takes any JSON value; an array without `items` took one char per item (`[12]` illegal).
 - With an MTP head armed, a request that never verifies (sampled on a GDN hybrid) no longer binds the head and decodes on the graph loop instead of the eager path: Qwen3.8-27B-NVFP4, `max_batch_size=1`, temperature 0.7: 70.8 -> 93.3 tok/s.
+- Weight forms the VRAM ledger missed read as library reserve, which the reserve cache charged again on the next start: Qwen3.5-4B MXFP4 GGUF 6866 -> 213 MiB, second-start KV ceiling 98888 -> 137596 blocks; Qwen3.8-27B-NVFP4 1031 -> 221 MiB (#2713).
 
 ## [0.52.1] - 2026-10-12
 

@@ -385,7 +385,10 @@ auto register_if_mxfp4 = [&](const Tensor& w, QType qt, bool is_attn = true) {
     if (unpack_mxfp4_gguf(w.data, w.shape[0], w.shape[1], mw, stream)) {
         mw.hadamard_bs = is_attn ? cfg.mxfp4_hadamard_attn : cfg.mxfp4_hadamard_ffn;
         wcache_->cutlass_mxfp4[w.data] = mw;
-        mx_native_bytes += mw.sf_bytes + static_cast<size_t>(w.shape[0]) * (w.shape[1] / 2);
+        const size_t packed = static_cast<size_t>(w.shape[0]) * (w.shape[1] / 2);  // compacted in place
+        const size_t linear_sf = static_cast<size_t>(w.shape[0]) * (w.shape[1] / 32);
+        mx_native_bytes += mw.sf_bytes + linear_sf + packed;
+        wcache_->cutlass_mxfp4_inplace_bytes += packed;  // already in WEIGHTS
         mx_native++;
     }
 };

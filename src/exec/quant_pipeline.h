@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <vector>
 #include <unordered_set>
+#include <utility>
 
 namespace imp {
 
@@ -60,6 +61,15 @@ struct Nvfp4DecodeContext {
 // unchanged (byte-identical).
 class QuantPipeline {
 public:
+    QuantPipeline() = default;
+    // Takes back the cache-family totals build() noted (MemAccount), so the next engine in the
+    // process starts from a ledger without them.
+    ~QuantPipeline();
+    QuantPipeline(const QuantPipeline&) = delete;
+    QuantPipeline& operator=(const QuantPipeline&) = delete;
+    QuantPipeline(QuantPipeline&&) = delete;
+    QuantPipeline& operator=(QuantPipeline&&) = delete;
+
     // Runs the full init-time quantization pipeline once. Populates the four
     // long-lived caches (owned by the caller) from the model's weights; owns the
     // transient StoragePlan + decode context internally.
@@ -91,6 +101,7 @@ private:
 
     // Owned build-only state.
     StoragePlan storage_plan_;
+    std::vector<std::pair<const char*, size_t>> noted_totals_;  // MemAccount notes of build()
 
     // --- moved phase / helper declarations (verbatim from executor.h) ---
     // Stage 1.2: fold the scattered arch-specific overlay rules into one pass

@@ -148,6 +148,8 @@ struct WeightCaches {
     // --- CUTLASS sm_120 MXFP4 ---
     std::unordered_map<const void*, CutlassMxFP4Weight> cutlass_mxfp4;
     size_t cutlass_mxfp4_bytes = 0;
+    // Native MXFP4 GGUF: packed data compacted in place in the source buffers (already WEIGHTS).
+    size_t cutlass_mxfp4_inplace_bytes = 0;
     bool use_mxfp4 = false;
 
     // Dual-path mode: FP8 attention + NVFP4 FFN

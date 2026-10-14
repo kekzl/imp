@@ -119,8 +119,12 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size, cudaStream_t str
         return cudaErrorMemoryAllocation;
     }
     cudaError_t err = malloc_async_in_scope(ptr, size, stream);
-    if (err == cudaSuccess && g_upload_log)
-        g_upload_log->note_alloc(*ptr, size);
+    if (err == cudaSuccess) {
+        // Outside upload passes too (Qwen3.8-27B-NVFP4: 7 F16 tensors, 710 MiB read as library reserve).
+        MemAccount::instance().note_alloc("WEIGHTS", *ptr, size);
+        if (g_upload_log)
+            g_upload_log->note_alloc(*ptr, size);
+    }
     return err;
 }
 
