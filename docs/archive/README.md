@@ -30,6 +30,7 @@ full text of each is in git history; the recipe for reading one is below.
 | [`quantization_awq_findings.md`](quantization_awq_findings.md) | AWQ findings, refuted quantization experiments | `docs/quantization.md` |
 | [`kernels_refuted_2026.md`](kernels_refuted_2026.md) | refuted FA2 occupancy follow-up | `docs/internals/KERNELS.md` |
 | [`roadmap_ledger_2026_09_28.md`](roadmap_ledger_2026_09_28.md) | `docs/roadmap.md` closed rows, Closed, 2026 bar, lever ledger, batch=1, MoE offload, quantizer, competitive records, known limitations, shelved | `docs/roadmap.md` |
+| [`roadmap_ledger_2026_10_15.md`](roadmap_ledger_2026_10_15.md) | Now / Next / Later rows closed, refuted or superseded in place up to 2026-10-15 (80 rows) | `docs/roadmap.md` |
 | [`performance_2026_05.md`](performance_2026_05.md) | 2026-05 prefill and KV-dtype comparison tables, moved out of `docs/PERF.md` 2026-09-05 (#1919) | `docs/PERF.md` |
 
 Moved here from `audit/` on 2026-08-11 so that `audit/` holds only the ledgers
