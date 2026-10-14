@@ -827,6 +827,9 @@ q4k_imma_prefill     = true
 # pre_dequant FP16 cache (with fused KV / gate+up) and FP8 cache for per-layer dense weights.
 # false: dense weights run their source route, as --gpu-layers host layers do (#2298 A/B control).
 dense_weight_cache   = true
+# FP8 checkpoint weights (Modelopt FP8): prefill as FP8 x FP8 cuBLASLt with the checkpoint's
+# input_scale, no FP16 copy. false: FP16 copy for prefill, FP8 GEMV decode.
+fp8_native_prefill   = true
 
 # There is no [gemma4] section. The one per-model Gemma-4 override left
 # (ModelConfig::Overrides::Gemma4::force_mmvq, src/model/model_config.h) is set

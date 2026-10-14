@@ -34,6 +34,9 @@ struct GEMM {
     // dense weights. false: every dense weight runs its source route, as --gpu-layers host
     // layers do (A/B control for #2298). Default on.
     bool dense_weight_cache = true;
+    // FP8 checkpoint weights (Modelopt FP8) run prefill as FP8 x FP8 cuBLASLt with the
+    // checkpoint's input_scale, no FP16 copy. false: FP16 copy for prefill, FP8 GEMV decode.
+    bool fp8_native_prefill = true;
     // Extend the NVFP4 decode cache to ALL quantized types (Q4_K, Q3_K, etc.),
     // not just Q8_0/Q6_K/Q5_K. Trades VRAM for decode throughput on sub-8-bit
     // models. Default off.

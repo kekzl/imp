@@ -50,6 +50,7 @@ struct WeightHandle {
         struct {
             __nv_fp8_e4m3* data;
             float* d_scale;
+            const float* d_act_scale;  // static input scale, null = dynamic (FP8CacheEntry)
         } fp8;
         struct {
             uint8_t* data;

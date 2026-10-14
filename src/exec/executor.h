@@ -1095,6 +1095,12 @@ private:
     // (dp4a on original quant is fastest). Caller passes both the TensorID
     void gemm_via_handle_(TensorID id, const Tensor& input,
                           Tensor& output, const GemmContext& ctx);
+    // FP16 input -> qscratch_.fp8_act for an FP8-tier weight: the weight's static input scale,
+    // else a per-call absmax. Returns the activation scale for gemm_cublaslt, null = no scratch.
+    const float* quantize_act_fp8_(const WeightHandle& hw, const Tensor& input, cudaStream_t stream);
+    // M>1 GEMM on an FP8-tier weight: FP8 x FP8 cuBLASLt, else (native) FP16 dequant scratch.
+    void gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry& e, const Tensor& input, Tensor& output,
+                           const GemmContext& ctx);
     // --gpu-layers: ensure_layer + prefetch / release_layer around layer i. Streamed layers rebind
     // handle.source_data to the matmul's current data (slot, then host): gemm_via_handle_ reads it.
     void offload_enter_(int layer, int n_layers, cudaStream_t stream);

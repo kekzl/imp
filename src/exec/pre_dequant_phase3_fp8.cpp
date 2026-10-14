@@ -123,8 +123,8 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
             continue;
         }
         const bool has_nvfp4 = (wcache_->nvfp4.find(ptr) != wcache_->nvfp4.end());
-        // A native-FP8 entry is NOT an alternative to the FP16 copy: it serves only the M=1
-        // GEMV, and sm_120 has no FP8 prefill GEMM behind it. Freeing FP16 on its account leaves
+        // A native-FP8 entry beside an FP16 copy (gemm.fp8_native_prefill off) serves only the
+        // M=1 GEMV; prefill reads the copy. Freeing FP16 on its account leaves
         // prefill with a dangling pointer (cublasLtMatmul status 14) and an illegal access at the
         // next cudaFree, only under decode mode 2.
         const auto fp8_it = wcache_->fp8.find(ptr);

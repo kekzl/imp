@@ -20,6 +20,12 @@ float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream = nullptr);
 void quantize_fp16_to_fp8_e4m3_scaled(const void* input_fp16, void* output_fp8, int n_elements, float scale,
                                       cudaStream_t stream = nullptr);
 
+// Static-scale activation quantize: out = sat_e4m3(in / *d_scale). Returns false (nothing
+// launched) unless n % 8 == 0, input 16-byte and output 8-byte aligned.
+[[nodiscard]] bool quantize_fp16_to_fp8_e4m3_dscale(const void* input_fp16, void* output_fp8,
+                                                    int64_t n_elements, const float* d_scale,
+                                                    cudaStream_t stream = nullptr);
+
 // Per-row (output-channel) E4M3 quantize: writes scale[row] = row_absmax/448
 // to d_row_scales and the quantized rows to output_fp8. Async, init-time.
 void quantize_fp8_rows_async(const void* input_fp16, void* output_fp8, int rows, int K,

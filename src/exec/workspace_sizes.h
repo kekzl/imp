@@ -209,6 +209,10 @@ ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len, int max_batch_s
 // Batch defaults to 1 (i.e. the max_logit_tokens floor of 8).
 ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len);
 
+// The FP8 activation scratch is needed: the FP8 prefill cache, or gemm.fp8_native_prefill with a
+// dense projection stored FP8 E4M3 on disk (Modelopt FP8 / MIXED_PRECISION).
+[[nodiscard]] bool fp8_act_scratch_needed(const Model& model, bool use_fp8_prefill, bool fp8_native_prefill);
+
 // ── Pure core ────────────────────────────────────────────────────────
 // The Model overloads above are thin wrappers over these. Everything the
 // arithmetic depends on is in ExecShape, so these run in the CPU lane.

@@ -110,6 +110,9 @@ private:
 
     void pre_dequant_phase0_promote_nvfp4_sidecars_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase0b_register_cutlass_nvfp4_(const ModelConfig& cfg, cudaStream_t stream);
+    // Phase 1a (gemm.fp8_native_prefill): FP8 checkpoint weights become primary FP8 entries on
+    // their own bytes, no FP16 copy. Lives in pre_dequant_phase1_fp16_cache.cpp.
+    void pre_dequant_phase1a_native_fp8_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase1_fp16_cache_(const ModelConfig& cfg, const VRAMBudget& budget,
                                         size_t& remaining_budget, cudaStream_t stream);
     void pre_dequant_phase2_fp8_cache_(const ModelConfig& cfg, const VRAMBudget& budget,
