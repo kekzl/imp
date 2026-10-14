@@ -189,7 +189,8 @@ IMP_THINK_HD inline bool grace_blocks_stop(int think_exit_idx, int output_size, 
 
 // Masks a stop token before sampling wherever should_stop would suppress it
 // (fill_sampling_params, post_decode_step_kernel): a suppressed stop left in
-// context can pick <|endoftext|> on a near-tie (AUDIT_qwen38_nvfp4 P3). Bounded: in-think only while budget_can_close, else the kMinAnswerAfterThink grace window.
+// context can pick <|endoftext|> on a near-tie (AUDIT_QWEN38_NVFP4 P3). Bounded: in-think only while
+// budget_can_close, else the kMinAnswerAfterThink grace window.
 IMP_THINK_HD inline bool stop_mask_active(bool in_think, bool budget_can_close, int think_exit_idx,
                                           int output_size, bool content_after_think, bool ignore_eos) {
     if (ignore_eos)

@@ -9,7 +9,7 @@ section at the end, including the next levers.
 ## Why this is the open ceiling
 
 The M=1 way past the bandwidth roofline is tokens per weight-sweep. The MTP
-chain saturates near 2.5 accepted/verify (`docs/roadmap.md` item 3): one wrong
+chain saturates near 2.5 accepted/verify (`docs/ROADMAP.md` item 3): one wrong
 token kills the whole tail, and k=3 is uneconomic as a chain. External engines
 target acceptance length >5 with multi-candidate trees. imp has every piece of
 a tree EXCEPT their composition:
@@ -299,5 +299,5 @@ stays 1, the code stays in tree flag-gated. The drafting cost is structural on
 this card: the W-1 alternate chains are (K-1) serial head forwards per step,
 paid whether or not the step branches.
 
-Standing row: `docs/roadmap.md` Closed, "speculation tree". The linear lever
+Standing row: `docs/ROADMAP.md` Closed, "speculation tree". The linear lever
 that did pay is adaptive chain depth (#1801) plus `mtp_k=auto` (#1809).

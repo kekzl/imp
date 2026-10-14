@@ -14,7 +14,7 @@ namespace imp {
 
 // Nothing throws across the C ABI: every ImpError imp_*() body runs inside
 // this (or an equivalent) try/catch, gated by tools/check_api_guard.py
-// (AUDIT_arch_2026 G-10: 4 of 23 entry points had no catch).
+// (AUDIT_ARCH_2026 G-10: 4 of 23 entry points had no catch).
 template <class F>
 ImpError api_guard(const char* fn, F&& body) noexcept {
     try {

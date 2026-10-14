@@ -512,7 +512,7 @@ TEST(ExecT2Demand, SplitkFollowsHeadsBatchAndContextAndCapsAt128Splits) {
 
 // The split-count term reads the RESOLVED kv block size (n_kv_heads<=4 models run 32,
 // kv_cache.block_size can set any multiple of 16), not a replicated kKVBlockSize. Before B-7
-// it was sized for 16 regardless of what the executor allocated (AUDIT_arch_2026 B-7).
+// it was sized for 16 regardless of what the executor allocated (AUDIT_ARCH_2026 B-7).
 TEST(ExecT2Demand, SplitkReadsTheResolvedKvBlockSize) {
     ExecShape s = dense_shape();
     s.n_heads = 32;

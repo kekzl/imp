@@ -296,7 +296,7 @@ class TestMetricsEndpoint:
         assert "imp_model_loaded" in r.text
 
     def test_metrics_series_carry_the_endpoint_label(self, client):
-        # AUDIT_arch_2026 E-7: one TTFT/duration ladder for every dialect meant
+        # AUDIT_ARCH_2026 E-7: one TTFT/duration ladder for every dialect meant
         # a dashboard could not tell /v1/messages from /v1/completions. The
         # per-endpoint series are emitted at zero, so both lanes carry them.
         text = client.get("/metrics").text

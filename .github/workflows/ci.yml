@@ -620,7 +620,7 @@ jobs:
           fetch=$!
           # A venv rather than --break-system-packages: the lock file pins the
           # whole transitive set, and pip cannot replace Debian's own copy of
-          # one of them in place (no RECORD file) (AUDIT_arch_2026 H-6).
+          # one of them in place (no RECORD file) (AUDIT_ARCH_2026 H-6).
           python3 -m venv /tmp/api-venv
           /tmp/api-venv/bin/pip install -q -r tests/api/requirements.txt
           wait "$fetch"
@@ -971,7 +971,7 @@ jobs:
               # grep -q exits at the first match and pipefail turns the
               # producer EPIPE into a non-zero pipeline (#1499): here-string.
               # The list is the untrusted-input surface, not only the files
-              # with a fuzz target (AUDIT_arch_2026 F2-8): request bytes also
+              # with a fuzz target (AUDIT_ARCH_2026 F2-8): request bytes also
               # go through utils.cpp (base64, nesting depth), the stb decoder,
               # the GGUF parsers and the chat parameter parser.
               if ! grep -qE '^(fuzz/|tests/test_fuzz_corpus|src/compute/json_schema|src/compute/gbnf|src/model/(safetensors_loader|tokenizer|json_util|gguf_|sentencepiece_loader|jinja|hf_config)|src/vision/image_|src/memory/weight_cache_file|tools/imp-server/(tool_stream_filter|utils|handlers_chat_params)|CMakeLists.txt|\.github/workflows/ci\.yml)' <<< "$files"; then
@@ -1098,7 +1098,7 @@ jobs:
           ./build-asan/test-core
           ./build-asan/test-text
 
-  # Coverage-guided fuzzing, nightly (AUDIT_arch_2026 F2-6). The CPU lane
+  # Coverage-guided fuzzing, nightly (AUDIT_ARCH_2026 F2-6). The CPU lane
   # replays 1500 fixed-seed iterations per target and can only re-find a known
   # defect class; libFuzzer with coverage feedback is what finds a new one, and
   # nothing ran it unless someone typed the docker line in fuzz/README.md. The

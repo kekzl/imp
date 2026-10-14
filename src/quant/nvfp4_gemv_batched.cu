@@ -225,7 +225,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
 // PDL registration + MaxL1 carveout for the batched-M kernels production reaches:
 // gemv_nvfp4_kpar_mb_fp32_kernel<1..4> behind gemv_nvfp4_kpar_batched_fp32 (batched decode
 // LM head). Kernel waits before its first global read, triggers after its last (core/pdl.h
-// contract); until AUDIT_arch_2026 A2-2 it was instrumented but never registered, so
+// contract); until AUDIT_ARCH_2026 A2-2 it was instrumented but never registered, so
 // pdl::launch fell through to <<<>>> with a default graph edge. multirow_mb and
 // kpar_mb_fp16 kernels (test oracles only) stay unregistered.
 void nvfp4_gemv_batched_pdl_register() {

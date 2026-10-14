@@ -234,7 +234,7 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
 
 // Launch config + tile counter, configured once per engine, file-scope so the reset hook can
 // re-arm the guard: a function-local `configured` survived engine teardown and the counter
-// pointed into the closed arena (AUDIT_arch_2026 B-2).
+// pointed into the closed arena (AUDIT_ARCH_2026 B-2).
 namespace {
 bool s_configured = false;
 int s_grid_size = 0;

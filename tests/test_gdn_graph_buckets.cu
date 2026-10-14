@@ -6,7 +6,7 @@
 // exercised bucket i vs bucket 1 on a recurrent model.
 // Failure mode: a bucket reads the wrong slab, staying fluent (invisible to degen batteries)
 // and differing only from the single-stream answer every benchmark measures.
-// Not a batch-invariance guarantee (imp has none, docs/determinism.md): each arm compares
+// Not a batch-invariance guarantee (imp has none, docs/DETERMINISM.md): each arm compares
 // against a PERMUTATION of itself (same prompts/shape, reversed slot assignment), not bucket
 // n vs bucket 1. GPU lane: needs a real hybrid checkpoint.
 

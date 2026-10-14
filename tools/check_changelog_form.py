@@ -5,7 +5,7 @@ WHY THIS EXISTS
 ---------------
 Root CLAUDE.md: "The CHANGELOG is a changelog, not a journal. One to three lines
 per entry". On 2026-09-05, 19 of the 26 entries in the last three releases broke
-that, the longest at 13 lines, and nothing checked it (AUDIT_arch_2026 J-8).
+that, the longest at 13 lines, and nothing checked it (AUDIT_ARCH_2026 J-8).
 Released sections are records and are left alone; the gate reads the block a
 PR appends to, so the rule is enforced where the entry is written.
 

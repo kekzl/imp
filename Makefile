@@ -176,14 +176,14 @@ test-gpu-suite:
 	@# so this is where it can actually run. A set-but-wrong path FAILS rather
 	@# than skipping. The suite lives in test-e2e: this line named test-text
 	@# until 2026-09-05 and ran "0 tests, PASSED" on every commit
-	@# (AUDIT_arch_2026 I-7; guard_makefile_filters now pins every filter here).
+	@# (AUDIT_ARCH_2026 I-7; guard_makefile_filters now pins every filter here).
 	docker run --rm -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL_QWEN38=/models/Qwen3.8-27B-NVFP4-vllm \
 		$(DOCKER_IMG) test-e2e --gtest_filter="*Qwen38TokenizerParity*"
 	@# Everything else that reads IMP_TEST_MODEL* skips here by design: this
 	@# target carries no model env (DOCKER_RUN has none), so "full suite" means
 	@# every macro, not every checkpoint. The model battery is `make test-e2e`
-	@# (AUDIT_arch_2026 I-8: three checkpoints in one process hit the VRAM
+	@# (AUDIT_ARCH_2026 I-8: three checkpoints in one process hit the VRAM
 	@# ceiling, TEST_INVENTORY.md section 5, so they are not added here).
 
 # Stage 3 — the SERVER stage (local, GPU-only). Boots a real imp-server against
@@ -237,7 +237,7 @@ test-e2e: build
 		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*:Gemma4SafeTensorsTest.*:SpecCaptureFidelityTest.*:DeviceFaultSignalTest.*:MoeAllocFailureTest.*:ServingSignalsTest.*:SamplerRowBansTest.*:*DetEvalE2ETest*"
 	@# The greedy regression locks, the degeneration battery, the prefix-cache
 	@# equivalence and the tokenizer/tensor-kind parity suites ran from NO
-	@# target until 2026-09-05 (AUDIT_arch_2026 I-1 = D-3): the filter above
+	@# target until 2026-09-05 (AUDIT_ARCH_2026 I-1 = D-3): the filter above
 	@# never named them, and the lock table (tests/refs/e2e_greedy_locks.h) has
 	@# rows for Qwen3-8B-Q8_0, not the Qwen3-4B the line above loads. Own
 	@# container, own checkpoint, so the lock rows match what is loaded.
@@ -248,7 +248,7 @@ test-e2e: build
 	@# The hybrid recurrent paths: the snapshot restore and the decode-graph
 	@# buckets. Both skip on a dense checkpoint, and every line above loads a
 	@# dense one, so without this container they run from NO target - the
-	@# AUDIT_arch_2026 I-1 escape class again. Own container, GDN checkpoint.
+	@# AUDIT_ARCH_2026 I-1 escape class again. Own container, GDN checkpoint.
 	@# HybridSnapshotRestoreMatchesFresh needs a prompt past 512 tokens and
 	@# asserts that rather than skipping, so a wrong checkpoint fails here.
 	@# HybridRestoreChainTest is a TEST_P suite: the *...* form is required
@@ -265,11 +265,11 @@ test-e2e: build
 		-e IMP_TEST_MODEL=/models/Qwen3-8B-NVFP4-cortecs \
 		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*"
 	@# LoraHotSwap crafts its PEFT adapters in-test against Llama-3.2-3B
-	@# (q/v, r=8); it ran from no target until AUDIT_arch_2026 dispatch #6.
+	@# (q/v, r=8); it ran from no target until AUDIT_ARCH_2026 dispatch #6.
 	$(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL_LLAMA=/models/Llama-3.2-3B-Instruct-Q8_0.gguf \
 		$(DOCKER_IMG) test-e2e --gtest_filter="LoraHotSwap.*"
-	@# The batch-invariance instrument (AUDIT_arch_2026 D-2): teacher-forced
+	@# The batch-invariance instrument (AUDIT_ARCH_2026 D-2): teacher-forced
 	@# M=1 vs M=32 on a DENSE native-NVFP4 checkpoint, own container because it
 	@# needs ~14 GiB free and its own deterministic-mode process state.
 	$(GPU_DOCKER) -v $(HOME)/models:/models \
@@ -292,7 +292,7 @@ test-spec-fidelity: build
 
 SPEC_FIDELITY_MODEL ?= /models/Qwen3.8-27B-NVFP4-vllm
 
-# imp-quantize round trip (AUDIT_arch_2026 I-6): BF16 SafeTensors -> NVFP4
+# imp-quantize round trip (AUDIT_ARCH_2026 I-6): BF16 SafeTensors -> NVFP4
 # with the shipped tool, loaded back through imp-cli, one greedy answer.
 # Opt-in like test-server; skips without $(HOME)/models/Qwen3-0.6B.
 test-quantize-repro: build
@@ -497,7 +497,7 @@ verify-north-star: build check-gpu
 	@IMP_VERIFY_BASELINE=tests/perf_baseline_north_star.json \
 	 $(GPU_LOCKED) scripts/verify.sh fast
 
-# verify-ab: the paired half of the perf gate (AUDIT_arch_2026 H-3). verify-fast
+# verify-ab: the paired half of the perf gate (AUDIT_ARCH_2026 H-3). verify-fast
 # compares one arm against a pin measured weeks earlier and cannot resolve a
 # delta smaller than this host's between-session movement (4-6 % on one tree);
 # this builds AB_BASE_REF (origin/main) into imp:ab-<sha> once per sha

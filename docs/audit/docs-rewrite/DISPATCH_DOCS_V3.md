@@ -18,7 +18,7 @@ Every section removed, moved or corrected in the prose cleanup. Base `9cbb8004`.
 | `AUDIT.md` B25 | citation [`docs/usage.md`](https://github.com/kekzl/imp/blob/7df8333d2f43b99139e13370d95d36589cc98365/docs/usage.md) | `docs/CONFIG.md` (`vram.kv_fraction` row) |
 | `docs/README.md` | layer prose, "Contracts" list | index tables; `usage.md` row -> `CONFIG.md`, `API_FEATURES.md` row added |
 | 61 paragraphs > 2 sentences (15 files) | prose form | same file, bullets or tables; tokens checked by `fc.sh` |
-| `docs/internals/MEMORY.md` | A2-A6, invariant compliance, open questions (23 tokens absent from the rewrite: `Owned<T, Tier::ModelResident>`, `BlockPool<Stride>`, `+256.00 MiB`, #1939, #1940, ...) | verbatim in `docs/archive/memory_census_2026.md` "Design draft A2-A6" |
+| `docs/internals/MEMORY.md` | A2-A6, invariant compliance, open questions (23 tokens absent from the rewrite: `Owned<T, Tier::ModelResident>`, `BlockPool<Stride>`, `+256.00 MiB`, #1939, #1940, ...) | verbatim in `docs/archive/MEMORY_CENSUS_2026.md` "Design draft A2-A6" |
 | `docs/internals/ARCHITECTURE.md` | `src/compute/sampling.{h,cu}`, `<\|image_pad\|>` | formatting only: component table lists `sampling.cu`, `sampling.h`; pipe escaped inside the table |
 
 | file | claim | was | now | source |
@@ -130,27 +130,27 @@ None. Every fact dropped from these five files was either a duplicate of an owne
 
 Orchestrator note: nothing left for another agent to fix inside these five files. Cross-file link inventory (files outside my assignment that link to `usage.md` or would need `API.md#anchor` updates) reported separately in my final message, not edited here per BRIEF.
 
-## Log: agent C (LIMITATIONS.md, TROUBLESHOOTING.md, DESIGN_DECISIONS.md, determinism.md)
+## Log: agent C (LIMITATIONS.md, TROUBLESHOOTING.md, DESIGN_DECISIONS.md, DETERMINISM.md)
 
 ### 1. Deleted or moved sections
 
 | file | deleted or moved section | fact preserved where |
 |---|---|---|
-| docs/LIMITATIONS.md | "Speculative decoding is not universally profitable" thinking-traffic ledger + adaptive-chain-depth detail | condensed row + `docs/archive/limitations_detail_2026.md#speculative-decoding-economics` |
-| docs/LIMITATIONS.md | "MTP released for one model class" two-accept-rate reconciliation + third-row-defect paragraph | model-class table kept inline; reconciliation moved to `docs/archive/limitations_detail_2026.md#nemotron-mtp-defect` |
-| docs/LIMITATIONS.md | "MTP speculation truncates answers" full 4-pass investigation (~185 lines) | condensed row + `docs/archive/limitations_detail_2026.md#mtp-truncation` |
-| docs/LIMITATIONS.md | "Speculative decoding does not reproduce non-speculative greedy output on a GDN hybrid" full investigation incl. 5-hypothesis table | condensed row + `docs/archive/limitations_detail_2026.md#mtp-vs-greedy-divergence` |
-| docs/LIMITATIONS.md | "A speculative arm is not byte-stable across processes" full detail | condensed row + `docs/archive/limitations_detail_2026.md#mtp-cross-process-stability` |
-| docs/LIMITATIONS.md | "MTP head accepts 75.0% of its first draft" full detail incl. 6 ruled-out hypotheses | condensed row + `docs/archive/limitations_detail_2026.md#mtp-acceptance-rate` |
-| docs/LIMITATIONS.md | "RESOLVED (2026-08-18)" MTP GDN launch-defect fix, pre-snapshot superseded block | `docs/archive/limitations_detail_2026.md#mtp-gdn-hybrid-launch-fix-resolved` (row 17's numbers already carry the outcome inline) |
+| docs/LIMITATIONS.md | "Speculative decoding is not universally profitable" thinking-traffic ledger + adaptive-chain-depth detail | condensed row + `docs/archive/LIMITATIONS_DETAIL_2026.md#speculative-decoding-economics` |
+| docs/LIMITATIONS.md | "MTP released for one model class" two-accept-rate reconciliation + third-row-defect paragraph | model-class table kept inline; reconciliation moved to `docs/archive/LIMITATIONS_DETAIL_2026.md#nemotron-mtp-defect` |
+| docs/LIMITATIONS.md | "MTP speculation truncates answers" full 4-pass investigation (~185 lines) | condensed row + `docs/archive/LIMITATIONS_DETAIL_2026.md#mtp-truncation` |
+| docs/LIMITATIONS.md | "Speculative decoding does not reproduce non-speculative greedy output on a GDN hybrid" full investigation incl. 5-hypothesis table | condensed row + `docs/archive/LIMITATIONS_DETAIL_2026.md#mtp-vs-greedy-divergence` |
+| docs/LIMITATIONS.md | "A speculative arm is not byte-stable across processes" full detail | condensed row + `docs/archive/LIMITATIONS_DETAIL_2026.md#mtp-cross-process-stability` |
+| docs/LIMITATIONS.md | "MTP head accepts 75.0% of its first draft" full detail incl. 6 ruled-out hypotheses | condensed row + `docs/archive/LIMITATIONS_DETAIL_2026.md#mtp-acceptance-rate` |
+| docs/LIMITATIONS.md | "RESOLVED (2026-08-18)" MTP GDN launch-defect fix, pre-snapshot superseded block | `docs/archive/LIMITATIONS_DETAIL_2026.md#mtp-gdn-hybrid-launch-fix-resolved` (row 17's numbers already carry the outcome inline) |
 | docs/LIMITATIONS.md | Nemotron-3.5 MTP economics narrative (41%/39% accept, 51% decode cost, DSpark -42%) duplicated in DESIGN_DECISIONS.md's "Speculative decoding stays opt-in" | removed: duplicate of owner `docs/DESIGN_DECISIONS.md`; LIMITATIONS row 16 links there instead of restating |
-| docs/LIMITATIONS.md | "Batched and solo decode disagree" full measurement narrative (already fuller in determinism.md's batch-invariance section) | removed: duplicate of owner `docs/determinism.md`; row links there and to `PERF.md` |
-| docs/LIMITATIONS.md | "Identical seeds can diverge" mechanism list | kept as condensed row, full list stays owned by `docs/determinism.md` (already was, per original doc's own cross-reference) |
+| docs/LIMITATIONS.md | "Batched and solo decode disagree" full measurement narrative (already fuller in DETERMINISM.md's batch-invariance section) | removed: duplicate of owner `docs/DETERMINISM.md`; row links there and to `PERF.md` |
+| docs/LIMITATIONS.md | "Identical seeds can diverge" mechanism list | kept as condensed row, full list stays owned by `docs/DETERMINISM.md` (already was, per original doc's own cross-reference) |
 | docs/TROUBLESHOOTING.md | none removed outright; "content empty" 74-turn / 54-turn corroboration tables condensed into prose within the row | numbers folded into the same table row (74/74, 53/54, character counts, `5 005` token ablation) |
 | docs/DESIGN_DECISIONS.md | per-decision `##` headings and narrative prose framing | converted to one table, one row per decision; all reason/measurement text kept in the row |
-| docs/determinism.md | per-limit `###` headings (1,2,3,5,4,6) and narrative framing | converted to one known-limits table, renumbered 1-6 in table order (plus 2 un-numbered #1314 rows for the prefix-cache-hit / batch-invariance scope items, which the source itself did not number) |
-| docs/determinism.md | "Two probes" paragraph + 4-arm probe result table (#1314) | kept, moved into a short supporting block directly under the known-limits table |
-| docs/determinism.md | `imp.conf.example` retraction note ("An earlier revision recommended `runtime.deterministic_gemm`... that recommendation was wrong and is retracted") | removed: historical self-correction about a past doc revision that this rewrite does not carry forward; nothing in the new doc repeats the retracted claim, so the retraction is moot (style rule: delete "previously"/history) |
+| docs/DETERMINISM.md | per-limit `###` headings (1,2,3,5,4,6) and narrative framing | converted to one known-limits table, renumbered 1-6 in table order (plus 2 un-numbered #1314 rows for the prefix-cache-hit / batch-invariance scope items, which the source itself did not number) |
+| docs/DETERMINISM.md | "Two probes" paragraph + 4-arm probe result table (#1314) | kept, moved into a short supporting block directly under the known-limits table |
+| docs/DETERMINISM.md | `imp.conf.example` retraction note ("An earlier revision recommended `runtime.deterministic_gemm`... that recommendation was wrong and is retracted") | removed: historical self-correction about a past doc revision that this rewrite does not carry forward; nothing in the new doc repeats the retracted claim, so the retraction is moot (style rule: delete "previously"/history) |
 | docs/DESIGN_DECISIONS.md | old-state PDL detail: "the audit's summary rows no longer count PDL as working sm_120a idiom while its evidence file records `griddepcontrol: 0`", and `pdl.h`'s old claim | removed: superseded by the 2026-08-31 device-half fix now documented in the same row; `griddepcontrol` is no longer 0 after that fix, so restating the old evidence-file value would be misleading without heavy extra framing |
 
 ### 2. Corrected facts
@@ -195,16 +195,16 @@ written; no change needed.
 at base commit (`"; answer bytes compared with"`, `"; divergence offsets from"`) are byte-ranges
 between two backticks that straddle a hand-wrapped line break in the ORIGINAL text, not real
 citable facts. Both PROV blocks are preserved verbatim (reflowed) in
-`docs/archive/limitations_detail_2026.md` under `#mtp-vs-greedy-divergence` and
+`docs/archive/LIMITATIONS_DETAIL_2026.md` under `#mtp-vs-greedy-divergence` and
 `#mtp-cross-process-stability`; the actual content (`cmp`, `/metrics` deltas, card idle, kernel
 identity from the dispatch log) is all present. No fix applied; re-wrapping to byte-identical line
 breaks was judged not worth chasing.
 
 ### Path-style non-issues (not real gaps)
 
-`docs/determinism.md` and `docs/internals/BENCHMARKING.md` are flagged missing from
-`docs/LIMITATIONS.md`/`docs/determinism.md` only because the rewritten files use relative links
-(`determinism.md`, `internals/BENCHMARKING.md`) from within `docs/`, correctly, instead of the
+`docs/DETERMINISM.md` and `docs/internals/BENCHMARKING.md` are flagged missing from
+`docs/LIMITATIONS.md`/`docs/DETERMINISM.md` only because the rewritten files use relative links
+(`DETERMINISM.md`, `internals/BENCHMARKING.md`) from within `docs/`, correctly, instead of the
 original's `docs/`-prefixed inline-code references. Both targets are linked and resolve; this is a
 style improvement, not a lost fact. No fix applied.
 
@@ -224,10 +224,10 @@ in the same file inside fenced blocks, so no fact was lost).
 | docs/LIMITATIONS.md | 792 | 107 | 11 (2 regex artifacts, 2 path-style, 7 line-number corrections, all logged) | 7 |
 | docs/TROUBLESHOOTING.md | 234 | 48 | 0 | 0 |
 | docs/DESIGN_DECISIONS.md | 232 | 24 | 2 (both deliberate: superseded PDL detail) | 0 |
-| docs/determinism.md | 295 | 75 | 2 (1 path-style, 1 deliberate retraction-note drop) | 0 |
-| docs/archive/limitations_detail_2026.md (new) | - | 492 | (destination file, not checked as its own source) | - |
+| docs/DETERMINISM.md | 295 | 75 | 2 (1 path-style, 1 deliberate retraction-note drop) | 0 |
+| docs/archive/LIMITATIONS_DETAIL_2026.md (new) | - | 492 | (destination file, not checked as its own source) | - |
 
-New file: `docs/archive/limitations_detail_2026.md` (layer L1, audience records), holding the full
+New file: `docs/archive/LIMITATIONS_DETAIL_2026.md` (layer L1, audience records), holding the full
 MTP speculative-decoding investigation series under 7 headings:
 `#speculative-decoding-economics`, `#nemotron-mtp-defect`, `#mtp-truncation`,
 `#mtp-vs-greedy-divergence`, `#mtp-cross-process-stability`, `#mtp-acceptance-rate`,
@@ -242,11 +242,11 @@ old file used bullet lists (no anchors) for those items, so no such inbound anch
 existed. `TARGET_STRUCTURE.md` (read via `git show 4bcb25a9:docs/audit/docs-rewrite/TARGET_STRUCTURE.md`
 since it is not yet merged into this worktree's base `9cbb8004`) confirms `docs/LIMITATIONS.md` is
 the sole canonical owner of "Limitations, untested paths" and `docs/DESIGN_DECISIONS.md` of
-"Deliberate absences" - both cross-reference each other and `docs/determinism.md` per that map.
+"Deliberate absences" - both cross-reference each other and `docs/DETERMINISM.md` per that map.
 
 No other files touched.
 
-## Agent D log: docs/PERF.md, docs/BENCHMARKS.md, docs/quantization.md, docs/internals/QUANT_PIPELINE.md
+## Agent D log: docs/PERF.md, docs/BENCHMARKS.md, docs/QUANTIZATION.md, docs/internals/QUANT_PIPELINE.md
 
 Note: `docs/audit/docs-rewrite/TARGET_STRUCTURE.md` did not exist in the worktree (checked at
 base commit `9cbb8004` and on disk); proceeded on the explicit per-file assignment given in the
@@ -257,19 +257,19 @@ generic pointer to that file. Flagging for the orchestrator in case another agen
 
 | file | deleted or moved section | fact preserved where |
 |---|---|---|
-| docs/BENCHMARKS.md | entire pre-rewrite file (all sweeps 2026-06 through 2026-09-08: three competitive re-sweeps, imp-vs-vLLM concurrency progression + nsys profiling attribution, batched-decode optimization history, full agentic-reliability tables) | moved verbatim to new `docs/archive/benchmarks_pre_v0.44.md`; current BENCHMARKS.md keeps only the latest number per section with date/commit/model/quant/command |
-| docs/quantization.md | `#### What --calib does` (full AWQ transform/fold mechanism, calibration-file provenance) | new `docs/archive/quantization_awq_findings.md` |
-| docs/quantization.md | `#### Head-to-head against a Modelopt export` | archive; one-line summary (9.9252 vs 10.0301, Qwen3-14B) kept in quantization.md Quality section |
-| docs/quantization.md | `#### Calibrating a model that will not fit, and what it exposed` | archive |
-| docs/quantization.md | "Why it flips between 1.7B and 14B" group-interaction tables | archive; production rule (`--calib-groups BD` on wide-GQA) kept in quantization.md |
-| docs/quantization.md | "Splitting the tie... REFUTED" + "second variant... REFUTED" | archive |
-| docs/quantization.md | `#### Fused layers share one tensor scale` deep measurement (29.42/30.40/31.05 PPL) | archive; one-row mention kept in quantization.md Roles table |
-| docs/quantization.md | `#### Roles that stay full precision, and why` (RMSNorm-offset root cause investigation, gate-share PPL tables) | archive; short Roles table kept in quantization.md |
-| docs/quantization.md | `#### MoE, and two roles that must stay full precision` (bisection table, gpt-oss/Gemma-4 destack quality numbers) | archive; one Roles-table row kept in quantization.md |
-| docs/quantization.md | `#### Refuted: micro-scale search` | archive; one-line pointer kept in "Choosing a quant" |
-| docs/quantization.md | `### NVFP4 internal pipeline` (dense/MoE pipeline diagrams) | merged into `docs/internals/QUANT_PIPELINE.md` "## NVFP4 walkthrough" |
-| docs/quantization.md | `#### What the loader enforces` deep example (Nemotron-3.5-Lightning case, `config_groups`, `targets`, `NVFP4 inventory:` log line) | condensed in quantization.md; full mechanics moved to `docs/internals/QUANT_PIPELINE.md` "## Loader enforcement (NVFP4 checkpoints)" |
-| docs/quantization.md | Modelopt CLI workflow (`pip install`, `python -m modelopt.llm.ptq`, quant-modes table) | moved to `docs/internals/QUANT_PIPELINE.md` "## Producing NVFP4 outside imp-quantize" |
+| docs/BENCHMARKS.md | entire pre-rewrite file (all sweeps 2026-06 through 2026-09-08: three competitive re-sweeps, imp-vs-vLLM concurrency progression + nsys profiling attribution, batched-decode optimization history, full agentic-reliability tables) | moved verbatim to new `docs/archive/BENCHMARKS_PRE_V0.44.md`; current BENCHMARKS.md keeps only the latest number per section with date/commit/model/quant/command |
+| docs/QUANTIZATION.md | `#### What --calib does` (full AWQ transform/fold mechanism, calibration-file provenance) | new `docs/archive/QUANTIZATION_AWQ_FINDINGS.md` |
+| docs/QUANTIZATION.md | `#### Head-to-head against a Modelopt export` | archive; one-line summary (9.9252 vs 10.0301, Qwen3-14B) kept in QUANTIZATION.md Quality section |
+| docs/QUANTIZATION.md | `#### Calibrating a model that will not fit, and what it exposed` | archive |
+| docs/QUANTIZATION.md | "Why it flips between 1.7B and 14B" group-interaction tables | archive; production rule (`--calib-groups BD` on wide-GQA) kept in QUANTIZATION.md |
+| docs/QUANTIZATION.md | "Splitting the tie... REFUTED" + "second variant... REFUTED" | archive |
+| docs/QUANTIZATION.md | `#### Fused layers share one tensor scale` deep measurement (29.42/30.40/31.05 PPL) | archive; one-row mention kept in QUANTIZATION.md Roles table |
+| docs/QUANTIZATION.md | `#### Roles that stay full precision, and why` (RMSNorm-offset root cause investigation, gate-share PPL tables) | archive; short Roles table kept in QUANTIZATION.md |
+| docs/QUANTIZATION.md | `#### MoE, and two roles that must stay full precision` (bisection table, gpt-oss/Gemma-4 destack quality numbers) | archive; one Roles-table row kept in QUANTIZATION.md |
+| docs/QUANTIZATION.md | `#### Refuted: micro-scale search` | archive; one-line pointer kept in "Choosing a quant" |
+| docs/QUANTIZATION.md | `### NVFP4 internal pipeline` (dense/MoE pipeline diagrams) | merged into `docs/internals/QUANT_PIPELINE.md` "## NVFP4 walkthrough" |
+| docs/QUANTIZATION.md | `#### What the loader enforces` deep example (Nemotron-3.5-Lightning case, `config_groups`, `targets`, `NVFP4 inventory:` log line) | condensed in QUANTIZATION.md; full mechanics moved to `docs/internals/QUANT_PIPELINE.md` "## Loader enforcement (NVFP4 checkpoints)" |
+| docs/QUANTIZATION.md | Modelopt CLI workflow (`pip install`, `python -m modelopt.llm.ptq`, quant-modes table) | moved to `docs/internals/QUANT_PIPELINE.md` "## Producing NVFP4 outside imp-quantize" |
 
 ### 2. Corrected facts
 
@@ -277,10 +277,10 @@ generic pointer to that file. Flagging for the orchestrator in case another agen
 |---|---|---|---|---|
 | docs/PERF.md | `moe.expert_cache_budget_pct` default | "Default stays 15" | Default is `0` (automatic: free VRAM minus allocator headroom and a state/KV floor), since #2069; flat 15% pre-#2069 starved a 56 GiB host-resident model | `src/core/config/moe.h:26` comment; `1383e87d` (#2069) confirmed ancestor of base commit `9cbb8004` via `git merge-base --is-ancestor` |
 | docs/PERF.md | line citation for MoE host-offload measurement (23.3 vs 384.0 tok/s) | `LIMITATIONS.md:108-110` | `LIMITATIONS.md:64` | `grep -n "23.3\|384.0" docs/LIMITATIONS.md` |
-| docs/PERF.md | line citation for #1669 withdrawn-row story | `roadmap.md:655` | `roadmap.md` (no line number) | `docs/roadmap.md` is 448 lines total, `:655` is out of range; could not locate the exact current line, dropped the number per instructions |
-| docs/quantization.md | code citation for the AWQ tie-statistic inflation mechanism | `awq_plan.cpp:266-277` | `awq_plan.cpp:163-174` | read `tools/imp-quantize/awq_plan.cpp`; the max-reduction "tie" logic (`site_statistic`/`spread` lambda) is at 135-179, not 266-277 (which is mid-`search_group_scale` call, unrelated) |
-| docs/quantization.md | KV-cache chunked-prefill gather function names | `paged_kv_gather_*_to_fp16` (glob) | `paged_kv_gather_{nvfp4_to_fp16,mxfp4_kv_to_fp16}` (exact names) | `grep -n paged_kv_gather src/compute/kv_gather.h`; the MXFP4 symbol is `paged_kv_gather_mxfp4_kv_to_fp16`, the glob does not match it |
-| docs/quantization.md | link text for the models doc | `` `supported-models.md` `` (text) linking to `MODELS.md` | `` `MODELS.md` `` | the file is `docs/MODELS.md`; old link text named a file that does not exist |
+| docs/PERF.md | line citation for #1669 withdrawn-row story | `ROADMAP.md:655` | `ROADMAP.md` (no line number) | `docs/ROADMAP.md` is 448 lines total, `:655` is out of range; could not locate the exact current line, dropped the number per instructions |
+| docs/QUANTIZATION.md | code citation for the AWQ tie-statistic inflation mechanism | `awq_plan.cpp:266-277` | `awq_plan.cpp:163-174` | read `tools/imp-quantize/awq_plan.cpp`; the max-reduction "tie" logic (`site_statistic`/`spread` lambda) is at 135-179, not 266-277 (which is mid-`search_group_scale` call, unrelated) |
+| docs/QUANTIZATION.md | KV-cache chunked-prefill gather function names | `paged_kv_gather_*_to_fp16` (glob) | `paged_kv_gather_{nvfp4_to_fp16,mxfp4_kv_to_fp16}` (exact names) | `grep -n paged_kv_gather src/compute/kv_gather.h`; the MXFP4 symbol is `paged_kv_gather_mxfp4_kv_to_fp16`, the glob does not match it |
+| docs/QUANTIZATION.md | link text for the models doc | `` `supported-models.md` `` (text) linking to `MODELS.md` | `` `MODELS.md` `` | the file is `docs/MODELS.md`; old link text named a file that does not exist |
 | docs/internals/QUANT_PIPELINE.md | link text for the architecture doc | `architecture.md` | `ARCHITECTURE.md` | actual file is `docs/internals/ARCHITECTURE.md` |
 | docs/internals/QUANT_PIPELINE.md | TurboQuant retirement doc pointer | `turboquant_retired_2026_05_17.md` (named as a file) | "(PR #251)" | `find . -iname "*turboquant*"` found no such file anywhere in the repo; `docs/archive/README.md` records the retirement as the `turboquant_fp8_gap` plan memo referencing PR #251, not a standalone file at that path |
 
@@ -311,12 +311,12 @@ generic pointer to that file. Flagging for the orchestrator in case another agen
 - `docs/audit/AUDIT_ARCH_2026_07_29.md` answer 5 / 3.50% citation in PERF.md: confirmed present.
 - Ran `scripts/docs_lint.py` (in `imp:toolchain` container) after every edit pass: fixed all
   paragraph->2-sentence violations in the four files (PERF.md 8, BENCHMARKS.md 13,
-  quantization.md 8, QUANT_PIPELINE.md 3) via semicolon-merging or converting to
+  QUANTIZATION.md 8, QUANT_PIPELINE.md 3) via semicolon-merging or converting to
   tables/bullets; zero forbidden tokens (tcgen05/TMEM/wgmma/sm_100/sm_90/Hopper); zero
   em/en dashes in any of the four rewritten files (archive files kept verbatim, not scrubbed,
   per the "move verbatim, not rewritten" instruction).
 - `fc.sh` fact-loss check against base `9cbb8004`: 0 missing tokens for BENCHMARKS.md; the
-  remaining "missing" tokens for PERF.md (2), quantization.md (3) and QUANT_PIPELINE.md (2) are
+  remaining "missing" tokens for PERF.md (2), QUANTIZATION.md (3) and QUANT_PIPELINE.md (2) are
   exactly the 8 corrections in table 2 above (old, now-wrong strings no longer appear, by design).
 
 ### Return
@@ -325,21 +325,21 @@ generic pointer to that file. Flagging for the orchestrator in case another agen
 |---|---|---|---|
 | docs/PERF.md | 246 -> 250 (budget <=250) | 2 (both logged corrections) | 3 |
 | docs/BENCHMARKS.md | 882 -> 297 (budget <=300) | 0 | 0 (all facts preserved via archive) |
-| docs/quantization.md | 552 -> 200 (budget <=200) | 3 (all logged corrections) | 5 |
+| docs/QUANTIZATION.md | 552 -> 200 (budget <=200) | 3 (all logged corrections) | 5 |
 | docs/internals/QUANT_PIPELINE.md | 67 -> 147 (budget <=250) | 2 (both logged corrections) | 2 |
-| docs/archive/benchmarks_pre_v0.44.md | new, 890 lines | n/a (record, no lint) | 0 |
-| docs/archive/quantization_awq_findings.md | new, 299 lines | n/a (record, no lint) | 1 (fixed a truncation bug in my own first draft: the Roles-full-precision section had been cut one line short mid-sentence, restored) |
+| docs/archive/BENCHMARKS_PRE_V0.44.md | new, 890 lines | n/a (record, no lint) | 0 |
+| docs/archive/QUANTIZATION_AWQ_FINDINGS.md | new, 299 lines | n/a (record, no lint) | 1 (fixed a truncation bug in my own first draft: the Roles-full-precision section had been cut one line short mid-sentence, restored) |
 
 Nothing for the orchestrator to fix in other agents' files from my side: I did not touch or add
 links into [`docs/usage.md`](https://github.com/kekzl/imp/blob/7df8333d2f43b99139e13370d95d36589cc98365/docs/usage.md)/`docs/API.md`/the not-yet-created `docs/CONFIG.md`/`docs/API_FEATURES.md`.
-My files link to `docs/MODELS.md`, `docs/PERF.md`, `docs/BENCHMARKS.md`, `docs/roadmap.md`,
+My files link to `docs/MODELS.md`, `docs/PERF.md`, `docs/BENCHMARKS.md`, `docs/ROADMAP.md`,
 `docs/LIMITATIONS.md`, `docs/QUICKSTART.md`, `../README.md`, `internals/ARCHITECTURE.md`,
-`internals/BENCHMARKING.md`, `archive/performance_2026_05.md` (pre-existing), and the two new
+`internals/BENCHMARKING.md`, `archive/PERFORMANCE_2026_05.md` (pre-existing), and the two new
 archive files - all verified to exist. `docs/internals/QUANT_PIPELINE.md` gained two new
 top-level sections (Loader enforcement, Producing NVFP4 outside imp-quantize) and a renamed
-"NVFP4 walkthrough" section (was "NVFP4 internal pipeline" inside quantization.md); if another
-agent's file links to the old `quantization.md#nvfp4-internal-pipeline` anchor, it needs
-updating to `internals/QUANT_PIPELINE.md#nvfp4-walkthrough`. `docs/quantization.md`'s "Formats
+"NVFP4 walkthrough" section (was "NVFP4 internal pipeline" inside QUANTIZATION.md); if another
+agent's file links to the old `QUANTIZATION.md#nvfp4-internal-pipeline` anchor, it needs
+updating to `internals/QUANT_PIPELINE.md#nvfp4-walkthrough`. `docs/QUANTIZATION.md`'s "Formats
 and where they show up" table combined the five GGUF Q*-quant rows into one row - if another
 file counts on individual anchors/rows there, none existed (plain table, no per-row anchors).
 
@@ -351,10 +351,10 @@ fc.sh baseline: 9cbb8004. Final missing-token counts (full DST set): MEMORY.md 9
 
 | file | deleted or moved section | fact preserved where |
 |---|---|---|
-| MEMORY.md | `0. The defect` | moved verbatim to `docs/archive/memory_census_2026.md` |
-| MEMORY.md | `A1. Current-state inventory` (A1.1-A1.7) | moved verbatim to `docs/archive/memory_census_2026.md` |
-| MEMORY.md | `A7. Migration plan` | moved verbatim to `docs/archive/memory_census_2026.md` |
-| MEMORY.md | `B0. Implementation log` (Landed, I1 allowlist baseline, Divergences D1-D16, B1-B8) | moved verbatim to `docs/archive/memory_census_2026.md` |
+| MEMORY.md | `0. The defect` | moved verbatim to `docs/archive/MEMORY_CENSUS_2026.md` |
+| MEMORY.md | `A1. Current-state inventory` (A1.1-A1.7) | moved verbatim to `docs/archive/MEMORY_CENSUS_2026.md` |
+| MEMORY.md | `A7. Migration plan` | moved verbatim to `docs/archive/MEMORY_CENSUS_2026.md` |
+| MEMORY.md | `B0. Implementation log` (Landed, I1 allowlist baseline, Divergences D1-D16, B1-B8) | moved verbatim to `docs/archive/MEMORY_CENSUS_2026.md` |
 | MEMORY.md | A3.1 VMM WSL2 spike raw probe table (`0.4`, `0x2000000000`, `13030`, `2016`, `VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED=1`, `cuMemCreate`, `cuMemMap`, `cuMemSetAccess`, `commit(new_total)`) | condensed to one summary table row ("24 GiB reserve costs 0 MiB physical; commit granularity 2 MiB..."); full probe table is in the pre-campaign doc history (git blame on this section) - not otherwise archived, logged here as the record |
 | MEMORY.md | A3.2 growth-guard implementation detail (`do_acquire()`, `do_commit()`, `do_commit_range()`, the `--wrap` interposer wrapping `cudaMalloc*`) | condensed to "commit()/commit_range() are guarded the same way as acquisition"; mechanism kept, wrapper-function names and interposer detail dropped for budget |
 | MEMORY.md | A4.3 example `PlanFailure::report()` output box (`35952`, `3345`, `25600`, `6144`, `3072`, `1680`, `mode-2`) | condensed to the properties table ("Fails at load time with an itemised report... plus the three largest levers"); the illustrative numbers were a worked example, not a measurement, so dropping them loses no fact - PlanFailure's `report()`/`lines()`/`levers` shape is still stated in the code block |
@@ -363,10 +363,10 @@ fc.sh baseline: 9cbb8004. Final missing-token counts (full DST set): MEMORY.md 9
 | MEMORY.md | A5.3 pre-migration static identifiers (`gemm.cu:s_workspace`, `gemm.cu:s_bench_scratch`, `gemm_cutlass_sm120.cu:s_cutlass_workspace`, `gemm_nvfp4_cutlass_sm120_impl`, `executor_perplexity.cu`) | mechanism and the 488 MiB / 152 320 B figures kept; the specific pre-move static-variable names and one co-caller file dropped (`CutlassWorkspaceContract` and `executor_forward.cu`/`gemm_nvfp4_cutlass_sm120_workspace(M, N, K)` were restored) |
 | MEMORY.md | A5.4 (`VisionPipeline::init()`, `engine_qwen3vl.cpp`, `vision_pipeline.cpp:97`) | condensed to one paragraph naming the design decision and the +1610 MiB figure; the raw-`cudaMalloc`-fallback hot-path-hole callout and its file:line dropped |
 | MEMORY.md | A6 (`HostPinnedAllocator`, `JsonConstrainer::init`, `mtp_k=0`, `AllocPhase::Serving` as a joined token, `RequestStatus::CANCELLED`) | `FakeBackend` capability list and V1-V9 table kept; specific I2-measurement call-site names dropped (belong to the archived B7 log) |
-| MEMORY.md | Invariant-compliance sub-measurements (`499`, `275`, `582`, `638`, `696`, `7460`, `864`, `984`, `309`, `2239`, `27.7`, `98.3`, `82.5`, `102.0`, `292.7`, `293.4`, `32607`, `4182`, `report_library_reserve()`, `engine_weight_upload.cpp:278`, `engine_kv_cache_init.cpp:370`) | verdict + target kept per invariant (I1-I7 table); the B-numbered measurement trail behind each "partial" is in the archived B0 log (`docs/archive/memory_census_2026.md`, "Invariants now under test" / per-invariant B-refs) |
+| MEMORY.md | Invariant-compliance sub-measurements (`499`, `275`, `582`, `638`, `696`, `7460`, `864`, `984`, `309`, `2239`, `27.7`, `98.3`, `82.5`, `102.0`, `292.7`, `293.4`, `32607`, `4182`, `report_library_reserve()`, `engine_weight_upload.cpp:278`, `engine_kv_cache_init.cpp:370`) | verdict + target kept per invariant (I1-I7 table); the B-numbered measurement trail behind each "partial" is in the archived B0 log (`docs/archive/MEMORY_CENSUS_2026.md`, "Invariants now under test" / per-invariant B-refs) |
 | MEMORY.md | Provenance branch name `fix/1104-json-number-grammar` | the measurement conditions sentence is kept without the exact branch name; branch name is in the archived A1 Provenance section verbatim |
 | MEMORY.md | `src/memory/vram_query.{h,cpp}` as a joined brace token | file is cited twice in the rewritten A4 section as `src/memory/vram_query.h` (no `.cpp` in the brace) - same file, narrower citation |
-| KERNELS.md | "REFUTED (2026-06-17)" occupancy follow-up narrative | moved verbatim to `docs/archive/kernels_refuted_2026.md` |
+| KERNELS.md | "REFUTED (2026-06-17)" occupancy follow-up narrative | moved verbatim to `docs/archive/KERNELS_REFUTED_2026.md` |
 | KERNELS.md | FA2 kernel template parameter list `<Bq, HD, FP16QK, F16ACC, BKV, TWOSLOT, PVF16, …>` and "dispatcher bands the tile config by grid-fill" | dropped; section 2's tiling spec (Bq/Bkv/HD/`__launch_bounds__`) and the kernel table's file/role already state the shape this summarized |
 | PROFILING.md | Mission, Phase 0-5, Deliverables, Constraints (the whole phase-plan narrative) | moved verbatim to `docs/plans/2026-06-profiling-campaign.md` (one-line header comment added, no lint there) |
 | ARCHITECTURE.md | inline attention-dispatcher decision snippet and vars (`attention-dispatch.md` display text, `attention.fa2_hd256_bkv=32`, `hd ∉ {128, 256}`, `0.53`) | removed: duplicate of owner `ATTENTION_DISPATCH.md`, which already states (its own text) that this exact inline snippet was wrong for six weeks - see corrected-facts table |
@@ -382,7 +382,7 @@ fc.sh baseline: 9cbb8004. Final missing-token counts (full DST set): MEMORY.md 9
 | MEMORY.md | `BlockPool` template shape | `template <size_t Stride> class BlockPool` | stride is a runtime constructor argument, not a template parameter | `src/memory/block_pool.h:70` (`class BlockPool {`); matches the tree's own D2 divergence note |
 | MEMORY.md | Cross-tier ownership type | `Owned<T, Tier>` compile-time-tagged handle exists | not implemented; `StableSpan<T>` + a runtime `RegionTag` + `generation()` counter on the arena is what exists, cross-tier smuggling caught at runtime not compile time | `grep -rln "class Owned" src/memory/` = 0 hits; `src/memory/arena.h:76-81` (`RegionTag tag()`, `generation()`); matches the tree's own D1 divergence note |
 | MEMORY.md | Debug-build phase-guard behaviour | `IMP_ASSERT_FAIL` with tag and backtrace | `IMP_LOG_ERROR` + `std::abort()` (no such macro as `IMP_ASSERT_FAIL` in the tree) | `src/memory/backend.cpp:113-116` |
-| MEMORY.md | Release-build phase-guard counter name | `steady_state_allocations_total{tag}` | `steady_state_allocations(tag)` | `src/memory/backend.h:70-73`; `docs/audit/AUDIT_arch_2026.md:2916` already flags the old name as "a name that exists in no source file" |
+| MEMORY.md | Release-build phase-guard counter name | `steady_state_allocations_total{tag}` | `steady_state_allocations(tag)` | `src/memory/backend.h:70-73`; `docs/audit/AUDIT_ARCH_2026.md:2916` already flags the old name as "a name that exists in no source file" |
 | MEMORY.md | `kv_cache.growable` default | "off by default" | on by default (`growable_initial_pct` default 25, commits a fraction at startup and grows at admission) | `src/core/config/kv_cache.h:35-44` ("Default on") |
 | MEMORY.md | `--vram-budget` / `vram_query.h` status | "the rewriting view is retired with the heuristics that needed it" | still live: `vram_budget_install()` still rewrites what `cudaMemGetInfo` returns; `plan_memory()`'s `budget_bytes` is fed from the same distributable-VRAM probe rather than replacing it | `src/memory/vram_query.h:9-23`; `src/runtime/plan_shadow.cpp:20` |
 | ARCHITECTURE.md / SM120.md | TMA warp-specialized grouped GEMM on `sm_120a` | "unresolved and deliberately not claimed either way" (`OPEN_QUESTIONS.md` Q1 cited as open) | present on `sm_120a` native SASS, verified by `cuobjdump` on the shipped grouped-NVFP4 cubin (#1543); only the `compute_120f` PTX fallback loses it | `docs/audit/docs-rewrite/OPEN_QUESTIONS.md` CLOSED Q1 ("ANSWERED by #1543"); `CHANGELOG.md` #1543 entry |
@@ -417,8 +417,8 @@ None. Every fact removed from these 8 files in this pass was either condensed-fo
 | `docs/QUICKSTART.md` | 189 | 144 |
 | `docs/README.md` | 76 | 70 |
 | `docs/TROUBLESHOOTING.md` | 234 | 48 |
-| `docs/determinism.md` | 295 | 73 |
-| `docs/quantization.md` | 552 | 200 |
+| `docs/DETERMINISM.md` | 295 | 73 |
+| `docs/QUANTIZATION.md` | 552 | 200 |
 | [`docs/usage.md`](https://github.com/kekzl/imp/blob/7df8333d2f43b99139e13370d95d36589cc98365/docs/usage.md) | 487 | 0 |
 | `docs/CONFIG.md` | 0 | 258 |
 | `docs/API_FEATURES.md` | 0 | 208 |
@@ -431,7 +431,7 @@ None. Every fact removed from these 8 files in this pass was either condensed-fo
 | `docs/internals/PROFILING.md` | 193 | 101 |
 | `docs/internals/QUANT_PIPELINE.md` | 67 | 147 |
 | `docs/internals/SM120.md` | 105 | 109 |
-| `docs/internals/vision_gemma4v_spec.md` | 66 | 67 |
+| `docs/internals/VISION_GEMMA4V_SPEC.md` | 66 | 67 |
 | **total** | **7654** | **4074** |
 
 | item | count |

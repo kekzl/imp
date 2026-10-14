@@ -91,7 +91,7 @@ void BatchingEngine::submit(std::shared_ptr<ServerRequest> req) {
     req->t_submit = std::chrono::steady_clock::now();
     // After a device fault the worker is gone and nothing would ever pop this
     // request: finish it now so the handler answers 500 instead of parking on
-    // the queue until the client gives up (AUDIT_arch_2026 D-1).
+    // the queue until the client gives up (AUDIT_ARCH_2026 D-1).
     if (faulted_.load(std::memory_order_relaxed) || stop_requested_.load(std::memory_order_relaxed)) {
         req->push_finish("internal_error");
         return;
@@ -347,7 +347,7 @@ void BatchingEngine::worker_loop() {
             if (!pause_requested_.load(std::memory_order_relaxed)) {
                 // Move all pending requests to active
                 while (!pending_queue_.empty()) {
-                    // Per-request LoRA (AUDIT_arch_2026 E-1): the adapter is engine-global (executor pointer,
+                    // Per-request LoRA (AUDIT_ARCH_2026 E-1): the adapter is engine-global (executor pointer,
                     // decode graphs), so a request naming a different one waits until in-flight requests
                     // drain,
                     // then this thread switches and admits it. FIFO barrier: nothing behind it admits
@@ -398,7 +398,7 @@ void BatchingEngine::worker_loop() {
                     // queue_ms is closed when the scheduler puts the request into its first batch
                     // (Request::t_scheduled), not here: this queue drains every loop, so a stamp here would
                     // measure loop latency, never the wait behind max_batch_size and KV admission
-                    // (AUDIT_arch_2026 C-5).
+                    // (AUDIT_ARCH_2026 C-5).
                     engine->add_request(sr->request);
                     active_requests_.push_back(std::move(sr));
                 }
@@ -486,7 +486,7 @@ void BatchingEngine::worker_loop() {
         // A device fault no guard promoted to a throw (every IMP_CUDA_CHECK_* in the hot path is
         // log-only) is still in this thread's error slot. Probed before the tokens go out: a step that
         // faulted wrote no new tokens, so delivering its buffer would replay the previous step's
-        // (AUDIT_arch_2026 D-1).
+        // (AUDIT_ARCH_2026 D-1).
         if (const cudaError_t probe = cudaPeekAtLastError(); imp::cuda_error_is_unrecoverable(probe)) {
             fail_active_requests_(std::string("engine->step() left a sticky CUDA error: ") +
                                       cudaGetErrorString(probe),

@@ -154,5 +154,5 @@ plan ("verify ratio under ~1.3x") was never met.
 Superseded for the multi-candidate question by
 [`2026-08-31-mtp-multicandidate-hybrid.md`](2026-08-31-mtp-multicandidate-hybrid.md),
 which measured the trained MTP head as the drafter instead: same verdict,
-`speculative.mtp_tree_width` default 1. Standing row: `docs/roadmap.md` Closed,
+`speculative.mtp_tree_width` default 1. Standing row: `docs/ROADMAP.md` Closed,
 "speculation tree".

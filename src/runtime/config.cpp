@@ -538,7 +538,7 @@ void seed_from_env(RuntimeConfig& cfg) {
         cfg.diagnostics.jump_trace = true;
     if (const char* e = std::getenv("IMP_PPL_DUMP"))
         cfg.diagnostics.ppl_dump = e;
-    // diagnostics.worker_timing: IMP_WORKER_TIMING '1' (AUDIT_arch_2026 J-10).
+    // diagnostics.worker_timing: IMP_WORKER_TIMING '1' (AUDIT_ARCH_2026 J-10).
     if (const char* e = std::getenv("IMP_WORKER_TIMING"))
         cfg.diagnostics.worker_timing = parse_bool(e, cfg.diagnostics.worker_timing);
 }

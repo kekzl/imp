@@ -28,7 +28,7 @@ namespace imp {
 
 // The GGUF reader, value parser and tensor-info parser are the shared ones from
 // model/gguf_loader_internal.h. This file carried a hand-copied fork of all three from
-// before the bounds checks were added and never picked them up (AUDIT_arch_2026 F1-2).
+// before the bounds checks were added and never picked them up (AUDIT_ARCH_2026 F1-2).
 
 namespace {
 
@@ -297,7 +297,7 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
 
     // gemma4v is a structurally different encoder (RMSNorm blocks, per-head q/k/v norm, 2D
     // axial NEOX RoPE, sandwich post-norms, GeGLU FFN, scale-1 attention); configured here, the
-    // encoder branches on cfg.is_gemma4v. See docs/internals/vision_gemma4v_spec.md.
+    // encoder branches on cfg.is_gemma4v. See docs/internals/VISION_GEMMA4V_SPEC.md.
     {
         std::string projector;
         auto it = metadata.find("clip.projector_type");

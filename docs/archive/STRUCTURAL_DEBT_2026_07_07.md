@@ -1,8 +1,8 @@
 # Structural audit — 2026-07-07
 
 Fifth structural pass (priors: `structural_consistency_2026_06_06.md`,
-`structural_debt_2026_06_08/09`, `housekeeping_2026_06_13.md`,
-`vram_audit_2026_07_07.md`). Since the last full pass: 152 commits (PRs
+`structural_debt_2026_06_08/09`, `HOUSEKEEPING_2026_06_13.md`,
+`VRAM_AUDIT_2026_07_07.md`). Since the last full pass: 152 commits (PRs
 ~#650–#887), so this sweep focused on the surfaces added since mid-June —
 speculative decoding (suffix drafter, MTP verify, spec graph-capture), the
 server endpoints (`/v1/messages`, `/v1/responses`, `/v1/embeddings`), and the

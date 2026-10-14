@@ -1,10 +1,10 @@
-# Open rows closed (moved out of docs/roadmap.md on 2026-09-16)
+# Open rows closed (moved out of docs/ROADMAP.md on 2026-09-16)
 
 Record. The rows below are the verdict text of the `## Open` items that had
-already closed by 2026-09-16 (1, 2, 4, 7, 13, 14, 15); `docs/roadmap.md`
+already closed by 2026-09-16 (1, 2, 4, 7, 13, 14, 15); `docs/ROADMAP.md`
 keeps one Closed row each with the headline number and the ref, and links here.
 
-Text is verbatim as of `docs/roadmap.md` at commit `cf96f768`. `path:line`
+Text is verbatim as of `docs/ROADMAP.md` at commit `cf96f768`. `path:line`
 citations inside are as they stood that day and are not gated in this file.
 
 | # | item | state | ref |

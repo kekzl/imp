@@ -328,7 +328,7 @@ TEST(QuantizeCheckpointOut, RefusesCompressedTensorsWithoutAConfigJson) {
 
 // vLLM refuses lm_head.weight_global_scale outright; imp reads it fine (byte-identical
 // greedy, since its own default already quantizes a native head at load: +0.99% PPL for
-// +10.4% decode, docs/quantization.md). Defensible for an imp-only checkpoint, useless for a
+// +10.4% decode, docs/QUANTIZATION.md). Defensible for an imp-only checkpoint, useless for a
 // portable one; the caller must be warned before conversion, not after.
 TEST(QuantizeCheckpointOut, WarnsOnlyWhenLmHeadMeetsCompressedTensors) {
     EXPECT_NE(portability_warning(OutputFormat::CompressedTensors, /*quantize_lm_head=*/true), nullptr);
@@ -536,7 +536,7 @@ TEST(QuantizeFp8Head, LoaderAcceptsTheWrittenHeadOnly) {
 }
 
 TEST(QuantizeFp8Head, Qwen38HeadIsHalfTheBf16Bytes) {
-    // docs/roadmap.md row 104: 248320 x 5120, BF16 2425.0 MiB -> 1213.4 MiB.
+    // docs/ROADMAP.md row 104: 248320 x 5120, BF16 2425.0 MiB -> 1213.4 MiB.
     const size_t fp8 = fp8_head_bytes(248320, 5120);
     EXPECT_EQ(fp8, 1272391680u);
     EXPECT_NEAR(fp8 / 1048576.0, 1213.4, 0.05);

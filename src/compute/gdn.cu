@@ -21,7 +21,7 @@ __global__ void gdn_scan_decode_kernel(const float*, const float*, const float*,
 // H[0..state_size-1,d]. Shared memory: K_norm[SS]+Q_norm[SS]+reduce[block_dim].
 // SPLIT: threads cooperating on one state column. SPLIT=1 at SS=128 needs 128 regs for state
 // alone and ptxas spills; SPLIT=2 halves the state per thread, partners in adjacent lanes reduce
-// via one __shfl_xor_sync. Every HD=SS=128 launch runs SPLIT=2 (launch_scan128, AUDIT_arch_2026
+// via one __shfl_xor_sync. Every HD=SS=128 launch runs SPLIT=2 (launch_scan128, AUDIT_ARCH_2026
 // A2-3); HD=SS=64 stays at 1.
 // StateT: h_state storage type, float (default) or bf16 (gdn.state_bf16, halves state traffic).
 // All arithmetic stays FP32 in registers; only loads/stores convert. FP16 state was refuted for

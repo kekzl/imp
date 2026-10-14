@@ -344,7 +344,7 @@ TEST(CheckpointLimits, DeepChatTemplateIsRejectedRatherThanOverflowingTheStack) 
 }
 
 // ---------------------------------------------------------------------------
-// AUDIT_arch_2026 F1-9 - the evaluation side of the same template
+// AUDIT_ARCH_2026 F1-9 - the evaluation side of the same template
 // ---------------------------------------------------------------------------
 
 TEST(CheckpointLimits, RecursiveMacroIsRefusedRatherThanOverflowingTheStack) {
@@ -388,7 +388,7 @@ TEST(CheckpointLimits, HugeLoopsAreRefusedRatherThanExhaustingMemory) {
 }
 
 // ---------------------------------------------------------------------------
-// AUDIT_arch_2026 F1-10 - the shared JSON parser and the config.json dims
+// AUDIT_ARCH_2026 F1-10 - the shared JSON parser and the config.json dims
 // ---------------------------------------------------------------------------
 
 TEST(CheckpointLimits, MalformedJsonNumbersAreParseErrorsNotExceptions) {

@@ -1,6 +1,6 @@
 # Exact pins with hashes. `>=` is a mutable pin and a bare `==` still lets the
 # index serve different bytes for the same version, so pip verifies every
-# artefact it downloads against this file (AUDIT_arch_2026 H-6/H-8). A single
+# artefact it downloads against this file (AUDIT_ARCH_2026 H-6/H-8). A single
 # --hash here puts pip into --require-hashes mode: an unpinned transitive dep
 # fails the install instead of floating.
 #

@@ -95,7 +95,7 @@ void send_json_error(httplib::Response& res, int status, const char* type, const
                      const char* param = nullptr, const char* code = nullptr);
 
 // kMaxPromptBytesPerToken=16: --max-input-tokens is checked AFTER tokenizing, and tokenizing
-// itself is the cost (BPE walk over a 100MiB body on a worker thread, AUDIT_arch_2026 F2-9) -
+// itself is the cost (BPE walk over a 100MiB body on a worker thread, AUDIT_ARCH_2026 F2-9) -
 // this pre-refuses a body that cannot pass the token check anyway. 16 bytes/token is a bound, not
 // an estimate (English ~4, code ~3; only long whitespace runs beat it).
 inline constexpr size_t kMaxPromptBytesPerToken = 16;

@@ -201,7 +201,7 @@ struct Request {
     // When the scheduler moved this request into its first prefill batch
     // (epoch = never). The server's queue histogram measures up to here:
     // the wait behind max_batch_size and KV admission, not the batching
-    // worker's loop latency (AUDIT_arch_2026 C-5).
+    // worker's loop latency (AUDIT_ARCH_2026 C-5).
     std::chrono::steady_clock::time_point t_scheduled{};
     // Context this request LOST to StreamingLLM eviction mid-generation (KV of the middle of
     // its own conversation freed to keep decoding). The engine only WARNs, which the caller
@@ -334,7 +334,7 @@ struct Request {
     size_t vision_content_hash = 0;
     // The LoRA adapter this request asks for (engine id, 0 = base). The
     // adapter is engine-global, so the batching worker switches to it before
-    // admission and only once nothing else is in flight (AUDIT_arch_2026 E-1).
+    // admission and only once nothing else is in flight (AUDIT_ARCH_2026 E-1).
     int lora_id = 0;
     // Control vector (roadmap row 114): engine id (0 = none) and its scale; switched like lora_id.
     int cvec_id = 0;

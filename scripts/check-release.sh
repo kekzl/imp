@@ -3,8 +3,8 @@
 # verify-fast (tests+perf+smoke), make test-server (HTTP surface), make test-spec-fidelity
 # (captured verify chunk), make bench-competitive (vs a competitor, GOAL.md release bar 2).
 # SKIP_VERIFY=1 skips all four; the summary then reports what actually ran instead of "all
-# gates passed" (the Release hygiene CI job runs this way, no GPU there). Exit 0 always: the
-# summary line, not the exit code, is what a human reads before tagging.
+# gates passed" (the Release hygiene CI job runs this way, no GPU there). Exit 1 on any FAIL;
+# exit 0 with SKIP_VERIFY=1 still prints "NOT a release verdict".
 
 set -euo pipefail
 
@@ -24,7 +24,7 @@ section() { echo; echo "${YLW}== $* ==${RST}"; }
 pass()    { echo "${GRN}PASS${RST} $*"; }
 fail()    { echo "${RED}FAIL${RST} $*"; FAIL=$((FAIL+1)); }
 
-# ---------------------------------------------------------------- 1. doc links
+# ---------------------------------------------------------------- doc links
 # Every (./*.md or docs/*.md) link of the form ](path) — where path looks
 # like a relative file — must resolve to a tracked file.
 section "doc links"
@@ -98,7 +98,7 @@ while IFS= read -r ref; do
         DOCBROKEN=$((DOCBROKEN+1))
     fi
 done <<< "$BAREREFS"
-# Floor for the same reason 1c has one: "0 names, all resolving" is a pass that
+# Floor for the same reason as the settled-prior anchors: "0 names, all resolving" is a pass that
 # checked nothing. There were 33 distinct bare names when this was written.
 if [ "$BARECHECKED" -lt 10 ]; then
     fail "bare-*.md scan checked only $BARECHECKED name(s) — the corpus or the pattern broke"
@@ -108,7 +108,7 @@ fi
 
 # docs/audit/SETTLED.md is the ledger an audit reads before generating hypotheses; each entry
 # names the file that makes it settled. A dead anchor means the entry is a stale prior, not a
-# true statement about the engine. Same shape as 1b, different corpus.
+# true statement about the engine. Same shape as the doc-pointer scan, different corpus.
 section "settled-prior anchors"
 if [ ! -e docs/audit/SETTLED.md ]; then
     fail "docs/audit/SETTLED.md is missing — the audit priors ledger is load-bearing"
@@ -206,7 +206,7 @@ else
     fi
 fi
 
-# --------------------------------------------------------- 2. personal paths
+# --------------------------------------------------------- personal paths
 # Flag real personal paths but allow the standard /home/user/ placeholder.
 section "personal path leaks"
 LEAKS=$(git ls-files \
@@ -220,7 +220,7 @@ else
     fail "personal paths in tracked files"
 fi
 
-# ----------------------------------------------------------- 3. secret-shaped
+# ----------------------------------------------------------- secret-shaped
 section "credential-shaped strings"
 SECRETS=$(git ls-files | xargs grep -lE 'sk-[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}' 2>/dev/null || true)
 if [ -z "$SECRETS" ]; then
@@ -230,7 +230,7 @@ else
     fail "potential secrets in tracked files"
 fi
 
-# ------------------------------------------------- 4. tracked-but-ignorable
+# ------------------------------------------------- tracked-but-ignorable
 section "tracked binaries / build artefacts"
 SUSPECTS=$(git ls-files | grep -E '\.(o|so|a|dylib|dll|fatbin|cubin|gguf|safetensors|bin|pt|onnx|nsys-rep|ncu-rep|sqlite|qdrep)$' || true)
 if [ -z "$SUSPECTS" ]; then
@@ -240,7 +240,7 @@ else
     fail "tracked files match build/weight patterns"
 fi
 
-# ------------------------------------------------------- 5. license sanity
+# ------------------------------------------------------- license sanity
 section "license"
 if [ -f LICENSE ] && grep -q "MIT" LICENSE && grep -q "MIT" README.md; then
     pass "LICENSE present and README mentions MIT"
@@ -248,7 +248,7 @@ else
     fail "LICENSE missing or README license claim mismatched"
 fi
 # nvfp4_quant_hw.cu (Apache-2.0, adapted from SageAttention) and src/compute/apa/ (MPL-2.0, kekzl/apa)
-# require their license text in every distribution (AUDIT_arch_2026 H-7).
+# require their license text in every distribution (AUDIT_ARCH_2026 H-7).
 # Four-way pin: file, content, OCI label, README pointer.
 if [ -f THIRD_PARTY_LICENSES.md ] && grep -q "Apache License" THIRD_PARTY_LICENSES.md \
    && grep -q "SageAttention" THIRD_PARTY_LICENSES.md \
@@ -275,12 +275,12 @@ else
     fail "version drift — CMakeLists '$CM_VER', CHANGELOG '${CL_VER:-none}', BENCHMARKS '${BM_VER:-none}'"
 fi
 
-# Covers every living doc (roadmap.md, docs/*.md, docs/internals/*.md, root docs); archive/,
+# Covers every living doc (ROADMAP.md, docs/*.md, docs/internals/*.md, root docs); archive/,
 # plans/, audit/ excluded (their line numbers describe the commit they document).
 # Fails on a gone or ambiguous citation anchor and a renamed bare docs/*.md name; line drift
 # only warns (#2231). Same gate runs in the
 # pre-commit/pre-push hooks and the Build job (citations selection).
-section "roadmap citations"
+section "living-doc citations"
 if python3 scripts/check_doc_citations.py . >/tmp/imp_check_citations.log 2>&1; then
     pass "living-doc citations resolve"
 else
@@ -302,7 +302,7 @@ else
     pass "[Unreleased] has no repeated '###' heading"
 fi
 
-# ----------------------------------------------- 6. defer to make verify-fast
+# ----------------------------------------------- defer to make verify-fast
 section "make verify-fast"
 if [ "${SKIP_VERIFY:-0}" = "1" ]; then
     echo "  (skipped via SKIP_VERIFY=1)"
@@ -320,8 +320,8 @@ else
     fi
 fi
 
-# The HTTP surface, untouched by verify-fast: the only battery driving handlers.cpp and
-# batching_engine against a live model end to end.
+# The HTTP surface, untouched by verify-fast: the only battery driving tools/imp-server/handlers*.cpp
+# against a live model end to end.
 section "make test-server"
 if [ "${SKIP_VERIFY:-0}" = "1" ]; then
     echo "  (skipped via SKIP_VERIFY=1)"
@@ -373,8 +373,8 @@ else
     MODEL_STAGES_RUN=$((MODEL_STAGES_RUN+1))
     if RELEASE_BAR=1 make bench-competitive >/tmp/imp_check_release_bench.log 2>&1; then
         # Surface the scope, not just the verdict. A bare green line here would
-        # be read as "the seven-hero blocker is satisfied" by anyone who does
-        # not open the script, and two of the seven cannot be contested at all.
+        # be read as "the hero blocker is satisfied" by anyone who does
+        # not open the script, and the NVFP4-only heroes cannot be contested at all.
         sed -n '/cannot contest/,/^$/p' /tmp/imp_check_release_bench.log | sed 's/^/  /' || true
         grep -A2 '^RELEASE BAR:' /tmp/imp_check_release_bench.log | sed 's/^/  /' || true
         pass "make bench-competitive (release bar 2)"

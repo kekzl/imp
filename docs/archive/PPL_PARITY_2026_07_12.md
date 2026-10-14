@@ -83,7 +83,7 @@ as expected for an lm_head effect.
   NVFP4, Gemma-4 NVFP4, Qwen3-14B NVFP4): no llama.cpp counterpart at the same
   quant — the bar is only measurable on shared GGUF quants.
 - **gpt-oss-20b MXFP4:** imp ships MXFP4 in GGUF under a proprietary tensor
-  type code; llama.cpp reads it as a removed format (docs/quantization.md) —
+  type code; llama.cpp reads it as a removed format (docs/QUANTIZATION.md) —
   not comparable.
 - **Nemotron-H:** no GGUF staged locally; NVFP4-only.
 - **Gemma-4-26B-A4B:** the llama.cpp reference itself reads PPL ≈ 309/330 on

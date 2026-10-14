@@ -421,7 +421,7 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
                     std::string url = part["image_url"].value("url", "");
                     // Each image part is decoded at full resolution on a worker thread, so the count is
                     // bounded
-                    // before the bytes are read (AUDIT_arch_2026 F2-4); the mmproj one-image rule applies on
+                    // before the bytes are read (AUDIT_ARCH_2026 F2-4); the mmproj one-image rule applies on
                     // top.
                     if (state.max_images > 0 &&
                         static_cast<int>(ctx.params.images.size()) >= state.max_images) {

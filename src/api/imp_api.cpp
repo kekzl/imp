@@ -170,7 +170,7 @@ static imp::QType map_dtype(ImpDType dt) {
 
 // KV cache accepts only 6 of 11 ImpDType values; reject invalid/out-of-range
 // dtypes here before the model loads, not after the FP16 kernel misreads them.
-// (AUDIT_arch_2026 G-4)
+// (AUDIT_ARCH_2026 G-4)
 static bool kv_cache_dtype_is_valid(ImpDType dt) {
     switch (dt) {
         case IMP_DTYPE_FP16:

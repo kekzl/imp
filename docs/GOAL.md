@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-10-15
+commit: 2a127345
 -->
 
 # imp - Goal Definition
@@ -25,7 +25,7 @@ Ranked, non-negotiable: anything below this bar is a bug.
 | # | Metric | Bar |
 |---|---|---|
 | 1 | Decode tok/s at batch=1 on RTX 5090 | Primary metric. Lead llama.cpp, vLLM, SGLang, ExLlamaV3, MLC-LLM on every shipped arch+quant |
-| 2 | Prefill tok/s at batch=1 | >= llama.cpp on dense NVFP4/SafeTensors (GGUF best-effort, release bar 3). MoE gap to vLLM closed and reversed: pp4096 +4 %, pp2048 +27 % (2026-06-13); Coder-30B pp512 ~19.4k vs vLLM ~18.5k (2026-07-22). Grouped-GEMM dated detail (Coder-30B-NVFP4, cold-median 5x5, 2026-05-23): pp512 17521 tok/s, pp2048 18573, tg128@512 273.24 (σ 0.09), tg128@2048 268.46 (σ 0.10); the #374 skip-gather moved pp512 14562->17521 (+20.3 %, was 1.14-1.32x behind vLLM pre-#374); vs vLLM 0.20.2 pp512 18500 = gap 1.056x snapshot, re-measured 2026-05-31/06-06 at the real ~1.4x (1.056x sat inside a 2.6x cuBLAS-restart variance band); compute near roofline, gap was prefill attention + grouped-GEMM occupancy (#558, closed, `docs/roadmap.md`) |
+| 2 | Prefill tok/s at batch=1 | >= llama.cpp on dense NVFP4/SafeTensors (GGUF best-effort, release bar 3). MoE gap to vLLM closed and reversed: pp4096 +4 %, pp2048 +27 % (2026-06-13); Coder-30B pp512 ~19.4k vs vLLM ~18.5k (2026-07-22). Grouped-GEMM dated detail (Coder-30B-NVFP4, cold-median 5x5, 2026-05-23): pp512 17521 tok/s, pp2048 18573, tg128@512 273.24 (σ 0.09), tg128@2048 268.46 (σ 0.10); the #374 skip-gather moved pp512 14562->17521 (+20.3 %, was 1.14-1.32x behind vLLM pre-#374); vs vLLM 0.20.2 pp512 18500 = gap 1.056x snapshot, re-measured 2026-05-31/06-06 at the real ~1.4x (1.056x sat inside a 2.6x cuBLAS-restart variance band); compute near roofline, gap was prefill attention + grouped-GEMM occupancy (#558, closed, `docs/ROADMAP.md`) |
 | 3 | TTFT at 512/2048/8192/32k prompt | Competitive with vLLM despite batch=1 focus |
 | 4 | VRAM efficiency | Fit larger models than competitors at equal quality; 32 GB serves up to ~70B dense. 80-120B-class MoE (small active set, hot experts resident, cold host-side): a target, not yet measured |
 | 5 | Quality | PPL / downstream eval parity with llama.cpp at the same quant; no silent regressions for speed |
@@ -52,11 +52,12 @@ Leading on 5090, no exceptions (realigned 2026-06-06, #549/#550; gpt-oss-20b clo
 | Qwen3.6-35B-A3B | NVFP4 | hybrid GDN+MoE daily driver, MTP head |
 | Gemma-4 26B-A4B (text+vision) | NVFP4 | multimodal + MoE hero |
 | Nemotron-H | NVFP4 | hybrid Mamba2+Attn+MoE flagship |
+| Qwen3.8-27B | NVFP4, Q4_K_M | dense-GDN flagship, text + images, README default |
 | gpt-oss-20b | MXFP4 | experts converted to NVFP4 at load, Harmony channels, tg ~315-345, pp512 ~16-19k |
 
-`check-release.sh` stage 9 runs `make bench-competitive` `RELEASE_BAR=1`, failing any hero leading llama.cpp by < 5 %.
+`check-release.sh` stage `make bench-competitive (release bar 2)` runs it with `RELEASE_BAR=1`, failing any hero leading llama.cpp by < 5 %.
 
-- Enforced over **5 of 7**: Coder-30B-A3B and Nemotron-H are NVFP4-only, llama.cpp has no NVFP4 path on `sm_120`, no shared-quant comparison exists; gate prints `N/7 contested`.
+- Enforced over **6 of 8**: Coder-30B-A3B and Nemotron-H are NVFP4-only, llama.cpp has no NVFP4 path on `sm_120`, no shared-quant comparison exists; gate prints `N/8 contested`.
 - Before 2026-08-21 enforced over 2 only (`perf_baseline.json`, `perf_baseline_north_star.json`); `docs/audit/DEBT_LEDGER_2026_08_21.md` (h).
 
 **Extended** - validated opportunistically, not release-blocking (2026-06-06): DeepSeek-R1-Distill-7B/14B (never benched, Qwen2/LLaMA arch); DeepSeek-V2-Lite MLA (supported, #802/#803, bf16 28 GB experts host-offloaded, PPL ~3 % of HF: imp 6.43 vs 6.25, 534-tok, post 2026-07-07 YaRN fix; teacher-forced, unaffected by the EOS id fix #2378); Gemma-3 27B (12B Q4_K_M + 4B-VL staged, 27B not); Phi-4 14B (NVFP4 staged, GGUF Q6_K not); Mixtral 8x7B (chat-template test only, never staged).
@@ -109,10 +110,10 @@ llama-bench methodology: pp512 + tg128 at minimum, plus pp8192/tg512 @ 16k ctx; 
    | `gemm.nvfp4_lm_head` | auto = FP8 per-row head from a 16-bit head (#2166), 8-bit GGUF head (Q8_0) at source precision (#2224); `"on"` = NVFP4, `"off"` = source | FP8 vs NVFP4 PPL 45k: Qwen3-8B 11.1108 -> 10.7623, 30B-A3B 11.8443 -> 11.3476, Flash-Next 4.6493 -> 4.4873 at -4.7 / -3.0 % tg128. Fallback for FP8-ineligible heads = NVFP4 net rule: ON native BF16/F16 + small dense GGUF heads (d_model<=4096): +6-16 % decode/+2.2-3.8 % PPL. OFF larger/MoE GGUF (reverse sign, `is_dense=false` arm; `is_gdn_hybrid` escapes to ON). Gemma-4-26B-A4B priced 2026-08-21: +7.4 % decode/+9.0 % PPL (245.31->263.44 tok/s, 251.23->273.90 PPL, 6465-token corpus), losing by its own rule; gpt-oss-20b MXFP4 same day: +10.2 %/+18.2 % (413.02->455.24 tok/s, 105.86->125.12 PPL), losing worse. Gemma-4 measured 258.96 before `63df2d30`, 245.24 after (this trade, not a regression) | #982 |
    | `gemm.fp8_attn_proj` gpt-oss | auto | +12.1 % decode (349.7->392.1); decode-only GEMV (M=1), not a PPL trade by construction, an nsys-verified `--perplexity` run executes zero FP8 kernels; opt-out `"off"`, `"qo"` middle mode | #984 |
 
-   2026-07-12 cross-engine measurement: with the LM-head opt-out imp is at parity (-0.8...+0.2 %) with llama.cpp on every comparable GGUF hero (`docs/archive/ppl_parity_2026_07_12.md`).
+   2026-07-12 cross-engine measurement: with the LM-head opt-out imp is at parity (-0.8...+0.2 %) with llama.cpp on every comparable GGUF hero (`docs/archive/PPL_PARITY_2026_07_12.md`).
 2. Decode tok/s leads llama.cpp by >= 5 % on every hero.
 3. Prefill tok/s >= llama.cpp on every dense NVFP4/SafeTensors hero. GGUF best-effort: Q4K-MMQ experiment (2026-05-28) showed the ceiling is architectural (ties cuBLAS ~4.3 % of peak, llama.cpp MMQ leads 1.3-2.4x); old GGUF bar dropped (2026-06-06, #550).
-4. Prefill tok/s >= 70 % of vLLM single-seq on every MoE hero - exceeded: +4-27 % (2026-06-13, re-verified 07-22, Coder-30B pp512 ~19.4k). #558 closed, `docs/roadmap.md`.
+4. Prefill tok/s >= 70 % of vLLM single-seq on every MoE hero - exceeded: +4-27 % (2026-06-13, re-verified 07-22, Coder-30B pp512 ~19.4k). #558 closed, `docs/ROADMAP.md`.
 5. No host syncs on the decode hot path (CI-enforced).
 6. OpenAI and Anthropic API compliance suites green.
 7. Agentic surface green (constrained-decode under degenerate sampler state, reasoning/Harmony parsing, prefix cache + long-context KV multi-turn, vision interleaves with text) and concurrency holds (tens of requests, TTFT/ITL in target, clean cancel, no single-stream regression).

@@ -42,7 +42,7 @@ void usage() {
         "                The ATTENTION groups (A, C) are what breaks on wide GQA:\n"
         "                Qwen3-14B (n_rep=5) ABCD 12.2634, BD 9.9068, round-to-\n"
         "                nearest 9.9849 PPL. Pass a subset to attribute a bad\n"
-        "                result. See docs/quantization.md.\n"
+        "                result. See docs/QUANTIZATION.md.\n"
         "  --lm-head [fp8|nvfp4|source]\n"
         "                how lm_head is written. fp8 (default for modelopt): per-row\n"
         "                E4M3 + F32 row scales, the head imp's gemm.nvfp4_lm_head=auto\n"

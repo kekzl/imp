@@ -56,7 +56,7 @@ struct MoEWorkspace {
     // Expert-activation histogram (diagnostics.moe_expert_hist), off unless the key names a
     // path. [n_layers*n_experts] device counters, incremented once per (token,k) routing
     // decision. Answers how skewed expert selection is, deciding whether a resident/host
-    // split of MoE experts can pay (docs/roadmap.md).
+    // split of MoE experts can pay (docs/ROADMAP.md).
     unsigned int* expert_hist = nullptr;
     int hist_layers = 0;
     int hist_experts = 0;

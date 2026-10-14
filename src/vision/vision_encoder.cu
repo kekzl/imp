@@ -789,7 +789,7 @@ bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream
 
 // gemma4v encoder: RMSNorm blocks, per-head q/k/v norm, 2D axial NEOX RoPE, sandwich
 // post-norms, GeGLU FFN, scale-1 attention, avg-pool(3) + sqrt(D) + std-affine + pre-proj
-// RMSNorm + linear projector. See docs/internals/vision_gemma4v_spec.md.
+// RMSNorm + linear projector. See docs/internals/VISION_GEMMA4V_SPEC.md.
 bool VisionEncoder::encode_impl_gemma4v(const half* d_pixels, half* d_output, cudaStream_t stream) {
     const auto& cfg = model_->config;
     int np = cfg.num_patches;

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # KV block size A/B on one binary (kv_cache.block_size=A vs B), alternating arms, spec-off,
-# tg128 per context length (AUDIT_arch_2026 B-5). The engine's auto rule (32 for
+# tg128 per context length (AUDIT_ARCH_2026 B-5). The engine's auto rule (32 for
 # n_kv_heads<=4, else 16) carried no measurement.
 # Block size moves the split-K count and table-walk length, so the effect grows with context:
 # 2048 alone can't see it. Run on a model of each GQA class.

@@ -83,7 +83,7 @@ struct WeightUploadRecord {
     bool raw_from_source = false;
 };
 
-// Warm-cache records are file-supplied (AUDIT_arch_2026 F1-3): alloc indices, byte offsets,
+// Warm-cache records are file-supplied (AUDIT_ARCH_2026 F1-3): alloc indices, byte offsets,
 // and the Tensor POD may come from a file another process replaced. Validates indices only
 // (caller already checked byte bounds); one bad record forces a cold load, never clamps.
 [[nodiscard]] inline bool weight_record_indices_ok(const WeightUploadRecord& rec, std::string* why) {

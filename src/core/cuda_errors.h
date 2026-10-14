@@ -1,5 +1,5 @@
 #pragma once
-// Sticky CUDA error classification (AUDIT_arch_2026 D-1, #874): a device
+// Sticky CUDA error classification (AUDIT_ARCH_2026 D-1, #874): a device
 // fault poisons the process-wide CUDA context, and hot-path IMP_CUDA_CHECK_*
 // is log-only, so without an explicit signal the server could log a cleared
 // error and still answer 200 with stale tokens.

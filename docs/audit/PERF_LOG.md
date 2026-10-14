@@ -4,7 +4,7 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
-## 2026-09-07 · KV block size as an operator key; the pool probes its own residency (AUDIT_arch_2026 B-5/B-6/B-7)
+## 2026-09-07 · KV block size as an operator key; the pool probes its own residency (AUDIT_ARCH_2026 B-5/B-6/B-7)
 
 Build: `make dev` (`build-dev/`, `imp:toolchain`), branch `mem/kv-block-size-residency` on 79e4cb1f.
 

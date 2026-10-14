@@ -120,7 +120,7 @@ TEST(WarmCacheTest, ColdLoadWritesCacheWarmBootTokenIdentical) {
     warm.down();
 }
 
-// AUDIT_arch_2026 F1-3: a record whose data_alloc indexes past the alloc table must not
+// AUDIT_ARCH_2026 F1-3: a record whose data_alloc indexes past the alloc table must not
 // restore. Layout (weight_cache_file.cpp v1): FileHeader 48 bytes, RecordHeader follows,
 // data_alloc is its int32 at byte 24; asserts the pre-flip value looks like a valid alloc
 // index so a layout change fails here, not vacuously.

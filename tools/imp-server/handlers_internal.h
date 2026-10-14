@@ -214,7 +214,7 @@ inline int cache_creation_tokens_(const std::shared_ptr<imp::Request>& req, int 
 
 // usage.prompt_tokens_details.evicted_tokens: context lost to StreamingLLM eviction mid-
 // generation (roadmap gap 6), else only a WARN the caller never sees. Null when nothing to report.
-// add_spec_usage_ (AUDIT_arch_2026 C-6): per-request speculation counters, vendor-prefixed keys
+// add_spec_usage_ (AUDIT_ARCH_2026 C-6): per-request speculation counters, vendor-prefixed keys
 // in completion_tokens_details, present only when a verify ran or mtp_k=auto declined the head.
 inline void add_spec_usage_(nlohmann::json& usage, const std::shared_ptr<imp::Request>& req) {
     if (!req)

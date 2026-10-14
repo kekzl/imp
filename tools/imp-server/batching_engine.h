@@ -120,7 +120,7 @@ public:
     // decoding together right now. The counter pair above gives only the
     // windowed mean and decode_batch_max never resets.
     std::atomic<int64_t> decode_batch_last{0};
-    // Queue split for /metrics (AUDIT_arch_2026 C-5): waiting = submitted but not yet in a
+    // Queue split for /metrics (AUDIT_ARCH_2026 C-5): waiting = submitted but not yet in a
     // prefill/decode batch (pending_queue_, or held behind max_batch_size/KV admission); running =
     // in a batch. queue_depth() is their sum, refreshed by the worker every loop so a scrape never
     // reads scheduler state directly.
@@ -177,7 +177,7 @@ public:
 private:
     void worker_loop();
     // Cancels every active request with finish "internal_error", re-probes the device and, on
-    // an unrecoverable class, sets faulted_ and stops the worker (#874, AUDIT_arch_2026 D-1).
+    // an unrecoverable class, sets faulted_ and stops the worker (#874, AUDIT_ARCH_2026 D-1).
     // `observed` is the error the caller already holds (cudaSuccess when the trigger was a host throw).
     void fail_active_requests_(const std::string& why, cudaError_t observed);
 

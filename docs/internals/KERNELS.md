@@ -11,7 +11,7 @@ Canonical design reference for imp's hot-path attention kernel on RTX 5090 (GB20
 
 - Grounded in profiling ground-truth and empirical refutations through 2026-06, not datacenter (B200/FA4) assumptions.
 - Companion docs: [`SM120.md`](SM120.md) (kernel notes), [`../PERF.md`](../PERF.md) (baselines/methodology).
-- Refuted design moves and the full occupancy-tax investigation: [`docs/archive/kernels_refuted_2026.md`](../archive/kernels_refuted_2026.md).
+- Refuted design moves and the full occupancy-tax investigation: [`docs/archive/KERNELS_REFUTED_2026.md`](../archive/KERNELS_REFUTED_2026.md).
 
 ## Kernel table
 
@@ -125,4 +125,4 @@ Two self-contained, bit-exact reference kernels (`tools/standalone/`, one file e
 | `fa2_sm120a_optimal.cu` | 50 -> 114/158/187 TFLOP/s (S=4k/8k/16k), ~90 % of a dedicated speed-of-light FA effort; residual gap is silicon, section 5 | - |
 | `gemm_nvfp4_sm120a.cu` | 1.8 -> 807/972 TFLOP/s (4k/8k), 48 % of measured FP4 peak, beat production CUTLASS's roofline-pipeline number (~41 %) at the time | apples-to-oranges: prod's ~41 % was measured on small-M model shapes, not the standalone's square-cubed benchmark; re-measured head-to-head in the archive |
 
-The GEMM's initial "L2-bound" diagnosis (82 % L2 *requests*, only 44 % *sectors*: request-rate-bound, not bandwidth-bound) drove two fixes: CTA-tile-major packing (full 128 B L2 lines, requests 82 -> 41 %) and column-interleave (`uint2` fragment reads, mio_throttle 5.77 -> 2.74). Full ncu trail in both kernels' headers; the occupancy-tax hypothesis this result suggested was tested head-to-head against production and refuted - [`docs/archive/kernels_refuted_2026.md`](../archive/kernels_refuted_2026.md).
+The GEMM's initial "L2-bound" diagnosis (82 % L2 *requests*, only 44 % *sectors*: request-rate-bound, not bandwidth-bound) drove two fixes: CTA-tile-major packing (full 128 B L2 lines, requests 82 -> 41 %) and column-interleave (`uint2` fragment reads, mio_throttle 5.77 -> 2.74). Full ncu trail in both kernels' headers; the occupancy-tax hypothesis this result suggested was tested head-to-head against production and refuted - [`docs/archive/KERNELS_REFUTED_2026.md`](../archive/KERNELS_REFUTED_2026.md).

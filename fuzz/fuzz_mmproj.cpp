@@ -1,4 +1,4 @@
-// Vision (mmproj) GGUF loader (AUDIT_arch_2026 F1-12): drives vision_gguf_probe(), the same
+// Vision (mmproj) GGUF loader (AUDIT_ARCH_2026 F1-12): drives vision_gguf_probe(), the same
 // load path as the real upload (header, metadata, tensor infos, bounds) with uploads replaced
 // by a byte count. CPU lane: whole parser, no GPU.
 

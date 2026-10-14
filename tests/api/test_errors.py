@@ -302,7 +302,7 @@ class TestUnknownModel:
         "a/b/c",                       # multi-segment
     ])
     def test_path_shaped_model_name_is_not_resolved(self, client, name):
-        """A request may name a model, never a path (AUDIT_arch_2026 F2-1).
+        """A request may name a model, never a path (AUDIT_ARCH_2026 F2-1).
 
         Until 2026-09-05 any name containing '/' reached fs::exists and a
         readable .gguf anywhere on the box was loaded, evicting the resident
@@ -367,7 +367,7 @@ class TestCompletionsEndpoint:
 @pytest.mark.nomodel
 class TestPerRequestCaps:
     """The per-request work caps (#1616, #1617, --max-images-per-request) had
-    no test in any lane (AUDIT_arch_2026 F2-5). Defaults: n 8, messages 10000,
+    no test in any lane (AUDIT_ARCH_2026 F2-5). Defaults: n 8, messages 10000,
     logit_bias 1024, images 8, rerank documents 512. Every check runs before
     the server looks for a model, so the model-less lane sees the 400.
     """

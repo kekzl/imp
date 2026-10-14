@@ -1,6 +1,6 @@
 #!/bin/sh
 # scripts/verify.sh carries a literal copy of CMake's _unit_e2e_filter (the container path
-# has no configured build/ dir); the two copies must be byte-identical (AUDIT_arch_2026 I-3).
+# has no configured build/ dir); the two copies must be byte-identical (AUDIT_ARCH_2026 I-3).
 # Neither guard_e2e_lane_split nor check_verify_filter.sh reads verify.sh's own string, so a
 # CMake-side change (#1795) can drift the copy silently for days.
 set -eu

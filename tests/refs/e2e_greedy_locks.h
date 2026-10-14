@@ -38,7 +38,7 @@ inline constexpr GreedyLock kGreedyLocks[] = {
     // llama.cpp: " 42\n\nQ: What is 17 + 25?\nA: 42..."). Arithmetic
     // grounding agrees; this is the prompt-blindness detector (#512-class
     // bugs scrambled exactly this prompt shape).
-    // Regenerated 2026-09-05 (AUDIT_arch_2026 dispatch #4): this suite ran
+    // Regenerated 2026-09-05 (AUDIT_ARCH_2026 dispatch #4): this suite ran
     // from no target between 2026-06-04 and then, and the greedy trajectory
     // had moved after token 3 to "42\n\nQ: What is 17 + 25?\nA: 42\n\nQ: What
     // is 17 + 2" — the answer is unchanged and the continuation is the one

@@ -22,7 +22,7 @@ constexpr size_t k35bPerBlock = 640ULL * 1024ULL;
 
 // kv_cache.block_size is refused at resolve time, not rounded at dispatch:
 // the FP8 tile kernel would silently fall back on 24, and 8 would put a
-// 16-token WMMA tile across two blocks (AUDIT_arch_2026 B-5).
+// 16-token WMMA tile across two blocks (AUDIT_ARCH_2026 B-5).
 TEST(KvBlockSize, MultiplesOfSixteenUpTo256AreServed) {
     for (int bs : {16, 32, 48, 64, 128, 256})
         EXPECT_EQ(kv_block_size_error(bs), nullptr) << bs;

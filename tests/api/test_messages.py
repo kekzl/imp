@@ -47,7 +47,7 @@ def _thinking_signature(text: str) -> str:
 @pytest.mark.nomodel
 class TestThinkingSignature:
     """A prior-turn thinking block that carries a signature must match it
-    (AUDIT_arch_2026 E-8): the field used to be emitted and never read, so an
+    (AUDIT_ARCH_2026 E-8): the field used to be emitted and never read, so an
     edited chain of thought was replayed as the model's own. Reached in the
     body transform, before the server looks for a model."""
 

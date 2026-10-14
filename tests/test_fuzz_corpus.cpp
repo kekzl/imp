@@ -231,7 +231,7 @@ std::vector<std::string> tokenizer_corpus() {
 
 // Minimal GGUF writer for the two GGUF-shaped corpora: header, KV pairs, tensor
 // infos, aligned data. Type ids per the GGUF spec (UINT32=4, STRING=8, ARRAY=9;
-// ggml F32=0, F16=1). The hostile entries are the AUDIT_arch_2026 F1 cases.
+// ggml F32=0, F16=1). The hostile entries are the AUDIT_ARCH_2026 F1 cases.
 struct GgufWriter {
     std::string s;
     void u32(uint32_t v) { raw(&v, 4); }
