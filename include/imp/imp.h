@@ -88,6 +88,12 @@ ImpError imp_lora_load(ImpContext ctx, const char* path, int32_t* out_id);
 ImpError imp_lora_set(ImpContext ctx, int32_t adapter_id);
 ImpError imp_lora_unload(ImpContext ctx, int32_t adapter_id);
 
+/* --- Control vectors (llama.cpp cvector GGUF: direction.N F32 [d_model], N >= 1) ---
+ * imp_control_vector_load: returns an id >= 1 via out_id; a width or layer mismatch, or a
+ * gated-residual model, answers IMP_ERROR_INVALID_MODEL. Activation is per request through
+ * the server (one vector + scale engine-wide, switched between requests). */
+ImpError imp_control_vector_load(ImpContext ctx, const char* path, int32_t* out_id);
+
 // --- Context / Runtime ---
 
 ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext* out_ctx);

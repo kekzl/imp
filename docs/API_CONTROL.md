@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-02
-commit: db9162d5
+verified: 2026-10-15
+commit: c0211fea
 -->
 
 # API: controlling a running request
@@ -22,3 +22,15 @@ Endpoint list and shared error rules: [`API.md`](API.md).
 | 409 | `code: "no_reasoning_closer"`: in a think block of a model without a closer token id |
 | latency | the next host step; a CUDA-graph burst already on the device finishes first |
 | `/metrics` | `imp_think_end_requests_total`: requests flagged (first call each) |
+
+## Steering with a control vector
+
+`"control_vector": NAME` or `{"name": NAME, "scale": s}` (default scale 1) on chat requests adds `s * direction.l` to the hidden state after every layer `l` the file carries (roadmap row 114, `src/exec/executor_control_vector.cu`). Vectors load at startup: `--control-vector NAME=PATH`, llama.cpp `cvector-generator` GGUF (`direction.N`, F32 [d_model], N >= 1).
+
+| item | behaviour |
+|---|---|
+| batching | one vector + scale is active engine-wide: a request asking for another waits for in-flight requests, then the worker switches (graphs re-capture), as with `lora` |
+| prefix cache | keyed by vector id and scale: steered KV never serves an unsteered prompt |
+| 400 | `code: "control_vector_not_loaded"` (unknown name), `"invalid_control_vector"` (not a name or `{name, scale}`, non-finite scale) |
+| refused at load | width != d_model, `direction.0` or past the last layer, non-F32, gated-residual models (Qwen4Exp) |
+| fused paths | while a vector is active, the batched add+norm and the NVFP4 norm-fold epilogues are off (they read the residual before the add) |

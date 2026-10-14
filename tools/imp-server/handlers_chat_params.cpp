@@ -537,5 +537,19 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // Per-request LoRA adapter selection ("lora": "<name>"; absent/"" = base).
     ctx.params.lora_name = body.value("lora", std::string());
 
+    // Control vector (roadmap row 114): "control_vector": NAME or {"name": NAME, "scale": s}.
+    if (body.contains("control_vector") && !body["control_vector"].is_null()) {
+        const auto& cv = body["control_vector"];
+        if (cv.is_string()) {
+            ctx.params.cvec_name = cv.get<std::string>();
+        } else if (cv.is_object() && cv.contains("name") && cv["name"].is_string() &&
+                   (!cv.contains("scale") || cv["scale"].is_number())) {
+            ctx.params.cvec_name = cv["name"].get<std::string>();
+            ctx.params.cvec_scale = cv.value("scale", 1.0f);
+        } else {
+            ctx.params.cvec_bad = true;
+        }
+    }
+
     return true;
 }

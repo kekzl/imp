@@ -167,6 +167,10 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             auto it = state.loras.find(ctx.params.lora_name);
             ctx.snap.lora_id = it == state.loras.end() ? -1 : it->second.engine_id;
         }
+        if (!ctx.params.cvec_name.empty()) {
+            auto it = state.control_vectors.find(ctx.params.cvec_name);
+            ctx.snap.cvec_id = it == state.control_vectors.end() ? -1 : it->second.engine_id;
+        }
         ctx.snap.tok = state.tok;
         ctx.snap.chat_tpl = state.chat_tpl;
         ctx.snap.have_template = state.have_template;
@@ -601,6 +605,19 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                         "lora", "lora_not_loaded");
         return false;
     }
+    if (ctx.params.cvec_bad || !std::isfinite(ctx.params.cvec_scale)) {
+        send_json_error(res, 400, "invalid_request_error",
+                        "control_vector must be a name or {\"name\": string, \"scale\": finite number}",
+                        "control_vector", "invalid_control_vector");
+        return false;
+    }
+    if (ctx.snap.cvec_id < 0) {
+        send_json_error(res, 400, "invalid_request_error",
+                        "control vector '" + ctx.params.cvec_name +
+                            "' is not loaded (--control-vector NAME=PATH at startup)",
+                        "control_vector", "control_vector_not_loaded");
+        return false;
+    }
 
     // Clamp max_tokens to remaining context window
     int remaining = ctx.snap.max_seq_len - ctx.snap.n_prompt_tokens;
@@ -627,6 +644,8 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->qwen_patches = ctx.snap.qwen_patches;  // dynamic-resolution route (empty otherwise)
     req->vision_content_hash = ctx.snap.vision_content_hash;
     req->lora_id = ctx.snap.lora_id;
+    req->cvec_id = ctx.snap.cvec_id;
+    req->cvec_scale = ctx.snap.cvec_id > 0 ? ctx.params.cvec_scale : 0.0f;
     req->input_tokens = input_tokens;
     req->max_tokens = ctx.params.max_tokens;
     ctx.params.apply_to(*req);

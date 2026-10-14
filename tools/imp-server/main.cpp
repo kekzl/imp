@@ -166,6 +166,21 @@ static int run_server(int argc, char** argv) {
         printf("LoRA adapter loaded: %s (id=%d) from %s\n", name.c_str(), server_id, path.c_str());
     }
 
+    // --control-vector NAME=PATH: llama.cpp cvector GGUF, selected per request by name.
+    if (!args.control_vectors.empty() && !state.model_loaded()) {
+        fprintf(stderr, "Error: --control-vector requires --model (vectors are shaped for one model)\n");
+        return 1;
+    }
+    for (const auto& [name, path] : args.control_vectors) {
+        int32_t id = 0;
+        if (imp_control_vector_load(state.ctx, path.c_str(), &id) != IMP_SUCCESS) {
+            fprintf(stderr, "Failed to load control vector '%s' from %s\n", name.c_str(), path.c_str());
+            return 1;
+        }
+        state.control_vectors[name] = ServerState::ControlVectorEntry{id, path};
+        printf("Control vector loaded: %s (id=%d) from %s\n", name.c_str(), id, path.c_str());
+    }
+
     // (svr was created + bound to the port above, before the model load.)
 
     // Limit request body size to 100 MiB (prevents DoS via large base64 images)

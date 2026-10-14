@@ -547,6 +547,10 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
                 printf("[model-swap] dropped LoRA adapter '%s' (id=%d, path=%s): model swapped\n",
                        name.c_str(), entry.id, entry.path.c_str());
             state.loras.clear();
+            for (const auto& [name, entry] : state.control_vectors)
+                printf("[model-swap] dropped control vector '%s' (path=%s): model swapped\n", name.c_str(),
+                       entry.path.c_str());
+            state.control_vectors.clear();
             fflush(stdout);
             // load_model_into_state owns the teardown of the previous model and
             // builds a fresh batching engine, so the paused worker goes with it.

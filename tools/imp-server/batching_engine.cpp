@@ -365,6 +365,21 @@ void BatchingEngine::worker_loop() {
                             continue;
                         }
                     }
+                    // Control vector (roadmap row 114): engine-global like the adapter, same barrier.
+                    const auto& want_req = *pending_queue_.front()->request;
+                    if (want_req.cvec_id != engine->active_control_vector() ||
+                        (want_req.cvec_id != 0 &&
+                         want_req.cvec_scale != engine->active_control_vector_scale())) {
+                        if (!active_requests_.empty())
+                            break;
+                        if (!engine->control_vector_set(want_req.cvec_id, want_req.cvec_scale)) {
+                            auto sr = std::move(pending_queue_.front());
+                            pending_queue_.pop_front();
+                            sr->request->status = imp::RequestStatus::CANCELLED;
+                            sr->push_finish("control_vector_unavailable");
+                            continue;
+                        }
+                    }
                     auto sr = std::move(pending_queue_.front());
                     pending_queue_.pop_front();
 

@@ -336,6 +336,9 @@ struct Request {
     // adapter is engine-global, so the batching worker switches to it before
     // admission and only once nothing else is in flight (AUDIT_arch_2026 E-1).
     int lora_id = 0;
+    // Control vector (roadmap row 114): engine id (0 = none) and its scale; switched like lora_id.
+    int cvec_id = 0;
+    float cvec_scale = 0.0f;
     // Seed of the prefix-cache hash chain (image hash + active adapter), computed once by
     // Engine::add_request. Every lookup and publish site reads this field, so a prompt can only
     // reuse KV computed under the same picture and adapter.

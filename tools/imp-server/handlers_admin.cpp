@@ -84,6 +84,8 @@ int suspend_locked(ServerState& state, json& body) {
     // Engine ids died with the context; names, server ids and paths stay for resume.
     for (auto& [name, entry] : state.loras)
         entry.engine_id = 0;
+    for (auto& [name, entry] : state.control_vectors)
+        entry.engine_id = 0;
     state.publish_model_status(false, model_name);
 
     const bool device_reset = state.runtime_config.suspend.device_reset;
@@ -144,6 +146,17 @@ int resume_locked(ServerState& state, json& body) {
             fprintf(stderr, "[resume] warning: failed to re-load LoRA adapter '%s' from %s, dropped\n",
                     it->first.c_str(), it->second.path.c_str());
             it = state.loras.erase(it);
+            continue;
+        }
+        it->second.engine_id = engine_id;
+        ++it;
+    }
+    for (auto it = state.control_vectors.begin(); it != state.control_vectors.end();) {
+        int32_t engine_id = 0;
+        if (imp_control_vector_load(state.ctx, it->second.path.c_str(), &engine_id) != IMP_SUCCESS) {
+            fprintf(stderr, "[resume] warning: failed to re-load control vector '%s' from %s, dropped\n",
+                    it->first.c_str(), it->second.path.c_str());
+            it = state.control_vectors.erase(it);
             continue;
         }
         it->second.engine_id = engine_id;
