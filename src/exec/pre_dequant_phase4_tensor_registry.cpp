@@ -678,7 +678,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
     if (mut_model->tok_emb_id != kInvalidTensorID)
         try_mark(mut_model->tok_emb_, mut_model->tok_emb_id);
 
-    release_fp8_lm_head_source_(stream, free_source);
+    release_lm_head_source_(stream, free_source);
 
     if (marked_count > 0) {
         // Source tensors are now freed (their .data is dangling). release_gpu_-
@@ -699,24 +699,44 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
     }
 }
 
-// gemm.nvfp4_lm_head=fp8: forward_logits, for_each_lm_head_batch_ and the MTP draft read the FP8
-// head (executor_lm_head_fp8.cpp), none reads the source; its bytes go to the expert cache
-// minus the FP8 head built after the cache was sized. Kept when tied or keyed by another cache.
-void QuantPipeline::release_fp8_lm_head_source_(cudaStream_t stream,
-                                                const std::function<void(Tensor&)>& free_source) {
+// An FP8 head (gemm.nvfp4_lm_head=fp8) or an NVFP4 decode-cache head serves every LM-head path:
+// forward_logits, for_each_lm_head_batch_, perplexity, prompt logprobs and the MTP draft read it,
+// none reads the source. The source's bytes go to the expert cache minus the served head built
+// after the cache was sized. Kept when tied or keyed by another cache (a CUTLASS entry with SfAtom).
+void QuantPipeline::release_lm_head_source_(cudaStream_t stream,
+                                            const std::function<void(Tensor&)>& free_source) {
     auto* mut_model = const_cast<Model*>(model_);
     Tensor& head = mut_model->out_proj_;
-    if (!wcache_->lm_head_fp8.weight.data || !head.data || head.dropped_source)
+    if (!head.data || head.dropped_source)
         return;
+    const bool fp8_head = wcache_->lm_head_fp8.weight.data != nullptr;
+    const bool nvfp4_head = !fp8_head && wcache_->nvfp4.count(head.data) != 0;
+    if (!fp8_head && !nvfp4_head)
+        return;
+    const char* served = fp8_head ? "FP8" : "NVFP4";
     if (wcache_->lm_head_fp8.weight.data == head.data) {  // checkpoint FP8 head (#2479)
         IMP_LOG_INFO("FP8 LM head: the checkpoint head is the served head, nothing to free");
         return;
     }
+    const auto ct = wcache_->cutlass_nvfp4.find(head.data);
+    // speculative.mtp_nvfp4_head=false: the MTP draft reads the source head.
+    const bool mtp_reads_source = nvfp4_head && model_->mtp_.has_value() &&
+                                  !dispatch_policy().speculative.mtp_nvfp4_head;
     if (head.data == model_->tok_emb_.data || !mut_model->is_base_gpu_allocation(head.data) ||
-        wcache_->nvfp4.count(head.data) || wcache_->cutlass_nvfp4.count(head.data) ||
+        (fp8_head && wcache_->nvfp4.count(head.data)) || mtp_reads_source ||
+        (ct != wcache_->cutlass_nvfp4.end() && ct->second.scale_factors != nullptr) ||
         wcache_->fp16.count(head.data) || wcache_->fp8.count(head.data)) {
-        IMP_LOG_INFO("FP8 LM head: source retained (tied, shared allocation, or keyed by another cache)");
+        IMP_LOG_INFO("%s LM head: source retained (tied, shared allocation, or keyed by another cache)",
+                     served);
         return;
+    }
+    // A GGUF head's NVFP4 entry sits in nvfp4_bytes, not nvfp4_lm_head_bytes: price it from its shape
+    // (packed N*K/2 + one FP8 scale per 16).
+    size_t price = wcache_->lm_head_fp8_bytes;
+    if (nvfp4_head) {
+        const NvFP4QuantResult& e = wcache_->nvfp4.at(head.data);
+        price = static_cast<size_t>(e.N) * static_cast<size_t>(e.K) / 2 +
+                static_cast<size_t>(e.N) * (e.K / 16);
     }
     const size_t head_bytes = qtype_row_bytes(head.qtype, head.shape[1]) * static_cast<size_t>(head.shape[0]);
     const size_t head_pool_before = release_on_free_pool_reserved(ReleasePool::LmHead);
@@ -727,12 +747,12 @@ void QuantPipeline::release_fp8_lm_head_source_(cudaStream_t stream,
     const size_t pool_after = release_on_free_pool_reserved(ReleasePool::LmHead);
     const size_t back = std::min(head_bytes, head_pool_before - std::min(head_pool_before, pool_after) +
                                                  trim_device_mempool());
-    wcache_->lm_head_released_bytes = back - std::min(back, wcache_->lm_head_fp8_bytes);
+    wcache_->lm_head_released_bytes = back - std::min(back, price);
     IMP_LOG_INFO(
-        "FP8 LM head: freed the %s source (%.1f MiB, %.1f MiB back to the driver, %.1f MiB to the "
-        "expert cache after the %.1f MiB FP8 head)",
-        qtype_name(head.qtype), head_bytes / (1024.0 * 1024.0), back / (1024.0 * 1024.0),
-        wcache_->lm_head_released_bytes / (1024.0 * 1024.0), wcache_->lm_head_fp8_bytes / (1024.0 * 1024.0));
+        "%s LM head: freed the %s source (%.1f MiB, %.1f MiB back to the driver, %.1f MiB to the "
+        "expert cache after the %.1f MiB served head)",
+        served, qtype_name(head.qtype), head_bytes / (1024.0 * 1024.0), back / (1024.0 * 1024.0),
+        wcache_->lm_head_released_bytes / (1024.0 * 1024.0), price / (1024.0 * 1024.0));
 }
 
 }  // namespace imp

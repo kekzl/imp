@@ -204,14 +204,33 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
     gemm(input, weight, output, 1.0f, 0.0f, ctx.stream);
 }
 
+// Last route of gemm_via_handle_. A GGUF source with an SfAtom-less CUTLASS_NVFP4 entry (Phase 3 G3)
+// has no CUTLASS form for the M=1 beta != 0 call that lands here: the source serves it.
+static void gemm_handle_last_route(const WeightHandle& h, const Tensor& input, Tensor& output,
+                                   const GemmContext& ctx, bool decode_rows, void* ws, size_t ws_size) {
+    if (h.primary_tier == StorageTier::CUTLASS_NVFP4 && h.payload.cutlass_nvfp4.sf == nullptr &&
+        h.source_data != nullptr && dequant_gpu_supported(h.source_qtype)) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            IMP_LOG_INFO("gemm: GGUF %s weight without SfAtom, M=%lld beta=%.0f runs on the source",
+                         qtype_name(h.source_qtype), static_cast<long long>(input.shape[0]), ctx.beta);
+        }
+        Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
+        gemm_dispatch_uncached_fallback(input, weight, output, ctx, decode_rows);
+        return;
+    }
+    imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta, ws, ws_size, ctx.stream);
+}
+
 // One CUTLASS NVFP4 prefill GEMM through the kernel registry: quantizes `input` into the
 // shared activation scratch (skipped when ctx says a prior dispatch on the same input
-// already did) and declines on a missing scratch or a nonzero beta (the epilogue bakes
-// beta=0), so the caller falls through to a beta-honouring route.
+// already did) and declines on a missing SfAtom (GGUF source, Phase 3 G3), a missing scratch
+// or a nonzero beta (the epilogue bakes beta=0), so the caller falls through to a beta-honouring route.
 static bool dispatch_cutlass_nvfp4_prefill(const CutlassNvFP4Weight& cw, const Tensor& input, Tensor& output,
                                            const GemmContext& ctx, int M) {
     const auto* qs = ctx.qscratch;
-    if (!qs || !qs->cutlass_act_data || !qs->cutlass_act_sf)
+    if (!cw.scale_factors || !qs || !qs->cutlass_act_data || !qs->cutlass_act_sf)
         return false;
     GemmKernelArgs args{};
     args.input = &input;
@@ -798,8 +817,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         return;
     }
 
-    imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta,
-                       ws_.shared(), ws_.shared_size(), ctx.stream);
+    gemm_handle_last_route(h, input, output, ctx, cur_decode_rows_, ws_.shared(), ws_.shared_size());
 }
 
 // Producer-side NVFP4 quantize fusion (batched decode): the small-M block

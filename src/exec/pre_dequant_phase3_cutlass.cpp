@@ -31,6 +31,37 @@ namespace imp {
 
 using imp::pre_dequant_internal::deduct_budget;
 
+namespace {
+
+enum class G3 { SfAtom, SkipQ8, SfLess };
+
+// G3: no SfAtom for a dense GGUF source: its M>1 GEMM reads the source (IMMA or dequant,
+// gemm_via_handle_ returns before the CUTLASS block). Decode keeps the plain wcache.nvfp4 GEMV.
+// Q8_0 under IMMA takes no entry (tier NVFP4); every other qtype gets an SfAtom-less entry here
+// so its handle keeps the CUTLASS_NVFP4 tier and routes. Qwen3-14B-Q6_K: 788 MiB.
+G3 g3_classify(const StoragePlan& plan, const DispatchPolicy& policy, WeightCaches& wc, const void* ptr,
+               const NvFP4QuantResult& nvfp4) {
+    const auto* pe = plan.entry_of(ptr);
+    if (!pe)
+        return G3::SfAtom;
+    if (pe->source_qtype == QType::Q8_0 && policy.gemm.q8_imma_enabled)
+        return G3::SkipQ8;
+    const bool expert = pe->kind == TensorKind::EXPERT_GATE || pe->kind == TensorKind::EXPERT_UP ||
+                        pe->kind == TensorKind::EXPERT_DOWN;
+    if (expert || !dequant_gpu_supported(pe->source_qtype))
+        return G3::SfAtom;
+    CutlassNvFP4Weight cw;
+    cw.data = nvfp4.packed_data;
+    cw.tensor_scale = nvfp4.tensor_scale;
+    cw.N = nvfp4.N;
+    cw.K = nvfp4.K;
+    cw.sf_borrowed = true;  // scale_factors stays null: nothing to free
+    wc.cutlass_nvfp4[ptr] = cw;
+    return G3::SfLess;
+}
+
+}  // namespace
+
 // Phase 3b: convert NVFP4 weights into CUTLASS sm_120 block-scaled format. Must run
 // after FP16-free; the CUTLASS cache approximately doubles NVFP4 VRAM (repacked data +
 // SfAtom scales). Budget-aware: stops if VRAM runs out and logs an info line.
@@ -136,6 +167,7 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
     size_t ct_total = 0;       // running padded slab size = real SF VRAM
     size_t n_groups_inc = 0;   // leading moe_groups that fit the budget
     int ct_skipped_dead = 0;
+    int ct_sfless = 0;
     bool ct_exhausted = false;
     for (auto& g : moe_groups) {
         size_t group_sf = align_up(static_cast<size_t>(g.ne) * g.sf_per_expert, kSfAlign);
@@ -151,13 +183,9 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
         for (auto& [ptr, nvfp4] : wcache_->nvfp4) {
             if (grouped.count(ptr))
                 continue;  // converted by a batched MoE group above
-            // G3 (Stage 1.4): skip the CUTLASS SF buffer for weights whose M>1 prefill uses IMMA
-            // raw-read on the GGUF source (today: Q8_0 with q8_imma_enabled) since the CUTLASS GEMM
-            // path is never reached for them. CUTLASS stays for native-NVFP4 and Q6_K/Q5_K. Decode
-            // is unaffected (decode_tier stays NVFP4, the plain wcache_->nvfp4 GEMV).
-            const auto* pe = storage_plan_.entry_of(ptr);
-            if (pe && pe->source_qtype == QType::Q8_0 && dispatch_policy().gemm.q8_imma_enabled) {
-                ++ct_skipped_dead;
+            if (const G3 g3 = g3_classify(storage_plan_, dispatch_policy(), *wcache_, ptr, nvfp4);
+                g3 != G3::SfAtom) {
+                ++(g3 == G3::SkipQ8 ? ct_skipped_dead : ct_sfless);
                 continue;
             }
             size_t est = align_up(
@@ -222,17 +250,19 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
             }
         }
     }
-    if (ct_count > 0) {
+    if (ct_count > 0 || ct_sfless > 0) {
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         wcache_->cutlass_nvfp4_bytes = ct_total;
         deduct_budget(remaining_budget, ct_total + wcache_->nvfp4_bytes);
-        IMP_LOG_INFO("CUTLASS sm_120 NVFP4 weight cache: %d tensors, %.2f MiB (skipped %d "
-                     "IMMA-prefill weights — dead SF buffer)",
-                     ct_count, ct_total / (1024.0 * 1024.0), ct_skipped_dead);
+        IMP_LOG_INFO(
+            "CUTLASS sm_120 NVFP4 weight cache: %d tensors, %.2f MiB; %d GGUF-source weights "
+            "without SfAtom, %d Q8_0 IMMA weights skipped (prefill reads the source)",
+            ct_count, ct_total / (1024.0 * 1024.0), ct_sfless, ct_skipped_dead);
     } else if (ct_skipped_dead > 0) {
-        IMP_LOG_INFO("CUTLASS sm_120 NVFP4 weight cache: 0 tensors (skipped %d IMMA-prefill "
-                     "weights — dead SF buffer)",
-                     ct_skipped_dead);
+        IMP_LOG_INFO(
+            "CUTLASS sm_120 NVFP4 weight cache: 0 tensors (skipped %d Q8_0 IMMA weights, "
+            "prefill reads the source)",
+            ct_skipped_dead);
     }
 }
 
