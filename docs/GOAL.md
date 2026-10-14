@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-10-15
+commit: 2a127345
 -->
 
 # imp - Goal Definition
@@ -52,11 +52,12 @@ Leading on 5090, no exceptions (realigned 2026-06-06, #549/#550; gpt-oss-20b clo
 | Qwen3.6-35B-A3B | NVFP4 | hybrid GDN+MoE daily driver, MTP head |
 | Gemma-4 26B-A4B (text+vision) | NVFP4 | multimodal + MoE hero |
 | Nemotron-H | NVFP4 | hybrid Mamba2+Attn+MoE flagship |
+| Qwen3.8-27B | NVFP4, Q4_K_M | dense-GDN flagship, text + images, README default |
 | gpt-oss-20b | MXFP4 | experts converted to NVFP4 at load, Harmony channels, tg ~315-345, pp512 ~16-19k |
 
-`check-release.sh` stage 9 runs `make bench-competitive` `RELEASE_BAR=1`, failing any hero leading llama.cpp by < 5 %.
+`check-release.sh` stage `make bench-competitive (release bar 2)` runs it with `RELEASE_BAR=1`, failing any hero leading llama.cpp by < 5 %.
 
-- Enforced over **5 of 7**: Coder-30B-A3B and Nemotron-H are NVFP4-only, llama.cpp has no NVFP4 path on `sm_120`, no shared-quant comparison exists; gate prints `N/7 contested`.
+- Enforced over **6 of 8**: Coder-30B-A3B and Nemotron-H are NVFP4-only, llama.cpp has no NVFP4 path on `sm_120`, no shared-quant comparison exists; gate prints `N/8 contested`.
 - Before 2026-08-21 enforced over 2 only (`perf_baseline.json`, `perf_baseline_north_star.json`); `docs/audit/DEBT_LEDGER_2026_08_21.md` (h).
 
 **Extended** - validated opportunistically, not release-blocking (2026-06-06): DeepSeek-R1-Distill-7B/14B (never benched, Qwen2/LLaMA arch); DeepSeek-V2-Lite MLA (supported, #802/#803, bf16 28 GB experts host-offloaded, PPL ~3 % of HF: imp 6.43 vs 6.25, 534-tok, post 2026-07-07 YaRN fix; teacher-forced, unaffected by the EOS id fix #2378); Gemma-3 27B (12B Q4_K_M + 4B-VL staged, 27B not); Phi-4 14B (NVFP4 staged, GGUF Q6_K not); Mixtral 8x7B (chat-template test only, never staged).

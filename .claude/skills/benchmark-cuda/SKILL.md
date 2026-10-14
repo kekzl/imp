@@ -29,7 +29,7 @@ Pair with `sm120-cuda-expert` (levers) and `docs/internals/BENCHMARKING.md` (mea
 
 - `CUBLAS_WORKSPACE_CONFIG=:4096:8`, 10 reps, 3+ trials, one model per process, warm >1 s.
 - GPU free first: `make check-gpu` (`scripts/require_free_gpu.sh`) or `~/.claude/skills/gpu-stats/gpu-busy-check.sh` (utilisation + memory; a Windows tenant is invisible to `docker ps` and `--query-compute-apps`). `gpu-busy-check && (nohup ...) ; echo launched` prints "launched" on BUSY too; test the exit code.
-- Server A/Bs: nothing besides the harness's own server (`docker ps -q | wc -l` = 0 before single-process benches).
+- Server A/Bs: nothing besides the harness's own server; host 1-min load <= nproc/4 (`bench_competitive.sh` guard, `IMP_BENCH_MAX_LOAD`). An idle container is not load.
 - Everything runs in Docker (`imp:test`, models from `$HOME/models`). `imp-cli` has no `--ctx`; in `--bench` mode the pool follows `--bench-pp` + `--max-tokens` + max(256, 12.5%) and `--max-seq-len` is overridden (an explicit `--set kv_cache.max_blocks=N` still wins); outside bench mode the ceiling is `--max-seq-len`. 32k prompts via `--prompt-file` (argv caps at ~128 KiB).
 - Bench from binary COPIES (`-v dir:/bin_arm`): `make dev` rebuilds `build-dev/` under a running chain.
 - dtype/KV A/Bs: force emitted tokens equal (`max_tokens` below need); library-reserve state equal in both arms (a `--rm` container plans with the 3900 MiB constant, a mounted `/home/imp/.cache/imp` with its measurement: 716 blocks apart on Qwen3.8).
