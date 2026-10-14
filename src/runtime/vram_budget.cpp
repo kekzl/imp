@@ -155,6 +155,58 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
     return d;
 }
 
+namespace {
+
+struct ImmaPlaneDemand {
+    size_t planes = 0;
+    size_t source_freed = 0;  // Q8_0 source bytes Phase 4c frees (config.q8_drop_source)
+};
+
+// Mandatory INT8 IMMA prefill planes (gemm.q8_imma_enabled / gemm.moe_imma_prefill):
+// mmq_q8_imma keeps an s8 + (alpha, beta) copy per prefilled Q8_0 weight, 1.125 B/element
+// (up to 8.6 GiB on Qwen3-8B-Q8_0). Charge as overhead and cap via
+// mmq_q8_imma_set_plane_budget(), or it grows unbounded into the KV pool (#1899).
+ImmaPlaneDemand imma_plane_demand(const Model& model, const EngineConfig& config, bool q8_imma_prefill,
+                                  bool moe_imma_prefill) {
+    ImmaPlaneDemand d;
+    auto count_q8 = [&](const Tensor& w, QType qt) {
+        if (w.data && qt == QType::Q8_0 && w.ndim >= 2)
+            d.planes += imma_q8_plane_bytes(w.shape[0], w.shape[1]);
+    };
+    auto count_dense_q8 = [&](const Tensor& w) {
+        count_q8(w, w.qtype);
+        if (config.q8_drop_source && w.data && w.qtype == QType::Q8_0 && w.ndim == 2 && w.shape[0] % 2 == 0 &&
+            w.shape[1] % 64 == 0)
+            d.source_freed += qtype_row_bytes(QType::Q8_0, w.shape[1]) * static_cast<size_t>(w.shape[0]);
+    };
+    for (int i = 0; i < model.config().n_layers; i++) {
+        const auto& L = model.layer(i);
+        // Dense/shared projections take the IMMA path only through the NVFP4-decode-overlay
+        // branch of the GEMM dispatch; without the overlay a Q8_0 weight is served from an
+        // FP16/FP8 cache and no planes are built.
+        if (q8_imma_prefill && config.use_nvfp4_decode > 0) {
+            for (const Tensor* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down,
+                                    &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared})
+                count_dense_q8(*w);
+        }
+        // The grouped MoE prefill GEMM builds the same planes over the
+        // packed expert block, and it is reached on its own flag.
+        if (moe_imma_prefill) {
+            for (const auto* experts : {&L.expert_w_gate, &L.expert_w_up, &L.expert_w_down})
+                for (const auto& e : *experts)
+                    count_q8(e, e.qtype);
+        }
+    }
+    if (d.planes > 0)
+        IMP_LOG_INFO(
+            "VRAM budget: IMMA Q8_0 prefill planes %.1f MiB (mandatory — mmq_q8_imma "
+            "caches an s8 plane per prefilled Q8_0 weight; capped at this figure)",
+            d.planes / (1024.0 * 1024.0));
+    return d;
+}
+
+}  // namespace
+
 VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim,
                                size_t free_vram, int swa_live_tokens, int n_swa_layers,
                                const NativeCacheDemand* native_demand, int ssm_reserved_slots,
@@ -277,50 +329,9 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                          mxfp4_fp16_fallback_bytes / (1024.0 * 1024.0));
     }
 
-    // Mandatory INT8 IMMA prefill planes (gemm.q8_imma_enabled / gemm.moe_imma_prefill):
-    // mmq_q8_imma keeps an s8 + (alpha, beta) copy per prefilled Q8_0 weight, 1.125 B/element
-    // (up to 8.6 GiB on Qwen3-8B-Q8_0). Charge as overhead and cap via
-    // mmq_q8_imma_set_plane_budget(), or it grows unbounded into the KV pool (#1899).
-    size_t imma_plane_bytes = 0;
-    {
-        auto count_q8 = [&](const Tensor& w, QType qt) {
-            if (w.data && qt == QType::Q8_0 && w.ndim >= 2)
-                imma_plane_bytes += imma_q8_plane_bytes(w.shape[0], w.shape[1]);
-        };
-        for (int i = 0; i < mcfg.n_layers; i++) {
-            const auto& L = model.layer(i);
-            // Dense/shared projections take the IMMA path only through the NVFP4-decode-overlay
-            // branch of the GEMM dispatch; without the overlay a Q8_0 weight is served from an
-            // FP16/FP8 cache and no planes are built.
-            if (q8_imma_prefill && config.use_nvfp4_decode > 0) {
-                count_q8(L.wq, L.wq.qtype);
-                count_q8(L.wk, L.wk.qtype);
-                count_q8(L.wv, L.wv.qtype);
-                count_q8(L.wo, L.wo.qtype);
-                count_q8(L.w_gate, L.w_gate.qtype);
-                count_q8(L.w_up, L.w_up.qtype);
-                count_q8(L.w_down, L.w_down.qtype);
-                count_q8(L.w_gate_shared, L.w_gate_shared.qtype);
-                count_q8(L.w_up_shared, L.w_up_shared.qtype);
-                count_q8(L.w_down_shared, L.w_down_shared.qtype);
-            }
-            // The grouped MoE prefill GEMM builds the same planes over the
-            // packed expert block, and it is reached on its own flag.
-            if (moe_imma_prefill) {
-                for (const auto& e : L.expert_w_gate)
-                    count_q8(e, e.qtype);
-                for (const auto& e : L.expert_w_up)
-                    count_q8(e, e.qtype);
-                for (const auto& e : L.expert_w_down)
-                    count_q8(e, e.qtype);
-            }
-        }
-        if (imma_plane_bytes > 0)
-            IMP_LOG_INFO(
-                "VRAM budget: IMMA Q8_0 prefill planes %.1f MiB (mandatory — mmq_q8_imma "
-                "caches an s8 plane per prefilled Q8_0 weight; capped at this figure)",
-                imma_plane_bytes / (1024.0 * 1024.0));
-    }
+    const ImmaPlaneDemand imma = imma_plane_demand(model, config, q8_imma_prefill, moe_imma_prefill);
+    size_t imma_plane_bytes = imma.planes;
+    size_t imma_source_freed = imma.source_freed;
     budget.imma_plane_bytes = imma_plane_bytes;
 
     size_t available = free_vram;
@@ -368,7 +379,10 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         // the room the planes may take is measured before that deduction.
         const size_t available_before = available + imma_plane_bytes;
         size_t cap = available_before > kv_guarantee ? available_before - kv_guarantee : 0;
-        if (imma_plane_bytes > cap) {
+        // Planes whose Q8_0 source Phase 4c frees (gemm.q8_drop_source) cost only their excess; when
+        // even that does not fit, the gross cap applies and every source stays (Gemma-4: cap 0).
+        const size_t net = imma_plane_bytes - std::min(imma_plane_bytes, imma_source_freed);
+        if (net > cap) {
             IMP_LOG_INFO(
                 "VRAM budget: IMMA Q8_0 prefill planes capped %.1f -> %.1f MiB (KV "
                 "guarantee %d blocks); the weights past the cap prefill via dequant",
@@ -376,6 +390,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             available += imma_plane_bytes - cap;  // hand the difference back to the pool
             imma_plane_bytes = cap;
             budget.imma_plane_bytes = cap;
+            imma_source_freed = 0;  // past the cap a weight keeps its source: no credit
         }
     }
 
@@ -508,6 +523,15 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
                 }
             }
         }
+    }
+
+    // Phase 4c frees the Q8_0 source of every weight it builds planes for: credited to the KV
+    // pool after the weight-cache reserve took its share. The residual pass clamps it if fewer go.
+    if (imma_source_freed > 0) {
+        const size_t credit = std::min(imma_plane_bytes, imma_source_freed);
+        available += credit;
+        IMP_LOG_INFO("VRAM budget: %.1f MiB of Q8_0 sources freed for their planes (gemm.q8_drop_source)",
+                     credit / (1024.0 * 1024.0));
     }
 
     switch (budget.strategy) {

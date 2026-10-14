@@ -528,6 +528,13 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
     }
 }
 
+// The one free site of Phases 4b and 4c: untrack, async free, mark (the pointer stays a cache key).
+void QuantPipeline::free_source_(Tensor& t, cudaStream_t stream) {
+    const_cast<Model*>(model_)->release_gpu_allocation(t.data);
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(t.data, stream));
+    t.dropped_source = true;
+}
+
 // Free a GGUF source allocation only when NO path still reads it: try_mark frees a
 // source iff it's a base allocation AND not present in wcache_->nvfp4 /
 // wcache_->cutlass_nvfp4. Decode-cached weights ARE present there (M>1 prefill still
@@ -542,12 +549,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
 
     size_t skipped_shared_count = 0;
     size_t skipped_shared_bytes = 0;
-    // The one free site of this phase: untrack, async free, mark (the pointer stays a cache key).
-    auto free_source = [&](Tensor& t) {
-        mut_model->release_gpu_allocation(t.data);
-        IMP_CUDA_CHECK_LOG(cudaFreeAsync(t.data, stream));
-        t.dropped_source = true;
-    };
+    auto free_source = [&](Tensor& t) { free_source_(t, stream); };
     auto try_mark = [&](Tensor& t, TensorID id) -> bool {
         if (id == kInvalidTensorID || !t.data || t.dropped_source)
             return false;

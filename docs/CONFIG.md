@@ -64,6 +64,7 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `warm_cache.dir` | `""` (`$XDG_CACHE_HOME/imp/warm` or `~/.cache/imp/warm`) | warm weight cache directory |
 | `suspend.device_reset` | `true` | `cudaDeviceReset()` on `/admin/suspend` so the process reads ~0 MiB |
 | `gemm.q8_imma_enabled` | `true` | Q8_0 dense prefill on INT8 IMMA; `false` = dequant + FP16 cuBLAS, prefill time 0.89-0.97x at >= 1536 prompt tokens, 1.04-1.32x below ([`LIMITATIONS.md`](LIMITATIONS.md), #2267) |
+| `gemm.q8_drop_source` | `true` | dense Q8_0 weights with an NVFP4 decode overlay build their IMMA planes at load and free the Q8_0 source (Phase 4c); Qwen3-8B-Q8_0 frees 7038 MiB; `false` keeps the source (a second engine on the same model handle needs it) |
 | `suspend.host_ram_headroom_mb` | `2048` | host RAM the suspend snapshot must leave free |
 
 RoPE example, serving past the model's native window:

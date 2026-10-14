@@ -56,7 +56,7 @@ because CI has no GPU runner.
 | prefill pp128 | 6132.05 tok/s | 8 % |
 | prefill pp512 | **14053.01 tok/s** | 8 % |
 | prefill pp4096 | 16197.82 tok/s | 8 % |
-| peak VRAM (own) | 20264 MiB | 10 % |
+| peak VRAM (own) | 12740 MiB | 10 % |
 
 [PROV: commit=702a9cd3 date=2026-09-28 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0
        cuda=13.4 path=gguf-dp4a cmd=`make verify-fast` n=5x5]

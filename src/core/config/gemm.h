@@ -19,6 +19,9 @@ struct GEMM {
     // (s8.s8.s32, full rate unlike the quartered f32-accumulate paths),
     // replacing dequant-to-FP16 -> cuBLAS for Q8_0 prefill (M>=64). Default on.
     bool q8_imma_enabled = true;
+    // Phase 4c: a dense Q8_0 weight served by its NVFP4 decode overlay (M <= 32) and IMMA planes
+    // (M >= 2) pins the planes at load and frees the Q8_0 source. Qwen3-8B-Q8_0: 7669 MiB.
+    bool q8_drop_source = true;
     // Q4_K dense prefill via the IMMA kernel for weights with no FP16 cache (dequant + cuBLAS
     // otherwise). gemma-3-12b Q4_K_M kernel time pp512 -5.2 %, pp4096 -1.2 %, PPL 9.9819 -> 9.9805.
     bool q4k_imma_prefill = true;

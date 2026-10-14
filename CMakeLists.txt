@@ -494,6 +494,7 @@ set(IMP_EXEC_SOURCES
     src/exec/pre_dequant_phase3_nvfp4_decode.cpp
     src/exec/pre_dequant_phase3c_mxfp4.cpp
     src/exec/pre_dequant_phase4_tensor_registry.cpp
+    src/exec/pre_dequant_phase4c_q8_planes.cpp
     src/exec/executor_workspace_config.cpp
     src/exec/executor_attention.cpp
     src/exec/executor_attention_helpers.cpp
@@ -1316,6 +1317,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mmq_q4k_imma_tile_bench.cu
         tests/test_mmq_q4k_imma_gemm.cu
         tests/test_mmq_q8_imma.cu
+        tests/test_q8_planes_only.cu
         tests/test_mmq_q8_imma_q5k.cu
         tests/test_mmq_q8_imma_q4k_moe.cu
         tests/test_mmq_q8_imma_q6k.cu
@@ -1399,6 +1401,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mtp_forward.cpp
         tests/test_nvfp4_prefill_cache_knob.cpp
         tests/test_gguf_dead_weight_forms.cpp
+        tests/test_q8_drop_source_e2e.cpp
         tests/test_spec_capture_fidelity.cpp
         # MTP must not change greedy output. The fidelity test above gates the
         # captured graph, not the speculation; this gates the accept path.

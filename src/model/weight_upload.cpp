@@ -432,6 +432,16 @@ struct UploadCtx {
         }                                                                                           \
     } while (0)
 
+// A dense layer weight Phase 4c may free (Q8_0, gemm.q8_drop_source) uploads into its own
+// release-on-free pool: the default pool kept 2336 of 7038 freed MiB on Qwen3-8B-Q8_0.
+#define UPLOAD_DENSE_OR_FAIL(tensor, msg, layer_idx, ctx)            \
+    do {                                                             \
+        std::optional<ReleasePoolScope> q8_scope;                    \
+        if ((tensor).qtype == QType::Q8_0)                           \
+            q8_scope.emplace(ReleasePool::Q8Sources);                \
+        UPLOAD_OR_FAIL(tensor, (tensor).qtype, msg, layer_idx, ctx); \
+    } while (0)
+
 #define UPLOAD_OR_FAIL_RAW(tensor, qtype, raw, msg, layer_idx, ctx)                                 \
     do {                                                                                            \
         if (!upload_weight((tensor), (qtype), (ctx).compute_dtype, (ctx).stream, (ctx).gpu_allocs, \
@@ -877,10 +887,10 @@ static bool upload_mla_latent_norms(TransformerLayer& L, int i, const UploadCtx&
 
 static bool upload_layer_attention_weights(TransformerLayer& L, int i, const UploadCtx& ctx) {
     // Attention weights — try regular upload first, fall back to GPTQ dequant
-    UPLOAD_OR_FAIL(L.wq, L.wq.qtype, "wq", i, ctx);
-    UPLOAD_OR_FAIL(L.wk, L.wk.qtype, "wk", i, ctx);
-    UPLOAD_OR_FAIL(L.wv, L.wv.qtype, "wv", i, ctx);
-    UPLOAD_OR_FAIL(L.wo, L.wo.qtype, "wo", i, ctx);
+    UPLOAD_DENSE_OR_FAIL(L.wq, "wq", i, ctx);
+    UPLOAD_DENSE_OR_FAIL(L.wk, "wk", i, ctx);
+    UPLOAD_DENSE_OR_FAIL(L.wv, "wv", i, ctx);
+    UPLOAD_DENSE_OR_FAIL(L.wo, "wo", i, ctx);
     // MLA (DeepSeek-V2/V3) latent-attention projections. UPLOAD_OR_FAIL no-ops when
     // tensor.data==nullptr (non-MLA layers) or already on device, so safe to call
     // unconditionally for every architecture. kv_a_layernorm uploads separately (QK-norm section).
@@ -1056,9 +1066,9 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i, const Upl
 // one layer.
 static bool upload_layer_ffn_weights(TransformerLayer& L, int i, const UploadCtx& ctx) {
     // FFN weights (dense path)
-    UPLOAD_OR_FAIL(L.w_gate, L.w_gate.qtype, "w_gate", i, ctx);
-    UPLOAD_OR_FAIL(L.w_up, L.w_up.qtype, "w_up", i, ctx);
-    UPLOAD_OR_FAIL(L.w_down, L.w_down.qtype, "w_down", i, ctx);
+    UPLOAD_DENSE_OR_FAIL(L.w_gate, "w_gate", i, ctx);
+    UPLOAD_DENSE_OR_FAIL(L.w_up, "w_up", i, ctx);
+    UPLOAD_DENSE_OR_FAIL(L.w_down, "w_down", i, ctx);
 
     // GPTQ fallback for FFN weights
     struct {
@@ -1100,13 +1110,13 @@ static bool upload_layer_ffn_weights(TransformerLayer& L, int i, const UploadCtx
 
     // Shared expert weights (Nemotron/DeepSeek style)
     if (L.w_up_shared.data && !L.w_up_shared.on_device) {
-        UPLOAD_OR_FAIL(L.w_up_shared, L.w_up_shared.qtype, "w_up_shared", i, ctx);
+        UPLOAD_DENSE_OR_FAIL(L.w_up_shared, "w_up_shared", i, ctx);
     }
     if (L.w_down_shared.data && !L.w_down_shared.on_device) {
-        UPLOAD_OR_FAIL(L.w_down_shared, L.w_down_shared.qtype, "w_down_shared", i, ctx);
+        UPLOAD_DENSE_OR_FAIL(L.w_down_shared, "w_down_shared", i, ctx);
     }
     if (L.w_gate_shared.data && !L.w_gate_shared.on_device) {
-        UPLOAD_OR_FAIL(L.w_gate_shared, L.w_gate_shared.qtype, "w_gate_shared", i, ctx);
+        UPLOAD_DENSE_OR_FAIL(L.w_gate_shared, "w_gate_shared", i, ctx);
     }
     // Qwen3-Next / Qwen3.6 shared-expert input gate (FP32 [d_model]).
     if (L.shared_expert_gate_inp.data && !L.shared_expert_gate_inp.on_device) {
