@@ -266,5 +266,49 @@ TEST(MmqQ8Imma, LongPromptBench) {
     mmq_q8_imma_release_all();
 }
 
+// Short prompts: M=2/40/64 at N=4096 (32 BN=128 tiles, under one wave) run the BN=32 kernel; the same
+// rows inside M=4096 run BN=128 / k128. Bit for bit, beta 0 and beta 1 (#2152).
+TEST(MmqQ8Imma, NarrowTileShortPromptRowsBitIdentical) {
+    const int N = 4096, K = 1024, M_big = 4096;
+    std::vector<uint8_t> W;
+    gen_q8_weight(W, N, K, 91);
+    std::vector<__half> x((size_t)M_big * K), c((size_t)M_big * N);
+    std::mt19937 rng(91);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    for (auto& v : x)
+        v = __float2half(nd(rng));
+    for (auto& v : c)
+        v = __float2half(nd(rng));
+    uint8_t* d_w = nullptr;
+    __half *d_x = nullptr, *d_s = nullptr, *d_b = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_w, W.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_x, x.size() * sizeof(__half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_s, (size_t)64 * N * sizeof(__half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_b, (size_t)M_big * N * sizeof(__half)), cudaSuccess);
+    cudaMemcpy(d_w, W.data(), W.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_x, x.data(), x.size() * sizeof(__half), cudaMemcpyHostToDevice);
+    for (float beta : {0.0f, 1.0f}) {
+        cudaMemcpy(d_b, c.data(), c.size() * sizeof(__half), cudaMemcpyHostToDevice);
+        ASSERT_TRUE(mmq_q8_imma_gemm(d_w, d_x, d_b, M_big, N, K, nullptr, beta, false));
+        std::vector<uint16_t> big((size_t)64 * N);
+        ASSERT_EQ(cudaMemcpy(big.data(), d_b, big.size() * 2, cudaMemcpyDeviceToHost), cudaSuccess);
+        for (int M : {2, 40, 64}) {
+            cudaMemcpy(d_s, c.data(), (size_t)M * N * sizeof(__half), cudaMemcpyHostToDevice);
+            ASSERT_TRUE(mmq_q8_imma_gemm(d_w, d_x, d_s, M, N, K, nullptr, beta, false));
+            std::vector<uint16_t> small((size_t)M * N);
+            ASSERT_EQ(cudaMemcpy(small.data(), d_s, small.size() * 2, cudaMemcpyDeviceToHost), cudaSuccess);
+            size_t diff = 0;
+            for (size_t i = 0; i < small.size(); i++)
+                diff += small[i] != big[i];
+            EXPECT_EQ(diff, 0u) << "M=" << M << " beta=" << beta << " rows differ from the M=4096 grid";
+        }
+    }
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_s);
+    cudaFree(d_b);
+    mmq_q8_imma_release_all();
+}
+
 }  // namespace
 }  // namespace imp

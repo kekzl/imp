@@ -6,9 +6,11 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Added
 - Web UI redesign in the logo's colours with an imp mascot: saved conversations, sampling panel, edit/continue, logprobs view, end thinking, structured output, images, `/tokenize` count, `/metrics` tab, GPU joules per answer. `drive.py features` on the dev mock: 16/16 checks pass.
+- Per-request control vectors: `--control-vector NAME=PATH` loads a llama.cpp cvector GGUF, `"control_vector": NAME` or `{name, scale}` adds scale * v_l after each layer it carries. Qwen3-4B Q8_0: scale 0 reproduces the base text, scale 4 steers it.
 - `/metrics`: `imp_gpu_power_watts` and `imp_gpu_energy_joules_total` from NVML (`dlopen`, absent without libnvidia-ml). A 60-token Qwen3-4B Q8_0 chat reads 18.4 J on the driver counter.
 
 ### Changed
+- Short prompts on Q8_0 GGUF prefill on a 32-wide IMMA N tile (M <= 64, under one wave), bit-identical rows. Qwen3-8B Q8_0 pp40 15.18 -> 11.81 ms; server TTFT p50 for ~35-token chats 17 -> 13 ms.
 - Release bar 2 (`bench-competitive`): Qwen3.8-27B Q4_K_M is a hero (6 of 8 contested), the non-hero Qwen3-30B-A3B row is gone; the sweep refuses on host 1-min load > nproc/4 instead of any running container.
 
 ## [0.53.0] - 2026-10-14

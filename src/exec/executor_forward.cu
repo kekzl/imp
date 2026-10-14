@@ -2,6 +2,7 @@
 #include "core/dispatch_policy.h"
 #include "exec/forward_profile.h"
 #include "exec/executor.h"
+#include "lora/control_vector.h"
 #include "vision/deepstack_inject.h"
 #include "exec/executor_gemv_helpers.h"
 #include "exec/executor_kernels.h"
@@ -555,6 +556,10 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
                                                                 static_cast<float*>(fp32_h.data), total);
             IMP_CUDA_CHECK_LAUNCH();
         }
+
+        // Control vector (row 114): after every residual and layer_out_scale, before the snapshot.
+        if (cvec_ != nullptr && cvec_->layer_mask[i])
+            control_vector_add_(i, n, stream);
 
         // Layer-diff dump: Snapshot C — end-of-layer state (input to next layer).
         // Captures the final hidden state after attention, FFN/MoE, residuals,

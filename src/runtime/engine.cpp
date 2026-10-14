@@ -347,6 +347,7 @@ size_t Engine::prefix_salt_(const Request& req) const {
     size_t salt = req.vision_content_hash;
     if (active_lora_ != 0)
         salt ^= (static_cast<size_t>(active_lora_) + 1) * 0x9E3779B97F4A7C15ULL;
+    salt ^= control_vector_salt_();  // steered KV must not serve an unsteered prompt
     return salt;
 }
 

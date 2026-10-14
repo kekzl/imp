@@ -58,6 +58,9 @@ struct ChatRequestParams : SamplingFields {
     // values are the template's business - Qwen3.8 takes xhigh/medium/low, OpenAI low/medium/high.
     std::string reasoning_effort;
     std::string lora_name;                   // "lora" body field (empty = base model)
+    std::string cvec_name;                   // "control_vector" name (empty = none)
+    float cvec_scale = 1.0f;                 // "control_vector.scale"
+    bool cvec_bad = false;                   // "control_vector" present but not a name or {name, scale}
     bool enable_thinking_set = false;        // true iff either carried a boolean
     // Stop sequences
     std::vector<std::string> stop_sequences;
@@ -162,6 +165,8 @@ struct ChatStateSnapshot {
     // Engine adapter id the request named via `lora` (0 = base). Resolved
     // here, switched by the batching worker at admission (E-1).
     int lora_id = 0;
+    // Engine control-vector id named by `control_vector` (0 = none, -1 = named but not loaded).
+    int cvec_id = 0;
 };
 
 // Top-level context bundling params + snap + transients.

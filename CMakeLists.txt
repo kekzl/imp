@@ -417,6 +417,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/request.cpp
     src/runtime/batch.cpp
     src/runtime/engine.cpp
+    src/runtime/engine_control_vector.cpp
     src/runtime/engine_init_resolver.cpp
     src/runtime/engine_weight_upload.cpp
     src/runtime/engine_kv_cache_init.cpp
@@ -503,7 +504,9 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_prompt_logprobs.cu
     src/exec/executor_lm_head_fp8.cpp
     src/exec/executor_lora.cu
+    src/exec/executor_control_vector.cu
     src/lora/lora_adapter.cpp
+    src/lora/control_vector.cpp
     src/quant/gpt_oss_mxfp4_convert.cpp
     src/exec/executor_ffn.cu
     src/exec/executor_ffn_graph.cpp
@@ -887,6 +890,7 @@ if(IMP_BUILD_TESTS)
         tests/test_batch_verify_predicates.cpp
         tests/test_forward_profile.cpp
         tests/test_lora_dims.cpp
+        tests/test_control_vector.cpp
         tests/test_fim.cpp
         tests/test_expert_cache_reinit.cpp
         tests/test_sparse_attn_geometry.cpp

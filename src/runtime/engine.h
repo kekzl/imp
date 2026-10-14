@@ -44,6 +44,7 @@
 #include <cuda_runtime.h>
 
 #include "lora/lora_adapter.h"
+#include "lora/control_vector.h"
 
 namespace imp {
 
@@ -196,6 +197,12 @@ public:
     [[nodiscard]] bool lora_set(int id);  // 0 deactivates
     [[nodiscard]] bool lora_unload(int id);  // frees it; slot stays empty, ids never reused (prefix salt = id)
     int active_lora() const { return active_lora_; }
+
+    // Control vectors (row 114): id >= 1 or 0; one active engine-wide, set() re-captures graphs.
+    int control_vector_load(const std::string& path);
+    [[nodiscard]] bool control_vector_set(int id, float scale);
+    int active_control_vector() const { return active_cvec_; }
+    float active_control_vector_scale() const { return active_cvec_scale_; }
 
     // Reset batch pool upload cache (call on context_reset to prevent
     // stale block table pointers when KV blocks are reused)
@@ -509,6 +516,10 @@ private:
     CudaGraphRunner decode_graph_pool_[kMaxGraphPoolSize];  // index = n_sequences - 1
     std::vector<std::unique_ptr<LoraAdapter>> lora_adapters_;
     int active_lora_ = 0;
+    std::vector<std::unique_ptr<ControlVectorDevice>> control_vectors_;
+    int active_cvec_ = 0;  // ids never reused: the prefix salt is (id, scale)
+    float active_cvec_scale_ = 0.0f;
+    size_t control_vector_salt_() const;
     size_t prefix_salt_(const Request& req) const;
     int last_decode_max_blocks_per_graph_[kMaxGraphPoolSize] = {};
     // pow2-bucketed context HIGH-WATER MARK at the last (re)capture: the

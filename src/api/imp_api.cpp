@@ -300,6 +300,18 @@ ImpError imp_lora_load(ImpContext ctx, const char* path, int32_t* out_id) {
     }
 }
 
+ImpError imp_control_vector_load(ImpContext ctx, const char* path, int32_t* out_id) {
+    return imp::api_guard("imp_control_vector_load", [&]() -> ImpError {
+        if (!ctx || !ctx->engine || !path || !out_id)
+            return IMP_ERROR_INVALID_ARG;
+        const int id = ctx->engine->control_vector_load(path);
+        if (id <= 0)
+            return IMP_ERROR_INVALID_MODEL;
+        *out_id = id;
+        return IMP_SUCCESS;
+    });
+}
+
 ImpError imp_lora_set(ImpContext ctx, int32_t adapter_id) {
     if (!ctx || !ctx->engine)
         return IMP_ERROR_INVALID_ARG;

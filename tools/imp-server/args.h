@@ -19,6 +19,9 @@ struct ServerArgs : CommonArgs {
     // --lora NAME=PATH (repeatable): PEFT adapters loaded at startup,
     // selectable per request via the "lora" body field.
     std::vector<std::pair<std::string, std::string>> loras;
+    // --control-vector NAME=PATH (repeatable): llama.cpp cvector GGUF, selected per request
+    // via the "control_vector" body field.
+    std::vector<std::pair<std::string, std::string>> control_vectors;
     std::string models_dir;                     // --models-dir: scan for .gguf files
     std::string api_key;                        // --api-key: require Bearer token auth
     // --metrics-require-auth: gates /metrics behind --api-key too. Off by default since the
