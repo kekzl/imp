@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- Per-request control vectors: `--control-vector NAME=PATH` loads a llama.cpp cvector GGUF, `"control_vector": NAME` or `{name, scale}` adds scale * v_l after each layer it carries. Qwen3-4B Q8_0: scale 0 reproduces the base text, scale 4 steers it.
+
 ### Changed
 - Release bar 2 (`bench-competitive`): Qwen3.8-27B Q4_K_M is a hero (6 of 8 contested), the non-hero Qwen3-30B-A3B row is gone; the sweep refuses on host 1-min load > nproc/4 instead of any running container.
 
