@@ -94,6 +94,9 @@ struct WeightCaches {
     // ssm_in / gdn_gate / ssm_out) and what of them reached the driver: the expert cache grows by it.
     size_t dropped_gdn_bytes = 0;
     size_t dropped_gdn_released_bytes = 0;
+    // gemm.mxfp8_gdn_proj_prefill resolved to fp8rows: prefill reads the FP8 sidecar rows, so
+    // Phase 4b frees the F16 in/gate/out with VRAM-resident experts too.
+    bool gdn_fp8rows = false;
     // Released ssm_in: FP8 view into its pack's sidecar rows, keyed by the freed pointer.
     std::unordered_map<const void*, FP8CacheEntry> released_fp8_view;
     // F16 rebuild target for released sources (released_source_gemm_), sized for the largest.
