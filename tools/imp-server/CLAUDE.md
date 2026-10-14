@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-23
-commit: 9b4a84e5
+verified: 2026-10-15
+commit: 18b480d7
 -->
 
 # tools/imp-server - the HTTP surface
