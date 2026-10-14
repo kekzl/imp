@@ -8,7 +8,7 @@
 namespace imp {
 
 // GBNF (llama.cpp grammar dialect) -> rule table + nondeterministic pushdown simulator for
-// token-level constrained decoding (docs/roadmap.md gap 8). A context-free grammar needs a
+// token-level constrained decoding (docs/ROADMAP.md gap 8). A context-free grammar needs a
 // STACK, which RegexNfa (#1091) structurally cannot have.
 // Supported syntax: root ::= alternatives (entry rule); name ::= a | b; "literal"; [a-z0-9_]
 // [^\n] classes/ranges/negation; . (any char); rule-ref; ( ... ) grouping; x* x+ x?;

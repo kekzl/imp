@@ -4,7 +4,7 @@
 // deterministic=true => greedy output and teacher-forced PPL are byte-/bit-identical for
 // repeats on one context and across fresh processes (Qwen3.6-35B is the documented flipper).
 // KNOWN LIMIT (DISABLED_ tests): across fresh CONTEXTS in one process output is only usually
-// identical (PPL deltas up to a few percent, state-sized); docs/determinism.md SS4 is the
+// identical (PPL deltas up to a few percent, state-sized); docs/DETERMINISM.md SS4 is the
 // source, not re-derived here.
 // Runs on every model env var naming a file on disk: IMP_TEST_MOE_MODEL (this suite's
 // target) and IMP_TEST_MODEL (dense) - #1299 showed the dense row fails independently
@@ -184,7 +184,7 @@ TEST_P(DetEvalE2ETest, PerplexityBitIdenticalSameContext) {
 
 // 4. KNOWN LIMIT companion (see header): cross-context perplexity in one
 //    process is flaky, like the greedy variant. For which model, see
-//    docs/determinism.md §4, not this comment.
+//    docs/DETERMINISM.md §4, not this comment.
 TEST_P(DetEvalE2ETest, DISABLED_PerplexityBitIdenticalAcrossFreshContexts) {
     std::vector<int32_t> tokens;
     for (int i = 0; i < 256; ++i)

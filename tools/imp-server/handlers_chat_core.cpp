@@ -383,7 +383,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
 
     // The byte bound before any render or merge walk: --max-input-tokens is
     // checked on the token count below, which exists only after the cost has
-    // been paid (AUDIT_arch_2026 F2-9). count_tokens takes this path too.
+    // been paid (AUDIT_ARCH_2026 F2-9). count_tokens takes this path too.
     size_t prompt_bytes = 0;
     for (const auto& m : ctx.params.chat_msgs)
         prompt_bytes += m.content.size();
@@ -593,7 +593,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
 
     // Per-request LoRA selection (#522): name resolved here; batching worker switches the
     // engine-global adapter at admission once nothing of another adapter is in flight
-    // (AUDIT_arch_2026 E-1). One adapter active at a time; others queue behind the barrier.
+    // (AUDIT_ARCH_2026 E-1). One adapter active at a time; others queue behind the barrier.
     if (ctx.snap.lora_id < 0) {
         send_json_error(res, 400, "invalid_request_error",
                         "LoRA adapter '" + ctx.params.lora_name +
@@ -836,7 +836,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         }
 
         // "internal_error": the worker cancelled this request from inside a
-        // failed step (host throw or device fault, AUDIT_arch_2026 D-1). A 200
+        // failed step (host throw or device fault, AUDIT_ARCH_2026 D-1). A 200
         // with an empty completion would read as a model that chose silence.
         if (std::strcmp(finish, "internal_error") == 0) {
             const bool faulted = state.batching && state.batching->faulted();

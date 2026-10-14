@@ -61,7 +61,7 @@ find_package(JPEG REQUIRED)
 # Fallback PTX compute_120f JIT-compiles for GB203, loses TMA-WS grouped GEMM (NVFP4 degraded).
 # IMP_DISABLE_120F_FALLBACK=ON strips it. CMake<3.31 can't parse a/f suffix; gencode passed direct.
 option(IMP_DISABLE_120F_FALLBACK "Skip compute_120f PTX fallback (RTX 5090-only fatbin)" OFF)
-# AUDIT_arch_2026 H-10: device LTO (per-TU rdc) measured neutral; hot kernels don't cross
+# AUDIT_ARCH_2026 H-10: device LTO (per-TU rdc) measured neutral; hot kernels don't cross
 # TU boundaries so there is nothing to inline. Off by default; kept as the switch that records it.
 option(IMP_DEVICE_LTO "Device link-time optimization: LTO IR (code=lto_120a) per TU, SASS produced at the device link" OFF)
 if(IMP_DEVICE_LTO)
@@ -975,7 +975,7 @@ if(IMP_BUILD_TESTS)
         # include both sides, which is the only place the two hand-maintained
         # copies of the arch/dtype numbering can be tied together.
         tests/test_c_api_enum_binding.cpp
-        # Hostile ImpConfig values through imp_context_create (AUDIT_arch_2026
+        # Hostile ImpConfig values through imp_context_create (AUDIT_ARCH_2026
         # G-3/G-4). CPU-only: every case is refused before a model or the GPU is
         # looked at, so the model handle is an empty ImpModel_T.
         tests/test_c_api_contract.cpp
@@ -1151,7 +1151,7 @@ if(IMP_BUILD_TESTS)
             tests/test_reasoning_reconcile.cpp
             tests/test_stream_reasoning_split.cpp
             tests/test_server_auth.cpp
-            # The request `model` field is a name, never a path (AUDIT_arch_2026
+            # The request `model` field is a name, never a path (AUDIT_ARCH_2026
             # F2-1): the two pure policy functions behind find_model_path().
             tests/test_model_name_policy.cpp
             tests/test_tracing.cpp
@@ -1514,14 +1514,14 @@ if(IMP_BUILD_TESTS)
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_precommit_filter.sh
                 ${CMAKE_CURRENT_SOURCE_DIR})
 
-    # AUDIT_arch_2026 I-7: every --gtest_filter literal in the Makefile must match a test in the
+    # AUDIT_ARCH_2026 I-7: every --gtest_filter literal in the Makefile must match a test in the
     # binary the same line names. Same fail-open shape as guard_verify_filter.
     add_test(NAME guard_makefile_filters
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_makefile_filters.sh
                 ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/Makefile)
 
     # verify.sh's literal copy of _unit_e2e_filter above must stay byte-identical
-    # (AUDIT_arch_2026 I-3: it drifted for nine days and every full `make verify`
+    # (AUDIT_ARCH_2026 I-3: it drifted for nine days and every full `make verify`
     # was red). Pure text diff, no binary.
     add_test(NAME guard_lane_filter_copy
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_lane_filter_copy.sh

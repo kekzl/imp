@@ -66,7 +66,7 @@ public:
             return false;
         // Compare against the bytes left, never `data_ + len`: a 64-bit
         // varint near 2^64 wraps the sum below `end_` and the cursor walks
-        // backwards (AUDIT_arch_2026 F1-8). Same form as gguf_loader_internal.h.
+        // backwards (AUDIT_ARCH_2026 F1-8). Same form as gguf_loader_internal.h.
         if (len > static_cast<uint64_t>(end_ - data_)) {
             fail("length-delim past end");
             return false;

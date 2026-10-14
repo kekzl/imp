@@ -22,7 +22,7 @@ from mock_server import MOCK_MODEL_ID, run_server
 
 
 class TestReadiness:
-    """GET /ready is a status code, not a JSON field (AUDIT_arch_2026 E-5).
+    """GET /ready is a status code, not a JSON field (AUDIT_ARCH_2026 E-5).
 
     /health stays liveness (200 model-less, suspended, mid-swap); /ready is
     200 only when an inference request would be taken right now, else 503

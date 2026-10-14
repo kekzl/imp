@@ -48,7 +48,7 @@ inline constexpr const char* kEnvMmprojGemma4 = "IMP_TEST_MMPROJ_GEMMA4";
 inline constexpr const char* kEnvModelModeloptCoder = "IMP_TEST_MODEL_MODELOPT_CODER";
 inline constexpr const char* kEnvModelMistral = "IMP_TEST_MODEL_MISTRAL";
 
-// Dense native-NVFP4 checkpoint for the batch-invariance instrument (AUDIT_arch_2026 D-2).
+// Dense native-NVFP4 checkpoint for the batch-invariance instrument (AUDIT_ARCH_2026 D-2).
 // Dense on purpose: MoE routing flips would sit on top of the numerics under test.
 // Default: /models/Qwen3-14B-NVFP4.
 inline constexpr const char* kEnvModelNvfp4 = "IMP_TEST_MODEL_NVFP4";

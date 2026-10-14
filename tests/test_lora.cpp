@@ -97,7 +97,7 @@ std::string make_adapter(int d_model, int kv_rows, bool zero_B, const char* dirn
 }
 
 // Teacher-forced PPL is the bit-stable A/B instrument under IMP_DETERMINISTIC (#542); greedy
-// text comparison is invalid since dense greedy logit ties flip across runs (docs/determinism.md).
+// text comparison is invalid since dense greedy logit ties flip across runs (docs/DETERMINISM.md).
 double ppl(ImpModel model, ImpContext ctx, const char* text) {
     std::vector<int32_t> toks(512);
     int n = 0;
@@ -126,7 +126,7 @@ TEST(LoraHotSwap, ZeroAdapterIdentity_EffectAdapterDiffers_SwapBack) {
     if (!std::filesystem::exists(model_path()))
         GTEST_SKIP() << "model not present: " << model_path();
 
-    // Identity assertions need bit-stable greedy (logit ties flip otherwise, docs/determinism.md);
+    // Identity assertions need bit-stable greedy (logit ties flip otherwise, docs/DETERMINISM.md);
     // IMP_DETERMINISTIC=1 must be set before model/engine creation, same as DetEvalE2ETest.
     setenv("IMP_DETERMINISTIC", "1", 1);
 
@@ -183,7 +183,7 @@ TEST(LoraHotSwap, ZeroAdapterIdentity_EffectAdapterDiffers_SwapBack) {
     imp_model_free(model);
 }
 
-// AUDIT_arch_2026 dispatch #6 (E-1, F1-6): the adapter is checked against the model at load,
+// AUDIT_ARCH_2026 dispatch #6 (E-1, F1-6): the adapter is checked against the model at load,
 // is a prefix-cache key, and is an admission barrier.
 
 // q_proj/v_proj adapter with caller-chosen widths (a wrong one must be refused).

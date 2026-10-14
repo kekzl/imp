@@ -9,7 +9,7 @@ commit: 9cbb8004
 
 Companion doc to [`ARCHITECTURE.md`](ARCHITECTURE.md): the two parallel layers that handle
 quantized weights, the boundary between them, and a concrete NVFP4 walkthrough.
-User-facing format choices: [`quantization.md`](../quantization.md).
+User-facing format choices: [`QUANTIZATION.md`](../QUANTIZATION.md).
 
 ## Two layers, one direction
 
@@ -59,7 +59,7 @@ Pure orchestration; calls `src/quant/` kernels for the actual format work.
 ## Producing NVFP4 outside `imp-quantize`
 
 NVIDIA Model Optimizer is the primary external producer (user-facing usage:
-[`quantization.md`](../quantization.md)):
+[`QUANTIZATION.md`](../QUANTIZATION.md)):
 
 ```bash
 pip install nvidia-modelopt
@@ -86,7 +86,7 @@ Qwen3.6, Gemma-4).
 `GraphExecutor::gemm_via_handle_` (`src/exec/executor_gemm_dispatch.cu`) consults at three
 sites. The FP8, NVFP4 GEMV/GEMM, MXFP4 and FP16 arms stay inside `gemm_via_handle_` (the R5
 migration stopped there; the 9 registrations without a dispatch site were retired in
-AUDIT_arch_2026 dispatch #8, decision (b), `docs/audit/SETTLED.md` section H).
+AUDIT_ARCH_2026 dispatch #8, decision (b), `docs/audit/SETTLED.md` section H).
 
 A new key lands together with its dispatch site; `GemmKernelRegistryTest.RegistryHoldsExactlyTheProducedKeys`
 pins the count at 10. Registered tiers:

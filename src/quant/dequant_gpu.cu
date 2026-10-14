@@ -464,7 +464,7 @@ __global__ void dequant_q3k_kernel(const uint8_t* __restrict__ src, half* __rest
 
     // hmask's 256 high bits are NOT stored in output order: ggml walks one bitplane per
     // 32-element sub-block, so element i reads bit i/32 of byte i%32, not bit i%8 of byte i/8
-    // (the two agree only for i<8, why this survived every by-eye check, AUDIT_arch_2026 D-5).
+    // (the two agree only for i<8, why this survived every by-eye check, AUDIT_ARCH_2026 D-5).
     int hm_bit = (hmask[i % 32] >> (i / 32)) & 1;
     int q3 = q2 - (hm_bit ? 0 : 4);
 

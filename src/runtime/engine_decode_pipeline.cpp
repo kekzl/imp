@@ -135,7 +135,7 @@ void Engine::log_pipeline_gate_once_(const std::vector<std::shared_ptr<Request>>
         (int)runtime_config_.diagnostics.profile, (int)decode_batch_pool_.is_allocated(),
         (int)(offload_mgr_ != nullptr),
         // Mirrors the gate above: `if (ssm_state_) return false;` is
-        // unconditional since #1750 (AUDIT_arch_2026 C-7: the pre-#1750
+        // unconditional since #1750 (AUDIT_ARCH_2026 C-7: the pre-#1750
         // version printed ssm_ok=1 on hybrids this gate now refuses).
         (int)!ssm_state_, (int)swa_sizing_active_, (int)config_.streaming_kv_enabled,
         (int)(kv_manager_ && kv_manager_->residual_enabled()), (int)executor_->sample_pipeline_ready(),

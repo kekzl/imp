@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn a MoE expert-activation histogram into the number the roadmap needs.
 
-docs/roadmap.md ("CPU-resident cold experts") and docs/GOAL.md both gate that
+docs/ROADMAP.md ("CPU-resident cold experts") and docs/GOAL.md both gate that
 idea on a measured budget rather than on how attractive it sounds. The
 bandwidth half is measurable directly; the half that was missing is ROUTING
 SKEW: if VRAM holds fraction f of each layer's experts, what share of the
@@ -34,10 +34,10 @@ import math
 import sys
 
 # Measured on this host 2026-08-10: streaming read, 16 threads, 24 GiB buffer,
-# 512-bit non-temporal loads, three runs within 0.2%. See docs/roadmap.md.
+# 512-bit non-temporal loads, three runs within 0.2%. See docs/ROADMAP.md.
 DEFAULT_HOST_BW_GBS = 62.5
 
-# docs/roadmap.md: each H2D transfer blocks the host ~165 us on this WSL2/WDDM
+# docs/ROADMAP.md: each H2D transfer blocks the host ~165 us on this WSL2/WDDM
 # box, regardless of size. A host-side expert needs the token's activations over
 # and its output back, so two per MoE layer per token.
 DEFAULT_TRANSFER_US = 165.0

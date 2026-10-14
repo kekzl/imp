@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# imp-quantize round trip (AUDIT_arch_2026 I-6): quantize a small BF16 SafeTensors checkpoint
+# imp-quantize round trip (AUDIT_ARCH_2026 I-6): quantize a small BF16 SafeTensors checkpoint
 # to NVFP4, load through imp-cli, require a coherent greedy answer.
 # Usage: make test-quantize (or scripts/test_quantize.sh). Env: IMP_QUANT_MODEL (default
 # Qwen3-0.6B), IMP_MODELS_DIR (default $HOME/models), IMP_TEST_IMG (default imp:test),

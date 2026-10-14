@@ -64,7 +64,7 @@ inline int kv_unmet_blocks(int ctx_len, int remaining, int held, int block_size)
     return std::max(0, (ctx_len + ahead - 1 + block_size - 1) / block_size - held);
 }
 
-// The mid-run trigger, as arithmetic the CPU lane can pin (AUDIT_arch_2026
+// The mid-run trigger, as arithmetic the CPU lane can pin (AUDIT_ARCH_2026
 // C-4): counts the pool exhausted when free + reclaimable prefix-cache
 // blocks fall under a tenth of it. Free-list-alone false-fired at a third
 // reclaimable, costing 2387 -> 1443 tok/s (#1879). `unmet` = sum of

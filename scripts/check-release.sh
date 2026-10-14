@@ -248,7 +248,7 @@ else
     fail "LICENSE missing or README license claim mismatched"
 fi
 # nvfp4_quant_hw.cu (Apache-2.0, adapted from SageAttention) and src/compute/apa/ (MPL-2.0, kekzl/apa)
-# require their license text in every distribution (AUDIT_arch_2026 H-7).
+# require their license text in every distribution (AUDIT_ARCH_2026 H-7).
 # Four-way pin: file, content, OCI label, README pointer.
 if [ -f THIRD_PARTY_LICENSES.md ] && grep -q "Apache License" THIRD_PARTY_LICENSES.md \
    && grep -q "SageAttention" THIRD_PARTY_LICENSES.md \
@@ -275,7 +275,7 @@ else
     fail "version drift — CMakeLists '$CM_VER', CHANGELOG '${CL_VER:-none}', BENCHMARKS '${BM_VER:-none}'"
 fi
 
-# Covers every living doc (roadmap.md, docs/*.md, docs/internals/*.md, root docs); archive/,
+# Covers every living doc (ROADMAP.md, docs/*.md, docs/internals/*.md, root docs); archive/,
 # plans/, audit/ excluded (their line numbers describe the commit they document).
 # Fails on a gone or ambiguous citation anchor and a renamed bare docs/*.md name; line drift
 # only warns (#2231). Same gate runs in the

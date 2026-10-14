@@ -166,7 +166,7 @@ TIES cuBLAS; closing the -38% gap needs to BEAT it, which the in-kernel decode
 tax blocks, and the alternative costs 2x weight VRAM (rejected). The files
 table below was never created.
 
-Standing verdict: `docs/roadmap.md` "Closed competitive records". The practical
+Standing verdict: `docs/ROADMAP.md` "Closed competitive records". The practical
 answer for fast Q4_K-class prefill is NVFP4 SafeTensors, not this kernel.
 
 2026-09-24: the scaffold that shipped behind `gemm.q4k_hmma_enabled` (#458) measured gemma-3-12b Q4_K_M pp512 305.74 tok/s against 4539.80 default and was removed with the flag; dense Q4_K prefill runs the IMMA kernel (`gemm.q4k_imma_prefill`, default on).

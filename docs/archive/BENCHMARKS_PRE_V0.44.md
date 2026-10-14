@@ -301,7 +301,7 @@ scan was the limit.
 ¹ᵈ 2026-07-13, commit `63df2d30` (PR #990) + `gemm.fp8_attn_proj` (default
 auto since that PR): FP8 E4M3 per-row-scale decode sidecar for the BF16
 q/k/v/o attention projections — the roofline cell
-(`docs/archive/roofline_gptoss_2026_07_13.md`) showed them at 33.5% of the
+(`docs/archive/ROOFLINE_GPTOSS_2026_07_13.md`) showed them at 33.5% of the
 decode window as 2 B/elem FP16 GEMVs. tg128 ~350 → **391.2** (+12%).
 Teacher-forced PPL unaffected by construction (decode-only sidecar;
 nsys-verified zero FP8 kernels in a `--perplexity` run); degen_suite 33/33.
@@ -365,7 +365,7 @@ processes agreed to 0.06 %, which is the quiet-host case the gate cannot assume.
 A dense-GDN 27B at 87 tok/s is bounded by weight bandwidth, not by the LM head:
 that head is 2.4 GiB of the 17.9 and is served from the NVFP4 decode cache, a
 trade measured at +10.4 % decode for +0.99 % perplexity
-([`quantization.md`](../quantization.md)).
+([`QUANTIZATION.md`](../QUANTIZATION.md)).
 
 ## imp vs vLLM on one checkpoint (2026-08-16)
 
@@ -446,7 +446,7 @@ Readings:
   per-stream decode falls 69 -> 46 tok/s across 1 -> 32 streams where imp
   falls 85 -> 29. The batched-GDN work in this branch closed the gap from
   ~6.5x (81.5 tok/s aggregate before it) to 1.58x; the rest is the open
-  concurrency-scaling gap and lives in `docs/roadmap.md`.
+  concurrency-scaling gap and lives in `docs/ROADMAP.md`.
 - vLLM serves 32 streams over 16k model len inside 0.90 utilization on this
   card — the Mamba-cache-block startup constraint from 2026-08-16 is handled
   by `--max-num-seqs 32`.
@@ -504,7 +504,7 @@ id-based prefill rotor) moved the same 32-stream wave from 936-990 to
 entirely. n=1 reads 84.0, n=8 374.5, n=32 aggregate 1050.1 (median of
 3). Against vLLM's 1477 profiled the gap stands at ~1.4x; what remains
 of the engine-side posts is the GEMM class (Marlin port, a standalone
-project) and cross-sequence prefill batching (`docs/roadmap.md` item
+project) and cross-sequence prefill batching (`docs/ROADMAP.md` item
 0(a)/(d)).
 
 [PROV: commit=957653ea date=2026-08-25 hw=RTX5090 model=Qwen3.8-27B-NVFP4
@@ -518,7 +518,7 @@ GDN state #1776 + plan fix #1777):** the same pinned 32-stream wave reads
 profiled the pinned gap stands at **~1.08x**. The scan itself is at the
 bandwidth ceiling in both dtypes (1527/1570 GB/s isolated); what remains
 is the launch-coupled idle, cross-sequence prefill batching and the
-elementwise fusion tail (`docs/roadmap.md` item 0).
+elementwise fusion tail (`docs/ROADMAP.md` item 0).
 
 [PROV: commit=b516d9a7 date=2026-08-26 hw=RTX5090 model=Qwen3.8-27B-NVFP4
        quant=NVFP4-CT cuda=13.3 path=server-api cmd=gdn_bf16_ab.sh+gdn_default_ab.sh
@@ -659,7 +659,7 @@ Qwen3-14B-NVFP4 --bench --bench-pp 131072 --bench-reps 5 --prefill-chunk-size 0
 is 128K since `d8bc45a8`. Q6_K GGUF north-star cannot host this on 32 GB (KV
 pool ~75K tokens beside dual weight residency); TTFT reference band in
 `tests/perf_baseline_north_star.json` ends at pp65536. Band used by `make
-verify-north-star` only; no hook or CI job runs it (AUDIT_arch_2026 H-4).
+verify-north-star` only; no hook or CI job runs it (AUDIT_ARCH_2026 H-4).
 Default gate baseline carries `pp128`/`pp512`/`pp4096`, so `scripts/verify.sh`
 skips 8K-64K lengths on `make verify-fast`.
 
@@ -908,5 +908,5 @@ in, 18.80 GiB out), which `scripts/stage-model.sh` produces.
 
 Weights land at 17.9 GiB resident, ~7.7 GiB left for KV on a 32 GB card. Bounded by weight
 bandwidth, not the LM head (2.4 GiB of the 17.9, served from the NVFP4 decode cache, a trade
-measured at +10.4% decode for +0.99% perplexity, see [`quantization.md`](../quantization.md)).
+measured at +10.4% decode for +0.99% perplexity, see [`QUANTIZATION.md`](../QUANTIZATION.md)).
 

@@ -343,7 +343,7 @@ MoeFusedDp4aPrefillFn moe_fused_dp4a_prefill_kernel(QType qt);
 
 // Max-L1 SMEM carveout on every dp4a GEMV kernel template instantiation.
 // Called from GraphExecutor::init(), independent of PDL: the kernels carry no
-// pdl_wait() and are not registered (AUDIT_arch_2026 A1-3 / A2-1).
+// pdl_wait() and are not registered (AUDIT_ARCH_2026 A1-3 / A2-1).
 void gemv_dp4a_set_l1_carveout();
 
 // dp4a-accelerated GEMV with FP32 output: W_quant @ x_q8_1 → y[M] float.

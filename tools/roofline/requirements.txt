@@ -1,6 +1,6 @@
 # Plot deps, pinned by content. Used by Dockerfile.plot (the `roofline plot`
 # container) and by the roofline workflow, so both install the same bytes
-# (AUDIT_arch_2026 H-6).
+# (AUDIT_ARCH_2026 H-6).
 #
 # Regenerate after a bump (matplotlib is the only direct pin, requirements.in):
 #   docker run --rm --network host -v "$PWD/tools/roofline":/w -w /w python:3.14-slim \

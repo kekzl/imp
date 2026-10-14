@@ -63,7 +63,7 @@ fi
 
 # Roofline (per-kernel %-of-peak, tools/roofline/) has no automated arm: CI has no GPU runner
 # and roofline.yml only re-parses committed history, so a kernel diff compares against nothing
-# unless someone measures. Reminder names the age of the newest run (AUDIT_arch_2026 H-2).
+# unless someone measures. Reminder names the age of the newest run (AUDIT_ARCH_2026 H-2).
 if [ "$NEEDS_ROOFLINE" -eq 1 ] && [ -s "$ROOT/tools/roofline/history/index.jsonl" ]; then
     _rl_run="$(tail -1 "$ROOT/tools/roofline/history/index.jsonl" | sed -n 's/.*"run_id": *"\([^"]*\)".*/\1/p')"
     _rl_date="$(echo "$_rl_run" | sed -n 's/^[0-9a-f]*_\([0-9]\{8\}\)_.*/\1/p')"

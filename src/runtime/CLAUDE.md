@@ -1,8 +1,8 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-23
-commit: c2b8f047
+verified: 2026-10-15
+commit: c0211fea
 -->
 
 # src/runtime - engine, scheduler, config, KV
@@ -41,4 +41,4 @@ Generated config documentation: edit the inline comments in `config.h`, which ar
 
 ## See also
 
-[`docs/internals/MEMORY.md`](../../docs/internals/MEMORY.md) (VRAM, ownership, lifetime), [`docs/determinism.md`](../../docs/determinism.md) (what reproducibility guarantees).
+[`docs/internals/MEMORY.md`](../../docs/internals/MEMORY.md) (VRAM, ownership, lifetime), [`docs/DETERMINISM.md`](../../docs/DETERMINISM.md) (what reproducibility guarantees).

@@ -39,7 +39,7 @@ LOGS="$(mktemp -d "${TMPDIR:-/tmp}/accept_2205.XXXXXX")"
 cleanup() { rm -rf "$LOGS" "$DIR/variant_gemv" "$DIR/variant_3bit"; }
 trap cleanup EXIT
 
-# The repo's PPL KPI corpus (docs/quantization.md), rebuilt byte-identical from git history.
+# The repo's PPL KPI corpus (docs/QUANTIZATION.md), rebuilt byte-identical from git history.
 CORPUS="$DIR/corpus/ppl_corpus_45k.txt"
 bash tools/analysis/make_ppl_corpus.sh "$CORPUS" >/dev/null || { echo "FAIL setup: make_ppl_corpus.sh"; exit 1; }
 

@@ -1,4 +1,4 @@
-// Can an expert promotion hide behind compute, or does it stall the layer? docs/roadmap.md
+// Can an expert promotion hide behind compute, or does it stall the layer? docs/ROADMAP.md
 // prices promotions as serialised on the critical path (routing for layer N is known only at
 // layer N); the optimistic reading is a prefetch on a copy stream. Which holds depends on
 // whether copy/compute overlap works on this WSL2/WDDM box, so all three arms are measured.

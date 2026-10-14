@@ -443,7 +443,7 @@ bool bench_paged_attention() {
         printf("\n");
     }
 
-    // Block-size sweep (AUDIT_arch_2026 B-5): same kernel at 16/32/64 tokens per block
+    // Block-size sweep (AUDIT_ARCH_2026 B-5): same kernel at 16/32/64 tokens per block
     // (kv_cache.block_size values). The engine's auto rule (32 for n_kv_heads<=4, else 16) never
     // had this instrument before.
     printf("=== Paged Attention Decode: block-size sweep (FP16 KV) ===\n");

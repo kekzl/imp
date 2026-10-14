@@ -190,7 +190,7 @@ __global__ void smallM_kernel_v1_software_ref(
 
 // smallM_kernel_v1: TMA loads + N_STAGES-deep producer/consumer pipeline, warp-specialised.
 // No v2 in this file; src/quant/nvfp4_gemm_smallm_v2.cu is the unrelated dense small-M kernel
-// (AUDIT_arch_2026 A2-7).
+// (AUDIT_ARCH_2026 A2-7).
 // Grid: (n_experts, N/TILE_N), one CTA per (expert, n-tile). Block: 256 threads (8 warps):
 // warps 0-3 produce, 4-7 consume. Pipeline (N_STAGES in [2,4]): stage SMEM holds A,B,SFA,SFB
 // sub-buffers plus a full/empty mbarrier per stage. Producer warps 0-3: thread 0 arrives with

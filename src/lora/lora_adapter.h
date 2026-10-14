@@ -28,7 +28,7 @@ struct LoraWeights {
 };
 
 // Base-model widths an adapter's declared shapes are held against at load
-// (AUDIT_arch_2026 F1-6): K is read from the projection input, N is written
+// (AUDIT_ARCH_2026 F1-6): K is read from the projection input, N is written
 // to its output, so a wrong pair is an out-of-bounds kernel, not a bad answer.
 struct LoraDims {
     int d_model = 0;  // input of q/k/v/gate/up, output of o/down

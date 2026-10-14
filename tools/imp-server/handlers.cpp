@@ -154,7 +154,7 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res, Serv
 
 // Readiness must be a status code, not a JSON field: an orchestrator keyed on the code got
 // traffic during model-less/suspend/swap states because /health said 200 for all three
-// (AUDIT_arch_2026 E-5). No mutex: the swap holds it for the whole load, when this must answer.
+// (AUDIT_ARCH_2026 E-5). No mutex: the swap holds it for the whole load, when this must answer.
 void handle_ready(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
     const char* code = nullptr;
     if (g_draining.load(std::memory_order_relaxed))
@@ -439,7 +439,7 @@ void handle_info(const httplib::Request& /*req*/, httplib::Response& res, Server
 }
 
 // find_model_path: name resolves only as a models_dir basename or HF cache id, never as a raw
-// filesystem path (AUDIT_arch_2026 F2-1: {"model":"/any/x.gguf"} loaded and evicted the resident model).
+// filesystem path (AUDIT_ARCH_2026 F2-1: {"model":"/any/x.gguf"} loaded and evicted the resident model).
 std::string find_model_path(const ServerState& state, const std::string& name) {
     using imp_server::ModelNameKind;
     switch (imp_server::classify_model_name(name)) {

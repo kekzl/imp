@@ -14,24 +14,24 @@ full text of each is in git history; the recipe for reading one is below.
 
 | file | subject | cited from |
 |---|---|---|
-| [`prefill_gap_2026_06_07.md`](prefill_gap_2026_06_07.md) | the prefill gap against llama.cpp | code (3) + docs |
-| [`roofline_2026_06_07.md`](roofline_2026_06_07.md) | first roofline campaign | code (1) + docs |
-| [`roofline_gptoss_2026_07_13.md`](roofline_gptoss_2026_07_13.md) | roofline on gpt-oss | code (1) + docs |
-| [`tile-fa2-dispatch-shelved.md`](tile-fa2-dispatch-shelved.md) | the shelved tiled-FA2 dispatch | code (1) + docs |
-| [`structural_debt_2026_07_07.md`](structural_debt_2026_07_07.md) | structure audit | docs |
+| [`PREFILL_GAP_2026_06_07.md`](PREFILL_GAP_2026_06_07.md) | the prefill gap against llama.cpp | code (3) + docs |
+| [`ROOFLINE_2026_06_07.md`](ROOFLINE_2026_06_07.md) | first roofline campaign | code (1) + docs |
+| [`ROOFLINE_GPTOSS_2026_07_13.md`](ROOFLINE_GPTOSS_2026_07_13.md) | roofline on gpt-oss | code (1) + docs |
+| [`TILE_FA2_DISPATCH_SHELVED.md`](TILE_FA2_DISPATCH_SHELVED.md) | the shelved tiled-FA2 dispatch | code (1) + docs |
+| [`STRUCTURAL_DEBT_2026_07_07.md`](STRUCTURAL_DEBT_2026_07_07.md) | structure audit | docs |
 | [`PERF_AUDIT_2026_07_23.md`](PERF_AUDIT_2026_07_23.md) | performance audit | `imp.conf.example` |
-| [`ppl_parity_2026_07_12.md`](ppl_parity_2026_07_12.md) | cross-engine perplexity parity | docs |
-| [`vram_audit_2026_07_07.md`](vram_audit_2026_07_07.md) | VRAM accounting snapshot | docs |
-| [`cpp23_migration_2026_07_08.md`](cpp23_migration_2026_07_08.md) | the C++23 move | docs |
-| [`housekeeping_2026_06_13.md`](housekeeping_2026_06_13.md) | the consolidation pass described below | docs |
-| [`benchmarks_pre_v0.44.md`](benchmarks_pre_v0.44.md) | `docs/BENCHMARKS.md` before the 2026-09-23 prose cleanup, all superseded sweeps | `docs/BENCHMARKS.md` |
-| [`memory_census_2026.md`](memory_census_2026.md) | `MEMORY.md` census, design draft A2-A6, migration plan, implementation log | `docs/internals/MEMORY.md` |
-| [`limitations_detail_2026.md`](limitations_detail_2026.md) | MTP speculative-decoding investigation series | `docs/LIMITATIONS.md` |
-| [`quantization_awq_findings.md`](quantization_awq_findings.md) | AWQ findings, refuted quantization experiments | `docs/quantization.md` |
-| [`kernels_refuted_2026.md`](kernels_refuted_2026.md) | refuted FA2 occupancy follow-up | `docs/internals/KERNELS.md` |
-| [`roadmap_ledger_2026_09_28.md`](roadmap_ledger_2026_09_28.md) | `docs/roadmap.md` closed rows, Closed, 2026 bar, lever ledger, batch=1, MoE offload, quantizer, competitive records, known limitations, shelved | `docs/roadmap.md` |
-| [`roadmap_ledger_2026_10_15.md`](roadmap_ledger_2026_10_15.md) | Now / Next / Later rows closed, refuted or superseded in place up to 2026-10-15 (80 rows) | `docs/roadmap.md` |
-| [`performance_2026_05.md`](performance_2026_05.md) | 2026-05 prefill and KV-dtype comparison tables, moved out of `docs/PERF.md` 2026-09-05 (#1919) | `docs/PERF.md` |
+| [`PPL_PARITY_2026_07_12.md`](PPL_PARITY_2026_07_12.md) | cross-engine perplexity parity | docs |
+| [`VRAM_AUDIT_2026_07_07.md`](VRAM_AUDIT_2026_07_07.md) | VRAM accounting snapshot | docs |
+| [`CPP23_MIGRATION_2026_07_08.md`](CPP23_MIGRATION_2026_07_08.md) | the C++23 move | docs |
+| [`HOUSEKEEPING_2026_06_13.md`](HOUSEKEEPING_2026_06_13.md) | the consolidation pass described below | docs |
+| [`BENCHMARKS_PRE_V0.44.md`](BENCHMARKS_PRE_V0.44.md) | `docs/BENCHMARKS.md` before the 2026-09-23 prose cleanup, all superseded sweeps | `docs/BENCHMARKS.md` |
+| [`MEMORY_CENSUS_2026.md`](MEMORY_CENSUS_2026.md) | `MEMORY.md` census, design draft A2-A6, migration plan, implementation log | `docs/internals/MEMORY.md` |
+| [`LIMITATIONS_DETAIL_2026.md`](LIMITATIONS_DETAIL_2026.md) | MTP speculative-decoding investigation series | `docs/LIMITATIONS.md` |
+| [`QUANTIZATION_AWQ_FINDINGS.md`](QUANTIZATION_AWQ_FINDINGS.md) | AWQ findings, refuted quantization experiments | `docs/QUANTIZATION.md` |
+| [`KERNELS_REFUTED_2026.md`](KERNELS_REFUTED_2026.md) | refuted FA2 occupancy follow-up | `docs/internals/KERNELS.md` |
+| [`ROADMAP_LEDGER_2026_09_28.md`](ROADMAP_LEDGER_2026_09_28.md) | `docs/ROADMAP.md` closed rows, Closed, 2026 bar, lever ledger, batch=1, MoE offload, quantizer, competitive records, known limitations, shelved | `docs/ROADMAP.md` |
+| [`ROADMAP_LEDGER_2026_10_15.md`](ROADMAP_LEDGER_2026_10_15.md) | Now / Next / Later rows closed, refuted or superseded in place up to 2026-10-15 (80 rows) | `docs/ROADMAP.md` |
+| [`PERFORMANCE_2026_05.md`](PERFORMANCE_2026_05.md) | 2026-05 prefill and KV-dtype comparison tables, moved out of `docs/PERF.md` 2026-09-05 (#1919) | `docs/PERF.md` |
 
 Moved here from `audit/` on 2026-08-11 so that `audit/` holds only the ledgers
 you are meant to consult. **`AUDIT_ARCH_2026_07_29.md` deliberately stayed in
@@ -70,12 +70,12 @@ live audit memos in [`../audit/`](../audit/).
 | `fmha_mxf4nvf4_sm120/` (`.cu` + `.h`) | FP4 `mxf4nvf4` block-scale FMHA prefill experiment. Not merged — raw e4m3/FP4 score quality cliff on real activations (#511 class). FP4 attention stayed opt-in elsewhere. |
 | `attention_naive/` (`attention_naive.cu` + `.h`) | Naive FP32 reference attention (incl. SWA). Was a correctness oracle; superseded by `flash_attention_blackwell` as the in-tree FP16 reference. |
 
-## `tile-fa2-dispatch-shelved.md` (was root `DISPATCH.md`)
+## `TILE_FA2_DISPATCH_SHELVED.md` (was root `DISPATCH.md`)
 
 Progress log for the autonomous cuTile-FA2 (CUDA 13.3 Tile / C++) mandate. The
 decisive 2026-05-29 experiment pinned the autotuned cuTile ceiling at ~26.5
 TFLOPS (3.2% of roofline) — far below the hand-written FA2 — so the Tile backend
-was **shelved** (GOAL §4.4 negative branch; see [`../roadmap.md`](../roadmap.md)).
+was **shelved** (GOAL §4.4 negative branch; see [`../ROADMAP.md`](../ROADMAP.md)).
 Kept as a file (not consolidated) because the live `tools/analysis/tile_fa2_probe.cu`
 still points to its WSL-driver dev recipe for any future re-evaluation.
 
@@ -106,7 +106,7 @@ layout), `cudnn_nvfp4_moe_audit`, `vllm_kernel_audit`. Outcome: the NVFP4 groupe
 GEMM fast path landed; **cuDNN NVFP4 MoE on sm_120 was refuted** (no usable path);
 the "20× / 1258 tok/s" premise from `vllm_kernel_audit` was later refuted (real gap
 ~1.4×). All superseded by the CUTLASS-3.x grouped-GEMM rework and
-`docs/archive/prefill_gap_2026_06_07.md`.
+`docs/archive/PREFILL_GAP_2026_06_07.md`.
 
 ## `cross_engine_bench_2026_05_24.md`
 
@@ -157,12 +157,12 @@ implementation plan and (often) a findings memo:
 A second sweep of dated one-off material whose conclusions are now embedded in code,
 the live `audit/` memos, or shipped PRs. Originals removed; full text in git history.
 
-**Structural-audit chain (superseded by `archive/housekeeping_2026_06_13.md` + the 2026-06-17
+**Structural-audit chain (superseded by `archive/HOUSEKEEPING_2026_06_13.md` + the 2026-06-17
 root audit ledger, itself since removed — git history; *not* today's root `AUDIT.md`):**
 - `audit/structural_debt_2026_06_08.md` — D1–D4 debt audit (ModelProfile / GraphExecutor /
   god-functions / flag sprawl). D1 shipped #622–#623; rest re-verified later.
 - `audit/structural_debt_2026_06_09.md` — C1–C8 follow-up; C1/C2/C4 refuted, C5–C8 tracked.
-  Final verdicts live in `housekeeping_2026_06_13.md`.
+  Final verdicts live in `HOUSEKEEPING_2026_06_13.md`.
 - `audit/structural_consistency_2026_06_06.md` — doc↔code/build/CI consistency pass;
   M1–M3 resolved (CUTLASS 4.5.1 bump, `imp.conf.example` gaps, stale `performance.md`).
 - `audit/vram_cache_structure_2026_06_07.md` — VRAM-cache rebuild audit; shipped as the
@@ -193,7 +193,7 @@ The component rationale now lives in the headers themselves (`quant_pipeline.h`,
 `engine_internal.h`, `pre_dequant_internal.h`, `memory_manager.h`, `tensor_kind_table.h`), which
 point here. DeepSeek MLA shipped (#802/#803, see the 2026-06-29 entry below) and was consolidated
 here; the only spec still live under `superpowers/specs/` is the Q4_K MMQ kernel design — kept not
-as future work but as the **refutation record** cited by [`../roadmap.md`](../roadmap.md) (the
+as future work but as the **refutation record** cited by [`../ROADMAP.md`](../ROADMAP.md) (the
 forge experiment built the in-SMEM Q4_K MMQ + FP16 HMMA kernel and ncu-proved it ties, not beats,
 cuBLAS).
 - `specs/2026-05-20-architecture-refactor-roadmap-design.md` — Phase 1–5 refactor master roadmap;
@@ -222,7 +222,7 @@ history.
 
 **Outcome:** both stages shipped — Stage A materialized (#802), Phase 3 absorbed latent-KV-cache
 decode (#803, opt-in). First MLA arch in imp; validated on DeepSeek-V2-Lite (same-corpus PPL within ~3% of HF bf16 after the 2026-07-07 YaRN rope-mscale fix; the original "6.06 vs 5.07" was cross-corpus).
-Current state lives in [`../supported-models.md`](../MODELS.md), [`../roadmap.md`](../roadmap.md),
+Current state lives in [`../supported-models.md`](../MODELS.md), [`../ROADMAP.md`](../ROADMAP.md),
 and the `src/compute/mla_*.{cu,h}` headers.
 
 ## 2026-06-29 consolidation — frozen/superseded snapshots
@@ -233,8 +233,8 @@ PRs. Originals removed; full text in git history.
 - `audit/performance_agent_readiness_2026_05_31.md` — perf-agent-readiness audit. Its own Executive
   Summary declared the central premise dead ("'1258 tok/s, 20× behind vLLM' no longer holds"), its
   only lever (A1) is annotated DONE (#525), and its "~18% materialized attention" finding was
-  re-measured to 0.0% on hd=128. Superseded by `archive/prefill_gap_2026_06_07.md` +
-  `archive/roofline_2026_06_07.md` (both still live).
+  re-measured to 0.0% on hd=128. Superseded by `archive/PREFILL_GAP_2026_06_07.md` +
+  `archive/ROOFLINE_2026_06_07.md` (both still live).
 - `ptx-status-2026-05-29-cuda133-sm120a.md` — sm_120a ptxas-acceptance survey. Frozen 494-line
   machine-generated snapshot; the filename said `cuda133` but the captured toolkit header was
   `V13.2.78` (compute_120f). Re-run the survey on the real 13.3 toolchain if a fresh PTX-acceptance
@@ -256,7 +256,7 @@ outright (point-in-time reports, superseded; full text in git history):
 
 - `AUDIT.md` (root) — 2026-06-17 whole-repo structural/hardening audit ledger (469 lines,
   append-only through 06-29). Its confirmed findings shipped via the June/July fix PRs;
-  later passes live in `archive/structural_debt_2026_07_07.md` / `_2026_07_10.md`.
+  later passes live in `archive/STRUCTURAL_DEBT_2026_07_07.md` / `_2026_07_10.md`.
   (Not the current root `AUDIT.md`, which is the 2026-07-29 memory-subsystem audit.)
 - `AUDIT/agentic_server_scout.md` — 2026-06-23 phase-0 read-only scout for the agentic
   server hardening campaign; the campaign shipped (PRs #772–#774 and follow-ups).
@@ -269,7 +269,7 @@ outright (point-in-time reports, superseded; full text in git history):
   a model that remains blocked (OOM, no GGUF); the pre-dequant machinery that shipped
   took a different shape.
 - [`docs/superpowers/specs/2026-05-28-q4k-mmq-kernel-design.md`](https://github.com/kekzl/imp/blob/8a1d0396c989d9e57db9b7dfe7b1c4d6ef33f689/docs/superpowers/specs/2026-05-28-q4k-mmq-kernel-design.md) was **moved** to
-  `docs/plans/` (still referenced as refutation evidence by `docs/roadmap.md`), and the
+  `docs/plans/` (still referenced as refutation evidence by `docs/ROADMAP.md`), and the
   empty [`docs/superpowers/`](https://github.com/kekzl/imp/tree/8a1d0396c989d9e57db9b7dfe7b1c4d6ef33f689/docs/superpowers) tree removed.
 - [`tools/prompt-test.sh`](https://github.com/kekzl/imp/blob/4b70d7da7fc5a4873e64a0dd53ef998487060b14/tools/prompt-test.sh), [`tools/benchmark.sh`](https://github.com/kekzl/imp/blob/4b70d7da7fc5a4873e64a0dd53ef998487060b14/tools/benchmark.sh), [`tools/chat.sh`](https://github.com/kekzl/imp/blob/4b70d7da7fc5a4873e64a0dd53ef998487060b14/tools/chat.sh),
   [`tools/download-models.sh`](https://github.com/kekzl/imp/blob/4b70d7da7fc5a4873e64a0dd53ef998487060b14/tools/download-models.sh) — March-era one-off shell tools (curl smoke prompts,
@@ -284,7 +284,7 @@ No living doc, source file, script or CI job referenced these. Full text:
 `git show 5b5b6486:docs/archive/<file>`.
 
 - `roofline_2026_07_11.md`: roofline re-measure.
-- `structural_debt_2026_07_10.md`: structure audit, second pass after `structural_debt_2026_07_07.md`.
+- `structural_debt_2026_07_10.md`: structure audit, second pass after `STRUCTURAL_DEBT_2026_07_07.md`.
 - `DISPATCH_BASELINE_2026_07_17.md`: dispatch baseline snapshot.
 - `AUDIT_REPORT.md`: soundness-hardening branch report.
 

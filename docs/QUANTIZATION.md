@@ -63,7 +63,7 @@ Calibrated per-tensor scales via AWQ or SmoothQuant. Compatible producers:
 | Tool | Status |
 |---|---|
 | [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) (Modelopt) | Primary path. Coherent on Qwen3-Coder-30B, Mistral-3.2, Qwen3.6, Gemma-4 (PR #88 lit up the CUTLASS NVFP4xNVFP4 prefill cache); usage recipe: [`internals/QUANT_PIPELINE.md`](internals/QUANT_PIPELINE.md). |
-| [llm-compressor](https://github.com/vllm-project/llm-compressor) | Loads; several models degenerate past ~30 tokens. See [roadmap](roadmap.md). Prefer Modelopt. |
+| [llm-compressor](https://github.com/vllm-project/llm-compressor) | Loads; several models degenerate past ~30 tokens. See [roadmap](ROADMAP.md). Prefer Modelopt. |
 | `imp-quantize` (in-tree) | **Experimental.** AWQ-calibrated with `--calib`, round-to-nearest without. Below a published export either way. |
 
 **Loader enforcement** (`quantization_config`, compressed-tensors checkpoints only): a Linear
@@ -200,7 +200,7 @@ NVFP4 head bytes, FP16 activations on every row count (decode, batch, `--perplex
 | GDN `linear_attn` in_proj_\* / out_proj, Mamba-2 `mixer.in_proj` / `out_proj` | quantized by default | `--keep-gdn-proj [all\|in,gate,out]`, `--gdn-proj-mxfp8` |
 | 3-D expert stacks (gpt-oss, Gemma-4) / fused `q+k+v_proj`, `gate+up_proj` | per-expert split, per-model_type descriptor / one merged linear needs one shared scale | automatic; unknown `model_type` refused |
 
-Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-expert bisection: [`archive/quantization_awq_findings.md`](archive/quantization_awq_findings.md).
+Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-expert bisection: [`archive/QUANTIZATION_AWQ_FINDINGS.md`](archive/QUANTIZATION_AWQ_FINDINGS.md).
 
 ### Quality, `--calib` vs round-to-nearest
 
@@ -217,7 +217,7 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
 | DeepSeek-V2-Lite (MLA + MoE, 14 955 tok) | 9.0616 | 9.6015 | **9.5250** (default `ABCDEG`; `ABCDK` 9.5092) | +6.0% -> **+5.1%** |
 
 - 14B / 27B BF16: transformers on the CPU (`tools/analysis/hf_ppl_cpu.py`, neither fits the card), the token counts imp reads (13 537 / 13 811); on Qwen3-1.7B it reads 16.9035 vs imp 16.8827. Recovers about a quarter of the RTN gap on the 0.6B, nearly two fifths on the 1.7B; does not close it against BF16. **Hurts at 14B and wider** (24-27% worse than RTN, the wrong direction): attention vs FFN, not model size.
-- **Production rule, the code default since roadmap row 6 closed**: all groups on narrow GQA (`n_rep < 4`), attention groups A and C off on dense wide GQA (`n_rep >= 4`; GDN hybrids keep all, Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136, `docs/audit/AUDIT_qwen38_nvfp4.md`), `--calib-weight abs` on both. Qwen3-14B BF16 source, `ppl_corpus_45k.txt`, deterministic:
+- **Production rule, the code default since roadmap row 6 closed**: all groups on narrow GQA (`n_rep < 4`), attention groups A and C off on dense wide GQA (`n_rep >= 4`; GDN hybrids keep all, Qwen3.8-27B ABCD 4.5986 vs BDEG 4.6136, `docs/audit/AUDIT_QWEN38_NVFP4.md`), `--calib-weight abs` on both. Qwen3-14B BF16 source, `ppl_corpus_45k.txt`, deterministic:
 
 | arm | RTN | ABCD `abs` | ABCD `sq` | BD `abs` | BD `sq` |
 |---|---:|---:|---:|---:|---:|
@@ -231,7 +231,7 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
 - `sq` removes 64 % of the ABCD damage (12.2634 -> 10.7965) and still loses to RTN; on BD it costs 0.15. On a dense model the default `BDEG` folds the same sites as `BD` (E/G need GDN tensors; `WideGqaDefaultIsBdOnADenseLayer`).
 - n_rep 4 measured (#2474): BDEG wins on Qwen3-4B and Qwen3-8B, threshold 5 -> 4 ([record](plans/2026-10-04-awq-groups-nrep4.md)); n_rep 3 unmeasured, keeps all groups; Phi-4 (`phi3`) is refused by `--calib`.
 - Uncalibrated `imp-quantize` already beats a published Modelopt export on the one locally comparable model (9.9252 vs 10.0301, Qwen3-14B).
-- Mechanism, refuted variants, the won't-fit calibration trick: [`archive/quantization_awq_findings.md`](archive/quantization_awq_findings.md). MoE experts (groups X, Y, opt-in: on Gemma-4-26B inside the RTN rounding band, sd 4.63 %) and DeepSeek-V2 MLA sites (A, K): [`plans/2026-10-04-awq-moe-experts.md`](plans/2026-10-04-awq-moe-experts.md).
+- Mechanism, refuted variants, the won't-fit calibration trick: [`archive/QUANTIZATION_AWQ_FINDINGS.md`](archive/QUANTIZATION_AWQ_FINDINGS.md). MoE experts (groups X, Y, opt-in: on Gemma-4-26B inside the RTN rounding band, sd 4.63 %) and DeepSeek-V2 MLA sites (A, K): [`plans/2026-10-04-awq-moe-experts.md`](plans/2026-10-04-awq-moe-experts.md).
 
 ## MXFP4 (GGUF)
 
@@ -240,7 +240,7 @@ scale: the format Blackwell tensor cores expect natively, so MXFP4 prefill goes 
 at full throughput; shipped inside GGUF under a proprietary tensor-type code (31), which
 llama.cpp reads as the removed `Q4_0_4_4` (cross-tool PPL comparison needs a standard export).
 Round-to-nearest MXFP4 is +5-15% perplexity vs Q8_0, worse than Q4_K_M (+2.2% on Qwen3-4B
-wikitext-2); MR-GPTQ calibration would close the gap: [roadmap](roadmap.md#later) row 101.
+wikitext-2); MR-GPTQ calibration would close the gap: [roadmap](ROADMAP.md#later) row 101.
 
 ## KV cache element type
 
@@ -297,4 +297,4 @@ Quick guidance, not a benchmark:
   fully tested.
 - **MXFP4**: GGUF-native FP4, smallest footprint (Qwen3-4B at 2.8 GB); quality lags Q4_K_M without MR-GPTQ calibration.
 - Quantizing your own checkpoint: prefer a published Modelopt export; `imp-quantize --calib` is
-  experimental (production rule above); the per-block micro-scale search is a closed dead end (refuted, [archive](archive/quantization_awq_findings.md)).
+  experimental (production rule above); the per-block micro-scale search is a closed dead end (refuted, [archive](archive/QUANTIZATION_AWQ_FINDINGS.md)).

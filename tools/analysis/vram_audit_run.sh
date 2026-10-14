@@ -3,7 +3,7 @@
 # harness, drives a fixed 8-concurrent workload, collects the init-time per-component VRAM
 # table, the device-used PEAK+final table on shutdown, and the append-only dump file.
 # Reproducible: same model/ctx/concurrency every run. Results land in $OUT_DIR (default
-# /tmp/vram_audit); NOT committed (docs/vram_audit.md is the curated record).
+# /tmp/vram_audit); NOT committed (docs/VRAM_AUDIT.md is the curated record).
 set -euo pipefail
 
 MODEL=${MODEL:-/models/Qwen3-Coder-30B-A3B-Instruct-FP4}

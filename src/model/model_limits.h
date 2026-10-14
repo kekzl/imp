@@ -14,7 +14,7 @@ namespace imp {
 
 inline constexpr int kMaxModelLayers = 1024;
 inline constexpr int kMaxModelExperts = 4096;
-// Per-dimension ceilings (AUDIT_arch_2026 F1-10): head_dim sizes RoPE factor tables,
+// Per-dimension ceilings (AUDIT_ARCH_2026 F1-10): head_dim sizes RoPE factor tables,
 // others size scratch/vocab. Largest today: head_dim 512 (Gemma-4), hidden 16384
 // (Llama-3.1-405B), intermediate 53248, vocab 262144 (Gemma), 128 heads.
 inline constexpr int kMaxHeadDim = 4096;

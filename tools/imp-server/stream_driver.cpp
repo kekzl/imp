@@ -30,7 +30,7 @@ imp::server::StreamReasoningSplitter make_think_splitter_(const ChatRequestConte
     // think block, but a model that reasons anyway emits only the CLOSER - the SCAN opener it's
     // waiting for never arrives, so at the default budget the whole CoT streamed as the answer
     // (found via Claude Code against imp-server). Holding longer here is safe: an agent client is
-    // waiting for a tool call anyway. Default 256; server.agent_scan_limit tunes it (AUDIT_arch_2026 E-4).
+    // waiting for a tool call anyway. Default 256; server.agent_scan_limit tunes it (AUDIT_ARCH_2026 E-4).
     const int agent_scan_limit = (state.ctx && state.ctx->engine)
                                      ? state.ctx->engine->runtime_config().server.agent_scan_limit
                                      : 256;
@@ -668,7 +668,7 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             "Shorten the prompt or retry when the server is less loaded.";
     }
     // "internal_error" is the worker's finish for a request cancelled from
-    // inside a failed step (host throw or device fault, AUDIT_arch_2026 D-1).
+    // inside a failed step (host throw or device fault, AUDIT_ARCH_2026 D-1).
     // Non-streaming answers 500; the stream says it in the same `error` event.
     if (std::strcmp(finish, "internal_error") == 0 && !out.error_type) {
         out.error_type = "internal_error";

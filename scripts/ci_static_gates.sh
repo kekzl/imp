@@ -94,7 +94,7 @@ fi
 
 # Nothing throws across the C ABI: every `ImpError imp_*()` body in src/api/
 # runs under imp::api_guard() or an inline try/catch. Four of 23 had neither
-# on 2026-09-05 (AUDIT_arch_2026 G-10).
+# on 2026-09-05 (AUDIT_ARCH_2026 G-10).
 if want api; then
     echo "== C API =="
     run "ImpError entry points guarded"         python3 tools/check_api_guard.py
@@ -103,7 +103,7 @@ fi
 
 # Offline half of the dependency-pin check (cmake/imp-deps.cmake vs Dockerfile ARG defaults,
 # textual, no network). Previously ran only as --online inside the advisory Lint job, so a
-# drifted pin could merge (AUDIT_arch_2026 H-1). Lint still runs --online.
+# drifted pin could merge (AUDIT_ARCH_2026 H-1). Lint still runs --online.
 if want deps; then
     echo "== Dependency pins =="
     run "cmake/imp-deps.cmake vs Dockerfile (offline)" bash scripts/check_dep_pins.sh
@@ -161,7 +161,7 @@ if want docs; then
     run "generated perf blocks match baseline"  python3 scripts/sync_docs.py --check
     run "doc lint (layers, provenance, links)"  python3 scripts/docs_lint.py
     # imp.conf.example is the only key catalogue; 31 of 223 bound keys were
-    # missing from it on 2026-09-05 (AUDIT_arch_2026 J-2). CHANGELOG entries:
+    # missing from it on 2026-09-05 (AUDIT_ARCH_2026 J-2). CHANGELOG entries:
     # 19 of the last 26 broke the 3-line rule nothing checked (J-8).
     run "imp.conf.example lists every bound key"   python3 tools/check_config_keys.py
     run "that gate still sees a missing key"       python3 tools/check_config_keys.py --selftest
@@ -170,12 +170,12 @@ if want docs; then
 fi
 
 # A file:line citation in a living doc dies the moment a TU is split or shrinks (#1782
-# scheduler split cost a CI roundtrip on a roadmap.md citation pre-push never checked).
-# Cheap (<0.5s), covers roadmap.md plus every living doc; archive/plans/audit stay excluded.
+# scheduler split cost a CI roundtrip on a ROADMAP.md citation pre-push never checked).
+# Cheap (<0.5s), covers ROADMAP.md plus every living doc; archive/plans/audit stay excluded.
 if want layering; then
     echo "== Layering =="
     # Backward #include edges between src/ layers against tools/layering_pins.txt.
-    # 88 lines on 2026-09-05, 24 after AUDIT_arch_2026 dispatch #14; the dead
+    # 88 lines on 2026-09-05, 24 after AUDIT_ARCH_2026 dispatch #14; the dead
     # runtime/config.h include in exec/ had come back once (#1388) with no gate.
     run "backward layer includes pinned"        python3 tools/check_layering.py
     run "that gate still classifies its cases"  python3 tools/check_layering.py --selftest

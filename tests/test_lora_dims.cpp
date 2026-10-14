@@ -1,4 +1,4 @@
-// AUDIT_arch_2026 F1-6: an adapter's declared widths are held against the
+// AUDIT_ARCH_2026 F1-6: an adapter's declared widths are held against the
 // base model at load. The rule table is a pure function so it runs in the
 // unit lane; the loader-level refusals live in test_lora.cpp (model-backed).
 #include <gtest/gtest.h>

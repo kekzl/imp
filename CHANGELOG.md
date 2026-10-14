@@ -22,7 +22,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Host-resident NVFP4 experts: the auto expert-cache budget takes the KV room a shorter `runtime.max_seq_len` leaves unused. Flash-Next at 32768 tokens: 386 -> 441 slots/layer, tg512 88.3 -> 92.6 tok/s (5 of 6 pairs); default context unchanged.
 - cpp-httplib v0.59.0 -> v0.60.1: a `Range` suffix longer than the body answers 206 with the whole body instead of 416 (RFC 9110 §14.1.2); SSE client clears `Last-Event-ID` on an empty `id`. imp's image fetch keeps `set_follow_location(false)`, so the redirect fixes do not reach it.
 - Qwen3.8-Flash-Next-NVFP4 decodes up to 8 requests per step: `max_batch_size` auto 1 -> 8 with pinned host experts, one expert-cache resolve and GEMV set for all rows, the miss gather beside the hit GEMVs (`moe.expert_gather_overlap`), KV ceiling one context. 8 streams 81.0 -> 162.2 tok/s, single stream 86.5 -> 86.1.
-- GDN projections at 5-32 decode rows read the FP8 decode rows (`gemv_fp8_rowscale_f16`) instead of a per-step F16 rebuild; output bits change at batch 5 and up (batch invariance is out of scope, `docs/determinism.md`).
+- GDN projections at 5-32 decode rows read the FP8 decode rows (`gemv_fp8_rowscale_f16`) instead of a per-step F16 rebuild; output bits change at batch 5 and up (batch invariance is out of scope, `docs/DETERMINISM.md`).
 - Flash-Next GDN in/gate/out keep one VRAM copy: prefill runs the MXFP8 GEMM on the FP8 decode rows (`gemm.mxfp8_gdn_proj_prefill=fp8rows`, auto with host experts), 1556 MiB of NVFP4/MXFP8 copies gone; free VRAM beyond the KV ceiling goes to the expert cache. 386 -> 422 slots/layer, tg512 88.8 -> 91.4 tok/s, pp4096 flat, KV still reaches 131072 tokens.
 - GGUF models drop two VRAM forms no path reads: dense weights build no CUTLASS SfAtom (prefill reads the source; Qwen3-14B-Q6_K -787.5 MiB), an LM head served by the NVFP4 decode cache frees its source (Qwen3.8-27B Q4_K_M -994.6 MiB). Greedy output bit-identical on 6 GGUF models (#2711).
 - Dense Q8_0 GGUF weights keep one 8-bit copy: the IMMA prefill planes are built at load and the Q8_0 source is freed (`gemm.q8_drop_source`, default on). Qwen3-8B-Q8_0 server: 27320 -> 19484 MiB used, KV ceiling 5466 -> 5688 blocks; greedy output identical on 7 GGUF models (#2712).
@@ -394,7 +394,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - gpt-oss prefill runs FA2: the register-resident kernel gained head_dim 64 (f32 accumulators) and learned sinks, replacing the tiled WMMA FMHA and the cuBLAS + softmax path. gpt-oss-20b MXFP4 pp4096 19766 -> 36413 tok/s, pp512 16071 -> 20850; attention 1571 -> 288 us per layer call. Record: `tools/roofline/PERF_LOG.md`.
 - Prefill, bit-identical outputs: the Mamba2 scan keeps its state in registers (Nemotron-3-Nano NVFP4 pp4096 13149 -> 39605 tok/s, pp512 9711 -> 16097, Nemotron-3.5-Lightning pp4096 12692 -> 36524), and RoPE computes each angle once per token instead of per head (gpt-oss-20b MXFP4 pp4096 19976 -> 23521, Qwen3-14B-NVFP4 25611 -> 26380); tg128 +0.1..+1.4 %. Record: `tools/roofline/PERF_LOG.md`.
 - Measured sm_120a limits and a kernel inventory: `tools/roofline/peaks/` (DRAM read 1692-1698 GB/s, NVFP4 `mma.sync` 1899 TOPS, FP8 f32-accumulate 490 TOPS vs 940 via `kind::mxf8f6f4`, graph node 0.47-0.68 us vs 5.7 us per stream launch, at locked 2842/13801 MHz) and `tools/roofline/inventory/` (nsys with graphs on over 13 models x 4 workloads, kernels split by the new `bench:pp`/`bench:tg` NVTX ranges of `imp-cli --bench`, ncu harness).
-- Docs are reference tables: in-scope docs 7654 -> 4074 lines, README 329 -> 136, `usage.md` split into `docs/CONFIG.md` + `CONTRIBUTING.md`, `API_FEATURES.md` split off `API.md`; 39 facts corrected, fact log `docs/audit/docs-rewrite/DISPATCH_docs_v3.md`. `docs_lint.py` gates filler words, paragraphs > 2 sentences, docs pages > 300 lines and dead anchors.
+- Docs are reference tables: in-scope docs 7654 -> 4074 lines, README 329 -> 136, `usage.md` split into `docs/CONFIG.md` + `CONTRIBUTING.md`, `API_FEATURES.md` split off `API.md`; 39 facts corrected, fact log `docs/audit/docs-rewrite/DISPATCH_DOCS_V3.md`. `docs_lint.py` gates filler words, paragraphs > 2 sentences, docs pages > 300 lines and dead anchors.
 - QSA indexer (`attention.qsa`, still default `false`) wins decode above budget: Qwen3.8-Flash-Next, 13863-token prompt, tg512 55.99-57.10 dense vs 62.28-63.84 tok/s indexer (was 57.59-58.31), pp 197.65-203.65 vs 185.21-185.64 before. Select scores across the card (128.4 -> 9.1 us per layer-step); `paged_attention_decode` split-K counts the GQA kernel's `batch * n_kv_heads` CTAs, so the 16-row prefill pass leaves the 32-CTA path (9233 -> 1588 ms per prompt). The 0.44.0 "0.3 % of the step" note was wrong: dense decode attention is 81.6 us per layer (`docs/plans/2026-09-19-qwen4exp-port.md`).
 
 ## [0.44.0] - 2026-09-22
@@ -487,9 +487,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - LFM2 and LFM2-MoE run (`Lfm2ForCausalLM`, `Lfm2MoeForCausalLM`, SafeTensors): gated short-conv layers keep their window in the SSM state pool, batched decode included. LFM2-24B-A2B NVFP4 `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367.
 - `imp-quantize` folds power-of-two activation pre-scales into LFM2 producer/consumer pairs, since NVFP4 activation blocks below 6 x 2^-9 flush: LFM2-8B-A1B NVFP4 PPL 38.92 -> 22.13 (BF16 20.22).
 - `gemm.nvfp4_gdn_proj_prefill` (default `false`; `all` or a list of in|gate|out): NVFP4 prefill copies of the F16 GDN projections of a native-NVFP4 hybrid, M>32 rows on the CUTLASS W4A4 GEMM instead of cuBLAS FP16 (290-345 TFLOPS on every shape, merged N included). Qwen3.6-35B `in,gate`: pp4096 146.66 / 147.18 / 146.18 -> 127.06 / 127.60 / 128.42 ms (+15.4%, 3 alternating pairs), PPL 6.8543 -> 6.9781 (+1.81%; `all` +4.25%), so it stays opt-in. Decode and M<=32 rows are untouched. Roadmap Open 12 closed.
-- `imp-quantize` splits 3-D expert stacks (gpt-oss `mlp.experts.gate_up_proj` [32, 2880, 5760], Gemma-4 `experts.gate_up_proj` [128, 1408, 2816]) into the per-expert 2-D matrices the loader reads, by a per-model_type layout descriptor (`tools/imp-quantize/expert_destack.cpp`); a model_type without one is refused as before. gpt-oss's 2^-4 residual rescale now lands in the NVFP4 tensor scales of Wo and the expert down projections (Phase 0) instead of refusing a non-BF16 Wo. gpt-oss-20b BF16 -> NVFP4: 12 820 MiB, PPL 179.23 vs 312.50 for the MXFP4 GGUF on `ppl_corpus_45k.txt` (roadmap item 7, `docs/quantization.md`).
+- `imp-quantize` splits 3-D expert stacks (gpt-oss `mlp.experts.gate_up_proj` [32, 2880, 5760], Gemma-4 `experts.gate_up_proj` [128, 1408, 2816]) into the per-expert 2-D matrices the loader reads, by a per-model_type layout descriptor (`tools/imp-quantize/expert_destack.cpp`); a model_type without one is refused as before. gpt-oss's 2^-4 residual rescale now lands in the NVFP4 tensor scales of Wo and the expert down projections (Phase 0) instead of refusing a non-BF16 Wo. gpt-oss-20b BF16 -> NVFP4: 12 820 MiB, PPL 179.23 vs 312.50 for the MXFP4 GGUF on `ppl_corpus_45k.txt` (roadmap item 7, `docs/QUANTIZATION.md`).
 - `gdn.alpha_beta_prefill` (default false): the GDN alpha/beta projections at prefill (M > 32) run as one split-K FP16 tensor-core launch plus one fixed-order reduce (`gemm_f16_narrow_prefill`, FP32 accumulate, separate alpha/beta outputs so the scan is untouched) instead of two cuBLAS GEMMs. Qwen3.8-27B-NVFP4 pp512 (nsys, 3 alternating pairs): 12.3 + 4.2 us per GDN layer against 2 x 11.1-12.6 us, class 5.31 / 5.55 / 5.77 vs 9.25 / 9.71 / 12.56 ms over the bench window, ~0.6% of the forward; Qwen3.6-35B (K=2048, N=32): 5.2 + 2.7 vs 2 x (2.3 + 1.4) us, neutral. Opt-in because the PPL judge moves: the cuBLAS default accumulates in FP16 (`gemm.cublas_fp16_acc` auto) and reads 4.6242 on the 45k corpus, the new kernel 4.6404, cuBLAS forced to FP32 accumulate 4.6426 (all bit-reproducible); vs the fp64 reference both kernels sit at rms 7.4e-4 on the Qwen3.8 shape. `GemmF16NarrowPrefill.*` (6 tests: M=33..4096, split 1..32, determinism, refusals, bench).
-- `server.transcript_token_reuse` (default true): every finished transcript keeps its token ids (prompt + reply as forwarded, 256 entries); a next turn that renders the reply verbatim tokenizes it with those ids instead of re-encoding the text. Closes the intermittent turn-2 `cached_tokens 0` on Qwen3.8-27B where the model wrote ` pre`+`pref` and the tokenizer re-encoded ` prep`+`ref` (hash chain broke at block 13 of 80, docs/roadmap.md row 15). `TranscriptIdStoreTest.ResentReplyKeepsTheModelSplit`.
+- `server.transcript_token_reuse` (default true): every finished transcript keeps its token ids (prompt + reply as forwarded, 256 entries); a next turn that renders the reply verbatim tokenizes it with those ids instead of re-encoding the text. Closes the intermittent turn-2 `cached_tokens 0` on Qwen3.8-27B where the model wrote ` pre`+`pref` and the tokenizer re-encoded ` prep`+`ref` (hash chain broke at block 13 of 80, docs/ROADMAP.md row 15). `TranscriptIdStoreTest.ResentReplyKeepsTheModelSplit`.
 - `gemm.nvfp4_smallm_a4` (default true): false keeps the 2..32-row small-M GEMM activations in FP16 (dequant+HMMA kernel, no sibling-pair launch, no fused quantize). Quality instrument: on Qwen3.8-27B-NVFP4 the batched-vs-solo logit delta at the first decode step is 0.36-1.09 nats with A4 and 0.015-0.039 with A16 plus an FP16-activation LM head (Qwen3.5-4B-mxfp4: 0.017-0.086); per layer the residual diverges 0.024 -> 0.14 (A4) vs 0.0001 -> 0.006 (A16). `HybridBatchedDecodeTest.BatchedLogitDeltaVsSolo` prints it (`IMP_TEST_SET`, `IMP_TEST_DUMP`).
 - Hybrid (GDN/SSM) models snapshot the recurrent state at the END of every reply (`server.transcript_snapshot`, default on): the state after the last forwarded token plus its partial KV block, so the next turn that resends the transcript restores there instead of at the prompt's block boundary. Qwen3.8-27B-NVFP4-vllm, 1 stream, 5 turns, reasoning resent: cached_tokens 285/863/1195/2595 of 310/888/1223/2620 (turns 2-5) vs 0/304/880/1152 before; turn-5 TTFT 156 -> 49 ms. State drift vs a cold prefill within the chunk-shape controls (`HybridRestoreChainTest.TranscriptRestoreStateStaysClose`).
 - Chat: a prior assistant message's `reasoning_content` reaches the Jinja template (Qwen3.8 renders it, `preserve_thinking` default); the web UI and `chat_probe.py` send the reply back with it. Before, the field was dropped on the OpenAI route (the Anthropic shim built it for nothing).
@@ -497,9 +497,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Changed
 - Dockerfile (both stages) and the 6 CI container jobs drop the CUDA apt source before `apt-get update` (nothing they install comes from it); NVIDIA's ubuntu2604 index shipped 5 malformed sections on 2026-09-16 and failed every `make build` and every CI run.
-- Prefix-cache observability: a refused pool growth warns once (`KV cache: growth to N blocks refused, the driver would not back layer L`); at DEBUG every block reclaimed under pressure, every freed sequence's cache split (cached / unhashed / shared / already listed), a hash that already maps to another block, and the block where a lookup chain breaks with its 16 token ids. The free list also refuses a block the cache still lists (ERROR, entry dropped). With these the intermittent turn-2 `cached_tokens` 0 on long hybrid replies read as a BPE seam, not a cache loss: the model emitted ` pre` + `pref` where the tokenizer re-encodes ` prepref` as ` prep` + `ref` (docs/roadmap.md row 15).
+- Prefix-cache observability: a refused pool growth warns once (`KV cache: growth to N blocks refused, the driver would not back layer L`); at DEBUG every block reclaimed under pressure, every freed sequence's cache split (cached / unhashed / shared / already listed), a hash that already maps to another block, and the block where a lookup chain breaks with its 16 token ids. The free list also refuses a block the cache still lists (ERROR, entry dropped). With these the intermittent turn-2 `cached_tokens` 0 on long hybrid replies read as a BPE seam, not a cache loss: the model emitted ` pre` + `pref` where the tokenizer re-encodes ` prepref` as ` prep` + `ref` (docs/ROADMAP.md row 15).
 - `tools/analysis/think_loop_probe.py` takes `NOLP=1`: no logprobs, so the eight sessions qualify for the decode pipeline (a logprobs row never does) and re-closes are counted as `</think>` text in the content. The pipeline's double forced close (#2029) was invisible to the logprobs probe.
-- `runtime.prefill_mixed_decode_hybrid` (default false): GDN hybrids may ride the mixed prefill+decode step as one-token continuation chunks of their live recurrent slot (the rider geometry used to push slot 0, another sequence's, and the first mixed step died with an illegal memory access). Measured negative on Qwen3.8-27B-NVFP4, 32 x 1k-token prompts x 300 tokens: 868.6 / 869.7 / 874.1 tok/s off vs 840.6 / 822.5 / 831.5 on (-4.6%, 3 of 3 pairs), and a 4400-token late ingest beside 31 streams raises their ITL max from 126-128 to 181-184 ms, so it stays opt-in as the record (docs/roadmap.md row 14).
+- `runtime.prefill_mixed_decode_hybrid` (default false): GDN hybrids may ride the mixed prefill+decode step as one-token continuation chunks of their live recurrent slot (the rider geometry used to push slot 0, another sequence's, and the first mixed step died with an illegal memory access). Measured negative on Qwen3.8-27B-NVFP4, 32 x 1k-token prompts x 300 tokens: 868.6 / 869.7 / 874.1 tok/s off vs 840.6 / 822.5 / 831.5 on (-4.6%, 3 of 3 pairs), and a 4400-token late ingest beside 31 streams raises their ITL max from 126-128 to 181-184 ms, so it stays opt-in as the record (docs/ROADMAP.md row 14).
 - `attention_prefill_dispatch`'s refusal names the shape and every tier's verdict (Q/K shape, q_offset, qtype, tier flags, `fmha_fa2`, hd256) instead of the head_dim alone: a sticky CUDA error from an earlier kernel read as "no prefill kernel accepts head_dim=256" until then.
 - Recurrent hybrids (GDN/SSM) enter the pipelined batched decode (`runtime.decode_pipeline_hybrid`, default on; the #1750 verdict re-measured on the batched GDN path). Qwen3.8-27B-NVFP4-vllm, 32 x 3 waves x 300 tokens, six alternating pairs on one binary: medians 1999.3 vs 1970.9 tok/s (+1.4%, 4 of 6 pairs positive). Under the pipeline the drain's finish spans include the row's final token (its KV row and state cover it), so hashes and the transcript snapshot key it too.
 - Batched decode enqueues the penalty-history append behind the sampler flush before the host waits on the token gather (`runtime.penalty_append_early`, default on) instead of after the sync; nsys at 32 streams read 62 us of GPU idle on each side of the append per step. Qwen3.8-27B-NVFP4-vllm, 32 x 3 waves x 300 tokens, 3 alternating pairs on one binary: 2028.8 / 2024.7 / 1997.2 vs 2014.4 / 1955.7 / 2015.7 tok/s, median +0.5%.
@@ -537,7 +537,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Fixed
 - `speculative.factored_spare` no longer shrinks the MTP draft pool to one KV slot. The slot count keyed on the recurrent spare count, which the factored form sets to 0, so one request per batched verify step carried a draft. Qwen3.8-27B-NVFP4-vllm, 24 streams: 128 drafts over 127 verify steps -> 8030 over 410, 24.28 -> 33.85 tokens per step. The batched verify still loses to plain decode there (1455-1493 vs 1226-1265 tok/s); `docs/plans/2026-09-12-factored-verify-spare.md`.
 - SWA prefix-cache snapshots of a block-aligned prompt are saved one block short, so the restore can match them. The saver floored the full span while the restore caps at `(prompt - 1) / block_size` blocks and matches the stored length exactly, which made every aligned prompt save a snapshot it could never find again (the twin of the hybrid-path defect fixed in #1960). `GraphEligibility.EverySnapshotBoundaryFitsUnderTheRestoreCap`.
-- Stop tokens are masked before sampling wherever a stop would have been suppressed: inside the think block while a budget can force `</think>`, and after the close until answer content appears. A suppressed `<|endoftext|>` used to stay in the context, and Qwen3.8-27B-NVFP4 at a near-tie then continued as a new document (`Human: ...`, empty `content`, `finish_reason` stop; `docs/audit/AUDIT_qwen38_nvfp4.md` P3). Eager, conditional-graph, constrained-pipeline and n-gram-verify samplers; `EndToEndModelTest.InThinkStopMaskKeepsStopTokensOutOfTheContext` (17 x `<|im_end|>` before, `</think>` plus answer after).
+- Stop tokens are masked before sampling wherever a stop would have been suppressed: inside the think block while a budget can force `</think>`, and after the close until answer content appears. A suppressed `<|endoftext|>` used to stay in the context, and Qwen3.8-27B-NVFP4 at a near-tie then continued as a new document (`Human: ...`, empty `content`, `finish_reason` stop; `docs/audit/AUDIT_QWEN38_NVFP4.md` P3). Eager, conditional-graph, constrained-pipeline and n-gram-verify samplers; `EndToEndModelTest.InThinkStopMaskKeepsStopTokensOutOfTheContext` (17 x `<|im_end|>` before, `</think>` plus answer after).
 - Non-streaming `reasoning_content` no longer carries `</think>` or `<think>` as text. After a budget-forced `</think>` the model may close once more on its own (`\n</think>\n9`, Qwen3.5-4B at `max_tokens` 48), and the last-close split kept the first marker inside the reasoning; `extract_reasoning` now drops markers inside the reasoning part, as the streaming splitter already did.
 
 ## [0.40.2] - 2026-09-11
@@ -569,7 +569,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 - `imp-quantize` says what an export cost: an `experimental:` provenance line at the start, a
   summary line and `quant_report.json` at the end (per tensor max relative error and MSE decoded
-  from the written bytes, AWQ `err_rtn`/`err_best` per group) ([quantization.md](docs/quantization.md))
+  from the written bytes, AWQ `err_rtn`/`err_best` per group) ([QUANTIZATION.md](docs/QUANTIZATION.md))
 - `"speculative"` accepts `{"mtp_k": N}` on every chat dialect: a request picks its own MTP chain depth
   (0..the armed depth, else 400 naming the range), and a decline reaches the caller as
   `imp_spec_declined` on all three dialects (one shared key table) instead of one startup log line
@@ -581,13 +581,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   cold prefill chunked at the same boundaries; two cold runs are bit-identical ([SETTLED.md](docs/audit/SETTLED.md))
 - `kv_cache.block_size`: tokens per KV block as an operator key (0 = auto: 32 for `n_kv_heads <= 4`,
   else 16), refused at load outside multiples of 16 in [16, 256]; `imp-bench decode-attn` sweeps 16/32/64 and
-  `tools/analysis/kv_block_size_ab.sh` A/Bs one binary against itself ([AUDIT_arch_2026 B-5](docs/audit/AUDIT_arch_2026.md))
+  `tools/analysis/kv_block_size_ab.sh` A/Bs one binary against itself ([AUDIT_ARCH_2026 B-5](docs/audit/AUDIT_ARCH_2026.md))
 - KV pool residency probe at load: `KV cache: pool copy bandwidth N GB/s` (WARN below 500),
   `kv_pool_bandwidth_gbps` on `/health`, `imp_kv_pool_bandwidth_gbps` on `/metrics`; a 256 MiB resident
-  pool reads 1287 GB/s, mapped pinned host memory 130-139 ([AUDIT_arch_2026 B-6](docs/audit/AUDIT_arch_2026.md))
+  pool reads 1287 GB/s, mapped pinned host memory 130-139 ([AUDIT_ARCH_2026 B-6](docs/audit/AUDIT_ARCH_2026.md))
 - `--max-images-per-request` (default 8) on every chat dialect, and the image decoder refuses a side
   above 16384 px before allocating; `--max-input-tokens` now holds on `/tokenize`, `/detokenize` and
-  `count_tokens`, with a byte bound ahead of the merge walk ([AUDIT_arch_2026 F2-4, F2-9](docs/audit/AUDIT_arch_2026.md))
+  `count_tokens`, with a byte bound ahead of the merge walk ([AUDIT_ARCH_2026 F2-4, F2-9](docs/audit/AUDIT_ARCH_2026.md))
 - `runtime.think_answer_reserve` (default 256, was the compile-time `kMaxAnswerReserve`): tokens of `max_tokens`
   the think budget keeps for the answer, force-closing reasoning at `max_tokens - max(reserve, max_tokens/4)`.
   The CUDA-graph loop used the fraction alone (at `max_tokens` 4096: 2048 against the host rule's 3072)
@@ -596,7 +596,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 - Single-stream decode on native-NVFP4 hybrids drops 6 launches per GDN layer and 2 per attention layer
   (`gdn.m1_fused`: in_proj|gate|alpha|beta one launch, out-projection with the residual, conv in place, q|k|v
-  one launch). Qwen3.8-27B-NVFP4 batch=1 spec-off 94.4 -> 99.5 tok/s (+5.1..6.0 %, 5/5) ([roadmap.md](docs/roadmap.md))
+  one launch). Qwen3.8-27B-NVFP4 batch=1 spec-off 94.4 -> 99.5 tok/s (+5.1..6.0 %, 5/5) ([ROADMAP.md](docs/ROADMAP.md))
 - Batched GDN decode drops three launches per layer: no residual save when the out-projection accumulates into
   the hidden buffer, kernel copies instead of memcpy nodes, and alpha+beta as one split-K FP16 launch
   (`gdn.alpha_beta_smallm`). Qwen3.8-27B-NVFP4 at 32 streams 1985.7 -> 2019.8 tok/s (+1.7 %, 3/3 pairs positive)
@@ -608,7 +608,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   and any shrink are a NOTE, only growth past that fails (exact two-way pins: 9 merge conflicts on 2026-09-09)
 - `imp-quantize --calib` accepts the qwen3_5 family (Qwen3.5 / 3.8 / Qwen3-Next): offset-aware norm fold
   `(1 + g)/s - 1`, layer prefix read off the checkpoint, GDN sites as groups E and G; the 4 of 40960
-  Qwen3.8-27B norm channels with a gain under 0.05 keep a clamped divisor ([quantization.md](docs/quantization.md))
+  Qwen3.8-27B norm channels with a gain under 0.05 keep a clamped divisor ([QUANTIZATION.md](docs/QUANTIZATION.md))
 - The `Sanitizers` lane keeps a ccache store of its own and drops the `compute_120f` PTX it cannot
   use (no GPU, device code is not sanitized; +53.1 % device-compile time per `Build`). It rebuilt
   every TU from scratch and was the workflow's critical path in 8 of 8 PR runs: 19 min median
@@ -617,68 +617,68 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   run; it was adding ~2.6 min after `Build` to lint zero files on every `.cu`- or docs-only PR
 - The NVFP4 loader enforces `quantization_config.ignore` instead of only parsing it: one inventory line reports the
   Linear slots and where the ignore entries landed (Qwen3.8-27B-NVFP4-vllm: 496 quantized, 0 unclassified; 170
-  entries = 1 + 161 + 8), and an unclassified Linear or a missing `weight_global_scale` is refused ([quantization.md](docs/quantization.md))
+  entries = 1 + 161 + 8), and an unclassified Linear or a missing `weight_global_scale` is refused ([QUANTIZATION.md](docs/QUANTIZATION.md))
 - The fused-projection scale split (`qkv_proj`, `gate_up_proj`) requires provenance from `weight_map.cpp`, and every
   fused group is asserted after promotion (one tensor_scale, one plane per sibling); without it a sibling that
   merely failed to promote inherited the base's global scale and read 5.57 MB past its scale plane
 - `gemm.nvfp4_lm_head=auto` says at load that it overrides the checkpoint's `ignore` entry for `lm_head`
 - Fused QK-norm + RoPE (`qknorm_rope_fused`, one CTA per head x token) now serves batched decode rows (n <= 64,
   full-head norm weights) instead of n == 1 only: q-norm, k-norm and rope were three launches per layer at 32 streams.
-  Qwen3-14B-NVFP4 32 streams +0.8/+0.7/-0.3%, Qwen3.8-27B +0.2/+0.2/+0.2%; batched rows share the single-stream numerics ([roadmap](docs/roadmap.md), #1957)
+  Qwen3-14B-NVFP4 32 streams +0.8/+0.7/-0.3%, Qwen3.8-27B +0.2/+0.2/+0.2%; batched rows share the single-stream numerics ([roadmap](docs/ROADMAP.md), #1957)
 - `rope_forward`, `elementwise_add_store` and the FP8 KV write are PDL-registered (wait, then trigger) like the other
   decode-chain kernels: Qwen3.8-27B-NVFP4 at 32 streams +2.7/+0.4/+1.7% aggregate (3/3), Qwen3-14B neutral
-  (+0.1/-0.1/-0.9%); the eager form (trigger before the wait, whole chain resident) measured -1..-5% and stays out ([roadmap](docs/roadmap.md), #1956)
+  (+0.1/-0.1/-0.9%); the eager form (trigger before the wait, whole chain resident) measured -1..-5% and stays out ([roadmap](docs/ROADMAP.md), #1956)
 - Batched-decode LM head at n <= 32 runs on the small-M mxf4nvf4 kernel with FP32 logits and a norm-fused activation
   quantize (`gemm.nvfp4_lm_head_smallm`, default on) instead of the CUTLASS 128-row tile: Qwen3-14B-NVFP4 at 32 streams
-  +1.2/+2.2/+0.2%, Qwen3.8-27B +0.6/+0.4/+2.6% aggregate (3/3 each); isolated 437 MB LM head 314 us vs 365 in situ before ([roadmap](docs/roadmap.md), #1955)
+  +1.2/+2.2/+0.2%, Qwen3.8-27B +0.6/+0.4/+2.6% aggregate (3/3 each); isolated 437 MB LM head 314 us vs 365 in situ before ([roadmap](docs/ROADMAP.md), #1955)
 - Small-M NVFP4 GEMM (batched decode M<=32) prefetches its weight ring before `griddepcontrol.wait` and triggers PDL
   dependents at CTA start; attention q|k|v run as one launch (`gemm_nvfp4_smallm_v2_multi_a4`). Qwen3-14B-NVFP4 at
-  32 streams x 982-token prompts +3.0/+4.9/+1.4/+2.9% aggregate (4/4), ITL p50 9.0-9.3 -> 8.7-8.9 ms ([roadmap](docs/roadmap.md), #1954)
+  32 streams x 982-token prompts +3.0/+4.9/+1.4/+2.9% aggregate (4/4), ITL p50 9.0-9.3 -> 8.7-8.9 ms ([roadmap](docs/ROADMAP.md), #1954)
 - FP8 paged decode attention (HD=128, `attention.paged_fp8_multitok=4`) groups the Q heads of a KV head per CTA on a
   16-lanes-per-row layout (each K/V row loaded and converted once): 32 x 1100 microbench 95.2 -> 56.4 us; Qwen3-14B-NVFP4 at 32
-  streams x 982-token prompts +12.7..+13.9% (ITL p50 10.5 -> 8.7 ms), parity with vLLM 0.27.1 there, was 0.75x ([roadmap](docs/roadmap.md), #1953)
+  streams x 982-token prompts +12.7..+13.9% (ITL p50 10.5 -> 8.7 ms), parity with vLLM 0.27.1 there, was 0.75x ([roadmap](docs/ROADMAP.md), #1953)
 - `runtime.prefill_mixed_decode` (default on): while prompts prefill, the decoding requests ride the ragged prefill
   forward as one-row members (one batched paged-decode attention launch per layer), so a burst step runs no separate
-  decode forward: Qwen3-14B-NVFP4 32 x ~1k-token burst +6.6..+7.8% aggregate, TTFT p50 -20..-23%, ITL max 141 -> 80 ms ([roadmap](docs/roadmap.md), #1952)
+  decode forward: Qwen3-14B-NVFP4 32 x ~1k-token burst +6.6..+7.8% aggregate, TTFT p50 -20..-23%, ITL max 141 -> 80 ms ([roadmap](docs/ROADMAP.md), #1952)
 - `runtime.prefill_cap_fairness` (waiters per decoder, default 4, 0 = off): the prefill chunk cap under decode scales by
   W x waiting / decoding, so a burst no longer paces 30 waiters behind its first 2 finishers: Qwen3-14B-NVFP4 32 x ~1k-token
-  burst +3.0..+4.2% aggregate at W=1, a further +1.9..+2.5% at W=4 (TTFT p50 -18..-23%, p90 -9%, ITL max 106 -> 139-147 ms); 31 streams + one 4.4k ingest unchanged ([roadmap](docs/roadmap.md), #1950, #1951)
-- AUDIT_arch_2026 campaign closed: 24 dispatch rows (#1909-#1927, #1939-#1946), 0 open findings, every ID with a
-  verdict in [SETTLED H](docs/audit/SETTLED.md); the P5 dispatch log names PRs, not branches ([AUDIT_arch_2026](docs/audit/AUDIT_arch_2026.md), #1949)
+  burst +3.0..+4.2% aggregate at W=1, a further +1.9..+2.5% at W=4 (TTFT p50 -18..-23%, p90 -9%, ITL max 106 -> 139-147 ms); 31 streams + one 4.4k ingest unchanged ([roadmap](docs/ROADMAP.md), #1950, #1951)
+- AUDIT_ARCH_2026 campaign closed: 24 dispatch rows (#1909-#1927, #1939-#1946), 0 open findings, every ID with a
+  verdict in [SETTLED H](docs/audit/SETTLED.md); the P5 dispatch log names PRs, not branches ([AUDIT_ARCH_2026](docs/audit/AUDIT_ARCH_2026.md), #1949)
 - Prompts under `server.snapshot_min_prompt_tokens` (256) take no prefix-cache snapshot and no prefill split at the
   block boundary: 35-token prompt on Qwen3.8-27B-NVFP4, client TTFT floor 48 -> 35 ms, medians 63/54 -> 36/48 over
-  2 x 12 waves; log timestamps carry milliseconds, the `/v1/completions` log line `ttft=` and `queue=` ([roadmap](docs/roadmap.md))
+  2 x 12 waves; log timestamps carry milliseconds, the `/v1/completions` log line `ttft=` and `queue=` ([roadmap](docs/ROADMAP.md))
 - The last async-loop burst of a request rearms the parked graph instead of recapturing (step cap clamped to
   the tokens left: 3 recaptures per 3 requests -> 0); `[spec-capture]` prices capture, instantiate and launch;
-  the burst-boundary gap measured closed: 57 rearm boundaries at max ITL 12-13 ms vs a 10.7 ms step ([roadmap](docs/roadmap.md))
+  the burst-boundary gap measured closed: 57 rearm boundaries at max ITL 12-13 ms vs a 10.7 ms step ([roadmap](docs/ROADMAP.md))
 - `generation.lm_dequant_fp16` is `diagnostics.lm_dequant_fp16` (a bisect, never a serving knob); the
   `beta != 0` uncached GEMM fallback warns once when it starts dequantising a whole weight per token;
-  the refuted MXFP4 attention family has its ledger row ([AUDIT_arch_2026 A2-9, A2-8, A1-9](docs/audit/AUDIT_arch_2026.md))
+  the refuted MXFP4 attention family has its ledger row ([AUDIT_ARCH_2026 A2-9, A2-8, A1-9](docs/audit/AUDIT_ARCH_2026.md))
 - `IMP_DEVICE_LTO` CMake option, off: device link-time optimization measured neutral (paired decode 0.00 %,
-  prefill -0.41 % over 5 pairs on Qwen3-8B-Q8_0) ([AUDIT_arch_2026 H-10](docs/audit/AUDIT_arch_2026.md))
+  prefill -0.41 % over 5 pairs on Qwen3-8B-Q8_0) ([AUDIT_ARCH_2026 H-10](docs/audit/AUDIT_ARCH_2026.md))
 - `make verify-fast` runs the default-path FA2 prefill fixtures (~40 s more); `make test-quantize` round-trips
   Qwen3-0.6B through `imp-quantize`; DRY, mirostat and `logit_bias` have kernel tests; ten mutation anchors
-  outside the kernel slice; a nightly libFuzzer job ([AUDIT_arch_2026 I-2, I-4, I-5, I-6, F2-6](docs/audit/AUDIT_arch_2026.md))
+  outside the kernel slice; a nightly libFuzzer job ([AUDIT_ARCH_2026 I-2, I-4, I-5, I-6, F2-6](docs/audit/AUDIT_ARCH_2026.md))
 - `--max-concurrent` admits on an atomic in-flight counter (the queue-depth read raced its own
   submit) and httplib's job queue is bounded at one pool's worth, so connections past it are closed
-  at once instead of hanging without a timer ([AUDIT_arch_2026 E-2](docs/audit/AUDIT_arch_2026.md))
+  at once instead of hanging without a timer ([AUDIT_ARCH_2026 E-2](docs/audit/AUDIT_ARCH_2026.md))
 - `/metrics`: `imp_endpoint_*` request counter and latency ladders labelled `endpoint`, `imp_model_loaded{model}`;
   an Anthropic `thinking` block whose signature does not match its text is a 400; `server.agent_scan_limit`
-  (default 256) is the tool-request first-token hold ([AUDIT_arch_2026 E-4, E-7, E-8](docs/audit/AUDIT_arch_2026.md))
+  (default 256) is the tool-request first-token hold ([AUDIT_ARCH_2026 E-4, E-7, E-8](docs/audit/AUDIT_ARCH_2026.md))
 - The KV-pressure graph demotion is no longer a latch: once a fifth of the pool is free again and
   StreamingLLM evicted nothing, graphs and the auto-arm come back (`imp_streaming_kv_auto_enables_total`
-  keeps counting the arms; an eviction still pins it) ([AUDIT_arch_2026 C-3](docs/audit/AUDIT_arch_2026.md))
+  keeps counting the arms; an eviction still pins it) ([AUDIT_ARCH_2026 C-3](docs/audit/AUDIT_ARCH_2026.md))
 - An aged request that cannot get its KV blocks holds the admission queue for that round instead of
   being passed by shorter requests that fit; `runtime.prefill_graph` resolves to off on quantized KV
-  with one log line ([AUDIT_arch_2026 C-2, C-10](docs/audit/AUDIT_arch_2026.md))
+  with one log line ([AUDIT_ARCH_2026 C-2, C-10](docs/audit/AUDIT_ARCH_2026.md))
 - KV block size auto = 16 for every model: the 2026-03-23 "32 when `n_kv_heads <= 4`" rule, measured for
   the first time, never won and lost 1.5-4.3 % tg128 on Qwen3.8-27B-NVFP4 (4 KV heads), the class it was
   meant for; Qwen3-8B-Q8_0 (8 heads) -0.0 to -1.8 % at 32 ([PERF_LOG](docs/audit/PERF_LOG.md))
 - The split-K attention partials and the executor workspace are sized from the resolved KV block size
-  instead of a replicated 16 ([AUDIT_arch_2026 B-7](docs/audit/AUDIT_arch_2026.md))
+  instead of a replicated 16 ([AUDIT_ARCH_2026 B-7](docs/audit/AUDIT_ARCH_2026.md))
 - `kv_cache.growable` defaults to on, the pool grows before the prefix cache is reclaimed, and
   every growth is capped at free VRAM above the allocator headroom. Qwen3.8-27B-NVFP4, 8 sessions x
-  3 turns x 3.8k tokens: turn-2 restores 4-6/8 -> 8/8, TTFT p50 6.3-7.3 -> 5.0-5.3 s, wall 9.8-10.2 -> 5.6-6.1 s ([ledger](docs/archive/roadmap_ledger_2026_09_28.md#lever-ledger))
+  3 turns x 3.8k tokens: turn-2 restores 4-6/8 -> 8/8, TTFT p50 6.3-7.3 -> 5.0-5.3 s, wall 9.8-10.2 -> 5.6-6.1 s ([ledger](docs/archive/ROADMAP_LEDGER_2026_09_28.md#lever-ledger))
 - The per-request upload family (ragged prefill, graph-loop block tables, constrained pipeline, banned
   tokens, M-RoPE positions) is one pool sized at init; `make check-alloc-interpose` runs two phases and
   its serving-allocation pin drops 19 -> 1 (+3 once-per-process constrainer tables in the new phase) (#1939)
@@ -741,10 +741,10 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   did not hold (isolated 126 of 200 launches bit-different, now 0; gate `NvFP4SmallMV2Test.RepeatedLaunchesBitwiseStable`) (#1958)
 - Parsers, round two: the warm weight cache bounds-checks every record index (an out-of-table `data_alloc`
   became a device pointer), SentencePiece lengths no longer wrap a pointer sum, Jinja caps macro depth (256) and
-  loop iterations (2^20), `config.json` dims have ceilings ([AUDIT_arch_2026 F1-3, F1-8, F1-9, F1-10](docs/audit/AUDIT_arch_2026.md))
+  loop iterations (2^20), `config.json` dims have ceilings ([AUDIT_ARCH_2026 F1-3, F1-8, F1-9, F1-10](docs/audit/AUDIT_ARCH_2026.md))
 - Hybrid prefix caching: a recurrent-state snapshot was dropped silently whenever every device
   slab was held by an in-flight restore; it now lands in the host tier. Qwen3.8-27B, 8 sessions x 3
-  turns x 3.8k tokens: turn-2 hits at the turn-1 boundary 0/8 -> 6/8, TTFT p50 6.8 -> 4.6 s ([ledger](docs/archive/roadmap_ledger_2026_09_28.md#lever-ledger))
+  turns x 3.8k tokens: turn-2 hits at the turn-1 boundary 0/8 -> 6/8, TTFT p50 6.8 -> 4.6 s ([ledger](docs/archive/ROADMAP_LEDGER_2026_09_28.md#lever-ledger))
 
 ## [0.38.0] - 2026-09-07
 
@@ -755,14 +755,14 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `make verify-ab`: paired perf gate against `origin/main` (`scripts/verify_ab.sh`), red
   at a mean paired tg128 delta below -2 %; a planted -2.93 % regression read -1.05 % on the
   single-arm gate. Pre-push runs it on measured paths; pin-age warning at 90 days (#1918)
-- `docs/audit/AUDIT_arch_2026.md`: read-only architecture audit at `ef664dd8`, 113
+- `docs/audit/AUDIT_ARCH_2026.md`: read-only architecture audit at `ef664dd8`, 113
   findings, 3 S0 + 9 S1 after the falsification pass, 15-item dispatch queue. No source change
 - `tools/check_function_size.py`: per-function body gate (warn >200, hard >500 code LOC),
   `[allow]` with a reason; 12 bodies over the line, all listed
   ([`docs/audit/AUDIT_FILESIZE.md`](docs/audit/AUDIT_FILESIZE.md))
 - `tools/check_config_keys.py` and `tools/check_changelog_form.py` join the `docs` gate:
   every bound `imp.conf` key is in `imp.conf.example` (31 of 223 were not) and every
-  `[Unreleased]` entry is at most 3 lines (AUDIT_arch_2026 dispatch #13, J-2 / J-8, #1919)
+  `[Unreleased]` entry is at most 3 lines (AUDIT_ARCH_2026 dispatch #13, J-2 / J-8, #1919)
 - `BatchInvarianceTest`: teacher-forced M=1 vs M=32, the first instrument reaching the
   batched-decode-only path. Qwen3-14B-NVFP4: 7 of 64 greedy tokens differ, mean NLL 3.4403 ->
   3.4889 ([`PERF.md`](docs/PERF.md) "Batch invariance"; dispatch #12, D-2, #1924)
@@ -771,7 +771,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   serves a format with no reference (dispatch #12, D-5, #1924)
 - `THIRD_PARTY_LICENSES.md`: the Apache-2.0 text and SageAttention notice behind
   `src/compute/nvfp4_quant_hw.cu`, shipped in the image at `/usr/share/doc/imp/`, OCI label
-  `MIT AND Apache-2.0`, `check-release.sh` gates all of it (AUDIT_arch_2026 dispatch #9, H-7, #1920)
+  `MIT AND Apache-2.0`, `check-release.sh` gates all of it (AUDIT_ARCH_2026 dispatch #9, H-7, #1920)
 
 ### Changed
 
@@ -786,7 +786,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   `sha256sum -c`, pip a hash-pinned lock file; 9 planted mutants red (H-6, #1927)
 - Third-party pins are commits, not mutable refs: the four `cmake/imp-deps.cmake` deps carry the SHA
   the build fetches, all 35 workflow `uses:` are 40-hex pinned, and `check_dep_pins.sh` fails on an
-  upstream re-tag or an unpinned action (5 planted mutants red) (AUDIT_arch_2026 H-8 pin half, #1926)
+  upstream re-tag or an unpinned action (5 planted mutants red) (AUDIT_ARCH_2026 H-8 pin half, #1926)
 - `moe.mr_nr` swept and left at 8: 16 and 32 are measured losses (-0.96 %, -5.15 % tg128 on
   Qwen3-Coder-30B-A3B-FP4) and are now settled; 4 led 8 of 9 paired runs but by less than this
   host's noise floor. Comment carries the numbers so the sweep is not repeated (#1925)
@@ -812,11 +812,11 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   and `handle_completions()` 593 -> 240 (`CompletionCtx`), both move-verbatim, both leave `[allow]`
 - The file-size gate charges a textually `#include`d `.cu` to its includer: `executor_attention.cu`
   is 1279 code LOC as a TU, not 542; `[allow]`-pinned, `--selftest` covers the merge (#1905)
-- `docs/roadmap.md` is one `Open` and one `Closed` ledger, 91.5 -> 41.0 KB; the measurement
+- `docs/ROADMAP.md` is one `Open` and one `Closed` ledger, 91.5 -> 41.0 KB; the measurement
   narrative moved verbatim to `docs/plans/2026-09-04-lever-ledger-detail.md`
 - `docs/plans/` and `docs/audit/` carry an index each; 9 of 12 plans close with a
   `## ROADMAP CLOSED` block, the docs-rewrite open questions are closed
-- Doc drift pack (AUDIT_arch_2026 dispatch #13, #1919): `imp.conf.example` lists all 223 keys,
+- Doc drift pack (AUDIT_ARCH_2026 dispatch #13, #1919): `imp.conf.example` lists all 223 keys,
   `IMP_WORKER_TIMING` is `diagnostics.worker_timing`, `docs/performance.md` is archived,
   `docs_lint.py` derives the layer from the path; 16 stale claims corrected (SETTLED section H)
 
@@ -898,7 +898,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - The `$HOME/.cache/imp` bind-mount the docs recommended was never writable for container uid
   1001; `imp.conf.example` and `docs/LIMITATIONS.md` point at the named volume `imp-cache` (#1899)
 - The `decode-pipeline` gate log printed `ssm_ok=1` on the GDN / Mamba2 hybrids that gate refuses
-  (AUDIT_arch_2026 C-7, dispatch #13, #1919)
+  (AUDIT_ARCH_2026 C-7, dispatch #13, #1919)
 
 ## [0.37.0] - 2026-09-04
 
@@ -1050,7 +1050,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   is median 0 (`layer_ab_diff.py`), the same class as fused -> #1851.
   Refuted on the way (ncu: both kernels were TF32-rate bound): kernel 2 at
   two CTAs per SM (flat), u_eff on plain tf32 (state diff 1e-4); ledger row
-  in `docs/roadmap.md`
+  in `docs/ROADMAP.md`
 
 - GDN chunk-parallel scan, state pass at 8 warps with register-pipelined
   factor staging, strip sized per head count under an L2 cap
@@ -1059,33 +1059,33 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   (alternating pairs): Qwen3.8-27B state pass 483/493 -> 337/336 ms, factor
   kernel 370/377 -> 324/323 ms, e2e 10002/10008 -> 10962/10813 tok/s;
   Qwen3.6-35B 152 -> 103 / 152 -> 133 ms, 27073/26701 -> 28513/27655 tok/s;
-  deterministic PPL 4.6273 unchanged; ledger row in `docs/roadmap.md`
+  deterministic PPL 4.6273 unchanged; ledger row in `docs/ROADMAP.md`
 
 - GDN chunk-parallel scan, blockwise triangular solve: 16-row diagonal
   blocks per thread in registers, off-diagonal updates as 3xTF32 `mma.sync`,
   8 barriers per chunk instead of 128. Qwen3.6-35B scan kernel class -71%
   pp512 / -79% pp4096 vs the fused scan (-19% / -23% vs #1849), e2e pp4096
   12.9k -> 27.0k tok/s; Qwen3.8-27B deterministic PPL 4.6273 (fused
-  4.6283); ledger row in `docs/roadmap.md` (#1850)
+  4.6283); ledger row in `docs/ROADMAP.md` (#1850)
 
 - GDN chunk-parallel scan, factor kernel on tensor cores: Gram matrices and
   the P@W / P@U_A products as 3xTF32 `mma.sync`, float4 row loads, parallel
   decay/beta. Qwen3.6-35B scan kernel class -64% pp512 / -74% pp4096 vs the
   fused scan (-24% / -27% vs #1848), e2e pp4096 12.7k -> 24.9k tok/s;
   Qwen3.8-27B deterministic PPL 4.6283 -> 4.6148; ledger row in
-  `docs/roadmap.md` (#1849)
+  `docs/ROADMAP.md` (#1849)
 
 - GDN chunk-parallel scan, state pass on tensor cores: the three per-chunk
   GEMMs run as `mma.sync` tf32 (3xTF32 on the two that feed the carried
   state). Qwen3.6-35B scan kernel class -53% pp512 / -65% pp4096 vs the
   fused scan (-31% / -31% vs #1847), e2e pp4096 12.5k -> 21.5k tok/s,
-  deterministic PPL 6.8216 -> 6.8122; ledger row in `docs/roadmap.md` (#1848)
+  deterministic PPL 6.8216 -> 6.8122; ledger row in `docs/ROADMAP.md` (#1848)
 
 - Chunk-parallel GDN prefill scan (`gdn.chunkpar_scan`, default on): the
   recurrent scan ran 32 CTAs sequentially over all tokens and was 42% of the
   hybrid pp512 wall. Qwen3.6-35B: scan kernel class -32% pp512 / -47% pp4096,
   e2e +15/+21% pp512 and +45% pp4096 (12.9k -> 18.9k tok/s), deterministic
-  PPL +0.03%; ledger row in `docs/roadmap.md` (#1847)
+  PPL +0.03%; ledger row in `docs/ROADMAP.md` (#1847)
 
 - Serving idle attribution tooling: `tools/analysis/serving_idle_profile.sh`
   (imp-server under nsys node-trace at N streams) +
@@ -1153,7 +1153,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   registers allow two. Qwen3.8-27B-NVFP4 pp4096: FA2 kernel sum 138.2 ->
   122.5 ms (-11.2%, 3/3 pairs), pp 6719 -> 6745 tok/s, PPL 4.6283 -> 4.6529
   (+0.53%, twice the f16 O rescales) - not a default-on trade. Verdict and
-  harness (`tools/analysis/fa2_hd256_bkv_ab.sh`) in `docs/roadmap.md`.
+  harness (`tools/analysis/fa2_hd256_bkv_ab.sh`) in `docs/ROADMAP.md`.
 - Roofline aggregation drops launches measured under `ncu.clock_floor_ghz`
   (1.2) and counts them as `n_launches_dropped_clock`: run 1d5b9230 carried
   one launch at 0.31 GHz (998 us for a 99-us kernel) that the report showed
@@ -1410,7 +1410,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `speculative.verify_smallm` (default off): verify-chunk GEMMs through the
   small-M kernel; +3-6% isolated, +1-2% mixed pairs (inside trajectory
   variance). Batch=1 roofline re-derived: 1628 GB/s resident, spec-off
-  ceiling ~112 tok/s, measured 87.4; details in docs/roadmap.md. (#1797)
+  ceiling ~112 tok/s, measured 87.4; details in docs/ROADMAP.md. (#1797)
 - Row-batched decode sampling: one penalty sweep + one argmax pair per step
   instead of ~124 per-row launches; 1740.9 -> 1779.4 tok/s aggregate at 32
   streams, bit-identical per row. (#1790)
@@ -2273,7 +2273,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   make that checkpoint reproducible, through the sites it does cover, and what
   is missing is the guarantee rather than the effect. Greedy bytes were
   identical in all six runs and could not see any of it. Known limit 5 in
-  `docs/determinism.md` names the uncovered path, and
+  `docs/DETERMINISM.md` names the uncovered path, and
   `tools/check_determinism_sites.py` fails when the code's sites and the doc's
   list drift apart. Second hole closed: `reselect_algo_for_entry` replaced the
   warmup-validated algo with a heuristic pick on a runtime matmul failure, with
@@ -2289,7 +2289,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - **`--use_fast_math` is named as part of the determinism envelope** (#1576).
   Every CUDA TU is compiled with it in both shipped configurations, which is
   fine and deliberate - but it means the guarantees are about one binary, not
-  one commit. `docs/determinism.md` says so, and the eval recipe now says to
+  one commit. `docs/DETERMINISM.md` says so, and the eval recipe now says to
   pin the image.
 
 - **The ITL histogram measured a per-request mean on the wrong ladder**
@@ -2479,7 +2479,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   prompt is overtaken every round forever. Aging bounds it - a request waiting
   `Scheduler::kAgingRounds` rounds sorts ahead of everything younger, ties by
   length - so the property survives and the starvation does not.
-  `docs/roadmap.md` said "scheduling is arrival order", which it never was;
+  `docs/ROADMAP.md` said "scheduling is arrival order", which it never was;
   corrected in place with the date. Separately, `EngineConfig::max_batch_size`
   caps admission while `runtime.max_batch_size` truncates the decode batch, and
   when the second was smaller the rows admitted beyond it were prefilled, held
@@ -2972,7 +2972,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   measured device-side. Output degenerated from the first fully rejected verify
   and MTP acceptance on NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 read 0 %
   where the head actually drafts at 39 %. Affects any drafter, not just MTP.
-  Details and the before/after table: [`roadmap.md`](docs/roadmap.md).
+  Details and the before/after table: [`ROADMAP.md`](docs/ROADMAP.md).
 
 - **`runtime.cuda_graphs=never` now works on dense models.** The check sat inside
   the MoE branch of weight upload, so on any model without experts the value was
@@ -3159,7 +3159,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   `.weight_global_scale`, declared in `config.json`); `--format modelopt` stays
   the default. Verified end to end: vLLM 0.27.1 loads the output as
   compressed-tensors NVFP4A16 and generates. See
-  [`quantization.md`](docs/quantization.md).
+  [`QUANTIZATION.md`](docs/QUANTIZATION.md).
 
 ### Changed
 
@@ -3171,7 +3171,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   costs: Qwen3.8-27B perplexity **4.5707 → 4.6158 (+0.99 %) for +10.4 % decode**,
   and the win survives concurrency (+25 % ITL at 4 requests, +8 % at 16). Also
   refuses a source with no `config.json` before converting rather than after.
-  See [`quantization.md`](docs/quantization.md).
+  See [`QUANTIZATION.md`](docs/QUANTIZATION.md).
 
 - **Fused layers now share one tensor scale.** Engines merge q/k/v and gate/up
   into a single linear that carries one scale, so three independently calibrated
@@ -3251,21 +3251,21 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - **NVFP4 MoE experts can now live on host**, so a checkpoint whose experts
   exceed VRAM runs instead of being refused. Qwen3-30B-A3B-NVFP4 with all 48 MoE
   layers off-GPU answers correctly at 23.0 tok/s, against 384.0 fully resident.
-  ([`docs/roadmap.md`](docs/roadmap.md))
+  ([`docs/ROADMAP.md`](docs/ROADMAP.md))
 
 - **`moe.pin_host_experts`** (default off) makes prefill **2.9x** faster on the
   NVFP4 host-offload path: pp512 goes from 276.6 to 790.8 tok/s on
   Qwen3-30B-A3B-NVFP4 with every MoE layer host-resident. It pins the experts at
   load and stages a whole layer per transfer instead of two per expert; the two
   only work together. Decode is unaffected. Off by default because it costs
-  4.4x model-load time. ([`docs/roadmap.md`](docs/roadmap.md))
+  4.4x model-load time. ([`docs/ROADMAP.md`](docs/ROADMAP.md))
 
 - **`moe.staged_cutlass_prefill`** (default off) runs host-resident NVFP4 experts
   through the CUTLASS grouped prefill instead of a per-expert dequant, lifting
   pp512 from 663 to **1564 tok/s** on Qwen3-30B-A3B-NVFP4 with every MoE layer
   host-resident. Needs `moe.pin_host_experts`. Opt-in: decode measures 36 % lower
   after a long prefill in the same test, which is reproducible but unexplained
-  and reverses on a short one. ([`docs/roadmap.md`](docs/roadmap.md))
+  and reverses on a short one. ([`docs/ROADMAP.md`](docs/ROADMAP.md))
 
 ### Fixed
 
@@ -3317,12 +3317,12 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   on the NVFP4 host path: it now honours the same working-set rule the GGUF path
   has had since #1365. Cache misses drop 3.5x (106k to 30k over a pp512+tg256
   run on Qwen3-30B-A3B-NVFP4 with every MoE layer host-resident); throughput
-  moves within noise. ([`docs/roadmap.md`](docs/roadmap.md))
+  moves within noise. ([`docs/ROADMAP.md`](docs/ROADMAP.md))
 - **An NVFP4 MoE checkpoint whose experts do not fit is refused at load**
   instead of skipping their GEMMs and answering from the rest at exit code 0.
   The refusal now fires only when the expert cache cannot hold a layer's working
   set; otherwise the host path above serves it. GGUF experts are unaffected.
-  ([`docs/roadmap.md`](docs/roadmap.md))
+  ([`docs/ROADMAP.md`](docs/ROADMAP.md))
 
 ## [0.25.0] - 2026-08-13
 
@@ -3417,7 +3417,7 @@ linked PR.
 ### Changed
 
 - **Batch invariance is a stated boundary, not an open question**:
-  `docs/determinism.md` records what holds: a batch neighbour's content cannot
+  `docs/DETERMINISM.md` records what holds: a batch neighbour's content cannot
   reach another row (asserted bit-exactly), joining a batch costs rounding only
   (0.22 % of the logit range). No flag makes batched and solo bit-equal. (#1314)
 - **The deterministic-mode E2E suite runs again**: it was gated on an env var
@@ -3481,7 +3481,7 @@ linked PR.
   PPL on `ppl_corpus_45k`: Qwen3.6-27B-Text-NVFP4 **65.13 → 7.53**,
   Ornith-1.0-35B-NVFP4 **16.16 → 7.07**, Qwen3.6-35B-A3B-NVFP4 **13.65 → 6.82**.
   GGUF and dense checkpoints byte-identical. (#1287,
-  [`docs/quantization.md`](docs/quantization.md))
+  [`docs/QUANTIZATION.md`](docs/QUANTIZATION.md))
 - **A `json_object` reply that hits `max_tokens` parses.** #1096 forbids a closer
   after a comma and #1104 demands one once the budget is spent; where they met
   nothing was legal and the constraint was released. Qwen3.6-35B-A3B-NVFP4 at
@@ -3546,7 +3546,7 @@ The 2026-08-06 error-path campaign (#1252-#1265) is written up in
   half only. `--calib-groups BD` scores **9.7922 on Qwen3-14B** against
   round-to-nearest's 9.9252, the best measured configuration; the default `ABCD`
   costs +2.68. Use `BD` on wide-GQA models.
-  ([`docs/quantization.md`](docs/quantization.md))
+  ([`docs/QUANTIZATION.md`](docs/QUANTIZATION.md))
 
 ### Changed
 
@@ -3745,7 +3745,7 @@ The 2026-08-06 error-path campaign (#1252-#1265) is written up in
   model too big to run in BF16 can be calibrated off any quantization of itself,
   which produced the first `--calib` result on Qwen3-14B, and it is negative: PPL
   **9.9252 uncalibrated vs 12.6016 / 12.2853** calibrated. It still helps on
-  Qwen3-0.6B/1.7B. (`docs/quantization.md`)
+  Qwen3-0.6B/1.7B. (`docs/QUANTIZATION.md`)
 - **A dead `docs/…` pointer in a code comment is a gate failure.** Sixteen design
   memos were deleted in earlier consolidation PRs and the 38 comments citing them
   stayed behind.
@@ -5074,7 +5074,7 @@ roofline audit that mapped the remaining decode/prefill ceilings.
   hot-path `cfg.arch == X` checks routed through it. (#622, #623, #625)
 - **VRAM cache rebuild**: RAII ownership of all 8 caches, so a double-free is now a
   compile error; one authoritative storage tier. (#621)
-- **Roofline audit** (`docs/archive/roofline_2026_06_07.md` plus the
+- **Roofline audit** (`docs/archive/ROOFLINE_2026_06_07.md` plus the
   `tools/roofline/` ncu+nsys pipeline): shipped the `attn_fa2` f16-acc lever and
   documented the structural ceilings of MoE-decode `gemv_nvfp4`, MoE-prefill
   `gemm_grouped_nvfp4` and hd=256 prefill coverage. (#597, #600, #601, #603)

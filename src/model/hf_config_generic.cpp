@@ -220,7 +220,7 @@ bool parse_hf_core_dims(const JValue& eff, ModelConfig& cfg) {
         cfg.n_kv_heads = cfg.n_heads;
 
     // Every count above came out of the file and `head_dim` sizes the RoPE factor tables
-    // (AUDIT_arch_2026 F1-10); the SafeTensors loader checks again once the config is complete.
+    // (AUDIT_ARCH_2026 F1-10); the SafeTensors loader checks again once the config is complete.
     std::string dim_err;
     if (!validate_declared_dimensions(cfg, &dim_err)) {
         IMP_LOG_ERROR("config.json: %s", dim_err.c_str());

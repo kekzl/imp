@@ -15,7 +15,7 @@ Docs are organised by READER, not topic; `scripts/docs_lint.py` gates it.
 | 2 | Link downward, never repeat: L0 links a kernel, L2 may assume L0 vocabulary. |
 | 3 | A claim needs a code path; a number needs provenance. Unbacked = deleted, not softened ("experimental", "planned" are not rescue words). |
 | 3b | A number also needs something that FAILS when it drifts: gate thresholds (8%/8%/10%, `verify.sh`), hardware constants (32 GB, 1792 GB/s), dated measurements (findings, true of the afternoon named). File/LOC/test counts and build/test runtimes qualify for none: write the COMMAND that prints the number (`python3 tools/check_test_lanes.py --report`) or the magnitude ("seconds" vs "minutes"). A restated gated number does not inherit the gate (`tests/CLAUDE.md` lost this twice, #1673; bulk-applied #1827). |
-| 4 | Records are not documentation: `CHANGELOG.md`, `docs/MISSION_JOURNAL.md`, `docs/vram_audit.md`, root `AUDIT.md`, `docs/roadmap.md`, prefixes `docs/archive/`, `docs/audit/`, `docs/plans/` are lint-excluded, append-only. `docs/BENCHMARKS.md` IS linted (PROV-header allowlist); `docs/roadmap.md` is drift-gated by `check_doc_citations.py` (#1772). |
+| 4 | Records are not documentation: `CHANGELOG.md`, `docs/MISSION_JOURNAL.md`, `docs/VRAM_AUDIT.md`, root `AUDIT.md`, `docs/ROADMAP.md`, prefixes `docs/archive/`, `docs/audit/`, `docs/plans/` are lint-excluded, append-only. `docs/BENCHMARKS.md` IS linted (PROV-header allowlist); `docs/ROADMAP.md` is drift-gated by `check_doc_citations.py` (#1772). |
 | 5 | `file:line` citations in every living doc are gated (#1783): `scripts/check_doc_citations.py .` over 33 living docs (`docs/*.md`, `docs/internals/*.md`, root README/CONTRIBUTING/AGENTS/AUDIT); format `path:N anchor` (N, N-M, N,M, N/M): no anchor = DEAD (#2185); anchor off line N but once in the file (or the one hit within 25 lines) = `DRIFT` warning, exit 0, `--fix` rewrites N; anchor gone, or several hits and none or 2+ within 25 lines = DEAD (#2231); cite a path, not a bare basename (a basename the anchor cannot resolve passes as `AMBIGUOUS`); it is the `citations` selection in `ci_static_gates.sh`, NOT the `docs` selection. |
 
 ## The layers
@@ -51,7 +51,7 @@ Bump `verified:`/`commit:` on every content edit. Legacy `---` YAML still accept
 | what does not / untested | `docs/LIMITATIONS.md` |
 | absent on purpose | `docs/DESIGN_DECISIONS.md` |
 | what `sm_120a` has and lacks | `docs/internals/ARCHITECTURE.md` ("no tcgen05/TMEM/wgmma" once stood in eight files) |
-| verdicts on levers | `docs/roadmap.md` ledgers (fact + number + decision per row; investigation in `docs/plans/` or the PR) |
+| verdicts on levers | `docs/ROADMAP.md` ledgers (fact + number + decision per row; investigation in `docs/plans/` or the PR) |
 
 Status legend in feature tables: verified (code path AND a gate test) / implemented (must also appear in `LIMITATIONS.md`) / not implemented (points at `DESIGN_DECISIONS.md`). "Verified" never means "green in CI" for anything GPU-shaped: CI has no GPU runner; the gate is `make verify-fast` locally.
 
@@ -83,7 +83,7 @@ No perf numbers in any `CLAUDE.md`; link `PERF.md`. L3 downgrades unprovenanced 
 
 ## Plan docs (`docs/plans/`)
 
-`YYYY-MM-DD-<topic>.md`, lint-exempt records, no header. Closure (#1786): `~~strikethrough~~` + `DONE <date> (#PR)` / `MEASURED` / `ANSWERED` / `REFUTED` / `CLOSED <date> (<reason>)`, acceptance cell rewritten to the standing evidence, terminal `## ROADMAP CLOSED (<date>)`. Items are closed, never deleted. Moving text out of `docs/roadmap.md` rewrites relative links (`](MODELS.md)` -> `](../MODELS.md)`); the hooks do not run `hygiene`, CI `Release hygiene` does.
+`YYYY-MM-DD-<topic>.md`, lint-exempt records, no header. Closure (#1786): `~~strikethrough~~` + `DONE <date> (#PR)` / `MEASURED` / `ANSWERED` / `REFUTED` / `CLOSED <date> (<reason>)`, acceptance cell rewritten to the standing evidence, terminal `## ROADMAP CLOSED (<date>)`. Items are closed, never deleted. Moving text out of `docs/ROADMAP.md` rewrites relative links (`](MODELS.md)` -> `](../MODELS.md)`); the hooks do not run `hygiene`, CI `Release hygiene` does.
 
 ## Audit trail
 

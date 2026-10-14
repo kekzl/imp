@@ -669,7 +669,7 @@ TEST(EndToEndModelTest, MultiDecodeOutputIsolation) {
 
 }  // namespace
 
-// In-think stop mask (AUDIT_qwen38_nvfp4 P3): a stop token wanted inside the think block
+// In-think stop mask (AUDIT_QWEN38_NVFP4 P3): a stop token wanted inside the think block
 // must be masked BEFORE sampling, not suppressed after - a suppressed <|endoftext|> stays in
 // context and the model continues as a new document. logit_bias +100 on every stop id forces
 // it as argmax every step, so only masking (not post-hoc suppression) lets output reach

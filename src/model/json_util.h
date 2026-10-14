@@ -43,7 +43,7 @@ struct JMember {
 class JsonParser {
 public:
     // Depth cap bounds the stack, not the heap: a JValue is ~104 bytes against 2 bytes of "0,"
-    // text, so a 128 MiB SafeTensors header alone admits ~6.6 GiB of tree (AUDIT_arch_2026 F1-10).
+    // text, so a 128 MiB SafeTensors header alone admits ~6.6 GiB of tree (AUDIT_ARCH_2026 F1-10).
     // 8M nodes is ~870 MiB; the largest real input (151k-vocab tokenizer.json) is ~0.4M.
     static constexpr size_t kMaxNodes = size_t{1} << 23;
 

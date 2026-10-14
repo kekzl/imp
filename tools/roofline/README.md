@@ -73,7 +73,7 @@ no agent session ever has.
   `tools/roofline/**` edits, not on kernel diffs. A `src/compute/` or `src/exec/`
   push gets a reminder from the pre-push hook with the age of the newest run; the
   measurement itself is the manual `make roofline-measure && make roofline-regress`
-  (AUDIT_arch_2026 H-2).
+  (AUDIT_ARCH_2026 H-2).
 
 ## Determinism / methodology
 

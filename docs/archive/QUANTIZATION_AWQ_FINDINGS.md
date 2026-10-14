@@ -7,10 +7,10 @@ commit: 9cbb8004
 
 # Quantization: AWQ calibration findings and refuted experiments
 
-Record. Moved verbatim out of [`quantization.md`](../quantization.md) in the 2026-09-22 docs
+Record. Moved verbatim out of [`QUANTIZATION.md`](../QUANTIZATION.md) in the 2026-09-22 docs
 rewrite: the deep AWQ-calibration investigation and refuted variants, kept for provenance.
 Current user-facing guidance (including the production `--calib-groups` rule this section
-derives): [`quantization.md`](../quantization.md#imp-quantize-converting-a-checkpoint-yourself-experimental).
+derives): [`QUANTIZATION.md`](../QUANTIZATION.md#imp-quantize-converting-a-checkpoint-yourself-experimental).
 
 #### What `--calib` does
 

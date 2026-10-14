@@ -5,7 +5,7 @@ description: Use when working on imp's quantization formats, loaders, or dequant
 
 # Quantization Formats & Pipelines - imp
 
-Sources of truth: `docs/quantization.md` (formats, choosing a quant), `docs/internals/QUANT_PIPELINE.md` (files, GEMM-dispatch registry, boundary rules). This skill carries the gotchas only.
+Sources of truth: `docs/QUANTIZATION.md` (formats, choosing a quant), `docs/internals/QUANT_PIPELINE.md` (files, GEMM-dispatch registry, boundary rules). This skill carries the gotchas only.
 
 ## The two worlds
 

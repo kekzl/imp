@@ -7,7 +7,7 @@ docs/audit/ARCHMAP.md draws the intended layer order (api above runtime above
 exec ... above core). The tree never was that DAG: on 2026-09-05 the layer graph
 was one 8-node cycle with 88 backward include lines, 64 of them four
 dependency-free headers that sat in runtime/ and compute/ by accident
-(AUDIT_arch_2026 G-1, P0-1..P0-5). Dispatch #14 moved those to core/, deleted
+(AUDIT_ARCH_2026 G-1, P0-1..P0-5). Dispatch #14 moved those to core/, deleted
 the one dead `runtime/config.h` include in exec/, and left 24 backward lines:
 six pre-dequant TUs that read the Engine-planned VRAMBudget (executor.h
 forward-declares it to cut its fan-out) and 18 placement decisions the audit's
@@ -132,7 +132,7 @@ def write_pins(back: dict[tuple[str, str], list], pins: dict[tuple[str, str], tu
         "# reason it is tolerated. tools/check_layering.py fails on an unlisted backward",
         "# edge, on a count above its ceiling, and on a stale line (edge gone).",
         "# Layer order: api > runtime > vision > exec > lora > model > compute > quant > memory > core.",
-        "# Baseline 2026-09-06 (AUDIT_arch_2026 dispatch #14): 88 lines -> 24, four headers",
+        "# Baseline 2026-09-06 (AUDIT_ARCH_2026 dispatch #14): 88 lines -> 24, four headers",
         "# moved to core/, storage_planner to exec/. What is left is the vram_budget.h",
         "# forward-declare trade and placement the audit's SCC simulation showed no move",
         "# repairs (memory <-> model, model <-> vision, vision <-> runtime,",
