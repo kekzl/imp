@@ -233,6 +233,13 @@ struct ServerState {
     };
     std::map<std::string, LoraEntry> loras;
     int32_t next_lora_id = 1;
+    // Control vectors (--control-vector NAME=PATH): name -> engine id (0 while suspended) + path,
+    // re-loaded on resume, dropped on a model swap like LoRA. Guarded by mtx.
+    struct ControlVectorEntry {
+        int32_t engine_id = 0;
+        std::string path;
+    };
+    std::map<std::string, ControlVectorEntry> control_vectors;
     imp::Tokenizer* tok = nullptr;
     imp::ChatTemplate chat_tpl;
     bool have_template = false;

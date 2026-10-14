@@ -585,6 +585,11 @@ public:
     void set_lora(const LoraAdapter* adapter);
     const LoraAdapter* lora() const { return lora_; }
 
+    // Control vector (roadmap row 114): h += scale * v_l after layer l on every forward;
+    // nullptr = off. Caller (Engine) invalidates captured graphs around a change: the
+    // pointer and scale are kernel arguments.
+    void set_control_vector(const struct ControlVectorDevice* cv, float scale);
+
     // Public view_tokens wrapper for external callers.
     Tensor view_hidden(int n_tokens) const { return view_tokens(hidden_, n_tokens); }
     // h_prev rows for an MTP head: the hc streams [n, hc*d] on a gated-residual model (Qwen4Exp
@@ -686,6 +691,9 @@ private:
     void* lora_scratch_ = nullptr;  // fp32[max_rank] + fp16[max_tokens*max_rank]
     size_t lora_scratch_sz_ = 0;
     void lora_delta_(const LoraWeights& w, const void* x, void* y, int n, cudaStream_t stream);
+    const ControlVectorDevice* cvec_ = nullptr;
+    float cvec_scale_ = 0.0f;
+    void control_vector_add_(int layer, int n, cudaStream_t stream);
     int max_logit_tokens_ = 0;     // max tokens needing LM head projection (= max(max_batch_size, 8))
     int kv_block_size_ = kKVBlockSize;  // real KV block size (set_kv_block_size)
     int cur_n_tokens_ = 0;         // set by forward_logits for use by run_ffn
