@@ -211,6 +211,9 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
     // --- Phase 4b: free GGUF sources no path reads anymore ---
     pre_dequant_phase4b_drop_redundant_sources_(cfg, stream);
 
+    // --- Phase 4c: dense Q8_0 keeps its IMMA planes and NVFP4 overlay, not the source ---
+    pre_dequant_phase4c_q8_planes_only_(cfg, stream);
+
     // MemAccount per-pool attribution (vram_audit diagnostic): the caches
     // above allocate via raw cudaMallocAsync, invisible to VRAMAllocator, so
     // note the build totals here — one note per cache family.

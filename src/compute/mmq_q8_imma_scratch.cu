@@ -311,5 +311,33 @@ void mmq_q8_imma_preallocate(int rows, int k) {
                   (static_cast<double>(rows) * k * 19 / 16) / (1024.0 * 1024.0));
 }
 
+namespace {
+// Planes -> FP16, the arithmetic of dequant_q8_0_kernel (fp32 d * q, one rounding).
+__global__ void q8_planes_to_f16_kernel(const int8_t* __restrict__ qs, const __half* __restrict__ sc,
+                                        __half* __restrict__ dst, int64_t total) {
+    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= total)
+        return;
+    dst[i] = __float2half(__half2float(sc[(i / 32) * 2]) * static_cast<float>(qs[i]));
+}
+}  // namespace
+
+bool mmq_q8_imma_build_planes(const void* src, int N, int K, cudaStream_t stream) {
+    std::lock_guard<std::mutex> lk(g_imma_mtx);
+    return N % 2 == 0 && K % kBK == 0 && imma_ensure_weight(src, N, K, stream, /*capturing=*/false);
+}
+
+bool mmq_q8_imma_planes_to_f16(const void* src, __half* dst, cudaStream_t stream) {
+    std::lock_guard<std::mutex> lk(g_imma_mtx);
+    const auto it = g_imma_weights.find(src);
+    if (it == g_imma_weights.end())
+        return false;
+    const int64_t total = static_cast<int64_t>(it->second.N) * it->second.K;
+    q8_planes_to_f16_kernel<<<static_cast<unsigned>((total + 255) / 256), 256, 0, stream>>>(it->second.qs,
+                                                                                            it->second.sc,
+                                                                                            dst, total);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
 
 }  // namespace imp

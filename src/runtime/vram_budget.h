@@ -113,8 +113,9 @@ struct VRAMBudget {
 // ssm_reserved_slots: recurrent-state slots past max_batch_size the multi-candidate
 // speculative verify reserves (SSMState::init n_reserved); priced with the pool.
 // q8_imma_prefill / moe_imma_prefill: gemm.q8_imma_enabled and gemm.moe_imma_prefill;
-// decide whether IMMA prefill planes (imma_plane_bytes) are charged. The pass cannot
-// read RuntimeConfig itself.
+// decide whether IMMA prefill planes (imma_plane_bytes) are charged; with
+// config.q8_drop_source the dense planes cost only their excess over the freed Q8_0 source.
+// The pass cannot read RuntimeConfig itself.
 VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim,
                                size_t free_vram, int swa_live_tokens = 0, int n_swa_layers = 0,
                                const NativeCacheDemand* native_demand = nullptr, int ssm_reserved_slots = 0,

@@ -18,6 +18,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - GDN projections at 5-32 decode rows read the FP8 decode rows (`gemv_fp8_rowscale_f16`) instead of a per-step F16 rebuild; output bits change at batch 5 and up (batch invariance is out of scope, `docs/determinism.md`).
 - Flash-Next GDN in/gate/out keep one VRAM copy: prefill runs the MXFP8 GEMM on the FP8 decode rows (`gemm.mxfp8_gdn_proj_prefill=fp8rows`, auto with host experts), 1556 MiB of NVFP4/MXFP8 copies gone; free VRAM beyond the KV ceiling goes to the expert cache. 386 -> 422 slots/layer, tg512 88.8 -> 91.4 tok/s, pp4096 flat, KV still reaches 131072 tokens.
 - GGUF models drop two VRAM forms no path reads: dense weights build no CUTLASS SfAtom (prefill reads the source; Qwen3-14B-Q6_K -787.5 MiB), an LM head served by the NVFP4 decode cache frees its source (Qwen3.8-27B Q4_K_M -994.6 MiB). Greedy output bit-identical on 6 GGUF models (#2711).
+- Dense Q8_0 GGUF weights keep one 8-bit copy: the IMMA prefill planes are built at load and the Q8_0 source is freed (`gemm.q8_drop_source`, default on). Qwen3-8B-Q8_0 server: 27320 -> 19484 MiB used, KV ceiling 5466 -> 5688 blocks; greedy output identical on 7 GGUF models (#2712).
 
 ### Fixed
 - JSON Schema `anyOf`/`oneOf` (every Pydantic `Optional[T]`) was generated as a free string (`"age": "34"`) that failed validation; the alternatives now run side by side until the first chars decide. A schema without a type (`Any`) takes any JSON value; an array without `items` took one char per item (`[12]` illegal).

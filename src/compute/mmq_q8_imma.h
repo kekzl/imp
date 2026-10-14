@@ -62,6 +62,13 @@ void mmq_imma_act_forget();
 // Free cached weight planes + activation scratch (tests / teardown).
 void mmq_q8_imma_release_all();
 
+// Builds the Q8_0 planes of one dense weight now (Phase 4c, before any capture); the caller may
+// then free the Q8_0 source: the planes live until release_all (engine teardown, one context per
+// process). False on a shape the IMMA kernel declines (N odd, K % 64), a budget hit or a failed malloc.
+[[nodiscard]] bool mmq_q8_imma_build_planes(const void* src, int N, int K, cudaStream_t stream);
+// FP16 [N][K] from the planes keyed by `src`, bit-equal to dequant_gpu on the Q8_0 source.
+[[nodiscard]] bool mmq_q8_imma_planes_to_f16(const void* src, __half* dst, cudaStream_t stream);
+
 // Per-weight prefill cache VRAM budget (Q8_0 SoA planes), taken lazily on
 // first prefill. Uncharged planes grew into whatever KV pool left free, making the spill
 // victim a lottery (#1899). Engine::init sets the plan's reserved figure

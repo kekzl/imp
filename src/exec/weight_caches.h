@@ -7,6 +7,7 @@
 #include "compute/gemm_cutlass_mxfp8_sm120.h"  // CutlassMxFP8Weight
 #include <cuda_fp16.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstddef>
 #include <vector>
 
@@ -92,6 +93,10 @@ struct WeightCaches {
     // F16 rebuild target for released sources (released_source_gemm_), sized for the largest.
     void* released_f16_scratch = nullptr;
     size_t released_f16_scratch_bytes = 0;
+    // Phase 4c (gemm.q8_drop_source): dense Q8_0 weights whose source is freed, keyed by the freed
+    // pointer; their IMMA planes are the only 8-bit copy until mmq_q8_imma_release_all (teardown).
+    std::unordered_set<const void*> q8_planes_only;
+    size_t q8_source_freed_bytes = 0;
 
     // --- NVFP4 decode weight cache ---
     // Mode: 0=off, 1=additive, 2=only

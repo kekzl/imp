@@ -146,6 +146,9 @@ private:
     void pre_dequant_phase4b_drop_redundant_sources_(const ModelConfig& cfg, cudaStream_t stream);
     // Phase 4b: the source of an FP8 or NVFP4 served LM head, freed through the phase's one free site.
     void release_lm_head_source_(cudaStream_t stream, const std::function<void(Tensor&)>& free_source);
+    // Phase 4c (gemm.q8_drop_source): pin the IMMA planes of dense Q8_0 weights, free their source.
+    void pre_dequant_phase4c_q8_planes_only_(const ModelConfig& cfg, cudaStream_t stream);
+    void free_source_(Tensor& t, cudaStream_t stream);
 };
 
 }  // namespace imp

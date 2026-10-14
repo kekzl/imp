@@ -204,6 +204,31 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
     gemm(input, weight, output, 1.0f, 0.0f, ctx.stream);
 }
 
+void gguf_source_fallback(const WeightHandle& h, const Tensor& input, Tensor& output, const GemmContext& ctx,
+                          bool decode_rows) {
+    if (ctx.wcache == nullptr || ctx.wcache->q8_planes_only.count(h.source_data) == 0) {
+        Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
+        gemm_dispatch_uncached_fallback(input, weight, output, ctx, decode_rows);
+        return;
+    }
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        IMP_LOG_INFO(
+            "gemm: IMMA declined a Q8_0 weight without source (M=%lld beta=%.0f), FP16 from its planes",
+            static_cast<long long>(input.shape[0]), ctx.beta);
+    }
+    const auto* qs = ctx.qscratch;
+    const size_t need = static_cast<size_t>(h.shape[0]) * static_cast<size_t>(h.shape[1]) * sizeof(half);
+    IMP_CHECK(qs && qs->dequant && qs->dequant_size >= need,
+              "gguf_source_fallback: no dequant scratch for a %lld x %lld Q8_0 weight without source",
+              static_cast<long long>(h.shape[0]), static_cast<long long>(h.shape[1]));
+    IMP_CHECK(mmq_q8_imma_planes_to_f16(h.source_data, static_cast<half*>(qs->dequant), ctx.stream),
+              "gguf_source_fallback: a Q8_0 weight without source has no IMMA planes");
+    Tensor w16(qs->dequant, QType::F16, 2, h.shape, true);
+    gemm(input, w16, output, 1.0f, ctx.beta, ctx.stream);
+}
+
 // Last route of gemm_via_handle_. A GGUF source with an SfAtom-less CUTLASS_NVFP4 entry (Phase 3 G3)
 // has no CUTLASS form for the M=1 beta != 0 call that lands here: the source serves it.
 static void gemm_handle_last_route(const WeightHandle& h, const Tensor& input, Tensor& output,
@@ -216,8 +241,7 @@ static void gemm_handle_last_route(const WeightHandle& h, const Tensor& input, T
             IMP_LOG_INFO("gemm: GGUF %s weight without SfAtom, M=%lld beta=%.0f runs on the source",
                          qtype_name(h.source_qtype), static_cast<long long>(input.shape[0]), ctx.beta);
         }
-        Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
-        gemm_dispatch_uncached_fallback(input, weight, output, ctx, decode_rows);
+        gguf_source_fallback(h, input, output, ctx, decode_rows);
         return;
     }
     imp::gemm_dispatch(nullptr, h, input, output, 1.0f, ctx.beta, ws, ws_size, ctx.stream);
@@ -763,8 +787,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // halves the int8 rate, and full-rate f16-acc HMMA wins on large dense
         // shapes; the fusion saving only dominates in the MoE regime (high dequant tax), where Q6_K-IMMA
         // ships instead.
-        Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
-        gemm_dispatch_uncached_fallback(input, weight, output, ctx, cur_decode_rows_);
+        gguf_source_fallback(h, input, output, ctx, cur_decode_rows_);
         return;
     }
 

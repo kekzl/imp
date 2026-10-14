@@ -815,6 +815,9 @@ cublas_fp16_acc      = auto
 # Q8_0 dense prefill GEMMs (Qwen3-8B Q8_0 pp512 +7% over fp16-acc cuBLAS).
 # >= 1536 prompt tokens: 3-13% slower than false (docs/LIMITATIONS.md, #2267).
 q8_imma_enabled      = true
+# Dense Q8_0 weights with an NVFP4 decode overlay keep only their IMMA planes: the Q8_0
+# source is freed at load (Qwen3-8B-Q8_0: 7669 MiB). false keeps the source.
+q8_drop_source       = true
 # Grouped MoE expert prefill (one launch over all experts). The big one:
 # Qwen3-30B-A3B +151% (ABOVE llama.cpp), gemma-4-26B +111%, Qwen3.6-35B +40%.
 moe_imma_prefill     = true
