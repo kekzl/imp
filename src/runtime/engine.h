@@ -953,9 +953,9 @@ private:
     // generates a token at intended_position, the matching entry is verified
     // and chain_accept_[lookahead] is incremented.
     struct MtpChainEntry {
-        int prediction;
-        int lookahead;
-        int intended_position;
+        int prediction = 0;
+        int lookahead = 0;
+        int intended_position = 0;
         int topk[kMtpMeasureW] = {-1, -1, -1, -1};  // top-W candidates at draft time
     };
     std::vector<MtpChainEntry> mtp_pending_chain_;

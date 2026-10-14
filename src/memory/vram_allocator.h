@@ -65,7 +65,7 @@ private:
     std::atomic<size_t> allocated_{0};
 
     struct Allocation {
-        size_t bytes;
+        size_t bytes = 0;
         std::string tag;
     };
     mutable std::mutex map_mutex_;

@@ -109,12 +109,12 @@ struct GreedyRowArgs {
 // vocab), one launch per stashed row. Caller pre-filters rows with an active penalty and
 // n_tokens>0, and pre-applies the repeat_last_n window.
 struct PenaltyRowArgs {
-    float* logits;
-    const int32_t* token_ids;  // device history, already windowed
-    int n_tokens;
-    float repetition_penalty;
-    float frequency_penalty;
-    float presence_penalty;
+    float* logits = nullptr;
+    const int32_t* token_ids = nullptr;  // device history, already windowed
+    int n_tokens = 0;
+    float repetition_penalty = 0.0f;
+    float frequency_penalty = 0.0f;
+    float presence_penalty = 0.0f;
     // Banned ids (device list, may be null): applied in the same sweep by the thread owning
     // the vocab entry, so an id that is both banned and in history is written once (-1e30).
     // Lets penalties + engine-static ban list share one batched sweep instead of two launches.
@@ -238,8 +238,8 @@ struct PenaltyAppendArgs {
     static constexpr int kMaxRows = 64;  // = Engine::kMaxGraphPoolSize
     int n = 0;
     int cap = 0;
-    int slots[kMaxRows];
-    int offs[kMaxRows];
+    int slots[kMaxRows] = {};
+    int offs[kMaxRows] = {};
 };
 void penalty_hist_append(const void* d_sample_base, size_t slot_stride_bytes,
                          const PenaltyAppendArgs& args, int32_t* d_hist,

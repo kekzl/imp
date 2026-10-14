@@ -406,8 +406,8 @@ namespace {
 // Bundles the repeated parameters needed by all upload helpers, passed by reference to
 // avoid more than 8 params on every helper call.
 struct UploadCtx {
-    QType compute_dtype;
-    cudaStream_t stream;
+    QType compute_dtype{};
+    cudaStream_t stream = nullptr;
     std::vector<void*>& gpu_allocs;
     std::vector<HostRegistration>& host_pinned;
     std::vector<PinnedBuffer>& host_pinned_allocs;
@@ -2097,10 +2097,10 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
         int is_scalar_count = 0, is_per_channel_count = 0;
         struct InputScaleSample {
             std::string name;
-            int ndim;
-            int64_t shape[4];
-            size_t numel;
-            float first_val;
+            int ndim = 0;
+            int64_t shape[4] = {};
+            size_t numel = 0;
+            float first_val = 0.0f;
         };
         std::vector<InputScaleSample> is_samples;
         if (audit) {

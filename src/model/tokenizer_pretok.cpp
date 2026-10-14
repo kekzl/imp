@@ -219,7 +219,7 @@ std::vector<std::string> nemotron_pre_tokenize(const std::string& text) {
 struct SplitSequence {
     enum class Kind { kClass, kTrailingSpace, kDigits };
     struct Step {
-        Kind kind;
+        Kind kind = Kind::kClass;
         bool opt_space = false;                             // leading \s?
         bool plus = false;                                  // class+ (else one codepoint)
         bool individual = false;                            // Digits: one piece per digit
