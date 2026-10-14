@@ -22,7 +22,7 @@ model whose name contains "Llama").
 
     docker run --rm -p 9099:9099 -v "$PWD":/src -w /src python:3.12-slim \
         python3 tools/imp-server/webui/dev/mock_server.py --port 9099
-    # then open http://localhost:9099/ or run drive.js (see its header)
+    # then open http://localhost:9099/ or run drive.py (see its header)
 """
 import argparse, json, math, os, random, socket, sys, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

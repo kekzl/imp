@@ -5,7 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
-- Web UI redesign in the logo's colours with an imp mascot: saved conversations, sampling panel, edit/continue, logprobs view, end thinking, structured output, images, `/tokenize` count, `/metrics` tab, GPU joules per answer. `drive.js features` on the dev mock: 16/16 checks pass.
+- Web UI redesign in the logo's colours with an imp mascot: saved conversations, sampling panel, edit/continue, logprobs view, end thinking, structured output, images, `/tokenize` count, `/metrics` tab, GPU joules per answer. `drive.py features` on the dev mock: 16/16 checks pass.
 - `/metrics`: `imp_gpu_power_watts` and `imp_gpu_energy_joules_total` from NVML (`dlopen`, absent without libnvidia-ml). A 60-token Qwen3-4B Q8_0 chat reads 18.4 J on the driver counter.
 
 ### Changed
@@ -334,7 +334,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - gpt-oss logged `[ERROR] MoE routing model disagrees with the dispatch: dispatch ran device_args, select_moe_prefill_path() says legacy` once per process since #2116 moved its unstaged MoE prefill onto device-args; the host-side routing model (`moe_prefill_decision.h`) and its unit tests still described the old gate. Model and tests now match (gpt-oss-20b MXFP4: 1 -> 0 lines). `MoePrefillTable.GptOss*`.
-- The built-in web UI showed markdown links as raw `[text](url)`; http(s) links now render (new tab, `noopener`), any other scheme stays text, and links inside code stay code. `tools/imp-server/webui/dev/markup_test.js` (11 renderer cases in node, no GPU).
+- The built-in web UI showed markdown links as raw `[text](url)`; http(s) links now render (new tab, `noopener`), any other scheme stays text, and links inside code stay code. `tools/imp-server/webui/dev/markup_test.py` (11 renderer cases in headless Chromium, no GPU).
 - The recurrent-slot admission gate counted finished and cancelled requests still in the scheduler's active list (until the next `schedule()`) as waiting for a slot: it committed a deeper slot than the next pop takes, or admitted unchecked once the count passed the free list. Found by reading; not reproduced end to end. `SchedulerTest.ActiveIdsSkipFinishedAndCancelled`.
 - A request field of the wrong JSON type answered 400 with the raw parser text "[json.exception.type_error.302] type must be number, but is string", no field named (15 of 26 fuzzed fields across chat, completions, responses, embeddings, tokenize), and `/v1/messages` answered 500 `api_error`. Now 400 naming the field, e.g. `"temperature" must be a number, got string`; also nested (`messages[i]`, `tools[i]`, `stream_options.include_usage`), rerank `top_n`/`return_documents` and `/v1/messages/count_tokens`. `WrongFieldTypeMessage.*`, `TestWrongFieldType` (model-less lane).
 - A top-level field sent as `null` (nullable in the OpenAI spec, e.g. `"seed": null`) answered 400 "[json.exception.type_error.302] type must be number, but is null": 18 field/endpoint pairs on chat and completions. Top-level nulls now mean absent on every JSON endpoint. `DropNullFields.*`, `test_null_fields_mean_absent`.

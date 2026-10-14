@@ -37,7 +37,7 @@ make test-agents-external # real aider / Claude Code / OpenAI Agents SDK
 ```
 
 - CI job `Real API contract` runs the API tests against the built binary, no GPU.
-- Web UI without a GPU: `webui/dev/mock_server.py` (imp-shaped SSE per token) + `webui/dev/drive.js` (Playwright image); commands in the file headers.
+- Web UI without a GPU: `webui/dev/mock_server.py` (imp-shaped SSE per token) + `webui/dev/drive.py` (Python Playwright image `mcr.microsoft.com/playwright/python:v1.55.0-noble`, `markup_test.py` for the renderer); commands in the file headers.
 - `tests/api/mock_server.py` sends the SSE body in one write: it does not exercise streaming.
 
 ## Pitfalls
