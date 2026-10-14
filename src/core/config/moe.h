@@ -56,7 +56,7 @@ struct MoE {
     // Escape hatch to drop the "experts on host -> graphs off" guard. Currently
     // a no-op: every host-resident-expert MoE path reads routing on the host,
     // so moe_host_args_capture_guard always throws under capture. Needs routing
-    // AND expert residency resolved device-side (host-issued H2D on a miss). See docs/roadmap.md.
+    // AND expert residency resolved device-side (host-issued H2D on a miss). See docs/ROADMAP.md.
     bool allow_graphs_under_offload = false;
     bool zero_workspace = false;
     bool no_shared_mlp = false;

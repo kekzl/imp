@@ -691,7 +691,7 @@ class Suite:
         per slot) leaks when a batched decode step reads another row's state. Two rounds,
         same target prompt, same number of neighbours, different neighbour contents: the
         target is byte-identical. Needs runtime.deterministic=true on the server;
-        batch-N == batch-1 is NOT asserted (docs/determinism.md, NVFP4 W4A4 at M>=2).
+        batch-N == batch-1 is NOT asserted (docs/DETERMINISM.md, NVFP4 W4A4 at M>=2).
         """
         import concurrent.futures as cf
         name = "seq 0 identical across different batch neighbours"
@@ -737,7 +737,7 @@ class Suite:
         per slot) leaks when a batched decode step reads another row's state. Two rounds,
         same target prompt, same number of neighbours, different neighbour contents: the
         target is byte-identical. Needs runtime.deterministic=true on the server;
-        batch-N == batch-1 is NOT asserted (docs/determinism.md, NVFP4 W4A4 at M>=2).
+        batch-N == batch-1 is NOT asserted (docs/DETERMINISM.md, NVFP4 W4A4 at M>=2).
         """
         import concurrent.futures as cf
         name = "seq 0 identical across different batch neighbours"

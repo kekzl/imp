@@ -9,7 +9,7 @@ commit: e48ff0d5
 
 Target: `sm_120a` (RTX 5090 / GB202, 32 607 MiB) with the `sm_120f` PTX fallback. No SM80/SM90 paths.
 
-Design: five lifetime tiers (A2) over a three-layer stack (A3), a planner that never queries the device (A4), subsystem ownership rules (A5), a CPU-only test seam (A6), seven invariants I1-I7. Site census that motivated the design, the migration steps, and the full implementation/divergence log (B0, B1-B8, D1-D16): [`docs/archive/memory_census_2026.md`](../archive/memory_census_2026.md).
+Design: five lifetime tiers (A2) over a three-layer stack (A3), a planner that never queries the device (A4), subsystem ownership rules (A5), a CPU-only test seam (A6), seven invariants I1-I7. Site census that motivated the design, the migration steps, and the full implementation/divergence log (B0, B1-B8, D1-D16): [`docs/archive/MEMORY_CENSUS_2026.md`](../archive/MEMORY_CENSUS_2026.md).
 
 ---
 
@@ -275,7 +275,7 @@ Nothing in the set was dropped.
 
 - I3 is type-enforced for stability with the graph-invalidation `generation()` check kept as a runtime assert rather than a compile-time one.
 - I5's "a request-scoped block cannot outlive its request" is type-enforced against aliasing (`BlockRef` move-only) and assert-plus-soak-enforced against outliving (A3.4), not compile-time enforced end to end.
-- Dated measurements behind every "partial" and the full divergence log (D1-D16, B1-B8): [`docs/archive/memory_census_2026.md`](../archive/memory_census_2026.md).
+- Dated measurements behind every "partial" and the full divergence log (D1-D16, B1-B8): [`docs/archive/MEMORY_CENSUS_2026.md`](../archive/MEMORY_CENSUS_2026.md).
 
 ---
 

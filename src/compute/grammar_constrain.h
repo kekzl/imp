@@ -15,7 +15,7 @@
 
 namespace imp {
 
-// Constrains generation to a context-free grammar (GBNF, docs/roadmap.md gap 8). Decode-time
+// Constrains generation to a context-free grammar (GBNF, docs/ROADMAP.md gap 8). Decode-time
 // wrapper around GbnfMatcher, same apply_mask contract as JsonConstrainer/SchemaConstrainer/
 // RegexConstrainer. State is a parse-continuation stack (context-free, not NFA states); UTF-8
 // assembly handles BPE tokens split mid-character. Anchored: EOS allowed only once the

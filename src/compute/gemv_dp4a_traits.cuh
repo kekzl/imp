@@ -430,7 +430,7 @@ struct DequantTraits<DPQTag::Q3_K> {
         const uint8_t* qs_base = qs + half_idx * 32;
         // High bits are one bitplane per 32-element sub-block, not 4 bytes per sub-block: ggml's
         // dequantize_row_q3_K reads BYTE (element%32) at BIT (element/32)=`sub`. The old
-        // `hmask+sub*4` reading only agreed with it for sub 0 elements 0..7 (AUDIT_arch_2026 D-5).
+        // `hmask+sub*4` reading only agreed with it for sub 0 elements 0..7 (AUDIT_ARCH_2026 D-5).
 
         // Unpack 16 6-bit scales from 12 packed bytes
         uint32_t aux0, aux1, aux2;

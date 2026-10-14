@@ -223,7 +223,7 @@ void Engine::demote_graphs_(GraphDemotionReason reason) {
                  graph_demotion_is_mid_run(reason) ? " (mid-run, lifted when the pressure clears)" : "");
 }
 
-// The mid-run demotion was a latch on a transient signal (AUDIT_arch_2026
+// The mid-run demotion was a latch on a transient signal (AUDIT_ARCH_2026
 // C-3). Only that reason is lifted: the init-time ones describe the model.
 // The captured decode graphs were left in place by demote_graphs_, and the
 // pool grows inside its reserved address range, so the pointers they bake are
@@ -727,7 +727,7 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
         }
     } else if (config_.streaming_kv_enabled &&
                graph_demotion_ == GraphDemotionReason::StreamingKvKvPressure) {
-        // The way back (AUDIT_arch_2026 C-3): the valve above armed
+        // The way back (AUDIT_ARCH_2026 C-3): the valve above armed
         // StreamingLLM and dropped graphs on a pool that was momentarily
         // full. Once a fifth of it is free again and no live sequence
         // carries an evicted window (a sentinel in a block table would be
@@ -2004,7 +2004,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             // The fully-on-device unbounded loop is the one decode path that
             // is greedy bit-reproducible run-to-run (no host re-entry);
             // chunking it would make non-streaming greedy output
-            // non-reproducible, breaking the determinism.md eval guarantee.
+            // non-reproducible, breaking the DETERMINISM.md eval guarantee.
             // Deterministic mode runs to completion and never needs
             // mid-burst cancellation, so keep it unbounded there. In
             // production the model is already non-deterministic, so bounding

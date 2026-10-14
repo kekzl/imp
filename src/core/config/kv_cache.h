@@ -67,7 +67,7 @@ struct KVCache {
     // Tokens per KV block. 0 = auto = 16 for every model. An explicit value
     // must be a multiple of 16 in [16,256]: 16 is the FP8 TC decode tile and
     // the NVFP4 WMMA tile, and the prefix cache's reuse granularity. Refused
-    // at load when outside that set, not silently rounded (AUDIT_arch_2026 B-5).
+    // at load when outside that set, not silently rounded (AUDIT_ARCH_2026 B-5).
     int block_size = 0;
 
     SwaSizingMode swa_sizing_mode() const {

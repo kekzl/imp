@@ -5,7 +5,7 @@
 # server.prefix_cache=false (a hit fakes throughput), --think-budget 0 (default 0.5 disables
 # speculation in a think block on this reasoning model), fresh process per arm, arms ALTERNATED
 # across rounds, tokens from usage.completion_tokens, verifies from /metrics.
-# Prints CSV: k,round,tokens,ms,tok_s,drafted,accepted,verifies. Results: docs/roadmap.md.
+# Prints CSV: k,round,tokens,ms,tok_s,drafted,accepted,verifies. Results: docs/ROADMAP.md.
 # Usage: bash tools/analysis/mtp_k_sweep.sh [KS="0 1"] [ROUNDS=1] [MTP_MODEL=...].
 set -uo pipefail
 IMG=${IMP_IMAGE:-imp:test}

@@ -579,7 +579,7 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
     }
 
     // The byte bound first: the merge walk over the prompt is the cost the
-    // token check below arrives too late for (AUDIT_arch_2026 F2-9).
+    // token check below arrives too late for (AUDIT_ARCH_2026 F2-9).
     if (!prompt_within_input_budget(res, fim.active ? fim.bytes() : prompt.size(), state.max_input_tokens,
                                     "prompt"))
         return;

@@ -1,4 +1,4 @@
-// AUDIT_arch_2026 C-6: per-request speculation counters reach usage under vendor-prefixed
+// AUDIT_ARCH_2026 C-6: per-request speculation counters reach usage under vendor-prefixed
 // keys, only when a verify step ran, plus the two missing halves: the DECLINE (asked for MTP,
 // did not get it) and the "speculative" request field's object form.
 #include <gtest/gtest.h>

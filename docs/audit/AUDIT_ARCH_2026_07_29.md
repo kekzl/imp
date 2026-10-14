@@ -753,7 +753,7 @@ include blast radius"; `runtime/config.h` is 1124 LOC and is included by **22 fi
 
 ### 9.9 C++23 usage
 
-`CMakeLists` targets C++23 and `docs/archive/cpp23_migration_2026_07_08.md` records the migration.
+`CMakeLists` targets C++23 and `docs/archive/CPP23_MIGRATION_2026_07_08.md` records the migration.
 Evidence of deliberate use: `std::exchange` throughout `cuda_raii.h`, `std::to_underlying`
 (`executor_attention_decode.cu:283`), `[[nodiscard]]`, `constexpr` predicates in `qtype.h`,
 `enum class` everywhere (34 distinct). Evidence of *un*even modernisation: `std::expected` unused
@@ -842,7 +842,7 @@ triggers: batch-size change, `max_blocks` bucket crossing, and the 8 demotion si
 
 ### 10.4 Determinism
 
-`[runtime] deterministic` is a real, gated, documented mode (`docs/determinism.md`), and the
+`[runtime] deterministic` is a real, gated, documented mode (`docs/DETERMINISM.md`), and the
 default mode carries its own guarantee — **greedy request-order independence within a process**,
 which is a stronger and rarer property than most engines claim.
 
@@ -853,7 +853,7 @@ Catalogued non-determinism sources and their gating:
 | MoE permute/scatter atomics | **yes** | `compute/moe_routing_permute.cu:180`, `compute/moe_routing.cu:606,724` |
 | Top-k softmax stats (`top_k ≤ 128`) | **yes** | `compute/sampling_topk_topp.cu:585` |
 | cuBLASLt split-K | **yes** | `compute/gemm.cu:398` |
-| CUB top-k `> 128` | documented exception | `docs/determinism.md` |
+| CUB top-k `> 128` | documented exception | `docs/DETERMINISM.md` |
 | `typical_p` smem `atomicAdd` | documented exception | ” |
 | GDN cross-context | documented exception | ” |
 | **NVFP4 grouped-MoE CUTLASS GEMM** | **NO** | `compute/gemm_cutlass_grouped_3x.cu` / `exec/executor_forward_moe_cutlass.cu` — `grep "deterministic"` returns **one hit and it is an unrelated comment about a replay address**. Confirms audit gap F-A9 |
@@ -1128,7 +1128,7 @@ inline-documented tolerance"). 48 of 91 `.cu` tests declare a tolerance.
 ### 12.4 Model-level
 
 - **Perplexity**: `imp-cli --perplexity` / `imp_perplexity`, teacher-forced, described in
-  `docs/determinism.md` as "the determinism-proof A/B instrument". Not in CI.
+  `docs/DETERMINISM.md` as "the determinism-proof A/B instrument". Not in CI.
 - **Degeneration battery**: `scripts/verify.sh:568-595` — smoke prompts on real models with a
   distinct-token detector ("degenerate — only N distinct tokens in last 32"). Local, part of
   `make verify`, not CI. `tests/test_degeneration.cpp` exists in the gpu/e2e lane.
@@ -1770,7 +1770,7 @@ Prometheus scrape setup in `monitoring/`.
 
 **1 — REFUTED, with one exception.** The materialised cuBLAS path is not ~18 % of prefill; the
 measured figure is **0.0 %** at pp512-pp4096 on hd=128 models
-(`docs/archive/roofline_2026_06_07.md`, quoted at [`docs/attention-dispatch.md:7-14`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md)), and since #932
+(`docs/archive/ROOFLINE_2026_06_07.md`, quoted at [`docs/attention-dispatch.md:7-14`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md)), and since #932
 hd=256 rides FA2 too. The engine has *six* prefill tiers, not two, ordered by an explicit
 short-circuit chain that terminates in `throw` rather than a silent fallback
 (`attention_dispatch.cu:130`, #654). **The exception is Gemma-4's hd=512 global layers**, which take
@@ -1989,7 +1989,7 @@ Ordered by how likely the drift is to mislead someone into a wrong change.
 | 6 | *"~100k LOC (src/ + include/)"* | `CLAUDE.md` | **134 878** LOC in `src/` + `include/` ([`docs/audit/arch_2026_07_29_evidence/largest_files.txt`](https://github.com/kekzl/imp/blob/5b5b64862fa5e9ad3295e15b5a570d521cccffbf/docs/audit/arch_2026_07_29_evidence/largest_files.txt)); 220k with `tests/`. The dispatch's "~161k" is also stale in the other direction | MED |
 | 7 | *"The only env vars still seeded are `IMP_DETERMINISTIC` and `IMP_FMHA_FA2`; don't reintroduce ad-hoc env reads"* | `CLAUDE.md` | Four more are read: `IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`, `IMP_PPL_DUMP`, `IMP_CONFIG` (F-23) | MED |
 | 8 | *"`src/{core,compute,memory,model,quant,graph,runtime,vision,api}`"* | the dispatch itself | There is no [`src/graph/`](https://github.com/kekzl/imp/tree/6213b5ed1aa6f448dabb1553b6df4056732a6215/src/graph) — it was renamed to `src/exec/` (git history still shows [`src/graph/executor_forward.cu`](https://github.com/kekzl/imp/blob/6213b5ed1aa6f448dabb1553b6df4056732a6215/src/graph/executor_forward.cu) in the 6-month churn list). `src/lora/` exists and is unlisted | MED |
-| 9 | *"9 architectures"*, *"6 tested models"*, *"C++20"* | the dispatch itself | **16** architecture enumerators (`model_arch.h:7`), ~30 validated checkpoints ([`docs/supported-models.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/supported-models.md)), **C++23** (`docs/archive/cpp23_migration_2026_07_08.md`) | MED |
+| 9 | *"9 architectures"*, *"6 tested models"*, *"C++20"* | the dispatch itself | **16** architecture enumerators (`model_arch.h:7`), ~30 validated checkpoints ([`docs/supported-models.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/supported-models.md)), **C++23** (`docs/archive/CPP23_MIGRATION_2026_07_08.md`) | MED |
 | 10 | *"no p50/p99 histograms"*, *"synthetic `/v1/messages` streaming (TTFT = full latency)"* | the dispatch itself | Prometheus histograms exist with `_bucket{le=…}` for `imp_request_duration_seconds`, `imp_ttft_seconds`, `imp_inter_token_seconds` (`handlers_misc.cpp:186-224`). `/v1/messages` has a real handler (`handlers_messages.cpp`, 497 LOC) plus the shared `stream_driver` | MED |
 | 11 | `ProcessDiag` is documented as *"snapshotted from RuntimeConfig once at startup (tool main calls `process_diag_install()`)"* | `runtime/process_diag.h:3-4` | **Accurate — and that is the problem.** The header honestly states the limitation; nothing states the *consequence* for C-API consumers, and `engine.cpp:783-790` patches exactly one of 28 flags without noting the other 27 (F-1) | MED |
 | 12 | *"`check-release.sh` runs in CI"* (prior state, per MEMORY) | — | **Now true** — `.github/workflows/ci.yml` job `Release hygiene` at `:352-356`. Recorded here as drift *repaired*, so nobody re-fixes it | — |
@@ -1998,7 +1998,7 @@ Ordered by how likely the drift is to mislead someone into a wrong change.
 ### The pattern
 
 Drift here is **not** in the narrative docs — [`docs/architecture.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/architecture.md), [`docs/MEMORY_ARCHITECTURE.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/MEMORY_ARCHITECTURE.md)
-and `docs/determinism.md` all track the code closely. It is concentrated in exactly two places:
+and `docs/DETERMINISM.md` all track the code closely. It is concentrated in exactly two places:
 
 - **[`docs/attention-dispatch.md`](https://github.com/kekzl/imp/blob/1e4fad60bd9b8c5da7c0489a40a6ff44cc605614/docs/attention-dispatch.md)** (items 3-5), which is the one doc that quotes *code* rather than
   describing behaviour. Quoted code rots; described behaviour does not. The doc even says "If this

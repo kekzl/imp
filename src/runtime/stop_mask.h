@@ -3,7 +3,7 @@
 // Engine::is_stop_token() accepts, minus the think markers the budget forces.
 // On the steps should_stop would suppress a stop token, this list replaces the
 // banned list in the sampler, so the stop never enters the context
-// (docs/audit/AUDIT_qwen38_nvfp4.md, P3).
+// (docs/audit/AUDIT_QWEN38_NVFP4.md, P3).
 #include "memory/vram_allocator.h"
 #include "memory/vram_owned.h"
 #include "runtime/request.h"

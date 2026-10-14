@@ -18,7 +18,7 @@ using namespace imp;
 
 // GemmKernel registry: the three live producers (generic dequant catch-all, GGUF small-M,
 // CUTLASS_NVFP4 prefill) against their direct paths, plus the pin that the table holds
-// exactly the produced keys (AUDIT_arch_2026 A1-1, dispatch #8).
+// exactly the produced keys (AUDIT_ARCH_2026 A1-1, dispatch #8).
 
 namespace {
 
@@ -38,7 +38,7 @@ TEST_F(GemmKernelRegistryTest, UnregisteredStrategyReturnsNoMatch) {
     EXPECT_EQ(reg.dispatch(unregistered, args), GemmDispatchResult::NoMatch);
 }
 
-// AUDIT_arch_2026 A1-1 (dispatch #8): the table must hold exactly the keys the three
+// AUDIT_ARCH_2026 A1-1 (dispatch #8): the table must hold exactly the keys the three
 // dispatch sites in executor_gemm_dispatch.cu construct - a registration without a producer
 // is dead code, a producer without a registration falls through to gemm_via_handle_ silently.
 TEST_F(GemmKernelRegistryTest, RegistryHoldsExactlyTheProducedKeys) {

@@ -48,7 +48,7 @@ timed reps (built-in `Warmup...` is too few iters); nsys with CUDA Graphs ON hid
 
 **Canonical references (not this journal — it lagged the 06-xx campaign):**
 - Perf gate: `tests/perf_baseline.json` (8% decode / 8% prefill). Reproducible numbers (SHA-anchored):
-  `BENCHMARKS.md`. User-visible changes: `CHANGELOG.md`. Current focus: `docs/roadmap.md`.
+  `BENCHMARKS.md`. User-visible changes: `CHANGELOG.md`. Current focus: `docs/ROADMAP.md`.
 - Detailed campaign index lives in the agent's private memory (`perf_baselines_detail_2026_06_11` et al.).
 - North-star: Qwen3-14B Q6_K decode @ctx2048 = 157.71 tok/s.
 
@@ -412,7 +412,7 @@ Picked up the iter8b lever: rewrite the smem-materializing fp8 FMHA into a true 
   Entire GPU suite green under 13.3, 0 regressions. FA2 reg count identical under 13.3 ptxas (no free win).
 - **Roadmap (13.3 tooling):** CUDA Tile **for C++** shipped (`cuda_tile.h` confirmed in-toolkit) — gated
   on the sm_120 perf question (Yadav et al.: cuTile = 0.53× FA2 on sm_120); CompileIQ auto-tuner (~15%
-  on optimized kernels) queued as last-mile pass on the FA2 kernel. Both in `docs/roadmap.md`.
+  on optimized kernels) queued as last-mile pass on the FA2 kernel. Both in `docs/ROADMAP.md`.
 
 ### 2026-06-13 — Catch-up: the 05-30 → 06-13 arc (40+ PRs, detail in CHANGELOG/PRs)
 

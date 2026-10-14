@@ -228,7 +228,7 @@ TEST(WeightSnapshotArmSlotTest, ArmTakeDisarm) {
     EXPECT_EQ(imp::weight_snapshot_take_armed(), fake);
 }
 
-// AUDIT_arch_2026 F1-3: every index a warm-cache record carries into the
+// AUDIT_ARCH_2026 F1-3: every index a warm-cache record carries into the
 // restore comes out of the file. The record here is what the reader hands
 // to the builder: two allocs of known size, a 4x4 F16 tensor at offset 32.
 TEST(WeightRecordIndicesTest, FileSuppliedIndicesAreBoundsChecked) {

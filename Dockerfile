@@ -16,7 +16,7 @@
 # INCREMENTAL ninja build against a persistent build dir, so a one-file edit
 # costs seconds instead of the full-image rebuild's minutes. The final image is
 # byte-for-byte what it was — `builder` still starts from exactly these layers.
-# Digest-pinned (AUDIT_arch_2026 H-6): a tag is a mutable ref, so the same
+# Digest-pinned (AUDIT_ARCH_2026 H-6): a tag is a mutable ref, so the same
 # Dockerfile built two different base layers on two different days. Refresh
 # with `docker buildx imagetools inspect nvidia/cuda:<tag>` (the index digest,
 # not a per-platform one) and keep the five ci.yml `image:` lines in step.
@@ -48,7 +48,7 @@ ENV CUDA_HOME=/usr/local/cuda
 # Pins are authoritative in cmake/imp-deps.cmake; `make build` injects them as
 # --build-arg from that file. The defaults below keep a bare `docker build .`
 # working and MUST match cmake/imp-deps.cmake.
-# Fetched by COMMIT, not by tag (AUDIT_arch_2026 H-8): `git clone --branch` takes
+# Fetched by COMMIT, not by tag (AUDIT_ARCH_2026 H-8): `git clone --branch` takes
 # a mutable ref, so an upstream re-tag silently changed what this layer contains.
 # GitHub serves a depth-1 fetch of any reachable SHA, so the pin costs nothing.
 # The tag is carried only as the human label and lands in /deps/PINS.

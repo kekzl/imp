@@ -654,7 +654,7 @@ void Engine::warmup() {
     }
     // The eager pre-capture step exists for per-process lazy init (cuBLASLt probe, workspaces), done
     // by now for the sizes above. Skipping it lets the first REAL request run the captured-graph
-    // kernel mix of every later one (greedy request-order independence, docs/determinism.md).
+    // kernel mix of every later one (greedy request-order independence, docs/DETERMINISM.md).
     for (int i = 0; i < kMaxGraphPoolSize; i++)
         decode_graph_pool_[i].mark_process_warm();
     // Drop FP8 KV calibrated_ flags so the first real prefill re-runs absmax and promotes the

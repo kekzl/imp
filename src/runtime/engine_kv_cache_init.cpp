@@ -656,7 +656,7 @@ bool Engine::init_kv_cache() {
                                        kv_bs);
     // A successful allocation proves nothing on WSL2/WDDM: the pool can sit in
     // host memory at a sixth of the bandwidth with /health ok and nothing logged
-    // (#1103, AUDIT_arch_2026 B-6). One cheap copy inside the fresh pool, then a
+    // (#1103, AUDIT_ARCH_2026 B-6). One cheap copy inside the fresh pool, then a
     // WARN and a gauge, never a refusal - the threshold is one driver on one card.
     {
         const double gbps = kv_cache_raw_->probe_residency();

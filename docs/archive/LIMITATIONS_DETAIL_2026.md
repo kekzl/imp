@@ -96,7 +96,7 @@ same prompts, acceptance unchanged (72-80 %), throughput gone:
 |---|---|---:|
 | k=0 | 88.97, 88.93 | |
 | k=1, `verify_nvfp4_gemm=false` | 80.50, 77.43 | **-11.2 %** |
-| k=1, default (truncates) | see `roadmap.md` | +21.3 % |
+| k=1, default (truncates) | see `ROADMAP.md` | +21.3 % |
 
 So the +21.3 % comes from precisely the kernel that causes the truncation. Both accumulate in
 `float`; the difference is summation order.
@@ -254,7 +254,7 @@ none could (divergence is complete by byte 271 on every prompt).
 ```
 
 **Consequence: `speculative.mtp_k` stays 0 by default**, despite the +18.6 to +21.3 % on this
-model (`roadmap.md`): a throughput win that truncates one answer in six is not a win. Refuted:
+model (`ROADMAP.md`): a throughput win that truncates one answer in six is not a win. Refuted:
 "closing this needs the chunk path to agree with decode numerically, which is a kernel change,
 not a flag" (three of four kernels agree and the count did not fall; handing the stop decision to
 decode did not either). What stands: speculation puts this model on a different trajectory from
@@ -458,7 +458,7 @@ size order:
 2. capture-bucket floor of 3: a two-row chunk is padded to three, ~17 % of its GEMV time for a row
    that does not exist.
 3. argmax + D2H + rollback host round-trip: grows the non-kernel gap 0.31 -> 0.68 ms/token, eats
-   16 % of the kernel win. Smallest; named fix in `roadmap.md`.
+   16 % of the kernel win. Smallest; named fix in `ROADMAP.md`.
 
 ### Pre-snapshot build (superseded)
 
@@ -474,7 +474,7 @@ Superseded by the fix above; kept as the record of the broken build. Qwen3.8-27B
 
 Emitted-per-verify saturates near 2.5 from `mtp_k=4` while the chunk grows linearly in k;
 acceptance falls 58.8 % -> 23.9 %. Break-even needs the verify below 2.25 emitted tokens times the
-decode step; no chain length on prose reaches it. Chain-length form of the `docs/roadmap.md`
+decode step; no chain length on prose reaches it. Chain-length form of the `docs/ROADMAP.md`
 result: acceptance is the lever, chain length is not.
 
 ```

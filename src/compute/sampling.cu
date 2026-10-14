@@ -184,7 +184,7 @@ __global__ void argmax_reduce_rows_kernel(const GreedyRowArgs* __restrict__ rows
 
 // Result scratch of the synchronous sample_greedy overload. File-scope so the reset hook
 // can reach it: a function-local static went unreset by any teardown, so a second engine
-// in the process read the first one's closed arena (AUDIT_arch_2026 B-2).
+// in the process read the first one's closed arena (AUDIT_ARCH_2026 B-2).
 namespace {
 int32_t* s_greedy_result = nullptr;
 bool s_greedy_result_owned = false;  // cudaMalloc fallback (arena closed), freed here

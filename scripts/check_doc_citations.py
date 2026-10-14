@@ -147,9 +147,9 @@ def living_docs(root):
     """Every doc whose citations must stay live. Records are excluded on
     purpose: docs/archive/, docs/plans/ and docs/audit/ cite the line numbers
     of the commit they describe, and rewriting those would destroy the record
-    (same reason docs_lint.py excludes roadmap.md)."""
+    (same reason docs_lint.py excludes ROADMAP.md)."""
     import glob
-    docs = [os.path.join(root, "docs/roadmap.md")]
+    docs = [os.path.join(root, "docs/ROADMAP.md")]
     docs += sorted(glob.glob(os.path.join(root, "docs/*.md")))
     docs += sorted(glob.glob(os.path.join(root, "docs/internals/*.md")))
     for extra in ("README.md", "CONTRIBUTING.md", "AGENTS.md", "AUDIT.md"):

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Records MoE expert-activation histograms and reports routing skew: the measurement
-# docs/roadmap.md and docs/GOAL.md leave open (bandwidth half is measured, skew half wasn't).
+# docs/ROADMAP.md and docs/GOAL.md leave open (bandwidth half is measured, skew half wasn't).
 # Skew decides whether a resident/host expert split streams most active experts every token or
 # far fewer. NEEDS A FREE GPU (busy card slows but doesn't corrupt the histogram).
 # Prompts are deliberately short with long generation: the cold-expert question is about

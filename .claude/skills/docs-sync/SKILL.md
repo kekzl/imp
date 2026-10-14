@@ -1,6 +1,6 @@
 ---
 name: docs-sync
-description: Use when keeping imp's docs and config examples coherent after a change - updating docs/internals/ARCHITECTURE.md / README / docs/GOAL.md / docs/MODELS.md / docs/roadmap.md / imp.conf.example / CHANGELOG / MISSION_JOURNAL, or "is this doc stale", "document this change", "the example config is out of date", "the README says X but the code does Y", "add a roadmap ledger row". Do NOT use for layer/frontmatter/lint questions (docs-layers), structural code audits (codebase-audit), measuring perf or refreshing the perf baseline (benchmark-cuda), or the agent's private memory (MEMORY.md).
+description: Use when keeping imp's docs and config examples coherent after a change - updating docs/internals/ARCHITECTURE.md / README / docs/GOAL.md / docs/MODELS.md / docs/ROADMAP.md / imp.conf.example / CHANGELOG / MISSION_JOURNAL, or "is this doc stale", "document this change", "the example config is out of date", "the README says X but the code does Y", "add a roadmap ledger row". Do NOT use for layer/frontmatter/lint questions (docs-layers), structural code audits (codebase-audit), measuring perf or refreshing the perf baseline (benchmark-cuda), or the agent's private memory (MEMORY.md).
 ---
 
 # Docs sync - imp
@@ -27,7 +27,7 @@ description: Use when keeping imp's docs and config examples coherent after a ch
 | `docs/GOAL.md` | north star (Qwen3-14B Q6_K @ctx2048 -> 175 tok/s) + hardware scope | goal or scope changes |
 | `docs/BENCHMARKS.md` | reproducible SHA-anchored table; `**Toolchain (current: \`vX.Y.Z\`):**` line parsed by `check-release.sh` | a publishable number; a release |
 | `docs/FEATURES.md`, `docs/LIMITATIONS.md`, `docs/DESIGN_DECISIONS.md` | what exists / what does not / why | feature ships, limitation opens or closes, decision made or reversed |
-| `docs/roadmap.md` | verdict ledgers (fact + number + decision per row), citations drift-gated by `check_doc_citations.py` (#1772) | a lever is measured, shipped, refuted or closed; investigation goes to `docs/plans/YYYY-MM-DD-<topic>.md` |
+| `docs/ROADMAP.md` | verdict ledgers (fact + number + decision per row), citations drift-gated by `check_doc_citations.py` (#1772) | a lever is measured, shipped, refuted or closed; investigation goes to `docs/plans/YYYY-MM-DD-<topic>.md` |
 | `docs/plans/` | records with closure marks (docs-layers) | an item closes |
 | `tests/perf_baseline*.json` | perf + peak-VRAM gate | intentional perf/VRAM move (`scripts/gen_perf_baseline.sh`) |
 | `docs/MODELS.md`, `docs/DEPLOYMENT.md`, `docs/API.md`, `docs/QUICKSTART.md` | supported models; container/compose; HTTP contract (request tracing, priority); worked example (`kekzle/Qwen3.8-27B-NVFP4-vllm`) | new arch/model/quant; new flag or env; new endpoint field |
@@ -44,8 +44,8 @@ description: Use when keeping imp's docs and config examples coherent after a ch
 | Config key added/removed/renamed | `config.h` + `config.cpp` + `imp.conf.example`; a new auto-default also needs an `imp-cli --bench` pin (`apply_config_pins` in `tools/imp-cli/args.cpp`) or the baseline bakes it in |
 | New arch / model / quant | `docs/MODELS.md` (+ README if headline) |
 | New endpoint field, header or env | `docs/API.md`, `docs/DEPLOYMENT.md`, `tests/api/mock_server.py` mirrors the contract |
-| Structural refactor | `ARCHITECTURE.md` if the narrative broke, then `python3 scripts/check_doc_citations.py .` (the #1782 scheduler split cost a CI roundtrip on a `roadmap.md` citation) |
-| A lever measured (shipped or refuted) | `docs/roadmap.md` ledger row; harness in `tools/analysis/`; record in `docs/plans/` if the investigation is longer than three lines |
+| Structural refactor | `ARCHITECTURE.md` if the narrative broke, then `python3 scripts/check_doc_citations.py .` (the #1782 scheduler split cost a CI roundtrip on a `ROADMAP.md` citation) |
+| A lever measured (shipped or refuted) | `docs/ROADMAP.md` ledger row; harness in `tools/analysis/`; record in `docs/plans/` if the investigation is longer than three lines |
 | Any L0-L2 doc edited | bump `verified:`/`commit:` in its header (docs-layers) |
 
 ## Common mistakes

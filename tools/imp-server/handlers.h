@@ -103,7 +103,7 @@ struct LatencyHistogram {
 
 // Server-wide metrics (atomics for lock-free reads from /metrics endpoint)
 struct ServerMetrics {
-    // Per-endpoint request/latency series (AUDIT_arch_2026 E-7): imp_endpoint_*{endpoint="..."}
+    // Per-endpoint request/latency series (AUDIT_ARCH_2026 E-7): imp_endpoint_*{endpoint="..."}
     // so a dashboard can separate error rate per dialect. Unlabelled totals kept for existing panels.
     enum Endpoint { kChat = 0, kCompletions, kMessages, kResponses, kEmbeddings, kRerank, kEndpointCount };
     static const char* endpoint_name(int e) {
@@ -360,7 +360,7 @@ struct ServerState {
 extern std::atomic<httplib::Server*> g_server;
 // g_draining: set by the signal handler before the listener stops. Already-accepted requests get
 // 503 instead of being served into teardown; main() then drains in-flight work
-// (server.model_swap_drain_ms) before stopping the batching engine (AUDIT_arch_2026 E-6).
+// (server.model_swap_drain_ms) before stopping the batching engine (AUDIT_ARCH_2026 E-6).
 extern std::atomic<bool> g_draining;
 
 void signal_handler(int sig);
@@ -375,7 +375,7 @@ std::vector<std::pair<std::string, std::string>> scan_gguf_files(const std::stri
 std::string find_model_path(const ServerState& state, const std::string& name);
 
 // resolve_max_batch_size: --max-batch > [runtime] max_batch_size (imp.conf) > 0 (auto). One
-// function because multiple callers must agree (AUDIT_arch_2026 G-12 removed a dead per-load
+// function because multiple callers must agree (AUDIT_ARCH_2026 G-12 removed a dead per-load
 // JSON overrides object: 11 keys parsed, no request body ever populated it).
 int resolve_max_batch_size(const ServerArgs& args, const imp::RuntimeConfig& runtime_cfg);
 
@@ -384,7 +384,7 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
 std::string load_model_into_state(ServerState& state, const std::string& path);
 
 void handle_health(const httplib::Request& req, httplib::Response& res, ServerState& state);
-// Readiness (AUDIT_arch_2026 E-5): 200 only when an inference request would be
+// Readiness (AUDIT_ARCH_2026 E-5): 200 only when an inference request would be
 // taken right now; 503 with a stable `code` (no_model, suspended, swapping,
 // draining) otherwise. /health stays liveness and answers 200 in all four.
 void handle_ready(const httplib::Request& req, httplib::Response& res, ServerState& state);
@@ -420,6 +420,8 @@ void handle_metrics(const httplib::Request& req, httplib::Response& res, ServerS
 // Appends the per-tier memory gauges (I7) to a /metrics body. Lives in
 // metrics_memory.cpp.
 void append_memory_metrics(std::string& out, ServerState& state);
+// imp_gpu_power_watts / imp_gpu_energy_joules_total; nothing when NVML is absent.
+void append_power_metrics(std::string& out);
 void handle_embeddings(const httplib::Request& req, httplib::Response& res, ServerState& state);
 
 // POST /v1/rerank (also /rerank) — Cohere/Jina/vLLM-compatible reranking.

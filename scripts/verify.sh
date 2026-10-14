@@ -264,7 +264,7 @@ else
         _E2E_BIN="$(dirname "$TESTS_BIN")/test-e2e"
         # DUPLICATE of _unit_e2e_filter in CMakeLists.txt, kept in sync: can't source CMake variables
         # here (container path has no configured build/ dir). Went stale for nine days after #1795
-        # before anything diffed it (AUDIT_arch_2026 I-3); check_lane_filter_copy.sh now diffs the two
+        # before anything diffed it (AUDIT_ARCH_2026 I-3); check_lane_filter_copy.sh now diffs the two
         # literals in the CPU lane.
         _LANE_FILTER="BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StoragePlanner.*:WeightRegistryPreservation.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub"
         if [ -x "$_E2E_BIN" ] && [ -x scripts/check_e2e_lane_split.sh ]; then
@@ -288,7 +288,7 @@ section "perf vs baseline"
 # across a distance the gate can't see. Warning, not a failure: a stale pin still catches a
 # 30% regression, and failing on a calendar date would train people to regenerate it just to
 # silence the warning.
-# 90 days, not 30 (AUDIT_arch_2026 H-9): 30 fired on every run for a month and carried nothing.
+# 90 days, not 30 (AUDIT_ARCH_2026 H-9): 30 fired on every run for a month and carried nothing.
 # The paired arm (make verify-ab) now measures cross-session drift directly; this single arm is
 # the coarse net.
 if [ -f "$BASELINE" ]; then

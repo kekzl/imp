@@ -199,7 +199,7 @@ TEST(SentencePieceLoader, RejectsLengthDelimPastEnd) {
 }
 
 TEST(SentencePieceLoader, RejectsLengthDelimThatWrapsThePointer) {
-    // AUDIT_arch_2026 F1-8: field 1, wire 2, claimed length 2^64-100 over 8 real bytes. Old
+    // AUDIT_ARCH_2026 F1-8: field 1, wire 2, claimed length 2^64-100 over 8 real bytes. Old
     // guard computed data_+len, which wraps to a pointer below end_, passes, and leaves the
     // cursor before the buffer, so the field loop never reaches the end.
     std::vector<uint8_t> blob;

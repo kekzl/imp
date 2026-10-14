@@ -33,7 +33,7 @@ TEST(RuntimeConfigTest, DefaultsAreSane) {
     RuntimeConfig cfg;
     EXPECT_FALSE(cfg.runtime.deterministic_gemm);
     EXPECT_EQ(cfg.runtime.cuda_graphs, "auto");
-    EXPECT_TRUE(cfg.runtime.warmup);  // default ON: greedy request-order independence (docs/determinism.md)
+    EXPECT_TRUE(cfg.runtime.warmup);  // default ON: greedy request-order independence (docs/DETERMINISM.md)
     EXPECT_EQ(cfg.kv_cache.dtype, "auto");
     EXPECT_EQ(cfg.kv_cache.swa_sizing, "auto");
     EXPECT_EQ(cfg.kv_cache.swa_sizing_mode(), SwaSizingMode::Auto);
@@ -42,7 +42,7 @@ TEST(RuntimeConfigTest, DefaultsAreSane) {
     EXPECT_EQ(cfg.diagnostics.exit_layer, -1);
 }
 
-// kv_cache.block_size: the operator surface AUDIT_arch_2026 B-5 found missing.
+// kv_cache.block_size: the operator surface AUDIT_ARCH_2026 B-5 found missing.
 // 0 = auto stays the default; the value binds through --set like every key.
 TEST(RuntimeConfigTest, KvBlockSizeBindsAndDefaultsToAuto) {
     RuntimeConfig cfg;
@@ -51,9 +51,9 @@ TEST(RuntimeConfigTest, KvBlockSizeBindsAndDefaultsToAuto) {
     EXPECT_EQ(cfg.kv_cache.block_size, 32);
 }
 
-// AUDIT_arch_2026 E-4: the agent-path SCAN hold was a constant in stream_driver.cpp; it is
+// AUDIT_ARCH_2026 E-4: the agent-path SCAN hold was a constant in stream_driver.cpp; it is
 // the whole TTFT of a prose reply on tool requests.
-// AUDIT_arch_2026 A2-9: the LM-head bisect key lives under diagnostics.*; the old
+// AUDIT_ARCH_2026 A2-9: the LM-head bisect key lives under diagnostics.*; the old
 // generation.* spelling is unknown and --set rejects it.
 TEST(RuntimeConfigTest, LmDequantBisectBindsUnderDiagnosticsOnly) {
     RuntimeConfig cfg;
@@ -235,7 +235,7 @@ TEST(RuntimeConfigTest, KvDtypeIsExplicitPin) {
 
 // runtime.max_seq_len must yield to a --max-seq-len / C-API EngineConfig value (config.h:
 // "a CLI value wins over the file"). The resolver let the config key overwrite the CLI flag
-// until AUDIT_arch_2026 G-5, logging a line that read like normal resolution.
+// until AUDIT_ARCH_2026 G-5, logging a line that read like normal resolution.
 TEST(RuntimeConfigTest, MaxSeqLenBindsAndYieldsToTheCliValue) {
     RuntimeConfig cfg;
     EXPECT_EQ(cfg.runtime.max_seq_len, 0);

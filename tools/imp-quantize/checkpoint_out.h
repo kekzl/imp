@@ -119,7 +119,7 @@ const char* portability_warning(OutputFormat fmt, bool quantize_lm_head);
 enum class KvHint { Auto, Fp8, None };
 bool parse_kv_hint(const std::string& s, KvHint& out);
 
-// model_type values with a measured FP8 KV PPL (docs/quantization.md KV table): qwen3 (Qwen3-14B
+// model_type values with a measured FP8 KV PPL (docs/QUANTIZATION.md KV table): qwen3 (Qwen3-14B
 // +1.07 %), qwen3_moe (Qwen3-30B-A3B neutral). Everything else writes null.
 bool kv_fp8_hint_allowlisted(const std::string& model_type);
 bool kv_fp8_hint_on(KvHint h, const std::string& model_type);

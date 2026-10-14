@@ -48,7 +48,7 @@ imp::RuntimeConfig arm_config(int mtp_k) {
     rc.runtime.deterministic = true;
     // Prefix cache disabled: a request reaching max_tokens registers block hashes, so a second
     // run of the same prompt would prefill at a different chunk shape, moving a near-tie
-    // (AUDIT_qwen38_nvfp4.md P7). Every run here must be cold.
+    // (AUDIT_QWEN38_NVFP4.md P7). Every run here must be cold.
     rc.server.prefix_cache = false;
     rc.speculative.ngram = false;
     rc.speculative.suffix = false;
@@ -186,7 +186,7 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
             GreedyRun plain = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false);
             const GreedyRun with_lp = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/true);
             // Same engine/params, deterministic, cold: neither a second run nor the logprobs flag may
-            // move a token (AUDIT_qwen38_nvfp4.md P7: trajectory depends on prior engine state).
+            // move a token (AUDIT_QWEN38_NVFP4.md P7: trajectory depends on prior engine state).
             // Margins cannot be read off a different sequence.
             const auto report = [&](const GreedyRun& x, const GreedyRun& y) {
                 size_t i = 0;

@@ -197,7 +197,7 @@ def functions_in(path, text, frag_cache):
             continue
         # Body ends where brace depth returns to zero, NOT at the first column-0 `}`: a dedented
         # inner close inside a long body made the gate undercount and clear the hard limit
-        # (AUDIT_arch_2026 G-6). Braces inside comments/string literals don't count.
+        # (AUDIT_ARCH_2026 G-6). Braces inside comments/string literals don't count.
         body, frags = [], []
         depth, in_comment = _braces(lines[k][bidx + 1:], False)
         depth += 1
@@ -282,7 +282,7 @@ def selftest():
          "struct S {\n    void m() {\n        g();\n    }\n};\n", []),
         ("lambda inside a body does not end it",
          "void f() {\n    auto l = [] {\n        g();\n    };\n    l();\n}\n", [4]),
-        ("column-0 close INSIDE a body does not end it (AUDIT_arch_2026 G-6)",
+        ("column-0 close INSIDE a body does not end it (AUDIT_ARCH_2026 G-6)",
          "void f() {\n    if (a) {\n        x();\n}\n    y();\n    z();\n}\n", [5]),
         ("braces in strings and comments do not count",
          "void f() {\n    s = \"}\";\n    // {\n    /* } */\n    g();\n}\n", [2]),

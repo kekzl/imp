@@ -274,7 +274,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                 }
 
                 // Truncated shard appends fewer than stensor_count entries; size() - stensor_count then
-                // wraps (AUDIT_arch_2026 F1-11). Primary shard checks this; so does this one.
+                // wraps (AUDIT_ARCH_2026 F1-11). Primary shard checks this; so does this one.
                 parse_tensor_infos(sreader, stensor_count, tensor_infos);
                 if (sreader.failed()) {
                     IMP_LOG_ERROR("GGUF shard %d tensor info truncated: %s", shard, shard_path);
@@ -1107,7 +1107,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         if (it_eos != metadata.end())
             eos_id = static_cast<int>(val_uint(it_eos->second));
         // Both ids land in the embedding gather as a row index with no clamp
-        // between here and the kernel (AUDIT_arch_2026 F1-7): out of the vocab
+        // between here and the kernel (AUDIT_ARCH_2026 F1-7): out of the vocab
         // is a device illegal-memory-access, so it is refused at load.
         const auto n_vocab = static_cast<int64_t>(tokens.size());
         if (bos_id < 0 || bos_id >= n_vocab || eos_id < 0 || eos_id >= n_vocab) {

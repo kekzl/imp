@@ -581,7 +581,7 @@ TEST(KVCacheGrowTest, KeyMinmaxGrowsWithThePool) {
     }
 }
 
-// Residency probe (AUDIT_arch_2026 B-6): a pool WDDM spilled into host memory can't be
+// Residency probe (AUDIT_ARCH_2026 B-6): a pool WDDM spilled into host memory can't be
 // produced on demand, so the falsifier is the copy routine itself over memory that IS
 // host-resident (mapped pinned host memory over PCIe) vs the device pool, which must read far
 // above the spill threshold - or the probe couldn't tell a real spill apart either. What a

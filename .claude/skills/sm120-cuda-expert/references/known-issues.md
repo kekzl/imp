@@ -101,7 +101,7 @@ Generalizations: (a) On latency-bound kernels count instructions before bytes; b
 
 Scalar NVFP4 kernel re-reads KV per Q head (6x at 24Q/4KV), profiles ~13x above DRAM floor, a classic GQA-sharing lever. FP16/FP8 twins carry the variant. Built for NVFP4 (`perf/nvfp4-gqa-decode`, shared-FP16-tile per seq/kv_head): **-9% e2e** at 32-stream serving (9/9 waves, 3 trials/arm). Cause: one layer's KV ~42 MB fits 96 MB L2, re-reads are L2 hits, tile removes DRAM traffic but costs occupancy (64 KiB smem = 1 block/SM vs scalar's 768 blocks). Rule: check if shared working set fits L2 before building traffic variant - "x-over-DRAM-floor" not headroom when L2-served. `kv_cache.bitdecoding_qk` (NVFP4 TC QK) -5%; both defaults off.
 
-## Ledger additions 2026-08-27 .. 2026-09-02 (verdict + number; records in `docs/roadmap.md` and `docs/plans/`)
+## Ledger additions 2026-08-27 .. 2026-09-02 (verdict + number; records in `docs/ROADMAP.md` and `docs/plans/`)
 
 | Lever | Verdict | Evidence |
 |---|---|---|

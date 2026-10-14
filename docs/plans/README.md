@@ -6,7 +6,7 @@ Dated records, lint-exempt, no metadata header. One file per campaign,
 `REFUTED` / `CLOSED <date>`, and a finished plan ends in a terminal
 `## ROADMAP CLOSED (<date>)` block (#1786).
 
-The verdict a plan produced lives in [`../roadmap.md`](../roadmap.md); the plan
+The verdict a plan produced lives in [`../ROADMAP.md`](../ROADMAP.md); the plan
 holds the measurement narrative behind it. A record whose title says "detail"
 is the other direction: text moved OUT of the roadmap.
 

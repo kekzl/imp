@@ -1,4 +1,4 @@
-// AUDIT_arch_2026 D-1: a device fault inside a step must reach the server as a host signal:
+// AUDIT_ARCH_2026 D-1: a device fault inside a step must reach the server as a host signal:
 // request finishes internal_error (500), faulted() flips /health to engine_faulted, later
 // submits refuse immediately instead of parking on an undrained queue.
 // Death test: child is a fresh process with its own CUDA context, so the poisoned context

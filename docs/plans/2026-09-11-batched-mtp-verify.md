@@ -9,10 +9,10 @@ table at the end carries the state of every stage.
 
 Qwen3.8-27B-NVFP4-vllm at 32 streams: step 14.75-14.98 ms = 1977-2005 tok/s,
 of which 12.06 ms is the DRAM floor (weights 13.7 GB + LM head 0.72 + GDN
-state 4.83 r+w + KV 0.4 = 19.6 GB at 1628 GB/s, `docs/roadmap.md` 2026-09-08).
+state 4.83 r+w + KV 0.4 = 19.6 GB at 1628 GB/s, `docs/ROADMAP.md` 2026-09-08).
 Every remaining lever inside that step is worth 1-3 %. The only way past the
 floor is tokens per weight sweep: the MTP head accepts 83.5-84.5 % at depth 1
-(`docs/roadmap.md`, "MTP acceptance gap"), so a step that forwards 2 rows per
+(`docs/ROADMAP.md`, "MTP acceptance gap"), so a step that forwards 2 rows per
 stream emits ~1.84 tokens per stream instead of 1.
 
 Today the MTP verify is batch-1: one MTP workspace (`engine_spec_mtp.cpp`,

@@ -72,7 +72,7 @@ TEST(GraphEligibility, NoneIsNotMidRunAndNamesItself) {
     EXPECT_STREQ(graph_demotion_reason_name(GraphDemotionReason::None), "none");
 }
 
-// The decision itself, not only the enum (AUDIT_arch_2026 C-4). The #1879
+// The decision itself, not only the enum (AUDIT_ARCH_2026 C-4). The #1879
 // shape: a 3000-block pool with 0 free and 984 reclaimable is NOT exhausted.
 // A need of 1000 blocks isolates the 10 % line.
 TEST(GraphEligibility, KvPressureCountsReclaimableBlocksAsFree) {

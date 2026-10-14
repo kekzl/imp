@@ -1,8 +1,8 @@
-# Roadmap ledger detail (moved out of docs/roadmap.md on 2026-08-31)
+# Roadmap ledger detail (moved out of docs/ROADMAP.md on 2026-08-31)
 
 Record. The sections below were the investigation narrative behind roadmap
-verdicts; `docs/roadmap.md` keeps the verdict, the number and a link here.
-Text is verbatim as of `docs/roadmap.md` at commit 6afcf35f; `path:line`
+verdicts; `docs/ROADMAP.md` keeps the verdict, the number and a link here.
+Text is verbatim as of `docs/ROADMAP.md` at commit 6afcf35f; `path:line`
 citations inside are as they stood on that day and are not gated in this
 file.
 
