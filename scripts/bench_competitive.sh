@@ -31,7 +31,7 @@ Qwen3-14B Q6_K	Qwen3-14B-Q6_K.gguf	hero
 Qwen3.6-35B-A3B UD-Q4_K_M	qwen3.6-35B-A3B-gguf/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf	hero
 Gemma-4-26B-A4B UD-Q4_K_M	gemma-4-26B-A4B-it-UD-Q4_K_M.gguf	hero
 gpt-oss-20b MXFP4	gpt-oss-20b-mxfp4.gguf	hero
-Qwen3-30B-A3B Q4_K_M	Qwen3-30B-A3B-Q4_K_M/Qwen3-30B-A3B-Q4_K_M.gguf	nonhero
+Qwen3.8-27B Q4_K_M	Qwen3.8-27B-Q4_K_M.gguf	hero
 TSV
 
 # Heroes this sweep structurally cannot contest, with the reason. They are
@@ -57,7 +57,16 @@ check_gpu() {
         echo "       blank even when memory is held, so this is the only usable guard." >&2
         exit 1
     fi
-    [ "$(docker ps -q | wc -l)" -eq 0 ] || { echo "FATAL: containers running, they depress every number" >&2; exit 1; }
+    # Host load, not the container list: an idle container depresses nothing, a CPU-bound one
+    # shows here. Limit: IMP_BENCH_MAX_LOAD (default nproc/4) on the 1-min loadavg.
+    local load max_load
+    load=$(cut -d' ' -f1 /proc/loadavg)
+    max_load=${IMP_BENCH_MAX_LOAD:-$(( $(nproc) / 4 ))}
+    if awk -v l="$load" -v m="$max_load" 'BEGIN { exit !(l > m) }'; then
+        echo "FATAL: host 1-min load $load > $max_load, it depresses every number" >&2
+        echo "       running containers: $(docker ps --format '{{.Names}}' | tr '\n' ' ')" >&2
+        exit 1
+    fi
 }
 
 llama_tg() {  # $1 = container path
@@ -144,7 +153,7 @@ if [ -n "$BREACH" ] || [ -n "$MISSING" ]; then
     exit 1
 fi
 # The PASS line names only the two uncontestable heroes it measured, not the full blocker
-# scope, so nobody over-reads it as "the seven-hero blocker is satisfied".
+# scope, so nobody over-reads it as "the hero blocker is satisfied".
 # awk on the tab-delimited hero field, not grep on suffix ("hero$" also matches "nonhero").
 N_HERO_MATRIX=$(awk -F'\t' '$3=="hero" {n++} END {print n+0}' <<< "$MATRIX")
 N_UNCONTESTABLE=$(awk 'NF {n++} END {print n+0}' <<< "$UNCONTESTED")
