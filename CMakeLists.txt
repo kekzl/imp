@@ -632,6 +632,13 @@ set_source_files_properties(
     src/compute/mmq_q8_imma_q5k.cu
     src/compute/mmq_q8_imma_q6k.cu
     PROPERTIES COMPILE_OPTIONS "-rdc=true")
+# Launchers of those cross-TU templates (and gemm_dp4a.cu: discarded `if constexpr` names) need
+# external host stubs; CUDA 13 defaults to static ones and warns #20280-D (42 warnings).
+set_source_files_properties(
+    src/compute/mmq_q8_imma.cu
+    src/quant/nvfp4_gemm.cu
+    src/compute/gemm_dp4a.cu
+    PROPERTIES COMPILE_OPTIONS "-static-global-template-stub=false")
 # Moved from nvcc (host pass -std=c++23: no FMA contraction); g++ -march=x86-64-v3 contracted 6 sites here (#2209).
 set_source_files_properties(
     src/exec/executor_attention.cpp
