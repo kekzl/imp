@@ -55,6 +55,11 @@ void mmq_imma_act_forget();
 // pp512 top-8/128 routing averages ~32 rows/expert). qkind: 0=Q8_0, 1=Q4_K, 2=Q6_K, 3=Q5_1, 4=Q5_K.
 // reuse_act: x_f16 is unchanged since the previous call quantized it (gate then up, #2469); the
 // quantize is skipped only if that call was the last one on this scratch.
+// Shape gate of mmq_imma_moe_gemm: N even, K a multiple of 256 (K-quants) or 64 (Q8_0, Q5_1).
+[[nodiscard]] constexpr bool mmq_imma_moe_shape_ok(int qkind, int N, int K) {
+    return N % 2 == 0 && K % ((qkind == 1 || qkind == 2 || qkind == 4) ? 256 : 64) == 0;
+}
+
 [[nodiscard]] bool mmq_imma_moe_gemm(const void* w_blocks, int qkind, const __half* x_f16, __half* out_f16,
                                      const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int N,
                                      int K, cudaStream_t stream, int rows_hint = 0, bool reuse_act = false);

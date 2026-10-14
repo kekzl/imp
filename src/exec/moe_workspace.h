@@ -10,6 +10,18 @@
 
 namespace imp {
 
+class Model;
+
+// Which prefill path serves every on-device expert without batch_dequant_buf.
+// cutlass_fp4: NVFP4/MXFP4 experts (CUTLASS grouped); imma_all: K-quant experts the MoE IMMA
+// kernel takes (Q8_0 excluded: its planes can hit the plane budget at runtime).
+struct MoeExpertServe {
+    bool cutlass_fp4 = false;
+    bool imma_all = false;
+};
+[[nodiscard]] MoeExpertServe classify_moe_experts(const Model& model, bool moe_imma_prefill,
+                                                  QType compute_dtype);
+
 // MoE workspace: holds all MoE-specific tensors and buffers. Phase tensors are views into
 // the executor's shared_workspace_ (no separate allocation); separately allocated buffers
 // are owned/freed by this struct. All members public for zero-overhead access.
@@ -34,6 +46,12 @@ struct MoEWorkspace {
     // dequanted to FP16 for L2-resident chunked processing.
     void* batch_dequant_buf = nullptr;
     size_t batch_dequant_buf_size = 0;
+    // Every on-device expert tensor fits the MoE IMMA kernel: the FP16 batch path runs without
+    // batch_dequant_buf, a runtime decline dequants into a stream-ordered temporary.
+    bool imma_serves_all = false;
+    [[nodiscard]] bool fp16_batch_buffer_ok(size_t need) const {
+        return (batch_dequant_buf != nullptr && batch_dequant_buf_size >= need) || imma_serves_all;
+    }
 
     // Expert-activation histogram (diagnostics.moe_expert_hist), off unless the key names a
     // path. [n_layers*n_experts] device counters, incremented once per (token,k) routing

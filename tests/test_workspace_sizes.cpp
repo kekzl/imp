@@ -67,8 +67,8 @@ TEST(ExecT2Demand, MmvqFollowsTheGemmScratchFormula) {
     ExecShape s = dense_shape();
     s.weights = {{4096, 12288}};
     const ExecT2Demand d = exec_t2_demand(s, 1024);
-    // max_tokens * ceil(K/32) * 36 * 2
-    const size_t expect = 1024ull * ((12288 + 31) / 32) * 36 * 2;
+    // ceil(K/32) * 36 * 2: one row, every MMVQ strategy is m_is_one
+    const size_t expect = ((12288ull + 31) / 32) * 36 * 2;
     EXPECT_EQ(d.mmvq_scratch, expect);
 }
 

@@ -1,8 +1,34 @@
 #include "exec/moe_workspace.h"
+#include "compute/gemm.h"         // moe_imma_prefill_supported
+#include "compute/mmq_q8_imma.h"  // mmq_imma_moe_shape_ok
 #include "core/logging.h"
+#include "model/model.h"
 #include <cuda_runtime.h>
 
 namespace imp {
+
+MoeExpertServe classify_moe_experts(const Model& model, bool moe_imma_prefill, QType compute_dtype) {
+    MoeExpertServe s{true, moe_imma_prefill && compute_dtype == QType::F16};
+    auto fp4 = [](const Tensor& t) { return !t.data || t.qtype == QType::NVFP4 || t.qtype == QType::MXFP4; };
+    // Packed experts are [ne][N][K].
+    auto imma = [](const Tensor& t) {
+        if (!t.data)
+            return true;
+        if (!t.on_device || !moe_imma_prefill_supported(t.qtype))
+            return false;
+        const int qkind = moe_imma_prefill_qkind(t.qtype);
+        return qkind != 0 &&
+               mmq_imma_moe_shape_ok(qkind, static_cast<int>(t.shape[1]), static_cast<int>(t.shape[2]));
+    };
+    for (int i = 0; i < model.config().n_layers && (s.cutlass_fp4 || s.imma_all); i++) {
+        const auto& L = model.layer(i);
+        s.cutlass_fp4 = s.cutlass_fp4 && fp4(L.expert_up_packed) && fp4(L.expert_down_packed);
+        s.imma_all = s.imma_all && imma(L.expert_gate_packed) && imma(L.expert_up_packed) &&
+                     imma(L.expert_down_packed);
+    }
+    s.imma_all = s.imma_all && !s.cutlass_fp4;
+    return s;
+}
 
 // Batched-MoE pointer/scale arrays are T2 arena tenants (A7 step 4b.2): engine-lifetime,
 // sized from n_experts, charged as moe_arrays. Arena is closed by ~Engine after teardown;
@@ -26,6 +52,7 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
 
     vfree(batch_dequant_buf);
     batch_dequant_buf_size = 0;
+    imma_serves_all = false;
 
     if (d_work_ptrs) {
         d_work_ptrs = nullptr;

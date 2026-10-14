@@ -353,11 +353,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
 
         // Pre-warm the file-scope MMVQ Q8_1 quantization scratch used by the
-        // ggml_mmvq_q*_kernel hot-path in executor_kernels.cu. Sized for the
-        // worst case (max_tokens × max_k) so the hot path never re-allocates
-        // (capture-safe). QW1 from the phase-5 review §2.1 (archived in #604).
-        if (max_k > 0 && max_tokens_ > 0) {
-            prewarm_mmvq_scratch(max_tokens_, max_k);
+        // ggml_mmvq_q*_kernel hot-path (gemm_kernel_gguf.cpp). Every GGUF strategy is
+        // registered m_is_one: one row x max_k, not max_tokens rows (Qwen3-14B 153 MiB -> 39 KiB).
+        if (max_k > 0) {
+            prewarm_mmvq_scratch(/*max_tokens=*/1, max_k);
         }
 
         // dp4a prefill scratch: enables direct Q4_K/Q5_K → dp4a GEMM for M>1
@@ -509,9 +508,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
 
     // cuBLAS attention S-matrix workspace [n_heads, attn_seq, attn_seq] FP16; only the
     // materialized cuBLAS prefill fallback uses it. Skip when FP16-QK FA2 serves all prefill
-    // (uniform per-layer shapes, no learned sinks, head_dim 128 or 256 with fa2_hd256).
-    // cuBLAS remains the reference for heterogeneous shapes, learned sinks, hd=256 without
-    // fa2_hd256, and fa2_fp16qk=never.
+    // (uniform per-layer shapes, head_dim 64, 128 or 256 with fa2_hd256, sinks included).
+    // cuBLAS remains the reference for heterogeneous shapes, hd=256 without fa2_hd256,
+    // and fa2_fp16qk=never.
     if (fa2_serves_all_prefill()) {
         IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (FP16-QK FA2 serves all prefill — "
                      "no S-matrix needed)");
@@ -819,71 +818,64 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             }
         }
 
-        // ST-NVFP4 experts run the CUTLASS 3.x grouped path for all prefill sizes; the buffers
-        // below only back GGUF-family batch paths (FP16-cache batch, Q6_K FP8 batch, IMMA Q8
-        // staging) and the post-CUTLASS NVFP4->FP16 dequant fallback. Skipping them frees VRAM;
-        // CUTLASS-decline falls through to the legacy per-expert path (slow but correct).
-        bool experts_st_nvfp4 = true;
-        for (int i = 0; i < cfg.n_layers && experts_st_nvfp4; i++) {
-            const auto& L = model_->layer(i);
-            if (L.expert_up_packed.data && L.expert_up_packed.qtype != QType::NVFP4)
-                experts_st_nvfp4 = false;
-            if (L.expert_down_packed.data && L.expert_down_packed.qtype != QType::NVFP4)
-                experts_st_nvfp4 = false;
-        }
-        if (experts_st_nvfp4) {
-            IMP_LOG_INFO(
-                "MoE batch dequant buffer: skipped "
-                "(ST-NVFP4 experts — CUTLASS grouped prefill does not need it)");
+        // NVFP4/MXFP4 experts take CUTLASS 3.x grouped prefill (MXFP4 via Phase 3: gpt-oss 506 MiB),
+        // K-quant experts the MoE IMMA kernel (Qwen3-30B-A3B 384, Gemma-4 484 MiB). A decline then
+        // runs the legacy per-expert path (CUTLASS) or dequants into a stream-ordered temporary (IMMA).
+        const MoeExpertServe serve = classify_moe_experts(*model_, dispatch_policy().gemm.moe_imma_prefill,
+                                                          compute_dtype_);
+        moe_.imma_serves_all = serve.imma_all;
+        if (serve.cutlass_fp4 || serve.imma_all) {
+            IMP_LOG_INFO("MoE batch dequant buffer: skipped (%s serves every expert tensor)",
+                         serve.cutlass_fp4 ? "CUTLASS grouped NVFP4" : "MoE IMMA prefill");
             moe_.batch_dequant_buf = nullptr;
             moe_.batch_dequant_buf_size = 0;
         } else
-        // Batch dequant: sized for a chunk of experts (L2-resident strategy). Dequant a chunk to
-        // FP16 then GEMM while still warm in L2 (~96 MB on RTX 5090), avoiding an FP16 round-trip
-        // to DRAM. Skipped when experts are host-resident (only useful for on-device experts).
-        if (!skip_batch_dequant) {
-            // Cap at remaining free VRAM minus a reserve for KV cache + workspaces (init_kv_cache
-            // runs after this and sees what's left). Leave >= 1 GiB free: covers vram_budget reserve
-            // (~768 MiB) plus a useful KV cache.
-            size_t free_now = 0, total_now = 0;
-            // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
-            (void)vram_budget_mem_get_info(&free_now, &total_now);
-            constexpr size_t kPostBufReserve = 1024ULL * 1024 * 1024;
-            size_t cap_bytes = (free_now > kPostBufReserve) ? (free_now - kPostBufReserve) : 0;
+            // Batch dequant: sized for a chunk of experts (L2-resident strategy). Dequant a chunk to
+            // FP16 then GEMM while still warm in L2 (~96 MB on RTX 5090), avoiding an FP16 round-trip
+            // to DRAM. Skipped when experts are host-resident (only useful for on-device experts).
+            if (!skip_batch_dequant) {
+                // Cap at remaining free VRAM minus a reserve for KV cache + workspaces (init_kv_cache
+                // runs after this and sees what's left). Leave >= 1 GiB free: covers vram_budget reserve
+                // (~768 MiB) plus a useful KV cache.
+                size_t free_now = 0, total_now = 0;
+                // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.
+                (void)vram_budget_mem_get_info(&free_now, &total_now);
+                constexpr size_t kPostBufReserve = 1024ULL * 1024 * 1024;
+                size_t cap_bytes = (free_now > kPostBufReserve) ? (free_now - kPostBufReserve) : 0;
 
-            int targets[] = {cfg.n_experts, cfg.n_experts / 2, 32, 16};
-            bool allocated = false;
-            for (int ne_try : targets) {
-                if (ne_try <= 0)
-                    continue;
-                ne_try = std::min(ne_try, cfg.n_experts);
-                size_t sz = static_cast<size_t>(ne_try) * eff * d * sizeof(half);
-                if (cap_bytes > 0 && sz > cap_bytes) {
-                    IMP_LOG_DEBUG("MoE dequant: skipping %d experts (%.0f MiB > cap %.0f MiB)", ne_try,
-                                  sz / (1024.0 * 1024.0), cap_bytes / (1024.0 * 1024.0));
-                    continue;
+                int targets[] = {cfg.n_experts, cfg.n_experts / 2, 32, 16};
+                bool allocated = false;
+                for (int ne_try : targets) {
+                    if (ne_try <= 0)
+                        continue;
+                    ne_try = std::min(ne_try, cfg.n_experts);
+                    size_t sz = static_cast<size_t>(ne_try) * eff * d * sizeof(half);
+                    if (cap_bytes > 0 && sz > cap_bytes) {
+                        IMP_LOG_DEBUG("MoE dequant: skipping %d experts (%.0f MiB > cap %.0f MiB)", ne_try,
+                                      sz / (1024.0 * 1024.0), cap_bytes / (1024.0 * 1024.0));
+                        continue;
+                    }
+                    moe_.batch_dequant_buf = vram_alloc(vram_alloc_, sz, "moe_batch_dequant");
+                    if (!moe_.batch_dequant_buf) {
+                        IMP_LOG_DEBUG("MoE dequant buf alloc failed for %d experts", ne_try);
+                        continue;
+                    }
+                    moe_.batch_dequant_buf_size = sz;
+                    allocated = true;
+                    IMP_LOG_INFO("MoE batch dequant buffer: %.2f MiB (%d experts)", sz / (1024.0 * 1024.0),
+                                 ne_try);
+                    break;
                 }
-                moe_.batch_dequant_buf = vram_alloc(vram_alloc_, sz, "moe_batch_dequant");
-                if (!moe_.batch_dequant_buf) {
-                    IMP_LOG_DEBUG("MoE dequant buf alloc failed for %d experts", ne_try);
-                    continue;
+                if (!allocated) {
+                    IMP_LOG_INFO("MoE batch dequant buffer: skipped (VRAM insufficient)");
+                    moe_.batch_dequant_buf = nullptr;
+                    moe_.batch_dequant_buf_size = 0;
                 }
-                moe_.batch_dequant_buf_size = sz;
-                allocated = true;
-                IMP_LOG_INFO("MoE batch dequant buffer: %.2f MiB (%d experts)", sz / (1024.0 * 1024.0),
-                             ne_try);
-                break;
-            }
-            if (!allocated) {
-                IMP_LOG_INFO("MoE batch dequant buffer: skipped (VRAM insufficient)");
+            } else {
+                IMP_LOG_INFO("MoE batch dequant buffer: skipped (experts on host)");
                 moe_.batch_dequant_buf = nullptr;
                 moe_.batch_dequant_buf_size = 0;
             }
-        } else {
-            IMP_LOG_INFO("MoE batch dequant buffer: skipped (experts on host)");
-            moe_.batch_dequant_buf = nullptr;
-            moe_.batch_dequant_buf_size = 0;
-        }
 
         // CUTLASS 3.x NVFP4 grouped activation staging: auto-used for prefill (n > 1) on
         // NVFP4-prequant MoE models. Decode (n == 1) keeps the legacy per-expert GEMV.
@@ -1752,10 +1744,9 @@ bool GraphExecutor::fa2_serves_all_prefill() const {
             break;
         }
     }
-    const bool fa2_hd_ok = hd_for_attn == 128 ||
-                           (hd_for_attn == 256 && dispatch_policy().attention.fa2_hd256);
-    return fa2_hd_ok && dispatch_policy().attention.fa2_fp16qk != "never" && attn_shapes_uniform() &&
-           !model_->profile().learned_attn_sinks;
+    // hd=64 and learned sinks ride FA2 too (try_fa2_fp16qk_prefill passes sinks): gpt-oss 378 MiB.
+    const bool fa2_hd_ok = fa2_serves_head_dim(hd_for_attn, dispatch_policy().attention.fa2_hd256);
+    return fa2_hd_ok && dispatch_policy().attention.fa2_fp16qk != "never" && attn_shapes_uniform();
 }
 
 int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) const {
