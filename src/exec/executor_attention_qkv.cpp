@@ -226,12 +226,12 @@
             bool fp8_qkv_available = (fp8_hwq && fp8_hwq->primary_tier == StorageTier::FP8 && fp8_hwk &&
                                       fp8_hwk->primary_tier == StorageTier::FP8 && fp8_hwv &&
                                       fp8_hwv->primary_tier == StorageTier::FP8);
-            if (n > 1 && !state.force_fp16_gemm && fp8_qkv_available && qscratch_.fp8_act != nullptr &&
-                qscratch_.d_act_scale != nullptr) {
+            // q/k/v share the quantized input: all three GEMMs take the scale it was quantized with.
+            const float* fp8_a_scale = (n > 1 && !state.force_fp16_gemm && fp8_qkv_available)
+                                           ? quantize_act_fp8_(*fp8_hwq, no, stream)
+                                           : nullptr;
+            if (fp8_a_scale) {
                 Tensor fp8_no(qscratch_.fp8_act, QType::FP8_E4M3, no.ndim, no.shape, true);
-                quantize_fp16_to_fp8_e4m3(no, fp8_no, qscratch_.d_act_scale, stream,
-                                          qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax,
-                                          qscratch_.fp8_max_grid);
                 // Reconstruct FP8 weight tensors from handle payloads.
                 auto make_fp8_tensor = [](const WeightHandle* hw) {
                     int64_t wshape[2] = {hw->shape[0], hw->shape[1]};
@@ -240,12 +240,12 @@
                 Tensor fp8_tq = make_fp8_tensor(fp8_hwq);
                 Tensor fp8_tk = make_fp8_tensor(fp8_hwk);
                 Tensor fp8_tv = make_fp8_tensor(fp8_hwv);
-                gemm_cublaslt(fp8_no, fp8_tq, q_target, 1.0f, 0.0f, qscratch_.d_act_scale,
-                              fp8_hwq->payload.fp8.d_scale, stream);
-                gemm_cublaslt(fp8_no, fp8_tk, kk, 1.0f, 0.0f, qscratch_.d_act_scale,
-                              fp8_hwk->payload.fp8.d_scale, stream);
-                gemm_cublaslt(fp8_no, fp8_tv, vv, 1.0f, 0.0f, qscratch_.d_act_scale,
-                              fp8_hwv->payload.fp8.d_scale, stream);
+                gemm_cublaslt(fp8_no, fp8_tq, q_target, 1.0f, 0.0f, fp8_a_scale, fp8_hwq->payload.fp8.d_scale,
+                              stream);
+                gemm_cublaslt(fp8_no, fp8_tk, kk, 1.0f, 0.0f, fp8_a_scale, fp8_hwk->payload.fp8.d_scale,
+                              stream);
+                gemm_cublaslt(fp8_no, fp8_tv, vv, 1.0f, 0.0f, fp8_a_scale, fp8_hwv->payload.fp8.d_scale,
+                              stream);
             } else {
                 // Fused K+V path: one strided batched GEMM for both projections, looked
                 // up via WeightRegistry handle (wcache_ is the storage owner only, not the

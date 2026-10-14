@@ -737,11 +737,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         if (prefill == StorageTier::FP8) {
             auto fp8_it = wcache_.fp8.find(h.source_data);
             if (fp8_it != wcache_.fp8.end()) {
-                int64_t wshape[2] = {h.shape[0],
-                    (h.primary_tier == StorageTier::CUTLASS_NVFP4) ? h.shape[1] * 2 : h.shape[1]};
-                Tensor fp8_w(fp8_it->second.weight.data, QType::FP8_E4M3, 2, wshape, true);
-                gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta,
-                              nullptr, fp8_it->second.d_scale, ctx.stream);
+                gemm_fp8_prefill_(h, fp8_it->second, input, output, ctx);
                 return;
             }
         }
@@ -897,5 +893,51 @@ void GraphExecutor::ensure_smallm_xq_(size_t xq_need, cudaStream_t stream) {
 // try_smallm_pair_dispatch_ live in executor_gemm_smallm.cpp (2026-08-27
 // split — see its header comment).
 
+void GraphExecutor::gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry& e, const Tensor& input,
+                                      Tensor& output, const GemmContext& ctx) {
+    int64_t wshape[2] = {h.shape[0],
+                         (h.primary_tier == StorageTier::CUTLASS_NVFP4) ? h.shape[1] * 2 : h.shape[1]};
+    Tensor fp8_w(e.weight.data, QType::FP8_E4M3, 2, wshape, true);
+    // cuBLASLt has no F16 x FP8 GEMM (status 15): quantize the activation first.
+    if (input.qtype == QType::F16 && e.d_scale) {
+        if (const float* a_scale = quantize_act_fp8_(h, input, ctx.stream)) {
+            Tensor fp8_in(qscratch_.fp8_act, QType::FP8_E4M3, input.ndim, input.shape, true);
+            gemm_cublaslt(fp8_in, fp8_w, output, 1.0f, ctx.beta, a_scale, e.d_scale, ctx.stream);
+            return;
+        }
+    }
+    // Native FP8 the activation scratch cannot serve: FP16 weight in the dequant scratch.
+    const size_t w_f16 = static_cast<size_t>(wshape[0]) * wshape[1] * sizeof(half);
+    if (e.native_source && input.qtype == QType::F16 && qscratch_.dequant &&
+        w_f16 <= qscratch_.dequant_size) {
+        dequantize_fp8_e4m3_to_fp16(fp8_w.data, qscratch_.dequant, static_cast<int>(wshape[0] * wshape[1]),
+                                    e.host_scale, ctx.stream);
+        Tensor w16(qscratch_.dequant, QType::F16, 2, wshape, true);
+        gemm(input, w16, output, 1.0f, ctx.beta, ctx.stream);
+        return;
+    }
+    static bool s_native_warned = false;
+    if (e.native_source && !std::exchange(s_native_warned, true))
+        IMP_LOG_ERROR("native FP8 prefill: no activation or dequant scratch (N=%ld K=%ld)",
+                      static_cast<long>(wshape[0]), static_cast<long>(wshape[1]));
+    gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta, nullptr, e.d_scale, ctx.stream);
+}
+
+const float* GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tensor& input,
+                                              cudaStream_t stream) {
+    if (!qscratch_.fp8_act || !input.is_contiguous() ||
+        static_cast<size_t>(input.numel()) > qscratch_.fp8_act_size)
+        return nullptr;
+    if (hw.payload.fp8.d_act_scale &&
+        quantize_fp16_to_fp8_e4m3_dscale(input.data, qscratch_.fp8_act, input.numel(),
+                                         hw.payload.fp8.d_act_scale, stream))
+        return hw.payload.fp8.d_act_scale;
+    if (!qscratch_.d_act_scale)
+        return nullptr;
+    Tensor fp8_in(qscratch_.fp8_act, QType::FP8_E4M3, input.ndim, input.shape, true);
+    quantize_fp16_to_fp8_e4m3(input, fp8_in, qscratch_.d_act_scale, stream, qscratch_.d_fp8_block_maxes,
+                              qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
+    return qscratch_.d_act_scale;
+}
 
 }  // namespace imp

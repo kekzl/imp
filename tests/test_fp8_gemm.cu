@@ -532,5 +532,150 @@ TEST_F(FP8GemmTest, RowscaleFp32HeadRowTileSweep) {
     cudaFree(d_y);
 }
 
+// The device-scale activation quantize (native FP8 prefill) is byte-identical to the host-scale
+// kernel, saturates, and declines a length that is not a multiple of 8.
+TEST_F(FP8GemmTest, DeviceScaleQuantizeMatchesHostScaleKernel) {
+    const int n = 4096 + 8;
+    const float scale = 0.0123f;
+    std::vector<half> h_x(n);
+    srand(7);
+    for (int i = 0; i < n; ++i)
+        h_x[i] = __float2half(((rand() % 20001) - 10000) / 1000.0f);  // |x| <= 10: x/scale > 448 saturates
+    void *d_x = nullptr, *d_a = nullptr, *d_b = nullptr;
+    float* d_s = nullptr;
+    cudaMalloc(&d_x, n * sizeof(half));
+    cudaMalloc(&d_a, n);
+    cudaMalloc(&d_b, n);
+    cudaMalloc(&d_s, sizeof(float));
+    cudaMemcpy(d_x, h_x.data(), n * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_s, &scale, sizeof(float), cudaMemcpyHostToDevice);
+    quantize_fp16_to_fp8_e4m3_scaled(d_x, d_a, n, scale, stream_);
+    ASSERT_TRUE(quantize_fp16_to_fp8_e4m3_dscale(d_x, d_b, n, d_s, stream_));
+    EXPECT_FALSE(quantize_fp16_to_fp8_e4m3_dscale(d_x, d_b, n - 4, d_s, stream_));
+    ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+    std::vector<uint8_t> a(n), b(n);
+    cudaMemcpy(a.data(), d_a, n, cudaMemcpyDeviceToHost);
+    cudaMemcpy(b.data(), d_b, n, cudaMemcpyDeviceToHost);
+    int n_sat = 0;
+    for (int i = 0; i < n; ++i) {
+        ASSERT_EQ(a[i], b[i]) << "element " << i;
+        n_sat += (b[i] & 0x7F) == 0x7E;  // +-448
+    }
+    EXPECT_GT(n_sat, 0);
+    cudaFree(d_x);
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_s);
+}
+
+// Native FP8 prefill: FP8 activation x FP8 weight through cuBLASLt with device scales, at an M
+// that is not a multiple of 16, against a host product of the decoded E4M3 operands.
+TEST_F(FP8GemmTest, NativeFp8PrefillGemmMatchesDecodedReference) {
+    const int M = 17, N = 64, K = 256;
+    const float a_scale = 0.02f, w_scale = 0.003f;
+    std::vector<half> h_x(static_cast<size_t>(M) * K);
+    std::vector<uint8_t> h_w(static_cast<size_t>(N) * K);
+    srand(11);
+    for (auto& v : h_x)
+        v = __float2half(((rand() % 2001) - 1000) / 400.0f);
+    for (auto& v : h_w) {
+        v = static_cast<uint8_t>(rand() & 0xFF);
+        if (e4m3_byte_is_nan(v))
+            v = 0;
+    }
+    void *d_x = nullptr, *d_x8 = nullptr, *d_w = nullptr, *d_y = nullptr;
+    float* d_sc = nullptr;
+    cudaMalloc(&d_x, h_x.size() * sizeof(half));
+    cudaMalloc(&d_x8, h_x.size());
+    cudaMalloc(&d_w, h_w.size());
+    cudaMalloc(&d_y, static_cast<size_t>(M) * N * sizeof(half));
+    cudaMalloc(&d_sc, 2 * sizeof(float));
+    const float h_sc[2] = {a_scale, w_scale};
+    cudaMemcpy(d_x, h_x.data(), h_x.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w, h_w.data(), h_w.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sc, h_sc, sizeof(h_sc), cudaMemcpyHostToDevice);
+
+    ASSERT_TRUE(quantize_fp16_to_fp8_e4m3_dscale(d_x, d_x8, h_x.size(), d_sc, stream_));
+    int64_t xs[2] = {M, K}, ws[2] = {N, K}, ys[2] = {M, N};
+    Tensor x8(d_x8, QType::FP8_E4M3, 2, xs, true), w8(d_w, QType::FP8_E4M3, 2, ws, true);
+    Tensor y(d_y, QType::F16, 2, ys, true);
+    gemm_cublaslt(x8, w8, y, 1.0f, 0.0f, d_sc, d_sc + 1, stream_);
+    ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+
+    std::vector<uint8_t> h_x8(h_x.size());
+    std::vector<half> h_y(static_cast<size_t>(M) * N);
+    cudaMemcpy(h_x8.data(), d_x8, h_x8.size(), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_y.data(), d_y, h_y.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    double max_rel = 0.0;
+    for (int m = 0; m < M; ++m) {
+        for (int n = 0; n < N; ++n) {
+            double ref = 0.0, mag = 0.0;
+            bool nan = false;
+            for (int k = 0; k < K; ++k) {
+                const double p = e4m3_decode_ref(h_x8[static_cast<size_t>(m) * K + k], nan) *
+                                 e4m3_decode_ref(h_w[static_cast<size_t>(n) * K + k], nan);
+                ref += p;
+                mag += std::fabs(p);
+            }
+            ref *= static_cast<double>(a_scale) * w_scale;
+            mag *= static_cast<double>(a_scale) * w_scale;
+            const double got = __half2float(h_y[static_cast<size_t>(m) * N + n]);
+            max_rel = std::max(max_rel, std::fabs(got - ref) / std::max(mag, 1e-6));
+        }
+    }
+    EXPECT_LT(max_rel, 2e-3);  // FP16 output rounding against the summed magnitude
+    cudaFree(d_x);
+    cudaFree(d_x8);
+    cudaFree(d_w);
+    cudaFree(d_y);
+    cudaFree(d_sc);
+}
+
+// FP8 x FP8 rows do not depend on M (#2152): the first 16 rows are bit-identical across chunk sizes
+// (down_proj shape; per-M algo picks differ bitwise).
+TEST_F(FP8GemmTest, Fp8GemmRowsInvariantAcrossM) {
+    const int N = 4096, K = 12288, R = 16;
+    const int Ms[] = {2048, 17, 64, 208, 272, 512, 1000};
+    const int Mmax = 2048;
+    std::vector<uint8_t> h_x(static_cast<size_t>(Mmax) * K), h_w(static_cast<size_t>(N) * K);
+    srand(5);
+    for (auto* v : {&h_x, &h_w})
+        for (auto& b : *v) {
+            b = static_cast<uint8_t>(rand() & 0xFF);
+            if (e4m3_byte_is_nan(b))
+                b = 0;
+        }
+    void *d_x = nullptr, *d_w = nullptr, *d_y = nullptr;
+    float* d_sc = nullptr;
+    cudaMalloc(&d_x, h_x.size());
+    cudaMalloc(&d_w, h_w.size());
+    cudaMalloc(&d_y, static_cast<size_t>(Mmax) * N * sizeof(half));
+    cudaMalloc(&d_sc, 2 * sizeof(float));
+    const float h_sc[2] = {0.01f, 0.002f};
+    cudaMemcpy(d_x, h_x.data(), h_x.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w, h_w.data(), h_w.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sc, h_sc, sizeof(h_sc), cudaMemcpyHostToDevice);
+    std::vector<half> ref(static_cast<size_t>(R) * N), got(ref.size());
+    for (int M : Ms) {
+        int64_t xs[2] = {M, K}, ws[2] = {N, K}, ys[2] = {M, N};
+        Tensor x8(d_x, QType::FP8_E4M3, 2, xs, true), w8(d_w, QType::FP8_E4M3, 2, ws, true);
+        Tensor y(d_y, QType::F16, 2, ys, true);
+        gemm_cublaslt(x8, w8, y, 1.0f, 0.0f, d_sc, d_sc + 1, stream_);
+        ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+        auto& dst = (M == Ms[0]) ? ref : got;
+        cudaMemcpy(dst.data(), d_y, dst.size() * sizeof(half), cudaMemcpyDeviceToHost);
+        if (M == Ms[0])
+            continue;
+        int diff = 0;
+        for (size_t i = 0; i < ref.size(); ++i)
+            diff += std::memcmp(&ref[i], &got[i], sizeof(half)) != 0;
+        EXPECT_EQ(diff, 0) << "M=" << M;
+    }
+    cudaFree(d_x);
+    cudaFree(d_w);
+    cudaFree(d_y);
+    cudaFree(d_sc);
+}
+
 }  // namespace
 }  // namespace imp

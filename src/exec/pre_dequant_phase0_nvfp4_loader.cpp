@@ -106,6 +106,21 @@ void assert_merged_scale_provenance(const Model& model, const ModelConfig& cfg,
 // A Modelopt FP8 checkpoint (quant_algo FP8) is not NVFP4 prequant, but its F8_E4M3 weights
 // carry the scalar weight_scale in the same scratch map: without Phase 0 they ran at scale 1.0
 // (Qwen3-8B-FP8: NaN from layer 0). promote() only records the scalar for FP8 weights.
+// A native FP8 weight's checkpoint input_scale (static activation scale) into `out`; absent or
+// non-positive leaves it out and prefill scales that weight's input per call.
+static void record_native_fp8_input_scale(const NvFP4PreQuantWeight& sc, const char* key, const void* w,
+                                          std::unordered_map<const void*, float>& out) {
+    if (!sc.input_scale.data)
+        return;
+    float s = 0.0f;
+    if (sc.input_scale.on_device)
+        read_device_scale_or_throw(&s, sc.input_scale.data, key);
+    else
+        memcpy(&s, sc.input_scale.data, sizeof(float));
+    if (s > 0.0f && std::isfinite(s))
+        out[w] = s;
+}
+
 static bool phase0_has_work(const ModelConfig& cfg, const Model& model) {
     return cfg.is_nvfp4_prequant || !model.nvfp4_scratch_.empty();
 }
@@ -142,8 +157,8 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
         // Native FP8 weights are not NVFP4 and must not be promoted as such. A Modelopt
         // MIXED_PRECISION export (Nemotron-3.5) stores Mamba in/out projections as F8_E4M3 with a
         // single FP32 weight_scale and no weight_scale_2; treating that as NVFP4's two-level
-        // layout would mislabel the scale as per-16 micro-scales. Record the scalar and stop:
-        // Phase 1 expands it to FP16 (sm_120 has no FP8 prefill GEMM).
+        // layout would mislabel the scale as per-16 micro-scales. Record the scalar (and the
+        // input_scale) and stop: Phase 1 serves the bytes as FP8 (gemm.fp8_native_prefill).
         if (w.qtype == QType::FP8_E4M3) {
             float s = 1.0f;
             if (sc.weight_scale.data) {
@@ -162,6 +177,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                 s = 1.0f;
             }
             w.tensor_scale = s;
+            record_native_fp8_input_scale(sc, key, w.data, wcache_->fp8_native_act_scale);
             n_native_fp8++;
             return false;  // not an NVFP4 promotion — nothing else to do here
         }
@@ -535,10 +551,8 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
         }
     }
     if (n_native_fp8 > 0) {
-        IMP_LOG_INFO(
-            "Mixed precision: %d native FP8 weight(s) carry a per-tensor scale — "
-            "expanded to FP16 in Phase 1 (sm_120 has no FP8 prefill GEMM)",
-            n_native_fp8);
+        IMP_LOG_INFO("Native FP8: %d weight(s) carry a per-tensor scale, %zu an input_scale", n_native_fp8,
+                     wcache_->fp8_native_act_scale.size());
     }
 }
 

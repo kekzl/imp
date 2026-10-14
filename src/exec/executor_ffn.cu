@@ -216,25 +216,20 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             rmsnorm_for_smallm_(h, ffn_norm_w, no, ly.w_gate_id, n, eps, stream, norm_w_off_);
 
             // FP8 prefill path: quantize norm_out→FP8 once, 2 separate FP8 GEMMs
-            bool fp8_ffn = (n > 1 && !cur_force_fp16_ && hwg && hwg->primary_tier == StorageTier::FP8 &&
-                            hwu && hwu->primary_tier == StorageTier::FP8 && qscratch_.fp8_act != nullptr &&
-                            qscratch_.d_act_scale != nullptr);
-            if (fp8_ffn) {
+            const bool fp8_ffn = (n > 1 && !cur_force_fp16_ && hwg && hwg->primary_tier == StorageTier::FP8 &&
+                                  hwu && hwu->primary_tier == StorageTier::FP8);
+            const float* fp8_a_scale = fp8_ffn ? quantize_act_fp8_(*hwg, no, stream) : nullptr;
+            if (fp8_a_scale) {
                 // Reconstruct FP8 weight tensors from handle payloads.
                 auto make_fp8_tensor = [](const WeightHandle* hw) {
                     int64_t wshape[2] = {hw->shape[0], hw->shape[1]};
                     return Tensor(hw->payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
                 };
                 Tensor fp8_no(qscratch_.fp8_act, QType::FP8_E4M3, no.ndim, no.shape, true);
-                quantize_fp16_to_fp8_e4m3(no, fp8_no, qscratch_.d_act_scale, stream,
-                                          qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax,
-                                          qscratch_.fp8_max_grid);
                 Tensor fp8_tg = make_fp8_tensor(hwg);
                 Tensor fp8_tu = make_fp8_tensor(hwu);
-                gemm_cublaslt(fp8_no, fp8_tg, go, 1.0f, 0.0f, qscratch_.d_act_scale, hwg->payload.fp8.d_scale,
-                              stream);
-                gemm_cublaslt(fp8_no, fp8_tu, uo, 1.0f, 0.0f, qscratch_.d_act_scale, hwu->payload.fp8.d_scale,
-                              stream);
+                gemm_cublaslt(fp8_no, fp8_tg, go, 1.0f, 0.0f, fp8_a_scale, hwg->payload.fp8.d_scale, stream);
+                gemm_cublaslt(fp8_no, fp8_tu, uo, 1.0f, 0.0f, fp8_a_scale, hwu->payload.fp8.d_scale, stream);
             } else {
                 // Read fused gate+up via WeightRegistry handle — the wcache_
                 // map is no longer the lookup mechanism (it remains the
@@ -466,17 +461,16 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     down_prequant = swiglu_for_smallm_(go, uo, so, ly.w_down_id, n, stream);
                     break;
             }
-            if (will_fuse_down_beta1 && !cur_force_fp16_ && wd_tier == StorageTier::FP8 &&
-                qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
+            const float* down_a_scale = (will_fuse_down_beta1 && !cur_force_fp16_ &&
+                                         wd_tier == StorageTier::FP8)
+                                            ? quantize_act_fp8_(*hwd, so, stream)
+                                            : nullptr;
+            if (down_a_scale) {
                 // FP8 beta=1: hidden = fp8(swiglu_out) @ fp8(w_down)^T + hidden
                 Tensor fp8_so(qscratch_.fp8_act, QType::FP8_E4M3, so.ndim, so.shape, true);
-                quantize_fp16_to_fp8_e4m3(so, fp8_so, qscratch_.d_act_scale, stream,
-                                          qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax,
-                                          qscratch_.fp8_max_grid);
                 int64_t wshape[2] = {hwd->shape[0], hwd->shape[1]};
                 Tensor fp8_wd(hwd->payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
-                gemm_cublaslt(fp8_so, fp8_wd, h, 1.0f, 1.0f, qscratch_.d_act_scale, hwd->payload.fp8.d_scale,
-                              stream);
+                gemm_cublaslt(fp8_so, fp8_wd, h, 1.0f, 1.0f, down_a_scale, hwd->payload.fp8.d_scale, stream);
             } else if (will_fuse_down_beta1_nvfp4) {
                 // Batched-decode NVFP4: hidden += swiglu_out @ w_down^T via
                 // the smallm accumulate path.

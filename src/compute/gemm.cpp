@@ -462,6 +462,9 @@ static inline void set_gemm_scale_pointers(cublasLtMatmulDesc_t opDesc, const fl
 // Algorithm benchmarking: request top-N candidates, time each, pick fastest. Uses a
 // temporary output buffer to avoid corrupting C during live inference.
 static constexpr int kMaxAlgoCandidates = 8;
+// FP8 x FP8 row pin: cache key M of the one per-(N, K) entry, and the M its algo is picked at.
+static constexpr int64_t kFp8RowPinKeyM = -1;
+static constexpr int64_t kFp8RowPinRefM = 512;
 static constexpr int kBenchmarkIters = 5;
 
 // Selection stability (F-9): a single timed sample per candidate is unstable at small M
@@ -747,8 +750,8 @@ static int algo_tile_id(const cublasLtMatmulAlgo_t& algo) {
 
 // Cold shape inside a capture: heuristic order, first candidate cublasLtMatmulAlgoCheck accepts.
 // Host-only, no launch: probing there invalidated the capture and dropped the size's graph (#2396).
-static void select_algo_host_only(cublasLtHandle_t lt, GemmCacheEntry& entry, int64_t M, int64_t K,
-                                  int64_t N) {
+static void select_algo_host_only(cublasLtHandle_t lt, GemmCacheEntry& entry, int64_t M, int64_t K, int64_t N,
+                                  bool in_capture = true) {
     cublasLtMatmulPreference_t pref = nullptr;
     CUBLASLT_CHECK(cublasLtMatmulPreferenceCreate(&pref));
     CUBLASLT_CHECK(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
@@ -776,9 +779,10 @@ static void select_algo_host_only(cublasLtHandle_t lt, GemmCacheEntry& entry, in
     if (pick >= 0)
         entry.algo = results[pick].algo;
     IMP_LOG_INFO(
-        "[gemm-algo] M=%ld K=%ld N=%ld first seen inside a stream capture: no timing, heuristic "
-        "cand[%d] of %d (host-checked, tile=%d)",
-        (long)M, (long)K, (long)N, pick, nresults, pick >= 0 ? algo_tile_id(entry.algo) : -1);
+        "[gemm-algo] M=%ld K=%ld N=%ld %s: no timing, heuristic cand[%d] of %d (host-checked, tile=%d)",
+        (long)M, (long)K, (long)N,
+        in_capture ? "first seen inside a stream capture" : "FP8 row pin for every M", pick, nresults,
+        pick >= 0 ? algo_tile_id(entry.algo) : -1);
 }
 
 // Probe outside a capture, host-only pick inside one. Same signature as the probe.
@@ -1087,28 +1091,38 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
     cudaDataType_t cuda_dtype_A = dtype_to_cuda(A.qtype);
     cudaDataType_t cuda_dtype_B = dtype_to_cuda(B.qtype);
     cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.qtype);
-    // FP8 algos on sm_120 are sensitive to exact M — an algo benchmarked at
-    // one M within a bucket can return CUBLAS_STATUS_NOT_SUPPORTED at another
-    // M in the same bucket. Use exact M for FP8 to avoid stale algo reuse.
-    bool is_fp8 = (cuda_dtype_A == CUDA_R_8F_E4M3 || cuda_dtype_B == CUDA_R_8F_E4M3);
-    GemmCacheKey cache_key{
-        cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, CUBLAS_COMPUTE_32F,
-        is_fp8 ? M : bucket_m(M), K, N, (aScale != nullptr)};
+    // FP8 algos on sm_120 are sensitive to exact M (NOT_SUPPORTED at another M in a bucket): exact-M
+    // keys. FP8 x FP8 instead keeps one algo per (N, K) for every M, the heuristic pick at
+    // kFp8RowPinRefM, so a prompt row does not change with its chunk size (#2152; FP8 algos differ
+    // bitwise). Ref M 512 vs 2048: pp512 30672 vs 23582 tok/s, pp2048 29969 vs 33307.
+    const int n_fp8 = int(cuda_dtype_A == CUDA_R_8F_E4M3) + int(cuda_dtype_B == CUDA_R_8F_E4M3);
+    const bool row_pin = n_fp8 == 2;
+    const int64_t key_m = row_pin ? kFp8RowPinKeyM : (n_fp8 == 1 ? M : bucket_m(M));
+    GemmCacheKey cache_key{cuda_dtype_A,       cuda_dtype_B, cuda_dtype_C, CUBLAS_COMPUTE_32F, key_m, K, N,
+                           (aScale != nullptr)};
 
     GemmCacheEntry* entry = nullptr;
     {
         std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
         entry = entry_for_m(lt, cache_key, M, cuda_dtype_A, cuda_dtype_C, K, N, [&] {
+            // First build of the pin key: algo at the ref M. An exact-M fallback (pin fails at M): at M.
+            const bool pin_build = row_pin && !s_gemm_cache.contains(cache_key);
+            const int64_t m = pin_build ? kFp8RowPinRefM : M;
             GemmCacheEntry new_entry{};
-            new_entry.desc_M = M;
+            new_entry.desc_M = m;
 
             create_gemm_descriptors(new_entry, CUBLAS_COMPUTE_32F, CUDA_R_32F, cuda_dtype_A, cuda_dtype_B,
-                                    cuda_dtype_C, (int)K, (int)M, (int)N);
+                                    cuda_dtype_C, (int)K, (int)m, (int)N);
 
             set_gemm_scale_pointers(new_entry.opDesc, aScale, bScale);
 
-            size_t c_bytes = (size_t)M * N * dtype_size(C.qtype);
-            select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta, false, stream, (int)M, (int)N,
+            if (pin_build) {
+                select_algo_host_only(lt, new_entry, m, K, N, /*in_capture=*/false);
+                new_entry.workspace_size = s_workspace_size;  // serves every M: the shared workspace caps it
+                return new_entry;
+            }
+            size_t c_bytes = (size_t)m * N * dtype_size(C.qtype);
+            select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta, false, stream, (int)m, (int)N,
                         (int)K);
             return new_entry;
         });

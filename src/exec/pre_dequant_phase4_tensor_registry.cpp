@@ -43,14 +43,14 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         // phase-2 prefill cache never keys F16 sources). A quantized (GGUF) source is the
         // sidecar only when the entry carries per-row scales (the phase-2 FP8 prefill cache
         // keys quantized sources with a per-tensor scale and must stay primary). A native-FP8
-        // source (Modelopt) is a third case, always a sidecar: sm_120 has no FP8 prefill GEMM
-        // for it, so prefill must take the FP16 companion or reach cuBLAS raw (status 15).
+        // source (Modelopt) is a sidecar only beside an FP16 companion (gemm.fp8_native_prefill
+        // off); without one it is primary and prefill runs FP8 x FP8.
         bool fp8_decode_sidecar = false;
         if (tier == StorageTier::FP8) {
             auto it = wcache_->fp8.find(t.data);
             const bool native = it != wcache_->fp8.end() && it->second.native_source;
             if (native) {
-                fp8_decode_sidecar = true;
+                fp8_decode_sidecar = wcache_->fp16.count(t.data) != 0;
             } else if (t.qtype == QType::F16) {
                 fp8_decode_sidecar = true;
             } else if (dequant_gpu_supported(t.qtype)) {
@@ -565,6 +565,9 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
             skipped_shared_bytes += bytes;
             return false;
         }
+        // A native FP8 entry borrows these bytes: they are the served weight, not a source.
+        if (const auto it = wcache_->fp8.find(t.data); it != wcache_->fp8.end() && it->second.native_source)
+            return false;
         if (wcache_->cutlass_nvfp4.count(t.data) > 0 || wcache_->nvfp4.count(t.data) > 0 ||
             wcache_->lm_head_fp8.weight.data == t.data) {  // checkpoint FP8 head is served (#2479)
             ++skipped_shared_count;

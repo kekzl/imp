@@ -51,6 +51,9 @@ int64_t incremental_bytes_for_tier(int64_t rows, int64_t cols, StorageTier tier,
     if ((source == QType::F16 || source == QType::BF16 || source == QType::F32) &&
         tier == StorageTier::FP16)
         return 0;
+    // A native FP8 source at the FP8 tier is served from the checkpoint bytes (Phase 1).
+    if (source == QType::FP8_E4M3 && tier == StorageTier::FP8)
+        return 0;
     return bytes_for_tier(rows, cols, tier);
 }
 

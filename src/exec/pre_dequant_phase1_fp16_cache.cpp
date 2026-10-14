@@ -14,6 +14,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <vector>
 
 using imp::pre_dequant_internal::create_fused_weight_pair;
 using imp::pre_dequant_internal::deduct_budget;
@@ -47,8 +48,8 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         (void)kind;
         // A weight already FP8 on disk (Modelopt MIXED_PRECISION) is not something dequant_gpu
         // handles: it carries one per-tensor scalar (Phase 0), not inline GGUF block scales.
-        // Still must land here because sm_120 has no FP8 prefill GEMM; left alone it reaches
-        // cuBLAS raw and fails with status 15.
+        // Phase 1a serves it as FP8 (gemm.fp8_native_prefill); off, the plan asks for an FP16 copy here
+        // (raw FP8 bytes in an F16 cuBLAS call fail with status 15).
         const bool native_fp8 = (qtype == QType::FP8_E4M3);
         if (!fp16_cache_source(w, qtype, dequant_gpu_supported(qtype)))
             return;  // also skips --gpu-layers host-streamed weights (model/layer_host_keep.h)
@@ -93,8 +94,8 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         total_cache_bytes += fp16_bytes;
         cached_count++;
 
-        // Decode keeps the checkpoint's own FP8 bytes; the FP16 copy exists only because sm_120
-        // has no FP8 prefill GEMM. Spending it on the M=1 GEMV too would read 2 B/elem where the
+        // Decode keeps the checkpoint's own FP8 bytes; the FP16 copy (gemm.fp8_native_prefill off)
+        // serves prefill only. Spending it on the M=1 GEMV too would read 2 B/elem where the
         // file has 1, on the one path that is bandwidth-bound. Lossless and free: these ARE the
         // published weights, not a requantization. gemm.fp8_ssm_proj=false falls back to FP16
         // for both paths.
@@ -183,6 +184,58 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
 
     // Deduct Phase 1 allocation from shared budget
     deduct_budget(remaining_budget, total_cache_bytes);
+}
+
+// One device buffer {weight_scale, input_scale} per native entry: cuBLASLt reads FP8 scales through
+// device pointers. False (entries keep null scales, Phase 1 copies them to FP16) on failure.
+static bool upload_native_fp8_scales(WeightCaches& wc, VRAMAllocator* alloc,
+                                     std::vector<FP8CacheEntry*>& entries, cudaStream_t stream) {
+    std::vector<float> host(2 * entries.size());
+    for (size_t i = 0; i < entries.size(); ++i) {
+        host[2 * i] = entries[i]->host_scale;
+        const auto it = wc.fp8_native_act_scale.find(entries[i]->weight.data);
+        host[2 * i + 1] = it != wc.fp8_native_act_scale.end() ? it->second : 0.0f;
+    }
+    auto* d = static_cast<float*>(vram_alloc(alloc, host.size() * sizeof(float), "fp8_native_scales"));
+    if (!d || cudaMemcpyAsync(d, host.data(), host.size() * sizeof(float), cudaMemcpyHostToDevice, stream) !=
+                  cudaSuccess) {
+        vram_free(alloc, d);
+        return false;
+    }
+    wc.fp8_native_scales = d;
+    for (size_t i = 0; i < entries.size(); ++i) {
+        entries[i]->d_scale = d + 2 * i;
+        entries[i]->d_act_scale = host[2 * i + 1] > 0.0f ? d + 2 * i + 1 : nullptr;  // null: dynamic
+    }
+    return true;
+}
+
+void QuantPipeline::pre_dequant_phase1a_native_fp8_(const ModelConfig& cfg, cudaStream_t stream) {
+    if (!dispatch_policy().gemm.fp8_native_prefill)
+        return;
+    std::vector<FP8CacheEntry*> entries;
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& L = model_->layer(i);
+        for (const Tensor* t : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.ssm_in,
+                                &L.ssm_out, &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared}) {
+            if (!t->data || !t->on_device || t->qtype != QType::FP8_E4M3 || wcache_->fp8.count(t->data))
+                continue;
+            FP8CacheEntry fe;
+            fe.weight = Tensor(t->data, QType::FP8_E4M3, t->ndim, t->shape, true);
+            fe.host_scale = t->tensor_scale;
+            fe.native_source = true;
+            entries.push_back(&(wcache_->fp8[t->data] = fe));
+        }
+    }
+    const bool ok = !entries.empty() && upload_native_fp8_scales(*wcache_, vram_alloc_, entries, stream);
+    if (!ok)
+        for (const FP8CacheEntry* e : entries)
+            wcache_->fp8.erase(e->weight.data);
+    wcache_->fp8_native_act_scale.clear();
+    IMP_LOG_INFO(
+        "Native FP8: %zu weight(s) serve prefill (FP8 x FP8 cuBLASLt) and decode from the checkpoint's "
+        "bytes, no FP16 copy%s",
+        ok ? entries.size() : 0, ok || entries.empty() ? "" : " (scale upload failed)");
 }
 
 }  // namespace imp

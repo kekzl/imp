@@ -134,6 +134,7 @@ inline void borrow_payload_from_wcache(WeightHandle& h, const WeightCaches& wc, 
             if (it != wc.fp8.end()) {
                 h.payload.fp8.data = static_cast<__nv_fp8_e4m3*>(it->second.weight.data);
                 h.payload.fp8.d_scale = it->second.d_scale;
+                h.payload.fp8.d_act_scale = it->second.d_act_scale;
             }
             break;
         }

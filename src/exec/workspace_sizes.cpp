@@ -595,4 +595,17 @@ ExecT2Demand exec_t2_demand(const Model& model, int max_seq_len) {
     return exec_t2_demand(model, max_seq_len, 1, false);
 }
 
+bool fp8_act_scratch_needed(const Model& model, bool use_fp8_prefill, bool fp8_native_prefill) {
+    if (use_fp8_prefill)
+        return true;
+    for (int i = 0; fp8_native_prefill && i < model.n_layers(); ++i) {
+        const auto& L = model.layer(i);
+        for (const Tensor* t : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.ssm_in,
+                                &L.ssm_out, &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared})
+            if (t->data && t->qtype == QType::FP8_E4M3)
+                return true;
+    }
+    return false;
+}
+
 }  // namespace imp

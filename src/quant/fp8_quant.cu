@@ -151,6 +151,31 @@ __global__ void quantize_fp16_to_fp8_scaled_kernel(const half* __restrict__ inpu
     }
 }
 
+// FP16 / *d_scale -> E4M3, 8 elements per thread (16-byte load, 8-byte store), saturating.
+// n % 8 == 0 and 16-byte aligned pointers (checked by the host wrapper).
+__global__ void quantize_fp16_to_fp8_dscale_kernel(const half* __restrict__ input,
+                                                   uint8_t* __restrict__ output, int n8,
+                                                   const float* __restrict__ d_scale) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n8)
+        return;
+    const float inv = 1.0f / __ldg(d_scale);
+    const uint4 v = reinterpret_cast<const uint4*>(input)[i];
+    const __half2* h2 = reinterpret_cast<const __half2*>(&v);
+    uint16_t packed[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        float2 f = __half22float2(h2[j]);
+        f.x *= inv;
+        f.y *= inv;
+        packed[j] = __nv_cvt_float2_to_fp8x2(f, __NV_SATFINITE, __NV_E4M3);
+    }
+    uint2 out;
+    out.x = static_cast<uint32_t>(packed[0]) | (static_cast<uint32_t>(packed[1]) << 16);
+    out.y = static_cast<uint32_t>(packed[2]) | (static_cast<uint32_t>(packed[3]) << 16);
+    reinterpret_cast<uint2*>(output)[i] = out;
+}
+
 // ---------------------------------------------------------------------------
 // Dequantize kernel: FP8 E4M3 * scale -> FP16
 // ---------------------------------------------------------------------------
@@ -468,6 +493,20 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output, float* d_sca
     IMP_CUDA_CHECK_LOG(cudaFree(d_scale_device));
 
     IMP_LOG_DEBUG("quantize_fp16_to_fp8_e4m3: n=%d  scale=%.6f", n, scale);
+}
+
+bool quantize_fp16_to_fp8_e4m3_dscale(const void* input_fp16, void* output_fp8, int64_t n_elements,
+                                      const float* d_scale, cudaStream_t stream) {
+    if (n_elements <= 0)
+        return true;
+    if (!input_fp16 || !output_fp8 || !d_scale || n_elements % 8 != 0 || n_elements / 8 > INT_MAX ||
+        reinterpret_cast<uintptr_t>(input_fp16) % 16 != 0 || reinterpret_cast<uintptr_t>(output_fp8) % 8 != 0)
+        return false;
+    const int n8 = static_cast<int>(n_elements / 8);
+    quantize_fp16_to_fp8_dscale_kernel<<<(n8 + kBlockSize - 1) / kBlockSize, kBlockSize, 0, stream>>>(
+        static_cast<const half*>(input_fp16), static_cast<uint8_t*>(output_fp8), n8, d_scale);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
 }
 
 // ---- quantize_fp16_to_fp8_e4m3_scaled (raw pointer API) ------------------

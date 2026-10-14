@@ -23,11 +23,12 @@ struct FP8CacheEntry {
     // Per-row (output-channel) scales — set by the fp8_ssm_proj sidecar
     // (points into fp8_ssm_sidecar_row_scales); null = per-tensor scale.
     const float* d_row_scales{};
-    // True when `weight` borrows the checkpoint's own FP8 bytes rather than a cache this
-    // pipeline allocated (Modelopt MIXED_PRECISION). Three consequences: the entry owns no
-    // memory, so nothing here may be freed; it is a DECODE sidecar, never primary (sm_120
-    // has no FP8 prefill GEMM, so phase 4 demotes prefill to the FP16 companion); it is
-    // therefore not an alternative to that FP16 copy, and phase 3 must keep it.
+    // Static activation scale (checkpoint input_scale, device scalar): prefill quantizes the
+    // input with it instead of a per-call absmax. Null = dynamic.
+    const float* d_act_scale{};
+    // True when `weight` borrows the checkpoint's own FP8 bytes (Modelopt FP8 / MIXED_PRECISION):
+    // the entry owns neither weight nor scales (fp8_native_scales). gemm.fp8_native_prefill
+    // makes it primary (FP8 x FP8 cuBLASLt prefill); off, it is a decode sidecar beside an FP16 copy.
     bool native_source = false;
 };
 
@@ -65,6 +66,11 @@ struct WeightCaches {
     int fp8_migrated_count = 0;
     void* fp8_migrated_data = nullptr;
     size_t fp8_migrated_data_size = 0;
+
+    // Native FP8 checkpoint weights: input_scale per weight (Phase 0 -> Phase 1, then cleared), and
+    // one device buffer {weight_scale, input_scale} per native entry that its scale pointers use.
+    std::unordered_map<const void*, float> fp8_native_act_scale;
+    float* fp8_native_scales = nullptr;
 
     // Overflow FP8 cache
     float* fp8_overflow_scales = nullptr;

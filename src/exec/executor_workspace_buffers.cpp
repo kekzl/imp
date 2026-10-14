@@ -1061,8 +1061,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // FP8 activation scratch buffers (for FP8 prefill weight cache)
-    if (wcache_.use_fp8) {
+    // FP8 activation scratch buffers (FP8 prefill weight cache, native FP8 checkpoint weights)
+    if (fp8_act_scratch_needed(*model_, wcache_.use_fp8, dispatch_policy().gemm.fp8_native_prefill)) {
         int max_dim = cfg.d_model;
         if (cfg.d_ff > 0)
             max_dim = std::max(max_dim, cfg.d_ff);
@@ -1582,10 +1582,8 @@ void GraphExecutor::free_buffers() {
         wcache_.cutlass_mxfp4_bytes = 0;
         // FP8 cache (entries may point into bulk buffers — free entry data only if not in bulk)
         for (auto& [ptr, entry] : wcache_.fp8) {
-            if (entry.weight.data) {
-                if (fp8_entry_owns_weight(entry, wcache_))
-                    IMP_CUDA_CHECK_LOG(cudaFree(entry.weight.data));
-            }
+            if (entry.weight.data && fp8_entry_owns_weight(entry, wcache_))
+                IMP_CUDA_CHECK_LOG(cudaFree(entry.weight.data));
             if (entry.d_scale) {
                 bool in_migrated = wcache_.fp8_migrated_scales &&
                                    entry.d_scale >= wcache_.fp8_migrated_scales &&
@@ -1593,12 +1591,13 @@ void GraphExecutor::free_buffers() {
                 bool in_overflow = wcache_.fp8_overflow_scales &&
                                    entry.d_scale >= wcache_.fp8_overflow_scales &&
                                    entry.d_scale < wcache_.fp8_overflow_scales + wcache_.fp8_overflow_count;
-                if (!in_migrated && !in_overflow)
+                if (!in_migrated && !in_overflow && !entry.native_source)
                     IMP_CUDA_CHECK_LOG(cudaFree(entry.d_scale));
             }
         }
         wcache_.fp8.clear();
         wcache_.fp8_bytes = 0;
+        vram_free(vram_alloc_, std::exchange(wcache_.fp8_native_scales, nullptr));
         // FP8 bulk buffers
         if (wcache_.fp8_migrated_scales) {
             IMP_CUDA_CHECK_LOG(cudaFree(wcache_.fp8_migrated_scales));

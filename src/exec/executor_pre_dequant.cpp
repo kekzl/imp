@@ -175,6 +175,9 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
                      storage_plan_.projected_vram_bytes / (1024.0 * 1024.0));
     }
 
+    // --- Phase 1a: FP8 checkpoint weights served from their own bytes (gemm.fp8_native_prefill) ---
+    pre_dequant_phase1a_native_fp8_(cfg, stream);
+
     // --- Phase 1: FP16 weight cache + fused KV + fused gate+up; Phase 2: FP8 cache for uncached
     // weights. gemm.dense_weight_cache=false skips both: dense weights take their source route.
     if (rcfg.gemm.dense_weight_cache) {
@@ -288,10 +291,12 @@ bool GraphExecutor::lm_head_nvfp4_view(NvFP4QuantResult& out) const {
 void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg) const {
     // FP8 prefill unavailable (sm_120 cuBLAS, and disabled for gemma/GDN): the
     // FP8-floor kinds (WK/WV/QKV_FUSED) the plan picked from the kind table fall
-    // back to FP16 at build time. Encode that so the plan matches.
+    // back to FP16 at build time. Encode that so the plan matches. FP8 checkpoint weights keep the
+    // FP8 tier under gemm.fp8_native_prefill: Phase 1a serves them, no FP16 copy.
+    const QType keep_fp8 = dispatch_policy().gemm.fp8_native_prefill ? QType::FP8_E4M3 : QType::NONE;
     if (!wcache_->use_fp8) {
         for (auto& e : plan.entries)
-            if (e.tier == StorageTier::FP8)
+            if (e.tier == StorageTier::FP8 && e.source_qtype != keep_fp8)
                 e.tier = StorageTier::FP16;
     }
 
@@ -330,11 +335,10 @@ void QuantPipeline::apply_arch_rules_(StoragePlan& plan, const ModelConfig& cfg)
         }
     }
 
-    // Weights stored as FP8 on disk (Modelopt MIXED_PRECISION, e.g. Nemotron-3.5
-    // Mamba in/out): sm_120 has no FP8 prefill GEMM, so the FP8 tier the
-    // planner picks has no path to cuBLAS (raw bytes as CUDA_R_8F_E4M3 fail
-    // with status 15). An FP16 companion gives prefill something to multiply; decode still re-quantizes to
-    // FP8 through the usual sidecar.
+    // Weights stored as FP8 on disk (Modelopt FP8 / MIXED_PRECISION): gemm.fp8_native_prefill serves
+    // prefill FP8 x FP8 from the checkpoint bytes. Off, an FP16 companion serves prefill.
+    if (dispatch_policy().gemm.fp8_native_prefill)
+        return;
     for (auto& e : plan.entries) {
         if (e.source_qtype == QType::FP8_E4M3)
             e.fp16_companion = true;
