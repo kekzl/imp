@@ -124,7 +124,7 @@ if want alloc; then
     run "that gate still matches its cases"     python3 tools/check_cuda_raii_sites.py --selftest
     run "no deref of an owner after .release()" python3 tools/check_released_owner_use.py
     run "that gate still matches its cases"     python3 tools/check_released_owner_use.py --selftest
-    run "discarded cudaError_t per file (#2211)" python3 tools/check_cuda_discards.py
+    run "discarded CUDA/cuBLAS status per file (#2211)" python3 tools/check_cuda_discards.py
     run "that gate still counts its cases"      python3 tools/check_cuda_discards.py --selftest
     run "sync legacy-stream device writes (#2275)" python3 tools/check_sync_device_writes.py
     run "that gate still matches its cases"    python3 tools/check_sync_device_writes.py --selftest

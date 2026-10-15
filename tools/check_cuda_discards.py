@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""#2211 gate: statements that call a CUDA runtime API and discard the cudaError_t.
+"""#2211 gate: statements that call a CUDA runtime or cuBLAS/cuBLASLt API and discard the status.
 
-Matcher = the awk in #2211 (statement starts with cuda<Upper>( after a finished
-statement; cudaGetLastError and type names excluded). Per-file counts must equal
+Matcher = the awk in #2211 (statement starts with cuda<Upper>( or cublas<Upper>( after a
+finished statement; cudaGetLastError and type names excluded). Per-file counts must equal
 tools/cuda_discard_allowlist.txt; the allowlist total may not exceed CEILING.
 
 Usage:
@@ -32,7 +32,7 @@ ZERO_DIRS = (
     "src/compute/", "src/exec/",
 )
 
-CALL = re.compile(r"^[ \t]*cuda[A-Z][A-Za-z0-9_]*[ \t]*\(")
+CALL = re.compile(r"^[ \t]*(?:cuda|cublas)[A-Z][A-Za-z0-9_]*[ \t]*\(")
 EXCLUDED = re.compile(
     r"^[ \t]*cuda(Error_t|Stream_t|Event_t|Graph_t|GraphExec_t|DeviceProp"
     r"|GetErrorString|GetErrorName|GetLastError)"
@@ -91,7 +91,7 @@ def check(hits: dict[str, list], allow: dict[str, tuple[int, str]]) -> list[str]
         want, reason = allow.get(rel, (0, ""))
         if got > want:
             lines = ",".join(str(ln) for ln, _ in hits[rel])
-            errors.append(f"{rel}: {got} discarded cudaError_t > allowed {want} (lines {lines})")
+            errors.append(f"{rel}: {got} discarded status > allowed {want} (lines {lines})")
         elif got < want:
             errors.append(f"{rel}: {got} < allowed {want}: lower the allowlist entry to {got}")
         if want and rel.startswith(ZERO_DIRS) and not reason:
@@ -119,6 +119,12 @@ def selftest() -> int:
         "foo(a,\n    cudaFree(p));": 0,
         "cudaStream_t s;": 0,
         "// cudaFree(p);": 0,
+        "cublasSetStream(h, s);": 1,
+        "x = 1;\ncublasLtMatmul(lt, d,\n    a, b);": 1,
+        "IMP_CUBLAS_CHECK_LOG(cublasSetStream(h, s));": 0,
+        "(void)cublasLtMatmulAlgoGetHeuristic(lt, d, p, 1, r, &n);": 0,
+        "cublasStatus_t st = cublasCreate(&h);": 0,
+        "cublasHandle_t h;": 0,
     }
     bad = 0
     for text, want in cases.items():
@@ -169,7 +175,7 @@ def main() -> int:
     for e in errors:
         print(e)
     total = sum(len(v) for v in hits.values())
-    print(f"discarded cudaError_t: {total} in {len(hits)} files (allowlist ceiling {CEILING})")
+    print(f"discarded cudaError_t / cublasStatus_t: {total} in {len(hits)} files (allowlist ceiling {CEILING})")
     return 1 if errors else 0
 
 
