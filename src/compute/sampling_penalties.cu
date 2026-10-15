@@ -603,11 +603,13 @@ void apply_logit_bias(float* d_logits, int vocab_size, const std::pair<int32_t, 
 
     if (s_bias_tokens_buf == nullptr || static_cast<size_t>(m) > s_bias_buf_cap) {
         // No arena slots: the old path, so the bias is still applied. Bounded
-        // by --max-logit-bias on the server side.
+        // by --max-logit-bias on the server side. The read is ordered on `stream`: a legacy
+        // cudaMemcpy does not wait for a non-blocking stream's logits write (#2275).
         for (int i = 0; i < m; i++) {
             float logit;
-            IMP_CUDA_CHECK_LOG(
-                cudaMemcpy(&logit, d_logits + h_tokens[i], sizeof(float), cudaMemcpyDeviceToHost));
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&logit, d_logits + h_tokens[i], sizeof(float),
+                                               cudaMemcpyDeviceToHost, stream));
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
             logit += h_values[i];
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_logits + h_tokens[i], &logit, sizeof(float),
                                                cudaMemcpyHostToDevice, stream));

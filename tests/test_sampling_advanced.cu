@@ -7,8 +7,10 @@
 #include "core/cuda_static_reset.h"
 #include "core/tensor.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <thread>
 #include <utility>
 #include <vector>
 #include "scoped_engine_arena.h"
@@ -75,6 +77,32 @@ TEST(SamplingAdvancedTest, LogitBiasIgnoresOutOfRangeIds) {
     apply_logit_bias(static_cast<float*>(d.data), 3, bias.data(), static_cast<int>(bias.size()));
     const auto out = read_back(d);
     EXPECT_EQ(out, base) << "an id outside the vocabulary must neither write nor crash";
+    free_gpu(d);
+}
+
+// No arena slots: the per-entry fallback must read the logit on the caller's stream. A host
+// callback holds a non-blocking stream 20 ms before the logits land; a legacy cudaMemcpy read
+// returns the stale 0 (C-020). Mutation: legacy cudaMemcpy in the fallback read.
+TEST(SamplingAdvancedTest, LogitBiasFallbackReadsOnTheCallerStream) {
+    reset_static_cuda_state();  // drops the arena slots: apply_logit_bias takes the fallback
+    Tensor d = make_logits(std::vector<float>(4, 0.0f));
+    float* fresh = nullptr;
+    ASSERT_EQ(cudaMallocHost(&fresh, d.nbytes()), cudaSuccess);
+    for (int i = 0; i < 4; i++)
+        fresh[i] = 1.0f + static_cast<float>(i);
+    cudaStream_t s = nullptr;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking), cudaSuccess);
+    auto hold = [](void*) { std::this_thread::sleep_for(std::chrono::milliseconds(20)); };
+    ASSERT_EQ(cudaLaunchHostFunc(s, hold, nullptr), cudaSuccess);
+    ASSERT_EQ(cudaMemcpyAsync(d.data, fresh, d.nbytes(), cudaMemcpyHostToDevice, s), cudaSuccess);
+    const std::pair<int32_t, float> bias[] = {{2, 0.5f}};
+    apply_logit_bias(static_cast<float*>(d.data), 4, bias, 1, s);
+    ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
+    const auto out = read_back(d);
+    EXPECT_FLOAT_EQ(out[2], 3.5f) << "the fallback read the logit before the stream wrote it";
+    EXPECT_FLOAT_EQ(out[1], 2.0f);
+    cudaStreamDestroy(s);
+    cudaFreeHost(fresh);
     free_gpu(d);
 }
 
