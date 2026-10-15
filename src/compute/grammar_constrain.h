@@ -62,7 +62,7 @@ public:
 
     // See JsonConstrainer::set_preamble — lets a reasoning model emit its
     // <think> block before the constraint engages.
-    void set_preamble(int32_t close_token, int max_tokens = 8192, bool thinking_open = true) {
+    void set_preamble(int32_t close_token, int max_tokens = kThinkPreambleBudget, bool thinking_open = true) {
         preamble_.configure(close_token, max_tokens, thinking_open);
     }
     PreambleGate& preamble() { return preamble_; }
