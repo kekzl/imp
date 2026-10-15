@@ -444,3 +444,31 @@ Branch `cleanup/b7-dup-helpers` off `origin/main` 1ab58bc7. Compile + CPU only, 
 |---|---|---|
 | per-loader malformed-index tests | legacy policies keep the old mapping, so a per-loader test today pins the wrong mapping; qwen3vl already has `MalformedIndexIsUnknownNotZero` | add with each `kStrict` go |
 | GPU-only checks | no GPU in this batch | validator list in the B7 report |
+
+## 2026-10-15 Phase 4 B7 (validator)
+
+Code head `2ac22739`, image `imp:b7-final`, against the Phase 3 baseline image `imp:test-imp-baseline-016f0c60`. Verdict: all gates PASS.
+
+| gate | baseline | B7 | result |
+|---|---|---|---|
+| build warnings | 13 unique lines | 13, diff empty | PASS |
+| `make test-gpu` | 0 FAILED | 0 FAILED; `[ RUN ]` diff = 3 new B7 tests + the B2 test | PASS |
+| reference dumps (5 models x 3 prompts x 2 runs; GGUF layer, vision `v.blk.`, NVFP4 dense + MoE parse sites) | `*.choices.json` | 30/30 byte-identical | PASS |
+| Qwen3-VL-4B-Instruct dumps (vision-map parse site), 3 image prompts x 2 runs, baseline image vs B7 image | - | 6/6 byte-identical | PASS |
+| LoRA key parse site | - | `LoraHotSwap.*` 3/3 OK in test-gpu | PASS |
+| ptxas rows, 3 binaries | 1024 / 1024 / 1026 | identical | PASS |
+| SASS hash per kernel, 3 binaries | - | 0 removed, 0 added | PASS |
+| decode tg256 pooled median | 371.63 tok/s (gate 364.20..379.06) | 372.06 (+0.12 %) | PASS |
+| decode tg256 after pp2048 | 345.41 | 345.12 (-0.08 %) | PASS |
+| prefill pp512 / pp2048 | 30444 (30125..30530) / 48919 (48739..49049) | 30360 / 48958 | PASS |
+
+| not exercised | why |
+|---|---|
+| GGUF expert parse site (`gguf_tensor_assign.cpp:327`, 5-part names) | local MoE GGUFs use packed `_exps` tensors; covered by the `kStoi`/`kAtoi` reference unit test only |
+
+## 2026-10-15 Phase 4 B7 (orchestrator decision)
+
+| row | decision | why |
+|---|---|---|
+| H-012, H-014 | ship | gates above |
+| `kStrict` at the 7 parse sites | DEFER to the deferred list | behaviour change on malformed tensor names ("3x" -> layer 3 today); belongs in a fix PR with one malformed-name test per loader |
