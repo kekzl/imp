@@ -341,3 +341,39 @@ Code head `32213359`, image `imp:b3-final`, against the Phase 3 baseline `5a30cb
 | `apa.cuh` launch-guard allowlist entry | GO | vendored from kekzl/apa; the entry goes when upstream adds the check |
 | H-008 incl. H-007 (3 dead inline functions), `apa.cuh:pass2` dead-inline allowlist entry | GO | no callers, ptxas rows identical; B4 drops H-007 |
 | 171 discarded results in `tools/imp-bench`, `imp-quantize`, `imp-cli` | next batch | outside the shipped binaries' hot paths |
+
+## 2026-10-15 Phase 4 B7 (builder)
+
+Branch `cleanup/b7-dup-helpers` off `origin/main` 1ab58bc7. Compile + CPU only, no GPU run. `make build DOCKER_IMG=imp:b7-branch`: 13 unique warning lines (main: 13), 0 in a changed file. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight`.
+
+| row | files | change | lines +/- | result |
+|---|---|---|---|---|
+| H-012 | `model/model_limits.h`, `model/gguf_tensor_assign.cpp` (2), `vision/vision_loader.cpp`, `lora/lora_adapter.cpp`, `vision/qwen3vl_vision_map.cpp`, `exec/pre_dequant_phase0_nvfp4_loader.cpp` (2), `tests/test_checkpoint_limits.cpp` | `parse_index(s, IndexParse)`: `kStrict` (default, unchanged), `kAtoi` = `(int)strtol` (glibc `atoi`), `kStoi` = `std::stoi` with throw -> -1; 3 `stoi` sites -> `kStoi`, 4 `atoi` sites -> `kAtoi`; every site rejects < 0 after the parse, so throw and -1 take the same branch | +70 / -27 | applied, behaviour-neutral for every input |
+| H-014 | `core/cache_dir.h` (new), `memory/weight_cache_file.cpp`, `memory/library_reserve_cache.cpp`, `tests/test_library_reserve_cache.cpp` | `imp_cache_dir(leaf)`: XDG, then HOME, then ""; fallbacks stay at the callers (`/tmp/imp-warm-cache`, "") | +74 / -12 | applied |
+
+| test | cases |
+|---|---|
+| `CheckpointLimits.IndexParsingStrictEdgeCases` | "007" -> 7, INT_MAX, "x", "+3", " 3", "3 ", "-0" -> 0, "-5" |
+| `CheckpointLimits.IndexParsingLegacyPoliciesMatchAtoiAndStoi` | 13 inputs against `std::atoi` / `std::stoi` as oracle; pinned "x" -> 0 (kAtoi), "3x" -> 3 (kStoi), "4294967296" -> 0 (kAtoi), 2 overflows -> -1 (kStoi) |
+| `CheckpointLimits.IndexParsingRejectsOverflowAndJunk` (existing) | empty, "1x", "-1", 3 overflows |
+| `LibraryReserveCache.CacheDirResolvesXdgThenHomeThenEmpty` | XDG set; XDG "" + HOME; XDG unset + HOME "" |
+
+| mutation (one `make dev-test` run, files restored from scratchpad backups) | failing tests | rerun after restore |
+|---|---|---|
+| kStrict: `return 0` instead of `return -1` on a parse error | `IndexParsingRejectsOverflowAndJunk`, `IndexParsingStrictEdgeCases`, `AnAliasingLayerIndexDoesNotOverwriteLayerZero` | 13/13 |
+| kStoi: drop the `end == s.c_str()` no-digits check | `IndexParsingLegacyPoliciesMatchAtoiAndStoi` | 13/13 |
+| `imp_cache_dir`: accept an empty `XDG_CACHE_HOME` | `CacheDirResolvesXdgThenHomeThenEmpty` | 13/13 |
+
+| needs orchestrator go (switch to `kStrict`) | legacy malformed mapping | input source |
+|---|---|---|
+| `model/gguf_tensor_assign.cpp:78` layer (`kStoi`) | "3x", " 3", "+3" -> layer 3 | GGUF tensor name |
+| `model/gguf_tensor_assign.cpp:327` expert (`kStoi`) | "3x" -> expert 3 | GGUF tensor name |
+| `vision/vision_loader.cpp:469` layer (`kStoi`) | "3x" -> layer 3 | mmproj GGUF tensor name |
+| `lora/lora_adapter.cpp:32` layer (`kAtoi`) | "x" -> layer 0; overflow -> truncated | PEFT adapter key |
+| `vision/qwen3vl_vision_map.cpp:22` block (`kAtoi`) | digit run > INT_MAX -> low 32 bits ("4294967296" -> block 0) | SafeTensors name, digits pre-checked |
+| `exec/pre_dequant_phase0_nvfp4_loader.cpp:288,300` layer, expert (`kAtoi`) | "x" -> 0 | internal keys built by `std::to_string` (`weight_map.cpp`, `weight_upload.cpp`): unreachable from a checkpoint |
+
+| finding / skip | evidence | proposed next step |
+|---|---|---|
+| per-loader malformed-index tests | legacy policies keep the old mapping, so a per-loader test today pins the wrong mapping; qwen3vl already has `MalformedIndexIsUnknownNotZero` | add with each `kStrict` go |
+| GPU-only checks | no GPU in this batch | validator list in the B7 report |
