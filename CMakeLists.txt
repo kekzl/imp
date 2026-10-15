@@ -136,21 +136,18 @@ if(IMP_BUILD_TESTS)
     FetchContent_MakeAvailable(googletest)
 endif()
 
-option(IMP_USE_CUTLASS "Use CUTLASS for MoE GEMM (requires sm_90+)" ON)
-if(IMP_USE_CUTLASS)
-    FetchContent_Declare(cutlass
-        GIT_REPOSITORY https://github.com/NVIDIA/cutlass.git
-        GIT_TAG ${IMP_DEP_CUTLASS_SHA}  # commit pin, cmake/imp-deps.cmake
-        GIT_SHALLOW TRUE
-        EXCLUDE_FROM_ALL
-    )
-    # CUTLASS is header-only for our use — disable all build targets
-    set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "" FORCE)
-    set(CUTLASS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-    set(CUTLASS_ENABLE_TOOLS OFF CACHE BOOL "" FORCE)
-    set(CUTLASS_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(cutlass)
-endif()
+FetchContent_Declare(cutlass
+    GIT_REPOSITORY https://github.com/NVIDIA/cutlass.git
+    GIT_TAG ${IMP_DEP_CUTLASS_SHA}  # commit pin, cmake/imp-deps.cmake
+    GIT_SHALLOW TRUE
+    EXCLUDE_FROM_ALL
+)
+# CUTLASS is mandatory and header-only for our use: disable all build targets
+set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "" FORCE)
+set(CUTLASS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+set(CUTLASS_ENABLE_TOOLS OFF CACHE BOOL "" FORCE)
+set(CUTLASS_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(cutlass)
 
 # --- Core library sources ---
 set(IMP_CORE_SOURCES
@@ -371,37 +368,35 @@ set(IMP_COMPUTE_SOURCES
     src/compute/mmq_q8_imma_scratch.cu
 )
 
-if(IMP_USE_CUTLASS)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_sm120.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_mxfp4_sm120.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_mxfp8_sm120.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_grouped_3x.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_grouped_nvfp4_smallM.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/quantize_fp16_nvfp4_moe_native.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_sm120.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_mxfp4_sm120.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_ra2.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_apa.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_hw.cu)
-    # Bench/probe TUs were relocated to tests/bench/ (P3 §10 #12, P5 §3).
-    # Validate/ref TUs that still serve internal call sites stay in src/compute/.
-    if(IMP_BUILD_TESTS OR IMP_BUILD_BENCH)
-        list(APPEND IMP_COMPUTE_SOURCES tests/bench/attention_mxf4nvf4_probe.cu)
-        list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_ref.cu)
-        list(APPEND IMP_COMPUTE_SOURCES tests/bench/mxf4nvf4_mma_bench.cu)
-        list(APPEND IMP_COMPUTE_SOURCES tests/bench/mma_peak_saturated.cu)
-        list(APPEND IMP_COMPUTE_SOURCES tests/bench/mxf4nvf4_mma_variants_bench.cu)
-        list(APPEND IMP_COMPUTE_SOURCES tests/bench/fp4_pv_bench.cu)
-        list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_qkt_validate.cu)
-        list(APPEND IMP_COMPUTE_SOURCES tests/bench/tma_block_scale_bench.cu)
-        list(APPEND IMP_COMPUTE_SOURCES tests/bench/fmha_v_load_bench.cu)
-        list(APPEND IMP_COMPUTE_SOURCES tests/bench/mmq_q4k_imma_bench.cu)
-    endif()
-    if(IMP_BUILD_TESTS)
-        set_source_files_properties(src/compute/gemm_grouped_nvfp4_smallM.cu
-            PROPERTIES COMPILE_DEFINITIONS "SMALLM_TEST_HOOKS=1")
-    endif()
+list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_sm120.cu)
+list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_mxfp4_sm120.cu)
+list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_mxfp8_sm120.cu)
+list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_grouped_3x.cu)
+list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_grouped_nvfp4_smallM.cu)
+list(APPEND IMP_COMPUTE_SOURCES src/compute/quantize_fp16_nvfp4_moe_native.cu)
+list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_sm120.cu)
+list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_mxfp4_sm120.cu)
+list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_ra2.cu)
+list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_apa.cu)
+list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
+list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_hw.cu)
+# Bench/probe TUs were relocated to tests/bench/ (P3 §10 #12, P5 §3).
+# Validate/ref TUs that still serve internal call sites stay in src/compute/.
+if(IMP_BUILD_TESTS OR IMP_BUILD_BENCH)
+    list(APPEND IMP_COMPUTE_SOURCES tests/bench/attention_mxf4nvf4_probe.cu)
+    list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_ref.cu)
+    list(APPEND IMP_COMPUTE_SOURCES tests/bench/mxf4nvf4_mma_bench.cu)
+    list(APPEND IMP_COMPUTE_SOURCES tests/bench/mma_peak_saturated.cu)
+    list(APPEND IMP_COMPUTE_SOURCES tests/bench/mxf4nvf4_mma_variants_bench.cu)
+    list(APPEND IMP_COMPUTE_SOURCES tests/bench/fp4_pv_bench.cu)
+    list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_qkt_validate.cu)
+    list(APPEND IMP_COMPUTE_SOURCES tests/bench/tma_block_scale_bench.cu)
+    list(APPEND IMP_COMPUTE_SOURCES tests/bench/fmha_v_load_bench.cu)
+    list(APPEND IMP_COMPUTE_SOURCES tests/bench/mmq_q4k_imma_bench.cu)
+endif()
+if(IMP_BUILD_TESTS)
+    set_source_files_properties(src/compute/gemm_grouped_nvfp4_smallM.cu
+        PROPERTIES COMPILE_DEFINITIONS "SMALLM_TEST_HOOKS=1")
 endif()
 
 set(IMP_RUNTIME_SOURCES
@@ -611,13 +606,10 @@ target_link_libraries(imp
         JPEG::JPEG
 )
 
-if(IMP_USE_CUTLASS)
-    target_include_directories(imp PRIVATE
-        ${cutlass_SOURCE_DIR}/include
-        ${cutlass_SOURCE_DIR}/tools/util/include
-    )
-    target_compile_definitions(imp PRIVATE IMP_USE_CUTLASS=1)
-endif()
+target_include_directories(imp PRIVATE
+    ${cutlass_SOURCE_DIR}/include
+    ${cutlass_SOURCE_DIR}/tools/util/include
+)
 
 set_target_properties(imp PROPERTIES
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
@@ -1334,15 +1326,12 @@ if(IMP_BUILD_TESTS)
         tests/test_mmq_q8_imma_tail.cu
         tests/test_weight_dispatch.cu
     )
-    if(IMP_USE_CUTLASS)
-        # test_cutlass_grouped_tile_bench.cu instantiates CUTLASS grouped GEMMs
-        # of its own (tile-shape A/B against the shipped kernel).
-        target_include_directories(test-quant PRIVATE
-            ${cutlass_SOURCE_DIR}/include
-            ${cutlass_SOURCE_DIR}/tools/util/include
-        )
-        target_compile_definitions(test-quant PRIVATE IMP_USE_CUTLASS=1)
-    endif()
+    # test_cutlass_grouped_tile_bench.cu instantiates CUTLASS grouped GEMMs
+    # of its own (tile-shape A/B against the shipped kernel).
+    target_include_directories(test-quant PRIVATE
+        ${cutlass_SOURCE_DIR}/include
+        ${cutlass_SOURCE_DIR}/tools/util/include
+    )
 
     imp_add_test_module(test-kv SOURCES
         tests/test_fp8_kv_cache.cu
