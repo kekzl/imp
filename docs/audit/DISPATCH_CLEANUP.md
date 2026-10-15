@@ -53,3 +53,22 @@ Rank = (risk reduction + maintainability gain) / effort. Each batch <= ~400 chan
 | C-002 | not new: SETTLED H A1-9 |
 
 Phase 3 (baseline) runs before any edit and needs a GPU slot (~2 h: reference dumps for five models, Qwen3-Coder-30B-A3B NVFP4 decode/prefill >= 5 iterations x 2 containers, roofline snapshot).
+
+## 2026-10-15 Phase 4 B1 (builder)
+
+Branch `cleanup/b1-ownership-odr` off `origin/main` 8d4c4148. Compile only, no GPU run. `make build` (image, `IMP_BUILD_TESTS=ON`): 13 unique warning lines on origin/main, 13 on the branch, diff empty. `make dev` (adds `IMP_BUILD_BENCH`, compiles `bench_e2e.cpp`) green; `make dev-test` 13/13.
+
+| row | files | change | lines +/- | compile result |
+|---|---|---|---|---|
+| H-018 | `memory/kv_cache.h`, `memory/ssm_state.h`, `memory/recurrent_snapshot_store.h`, `model/ngram_table.cpp`, `compute/sampling_topk_topp.cu`, `tools/imp-quantize/awq.cu` | copy ctor + copy assignment `= delete` on 6 of 7 types; `= default` ctor where the deleted copy ctor suppressed the implicit one; `OwnedSampleScratch`: two-arg ctor (was aggregate init), const members (copy assignment implicitly deleted, file at the 600-LOC hard-review line) | +17 / -2 | green, 0 copies exposed in the 6 |
+| H-019 | `tools/imp-bench/bench_e2e.cpp` | 14 leaked `new uint16_t[]` -> `std::vector<std::vector<uint16_t>>` declared before the model in `bench_e2e()` | +10 / -6 | green (dev build) |
+| H-023 | `exec/executor_gemv_helpers.h` | `static` -> `inline`; comment names the 4 includers | +2 / -2 | green |
+| H-024 | `model/jinja.cpp`, `compute/json_schema.cpp`, `compute/gemm.cpp`, `model/weight_upload.cpp`, `model/safetensors_loader.cpp`, `model/model.cpp`, `runtime/engine_spec_batch_verify.cpp`, `imp-server/constraint_validation.cpp`, `imp-server/handlers.cpp`; citations in `docs/CONFIG.md`, `AUDIT.md`, `docs/LIMITATIONS.md` | 41 of 46 `misc-use-internal-linkage` host findings into anonymous namespaces (`Expr`, `Node` stay outside: `jinja.h` forward-declares them) | +38 / -5 | green |
+| H-026 | `compute/gbnf_grammar.h`, `compute/sampling.h`, `exec/executor_attention_internal.h`, `exec/pre_dequant_phase3_cutlass.cpp`, `memory/vram_allocator.h`, `memory/weight_cache_file.cpp`, `model/tokenizer_pretok.cpp`, `model/weight_upload.cpp`, `runtime/engine.h`, `vision/image_decode.cpp` | default member initializers on all 14 findings; `FileHeader` writer sets all 8 fields before `f.write` | +35 / -35 | green |
+
+| finding / skip | evidence | proposed next step |
+|---|---|---|
+| H-018 real copy: `MoeRoutingBuffers` | deleting its copy assignment fails `tests/test_mtp_attn_guard.cpp:60` `ws = MtpDraftWorkspace{}`: the implicit move assignment of `MtpDraftWorkspace` falls back to the `MoeRoutingBuffers` copy (user-declared dtor, no move ops). Benign there (both `pool` null); with an allocated `routing_buf` the target leaks its pool and keeps the source's, which the temporary frees: double free | owner call: move ctor/assignment on `MoeRoutingBuffers` (free, steal, null the source), then the `= delete` copy ops; not applied here |
+| H-024 skip: `bench_e2e` | `tools/imp-bench/main.cpp:21` declares and calls it from another TU | a `bench_e2e.h` header (out of scope) |
+| H-024 skip: `PrefixCacheHeader` | `memory/kv_cache_manager.cpp` code LOC 1425 = its filesize ceiling; the wrap adds 2 | with the next shrink of that file |
+| H-024 kept external | `gemm_reset_static_cuda_state`, `gemm_grouped_reset_static_cuda_state`, `qwen3vl_encoder_reset_static_cuda_state` | SETTLED R-11 |
