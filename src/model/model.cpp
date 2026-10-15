@@ -127,6 +127,7 @@ bool Model::is_base_gpu_allocation(void* ptr) const {
     return std::find(gpu_allocations_.begin(), gpu_allocations_.end(), ptr) != gpu_allocations_.end();
 }
 
+namespace {
 // Architecture registry: single source of truth for per-arch metadata, replacing scattered
 // switch statements in model.cpp/chat_template.cpp/presets.cpp/imp_api.cpp (RF-003).
 struct ArchEntry {
@@ -147,6 +148,7 @@ struct ArchEntry {
     float top_p;
     int top_k;
 };
+}  // namespace
 
 // IMP_ARCH_* values from include/imp/types.h (avoid header dependency)
 enum {

@@ -239,6 +239,7 @@ static int64_t bucket_m(int64_t m) {
 // ---------------------------------------------------------------------------
 // cuBLASLt descriptor + algorithm cache
 // ---------------------------------------------------------------------------
+namespace {
 struct GemmCacheKey {
     cudaDataType_t dtA, dtB, dtC;
     cublasComputeType_t compute;
@@ -294,6 +295,7 @@ struct GemmCacheEntry {
     // The algo a stream capture recorded for this entry is logged once (#2396).
     bool capture_logged = false;
 };
+}  // namespace
 
 static std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash> s_gemm_cache;
 static std::mutex s_gemm_cache_mutex;

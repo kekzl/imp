@@ -110,12 +110,12 @@ private:
     // One interned stack frame: a position plus the continuation below it.
     struct StackNode {
         GbnfPos pos;
-        int32_t parent;  // -1 = bottom of the stack
-        int32_t depth;
+        int32_t parent = -1;  // -1 = bottom of the stack
+        int32_t depth = 0;
     };
     struct StackKey {
         GbnfPos pos;
-        int32_t parent;
+        int32_t parent = -1;
         bool operator==(const StackKey& o) const { return pos == o.pos && parent == o.parent; }
     };
     struct StackKeyHash {

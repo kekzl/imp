@@ -111,9 +111,9 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
     // is non-contiguous, non-uniform, or partly absent from the decode cache falls back to
     // the per-tensor path (correctness over speed).
     struct MoeGroup {
-        const void* base_ms;
-        int ne, N, K;
-        size_t sf_per_expert, slab_off;
+        const void* base_ms = nullptr;
+        int ne = 0, N = 0, K = 0;
+        size_t sf_per_expert = 0, slab_off = 0;
         std::vector<float> tscale;
         std::vector<const void*> data_ptrs;
     };

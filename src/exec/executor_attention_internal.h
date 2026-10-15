@@ -251,7 +251,7 @@ static void set_l2_persist_kv(cudaStream_t stream, const void* kv_ptr, size_t kv
     static size_t max_persist = 0;
     static size_t max_window = 0;
     if (max_persist == 0) {
-        cudaDeviceProp prop;
+        cudaDeviceProp prop{};
         if (const cudaError_t err = cudaGetDeviceProperties(&prop, 0); err != cudaSuccess) {
             IMP_LOG_WARN("set_l2_persist_kv: device query failed (%s), no L2 hint", cudaGetErrorString(err));
             return;  // uncached: max_persist stays 0 (hint only, output unchanged)

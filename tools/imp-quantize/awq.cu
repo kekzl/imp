@@ -55,10 +55,13 @@ __global__ void weighted_sqerr_kernel(const half* __restrict__ scaled, const hal
 
 struct DeviceBuf {
     void* p = nullptr;
+    DeviceBuf() = default;
     ~DeviceBuf() {
         if (p)
             cudaFree(p);
     }
+    DeviceBuf(const DeviceBuf&) = delete;
+    DeviceBuf& operator=(const DeviceBuf&) = delete;
     bool alloc(size_t bytes) { return cudaMalloc(&p, bytes) == cudaSuccess; }
 };
 

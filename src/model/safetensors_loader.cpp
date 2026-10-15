@@ -93,6 +93,8 @@ bool validate_tensor_offsets(uint64_t offset_start, uint64_t offset_end, uint64_
 
 }  // namespace safetensors_internal
 
+namespace {
+
 // #1604: the width a tensor is validated with and the width its consumer reads it with must
 // be the same number (I16 disagreed: 2 bytes on disk vs 4 for the QType::INT32 it mapped to,
 // so a passing tensor was read 2x past its window). A dtype with no equal-width engine type
@@ -138,6 +140,7 @@ const SafeTensorsDtype* safetensors_dtype_entry(const std::string& s) {
     }
     return nullptr;
 }
+}  // namespace
 
 // Shard loading is multi-threaded, so the once-per-dtype note needs a lock;
 // the previous plain `static bool warned` raced (harmlessly, but it raced).
@@ -319,10 +322,12 @@ static void infer_config(ModelConfig& cfg, const std::unordered_map<std::string,
 
 // ---- Per-shard loading helper ----
 
+namespace {
 struct ShardInfo {
     void* mmap_base = nullptr;
     size_t mmap_size = 0;
 };
+}  // namespace
 
 // mtp_out (optional): when non-null, mtp.*/model.mtp.* tensors (which translate_name would
 // otherwise SKIP) are collected under their raw mtp.* name. keep_vision: passed through to

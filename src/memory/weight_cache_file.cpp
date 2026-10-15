@@ -27,14 +27,14 @@ constexpr char kMagic[8] = {'I', 'M', 'P', 'W', 'C', 'A', 'C', 'H'};
 constexpr uint32_t kVersion = 1;
 
 struct FileHeader {
-    char magic[8];
-    uint32_t version;
-    uint32_t tensor_pod_size;  // sizeof(Tensor) sanity guard across rebuilds
-    int32_t arch_id;
-    int32_t n_layers;
-    uint64_t fp_total_bytes;
-    int64_t fp_mtime_max;
-    uint32_t record_count;
+    char magic[8] = {};
+    uint32_t version = 0;
+    uint32_t tensor_pod_size = 0;  // sizeof(Tensor) sanity guard across rebuilds
+    int32_t arch_id = 0;
+    int32_t n_layers = 0;
+    uint64_t fp_total_bytes = 0;
+    int64_t fp_mtime_max = 0;
+    uint32_t record_count = 0;
     uint32_t reserved = 0;
 };
 
