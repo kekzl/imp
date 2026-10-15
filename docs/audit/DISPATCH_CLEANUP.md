@@ -376,3 +376,35 @@ Branch `cleanup/b4-dead-code` off `origin/main` 1ab58bc7, code head 60d148cd. Co
 | `get_device_sm_version` + cache + INFO line | only caller after C-008: `tools/imp-bench/bench_attention.cu:168`, whose `sm >= 120` gate is always true | drop the bench gate (dedent 108 lines), then delete the function |
 | C-010 | see row | owner call: fold the 4 checks into one cached `device_query_ok()` that keeps the false-on-error result, or accept true on a cc < 12.0 device |
 | GPU-only checks | no GPU in this batch | validator: reference dumps, test-gpu (`*JsonConstrain*`, `*SchemaConstrain*` exercise the moved kernel), PTX diff |
+
+## 2026-10-15 Phase 4 B4 (validator)
+
+Code head `60d148cd`, image `imp:b4-final`, against the Phase 3 baseline image `imp:test-imp-baseline-016f0c60`. Verdict: all gates PASS; perf judged by a paired control.
+
+| gate | baseline | B4 | result |
+|---|---|---|---|
+| build warnings | 13 unique lines | 13, diff empty | PASS |
+| `make test-gpu` | 0 FAILED | 0 FAILED; `[ RUN ]` diff = the B2 test only | PASS |
+| reference dumps (5 models x 3 prompts x 2 runs) | `*.choices.json` | 30/30 byte-identical | PASS |
+| ptxas rows imp-server / imp-quantize | 1024 / 1026 | 1023 / 1025: only `constrain_mask_allow_kernel` (the header duplicate) gone | PASS |
+| SASS hash per (kernel, arch), 3 binaries | - | 1 removed row (the duplicate); 2 rows change only the ELF arch label (`sm_120a` <-> `sm_120f`) with identical hashes | PASS |
+| PTX, imp-server | 998 entries | 997; diff = 66 removed lines of the duplicate entry, 0 added | PASS |
+
+| perf, Qwen3-Coder-30B-A3B FP4, pooled n=10 | decode tg256 | pp512 | pp2048 | tg256 after pp2048 |
+|---|---|---|---|---|
+| Phase 3 baseline, 06:xx | 371.63 | 30444 | 48919 | 345.41 |
+| B4 run 1, 11:26 | 369.52 (-0.57 %) | 30210 | 48592 (below the baseline min 48739) | 343.06 |
+| control: baseline image, 11:31 | 366.75 | 29916 | 48495 | 341.00 |
+| B4 run 2, directly after the control | 368.65 (+0.52 % vs control) | 30179 | 48318 (-0.37 % vs control) | 340.16 |
+
+| perf verdict | evidence |
+|---|---|
+| host drift, not B4 | the unchanged baseline image lost 1.3 % decode since the Phase 3 run; B4 vs control inside each other's min..max; SASS identical |
+
+## 2026-10-15 Phase 4 B4 (orchestrator decision)
+
+| row | decision | why |
+|---|---|---|
+| H-001, H-003..H-006, H-010, C-003, C-008 guard, C-009, C-011, C-013 + H-034, H-033 | ship | gates above |
+| C-010 | DEFER to the deferred list | removal flips the result to true on a failed device query (CPU lane) and on cc < 12.0 |
+| C-008 `get_device_sm_version` | next batch | live caller `tools/imp-bench/bench_attention.cu:168` |
