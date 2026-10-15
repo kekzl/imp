@@ -10,8 +10,6 @@
 #include "memory/ssm_state.h"
 #include "memory/layer_offload.h"
 #include "compute/moe_routing.h"
-#include "compute/json_constrain.h"
-#include "compute/schema_constrain.h"
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
 // Note: quant/turboquant.h removed (TurboQuant retired Phase 5, 2026-05-17).

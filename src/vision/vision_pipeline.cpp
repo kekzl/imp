@@ -3,6 +3,7 @@
 #include "vision/vision_loader.h"
 #include "vision/image_processor.h"
 #include "model/model.h"
+#include "model/tokenizer.h"
 
 #include <cmath>
 #include <vector>
