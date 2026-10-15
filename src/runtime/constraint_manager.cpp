@@ -125,7 +125,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
         if (schema_constrainer_ && schema_constrainer_->is_initialized() &&
             json_schema == cached_schema_string_) {
             configure_gate(schema_constrainer_.get());
-            schema_constrainer_->reset();
+            schema_constrainer_->rewind();
             active_schema_ = true;
         } else {
             auto schema = parse_json_schema(json_schema);
@@ -134,7 +134,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
                 if (tokenizer && schema_constrainer_->init(*tokenizer, std::move(schema))) {
                     cached_schema_string_ = json_schema;
                     configure_gate(schema_constrainer_.get());
-                    schema_constrainer_->reset();
+                    schema_constrainer_->rewind();
                     active_schema_ = true;
                 } else {
                     IMP_LOG_ERROR("Failed to initialize schema constrainer");
@@ -158,7 +158,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
             }
         }
         configure_gate(json_constrainer_.get());
-        json_constrainer_->reset();
+        json_constrainer_->rewind();
         active_json_ = true;
     }
 }
@@ -256,7 +256,7 @@ bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::strin
     } else {
         schema_constrainer_->set_preamble(think_close, preamble_budget, thinking_open);
     }
-    schema_constrainer_->reset();
+    schema_constrainer_->rewind();
     active_schema_ = true;
     IMP_LOG_INFO("ConstraintManager: enforcing %s tool call (%zu tool(s), %s body, envelope %zu+%zu chars)",
                  optional ? "optional (strict)" : "forced", tools.size(), xml ? "XML" : "JSON",
@@ -288,7 +288,7 @@ bool ConstraintManager::prepare_regex(const std::string& pattern, Tokenizer* tok
     const int32_t think_close = detect_think_close(tokenizer);
     if (think_close >= 0)
         regex_constrainer_->set_preamble(think_close, 8192, thinking_open);
-    regex_constrainer_->reset();
+    regex_constrainer_->rewind();
     active_regex_ = true;
     IMP_LOG_INFO("ConstraintManager: constraining output to regex '%s'%s", pattern.c_str(),
                  reuse ? " (reused classification)" : "");
@@ -323,7 +323,7 @@ bool ConstraintManager::prepare_grammar(const std::string& gbnf, Tokenizer* toke
     const int32_t think_close = detect_think_close(tokenizer);
     if (think_close >= 0)
         grammar_constrainer_->set_preamble(think_close, 8192, thinking_open);
-    grammar_constrainer_->reset();
+    grammar_constrainer_->rewind();
     active_grammar_ = true;
     cached_grammar_string_ = gbnf;
     IMP_LOG_INFO("ConstraintManager: constraining output to a GBNF grammar (%zu bytes)", gbnf.size());
@@ -354,13 +354,13 @@ int ConstraintManager::forced_text(std::string& out, int max_chars) const {
 
 void ConstraintManager::reset() {
     if (active_grammar_ && grammar_constrainer_) {
-        grammar_constrainer_->reset();
+        grammar_constrainer_->rewind();
     } else if (active_regex_ && regex_constrainer_) {
-        regex_constrainer_->reset();
+        regex_constrainer_->rewind();
     } else if (active_schema_ && schema_constrainer_) {
-        schema_constrainer_->reset();
+        schema_constrainer_->rewind();
     } else if (active_json_ && json_constrainer_) {
-        json_constrainer_->reset();
+        json_constrainer_->rewind();
     }
     active_json_ = false;
     active_schema_ = false;

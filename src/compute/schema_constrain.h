@@ -194,11 +194,11 @@ public:
     [[nodiscard]] bool completes_for_test(const std::string& text) const;
 
     // Reset for a new generation with the same schema.
-    void reset();
+    void rewind();
 
     // Tool-call envelope (#1002): when set, generation is framed by forced
     // literals (open before the root value, close after it) — e.g.
-    // "<tool_call>\n" ... "\n</tool_call>". Configure BEFORE reset().
+    // "<tool_call>\n" ... "\n</tool_call>". Configure BEFORE rewind().
     void set_envelope(std::string open, std::string close) {
         envelope_open_ = std::move(open);
         envelope_close_ = std::move(close);
@@ -208,12 +208,12 @@ public:
     // emitted freely; preamble gate detects the opener and hands off to the TOOL_CALL body FSM
     // (enforces args, forces close literal + EOS). Unlike set_envelope's forced mode, no call
     // is forced. Requires set_envelope + a tool-aware preamble with strict_tool=true. Configure
-    // before reset().
+    // before rewind().
     void set_strict_optional_envelope(bool v) { strict_optional_envelope_ = v; }
 
     // parallel_tool_calls (#1002, strict optional mode only): true = gate re-arms after each
     // tool-call body instead of forcing EOS, allowing several tool calls; false = EOS forced
-    // after the first. Configure before reset().
+    // after the first. Configure before rewind().
     void set_allow_parallel(bool v) { allow_parallel_ = v; }
 
     bool is_initialized() const { return initialized_; }

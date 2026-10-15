@@ -85,7 +85,7 @@ bool JsonConstrainer::init(const Tokenizer& tok) {
     if (!dev_.alloc_token_allow("JsonConstrainer", vocab_size_))
         return false;
 
-    reset();
+    rewind();
     initialized_ = true;
     IMP_LOG_INFO("JsonConstrainer initialized (%d tokens classified)", vocab_size_);
     return true;
@@ -101,7 +101,7 @@ void JsonGrammar::reset() {
     num_need_digit = false;
 }
 
-void JsonConstrainer::reset() {
+void JsonConstrainer::rewind() {
     g_.reset();
     preamble_.reset();
 }

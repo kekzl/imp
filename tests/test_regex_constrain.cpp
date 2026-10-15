@@ -195,7 +195,7 @@ TEST(RegexConstrain, ResetReturnsToTheStart) {
     auto rc = make("ab");
     ASSERT_TRUE(rc->update_text("ab"));
     EXPECT_TRUE(rc->is_done());
-    rc->reset();
+    rc->rewind();
     EXPECT_FALSE(rc->is_done());
     EXPECT_TRUE(rc->would_accept("a"));
     EXPECT_FALSE(rc->would_accept("b"));

@@ -503,11 +503,11 @@ bool Engine::init_kv_cache() {
     // successfully and cancel every request later.
     // Only when a budget is installed - without one this stays the pre-existing best-effort path.
     if (vram_budget_bytes() > 0 && per_block_total_bytes > 0) {
-        const int blocks_per_seq = kv_blocks_per_sequence(config_.max_seq_len, kv_bs);
+        const int blocks_per_req = kv_blocks_per_sequence(config_.max_seq_len, kv_bs);
         // Operator-set max_seq_len only: an AUTO one is clamped to the built pool below.
-        if (max_seq_len_explicit_ && max_blocks < blocks_per_seq) {
-            const double need_mib =
-                double(blocks_per_seq) * double(per_block_total_bytes) / (1024.0 * 1024.0);
+        if (max_seq_len_explicit_ && max_blocks < blocks_per_req) {
+            const double need_mib = double(blocks_per_req) * double(per_block_total_bytes) /
+                                    (1024.0 * 1024.0);
             const double have_mib =
                 double(max_blocks) * double(per_block_total_bytes) / (1024.0 * 1024.0);
             IMP_LOG_ERROR(
@@ -516,7 +516,7 @@ bool Engine::init_kv_cache() {
                 "Every request would be cancelled at admission. Raise --vram-budget by at least "
                 "%.0f MiB, or lower runtime.max_seq_len (imp-server: --set "
                 "runtime.max_seq_len=N; --max-seq-len is imp-cli only, #1681).",
-                vram_budget_bytes() >> 20, max_blocks, have_mib, config_.max_seq_len, blocks_per_seq,
+                vram_budget_bytes() >> 20, max_blocks, have_mib, config_.max_seq_len, blocks_per_req,
                 need_mib, need_mib - have_mib);
             return false;
         }
