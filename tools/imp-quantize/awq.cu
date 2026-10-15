@@ -1,5 +1,6 @@
 #include "awq.h"
 
+#include "core/logging.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_quant.h"
 
@@ -58,7 +59,7 @@ struct DeviceBuf {
     DeviceBuf() = default;
     ~DeviceBuf() {
         if (p)
-            cudaFree(p);
+            IMP_CUDA_CHECK_LOG(cudaFree(p));
     }
     DeviceBuf(const DeviceBuf&) = delete;
     DeviceBuf& operator=(const DeviceBuf&) = delete;

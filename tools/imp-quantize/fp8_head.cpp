@@ -1,6 +1,7 @@
 #include "fp8_head.h"
 
 #include "core/config/lm_head_mode.h"
+#include "core/logging.h"
 #include "core/qtype.h"
 #include "core/tensor.h"
 #include "model/weight_upload_traits.h"
@@ -108,9 +109,9 @@ std::expected<Fp8Head, std::string> quantize_head_fp8(const std::vector<uint16_t
              cudaMemcpy(out.scales.data(), d_scales, out.scales.size() * sizeof(float),
                         cudaMemcpyDeviceToHost) == cudaSuccess;
     }
-    cudaFree(d_in);
-    cudaFree(d_codes);
-    cudaFree(d_scales);
+    IMP_CUDA_CHECK_LOG(cudaFree(d_in));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_codes));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_scales));
     if (!ok)
         return std::unexpected("FP8 head quantization failed on the device");
     return out;

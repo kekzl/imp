@@ -32,6 +32,7 @@
 #include "tensor_policy.h"
 #include "usage.h"
 
+#include "core/logging.h"
 #include "core/tensor.h"
 #include "memory/plan.h"
 #include "model/mxfp8_widen.h"
@@ -107,7 +108,7 @@ std::expected<Quantized, std::string> quantize_one(const std::vector<uint16_t>& 
     if (cudaMalloc(&d_in, in_bytes) != cudaSuccess)
         return std::unexpected("cudaMalloc failed for " + std::to_string(in_bytes) + " bytes");
     if (cudaMemcpy(d_in, h_fp16.data(), in_bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
-        cudaFree(d_in);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_in));
         return std::unexpected("H2D copy failed");
     }
 
@@ -120,7 +121,7 @@ std::expected<Quantized, std::string> quantize_one(const std::vector<uint16_t>& 
                                                   quantize::fp16_absmax(h_fp16.data(), h_fp16.size()));
     quantize_fp16_to_nvfp4_with_scale(in, scale, q);
     if (cudaDeviceSynchronize() != cudaSuccess) {
-        cudaFree(d_in);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_in));
         free_nvfp4_result(q);
         return std::unexpected("quantization kernel failed");
     }
@@ -132,7 +133,7 @@ std::expected<Quantized, std::string> quantize_one(const std::vector<uint16_t>& 
                   cudaSuccess &&
               cudaMemcpy(out.micro.data(), q.micro_scales, out.micro.size(), cudaMemcpyDeviceToHost) ==
                   cudaSuccess;
-    cudaFree(d_in);
+    IMP_CUDA_CHECK_LOG(cudaFree(d_in));
     free_nvfp4_result(q);
     if (!ok)
         return std::unexpected("D2H copy failed");
