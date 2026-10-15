@@ -562,3 +562,30 @@ Branch `cleanup/b6-headers-build` off `origin/main` 887edce4, code head d85a30e2
 | `json_constrain.h` / `schema_constrain.h` still reach 78 / 75 TUs | other includers (`constraint_manager.h` path) | price with the SETTLED reverse-BFS before acting (H-022) |
 | `tokenizer.h` still reaches 170 TUs | `json_constrain.h` / `schema_constrain.h` include it | same |
 | GPU-only checks | no GPU in this batch | validator: reference dumps, test-gpu (test-quant runs the moved kernels) |
+
+## 2026-10-15 Phase 4 B6 (validator)
+
+Code head `d85a30e2`, image `imp:b6-final`; paired control `imp:main-ctrl` built from main `36fa6317`. Verdict: all gates PASS.
+
+| gate | main control | B6 | result |
+|---|---|---|---|
+| build warnings | 13 | 13, diff empty | PASS |
+| SASS hash per kernel, imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 | diff 0 / 0 / 0 | PASS |
+| `make test-gpu` | 2/2 green, 3700 `[ RUN ]` each | 2/2 green, 3700 each, list diff 0; `DeviceFaultSignalTest.FaultInside...` OK in all 4 runs | PASS |
+| reference dumps vs the Phase 3 baseline | - | 30/30 byte-identical | PASS |
+| decode tg256 pooled median, paired run | 371.36 tok/s | 370.93 (-0.12 %) | PASS |
+| prefill pp512 / pp2048, paired run | 30298 / 48885 | 30330 / 48799 | PASS |
+
+| measurement note | value |
+|---|---|
+| host noise during the paired perf | spread up to 8.72 % (main) and 7.58 % (B6) on pp512; medians compared |
+| first B6 perf run (unpaired) | SM clock 2778..2855 MHz, pp512 spread 9.78 %; discarded for the paired run |
+| first two B6 suites | not run: the GPU lock was taken from the main worktree, `make test-gpu` in the B6 worktree refused it (validator script error) |
+
+## 2026-10-15 Phase 4 B6 (orchestrator decision)
+
+| row | decision | why |
+|---|---|---|
+| H-020, H-021, H-009 | ship | gates above |
+| kernel-resources pin reads `libimp_test_kernels.a` too | accept | the 3 moved bench kernels would otherwise read as IMPROVED and fail the gate; baseline unchanged |
+| rest fan-in via `constraint_manager.h`, `tokenizer.h` | with H-022 (deferred list) | M risk |
