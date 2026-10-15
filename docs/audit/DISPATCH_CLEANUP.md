@@ -472,3 +472,60 @@ Code head `2ac22739`, image `imp:b7-final`, against the Phase 3 baseline image `
 |---|---|---|
 | H-012, H-014 | ship | gates above |
 | `kStrict` at the 7 parse sites | DEFER to the deferred list | behaviour change on malformed tensor names ("3x" -> layer 3 today); belongs in a fix PR with one malformed-name test per loader |
+
+## 2026-10-15 Phase 4 B6 (builder)
+
+Branch `cleanup/b6-headers-build` off `origin/main` 887edce4, code head d85a30e2. Compile + CPU only, no GPU run. `make build DOCKER_IMG=imp:b6-branch`: 13 unique warning lines (main `imp:b6-main`: 13), diff empty. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight` (0 failures). Code diff: 14 files, +74 / -46.
+
+| row | commit | files | change | result |
+|---|---|---|---|---|
+| H-020 | 9bc8c234 | `exec/executor.h` | 2 includes (`json_constrain.h`, `schema_constrain.h`) removed | applied; build named 0 TUs that needed them through executor.h |
+| H-021 (Tokenizer) | cb561ce4 | `model/model.h`, `model/model.cpp`, `model/gguf_loader.cpp`, `vision/vision_pipeline.cpp`, `docs/CONFIG.md` | `class Tokenizer;` forward declaration; `set_tokenizer` out of line; 2 TUs named by the build include `tokenizer.h`; CONFIG.md citation `model.cpp:191` -> `:194` | applied |
+| H-021 (GenerationConfig) | bb3af8ae | `model/generation_config.h` (new), `model/hf_config_loader.h`, `model/model.h`, `runtime/presets.h`, `runtime/presets.cpp`, `tests/test_sampling_defaults_parity.cpp` | struct moved verbatim to namespace scope; `HFConfigLoader::GenerationConfig` kept as alias; 1 test TU named by the build includes `hf_config_loader.h` | applied |
+| H-009 | d85a30e2 | `CMakeLists.txt`, `Makefile`, `.github/workflows/ci.yml` | 10 TUs out of libimp into static `imp_test_kernels` (built only with `IMP_BUILD_TESTS`, linked by test-quant, PIC, no `-rdc`); kernel-resources dump (Makefile + CI step) reads `libimp_test_kernels.a` too; stale CMake + ci.yml comments removed | applied |
+
+| header (build-dev `ninja -t deps`, 844 targets) | TUs main | TUs B6 |
+|---|---:|---:|
+| `compute/json_constrain.h` | 130 | 78 |
+| `compute/schema_constrain.h` | 127 | 75 |
+| `model/tokenizer.h` | 274 | 170 |
+| `model/hf_config_loader.h` | 218 | 18 |
+| `model/generation_config.h` (new) | - | 218 |
+| `exec/executor.h`, `model/model.h` (control) | 119, 201 | 119, 201 |
+
+| `make dev` after one header change (indicative: other builders ran; load avg 3.9 main, 11.6 B6) | ninja steps main | ninja steps B6 | `touch` ms main / B6 (ccache hits) | content edit ms main / B6 (ccache misses) |
+|---|---:|---:|---:|---:|
+| `compute/json_constrain.h` | 156 | 104 | 3523 / 3489 | 74955 / 51067 |
+| `compute/schema_constrain.h` | 153 | 101 | 3262 / 3522 | 68545 / 50197 |
+| `model/tokenizer.h` | 300 | 196 | 3684 / 3624 | 130790 / 100673 |
+| `model/hf_config_loader.h` | 244 | 44 | 3707 / 3393 | 102928 / 9940 |
+
+| H-009 check | result |
+|---|---|
+| 10 moved objects, build-dev `imp.dir` vs `imp_test_kernels.dir` | byte-identical (`cmp`) |
+| tests OFF + bench ON (release-docker shape) | imp-bench, imp-server, imp-cli, imp-quantize link; libimp.a 354 objects, 0 of the 10 |
+| kernel-resources pin (libimp.a + libimp_test_kernels.a) | 92 at-risk kernels match, baseline unchanged; libimp.a alone reports 3 IMPROVED (`bench_fused`, `bench_separate`, `bench_tma_v_load`) |
+| test-quant `--gtest_list_tests` | 275 (imp:b6-main) / 275 (build-dev), names identical |
+
+| `make check-test-lanes` | main | B6 |
+|---|---|---|
+| `ctest -L unit` / no CI lane | 2357 / 1286 | 2357 / 1286 |
+| test-quant (no CI) | 262 | 262 |
+
+| SASS check (no GPU) | imp:b6-main | imp:b6-branch | result |
+|---|---|---|---|
+| per-kernel rows imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 | 1023 / 1023 / 1025 | diff 0 lines in all 3 |
+| distinct SASS hashes | - | 1014 / 1014 / 1016 | - |
+
+| host symbol diff (`nm -C --defined-only`, 3 shipped binaries) | rows |
+|---|---|
+| mangling renamed (`HFConfigLoader::GenerationConfig` -> `GenerationConfig`) | `load_generation_config` (T, t), `resolve_sampling_defaults` (T, not in imp-quantize) |
+| new out-of-line | `Model::set_tokenizer` |
+| gone weak instantiations | `Tokenizer::~Tokenizer()`, `__uniq_ptr_impl<Tokenizer>::reset` |
+| compiler label | `CSWTCH.149` -> `CSWTCH.150` |
+
+| finding | evidence | proposed next step |
+|---|---|---|
+| `json_constrain.h` / `schema_constrain.h` still reach 78 / 75 TUs | other includers (`constraint_manager.h` path) | price with the SETTLED reverse-BFS before acting (H-022) |
+| `tokenizer.h` still reaches 170 TUs | `json_constrain.h` / `schema_constrain.h` include it | same |
+| GPU-only checks | no GPU in this batch | validator: reference dumps, test-gpu (test-quant runs the moved kernels) |
