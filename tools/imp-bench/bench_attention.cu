@@ -163,117 +163,114 @@ bool bench_attention() {
 
     cudaStreamDestroy(stream);
 
-    // ---- FP8 vs MXFP4 FMHA comparison (sm_120+ only) ----
-    {
-        int sm = get_device_sm_version();
-        if (sm >= 120) {
-            printf("=== FP8 FMHA vs MXFP4 FMHA (sm_120) ===\n");
-            printf("Causal, batch=1, warmup=10, iters=30\n\n");
+    // ---- FP8 vs MXFP4 FMHA comparison ----
+    printf("=== FP8 FMHA vs MXFP4 FMHA (sm_120) ===\n");
+    printf("Causal, batch=1, warmup=10, iters=30\n\n");
 
-            cudaStream_t s;
-            cudaStreamCreate(&s);
+    cudaStream_t s;
+    cudaStreamCreate(&s);
 
-            std::vector<AttentionConfig> cfgs_sm120 = {
-                {"Qwen3-4B", 32, 8, 128},
-                {"Qwen3-8B", 28, 4, 128},
-                {"GQA-MHA", 16, 16, 128},
-                {"GQA-8x", 32, 4, 128},
-            };
-            std::vector<int> seqs = {128, 256, 512, 1024, 2048, 4096};
+    std::vector<AttentionConfig> cfgs_sm120 = {
+        {"Qwen3-4B", 32, 8, 128},
+        {"Qwen3-8B", 28, 4, 128},
+        {"GQA-MHA", 16, 16, 128},
+        {"GQA-8x", 32, 4, 128},
+    };
+    std::vector<int> seqs = {128, 256, 512, 1024, 2048, 4096};
 
-            for (const auto& c : cfgs_sm120) {
-                printf("%-20s  nh=%2d nkv=%2d hd=%3d\n", c.name, c.n_heads, c.n_kv_heads, c.head_dim);
-                printf("  %8s  %10s  %10s  %7s\n", "seq", "FP8", "MXFP4", "speedup");
+    for (const auto& c : cfgs_sm120) {
+        printf("%-20s  nh=%2d nkv=%2d hd=%3d\n", c.name, c.n_heads, c.n_kv_heads, c.head_dim);
+        printf("  %8s  %10s  %10s  %7s\n", "seq", "FP8", "MXFP4", "speedup");
 
-                for (int seq : seqs) {
-                    const int batch = 1;
-                    const float sc = 1.0f / sqrtf((float)c.head_dim);
-                    const int warmup = 10;
-                    const int iters = 30;
+        for (int seq : seqs) {
+            const int batch = 1;
+            const float sc = 1.0f / sqrtf((float)c.head_dim);
+            const int warmup = 10;
+            const int iters = 30;
 
-                    const int64_t q_elems = (int64_t)batch * seq * c.n_heads * c.head_dim;
-                    const int64_t kv_elems = (int64_t)batch * seq * c.n_kv_heads * c.head_dim;
+            const int64_t q_elems = (int64_t)batch * seq * c.n_heads * c.head_dim;
+            const int64_t kv_elems = (int64_t)batch * seq * c.n_kv_heads * c.head_dim;
 
-                    void *dq, *dk, *dv, *dofp8, *domx;
-                    cudaMalloc(&dq, q_elems * sizeof(half));
-                    cudaMalloc(&dk, kv_elems * sizeof(half));
-                    cudaMalloc(&dv, kv_elems * sizeof(half));
-                    cudaMalloc(&dofp8, q_elems * sizeof(half));
-                    cudaMalloc(&domx, q_elems * sizeof(half));
-                    cudaMemset(dq, 0x3C, q_elems * sizeof(half));  // ~1.0 in FP16
-                    cudaMemset(dk, 0x3C, kv_elems * sizeof(half));
-                    cudaMemset(dv, 0x3C, kv_elems * sizeof(half));
+            void *dq, *dk, *dv, *dofp8, *domx;
+            cudaMalloc(&dq, q_elems * sizeof(half));
+            cudaMalloc(&dk, kv_elems * sizeof(half));
+            cudaMalloc(&dv, kv_elems * sizeof(half));
+            cudaMalloc(&dofp8, q_elems * sizeof(half));
+            cudaMalloc(&domx, q_elems * sizeof(half));
+            cudaMemset(dq, 0x3C, q_elems * sizeof(half));  // ~1.0 in FP16
+            cudaMemset(dk, 0x3C, kv_elems * sizeof(half));
+            cudaMemset(dv, 0x3C, kv_elems * sizeof(half));
 
-                    int64_t qs[4] = {batch, seq, c.n_heads, c.head_dim};
-                    int64_t ks[4] = {batch, seq, c.n_kv_heads, c.head_dim};
+            int64_t qs[4] = {batch, seq, c.n_heads, c.head_dim};
+            int64_t ks[4] = {batch, seq, c.n_kv_heads, c.head_dim};
 
-                    Tensor Q(dq, QType::F16, 4, qs, true);
-                    Tensor K(dk, QType::F16, 4, ks, true);
-                    Tensor V(dv, QType::F16, 4, ks, true);
+            Tensor Q(dq, QType::F16, 4, qs, true);
+            Tensor K(dk, QType::F16, 4, ks, true);
+            Tensor V(dv, QType::F16, 4, ks, true);
 
-                    // FP8 FMHA
-                    float ms_fp8 = -1.0f;
-                    {
-                        Tensor O(dofp8, QType::F16, 4, qs, true);
-                        bool ran = true;
-                        for (int i = 0; i < warmup; i++)
-                            ran = fmha_sm120_fp8_prefill(Q, K, V, O, sc, true, 0, 0.0f, s) && ran;
-                        if (!ran)
-                            fprintf(stderr, "fp8 FMHA refused seq=%d: row reports -1\n", seq);
-                        cudaStreamSynchronize(s);
-                        cudaEvent_t t0, t1;
-                        cudaEventCreate(&t0);
-                        cudaEventCreate(&t1);
-                        cudaEventRecord(t0, s);
-                        for (int i = 0; i < iters; i++)
-                            (void)fmha_sm120_fp8_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);  // args checked in warmup
-                        cudaEventRecord(t1, s);
-                        cudaEventSynchronize(t1);
-                        cudaEventElapsedTime(&ms_fp8, t0, t1);
-                        ms_fp8 = ran ? ms_fp8 / iters : -1.0f;
-                        cudaEventDestroy(t0);
-                        cudaEventDestroy(t1);
-                    }
-
-                    // MXFP4 FMHA
-                    float ms_mxfp4 = -1.0f;
-                    {
-                        Tensor O(domx, QType::F16, 4, qs, true);
-                        bool ran = true;
-                        for (int i = 0; i < warmup; i++)
-                            ran = fmha_sm120_mxfp4_prefill(Q, K, V, O, sc, true, 0, 0.0f, s) && ran;
-                        if (!ran)
-                            fprintf(stderr, "mxfp4 FMHA refused seq=%d: row reports -1\n", seq);
-                        cudaStreamSynchronize(s);
-                        cudaEvent_t t0, t1;
-                        cudaEventCreate(&t0);
-                        cudaEventCreate(&t1);
-                        cudaEventRecord(t0, s);
-                        for (int i = 0; i < iters; i++)
-                            (void)fmha_sm120_mxfp4_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);  // args checked in warmup
-                        cudaEventRecord(t1, s);
-                        cudaEventSynchronize(t1);
-                        cudaEventElapsedTime(&ms_mxfp4, t0, t1);
-                        ms_mxfp4 = ran ? ms_mxfp4 / iters : -1.0f;
-                        cudaEventDestroy(t0);
-                        cudaEventDestroy(t1);
-                    }
-
-                    float speedup = ms_fp8 / ms_mxfp4;
-                    printf("  %8d  %8.3f ms  %8.3f ms  %5.2fx%s\n", seq, ms_fp8, ms_mxfp4, speedup,
-                           speedup > 1.03f ? " <--" : (speedup < 0.97f ? " REG" : ""));
-
-                    cudaFree(dq);
-                    cudaFree(dk);
-                    cudaFree(dv);
-                    cudaFree(dofp8);
-                    cudaFree(domx);
-                }
-                printf("\n");
+            // FP8 FMHA
+            float ms_fp8 = -1.0f;
+            {
+                Tensor O(dofp8, QType::F16, 4, qs, true);
+                bool ran = true;
+                for (int i = 0; i < warmup; i++)
+                    ran = fmha_sm120_fp8_prefill(Q, K, V, O, sc, true, 0, 0.0f, s) && ran;
+                if (!ran)
+                    fprintf(stderr, "fp8 FMHA refused seq=%d: row reports -1\n", seq);
+                cudaStreamSynchronize(s);
+                cudaEvent_t t0, t1;
+                cudaEventCreate(&t0);
+                cudaEventCreate(&t1);
+                cudaEventRecord(t0, s);
+                // args checked in warmup
+                for (int i = 0; i < iters; i++)
+                    (void)fmha_sm120_fp8_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);
+                cudaEventRecord(t1, s);
+                cudaEventSynchronize(t1);
+                cudaEventElapsedTime(&ms_fp8, t0, t1);
+                ms_fp8 = ran ? ms_fp8 / iters : -1.0f;
+                cudaEventDestroy(t0);
+                cudaEventDestroy(t1);
             }
-            cudaStreamDestroy(s);
+
+            // MXFP4 FMHA
+            float ms_mxfp4 = -1.0f;
+            {
+                Tensor O(domx, QType::F16, 4, qs, true);
+                bool ran = true;
+                for (int i = 0; i < warmup; i++)
+                    ran = fmha_sm120_mxfp4_prefill(Q, K, V, O, sc, true, 0, 0.0f, s) && ran;
+                if (!ran)
+                    fprintf(stderr, "mxfp4 FMHA refused seq=%d: row reports -1\n", seq);
+                cudaStreamSynchronize(s);
+                cudaEvent_t t0, t1;
+                cudaEventCreate(&t0);
+                cudaEventCreate(&t1);
+                cudaEventRecord(t0, s);
+                // args checked in warmup
+                for (int i = 0; i < iters; i++)
+                    (void)fmha_sm120_mxfp4_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);
+                cudaEventRecord(t1, s);
+                cudaEventSynchronize(t1);
+                cudaEventElapsedTime(&ms_mxfp4, t0, t1);
+                ms_mxfp4 = ran ? ms_mxfp4 / iters : -1.0f;
+                cudaEventDestroy(t0);
+                cudaEventDestroy(t1);
+            }
+
+            float speedup = ms_fp8 / ms_mxfp4;
+            printf("  %8d  %8.3f ms  %8.3f ms  %5.2fx%s\n", seq, ms_fp8, ms_mxfp4, speedup,
+                   speedup > 1.03f ? " <--" : (speedup < 0.97f ? " REG" : ""));
+
+            cudaFree(dq);
+            cudaFree(dk);
+            cudaFree(dv);
+            cudaFree(dofp8);
+            cudaFree(domx);
         }
+        printf("\n");
     }
+    cudaStreamDestroy(s);
     return true;
 }
 
