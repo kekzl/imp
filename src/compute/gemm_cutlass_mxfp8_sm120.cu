@@ -116,13 +116,9 @@ __device__ __forceinline__ float mx8_ue8m0_to_float(uint8_t e) {
 
 // Two FP32 -> one E4M3 pair, v0 in the low byte. RNE, saturating (E4M3 has no inf).
 __device__ __forceinline__ uint16_t mx8_pack_e4m3_pair(float v0, float v1) {
-#if __CUDA_ARCH__ >= 890
     uint16_t out;
     asm volatile("cvt.rn.satfinite.e4m3x2.f32 %0, %2, %1;" : "=h"(out) : "f"(v0), "f"(v1));
     return out;
-#else
-    return 0;
-#endif
 }
 
 // One thread per 32-element block: 64 B in (4 x uint4), 32 B out (2 x uint4), one scale byte.

@@ -1405,17 +1405,6 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
     return !nvfp4_dequant_uncapturable_;
 }
 
-void GraphExecutor::release_moe_batch_buf() {
-    if (moe_.batch_dequant_buf) {
-        size_t freed = moe_.batch_dequant_buf_size;
-        vram_free(vram_alloc_, moe_.batch_dequant_buf);
-        moe_.batch_dequant_buf = nullptr;
-        moe_.batch_dequant_buf_size = 0;
-        IMP_LOG_INFO("Released MoE batch dequant buffer: %.2f MiB (experts on host)",
-                     freed / (1024.0 * 1024.0));
-    }
-}
-
 // An FP8 cache entry owns its weight bytes unless they sit in a bulk buffer (migrated, overflow,
 // SSM sidecar) or are the checkpoint's own FP8 tensor (native_source: the Model frees those).
 static bool fp8_entry_owns_weight(const FP8CacheEntry& e, const WeightCaches& wc) {

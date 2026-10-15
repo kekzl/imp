@@ -707,8 +707,8 @@ void Workspace::free_buffers() {
     persistent_workspace_size_ = 0;
 }
 
-// GraphExecutor::allocate_auxiliary_buffers(), release_moe_batch_buf(),
-// free_buffers() are in executor_workspace_buffers.cu
+// GraphExecutor::allocate_auxiliary_buffers(), free_buffers() are in
+// executor_workspace_buffers.cpp
 
 // pre_dequant_weights() is in executor_pre_dequant.cpp
 // configure_*_workspace(), resize_workspace(), allocate_decode_workspace(),

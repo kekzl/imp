@@ -167,11 +167,6 @@ void gdn_scan_decode_f32(const float* x, const float* B, const float* C, const h
                          int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
                          int grouped_layout = 0);
 
-void gdn_scan_prefill_f32(const float* x, const float* B, const float* C, const half* alpha, const half* beta,
-                          const float* A_log, const float* dt_bias, float* h_state, half* y, const half* z,
-                          int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                          cudaStream_t stream, int grouped_layout = 0);
-
 // V-head reorder tiled -> grouped (FP32, conv1d-SiLU output). GGUF may store V tiled
 // (h0_g0,h1_g1,...,h0_g0_r1,...) while the scan kernel expects grouped V[h*HD+d]; Qwen 3.6
 // (16K/32V) triggers this. Skipped when n_heads == n_groups.

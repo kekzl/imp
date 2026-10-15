@@ -92,7 +92,7 @@ MemAccount::Pool& MemAccount::pool_locked(const char* name) {
 
 void MemAccount::note(const char* pool, std::ptrdiff_t delta_bytes) {
     // Deliberately NOT gated on enabled_: the per-pool ledger is what makes
-    // unattributed_bytes() mean "what imp cannot account for"; gated, it would be empty on
+    // unattributed_signed_bytes() mean "what imp cannot account for"; gated, it would be empty on
     // every start without diagnostics.vram_audit and the residual would read as the whole device
     // (this once collapsed a KV pool from 4096 tokens to 512, AUDIT B80). Cost is a lock +
     // small map lookup per ACQUISITION, an init-time event (I2 measures zero while serving).
@@ -162,11 +162,6 @@ void MemAccount::sample_once() {
     size_t prev = peak_used_.load(std::memory_order_relaxed);
     while (used > prev && !peak_used_.compare_exchange_weak(prev, used, std::memory_order_relaxed)) {
     }
-}
-
-size_t MemAccount::unattributed_bytes() const {
-    const int64_t r = unattributed_signed_bytes();
-    return r > 0 ? static_cast<size_t>(r) : 0;
 }
 
 int64_t MemAccount::unattributed_signed_bytes() const {

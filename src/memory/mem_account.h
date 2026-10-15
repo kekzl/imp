@@ -65,16 +65,16 @@ public:
     // stream-ordered allocation regardless of module or allocator.
     void arm_steady_state_watermarks();
 
+    // Reconciliation residual (device used minus the ledger), unclamped: negative when the
+    // ledger counts more than the device holds.
+    int64_t unattributed_signed_bytes() const;
+
     // Named, non-imp charges the pool notes cannot see, so the reconciliation residual
     // reports what is genuinely unattributed. Set from Engine::init once known:
     //   context  - CUDA primary context + driver (checkpoint 00_pre_init)
     //   library  - the fixed charge CUDA/cuBLAS/CUTLASS claim on the first forward (A1.5)
     //   arena    - engine-persistent tier reservation (its high-water is what the planner
     //              should eventually use)
-    size_t unattributed_bytes() const;
-    // The same residual unclamped: negative when the ledger counts more than the device holds.
-    int64_t unattributed_signed_bytes() const;
-
     void set_named_charges(size_t context_bytes, size_t library_bytes, size_t arena_bytes,
                            size_t arena_high_water);
 

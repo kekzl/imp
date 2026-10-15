@@ -245,39 +245,6 @@ std::string HFConfigLoader::load_chat_template(const std::string& model_dir) {
     return "";
 }
 
-// ---- load_added_tokens ----
-
-std::vector<HFConfigLoader::AddedToken> HFConfigLoader::load_added_tokens(const std::string& model_dir) {
-    std::vector<AddedToken> result;
-    std::string path = model_dir + "/tokenizer_config.json";
-    JValue root;
-    if (!parse_json_file(path, root))
-        return result;
-
-    const JValue* added = jobj_find(root, "added_tokens_decoder");
-    if (!added || added->type != JType::OBJECT)
-        return result;
-
-    for (const auto& [id_str, val] : added->obj) {
-        if (val.type != JType::OBJECT)
-            continue;
-        AddedToken tok;
-        tok.id = std::atoi(id_str.c_str());
-        jobj_opt_string(val, "content", tok.content);
-        // "special" field — treat as bool via number (true=1.0, false=0.0)
-        const JValue* sp = jobj_find(val, "special");
-        tok.special = sp && sp->type == JType::NUMBER && sp->num_val != 0.0;
-        if (!tok.content.empty()) {
-            result.push_back(std::move(tok));
-        }
-    }
-
-    if (!result.empty()) {
-        IMP_LOG_INFO("loaded %zu added tokens from tokenizer_config.json", result.size());
-    }
-    return result;
-}
-
 // ---- load_special_tokens_map ----
 
 namespace {
