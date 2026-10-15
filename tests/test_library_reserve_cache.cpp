@@ -4,10 +4,13 @@
 
 #include <gtest/gtest.h>
 
+#include "core/cache_dir.h"
 #include "memory/library_reserve_cache.h"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 
 using namespace imp;
@@ -129,4 +132,51 @@ TEST(LibraryReserveCache, AnEmptyPathIsAWorkingNoOp) {
 TEST(LibraryReserveCache, AnUnwritablePathFailsWithoutThrowing) {
     // /proc is present and not writable in every environment this runs in.
     EXPECT_FALSE(library_reserve_cache_store("/proc/imp_lrc_should_fail/x", key_a(), 1));
+}
+
+// Sets an env var for one scope and restores the previous value (or unsets it).
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name, const char* value) : name_(name) {
+        if (const char* old = std::getenv(name))
+            old_ = old;
+        if (value)
+            setenv(name, value, 1);
+        else
+            unsetenv(name);
+    }
+    ~ScopedEnv() {
+        if (old_)
+            setenv(name_, old_->c_str(), 1);
+        else
+            unsetenv(name_);
+    }
+    ScopedEnv(const ScopedEnv&) = delete;
+    ScopedEnv& operator=(const ScopedEnv&) = delete;
+
+private:
+    const char* name_;
+    std::optional<std::string> old_;
+};
+
+// H-014: one XDG -> HOME resolution; the two callers differ only in their "" fallback.
+TEST(LibraryReserveCache, CacheDirResolvesXdgThenHomeThenEmpty) {
+    {
+        ScopedEnv xdg("XDG_CACHE_HOME", "/x/cache");
+        ScopedEnv home("HOME", "/h");
+        EXPECT_EQ(imp_cache_dir("warm"), "/x/cache/imp/warm");
+        EXPECT_EQ(library_reserve_cache_default_path(), "/x/cache/imp/library_reserve");
+    }
+    {
+        ScopedEnv xdg("XDG_CACHE_HOME", "");
+        ScopedEnv home("HOME", "/h");
+        EXPECT_EQ(imp_cache_dir("warm"), "/h/.cache/imp/warm");
+        EXPECT_EQ(library_reserve_cache_default_path(), "/h/.cache/imp/library_reserve");
+    }
+    {
+        ScopedEnv xdg("XDG_CACHE_HOME", nullptr);
+        ScopedEnv home("HOME", "");
+        EXPECT_EQ(imp_cache_dir("warm"), "");
+        EXPECT_EQ(library_reserve_cache_default_path(), "");
+    }
 }
