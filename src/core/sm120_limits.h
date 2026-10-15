@@ -8,4 +8,7 @@ namespace imp {
 // (cudaDevAttrMaxSharedMemoryPerBlockOptin on RTX 5090).
 inline constexpr size_t kSm120SmemOptinBytes = 101376;
 
+// Dynamic smem a launch gets without cudaFuncAttributeMaxDynamicSharedMemorySize: 48 KiB.
+inline constexpr int kSmemNoOptinBytes = 48 * 1024;
+
 }  // namespace imp
