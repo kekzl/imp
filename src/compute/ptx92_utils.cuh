@@ -19,26 +19,6 @@ __device__ __forceinline__ uint16_t cvt_f16x2_to_e4m3x2(uint32_t f16x2) {
     return result;
 }
 
-// Convert 2 packed FP8 E4M3 (e4m3x2, 16-bit) → 2 packed FP16 (f16x2, 32-bit).
-__device__ __forceinline__ uint32_t cvt_e4m3x2_to_f16x2(uint16_t e4m3x2) {
-    uint32_t result;
-    asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(result) : "h"(e4m3x2));
-    return result;
-}
-
-// Convenience: convert 4 packed FP8 (uint32_t) → 4 floats via 2 paired cvt ops.
-__device__ __forceinline__ void cvt_e4m3x4_to_f32x4(uint32_t packed_fp8, float& f0, float& f1, float& f2,
-                                                    float& f3) {
-    uint32_t f16x2_lo = cvt_e4m3x2_to_f16x2(static_cast<uint16_t>(packed_fp8 & 0xFFFF));
-    uint32_t f16x2_hi = cvt_e4m3x2_to_f16x2(static_cast<uint16_t>((packed_fp8 >> 16) & 0xFFFF));
-    const half2* h2_lo = reinterpret_cast<const half2*>(&f16x2_lo);
-    const half2* h2_hi = reinterpret_cast<const half2*>(&f16x2_hi);
-    f0 = __half2float(h2_lo->x);
-    f1 = __half2float(h2_lo->y);
-    f2 = __half2float(h2_hi->x);
-    f3 = __half2float(h2_hi->y);
-}
-
 // Packed FP4 E2M1 conversion. NOTE: FP16->FP4 packed conversion
 // (cvt.rn.satfinite.e2m1x2.f16x2) is in PTX ISA 9.2 but ptxas rejects it on CUDA 13.2.
 // Production paths use the FP32 variant (cvt.rn.satfinite.e2m1x2.f32, see
