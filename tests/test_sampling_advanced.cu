@@ -7,8 +7,10 @@
 #include "core/cuda_static_reset.h"
 #include "core/tensor.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <thread>
 #include <utility>
 #include <vector>
 #include "scoped_engine_arena.h"
@@ -75,6 +77,33 @@ TEST(SamplingAdvancedTest, LogitBiasIgnoresOutOfRangeIds) {
     apply_logit_bias(static_cast<float*>(d.data), 3, bias.data(), static_cast<int>(bias.size()));
     const auto out = read_back(d);
     EXPECT_EQ(out, base) << "an id outside the vocabulary must neither write nor crash";
+    free_gpu(d);
+}
+
+__global__ void fill_iota_plus_one(float* p, int n) {
+    if (threadIdx.x < n)
+        p[threadIdx.x] = 1.0f + static_cast<float>(threadIdx.x);
+}
+
+// No arena slots: the per-entry fallback applies the bias to logits a held non-blocking stream
+// writes 20 ms late. Does not detect C-020 on WSL2: the legacy cudaMemcpy read also waited
+// there (mutant passes, 22 ms in both arms, 2026-10-15).
+TEST(SamplingAdvancedTest, LogitBiasFallbackReadsOnTheCallerStream) {
+    reset_static_cuda_state();  // drops the arena slots: apply_logit_bias takes the fallback
+    Tensor d = make_logits(std::vector<float>(4, 0.0f));
+    cudaStream_t s = nullptr;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking), cudaSuccess);
+    auto hold = [](void*) { std::this_thread::sleep_for(std::chrono::milliseconds(20)); };
+    ASSERT_EQ(cudaLaunchHostFunc(s, hold, nullptr), cudaSuccess);
+    fill_iota_plus_one<<<1, 32, 0, s>>>(static_cast<float*>(d.data), 4);
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+    const std::pair<int32_t, float> bias[] = {{2, 0.5f}};
+    apply_logit_bias(static_cast<float*>(d.data), 4, bias, 1, s);
+    ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
+    const auto out = read_back(d);
+    EXPECT_FLOAT_EQ(out[2], 3.5f) << "the fallback read the logit before the stream wrote it";
+    EXPECT_FLOAT_EQ(out[1], 2.0f);
+    cudaStreamDestroy(s);
     free_gpu(d);
 }
 
