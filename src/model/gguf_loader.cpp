@@ -10,6 +10,7 @@
 #include "model/model_arch.h"
 #include "model/fim.h"
 #include "model/tensor_kind_matcher.h"
+#include "model/tokenizer.h"
 #include "quant/dequant_gpu.h"
 #include "core/logging.h"
 

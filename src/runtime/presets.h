@@ -1,6 +1,6 @@
 #pragma once
 
-#include "model/hf_config_loader.h"
+#include "model/generation_config.h"
 #include "model/model_arch.h"
 
 namespace imp {
@@ -18,6 +18,6 @@ struct SamplingDefaults {
 SamplingDefaults get_sampling_defaults(ModelArch arch);
 
 // CLI and server defaults (#2462): generation_config.json (field >= 0) over the arch preset.
-SamplingDefaults resolve_sampling_defaults(ModelArch arch, const HFConfigLoader::GenerationConfig& gen);
+SamplingDefaults resolve_sampling_defaults(ModelArch arch, const GenerationConfig& gen);
 
 }  // namespace imp

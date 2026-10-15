@@ -505,3 +505,87 @@ Branch `cleanup/b5-magic-numbers` head `5a6b6e1c` (H-029, C-032, C-033 rename pa
 | B5 re-validation | later: 3 x `make test-gpu` on a rebuilt B5 image vs 3 x main, interleaved | separate a B5 cause from the timing flake |
 | `DeviceFaultSignalTest` timing flake | new finding, needs a GPU repro | isolated failures on 5 images with unrelated code; exit 7 and exit 8 are two failure modes |
 | C-033 runtime `device_sm_count()` | DEFER | turns `kMinBlocks` into a runtime value; retry-on-error is a behaviour change |
+
+## 2026-10-15 Phase 4 B6 (builder)
+
+Branch `cleanup/b6-headers-build` off `origin/main` 887edce4, code head d85a30e2. Compile + CPU only, no GPU run. `make build DOCKER_IMG=imp:b6-branch`: 13 unique warning lines (main `imp:b6-main`: 13), diff empty. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight` (0 failures). Code diff: 14 files, +74 / -46.
+
+| row | commit | files | change | result |
+|---|---|---|---|---|
+| H-020 | 9bc8c234 | `exec/executor.h` | 2 includes (`json_constrain.h`, `schema_constrain.h`) removed | applied; build named 0 TUs that needed them through executor.h |
+| H-021 (Tokenizer) | cb561ce4 | `model/model.h`, `model/model.cpp`, `model/gguf_loader.cpp`, `vision/vision_pipeline.cpp`, `docs/CONFIG.md` | `class Tokenizer;` forward declaration; `set_tokenizer` out of line; 2 TUs named by the build include `tokenizer.h`; CONFIG.md citation `model.cpp:191` -> `:194` | applied |
+| H-021 (GenerationConfig) | bb3af8ae | `model/generation_config.h` (new), `model/hf_config_loader.h`, `model/model.h`, `runtime/presets.h`, `runtime/presets.cpp`, `tests/test_sampling_defaults_parity.cpp` | struct moved verbatim to namespace scope; `HFConfigLoader::GenerationConfig` kept as alias; 1 test TU named by the build includes `hf_config_loader.h` | applied |
+| H-009 | d85a30e2 | `CMakeLists.txt`, `Makefile`, `.github/workflows/ci.yml` | 10 TUs out of libimp into static `imp_test_kernels` (built only with `IMP_BUILD_TESTS`, linked by test-quant, PIC, no `-rdc`); kernel-resources dump (Makefile + CI step) reads `libimp_test_kernels.a` too; stale CMake + ci.yml comments removed | applied |
+
+| header (build-dev `ninja -t deps`, 844 targets) | TUs main | TUs B6 |
+|---|---:|---:|
+| `compute/json_constrain.h` | 130 | 78 |
+| `compute/schema_constrain.h` | 127 | 75 |
+| `model/tokenizer.h` | 274 | 170 |
+| `model/hf_config_loader.h` | 218 | 18 |
+| `model/generation_config.h` (new) | - | 218 |
+| `exec/executor.h`, `model/model.h` (control) | 119, 201 | 119, 201 |
+
+| `make dev` after one header change (indicative: other builders ran; load avg 3.9 main, 11.6 B6) | ninja steps main | ninja steps B6 | `touch` ms main / B6 (ccache hits) | content edit ms main / B6 (ccache misses) |
+|---|---:|---:|---:|---:|
+| `compute/json_constrain.h` | 156 | 104 | 3523 / 3489 | 74955 / 51067 |
+| `compute/schema_constrain.h` | 153 | 101 | 3262 / 3522 | 68545 / 50197 |
+| `model/tokenizer.h` | 300 | 196 | 3684 / 3624 | 130790 / 100673 |
+| `model/hf_config_loader.h` | 244 | 44 | 3707 / 3393 | 102928 / 9940 |
+
+| H-009 check | result |
+|---|---|
+| 10 moved objects, build-dev `imp.dir` vs `imp_test_kernels.dir` | byte-identical (`cmp`) |
+| tests OFF + bench ON (release-docker shape) | imp-bench, imp-server, imp-cli, imp-quantize link; libimp.a 354 objects, 0 of the 10 |
+| kernel-resources pin (libimp.a + libimp_test_kernels.a) | 92 at-risk kernels match, baseline unchanged; libimp.a alone reports 3 IMPROVED (`bench_fused`, `bench_separate`, `bench_tma_v_load`) |
+| test-quant `--gtest_list_tests` | 275 (imp:b6-main) / 275 (build-dev), names identical |
+
+| `make check-test-lanes` | main | B6 |
+|---|---|---|
+| `ctest -L unit` / no CI lane | 2357 / 1286 | 2357 / 1286 |
+| test-quant (no CI) | 262 | 262 |
+
+| SASS check (no GPU) | imp:b6-main | imp:b6-branch | result |
+|---|---|---|---|
+| per-kernel rows imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 | 1023 / 1023 / 1025 | diff 0 lines in all 3 |
+| distinct SASS hashes | - | 1014 / 1014 / 1016 | - |
+
+| host symbol diff (`nm -C --defined-only`, 3 shipped binaries) | rows |
+|---|---|
+| mangling renamed (`HFConfigLoader::GenerationConfig` -> `GenerationConfig`) | `load_generation_config` (T, t), `resolve_sampling_defaults` (T, not in imp-quantize) |
+| new out-of-line | `Model::set_tokenizer` |
+| gone weak instantiations | `Tokenizer::~Tokenizer()`, `__uniq_ptr_impl<Tokenizer>::reset` |
+| compiler label | `CSWTCH.149` -> `CSWTCH.150` |
+
+| finding | evidence | proposed next step |
+|---|---|---|
+| `json_constrain.h` / `schema_constrain.h` still reach 78 / 75 TUs | other includers (`constraint_manager.h` path) | price with the SETTLED reverse-BFS before acting (H-022) |
+| `tokenizer.h` still reaches 170 TUs | `json_constrain.h` / `schema_constrain.h` include it | same |
+| GPU-only checks | no GPU in this batch | validator: reference dumps, test-gpu (test-quant runs the moved kernels) |
+
+## 2026-10-15 Phase 4 B6 (validator)
+
+Code head `d85a30e2`, image `imp:b6-final`; paired control `imp:main-ctrl` built from main `36fa6317`. Verdict: all gates PASS.
+
+| gate | main control | B6 | result |
+|---|---|---|---|
+| build warnings | 13 | 13, diff empty | PASS |
+| SASS hash per kernel, imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 | diff 0 / 0 / 0 | PASS |
+| `make test-gpu` | 2/2 green, 3700 `[ RUN ]` each | 2/2 green, 3700 each, list diff 0; `DeviceFaultSignalTest.FaultInside...` OK in all 4 runs | PASS |
+| reference dumps vs the Phase 3 baseline | - | 30/30 byte-identical | PASS |
+| decode tg256 pooled median, paired run | 371.36 tok/s | 370.93 (-0.12 %) | PASS |
+| prefill pp512 / pp2048, paired run | 30298 / 48885 | 30330 / 48799 | PASS |
+
+| measurement note | value |
+|---|---|
+| host noise during the paired perf | spread up to 8.72 % (main) and 7.58 % (B6) on pp512; medians compared |
+| first B6 perf run (unpaired) | SM clock 2778..2855 MHz, pp512 spread 9.78 %; discarded for the paired run |
+| first two B6 suites | not run: the GPU lock was taken from the main worktree, `make test-gpu` in the B6 worktree refused it (validator script error) |
+
+## 2026-10-15 Phase 4 B6 (orchestrator decision)
+
+| row | decision | why |
+|---|---|---|
+| H-020, H-021, H-009 | ship | gates above |
+| kernel-resources pin reads `libimp_test_kernels.a` too | accept | the 3 moved bench kernels would otherwise read as IMPROVED and fail the gate; baseline unchanged |
+| rest fan-in via `constraint_manager.h`, `tokenizer.h` | with H-022 (deferred list) | M risk |
