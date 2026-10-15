@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include "model/hf_config_loader.h"
 #include "runtime/presets.h"
 #include "sampling_fields.h"
 

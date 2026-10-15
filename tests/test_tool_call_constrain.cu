@@ -63,7 +63,7 @@ TEST(SchemaConstrainTest, ToolCallEnvelopeAndNameBinding) {
     SchemaConstrainer sc;
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
     sc.set_envelope("<tool_call>\n", "\n</tool_call>");
-    sc.reset();
+    sc.rewind();
 
     // 1. Envelope first: '<' legal, '{' not.
     auto at_start = schema_allowed(sc, static_cast<int>(toks.size()));
@@ -161,7 +161,7 @@ TEST(SchemaConstrainTest, ToolCallHoistedDefsEnforced) {
     SchemaConstrainer sc;
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
     sc.set_envelope("<tool_call>\n", "\n</tool_call>");
-    sc.reset();
+    sc.rewind();
 
     auto feed = [&](const std::string& s) {
         for (char c : s)
@@ -230,7 +230,7 @@ TEST(SchemaConstrainTest, ToolCallStrictOptionalEnforced) {
                                /*close_tokens=*/{}, /*open_prefix=*/"<tool_call>",
                                /*close_suffix=*/"</tool_call>", /*thinking_open=*/false,
                                /*strict_tool=*/true);
-    sc.reset();
+    sc.rewind();
 
     // 1. Free generation: the gate is ACTIVE, mask bypassed — a plain-text token
     // and even a non-structural char pass. The model is NOT forced to call.
@@ -311,7 +311,7 @@ TEST(SchemaConstrainTest, ToolCallStrictParallelReArms) {
     sc.set_allow_parallel(true);
     sc.set_preamble_with_tools(-1, 512, {opener_id}, {}, "<tool_call>", "</tool_call>",
                                /*thinking_open=*/false, /*strict_tool=*/true);
-    sc.reset();
+    sc.rewind();
 
     auto feed = [&](const std::string& s) {
         for (char c : s)
@@ -369,7 +369,7 @@ TEST(SchemaConstrainTest, Llama3BareArgsForcedEnvelope) {
     SchemaConstrainer sc;
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
     sc.set_envelope("<function=add>", "</function>");  // forced (no strict flag)
-    sc.reset();
+    sc.rewind();
 
     auto feed = [&](const std::string& s) {
         for (char c : s)
@@ -438,7 +438,7 @@ TEST(SchemaConstrainTest, XmlToolCallForcedGrammar) {
     SchemaConstrainer sc;
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
     sc.set_envelope("<tool_call>\n", "\n</tool_call>");
-    sc.reset();
+    sc.rewind();
 
     auto allowed = [&] { return schema_allowed(sc, static_cast<int>(toks.size())); };
     auto feed = [&](const std::string& s) {
@@ -562,7 +562,7 @@ TEST(SchemaConstrainTest, XmlToolCallRawValueDelimiterOverlap) {
     SchemaConstrainer sc;
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
     sc.set_envelope("<tool_call>\n", "\n</tool_call>");
-    sc.reset();
+    sc.rewind();
 
     auto allowed = [&] { return schema_allowed(sc, static_cast<int>(toks.size())); };
     auto feed = [&](const std::string& s) {
@@ -613,7 +613,7 @@ TEST(SchemaConstrainTest, XmlToolCallEmptyValue) {
     SchemaConstrainer sc;
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
     sc.set_envelope("<tool_call>\n", "\n</tool_call>");
-    sc.reset();
+    sc.rewind();
 
     auto feed = [&](const std::string& s) {
         for (char c : s)
@@ -651,7 +651,7 @@ TEST(SchemaConstrainTest, XmlToolCallEnumValueConstrained) {
     SchemaConstrainer sc;
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
     sc.set_envelope("<tool_call>\n", "\n</tool_call>");
-    sc.reset();
+    sc.rewind();
     auto allowed = [&] { return schema_allowed(sc, static_cast<int>(toks.size())); };
     auto feed = [&](const std::string& s) {
         for (char c : s)
@@ -701,7 +701,7 @@ TEST(SchemaConstrainTest, XmlToolCallLiteralEnumValue) {
     SchemaConstrainer sc;
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
     sc.set_envelope("<tool_call>\n", "\n</tool_call>");
-    sc.reset();
+    sc.rewind();
     auto allowed = [&] { return schema_allowed(sc, static_cast<int>(toks.size())); };
     auto feed = [&](const std::string& s) {
         for (char c : s)
@@ -746,7 +746,7 @@ TEST(SchemaConstrainTest, XmlToolCallEmptyValueSingleNewline) {
     SchemaConstrainer sc;
     ASSERT_TRUE(sc.init(tok, std::move(schema)));
     sc.set_envelope("<tool_call>\n", "\n</tool_call>");
-    sc.reset();
+    sc.rewind();
 
     auto feed = [&](const std::string& s) {
         for (char c : s)
@@ -789,7 +789,7 @@ TEST(SchemaConstrainTest, XmlToolCallStrictOptionalEnforced) {
     sc.set_strict_optional_envelope(true);
     sc.set_preamble_with_tools(-1, 512, {opener_id}, {}, "<tool_call>", "</tool_call>",
                                /*thinking_open=*/false, /*strict_tool=*/true);
-    sc.reset();
+    sc.rewind();
 
     auto allowed = [&] { return schema_allowed(sc, static_cast<int>(toks.size())); };
     auto feed = [&](const std::string& s) {
@@ -852,7 +852,7 @@ TEST(SchemaConstrainTest, XmlToolCallStrictParallelReArms) {
     sc.set_allow_parallel(true);
     sc.set_preamble_with_tools(-1, 512, {opener_id}, {}, "<tool_call>", "</tool_call>",
                                /*thinking_open=*/false, /*strict_tool=*/true);
-    sc.reset();
+    sc.rewind();
 
     auto allowed = [&] { return schema_allowed(sc, static_cast<int>(toks.size())); };
     auto feed = [&](const std::string& s) {

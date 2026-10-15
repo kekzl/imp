@@ -37,8 +37,9 @@ include(imp-deps)  # third-party dependency pins (single source; mirrored by Doc
 # imp target (lib, tools, server, tests) so warnings apply to OUR host C++ TUs
 # only — never nvcc, never FetchContent deps. (Was a global CMAKE_CXX_FLAGS.)
 add_library(imp_warnings INTERFACE)
+# -Wshadow: 0 g++ findings across first-party host TUs (DISPATCH_cleanup B8); nvcc TUs excluded.
 target_compile_options(imp_warnings INTERFACE
-    $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>)
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-Wshadow>)
 # #2211: a dropped [[nodiscard]] status is a build error. nvcc front end: diag 2809.
 target_compile_options(imp_warnings INTERFACE
     $<$<COMPILE_LANGUAGE:CXX>:-Werror=unused-result>
@@ -380,20 +381,6 @@ list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_ra2.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_apa.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_hw.cu)
-# Bench/probe TUs were relocated to tests/bench/ (P3 §10 #12, P5 §3).
-# Validate/ref TUs that still serve internal call sites stay in src/compute/.
-if(IMP_BUILD_TESTS OR IMP_BUILD_BENCH)
-    list(APPEND IMP_COMPUTE_SOURCES tests/bench/attention_mxf4nvf4_probe.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_ref.cu)
-    list(APPEND IMP_COMPUTE_SOURCES tests/bench/mxf4nvf4_mma_bench.cu)
-    list(APPEND IMP_COMPUTE_SOURCES tests/bench/mma_peak_saturated.cu)
-    list(APPEND IMP_COMPUTE_SOURCES tests/bench/mxf4nvf4_mma_variants_bench.cu)
-    list(APPEND IMP_COMPUTE_SOURCES tests/bench/fp4_pv_bench.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_qkt_validate.cu)
-    list(APPEND IMP_COMPUTE_SOURCES tests/bench/tma_block_scale_bench.cu)
-    list(APPEND IMP_COMPUTE_SOURCES tests/bench/fmha_v_load_bench.cu)
-    list(APPEND IMP_COMPUTE_SOURCES tests/bench/mmq_q4k_imma_bench.cu)
-endif()
 if(IMP_BUILD_TESTS)
     set_source_files_properties(src/compute/gemm_grouped_nvfp4_smallM.cu
         PROPERTIES COMPILE_DEFINITIONS "SMALLM_TEST_HOOKS=1")
@@ -1326,6 +1313,24 @@ if(IMP_BUILD_TESTS)
         tests/test_mmq_q8_imma_tail.cu
         tests/test_weight_dispatch.cu
     )
+    # Probe, microbench and reference TUs: callers only in test-quant, 0 in src/ or tools/.
+    # Compiled like libimp (static, PIC, no -rdc); never part of libimp or a shipped binary.
+    add_library(imp_test_kernels STATIC
+        tests/bench/attention_mxf4nvf4_probe.cu
+        src/compute/nvfp4_quant_ref.cu
+        tests/bench/mxf4nvf4_mma_bench.cu
+        tests/bench/mma_peak_saturated.cu
+        tests/bench/mxf4nvf4_mma_variants_bench.cu
+        tests/bench/fp4_pv_bench.cu
+        src/compute/mxf4nvf4_qkt_validate.cu
+        tests/bench/tma_block_scale_bench.cu
+        tests/bench/fmha_v_load_bench.cu
+        tests/bench/mmq_q4k_imma_bench.cu
+    )
+    target_include_directories(imp_test_kernels PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(imp_test_kernels PUBLIC imp PRIVATE imp_warnings)
+    set_target_properties(imp_test_kernels PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_link_libraries(test-quant PRIVATE imp_test_kernels)
     # test_cutlass_grouped_tile_bench.cu instantiates CUTLASS grouped GEMMs
     # of its own (tile-shape A/B against the shipped kernel).
     target_include_directories(test-quant PRIVATE

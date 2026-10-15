@@ -494,12 +494,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                hd, cfg.qk_rope_head_dim, cfg.kv_lora_rank, mla_absorb_max_seq_, stream);
     }
 
-    // Decode attention for `n` one-token rows: historical inline block, now a
+    // Decode attention for `sub_n` one-token rows: historical inline block, now a
     // lambda so ragged prefill can hand its riders (mixed prefill+decode step)
-    // to it as ONE batched launch per layer. `state`/`layer_block_tables` are
+    // to it as ONE batched launch per layer. `sub_state`/`sub_block_tables` are
     // the sub-batch's own (block tables, context lens, positions start at its first sequence).
-    auto decode_attend = [&](const InferenceState& state, int n, int row_begin, Tensor qv, Tensor kk,
-                             Tensor vv, Tensor ao, const int* layer_block_tables) {
+    auto decode_attend = [&](const InferenceState& sub_state, int sub_n, int row_begin, Tensor sub_q,
+                             Tensor sub_k, Tensor sub_v, Tensor sub_ao, const int* sub_block_tables) {
 #include "exec/executor_attention_decode.cpp"  // NOLINT(bugprone-suspicious-include): body fragment, not a TU
     };
 
@@ -508,10 +508,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // parameterized on per-sequence geometry so the ragged cross-sequence path
         // can loop it. Non-ragged callers pass bt_flat=nullptr, keeping
         // write_kv_cache on its historical default path.
-        auto prefill_attend_seq = [&](int n, int q_offset, int row_begin, Tensor qv, Tensor kk,
-                                      Tensor vv, Tensor ao, const int* layer_block_tables,
-                                      const int* bt_flat, const int* bt_swa_flat,
-                                      const int* seq_positions) {
+        auto prefill_attend_seq = [&](int seq_n, int q_offset, int row_begin, Tensor seq_q, Tensor seq_k,
+                                      Tensor seq_v, Tensor seq_ao, const int* seq_block_tables,
+                                      const int* bt_flat, const int* bt_swa_flat, const int* seq_positions) {
 #include "exec/executor_attention_prefill.cpp"  // NOLINT(bugprone-suspicious-include): body fragment, not a TU
         };
         if (state.ragged_prefill()) {
@@ -652,8 +651,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             wo_nvfp4.N = static_cast<int>(wo_h.shape[0]);
             wo_nvfp4.K = static_cast<int64_t>(static_cast<int>(wo_h.shape[1])) * 2;  // packed → logical K
         }
-        int M_o = wo_nvfp4.N;
-        int K_o = wo_nvfp4.K;
+        int M_o = static_cast<int>(wo_nvfp4.N);
+        int K_o = static_cast<int>(wo_nvfp4.K);
         gemv_nvfp4_residual(wo_nvfp4, static_cast<const half*>(ao.data), static_cast<half*>(h.data),
                             static_cast<const half*>(h.data), M_o, K_o, stream,
                             norm_fold_arm_(layer, /*after_ffn=*/false, view_tokens(norm_out_, 1)));
@@ -705,7 +704,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // Sandwich norm with FP32 accumulator (Gemma-3):
             // FP32 residual += attn_out, then post_attn_norm → FP16 hidden.
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
-            float eps = model_->config().rms_norm_eps;
+            float post_eps = model_->config().rms_norm_eps;
             if (layer == 0 && debug_attn_steps) {
                 IMP_LOG_DEBUG("[DEBUG_FWD] L0 fp32_accum_kernel: po=%p h=%p fp32_h=%p d=%d n=%d", po.data,
                               h.data, fp32_h.data, model_->config().d_model, n);
@@ -749,7 +748,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             rmsnorm_fp32_accum_to_fp16(static_cast<const half*>(po.data),
                                        static_cast<const half*>(ly.post_attn_norm.data),
                                        static_cast<float*>(fp32_h.data), static_cast<half*>(h.data), n,
-                                       model_->config().d_model, eps, norm_w_off_, stream);
+                                       model_->config().d_model, post_eps, norm_w_off_, stream);
             if (layer == 0 && debug_attn_steps) {
                 debug_tensor_stats_all("L0_post_fp32accum_h", view_tokens(h, n), stream);
             }

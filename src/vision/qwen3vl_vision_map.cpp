@@ -1,6 +1,6 @@
 #include "vision/qwen3vl_vision_map.h"
 
-#include <cstdlib>
+#include "model/model_limits.h"
 
 namespace imp {
 
@@ -19,7 +19,7 @@ int take_index(const std::string& s, size_t& pos) {
         ++pos;
     if (pos == start || pos >= s.size() || s[pos] != '.')
         return -1;
-    const int v = std::atoi(s.substr(start, pos - start).c_str());
+    const int v = parse_index(s.substr(start, pos - start), IndexParse::kAtoi);
     ++pos;  // skip '.'
     return v;
 }

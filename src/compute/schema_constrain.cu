@@ -72,7 +72,7 @@ bool SchemaConstrainer::init_grammar_for_test(std::unique_ptr<SchemaNode> schema
         return false;
     // No tokenizer classification and no device buffers: token_legal() walks
     // the frame stack only, which is all the CPU grammar battery needs.
-    reset();
+    rewind();
     initialized_ = true;
     return true;
 }
@@ -112,7 +112,7 @@ bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> s
     if (!dev_.alloc_allowed_mask("SchemaConstrainer"))
         return false;
 
-    reset();
+    rewind();
     initialized_ = true;
 
     IMP_LOG_INFO("SchemaConstrainer: initialized with %d tokens, schema type=%d", vocab_size_,
@@ -124,7 +124,7 @@ bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> s
 // Reset
 // ---------------------------------------------------------------------------
 
-void SchemaConstrainer::reset() {
+void SchemaConstrainer::rewind() {
     stack_.clear();
     if (strict_optional_envelope_) {
         // Strict OPTIONAL tool call: leave the stack EMPTY while the tool-aware preamble gate is

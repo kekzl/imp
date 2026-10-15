@@ -8,7 +8,7 @@ SamplingDefaults get_sampling_defaults(ModelArch arch) {
     return d;
 }
 
-SamplingDefaults resolve_sampling_defaults(ModelArch arch, const HFConfigLoader::GenerationConfig& gen) {
+SamplingDefaults resolve_sampling_defaults(ModelArch arch, const GenerationConfig& gen) {
     SamplingDefaults d = get_sampling_defaults(arch);
     if (gen.temperature >= 0.0f)
         d.temperature = gen.temperature;

@@ -409,6 +409,244 @@ Code head `60d148cd`, image `imp:b4-final`, against the Phase 3 baseline image `
 | C-010 | DEFER to the deferred list | removal flips the result to true on a failed device query (CPU lane) and on cc < 12.0 |
 | C-008 `get_device_sm_version` | next batch | live caller `tools/imp-bench/bench_attention.cu:168` |
 
+## 2026-10-15 Phase 4 B7 (builder)
+
+Branch `cleanup/b7-dup-helpers` off `origin/main` 1ab58bc7. Compile + CPU only, no GPU run. `make build DOCKER_IMG=imp:b7-branch`: 13 unique warning lines (main: 13), 0 in a changed file. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight`.
+
+| row | files | change | lines +/- | result |
+|---|---|---|---|---|
+| H-012 | `model/model_limits.h`, `model/gguf_tensor_assign.cpp` (2), `vision/vision_loader.cpp`, `lora/lora_adapter.cpp`, `vision/qwen3vl_vision_map.cpp`, `exec/pre_dequant_phase0_nvfp4_loader.cpp` (2), `tests/test_checkpoint_limits.cpp` | `parse_index(s, IndexParse)`: `kStrict` (default, unchanged), `kAtoi` = `(int)strtol` (glibc `atoi`), `kStoi` = `std::stoi` with throw -> -1; 3 `stoi` sites -> `kStoi`, 4 `atoi` sites -> `kAtoi`; every site rejects < 0 after the parse, so throw and -1 take the same branch | +70 / -27 | applied, behaviour-neutral for every input |
+| H-014 | `core/cache_dir.h` (new), `memory/weight_cache_file.cpp`, `memory/library_reserve_cache.cpp`, `tests/test_library_reserve_cache.cpp` | `imp_cache_dir(leaf)`: XDG, then HOME, then ""; fallbacks stay at the callers (`/tmp/imp-warm-cache`, "") | +74 / -12 | applied |
+
+| test | cases |
+|---|---|
+| `CheckpointLimits.IndexParsingStrictEdgeCases` | "007" -> 7, INT_MAX, "x", "+3", " 3", "3 ", "-0" -> 0, "-5" |
+| `CheckpointLimits.IndexParsingLegacyPoliciesMatchAtoiAndStoi` | 13 inputs against `std::atoi` / `std::stoi` as oracle; pinned "x" -> 0 (kAtoi), "3x" -> 3 (kStoi), "4294967296" -> 0 (kAtoi), 2 overflows -> -1 (kStoi) |
+| `CheckpointLimits.IndexParsingRejectsOverflowAndJunk` (existing) | empty, "1x", "-1", 3 overflows |
+| `LibraryReserveCache.CacheDirResolvesXdgThenHomeThenEmpty` | XDG set; XDG "" + HOME; XDG unset + HOME "" |
+
+| mutation (one `make dev-test` run, files restored from scratchpad backups) | failing tests | rerun after restore |
+|---|---|---|
+| kStrict: `return 0` instead of `return -1` on a parse error | `IndexParsingRejectsOverflowAndJunk`, `IndexParsingStrictEdgeCases`, `AnAliasingLayerIndexDoesNotOverwriteLayerZero` | 13/13 |
+| kStoi: drop the `end == s.c_str()` no-digits check | `IndexParsingLegacyPoliciesMatchAtoiAndStoi` | 13/13 |
+| `imp_cache_dir`: accept an empty `XDG_CACHE_HOME` | `CacheDirResolvesXdgThenHomeThenEmpty` | 13/13 |
+
+| needs orchestrator go (switch to `kStrict`) | legacy malformed mapping | input source |
+|---|---|---|
+| `model/gguf_tensor_assign.cpp:78` layer (`kStoi`) | "3x", " 3", "+3" -> layer 3 | GGUF tensor name |
+| `model/gguf_tensor_assign.cpp:327` expert (`kStoi`) | "3x" -> expert 3 | GGUF tensor name |
+| `vision/vision_loader.cpp:469` layer (`kStoi`) | "3x" -> layer 3 | mmproj GGUF tensor name |
+| `lora/lora_adapter.cpp:32` layer (`kAtoi`) | "x" -> layer 0; overflow -> truncated | PEFT adapter key |
+| `vision/qwen3vl_vision_map.cpp:22` block (`kAtoi`) | digit run > INT_MAX -> low 32 bits ("4294967296" -> block 0) | SafeTensors name, digits pre-checked |
+| `exec/pre_dequant_phase0_nvfp4_loader.cpp:288,300` layer, expert (`kAtoi`) | "x" -> 0 | internal keys built by `std::to_string` (`weight_map.cpp`, `weight_upload.cpp`): unreachable from a checkpoint |
+
+| finding / skip | evidence | proposed next step |
+|---|---|---|
+| per-loader malformed-index tests | legacy policies keep the old mapping, so a per-loader test today pins the wrong mapping; qwen3vl already has `MalformedIndexIsUnknownNotZero` | add with each `kStrict` go |
+| GPU-only checks | no GPU in this batch | validator list in the B7 report |
+
+## 2026-10-15 Phase 4 B7 (validator)
+
+Code head `2ac22739`, image `imp:b7-final`, against the Phase 3 baseline image `imp:test-imp-baseline-016f0c60`. Verdict: all gates PASS.
+
+| gate | baseline | B7 | result |
+|---|---|---|---|
+| build warnings | 13 unique lines | 13, diff empty | PASS |
+| `make test-gpu` | 0 FAILED | 0 FAILED; `[ RUN ]` diff = 3 new B7 tests + the B2 test | PASS |
+| reference dumps (5 models x 3 prompts x 2 runs; GGUF layer, vision `v.blk.`, NVFP4 dense + MoE parse sites) | `*.choices.json` | 30/30 byte-identical | PASS |
+| Qwen3-VL-4B-Instruct dumps (vision-map parse site), 3 image prompts x 2 runs, baseline image vs B7 image | - | 6/6 byte-identical | PASS |
+| LoRA key parse site | - | `LoraHotSwap.*` 3/3 OK in test-gpu | PASS |
+| ptxas rows, 3 binaries | 1024 / 1024 / 1026 | identical | PASS |
+| SASS hash per kernel, 3 binaries | - | 0 removed, 0 added | PASS |
+| decode tg256 pooled median | 371.63 tok/s (gate 364.20..379.06) | 372.06 (+0.12 %) | PASS |
+| decode tg256 after pp2048 | 345.41 | 345.12 (-0.08 %) | PASS |
+| prefill pp512 / pp2048 | 30444 (30125..30530) / 48919 (48739..49049) | 30360 / 48958 | PASS |
+
+| not exercised | why |
+|---|---|
+| GGUF expert parse site (`gguf_tensor_assign.cpp:327`, 5-part names) | local MoE GGUFs use packed `_exps` tensors; covered by the `kStoi`/`kAtoi` reference unit test only |
+
+## 2026-10-15 Phase 4 B7 (orchestrator decision)
+
+| row | decision | why |
+|---|---|---|
+| H-012, H-014 | ship | gates above |
+| `kStrict` at the 7 parse sites | DEFER to the deferred list | behaviour change on malformed tensor names ("3x" -> layer 3 today); belongs in a fix PR with one malformed-name test per loader |
+
+## 2026-10-15 Phase 4 B5 (validator)
+
+Branch `cleanup/b5-magic-numbers` head `5a6b6e1c` (H-029, C-032, C-033 rename part, C-034, H-031, H-032; builder log on the branch), image `imp:b5-final`. Verdict: FAIL on test-gpu; not shipped.
+
+| gate | reference | B5 | result |
+|---|---|---|---|
+| build warnings | 13 | 13, diff empty | PASS |
+| SASS hash per kernel vs `imp:b4-final`, 3 binaries | - | 0 removed, 0 added | PASS |
+| PTX imp-server vs `imp:b4-final` | 886193 lines | diff 0 | PASS |
+| reference dumps | `*.choices.json` | 30/30 byte-identical | PASS |
+| decode tg256 pooled median | 371.63 tok/s | 370.72 (-0.24 %) | PASS |
+| `make test-gpu`, run 1 | 0 FAILED | `DeviceFaultSignalTest.FaultInsideAStepCancelsFaultsAndRefusesLaterRequests` FAILED (child exit 7: "the fault kernel did not poison the context"); suite stopped, DetEval + Qwen38 tokenizer not run | FAIL |
+| `make test-gpu`, run 2 | - | same test FAILED (child exit 8: `AsyncGraphLoop: no token for 30 s`) | FAIL |
+| control: `make test-gpu` on `imp:b4-final` (main without B5), between the two | - | test OK (3106 ms), suite green | - |
+
+| isolated runs of the test (`--gtest_filter='DeviceFaultSignalTest.*'`) | failed / runs |
+|---|---|
+| baseline image `imp:test-imp-baseline-016f0c60` | 0 / 60 |
+| `imp:b1-base` (main 8d4c4148, pre-cleanup) | 0 / 20 |
+| `imp:b1-final`, `b2-final`, `b3-final`, `b4-final` | 1 / 20, 1 / 20, 2 / 20, 1 / 20 |
+| `imp:b5-final` | 2 / 40 |
+| B5 with a DIAG print: dev build / image | 0 / 40, 0 / 40 |
+| all isolated failures | 7, all within the first 120 runs; 0 / 160 after them, every image |
+
+## 2026-10-15 Phase 4 B5 (orchestrator decision)
+
+| item | decision | why |
+|---|---|---|
+| B5 | REVERT: not merged; branch `cleanup/b5-magic-numbers` kept | dispatch rule: any gate failure reverts, no fix forward; full suite red 2/2 with B5, green on the control |
+| B5 re-validation | later: 3 x `make test-gpu` on a rebuilt B5 image vs 3 x main, interleaved | separate a B5 cause from the timing flake |
+| `DeviceFaultSignalTest` timing flake | new finding, needs a GPU repro | isolated failures on 5 images with unrelated code; exit 7 and exit 8 are two failure modes |
+| C-033 runtime `device_sm_count()` | DEFER | turns `kMinBlocks` into a runtime value; retry-on-error is a behaviour change |
+
+## 2026-10-15 Phase 4 B6 (builder)
+
+Branch `cleanup/b6-headers-build` off `origin/main` 887edce4, code head d85a30e2. Compile + CPU only, no GPU run. `make build DOCKER_IMG=imp:b6-branch`: 13 unique warning lines (main `imp:b6-main`: 13), diff empty. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight` (0 failures). Code diff: 14 files, +74 / -46.
+
+| row | commit | files | change | result |
+|---|---|---|---|---|
+| H-020 | 9bc8c234 | `exec/executor.h` | 2 includes (`json_constrain.h`, `schema_constrain.h`) removed | applied; build named 0 TUs that needed them through executor.h |
+| H-021 (Tokenizer) | cb561ce4 | `model/model.h`, `model/model.cpp`, `model/gguf_loader.cpp`, `vision/vision_pipeline.cpp`, `docs/CONFIG.md` | `class Tokenizer;` forward declaration; `set_tokenizer` out of line; 2 TUs named by the build include `tokenizer.h`; CONFIG.md citation `model.cpp:191` -> `:194` | applied |
+| H-021 (GenerationConfig) | bb3af8ae | `model/generation_config.h` (new), `model/hf_config_loader.h`, `model/model.h`, `runtime/presets.h`, `runtime/presets.cpp`, `tests/test_sampling_defaults_parity.cpp` | struct moved verbatim to namespace scope; `HFConfigLoader::GenerationConfig` kept as alias; 1 test TU named by the build includes `hf_config_loader.h` | applied |
+| H-009 | d85a30e2 | `CMakeLists.txt`, `Makefile`, `.github/workflows/ci.yml` | 10 TUs out of libimp into static `imp_test_kernels` (built only with `IMP_BUILD_TESTS`, linked by test-quant, PIC, no `-rdc`); kernel-resources dump (Makefile + CI step) reads `libimp_test_kernels.a` too; stale CMake + ci.yml comments removed | applied |
+
+| header (build-dev `ninja -t deps`, 844 targets) | TUs main | TUs B6 |
+|---|---:|---:|
+| `compute/json_constrain.h` | 130 | 78 |
+| `compute/schema_constrain.h` | 127 | 75 |
+| `model/tokenizer.h` | 274 | 170 |
+| `model/hf_config_loader.h` | 218 | 18 |
+| `model/generation_config.h` (new) | - | 218 |
+| `exec/executor.h`, `model/model.h` (control) | 119, 201 | 119, 201 |
+
+| `make dev` after one header change (indicative: other builders ran; load avg 3.9 main, 11.6 B6) | ninja steps main | ninja steps B6 | `touch` ms main / B6 (ccache hits) | content edit ms main / B6 (ccache misses) |
+|---|---:|---:|---:|---:|
+| `compute/json_constrain.h` | 156 | 104 | 3523 / 3489 | 74955 / 51067 |
+| `compute/schema_constrain.h` | 153 | 101 | 3262 / 3522 | 68545 / 50197 |
+| `model/tokenizer.h` | 300 | 196 | 3684 / 3624 | 130790 / 100673 |
+| `model/hf_config_loader.h` | 244 | 44 | 3707 / 3393 | 102928 / 9940 |
+
+| H-009 check | result |
+|---|---|
+| 10 moved objects, build-dev `imp.dir` vs `imp_test_kernels.dir` | byte-identical (`cmp`) |
+| tests OFF + bench ON (release-docker shape) | imp-bench, imp-server, imp-cli, imp-quantize link; libimp.a 354 objects, 0 of the 10 |
+| kernel-resources pin (libimp.a + libimp_test_kernels.a) | 92 at-risk kernels match, baseline unchanged; libimp.a alone reports 3 IMPROVED (`bench_fused`, `bench_separate`, `bench_tma_v_load`) |
+| test-quant `--gtest_list_tests` | 275 (imp:b6-main) / 275 (build-dev), names identical |
+
+| `make check-test-lanes` | main | B6 |
+|---|---|---|
+| `ctest -L unit` / no CI lane | 2357 / 1286 | 2357 / 1286 |
+| test-quant (no CI) | 262 | 262 |
+
+| SASS check (no GPU) | imp:b6-main | imp:b6-branch | result |
+|---|---|---|---|
+| per-kernel rows imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 | 1023 / 1023 / 1025 | diff 0 lines in all 3 |
+| distinct SASS hashes | - | 1014 / 1014 / 1016 | - |
+
+| host symbol diff (`nm -C --defined-only`, 3 shipped binaries) | rows |
+|---|---|
+| mangling renamed (`HFConfigLoader::GenerationConfig` -> `GenerationConfig`) | `load_generation_config` (T, t), `resolve_sampling_defaults` (T, not in imp-quantize) |
+| new out-of-line | `Model::set_tokenizer` |
+| gone weak instantiations | `Tokenizer::~Tokenizer()`, `__uniq_ptr_impl<Tokenizer>::reset` |
+| compiler label | `CSWTCH.149` -> `CSWTCH.150` |
+
+| finding | evidence | proposed next step |
+|---|---|---|
+| `json_constrain.h` / `schema_constrain.h` still reach 78 / 75 TUs | other includers (`constraint_manager.h` path) | price with the SETTLED reverse-BFS before acting (H-022) |
+| `tokenizer.h` still reaches 170 TUs | `json_constrain.h` / `schema_constrain.h` include it | same |
+| GPU-only checks | no GPU in this batch | validator: reference dumps, test-gpu (test-quant runs the moved kernels) |
+
+## 2026-10-15 Phase 4 B6 (validator)
+
+Code head `d85a30e2`, image `imp:b6-final`; paired control `imp:main-ctrl` built from main `36fa6317`. Verdict: all gates PASS.
+
+| gate | main control | B6 | result |
+|---|---|---|---|
+| build warnings | 13 | 13, diff empty | PASS |
+| SASS hash per kernel, imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 | diff 0 / 0 / 0 | PASS |
+| `make test-gpu` | 2/2 green, 3700 `[ RUN ]` each | 2/2 green, 3700 each, list diff 0; `DeviceFaultSignalTest.FaultInside...` OK in all 4 runs | PASS |
+| reference dumps vs the Phase 3 baseline | - | 30/30 byte-identical | PASS |
+| decode tg256 pooled median, paired run | 371.36 tok/s | 370.93 (-0.12 %) | PASS |
+| prefill pp512 / pp2048, paired run | 30298 / 48885 | 30330 / 48799 | PASS |
+
+| measurement note | value |
+|---|---|
+| host noise during the paired perf | spread up to 8.72 % (main) and 7.58 % (B6) on pp512; medians compared |
+| first B6 perf run (unpaired) | SM clock 2778..2855 MHz, pp512 spread 9.78 %; discarded for the paired run |
+| first two B6 suites | not run: the GPU lock was taken from the main worktree, `make test-gpu` in the B6 worktree refused it (validator script error) |
+
+## 2026-10-15 Phase 4 B6 (orchestrator decision)
+
+| row | decision | why |
+|---|---|---|
+| H-020, H-021, H-009 | ship | gates above |
+| kernel-resources pin reads `libimp_test_kernels.a` too | accept | the 3 moved bench kernels would otherwise read as IMPROVED and fail the gate; baseline unchanged |
+| rest fan-in via `constraint_manager.h`, `tokenizer.h` | with H-022 (deferred list) | M risk |
+
+## 2026-10-15 Phase 4 B8 (builder)
+
+Branch `cleanup/b8-warnings` off `origin/main` 36fa6317, code head d5c0c5d1. Compile + CPU only, no GPU run. `make build DOCKER_IMG=imp:b8-branch` (524 CXX + 302 CUDA compile steps): 13 unique warning lines (main: 13), diff empty, 0 `-Wshadow`. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight`. Code diff: 24 files, +211 / -209. origin/main moved to 32b66557 during the batch; the branch is not rebased.
+
+| row | commit | files | change | lines +/- | evidence | result |
+|---|---|---|---|---|---|---|
+| H-027 shorten (6 host) | bf732436 | `exec/executor_attention.cpp`, `exec/executor_forward_moe_legacy.cpp` | `static_cast<int>` on `NvFP4QuantResult::N/K` (`int64_t`) at the `int` GEMV args: attention:655,656; moe_legacy:282,329 (N and K each) | +6 / -6 | same implicit conversion spelled out; host objects identical | applied |
+| H-027 shadow (5 listed host) | e3c9eb70 | `exec/executor_attention.cpp` (`eps` -> `post_eps`), `exec/executor_attention_qkv.cpp:257` (`h` -> `kv_h`), `runtime/engine_kv_cache_init.cpp:506` (`blocks_per_seq` -> `blocks_per_req`), `model/tokenizer.cpp:657` (`n` -> `entry`), `imp-server/handlers_misc.cpp:651` (`req` -> `embed_req`) | rename | +34 / -34 | g++ `-Wshadow` reports each; host objects identical | applied |
+| g++ `-Wshadow`, 4 more sites | e3c9eb70 | `exec/executor_attention_qkv.cpp:152` (`h` -> `wh`), `exec/executor_forward_moe_cutlass.cpp:289` (`n` -> `n_ex`), `imp-quantize/awq_plan.cpp:473` (`f` -> `fs`), `tests/test_determinism_e2e.cpp:208` (`info` -> `param_info`) | rename | (same commit) | not in the clang lane (g++ only) | applied |
+| g++ `-Wshadow`, `Tensor` ctors (11) | c260f775 | `core/tensor.cpp` | ctor params `ptr, qt, nd, dims, strides, dev` in the definition; `this->` dropped | +11 / -11 | `tensor.h` keeps member-named params: 120 `/*on_device=*/` argument comments (bugprone-argument-comment, WarningsAsErrors) | applied |
+| g++ `-Wshadow`, attention lambdas (13) | cd6be0ab | `exec/executor_attention.cpp`, `exec/executor_attention_decode.cpp`, `exec/executor_attention_prefill.cpp` | `decode_attend` params -> `sub_state, sub_n, sub_q, sub_k, sub_v, sub_ao, sub_block_tables`; `prefill_attend_seq` -> `seq_n, seq_q, seq_k, seq_v, seq_ao, seq_block_tables`; both fragments get `// clang-format off` | +120 / -119 | object identical before the marker; after it only 21 line-number immediates (`__LINE__`, +-1) | applied |
+| H-027 flag | b08e8895 | `CMakeLists.txt` | `-Wshadow` added to `imp_warnings` under `$<COMPILE_LANGUAGE:CXX>` | +2 / -1 | 0 findings in deps (FetchContent targets do not link `imp_warnings`; no header warning seen) | applied |
+| H-027 `-Wsign-conversion`, `-Wimplicit-int-float` | - | - | not enabled | - | inventory: 1850 + 473 host findings, L effort | out of scope (row says leave off) |
+| H-025 | d5c0c5d1 | 4 `compute/*_constrain.h`, 4 `compute/*_constrain.cu` (host methods), `runtime/constraint_manager.cpp`, `tests/test_regex_constrain.cpp`, `tests/test_tool_call_constrain.cu` | `{Json,Schema,Regex,Grammar}Constrainer::reset()` -> `rewind()`; `ConstraintManager` `->reset()` x10 -> `->rewind()`; `.reset()` x3 on the `unique_ptr` unchanged | +38 / -38 | preflight tidy on `constraint_manager.cpp`: 0 `readability-ambiguous-smartptr-reset-call` (inventory: 13); old name gone, so a missed caller is a compile error | applied |
+
+| `-Wshadow` count (g++, `make dev`) | value |
+|---|---|
+| main, flag off | 0 (flag absent); 13 unique warning lines total |
+| main + flag, before renames | 33 unique sites: tensor.cpp 11, executor_attention.cpp 14, executor_attention_qkv.cpp 2, 1 each in moe_cutlass, tokenizer, engine_kv_cache_init, awq_plan, handlers_misc, test_determinism_e2e |
+| branch + flag | 0; `make build` 13 unique lines, diff vs main empty |
+
+| behaviour check (no GPU) | reference | B8 | result |
+|---|---|---|---|
+| host `objdump -d -r` of all 522 first-party `.cpp.o` in `build-dev`, before vs after bf732436..cd6be0ab (pre-marker) | main 36fa6317 | 522 / 522 identical | PASS |
+| same, after the `clang-format off` lines | - | 521 identical; `executor_attention.cpp.o`: 21 `mov`/`push` immediates = log `__LINE__` +-1 | PASS |
+| same, H-025 (`Constrainer::reset()` -> `rewind()` normalised in symbol names) | cd6be0ab | `constraint_manager.cpp.o`, `test_regex_constrain.cpp.o`: 0 diff lines | PASS |
+| SASS per kernel, `imp:main-ctrl` (36fa6317) vs `imp:b8-branch`, imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 rows | 1023 / 1023 / 1025, 0 hash diffs; 1014 distinct hashes in imp-server | PASS |
+
+| finding / skip | evidence | proposed next step |
+|---|---|---|
+| `readability-inconsistent-declaration-parameter-name` on `tensor.h:47,50` | 2 new advisory tidy findings (not WarningsAsErrors) from c260f775 | rename the header params together with the `/*on_device=*/` comments, or accept |
+| `IMP_CUDA_CHECK_LOG` text in `executor_attention_prefill.cpp:202,205` | `#call` stringifies `kk.data`/`vv.data`, now `seq_k.data`/`seq_v.data`: CUDA-error message text only | none |
+| `// clang-format off` in the two attention fragments | `git clang-format` formats a body fragment as top-level code: every changed line of a top-level block is dedented | none; applies to any later edit of those fragments |
+| GPU-only checks | no GPU in this batch | validator: test-gpu (`*JsonConstrain*`, `*SchemaConstrain*`, `*Regex*`, `*Gbnf*`, `*ToolCall*`), reference dumps (attention lambdas), PTX diff |
+
+## 2026-10-15 Phase 4 B8 (validator)
+
+Code head `d5c0c5d1`, image `imp:b8-final`; paired control `imp:main-ctrl` (main `36fa6317`, the branch base). Verdict: all gates PASS.
+
+| gate | main control | B8 | result |
+|---|---|---|---|
+| build warnings (with `-Wshadow` on) | 13 | 13, diff empty; merged with main (B6, B7): 13, 0 `-Wshadow` | PASS |
+| SASS hash per kernel, imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 | diff 0 / 0 / 0 | PASS |
+| PTX imp-server | 886193 lines | diff 0 | PASS |
+| `make test-gpu` | 2/2 green (B6 validator run) | 2/2 green, 3700 `[ RUN ]` each, list diff 0; `DeviceFaultSignalTest.FaultInside...` OK both | PASS |
+| reference dumps vs the Phase 3 baseline | - | 30/30 byte-identical | PASS |
+| decode tg256 pooled median, paired run | 366.12 tok/s | 366.55 (+0.12 %) | PASS |
+| prefill pp512 / pp2048, paired run | 29581 / 48374 | 30078 / 48269 | PASS |
+
+## 2026-10-15 Phase 4 B8 (orchestrator decision)
+
+| row | decision | why |
+|---|---|---|
+| H-027 (6 shorten + 33 shadow sites), `-Wshadow` for first-party host C++, H-025 (`reset()` -> `rewind()`) | ship | gates above |
+| `// clang-format off` in `executor_attention_decode.cpp`, `executor_attention_prefill.cpp` | accept | precedent in 3 files (`image_decode.cpp`, `arch_registry.cpp`, `fim.cpp`); `__LINE__` in error texts shifts by 1 |
+| 2 `readability-inconsistent-declaration-parameter-name` hints in `tensor.h:47,50` | accept | keeps 120 `/*on_device=*/` argument comments valid; not a gated check |
+
 ## 2026-10-15 Phase 4 B5 (builder)
 
 Branch `cleanup/b5-magic-numbers` off `origin/main` fb524a1d, code head 0431193f. Compile only, no GPU run. `make build DOCKER_IMG=imp:b5-branch`: 13 unique warning lines (main: 13), all in untouched `tests/*.cpp` and `stl_vector.h`, 0 in a changed file. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight` (final: 0 failures). Code diff: 23 files, +110 / -38. Every replaced literal keeps its type and value; no compile-time constant became a runtime query.

@@ -278,8 +278,8 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                         nw.K = static_cast<int>(w.shape[1] * 2);
                         const int M = static_cast<int>(a.shape[0]);
                         if (M == 1) {
-                            gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data),
-                                            static_cast<half*>(c.data), nw.N, nw.K, stream);
+                            gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data), static_cast<half*>(c.data),
+                                            static_cast<int>(nw.N), static_cast<int>(nw.K), stream);
                         } else {
                             int64_t a_shape[2] = {static_cast<int64_t>(M),
                                                   static_cast<int64_t>(nw.K)};
@@ -325,8 +325,8 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                         nw.K = static_cast<int>(w.shape[1] * 2);
                         const int M = static_cast<int>(a.shape[0]);
                         if (M == 1) {
-                            gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data),
-                                            static_cast<half*>(c.data), nw.N, nw.K, stream);
+                            gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data), static_cast<half*>(c.data),
+                                            static_cast<int>(nw.N), static_cast<int>(nw.K), stream);
                         } else {
                             // M>1 routes through gemm_nvfp4 for the same reason the resident path
                             // does: the per-row gemv loop is wrong on multi-token expert prefill (bisected

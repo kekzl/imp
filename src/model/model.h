@@ -2,11 +2,10 @@
 
 #include "memory/host_pinned.h"
 #include "memory/upload_reserve.h"
-#include "model/hf_config_loader.h"
+#include "model/generation_config.h"
 #include "model/model_config.h"
 #include "model/model_profile.h"
 #include "model/mtp_head.h"
-#include "model/tokenizer.h"
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -22,6 +21,8 @@ class WeightUploadLog;
 // so model/ has no header dependency on vision/.
 struct VisionModel;
 class NGramTable;
+// Held by unique_ptr only; set_tokenizer and ~Model are out of line (model.cpp).
+class Tokenizer;
 
 class Model {
 public:
@@ -42,7 +43,7 @@ public:
     // Sampling/EOS defaults shipped by the model author in
     // generation_config.json (SafeTensors only; empty for GGUF). Sentinel
     // values (<0) mean the field was not present.
-    const HFConfigLoader::GenerationConfig& generation_config() const { return generation_config_; }
+    const GenerationConfig& generation_config() const { return generation_config_; }
     // C++23 deducing this: one overload serves const and non-const callers.
     template <typename Self>
     auto&& layer(this Self&& self, int i) {
@@ -65,7 +66,7 @@ public:
     int n_layers() const { return static_cast<int>(layers_.size()); }
 
     Tokenizer* tokenizer() const { return tokenizer_.get(); }
-    void set_tokenizer(std::unique_ptr<Tokenizer> tok) { tokenizer_ = std::move(tok); }
+    void set_tokenizer(std::unique_ptr<Tokenizer> tok);
 
     // Uploads mmap'd weights to GPU, dequantizing per dtype (Q4_0 unpacks to nibbles+scales on
     // GPU, Q8_0 dequants to FP16, F16/BF16 direct, F32 converts to compute_dtype). warm_cache
@@ -112,7 +113,7 @@ public:
 
     ModelConfig config_;
     ModelProfile profile_;
-    HFConfigLoader::GenerationConfig generation_config_;
+    GenerationConfig generation_config_;
     Tensor tok_emb_, out_norm_, out_proj_;
     Tensor out_proj_row_scales_;
     // Qwen4Exp: the final hyper-connection mixer folds the hc_count streams back to d_model

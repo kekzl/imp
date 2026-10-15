@@ -6,21 +6,21 @@
 
 namespace imp {
 
-Tensor::Tensor(void* data, QType qtype, int ndim, const int64_t* shape, bool on_device)
-    : data(data), qtype(qtype), ndim(ndim), on_device(on_device) {
-    IMP_CHECK(ndim >= 0 && ndim <= kMaxDims, "Tensor: ndim=%d out of [0, %d]", ndim, kMaxDims);
-    for (int i = 0; i < ndim; ++i) {
-        this->shape[i] = shape[i];
+Tensor::Tensor(void* ptr, QType qt, int nd, const int64_t* dims, bool dev)
+    : data(ptr), qtype(qt), ndim(nd), on_device(dev) {
+    IMP_CHECK(nd >= 0 && nd <= kMaxDims, "Tensor: ndim=%d out of [0, %d]", nd, kMaxDims);
+    for (int i = 0; i < nd; ++i) {
+        shape[i] = dims[i];
     }
     compute_strides();
 }
 
-Tensor::Tensor(void* data, QType qtype, int ndim, const int64_t* shape, const int64_t* stride, bool on_device)
-    : data(data), qtype(qtype), ndim(ndim), on_device(on_device) {
-    IMP_CHECK(ndim >= 0 && ndim <= kMaxDims, "Tensor: ndim=%d out of [0, %d]", ndim, kMaxDims);
-    for (int i = 0; i < ndim; ++i) {
-        this->shape[i] = shape[i];
-        this->stride[i] = stride[i];
+Tensor::Tensor(void* ptr, QType qt, int nd, const int64_t* dims, const int64_t* strides, bool dev)
+    : data(ptr), qtype(qt), ndim(nd), on_device(dev) {
+    IMP_CHECK(nd >= 0 && nd <= kMaxDims, "Tensor: ndim=%d out of [0, %d]", nd, kMaxDims);
+    for (int i = 0; i < nd; ++i) {
+        shape[i] = dims[i];
+        stride[i] = strides[i];
     }
 }
 

@@ -149,15 +149,15 @@
                 hadamard_transform_fp16(static_cast<const half*>(no.data), static_cast<half*>(no.data), 1, K,
                                         hbs, stream);
             // Reconstruct CutlassMxFP4Weight structs from handle payloads.
-            auto make_mxfp4 = [](const WeightHandle* h) {
+            auto make_mxfp4 = [](const WeightHandle* wh) {
                 CutlassMxFP4Weight mw;
-                mw.data = h->payload.mxfp4.weight;
-                mw.scale_factors = h->payload.mxfp4.scales;
-                mw.linear_scales = h->payload.mxfp4.linear_scales;
-                mw.hadamard_bs = h->payload.mxfp4.hadamard_bs;
+                mw.data = wh->payload.mxfp4.weight;
+                mw.scale_factors = wh->payload.mxfp4.scales;
+                mw.linear_scales = wh->payload.mxfp4.linear_scales;
+                mw.hadamard_bs = wh->payload.mxfp4.hadamard_bs;
                 mw.tensor_scale = 1.0f;
-                mw.N = static_cast<int>(h->shape[0]);
-                mw.K = static_cast<int>(h->shape[1]);
+                mw.N = static_cast<int>(wh->shape[0]);
+                mw.K = static_cast<int>(wh->shape[1]);
                 mw.sf_bytes = cutlass_mxfp4_sf_size(mw.N, mw.K);
                 mw.owns_data = false;
                 return mw;
@@ -254,9 +254,9 @@
                 const Tensor* fused_kv = nullptr;
                 Tensor fused_from_handle;
                 if (ly.fused_kv_id != kInvalidTensorID) {
-                    const auto& h = registry_.handle(ly.fused_kv_id);
-                    if (h.payload.fp16.data) {
-                        fused_from_handle = Tensor(h.payload.fp16.data, QType::F16, 2, h.shape, true);
+                    const auto& kv_h = registry_.handle(ly.fused_kv_id);
+                    if (kv_h.payload.fp16.data) {
+                        fused_from_handle = Tensor(kv_h.payload.fp16.data, QType::F16, 2, kv_h.shape, true);
                         fused_kv = &fused_from_handle;
                     }
                 }
