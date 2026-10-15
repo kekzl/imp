@@ -1,6 +1,7 @@
 #include "lora/lora_adapter.h"
 #include "core/logging.h"
 #include "model/json_util.h"
+#include "model/model_limits.h"
 #include "core/fp_bits.h"
 
 #include <cuda_fp16.h>
@@ -28,7 +29,7 @@ bool parse_key(const std::string& key, int* layer, LoraProj* proj, bool* is_A) {
     size_t num_end = key.find('.', num_start);
     if (num_end == std::string::npos)
         return false;
-    *layer = std::atoi(key.substr(num_start, num_end - num_start).c_str());
+    *layer = parse_index(key.substr(num_start, num_end - num_start), IndexParse::kAtoi);
 
     struct {
         const char* needle;

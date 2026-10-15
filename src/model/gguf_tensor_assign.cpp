@@ -5,6 +5,7 @@
 #include "model/gguf_loader_internal.h"
 #include "model/loader_assign.h"
 #include "model/model_arch.h"
+#include "model/model_limits.h"
 #include "core/logging.h"
 
 #include <cmath>
@@ -74,13 +75,7 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
     if (parts.size() < 3)
         return false;
 
-    int layer_idx = 0;
-    try {
-        layer_idx = std::stoi(parts[1]);
-    } catch (...) {
-        return false;
-    }
-
+    const int layer_idx = parse_index(parts[1], IndexParse::kStoi);
     if (layer_idx < 0 || layer_idx >= model.n_layers())
         return false;
     auto& layer = model.layers_[layer_idx];
@@ -329,13 +324,7 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
         }
 
         // MoE expert weights: "blk.{i}.ffn_*.{expert_idx}.weight"
-        int expert_idx = 0;
-        try {
-            expert_idx = std::stoi(parts[3]);
-        } catch (...) {
-            return false;
-        }
-
+        const int expert_idx = parse_index(parts[3], IndexParse::kStoi);
         int n_experts = model.config().n_experts;
         if (expert_idx < 0 || expert_idx >= n_experts)
             return false;
