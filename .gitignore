@@ -135,3 +135,8 @@ build-interpose/
 codegraph.json
 loop/
 results/
+
+# npm install from the webui/dev Playwright harness (container writes into the mounted dir)
+tools/imp-server/webui/dev/node_modules/
+tools/imp-server/webui/dev/package.json
+tools/imp-server/webui/dev/package-lock.json

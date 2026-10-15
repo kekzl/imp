@@ -109,7 +109,7 @@ curl -s http://localhost:8090/health | jq -c '{status,kv_blocks_total,kv_capacit
 **Ready** after about 64 s: `Server listening on http://0.0.0.0:8090` in `docker logs imp-server`, `/health` prints `{"status":"ok","kv_blocks_total":2025,"kv_capacity_tokens":32400}`. Image v0.46.0 or later; RAM, measurements: [`docs/QUICKSTART.md`](docs/QUICKSTART.md#qwen38-flash-next).
 ## Using it
 
-- **In the browser:** <http://localhost:8080>, the built-in chat.
+- **In the browser:** <http://localhost:8080>, the built-in chat: saved conversations, sampling controls, live server metrics, GPU energy per answer ([tour](docs/QUICKSTART.md#4-or-use-the-other-surfaces)).
 - **Your apps and coding agents:** an "OpenAI-compatible" provider with base URL **`http://localhost:8080/v1`**; Anthropic apps: `http://localhost:8080/v1/messages`. The model id is the file or directory name (`GET /v1/models`).
 - **Tool calling, JSON output, streaming** on every API dialect; which fields work: [`docs/API.md`](docs/API.md).
 - **Thinking models:** the reasoning comes back in `reasoning_content`, the answer in `content`.

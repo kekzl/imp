@@ -9,21 +9,42 @@ TTFT, inter-token latency and mid-stream failures are observable.
 
 Serves GET / from --html so the page runs same-origin, as in production.
 Prompt keywords steer a run: nothink, length, thinkonly, fail400, fail500,
-failmid (socket dropped after 12 tokens), slow (2.5 s TTFT), long, big.
+failmid (socket dropped after 12 tokens), slow (2.5 s TTFT), long, big,
+fast (3x token rate, no stall), deepthink (long reasoning, for end_thinking).
 Naming a model with loaded=false swaps it in after --swap-delay seconds;
 --boot-delay N answers /v1/models with an empty list for N seconds;
 --answer-file / --reasoning-file replace the built-in texts (README capture).
+Also mirrors GET /metrics (names from handlers_misc.cpp / metrics_memory.cpp, plus
+imp_gpu_power_watts / imp_gpu_energy_joules_total unless --no-power), /props, /info,
+/health, POST /tokenize, POST /v1/requests/{id}/end_thinking, streamed logprobs,
+response_format (answers JSON) and image_url parts (400 vision_unavailable on a
+model whose name contains "Llama").
 
     docker run --rm -p 9099:9099 -v "$PWD":/src -w /src python:3.12-slim \
         python3 tools/imp-server/webui/dev/mock_server.py --port 9099
-    # then open http://localhost:9099/ or run drive.js (see its header)
+    # then open http://localhost:9099/ or run drive.py (see its header)
 """
-import argparse, json, os, random, socket, sys, threading, time, uuid
+import argparse, json, math, os, random, socket, sys, threading, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 ARGS = None
-STATE = {"loaded": None, "boot_until": 0.0, "lock": threading.Lock()}
+STATE = {"loaded": None, "boot_until": 0.0, "lock": threading.Lock(), "started": time.time()}
+# /metrics counters; energy integrates power (idle vs streaming) between reads.
+METRICS = {"requests": 0, "failed": 0, "prompt": 0, "completion": 0, "cached": 0, "active": 0,
+           "energy": 0.0, "energy_t": time.monotonic(), "last_ttft_ms": 0}
+ACTIVE = {}  # request id -> threading.Event set by end_thinking
+
+
+def power_now():
+    return 72.0 + (380.0 if METRICS["active"] else 0.0) + random.uniform(-4, 4)
+
+
+def tick_energy():
+    with STATE["lock"]:
+        now = time.monotonic()
+        METRICS["energy"] += power_now() * (now - METRICS["energy_t"])
+        METRICS["energy_t"] = now
 
 REASONING = ("Let me think about this. The user wants a short answer with an example. "
              "I should mention the key point first, then show code, then summarise. "
@@ -75,10 +96,57 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
-    def _reqid(self):
-        rid = self.headers.get("X-Request-Id") or ("req_" + uuid.uuid4().hex[:12])
+    def _reqid(self, own=None):
+        # Like the server: the client id if sent, else the completion id on generation routes.
+        rid = self.headers.get("X-Request-Id") or own or ("req_" + uuid.uuid4().hex[:12])
         self.send_header("X-Request-Id", rid)
         return rid
+
+    def _text(self, status, text, ctype):
+        raw = text.encode()
+        self.send_response(status)
+        self._cors()
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _metrics(self):
+        tick_energy()
+        loaded = STATE["loaded"] or ""
+        active = METRICS["active"]
+        total_blocks = ARGS.ctx // 16 * 4
+        used = min(total_blocks, 180 + active * 900 + METRICS["requests"] * 12)
+        lines = [
+            ("imp_uptime_seconds", int(time.time() - STATE["started"])),
+            ("imp_requests_total", METRICS["requests"]),
+            ("imp_requests_failed_total", METRICS["failed"]),
+            ("imp_tokens_prompt_total", METRICS["prompt"]),
+            ("imp_tokens_completion_total", METRICS["completion"]),
+            ("imp_tokens_cached_total", METRICS["cached"]),
+            ("imp_last_ttft_ms", METRICS["last_ttft_ms"]),
+            ("imp_decode_batch_last_rows", active),
+            ('imp_model_loaded{model="%s"}' % loaded, 1 if loaded else 0),
+            ("imp_queue_depth", active),
+            ("imp_queue_waiting", 0),
+            ("imp_queue_running", active),
+            ("imp_queued_prompt_tokens", 0),
+            ("imp_kv_blocks_total", total_blocks),
+            ("imp_kv_blocks_used", used),
+            ("imp_kv_blocks_cached", max(0, used - active * 900)),
+            ("imp_vram_budget_bytes", 0),
+            ("imp_vram_own_bytes", 27_412_000_000 + active * 180_000_000),
+            ("imp_vram_own_peak_bytes", 28_190_000_000),
+        ]
+        if not ARGS.no_power:
+            lines += [("imp_gpu_power_watts", round(power_now(), 1)),
+                      ("imp_gpu_energy_joules_total", round(METRICS["energy"], 1))]
+        out = []
+        for name, v in lines:
+            base = name.split("{")[0]
+            out.append("# TYPE %s %s" % (base, "counter" if base.endswith("_total") else "gauge"))
+            out.append("%s %s" % (name, v))
+        return "\n".join(out) + "\n"
 
     def _json(self, status, body):
         raw = json.dumps(body).encode()
@@ -115,7 +183,15 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(raw)
         elif path == "/health":
             self._json(200, {"status": "ok", "model_loaded": not self._booting() and STATE["loaded"] is not None,
-                             "queue_depth": 0, "suspended": False})
+                             "queue_depth": METRICS["active"], "suspended": False, "idle_suspended": False})
+        elif path == "/metrics":
+            self._text(200, self._metrics(), "text/plain; version=0.0.4")
+        elif path == "/props":  # handlers.cpp handle_props
+            self._json(200, {"model_path": STATE["loaded"] or "", "total_slots": 8, "n_ctx": ARGS.ctx,
+                             "default_generation_settings": {"n_ctx": ARGS.ctx}})
+        elif path == "/info":  # handlers.cpp handle_info
+            self._json(200, {"model_id": STATE["loaded"] or "", "max_total_tokens": ARGS.ctx,
+                             "max_input_tokens": ARGS.ctx - 1})
         elif path == "/v1/models":
             data = []
             if not self._booting():
@@ -135,13 +211,30 @@ class H(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         n = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(n) if n else b""
-        if path != "/v1/chat/completions":
+        if path.startswith("/v1/requests/") and path.endswith("/end_thinking"):  # handlers_admin.cpp
+            rid = path[len("/v1/requests/"):-len("/end_thinking")]
+            ev = ACTIVE.get(rid)
+            if ev is None:
+                self._error(404, "No running request with id '%s'." % rid[:128], code="request_not_found")
+                return
+            status = "already_closed" if ev.is_set() else "ending"
+            ev.set()
+            self._json(200, {"id": rid, "object": "request.end_thinking", "status": status})
+            return
+        if path not in ("/v1/chat/completions", "/tokenize"):
             self._error(404, "unmatched route: POST %s" % path, code="not_found")
             return
         try:
             body = json.loads(raw or b"{}")
         except Exception:
             self._error(400, "invalid JSON body")
+            return
+        if path == "/tokenize":  # handlers_misc.cpp handle_tokenize
+            content = body.get("content") or body.get("prompt") or ""
+            if not content:
+                self._error(400, "\"content\" (or its alias \"prompt\") is required")
+                return
+            self._json(200, {"tokens": [hash(t) % 151936 for t in tokenize(content)]})
             return
         self._chat(body)
 
@@ -175,13 +268,29 @@ class H(BaseHTTPRequestHandler):
         if "fail500" in low:
             self._error(500, "internal error: CUDA error 700 (illegal address)", etype="server_error")
             return
+        tail = msgs[-1].get("content") if msgs else None
+        has_image = isinstance(tail, list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in tail)
+        if has_image and "llama" in model.lower():
+            self._error(400, "The loaded model has no vision tower; image_url parts cannot be read.",
+                        code="vision_unavailable")
+            return
 
-        think = bool(body.get("enable_thinking", False)) and "nothink" not in low
+        rf = (body.get("response_format") or {}).get("type")
+        think = bool(body.get("enable_thinking", False)) and "nothink" not in low and not rf
         include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+        want_lp = bool(body.get("logprobs"))
+        n_top = int(body.get("top_logprobs") or 0)
         reasoning = REASONING if think else []
+        if "deepthink" in low and think:
+            reasoning = REASONING * 10
         if "thinkonly" in low:
             reasoning = (REASONING * 4)
             content = []
+        elif rf in ("json_object", "json_schema"):
+            content = tokenize(json.dumps({"answer": "streaming sends one delta per token", "tokens": 42,
+                                           "images_seen": int(has_image)}, indent=1))
+        elif has_image:
+            content = tokenize("I see the picture you attached: a small pink imp holding a fireball. " + ANSWER[:200])
         elif "long" in low:
             content = tokenize(ANSWER * 6)
         elif "big" in low:
@@ -210,40 +319,66 @@ class H(BaseHTTPRequestHandler):
         created = int(time.time())
         self.send_response(200)
         self._cors()
-        self._reqid()
+        rid = self._reqid(rid)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
 
-        def frame(delta, finish_reason=None, usage=None):
+        def frame(delta, finish_reason=None, usage=None, logprobs=None):
+            choice = {"index": 0, "delta": delta, "finish_reason": finish_reason}
+            if logprobs is not None:
+                choice["logprobs"] = logprobs
             obj = {"id": rid, "object": "chat.completion.chunk", "created": created, "model": model,
-                   "choices": [] if usage is not None else
-                   [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+                   "choices": [] if usage is not None else [choice]}
             if usage is not None:
                 obj["usage"] = usage
             data = ("data: " + json.dumps(obj) + "\n\n").encode()
             self.wfile.write(("%x\r\n" % len(data)).encode() + data + b"\r\n")
             self.wfile.flush()
 
-        itl = ARGS.itl / 1000.0
+        def lp_for(tok):
+            # handlers_chat_stream.cpp: {"content": [{token, logprob, bytes, top_logprobs: [...]}]}
+            p = random.choice([0.97, 0.9, 0.75, 0.5, 0.2, 0.06]) if tok.strip() else 0.99
+            lp = math.log(p)
+            alts = [{"token": tok, "logprob": lp, "bytes": list(tok.encode())}]
+            rest = 1.0 - p
+            for k, alt in enumerate([" the", " a", "ing", ".", " and"][: max(0, n_top - 1)]):
+                q = max(rest * (0.6 / (k + 1)), 1e-6)
+                alts.append({"token": alt, "logprob": math.log(q), "bytes": list(alt.encode())})
+            alts.sort(key=lambda a: -a["logprob"])
+            return {"content": [{"token": tok, "logprob": lp, "bytes": list(tok.encode()), "top_logprobs": alts[:n_top]}]}
+
+        itl = ARGS.itl / 1000.0 / (3.0 if "fast" in low else 1.0)
+        ended = threading.Event()
+        ACTIVE[rid] = ended
+        with STATE["lock"]:
+            METRICS["requests"] += 1
+        tick_energy()
+        with STATE["lock"]:
+            METRICS["active"] += 1
+        t0 = time.monotonic()
         try:
             time.sleep(2.5 if "slow" in low else ARGS.ttft / 1000.0)
+            METRICS["last_ttft_ms"] = int((time.monotonic() - t0) * 1000)
             frame({"role": "assistant"})
             n_emitted = 0
             for tok in reasoning:
+                if ended.is_set():  # end_thinking: the think block closes, the answer follows
+                    break
                 frame({"reasoning_content": tok + " "})
                 n_emitted += 1
                 time.sleep(itl * random.uniform(0.7, 1.4))
+            ended.set()
             for i, tok in enumerate(content):
                 if "failmid" in low and i == 12:
                     self.connection.shutdown(socket.SHUT_RDWR)
                     self.close_connection = True
                     return
-                frame({"content": tok})
+                frame({"content": tok}, logprobs=lp_for(tok) if want_lp else None)
                 n_emitted += 1
                 # one visible stall per run, like a page-in
-                time.sleep(0.25 if i == len(content) // 3 else itl * random.uniform(0.7, 1.4))
+                time.sleep(0.25 if i == len(content) // 3 and "fast" not in low else itl * random.uniform(0.7, 1.4))
             frame({}, finish_reason=finish)
             if include_usage:
                 usage = {"prompt_tokens": prompt_tokens, "completion_tokens": n_emitted,
@@ -256,8 +391,17 @@ class H(BaseHTTPRequestHandler):
             data = b"data: [DONE]\n\n"
             self.wfile.write(("%x\r\n" % len(data)).encode() + data + b"\r\n0\r\n\r\n")
             self.wfile.flush()
+            with STATE["lock"]:
+                METRICS["prompt"] += prompt_tokens
+                METRICS["completion"] += n_emitted
+                METRICS["cached"] += cached
         except (BrokenPipeError, ConnectionResetError):
             sys.stderr.write("client went away\n")
+        finally:
+            ACTIVE.pop(rid, None)
+            tick_energy()
+            with STATE["lock"]:
+                METRICS["active"] -= 1
 
 
 def main():
@@ -270,6 +414,7 @@ def main():
     p.add_argument("--itl", type=float, default=11.0, help="ms between tokens")
     p.add_argument("--ttft", type=float, default=180.0, help="ms before first token")
     p.add_argument("--swap-delay", type=float, default=2.0)
+    p.add_argument("--no-power", action="store_true", help="omit imp_gpu_power_watts / imp_gpu_energy_joules_total")
     p.add_argument("--boot-delay", type=float, default=0.0, help="seconds of model-less start")
     p.add_argument("--answer-file", help="markdown the model answers with, instead of the built-in text")
     p.add_argument("--reasoning-file", help="text the model thinks with, instead of the built-in text")

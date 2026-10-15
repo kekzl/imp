@@ -75,3 +75,8 @@ AttributeMacros:
 # JSON (e.g. tools/mutation/catalogue.json) is data: git clang-format must not reformat or fail on it.
 Language: Json
 DisableFormat: true
+---
+# JavaScript (tools/imp-server/webui/dev/*.js, the GPU-less web UI harness) is hand-formatted like the
+# page it drives: git clang-format must not reformat or fail on it.
+Language: JavaScript
+DisableFormat: true

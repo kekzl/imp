@@ -3,265 +3,342 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>imp</title>
 <style>
+  /* Palette from docs/logo.svg: horn red #ff2222 -> #990000, silver letters, near-black ground.
+     The mascot adds its own two: magenta skin (thinking) and fireball amber (tokens, speed). */
   :root {
-    --void:   #090C17;
-    --panel:  #10162B;
-    --panel2: #151C36;
-    --line:   rgba(133, 147, 184, 0.16);
-    --line2:  rgba(133, 147, 184, 0.34);
-    --ice:    #8593B8;
-    --ice2:   #C3CBE3;
-    --paper:  #E8ECF7;
-    --ember:  #FF8A3D;
-    --ember2: #FFB07A;
-    --think:  #8C7FE0;
+    --bg:       #0c0809;
+    --bg-side:  #120b0e;
+    --surface:  #1a1115;
+    --surface2: #24171d;
+    --line:     rgba(255, 214, 228, 0.08);
+    --line2:    rgba(255, 214, 228, 0.17);
+    --text:     #f2ecef;
+    --text2:    #bdb1b7;
+    --text3:    #8d8087;
+    --horn:     #ff2222;
+    --horn2:    #990000;
+    --accent:   #ff3a3a;
+    --accent-ink: #ffffff;
+    --skin:     #ff5ea2;
+    --skin2:    #c8175d;
+    --fire:     #ffb43a;
+    --fire2:    #ff7a1a;
+    --ok:       #6fd49a;
+    --word1:    #ffffff;
+    --word2:    #f0f0f0;
+    --word3:    #b0b0b0;
+    --code-bg:  #110a0d;
+    --shadow:   0 18px 50px rgba(0, 0, 0, 0.45);
+    --glow:     rgba(255, 34, 34, 0.10);
 
-    --r1: 6px;
-    --r2: 10px;
-    --r3: 14px;
-
-    --sans: "IBM Plex Sans", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
-    --mono: "JetBrains Mono", "Cascadia Code", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    --side-w: 256px;
+    --panel-w: 316px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f7f3f4; --bg-side: #efe8eb; --surface: #ffffff; --surface2: #f4edf0;
+      --line: rgba(70, 20, 40, 0.10); --line2: rgba(70, 20, 40, 0.20);
+      --text: #1f1317; --text2: #5b4a52; --text3: #85747c;
+      --accent: #c8001e; --skin: #d6246f; --skin2: #a5104e; --fire: #b85c00; --fire2: #d06a00; --ok: #1d8a52;
+      --word1: #4a3a41; --word2: #2b2025; --word3: #120b0e; --code-bg: #fbf7f8;
+      --shadow: 0 14px 40px rgba(70, 20, 40, 0.12); --glow: rgba(255, 34, 34, 0.06);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f3f4; --bg-side: #efe8eb; --surface: #ffffff; --surface2: #f4edf0;
+    --line: rgba(70, 20, 40, 0.10); --line2: rgba(70, 20, 40, 0.20);
+    --text: #1f1317; --text2: #5b4a52; --text3: #85747c;
+    --accent: #c8001e; --skin: #d6246f; --skin2: #a5104e; --fire: #b85c00; --fire2: #d06a00; --ok: #1d8a52;
+    --word1: #4a3a41; --word2: #2b2025; --word3: #120b0e; --code-bg: #fbf7f8;
+    --shadow: 0 14px 40px rgba(70, 20, 40, 0.12); --glow: rgba(255, 34, 34, 0.06);
   }
 
   * { box-sizing: border-box; }
-
-  html, body {
-    height: 100%;
-    margin: 0;
-  }
-
+  html, body { height: 100%; margin: 0; }
   body {
-    background: var(--void);
-    color: var(--paper);
+    background: var(--bg);
+    color: var(--text);
     font-family: var(--sans);
     font-size: 15px;
     line-height: 1.6;
     -webkit-font-smoothing: antialiased;
+    overflow: hidden;
   }
-
-  /* Two soft blooms give the panel depth: warm where the answer is written,
-     cool where the model thinks. Nothing else is decoration. */
+  /* The logo's red ambient glow behind the horns, once, behind the header. */
   body::before {
     content: "";
     position: fixed;
     inset: 0;
     z-index: -1;
     pointer-events: none;
-    background:
-      radial-gradient(900px 440px at 16% 108%, rgba(255, 138, 61, 0.11), transparent 62%),
-      radial-gradient(760px 400px at 102% -8%, rgba(140, 127, 224, 0.11), transparent 62%);
+    background: radial-gradient(520px 260px at 38% -40px, var(--glow), transparent 70%);
   }
+  .defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+  [hidden] { display: none !important; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-  /* ---- shell ------------------------------------------------------- */
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  button:disabled { cursor: default; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  .shell {
-    position: relative;
+  /* ---- frame --------------------------------------------------------- */
+
+  .app {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 292px;
-    grid-template-rows: auto minmax(0, 1fr) auto auto;
-    grid-template-areas:
-      "head    inst"
-      "log     inst"
-      "pulse   inst"
-      "compose inst";
+    grid-template-columns: var(--side-w) minmax(0, 1fr) var(--panel-w);
     height: 100%;
-    max-width: 1280px;
-    margin: 0 auto;
-    animation: settle 420ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+    height: 100dvh;
   }
-  @keyframes settle {
-    from { opacity: 0; transform: translateY(6px); }
-    to   { opacity: 1; transform: none; }
-  }
-
-  /* The spark: one motif for the wordmark, the role marker and the status. */
-  .spark {
-    width: 9px;
-    height: 9px;
-    border-radius: 2px;
-    background: var(--line2);
-    transform: rotate(45deg);
-    flex: none;
-    transition: background 200ms linear, box-shadow 200ms linear;
-  }
-  @keyframes breathe {
-    0%, 100% { opacity: 1; box-shadow: 0 0 6px rgba(255, 138, 61, 0.35); }
-    50%      { opacity: 0.55; box-shadow: 0 0 16px rgba(255, 138, 61, 0.75); }
+  .stage {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    /* explicit: an auto column would grow to the canvas's pixel width and never shrink back */
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+    min-height: 0;
+    position: relative;
   }
 
-  /* ---- header ------------------------------------------------------ */
+  /* ---- sidebar: conversations --------------------------------------- */
 
-  header {
-    grid-area: head;
+  .side {
+    background: var(--bg-side);
+    border-right: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .side-top { padding: 16px 14px 10px; display: grid; gap: 10px; }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 7px 12px;
+    border-radius: 9px;
+    border: 1px solid var(--line2);
+    background: transparent;
+    font-size: 13px;
+    font-weight: 550;
+    color: var(--text2);
+    transition: color 120ms linear, border-color 120ms linear, background 120ms linear;
+  }
+  .btn:hover:not(:disabled) { color: var(--text); border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+  .btn:disabled { opacity: 0.45; }
+  .btn.primary {
+    background: linear-gradient(180deg, var(--horn), var(--horn2));
+    border-color: transparent;
+    color: #fff;
+    box-shadow: 0 6px 20px rgba(255, 34, 34, 0.22);
+  }
+  .btn.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.08); }
+  .btn svg { width: 15px; height: 15px; flex: none; }
+  .btn kbd { margin-left: auto; }
+  kbd {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 0 5px;
+    border-radius: 4px;
+    border: 1px solid var(--line2);
+    background: var(--surface2);
+    color: var(--text2);
+  }
+  .btn.primary kbd { background: rgba(0, 0, 0, 0.2); border-color: rgba(255, 255, 255, 0.25); color: #fff; }
+  .search {
+    width: 100%;
+    padding: 7px 10px;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    font-size: 13px;
+  }
+  .search:focus-visible { outline: none; border-color: var(--accent); }
+
+  .convs { list-style: none; margin: 0; padding: 4px 8px 12px; overflow-y: auto; flex: 1; scrollbar-width: thin; scrollbar-color: var(--line2) transparent; }
+  .convs li { position: relative; display: flex; align-items: stretch; border-radius: 9px; }
+  .convs li + li { margin-top: 2px; }
+  .conv {
+    flex: 1;
+    min-width: 0;
+    text-align: left;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    display: grid;
+    gap: 1px;
+  }
+  .conv .t { font-size: 13.5px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .conv .m { font-size: 11.5px; color: var(--text3); font-variant-numeric: tabular-nums; }
+  .convs li:hover { background: color-mix(in srgb, var(--surface) 70%, transparent); }
+  .convs li.on { background: var(--surface); box-shadow: inset 2px 0 0 var(--horn); }
+  .convs li.on .t { color: var(--text); }
+  .conv-acts { display: flex; align-items: center; gap: 2px; padding-right: 4px; opacity: 0; transition: opacity 120ms linear; }
+  .convs li:hover .conv-acts, .convs li:focus-within .conv-acts, .convs li.on .conv-acts { opacity: 1; }
+  .conv-acts button {
+    border: 0; background: transparent; color: var(--text3);
+    font-size: 11.5px; padding: 3px 6px; border-radius: 6px;
+  }
+  .conv-acts button:hover { color: var(--text); background: var(--surface2); }
+  .conv-acts button.armed { color: #fff; background: var(--accent); }
+  .rename { flex: 1; margin: 3px; padding: 5px 8px; border-radius: 7px; border: 1px solid var(--accent); background: var(--surface); font-size: 13px; }
+  .side-empty { padding: 10px 12px; font-size: 12.5px; color: var(--text3); }
+  .side-foot { padding: 10px 14px 14px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 6px; }
+  .side-foot .btn { padding: 5px 9px; font-size: 12px; }
+
+  /* ---- header -------------------------------------------------------- */
+
+  .top {
     display: flex;
     align-items: center;
-    gap: 18px;
-    padding: 18px 28px 14px;
+    gap: 12px;
+    padding: 10px 22px 10px 16px;
     border-bottom: 1px solid var(--line);
     min-width: 0;
+    position: relative;
   }
+  .icon-btn {
+    display: inline-grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    flex: none;
+    border-radius: 9px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text2);
+    font-size: 15px;
+    font-weight: 600;
+    transition: color 120ms linear, background 120ms linear;
+  }
+  .icon-btn:hover:not(:disabled) { color: var(--text); background: var(--surface); }
+  .icon-btn svg { width: 18px; height: 18px; }
+  .only-narrow-side, .only-narrow-panel { display: none; }
 
-  .wordmark {
-    display: flex;
-    align-items: center;
-    gap: 11px;
-    font-size: 21px;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    line-height: 1;
-    color: var(--paper);
+  .brand { display: flex; align-items: center; gap: 2px; flex: none; }
+  .mascot {
+    width: 50px;
+    height: 50px;
+    margin: -6px 0 -6px -6px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    border-radius: 50%;
     flex: none;
   }
-  .wordmark .spark.ok   { background: var(--ember); box-shadow: 0 0 12px rgba(255, 138, 61, 0.55); }
-  .wordmark .spark.busy { background: var(--ember); animation: breathe 1.2s ease-in-out infinite; }
-  .wordmark .spark.wait { background: var(--ice); animation: breathe 1.9s ease-in-out infinite; }
-  .wordmark .spark.down { background: #C0546A; box-shadow: 0 0 10px rgba(192, 84, 106, 0.5); }
+  .mascot svg { width: 100%; height: 100%; overflow: visible; }
+  .wordmark { display: block; height: 30px; width: auto; }
 
-  .state {
-    font-size: 12.5px;
-    color: var(--ice);
-    flex: none;
-    min-width: 7ch;
+  .bubble {
+    position: absolute;
+    left: 58px;
+    top: 52px;
+    z-index: 30;
+    max-width: 240px;
+    padding: 8px 12px;
+    border-radius: 12px 12px 12px 3px;
+    background: var(--surface2);
+    border: 1px solid color-mix(in srgb, var(--skin) 45%, transparent);
+    box-shadow: var(--shadow);
+    font-size: 13.5px;
+    font-weight: 550;
+    color: var(--text);
+    animation: pop 220ms cubic-bezier(0.2, 0.9, 0.3, 1.3) both;
   }
+  @keyframes pop { from { opacity: 0; transform: translateY(-4px) scale(0.92); } to { opacity: 1; transform: none; } }
+
+  .state { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text3); flex: none; min-width: 6ch; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line2); flex: none; }
+  .dot.ok   { background: var(--ok); box-shadow: 0 0 8px color-mix(in srgb, var(--ok) 60%, transparent); }
+  .dot.busy { background: var(--fire); animation: breathe 1.1s ease-in-out infinite; }
+  .dot.wait { background: var(--text3); animation: breathe 1.9s ease-in-out infinite; }
+  .dot.down { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  @keyframes breathe { 50% { opacity: 0.35; } }
 
   .model {
     font-family: var(--mono);
     font-size: 12.5px;
-    color: var(--ice2);
+    color: var(--text2);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
-    padding-left: 18px;
+    padding-left: 12px;
     border-left: 1px solid var(--line);
   }
-
-  /* One model: a label. Several: a picker in the same place, same type. */
   select.model {
-    max-width: 48ch;
-    padding: 4px 22px 4px 18px;
+    max-width: 44ch;
+    padding: 5px 24px 5px 12px;
     background: transparent;
     border: 0;
     border-left: 1px solid var(--line);
     border-radius: 0;
-    color: var(--ice2);
-    cursor: pointer;
     appearance: none;
     -webkit-appearance: none;
-    background-image: linear-gradient(45deg, transparent 50%, var(--ice) 50%),
-                      linear-gradient(135deg, var(--ice) 50%, transparent 50%);
-    background-position: right 9px top 52%, right 5px top 52%;
+    background-image: linear-gradient(45deg, transparent 50%, var(--text3) 50%), linear-gradient(135deg, var(--text3) 50%, transparent 50%);
+    background-position: right 10px top 52%, right 6px top 52%;
     background-size: 4px 4px, 4px 4px;
     background-repeat: no-repeat;
-    transition: color 120ms linear;
   }
-  select.model:hover, select.model:focus-visible { color: var(--paper); }
-  select.model option { background: var(--panel); color: var(--paper); }
+  select.model:hover { color: var(--text); }
+  select option { background: var(--surface); color: var(--text); }
+  .top-acts { margin-left: auto; display: flex; align-items: center; gap: 2px; flex: none; }
 
-  .head-actions {
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex: none;
-  }
-
-  .link, .act {
-    font-family: var(--sans);
-    font-size: 12.5px;
-    font-weight: 500;
-    color: var(--ice);
-    text-decoration: none;
-    background: none;
-    border: 1px solid transparent;
-    border-radius: var(--r1);
-    padding: 5px 9px;
-    cursor: pointer;
-    transition: color 120ms linear, background 120ms linear, border-color 120ms linear;
-  }
-  .link:hover, .link:focus-visible, .act:hover:not(:disabled), .act:focus-visible {
-    color: var(--paper);
-    background: rgba(133, 147, 184, 0.09);
-  }
-  .act:disabled { opacity: 0.35; cursor: default; }
-  .act.ghost { border-color: var(--line2); }
-  .act.ghost:hover:not(:disabled) { border-color: rgba(255, 138, 61, 0.6); }
-
-  /* ---- transcript -------------------------------------------------- */
+  /* ---- transcript ---------------------------------------------------- */
 
   .log {
-    grid-area: log;
     overflow-y: auto;
-    padding: 26px 28px 8px;
-    scroll-behavior: smooth;
+    padding: 26px 22px 10px;
     scrollbar-width: thin;
     scrollbar-color: var(--line2) transparent;
+    position: relative;
+  }
+  .log > * { max-width: 820px; margin-left: auto; margin-right: auto; }
+  .drop-hint {
+    position: absolute; inset: 10px; z-index: 5; display: grid; place-items: center;
+    border: 2px dashed var(--skin); border-radius: 16px; background: color-mix(in srgb, var(--bg) 82%, transparent);
+    color: var(--text); font-weight: 600; pointer-events: none;
   }
 
-  .turn {
-    margin-bottom: 30px;
-    max-width: 78ch;
-    animation: rise 220ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  .turn { margin-bottom: 26px; }
+  .turn.is-user {
+    width: fit-content;
+    max-width: min(66ch, 88%);
+    margin-right: 0;
+    padding: 9px 14px 8px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 16px 16px 4px 16px;
   }
-  @keyframes rise {
-    from { opacity: 0; transform: translateY(8px); }
-    to   { opacity: 1; transform: none; }
-  }
+  .turn.is-user > .role { display: none; }
+  .turn.is-user .body { color: var(--text); }
+  .turn.is-cont { margin-top: -14px; }
 
-  .role {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
-    font-size: 12.5px;
-    font-weight: 500;
-    color: var(--ice);
-  }
-  .role .spark { width: 8px; height: 8px; }
-  .turn.is-model .role .spark { background: var(--ember); box-shadow: 0 0 8px rgba(255, 138, 61, 0.45); }
-  .turn.is-model.live .role .spark { animation: breathe 1.3s ease-in-out infinite; }
+  .role { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12.5px; font-weight: 600; color: var(--text3); }
+  .spark { width: 18px; height: 18px; flex: none; display: inline-block; }
+  .spark svg { width: 100%; height: 100%; overflow: visible; }
+  .turn.is-model.live .spark { animation: breathe 1.3s ease-in-out infinite; }
 
-  .body { white-space: pre-wrap; word-wrap: break-word; }
-  .turn.is-user .body { color: var(--ice2); }
-
-  .body strong { font-weight: 600; color: #FFF; }
+  .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .body strong { font-weight: 650; }
   .body em { font-style: italic; }
-  .body h4 {
-    font-size: 13px;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-    color: var(--ice2);
-    margin: 18px 0 4px;
-  }
-  .body a { color: var(--ember); text-decoration: underline; text-underline-offset: 2px; }
-  .body table {
-    border-collapse: collapse;
-    margin: 10px 0;
-    font-size: 0.92em;
-    white-space: normal;
-  }
-  .body th, .body td {
-    border: 1px solid var(--line);
-    padding: 4px 10px;
-    text-align: left;
-  }
-  .body th { color: var(--ice2); font-weight: 600; background: rgba(133, 147, 184, 0.06); }
-  .body code {
-    font-family: var(--mono);
-    font-size: 0.86em;
-    background: rgba(133, 147, 184, 0.10);
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    padding: 1px 6px;
-  }
+  .body h4 { font-size: 14px; font-weight: 650; color: var(--text); margin: 16px 0 4px; }
+  .body a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+  .body table { border-collapse: collapse; margin: 10px 0; font-size: 0.92em; white-space: normal; display: block; overflow-x: auto; max-width: 100%; }
+  .body th, .body td { border: 1px solid var(--line2); padding: 4px 10px; text-align: left; }
+  .body th { font-weight: 600; background: var(--surface); }
+  .body code { font-family: var(--mono); font-size: 0.86em; background: var(--surface2); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
   .body pre {
     margin: 12px 0;
-    background: #0A0F20;
-    border: 1px solid var(--line);
-    border-radius: var(--r2);
+    background: var(--code-bg);
+    border: 1px solid var(--line2);
+    border-radius: 10px;
     overflow: hidden;
     white-space: pre;
   }
@@ -269,482 +346,530 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 5px 8px 5px 14px;
+    padding: 4px 6px 4px 14px;
     font-size: 11.5px;
-    font-weight: 500;
-    color: var(--ice);
-    background: rgba(133, 147, 184, 0.06);
+    font-weight: 600;
+    color: var(--text3);
     border-bottom: 1px solid var(--line);
     white-space: normal;
   }
   .body pre .copy-code {
-    font-family: var(--sans);
-    font-size: 11.5px;
-    font-weight: 500;
-    color: var(--ice);
-    background: none;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    padding: 2px 8px;
-    cursor: pointer;
-    transition: color 120ms linear, background 120ms linear;
+    font-size: 11.5px; font-weight: 550; color: var(--text2);
+    background: none; border: 1px solid transparent; border-radius: 6px; padding: 2px 8px;
   }
-  .body pre .copy-code:hover { color: var(--paper); background: rgba(133, 147, 184, 0.1); }
+  .body pre .copy-code:hover { color: var(--text); background: var(--surface2); }
   .body pre code {
-    display: block;
-    padding: 12px 14px;
-    overflow-x: auto;
-    background: none;
-    border: 0;
-    border-radius: 0;
-    font-size: 13px;
-    line-height: 1.55;
-    scrollbar-width: thin;
-    scrollbar-color: var(--line2) transparent;
+    display: block; padding: 12px 14px; overflow-x: auto; background: none; border: 0; border-radius: 0;
+    font-size: 13px; line-height: 1.55; scrollbar-width: thin;
   }
+  /* syntax colours: one hue per job, both themes */
+  .tk-k { color: var(--accent); font-weight: 600; }
+  .tk-s { color: var(--ok); }
+  .tk-n { color: var(--fire); }
+  .tk-c { color: var(--text3); font-style: italic; }
+  .tk-f { color: var(--skin); }
+
+  .math { font-family: "Cambria Math", "STIX Two Math", "Latin Modern Math", Cambria, Georgia, serif; font-size: 1.05em; }
+  .math.display { display: block; text-align: center; margin: 10px 0; font-size: 1.15em; white-space: normal; }
+  .math sub, .math sup { font-size: 0.72em; }
+  .frac { display: inline-flex; flex-direction: column; vertical-align: middle; text-align: center; font-size: 0.9em; margin: 0 2px; }
+  .frac > span:first-child { border-bottom: 1px solid currentColor; padding: 0 2px; }
+  .sqrt { border-top: 1px solid currentColor; padding: 0 1px; }
+
+  .thumbs-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 6px; }
+  .thumbs-row img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line2); }
 
   details.think {
-    margin: 2px 0 14px;
-    padding: 6px 14px 4px;
-    border-radius: var(--r1);
-    background: rgba(140, 127, 224, 0.06);
-    border: 1px solid rgba(140, 127, 224, 0.2);
+    margin: 0 0 12px;
+    padding: 4px 12px 4px;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--skin) 7%, transparent);
+    border: 1px solid color-mix(in srgb, var(--skin) 22%, transparent);
   }
-  details.think summary {
-    font-size: 12.5px;
-    font-weight: 500;
-    color: var(--think);
-    cursor: pointer;
-    list-style: none;
-    padding: 3px 0;
-  }
+  details.think summary { font-size: 12.5px; font-weight: 600; color: var(--skin); cursor: pointer; list-style: none; padding: 3px 0; }
   details.think summary::-webkit-details-marker { display: none; }
-  details.think summary::after { content: " ▾"; opacity: 0.6; }
-  details.think[open] summary::after { content: " ▴"; }
-  /* While reasoning streams the label carries a slow light; it stops with the stream. */
+  details.think summary::after { content: " +"; opacity: 0.6; }
+  details.think[open] summary::after { content: " -"; }
   details.think.live summary {
-    background: linear-gradient(90deg, var(--think) 0%, var(--paper) 50%, var(--think) 100%);
+    background: linear-gradient(90deg, var(--skin) 0%, var(--text) 50%, var(--skin) 100%);
     background-size: 200% 100%;
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
     animation: shimmer 1.8s linear infinite;
   }
-  details.think.live summary::after { color: var(--think); -webkit-text-fill-color: var(--think); }
+  details.think.live summary::after { color: var(--skin); -webkit-text-fill-color: var(--skin); }
   @keyframes shimmer { to { background-position: -200% 0; } }
-  details.think .body {
-    color: color-mix(in srgb, var(--think) 60%, var(--paper));
-    font-size: 14px;
-    padding: 4px 0 8px;
+  details.think .body { color: color-mix(in srgb, var(--skin) 45%, var(--text2)); font-size: 14px; padding: 2px 0 8px; }
+  .end-think {
+    margin: 2px 0 8px; font-size: 12px; font-weight: 600; color: var(--skin);
+    background: transparent; border: 1px solid color-mix(in srgb, var(--skin) 45%, transparent); border-radius: 999px; padding: 3px 11px;
   }
+  .end-think:hover:not(:disabled) { background: color-mix(in srgb, var(--skin) 14%, transparent); }
 
-  /* Each finished model turn keeps its own numbers: the pulse only ever shows
-     the last run, the transcript remembers all of them. */
-  .foot {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    margin-top: 12px;
-    color: var(--ice);
+  .foot { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; color: var(--text3); }
+  .turn.is-user .foot { margin-top: 4px; justify-content: flex-end; }
+  .foot .stats { display: flex; flex-wrap: wrap; gap: 4px 0; font-size: 12px; font-variant-numeric: tabular-nums; min-width: 0; }
+  .foot .stats span + span { margin-left: 10px; padding-left: 10px; border-left: 1px solid var(--line2); }
+  .foot .stats .hot { color: var(--fire); font-weight: 600; }
+  .foot .acts { margin-left: auto; display: flex; flex-wrap: wrap; gap: 2px; }
+  .act {
+    font-size: 12px; font-weight: 550; color: var(--text3);
+    background: none; border: 1px solid transparent; border-radius: 7px; padding: 3px 8px;
+    transition: color 120ms linear, background 120ms linear;
   }
-  .foot .stats {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px 0;
-    font-family: var(--mono);
-    font-size: 11.5px;
-    font-variant-numeric: tabular-nums;
-    min-width: 0;
-  }
-  .foot .stats span + span {
-    margin-left: 12px;
-    padding-left: 12px;
-    border-left: 1px solid var(--line2);
-  }
-  .foot .acts { margin-left: auto; display: flex; gap: 2px; flex: none; }
+  .act:hover:not(:disabled), .act:focus-visible { color: var(--text); background: var(--surface2); }
+  .act.on { color: var(--fire); }
+  .act:disabled { opacity: 0.4; }
 
-  .note {
-    margin-top: 12px;
-    padding: 2px 0 2px 14px;
-    border-left: 2px solid var(--ember);
-    font-size: 13.5px;
-    color: var(--ice2);
+  .edit-box textarea {
+    width: 100%; min-height: 80px; max-height: 320px; padding: 8px 10px; resize: vertical;
+    border-radius: 9px; border: 1px solid var(--accent); background: var(--bg); font-size: 15px; line-height: 1.5;
   }
-  .note b { color: var(--paper); font-weight: 500; }
+  .edit-box .row { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+
+  .note { margin-top: 10px; padding: 2px 0 2px 12px; border-left: 2px solid var(--fire); font-size: 13.5px; color: var(--text2); }
+  .note b { color: var(--text); font-weight: 600; }
+  .cont-mark { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; font-size: 11.5px; color: var(--text3); }
+  .cont-mark::before, .cont-mark::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 
   .caret {
-    display: inline-block;
-    width: 8px;
-    height: 16px;
-    margin-left: 2px;
-    vertical-align: -3px;
-    border-radius: 2px;
-    background: var(--ember);
-    box-shadow: 0 0 10px rgba(255, 138, 61, 0.6);
-    animation: caret 1.1s ease-in-out infinite;
+    display: inline-block; width: 8px; height: 16px; margin-left: 2px; vertical-align: -3px; border-radius: 2px;
+    background: var(--fire); box-shadow: 0 0 10px var(--fire2); animation: caret 1.1s ease-in-out infinite;
   }
-  @keyframes caret { 50% { opacity: 0.25; box-shadow: 0 0 2px rgba(255, 138, 61, 0.2); } }
+  @keyframes caret { 50% { opacity: 0.25; } }
 
-  .empty {
-    color: var(--ice);
-    font-size: 14.5px;
-    max-width: 52ch;
-    margin: 6px 0 0;
+  /* token probability view */
+  .body.tokens .tk { border-radius: 3px; cursor: help; }
+  .body.tokens .tk:focus-visible { outline-offset: 0; }
+  .tk.p1 { background: color-mix(in srgb, var(--fire) 16%, transparent); }
+  .tk.p2 { background: color-mix(in srgb, var(--fire) 34%, transparent); }
+  .tk.p3 { background: color-mix(in srgb, var(--accent) 38%, transparent); }
+  .tk.p4 { background: color-mix(in srgb, var(--accent) 62%, transparent); color: #fff; }
+  .tk-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; font-size: 11.5px; color: var(--text3); }
+  .tk-legend .tk { padding: 0 6px; }
+  .tk-tip {
+    position: fixed; z-index: 60; min-width: 160px; max-width: 280px; padding: 8px 10px; border-radius: 9px;
+    background: var(--surface2); border: 1px solid var(--line2); box-shadow: var(--shadow);
+    font-size: 12.5px; pointer-events: none;
   }
-  .empty b { color: var(--paper); font-weight: 500; }
-  .empty kbd {
-    font-family: var(--mono);
-    font-size: 11px;
-    border: 1px solid var(--line2);
-    border-radius: 4px;
-    padding: 0 5px;
-    color: var(--ice2);
-    background: rgba(133, 147, 184, 0.08);
+  .tk-tip table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  .tk-tip td { padding: 1px 4px; }
+  .tk-tip td:first-child { font-family: var(--mono); white-space: pre; max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+  .tk-tip td:last-child { text-align: right; color: var(--text2); }
+  .tk-tip tr.pick td { color: var(--fire); font-weight: 600; }
+
+  .empty { text-align: center; padding-top: 6vh; color: var(--text2); }
+  .empty .big { width: 150px; height: 150px; display: block; margin: 0 auto 4px; overflow: visible; }
+  .empty .say {
+    display: inline-block; margin: 0 0 14px; padding: 8px 16px; border-radius: 14px;
+    background: var(--surface); border: 1px solid color-mix(in srgb, var(--skin) 40%, transparent);
+    font-size: 17px; font-weight: 650; color: var(--text);
   }
+  .empty p { max-width: 50ch; margin: 0 auto 10px; font-size: 14.5px; }
+  .empty .keys { font-size: 13px; color: var(--text3); }
 
   .fault {
-    padding: 12px 14px;
-    border-radius: var(--r1);
-    background: rgba(255, 138, 61, 0.06);
-    border: 1px solid rgba(255, 138, 61, 0.3);
-    color: var(--paper);
+    padding: 11px 14px; border-radius: 10px; margin-bottom: 18px;
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
     font-size: 14px;
-    animation: rise 220ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
   }
-  .fault code { font-family: var(--mono); font-size: 0.9em; color: var(--ember2); }
-  .fault small { display: block; margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--ice); }
+  .fault code { font-family: var(--mono); font-size: 0.9em; color: var(--accent); overflow-wrap: anywhere; }
+  .fault small { display: block; margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--text3); }
 
-  /* ---- pulse: the signature, one bar per token as it arrives ------- */
+  /* ---- pulse: one bar per token -------------------------------------- */
 
   .pulse {
-    grid-area: pulse;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    gap: 18px;
+    gap: 16px;
     align-items: end;
-    padding: 12px 28px 0;
+    padding: 10px 22px 0;
     border-top: 1px solid var(--line);
   }
+  .pulse > div:first-child { min-width: 0; }
   .strip {
-    display: block;
-    width: 100%;
-    height: 64px;
-    border-radius: var(--r1);
-    background: linear-gradient(180deg, rgba(16, 22, 43, 0.95), rgba(16, 22, 43, 0.45));
+    display: block; width: 100%; height: 56px; border-radius: 9px;
+    background: var(--surface);
     border: 1px solid var(--line);
   }
-  .strip-note {
-    margin: 6px 0 0;
-    font-size: 11.5px;
-    color: var(--ice);
-    font-variant-numeric: tabular-nums;
-  }
-  .rate {
-    text-align: right;
-    padding-bottom: 22px;
-    white-space: nowrap;
-  }
+  .strip-note { margin: 5px 0 0; font-size: 11.5px; color: var(--text3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rate { text-align: right; padding-bottom: 20px; white-space: nowrap; }
   .rate .n {
-    font-family: var(--mono);
-    font-size: 30px;
-    font-weight: 600;
-    line-height: 1;
-    color: var(--ember);
-    font-variant-numeric: tabular-nums;
-    text-shadow: 0 0 20px rgba(255, 138, 61, 0.4);
-    transition: color 200ms linear, text-shadow 200ms linear;
+    font-size: 32px; font-weight: 750; line-height: 1; letter-spacing: -0.02em;
+    color: var(--fire); font-variant-numeric: tabular-nums;
+    text-shadow: 0 0 22px color-mix(in srgb, var(--fire2) 45%, transparent);
   }
-  .rate.idle .n { color: var(--ice2); text-shadow: none; }
-  .rate .u {
-    font-size: 12px;
-    color: var(--ice);
-    margin-top: 4px;
-  }
+  .rate.idle .n { color: var(--text2); text-shadow: none; }
+  .rate .u { font-size: 12px; color: var(--text3); margin-top: 3px; }
 
-  /* ---- composer ---------------------------------------------------- */
+  /* ---- composer ------------------------------------------------------ */
 
-  .compose {
-    grid-area: compose;
-    padding: 12px 28px 22px;
-  }
+  .compose { padding: 10px 22px 18px; }
   .box {
-    display: flex;
-    align-items: flex-end;
-    gap: 10px;
-    padding: 6px 6px 6px 16px;
-    border-radius: var(--r3);
-    background: linear-gradient(180deg, rgba(21, 28, 54, 0.88), rgba(16, 22, 43, 0.88));
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 8px 8px 8px 14px;
+    border-radius: 16px;
+    background: var(--surface);
     border: 1px solid var(--line2);
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.035);
+    box-shadow: var(--shadow);
     transition: border-color 160ms linear, box-shadow 160ms linear;
   }
-  .box:focus-within {
-    border-color: rgba(255, 138, 61, 0.55);
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35), 0 0 0 3px rgba(255, 138, 61, 0.12);
+  .box:focus-within { border-color: color-mix(in srgb, var(--accent) 60%, transparent); box-shadow: var(--shadow), 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+  .box textarea {
+    display: block; width: 100%; resize: none; min-height: 28px; max-height: 220px; padding: 6px 0;
+    background: transparent; border: 0; outline: none; font-size: 15.5px; line-height: 1.5;
   }
-
-  textarea {
-    flex: 1;
-    resize: none;
-    min-height: 40px;
-    max-height: 200px;
-    padding: 9px 0;
-    background: transparent;
-    border: 0;
-    outline: none;
-    color: var(--paper);
-    font-family: var(--sans);
-    font-size: 15.5px;
-    line-height: 1.5;
+  .box textarea::placeholder { color: var(--text3); }
+  .box-row { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+  .ctx { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; font-size: 11.5px; color: var(--text3); font-variant-numeric: tabular-nums; }
+  .ctx-bar { width: 72px; height: 4px; border-radius: 2px; background: var(--surface2); overflow: hidden; flex: none; }
+  .ctx-bar > span { display: block; height: 100%; width: 0; background: var(--text3); transition: width 300ms ease; }
+  .ctx-bar.warm > span { background: var(--accent); }
+  #ctx-note { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .thumbs { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 0 8px; }
+  .thumb { position: relative; }
+  .thumb img { width: 58px; height: 58px; object-fit: cover; border-radius: 9px; border: 1px solid var(--line2); display: block; }
+  .thumb button {
+    position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 50%;
+    border: 1px solid var(--line2); background: var(--surface2); font-size: 12px; line-height: 1; padding: 0;
   }
-  textarea::placeholder { color: color-mix(in srgb, var(--ice) 75%, transparent); }
-  button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible, .link:focus-visible {
-    outline: 2px solid var(--ember);
-    outline-offset: 2px;
-  }
-
   button.send {
-    flex: none;
-    height: 40px;
-    min-width: 92px;
-    padding: 0 18px;
-    border: 1px solid transparent;
-    border-radius: var(--r2);
-    background: var(--ember);
-    color: #1B0D03;
-    font-family: var(--sans);
-    font-size: 13.5px;
-    font-weight: 600;
-    cursor: pointer;
-    box-shadow: 0 6px 18px rgba(255, 138, 61, 0.28);
-    transition: transform 120ms ease, box-shadow 120ms ease, background 160ms linear, color 160ms linear;
+    flex: none; height: 38px; min-width: 84px; padding: 0 16px; border: 1px solid transparent; border-radius: 11px;
+    background: linear-gradient(180deg, var(--horn), var(--horn2)); color: #fff;
+    font-size: 13.5px; font-weight: 650;
+    box-shadow: 0 6px 18px rgba(255, 34, 34, 0.28);
+    transition: filter 120ms linear, box-shadow 120ms linear;
   }
-  button.send:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 24px rgba(255, 138, 61, 0.42); background: var(--ember2); }
-  button.send:active:not(:disabled) { transform: translateY(0); }
-  button.send:disabled { opacity: 0.4; cursor: default; box-shadow: none; }
-  button.send.stop {
-    background: transparent;
-    color: var(--ice2);
-    border-color: var(--line2);
-    box-shadow: none;
-  }
-  button.send.stop:hover { background: rgba(133, 147, 184, 0.1); color: var(--paper); transform: none; }
+  button.send:hover:not(:disabled) { filter: brightness(1.1); box-shadow: 0 8px 24px rgba(255, 34, 34, 0.4); }
+  button.send:disabled { opacity: 0.4; box-shadow: none; }
+  button.send.stop { background: transparent; color: var(--text); border-color: var(--line2); box-shadow: none; }
+  button.send.stop:hover { background: var(--surface2); }
 
-  /* ---- instruments ------------------------------------------------- */
+  /* ---- right panel --------------------------------------------------- */
 
-  .inst {
-    grid-area: inst;
+  .panel {
     border-left: 1px solid var(--line);
-    padding: 22px 24px 24px;
+    background: var(--bg-side);
     display: flex;
     flex-direction: column;
-    gap: 26px;
-    overflow-y: auto;
-    scrollbar-width: thin;
-    scrollbar-color: var(--line2) transparent;
-    background: linear-gradient(180deg, rgba(16, 22, 43, 0.4), transparent 45%);
+    min-height: 0;
   }
+  .tabs { display: flex; gap: 4px; padding: 12px 14px 0; border-bottom: 1px solid var(--line); }
+  .tabs [role="tab"] {
+    flex: 1; padding: 8px 6px 9px; border: 0; background: transparent; font-size: 13px; font-weight: 600; color: var(--text3);
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .tabs [role="tab"]:hover { color: var(--text); }
+  .tabs [role="tab"][aria-selected="true"] { color: var(--text); border-bottom-color: var(--horn); }
+  .pane { padding: 16px 18px 22px; overflow-y: auto; flex: 1; scrollbar-width: thin; scrollbar-color: var(--line2) transparent; }
+  .pane h2 {
+    display: flex; align-items: center; gap: 8px; margin: 22px 0 10px;
+    font-size: 13px; font-weight: 650; color: var(--text);
+  }
+  .pane h2:first-child { margin-top: 0; }
+  .pane h2 .aside { margin-left: auto; font-size: 11.5px; font-weight: 500; color: var(--text3); }
+  .hint { font-size: 12px; color: var(--text3); margin: 6px 0 0; }
 
-  .inst h2 {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin: 0 0 12px;
-    font-size: 12.5px;
-    font-weight: 500;
-    color: var(--ice);
-  }
-  .inst h2::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .readout { display: grid; grid-template-columns: 1fr auto; gap: 7px 12px; margin: 0; align-items: baseline; }
+  .readout > div:not(.meter) { display: contents; }
+  .readout dt { font-size: 12.5px; color: var(--text2); }
+  .readout dd { margin: 0; font-size: 13.5px; font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; color: var(--text); overflow-wrap: anywhere; }
+  .readout dd.dim { color: var(--text2); font-weight: 500; }
+  .readout dd.mono { font-family: var(--mono); font-size: 12px; font-weight: 500; }
+  .meter { grid-column: 1 / -1; height: 4px; border-radius: 2px; background: var(--surface2); margin-top: -1px; overflow: hidden; }
+  .meter > span { display: block; height: 100%; width: 0; border-radius: 2px; background: var(--text3); transition: width 420ms ease; }
+  .meter.warm > span { background: var(--accent); }
+  .meter.fire > span { background: linear-gradient(90deg, var(--fire2), var(--fire)); }
 
-  .readout { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; margin: 0; align-items: baseline; }
-  .readout dt { font-size: 12.5px; color: var(--ice); }
-  .readout dd {
-    margin: 0;
-    font-family: var(--mono);
-    font-size: 14px;
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-    text-align: right;
-    color: var(--paper);
-  }
-  .readout dd.dim { color: var(--ice2); }
+  .spark-chart { display: block; width: 100%; height: 64px; margin-top: 4px; overflow: visible; }
+  .spark-chart .ln { fill: none; stroke: var(--fire); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; }
+  .spark-chart .ar { fill: color-mix(in srgb, var(--fire) 12%, transparent); stroke: none; }
+  .spark-chart .base { stroke: var(--line2); stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .spark-chart .pt { fill: var(--fire); stroke: var(--bg-side); stroke-width: 2; vector-effect: non-scaling-stroke; }
+  .spark-chart .hit { fill: transparent; }
+  .spark-chart .hit:hover { fill: color-mix(in srgb, var(--fire) 10%, transparent); }
 
-  /* context window fill, drawn under the usage readout */
-  .meter {
-    grid-column: 1 / -1;
-    height: 4px;
-    border-radius: 2px;
-    background: rgba(133, 147, 184, 0.12);
-    margin-top: 2px;
-    overflow: hidden;
+  .field { display: grid; grid-template-columns: 1fr 92px; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .field label { font-size: 12.5px; color: var(--text2); }
+  .field input[type="number"], .field select, .pane select, .pane textarea {
+    width: 100%; padding: 6px 9px; background: var(--surface); border: 1px solid var(--line2); border-radius: 8px;
+    font-size: 12.5px; transition: border-color 120ms linear;
   }
-  .meter > span {
-    display: block;
-    height: 100%;
-    width: 0;
-    border-radius: 2px;
-    background: linear-gradient(90deg, var(--ice), var(--ice2));
-    transition: width 420ms cubic-bezier(0.2, 0.7, 0.2, 1), background 300ms linear;
-  }
-  .meter.warm > span { background: linear-gradient(90deg, var(--ember), var(--ember2)); box-shadow: 0 0 10px rgba(255, 138, 61, 0.5); }
-
-  .field { display: grid; grid-template-columns: 1fr 76px; align-items: center; gap: 10px; margin-bottom: 10px; }
-  .field label { font-size: 12.5px; color: var(--ice); }
-  .field input[type="number"] {
-    width: 100%;
-    padding: 6px 9px;
-    background: var(--panel);
-    border: 1px solid var(--line2);
-    border-radius: var(--r1);
-    color: var(--paper);
-    font-family: var(--mono);
-    font-size: 12.5px;
-    text-align: right;
-    transition: border-color 120ms linear;
-  }
-  .field input[type="number"]:hover { border-color: rgba(133, 147, 184, 0.5); }
-  .field input[type="number"]:focus-visible { outline: none; border-color: var(--ember); box-shadow: 0 0 0 3px rgba(255, 138, 61, 0.14); }
+  .field input[type="number"] { font-family: var(--mono); text-align: right; }
+  .field input::placeholder { color: var(--text3); font-family: var(--sans); }
+  .field input:focus-visible, .pane select:focus-visible, .pane textarea:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
   .field.check { grid-template-columns: 1fr auto; }
-  .field input[type="checkbox"] { accent-color: var(--ember); width: 16px; height: 16px; margin: 0; cursor: pointer; }
-  .field[hidden] { display: none; }
-  .field.effort { grid-template-columns: 1fr auto; }
-  .field select {
-    width: 100%;
-    padding: 5px 6px;
-    background: var(--panel);
-    border: 1px solid var(--line2);
-    border-radius: var(--r1);
-    color: var(--paper);
-    font-family: var(--mono);
-    font-size: 12.5px;
-  }
-  .field select:focus-visible { outline: none; border-color: var(--ember); box-shadow: 0 0 0 3px rgba(255, 138, 61, 0.14); }
+  .field input[type="checkbox"] { accent-color: var(--horn); width: 16px; height: 16px; margin: 0; }
+  .field.wide { grid-template-columns: 1fr 150px; }
+  .pane textarea { display: block; min-height: 96px; max-height: 300px; resize: vertical; line-height: 1.45; font-size: 13px; }
+  #schema { font-family: var(--mono); font-size: 12px; min-height: 120px; }
+  .schema-state { font-size: 12px; margin-top: 5px; color: var(--text3); }
+  .schema-state.bad { color: var(--accent); }
+  .schema-state.good { color: var(--ok); }
+  .link { background: none; border: 0; padding: 0; font-size: 12px; font-weight: 550; color: var(--text3); text-decoration: underline; text-underline-offset: 2px; }
+  .link:hover { color: var(--text); }
+  .srv-err { font-size: 12.5px; color: var(--accent); margin: 8px 0 0; }
 
-  details.sys summary {
-    font-size: 12.5px;
-    color: var(--ice);
-    cursor: pointer;
-    list-style: none;
-    padding: 3px 0;
-    transition: color 120ms linear;
-  }
-  details.sys summary:hover { color: var(--paper); }
-  details.sys summary::-webkit-details-marker { display: none; }
-  details.sys summary::after { content: " ▾"; opacity: 0.6; }
-  details.sys[open] summary::after { content: " ▴"; }
-  details.sys summary.set { color: var(--ice2); }
-  details.sys summary.set::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 2px; background: var(--ember); transform: rotate(45deg); margin-right: 9px; vertical-align: 1px; }
-  details.sys textarea {
-    display: block;
-    width: 100%;
-    min-height: 78px;
-    max-height: 220px;
-    margin-top: 8px;
-    padding: 8px 10px;
-    font-size: 13px;
-    line-height: 1.45;
-    background: var(--panel);
-    border: 1px solid var(--line2);
-    border-radius: var(--r1);
-    transition: border-color 120ms linear;
-  }
-  details.sys textarea:focus-visible { border-color: var(--ember); box-shadow: 0 0 0 3px rgba(255, 138, 61, 0.14); }
+  /* ---- overlays ------------------------------------------------------ */
 
-  .foot-links {
-    margin-top: auto;
-    display: flex;
-    justify-content: flex-end;
+  .scrim { position: fixed; inset: 0; z-index: 40; background: rgba(0, 0, 0, 0.45); }
+  dialog {
+    border: 1px solid var(--line2); border-radius: 14px; background: var(--surface); color: var(--text);
+    box-shadow: var(--shadow); padding: 20px 22px; max-width: min(460px, calc(100vw - 32px)); width: 100%;
+  }
+  dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+  dialog h2 { margin: 0 0 12px; font-size: 16px; }
+  dialog table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  dialog td { padding: 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  dialog td:first-child { white-space: nowrap; padding-right: 16px; }
+  dialog .row { display: flex; justify-content: flex-end; margin-top: 14px; }
+  .toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 70;
+    padding: 9px 14px; border-radius: 10px; background: var(--surface2); border: 1px solid var(--line2);
+    box-shadow: var(--shadow); font-size: 13px; max-width: calc(100vw - 32px);
+  }
+  .toast:empty { display: none; }
+
+  /* ---- the imp ------------------------------------------------------- */
+
+  .imp-float { animation: float 3.4s ease-in-out infinite; transform-box: fill-box; }
+  .imp-shadow { fill: #000; opacity: 0.35; animation: shade 3.4s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+  :root[data-theme="light"] .imp-shadow { opacity: 0.14; }
+  @keyframes float { 50% { transform: translateY(-3px); } }
+  @keyframes shade { 50% { transform: scaleX(0.82); opacity: 0.22; } }
+  .imp-eyes { transform-box: fill-box; transform-origin: center; transition: transform 260ms ease; }
+  .imp-fire { transform-box: fill-box; transform-origin: 50% 80%; }
+  .mascot.busy .imp-fire { animation: flicker 0.5s ease-in-out infinite alternate; }
+  .mascot.busy .imp-float { animation-duration: 1.6s; }
+  .mascot.sleep .imp-eyes { transform: scaleY(0.2); }
+  .mascot.sleep .imp-fire { opacity: 0.35; }
+  .mascot.down .imp-float { animation: shake 0.45s ease-in-out 2; }
+  .mascot.throw .imp-fire { animation: none; opacity: 0; transition: opacity 80ms; }
+  @keyframes flicker { from { transform: scale(0.92); } to { transform: scale(1.12); } }
+  @keyframes shake { 25% { transform: translateX(-2px) rotate(-4deg); } 75% { transform: translateX(2px) rotate(4deg); } }
+  .fireball {
+    position: fixed; z-index: 50; width: 14px; height: 14px; border-radius: 50%; pointer-events: none;
+    background: radial-gradient(circle at 40% 40%, #fff6c2, #ffc53a 45%, #ff5a00);
+    box-shadow: 0 0 14px 4px rgba(255, 122, 26, 0.65);
+    animation: fling 760ms cubic-bezier(0.3, 0.6, 0.5, 1) forwards;
+  }
+  @keyframes fling {
+    0%   { transform: translate(0, 0) scale(1); opacity: 1; }
+    45%  { transform: translate(var(--fx-mid), -26px) scale(1.15); opacity: 1; }
+    100% { transform: translate(var(--fx), 18px) scale(0.3); opacity: 0; }
   }
 
-  /* ---- narrow ------------------------------------------------------ */
+  /* ---- responsive ---------------------------------------------------- */
 
+  @media (max-width: 1180px) {
+    .app { grid-template-columns: minmax(0, 1fr) var(--panel-w); }
+    .only-narrow-side { display: inline-grid; }
+    .side {
+      position: fixed; z-index: 45; left: 0; top: 0; bottom: 0; width: min(300px, 86vw);
+      transform: translateX(-102%); transition: transform 200ms ease, visibility 200ms;
+      visibility: hidden; box-shadow: var(--shadow);
+    }
+    .app.side-open .side { transform: none; visibility: visible; }
+  }
   @media (max-width: 900px) {
-    .shell {
-      grid-template-columns: minmax(0, 1fr);
-      /* Without restating the rows, the instrument strip claims the free space
-         and clips its own readouts. */
-      grid-template-rows: auto auto minmax(0, 1fr) auto auto;
-      grid-template-areas: "head" "inst" "log" "pulse" "compose";
+    .app { grid-template-columns: minmax(0, 1fr); }
+    .only-narrow-panel { display: inline-grid; }
+    .panel {
+      position: fixed; z-index: 45; right: 0; top: 0; bottom: 0; width: min(360px, 92vw);
+      transform: translateX(102%); transition: transform 200ms ease, visibility 200ms;
+      visibility: hidden; box-shadow: var(--shadow);
     }
-    header { flex-wrap: wrap; gap: 12px 18px; }
-    .model, select.model { order: 3; flex: 1 1 100%; border-left: 0; padding-left: 0; max-width: 100%; }
-    .inst {
-      border-left: 0;
-      border-bottom: 1px solid var(--line);
-      flex-direction: row;
-      flex-wrap: wrap;
-      align-items: flex-start;
-      gap: 18px 28px;
-      padding: 16px 28px;
-      overflow: visible;
-      background: none;
-    }
-    .inst > section { flex: 1 1 200px; }
-    .foot-links { display: none; }
-    .log { padding-top: 20px; }
-    .turn { max-width: none; }
+    .app.panel-open .panel { transform: none; visibility: visible; }
+    .top { flex-wrap: wrap; gap: 6px 10px; padding: 8px 12px; }
+    .model, select.model { order: 5; flex: 1 1 100%; max-width: 100%; border-left: 0; padding-left: 2px; }
+    .log { padding: 18px 14px 8px; }
+    .pulse { padding: 8px 14px 0; gap: 12px; }
+    .strip { height: 44px; }
+    .rate { padding-bottom: 18px; }
+    .rate .n { font-size: 26px; }
+    .compose { padding: 8px 12px 12px; }
+    .turn.is-user { max-width: 92%; }
   }
-
+  @media (max-width: 480px) {
+    .wordmark { height: 24px; }
+    .mascot { width: 42px; height: 42px; }
+    .state #state { font-size: 11.5px; }
+    .bubble { left: 44px; top: 44px; }
+    .ctx-bar { width: 44px; }
+    .empty .big { width: 118px; height: 118px; }
+    .foot .acts { margin-left: 0; }
+  }
   @media (prefers-reduced-motion: reduce) {
-    .shell, .turn, .fault { animation: none; }
-    .caret, .spark, details.think.live summary { animation: none !important; }
-    details.think.live summary { color: var(--think); -webkit-text-fill-color: var(--think); background: none; }
-    * { transition: none !important; }
-    .log { scroll-behavior: auto; }
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+    details.think.live summary { color: var(--skin); -webkit-text-fill-color: var(--skin); background: none; }
   }
 </style>
 </head>
 <body>
-<div class="shell">
+<svg class="defs" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="g-horn" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff2222"/><stop offset="1" stop-color="#990000"/></linearGradient>
+    <linearGradient id="g-word" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" style="stop-color: var(--word1)"/><stop offset="0.4" style="stop-color: var(--word2)"/><stop offset="1" style="stop-color: var(--word3)"/>
+    </linearGradient>
+    <linearGradient id="g-skin" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff74b0"/><stop offset="1" stop-color="#d81b63"/></linearGradient>
+    <linearGradient id="g-skin-d" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ec3f86"/><stop offset="1" stop-color="#a8104a"/></linearGradient>
+    <radialGradient id="g-ball" cx="0.4" cy="0.4" r="0.65"><stop offset="0" stop-color="#fff6c2"/><stop offset="0.45" stop-color="#ffc53a"/><stop offset="1" stop-color="#ff5a00"/></radialGradient>
+    <linearGradient id="g-flame" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#ff7a00"/><stop offset="0.6" stop-color="#ffcf40" stop-opacity="0.9"/><stop offset="1" stop-color="#ff3b00" stop-opacity="0"/></linearGradient>
+    <filter id="f-glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="1.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="f-hot" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <!-- The imp: WoW warlock's summoned imp. Big bald head, glowing round eyes, small pointy ears,
+         horn nubs, stubby body, fireball in hand. Not a devil. -->
+    <symbol id="imp" viewBox="0 0 72 72">
+      <ellipse class="imp-shadow" cx="34" cy="69" rx="12" ry="2.2"/>
+      <g class="imp-float">
+        <ellipse cx="28" cy="61" rx="4.2" ry="2.8" fill="url(#g-skin-d)"/>
+        <ellipse cx="40" cy="61" rx="4.2" ry="2.8" fill="url(#g-skin-d)"/>
+        <path d="M22 50 C22 42 27 39 34 39 C41 39 46 42 46 50 C46 57 41 61 34 61 C27 61 22 57 22 50 Z" fill="url(#g-skin)"/>
+        <ellipse cx="34" cy="52" rx="6" ry="5" fill="#fff" opacity="0.13"/>
+        <path d="M23.5 46 C18 47 16.5 52.5 20.5 55" stroke="url(#g-skin-d)" stroke-width="4" fill="none" stroke-linecap="round"/>
+        <path d="M44.5 46 C51 46 55 44 58.5 41" stroke="url(#g-skin-d)" stroke-width="4" fill="none" stroke-linecap="round"/>
+        <path d="M15 22.5 L4.5 17.5 L13.5 30 Z" fill="url(#g-skin-d)"/>
+        <path d="M53 22.5 L63.5 17.5 L54.5 30 Z" fill="url(#g-skin-d)"/>
+        <path d="M25.5 11.5 L23 4.5 L30.5 9.5 Z" fill="url(#g-horn)"/>
+        <path d="M42.5 11.5 L45 4.5 L37.5 9.5 Z" fill="url(#g-horn)"/>
+        <ellipse cx="34" cy="25" rx="20" ry="17" fill="url(#g-skin)"/>
+        <ellipse cx="27" cy="14.5" rx="7" ry="3.2" fill="#fff" opacity="0.2"/>
+        <path d="M20 18.8 Q24.5 14.8 29.5 18.2" stroke="#5a0624" stroke-width="2.1" fill="none" stroke-linecap="round"/>
+        <path d="M38.6 20.4 Q43.5 19.4 48 20.2" stroke="#5a0624" stroke-width="2.1" fill="none" stroke-linecap="round"/>
+        <g class="imp-eyes">
+          <circle cx="26" cy="26.5" r="5.6" fill="#ffe14d" filter="url(#f-glow)"/>
+          <circle cx="42" cy="26.5" r="5.6" fill="#ffe14d" filter="url(#f-glow)"/>
+          <circle cx="27.2" cy="27" r="1.8" fill="#2a0010"/>
+          <circle cx="43.2" cy="27" r="1.8" fill="#2a0010"/>
+        </g>
+        <path d="M27 35 Q34 39 41.5 33.2" stroke="#5a0624" stroke-width="1.9" fill="none" stroke-linecap="round"/>
+        <path d="M37.2 36.1 L38.4 39 L39.6 35.4 Z" fill="#fff"/>
+        <g class="imp-fire">
+          <path d="M57.5 25.5 C54 30 53.5 34 55.5 37 C57.5 40 63.5 40 64.5 36 C65.5 33 63 30 64 26.5 C61.5 28.5 60 27.5 57.5 25.5 Z" fill="url(#g-flame)"/>
+          <circle cx="60" cy="37" r="5.2" fill="url(#g-ball)" filter="url(#f-glow)"/>
+        </g>
+      </g>
+    </symbol>
+    <symbol id="imp-head" viewBox="0 0 40 36">
+      <path d="M9 10 L1 5 L7 17 Z M31 10 L39 5 L33 17 Z" fill="url(#g-skin-d)"/>
+      <path d="M13 5 L12 0.5 L16.5 3.5 Z M27 5 L28 0.5 L23.5 3.5 Z" fill="url(#g-horn)"/>
+      <ellipse cx="20" cy="17" rx="13" ry="12" fill="url(#g-skin)"/>
+      <circle cx="15" cy="17" r="3.6" fill="#ffe14d"/><circle cx="25" cy="17" r="3.6" fill="#ffe14d"/>
+      <circle cx="15.7" cy="17.3" r="1.2" fill="#2a0010"/><circle cx="25.7" cy="17.3" r="1.2" fill="#2a0010"/>
+      <path d="M15.5 23.5 Q20 26 24.5 22.5" stroke="#5a0624" stroke-width="1.4" fill="none" stroke-linecap="round"/>
+    </symbol>
+  </defs>
+</svg>
 
-  <header>
-    <span class="wordmark">imp<span class="spark" id="dot"></span></span>
-    <span class="state" id="state">starting</span>
-    <span class="model" id="model">connecting…</span>
-    <div class="head-actions">
-      <button type="button" class="act ghost" id="newchat" title="clear the conversation">New chat</button>
-    </div>
-  </header>
+<div class="app" id="app">
 
-  <main class="log" id="log" role="log">
-    <p class="empty">
-      <b>Nothing here yet.</b> Ask something. While the answer streams, the pulse below
-      draws one bar per token, so you can watch the model's pace as it writes.
-      <kbd>Enter</kbd> sends, <kbd>Shift+Enter</kbd> breaks the line, <kbd>Esc</kbd> stops.
-    </p>
-  </main>
+  <aside class="side" id="side" aria-label="Conversations">
+    <div class="side-top">
+      <button type="button" class="btn primary" id="newchat" title="start a new conversation (Ctrl+K)">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        New chat <kbd>Ctrl K</kbd>
+      </button>
+      <input type="search" class="search" id="conv-search" placeholder="Search chats" aria-label="Search conversations">
+    </div>
+    <ul class="convs" id="convs" aria-label="Conversation list"></ul>
+    <div class="side-foot">
+      <button type="button" class="btn" id="export-md" title="download this conversation as Markdown">Export .md</button>
+      <button type="button" class="btn" id="export-json" title="download this conversation as JSON">Export .json</button>
+      <button type="button" class="btn" id="import-json" title="load conversations from a JSON export">Import</button>
+      <input type="file" id="import-file" accept="application/json,.json" hidden>
+    </div>
+  </aside>
 
-  <div class="pulse">
-    <div>
-      <canvas class="strip" id="strip" width="960" height="128" role="img"
-              aria-label="one bar per token, height is the gap to the previous token"></canvas>
-      <p class="strip-note" id="strip-note">one bar per token, dashed line is the median gap</p>
+  <div class="stage" id="stage">
+    <header class="top">
+      <button type="button" class="icon-btn only-narrow-side" id="open-side" aria-label="Show conversations" aria-controls="side" aria-expanded="false">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+      <div class="brand">
+        <button type="button" class="mascot sleep" id="mascot" aria-label="The imp. Click for a remark.">
+          <svg aria-hidden="true"><use href="#imp"/></svg>
+        </button>
+        <svg class="wordmark" viewBox="76 0 410 214" role="img" aria-label="imp">
+          <g filter="url(#f-hot)">
+            <path d="M 120 72 C 112 50, 98 30, 82 6 C 80 2, 84 4, 86 6 C 100 26, 116 50, 134 72 Z" fill="url(#g-horn)"/>
+            <path d="M 150 72 C 158 50, 172 30, 190 6 C 192 2, 188 4, 186 6 C 172 26, 156 50, 138 72 Z" fill="url(#g-horn)"/>
+          </g>
+          <circle cx="137" cy="68" r="10" fill="url(#g-horn)" filter="url(#f-hot)"/>
+          <rect x="119" y="90" width="36" height="86" rx="5" fill="url(#g-word)"/>
+          <path d="M 178 176 L 178 126 C 178 96, 206 86, 226 86 C 244 86, 256 94, 262 108 C 268 94, 280 86, 298 86 C 318 86, 346 96, 346 126 L 346 176 L 314 176 L 314 130 C 314 112, 304 104, 292 104 C 280 104, 270 112, 270 130 L 270 176 L 238 176 L 238 130 C 238 112, 228 104, 216 104 C 204 104, 194 112, 194 130 L 194 176 Z" fill="url(#g-word)"/>
+          <path d="M 370 86 L 370 210 L 388 210 L 388 170 C 396 176, 410 180, 424 180 C 458 180, 480 158, 480 132 C 480 106, 458 86, 424 86 C 410 86, 396 90, 388 98 L 388 86 Z M 420 104 C 445 104, 460 116, 460 132 C 460 148, 445 160, 420 160 C 400 160, 388 150, 388 132 C 388 114, 400 104, 420 104 Z" fill="url(#g-word)" fill-rule="evenodd"/>
+        </svg>
+      </div>
+      <div class="bubble" id="bubble" role="status" aria-live="polite" hidden></div>
+      <span class="state"><span class="dot" id="dot"></span><span id="state">starting</span></span>
+      <span class="model" id="model">connecting...</span>
+      <div class="top-acts">
+        <button type="button" class="icon-btn" id="theme" aria-label="Switch theme"></button>
+        <button type="button" class="icon-btn" id="help-btn" aria-label="Keyboard shortcuts" title="keyboard shortcuts (?)">?</button>
+        <button type="button" class="icon-btn only-narrow-panel" id="open-panel" aria-label="Show run, settings and server panel" aria-controls="panel" aria-expanded="false">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5h12M4 10h12M4 15h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="8" cy="5" r="2" fill="var(--bg)" stroke="currentColor" stroke-width="1.6"/><circle cx="13" cy="10" r="2" fill="var(--bg)" stroke="currentColor" stroke-width="1.6"/><circle cx="7" cy="15" r="2" fill="var(--bg)" stroke="currentColor" stroke-width="1.6"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <main class="log" id="log" role="log" aria-label="Conversation"></main>
+
+    <div class="pulse">
+      <div>
+        <canvas class="strip" id="strip" width="960" height="112" role="img"
+                aria-label="one bar per token, height is the gap to the previous token"></canvas>
+        <p class="strip-note" id="strip-note">one bar per token, dashed line is the median gap</p>
+      </div>
+      <div class="rate idle" id="rate">
+        <div class="n" id="m-rate">0.0</div>
+        <div class="u">tok/s</div>
+      </div>
     </div>
-    <div class="rate idle" id="rate">
-      <div class="n" id="m-rate">0.0</div>
-      <div class="u">tok/s</div>
-    </div>
+
+    <form class="compose" id="composer">
+      <div class="box">
+        <div class="thumbs" id="thumbs" hidden></div>
+        <textarea id="prompt" rows="1" placeholder="Ask the imp..." aria-label="Message"></textarea>
+        <div class="box-row">
+          <button type="button" class="icon-btn" id="attach" aria-label="Attach images" title="attach images (or drop, or paste)">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M13.5 6.5 7.8 12.2a1.6 1.6 0 0 0 2.3 2.3l6-6a3.2 3.2 0 0 0-4.6-4.6l-6.2 6.2a4.8 4.8 0 0 0 6.8 6.8l5-5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>
+          </button>
+          <input type="file" id="attach-file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+          <span class="ctx" id="ctx" title="draft tokens from POST /tokenize, context from the last answer's usage">
+            <span class="ctx-bar" id="ctx-bar" role="progressbar" aria-label="context window used by the next request" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></span>
+            <span id="ctx-note"></span>
+          </span>
+          <button type="submit" class="send" id="send">Send</button>
+        </div>
+      </div>
+    </form>
   </div>
 
-  <form class="compose" id="composer">
-    <div class="box">
-      <textarea id="prompt" rows="1" placeholder="Ask the model…"></textarea>
-      <button type="submit" class="send" id="send">Send</button>
+  <aside class="panel" id="panel" aria-label="Run, settings and server">
+    <div class="tabs" role="tablist" aria-label="Panel">
+      <button type="button" role="tab" id="tab-run" aria-controls="pane-run" aria-selected="true">Run</button>
+      <button type="button" role="tab" id="tab-set" aria-controls="pane-set" aria-selected="false" tabindex="-1">Settings</button>
+      <button type="button" role="tab" id="tab-srv" aria-controls="pane-srv" aria-selected="false" tabindex="-1">Server</button>
     </div>
-  </form>
 
-  <aside class="inst">
-    <section>
-      <h2>Run</h2>
+    <section class="pane" role="tabpanel" id="pane-run" aria-labelledby="tab-run">
+      <h2>Last run</h2>
       <dl class="readout">
         <dt>time to first token</dt> <dd id="m-ttft">-</dd>
         <dt>tokens</dt>              <dd id="m-count">-</dd>
         <dt>median gap</dt>          <dd id="m-itl">-</dd>
         <dt>wall</dt>                <dd id="m-wall">-</dd>
+        <div id="m-energy-row" hidden><dt>GPU energy</dt><dd id="m-energy">-</dd></div>
       </dl>
-    </section>
 
-    <section>
       <h2>Usage</h2>
       <dl class="readout">
         <dt>prompt tokens</dt> <dd id="u-prompt">-</dd>
@@ -754,43 +879,139 @@
         <div class="meter" id="u-meter" role="progressbar" aria-label="context window used"
              aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
       </dl>
+
+      <h2>Speed in this chat <span class="aside" id="speed-aside"></span></h2>
+      <svg class="spark-chart" id="speed" viewBox="0 0 280 64" preserveAspectRatio="none" role="img" aria-label="tokens per second of each answer in this conversation"></svg>
+      <p class="hint" id="speed-note">One point per answer once the first one lands.</p>
     </section>
 
-    <section>
-      <h2>Parameters</h2>
-      <div class="field">
-        <label for="temp">temperature</label>
-        <input type="number" id="temp" value="0.7" min="0" max="2" step="0.1">
-      </div>
-      <div class="field">
-        <label for="maxtok">max tokens</label>
-        <input type="number" id="maxtok" value="512" min="1" max="65536" step="1">
-      </div>
+    <section class="pane" role="tabpanel" id="pane-set" aria-labelledby="tab-set" hidden>
+      <h2>Model</h2>
       <div class="field check">
         <label for="thinking">thinking</label>
         <input type="checkbox" id="thinking" checked>
       </div>
-      <div class="field effort" id="effortbox" hidden>
+      <div class="field wide" id="effortbox" hidden>
         <label for="effort">reasoning effort</label>
         <select id="effort"></select>
       </div>
-      <details class="sys" id="sysbox">
-        <summary id="syslabel">system prompt</summary>
-        <textarea id="system" rows="3" placeholder="Sent as the system message of every request."></textarea>
-      </details>
+
+      <h2>Sampling <button type="button" class="link aside" id="reset-params">Reset to defaults</button></h2>
+      <div class="field"><label for="temp">temperature</label><input type="number" id="temp" value="0.7" min="0" max="2" step="0.05" placeholder="model"></div>
+      <div class="field"><label for="maxtok">max tokens</label><input type="number" id="maxtok" value="512" min="1" max="65536" step="1"></div>
+      <div class="field"><label for="topp">top_p</label><input type="number" id="topp" min="0" max="1" step="0.01" placeholder="model"></div>
+      <div class="field"><label for="topk">top_k</label><input type="number" id="topk" min="0" step="1" placeholder="model"></div>
+      <div class="field"><label for="minp">min_p</label><input type="number" id="minp" min="0" max="1" step="0.01" placeholder="model"></div>
+      <div class="field"><label for="reppen">repetition penalty</label><input type="number" id="reppen" min="0.01" max="5" step="0.01" placeholder="1.05"></div>
+      <div class="field"><label for="prespen">presence penalty</label><input type="number" id="prespen" min="-2" max="2" step="0.1" placeholder="0"></div>
+      <div class="field"><label for="freqpen">frequency penalty</label><input type="number" id="freqpen" min="-2" max="2" step="0.1" placeholder="0"></div>
+      <div class="field"><label for="seed">seed</label><input type="number" id="seed" step="1" placeholder="random"></div>
+      <p class="hint">An empty field is not sent: the server uses the model's own default.</p>
+
+      <h2>System prompt <span class="aside">saved with this chat</span></h2>
+      <div class="field wide">
+        <label for="sys-preset">preset</label>
+        <select id="sys-preset">
+          <option value="">choose...</option>
+          <option value="none">none</option>
+          <option value="concise">concise</option>
+          <option value="coder">coding assistant</option>
+          <option value="teacher">patient teacher</option>
+          <option value="translate">translate to English</option>
+          <option value="imp">sassy imp</option>
+        </select>
+      </div>
+      <textarea id="system" rows="4" aria-label="System prompt" placeholder="Sent as the system message of every request in this chat."></textarea>
+
+      <h2>Output</h2>
+      <div class="field check">
+        <label for="logprobs">token probabilities</label>
+        <input type="checkbox" id="logprobs">
+      </div>
+      <div class="field wide">
+        <label for="fmt">format</label>
+        <select id="fmt">
+          <option value="none">free text</option>
+          <option value="json_object">JSON object</option>
+          <option value="json_schema">JSON schema</option>
+        </select>
+      </div>
+      <div id="schema-box" hidden>
+        <textarea id="schema" spellcheck="false" aria-label="JSON schema" placeholder='{"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}'></textarea>
+        <p class="schema-state" id="schema-state" aria-live="polite"></p>
+      </div>
+      <p class="hint">Structured output switches thinking off on the server.</p>
     </section>
 
-    <div class="foot-links"><a class="link" href="https://github.com/kekzl/imp">github.com/kekzl/imp</a></div>
+    <section class="pane" role="tabpanel" id="pane-srv" aria-labelledby="tab-srv" hidden>
+      <h2>Live <span class="aside" id="srv-age">not polled yet</span></h2>
+      <dl class="readout">
+        <dt>requests in flight</dt> <dd id="s-flight">-</dd>
+        <dt>running / waiting</dt>  <dd id="s-split" class="dim">-</dd>
+        <dt>queued prompt tokens</dt> <dd id="s-qtok" class="dim">-</dd>
+        <dt>decode batch</dt>       <dd id="s-batch" class="dim">-</dd>
+        <dt>KV blocks used</dt>     <dd id="s-kv">-</dd>
+        <div class="meter" id="s-kv-meter" role="progressbar" aria-label="KV pool used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
+        <dt>prefix cache blocks</dt> <dd id="s-kvc" class="dim">-</dd>
+        <dt>VRAM held</dt>          <dd id="s-vram">-</dd>
+        <div class="meter" id="s-vram-meter" role="progressbar" aria-label="VRAM held" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
+        <dt>VRAM peak</dt>          <dd id="s-vpeak" class="dim">-</dd>
+        <div id="s-power-row" hidden><dt>GPU power</dt><dd id="s-power">-</dd></div>
+        <div id="s-energy-row" hidden><dt>GPU energy total</dt><dd id="s-energy" class="dim">-</dd></div>
+      </dl>
+      <svg class="spark-chart" id="s-power-spark" viewBox="0 0 280 64" preserveAspectRatio="none" role="img" aria-label="GPU power over the last polls" hidden></svg>
+
+      <h2>Since start</h2>
+      <dl class="readout">
+        <dt>requests</dt>           <dd id="s-req">-</dd>
+        <dt>failed</dt>             <dd id="s-fail" class="dim">-</dd>
+        <dt>generated tokens</dt>   <dd id="s-gen">-</dd>
+        <dt>prompt tokens seen</dt> <dd id="s-prompt" class="dim">-</dd>
+        <dt>served from cache</dt>  <dd id="s-cache" class="dim">-</dd>
+        <dt>last TTFT (server)</dt> <dd id="s-lttft" class="dim">-</dd>
+        <dt>uptime</dt>             <dd id="s-up" class="dim">-</dd>
+      </dl>
+      <p class="srv-err" id="srv-err" hidden></p>
+
+      <h2>Model</h2>
+      <dl class="readout" id="model-card">
+        <dt>id</dt>               <dd id="i-id" class="mono">-</dd>
+        <dt>status</dt>           <dd id="i-status" class="dim">-</dd>
+        <dt>context window</dt>   <dd id="i-ctx">-</dd>
+        <dt>max prompt</dt>       <dd id="i-input" class="dim">-</dd>
+        <dt>parallel slots</dt>   <dd id="i-slots" class="dim">-</dd>
+        <dt>reasoning effort</dt> <dd id="i-effort" class="dim">-</dd>
+        <dt>models on disk</dt>   <dd id="i-disk" class="dim">-</dd>
+      </dl>
+      <p class="hint">Polled from GET /metrics every 3 s while this tab is open. Model facts: GET /v1/models, /props, /info.</p>
+    </section>
   </aside>
 
+  <div class="scrim" id="scrim" hidden></div>
 </div>
+
+<dialog id="help" aria-labelledby="help-title">
+  <h2 id="help-title">Keyboard shortcuts</h2>
+  <table>
+    <tr><td><kbd>Enter</kbd></td><td>send</td></tr>
+    <tr><td><kbd>Shift</kbd> + <kbd>Enter</kbd></td><td>new line</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>stop the answer, close a drawer or this box</td></tr>
+    <tr><td><kbd>Ctrl</kbd> + <kbd>K</kbd></td><td>new chat</td></tr>
+    <tr><td><kbd>/</kbd></td><td>focus the message box</td></tr>
+    <tr><td><kbd>?</kbd></td><td>this list</td></tr>
+    <tr><td><kbd>Left</kbd> <kbd>Right</kbd></td><td>switch panel tabs when a tab has focus</td></tr>
+  </table>
+  <div class="row"><button type="button" class="btn" id="help-close">Close</button></div>
+</dialog>
+<div class="tk-tip" id="tk-tip" role="tooltip" hidden></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
 "use strict";
 
 // Served by imp-server itself, the origin is the engine. When the page is opened
 // from disk or hosted elsewhere it is not, so ?api= overrides and the default
-// port is the last resort: CORS is open, so pointing off-origin works.
+// port is the last resort.
 const API_OVERRIDE = new URLSearchParams(location.search).get("api");
 const FALLBACK_API = "http://localhost:8080";
 let API = API_OVERRIDE || (location.protocol === "file:" ? FALLBACK_API : location.origin);
@@ -798,33 +1019,84 @@ let API = API_OVERRIDE || (location.protocol === "file:" ? FALLBACK_API : locati
 const el = (id) => document.getElementById(id);
 const log = el("log"), promptBox = el("prompt"), sendBtn = el("send"), composer = el("composer");
 const dot = el("dot"), stateLabel = el("state"), newChatBtn = el("newchat"), rateBox = el("rate");
+const app = el("app"), mascot = el("mascot");
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
 let models = [];         // GET /v1/models data[], loaded one first
 let modelName = null;    // the id the next request names
 let contextLen = 0;      // max_model_len of the loaded model, 0 = unknown
-let history = [];        // [{role, content}]: reasoning is never sent back
 let controller = null;   // AbortController for the in-flight stream
+let lastActivity = Date.now();
 
-/* ---------- settings ---------------------------------------------- */
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); return true; } catch { return false; } };
 
-// Parameters survive a reload; the conversation deliberately does not.
+let toastTimer = 0;
+function toast(text) {
+  const t = el("toast");
+  t.textContent = text;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.textContent = ""; }, 3600);
+}
+
+/* ---------- theme --------------------------------------------------- */
+
+const THEME_KEY = "imp.ui.theme";
+const darkQuery = matchMedia("(prefers-color-scheme: dark)");
+const SUN = '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.3 4.3l1.4 1.4M14.3 14.3l1.4 1.4M4.3 15.7l1.4-1.4M14.3 5.7l1.4-1.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+const MOON = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 12.6A6.5 6.5 0 0 1 7.4 4.5a6.5 6.5 0 1 0 8.1 8.1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+const isLight = () => (document.documentElement.dataset.theme || (darkQuery.matches ? "dark" : "light")) === "light";
+
+function applyTheme() {
+  const pick = lsGet(THEME_KEY);
+  if (pick === "light" || pick === "dark") document.documentElement.dataset.theme = pick;
+  else delete document.documentElement.dataset.theme;
+  const light = isLight();
+  const btn = el("theme");
+  btn.innerHTML = light ? MOON : SUN;
+  btn.setAttribute("aria-label", light ? "Switch to dark theme" : "Switch to light theme");
+  btn.title = btn.getAttribute("aria-label");
+  drawStrip();
+}
+el("theme").addEventListener("click", () => {
+  lsSet(THEME_KEY, isLight() ? "dark" : "light");
+  applyTheme();
+});
+darkQuery.addEventListener("change", applyTheme);
+
+/* ---------- settings ------------------------------------------------ */
+
+// Sampling survives a reload. An empty field is not sent, so the model's own default applies.
 const PARAMS_KEY = "imp.ui.params", DRAFT_KEY = "imp.ui.draft";
-const paramIds = ["temp", "maxtok", "thinking", "effort", "system"];
+const PARAM_DEFAULTS = {
+  temp: "0.7", maxtok: "512", topp: "", topk: "", minp: "", reppen: "", prespen: "", freqpen: "", seed: "",
+  thinking: true, effort: "", logprobs: false, fmt: "none", schema: "",
+};
+const paramIds = Object.keys(PARAM_DEFAULTS);
+// [input id, request field, integer?]
+const SAMPLING = [
+  ["temp", "temperature", false], ["topp", "top_p", false], ["topk", "top_k", true], ["minp", "min_p", false],
+  ["reppen", "repetition_penalty", false], ["prespen", "presence_penalty", false],
+  ["freqpen", "frequency_penalty", false], ["seed", "seed", true],
+];
 let savedEffort = "";  // restored once the loaded model's choices exist
+
+function setParam(id, v) {
+  const box = el(id);
+  if (box.type === "checkbox") box.checked = !!v;
+  else box.value = v;
+}
 
 function loadParams() {
   let saved = {};
-  try { saved = JSON.parse(localStorage.getItem(PARAMS_KEY) || "{}"); } catch { /* fresh */ }
-  for (const id of paramIds) {
-    if (!(id in saved)) continue;
-    const box = el(id);
-    if (box.type === "checkbox") box.checked = !!saved[id];
-    else box.value = saved[id];
-  }
+  try { saved = JSON.parse(lsGet(PARAMS_KEY) || "{}") || {}; } catch { /* fresh */ }
+  for (const id of paramIds) setParam(id, id in saved ? saved[id] : PARAM_DEFAULTS[id]);
   savedEffort = typeof saved.effort === "string" ? saved.effort : "";
   try { promptBox.value = sessionStorage.getItem(DRAFT_KEY) || ""; } catch { /* fine */ }
   if (promptBox.value) promptBox.dispatchEvent(new Event("input"));
-  reflectSystem();
+  reflectFormat();
+  // The system prompt used to be global; it now belongs to a conversation.
+  return typeof saved.system === "string" ? saved.system : "";
 }
 
 function saveParams() {
@@ -833,20 +1105,372 @@ function saveParams() {
     const box = el(id);
     out[id] = box.type === "checkbox" ? box.checked : box.value;
   }
-  try { localStorage.setItem(PARAMS_KEY, JSON.stringify(out)); } catch { /* private mode */ }
+  lsSet(PARAMS_KEY, JSON.stringify(out));
 }
 
-function reflectSystem() {
-  el("syslabel").classList.toggle("set", el("system").value.trim() !== "");
+el("reset-params").addEventListener("click", () => {
+  for (const id of paramIds) if (id !== "schema" && id !== "fmt") setParam(id, PARAM_DEFAULTS[id]);
+  saveParams();
+  toast("Sampling reset: temperature 0.7, max tokens 512, everything else the model's default.");
+});
+
+const SYS_PRESETS = {
+  none: "",
+  concise: "Answer briefly and directly. No preamble, no closing summary.",
+  coder: "You are a senior software engineer. Give working code first, then a short explanation. Name the language on every code block.",
+  teacher: "You are a patient teacher. Explain step by step, check understanding with a short question at the end.",
+  translate: "Translate every message the user sends into natural English. Output only the translation.",
+  imp: "You are a small, sassy imp who is mildly annoyed to be summoned. Stay helpful and correct, keep the attitude light.",
+};
+el("sys-preset").addEventListener("change", (e) => {
+  const v = e.target.value;
+  if (!(v in SYS_PRESETS)) return;
+  el("system").value = SYS_PRESETS[v];
+  e.target.value = "";
+  cur.system = el("system").value;
+  saveConvs();
+});
+el("system").addEventListener("input", () => { cur.system = el("system").value; saveConvs(); });
+
+// response_format from the Output section; throws with a readable reason when the schema does not parse.
+function responseFormat() {
+  const fmt = el("fmt").value;
+  if (fmt === "json_object") return { type: "json_object" };
+  if (fmt !== "json_schema") return null;
+  const src = el("schema").value.trim();
+  if (!src) throw new Error("paste a JSON schema first");
+  const parsed = JSON.parse(src);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("the schema must be a JSON object");
+  // Accept the OpenAI wrapper {name, schema, strict} or a bare schema.
+  const js = parsed.schema && typeof parsed.schema === "object" ? { name: "schema", ...parsed } : { name: "schema", schema: parsed };
+  return { type: "json_schema", json_schema: js };
 }
 
-/* ---------- pulse -------------------------------------------------- */
+function reflectFormat() {
+  const isSchema = el("fmt").value === "json_schema";
+  el("schema-box").hidden = !isSchema;
+  if (!isSchema) return;
+  const st = el("schema-state");
+  try {
+    responseFormat();
+    st.textContent = "Valid JSON, sent as response_format json_schema.";
+    st.className = "schema-state good";
+  } catch (e) {
+    st.textContent = "Not sent yet: " + e.message;
+    st.className = "schema-state bad";
+  }
+}
+el("fmt").addEventListener("change", reflectFormat);
+el("schema").addEventListener("input", reflectFormat);
+
+/* ---------- conversations ------------------------------------------- */
+
+const CONV_KEY = "imp.ui.convs", CUR_KEY = "imp.ui.current";
+let convs = [], cur = null;
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+const newConv = (system = "") => ({ id: uid(), title: "", created: Date.now(), updated: Date.now(), system, messages: [] });
+const isDataImage = (u) => typeof u === "string" && u.length < 24e6 && /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(u);
+const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+const str = (v, max = 2e6) => (typeof v === "string" ? v.slice(0, max) : "");
+
+// Everything that comes from storage or an imported file passes through here: only known
+// fields of known types survive, images only as data:image URLs.
+function sanitizeConv(c) {
+  if (!c || typeof c !== "object" || !Array.isArray(c.messages)) return null;
+  let system = str(c.system, 200000);
+  const messages = [];
+  for (const m of c.messages) {
+    if (!m || typeof m !== "object") continue;
+    let content = m.content, images = [];
+    if (Array.isArray(content)) {
+      images = content.filter((p) => p && p.type === "image_url").map((p) => p.image_url?.url ?? p.image_url);
+      content = content.filter((p) => p && p.type === "text").map((p) => str(p.text)).join("\n");
+    }
+    if (m.role === "system") { if (!system) system = str(content, 200000); continue; }
+    if (m.role !== "user" && m.role !== "assistant") continue;
+    const o = { role: m.role, content: str(content) };
+    if (Array.isArray(m.images)) images = images.concat(m.images);
+    images = images.filter(isDataImage).slice(0, 8);
+    if (images.length) o.images = images;
+    if (num(m.imagesDropped)) o.imagesDropped = m.imagesDropped;
+    if (m.role === "user" && m.hidden === true) o.hidden = true;
+    if (m.role === "assistant") {
+      const r = str(m.reasoning ?? m.reasoning_content);
+      if (r) o.reasoning = r;
+      if (typeof m.finish === "string") o.finish = m.finish.slice(0, 32);
+      if (m.noFinish === true) o.noFinish = true;
+      if (m.cont === true) o.cont = true;
+      if (m.stats && typeof m.stats === "object") {
+        const s = {};
+        for (const k of ["count", "tps", "ttft", "wall", "cached", "joules", "watts", "used", "prompt", "reasoning", "evicted", "maxTokens"])
+          if (num(m.stats[k]) !== undefined) s[k] = m.stats[k];
+        o.stats = s;
+      }
+      if (Array.isArray(m.logprobs)) {
+        o.logprobs = m.logprobs.filter((x) => Array.isArray(x) && typeof x[0] === "string" && typeof x[1] === "number")
+          .slice(0, 50000).map((x) => [x[0], x[1], Array.isArray(x[2]) ? x[2].filter((t) => Array.isArray(t) && typeof t[0] === "string" && typeof t[1] === "number").slice(0, 20) : []]);
+      }
+    }
+    messages.push(o);
+  }
+  const id = typeof c.id === "string" && /^[\w-]{1,40}$/.test(c.id) ? c.id : uid();
+  return { id, title: str(c.title, 200), created: num(c.created) ?? Date.now(), updated: num(c.updated) ?? Date.now(), system, messages };
+}
+
+function loadConvs(migratedSystem) {
+  let list = [];
+  try { list = JSON.parse(lsGet(CONV_KEY) || "[]"); } catch { list = []; }
+  convs = Array.isArray(list) ? list.map(sanitizeConv).filter(Boolean) : [];
+  const curId = lsGet(CUR_KEY);
+  cur = convs.find((c) => c.id === curId) ?? null;
+  if (!cur) {
+    cur = convs.find((c) => !c.messages.length) ?? newConv(convs[0]?.system ?? migratedSystem);
+    if (!convs.includes(cur)) convs.unshift(cur);
+  }
+}
+
+// Images and token probabilities are the bulk of a chat; over quota they are dropped
+// from storage (not from the open page) before anything else is.
+function stripHeavy(c) {
+  return { ...c, messages: c.messages.map((m) => {
+    const o = { ...m };
+    if (o.images?.length) { o.imagesDropped = o.images.length; delete o.images; }
+    delete o.logprobs;
+    return o;
+  }) };
+}
+let saveTimer = 0;
+function saveConvs() { clearTimeout(saveTimer); saveTimer = setTimeout(flushConvs, 250); }
+function flushConvs() {
+  clearTimeout(saveTimer);
+  const keep = convs.filter((c) => c.messages.length || c === cur);
+  lsSet(CUR_KEY, cur.id);
+  if (lsSet(CONV_KEY, JSON.stringify(keep))) return;
+  if (lsSet(CONV_KEY, JSON.stringify(keep.map((c) => (c === cur ? c : stripHeavy(c)))))) {
+    toast("Browser storage is full: images and token probabilities of older chats were not saved.");
+    return;
+  }
+  if (lsSet(CONV_KEY, JSON.stringify(keep.map(stripHeavy)))) {
+    toast("Browser storage is full: images and token probabilities were not saved.");
+    return;
+  }
+  toast("Browser storage is full: this chat is not saved. Export it, or delete old chats.");
+}
+window.addEventListener("pagehide", flushConvs);
+
+const visibleText = (m) => m.content + (m.reasoning ? "\n" + m.reasoning : "");
+function titleOf(c) {
+  if (c.title) return c.title;
+  const first = c.messages.find((m) => m.role === "user" && !m.hidden);
+  if (!first) return "New chat";
+  const t = first.content.replace(/\s+/g, " ").trim();
+  return t ? (t.length > 52 ? t.slice(0, 50) + "..." : t) : "Image";
+}
+function ago(ts) {
+  const s = (Date.now() - ts) / 1000;
+  if (s < 60) return "now";
+  if (s < 3600) return Math.floor(s / 60) + " min";
+  if (s < 86400) return Math.floor(s / 3600) + " h";
+  if (s < 86400 * 7) return Math.floor(s / 86400) + " d";
+  return new Date(ts).toLocaleDateString();
+}
+
+function renderSidebar() {
+  const ul = el("convs");
+  const q = el("conv-search").value.trim().toLowerCase();
+  ul.replaceChildren();
+  const list = [...convs].sort((a, b) => b.updated - a.updated)
+    .filter((c) => !q || titleOf(c).toLowerCase().includes(q) || c.messages.some((m) => visibleText(m).toLowerCase().includes(q)));
+  for (const c of list) {
+    const li = document.createElement("li");
+    li.dataset.id = c.id;
+    if (c === cur) li.className = "on";
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "conv";
+    if (c === cur) b.setAttribute("aria-current", "true");
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = titleOf(c);
+    const m = document.createElement("span");
+    m.className = "m";
+    const turns = c.messages.filter((x) => x.role === "assistant").length;
+    m.textContent = ago(c.updated) + (turns ? `, ${turns} answer${turns === 1 ? "" : "s"}` : "");
+    b.append(t, m);
+    const acts = document.createElement("span");
+    acts.className = "conv-acts";
+    const rn = document.createElement("button");
+    rn.type = "button"; rn.className = "conv-rename"; rn.textContent = "Rename";
+    rn.setAttribute("aria-label", "Rename " + titleOf(c));
+    const del = document.createElement("button");
+    del.type = "button"; del.className = "conv-del"; del.textContent = "Delete";
+    del.setAttribute("aria-label", "Delete " + titleOf(c));
+    acts.append(rn, del);
+    li.append(b, acts);
+    ul.append(li);
+  }
+  if (!list.length) {
+    const li = document.createElement("li");
+    li.className = "side-empty";
+    li.textContent = q ? "No chat contains that text." : "No chats yet.";
+    ul.append(li);
+  }
+}
+
+el("conv-search").addEventListener("input", renderSidebar);
+
+el("convs").addEventListener("click", (e) => {
+  const li = e.target.closest("li[data-id]");
+  if (!li) return;
+  const c = convs.find((x) => x.id === li.dataset.id);
+  if (!c) return;
+  if (e.target.closest(".conv-rename")) return startRename(li, c);
+  const del = e.target.closest(".conv-del");
+  if (del) {
+    if (controller && c === cur) return toast("Stop the answer first.");
+    if (!del.classList.contains("armed")) {
+      del.classList.add("armed");
+      del.textContent = "Confirm";
+      setTimeout(() => { del.classList.remove("armed"); del.textContent = "Delete"; }, 3000);
+      return;
+    }
+    convs = convs.filter((x) => x !== c);
+    if (c === cur) {
+      cur = [...convs].sort((a, b) => b.updated - a.updated)[0] ?? newConv(c.system);
+      if (!convs.includes(cur)) convs.unshift(cur);
+      showConversation();
+    }
+    flushConvs();
+    renderSidebar();
+    toast("Chat deleted.");
+    return;
+  }
+  if (e.target.closest(".conv")) selectConv(c);
+});
+
+function startRename(li, c) {
+  const input = document.createElement("input");
+  input.className = "rename";
+  input.value = titleOf(c);
+  input.setAttribute("aria-label", "Chat title");
+  li.replaceChildren(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    if (commit) { c.title = input.value.trim().slice(0, 200); saveConvs(); }
+    renderSidebar();
+  };
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+}
+
+function selectConv(c) {
+  if (c === cur) { closeDrawers(); return; }
+  if (controller) { toast("Stop the answer first."); return; }
+  if (!cur.messages.length && !cur.system) convs = convs.filter((x) => x !== cur);
+  cur = c;
+  lsSet(CUR_KEY, cur.id);
+  showConversation();
+  renderSidebar();
+  closeDrawers();
+}
+
+function newChat() {
+  if (controller) { toast("Stop the answer first."); return; }
+  if (cur.messages.length) {
+    cur = newConv(cur.system);
+    convs.unshift(cur);
+  }
+  showConversation();
+  renderSidebar();
+  saveConvs();
+  closeDrawers();
+  promptBox.focus();
+}
+newChatBtn.addEventListener("click", newChat);
+
+function showConversation() {
+  el("system").value = cur.system || "";
+  renderTranscript();
+  showLastRun();
+  renderSpeed();
+  renderCtx();
+}
+
+/* ---------- export / import ----------------------------------------- */
+
+function download(name, type, text) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+const fileBase = (c) => (titleOf(c).replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "chat");
+
+function toMarkdown(c) {
+  const out = ["# " + titleOf(c), ""];
+  if (c.system) out.push("> System: " + c.system.replace(/\n/g, "\n> "), "");
+  for (const m of c.messages) {
+    if (m.role === "user" && m.hidden) { out.push("_(continued)_", ""); continue; }
+    out.push(m.role === "user" ? "## You" : "## imp" + (modelName ? " (" + modelName + ")" : ""), "");
+    if (m.reasoning) out.push("<details><summary>Thinking</summary>", "", m.reasoning, "", "</details>", "");
+    if (m.images?.length) out.push(m.images.map((_, i) => `_[image ${i + 1}]_`).join(" "), "");
+    out.push(m.content, "");
+    if (m.stats) out.push("_" + statBits(m.stats).join(", ") + "_", "");
+  }
+  return out.join("\n");
+}
+el("export-md").addEventListener("click", () => download(fileBase(cur) + ".md", "text/markdown", toMarkdown(cur)));
+el("export-json").addEventListener("click", () => download(fileBase(cur) + ".json", "application/json",
+  JSON.stringify({ format: "imp-webui", version: 1, exported: new Date().toISOString(), conversations: [cur] }, null, 1)));
+el("import-json").addEventListener("click", () => el("import-file").click());
+el("import-file").addEventListener("change", async (e) => {
+  const f = e.target.files?.[0];
+  e.target.value = "";
+  if (!f) return;
+  if (controller) return toast("Stop the answer first.");
+  let data;
+  try { data = JSON.parse(await f.text()); } catch (err) { return toast("Not JSON: " + err.message); }
+  // Our own export, an array of them, a bare OpenAI messages array, or a request body with messages.
+  let raw = [];
+  if (data && Array.isArray(data.conversations)) raw = data.conversations;
+  else if (Array.isArray(data) && data.length && data[0]?.messages) raw = data;
+  else if (Array.isArray(data)) raw = [{ messages: data }];
+  else if (data && Array.isArray(data.messages)) raw = [data];
+  const got = raw.map(sanitizeConv).filter((c) => c && c.messages.length);
+  if (!got.length) return toast("No conversation found in " + f.name + ".");
+  for (const c of got) {
+    if (convs.some((x) => x.id === c.id)) c.id = uid();
+    if (!c.title) c.title = titleOf(c);
+    convs.unshift(c);
+  }
+  if (!cur.messages.length) convs = convs.filter((x) => x !== cur);
+  cur = got[0];
+  showConversation();
+  renderSidebar();
+  flushConvs();
+  toast(`Imported ${got.length} chat${got.length === 1 ? "" : "s"}.`);
+});
+
+/* ---------- pulse ---------------------------------------------------- */
 
 const strip = el("strip");
 const ctx2d = strip.getContext("2d");
 
-// Canvas fillStyle cannot parse color-mix(), so the ramp is interpolated by hand.
-const EMBER = [255, 138, 61], HOT = [255, 214, 170], LINE = [40, 50, 88], ICE = [133, 147, 184];
+// Canvas fillStyle cannot read CSS variables, so each theme's ramp is spelled out here.
+const RAMPS = {
+  dark:  { line: [64, 34, 46], red: [255, 34, 34], hot: [255, 214, 140], ice: [189, 177, 183] },
+  light: { line: [228, 210, 217], red: [200, 0, 30], hot: [255, 168, 40], ice: [133, 116, 124] },
+};
 const mixA = (a, b, t) => [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t));
 const rgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
 const quantile = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * q)))];
@@ -854,7 +1478,7 @@ const quantile = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.max(0, M
 let itl = [];            // ms between consecutive tokens
 let itlAt = [];          // when each gap was recorded, for the cool-down glow
 let tStart = 0, tFirst = 0, tPrev = 0, nTokens = 0;
-const HOT_MS = 700;      // a new bar lands bright and cools to its colour in this time
+const HOT_MS = 700;      // a new bar lands fire-hot and cools to its colour in this time
 
 function median(xs) {
   if (!xs.length) return 0;
@@ -865,11 +1489,15 @@ function median(xs) {
 
 const fmtK = (n) => n >= 10000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1) + "k" : String(n);
 const fmtS = (ms) => ms >= 10000 ? (ms / 1000).toFixed(0) + " s" : ms >= 1000 ? (ms / 1000).toFixed(1) + " s" : Math.round(ms) + " ms";
+const fmtB = (b) => b >= 1024 ** 3 ? (b / 1024 ** 3).toFixed(1) + " GiB" : (b / 1024 ** 2).toFixed(0) + " MiB";
+const fmtJ = (j) => j >= 10000 ? (j / 1000).toFixed(1) + " kJ" : j >= 100 ? j.toFixed(0) + " J" : j.toFixed(1) + " J";
 
 function drawStrip() {
+  const P = RAMPS[isLight() ? "light" : "dark"];
   const dpr = window.devicePixelRatio || 1;
   const w = strip.clientWidth, h = strip.clientHeight;
-  if (strip.width !== Math.round(w * dpr)) {
+  if (!w || !h) return;
+  if (strip.width !== Math.round(w * dpr) || strip.height !== Math.round(h * dpr)) {
     strip.width = Math.round(w * dpr);
     strip.height = Math.round(h * dpr);
   }
@@ -878,8 +1506,7 @@ function drawStrip() {
   ctx2d.shadowBlur = 0;
 
   if (!itl.length) {
-    // At rest: the baseline the bars will stand on.
-    ctx2d.strokeStyle = `rgba(${ICE[0]},${ICE[1]},${ICE[2]},0.25)`;
+    ctx2d.strokeStyle = `rgba(${P.ice[0]},${P.ice[1]},${P.ice[2]},0.3)`;
     ctx2d.setLineDash([2, 4]);
     ctx2d.beginPath();
     ctx2d.moveTo(8, h - 8.5);
@@ -890,8 +1517,7 @@ function drawStrip() {
   }
 
   // A steady stream clusters tightly, so scaling from zero would paint one solid
-  // block. Anchor the floor at p05 and the ceiling at p98: the run reads as a low
-  // even band and only real stalls climb.
+  // block. Anchor the floor at p05 and the ceiling at p98: only real stalls climb.
   const sorted = [...itl].sort((a, b) => a - b);
   const lo = quantile(sorted, 0.05);
   const span = Math.max(quantile(sorted, 0.98) - lo, 0.4);
@@ -908,10 +1534,10 @@ function drawStrip() {
     const frac = norm(itl[i]);
     const bh = 3 + frac * usable;  // even the fastest token keeps a visible floor
     const heat = Math.max(0, 1 - (now - itlAt[i]) / HOT_MS);
-    const base = mixA(LINE, EMBER, 0.35 + frac * 0.65);
-    ctx2d.fillStyle = rgb(heat > 0 ? mixA(base, HOT, heat * 0.85) : base);
+    const base = mixA(P.line, P.red, 0.35 + frac * 0.65);
+    ctx2d.fillStyle = rgb(heat > 0 ? mixA(base, P.hot, heat * 0.85) : base);
     ctx2d.shadowBlur = heat * 14;
-    ctx2d.shadowColor = `rgba(255,138,61,${(0.7 * heat).toFixed(2)})`;
+    ctx2d.shadowColor = `rgba(255,122,26,${(0.7 * heat).toFixed(2)})`;
     const x = pad + i * bw, y = h - pad - bh;
     ctx2d.beginPath();
     ctx2d.roundRect(x, y, Math.max(1, bw - gap), bh, Math.min(2, bw / 2));
@@ -920,7 +1546,7 @@ function drawStrip() {
   ctx2d.shadowBlur = 0;
 
   const y = h - pad - (3 + norm(med) * usable);
-  ctx2d.strokeStyle = `rgba(${ICE[0]},${ICE[1]},${ICE[2]},0.55)`;
+  ctx2d.strokeStyle = `rgba(${P.ice[0]},${P.ice[1]},${P.ice[2]},0.6)`;
   ctx2d.setLineDash([3, 3]);
   ctx2d.beginPath();
   ctx2d.moveTo(pad, y + 0.5);
@@ -945,11 +1571,11 @@ function cool() {
 
 function resetRun() {
   itl = []; itlAt = []; tFirst = 0; tPrev = 0; nTokens = 0;
-  for (const id of ["m-ttft", "m-count", "m-itl", "m-wall", "u-prompt", "u-cached", "u-reason", "u-ctx"])
+  for (const id of ["m-ttft", "m-count", "m-itl", "m-wall", "m-energy", "u-prompt", "u-cached", "u-reason", "u-ctx"])
     el(id).textContent = "-";
   el("m-rate").textContent = "0.0";
   rateBox.classList.add("idle");
-  setMeter(0);
+  setMeter(el("u-meter"), 0);
   el("strip-note").textContent = "one bar per token, dashed line is the median gap";
   drawStrip();
 }
@@ -976,11 +1602,11 @@ function noteToken() {
   cool();
 }
 
-function setMeter(frac) {
-  const meter = el("u-meter");
-  meter.firstElementChild.style.width = (Math.min(1, frac) * 100).toFixed(1) + "%";
-  meter.classList.toggle("warm", frac > 0.85);
-  meter.setAttribute("aria-valuenow", String(Math.round(Math.min(1, frac) * 100)));
+function setMeter(meter, frac, warmAt = 0.85) {
+  const f = Math.max(0, Math.min(1, frac || 0));
+  meter.firstElementChild.style.width = (f * 100).toFixed(1) + "%";
+  meter.classList.toggle("warm", f > warmAt);
+  meter.setAttribute("aria-valuenow", String(Math.round(f * 100)));
 }
 
 // The usage chunk is the server's count: prompt tokens the client cannot know,
@@ -1003,43 +1629,134 @@ function showUsage(u) {
   const evicted = u.prompt_tokens_details?.evicted_tokens ?? 0;
   if (contextLen > 0) {
     el("u-ctx").textContent = `${fmtK(used)} / ${fmtK(contextLen)}`;
-    setMeter(used / contextLen);
+    setMeter(el("u-meter"), used / contextLen);
   } else {
     el("u-ctx").textContent = fmtK(used);
   }
   if (evicted) el("u-ctx").textContent += `, ${fmtK(evicted)} evicted`;
 }
 
-/* ---------- transcript -------------------------------------------- */
+/* ---------- transcript ---------------------------------------------- */
 
 /* Minimal markdown. Model output is escaped first: it is never trusted HTML. */
 const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
 const esc = (s) => s.replace(/[&<>]/g, (c) => ESCAPES[c]);
+const unesc = (s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 
-// Fenced code is stashed behind a control-char sentinel while the inline rules
-// run, so a stray ** or ` inside a code block is never styled.
-const SENT = String.fromCharCode(1);
+// Fenced code and math are stashed behind control-char sentinels while the inline
+// rules run, so a stray ** or ` inside them is never styled.
+const SENT = String.fromCharCode(1), MSENT = String.fromCharCode(2);
 const FENCE_SLOT = new RegExp("\\n?" + SENT + "(\\d+)" + SENT + "\\n?", "g");
+const MATH_SLOT = new RegExp(MSENT + "(\\d+)" + MSENT, "g");
+
+// A tiny highlighter: comments, strings, numbers, keywords, calls. One regex per family.
+const KW = {
+  c: "auto bool break case catch char class const constexpr continue default delete do double else enum explicit extern false float for friend goto if inline int long namespace new noexcept nullptr operator private protected public register return short signed sizeof static static_cast struct switch template this throw true try typedef typename union unsigned using virtual void volatile while override final import package extends implements interface var let fn __global__ __device__ __host__ __shared__",
+  py: "and as assert async await break class continue def del elif else except False finally for from global if import in is lambda None nonlocal not or pass raise return True try while with yield self",
+  js: "async await break case catch class const continue debugger default delete do else export extends false finally for function from if import in instanceof let new null of return static super switch this throw true try typeof undefined var void while with yield interface type enum implements",
+  rs: "as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while",
+  go: "break case chan const continue default defer else fallthrough false for func go goto if import interface map nil package range return select struct switch true type var",
+  sh: "if then else elif fi for in do done while until case esac function return export local echo exit set unset source cd",
+  sql: "select from where and or not insert into values update set delete create table drop alter join left right inner outer on group by order having limit as distinct null is in like union all primary key",
+  json: "true false null",
+};
+const HL_ALIAS = {
+  c: "c", h: "c", cpp: "c", "c++": "c", cc: "c", hpp: "c", cu: "c", cuda: "c", java: "c", cs: "c", csharp: "c", kotlin: "c", swift: "c",
+  py: "py", python: "py", js: "js", javascript: "js", ts: "js", typescript: "js", jsx: "js", tsx: "js", mjs: "js",
+  rs: "rs", rust: "rs", go: "go", golang: "go", sh: "sh", bash: "sh", shell: "sh", zsh: "sh", console: "sh",
+  sql: "sql", json: "json", jsonc: "json",
+};
+const CMT = { c: "\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?(?:\\*\\/|$)", hash: "#[^\\n]*", sql: "--[^\\n]*" };
+const STR_DQ = "\"(?:\\\\[\\s\\S]|[^\"\\\\\\n])*\"?", STR_SQ = "'(?:\\\\[\\s\\S]|[^'\\\\\\n])*'?", STR_BT = "`(?:\\\\[\\s\\S]|[^`\\\\])*`?";
+const NUM_RE = "\\b0[xX][0-9a-fA-F]+\\b|\\b\\d[\\d_]*(?:\\.\\d+)?(?:[eE][+-]?\\d+)?[a-zA-Z]*\\b";
+function hlSpec(cmt, strs, words) {
+  return { re: new RegExp(`(${cmt})|(${strs})|(${NUM_RE})|([A-Za-z_$][\\w$]*)`, "g"), kw: new Set(words.split(" ")) };
+}
+const HL = {
+  c: hlSpec(CMT.c, [STR_DQ, STR_SQ].join("|"), KW.c),
+  py: hlSpec(CMT.hash, ["\"\"\"[\\s\\S]*?(?:\"\"\"|$)", "'''[\\s\\S]*?(?:'''|$)", STR_DQ, STR_SQ].join("|"), KW.py),
+  js: hlSpec(CMT.c, [STR_DQ, STR_SQ, STR_BT].join("|"), KW.js),
+  rs: hlSpec(CMT.c, [STR_DQ, "'(?:\\\\.|[^'\\\\\\n])'"].join("|"), KW.rs),
+  go: hlSpec(CMT.c, [STR_DQ, STR_BT, "'(?:\\\\.|[^'\\\\\\n])'"].join("|"), KW.go),
+  sh: hlSpec(CMT.hash, [STR_DQ, STR_SQ].join("|"), KW.sh),
+  sql: hlSpec(CMT.sql, [STR_SQ, STR_DQ].join("|"), KW.sql + " " + KW.sql.toUpperCase()),
+  json: hlSpec("(?!)", STR_DQ, KW.json),
+  any: hlSpec(CMT.c, [STR_DQ, STR_SQ, STR_BT].join("|"), KW.c + " " + KW.js + " " + KW.py),
+};
+
+// Takes escaped code, returns escaped code with spans; the spans are the only markup added.
+function highlight(lang, code) {
+  const spec = HL[HL_ALIAS[lang.toLowerCase()]] ?? (lang ? HL.any : null);
+  if (!spec || code.length > 60000) return code;
+  const raw = unesc(code);
+  const re = spec.re;
+  let out = "", last = 0, m;
+  re.lastIndex = 0;
+  while ((m = re.exec(raw))) {
+    if (!m[0]) { re.lastIndex++; continue; }
+    let cls = m[1] ? "c" : m[2] ? "s" : m[3] ? "n" : null;
+    if (m[4]) cls = spec.kw.has(m[4]) ? "k" : /^\s*\(/.test(raw.slice(re.lastIndex, re.lastIndex + 6)) ? "f" : null;
+    out += esc(raw.slice(last, m.index)) + (cls ? `<span class="tk-${cls}">${esc(m[0])}</span>` : esc(m[0]));
+    last = re.lastIndex;
+  }
+  return out + esc(raw.slice(last));
+}
 
 function codeBlock(lang, code) {
   // No whitespace between the tags: the <pre> keeps it.
   return '<pre><div class="code-head"><span>' + (lang || "code") + '</span>' +
          '<button type="button" class="copy-code" title="copy code">Copy</button></div>' +
-         '<code>' + code + '</code></pre>';
+         '<code>' + highlight(lang, code) + '</code></pre>';
+}
+
+// TeX to readable HTML: symbols to Unicode, ^ and _ to sup/sub, \frac stacked, \sqrt overlined.
+// The input is already escaped; only fixed tags are added.
+const TEX = {
+  alpha: "α", beta: "β", gamma: "γ", delta: "δ", epsilon: "ϵ", varepsilon: "ε", zeta: "ζ", eta: "η", theta: "θ",
+  iota: "ι", kappa: "κ", lambda: "λ", mu: "μ", nu: "ν", xi: "ξ", pi: "π", rho: "ρ", sigma: "σ", tau: "τ",
+  upsilon: "υ", phi: "ϕ", varphi: "φ", chi: "χ", psi: "ψ", omega: "ω", Gamma: "Γ", Delta: "Δ", Theta: "Θ",
+  Lambda: "Λ", Xi: "Ξ", Pi: "Π", Sigma: "Σ", Phi: "Φ", Psi: "Ψ", Omega: "Ω",
+  cdot: "·", times: "×", div: "÷", pm: "±", mp: "∓", le: "≤", leq: "≤", ge: "≥", geq: "≥", neq: "≠", ne: "≠",
+  approx: "≈", equiv: "≡", sim: "∼", propto: "∝", infty: "∞", sum: "∑", prod: "∏", int: "∫", oint: "∮",
+  partial: "∂", nabla: "∇", to: "→", rightarrow: "→", leftarrow: "←", Rightarrow: "⇒", Leftarrow: "⇐",
+  leftrightarrow: "↔", Leftrightarrow: "⇔", implies: "⇒", iff: "⇔", mapsto: "↦", in: "∈", notin: "∉",
+  subset: "⊂", subseteq: "⊆", supset: "⊃", cup: "∪", cap: "∩", emptyset: "∅", forall: "∀", exists: "∃",
+  neg: "¬", land: "∧", lor: "∨", ldots: "…", cdots: "⋯", dots: "…", circ: "∘", prime: "′", angle: "∠",
+  quad: " ", qquad: "  ", ",": " ", ";": " ", "!": "", " ": " ",
+};
+const BB = { R: "ℝ", N: "ℕ", Z: "ℤ", Q: "ℚ", C: "ℂ" };
+function tex(s) {
+  s = s.replace(/\\\\/g, " ").replace(/\\([{}])/g, (_, b) => (b === "{" ? "\u0003" : "\u0004"));
+  s = s.replace(/\\(?:left|right|big|Big|bigg|Bigg|displaystyle|textstyle)\b\.?/g, "");
+  for (let i = 0; i < 4; i++)
+    s = s.replace(/\\[dt]?frac\{([^{}]*)\}\{([^{}]*)\}/g, '<span class="frac"><span>$1</span><span>$2</span></span>');
+  s = s.replace(/\\sqrt\{([^{}]*)\}/g, '√<span class="sqrt">$1</span>');
+  s = s.replace(/\\mathbb\{([A-Z])\}/g, (_, c) => BB[c] ?? c);
+  s = s.replace(/\\(?:text|mathrm|operatorname|mathit|textit|mathsf|texttt|mathcal)\{([^{}]*)\}/g, "$1");
+  s = s.replace(/\\(?:mathbf|textbf|boldsymbol)\{([^{}]*)\}/g, "<b>$1</b>");
+  s = s.replace(/\\([A-Za-z]+|[,;! ])/g, (_, c) => TEX[c] ?? c);
+  s = s.replace(/\^\{([^{}]*)\}/g, "<sup>$1</sup>").replace(/_\{([^{}]*)\}/g, "<sub>$1</sub>");
+  s = s.replace(/\^([^\s{}<\\&])/g, "<sup>$1</sup>").replace(/_([^\s{}<\\&])/g, "<sub>$1</sub>");
+  return s.replace(/[{}]/g, "").replace(/\u0003/g, "{").replace(/\u0004/g, "}");
 }
 
 function markup(src) {
-  const fences = [];
+  const fences = [], maths = [];
   let s = esc(src);
   s = s.replace(/```([\w+-]*)\n?([\s\S]*?)(?:```|$)/g, (_, lang, code) => {
     fences.push([lang, code.replace(/\n$/, "")]);
     return SENT + (fences.length - 1) + SENT;
   });
   s = s.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+  const stash = (html) => { maths.push(html); return MSENT + (maths.length - 1) + MSENT; };
   // Links showed as raw [text](url). http(s) only: a javascript: or data: target stays text. The
   // source is already escaped, and a quote cannot close the attribute because the URL has none.
+  // Math: $$..$$ and \[..\] display, \(..\) and $..$ inline; "$5 and $10" stays text.
   s = s.split(/(<code>[\s\S]*?<\/code>)/).map((part, k) => k % 2 ? part :
-        part.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)"'<>]+)\)/g,
+        part.replace(/\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]/g, (_, a, b) => stash('<span class="math display">' + tex(a ?? b) + "</span>"))
+            .replace(/\\\(([\s\S]+?)\\\)/g, (_, a) => stash('<span class="math">' + tex(a) + "</span>"))
+            .replace(/(^|[^\\$\w])\$(?=\S)([^$\n]+?)(?<=\S)\$(?![\w$])/g, (_, pre, a) => pre + stash('<span class="math">' + tex(a) + "</span>"))
+            .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)"'<>]+)\)/g,
                      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')).join("");
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
@@ -1047,6 +1764,7 @@ function markup(src) {
   // with white-space: pre-wrap it would otherwise double the gap.
   s = s.replace(/^#{1,6}[ \t]+(.+?)[ \t]*(?:\n+|$)/gm, "<h4>$1</h4>");
   s = tables(s);
+  s = s.replace(MATH_SLOT, (_, i) => maths[i]);
   s = s.replace(FENCE_SLOT, (_, i) => codeBlock(fences[i][0], fences[i][1]));
   return s;
 }
@@ -1079,32 +1797,32 @@ function tables(s) {
 
 const rawText = new WeakMap();  // model turn element -> the markdown it renders
 
-function addTurn(role) {
+function addTurnEl(role) {
   const wrap = document.createElement("article");
   wrap.className = "turn " + (role === "user" ? "is-user" : "is-model");
   const label = document.createElement("div");
   label.className = "role";
   const spark = document.createElement("span");
   spark.className = "spark";
+  if (role !== "user") spark.innerHTML = '<svg aria-hidden="true"><use href="#imp-head"/></svg>';
   label.append(spark, role === "user" ? "you" : "imp");
   const body = document.createElement("div");
   body.className = "body";
   wrap.append(label, body);
-  log.append(wrap);
-  return { wrap, body };
+  return { wrap, body, label };
 }
 
-function thinkPane(turn) {
+function thinkPane(turn, live) {
   const d = document.createElement("details");
-  d.className = "think live";
-  d.open = true;
+  d.className = "think" + (live ? " live" : "");
+  d.open = !!live;
   const s = document.createElement("summary");
   s.textContent = "thinking";
   const b = document.createElement("div");
   b.className = "body";
   d.append(s, b);
   turn.wrap.insertBefore(d, turn.body);
-  return { pane: d, body: b };
+  return { pane: d, body: b, summary: s };
 }
 
 function actButton(cls, text, title) {
@@ -1116,26 +1834,38 @@ function actButton(cls, text, title) {
   return b;
 }
 
-// Footer of a finished model turn: its numbers, copy, and (on the last turn
-// only) regenerate. Earlier footers lose their regenerate button when a new
-// turn lands, so the history and the transcript never disagree about what a
-// rerun replaces.
-function addFoot(turn, bits) {
+function statBits(st) {
+  if (!st) return [];
+  const bits = [];
+  if (num(st.count) !== undefined) bits.push(`${st.count} tok`);
+  if (st.tps) bits.push(`${st.tps.toFixed(1)} tok/s`);
+  if (st.ttft) bits.push(`ttft ${fmtS(st.ttft)}`);
+  if (st.wall) bits.push(fmtS(st.wall));
+  if (st.joules !== undefined) bits.push(`${fmtJ(st.joules)}, ${Math.round(st.watts ?? 0)} W avg`);
+  if (st.cached) bits.push(`${fmtK(st.cached)} cached`);
+  return bits;
+}
+
+function addFoot(turn, bits, acts) {
   const foot = document.createElement("div");
   foot.className = "foot";
-  const s = document.createElement("span");
-  s.className = "stats";
-  for (const bit of bits) {
-    const span = document.createElement("span");
-    span.textContent = bit;
-    s.append(span);
+  if (bits) {
+    const s = document.createElement("span");
+    s.className = "stats";
+    for (const bit of bits) {
+      const span = document.createElement("span");
+      span.textContent = bit;
+      if (/tok\/s$/.test(bit) && parseFloat(bit) >= 100) span.className = "hot";
+      s.append(span);
+    }
+    foot.append(s);
   }
-  const acts = document.createElement("span");
-  acts.className = "acts";
-  acts.append(actButton("act-copy", "Copy", "copy the answer as markdown"),
-              actButton("act-regen", "Regenerate", "drop this answer and ask again"));
-  foot.append(s, acts);
+  const a = document.createElement("span");
+  a.className = "acts";
+  a.append(...acts);
+  foot.append(a);
   turn.wrap.append(foot);
+  return foot;
 }
 
 function addNote(turn, html) {
@@ -1145,9 +1875,83 @@ function addNote(turn, html) {
   turn.wrap.append(n);
 }
 
-function dropRegenExcept(last) {
-  for (const b of log.querySelectorAll(".act-regen"))
-    if (!last || !last.contains(b)) b.remove();
+function emptyState() {
+  const d = document.createElement("div");
+  d.className = "empty";
+  d.innerHTML =
+    '<svg class="big" aria-hidden="true"><use href="#imp"/></svg>' +
+    '<p class="say">I have nothing to do!</p>' +
+    "<p>Ask something. While the answer streams, the strip below draws one bar per token, so you can watch the model's pace as it writes.</p>" +
+    '<p class="keys"><kbd>Enter</kbd> sends, <kbd>Shift+Enter</kbd> breaks the line, <kbd>Esc</kbd> stops, <kbd>?</kbd> lists every shortcut.</p>';
+  return d;
+}
+
+function userTurn(m, idx) {
+  const t = addTurnEl("user");
+  t.wrap.dataset.idx = idx;
+  if (m.images?.length) {
+    const row = document.createElement("div");
+    row.className = "thumbs-row";
+    for (const src of m.images) {
+      const img = document.createElement("img");
+      img.src = src;  // checked by isDataImage
+      img.alt = "attached image";
+      row.append(img);
+    }
+    t.wrap.insertBefore(row, t.body);
+  }
+  t.body.textContent = m.content;
+  if (m.imagesDropped) {
+    const n = document.createElement("p");
+    n.className = "hint";
+    n.textContent = `${m.imagesDropped} image(s) were not kept: browser storage was full.`;
+    t.wrap.append(n);
+  }
+  addFoot(t, null, [actButton("act-edit", "Edit", "edit this message and send it again; later turns are dropped"),
+                    actButton("act-copy-user", "Copy", "copy this message")]);
+  return t.wrap;
+}
+
+function modelTurn(m, idx, isLast) {
+  const t = addTurnEl("model");
+  t.wrap.dataset.idx = idx;
+  if (m.cont) { t.wrap.classList.add("is-cont"); t.label.lastChild.textContent = "imp, continued"; }
+  if (m.reasoning) thinkPane(t, false).body.textContent = m.reasoning;
+  t.body.innerHTML = markup(m.content);
+  rawText.set(t.wrap, m.content);
+  const acts = [actButton("act-copy-text", "Copy", "copy the answer as plain text"),
+                actButton("act-copy", "Markdown", "copy the answer as Markdown")];
+  if (m.logprobs?.length) acts.push(actButton("act-tokens", "Tokens", "colour each token by its probability"));
+  if (isLast && m.finish === "length" && m.content) acts.push(actButton("act-cont", "Continue", "ask the model to go on where it stopped"));
+  if (isLast) acts.push(actButton("act-regen", "Regenerate", "drop this answer and ask again"));
+  addFoot(t, statBits(m.stats), acts);
+  if (m.finish === "length") {
+    if (!m.content && m.reasoning)
+      addNote(t, "<b>No answer: the whole token budget went to thinking.</b> Raise max tokens, a thinking model needs room to answer after it thinks.");
+    else
+      addNote(t, `<b>Cut off at max tokens</b> (${m.stats?.maxTokens ?? parseInt(el("maxtok").value, 10)}). Continue picks up where it stopped, or raise max tokens and regenerate.`);
+  } else if (m.noFinish) {
+    addNote(t, "<b>The stream ended without a finish reason.</b> Something between here and the engine cut it off; the answer may be incomplete.");
+  }
+  return t.wrap;
+}
+
+function contMark() {
+  const d = document.createElement("div");
+  d.className = "cont-mark";
+  d.textContent = "continue";
+  return d;
+}
+
+function renderTranscript() {
+  log.replaceChildren();
+  const msgs = cur.messages;
+  if (!msgs.length) { log.append(emptyState()); return; }
+  msgs.forEach((m, i) => {
+    if (m.role === "user") log.append(m.hidden ? contMark() : userTurn(m, i));
+    else log.append(modelTurn(m, i, i === msgs.length - 1));
+  });
+  log.scrollTop = log.scrollHeight;
 }
 
 async function copyText(text, button) {
@@ -1173,8 +1977,15 @@ const atBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 90;
 const stickBottom = (was) => { if (was) log.scrollTop = log.scrollHeight; };
 
 function setState(kind, text) {
-  dot.className = "spark " + kind;
+  dot.className = "dot " + kind;
   stateLabel.textContent = text;
+  mascot.classList.toggle("busy", kind === "busy");
+  mascot.classList.toggle("sleep", kind === "wait");
+  if (kind === "down") {
+    mascot.classList.remove("down");
+    void mascot.offsetWidth;
+    mascot.classList.add("down");
+  }
 }
 
 function fault(message, detail, meta) {
@@ -1212,61 +2023,189 @@ async function errorDetail(res) {
   return "HTTP " + res.status + (msg ? ": " + msg : "");
 }
 
-/* ---------- streaming --------------------------------------------- */
+/* ---------- token probabilities ------------------------------------- */
 
-function requestBody() {
-  const messages = [];
-  const system = el("system").value.trim();
-  if (system) messages.push({ role: "system", content: system });
-  messages.push(...history);
-  const effort = el("effortbox").hidden ? "" : el("effort").value;
-  return {
-    model: modelName || "imp",
-    messages,
-    stream: true,
-    stream_options: { include_usage: true },
-    temperature: parseFloat(el("temp").value),
-    max_tokens: parseInt(el("maxtok").value, 10),
-    enable_thinking: el("thinking").checked,
-    ...(effort ? { reasoning_effort: effort } : {}),
-  };
+const probClass = (p) => (p >= 0.9 ? "p0" : p >= 0.6 ? "p1" : p >= 0.3 ? "p2" : p >= 0.1 ? "p3" : "p4");
+const pct = (lp) => {
+  const p = Math.exp(lp) * 100;
+  return p >= 99.95 ? "100%" : p >= 10 ? p.toFixed(1) + "%" : p >= 0.1 ? p.toFixed(2) + "%" : "<0.1%";
+};
+
+function showTokens(turnEl, msg) {
+  const body = turnEl.querySelector(":scope > .body");
+  const btn = turnEl.querySelector(".act-tokens");
+  const legend = turnEl.querySelector(".tk-legend");
+  if (body.classList.contains("tokens")) {
+    body.classList.remove("tokens");
+    body.innerHTML = markup(msg.content);
+    legend?.remove();
+    btn.classList.remove("on");
+    btn.setAttribute("aria-pressed", "false");
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  msg.logprobs.forEach((t, i) => {
+    const s = document.createElement("span");
+    s.className = "tk " + probClass(Math.exp(t[1]));
+    s.dataset.i = i;
+    s.tabIndex = 0;
+    s.textContent = t[0];
+    frag.append(s);
+  });
+  body.classList.add("tokens");
+  body.replaceChildren(frag);
+  btn.classList.add("on");
+  btn.setAttribute("aria-pressed", "true");
+  const lg = document.createElement("div");
+  lg.className = "tk-legend";
+  lg.innerHTML = 'probability <span class="tk p0">90%+</span><span class="tk p1">60%+</span><span class="tk p2">30%+</span>' +
+                 '<span class="tk p3">10%+</span><span class="tk p4">below</span> hover or focus a token for the alternatives';
+  body.after(lg);
 }
 
-async function run(text) {
-  const empty = log.querySelector(".empty");
-  if (empty) empty.remove();
+const tip = el("tk-tip");
+function tokenTip(span) {
+  const turn = span.closest(".turn");
+  const msg = cur.messages[+turn?.dataset.idx];
+  const t = msg?.logprobs?.[+span.dataset.i];
+  if (!t) return;
+  const table = document.createElement("table");
+  const rows = t[2].length ? t[2] : [[t[0], t[1]]];
+  for (const [tok, lp] of rows) {
+    const tr = table.insertRow();
+    if (tok === t[0]) tr.className = "pick";
+    tr.insertCell().textContent = JSON.stringify(tok).slice(1, -1);
+    tr.insertCell().textContent = pct(lp);
+  }
+  tip.replaceChildren(table);
+  tip.hidden = false;
+  const r = span.getBoundingClientRect();
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = Math.max(8, Math.min(innerWidth - tw - 8, r.left)) + "px";
+  tip.style.top = (r.bottom + th + 10 > innerHeight ? r.top - th - 6 : r.bottom + 6) + "px";
+}
+log.addEventListener("mouseover", (e) => { const s = e.target.closest(".tokens .tk"); if (s) tokenTip(s); });
+log.addEventListener("focusin", (e) => { const s = e.target.closest(".tokens .tk"); if (s) tokenTip(s); });
+log.addEventListener("mouseout", (e) => { if (e.target.closest(".tokens .tk")) tip.hidden = true; });
+log.addEventListener("focusout", () => { tip.hidden = true; });
+log.addEventListener("scroll", () => { tip.hidden = true; }, { passive: true });
+
+/* ---------- energy -------------------------------------------------- */
+
+let energyKnown = null;  // null = not probed, false = this server does not export it
+
+async function fetchMetrics(timeoutMs = 2500) {
+  const res = await fetch(API + "/metrics", { signal: AbortSignal.timeout(timeoutMs), cache: "no-store" });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return parseProm(await res.text());
+}
+
+// Prometheus text: one sample per line, "name{labels} value"; label sets are summed per name.
+function parseProm(text) {
+  const out = new Map();
+  for (const line of text.split("\n")) {
+    if (!line || line[0] === "#") continue;
+    const m = /^([a-zA-Z_:][\w:]*)(\{.*\})?\s+(\S+)/.exec(line);
+    if (!m) continue;
+    const v = Number(m[3]);
+    if (!Number.isFinite(v)) continue;
+    const labels = {};
+    if (m[2]) for (const lm of m[2].matchAll(/(\w+)="((?:[^"\\]|\\.)*)"/g)) labels[lm[1]] = lm[2];
+    if (!out.has(m[1])) out.set(m[1], []);
+    out.get(m[1]).push({ labels, v });
+  }
+  return out;
+}
+const msum = (m, name) => { const r = m.get(name); return r ? r.reduce((a, x) => a + x.v, 0) : null; };
+
+async function energyNow() {
+  if (energyKnown === false) return null;
+  try {
+    const m = await fetchMetrics(900);
+    const j = msum(m, "imp_gpu_energy_joules_total");
+    energyKnown = j !== null;
+    return j === null ? null : { j, t: performance.now() };
+  } catch { return null; }
+}
+
+/* ---------- streaming ----------------------------------------------- */
+
+const CONTINUE_TEXT = "Continue exactly where your previous answer stopped. Do not repeat anything and do not add a preamble.";
+
+function wireMessages() {
+  const messages = [];
+  if (cur.system?.trim()) messages.push({ role: "system", content: cur.system.trim() });
+  for (const m of cur.messages) {
+    if (m.role === "user") {
+      messages.push({
+        role: "user",
+        content: m.images?.length
+          ? [...(m.content ? [{ type: "text", text: m.content }] : []), ...m.images.map((url) => ({ type: "image_url", image_url: { url } }))]
+          : m.content,
+      });
+    } else {
+      // The reply goes back WITH its reasoning: the model's own template keeps prior thinking
+      // (Qwen3.8 preserve_thinking), and a resent transcript that matches the generated tokens
+      // restores the recurrent state at the end of the reply instead of re-prefilling it.
+      messages.push(m.reasoning ? { role: "assistant", content: m.content, reasoning_content: m.reasoning }
+                                : { role: "assistant", content: m.content });
+    }
+  }
+  return messages;
+}
+
+function requestBody() {
+  const effort = el("effortbox").hidden ? "" : el("effort").value;
+  const body = {
+    model: modelName || "imp",
+    messages: wireMessages(),
+    stream: true,
+    stream_options: { include_usage: true },
+    max_tokens: parseInt(el("maxtok").value, 10) || 512,
+    enable_thinking: el("thinking").checked,
+  };
+  for (const [id, field, int] of SAMPLING) {
+    const v = el(id).value.trim();
+    if (v === "") continue;
+    const n = int ? parseInt(v, 10) : parseFloat(v);
+    if (Number.isFinite(n)) body[field] = n;
+  }
+  if (effort) body.reasoning_effort = effort;
+  if (el("logprobs").checked) { body.logprobs = true; body.top_logprobs = 5; }
+  const rf = responseFormat();
+  if (rf) body.response_format = rf;
+  return body;
+}
+
+async function generate({ cont = false } = {}) {
   clearFaults();
+  log.querySelector(".empty")?.remove();
+  for (const b of log.querySelectorAll(".act-regen, .act-cont, .act-edit")) b.disabled = true;
 
-  const user = addTurn("user");
-  user.body.textContent = text;
-  history.push({ role: "user", content: text });
-
-  const turn = addTurn("model");
+  const turn = addTurnEl("model");
   turn.wrap.classList.add("live");
+  if (cont) { turn.wrap.classList.add("is-cont"); turn.label.lastChild.textContent = "imp, continued"; }
+  log.append(turn.wrap);
   const caret = document.createElement("span");
   caret.className = "caret";
   turn.body.append(caret);
   log.scrollTop = log.scrollHeight;
 
   resetRun();
-  dropRegenExcept(null);
   setState("busy", "generating");
   sendBtn.textContent = "Stop";
   sendBtn.classList.add("stop");
   sendBtn.disabled = false;
   newChatBtn.disabled = true;
+  hideBubble();
 
   const swapping = models.length > 1 && !models.find((m) => m.id === modelName)?.loaded;
   if (swapping) setState("busy", "loading " + modelName);
 
+  const maxTokens = parseInt(el("maxtok").value, 10) || 512;
   let answer = "", reasoning = "", thinking = null, finish = null, usage = null, requestId = null;
-  // The reply goes back into the history WITH its reasoning: the model's own
-  // template keeps prior thinking (Qwen3.8 preserve_thinking), and a resent
-  // transcript that matches the generated tokens restores the recurrent
-  // state at the end of the reply instead of re-prefilling it.
-  const assistantMsg = () =>
-    reasoning ? { role: "assistant", content: answer, reasoning_content: reasoning }
-              : { role: "assistant", content: answer };
+  let outcome = "ok", errText = "";
+  const lps = [];
 
   // Re-typesetting on every token would burn the frame budget at 150 tok/s, so
   // repaints are coalesced to one per animation frame.
@@ -1284,6 +2223,7 @@ async function run(text) {
     });
   };
 
+  const e0 = await energyNow();
   controller = new AbortController();
   tStart = performance.now();
 
@@ -1320,10 +2260,14 @@ async function run(text) {
 
           let obj;
           try { obj = JSON.parse(payload); } catch { continue; }
+          if (obj.error) throw new Error(obj.error.message || "stream error");
           if (obj.usage) { usage = obj.usage; showUsage(usage); }
           const choice = obj.choices?.[0];
           if (!choice) continue;
           if (choice.finish_reason) finish = choice.finish_reason;
+          for (const c of choice.logprobs?.content ?? [])
+            if (typeof c.token === "string" && typeof c.logprob === "number")
+              lps.push([c.token, c.logprob, (c.top_logprobs ?? []).filter((x) => typeof x.token === "string").map((x) => [x.token, x.logprob])]);
           const delta = choice.delta;
           if (!delta) continue;
 
@@ -1331,7 +2275,18 @@ async function run(text) {
 
           if (delta.reasoning_content) {
             // Thinking stays raw text: it is working-out, not typeset prose.
-            if (!thinking) thinking = thinkPane(turn);
+            if (!thinking) {
+              thinking = thinkPane(turn, true);
+              if (requestId) {
+                const b = document.createElement("button");
+                b.type = "button";
+                b.className = "end-think";
+                b.textContent = "End thinking";
+                b.title = "ask the server to close the think block now; the answer follows on the same KV";
+                b.addEventListener("click", () => endThinking(b, requestId));
+                thinking.summary.after(b);
+              }
+            }
             thinking.body.append(delta.reasoning_content);
             reasoning += delta.reasoning_content;
             if (nTokens === 0) setState("busy", "thinking");
@@ -1339,7 +2294,7 @@ async function run(text) {
           if (delta.content) {
             if (!answer) {
               setState("busy", "generating");
-              if (thinking) thinking.pane.classList.remove("live");
+              if (thinking) { thinking.pane.classList.remove("live"); thinking.pane.querySelector(".end-think")?.remove(); }
             }
             answer += delta.content;
             paint();
@@ -1349,84 +2304,220 @@ async function run(text) {
         }
       }
     }
-
-    history.push(assistantMsg());
-    setState("ok", "idle");
+    if (finish === null) outcome = "nofinish";
   } catch (err) {
-    if (err.name === "AbortError") {
-      history.push(assistantMsg());
-      setState("ok", "stopped");
-    } else if (answer || thinking) {
-      // The stream broke after tokens arrived: keep what the model said, and
-      // say that it is a fragment.
-      history.push(assistantMsg());
-      setState("down", "error");
-      fault("The stream ended early.", err.message, requestId ? "request id " + requestId : "");
-    } else {
-      history.pop();  // drop the user turn: the exchange never happened
-      setState("down", "error");
-      fault("The request failed.", err.message, requestId ? "request id " + requestId : "");
+    if (err.name === "AbortError") outcome = "stopped";
+    else { outcome = answer || reasoning ? "broken" : "failed"; errText = err.message; }
+  }
+
+  finished = true;
+  controller = null;
+  const wall = performance.now() - tStart;
+  const count = usage?.completion_tokens ?? nTokens;
+  const gen = tPrev > tFirst ? (tPrev - tFirst) / 1000 : 0;
+
+  if (outcome === "failed" || !(answer || reasoning)) {
+    // The exchange never happened (failed, or stopped before the first token): drop what
+    // this run asked for and hand the text back, so the history never holds two user turns.
+    const asked = cur.messages.pop();
+    if (asked && !asked.hidden && !promptBox.value) {
+      promptBox.value = asked.content;
+      promptBox.dispatchEvent(new Event("input"));
+      if (asked.images?.length) { attachments = asked.images.slice(); renderThumbs(); }
     }
-  } finally {
-    // Final typeset, and it must win over any repaint still queued for the next
-    // frame, otherwise that frame puts the caret back after the run has ended.
-    finished = true;
-    turn.body.innerHTML = markup(answer);
-    turn.wrap.classList.remove("live");
-    if (thinking) { thinking.pane.open = false; thinking.pane.classList.remove("live"); }
-    if (!answer && !thinking) {
-      turn.wrap.remove();
-    } else {
-      rawText.set(turn.wrap, answer);
-      const wall = performance.now() - tStart;
-      const count = usage?.completion_tokens ?? nTokens;
-      const gen = tPrev > tFirst ? (tPrev - tFirst) / 1000 : 0;
-      const bits = [`${count} tok`];
-      if (gen > 0.05) bits.push(`${(count / gen).toFixed(1)} tok/s`);
-      if (tFirst) bits.push(`ttft ${fmtS(tFirst - tStart)}`);
-      bits.push(fmtS(wall));
-      if (usage?.prompt_tokens_details?.cached_tokens) bits.push(`${fmtK(usage.prompt_tokens_details.cached_tokens)} cached`);
-      addFoot(turn, bits);
-      if (finish === "length") {
-        if (!answer && thinking)
-          addNote(turn, "<b>No answer: the whole token budget went to thinking.</b> Raise max tokens, a thinking model needs room to answer after it thinks.");
-        else
-          addNote(turn, `<b>Cut off at max tokens</b> (${parseInt(el("maxtok").value, 10)}). Raise it and regenerate for the rest.`);
-      } else if (finish === null && stateLabel.textContent === "idle") {
-        // The body closed cleanly but no chunk carried finish_reason: a proxy
-        // or the server ended the response before the model was done.
-        addNote(turn, "<b>The stream ended without a finish reason.</b> Something between here and the engine cut it off; the answer may be incomplete.");
-      }
-      el("m-wall").textContent = fmtS(wall);
-      el("strip-note").textContent = `${count} tokens, median gap ${median(itl).toFixed(1)} ms`;
+    if (outcome === "failed") { setState("down", "error"); say("Not my fault!"); }
+    else setState("ok", outcome === "stopped" ? "stopped" : "idle");
+  } else {
+    const st = { count, wall: Math.round(wall), maxTokens };
+    if (gen > 0.05) st.tps = Math.round((count / gen) * 10) / 10;
+    if (tFirst) st.ttft = Math.round(tFirst - tStart);
+    if (usage) {
+      st.prompt = usage.prompt_tokens ?? 0;
+      st.used = (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0);
+      st.cached = usage.prompt_tokens_details?.cached_tokens ?? 0;
+      st.reasoning = usage.completion_tokens_details?.reasoning_tokens ?? 0;
+      st.evicted = usage.prompt_tokens_details?.evicted_tokens ?? 0;
     }
-    controller = null;
-    sendBtn.textContent = "Send";
-    sendBtn.classList.remove("stop");
-    sendBtn.disabled = false;
-    newChatBtn.disabled = false;
-    // A request that named another model swapped it in; the list and the
-    // context window follow the engine, not the picker.
-    if (swapping) refreshModels().catch(() => {});
+    const msg = { role: "assistant", content: answer, stats: st };
+    if (reasoning) msg.reasoning = reasoning;
+    if (finish) msg.finish = finish;
+    if (outcome === "nofinish") msg.noFinish = true;
+    if (cont) msg.cont = true;
+    if (lps.length) msg.logprobs = lps;
+    cur.messages.push(msg);
+    setState(outcome === "broken" ? "down" : "ok", outcome === "stopped" ? "stopped" : outcome === "broken" ? "error" : "idle");
+    if (outcome === "ok" && st.tps >= 100) throwFireball(st.tps);
+    if (e0) {
+      energyNow().then((e1) => {
+        if (!e1 || e1.j < e0.j) return;
+        st.joules = Math.round((e1.j - e0.j) * 10) / 10;
+        st.watts = (e1.t - e0.t) > 0 ? st.joules / ((e1.t - e0.t) / 1000) : 0;
+        el("m-energy").textContent = `${fmtJ(st.joules)}, ${Math.round(st.watts)} W avg`;
+        el("m-energy-row").hidden = false;
+        saveConvs();
+        const node = log.querySelector(`.turn[data-idx="${cur.messages.indexOf(msg)}"]`);
+        if (node && !node.querySelector(".body.tokens")) node.replaceWith(modelTurn(msg, cur.messages.indexOf(msg), msg === cur.messages.at(-1)));
+      });
+    }
+  }
+
+  cur.updated = Date.now();
+  saveConvs();
+  renderTranscript();
+  if (outcome === "failed") fault("The request failed.", errText, requestId ? "request id " + requestId : "");
+  else if (outcome === "broken") fault("The stream ended early.", errText, requestId ? "request id " + requestId : "");
+
+  if (answer || reasoning) {
+    el("m-wall").textContent = fmtS(wall);
+    el("strip-note").textContent = `${count} tokens, median gap ${median(itl).toFixed(1)} ms`;
+  }
+  sendBtn.textContent = "Send";
+  sendBtn.classList.remove("stop");
+  sendBtn.disabled = false;
+  newChatBtn.disabled = false;
+  lastActivity = Date.now();
+  renderSidebar();
+  renderSpeed();
+  renderCtx();
+  // A request that named another model swapped it in; the list and the
+  // context window follow the engine, not the picker.
+  if (swapping) refreshModels().catch(() => {});
+}
+
+async function endThinking(btn, requestId) {
+  btn.disabled = true;
+  btn.textContent = "Ending...";
+  try {
+    const res = await fetch(API + "/v1/requests/" + encodeURIComponent(requestId) + "/end_thinking", { method: "POST" });
+    if (res.ok) {
+      const j = await res.json().catch(() => ({}));
+      btn.textContent = j.status === "already_closed" ? "Already answering" : "Thinking ends now";
+    } else {
+      btn.textContent = res.status === 409 ? "This model cannot end thinking early" : "Could not end thinking";
+      btn.title = await errorDetail(res);
+    }
+  } catch (e) {
+    btn.textContent = "Could not end thinking";
+    btn.title = e.message;
   }
 }
 
-/* ---------- wiring ------------------------------------------------- */
+/* ---------- composer ------------------------------------------------ */
+
+let attachments = [];  // data:image URLs for the next message
+const MAX_SIDE = 2048;
+
+async function toDataUrl(file) {
+  const url = await new Promise((ok, bad) => {
+    const r = new FileReader();
+    r.onload = () => ok(r.result);
+    r.onerror = () => bad(r.error);
+    r.readAsDataURL(file);
+  });
+  // Large pictures are scaled down in the browser: smaller request, smaller saved chat.
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+    if (scale < 1 || file.size > 1.5e6) {
+      const c = document.createElement("canvas");
+      c.width = Math.round(bmp.width * scale);
+      c.height = Math.round(bmp.height * scale);
+      c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+      return c.toDataURL("image/jpeg", 0.9);
+    }
+  } catch { /* keep the original */ }
+  return url;
+}
+
+async function addFiles(files) {
+  const imgs = [...files].filter((f) => /^image\/(png|jpeg|webp|gif)$/.test(f.type));
+  if (!imgs.length) { toast("Only PNG, JPEG, WebP or GIF images can be attached."); return; }
+  for (const f of imgs) {
+    if (attachments.length >= 8) { toast("Up to 8 images per message."); break; }
+    try {
+      const u = await toDataUrl(f);
+      if (isDataImage(u)) attachments.push(u);
+    } catch { toast("Could not read " + f.name + "."); }
+  }
+  renderThumbs();
+}
+
+function renderThumbs() {
+  const box = el("thumbs");
+  box.replaceChildren();
+  attachments.forEach((src, i) => {
+    const d = document.createElement("div");
+    d.className = "thumb";
+    const img = document.createElement("img");
+    img.src = src;
+    img.alt = `attachment ${i + 1}`;
+    const x = document.createElement("button");
+    x.type = "button";
+    x.textContent = "x";
+    x.setAttribute("aria-label", `Remove attachment ${i + 1}`);
+    x.addEventListener("click", () => { attachments.splice(i, 1); renderThumbs(); });
+    d.append(img, x);
+    box.append(d);
+  });
+  box.hidden = !attachments.length;
+}
+
+el("attach").addEventListener("click", () => el("attach-file").click());
+el("attach-file").addEventListener("change", (e) => { addFiles(e.target.files); e.target.value = ""; });
+promptBox.addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith("image/"));
+  if (files.length) { e.preventDefault(); addFiles(files); }
+});
+const stage = el("stage");
+let dragDepth = 0, dropHint = null;
+stage.addEventListener("dragenter", (e) => {
+  if (![...(e.dataTransfer?.types ?? [])].includes("Files")) return;
+  e.preventDefault();
+  if (dragDepth++ === 0) {
+    dropHint = document.createElement("div");
+    dropHint.className = "drop-hint";
+    dropHint.textContent = "Drop images to attach them";
+    stage.append(dropHint);
+  }
+});
+stage.addEventListener("dragover", (e) => { if (dragDepth) e.preventDefault(); });
+stage.addEventListener("dragleave", () => { if (dragDepth && --dragDepth === 0) dropHint?.remove(); });
+stage.addEventListener("drop", (e) => {
+  if (!dragDepth) return;
+  e.preventDefault();
+  dragDepth = 0;
+  dropHint?.remove();
+  addFiles(e.dataTransfer.files);
+});
 
 composer.addEventListener("submit", (e) => {
   e.preventDefault();
   if (controller) { controller.abort(); return; }
   if (!modelName) return;
   const text = promptBox.value.trim();
-  if (!text) return;
+  if (!text && !attachments.length) return;
+  try { responseFormat(); } catch (err) {
+    clearFaults();
+    fault("The output format is not usable, nothing was sent.", err.message, "Settings, Output");
+    return;
+  }
+  const msg = { role: "user", content: text };
+  if (attachments.length) msg.images = attachments;
+  cur.messages.push(msg);
+  attachments = [];
+  renderThumbs();
   promptBox.value = "";
   promptBox.style.height = "auto";
   try { sessionStorage.removeItem(DRAFT_KEY); } catch { /* fine */ }
-  run(text);
+  clearTimeout(tokTimer);
+  tokSeq++;
+  draftTokens = 0;
+  renderTranscript();
+  generate();
 });
 
 promptBox.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (!e.shiftKey || e.ctrlKey || e.metaKey)) {
+  if (e.key === "Enter" && !e.isComposing && (!e.shiftKey || e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     composer.requestSubmit();
   }
@@ -1434,59 +2525,442 @@ promptBox.addEventListener("keydown", (e) => {
 
 promptBox.addEventListener("input", () => {
   promptBox.style.height = "auto";
-  promptBox.style.height = Math.min(promptBox.scrollHeight, 200) + "px";
+  promptBox.style.height = Math.min(promptBox.scrollHeight, 220) + "px";
   try { sessionStorage.setItem(DRAFT_KEY, promptBox.value); } catch { /* fine */ }
-});
-
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && controller) controller.abort();
+  scheduleTokenize();
 });
 
 for (const id of paramIds) {
   el(id).addEventListener("change", saveParams);
   el(id).addEventListener("input", saveParams);
 }
-el("system").addEventListener("input", reflectSystem);
 
-newChatBtn.addEventListener("click", () => {
-  if (controller) return;
-  history = [];
-  log.replaceChildren();
-  resetRun();
-  const p = document.createElement("p");
-  p.className = "empty";
-  p.innerHTML = "<b>New conversation.</b> Nothing from the last one is sent along; the system prompt and parameters stay.";
-  log.append(p);
-  promptBox.focus();
-});
+/* ---------- prompt size --------------------------------------------- */
 
-// One delegated handler for every copy and regenerate button the transcript
-// will ever grow, including the ones inside re-rendered code blocks.
+let draftTokens = 0, tokTimer = 0, tokSeq = 0, healthAt = 0, idleSuspended = false;
+
+// POST /tokenize wakes an idle-suspended model (it resumes to tokenize), so the count is
+// skipped while /health reports idle_suspended.
+async function healthFresh() {
+  if (Date.now() - healthAt < 15000) return;
+  healthAt = Date.now();
+  try {
+    const r = await fetch(API + "/health", { cache: "no-store", signal: AbortSignal.timeout(2000) });
+    const j = await r.json();
+    idleSuspended = j.idle_suspended === true || j.suspended === true;
+  } catch { /* keep the last answer */ }
+}
+
+function scheduleTokenize() {
+  clearTimeout(tokTimer);
+  const text = promptBox.value;
+  if (!text.trim()) { draftTokens = 0; tokSeq++; renderCtx(); return; }
+  const seq = ++tokSeq;
+  tokTimer = setTimeout(async () => {
+    if (controller || !models.some((m) => m.loaded)) return;
+    await healthFresh();
+    if (seq !== tokSeq) return;
+    if (idleSuspended) { draftTokens = null; renderCtx(); return; }
+    try {
+      const res = await fetch(API + "/tokenize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: text }),
+      });
+      if (seq !== tokSeq) return;
+      const j = res.ok ? await res.json() : null;
+      draftTokens = Array.isArray(j?.tokens) ? j.tokens.length : null;
+    } catch { draftTokens = null; }
+    renderCtx();
+  }, 650);
+}
+
+function renderCtx() {
+  if (!cur) return;
+  const last = [...cur.messages].reverse().find((m) => m.role === "assistant" && m.stats?.used);
+  const base = last?.stats.used ?? 0;
+  const parts = [];
+  if (draftTokens) parts.push(`${fmtK(draftTokens)} token${draftTokens === 1 ? "" : "s"} in draft`);
+  const total = base + (draftTokens || 0);
+  if (contextLen > 0 && total) parts.push(`${fmtK(total)} of ${fmtK(contextLen)} context`);
+  else if (contextLen > 0) parts.push(`${fmtK(contextLen)} context`);
+  el("ctx-note").textContent = parts.join(", ");
+  const bar = el("ctx-bar");
+  bar.hidden = !(contextLen > 0);
+  const f = contextLen > 0 ? Math.min(1, total / contextLen) : 0;
+  bar.firstElementChild.style.width = (f * 100).toFixed(1) + "%";
+  bar.classList.toggle("warm", f > 0.85);
+  bar.setAttribute("aria-valuenow", String(Math.round(f * 100)));
+}
+
+/* ---------- transcript actions -------------------------------------- */
+
+function startEdit(turnEl, idx) {
+  const m = cur.messages[idx];
+  if (!m || controller) return;
+  const box = document.createElement("div");
+  box.className = "edit-box";
+  const ta = document.createElement("textarea");
+  ta.value = m.content;
+  ta.setAttribute("aria-label", "Edit message");
+  const row = document.createElement("div");
+  row.className = "row";
+  const cancel = actButton("", "Cancel");
+  const go = document.createElement("button");
+  go.type = "button";
+  go.className = "btn primary";
+  go.textContent = "Send edited";
+  row.append(cancel, go);
+  box.append(ta, row);
+  const body = turnEl.querySelector(":scope > .body"), foot = turnEl.querySelector(".foot");
+  body.hidden = true;
+  foot.hidden = true;
+  turnEl.style.width = "100%";
+  turnEl.append(box);
+  ta.focus();
+  const later = cur.messages.length - idx - 1;
+  const restore = () => { box.remove(); body.hidden = false; foot.hidden = false; turnEl.style.width = ""; };
+  const submit = () => {
+    const text = ta.value.trim();
+    if (!text && !m.images?.length) return;
+    cur.messages.splice(idx, cur.messages.length - idx, { ...m, content: text });
+    renderTranscript();
+    generate();
+  };
+  cancel.addEventListener("click", restore);
+  go.addEventListener("click", submit);
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); restore(); }
+    else if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); }
+  });
+  if (later) go.title = `drops the ${later} message${later === 1 ? "" : "s"} after this one`;
+}
+
+// One delegated handler for every button the transcript will ever grow,
+// including the ones inside re-rendered code blocks.
 log.addEventListener("click", (e) => {
   const btn = e.target.closest("button");
-  if (!btn) return;
+  if (!btn || btn.disabled) return;
+  const turnEl = btn.closest(".turn");
+  const idx = turnEl ? +turnEl.dataset.idx : -1;
+  const msg = cur.messages[idx];
   if (btn.classList.contains("copy-code")) {
     copyText(btn.closest("pre")?.querySelector("code")?.textContent ?? "", btn);
   } else if (btn.classList.contains("act-copy")) {
-    copyText(rawText.get(btn.closest(".turn")) ?? "", btn);
+    copyText(rawText.get(turnEl) ?? msg?.content ?? "", btn);
+  } else if (btn.classList.contains("act-copy-text")) {
+    const b = turnEl.querySelector(":scope > .body");
+    copyText((b.innerText || b.textContent || "").trim(), btn);
+  } else if (btn.classList.contains("act-copy-user")) {
+    copyText(msg?.content ?? "", btn);
+  } else if (btn.classList.contains("act-tokens")) {
+    if (msg?.logprobs) showTokens(turnEl, msg);
+  } else if (btn.classList.contains("act-edit")) {
+    startEdit(turnEl, idx);
   } else if (btn.classList.contains("act-regen")) {
+    if (controller || idx !== cur.messages.length - 1) return;
+    cur.messages.splice(idx, 1);
+    const cont = cur.messages.at(-1)?.hidden === true;
+    renderTranscript();
+    generate({ cont });
+  } else if (btn.classList.contains("act-cont")) {
     if (controller) return;
-    const modelTurn = btn.closest(".turn");
-    const userTurn = modelTurn.previousElementSibling;
-    if (!userTurn?.classList.contains("is-user")) return;
-    // The last two history entries are exactly this pair (regenerate lives on
-    // the last model turn only), so the rerun replaces them.
-    history.splice(-2, 2);
-    const text = userTurn.querySelector(".body").textContent;
-    modelTurn.remove();
-    userTurn.remove();
-    run(text);
+    cur.messages.push({ role: "user", content: CONTINUE_TEXT, hidden: true });
+    renderTranscript();
+    generate({ cont: true });
   }
 });
 
-window.addEventListener("resize", drawStrip);
+/* ---------- run panel ----------------------------------------------- */
 
-/* ---------- connection -------------------------------------------- */
+function showLastRun() {
+  resetRun();
+  const last = [...cur.messages].reverse().find((m) => m.role === "assistant" && m.stats);
+  el("m-energy-row").hidden = !(last?.stats.joules !== undefined);
+  if (!last) return;
+  const st = last.stats;
+  if (st.ttft) el("m-ttft").textContent = fmtS(st.ttft);
+  el("m-count").textContent = String(st.count ?? "-");
+  if (st.wall) el("m-wall").textContent = fmtS(st.wall);
+  if (st.tps) { el("m-rate").textContent = st.tps.toFixed(1); rateBox.classList.remove("idle"); }
+  if (st.joules !== undefined) el("m-energy").textContent = `${fmtJ(st.joules)}, ${Math.round(st.watts ?? 0)} W avg`;
+  if (st.prompt !== undefined) {
+    showUsage({ prompt_tokens: st.prompt, completion_tokens: st.used - st.prompt,
+                prompt_tokens_details: { cached_tokens: st.cached, evicted_tokens: st.evicted },
+                completion_tokens_details: { reasoning_tokens: st.reasoning } });
+    el("m-count").textContent = String(st.count ?? "-");
+    if (st.tps) el("m-rate").textContent = st.tps.toFixed(1);
+  }
+}
+
+const SVGNS = "http://www.w3.org/2000/svg";
+// Single-series sparkline, zero-based so the height reads as magnitude; each point has a hover title.
+function sparkline(svg, values, label) {
+  svg.replaceChildren();
+  if (!values.length) return;
+  const W = 280, H = 64, pad = 6;
+  const max = Math.max(...values, 1e-9);
+  const n = values.length;
+  const x = (i) => (n === 1 ? W / 2 : pad + (i * (W - 2 * pad)) / (n - 1));
+  const y = (v) => H - pad - (v / max) * (H - 2 * pad);
+  const mk = (tag, attrs) => { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+  svg.append(mk("line", { class: "base", x1: 0, x2: W, y1: H - pad, y2: H - pad }));
+  const pts = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+  if (n > 1) {
+    svg.append(mk("path", { class: "ar", d: `M${x(0)},${H - pad} L${pts.join(" L")} L${x(n - 1)},${H - pad} Z` }));
+    svg.append(mk("polyline", { class: "ln", points: pts.join(" ") }));
+  }
+  svg.append(mk("circle", { class: "pt", cx: x(n - 1), cy: y(values[n - 1]), r: 3.5 }));
+  values.forEach((v, i) => {
+    const hit = mk("rect", { class: "hit", x: x(i) - 8, y: 0, width: 16, height: H });
+    const t = mk("title", {});
+    t.textContent = label(v, i);
+    hit.append(t);
+    svg.append(hit);
+  });
+}
+
+function renderSpeed() {
+  const runs = cur.messages.filter((m) => m.role === "assistant" && m.stats?.tps);
+  const v = runs.map((m) => m.stats.tps).slice(-40);
+  sparkline(el("speed"), v, (val, i) => `answer ${runs.length - v.length + i + 1}: ${val.toFixed(1)} tok/s`);
+  if (!v.length) {
+    el("speed-note").textContent = "One point per answer once the first one lands.";
+    el("speed-aside").textContent = "";
+    return;
+  }
+  el("speed-aside").textContent = `${v.length} answer${v.length === 1 ? "" : "s"}`;
+  el("speed-note").textContent = `last ${v.at(-1).toFixed(1)}, median ${median(v).toFixed(1)}, best ${Math.max(...v).toFixed(1)} tok/s`;
+}
+
+/* ---------- server panel -------------------------------------------- */
+
+let pollTimer = 0, powerHist = [], lastPoll = 0;
+const TABS = ["run", "set", "srv"];
+let tabNow = "run";
+
+function panelVisible() {
+  return getComputedStyle(el("panel")).visibility !== "hidden" && !document.hidden;
+}
+function wantPoll() { return tabNow === "srv" && panelVisible(); }
+
+async function pollServer() {
+  clearTimeout(pollTimer);
+  if (!wantPoll()) return;
+  try {
+    const m = await fetchMetrics();
+    lastPoll = Date.now();
+    el("srv-err").hidden = true;
+    renderServer(m);
+  } catch (e) {
+    el("srv-err").hidden = false;
+    el("srv-err").textContent = "GET /metrics failed: " + e.message;
+  }
+  el("srv-age").textContent = lastPoll ? "every 3 s" : "no answer";
+  pollTimer = setTimeout(pollServer, 3000);
+}
+document.addEventListener("visibilitychange", () => { if (wantPoll()) pollServer(); });
+
+function setText(id, v) { el(id).textContent = v === null || v === undefined ? "-" : v; }
+function renderServer(m) {
+  const g = (n) => msum(m, n);
+  const flight = g("imp_queue_depth");
+  setText("s-flight", flight);
+  const run = g("imp_queue_running"), wait = g("imp_queue_waiting");
+  setText("s-split", run === null ? null : `${run} / ${wait ?? 0}`);
+  setText("s-qtok", g("imp_queued_prompt_tokens") === null ? null : fmtK(g("imp_queued_prompt_tokens")));
+  setText("s-batch", g("imp_decode_batch_last_rows") === null ? null : `${g("imp_decode_batch_last_rows")} rows`);
+  const kt = g("imp_kv_blocks_total"), ku = g("imp_kv_blocks_used");
+  setText("s-kv", kt ? `${fmtK(ku ?? 0)} / ${fmtK(kt)}` : null);
+  setMeter(el("s-kv-meter"), kt ? (ku ?? 0) / kt : 0);
+  setText("s-kvc", g("imp_kv_blocks_cached") === null ? null : fmtK(g("imp_kv_blocks_cached")));
+  const own = g("imp_vram_own_bytes"), budget = g("imp_vram_budget_bytes");
+  const cap = budget > 0 ? budget : 32 * 1024 ** 3;  // RTX 5090: the one card imp targets
+  setText("s-vram", own === null ? null : `${fmtB(own)} of ${fmtB(cap)}${budget > 0 ? " budget" : ""}`);
+  setMeter(el("s-vram-meter"), own ? own / cap : 0, 0.92);
+  setText("s-vpeak", g("imp_vram_own_peak_bytes") === null ? null : fmtB(g("imp_vram_own_peak_bytes")));
+
+  const w = g("imp_gpu_power_watts"), j = g("imp_gpu_energy_joules_total");
+  el("s-power-row").hidden = w === null;
+  el("s-energy-row").hidden = j === null;
+  if (j !== null) energyKnown = true;
+  if (w !== null) {
+    setText("s-power", `${Math.round(w)} W`);
+    powerHist.push(w);
+    if (powerHist.length > 60) powerHist.shift();
+    el("s-power-spark").removeAttribute("hidden");  // SVG has no .hidden property
+    sparkline(el("s-power-spark"), powerHist, (v, i) => `${Math.round(v)} W, ${(powerHist.length - 1 - i) * 3} s ago`);
+  } else {
+    el("s-power-spark").setAttribute("hidden", "");
+  }
+  if (j !== null) setText("s-energy", j >= 3.6e6 ? (j / 3.6e6).toFixed(2) + " kWh" : (j / 3600).toFixed(1) + " Wh");
+
+  setText("s-req", g("imp_requests_total"));
+  setText("s-fail", g("imp_requests_failed_total"));
+  setText("s-gen", g("imp_tokens_completion_total") === null ? null : fmtK(g("imp_tokens_completion_total")));
+  setText("s-prompt", g("imp_tokens_prompt_total") === null ? null : fmtK(g("imp_tokens_prompt_total")));
+  setText("s-cache", g("imp_tokens_cached_total") === null ? null : fmtK(g("imp_tokens_cached_total")));
+  setText("s-lttft", g("imp_last_ttft_ms") ? fmtS(g("imp_last_ttft_ms")) : null);
+  const up = g("imp_uptime_seconds");
+  setText("s-up", up === null ? null : up >= 86400 ? `${Math.floor(up / 86400)} d ${Math.floor((up % 86400) / 3600)} h`
+                                     : up >= 3600 ? `${Math.floor(up / 3600)} h ${Math.floor((up % 3600) / 60)} min`
+                                     : `${Math.floor(up / 60)} min`);
+  serverQueue = flight;
+}
+let serverQueue = null;
+
+async function fetchModelInfo() {
+  const loaded = models.find((m) => m.loaded);
+  setText("i-id", loaded?.id ?? modelName ?? null);
+  setText("i-status", loaded ? "loaded" : models.length ? "not loaded" : "no model");
+  setText("i-ctx", contextLen ? `${fmtK(contextLen)} tokens` : null);
+  const eff = loaded?.meta?.reasoning_effort;
+  setText("i-effort", eff?.values?.length ? `${eff.values.join(", ")} (default ${eff.default})` : "not offered");
+  setText("i-disk", models.length ? String(models.length) : null);
+  const get = (p) => fetch(API + p, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  const [props, info] = await Promise.all([get("/props"), get("/info")]);
+  if (props?.total_slots !== undefined) setText("i-slots", String(props.total_slots));
+  if (info?.max_input_tokens) setText("i-input", `${fmtK(info.max_input_tokens)} tokens`);
+  if (!contextLen && (props?.n_ctx || info?.max_total_tokens)) {
+    contextLen = props?.n_ctx || info.max_total_tokens;
+    setText("i-ctx", `${fmtK(contextLen)} tokens`);
+    renderCtx();
+  }
+}
+
+/* ---------- tabs and drawers ---------------------------------------- */
+
+function selectTab(name, focus) {
+  tabNow = name;
+  for (const t of TABS) {
+    const tab = el("tab-" + t), pane = el("pane-" + t);
+    const on = t === name;
+    tab.setAttribute("aria-selected", String(on));
+    tab.tabIndex = on ? 0 : -1;
+    pane.hidden = !on;
+    if (on && focus) tab.focus();
+  }
+  if (name === "srv") { pollServer(); fetchModelInfo(); }
+}
+for (const t of TABS) el("tab-" + t).addEventListener("click", () => selectTab(t));
+document.querySelector(".tabs").addEventListener("keydown", (e) => {
+  const i = TABS.indexOf(tabNow);
+  if (e.key === "ArrowRight") selectTab(TABS[(i + 1) % TABS.length], true);
+  else if (e.key === "ArrowLeft") selectTab(TABS[(i + TABS.length - 1) % TABS.length], true);
+  else if (e.key === "Home") selectTab(TABS[0], true);
+  else if (e.key === "End") selectTab(TABS[TABS.length - 1], true);
+  else return;
+  e.preventDefault();
+});
+
+const narrowSide = matchMedia("(max-width: 1180px)"), narrowPanel = matchMedia("(max-width: 900px)");
+function syncDrawers() {
+  const sideOpen = app.classList.contains("side-open") && narrowSide.matches;
+  const panelOpen = app.classList.contains("panel-open") && narrowPanel.matches;
+  el("side").inert = narrowSide.matches && !sideOpen;
+  el("panel").inert = narrowPanel.matches && !panelOpen;
+  el("open-side").setAttribute("aria-expanded", String(sideOpen));
+  el("open-panel").setAttribute("aria-expanded", String(panelOpen));
+  el("scrim").hidden = !(sideOpen || panelOpen);
+  if (wantPoll()) pollServer();
+}
+function openDrawer(which) {
+  app.classList.remove("side-open", "panel-open");
+  app.classList.add(which + "-open");
+  syncDrawers();
+  const first = el(which === "side" ? "conv-search" : "tab-" + tabNow);
+  setTimeout(() => first.focus(), 60);
+}
+function closeDrawers() {
+  const was = app.classList.contains("side-open") || app.classList.contains("panel-open");
+  app.classList.remove("side-open", "panel-open");
+  syncDrawers();
+  return was && (narrowSide.matches || narrowPanel.matches);
+}
+el("open-side").addEventListener("click", () => openDrawer("side"));
+el("open-panel").addEventListener("click", () => openDrawer("panel"));
+el("scrim").addEventListener("click", closeDrawers);
+narrowSide.addEventListener("change", syncDrawers);
+narrowPanel.addEventListener("change", syncDrawers);
+
+/* ---------- keyboard ------------------------------------------------ */
+
+const help = el("help");
+el("help-btn").addEventListener("click", () => help.showModal());
+el("help-close").addEventListener("click", () => help.close());
+
+document.addEventListener("keydown", (e) => {
+  if (help.open) return;
+  const typing = e.target.closest?.("input, textarea, select, [contenteditable]");
+  if (e.key === "Escape") {
+    if (controller) { e.preventDefault(); controller.abort(); return; }
+    if (closeDrawers()) { e.preventDefault(); return; }
+    hideBubble();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    newChat();
+    return;
+  }
+  if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === "/") { e.preventDefault(); promptBox.focus(); }
+  else if (e.key === "?") { e.preventDefault(); help.showModal(); }
+});
+
+window.addEventListener("resize", () => { drawStrip(); tip.hidden = true; });
+
+/* ---------- the imp ------------------------------------------------- */
+
+const IDLE_LINES = [
+  "I have nothing to do!",
+  "Ready to work. Reluctantly.",
+  "My fireball is getting cold.",
+  "Nothing in the queue. Nap time?",
+  "I'm not lazy, I'm in power saving mode.",
+  "Summon me with a question, I'll wait. I'm good at waiting.",
+  "Is that all you've got? Ask me something hard.",
+];
+const BUSY_LINES = ["Working on it, working on it!", "Hot tokens, coming right up.", "Don't rush me, I'm on fire here."];
+let bubbleTimer = 0;
+function say(text, ms = 5200) {
+  const b = el("bubble");
+  b.textContent = text;
+  b.hidden = false;
+  clearTimeout(bubbleTimer);
+  bubbleTimer = setTimeout(hideBubble, ms);
+}
+function hideBubble() { el("bubble").hidden = true; }
+const pick = (xs) => xs[Math.floor(Math.random() * xs.length)];
+mascot.addEventListener("click", () => say(controller ? pick(BUSY_LINES) : pick(IDLE_LINES)));
+
+// Idle long enough, and no one else is using the server: the imp complains.
+setInterval(() => {
+  if (controller || document.hidden || !models.some((m) => m.loaded)) return;
+  if (Date.now() - lastActivity < 75000) return;
+  if (serverQueue) return;
+  lastActivity = Date.now() + 45000;  // next remark no sooner than two minutes
+  say(pick(IDLE_LINES));
+}, 10000);
+
+function throwFireball(tps) {
+  say(tps >= 150 ? `${Math.round(tps)} tok/s. Too fast for you?` : "Hot off the GPU.", 3200);
+  if (reduceMotion.matches) return;
+  const src = mascot.querySelector("svg").getBoundingClientRect();
+  const fb = document.createElement("div");
+  fb.className = "fireball";
+  const travel = Math.min(320, innerWidth - src.right - 30);
+  fb.style.left = src.left + src.width * 0.8 + "px";
+  fb.style.top = src.top + src.height * 0.45 + "px";
+  fb.style.setProperty("--fx", travel + "px");
+  fb.style.setProperty("--fx-mid", travel * 0.55 + "px");
+  mascot.classList.add("throw");
+  document.body.append(fb);
+  fb.addEventListener("animationend", () => fb.remove());
+  setTimeout(() => mascot.classList.remove("throw"), 900);
+}
+
+/* ---------- connection ---------------------------------------------- */
 
 // reasoning_effort choices the loaded model's chat template names (/v1/models meta); hidden for
 // any other model, including one the picker would swap in.
@@ -1510,6 +2984,8 @@ function renderModels() {
   contextLen = loaded?.max_model_len ?? loaded?.meta?.n_ctx_train ?? 0;
   if (!models.find((m) => m.id === modelName)) modelName = (loaded ?? models[0])?.id ?? null;
   renderEffort(loaded);
+  renderCtx();
+  fetchModelInfo();
 
   if (models.length <= 1) {
     const span = document.createElement("span");
@@ -1527,6 +3003,7 @@ function renderModels() {
   sel.className = "model";
   sel.id = "model";
   sel.title = "model for the next request; an unloaded one is swapped in by the server";
+  sel.setAttribute("aria-label", "Model");
   for (const m of models) {
     const o = document.createElement("option");
     o.value = m.id;
@@ -1569,6 +3046,7 @@ async function refreshModels() {
         if (models.length) {
           clearFaults();
           if (!controller) setState("ok", "idle");
+          energyNow();
           return;
         }
         break;
@@ -1591,8 +3069,18 @@ async function refreshModels() {
   }
 })();
 
-loadParams();
-drawStrip();
+// The header imp is inlined, not a <use>: state classes cannot reach into a use shadow tree.
+{
+  const s = mascot.querySelector("svg");
+  s.setAttribute("viewBox", el("imp").getAttribute("viewBox"));
+  s.innerHTML = el("imp").innerHTML;
+}
+loadConvs(loadParams());
+applyTheme();
+showConversation();
+renderSidebar();
+syncDrawers();
+setInterval(renderSidebar, 60000);
 </script>
 </body>
 </html>

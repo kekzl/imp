@@ -118,7 +118,25 @@ Expected: an explanation of Rayleigh scattering, written at the single-stream ra
 
 - Shows the usage chunk of every run: prompt tokens, prefix-cache hits, reasoning tokens, context used against the model's window.
 - With a models directory the header is a picker; an unloaded entry is swapped in by the request.
-- One file, no build step; served from the binary at `GET /`.
+- One file, no build step; served from the binary at `GET /`. Nothing leaves the browser except calls to the server.
+
+| feature | how |
+|---|---|
+| conversations | sidebar: new (`Ctrl+K`), rename, delete, search; kept in the browser's `localStorage` |
+| export / import | Markdown or JSON per chat; JSON import |
+| system prompt | per chat, with presets |
+| sampling | temperature, top_p, top_k, min_p, penalties, seed, max tokens; an empty field is not sent |
+| edit, regenerate, continue | edit a user turn and resend from there; continue a `finish_reason: length` answer as a follow-up turn |
+| code and math | syntax colours, language label, copy; `$..$`, `$$..$$`, `\(..\)` as Unicode math |
+| images | file picker, drag and drop, paste; sent as `image_url` data URIs |
+| end thinking | button while the model reasons: `POST /v1/requests/{id}/end_thinking` |
+| token probabilities | `logprobs` + `top_logprobs: 5`, tokens coloured by probability, alternatives on hover |
+| structured output | `response_format` `json_object` or a pasted `json_schema`, parsed before sending |
+| prompt size | draft tokens from `POST /tokenize` (skipped while `/health` reports `idle_suspended`), context bar |
+| server tab | `GET /metrics` every 3 s while open: queue, KV blocks, VRAM, `imp_gpu_power_watts` when exported |
+| energy per answer | `imp_gpu_energy_joules_total` read before and after: J and W avg per turn; card-wide, so concurrent work counts |
+| speed history | tok/s of every answer in the chat as a sparkline |
+| keys, themes, mobile | `Enter`, `Shift+Enter`, `Esc`, `/`, `?`; dark and light; drawers below 1180 and 900 px |
 
 <img src="webui.png" width="800" alt="the built-in web UI after one answer">
 
