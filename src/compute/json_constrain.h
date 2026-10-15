@@ -111,7 +111,7 @@ public:
     void update(int32_t token);
 
     // Reset FSM for a new generation.
-    void reset();
+    void rewind();
 
     // Output tokens still available to the request. Once only just enough remain to close every
     // open structure, the mask narrows to closers so the document always ends well-formed instead

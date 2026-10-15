@@ -61,7 +61,7 @@ bool GrammarConstrainer::init(const std::string& gbnf, Tokenizer* tokenizer) {
     return true;
 }
 
-void GrammarConstrainer::reset() {
+void GrammarConstrainer::rewind() {
     if (!matcher_.compiled())
         return;
     matcher_.reset();

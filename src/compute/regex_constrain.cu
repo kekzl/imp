@@ -173,7 +173,7 @@ bool RegexConstrainer::init(const std::string& pattern, Tokenizer* tokenizer) {
     return true;
 }
 
-void RegexConstrainer::reset() {
+void RegexConstrainer::rewind() {
     if (!nfa_.compiled())
         return;
     states_ = nfa_.start_set();

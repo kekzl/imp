@@ -39,7 +39,7 @@ public:
 
     // Back to the start state, keeping the compiled pattern and the classified
     // vocabulary (both are the expensive parts).
-    void reset();
+    void rewind();
 
     // Mask logits in place: every token that would leave the language is
     // driven to -inf. No-op while the preamble gate is open.
