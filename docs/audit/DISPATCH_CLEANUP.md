@@ -674,3 +674,24 @@ Branch `cleanup/b5-magic-numbers` off `origin/main` fb524a1d, code head 0431193f
 | `HeadScale` size `bhk * 12` in both workspace functions | 3 floats, not in H-032 | leave, or `sizeof` of a host mirror struct |
 | comment in `tests/test_attention_ra2.cu:135` says "CPU lane" | the test sits in `test-attention`, a GPU binary | doc fix in a later batch |
 | GPU-only checks | no GPU in this batch | validator: test-gpu (`*ApaPrefill*`, `*Ra2*`, `*Constrain*`, dp4a GEMV), reference dumps, PTX diff |
+
+## 2026-10-15 Phase 4 B5 (validator, re-run)
+
+B5 merged with main `58263bb4` (head `1f53d0fa`; `constraint_manager.cpp` conflict resolved to `kThinkPreambleBudget` + `rewind()`), image `imp:b5-rebased`; paired control `imp:main-ctrl3` (main `58263bb4`). Suites interleaved B5, main, B5, main, B5, main. Verdict: all gates PASS.
+
+| gate | main control | B5 | result |
+|---|---|---|---|
+| build warnings | 13 | 13, diff empty | PASS |
+| SASS hash per kernel, imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 | diff 0 / 0 / 0 | PASS |
+| `make test-gpu` | 3/3 green, 3700 `[ RUN ]` each | 3/3 green, 3700 `[ RUN ]` each | PASS |
+| `DeviceFaultSignalTest.FaultInside...` | OK 3/3 | OK 3/3 | PASS |
+| reference dumps vs the Phase 3 baseline | - | 15/15 identical (run 1 and run 2); run 1 = run 2 | PASS |
+| decode tg256 pooled median, paired run, n=10 | 368.24 tok/s (spread 8.13 %) | 371.18 (+0.80 %, spread 0.96 %) | PASS |
+| prefill pp512 / pp2048, paired run | 30329 / 48168 | 30189 / 48789 | PASS (pp512 -0.46 %, main spread 8.64 %) |
+
+## 2026-10-15 Phase 4 B5 (orchestrator decision, re-run)
+
+| item | decision | why |
+|---|---|---|
+| B5 (H-029, C-032, C-033 rename part, C-034, H-031, H-032) | ship | re-run gates above; the first FAIL is attributed to the `DeviceFaultSignalTest` timing flake (isolated failures on 4 images without B5 (`imp:b1-final`..`imp:b4-final`), 0/6 suites here) |
+| `DeviceFaultSignalTest` timing flake | stays open | no repro in 6 suites + 160 isolated runs; exit 7 and exit 8 modes unexplained |
