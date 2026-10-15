@@ -250,3 +250,31 @@ Branch `cleanup/b2-stream-order` off `origin/main` 7462b738. Compile only, no GP
 | C-026 refuted (production) | `decode_tier` is `tier`, FP8 or NVFP4 (`pre_dequant_phase4_tensor_registry.cpp:78-88`); executor `default:` (`executor_gemm_dispatch.cpp:547-548`) needs decode FP32, so `primary_tier` FP32 and `gemv_dispatch` throws in its FP32 case; FP8 case reached only by `tests/test_weight_dispatch.cu:306` | none; a `host_scale` field would grow the `WeightHandle` union for a test-only path |
 | C-027 skip: KV growth, smallM dummy, constrain categories, `executor_workspace_buffers.cpp:1710` | each site has an explicit `cudaStreamSynchronize(0)` / `nullptr` after the legacy write (#1652, #2275): correct; stream-ordered version needs a stream threaded into `KVCache` growth (KV path, check-degeneration scope) | needs orchestrator go if wanted; not L |
 | C-027 refuted: `executor_workspace_buffers.cpp:1200` | `cudaMemset(qscratch_.cutlass_act_sf)` without a sync, but allowlisted `init` ("before the warmup device syncs", `tools/sync_device_write_allowlist.txt:26`); `cudaDeviceSynchronize` at `engine_workspace_warmup.cpp:563`, `:572` | stale comment "Sync because ..." with no sync in the code; comment fix only |
+
+## 2026-10-15 Phase 4 B2 (validator)
+
+Code head `0e0d354b`, image `imp:b2-final`, against the Phase 3 baseline `5a30cb5f`. Verdict: gates PASS; the C-020 test fails mutation validation.
+
+| gate | baseline | B2 | result |
+|---|---|---|---|
+| build warnings | 13 unique lines | 13, diff empty | PASS |
+| `make test-gpu` | 0 FAILED | 0 FAILED; `[ RUN ]` list diff = 1 added line (`LogitBiasFallbackReadsOnTheCallerStream`) | PASS |
+| reference dumps (5 models x 3 prompts x 2 runs) | `*.choices.json` | 30/30 byte-identical | PASS |
+| ptxas rows, imp-server / imp-cli / imp-quantize | 1024 / 1024 / 1026 | identical | PASS |
+| decode tg256 pooled median | 371.63 tok/s (gate 364.20..379.06) | 371.76 (+0.03 %) | PASS |
+| decode tg256 after pp2048 | 345.41 | 344.85 (-0.16 %) | PASS |
+| prefill pp512 / pp2048 | 30444 (30125..30530) / 48919 (48739..49049) | 30437 / 48911 | PASS |
+
+| C-020 mutation (fallback read back to legacy `cudaMemcpy`) | runs | result |
+|---|---|---|
+| writer = H2D copy on the held stream (builder test) | 1 | mutant PASSES (26 ms) |
+| writer = kernel on the held stream | 3 fixed + 3 mutant | all PASS, 22 ms each |
+| conclusion | - | legacy `cudaMemcpy` D2H waits for the held non-blocking stream on this WSL2 host; race not observable here; code change kept (CUDA stream semantics), test comment says it covers the fallback path only |
+
+## 2026-10-15 Phase 4 B2 (orchestrator decision)
+
+| row | decision | why |
+|---|---|---|
+| C-020, C-021, C-022 | ship | gates above |
+| C-025 | DEFER to the deferred list | reachable only after a failed pool allocation; both fixes change behaviour or move an allocation into the decode-graph region |
+| C-026, C-027 | closed as logged by the builder | refuted / explicit syncs in place |
