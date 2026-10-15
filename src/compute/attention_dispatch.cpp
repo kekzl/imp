@@ -16,25 +16,6 @@
 
 namespace imp {
 
-static int cached_sm_version = -1;
-
-int get_device_sm_version() {
-    if (cached_sm_version >= 0)
-        return cached_sm_version;
-    int device = 0;
-    int major = 0, minor = 0;
-    cudaError_t err = cudaGetDevice(&device);
-    if (err == cudaSuccess) err = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
-    if (err == cudaSuccess) err = cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
-    if (err != cudaSuccess) {
-        IMP_LOG_WARN("Device SM version query failed: %s", cudaGetErrorString(err));
-        return 0;  // not cached: callers take the generic (pre-sm_90) path
-    }
-    cached_sm_version = major * 10 + minor;
-    IMP_LOG_INFO("Device SM version: %d.%d (sm_%d)", major, minor, cached_sm_version);
-    return cached_sm_version;
-}
-
 // Path-selection order + gates here are mirrored as select_attn_prefill_path() in
 // attention_dispatch_decision.h; each tier's outcome is replayed against that model and a
 // divergence fires a one-shot log (not silence) so a reorder or gate drift is caught.

@@ -1,6 +1,7 @@
 #include "compute/attention.h"
 #include "compute/attention_tc.h"
 #include "compute/attention_paged.h"
+#include "core/logging.h"
 #include "core/tensor.h"
 #include "core/dispatch_policy.h"
 
@@ -38,10 +39,10 @@ static float bench_kernel(const AttentionConfig& cfg, int seq_len, bool use_cutl
     const size_t o_bytes = q_elems * sizeof(__half);
 
     void *d_q, *d_k, *d_v, *d_o;
-    cudaMalloc(&d_q, q_bytes);
-    cudaMalloc(&d_k, kv_bytes);
-    cudaMalloc(&d_v, kv_bytes);
-    cudaMalloc(&d_o, o_bytes);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_q, q_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_k, kv_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_v, kv_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_o, o_bytes));
 
     // Fill with deterministic data
     {
@@ -49,15 +50,15 @@ static float bench_kernel(const AttentionConfig& cfg, int seq_len, bool use_cutl
         std::vector<__half> h_buf(max_elems);
         for (int64_t i = 0; i < q_elems; i++)
             h_buf[i] = __float2half(0.01f * (float)((i * 7 + 13) % 1000 - 500));
-        cudaMemcpy(d_q, h_buf.data(), q_bytes, cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_q, h_buf.data(), q_bytes, cudaMemcpyHostToDevice));
         for (int64_t i = 0; i < kv_elems; i++)
             h_buf[i] = __float2half(0.01f * (float)((i * 11 + 17) % 1000 - 500));
-        cudaMemcpy(d_k, h_buf.data(), kv_bytes, cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_k, h_buf.data(), kv_bytes, cudaMemcpyHostToDevice));
         for (int64_t i = 0; i < kv_elems; i++)
             h_buf[i] = __float2half(0.01f * (float)((i * 13 + 19) % 1000 - 500));
-        cudaMemcpy(d_v, h_buf.data(), kv_bytes, cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_v, h_buf.data(), kv_bytes, cudaMemcpyHostToDevice));
     }
-    cudaMemset(d_o, 0, o_bytes);
+    IMP_CUDA_CHECK_LOG(cudaMemset(d_o, 0, o_bytes));
 
     int64_t q_shape[4] = {batch, seq_len, cfg.n_heads, cfg.head_dim};
     int64_t kv_shape[4] = {batch, seq_len, cfg.n_kv_heads, cfg.head_dim};
@@ -89,36 +90,36 @@ static float bench_kernel(const AttentionConfig& cfg, int seq_len, bool use_cutl
     // Warmup
     for (int i = 0; i < warmup_iters; i++)
         run_kernel();
-    cudaStreamSynchronize(stream);
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
     // Timed
     cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    IMP_CUDA_CHECK_LOG(cudaEventCreate(&start));
+    IMP_CUDA_CHECK_LOG(cudaEventCreate(&stop));
 
-    cudaEventRecord(start, stream);
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(start, stream));
     for (int i = 0; i < timed_iters; i++)
         run_kernel();
-    cudaEventRecord(stop, stream);
-    cudaEventSynchronize(stop);
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(stop, stream));
+    IMP_CUDA_CHECK_LOG(cudaEventSynchronize(stop));
 
     float total_ms = 0.0f;
-    cudaEventElapsedTime(&total_ms, start, stop);
+    IMP_CUDA_CHECK_LOG(cudaEventElapsedTime(&total_ms, start, stop));
     float avg_ms = total_ms / (float)timed_iters;
 
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
-    cudaFree(d_q);
-    cudaFree(d_k);
-    cudaFree(d_v);
-    cudaFree(d_o);
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(start));
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(stop));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_q));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_k));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_v));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_o));
 
     return avg_ms;
 }
 
 bool bench_attention() {
     int device_count = 0;
-    cudaGetDeviceCount(&device_count);
+    IMP_CUDA_CHECK_LOG(cudaGetDeviceCount(&device_count));
     if (device_count == 0) {
         printf("bench_attention: no CUDA device found, skipping\n");
         return false;  // measured nothing (#1584)
@@ -128,7 +129,7 @@ bool bench_attention() {
     printf("Causal, FP16, batch=1, warmup=10, iters=30\n\n");
 
     cudaStream_t stream = nullptr;
-    cudaStreamCreate(&stream);
+    IMP_CUDA_CHECK_LOG(cudaStreamCreate(&stream));
 
     std::vector<AttentionConfig> configs = {
         {"Phi-4-mini", 24, 8, 128},      {"DS-R1-7B (Qwen2)", 28, 4, 128}, {"Qwen3-4B", 32, 8, 128},
@@ -161,119 +162,116 @@ bool bench_attention() {
         printf("\n");
     }
 
-    cudaStreamDestroy(stream);
+    IMP_CUDA_CHECK_LOG(cudaStreamDestroy(stream));
 
-    // ---- FP8 vs MXFP4 FMHA comparison (sm_120+ only) ----
-    {
-        int sm = get_device_sm_version();
-        if (sm >= 120) {
-            printf("=== FP8 FMHA vs MXFP4 FMHA (sm_120) ===\n");
-            printf("Causal, batch=1, warmup=10, iters=30\n\n");
+    // ---- FP8 vs MXFP4 FMHA comparison ----
+    printf("=== FP8 FMHA vs MXFP4 FMHA (sm_120) ===\n");
+    printf("Causal, batch=1, warmup=10, iters=30\n\n");
 
-            cudaStream_t s;
-            cudaStreamCreate(&s);
+    cudaStream_t s;
+    IMP_CUDA_CHECK_LOG(cudaStreamCreate(&s));
 
-            std::vector<AttentionConfig> cfgs_sm120 = {
-                {"Qwen3-4B", 32, 8, 128},
-                {"Qwen3-8B", 28, 4, 128},
-                {"GQA-MHA", 16, 16, 128},
-                {"GQA-8x", 32, 4, 128},
-            };
-            std::vector<int> seqs = {128, 256, 512, 1024, 2048, 4096};
+    std::vector<AttentionConfig> cfgs_sm120 = {
+        {"Qwen3-4B", 32, 8, 128},
+        {"Qwen3-8B", 28, 4, 128},
+        {"GQA-MHA", 16, 16, 128},
+        {"GQA-8x", 32, 4, 128},
+    };
+    std::vector<int> seqs = {128, 256, 512, 1024, 2048, 4096};
 
-            for (const auto& c : cfgs_sm120) {
-                printf("%-20s  nh=%2d nkv=%2d hd=%3d\n", c.name, c.n_heads, c.n_kv_heads, c.head_dim);
-                printf("  %8s  %10s  %10s  %7s\n", "seq", "FP8", "MXFP4", "speedup");
+    for (const auto& c : cfgs_sm120) {
+        printf("%-20s  nh=%2d nkv=%2d hd=%3d\n", c.name, c.n_heads, c.n_kv_heads, c.head_dim);
+        printf("  %8s  %10s  %10s  %7s\n", "seq", "FP8", "MXFP4", "speedup");
 
-                for (int seq : seqs) {
-                    const int batch = 1;
-                    const float sc = 1.0f / sqrtf((float)c.head_dim);
-                    const int warmup = 10;
-                    const int iters = 30;
+        for (int seq : seqs) {
+            const int batch = 1;
+            const float sc = 1.0f / sqrtf((float)c.head_dim);
+            const int warmup = 10;
+            const int iters = 30;
 
-                    const int64_t q_elems = (int64_t)batch * seq * c.n_heads * c.head_dim;
-                    const int64_t kv_elems = (int64_t)batch * seq * c.n_kv_heads * c.head_dim;
+            const int64_t q_elems = (int64_t)batch * seq * c.n_heads * c.head_dim;
+            const int64_t kv_elems = (int64_t)batch * seq * c.n_kv_heads * c.head_dim;
 
-                    void *dq, *dk, *dv, *dofp8, *domx;
-                    cudaMalloc(&dq, q_elems * sizeof(half));
-                    cudaMalloc(&dk, kv_elems * sizeof(half));
-                    cudaMalloc(&dv, kv_elems * sizeof(half));
-                    cudaMalloc(&dofp8, q_elems * sizeof(half));
-                    cudaMalloc(&domx, q_elems * sizeof(half));
-                    cudaMemset(dq, 0x3C, q_elems * sizeof(half));  // ~1.0 in FP16
-                    cudaMemset(dk, 0x3C, kv_elems * sizeof(half));
-                    cudaMemset(dv, 0x3C, kv_elems * sizeof(half));
+            void *dq, *dk, *dv, *dofp8, *domx;
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&dq, q_elems * sizeof(half)));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&dk, kv_elems * sizeof(half)));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&dv, kv_elems * sizeof(half)));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&dofp8, q_elems * sizeof(half)));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&domx, q_elems * sizeof(half)));
+            IMP_CUDA_CHECK_LOG(cudaMemset(dq, 0x3C, q_elems * sizeof(half)));  // ~1.0 in FP16
+            IMP_CUDA_CHECK_LOG(cudaMemset(dk, 0x3C, kv_elems * sizeof(half)));
+            IMP_CUDA_CHECK_LOG(cudaMemset(dv, 0x3C, kv_elems * sizeof(half)));
 
-                    int64_t qs[4] = {batch, seq, c.n_heads, c.head_dim};
-                    int64_t ks[4] = {batch, seq, c.n_kv_heads, c.head_dim};
+            int64_t qs[4] = {batch, seq, c.n_heads, c.head_dim};
+            int64_t ks[4] = {batch, seq, c.n_kv_heads, c.head_dim};
 
-                    Tensor Q(dq, QType::F16, 4, qs, true);
-                    Tensor K(dk, QType::F16, 4, ks, true);
-                    Tensor V(dv, QType::F16, 4, ks, true);
+            Tensor Q(dq, QType::F16, 4, qs, true);
+            Tensor K(dk, QType::F16, 4, ks, true);
+            Tensor V(dv, QType::F16, 4, ks, true);
 
-                    // FP8 FMHA
-                    float ms_fp8 = -1.0f;
-                    {
-                        Tensor O(dofp8, QType::F16, 4, qs, true);
-                        bool ran = true;
-                        for (int i = 0; i < warmup; i++)
-                            ran = fmha_sm120_fp8_prefill(Q, K, V, O, sc, true, 0, 0.0f, s) && ran;
-                        if (!ran)
-                            fprintf(stderr, "fp8 FMHA refused seq=%d: row reports -1\n", seq);
-                        cudaStreamSynchronize(s);
-                        cudaEvent_t t0, t1;
-                        cudaEventCreate(&t0);
-                        cudaEventCreate(&t1);
-                        cudaEventRecord(t0, s);
-                        for (int i = 0; i < iters; i++)
-                            (void)fmha_sm120_fp8_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);  // args checked in warmup
-                        cudaEventRecord(t1, s);
-                        cudaEventSynchronize(t1);
-                        cudaEventElapsedTime(&ms_fp8, t0, t1);
-                        ms_fp8 = ran ? ms_fp8 / iters : -1.0f;
-                        cudaEventDestroy(t0);
-                        cudaEventDestroy(t1);
-                    }
-
-                    // MXFP4 FMHA
-                    float ms_mxfp4 = -1.0f;
-                    {
-                        Tensor O(domx, QType::F16, 4, qs, true);
-                        bool ran = true;
-                        for (int i = 0; i < warmup; i++)
-                            ran = fmha_sm120_mxfp4_prefill(Q, K, V, O, sc, true, 0, 0.0f, s) && ran;
-                        if (!ran)
-                            fprintf(stderr, "mxfp4 FMHA refused seq=%d: row reports -1\n", seq);
-                        cudaStreamSynchronize(s);
-                        cudaEvent_t t0, t1;
-                        cudaEventCreate(&t0);
-                        cudaEventCreate(&t1);
-                        cudaEventRecord(t0, s);
-                        for (int i = 0; i < iters; i++)
-                            (void)fmha_sm120_mxfp4_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);  // args checked in warmup
-                        cudaEventRecord(t1, s);
-                        cudaEventSynchronize(t1);
-                        cudaEventElapsedTime(&ms_mxfp4, t0, t1);
-                        ms_mxfp4 = ran ? ms_mxfp4 / iters : -1.0f;
-                        cudaEventDestroy(t0);
-                        cudaEventDestroy(t1);
-                    }
-
-                    float speedup = ms_fp8 / ms_mxfp4;
-                    printf("  %8d  %8.3f ms  %8.3f ms  %5.2fx%s\n", seq, ms_fp8, ms_mxfp4, speedup,
-                           speedup > 1.03f ? " <--" : (speedup < 0.97f ? " REG" : ""));
-
-                    cudaFree(dq);
-                    cudaFree(dk);
-                    cudaFree(dv);
-                    cudaFree(dofp8);
-                    cudaFree(domx);
-                }
-                printf("\n");
+            // FP8 FMHA
+            float ms_fp8 = -1.0f;
+            {
+                Tensor O(dofp8, QType::F16, 4, qs, true);
+                bool ran = true;
+                for (int i = 0; i < warmup; i++)
+                    ran = fmha_sm120_fp8_prefill(Q, K, V, O, sc, true, 0, 0.0f, s) && ran;
+                if (!ran)
+                    fprintf(stderr, "fp8 FMHA refused seq=%d: row reports -1\n", seq);
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(s));
+                cudaEvent_t t0, t1;
+                IMP_CUDA_CHECK_LOG(cudaEventCreate(&t0));
+                IMP_CUDA_CHECK_LOG(cudaEventCreate(&t1));
+                IMP_CUDA_CHECK_LOG(cudaEventRecord(t0, s));
+                // args checked in warmup
+                for (int i = 0; i < iters; i++)
+                    (void)fmha_sm120_fp8_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);
+                IMP_CUDA_CHECK_LOG(cudaEventRecord(t1, s));
+                IMP_CUDA_CHECK_LOG(cudaEventSynchronize(t1));
+                IMP_CUDA_CHECK_LOG(cudaEventElapsedTime(&ms_fp8, t0, t1));
+                ms_fp8 = ran ? ms_fp8 / iters : -1.0f;
+                IMP_CUDA_CHECK_LOG(cudaEventDestroy(t0));
+                IMP_CUDA_CHECK_LOG(cudaEventDestroy(t1));
             }
-            cudaStreamDestroy(s);
+
+            // MXFP4 FMHA
+            float ms_mxfp4 = -1.0f;
+            {
+                Tensor O(domx, QType::F16, 4, qs, true);
+                bool ran = true;
+                for (int i = 0; i < warmup; i++)
+                    ran = fmha_sm120_mxfp4_prefill(Q, K, V, O, sc, true, 0, 0.0f, s) && ran;
+                if (!ran)
+                    fprintf(stderr, "mxfp4 FMHA refused seq=%d: row reports -1\n", seq);
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(s));
+                cudaEvent_t t0, t1;
+                IMP_CUDA_CHECK_LOG(cudaEventCreate(&t0));
+                IMP_CUDA_CHECK_LOG(cudaEventCreate(&t1));
+                IMP_CUDA_CHECK_LOG(cudaEventRecord(t0, s));
+                // args checked in warmup
+                for (int i = 0; i < iters; i++)
+                    (void)fmha_sm120_mxfp4_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);
+                IMP_CUDA_CHECK_LOG(cudaEventRecord(t1, s));
+                IMP_CUDA_CHECK_LOG(cudaEventSynchronize(t1));
+                IMP_CUDA_CHECK_LOG(cudaEventElapsedTime(&ms_mxfp4, t0, t1));
+                ms_mxfp4 = ran ? ms_mxfp4 / iters : -1.0f;
+                IMP_CUDA_CHECK_LOG(cudaEventDestroy(t0));
+                IMP_CUDA_CHECK_LOG(cudaEventDestroy(t1));
+            }
+
+            float speedup = ms_fp8 / ms_mxfp4;
+            printf("  %8d  %8.3f ms  %8.3f ms  %5.2fx%s\n", seq, ms_fp8, ms_mxfp4, speedup,
+                   speedup > 1.03f ? " <--" : (speedup < 0.97f ? " REG" : ""));
+
+            IMP_CUDA_CHECK_LOG(cudaFree(dq));
+            IMP_CUDA_CHECK_LOG(cudaFree(dk));
+            IMP_CUDA_CHECK_LOG(cudaFree(dv));
+            IMP_CUDA_CHECK_LOG(cudaFree(dofp8));
+            IMP_CUDA_CHECK_LOG(cudaFree(domx));
         }
+        printf("\n");
     }
+    IMP_CUDA_CHECK_LOG(cudaStreamDestroy(s));
     return true;
 }
 
@@ -298,10 +296,10 @@ static float bench_paged_decode_kernel(const AttentionConfig& cfg, int ctx_len, 
     const int64_t o_elems = q_elems;
 
     void *d_q, *d_k, *d_v, *d_o;
-    cudaMalloc(&d_q, q_elems * sizeof(__half));
-    cudaMalloc(&d_k, kv_elems * sizeof(__half));
-    cudaMalloc(&d_v, kv_elems * sizeof(__half));
-    cudaMalloc(&d_o, o_elems * sizeof(__half));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_q, q_elems * sizeof(__half)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_k, kv_elems * sizeof(__half)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_v, kv_elems * sizeof(__half)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_o, o_elems * sizeof(__half)));
 
     // Fill with deterministic data
     {
@@ -309,33 +307,34 @@ static float bench_paged_decode_kernel(const AttentionConfig& cfg, int ctx_len, 
         std::vector<__half> h_buf(max_e);
         for (int64_t i = 0; i < q_elems; i++)
             h_buf[i] = __float2half(0.01f * (float)((i * 7 + 13) % 1000 - 500));
-        cudaMemcpy(d_q, h_buf.data(), q_elems * sizeof(__half), cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_q, h_buf.data(), q_elems * sizeof(__half), cudaMemcpyHostToDevice));
         for (int64_t i = 0; i < kv_elems; i++)
             h_buf[i] = __float2half(0.01f * (float)((i * 11 + 17) % 1000 - 500));
-        cudaMemcpy(d_k, h_buf.data(), kv_elems * sizeof(__half), cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_k, h_buf.data(), kv_elems * sizeof(__half), cudaMemcpyHostToDevice));
         for (int64_t i = 0; i < kv_elems; i++)
             h_buf[i] = __float2half(0.01f * (float)((i * 13 + 19) % 1000 - 500));
-        cudaMemcpy(d_v, h_buf.data(), kv_elems * sizeof(__half), cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_v, h_buf.data(), kv_elems * sizeof(__half), cudaMemcpyHostToDevice));
     }
-    cudaMemset(d_o, 0, o_elems * sizeof(__half));
+    IMP_CUDA_CHECK_LOG(cudaMemset(d_o, 0, o_elems * sizeof(__half)));
 
     // Block tables: identity mapping [batch, max_num_blocks]
     int* d_block_tables;
     int* d_context_lens;
-    cudaMalloc(&d_block_tables, num_kv_blocks * sizeof(int));
-    cudaMalloc(&d_context_lens, batch * sizeof(int));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_tables, num_kv_blocks * sizeof(int)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_context_lens, batch * sizeof(int)));
 
     std::vector<int> h_bt(num_kv_blocks);
     for (int i = 0; i < num_kv_blocks; i++)
         h_bt[i] = i;
-    cudaMemcpy(d_block_tables, h_bt.data(), num_kv_blocks * sizeof(int), cudaMemcpyHostToDevice);
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpy(d_block_tables, h_bt.data(), num_kv_blocks * sizeof(int), cudaMemcpyHostToDevice));
     int h_ctx = ctx_len;
-    cudaMemcpy(d_context_lens, &h_ctx, sizeof(int), cudaMemcpyHostToDevice);
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(d_context_lens, &h_ctx, sizeof(int), cudaMemcpyHostToDevice));
 
     // Split-K scratch buffer: the split count caps at 128 (workspace_sizes.cpp)
     void* d_scratch = nullptr;
     size_t scratch_size = (size_t)batch * cfg.n_heads * 128 * (2 + cfg.head_dim) * sizeof(float);
-    cudaMalloc(&d_scratch, scratch_size);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scratch, scratch_size));
     paged_attention_set_splitk_scratch(d_scratch, scratch_size);
 
     // Tensor wrappers
@@ -356,40 +355,40 @@ static float bench_paged_decode_kernel(const AttentionConfig& cfg, int ctx_len, 
     // Warmup
     for (int i = 0; i < warmup_iters; i++)
         run();
-    cudaStreamSynchronize(stream);
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
     // Timed
     cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    IMP_CUDA_CHECK_LOG(cudaEventCreate(&start));
+    IMP_CUDA_CHECK_LOG(cudaEventCreate(&stop));
 
-    cudaEventRecord(start, stream);
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(start, stream));
     for (int i = 0; i < timed_iters; i++)
         run();
-    cudaEventRecord(stop, stream);
-    cudaEventSynchronize(stop);
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(stop, stream));
+    IMP_CUDA_CHECK_LOG(cudaEventSynchronize(stop));
 
     float total_ms = 0.0f;
-    cudaEventElapsedTime(&total_ms, start, stop);
+    IMP_CUDA_CHECK_LOG(cudaEventElapsedTime(&total_ms, start, stop));
     float avg_ms = total_ms / (float)timed_iters;
 
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(start));
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(stop));
     paged_attention_set_splitk_scratch(nullptr, 0);
-    cudaFree(d_scratch);
-    cudaFree(d_block_tables);
-    cudaFree(d_context_lens);
-    cudaFree(d_q);
-    cudaFree(d_k);
-    cudaFree(d_v);
-    cudaFree(d_o);
+    IMP_CUDA_CHECK_LOG(cudaFree(d_scratch));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_block_tables));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_context_lens));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_q));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_k));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_v));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_o));
 
     return avg_ms;
 }
 
 bool bench_paged_attention() {
     int device_count = 0;
-    cudaGetDeviceCount(&device_count);
+    IMP_CUDA_CHECK_LOG(cudaGetDeviceCount(&device_count));
     if (device_count == 0) {
         printf("bench_paged_attention: no CUDA device found, skipping\n");
         return false;  // measured nothing (#1584)
@@ -399,7 +398,7 @@ bool bench_paged_attention() {
     printf("batch=1, block_size=16, warmup=20, iters=50\n\n");
 
     cudaStream_t stream = nullptr;
-    cudaStreamCreate(&stream);
+    IMP_CUDA_CHECK_LOG(cudaStreamCreate(&stream));
 
     std::vector<AttentionConfig> configs = {
         {"MHA-32h", 32, 32, 128},     // MHA: Llama-2-7B style
@@ -463,7 +462,7 @@ bool bench_paged_attention() {
         printf("\n");
     }
 
-    cudaStreamDestroy(stream);
+    IMP_CUDA_CHECK_LOG(cudaStreamDestroy(stream));
     return true;
 }
 

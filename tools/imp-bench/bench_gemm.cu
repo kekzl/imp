@@ -2,6 +2,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "quant/quant_gemm.h"
 #include "quant/nvfp4_quant.h"
+#include "core/logging.h"
 #include "core/tensor.h"
 
 #include <cuda_runtime.h>
@@ -59,11 +60,11 @@ static float bench_fp16_gemm(const GemmSize& sz) {
     if (cudaMalloc(&d_A, bytes_A) != cudaSuccess || cudaMalloc(&d_B, bytes_B) != cudaSuccess ||
         cudaMalloc(&d_C, bytes_C) != cudaSuccess) {
         if (d_A)
-            cudaFree(d_A);
+            IMP_CUDA_CHECK_LOG(cudaFree(d_A));
         if (d_B)
-            cudaFree(d_B);
+            IMP_CUDA_CHECK_LOG(cudaFree(d_B));
         if (d_C)
-            cudaFree(d_C);
+            IMP_CUDA_CHECK_LOG(cudaFree(d_C));
         fprintf(stderr, "bench_fp16_gemm: cudaMalloc failed for M=%ld N=%ld K=%ld\n", M, N, K);
         return -1.0f;
     }
@@ -73,9 +74,9 @@ static float bench_fp16_gemm(const GemmSize& sz) {
     std::vector<half> h_B(K * N);
     fill_random_fp16(h_A.data(), M * K);
     fill_random_fp16(h_B.data(), K * N);
-    cudaMemcpy(d_A, h_A.data(), bytes_A, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, h_B.data(), bytes_B, cudaMemcpyHostToDevice);
-    cudaMemset(d_C, 0, bytes_C);
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(d_A, h_A.data(), bytes_A, cudaMemcpyHostToDevice));
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(d_B, h_B.data(), bytes_B, cudaMemcpyHostToDevice));
+    IMP_CUDA_CHECK_LOG(cudaMemset(d_C, 0, bytes_C));
 
     // Build tensor descriptors
     int64_t shape_A[] = {M, K};
@@ -89,29 +90,29 @@ static float bench_fp16_gemm(const GemmSize& sz) {
     for (int i = 0; i < kWarmupIters; ++i) {
         gemm(A, B, C, 1.0f, 0.0f, nullptr);
     }
-    cudaDeviceSynchronize();
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
 
     // Timed iterations
     cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    IMP_CUDA_CHECK_LOG(cudaEventCreate(&start));
+    IMP_CUDA_CHECK_LOG(cudaEventCreate(&stop));
 
-    cudaEventRecord(start, nullptr);
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(start, nullptr));
     for (int i = 0; i < kTimedIters; ++i) {
         gemm(A, B, C, 1.0f, 0.0f, nullptr);
     }
-    cudaEventRecord(stop, nullptr);
-    cudaEventSynchronize(stop);
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(stop, nullptr));
+    IMP_CUDA_CHECK_LOG(cudaEventSynchronize(stop));
 
     float total_ms = 0.0f;
-    cudaEventElapsedTime(&total_ms, start, stop);
+    IMP_CUDA_CHECK_LOG(cudaEventElapsedTime(&total_ms, start, stop));
     float avg_ms = total_ms / static_cast<float>(kTimedIters);
 
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
-    cudaFree(d_A);
-    cudaFree(d_B);
-    cudaFree(d_C);
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(start));
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(stop));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_A));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_B));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_C));
 
     return avg_ms;
 }
@@ -123,37 +124,37 @@ static float bench_int4_gemm(const GemmSize& sz) {
     // A is FP16 [M, K]
     size_t bytes_A = static_cast<size_t>(M * K) * sizeof(half);
     void* d_A = nullptr;
-    cudaMalloc(&d_A, bytes_A);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_A, bytes_A));
 
     std::vector<half> h_A(M * K);
     fill_random_fp16(h_A.data(), M * K);
-    cudaMemcpy(d_A, h_A.data(), bytes_A, cudaMemcpyHostToDevice);
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(d_A, h_A.data(), bytes_A, cudaMemcpyHostToDevice));
 
     // B_quant is INT4-packed [N, K/2] (two 4-bit values per byte)
     int64_t K_packed = K / 2;
     size_t bytes_Bq = static_cast<size_t>(N * K_packed);
     void* d_Bq = nullptr;
-    cudaMalloc(&d_Bq, bytes_Bq);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_Bq, bytes_Bq));
 
     std::vector<uint8_t> h_Bq(N * K_packed);
     fill_random_bytes(h_Bq.data(), N * K_packed);
-    cudaMemcpy(d_Bq, h_Bq.data(), bytes_Bq, cudaMemcpyHostToDevice);
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(d_Bq, h_Bq.data(), bytes_Bq, cudaMemcpyHostToDevice));
 
     // Scales are FP16 [N, K/32] (one scale per group of 32 elements)
     int64_t num_groups = K / 32;
     size_t bytes_scales = static_cast<size_t>(N * num_groups) * sizeof(half);
     void* d_scales = nullptr;
-    cudaMalloc(&d_scales, bytes_scales);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scales, bytes_scales));
 
     std::vector<half> h_scales(N * num_groups);
     fill_random_fp16(h_scales.data(), N * num_groups);
-    cudaMemcpy(d_scales, h_scales.data(), bytes_scales, cudaMemcpyHostToDevice);
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(d_scales, h_scales.data(), bytes_scales, cudaMemcpyHostToDevice));
 
     // C is FP16 [M, N]
     size_t bytes_C = static_cast<size_t>(M * N) * sizeof(half);
     void* d_C = nullptr;
-    cudaMalloc(&d_C, bytes_C);
-    cudaMemset(d_C, 0, bytes_C);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_C, bytes_C));
+    IMP_CUDA_CHECK_LOG(cudaMemset(d_C, 0, bytes_C));
 
     // Build tensor descriptors
     int64_t shape_A[] = {M, K};
@@ -170,30 +171,30 @@ static float bench_int4_gemm(const GemmSize& sz) {
     for (int i = 0; i < kWarmupIters; ++i) {
         quant_gemm_int4(A, B_quant, scales, C, nullptr);
     }
-    cudaDeviceSynchronize();
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
 
     // Timed iterations
     cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    IMP_CUDA_CHECK_LOG(cudaEventCreate(&start));
+    IMP_CUDA_CHECK_LOG(cudaEventCreate(&stop));
 
-    cudaEventRecord(start, nullptr);
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(start, nullptr));
     for (int i = 0; i < kTimedIters; ++i) {
         quant_gemm_int4(A, B_quant, scales, C, nullptr);
     }
-    cudaEventRecord(stop, nullptr);
-    cudaEventSynchronize(stop);
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(stop, nullptr));
+    IMP_CUDA_CHECK_LOG(cudaEventSynchronize(stop));
 
     float total_ms = 0.0f;
-    cudaEventElapsedTime(&total_ms, start, stop);
+    IMP_CUDA_CHECK_LOG(cudaEventElapsedTime(&total_ms, start, stop));
     float avg_ms = total_ms / static_cast<float>(kTimedIters);
 
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
-    cudaFree(d_A);
-    cudaFree(d_Bq);
-    cudaFree(d_scales);
-    cudaFree(d_C);
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(start));
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(stop));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_A));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_Bq));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_scales));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_C));
 
     return avg_ms;
 }
@@ -213,21 +214,21 @@ static float bench_nvfp4_cutlass_gemm(const GemmSize& sz) {
     std::vector<half> h_A(static_cast<size_t>(M) * K);
     fill_random_fp16(h_A.data(), M * K);
     void* d_A_fp16 = nullptr;
-    cudaMalloc(&d_A_fp16, h_A.size() * sizeof(half));
-    cudaMemcpy(d_A_fp16, h_A.data(), h_A.size() * sizeof(half), cudaMemcpyHostToDevice);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_A_fp16, h_A.size() * sizeof(half)));
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(d_A_fp16, h_A.data(), h_A.size() * sizeof(half), cudaMemcpyHostToDevice));
 
     void* a_data = nullptr;  // [M, K/2] packed FP4
     void* a_sf = nullptr;    // SfAtom UE4M3 scales
-    cudaMalloc(&a_data, static_cast<size_t>(M) * (K / 2));
-    cudaMalloc(&a_sf, cutlass_nvfp4_sf_size(static_cast<int>(M), static_cast<int>(K)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&a_data, static_cast<size_t>(M) * (K / 2)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&a_sf, cutlass_nvfp4_sf_size(static_cast<int>(M), static_cast<int>(K))));
     quantize_fp16_to_nvfp4_cutlass(d_A_fp16, a_data, a_sf, static_cast<int>(M), static_cast<int>(K), nullptr);
 
     // --- Weight B [N,K] FP16 -> NvFP4QuantResult -> CUTLASS block-scaled ---
     std::vector<half> h_B(static_cast<size_t>(N) * K);
     fill_random_fp16(h_B.data(), N * K);
     void* d_B_fp16 = nullptr;
-    cudaMalloc(&d_B_fp16, h_B.size() * sizeof(half));
-    cudaMemcpy(d_B_fp16, h_B.data(), h_B.size() * sizeof(half), cudaMemcpyHostToDevice);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_B_fp16, h_B.size() * sizeof(half)));
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(d_B_fp16, h_B.data(), h_B.size() * sizeof(half), cudaMemcpyHostToDevice));
     int64_t bshape[2] = {N, K};
     Tensor b_t(d_B_fp16, QType::F16, 2, bshape, /*on_device=*/true);
     NvFP4QuantResult qr{};
@@ -237,13 +238,13 @@ static float bench_nvfp4_cutlass_gemm(const GemmSize& sz) {
 
     // --- Output + workspace ---
     void* d_D = nullptr;
-    cudaMalloc(&d_D, static_cast<size_t>(M) * N * sizeof(half));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_D, static_cast<size_t>(M) * N * sizeof(half)));
     size_t ws_size = gemm_nvfp4_cutlass_sm120_workspace(static_cast<int>(M), static_cast<int>(N),
                                                         static_cast<int>(K));
     void* ws = nullptr;
     if (ws_size > 0)
-        cudaMalloc(&ws, ws_size);
-    cudaDeviceSynchronize();
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&ws, ws_size));
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
 
     auto run = [&]() {
         return gemm_nvfp4_cutlass_sm120(a_data, a_sf, cw, d_D, static_cast<int>(M), static_cast<int>(N),
@@ -254,33 +255,33 @@ static float bench_nvfp4_cutlass_gemm(const GemmSize& sz) {
     bool ok = true;
     for (int i = 0; i < 50; ++i)
         ok = run() && ok;
-    cudaDeviceSynchronize();
+    IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
     if (!ok)
         fprintf(stderr, "bench_nvfp4_cutlass_gemm: kernel returned false for M=%ld N=%ld K=%ld\n", M, N, K);
 
     cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start, nullptr);
+    IMP_CUDA_CHECK_LOG(cudaEventCreate(&start));
+    IMP_CUDA_CHECK_LOG(cudaEventCreate(&stop));
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(start, nullptr));
     for (int i = 0; i < kTimedIters; ++i)
         run();
-    cudaEventRecord(stop, nullptr);
-    cudaEventSynchronize(stop);
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(stop, nullptr));
+    IMP_CUDA_CHECK_LOG(cudaEventSynchronize(stop));
     float total_ms = 0.0f;
-    cudaEventElapsedTime(&total_ms, start, stop);
+    IMP_CUDA_CHECK_LOG(cudaEventElapsedTime(&total_ms, start, stop));
     float avg_ms = total_ms / static_cast<float>(kTimedIters);
 
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(start));
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(stop));
     free_cutlass_nvfp4_weight(cw);
     free_nvfp4_result(qr);
     if (ws)
-        cudaFree(ws);
-    cudaFree(d_D);
-    cudaFree(a_data);
-    cudaFree(a_sf);
-    cudaFree(d_A_fp16);
-    cudaFree(d_B_fp16);
+        IMP_CUDA_CHECK_LOG(cudaFree(ws));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_D));
+    IMP_CUDA_CHECK_LOG(cudaFree(a_data));
+    IMP_CUDA_CHECK_LOG(cudaFree(a_sf));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_A_fp16));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_B_fp16));
     return avg_ms;
 }
 

@@ -695,3 +695,66 @@ B5 merged with main `58263bb4` (head `1f53d0fa`; `constraint_manager.cpp` confli
 |---|---|---|
 | B5 (H-029, C-032, C-033 rename part, C-034, H-031, H-032) | ship | re-run gates above; the first FAIL is attributed to the `DeviceFaultSignalTest` timing flake (isolated failures on 4 images without B5 (`imp:b1-final`..`imp:b4-final`), 0/6 suites here) |
 | `DeviceFaultSignalTest` timing flake | stays open | no repro in 6 suites + 160 isolated runs; exit 7 and exit 8 modes unexplained |
+
+## 2026-10-15 Phase 4 B9 (builder)
+
+Branch `cleanup/b9-tools-discards` off `origin/main` 58263bb4, code head f1e539dc. Compile + CPU only, no GPU run. `make build DOCKER_IMG=imp:b9-branch`: 13 unique warning lines (`imp:b9-main` 58263bb4: 13), diff empty. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight` (256 static gates ok). Code diff: 9 files, +261 / -272.
+
+| row | commit | files | change | lines +/- | evidence | result |
+|---|---|---|---|---|---|---|
+| C-008 rest, bench gate | 89da8a9e | `imp-bench/bench_attention.cu` | `{ int sm = get_device_sm_version(); if (sm >= 120) {` removed, block dedented; 2 trailing `// args checked in warmup` moved above their loop | +105 / -108 (commit body says +104) | always true on sm_120a | applied |
+| C-008 rest, dead function | 58b20f15 | `compute/attention_dispatch.cpp`, `compute/attention.h` | `get_device_sm_version()`, `cached_sm_version`, INFO line, declaration deleted | +0 / -22 | `rg get_device_sm_version src tools tests`: 0; `Device SM version` string in imp-server: main 2, branch 0 | applied |
+| B3 finding, imp-bench | 69d8f9c0 | `imp-bench/bench_attention.cu` (89), `bench_gemm.cu` (63), `bench_q8_imma.cu` (12) | `IMP_CUDA_CHECK_LOG` on 164 sites; `core/logging.h` included | +168 / -164 | re-count before: 164; after: 0 | applied |
+| B3 finding, imp-quantize | 4d6d2c4f | `imp-quantize/awq.cu` (1), `fp8_head.cpp` (3), `main.cpp` (3) | `IMP_CUDA_CHECK_LOG` on 7 `cudaFree`; `core/logging.h` included | +10 / -7 | re-count before: 7; after: 0; imp-cli: 0 before and after | applied |
+| gate | f1e539dc | `tools/check_cuda_discards.py` | SCAN_DIRS + `tools/imp-bench`, `tools/imp-quantize`, `tools/imp-cli`; same 3 in ZERO_DIRS; selftest 29 -> 30 | +11 / -4 | repo scan: 1 in 1 file (allowlisted `cuda_graph.cu`), CEILING 1 | applied |
+
+| count | before | after |
+|---|---|---|
+| `tools/imp-bench/bench_attention.cu` | 89 | 0 |
+| `tools/imp-bench/bench_gemm.cu` | 63 | 0 |
+| `tools/imp-bench/bench_q8_imma.cu` | 12 | 0 |
+| `tools/imp-quantize/awq.cu`, `fp8_head.cpp`, `main.cpp` | 1, 3, 3 | 0, 0, 0 |
+| `tools/imp-cli` | 0 | 0 |
+| total (B3 figure: 171) | 171 | 0 |
+
+| timed region | sites | handling |
+|---|---|---|
+| inside a timed loop body (between `cudaEventRecord(start/t0)` and `(stop/t1)`) | 0 | none needed |
+| region-opening `cudaEventRecord(start/t0)` | 8 (bench_attention 4, bench_gemm 3, bench_q8_imma 1) | wrapped: host compare after an async enqueue, no sync, no round trip |
+
+| gate | fixture | old gate | new gate |
+|---|---|---|---|
+| `check_cuda_discards.py` (tools roots) | `tools/imp-bench/bad.cu`: bare `cudaFree`, `cudaEventRecord` | rc 0, 0 found | rc 1, `2 discarded status > allowed 0 (lines 2,3)` |
+| `--selftest` with the old SCAN_DIRS (mutant) | scan fixture over 5 roots + `tools/standalone/s.cu` | - | rc 1, 29/30 |
+| `--selftest` | - | 29/29 | 30/30 |
+
+| behaviour check (no GPU) | main `imp:b9-main` | B9 `imp:b9-branch` | result |
+|---|---|---|---|
+| SASS hash per kernel, imp-server / imp-cli / imp-quantize (`sass_dump.sh`) | 1023 / 1023 / 1025 rows | 0 / 0 / 0 diff lines | PASS |
+| imp-bench SASS | not in the shipped image | changed bench `.cu` files hold 0 `__global__` / `__device__` | host-only change |
+
+| finding / skip | evidence | proposed next step |
+|---|---|---|
+| GPU-only checks | no GPU in this batch | validator: `imp-bench` attention / gemm / q8_imma run, 0 `CUDA error` lines on the success path |
+
+## 2026-10-15 Phase 4 B9 (validator)
+
+Code head `7b0863f1`, image `imp:b9-final`; paired control `imp:main-ctrl3` (main `58263bb4`, the branch base; 3/3 test-gpu green in the B5 re-run). `imp-bench` from `make dev` of both trees. Verdict: all gates PASS.
+
+| gate | main control | B9 | result |
+|---|---|---|---|
+| build warnings | 13 | 13, diff empty | PASS |
+| SASS hash per kernel, imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 | diff 0 / 0 / 0 | PASS |
+| `make test-gpu` | 3/3 green (B5 re-run) | 2/2 green, 3700 `[ RUN ]` each; `DeviceFaultSignalTest.FaultInside...` OK both | PASS |
+| `imp-bench gemm` / `q8imma` / `attention`: exit, `CUDA error` lines | 0 / 0 / 0, 0 / 0 / 0 | 0 / 0 / 0, 0 / 0 / 0 | PASS |
+| `imp-bench attention` output | 126 lines | 125 lines: the `Device SM version` INFO line of the deleted `get_device_sm_version` (only caller was `bench_attention.cu:168`); other diffs are winner markers | expected |
+| reference dumps vs the Phase 3 baseline | - | 15/15 identical (run 1 and run 2); run 1 = run 2 | PASS |
+| decode tg256 pooled median, paired run, n=10 | 368.97 tok/s | 364.86 (-1.11 %) | PASS (+-2 %) |
+| prefill pp512 / pp2048, paired run | 30089 / 48704 | 29750 / 48252 | PASS (spread 6.32 % / 5.29 %) |
+
+## 2026-10-15 Phase 4 B9 (orchestrator decision)
+
+| row | decision | why |
+|---|---|---|
+| 171 discarded CUDA / cuBLAS statuses in imp-bench (164) and imp-quantize (7), gate scope extended to `tools/imp-bench`, `tools/imp-quantize`, `tools/imp-cli` | ship | gates above |
+| `get_device_sm_version` deletion, always-true `sm >= 120` gate in `bench_attention` | ship | no caller left; shipped SASS identical |
