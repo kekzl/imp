@@ -779,7 +779,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                 cap / (1024.0 * 1024.0));
         }
         // Name the two charges already known HERE (context, arena region), not
-        // after warmup: lets MemAccount::unattributed_bytes() mean "what imp
+        // after warmup: lets MemAccount::unattributed_signed_bytes() mean "what imp
         // cannot account for" during init (AUDIT B79). Library figure fills in
         // after warmup measures it.
         // A lazy arena is a tracked pool, not a named charge: naming its
