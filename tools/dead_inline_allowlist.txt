@@ -9,5 +9,6 @@
 # outside this repository. It is NOT a place to park an accessor nobody calls -
 # delete those.
 #
-# Empty on purpose since 2026-08-21: all 25 the gate found on its first run were
-# deleted rather than listed.
+# 2026-08-21: all 25 first-run findings deleted, none listed.
+
+src/compute/apa/apa.cuh:pass2  # vendored kekzl/apa v0.6.1 public API; the copy stays byte-equal to upstream

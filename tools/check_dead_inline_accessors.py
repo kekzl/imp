@@ -20,7 +20,8 @@ the next reader can trust the ones that remain.
 WHAT IT CHECKS
 --------------
 For every function DEFINED inline in a header under `src/` (the body opens on
-the same line as the signature), count word-boundary occurrences of its name
+the signature's last line; a wrapped parameter list is joined, up to JOIN_MAX
+lines), count word-boundary occurrences of its name
 across `src tools tests include`. Exactly one occurrence means the definition is
 the only mention: no call, no address taken, no test.
 
@@ -69,6 +70,23 @@ DEF_RE = re.compile(
     r"\{")
 
 SKIP_NAMES = {"if", "for", "while", "switch", "return", "catch", "sizeof", "operator"}
+JOIN_MAX = 8  # continuation lines joined to a signature whose parameter list wraps (H-008)
+
+
+def definitions(text):
+    """Yield (lineno, name) per inline definition; a wrapped signature counts at its first line."""
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        m = DEF_RE.match(line)
+        if not m and "(" in line and ";" not in line and "{" not in line:
+            joined = line
+            for nxt in lines[i + 1 : i + 1 + JOIN_MAX]:
+                joined += " " + nxt.strip()
+                if ";" in nxt or "{" in nxt:
+                    break
+            m = DEF_RE.match(joined)
+        if m:
+            yield i + 1, m.group(1)
 
 
 def strip_comments(text):
@@ -116,10 +134,32 @@ def load_allowlist():
     return entries
 
 
+def selftest():
+    cases = {  # header text -> names found
+        "inline int one_line(int a) { return a; }\n": ["one_line"],
+        "inline int wrapped(int a,\n                   int b) {\n    return a + b;\n}\n": ["wrapped"],
+        "__device__ __forceinline__ void cvt(const uint32_t p,\n    float* f) {\n}\n": ["cvt"],
+        "int declared(int a,\n             int b);\n": [],
+        "    if (a ||\n        b) {\n": [],
+        "    foo(a,\n        b);\n": [],
+    }
+    bad = 0
+    for text, want in cases.items():
+        got = [name for _, name in definitions(text) if name not in SKIP_NAMES]
+        if got != want:
+            print(f"selftest: {text!r}: want {want}, got {got}")
+            bad += 1
+    print(f"selftest: {len(cases) - bad}/{len(cases)} cases ok")
+    return 1 if bad else 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
+    if args.selftest:
+        return selftest()
 
     # One pass over the corpus, so the occurrence count is a dict lookup rather
     # than a grep per candidate (which was ~90 s on this tree).
@@ -141,11 +181,7 @@ def main():
             continue
         # Class name in scope, so a constructor is not mistaken for a function.
         classes = set(re.findall(r"\b(?:class|struct)\s+([A-Za-z_]\w*)", text))
-        for lineno, line in enumerate(text.split("\n"), 1):
-            m = DEF_RE.match(line)
-            if not m:
-                continue
-            name = m.group(1)
+        for lineno, name in definitions(text):
             if name in SKIP_NAMES or name in classes or name.startswith("operator"):
                 continue
             if counts.get(name, 0) == 1:
