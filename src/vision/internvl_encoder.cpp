@@ -1,6 +1,7 @@
 #include "vision/internvl_encoder.h"
 
 #include "core/cuda_static_reset.h"
+#include "core/cublas_check.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 #include "vision/internvl_encoder_kernels.h"
@@ -21,8 +22,8 @@ cublasHandle_t s_handle = nullptr;
 
 cublasHandle_t handle() {
     if (!s_handle) {
-        cublasCreate(&s_handle);
-        cublasSetMathMode(s_handle, CUBLAS_TF32_TENSOR_OP_MATH);
+        IMP_CUBLAS_CHECK_LOG(cublasCreate(&s_handle));
+        IMP_CUBLAS_CHECK_LOG(cublasSetMathMode(s_handle, CUBLAS_TF32_TENSOR_OP_MATH));
     }
     return s_handle;
 }
@@ -33,9 +34,10 @@ cublasHandle_t handle() {
 void linear(const half* A, const half* W, half* C, int M, int N, int K, const half* b, cudaStream_t stream) {
     const float one = 1.0f;
     launch_internvl_fill_rows(C, b, M, N, stream);
-    cublasSetStream(handle(), stream);
-    cublasGemmEx(handle(), CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &one, W, CUDA_R_16F, K, A, CUDA_R_16F, K, &one, C,
-                 CUDA_R_16F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle(), stream));
+    IMP_CUBLAS_CHECK_LOG(cublasGemmEx(handle(), CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &one, W, CUDA_R_16F, K, A,
+                                      CUDA_R_16F, K, &one, C, CUDA_R_16F, N, CUBLAS_COMPUTE_32F,
+                                      CUBLAS_GEMM_DEFAULT));
 }
 
 const half* hp(const Tensor& t) { return static_cast<const half*>(t.data); }
@@ -120,7 +122,7 @@ bool InternVLEncoder::attention(int tokens, cudaStream_t stream) {
     const VisionConfig& c = model_->config;
     const int heads = c.num_heads, hd = c.head_dim;
     const float scale = 1.0f / std::sqrt(static_cast<float>(hd)), zero = 0.0f, one = 1.0f;
-    cublasSetStream(handle(), stream);
+    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle(), stream));
     for (int c0 = 0; c0 < tokens; c0 += kAttnChunk) {
         const int rows = std::min(kAttnChunk, tokens - c0);
         cublasStatus_t st = cublasGemmStridedBatchedEx(

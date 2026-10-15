@@ -1,6 +1,7 @@
 #include "vision/qwen3vl_encoder.h"
 #include "core/cuda_static_reset.h"
 
+#include "core/cublas_check.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 #include "vision/qwen3vl_encoder_kernels.h"
@@ -25,8 +26,8 @@ cublasHandle_t s_handle = nullptr;
 
 cublasHandle_t handle() {
     if (!s_handle) {
-        cublasCreate(&s_handle);
-        cublasSetMathMode(s_handle, CUBLAS_TF32_TENSOR_OP_MATH);
+        IMP_CUBLAS_CHECK_LOG(cublasCreate(&s_handle));
+        IMP_CUBLAS_CHECK_LOG(cublasSetMathMode(s_handle, CUBLAS_TF32_TENSOR_OP_MATH));
     }
     return s_handle;
 }
@@ -35,11 +36,12 @@ cublasHandle_t handle() {
 // checkpoint as [out, in], which is exactly B.
 void gemm_nt(const half* A, const half* B, half* C, int M, int N, int K, float alpha, float beta,
              cudaStream_t stream) {
-    cublasSetStream(handle(), stream);
+    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle(), stream));
     // FP32 accumulation: the FFN down-projection sums 4096 terms, and FP16
     // accumulation overflows there for high-magnitude tokens.
-    cublasGemmEx(handle(), CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &alpha, B, CUDA_R_16F, K, A, CUDA_R_16F, K,
-                 &beta, C, CUDA_R_16F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    IMP_CUBLAS_CHECK_LOG(cublasGemmEx(handle(), CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &alpha, B, CUDA_R_16F, K,
+                                      A, CUDA_R_16F, K, &beta, C, CUDA_R_16F, N, CUBLAS_COMPUTE_32F,
+                                      CUBLAS_GEMM_DEFAULT));
 }
 
 }  // namespace
@@ -174,7 +176,7 @@ bool Qwen3VLEncoder::attention(int tokens, cudaStream_t stream) {
     const int hd = c.head_dim;
     const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
     const float zero = 0.0f;
-    cublasSetStream(handle(), stream);
+    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle(), stream));
 
     for (int c0 = 0; c0 < tokens; c0 += kAttnChunk) {
         const int rows = std::min(kAttnChunk, tokens - c0);

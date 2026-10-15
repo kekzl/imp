@@ -2,6 +2,7 @@
 #include "compute/gemm_grouped.h"
 #include "core/cuda_static_reset.h"
 #include "core/cuda_errors.h"
+#include "core/cublas_check.h"
 #include "core/logging.h"
 #include "memory/device_alloc_all.h"
 
@@ -30,7 +31,7 @@ static cublasHandle_t get_cublas_handle() {
             IMP_LOG_ERROR("imp::gemm_grouped: cublasCreate failed (status %d)", (int)st);
             abort();
         }
-        cublasSetMathMode(s_grouped_cublas_handle, CUBLAS_DEFAULT_MATH);
+        IMP_CUBLAS_CHECK_LOG(cublasSetMathMode(s_grouped_cublas_handle, CUBLAS_DEFAULT_MATH));
     }
     return s_grouped_cublas_handle;
 }
@@ -115,7 +116,7 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
     // cublasLtMatmulGrouped in CUDA 13.2+; cuBLAS dispatch below handles all cases it covered.
 
     cublasHandle_t handle = get_cublas_handle();
-    cublasSetStream(handle, stream);
+    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle, stream));
 
     cudaDataType_t cuda_dt_ab = dtype_to_cuda(dtype);
     cublasComputeType_t compute_type = dtype_to_compute(dtype);
@@ -301,11 +302,10 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
             // Fallback: per-group cublasGemmBatchedEx
             for (const auto& g : groups) {
                 float g_alpha = g.alpha;
-                cublasGemmBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, N, g.M, K, &g_alpha,
-                                    (const void**)(d_B_ptrs + g.start), cuda_dt_ab, K,
-                                    (const void**)(d_A_ptrs + g.start), cuda_dt_ab, K, &beta,
-                                    (void**)(d_C_ptrs + g.start), cuda_dt_c, N, g.count, compute_type,
-                                    cublas_gemm_algo());
+                IMP_CUBLAS_CHECK_LOG(cublasGemmBatchedEx(
+                    handle, CUBLAS_OP_T, CUBLAS_OP_N, N, g.M, K, &g_alpha, (const void**)(d_B_ptrs + g.start),
+                    cuda_dt_ab, K, (const void**)(d_A_ptrs + g.start), cuda_dt_ab, K, &beta,
+                    (void**)(d_C_ptrs + g.start), cuda_dt_c, N, g.count, compute_type, cublas_gemm_algo()));
             }
         }
     }
