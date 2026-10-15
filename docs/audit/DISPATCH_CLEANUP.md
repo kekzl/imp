@@ -505,3 +505,38 @@ Branch `cleanup/b5-magic-numbers` head `5a6b6e1c` (H-029, C-032, C-033 rename pa
 | B5 re-validation | later: 3 x `make test-gpu` on a rebuilt B5 image vs 3 x main, interleaved | separate a B5 cause from the timing flake |
 | `DeviceFaultSignalTest` timing flake | new finding, needs a GPU repro | isolated failures on 5 images with unrelated code; exit 7 and exit 8 are two failure modes |
 | C-033 runtime `device_sm_count()` | DEFER | turns `kMinBlocks` into a runtime value; retry-on-error is a behaviour change |
+
+## 2026-10-15 Phase 4 B8 (builder)
+
+Branch `cleanup/b8-warnings` off `origin/main` 36fa6317, code head d5c0c5d1. Compile + CPU only, no GPU run. `make build DOCKER_IMG=imp:b8-branch` (524 CXX + 302 CUDA compile steps): 13 unique warning lines (main: 13), diff empty, 0 `-Wshadow`. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight`. Code diff: 24 files, +211 / -209. origin/main moved to 32b66557 during the batch; the branch is not rebased.
+
+| row | commit | files | change | lines +/- | evidence | result |
+|---|---|---|---|---|---|---|
+| H-027 shorten (6 host) | bf732436 | `exec/executor_attention.cpp`, `exec/executor_forward_moe_legacy.cpp` | `static_cast<int>` on `NvFP4QuantResult::N/K` (`int64_t`) at the `int` GEMV args: attention:655,656; moe_legacy:282,329 (N and K each) | +6 / -6 | same implicit conversion spelled out; host objects identical | applied |
+| H-027 shadow (5 listed host) | e3c9eb70 | `exec/executor_attention.cpp` (`eps` -> `post_eps`), `exec/executor_attention_qkv.cpp:257` (`h` -> `kv_h`), `runtime/engine_kv_cache_init.cpp:506` (`blocks_per_seq` -> `blocks_per_req`), `model/tokenizer.cpp:657` (`n` -> `entry`), `imp-server/handlers_misc.cpp:651` (`req` -> `embed_req`) | rename | +34 / -34 | g++ `-Wshadow` reports each; host objects identical | applied |
+| g++ `-Wshadow`, 4 more sites | e3c9eb70 | `exec/executor_attention_qkv.cpp:152` (`h` -> `wh`), `exec/executor_forward_moe_cutlass.cpp:289` (`n` -> `n_ex`), `imp-quantize/awq_plan.cpp:473` (`f` -> `fs`), `tests/test_determinism_e2e.cpp:208` (`info` -> `param_info`) | rename | (same commit) | not in the clang lane (g++ only) | applied |
+| g++ `-Wshadow`, `Tensor` ctors (11) | c260f775 | `core/tensor.cpp` | ctor params `ptr, qt, nd, dims, strides, dev` in the definition; `this->` dropped | +11 / -11 | `tensor.h` keeps member-named params: 120 `/*on_device=*/` argument comments (bugprone-argument-comment, WarningsAsErrors) | applied |
+| g++ `-Wshadow`, attention lambdas (13) | cd6be0ab | `exec/executor_attention.cpp`, `exec/executor_attention_decode.cpp`, `exec/executor_attention_prefill.cpp` | `decode_attend` params -> `sub_state, sub_n, sub_q, sub_k, sub_v, sub_ao, sub_block_tables`; `prefill_attend_seq` -> `seq_n, seq_q, seq_k, seq_v, seq_ao, seq_block_tables`; both fragments get `// clang-format off` | +120 / -119 | object identical before the marker; after it only 21 line-number immediates (`__LINE__`, +-1) | applied |
+| H-027 flag | b08e8895 | `CMakeLists.txt` | `-Wshadow` added to `imp_warnings` under `$<COMPILE_LANGUAGE:CXX>` | +2 / -1 | 0 findings in deps (FetchContent targets do not link `imp_warnings`; no header warning seen) | applied |
+| H-027 `-Wsign-conversion`, `-Wimplicit-int-float` | - | - | not enabled | - | inventory: 1850 + 473 host findings, L effort | out of scope (row says leave off) |
+| H-025 | d5c0c5d1 | 4 `compute/*_constrain.h`, 4 `compute/*_constrain.cu` (host methods), `runtime/constraint_manager.cpp`, `tests/test_regex_constrain.cpp`, `tests/test_tool_call_constrain.cu` | `{Json,Schema,Regex,Grammar}Constrainer::reset()` -> `rewind()`; `ConstraintManager` `->reset()` x10 -> `->rewind()`; `.reset()` x3 on the `unique_ptr` unchanged | +38 / -38 | preflight tidy on `constraint_manager.cpp`: 0 `readability-ambiguous-smartptr-reset-call` (inventory: 13); old name gone, so a missed caller is a compile error | applied |
+
+| `-Wshadow` count (g++, `make dev`) | value |
+|---|---|
+| main, flag off | 0 (flag absent); 13 unique warning lines total |
+| main + flag, before renames | 33 unique sites: tensor.cpp 11, executor_attention.cpp 14, executor_attention_qkv.cpp 2, 1 each in moe_cutlass, tokenizer, engine_kv_cache_init, awq_plan, handlers_misc, test_determinism_e2e |
+| branch + flag | 0; `make build` 13 unique lines, diff vs main empty |
+
+| behaviour check (no GPU) | reference | B8 | result |
+|---|---|---|---|
+| host `objdump -d -r` of all 522 first-party `.cpp.o` in `build-dev`, before vs after bf732436..cd6be0ab (pre-marker) | main 36fa6317 | 522 / 522 identical | PASS |
+| same, after the `clang-format off` lines | - | 521 identical; `executor_attention.cpp.o`: 21 `mov`/`push` immediates = log `__LINE__` +-1 | PASS |
+| same, H-025 (`Constrainer::reset()` -> `rewind()` normalised in symbol names) | cd6be0ab | `constraint_manager.cpp.o`, `test_regex_constrain.cpp.o`: 0 diff lines | PASS |
+| SASS per kernel, `imp:main-ctrl` (36fa6317) vs `imp:b8-branch`, imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 rows | 1023 / 1023 / 1025, 0 hash diffs; 1014 distinct hashes in imp-server | PASS |
+
+| finding / skip | evidence | proposed next step |
+|---|---|---|
+| `readability-inconsistent-declaration-parameter-name` on `tensor.h:47,50` | 2 new advisory tidy findings (not WarningsAsErrors) from c260f775 | rename the header params together with the `/*on_device=*/` comments, or accept |
+| `IMP_CUDA_CHECK_LOG` text in `executor_attention_prefill.cpp:202,205` | `#call` stringifies `kk.data`/`vv.data`, now `seq_k.data`/`seq_v.data`: CUDA-error message text only | none |
+| `// clang-format off` in the two attention fragments | `git clang-format` formats a body fragment as top-level code: every changed line of a top-level block is dedented | none; applies to any later edit of those fragments |
+| GPU-only checks | no GPU in this batch | validator: test-gpu (`*JsonConstrain*`, `*SchemaConstrain*`, `*Regex*`, `*Gbnf*`, `*ToolCall*`), reference dumps (attention lambdas), PTX diff |
