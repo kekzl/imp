@@ -35,6 +35,7 @@ void launch(KernelFunc func, dim3 grid, dim3 block, size_t smem, cudaStream_t st
         IMP_CUDA_CHECK_LOG(cudaLaunchKernelEx(&config, func, args...));
     } else {
         func<<<grid, block, smem, stream>>>(args...);
+        IMP_CUDA_CHECK_LAUNCH();
     }
 }
 
