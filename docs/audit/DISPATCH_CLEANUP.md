@@ -209,3 +209,25 @@ Branch `cleanup/b1-ownership-odr` off `origin/main` 8d4c4148. Compile only, no G
 | row | decision | why |
 |---|---|---|
 | H-018 `MoeRoutingBuffers` | GO: move ops (free own pool, take the source's, null the source), copy ops deleted | the builder's finding: `ws = MtpDraftWorkspace{}` fell back to the implicit copy; with a live pool that leaks the target pool and double-frees the source's. Current callers move empty pools only, so outputs are unchanged; `make build` green |
+
+## 2026-10-15 Phase 4 B1 (validator)
+
+Branch head `e4b4134e`, image `imp:b1-final`, against the Phase 3 baseline `5a30cb5f`. Verdict: all 7 gates PASS.
+
+| gate | baseline | B1 | result |
+|---|---|---|---|
+| build warnings | 13 unique lines | 13, diff empty | PASS |
+| `make test-gpu` | 0 FAILED; per-binary PASSED counts 2004, 306, 272, 269, 225, 210, 199, 113, 6, 4 | identical counts, 0 FAILED, `[ RUN ]` list diff 0 lines | PASS |
+| reference dumps (`runtime.deterministic=true`, 5 models x 3 prompts x 2 runs) | `*.choices.json` | 30/30 byte-identical | PASS |
+| sanitizer | BLOCKED on WSL2 (Phase 1) | not run | n/a |
+| ptxas (`cuobjdump -res-usage` + SASS counts) | 1024 rows imp-server / imp-cli, 1026 imp-quantize | identical rows in all three | PASS |
+| decode tg256 pooled median, Qwen3-Coder-30B-A3B FP4 | 371.63 tok/s (gate 364.20..379.06) | 372.26 (+0.17 %) | PASS |
+| decode tg256 after pp2048 | 345.41 | 344.82 (-0.17 %) | PASS |
+| prefill pp512 | 30444 (30125..30530) | 30387 | PASS |
+| prefill pp2048 | 48919 (48739..49049) | 48929 | PASS |
+| `make preflight` (255 static gates incl. file size, clang-tidy on 17 files) | - | 0 failures | PASS |
+
+| fact | value |
+|---|---|
+| imp-server binary | 42524880 -> 42440960 B (-83920, internal linkage) |
+| GPU lock | held for the whole run (08:35-08:53 local) |
