@@ -687,3 +687,25 @@ Branch `cleanup/b9-tools-discards` off `origin/main` 58263bb4, code head f1e539d
 | finding / skip | evidence | proposed next step |
 |---|---|---|
 | GPU-only checks | no GPU in this batch | validator: `imp-bench` attention / gemm / q8_imma run, 0 `CUDA error` lines on the success path |
+
+## 2026-10-15 Phase 4 B9 (validator)
+
+Code head `7b0863f1`, image `imp:b9-final`; paired control `imp:main-ctrl3` (main `58263bb4`, the branch base; 3/3 test-gpu green in the B5 re-run). `imp-bench` from `make dev` of both trees. Verdict: all gates PASS.
+
+| gate | main control | B9 | result |
+|---|---|---|---|
+| build warnings | 13 | 13, diff empty | PASS |
+| SASS hash per kernel, imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 | diff 0 / 0 / 0 | PASS |
+| `make test-gpu` | 3/3 green (B5 re-run) | 2/2 green, 3700 `[ RUN ]` each; `DeviceFaultSignalTest.FaultInside...` OK both | PASS |
+| `imp-bench gemm` / `q8imma` / `attention`: exit, `CUDA error` lines | 0 / 0 / 0, 0 / 0 / 0 | 0 / 0 / 0, 0 / 0 / 0 | PASS |
+| `imp-bench attention` output | 126 lines | 125 lines: the `Device SM version` INFO line of the deleted `get_device_sm_version` (only caller was `bench_attention.cu:168`); other diffs are winner markers | expected |
+| reference dumps vs the Phase 3 baseline | - | 15/15 identical (run 1 and run 2); run 1 = run 2 | PASS |
+| decode tg256 pooled median, paired run, n=10 | 368.97 tok/s | 364.86 (-1.11 %) | PASS (+-2 %) |
+| prefill pp512 / pp2048, paired run | 30089 / 48704 | 29750 / 48252 | PASS (spread 6.32 % / 5.29 %) |
+
+## 2026-10-15 Phase 4 B9 (orchestrator decision)
+
+| row | decision | why |
+|---|---|---|
+| 171 discarded CUDA / cuBLAS statuses in imp-bench (164) and imp-quantize (7), gate scope extended to `tools/imp-bench`, `tools/imp-quantize`, `tools/imp-cli` | ship | gates above |
+| `get_device_sm_version` deletion, always-true `sm >= 120` gate in `bench_attention` | ship | no caller left; shipped SASS identical |
