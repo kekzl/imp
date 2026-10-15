@@ -342,6 +342,73 @@ Code head `32213359`, image `imp:b3-final`, against the Phase 3 baseline `5a30cb
 | H-008 incl. H-007 (3 dead inline functions), `apa.cuh:pass2` dead-inline allowlist entry | GO | no callers, ptxas rows identical; B4 drops H-007 |
 | 171 discarded results in `tools/imp-bench`, `imp-quantize`, `imp-cli` | next batch | outside the shipped binaries' hot paths |
 
+## 2026-10-15 Phase 4 B4 (builder)
+
+Branch `cleanup/b4-dead-code` off `origin/main` 1ab58bc7, code head 60d148cd. Compile only, no GPU run. `make build DOCKER_IMG=imp:b4-branch`: 13 unique warning lines (main: 13), all in untouched `tests/*.cpp` and `stl_vector.h`, 0 in a changed file. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight` (final: 0 failures). Code diff: 26 files, +104 / -285. Dead-symbol evidence: `codegraph sync` then `codegraph callers <sym>` (control `write_kv_cache`: callers found) plus `rg -n '\b<sym>\b' src tools tests include fuzz docs scripts cmake`.
+
+| row | commit | files | change | lines +/- | evidence | result |
+|---|---|---|---|---|---|---|
+| H-001 | 26092a1c | `core/tensor_view.h` | header deleted | +0 / -74 | `rg tensor_view` in code = 0 includes; `TensorView` only in its own file; codegraph callers 0 | applied |
+| H-003 | bcd89b16 | `exec/executor.h`, `exec/executor_workspace_buffers.cpp`, `exec/executor_workspace.cpp` | `GraphExecutor::release_moe_batch_buf` deleted; locator comment names `.cpp` (was `.cu`) | +2 / -17 | codegraph callers 0; rg = decl + def + 1 comment | applied |
+| H-004 | 698952e7 | `memory/mem_account.h`, `memory/mem_account.cpp`, `runtime/engine.cpp` | `MemAccount::unattributed_bytes` deleted; 2 comments name the live `unattributed_signed_bytes` (`engine_workspace_warmup.cpp:512`) | +6 / -11 | codegraph callers 0; rg = decl + def + 2 comments | applied |
+| H-005 | 62a4d1e1 | `model/hf_config_loader.h`, `model/hf_config_loader.cpp` | `HFConfigLoader::load_added_tokens` + its `AddedToken` struct deleted | +0 / -42 | codegraph callers 0; rg = decl + def; `HFConfigLoader::AddedToken` used only there | applied |
+| H-006 | 10fca744 | `core/process_diag.h`, `core/process_diag.cpp` | setter deleted, getter kept | +0 / -2 | codegraph callers 0; rg = decl + def | applied |
+| H-007 | - | - | - | - | done in B3 (#2735) | skipped |
+| H-010 | 4ea1f86b | `compute/gdn.h`, `compute/gdn.cu`, `tests/test_gdn.cu` (comment) | host launcher `gdn_scan_prefill_f32` deleted; `gdn_scan_decode_kernel` stays (launched by `gdn_scan_decode_f32`) | +1 / -24 | codegraph callers 0; rg = decl + def + 1 test comment | applied |
+| C-008 | e6e872c4 | `compute/attention_paged.cu` | `static sm_ver` and the `sm_ver >= 90` term deleted; non-pipe arm still reachable via `attention.splitk_pipe=false` | +3 / -4 | value 120 on every device the fatbin loads on | applied (guard) |
+| C-008 rest | - | `compute/attention_dispatch.cpp`, `attention.h` | `get_device_sm_version` kept | - | REFUTED as dead: live caller `tools/imp-bench/bench_attention.cu:168` (`sm >= 120` gate, 108-line block); codegraph callers = `bench_attention` | next batch |
+| C-009 | 17140d24 | `compute/mmq_q8_imma.cu`, `mmq_q8_imma_q4k.cu`, `mmq_q8_imma_q51.cu`, `mmq_q8_imma_q6k.cu`, `mmq_q4k_imma_tile.cu`, `gemm_cutlass_mxfp8_sm120.cu` | `#if __CUDA_ARCH__ >= 800` x4, `>= 750` x1, `>= 890` x1 (dead `return 0` else) removed | +0 / -14 | `__CUDA_ARCH__` = 1200 in both device passes | applied |
+| C-010 | - | `core/pdl.cpp:53`, `gemm_grouped_nvfp4_smallM.cu:716`, `gemm_capture_fp16_sm120.cu:270`, `gemm_cutlass_grouped_3x.cu:96` | not changed | - | can flip: each returns false (uncached) when `cudaGetDevice` / `cudaGetDeviceProperties` fails (no device, CPU lane) and false on a cc < 12.0 device; removal turns both into true | needs orchestrator go |
+| C-011 | 5e168a96 | `core/pdl_device.cuh` | guard `>= 900` -> `defined(__CUDA_ARCH__)`; comment no longer claims a 120f no-op | +5 / -4 | host pass: undefined before and after; device passes: 1200 | applied |
+| C-003 | 093e6a5b | `compute/constrain_common.h`, `compute/json_constrain.cu` | `__global__ inline` body moved verbatim to `json_constrain.cu`; header declares it | +35 / -27 | launchers `json_constrain.cu:708`, `schema_constrain.cu:367,417`, `tests/test_json_constrain.cu:172`; non-template kernel, extern host stub, no `-rdc` | applied |
+| H-033 | ac422517 | `CMakeLists.txt` | stale TurboQuant / sm_120f note deleted | +0 / -3 | TurboQuant retired 2026-05-17; 0 sm_120f SASS emitted | applied |
+| C-013 + H-034 | 60d148cd | `CMakeLists.txt`, `compute/attention_mxfp4_prefill.h` (comment) | option and 4 `if(IMP_USE_CUTLASS)` blocks removed, bodies dedented; `IMP_USE_CUTLASS=1` define on `imp` and `test-quant` dropped | +52 / -63 | `rg IMP_USE_CUTLASS` in src/tools/tests = 1 comment; 0 `#if` readers | applied |
+
+| SASS check (no GPU) | imp:b3-final | imp:b4-branch | result |
+|---|---|---|---|
+| per-kernel rows, imp-server / imp-cli / imp-quantize (`cuobjdump -sass` in `imp:toolchain`, sha1 of each function body without addresses and encodings) | 1024 / 1024 / 1026 | 1023 / 1023 / 1025 | -1 each: the duplicate `constrain_mask_allow_kernel` row (C-003) |
+| unique (kernel, SASS hash) pairs | - | - | identical in all 3 binaries |
+| hash tool discriminates | - | 1014 distinct hashes over 1023 kernels, 0 empty bodies | - |
+| `compute_120f` PTX | not compared | not compared | validator |
+
+| finding / skip | evidence | proposed next step |
+|---|---|---|
+| `get_device_sm_version` + cache + INFO line | only caller after C-008: `tools/imp-bench/bench_attention.cu:168`, whose `sm >= 120` gate is always true | drop the bench gate (dedent 108 lines), then delete the function |
+| C-010 | see row | owner call: fold the 4 checks into one cached `device_query_ok()` that keeps the false-on-error result, or accept true on a cc < 12.0 device |
+| GPU-only checks | no GPU in this batch | validator: reference dumps, test-gpu (`*JsonConstrain*`, `*SchemaConstrain*` exercise the moved kernel), PTX diff |
+
+## 2026-10-15 Phase 4 B4 (validator)
+
+Code head `60d148cd`, image `imp:b4-final`, against the Phase 3 baseline image `imp:test-imp-baseline-016f0c60`. Verdict: all gates PASS; perf judged by a paired control.
+
+| gate | baseline | B4 | result |
+|---|---|---|---|
+| build warnings | 13 unique lines | 13, diff empty | PASS |
+| `make test-gpu` | 0 FAILED | 0 FAILED; `[ RUN ]` diff = the B2 test only | PASS |
+| reference dumps (5 models x 3 prompts x 2 runs) | `*.choices.json` | 30/30 byte-identical | PASS |
+| ptxas rows imp-server / imp-quantize | 1024 / 1026 | 1023 / 1025: only `constrain_mask_allow_kernel` (the header duplicate) gone | PASS |
+| SASS hash per (kernel, arch), 3 binaries | - | 1 removed row (the duplicate); 2 rows change only the ELF arch label (`sm_120a` <-> `sm_120f`) with identical hashes | PASS |
+| PTX, imp-server | 998 entries | 997; diff = 66 removed lines of the duplicate entry, 0 added | PASS |
+
+| perf, Qwen3-Coder-30B-A3B FP4, pooled n=10 | decode tg256 | pp512 | pp2048 | tg256 after pp2048 |
+|---|---|---|---|---|
+| Phase 3 baseline, 06:xx | 371.63 | 30444 | 48919 | 345.41 |
+| B4 run 1, 11:26 | 369.52 (-0.57 %) | 30210 | 48592 (below the baseline min 48739) | 343.06 |
+| control: baseline image, 11:31 | 366.75 | 29916 | 48495 | 341.00 |
+| B4 run 2, directly after the control | 368.65 (+0.52 % vs control) | 30179 | 48318 (-0.37 % vs control) | 340.16 |
+
+| perf verdict | evidence |
+|---|---|
+| host drift, not B4 | the unchanged baseline image lost 1.3 % decode since the Phase 3 run; B4 vs control inside each other's min..max; SASS identical |
+
+## 2026-10-15 Phase 4 B4 (orchestrator decision)
+
+| row | decision | why |
+|---|---|---|
+| H-001, H-003..H-006, H-010, C-003, C-008 guard, C-009, C-011, C-013 + H-034, H-033 | ship | gates above |
+| C-010 | DEFER to the deferred list | removal flips the result to true on a failed device query (CPU lane) and on cc < 12.0 |
+| C-008 `get_device_sm_version` | next batch | live caller `tools/imp-bench/bench_attention.cu:168` |
+
 ## 2026-10-15 Phase 4 B7 (builder)
 
 Branch `cleanup/b7-dup-helpers` off `origin/main` 1ab58bc7. Compile + CPU only, no GPU run. `make build DOCKER_IMG=imp:b7-branch`: 13 unique warning lines (main: 13), 0 in a changed file. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight`.

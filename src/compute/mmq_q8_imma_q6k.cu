@@ -254,7 +254,6 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
                     // partial sums separately — zero the other B register.
                     int32_t p0 = 0, p1 = 0, p2 = 0, p3 = 0;
                     int32_t q0 = 0, q1 = 0, q2 = 0, q3 = 0;
-#if __CUDA_ARCH__ >= 800
                     asm volatile(
                         "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
                         "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
@@ -267,7 +266,6 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
                         : "=r"(q0), "=r"(q1), "=r"(q2), "=r"(q3)
                         : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(0), "r"(b1), "r"(0), "r"(0),
                           "r"(0), "r"(0));
-#endif
                     const int ncol_lo = warp_n * kTileN + nf * 8 + cl * 2;
                     // per-16 α from the staged scales: bytes [2*kb], [2*kb+1]; d at [4]
                     const int8_t* sc_lo = reinterpret_cast<const int8_t*>(&sScd(stage)[ncol_lo][0]);

@@ -791,22 +791,4 @@ void gdn_scan_decode_f32(const float* x, const float* B, const float* C, const h
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-void gdn_scan_prefill_f32(const float* x, const float* B, const float* C, const half* alpha, const half* beta,
-                          const float* A_log, const float* dt_bias, float* h_state, half* y, const half* z,
-                          int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
-                          cudaStream_t stream, int grouped_layout) {
-    int inner = n_heads * head_dim_ssm;
-    int BC_size = n_groups * state_size;
-    size_t smem = static_cast<int64_t>(2) * state_size * sizeof(float) + 2 * sizeof(float);
-    for (int t = 0; t < n_tokens; t++) {
-        gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(
-            x + static_cast<ptrdiff_t>(t) * inner, B + static_cast<ptrdiff_t>(t) * BC_size,
-            C + static_cast<ptrdiff_t>(t) * BC_size, alpha + static_cast<ptrdiff_t>(t) * n_heads,
-            beta + static_cast<ptrdiff_t>(t) * n_heads, A_log, dt_bias, h_state,
-            y + static_cast<ptrdiff_t>(t) * inner, nullptr, n_heads, head_dim_ssm, state_size, n_groups,
-            grouped_layout);
-        IMP_CUDA_CHECK_LAUNCH();
-    }
-}
-
 }  // namespace imp

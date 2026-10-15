@@ -154,14 +154,12 @@ __global__ void mmq_q4k_imma_tile_kernel(const int8_t* __restrict__ X_s8,
                     *reinterpret_cast<const uint32_t*>(&sB[stage][b_col][b_k_base + 16]);
 
                 int32_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
-#if __CUDA_ARCH__ >= 750
                 asm volatile(
                     "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
                     "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
                     : "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3)
                     : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1),
                       "r"(0), "r"(0), "r"(0), "r"(0));
-#endif
 
                 // -------- Per-sub-block scale apply for this (wrm, wrn) MMA --------
                 const int row_lo = sub_origin_m + ((lane >> 2) & 7);

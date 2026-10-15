@@ -11,7 +11,7 @@ namespace imp {
 // for long sequences use flash attention (attention_blackwell.cu) instead. Decode stays scalar
 // software-dequant (GEMV is memory-bound).
 // Q:[batch,seq_q,n_heads,hd] K,V:[batch,seq_kv,n_kv_heads,hd] O: same as Q, all FP16.
-// Requires sm_120+, head_dim % 32 == 0, IMP_USE_CUTLASS at compile time, IMP_MXFP4_ATTENTION=1
+// Requires sm_120+, head_dim % 32 == 0, IMP_MXFP4_ATTENTION=1
 // at runtime. Returns false if unsupported or GEMM fails.
 [[nodiscard]] bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
                              bool causal, float softcap, cudaStream_t stream);

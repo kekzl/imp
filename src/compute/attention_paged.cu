@@ -1235,9 +1235,8 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
         dim3 grid1(batch_size, n_heads, num_splits);
         dim3 block1(BLOCK_THREADS);
 
-        // Use pipelined cp.async kernel on sm_90+ for better memory/compute overlap.
-        // IMP_SPLITK_NO_PIPE forces non-pipeline as a bisect escape hatch.
-        static int sm_ver = get_device_sm_version();
+        // Pipelined cp.async kernel by default; attention.splitk_pipe=false forces the
+        // non-pipeline kernel as a bisect escape hatch.
         const bool force_non_pipe = !process_diag_attention_splitk_pipe();
         const bool mt_splitk_done = (mt_hpc > 0) &&
                                     paged_attention_splitk_f16_multitok_launch(
@@ -1249,7 +1248,7 @@ void paged_attention_decode(const Tensor& Q, const Tensor& K_cache, const Tensor
                                         stream);
         if (mt_splitk_done) {
             // one (m, l, o) partial per head; the reduce below is shared
-        } else if (sm_ver >= 90 && !force_non_pipe) {
+        } else if (!force_non_pipe) {
             // Pipeline smem: 8 warps * 3 * head_dim * 2B (FP16)
             // Must be at least as large as reduction smem
             size_t pipe_smem = static_cast<int64_t>(NUM_WARPS * 3) * head_dim * sizeof(half);

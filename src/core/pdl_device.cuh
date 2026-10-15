@@ -1,7 +1,8 @@
 #pragma once
 
-// Programmatic Dependent Launch, device half. No-ops for a non-programmatic launch and for the
-// compute_120f fallback. Contract for every kernel registered via pdl::enable():
+// Programmatic Dependent Launch, device half. No-op for a non-programmatic launch; emitted for
+// sm_120a SASS and the compute_120f PTX alike (__CUDA_ARCH__ 1200). Contract for every kernel
+// registered via pdl::enable():
 // - before pdl_wait() (griddepcontrol.wait): global reads of immutable data (weights) and
 //   prefetch.global.L2 only. Any mutable buffer, even one written many kernels earlier, waits: a
 //   predecessor that triggers before its own wait (smallm_v2) lets this grid start while older grids
@@ -14,13 +15,13 @@
 namespace imp {
 
 __device__ __forceinline__ void pdl_wait() {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+#if defined(__CUDA_ARCH__)
     asm volatile("griddepcontrol.wait;" ::: "memory");
 #endif
 }
 
 __device__ __forceinline__ void pdl_trigger() {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+#if defined(__CUDA_ARCH__)
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 #endif
 }
