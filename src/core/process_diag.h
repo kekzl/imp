@@ -169,7 +169,6 @@ void process_diag_set_fp8_qk_scaled(bool v);
 int process_diag_nvfp4_cutlass_streamk();  // gemm.nvfp4_cutlass_streamk: 0 off, 1 sub-2-wave grids, 2 forced
 void process_diag_set_nvfp4_cutlass_streamk(int v);
 int process_diag_nvfp4_cublaslt_min_m();  // gemm.nvfp4_cublaslt_min_m: 0 off
-void process_diag_set_nvfp4_cublaslt_min_m(int v);
 // test hook: force the paged-decode split-K path onto its single-split GQA/MHA
 // fallback even on a clean launch, so the fallback can be verified against the
 // split-K result without provoking a real cudaErrorInvalidValue. Default off.
