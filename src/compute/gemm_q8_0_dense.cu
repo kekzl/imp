@@ -4,6 +4,7 @@
 #include "compute/gemm.h"
 #include "compute/gemm_q8_0_dense.h"
 #include "core/logging.h"
+#include "core/sm120_limits.h"
 
 #include <cuda_fp16.h>
 
@@ -16,7 +17,6 @@ namespace {
 constexpr int kWarps = 8;
 constexpr int kThreads = kWarps * 32;
 constexpr int kBlockBytes = 34;  // fp16 d + 32 x int8
-constexpr size_t kSmemLimit = 101376;
 
 size_t smem_bytes(int tile_m, int q8_per_row) {
     return static_cast<size_t>(tile_m) * q8_per_row * (32 + sizeof(float));
@@ -137,7 +137,7 @@ void launch_tiled(int tile_m, const uint8_t* w, const block_q8_1* q8, const floa
 
 int gemm_q8_0_dp4a_dense_tile_m(int K) {
     for (int t : {16, 8, 4})
-        if (smem_bytes(t, K / 32) <= kSmemLimit)
+        if (smem_bytes(t, K / 32) <= kSm120SmemOptinBytes)
             return t;
     return 0;
 }

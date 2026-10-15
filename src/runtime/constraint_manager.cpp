@@ -75,7 +75,7 @@ void ConstraintManager::prepare(bool json_mode, const std::string& json_schema, 
     //     around otherwise valid JSON.
     int preamble_budget;
     if (thinking_open && think_close >= 0) {
-        preamble_budget = 8192;
+        preamble_budget = kThinkPreambleBudget;
     } else if (has_tools) {
         preamble_budget = 512;
     } else {
@@ -227,7 +227,7 @@ bool ConstraintManager::prepare_tool_call(const std::vector<std::pair<std::strin
     // the tool-deliberation slack (#840) for prose before the tag.
     int preamble_budget;
     if (thinking_open && think_close >= 0)
-        preamble_budget = 8192;
+        preamble_budget = kThinkPreambleBudget;
     else if (optional)
         preamble_budget = 512;
     else
@@ -287,7 +287,7 @@ bool ConstraintManager::prepare_regex(const std::string& pattern, Tokenizer* tok
     }
     const int32_t think_close = detect_think_close(tokenizer);
     if (think_close >= 0)
-        regex_constrainer_->set_preamble(think_close, 8192, thinking_open);
+        regex_constrainer_->set_preamble(think_close, kThinkPreambleBudget, thinking_open);
     regex_constrainer_->rewind();
     active_regex_ = true;
     IMP_LOG_INFO("ConstraintManager: constraining output to regex '%s'%s", pattern.c_str(),
@@ -322,7 +322,7 @@ bool ConstraintManager::prepare_grammar(const std::string& gbnf, Tokenizer* toke
     }
     const int32_t think_close = detect_think_close(tokenizer);
     if (think_close >= 0)
-        grammar_constrainer_->set_preamble(think_close, 8192, thinking_open);
+        grammar_constrainer_->set_preamble(think_close, kThinkPreambleBudget, thinking_open);
     grammar_constrainer_->rewind();
     active_grammar_ = true;
     cached_grammar_string_ = gbnf;

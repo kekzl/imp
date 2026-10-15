@@ -6,7 +6,7 @@ using namespace imp;
 
 namespace {
 constexpr int kBkv = 64;               // SM120_Bkv in attention_fmha_sm120.cu
-constexpr size_t kSm120Smem = 101376;  // cudaDevAttrMaxSharedMemoryPerBlockOptin on sm_120
+constexpr size_t kSm120Smem = kSm120SmemOptinBytes;
 }  // namespace
 
 // #2195: the selector returned Bq=128 for HD64, which had no instance, so the launch returned false.

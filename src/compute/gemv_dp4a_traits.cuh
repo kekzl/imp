@@ -6,6 +6,7 @@
 #include "compute/gemm.h"
 #include "core/pdl_launch.cuh"
 #include "compute/ptx92_utils.cuh"
+#include "core/sm120_limits.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstring>
@@ -1150,7 +1151,7 @@ static void launch_gemv_dp4a_fp32_batched(const uint8_t* W, const block_q8_1* q8
             s_max_smem = 0;
         }
         if (s_max_smem <= 0)
-            s_max_smem = 48 * 1024;
+            s_max_smem = kSmemNoOptinBytes;
     }
     if (per_row * 2 > (size_t)s_max_smem) {
         // K too large to stage even two activation rows — per-row fallback.
@@ -1164,7 +1165,7 @@ static void launch_gemv_dp4a_fp32_batched(const uint8_t* W, const block_q8_1* q8
     auto run = [&](auto mr_tag, int r0, int rn) {
         constexpr int MR = decltype(mr_tag)::value;
         const size_t smem = per_row * MR;
-        if (smem > 48 * 1024)  // failure: pdl::launch below fails and reports it
+        if (smem > kSmemNoOptinBytes)  // failure: pdl::launch below fails and reports it
             IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(gemv_dp4a_fp32_batched_kernel<QT, MR>,
                                                     cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
         pdl::launch(gemv_dp4a_fp32_batched_kernel<QT, MR>, dim3(blocks), dim3(threads_per_block), smem,

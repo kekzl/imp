@@ -647,6 +647,55 @@ Code head `d5c0c5d1`, image `imp:b8-final`; paired control `imp:main-ctrl` (main
 | `// clang-format off` in `executor_attention_decode.cpp`, `executor_attention_prefill.cpp` | accept | precedent in 3 files (`image_decode.cpp`, `arch_registry.cpp`, `fim.cpp`); `__LINE__` in error texts shifts by 1 |
 | 2 `readability-inconsistent-declaration-parameter-name` hints in `tensor.h:47,50` | accept | keeps 120 `/*on_device=*/` argument comments valid; not a gated check |
 
+## 2026-10-15 Phase 4 B5 (builder)
+
+Branch `cleanup/b5-magic-numbers` off `origin/main` fb524a1d, code head 0431193f. Compile only, no GPU run. `make build DOCKER_IMG=imp:b5-branch`: 13 unique warning lines (main: 13), all in untouched `tests/*.cpp` and `stl_vector.h`, 0 in a changed file. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight` (final: 0 failures). Code diff: 23 files, +110 / -38. Every replaced literal keeps its type and value; no compile-time constant became a runtime query.
+
+| row | commit | files | change | lines +/- | evidence | result |
+|---|---|---|---|---|---|---|
+| H-029 + C-032 | 925c385e | new `core/sm120_limits.h`; `compute/gemm_q4k.cu`, `gemm_q8_0_dense.cu`, `exec/executor_gemm_dispatch.cpp`, `compute/fmha_sm120_tile_select.h`, `fmha_fp8_tile_select.h`, 2 tile-select tests | `101376` -> `kSm120SmemOptinBytes` (`size_t`): 3 host locals, 6 `static_assert`s, 2 test locals | +30 / -16 | row confirmed: 5 sites + 2 test locals, `rg 'kSm120\w*Smem'` in src = 0 before; the `cudaDevAttrMaxSharedMemoryPerBlockOptin` queries (8 `rg` hits, 5 files) stay runtime | applied |
+| C-034 | 696306c2 | `core/sm120_limits.h`, `compute/gemv_dp4a_traits.cuh` | `48 * 1024` x2 -> `kSmemNoOptinBytes` (`int`) | +6 / -2 | row confirmed at `:1153`, `:1167`; both host launcher code | applied |
+| C-033 | 26b77702 | `core/sm120_limits.h`, `compute/gemv_fp8_rowscale_fp32.cu`, `gemm_cutlass_sm120.cu`, `gdn_scan_chunkpar.cu` | `170` -> `kSm120SmCount` (`int`): `kMinBlocks = 2 * kSm120SmCount`, 2 failed-query fallbacks | +9 / -3 | row confirmed; `kMinBlocks` stays `constexpr` | applied (rename part) |
+| C-033 rest | - | `src/quant/mxfp4_gemm.cu`, 12 SM-count queries | not changed | - | proposed cached `device_sm_count()` makes `kMinBlocks` a runtime value; `mxfp4_n_sms` retry-on-failure policy change = behaviour change | needs-go |
+| H-031 (a) | 9ec7bbe8 | `runtime/engine_init_resolver.cpp` | `":4096:8"` x3 `setenv` + 1 log string -> file-local `kCublasDeterministicWorkspace`; log prints it via `%s` (same text) | +8 / -4 | row confirmed at `:105`, `:396`, `:850-851`; `tests/*.cpp` + `tools/` copies out of the row | applied |
+| H-031 (b) | fab470d8 | `compute/preamble_gate.h`, 4 constrainer headers, `runtime/constraint_manager.cpp` | `8192` -> `kThinkPreambleBudget` (`int`) at 4 `constraint_manager.cpp` sites + 4 `set_preamble` default args | +11 / -8 | row confirmed at `:78,230,290,325`; the 4 default args are the same value; `preamble_gate.h` already included by all 4 constrainer headers | applied |
+| H-032 | 0431193f | new `compute/fp4_attn_geometry.h`; `exec/workspace_sizes.cpp`, `compute/attention_apa.cu`, `attention_ra2.cu` | literals of `exec_apa_workspace_bytes` / `exec_ra2_workspace_bytes` -> named `size_t` constants; 6 `static_assert`s against `apa::BKV`, `STATS_TILES`, `Launch<128>::NW`, `Cfg<128>::TILE`, `ra2::BKV`, `ra2::Cfg<64/128/256>::TILE` | +46 / -5 | vendored `compute/apa/`, `compute/ra2/` untouched ("change there first"); mutation `kApaWarpsHd128 = 13`, `kRa2TileBytesExtra = 17`: build fails with 4 static assertion errors | applied (compile-time check instead of moving the GPU-lane test) |
+
+| SASS check (no GPU) | imp:b4-final | imp:b5-branch | result |
+|---|---|---|---|
+| per-kernel rows, imp-server / imp-cli / imp-quantize (`sass_dump.sh`: sha1 of each function body without addresses and encodings) | 1023 / 1023 / 1025 | 1023 / 1023 / 1025 | identical |
+| diff of the (kernel, arch, hash) tables | - | 0 / 0 / 0 lines | identical |
+| hash tool discriminates | - | 1014 / 1014 / 1016 distinct hashes, 0 empty bodies | - |
+| `compute_120f` PTX | not compared | not compared | validator |
+
+| finding / skip | evidence | proposed next step |
+|---|---|---|
+| C-033 rest | see row | owner call: one cached SM-count query in `src/core/` keeping each caller's failure fallback |
+| `HeadScale` size `bhk * 12` in both workspace functions | 3 floats, not in H-032 | leave, or `sizeof` of a host mirror struct |
+| comment in `tests/test_attention_ra2.cu:135` says "CPU lane" | the test sits in `test-attention`, a GPU binary | doc fix in a later batch |
+| GPU-only checks | no GPU in this batch | validator: test-gpu (`*ApaPrefill*`, `*Ra2*`, `*Constrain*`, dp4a GEMV), reference dumps, PTX diff |
+
+## 2026-10-15 Phase 4 B5 (validator, re-run)
+
+B5 merged with main `58263bb4` (head `1f53d0fa`; `constraint_manager.cpp` conflict resolved to `kThinkPreambleBudget` + `rewind()`), image `imp:b5-rebased`; paired control `imp:main-ctrl3` (main `58263bb4`). Suites interleaved B5, main, B5, main, B5, main. Verdict: all gates PASS.
+
+| gate | main control | B5 | result |
+|---|---|---|---|
+| build warnings | 13 | 13, diff empty | PASS |
+| SASS hash per kernel, imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 | diff 0 / 0 / 0 | PASS |
+| `make test-gpu` | 3/3 green, 3700 `[ RUN ]` each | 3/3 green, 3700 `[ RUN ]` each | PASS |
+| `DeviceFaultSignalTest.FaultInside...` | OK 3/3 | OK 3/3 | PASS |
+| reference dumps vs the Phase 3 baseline | - | 15/15 identical (run 1 and run 2); run 1 = run 2 | PASS |
+| decode tg256 pooled median, paired run, n=10 | 368.24 tok/s (spread 8.13 %) | 371.18 (+0.80 %, spread 0.96 %) | PASS |
+| prefill pp512 / pp2048, paired run | 30329 / 48168 | 30189 / 48789 | PASS (pp512 -0.46 %, main spread 8.64 %) |
+
+## 2026-10-15 Phase 4 B5 (orchestrator decision, re-run)
+
+| item | decision | why |
+|---|---|---|
+| B5 (H-029, C-032, C-033 rename part, C-034, H-031, H-032) | ship | re-run gates above; the first FAIL is attributed to the `DeviceFaultSignalTest` timing flake (isolated failures on 4 images without B5 (`imp:b1-final`..`imp:b4-final`), 0/6 suites here) |
+| `DeviceFaultSignalTest` timing flake | stays open | no repro in 6 suites + 160 isolated runs; exit 7 and exit 8 modes unexplained |
+
 ## 2026-10-15 Phase 4 B9 (builder)
 
 Branch `cleanup/b9-tools-discards` off `origin/main` 58263bb4, code head f1e539dc. Compile + CPU only, no GPU run. `make build DOCKER_IMG=imp:b9-branch`: 13 unique warning lines (`imp:b9-main` 58263bb4: 13), diff empty. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight` (256 static gates ok). Code diff: 9 files, +261 / -272.
