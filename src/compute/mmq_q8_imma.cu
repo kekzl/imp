@@ -225,14 +225,12 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_kernel(
 #pragma unroll
                 for (int mf = 0; mf < kMF; ++mf) {
                     int32_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
-#if __CUDA_ARCH__ >= 800
                     asm volatile(
                         "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
                         "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
                         : "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3)
                         : "r"(a[mf][0]), "r"(a[mf][1]), "r"(a[mf][2]), "r"(a[mf][3]), "r"(b0), "r"(b1),
                           "r"(0), "r"(0), "r"(0), "r"(0));
-#endif
                     if (WB) {
                         acc[mf][nf][0] += da_lo[mf] * fmaf(al, static_cast<float>(c0), bl * rs_lo[mf]);
                         acc[mf][nf][1] += da_lo[mf] * fmaf(ah, static_cast<float>(c1), bh * rs_lo[mf]);
