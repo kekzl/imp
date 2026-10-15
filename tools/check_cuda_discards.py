@@ -21,7 +21,8 @@ import tempfile
 from collections import Counter
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-SCAN_DIRS = ("src", "tools/imp-server")  # imp-server: H-017
+# imp-server: H-017; imp-bench, imp-quantize, imp-cli: B9.
+SCAN_DIRS = ("src", "tools/imp-server", "tools/imp-bench", "tools/imp-quantize", "tools/imp-cli")
 ALLOWLIST = REPO / "tools" / "cuda_discard_allowlist.txt"
 SUFFIXES = (".cpp", ".cu", ".h", ".cuh")
 # Ratchet: lower with every fix, never raise.
@@ -31,6 +32,7 @@ ZERO_DIRS = (
     "src/runtime/", "src/memory/",
     "src/core/", "src/quant/", "src/model/", "src/vision/", "src/lora/", "src/api/",
     "src/compute/", "src/exec/", "tools/imp-server/",
+    "tools/imp-bench/", "tools/imp-quantize/", "tools/imp-cli/",
 )
 
 CALL = re.compile(r"^[ \t]*(?:cuda|cublas)[A-Z][A-Za-z0-9_]*[ \t]*\(")
@@ -142,6 +144,7 @@ def selftest() -> int:
         ({"src/memory/m.cpp": [(1, "cudaFree")]}, "1 src/memory/m.cpp\n", 1),
         ({"src/memory/m.cpp": [(1, "cudaFree")]}, "1 src/memory/m.cpp # sticky clear\n", 0),
         ({"src/b.cu": [(1, "cudaFree")] * (CEILING + 1)}, f"{CEILING + 1} src/b.cu\n", 1),
+        ({"tools/imp-bench/b.cu": [(1, "cudaFree")]}, "1 tools/imp-bench/b.cu\n", 1),
     ]
     for hits, text, want in allow_cases:
         allow, errs = load_allowlist(text)
@@ -151,12 +154,16 @@ def selftest() -> int:
             bad += 1
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
-        for rel in ("src/a/k.cu", "tools/imp-server/h.cpp", "tools/imp-bench/b.cpp"):
+        want_files = [
+            "src/a/k.cu", "tools/imp-bench/b.cu", "tools/imp-cli/c.cpp",
+            "tools/imp-quantize/q.cpp", "tools/imp-server/h.cpp",
+        ]
+        for rel in (*want_files, "tools/standalone/s.cu"):
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             (root / rel).write_text("cudaFree(p);\n", encoding="utf-8")
         got_files = sorted(scan(root))
-        if got_files != ["src/a/k.cu", "tools/imp-server/h.cpp"]:
-            print(f"selftest: scanned {got_files}, want src/ and tools/imp-server/ only")
+        if got_files != want_files:
+            print(f"selftest: scanned {got_files}, want {', '.join(SCAN_DIRS)} only")
             bad += 1
     total = len(cases) + len(allow_cases) + 1
     print(f"selftest: {total - bad}/{total} cases ok")
