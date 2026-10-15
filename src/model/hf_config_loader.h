@@ -42,15 +42,6 @@ struct HFConfigLoader {
     // Returns empty string if not found.
     static std::string load_chat_template(const std::string& model_dir);
 
-    // Load added_tokens from tokenizer_config.json.
-    // Returns pairs of (token_string, special_flag).
-    struct AddedToken {
-        std::string content;
-        bool special = false;
-        int id = -1;
-    };
-    static std::vector<AddedToken> load_added_tokens(const std::string& model_dir);
-
     // Authoritative special-token declarations from special_tokens_map.json. tokenizer.json's
     // special:true flag is normally a faithful copy but conversions can drop it; cross-checking
     // patches the gap before the engine builds its banned-token list.
