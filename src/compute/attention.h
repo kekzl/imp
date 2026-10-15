@@ -18,7 +18,4 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
                                 const DispatchPolicy& rcfg, int q_offset = 0,
                                 const half* attn_sinks = nullptr);
 
-// Query the compute capability of the current device.
-int get_device_sm_version();
-
 }  // namespace imp
