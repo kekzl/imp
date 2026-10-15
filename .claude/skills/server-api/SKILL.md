@@ -91,7 +91,7 @@ make test-rerank; make test-agents; make test-agents-external   # aider, Claude 
 - The mock lane runs the nomodel tests too: a new contract test must be lane-agnostic AND `tests/api/mock_server.py` must mirror the contract (X-Request-Id echo cost a red `Mock API contract` on #1803).
 - `--log-requests`: bind-mount a DIRECTORY (`-v dir:/out`); a single-file bind mount stays at 0 bytes.
 - `imp-cli --version` does not exist (usage, rc=1): a control arm on it distinguishes nothing; bare `imp-cli` validates `--set` keys before the load (`no such key`).
-- Browser-driven checks: no Chrome on the host; `docker run --rm --network host -e PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 -e HOME=/sp -v "$PWD":/work:ro -v /tmp/<scratch>:/sp -v /tmp/<scratch>/shots:/out -w /sp mcr.microsoft.com/playwright:v1.56.0-noble sh -c 'npm i --silent playwright@1.56.0 && node /sp/script.mjs'`; assert on the DOM.
+- Browser-driven checks: no Chrome on the host; `docker run --rm --network host -e HOME=/sp -v "$PWD":/work:ro -v /tmp/<scratch>:/sp -v /tmp/<scratch>/shots:/out -w /sp mcr.microsoft.com/playwright/python:v1.55.0-noble sh -c 'pip install -q playwright==1.55.0 && python /sp/script.py'` (sync API); assert on the DOM. Ready-made runner: `tools/imp-server/webui/dev/drive.py`.
 
 ## Diagnostic fingerprints
 
