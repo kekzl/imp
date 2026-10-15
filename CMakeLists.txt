@@ -37,8 +37,9 @@ include(imp-deps)  # third-party dependency pins (single source; mirrored by Doc
 # imp target (lib, tools, server, tests) so warnings apply to OUR host C++ TUs
 # only — never nvcc, never FetchContent deps. (Was a global CMAKE_CXX_FLAGS.)
 add_library(imp_warnings INTERFACE)
+# -Wshadow: 0 g++ findings across first-party host TUs (DISPATCH_cleanup B8); nvcc TUs excluded.
 target_compile_options(imp_warnings INTERFACE
-    $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>)
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-Wshadow>)
 # #2211: a dropped [[nodiscard]] status is a build error. nvcc front end: diag 2809.
 target_compile_options(imp_warnings INTERFACE
     $<$<COMPILE_LANGUAGE:CXX>:-Werror=unused-result>
