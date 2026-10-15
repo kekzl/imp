@@ -286,15 +286,15 @@ bool device_args_done = false;
             const auto& da = da_cache;
             ok = run_staged_blocks_(
                 layer, stream, ctx,
-                [&](ExpertProj p, int e0, int n) {
+                [&](ExpertProj p, int e0, int n_ex) {
                     if (p == ExpertProj::Gate)
                         return dispatch_device(ly.expert_gate_ids, da.d_gate_B_ptrs, da.d_gate_SFB_ptrs,
-                                               da.d_gate_alpha, expert_gate_base, d, eff, e0, n);
+                                               da.d_gate_alpha, expert_gate_base, d, eff, e0, n_ex);
                     if (p == ExpertProj::Up)
                         return dispatch_device(ly.expert_up_ids, da.d_up_B_ptrs, da.d_up_SFB_ptrs,
-                                               da.d_up_alpha, expert_up_base, d, eff, e0, n);
+                                               da.d_up_alpha, expert_up_base, d, eff, e0, n_ex);
                     return dispatch_device(ly.expert_down_ids, da.d_down_B_ptrs, da.d_down_SFB_ptrs,
-                                           da.d_down_alpha, expert_down_base, eff, d, e0, n);
+                                           da.d_down_alpha, expert_down_base, eff, d, e0, n_ex);
                 },
                 [&] {
                     fused_act_quantize_device(non_gated_experts ? nullptr : expert_gate_base, expert_up_base,

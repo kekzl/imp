@@ -654,9 +654,9 @@ bool Tokenizer::load(const std::string& path) {
         nfc_ = nt == "NFC";
         const JValue* seq = nt == "Sequence" ? jobj_find(*norm, "normalizers") : nullptr;
         if (seq && seq->type == JType::ARRAY) {
-            for (const auto& n : seq->arr) {
+            for (const auto& entry : seq->arr) {
                 std::string inner;
-                if (n.type == JType::OBJECT && jobj_get_string(n, "type", inner) && inner == "NFC")
+                if (entry.type == JType::OBJECT && jobj_get_string(entry, "type", inner) && inner == "NFC")
                     nfc_ = true;
             }
         }

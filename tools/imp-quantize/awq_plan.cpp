@@ -470,7 +470,7 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
         // X needs a norm that feeds only the experts (pre_feedforward_layernorm_2); elsewhere the
         // expert input norm also feeds the router and the expert gate/up stay round-to-nearest.
         const auto has_group = [](const std::vector<FoldSite>& s, char g) {
-            return std::any_of(s.begin(), s.end(), [g](const FoldSite& f) { return f.group == g; });
+            return std::any_of(s.begin(), s.end(), [g](const FoldSite& fs) { return fs.group == g; });
         };
         if (has_group(all, 'Y') && !has_group(all, 'X'))
             moe_gate_up_rtn++;

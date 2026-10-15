@@ -705,7 +705,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             // Sandwich norm with FP32 accumulator (Gemma-3):
             // FP32 residual += attn_out, then post_attn_norm → FP16 hidden.
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
-            float eps = model_->config().rms_norm_eps;
+            float post_eps = model_->config().rms_norm_eps;
             if (layer == 0 && debug_attn_steps) {
                 IMP_LOG_DEBUG("[DEBUG_FWD] L0 fp32_accum_kernel: po=%p h=%p fp32_h=%p d=%d n=%d", po.data,
                               h.data, fp32_h.data, model_->config().d_model, n);
@@ -749,7 +749,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             rmsnorm_fp32_accum_to_fp16(static_cast<const half*>(po.data),
                                        static_cast<const half*>(ly.post_attn_norm.data),
                                        static_cast<float*>(fp32_h.data), static_cast<half*>(h.data), n,
-                                       model_->config().d_model, eps, norm_w_off_, stream);
+                                       model_->config().d_model, post_eps, norm_w_off_, stream);
             if (layer == 0 && debug_attn_steps) {
                 debug_tensor_stats_all("L0_post_fp32accum_h", view_tokens(h, n), stream);
             }

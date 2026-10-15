@@ -205,8 +205,8 @@ TEST_P(DetEvalE2ETest, DISABLED_PerplexityBitIdenticalAcrossFreshContexts) {
 }
 
 INSTANTIATE_TEST_SUITE_P(Models, DetEvalE2ETest, ::testing::ValuesIn(det_models()),
-                         [](const ::testing::TestParamInfo<DetModel>& info) {
-                             return std::string(info.param.label);
+                         [](const ::testing::TestParamInfo<DetModel>& param_info) {
+                             return std::string(param_info.param.label);
                          });
 
 }  // namespace

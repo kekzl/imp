@@ -648,15 +648,15 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
             tokens.resize(n_tokens);
             total_prompt_tokens += n_tokens;
 
-            auto req = std::make_shared<imp::Request>();
-            req->input_tokens = std::move(tokens);
-            req->max_tokens = 1;
-            req->temperature = 0.0f;
-            req->stream = false;
-            req->embedding_request = true;
-            req->status = imp::RequestStatus::PENDING;
+            auto embed_req = std::make_shared<imp::Request>();
+            embed_req->input_tokens = std::move(tokens);
+            embed_req->max_tokens = 1;
+            embed_req->temperature = 0.0f;
+            embed_req->stream = false;
+            embed_req->embedding_request = true;
+            embed_req->status = imp::RequestStatus::PENDING;
             auto sr = std::make_shared<ServerRequest>();
-            sr->request = req;
+            sr->request = embed_req;
             state.batching->submit(sr);
             submitted.push_back(std::move(sr));
         }
