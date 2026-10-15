@@ -13,6 +13,7 @@
 #include "compute/weight_dispatch.h"
 #include "core/tensor_kind.h"
 #include "core/logging.h"
+#include "core/sm120_limits.h"
 #include "compute/gemm.h"
 #include "compute/gemm_cutlass_mxfp8_sm120.h"
 #include "compute/gemm_q4k.h"
@@ -694,12 +695,11 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             if (qs && qs->q8_1_prefill_buf && qs->d8_prefill_buf) {
                 int N = static_cast<int>(h.shape[0]);
                 int K = static_cast<int>(h.shape[1]);
-                constexpr size_t kSmemLimit = 101376;
                 size_t smem_needed = static_cast<size_t>(16) * (K / 32) * 36;
                 size_t needed_q8 = static_cast<size_t>(M) * ((K + 31) / 32) * sizeof(block_q8_1);
                 size_t needed_d8 = static_cast<size_t>(M) * ((K + 31) / 32) * sizeof(float);
-                if (smem_needed <= kSmemLimit &&
-                    needed_q8 <= qs->q8_1_prefill_bytes && needed_d8 <= qs->d8_prefill_bytes) {
+                if (smem_needed <= kSm120SmemOptinBytes && needed_q8 <= qs->q8_1_prefill_bytes &&
+                    needed_d8 <= qs->d8_prefill_bytes) {
                     if (h.source_qtype == QType::Q4_K) {
                         gemm_q4k_dp4a_dense(h.source_data,
                                             reinterpret_cast<const half*>(input.data),

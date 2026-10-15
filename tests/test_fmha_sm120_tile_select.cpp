@@ -5,7 +5,7 @@
 using namespace imp;
 
 namespace {
-constexpr size_t kSm120Smem = 101376;  // cudaDevAttrMaxSharedMemoryPerBlockOptin on sm_120
+constexpr size_t kSm120Smem = kSm120SmemOptinBytes;
 }  // namespace
 
 // #2243: the old selector reached (Bq>=32, HD512) and (Bq16, HD256) off sm_120; neither has a kernel.
