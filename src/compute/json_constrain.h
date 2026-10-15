@@ -145,7 +145,7 @@ public:
     // close-token mode (reasoning models with </think>); close_token<0 + max_tokens>0 enables
     // budget-only mode (markdown-fence preambles). Both modes also exit on the first `{`/`[` seen.
     // Pass close_token=-1 with max_tokens<=0 to fully disable.
-    void set_preamble(int32_t close_token, int max_tokens = 8192, bool thinking_open = true) {
+    void set_preamble(int32_t close_token, int max_tokens = kThinkPreambleBudget, bool thinking_open = true) {
         preamble_.configure(close_token, max_tokens, thinking_open);
     }
 

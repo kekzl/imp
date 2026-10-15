@@ -34,6 +34,9 @@ namespace imp {
 
 namespace {
 
+// CUBLAS_WORKSPACE_CONFIG for deterministic cuBLAS: 8 workspaces of 4096 KiB.
+constexpr const char kCublasDeterministicWorkspace[] = ":4096:8";
+
 // Crude pre-upload weight-footprint estimate (weights are still host/mmap at
 // resolver time, so cudaMemGetInfo reports the near-empty card). Shared by
 // the auto max_batch_size and auto max_seq_len resolvers.
@@ -102,7 +105,7 @@ void Engine::init_apply_debug_raw_overrides_() {
     runtime_config_.runtime.deterministic_gemm = true;
     // CUBLAS_WORKSPACE_CONFIG is read by cuBLAS itself, not by imp, so this one
     // stays an environment variable.
-    setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
+    setenv("CUBLAS_WORKSPACE_CONFIG", kCublasDeterministicWorkspace, 0);
     // MoE: no expert LRU cache (state-carrying)
     runtime_config_.moe.no_expert_cache = true;
     // GDN: reference unfused scan (no register-state reordering); config key
@@ -393,7 +396,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
         // RuntimeConfig.
         runtime_config_.runtime.deterministic_gemm = true;
         process_diag_set_deterministic_gemm(true);
-        setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
+        setenv("CUBLAS_WORKSPACE_CONFIG", kCublasDeterministicWorkspace, 0);
         IMP_LOG_INFO(
             "FP8 KV cache: forcing runtime.deterministic_gemm=true "
             "(non-deterministic cuBLAS + FP8 round-trip → NaN). "
@@ -847,8 +850,9 @@ void Engine::init_resolve_quant_flags_() {
                 "Gemma 4: enabling runtime.deterministic_gemm (output_norm outliers amplify algo jitter)");
         }
         if (!getenv("CUBLAS_WORKSPACE_CONFIG")) {
-            setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 1);
-            IMP_LOG_INFO("Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic grouped GEMM");
+            setenv("CUBLAS_WORKSPACE_CONFIG", kCublasDeterministicWorkspace, 1);
+            IMP_LOG_INFO("Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=%s for deterministic grouped GEMM",
+                         kCublasDeterministicWorkspace);
         }
         // Enable MMVQ for all weight GEMMs: quantized matmul matching llama.cpp's
         // accumulation behavior, critical for 128-expert MoE precision.

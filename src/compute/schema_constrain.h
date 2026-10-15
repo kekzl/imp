@@ -220,7 +220,7 @@ public:
 
     // See JsonConstrainer::set_preamble for semantics — close-token mode for
     // reasoning models (</think>) or budget-only mode for markdown fences.
-    void set_preamble(int32_t close_token, int max_tokens = 8192, bool thinking_open = true) {
+    void set_preamble(int32_t close_token, int max_tokens = kThinkPreambleBudget, bool thinking_open = true) {
         preamble_.configure(close_token, max_tokens, thinking_open);
     }
 

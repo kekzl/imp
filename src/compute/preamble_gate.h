@@ -6,6 +6,9 @@
 
 namespace imp {
 
+// Think-close preamble cap: 8192 tokens before the FSM mask engages without a close token.
+inline constexpr int kThinkPreambleBudget = 8192;
+
 // Gate allowing a free-form preamble before strict JSON enforcement. Two axes:
 // think-close (close_token>=0) vs budget-only (close_token<0, max_tokens>0); tool-aware
 // (configure_with_tools) vs legacy.

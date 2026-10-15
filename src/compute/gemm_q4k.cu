@@ -8,6 +8,7 @@
 #include "compute/gemm_q4k.h"
 #include "compute/gemm.h"
 #include "core/logging.h"
+#include "core/sm120_limits.h"
 
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -377,8 +378,6 @@ __global__ void __launch_bounds__(CTA_THREADS, 1) gemm_qk_dp4a_dense_kernel(
 // Host launchers — dense dp4a
 // ---------------------------------------------------------------------------
 
-static constexpr size_t kDenseSmemLimit = 101376;  // sm_120 opt-in max dynamic smem
-
 static size_t dense_smem_bytes(int tile_m, int q8_per_row) {
     return static_cast<size_t>(tile_m) * q8_per_row * (32 + sizeof(float));
 }
@@ -386,7 +385,7 @@ static size_t dense_smem_bytes(int tile_m, int q8_per_row) {
 // Largest of 16 / 8 / 4 whose activation tile fits; 0 = none.
 static int dense_tile_m(int K) {
     for (int t : {16, 8, 4})
-        if (dense_smem_bytes(t, K / 32) <= kDenseSmemLimit)
+        if (dense_smem_bytes(t, K / 32) <= kSm120SmemOptinBytes)
             return t;
     return 0;
 }

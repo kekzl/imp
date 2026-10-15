@@ -16,6 +16,7 @@
 #include "core/cuda_static_reset.h"
 #include "core/cuda_errors.h"
 #include "core/logging.h"
+#include "core/sm120_limits.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -844,7 +845,7 @@ static int device_sm_count() {
         if (cudaGetDevice(&dev) == cudaSuccess &&
             cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev) == cudaSuccess && n > 0)
             return n;
-        return 170;
+        return kSm120SmCount;
     }();
     return sms;
 }

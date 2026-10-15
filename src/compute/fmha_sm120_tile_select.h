@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <initializer_list>
 
+#include "core/sm120_limits.h"
+
 // Tile selection for fmha_sm120_prefill (FP16 WMMA). Host-only and constexpr so the CPU unit lane
 // (tests/test_fmha_sm120_tile_select.cpp) covers it; the launcher switch instantiates exactly
 // kSm120FmhaTiles.
@@ -50,9 +52,9 @@ constexpr int sm120_fmha_select_bq(int head_dim, size_t max_smem) {
 }
 
 // sm_120 opt-in smem 101376 B: HD64 Bq64, HD96/128 Bq32 (occupancy 2), HD256 Bq32, HD512 Bq16.
-static_assert(sm120_fmha_select_bq(64, 101376) == 64, "HD64 on sm_120");
-static_assert(sm120_fmha_select_bq(128, 101376) == 32, "HD128 on sm_120");
-static_assert(sm120_fmha_select_bq(256, 101376) == 32, "HD256 on sm_120");
-static_assert(sm120_fmha_select_bq(512, 101376) == 16, "HD512 on sm_120");
+static_assert(sm120_fmha_select_bq(64, kSm120SmemOptinBytes) == 64, "HD64 on sm_120");
+static_assert(sm120_fmha_select_bq(128, kSm120SmemOptinBytes) == 32, "HD128 on sm_120");
+static_assert(sm120_fmha_select_bq(256, kSm120SmemOptinBytes) == 32, "HD256 on sm_120");
+static_assert(sm120_fmha_select_bq(512, kSm120SmemOptinBytes) == 16, "HD512 on sm_120");
 
 }  // namespace imp

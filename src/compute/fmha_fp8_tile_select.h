@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "core/sm120_limits.h"
+
 // Tile selection for fmha_sm120_fp8_prefill. Host-only and constexpr so the CPU unit lane
 // (tests/test_fmha_fp8_tile_select.cpp) covers it; the launcher instantiates exactly kFp8FmhaTiles.
 
@@ -67,7 +69,7 @@ constexpr bool every_tile_is_a_candidate() {
 static_assert(fp8_fmha_detail::every_tile_is_a_candidate(),
               "kFp8FmhaTiles has a Bq the selector never tries");
 // sm_120 opt-in smem is 101376 B: HD64 has no Bq=128 instance, so it takes Bq=64 (#2195).
-static_assert(fp8_fmha_select_bq(64, 64, 101376) == 64, "HD64 must select its Bq=64 instance");
-static_assert(fp8_fmha_select_bq(96, 64, 101376) == 0, "HD96 has no FP8 instance");
+static_assert(fp8_fmha_select_bq(64, 64, kSm120SmemOptinBytes) == 64, "HD64 must select its Bq=64 instance");
+static_assert(fp8_fmha_select_bq(96, 64, kSm120SmemOptinBytes) == 0, "HD96 has no FP8 instance");
 
 }  // namespace imp

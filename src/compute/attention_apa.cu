@@ -1,6 +1,7 @@
 #include "compute/attention_apa.h"
 
 #include "compute/apa/apa.cuh"
+#include "compute/fp4_attn_geometry.h"
 #include "core/cuda_static_reset.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
@@ -10,6 +11,12 @@
 #include <vector>
 
 namespace imp {
+
+// exec_apa_workspace_bytes (workspace_sizes.cpp) sizes apa::carve from fp4_attn_geometry.h.
+static_assert(fp4_attn_geom::kKvTileTokens == static_cast<size_t>(apa::BKV));
+static_assert(fp4_attn_geom::kApaStatsTiles == static_cast<size_t>(apa::STATS_TILES));
+static_assert(fp4_attn_geom::kApaWarpsHd128 == static_cast<size_t>(apa::Launch<128>::NW));
+static_assert(fp4_attn_geom::kApaTileBytesPerD * 128 == static_cast<size_t>(apa::Cfg<128>::TILE));
 
 // T2 arena scratch (AUDIT B13 family), taken once at the planned bound (exec_t2_demand apa_scratch);
 // unplanned it grows, and a bump arena keeps each old slice valid inside a captured graph. Arena
