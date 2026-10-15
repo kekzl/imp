@@ -1,5 +1,6 @@
 #pragma once
 
+#include "model/generation_config.h"
 #include "model/model_config.h"
 #include "model/model_arch.h"
 
@@ -23,16 +24,8 @@ struct HFConfigLoader {
     [[nodiscard]] static bool load_config(const std::string& model_dir, ModelConfig& cfg,
                             std::unique_ptr<VisionModel>* out_vision_tower = nullptr);
 
-    // Sampling/stop-condition defaults from generation_config.json. Sentinels mean "not
-    // present": <0 for floats, -1 for ints, empty vector for eos. Caller falls back to arch
-    // defaults or the hardcoded ImpGenerateParams baseline.
-    struct GenerationConfig {
-        float temperature = -1.0f;
-        float top_p = -1.0f;
-        int top_k = -1;
-        float repetition_penalty = -1.0f;
-        std::vector<int32_t> eos_token_ids;
-    };
+    // Defined in model/generation_config.h; model.h holds it by value without this header.
+    using GenerationConfig = imp::GenerationConfig;
 
     // Load generation_config.json. Returns true if file found and parsed.
     // Only fields present in the JSON are populated; the rest stay at sentinel.

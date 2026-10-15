@@ -2,7 +2,7 @@
 
 #include "memory/host_pinned.h"
 #include "memory/upload_reserve.h"
-#include "model/hf_config_loader.h"
+#include "model/generation_config.h"
 #include "model/model_config.h"
 #include "model/model_profile.h"
 #include "model/mtp_head.h"
@@ -43,7 +43,7 @@ public:
     // Sampling/EOS defaults shipped by the model author in
     // generation_config.json (SafeTensors only; empty for GGUF). Sentinel
     // values (<0) mean the field was not present.
-    const HFConfigLoader::GenerationConfig& generation_config() const { return generation_config_; }
+    const GenerationConfig& generation_config() const { return generation_config_; }
     // C++23 deducing this: one overload serves const and non-const callers.
     template <typename Self>
     auto&& layer(this Self&& self, int i) {
@@ -113,7 +113,7 @@ public:
 
     ModelConfig config_;
     ModelProfile profile_;
-    HFConfigLoader::GenerationConfig generation_config_;
+    GenerationConfig generation_config_;
     Tensor tok_emb_, out_norm_, out_proj_;
     Tensor out_proj_row_scales_;
     // Qwen4Exp: the final hyper-connection mixer folds the hc_count streams back to d_model
