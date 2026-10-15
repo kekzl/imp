@@ -176,8 +176,6 @@ bool anthropic_tool_result_unreadable(const json& block, std::string& why) {
     return false;
 }
 
-}  // namespace
-
 // system field allowlist matches flatten_system: string, or array of text blocks; other shapes
 // silently become "" and the whole system prompt is lost.
 bool anthropic_system_unreadable(const json& system_field, std::string& why) {
@@ -201,6 +199,8 @@ bool anthropic_system_unreadable(const json& system_field, std::string& why) {
     }
     return false;
 }
+
+}  // namespace
 
 bool anthropic_unreadable_block(const json& body, std::string& why) {
     if (body.contains("system") && anthropic_system_unreadable(body["system"], why))

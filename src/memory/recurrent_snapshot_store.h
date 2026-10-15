@@ -50,7 +50,10 @@ inline std::span<const KvChainLink> restore_chain_of(const std::shared_ptr<const
 // in-flight restore goes straight into the host tier (save_to_host_).
 class RecurrentSnapshotStore {
 public:
+    RecurrentSnapshotStore() = default;
     ~RecurrentSnapshotStore();
+    RecurrentSnapshotStore(const RecurrentSnapshotStore&) = delete;
+    RecurrentSnapshotStore& operator=(const RecurrentSnapshotStore&) = delete;
 
     // entry_bytes: size of one snapshot (the SSM per-seq slab).
     // budget_bytes: total device memory cap; capacity = budget / entry_bytes.

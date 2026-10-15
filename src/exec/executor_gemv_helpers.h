@@ -8,8 +8,8 @@
 namespace imp {
 
 // Residual-fused GEMV dispatch by quant type: y[i] = dot(W[i], x) + residual[i].
-// Shared by executor_attention.cu and executor_ffn.cu.
-static void dispatch_gemv_residual(QType qtype, const void* W, const block_q8_1* q8_1, const float* d8,
+// Shared by executor_attention.cpp, executor_ffn.cu, executor_forward.cu and executor_perplexity.cu.
+inline void dispatch_gemv_residual(QType qtype, const void* W, const block_q8_1* q8_1, const float* d8,
                                    half* y, const half* residual, int M, int K, cudaStream_t stream) {
     switch (qtype) {
         case QType::Q6_K:

@@ -69,7 +69,7 @@ void cmyk_inverted_to_rgb(const uint8_t* in, uint8_t* out, int n) {
 
 // No automatic objects with destructors live in this frame: longjmp skips none.
 bool decode_jpeg(std::span<const uint8_t> data, DecodedImage& out, std::vector<uint8_t>& cmyk_row) {
-    jpeg_decompress_struct c;
+    jpeg_decompress_struct c{};
     JpegErr err{};
     jpeg_progress_mgr progress{};
     c.err = jpeg_std_error(&err.mgr);

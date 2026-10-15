@@ -74,9 +74,11 @@ int batch_verify_spare_slots(const RuntimeConfig& cfg, const Model* model, int m
     return max_batch_size;
 }
 
+namespace {
 bool ensure_factored_rows(RuntimeConfig& cfg, const ModelConfig& mc, SSMState* ssm, VRAMAllocator& alloc,
                           BatchVerifyState& bv, cudaStream_t stream);
 void free_factored_rows(VRAMAllocator& alloc, BatchVerifyState& bv);
+}  // namespace
 
 bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
     if (!batch_verify_wants_bufs(runtime_config_, model_.get(), config_.max_batch_size))
@@ -125,6 +127,7 @@ bool factored_spare_active(const RuntimeConfig& cfg, const BatchVerifyState& bv)
     return cfg.speculative.factored_spare && bv.d_fac != nullptr;
 }
 
+namespace {
 bool ensure_factored_rows(RuntimeConfig& cfg, const ModelConfig& mc, SSMState* ssm, VRAMAllocator& alloc,
                           BatchVerifyState& bv, cudaStream_t stream) {
     if (!cfg.speculative.factored_spare || bv.d_fac != nullptr)
@@ -193,6 +196,7 @@ void free_factored_rows(VRAMAllocator& alloc, BatchVerifyState& bv) {
     bv.h_pending = PinnedBuffer{};
     bv.h_clear = PinnedBuffer{};
 }
+}  // namespace
 
 void Engine::free_batch_verify_bufs_() {
     if (bv_.d_stage)
