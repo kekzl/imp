@@ -72,3 +72,9 @@ Branch `cleanup/b1-ownership-odr` off `origin/main` 8d4c4148. Compile only, no G
 | H-024 skip: `bench_e2e` | `tools/imp-bench/main.cpp:21` declares and calls it from another TU | a `bench_e2e.h` header (out of scope) |
 | H-024 skip: `PrefixCacheHeader` | `memory/kv_cache_manager.cpp` code LOC 1425 = its filesize ceiling; the wrap adds 2 | with the next shrink of that file |
 | H-024 kept external | `gemm_reset_static_cuda_state`, `gemm_grouped_reset_static_cuda_state`, `qwen3vl_encoder_reset_static_cuda_state` | SETTLED R-11 |
+
+## 2026-10-15 Phase 4 B1 (orchestrator decision)
+
+| row | decision | why |
+|---|---|---|
+| H-018 `MoeRoutingBuffers` | GO: move ops (free own pool, take the source's, null the source), copy ops deleted | the builder's finding: `ws = MtpDraftWorkspace{}` fell back to the implicit copy; with a live pool that leaks the target pool and double-frees the source's. Current callers move empty pools only, so outputs are unchanged; `make build` green |

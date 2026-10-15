@@ -9,6 +9,7 @@
 #include <cfloat>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 namespace imp {
 
@@ -520,6 +521,24 @@ void MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
     ptr += scratch_sz;
     token_to_expanded = reinterpret_cast<int32_t*>(ptr);
     ptr += t2e_sz;
+}
+
+MoeRoutingBuffers& MoeRoutingBuffers::operator=(MoeRoutingBuffers&& o) noexcept {
+    if (this == &o)
+        return *this;
+    free();
+    pool = std::exchange(o.pool, nullptr);
+    pool_size = std::exchange(o.pool_size, 0);
+    expert_indices = std::exchange(o.expert_indices, nullptr);
+    expert_weights = std::exchange(o.expert_weights, nullptr);
+    sorted_token_ids = std::exchange(o.sorted_token_ids, nullptr);
+    expert_offsets = std::exchange(o.expert_offsets, nullptr);
+    permute_scratch = std::exchange(o.permute_scratch, nullptr);
+    token_to_expanded = std::exchange(o.token_to_expanded, nullptr);
+    max_tokens = std::exchange(o.max_tokens, 0);
+    max_experts = std::exchange(o.max_experts, 0);
+    top_k = std::exchange(o.top_k, 0);
+    return *this;
 }
 
 void MoeRoutingBuffers::free() {

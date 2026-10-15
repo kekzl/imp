@@ -2,6 +2,7 @@
 
 #include "core/tensor.h"
 #include <cuda_runtime.h>
+#include <utility>
 #include <vector>
 
 namespace imp {
@@ -35,6 +36,12 @@ struct MoeRoutingBuffers {
 
     void allocate(int max_tokens, int max_experts, int top_k);
     void free();
+    MoeRoutingBuffers() = default;
+    // Owns pool: no copies (a copy double-frees, H-018); a move takes the pool and empties the source.
+    MoeRoutingBuffers(const MoeRoutingBuffers&) = delete;
+    MoeRoutingBuffers& operator=(const MoeRoutingBuffers&) = delete;
+    MoeRoutingBuffers(MoeRoutingBuffers&& o) noexcept { *this = std::move(o); }
+    MoeRoutingBuffers& operator=(MoeRoutingBuffers&& o) noexcept;
     ~MoeRoutingBuffers();
 };
 
