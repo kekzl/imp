@@ -2,6 +2,7 @@
 #include "model/model_arch.h"
 #include "model/arch_registry.h"
 #include "model/ngram_table.h"
+#include "model/tokenizer.h"
 #include "core/logging.h"
 #include "memory/mem_account.h"  // trim_device_mempool
 #include "memory/weight_snapshot.h"
@@ -20,6 +21,8 @@
 namespace imp {
 
 Model::Model() = default;
+
+void Model::set_tokenizer(std::unique_ptr<Tokenizer> tok) { tokenizer_ = std::move(tok); }
 
 Model::~Model() {
     // #834: free with cudaFreeAsync, not cudaFree - on this stack (CUDA 13.3/WSL2) cudaFree on

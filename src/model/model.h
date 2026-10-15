@@ -6,7 +6,6 @@
 #include "model/model_config.h"
 #include "model/model_profile.h"
 #include "model/mtp_head.h"
-#include "model/tokenizer.h"
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -22,6 +21,8 @@ class WeightUploadLog;
 // so model/ has no header dependency on vision/.
 struct VisionModel;
 class NGramTable;
+// Held by unique_ptr only; set_tokenizer and ~Model are out of line (model.cpp).
+class Tokenizer;
 
 class Model {
 public:
@@ -65,7 +66,7 @@ public:
     int n_layers() const { return static_cast<int>(layers_.size()); }
 
     Tokenizer* tokenizer() const { return tokenizer_.get(); }
-    void set_tokenizer(std::unique_ptr<Tokenizer> tok) { tokenizer_ = std::move(tok); }
+    void set_tokenizer(std::unique_ptr<Tokenizer> tok);
 
     // Uploads mmap'd weights to GPU, dequantizing per dtype (Q4_0 unpacks to nibbles+scales on
     // GPU, Q8_0 dequants to FP16, F16/BF16 direct, F32 converts to compute_dtype). warm_cache
