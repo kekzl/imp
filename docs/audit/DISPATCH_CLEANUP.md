@@ -231,3 +231,32 @@ Branch head `e4b4134e`, image `imp:b1-final`, against the Phase 3 baseline `5a30
 |---|---|
 | imp-server binary | 42524880 -> 42440960 B (-83920, internal linkage) |
 | GPU lock | held for the whole run (08:35-08:53 local) |
+
+## 2026-10-15 Phase 4 B3 (builder)
+
+Branch `cleanup/b3-launch-checks` off `origin/main` b87b0364, head 32213359. Compile only, no GPU run. `make build DOCKER_IMG=imp:b3-branch`: 13 unique warning lines (main: 13), all in untouched `tests/*.cpp` and `stl_vector.h`, 0 in a changed file. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight` (final: 256 static gates ok). Branch diff: 23 files, +375 / -258.
+
+| row | files | change | lines +/- | result |
+|---|---|---|---|---|
+| C-014 | `core/pdl_launch.cuh` | `IMP_CUDA_CHECK_LAUNCH()` after the `<<<>>>` fallback (cudaPeekAtLastError, log-only, capture-safe) | +1 / -0 | applied, covers all 106 `pdl::launch` sites |
+| C-015 | `exec/executor_forward_moe_kernels.cuh`, `tools/check_launch_guards.py`, `scripts/ci_static_gates.sh` | gate collects `*.cu` + `*.cuh` (475 -> 500 launches), `--selftest` 7 cases; `IMP_CUDA_CHECK_LAUNCH` on `sanitize_fp16_kernel` | +53 / -5 | applied |
+| C-015 apa | `compute/apa/apa.cuh`, `tools/check_launch_guards.py` | vendored kekzl/apa v0.6.1: local patch reverted (7e445f93); file-level ALLOWLIST entry, its 2 `reset_stats_kernel` launches are checked by the `cudaPeekAtLastError` 5 lines below (gate window 4) | +4 / -5 | applied as allowlist; upstream fix needs orchestrator go |
+| H-016 | `core/cublas_check.h` (new), `compute/gemm.cpp`, `gemm_batched.cpp`, `gemm_grouped.cpp`, `gemm_gemv_dtype.cu`, `attention_cublas.cu`, `attention_mxfp4_prefill.cu`, `vision/vision_encoder.cu`, `qwen3vl_encoder.cpp`, `internvl_encoder.cpp`; `AUDIT.md` B14 citation | `IMP_CUBLAS_CHECK_LOG` on 79 sites; `(void)` + reason on 3 `cublasLtMatmulAlgoGetHeuristic` (status carried by `nresults`); file-local `CUBLASLT_CHECK` (10 uses) replaced | +215 / -179 | applied |
+| H-016 gate | `tools/check_cuda_discards.py`, `tools/cuda_discard_allowlist.txt`, `scripts/ci_static_gates.sh` | matcher `cuda<Upper>(` or `cublas<Upper>(`; selftest 22 -> 28; CEILING stays 1 | +14 / -8 | applied |
+| H-017 | `tools/imp-server/handlers_admin.cpp`, `tools/imp-bench/bench_e2e.cpp` | `IMP_CUDA_CHECK_LOG` on 2 `cudaMemGetInfo` + 19 bench_e2e calls (row line numbers shifted by B1 H-019) | +25 / -21 | applied |
+| H-017 gate | `tools/check_cuda_discards.py` | scan roots `src` + `tools/imp-server`; selftest 29; imp-server allowlist entries need a reason | +17 / -6 | applied |
+| H-008 | `tools/check_dead_inline_accessors.py`, `tools/dead_inline_allowlist.txt`, `scripts/ci_static_gates.sh` | wrapped signature joined (JOIN_MAX 8); `--selftest` 6 cases; 3 findings: 2 deleted, `apa.cuh:pass2` allowlisted (vendored public API) | +46 / -8 | applied |
+| H-008 dead code | `model/loader_assign.h`, `compute/ptx92_utils.cuh` | deleted `assign_quant_with_scales` (H-007, pulled from B4), `cvt_e4m3x4_to_f32x4`, its only callee `cvt_e4m3x2_to_f16x2` (all `inline` / `__forceinline__`, 0 callers) | +0 / -30 | applied; B4 drops H-007 |
+
+| gate | fixture | old gate | new gate |
+|---|---|---|---|
+| `check_launch_guards.py` | `src/bad.cuh`: `k<<<1, 32, 0, s>>>(p);` unguarded | rc 0, `0/0` scanned, OK | rc 1, `FAIL src/bad.cuh:3` |
+| `check_cuda_discards.py` (cuBLAS) | `src/compute/bad.cpp`: bare `cublasSetStream`, `cublasGemmEx` | rc 0, 0 found | rc 1, `2 discarded status > allowed 0 (lines 2,3)` |
+| `check_cuda_discards.py` (imp-server) | `tools/imp-server/bad.cpp`: bare `cudaMemGetInfo` | rc 0, 0 found | rc 1, `1 discarded status > allowed 0 (lines 3)` |
+| `check_dead_inline_accessors.py` | `src/x.h`: `inline void wrapped_dead(...,\n ...) {` | rc 0, 0 found | rc 1, `DEAD src/x.h:2 wrapped_dead()` |
+
+| finding / skip | evidence | proposed next step |
+|---|---|---|
+| apa.cuh is vendored ("change there first, then copy") | header line 4; edited in ddf4f20e, reverted in 7e445f93 | add a peek after `reset_stats_kernel` in kekzl/apa, re-vendor, drop the ALLOWLIST entry (a stale entry fails the gate) |
+| tools/ outside the discard gate | same matcher over `tools/imp-bench`, `imp-quantize`, `imp-cli`: 171 (bench_attention.cu 89, bench_gemm.cu 63, bench_q8_imma.cu 12, imp-quantize 7) | next batch |
+| GPU-only checks | no GPU in this batch | validator list in the B3 report |
