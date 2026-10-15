@@ -184,3 +184,22 @@ Clocks (1 Hz, samples at util >= 50 %): SM 2861..2918 MHz, mem 13801 MHz, 307..3
 | GPU lock | `gpu_lock.sh` keeper (TTL 4 h) expired between 00:24Z and 06:11Z (no job ran in that window); dumps for four models and the perf runs ran with a FREE busy check before every container but without the lock; re-acquired 06:16:55Z for the roofline, released after |
 | `imp-bench` | not in the image (`IMP_BUILD_BENCH=OFF`) |
 | cold `make build` | not measured (warm ccache) |
+
+## 2026-10-15 Phase 4 B2 (builder)
+
+Branch `cleanup/b2-stream-order` off `origin/main` 7462b738. Compile only, no GPU run. `make build DOCKER_IMG=imp:b2-branch`: 13 unique warning lines, main 13, diff empty. `make dev` green; `make dev-test` 13/13.
+
+| row | files | change | lines +/- | compile result |
+|---|---|---|---|---|
+| C-020 | `compute/sampling_penalties.cu`, `tests/test_sampling_advanced.cu` | fallback logit read: legacy `cudaMemcpy` -> `cudaMemcpyAsync(stream)` + `cudaStreamSynchronize(stream)`; new GPU test `SamplingAdvancedTest.LogitBiasFallbackReadsOnTheCallerStream` (host callback holds a non-blocking stream 20 ms before the logits land) | +33 / -3 | green |
+| C-021 | `exec/expert_cache.cu`, `exec/expert_cache.h`, `tools/sync_device_write_allowlist.txt` | `invalidate_host_state(cudaStream_t)`; `cudaMemset(d_lookup_)` -> `cudaMemsetAsync(..., stream)`; allowlist key count 2 -> 1 (the runtime site was classed `init`) | +4 / -5 | green |
+| C-022 | `compute/gemm.cpp` | FP8 fallback scale reads: 2x legacy `cudaMemcpy` -> static `read_gemm_scales` (2x `cudaMemcpyAsync(stream)` + `cudaStreamSynchronize(stream)`); helper keeps `gemm_cublaslt` CCN at 25 (inline version hit 26, ratchet #2210) | +12 / -5 | green |
+
+| finding / skip | evidence | proposed next step |
+|---|---|---|
+| C-020 reach | server default `--max-logit-bias` 1024 (`tools/imp-server/args.h:56`) < 4096 arena slots (`engine_workspace_warmup.cpp:261`): fallback only after an arena decline or `--max-logit-bias` > 4096 | GPU: new test + decode A/B with logit_bias (kernel path, expected bit-exact) |
+| C-021 reach | `d_lookup_` allocated only with `moe.expert_cache_debug_parity` (default false, `expert_cache.cu:127`); sole reader `check_parity()` | production unchanged; GPU: expert-cache tests with debug parity |
+| C-025 needs orchestrator go | fixes: throw (behaviour change: request fails instead of the slow path) or `cudaMallocAsync` / arena (moves allocation onto `stream` in the MoE layer path, decode-graph region); `MoeRoutingBuffers::allocate` failure is silent (`moe_routing.cu:504-507`, no log) | owner call; minimum: a WARN on pool allocation failure |
+| C-026 refuted (production) | `decode_tier` is `tier`, FP8 or NVFP4 (`pre_dequant_phase4_tensor_registry.cpp:78-88`); executor `default:` (`executor_gemm_dispatch.cpp:547-548`) needs decode FP32, so `primary_tier` FP32 and `gemv_dispatch` throws in its FP32 case; FP8 case reached only by `tests/test_weight_dispatch.cu:306` | none; a `host_scale` field would grow the `WeightHandle` union for a test-only path |
+| C-027 skip: KV growth, smallM dummy, constrain categories, `executor_workspace_buffers.cpp:1710` | each site has an explicit `cudaStreamSynchronize(0)` / `nullptr` after the legacy write (#1652, #2275): correct; stream-ordered version needs a stream threaded into `KVCache` growth (KV path, check-degeneration scope) | needs orchestrator go if wanted; not L |
+| C-027 refuted: `executor_workspace_buffers.cpp:1200` | `cudaMemset(qscratch_.cutlass_act_sf)` without a sync, but allowlisted `init` ("before the warmup device syncs", `tools/sync_device_write_allowlist.txt:26`); `cudaDeviceSynchronize` at `engine_workspace_warmup.cpp:563`, `:572` | stale comment "Sync because ..." with no sync in the code; comment fix only |
