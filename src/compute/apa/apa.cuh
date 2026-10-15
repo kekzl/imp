@@ -214,8 +214,6 @@ inline cudaError_t prep_d(const T* Q, const Reader& rd, const Problem& p, const 
         return e;
     if (chk) {  // redo on overflow (kernels exit early when ovf == 0)
         reset_stats_kernel<D><<<(unsigned)bhk, 32, 0, st>>>(w.amax, w.ovf);
-        if ((e = cudaPeekAtLastError()) != cudaSuccess)
-            return e;
         stats_kernel<D, Reader><<<dim3(w.nchunk, p.Hkv, p.B), 256, 0, st>>>(rd, dm, w.amax, w.kpart, w.ovf);
         finalize_stats_kernel<D><<<(unsigned)bhk, D, 0, st>>>(w.amax, w.kpart, w.nchunk, w.ksum, w.hs, p.Skv,
                                                               std::max(KV_HEADROOM, 1.f), w.ovf, P2);
@@ -459,8 +457,6 @@ inline cudaError_t prep_incremental(const T* Q, const Reader& rd, const Problem&
     if (P2) {  // a key beyond the frozen or sampled scales: exact stats over all keys, every tile again
                // (gated)
         reset_stats_kernel<D><<<bhk, 32, 0, s>>>(w.amax, w.ovf);
-        if ((e = cudaPeekAtLastError()) != cudaSuccess)
-            return e;
         stats_kernel<D, Reader><<<dim3(w.nchunk, p.Hkv, p.B), 256, 0, s>>>(rd, dm, w.amax, w.kpart, w.ovf);
         finalize_stats_kernel<D><<<bhk, D, 0, s>>>(w.amax, w.kpart, w.nchunk, st.kmean, st.hs, p.Skv,
                                                    std::max(KV_HEADROOM, 1.f), w.ovf, true);
