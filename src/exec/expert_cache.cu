@@ -226,7 +226,7 @@ ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, Exp
         return nullptr;
     }
     if (device_dirty_) {
-        invalidate_host_state();
+        invalidate_host_state(stream);
         device_dirty_ = false;
     }
     auto& plru = per_layer_lru_[layer];
@@ -669,7 +669,7 @@ bool ExpertLRUCache::check_parity(cudaStream_t stream) const {
     return true;
 }
 
-void ExpertLRUCache::invalidate_host_state() {
+void ExpertLRUCache::invalidate_host_state(cudaStream_t stream) {
     for (auto& plru : per_layer_lru_) {
         plru.lookup.clear();
         plru.lru_order.clear();
@@ -681,7 +681,7 @@ void ExpertLRUCache::invalidate_host_state() {
     }
     if (d_lookup_ && n_experts_ > 0) {
         const size_t cells = static_cast<size_t>(n_layers_) * kExpertProjCount * n_experts_;
-        IMP_CUDA_CHECK_LOG(cudaMemset(d_lookup_, 0xFF, cells * sizeof(int)));
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_lookup_, 0xFF, cells * sizeof(int), stream));
     }
     ++host_generation_;
 }

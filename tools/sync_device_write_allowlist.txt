@@ -28,7 +28,6 @@ src/exec/executor_workspace.cpp cudaMemcpy(*buf init  # GraphExecutor::init, Gem
 src/exec/executor_workspace.cpp cudaMemcpy(longrope_long_freqs_ init  # GraphExecutor::init
 src/exec/executor_workspace.cpp cudaMemcpy(longrope_short_freqs_ init  # GraphExecutor::init
 src/exec/expert_cache.cu cudaMemset(d_lookup_ init  # expert cache init and reinit_or_disable at pre-dequant
-src/exec/expert_cache.cu cudaMemset(d_lookup_ init  # expert cache init and reinit_or_disable at pre-dequant
 src/exec/expert_cache.cu cudaMemset(d_slot_scales_ init  # expert cache init
 src/exec/expert_cache_device.cu cudaMemcpy(d_src init  # device expert cache init
 src/exec/expert_cache_device.cu cudaMemset(d_clock init  # device expert cache init

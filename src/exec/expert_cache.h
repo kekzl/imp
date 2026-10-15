@@ -189,7 +189,7 @@ struct ExpertLRUCache {
     // the next host-side acquire forget every slot first (the device moved occupants).
     uint64_t host_generation_ = 0;
     bool device_dirty_ = false;
-    void invalidate_host_state();
+    void invalidate_host_state(cudaStream_t stream);
     bool nvfp4_slots_ = false;
     bool debug_parity_ = false;
     mutable int64_t parity_checks_ok_ = 0;  // exposed for tests; bumped by const check_parity()
