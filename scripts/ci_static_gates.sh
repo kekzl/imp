@@ -151,6 +151,7 @@ fi
 if want launchguards; then
     echo "== Launch guards =="
     run "post-launch check gate"                python3 tools/check_launch_guards.py
+    run "that gate still sees .cu and .cuh"     python3 tools/check_launch_guards.py --selftest
     # #2254: 5 GDN scan kernels read s_reduce[0] and let thread 0 overwrite it with no barrier.
     run "smem reduce slot read behind a barrier" python3 tools/check_smem_reduce_barrier.py
     run "that gate still catches its cases"     python3 tools/check_smem_reduce_barrier.py --selftest
