@@ -493,9 +493,9 @@ Branch `cleanup/b5-magic-numbers` head `5a6b6e1c` (H-029, C-032, C-033 rename pa
 | baseline image `imp:test-imp-baseline-016f0c60` | 0 / 60 |
 | `imp:b1-base` (main 8d4c4148, pre-cleanup) | 0 / 20 |
 | `imp:b1-final`, `b2-final`, `b3-final`, `b4-final` | 1 / 20, 1 / 20, 2 / 20, 1 / 20 |
-| `imp:b5-final` | 3 / 41 |
+| `imp:b5-final` | 2 / 40 |
 | B5 with a DIAG print: dev build / image | 0 / 40, 0 / 40 |
-| all isolated failures | inside one window (first ~110 runs); 0 / 180 after it, every image |
+| all isolated failures | 7, all within the first 120 runs; 0 / 160 after them, every image |
 
 ## 2026-10-15 Phase 4 B5 (orchestrator decision)
 
