@@ -459,6 +459,17 @@ static inline void set_gemm_scale_pointers(cublasLtMatmulDesc_t opDesc, const fl
     }
 }
 
+// D2H of the FP8 fallback scales, ordered on `stream`: aScale can be written there (#2275).
+static cudaError_t read_gemm_scales(const float* aScale, const float* bScale, float* a_h, float* b_h,
+                                    cudaStream_t stream) {
+    cudaError_t err = cudaSuccess;
+    if (aScale)
+        err = cudaMemcpyAsync(a_h, aScale, sizeof(float), cudaMemcpyDeviceToHost, stream);
+    if (bScale && err == cudaSuccess)
+        err = cudaMemcpyAsync(b_h, bScale, sizeof(float), cudaMemcpyDeviceToHost, stream);
+    return err == cudaSuccess ? cudaStreamSynchronize(stream) : err;
+}
+
 // Algorithm benchmarking: request top-N candidates, time each, pick fastest. Uses a
 // temporary output buffer to avoid corrupting C during live inference.
 static constexpr int kMaxAlgoCandidates = 8;
@@ -1171,11 +1182,7 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, flo
                         "Consider --set attention.fp8_prefill=never to skip FP8 overhead.");
                 }
                 float a_scale_h = 1.0f, b_scale_h = 1.0f;
-                cudaError_t serr = cudaSuccess;
-                if (aScale)
-                    serr = cudaMemcpy(&a_scale_h, aScale, sizeof(float), cudaMemcpyDeviceToHost);
-                if (bScale && serr == cudaSuccess)
-                    serr = cudaMemcpy(&b_scale_h, bScale, sizeof(float), cudaMemcpyDeviceToHost);
+                const cudaError_t serr = read_gemm_scales(aScale, bScale, &a_scale_h, &b_scale_h, stream);
                 if (serr != cudaSuccess) {  // a wrong scale would be a silent wrong result
                     IMP_LOG_ERROR("gemm_cublaslt: FP8 fallback scale read failed M=%ld K=%ld N=%ld: %s",
                                   (long)M, (long)K, (long)N, cudaGetErrorString(serr));
