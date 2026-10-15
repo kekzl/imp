@@ -4,6 +4,7 @@
 
 #include "compute/gemm.h"
 #include "core/logging.h"
+#include "core/sm120_limits.h"
 
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -246,7 +247,7 @@ bool gemv_fp8_rowscale_fp32(const void* W_fp8, const float* d_row_scales, const 
 // still fills the 170 SMs twice; the per-row MMA chain is the same for every kNT.
 bool gemv_fp8_rowscale_f16(const void* W_fp8, const float* d_row_scales, const half* x, half* y, int M, int K,
                            int n_rows, cudaStream_t stream) {
-    constexpr int kMinBlocks = 2 * 170;
+    constexpr int kMinBlocks = 2 * kSm120SmCount;
     if ((M + 63) / 64 >= kMinBlocks)
         return launch_fp8_head<8, 2>(W_fp8, d_row_scales, x, y, M, K, n_rows, stream);
     if ((M + 31) / 32 >= kMinBlocks)

@@ -1,6 +1,7 @@
 #include "compute/gdn_internal.cuh"
 #include "compute/gdn_scan_chunkpar.cuh"
 #include "core/logging.h"
+#include "core/sm120_limits.h"
 
 #include <cuda_bf16.h>
 #include <algorithm>
@@ -469,7 +470,7 @@ int chunkpar_strip_chunks(int n_heads, int requested) {
             sm_count = l2_bytes = 0;  // -> the defaults below
         }
         if (sm_count <= 0)
-            sm_count = 170;
+            sm_count = kSm120SmCount;
         if (l2_bytes <= 0)
             l2_bytes = 96 << 20;
     }
