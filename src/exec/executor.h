@@ -554,10 +554,6 @@ public:
 
     // QJL projection accessor removed (TurboQuant retired Phase 5, 2026-05-17).
 
-    // Release the MoE batch dequant buffer when expert weights are on host.
-    // Call after weight upload if experts didn't fit on GPU.
-    void release_moe_batch_buf();
-
     // Pre-allocated device buffer for sampling output (stable address for CUDA graph).
     int32_t* d_sample_result() const { return d_sample_result_; }
 
