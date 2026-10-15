@@ -1,6 +1,7 @@
 #include "compute/gemm.h"
 #include "compute/gemm_internal.cuh"
 #include "compute/gemm_internal_device.cuh"
+#include "core/cublas_check.h"
 #include "core/logging.h"
 
 #include <cublas_v2.h>
@@ -67,7 +68,7 @@ bool gemm_try_sgemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, fl
     const int64_t N = B.shape[0];
 
     cublasHandle_t handle = get_cublas_handle();
-    cublasSetStream(handle, stream);
+    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle, stream));
 
     cublasStatus_t st = cublasSgemm(handle,
                                     CUBLAS_OP_T,  // transa: transpose B_col [K,N] → [N,K]

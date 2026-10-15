@@ -7,6 +7,7 @@
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/cuda_static_reset.h"
 #include "core/cuda_errors.h"
+#include "core/cublas_check.h"
 #include "core/logging.h"
 #include "memory/device_alloc_all.h"
 #include "core/process_diag.h"
@@ -319,8 +320,8 @@ static cublasHandle_t s_cublas_handle = nullptr;  // file-scope so the reset hoo
 
 static cublasHandle_t get_cublas() {
     if (!s_cublas_handle) {
-        cublasCreate(&s_cublas_handle);
-        cublasSetMathMode(s_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
+        IMP_CUBLAS_CHECK_LOG(cublasCreate(&s_cublas_handle));
+        IMP_CUBLAS_CHECK_LOG(cublasSetMathMode(s_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH));
     }
     return s_cublas_handle;
 }
@@ -404,7 +405,7 @@ bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, 
 
     // cuBLAS for P·V
     cublasHandle_t cublas = get_cublas();
-    cublasSetStream(cublas, stream);
+    IMP_CUBLAS_CHECK_LOG(cublasSetStream(cublas, stream));
 
     // Reusable K weight descriptor for CUTLASS GEMM
     CutlassMxFP4Weight k_weight;
@@ -473,12 +474,13 @@ bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, 
                 const half* V_head = V_b + static_cast<ptrdiff_t>(g) * hd;
                 half* O_head = O_b + static_cast<ptrdiff_t>(h) * hd;
 
-                cublasGemmEx(cublas, CUBLAS_OP_N, CUBLAS_OP_N,
-                             hd,      // M
-                             seq_q,   // N
-                             seq_kv,  // K
-                             &one, V_head, CUDA_R_16F, kv_row_stride, S, CUDA_R_16F, seq_kv, &zero, O_head,
-                             CUDA_R_16F, q_row_stride, CUBLAS_COMPUTE_32F, cublas_gemm_algo());
+                IMP_CUBLAS_CHECK_LOG(cublasGemmEx(cublas, CUBLAS_OP_N, CUBLAS_OP_N,
+                                                  hd,      // M
+                                                  seq_q,   // N
+                                                  seq_kv,  // K
+                                                  &one, V_head, CUDA_R_16F, kv_row_stride, S, CUDA_R_16F,
+                                                  seq_kv, &zero, O_head, CUDA_R_16F, q_row_stride,
+                                                  CUBLAS_COMPUTE_32F, cublas_gemm_algo()));
             }
         }
     }

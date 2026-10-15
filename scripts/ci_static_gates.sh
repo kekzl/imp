@@ -65,6 +65,7 @@ if want filesize; then
     run "deterministic-mode sites vs the doc"   python3 tools/check_determinism_sites.py
     run "that gate still catches its drift"     python3 tools/check_determinism_sites.py --selftest
     run "header-inline definitions with no caller" python3 tools/check_dead_inline_accessors.py
+    run "that gate still sees wrapped signatures" python3 tools/check_dead_inline_accessors.py --selftest
     run "FATAL logs that do not stop"           python3 tools/check_log_fatal.py --list
 fi
 
@@ -124,7 +125,7 @@ if want alloc; then
     run "that gate still matches its cases"     python3 tools/check_cuda_raii_sites.py --selftest
     run "no deref of an owner after .release()" python3 tools/check_released_owner_use.py
     run "that gate still matches its cases"     python3 tools/check_released_owner_use.py --selftest
-    run "discarded cudaError_t per file (#2211)" python3 tools/check_cuda_discards.py
+    run "discarded CUDA/cuBLAS status per file (#2211)" python3 tools/check_cuda_discards.py
     run "that gate still counts its cases"      python3 tools/check_cuda_discards.py --selftest
     run "sync legacy-stream device writes (#2275)" python3 tools/check_sync_device_writes.py
     run "that gate still matches its cases"    python3 tools/check_sync_device_writes.py --selftest
@@ -151,6 +152,7 @@ fi
 if want launchguards; then
     echo "== Launch guards =="
     run "post-launch check gate"                python3 tools/check_launch_guards.py
+    run "that gate still sees .cu and .cuh"     python3 tools/check_launch_guards.py --selftest
     # #2254: 5 GDN scan kernels read s_reduce[0] and let thread 0 overwrite it with no barrier.
     run "smem reduce slot read behind a barrier" python3 tools/check_smem_reduce_barrier.py
     run "that gate still catches its cases"     python3 tools/check_smem_reduce_barrier.py --selftest

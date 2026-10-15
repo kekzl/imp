@@ -2,6 +2,7 @@
 // down model+engine, then imp_gpu_release ([suspend] device_reset default resets the device).
 // /admin/resume: reload from the snapshot; only weights stay warm, KV/graphs/cuBLAS rebuild.
 
+#include "core/logging.h"
 #include "handlers.h"
 #include "sampling_fields.h"
 #include "utils.h"
@@ -36,7 +37,7 @@ int suspend_locked(ServerState& state, json& body) {
     }
 
     size_t vram_free_before = 0, vram_total = 0;
-    cudaMemGetInfo(&vram_free_before, &vram_total);
+    IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&vram_free_before, &vram_total));
 
     // Drain: let in-flight generations FINISH (never cancels), then park the
     // worker. We hold state.mtx so no new request can be submitted meanwhile
@@ -93,7 +94,7 @@ int suspend_locked(ServerState& state, json& body) {
     // after cudaDeviceReset would lazily re-create the primary context.
     size_t vram_free_after = 0;
     if (!device_reset)
-        cudaMemGetInfo(&vram_free_after, &vram_total);
+        IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&vram_free_after, &vram_total));
     imp_gpu_release(device_reset ? 1 : 0);
     if (!device_reset) {
         size_t f = 0;

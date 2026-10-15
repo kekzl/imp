@@ -20,7 +20,7 @@ image embeddings.
 
 WHAT COUNTS
 -----------
-A launch is a `<<<` outside a comment/string. It is guarded when one of
+A launch is a `<<<` outside a comment/string in a `.cu` or `.cuh`. It is guarded when one of
 IMP_CUDA_CHECK_LAUNCH / cudaPeekAtLastError / cudaGetLastError appears within
 LOOKAHEAD lines after the statement the launch belongs to (launches spanning
 several lines are followed to their terminating `;`).
@@ -38,14 +38,17 @@ decide and prints the count it cannot, so the blind spot is visible instead of
 implied.
 
 Exit 0 when clean, 1 when a launch is unguarded and not allowlisted.
+`--selftest` runs the matcher and the file collection on fixtures.
 """
 
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCAN_DIRS = ["src"]
+SUFFIXES = ("*.cu", "*.cuh")  # .cuh: 24 launches were outside the gate (C-015)
 LOOKAHEAD = 4  # lines after the launch statement ends
 
 GUARD = re.compile(r"IMP_CUDA_CHECK_LAUNCH|cudaPeekAtLastError|cudaGetLastError")
@@ -53,7 +56,10 @@ GUARD = re.compile(r"IMP_CUDA_CHECK_LAUNCH|cudaPeekAtLastError|cudaGetLastError"
 # Launch sites that are deliberately unguarded, each with a reason.
 # THIS LIST ONLY SHRINKS — an entry that no longer matches is an error too, so
 # it cannot go stale silently.
-ALLOWLIST: dict[str, str] = {}
+ALLOWLIST: dict[str, str] = {
+    "src/compute/apa/apa.cuh": "vendored kekzl/apa v0.6.1, patched upstream only; the 2 reset_stats_kernel "
+    "launches are checked by the cudaPeekAtLastError 5 lines below, after the 4-launch redo group",
+}
 
 
 def strip_comments_and_strings(src: str) -> str:
@@ -85,9 +91,20 @@ def strip_comments_and_strings(src: str) -> str:
     return "".join(out)
 
 
+def launch_files(root: Path) -> list[Path]:
+    files: list[Path] = []
+    for d in SCAN_DIRS:
+        for pattern in SUFFIXES:
+            files.extend((root / d).rglob(pattern))
+    return sorted(files)
+
+
 def scan(path: Path) -> tuple[list[tuple[int, str]], int]:
     """Return ([(line_no, source_line)] unguarded, count of macro-body launches)."""
-    raw = path.read_text(encoding="utf-8", errors="replace")
+    return scan_text(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def scan_text(raw: str) -> tuple[list[tuple[int, str]], int]:
     clean = strip_comments_and_strings(raw).split("\n")
     raw_lines = raw.split("\n")
 
@@ -119,13 +136,44 @@ def scan(path: Path) -> tuple[list[tuple[int, str]], int]:
     return bad, macro_launches
 
 
+def selftest() -> int:
+    cases = {  # source -> (unguarded, macro-body launches)
+        "k<<<1, 32, 0, s>>>(p);\n": (1, 0),
+        "k<<<1, 32, 0, s>>>(p);\nIMP_CUDA_CHECK_LAUNCH();\n": (0, 0),
+        "k\n    <<<1, 32, 0, s>>>(p,\n        q);\nif ((e = cudaPeekAtLastError()) != cudaSuccess)\n": (0, 0),
+        "a<<<1, 1>>>(p);\nb<<<1, 1>>>(p);\nc<<<1, 1>>>(p);\nd<<<1, 1>>>(p);\ne<<<1, 1>>>(p);\n"
+        "IMP_CUDA_CHECK_LAUNCH();\n": (1, 0),
+        "#define L(D) \\\n    k<D><<<1, 32>>>(p)\n": (0, 1),
+        "// k<<<1, 32>>>(p);\n": (0, 0),
+    }
+    bad = 0
+    for text, want in cases.items():
+        unguarded, in_macro = scan_text(text)
+        got = (len(unguarded), in_macro)
+        if got != want:
+            print(f"selftest: {text!r}: want {want}, got {got}")
+            bad += 1
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "src" / "a").mkdir(parents=True)
+        for name in ("k.cu", "k.cuh", "k.h", "k.cpp"):
+            (root / "src" / "a" / name).write_text("k<<<1, 32>>>(p);\n", encoding="utf-8")
+        got_files = sorted(p.name for p in launch_files(root))
+        if got_files != ["k.cu", "k.cuh"]:
+            print(f"selftest: collected {got_files}, want ['k.cu', 'k.cuh']")
+            bad += 1
+    total = len(cases) + 1
+    print(f"selftest: {total - bad}/{total} cases ok")
+    return 1 if bad else 0
+
+
 def main() -> int:
+    if "--selftest" in sys.argv[1:]:
+        return selftest()
     total_launches = 0
     macro_total = 0
     findings: list[tuple[str, int, str]] = []
-    files = []
-    for d in SCAN_DIRS:
-        files.extend(sorted((ROOT / d).rglob("*.cu")))
+    files = launch_files(ROOT)
 
     for f in files:
         rel = f.relative_to(ROOT).as_posix()

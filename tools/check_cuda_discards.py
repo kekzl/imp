@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""#2211 gate: statements that call a CUDA runtime API and discard the cudaError_t.
+"""#2211 gate: statements that call a CUDA runtime or cuBLAS/cuBLASLt API and discard the status.
 
-Matcher = the awk in #2211 (statement starts with cuda<Upper>( after a finished
-statement; cudaGetLastError and type names excluded). Per-file counts must equal
+Matcher = the awk in #2211 (statement starts with cuda<Upper>( or cublas<Upper>( after a
+finished statement; cudaGetLastError and type names excluded). Per-file counts must equal
 tools/cuda_discard_allowlist.txt; the allowlist total may not exceed CEILING.
 
 Usage:
@@ -17,10 +17,11 @@ import argparse
 import pathlib
 import re
 import sys
+import tempfile
 from collections import Counter
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-SRC = REPO / "src"
+SCAN_DIRS = ("src", "tools/imp-server")  # imp-server: H-017
 ALLOWLIST = REPO / "tools" / "cuda_discard_allowlist.txt"
 SUFFIXES = (".cpp", ".cu", ".h", ".cuh")
 # Ratchet: lower with every fix, never raise.
@@ -29,10 +30,10 @@ CEILING = 1
 ZERO_DIRS = (
     "src/runtime/", "src/memory/",
     "src/core/", "src/quant/", "src/model/", "src/vision/", "src/lora/", "src/api/",
-    "src/compute/", "src/exec/",
+    "src/compute/", "src/exec/", "tools/imp-server/",
 )
 
-CALL = re.compile(r"^[ \t]*cuda[A-Z][A-Za-z0-9_]*[ \t]*\(")
+CALL = re.compile(r"^[ \t]*(?:cuda|cublas)[A-Z][A-Za-z0-9_]*[ \t]*\(")
 EXCLUDED = re.compile(
     r"^[ \t]*cuda(Error_t|Stream_t|Event_t|Graph_t|GraphExec_t|DeviceProp"
     r"|GetErrorString|GetErrorName|GetLastError)"
@@ -59,14 +60,15 @@ def sites(text: str) -> list[tuple[int, str]]:
     return out
 
 
-def scan() -> dict[str, list[tuple[int, str]]]:
+def scan(repo: pathlib.Path = REPO) -> dict[str, list[tuple[int, str]]]:
     hits = {}
-    for path in sorted(SRC.rglob("*")):
+    paths = [p for d in SCAN_DIRS for p in (repo / d).rglob("*")]
+    for path in sorted(paths):
         if path.suffix not in SUFFIXES or not path.is_file():
             continue
         found = sites(path.read_text(encoding="utf-8", errors="replace"))
         if found:
-            hits[path.relative_to(REPO).as_posix()] = found
+            hits[path.relative_to(repo).as_posix()] = found
     return hits
 
 
@@ -91,7 +93,7 @@ def check(hits: dict[str, list], allow: dict[str, tuple[int, str]]) -> list[str]
         want, reason = allow.get(rel, (0, ""))
         if got > want:
             lines = ",".join(str(ln) for ln, _ in hits[rel])
-            errors.append(f"{rel}: {got} discarded cudaError_t > allowed {want} (lines {lines})")
+            errors.append(f"{rel}: {got} discarded status > allowed {want} (lines {lines})")
         elif got < want:
             errors.append(f"{rel}: {got} < allowed {want}: lower the allowlist entry to {got}")
         if want and rel.startswith(ZERO_DIRS) and not reason:
@@ -119,6 +121,12 @@ def selftest() -> int:
         "foo(a,\n    cudaFree(p));": 0,
         "cudaStream_t s;": 0,
         "// cudaFree(p);": 0,
+        "cublasSetStream(h, s);": 1,
+        "x = 1;\ncublasLtMatmul(lt, d,\n    a, b);": 1,
+        "IMP_CUBLAS_CHECK_LOG(cublasSetStream(h, s));": 0,
+        "(void)cublasLtMatmulAlgoGetHeuristic(lt, d, p, 1, r, &n);": 0,
+        "cublasStatus_t st = cublasCreate(&h);": 0,
+        "cublasHandle_t h;": 0,
     }
     bad = 0
     for text, want in cases.items():
@@ -141,7 +149,16 @@ def selftest() -> int:
         if got != want:
             print(f"selftest: allowlist {text!r}: want {want} errors, got {got}")
             bad += 1
-    total = len(cases) + len(allow_cases)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        for rel in ("src/a/k.cu", "tools/imp-server/h.cpp", "tools/imp-bench/b.cpp"):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("cudaFree(p);\n", encoding="utf-8")
+        got_files = sorted(scan(root))
+        if got_files != ["src/a/k.cu", "tools/imp-server/h.cpp"]:
+            print(f"selftest: scanned {got_files}, want src/ and tools/imp-server/ only")
+            bad += 1
+    total = len(cases) + len(allow_cases) + 1
     print(f"selftest: {total - bad}/{total} cases ok")
     return 1 if bad else 0
 
@@ -169,7 +186,7 @@ def main() -> int:
     for e in errors:
         print(e)
     total = sum(len(v) for v in hits.values())
-    print(f"discarded cudaError_t: {total} in {len(hits)} files (allowlist ceiling {CEILING})")
+    print(f"discarded cudaError_t / cublasStatus_t: {total} in {len(hits)} files (allowlist ceiling {CEILING})")
     return 1 if errors else 0
 
 

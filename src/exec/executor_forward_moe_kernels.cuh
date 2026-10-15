@@ -3,6 +3,7 @@
 // MoE kernel declarations + launchers for executor_forward_moe*.cu; kept out of executor_forward_moe_internal.h
 // so host-only MoE TUs compile as C++ (#2209).
 
+#include "core/logging.h"
 #include "exec/executor_kernels.cuh"  // executor kernels the MoE paths also launch
 
 #include <cuda_fp16.h>
@@ -23,6 +24,7 @@ inline void sanitize_fp16(__half* data, int64_t n, cudaStream_t stream) {
     int threads = 256;
     int blocks = static_cast<int>((n + threads - 1) / threads);
     sanitize_fp16_kernel<<<blocks, threads, 0, stream>>>(data, n);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace imp

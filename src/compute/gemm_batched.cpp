@@ -2,6 +2,7 @@
 #include "compute/gemm.h"
 #include "compute/gemm_internal.cuh"
 
+#include "core/cublas_check.h"
 #include "core/logging.h"
 #include <cublas_v2.h>
 #include <cublasLt.h>
@@ -29,7 +30,7 @@ void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv, Tensor& k_out
     int N = static_cast<int>(k_out.shape[1]);  // nkv * hd
 
     cublasHandle_t handle = get_cublas_handle();
-    cublasSetStream(handle, stream);
+    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle, stream));
 
     cudaDataType_t dt = dtype_to_cuda(input.qtype);
     float alpha = 1.0f, beta = 0.0f;
@@ -82,7 +83,7 @@ void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused, Tensor& 
     int N = static_cast<int>(out1.shape[1]);   // d_ff (or nkv*hd)
 
     cublasHandle_t handle = get_cublas_handle();
-    cublasSetStream(handle, stream);
+    IMP_CUBLAS_CHECK_LOG(cublasSetStream(handle, stream));
 
     cudaDataType_t dt = dtype_to_cuda(input.qtype);
     float alpha = 1.0f, beta = 0.0f;
@@ -135,29 +136,31 @@ bool gemm_cublaslt_fp8_probe() {
 
     cublasLtHandle_t lt = get_cublaslt_handle();
     cublasLtMatmulDesc_t opDesc;
-    cublasLtMatmulDescCreate(&opDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulDescCreate(&opDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
     cublasOperation_t transA = CUBLAS_OP_T, transB = CUBLAS_OP_N;
-    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(transA));
-    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(transB));
-    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
-                                   static_cast<const void*>(&d_sa), sizeof(d_sa));
-    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
-                                   static_cast<const void*>(&d_sb), sizeof(d_sb));
+    IMP_CUBLAS_CHECK_LOG(
+        cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(transA)));
+    IMP_CUBLAS_CHECK_LOG(
+        cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(transB)));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                        static_cast<const void*>(&d_sa), sizeof(d_sa)));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                        static_cast<const void*>(&d_sb), sizeof(d_sb)));
 
     cublasLtMatrixLayout_t Adesc, Bdesc, Cdesc;
-    cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_8F_E4M3, K, N, K);
-    cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_8F_E4M3, K, M, K);
-    cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_16F, N, M, N);
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_8F_E4M3, K, N, K));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_8F_E4M3, K, M, K));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_16F, N, M, N));
 
     float alpha = 1.0f, beta = 0.0f;
     cublasStatus_t st = cublasLtMatmul(lt, opDesc, &alpha, d_b, Bdesc, d_a, Adesc, &beta,
                                         d_c, Cdesc, d_c, Cdesc, nullptr,
                                         gemm_internal_workspace(), gemm_internal_workspace_size(), nullptr);
 
-    cublasLtMatrixLayoutDestroy(Adesc);
-    cublasLtMatrixLayoutDestroy(Bdesc);
-    cublasLtMatrixLayoutDestroy(Cdesc);
-    cublasLtMatmulDescDestroy(opDesc);
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutDestroy(Adesc));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutDestroy(Bdesc));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutDestroy(Cdesc));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulDescDestroy(opDesc));
     release();
     cudaGetLastError();
     return st == CUBLAS_STATUS_SUCCESS;

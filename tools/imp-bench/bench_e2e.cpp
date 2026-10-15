@@ -2,6 +2,7 @@
 #include "exec/executor.h"
 #include "compute/gemm.h"
 #include "core/fp_bits.h"
+#include "core/logging.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -113,7 +114,7 @@ static std::unique_ptr<Model> make_bench_model(int d_model, int d_ff, int n_head
 bool bench_e2e() {
     // Check for CUDA device
     int device_count = 0;
-    cudaGetDeviceCount(&device_count);
+    IMP_CUDA_CHECK_LOG(cudaGetDeviceCount(&device_count));
     if (device_count == 0) {
         printf("bench_e2e: no CUDA device found, skipping\n");
         return false;  // measured nothing (#1584)
@@ -177,10 +178,12 @@ bool bench_e2e() {
         // Upload to device
         int32_t* d_tokens = nullptr;
         int* d_positions = nullptr;
-        cudaMalloc(&d_tokens, seq_len * sizeof(int32_t));
-        cudaMalloc(&d_positions, seq_len * sizeof(int));
-        cudaMemcpy(d_tokens, h_tokens.data(), seq_len * sizeof(int32_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_positions, h_positions.data(), seq_len * sizeof(int), cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tokens, seq_len * sizeof(int32_t)));
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_positions, seq_len * sizeof(int)));
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpy(d_tokens, h_tokens.data(), seq_len * sizeof(int32_t), cudaMemcpyHostToDevice));
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpy(d_positions, h_positions.data(), seq_len * sizeof(int), cudaMemcpyHostToDevice));
 
         InferenceState state;
         state.token_ids = d_tokens;
@@ -192,16 +195,16 @@ bool bench_e2e() {
         // Warmup
         for (int i = 0; i < warmup_iters; ++i) {
             executor.forward(state, nullptr);
-            cudaDeviceSynchronize();
+            IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
         }
 
         // Timed iterations
         double total_ms = 0.0;
         for (int i = 0; i < timed_iters; ++i) {
-            cudaDeviceSynchronize();
+            IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
             auto t0 = std::chrono::high_resolution_clock::now();
             executor.forward(state, nullptr);
-            cudaDeviceSynchronize();
+            IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
             auto t1 = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             total_ms += ms;
@@ -212,8 +215,8 @@ bool bench_e2e() {
 
         printf("  seq=%-8d  %8.2f ms  %8.1f tok/s\n", seq_len, avg_ms, tok_per_sec);
 
-        cudaFree(d_tokens);
-        cudaFree(d_positions);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_tokens));
+        IMP_CUDA_CHECK_LOG(cudaFree(d_positions));
     }
 
     // -----------------------------------------------------------------------
@@ -227,10 +230,10 @@ bool bench_e2e() {
 
         int32_t* d_token = nullptr;
         int* d_position = nullptr;
-        cudaMalloc(&d_token, sizeof(int32_t));
-        cudaMalloc(&d_position, sizeof(int));
-        cudaMemcpy(d_token, h_token.data(), sizeof(int32_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_position, h_position.data(), sizeof(int), cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_token, sizeof(int32_t)));
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_position, sizeof(int)));
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_token, h_token.data(), sizeof(int32_t), cudaMemcpyHostToDevice));
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_position, h_position.data(), sizeof(int), cudaMemcpyHostToDevice));
 
         InferenceState state;
         state.token_ids = d_token;
@@ -242,16 +245,16 @@ bool bench_e2e() {
         // Warmup
         for (int i = 0; i < warmup_iters; ++i) {
             executor.forward(state, nullptr);
-            cudaDeviceSynchronize();
+            IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
         }
 
         // Timed iterations
         double total_ms = 0.0;
         for (int i = 0; i < timed_iters; ++i) {
-            cudaDeviceSynchronize();
+            IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
             auto t0 = std::chrono::high_resolution_clock::now();
             executor.forward(state, nullptr);
-            cudaDeviceSynchronize();
+            IMP_CUDA_CHECK_LOG(cudaDeviceSynchronize());
             auto t1 = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             total_ms += ms;
@@ -262,8 +265,8 @@ bool bench_e2e() {
 
         printf("  step          %8.2f ms  %8.0f tok/s\n", avg_ms, tok_per_sec);
 
-        cudaFree(d_token);
-        cudaFree(d_position);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_token));
+        IMP_CUDA_CHECK_LOG(cudaFree(d_position));
     }
 
     printf("\n");

@@ -6,6 +6,7 @@
 #include "core/cuda_raii.h"
 #include "core/cuda_static_reset.h"
 #include "compute/gemm_internal.cuh"
+#include "core/cublas_check.h"
 #include "core/logging.h"
 #include "core/tensor_kind.h"
 #include "memory/engine_arena.h"
@@ -29,14 +30,6 @@
 #include <stdexcept>
 #include <vector>
 #include <utility>
-
-#define CUBLASLT_CHECK(call)                                                    \
-    do {                                                                        \
-        cublasStatus_t _st = (call);                                            \
-        if (_st != CUBLAS_STATUS_SUCCESS) {                                     \
-            IMP_LOG_ERROR("imp::gemm: %s failed (status %d)", #call, (int)_st); \
-        }                                                                       \
-    } while (0)
 
 namespace imp {
 
@@ -67,7 +60,7 @@ static cublasHandle_t get_cublas_handle() {
             IMP_LOG_ERROR("imp::gemm: cublasCreate failed (status %d)", (int)st);
             abort();
         }
-        cublasSetMathMode(s_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
+        IMP_CUBLAS_CHECK_LOG(cublasSetMathMode(s_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH));
     }
     return s_cublas_handle;
 }
@@ -153,7 +146,7 @@ void gemm_init() {
 
     // Also let legacy cuBLAS API use the same workspace; null after a dropped slice, never stale.
     if (s_workspace || prev_workspace_size > 0)
-        cublasSetWorkspace(get_cublas_handle(), s_workspace, s_workspace_size);
+        IMP_CUBLAS_CHECK_LOG(cublasSetWorkspace(get_cublas_handle(), s_workspace, s_workspace_size));
 
     if (!s_bench_scratch) {
         auto slab = engine_arena().take_bytes(kGemmBenchScratchBytes);
@@ -313,26 +306,28 @@ static std::atomic<int> s_exact_m_entries{0};
 static void create_gemm_descriptors(GemmCacheEntry& entry, cublasComputeType_t compute_type,
                                     cudaDataType_t scale_type, cudaDataType_t dtype_A, cudaDataType_t dtype_B,
                                     cudaDataType_t dtype_C, int K, int M, int N) {
-    cublasLtMatmulDescCreate(&entry.opDesc, compute_type, scale_type);
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulDescCreate(&entry.opDesc, compute_type, scale_type));
 
     cublasOperation_t transA = CUBLAS_OP_T;
     cublasOperation_t transB = CUBLAS_OP_N;
-    cublasLtMatmulDescSetAttribute(entry.opDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(transA));
-    cublasLtMatmulDescSetAttribute(entry.opDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(transB));
+    IMP_CUBLAS_CHECK_LOG(
+        cublasLtMatmulDescSetAttribute(entry.opDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(transA)));
+    IMP_CUBLAS_CHECK_LOG(
+        cublasLtMatmulDescSetAttribute(entry.opDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(transB)));
 
-    CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&entry.Bdesc, dtype_B, K, N, K));
-    CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&entry.Adesc, dtype_A, K, M, K));
-    CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&entry.Cdesc, dtype_C, N, M, N));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutCreate(&entry.Bdesc, dtype_B, K, N, K));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutCreate(&entry.Adesc, dtype_A, K, M, K));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutCreate(&entry.Cdesc, dtype_C, N, M, N));
 }
 
 // Rebuild A and C layout descriptors when actual M differs from cached M.
 // Cheap CPU-only operation (no GPU sync).
 static void rebuild_layouts_for_m(GemmCacheEntry& entry, cudaDataType_t dtype_A, cudaDataType_t dtype_C,
                                   int K, int M, int N) {
-    cublasLtMatrixLayoutDestroy(entry.Adesc);
-    cublasLtMatrixLayoutDestroy(entry.Cdesc);
-    CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&entry.Adesc, dtype_A, K, M, K));
-    CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&entry.Cdesc, dtype_C, N, M, N));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutDestroy(entry.Adesc));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutDestroy(entry.Cdesc));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutCreate(&entry.Adesc, dtype_A, K, M, K));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutCreate(&entry.Cdesc, dtype_C, N, M, N));
     entry.desc_M = M;
 }
 
@@ -350,15 +345,16 @@ static bool reselect_algo_for_entry(GemmCacheEntry& entry, int64_t M, int64_t K,
     }
     cublasLtHandle_t lt = get_cublaslt_handle();
     cublasLtMatmulPreference_t pref = nullptr;
-    cublasLtMatmulPreferenceCreate(&pref);
-    cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &s_workspace_size,
-                                         sizeof(s_workspace_size));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulPreferenceCreate(&pref));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                                              &s_workspace_size, sizeof(s_workspace_size)));
 
     cublasLtMatmulHeuristicResult_t results[1];
     int nresults = 0;
-    cublasLtMatmulAlgoGetHeuristic(lt, entry.opDesc, entry.Bdesc, entry.Adesc, entry.Cdesc, entry.Cdesc, pref,
-                                   1, results, &nresults);
-    cublasLtMatmulPreferenceDestroy(pref);
+    // status carried by nresults (0 when no algo fits)
+    (void)cublasLtMatmulAlgoGetHeuristic(lt, entry.opDesc, entry.Bdesc, entry.Adesc, entry.Cdesc, entry.Cdesc,
+                                         pref, 1, results, &nresults);
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulPreferenceDestroy(pref));
 
     if (nresults > 0) {
         // Logs once when the benchmarked pin is replaced by heuristic results[0] for the rest
@@ -457,7 +453,8 @@ static inline void set_gemm_scale_pointers(cublasLtMatmulDesc_t opDesc, const fl
     for (auto [attr, p] : {std::pair{CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &aScale},
                            std::pair{CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &bScale}}) {
         if (*p)
-            cublasLtMatmulDescSetAttribute(opDesc, attr, static_cast<const void*>(p), sizeof(*p));
+            IMP_CUBLAS_CHECK_LOG(
+                cublasLtMatmulDescSetAttribute(opDesc, attr, static_cast<const void*>(p), sizeof(*p)));
     }
 }
 
@@ -526,15 +523,16 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     const void* p_alpha = fp16_scale ? static_cast<const void*>(&h_alpha) : static_cast<const void*>(&alpha);
     const void* p_zero = fp16_scale ? static_cast<const void*>(&h_zero) : static_cast<const void*>(&f_zero);
     cublasLtMatmulPreference_t pref = nullptr;
-    CUBLASLT_CHECK(cublasLtMatmulPreferenceCreate(&pref));
-    CUBLASLT_CHECK(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                                                        &s_workspace_size, sizeof(s_workspace_size)));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulPreferenceCreate(&pref));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                                              &s_workspace_size, sizeof(s_workspace_size)));
 
     cublasLtMatmulHeuristicResult_t results[kMaxAlgoCandidates];
     int nresults = 0;
-    cublasLtMatmulAlgoGetHeuristic(lt, entry.opDesc, entry.Bdesc, entry.Adesc, entry.Cdesc, entry.Cdesc, pref,
-                                   kMaxAlgoCandidates, results, &nresults);
-    cublasLtMatmulPreferenceDestroy(pref);
+    // status carried by nresults (0 when no algo fits)
+    (void)cublasLtMatmulAlgoGetHeuristic(lt, entry.opDesc, entry.Bdesc, entry.Adesc, entry.Cdesc, entry.Cdesc,
+                                         pref, kMaxAlgoCandidates, results, &nresults);
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulPreferenceDestroy(pref));
 
     if (nresults <= 0) {
         entry.has_algo = false;
@@ -547,10 +545,12 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         IMP_LOG_DEBUG("[gemm-algo] shape M=%d N=%d K=%d  candidates=%d", M, N, K, nresults);
         for (int i = 0; i < nresults; i++) {
             int algo_id = -1, tile_id = -1;
-            cublasLtMatmulAlgoCapGetAttribute(&results[i].algo, CUBLASLT_ALGO_CAP_NUMERICAL_IMPL_FLAGS,
-                                              &algo_id, sizeof(algo_id), nullptr);
-            cublasLtMatmulAlgoConfigGetAttribute(&results[i].algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &tile_id,
-                                                 sizeof(tile_id), nullptr);
+            IMP_CUBLAS_CHECK_LOG(cublasLtMatmulAlgoCapGetAttribute(&results[i].algo,
+                                                                   CUBLASLT_ALGO_CAP_NUMERICAL_IMPL_FLAGS,
+                                                                   &algo_id, sizeof(algo_id), nullptr));
+            IMP_CUBLAS_CHECK_LOG(cublasLtMatmulAlgoConfigGetAttribute(&results[i].algo,
+                                                                      CUBLASLT_ALGO_CONFIG_TILE_ID, &tile_id,
+                                                                      sizeof(tile_id), nullptr));
             IMP_LOG_DEBUG("[gemm-algo]   cand[%d]: numImplFlags=0x%x tile=%d ws=%zu", i, algo_id, tile_id,
                           results[i].workspaceSize);
         }
@@ -649,9 +649,10 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
 
     auto time_candidate = [&](int i, int iters) {
         return time_on_stream(start, stop, stream, iters, [&] {
-            cublasLtMatmul(lt, entry.opDesc, p_alpha, B_data, entry.Bdesc, A_data, entry.Adesc, p_zero, temp_c,
-                           entry.Cdesc, temp_c, entry.Cdesc, &results[i].algo, s_workspace,
-                           results[i].workspaceSize, stream);
+            IMP_CUBLAS_CHECK_LOG(cublasLtMatmul(lt, entry.opDesc, p_alpha, B_data, entry.Bdesc, A_data,
+                                                entry.Adesc, p_zero, temp_c, entry.Cdesc, temp_c, entry.Cdesc,
+                                                &results[i].algo, s_workspace, results[i].workspaceSize,
+                                                stream));
         });
     };
 
@@ -740,8 +741,9 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     entry.benchmarked = true;
     if (gemm_algo_log_enabled() && M > 0) {
         int picked_tile = -1;
-        cublasLtMatmulAlgoConfigGetAttribute(&entry.algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &picked_tile,
-                                             sizeof(picked_tile), nullptr);
+        IMP_CUBLAS_CHECK_LOG(cublasLtMatmulAlgoConfigGetAttribute(&entry.algo, CUBLASLT_ALGO_CONFIG_TILE_ID,
+                                                                  &picked_tile, sizeof(picked_tile),
+                                                                  nullptr));
         IMP_LOG_DEBUG("[gemm-algo]   PICKED cand[%d] tile=%d  best_ms=%.3f", best_idx, picked_tile, best_ms);
     }
 }
@@ -757,7 +759,8 @@ static bool probe_allowed_on(cudaStream_t stream) {
 
 static int algo_tile_id(const cublasLtMatmulAlgo_t& algo) {
     int tile = -1;
-    cublasLtMatmulAlgoConfigGetAttribute(&algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &tile, sizeof(tile), nullptr);
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulAlgoConfigGetAttribute(&algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &tile,
+                                                              sizeof(tile), nullptr));
     return tile;
 }
 
@@ -766,14 +769,15 @@ static int algo_tile_id(const cublasLtMatmulAlgo_t& algo) {
 static void select_algo_host_only(cublasLtHandle_t lt, GemmCacheEntry& entry, int64_t M, int64_t K, int64_t N,
                                   bool in_capture = true) {
     cublasLtMatmulPreference_t pref = nullptr;
-    CUBLASLT_CHECK(cublasLtMatmulPreferenceCreate(&pref));
-    CUBLASLT_CHECK(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                                                        &s_workspace_size, sizeof(s_workspace_size)));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulPreferenceCreate(&pref));
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                                              &s_workspace_size, sizeof(s_workspace_size)));
     cublasLtMatmulHeuristicResult_t results[kMaxAlgoCandidates];
     int nresults = 0;
-    cublasLtMatmulAlgoGetHeuristic(lt, entry.opDesc, entry.Bdesc, entry.Adesc, entry.Cdesc, entry.Cdesc, pref,
-                                   kMaxAlgoCandidates, results, &nresults);
-    cublasLtMatmulPreferenceDestroy(pref);
+    // status carried by nresults (0 when no algo fits)
+    (void)cublasLtMatmulAlgoGetHeuristic(lt, entry.opDesc, entry.Bdesc, entry.Adesc, entry.Cdesc, entry.Cdesc,
+                                         pref, kMaxAlgoCandidates, results, &nresults);
+    IMP_CUBLAS_CHECK_LOG(cublasLtMatmulPreferenceDestroy(pref));
 
     std::array<GemmAlgoHostCheck, kMaxAlgoCandidates> checks{};
     for (int i = 0; i < nresults; i++) {
@@ -839,10 +843,10 @@ void gemm_cleanup() {
             f, x);
     std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
     for (auto& [key, entry] : s_gemm_cache) {
-        cublasLtMatrixLayoutDestroy(entry.Adesc);
-        cublasLtMatrixLayoutDestroy(entry.Bdesc);
-        cublasLtMatrixLayoutDestroy(entry.Cdesc);
-        cublasLtMatmulDescDestroy(entry.opDesc);
+        IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutDestroy(entry.Adesc));
+        IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutDestroy(entry.Bdesc));
+        IMP_CUBLAS_CHECK_LOG(cublasLtMatrixLayoutDestroy(entry.Cdesc));
+        IMP_CUBLAS_CHECK_LOG(cublasLtMatmulDescDestroy(entry.opDesc));
     }
     s_gemm_cache.clear();
 }
@@ -930,7 +934,7 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
     // handles it correctly.
     if (A.qtype != C.qtype && A.qtype == QType::F16 && B.qtype == QType::F16 && C.qtype == QType::F32) {
         cublasHandle_t fb_handle = get_cublas_handle();
-        cublasSetStream(fb_handle, stream);
+        IMP_CUBLAS_CHECK_LOG(cublasSetStream(fb_handle, stream));
         cublasStatus_t st = cublasGemmEx(fb_handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &alpha,
                                          B.data, cuda_dtype_B, (int)K, A.data, cuda_dtype_A, (int)K, &beta,
                                          C.data, cuda_dtype_C, (int)N, CUBLAS_COMPUTE_32F,
@@ -980,7 +984,7 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                 "falling back to cublasGemmEx",
                 (int)st, (long)M, (long)K, (long)N);
             cublasHandle_t fb_handle = get_cublas_handle();
-            cublasSetStream(fb_handle, stream);
+            IMP_CUBLAS_CHECK_LOG(cublasSetStream(fb_handle, stream));
             cublasStatus_t fb_st = cublasGemmEx(
                 fb_handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &ialpha, B.data, cuda_dtype_B,
                 (int)K, A.data, cuda_dtype_A, (int)K, &ibeta, C.data, cuda_dtype_C, (int)N,
@@ -1025,7 +1029,7 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
                         (int)st, (long)M, (long)K, (long)N);
                 }
                 cublasHandle_t fb_handle = get_cublas_handle();
-                cublasSetStream(fb_handle, stream);
+                IMP_CUBLAS_CHECK_LOG(cublasSetStream(fb_handle, stream));
                 cublasStatus_t fb_st = cublasGemmEx(fb_handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M,
                                                     (int)K, &alpha, B.data, cuda_dtype_B, (int)K, A.data,
                                                     cuda_dtype_A, (int)K, &beta, C.data, cuda_dtype_C, (int)N,
@@ -1226,10 +1230,10 @@ bool gemm_nvfp4_cublaslt(const void* a_data, const void* a_sf, const void* w_dat
         return false;
     // cuBLAS "A" operand is the weight (Bdesc of the row-major convention), "B" the activation.
     auto set_scales = [&](cublasLtMatmulDesc_t desc) {
-        cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
-                                       static_cast<const void*>(&w_sf), sizeof(w_sf));
-        cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
-                                       static_cast<const void*>(&a_sf), sizeof(a_sf));
+        IMP_CUBLAS_CHECK_LOG(cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                            static_cast<const void*>(&w_sf), sizeof(w_sf)));
+        IMP_CUBLAS_CHECK_LOG(cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                            static_cast<const void*>(&a_sf), sizeof(a_sf)));
     };
     const GemmCacheKey cache_key{
         CUDA_R_4F_E2M1, CUDA_R_4F_E2M1, CUDA_R_16F, CUBLAS_COMPUTE_32F, bucket_m(M), K, N, true};
@@ -1243,7 +1247,8 @@ bool gemm_nvfp4_cublaslt(const void* a_data, const void* a_sf, const void* w_dat
                                     CUDA_R_16F, K, M, N);
             const int32_t mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
             for (auto attr : {CUBLASLT_MATMUL_DESC_A_SCALE_MODE, CUBLASLT_MATMUL_DESC_B_SCALE_MODE})
-                cublasLtMatmulDescSetAttribute(new_entry.opDesc, attr, &mode, sizeof(mode));
+                IMP_CUBLAS_CHECK_LOG(
+                    cublasLtMatmulDescSetAttribute(new_entry.opDesc, attr, &mode, sizeof(mode)));
             set_scales(new_entry.opDesc);
             select_algo(lt, new_entry, a_data, w_data, (size_t)M * N * sizeof(half), alpha, 0.0f, false,
                         stream, M, N, K);
