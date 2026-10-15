@@ -3,6 +3,7 @@
 #include "model/model.h"
 #include "quant/nvfp4_gemm.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"  // smallM_table_bytes
+#include "compute/fp4_attn_geometry.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -257,7 +258,9 @@ size_t exec_ra2_workspace_bytes(int sq, int skv, int nh, int nkv, int hd) {
     auto al = [](size_t x) { return (x + 255) & ~size_t(255); };
     const size_t bhk = static_cast<size_t>(nkv), rows = static_cast<size_t>(sq) * nh,
                  d = static_cast<size_t>(hd);
-    const size_t ntkv = (static_cast<size_t>(skv) + 63) / 64, tile = 136 * d + 16;
+    using namespace fp4_attn_geom;
+    const size_t ntkv = (static_cast<size_t>(skv) + kKvTileTokens - 1) / kKvTileTokens,
+                 tile = kRa2TileBytesPerD * d + kRa2TileBytesExtra;
     return al(bhk * 3 * 4) + al(bhk * d * 4) + al(bhk * 12) + al(rows * 4) + al(rows * d) +
            al(bhk * ntkv * tile);
 }
@@ -269,11 +272,15 @@ size_t exec_apa_workspace_bytes(int sq, int skv, int nh, int nkv, int hd) {
     auto al = [](size_t x) { return (x + 255) & ~size_t(255); };
     const size_t bhk = static_cast<size_t>(nkv), rows = static_cast<size_t>(sq) * nh,
                  d = static_cast<size_t>(hd);
-    const size_t ntkv = (static_cast<size_t>(skv) + 63) / 64, words = (ntkv + 31) / 32;
-    const size_t nqb = (rows / bhk + 191) / 192;
+    using namespace fp4_attn_geom;
+    const size_t ntkv = (static_cast<size_t>(skv) + kKvTileTokens - 1) / kKvTileTokens,
+                 words = (ntkv + 31) / 32;
+    const size_t nqb = (rows / bhk + kApaQBlockRows - 1) / kApaQBlockRows;
+    const size_t nchunk = (ntkv + kApaStatsTiles - 1) / kApaStatsTiles;
     return al((bhk * 3 + 1) * 4) + al(bhk * d * 4) + al(bhk * 12) + al(rows * 4) + al(rows * d) +
-           al(rows * d / 8) + al(bhk * ntkv * 72 * d) + al((bhk * nqb * (12 * words + 1) + 2) * 4) +
-           al(rows * d * 4) + al(rows * 8) + al(bhk * ((ntkv + 15) / 16) * d * 4);
+           al(rows * d / 8) + al(bhk * ntkv * kApaTileBytesPerD * d) +
+           al((bhk * nqb * (kApaWarpsHd128 * words + 1) + 2) * 4) + al(rows * d * 4) + al(rows * 8) +
+           al(bhk * nchunk * d * 4);
 }
 
 // APA prefill workspace, taken once at this bound (attention_apa_set_workspace_bound); hd 128 only.
