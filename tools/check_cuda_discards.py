@@ -17,10 +17,11 @@ import argparse
 import pathlib
 import re
 import sys
+import tempfile
 from collections import Counter
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-SRC = REPO / "src"
+SCAN_DIRS = ("src", "tools/imp-server")  # imp-server: H-017
 ALLOWLIST = REPO / "tools" / "cuda_discard_allowlist.txt"
 SUFFIXES = (".cpp", ".cu", ".h", ".cuh")
 # Ratchet: lower with every fix, never raise.
@@ -29,7 +30,7 @@ CEILING = 1
 ZERO_DIRS = (
     "src/runtime/", "src/memory/",
     "src/core/", "src/quant/", "src/model/", "src/vision/", "src/lora/", "src/api/",
-    "src/compute/", "src/exec/",
+    "src/compute/", "src/exec/", "tools/imp-server/",
 )
 
 CALL = re.compile(r"^[ \t]*(?:cuda|cublas)[A-Z][A-Za-z0-9_]*[ \t]*\(")
@@ -59,14 +60,15 @@ def sites(text: str) -> list[tuple[int, str]]:
     return out
 
 
-def scan() -> dict[str, list[tuple[int, str]]]:
+def scan(repo: pathlib.Path = REPO) -> dict[str, list[tuple[int, str]]]:
     hits = {}
-    for path in sorted(SRC.rglob("*")):
+    paths = [p for d in SCAN_DIRS for p in (repo / d).rglob("*")]
+    for path in sorted(paths):
         if path.suffix not in SUFFIXES or not path.is_file():
             continue
         found = sites(path.read_text(encoding="utf-8", errors="replace"))
         if found:
-            hits[path.relative_to(REPO).as_posix()] = found
+            hits[path.relative_to(repo).as_posix()] = found
     return hits
 
 
@@ -147,7 +149,16 @@ def selftest() -> int:
         if got != want:
             print(f"selftest: allowlist {text!r}: want {want} errors, got {got}")
             bad += 1
-    total = len(cases) + len(allow_cases)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        for rel in ("src/a/k.cu", "tools/imp-server/h.cpp", "tools/imp-bench/b.cpp"):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("cudaFree(p);\n", encoding="utf-8")
+        got_files = sorted(scan(root))
+        if got_files != ["src/a/k.cu", "tools/imp-server/h.cpp"]:
+            print(f"selftest: scanned {got_files}, want src/ and tools/imp-server/ only")
+            bad += 1
+    total = len(cases) + len(allow_cases) + 1
     print(f"selftest: {total - bad}/{total} cases ok")
     return 1 if bad else 0
 
