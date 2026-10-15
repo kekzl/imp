@@ -3,6 +3,7 @@
 // Output: one `q8imma` line per (shape, M) and one `layer` line per (model, M), times in ms.
 #include "compute/gemm.h"
 #include "compute/mmq_q8_imma.h"
+#include "core/logging.h"
 #include "core/process_diag.h"
 #include "core/tensor.h"
 #include "memory/backend.h"
@@ -84,21 +85,21 @@ float time_variant(int v, const Bufs& b, int M, int N, int K) {
     if (cudaDeviceSynchronize() != cudaSuccess)
         return -1.0f;
     cudaEvent_t t0, t1;
-    cudaEventCreate(&t0);
-    cudaEventCreate(&t1);
+    IMP_CUDA_CHECK_LOG(cudaEventCreate(&t0));
+    IMP_CUDA_CHECK_LOG(cudaEventCreate(&t1));
     std::vector<float> reps;
     for (int r = 0; r < kRepeats; ++r) {
-        cudaEventRecord(t0, nullptr);
+        IMP_CUDA_CHECK_LOG(cudaEventRecord(t0, nullptr));
         for (int i = 0; i < kIters; ++i)
             run_variant(v, b, M, N, K);
-        cudaEventRecord(t1, nullptr);
-        cudaEventSynchronize(t1);
+        IMP_CUDA_CHECK_LOG(cudaEventRecord(t1, nullptr));
+        IMP_CUDA_CHECK_LOG(cudaEventSynchronize(t1));
         float ms = 0.0f;
-        cudaEventElapsedTime(&ms, t0, t1);
+        IMP_CUDA_CHECK_LOG(cudaEventElapsedTime(&ms, t0, t1));
         reps.push_back(ms / kIters);
     }
-    cudaEventDestroy(t0);
-    cudaEventDestroy(t1);
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(t0));
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(t1));
     std::sort(reps.begin(), reps.end());
     return cudaGetLastError() == cudaSuccess ? reps[kRepeats / 2] : -1.0f;
 }
@@ -171,16 +172,16 @@ bool bench_q8_imma() {
     }
     mmq_q8_imma_release_all();
     for (void* w : weights)
-        cudaFree(w);
+        IMP_CUDA_CHECK_LOG(cudaFree(w));
     for (int mi = 0; mi < 2; ++mi)
         for (size_t r = 0; r < sizeof(kRows) / sizeof(kRows[0]); ++r) {
             const double* l = layer_ms[mi][r];
             printf("layer model=%s M=%d off=%.4f imma=%.4f\n", mi == 0 ? "Qwen3-8B" : "Qwen3-4B", kRows[r],
                    l[0], l[1]);
         }
-    cudaFree(b.x);
-    cudaFree(b.out);
-    cudaFree(b.deq);
+    IMP_CUDA_CHECK_LOG(cudaFree(b.x));
+    IMP_CUDA_CHECK_LOG(cudaFree(b.out));
+    IMP_CUDA_CHECK_LOG(cudaFree(b.deq));
     return all_measured;
 }
 
