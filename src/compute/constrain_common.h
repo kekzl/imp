@@ -149,33 +149,12 @@ static inline uint16_t classify_token(const std::string& text) {
 // constrainer classified. SafeTensors models pad lm_head past n_classified; those padding ids
 // have no grammar classification, so they are masked unconditionally - the category/allow
 // buffers are only n_classified wide, and reading past it would be OOB.
-__global__ inline void constrain_mask_allow_kernel(float* __restrict__ logits,
-                                                   const uint16_t* __restrict__ token_cats,
-                                                   const uint8_t* __restrict__ token_allow,
-                                                   const uint16_t* __restrict__ allowed_mask, int vocab_size,
-                                                   int n_classified, bool use_token_allow) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= vocab_size)
-        return;
-    if (idx >= n_classified) {
-        logits[idx] = -FLT_MAX;
-        return;
-    }
-
-    uint16_t mask = *allowed_mask;
-    bool cat_ok = (token_cats[idx] & mask) != 0;
-
-    if (use_token_allow) {
-        bool allow_ok = token_allow[idx] != 0;
-        if (!cat_ok || !allow_ok) {
-            logits[idx] = -FLT_MAX;
-        }
-    } else {
-        if (!cat_ok) {
-            logits[idx] = -FLT_MAX;
-        }
-    }
-}
+// Defined once in json_constrain.cu (one cubin entry, not one per includer).
+__global__ void constrain_mask_allow_kernel(float* __restrict__ logits,
+                                            const uint16_t* __restrict__ token_cats,
+                                            const uint8_t* __restrict__ token_allow,
+                                            const uint16_t* __restrict__ allowed_mask, int vocab_size,
+                                            int n_classified, bool use_token_allow);
 
 #endif  // __CUDACC__
 
