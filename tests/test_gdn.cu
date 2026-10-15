@@ -281,7 +281,7 @@ TEST(GDNScanTest, FusedKernelMatchesLegacy) {
                        head_dim, state_size, n_groups, nullptr);
     cudaDeviceSynchronize();
 
-    // Legacy: per-token using gdn_scan_prefill_f32 (which internally loops)
+    // Legacy: per-token reference.
     // We need to decompose conv_f32 into separate Q, K, V arrays per token
     // and use gdn_scan_decode_f32 per token.
     float *d_V, *d_K, *d_Q;
