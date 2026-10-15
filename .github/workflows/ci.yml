@@ -322,8 +322,8 @@ jobs:
           # diagnostic from being emitted twice (once per gencode). The shipped
           # fatbin (release-docker) keeps the 120f PTX fallback for 5080/5070
           # SKUs; the `PTX fallback` job below is what assembles it (#1650).
-          # IMP_BUILD_BENCH=OFF skips ~30-60s of mxf4nvf4 microbench TUs that
-          # are bench-only — production server builds don't link them.
+          # IMP_BUILD_BENCH=OFF skips imp-bench. The mxf4nvf4 probe/microbench TUs
+          # build with the tests (imp_test_kernels), never into libimp.
 
       - name: Build
         if: steps.changes.outputs.code == 'true'
@@ -341,7 +341,10 @@ jobs:
       # possible in CI at all, where every throughput gate is impossible.
       - name: Kernel resources
         if: steps.changes.outputs.code == 'true'
-        run: cuobjdump -res-usage build/libimp.a | python3 tools/kernel_resources.py -
+        # libimp_test_kernels.a: the test-only probe/bench kernels (IMP_BUILD_TESTS=ON here).
+        run: |
+          { cuobjdump -res-usage build/libimp.a; cuobjdump -res-usage build/libimp_test_kernels.a; } \
+            | python3 tools/kernel_resources.py -
 
       - name: ccache stats
         id: ccstats
