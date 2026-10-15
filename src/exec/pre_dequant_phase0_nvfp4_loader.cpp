@@ -10,6 +10,7 @@
 #include "exec/nvfp4_merged_scale_guard.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/logging.h"
+#include "model/model_limits.h"
 #include "quant/nvfp4_quant.h"
 
 #include <cuda_runtime.h>
@@ -284,7 +285,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
         size_t dot = key.find('.', 1);
         if (dot == std::string::npos)
             return nullptr;
-        int idx = std::atoi(key.substr(1, dot - 1).c_str());
+        int idx = parse_index(key.substr(1, dot - 1), IndexParse::kAtoi);
         if (idx < 0 || idx >= cfg.n_layers)
             return nullptr;
         auto& L = mut_model->layers_[idx];
@@ -296,7 +297,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
             if (dot2 == std::string::npos)
                 return nullptr;
             std::string kind = slot.substr(0, dot2);
-            int e = std::atoi(slot.substr(dot2 + 1).c_str());
+            int e = parse_index(slot.substr(dot2 + 1), IndexParse::kAtoi);
             std::vector<Tensor>* vec = nullptr;
             if (kind == "expert_w_gate")
                 vec = &L.expert_w_gate;

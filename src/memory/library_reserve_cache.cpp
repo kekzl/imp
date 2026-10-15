@@ -1,4 +1,5 @@
 #include "memory/library_reserve_cache.h"
+#include "core/cache_dir.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -19,13 +20,7 @@ std::string LibraryReserveKey::str() const {
     return buf;
 }
 
-std::string library_reserve_cache_default_path() {
-    if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
-        return std::string(xdg) + "/imp/library_reserve";
-    if (const char* home = std::getenv("HOME"); home && *home)
-        return std::string(home) + "/.cache/imp/library_reserve";
-    return {};
-}
+std::string library_reserve_cache_default_path() { return imp_cache_dir("library_reserve"); }
 
 namespace {
 

@@ -1,4 +1,5 @@
 #include "memory/weight_cache_file.h"
+#include "core/cache_dir.h"
 #include "core/logging.h"
 #include "memory/weight_snapshot.h"
 #include "model/model.h"
@@ -64,11 +65,8 @@ int64_t mtime_seconds(const fs::directory_entry& e, std::error_code& ec) {
 // read-only for the serving user, and cache files should not clutter (or invalidate
 // tooling checksums of) model directories.
 static std::string default_warm_cache_dir() {
-    if (const char* xdg = getenv("XDG_CACHE_HOME"); xdg && *xdg)
-        return std::string(xdg) + "/imp/warm";
-    if (const char* home = getenv("HOME"); home && *home)
-        return std::string(home) + "/.cache/imp/warm";
-    return "/tmp/imp-warm-cache";
+    std::string dir = imp_cache_dir("warm");
+    return dir.empty() ? std::string("/tmp/imp-warm-cache") : dir;
 }
 
 std::string weight_cache_path_for(const std::string& model_path, const std::string& cache_dir) {

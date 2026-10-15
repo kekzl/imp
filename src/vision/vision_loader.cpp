@@ -466,12 +466,7 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
             size_t dot2 = name.find('.', 6);
             if (dot2 == std::string::npos)
                 continue;
-            int layer_idx = 0;
-            try {
-                layer_idx = std::stoi(name.substr(6, dot2 - 6));
-            } catch (...) {
-                continue;
-            }
+            const int layer_idx = parse_index(name.substr(6, dot2 - 6), IndexParse::kStoi);
             if (layer_idx < 0 || layer_idx >= cfg.num_layers)
                 continue;
 
