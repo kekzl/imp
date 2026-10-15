@@ -80,21 +80,23 @@ TEST(SamplingAdvancedTest, LogitBiasIgnoresOutOfRangeIds) {
     free_gpu(d);
 }
 
-// No arena slots: the per-entry fallback must read the logit on the caller's stream. A host
-// callback holds a non-blocking stream 20 ms before the logits land; a legacy cudaMemcpy read
-// returns the stale 0 (C-020). Mutation: legacy cudaMemcpy in the fallback read.
+__global__ void fill_iota_plus_one(float* p, int n) {
+    if (threadIdx.x < n)
+        p[threadIdx.x] = 1.0f + static_cast<float>(threadIdx.x);
+}
+
+// No arena slots: the per-entry fallback applies the bias to logits a held non-blocking stream
+// writes 20 ms late. Does not detect C-020 on WSL2: the legacy cudaMemcpy read also waited
+// there (mutant passes, 22 ms in both arms, 2026-10-15).
 TEST(SamplingAdvancedTest, LogitBiasFallbackReadsOnTheCallerStream) {
     reset_static_cuda_state();  // drops the arena slots: apply_logit_bias takes the fallback
     Tensor d = make_logits(std::vector<float>(4, 0.0f));
-    float* fresh = nullptr;
-    ASSERT_EQ(cudaMallocHost(&fresh, d.nbytes()), cudaSuccess);
-    for (int i = 0; i < 4; i++)
-        fresh[i] = 1.0f + static_cast<float>(i);
     cudaStream_t s = nullptr;
     ASSERT_EQ(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking), cudaSuccess);
     auto hold = [](void*) { std::this_thread::sleep_for(std::chrono::milliseconds(20)); };
     ASSERT_EQ(cudaLaunchHostFunc(s, hold, nullptr), cudaSuccess);
-    ASSERT_EQ(cudaMemcpyAsync(d.data, fresh, d.nbytes(), cudaMemcpyHostToDevice, s), cudaSuccess);
+    fill_iota_plus_one<<<1, 32, 0, s>>>(static_cast<float*>(d.data), 4);
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
     const std::pair<int32_t, float> bias[] = {{2, 0.5f}};
     apply_logit_bias(static_cast<float*>(d.data), 4, bias, 1, s);
     ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
@@ -102,7 +104,6 @@ TEST(SamplingAdvancedTest, LogitBiasFallbackReadsOnTheCallerStream) {
     EXPECT_FLOAT_EQ(out[2], 3.5f) << "the fallback read the logit before the stream wrote it";
     EXPECT_FLOAT_EQ(out[1], 2.0f);
     cudaStreamDestroy(s);
-    cudaFreeHost(fresh);
     free_gpu(d);
 }
 
