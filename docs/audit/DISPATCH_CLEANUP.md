@@ -473,6 +473,39 @@ Code head `2ac22739`, image `imp:b7-final`, against the Phase 3 baseline image `
 | H-012, H-014 | ship | gates above |
 | `kStrict` at the 7 parse sites | DEFER to the deferred list | behaviour change on malformed tensor names ("3x" -> layer 3 today); belongs in a fix PR with one malformed-name test per loader |
 
+## 2026-10-15 Phase 4 B5 (validator)
+
+Branch `cleanup/b5-magic-numbers` head `5a6b6e1c` (H-029, C-032, C-033 rename part, C-034, H-031, H-032; builder log on the branch), image `imp:b5-final`. Verdict: FAIL on test-gpu; not shipped.
+
+| gate | reference | B5 | result |
+|---|---|---|---|
+| build warnings | 13 | 13, diff empty | PASS |
+| SASS hash per kernel vs `imp:b4-final`, 3 binaries | - | 0 removed, 0 added | PASS |
+| PTX imp-server vs `imp:b4-final` | 886193 lines | diff 0 | PASS |
+| reference dumps | `*.choices.json` | 30/30 byte-identical | PASS |
+| decode tg256 pooled median | 371.63 tok/s | 370.72 (-0.24 %) | PASS |
+| `make test-gpu`, run 1 | 0 FAILED | `DeviceFaultSignalTest.FaultInsideAStepCancelsFaultsAndRefusesLaterRequests` FAILED (child exit 7: "the fault kernel did not poison the context"); suite stopped, DetEval + Qwen38 tokenizer not run | FAIL |
+| `make test-gpu`, run 2 | - | same test FAILED (child exit 8: `AsyncGraphLoop: no token for 30 s`) | FAIL |
+| control: `make test-gpu` on `imp:b4-final` (main without B5), between the two | - | test OK (3106 ms), suite green | - |
+
+| isolated runs of the test (`--gtest_filter='DeviceFaultSignalTest.*'`) | failed / runs |
+|---|---|
+| baseline image `imp:test-imp-baseline-016f0c60` | 0 / 60 |
+| `imp:b1-base` (main 8d4c4148, pre-cleanup) | 0 / 20 |
+| `imp:b1-final`, `b2-final`, `b3-final`, `b4-final` | 1 / 20, 1 / 20, 2 / 20, 1 / 20 |
+| `imp:b5-final` | 2 / 40 |
+| B5 with a DIAG print: dev build / image | 0 / 40, 0 / 40 |
+| all isolated failures | 7, all within the first 120 runs; 0 / 160 after them, every image |
+
+## 2026-10-15 Phase 4 B5 (orchestrator decision)
+
+| item | decision | why |
+|---|---|---|
+| B5 | REVERT: not merged; branch `cleanup/b5-magic-numbers` kept | dispatch rule: any gate failure reverts, no fix forward; full suite red 2/2 with B5, green on the control |
+| B5 re-validation | later: 3 x `make test-gpu` on a rebuilt B5 image vs 3 x main, interleaved | separate a B5 cause from the timing flake |
+| `DeviceFaultSignalTest` timing flake | new finding, needs a GPU repro | isolated failures on 5 images with unrelated code; exit 7 and exit 8 are two failure modes |
+| C-033 runtime `device_sm_count()` | DEFER | turns `kMinBlocks` into a runtime value; retry-on-error is a behaviour change |
+
 ## 2026-10-15 Phase 4 B6 (builder)
 
 Branch `cleanup/b6-headers-build` off `origin/main` 887edce4, code head d85a30e2. Compile + CPU only, no GPU run. `make build DOCKER_IMG=imp:b6-branch`: 13 unique warning lines (main `imp:b6-main`: 13), diff empty. `make dev` green; `make dev-test` 13/13. Every commit passed `make preflight` (0 failures). Code diff: 14 files, +74 / -46.
