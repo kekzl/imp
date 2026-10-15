@@ -307,3 +307,37 @@ Branch `cleanup/b3-launch-checks` off `origin/main` b87b0364, head 32213359. Com
 | apa.cuh is vendored ("change there first, then copy") | header line 4; edited in ddf4f20e, reverted in 7e445f93 | add a peek after `reset_stats_kernel` in kekzl/apa, re-vendor, drop the ALLOWLIST entry (a stale entry fails the gate) |
 | tools/ outside the discard gate | same matcher over `tools/imp-bench`, `imp-quantize`, `imp-cli`: 171 (bench_attention.cu 89, bench_gemm.cu 63, bench_q8_imma.cu 12, imp-quantize 7) | next batch |
 | GPU-only checks | no GPU in this batch | validator list in the B3 report |
+
+## 2026-10-15 Phase 4 B3 (validator)
+
+Code head `32213359`, image `imp:b3-final`, against the Phase 3 baseline `5a30cb5f`. Verdict: all gates PASS, both mutations caught.
+
+| gate | baseline | B3 | result |
+|---|---|---|---|
+| build warnings | 13 unique lines | 13, diff empty | PASS |
+| `make test-gpu` | 0 FAILED | 0 FAILED, `[ RUN ]` list diff 0 lines | PASS |
+| reference dumps (5 models x 3 prompts x 2 runs) | `*.choices.json` | 30/30 byte-identical | PASS |
+| ptxas rows, imp-server / imp-cli / imp-quantize | 1024 / 1024 / 1026 | identical | PASS |
+| decode tg256 pooled median | 371.63 tok/s (gate 364.20..379.06) | 371.73 (+0.03 %) | PASS |
+| decode tg256 after pp2048 | 345.41 | 345.60 (+0.06 %) | PASS |
+| prefill pp512 / pp2048 | 30444 (30125..30530) / 48919 (48739..49049) | 30430 / 48979 | PASS |
+| `cuBLAS error` lines, test-gpu + 10 dump servers | 0 / 0 | 0 / 0 | PASS: no silently failing cuBLAS call on the success path |
+| `kernel launch failed` lines, test-gpu | 7 | 9 | PASS: the 2 new lines are the new `pdl_launch.cuh:38` check reporting the error `GgufQ8_0Dp4aRegistryDispatchMatchesDirectPath` already raised in the baseline |
+
+| mutation | binary, filter | fixed | mutant |
+|---|---|---|---|
+| C-014: dp4a row-parallel GEMV `pdl::launch` block 2048 | test-compute `GemmDP4ATest.Q8_0_Q8_1_Basic` | exit 0, 0 log lines | exit 1, 1 `CUDA kernel launch failed at` line |
+| H-016: `vision_gemm` lda 0 | test-e2e `VisionGolden.Gemma3SigLIP` | exit 0, 0 lines, 0 skipped | exit 1, 164 `cuBLAS error: cublasGemmEx` lines |
+
+| finding (not B3) | evidence | next step |
+|---|---|---|
+| test passes while raising CUDA errors | `GemmKernelRegistryTest.GgufQ8_0Dp4aRegistryDispatchMatchesDirectPath`: `cudaMemsetAsync` `invalid argument` at `gemm_dp4a.cu:143-144` and a failed launch at `gemm_dp4a.cu:135`, in the baseline and in B3 | find-stubs pass: assert no CUDA error in that test |
+
+## 2026-10-15 Phase 4 B3 (orchestrator decision)
+
+| row | decision | why |
+|---|---|---|
+| C-014, C-015, H-016, H-017 | ship | gates above |
+| `apa.cuh` launch-guard allowlist entry | GO | vendored from kekzl/apa; the entry goes when upstream adds the check |
+| H-008 incl. H-007 (3 dead inline functions), `apa.cuh:pass2` dead-inline allowlist entry | GO | no callers, ptxas rows identical; B4 drops H-007 |
+| 171 discarded results in `tools/imp-bench`, `imp-quantize`, `imp-cli` | next batch | outside the shipped binaries' hot paths |
