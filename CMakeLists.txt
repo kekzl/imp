@@ -404,9 +404,6 @@ if(IMP_USE_CUTLASS)
     endif()
 endif()
 
-# Note: TurboQuant paged attention previously required a fast-math override
-# (ptxas C7600 on sm_120a). This is resolved by using sm_120f instead.
-
 set(IMP_RUNTIME_SOURCES
     src/runtime/process_diag_install.cpp
     src/runtime/config.cpp
