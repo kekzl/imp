@@ -624,3 +624,25 @@ Branch `cleanup/b8-warnings` off `origin/main` 36fa6317, code head d5c0c5d1. Com
 | `IMP_CUDA_CHECK_LOG` text in `executor_attention_prefill.cpp:202,205` | `#call` stringifies `kk.data`/`vv.data`, now `seq_k.data`/`seq_v.data`: CUDA-error message text only | none |
 | `// clang-format off` in the two attention fragments | `git clang-format` formats a body fragment as top-level code: every changed line of a top-level block is dedented | none; applies to any later edit of those fragments |
 | GPU-only checks | no GPU in this batch | validator: test-gpu (`*JsonConstrain*`, `*SchemaConstrain*`, `*Regex*`, `*Gbnf*`, `*ToolCall*`), reference dumps (attention lambdas), PTX diff |
+
+## 2026-10-15 Phase 4 B8 (validator)
+
+Code head `d5c0c5d1`, image `imp:b8-final`; paired control `imp:main-ctrl` (main `36fa6317`, the branch base). Verdict: all gates PASS.
+
+| gate | main control | B8 | result |
+|---|---|---|---|
+| build warnings (with `-Wshadow` on) | 13 | 13, diff empty; merged with main (B6, B7): 13, 0 `-Wshadow` | PASS |
+| SASS hash per kernel, imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 | diff 0 / 0 / 0 | PASS |
+| PTX imp-server | 886193 lines | diff 0 | PASS |
+| `make test-gpu` | 2/2 green (B6 validator run) | 2/2 green, 3700 `[ RUN ]` each, list diff 0; `DeviceFaultSignalTest.FaultInside...` OK both | PASS |
+| reference dumps vs the Phase 3 baseline | - | 30/30 byte-identical | PASS |
+| decode tg256 pooled median, paired run | 366.12 tok/s | 366.55 (+0.12 %) | PASS |
+| prefill pp512 / pp2048, paired run | 29581 / 48374 | 30078 / 48269 | PASS |
+
+## 2026-10-15 Phase 4 B8 (orchestrator decision)
+
+| row | decision | why |
+|---|---|---|
+| H-027 (6 shorten + 33 shadow sites), `-Wshadow` for first-party host C++, H-025 (`reset()` -> `rewind()`) | ship | gates above |
+| `// clang-format off` in `executor_attention_decode.cpp`, `executor_attention_prefill.cpp` | accept | precedent in 3 files (`image_decode.cpp`, `arch_registry.cpp`, `fim.cpp`); `__LINE__` in error texts shifts by 1 |
+| 2 `readability-inconsistent-declaration-parameter-name` hints in `tensor.h:47,50` | accept | keeps 120 `/*on_device=*/` argument comments valid; not a gated check |
