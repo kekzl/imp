@@ -494,12 +494,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                hd, cfg.qk_rope_head_dim, cfg.kv_lora_rank, mla_absorb_max_seq_, stream);
     }
 
-    // Decode attention for `n` one-token rows: historical inline block, now a
+    // Decode attention for `sub_n` one-token rows: historical inline block, now a
     // lambda so ragged prefill can hand its riders (mixed prefill+decode step)
-    // to it as ONE batched launch per layer. `state`/`layer_block_tables` are
+    // to it as ONE batched launch per layer. `sub_state`/`sub_block_tables` are
     // the sub-batch's own (block tables, context lens, positions start at its first sequence).
-    auto decode_attend = [&](const InferenceState& state, int n, int row_begin, Tensor qv, Tensor kk,
-                             Tensor vv, Tensor ao, const int* layer_block_tables) {
+    auto decode_attend = [&](const InferenceState& sub_state, int sub_n, int row_begin, Tensor sub_q,
+                             Tensor sub_k, Tensor sub_v, Tensor sub_ao, const int* sub_block_tables) {
 #include "exec/executor_attention_decode.cpp"  // NOLINT(bugprone-suspicious-include): body fragment, not a TU
     };
 
@@ -508,10 +508,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         // parameterized on per-sequence geometry so the ragged cross-sequence path
         // can loop it. Non-ragged callers pass bt_flat=nullptr, keeping
         // write_kv_cache on its historical default path.
-        auto prefill_attend_seq = [&](int n, int q_offset, int row_begin, Tensor qv, Tensor kk,
-                                      Tensor vv, Tensor ao, const int* layer_block_tables,
-                                      const int* bt_flat, const int* bt_swa_flat,
-                                      const int* seq_positions) {
+        auto prefill_attend_seq = [&](int seq_n, int q_offset, int row_begin, Tensor seq_q, Tensor seq_k,
+                                      Tensor seq_v, Tensor seq_ao, const int* seq_block_tables,
+                                      const int* bt_flat, const int* bt_swa_flat, const int* seq_positions) {
 #include "exec/executor_attention_prefill.cpp"  // NOLINT(bugprone-suspicious-include): body fragment, not a TU
         };
         if (state.ragged_prefill()) {

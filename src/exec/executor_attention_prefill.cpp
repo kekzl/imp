@@ -3,6 +3,7 @@
 // Omitted from CMake; must not be compiled alone. Per-sequence geometry
 // arrives as lambda parameters; everything else is captured by reference. `return` falls through to
 // `after_attention`.
+// clang-format off
         // Chunked prefill (prefill_offset>0): gathers past [0,prefill_offset) KV
         // to contiguous, appends the current chunk, runs rectangular
         // attention_cublas_prefill with q_offset. cudaMallocAsync per layer here
@@ -29,7 +30,7 @@
 
             int kv_layer = get_kv_layer(kv_layer_map_, layer);
             int kv_bs = cache->block_size();
-            int ctx_len = q_offset + n;
+            int ctx_len = q_offset + seq_n;
             // Of the chunked branches, ONLY cuBLAS consumes attn_scores_. FP16-QK FA2
             // (hd=128) and tiled FMHA are O(n), no S-matrix. Uniform per-layer shapes
             // (GDN/Mamba2 hybrids) are served by the O(n) family too; only truly
@@ -54,17 +55,17 @@
             // aborted once cumulative ctx_len crossed s_cap even when the matrix still
             // fit). FP32 overflow auto-falls back to FP16-S, so only the FP16 footprint needs guarding here.
             int s_cap = attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
-            int64_t fp16_elems_needed = static_cast<int64_t>(n) * ctx_len;
+            int64_t fp16_elems_needed = static_cast<int64_t>(seq_n) * ctx_len;
             int64_t fp16_elems_avail = static_cast<int64_t>(s_cap) * s_cap;
             const bool smatrix_fits =
-                s_cap > 0 && n <= s_cap && fp16_elems_needed <= fp16_elems_avail;
+                s_cap > 0 && seq_n <= s_cap && fp16_elems_needed <= fp16_elems_avail;
             // Spec-verify chunks (small n, growing ctx_len) on hd!=128 land on cuBLAS
             // below the FMHA threshold, and cuBLAS re-runs per-new-shape algo
             // selection on every call (workspace memset + benchmark + blocking sync),
             // pure churn per verify. The tiled FMHA keeps no shape-keyed state, so it
             // is preferred for small chunks inside its correctness domain (#847).
             // hd 64/128 never reach this (FA2 serves them); heterogeneous shapes stay on cuBLAS.
-            const bool small_growing_chunk = n <= 32 && hd != 128;
+            const bool small_growing_chunk = seq_n <= 32 && hd != 128;
             // hd=512 never prefers the fused path: the SMEM-capped WMMA FMHA is
             // several times slower than cuBLAS there. Stays on cuBLAS while the
             // S-matrix fits; the fused hd=512 kernel serves only the S-matrix-overflow (O(n)) fallback.
@@ -80,7 +81,7 @@
                 IMP_LOG_ERROR(
                     "chunked_prefill: attn_scores_ capacity %d×%d=%lld too small for "
                     "n=%d × ctx_len=%d = %lld at L%d — engine should have prevented this",
-                    s_cap, s_cap, (long long)fp16_elems_avail, n, ctx_len, (long long)fp16_elems_needed,
+                    s_cap, s_cap, (long long)fp16_elems_avail, seq_n, ctx_len, (long long)fp16_elems_needed,
                     layer);
                 std::abort();
             }
@@ -105,18 +106,18 @@
             bool paged_kv_written = false;
             if (!cap_replay && kvt == QType::NVFP4 && hd == 128 && shapes_uniform && !attn_sinks &&
                 state.n_sequences == 1 && dispatch_policy().attention.mxfp4_paged_kv) {
-                write_kv_cache(layer, state, stream, row_begin, n, bt_flat, bt_swa_flat, seq_positions);
+                write_kv_cache(layer, state, stream, row_begin, seq_n, bt_flat, bt_swa_flat, seq_positions);
                 paged_kv_written = true;
-                int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
-                int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
-                Tensor q4 = qv.reshape(4, q4s);
-                Tensor o4 = ao.reshape(4, o4s);
+                int64_t q4s[4] = {1, (int64_t)seq_n, (int64_t)nh, (int64_t)hd};
+                int64_t o4s[4] = {1, (int64_t)seq_n, (int64_t)nh, (int64_t)hd};
+                Tensor q4 = seq_q.reshape(4, q4s);
+                Tensor o4 = seq_ao.reshape(4, o4s);
                 if (fmha_sm120_mxfp4_prefill_paged(
-                        q4, o4, static_cast<const half*>(kk.data), static_cast<const half*>(vv.data),
+                        q4, o4, static_cast<const half*>(seq_k.data), static_cast<const half*>(seq_v.data),
                         static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
                         static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
                         static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
-                        static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), layer_block_tables,
+                        static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), seq_block_tables,
                         kv_bs, ctx_len, nkv, scale, /*causal=*/true, layer_sliding_window,
                         cfg.attn_logit_softcap, stream, q_offset,
                         dispatch_policy().attention.mxfp4_promote_budget)) {
@@ -130,21 +131,21 @@
             // Sparse prefill (attention.sparse_prefill_topk_tokens): this chunk attends to its own
             // rows plus the selected past pages, compacted ascending; past keys are post-RoPE, so
             // only the causal offset changes (att_off = selected past tokens).
-            const auto [past_bt, att_off] = sparse_prefill_pick_(static_cast<const half*>(qv.data), n, cache,
-                                                                 kv_layer, layer_block_tables, q_offset, nh,
+            const auto [past_bt, att_off] = sparse_prefill_pick_(static_cast<const half*>(seq_q.data), seq_n, cache,
+                                                                 kv_layer, seq_block_tables, q_offset, nh,
                                                                  nkv, hd, cap_replay, paged_kv_written,
                                                                  layer_sliding_window, attn_sinks, stream);
             // APA straight from the FP16 paged cache: no gather, no K/V scratch (FP16 cache only, so the
             // NVFP4 branch above has not written this chunk). Tile cache only over the uncompacted past.
-            if (try_apa_paged_prefill(dispatch_policy(), cap_replay, qv, cache, kv_layer, past_bt, kv_bs, kk,
-                                      vv, att_off, ao, n, nh, nkv, hd, scale, layer_sliding_window,
+            if (try_apa_paged_prefill(dispatch_policy(), cap_replay, seq_q, cache, kv_layer, past_bt, kv_bs, seq_k,
+                                      seq_v, att_off, seq_ao, seq_n, nh, nkv, hd, scale, layer_sliding_window,
                                       cfg.attn_logit_softcap, stream, attn_sinks,
                                       att_off == q_offset ? state.prefill_req_id : -1)) {
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::APA);
-                write_kv_cache(layer, state, stream, row_begin, n, bt_flat, bt_swa_flat, seq_positions);
+                write_kv_cache(layer, state, stream, row_begin, seq_n, bt_flat, bt_swa_flat, seq_positions);
                 return;
             }
-            const int att_ctx = att_off + n;
+            const int att_ctx = att_off + seq_n;
             const int gather_cap = cap_replay ? state.ctx_capacity : att_off;
             const int* d_past = cap_replay ? state.d_past_len : nullptr;
             size_t full_bytes = (size_t)att_ctx * nkv * hd * sizeof(half);
@@ -193,16 +194,16 @@
 
             // Append current chunk's K/V at offset att_off.
             if (cap_replay) {
-                kv_chunk_append_fp16(k_full, static_cast<const half*>(kk.data), state.d_past_len, n,
+                kv_chunk_append_fp16(k_full, static_cast<const half*>(seq_k.data), state.d_past_len, seq_n,
                                      nkv * hd, stream);
-                kv_chunk_append_fp16(v_full, static_cast<const half*>(vv.data), state.d_past_len, n,
+                kv_chunk_append_fp16(v_full, static_cast<const half*>(seq_v.data), state.d_past_len, seq_n,
                                      nkv * hd, stream);
             } else {
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(k_full + (size_t)att_off * nkv * hd, kk.data,
-                                                   (size_t)n * nkv * hd * sizeof(half),
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(k_full + (size_t)att_off * nkv * hd, seq_k.data,
+                                                   (size_t)seq_n * nkv * hd * sizeof(half),
                                                    cudaMemcpyDeviceToDevice, stream));
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(v_full + (size_t)att_off * nkv * hd, vv.data,
-                                                   (size_t)n * nkv * hd * sizeof(half),
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(v_full + (size_t)att_off * nkv * hd, seq_v.data,
+                                                   (size_t)seq_n * nkv * hd * sizeof(half),
                                                    cudaMemcpyDeviceToDevice, stream));
             }
 
@@ -226,22 +227,22 @@
             // threshold.
             if (cap_replay) {
                 // Replay mode is FA2-only; a decline throws rather than record a stale-length fallback.
-                fa2_prefill_for_replay(dispatch_policy(), qv, k_full_t, v_full_t, ao, n, state.ctx_capacity,
+                fa2_prefill_for_replay(dispatch_policy(), seq_q, k_full_t, v_full_t, seq_ao, seq_n, state.ctx_capacity,
                                        nh, nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
                                        att_off, stream, state.context_lens, attn_sinks);
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
             } else if (const AttnPrefillOuter fp4 = try_fp4_prefill(
-                           dispatch_policy(), qv, k_full_t, v_full_t, ao, n, att_ctx, nh, nkv, hd, scale,
+                           dispatch_policy(), seq_q, k_full_t, v_full_t, seq_ao, seq_n, att_ctx, nh, nkv, hd, scale,
                            layer_sliding_window, cfg.attn_logit_softcap, att_off, stream, attn_sinks);
                        fp4 != AttnPrefillOuter::UNSET) {
                 dispatch_record::set_attn_prefill_outer(fp4);
-            } else if (try_fa2_fp16qk_prefill(dispatch_policy(), qv, k_full_t, v_full_t, ao, n, att_ctx, nh,
+            } else if (try_fa2_fp16qk_prefill(dispatch_policy(), seq_q, k_full_t, v_full_t, seq_ao, seq_n, att_ctx, nh,
                                               nkv, hd, scale, layer_sliding_window, cfg.attn_logit_softcap,
                                               att_off, stream, /*d_kv_len=*/nullptr, attn_sinks)) {
                 // chunked prefill: FP16-QK FA2 (no S-matrix, no e4m3 noise); declines exactly where
                 // chunk_fa2_serves is false (fa2_serves_head_dim + fa2_fp16qk != never).
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
-            } else if (try_hd512_row_invariant_prefill(dispatch_policy(), hd, qv, k_full_t, v_full_t, ao, n,
+            } else if (try_hd512_row_invariant_prefill(dispatch_policy(), hd, seq_q, k_full_t, v_full_t, seq_ao, seq_n,
                                                        att_ctx, nh, nkv, scale, layer_sliding_window,
                                                        cfg.attn_logit_softcap, att_off, stream, attn_sinks)) {
                 // Same kernel as the single-shot prefill: a row matches in every chunk (#2167).
@@ -252,11 +253,11 @@
                 // the SMEM-capped fused hd=512 kernel). hd=256 SWA layers took FA2 above; only hd=512 layers
                 // land here.
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS);
-                attention_cublas_prefill(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd, scale,
+                attention_cublas_prefill(seq_q, k_full_t, v_full_t, seq_ao, attn_scores_, nh, nkv, hd, scale,
                                          /*causal=*/true, cfg.attn_logit_softcap, att_off, stream,
                                          layer_sliding_window, attn_sinks);
             } else if (hd == 512 && !prefer_fmha && s_cap > 0 &&
-                       attention_cublas_prefill_sliced(qv, k_full_t, v_full_t, ao, attn_scores_, nh, nkv, hd,
+                       attention_cublas_prefill_sliced(seq_q, k_full_t, v_full_t, seq_ao, attn_scores_, nh, nkv, hd,
                                                        scale, /*causal=*/true, cfg.attn_logit_softcap,
                                                        att_off, stream, layer_sliding_window, attn_sinks)) {
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS_SLICED);
@@ -269,13 +270,13 @@
                 // chunks above the FMHA threshold, any chunk the S-matrix cannot hold, and
                 // hd=512 only when the workspace is too degraded even for 16-row cuBLAS
                 // slices. Learned sinks ride along (#992).
-                int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
+                int64_t q4s[4] = {1, (int64_t)seq_n, (int64_t)nh, (int64_t)hd};
                 int64_t kv4s[4] = {1, (int64_t)att_ctx, (int64_t)nkv, (int64_t)hd};
-                int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
-                Tensor q4 = qv.reshape(4, q4s);
+                int64_t o4s[4] = {1, (int64_t)seq_n, (int64_t)nh, (int64_t)hd};
+                Tensor q4 = seq_q.reshape(4, q4s);
                 Tensor k4 = k_full_t.reshape(4, kv4s);
                 Tensor v4 = v_full_t.reshape(4, kv4s);
-                Tensor o4 = ao.reshape(4, o4s);
+                Tensor o4 = seq_ao.reshape(4, o4s);
                 dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FMHA_CHAIN);
                 attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
                                            cfg.attn_logit_softcap, stream, dispatch_policy(), att_off,
@@ -289,7 +290,7 @@
             // Persist current chunk's K/V (same as non-chunked path).
             // Skipped when the paged-FP4 branch already appended it above.
             if (!paged_kv_written)
-                write_kv_cache(layer, state, stream, row_begin, n, bt_flat, bt_swa_flat, seq_positions);
+                write_kv_cache(layer, state, stream, row_begin, seq_n, bt_flat, bt_swa_flat, seq_positions);
             return;
         }
 
@@ -304,11 +305,11 @@
         // hd=512 kernel, Bq=16 forced by its 99 KB opt-in). The fused hd=512
         // kernel exists only as the O(n)-memory overflow fallback for long context.
         const bool s_matrix_fits = attn_scores_buf_ != nullptr &&
-                                   n <= static_cast<int>(attn_scores_.shape[1]);
+                                   seq_n <= static_cast<int>(attn_scores_.shape[1]);
         // FMHA only above the S-matrix threshold (see the chunked path for why the
         // #493 prefer-FA2-everywhere override was reverted). hd=512 never prefers
         // the fused path (slower than cuBLAS); stays on cuBLAS until the S-matrix no longer fits.
-        const bool prefer_fmha = (n >= dispatch_policy().attention.fmha_prefill_threshold) && hd != 512;
+        const bool prefer_fmha = (seq_n >= dispatch_policy().attention.fmha_prefill_threshold) && hd != 512;
 
         // FP16-QK FA2 is the primary hd=128 prefill kernel at EVERY length: O(n)
         // memory (no S-matrix), at or above cuBLAS throughput across the whole
@@ -321,18 +322,18 @@
         // softmax mask); the historic hd=256+window failure was root-caused to
         // the fp8-QK kernel's raw e4m3 conversion (#511), now opt-in only - the
         // FP16 WMMA kernel serving hd=256 is PPL-identical to cuBLAS.
-        if (const AttnPrefillOuter fp4 = try_fp4_prefill(dispatch_policy(), qv, kk, vv, ao, n, n, nh, nkv, hd,
+        if (const AttnPrefillOuter fp4 = try_fp4_prefill(dispatch_policy(), seq_q, seq_k, seq_v, seq_ao, seq_n, seq_n, nh, nkv, hd,
                                                          scale, layer_sliding_window, cfg.attn_logit_softcap,
                                                          /*q_offset=*/0, stream, attn_sinks);
             fp4 != AttnPrefillOuter::UNSET) {
             dispatch_record::set_attn_prefill_outer(fp4);
-        } else if (try_fa2_fp16qk_prefill(dispatch_policy(), qv, kk, vv, ao, n, n, nh, nkv, hd, scale,
+        } else if (try_fa2_fp16qk_prefill(dispatch_policy(), seq_q, seq_k, seq_v, seq_ao, seq_n, seq_n, nh, nkv, hd, scale,
                                           layer_sliding_window, cfg.attn_logit_softcap, /*q_offset=*/0,
                                           stream,
                                           /*d_kv_len=*/nullptr, attn_sinks)) {
             // handled by FA2 f16 — no S-matrix needed (hd 128/256, incl. Gemma-4 SWA)
             dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FA2_FP16QK);
-        } else if (try_hd512_row_invariant_prefill(dispatch_policy(), hd, qv, kk, vv, ao, n, n, nh, nkv,
+        } else if (try_hd512_row_invariant_prefill(dispatch_policy(), hd, seq_q, seq_k, seq_v, seq_ao, seq_n, seq_n, nh, nkv,
                                                    scale, layer_sliding_window, cfg.attn_logit_softcap,
                                                    /*q_offset=*/0, stream, attn_sinks)) {
             // Deterministic mode: cuBLAS picks its algorithm by n, so a row changed with its chunk (#2167).
@@ -343,11 +344,11 @@
             // S-matrix fits (faster than the SMEM-capped fused hd=512 kernel). hd=256 SWA layers took FA2
             // above.
             dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::CUBLAS);
-            attention_cublas_prefill(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
+            attention_cublas_prefill(seq_q, seq_k, seq_v, seq_ao, attn_scores_, nh, nkv, hd, scale,
                                      /*causal=*/true, cfg.attn_logit_softcap,
                                      /*q_offset=*/0, stream, layer_sliding_window, attn_sinks);
         } else if (hd == 512 && !prefer_fmha && attn_scores_buf_ != nullptr &&
-                   attention_cublas_prefill_sliced(qv, kk, vv, ao, attn_scores_, nh, nkv, hd, scale,
+                   attention_cublas_prefill_sliced(seq_q, seq_k, seq_v, seq_ao, attn_scores_, nh, nkv, hd, scale,
                                                    /*causal=*/true, cfg.attn_logit_softcap,
                                                    /*q_offset=*/0, stream, layer_sliding_window,
                                                    attn_sinks)) {
@@ -360,13 +361,13 @@
             // sinks to FA2 or WMMA FMHA, throws instead of falling through to a sink-blind
             // kernel). Reached by uniform models above the FMHA threshold, and by
             // hd=512 layers only when the workspace is too degraded for 16-row cuBLAS slices.
-            int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
-            int64_t kv4s[4] = {1, (int64_t)n, (int64_t)nkv, (int64_t)hd};
-            int64_t o4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
-            Tensor q4 = qv.reshape(4, q4s);
-            Tensor k4 = kk.reshape(4, kv4s);
-            Tensor v4 = vv.reshape(4, kv4s);
-            Tensor o4 = ao.reshape(4, o4s);
+            int64_t q4s[4] = {1, (int64_t)seq_n, (int64_t)nh, (int64_t)hd};
+            int64_t kv4s[4] = {1, (int64_t)seq_n, (int64_t)nkv, (int64_t)hd};
+            int64_t o4s[4] = {1, (int64_t)seq_n, (int64_t)nh, (int64_t)hd};
+            Tensor q4 = seq_q.reshape(4, q4s);
+            Tensor k4 = seq_k.reshape(4, kv4s);
+            Tensor v4 = seq_v.reshape(4, kv4s);
+            Tensor o4 = seq_ao.reshape(4, o4s);
             dispatch_record::set_attn_prefill_outer(AttnPrefillOuter::FMHA_CHAIN);
             attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, layer_sliding_window,
                                        cfg.attn_logit_softcap, stream, dispatch_policy(), /*q_offset=*/0,
@@ -374,4 +375,4 @@
         }
 
         // Persist K, V into cache for later decode steps
-        write_kv_cache(layer, state, stream, row_begin, n, bt_flat, bt_swa_flat, seq_positions);
+        write_kv_cache(layer, state, stream, row_begin, seq_n, bt_flat, bt_swa_flat, seq_positions);
