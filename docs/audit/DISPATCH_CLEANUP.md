@@ -841,3 +841,20 @@ Image `imp:fix-int-b` = this branch + `fix/device-query-cache`, vs `imp:final-ma
 | `make test-gpu` | 3710 ran (+10: 7 new H-012 tests, 4 `DeviceInfoTest`, 1 deleted), 0 failed |
 | reference dumps vs the Phase 3 baseline (GGUF, NVFP4, vision) | 15/15 identical, run 1 and run 2 |
 | decode tg256 pooled median, paired, n=10 | main 372.29, branch 371.93 tok/s (-0.10 %) |
+
+## 2026-10-16 Package 1: H-013, H-002, C-016 (owner go)
+
+| row | change | evidence |
+|---|---|---|
+| H-013 | `parse_cli_int`/`parse_cli_double` + `cli_int`/`cli_float`/`cli_double` in `tools/common/args_common.{h,cpp}` replace 44 `atoi`/`atof` (imp-cli 25, imp-server 14, shared 5); bad value = "<flag> expects ..., got '<v>'", exit 1 | `StrictCliNumbers.*` 3 tests (test-core); mutants: trailing-garbage check off, `--prefill-chunk-size` back to `atoi`, non-finite accepted: each FAIL |
+| H-002 | `ScratchStack` (213 lines, 6 tests) removed with its `StableKey` friend; MEMORY.md T4/A3.3/A5/V6/open-question rows and ARCHITECTURE.md corrected | 0 users in `src/` before removal (`rg`); build + `make dev-test` 13/13 |
+| C-016 | `tools/check_launch_guards.py` decides the 23 `#define`-body launches: body check after the `<<<`, or every expansion checked before its function closes | 23/23 guarded as written (20 body, 3 call site); selftest 10/10; mutants: `LAUNCH_INT4` body check removed FAIL, `IMP_SSM_REG` call-site check removed FAIL, split-K `cudaGetLastError` removed still OK (later peeks in `paged_attention_decode` see the uncleared error) |
+
+| gate (image `imp:p1-branch` vs `imp:p1-main`, main `bad6a308`) | result |
+|---|---|
+| SASS hash per kernel, imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 kernels, diff 0 / 0 / 0 |
+| `make test-gpu` (branch) | 3712 ran, 3624 passed, 0 failed |
+| Qwen3-8B Q8_0 `imp-cli --bench --bench-pp 512 --bench-reps 5`, 3 paired runs, median | pp512 16520.68 -> 16503.17 tok/s (-0.11 %); tg 423.76 -> 419.77 tok/s (-0.94 %), host-only change, SASS identical |
+| `make dev-test` / `make preflight` | 13/13 / 0 failures |
+
+Open rows after this package: H-011, H-015, H-022, H-028, H-030, C-004..C-007, C-012, C-017, C-018, C-023, C-024, C-029, C-031.
