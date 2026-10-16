@@ -4,6 +4,13 @@
 #include <gtest/gtest.h>
 #include "lora/lora_adapter.h"
 
+#include <unistd.h>
+
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <string>
+
 namespace imp {
 namespace {
 
@@ -41,6 +48,51 @@ TEST(LoraDimsTest, FfnTargetsRefusedWithoutDenseFfn) {
     EXPECT_FALSE(lora_proj_expected(LoraProj::UP, moe, &K, &N));
     EXPECT_FALSE(lora_proj_expected(LoraProj::DOWN, moe, &K, &N));
     EXPECT_TRUE(lora_proj_expected(LoraProj::Q, moe, &K, &N));
+}
+
+// H-012: "layers.x" is a malformed index, not layer 0 (atoi), and "3x" is not layer 3.
+TEST(LoraDimsTest, MalformedLayerIndexIsNotMapped) {
+    for (const char* key : {"base_model.model.model.layers.x.self_attn.q_proj.lora_A.weight",
+                            "base_model.model.model.layers.3x.self_attn.q_proj.lora_A.weight",
+                            "base_model.model.model.layers.4294967296.self_attn.q_proj.lora_A.weight"}) {
+        int layer = 99;
+        LoraProj proj{};
+        bool is_A = false;
+        ASSERT_TRUE(lora_parse_key(key, &layer, &proj, &is_A)) << key;
+        EXPECT_EQ(layer, -1) << key;
+    }
+    int layer = -1;
+    LoraProj proj{};
+    bool is_A = false;
+    ASSERT_TRUE(lora_parse_key("base_model.model.model.layers.3.self_attn.q_proj.lora_A.weight", &layer,
+                               &proj, &is_A));
+    EXPECT_EQ(layer, 3);
+    EXPECT_EQ(proj, LoraProj::Q);
+    EXPECT_TRUE(is_A);
+}
+
+// The load refuses the adapter and names the tensor, before any device upload.
+TEST(LoraDimsTest, MalformedLayerIndexRefusesTheLoad) {
+    const std::string key = "base_model.model.model.layers.x.self_attn.q_proj.lora_A.weight";
+    const std::string hdr = "{\"" + key + "\":{\"dtype\":\"F32\",\"shape\":[2,4],\"data_offsets\":[0,32]}}";
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("imp_lora_malformed_" + std::to_string(::getpid()) + ".safetensors");
+    {
+        std::ofstream f(path, std::ios::binary);
+        const uint64_t n = hdr.size();
+        f.write(reinterpret_cast<const char*>(&n), sizeof(n));
+        f.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
+        const std::string payload(32, '\0');
+        f.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    }
+    LoraAdapter a;
+    testing::internal::CaptureStderr();
+    const bool ok = a.load(path.string(), 4);
+    const std::string log = testing::internal::GetCapturedStderr();
+    std::filesystem::remove(path);
+    EXPECT_FALSE(ok);
+    EXPECT_NE(log.find("malformed layer index"), std::string::npos) << log;
+    EXPECT_NE(log.find(key), std::string::npos) << log;
 }
 
 }  // namespace

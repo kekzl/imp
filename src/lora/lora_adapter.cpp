@@ -17,11 +17,7 @@
 
 namespace imp {
 
-namespace {
-
-// Map a PEFT tensor key to (layer, proj, is_A). Returns false for keys that
-// are not per-layer LoRA pairs (e.g. embed/lm_head adapters — unsupported v1).
-bool parse_key(const std::string& key, int* layer, LoraProj* proj, bool* is_A) {
+bool lora_parse_key(const std::string& key, int* layer, LoraProj* proj, bool* is_A) {
     size_t lpos = key.find(".layers.");
     if (lpos == std::string::npos)
         return false;
@@ -29,7 +25,7 @@ bool parse_key(const std::string& key, int* layer, LoraProj* proj, bool* is_A) {
     size_t num_end = key.find('.', num_start);
     if (num_end == std::string::npos)
         return false;
-    *layer = parse_index(key.substr(num_start, num_end - num_start), IndexParse::kAtoi);
+    *layer = parse_index(key.substr(num_start, num_end - num_start));
 
     struct {
         const char* needle;
@@ -61,6 +57,8 @@ bool parse_key(const std::string& key, int* layer, LoraProj* proj, bool* is_A) {
     }
     return false;
 }
+
+namespace {
 
 // Convert one host tensor (F32 / F16 / BF16 wire dtype) to an F16 device
 // buffer. Returns nullptr on failure.
@@ -206,13 +204,17 @@ bool LoraAdapter::load(const std::string& path, int n_layers) {
         int layer = -1;
         LoraProj proj{};
         bool is_A = false;
-        if (!parse_key(key, &layer, &proj, &is_A)) {
+        if (!lora_parse_key(key, &layer, &proj, &is_A)) {
             if (key.find("lora") != std::string::npos)
                 IMP_LOG_WARN("LoRA: unsupported tensor '%s' skipped (v1: per-layer q/k/v/o/gate/up/down)",
                              key.c_str());
             continue;
         }
-        if (layer < 0 || layer >= n_layers) {
+        if (layer < 0) {
+            IMP_LOG_ERROR("LoRA: tensor '%s' has a malformed layer index", key.c_str());
+            return false;
+        }
+        if (layer >= n_layers) {
             IMP_LOG_ERROR("LoRA: tensor '%s' layer out of range (n_layers=%d)", key.c_str(), n_layers);
             return false;
         }

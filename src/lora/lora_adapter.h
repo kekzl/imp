@@ -63,6 +63,10 @@ struct LoraDims {
     }
 }
 
+// PEFT key "...layers.{i}.<proj>.lora_{A,B}..." -> (layer, proj, is_A); false for keys that
+// are not per-layer pairs. A malformed i ("x", "3x", overflow) yields layer -1: load() refuses.
+[[nodiscard]] bool lora_parse_key(const std::string& key, int* layer, LoraProj* proj, bool* is_A);
+
 class LoraAdapter {
 public:
     LoraAdapter() = default;
