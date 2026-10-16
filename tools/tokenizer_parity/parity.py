@@ -7,6 +7,7 @@
   parity.py compare <imp.txt> <hf.txt> [tok]  summary line; with tokenizer.json, print the diffs
 """
 import hashlib
+import os
 import random
 import sys
 
@@ -33,6 +34,10 @@ LITERALS = [
     "’curly’ “quotes” — dash – en",
     # Qwen3-VL video timestamps (Qwen3VLProcessor "<%.1f seconds>"), tokenized by imp per frame pair.
     "<0.0 seconds>", "<0.1 seconds>", "<1.2 seconds>", "<4.3 seconds>", "<29.8 seconds>", "<125.5 seconds>",
+    # Split-step shapes: digit triples (MiniCPM5, Cohere2), ignore_merges table rows (LFM2.5), Ruby $.
+    "x 1008| v12ab 2½ 12345 1234567 ٦١٥", "| Step | Method |\n|---|---|\n| 1 | `load` |\n",
+    "I'm, DON'T, they'LL, we'd've", "line1\r\nline2\r\n\r\nline3\r", "ab \t\n\ncd  ",
+    "nel\u0085next\u000bvt\u000cff", "1́ a⃝ b क्षि",
 ]
 
 POOL_SMALL = "abcXYZ 019\n\t.,!?'\"-_éüß日本\U0001F600ʼ́ <>|/"
@@ -57,6 +62,10 @@ def corpus():
     texts = list(LITERALS)
     texts += ["".join(rnd.choice(POOL_SMALL) for _ in range(rnd.randint(1, 40))) for _ in range(150)]
     texts += ["".join(rnd.choice(POOL_WIDE) for _ in range(rnd.randint(1, 60))) for _ in range(1000)]
+    # EXTRA (run.sh --extra): whole files as one record each, e.g. tools/analysis/ppl_corpus_45k.txt.
+    for path in filter(None, os.environ.get("EXTRA", "").split(":")):
+        with open(path, encoding="utf-8") as f:
+            texts.append(f.read())
     return texts
 
 
@@ -75,6 +84,8 @@ def main():
     elif mode == "hf":
         from tokenizers import Tokenizer
         tok = Tokenizer.from_file(sys.argv[2])
+        tok.no_truncation()  # some tokenizer.json ship a max_length; EXTRA records exceed it
+        tok.no_padding()
         for t in corpus():
             print(" ".join(str(i) for i in tok.encode(t, add_special_tokens=False).ids))
     elif mode == "chat":

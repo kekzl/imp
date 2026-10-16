@@ -1,6 +1,7 @@
 #include "model/tokenizer.h"
 #include "core/logging.h"
 #include "model/json_util.h"  // shared JValue/JsonParser/jobj_find (was duplicated here)
+#include "model/tokenizer_regex.h"
 #include "model/unicode_class.h"
 #include <algorithm>
 #include <cassert>
@@ -355,75 +356,6 @@ static int gpt2_to_byte(const char* s, int len) {
     return -1;
 }
 
-// GPT2 pre-tokenization: splits text into chunks before BPE, a simplified cl100k_base/Qwen2
-// pre-tokenizer. Spaces attach to the following word; letters and digit runs (up to 3) each
-// form a chunk; punctuation chars are individual chunks; newlines group together.
-
-static std::vector<std::string> gpt2_pre_tokenize(const std::string& text) {
-    std::vector<std::string> result;
-    if (text.empty())
-        return result;
-
-    size_t i = 0;
-    while (i < text.size()) {
-        std::string chunk;
-
-        // Collect leading spaces/tabs (attach to next non-whitespace chunk)
-        while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) {
-            chunk += text[i++];
-        }
-
-        if (i >= text.size()) {
-            if (!chunk.empty())
-                result.push_back(chunk);
-            break;
-        }
-
-        unsigned char c = static_cast<unsigned char>(text[i]);
-
-        if (c == '\n' || c == '\r') {
-            // Newlines: collect consecutive newlines
-            while (i < text.size() && (text[i] == '\n' || text[i] == '\r')) {
-                chunk += text[i++];
-            }
-        } else if (std::isalpha(c) || c >= 128) {
-            // Letters (ASCII + multi-byte UTF-8 treated as letters)
-            while (i < text.size()) {
-                unsigned char cc = static_cast<unsigned char>(text[i]);
-                if (std::isalpha(cc) || cc >= 128) {
-                    int len = 1;
-                    if ((cc & 0xE0) == 0xC0)
-                        len = 2;
-                    else if ((cc & 0xF0) == 0xE0)
-                        len = 3;
-                    else if ((cc & 0xF8) == 0xF0)
-                        len = 4;
-                    for (int j = 0; j < len && i < text.size(); j++)
-                        chunk += text[i++];
-                } else {
-                    break;
-                }
-            }
-        } else if (std::isdigit(c)) {
-            // Digits: groups of up to 3
-            int count = 0;
-            while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i])) && count < 3) {
-                chunk += text[i++];
-                count++;
-            }
-        } else {
-            // Punctuation/other: single character
-            chunk += text[i++];
-        }
-
-        if (!chunk.empty()) {
-            result.push_back(chunk);
-        }
-    }
-
-    return result;
-}
-
 namespace {
 
 bool jnum_true(const JValue* v) { return v && v->type == JType::NUMBER && v->num_val != 0.0; }
@@ -434,52 +366,10 @@ uint8_t added_token_strip(const JValue& tok) {
                                 (jnum_true(jobj_find(tok, "rstrip")) ? 2 : 0));
 }
 
-// A Split step's pattern.Regex, "" when it has none.
-std::string split_regex(const JValue& pt) {
-    std::string rx;
-    const JValue* pat = jobj_find(pt, "pattern");
-    if (pat && pat->type == JType::OBJECT)
-        jobj_opt_string(*pat, "Regex", rx);
-    return rx;
-}
-
-// A pre-tokenizer Split step as a scanner step: "re:<regex>" for an Isolated, non-inverted regex
-// split, "!" for any other (not expressible).
-std::string split_step(const JValue& pt) {
-    std::string behavior;
-    jobj_opt_string(pt, "behavior", behavior);
-    const JValue* pat = jobj_find(pt, "pattern");
-    std::string rx;
-    const bool regex = pat && pat->type == JType::OBJECT && jobj_get_string(*pat, "Regex", rx);
-    return regex && behavior == "Isolated" && !jnum_true(jobj_find(pt, "invert")) ? "re:" + rx : "!";
-}
-
-// Family named by a Split step's regex (tokenizer_pretok.cpp), "" when none matches (gpt2, #657).
-// Case classes: o200k (contractions) or Nemotron-H (none, single digits); else digit triples:
-// cl100k; [\p{L}\p{M}]+ letter runs: Qwen3.5+; plain contraction list: qwen2.
-std::string pretok_family(const std::string& rx) {
-    const bool contractions = rx.find("'s|'t|'re|'ve|'m|'ll|'d") != std::string::npos;
-    if (rx.find("\\p{Lu}") != std::string::npos)
-        return contractions ? "o200k" : "nemotron";
-    if (!contractions)
-        return "";
-    if (rx.find("\\p{N}{1,3}") != std::string::npos)
-        return "cl100k";
-    if (rx.find("[\\p{L}\\p{M}]+") != std::string::npos)
-        return "qwen35";
-    if (rx.find("|\\p{N}+|") != std::string::npos)
-        return "digitrun";
-    return "qwen2";
-}
-
-// "pre=<family>[+digits3L|+digits3R] ignore_merges=<bool>" for the load log line.
-std::string pretok_summary(const std::string& family, bool left, bool right, bool ignore_merges) {
-    std::string s = "pre=" + (family.empty() ? std::string("gpt2") : family);
-    if (left)
-        s += "+digits3L";
-    else if (right)
-        s += "+digits3R";
-    return s + (ignore_merges ? " ignore_merges=true" : " ignore_merges=false");
+// "pre=<n> regex steps|gpt2 ignore_merges=<bool>" for the load log line.
+std::string pretok_summary(const RegexPretokenizer* rp, bool ignore_merges) {
+    const std::string pre = rp ? std::to_string(rp->n_steps()) + " regex steps" : std::string("gpt2");
+    return "pre=" + pre + (ignore_merges ? " ignore_merges=true" : " ignore_merges=false");
 }
 
 }  // namespace
@@ -694,31 +584,15 @@ bool Tokenizer::load(const std::string& path) {
             if (prefix && prefix->type == JType::NUMBER)
                 add_space_prefix_ = (prefix->num_val != 0.0);
         } else if (pt_type == "Sequence") {
-            // Check inner pre-tokenizers for ByteLevel or Metaspace
+            // The encode type from the inner ByteLevel or Metaspace; the split steps themselves run
+            // in regex_pretok_ (install_regex_pretok_).
             const JValue* pretoks = jobj_find(*pre_tok, "pretokenizers");
-            // Steps for a regex list no family scanner covers (DeepSeek-V2); "!" = not expressible.
-            std::vector<std::string> split_steps;
-            bool byte_level_regex = false;
             if (pretoks && pretoks->type == JType::ARRAY) {
                 for (const auto& pt : pretoks->arr) {
                     if (pt.type != JType::OBJECT)
                         continue;
                     std::string inner_type;
                     jobj_opt_string(pt, "type", inner_type);
-                    if (inner_type == "Digits") {
-                        split_steps.push_back(jnum_true(jobj_find(pt, "individual_digits")) ? "digits:1"
-                                                                                            : "digits:0");
-                        continue;
-                    }
-                    if (inner_type == "Split") {
-                        split_steps.push_back(split_step(pt));
-                        digit_triples_right_ |= split_regex(pt) == kDigitTriplesRightRegex;
-                        digit_triples_left_ |= split_regex(pt) == kDigitTriplesLeftRegex;
-                        const std::string family = pretok_family(split_regex(pt));
-                        if (!family.empty())
-                            pre_tokenizer_ = family;
-                        continue;
-                    }
                     if (inner_type == "ByteLevel") {
                         type_ = "gpt2";
                         const JValue* prefix = jobj_find(pt, "add_prefix_space");
@@ -726,8 +600,6 @@ bool Tokenizer::load(const std::string& path) {
                             add_space_prefix_ = (prefix->num_val != 0.0);
                         else
                             add_space_prefix_ = false;
-                        const JValue* ur = jobj_find(pt, "use_regex");
-                        byte_level_regex = !ur || ur->type != JType::NUMBER || ur->num_val != 0.0;
                         break;
                     }
                     if (inner_type == "Metaspace") {
@@ -737,15 +609,6 @@ bool Tokenizer::load(const std::string& path) {
                             add_space_prefix_ = (prefix->num_val != 0.0);
                         break;
                     }
-                }
-                if (pre_tokenizer_.empty() && !split_steps.empty() && !byte_level_regex && type_ == "gpt2") {
-                    split_seq_ = compile_split_sequence(split_steps);
-                    if (split_seq_)
-                        pre_tokenizer_ = "split-seq";
-                    else
-                        IMP_LOG_WARN(
-                            "tokenizer.json: pre-tokenizer regex list not supported, using the generic "
-                            "split");
                 }
             }
         }
@@ -796,12 +659,12 @@ bool Tokenizer::load(const std::string& path) {
         }
     }
 
+    install_regex_pretok_(pre_tok);
     build_merge_pairs();  // after added_tokens, which may extend token_to_id_
-    IMP_LOG_INFO(
-        "tokenizer.json: type=%s vocab_size=%d bos=%d eos=%d add_prefix=%s %s", type_.c_str(),
-        static_cast<int>(vocab_.size()), bos_id_, eos_ids_.empty() ? -1 : eos_ids_[0],
-        add_space_prefix_ ? "true" : "false",
-        pretok_summary(pre_tokenizer_, digit_triples_left_, digit_triples_right_, ignore_merges_).c_str());
+    IMP_LOG_INFO("tokenizer.json: type=%s vocab_size=%d bos=%d eos=%d add_prefix=%s %s", type_.c_str(),
+                 static_cast<int>(vocab_.size()), bos_id_, eos_ids_.empty() ? -1 : eos_ids_[0],
+                 add_space_prefix_ ? "true" : "false",
+                 pretok_summary(regex_pretok_.get(), ignore_merges_).c_str());
     return true;
 }
 
@@ -1399,38 +1262,33 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
     return out_ids;
 }
 
-std::vector<std::string> Tokenizer::pre_tokenize_family_(const std::string& bpe_text) const {
-    // GGUF llama-bpe is the Llama 3 tokenizer.json regex, i.e. cl100k (#2520).
-    if (pre_tokenizer_ == "llama3" || pre_tokenizer_ == "llama-v3" || pre_tokenizer_ == "llama-bpe" ||
-        pre_tokenizer_ == "cl100k")
-        return cl100k_pre_tokenize(bpe_text);
-    // The gpt2 fallback's per-char punctuation blocks merges like "->", "():" (#657).
-    if (pre_tokenizer_ == "qwen2")
-        return qwen2_pre_tokenize(bpe_text);
-    if (pre_tokenizer_ == "qwen35")
-        return qwen35_pre_tokenize(bpe_text);
-    if (pre_tokenizer_ == "o200k" || pre_tokenizer_ == "gpt-4o")
-        return o200k_pre_tokenize(bpe_text);
-    if (pre_tokenizer_ == "nemotron")
-        return nemotron_pre_tokenize(bpe_text);
-    if (pre_tokenizer_ == "digitrun")
-        return digit_run_pre_tokenize(bpe_text);
-    if (pre_tokenizer_ == "split-seq" && split_seq_)
-        return split_sequence_pre_tokenize(*split_seq_, bpe_text);
-    return gpt2_pre_tokenize(bpe_text);
+// The name stays for pre_tokenizer(); the split itself is its regex (gguf_pre_regexes).
+void Tokenizer::set_pre_tokenizer(const std::string& pre) {
+    pre_tokenizer_ = pre;
+    std::string why;
+    regex_pretok_ = RegexPretokenizer::from_regexes(gguf_pre_regexes(pre), &why);
+    if (!regex_pretok_)
+        IMP_LOG_WARN("GGUF pre-tokenizer '%s': %s; using the GPT-2 regex", pre.c_str(), why.c_str());
 }
 
+// Byte-level BPE only: SentencePiece and the Gemma-4 raw-UTF-8 path pre-tokenize their own way.
+void Tokenizer::install_regex_pretok_(const JValue* pre_tok) {
+    regex_pretok_.reset();
+    if (!pre_tok || pre_tok->type != JType::OBJECT || type_ != "gpt2")
+        return;
+    std::string why;
+    regex_pretok_ = RegexPretokenizer::from_json(*pre_tok, &why);
+    if (!regex_pretok_)
+        IMP_LOG_WARN("tokenizer.json pre_tokenizer: %s; using the GPT-2 regex", why.c_str());
+}
+
+// No pre-tokenizer named (BPE without pre_tokenizer, a GGUF without tokenizer.ggml.pre, an
+// uncovered step): the GPT-2 ByteLevel regex.
 std::vector<std::string> Tokenizer::pre_tokenize_(const std::string& bpe_text) const {
-    if (!digit_triples_right_ && !digit_triples_left_)
-        return pre_tokenize_family_(bpe_text);
-    std::vector<std::string> chunks;
-    for (const std::string& piece :
-         digit_triples_right_ ? digit_triples_right_split(bpe_text) : digit_triples_left_split(bpe_text)) {
-        auto part = pre_tokenize_family_(piece);
-        chunks.insert(chunks.end(), std::make_move_iterator(part.begin()),
-                      std::make_move_iterator(part.end()));
-    }
-    return chunks;
+    if (regex_pretok_)
+        return regex_pretok_->split(bpe_text);
+    static const auto gpt2 = RegexPretokenizer::from_regexes({kGpt2PretokRegex}, nullptr);
+    return gpt2->split(bpe_text);
 }
 
 std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {

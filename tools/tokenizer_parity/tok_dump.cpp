@@ -7,6 +7,7 @@
 #include "model/safetensors_loader.h"
 #include "model/tokenizer.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -80,12 +81,16 @@ int main(int argc, char** argv) {
     std::stringstream ss;
     ss << f.rdbuf();
     const std::string all = ss.str();
+    double encode_ms = 0.0;  // "@@T <ms>": encode wall time over all records
     for (size_t pos = 0, end; (end = all.find('\x1e', pos)) != std::string::npos; pos = end + 1) {
         const std::string text = all.substr(pos, end - pos);
+        const auto t0 = std::chrono::steady_clock::now();
         auto ids = tok.encode(text, /*no_prefix=*/false);
+        encode_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         if (!ids.empty() && ids[0] == tok.bos_id() && tok.add_bos())
             ids.erase(ids.begin());  // HF add_special_tokens=False
         print_ids(tok.decode(ids) == text, ids);
     }
+    printf("@@T %.2f\n", encode_ms);
     return 0;
 }

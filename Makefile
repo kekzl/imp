@@ -107,7 +107,8 @@ DEV_CMAKE_ARGS = -DCMAKE_BUILD_TYPE=Release -DIMP_BUILD_TESTS=ON -DIMP_BUILD_TOO
                  -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest \
                  -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
                  -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
-                 -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json
+                 -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json \
+                 -DFETCHCONTENT_SOURCE_DIR_PCRE2=/deps/pcre2
 
 .PHONY: dev dev-image dev-test dev-clean test-spec-fidelity
 
@@ -728,7 +729,8 @@ tidy: lint-image
 	      -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/deps/googletest \
 	      -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
 	      -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
-	      -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json >/dev/null; \
+	      -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json \
+	      -DFETCHCONTENT_SOURCE_DIR_PCRE2=/deps/pcre2 >/dev/null; \
 	  cmake -DIN=tools/imp-server/webui/index.html -DOUT=build/generated/webui_asset.h -P cmake/embed_webui.cmake && \
 	  bash scripts/tidy_lane.sh --all'
 

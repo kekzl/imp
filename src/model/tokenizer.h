@@ -8,7 +8,8 @@
 
 namespace imp {
 
-struct SplitSequence;  // tokenizer_pretok.cpp
+class RegexPretokenizer;  // tokenizer_regex.h
+struct JValue;            // json_util.h
 
 // #1606: largest token id a tokenizer.json may declare. Ids arrive as JSON doubles and
 // index vocab_/scores_/token_types_ directly, needing both bounds: below zero is an OOB
@@ -53,9 +54,8 @@ public:
     // Pre-tokenizer type from GGUF metadata (e.g. "default", "llama3", "deepseek-llm").
     // "deepseek-r1-qwen": tokenizer.json regex and NFC equal Qwen2's, stored as "qwen2" (#2270).
     // "tekken" (Mistral / Devstral-Small-2): the nemotron scan's regex exactly (#2411).
-    void set_pre_tokenizer(const std::string& pre) {
-        pre_tokenizer_ = pre == "deepseek-r1-qwen" ? "qwen2" : pre == "tekken" ? "nemotron" : pre;
-    }
+    // Also installs the name's regex (gguf_pre_regexes) as regex_pretok_.
+    void set_pre_tokenizer(const std::string& pre);
     const std::string& pre_tokenizer() const { return pre_tokenizer_; }
 
     // Chat template string from GGUF metadata (Jinja2 format, used for detection)
@@ -191,13 +191,12 @@ private:
     bool eos_is_default_ = true;
 
     std::string type_ = "spm";   // "spm" or "gpt2"
-    std::string pre_tokenizer_;  // Pre-tokenizer type from GGUF tokenizer.ggml.pre
-    std::shared_ptr<const SplitSequence> split_seq_;  // pre_tokenizer_ == "split-seq"
-    bool digit_triples_right_ = false;  // Split kDigitTriplesRightRegex ahead of the family scan
-    bool digit_triples_left_ = false;   // Split kDigitTriplesLeftRegex ahead of the family scan
-    bool ignore_merges_ = false;        // BPE ignore_merges: a pre-token found whole in the vocab skips BPE
+    std::string pre_tokenizer_;  // GGUF tokenizer.ggml.pre name, as given
+    // tokenizer.json pre_tokenizer or GGUF tokenizer.ggml.pre on PCRE2; null: the GPT-2 regex.
+    std::shared_ptr<const RegexPretokenizer> regex_pretok_;
+    void install_regex_pretok_(const JValue* pre_tok);
+    bool ignore_merges_ = false;  // BPE ignore_merges: a pre-token found whole in the vocab skips BPE
     std::vector<std::string> pre_tokenize_(const std::string& bpe_text) const;
-    std::vector<std::string> pre_tokenize_family_(const std::string& bpe_text) const;
     bool add_bos_ = true;
     bool add_space_prefix_ = true;           // SentencePiece ▁ prefix (false for Gemma)
     bool use_default_system_prompt_ = true;  // false → skip template's hardcoded default system
@@ -235,34 +234,6 @@ private:
     std::vector<std::pair<std::string, int32_t>> special_pieces_;
     void build_special_pieces();
 };
-
-// Regex pre-tokenizer scans (tokenizer_pretok.cpp; #657), one per tokenizer.json regex family.
-// qwen2: Qwen2/Qwen3; qwen35: letter runs include \p{M}; cl100k: digit triples (Phi-4, Llama 3);
-// o200k: case-aware letter runs (gpt-oss); nemotron: o200k without contractions, single digits.
-std::vector<std::string> qwen2_pre_tokenize(const std::string& text);
-std::vector<std::string> qwen35_pre_tokenize(const std::string& text);
-std::vector<std::string> cl100k_pre_tokenize(const std::string& text);
-std::vector<std::string> o200k_pre_tokenize(const std::string& text);
-std::vector<std::string> nemotron_pre_tokenize(const std::string& text);
-
-// tokenizer.json pre-tokenizer given as a Sequence of Split(Isolated) regexes plus Digits
-// (DeepSeek-V2 / Coder-V2). Steps: "re:<regex>" or "digits:<individual 0|1>". Accepts only the
-// regex forms it can match exactly ([\s?]<class>[+], \s+$); nullptr otherwise.
-std::shared_ptr<const SplitSequence> compile_split_sequence(const std::vector<std::string>& steps);
-std::vector<std::string> split_sequence_pre_tokenize(const SplitSequence& seq, const std::string& text);
-
-// Split(Isolated) \d{1,3}(?=(?:\d{3})*\b) ahead of a family scan (Cohere2): a \d run followed by a word
-// boundary splits into right-aligned triples ("1008" -> "1" "008"); a run followed by \w stays whole.
-std::vector<std::string> digit_triples_right_split(const std::string& text);
-inline constexpr const char* kDigitTriplesRightRegex = "\\d{1,3}(?=(?:\\d{3})*\\b)";
-
-// Split(Isolated) \p{N}{1,3} ahead of a family scan (MiniCPM5): every \p{N} run splits into
-// left-aligned triples ("12345" -> "123" "45").
-std::vector<std::string> digit_triples_left_split(const std::string& text);
-inline constexpr const char* kDigitTriplesLeftRegex = "\\p{N}{1,3}";
-
-// The cl100k alternatives with an unbounded digit run \p{N}+ (MiniCPM5's second Split).
-std::vector<std::string> digit_run_pre_tokenize(const std::string& text);
 
 // NFC as encode() applies it: table compositions of Latin/Greek/Cyrillic base + combining mark,
 // and algorithmic Hangul L+V(+T). Exposed for unit tests.

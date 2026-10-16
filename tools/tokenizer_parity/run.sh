@@ -2,27 +2,30 @@
 # Tokenizer parity: imp token ids vs HF tokenizers (tokenizer.json) on a fixed 1202-string corpus.
 # CPU only. Needs a dev build of the tree under test (make dev -> build-dev/libimp.a).
 #
-#   tools/tokenizer_parity/run.sh [--tree DIR] [--chat] [--diff] MODEL...
+#   tools/tokenizer_parity/run.sh [--tree DIR] [--chat] [--diff] [--extra FILE]... MODEL...
 #
 # MODEL: a SafeTensors dir with tokenizer.json, or FILE.gguf=DIR (DIR's tokenizer.json is the
 # reference). --tree: the imp checkout whose build-dev/libimp.a is measured (default: this one).
 # --chat: ChatTemplate::apply vs transformers apply_chat_template on 3 conversations.
-# --diff: print the first 20 differing records.
+# --diff: print the first 20 differing records. --extra: append FILE as one record (absolute path
+# under /home), e.g. tools/analysis/ppl_corpus_45k.txt. The line ends with imp encode ms (all records).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TREE="$(cd "$HERE/../.." && pwd)"
 CHAT=0
 DIFF=0
+EXTRA=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --tree) TREE="$(cd "$2" && pwd)"; shift 2 ;;
         --chat) CHAT=1; shift ;;
         --diff) DIFF=1; shift ;;
+        --extra) EXTRA="${EXTRA:+$EXTRA:}$(realpath "$2")"; shift 2 ;;
         *) break ;;
     esac
 done
-[ $# -gt 0 ] || { sed -n '2,11p' "$0"; exit 2; }
+[ $# -gt 0 ] || { sed -n '2,13p' "$0"; exit 2; }
 
 PY_IMG=python:3.12-slim
 PY_PKGS="tokenizers==0.23.2 transformers==5.17.0 jinja2==3.1.6"
@@ -32,7 +35,7 @@ cp "$HERE/parity.py" "$WORK/"
 docker volume create imp-tokparity-pip >/dev/null
 
 py() {  # py <args...>: parity.py in the pinned container, models mounted read-only at their paths
-    docker run --rm -v "$WORK":/w -v imp-tokparity-pip:/root/.cache/pip -v /home:/home:ro -w /w "$PY_IMG" \
+    docker run --rm -v "$WORK":/w -v imp-tokparity-pip:/root/.cache/pip -v /home:/home:ro -e EXTRA="$EXTRA" -w /w "$PY_IMG" \
         bash -c "pip -q install $PY_PKGS >/dev/null 2>&1; python parity.py $*"
 }
 
@@ -40,6 +43,7 @@ docker run --rm -v "$TREE":/src -v "$HERE":/h:ro -v "$WORK":/w -w /src --entrypo
     "g++ -O2 -std=gnu++23 -I/src/src -I/src/tools -I/src/include \
        -isystem /usr/local/cuda/targets/x86_64-linux/include /h/tok_dump.cpp -o /w/tok_dump \
        -Wl,-rpath,/usr/local/cuda/targets/x86_64-linux/lib build-dev/libimp.a build-dev/libimp_core.a \
+       \$(ls build-dev/_deps/pcre2-build/libpcre2-8.a 2>/dev/null) \
        -L/usr/local/cuda/targets/x86_64-linux/lib -lcudart /usr/local/cuda/targets/x86_64-linux/lib/stubs/libcuda.so \
        -lcublas -lcublasLt -lculibos -lcudadevrt -lcudart_static -lrt -lpthread -ldl"
 echo "tree: $TREE @ $(git -C "$TREE" rev-parse --short HEAD)"
@@ -62,5 +66,6 @@ for spec in "$@"; do
     grep '^@@ ' "$WORK/imp.raw" | cut -c4- > "$WORK/imp.txt" || true
     extra=""
     [ "$DIFF" = 1 ] && extra="$ref/tokenizer.json"
-    printf '%-44s %s\n' "$name" "$(py compare imp.txt hf.txt $extra)"
+    ms="$(grep -oE '^@@T [0-9.]+' "$WORK/imp.raw" | cut -d' ' -f2)"
+    printf '%-44s %s  encode %s ms\n' "$name" "$(py compare imp.txt hf.txt $extra)" "${ms:--}"
 done
