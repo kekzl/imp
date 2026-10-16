@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-09-22
-commit: 9cbb8004
+verified: 2026-10-16
+commit: 01f76b7b
 -->
 
 # Supported models
@@ -35,10 +35,12 @@ Model families with a known-working code path on `main`. Throughput numbers and 
 | [Phi-4-reasoning-plus](https://huggingface.co/nvidia/Phi-4-reasoning-plus-NVFP4) | NVFP4 | 9.0 GB | 157 | SafeTensors (nvidia), fused projections. Phi-4 is an alias onto the LLaMA loader path (`src/model/arch_registry.cpp:16 {GGUF, "phi3", ModelArch::LLAMA}`), not a separate loader; no dedicated gate (#1680) |
 | [Gemma-4-12B](https://huggingface.co/AxionML/Gemma-4-12B-NVFP4) | NVFP4 | 11 GB | - | SafeTensors (Modelopt) - **dense** Gemma-4, `gemma4_unified` multimodal wrapper (nested `text_config`, `model.language_model.*` prefix, vision/audio embedders skipped). This export carries the embedders only: 0 `model.vision_tower.*` and no audio tower, so it serves as text even where a fuller release would see or hear ([LIMITATIONS](LIMITATIONS.md#model-specific-blockers)). FFN in NVFP4, attention BF16. |
 | [Llama-3.2-3B-Instruct](https://huggingface.co/unsloth/Llama-3.2-3B-Instruct-GGUF) | Q8_0 | 3.2 GB | 306 | GGUF |
+| [MiniCPM5-2B](https://huggingface.co/openbmb/MiniCPM5-2B) | bf16 | 4.7 GB | - | SafeTensors - `LlamaForCausalLM`. `ppl_corpus_45k` 10.4937 vs HF BF16 10.4138, token ids identical to HF (digit-triple pre-split). Reasoning split by `<think>` (id 8, added token). |
 | [Granite-4.2-8B](https://huggingface.co/ibm-granite/granite-4.2-8b) | bf16 / NVFP4 (imp-quantize) | 16 / 5.3 GB | - | SafeTensors - `GraniteForCausalLM` (#2412): `attention_multiplier` 1/128 replaces 1/sqrt(head_dim); embedding and residual multipliers fold into one embedding scale. `ppl_corpus_45k` 25.36 BF16, 27.17 NVFP4 (GENERIC route before: 1380.74). vs HF fp32: top-1 32/32 greedy positions, max abs logit diff 0.41. `logits_scaling` != 1 (Granite 3.x) is refused. |
 | [Olmo-3-7B-Instruct](https://huggingface.co/allenai/Olmo-3-7B-Instruct) | bf16 | 15 GB | - | SafeTensors - `Olmo3ForCausalLM`: post-norm-only block, QK-norm over all heads, 3 sliding (4096) + 1 full layer with YaRN x8. `ppl_corpus_45k` 18.7245 vs HF BF16 18.7333; window 16384 control 583.99 vs HF 578.95. GGUF refused. |
 | [Olmo-3.1-32B-Instruct](https://huggingface.co/allenai/Olmo-3.1-32B-Instruct) | NVFP4 (imp-quantize) | 18 GB | - | SafeTensors - `Olmo3ForCausalLM`, GQA 40/8. `ppl_corpus_45k` 12.6395 vs HF BF16 12.2363. |
 | [LFM2-24B-A2B](https://huggingface.co/LiquidAI/LFM2-24B-A2B) | NVFP4 (imp-quantize) | 13 GB | - | SafeTensors - `Lfm2MoeForCausalLM`: 30 short-conv + 10 GQA layers, 64 experts top-4, conv window in the SSM state pool. `ppl_corpus_45k` 19.0274 vs HF BF16 19.2367. imp-quantize folds LFM2 activation pre-scales (see LIMITATIONS). |
+| [LFM2.5-24B-A2B](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B) | NVFP4 (imp-quantize) | 13 GB | - | SafeTensors - `Lfm2MoeForCausalLM`, same path as LFM2-24B-A2B. `ppl_corpus_45k` with BOS 18.7776 vs HF BF16 18.8191, token ids identical to HF (tokenizer `ignore_merges`). |
 | [LFM2-8B-A1B](https://huggingface.co/LiquidAI/LFM2-8B-A1B) | bf16 / NVFP4 (imp-quantize) | 17 / 4.6 GB | - | SafeTensors - `ppl_corpus_45k` with BOS 20.2175 bf16 vs HF 20.2434; NVFP4 22.1304. |
 | [North-Mini-Code-1.0](https://huggingface.co/CohereLabs/North-Mini-Code-1.0) | NVFP4 (imp-quantize) | 17 GB | - | SafeTensors - `Cohere2MoeForCausalLM`: parallel attention + MoE block, 36 sliding-window RoPE + 13 full NoPE layers, 128 experts top-8 sigmoid; tool calls in the `<|START_ACTION|>` format. PPL 11.8222 vs HF BF16 11.2088 (24000-char slice); pp512 29707.98 / tg128 347.34 tok/s. |
 | [GLM-4.7-Flash](https://huggingface.co/zai-org/GLM-4.7-Flash) | NVFP4 (imp-quantize) | 18 GB | - | SafeTensors - `Glm4MoeLiteForCausalLM` on the DeepSeek MLA path (q_lora 768, kv_lora 512, head 256), 64 experts top-4 + 1 shared; tool calls in the `<arg_key>` format. PPL 10.4301 vs HF BF16 9.7618 (24000-char slice; the full corpus exceeds the default KV pool). |

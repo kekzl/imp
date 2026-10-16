@@ -7,6 +7,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Added
 - Web UI redesign in the logo's colours with an imp mascot: saved conversations, sampling panel, edit/continue, logprobs view, end thinking, structured output, images, `/tokenize` count, `/metrics` tab, GPU joules per answer. `drive.py features` on the dev mock: 16/16 checks pass.
 - Per-request control vectors: `--control-vector NAME=PATH` loads a llama.cpp cvector GGUF, `"control_vector": NAME` or `{name, scale}` adds scale * v_l after each layer it carries. Qwen3-4B Q8_0: scale 0 reproduces the base text, scale 4 steers it.
+- Verified checkpoints: MiniCPM5-2B (bf16) and LFM2.5-24B-A2B (imp-quantize NVFP4), `ppl_corpus_45k` 10.4937 vs HF BF16 10.4138 and 18.7776 vs 18.8191.
 - `/metrics`: `imp_gpu_power_watts` and `imp_gpu_energy_joules_total` from NVML (`dlopen`, absent without libnvidia-ml). A 60-token Qwen3-4B Q8_0 chat reads 18.4 J on the driver counter.
 
 ### Changed
@@ -15,6 +16,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - imp-server detects a think model with the engine's predicate (added/control `<think>`), not the top 1 % vocab band: MiniCPM5-2B reasoning leaves `content` (3/3 -> 0/3 replies, stream 2/2 -> 0/2) and `enable_thinking: false` now reaches Nemotron-3-Nano (reasoning 3/3 -> 0/3).
+- tokenizer.json: a leading Split `\p{N}{1,3}` with a `\p{N}+` regex (MiniCPM5) and BPE `ignore_merges` (LFM2, LFM2.5) tokenize as HF. `ppl_corpus_45k` ids now identical: MiniCPM5-2B 13909 -> 13180 tokens, PPL 12.9456 -> 10.4937 (HF 10.4138); LFM2.5-24B-A2B 13378 -> 13346.
 - A malformed layer or expert index in a tensor name ("blk.3x", "layers.x", past INT_MAX) is skipped with a WARN naming the tensor instead of mapping to another layer: GGUF, mmproj, Qwen3-VL vision and NVFP4 scale keys; a LoRA adapter with one is refused. 7 parse sites.
 
 ## [0.53.0] - 2026-10-14
