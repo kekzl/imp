@@ -685,10 +685,12 @@ bool Workspace::allocate_shared_workspace(int max_tokens) {
         (attn_shared_size_ + ffn_shared_size_ + moe_shared_size_ + ssm_shared_size_ - max_shared) /
             (1024.0 * 1024.0));
 
-    // Pre-allocate MoE routing buffers (separate from shared workspace)
+    // MoE routing pool (separate from shared workspace). Without it every MoE layer would
+    // cudaMalloc + cudaFree 4 routing arrays (device-wide sync), so a failed pool fails init.
     if (*has_moe_) {
         const auto& cfg = model_->config();
-        moe_->routing_buffers.allocate(max_tokens, cfg.n_experts, cfg.n_experts_active);
+        if (!moe_->routing_buffers.allocate(max_tokens, cfg.n_experts, cfg.n_experts_active))
+            return false;
     }
     return true;
 }
