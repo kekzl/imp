@@ -4,6 +4,7 @@
 
 #include "compute/cublas_gemm_algo.h"
 #include "compute/attention_mxfp4_prefill.h"
+#include "compute/cublas_handle.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/cuda_static_reset.h"
 #include "core/cuda_errors.h"
@@ -319,10 +320,8 @@ static void ensure_workspace(int seq_q, int seq_kv, int hd) {
 static cublasHandle_t s_cublas_handle = nullptr;  // file-scope so the reset hook can reach it
 
 static cublasHandle_t get_cublas() {
-    if (!s_cublas_handle) {
-        IMP_CUBLAS_CHECK_LOG(cublasCreate(&s_cublas_handle));
-        IMP_CUBLAS_CHECK_LOG(cublasSetMathMode(s_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH));
-    }
+    if (!s_cublas_handle)
+        s_cublas_handle = cublas_handle_create("imp::attention_mxfp4_prefill", CUBLAS_TF32_TENSOR_OP_MATH);
     return s_cublas_handle;
 }
 
@@ -347,10 +346,7 @@ void attention_mxfp4_prefill_reset_static_cuda_state() {
         s_ws.alloc_seq_kv = 0;
         s_ws.alloc_hd = 0;
     }
-    if (s_cublas_handle) {
-        (void)cublasDestroy(s_cublas_handle);
-        s_cublas_handle = nullptr;
-    }
+    cublas_handle_destroy(s_cublas_handle);
 }
 
 // Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.

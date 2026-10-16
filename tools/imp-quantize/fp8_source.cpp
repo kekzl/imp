@@ -2,9 +2,7 @@
 
 #include "core/fp_bits.h"
 
-#include <cmath>
 #include <cstring>
-#include <limits>
 
 namespace imp::quantize {
 
@@ -44,22 +42,7 @@ bool is_fp8_e4m3_dtype(const std::string& dtype) {
     return dtype == "F8_E4M3" || dtype == "FP8_E4M3" || dtype == "F8_E4M3FN";
 }
 
-float e4m3_to_float(uint8_t bits) {
-    const uint32_t s = (bits >> 7) & 0x1u;
-    const uint32_t e = (bits >> 3) & 0xFu;
-    const uint32_t m = bits & 0x7u;
-    float v;
-    if (e == 0) {
-        // Subnormal: no implicit leading one, fixed 2^-6 scale.
-        v = std::ldexp(static_cast<float>(m) / 8.0f, -6);
-    } else if (e == 0xFu && m == 0x7u) {
-        // E4M3 spends the would-be infinity encoding on NaN; there is no Inf.
-        return std::numeric_limits<float>::quiet_NaN();
-    } else {
-        v = std::ldexp(1.0f + static_cast<float>(m) / 8.0f, static_cast<int>(e) - 7);
-    }
-    return s ? -v : v;
-}
+float e4m3_to_float(uint8_t bits) { return imp::e4m3_to_float(bits); }
 
 int derive_block_edge(int64_t n, int64_t k, int64_t scale_rows, int64_t scale_cols) {
     if (n <= 0 || k <= 0 || scale_rows <= 0 || scale_cols <= 0)

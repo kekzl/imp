@@ -24,8 +24,8 @@ For each TU under src/ (outside src/memory/, which owns the driver):
                `g_*` / `s_*` global, whose type is a pointer, a CUDA/cuBLAS
                handle, or a class instance (not std::, not a primitive)
   acquires   = takes from engine_arena() or calls cudaMalloc* / cublasCreate /
-               cublasLtCreate / cudaStreamCreate / cudaEventCreate /
-               cudaGraphInstantiate
+               cublasLtCreate / cublas(lt)_handle_create / cudaStreamCreate /
+               cudaEventCreate / cudaGraphInstantiate
   re-arms    = IMP_REGISTER_CUDA_STATIC_RESET( in the TU, or an
                engine_arena().generation() check (the other accepted pattern:
                the tenant compares the arena generation instead of trusting
@@ -56,7 +56,7 @@ SUFFIXES = (".cu", ".cpp")
 
 ACQUIRE = re.compile(
     r"\b(engine_arena\(\)\s*\.\s*take(_bytes)?\s*\(|cudaMalloc\w*\s*\(|cublasCreate|cublasLtCreate"
-    r"|cudaStreamCreate|cudaEventCreate|cudaGraphInstantiate)"
+    r"|cublas(lt)?_handle_create\s*\(|cudaStreamCreate|cudaEventCreate|cudaGraphInstantiate)"
 )
 REARM_HOOK = re.compile(r"\bIMP_REGISTER_CUDA_STATIC_RESET\s*\(")
 REARM_GEN = re.compile(r"\bengine_arena\(\)\s*\.\s*generation\s*\(")
@@ -223,6 +223,13 @@ def selftest() -> int:
          "not-candidate"),
         ("cuBLAS handle + cublasCreate, no hook",
          "static cublasHandle_t s_handle = nullptr;\nvoid f() { if (!s_handle) cublasCreate(&s_handle); }\n",
+         "no-rearm"),
+        ("cuBLAS handle via compute/cublas_handle.h, no hook",
+         "static cublasHandle_t s_handle = nullptr;\n"
+         "void f() { if (!s_handle) s_handle = cublas_handle_create(\"x\", CUBLAS_DEFAULT_MATH); }\n",
+         "no-rearm"),
+        ("cuBLASLt handle via compute/cublas_handle.h, no hook",
+         "static cublasLtHandle_t s_lt = nullptr;\nvoid f() { if (!s_lt) s_lt = cublaslt_handle_create(\"x\"); }\n",
          "no-rearm"),
         ("constexpr / thread_local statics are skipped",
          "static constexpr int* kNull = nullptr;\nstatic thread_local std::vector<int32_t> h_tokens;\n"

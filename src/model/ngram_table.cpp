@@ -1,5 +1,6 @@
 #include "model/ngram_table.h"
 
+#include "core/fp_bits.h"
 #include "core/logging.h"
 #include "model/json_util.h"
 #include "model/model_limits.h"
@@ -23,58 +24,6 @@ namespace {
 constexpr int kMaxTableShards = 1024;
 constexpr int kMaxNGramHeads = 256;
 constexpr int kMaxNGramSize = 8;
-
-// Round-to-nearest-even float -> FP16 bits (host, no CUDA headers here).
-uint16_t f32_to_f16(float f) {
-    uint32_t x;
-    std::memcpy(&x, &f, 4);
-    const uint32_t sign = (x >> 16) & 0x8000u;
-    const int32_t exp = static_cast<int32_t>((x >> 23) & 0xffu) - 127 + 15;
-    uint32_t mant = x & 0x7fffffu;
-    if (((x >> 23) & 0xffu) == 0xffu)  // inf / nan
-        return static_cast<uint16_t>(sign | 0x7c00u | (mant ? 0x200u : 0u));
-    if (exp >= 0x1f)
-        return static_cast<uint16_t>(sign | 0x7c00u);
-    if (exp <= 0) {
-        if (exp < -10)
-            return static_cast<uint16_t>(sign);
-        mant |= 0x800000u;
-        const uint32_t shift = static_cast<uint32_t>(14 - exp);
-        uint32_t half_mant = mant >> shift;
-        const uint32_t rem = mant & ((1u << shift) - 1u);
-        const uint32_t halfway = 1u << (shift - 1);
-        if (rem > halfway || (rem == halfway && (half_mant & 1u)))
-            half_mant++;
-        return static_cast<uint16_t>(sign | half_mant);
-    }
-    uint32_t half = sign | (static_cast<uint32_t>(exp) << 10) | (mant >> 13);
-    const uint32_t rem = mant & 0x1fffu;
-    if (rem > 0x1000u || (rem == 0x1000u && (half & 1u)))
-        half++;
-    return static_cast<uint16_t>(half);
-}
-
-// FP8 E4M3 (bias 7, no inf, 0x7f/0xff NaN) -> float.
-float fp8_e4m3_to_f32(uint8_t b) {
-    const int sign = (b >> 7) & 1;
-    const int exp = (b >> 3) & 0xf;
-    const int mant = b & 7;
-    float v;
-    if (exp == 0)
-        v = std::ldexp(static_cast<float>(mant) / 8.0f, -6);
-    else if (exp == 15 && mant == 7)
-        v = std::nanf("");
-    else
-        v = std::ldexp(1.0f + static_cast<float>(mant) / 8.0f, exp - 7);
-    return sign ? -v : v;
-}
-
-float bf16_to_f32(uint16_t b) {
-    const uint32_t x = static_cast<uint32_t>(b) << 16;
-    float f;
-    std::memcpy(&f, &x, 4);
-    return f;
-}
 
 // One SafeTensors file opened for header-driven access: I64 buffers by pread, shards by mmap.
 struct StFile {
@@ -184,6 +133,10 @@ int64_t py_mod(int64_t a, int64_t m) {
 }
 
 }  // namespace
+
+uint16_t ngram_fp8_to_half(uint8_t q, float scale) {
+    return float_to_half_as<HalfSubnormal::kNearestEven>(e4m3_to_float<E4m3Nan::kSigned>(q) * scale);
+}
 
 void ngram_hash(const NGramHashParams& p, const int32_t* ctx, const int32_t* tokens, int n,
                 int64_t* ids_out) {
@@ -304,7 +257,7 @@ std::unique_ptr<NGramTable> NGramTable::open(const std::string& model_dir, int l
         uint16_t b = 0;
         if (pread(f->fd, &b, 2, static_cast<off_t>(off)) != 2)
             return nullptr;
-        t->scale_ = bf16_to_f32(b);
+        t->scale_ = bf16_to_float(b);
     }
     int n_shards = 0;
     for (const auto& [suffix, fname] : file_of) {
@@ -412,7 +365,7 @@ void NGramTable::gather(const int64_t* ids, int n, uint16_t* out) const {
             continue;
         }
         for (int j = 0; j < head_dim_; j++)
-            o[j] = f32_to_f16(fp8_e4m3_to_f32(p[j]) * scale_);
+            o[j] = ngram_fp8_to_half(p[j], scale_);
     }
 }
 
