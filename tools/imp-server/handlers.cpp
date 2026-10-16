@@ -15,6 +15,7 @@
 #include "memory/kv_cache.h"
 #include "model/hf_hub.h"
 #include "runtime/config.h"
+#include "runtime/think_stop_logic.h"
 
 #include <algorithm>
 #include <chrono>
@@ -801,14 +802,16 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     state.sampling_defaults = imp::resolve_sampling_defaults(state.model->model->config().arch,
                                                              state.model->model->generation_config());
 
-    // Detect thinking model (DeepSeek R1, Qwen3 etc.) by checking for <think> token.
-    // Only treat as think model if <think> is a special/added token (high vocab ID),
-    // not a regular text piece. Nemotron has "<think>" at ID 12 as normal text.
+    // Think model: <think> is a control/added token, not a plain text piece. Same predicate as the
+    // engine (think_stop_logic.h): the 99 % vocab band alone missed MiniCPM5 (<think> = id 8).
     {
         int32_t ts = state.tok->find_token("<think>");
         int32_t te = state.tok->find_token("</think>");
-        int vocab = state.tok->vocab_size();
-        bool is_special = (ts >= 0 && ts > vocab * 99 / 100);
+        const bool types = state.tok->has_token_types();
+        bool is_special = imp::think_logic::accept_think_token(ts, types,
+                                                               types && state.tok->is_special_token(ts),
+                                                               state.tok->is_added_token(ts),
+                                                               state.tok->vocab_size());
         state.think_start_id = is_special ? ts : -1;
         state.think_end_id = is_special ? te : -1;
         state.is_think_model = is_special;

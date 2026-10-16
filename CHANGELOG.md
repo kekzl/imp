@@ -14,6 +14,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Release bar 2 (`bench-competitive`): Qwen3.8-27B Q4_K_M is a hero (6 of 8 contested), the non-hero Qwen3-30B-A3B row is gone; the sweep refuses on host 1-min load > nproc/4 instead of any running container.
 
 ### Fixed
+- imp-server detects a think model with the engine's predicate (added/control `<think>`), not the top 1 % vocab band: MiniCPM5-2B reasoning leaves `content` (3/3 -> 0/3 replies, stream 2/2 -> 0/2) and `enable_thinking: false` now reaches Nemotron-3-Nano (reasoning 3/3 -> 0/3).
 - A malformed layer or expert index in a tensor name ("blk.3x", "layers.x", past INT_MAX) is skipped with a WARN naming the tensor instead of mapping to another layer: GGUF, mmproj, Qwen3-VL vision and NVFP4 scale keys; a LoRA adapter with one is refused. 7 parse sites.
 
 ## [0.53.0] - 2026-10-14
