@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-10-14
-commit: e48ff0d5
+verified: 2026-10-16
+commit: bad6a308
 -->
 
 # imp Memory Architecture
@@ -22,7 +22,7 @@ Five tiers. Each gets exactly one allocator whose discipline makes that tier's f
 | T1 Model-resident | model load -> unload | bump arena, freed wholesale | per-object leak | stable |
 | T2 Engine-persistent | process | bump arena | per-object leak | stable |
 | T3 Pooled fixed-block | request-scoped, refcounted | free-list over one slab | external fragmentation | stable |
-| T4 Forward-scratch | one forward pass | LIFO stack (`ScratchStack`) | fragmentation + leak | stable per slot |
+| T4 Forward-scratch | one forward pass | none: forward intermediates live in T2 executor workspaces (`ScratchStack` removed 2026-10-16, 0 users) | - | stable |
 | T5a Transient host-staging | load only | ordinary host alloc | surviving load | n/a |
 | T5b Engine-persistent pinned host | process | `PinnedBuffer` / `HostRegistration` | per-object leak, asymmetric unregister | n/a |
 
@@ -91,19 +91,13 @@ One deliberate exception: `Serving` is temporarily re-entered as `Planning` duri
 |---|---|---|
 | `ArenaAllocator` | T1, T2 | bump; `reset()` frees wholesale |
 | `BlockPool` | T3 | free-list over one slab; stride is a runtime constructor argument |
-| `ScratchStack` | T4 | LIFO; RAII `Mark` rewinds on scope exit |
-
-A forward pass opens one `ScratchStack::Mark` at entry; every intermediate takes from the stack; the mark's destructor rewinds.
-
-- Cannot fragment (LIFO), cannot leak (unwinds on exception too).
-- Its high-water mark sizes the planner's T4 charge from a measured warmup, not the `max(attn, ffn, moe, ssm)` heuristic recomputed in three places.
 
 ### A3.4 L3 Handles (I3, I5)
 
 | Type | Guarantee |
 |---|---|
 | `DeviceSpan<T>` | non-owning view, may point at anything, cheap and copyable |
-| `StableSpan<T>` | non-owning view whose address is stable for the region's lifetime; constructible only by a tier allocator (`detail::StableKey` passkey, friended to `ArenaAllocator`/`ScratchStack`/`BlockPool`); widens to `DeviceSpan` implicitly, never narrows back, no raw-pointer constructor |
+| `StableSpan<T>` | non-owning view whose address is stable for the region's lifetime; constructible only by a tier allocator (`detail::StableKey` passkey, friended to `ArenaAllocator`/`BlockPool`); widens to `DeviceSpan` implicitly, never narrows back, no raw-pointer constructor |
 | `BlockRef` | move-only, request-scoped KV reference; `~BlockRef()` decrements exactly once; `share()` is the only way to alias (explicit inc_ref) |
 | `GraphSlotLease` | move-only lease over the T2 conditional-graph-loop slot pool; releases on destruction |
 
@@ -167,7 +161,7 @@ PlanResult plan_memory(const PlanInput& in);   // pure, deterministic, never tou
 | Subsystem | May hold | Must request | Must never touch |
 |---|---|---|---|
 | `compute/` | nothing | buffers as `StableSpan`/`DeviceSpan` parameters | any allocation API; static workspace |
-| `exec/` | T2 workspace handles; one `ScratchStack::Mark` per forward | scratch from the stack | driver calls; `cudaMallocAsync` |
+| `exec/` | T2 workspace handles | workspaces from the T2 arena | driver calls; `cudaMallocAsync` |
 | `model/` | T1 weight handles | the T1 arena | KV, workspaces, driver calls |
 | `quant/` | T1 cache handles | the T1 arena, budgeted by the plan | live free-VRAM queries |
 | `runtime/cuda_graph.*`, `engine_graph_decode.cpp` | graph + exec objects | `StableSpan` for everything captured | allocation inside a capture region |
@@ -250,7 +244,6 @@ Draft/verify staging and `spec_graphs_` are T2, sized by the plan from `speculat
 | V3 | Arena resets free wholesale | after `reset()`, live bytes attributable to that arena == 0 |
 | V4 | Block pool conservation | randomised churn; free_count + live refs == num_blocks, always |
 | V5 | Refcount balance under faults | exception injected at every lifecycle point; net refcount delta == 0 |
-| V6 | LIFO discipline | `ScratchStack` marks rewind in reverse order; out-of-order rewind is a hard failure |
 | V7 | Plan determinism | `plan_memory` is pure: same input -> byte-identical plan, 1000 randomised configs |
 | V8 | Plan sufficiency | replay a recorded real allocation journal against the plan; no tier exceeded |
 | V9 | Stability under growth | VMM fake: commit/decommit across a 10x growth; `Region::base` invariant |
@@ -264,7 +257,7 @@ V8 is the migration safety net: record a journal from a real GPU run once per mo
 | ID | Invariant | Status | Target |
 |---|---|---|---|
 | I1 | Single acquisition point | partial - device-memory sites remain outside `src/memory/` (`tools/alloc_allowlist.txt`); the pinned-host class is closed, every site moved to T5b's `PinnedBuffer`/`HostRegistration` | `Backend`, empty allowlist, CI gate |
-| I2 | No allocation on the hot path | partial - `make check-alloc-interpose` (2026-09-07): the ragged-prefill/constrained-decoding path reads 0 driver calls while serving; the upload family (block tables, token ids, positions, M-RoPE) is one T2 pool | `ScratchStack`, phase guard, counter == 0 |
+| I2 | No allocation on the hot path | partial - `make check-alloc-interpose` (2026-09-07): the ragged-prefill/constrained-decoding path reads 0 driver calls while serving; the upload family (block tables, token ids, positions, M-RoPE) is one T2 pool | phase guard, counter == 0 |
 | I3 | Stable addresses for graph memory | partial - `StableSpan` exists and is passkey-enforced, so only a tier allocator can mint one; some kernel signatures still take raw pointers | `StableSpan` in every kernel signature, no `DeviceSpan` conversion |
 | I4 | Capacity planned, not discovered | partial - `plan_memory()` is pure and deterministic (byte-identical across 5 identical starts); the balloon is deleted; the KV block count is the plan's, the live pass only a fallback | `plan_memory()` never queries the device; fails at load with a report |
 | I5 | Unidirectional ownership | partial - KV blocks and the T2/T3 tiers own through move-only RAII (`Region`, `BlockRef`, `GraphSlotLease`); raw `void*` still crosses boundaries in `exec/` and `compute/` | `Owned`-style non-copyable handles everywhere, no raw device pointers above L1 |
@@ -285,7 +278,6 @@ Nothing in the set was dropped.
 |---|---|---|
 | 1 | WSL2 VMM spike | resolved GO (A3.1); gated migration step 7 only |
 | 2 | `LibraryReserve` calibration | the ~3.9 GiB constant is measured on this driver/CUDA/card; needs a boot-time self-check (assumed vs. actual after the first forward, on >10 % divergence) plus a documented re-measure procedure after a driver or CUDA bump |
-| 3 | `ScratchStack` under concurrency | one compute stream plus a prefill stream: two stacks (one per stream, no lock, LIFO stays per-stream) vs. one stack with a mutex - undecided |
 
 ---
 

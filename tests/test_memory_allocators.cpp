@@ -6,7 +6,6 @@
 #include "memory/arena.h"
 #include "memory/block_pool.h"
 #include "memory/fake_backend.h"
-#include "memory/scratch_stack.h"
 #include "memory/ssm_state.h"
 #include "memory/vram_query.h"
 
@@ -305,104 +304,6 @@ TEST(BlockPool, OutOfRangeBlockIdYieldsAnEmptySpan) {
     ASSERT_EQ(pool.open(be, 256, 2, RegionTag::KvBlockPool), MemError::Ok);
     EXPECT_FALSE(pool.block(-1));
     EXPECT_FALSE(pool.block(2));
-}
-
-// ── ScratchStack (T4) ─────────────────────────────────────────────────
-
-TEST(ScratchStack, MarkRewindsEverythingTakenAfterIt) {
-    FakeBackend be;
-    ScratchStack stack;
-    ASSERT_EQ(stack.open(be, 64 * 1024, RegionTag::ForwardScratch), MemError::Ok);
-
-    EXPECT_EQ(stack.used(), 0u);
-    {
-        auto m = stack.mark();
-        ASSERT_TRUE(stack.take_bytes(1024));
-        ASSERT_TRUE(stack.take_bytes(2048));
-        EXPECT_GE(stack.used(), 3072u);
-    }
-    EXPECT_EQ(stack.used(), 0u) << "the mark unwinds the whole forward pass";
-}
-
-TEST(ScratchStack, NestedMarksRewindInReverseOrder) {
-    FakeBackend be;
-    ScratchStack stack;
-    ASSERT_EQ(stack.open(be, 64 * 1024, RegionTag::ForwardScratch), MemError::Ok);
-
-    auto outer = stack.mark();
-    ASSERT_TRUE(stack.take_bytes(1024));
-    const size_t after_outer = stack.used();
-    {
-        auto inner = stack.mark();
-        ASSERT_TRUE(stack.take_bytes(4096));
-        EXPECT_GT(stack.used(), after_outer);
-    }
-    EXPECT_EQ(stack.used(), after_outer) << "the inner mark returns only its own takes";
-}
-
-TEST(ScratchStack, RewindsOnTheExceptionPathToo) {
-    FakeBackend be;
-    ScratchStack stack;
-    ASSERT_EQ(stack.open(be, 16 * 1024, RegionTag::ForwardScratch), MemError::Ok);
-
-    try {
-        auto m = stack.mark();
-        ASSERT_TRUE(stack.take_bytes(8192));
-        throw std::runtime_error("kernel dispatch failed");
-    } catch (const std::exception&) {
-    }
-    EXPECT_EQ(stack.used(), 0u) << "a LIFO stack cannot leak — that is why it is a stack";
-}
-
-TEST(ScratchStack, ReportsItsHighWaterAndItsExhaustions) {
-    FakeBackend be;
-    ScratchStack stack;
-    ASSERT_EQ(stack.open(be, 8192, RegionTag::ForwardScratch), MemError::Ok);
-
-    for (int i = 0; i < 4; ++i) {
-        auto m = stack.mark();
-        ASSERT_TRUE(stack.take_bytes(static_cast<size_t>(1 + i) * 1024));
-    }
-    EXPECT_GE(stack.high_water(), 4u * 1024);
-    EXPECT_EQ(stack.used(), 0u);
-    EXPECT_EQ(stack.exhaustion_count(), 0u);
-
-    {
-        auto m = stack.mark();
-        EXPECT_FALSE(stack.take_bytes(64 * 1024));
-    }
-    EXPECT_EQ(stack.exhaustion_count(), 1u)
-        << "an under-provisioned plan must be visible, not silently absorbed";
-}
-
-TEST(ScratchStack, ReusesTheSameAddressesAcrossPasses) {
-    FakeBackend be;
-    ScratchStack stack;
-    ASSERT_EQ(stack.open(be, 16 * 1024, RegionTag::ForwardScratch), MemError::Ok);
-
-    void* first = nullptr;
-    for (int pass = 0; pass < 3; ++pass) {
-        auto m = stack.mark();
-        auto s = stack.take_bytes(2048);
-        ASSERT_TRUE(s);
-        if (pass == 0)
-            first = s.data();
-        else
-            EXPECT_EQ(s.data(), first)
-                << "stable per slot: a captured graph replays against the same address (I3)";
-    }
-}
-
-TEST(ScratchStack, TypedTakeIsAligned) {
-    FakeBackend be;
-    ScratchStack stack;
-    ASSERT_EQ(stack.open(be, 64 * 1024, RegionTag::ForwardScratch), MemError::Ok);
-    auto m = stack.mark();
-    auto s = stack.take<int32_t>(100);
-    ASSERT_TRUE(s);
-    EXPECT_EQ(s.size(), 100u);
-    EXPECT_EQ(s.size_bytes(), 400u);
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(s.data()) % 256, 0u);
 }
 
 // ── Spans ─────────────────────────────────────────────────────────────

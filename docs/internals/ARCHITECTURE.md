@@ -1,8 +1,8 @@
 <!--
 layer: L2
 audience: kernel-devs
-verified: 2026-10-14
-commit: e48ff0d5
+verified: 2026-10-16
+commit: bad6a308
 -->
 
 # imp - Architecture
@@ -90,7 +90,7 @@ Entry points, all in `include/imp/imp.h`, dispatched via `src/api/imp_api.cpp`:
 | Decode FFN | `src/exec/executor_ffn.cu` | dp4a / mma.sync / NVFP4 GEMV variants |
 | Sampling / penalties | `src/compute/sampling.cu`, `src/compute/sampling.h`, `src/exec/executor.cu` | repeat/freq/presence/DRY penalties (params in `src/runtime/request.h`); temp/top-p/top-k/min-p/typical/mirostat via `sample_greedy`, `sample_topk_topp`, `sample_mirostat_v2`, `apply_typical_p` |
 | Speculative decoding | `src/runtime/engine_spec_ngram.cpp`, `src/runtime/suffix_draft.{h,cpp}`, `src/runtime/ngram_draft.h`, `src/runtime/engine_spec_mtp.cpp`, `src/compute/mtp_forward.cu` | n-gram/suffix draft and opt-in MTP head (`speculative.hybrid` gates hybrid SSM/GDN participation), batch-1 greedy only |
-| Memory subsystem | `src/memory/backend.{h,cpp}` (device), `memory/host_pinned.{h,cpp}` (host); tier allocators `arena`/`block_pool`/`scratch_stack`/`graph_slots`; older still-live pieces `src/memory/vram_allocator.cpp`, `src/memory/kv_cache_manager.cpp`, `src/memory/layer_offload.cpp`, `src/memory/recurrent_snapshot_store.cpp`, `src/exec/storage_planner.cpp` | tiers, allocators, planner; canonical doc [`MEMORY.md`](MEMORY.md) |
+| Memory subsystem | `src/memory/backend.{h,cpp}` (device), `memory/host_pinned.{h,cpp}` (host); tier allocators `arena`/`block_pool`/`graph_slots`; older still-live pieces `src/memory/vram_allocator.cpp`, `src/memory/kv_cache_manager.cpp`, `src/memory/layer_offload.cpp`, `src/memory/recurrent_snapshot_store.cpp`, `src/exec/storage_planner.cpp` | tiers, allocators, planner; canonical doc [`MEMORY.md`](MEMORY.md) |
 | Kernels | `src/compute/`, `src/quant/` | attention, GEMM, RMSNorm, RoPE, SwiGLU, softmax, sampling, dequant/quant |
 | Constrained decoding | `src/runtime/constraint_manager.h` (`ConstraintManager`), `src/compute/gbnf_grammar.cpp` | `JsonConstrainer`, `SchemaConstrainer`, `RegexConstrainer` (shares `RegexNfa` with JSON-Schema `pattern`), `GrammarConstrainer` (GBNF); one `apply_mask(logits, vocab, stream)` contract applied via `apply_constraint_mask` in `src/exec/executor.cu`; routed through `Engine::step_constrained_pipeline` on the `needs_constrained` flag |
 | Vision | `src/vision/` | SigLIP/gemma4v (fixed token count) and Qwen3-VL (dynamic, patch-budget-sized, DeepStack taps, M-RoPE); merged embeddings replace the expanded `<\|image_pad\|>` positions before layer 0 |

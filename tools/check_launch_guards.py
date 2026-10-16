@@ -25,17 +25,12 @@ IMP_CUDA_CHECK_LAUNCH / cudaPeekAtLastError / cudaGetLastError appears within
 LOOKAHEAD lines after the statement the launch belongs to (launches spanning
 several lines are followed to their terminating `;`).
 
-Launches written inside a `#define` body are OUT OF SCOPE and are reported as
-such rather than guessed at. There the `<<<` is not the launch *site* — the
-macro's call sites are, typically a `switch` over head_dim expanding it 5x with
-a single shared check after the switch (paged_attention_splitk in
-compute/attention_paged.cu guards both its macros with one cudaGetLastError 67
-lines below, and falls back to the single-split path on failure). Deciding
-guardedness for those needs the enclosing function, not a line window; a
-line-distance heuristic would either flag working code or silently stop
-catching real misses once someone's switch grows. The gate covers what it can
-decide and prints the count it cannot, so the blind spot is visible instead of
-implied.
+A launch inside a `#define` body (C-016) is guarded when the body checks after the
+`<<<`, or when EVERY expansion of the macro in the file is followed by a check before
+its enclosing function closes (the first later line starting with `}` in column 0).
+The second form is the shared check after a `switch` over head_dim
+(paged_attention_splitk in compute/attention_paged.cu: one cudaGetLastError after
+both macros, with a single-split fallback). A macro with no expansion is unguarded.
 
 Exit 0 when clean, 1 when a launch is unguarded and not allowlisted.
 `--selftest` runs the matcher and the file collection on fixtures.
@@ -52,6 +47,7 @@ SUFFIXES = ("*.cu", "*.cuh")  # .cuh: 24 launches were outside the gate (C-015)
 LOOKAHEAD = 4  # lines after the launch statement ends
 
 GUARD = re.compile(r"IMP_CUDA_CHECK_LAUNCH|cudaPeekAtLastError|cudaGetLastError")
+MACRO_NAME = re.compile(r"#define\s+(\w+)")
 
 # Launch sites that are deliberately unguarded, each with a reason.
 # THIS LIST ONLY SHRINKS — an entry that no longer matches is an error too, so
@@ -104,28 +100,61 @@ def scan(path: Path) -> tuple[list[tuple[int, str]], int]:
     return scan_text(path.read_text(encoding="utf-8", errors="replace"))
 
 
+def macro_spans(clean: list[str]) -> list[tuple[str, int, int]]:
+    """(name, first line, last line) of every #define, continuation lines included."""
+    spans = []
+    i = 0
+    while i < len(clean):
+        stripped = clean[i].strip()
+        if stripped.startswith("#define"):
+            j = i
+            while j + 1 < len(clean) and clean[j].rstrip().endswith("\\"):
+                j += 1
+            m = MACRO_NAME.match(stripped)
+            spans.append((m.group(1) if m else "", i, j))
+            i = j + 1
+        else:
+            i += 1
+    return spans
+
+
+def macro_launch_guarded(clean: list[str], name: str, start: int, end: int, launch: int) -> bool:
+    """Body checks after the launch, or every expansion is checked before its function closes."""
+    if GUARD.search("\n".join(clean[launch : end + 1])):
+        return True
+    call = re.compile(r"\b%s\s*\(" % re.escape(name))
+    sites = [
+        k for k, line in enumerate(clean)
+        if not start <= k <= end and call.search(line) and not line.lstrip().startswith("#")
+    ]
+    if not name or not sites:
+        return False
+    for k in sites:
+        close = k + 1
+        while close < len(clean) and not clean[close].startswith("}"):
+            close += 1
+        if not GUARD.search("\n".join(clean[k:close])):
+            return False
+    return True
+
+
 def scan_text(raw: str) -> tuple[list[tuple[int, str]], int]:
     clean = strip_comments_and_strings(raw).split("\n")
     raw_lines = raw.split("\n")
-
-    # Line indices that belong to a #define body (the directive line and every
-    # backslash-continued line after it).
-    in_macro = set()
-    cont = False
-    for i, line in enumerate(clean):
-        stripped = line.strip()
-        if cont or stripped.startswith("#define"):
-            in_macro.add(i)
-        cont = line.rstrip().endswith("\\")
+    spans = macro_spans(clean)
+    span_of = {i: sp for sp in spans for i in range(sp[1], sp[2] + 1)}
 
     bad = []
     macro_launches = 0
     for idx, line in enumerate(clean):
         if "<<<" not in line:
             continue
-        if idx in in_macro:
+        if idx in span_of:
             macro_launches += 1
-            continue  # out of scope — see the module docstring
+            name, start, end = span_of[idx]
+            if not macro_launch_guarded(clean, name, start, end, idx):
+                bad.append((idx + 1, raw_lines[idx].strip()))
+            continue
         # Follow the statement to its terminating ';' (launches wrap often).
         end = idx
         while end < len(clean) and ";" not in clean[end]:
@@ -143,7 +172,11 @@ def selftest() -> int:
         "k\n    <<<1, 32, 0, s>>>(p,\n        q);\nif ((e = cudaPeekAtLastError()) != cudaSuccess)\n": (0, 0),
         "a<<<1, 1>>>(p);\nb<<<1, 1>>>(p);\nc<<<1, 1>>>(p);\nd<<<1, 1>>>(p);\ne<<<1, 1>>>(p);\n"
         "IMP_CUDA_CHECK_LAUNCH();\n": (1, 0),
-        "#define L(D) \\\n    k<D><<<1, 32>>>(p)\n": (0, 1),
+        "#define L(D) \\\n    k<D><<<1, 32>>>(p)\n": (1, 1),  # never expanded
+        "#define L(D) \\\n    k<D><<<1, 32>>>(p); \\\n    IMP_CUDA_CHECK_LAUNCH()\n": (0, 1),
+        "#define L(D) \\\n    k<D><<<1, 32>>>(p)\nvoid f() {\n    L(64);\n    cudaGetLastError();\n}\n": (0, 1),
+        "#define L(D) \\\n    k<D><<<1, 32>>>(p)\nvoid f() {\n    L(64);\n    cudaGetLastError();\n}\n"
+        "void g() {\n    L(32);\n}\n": (1, 1),
         "// k<<<1, 32>>>(p);\n": (0, 0),
     }
     bad = 0
@@ -187,10 +220,9 @@ def main() -> int:
     unexpected = [(f, l, t) for f, l, t in findings if f not in ALLOWLIST]
     stale = [f for f in ALLOWLIST if not any(f == g for g, _, _ in findings)]
 
-    in_scope = total_launches - macro_total
-    guarded = in_scope - len(findings)
-    print(f"launch guards: {guarded}/{in_scope} in-scope kernel launches carry a post-launch check "
-          f"({macro_total} in #define bodies — guarded at their call sites, not checked here)")
+    guarded = total_launches - len(findings)
+    print(f"launch guards: {guarded}/{total_launches} kernel launches carry a post-launch check "
+          f"({macro_total} of them in #define bodies, decided per expansion site)")
 
     if unexpected:
         print(f"\nFAIL — {len(unexpected)} unguarded kernel launch(es):\n")
