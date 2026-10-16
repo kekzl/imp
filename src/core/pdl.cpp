@@ -1,4 +1,5 @@
 #include "core/pdl.h"
+#include "core/device_info.h"
 #include "core/process_diag.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
@@ -38,18 +39,8 @@ bool is_available() {
         return s_pdl_available;
     s_pdl_checked = true;
 
-    int device;
-    cudaError_t err = cudaGetDevice(&device);
-    if (err != cudaSuccess) {
-        s_pdl_available = false;
-        return false;
-    }
-
-    int major = 0;
-    if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device) != cudaSuccess) {
-        s_pdl_available = false;
-        return false;
-    }
+    // PDL needs cc >= 9.0; device_cc() is 0 on a failed query.
+    const int major = device_cc() / 10;
     s_pdl_available = (major >= 9);
 
     if (s_pdl_available) {
