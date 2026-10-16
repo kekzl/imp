@@ -19,6 +19,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Release bar 2 (`bench-competitive`): Qwen3.8-27B Q4_K_M is a hero (6 of 8 contested), the non-hero Qwen3-30B-A3B row is gone; the sweep refuses on host 1-min load > nproc/4 instead of any running container.
 
 ### Fixed
+- `kv_cache.swa_sizing`: each prefill chunk frees its dead window blocks at enqueue, so the SWA group charges the chunk once per pool, not per sequence. Gemma-3-12B Q4_K_M, 17 slots: 16830 -> 7235 MiB, global KV 1742 -> 3038 blocks, chunk 4096 now starts; 34 concurrent long prompts 34/34.
 - `kv_cache.swa_sizing`: the SWA group is sized for the prefill chunk the scheduler runs, so `--set runtime.prefill_chunk_size` counts like the CLI flag (Gemma-3-12B at 1024: 16830 -> 11390 MiB); a group that cannot fit is refused with an ERROR naming the knobs.
 - imp-cli and imp-server number flags parse strictly (44 `atoi`/`atof` sites): `--prefill-chunk-size abc`, `--port 80x`, `--temperature nan` exit 1 naming the flag instead of running with 0, 80 or NaN.
 - imp-server detects a think model with the engine's predicate (added/control `<think>`), not the top 1 % vocab band: MiniCPM5-2B reasoning leaves `content` (3/3 -> 0/3 replies, stream 2/2 -> 0/2) and `enable_thinking: false` now reaches Nemotron-3-Nano (reasoning 3/3 -> 0/3).
