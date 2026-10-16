@@ -136,45 +136,45 @@ CliArgs parse_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--prompt-file") == 0 && i + 1 < argc) {
             args.prompt_file = argv[++i];
         } else if (std::strcmp(arg, "--max-seq-len") == 0 && i + 1 < argc) {
-            args.max_seq_len = std::atoi(argv[++i]);
+            args.max_seq_len = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--temperature") == 0 && i + 1 < argc) {
-            args.temperature = static_cast<float>(std::atof(argv[++i]));
+            args.temperature = cli_float(arg, argv[++i]);
             args.temperature_set = true;
         } else if (std::strcmp(arg, "--top-p") == 0 && i + 1 < argc) {
-            args.top_p = static_cast<float>(std::atof(argv[++i]));
+            args.top_p = cli_float(arg, argv[++i]);
             args.top_p_set = true;
         } else if (std::strcmp(arg, "--top-k") == 0 && i + 1 < argc) {
-            args.top_k = std::atoi(argv[++i]);
+            args.top_k = cli_int(arg, argv[++i]);
             args.top_k_set = true;
         } else if (std::strcmp(arg, "--seed") == 0 && i + 1 < argc) {
-            args.seed = std::atoi(argv[++i]);
+            args.seed = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--min-p") == 0 && i + 1 < argc) {
-            args.min_p = static_cast<float>(std::atof(argv[++i]));
+            args.min_p = cli_float(arg, argv[++i]);
         } else if (std::strcmp(arg, "--typical-p") == 0 && i + 1 < argc) {
-            args.typical_p = static_cast<float>(std::atof(argv[++i]));
+            args.typical_p = cli_float(arg, argv[++i]);
         } else if (std::strcmp(arg, "--repeat-penalty") == 0 && i + 1 < argc) {
-            args.repetition_penalty = static_cast<float>(std::atof(argv[++i]));
+            args.repetition_penalty = cli_float(arg, argv[++i]);
             args.repetition_penalty_set = true;
         } else if (std::strcmp(arg, "--frequency-penalty") == 0 && i + 1 < argc) {
-            args.frequency_penalty = static_cast<float>(std::atof(argv[++i]));
+            args.frequency_penalty = cli_float(arg, argv[++i]);
         } else if (std::strcmp(arg, "--presence-penalty") == 0 && i + 1 < argc) {
-            args.presence_penalty = static_cast<float>(std::atof(argv[++i]));
+            args.presence_penalty = cli_float(arg, argv[++i]);
         } else if (std::strcmp(arg, "--repeat-last-n") == 0 && i + 1 < argc) {
-            args.repeat_last_n = std::atoi(argv[++i]);
+            args.repeat_last_n = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--dry-multiplier") == 0 && i + 1 < argc) {
-            args.dry_multiplier = static_cast<float>(std::atof(argv[++i]));
+            args.dry_multiplier = cli_float(arg, argv[++i]);
         } else if (std::strcmp(arg, "--dry-base") == 0 && i + 1 < argc) {
-            args.dry_base = static_cast<float>(std::atof(argv[++i]));
+            args.dry_base = cli_float(arg, argv[++i]);
         } else if (std::strcmp(arg, "--dry-allowed-length") == 0 && i + 1 < argc) {
-            args.dry_allowed_length = std::atoi(argv[++i]);
+            args.dry_allowed_length = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--dry-penalty-last-n") == 0 && i + 1 < argc) {
-            args.dry_penalty_last_n = std::atoi(argv[++i]);
+            args.dry_penalty_last_n = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--mirostat") == 0 && i + 1 < argc) {
-            args.mirostat = std::atoi(argv[++i]);
+            args.mirostat = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--mirostat-tau") == 0 && i + 1 < argc) {
-            args.mirostat_tau = static_cast<float>(std::atof(argv[++i]));
+            args.mirostat_tau = cli_float(arg, argv[++i]);
         } else if (std::strcmp(arg, "--mirostat-eta") == 0 && i + 1 < argc) {
-            args.mirostat_eta = static_cast<float>(std::atof(argv[++i]));
+            args.mirostat_eta = cli_float(arg, argv[++i]);
         } else if (std::strcmp(arg, "--interactive") == 0) {
             args.interactive = true;
         } else if (std::strcmp(arg, "--kv-fp16") == 0) {
@@ -184,7 +184,7 @@ CliArgs parse_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--no-fp8-prefill") == 0) {
             args.config_overrides.push_back("attention.fp8_prefill=never");
         } else if (std::strcmp(arg, "--mtp-spec-decode") == 0 && i + 1 < argc) {
-            args.mtp_spec_decode_k = std::atoi(argv[++i]);
+            args.mtp_spec_decode_k = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--prefill-fp8") == 0) {
             args.prefill_fp8 = true;
         } else if (std::strcmp(arg, "--token-trace") == 0) {
@@ -196,9 +196,9 @@ CliArgs parse_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--no-streaming-kv-auto") == 0) {
             args.no_streaming_kv_auto = true;
         } else if (std::strcmp(arg, "--stream-sinks") == 0 && i + 1 < argc) {
-            args.streaming_sinks = std::atoi(argv[++i]);
+            args.streaming_sinks = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--stream-window") == 0 && i + 1 < argc) {
-            args.streaming_window = std::atoi(argv[++i]);
+            args.streaming_window = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--stop") == 0 && i + 1 < argc) {
             if (args.stop_sequences.size() < 4)
                 args.stop_sequences.push_back(argv[++i]);
@@ -207,9 +207,9 @@ CliArgs parse_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--bench") == 0) {
             args.bench = true;
         } else if (std::strcmp(arg, "--bench-pp") == 0 && i + 1 < argc) {
-            args.bench_pp = std::atoi(argv[++i]);
+            args.bench_pp = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--bench-reps") == 0 && i + 1 < argc) {
-            args.bench_reps = std::atoi(argv[++i]);
+            args.bench_reps = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--bench-teacher-force") == 0) {
             args.bench_teacher_force = true;
         } else if (std::strcmp(arg, "--bench-prompt-file") == 0 && i + 1 < argc) {
@@ -225,13 +225,13 @@ CliArgs parse_args(int argc, char** argv) {
                 s = e + 1;
             }
         } else if (std::strcmp(arg, "--video-fps") == 0 && i + 1 < argc) {
-            args.video_fps = std::atof(argv[++i]);
+            args.video_fps = cli_double(arg, argv[++i]);
         } else if (std::strcmp(arg, "--video-timestamps") == 0 && i + 1 < argc) {
             const std::string list = argv[++i];
             for (size_t s = 0; s <= list.size();) {
                 const size_t e = std::min(list.find(',', s), list.size());
                 if (e > s)
-                    args.video_timestamps.push_back(std::atof(list.substr(s, e - s).c_str()));
+                    args.video_timestamps.push_back(cli_double(arg, list.substr(s, e - s).c_str()));
                 s = e + 1;
             }
         } else {

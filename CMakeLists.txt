@@ -192,7 +192,6 @@ set(IMP_MEMORY_SOURCES
     src/memory/host_pinned.cpp
     src/memory/library_reserve_cache.cpp
     src/memory/block_pool.cpp
-    src/memory/scratch_stack.cpp
     src/memory/plan.cpp
     src/memory/vram_allocator.cpp
     src/memory/mem_account.cpp
@@ -622,9 +621,7 @@ set_target_properties(imp PROPERTIES
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
     POSITION_INDEPENDENT_CODE ON
 )
-# Kernel templates instantiated in one TU and launched from another: external host stubs on both
-# sides, no -rdc (an -rdc TU drops out of the compute_120f PTX: 26 kernels, C-012). CUDA 13
-# defaults to static stubs and warns #20280-D; gemm_dp4a.cu: discarded `if constexpr` names.
+# rdc only where a kernel template is instantiated in one TU and launched from another (#2209 link test).
 set_source_files_properties(
     src/quant/nvfp4_gemv_dense.cu
     src/quant/nvfp4_gemv_fused.cu
@@ -632,6 +629,10 @@ set_source_files_properties(
     src/compute/mmq_q8_imma_q51.cu
     src/compute/mmq_q8_imma_q5k.cu
     src/compute/mmq_q8_imma_q6k.cu
+    PROPERTIES COMPILE_OPTIONS "-rdc=true")
+# Launchers of those cross-TU templates (and gemm_dp4a.cu: discarded `if constexpr` names) need
+# external host stubs; CUDA 13 defaults to static ones and warns #20280-D (42 warnings).
+set_source_files_properties(
     src/compute/mmq_q8_imma.cu
     src/quant/nvfp4_gemm.cu
     src/compute/gemm_dp4a.cu

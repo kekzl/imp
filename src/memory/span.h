@@ -19,7 +19,6 @@
 namespace imp {
 
 class ArenaAllocator;
-class ScratchStack;
 class BlockPool;
 template <class T>
 class StableSpan;
@@ -33,7 +32,6 @@ class StableKey {
 private:
     StableKey() = default;
     friend class ::imp::ArenaAllocator;
-    friend class ::imp::ScratchStack;
     friend class ::imp::BlockPool;
     // StableSpan itself, so subspan()/as<>() can re-wrap a view it ALREADY
     // holds. That mints no new guarantee — you cannot reach this without a

@@ -885,6 +885,38 @@ Run spread per cell 3.2..5.8 %; one outlier (branch, Qwen3.8 NVFP4 pp512 round 2
 
 C-012: fixed. GB203 itself stays untested (#1651).
 
+## 2026-10-16 Package 1: H-013, H-002, C-016 (owner go)
+
+| row | change | evidence |
+|---|---|---|
+| H-013 | `parse_cli_int`/`parse_cli_double` + `cli_int`/`cli_float`/`cli_double` in `tools/common/args_common.{h,cpp}` replace 44 `atoi`/`atof` (imp-cli 25, imp-server 14, shared 5); bad value = "<flag> expects ..., got '<v>'", exit 1 | `StrictCliNumbers.*` 3 tests (test-core); mutants: trailing-garbage check off, `--prefill-chunk-size` back to `atoi`, non-finite accepted: each FAIL |
+| H-002 | `ScratchStack` (213 lines, 6 tests) removed with its `StableKey` friend; MEMORY.md T4/A3.3/A5/V6/open-question rows and ARCHITECTURE.md corrected | 0 users in `src/` before removal (`rg`); build + `make dev-test` 13/13 |
+| C-016 | `tools/check_launch_guards.py` decides the 23 `#define`-body launches: body check after the `<<<`, or every expansion checked before its function closes | 23/23 guarded as written (20 body, 3 call site); selftest 10/10; mutants: `LAUNCH_INT4` body check removed FAIL, `IMP_SSM_REG` call-site check removed FAIL, split-K `cudaGetLastError` removed still OK (later peeks in `paged_attention_decode` see the uncleared error) |
+
+| gate (image `imp:p1-branch` vs `imp:p1-main`, main `bad6a308`) | result |
+|---|---|
+| SASS hash per kernel, imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 kernels, diff 0 / 0 / 0 |
+| `make test-gpu` (branch) | 3712 ran, 3624 passed, 0 failed |
+| Qwen3-8B Q8_0 `imp-cli --bench --bench-pp 512 --bench-reps 5`, 3 paired runs, median | pp512 16520.68 -> 16503.17 tok/s (-0.11 %); tg 423.76 -> 419.77 tok/s (-0.94 %), host-only change, SASS identical |
+| `make dev-test` / `make preflight` | 13/13 / 0 failures |
+
+Open rows after this package: H-011, H-015, H-022, H-028, H-030, C-004..C-007, C-017, C-018, C-023, C-024, C-029, C-031.
+
+## 2026-10-16 C-012 reverted (verify-fast decode FAIL)
+
+`make verify-fast` on a branch carrying #2753: decode tg128 258.73 tok/s vs baseline 282.97 (-8.57 %, FAIL). Paired control, `scripts/verify_ab.sh`, 3 pairs, Qwen3-8B Q8_0, arm A = main before #2753 (`bad6a308`):
+
+| arm B | decode pairs | mean | prefill mean |
+|---|---|---:|---:|
+| #2753 alone (`imp:c012`) | -5.68 / -5.70 / -6.10 % | -5.83 % | -0.36 % |
+| H-030 branch incl. #2753 | -5.87 / -5.72 / -5.97 % | -5.85 % | -0.92 % |
+
+Qwen3-8B Q8_0 decodes through the NVFP4 decode cache, i.e. the 14 dense NVFP4 GEMVs whose SASS changed without `-rdc` (REG 42..64 -> 38..40). The #2753 A/B had no Q8_0 / NVFP4-decode-cache cell. Reverted per the dispatch rule (revert, no fix forward).
+
+| row | status |
+|---|---|
+| C-012 | reopened; option (b) costs -5.83 % decode on the gate model. Left: (a) `IMP_DISABLE_120F_FALLBACK=ON` + SM120.md correction, (c) document the 26-entry PTX gap, or (b) with SASS-identical GEMVs |
+
 ## 2026-10-16 H-030 SWA burst cap, C-023 / C-024 measured (owner go, packages 2 and 3)
 
 H-030: the SWA burst cap read only `config_.prefill_chunk_size` (CLI); `--set runtime.prefill_chunk_size` reached the scheduler (`resolve_prefill_chunk_size_`) but not the SWA group sizing. Fix: the cap takes `base_prefill_chunk(resolve_prefill_chunk_size_(), executor max_tokens, block)`; `vram_budget.cpp` logs an ERROR with the knobs when the SWA group cannot fit.
