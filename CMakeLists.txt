@@ -150,6 +150,24 @@ set(CUTLASS_ENABLE_TOOLS OFF CACHE BOOL "" FORCE)
 set(CUTLASS_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(cutlass)
 
+# PCRE2, 8-bit with Unicode properties, no JIT: tokenizer.json pre-tokenizer regexes
+# (src/model/tokenizer_regex.cpp).
+FetchContent_Declare(pcre2
+    GIT_REPOSITORY https://github.com/PCRE2Project/pcre2.git
+    GIT_TAG ${IMP_DEP_PCRE2_SHA}  # commit pin, cmake/imp-deps.cmake
+    GIT_SUBMODULES ""
+    EXCLUDE_FROM_ALL
+)
+set(PCRE2_BUILD_PCRE2_8 ON CACHE BOOL "" FORCE)
+set(PCRE2_BUILD_PCRE2_16 OFF CACHE BOOL "" FORCE)
+set(PCRE2_BUILD_PCRE2_32 OFF CACHE BOOL "" FORCE)
+set(PCRE2_SUPPORT_UNICODE ON CACHE BOOL "" FORCE)
+set(PCRE2_SUPPORT_JIT OFF CACHE BOOL "" FORCE)
+set(PCRE2_BUILD_PCRE2GREP OFF CACHE BOOL "" FORCE)
+set(PCRE2_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(PCRE2_STATIC_PIC ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(pcre2)
+
 # --- Core library sources ---
 set(IMP_CORE_SOURCES
     src/core/process_diag.cpp
@@ -231,7 +249,7 @@ set(IMP_MODEL_SOURCES
     src/model/tokenizer.cpp
     src/model/fim.cpp
     src/model/tokenizer_nfc.cpp
-    src/model/tokenizer_pretok.cpp
+    src/model/tokenizer_regex.cpp
     src/model/unicode_class.cpp
     src/model/unicode_nfc_data.cpp
     src/model/tensor_kind_name.cpp
@@ -592,6 +610,7 @@ target_link_libraries(imp
         CURL::libcurl
         OpenSSL::Crypto
         JPEG::JPEG
+        pcre2-8-static
 )
 
 target_include_directories(imp PRIVATE

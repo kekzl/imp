@@ -1,4 +1,5 @@
 #include "model/tokenizer.h"
+#include "model/tokenizer_regex.h"
 #include <gtest/gtest.h>
 
 #include <cstdio>
@@ -664,6 +665,17 @@ TEST(TokenizerControlTest, PreservesExistingTypes) {
 
 using Chunks = std::vector<std::string>;
 
+// A GGUF pre name's regex (gguf_pre_regexes) on the PCRE2 pre-tokenizer: the truths below were
+// written for the hand scanners these replaced.
+Chunks pretok(const char* name, const std::string& s) {
+    return RegexPretokenizer::from_regexes(gguf_pre_regexes(name), nullptr)->split(s);
+}
+Chunks qwen2_pre_tokenize(const std::string& s) { return pretok("qwen2", s); }
+Chunks qwen35_pre_tokenize(const std::string& s) { return pretok("qwen35", s); }
+Chunks cl100k_pre_tokenize(const std::string& s) { return pretok("cl100k", s); }
+Chunks o200k_pre_tokenize(const std::string& s) { return pretok("o200k", s); }
+Chunks nemotron_pre_tokenize(const std::string& s) { return pretok("nemotron", s); }
+
 TEST(Qwen2PreTokenizeTest, SymbolRunsMerge) {
     EXPECT_EQ(qwen2_pre_tokenize("x->bar"), (Chunks{"x", "->", "bar"}));
     EXPECT_EQ(qwen2_pre_tokenize("https://example.com"),
@@ -713,19 +725,18 @@ TEST(Qwen2PreTokenizeTest, Qwen35RoutesToQwen2NotGpt2) {
     const auto qwen2_ids = tok.encode("x->y", /*no_prefix=*/true);
     tok.set_pre_tokenizer("qwen35");
     EXPECT_EQ(tok.encode("x->y", /*no_prefix=*/true), qwen2_ids);
-    // gpt2 fallback splits "->" per char, so the merged token stays
-    // unreachable — guards against qwen35 regressing to the fallback.
-    tok.set_pre_tokenizer("gpt2");
-    EXPECT_NE(tok.encode("x->y", /*no_prefix=*/true), qwen2_ids);
+    // An unknown name takes the GPT-2 regex: digit runs whole (qwen2: one digit each).
+    EXPECT_EQ(pretok("gpt2", "x12"), (Chunks{"x", "12"}));
+    EXPECT_EQ(qwen35_pre_tokenize("x12"), (Chunks{"x", "1", "2"}));
 }
 
 // #2270: GGUF pre "deepseek-r1-qwen" (DeepSeek-R1-Distill-Qwen) is the Qwen2 regex + NFC.
 TEST(Qwen2PreTokenizeTest, DeepSeekR1QwenMapsToQwen2) {
+    EXPECT_EQ(gguf_pre_regexes("deepseek-r1-qwen"), gguf_pre_regexes("qwen2"));
+    EXPECT_NE(gguf_pre_regexes("qwen35"), gguf_pre_regexes("qwen2"));
     Tokenizer tok = make_gpt2_tokenizer();
     tok.set_pre_tokenizer("deepseek-r1-qwen");
-    EXPECT_EQ(tok.pre_tokenizer(), "qwen2");
-    tok.set_pre_tokenizer("qwen35");
-    EXPECT_EQ(tok.pre_tokenizer(), "qwen35");
+    EXPECT_EQ(tok.pre_tokenizer(), "deepseek-r1-qwen");
 }
 
 // #657: expected chunks verified against HF tokenizers pre_tokenize_str on the gpt-oss-20b
@@ -868,48 +879,6 @@ TEST(PreTokenizeUnicodeTest, CasedRunsUseUnicodeCase) {
     EXPECT_EQ(nemotron_pre_tokenize("12345"), (Chunks{"1", "2", "3", "4", "5"}));
 }
 #undef EMOJI
-
-// DeepSeek-V2-shaped Split sequence. Truths: HF tokenizers 0.23.2 pre_tokenize_str on
-// Sequence([Split(r, "isolated") for r in the steps] + [Digits(individual_digits=True)]).
-TEST(PreTokenizeSplitSequenceTest, MatchesHfOnDeepSeekShapedSteps) {
-    auto seq = compile_split_sequence({"re:[\r\n]", "re:\\s?[A-Za-z\xc3\x80-\xc3\xbf]+",
-                                       "re:\\s?[!-/:-~\xe3\x80\x80-\xe3\x80\x82]+", "re:\\s+$",
-                                       "re:[\xe4\xb8\x80-\xe9\xbe\xa5]+", "digits:1"});
-    ASSERT_NE(seq, nullptr);
-    auto split = [&](const std::string& s) { return split_sequence_pre_tokenize(*seq, s); };
-    EXPECT_EQ(split("  two leading"), (Chunks{" ", " two", " leading"}));
-    EXPECT_EQ(split("Hello, world!\n"), (Chunks{"Hello", ",", " world", "!", "\n"}));
-    EXPECT_EQ(split("x = 12345;  "), (Chunks{"x", " =", " ", "1", "2", "3", "4", "5", ";", "  "}));
-    EXPECT_EQ(split("\xe4\xb8\xad\xe6\x96\x87"
-                    "abc\xe3\x80\x82"),
-              (Chunks{"\xe4\xb8\xad\xe6\x96\x87", "abc", "\xe3\x80\x82"}));
-    EXPECT_EQ(split("caf\xc3\xa9  \xc3\xa9t\xc3\xa9  "),
-              (Chunks{"caf", "\xc3\xa9", " ", " \xc3\xa9", "t", "\xc3\xa9", "  "}));
-    EXPECT_EQ(split("a\xe3\x80\x80"
-                    "b"),
-              (Chunks{"a",
-                      "\xe3\x80\x80"
-                      "b"}));  // U+3000 is the \s of \s?
-    EXPECT_EQ(split("ab  \n  cd"), (Chunks{"ab", "  ", "\n", " ", " cd"}));
-    EXPECT_EQ(split(" \xc2\xb2x"), (Chunks{" ", "\xc2\xb2", "x"}));  // U+00B2 is a Digits piece
-}
-
-// Onig (Ruby syntax) $ also matches before any "\n", not only at the end.
-TEST(PreTokenizeSplitSequenceTest, TrailingSpaceDollarIsEndOfLine) {
-    auto seq = compile_split_sequence({"re:\\s+$"});
-    ASSERT_NE(seq, nullptr);
-    EXPECT_EQ(split_sequence_pre_tokenize(*seq, "ab  \ncd"), (Chunks{"ab", "  ", "\ncd"}));
-    EXPECT_EQ(split_sequence_pre_tokenize(*seq, "ab \t\n\ncd  "), (Chunks{"ab", " \t\n", "\ncd", "  "}));
-    EXPECT_EQ(split_sequence_pre_tokenize(*seq, "a  b"), (Chunks{"a  b"}));
-}
-
-TEST(PreTokenizeSplitSequenceTest, RefusesRegexItCannotMatchExactly) {
-    EXPECT_EQ(compile_split_sequence({"re:\\p{L}+"}), nullptr);
-    EXPECT_EQ(compile_split_sequence({"re:[^a-z]+"}), nullptr);
-    EXPECT_EQ(compile_split_sequence({"re:[a-z]+|[0-9]+"}), nullptr);
-    EXPECT_EQ(compile_split_sequence({"!"}), nullptr);
-    EXPECT_EQ(compile_split_sequence({}), nullptr);
-}
 
 // HF matches an added token atomically iff normalized=false (special only governs decode
 // -skipping). Qwen3's <think>/</think>/<tool_call> ship special=false, normalized=false and

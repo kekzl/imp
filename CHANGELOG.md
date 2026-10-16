@@ -12,6 +12,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `/metrics`: `imp_gpu_power_watts` and `imp_gpu_energy_joules_total` from NVML (`dlopen`, absent without libnvidia-ml). A 60-token Qwen3-4B Q8_0 chat reads 18.4 J on the driver counter.
 
 ### Changed
+- tokenizer.json pre-tokenizers run step by step on PCRE2 10.49 (Split with all behaviors and invert, ByteLevel, Digits, Punctuation, Whitespace) instead of hand-written family scanners; GGUF pre names map to their regex. 32 local tokenizers: 0 of 1210 parity records differ from HF; encode 1.20x slower on average.
 - Short prompts on Q8_0 GGUF prefill on a 32-wide IMMA N tile (M <= 64, under one wave), bit-identical rows. Qwen3-8B Q8_0 pp40 15.18 -> 11.81 ms; server TTFT p50 for ~35-token chats 17 -> 13 ms.
 - Release bar 2 (`bench-competitive`): Qwen3.8-27B Q4_K_M is a hero (6 of 8 contested), the non-hero Qwen3-30B-A3B row is gone; the sweep refuses on host 1-min load > nproc/4 instead of any running container.
 

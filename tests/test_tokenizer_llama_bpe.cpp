@@ -1,6 +1,7 @@
 // GGUF tokenizer.ggml.pre aliases: llama-bpe (Llama 3) uses the cl100k regex (#2520), tekken the nemotron
-// scan (#2411).
+// regex (#2411).
 #include "model/tokenizer.h"
+#include "model/tokenizer_regex.h"
 
 #include <gtest/gtest.h>
 
@@ -53,28 +54,30 @@ TEST(TokenizerLlamaBpeTest, UsesCl100kChunks) {
     }
 }
 
-// GGUF pre "tekken" (Devstral-Small-2, #2411) is the nemotron scan; the gpt2 fallback split "_case"
-// and "/," apart (592 of 1202 parity records differed). Chunks: HF tokenizers on tokenizer.json.
+// GGUF pre "tekken" (Devstral-Small-2, #2411) is the nemotron regex; the old gpt2 fallback split
+// "_case" and "/," apart (592 of 1202 parity records differed). Chunks: HF tokenizers on tokenizer.json.
 TEST(TokenizerLlamaBpeTest, TekkenUsesNemotronChunks) {
-    Tokenizer tok;
-    tok.set_pre_tokenizer("tekken");
-    EXPECT_EQ(tok.pre_tokenizer(), "nemotron");
+    EXPECT_EQ(gguf_pre_regexes("tekken"), gguf_pre_regexes("nemotron"));
     using Chunks = std::vector<std::string>;
-    EXPECT_EQ(nemotron_pre_tokenize("snake_case and camelCase"),
+    auto nemotron = RegexPretokenizer::from_regexes(gguf_pre_regexes("tekken"), nullptr);
+    ASSERT_NE(nemotron, nullptr);
+    EXPECT_EQ(nemotron->split("snake_case and camelCase"),
               (Chunks{"snake", "_case", " and", " camel", "Case"}));
-    EXPECT_EQ(nemotron_pre_tokenize("X/,c"), (Chunks{"X", "/,", "c"}));
+    EXPECT_EQ(nemotron->split("X/,c"), (Chunks{"X", "/,", "c"}));
 }
 
 // Cohere2 Split \d{1,3}(?=(?:\d{3})*\b): right-aligned triples before a word boundary; a run
-// followed by \w (Oniguruma: L, M, any N, Pc) stays whole for the family scan.
+// followed by \w (Oniguruma: L, M, any N, Pc) stays whole. \b runs through onig_to_pcre2.
 TEST(DigitTriplesRightSplitTest, RightAlignedOnlyBeforeAWordBoundary) {
     using Chunks = std::vector<std::string>;
-    EXPECT_EQ(digit_triples_right_split("x 1008|"), (Chunks{"x ", "1", "008", "|"}));
-    EXPECT_EQ(digit_triples_right_split("123456"), (Chunks{"123", "456"}));
-    EXPECT_EQ(digit_triples_right_split("v12ab 2\xC2\xBD"), (Chunks{"v12ab 2\xC2\xBD"}));  // 2½: ½ is \w
-    EXPECT_EQ(digit_triples_right_split("\t 9\xE2\x80\x8D"), (Chunks{"\t ", "9", "\xE2\x80\x8D"}));  // ZWJ
-    EXPECT_EQ(digit_triples_right_split("6\xD9\xA1"
-                                        "15."),
+    auto rp = RegexPretokenizer::from_regexes({"\\d{1,3}(?=(?:\\d{3})*\\b)"}, nullptr);
+    ASSERT_NE(rp, nullptr);
+    EXPECT_EQ(rp->split("x 1008|"), (Chunks{"x ", "1", "008", "|"}));
+    EXPECT_EQ(rp->split("123456"), (Chunks{"123", "456"}));
+    EXPECT_EQ(rp->split("v12ab 2\xC2\xBD"), (Chunks{"v12ab 2\xC2\xBD"}));            // 2½: ½ is \w
+    EXPECT_EQ(rp->split("\t 9\xE2\x80\x8D"), (Chunks{"\t ", "9", "\xE2\x80\x8D"}));  // ZWJ
+    EXPECT_EQ(rp->split("6\xD9\xA1"
+                        "15."),
               (Chunks{"6",
                       "\xD9\xA1"
                       "15",

@@ -56,17 +56,20 @@ ARG IMP_DEP_GOOGLETEST_TAG=v1.18.0
 ARG IMP_DEP_CUTLASS_TAG=v4.8.0
 ARG IMP_DEP_HTTPLIB_TAG=v0.60.1
 ARG IMP_DEP_NLOHMANN_JSON_TAG=v3.12.0
+ARG IMP_DEP_PCRE2_TAG=pcre2-10.49
 ARG IMP_DEP_GOOGLETEST_SHA=063de7e9578f82b369302001269680b4b1553359
 ARG IMP_DEP_CUTLASS_SHA=098de2a652cf8f00fd70b2df54051c7eccbb855a
 ARG IMP_DEP_HTTPLIB_SHA=00afaaed6aaba592e4d079742dfecfba2dcd1196
 ARG IMP_DEP_NLOHMANN_JSON_SHA=55f93686c01528224f448c19128836e7df245f72
+ARG IMP_DEP_PCRE2_SHA=6f9d7c1373262c541324a16a358785b33ef116cf
 RUN set -eu; \
     pin() { mkdir -p "$4"; git -C "$4" init -q; git -C "$4" fetch -q --depth=1 "$1" "$3"; \
             git -C "$4" checkout -q FETCH_HEAD; printf '%s %s %s\n' "$1" "$2" "$3" >> /deps/PINS; }; \
     pin https://github.com/google/googletest.git   ${IMP_DEP_GOOGLETEST_TAG}    ${IMP_DEP_GOOGLETEST_SHA}    /deps/googletest; \
     pin https://github.com/NVIDIA/cutlass.git      ${IMP_DEP_CUTLASS_TAG}       ${IMP_DEP_CUTLASS_SHA}       /deps/cutlass; \
     pin https://github.com/yhirose/cpp-httplib.git ${IMP_DEP_HTTPLIB_TAG}       ${IMP_DEP_HTTPLIB_SHA}       /deps/httplib; \
-    pin https://github.com/nlohmann/json.git       ${IMP_DEP_NLOHMANN_JSON_TAG} ${IMP_DEP_NLOHMANN_JSON_SHA} /deps/json
+    pin https://github.com/nlohmann/json.git       ${IMP_DEP_NLOHMANN_JSON_TAG} ${IMP_DEP_NLOHMANN_JSON_SHA} /deps/json; \
+    pin https://github.com/PCRE2Project/pcre2.git  ${IMP_DEP_PCRE2_TAG}         ${IMP_DEP_PCRE2_SHA}         /deps/pcre2
 
 # clang-format + clang-tidy for `make format`, `make tidy`. Pin: scripts/install_llvm.sh.
 FROM toolchain AS lint
@@ -116,6 +119,7 @@ RUN --mount=type=cache,id=imp-ccache,target=/ccache \
         -DFETCHCONTENT_SOURCE_DIR_CUTLASS=/deps/cutlass \
         -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=/deps/httplib \
         -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json \
+        -DFETCHCONTENT_SOURCE_DIR_PCRE2=/deps/pcre2 \
     && cmake --build build -j"$(bash scripts/build_jobs.sh)" \
     && ccache -s \
     && cp build/imp-server build/imp-cli /tmp/ \
