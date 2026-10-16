@@ -132,7 +132,7 @@ TEST(Ra2PrefillTest, MatchesReference_Hd256) { expect_close({320, 320, 8, 2, 256
 // Chunk continuation: Q rows start at position 512 of a 712-token context (FA2's q_offset contract).
 TEST(Ra2PrefillTest, ChunkContinuation) { expect_close({200, 712, 8, 2, 128}); }
 
-// The T2 plan (exec_ra2_workspace_bytes, CPU lane) must equal what the kernel carves.
+// The host-side T2 plan (exec_ra2_workspace_bytes) must equal what the kernel carves.
 TEST(Ra2PrefillTest, PlannedWorkspaceMatchesTheCarve) {
     const int shapes[][5] = {{320, 320, 8, 2, 64},
                              {200, 712, 8, 2, 128},
