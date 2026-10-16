@@ -758,3 +758,24 @@ Code head `7b0863f1`, image `imp:b9-final`; paired control `imp:main-ctrl3` (mai
 |---|---|---|
 | 171 discarded CUDA / cuBLAS statuses in imp-bench (164) and imp-quantize (7), gate scope extended to `tools/imp-bench`, `tools/imp-quantize`, `tools/imp-cli` | ship | gates above |
 | `get_device_sm_version` deletion, always-true `sm >= 120` gate in `bench_attention` | ship | no caller left; shipped SASS identical |
+
+## 2026-10-16 H-012 strict index parse (builder)
+
+Branch `fix/strict-index-parse` off `origin/main` 2f959d93, owner go for the B7 deferred row. CPU only. `make dev-test` 13/13, test-core 2013/2013.
+
+| site | was | malformed index now |
+|---|---|---|
+| `model/gguf_tensor_assign.cpp` layer | `kStoi` | WARN naming the tensor, unassigned |
+| `model/gguf_tensor_assign.cpp` expert | `kStoi` | WARN on `ffn_gate`/`ffn_up`/`ffn_down`, unassigned |
+| `vision/vision_loader.cpp` via `vision_blk_layer_index` | `kStoi` | WARN naming the tensor, unassigned |
+| `lora/lora_adapter.cpp` `lora_parse_key` | `kAtoi` | load refused, ERROR naming the tensor |
+| `vision/qwen3vl_vision_map.cpp` | `kAtoi` | `Unknown`, the loader WARNs |
+| `exec/pre_dequant_phase0_nvfp4_loader.cpp` `resolve_nvfp4_scratch_key` layer, expert | `kAtoi` | nullptr, "unresolved scratch key" WARN |
+
+`IndexParse::kAtoi` / `kStoi` and `IndexParsingLegacyPoliciesMatchAtoiAndStoi` deleted: no caller left.
+
+| mutation (site back to its old policy) | failing test (failed assertions) |
+|---|---|
+| set 1: GGUF layer, vision, LoRA, Qwen3-VL, NVFP4 layer | `MalformedLayerIndexIsSkippedNotMapped` (5), `VisionLoaderCheck.MalformedLayerIndexIsDroppedNotMapped` (4), `LoraDimsTest.MalformedLayerIndexIsNotMapped` (3), `LoraDimsTest.MalformedLayerIndexRefusesTheLoad` (1), `OverflowingIndexIsUnknownNotTruncated` (6), `Nvfp4ScratchKey` (4, layer keys only) |
+| set 2: GGUF expert, NVFP4 expert | `MalformedExpertIndexIsSkippedNotMapped` (3), `Nvfp4ScratchKey` (3, expert keys only) |
+| set 3, after the CCN split: `strtol` in `name_index_or_warn` and both NVFP4 parses | `MalformedLayerIndexIsSkippedNotMapped` (10), `MalformedExpertIndexIsSkippedNotMapped` (3), `Nvfp4ScratchKey` (7) |

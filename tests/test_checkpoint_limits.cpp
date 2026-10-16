@@ -17,7 +17,6 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -154,31 +153,6 @@ TEST(CheckpointLimits, IndexParsingStrictEdgeCases) {
     EXPECT_EQ(parse_index("3 "), -1);
     EXPECT_EQ(parse_index("-0"), 0);
     EXPECT_EQ(parse_index("-5"), -1);
-}
-
-// The legacy policies (H-012, B7) must equal the call they replaced for every input, so the
-// 7 routed sites are behaviour-neutral until each one gets its kStrict go.
-TEST(CheckpointLimits, IndexParsingLegacyPoliciesMatchAtoiAndStoi) {
-    const char* inputs[] = {"0",  "42", "007", "",   "x",  "3x",        "0x10",
-                            "+3", " 3", "-1",  "-5", "-0", "2147483647"};
-    for (const char* in : inputs) {
-        const std::string s(in);
-        EXPECT_EQ(parse_index(s, IndexParse::kAtoi), std::atoi(in)) << "'" << s << "'";
-        int want = -1;
-        try {
-            want = std::stoi(s);
-        } catch (...) {
-            want = -1;
-        }
-        EXPECT_EQ(parse_index(s, IndexParse::kStoi), want) << "'" << s << "'";
-    }
-    // Pinned values where the legacy call is a silent wrong mapping (the needs-go list).
-    EXPECT_EQ(parse_index("x", IndexParse::kAtoi), 0);
-    EXPECT_EQ(parse_index("3x", IndexParse::kStoi), 3);
-    EXPECT_EQ(parse_index("4294967296", IndexParse::kAtoi), 0);  // glibc atoi: (int)strtol
-    // std::stoi throws out_of_range here; the sites caught it and dropped the tensor.
-    EXPECT_EQ(parse_index("2147483648", IndexParse::kStoi), -1);
-    EXPECT_EQ(parse_index("99999999999999999999", IndexParse::kStoi), -1);
 }
 
 // ---------------------------------------------------------------------------
