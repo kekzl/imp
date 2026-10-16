@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -206,6 +207,10 @@ std::vector<std::string> cl100k_pre_tokenize(const std::string& text) {
     return scan(text, {Contractions::kPrefix, false, false, 3, false});
 }
 
+std::vector<std::string> digit_run_pre_tokenize(const std::string& text) {
+    return scan(text, {Contractions::kPrefix, false, false, std::numeric_limits<int>::max(), false});
+}
+
 std::vector<std::string> o200k_pre_tokenize(const std::string& text) {
     return scan(text, {Contractions::kSuffix, true, false, 3, true});
 }
@@ -396,6 +401,28 @@ std::vector<std::string> split_sequence_pre_tokenize(const SplitSequence& seq, c
         pieces.swap(next);
     }
     return pieces;
+}
+
+std::vector<std::string> digit_triples_left_split(const std::string& text) {
+    std::vector<std::string> out;
+    size_t last = 0, k = 0, len = 0;
+    while (k < text.size()) {
+        if (!(cp_class(decode_utf8_at(text, k, &len)) & unicode::kNumber)) {
+            k += len;
+            continue;
+        }
+        if (k > last)
+            out.push_back(text.substr(last, k - last));
+        size_t e = k;
+        for (int d = 0;
+             d < 3 && e < text.size() && (cp_class(decode_utf8_at(text, e, &len)) & unicode::kNumber); d++)
+            e += len;
+        out.push_back(text.substr(k, e - k));
+        last = k = e;
+    }
+    if (last < text.size())
+        out.push_back(text.substr(last));
+    return out;
 }
 
 std::vector<std::string> digit_triples_right_split(const std::string& text) {

@@ -1193,6 +1193,7 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-text SOURCES
         tests/test_tokenizer.cpp
         tests/test_tokenizer_llama_bpe.cpp
+        tests/test_tokenizer_pretok_json.cpp
         tests/test_tokenizer_robustness.cpp
         tests/test_chat_template.cpp
         tests/test_transcript_ids.cpp

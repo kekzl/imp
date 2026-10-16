@@ -194,6 +194,8 @@ private:
     std::string pre_tokenizer_;  // Pre-tokenizer type from GGUF tokenizer.ggml.pre
     std::shared_ptr<const SplitSequence> split_seq_;  // pre_tokenizer_ == "split-seq"
     bool digit_triples_right_ = false;  // Split kDigitTriplesRightRegex ahead of the family scan
+    bool digit_triples_left_ = false;   // Split kDigitTriplesLeftRegex ahead of the family scan
+    bool ignore_merges_ = false;        // BPE ignore_merges: a pre-token found whole in the vocab skips BPE
     std::vector<std::string> pre_tokenize_(const std::string& bpe_text) const;
     std::vector<std::string> pre_tokenize_family_(const std::string& bpe_text) const;
     bool add_bos_ = true;
@@ -253,6 +255,14 @@ std::vector<std::string> split_sequence_pre_tokenize(const SplitSequence& seq, c
 // boundary splits into right-aligned triples ("1008" -> "1" "008"); a run followed by \w stays whole.
 std::vector<std::string> digit_triples_right_split(const std::string& text);
 inline constexpr const char* kDigitTriplesRightRegex = "\\d{1,3}(?=(?:\\d{3})*\\b)";
+
+// Split(Isolated) \p{N}{1,3} ahead of a family scan (MiniCPM5): every \p{N} run splits into
+// left-aligned triples ("12345" -> "123" "45").
+std::vector<std::string> digit_triples_left_split(const std::string& text);
+inline constexpr const char* kDigitTriplesLeftRegex = "\\p{N}{1,3}";
+
+// The cl100k alternatives with an unbounded digit run \p{N}+ (MiniCPM5's second Split).
+std::vector<std::string> digit_run_pre_tokenize(const std::string& text);
 
 // NFC as encode() applies it: table compositions of Latin/Greek/Cyrillic base + combining mark,
 // and algorithmic Hangul L+V(+T). Exposed for unit tests.
