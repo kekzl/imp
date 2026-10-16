@@ -1,12 +1,14 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_common.cuh (v0.6.1, 015301f); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_common.cuh (v0.8.1, c616972); change there first, then copy.
 // APA common (all-FP4 base from ra2 1d72da2): Cfg<D>, layouts, PTX helpers (sm_120a).
 #pragma once
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#include <cfloat>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 
@@ -202,12 +204,30 @@ __device__ __forceinline__ void bulk_g2s(uint32_t dst, const void* src, uint32_t
                  "l"(src), "r"(bytes), "r"(bar)
                  : "memory");
 }
+__device__ __forceinline__ void mbar_inval(uint32_t bar) {
+    asm volatile("mbarrier.inval.shared::cta.b64 [%0];" ::"r"(bar) : "memory");
+}
+// Generic-proxy writes (global: other CTAs, acquired; shared: this CTA) before bulk copies touch them.
+__device__ __forceinline__ void fence_proxy_async() { asm volatile("fence.proxy.async;" ::: "memory"); }
+__device__ __forceinline__ void add_release(uint32_t* p, uint32_t v) {
+    asm volatile("red.release.gpu.global.add.u32 [%0], %1;" ::"l"(p), "r"(v) : "memory");
+}
+// Spin until *p >= v (acquire).
+__device__ __forceinline__ void wait_geq(const uint32_t* p, uint32_t v) {
+    for (uint32_t x;;) {
+        asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(x) : "l"(p) : "memory");
+        if (x >= v)
+            return;
+        __nanosleep(500);
+    }
+}
 
 // Problem geometry shared by prep and attention. Q/O: [B][Sq][H][D]; GQA group G = H / Hkv.
 // Packed Q rows per (b, kv head): row r = position r / G, q head hk*G + r % G (R = Sq * G rows).
 struct Dims {
     int B, Sq, Skv, H, Hkv, G, R, ntkv, q_offset;
     int kvcap;  // KV blob stride in tiles per (b, kv head): ntkv, or a persistent KvState capacity
+    int swin;   // sliding window: keys per query (pos - swin, pos]; 0 = full causal
 };
 
 __device__ __forceinline__ float to_f(__half x) { return __half2float(x); }

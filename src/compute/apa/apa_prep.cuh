@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_prep.cuh (v0.6.1, 015301f); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_prep.cuh (v0.8.1, c616972); change there first, then copy.
 // APA prep: KV readers (flat / paged FP16 / paged NVFP4), K/V stats, quantization into tile blobs, Q packing.
 #pragma once
 #include "apa_common.cuh"
@@ -212,29 +212,22 @@ __global__ void __launch_bounds__(D) finalize_stats_kernel(const unsigned* __res
     }
 }
 
-// grid (ntkv - t0, Hkv, B): tiles t0.. into KV (stride kvcap tiles per (b, kv head)) with the finalized
-// K mean (mean-centred K, softmax-invariant) and head scales; tokens >= Skv are zero (masked in attention).
+// nb consecutive KV tiles (tile0.., blob0 + i * TILE) of (b, hk) with the finalized K mean (mean-centred K,
+// softmax-invariant) and head scales; tokens >= Skv are zero (masked in attention). nthr threads (all call),
+// vt
+// ([nb * BKV] rows) / kmean in smem. nb * 512 groups per phase: 384 threads fill both phases at nb 3, 67 % at
+// nb 1. Returns this thread's largest |x| of a 16-block (ovf: > P_SCALE saturates the UE4M3 scale).
 template <int D, typename Reader>
-__global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const float* __restrict__ kmean_g,
-                                                       const HeadScale* __restrict__ hs,
-                                                       uint8_t* __restrict__ KV, int t0, int t_keep = 0,
-                                                       const int* redo = nullptr, int* ovf = nullptr) {
+__device__ __forceinline__ float quant_tile(const Reader& rd, const Dims& dm, const float* kmean, float kg,
+                                            float vg, uint8_t* blob0, int b, int hk, int tile0, int nb,
+                                            int tid, int nthr,
+                                            __half (*vt)[D + 2]) {  // V / vg (|x| <= 2688 fits FP16)
     using C = Cfg<D>;
-    __shared__ __half vt[BKV][D + 2];  // V / vg (|x| <= 2688 fits FP16)
-    __shared__ float kmean[D];
-    const int b = blockIdx.z, hk = blockIdx.y, bhk = b * dm.Hkv + hk, tile = t0 + blockIdx.x,
-              tid = threadIdx.x;
-    if (tile < t_keep && redo != nullptr && *redo == 0)
-        return;  // cached tile of a still-valid KvState
-    for (int d = tid; d < D; d += 256)
-        kmean[d] = kmean_g[bhk * D + d];
-    __syncthreads();
-    const float kg = hs[bhk].k, vg = hs[bhk].v;
-    uint8_t* blob = KV + ((size_t)bhk * dm.kvcap + tile) * C::TILE;
-    float amx = 0.f;  // largest |x| of a 16-block (ovf: > P_SCALE saturates the UE4M3 scale)
-
-    for (int p = tid; p < BKV * C::G16; p += 256) {
-        const int r = p / C::G16, g = p % C::G16, s = tile * BKV + r;
+    constexpr int NG = BKV * C::G16;  // groups per tile and phase
+    float amx = 0.f;
+    for (int pp = tid; pp < nb * NG; pp += nthr) {
+        const int ti = pp / NG, p = pp % NG, r = p / C::G16, g = p % C::G16, s = (tile0 + ti) * BKV + r;
+        uint8_t* blob = blob0 + (size_t)ti * C::TILE;
         float x[16];
         uint2 w;
         // ---- V row to smem (transposed gather below)
@@ -247,7 +240,7 @@ __global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const
         }
 #pragma unroll
         for (int i = 0; i < 16; ++i)
-            vt[r][g * 16 + i] = __float2half(x[i] / vg);
+            vt[ti * BKV + r][g * 16 + i] = __float2half(x[i] / vg);
         // ---- K (token row r, swizzled 16 B chunk g>>1, half g&1)
         if (s < dm.Skv) {
             rd.load16(false, b, s, hk, g * 16, dm, D, x);
@@ -266,14 +259,15 @@ __global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const
         blob[C::K_BYTES + C::V_BYTES + (r & 7) * (D / 2) + (r >> 3) * (D / 16) + g] = sb;  // [T1][nt][D/16]
     }
     __syncthreads();
-    for (int p = tid; p < D * (BKV / 16); p += 256) {
+    for (int pp = tid; pp < nb * NG; pp += nthr) {
         // ---- Vt (channel row d, slot group g of 4)
-        const int d = p >> 2, g = p & 3;
+        const int ti = pp / NG, d = (pp % NG) >> 2, g = pp & 3;
+        uint8_t* blob = blob0 + (size_t)ti * C::TILE;
         float x[16];
         uint2 w;
 #pragma unroll
         for (int i = 0; i < 16; ++i)
-            x[i] = __half2float(vt[slot_token(g * 16 + i)][d]);
+            x[i] = __half2float(vt[ti * BKV + slot_token(g * 16 + i)][d]);
         float am;
         const uint8_t sb = quant16(x, w, &am);
         amx = fmaxf(amx, am);
@@ -281,6 +275,27 @@ __global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const
         blob[C::K_BYTES + C::V_BYTES + C::KS_BYTES + (d & 7) * (D / 2) + (d >> 3) * 4 + g] =
             sb;  // [T1][dt][4]
     }
+    return amx;
+}
+
+// grid (ntkv - t0, Hkv, B): tiles t0.. into KV (stride kvcap tiles per (b, kv head)).
+template <int D, typename Reader>
+__global__ void __launch_bounds__(256) quant_kv_kernel(Reader rd, Dims dm, const float* __restrict__ kmean_g,
+                                                       const HeadScale* __restrict__ hs,
+                                                       uint8_t* __restrict__ KV, int t0, int t_keep = 0,
+                                                       const int* redo = nullptr, int* ovf = nullptr) {
+    __shared__ __half vt[BKV][D + 2];
+    __shared__ float kmean[D];
+    const int b = blockIdx.z, hk = blockIdx.y, bhk = b * dm.Hkv + hk, tile = t0 + blockIdx.x,
+              tid = threadIdx.x;
+    if (tile < t_keep && redo != nullptr && *redo == 0)
+        return;  // cached tile of a still-valid KvState
+    for (int d = tid; d < D; d += 256)
+        kmean[d] = kmean_g[bhk * D + d];
+    __syncthreads();
+    const float amx = quant_tile<D>(rd, dm, kmean, hs[bhk].k, hs[bhk].v,
+                                    KV + ((size_t)bhk * dm.kvcap + tile) * Cfg<D>::TILE, b, hk, tile, 1, tid,
+                                    256, vt);
     if (ovf != nullptr && __syncthreads_or(!(amx <= P_SCALE)) && tid == 0)
         atomicOr(ovf, 1);  // NaN / inf too
 }

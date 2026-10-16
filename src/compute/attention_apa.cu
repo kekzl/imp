@@ -17,6 +17,9 @@ static_assert(fp4_attn_geom::kKvTileTokens == static_cast<size_t>(apa::BKV));
 static_assert(fp4_attn_geom::kApaStatsTiles == static_cast<size_t>(apa::STATS_TILES));
 static_assert(fp4_attn_geom::kApaWarpsHd128 == static_cast<size_t>(apa::Launch<128>::NW));
 static_assert(fp4_attn_geom::kApaTileBytesPerD * 128 == static_cast<size_t>(apa::Cfg<128>::TILE));
+static_assert(fp4_attn_geom::kApaWinTiles == static_cast<size_t>(apa::WIN));
+static_assert(fp4_attn_geom::kApaWinSlots == static_cast<size_t>(apa::WIN_SLOTS));
+static_assert(APA_P2_SEG && !APA_P2_F32O);  // exec_apa_workspace_bytes: pass-2 state f16, per segment
 
 // T2 arena scratch (AUDIT B13 family), taken once at the planned bound (exec_t2_demand apa_scratch);
 // unplanned it grows, and a bump arena keeps each old slice valid inside a captured graph. Arena

@@ -53,7 +53,7 @@ MACRO_NAME = re.compile(r"#define\s+(\w+)")
 # THIS LIST ONLY SHRINKS — an entry that no longer matches is an error too, so
 # it cannot go stale silently.
 ALLOWLIST: dict[str, str] = {
-    "src/compute/apa/apa.cuh": "vendored kekzl/apa v0.6.1, patched upstream only; the 2 reset_stats_kernel "
+    "src/compute/apa/apa.cuh": "vendored kekzl/apa v0.8.1, patched upstream only; the 2 reset_stats_kernel "
     "launches are checked by the cudaPeekAtLastError 5 lines below, after the 4-launch redo group",
 }
 
