@@ -951,3 +951,11 @@ Default MoE prefill paths do not reach the D2H sites: `CUTLASS 3.x device-args f
 | H-030 | fixed |
 | C-023 | not pursued: 269.87 vs 269.91 tok/s |
 | C-024 | not pursued: default tiers do not run the sites, pp deltas inside noise |
+
+## 2026-10-16 C-012 option (c): gap documented
+
+Option (b) with SASS-identical GEMVs is not available: an `-rdc` object reaches only the `sm_120a` device link (its `compute_120f` PTX is dropped there), and the same TUs without `-rdc` compile to different SASS (-5.83 % decode, reverted in #2755). Option (a) would ship no PTX at all, so GB203 loses every kernel instead of 26.
+
+| row | status |
+|---|---|
+| C-012 | documented: `docs/internals/SM120.md` GB203 row, `docs/LIMITATIONS.md` model-specific blockers; GB203 untested (#1651) |
