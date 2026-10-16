@@ -34,7 +34,7 @@ The outer gate is decided **per layer**, not per model (the part the old snippet
        path=attention_cublas_prefill_sliced cmd=`test_attention_fmha_hd512.cu` DISABLED benches
        n=unknown note=isolated kernel A/B from the #1042 PR body, not an e2e figure]
 
-Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cpp:69 if (has_sinks) {`: they route only to the two sink-capable tiers, in code order: (1) `fmha_sm120_fa2_prefill` with `fp16_qk=true` (gated by `attention.fmha_fa2 == "on"` and `fa2_fp16qk != "never"`), then (2) the FP16 WMMA FMHA `fmha_sm120_prefill` (gated by `fmha_sm120 != "never"`). If both decline (or both are off) the dispatch **throws** rather than falling through to a sink-blind kernel (#992).
+Learned sinks (gpt-oss) are pre-gated at `attention_dispatch.cpp:50 if (has_sinks) {`: they route only to the two sink-capable tiers, in code order: (1) `fmha_sm120_fa2_prefill` with `fp16_qk=true` (gated by `attention.fmha_fa2 == "on"` and `fa2_fp16qk != "never"`), then (2) the FP16 WMMA FMHA `fmha_sm120_prefill` (gated by `fmha_sm120 != "never"`). If both decline (or both are off) the dispatch **throws** rather than falling through to a sink-blind kernel (#992).
 
 Since #1205 the resolved path is **observable at runtime**: the engine logs one `Resolved dispatch: attn_prefill=… attn_decode=… moe_prefill=…` line after the first step that has seen both a prefill and a decode, recorded from inside the real dispatch rather than predicted.
 

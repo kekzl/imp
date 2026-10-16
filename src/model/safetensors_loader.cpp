@@ -13,6 +13,7 @@
 #include "model/awq_load.h"
 #include "quant/dequant_gptq.h"
 #include "core/logging.h"
+#include "model/mtp_head.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -1121,7 +1122,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     model->mtp_head_available_unloaded_ = mtp_available_unloaded;
     model->source_path_ = path;
     if (mtp_local.has_value()) {
-        model->mtp_ = std::move(mtp_local);
+        model->mtp_ = std::make_unique<imp::MtpHead>(std::move(*mtp_local));
         // Retain MTP mmap so Tensor data pointers stay valid for the lifetime
         // of the Model. Cleaned up by Model destructor like other shard mmaps.
         if (mtp_shard.mmap_base != nullptr) {

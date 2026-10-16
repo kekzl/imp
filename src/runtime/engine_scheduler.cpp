@@ -1628,8 +1628,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     // Measures MTP-draft prediction accuracy without changing generation.
     // Single-sequence only (batch=1 simplifies hidden-state addressing).
     // Skipped when MTP is disabled or the workspace lacks attention dims.
-    if (mtp_spec_decode_enabled() && model_ && model_->mtp_.has_value() &&
-        model_->mtp_->loaded && gpu_batch.n_sequences == 1 && !tokens.empty()) {
+    if (mtp_spec_decode_enabled() && model_ && model_->mtp_ && model_->mtp_->loaded &&
+        gpu_batch.n_sequences == 1 && !tokens.empty()) {
         const int32_t next_token = tokens[0];
         if (mtp_pool_.pending_prediction >= 0) {
             mtp_accuracy_.total++;

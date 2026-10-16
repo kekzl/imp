@@ -26,6 +26,7 @@
 #include "exec/expert_batch_policy.h"
 #include "runtime/plan_shadow.h"
 #include "runtime/scheduler.h"
+#include "model/mtp_head.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -454,8 +455,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
             // the auto batch must leave it room, else hybrid-aware sizing
             // spends it on recurrent-state slots and the head upload fails.
             // ~130 MiB on top for draft workspace + batched-feed scratch.
-            if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_.has_value() &&
-                model_->mtp_->loaded)
+            if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_ && model_->mtp_->loaded)
                 upload_bytes += mtp_upload_peak_bytes(*model_->mtp_) + (130ULL << 20);
             headroom = (free_vram > upload_bytes) ? (free_vram - upload_bytes) : 0;
             int nkv = mcfg.n_kv_heads > 0 ? mcfg.n_kv_heads : 1;
@@ -511,8 +511,8 @@ void Engine::init_resolve_kv_dtype_policy_() {
                 // slots at the state price. 2x the head: the async pool
                 // doubles the first large request it serves, and the head is
                 // exactly that request.
-                if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_.has_value() &&
-                    model_->mtp_->loaded && per_slot_state > 0) {
+                if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_ && model_->mtp_->loaded &&
+                    per_slot_state > 0) {
                     size_t mtp_cost = 2 * mtp_upload_peak_bytes(*model_->mtp_) + (260ULL << 20);
                     // Batched verify: the MTP KV slots share a 1 GiB budget
                     // (engine_spec_mtp.cpp, enable_mtp_spec_decode).

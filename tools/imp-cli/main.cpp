@@ -17,6 +17,7 @@
 #include "runtime/process_diag_install.h"
 #include "runtime/engine.h"
 #include "memory/vram_query.h"
+#include "model/mtp_head.h"
 
 #include <chrono>
 #include <cstdio>
@@ -157,10 +158,11 @@ int main(int argc, char** argv) {
     }
     // What the load produced decides the pair: a checkpoint without a head must
     // not end up with ngram off and nothing drafting (mtp_auto_after_load).
-    mtp_k = imp::tools::mtp_auto_after_load(
-        runtime_cfg, mtp_k, model->model->mtp_.has_value() && model->model->mtp_->loaded,
-        args.mtp_spec_decode_k,
-        model->model->mtp_.has_value() ? imp::mtp_auto_k_cap(*model->model->mtp_) : 0);
+    mtp_k = imp::tools::mtp_auto_after_load(runtime_cfg, mtp_k,
+                                            model->model->mtp_ && model->model->mtp_->loaded,
+                                            args.mtp_spec_decode_k,
+                                            model->model->mtp_ ? imp::mtp_auto_k_cap(*model->model->mtp_)
+                                                               : 0);
     if (mtp_k <= 0)
         model->model->decline_mtp_head();
 

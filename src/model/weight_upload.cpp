@@ -18,6 +18,7 @@
 #include "core/fp_bits.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
+#include "model/mtp_head.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
@@ -2322,7 +2323,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
     // MTP head weights (DeepSeek-V3/Qwen3.6 sidecar, optional), Phase 2 of MTP wiring; the
     // consuming forward path is Phase 3+. Gates on VRAM here: if the upload fails, MTP is
     // disabled rather than failing the whole model load.
-    if (mtp_.has_value() && mtp_->loaded) {
+    if (mtp_ && mtp_->loaded) {
         // Refuse a head that does not fit BEFORE uploading any of it. See
         // mtp_upload_peak_bytes: a per-allocation refusal partway through
         // strands everything already uploaded for the life of the process.
@@ -2339,7 +2340,7 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
             mtp_->loaded = false;
         }
     }
-    if (mtp_.has_value() && mtp_->loaded) {
+    if (mtp_ && mtp_->loaded) {
         size_t allocs_before = gpu_allocations_.size();
         size_t mtp_free_before = 0;
         // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.

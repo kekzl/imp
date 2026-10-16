@@ -16,6 +16,7 @@
 #include "model/hf_hub.h"
 #include "runtime/config.h"
 #include "runtime/think_stop_logic.h"
+#include "model/mtp_head.h"
 
 #include <algorithm>
 #include <chrono>
@@ -721,9 +722,10 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     }
     // Resolve the pair against what the load produced, BEFORE the pending
     // config is stashed for Engine::init below.
-    imp::tools::mtp_auto_finalize(
-        state.runtime_config, mtp_k, state.model->model->mtp_.has_value() && state.model->model->mtp_->loaded,
-        state.model->model->mtp_.has_value() ? imp::mtp_auto_k_cap(*state.model->model->mtp_) : 0);
+    imp::tools::mtp_auto_finalize(state.runtime_config, mtp_k,
+                                  state.model->model->mtp_ && state.model->model->mtp_->loaded,
+                                  state.model->model->mtp_ ? imp::mtp_auto_k_cap(*state.model->model->mtp_)
+                                                           : 0);
     // The enable call below takes the RESOLVED depth, not the requested one.
     mtp_k = state.runtime_config.speculative.mtp_k;
     if (mtp_k <= 0)
@@ -754,8 +756,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
     // concurrency-driven decline is distinguishable from "no head at all".
     state.armed_mtp_k.store(state.ctx ? state.ctx->engine->mtp_spec_decode_k() : 0,
                             std::memory_order_relaxed);
-    state.mtp_head_loaded.store(state.model->model->mtp_.has_value() &&
-                                    state.model->model->mtp_->loaded,
+    state.mtp_head_loaded.store(state.model->model->mtp_ && state.model->model->mtp_->loaded,
                                 std::memory_order_relaxed);
     state.mtp_head_present.store(state.mtp_head_loaded.load(std::memory_order_relaxed) ||
                                      state.model->model->mtp_head_available_unloaded_,

@@ -1,7 +1,6 @@
 #pragma once
 
 #include "runtime/decode_length_estimate.h"
-#include "runtime/request.h"
 #include <algorithm>
 #include <cstdint>
 #include <vector>
@@ -12,6 +11,7 @@
 namespace imp {
 
 class KVCacheManager;  // forward declare
+struct Request;        // runtime/request.h
 
 class Scheduler {
 public:
@@ -61,9 +61,7 @@ public:
     // Brings a SWAPPED request's KV back (engine thread). True = it holds its blocks again.
     using SwapInFn = std::function<bool(Request&)>;
     void set_swap_in(SwapInFn fn) { swap_in_ = std::move(fn); }
-    [[nodiscard]] int reserve_decode_tokens(const Request& r) const {
-        return admission_decode_tokens(admission_decode_mode_, r.max_tokens, decode_estimate_);
-    }
+    [[nodiscard]] int reserve_decode_tokens(const Request& r) const;
     [[nodiscard]] const DecodeLengthEstimate& decode_estimate() const { return decode_estimate_; }
     [[nodiscard]] int swapped_count() const;
 

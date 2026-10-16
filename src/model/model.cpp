@@ -1,6 +1,7 @@
 #include "model/model.h"
 #include "model/model_arch.h"
 #include "model/arch_registry.h"
+#include "model/mtp_head.h"  // ~Model destroys the unique_ptr<MtpHead>
 #include "model/ngram_table.h"
 #include "model/tokenizer.h"
 #include "core/logging.h"
@@ -23,6 +24,13 @@ namespace imp {
 Model::Model() = default;
 
 void Model::set_tokenizer(std::unique_ptr<Tokenizer> tok) { tokenizer_ = std::move(tok); }
+
+void Model::decline_mtp_head() {
+    if (mtp_) {
+        mtp_.reset();
+        mtp_head_available_unloaded_ = true;
+    }
+}
 
 Model::~Model() {
     // #834: free with cudaFreeAsync, not cudaFree - on this stack (CUDA 13.3/WSL2) cudaFree on

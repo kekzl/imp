@@ -1006,3 +1006,19 @@ Gemma-3-12B Q4_K_M, `kv_cache.swa_sizing=on`, auto max_batch 17, 6408-token prom
 | `--set runtime.decode_burst=0` | 3366, 16830 MiB | 1831, 9155 MiB, live 1616 | 1742 ceiling / 3038 | 17/17 34/34, 17/17 34/34 | 69ac3e6e |
 
 `SWA block group exhausted`: 0 in every arm. Decode `imp-cli --bench` tg256, swa_sizing on, alternating pairs main / branch: 96.24 / 96.57, 95.54 / 96.80, 98.18 / 102.82 tok/s (inside the run-to-run band).
+
+## 2026-10-16 H-022 header fan-in re-measured (owner go)
+
+SETTLED 2026-08-03 method rerun; on the August tree it reproduces config.h 85, engine.h 41, executor.h 77 TUs. Main today, 833 TUs (src+tools+tests):
+
+| header | 2026-08-03 | today | action |
+|---|---|---|---|
+| `config.h` / `executor.h` / `engine.h` | 18.4 / 16.6 / 8.9 % of TUs | 11.3 / 14.3 / 7.7 % | none (share shrank; SETTLED: includers read real members) |
+| `request.h` | 44 (9.5 %) | 103 -> 75 | forward-declared in 4 carrier headers, 5 inline bodies out of line |
+| `mtp_head.h` | not in top 11 | 208 -> 28 | `Model::mtp_` held by `unique_ptr` |
+
+`make verify-fast` 0 FAIL (decode -3.16 %, pp512 +16.21 % vs baseline).
+
+| row | status |
+|---|---|
+| H-022 | fixed (two outliers); the top three stay with SETTLED |

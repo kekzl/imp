@@ -144,7 +144,7 @@ void Engine::mtp_release_(int req_id) {
 void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs, const std::vector<int>& rows,
                                const std::vector<int>& emitted, cudaStream_t stream) {
     auto* ws = mtp_ws_storage_.get();
-    if (ws == nullptr || !model_ || !model_->mtp_.has_value() || !model_->mtp_->loaded)
+    if (ws == nullptr || !model_ || !model_->mtp_ || !model_->mtp_->loaded)
         return;
     const int N = static_cast<int>(reqs.size());
     if (ws->feed_rows_cap <= 0 || ws->d_b_h_final == nullptr) {
@@ -263,6 +263,32 @@ void Engine::mtp_batched_feed_(const std::vector<std::shared_ptr<Request>>& reqs
     }
 }
 
+bool Engine::spec_history_too_short_(const Request& req) const {
+    const int n = runtime_config_.speculative.min_history;
+    return n > 0 && static_cast<int>(req.output_tokens.size()) < n;
+}
+
+bool Engine::mtp_holds_eager_(const Request& req) const {
+    return mtp_spec_decode_enabled() && mtp_bound(mtp_active_, mtp_pool_, req.id);
+}
+
+SpecDrafterState Engine::spec_drafter_state_(const Request& req) const {
+    SpecDrafterState s;
+    s.model_capable = spec_ngram_model_capable_();
+    // "speculative": false means no speculation at all, not just "no
+    // n-gram speculation" - it must also stop MTP and recycling (#1639).
+    const bool forced_off = req.spec_override == 0;
+    s.ngram_on = req.spec_override >= 0 ? req.spec_override == 1 : runtime_config_.speculative.ngram;
+    // The head is a per-request contract, not a process-wide switch: a
+    // request may lower its depth or turn it off, and asking for it on a
+    // process that armed nothing is a DECLINE with a reason rather than a
+    // silent plain decode (spec_request.h). The rule is shared with the
+    // server so the two cannot disagree about what a request asked for.
+    s.mtp_on = mtp_resolve_request(mtp_request_state_(req)).k > 0;
+    s.recycling_on = !forced_off && runtime_config_.speculative.token_recycling;
+    return s;
+}
+
 MtpRequestState Engine::mtp_request_state_(const Request& req) const {
     MtpRequestState s;
     s.requested_k = req.spec_mtp_k;
@@ -270,8 +296,8 @@ MtpRequestState Engine::mtp_request_state_(const Request& req) const {
     // "present" covers the head this process declined to upload: that is what
     // the concurrency decline looks like from a request's side, and telling it
     // apart from a checkpoint with no head is the whole point of the reason.
-    s.head_present = model_ && (model_->mtp_.has_value() || model_->mtp_head_available_unloaded_);
-    s.head_loaded = model_ && model_->mtp_.has_value() && model_->mtp_->loaded;
+    s.head_present = model_ && (model_->mtp_ || model_->mtp_head_available_unloaded_);
+    s.head_loaded = model_ && model_->mtp_ && model_->mtp_->loaded;
     s.forced_off = req.spec_override == 0;
     return s;
 }
@@ -555,7 +581,7 @@ void Engine::mtp_prefill_feed_chunk(const Request& req, int offset, int chunk_le
                                     int next_token) {
     if (!mtp_feed_wanted_(req))
         return;
-    if (!model_ || !model_->mtp_.has_value() || !model_->mtp_->loaded)
+    if (!model_ || !model_->mtp_ || !model_->mtp_->loaded)
         return;
     if (chunk_len <= 0)
         return;
@@ -651,7 +677,7 @@ bool Engine::enable_mtp_spec_decode(int k) {
         IMP_LOG_ERROR("enable_mtp_spec_decode: no model loaded");
         return false;
     }
-    if (!model_->mtp_.has_value() || !model_->mtp_->loaded) {
+    if (!model_->mtp_ || !model_->mtp_->loaded) {
         IMP_LOG_ERROR("enable_mtp_spec_decode: model has no MTP head loaded");
         return false;
     }
@@ -700,7 +726,7 @@ bool Engine::enable_mtp_spec_decode(int k) {
     // for attn_output_gate). q_proj shape [2*num_heads*head_dim, hidden_dim];
     // v_proj shape [num_kv_heads*head_dim, hidden_dim]; head_dim comes from the main model, head counts are back-computed.
     int mtp_num_heads = 0, mtp_num_kv_heads = 0, mtp_head_dim = 0;
-    if (model_->mtp_.has_value() && model_->mtp_->loaded && model_->mtp_->q_proj.data != nullptr &&
+    if (model_->mtp_ && model_->mtp_->loaded && model_->mtp_->q_proj.data != nullptr &&
         model_->mtp_->v_proj.data != nullptr) {
         const int q_out = static_cast<int>(model_->mtp_->q_proj.shape[0]);
         const int v_out = static_cast<int>(model_->mtp_->v_proj.shape[0]);
@@ -877,7 +903,7 @@ bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev, int hidden_d
         IMP_LOG_ERROR("mtp_draft_one: spec-decode not enabled");
         return false;
     }
-    if (!model_ || !model_->mtp_.has_value() || !model_->mtp_->loaded) {
+    if (!model_ || !model_->mtp_ || !model_->mtp_->loaded) {
         IMP_LOG_ERROR("mtp_draft_one: MTP head not loaded");
         return false;
     }

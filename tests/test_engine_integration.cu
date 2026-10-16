@@ -4,6 +4,7 @@
 #include "runtime/config.h"
 #include "compute/gemm.h"
 #include "test_model_builder.h"
+#include "runtime/request.h"
 
 #include <memory>
 

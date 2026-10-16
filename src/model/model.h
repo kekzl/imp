@@ -5,7 +5,6 @@
 #include "model/generation_config.h"
 #include "model/model_config.h"
 #include "model/model_profile.h"
-#include "model/mtp_head.h"
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -20,6 +19,7 @@ class WeightUploadLog;
 // weights are views into the same mapping and share the model's lifetime. Forward-declared
 // so model/ has no header dependency on vision/.
 struct VisionModel;
+struct MtpHead;  // model/mtp_head.h; held by unique_ptr so 208 -> few TUs see it
 class NGramTable;
 // Held by unique_ptr only; set_tokenizer and ~Model are out of line (model.cpp).
 class Tokenizer;
@@ -136,7 +136,7 @@ public:
     // MTP head storage, populated when model_mtp.safetensors sits next to the main weights
     // (DeepSeek-V3 family, e.g. Qwen3.6). Phase 1.A: detection only. Phase 1.B: weights
     // loaded. Phase 2+: forward+verify wiring.
-    std::optional<MtpHead> mtp_;
+    std::unique_ptr<MtpHead> mtp_;
 
     // True when the checkpoint carries an MTP head this load did NOT take, because
     // speculative.mtp_k defaults to 0 (#1537). Lets /health report a documented +8..+22%
@@ -145,12 +145,7 @@ public:
 
     // speculative.mtp_k resolved to 0 after the head loaded (auto declines Qwen4Exp): drop it
     // before the GPU upload so its VRAM (2560 MiB on Flash-Next) goes to the expert cache.
-    void decline_mtp_head() {
-        if (mtp_.has_value()) {
-            mtp_.reset();
-            mtp_head_available_unloaded_ = true;
-        }
-    }
+    void decline_mtp_head();
 
     // Load-time scratch for NVFP4 prequant scale tensors, keyed "L{idx}.{slot}" (dense),
     // "L{idx}.expert_w_{kind}.{e}" (per-expert), "out_proj" (LM head). Cleared after Phase 0's
