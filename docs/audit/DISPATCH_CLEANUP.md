@@ -758,3 +758,53 @@ Code head `7b0863f1`, image `imp:b9-final`; paired control `imp:main-ctrl3` (mai
 |---|---|---|
 | 171 discarded CUDA / cuBLAS statuses in imp-bench (164) and imp-quantize (7), gate scope extended to `tools/imp-bench`, `tools/imp-quantize`, `tools/imp-cli` | ship | gates above |
 | `get_device_sm_version` deletion, always-true `sm >= 120` gate in `bench_attention` | ship | no caller left; shipped SASS identical |
+
+## 2026-10-16 Final deliverable (orchestrator)
+
+Batches B1..B9 merged (#2733..#2742, #2738 docs only); main `2f959d93`. Before = Phase 3 baseline image `imp:test-imp-baseline-016f0c60` (`5a30cb5f`), after = `imp:final-main` (`2f959d93`), both measured in one run on 2026-10-16.
+
+### Findings
+
+| outcome | rows | ids |
+|---|---:|---|
+| total | 70 | H-001..H-035, C-001..C-035 |
+| fixed | 38 | H-001, H-003..H-010, H-014, H-016..H-021, H-023..H-027, H-029, H-031..H-034, C-003, C-008, C-009, C-011, C-013..C-015, C-020..C-022, C-032, C-034 |
+| partly fixed | 2 | H-012 (shared `parse_index`, lenient policies kept), C-033 (named constant; runtime query open) |
+| deferred | 21 | H-002, H-011, H-013, H-015, H-022, H-028, H-030, C-004..C-007, C-010, C-012, C-016..C-018, C-023..C-025, C-029, C-031 |
+| rejected | 9 | H-035 (0 markers), C-001 (0 unreferenced kernels), C-002 (SETTLED A1-9), C-019, C-028, C-030 (negative checks), C-026 (refuted: decode tier never FP8), C-027 (syncs already explicit), C-035 (compute-sanitizer BLOCKED on WSL2) |
+
+### Before / after
+
+| metric | before | after |
+|---|---|---|
+| C++/CUDA lines in `src`, `tools`, `tests` (`.cpp .cu .cuh .h .hpp`) | 327688 | 327827 (+1220 / -1081) |
+| imp-server / imp-cli / imp-quantize bytes | 42524880 / 37248664 / 37691256 | 42526568 / 37250296 / 37693080 |
+| test-compute bytes | 22450288 | 15862864 (H-009: probe TUs out of `libimp`) |
+| image bytes | 5614294099 | 5605284845 |
+| `make build` wall, warm ccache | 29.4 s (823/826 hits) | 23 s (823/826 hits) |
+| `#include` fan-in `hf_config_loader.h` / `tokenizer.h` (TUs) | 218 / 274 | 18 / 170 |
+| kernels, imp-server / imp-cli / imp-quantize (SASS functions) | 1024 / 1024 / 1026 | 1023 / 1023 / 1025: duplicate `constrain_mask_allow_kernel` removed; every other kernel hash identical |
+| build warnings | 13 | 13 with `-Wshadow` on (0 `-Wshadow` reports) |
+| discarded CUDA / cuBLAS statuses (gated scope) | 82 cuBLAS in `src`, 171 in tools | 0 / 0 |
+| sanitizer findings | not run: compute-sanitizer BLOCKED on WSL2 | not run |
+| `make test-gpu` | 3686 ran, 3598 passed, 88 skipped, 0 failed | 3700 ran, 3612 passed, 88 skipped, 0 failed |
+| reference dumps (`runtime.deterministic=true`) | 15 | 15/15 identical, run 1 and run 2 |
+| decode tg256 after pp512, pooled median, n=10 (same run) | 368.96 tok/s | 370.34 (+0.37 %) |
+| prefill pp512 / pp2048, pooled median | 30157 / 48236 | 30163 / 48834 |
+| tg256 after pp2048 | 342.69 | 345.15 |
+
+### Deferred list and follow-ups
+
+| rows | follow-up |
+|---|---|
+| H-012 rest (`kStrict` at 7 sites), C-025, C-033 rest + C-010, open test findings | fix PRs in progress on 2026-10-16 (owner go): strict index parse with one malformed-name test per loader; routing-pool failure fails init; one cached `device_sm_count()` / capability helper; GPU-test CUDA-error listener |
+| C-004..C-007 | kernel variant merges only with byte-identical `cuobjdump -sass` per instance |
+| C-012 | owner decision: `IMP_DISABLE_120F_FALLBACK=ON` + SM120.md correction, or drop `-rdc` |
+| C-016 | manual pass over 23 macro-body launches for a post-launch guard |
+| C-017, C-018 | correct the SETTLED A2-2 anchor, then PDL-register the two verify kernels with `make verify-ab` |
+| C-023, C-024, C-029, C-031 | perf-affecting: measure first (benchmark-cuda two-image A/B) |
+| H-002, H-011, H-015, H-022, H-028 | M risk: one PR each with the owner's go |
+| H-013 | shared strict CLI number parser in `tools/common/args_common.cpp` (`--prefill-chunk abc` = 0 today) |
+| H-030 | GPU repro of the SWA burst cap with `--set runtime.prefill_chunk_size=4096`, then check-degeneration on an SWA model |
+| out of scope, logged in Phase 1 | MoE atomics nondeterminism, `/v1/messages` streaming, FA2 coverage gaps; legacy causal_softmax + cuBLAS stays (SETTLED S-8) |
+| new in Phase 4 | `DeviceFaultSignalTest.FaultInside...` timing flake (exit 7 / exit 8, 7 isolated failures in the first 120 runs, 0 after); C-020 race test does not discriminate on WSL2 (legacy `cudaMemcpy` waits for non-blocking streams there) |

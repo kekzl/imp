@@ -559,17 +559,11 @@ TEST(MoEExecutorTest, MixedMoEDense) {
 
     // Make layer 0 a dense layer by clearing expert weights and adding dense FFN weights
     auto& ly0 = tm.model->layers_[0];
-    // Free expert weights for layer 0
-    for (auto& t : ly0.expert_w_gate)
-        free_tensor(t);
-    for (auto& t : ly0.expert_w_up)
-        free_tensor(t);
-    for (auto& t : ly0.expert_w_down)
-        free_tensor(t);
+    // Detach layer 0's expert weights. tm.all_tensors holds the same pointers and frees them in
+    // cleanup(); freeing them here too made cleanup() free executor buffers that reused the addresses.
     ly0.expert_w_gate.clear();
     ly0.expert_w_up.clear();
     ly0.expert_w_down.clear();
-    free_tensor(ly0.moe_gate);
     ly0.moe_gate = Tensor();
 
     // Add dense FFN weights for layer 0

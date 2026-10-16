@@ -484,7 +484,7 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
 
 MoeRoutingBuffers::~MoeRoutingBuffers() { free(); }
 
-void MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
+bool MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
     free();
     max_tokens = max_tok;
     max_experts = max_exp;
@@ -503,9 +503,11 @@ void MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
     pool_size = indices_sz + weights_sz + sorted_sz + offsets_sz + scratch_sz + t2e_sz;
     cudaError_t err = cudaMalloc(&pool, pool_size);
     if (err != cudaSuccess) {
+        IMP_LOG_ERROR("MoE routing pool: cudaMalloc of %zu bytes failed (%d tokens x top-%d, %d experts): %s",
+                      pool_size, max_tokens, top_k, max_experts, cudaGetErrorString(err));
         pool = nullptr;
         pool_size = 0;
-        return;
+        return false;
     }
 
     char* ptr = static_cast<char*>(pool);
@@ -521,6 +523,7 @@ void MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
     ptr += scratch_sz;
     token_to_expanded = reinterpret_cast<int32_t*>(ptr);
     ptr += t2e_sz;
+    return true;
 }
 
 MoeRoutingBuffers& MoeRoutingBuffers::operator=(MoeRoutingBuffers&& o) noexcept {
