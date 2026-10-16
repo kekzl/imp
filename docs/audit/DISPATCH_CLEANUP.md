@@ -954,8 +954,8 @@ Default MoE prefill paths do not reach the D2H sites: `CUTLASS 3.x device-args f
 
 ## 2026-10-16 C-012 option (c): gap documented
 
-Option (b) with SASS-identical GEMVs is not available: an `-rdc` object reaches only the `sm_120a` device link (its `compute_120f` PTX is dropped there), and the same TUs without `-rdc` compile to different SASS (-5.83 % decode, reverted in #2755). Option (a) would ship no PTX at all, so GB203 loses every kernel instead of 26.
+Option (b) with SASS-identical GEMVs is not available: an `-rdc` object reaches only the `sm_120a` device link (its `compute_120f` PTX is dropped there), and the same TUs without `-rdc` compile to different SASS (-5.83 % decode, reverted in #2755). Option (a) would ship no PTX at all, so a cc 12.1 device (GB10, DGX Spark) loses every kernel instead of 26. GB203 (RTX 5080 / 5070 Ti) is cc 12.0 and loads the `sm_120a` SASS: the older SM120.md row that sent it to the PTX was wrong ([NVIDIA table](https://developer.nvidia.com/cuda/gpus)), corrected here.
 
 | row | status |
 |---|---|
-| C-012 | documented: `docs/internals/SM120.md` GB203 row, `docs/LIMITATIONS.md` model-specific blockers; GB203 untested (#1651) |
+| C-012 | documented: `docs/internals/SM120.md` cc 12.1 row, `docs/LIMITATIONS.md` model-specific blockers; affects cc 12.1 only, untested (#1651) |
