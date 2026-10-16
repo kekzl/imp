@@ -7,6 +7,7 @@
 
 #include "compute/mmq_q8_imma.h"
 #include "compute/mmq_q8_imma_internal.cuh"
+#include "core/device_info.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 #include "memory/mem_account.h"
@@ -38,16 +39,6 @@ bool ensure_raw_smem(bool& done, Kernel k32, Kernel k128b, Kernel k128, size_t s
         done = set_max_dyn_smem(k32, smem32) && set_max_dyn_smem(k128b, smem128) &&
                set_max_dyn_smem(k128, smem128);
     return done;
-}
-
-// SM count of the current device; 0 on a query error (dense small-grid path off, same output).
-int current_sm_count() {
-    int dev = 0, v = 0;
-    if (cudaGetDevice(&dev) == cudaSuccess &&
-        cudaDeviceGetAttribute(&v, cudaDevAttrMultiProcessorCount, dev) == cudaSuccess)
-        return v;
-    IMP_LOG_WARN("mmq imma: SM count query failed, dense small-grid path off");
-    return 0;
 }
 
 // One K-step tile load, all 256 threads cooperating, loops unrolled for both BM variants:
@@ -538,7 +529,7 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
         }
     }
 
-    static const int n_sms = current_sm_count();
+    const int n_sms = device_sm_count_or_0();  // 0: dense small-grid path off, same output
     // plane path = Q8_0 only since the raw-read kernels: pure-alpha (WB=false)
     if (launch_q8_small_grid(w, out_f16, M, N, K, grid, grid_m_rows, ne, small_m, d_offsets, beta, w_stride,
                              wsc_stride, n_sms, stream))

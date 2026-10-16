@@ -16,7 +16,7 @@
 #include "core/cuda_static_reset.h"
 #include "core/cuda_errors.h"
 #include "core/logging.h"
-#include "core/sm120_limits.h"
+#include "core/device_info.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -837,17 +837,6 @@ size_t gemm_nvfp4_cutlass_sm120_workspace(int M, int N, int K) {
         ws = std::max(ws, cutlass_workspace_for<GemmStreamK>(M, N, K, /*force_streamk=*/true));
     }
     return ws;
-}
-
-static int device_sm_count() {
-    static int sms = [] {
-        int dev = 0, n = 0;
-        if (cudaGetDevice(&dev) == cudaSuccess &&
-            cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev) == cudaSuccess && n > 0)
-            return n;
-        return kSm120SmCount;
-    }();
-    return sms;
 }
 
 // Stream-K decision for the cooperative 128x128 tile (large N only).

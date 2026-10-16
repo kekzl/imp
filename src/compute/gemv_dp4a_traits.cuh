@@ -6,6 +6,7 @@
 #include "compute/gemm.h"
 #include "core/pdl_launch.cuh"
 #include "compute/ptx92_utils.cuh"
+#include "core/device_info.h"
 #include "core/sm120_limits.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -556,17 +557,8 @@ using Q3_K_Traits = DequantTraits<DPQTag::Q3_K>;
 // K-parallel helpers and occupancy heuristic
 // ============================================================================
 
-// Detect GPU SM count for K-parallel occupancy decisions. Cached after first call.
-static inline int kpar_n_sms() {
-    static int n_sms = 0;
-    if (__builtin_expect(n_sms == 0, 0)) {
-        cudaDeviceProp prop;
-        if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess)
-            return 0;  // not cached; kpar_is_better() -> row-parallel
-        n_sms = prop.multiProcessorCount;
-    }
-    return n_sms;
-}
+// SM count for K-parallel occupancy decisions; 0 on a failed query: kpar_is_better() -> row-parallel.
+static inline int kpar_n_sms() { return device_sm_count_or_0(); }
 
 // Returns true if K-parallel GEMV gives more active warps/SM than row-parallel. K-parallel:
 // 128 threads (4 warps), 1 row/block, Q8_1 from L2. Row-parallel: 256 threads (8 warps), NR

@@ -1,4 +1,5 @@
 #include "quant/mxfp4_gemm.h"
+#include "core/device_info.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -22,19 +23,8 @@ __device__ __forceinline__ float ue8m0_to_float(uint8_t byte) {
     return __uint_as_float(static_cast<uint32_t>(byte) << 23);
 }
 
-// Cached SM count for multi-row dispatch.
-static int mxfp4_n_sms() {
-    static int n_sms = 0;
-    if (__builtin_expect(n_sms == 0, 0)) {
-        cudaDeviceProp prop;
-        if (cudaError_t e = cudaGetDeviceProperties(&prop, 0); e != cudaSuccess) {
-            IMP_LOG_WARN("SM count query failed: %s; multirow gated on K only", cudaGetErrorString(e));
-            return 0;  // not cached: the next call retries
-        }
-        n_sms = prop.multiProcessorCount;
-    }
-    return n_sms;
-}
+// SM count for multi-row dispatch; 0 on a failed query: multirow gated on K only.
+static int mxfp4_n_sms() { return device_sm_count_or_0(); }
 
 static bool use_multirow(int n_groups, int mr_blocks) {
     return n_groups <= 256 && mr_blocks >= 6 * mxfp4_n_sms();

@@ -4,7 +4,7 @@
 
 #include "compute/gemm.h"
 #include "core/logging.h"
-#include "core/sm120_limits.h"
+#include "core/device_info.h"
 
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -244,13 +244,13 @@ bool gemv_fp8_rowscale_fp32(const void* W_fp8, const float* d_row_scales, const 
 }
 
 // Narrow weights (GDN out: 2560 rows = 40 blocks at kNT 8) take fewer rows per block so a wave
-// still fills the 170 SMs twice; the per-row MMA chain is the same for every kNT.
+// still fills every SM twice; the per-row MMA chain is the same for every kNT.
 bool gemv_fp8_rowscale_f16(const void* W_fp8, const float* d_row_scales, const half* x, half* y, int M, int K,
                            int n_rows, cudaStream_t stream) {
-    constexpr int kMinBlocks = 2 * kSm120SmCount;
-    if ((M + 63) / 64 >= kMinBlocks)
+    const int min_blocks = 2 * device_sm_count();  // 340 on RTX 5090 (170 SMs)
+    if ((M + 63) / 64 >= min_blocks)
         return launch_fp8_head<8, 2>(W_fp8, d_row_scales, x, y, M, K, n_rows, stream);
-    if ((M + 31) / 32 >= kMinBlocks)
+    if ((M + 31) / 32 >= min_blocks)
         return launch_fp8_head<4, 4>(W_fp8, d_row_scales, x, y, M, K, n_rows, stream);
     return launch_fp8_head<2, 4>(W_fp8, d_row_scales, x, y, M, K, n_rows, stream);
 }

@@ -1,5 +1,6 @@
 // Qwen4Exp QSA indexer kernels. Contract: qsa_indexer.h.
 #include "compute/qsa_indexer.h"
+#include "core/device_info.h"
 #include "core/logging.h"
 
 #include <cuda_fp16.h>
@@ -329,13 +330,8 @@ void qsa_select(const half* q, const int* positions, const half* block_keys, flo
     if (rows <= 0)
         return;
     IMP_CHECK(g.n_heads <= 4, "qsa_select: %d indexer heads, kernel holds 4", g.n_heads);
-    static const int n_sms = [] {
-        int dev = 0, n = 0;
-        if (cudaGetDevice(&dev) != cudaSuccess ||
-            cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess)
-            n = 0;  // -> 1 below: fewer score CTAs, same selection
-        return n > 0 ? n : 1;
-    }();
+    // 1 on a failed query: fewer score CTAs, same selection.
+    const int n_sms = std::max(device_sm_count_or_0(), 1);
     // Two waves of score CTAs over all rows, never more CTAs per row than blocks to score.
     const int gx = std::max(1, std::min((max_blocks + kScoreWarps - 1) / kScoreWarps, 2 * n_sms / rows));
     qsa_score_kernel<<<dim3(gx, rows), kScoreWarps * 32, 0, stream>>>(q, positions, block_keys, scores,

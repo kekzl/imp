@@ -8,6 +8,7 @@
 
 #include "quant/nvfp4_gemm.h"
 #include "quant/fp8_utils.cuh"
+#include "core/device_info.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
@@ -40,18 +41,8 @@ static constexpr int kMinBlocksPerSM = 6;
 // impossible to toggle in a test.
 [[nodiscard]] static bool nvfp4_verify_row_parity() { return imp::process_diag_verify_row_parity(); }
 
-static int nvfp4_n_sms() {
-    static int n_sms = 0;
-    if (__builtin_expect(n_sms == 0, 0)) {
-        cudaDeviceProp prop;
-        if (cudaError_t e = cudaGetDeviceProperties(&prop, 0); e != cudaSuccess) {
-            IMP_LOG_WARN("SM count query failed: %s; multirow gated on K only", cudaGetErrorString(e));
-            return 0;  // not cached: the next call retries
-        }
-        n_sms = prop.multiProcessorCount;
-    }
-    return n_sms;
-}
+// 0 on a failed query: multirow gated on K only.
+static int nvfp4_n_sms() { return device_sm_count_or_0(); }
 
 // Returns true if multi-row should be used: K is small enough AND there are
 // enough blocks for good SM occupancy (>= kMinBlocksPerSM blocks/SM).
