@@ -5,6 +5,7 @@
 #include "memory/kv_cache.h"
 #include "memory/recurrent_snapshot_store.h"
 #include "core/logging.h"
+#include "runtime/request.h"
 #include <algorithm>
 #include <chrono>
 #include <ranges>
@@ -309,6 +310,10 @@ void Scheduler::hold_decode_reservation_(const Request& req) {
     const int pool_blocks = kv_manager_->kv_cache()->total_blocks();
     kv_manager_->set_decode_reservation(req.id, std::min(prompt_blocks + decode_blocks,
                                                          std::max(prompt_blocks, pool_blocks)));
+}
+
+int Scheduler::reserve_decode_tokens(const Request& r) const {
+    return admission_decode_tokens(admission_decode_mode_, r.max_tokens, decode_estimate_);
 }
 
 int Scheduler::swapped_count() const {

@@ -137,7 +137,7 @@ bool Engine::ensure_spec_state_scratch_() {
 
 bool Engine::spec_state_scratch_wanted_() const {
     const auto& scfg = runtime_config_.speculative;
-    const bool mtp = scfg.mtp_k != 0 && model_ && model_->mtp_.has_value() && model_->mtp_->loaded;
+    const bool mtp = scfg.mtp_k != 0 && model_ && model_->mtp_ && model_->mtp_->loaded;
     return scfg.ngram || scfg.suffix || scfg.capture || mtp || mtp_spec_decode_enabled();
 }
 
@@ -167,7 +167,7 @@ int Engine::spec_mc_reserved_slots_() const {
     const auto& scfg = runtime_config_.speculative;
     if (scfg.mtp_tree_width <= 1 || scfg.mtp_k == 0)
         return 0;
-    if (!model_ || !model_->mtp_.has_value() || !model_->mtp_->loaded)
+    if (!model_ || !model_->mtp_ || !model_->mtp_->loaded)
         return 0;
     if (model_->config().ssm_inner_size <= 0)
         return 0;

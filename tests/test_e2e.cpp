@@ -9,6 +9,7 @@
 #include "runtime/think_stop_logic.h"
 #include "model/model.h"
 #include "model/tokenizer.h"
+#include "runtime/request.h"
 #include <vector>
 
 #include <cuda_runtime.h>

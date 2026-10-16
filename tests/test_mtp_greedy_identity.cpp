@@ -8,6 +8,7 @@
 #include "model/tokenizer.h"
 #include "runtime/config.h"
 #include "runtime/engine.h"
+#include "runtime/request.h"
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 

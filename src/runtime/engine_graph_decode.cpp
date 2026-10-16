@@ -48,6 +48,10 @@ void Engine::release_async_block_tables_() {
     async_bt_pooled_ = false;
 }
 
+bool Engine::graph_loop_blocked_(const Request& r, bool experts_matter) const {
+    return model_->ngram_table() != nullptr || (experts_matter && experts_on_host_) || r.forcing();
+}
+
 int Engine::prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit) {
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
 

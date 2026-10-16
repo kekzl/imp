@@ -726,8 +726,7 @@ void QuantPipeline::release_lm_head_source_(cudaStream_t stream,
     }
     const auto ct = wcache_->cutlass_nvfp4.find(head.data);
     // speculative.mtp_nvfp4_head=false: the MTP draft reads the source head.
-    const bool mtp_reads_source = nvfp4_head && model_->mtp_.has_value() &&
-                                  !dispatch_policy().speculative.mtp_nvfp4_head;
+    const bool mtp_reads_source = nvfp4_head && model_->mtp_ && !dispatch_policy().speculative.mtp_nvfp4_head;
     if (head.data == model_->tok_emb_.data || !mut_model->is_base_gpu_allocation(head.data) ||
         (fp8_head && wcache_->nvfp4.count(head.data)) || mtp_reads_source ||
         (ct != wcache_->cutlass_nvfp4.end() && ct->second.scale_factors != nullptr) ||

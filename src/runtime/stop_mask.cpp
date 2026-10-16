@@ -1,6 +1,7 @@
 #include "runtime/stop_mask.h"
 #include "runtime/think_stop_logic.h"
 #include "core/logging.h"
+#include "runtime/request.h"
 
 #include <algorithm>
 

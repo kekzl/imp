@@ -57,7 +57,7 @@ TEST(MtpForwardTest, DraftStepProducesValidToken) {
     // Load model + upload weights with MTP enabled.
     auto model = imp::load_safetensors(kQwen36ModelDir, /*load_mtp_head=*/true);
     ASSERT_NE(model, nullptr);
-    ASSERT_TRUE(model->mtp_.has_value());
+    ASSERT_TRUE(model->mtp_ != nullptr);
 
     // upload_weights_gpu automatically uploads the MTP sidecar when
     // model->mtp_->loaded is set (the safetensors loader sets it after

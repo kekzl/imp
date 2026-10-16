@@ -10,6 +10,7 @@
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "core/logging.h"
+#include "runtime/request.h"
 
 #include <cuda_runtime.h>
 

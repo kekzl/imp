@@ -4,13 +4,14 @@
 #include "core/logging.h"
 #include "memory/weight_snapshot.h"
 #include "model/model.h"
-#include "runtime/request.h"
 
 #include <exception>
 #include <memory>
 #include <new>
 
 namespace imp {
+
+struct Request;  // runtime/request.h
 
 // Nothing throws across the C ABI: every ImpError imp_*() body runs inside
 // this (or an equivalent) try/catch, gated by tools/check_api_guard.py

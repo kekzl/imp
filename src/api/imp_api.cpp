@@ -11,6 +11,7 @@
 #include "memory/mem_account.h"  // trim_device_mempool
 
 #include "core/logging.h"
+#include "runtime/request.h"
 
 #include <cstring>
 #include <memory>

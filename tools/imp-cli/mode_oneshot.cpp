@@ -7,6 +7,7 @@
 #include "model/tokenizer.h"
 #include "runtime/engine.h"
 #include "vision/vision_family.h"
+#include "runtime/request.h"
 
 #include <chrono>
 #include <cstdio>

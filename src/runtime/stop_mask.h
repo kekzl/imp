@@ -6,7 +6,6 @@
 // (docs/audit/AUDIT_QWEN38_NVFP4.md, P3).
 #include "memory/vram_allocator.h"
 #include "memory/vram_owned.h"
-#include "runtime/request.h"
 
 #include <cuda_runtime.h>
 
@@ -14,6 +13,8 @@
 #include <vector>
 
 namespace imp {
+
+struct Request;  // runtime/request.h
 
 // One engine-owned device copy of a small id list, uploaded at first use.
 // Returns nullptr for an empty list or a failed upload; callers mask nothing.

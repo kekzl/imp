@@ -4,6 +4,7 @@
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "runtime/engine.h"
+#include "runtime/request.h"
 
 void imp_prefill_until_admitted(ImpContext ctx, imp::Request& req, int n_tokens) {
     // A request the scheduler holds back stays PENDING; after 8 rounds it is a capacity refusal,

@@ -6,7 +6,6 @@
 #include "runtime/spec_gates.h"
 #include "runtime/spec_batch_verify_state.h"
 #include "runtime/spec_request.h"
-#include "runtime/request.h"
 #include "runtime/batch.h"
 #include "runtime/green_ctx.h"
 #include "runtime/cuda_graph.h"
@@ -49,6 +48,8 @@
 namespace imp {
 
 struct ImageData;  // src/vision/image_processor.h (per-request vision)
+struct QwenPatches;      // src/vision/image_processor.h
+struct Request;          // runtime/request.h: complete only in the TUs that read it
 struct ShadowPlanProbe;  // src/runtime/plan_shadow.h
 struct PlanResult;       // src/memory/plan.h
 struct MtpDraftWorkspace;  // src/compute/mtp_forward.h
@@ -1133,23 +1134,9 @@ private:
     }
     // The configuration half, split out so the rule itself lives in
     // spec_gates.h as a pure function and CI can test its truth table without
-    // a GPU. The engine supplies the state; it does not own the rule.
-    SpecDrafterState spec_drafter_state_(const Request& req) const {
-        SpecDrafterState s;
-        s.model_capable = spec_ngram_model_capable_();
-        // "speculative": false means no speculation at all, not just "no
-        // n-gram speculation" - it must also stop MTP and recycling (#1639).
-        const bool forced_off = req.spec_override == 0;
-        s.ngram_on = req.spec_override >= 0 ? req.spec_override == 1 : runtime_config_.speculative.ngram;
-        // The head is a per-request contract, not a process-wide switch: a
-        // request may lower its depth or turn it off, and asking for it on a
-        // process that armed nothing is a DECLINE with a reason rather than a
-        // silent plain decode (spec_request.h). The rule is shared with the
-        // server so the two cannot disagree about what a request asked for.
-        s.mtp_on = mtp_resolve_request(mtp_request_state_(req)).k > 0;
-        s.recycling_on = !forced_off && runtime_config_.speculative.token_recycling;
-        return s;
-    }
+    // a GPU. The engine supplies the state; it does not own the rule. Out of line
+    // (engine_spec_mtp.cpp) so this header needs no complete Request.
+    SpecDrafterState spec_drafter_state_(const Request& req) const;
     // The inputs mtp_resolve_request needs, read off this engine. Out of line
     // (engine_spec_mtp.cpp): this header is at its hard-review ceiling.
     MtpRequestState mtp_request_state_(const Request& req) const;
@@ -1171,10 +1158,7 @@ private:
     // not the request's eventual length (not known). Inline here because
     // engine_spec_ngram.cpp is at its hard-review ceiling. See
     // speculative.min_history.
-    [[nodiscard]] bool spec_history_too_short_(const Request& req) const {
-        const int n = runtime_config_.speculative.min_history;
-        return n > 0 && static_cast<int>(req.output_tokens.size()) < n;
-    }
+    [[nodiscard]] bool spec_history_too_short_(const Request& req) const;
     // Which gate refuses, or nullptr when none does. See the definition in
     // engine_spec_ngram.cpp for why the reason is a string and not a bool.
     const char* spec_verify_gate_refusal_(const Request& req, bool ignore_think = false) const;
@@ -1192,9 +1176,7 @@ private:
                spec_sampling_refusal_(req) == nullptr;
     }
     // The MTP head is bound to this request: its per-step feed needs every token on the host (no async loop).
-    [[nodiscard]] bool mtp_holds_eager_(const Request& req) const {
-        return mtp_spec_decode_enabled() && mtp_bound(mtp_active_, mtp_pool_, req.id);
-    }
+    [[nodiscard]] bool mtp_holds_eager_(const Request& req) const;
     [[nodiscard]] bool spec_burst_launch_ok_(const Request& req) const;
     int spec_effective_miss_burst_(const Request& req) const;
     void spec_maybe_rearm_(Request& req) const;
@@ -1661,9 +1643,7 @@ private:
     int prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit = 0);
     // Graph loop refused: PLE host n-gram rows, host-resident experts (async loop only) and
     // teacher-forced requests (the host substitutes every token) decode per step.
-    [[nodiscard]] bool graph_loop_blocked_(const Request& r, bool experts_matter) const {
-        return model_->ngram_table() != nullptr || (experts_matter && experts_on_host_) || r.forcing();
-    }
+    [[nodiscard]] bool graph_loop_blocked_(const Request& r, bool experts_matter) const;
 
     // Build InferenceState + CudaGraphConditionalRunner::Config for graph loop.
     CudaGraphConditionalRunner::Config build_graph_config(const Request& req, int remaining) const;
