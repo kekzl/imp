@@ -34,7 +34,8 @@ cyclomatic = 25
 
 [scan]
 roots = ["src"]
-skip_dirs = []
+# apa: vendored kekzl/apa headers (src/compute/apa), complexity reviewed upstream; the copy stays equal to the tag.
+skip_dirs = ["apa"]
 
 [baseline]
 "src/api/imp_api.cpp::ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params, int32_t* out_token)" = 27

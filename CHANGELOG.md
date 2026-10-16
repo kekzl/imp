@@ -16,6 +16,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Launch-guard gate decides the 23 kernel launches inside `#define` bodies (a check in the body, or at every expansion before its function closes); test-only `ScratchStack` (213 lines) removed.
 - tokenizer.json pre-tokenizers run step by step on PCRE2 10.49 (Split with all behaviors and invert, ByteLevel, Digits, Punctuation, Whitespace) instead of hand-written family scanners; GGUF pre names map to their regex. 32 local tokenizers: 0 of 1210 parity records differ from HF; encode 1.20x slower on average.
 - Short prompts on Q8_0 GGUF prefill on a 32-wide IMMA N tile (M <= 64, under one wave), bit-identical rows. Qwen3-8B Q8_0 pp40 15.18 -> 11.81 ms; server TTFT p50 for ~35-token chats 17 -> 13 ms.
+- APA 0.6.1 -> 0.8.1 (kekzl/apa c616972): pass 1 on a 1+2*96-tile KV window, pass 2 per window segment. Llama-3.2-3B Q8_0 pp106451 dense 6281.57 -> 6185.58 ms (eps 0.01), sparse 4551.82 -> 4566.35 ms; PPL Qwen3-8B 10.7953 -> 10.7982, Llama-3.2-3B 17.3663 -> 17.3663; workspace 4096x32768 99.1 -> 105.2 MiB.
 - Release bar 2 (`bench-competitive`): Qwen3.8-27B Q4_K_M is a hero (6 of 8 contested), the non-hero Qwen3-30B-A3B row is gone; the sweep refuses on host 1-min load > nproc/4 instead of any running container.
 
 ### Fixed

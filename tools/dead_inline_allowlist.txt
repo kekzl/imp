@@ -11,4 +11,4 @@
 #
 # 2026-08-21: all 25 first-run findings deleted, none listed.
 
-src/compute/apa/apa.cuh:pass2  # vendored kekzl/apa v0.6.1 public API; the copy stays byte-equal to upstream
+src/compute/apa/apa.cuh:pass2  # vendored kekzl/apa v0.8.1 public API; the copy stays byte-equal to upstream

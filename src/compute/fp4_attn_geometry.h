@@ -11,6 +11,8 @@ inline constexpr size_t kApaStatsTiles = 16;                   // apa::STATS_TIL
 inline constexpr size_t kApaWarpsHd128 = 12;                   // apa::Launch<128>::NW
 inline constexpr size_t kApaQBlockRows = kApaWarpsHd128 * 16;  // 192: 16 q rows per warp
 inline constexpr size_t kApaTileBytesPerD = 72;                // apa::Cfg<D>::TILE = 72 * D
+inline constexpr size_t kApaWinTiles = 96;                     // apa::WIN: tiles per KV-window segment
+inline constexpr size_t kApaWinSlots = 2;                      // apa::WIN_SLOTS: ring slots of the FP4 KV
 inline constexpr size_t kRa2TileBytesPerD = 136;               // ra2::Cfg<D>::TILE = 136 * D + 16
 inline constexpr size_t kRa2TileBytesExtra = 16;               // ra2 K scale slot
 
