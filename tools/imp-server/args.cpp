@@ -94,9 +94,9 @@ ServerArgs parse_server_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--host") == 0 && i + 1 < argc) {
             args.host = argv[++i];
         } else if (std::strcmp(arg, "--port") == 0 && i + 1 < argc) {
-            args.port = std::atoi(argv[++i]);
+            args.port = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--max-batch") == 0 && i + 1 < argc) {
-            args.max_batch_size = std::atoi(argv[++i]);
+            args.max_batch_size = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--lora") == 0 && i + 1 < argc) {
             std::string spec = argv[++i];
             size_t eq = spec.find('=');
@@ -124,15 +124,15 @@ ServerArgs parse_server_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--reasoning-format") == 0 && i + 1 < argc) {
             args.reasoning_format = argv[++i];
         } else if (std::strcmp(arg, "--think-budget") == 0 && i + 1 < argc) {
-            args.think_budget = std::atof(argv[++i]);
+            args.think_budget = cli_float(arg, argv[++i]);
         } else if (std::strcmp(arg, "--max-concurrent") == 0 && i + 1 < argc) {
-            args.max_concurrent = std::atoi(argv[++i]);
+            args.max_concurrent = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--request-timeout") == 0 && i + 1 < argc) {
-            args.request_timeout = std::atoi(argv[++i]);
+            args.request_timeout = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--rate-limit") == 0 && i + 1 < argc) {
-            args.rate_limit = std::atoi(argv[++i]);
+            args.rate_limit = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--max-input-tokens") == 0 && i + 1 < argc) {
-            args.max_input_tokens = std::atoi(argv[++i]);
+            args.max_input_tokens = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--max-queued-tokens") == 0 && i + 1 < argc) {
             // Strict: a typo must not silently mean "off".
             const char* v = argv[++i];
@@ -148,19 +148,19 @@ ServerArgs parse_server_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--cors-origins") == 0 && i + 1 < argc) {
             args.cors_origins = argv[++i];
         } else if (std::strcmp(arg, "--max-n") == 0 && i + 1 < argc) {
-            args.max_n = std::atoi(argv[++i]);
+            args.max_n = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--max-batch-items") == 0 && i + 1 < argc) {
-            args.max_batch_items = std::atoi(argv[++i]);
+            args.max_batch_items = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--max-logit-bias") == 0 && i + 1 < argc) {
-            args.max_logit_bias = std::atoi(argv[++i]);
+            args.max_logit_bias = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--max-images-per-request") == 0 && i + 1 < argc) {
-            args.max_images = std::atoi(argv[++i]);
+            args.max_images = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--http-read-timeout") == 0 && i + 1 < argc) {
-            args.read_timeout = std::atoi(argv[++i]);
+            args.read_timeout = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--http-write-timeout") == 0 && i + 1 < argc) {
-            args.write_timeout = std::atoi(argv[++i]);
+            args.write_timeout = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--http-keep-alive-max") == 0 && i + 1 < argc) {
-            args.keep_alive_max = std::atoi(argv[++i]);
+            args.keep_alive_max = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--prefix-cache") == 0 && i + 1 < argc) {
             args.prefix_cache_path = argv[++i];
         } else if (std::strcmp(arg, "--idle-unload-seconds") == 0 && i + 1 < argc) {

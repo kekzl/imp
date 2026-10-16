@@ -192,7 +192,6 @@ set(IMP_MEMORY_SOURCES
     src/memory/host_pinned.cpp
     src/memory/library_reserve_cache.cpp
     src/memory/block_pool.cpp
-    src/memory/scratch_stack.cpp
     src/memory/plan.cpp
     src/memory/vram_allocator.cpp
     src/memory/mem_account.cpp
