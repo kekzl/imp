@@ -7,6 +7,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Added
 - Web UI redesign in the logo's colours with an imp mascot: saved conversations, sampling panel, edit/continue, logprobs view, end thinking, structured output, images, `/tokenize` count, `/metrics` tab, GPU joules per answer. `drive.py features` on the dev mock: 16/16 checks pass.
 - Per-request control vectors: `--control-vector NAME=PATH` loads a llama.cpp cvector GGUF, `"control_vector": NAME` or `{name, scale}` adds scale * v_l after each layer it carries. Qwen3-4B Q8_0: scale 0 reproduces the base text, scale 4 steers it.
+- `scripts/check_model.sh <hf-repo> [--nvfp4]`: download, HF BF16 PPL on the CPU, imp PPL, `/tokenize` ids vs HF, reasoning split and `json_object` as one table under the GPU lock. MiniCPM5-2B: 7 rows, 10.4937 vs HF 10.4138, ids identical.
 - Verified checkpoints: MiniCPM5-2B (bf16) and LFM2.5-24B-A2B (imp-quantize NVFP4), `ppl_corpus_45k` 10.4937 vs HF BF16 10.4138 and 18.7776 vs 18.8191.
 - `/metrics`: `imp_gpu_power_watts` and `imp_gpu_energy_joules_total` from NVML (`dlopen`, absent without libnvidia-ml). A 60-token Qwen3-4B Q8_0 chat reads 18.4 J on the driver counter.
 

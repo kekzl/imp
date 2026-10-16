@@ -9,6 +9,8 @@ description: Use when adding support for a new model architecture to imp, portin
 
 Diff `config.json` against a supported sibling before estimating. Qwen3.8 shipped with zero enum members (loads as `QWEN35`); the work was tokenizer parity, template goldens, KV dtype default and MTP head (#1750). HF reference values come from `curl`, never from memory.
 
+Start with `scripts/check_model.sh <hf-repo> [--nvfp4] [--bos]`: download, HF BF16 PPL (CPU), imp PPL, `/tokenize` ids vs HF, reasoning split, `json_object`; one table, exit 1 on a FAIL row. A checkpoint whose rows are all ok needs only its MODELS.md row (MiniCPM5-2B, LFM2.5-24B-A2B).
+
 ## Integration checklist (gpt-oss #572 is the reference PR)
 
 | Step | Where | Notes |
