@@ -884,3 +884,38 @@ Run spread per cell 3.2..5.8 %; one outlier (branch, Qwen3.8 NVFP4 pp512 round 2
 | `make dev-test` | 13/13 |
 
 C-012: fixed. GB203 itself stays untested (#1651).
+
+## 2026-10-16 H-030 SWA burst cap, C-023 / C-024 measured (owner go, packages 2 and 3)
+
+H-030: the SWA burst cap read only `config_.prefill_chunk_size` (CLI); `--set runtime.prefill_chunk_size` reached the scheduler (`resolve_prefill_chunk_size_`) but not the SWA group sizing. Fix: the cap takes `base_prefill_chunk(resolve_prefill_chunk_size_(), executor max_tokens, block)`; `vram_budget.cpp` logs an ERROR with the knobs when the SWA group cannot fit.
+
+Gemma-3-12B Q4_K_M, `kv_cache.swa_sizing=on`, auto max_batch 17, 6408-token prompt, greedy 200 tokens + 17 concurrent 300-token requests:
+
+| arm | main SWA group | branch SWA group | concurrent ok (main / branch) |
+|---|---|---|---|
+| default chunk (2048) | 3366 blocks, 16830 MiB, live 3152 | identical | 17/17 / 17/17 |
+| `--set runtime.prefill_chunk_size=1024` | 3366 blocks, 16830 MiB (chunk ignored) | 2278 blocks, 11390 MiB, live 2128 | 17/17 / 17/17 |
+| `--set runtime.prefill_chunk_size=4096` | 3366 blocks, live 3152 (undersized for 4096-row chunks) | start refused: 27710 MiB = 17 x 5200 does not fit 18472 MiB, ERROR names the knobs | 17/17 / - |
+| `--prefill-chunk-size 4096` (CLI) | start fails, cudaMalloc 27726 MiB, no hint | start refused, same ERROR | - / - |
+
+Greedy output md5 69ac3e6e on every arm that started, both images. `imp-cli --bench --bench-pp 512 --max-tokens 256` with swa_sizing on: pp 8730.64 / 8719.16 tok/s, tg 99.40 / 98.83 tok/s (main / branch, default chunk: same sizing).
+
+Rejected on measurement: charging the prefill chunk once per batch (group 3366 -> 1471 blocks at chunk 2048) exhausted the group, 11 of 17 concurrent requests failed with `SWA block group exhausted`: `swa_trim` runs before a sequence's next step, so a sequence keeps window + its last chunk until then. Follow-up: trim right after a prefill chunk (stream-ordering of the freed blocks to be shown), then charge the chunk once.
+
+C-023 (pinned staging for the constrainer allow list) and C-024 (pinned landing for the per-layer MoE offsets D2H), A/B `imp:p3` vs main, not shipped:
+
+| measurement | main | p3 |
+|---|---:|---:|
+| Qwen3-8B Q8_0 `json_schema` decode, 522 tokens, mean of 7 | 269.87 tok/s | 269.91 tok/s |
+| Qwen3-30B-A3B NVFP4 pp2048, 3 rounds | 50110.90 / 50109.11 / 50050.48 | 50065.67 / 50078.40 / 49885.51 |
+| Qwen3-30B-A3B NVFP4 pp512, 3 rounds | 31576.03 / 31523.48 / 31515.63 | 31557.22 / 31534.85 / 31624.19 |
+| Qwen3.6-35B-A3B Q4_K_M pp2048, 3 rounds | 22116.38 / 22029.10 / 22014.11 | 21990.58 / 22009.58 / 22014.03 |
+| Qwen3.6-35B-A3B Q4_K_M pp512, 3 rounds | 14876.62 / 14859.91 / 14759.29 | 14832.40 / 15007.74 / 14939.84 |
+
+Default MoE prefill paths do not reach the D2H sites: `CUTLASS 3.x device-args full path` (NVFP4) and `FP16 batch + grouped GEMM path` (GGUF, IMMA, offsets only on the dequant fallback). C-023: the per-step pageable H2D is below the noise of a 3.7 ms decode step.
+
+| row | status |
+|---|---|
+| H-030 | fixed |
+| C-023 | not pursued: 269.87 vs 269.91 tok/s |
+| C-024 | not pursued: default tiers do not run the sites, pp deltas inside noise |
