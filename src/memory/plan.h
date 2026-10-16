@@ -53,6 +53,7 @@ struct FeatureSet {
     // of full context. 0/0 = feature off.
     int swa_live_tokens = 0;
     int n_swa_layers = 0;
+    int swa_shared_tokens = 0;  // charged once per pool (prefill chunk past the burst)
 };
 
 struct ConcurrencyLimits {

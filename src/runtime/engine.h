@@ -63,6 +63,7 @@ struct EngineConfig {
     int max_seq_len = 0;          // 0 = auto (engine detects from model metadata + VRAM)
     int kv_cache_max_blocks = 0;  // 0 = auto
     int kv_ceiling_seqs = 0;      // KV pool ceiling in max_seq_len sequences, 0 = max_batch_size
+    int swa_shared_tokens = 0;    // SWA group tokens charged once per pool (prefill chunk past the burst)
     bool use_green_contexts = false;
     float green_ctx_prefill_ratio = 0.8f;
     bool use_cuda_graphs = true;
@@ -1310,8 +1311,9 @@ private:
     bool swa_sizing_active_ = false;
     int swa_window_max_ = 0;        // largest per-layer sliding window (tokens)
     int swa_slack_tokens_ = 0;      // rollback/boundary cushion (tokens)
-    // Longest on-device burst span the SWA group is sized for: the graph
+    // Per-sequence on-device burst span the SWA group is sized for: the graph
     // decode loop clamps its step budget to this (no host trim mid-burst).
+    // The prefill chunk is charged once per pool (trimmed on enqueue).
     int swa_burst_cap_tokens_ = 0;
 
     // ── Banned tokens (special/control tokens that must not be generated) ──

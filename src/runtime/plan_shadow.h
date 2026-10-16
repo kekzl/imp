@@ -47,6 +47,7 @@ struct ShadowPlanProbe {
     int n_kv_layers = 0;
     int n_swa_layers = 0;
     int swa_live_tokens = 0;
+    int swa_shared_tokens = 0;
     int max_batch_size = 1;
     int max_seq_len = 0;
     int kv_block_size = 16;

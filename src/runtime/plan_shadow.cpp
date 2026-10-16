@@ -35,6 +35,7 @@ PlanInput shadow_plan_input(const ShadowPlanProbe& probe) {
     // report note at the bottom says so.
     in.features.n_swa_layers = probe.n_swa_layers;
     in.features.swa_live_tokens = probe.swa_live_tokens;
+    in.features.swa_shared_tokens = probe.swa_shared_tokens;
 
     in.limits.max_batch_size = probe.max_batch_size;
     in.limits.max_seq_len = probe.max_seq_len;
