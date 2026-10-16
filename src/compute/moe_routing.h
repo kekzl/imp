@@ -34,7 +34,8 @@ struct MoeRoutingBuffers {
     int max_experts = 0;
     int top_k = 0;
 
-    void allocate(int max_tokens, int max_experts, int top_k);
+    // false (pool null, ERROR logged) when cudaMalloc fails.
+    [[nodiscard]] bool allocate(int max_tokens, int max_experts, int top_k);
     void free();
     MoeRoutingBuffers() = default;
     // Owns pool: no copies (a copy double-frees, H-018); a move takes the pool and empties the source.

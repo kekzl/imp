@@ -820,10 +820,14 @@ if(IMP_BUILD_TESTS)
     include(GoogleTest)
 
     function(imp_add_test_module target)
-        cmake_parse_arguments(ARG "WITH_STUB" "" "SOURCES" ${ARGN})
+        cmake_parse_arguments(ARG "WITH_STUB;GPU" "" "SOURCES" ${ARGN})
         set(_sources ${ARG_SOURCES})
         if(ARG_WITH_STUB)
             list(APPEND _sources tests/gguf_stub.cpp)
+        endif()
+        # GPU modules: a test that ends with a pending CUDA error fails (tests/cuda_error_listener.cpp).
+        if(ARG_GPU)
+            list(APPEND _sources tests/cuda_error_listener.cpp)
         endif()
         add_executable(${target} ${_sources})
         target_link_libraries(${target} PRIVATE imp GTest::gtest GTest::gtest_main imp_warnings)
@@ -1196,7 +1200,7 @@ if(IMP_BUILD_TESTS)
         tests/test_chat_template_goldens.cpp
     )
 
-    imp_add_test_module(test-compute SOURCES
+    imp_add_test_module(test-compute GPU SOURCES
         tests/test_cuda_fault_signal.cu
         tests/test_shortconv.cu
         tests/test_swiglu_quantize_cutlass.cu
@@ -1234,7 +1238,7 @@ if(IMP_BUILD_TESTS)
         tests/test_ffn_sparsity.cu
     )
 
-    imp_add_test_module(test-attention SOURCES
+    imp_add_test_module(test-attention GPU SOURCES
         tests/test_attention_fmha_sm120.cu
         tests/test_attention_fmha_hd512.cu
         tests/test_attention_crosspath.cu
@@ -1254,7 +1258,7 @@ if(IMP_BUILD_TESTS)
         tests/test_sparse_prefill.cu
     )
 
-    imp_add_test_module(test-quant SOURCES
+    imp_add_test_module(test-quant GPU SOURCES
         tests/test_quant.cu
         tests/test_quant_integration.cu
         tests/test_dequant_awq_gpu.cu
@@ -1338,7 +1342,7 @@ if(IMP_BUILD_TESTS)
         ${cutlass_SOURCE_DIR}/tools/util/include
     )
 
-    imp_add_test_module(test-kv SOURCES
+    imp_add_test_module(test-kv GPU SOURCES
         tests/test_fp8_kv_cache.cu
         tests/test_kv_cache_write.cu
         tests/test_kv_gather.cu
@@ -1354,7 +1358,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mtp_upload_budget.cpp
     )
 
-    imp_add_test_module(test-moe-gdn SOURCES
+    imp_add_test_module(test-moe-gdn GPU SOURCES
         tests/test_moe.cu
         tests/test_gpt_oss_moe_fused_bias.cu
         tests/test_moe_executor.cu
@@ -1376,7 +1380,7 @@ if(IMP_BUILD_TESTS)
         tests/test_grammar_regex_mask.cu
     )
 
-    imp_add_test_module(test-e2e WITH_STUB SOURCES
+    imp_add_test_module(test-e2e WITH_STUB GPU SOURCES
         tests/test_forward_pass.cu
         tests/test_engine_integration.cu
         tests/test_prefill_ragged.cu

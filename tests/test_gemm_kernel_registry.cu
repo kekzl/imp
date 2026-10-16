@@ -3,6 +3,7 @@
 #include "compute/gemm_cutlass_sm120.h"  // CutlassNvFP4Weight, convert_nvfp4_to_cutlass, gemm_nvfp4_cutlass_sm120
 #include "core/tensor.h"
 #include "exec/executor_kernels.h"  // is_dp4a_qtype, dispatch_dp4a_gemv
+#include "exec/gemm_scratch.h"      // prewarm_mmvq_scratch
 #include "quant/dequant_gpu.h"      // generic-dequant parity test
 #include "quant/nvfp4_quant.h"
 
@@ -25,9 +26,18 @@ namespace {
 class GemmKernelRegistryTest : public ::testing::Test {
 protected:
     void SetUp() override { cudaStreamCreate(&stream_); }
-    void TearDown() override { cudaStreamDestroy(stream_); }
+    // Async kernel faults surface here; pending launch errors fail via tests/cuda_error_listener.cpp.
+    void TearDown() override {
+        EXPECT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+        cudaStreamDestroy(stream_);
+    }
     cudaStream_t stream_ = nullptr;
 };
+
+// Distinct fill bytes for the two outputs of a parity test: an output no path wrote fails
+// the bit-compare instead of matching its untouched twin.
+constexpr int kPoisonDirect = 0xAA;
+constexpr int kPoisonRegistry = 0x55;
 
 TEST_F(GemmKernelRegistryTest, UnregisteredStrategyReturnsNoMatch) {
     const auto& reg = GemmKernelRegistry::instance();
@@ -303,12 +313,13 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0Dp4aRegistryDispatchMatchesDirectPath) {
     cudaMemcpy(d_weight, h_weight_q8_0.data(), h_weight_q8_0.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(d_input, h_input.data(), sizeof(__half) * M * K, cudaMemcpyHostToDevice);
 
-    // dp4a scratch: q8_1_buf is `block_q8_1[K/32]` (36 bytes/block), d8_buf
-    // is `float[K/32]`.
+    // dp4a scratch: quantize_fp16_to_q8_1 zero-pads to a 256-element boundary, so
+    // q8_1_buf / d8_buf hold ceil(K/256)*8 blocks (K=128: 8), not K/32.
+    constexpr int q8_1_blocks = ((K + 255) / 256) * 8;
     void* d_q8_1 = nullptr;
     float* d_d8 = nullptr;
-    cudaMalloc(&d_q8_1, sizeof(block_q8_1) * blocks_per_row);
-    cudaMalloc(&d_d8, sizeof(float) * blocks_per_row);
+    cudaMalloc(&d_q8_1, sizeof(block_q8_1) * q8_1_blocks);
+    cudaMalloc(&d_d8, sizeof(float) * q8_1_blocks);
 
     int64_t in_shape[2] = {M, K};
     int64_t w_shape[2] = {N, K};
@@ -319,6 +330,7 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0Dp4aRegistryDispatchMatchesDirectPath) {
     // Path 1: direct legacy invocation (mirrors gemm_dispatch_impl:2249-2251).
     __half* d_out_direct = nullptr;
     cudaMalloc(&d_out_direct, sizeof(__half) * M * N);
+    cudaMemset(d_out_direct, kPoisonDirect, sizeof(__half) * M * N);
     quantize_fp16_to_q8_1(static_cast<const half*>(d_input), static_cast<block_q8_1*>(d_q8_1), d_d8, K,
                           stream_);
     dispatch_dp4a_gemv(QType::Q8_0, d_weight, static_cast<const block_q8_1*>(d_q8_1), d_d8,
@@ -329,6 +341,7 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0Dp4aRegistryDispatchMatchesDirectPath) {
     // both are eligible).
     __half* d_out_registry = nullptr;
     cudaMalloc(&d_out_registry, sizeof(__half) * M * N);
+    cudaMemset(d_out_registry, kPoisonRegistry, sizeof(__half) * M * N);
     Tensor out_registry(d_out_registry, QType::F16, 2, out_shape, /*on_device=*/true);
     GemmKernelArgs args{};
     args.input = &input;
@@ -430,6 +443,8 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0MmvqRegistryDispatchProducesNonZero) {
     args.force_mmvq = true;
     // q8_1_buf / d8_buf intentionally NOT supplied — mmvq has its own
     // file-scope scratch and should win the gate.
+    // Engine init prewarms that scratch; without it the dispatch grows it on the hot path.
+    prewarm_mmvq_scratch(M, K);
 
     GemmStrategy strat{StorageTier::FP16, QType::Q8_0, /*m_is_one=*/true};
     EXPECT_EQ(GemmKernelRegistry::instance().dispatch(strat, args), GemmDispatchResult::Ok);
@@ -510,6 +525,7 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0FusedGemvFallbackMatchesDirectPath) {
     // Path 1: direct gemv_q8_0 invocation (mirrors legacy line 2275).
     __half* d_out_direct = nullptr;
     cudaMalloc(&d_out_direct, sizeof(__half) * M * N);
+    cudaMemset(d_out_direct, kPoisonDirect, sizeof(__half) * M * N);
     gemv_q8_0(d_weight, static_cast<const half*>(d_input), reinterpret_cast<half*>(d_out_direct), N, K,
               stream_);
 
@@ -518,6 +534,7 @@ TEST_F(GemmKernelRegistryTest, GgufQ8_0FusedGemvFallbackMatchesDirectPath) {
     // Phase 5 Track A: force_mmvq now lives on GemmKernelArgs.
     __half* d_out_registry = nullptr;
     cudaMalloc(&d_out_registry, sizeof(__half) * M * N);
+    cudaMemset(d_out_registry, kPoisonRegistry, sizeof(__half) * M * N);
     Tensor out_registry(d_out_registry, QType::F16, 2, out_shape, /*on_device=*/true);
 
     // Engine-ready sentinel — the kernel does not dereference this pointer,
@@ -797,6 +814,7 @@ TEST_F(GemmKernelRegistryTest, GenericDequantMatchesDirectPath) {
     // Path 1: direct (mirror executor_kernels.cu legacy generic catch-all).
     __half* d_out_direct = nullptr;
     cudaMalloc(&d_out_direct, sizeof(__half) * M * N);
+    cudaMemset(d_out_direct, kPoisonDirect, sizeof(__half) * M * N);
     Tensor out_direct(d_out_direct, QType::F16, 2, out_shape, /*on_device=*/true);
     dequant_gpu(weight.data, d_scratch_direct, weight.qtype, N, K, stream_);
     Tensor w_fp16_direct(d_scratch_direct, QType::F16, 2, w_shape, /*on_device=*/true);
@@ -805,6 +823,7 @@ TEST_F(GemmKernelRegistryTest, GenericDequantMatchesDirectPath) {
     // Path 2: registry dispatch through the generic-dequant adapter.
     __half* d_out_registry = nullptr;
     cudaMalloc(&d_out_registry, sizeof(__half) * M * N);
+    cudaMemset(d_out_registry, kPoisonRegistry, sizeof(__half) * M * N);
     Tensor out_registry(d_out_registry, QType::F16, 2, out_shape, /*on_device=*/true);
     GemmKernelArgs args{};
     args.input = &input;
