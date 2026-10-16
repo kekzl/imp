@@ -901,3 +901,18 @@ C-012: fixed. GB203 itself stays untested (#1651).
 | `make dev-test` / `make preflight` | 13/13 / 0 failures |
 
 Open rows after this package: H-011, H-015, H-022, H-028, H-030, C-004..C-007, C-017, C-018, C-023, C-024, C-029, C-031.
+
+## 2026-10-16 C-012 reverted (verify-fast decode FAIL)
+
+`make verify-fast` on a branch carrying #2753: decode tg128 258.73 tok/s vs baseline 282.97 (-8.57 %, FAIL). Paired control, `scripts/verify_ab.sh`, 3 pairs, Qwen3-8B Q8_0, arm A = main before #2753 (`bad6a308`):
+
+| arm B | decode pairs | mean | prefill mean |
+|---|---|---:|---:|
+| #2753 alone (`imp:c012`) | -5.68 / -5.70 / -6.10 % | -5.83 % | -0.36 % |
+| H-030 branch incl. #2753 | -5.87 / -5.72 / -5.97 % | -5.85 % | -0.92 % |
+
+Qwen3-8B Q8_0 decodes through the NVFP4 decode cache, i.e. the 14 dense NVFP4 GEMVs whose SASS changed without `-rdc` (REG 42..64 -> 38..40). The #2753 A/B had no Q8_0 / NVFP4-decode-cache cell. Reverted per the dispatch rule (revert, no fix forward).
+
+| row | status |
+|---|---|
+| C-012 | reopened; option (b) costs -5.83 % decode on the gate model. Left: (a) `IMP_DISABLE_120F_FALLBACK=ON` + SM120.md correction, (c) document the 26-entry PTX gap, or (b) with SASS-identical GEMVs |
