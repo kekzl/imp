@@ -1,7 +1,7 @@
 #include "compute/gdn_internal.cuh"
 #include "compute/gdn_scan_chunkpar.cuh"
 #include "core/logging.h"
-#include "core/sm120_limits.h"
+#include "core/device_info.h"
 
 #include <cuda_bf16.h>
 #include <algorithm>
@@ -460,17 +460,15 @@ using namespace chunkpar;
 int chunkpar_strip_chunks(int n_heads, int requested) {
     if (requested > 0)
         return std::min(requested, kMaxStripChunks);
-    static int sm_count = 0, l2_bytes = 0;
-    if (sm_count == 0) {
+    const int sm_count = device_sm_count();  // 170 when the query failed
+    static int l2_bytes = 0;
+    if (l2_bytes == 0) {
         int dev = 0;
         if (cudaGetDevice(&dev) != cudaSuccess ||
-            cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess ||
             cudaDeviceGetAttribute(&l2_bytes, cudaDevAttrL2CacheSize, dev) != cudaSuccess) {
-            IMP_LOG_WARN("gdn chunkpar: device query failed, strip sized for 170 SMs / 96 MiB L2");
-            sm_count = l2_bytes = 0;  // -> the defaults below
+            IMP_LOG_WARN("gdn chunkpar: L2 size query failed, strip sized for 96 MiB L2");
+            l2_bytes = 0;  // -> the default below
         }
-        if (sm_count <= 0)
-            sm_count = kSm120SmCount;
         if (l2_bytes <= 0)
             l2_bytes = 96 << 20;
     }

@@ -4,6 +4,7 @@
 
 #include "compute/gemm_cutlass_grouped_3x.h"
 #include "core/cuda_static_reset.h"
+#include "core/device_info.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 
@@ -87,20 +88,7 @@ using GrpUnderlyingShape = typename GrpProblemShape::UnderlyingProblemShape;
 
 namespace imp {
 
-static int s_grp3x_available = -1;
-
-bool cutlass_grouped_3x_nvfp4_available() {
-    if (s_grp3x_available >= 0)
-        return s_grp3x_available;
-    cudaDeviceProp prop;
-    const cudaError_t err = cudaGetDeviceProperties(&prop, 0);
-    if (err != cudaSuccess) {
-        IMP_LOG_WARN("cutlass_grouped_3x: cudaGetDeviceProperties failed: %s", cudaGetErrorString(err));
-        return false;  // not cached: the next call queries again
-    }
-    s_grp3x_available = (prop.major * 10 + prop.minor >= 120) ? 1 : 0;
-    return s_grp3x_available;
-}
+bool cutlass_grouped_3x_nvfp4_available() { return device_is_sm120(); }
 
 // Staging + workspace, both engine-persistent (T2) since A7 step 8.
 static void* s_staging = nullptr;

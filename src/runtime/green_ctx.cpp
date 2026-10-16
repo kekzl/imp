@@ -1,4 +1,5 @@
 #include "runtime/green_ctx.h"
+#include "core/device_info.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -39,9 +40,9 @@ bool GreenContextManager::init(int device, float prefill_sm_ratio) {
         return false;
     }
 
-    // Query total SM count
-    err = cudaDeviceGetAttribute(&total_sms_, cudaDevAttrMultiProcessorCount, device);
-    if (err != cudaSuccess || total_sms_ <= 0) {
+    // Cached current-device SM count: device is 0 here, imp drives device 0 only.
+    total_sms_ = device_sm_count_or_0();
+    if (total_sms_ <= 0) {
         IMP_LOG_ERROR("GreenContextManager: failed to query SM count");
         return false;
     }

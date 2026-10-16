@@ -153,6 +153,7 @@ FetchContent_MakeAvailable(cutlass)
 # --- Core library sources ---
 set(IMP_CORE_SOURCES
     src/core/process_diag.cpp
+    src/core/device_info.cpp
     src/core/pdl.cpp
     src/core/tensor.cpp
     src/core/qtype.cpp
@@ -859,6 +860,8 @@ if(IMP_BUILD_TESTS)
 
     imp_add_test_module(test-core WITH_STUB SOURCES
         tests/test_cuda_errors.cpp
+        # Cached SM count + sm_120 check: CPU lane takes the no-device fallback (170, false).
+        tests/test_device_info.cpp
         # FFN prefill graph buckets (#2435).
         tests/test_ffn_graph_cache.cpp
         # KV admission by expected decode length, swapped requests first (#2486).

@@ -10,6 +10,7 @@
 // D = alpha*A@B^T + beta*D. M,N must be multiples of BM,BN; K must be a multiple of BK=32.
 
 #include "compute/gemm_capture_fp16_sm120.h"
+#include "core/device_info.h"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -262,19 +263,7 @@ bool should_use_bm64(int M, int N) {
 
 }  // anonymous namespace
 
-static int s_avail = -1;
-
-bool capture_gemm_fp16_sm120_available() {
-    if (s_avail >= 0) return s_avail;
-    cudaDeviceProp prop;
-    const cudaError_t err = cudaGetDeviceProperties(&prop, 0);
-    if (err != cudaSuccess) {
-        IMP_LOG_WARN("capture_gemm_fp16_sm120: cudaGetDeviceProperties failed: %s", cudaGetErrorString(err));
-        return false;  // not cached: the next call queries again
-    }
-    s_avail = (prop.major * 10 + prop.minor >= 120) ? 1 : 0;
-    return s_avail;
-}
+bool capture_gemm_fp16_sm120_available() { return device_is_sm120(); }
 
 bool gemm_capture_fp16_sm120(const void* A, const void* B, void* D, int M, int N, int K, float alpha,
                               float beta, cudaStream_t stream) {

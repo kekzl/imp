@@ -1,6 +1,7 @@
 #pragma once
 
 #include "compute/warp_reduce.cuh"
+#include "core/device_info.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <float.h>
@@ -154,16 +155,10 @@ __device__ __forceinline__ bool block_token_range(const ContextRange& r, int blk
     return last_tok > first_tok;
 }
 
-// Detect GPU SM count for split-K occupancy decisions. Cached after first call.
+// SM count for split-K occupancy decisions; 1 on a failed query keeps the heuristics' `/ sms` defined.
 static inline int kpar_n_sms() {
-    static int n_sms = 0;
-    if (__builtin_expect(n_sms == 0, 0)) {
-        cudaDeviceProp prop;
-        if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess)
-            return 1;  // not cached; >= 1 keeps the split heuristics' `/ sms` defined
-        n_sms = prop.multiProcessorCount;
-    }
-    return n_sms;
+    const int n = device_sm_count_or_0();
+    return n > 0 ? n : 1;
 }
 
 // Current device attribute, queried per call; 0 on a query error (#2211). For the smem opt-in

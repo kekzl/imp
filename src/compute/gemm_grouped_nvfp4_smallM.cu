@@ -1,6 +1,7 @@
 // src/compute/gemm_grouped_nvfp4_smallM.cu
 #include "compute/gemm_grouped_nvfp4_smallM.h"
 #include "core/cuda_static_reset.h"
+#include "core/device_info.h"
 #include "core/logging.h"
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -708,19 +709,7 @@ static bool build_tma_2d_u8(CUtensorMap* desc, void* gmem,
     return r == CUDA_SUCCESS;
 }
 
-static int s_smallM_available = -1;
-
-bool gemm_grouped_nvfp4_smallM_available() {
-    if (s_smallM_available >= 0) return s_smallM_available;
-    cudaDeviceProp prop;
-    const cudaError_t err = cudaGetDeviceProperties(&prop, 0);
-    if (err != cudaSuccess) {
-        IMP_LOG_WARN("[smallM] cudaGetDeviceProperties failed: %s", cudaGetErrorString(err));
-        return false;  // not cached: the next call queries again
-    }
-    s_smallM_available = (prop.major * 10 + prop.minor >= 120) ? 1 : 0;
-    return s_smallM_available;
-}
+bool gemm_grouped_nvfp4_smallM_available() { return device_is_sm120(); }
 
 // Dummy buffer backing TMA descriptors of inactive experts (lazily created
 // in gemm_grouped_nvfp4_smallM below; file-scope so the reset hook can free it).

@@ -10,6 +10,7 @@
 #include "compute/fmha_fp8_tile_select.h"
 #include "compute/fmha_sm120_tile_select.h"
 #include "core/cuda_static_reset.h"
+#include "core/device_info.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
@@ -1890,7 +1891,7 @@ bool fmha_sm120_fa2_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, T
         return false;
 
     const int max_smem = device_attr_or_0(cudaDevAttrMaxSharedMemoryPerBlockOptin);  // 0: declines below
-    const int sm_count = device_attr_or_0(cudaDevAttrMultiProcessorCount);  // 0: tile bands only
+    const int sm_count = device_sm_count_or_0();                                     // 0: tile bands only
 
     // Bq/Bkv bands (fp16qk path, #597 occupancy surgery), grid = q_tiles x batch*heads:
     //   blocks_128 >= sm_count: Bq=128/Bkv=64, 1 CTA/SM, 8 warps latency-hiding, deepest cp.async.

@@ -1,4 +1,5 @@
 #include "compute/gemm_moe_fused_tc.h"
+#include "core/device_info.h"
 #include "core/logging.h"
 #include "core/cuda_static_reset.h"
 #include "memory/engine_arena.h"
@@ -267,9 +268,12 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights, const void* activ
         int max_blocks_per_sm = 0;  // failure: 1 CTA/SM, the tile counter still covers every tile
         IMP_CUDA_CHECK_LOG(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
             &max_blocks_per_sm, gemm_q6k_fused_moe_prefill_tc_kernel, TC_BLOCK, SMEM_TOTAL));
-        int num_sms = 0;
         // Failure: stay unconfigured (grid 0 would stick), as on the tile-counter failure below.
-        IMP_CUDA_CHECK_VOID(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0));
+        const int num_sms = device_sm_count_or_0();
+        if (num_sms == 0) {
+            IMP_LOG_ERROR("gemm_q6k_fused_moe_prefill_tc: SM count query failed, not launched");
+            return;
+        }
         s_grid_size = num_sms * max(max_blocks_per_sm, 1);
 
         // T2 (engine-persistent): a 4-byte counter allocated once under the `s_configured` guard, the
