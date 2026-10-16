@@ -1,5 +1,6 @@
 #include "model/mxfp8_widen.h"
 
+#include "core/fp_bits.h"
 #include "core/logging.h"
 #include "quant/fp8_row_quant.h"
 
@@ -12,22 +13,8 @@
 
 namespace imp {
 
-namespace {
-
-float e4m3_value(uint8_t b) {
-    const int e = (b >> 3) & 0xF;
-    const int m = b & 0x7;
-    if (e == 0xF && m == 0x7)
-        return NAN;
-    const float mag = e == 0 ? std::ldexp(static_cast<float>(m), -9)
-                             : std::ldexp(1.0f + static_cast<float>(m) / 8.0f, e - 7);
-    return (b & 0x80) ? -mag : mag;
-}
-
-}  // namespace
-
 uint16_t mxfp8_to_bf16(uint8_t e4m3, uint8_t e8m0) {
-    const float v = std::ldexp(e4m3_value(e4m3), static_cast<int>(e8m0) - 127);
+    const float v = std::ldexp(e4m3_to_float(e4m3), static_cast<int>(e8m0) - 127);
     return static_cast<uint16_t>(std::bit_cast<uint32_t>(v) >> 16);
 }
 

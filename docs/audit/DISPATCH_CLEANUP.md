@@ -959,3 +959,35 @@ Option (b) with SASS-identical GEMVs is not available: an `-rdc` object reaches 
 | row | status |
 |---|---|
 | C-012 | documented: `docs/internals/SM120.md` cc 12.1 row, `docs/LIMITATIONS.md` model-specific blockers; affects cc 12.1 only, untested (#1651) |
+
+## 2026-10-16 H-011 dtype conversion, H-015 library handles (owner go)
+
+H-011: `core/fp_bits.h` gains `float_to_half_as<HalfSubnormal>` (half-up = `float_to_half`, nearest-even, truncate) and `e4m3_to_float<E4m3Nan>` (+qNaN, signed NaN). `tools/imp-quantize/quant_report.cpp` stays independent.
+
+| site | was | now |
+|---|---|---|
+| `model/weight_upload_traits.h` `wupload::fp16_to_float` | own ldexp decode, Inf/NaN -> signed 0 | wrapper over `half_to_float`, same Inf/NaN policy |
+| `model/weight_upload_traits.h` `wupload::float_to_fp16` | own encoder, NaN -> signed Inf, subnormals truncated | wrapper over `float_to_half_as<kTruncate>`, same NaN policy |
+| `model/weight_upload_traits.h` `stage_bf16`, `model/weight_upload.cpp` MTP FP8 scales, SSM F32, host experts | 4 inline `<< 16` + memcpy loops | `bf16_to_float` |
+| `model/ngram_table.cpp` `f32_to_f16`, `fp8_e4m3_to_f32`, `bf16_to_f32` | 3 local copies | `ngram_fp8_to_half` = `float_to_half_as<kNearestEven>(e4m3_to_float<kSigned>(q) * scale)`, `bf16_to_float` |
+| `model/mxfp8_widen.cpp` `e4m3_value` | local copy, +qNaN | `e4m3_to_float` |
+| `tools/imp-quantize/fp8_source.cpp` `e4m3_to_float` | own body, +qNaN | forwards to `imp::e4m3_to_float` |
+
+H-015: `compute/cublas_handle.{h,cpp}`: `cublas_handle_create(site, math)`, `cublaslt_handle_create(site)` (ERROR with site + status, then abort), `cublas_handle_destroy()` for the reset hooks. 7 cuBLAS + 1 cuBLASLt handle sites keep their own handle, math mode (TF32 x 6, DEFAULT in `gemm_grouped.cpp`), `cublasSetStream` calls and `IMP_REGISTER_CUDA_STATIC_RESET` hook. `attention_mxfp4_prefill.cu` and the 3 vision sites ran on with a null handle after a failed `cublasCreate`. `tools/check_static_reset.py` counts the helpers as an acquisition (selftest +2 cases).
+
+| gate (image `imp:helpers` vs `imp:helpers-main`, main `7e75eb8c`) | result |
+|---|---|
+| `FpBitsLegacyParity` (test-core), pre-merge bodies vs live code | fp16 decode 65536, bf16 decode 65536, E4M3 decode 256 x 3 callers, MXFP8 65536 pairs, ngram gather 16776708 pairs (508 NaN x NaN skipped: result sign is the compiler's operand order), fp16 encode 735657538 floats: 0 mismatches each |
+| one-off sweep, both encoders, all 4294967296 floats | 0 mismatches |
+| mutants (9) | each red: wupload Inf/NaN sign (1024), wupload NaN -> Inf off (66846), wupload subnormal mode (100663296), nearest-even tie (27636), bf16 low bit (1), ngram NaN sign (65282), ngram rounding (27636), mxfp8 NaN sign (256), imp-quantize NaN sign (1) |
+| SASS hash per kernel, imp-server / imp-cli / imp-quantize | 1023 / 1023 / 1025 kernels, diff 0 / 0 / 0 |
+| build warnings | 13 / 13 |
+| `make test-gpu` (branch) | 3718 ran, 3630 passed, 88 skipped, 0 failed |
+| `scripts/verify_ab.sh`, Qwen3-8B Q8_0, 3 pairs | decode mean +0.05 %, prefill mean +0.18 %: PASS |
+| vision, `imp-cli --image tests/fixtures/vision_test_green_bar.png`, 40 tokens, temperature 0 | gemma-3-4b (SigLIP), Qwen3-VL-4B, InternVL3.5-2B: same answer on both images |
+| `make dev-test` / `make preflight` | 13/13 / 0 failures |
+
+| row | status |
+|---|---|
+| H-011 | fixed |
+| H-015 | fixed (shared create helper); one shared handle with per-call math mode not done: needs an A/B |

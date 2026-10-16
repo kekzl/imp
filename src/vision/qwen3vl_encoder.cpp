@@ -1,4 +1,5 @@
 #include "vision/qwen3vl_encoder.h"
+#include "compute/cublas_handle.h"
 #include "core/cuda_static_reset.h"
 
 #include "core/cublas_check.h"
@@ -25,10 +26,8 @@ constexpr float kVisionRopeTheta = 10000.0f;
 cublasHandle_t s_handle = nullptr;
 
 cublasHandle_t handle() {
-    if (!s_handle) {
-        IMP_CUBLAS_CHECK_LOG(cublasCreate(&s_handle));
-        IMP_CUBLAS_CHECK_LOG(cublasSetMathMode(s_handle, CUBLAS_TF32_TENSOR_OP_MATH));
-    }
+    if (!s_handle)
+        s_handle = cublas_handle_create("imp::qwen3vl_encoder", CUBLAS_TF32_TENSOR_OP_MATH);
     return s_handle;
 }
 
@@ -47,12 +46,7 @@ void gemm_nt(const half* A, const half* B, half* C, int M, int N, int K, float a
 }  // namespace
 
 // Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
-void qwen3vl_encoder_reset_static_cuda_state() {
-    if (s_handle) {
-        (void)cublasDestroy(s_handle);
-        s_handle = nullptr;
-    }
-}
+void qwen3vl_encoder_reset_static_cuda_state() { cublas_handle_destroy(s_handle); }
 
 // Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
 namespace {

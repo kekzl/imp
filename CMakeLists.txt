@@ -291,6 +291,7 @@ set(IMP_QUANT_SOURCES
 
 set(IMP_COMPUTE_SOURCES
     src/compute/dispatch_paths.cpp
+    src/compute/cublas_handle.cpp
     src/compute/gemm.cpp
     src/compute/gemm_capture_fp16_sm120.cu
     src/compute/gemm_f16_narrow_smallm.cu
@@ -1102,6 +1103,8 @@ if(IMP_BUILD_TESTS)
         # not by inspecting a converted checkpoint where a wrong exponent bias/stride looks plausible.
         tools/imp-quantize/fp8_source.cpp
         tests/test_quantize_fp8_source.cpp
+        # H-011: fp_bits.h vs the pre-merge fp16/bf16/E4M3 copies, bit for bit over every 8/16-bit input.
+        tests/test_fp_bits_legacy_parity.cpp
         # The output-format rules. Every one of them is silent when wrong: a
         # reciprocal written the wrong way round, a fused group that does not
         # share a scale, a config.json with two quantization_config keys.

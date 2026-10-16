@@ -1,4 +1,5 @@
 #include "compute/gemm.h"
+#include "compute/cublas_handle.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include <atomic>
 #include "compute/gemm_algo_capture.h"
@@ -54,25 +55,14 @@ static cublasHandle_t s_cublas_handle = nullptr;
 static cublasLtHandle_t s_cublaslt_handle = nullptr;
 
 static cublasHandle_t get_cublas_handle() {
-    if (!s_cublas_handle) {
-        cublasStatus_t st = cublasCreate(&s_cublas_handle);
-        if (st != CUBLAS_STATUS_SUCCESS) {
-            IMP_LOG_ERROR("imp::gemm: cublasCreate failed (status %d)", (int)st);
-            abort();
-        }
-        IMP_CUBLAS_CHECK_LOG(cublasSetMathMode(s_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH));
-    }
+    if (!s_cublas_handle)
+        s_cublas_handle = cublas_handle_create("imp::gemm", CUBLAS_TF32_TENSOR_OP_MATH);
     return s_cublas_handle;
 }
 
 static cublasLtHandle_t get_cublaslt_handle() {
-    if (!s_cublaslt_handle) {
-        cublasStatus_t st = cublasLtCreate(&s_cublaslt_handle);
-        if (st != CUBLAS_STATUS_SUCCESS) {
-            IMP_LOG_ERROR("imp::gemm: cublasLtCreate failed (status %d)", (int)st);
-            abort();
-        }
-    }
+    if (!s_cublaslt_handle)
+        s_cublaslt_handle = cublaslt_handle_create("imp::gemm");
     return s_cublaslt_handle;
 }
 
@@ -856,14 +846,8 @@ void gemm_cleanup() {
 // guards re-arm on the next use after the reset.
 void gemm_reset_static_cuda_state() {
     gemm_cleanup();  // idempotent: clears the cuBLASLt descriptor/algo cache
-    if (s_cublas_handle) {
-        (void)cublasDestroy(s_cublas_handle);
-        s_cublas_handle = nullptr;
-    }
-    if (s_cublaslt_handle) {
-        (void)cublasLtDestroy(s_cublaslt_handle);
-        s_cublaslt_handle = nullptr;
-    }
+    cublas_handle_destroy(s_cublas_handle);
+    cublas_handle_destroy(s_cublaslt_handle);
     // Arena-owned since A7 step 8 — the region belongs to the T2 arena, which
     // ~Engine closes. Only the pointers are re-armed here, so the next
     // gemm_init() takes a fresh slice.

@@ -3,10 +3,12 @@
 // a StagePlan (host bytes + resulting tensor), commit_plan() does the device side for all of them.
 // CUDA-free: the device ops come in through Dev, so tests/test_weight_upload_staging.cpp runs it on CPU.
 
+#include "core/fp_bits.h"
 #include "core/logging.h"
 #include "core/qtype.h"
 #include "core/tensor.h"
 
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -16,79 +18,21 @@
 
 namespace imp::wupload {
 
-// Host-side FP16<->FP32 conversion: CUDA device intrinsics (__half2float, __float2half)
-// aren't available on the host, so these are bitwise conversions.
-
+// fp_bits.h with the staging policy: fp16 Inf/NaN -> signed zero (a non-finite scale never
+// reaches a weight). Bit-equal to the pre-merge body: FpBitsLegacyParity.
 inline float fp16_to_float(uint16_t h) {
-    uint16_t sign = (h >> 15) & 1;
-    uint16_t exp = (h >> 10) & 0x1F;
-    uint16_t man = h & 0x3FF;
-
-    float result;
-    if (exp == 0) {
-        // Subnormal or zero
-        if (man == 0) {
-            result = 0.0f;
-        } else {
-            result = std::ldexp(static_cast<float>(man) / 1024.0f, -14);
-        }
-    } else if (exp == 31) {
-        // Inf or NaN -- clamp to 0 for safety in weight dequant
-        result = 0.0f;
-    } else {
-        result = std::ldexp(1.0f + static_cast<float>(man) / 1024.0f, exp - 15);
-    }
-    return sign ? -result : result;
+    if ((h & 0x7C00u) == 0x7C00u)
+        return (h & 0x8000u) ? -0.0f : 0.0f;
+    return half_to_float(h);
 }
 
+// fp_bits.h with the staging policy: NaN -> signed Inf, fp16 subnormals truncated.
+// Bit-equal to the pre-merge body: FpBitsLegacyParity.
 inline uint16_t float_to_fp16(float val) {
-    uint32_t fbits;
-    std::memcpy(&fbits, &val, 4);
-    uint32_t f_sign = (fbits >> 31) & 1;
-    int f_exp = static_cast<int>((fbits >> 23) & 0xFF) - 127;
-    uint32_t f_man = fbits & 0x7FFFFF;
-
-    // Zero (positive or negative)
-    if ((fbits & 0x7FFFFFFF) == 0) {
-        return static_cast<uint16_t>(f_sign << 15);
-    }
-
-    // Overflow -> Inf
-    if (f_exp > 15) {
-        return static_cast<uint16_t>((f_sign << 15) | 0x7C00);
-    }
-
-    // Underflow -> flush to zero
-    if (f_exp < -24) {
-        return static_cast<uint16_t>(f_sign << 15);
-    }
-
-    // Subnormal in FP16
-    if (f_exp < -14) {
-        // Convert to subnormal
-        int shift = -14 - f_exp;
-        uint32_t subnormal_man = (0x800000 | f_man) >> (shift + 13);
-        return static_cast<uint16_t>((f_sign << 15) | (subnormal_man & 0x3FF));
-    }
-
-    // Normal -- round-to-nearest-even (matching __float2half behavior)
-    uint16_t h_exp = static_cast<uint16_t>(f_exp + 15);
-    uint32_t round_bit = (f_man >> 12) & 1;  // bit 12 (first discarded bit)
-    uint32_t sticky = f_man & 0xFFF;         // bits 11..0 (remaining discarded bits)
-    uint16_t h_man = static_cast<uint16_t>(f_man >> 13);
-    // Round to nearest even: round up if round_bit=1 AND (sticky!=0 OR lsb=1)
-    if (round_bit && (sticky || (h_man & 1))) {
-        h_man++;
-        if (h_man > 0x3FF) {
-            h_man = 0;
-            h_exp++;
-            if (h_exp > 30) {
-                // Overflow to infinity
-                return static_cast<uint16_t>((f_sign << 15) | 0x7C00);
-            }
-        }
-    }
-    return static_cast<uint16_t>((f_sign << 15) | (h_exp << 10) | h_man);
+    const uint32_t b = std::bit_cast<uint32_t>(val);
+    if ((b & 0x7FFFFFFFu) > 0x7F800000u)
+        return static_cast<uint16_t>(((b >> 16) & 0x8000u) | 0x7C00u);
+    return float_to_half_as<HalfSubnormal::kTruncate>(val);
 }
 
 // What one upload does: up to 2 H2D segments, then the tensor it leaves behind.
@@ -152,14 +96,8 @@ inline void stage_bf16(const Tensor& w, float weight_offset, StagePlan& p) {
     int64_t n_elem = w.numel();
     const uint16_t* src = static_cast<const uint16_t*>(w.data);
     p.h16.resize(static_cast<size_t>(n_elem));
-    for (int64_t i = 0; i < n_elem; ++i) {
-        // BF16 → float: zero-fill lower mantissa bits
-        uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
-        float f;
-        std::memcpy(&f, &bits, sizeof(float));
-        f += weight_offset;
-        p.h16[i] = float_to_fp16(f);
-    }
+    for (int64_t i = 0; i < n_elem; ++i)
+        p.h16[i] = float_to_fp16(bf16_to_float(src[i]) + weight_offset);
     p.add(p.h16.data(), static_cast<size_t>(n_elem) * sizeof(uint16_t));
     p.result(QType::F16, w.ndim, w.shape);
 }

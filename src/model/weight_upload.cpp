@@ -15,6 +15,7 @@
 #include "quant/dequant_awq.h"
 #include "core/config/lm_head_mode.h"
 #include "core/cuda_raii.h"
+#include "core/fp_bits.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
@@ -579,10 +580,8 @@ static bool upload_mtp_fp8_experts(MtpHead& head, const UploadCtx& ctx) {
     std::vector<float> gu_s(static_cast<size_t>(ne) * 2 * gu_sc), dn_s(static_cast<size_t>(ne) * gu_sc);
     auto widen = [](const Tensor& s, float* dst, size_t n) {
         const uint16_t* p = static_cast<const uint16_t*>(s.data);
-        for (size_t i = 0; i < n; ++i) {
-            const uint32_t bits = static_cast<uint32_t>(p[i]) << 16;  // BF16 = top half of an FP32
-            std::memcpy(&dst[i], &bits, sizeof(float));
-        }
+        for (size_t i = 0; i < n; ++i)
+            dst[i] = bf16_to_float(p[i]);
     };
     for (int e = 0; e < ne; ++e) {
         const MtpFp8Expert& x = head.experts_fp8[static_cast<size_t>(e)];
@@ -1191,10 +1190,8 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
             std::memcpy(h_fp32.data(), t->data, fp32_bytes);
         } else if (t->qtype == QType::BF16) {
             const uint16_t* src = static_cast<const uint16_t*>(t->data);
-            for (int64_t k = 0; k < n_elem; ++k) {
-                uint32_t bits = static_cast<uint32_t>(src[k]) << 16;
-                std::memcpy(&h_fp32[k], &bits, sizeof(float));
-            }
+            for (int64_t k = 0; k < n_elem; ++k)
+                h_fp32[k] = bf16_to_float(src[k]);
         } else if (t->qtype == QType::F16) {
             const uint16_t* src = static_cast<const uint16_t*>(t->data);
             for (int64_t k = 0; k < n_elem; ++k) {
@@ -1876,12 +1873,8 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                     }
                     uint16_t* pinned = pin.as<uint16_t>();
                     const uint16_t* src = static_cast<const uint16_t*>(w.data);
-                    for (int64_t k = 0; k < n_elem; ++k) {
-                        uint32_t bits = static_cast<uint32_t>(src[k]) << 16;
-                        float f;
-                        std::memcpy(&f, &bits, sizeof(float));
-                        pinned[k] = float_to_fp16(f);
-                    }
+                    for (int64_t k = 0; k < n_elem; ++k)
+                        pinned[k] = float_to_fp16(bf16_to_float(src[k]));
                     w = Tensor(pinned, QType::F16, w.ndim, w.shape, /*on_device=*/false);
                     ctx.host_pinned_allocs.push_back(std::move(pin));
                 }

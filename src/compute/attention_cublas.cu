@@ -1,5 +1,6 @@
 #include "compute/cublas_gemm_algo.h"
 #include "compute/attention_cublas.h"
+#include "compute/cublas_handle.h"
 #include "core/cuda_static_reset.h"
 #include "core/cuda_errors.h"
 #include "core/cublas_check.h"
@@ -41,14 +42,8 @@ void attention_cublas_prefill_reset_count() {
 static cublasHandle_t s_attn_cublas_handle = nullptr;  // file-scope so the reset hook can reach it
 
 static cublasHandle_t get_attn_cublas_handle() {
-    if (!s_attn_cublas_handle) {
-        cublasStatus_t st = cublasCreate(&s_attn_cublas_handle);
-        if (st != CUBLAS_STATUS_SUCCESS) {
-            IMP_LOG_ERROR("imp::attention_cublas: cublasCreate failed (status %d)", (int)st);
-            abort();
-        }
-        IMP_CUBLAS_CHECK_LOG(cublasSetMathMode(s_attn_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH));
-    }
+    if (!s_attn_cublas_handle)
+        s_attn_cublas_handle = cublas_handle_create("imp::attention_cublas", CUBLAS_TF32_TENSOR_OP_MATH);
     return s_attn_cublas_handle;
 }
 
@@ -325,10 +320,7 @@ static void ensure_attn_ptr_arrays(int n_heads) {
 
 // Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
 void attention_cublas_reset_static_cuda_state() {
-    if (s_attn_cublas_handle) {
-        (void)cublasDestroy(s_attn_cublas_handle);
-        s_attn_cublas_handle = nullptr;
-    }
+    cublas_handle_destroy(s_attn_cublas_handle);
     if (s_attn_d_ptrs) {
         (void)cudaFree(static_cast<void*>(s_attn_d_ptrs));
         s_attn_d_ptrs = nullptr;

@@ -1,5 +1,6 @@
 #include "vision/vision_encoder.h"
 #include "memory/engine_arena.h"
+#include "compute/cublas_handle.h"
 #include "compute/warp_reduce.cuh"
 #include "core/cuda_static_reset.h"
 #include "memory/vram_allocator.h"
@@ -22,20 +23,13 @@ namespace imp {
 static cublasHandle_t s_vision_cublas_handle = nullptr;  // file-scope so the reset hook can reach it
 
 static cublasHandle_t get_vision_cublas_handle() {
-    if (!s_vision_cublas_handle) {
-        IMP_CUBLAS_CHECK_LOG(cublasCreate(&s_vision_cublas_handle));
-        IMP_CUBLAS_CHECK_LOG(cublasSetMathMode(s_vision_cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH));
-    }
+    if (!s_vision_cublas_handle)
+        s_vision_cublas_handle = cublas_handle_create("imp::vision_encoder", CUBLAS_TF32_TENSOR_OP_MATH);
     return s_vision_cublas_handle;
 }
 
 // Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
-void vision_encoder_reset_static_cuda_state() {
-    if (s_vision_cublas_handle) {
-        (void)cublasDestroy(s_vision_cublas_handle);
-        s_vision_cublas_handle = nullptr;
-    }
-}
+void vision_encoder_reset_static_cuda_state() { cublas_handle_destroy(s_vision_cublas_handle); }
 
 // Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
 namespace {

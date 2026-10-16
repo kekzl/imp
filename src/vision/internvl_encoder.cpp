@@ -1,5 +1,6 @@
 #include "vision/internvl_encoder.h"
 
+#include "compute/cublas_handle.h"
 #include "core/cuda_static_reset.h"
 #include "core/cublas_check.h"
 #include "core/logging.h"
@@ -21,10 +22,8 @@ constexpr int kAttnChunk = 512;  // query rows per score pass; scores are the on
 cublasHandle_t s_handle = nullptr;
 
 cublasHandle_t handle() {
-    if (!s_handle) {
-        IMP_CUBLAS_CHECK_LOG(cublasCreate(&s_handle));
-        IMP_CUBLAS_CHECK_LOG(cublasSetMathMode(s_handle, CUBLAS_TF32_TENSOR_OP_MATH));
-    }
+    if (!s_handle)
+        s_handle = cublas_handle_create("imp::internvl_encoder", CUBLAS_TF32_TENSOR_OP_MATH);
     return s_handle;
 }
 
@@ -42,12 +41,7 @@ void linear(const half* A, const half* W, half* C, int M, int N, int K, const ha
 
 const half* hp(const Tensor& t) { return static_cast<const half*>(t.data); }
 
-void internvl_encoder_reset_static_cuda_state() {
-    if (s_handle) {
-        (void)cublasDestroy(s_handle);
-        s_handle = nullptr;
-    }
-}
+void internvl_encoder_reset_static_cuda_state() { cublas_handle_destroy(s_handle); }
 IMP_REGISTER_CUDA_STATIC_RESET(internvl_encoder_reset_static_cuda_state);
 
 }  // namespace

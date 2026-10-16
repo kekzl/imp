@@ -1,4 +1,5 @@
 #include "compute/cublas_gemm_algo.h"
+#include "compute/cublas_handle.h"
 #include "compute/gemm_grouped.h"
 #include "core/cuda_static_reset.h"
 #include "core/cuda_errors.h"
@@ -25,24 +26,13 @@ namespace imp {
 static cublasHandle_t s_grouped_cublas_handle = nullptr;  // file-scope so the reset hook can reach it
 
 static cublasHandle_t get_cublas_handle() {
-    if (!s_grouped_cublas_handle) {
-        cublasStatus_t st = cublasCreate(&s_grouped_cublas_handle);
-        if (st != CUBLAS_STATUS_SUCCESS) {
-            IMP_LOG_ERROR("imp::gemm_grouped: cublasCreate failed (status %d)", (int)st);
-            abort();
-        }
-        IMP_CUBLAS_CHECK_LOG(cublasSetMathMode(s_grouped_cublas_handle, CUBLAS_DEFAULT_MATH));
-    }
+    if (!s_grouped_cublas_handle)
+        s_grouped_cublas_handle = cublas_handle_create("imp::gemm_grouped", CUBLAS_DEFAULT_MATH);
     return s_grouped_cublas_handle;
 }
 
 // Pre-cudaDeviceReset hook (see core/cuda_static_reset.h).
-void gemm_grouped_reset_static_cuda_state() {
-    if (s_grouped_cublas_handle) {
-        (void)cublasDestroy(s_grouped_cublas_handle);
-        s_grouped_cublas_handle = nullptr;
-    }
-}
+void gemm_grouped_reset_static_cuda_state() { cublas_handle_destroy(s_grouped_cublas_handle); }
 
 // Registered as a pre-cudaDeviceReset hook (#1207); see core/cuda_static_reset.h.
 namespace {

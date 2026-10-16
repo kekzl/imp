@@ -45,6 +45,9 @@ void ngram_hash(const NGramHashParams& p, const int32_t* ctx, const int32_t* tok
     return ok;
 }
 
+// One gather element: E4M3 byte * table scale -> FP16 bits, subnormal ties to even, 0xFF -> -NaN.
+uint16_t ngram_fp8_to_half(uint8_t q, float scale);
+
 class NGramTable {
 public:
     ~NGramTable();
