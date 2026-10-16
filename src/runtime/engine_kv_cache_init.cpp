@@ -10,6 +10,7 @@
 #include "memory/ssm_state_size.h"
 #include "exec/expert_batch_policy.h"
 #include "runtime/plan_shadow.h"
+#include "runtime/prompt_tail.h"  // base_prefill_chunk
 #include "exec/executor.h"
 #include "memory/kv_cache.h"
 #include "core/logging.h"
@@ -141,9 +142,14 @@ bool Engine::init_kv_cache() {
             const auto& sc = runtime_config_.speculative;
             int spec_depth = std::max({sc.k, sc.suffix_k_max, sc.mtp_k + 1, kJumpRowsCap});
             swa_slack_tokens_ = std::max(2 * kv_bs, spec_depth + kv_bs);
-            // Longest on-device burst span (graph decode loop) plus the
-            // largest prefill chunk the live window must ride through.
-            int chunk_peak = config_.prefill_chunk_size > 0 ? config_.prefill_chunk_size : 2048;
+            // Longest on-device burst span (graph decode loop) plus the largest prefill chunk the
+            // live window must ride through: the chunk the scheduler runs (resolver incl. --set
+            // runtime.prefill_chunk_size, executor cap, block floor), trimmed only on the next step.
+            const int max_rows = executor_ ? executor_->max_tokens() : 0;
+            const int resolved = resolve_prefill_chunk_size_();
+            int chunk_peak = max_rows > 0 ? base_prefill_chunk(resolved, max_rows, kv_bs) : resolved;
+            if (chunk_peak <= 0)
+                chunk_peak = 2048;
             int burst_peak = runtime_config_.runtime.decode_burst > 0
                                  ? runtime_config_.runtime.decode_burst
                                  : 512;

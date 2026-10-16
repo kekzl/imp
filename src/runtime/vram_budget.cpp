@@ -354,6 +354,10 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         budget.swa_max_blocks = swa_blocks_per_seq * batch;
         size_t swa_footprint = static_cast<size_t>(budget.swa_max_blocks) * per_layer_block_bytes *
                                static_cast<size_t>(n_swa_layers);
+        if (swa_footprint >= available)
+            IMP_LOG_ERROR("VRAM budget: SWA group (%.1f MiB = %d seqs x %d live tokens) does not fit %.1f MiB: "
+                          "lower runtime.max_batch_size or runtime.prefill_chunk_size, or kv_cache.swa_sizing=off",
+                          swa_footprint / (1024.0 * 1024.0), batch, swa_live_tokens, available / (1024.0 * 1024.0));
         available = (available > swa_footprint) ? (available - swa_footprint) : 0;
         IMP_LOG_INFO("VRAM budget: SWA group %d blocks × %d layers = %.1f MiB "
                      "(live span %d tokens, %d global layers keep full context)",
