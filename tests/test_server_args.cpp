@@ -126,3 +126,36 @@ TEST(CalibrationOutPath, AnEmptyConfigKeyDoesNotClobberTheFlag) {
     // is the empty string on every run that does not set it.
     EXPECT_EQ(resolve_calibration_out("/from/flag.json", ""), "/from/flag.json");
 }
+
+// H-013: CLI numbers parse whole or not at all; atoi read "abc" as 0 and "12x" as 12.
+TEST(StrictCliNumbers, WholeValueOrRefused) {
+    int i = 7;
+    EXPECT_TRUE(parse_cli_int("-1", i));
+    EXPECT_EQ(i, -1);
+    EXPECT_TRUE(parse_cli_int("2147483647", i));
+    EXPECT_EQ(i, 2147483647);
+    for (const char* bad : {"", "abc", "12x", "4k", "1.5", "2147483648", "-2147483649", " "})
+        EXPECT_FALSE(parse_cli_int(bad, i)) << "'" << bad << "'";
+    double d = 0.0;
+    EXPECT_TRUE(parse_cli_double("0.7", d));
+    EXPECT_DOUBLE_EQ(d, 0.7);
+    EXPECT_TRUE(parse_cli_double("-1e-3", d));
+    for (const char* bad : {"", "abc", "0.7x", "nan", "inf", "1e999", "1,5"})
+        EXPECT_FALSE(parse_cli_double(bad, d)) << "'" << bad << "'";
+}
+
+TEST(StrictCliNumbers, ValidValuesStillParse) {
+    const ServerArgs a = parse({"--prefill-chunk-size", "4096", "--port", "9000", "--think-budget", "0.5"});
+    EXPECT_EQ(a.prefill_chunk_size, 4096);
+    EXPECT_EQ(a.port, 9000);
+    EXPECT_FLOAT_EQ(a.think_budget, 0.5f);
+}
+
+TEST(StrictCliNumbersDeathTest, MalformedValueExitsNamingTheFlag) {
+    EXPECT_EXIT(parse({"--prefill-chunk-size", "abc"}), ::testing::ExitedWithCode(1),
+                "--prefill-chunk-size expects an integer, got 'abc'");
+    EXPECT_EXIT(parse({"--port", "80x"}), ::testing::ExitedWithCode(1), "--port expects an integer");
+    EXPECT_EXIT(parse({"--max-tokens", ""}), ::testing::ExitedWithCode(1), "--max-tokens expects an integer");
+    EXPECT_EXIT(parse({"--think-budget", "high"}), ::testing::ExitedWithCode(1),
+                "--think-budget expects a number");
+}

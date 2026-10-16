@@ -57,6 +57,15 @@ struct CommonArgs {
 // tool-specific chain so a shared flag cannot be shadowed by a divergent local handler.
 bool parse_common_flag(CommonArgs& args, int argc, char** argv, int& i);
 
+// Strict CLI numbers (H-013): the whole value parses and fits the type, floats are finite.
+// atoi/atof read "abc" as 0 and "12x" as 12; --set already refused that (config.cpp parse_int).
+bool parse_cli_int(const char* s, int& out);
+bool parse_cli_double(const char* s, double& out);
+// Parse or print "<flag> expects <kind>, got '<value>'" and exit 1 (the unknown-flag exit code).
+int cli_int(const char* flag, const char* value);
+float cli_float(const char* flag, const char* value);
+double cli_double(const char* flag, const char* value);
+
 // imp_calibration_write() takes the path as an argument; --calibrate <out> passed it straight
 // through and NOTHING ever read [calibration] out_path, despite it being documented and
 // parsed. Resolution order: --calibrate <path> flag, then [calibration] out_path, then empty

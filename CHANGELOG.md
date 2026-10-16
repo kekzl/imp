@@ -12,11 +12,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `/metrics`: `imp_gpu_power_watts` and `imp_gpu_energy_joules_total` from NVML (`dlopen`, absent without libnvidia-ml). A 60-token Qwen3-4B Q8_0 chat reads 18.4 J on the driver counter.
 
 ### Changed
+- Launch-guard gate decides the 23 kernel launches inside `#define` bodies (a check in the body, or at every expansion before its function closes); test-only `ScratchStack` (213 lines) removed.
 - tokenizer.json pre-tokenizers run step by step on PCRE2 10.49 (Split with all behaviors and invert, ByteLevel, Digits, Punctuation, Whitespace) instead of hand-written family scanners; GGUF pre names map to their regex. 32 local tokenizers: 0 of 1210 parity records differ from HF; encode 1.20x slower on average.
 - Short prompts on Q8_0 GGUF prefill on a 32-wide IMMA N tile (M <= 64, under one wave), bit-identical rows. Qwen3-8B Q8_0 pp40 15.18 -> 11.81 ms; server TTFT p50 for ~35-token chats 17 -> 13 ms.
 - Release bar 2 (`bench-competitive`): Qwen3.8-27B Q4_K_M is a hero (6 of 8 contested), the non-hero Qwen3-30B-A3B row is gone; the sweep refuses on host 1-min load > nproc/4 instead of any running container.
 
 ### Fixed
+- imp-cli and imp-server number flags parse strictly (44 `atoi`/`atof` sites): `--prefill-chunk-size abc`, `--port 80x`, `--temperature nan` exit 1 naming the flag instead of running with 0, 80 or NaN.
 - imp-server detects a think model with the engine's predicate (added/control `<think>`), not the top 1 % vocab band: MiniCPM5-2B reasoning leaves `content` (3/3 -> 0/3 replies, stream 2/2 -> 0/2) and `enable_thinking: false` now reaches Nemotron-3-Nano (reasoning 3/3 -> 0/3).
 - tokenizer.json: a leading Split `\p{N}{1,3}` with a `\p{N}+` regex (MiniCPM5) and BPE `ignore_merges` (LFM2, LFM2.5) tokenize as HF. `ppl_corpus_45k` ids now identical: MiniCPM5-2B 13909 -> 13180 tokens, PPL 12.9456 -> 10.4937 (HF 10.4138); LFM2.5-24B-A2B 13378 -> 13346.
 - A malformed layer or expert index in a tensor name ("blk.3x", "layers.x", past INT_MAX) is skipped with a WARN naming the tensor instead of mapping to another layer: GGUF, mmproj, Qwen3-VL vision and NVFP4 scale keys; a LoRA adapter with one is refused. 7 parse sites.
