@@ -352,6 +352,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         int swa_blocks_per_seq = (swa_live_tokens + bs - 1) / bs + 1;
         int batch = config.max_batch_size > 0 ? config.max_batch_size : 1;
         budget.swa_max_blocks = swa_blocks_per_seq * batch;
+        if (config.swa_shared_tokens > 0)
+            budget.swa_max_blocks += (config.swa_shared_tokens + bs - 1) / bs + 1;
         size_t swa_footprint = static_cast<size_t>(budget.swa_max_blocks) * per_layer_block_bytes *
                                static_cast<size_t>(n_swa_layers);
         if (swa_footprint >= available)

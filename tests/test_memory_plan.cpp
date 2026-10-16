@@ -313,6 +313,21 @@ TEST(MemoryPlan, SwaLayersAreChargedTheirWindowNotTheContext) {
         << "SWA sizing has to actually reduce the context-scaled part";
 }
 
+TEST(MemoryPlan, SwaSharedChunkIsChargedOncePerPool) {
+    auto in = dense_input();
+    in.features.n_swa_layers = 24;
+    in.features.swa_live_tokens = 1024;
+    auto base = plan_memory(in);
+    ASSERT_TRUE(base) << base.failure.report();
+
+    in.features.swa_shared_tokens = 1920;
+    auto res = plan_memory(in);
+    ASSERT_TRUE(res) << res.failure.report();
+    const int bs = in.limits.kv_block_size;
+    EXPECT_EQ(res.plan.kv.swa_blocks - base.plan.kv.swa_blocks, (1920 + bs - 1) / bs + 1)
+        << "the shared chunk is one pool-wide term, not one per sequence slot";
+}
+
 TEST(MemoryPlan, SwaSizingIsIgnoredWhenTheLayerCountIsNonsensical) {
     auto in = dense_input();
     in.features.n_swa_layers = 999;  // more SWA layers than the model has

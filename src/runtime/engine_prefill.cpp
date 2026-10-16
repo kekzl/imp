@@ -915,6 +915,12 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             }
         }
     }
+
+    // Free the window blocks this chunk left behind now, not on the sequence's next step: the
+    // SWA group charges the chunk once per pool. Safe on enqueue: SWA sizing is off under green
+    // contexts and ragged prefill, so every reuse is ordered behind this chunk on one stream.
+    if (swa_sizing_active_)
+        kv_manager_->swa_trim(req->id, ctx_len);
 }
 
 }  // namespace imp

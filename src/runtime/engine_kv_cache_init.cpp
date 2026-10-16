@@ -96,6 +96,7 @@ bool Engine::init_kv_cache() {
     swa_sizing_active_ = false;
     swa_window_max_ = 0;
     int n_swa_layers = 0;
+    int swa_chunk_extra_tokens = 0;
     const SwaSizingMode swa_mode = runtime_config_.kv_cache.swa_sizing_mode();
     if (swa_mode != SwaSizingMode::Off) {
         const auto& prof = model_->profile();
@@ -142,9 +143,9 @@ bool Engine::init_kv_cache() {
             const auto& sc = runtime_config_.speculative;
             int spec_depth = std::max({sc.k, sc.suffix_k_max, sc.mtp_k + 1, kJumpRowsCap});
             swa_slack_tokens_ = std::max(2 * kv_bs, spec_depth + kv_bs);
-            // Longest on-device burst span (graph decode loop) plus the largest prefill chunk the
-            // live window must ride through: the chunk the scheduler runs (resolver incl. --set
-            // runtime.prefill_chunk_size, executor cap, block floor), trimmed only on the next step.
+            // Per sequence: the on-device decode burst (graph loop clamp). Once per pool: the
+            // prefill chunk the scheduler runs (resolver incl. --set runtime.prefill_chunk_size,
+            // executor cap, block floor); serial prefill trims each chunk on enqueue.
             const int max_rows = executor_ ? executor_->max_tokens() : 0;
             const int resolved = resolve_prefill_chunk_size_();
             int chunk_peak = max_rows > 0 ? base_prefill_chunk(resolved, max_rows, kv_bs) : resolved;
@@ -153,7 +154,8 @@ bool Engine::init_kv_cache() {
             int burst_peak = runtime_config_.runtime.decode_burst > 0
                                  ? runtime_config_.runtime.decode_burst
                                  : 512;
-            swa_burst_cap_tokens_ = std::max(chunk_peak, burst_peak);
+            swa_burst_cap_tokens_ = burst_peak;
+            swa_chunk_extra_tokens = std::max(0, chunk_peak - burst_peak);
             // Prefix caching cannot reuse freed window blocks. With a SWA
             // snapshot budget the two coexist (window restored at reuse
             // boundary); otherwise honor the forced opt-in by disabling it.
@@ -170,6 +172,7 @@ bool Engine::init_kv_cache() {
     }
     const int swa_live_tokens =
         swa_sizing_active_ ? swa_window_max_ + swa_slack_tokens_ + swa_burst_cap_tokens_ : 0;
+    config_.swa_shared_tokens = swa_sizing_active_ ? swa_chunk_extra_tokens : 0;
 
     // VRAM budget: KV charges the full measured cache demand, phase 3 floors at
     // it (no held-back reserve, AUDIT B62). library_reserve_mb caches the first
@@ -288,6 +291,7 @@ bool Engine::init_kv_cache() {
         probe.n_kv_layers = n_kv_layers;
         probe.n_swa_layers = n_swa_layers;
         probe.swa_live_tokens = swa_live_tokens;
+        probe.swa_shared_tokens = config_.swa_shared_tokens;
         probe.max_batch_size = config_.max_batch_size;
         probe.max_seq_len = config_.max_seq_len;
         probe.kv_block_size = kv_bs;

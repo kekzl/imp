@@ -64,7 +64,8 @@ struct VRAMBudget {
     int kv_blocks_before_fit_clamp = 0;
     // SWA-aware sizing (kv_cache.swa_sizing): capacity of the dedicated
     // sliding-window block group (0 = feature off). Sized batch-shaped:
-    // ceil(swa_live_tokens / block_size) + 1 blocks per sequence slot.
+    // ceil(swa_live_tokens / block_size) + 1 blocks per sequence slot, plus
+    // ceil(config.swa_shared_tokens / block_size) + 1 once.
     int swa_max_blocks = 0;
     bool nvfp4_second_pass = false;  // true → re-run NVFP4 after FP16-Free
     // Guaranteed byte-floors for mandatory native-NVFP4 decode caches (0 for non-prequant
@@ -103,7 +104,8 @@ struct VRAMBudget {
 //
 // swa_live_tokens / n_swa_layers (kv_cache.swa_sizing, both 0 = off): sliding-window
 // layers are charged a fixed per-sequence live span of swa_live_tokens (window + slack
-// + burst/chunk peak) instead of max_seq_len; only global layers scale with context.
+// + decode burst) instead of max_seq_len, plus config.swa_shared_tokens once per pool (the
+// prefill chunk past the burst); only global layers scale with context.
 //
 // KV is charged the full measured native-NVFP4 decode-cache demand; phase 3 is floored
 // at it via mandatory_sf_bytes / mandatory_moe_bytes, a planned guarantee (AUDIT B62).

@@ -991,3 +991,18 @@ H-015: `compute/cublas_handle.{h,cpp}`: `cublas_handle_create(site, math)`, `cub
 |---|---|
 | H-011 | fixed |
 | H-015 | fixed (shared create helper); one shared handle with per-call math mode not done: needs an A/B |
+
+## 2026-10-16 H-030 follow-up: eager SWA trim, prefill chunk charged once per pool
+
+`step_prefill_one` calls `swa_trim(seq, ctx_len)` after every chunk's enqueue. Stream-ordered: SWA sizing is off under green contexts / prefill overlap and ragged prefill, so every reuse of a freed block is enqueued later on the same stream. Per sequence: window + slack + decode burst (`runtime.decode_burst`, 512 when <= 0, also the graph-loop clamp); once per pool: `max(0, chunk - burst)` (`EngineConfig::swa_shared_tokens`, `FeatureSet::swa_shared_tokens`).
+
+Gemma-3-12B Q4_K_M, `kv_cache.swa_sizing=on`, auto max_batch 17, 6408-token prompt, 300-token concurrent requests:
+
+| arm | main SWA group | branch SWA group | global KV main / branch (blocks) | concurrent 17 / 34 ok (main, branch) | greedy md5 (both) |
+|---|---|---|---|---|---|
+| default chunk | 3366 blocks, 16830 MiB, live 3152 | 1447 blocks, 7235 MiB, live 1232 | 1742 ceiling (growable) / 3038 | 17/17 34/34, 17/17 34/34 | 69ac3e6e |
+| `--set runtime.prefill_chunk_size=1024` | 2278, 11390 MiB | 1383, 6915 MiB | 3038 / 3038 | 17/17 34/34, 17/17 34/34 | 69ac3e6e |
+| `--set runtime.prefill_chunk_size=4096` | start refused (27710 MiB) | 1575, 7875 MiB | - / 2991 | -, 17/17 34/34 | 69ac3e6e (branch) |
+| `--set runtime.decode_burst=0` | 3366, 16830 MiB | 1831, 9155 MiB, live 1616 | 1742 ceiling / 3038 | 17/17 34/34, 17/17 34/34 | 69ac3e6e |
+
+`SWA block group exhausted`: 0 in every arm. Decode `imp-cli --bench` tg256, swa_sizing on, alternating pairs main / branch: 96.24 / 96.57, 95.54 / 96.80, 98.18 / 102.82 tok/s (inside the run-to-run band).

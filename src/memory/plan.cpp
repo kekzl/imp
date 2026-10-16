@@ -20,6 +20,15 @@ std::string fmt_lever(const char* key, long long from, long long to) {
     return std::format("{} {} -> {}", key, from, to);
 }
 
+// SWA group: per-slot live span x batch, plus the shared chunk once. 0 = feature off.
+int swa_group_blocks(const FeatureSet& f, int n_kv_layers, int bs, int batch) {
+    if (f.swa_live_tokens <= 0 || f.n_swa_layers <= 0 || f.n_swa_layers > n_kv_layers)
+        return 0;
+    const int per_seq = (f.swa_live_tokens + bs - 1) / bs + 1;
+    const int shared = f.swa_shared_tokens > 0 ? (f.swa_shared_tokens + bs - 1) / bs + 1 : 0;
+    return per_seq * batch + shared;
+}
+
 }  // namespace
 
 size_t MemoryPlan::total() const {
@@ -111,11 +120,9 @@ PlanResult plan_memory(const PlanInput& in) {
     // ── 4. SWA group: batch-shaped, charged before the global pool. ──
     int n_global_layers = in.model.n_kv_layers;
     const size_t per_layer = in.limits.kv_block_bytes_per_layer;
-    if (in.features.swa_live_tokens > 0 && in.features.n_swa_layers > 0 &&
-        in.features.n_swa_layers <= in.model.n_kv_layers) {
+    p.kv.swa_blocks = swa_group_blocks(in.features, in.model.n_kv_layers, bs, batch);
+    if (p.kv.swa_blocks > 0) {
         n_global_layers = in.model.n_kv_layers - in.features.n_swa_layers;
-        const int per_seq = (in.features.swa_live_tokens + bs - 1) / bs + 1;
-        p.kv.swa_blocks = per_seq * batch;
         p.kv.swa_bytes = static_cast<size_t>(p.kv.swa_blocks) * per_layer *
                          static_cast<size_t>(in.features.n_swa_layers);
     }
