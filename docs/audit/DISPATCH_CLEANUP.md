@@ -841,3 +841,46 @@ Image `imp:fix-int-b` = this branch + `fix/device-query-cache`, vs `imp:final-ma
 | `make test-gpu` | 3710 ran (+10: 7 new H-012 tests, 4 `DeviceInfoTest`, 1 deleted), 0 failed |
 | reference dumps vs the Phase 3 baseline (GGUF, NVFP4, vision) | 15/15 identical, run 1 and run 2 |
 | decode tg256 pooled median, paired, n=10 | main 372.29, branch 371.93 tok/s (-0.10 %) |
+
+## 2026-10-16 C-012 drop -rdc (owner decision: option b)
+
+The six TUs that instantiate kernel templates launched from another TU (`nvfp4_gemv_dense.cu`, `nvfp4_gemv_fused.cu`, `mmq_q8_imma_q{4k,51,5k,6k}.cu`) build with `-static-global-template-stub=false` instead of `-rdc=true`; the launchers keep the same flag. An `-rdc` TU dropped out of the `compute_120f` PTX.
+
+| measurement (`imp-server`, main `bad6a308` vs branch) | main | branch |
+|---|---:|---:|
+| `sm_120a` SASS kernels | 1023 | 1023 |
+| `compute_120f` PTX `.entry` | 997 | 1023 |
+| SASS kernels without a PTX entry | 26 (exactly the `-rdc` kernels) | 0 |
+| SASS hash per kernel identical | - | 997 of 1023; the 26 differ |
+| build warnings | 13 | 13 |
+| `make check-ptx-fallback` | - | PASS, 143 PTX images assemble for sm_120 |
+
+| re-codegen of the 26 | REG before -> after | STACK |
+|---|---|---|
+| 14 dense NVFP4 GEMVs (`gemv_nvfp4_kpar/multirow/residual/qkv_fused/gate_up_fused/geglu_residual/swiglu_residual`, plain and `_mr`) | 42..64 -> 38..40 | 0 -> 0 |
+| `mmq_imma_q{4k,51,5k,6k}_raw_kernel<128, *>` | 187/194/248/235 -> 189/187/250/228 | 0 -> 0 |
+| `mmq_imma_q{4k,51,5k,6k}_raw_kernel<32, false>` | 102/95/111/109 -> 80/76/80/76 | q4k, q5k 0 -> 8 |
+
+`tools/kernel_resource_baseline.txt` re-pinned (q5k <128> 248 -> 250; q4k/q5k <32> new at stack 8).
+
+Paired A/B, alternating images, 5 rounds, `imp-cli --bench --bench-reps 3 --max-tokens 256`, median tok/s:
+
+| model, cell | main | branch | delta |
+|---|---:|---:|---:|
+| Qwen3.8-27B-NVFP4 tg (dense NVFP4 GEMVs) | 92.29 | 94.23 | +2.10 % |
+| Qwen3.8-27B-NVFP4 pp512 | 10595.54 | 10689.88 | +0.89 % |
+| Qwen3.6-35B-A3B Q4_K_M pp32 (MoE IMMA) | 2756.16 | 2722.52 | -1.22 % |
+| Qwen3.6-35B-A3B Q4_K_M pp512 | 14893.54 | 15050.54 | +1.05 % |
+| Qwen3.6-35B-A3B Q4_K_M pp2048 | 22076.80 | 21830.08 | -1.12 % |
+| Qwen3.6-35B-A3B Q4_K_M tg (pp512 run) | 255.71 | 257.02 | +0.51 % |
+| Qwen3.8-27B Q4_K_M pp512 | 3768.13 | 3780.08 | +0.32 % |
+| Qwen3.8-27B Q4_K_M tg | 76.83 | 77.56 | +0.95 % |
+
+Run spread per cell 3.2..5.8 %; one outlier (branch, Qwen3.8 NVFP4 pp512 round 2: 7837 tok/s, CUTLASS prefill, not a changed kernel). Every delta is inside the spread.
+
+| gate | result |
+|---|---|
+| `make test-gpu` | 3715 ran, 3627 passed, 88 skipped, 0 failed |
+| `make dev-test` | 13/13 |
+
+C-012: fixed. GB203 itself stays untested (#1651).

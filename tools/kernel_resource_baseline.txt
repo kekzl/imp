@@ -16,9 +16,9 @@ void imp::gdn_scan_chunkwise_kernel<128, 128, 64, __half>	sm_120a	255	80	0
 void imp::gdn_scan_chunkwise_kernel<128, 128, 64, float>	sm_120a	255	80	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 64, true, false, false>	sm_120a	255	64	0
 void ra2::attn_kernel<256, 8, 2, false, __half, 1>	sm_120a	255	8	0
+void imp::mmq_imma_q5k_raw_kernel<128, false>	sm_120a	250	0	0
+void imp::mmq_imma_q5k_raw_kernel<128, true>	sm_120a	250	0	0
 void ra2::attn_kernel<256, 8, 2, true, __half, 1>	sm_120a	250	0	0
-void imp::mmq_imma_q5k_raw_kernel<128, false>	sm_120a	248	0	0
-void imp::mmq_imma_q5k_raw_kernel<128, true>	sm_120a	248	0	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 32, true, false, false>	sm_120a	246	0	0
 void imp::(anonymous namespace)::gemm_fp16_kernel<128, 2>	sm_120a	244	32	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, false, 32, true, false, false>	sm_120a	242	0	0
@@ -35,6 +35,8 @@ void imp::fmha_sm120_kernel<64, 256, false>	sm_120a	128	8	0
 void imp::(anonymous namespace)::smallM_kernel_v1<32, 128, 256, 2>	sm_120a	104	144	0
 void imp::paged_attention_splitk_fp8_tile_kernel<128>	sm_120a	96	32	0
 void imp::paged_attention_splitk_fp8_tile_gqa_kernel<128>	sm_120a	80	32	0
+void imp::mmq_imma_q4k_raw_kernel<32, false>	sm_120a	80	8	0
+void imp::mmq_imma_q5k_raw_kernel<32, false>	sm_120a	80	8	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<512>	sm_120a	79	16	0
 void imp::paged_attention_splitk_pipeline_kernel<512>	sm_120a	79	16	0
 void apa::quant_kv_kernel<256, apa::PagedNvfp4KV>	sm_120a	74	32	0
