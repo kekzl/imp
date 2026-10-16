@@ -9,7 +9,7 @@
 # CPU steps run in Docker (python:3.12-slim, hfref:cpu); the GPU block holds scripts/gpu_lock.sh and
 # refuses a busy card (scripts/require_free_gpu.sh). Exit 0 = every row ok, 1 = a row failed.
 set -uo pipefail
-cd "$(git rev-parse --show-toplevel)"
+cd "$(dirname "$0")/.."  # this checkout's tools/, not the caller's
 
 REPO=""
 NVFP4=0
