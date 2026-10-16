@@ -105,5 +105,49 @@ TEST(GgufSilentDrops, NextnBlocksAreNotDecoderLayers) {
     EXPECT_EQ(gguf_decoder_layers(0, 1), 0u);
 }
 
+// H-012: "blk.3x" is a malformed index, not layer 3. Dropped with a WARN naming the tensor.
+TEST(GgufSilentDrops, MalformedLayerIndexIsSkippedNotMapped) {
+    std::vector<uint16_t> backing(1024, 0);
+    Model model;
+    model.config_.arch = ModelArch::LLAMA;
+    model.config_.n_layers = 4;
+    model.layers_.resize(4);
+    const Tensor t = fake_weight(backing.data(), 8, 8);
+
+    for (const char* name : {"blk.3x.attn_q.weight", "blk.x.attn_q.weight", "blk.+3.attn_q.weight",
+                             "blk.4294967299.attn_q.weight"}) {
+        testing::internal::CaptureStderr();
+        EXPECT_FALSE(assign_tensor(model, name, t, GgufWireType::F16)) << name;
+        const std::string log = testing::internal::GetCapturedStderr();
+        EXPECT_NE(log.find(name), std::string::npos) << "the skip must name the tensor: " << log;
+    }
+    for (const auto& layer : model.layers_)
+        EXPECT_EQ(layer.wq.data, nullptr) << "a malformed index landed in a layer";
+
+    EXPECT_TRUE(assign_tensor(model, "blk.3.attn_q.weight", t, GgufWireType::F16));
+    EXPECT_NE(model.layers_[3].wq.data, nullptr);
+}
+
+TEST(GgufSilentDrops, MalformedExpertIndexIsSkippedNotMapped) {
+    std::vector<uint16_t> backing(1024, 0);
+    Model model;
+    model.config_.arch = ModelArch::LLAMA;
+    model.config_.n_layers = 1;
+    model.config_.n_experts = 4;
+    model.layers_.resize(1);
+    model.layers_[0].expert_w_gate.resize(4);
+    const Tensor t = fake_weight(backing.data(), 8, 8);
+
+    testing::internal::CaptureStderr();
+    EXPECT_FALSE(assign_tensor(model, "blk.0.ffn_gate.3x.weight", t, GgufWireType::F16));
+    const std::string log = testing::internal::GetCapturedStderr();
+    EXPECT_NE(log.find("blk.0.ffn_gate.3x.weight"), std::string::npos) << log;
+    for (const auto& e : model.layers_[0].expert_w_gate)
+        EXPECT_EQ(e.data, nullptr) << "a malformed expert index landed in a slot";
+
+    EXPECT_TRUE(assign_tensor(model, "blk.0.ffn_gate.3.weight", t, GgufWireType::F16));
+    EXPECT_NE(model.layers_[0].expert_w_gate[3].data, nullptr);
+}
+
 }  // namespace
 }  // namespace imp
