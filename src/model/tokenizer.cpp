@@ -467,7 +467,19 @@ std::string pretok_family(const std::string& rx) {
         return "cl100k";
     if (rx.find("[\\p{L}\\p{M}]+") != std::string::npos)
         return "qwen35";
+    if (rx.find("|\\p{N}+|") != std::string::npos)
+        return "digitrun";
     return "qwen2";
+}
+
+// "pre=<family>[+digits3L|+digits3R] ignore_merges=<bool>" for the load log line.
+std::string pretok_summary(const std::string& family, bool left, bool right, bool ignore_merges) {
+    std::string s = "pre=" + (family.empty() ? std::string("gpt2") : family);
+    if (left)
+        s += "+digits3L";
+    else if (right)
+        s += "+digits3R";
+    return s + (ignore_merges ? " ignore_merges=true" : " ignore_merges=false");
 }
 
 }  // namespace
@@ -555,6 +567,7 @@ bool Tokenizer::load(const std::string& path) {
     // Extract merges (BPE only)
     // Supports both string format ("a b") and array format (["a", "b"])
     const JValue* merges = jobj_find(*model, "merges");
+    ignore_merges_ = jnum_true(jobj_find(*model, "ignore_merges"));
     if (merges && merges->type == JType::ARRAY) {
         std::vector<std::string> merge_strs;
         merge_strs.reserve(merges->arr.size());
@@ -700,6 +713,7 @@ bool Tokenizer::load(const std::string& path) {
                     if (inner_type == "Split") {
                         split_steps.push_back(split_step(pt));
                         digit_triples_right_ |= split_regex(pt) == kDigitTriplesRightRegex;
+                        digit_triples_left_ |= split_regex(pt) == kDigitTriplesLeftRegex;
                         const std::string family = pretok_family(split_regex(pt));
                         if (!family.empty())
                             pre_tokenizer_ = family;
@@ -783,9 +797,11 @@ bool Tokenizer::load(const std::string& path) {
     }
 
     build_merge_pairs();  // after added_tokens, which may extend token_to_id_
-    IMP_LOG_INFO("tokenizer.json: type=%s vocab_size=%d bos=%d eos=%d add_prefix=%s", type_.c_str(),
-                 static_cast<int>(vocab_.size()), bos_id_, eos_ids_.empty() ? -1 : eos_ids_[0],
-                 add_space_prefix_ ? "true" : "false");
+    IMP_LOG_INFO(
+        "tokenizer.json: type=%s vocab_size=%d bos=%d eos=%d add_prefix=%s %s", type_.c_str(),
+        static_cast<int>(vocab_.size()), bos_id_, eos_ids_.empty() ? -1 : eos_ids_[0],
+        add_space_prefix_ ? "true" : "false",
+        pretok_summary(pre_tokenizer_, digit_triples_left_, digit_triples_right_, ignore_merges_).c_str());
     return true;
 }
 
@@ -1397,16 +1413,19 @@ std::vector<std::string> Tokenizer::pre_tokenize_family_(const std::string& bpe_
         return o200k_pre_tokenize(bpe_text);
     if (pre_tokenizer_ == "nemotron")
         return nemotron_pre_tokenize(bpe_text);
+    if (pre_tokenizer_ == "digitrun")
+        return digit_run_pre_tokenize(bpe_text);
     if (pre_tokenizer_ == "split-seq" && split_seq_)
         return split_sequence_pre_tokenize(*split_seq_, bpe_text);
     return gpt2_pre_tokenize(bpe_text);
 }
 
 std::vector<std::string> Tokenizer::pre_tokenize_(const std::string& bpe_text) const {
-    if (!digit_triples_right_)
+    if (!digit_triples_right_ && !digit_triples_left_)
         return pre_tokenize_family_(bpe_text);
     std::vector<std::string> chunks;
-    for (const std::string& piece : digit_triples_right_split(bpe_text)) {
+    for (const std::string& piece :
+         digit_triples_right_ ? digit_triples_right_split(bpe_text) : digit_triples_left_split(bpe_text)) {
         auto part = pre_tokenize_family_(piece);
         chunks.insert(chunks.end(), std::make_move_iterator(part.begin()),
                       std::make_move_iterator(part.end()));
@@ -1441,6 +1460,15 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
         all_ids.reserve(bpe_text.size());  // rough estimate
 
         for (const auto& chunk : chunks) {
+            if (ignore_merges_) {
+                std::string word;
+                for (unsigned char byte : chunk)
+                    word += byte_to_gpt2(byte);
+                if (auto wit = token_to_id_.find(word); wit != token_to_id_.end()) {
+                    all_ids.push_back(wit->second);
+                    continue;
+                }
+            }
             if (merge_pairs_ok_ && std::none_of(chunk.begin(), chunk.end(), [&](char c) {
                     return byte_ids_[static_cast<uint8_t>(c)] < 0;
                 })) {
