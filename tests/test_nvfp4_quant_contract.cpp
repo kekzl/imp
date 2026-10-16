@@ -4,6 +4,7 @@
 // Linear missing weight_scale was indistinguishable from an intentional BF16 one.
 
 #include "exec/nvfp4_merged_scale_guard.h"
+#include "exec/nvfp4_scratch_key.h"
 #include "model/model.h"
 #include "model/nvfp4_module_policy.h"
 #include "model/weight_map.h"
@@ -412,4 +413,19 @@ TEST(NvFP4MergedScaleProvenance, SeparateTensorsAreNotChecked) {
     g.m[2].scales = b;
     EXPECT_FALSE(imp::merged_scale_group_ok(g, &err));
     EXPECT_NE(err.find("same scale pointer"), std::string::npos) << err;
+}
+
+// H-012: a malformed index in a scratch key resolves to nothing, never to layer or expert 0.
+TEST(Nvfp4ScratchKey, MalformedIndexResolvesToNothing) {
+    imp::Model model;
+    model.layers_.resize(4);
+    model.layers_[0].expert_w_gate.resize(4);
+    for (const char* key : {"Lx.wq", "L3x.wq", "L4294967296.wq", "L+3.wq", "L0.expert_w_gate.x",
+                            "L0.expert_w_gate.3x", "L0.expert_w_gate.4294967296"})
+        EXPECT_EQ(imp::resolve_nvfp4_scratch_key(model, 4, key), nullptr) << key;
+
+    EXPECT_EQ(imp::resolve_nvfp4_scratch_key(model, 4, "L3.wq"), &model.layers_[3].wq);
+    EXPECT_EQ(imp::resolve_nvfp4_scratch_key(model, 4, "L0.expert_w_gate.3"),
+              &model.layers_[0].expert_w_gate[3]);
+    EXPECT_EQ(imp::resolve_nvfp4_scratch_key(model, 4, "L4.wq"), nullptr);  // out of range
 }
