@@ -19,6 +19,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 - imp-cli and imp-server number flags parse strictly (44 `atoi`/`atof` sites): `--prefill-chunk-size abc`, `--port 80x`, `--temperature nan` exit 1 naming the flag instead of running with 0, 80 or NaN.
+- The `compute_120f` PTX fallback (GB203) carries every kernel: 1023 PTX entries for 1023 `sm_120a` kernels (was 997); the six `-rdc` TUs build with external template stubs instead. Qwen3.8-27B NVFP4 tg +2.10 %, GGUF prefill -1.22..+1.05 %.
 - imp-server detects a think model with the engine's predicate (added/control `<think>`), not the top 1 % vocab band: MiniCPM5-2B reasoning leaves `content` (3/3 -> 0/3 replies, stream 2/2 -> 0/2) and `enable_thinking: false` now reaches Nemotron-3-Nano (reasoning 3/3 -> 0/3).
 - tokenizer.json: a leading Split `\p{N}{1,3}` with a `\p{N}+` regex (MiniCPM5) and BPE `ignore_merges` (LFM2, LFM2.5) tokenize as HF. `ppl_corpus_45k` ids now identical: MiniCPM5-2B 13909 -> 13180 tokens, PPL 12.9456 -> 10.4937 (HF 10.4138); LFM2.5-24B-A2B 13378 -> 13346.
 - A malformed layer or expert index in a tensor name ("blk.3x", "layers.x", past INT_MAX) is skipped with a WARN naming the tensor instead of mapping to another layer: GGUF, mmproj, Qwen3-VL vision and NVFP4 scale keys; a LoRA adapter with one is refused. 7 parse sites.
