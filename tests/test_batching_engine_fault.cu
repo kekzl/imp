@@ -77,24 +77,37 @@ bool pop_until_last(ServerRequest& sr, TokenEvent& ev, int ms) {
     auto first = make_request(ctx, "Write a long story about a dragon who learns to read.", 256);
     be.submit(first);
 
-    // Wait for the first token so the fault lands inside a running generation.
+    // Wait for 4 tokens so the fault lands inside the running decode graph loop, not prefill.
     TokenEvent ev{};
     const auto first_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
-    while (!first->pop_token(ev, 500))
-        if (std::chrono::steady_clock::now() > first_deadline)
-            die(5, "no first token within 120 s");
-    if (ev.is_last)
-        die(6, "the request finished before the fault");
+    for (int got = 0; got < 4;) {
+        if (first->pop_token(ev, 500)) {
+            if (ev.is_last)
+                die(6, "the request finished before the fault");
+            ++got;
+        } else if (std::chrono::steady_clock::now() > first_deadline) {
+            die(5, "no 4 tokens within 120 s");
+        }
+    }
 
     // Poison the context from this thread; the worker meets the sticky error
     // at its next sync or launch.
     write_through_bad_pointer<<<1, 32>>>(reinterpret_cast<int*>(0x10));
+    const cudaError_t launch = cudaGetLastError();
     const cudaError_t sync = cudaDeviceSynchronize();
-    if (!imp::cuda_error_is_unrecoverable(sync))
+    const auto fault_at = std::chrono::steady_clock::now();
+    if (!imp::cuda_error_is_unrecoverable(sync)) {
+        std::fprintf(stderr, "child: launch=%s sync=%s\n", cudaGetErrorName(launch), cudaGetErrorName(sync));
         die(7, "the fault kernel did not poison the context");
+    }
 
-    if (!pop_until_last(*first, ev, 30000))
+    // The engine's async-graph valve is 30 s; a poisoned burst must end long before it.
+    if (!pop_until_last(*first, ev, 20000))
         die(8, "the in-flight request never finished after the fault");
+    std::fprintf(stderr, "child: fault to finish %lld ms\n",
+                 static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::steady_clock::now() - fault_at)
+                                            .count()));
     if (std::strcmp(ev.finish_reason, "internal_error") != 0) {
         std::fprintf(stderr, "child: in-flight request finished with %s\n", ev.finish_reason);
         std::_Exit(9);

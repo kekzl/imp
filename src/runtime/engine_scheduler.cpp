@@ -27,6 +27,7 @@
 #include "memory/kv_cache.h"
 #include "compute/sampling.h"
 #include "compute/layernorm.h"
+#include "core/cuda_errors.h"
 #include "core/cuda_static_reset.h"
 #include "core/logging.h"
 #include "memory/engine_arena.h"
@@ -308,10 +309,18 @@ int Engine::step_async_graph_resume() {
             // sync (which surfaces the error) instead of polling forever.
             // 30 s dwarfs any legitimate inter-token gap (decode ≤ ~100 ms).
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+            int polls = 0;
             while (async_graph_runner_.poll_new_tokens(async_pending_tokens_) == 0) {
                 if (async_graph_runner_.try_finish_burst(dec_stream)) {
                     // Burst retired between polls — drain the tail and stop.
                     async_graph_runner_.poll_new_tokens(async_pending_tokens_);
+                    break;
+                }
+                // A device fault never publishes done: every 50 polls (~10 ms) ask the stream for a
+                // sticky error instead of waiting out the 30 s valve. Idle/NotReady are ignored.
+                if (++polls % 50 == 0 && cuda_error_is_unrecoverable(cudaStreamQuery(dec_stream))) {
+                    IMP_LOG_ERROR("AsyncGraphLoop: CUDA context poisoned during a burst");
+                    async_graph_runner_.finish_burst_blocking(dec_stream);
                     break;
                 }
                 if (std::chrono::steady_clock::now() > deadline) {
