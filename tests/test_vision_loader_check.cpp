@@ -174,5 +174,19 @@ TEST(VisionLoaderCheck, Gemma4vDoesNotRequireLayerNormBiases) {
     EXPECT_EQ(vision_model_missing_slot(m), "");
 }
 
+// H-012: "v.blk.3x" is a malformed index, not layer 3. Dropped with a WARN naming the tensor.
+TEST(VisionLoaderCheck, MalformedLayerIndexIsDroppedNotMapped) {
+    for (const char* name : {"v.blk.3x.attn_q.weight", "v.blk.x.attn_q.weight", "v.blk.+3.attn_q.weight",
+                             "v.blk.4294967299.attn_q.weight"}) {
+        testing::internal::CaptureStderr();
+        EXPECT_EQ(vision_blk_layer_index(name), -1) << name;
+        const std::string log = testing::internal::GetCapturedStderr();
+        EXPECT_NE(log.find(name), std::string::npos) << "the drop must name the tensor: " << log;
+    }
+    EXPECT_EQ(vision_blk_layer_index("v.blk.3.attn_q.weight"), 3);
+    EXPECT_EQ(vision_blk_layer_index("v.blk.3"), -1);  // no field
+    EXPECT_EQ(vision_blk_layer_index("v.patch_embd.weight"), -1);
+}
+
 }  // namespace
 }  // namespace imp

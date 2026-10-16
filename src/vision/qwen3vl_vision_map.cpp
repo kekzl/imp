@@ -19,7 +19,7 @@ int take_index(const std::string& s, size_t& pos) {
         ++pos;
     if (pos == start || pos >= s.size() || s[pos] != '.')
         return -1;
-    const int v = parse_index(s.substr(start, pos - start), IndexParse::kAtoi);
+    const int v = parse_index(s.substr(start, pos - start));  // -1 past INT_MAX
     ++pos;  // skip '.'
     return v;
 }

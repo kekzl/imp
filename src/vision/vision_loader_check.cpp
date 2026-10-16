@@ -1,6 +1,22 @@
 #include "vision/vision_loader_check.h"
 
+#include "core/logging.h"
+#include "model/model_limits.h"
+
 namespace imp {
+
+int vision_blk_layer_index(const std::string& name) {
+    constexpr size_t kPrefix = 6;  // "v.blk."
+    if (name.rfind("v.blk.", 0) != 0)
+        return -1;
+    const size_t dot = name.find('.', kPrefix);
+    if (dot == std::string::npos)
+        return -1;
+    const int idx = parse_index(name.substr(kPrefix, dot - kPrefix));
+    if (idx < 0)
+        IMP_LOG_WARN("Vision: tensor '%s' has a malformed layer index, skipped", name.c_str());
+    return idx;
+}
 
 std::string vision_projector_reject_reason(const std::string& projector) {
     if (projector == "qwen3vl_merger") {

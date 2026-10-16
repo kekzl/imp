@@ -88,6 +88,20 @@ TEST(Qwen3VLVisionMap, MalformedIndexIsUnknownNotZero) {
     }
 }
 
+// H-012: a digit run past INT_MAX is malformed; atoi truncated 4294967296 to block 0.
+TEST(Qwen3VLVisionMap, OverflowingIndexIsUnknownNotTruncated) {
+    for (const char* n :
+         {"blocks.4294967296.norm1.weight", "blocks.4294967299.norm1.weight",
+          "deepstack_merger_list.4294967296.norm.weight", "blocks.99999999999999999999.norm1.weight"}) {
+        const auto r = qwen3vl_map_vision_tensor(n);
+        EXPECT_EQ(r.slot, Slot::Unknown) << n;
+        EXPECT_EQ(r.index, -1) << n;
+    }
+    const auto ok = qwen3vl_map_vision_tensor("blocks.2147483647.norm1.weight");
+    EXPECT_EQ(ok.slot, Slot::Norm1Weight);
+    EXPECT_EQ(ok.index, 2147483647);
+}
+
 TEST(Qwen3VLVisionMap, UnrelatedNamesAreUnknown) {
     for (const char* n : {"", "blocks.0.attn.q_proj.weight", "merger.linear_fc3.weight", "patch_embed.proj",
                           "pos_embed", "language_model.layers.0.mlp.up_proj.weight"}) {
