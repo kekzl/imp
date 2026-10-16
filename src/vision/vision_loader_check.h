@@ -27,4 +27,8 @@ std::string vision_projector_reject_reason(const std::string& projector);
 // guarded by `if(.data)`; gemma4v has none of these) are deliberately absent from the walk.
 std::string vision_model_missing_slot(const VisionModel& model);
 
+// "v.blk.{i}.{field}" -> i; -1 for any other name or a malformed i ("3x", "x", overflow).
+// A malformed i is dropped with a WARN naming the tensor, never read as a layer.
+int vision_blk_layer_index(const std::string& name);
+
 }  // namespace imp

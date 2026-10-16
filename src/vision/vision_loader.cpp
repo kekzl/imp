@@ -462,13 +462,10 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
         }
         // Layer weights: "v.blk.{i}.{field}"
         else if (name.substr(0, 6) == "v.blk.") {
-            // Parse layer index
-            size_t dot2 = name.find('.', 6);
-            if (dot2 == std::string::npos)
-                continue;
-            const int layer_idx = parse_index(name.substr(6, dot2 - 6), IndexParse::kStoi);
+            const int layer_idx = vision_blk_layer_index(name);
             if (layer_idx < 0 || layer_idx >= cfg.num_layers)
                 continue;
+            const size_t dot2 = name.find('.', 6);  // present: layer_idx >= 0
 
             auto& layer = model->layers[layer_idx];
             std::string field = name.substr(dot2 + 1);

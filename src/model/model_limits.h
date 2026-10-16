@@ -7,10 +7,7 @@
 
 #include "model/model_config.h"
 
-#include <cerrno>
 #include <charconv>
-#include <climits>
-#include <cstdlib>
 #include <string>
 
 namespace imp {
@@ -26,27 +23,10 @@ inline constexpr int kMaxFfnDim = 1 << 20;
 inline constexpr int kMaxVocabSize = 1 << 22;
 inline constexpr int kMaxHeads = 4096;
 
-// Malformed-input policy of parse_index. kAtoi = glibc std::atoi (truncated strtol, "x" -> 0),
-// kStoi = std::stoi with a throw -> -1 ("3x" -> 3). Both are legacy: a site moves to kStrict
-// only with its go (DISPATCH_CLEANUP B7, H-012).
-enum class IndexParse { kStrict, kAtoi, kStoi };
-
-// kStrict: a non-negative decimal index from a tensor-name component; -1 for empty, sign,
-// non-digit, or overflow. std::atoi is unfit here: UB on overflow, stops at the first
-// non-digit instead of rejecting it.
-inline int parse_index(const std::string& s, IndexParse policy = IndexParse::kStrict) {
-    if (policy == IndexParse::kAtoi)
-        return static_cast<int>(std::strtol(s.c_str(), nullptr, 10));
-    if (policy == IndexParse::kStoi) {
-        const int saved_errno = errno;
-        errno = 0;
-        char* end = nullptr;
-        const long v = std::strtol(s.c_str(), &end, 10);
-        const bool bad = end == s.c_str() || errno == ERANGE || v < INT_MIN || v > INT_MAX;
-        if (errno == 0)
-            errno = saved_errno;
-        return bad ? -1 : static_cast<int>(v);
-    }
+// A non-negative decimal index from a tensor-name component; -1 for empty, sign, non-digit,
+// or overflow. std::atoi is unfit here: UB on overflow, stops at the first non-digit instead
+// of rejecting it ("3x" -> 3, "x" -> 0).
+inline int parse_index(const std::string& s) {
     if (s.empty())
         return -1;
     int value = 0;

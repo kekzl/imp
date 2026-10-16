@@ -808,3 +808,36 @@ Batches B1..B9 merged (#2733..#2742, #2738 docs only); main `2f959d93`. Before =
 | H-030 | GPU repro of the SWA burst cap with `--set runtime.prefill_chunk_size=4096`, then check-degeneration on an SWA model |
 | out of scope, logged in Phase 1 | MoE atomics nondeterminism, `/v1/messages` streaming, FA2 coverage gaps; legacy causal_softmax + cuBLAS stays (SETTLED S-8) |
 | new in Phase 4 | `DeviceFaultSignalTest.FaultInside...` timing flake (exit 7 / exit 8, 7 isolated failures in the first 120 runs, 0 after); C-020 race test does not discriminate on WSL2 (legacy `cudaMemcpy` waits for non-blocking streams there) |
+
+## 2026-10-16 H-012 strict index parse (builder)
+
+Branch `fix/strict-index-parse` off `origin/main` 2f959d93, owner go for the B7 deferred row. CPU only. `make dev-test` 13/13, test-core 2013/2013.
+
+| site | was | malformed index now |
+|---|---|---|
+| `model/gguf_tensor_assign.cpp` layer | `kStoi` | WARN naming the tensor, unassigned |
+| `model/gguf_tensor_assign.cpp` expert | `kStoi` | WARN on `ffn_gate`/`ffn_up`/`ffn_down`, unassigned |
+| `vision/vision_loader.cpp` via `vision_blk_layer_index` | `kStoi` | WARN naming the tensor, unassigned |
+| `lora/lora_adapter.cpp` `lora_parse_key` | `kAtoi` | load refused, ERROR naming the tensor |
+| `vision/qwen3vl_vision_map.cpp` | `kAtoi` | `Unknown`, the loader WARNs |
+| `exec/pre_dequant_phase0_nvfp4_loader.cpp` `resolve_nvfp4_scratch_key` layer, expert | `kAtoi` | nullptr, "unresolved scratch key" WARN |
+
+`IndexParse::kAtoi` / `kStoi` and `IndexParsingLegacyPoliciesMatchAtoiAndStoi` deleted: no caller left.
+
+| mutation (site back to its old policy) | failing test (failed assertions) |
+|---|---|
+| set 1: GGUF layer, vision, LoRA, Qwen3-VL, NVFP4 layer | `MalformedLayerIndexIsSkippedNotMapped` (5), `VisionLoaderCheck.MalformedLayerIndexIsDroppedNotMapped` (4), `LoraDimsTest.MalformedLayerIndexIsNotMapped` (3), `LoraDimsTest.MalformedLayerIndexRefusesTheLoad` (1), `OverflowingIndexIsUnknownNotTruncated` (6), `Nvfp4ScratchKey` (4, layer keys only) |
+| set 2: GGUF expert, NVFP4 expert | `MalformedExpertIndexIsSkippedNotMapped` (3), `Nvfp4ScratchKey` (3, expert keys only) |
+| set 3, after the CCN split: `strtol` in `name_index_or_warn` and both NVFP4 parses | `MalformedLayerIndexIsSkippedNotMapped` (10), `MalformedExpertIndexIsSkippedNotMapped` (3), `Nvfp4ScratchKey` (7) |
+
+## 2026-10-16 H-012 strict index parse (validator)
+
+Image `imp:fix-int-b` = this branch + `fix/device-query-cache`, vs `imp:final-main` (main `2f959d93`). Verdict: PASS.
+
+| gate | result |
+|---|---|
+| build warnings | 13, diff empty |
+| SASS hash per kernel, 3 binaries | diff 0 / 0 / 0 |
+| `make test-gpu` | 3710 ran (+10: 7 new H-012 tests, 4 `DeviceInfoTest`, 1 deleted), 0 failed |
+| reference dumps vs the Phase 3 baseline (GGUF, NVFP4, vision) | 15/15 identical, run 1 and run 2 |
+| decode tg256 pooled median, paired, n=10 | main 372.29, branch 371.93 tok/s (-0.10 %) |

@@ -13,6 +13,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Short prompts on Q8_0 GGUF prefill on a 32-wide IMMA N tile (M <= 64, under one wave), bit-identical rows. Qwen3-8B Q8_0 pp40 15.18 -> 11.81 ms; server TTFT p50 for ~35-token chats 17 -> 13 ms.
 - Release bar 2 (`bench-competitive`): Qwen3.8-27B Q4_K_M is a hero (6 of 8 contested), the non-hero Qwen3-30B-A3B row is gone; the sweep refuses on host 1-min load > nproc/4 instead of any running container.
 
+### Fixed
+- A malformed layer or expert index in a tensor name ("blk.3x", "layers.x", past INT_MAX) is skipped with a WARN naming the tensor instead of mapping to another layer: GGUF, mmproj, Qwen3-VL vision and NVFP4 scale keys; a LoRA adapter with one is refused. 7 parse sites.
+
 ## [0.53.0] - 2026-10-14
 
 ### Added

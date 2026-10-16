@@ -8,6 +8,7 @@
 #include "exec/pre_dequant_internal.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/nvfp4_merged_scale_guard.h"
+#include "exec/nvfp4_scratch_key.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/logging.h"
 #include "model/model_limits.h"
@@ -124,6 +125,89 @@ static void record_native_fp8_input_scale(const NvFP4PreQuantWeight& sc, const c
 
 static bool phase0_has_work(const ModelConfig& cfg, const Model& model) {
     return cfg.is_nvfp4_prequant || !model.nvfp4_scratch_.empty();
+}
+
+namespace {
+
+// Per-expert slot "expert_w_{kind}.{e}"; a malformed e resolves to nothing.
+Tensor* resolve_expert_slot(TransformerLayer& L, const std::string& slot) {
+    size_t dot2 = slot.find('.');
+    if (dot2 == std::string::npos)
+        return nullptr;
+    std::string kind = slot.substr(0, dot2);
+    int e = parse_index(slot.substr(dot2 + 1));
+    std::vector<Tensor>* vec = nullptr;
+    if (kind == "expert_w_gate")
+        vec = &L.expert_w_gate;
+    else if (kind == "expert_w_up")
+        vec = &L.expert_w_up;
+    else if (kind == "expert_w_down")
+        vec = &L.expert_w_down;
+    if (!vec || e < 0 || e >= static_cast<int>(vec->size()))
+        return nullptr;
+    return &(*vec)[e];
+}
+
+Tensor* resolve_layer_slot(TransformerLayer& L, const std::string& slot) {
+    if (slot == "wq")
+        return &L.wq;
+    if (slot == "wk")
+        return &L.wk;
+    if (slot == "wv")
+        return &L.wv;
+    if (slot == "wo")
+        return &L.wo;
+    // Gemma-4: mlp.{gate,up,down}_proj weights land in w_*_shared
+    // (weight_map.cpp routes them there). Fall back to shared when
+    // primary is null.
+    if (slot == "w_gate")
+        return L.w_gate.data ? &L.w_gate : &L.w_gate_shared;
+    if (slot == "w_up")
+        return L.w_up.data ? &L.w_up : &L.w_up_shared;
+    if (slot == "w_down")
+        return L.w_down.data ? &L.w_down : &L.w_down_shared;
+    if (slot == "w_gate_shared")
+        return &L.w_gate_shared;
+    if (slot == "w_up_shared")
+        return &L.w_up_shared;
+    if (slot == "w_down_shared")
+        return &L.w_down_shared;
+    // Mamba2 SSM (Nemotron-H): in_proj/out_proj are NVFP4-quantized
+    // for layers not feeding into attention; their scales must promote
+    // to the tensor sidecars so the runtime dequant path finds them.
+    if (slot == "ssm_in")
+        return &L.ssm_in;
+    if (slot == "ssm_out")
+        return &L.ssm_out;
+    // GDN (Qwen3.5 linear_attn) NVFP4 projections: gdn_gate runs native
+    // NVFP4 (registered in Phase 0b); gdn_alpha/gdn_beta are FP16_ONLY and
+    // get dequant→FP16 below after promotion.
+    if (slot == "gdn_gate")
+        return &L.gdn_gate;
+    if (slot == "gdn_alpha")
+        return &L.gdn_alpha;
+    if (slot == "gdn_beta")
+        return &L.gdn_beta;
+    return nullptr;
+}
+
+}  // namespace
+
+Tensor* resolve_nvfp4_scratch_key(Model& model, int n_layers, const std::string& key) {
+    // Index parsed out of a key: drop ("x" is not layer 0); the caller WARNs with the key.
+    if (key == "out_proj")
+        return &model.out_proj_;
+    if (key.size() < 3 || key[0] != 'L')
+        return nullptr;
+    size_t dot = key.find('.', 1);
+    if (dot == std::string::npos)
+        return nullptr;
+    int idx = parse_index(key.substr(1, dot - 1));
+    if (idx < 0 || idx >= n_layers)
+        return nullptr;
+    auto& L = model.layers_[idx];
+    std::string slot = key.substr(dot + 1);
+    return slot.rfind("expert_w_", 0) == 0 ? resolve_expert_slot(L, slot) : resolve_layer_slot(L, slot);
 }
 
 void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
@@ -274,88 +358,9 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
         return true;
     };
 
-    // Resolve "L{idx}.{slot}" / "out_proj" / "L{idx}.expert_w_*.{e}"
-    // back to the corresponding main weight tensor. Returns nullptr for
-    // unknown / out-of-range keys.
-    auto resolve = [&](const std::string& key) -> Tensor* {
-        if (key == "out_proj")
-            return &mut_model->out_proj_;
-        if (key.size() < 3 || key[0] != 'L')
-            return nullptr;
-        size_t dot = key.find('.', 1);
-        if (dot == std::string::npos)
-            return nullptr;
-        int idx = parse_index(key.substr(1, dot - 1), IndexParse::kAtoi);
-        if (idx < 0 || idx >= cfg.n_layers)
-            return nullptr;
-        auto& L = mut_model->layers_[idx];
-        std::string slot = key.substr(dot + 1);
-
-        // Per-expert: "expert_w_{kind}.{e}"
-        if (slot.rfind("expert_w_", 0) == 0) {
-            size_t dot2 = slot.find('.');
-            if (dot2 == std::string::npos)
-                return nullptr;
-            std::string kind = slot.substr(0, dot2);
-            int e = parse_index(slot.substr(dot2 + 1), IndexParse::kAtoi);
-            std::vector<Tensor>* vec = nullptr;
-            if (kind == "expert_w_gate")
-                vec = &L.expert_w_gate;
-            else if (kind == "expert_w_up")
-                vec = &L.expert_w_up;
-            else if (kind == "expert_w_down")
-                vec = &L.expert_w_down;
-            if (!vec || e < 0 || e >= static_cast<int>(vec->size()))
-                return nullptr;
-            return &(*vec)[e];
-        }
-
-        // Per-layer dense / shared.
-        if (slot == "wq")
-            return &L.wq;
-        if (slot == "wk")
-            return &L.wk;
-        if (slot == "wv")
-            return &L.wv;
-        if (slot == "wo")
-            return &L.wo;
-        // Gemma-4: mlp.{gate,up,down}_proj weights land in w_*_shared
-        // (weight_map.cpp routes them there). Fall back to shared when
-        // primary is null.
-        if (slot == "w_gate")
-            return L.w_gate.data ? &L.w_gate : &L.w_gate_shared;
-        if (slot == "w_up")
-            return L.w_up.data ? &L.w_up : &L.w_up_shared;
-        if (slot == "w_down")
-            return L.w_down.data ? &L.w_down : &L.w_down_shared;
-        if (slot == "w_gate_shared")
-            return &L.w_gate_shared;
-        if (slot == "w_up_shared")
-            return &L.w_up_shared;
-        if (slot == "w_down_shared")
-            return &L.w_down_shared;
-        // Mamba2 SSM (Nemotron-H): in_proj/out_proj are NVFP4-quantized
-        // for layers not feeding into attention; their scales must promote
-        // to the tensor sidecars so the runtime dequant path finds them.
-        if (slot == "ssm_in")
-            return &L.ssm_in;
-        if (slot == "ssm_out")
-            return &L.ssm_out;
-        // GDN (Qwen3.5 linear_attn) NVFP4 projections: gdn_gate runs native
-        // NVFP4 (registered in Phase 0b); gdn_alpha/gdn_beta are FP16_ONLY and
-        // get dequant→FP16 below after promotion.
-        if (slot == "gdn_gate")
-            return &L.gdn_gate;
-        if (slot == "gdn_alpha")
-            return &L.gdn_alpha;
-        if (slot == "gdn_beta")
-            return &L.gdn_beta;
-        return nullptr;
-    };
-
     int prequant_count = 0;
     for (auto& [key, sc] : mut_model->nvfp4_scratch_) {
-        Tensor* w = resolve(key);
+        Tensor* w = resolve_nvfp4_scratch_key(*mut_model, cfg.n_layers, key);
         if (!w) {
             IMP_LOG_WARN("NVFP4 prequant: unresolved scratch key '%s'", key.c_str());
             continue;

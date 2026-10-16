@@ -31,6 +31,20 @@ static std::vector<std::string> split(const std::string& s, char delim) {
     return parts;
 }
 
+// Index parsed out of a name: drop ("3x" is not layer 3, src/model/CLAUDE.md); -1 when
+// malformed, with a WARN naming the tensor if `warn`.
+static int name_index_or_warn(const std::string& part, const std::string& name, const char* what, bool warn) {
+    const int idx = parse_index(part);
+    if (idx < 0 && warn)
+        IMP_LOG_WARN("GGUF: tensor '%s' has a malformed %s index, skipped", name.c_str(), what);
+    return idx;
+}
+
+// "blk.{i}.{field}.{e}.weight" carries an expert index only for these; nextn.* does not.
+static bool is_per_expert_field(const std::string& f) {
+    return f == "ffn_gate" || f == "ffn_up" || f == "ffn_down";
+}
+
 // ---- Assign a single tensor to the model by GGUF name ----
 
 bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, GgufWireType gtype) {
@@ -75,7 +89,7 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
     if (parts.size() < 3)
         return false;
 
-    const int layer_idx = parse_index(parts[1], IndexParse::kStoi);
+    const int layer_idx = name_index_or_warn(parts[1], name, "layer", true);
     if (layer_idx < 0 || layer_idx >= model.n_layers())
         return false;
     auto& layer = model.layers_[layer_idx];
@@ -324,7 +338,7 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
         }
 
         // MoE expert weights: "blk.{i}.ffn_*.{expert_idx}.weight"
-        const int expert_idx = parse_index(parts[3], IndexParse::kStoi);
+        const int expert_idx = name_index_or_warn(parts[3], name, "expert", is_per_expert_field(field));
         int n_experts = model.config().n_experts;
         if (expert_idx < 0 || expert_idx >= n_experts)
             return false;
