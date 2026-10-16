@@ -509,7 +509,7 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
         ok &= alloc(&ws.d_expert_outputs, sizeof(__half) * top_k * hidden_dim);
 
         // Routing pool (max 1 token for M=1 decode).
-        ws.routing_buf.allocate(/*max_tokens=*/1, /*max_experts=*/n_experts, /*top_k=*/top_k);
+        ok &= ws.routing_buf.allocate(/*max_tokens=*/1, /*max_experts=*/n_experts, /*top_k=*/top_k);
 
         // Pinned host buffers for D2H of routing decision.
         if (ok) {
