@@ -384,6 +384,14 @@ def features(page, out, bodies, step, answer_and_settle):
     answer_and_settle("nothink no bans", settle=100)
     checks["bansOffNotSent"] = dig(lb(), "banned_strings") is None
     open_tab(page, "set")
+    page.fill("#cfg", "3")
+    open_tab(page, "run")
+    answer_and_settle("nothink guided", settle=100)
+    checks["cfgSent"] = dig(lb(), "cfg_scale") == 3
+    open_tab(page, "set")
+    page.fill("#cfg", "")
+    open_tab(page, "run")
+    open_tab(page, "set")
     page.uncheck("#logprobs")
     open_tab(page, "run")
 

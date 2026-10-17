@@ -1,6 +1,8 @@
 // Engine sampling helpers + stop-token detection: fill_sampling_params
 // (per-request config -> InferenceState), upload_penalties, fill_recurrent_state
-// (SSM/GDN), is_stop_token, track_think_state (<think> budget), should_stop (aggregate EOS/max_tokens/stop_strings).
+// (SSM/GDN), is_stop_token, track_think_state (<think> budget), should_stop (aggregate
+// EOS/max_tokens/stop_strings). decode_append_row_: one decode row's token (append, phrase check, think
+// state, FSM, finish).
 
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
@@ -688,6 +690,39 @@ bool Engine::decode_kv_exhausted_(std::shared_ptr<Request>& req, int blocks_need
     cancel_sequence_(req);
     req->status = RequestStatus::CANCELLED;
     return false;
+}
+
+// One decode row's sampled token: append, think state, FSM, finish.
+void Engine::decode_append_row_(std::shared_ptr<Request>& req, int32_t next_token, Tokenizer* tok,
+                                cudaStream_t stream) {
+    req->output_tokens.push_back(next_token);
+    if (phrase_after_append_(*req, stream))
+        return;  // banned phrase completed: rewound to its first token, the next step resamples there
+    track_think_state(*req, next_token);
+
+    IMP_LOG_DEBUG("Decode step %d (ctx=%d, pos=%d): id=%d [%s]", (int)req->output_tokens.size(),
+                  req->context_len(), req->context_len() - 1, next_token,
+                  tok->decode_token(next_token).c_str());
+
+    // Advance the FSM before finish_request: finishing returns the
+    // request's ConstraintManager to the engine pool.
+    if (req->constraints)
+        req->constraints->update(next_token);
+
+    if (should_stop(*req, next_token) || static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
+        if (bd_pipe_.in_flight) {
+            // A chained step is in flight and still WRITES this row's
+            // next KV slot: mark FINISHED (stream delivery proceeds)
+            // but defer the KV/slot release to the pipeline drain.
+            req->status = RequestStatus::FINISHED;
+            req->release_pending = true;
+            bd_pipe_.deferred_release.push_back(req);
+        } else {
+            finish_request(req);
+        }
+    }
+
+    kv_manager_->touch(req->id);
 }
 
 }  // namespace imp

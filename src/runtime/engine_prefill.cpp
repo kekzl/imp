@@ -847,6 +847,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             logit_lens_arm_prefill_(*req, state.n_tokens);
             executor_->forward_logits(state, prefill_logits_out, pf_stream);
             phrase_save_logits_(*req, prefill_logits_out, pf_stream);  // before sampling shapes them
+            cfg_prefill_logits_(*req, prefill_logits_out,
+                                pf_stream);  // guidance: save (shadow) or combine (owner)
             auto sampled = executor_->sample_from_logits(prefill_logits_out, state, pf_stream);
             next_token = sampled[0];
 
@@ -894,6 +896,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
 
         next_token = phrase_first_token_(*req, next_token, pf_stream);  // banned phrase in token 0: resampled
         req->output_tokens.push_back(next_token);
+        cfg_first_token_(*req);  // a guidance owner hands its first token to its shadow
         track_think_state(*req, next_token);
 
         Tokenizer* tok = model_->tokenizer();

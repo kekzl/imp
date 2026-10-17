@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- Classifier-free guidance: `cfg_scale` on chat decodes a shadow without the system message (or with `cfg_negative_prompt`) in the same step and samples l_b + s (l_a - l_b). Qwen3-4B Q8_0, "exactly three words": unguided "Sushi is my favorite.", cfg 1.5 "Sushi, fresh, delicious".
 - `banned_strings` on chat: a completed phrase rewinds output and KV to its first token, bans that token there and resamples; the stream holds back what may still be retracted. Qwen3-4B Q8_0, temp 0, "Eiffel Tower" banned: same text up to "iconic", then "Notre-Dame Cathedral". Dense models only.
 - Logit lens: `"logit_lens": N` on chat adds rank, logprob, top-N and entropy of every layer to each logprobs entry; Web UI "layer readout" grid. Last layer = sampler within 6.1e-6 on Qwen3-4B, Qwen3.8-27B NVFP4, gemma-3-12b; decode runs eager while on (Qwen3-4B: 20 tokens 65 -> 195 ms).
 - Web UI token loom: in the token view, click a token and pick a `top_logprobs` alternative; a new chat continues that prefix via `continue_final_message` on the prefix cache, the source chat stays. `drive.py features` on the dev mock: 4 new branch checks, 35 checks, 0 false.

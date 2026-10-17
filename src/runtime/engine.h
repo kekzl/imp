@@ -210,6 +210,8 @@ public:
     [[nodiscard]] bool logit_lens_supported() const;
     // Banned phrases (row 118): dense attention only (no recurrent state, no residual KV ring).
     [[nodiscard]] bool phrase_ban_supported() const;
+    // Classifier-free guidance (row 117): a pair decodes as two rows of one step.
+    [[nodiscard]] bool cfg_supported() const;
 
     // Reset batch pool upload cache (call on context_reset to prevent
     // stale block table pointers when KV blocks are reused)
@@ -544,6 +546,19 @@ private:
     VramOwned<float> phrase_scratch_;  // [vocab] token-0 logits for a resample
     void decode_append_row_(std::shared_ptr<Request>& req, int32_t next_token, Tokenizer* tok,
                             cudaStream_t stream);
+    // Classifier-free guidance (row 117, runtime/cfg_guidance.h): owner held until its shadow prefilled,
+    // pair rows filtered together, owner row combined before sampling, shadow takes the owner token.
+    void cfg_admit_(std::shared_ptr<Request> req);
+    void cfg_tick_();
+    void cfg_pair_rows_(std::vector<std::shared_ptr<Request>>& rows);
+    void cfg_combine_rows_(const std::vector<std::shared_ptr<Request>>& rows, const Tensor& logits,
+                           cudaStream_t stream) const;
+    void cfg_mirror_tokens_(const std::vector<std::shared_ptr<Request>>& rows,
+                            std::vector<int32_t>& tokens) const;
+    void cfg_prefill_logits_(Request& req, const Tensor& logits, cudaStream_t stream);
+    void cfg_first_token_(Request& req);
+    std::vector<std::shared_ptr<Request>> cfg_held_, cfg_shadows_;
+    VramOwned<float> cfg_scratch_;  // [vocab] the shadow's first-token logits
     size_t prefix_salt_(const Request& req) const;
     int last_decode_max_blocks_per_graph_[kMaxGraphPoolSize] = {};
     // pow2-bucketed context HIGH-WATER MARK at the last (re)capture: the
