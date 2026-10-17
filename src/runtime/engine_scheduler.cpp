@@ -1916,6 +1916,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
     }
 
     logit_lens_collect_(valid_decode, tokens, dec_stream);  // after the logits_ reads above; disarms the lens
+    sae_collect_(valid_decode, dec_stream);                 // SAE features (row 116); disarms the SAE
 
     // Distribute sampled tokens back to requests
     for (int i = 0; i < static_cast<int>(valid_decode.size()); i++)

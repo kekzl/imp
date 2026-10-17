@@ -231,6 +231,11 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
         if (ctx.params.logit_lens > 0)
             ctx.params.req_logprobs = true;
     }
+    const char* sae_field = "sae_features";
+    if (const std::string err = parse_sae_fields(body, ctx.params, &sae_field); !err.empty()) {
+        send_json_error(res, 400, "invalid_request_error", err, sae_field);
+        return false;
+    }
     if (const std::string err = parse_cfg_fields(body, ctx.params); !err.empty()) {
         send_json_error(res, 400, "invalid_request_error", err, "cfg_scale");
         return false;

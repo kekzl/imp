@@ -94,6 +94,11 @@ ImpError imp_lora_unload(ImpContext ctx, int32_t adapter_id);
  * the server (one vector + scale engine-wide, switched between requests). */
 ImpError imp_control_vector_load(ImpContext ctx, const char* path, int32_t* out_id);
 
+/* --- Sparse autoencoder (Gemma Scope 2 layout: dir/config.json + dir/params.safetensors) ---
+ * imp_sae_load: one JumpReLU SAE per context on the residual after its layer; out_width = its
+ * feature count. A layer, d_model or dtype mismatch answers IMP_ERROR_INVALID_MODEL. */
+ImpError imp_sae_load(ImpContext ctx, const char* dir, int32_t* out_width);
+
 // --- Context / Runtime ---
 
 ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext* out_ctx);

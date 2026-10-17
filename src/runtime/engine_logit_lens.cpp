@@ -27,7 +27,8 @@ bool Engine::decode_eager_only_(const std::vector<std::shared_ptr<Request>>& row
     const bool lens = !idx.empty();
     if (lens)
         executor_->set_lens_rows(std::move(idx));
-    return lens || runtime_config_.diagnostics.profile;
+    const bool sae = sae_arm_decode_(rows);  // SAE features and clamps (row 116) ride the same eager step
+    return lens || sae || runtime_config_.diagnostics.profile;
 }
 
 void Engine::logit_lens_arm_prefill_(const Request& req, int n_tokens) {

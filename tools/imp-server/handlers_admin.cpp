@@ -87,6 +87,7 @@ int suspend_locked(ServerState& state, json& body) {
         entry.engine_id = 0;
     for (auto& [name, entry] : state.control_vectors)
         entry.engine_id = 0;
+    state.sae_width.store(0, std::memory_order_relaxed);  // sae_path stays for resume
     state.publish_model_status(false, model_name);
 
     const bool device_reset = state.runtime_config.suspend.device_reset;
@@ -162,6 +163,14 @@ int resume_locked(ServerState& state, json& body) {
         }
         it->second.engine_id = engine_id;
         ++it;
+    }
+    if (!state.sae_path.empty()) {
+        int32_t width = 0;
+        if (imp_sae_load(state.ctx, state.sae_path.c_str(), &width) != IMP_SUCCESS) {
+            fprintf(stderr, "[resume] warning: failed to re-load SAE %s, dropped\n", state.sae_path.c_str());
+            state.sae_path.clear();
+        }
+        state.sae_width.store(width, std::memory_order_relaxed);
     }
 
     const int warm_hits = imp_weights_snapshot_hits(state.weight_snapshot);

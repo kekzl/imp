@@ -181,6 +181,18 @@ static int run_server(int argc, char** argv) {
         printf("Control vector loaded: %s (id=%d) from %s\n", name.c_str(), id, path.c_str());
     }
 
+    // --sae DIR (row 116): one SAE for the loaded model.
+    if (!args.sae_dir.empty()) {
+        int32_t width = 0;
+        if (!state.model_loaded() || imp_sae_load(state.ctx, args.sae_dir.c_str(), &width) != IMP_SUCCESS) {
+            fprintf(stderr, "Error: --sae %s needs --model and an SAE shaped for it\n", args.sae_dir.c_str());
+            return 1;
+        }
+        state.sae_path = args.sae_dir;
+        state.sae_width.store(width, std::memory_order_relaxed);
+        printf("SAE loaded: %s (%d features)\n", args.sae_dir.c_str(), width);
+    }
+
     // (svr was created + bound to the port above, before the model load.)
 
     // Limit request body size to 100 MiB (prevents DoS via large base64 images)

@@ -240,6 +240,9 @@ struct ServerState {
         std::string path;
     };
     std::map<std::string, ControlVectorEntry> control_vectors;
+    // SAE (--sae DIR, row 116): re-loaded on resume, dropped on a model swap; width 0 = none loaded.
+    std::string sae_path;
+    std::atomic<int> sae_width{0};
     imp::Tokenizer* tok = nullptr;
     imp::ChatTemplate chat_tpl;
     bool have_template = false;

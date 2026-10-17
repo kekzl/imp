@@ -182,6 +182,7 @@ Both GGUF and SafeTensors accepted; `--model` is optional (model-less start, fir
 | `--models-dir <path>` | - | directory to scan for `.gguf` models (auto-load on select) |
 | `--lora NAME=PATH` | - | load a PEFT LoRA adapter, repeatable - see LoRA below |
 | `--control-vector NAME=PATH` | - | load a llama.cpp control vector GGUF, repeatable - see [`API_CONTROL.md`](API_CONTROL.md#steering-with-a-control-vector) |
+| `--sae DIR` | - | load a Gemma Scope 2 SAE dir for the model, see [`API_CONTROL.md`](API_CONTROL.md#reading-and-clamping-sae-features) |
 | `--api-key <key>` | - | require `Authorization: Bearer <key>` |
 | `--cors-origins <list>` | - (no CORS headers) | comma list of browser origins answered with `Access-Control-Allow-Origin` on an exact match (+ `Vary: Origin`); `*` = any origin. See [`DEPLOYMENT.md`](DEPLOYMENT.md#auth-and-exposure) |
 | `--max-concurrent <n>` | `64` (`0`=unlimited) | max simultaneous requests |

@@ -407,7 +407,8 @@ json completions_logprobs_json_one(const imp::TokenLogprobInfo& lp, size_t text_
 }
 
 json chat_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit,
-                        const std::vector<std::vector<imp::LogitLensLayer>>* lens) {
+                        const std::vector<std::vector<imp::LogitLensLayer>>* lens,
+                        const std::vector<imp::SaeTokenInfo>* sae) {
     json content = json::array();
     for (size_t i = 0; i < lps.size() && i < limit; i++) {
         const auto& lp = lps[i];
@@ -423,6 +424,8 @@ json chat_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t li
                            {"top_logprobs", top_arr}});
         if (lens && i < lens->size())
             content.back()["logit_lens"] = logit_lens_json((*lens)[i]);
+        if (sae && i < sae->size())
+            content.back()["sae"] = sae_json((*sae)[i]);
     }
     return json{{"content", content}};
 }

@@ -8,6 +8,7 @@
 #include "model/chat_template.h"
 #include "runtime/tool_call_gate.h"
 #include "runtime/spec_request.h"
+#include "exec/sae_token.h"
 
 namespace imp {
 
@@ -254,6 +255,11 @@ struct Request {
     // Logit lens (row 115): top-N per layer, 0 = off. Needs logprobs (same eager decode path).
     int logit_lens = 0;
     std::vector<std::vector<LogitLensLayer>> output_lens;  // parallel to output_tokens, [token][layer]
+    // SAE (row 116): top-N features per output token, 0 = off; clamps (feature, value) apply at every
+    // position, prompt included. Either needs logprobs (same eager path as the lens).
+    int sae_top = 0;
+    std::vector<std::pair<int32_t, float>> sae_clamp;
+    std::vector<SaeTokenInfo> output_sae;  // parallel to output_tokens while sae_top > 0
 
     // Prompt logprobs (#2207): -1 off, else top-N (0..kMaxPromptLogprobs) per prompt token.
     // Row p scores input_tokens[p+1]; filled per prefill chunk, rows == n_prompt-1 when complete.

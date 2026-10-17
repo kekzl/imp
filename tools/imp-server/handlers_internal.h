@@ -40,6 +40,8 @@ struct ChatRequestParams : SamplingFields {
     int max_tokens = 0, n_completions = 1, top_logprobs = 0;
     bool json_mode = false, req_logprobs = false, include_usage = false;
     int logit_lens = 0;  // top-N per layer (row 115), 0 = off
+    int sae_features = 0;                              // row 116: top-N SAE features per token, 0 = off
+    std::vector<std::pair<int32_t, float>> sae_clamp;  // row 116: (feature, value) at every position
     std::vector<std::string> banned_strings;  // row 118: a completed phrase is rewound and banned
     std::vector<std::shared_ptr<const imp::PhraseRegex>> banned_regex;  // same for a pattern match
     float cfg_scale = 1.0f;                   // row 117: classifier-free guidance weight (> 1 guides)
@@ -131,6 +133,7 @@ struct ChatStateSnapshot {
     bool logit_lens_ok = false;
     bool phrase_ban_ok = false;
     bool cfg_ok = false;
+    int sae_width = 0;
     std::vector<int32_t> cfg_tokens;  // row 117: the shadow prompt, cfg_render_negative
     imp::Tokenizer* tok = nullptr;
     imp::ChatTemplate chat_tpl;
@@ -263,6 +266,7 @@ inline void snapshot_mtp_state_(const State& state, Snap& snap) {
     snap.mtp_head_present = state.mtp_head_present.load(std::memory_order_relaxed);
     snap.logit_lens_ok = state.logit_lens_ok.load(std::memory_order_relaxed);
     snap.phrase_ban_ok = state.phrase_ban_ok.load(std::memory_order_relaxed);
+    snap.sae_width = state.sae_width.load(std::memory_order_relaxed);
     snap.cfg_ok = state.cfg_ok.load(std::memory_order_relaxed);
     snap.mtp_head_loaded = state.mtp_head_loaded.load(std::memory_order_relaxed);
 }
@@ -389,6 +393,10 @@ struct ExtensionError {
 ExtensionError extension_error(const ChatRequestContext& ctx);
 // Classifier-free guidance (row 117): "cfg_scale" in [1, 10], "cfg_negative_prompt"; "" or the 400 message.
 std::string parse_cfg_fields(const nlohmann::json& body, ChatRequestParams& p);
+// SAE (row 116): "sae_features" 0..kSaeMaxTopN, "sae_clamp" {"id": value}; "" or the 400 message for *field.
+std::string parse_sae_fields(const nlohmann::json& body, ChatRequestParams& p, const char** field);
+// Copies the rewind (banned_strings, banned_regex) and SAE fields of p onto req.
+void apply_rewind_and_sae(imp::Request& req, const ChatRequestParams& p);
 // The shadow prompt into ctx.snap.cfg_tokens: the messages with the system message replaced by
 // cfg_negative_prompt (dropped when empty), rendered like the main prompt. No-op without guidance.
 void cfg_render_negative(ChatRequestContext& ctx, bool force_thinking);

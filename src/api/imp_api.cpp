@@ -313,6 +313,18 @@ ImpError imp_control_vector_load(ImpContext ctx, const char* path, int32_t* out_
     });
 }
 
+ImpError imp_sae_load(ImpContext ctx, const char* dir, int32_t* out_width) {
+    return imp::api_guard("imp_sae_load", [&]() -> ImpError {
+        if (!ctx || !ctx->engine || !dir || !out_width)
+            return IMP_ERROR_INVALID_ARG;
+        const int width = ctx->engine->sae_load(dir);
+        if (width <= 0)
+            return IMP_ERROR_INVALID_MODEL;
+        *out_width = width;
+        return IMP_SUCCESS;
+    });
+}
+
 ImpError imp_lora_set(ImpContext ctx, int32_t adapter_id) {
     if (!ctx || !ctx->engine)
         return IMP_ERROR_INVALID_ARG;
