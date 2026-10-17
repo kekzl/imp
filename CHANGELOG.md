@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- Web UI token loom: in the token view, click a token and pick a `top_logprobs` alternative; a new chat continues that prefix via `continue_final_message` on the prefix cache, the source chat stays. `drive.py features` on the dev mock: 4 new branch checks, 35 checks, 0 false.
 - Assistant prefill: `continue_final_message` (vLLM field) on chat and `/v1/responses`, and a trailing assistant turn on `/v1/messages`, continue that text (HF cut rule) instead of opening a new turn. Qwen3.8-27B: "Seventeen times twenty-three equals" -> " three hundred and ninety-one."; an open `<think>` prefix continues as reasoning.
 - Web UI redesign in the logo's colours with an imp mascot: saved conversations, sampling panel, edit/continue, logprobs view, end thinking, structured output, images, `/tokenize` count, `/metrics` tab, GPU joules per answer. `drive.py features` on the dev mock: 16/16 checks pass.
 - Per-request control vectors: `--control-vector NAME=PATH` loads a llama.cpp cvector GGUF, `"control_vector": NAME` or `{name, scale}` adds scale * v_l after each layer it carries. Qwen3-4B Q8_0: scale 0 reproduces the base text, scale 4 steers it.

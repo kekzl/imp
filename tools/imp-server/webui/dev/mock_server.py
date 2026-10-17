@@ -16,7 +16,7 @@ Naming a model with loaded=false swaps it in after --swap-delay seconds;
 --answer-file / --reasoning-file replace the built-in texts (README capture).
 Also mirrors GET /metrics (names from handlers_misc.cpp / metrics_memory.cpp, plus
 imp_gpu_power_watts / imp_gpu_energy_joules_total unless --no-power), /props, /info,
-/health, POST /tokenize, POST /v1/requests/{id}/end_thinking, streamed logprobs,
+/health, POST /tokenize, POST /v1/requests/{id}/end_thinking, streamed logprobs, continue_final_message,
 response_format (answers JSON) and image_url parts (400 vision_unavailable on a
 model whose name contains "Llama").
 
@@ -253,7 +253,15 @@ class H(BaseHTTPRequestHandler):
         model = STATE["loaded"]
 
         msgs = body.get("messages") or []
-        last = (msgs[-1].get("content") if msgs else "") or ""
+        # handlers_chat_params.cpp: continue_final_message needs a final assistant turn with text;
+        # the reply holds only the new text, keywords come from the last user turn.
+        prefill = body.get("continue_final_message") is True
+        if prefill and (not msgs or msgs[-1].get("role") != "assistant" or not msgs[-1].get("content")):
+            self._error(400, "continue_final_message needs a final assistant message with text and no tool_calls",
+                        code="invalid_value")
+            return
+        users = [m for m in msgs if m.get("role") == "user"]
+        last = ((users[-1] if prefill and users else msgs[-1]).get("content") if msgs else "") or ""
         if isinstance(last, list):
             last = " ".join(p.get("text", "") for p in last if isinstance(p, dict))
         low = last.lower()
@@ -276,7 +284,7 @@ class H(BaseHTTPRequestHandler):
             return
 
         rf = (body.get("response_format") or {}).get("type")
-        think = bool(body.get("enable_thinking", False)) and "nothink" not in low and not rf
+        think = bool(body.get("enable_thinking", False)) and "nothink" not in low and not rf and not prefill
         include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
         want_lp = bool(body.get("logprobs"))
         n_top = int(body.get("top_logprobs") or 0)
@@ -286,6 +294,8 @@ class H(BaseHTTPRequestHandler):
         if "thinkonly" in low:
             reasoning = (REASONING * 4)
             content = []
+        elif prefill:
+            content = tokenize(" and from this token on the branch takes its own way. " + ANSWER[:160])
         elif rf in ("json_object", "json_schema"):
             content = tokenize(json.dumps({"answer": "streaming sends one delta per token", "tokens": 42,
                                            "images_seen": int(has_image)}, indent=1))

@@ -320,6 +320,36 @@ def features(page, out, bodies, step, answer_and_settle):
     checks["tokenTip"] = q(
         '() => !document.getElementById("tk-tip").hidden && document.querySelectorAll("#tk-tip tr").length'
     )
+
+    # Loom: click token 6, pick an alternative that is not the sampled token.
+    src = q('() => ({ convs: document.querySelectorAll("#convs li").length,'
+            ' tokens: [...document.querySelectorAll(".turn.is-model:last-of-type .tk")].map((s) => s.textContent) })')
+
+    def s2b():
+        page.click(".turn.is-model:last-of-type .tk >> nth=5")
+        page.wait_for_selector("#tk-tip.pinned .tk-alt:not(.pick)")
+        page.screenshot(path=f"{SHOTS}/{SCENARIO}-02b-menu.png", full_page=False)
+        out["branchTok"] = page.text_content("#tk-tip .tk-alt:not(.pick) .tok")
+        page.click("#tk-tip .tk-alt:not(.pick)")
+        wait_idle(page)
+        sleep(200)
+
+    step("02b-branch", s2b)
+    branch_body = lb()
+    want = "".join(src["tokens"][:5]) + json.loads('"' + out["branchTok"] + '"')
+    checks["branchPrefill"] = (
+        dig(branch_body, "continue_final_message") is True
+        and dig(branch_body, "messages", -1, "role") == "assistant"
+        and dig(branch_body, "messages", -1, "content") == want
+    )
+    checks["branchNewChat"] = q('() => document.querySelectorAll("#convs li").length') == src["convs"] + 1
+    checks["branchLabel"] = q(
+        '() => /branched at token 6/.test(document.querySelector(".turn.is-model:last-of-type .role")?.textContent || "")'
+    )
+    checks["branchContinues"] = q(
+        '(w) => { const b = document.querySelector(".turn.is-model:last-of-type > .body").textContent;'
+        ' return b.length > w.length + 20; }', want
+    )
     open_tab(page, "set")
     page.uncheck("#logprobs")
     open_tab(page, "run")
