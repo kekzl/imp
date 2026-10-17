@@ -1160,6 +1160,7 @@ if(IMP_BUILD_TESTS)
             tests/test_sse_stream_utils.cpp
             tests/test_logprobs_shapes.cpp
             tests/test_phrase_ban.cpp
+            tests/test_token_extras.cpp
             tests/test_prompt_logprobs.cpp
             tests/test_tool_call.cpp
         tests/test_regex_constrain.cpp

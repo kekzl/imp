@@ -25,6 +25,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Release bar 2 (`bench-competitive`): Qwen3.8-27B Q4_K_M is a hero (6 of 8 contested), the non-hero Qwen3-30B-A3B row is gone; the sweep refuses on host 1-min load > nproc/4 instead of any running container.
 
 ### Fixed
+- Streaming `logprobs` (chat, `/v1/completions`) read `Request::output_logprobs` on the handler thread while the worker appended to it; a reallocation left the reader on freed memory. The worker now hands each token's copy over with the token. Qwen3-4B Q8_0: stream == non-stream, 97 and 120 tokens.
 - A greedy first token ignored `logit_bias`: the prefill event-sync sampler applied banned tokens only. Qwen3-4B Q8_0, `{"785": -100}` on "The": v0.53.0 answers "The capital of France is Paris...", now "Paris is the capital of France...".
 - `kv_cache.swa_sizing`: each prefill chunk frees its dead window blocks at enqueue, so the SWA group charges the chunk once per pool, not per sequence. Gemma-3-12B Q4_K_M, 17 slots: 16830 -> 7235 MiB, global KV 1742 -> 3038 blocks, chunk 4096 now starts; 34 concurrent long prompts 34/34.
 - `kv_cache.swa_sizing`: the SWA group is sized for the prefill chunk the scheduler runs, so `--set runtime.prefill_chunk_size` counts like the CLI flag (Gemma-3-12B at 1024: 16830 -> 11390 MiB); a group that cannot fit is refused with an ERROR naming the knobs.

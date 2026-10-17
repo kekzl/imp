@@ -228,10 +228,20 @@ void BatchingEngine::notify_loop_() {
             if (d.finish_only)
                 d.sr->push_finish(d.reason);
             else
-                d.sr->push_token(d.token_id, d.is_last, d.reason);
+                d.sr->push_token(d.token_id, d.is_last, d.reason, d.pos, std::move(d.extras));
         }
         batch.clear();
     }
+}
+
+std::shared_ptr<const TokenExtras> token_extras(const imp::Request& r, size_t i) {
+    if (!r.logprobs || i >= r.output_logprobs.size())
+        return nullptr;
+    auto ex = std::make_shared<TokenExtras>();
+    ex->lp = r.output_logprobs[i];
+    if (i < r.output_lens.size())
+        ex->lens = r.output_lens[i];
+    return ex;
 }
 
 namespace {
@@ -595,10 +605,10 @@ void BatchingEngine::worker_loop() {
                         // Don't include stop/banned tokens in output text
                         staged.push_back({sr, -1, true, reason, /*finish_only=*/true});
                     } else {
-                        staged.push_back({sr, token, true, reason, false});
+                        staged.push_back({sr, token, true, reason, false, i, token_extras(*req, i)});
                     }
                 } else {
-                    staged.push_back({sr, token, false, nullptr, false});
+                    staged.push_back({sr, token, false, nullptr, false, i, token_extras(*req, i)});
                 }
             }
             sr->notified_count = current_count;

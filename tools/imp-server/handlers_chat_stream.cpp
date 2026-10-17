@@ -76,9 +76,12 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
             // Logprobs path: fall back to sse_chunk (rare)
             json content_delta = {{"content", text}};
             json lp_chunk = nullptr;
-            size_t lp_idx = static_cast<size_t>(token_index);
-            if (token_index >= 0 && lp_idx < active_req->output_logprobs.size()) {
-                const auto& lp = active_req->output_logprobs[lp_idx];
+            // The worker's copy of this token's data (TokenExtras): the request's vectors grow
+            // under this thread.
+            const auto ex = token_index >= 0 ? server_req->extras_at(static_cast<size_t>(token_index))
+                                             : nullptr;
+            if (ex) {
+                const auto& lp = ex->lp;
                 json top_arr = json::array();
                 for (const auto& t : lp.top) {
                     top_arr.push_back({{"token", safe_token_json(t.text)},
@@ -90,8 +93,8 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                                               {"logprob", lp.logprob},
                                               {"bytes", token_bytes_json(lp.text)},
                                               {"top_logprobs", top_arr}}})}};
-                if (lp_idx < active_req->output_lens.size())  // logit lens (row 115)
-                    lp_chunk["content"][0]["logit_lens"] = logit_lens_json(active_req->output_lens[lp_idx]);
+                if (!ex->lens.empty())  // logit lens (row 115)
+                    lp_chunk["content"][0]["logit_lens"] = logit_lens_json(ex->lens);
             }
             std::string sse = sse_chunk(comp_id, created, snap_model_name, content_delta,
                                         nullptr, lp_chunk);
