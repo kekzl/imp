@@ -1022,3 +1022,31 @@ SETTLED 2026-08-03 method rerun; on the August tree it reproduces config.h 85, e
 | row | status |
 |---|---|
 | H-022 | fixed (two outliers); the top three stay with SETTLED |
+
+## 2026-10-17 C-017 / C-018: PDL on the verify GEMVs, MaxL1 carveout off the NVFP4 GEMV family
+
+Qwen3.8-27B-NVFP4-vllm, `speculative.mtp_k=3`, `ngram=false`, `IMP_DETERMINISTIC=1`, 3 prompts x 600 tokens, arms alternated, main = 72777c69. Every arm: same 3 md5, 683 verify steps.
+
+| arm (vs main) | main tok/s | arm tok/s | delta |
+|---|---|---|---|
+| all 16 verify instantiations registered, PDL + MaxL1 (4 rounds) | 102.15 | 96.77 | -5.3 % |
+| multirow_mb only, PDL + MaxL1 | 102.33 | 102.04 | -0.3 % |
+| kpar_mb_fp16 only, PDL + MaxL1 | 101.87 | 96.80 | -5.0 % |
+| kpar_mb_fp16 only, PDL | 101.69 | 101.87 | +0.2 % |
+| kpar_mb_fp16 only, MaxL1 | 102.31 | 96.93 | -5.3 % |
+| shipped: PDL on all, no MaxL1 on the NVFP4 GEMV family | 102.24 | 102.30 | +0.06 % |
+
+| shipped state, other regimes | main | branch |
+|---|---|---|
+| `scripts/verify_ab.sh`, same model, tg128, 3 pairs | 95.41 / 95.32 / 95.27 | 95.86 / 95.84 / 95.84 (+0.54 %, 3/3) |
+| `tools/analysis/two_image_conc_ab.sh`, 32 streams, median of 3 trials | 1933.4 | 1961.1 (+1.4 %) |
+| `make verify-fast` | - | OK, tg128 279.21 (-1.33 %), pp512 +16.59 % |
+
+C-017, nsys over one `imp-cli --bench` run (load, 3 x pp4096, decode): `cuKernelSetAttribute` 4149 calls, 4.89 ms total, median 660 ns; the three launch APIs 36391 calls, 1708 ms. Kernels launch from one host thread (loader threads mmap, the tier thread is host-only `.cpp`), so the unsynchronised registry has no concurrent writer.
+
+| row | status |
+|---|---|
+| C-018 | fixed; SETTLED A2-2 anchor corrected |
+| C-017 | measured, no host-cost lever (0.29 % of launch API time); registry stays |
+| open | MaxL1 on dp4a (+8.2 %, SETTLED A1-3), `nvfp4_gdn_input`, MoE NVFP4 decode GEMVs not re-measured |
+| found | `PrefixCacheE2ETest.PrefixCacheMatchesNoCacheBaseline` red on main 72777c69 too: `imp_context_create` returns `IMP_ERROR_INTERNAL` (-7) |

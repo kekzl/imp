@@ -279,14 +279,9 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C, cudaStrea
 void nvfp4_gemv_pdl_register() {
     constexpr int NR = 8;
 
-// GEMV kernels are bandwidth-bound with minimal SMEM usage.
-// Maximize L1 cache to improve weight data locality.
-#define NVFP4_REGISTER(kern)                                                       \
-    do {                                                                           \
-        pdl::enable_kernel(kern);                                                  \
-        cudaFuncSetAttribute(kern, cudaFuncAttributePreferredSharedMemoryCarveout, \
-                             cudaSharedmemCarveoutMaxL1);                          \
-    } while (0)
+// PDL only, no MaxL1 carveout: on kpar_mb_fp16 it cost -5.3 % MTP verify; dropped for the
+// family, Qwen3.8-27B tg128 +0.54 %, 32 streams +1.4 % (C-018). dp4a GEMVs keep theirs (+8 %).
+#define NVFP4_REGISTER(kern) pdl::enable_kernel(kern)
 
     // Dense GEMV kernels
     NVFP4_REGISTER(gemv_nvfp4_kpar_kernel);
