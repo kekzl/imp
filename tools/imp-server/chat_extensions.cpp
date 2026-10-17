@@ -69,10 +69,8 @@ ExtensionError extension_error(const ChatRequestContext& ctx) {
     if (p.banned_strings.empty())
         return {};
     if (!ctx.snap.phrase_ban_ok)
-        return {
-            "\"banned_strings\" needs a model without recurrent state (GDN/SSM) and without the residual KV "
-            "ring: a rewind restores KV only",
-            "banned_strings"};
+        return {"\"banned_strings\" needs a model without the residual KV ring: a rewind cannot restore it",
+                "banned_strings"};
     if (p.json_mode || !p.json_schema_str.empty() || !p.regex_pattern.empty() || !p.grammar.empty() ||
         !p.tool_constraint_tools.empty() || p.mirostat != 0)
         return {
