@@ -176,7 +176,7 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
                            req.presence_penalty != 0.0f;
     if (penalties && req.repeat_last_n != 0) return "bounded_repeat_window";
     // Logit-shaping the verify chunk does not replicate disqualifies.
-    if (req.dry_multiplier != 0.0f || req.mirostat != 0 || !req.logit_bias.empty())
+    if (req.dry_multiplier != 0.0f || req.mirostat != 0 || req.host_logit_shaping())
         return "logit_shaping";
     if (req.logprobs || req.json_mode || !req.json_schema.empty() ||
         !req.regex_pattern.empty() || !req.grammar.empty() || !req.tool_constraint_tools.empty())

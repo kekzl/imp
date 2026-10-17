@@ -261,6 +261,7 @@ struct ServerState {
     std::atomic<bool> mtp_head_present{false};  // checkpoint ships MTP tensors
     std::atomic<bool> mtp_head_loaded{false};   // ... and this process uploaded them
     std::atomic<bool> logit_lens_ok{false};     // engine reads the residual per layer (row 115)
+    std::atomic<bool> phrase_ban_ok{false};     // engine can rewind a decode (row 118)
     std::atomic<int> next_id{0};
     std::atomic<int> next_tool_call_id{0};
     ServerArgs default_args;

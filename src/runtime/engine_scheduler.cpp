@@ -1863,6 +1863,39 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     }
 }
 
+// One decode row's sampled token: append, think state, FSM, finish.
+void Engine::decode_append_row_(std::shared_ptr<Request>& req, int32_t next_token, Tokenizer* tok,
+                                cudaStream_t stream) {
+    req->output_tokens.push_back(next_token);
+    if (phrase_after_append_(*req, stream))
+        return;  // banned phrase completed: rewound to its first token, the next step resamples there
+    track_think_state(*req, next_token);
+
+    IMP_LOG_DEBUG("Decode step %d (ctx=%d, pos=%d): id=%d [%s]", (int)req->output_tokens.size(),
+                  req->context_len(), req->context_len() - 1, next_token,
+                  tok->decode_token(next_token).c_str());
+
+    // Advance the FSM before finish_request: finishing returns the
+    // request's ConstraintManager to the engine pool.
+    if (req->constraints)
+        req->constraints->update(next_token);
+
+    if (should_stop(*req, next_token) || static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
+        if (bd_pipe_.in_flight) {
+            // A chained step is in flight and still WRITES this row's
+            // next KV slot: mark FINISHED (stream delivery proceeds)
+            // but defer the KV/slot release to the pipeline drain.
+            req->status = RequestStatus::FINISHED;
+            req->release_pending = true;
+            bd_pipe_.deferred_release.push_back(req);
+        } else {
+            finish_request(req);
+        }
+    }
+
+    kv_manager_->touch(req->id);
+}
+
 // =====================================================================
 // step_decode_process_outputs — extract logprobs, distribute tokens,
 //                                try async graph loop
@@ -1913,37 +1946,8 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
     logit_lens_collect_(valid_decode, tokens, dec_stream);  // after the logits_ reads above; disarms the lens
 
     // Distribute sampled tokens back to requests
-    for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {
-        auto& req = valid_decode[i];
-        int32_t next_token = req->take_forced(tokens[i]);
-
-        req->output_tokens.push_back(next_token);
-        track_think_state(*req, next_token);
-
-        IMP_LOG_DEBUG("Decode step %d (ctx=%d, pos=%d): id=%d [%s]", (int)req->output_tokens.size(),
-                      req->context_len(), req->context_len() - 1, next_token,
-                      tok->decode_token(next_token).c_str());
-
-        // Advance the FSM before finish_request: finishing returns the
-        // request's ConstraintManager to the engine pool.
-        if (req->constraints)
-            req->constraints->update(next_token);
-
-        if (should_stop(*req, next_token) || static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
-            if (bd_pipe_.in_flight) {
-                // A chained step is in flight and still WRITES this row's
-                // next KV slot: mark FINISHED (stream delivery proceeds)
-                // but defer the KV/slot release to the pipeline drain.
-                req->status = RequestStatus::FINISHED;
-                req->release_pending = true;
-                bd_pipe_.deferred_release.push_back(req);
-            } else {
-                finish_request(req);
-            }
-        }
-
-        kv_manager_->touch(req->id);
-    }
+    for (int i = 0; i < static_cast<int>(valid_decode.size()); i++)
+        decode_append_row_(valid_decode[i], valid_decode[i]->take_forced(tokens[i]), tok, dec_stream);
 
     // Try async graph loop after first decode step.
     // Think budget is now handled device-side in post_decode_step_kernel.
@@ -1959,7 +1963,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         // penalties device-side. Any sampling feature that requires host-side
         // logic (logit_bias, mirostat, typical_p, min_p, DRY) would be silently
         // skipped inside the captured graph — stay on the eager path instead.
-        const bool async_compatible = dreq->logit_bias.empty() && dreq->mirostat == 0 &&
+        const bool async_compatible = !dreq->host_logit_shaping() && dreq->mirostat == 0 &&
                                       dreq->dry_multiplier == 0.0f && dreq->min_p == 0.0f &&
                                       dreq->typical_p >= 1.0f &&
                                       // MTP feed + telemetry hook the per-step path; the async
@@ -2070,7 +2074,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         // (repetition_penalty 1.05, think_budget 0.5) must not block the
         // pipeline. min_p/typical_p/mirostat/DRY/logit_bias stay eager.
         const bool pipeline_compatible =
-            dreq->logit_bias.empty() && dreq->mirostat == 0 && dreq->dry_multiplier == 0.0f &&
+            !dreq->host_logit_shaping() && dreq->mirostat == 0 && dreq->dry_multiplier == 0.0f &&
             dreq->min_p == 0.0f && dreq->typical_p >= 1.0f && !mtp_spec_decode_enabled() &&
             dreq->constraints && dreq->constraints->is_active() &&
             // The pipeline enqueues the next forward before the host sees the token: a

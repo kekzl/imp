@@ -514,7 +514,7 @@ void BatchingEngine::worker_loop() {
                 ++it;
                 continue;
             }
-            size_t current_count = req->output_tokens.size();
+            size_t current_count = req->deliverable_tokens();  // banned phrases hold back a tail
             bool is_done = (req->status == imp::RequestStatus::FINISHED ||
                             req->status == imp::RequestStatus::CANCELLED);
             bool had_new_tokens = (current_count > sr->notified_count);

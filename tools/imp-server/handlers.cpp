@@ -763,6 +763,8 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
                                  std::memory_order_relaxed);
     state.logit_lens_ok.store(state.ctx && state.ctx->engine->logit_lens_supported(),
                               std::memory_order_relaxed);
+    state.phrase_ban_ok.store(state.ctx && state.ctx->engine->phrase_ban_supported(),
+                              std::memory_order_relaxed);
 
     // Strip trailing path separators first: a directory path ending in "/" must still yield a
     // non-empty model id (#756), or the model becomes unaddressable over the HTTP API.

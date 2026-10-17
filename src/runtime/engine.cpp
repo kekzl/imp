@@ -1089,6 +1089,7 @@ void Engine::add_request(std::shared_ptr<Request> req) {
         if (qwen_video_pad_id_ >= 0 && (!req->qwen_patches.empty() || !qwen_pending_patches_.empty()))
             req->qwen_token_types = fold_video_pads(req->input_tokens, qwen_image_pad_id_,
                                                     qwen_video_pad_id_);
+        phrase_ban_init_(*req);  // banned phrases: think seed and own logit_bias, after the seeding above
         req->prefix_salt = prefix_salt_(*req);
         scheduler_->add_request(std::move(req));
     }

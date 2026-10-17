@@ -40,6 +40,7 @@ struct ChatRequestParams : SamplingFields {
     int max_tokens = 0, n_completions = 1, top_logprobs = 0;
     bool json_mode = false, req_logprobs = false, include_usage = false;
     int logit_lens = 0;  // top-N per layer (row 115), 0 = off
+    std::vector<std::string> banned_strings;  // row 118: a completed phrase is rewound and banned
     // cache_prefix_messages: leading chat-message count forming the cacheable prefix (-1 = whole
     // prompt). Set by anthropic_to_openai_body; shifted when a system message is injected in front
     // (tool-prompt fallback).
@@ -125,6 +126,7 @@ struct ChatStateSnapshot {
     bool mtp_head_present = false;
     bool mtp_head_loaded = false;
     bool logit_lens_ok = false;
+    bool phrase_ban_ok = false;
     imp::Tokenizer* tok = nullptr;
     imp::ChatTemplate chat_tpl;
     bool have_template = false;
@@ -255,6 +257,7 @@ inline void snapshot_mtp_state_(const State& state, Snap& snap) {
     snap.mtp_armed_k = state.armed_mtp_k.load(std::memory_order_relaxed);
     snap.mtp_head_present = state.mtp_head_present.load(std::memory_order_relaxed);
     snap.logit_lens_ok = state.logit_lens_ok.load(std::memory_order_relaxed);
+    snap.phrase_ban_ok = state.phrase_ban_ok.load(std::memory_order_relaxed);
     snap.mtp_head_loaded = state.mtp_head_loaded.load(std::memory_order_relaxed);
 }
 
@@ -370,6 +373,15 @@ void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_
 bool parse_chat_request_params(const httplib::Request& req, httplib::Response& res, ServerState& state,
                                ChatRequestContext& ctx);
 bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx);
+
+// imp extensions this load or this request cannot honour (logit_lens, banned_strings): the 400 message
+// and its field, or an empty message. chat_extensions.cpp.
+struct ExtensionError {
+    std::string message;
+    const char* param = nullptr;
+};
+ExtensionError extension_error(const ChatRequestContext& ctx);
+
 // Reply thinking state from the rendered prompt tail; appends <think>\n when it opens
 // (handlers_chat_thinking.cpp).
 void settle_thinking_from_prompt_(ChatRequestContext& ctx);
