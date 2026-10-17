@@ -46,7 +46,7 @@ Rank = (risk reduction + maintainability gain) / effort. Each batch <= ~400 chan
 | rows | why |
 |---|---|
 | C-004..C-007 (kernel variant merges) | acceptable only with byte-identical `cuobjdump -sass` per instance |
-| C-012 | owner decision: `IMP_DISABLE_120F_FALLBACK=ON` + SM120.md correction, or drop `-rdc` |
+| C-012 | DONE 2026-10-17, owner chose (a): `IMP_DISABLE_120F_FALLBACK` defaults ON, the shipped fatbin is `sm_120a` SASS only, the `PTX fallback` CI job builds the opt-in with OFF |
 | C-017, C-018 (PDL registration of two production verify kernels) | perf path; SETTLED A2-2 anchor to correct first |
 | C-023, C-024, C-029, C-031 | perf-affecting; measure first |
 | H-002, H-011, H-013, H-015, H-022, H-028, H-030 | M risk or behaviour change (H-013 turns silent 0 into an error; H-030 may be a KV-sizing bug, needs a GPU repro) |
@@ -799,7 +799,7 @@ Batches B1..B9 merged (#2733..#2742, #2738 docs only); main `2f959d93`. Before =
 |---|---|
 | H-012 rest (`kStrict` at 7 sites), C-025, C-033 rest + C-010, open test findings | fix PRs in progress on 2026-10-16 (owner go): strict index parse with one malformed-name test per loader; routing-pool failure fails init; one cached `device_sm_count()` / capability helper; GPU-test CUDA-error listener |
 | C-004..C-007 | kernel variant merges only with byte-identical `cuobjdump -sass` per instance |
-| C-012 | owner decision: `IMP_DISABLE_120F_FALLBACK=ON` + SM120.md correction, or drop `-rdc` |
+| C-012 | DONE 2026-10-17: option (a), see the deferred table |
 | C-016 | manual pass over 23 macro-body launches for a post-launch guard |
 | C-017, C-018 | correct the SETTLED A2-2 anchor, then PDL-register the two verify kernels with `make verify-ab` |
 | C-023, C-024, C-029, C-031 | perf-affecting: measure first (benchmark-cuda two-image A/B) |

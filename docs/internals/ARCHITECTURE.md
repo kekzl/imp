@@ -13,7 +13,7 @@ If the code and this document disagree, the code wins.
 
 **This is the one place in the repository that states what consumer Blackwell has and lacks.** Every other document links here; `docs_lint.py`'s forbidden-token check keeps it that way.
 
-imp compiles for **`sm_120a` exclusively**, emitting raw SASS via direct gencode, with a `compute_120f` PTX fallback for other consumer Blackwell SKUs. No portability layer, no second target.
+imp compiles for **`sm_120a` exclusively**, emitting raw SASS via direct gencode; GB203 (cc 12.0) loads the same SASS, a `compute_120f` PTX for cc 12.1 is opt-in (`IMP_DISABLE_120F_FALLBACK=OFF`). No portability layer, no second target.
 
 | Absent on `sm_120a` | Where it exists | Consequence for imp |
 |---|---|---|

@@ -39,7 +39,7 @@ make dev       # incremental container build (seconds, Ninja) - iterate here
 | `IMP_ALLOC_INTERPOSE` | `OFF` | Wrap `cudaMalloc`/`cudaMallocAsync` to attribute steady-state allocations - never benchmark with it on, costs ~3% decode (`AUDIT.md` G16) |
 | `IMP_FUZZERS` | `OFF` | libFuzzer binaries from `fuzz/` (clang only) |
 | `CMAKE_BUILD_TYPE` | - | `Release` / `RelWithDebInfo` / `Debug` |
-| `CMAKE_CUDA_ARCHITECTURES` | `OFF` | pinned instead via raw `--generate-code=arch=compute_120a,code=sm_120a` (+ `compute_120f` PTX fallback), a CMake < 3.31 workaround - don't override it |
+| `CMAKE_CUDA_ARCHITECTURES` | `OFF` | pinned instead via raw `--generate-code=arch=compute_120a,code=sm_120a` (`compute_120f` PTX only with `IMP_DISABLE_120F_FALLBACK=OFF`), a CMake < 3.31 workaround - don't override it |
 
 ## Test
 

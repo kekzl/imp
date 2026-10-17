@@ -7,7 +7,7 @@ commit: bad6a308
 
 # imp Memory Architecture
 
-Target: `sm_120a` (RTX 5090 / GB202, 32 607 MiB) with the `sm_120f` PTX fallback. No SM80/SM90 paths.
+Target: `sm_120a` (RTX 5090 / GB202, 32 607 MiB) SASS only (`compute_120f` PTX opt-in, C-012). No SM80/SM90 paths.
 
 Design: five lifetime tiers (A2) over a three-layer stack (A3), a planner that never queries the device (A4), subsystem ownership rules (A5), a CPU-only test seam (A6), seven invariants I1-I7. Site census that motivated the design, the migration steps, and the full implementation/divergence log (B0, B1-B8, D1-D16): [`docs/archive/MEMORY_CENSUS_2026.md`](../archive/MEMORY_CENSUS_2026.md).
 

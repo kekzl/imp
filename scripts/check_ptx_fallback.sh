@@ -37,11 +37,11 @@ fi
 
 n_listed=$(cuobjdump -all -lptx "$BIN" 2>/dev/null | grep -c 'PTX file' || true)
 if [ "$n_listed" -eq 0 ]; then
-    # Not "nothing to check": the fallback is on by default and this build did
-    # not opt out, so zero images means it stopped emitting the fallback and
-    # every non-5090 Blackwell lost its only path.
+    # Not "nothing to check": this build opted into the fallback (IMP_DISABLE_120F_FALLBACK=OFF,
+    # or no CMakeCache next to it), so zero images means the opt-in stopped emitting it and
+    # cc 12.1 (GB10) lost its only path.
     echo "check_ptx_fallback: FAIL - $BIN carries no PTX image at all." >&2
-    echo "  The compute_120f fallback is on by default (CMakeLists.txt) and" >&2
+    echo "  The compute_120f fallback is opt-in (CMakeLists.txt) and" >&2
     echo "  ${CACHE} does not set IMP_DISABLE_120F_FALLBACK=ON." >&2
     echo "  A binary without it runs on sm_120a only." >&2
     exit 1

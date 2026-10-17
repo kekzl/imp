@@ -320,8 +320,8 @@ jobs:
           # toolchain, the second gencode costs +53.1% device-compile time
           # (47278 ms with it, 30886 ms without), and it stops every .cu
           # diagnostic from being emitted twice (once per gencode). The shipped
-          # fatbin (release-docker) keeps the 120f PTX fallback for 5080/5070
-          # SKUs; the `PTX fallback` job below is what assembles it (#1650).
+          # fatbin carries no 120f PTX either since C-012 (sm_120a only); the opt-in
+          # build is what the `PTX fallback` job below assembles (#1650).
           # IMP_BUILD_BENCH=OFF skips imp-bench. The mxf4nvf4 probe/microbench TUs
           # build with the tests (imp_test_kernels), never into libimp.
 
@@ -792,8 +792,8 @@ jobs:
 
   # Assemble the compute_120f PTX fallback (#1650).
   #
-  # It ships as `code=compute_120f`, the PTX-only form, so ptxas never runs over
-  # it in a build and the first thing that would is the driver's JIT on a GB203
+  # Opt-in since C-012 (IMP_DISABLE_120F_FALLBACK=OFF). It is `code=compute_120f`, the PTX-only form, so ptxas never runs over
+  # it in a build and the first thing that would is the driver's JIT on a cc 12.1 GB10
   # - a card nobody in this project owns. Assembling it needs no GPU: ptxas is a
   # compiler.
   #
@@ -871,12 +871,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cuda13.4-ccache-ptx-
 
-      # No -DIMP_DISABLE_120F_FALLBACK: the default (OFF) is what ships, and it
-      # is the thing under test.
+      # The fallback is opt-in since C-012 (default ON = no PTX): this job keeps
+      # the opt-in build (OFF) assembling.
       - name: Configure with the fallback on
         if: steps.scope.outputs.run == 'true'
         run: |
           cmake -B build-ptx \
+            -DIMP_DISABLE_120F_FALLBACK=OFF \
             -DCMAKE_BUILD_TYPE=Release \
             -DIMP_BUILD_TESTS=OFF \
             -DIMP_BUILD_TOOLS=OFF \
