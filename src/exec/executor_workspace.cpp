@@ -663,12 +663,13 @@ bool Workspace::allocate_shared_workspace(int max_tokens) {
     generation_++;  // fresh arena — any prior baked pointers are dead
     shared_workspace_ = vram_alloc(vram_alloc_, max_shared, "shared_workspace");
     if (!shared_workspace_) {
-        // Shared workspace is critical for GEMV scratch buffers. Fall back to
-        // raw cudaMalloc bypassing headroom (Nemotron-30B leaves <headroom free).
-        IMP_LOG_WARN("Shared workspace: allocator rejected (%.1f MiB), trying raw cudaMalloc",
+        // Shared workspace is critical for GEMV scratch buffers. Retry past the headroom
+        // (Nemotron-30B leaves <headroom free), still through the allocator so free_buffers()
+        // and the accounting see the bytes.
+        IMP_LOG_WARN("Shared workspace: allocator rejected (%.1f MiB), retrying past the headroom",
                      max_shared / (1024.0 * 1024.0));
-        cudaError_t err = cudaMalloc(&shared_workspace_, max_shared);
-        if (err != cudaSuccess) {
+        shared_workspace_ = vram_alloc_force(vram_alloc_, max_shared, "shared_workspace");
+        if (!shared_workspace_) {
             IMP_LOG_ERROR("Failed to allocate shared workspace (%.1f MiB)", max_shared / (1024.0 * 1024.0));
             return false;
         }
