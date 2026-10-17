@@ -44,7 +44,7 @@ No open row; closed rows are indexed below. A new row takes the next free number
 
 | # | outcome | now -> target | size | ref |
 |---|---|---|---|---|
-| 100 | `--calib` covers the shipped MoE and hybrid families | BLOCKED 2026-10-11 on weights and an owner decision: BF16 sources not staged and over the 50 GB download cap: glm GLM-4.7-Flash 62.44 GB, mistral4 Mistral-Small-4-119B 241.85 GB (no imp arch, row 35), nemotron_h Nemotron-3-Nano-30B-A3B-BF16 63.16 GB; gpt_oss (BF16 41.83 GB) has no exact default fold: expert Y breaks on `clamp(up, -7, 7)` and `(up + 1)`, X needs an expert-only norm (the router reads post_attention_layernorm), A/C are off at n_rep 8; options in #2477. Covered: 12 model_types, deepseek_v2 2026-10-09 RTN 9.6015 -> `--calib` 9.5250 (BF16 9.0616) | M | `tools/imp-quantize/awq_sites.cpp:60 kPlain[]`, `tools/imp-quantize/awq_plan.cpp:395 --calib does not support`, `src/compute/gpt_oss_glu.cuh:8 gpt_oss_glu_elem`, #2477, #2670 |
+| 100 | `--calib` covers the shipped MoE and hybrid families | CLOSED 2026-10-17: glm4_moe_lite (MLA q_lora: groups Q, S) default `ABCDEGKQS` PPL 10.4179 / 13.5082 vs RTN 10.4301 / 13.7470; nemotron_h (Mamba2 G/E, A/C, relu^2 S) default `G` 10.1743 / 12.4981 vs RTN 10.2391 / 12.5052, E +12 % / +16 % stays opt-in; 14 model_types. Out: gpt_oss (owner 2026-10-11: no exact fold, `clamp(up, -7, 7)`), mistral4 (no imp arch, row 35). Table: `docs/plans/2026-10-04-awq-moe-experts.md` | M | `tools/imp-quantize/awq_sites.cpp:60 kPlain[]`, `tools/imp-quantize/awq_plan.cpp:395 --calib does not support`, `src/compute/gpt_oss_glu.cuh:8 gpt_oss_glu_elem`, #2477, #2670 |
 
 ## Later
 

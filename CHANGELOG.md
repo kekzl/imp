@@ -17,6 +17,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `/metrics`: `imp_gpu_power_watts` and `imp_gpu_energy_joules_total` from NVML (`dlopen`, absent without libnvidia-ml). A 60-token Qwen3-4B Q8_0 chat reads 18.4 J on the driver counter.
 
 ### Changed
+- `imp-quantize --calib` covers glm4_moe_lite and nemotron_h with measured defaults (#2477). PPL vs RTN, two `ppl_corpus_45k` slices: GLM-4.7-Flash `ABCDEGKQS` 10.4179 / 13.5082 vs 10.4301 / 13.7470; Nemotron-3-Nano `G` 10.1743 / 12.4981 vs 10.2391 / 12.5052 (Mamba2 out_proj E +12 %, opt-in).
 - The shipped fatbin is `sm_120a` SASS only: `IMP_DISABLE_120F_FALLBACK` defaults ON (C-012), the `compute_120f` PTX for cc 12.1 (GB10) is opt-in with OFF and lacked 26 `-rdc` kernels anyway. RTX 5090 / 5080 / 5070 Ti load `sm_120a` as before.
 - NVFP4 GEMVs register PDL without the MaxL1 carveout (it cost -5.3 % on the verify kernel), the speculative-verify GEMVs now with PDL. Qwen3.8-27B NVFP4 tg128 +0.54 %, 32 streams 1933.4 -> 1961.1 tok/s, MTP k=3 verify unchanged.
 - Host fp16/bf16/E4M3 conversion lives once in `core/fp_bits.h` (11 copies replaced, bit-identical over all 2^32 floats and every 8/16-bit input); the 8 lazy cuBLAS/cuBLASLt handles share one create helper that aborts naming the site (4 ignored a failed `cublasCreate`). SASS unchanged in 1023 kernels.

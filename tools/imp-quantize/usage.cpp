@@ -34,6 +34,8 @@ void usage() {
         "                  E linear_attn.out_proj  <- linear_attn.norm  (qwen3_5 GDN)\n"
         "                  X experts.*.gate,up <- pre_feedforward_layernorm_2 (Gemma-4)\n"
         "                  Y experts.E.down    <- experts.E.up (every MoE)\n"
+        "                  K kv_b_proj <- kv_a_layernorm   Q q_b_proj <- q_a_layernorm (MLA)\n"
+        "                  S shared_experts.down <- shared_experts.up (DeepSeek, GLM)\n"
         "                X, Y are opt-in, no measured gain: on Gemma-4-26B every set\n"
         "                lands inside the RTN rounding band (16.76..19.01 PPL);\n"
         "                gemma4 needs an explicit selector.\n"

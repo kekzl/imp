@@ -19,6 +19,7 @@
 #include <cuda_fp16.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -325,6 +326,9 @@ std::expected<void, std::string> run_site(bool weight_sq,
         plan.vec_div[site.producer] = div;
         plan.vec_offset[site.producer] = site.offset;
     } else {
+        if (site.producer_sqrt)  // down(relu(c u)^2) = c^2 down(relu(u)^2): rows take sqrt of the divisor
+            for (float& d : div)
+                d = std::sqrt(d);
         plan.row_div[site.producer] = div;
         if (!site.producer_bias.empty() && index.count(site.producer_bias))
             plan.vec_div[site.producer_bias] = div;
@@ -433,7 +437,7 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
             "ABDXY 17.5810 PPL) lands inside the round-to-nearest rounding band 16.7551..19.0110 (8 "
             "tensor-scale "
             "shifts). Quantize without --calib, or pass --calib-groups to run one anyway.");
-    const char* dflt = default_groups(geo.n_rep, hybrid);
+    const char* dflt = arch_default_groups(model_type, geo.n_rep, hybrid);
     const std::string groups = groups_arg.empty() ? dflt : groups_arg;
     plan.groups = groups;
     plan.n_rep = geo.n_rep;
@@ -441,6 +445,9 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
     if (!groups_arg.empty() && groups_arg != dflt)
         plan.notes.push_back("group selector: " + groups + " (default here " + dflt +
                              ") - a diagnostic subset, not a normal checkpoint");
+    else if (std::string(dflt) != default_groups(geo.n_rep, hybrid))
+        plan.notes.push_back("group selector: " + groups + " (measured default for model_type " + model_type +
+                             ")");
     else if (groups != kAwqDefaultGroups)
         plan.notes.push_back("group selector: " + groups + " (dense, n_rep " + std::to_string(geo.n_rep) +
                              " >= " + std::to_string(kAwqWideGqaRep) + ": attention groups A, C off)");

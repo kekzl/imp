@@ -55,3 +55,20 @@ Decision: X/Y opt-in (`kAwqDefaultGroups` = `ABCDEG`, `tools/imp-quantize/awq_si
        path=imp-quantize+imp-cli-perplexity n=1-per-arm-deterministic
        cmd=`imp-cli --perplexity <calib_corpus first 90000 bytes> --calibrate`, `imp-quantize [--calib] [--calib-groups ABCDK]`, `imp-cli --perplexity ppl_corpus_45k --set runtime.deterministic=true`
        note=dev build of feat/awq-calib-deepseek-v2 on that commit]
+
+## GLM-4.7-Flash and Nemotron-3-Nano (#2477, 2026-10-17)
+
+| model_type (model) | RTN | default | rejected arms |
+|---|---|---|---|
+| `glm4_moe_lite` (GLM-4.7-Flash) | 10.4301 / 13.7470 | `ABCDEGKQS` 10.4179 / 13.5082 | `ABCDEG` 10.5039 / 13.7244 |
+| `nemotron_h` (Nemotron-3-Nano-30B-A3B) | 10.2391 / 12.5052 | `G` 10.1743 / 12.4981 | `E` 11.4932 / 14.5062, `S` 10.6372 / 12.9595, `AC` 10.3560 / 12.5641, `BDEG` 10.5248 / 14.2558 |
+
+- PPL pairs: `ppl_corpus_45k` chars 0-24000 / 24000-end (Nemotron 7447 / 6467 tokens, GLM 6892 / 6037).
+- E (Mamba2 `out_proj` into the gated group norm) is an exact fold (`executor_ssm_gdn.cu` group_rmsnorm then out_proj) and loses on both slices: opt-in.
+- `nemotron_h` has no Y: `--calibrate` records no down statistic for non-gated relu^2 experts (`calibrate_moe_experts_`).
+- Default path check: `imp-quantize --calib` without `--calib-groups` on Nemotron plans 23 G groups, PPL 10.1743, identical to the explicit `G` arm.
+
+[PROV: commit=a0dce46d date=2026-10-17 hw=RTX5090 model=GLM-4.7-Flash,Nemotron-3-Nano-30B-A3B-BF16 quant=NVFP4 cuda=13.4.2
+       path=imp-quantize+imp-cli-perplexity n=1-per-arm-deterministic
+       cmd=`imp-cli --perplexity <calib_corpus first 40000 bytes> --calibrate` on the RTN export, `imp-quantize --calib [--calib-groups X]`, `imp-cli --perplexity <slice> --set runtime.deterministic=true`
+       note=imp:test built from feat/calib-glm-nemotron]
