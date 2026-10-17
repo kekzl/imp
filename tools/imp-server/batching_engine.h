@@ -29,6 +29,16 @@ struct TokenEvent {
     const char* finish_reason;  // non-null on last token: "stop", "length", "cancelled"
 };
 
+// Per-token logprob side data, copied by the worker when it delivers the token: a handler thread
+// never reads Request::output_logprobs / output_lens while the worker appends to them (a growing
+// vector reallocates under the reader).
+struct TokenExtras {
+    imp::TokenLogprobInfo lp;
+    std::vector<imp::LogitLensLayer> lens;
+};
+// The worker's copy of output position i, null without logprobs or before the entry exists.
+std::shared_ptr<const TokenExtras> token_extras(const imp::Request& r, size_t i);
+
 // A server-level request submitted to the batching engine.
 // Wraps an imp::Request and adds a token queue for the HTTP handler to read.
 struct ServerRequest {
@@ -39,6 +49,7 @@ struct ServerRequest {
     std::mutex token_mutex;
     std::condition_variable token_cv;
     std::deque<TokenEvent> token_queue;
+    std::vector<std::shared_ptr<const TokenExtras>> extras;  // by output position, token_mutex
     std::atomic<bool> cancelled{false};  // set by HTTP handler to cancel
 
     // Track how many output tokens we have already delivered
@@ -69,13 +80,26 @@ struct ServerRequest {
     std::atomic<bool> end_thinking{false};
     std::atomic<int> think_phase{kThinkUnknown};
 
-    // Push a token event (called from worker thread)
-    void push_token(int32_t token_id, bool is_last, const char* reason) {
+    // Push a token event (called from worker thread). pos: the token's output position; extras:
+    // its logprob data (null without logprobs), readable from then on through extras_at(pos).
+    void push_token(int32_t token_id, bool is_last, const char* reason, size_t pos = 0,
+                    std::shared_ptr<const TokenExtras> ex = nullptr) {
         if (is_last)
             think_phase.store(kThinkDone, std::memory_order_release);
         std::lock_guard<std::mutex> lock(token_mutex);
+        if (ex) {
+            if (extras.size() <= pos)
+                extras.resize(pos + 1);
+            extras[pos] = std::move(ex);
+        }
         token_queue.push_back({token_id, is_last, reason});
         token_cv.notify_one();
+    }
+
+    // Logprob data of the token at output position pos, null when none was delivered.
+    std::shared_ptr<const TokenExtras> extras_at(size_t pos) {
+        std::lock_guard<std::mutex> lock(token_mutex);
+        return pos < extras.size() ? extras[pos] : nullptr;
     }
 
     // Push a completion event with no token (called from worker thread)
@@ -195,6 +219,8 @@ private:
         bool is_last;
         const char* reason;  // nullptr = plain token; is_last: finish reason
         bool finish_only;    // push_finish instead of push_token
+        size_t pos = 0;      // output position of token_id
+        std::shared_ptr<const TokenExtras> extras;  // its logprob data, copied on the worker
     };
     std::thread notify_thread_;
     std::mutex nq_mutex_;

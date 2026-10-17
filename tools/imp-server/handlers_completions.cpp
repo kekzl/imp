@@ -112,11 +112,9 @@ void stream_completion_response_(httplib::Response& res, ServerState& state, con
             auto emit_completion_piece = [&](const std::string& piece_text, int token_index) {
                 json lp_obj = nullptr;
                 if (req_logprobs && token_index >= 0) {
-                    const auto& lps = server_req->request->output_logprobs;
-                    if (static_cast<size_t>(token_index) < lps.size()) {
-                        lp_obj = completions_logprobs_json_one(lps[static_cast<size_t>(token_index)],
-                                                               completion_offset);
-                    }
+                    // The worker's copy (TokenExtras): output_logprobs grows under this thread.
+                    if (const auto ex = server_req->extras_at(static_cast<size_t>(token_index)))
+                        lp_obj = completions_logprobs_json_one(ex->lp, completion_offset);
                 }
                 completion_offset += piece_text.size();
                 std::string sse = sse_completion_chunk(comp_id, created, snap_model_name, piece_text, nullptr,

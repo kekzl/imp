@@ -625,8 +625,6 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->logprobs = ctx.params.req_logprobs;
     req->top_logprobs = ctx.params.top_logprobs;
     req->logit_lens = ctx.params.logit_lens;
-    if (req->logit_lens > 0)  // the SSE thread reads entries while the worker appends: no reallocation
-        req->output_lens.reserve(static_cast<size_t>(std::max(req->max_tokens, 1)) + 1);
     req->json_mode = ctx.params.json_mode;
     req->json_schema = ctx.params.json_schema_str;
     req->regex_pattern = ctx.params.regex_pattern;
