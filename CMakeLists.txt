@@ -59,9 +59,10 @@ find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(JPEG REQUIRED)
 
 # Target sm_120a (RTX 5090/PRO 6000, GB202): FP8 f8f6f4 MMA, NVFP4 block MMA, TMA-WS GEMM.
-# Fallback PTX compute_120f JIT-compiles for cc 12.1 (GB10); GB203 is cc 12.0 and loads sm_120a.
-# IMP_DISABLE_120F_FALLBACK=ON strips it. CMake<3.31 can't parse a/f suffix; gencode passed direct.
-option(IMP_DISABLE_120F_FALLBACK "Skip compute_120f PTX fallback (RTX 5090-only fatbin)" OFF)
+# Opt-in PTX compute_120f (IMP_DISABLE_120F_FALLBACK=OFF) JIT-compiles for cc 12.1 (GB10); GB203 is cc 12.0
+# and loads sm_120a. Off by default (C-012): the 26 -rdc kernels never reach that PTX.
+# CMake<3.31 can't parse a/f suffix; gencode passed direct.
+option(IMP_DISABLE_120F_FALLBACK "Skip the compute_120f PTX fallback (sm_120a-only fatbin)" ON)
 # AUDIT_ARCH_2026 H-10: device LTO (per-TU rdc) measured neutral; hot kernels don't cross
 # TU boundaries so there is nothing to inline. Off by default; kept as the switch that records it.
 option(IMP_DEVICE_LTO "Device link-time optimization: LTO IR (code=lto_120a) per TU, SASS produced at the device link" OFF)
@@ -85,7 +86,7 @@ if(NOT IMP_DISABLE_120F_FALLBACK)
     set(IMP_SM120_FLAGS "${IMP_SM120_FLAGS} --generate-code=arch=compute_120f,code=compute_120f")
     message(STATUS "CUDA architectures: sm_120a (SASS, cc 12.0: RTX 5090 / 5080 / 5070 Ti / RTX PRO 6000) + compute_120f (PTX, cc 12.1: GB10 / DGX Spark)")
 else()
-    message(STATUS "CUDA architectures: sm_120a (RTX 5090 only — fallback disabled)")
+    message(STATUS "CUDA architectures: sm_120a (cc 12.0: RTX 5090 / 5080 / 5070 Ti / RTX PRO 6000; no compute_120f PTX)")
 endif()
 set(CMAKE_CUDA_ARCHITECTURES OFF)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${IMP_SM120_FLAGS}")

@@ -640,7 +640,7 @@ check-static-reset:
 
 # Assemble the compute_120f PTX fallback out of a built artefact (#1650). Needs
 # ptxas, not a GPU. Runs in CI's `PTX fallback` job; this target reproduces it.
-# The default target is build-dev, which keeps the fallback on; a build
+# The default target is build-dev (its cache may predate the C-012 default flip); a build
 # configured with IMP_DISABLE_120F_FALLBACK=ON is skipped, not failed.
 check-ptx-fallback:
 	@docker run --rm -v $(PWD):/src -w /src $(DEV_IMG) \
