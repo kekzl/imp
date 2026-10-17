@@ -30,7 +30,7 @@ std::expected<Quantized, std::string> quantize_one(const std::vector<uint16_t>& 
 // quantize_one.
 class WeightQuantizer {
 public:
-    std::string open_gptq(const std::string& hess_path);
+    std::string open_gptq(const std::string& hess_path, float damp);
     std::expected<Quantized, std::string> quantize(
         const std::string& name, const std::vector<uint16_t>& h, int64_t N, int64_t K, float forced_scale,
         const std::map<std::string, std::vector<float>>& col_scale);
@@ -39,9 +39,10 @@ public:
 
 private:
     std::string path_;
+    float damp_ = 10.0f;
     std::vector<HessianIndexEntry> index_;
     double loss_rtn_ = 0.0, loss_gptq_ = 0.0;
-    size_t n_ = 0;
+    size_t n_ = 0, n_worse_ = 0;
 };
 
 }  // namespace imp::quantize

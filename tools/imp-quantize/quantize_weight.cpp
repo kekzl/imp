@@ -54,8 +54,9 @@ std::expected<Quantized, std::string> quantize_one(const std::vector<uint16_t>& 
     return out;
 }
 
-std::string WeightQuantizer::open_gptq(const std::string& hess_path) {
+std::string WeightQuantizer::open_gptq(const std::string& hess_path, float damp) {
     path_ = hess_path;
+    damp_ = damp;
     if (std::string err = read_hessian_index(path_, index_); !err.empty())
         return err;
     printf("GPTQ: %zu Hessians from %s\n", index_.size(), path_.c_str());
@@ -80,22 +81,25 @@ std::expected<Quantized, std::string> WeightQuantizer::quantize(
                 H[static_cast<size_t>(i) * K + j] /= cs->second[i] * cs->second[j];
     const float scale = forced_scale > 0.0f ? forced_scale
                                             : export_tensor_scale(fp16_absmax(h.data(), h.size()));
-    auto g = gptq::quantize_nvfp4(h.data(), N, K, std::move(H), scale);
+    auto g = gptq::quantize_nvfp4(h.data(), N, K, std::move(H), scale, damp_);
     if (!g)
         return std::unexpected(g.error());
     loss_rtn_ += g->loss_rtn;
     loss_gptq_ += g->loss_gptq;
     n_++;
+    n_worse_ += g->loss_gptq > g->loss_rtn ? 1 : 0;
     return Quantized{std::move(g->packed), std::move(g->micro), scale};
 }
 
 std::string WeightQuantizer::summary() const {
     if (n_ == 0)
         return "";
-    char buf[256];
+    char buf[320];
     std::snprintf(buf, sizeof(buf),
-                  "GPTQ: %zu tensors, output loss sum(dW H dW^T) %.6g vs round-to-nearest %.6g (%.1f%%)", n_,
-                  loss_gptq_, loss_rtn_, loss_rtn_ > 0.0 ? 100.0 * loss_gptq_ / loss_rtn_ : 0.0);
+                  "GPTQ: %zu tensors (damp %g), output loss sum(dW H dW^T) %.6g vs round-to-nearest %.6g "
+                  "(%.1f%%), %zu tensors worse",
+                  n_, static_cast<double>(damp_), loss_gptq_, loss_rtn_,
+                  loss_rtn_ > 0.0 ? 100.0 * loss_gptq_ / loss_rtn_ : 0.0, n_worse_);
     return buf;
 }
 

@@ -592,7 +592,7 @@ int main(int argc, char** argv) {
     // GPTQ (row 101) for weights with a Hessian, round-to-nearest for the rest.
     quantize::WeightQuantizer wq;
     if (!opt.gptq_file.empty() && !opt.dry_run) {
-        if (const std::string err = wq.open_gptq(opt.gptq_file); !err.empty()) {
+        if (const std::string err = wq.open_gptq(opt.gptq_file, opt.gptq_damp); !err.empty()) {
             fprintf(stderr, "--gptq: %s\n", err.c_str());
             return 1;
         }

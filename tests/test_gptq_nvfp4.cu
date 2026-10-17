@@ -78,7 +78,8 @@ std::vector<float> correlated_hessian(int K, unsigned seed) {
 TEST(GptqNvfp4, BeatsRoundToNearestOnCorrelatedInputs) {
     Case c(7);
     const auto H = correlated_hessian(c.K, 11);
-    auto r = gptq::quantize_nvfp4(c.w16.data(), c.N, c.K, H, c.tensor_scale);
+    // Damp 0.01: the in-sample fit the algorithm owes; the export default 10 trades it for PPL.
+    auto r = gptq::quantize_nvfp4(c.w16.data(), c.N, c.K, H, c.tensor_scale, 0.01f);
     ASSERT_TRUE(r.has_value()) << r.error();
     EXPECT_LT(r->loss_gptq, 0.8 * r->loss_rtn) << "gptq " << r->loss_gptq << " rtn " << r->loss_rtn;
     // The bytes written are the codes the loss was computed from.

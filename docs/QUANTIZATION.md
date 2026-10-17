@@ -240,7 +240,7 @@ scale: the format Blackwell tensor cores expect natively, so MXFP4 prefill goes 
 at full throughput; shipped inside GGUF under a proprietary tensor-type code (31), which
 llama.cpp reads as the removed `Q4_0_4_4` (cross-tool PPL comparison needs a standard export).
 Round-to-nearest MXFP4 is +5-15% perplexity vs Q8_0, worse than Q4_K_M (+2.2% on Qwen3-4B
-wikitext-2); MR-GPTQ calibration would close the gap: [roadmap](ROADMAP.md#later) row 101.
+wikitext-2); MR-GPTQ calibration would close the gap: [roadmap](ROADMAP.md#later) row 101; plain GPTQ on NVFP4 (`imp-quantize --gptq`): AWQ+GPTQ Qwen3-1.7B 18.07-18.46 vs AWQ 18.23, Qwen3-0.6B -1.5 % ([record](plans/2026-10-17-gptq-nvfp4.md)).
 
 ## KV cache element type
 

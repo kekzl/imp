@@ -24,6 +24,8 @@ void usage() {
         "                which costs measurably more quality (see the header).\n"
         "  --gptq FILE   GPTQ against IMPHES01 second moments (imp-cli --perplexity <corpus>\n"
         "                --calibrate F --set calibration.hessian=true writes F.hess)\n"
+        "  --gptq-damp X fraction of mean diag(H) added to its diagonal (default 10;\n"
+        "                0.01 loses to round-to-nearest: Qwen3-1.7B 22.58 vs 19.63)\n"
         "  --calib-weight abs|sq  error weight of the AWQ search (default abs;\n"
         "                sq loses at wide GQA: Qwen3-14B BD 9.9068 abs vs 10.0563 sq)\n"
         "  --calib-groups ABCDEG\n"

@@ -57,8 +57,7 @@ private:
     struct HessEntry {
         float* d_H = nullptr;
         int64_t K = 0;
-        uint64_t rows = 0;     // rows in H
-        uint64_t dropped = 0;  // outlier rows left out
+        uint64_t rows = 0;  // rows in H
     };
     std::map<uint32_t, HessEntry> hess_;  // same key as entries_
     bool hessian_ = false;

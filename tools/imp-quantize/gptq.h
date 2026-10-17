@@ -20,10 +20,12 @@ struct Result {
     double loss_gptq = 0.0;             // the same for the GPTQ codes
 };
 
-// H is consumed (damped in place). damp: fraction of the mean diagonal added to it.
+// H is consumed (damped in place). damp: fraction of the mean diagonal added to it. Qwen3-1.7B
+// AWQ+GPTQ PPL: 19.58 at 0.01, 18.07-18.46 over 5-30, AWQ alone 18.23 (docs/QUANTIZATION.md).
+inline constexpr float kDefaultDamp = 10.0f;
 [[nodiscard]] std::expected<Result, std::string> quantize_nvfp4(const uint16_t* w_fp16, int64_t N, int64_t K,
                                                                 std::vector<float> H, float tensor_scale,
-                                                                float damp = 0.01f);
+                                                                float damp = kDefaultDamp);
 
 // Layer index of a checkpoint weight name (".layers.N."), -1 when absent.
 int layer_of(const std::string& name);
