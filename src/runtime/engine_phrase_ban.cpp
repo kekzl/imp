@@ -1,8 +1,8 @@
 // Banned phrases (roadmap row 118): every append re-decodes the new token into the request's text;
 // a completed phrase rewinds output_tokens and the KV to the token the phrase starts in and bans
 // that token at that position. Position 0 resamples from the prefill's saved logits instead of a
-// second forward over the prompt's last token. Dense attention only: a recurrent state has no
-// history to rewind to.
+// second forward over the prompt's last token. Hybrids restore a recurrent slab saved after the
+// prefill or every kPhraseSnapEvery tokens and re-forward the kept tokens after it.
 
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
@@ -30,6 +30,30 @@ void phrase_bias_at(Request& req, size_t pos) {
 
 }  // namespace
 
+// Hybrids: per request, the recurrent slabs of PhraseBanState::snap_consumed and the logprobs and
+// lens of the tokens a rewind replays.
+struct Engine::PhraseRecurrent {
+    std::array<VramOwned<uint8_t>, kPhraseSnapSlots> slab;
+    std::vector<TokenLogprobInfo> replay_lp;
+    std::vector<std::vector<LogitLensLayer>> replay_lens;
+};
+
+void Engine::PhraseRecurrentFree::operator()(PhraseRecurrent* p) const { delete p; }
+
+Engine::PhraseRecurrent& Engine::phrase_rec_of_(int req_id) {
+    auto& p = phrase_rec_[req_id];
+    if (!p)
+        p.reset(new PhraseRecurrent());
+    return *p;
+}
+
+void Engine::phrase_release_(int req_id) {
+    if (!phrase_rec_.count(req_id))
+        return;
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(decode_stream()));  // a snapshot copy may still be queued
+    phrase_rec_.erase(req_id);
+}
+
 size_t Request::deliverable_tokens() const {
     if (!phrase || status == RequestStatus::FINISHED || status == RequestStatus::CANCELLED)
         return output_tokens.size();
@@ -37,15 +61,14 @@ size_t Request::deliverable_tokens() const {
 }
 
 bool Engine::phrase_ban_supported() const {
-    return model_ && !ssm_state_ && !(kv_manager_ && kv_manager_->residual_enabled());
+    return model_ && !(kv_manager_ && kv_manager_->residual_enabled());
 }
 
 void Engine::phrase_ban_init_(Request& req) const {
     if (!req.phrase)
         return;
     if (!phrase_ban_supported()) {  // the server answers 400 first; direct API users get no ban
-        IMP_LOG_WARN("phrase ban: req %d dropped, the model keeps a recurrent state or a residual KV ring",
-                     req.id);
+        IMP_LOG_WARN("phrase ban: req %d dropped, the model keeps a residual KV ring", req.id);
         req.phrase.reset();
         return;
     }
@@ -67,7 +90,32 @@ void Engine::phrase_save_logits_(Request& req, const Tensor& logits, cudaStream_
     req.phrase->first_logits.resize(v);
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(req.phrase->first_logits.data(), logits.data, v * sizeof(float),
                                        cudaMemcpyDeviceToHost, stream));
+    if (ssm_state_)
+        phrase_snapshot_(req, 0, 0, stream);  // the prefill's final state, no output token in it yet
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+}
+
+// Copies the request's recurrent slab into slab `slot`, recorded as holding `consumed` output tokens.
+// Slot 0 failing to allocate drops the ban: no rewind could restore a state.
+void Engine::phrase_snapshot_(Request& req, int slot, int consumed, cudaStream_t stream) {
+    PhraseRecurrent& rec = phrase_rec_of_(req.id);
+    auto& slab = rec.slab[static_cast<size_t>(slot)];
+    const size_t bytes = ssm_state_->per_seq_bytes();
+    if (slab.count() < bytes)
+        slab = VramOwned<uint8_t>(vram_alloc_, bytes, "phrase_ban_recurrent");
+    if (!slab) {
+        IMP_LOG_WARN("phrase ban: req %d, no VRAM for a %.1f MiB recurrent snapshot%s", req.id,
+                     static_cast<double>(bytes) / (1024.0 * 1024.0), slot == 0 ? ", ban dropped" : "");
+        req.phrase->snap_consumed[static_cast<size_t>(slot)] = -1;
+        if (slot == 0) {
+            phrase_rec_.erase(req.id);
+            req.phrase.reset();
+        }
+        return;
+    }
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(slab.get(), ssm_state_->seq_base(recurrent_slot_for_(req.id)), bytes,
+                                       cudaMemcpyDeviceToDevice, stream));
+    req.phrase->snap_consumed[static_cast<size_t>(slot)] = consumed;
 }
 
 int32_t Engine::phrase_first_token_(Request& req, int32_t token, cudaStream_t stream, bool resample) {
@@ -134,6 +182,25 @@ bool Engine::phrase_after_append_(Request& req, cudaStream_t stream) {
     const size_t prev = s.text.size();
     s.text += model_->tokenizer()->decode_token(req.output_tokens.back());
     s.tok_end.push_back(static_cast<uint32_t>(s.text.size()));
+    const size_t n_out = req.output_tokens.size();
+    if (ssm_state_ && n_out > 1 &&
+        (n_out - 1) % kPhraseSnapEvery == 0)  // the forward just run read n_out - 1
+        phrase_snapshot_(req, phrase_snapshot_slot(s.snap_consumed), static_cast<int>(n_out - 1), stream);
+    if (s.replaying()) {  // a kept token re-forwarded: its original logprobs and lens, no new match
+        auto& rec = phrase_rec_of_(req.id);
+        if (s.replay_at < rec.replay_lp.size() && req.output_logprobs.size() == n_out)
+            req.output_logprobs.back() = std::move(rec.replay_lp[s.replay_at]);
+        if (s.replay_at < rec.replay_lens.size() && req.output_lens.size() == n_out)
+            req.output_lens.back() = std::move(rec.replay_lens[s.replay_at]);
+        if (++s.replay_at == s.replay.size()) {
+            s.replay.clear();
+            s.replay_at = 0;
+            rec.replay_lp.clear();
+            rec.replay_lens.clear();
+        }
+        phrase_bias_at(req, n_out);
+        return false;
+    }
     const auto hit = s.rewinds < kMaxPhraseRewinds ? phrase_match_start(s.text, prev, s.phrases)
                                                    : std::optional<size_t>{};
     const size_t pos = hit ? phrase_token_at(s.tok_end, *hit) : 0;
@@ -153,13 +220,39 @@ bool Engine::phrase_after_append_(Request& req, cudaStream_t stream) {
 void Engine::phrase_rewind_(Request& req, size_t pos, cudaStream_t stream) {
     PhraseBanState& s = *req.phrase;
     drain_decode_pipeline();
-    req.output_tokens.resize(pos);
-    if (req.output_logprobs.size() > pos)
-        req.output_logprobs.resize(pos);
-    if (req.output_lens.size() > pos)
-        req.output_lens.resize(pos);
-    s.text.resize(pos > 0 ? s.tok_end[pos - 1] : 0);
-    s.tok_end.resize(pos);
+    // Hybrids: the recurrent state cannot step back, so restore the latest slab at or before
+    // pos - 1 and re-forward the kept tokens after it (replay) before sampling pos.
+    size_t keep = pos;
+    if (ssm_state_) {
+        const int slot = pos > 0 ? std::max(phrase_pick_snapshot(s.snap_consumed, pos), 0) : 0;  // 0 holds 0
+        const int consumed = s.snap_consumed[static_cast<size_t>(slot)];
+        keep = pos > 0 ? static_cast<size_t>(consumed) + 1 : 0;
+        s.replay.assign(req.output_tokens.begin() + static_cast<std::ptrdiff_t>(keep),
+                        req.output_tokens.begin() + static_cast<std::ptrdiff_t>(pos));
+        s.replay_at = 0;
+        auto& rec = phrase_rec_of_(req.id);
+        rec.replay_lp.clear();
+        rec.replay_lens.clear();
+        for (size_t i = keep; i < pos && i < req.output_logprobs.size(); i++)
+            rec.replay_lp.push_back(std::move(req.output_logprobs[i]));
+        for (size_t i = keep; i < pos && i < req.output_lens.size(); i++)
+            rec.replay_lens.push_back(std::move(req.output_lens[i]));
+        for (auto& c : s.snap_consumed)  // a slab past pos folded tokens that are gone
+            if (c > static_cast<int>(pos))
+                c = -1;
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(recurrent_slot_for_(req.id)),
+                                           rec.slab[static_cast<size_t>(slot)].get(),
+                                           ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice, stream));
+        IMP_LOG_DEBUG("phrase ban: req %d restores the slab after %d tokens, replays %zu", req.id, consumed,
+                      s.replay.size());
+    }
+    req.output_tokens.resize(keep);
+    if (req.output_logprobs.size() > keep)
+        req.output_logprobs.resize(keep);
+    if (req.output_lens.size() > keep)
+        req.output_lens.resize(keep);
+    s.text.resize(keep > 0 ? s.tok_end[keep - 1] : 0);
+    s.tok_end.resize(keep);
     for (auto& hs : penalty_hist_state_)  // the device history holds the dropped tokens
         if (hs.req_id == req.id)
             hs.synced = -1;
@@ -179,9 +272,10 @@ void Engine::phrase_rewind_(Request& req, size_t pos, cudaStream_t stream) {
     }
     const int n_in = static_cast<int>(req.input_tokens.size());
     if (pos > 0) {
-        // The next step re-forwards output[pos - 1] at its position and samples pos with the ban.
-        kv_manager_->rollback(req.id, n_in + static_cast<int>(pos) - 1);
-        phrase_bias_at(req, pos);
+        // The next step re-forwards output[keep - 1] at its position; after the replay it samples
+        // pos with the ban.
+        kv_manager_->rollback(req.id, n_in + static_cast<int>(keep) - 1);
+        phrase_bias_at(req, keep);
         return;
     }
     kv_manager_->rollback(req.id, n_in);  // the prompt stays; token 0 comes from the saved logits

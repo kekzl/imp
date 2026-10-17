@@ -5,6 +5,7 @@
 // state here; the engine side is runtime/engine_phrase_ban.cpp.
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -17,6 +18,10 @@ namespace imp {
 inline constexpr int kMaxBannedPhrases = 64;
 inline constexpr size_t kMaxBannedPhraseBytes = 256;
 inline constexpr int kMaxPhraseRewinds = 64;  // per request; past it a phrase is let through
+// Hybrids: recurrent-state slabs per request, slot 0 = after prefill, slots 1.. = every
+// kPhraseSnapEvery output tokens; a rewind replays at most the tokens after its slab.
+inline constexpr int kPhraseSnapEvery = 32;
+inline constexpr int kPhraseSnapSlots = 3;
 
 struct PhraseBanState {
     std::vector<std::string> phrases;
@@ -33,7 +38,39 @@ struct PhraseBanState {
     int think_exit0 = -1;
     bool content_after0 = false;
     std::string think_tail0;
+    // Hybrids: output tokens folded into each recurrent slab (-1 = empty); kept tokens a rewind
+    // re-forwards before the banned position, emitted from replay_at on.
+    std::array<int, kPhraseSnapSlots> snap_consumed = [] {
+        std::array<int, kPhraseSnapSlots> a{};
+        a.fill(-1);
+        return a;
+    }();
+    std::vector<int32_t> replay;
+    size_t replay_at = 0;
+    [[nodiscard]] bool replaying() const { return replay_at < replay.size(); }
+    // The token a decode step emits: the kept one while replaying, else the sampled one.
+    [[nodiscard]] int32_t emit(int32_t sampled) const { return replaying() ? replay[replay_at] : sampled; }
 };
+
+// Slab to restore for a rewind to output position pos > 0: the largest consumed <= pos - 1
+// (the next forward then reads output[consumed]). -1 = none.
+inline int phrase_pick_snapshot(const std::array<int, kPhraseSnapSlots>& consumed, size_t pos) {
+    int best = -1;
+    for (int i = 0; i < kPhraseSnapSlots; i++)
+        if (consumed[i] >= 0 && static_cast<size_t>(consumed[i]) + 1 <= pos &&
+            (best < 0 || consumed[i] > consumed[best]))
+            best = i;
+    return best;
+}
+
+// Slot a periodic snapshot overwrites: never slot 0, an empty one first, else the oldest.
+inline int phrase_snapshot_slot(const std::array<int, kPhraseSnapSlots>& consumed) {
+    int slot = 1;
+    for (int i = 1; i < kPhraseSnapSlots; i++)
+        if (consumed[i] < consumed[slot])
+            slot = i;
+    return slot;
+}
 
 // Earliest start byte of a phrase occurrence that ends after byte prev_len (only new text matches).
 inline std::optional<size_t> phrase_match_start(std::string_view text, size_t prev_len,

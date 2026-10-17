@@ -7,6 +7,7 @@
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 #include "runtime/batch.h"
+#include "runtime/phrase_ban.h"
 #include "runtime/prompt_tail.h"
 #include "runtime/snapshot_boundary.h"
 #include "runtime/think_stop_logic.h"
@@ -331,6 +332,7 @@ void Engine::release_recurrent_slot_(int req_id) {
         bv_.free.push_back(sp->second);
         bv_.spare_of.erase(sp);
     }
+    phrase_release_(req_id);  // banned-phrase recurrent slabs
     auto it = recurrent_slot_of_.find(req_id);
     if (it == recurrent_slot_of_.end())
         return;  // idempotent: request never acquired a slot (dense model / pre-prefill cancel)
@@ -695,6 +697,8 @@ bool Engine::decode_kv_exhausted_(std::shared_ptr<Request>& req, int blocks_need
 // One decode row's sampled token: append, think state, FSM, finish.
 void Engine::decode_append_row_(std::shared_ptr<Request>& req, int32_t next_token, Tokenizer* tok,
                                 cudaStream_t stream) {
+    if (req->phrase)  // hybrid rewind: re-forwards a kept token
+        next_token = req->phrase->emit(next_token);
     req->output_tokens.push_back(next_token);
     if (phrase_after_append_(*req, stream))
         return;  // banned phrase completed: rewound to its first token, the next step resamples there

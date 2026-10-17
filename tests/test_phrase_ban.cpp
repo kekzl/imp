@@ -44,5 +44,24 @@ TEST(PhraseBan, TokenAtByteAndSafePrefix) {
     EXPECT_GE(phrase_token_at(ends, *hit), safe);
 }
 
+// Hybrids: a rewind to pos restores the slab with the most tokens that still lets the next
+// forward read output[consumed] (consumed <= pos - 1); periodic saves never overwrite slot 0.
+TEST(PhraseBan, RecurrentSnapshotPickAndSlot) {
+    EXPECT_EQ(PhraseBanState{}.snap_consumed, (std::array<int, kPhraseSnapSlots>{-1, -1, -1}));
+    const std::array<int, kPhraseSnapSlots> c = {0, 32, 64};
+    EXPECT_EQ(phrase_pick_snapshot(c, 70), 2);
+    EXPECT_EQ(phrase_pick_snapshot(c, 65), 2);
+    EXPECT_EQ(phrase_pick_snapshot(c, 64), 1);
+    EXPECT_EQ(phrase_pick_snapshot(c, 33), 1);
+    EXPECT_EQ(phrase_pick_snapshot(c, 32), 0);
+    EXPECT_EQ(phrase_pick_snapshot(c, 1), 0);
+    EXPECT_EQ(phrase_pick_snapshot({-1, -1, -1}, 5), -1);
+    EXPECT_EQ(phrase_pick_snapshot({0, -1, 32}, 40), 2);
+    EXPECT_EQ(phrase_snapshot_slot({0, -1, -1}), 1);
+    EXPECT_EQ(phrase_snapshot_slot({0, 32, -1}), 2);
+    EXPECT_EQ(phrase_snapshot_slot({0, 32, 64}), 1);
+    EXPECT_EQ(phrase_snapshot_slot({0, 96, 64}), 2);
+}
+
 }  // namespace
 }  // namespace imp

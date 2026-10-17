@@ -611,7 +611,8 @@ void BatchingEngine::worker_loop() {
                     staged.push_back({sr, token, false, nullptr, false, i, token_extras(*req, i)});
                 }
             }
-            sr->notified_count = current_count;
+            // Never down: a hybrid phrase rewind shrinks output while it replays kept tokens.
+            sr->notified_count = std::max(sr->notified_count, current_count);
 
             if (is_done) {
                 // If we didn't push a finish event via the token loop
