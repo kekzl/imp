@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- Assistant prefill: `continue_final_message` (vLLM field) on chat and `/v1/responses`, and a trailing assistant turn on `/v1/messages`, continue that text (HF cut rule) instead of opening a new turn. Qwen3.8-27B: "Seventeen times twenty-three equals" -> " three hundred and ninety-one."; an open `<think>` prefix continues as reasoning.
 - Web UI redesign in the logo's colours with an imp mascot: saved conversations, sampling panel, edit/continue, logprobs view, end thinking, structured output, images, `/tokenize` count, `/metrics` tab, GPU joules per answer. `drive.py features` on the dev mock: 16/16 checks pass.
 - Per-request control vectors: `--control-vector NAME=PATH` loads a llama.cpp cvector GGUF, `"control_vector": NAME` or `{name, scale}` adds scale * v_l after each layer it carries. Qwen3-4B Q8_0: scale 0 reproduces the base text, scale 4 steers it.
 - `scripts/check_model.sh <hf-repo> [--nvfp4]`: download, HF BF16 PPL on the CPU, imp PPL, `/tokenize` ids vs HF, reasoning split and `json_object` as one table under the GPU lock. MiniCPM5-2B: 7 rows, 10.4937 vs HF 10.4138, ids identical.

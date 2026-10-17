@@ -470,6 +470,14 @@ json anthropic_to_openai_body(const json& anth) {
                 cache_prefix_msgs = static_cast<int>(oai_messages.size());
         }
     }
+    // Messages API: a trailing assistant turn is a prefill the reply continues.
+    if (!oai_messages.empty()) {
+        const json& last = oai_messages.back();
+        if (last.value("role", "") == "assistant" && !last.contains("tool_calls") &&
+            last.contains("content") && last["content"].is_string() &&
+            last["content"].get<std::string>().find_first_not_of(" \t\n\r\f\v") != std::string::npos)
+            oai["continue_final_message"] = true;
+    }
     oai["messages"] = std::move(oai_messages);
 
     // Tools ----------------------------------------------------------------

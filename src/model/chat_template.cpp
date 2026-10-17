@@ -426,17 +426,25 @@ std::vector<int32_t> ChatTemplate::apply(const Tokenizer& tok, const std::vector
                                          bool suppress_thinking, bool force_thinking,
                                          const std::string& reasoning_effort) const {
     auto eff_msgs = maybe_suppress_default_system(tok, messages, family_);
+    const bool cont = continuing_(eff_msgs);
     // Prefer Jinja2 rendering when available (data-driven from GGUF).
     // Falls back to hardcoded families if Jinja rendering fails.
     if (use_jinja_ && jinja_tpl_) {
         auto tokens = apply_jinja(tok, eff_msgs, true, suppress_thinking, force_thinking,
                                   reasoning_effort);
         if (!tokens.empty()) {
-            harmony_open_final_(tok, tokens, suppress_thinking);
+            if (!cont)
+                harmony_open_final_(tok, tokens, suppress_thinking);
             return tokens;
         }
         IMP_LOG_WARN("Jinja2 render produced empty result, falling back to hardcoded template");
     }
+    if (cont)
+        return continue_after_history_(tok, eff_msgs,
+                                       [&](const ChatTemplate& t, const std::vector<ChatMessage>& h) {
+                                           return t.apply(tok, h, suppress_thinking, force_thinking,
+                                                          reasoning_effort);
+                                       });
 
     switch (family_) {
         case ChatTemplateFamily::CHATML:
@@ -724,13 +732,14 @@ std::string ChatTemplate::render_jinja(const Tokenizer& tok, const std::vector<C
                                        bool force_thinking, const std::string& reasoning_effort) const {
     if (!jinja_tpl_)
         return {};
+    const bool cont = continuing_(msgs);
 
     // Build Jinja2 context
     jinja::Context ctx;
     ctx["messages"] = jinja::Value(build_jinja_messages(msgs, suppress_thinking));
     // HF apply_chat_template passes tools=None: `tools is defined` holds without tools (#2269).
     ctx["tools"] = jinja::Value();
-    ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
+    ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt && !cont);
     // Stamp enable_thinking only when the caller has an opinion: Qwen3 defaults undefined to an
     // open <think>, Gemma-4 to a pre-closed thought block. force_thinking opens a template's
     // default-closed block (e.g. Qwen3.5-4B); suppress wins if both are set.
@@ -752,6 +761,14 @@ std::string ChatTemplate::render_jinja(const Tokenizer& tok, const std::vector<C
     if (rendered.empty()) {
         IMP_LOG_WARN("Jinja2 render returned empty string (error: %s)", jinja_tpl_->error().c_str());
         return {};
+    }
+    if (cont) {
+        rendered = cut_after_final_content(rendered, msgs.back().content);
+        if (rendered.empty()) {
+            IMP_LOG_WARN(
+                "Jinja2 render dropped the final assistant text; continuing after the generation prompt");
+            return {};
+        }
     }
     IMP_LOG_DEBUG("Jinja2 rendered (%zu chars)", rendered.size());
     if (imp::process_diag_debug_template()) {
@@ -866,7 +883,8 @@ std::vector<int32_t> ChatTemplate::apply_jinja_with_tools(
     ctx["messages"] = jinja::Value(build_jinja_messages(msgs, suppress_thinking));
     ctx["tools"] = jinja::Value(std::move(tools_arr));
     ctx["tool_choice"] = jinja::Value(tool_choice);
-    ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
+    const bool cont = continuing_(msgs);
+    ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt && !cont);
     // Same defaults rationale as apply_jinja, tools-aware path. Default enable_thinking=true
     // when tools are present: Gemma-4 emits tool_calls via a thought-channel decision, and the
     // template auto-closes the channel with empty content when thinking is off.
@@ -886,6 +904,11 @@ std::vector<int32_t> ChatTemplate::apply_jinja_with_tools(
     if (rendered.empty()) {
         IMP_LOG_WARN("Jinja2 tools render returned empty string (error: %s)", jinja_tpl_->error().c_str());
         return {};
+    }
+    if (cont) {
+        rendered = cut_after_final_content(rendered, msgs.back().content);
+        if (rendered.empty())
+            return {};  // caller falls back to the text tool prompt, whose apply() continues
     }
     IMP_LOG_DEBUG("Jinja2 tools rendered (%zu chars): %.200s", rendered.size(), rendered.c_str());
 

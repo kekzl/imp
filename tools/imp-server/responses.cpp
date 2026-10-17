@@ -112,6 +112,9 @@ json responses_to_openai_body(const json& rsp) {
         }
     }
     oai["messages"] = std::move(messages);
+    // Assistant prefill (imp extension, the chat field): continue a trailing assistant input item.
+    if (rsp.contains("continue_final_message"))
+        oai["continue_final_message"] = rsp["continue_final_message"];
 
     // Tools: Responses uses a FLAT function shape ({type, name, parameters});
     // chat/completions nests it under `function`.

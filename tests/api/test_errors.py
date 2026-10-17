@@ -98,6 +98,29 @@ class TestParameterValidation:
         assert r.status_code == 400
         assert "n" in r.json()["error"]["message"].lower()
 
+    @pytest.mark.parametrize("last", [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "  \n"},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+    ])
+    def test_continue_final_message_needs_assistant_text(self, client, model, last):
+        msgs = [{"role": "user", "content": "Hi"}] if last["role"] != "user" else []
+        r = client.post("/v1/chat/completions", json={
+            "model": model, "messages": msgs + [last], "continue_final_message": True,
+        })
+        assert r.status_code == 400, r.text[:200]
+        assert "continue_final_message" in r.json()["error"]["message"]
+
+    def test_continue_final_message_with_generation_prompt(self, client, model):
+        r = client.post("/v1/chat/completions", json={
+            "model": model,
+            "messages": [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Sure"}],
+            "continue_final_message": True, "add_generation_prompt": True,
+        })
+        assert r.status_code == 400, r.text[:200]
+        assert "add_generation_prompt" in r.json()["error"]["message"]
+
     def test_max_tokens_null_is_not_a_crash(self, client, model):
         """`max_tokens: null` is the SDK default for "unset", not an error.
 

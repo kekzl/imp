@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 namespace imp {
@@ -126,6 +127,14 @@ public:
     }
     const std::shared_ptr<TranscriptIdStore>& transcript_store() const { return transcript_store_; }
 
+    // HF continue_final_message: a trailing assistant message is a prefix the model continues.
+    // Jinja renders without the generation prompt and cuts after its text; hardcoded families
+    // render the history with the generation prompt and append the text. Per-request copies only.
+    void set_continue_final(bool on) { continue_final_ = on; }
+    // `rendered` up to the end of `final_content` (HF transformers rule: last occurrence of the
+    // stripped text, keeping its leading-space-stripped form when verbatim). Empty if absent.
+    static std::string cut_after_final_content(const std::string& rendered, const std::string& final_content);
+
     // Special token accessors (for banned token list)
     int32_t im_start_id() const { return im_start_id_; }
     int32_t start_header_id() const { return start_header_id_; }
@@ -214,6 +223,16 @@ private:
 
     // Shared helper: split rendered string on control tokens and encode
     std::vector<int32_t> tokenize_rendered(const Tokenizer& tok, const std::string& rendered) const;
+
+    bool continue_final_ = false;
+    // set_continue_final() is on and the last message is an assistant turn with text to continue.
+    [[nodiscard]] bool continuing_(const std::vector<ChatMessage>& msgs) const;
+    // Fallback continuation: `render` on a copy with continuation off over all but the last
+    // message (generation prompt included), then the last message's text appended.
+    std::vector<int32_t> continue_after_history_(
+        const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
+        const std::function<std::vector<int32_t>(const ChatTemplate&, const std::vector<ChatMessage>&)>&
+            render) const;
 
     // Auto-detect stop tokens from a rendered Jinja2 context
     void auto_detect_stop_tokens(const jinja::Context& ctx) const;
