@@ -150,6 +150,11 @@ TEST_F(PrefixCacheE2ETest, PrefixCacheMatchesNoCacheBaseline) {
     std::string baseline = gen(kPrompt, kGen);
     imp_context_free(ctx_);
     ctx_ = nullptr;
+    // An engine may consume the handle's source tensors (Q8_0 keeps only its IMMA planes,
+    // #2712); a second engine needs a fresh handle (engine.cpp refuses it).
+    imp_model_free(model_);
+    model_ = nullptr;
+    ASSERT_EQ(imp_model_load(path_.c_str(), fmt_, &model_), IMP_SUCCESS);
 
     // Caching ON, warm the cache, then the hit run.
     MakeContext(/*prefix_cache=*/true);
