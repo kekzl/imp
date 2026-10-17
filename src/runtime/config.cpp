@@ -528,8 +528,14 @@ void seed_from_env(RuntimeConfig& cfg) {
 
     // attention.fmha_fa2: IMP_FMHA_FA2 '1' enables the register-resident FA2
     // prefill kernel (A/B vs the legacy FP8 FMHA), '0' forces it off.
-    if (const char* e = std::getenv("IMP_FMHA_FA2"))
-        cfg.attention.fmha_fa2 = (std::atoi(e) != 0) ? "on" : "never";
+    if (const char* e = std::getenv("IMP_FMHA_FA2")) {
+        bool ok = true;
+        const bool on = parse_bool(e, false, &ok);
+        if (ok)
+            cfg.attention.fmha_fa2 = on ? "on" : "never";
+        else
+            IMP_LOG_WARN("IMP_FMHA_FA2='%s' is not a boolean (0/1); ignored", e);
+    }
 
     // diagnostics.spec_trace / jump_trace / ppl_dump: presence-is-truth
     // (empty value counts as ON) to match old shell/getenv() habits.

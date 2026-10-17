@@ -3,6 +3,7 @@
 
 #include "gptq.h"
 
+#include "compute/cublas_handle.h"
 #include "core/logging.h"
 #include "quant/nvfp4_pack.cuh"
 
@@ -206,15 +207,16 @@ std::expected<Result, std::string> quantize_nvfp4(const uint16_t* w_fp16, int64_
 
     // U = upper Cholesky factor of H^-1: potrf + potri (lower), mirror, potrf (upper).
     cusolverDnHandle_t sol = nullptr;
-    cublasHandle_t bl = nullptr;
-    if (cusolverDnCreate(&sol) != CUSOLVER_STATUS_SUCCESS || cublasCreate(&bl) != CUBLAS_STATUS_SUCCESS)
-        return std::unexpected("cuSOLVER / cuBLAS handle creation failed");
+    if (cusolverDnCreate(&sol) != CUSOLVER_STATUS_SUCCESS)
+        return std::unexpected("cuSOLVER handle creation failed");
+    cublasHandle_t bl = cublas_handle_create("imp-quantize::gptq", CUBLAS_DEFAULT_MATH);
     struct Handles {
         cusolverDnHandle_t s;
         cublasHandle_t b;
         ~Handles() {
-            if (cusolverDnDestroy(s) != CUSOLVER_STATUS_SUCCESS || cublasDestroy(b) != CUBLAS_STATUS_SUCCESS)
-                std::fprintf(stderr, "gptq: handle destroy failed\n");
+            if (cusolverDnDestroy(s) != CUSOLVER_STATUS_SUCCESS)
+                std::fprintf(stderr, "gptq: cuSOLVER handle destroy failed\n");
+            cublas_handle_destroy(b);
         }
     } handles{sol, bl};
     const int k = static_cast<int>(K);
