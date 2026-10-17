@@ -862,6 +862,12 @@ ImpError imp_calibration_write(ImpContext ctx, const char* path) {
             return IMP_ERROR_INTERNAL;
         }
         IMP_LOG_INFO("Calibration written: %s (%zu entries)", path, stats.entries.size());
+        // GPTQ second moments (row 101): <path>.hess, nothing when calibration.hessian is off.
+        if (const std::string herr = calib->write_hessians(std::string(path) + ".hess", nullptr);
+            !herr.empty()) {
+            IMP_LOG_ERROR("imp_calibration_write: %s", herr.c_str());
+            return IMP_ERROR_INTERNAL;
+        }
         return IMP_SUCCESS;
     } catch (const std::exception& ex) {
         IMP_LOG_ERROR("imp_calibration_write: %s", ex.what());

@@ -46,7 +46,22 @@ public:
 
     bool empty() const { return entries_.empty() && expert_entries_.empty(); }
 
+    // GPTQ second moments (row 101, quant/calibration_hessian.h): H += x^T x per (layer, kind),
+    // FP32 [K, K]; WK, WV and W_UP share the input of WQ / W_GATE and add nothing.
+    void enable_hessian() { hessian_ = true; }
+    std::string write_hessians(const std::string& path, cudaStream_t stream) const;
+
 private:
+    void accumulate_hessian_(int layer, TensorKind kind, const Tensor& input, int64_t row_stride,
+                             cudaStream_t stream);
+    struct HessEntry {
+        float* d_H = nullptr;
+        int64_t K = 0;
+        uint64_t rows = 0;  // rows in H
+    };
+    std::map<uint32_t, HessEntry> hess_;  // same key as entries_
+    bool hessian_ = false;
+    void* cublas_ = nullptr;  // cublasHandle_t, created on the first Hessian GEMM
     struct Entry {
         double* d_sum = nullptr;  // [K], FP64 so long corpora do not lose the tail
         int64_t K = 0;

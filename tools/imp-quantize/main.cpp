@@ -42,6 +42,7 @@
 #include "quant/calibration_stats.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_quant.h"
+#include "quantize_weight.h"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -62,6 +63,8 @@
 namespace fs = std::filesystem;
 using namespace imp;
 using imp::quantize::Options;
+using imp::quantize::quantize_one;
+using imp::quantize::Quantized;
 
 namespace {
 
@@ -88,55 +91,6 @@ std::vector<unsigned char> folded_copy(const RawTensor& t, const std::vector<flo
     std::vector<unsigned char> out(t.nbytes);
     std::memcpy(out.data(), t.data, t.nbytes);
     ok = awq_apply_vector_div(out.data(), static_cast<size_t>(t.numel()), t.dtype, div, offset);
-    return out;
-}
-
-// Quantize one host FP16 matrix, returning host-side packed data + scales.
-struct Quantized {
-    std::vector<unsigned char> packed;  // [N, K/2]
-    std::vector<unsigned char> micro;   // [N, K/16] FP8 E4M3
-    float tensor_scale = 1.0f;
-};
-
-// `forced_scale` > 0 quantizes against a scale decided elsewhere — the shared
-// scale of a fused group. At 0 the tensor's own absmax decides.
-std::expected<Quantized, std::string> quantize_one(const std::vector<uint16_t>& h_fp16, int64_t N, int64_t K,
-                                                   float forced_scale) {
-    Quantized out;
-    void* d_in = nullptr;
-    const size_t in_bytes = static_cast<size_t>(N) * static_cast<size_t>(K) * 2;
-    if (cudaMalloc(&d_in, in_bytes) != cudaSuccess)
-        return std::unexpected("cudaMalloc failed for " + std::to_string(in_bytes) + " bytes");
-    if (cudaMemcpy(d_in, h_fp16.data(), in_bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_in));
-        return std::unexpected("H2D copy failed");
-    }
-
-    int64_t shape[2] = {N, K};
-    Tensor in(d_in, QType::F16, 2, shape, /*on_device=*/true);
-
-    NvFP4QuantResult q;
-    const float scale = forced_scale > 0.0f ? forced_scale
-                                            : quantize::export_tensor_scale(
-                                                  quantize::fp16_absmax(h_fp16.data(), h_fp16.size()));
-    quantize_fp16_to_nvfp4_with_scale(in, scale, q);
-    if (cudaDeviceSynchronize() != cudaSuccess) {
-        IMP_CUDA_CHECK_LOG(cudaFree(d_in));
-        free_nvfp4_result(q);
-        return std::unexpected("quantization kernel failed");
-    }
-
-    out.packed.resize(static_cast<size_t>(N) * static_cast<size_t>(K / 2));
-    out.micro.resize(static_cast<size_t>(N) * static_cast<size_t>(K / 16));
-    out.tensor_scale = q.tensor_scale;
-    bool ok = cudaMemcpy(out.packed.data(), q.packed_data, out.packed.size(), cudaMemcpyDeviceToHost) ==
-                  cudaSuccess &&
-              cudaMemcpy(out.micro.data(), q.micro_scales, out.micro.size(), cudaMemcpyDeviceToHost) ==
-                  cudaSuccess;
-    IMP_CUDA_CHECK_LOG(cudaFree(d_in));
-    free_nvfp4_result(q);
-    if (!ok)
-        return std::unexpected("D2H copy failed");
     return out;
 }
 
@@ -635,6 +589,18 @@ int main(int argc, char** argv) {
         const auto it = forced_scale.find(name);
         return it == forced_scale.end() ? 0.0f : it->second;
     };
+    // GPTQ (row 101) for weights with a Hessian, round-to-nearest for the rest.
+    quantize::WeightQuantizer wq;
+    if (!opt.gptq_file.empty() && !opt.dry_run) {
+        if (const std::string err = wq.open_gptq(opt.gptq_file, opt.gptq_damp); !err.empty()) {
+            fprintf(stderr, "--gptq: %s\n", err.c_str());
+            return 1;
+        }
+    }
+    auto quantize_weight = [&](const std::string& name, const std::vector<uint16_t>& h, int64_t N,
+                               int64_t K) {
+        return wq.quantize(name, h, N, K, forced_of(name), plan.col_scale);
+    };
     // The three tensors one quantized module becomes, named and scaled for the
     // output format. `scale_store` owns the F32 until the shard is written, so
     // it must not reallocate — the callers reserve it per shard.
@@ -769,7 +735,7 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 const std::vector<uint16_t>& h = *widened;
-                auto quantized = quantize_one(h, N, K, forced_of(t.name));
+                auto quantized = quantize_weight(t.name, h, N, K);
                 if (!quantized) {
                     fprintf(stderr, "  %s: %s\n", t.name.c_str(), quantized.error().c_str());
                     return 1;
@@ -844,7 +810,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
             const std::vector<uint16_t>& h = *widened;
-            auto quantized = quantize_one(h, N, K, forced_of(t.name));
+            auto quantized = quantize_weight(t.name, h, N, K);
             if (!quantized) {
                 fprintf(stderr, "  %s: %s\n", t.name.c_str(), quantized.error().c_str());
                 return 1;
@@ -928,6 +894,8 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (const std::string s = wq.summary(); !s.empty())
+        printf("%s\n", s.c_str());
     printf("\n%s: %zu tensors quantized, %zu copied, %s layout", opt.dry_run ? "dry run" : "done",
            n_quantized, n_copied, quantize::format_name(opt.format));
     if (!opt.dry_run && opt.calib_file.empty())

@@ -228,7 +228,7 @@ bool Engine::init_weights() {
         }
 
         if (runtime_config_.calibration.enabled) {
-            executor_->enable_calibration();
+            executor_->enable_calibration(runtime_config_.calibration.hessian);
             IMP_LOG_INFO("Activation calibration ON — collecting per-channel activation magnitudes.");
             // The collector allocates an accumulator the first time it sees a
             // weight, which a graph capture rejects outright.

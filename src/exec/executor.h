@@ -625,9 +625,11 @@ public:
     // channel activation magnitudes off gemm_via_handle_ for an offline
     // quantizer. Engine turns this on before the first forward and turns CUDA
     // graphs off with it, since the collector allocates lazily (a capture forbids that).
-    void enable_calibration() {
+    void enable_calibration(bool hessian = false) {
         if (!calib_)
             calib_ = std::make_unique<ActivationCalibrator>(vram_alloc_);
+        if (hessian)
+            calib_->enable_hessian();
     }
     const ActivationCalibrator* calibration() const { return calib_.get(); }
 
