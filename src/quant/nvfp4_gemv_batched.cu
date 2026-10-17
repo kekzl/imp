@@ -222,24 +222,33 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
 
 }  // namespace
 
-// PDL registration + MaxL1 carveout for the batched-M kernels production reaches:
-// gemv_nvfp4_kpar_mb_fp32_kernel<1..4> behind gemv_nvfp4_kpar_batched_fp32 (batched decode
-// LM head). Kernel waits before its first global read, triggers after its last (core/pdl.h
-// contract); until AUDIT_ARCH_2026 A2-2 it was instrumented but never registered, so
-// pdl::launch fell through to <<<>>> with a default graph edge. multirow_mb and
-// kpar_mb_fp16 kernels (test oracles only) stay unregistered.
+namespace {
+
+template <bool kAcc>
+void register_verify_mb() {
+    constexpr int NR = 8;  // = gemm_nvfp4_batched(_acc)
+    pdl::enable_kernel(gemv_nvfp4_multirow_mb_kernel<NR, 1, kAcc>);
+    pdl::enable_kernel(gemv_nvfp4_multirow_mb_kernel<NR, 2, kAcc>);
+    pdl::enable_kernel(gemv_nvfp4_multirow_mb_kernel<NR, 3, kAcc>);
+    pdl::enable_kernel(gemv_nvfp4_multirow_mb_kernel<NR, 4, kAcc>);
+    pdl::enable_kernel(gemv_nvfp4_kpar_mb_fp16_kernel<1, kAcc>);
+    pdl::enable_kernel(gemv_nvfp4_kpar_mb_fp16_kernel<2, kAcc>);
+    pdl::enable_kernel(gemv_nvfp4_kpar_mb_fp16_kernel<3, kAcc>);
+    pdl::enable_kernel(gemv_nvfp4_kpar_mb_fp16_kernel<4, kAcc>);
+}
+
+}  // namespace
+
+// PDL for every batched-M kernel: kpar_mb_fp32 (batched decode LM head) and
+// the multirow_mb / kpar_mb_fp16 spec-verify chunk kernels (gemm_nvfp4_batched(_acc)). Each
+// waits before its first global read (core/pdl_device.cuh contract).
 void nvfp4_gemv_batched_pdl_register() {
-#define NVFP4_MB_REGISTER(kern)                                                    \
-    do {                                                                           \
-        pdl::enable_kernel(kern);                                                  \
-        cudaFuncSetAttribute(kern, cudaFuncAttributePreferredSharedMemoryCarveout, \
-                             cudaSharedmemCarveoutMaxL1);                          \
-    } while (0)
-    NVFP4_MB_REGISTER(gemv_nvfp4_kpar_mb_fp32_kernel<1>);
-    NVFP4_MB_REGISTER(gemv_nvfp4_kpar_mb_fp32_kernel<2>);
-    NVFP4_MB_REGISTER(gemv_nvfp4_kpar_mb_fp32_kernel<3>);
-    NVFP4_MB_REGISTER(gemv_nvfp4_kpar_mb_fp32_kernel<4>);
-#undef NVFP4_MB_REGISTER
+    pdl::enable_kernel(gemv_nvfp4_kpar_mb_fp32_kernel<1>);
+    pdl::enable_kernel(gemv_nvfp4_kpar_mb_fp32_kernel<2>);
+    pdl::enable_kernel(gemv_nvfp4_kpar_mb_fp32_kernel<3>);
+    pdl::enable_kernel(gemv_nvfp4_kpar_mb_fp32_kernel<4>);
+    register_verify_mb<false>();
+    register_verify_mb<true>();
 }
 
 // Batched-M FP32 GEMV for the LM head at batch>1: y[n_act,N_out]=x[n_act,K]@A^T. Reads the

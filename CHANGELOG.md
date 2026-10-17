@@ -12,6 +12,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `/metrics`: `imp_gpu_power_watts` and `imp_gpu_energy_joules_total` from NVML (`dlopen`, absent without libnvidia-ml). A 60-token Qwen3-4B Q8_0 chat reads 18.4 J on the driver counter.
 
 ### Changed
+- NVFP4 GEMVs register PDL without the MaxL1 carveout (it cost -5.3 % on the verify kernel), the speculative-verify GEMVs now with PDL. Qwen3.8-27B NVFP4 tg128 +0.54 %, 32 streams 1933.4 -> 1961.1 tok/s, MTP k=3 verify unchanged.
 - Host fp16/bf16/E4M3 conversion lives once in `core/fp_bits.h` (11 copies replaced, bit-identical over all 2^32 floats and every 8/16-bit input); the 8 lazy cuBLAS/cuBLASLt handles share one create helper that aborts naming the site (4 ignored a failed `cublasCreate`). SASS unchanged in 1023 kernels.
 - Launch-guard gate decides the 23 kernel launches inside `#define` bodies (a check in the body, or at every expansion before its function closes); test-only `ScratchStack` (213 lines) removed.
 - tokenizer.json pre-tokenizers run step by step on PCRE2 10.49 (Split with all behaviors and invert, ByteLevel, Digits, Punctuation, Whitespace) instead of hand-written family scanners; GGUF pre names map to their regex. 32 local tokenizers: 0 of 1210 parity records differ from HF; encode 1.20x slower on average.
