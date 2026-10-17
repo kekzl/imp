@@ -403,6 +403,34 @@ TEST(LogitLensParams, ParseRules) {
     }
 }
 
+// Classifier-free guidance (row 117): cfg_scale in [1, 10], cfg_negative_prompt a string, else 400.
+TEST(CfgParams, ParseRules) {
+    auto parse = [](const json& extra, float* scale = nullptr, std::string* neg = nullptr) {
+        json body = {{"model", "m"}, {"messages", json::array({{{"role", "user"}, {"content", "hi"}}})}};
+        body.update(extra);
+        httplib::Request req;
+        req.body = body.dump();
+        httplib::Response res;
+        ChatRequestContext ctx;
+        const bool ok = parse_chat_request_params(req, res, test_state(), ctx);
+        if (scale)
+            *scale = ctx.params.cfg_scale;
+        if (neg)
+            *neg = ctx.params.cfg_negative_prompt;
+        return ok ? 200 : res.status;
+    };
+    float s = 0.0f;
+    std::string neg;
+    EXPECT_EQ(parse({{"cfg_scale", 2.5}, {"cfg_negative_prompt", "be terse"}}, &s, &neg), 200);
+    EXPECT_FLOAT_EQ(s, 2.5f);
+    EXPECT_EQ(neg, "be terse");
+    EXPECT_EQ(parse(json::object(), &s), 200);
+    EXPECT_FLOAT_EQ(s, 1.0f);  // unguided by default
+    for (const json& bad : {json{{"cfg_scale", 0.5}}, json{{"cfg_scale", 11}}, json{{"cfg_scale", "3"}},
+                            json{{"cfg_negative_prompt", 3}}})
+        EXPECT_EQ(parse(bad), 400) << bad.dump();
+}
+
 // Banned phrases (row 118): 1..64 non-empty strings of at most 256 bytes, else 400.
 TEST(BannedStringsParams, ParseRules) {
     auto parse = [](const json& v, std::vector<std::string>* out = nullptr) {

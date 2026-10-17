@@ -41,6 +41,8 @@ struct ChatRequestParams : SamplingFields {
     bool json_mode = false, req_logprobs = false, include_usage = false;
     int logit_lens = 0;  // top-N per layer (row 115), 0 = off
     std::vector<std::string> banned_strings;  // row 118: a completed phrase is rewound and banned
+    float cfg_scale = 1.0f;                   // row 117: classifier-free guidance weight (> 1 guides)
+    std::string cfg_negative_prompt;          // row 117: system message of the shadow prompt ("" = none)
     // cache_prefix_messages: leading chat-message count forming the cacheable prefix (-1 = whole
     // prompt). Set by anthropic_to_openai_body; shifted when a system message is injected in front
     // (tool-prompt fallback).
@@ -127,6 +129,8 @@ struct ChatStateSnapshot {
     bool mtp_head_loaded = false;
     bool logit_lens_ok = false;
     bool phrase_ban_ok = false;
+    bool cfg_ok = false;
+    std::vector<int32_t> cfg_tokens;  // row 117: the shadow prompt, cfg_render_negative
     imp::Tokenizer* tok = nullptr;
     imp::ChatTemplate chat_tpl;
     bool have_template = false;
@@ -258,6 +262,7 @@ inline void snapshot_mtp_state_(const State& state, Snap& snap) {
     snap.mtp_head_present = state.mtp_head_present.load(std::memory_order_relaxed);
     snap.logit_lens_ok = state.logit_lens_ok.load(std::memory_order_relaxed);
     snap.phrase_ban_ok = state.phrase_ban_ok.load(std::memory_order_relaxed);
+    snap.cfg_ok = state.cfg_ok.load(std::memory_order_relaxed);
     snap.mtp_head_loaded = state.mtp_head_loaded.load(std::memory_order_relaxed);
 }
 
@@ -381,6 +386,11 @@ struct ExtensionError {
     const char* param = nullptr;
 };
 ExtensionError extension_error(const ChatRequestContext& ctx);
+// Classifier-free guidance (row 117): "cfg_scale" in [1, 10], "cfg_negative_prompt"; "" or the 400 message.
+std::string parse_cfg_fields(const nlohmann::json& body, ChatRequestParams& p);
+// The shadow prompt into ctx.snap.cfg_tokens: the messages with the system message replaced by
+// cfg_negative_prompt (dropped when empty), rendered like the main prompt. No-op without guidance.
+void cfg_render_negative(ChatRequestContext& ctx, bool force_thinking);
 
 // Reply thinking state from the rendered prompt tail; appends <think>\n when it opens
 // (handlers_chat_thinking.cpp).

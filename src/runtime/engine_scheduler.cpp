@@ -117,6 +117,7 @@ IMP_REGISTER_CUDA_STATIC_RESET(engine_scheduler_reset_static_cuda_state);
 
 bool Engine::step_impl_() {
     mixed_served_this_step_ = false;
+    cfg_tick_();  // guidance: release held owners, end shadows of finished owners (row 117)
     const bool s_ot = runtime_config_.diagnostics.step_timing;
     std::chrono::steady_clock::time_point o0, o1, o2, o3, o4;
     if (s_ot)
@@ -1019,6 +1020,7 @@ void Engine::step_decode(cudaStream_t dec_stream) {
             continue;
         valid_decode.push_back(req);
     }
+    cfg_pair_rows_(valid_decode);  // guidance pairs run together or not at all (row 117)
 
     if (!valid_decode.empty()) {
         step_decode_forward(valid_decode, dec_stream);
@@ -1607,6 +1609,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             tp2 = std::chrono::steady_clock::now();
         // Eager sampling (handles all modes: greedy, top-k/p, penalties,
         // force_token, constraints, logprobs, mirostat)
+        cfg_combine_rows_(valid_decode, logits_out, dec_stream);  // guidance pairs (row 117), before sampling
         if (!piped)
             tokens = sample_decode_rows_(state, valid_decode, logits_out, dec_stream);
         if (s_timing)
@@ -1615,6 +1618,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             decode_logits_out = logits_out;
     } else {
         executor_->forward_logits(state, decode_logits_out, dec_stream);
+        cfg_combine_rows_(valid_decode, decode_logits_out, dec_stream);
         tokens = sample_decode_rows_(state, valid_decode, decode_logits_out, dec_stream);
     }
 
@@ -1835,6 +1839,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     }
 
     // Process outputs: logprobs extraction + token distribution
+    cfg_mirror_tokens_(valid_decode, tokens);  // a guidance shadow appends its owner's token
     step_decode_process_outputs(valid_decode, tokens, decode_logits_out, needs_logprobs, needs_constrained,
                                 dec_stream);
     if (s_timing) {
@@ -1861,39 +1866,6 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             g_step_timing = {};
         }
     }
-}
-
-// One decode row's sampled token: append, think state, FSM, finish.
-void Engine::decode_append_row_(std::shared_ptr<Request>& req, int32_t next_token, Tokenizer* tok,
-                                cudaStream_t stream) {
-    req->output_tokens.push_back(next_token);
-    if (phrase_after_append_(*req, stream))
-        return;  // banned phrase completed: rewound to its first token, the next step resamples there
-    track_think_state(*req, next_token);
-
-    IMP_LOG_DEBUG("Decode step %d (ctx=%d, pos=%d): id=%d [%s]", (int)req->output_tokens.size(),
-                  req->context_len(), req->context_len() - 1, next_token,
-                  tok->decode_token(next_token).c_str());
-
-    // Advance the FSM before finish_request: finishing returns the
-    // request's ConstraintManager to the engine pool.
-    if (req->constraints)
-        req->constraints->update(next_token);
-
-    if (should_stop(*req, next_token) || static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
-        if (bd_pipe_.in_flight) {
-            // A chained step is in flight and still WRITES this row's
-            // next KV slot: mark FINISHED (stream delivery proceeds)
-            // but defer the KV/slot release to the pipeline drain.
-            req->status = RequestStatus::FINISHED;
-            req->release_pending = true;
-            bd_pipe_.deferred_release.push_back(req);
-        } else {
-            finish_request(req);
-        }
-    }
-
-    kv_manager_->touch(req->id);
 }
 
 // =====================================================================
