@@ -130,6 +130,25 @@ TEST(LogprobShapes, TheStreamingVariantCarriesOneTokenAndItsOffset) {
     EXPECT_FLOAT_EQ(j["top_logprobs"][0]["lo"].get<float>(), -0.25f);
 }
 
+// Logit lens (row 115): one {rank, logprob, entropy, top} per layer on each chat content entry.
+TEST(LogprobShapes, ChatEntriesCarryTheLogitLens) {
+    std::vector<imp::TokenLogprobInfo> lps = {lp("a", -0.1f), lp("b", -0.2f)};
+    imp::LogitLensLayer l0{-3.0f, 7, 4.25f, {{1, -1.5f, "x"}, {2, -2.0f, "y"}}};
+    imp::LogitLensLayer l1{-0.1f, 1, 0.5f, {{3, -0.1f, "a"}}};
+    const std::vector<std::vector<imp::LogitLensLayer>> lens = {{l0, l1}};  // only the first token
+    const json j = chat_logprobs_json(lps, lps.size(), &lens);
+    const json& e = j["content"][0]["logit_lens"];
+    ASSERT_EQ(e.size(), 2u);
+    EXPECT_EQ(e[0]["rank"].get<int>(), 7);
+    EXPECT_FLOAT_EQ(e[0]["logprob"].get<float>(), -3.0f);
+    EXPECT_FLOAT_EQ(e[0]["entropy"].get<float>(), 4.25f);
+    ASSERT_EQ(e[0]["top"].size(), 2u);
+    EXPECT_EQ(e[0]["top"][1]["token"].get<std::string>(), "y");
+    EXPECT_EQ(e[1]["rank"].get<int>(), 1);
+    EXPECT_FALSE(j["content"][1].contains("logit_lens"));  // no lens entry for token 2
+    EXPECT_FALSE(chat_logprobs_json(lps, lps.size())["content"][0].contains("logit_lens"));
+}
+
 TEST(LogprobShapes, LimitTruncatesBothShapes) {
     std::vector<imp::TokenLogprobInfo> lps = {lp("a", -1.0f), lp("b", -1.0f), lp("c", -1.0f)};
     EXPECT_EQ(chat_logprobs_json(lps, 2)["content"].size(), 2u);

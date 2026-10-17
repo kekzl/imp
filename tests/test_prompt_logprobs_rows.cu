@@ -17,6 +17,7 @@ namespace {
 
 struct RowRef {
     float lp = 0.0f;
+    float entropy = 0.0f;  // nats
     int32_t rank = 0;
     std::vector<int32_t> top_ids;
     std::vector<float> top_lp;
@@ -36,6 +37,11 @@ RowRef ref_row(const float* x, int V, int32_t t, int top_n) {
     RowRef r;
     r.lp = static_cast<float>(static_cast<double>(x[t]) - lse);
     r.rank = above + 1;
+    double ex = 0.0;  // E[x] under softmax(x)
+    for (int j = 0; j < V; ++j)
+        if (!std::isinf(x[j]))
+            ex += std::exp(static_cast<double>(x[j]) - lse) * static_cast<double>(x[j]);
+    r.entropy = static_cast<float>(lse - ex);
     std::vector<int32_t> idx(V);
     std::iota(idx.begin(), idx.end(), 0);
     std::partial_sort(idx.begin(), idx.begin() + top_n, idx.end(),
@@ -73,7 +79,7 @@ std::vector<float> make_logits(int rows, int V, uint32_t seed) {
     return x;
 }
 
-void run_case(int rows, int V, int slab_w, int top_n, uint32_t seed) {
+void run_case(int rows, int V, int slab_w, int top_n, uint32_t seed, bool entropy = true) {
     SCOPED_TRACE(testing::Message() << "rows=" << rows << " V=" << V << " slab_w=" << slab_w
                                     << " top_n=" << top_n);
     const std::vector<float> rm = make_logits(rows, V, seed);
@@ -88,11 +94,13 @@ void run_case(int rows, int V, int slab_w, int top_n, uint32_t seed) {
     targets[0] = static_cast<int32_t>(row0_max);
     const std::vector<float> dev_layout = (slab_w >= V) ? rm : to_slabs(rm, rows, V, slab_w);
 
-    float *d_x = nullptr, *d_lp = nullptr, *d_tlp = nullptr;
+    float *d_x = nullptr, *d_lp = nullptr, *d_tlp = nullptr, *d_ent = nullptr;
     int32_t *d_t = nullptr, *d_rank = nullptr, *d_tid = nullptr;
     const size_t ntop = static_cast<size_t>(rows) * std::max(top_n, 1);
     ASSERT_EQ(cudaMalloc(&d_x, dev_layout.size() * sizeof(float)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_lp, rows * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_ent, rows * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMemset(d_ent, 0xFF, rows * sizeof(float)), cudaSuccess);  // NaN: untouched stays visible
     ASSERT_EQ(cudaMalloc(&d_tlp, ntop * sizeof(float)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_t, rows * sizeof(int32_t)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&d_rank, rows * sizeof(int32_t)), cudaSuccess);
@@ -100,16 +108,18 @@ void run_case(int rows, int V, int slab_w, int top_n, uint32_t seed) {
     cudaMemcpy(d_x, dev_layout.data(), dev_layout.size() * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_t, targets.data(), rows * sizeof(int32_t), cudaMemcpyHostToDevice);
     prompt_logprobs_rows(d_x, rows, V, slab_w, d_t, top_n, d_lp, d_rank, top_n > 0 ? d_tid : nullptr,
-                         top_n > 0 ? d_tlp : nullptr, nullptr);
+                         top_n > 0 ? d_tlp : nullptr, nullptr, entropy ? d_ent : nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-    std::vector<float> lp(rows), tlp(ntop);
+    std::vector<float> lp(rows), tlp(ntop), ent(rows);
     std::vector<int32_t> rank(rows), tid(ntop);
     cudaMemcpy(lp.data(), d_lp, rows * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(ent.data(), d_ent, rows * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(rank.data(), d_rank, rows * sizeof(int32_t), cudaMemcpyDeviceToHost);
     cudaMemcpy(tlp.data(), d_tlp, ntop * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(tid.data(), d_tid, ntop * sizeof(int32_t), cudaMemcpyDeviceToHost);
     for (void* p : {static_cast<void*>(d_x), static_cast<void*>(d_lp), static_cast<void*>(d_tlp),
-                    static_cast<void*>(d_t), static_cast<void*>(d_rank), static_cast<void*>(d_tid)})
+                    static_cast<void*>(d_ent), static_cast<void*>(d_t), static_cast<void*>(d_rank),
+                    static_cast<void*>(d_tid)})
         cudaFree(p);
 
     float max_diff = 0.0f;
@@ -117,6 +127,10 @@ void run_case(int rows, int V, int slab_w, int top_n, uint32_t seed) {
         const RowRef ref = ref_row(rm.data() + static_cast<size_t>(r) * V, V, targets[r], top_n);
         max_diff = std::max(max_diff, std::fabs(lp[r] - ref.lp));
         EXPECT_EQ(rank[r], ref.rank) << "row " << r;
+        if (entropy)
+            max_diff = std::max(max_diff, std::fabs(ent[r] - ref.entropy));
+        else
+            EXPECT_TRUE(std::isnan(ent[r])) << "row " << r << ": entropy written without a buffer";
         for (int k = 0; k < top_n; ++k) {
             const size_t o = static_cast<size_t>(r) * top_n + k;
             EXPECT_EQ(tid[o], ref.top_ids[k]) << "row " << r << " k " << k;
@@ -141,6 +155,11 @@ TEST(PromptLogprobsRows, SlabMajorMatchesReference) {
 TEST(PromptLogprobsRows, SmallVocabAndSingleRow) {
     run_case(/*rows=*/1, /*V=*/300, /*slab_w=*/300, /*top_n=*/20, 5u);
     run_case(/*rows=*/3, /*V=*/33, /*slab_w=*/33, /*top_n=*/20, 6u);
+}
+
+// Without an entropy buffer the kernel writes none (the prompt-logprobs callers).
+TEST(PromptLogprobsRows, EntropyOnlyWithBuffer) {
+    run_case(/*rows=*/4, /*V=*/5000, /*slab_w=*/1024, /*top_n=*/5, 7u, /*entropy=*/false);
 }
 
 }  // namespace

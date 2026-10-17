@@ -151,7 +151,7 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
         }
     }
 
-    Tensor hidden_all = view_tokens(hidden_, chunk_len);
+    Tensor hidden_all = lm_head_rows_(chunk_len);
     for (int c = 0; c < chunk_len; c += mb) {
         int csz = (chunk_len - c < mb) ? (chunk_len - c) : mb;
         Tensor hc = hidden_all.slice(c, c + csz);          // [csz, d]

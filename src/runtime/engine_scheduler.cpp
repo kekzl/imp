@@ -1518,7 +1518,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     std::vector<int32_t> tokens;
     Tensor decode_logits_out;
 
-    const bool profiling = runtime_config_.diagnostics.profile;
+    const bool profiling = decode_eager_only_(valid_decode);  // also arms the logit lens (row 115)
     int graph_idx = gpu_batch.n_sequences - 1;
     if (config_.use_cuda_graphs && !profiling && gpu_batch.n_sequences > 0 && graph_idx < kMaxGraphPoolSize &&
         decode_batch_pool_.is_allocated()) {
@@ -1909,6 +1909,8 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             slot++;
         }
     }
+
+    logit_lens_collect_(valid_decode, tokens, dec_stream);  // after the logits_ reads above; disarms the lens
 
     // Distribute sampled tokens back to requests
     for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {

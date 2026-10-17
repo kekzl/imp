@@ -230,7 +230,12 @@ json token_bytes_json(const std::string& text);
 // {"content":[{"token","logprob","bytes","top_logprobs"}]}, Completions is
 // {"tokens":[],"token_logprobs":[],"top_logprobs":[{tok:lp}],"text_offset":[]}.
 // /v1/completions returned the Chat shape until #1589. `text_offset` is byte offset from `text`'s start.
-json chat_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit);
+// lens (nullable, parallel to lps): each content entry gains "logit_lens" (logit_lens_json).
+json chat_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit,
+                        const std::vector<std::vector<imp::LogitLensLayer>>* lens = nullptr);
+// Logit lens of one token (row 115): [{"rank","logprob","entropy","top":[{"token","logprob"}]}], one per
+// layer.
+json logit_lens_json(const std::vector<imp::LogitLensLayer>& layers);
 json completions_logprobs_json(const std::vector<imp::TokenLogprobInfo>& lps, size_t limit,
                                const std::string& text);
 

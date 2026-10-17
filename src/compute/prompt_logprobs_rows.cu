@@ -70,13 +70,15 @@ __device__ __forceinline__ void plp_insert(float* s_v, int* s_i, int tid, int to
 __global__ void __launch_bounds__(kPlpRowThreads) prompt_logprobs_rows_kernel(
     const float* __restrict__ logits, int rows, int V, int slab_w, const int32_t* __restrict__ targets,
     int top_n, float* __restrict__ out_lp, int32_t* __restrict__ out_rank, int32_t* __restrict__ out_top_ids,
-    float* __restrict__ out_top_lp) {
+    float* __restrict__ out_top_lp, float* __restrict__ out_entropy) {
     extern __shared__ unsigned char plp_smem[];
     float* s_v = reinterpret_cast<float*>(plp_smem);  // [top_n][threads]
     int* s_i = reinterpret_cast<int*>(s_v + static_cast<size_t>(top_n) * kPlpRowThreads);
     __shared__ float s_m[kPlpRowThreads];
     __shared__ double s_s[kPlpRowThreads];
+    __shared__ double s_t[kPlpRowThreads];
     __shared__ int s_c[kPlpRowThreads];
+    const bool want_h = out_entropy != nullptr;
 
     const int row = blockIdx.x;
     const int tid = threadIdx.x;
@@ -91,8 +93,9 @@ __global__ void __launch_bounds__(kPlpRowThreads) prompt_logprobs_rows_kernel(
     }
     float kv = -INFINITY;  // this thread's N-th best so far
     int ki = INT_MAX;
-    float m = -INFINITY;  // running max; s = sum exp(x - m)
+    float m = -INFINITY;  // running max; s = sum exp(x - m), t = sum exp(x - m) * x (entropy only)
     double s = 0.0;
+    double t = 0.0;
     int above = 0;
     for (int n0 = 0; n0 < V; n0 += slab_w) {
         int w = 0;
@@ -101,10 +104,16 @@ __global__ void __launch_bounds__(kPlpRowThreads) prompt_logprobs_rows_kernel(
             const float v = lg[c];
             const int j = n0 + c;
             if (v > m) {
-                s = s * static_cast<double>(expf(m - v)) + 1.0;
+                const double r = static_cast<double>(expf(m - v));
+                s = s * r + 1.0;
+                if (want_h)
+                    t = (m > -INFINITY ? t * r : 0.0) + static_cast<double>(v);
                 m = v;
             } else if (v > -INFINITY) {
-                s += static_cast<double>(expf(v - m));
+                const double e = static_cast<double>(expf(v - m));
+                s += e;
+                if (want_h)
+                    t += e * static_cast<double>(v);
             }
             above += (v > tv || (v == tv && j < target)) ? 1 : 0;
             if (top_n > 0 && plp_better(v, j, kv, ki))
@@ -120,12 +129,15 @@ __global__ void __launch_bounds__(kPlpRowThreads) prompt_logprobs_rows_kernel(
         __syncthreads();
     }
     const float row_max = s_m[0];
-    s_s[tid] = (m > -INFINITY) ? s * exp(static_cast<double>(m) - static_cast<double>(row_max)) : 0.0;
+    const double shift = (m > -INFINITY) ? exp(static_cast<double>(m) - static_cast<double>(row_max)) : 0.0;
+    s_s[tid] = s * shift;
+    s_t[tid] = t * shift;
     s_c[tid] = above;
     __syncthreads();
     for (int st = kPlpRowThreads / 2; st > 0; st >>= 1) {
         if (tid < st) {
             s_s[tid] += s_s[tid + st];
+            s_t[tid] += s_t[tid + st];
             s_c[tid] += s_c[tid + st];
             if (top_n > 0)
                 plp_merge_lists(s_v, s_i, tid, tid + st, top_n);
@@ -136,6 +148,8 @@ __global__ void __launch_bounds__(kPlpRowThreads) prompt_logprobs_rows_kernel(
     if (tid == 0) {
         out_lp[row] = static_cast<float>(static_cast<double>(tv) - lse);
         out_rank[row] = s_c[0] + 1;
+        if (want_h)  // H = lse - E[x], nats
+            out_entropy[row] = static_cast<float>(lse - s_t[0] / s_s[0]);
     }
     if (tid < top_n) {
         const int64_t o = static_cast<int64_t>(row) * top_n + tid;
@@ -148,7 +162,8 @@ __global__ void __launch_bounds__(kPlpRowThreads) prompt_logprobs_rows_kernel(
 }  // namespace
 
 void prompt_logprobs_rows(const float* logits, int rows, int V, int slab_w, const int32_t* targets, int top_n,
-                          float* lp, int32_t* rank, int32_t* top_ids, float* top_lp, cudaStream_t stream) {
+                          float* lp, int32_t* rank, int32_t* top_ids, float* top_lp, cudaStream_t stream,
+                          float* entropy) {
     if (rows <= 0 || V <= 0 || !logits || !targets || !lp || !rank)
         return;
     IMP_CHECK(top_n >= 0 && top_n <= kPlpMaxTopN, "prompt_logprobs_rows: top_n %d outside [0, %d]", top_n,
@@ -158,7 +173,7 @@ void prompt_logprobs_rows(const float* logits, int rows, int V, int slab_w, cons
     const int sw = (slab_w <= 0 || slab_w > V) ? V : slab_w;
     const size_t smem = static_cast<size_t>(top_n) * kPlpRowThreads * (sizeof(float) + sizeof(int));
     prompt_logprobs_rows_kernel<<<rows, kPlpRowThreads, smem, stream>>>(logits, rows, V, sw, targets, top_n,
-                                                                        lp, rank, top_ids, top_lp);
+                                                                        lp, rank, top_ids, top_lp, entropy);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

@@ -217,6 +217,20 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
         ctx.params.top_logprobs = 0;
     if (ctx.params.top_logprobs > 20)
         ctx.params.top_logprobs = 20;
+    // Logit lens (row 115): true = top 5 per layer, an integer 1..20 = top N; implies logprobs.
+    if (const auto ll = body.find("logit_lens"); ll != body.end() && !ll->is_null()) {
+        if (ll->is_boolean()) {
+            ctx.params.logit_lens = ll->get<bool>() ? 5 : 0;
+        } else if (ll->is_number_integer() && ll->get<int64_t>() >= 0 && ll->get<int64_t>() <= 20) {
+            ctx.params.logit_lens = static_cast<int>(ll->get<int64_t>());
+        } else {
+            send_json_error(res, 400, "invalid_request_error",
+                            "\"logit_lens\" must be a boolean or an integer 0..20", "logit_lens");
+            return false;
+        }
+        if (ctx.params.logit_lens > 0)
+            ctx.params.req_logprobs = true;
+    }
 
     // Parse response_format for JSON mode / JSON Schema / regex
     if (body.contains("response_format") && body["response_format"].is_object()) {

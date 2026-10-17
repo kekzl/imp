@@ -365,4 +365,42 @@ TEST(SamplingParamsGolden, EveryDialectMatchesTheRecordedParse) {
     std::printf("[sampling golden] %zu dialects x %zu bodies = %zu cases\n", got.size(), cases().size(), n);
 }
 
+// Logit lens (row 115): true = 5, an integer 0..20 = that N, anything else 400; on implies logprobs.
+TEST(LogitLensParams, ParseRules) {
+    struct Out {
+        bool ok;
+        int status, lens;
+        std::string body;
+        bool logprobs;
+    };
+    auto parse = [](const json& lens) {
+        json body = {{"model", "m"}, {"messages", json::array({{{"role", "user"}, {"content", "hi"}}})}};
+        body["logit_lens"] = lens;
+        httplib::Request req;
+        req.body = body.dump();
+        httplib::Response res;
+        ChatRequestContext ctx;
+        const bool ok = parse_chat_request_params(req, res, test_state(), ctx);
+        return Out{ok, res.status, ctx.params.logit_lens, res.body, ctx.params.req_logprobs};
+    };
+    const Out t = parse(true);
+    EXPECT_TRUE(t.ok);
+    EXPECT_EQ(t.lens, 5);
+    EXPECT_TRUE(t.logprobs);
+    const Out three = parse(3);
+    EXPECT_EQ(three.lens, 3);
+    EXPECT_TRUE(three.logprobs);
+    for (const json& off : {json(false), json(0), json(nullptr)}) {
+        const Out o = parse(off);
+        EXPECT_TRUE(o.ok) << off << " " << o.body;
+        EXPECT_EQ(o.lens, 0) << off;
+        EXPECT_FALSE(o.logprobs) << off;
+    }
+    for (const json& bad : {json(21), json(-1), json("5"), json(2.5)}) {
+        const Out o = parse(bad);
+        EXPECT_FALSE(o.ok) << bad;
+        EXPECT_EQ(o.status, 400) << bad;
+    }
+}
+
 }  // namespace

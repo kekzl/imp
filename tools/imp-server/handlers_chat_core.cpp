@@ -225,6 +225,13 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         send_json_error(res, 400, "invalid_request_error", err, "logit_bias");
         return false;
     }
+    if (ctx.params.logit_lens > 0 && !ctx.snap.logit_lens_ok) {
+        send_json_error(res, 400, "invalid_request_error",
+                        "\"logit_lens\" is not available for this model: its residual stream is not the "
+                        "d_model stream the LM head reads (gated-residual architecture)",
+                        "logit_lens");
+        return false;
+    }
 
     // Called after ensure_model_loaded (#1002): the request may have auto-loaded or switched the
     // model, so the grammar must derive from the template that actually renders this prompt, not
@@ -619,6 +626,9 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->prediction_tokens = ctx.snap.prediction_tokens;
     req->logprobs = ctx.params.req_logprobs;
     req->top_logprobs = ctx.params.top_logprobs;
+    req->logit_lens = ctx.params.logit_lens;
+    if (req->logit_lens > 0)  // the SSE thread reads entries while the worker appends: no reallocation
+        req->output_lens.reserve(static_cast<size_t>(std::max(req->max_tokens, 1)) + 1);
     req->json_mode = ctx.params.json_mode;
     req->json_schema = ctx.params.json_schema_str;
     req->regex_pattern = ctx.params.regex_pattern;
@@ -901,7 +911,8 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         // come out of utils.cpp now, so the two cannot drift apart again.
         json logprobs_obj = nullptr;
         if (ctx.params.req_logprobs && active_req) {
-            logprobs_obj = chat_logprobs_json(active_req->output_logprobs, output_ids.size());
+            logprobs_obj = chat_logprobs_json(active_req->output_logprobs, output_ids.size(),
+                                              ctx.params.logit_lens > 0 ? &active_req->output_lens : nullptr);
         }
 
         // Tool-call parsing runs even on finish=length: the model may emit a complete tool_call then

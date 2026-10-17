@@ -560,6 +560,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         // Control vector (row 114): after every residual and layer_out_scale, before the snapshot.
         if (cvec_ != nullptr && cvec_->layer_mask[i])
             control_vector_add_(i, n, stream);
+        // Logit lens (row 115): the residual the next layer reads.
+        if (!lens_rows_.empty())
+            lens_stash_(i, n, stream);
 
         // Layer-diff dump: Snapshot C — end-of-layer state (input to next layer).
         // Captures the final hidden state after attention, FFN/MoE, residuals,
