@@ -799,8 +799,9 @@ TEST(ChatTemplateVisionTest, GemmaSeveralImagesRenderOneBlockEach) {
             open++;
         else if (id == EOI)
             open--;
-        else if (id == IMG_SOFT)
+        else if (id == IMG_SOFT) {
             EXPECT_EQ(open, 1);
+        }
     }
     EXPECT_EQ(tpl.apply_with_image(tok, msgs, 4, false, false, "", 1), tpl.apply_with_image(tok, msgs, 4));
 }

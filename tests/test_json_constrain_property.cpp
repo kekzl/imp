@@ -535,8 +535,9 @@ TEST(JsonConstrainFsm, PrefilteredMaskMatchesSimulation) {
     for (size_t s = 0; s < walk.size(); s++) {
         const auto mask = c.mask_for_test(texts);
         for (size_t i = 0; i < texts.size(); i++) {
-            if (mask[i])
+            if (mask[i]) {
                 EXPECT_TRUE(c.sim_token_valid(texts[i])) << "step " << s << " allowed '" << texts[i] << "'";
+            }
         }
         EXPECT_TRUE(mask[walk[s]]) << "step " << s << " masked the walk token '" << texts[walk[s]] << "'";
         c.update(walk[s]);

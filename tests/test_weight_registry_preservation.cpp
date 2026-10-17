@@ -416,13 +416,15 @@ TEST(StoragePlanner, Q4KInPlaceHintKeepsDenseProjectionsUncopied) {
     hints.vram_budget_bytes = size_t{100} * 1024 * 1024 * 1024;
     hints.q4k_in_place = false;
     for (const auto& e : plan_storage(m, m.config_, hints).entries)
-        if (e.source_qtype == QType::Q4_K)
+        if (e.source_qtype == QType::Q4_K) {
             EXPECT_NE(e.tier, StorageTier::Undefined) << "hint off, kind " << static_cast<int>(e.kind);
+        }
     hints.q4k_in_place = true;
     m.profile_.is_dense = false;
     for (const auto& e : plan_storage(m, m.config_, hints).entries)
-        if (e.source_qtype == QType::Q4_K)
+        if (e.source_qtype == QType::Q4_K) {
             EXPECT_NE(e.tier, StorageTier::Undefined) << "MoE, kind " << static_cast<int>(e.kind);
+        }
 }
 
 TEST(StoragePlanner, Q6KSourcePreservesNVFP4UnderPreferHint) {

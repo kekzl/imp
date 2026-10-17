@@ -222,7 +222,7 @@ private:
         const char* reason;  // nullptr = plain token; is_last: finish reason
         bool finish_only;    // push_finish instead of push_token
         size_t pos = 0;      // output position of token_id
-        std::shared_ptr<const TokenExtras> extras;  // its logprob data, copied on the worker
+        std::shared_ptr<const TokenExtras> extras{};  // its logprob data, copied on the worker
     };
     std::thread notify_thread_;
     std::mutex nq_mutex_;
