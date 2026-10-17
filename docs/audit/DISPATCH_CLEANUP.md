@@ -1050,3 +1050,18 @@ C-017, nsys over one `imp-cli --bench` run (load, 3 x pp4096, decode): `cuKernel
 | C-017 | measured, no host-cost lever (0.29 % of launch API time); registry stays |
 | open | MaxL1 on dp4a (+8.2 %, SETTLED A1-3), `nvfp4_gdn_input`, MoE NVFP4 decode GEMVs not re-measured |
 | found | `PrefixCacheE2ETest.PrefixCacheMatchesNoCacheBaseline` red on main 72777c69 too: `imp_context_create` returns `IMP_ERROR_INTERNAL` (-7) |
+
+## 2026-10-17 C-018 follow-up: MaxL1 on `nvfp4_gdn_input` and the MoE NVFP4 KPAR decode GEMVs
+
+Arm B = main 00a34025 without the MaxL1 carveout on `gemv_nvfp4_gdn_input_kernel`; `scripts/verify_ab.sh`, 4 alternating pairs. Activity: nsys `--cuda-graph-trace=node` on arm B, Qwen3.8-27B-NVFP4-vllm pp128 + 64 decode tokens: 6240 `gemv_nvfp4_gdn_input_kernel` launches, 33.4 us mean.
+
+| model | tg128 A (pair 1..4) | tg128 B (pair 1..4) | paired decode delta | pp512 delta |
+|---|---|---|---|---|
+| Qwen3.8-27B-NVFP4-vllm | 96.87 / 96.85 / 96.87 / 96.77 | 96.83 / 96.79 / 96.81 / 96.82 | -0.03 % (3/4 negative) | -0.34 % (noise, pairs -4.36..+4.36) |
+| Qwen3.6-35B-A3B-NVFP4 | 339.49 / 339.44 / 339.62 / 339.61 | 338.88 / 339.03 / 339.15 / 338.97 | -0.16 % (4/4 negative) | +0.93 % |
+
+| row | status |
+|---|---|
+| `nvfp4_gdn_input` MaxL1 | kept: dropping it is -0.16 % (4/4) on Qwen3.6-35B, -0.03 % on Qwen3.8-27B |
+| MoE `gemv_nvfp4_moe_decode_kernel`, `gemv_nvfp4_moe_gate_up_fused_kernel` MaxL1 | not measurable locally: KPAR path only at K / 16 > 512 (`use_moe_multirow`, `src/quant/nvfp4_gemv_moe.cu`); every local NVFP4 MoE has K <= 2816 (hidden 2048..2816, expert intermediate 512..1856) and runs the MR kernels, which carry no carveout; kept |
+| dp4a MaxL1 | kept (+8.2 %, SETTLED A1-3) |

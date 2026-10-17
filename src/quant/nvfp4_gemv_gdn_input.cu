@@ -179,6 +179,7 @@ bool gemv_nvfp4_gdn_input_fused(const NvFP4QuantResult& w_in, const NvFP4QuantRe
 
 void nvfp4_gdn_input_pdl_register() {
     pdl::enable_kernel(gemv_nvfp4_gdn_input_kernel);
+    // MaxL1 kept: without it Qwen3.6-35B tg128 -0.16 % (4/4 pairs), unlike the GEMV family (C-018).
     IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(gemv_nvfp4_gdn_input_kernel,
                                             cudaFuncAttributePreferredSharedMemoryCarveout,
                                             cudaSharedmemCarveoutMaxL1));
