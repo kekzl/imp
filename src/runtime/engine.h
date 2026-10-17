@@ -544,6 +544,14 @@ private:
     void phrase_rewind_(Request& req, size_t pos, cudaStream_t stream);
     void phrase_ban_init_(Request& req) const;
     VramOwned<float> phrase_scratch_;  // [vocab] token-0 logits for a resample
+    struct PhraseRecurrent;            // hybrids: recurrent slabs + replay logprobs, engine_phrase_ban.cpp
+    struct PhraseRecurrentFree {
+        void operator()(PhraseRecurrent* p) const;
+    };
+    std::unordered_map<int, std::unique_ptr<PhraseRecurrent, PhraseRecurrentFree>> phrase_rec_;
+    PhraseRecurrent& phrase_rec_of_(int req_id);
+    void phrase_release_(int req_id);
+    void phrase_snapshot_(Request& req, int slot, int consumed, cudaStream_t stream);
     void decode_append_row_(std::shared_ptr<Request>& req, int32_t next_token, Tokenizer* tok,
                             cudaStream_t stream);
     // Classifier-free guidance (row 117, runtime/cfg_guidance.h): owner held until its shadow prefilled,
