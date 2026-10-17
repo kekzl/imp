@@ -435,6 +435,101 @@ TEST(AwqSites, DeepseekV2MlaFoldsQAndKvAIntoInputNormAndKvBIntoLatentNorm) {
     EXPECT_NE(site_of(sites, 'D'), nullptr);
 }
 
+// GLM-4.7-Flash (glm4_moe_lite, MLA with q_lora_rank 768): names from its model.safetensors.index.json.
+static std::set<std::string> glm_attention(const std::string& base) {
+    std::set<std::string> n = {base + "input_layernorm.weight", base + "post_attention_layernorm.weight"};
+    for (const char* p : {"q_a_proj", "q_a_layernorm", "q_b_proj", "kv_a_proj_with_mqa", "kv_a_layernorm",
+                          "kv_b_proj", "o_proj"})
+        n.insert(base + "self_attn." + p + ".weight");
+    return n;
+}
+
+TEST(AwqSites, GlmQLoraFoldsQaIntoInputNormAndQbIntoTheQLatentNorm) {
+    ASSERT_TRUE(arch_norm_convention("glm4_moe_lite").has_value());
+    EXPECT_EQ(*arch_norm_convention("glm4_moe_lite"), NormConvention::Plain);
+    const std::string base = "model.layers.1.";
+    auto n = glm_attention(base);
+    n.insert(base + "mlp.gate.weight");
+    for (const char* p : {"gate_proj", "up_proj", "down_proj"}) {
+        n.insert(base + "mlp.shared_experts." + std::string(p) + ".weight");
+        n.insert(base + "mlp.experts.0." + std::string(p) + ".weight");
+    }
+    const auto sites = layer_fold_sites(n, base, NormConvention::Plain, kAwqAllGroups);
+    const FoldSite* a = site_of(sites, 'A');
+    ASSERT_NE(a, nullptr);
+    EXPECT_EQ(a->members.size(), 2u);
+    EXPECT_TRUE(has_member(*a, "self_attn.q_a_proj.weight"));
+    EXPECT_TRUE(has_member(*a, "self_attn.kv_a_proj_with_mqa.weight"));
+    const FoldSite* q = site_of(sites, 'Q');
+    ASSERT_NE(q, nullptr);
+    EXPECT_EQ(q->producer, base + "self_attn.q_a_layernorm.weight");
+    ASSERT_EQ(q->members.size(), 1u);
+    EXPECT_TRUE(has_member(*q, "self_attn.q_b_proj.weight"));
+    EXPECT_EQ(q->calib_keys, std::vector<std::string>{"WQ"});
+    EXPECT_NE(site_of(sites, 'K'), nullptr);
+    const FoldSite* s = site_of(sites, 'S');
+    ASSERT_NE(s, nullptr);
+    EXPECT_EQ(s->producer, base + "mlp.shared_experts.up_proj.weight");
+    EXPECT_TRUE(has_member(*s, "mlp.shared_experts.down_proj.weight"));
+    EXPECT_EQ(s->kind, FoldKind::MatrixRows);
+    // Router + routed + shared experts read post_attention_layernorm: no B, no X.
+    EXPECT_EQ(site_of(sites, 'B'), nullptr);
+    EXPECT_EQ(site_of(sites, 'X'), nullptr);
+    // Q and S only on request.
+    const auto dflt = layer_fold_sites(n, base, NormConvention::Plain, kAwqDefaultGroups);
+    EXPECT_EQ(site_of(dflt, 'Q'), nullptr);
+    EXPECT_EQ(site_of(dflt, 'S'), nullptr);
+}
+
+// Nemotron-3-Nano (nemotron_h): names from its model.safetensors.index.json, one mixer per block.
+TEST(AwqSites, NemotronHMambaAttentionAndRelu2ExpertSites) {
+    ASSERT_TRUE(arch_norm_convention("nemotron_h").has_value());
+    const auto block = [](const std::string& base, std::initializer_list<const char*> mixer) {
+        std::set<std::string> n = {base + "norm.weight"};
+        for (const char* p : mixer)
+            n.insert(base + "mixer." + p);
+        return n;
+    };
+    const std::string m = "backbone.layers.0.";
+    const auto mamba = layer_fold_sites(block(m, {"in_proj.weight", "conv1d.weight", "conv1d.bias",
+                                                  "norm.weight", "A_log", "D", "dt_bias", "out_proj.weight"}),
+                                        m, NormConvention::Plain, kAwqAllGroups);
+    const FoldSite* g = site_of(mamba, 'G');
+    ASSERT_NE(g, nullptr);
+    EXPECT_EQ(g->producer, m + "norm.weight");
+    EXPECT_TRUE(has_member(*g, "mixer.in_proj.weight"));
+    const FoldSite* e = site_of(mamba, 'E');
+    ASSERT_NE(e, nullptr);
+    EXPECT_EQ(e->producer, m + "mixer.norm.weight");
+    EXPECT_EQ(e->tie, TieMode::Identity);  // the gated group norm weight is per channel
+
+    const std::string a = "backbone.layers.5.";
+    const auto attn = layer_fold_sites(block(a, {"q_proj.weight", "k_proj.weight", "v_proj.weight",
+                                                 "o_proj.weight"}),
+                                       a, NormConvention::Plain, kAwqAllGroups);
+    ASSERT_NE(site_of(attn, 'A'), nullptr);
+    EXPECT_EQ(site_of(attn, 'A')->members.size(), 3u);
+    ASSERT_NE(site_of(attn, 'C'), nullptr);
+
+    const std::string x = "backbone.layers.1.";
+    auto moe = block(x, {"gate.weight", "gate.e_score_correction_bias", "shared_experts.up_proj.weight",
+                         "shared_experts.down_proj.weight"});
+    for (int i = 0; i < 2; i++)
+        for (const char* p : {"up_proj.weight", "down_proj.weight"})
+            moe.insert(x + "mixer.experts." + std::to_string(i) + "." + p);
+    const auto sites = layer_fold_sites(moe, x, NormConvention::Plain, kAwqAllGroups);
+    int ys = 0;
+    for (const auto& s : sites)
+        if (s.group == 'Y') {
+            ys++;
+            EXPECT_TRUE(s.producer_sqrt) << "relu^2 experts take the square root of the divisor";
+        }
+    EXPECT_EQ(ys, 2);
+    ASSERT_NE(site_of(sites, 'S'), nullptr);
+    EXPECT_TRUE(site_of(sites, 'S')->producer_sqrt);
+    EXPECT_EQ(site_of(sites, 'G'), nullptr);  // the pre-norm also feeds the router: nothing folds into it
+}
+
 TEST(AwqSites, DeepseekV2MoeLayerHasNoMlpNormFold) {
     // post_attention_layernorm feeds the router, the routed and the shared experts: no B, no X.
     const std::string base = "model.layers.1.";

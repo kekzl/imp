@@ -30,7 +30,8 @@ namespace imp::awq {
 
 // AWQ scale groups, selectable to attribute a bad result. E and G exist only on qwen3_5 GDN
 // hybrids and are unmeasured against an uncalibrated twin.
-constexpr const char* kAwqAllGroups = "ABCDEGKXY";
+// Q (MLA q_lora q_b_proj into q_a_layernorm) and S (shared-expert down into up) are opt-in like K/X/Y.
+constexpr const char* kAwqAllGroups = "ABCDEGKQSXY";
 // X/Y are opt-in, no measured gain: Gemma-4-26B arms 17.10..17.37 PPL sit inside the RTN rounding band
 // 16.7551..19.0110 (8 tensor-scale shifts, sd 4.63 %, 14676 framed tokens).
 constexpr const char* kAwqDefaultGroups = "ABCDEG";
@@ -93,6 +94,7 @@ struct FoldSite {
     std::vector<std::string> calib_keys;   // statistic sources, merged by max
     std::string scan_prefix;               // "" = no unlisted-consumer scan
     std::vector<std::string> scan_exempt;  // suffixes that are not consumers
+    bool producer_sqrt = false;            // MatrixRows: consumer reads relu(producer)^2, rows take sqrt(1/s)
 };
 
 // producer channel for each of the K consumer input channels. Empty when the

@@ -19,6 +19,7 @@
 #include <cuda_fp16.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -325,6 +326,9 @@ std::expected<void, std::string> run_site(bool weight_sq,
         plan.vec_div[site.producer] = div;
         plan.vec_offset[site.producer] = site.offset;
     } else {
+        if (site.producer_sqrt)  // down(relu(c u)^2) = c^2 down(relu(u)^2): rows take sqrt of the divisor
+            for (float& d : div)
+                d = std::sqrt(d);
         plan.row_div[site.producer] = div;
         if (!site.producer_bias.empty() && index.count(site.producer_bias))
             plan.vec_div[site.producer_bias] = div;

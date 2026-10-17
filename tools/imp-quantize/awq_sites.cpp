@@ -32,7 +32,7 @@ std::vector<std::string> strs(const std::vector<const char*>& in) {
 // Qwen-MoE) and the expert indices that carry an up_proj, ascending.
 std::pair<std::string, std::vector<int64_t>> layer_experts(const std::set<std::string>& names,
                                                            const std::string& base) {
-    for (const char* p : {"experts.", "mlp.experts."}) {
+    for (const char* p : {"experts.", "mlp.experts.", "mixer.experts."}) {
         const std::string pre = base + p;
         std::set<int64_t> ids;
         for (auto it = names.lower_bound(pre); it != names.end() && it->compare(0, pre.size(), pre) == 0;
@@ -51,14 +51,108 @@ std::pair<std::string, std::vector<int64_t>> layer_experts(const std::set<std::s
     return {};
 }
 
+// Nemotron-H (backbone.layers.N.{norm, mixer.*}): one mixer per block, read through the block's
+// pre-norm. Mamba2: in_proj (G), out_proj into the gated group norm (E, per channel). Attention:
+// q/k/v (A), o_proj into v rows (C). MoE: non-gated relu^2 experts, so a Y/S row fold takes the
+// square root of the divisor; the pre-norm also feeds the router, so no X.
+std::vector<FoldSite> nemotron_h_fold_sites(const std::set<std::string>& names, const std::string& base,
+                                            const std::string& groups) {
+    const std::string mix = base + "mixer.";
+    const std::string pre = base + "norm.weight";
+    const std::vector<const char*> mamba_rest = {"conv1d.weight", "conv1d.bias", "norm.weight",
+                                                 "A_log",         "D",           "dt_bias"};
+    std::vector<FoldSite> out;
+    if (wants(groups, 'C') && has(names, mix + "o_proj.weight") && has(names, mix + "v_proj.weight")) {
+        FoldSite s;
+        s.group = 'C';
+        s.members = {mix + "o_proj.weight"};
+        s.producer = mix + "v_proj.weight";
+        s.kind = FoldKind::MatrixRows;
+        s.tie = TieMode::GqaValue;
+        s.calib_keys = {"WO"};
+        out.push_back(std::move(s));
+    }
+    const auto [experts, expert_ids] = layer_experts(names, base);
+    for (const int64_t e : wants(groups, 'Y') ? expert_ids : std::vector<int64_t>{}) {
+        const std::string ex = experts + std::to_string(e) + ".";
+        if (!has(names, ex + "down_proj.weight") || !has(names, ex + "up_proj.weight") ||
+            has(names, ex + "gate_proj.weight"))
+            continue;
+        FoldSite s;
+        s.group = 'Y';
+        s.members = {ex + "down_proj.weight"};
+        s.producer = ex + "up_proj.weight";
+        s.kind = FoldKind::MatrixRows;
+        s.producer_sqrt = true;
+        s.calib_keys = {"EXPERT_DOWN." + std::to_string(e)};
+        out.push_back(std::move(s));
+    }
+    const std::string sh = mix + "shared_experts.";
+    if (wants(groups, 'S') && has(names, sh + "down_proj.weight") && has(names, sh + "up_proj.weight") &&
+        !has(names, sh + "gate_proj.weight")) {
+        FoldSite s;
+        s.group = 'S';
+        s.members = {sh + "down_proj.weight"};
+        s.producer = sh + "up_proj.weight";
+        s.kind = FoldKind::MatrixRows;
+        s.producer_sqrt = true;
+        s.calib_keys = {"W_DOWN"};
+        out.push_back(std::move(s));
+    }
+    if (wants(groups, 'E') && has(names, mix + "out_proj.weight") && has(names, mix + "norm.weight")) {
+        FoldSite s;
+        s.group = 'E';
+        s.members = {mix + "out_proj.weight"};
+        s.producer = mix + "norm.weight";
+        s.kind = FoldKind::NormVector;
+        s.offset = NormOffset::Plain;
+        s.calib_keys = {"SSM_OUT"};
+        s.scan_prefix = mix;
+        s.scan_exempt = strs({"in_proj.weight", "conv1d.weight", "conv1d.bias", "A_log", "D", "dt_bias"});
+        out.push_back(std::move(s));
+    }
+    if (wants(groups, 'A') && has(names, pre)) {
+        auto members = present(names, mix, {"q_proj.weight", "k_proj.weight", "v_proj.weight"});
+        if (members.size() == 3) {
+            FoldSite s;
+            s.group = 'A';
+            s.members = std::move(members);
+            s.producer = pre;
+            s.kind = FoldKind::NormVector;
+            s.offset = NormOffset::Plain;
+            s.calib_keys = strs({"WQ", "WK", "WV"});
+            s.scan_prefix = mix;
+            s.scan_exempt = strs({"o_proj.weight"});
+            out.push_back(std::move(s));
+        }
+    }
+    if (wants(groups, 'G') && has(names, pre) && has(names, mix + "in_proj.weight")) {
+        FoldSite s;
+        s.group = 'G';
+        s.members = {mix + "in_proj.weight"};
+        s.producer = pre;
+        s.kind = FoldKind::NormVector;
+        s.offset = NormOffset::Plain;
+        s.calib_keys = {"SSM_IN"};
+        s.scan_prefix = mix;
+        std::vector<std::string> ex = strs(mamba_rest);
+        ex.push_back("out_proj.weight");  // reads the gated norm (group E)
+        s.scan_exempt = std::move(ex);
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
 }  // namespace
 
 std::optional<NormConvention> arch_norm_convention(const std::string& model_type) {
     // Plain: out = norm(x) * g. The four this tool has always accepted.
     // gemma4: imp applies the norm weight as stored (norm_weight_offset 0, no load-time +1).
     // deepseek_v2: plain RMSNorm, MLA attention (kv_a_layernorm on the latent), no load-time offset.
-    static const char* kPlain[] = {"qwen2",  "qwen3",       "llama",      "mistral",
-                                   "gemma4", "gemma4_text", "deepseek_v2"};
+    // glm4_moe_lite (GLM-4.7-Flash): the same MLA plus q_lora (q_a_proj, q_a_layernorm, q_b_proj).
+    // nemotron_h: plain RMSNorm block pre-norms and plain gated group norm in the Mamba2 mixer.
+    static const char* kPlain[] = {"qwen2",       "qwen3",       "llama",         "mistral",   "gemma4",
+                                   "gemma4_text", "deepseek_v2", "glm4_moe_lite", "nemotron_h"};
     // Unit offset: out = norm(x) * (1 + g). imp bakes the +1 at load for these
     // (src/model/weight_upload.cpp arch_norm_offset), so runtime norm_weight_offset stays 0 and the
     // fold must carry it. Spellings from src/model/hf_config_loader.cpp: a Qwen3.8 checkpoint
@@ -150,6 +244,9 @@ std::vector<int64_t> tie_map(TieMode tie, int64_t K, const Geometry& geo) {
 
 std::vector<FoldSite> layer_fold_sites(const std::set<std::string>& names, const std::string& base,
                                        NormConvention conv, const std::string& groups, bool v_normed) {
+    // Nemotron-H blocks carry one pre-norm (backbone.layers.N.norm) and a single mixer.
+    if (has(names, base + "norm.weight") && !has(names, base + "input_layernorm.weight"))
+        return nemotron_h_fold_sites(names, base, groups);
     const NormOffset block_norm = conv == NormConvention::UnitOffset ? NormOffset::Unit : NormOffset::Plain;
     const std::string attn = base + "self_attn.";
     const std::string gdn = base + "linear_attn.";
@@ -225,11 +322,11 @@ std::vector<FoldSite> layer_fold_sites(const std::set<std::string>& names, const
         out.push_back(std::move(s));
     }
 
-    // ---- A: q/k/v (MLA: q_proj + kv_a_proj_with_mqa) into input_layernorm. ----
+    // ---- A: q/k/v (MLA: q_proj or q_a_proj, + kv_a_proj_with_mqa) into input_layernorm. ----
     if (wants(groups, 'A') && has(names, in_norm)) {
         auto members = present(names, attn,
                                {"q_proj.weight", "k_proj.weight", "v_proj.weight",
-                                "kv_a_proj_with_mqa.weight"});
+                                "kv_a_proj_with_mqa.weight", "q_a_proj.weight"});
         if (!members.empty()) {
             FoldSite s;
             s.group = 'A';
@@ -237,10 +334,13 @@ std::vector<FoldSite> layer_fold_sites(const std::set<std::string>& names, const
             s.producer = in_norm;
             s.kind = FoldKind::NormVector;
             s.offset = block_norm;
+            // q_a_proj records under KV_A_PROJ (one TensorKind for both MLA down-projections).
             s.calib_keys = strs({"WQ", "WK", "WV", "KV_A_PROJ"});
             s.scan_prefix = attn;
-            // o_proj reads the attention output; MLA kv_b_proj reads kv_a_layernorm (group K).
-            s.scan_exempt = strs({"o_proj.weight", "kv_b_proj.weight", "kv_a_layernorm.weight"});
+            // o_proj reads the attention output; MLA kv_b_proj reads kv_a_layernorm (group K),
+            // q_b_proj reads q_a_layernorm (group Q).
+            s.scan_exempt = strs({"o_proj.weight", "kv_b_proj.weight", "kv_a_layernorm.weight",
+                                  "q_b_proj.weight", "q_a_layernorm.weight"});
             out.push_back(std::move(s));
         }
     }
@@ -256,8 +356,39 @@ std::vector<FoldSite> layer_fold_sites(const std::set<std::string>& names, const
         s.offset = block_norm;
         s.calib_keys = {"KV_B_PROJ"};
         s.scan_prefix = attn;
-        // Every other attention projection reads input_layernorm or the attention output.
-        s.scan_exempt = strs({"q_proj.weight", "kv_a_proj_with_mqa.weight", "o_proj.weight"});
+        // Every other attention projection reads input_layernorm, q_a_layernorm or the attention output.
+        s.scan_exempt = strs({"q_proj.weight", "kv_a_proj_with_mqa.weight", "o_proj.weight",
+                              "q_a_proj.weight", "q_b_proj.weight", "q_a_layernorm.weight"});
+        out.push_back(std::move(s));
+    }
+
+    // ---- Q: MLA q_lora q_b_proj into q_a_layernorm, the RMSNorm on the q latent (GLM, V3). ----
+    if (wants(groups, 'Q') && has(names, attn + "q_a_layernorm.weight") &&
+        has(names, attn + "q_b_proj.weight")) {
+        FoldSite s;
+        s.group = 'Q';
+        s.members = {attn + "q_b_proj.weight"};
+        s.producer = attn + "q_a_layernorm.weight";
+        s.kind = FoldKind::NormVector;
+        s.offset = block_norm;
+        s.calib_keys = {"WQ"};  // q_b_proj is the WQ GEMM; its input is the q latent
+        s.scan_prefix = attn;
+        s.scan_exempt = strs({"q_a_proj.weight", "kv_a_proj_with_mqa.weight", "kv_b_proj.weight",
+                              "kv_a_layernorm.weight", "o_proj.weight"});
+        out.push_back(std::move(s));
+    }
+
+    // ---- S: the shared expert's down_proj into its up_proj rows (D for mlp.shared_experts). ----
+    const std::string shared = mlp + "shared_experts.";
+    if (wants(groups, 'S') && has(names, shared + "down_proj.weight") &&
+        has(names, shared + "up_proj.weight")) {
+        FoldSite s;
+        s.group = 'S';
+        s.members = {shared + "down_proj.weight"};
+        s.producer = shared + "up_proj.weight";
+        s.kind = FoldKind::MatrixRows;
+        s.tie = TieMode::Identity;
+        s.calib_keys = {"W_DOWN"};  // a MoE layer's only W_DOWN GEMM is the shared expert's
         out.push_back(std::move(s));
     }
 
