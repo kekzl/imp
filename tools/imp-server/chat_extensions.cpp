@@ -55,9 +55,11 @@ ExtensionError extension_error(const ChatRequestContext& ctx) {
                 "\"cfg_scale\" needs a model that decodes two sequences in one step (hybrids: "
                 "runtime.gdn_batched_decode)",
                 "cfg_scale"};
-        if (!p.images.empty() || !p.videos.empty() || p.has_tools || !p.banned_strings.empty())
-            return {"\"cfg_scale\" cannot be combined with images, video, tools or banned_strings",
-                    "cfg_scale"};
+        if (!p.images.empty() || !p.videos.empty() || p.has_tools || !p.banned_strings.empty() ||
+            !p.banned_regex.empty())
+            return {
+                "\"cfg_scale\" cannot be combined with images, video, tools, banned_strings or banned_regex",
+                "cfg_scale"};
         const bool has_system = std::any_of(p.chat_msgs.begin(), p.chat_msgs.end(),
                                             [](const auto& m) { return m.role == "system"; });
         if (!has_system && p.cfg_negative_prompt.empty())
@@ -66,16 +68,19 @@ ExtensionError extension_error(const ChatRequestContext& ctx) {
                 "message or \"cfg_negative_prompt\"",
                 "cfg_scale"};
     }
-    if (p.banned_strings.empty())
+    if (p.banned_strings.empty() && p.banned_regex.empty())
         return {};
+    const char* field = p.banned_strings.empty() ? "banned_regex" : "banned_strings";
     if (!ctx.snap.phrase_ban_ok)
-        return {"\"banned_strings\" needs a model without the residual KV ring: a rewind cannot restore it",
-                "banned_strings"};
+        return {"\"" + std::string(field) +
+                    "\" needs a model without the residual KV ring: a rewind cannot restore it",
+                field};
     if (p.json_mode || !p.json_schema_str.empty() || !p.regex_pattern.empty() || !p.grammar.empty() ||
         !p.tool_constraint_tools.empty() || p.mirostat != 0)
         return {
-            "\"banned_strings\" cannot be combined with constrained output, enforced tool calls or mirostat: "
-            "their state has no rewind",
-            "banned_strings"};
+            "\"" + std::string(field) +
+                "\" cannot be combined with constrained output, enforced tool calls or mirostat: their state "
+                "has no rewind",
+            field};
     return {};
 }

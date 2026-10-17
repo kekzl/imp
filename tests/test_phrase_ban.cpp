@@ -1,6 +1,7 @@
 // Banned phrases (roadmap row 118): the pure text rules the engine's rewind relies on.
 
 #include "runtime/phrase_ban.h"
+#include "runtime/phrase_regex.h"
 
 #include <gtest/gtest.h>
 
@@ -61,6 +62,46 @@ TEST(PhraseBan, RecurrentSnapshotPickAndSlot) {
     EXPECT_EQ(phrase_snapshot_slot({0, 32, -1}), 2);
     EXPECT_EQ(phrase_snapshot_slot({0, 32, 64}), 1);
     EXPECT_EQ(phrase_snapshot_slot({0, 96, 64}), 2);
+}
+
+TEST(PhraseBan, RegexCompileRejectsBadAndEmptyMatching) {
+    std::string why;
+    EXPECT_EQ(PhraseRegex::compile("(unclosed", why), nullptr);
+    EXPECT_NE(why.find("does not compile"), std::string::npos) << why;
+    why.clear();
+    EXPECT_EQ(PhraseRegex::compile("x*", why), nullptr);
+    EXPECT_EQ(why, "pattern matches the empty string");
+    EXPECT_NE(PhraseRegex::compile(R"(\d{3,})", why), nullptr);
+}
+
+// A match counts once it ends in the new text; zero-length and old matches do not.
+TEST(PhraseBan, RegexMatchEndsInNewTextInsideTheWindow) {
+    std::string why;
+    const auto re = PhraseRegex::compile(R"(\b[0-9]{3}\b)", why);
+    ASSERT_NE(re, nullptr) << why;
+    EXPECT_EQ(re->match_start("call 911 now", 0, 0), 5u);
+    EXPECT_EQ(re->match_start("call 911 now", 0, 8), std::nullopt) << "ended at byte 8, nothing new";
+    EXPECT_EQ(re->match_start("call 911 now 112", 0, 13), 13u) << "the old match is skipped";
+
+    PhraseBanState s;
+    s.phrases = {"now"};
+    s.regex = {re};
+    EXPECT_EQ(phrase_hit(s, "call 911 now", 0), 5u) << "the earlier start wins";
+    EXPECT_EQ(phrase_hit(s, "call 911 now", 9), 9u);
+    // Only the last kMaxBannedPhraseBytes bytes are searched: a match starting before them passes.
+    PhraseBanState wide;
+    wide.regex = {PhraseRegex::compile("1 +x", why)};
+    ASSERT_NE(wide.regex[0], nullptr) << why;
+    const std::string far = "911" + std::string(kMaxBannedPhraseBytes, ' ') + "x";
+    EXPECT_EQ(phrase_hit(wide, far, far.size() - 1), std::nullopt);
+    EXPECT_EQ(phrase_hit(wide, "911   x", 6), 2u);
+
+    // A token boundary splits a UTF-8 character: no error, the match after it still counts.
+    const auto word = PhraseRegex::compile("Stra(ss|ß)e", why);
+    ASSERT_NE(word, nullptr) << why;
+    const std::string split = std::string("gro") + "\xC3";  // first byte of U+00DF only
+    EXPECT_EQ(word->match_start(split, 0, 0), std::nullopt);
+    EXPECT_EQ(word->match_start(split + " Strasse", 0, 4), 5u);
 }
 
 }  // namespace
