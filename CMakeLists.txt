@@ -418,6 +418,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine.cpp
     src/runtime/engine_control_vector.cpp
     src/runtime/engine_logit_lens.cpp
+    src/runtime/engine_phrase_ban.cpp
     src/runtime/engine_init_resolver.cpp
     src/runtime/engine_weight_upload.cpp
     src/runtime/engine_kv_cache_init.cpp
@@ -785,6 +786,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
         tools/imp-server/logit_lens_json.cpp
+        tools/imp-server/chat_extensions.cpp
         tools/imp-server/prompt_logprobs.cpp
         tools/imp-server/rate_limit.cpp
         tools/imp-server/logit_bias.cpp
@@ -1157,6 +1159,7 @@ if(IMP_BUILD_TESTS)
             tests/test_spec_usage.cpp  # includes handlers_internal.h -> httplib.h
             tests/test_sse_stream_utils.cpp
             tests/test_logprobs_shapes.cpp
+            tests/test_phrase_ban.cpp
             tests/test_prompt_logprobs.cpp
             tests/test_tool_call.cpp
         tests/test_regex_constrain.cpp

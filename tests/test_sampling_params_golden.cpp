@@ -403,4 +403,31 @@ TEST(LogitLensParams, ParseRules) {
     }
 }
 
+// Banned phrases (row 118): 1..64 non-empty strings of at most 256 bytes, else 400.
+TEST(BannedStringsParams, ParseRules) {
+    auto parse = [](const json& v, std::vector<std::string>* out = nullptr) {
+        json body = {{"model", "m"}, {"messages", json::array({{{"role", "user"}, {"content", "hi"}}})}};
+        body["banned_strings"] = v;
+        httplib::Request req;
+        req.body = body.dump();
+        httplib::Response res;
+        ChatRequestContext ctx;
+        const bool ok = parse_chat_request_params(req, res, test_state(), ctx);
+        if (out)
+            *out = ctx.params.banned_strings;
+        return ok ? 200 : res.status;
+    };
+    std::vector<std::string> got;
+    EXPECT_EQ(parse(json::array({"delve", "rich tapestry"}), &got), 200);
+    EXPECT_EQ(got, (std::vector<std::string>{"delve", "rich tapestry"}));
+    EXPECT_EQ(parse(nullptr, &got), 200);
+    EXPECT_TRUE(got.empty());
+    json many = json::array();
+    for (int i = 0; i < 65; ++i)
+        many.push_back("p" + std::to_string(i));
+    for (const json& bad : {json::array(), json("delve"), json::array({1}), json::array({""}),
+                            json::array({std::string(257, 'x')}), many})
+        EXPECT_EQ(parse(bad), 400) << bad.dump().substr(0, 40);
+}
+
 }  // namespace

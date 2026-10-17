@@ -208,6 +208,8 @@ public:
 
     // Logit lens (row 115): false for gated-residual models; add_request then drops logit_lens.
     [[nodiscard]] bool logit_lens_supported() const;
+    // Banned phrases (row 118): dense attention only (no recurrent state, no residual KV ring).
+    [[nodiscard]] bool phrase_ban_supported() const;
 
     // Reset batch pool upload cache (call on context_reset to prevent
     // stale block table pointers when KV blocks are reused)
@@ -532,6 +534,16 @@ private:
     void logit_lens_arm_prefill_(const Request& req, int n_tokens);
     void logit_lens_collect_(const std::vector<std::shared_ptr<Request>>& rows,
                              const std::vector<int32_t>& tokens, cudaStream_t stream);
+    // Banned phrases (row 118, runtime/phrase_ban.h): token-0 logits saved at prefill, token 0 checked
+    // and resampled on a hit, every decode append checked (true = rewound to the phrase start).
+    void phrase_save_logits_(Request& req, const Tensor& logits, cudaStream_t stream);
+    int32_t phrase_first_token_(Request& req, int32_t token, cudaStream_t stream, bool resample = false);
+    [[nodiscard]] bool phrase_after_append_(Request& req, cudaStream_t stream);
+    void phrase_rewind_(Request& req, size_t pos, cudaStream_t stream);
+    void phrase_ban_init_(Request& req) const;
+    VramOwned<float> phrase_scratch_;  // [vocab] token-0 logits for a resample
+    void decode_append_row_(std::shared_ptr<Request>& req, int32_t next_token, Tokenizer* tok,
+                            cudaStream_t stream);
     size_t prefix_salt_(const Request& req) const;
     int last_decode_max_blocks_per_graph_[kMaxGraphPoolSize] = {};
     // pow2-bucketed context HIGH-WATER MARK at the last (re)capture: the

@@ -15,6 +15,7 @@ namespace imp {
 struct ImageData;
 struct QwenPatches;  // vision/image_processor.h
 class Buffer;      // src/core/buffer.h
+struct PhraseBanState;  // runtime/phrase_ban.h
 
 // Per-token log probability information (for logprobs output)
 struct TokenLogprob {
@@ -317,6 +318,15 @@ struct Request {
 
     // Logit bias: token_id -> bias value, added to logits before sampling
     std::vector<std::pair<int32_t, float>> logit_bias;
+    // Banned phrases (row 118): set = the engine rewinds a completed phrase; logit_bias then also
+    // carries the bans of the current output position. Only the first deliverable_tokens() leave.
+    std::shared_ptr<PhraseBanState> phrase;
+    // Host-side logit shaping: keeps the request on the eager decode path (no graph loop, no
+    // pipeline, no speculation), as logit_bias always did.
+    [[nodiscard]] bool host_logit_shaping() const { return !logit_bias.empty() || phrase != nullptr; }
+    // Prefill samples the first token from explicit logits (logprobs, logit_bias, phrase rewind).
+    [[nodiscard]] bool needs_prefill_logits() const { return logprobs || host_logit_shaping(); }
+    [[nodiscard]] size_t deliverable_tokens() const;
 
     // Vision (multimodal), per-request binding. `images` carries CPU-preprocessed pixels in
     // prompt order; the batch worker encodes them back to back into `vision_emb` (device
@@ -386,7 +396,8 @@ struct Request {
         const bool has_vision = !images.empty() || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
         const bool wants_constraints = json_mode || !json_schema.empty() || !tool_constraint_tools.empty() ||
                                        !regex_pattern.empty() || !grammar.empty();
-        return !has_vision && !embedding_request && !logprobs && prompt_logprobs < 0 && !wants_constraints;
+        return !has_vision && !embedding_request && !logprobs && prompt_logprobs < 0 && !wants_constraints &&
+               !phrase;
     }
 
     // Deliberately LAST rather than next to `status`: Request is touched every decode step, so

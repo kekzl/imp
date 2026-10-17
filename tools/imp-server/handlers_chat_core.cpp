@@ -19,6 +19,7 @@
 #include "api/imp_internal.h"
 #include "vision/image_processor.h"
 #include "runtime/request.h"
+#include "runtime/phrase_ban.h"
 #include "memory/kv_cache.h"
 #include "model/hf_hub.h"
 #include "runtime/config.h"
@@ -225,11 +226,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         send_json_error(res, 400, "invalid_request_error", err, "logit_bias");
         return false;
     }
-    if (ctx.params.logit_lens > 0 && !ctx.snap.logit_lens_ok) {
-        send_json_error(res, 400, "invalid_request_error",
-                        "\"logit_lens\" is not available for this model: its residual stream is not the "
-                        "d_model stream the LM head reads (gated-residual architecture)",
-                        "logit_lens");
+    if (const ExtensionError e = extension_error(ctx); !e.message.empty()) {
+        send_json_error(res, 400, "invalid_request_error", e.message, e.param);
         return false;
     }
 
@@ -643,6 +641,10 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->tool_constraint_xml = ctx.params.tool_constraint_xml;
     req->tool_gate = tool_call_gate(ctx.snap.tpl_family);
     req->logit_bias = ctx.params.logit_bias;
+    if (!ctx.params.banned_strings.empty()) {
+        req->phrase = std::make_shared<imp::PhraseBanState>();
+        req->phrase->phrases = ctx.params.banned_strings;
+    }
     // req->started_in_think = enable_thinking: without it the engine's think-budget enforcement
     // never sees an opener in the output and lets the model reason to max_tokens (content empty).
     req->started_in_think = ctx.snap.enable_thinking;

@@ -786,9 +786,10 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // Last chunk: forward + sample
         int32_t next_token;
         bool use_event_sync = (!h_sample_pinned_.empty() && executor_->d_sample_result() != nullptr &&
-                               (state.temperature <= 0.0f || state.top_k == 1) && !req->logprobs &&
-                               !state.json_constrainer && !state.schema_constrainer &&
-                               !state.regex_constrainer && !state.grammar_constrainer);
+                               (state.temperature <= 0.0f || state.top_k == 1) &&
+                               !req->needs_prefill_logits() && !state.json_constrainer &&
+                               !state.schema_constrainer && !state.regex_constrainer &&
+                               !state.grammar_constrainer);
 
         Tensor prefill_logits_out;
 
@@ -842,9 +843,10 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             cuda_sync_or_throw(cudaEventSynchronize(prefill_done_), "step_prefill_one");
             sampler_enqueued_or_throw(sample_enqueued, "step_prefill_one");
             next_token = *h_sample_pinned_.as<int32_t>();
-        } else if (req->logprobs) {
+        } else if (req->needs_prefill_logits()) {
             logit_lens_arm_prefill_(*req, state.n_tokens);
             executor_->forward_logits(state, prefill_logits_out, pf_stream);
+            phrase_save_logits_(*req, prefill_logits_out, pf_stream);  // before sampling shapes them
             auto sampled = executor_->sample_from_logits(prefill_logits_out, state, pf_stream);
             next_token = sampled[0];
 
@@ -890,6 +892,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         }
         prompt_logprobs_chunk_(*req, offset, chunk_len, pf_stream);
 
+        next_token = phrase_first_token_(*req, next_token, pf_stream);  // banned phrase in token 0: resampled
         req->output_tokens.push_back(next_token);
         track_think_state(*req, next_token);
 

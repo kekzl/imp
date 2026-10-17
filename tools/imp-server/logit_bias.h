@@ -16,3 +16,7 @@ std::string parse_logit_bias(const nlohmann::json& body, int cap,
 
 // 400 message naming the first id >= `vocab`, else "": the sampler skips such ids without a word.
 std::string logit_bias_vocab_error(const std::vector<std::pair<int32_t, float>>& bias, int vocab);
+
+// "banned_strings" (row 118): an array of 1..kMaxBannedPhrases non-empty strings of at most
+// kMaxBannedPhraseBytes bytes each (runtime/phrase_ban.h). Returns "" and fills `out`, or the 400 message.
+std::string parse_banned_strings(const nlohmann::json& v, std::vector<std::string>& out);

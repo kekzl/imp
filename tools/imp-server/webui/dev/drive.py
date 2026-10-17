@@ -374,7 +374,15 @@ def features(page, out, bodies, step, answer_and_settle):
     open_tab(page, "set")
     page.uncheck("#lens")
     page.check("#logprobs")
+    page.fill("#bans", "delve\n  rich tapestry \n\n")
     open_tab(page, "run")
+    answer_and_settle("nothink bans", settle=100)
+    checks["bansSent"] = dig(lb(), "banned_strings") == ["delve", "rich tapestry"]
+    open_tab(page, "set")
+    page.fill("#bans", "")
+    open_tab(page, "run")
+    answer_and_settle("nothink no bans", settle=100)
+    checks["bansOffNotSent"] = dig(lb(), "banned_strings") is None
     open_tab(page, "set")
     page.uncheck("#logprobs")
     open_tab(page, "run")

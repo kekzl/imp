@@ -39,7 +39,7 @@ bool batch_verify_row_ok(const Request& r) {
                            r.presence_penalty != 0.0f;
     if (penalties && r.repeat_last_n != 0)
         return false;  // a bounded window slides per chunk row; not replicated
-    if (r.dry_multiplier != 0.0f || r.mirostat != 0 || !r.logit_bias.empty())
+    if (r.dry_multiplier != 0.0f || r.mirostat != 0 || r.host_logit_shaping())
         return false;
     if (r.logprobs || r.json_mode || !r.json_schema.empty() || !r.regex_pattern.empty() ||
         !r.grammar.empty() || !r.tool_constraint_tools.empty())

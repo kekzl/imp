@@ -966,6 +966,9 @@
         <p class="schema-state" id="schema-state" aria-live="polite"></p>
       </div>
       <p class="hint">Structured output switches thinking off on the server.</p>
+      <h2>Banned phrases</h2>
+      <textarea id="bans" spellcheck="false" aria-label="Banned phrases, one per line" placeholder="one per line: the server rewinds to where one starts and samples something else"></textarea>
+      <p class="hint">Sent as banned_strings; models with recurrent state (Qwen3.5+, hybrids) answer 400.</p>
     </section>
 
     <section class="pane" role="tabpanel" id="pane-srv" aria-labelledby="tab-srv" hidden>
@@ -1095,7 +1098,7 @@ darkQuery.addEventListener("change", applyTheme);
 const PARAMS_KEY = "imp.ui.params", DRAFT_KEY = "imp.ui.draft";
 const PARAM_DEFAULTS = {
   temp: "0.7", maxtok: "512", topp: "", topk: "", minp: "", reppen: "", prespen: "", freqpen: "", seed: "",
-  thinking: true, effort: "", logprobs: false, lens: false, fmt: "none", schema: "",
+  thinking: true, effort: "", logprobs: false, lens: false, fmt: "none", schema: "", bans: "",
 };
 const paramIds = Object.keys(PARAM_DEFAULTS);
 // [input id, request field, integer?]
@@ -2394,6 +2397,8 @@ function requestBody() {
   if (effort) body.reasoning_effort = effort;
   if (el("logprobs").checked || el("lens").checked) { body.logprobs = true; body.top_logprobs = 5; }
   if (el("lens").checked) body.logit_lens = 5;
+  const bans = el("bans").value.split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 64);
+  if (bans.length) body.banned_strings = bans;
   const rf = responseFormat();
   if (rf) body.response_format = rf;
   return body;

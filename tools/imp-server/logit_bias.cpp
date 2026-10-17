@@ -1,6 +1,7 @@
 #include "logit_bias.h"
 
 #include "utils.h"
+#include "runtime/phrase_ban.h"
 
 #include <charconv>
 #include <cmath>
@@ -37,5 +38,20 @@ std::string logit_bias_vocab_error(const std::vector<std::pair<int32_t, float>>&
         if (id >= vocab)
             return "\"logit_bias\" token id " + std::to_string(id) + " is outside the vocabulary (" +
                    std::to_string(vocab) + " tokens)";
+    return "";
+}
+
+std::string parse_banned_strings(const nlohmann::json& v, std::vector<std::string>& out) {
+    out.clear();
+    if (!v.is_array() || v.empty() || v.size() > static_cast<size_t>(imp::kMaxBannedPhrases))
+        return "\"banned_strings\" must be an array of 1.." + std::to_string(imp::kMaxBannedPhrases) +
+               " strings";
+    for (const auto& s : v) {
+        if (!s.is_string() || s.get_ref<const std::string&>().empty() ||
+            s.get_ref<const std::string&>().size() > imp::kMaxBannedPhraseBytes)
+            return "\"banned_strings\" entries must be non-empty strings of at most " +
+                   std::to_string(imp::kMaxBannedPhraseBytes) + " bytes";
+        out.push_back(s.get<std::string>());
+    }
     return "";
 }

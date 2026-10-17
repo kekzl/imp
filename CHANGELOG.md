@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- `banned_strings` on chat: a completed phrase rewinds output and KV to its first token, bans that token there and resamples; the stream holds back what may still be retracted. Qwen3-4B Q8_0, temp 0, "Eiffel Tower" banned: same text up to "iconic", then "Notre-Dame Cathedral". Dense models only.
 - Logit lens: `"logit_lens": N` on chat adds rank, logprob, top-N and entropy of every layer to each logprobs entry; Web UI "layer readout" grid. Last layer = sampler within 6.1e-6 on Qwen3-4B, Qwen3.8-27B NVFP4, gemma-3-12b; decode runs eager while on (Qwen3-4B: 20 tokens 65 -> 195 ms).
 - Web UI token loom: in the token view, click a token and pick a `top_logprobs` alternative; a new chat continues that prefix via `continue_final_message` on the prefix cache, the source chat stays. `drive.py features` on the dev mock: 4 new branch checks, 35 checks, 0 false.
 - Assistant prefill: `continue_final_message` (vLLM field) on chat and `/v1/responses`, and a trailing assistant turn on `/v1/messages`, continue that text (HF cut rule) instead of opening a new turn. Qwen3.8-27B: "Seventeen times twenty-three equals" -> " three hundred and ninety-one."; an open `<think>` prefix continues as reasoning.
@@ -24,6 +25,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Release bar 2 (`bench-competitive`): Qwen3.8-27B Q4_K_M is a hero (6 of 8 contested), the non-hero Qwen3-30B-A3B row is gone; the sweep refuses on host 1-min load > nproc/4 instead of any running container.
 
 ### Fixed
+- A greedy first token ignored `logit_bias`: the prefill event-sync sampler applied banned tokens only. Qwen3-4B Q8_0, `{"785": -100}` on "The": v0.53.0 answers "The capital of France is Paris...", now "Paris is the capital of France...".
 - `kv_cache.swa_sizing`: each prefill chunk frees its dead window blocks at enqueue, so the SWA group charges the chunk once per pool, not per sequence. Gemma-3-12B Q4_K_M, 17 slots: 16830 -> 7235 MiB, global KV 1742 -> 3038 blocks, chunk 4096 now starts; 34 concurrent long prompts 34/34.
 - `kv_cache.swa_sizing`: the SWA group is sized for the prefill chunk the scheduler runs, so `--set runtime.prefill_chunk_size` counts like the CLI flag (Gemma-3-12B at 1024: 16830 -> 11390 MiB); a group that cannot fit is refused with an ERROR naming the knobs.
 - imp-cli and imp-server number flags parse strictly (44 `atoi`/`atof` sites): `--prefill-chunk-size abc`, `--port 80x`, `--temperature nan` exit 1 naming the flag instead of running with 0, 80 or NaN.
