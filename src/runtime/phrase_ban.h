@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -14,6 +15,8 @@
 #include <vector>
 
 namespace imp {
+
+class PhraseRegex;
 
 inline constexpr int kMaxBannedPhrases = 64;
 inline constexpr size_t kMaxBannedPhraseBytes = 256;
@@ -25,6 +28,7 @@ inline constexpr int kPhraseSnapSlots = 3;
 
 struct PhraseBanState {
     std::vector<std::string> phrases;
+    std::vector<std::shared_ptr<const PhraseRegex>> regex;  // runtime/phrase_regex.h
     size_t max_len = 0;
     std::string text;                                  // decoded output_tokens
     std::vector<uint32_t> tok_end;                     // byte end of output token i in text

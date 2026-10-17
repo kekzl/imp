@@ -2,6 +2,7 @@
 
 #include "utils.h"
 #include "runtime/phrase_ban.h"
+#include "runtime/phrase_regex.h"
 
 #include <charconv>
 #include <cmath>
@@ -52,6 +53,25 @@ std::string parse_banned_strings(const nlohmann::json& v, std::vector<std::strin
             return "\"banned_strings\" entries must be non-empty strings of at most " +
                    std::to_string(imp::kMaxBannedPhraseBytes) + " bytes";
         out.push_back(s.get<std::string>());
+    }
+    return "";
+}
+
+std::string parse_banned_regex(const nlohmann::json& v,
+                               std::vector<std::shared_ptr<const imp::PhraseRegex>>& out) {
+    out.clear();
+    if (!v.is_array() || v.empty() || v.size() > static_cast<size_t>(imp::kMaxBannedRegex))
+        return "\"banned_regex\" must be an array of 1.." + std::to_string(imp::kMaxBannedRegex) + " strings";
+    for (const auto& s : v) {
+        if (!s.is_string() || s.get_ref<const std::string&>().empty() ||
+            s.get_ref<const std::string&>().size() > imp::kMaxBannedPhraseBytes)
+            return "\"banned_regex\" entries must be non-empty strings of at most " +
+                   std::to_string(imp::kMaxBannedPhraseBytes) + " bytes";
+        std::string why;
+        auto re = imp::PhraseRegex::compile(s.get<std::string>(), why);
+        if (!re)
+            return "\"banned_regex\" entry " + std::to_string(out.size()) + ": " + why;
+        out.push_back(std::move(re));
     }
     return "";
 }

@@ -7,6 +7,7 @@
 #include "runtime/engine.h"
 #include "runtime/engine_internal.h"
 #include "runtime/phrase_ban.h"
+#include "runtime/phrase_regex.h"
 #include "runtime/request.h"
 #include "core/logging.h"
 #include "exec/executor.h"
@@ -77,6 +78,8 @@ void Engine::phrase_ban_init_(Request& req) const {
     s.max_len = 0;
     for (const auto& p : s.phrases)
         s.max_len = std::max(s.max_len, p.size());
+    if (!s.regex.empty())  // a pattern match may be as long as the whole window
+        s.max_len = kMaxBannedPhraseBytes;
     s.in_think0 = req.in_think_block;
     s.think_exit0 = req.think_exit_idx;
     s.content_after0 = req.content_after_think;
@@ -126,8 +129,7 @@ int32_t Engine::phrase_first_token_(Request& req, int32_t token, cudaStream_t st
     const auto v = static_cast<int>(s.first_logits.size());
     std::string text = tok->decode_token(token);
     // resample: the caller already banned `token` at position 0 (a phrase that starts there).
-    for (bool redo = resample;
-         v > 0 && (redo || (s.rewinds < kMaxPhraseRewinds && phrase_match_start(text, 0, s.phrases)));
+    for (bool redo = resample; v > 0 && (redo || (s.rewinds < kMaxPhraseRewinds && phrase_hit(s, text, 0)));
          redo = false) {
         if (!redo) {
             s.bans.emplace_back(0, token);
@@ -201,8 +203,7 @@ bool Engine::phrase_after_append_(Request& req, cudaStream_t stream) {
         phrase_bias_at(req, n_out);
         return false;
     }
-    const auto hit = s.rewinds < kMaxPhraseRewinds ? phrase_match_start(s.text, prev, s.phrases)
-                                                   : std::optional<size_t>{};
+    const auto hit = s.rewinds < kMaxPhraseRewinds ? phrase_hit(s, s.text, prev) : std::optional<size_t>{};
     const size_t pos = hit ? phrase_token_at(s.tok_end, *hit) : 0;
     if (!hit || pos < s.safe) {  // a delivered token is never taken back
         s.safe = std::max(s.safe, phrase_safe_tokens(s.tok_end, s.text.size(), s.max_len));

@@ -243,6 +243,13 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
             return false;
         }
     }
+    if (const auto br = body.find("banned_regex"); br != body.end() && !br->is_null()) {
+        const std::string why = parse_banned_regex(*br, ctx.params.banned_regex);
+        if (!why.empty()) {
+            send_json_error(res, 400, "invalid_request_error", why, "banned_regex");
+            return false;
+        }
+    }
 
     // Parse response_format for JSON mode / JSON Schema / regex
     if (body.contains("response_format") && body["response_format"].is_object()) {

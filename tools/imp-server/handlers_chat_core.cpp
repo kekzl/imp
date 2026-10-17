@@ -641,9 +641,10 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->tool_constraint_xml = ctx.params.tool_constraint_xml;
     req->tool_gate = tool_call_gate(ctx.snap.tpl_family);
     req->logit_bias = ctx.params.logit_bias;
-    if (!ctx.params.banned_strings.empty()) {
+    if (!ctx.params.banned_strings.empty() || !ctx.params.banned_regex.empty()) {
         req->phrase = std::make_shared<imp::PhraseBanState>();
         req->phrase->phrases = ctx.params.banned_strings;
+        req->phrase->regex = ctx.params.banned_regex;
     }
     if (ctx.params.cfg_scale > 1.0f) {  // classifier-free guidance (row 117): the engine runs the shadow
         auto shadow = std::make_shared<imp::Request>();

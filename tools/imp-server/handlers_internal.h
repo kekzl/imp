@@ -41,6 +41,7 @@ struct ChatRequestParams : SamplingFields {
     bool json_mode = false, req_logprobs = false, include_usage = false;
     int logit_lens = 0;  // top-N per layer (row 115), 0 = off
     std::vector<std::string> banned_strings;  // row 118: a completed phrase is rewound and banned
+    std::vector<std::shared_ptr<const imp::PhraseRegex>> banned_regex;  // same for a pattern match
     float cfg_scale = 1.0f;                   // row 117: classifier-free guidance weight (> 1 guides)
     std::string cfg_negative_prompt;          // row 117: system message of the shadow prompt ("" = none)
     // cache_prefix_messages: leading chat-message count forming the cacheable prefix (-1 = whole

@@ -421,6 +421,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_control_vector.cpp
     src/runtime/engine_logit_lens.cpp
     src/runtime/engine_phrase_ban.cpp
+    src/runtime/phrase_regex.cpp
     src/runtime/engine_cfg.cpp
     src/runtime/engine_init_resolver.cpp
     src/runtime/engine_weight_upload.cpp
