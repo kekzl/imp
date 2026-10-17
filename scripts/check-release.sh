@@ -338,6 +338,22 @@ else
     fi
 fi
 
+# Invariant I2: serving-phase allocations stay at their pins (scripts/check_alloc_interpose.sh).
+# GPU and an interposed build, so CI cannot run it.
+section "make check-alloc-interpose"
+if [ "${SKIP_VERIFY:-0}" = "1" ]; then
+    echo "  (skipped via SKIP_VERIFY=1)"
+else
+    MODEL_STAGES_RUN=$((MODEL_STAGES_RUN+1))
+    if make check-alloc-interpose >/tmp/imp_check_release_interpose.log 2>&1; then
+        pass "make check-alloc-interpose"
+    else
+        echo "  log: /tmp/imp_check_release_interpose.log"
+        tail -20 /tmp/imp_check_release_interpose.log | sed 's/^/  /'
+        fail "make check-alloc-interpose"
+    fi
+fi
+
 # The captured speculative verify chunk, untouched by the two stages above. Runs in its own
 # container (Makefile test-spec-fidelity): checkpoint + comparison forward don't fit behind
 # another model, so the case skips silently in a batched lane without its own stage here.

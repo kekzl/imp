@@ -11,7 +11,7 @@ BIN=${BIN:-build-interpose/imp-server}
 IMG=${DEV_IMG:-imp:toolchain}
 MODEL=${INTERPOSE_MODEL:-/models/Qwen3.8-27B-NVFP4-vllm}
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
-PORT=8099
+PORT=${INTERPOSE_PORT:-8099}  # override when 8099 is taken
 M=$(basename "$MODEL")
 URL="http://127.0.0.1:$PORT"
 
