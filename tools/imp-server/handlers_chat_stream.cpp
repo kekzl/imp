@@ -90,6 +90,8 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                                               {"logprob", lp.logprob},
                                               {"bytes", token_bytes_json(lp.text)},
                                               {"top_logprobs", top_arr}}})}};
+                if (lp_idx < active_req->output_lens.size())  // logit lens (row 115)
+                    lp_chunk["content"][0]["logit_lens"] = logit_lens_json(active_req->output_lens[lp_idx]);
             }
             std::string sse = sse_chunk(comp_id, created, snap_model_name, content_delta,
                                         nullptr, lp_chunk);

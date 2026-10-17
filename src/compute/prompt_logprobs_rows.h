@@ -12,7 +12,9 @@ inline constexpr int kPlpMaxTopN = 20;
 // n0 stored row-major [rows x min(slab_w, V - n0)] at logits + n0 * rows; slab_w >= V = row-major.
 // lp = x[t] - logsumexp(x); rank = 1 + #{j : x[j] > x[t] or (x[j] == x[t] and j < t)};
 // top_n (<= kPlpMaxTopN) by (value desc, index asc). top_ids/top_lp may be null when top_n == 0.
+// entropy (nullable): H = logsumexp(x) - sum softmax(x) * x per row, nats (logit lens, row 115).
 void prompt_logprobs_rows(const float* logits, int rows, int V, int slab_w, const int32_t* targets, int top_n,
-                          float* lp, int32_t* rank, int32_t* top_ids, float* top_lp, cudaStream_t stream);
+                          float* lp, int32_t* rank, int32_t* top_ids, float* top_lp, cudaStream_t stream,
+                          float* entropy = nullptr);
 
 }  // namespace imp

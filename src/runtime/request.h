@@ -31,6 +31,14 @@ struct TokenLogprobInfo {
 
 inline constexpr int kMaxPromptLogprobs = 20;
 
+// Logit lens (roadmap row 115): final norm + LM head on the residual after one layer.
+struct LogitLensLayer {
+    float logprob{};                // of the token the step sampled
+    int32_t rank{};                 // 1-based rank of that token
+    float entropy{};                // nats
+    std::vector<TokenLogprob> top;  // top-N at this layer
+};
+
 // Teacher-forced prompt logprobs, row p = log p(input_tokens[p+1] | input_tokens[0..p]).
 struct PromptLogprobs {
     int top_n = 0;
@@ -240,6 +248,10 @@ struct Request {
     bool logprobs = false;                          // Return logprobs for sampled tokens
     int top_logprobs = 0;                           // 0-20, number of top alternatives
     std::vector<TokenLogprobInfo> output_logprobs;  // parallel to output_tokens
+
+    // Logit lens (row 115): top-N per layer, 0 = off. Needs logprobs (same eager decode path).
+    int logit_lens = 0;
+    std::vector<std::vector<LogitLensLayer>> output_lens;  // parallel to output_tokens, [token][layer]
 
     // Prompt logprobs (#2207): -1 off, else top-N (0..kMaxPromptLogprobs) per prompt token.
     // Row p scores input_tokens[p+1]; filled per prefill chunk, rows == n_prompt-1 when complete.

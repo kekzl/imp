@@ -1035,6 +1035,13 @@ void Engine::add_request(std::shared_ptr<Request> req) {
         // integer, no Request - the mapping is published once here instead.
         if (!req->trace_id.empty())
             IMP_LOG_INFO("request %s -> engine req %d", req->trace_id.c_str(), req->id);
+        // Logit lens rides the logprobs path: eager decode, no ragged prefill, no speculation.
+        if (req->logit_lens > 0) {
+            if (logit_lens_supported())
+                req->logprobs = true;
+            else
+                req->logit_lens = 0;
+        }
         // Seed think state from the prompt tail: chat templates (Qwen3.x,
         // DeepSeek-R1) inject `<think>\n` by default, so without this a model
         // closing its empty think block hits should_stop with

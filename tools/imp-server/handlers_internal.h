@@ -39,6 +39,7 @@ struct ChatVideoInput {
 struct ChatRequestParams : SamplingFields {
     int max_tokens = 0, n_completions = 1, top_logprobs = 0;
     bool json_mode = false, req_logprobs = false, include_usage = false;
+    int logit_lens = 0;  // top-N per layer (row 115), 0 = off
     // cache_prefix_messages: leading chat-message count forming the cacheable prefix (-1 = whole
     // prompt). Set by anthropic_to_openai_body; shifted when a system message is injected in front
     // (tool-prompt fallback).
@@ -123,6 +124,7 @@ struct ChatStateSnapshot {
     int mtp_armed_k = 0;
     bool mtp_head_present = false;
     bool mtp_head_loaded = false;
+    bool logit_lens_ok = false;
     imp::Tokenizer* tok = nullptr;
     imp::ChatTemplate chat_tpl;
     bool have_template = false;
@@ -252,6 +254,7 @@ template <typename State, typename Snap>
 inline void snapshot_mtp_state_(const State& state, Snap& snap) {
     snap.mtp_armed_k = state.armed_mtp_k.load(std::memory_order_relaxed);
     snap.mtp_head_present = state.mtp_head_present.load(std::memory_order_relaxed);
+    snap.logit_lens_ok = state.logit_lens_ok.load(std::memory_order_relaxed);
     snap.mtp_head_loaded = state.mtp_head_loaded.load(std::memory_order_relaxed);
 }
 

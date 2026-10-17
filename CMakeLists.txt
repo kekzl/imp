@@ -417,6 +417,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/batch.cpp
     src/runtime/engine.cpp
     src/runtime/engine_control_vector.cpp
+    src/runtime/engine_logit_lens.cpp
     src/runtime/engine_init_resolver.cpp
     src/runtime/engine_weight_upload.cpp
     src/runtime/engine_kv_cache_init.cpp
@@ -504,6 +505,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_lm_head_fp8.cpp
     src/exec/executor_lora.cu
     src/exec/executor_control_vector.cu
+    src/exec/executor_logit_lens.cu
     src/lora/lora_adapter.cpp
     src/lora/control_vector.cpp
     src/quant/gpt_oss_mxfp4_convert.cpp
@@ -782,6 +784,7 @@ if(IMP_BUILD_SERVER)
     imp_server_objects(imp_server_core
         tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
+        tools/imp-server/logit_lens_json.cpp
         tools/imp-server/prompt_logprobs.cpp
         tools/imp-server/rate_limit.cpp
         tools/imp-server/logit_bias.cpp

@@ -843,6 +843,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             sampler_enqueued_or_throw(sample_enqueued, "step_prefill_one");
             next_token = *h_sample_pinned_.as<int32_t>();
         } else if (req->logprobs) {
+            logit_lens_arm_prefill_(*req, state.n_tokens);
             executor_->forward_logits(state, prefill_logits_out, pf_stream);
             auto sampled = executor_->sample_from_logits(prefill_logits_out, state, pf_stream);
             next_token = sampled[0];
@@ -877,6 +878,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                                                               next_token, req->top_logprobs,
                                                               model_->tokenizer()));
         }
+        logit_lens_collect_({req}, {next_token},
+                            pf_stream);  // after the logits_ reads above; disarms the lens
 
         // Teacher-forced NLL for the LAST chunk (imp_perplexity), after
         // sampling + logprob extraction: the partial pass overwrites logits_,

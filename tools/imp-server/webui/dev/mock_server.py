@@ -16,7 +16,8 @@ Naming a model with loaded=false swaps it in after --swap-delay seconds;
 --answer-file / --reasoning-file replace the built-in texts (README capture).
 Also mirrors GET /metrics (names from handlers_misc.cpp / metrics_memory.cpp, plus
 imp_gpu_power_watts / imp_gpu_energy_joules_total unless --no-power), /props, /info,
-/health, POST /tokenize, POST /v1/requests/{id}/end_thinking, streamed logprobs, continue_final_message,
+/health, POST /tokenize, POST /v1/requests/{id}/end_thinking, streamed logprobs + logit_lens,
+continue_final_message,
 response_format (answers JSON) and image_url parts (400 vision_unavailable on a
 model whose name contains "Llama").
 
@@ -29,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 ARGS = None
+MOCK_LAYERS = 24  # logit lens rows
 STATE = {"loaded": None, "boot_until": 0.0, "lock": threading.Lock(), "started": time.time()}
 # /metrics counters; energy integrates power (idle vs streaming) between reads.
 METRICS = {"requests": 0, "failed": 0, "prompt": 0, "completion": 0, "cached": 0, "active": 0,
@@ -288,6 +290,10 @@ class H(BaseHTTPRequestHandler):
         include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
         want_lp = bool(body.get("logprobs"))
         n_top = int(body.get("top_logprobs") or 0)
+        ll = body.get("logit_lens")
+        n_lens = 5 if ll is True else int(ll) if isinstance(ll, int) and not isinstance(ll, bool) else 0
+        if n_lens:
+            want_lp = True
         reasoning = REASONING if think else []
         if "deepthink" in low and think:
             reasoning = REASONING * 10
@@ -357,7 +363,26 @@ class H(BaseHTTPRequestHandler):
                 q = max(rest * (0.6 / (k + 1)), 1e-6)
                 alts.append({"token": alt, "logprob": math.log(q), "bytes": list(alt.encode())})
             alts.sort(key=lambda a: -a["logprob"])
-            return {"content": [{"token": tok, "logprob": lp, "bytes": list(tok.encode()), "top_logprobs": alts[:n_top]}]}
+            entry = {"token": tok, "logprob": lp, "bytes": list(tok.encode()), "top_logprobs": alts[:n_top]}
+            if n_lens > 0:
+                entry["logit_lens"] = lens_for(tok)
+            return {"content": [entry]}
+
+        def lens_for(tok):
+            # utils.cpp logit_lens_json: one {rank, logprob, entropy, top} per layer, the sampled
+            # token climbing to rank 1 at a random settle layer.
+            settle = random.randint(MOCK_LAYERS // 3, MOCK_LAYERS - 2)
+            out = []
+            for layer in range(MOCK_LAYERS):
+                rank = 1 if layer >= settle else max(2, (settle - layer) * 37)
+                lp = math.log(0.15 + 0.8 * (layer - settle + 1) / (MOCK_LAYERS - settle + 1)) if rank == 1 \
+                    else math.log(0.5 / rank)
+                top = [{"token": t, "logprob": math.log(0.3 / (k + 1))}
+                       for k, t in enumerate([" the", " of", "ing", ".", " and"][:n_lens])]
+                if rank == 1:
+                    top = [{"token": tok, "logprob": lp}] + top[: n_lens - 1]
+                out.append({"rank": rank, "logprob": lp, "entropy": 4.5 * (1 - layer / MOCK_LAYERS) + 0.3, "top": top})
+            return out
 
         itl = ARGS.itl / 1000.0 / (3.0 if "fast" in low else 1.0)
         ended = threading.Event()

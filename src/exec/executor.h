@@ -135,6 +135,13 @@ public:
                                  int32_t* d_rank, int32_t* d_top_ids, float* d_top_lp, float* d_logits,
                                  int chunk_rows, cudaStream_t stream);
 
+    // Logit lens (row 115): hidden_ rows the following eager forwards stash after every layer; empty = off.
+    // logit_lens_readout: tier-aware LM head over the stash, targets[r] = the token row r sampled;
+    // out is [layer x row]. False = no stash or no scratch; nothing written.
+    void set_lens_rows(std::vector<int> rows);
+    [[nodiscard]] bool logit_lens_readout(const std::vector<int32_t>& targets, int top_n,
+                                          struct LogitLensResult& out, cudaStream_t stream);
+
     // Embedding pooling (#1005): column-wise sum of hidden_[0..n_tokens) into
     // d_out[d_model] fp32. Runs after a chunk's forward while hidden_ still
     // holds it; engine accumulates chunk sums host-side for full-input pooling.
@@ -652,6 +659,9 @@ private:
     // batch=1 output stays bit-identical to the FP16-activation GEMV.
     void for_each_lm_head_batch_(int n_rows, cudaStream_t stream, bool allow_cutlass,
                                  const std::function<void(const Tensor&, int, int)>& consume);
+    // The LM-head driver's input: lm_rows_ (logit lens, FP16 [n x d_model]) while set, else hidden_[0..n).
+    const Tensor* lm_rows_ = nullptr;
+    [[nodiscard]] Tensor lm_head_rows_(int n) const;
     // FP8 per-row LM head (gemm.nvfp4_lm_head=fp8): final norm + gemv_fp8_rowscale_fp32 over h's rows
     // into lg (FP32). False = no FP8 head built; the caller keeps its own dispatch.
     [[nodiscard]] bool lm_head_fp8_(const Tensor& h, Tensor& lg, cudaStream_t stream);
@@ -688,6 +698,11 @@ private:
     const ControlVectorDevice* cvec_ = nullptr;
     float cvec_scale_ = 0.0f;
     void control_vector_add_(int layer, int n, cudaStream_t stream);
+    std::vector<int> lens_rows_;  // logit lens: rows stashed per layer, [layer x rows x d_model] FP16
+    int lens_layers_ = 0;         // layers stashed since set_lens_rows
+    VramOwned<char> lens_scratch_;
+    size_t lens_scratch_bytes_ = 0;
+    void lens_stash_(int layer, int n, cudaStream_t stream);
     int max_logit_tokens_ = 0;     // max tokens needing LM head projection (= max(max_batch_size, 8))
     int kv_block_size_ = kKVBlockSize;  // real KV block size (set_kv_block_size)
     int cur_n_tokens_ = 0;         // set by forward_logits for use by run_ffn

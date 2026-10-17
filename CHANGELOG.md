@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- Logit lens: `"logit_lens": N` on chat adds rank, logprob, top-N and entropy of every layer to each logprobs entry; Web UI "layer readout" grid. Last layer = sampler within 6.1e-6 on Qwen3-4B, Qwen3.8-27B NVFP4, gemma-3-12b; decode runs eager while on (Qwen3-4B: 20 tokens 65 -> 195 ms).
 - Web UI token loom: in the token view, click a token and pick a `top_logprobs` alternative; a new chat continues that prefix via `continue_final_message` on the prefix cache, the source chat stays. `drive.py features` on the dev mock: 4 new branch checks, 35 checks, 0 false.
 - Assistant prefill: `continue_final_message` (vLLM field) on chat and `/v1/responses`, and a trailing assistant turn on `/v1/messages`, continue that text (HF cut rule) instead of opening a new turn. Qwen3.8-27B: "Seventeen times twenty-three equals" -> " three hundred and ninety-one."; an open `<think>` prefix continues as reasoning.
 - Web UI redesign in the logo's colours with an imp mascot: saved conversations, sampling panel, edit/continue, logprobs view, end thinking, structured output, images, `/tokenize` count, `/metrics` tab, GPU joules per answer. `drive.py features` on the dev mock: 16/16 checks pass.

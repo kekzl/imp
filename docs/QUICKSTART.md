@@ -132,6 +132,7 @@ Expected: an explanation of Rayleigh scattering, written at the single-stream ra
 | end thinking | button while the model reasons: `POST /v1/requests/{id}/end_thinking` |
 | token probabilities | `logprobs` + `top_logprobs: 5`, tokens coloured by probability, alternatives on hover |
 | branch at a token | click a token, pick an alternative: a new chat continues that prefix (`continue_final_message`) |
+| layer readout | `logit_lens: 5`: a grid of the top token after every layer, coloured by the sampled token's probability there |
 | structured output | `response_format` `json_object` or a pasted `json_schema`, parsed before sending |
 | prompt size | draft tokens from `POST /tokenize` (skipped while `/health` reports `idle_suspended`), context bar |
 | server tab | `GET /metrics` every 3 s while open: queue, KV blocks, VRAM, `imp_gpu_power_watts` when exported |

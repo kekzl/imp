@@ -206,6 +206,9 @@ public:
     int active_control_vector() const { return active_cvec_; }
     float active_control_vector_scale() const { return active_cvec_scale_; }
 
+    // Logit lens (row 115): false for gated-residual models; add_request then drops logit_lens.
+    [[nodiscard]] bool logit_lens_supported() const;
+
     // Reset batch pool upload cache (call on context_reset to prevent
     // stale block table pointers when KV blocks are reused)
     void reset_batch_pool_cache();
@@ -522,6 +525,13 @@ private:
     int active_cvec_ = 0;  // ids never reused: the prefix salt is (id, scale)
     float active_cvec_scale_ = 0.0f;
     size_t control_vector_salt_() const;
+    // Decode forward must run eager: diagnostics.profile, or a logit lens row (its stash is armed here).
+    [[nodiscard]] bool decode_eager_only_(const std::vector<std::shared_ptr<Request>>& rows);
+    // Logit lens (row 115): prefill stashes the chunk's last row; collect reads every armed row out after
+    // sampling into output_lens and disarms. Both are no-ops without a lens request.
+    void logit_lens_arm_prefill_(const Request& req, int n_tokens);
+    void logit_lens_collect_(const std::vector<std::shared_ptr<Request>>& rows,
+                             const std::vector<int32_t>& tokens, cudaStream_t stream);
     size_t prefix_salt_(const Request& req) const;
     int last_decode_max_blocks_per_graph_[kMaxGraphPoolSize] = {};
     // pow2-bucketed context HIGH-WATER MARK at the last (re)capture: the

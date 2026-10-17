@@ -350,6 +350,31 @@ def features(page, out, bodies, step, answer_and_settle):
         '(w) => { const b = document.querySelector(".turn.is-model:last-of-type > .body").textContent;'
         ' return b.length > w.length + 20; }', want
     )
+
+    # Logit lens: layer readout on, the Layers grid holds layers x tokens cells.
+    def s2c():
+        open_tab(page, "set")
+        page.uncheck("#logprobs")
+        page.check("#lens")
+        open_tab(page, "run")
+        answer_and_settle("nothink lens view", settle=200)
+        page.click(".turn.is-model:last-of-type .act-lens")
+        page.hover(".turn.is-model:last-of-type .lens-grid .lc[data-l] >> nth=40")
+        sleep(150)
+
+    step("02c-lens", s2c)
+    checks["lensSent"] = dig(lb(), "logit_lens") == 5 and dig(lb(), "logprobs") is True
+    checks["lensCells"] = q(
+        '() => { const g = document.querySelector(".turn.is-model:last-of-type .lens-grid");'
+        ' const n = document.querySelectorAll(".turn.is-model:last-of-type .lens-grid .lc.lo").length;'
+        ' return g ? g.querySelectorAll(".lc[data-l]").length === 24 * n && n > 0 : false; }'
+    )
+    checks["lensSettle"] = q('() => document.querySelectorAll(".turn.is-model:last-of-type .lens-grid .settle").length > 0')
+    checks["lensTip"] = q('() => !document.getElementById("tk-tip").hidden && /layer \\d+/.test(document.getElementById("tk-tip").textContent)')
+    open_tab(page, "set")
+    page.uncheck("#lens")
+    page.check("#logprobs")
+    open_tab(page, "run")
     open_tab(page, "set")
     page.uncheck("#logprobs")
     open_tab(page, "run")
