@@ -167,8 +167,9 @@ void GraphExecutor::rmsnorm_for_smallm_(const Tensor& h, const Tensor& w, Tensor
 }
 
 bool GraphExecutor::residual_fusion_ok_(int n) const {
-    return n >= 2 && n <= 32 && lora_ == nullptr && cvec_ == nullptr && !model_->profile().gated_residual &&
-           !model_->config().parallel_block && fp32_accum_buf_ == nullptr && !debug_forward_enabled();
+    return n >= 2 && n <= 32 && lora_ == nullptr && cvec_ == nullptr && sae_rows_.empty() &&
+           !model_->profile().gated_residual && !model_->config().parallel_block &&
+           fp32_accum_buf_ == nullptr && !debug_forward_enabled();
 }
 
 bool GraphExecutor::add_norm_for_smallm_(const Tensor& a, Tensor& r, Tensor& h, const Tensor& w, Tensor& no,

@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- SAE features: `imp-server --sae DIR` (Gemma Scope 2), `"sae_features": N` adds the strongest features per token, `"sae_clamp": {id: value}` steers; Web UI "Concepts" panel. gemma-3-12b-it Q4_K_M, layer 24: L0 58.5, reconstruction error 0.055 (same SAE at layer 10: L0 2193, error 99.4).
 - Classifier-free guidance: `cfg_scale` on chat decodes a shadow without the system message (or with `cfg_negative_prompt`) in the same step and samples l_b + s (l_a - l_b). Qwen3-4B Q8_0, "exactly three words": unguided "Sushi is my favorite.", cfg 1.5 "Sushi, fresh, delicious".
 - `banned_strings` on chat: a completed phrase rewinds output and KV to its first token, bans that token there and resamples; the stream holds back what may still be retracted. Qwen3-4B Q8_0, temp 0, "Eiffel Tower" banned: same text up to "iconic", then "Notre-Dame Cathedral".
 - `banned_regex` on chat: 1..16 PCRE2 patterns, the leftmost match ending in new text inside the last 256 bytes rewinds like `banned_strings`. Qwen3-4B Q8_0 and Nemotron-3-Nano NVFP4, temp 0, `\b1[0-9]{3}\b` on a list of Paris buildings with years: 5 matches -> 0; a pattern that does not compile or matches "" is a 400.
@@ -30,6 +31,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Release bar 2 (`bench-competitive`): Qwen3.8-27B Q4_K_M is a hero (6 of 8 contested), the non-hero Qwen3-30B-A3B row is gone; the sweep refuses on host 1-min load > nproc/4 instead of any running container.
 
 ### Fixed
+- Control vectors on Gemma-3 edited only the FP16 copy of the residual; the FP32 accumulator the next layer adds to dropped the edit. Same path for SAE clamps: feature 451 at 20000 left the gemma-3-12b answer intact before, breaks it after.
 - Streaming `logprobs` (chat, `/v1/completions`) read `Request::output_logprobs` on the handler thread while the worker appended to it; a reallocation left the reader on freed memory. The worker now hands each token's copy over with the token. Qwen3-4B Q8_0: stream == non-stream, 97 and 120 tokens.
 - A greedy first token ignored `logit_bias`: the prefill event-sync sampler applied banned tokens only. Qwen3-4B Q8_0, `{"785": -100}` on "The": v0.53.0 answers "The capital of France is Paris...", now "Paris is the capital of France...".
 - `kv_cache.swa_sizing`: each prefill chunk frees its dead window blocks at enqueue, so the SWA group charges the chunk once per pool, not per sequence. Gemma-3-12B Q4_K_M, 17 slots: 16830 -> 7235 MiB, global KV 1742 -> 3038 blocks, chunk 4096 now starts; 34 concurrent long prompts 34/34.

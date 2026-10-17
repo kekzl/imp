@@ -555,6 +555,10 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
                 printf("[model-swap] dropped control vector '%s' (path=%s): model swapped\n", name.c_str(),
                        entry.path.c_str());
             state.control_vectors.clear();
+            if (!state.sae_path.empty())
+                printf("[model-swap] dropped SAE %s: model swapped\n", state.sae_path.c_str());
+            state.sae_path.clear();
+            state.sae_width.store(0, std::memory_order_relaxed);
             fflush(stdout);
             // load_model_into_state owns the teardown of the previous model and
             // builds a fresh batching engine, so the paused worker goes with it.

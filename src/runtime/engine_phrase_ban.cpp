@@ -252,6 +252,8 @@ void Engine::phrase_rewind_(Request& req, size_t pos, cudaStream_t stream) {
         req.output_logprobs.resize(keep);
     if (req.output_lens.size() > keep)
         req.output_lens.resize(keep);
+    if (req.output_sae.size() > keep)
+        req.output_sae.resize(keep);
     s.text.resize(keep > 0 ? s.tok_end[keep - 1] : 0);
     s.tok_end.resize(keep);
     for (auto& hs : penalty_hist_state_)  // the device history holds the dropped tokens

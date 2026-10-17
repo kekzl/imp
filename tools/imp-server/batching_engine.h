@@ -4,6 +4,7 @@
 #include "api/imp_internal.h"
 #include "rate_limit.h"
 
+#include <optional>
 #include <cuda_runtime_api.h>
 
 #include <atomic>
@@ -35,6 +36,7 @@ struct TokenEvent {
 struct TokenExtras {
     imp::TokenLogprobInfo lp;
     std::vector<imp::LogitLensLayer> lens;
+    std::optional<imp::SaeTokenInfo> sae;  // row 116
 };
 // The worker's copy of output position i, null without logprobs or before the entry exists.
 std::shared_ptr<const TokenExtras> token_extras(const imp::Request& r, size_t i);

@@ -95,6 +95,8 @@ bool run_chat_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                                               {"top_logprobs", top_arr}}})}};
                 if (!ex->lens.empty())  // logit lens (row 115)
                     lp_chunk["content"][0]["logit_lens"] = logit_lens_json(ex->lens);
+                if (ex->sae)  // SAE features (row 116)
+                    lp_chunk["content"][0]["sae"] = sae_json(*ex->sae);
             }
             std::string sse = sse_chunk(comp_id, created, snap_model_name, content_delta,
                                         nullptr, lp_chunk);

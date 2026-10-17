@@ -560,6 +560,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         // Control vector (row 114): after every residual and layer_out_scale, before the snapshot.
         if (cvec_ != nullptr && cvec_->layer_mask[i])
             control_vector_add_(i, n, stream);
+        // SAE (row 116): features of the residual after its layer, clamps edited in before the lens.
+        if (sae_ != nullptr && i == sae_->layer && !sae_rows_.empty())
+            sae_apply_(n, stream);
         // Logit lens (row 115): the residual the next layer reads.
         if (!lens_rows_.empty())
             lens_stash_(i, n, stream);

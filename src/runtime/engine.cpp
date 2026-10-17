@@ -42,6 +42,7 @@
 #include "core/logging.h"
 #include "core/cuda_static_reset.h"
 
+#include <bit>
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
@@ -348,6 +349,9 @@ size_t Engine::prefix_salt_(const Request& req) const {
     if (active_lora_ != 0)
         salt ^= (static_cast<size_t>(active_lora_) + 1) * 0x9E3779B97F4A7C15ULL;
     salt ^= control_vector_salt_();  // steered KV must not serve an unsteered prompt
+    for (const auto& [id, v] : req.sae_clamp)  // SAE clamps edit the prompt's residual too (row 116)
+        salt = (salt ^ (static_cast<size_t>(id) * 0x9E3779B97F4A7C15ULL) ^ std::bit_cast<uint32_t>(v)) *
+               0xBF58476D1CE4E5B9ULL;
     return salt;
 }
 
@@ -1041,6 +1045,14 @@ void Engine::add_request(std::shared_ptr<Request> req) {
                 req->logprobs = true;
             else
                 req->logit_lens = 0;
+        }
+        if (req->sae_top > 0 || !req->sae_clamp.empty()) {  // SAE (row 116): same eager path
+            if (sae_) {
+                req->logprobs = true;
+            } else {
+                req->sae_top = 0;
+                req->sae_clamp.clear();
+            }
         }
         // Seed think state from the prompt tail: chat templates (Qwen3.x,
         // DeepSeek-R1) inject `<think>\n` by default, so without this a model

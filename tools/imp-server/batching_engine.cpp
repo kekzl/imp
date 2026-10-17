@@ -241,6 +241,8 @@ std::shared_ptr<const TokenExtras> token_extras(const imp::Request& r, size_t i)
     ex->lp = r.output_logprobs[i];
     if (i < r.output_lens.size())
         ex->lens = r.output_lens[i];
+    if (r.sae_top > 0 && i < r.output_sae.size())
+        ex->sae = r.output_sae[i];
     return ex;
 }
 

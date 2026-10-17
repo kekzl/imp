@@ -208,6 +208,9 @@ public:
 
     // Logit lens (row 115): false for gated-residual models; add_request then drops logit_lens.
     [[nodiscard]] bool logit_lens_supported() const;
+    // SAE (row 116): one Gemma Scope layout dir per engine; width, 0 = refused.
+    int sae_load(const std::string& dir);
+    [[nodiscard]] int sae_width() const;
     // Banned phrases (row 118): dense attention only (no recurrent state, no residual KV ring).
     [[nodiscard]] bool phrase_ban_supported() const;
     // Classifier-free guidance (row 117): a pair decodes as two rows of one step.
@@ -534,6 +537,10 @@ private:
     // Logit lens (row 115): prefill stashes the chunk's last row; collect reads every armed row out after
     // sampling into output_lens and disarms. Both are no-ops without a lens request.
     void logit_lens_arm_prefill_(const Request& req, int n_tokens);
+    std::unique_ptr<SaeDevice> sae_;
+    [[nodiscard]] bool sae_arm_decode_(const std::vector<std::shared_ptr<Request>>& rows);
+    void sae_arm_prefill_(const Request& req, int n_tokens, bool last_chunk, cudaStream_t stream);
+    void sae_collect_(const std::vector<std::shared_ptr<Request>>& rows, cudaStream_t stream);
     void logit_lens_collect_(const std::vector<std::shared_ptr<Request>>& rows,
                              const std::vector<int32_t>& tokens, cudaStream_t stream);
     // Banned phrases (row 118, runtime/phrase_ban.h): token-0 logits saved at prefill, token 0 checked

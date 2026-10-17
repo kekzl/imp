@@ -22,6 +22,7 @@
 #include "exec/expert_cache_device.h"
 #include "compute/qsa_indexer.h"
 #include "exec/ffn_graph_cache.h"
+#include "exec/sae.h"
 #include "exec/nvfp4_expert_offload.h"
 #include "exec/inference_state.h"
 #include "exec/moe_ffn_context.h"
@@ -141,6 +142,12 @@ public:
     void set_lens_rows(std::vector<int> rows);
     [[nodiscard]] bool logit_lens_readout(const std::vector<int32_t>& targets, int top_n,
                                           struct LogitLensResult& out, cudaStream_t stream);
+    // SAE (row 116, exec/sae.h): set_sae at load; set_sae_rows arms the next eager forwards
+    // (empty = off); sae_readout = the readout rows of the last forward, false = none.
+    void set_sae(const SaeDevice* sae) { sae_ = sae; }
+    void set_sae_rows(std::vector<SaeRowSpec> rows, cudaStream_t stream);
+    [[nodiscard]] bool sae_readout(SaeReadout& out, cudaStream_t stream);
+    [[nodiscard]] bool sae_armed() const { return !sae_rows_.empty(); }
 
     // Embedding pooling (#1005): column-wise sum of hidden_[0..n_tokens) into
     // d_out[d_model] fp32. Runs after a chunk's forward while hidden_ still
@@ -703,6 +710,15 @@ private:
     VramOwned<char> lens_scratch_;
     size_t lens_scratch_bytes_ = 0;
     void lens_stash_(int layer, int n, cudaStream_t stream);
+    const SaeDevice* sae_ = nullptr;
+    std::vector<SaeRowSpec> sae_rows_;
+    int sae_n_readout_ = 0;
+    bool sae_ran_ = false;
+    std::vector<int32_t> sae_h_int_;  // host mirror of sae_idx_: rows | readout slot | clamp offsets | ids
+    std::vector<float> sae_h_vals_;
+    VramOwned<float> sae_x_, sae_acts_, sae_vals_, sae_out_;  // out: [readout, width] acts, then err pairs
+    VramOwned<int32_t> sae_idx_;
+    void sae_apply_(int n, cudaStream_t stream);
     int max_logit_tokens_ = 0;     // max tokens needing LM head projection (= max(max_batch_size, 8))
     int kv_block_size_ = kKVBlockSize;  // real KV block size (set_kv_block_size)
     int cur_n_tokens_ = 0;         // set by forward_logits for use by run_ffn

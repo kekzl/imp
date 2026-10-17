@@ -19,7 +19,6 @@
 #include "api/imp_internal.h"
 #include "vision/image_processor.h"
 #include "runtime/request.h"
-#include "runtime/phrase_ban.h"
 #include "runtime/cfg_guidance.h"
 #include "memory/kv_cache.h"
 #include "model/hf_hub.h"
@@ -641,11 +640,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->tool_constraint_xml = ctx.params.tool_constraint_xml;
     req->tool_gate = tool_call_gate(ctx.snap.tpl_family);
     req->logit_bias = ctx.params.logit_bias;
-    if (!ctx.params.banned_strings.empty() || !ctx.params.banned_regex.empty()) {
-        req->phrase = std::make_shared<imp::PhraseBanState>();
-        req->phrase->phrases = ctx.params.banned_strings;
-        req->phrase->regex = ctx.params.banned_regex;
-    }
+    apply_rewind_and_sae(*req, ctx.params);  // banned_strings / banned_regex (row 118), SAE (row 116)
     if (ctx.params.cfg_scale > 1.0f) {  // classifier-free guidance (row 117): the engine runs the shadow
         auto shadow = std::make_shared<imp::Request>();
         shadow->input_tokens = ctx.snap.cfg_tokens;
@@ -922,7 +917,9 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
         json logprobs_obj = nullptr;
         if (ctx.params.req_logprobs && active_req) {
             logprobs_obj = chat_logprobs_json(active_req->output_logprobs, output_ids.size(),
-                                              ctx.params.logit_lens > 0 ? &active_req->output_lens : nullptr);
+                                              ctx.params.logit_lens > 0 ? &active_req->output_lens : nullptr,
+                                              ctx.params.sae_features > 0 ? &active_req->output_sae
+                                                                          : nullptr);
         }
 
         // Tool-call parsing runs even on finish=length: the model may emit a complete tool_call then

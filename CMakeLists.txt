@@ -421,6 +421,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_control_vector.cpp
     src/runtime/engine_logit_lens.cpp
     src/runtime/engine_phrase_ban.cpp
+    src/runtime/engine_sae.cpp
     src/runtime/phrase_regex.cpp
     src/runtime/engine_cfg.cpp
     src/runtime/engine_init_resolver.cpp
@@ -511,6 +512,8 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_lora.cu
     src/exec/executor_control_vector.cu
     src/exec/executor_logit_lens.cu
+    src/exec/executor_sae.cu
+    src/exec/sae_load.cpp
     src/lora/lora_adapter.cpp
     src/lora/control_vector.cpp
     src/quant/gpt_oss_mxfp4_convert.cpp
@@ -904,6 +907,7 @@ if(IMP_BUILD_TESTS)
         tests/test_forward_profile.cpp
         tests/test_lora_dims.cpp
         tests/test_control_vector.cpp
+        tests/test_sae.cpp
         tests/test_fim.cpp
         tests/test_expert_cache_reinit.cpp
         tests/test_sparse_attn_geometry.cpp

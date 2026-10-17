@@ -27,6 +27,8 @@ void print_server_usage(const char* prog) {
             "  --control-vector NAME=PATH  Load a llama.cpp control vector GGUF (repeatable); select per "
             "request\n"
             "                        via \"control_vector\": NAME or {\"name\": NAME, \"scale\": s}\n"
+            "  --sae DIR             Load a Gemma Scope 2 SAE dir; per request \"sae_features\": N and\n"
+            "                        \"sae_clamp\": {\"FEATURE\": value}\n"
             "  --no-cuda-graphs      Disable CUDA Graph capture for decode\n"
             "  --ssm-fp16            Use FP16 for SSM h_state\n"
             "  --kv-fp8              Use FP8 E4M3 KV cache (halves KV memory)\n"
@@ -113,6 +115,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
                 exit(1);
             }
             args.control_vectors.emplace_back(spec.substr(0, eq), spec.substr(eq + 1));
+        } else if (std::strcmp(arg, "--sae") == 0 && i + 1 < argc) {
+            args.sae_dir = argv[++i];
         } else if (std::strcmp(arg, "--models-dir") == 0 && i + 1 < argc) {
             args.models_dir = argv[++i];
         } else if (std::strcmp(arg, "--api-key") == 0 && i + 1 < argc) {

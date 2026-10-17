@@ -12,3 +12,10 @@ json logit_lens_json(const std::vector<imp::LogitLensLayer>& layers) {
     }
     return out;
 }
+
+json sae_json(const imp::SaeTokenInfo& s) {
+    json feats = json::array();
+    for (const auto& [id, act] : s.top)
+        feats.push_back({{"id", id}, {"act", act}});
+    return {{"l0", s.l0}, {"err", s.rel_err}, {"features", feats}};
+}

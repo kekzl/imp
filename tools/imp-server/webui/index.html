@@ -474,6 +474,10 @@
   .lens-grid .lc.settle { box-shadow: inset 0 0 0 1px var(--fire); }
   .lens-grid .lh { position: sticky; left: 0; z-index: 1; padding: 1px 8px 1px 2px; color: var(--text3); background: var(--bg); }
   .lens-grid .lo { color: var(--text); font-weight: 600; border-top: 1px solid var(--line2); }
+  .sae-grid { display: grid; grid-template-columns: max-content max-content 1fr; gap: 1px 12px; max-height: 360px; overflow: auto; font: 12px/1.5 var(--mono); }
+  .sae-grid .st { white-space: pre; color: var(--text); }
+  .sae-grid .sm { color: var(--text3); }
+  .sae-grid .sf { color: var(--text2); overflow-wrap: anywhere; }
   .tk-tip table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
   .tk-tip td { padding: 1px 4px; }
   .tk-tip td:first-child { font-family: var(--mono); white-space: pre; max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
@@ -954,6 +958,11 @@
         <label for="lens" title="logit_lens: the top tokens after every layer; decode runs eager while on">layer readout</label>
         <input type="checkbox" id="lens">
       </div>
+      <div class="field check">
+        <label for="sae" title="sae_features: the SAE features that fire on each answer token (server started with --sae)">concepts</label>
+        <input type="checkbox" id="sae">
+      </div>
+      <div class="field"><label for="steer" title="sae_clamp: FEATURE=VALUE, comma separated; the residual carries that activation at every token (server started with --sae)">steer</label><input id="steer" spellcheck="false" placeholder="2997=4000"></div>
       <div class="field wide">
         <label for="fmt">format</label>
         <select id="fmt">
@@ -1099,7 +1108,7 @@ darkQuery.addEventListener("change", applyTheme);
 const PARAMS_KEY = "imp.ui.params", DRAFT_KEY = "imp.ui.draft";
 const PARAM_DEFAULTS = {
   temp: "0.7", maxtok: "512", topp: "", topk: "", minp: "", reppen: "", prespen: "", freqpen: "", seed: "", cfg: "",
-  thinking: true, effort: "", logprobs: false, lens: false, fmt: "none", schema: "", bans: "",
+  thinking: true, effort: "", logprobs: false, lens: false, sae: false, steer: "", fmt: "none", schema: "", bans: "",
 };
 const paramIds = Object.keys(PARAM_DEFAULTS);
 // [input id, request field, integer?]
@@ -1215,6 +1224,14 @@ function lensOf(x) {
   return out;
 }
 
+// One token's SAE features, from the wire ({l0, err, features: [{id, act}]}) or from storage
+// ([l0, err, [[id, act]]]); null when absent or malformed.
+function saeOf(x) {
+  const a = Array.isArray(x) ? x : [x?.l0, x?.err, (Array.isArray(x?.features) ? x.features : []).map((f) => [f?.id, f?.act])];
+  if (typeof a[0] !== "number" || typeof a[1] !== "number" || !Array.isArray(a[2])) return null;
+  return [a[0], a[1], a[2].filter((f) => Array.isArray(f) && Number.isInteger(f[0]) && typeof f[1] === "number").slice(0, 32)];
+}
+
 // Everything that comes from storage or an imported file passes through here: only known
 // fields of known types survive, images only as data:image URLs.
 function sanitizeConv(c) {
@@ -1254,6 +1271,7 @@ function sanitizeConv(c) {
           .slice(0, 50000).map((x) => [x[0], x[1], Array.isArray(x[2]) ? x[2].filter((t) => Array.isArray(t) && typeof t[0] === "string" && typeof t[1] === "number").slice(0, 20) : []]);
       }
       if (Array.isArray(m.lens)) o.lens = m.lens.slice(0, 50000).map(lensOf);
+      if (Array.isArray(m.sae)) o.sae = m.sae.slice(0, 50000).map(saeOf);
     }
     messages.push(o);
   }
@@ -1281,6 +1299,7 @@ function stripHeavy(c) {
     if (o.images?.length) { o.imagesDropped = o.images.length; delete o.images; }
     delete o.logprobs;
     delete o.lens;
+    delete o.sae;
     return o;
   }) };
 }
@@ -1969,6 +1988,7 @@ function modelTurn(m, idx, isLast) {
                 actButton("act-copy", "Markdown", "copy the answer as Markdown")];
   if (m.logprobs?.length) acts.push(actButton("act-tokens", "Tokens", "colour each token by its probability"));
   if (m.lens?.some(Boolean)) acts.push(actButton("act-lens", "Layers", "the top token after every layer (logit lens)"));
+  if (m.sae?.some(Boolean)) acts.push(actButton("act-sae", "Concepts", "the SAE features that fire on each token"));
   if (isLast && m.finish === "length" && m.content) acts.push(actButton("act-cont", "Continue", "ask the model to go on where it stopped"));
   if (isLast) acts.push(actButton("act-regen", "Regenerate", "drop this answer and ask again"));
   addFoot(t, statBits(m.stats), acts);
@@ -2203,6 +2223,41 @@ document.addEventListener("pointerdown", (e) => {
   if (tipSpan && !tip.contains(e.target) && e.target.closest(".tokens .tk") !== tipSpan) hideTip();
 });
 
+// SAE concepts: one row per answer token, its strongest features by activation, L0 and the
+// relative reconstruction error of the residual.
+function showSae(turnEl, msg) {
+  const btn = turnEl.querySelector(".act-sae");
+  const open = turnEl.querySelector(":scope > .sae");
+  btn.classList.toggle("on", !open);
+  btn.setAttribute("aria-pressed", String(!open));
+  if (open) { open.remove(); return; }
+  const toks = msg.logprobs ?? [];
+  const n = Math.min(msg.sae.length, toks.length, LENS_MAX_COLS);
+  const box = document.createElement("div");
+  box.className = "sae lens";
+  const note = document.createElement("p");
+  note.className = "lens-note";
+  note.textContent = "Strongest SAE features per token (id: activation); L0 = active features, err = reconstruction error" +
+                     (msg.sae.length > n ? `; first ${n} tokens` : "");
+  const grid = document.createElement("div");
+  grid.className = "sae-grid";
+  for (let t = 0; t < n; t++) {
+    const s = msg.sae[t];
+    const tok = document.createElement("span");
+    tok.className = "st";
+    tok.textContent = tokLabel(toks[t][0]);
+    const meta = document.createElement("span");
+    meta.className = "sm";
+    meta.textContent = s ? `L0 ${s[0]} · err ${s[1].toFixed(3)}` : "";
+    const feats = document.createElement("span");
+    feats.className = "sf";
+    feats.textContent = s ? s[2].map(([id, a]) => `${id}: ${Math.round(a)}`).join("  ") : "";
+    grid.append(tok, meta, feats);
+  }
+  box.append(note, grid);
+  turnEl.insertBefore(box, turnEl.querySelector(".foot"));
+}
+
 // Logit lens grid: one column per answer token, one row per layer (last layer on top), the cell is
 // that layer's top token coloured by the probability it gives the token finally sampled.
 const LENS_MAX_COLS = 600;
@@ -2302,6 +2357,7 @@ function branchAt(idx, i, tok) {
                   logprobs: [...head, [tok, lp, t[2]]].map((x) => [x[0], x[1], x[2].map((a) => a.slice())]), branchAt: i };
   if (src.reasoning) reply.reasoning = src.reasoning;
   if (src.lens) reply.lens = [...structuredClone(src.lens.slice(0, i)), null];  // the picked token was not read out
+  if (src.sae) reply.sae = [...structuredClone(src.sae.slice(0, i)), null];
   const c = newConv(cur.system);
   c.title = "Branch: " + titleOf(cur).replace(/^Branch: /, "");
   c.messages = structuredClone(cur.messages.slice(0, idx));
@@ -2396,8 +2452,15 @@ function requestBody() {
     if (Number.isFinite(n)) body[field] = n;
   }
   if (effort) body.reasoning_effort = effort;
-  if (el("logprobs").checked || el("lens").checked) { body.logprobs = true; body.top_logprobs = 5; }
+  if (el("logprobs").checked || el("lens").checked || el("sae").checked) { body.logprobs = true; body.top_logprobs = 5; }
   if (el("lens").checked) body.logit_lens = 5;
+  if (el("sae").checked) body.sae_features = 8;
+  const steer = {};
+  for (const part of el("steer").value.split(",")) {
+    const m = part.trim().match(/^(\d+)\s*=\s*(-?[\d.]+(?:e-?\d+)?)$/i);
+    if (m && Object.keys(steer).length < 16) steer[m[1]] = parseFloat(m[2]);
+  }
+  if (Object.keys(steer).length) body.sae_clamp = steer;
   const bans = el("bans").value.split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 64);
   if (bans.length) body.banned_strings = bans;
   const rf = responseFormat();
@@ -2442,7 +2505,7 @@ async function generate({ cont = false, prefill = false } = {}) {
   const maxTokens = parseInt(el("maxtok").value, 10) || 512;
   let answer = "", reasoning = "", thinking = null, finish = null, usage = null, requestId = null;
   let outcome = "ok", errText = "";
-  const lps = [], lensTok = [];  // lensTok parallel to lps
+  const lps = [], lensTok = [], saeTok = [];  // lensTok, saeTok parallel to lps
 
   // Re-typesetting on every token would burn the frame budget at 150 tok/s, so
   // repaints are coalesced to one per animation frame.
@@ -2506,6 +2569,7 @@ async function generate({ cont = false, prefill = false } = {}) {
             if (typeof c.token === "string" && typeof c.logprob === "number") {
               lps.push([c.token, c.logprob, (c.top_logprobs ?? []).filter((x) => typeof x.token === "string").map((x) => [x.token, x.logprob])]);
               lensTok.push(lensOf(c.logit_lens));
+              saeTok.push(saeOf(c.sae));
             }
           const delta = choice.delta;
           if (!delta) continue;
@@ -2591,6 +2655,10 @@ async function generate({ cont = false, prefill = false } = {}) {
     if (lensTok.some(Boolean) || msg.lens) {
       const had = msg.logprobs?.length ?? 0;
       msg.lens = (msg.lens ?? []).concat(Array(Math.max(0, had - (msg.lens?.length ?? 0))).fill(null), lensTok);
+    }
+    if (saeTok.some(Boolean) || msg.sae) {
+      const had = msg.logprobs?.length ?? 0;
+      msg.sae = (msg.sae ?? []).concat(Array(Math.max(0, had - (msg.sae?.length ?? 0))).fill(null), saeTok);
     }
     if (lps.length) msg.logprobs = (msg.logprobs ?? []).concat(lps);
     if (!base) cur.messages.push(msg);
@@ -2906,6 +2974,8 @@ log.addEventListener("click", (e) => {
     if (msg?.logprobs) showTokens(turnEl, msg);
   } else if (btn.classList.contains("act-lens")) {
     if (msg?.lens) showLens(turnEl, msg);
+  } else if (btn.classList.contains("act-sae")) {
+    if (msg?.sae) showSae(turnEl, msg);
   } else if (btn.classList.contains("act-edit")) {
     startEdit(turnEl, idx);
   } else if (btn.classList.contains("act-regen")) {

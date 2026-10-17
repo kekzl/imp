@@ -658,7 +658,9 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                                  // PLE gathers its n-gram rows on the host per chunk (D2H + sync).
                                  model_->ngram_table() == nullptr &&
                                  // n_vision_tokens is a host arg; the graph outlives the request.
-                                 state.vision_embeddings == nullptr;
+                                 state.vision_embeddings == nullptr &&
+                                 // a capture skips the SAE hook (row 116)
+                                 !executor_->sae_armed();
         // Capture a shape on its second consecutive sighting: capture + instantiate cost more than
         // one eager forward (26.5 ms instantiate at pp512 on Qwen3-30B-A3B), so a one-off prompt
         // length runs eager and leaves the cached graph in place.
@@ -711,6 +713,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         }
     };
 
+    sae_arm_prefill_(*req, state.n_tokens, is_last_chunk, pf_stream);  // SAE clamps/features (row 116)
     if (!is_last_chunk) {
         if (executor_->has_decode_workspace()) {
             executor_->use_workspace(0);
@@ -718,6 +721,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         Tensor logits_out;
 
         forward_prefill_logits(logits_out);
+        executor_->set_sae_rows({}, pf_stream);  // interleaved decode steps must not inherit an SAE arm
 
         // Teacher-forced NLL for this chunk's positions (imp_perplexity).
         // Runs eagerly after the (possibly graph-replayed) forward; hidden_
@@ -884,6 +888,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         }
         logit_lens_collect_({req}, {next_token},
                             pf_stream);  // after the logits_ reads above; disarms the lens
+        sae_collect_({req}, pf_stream);  // SAE features of the first output token; disarms the SAE
 
         // Teacher-forced NLL for the LAST chunk (imp_perplexity), after
         // sampling + logprob extraction: the partial pass overwrites logits_,
