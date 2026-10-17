@@ -440,7 +440,7 @@
   @keyframes caret { 50% { opacity: 0.25; } }
 
   /* token probability view */
-  .body.tokens .tk { border-radius: 3px; cursor: help; }
+  .body.tokens .tk { border-radius: 3px; cursor: pointer; }
   .body.tokens .tk:focus-visible { outline-offset: 0; }
   .tk.p1 { background: color-mix(in srgb, var(--fire) 16%, transparent); }
   .tk.p2 { background: color-mix(in srgb, var(--fire) 34%, transparent); }
@@ -453,6 +453,17 @@
     background: var(--surface2); border: 1px solid var(--line2); box-shadow: var(--shadow);
     font-size: 12.5px; pointer-events: none;
   }
+  .tk-tip.pinned { pointer-events: auto; }
+  .tk-tip .tk-head { margin: 0 0 6px; color: var(--text3); font-size: 11.5px; }
+  .tk-tip .tk-alt {
+    display: flex; justify-content: space-between; gap: 10px; width: 100%; padding: 3px 6px; border: 0; border-radius: 6px;
+    background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; font-variant-numeric: tabular-nums;
+  }
+  .tk-tip .tk-alt:hover, .tk-tip .tk-alt:focus-visible { background: var(--surface); }
+  .tk-tip .tk-alt .tok { font-family: var(--mono); white-space: pre; max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+  .tk-tip .tk-alt .p { color: var(--text2); }
+  .tk-tip .tk-alt.pick .tok { color: var(--fire); font-weight: 600; }
+  .body.tokens .tk.branch { box-shadow: inset 0 -2px 0 var(--horn); }
   .tk-tip table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
   .tk-tip td { padding: 1px 4px; }
   .tk-tip td:first-child { font-family: var(--mono); white-space: pre; max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
@@ -1200,6 +1211,7 @@ function sanitizeConv(c) {
       if (typeof m.finish === "string") o.finish = m.finish.slice(0, 32);
       if (m.noFinish === true) o.noFinish = true;
       if (m.cont === true) o.cont = true;
+      if (Number.isInteger(m.branchAt) && m.branchAt >= 0) o.branchAt = m.branchAt;
       if (m.stats && typeof m.stats === "object") {
         const s = {};
         for (const k of ["count", "tps", "ttft", "wall", "cached", "joules", "watts", "used", "prompt", "reasoning", "evicted", "maxTokens"])
@@ -1916,6 +1928,7 @@ function modelTurn(m, idx, isLast) {
   const t = addTurnEl("model");
   t.wrap.dataset.idx = idx;
   if (m.cont) { t.wrap.classList.add("is-cont"); t.label.lastChild.textContent = "imp, continued"; }
+  if (m.branchAt !== undefined) t.label.lastChild.textContent = `imp, branched at token ${m.branchAt + 1}`;
   if (m.reasoning) thinkPane(t, false).body.textContent = m.reasoning;
   t.body.innerHTML = markup(m.content);
   rawText.set(t.wrap, m.content);
@@ -2046,7 +2059,7 @@ function showTokens(turnEl, msg) {
   const frag = document.createDocumentFragment();
   msg.logprobs.forEach((t, i) => {
     const s = document.createElement("span");
-    s.className = "tk " + probClass(Math.exp(t[1]));
+    s.className = "tk " + probClass(Math.exp(t[1])) + (i === msg.branchAt ? " branch" : "");
     s.dataset.i = i;
     s.tabIndex = 0;
     s.textContent = t[0];
@@ -2059,36 +2072,128 @@ function showTokens(turnEl, msg) {
   const lg = document.createElement("div");
   lg.className = "tk-legend";
   lg.innerHTML = 'probability <span class="tk p0">90%+</span><span class="tk p1">60%+</span><span class="tk p2">30%+</span>' +
-                 '<span class="tk p3">10%+</span><span class="tk p4">below</span> hover or focus a token for the alternatives';
+                 '<span class="tk p3">10%+</span><span class="tk p4">below</span> hover a token for the alternatives, click one to branch there';
   body.after(lg);
 }
 
 const tip = el("tk-tip");
-function tokenTip(span) {
+let tipSpan = null;  // the token whose branch menu is open; null = plain hover tip
+const tokLabel = (tok) => JSON.stringify(tok).slice(1, -1);
+
+// Hover or focus: the alternatives as a table. Click or Enter: the same rows as buttons,
+// each one branches the chat at this token (branchAt).
+function tokenTip(span, pin = false) {
   const turn = span.closest(".turn");
   const msg = cur.messages[+turn?.dataset.idx];
   const t = msg?.logprobs?.[+span.dataset.i];
   if (!t) return;
-  const table = document.createElement("table");
   const rows = t[2].length ? t[2] : [[t[0], t[1]]];
-  for (const [tok, lp] of rows) {
-    const tr = table.insertRow();
-    if (tok === t[0]) tr.className = "pick";
-    tr.insertCell().textContent = JSON.stringify(tok).slice(1, -1);
-    tr.insertCell().textContent = pct(lp);
+  if (pin) {
+    const head = document.createElement("p");
+    head.className = "tk-head";
+    head.textContent = "branch a new chat here with";
+    const btns = rows.map(([tok, lp]) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "tk-alt" + (tok === t[0] ? " pick" : "");
+      b.dataset.tok = tok;
+      b.innerHTML = '<span class="tok"></span><span class="p"></span>';
+      b.firstChild.textContent = tokLabel(tok);
+      b.lastChild.textContent = pct(lp);
+      b.title = tok === t[0] ? "keep this token, sample again after it" : "continue with this token instead";
+      return b;
+    });
+    tip.replaceChildren(head, ...btns);
+    tip.setAttribute("role", "dialog");
+    tip.setAttribute("aria-label", "Branch at this token");
+  } else {
+    const table = document.createElement("table");
+    for (const [tok, lp] of rows) {
+      const tr = table.insertRow();
+      if (tok === t[0]) tr.className = "pick";
+      tr.insertCell().textContent = tokLabel(tok);
+      tr.insertCell().textContent = pct(lp);
+    }
+    tip.replaceChildren(table);
+    tip.setAttribute("role", "tooltip");
+    tip.removeAttribute("aria-label");
   }
-  tip.replaceChildren(table);
+  tipSpan = pin ? span : null;
+  tip.classList.toggle("pinned", pin);
   tip.hidden = false;
   const r = span.getBoundingClientRect();
   const tw = tip.offsetWidth, th = tip.offsetHeight;
   tip.style.left = Math.max(8, Math.min(innerWidth - tw - 8, r.left)) + "px";
   tip.style.top = (r.bottom + th + 10 > innerHeight ? r.top - th - 6 : r.bottom + 6) + "px";
+  if (pin) tip.querySelector(".tk-alt")?.focus();
 }
-log.addEventListener("mouseover", (e) => { const s = e.target.closest(".tokens .tk"); if (s) tokenTip(s); });
-log.addEventListener("focusin", (e) => { const s = e.target.closest(".tokens .tk"); if (s) tokenTip(s); });
-log.addEventListener("mouseout", (e) => { if (e.target.closest(".tokens .tk")) tip.hidden = true; });
-log.addEventListener("focusout", () => { tip.hidden = true; });
-log.addEventListener("scroll", () => { tip.hidden = true; }, { passive: true });
+function hideTip(refocus = false) {
+  const s = tipSpan;
+  tip.hidden = true;
+  tip.classList.remove("pinned");
+  tipSpan = null;
+  if (refocus && s?.isConnected) s.focus();
+}
+log.addEventListener("mouseover", (e) => { const s = e.target.closest(".tokens .tk"); if (s && !tipSpan) tokenTip(s); });
+log.addEventListener("focusin", (e) => { const s = e.target.closest(".tokens .tk"); if (s && !tipSpan) tokenTip(s); });
+log.addEventListener("mouseout", (e) => { if (e.target.closest(".tokens .tk") && !tipSpan) tip.hidden = true; });
+log.addEventListener("focusout", (e) => { if (!tipSpan && !tip.contains(e.relatedTarget)) tip.hidden = true; });
+log.addEventListener("scroll", () => hideTip(), { passive: true });
+log.addEventListener("click", (e) => {
+  const s = e.target.closest(".tokens .tk");
+  if (!s) return;
+  if (tipSpan === s) hideTip();
+  else tokenTip(s, true);
+});
+log.addEventListener("keydown", (e) => {
+  const s = e.target.closest(".tokens .tk");
+  if (s && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); tokenTip(s, true); }
+});
+tip.addEventListener("click", (e) => {
+  const b = e.target.closest(".tk-alt");
+  if (!b || !tipSpan) return;
+  const idx = +tipSpan.closest(".turn").dataset.idx, i = +tipSpan.dataset.i;
+  hideTip();
+  branchAt(idx, i, b.dataset.tok);
+});
+tip.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); hideTip(true); return; }
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+  e.preventDefault();
+  const bs = [...tip.querySelectorAll(".tk-alt")];
+  const k = bs.indexOf(document.activeElement);
+  bs[(k + (e.key === "ArrowDown" ? 1 : bs.length - 1)) % bs.length]?.focus();
+});
+tip.addEventListener("focusout", (e) => { if (tipSpan && !tip.contains(e.relatedTarget)) hideTip(); });
+document.addEventListener("pointerdown", (e) => {
+  if (tipSpan && !tip.contains(e.target) && e.target.closest(".tokens .tk") !== tipSpan) hideTip();
+});
+
+// A loom branch is a new chat: the history up to this reply, the reply's tokens before
+// position i, then `tok`; the server continues that text (continue_final_message), and the
+// unchanged prefix comes from the prefix cache. The source chat stays as it was.
+function branchAt(idx, i, tok) {
+  if (controller) { toast("Stop the answer first."); return; }
+  const src = cur.messages[idx];
+  const t = src?.logprobs?.[i];
+  if (src?.role !== "assistant" || !t) return;
+  const head = src.logprobs.slice(0, i);
+  const lp = t[2].find((x) => x[0] === tok)?.[1] ?? t[1];
+  const reply = { role: "assistant", content: head.map((x) => x[0]).join("") + tok,
+                  logprobs: [...head, [tok, lp, t[2]]].map((x) => [x[0], x[1], x[2].map((a) => a.slice())]), branchAt: i };
+  if (src.reasoning) reply.reasoning = src.reasoning;
+  const c = newConv(cur.system);
+  c.title = "Branch: " + titleOf(cur).replace(/^Branch: /, "");
+  c.messages = structuredClone(cur.messages.slice(0, idx));
+  c.messages.push(reply);
+  if (!cur.messages.length && !cur.system) convs = convs.filter((x) => x !== cur);
+  convs.unshift(c);
+  cur = c;
+  lsSet(CUR_KEY, cur.id);
+  showConversation();
+  renderSidebar();
+  generate({ prefill: true });
+}
 
 /* ---------- energy -------------------------------------------------- */
 
@@ -2177,14 +2282,23 @@ function requestBody() {
   return body;
 }
 
-async function generate({ cont = false } = {}) {
+// prefill: the last message is an assistant prefix (a loom branch); the reply continues it.
+async function generate({ cont = false, prefill = false } = {}) {
   clearFaults();
   log.querySelector(".empty")?.remove();
   for (const b of log.querySelectorAll(".act-regen, .act-cont, .act-edit")) b.disabled = true;
 
+  const base = prefill ? cur.messages.at(-1) : null;
+  const pre = base?.content ?? "";
   const turn = addTurnEl("model");
   turn.wrap.classList.add("live");
   if (cont) { turn.wrap.classList.add("is-cont"); turn.label.lastChild.textContent = "imp, continued"; }
+  if (base) {
+    log.querySelector(`.turn[data-idx="${cur.messages.length - 1}"]`)?.remove();
+    turn.label.lastChild.textContent = `imp, branched at token ${base.branchAt + 1}`;
+    if (base.reasoning) thinkPane(turn, false).body.textContent = base.reasoning;
+    turn.body.innerHTML = markup(pre);
+  }
   log.append(turn.wrap);
   const caret = document.createElement("span");
   caret.className = "caret";
@@ -2217,7 +2331,7 @@ async function generate({ cont = false } = {}) {
       queued = false;
       if (finished) return;
       const was = atBottom();
-      turn.body.innerHTML = markup(answer);
+      turn.body.innerHTML = markup(pre + answer);
       turn.body.append(caret);
       stickBottom(was);
     });
@@ -2232,7 +2346,7 @@ async function generate({ cont = false } = {}) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: controller.signal,
-      body: JSON.stringify(requestBody()),
+      body: JSON.stringify(prefill ? { ...requestBody(), continue_final_message: true } : requestBody()),
     });
     requestId = res.headers.get("x-request-id");
 
@@ -2316,7 +2430,11 @@ async function generate({ cont = false } = {}) {
   const count = usage?.completion_tokens ?? nTokens;
   const gen = tPrev > tFirst ? (tPrev - tFirst) / 1000 : 0;
 
-  if (outcome === "failed" || !(answer || reasoning)) {
+  if (base && (outcome === "failed" || !(answer || reasoning))) {
+    // The branch stays as its prefix; Regenerate drops it.
+    if (outcome === "failed") { setState("down", "error"); say("Not my fault!"); }
+    else setState("ok", outcome === "stopped" ? "stopped" : "idle");
+  } else if (outcome === "failed" || !(answer || reasoning)) {
     // The exchange never happened (failed, or stopped before the first token): drop what
     // this run asked for and hand the text back, so the history never holds two user turns.
     const asked = cur.messages.pop();
@@ -2338,13 +2456,15 @@ async function generate({ cont = false } = {}) {
       st.reasoning = usage.completion_tokens_details?.reasoning_tokens ?? 0;
       st.evicted = usage.prompt_tokens_details?.evicted_tokens ?? 0;
     }
-    const msg = { role: "assistant", content: answer, stats: st };
-    if (reasoning) msg.reasoning = reasoning;
+    const msg = base ?? { role: "assistant" };
+    msg.content = pre + answer;
+    msg.stats = st;
+    if (reasoning) msg.reasoning = (msg.reasoning ?? "") + reasoning;
     if (finish) msg.finish = finish;
     if (outcome === "nofinish") msg.noFinish = true;
     if (cont) msg.cont = true;
-    if (lps.length) msg.logprobs = lps;
-    cur.messages.push(msg);
+    if (lps.length) msg.logprobs = (msg.logprobs ?? []).concat(lps);
+    if (!base) cur.messages.push(msg);
     setState(outcome === "broken" ? "down" : "ok", outcome === "stopped" ? "stopped" : outcome === "broken" ? "error" : "idle");
     if (outcome === "ok" && st.tps >= 100) throwFireball(st.tps);
     if (e0) {
