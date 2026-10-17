@@ -927,6 +927,7 @@
       <div class="field"><label for="prespen">presence penalty</label><input type="number" id="prespen" min="-2" max="2" step="0.1" placeholder="0"></div>
       <div class="field"><label for="freqpen">frequency penalty</label><input type="number" id="freqpen" min="-2" max="2" step="0.1" placeholder="0"></div>
       <div class="field"><label for="seed">seed</label><input type="number" id="seed" step="1" placeholder="random"></div>
+      <div class="field"><label for="cfg" title="classifier-free guidance: contrasts the prompt with itself minus the system message; 1 = off, decodes a second sequence">guidance</label><input type="number" id="cfg" min="1" max="10" step="0.5" placeholder="1"></div>
       <p class="hint">An empty field is not sent: the server uses the model's own default.</p>
 
       <h2>System prompt <span class="aside">saved with this chat</span></h2>
@@ -1097,7 +1098,7 @@ darkQuery.addEventListener("change", applyTheme);
 // Sampling survives a reload. An empty field is not sent, so the model's own default applies.
 const PARAMS_KEY = "imp.ui.params", DRAFT_KEY = "imp.ui.draft";
 const PARAM_DEFAULTS = {
-  temp: "0.7", maxtok: "512", topp: "", topk: "", minp: "", reppen: "", prespen: "", freqpen: "", seed: "",
+  temp: "0.7", maxtok: "512", topp: "", topk: "", minp: "", reppen: "", prespen: "", freqpen: "", seed: "", cfg: "",
   thinking: true, effort: "", logprobs: false, lens: false, fmt: "none", schema: "", bans: "",
 };
 const paramIds = Object.keys(PARAM_DEFAULTS);
@@ -1105,7 +1106,7 @@ const paramIds = Object.keys(PARAM_DEFAULTS);
 const SAMPLING = [
   ["temp", "temperature", false], ["topp", "top_p", false], ["topk", "top_k", true], ["minp", "min_p", false],
   ["reppen", "repetition_penalty", false], ["prespen", "presence_penalty", false],
-  ["freqpen", "frequency_penalty", false], ["seed", "seed", true],
+  ["freqpen", "frequency_penalty", false], ["seed", "seed", true], ["cfg", "cfg_scale", false],
 ];
 let savedEffort = "";  // restored once the loaded model's choices exist
 

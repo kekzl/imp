@@ -231,6 +231,10 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
         if (ctx.params.logit_lens > 0)
             ctx.params.req_logprobs = true;
     }
+    if (const std::string err = parse_cfg_fields(body, ctx.params); !err.empty()) {
+        send_json_error(res, 400, "invalid_request_error", err, "cfg_scale");
+        return false;
+    }
     // Banned phrases (row 118): a completed phrase is rewound to its first token, which is banned there.
     if (const auto bs = body.find("banned_strings"); bs != body.end() && !bs->is_null()) {
         const std::string why = parse_banned_strings(*bs, ctx.params.banned_strings);

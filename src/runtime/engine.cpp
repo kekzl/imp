@@ -1091,7 +1091,7 @@ void Engine::add_request(std::shared_ptr<Request> req) {
                                                     qwen_video_pad_id_);
         phrase_ban_init_(*req);  // banned phrases: think seed and own logit_bias, after the seeding above
         req->prefix_salt = prefix_salt_(*req);
-        scheduler_->add_request(std::move(req));
+        cfg_admit_(std::move(req));  // the scheduler, or held until its guidance shadow prefilled
     }
 }
 

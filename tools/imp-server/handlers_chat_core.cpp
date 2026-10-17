@@ -20,6 +20,7 @@
 #include "vision/image_processor.h"
 #include "runtime/request.h"
 #include "runtime/phrase_ban.h"
+#include "runtime/cfg_guidance.h"
 #include "memory/kv_cache.h"
 #include "model/hf_hub.h"
 #include "runtime/config.h"
@@ -510,6 +511,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
             raw.pop_back();  // the prefix continues on its own line
         ctx.snap.tokens = ctx.snap.tok->encode(raw);
     }
+    cfg_render_negative(ctx, force_thinking);     // guidance shadow prompt (row 117), same template state
     ctx.snap.chat_tpl.set_continue_final(false);  // the cache_control prefix renders closed turns
 
     // cache_control breakpoint (#1046): re-render leading messages up to the marked block and count
@@ -642,6 +644,13 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     if (!ctx.params.banned_strings.empty()) {
         req->phrase = std::make_shared<imp::PhraseBanState>();
         req->phrase->phrases = ctx.params.banned_strings;
+    }
+    if (ctx.params.cfg_scale > 1.0f) {  // classifier-free guidance (row 117): the engine runs the shadow
+        auto shadow = std::make_shared<imp::Request>();
+        shadow->input_tokens = ctx.snap.cfg_tokens;
+        req->cfg = std::make_shared<imp::CfgState>();
+        req->cfg->scale = ctx.params.cfg_scale - 1.0f;  // l_b + s (l_a - l_b) = l_a + (s - 1)(l_a - l_b)
+        req->cfg->shadow = std::move(shadow);
     }
     // req->started_in_think = enable_thinking: without it the engine's think-budget enforcement
     // never sees an opener in the output and lets the model reason to max_tokens (content empty).

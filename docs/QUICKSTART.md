@@ -133,6 +133,7 @@ Expected: an explanation of Rayleigh scattering, written at the single-stream ra
 | token probabilities | `logprobs` + `top_logprobs: 5`, tokens coloured by probability, alternatives on hover |
 | branch at a token | click a token, pick an alternative: a new chat continues that prefix (`continue_final_message`) |
 | layer readout | `logit_lens: 5`: a grid of the top token after every layer, coloured by the sampled token's probability there |
+| guidance, banned phrases | `cfg_scale` (sampling panel): follow the system message harder; `banned_strings` (one per line): rewind and resample where a phrase starts |
 | structured output | `response_format` `json_object` or a pasted `json_schema`, parsed before sending |
 | prompt size | draft tokens from `POST /tokenize` (skipped while `/health` reports `idle_suspended`), context bar |
 | server tab | `GET /metrics` every 3 s while open: queue, KV blocks, VRAM, `imp_gpu_power_watts` when exported |

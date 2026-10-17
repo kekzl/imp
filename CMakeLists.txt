@@ -341,6 +341,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/prompt_logprobs_rows.cu
     src/compute/sampling_topk_topp.cu
     src/compute/sampling_penalties.cu
+    src/compute/cfg_combine.cu
     src/compute/sampling_penalties_history.cu
     src/compute/sampling_filters.cu
     src/compute/sampling_verify_rows.cpp
@@ -420,6 +421,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_control_vector.cpp
     src/runtime/engine_logit_lens.cpp
     src/runtime/engine_phrase_ban.cpp
+    src/runtime/engine_cfg.cpp
     src/runtime/engine_init_resolver.cpp
     src/runtime/engine_weight_upload.cpp
     src/runtime/engine_kv_cache_init.cpp
