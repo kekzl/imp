@@ -400,6 +400,13 @@ std::vector<int32_t> ChatTemplate::apply_with_image(const Tokenizer& tok,
     if (family_ != ChatTemplateFamily::GEMMA || boi_id_ < 0 || eoi_id_ < 0 || img_soft_token_id_ < 0) {
         return apply(tok, messages, suppress_thinking, force_thinking, reasoning_effort);
     }
+    if (continuing_(messages))
+        return continue_after_history_(tok, messages,
+                                       [&](const ChatTemplate& t, const std::vector<ChatMessage>& h) {
+                                           return t.apply_with_image(tok, h, n_image_tokens,
+                                                                     suppress_thinking, force_thinking,
+                                                                     reasoning_effort, n_images);
+                                       });
 
     // Image rides the FIRST USER turn, not message index 0: keying on index 0 rendered
     // text-only when a request opened with a system prompt (#1246). Matches the Qwen3-VL

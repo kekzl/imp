@@ -672,6 +672,20 @@ class MockHandler(BaseHTTPRequestHandler):
         if n_images > 8:
             self._send_error(400, "request carries more than 8 images, the server limit (--max-images-per-request)")
             return
+        # handlers_chat_params.cpp: assistant prefill (vLLM continue_final_message).
+        if body.get("continue_final_message") is True:
+            if body.get("add_generation_prompt") is True:
+                self._send_error(400, "continue_final_message and add_generation_prompt cannot both be true")
+                return
+            last = messages[-1] if isinstance(messages[-1], dict) else {}
+            content = last.get("content")
+            if isinstance(content, list):
+                content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+            if (last.get("role") != "assistant" or last.get("tool_calls")
+                    or not isinstance(content, str) or not content.strip()):
+                self._send_error(
+                    400, "continue_final_message needs a final assistant message with text and no tool_calls")
+                return
 
         model = body.get("model", "")
         if not model:

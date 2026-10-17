@@ -494,6 +494,33 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
         }
     }
 
+    // Assistant prefill, vLLM fields: continue_final_message continues the last (assistant) message;
+    // with add_generation_prompt:true it is a contradiction (vLLM 400s too).
+    if (body.contains("continue_final_message") && body["continue_final_message"].is_boolean())
+        ctx.params.continue_final = body["continue_final_message"].get<bool>();
+    if (ctx.params.continue_final) {
+        if (body.contains("add_generation_prompt") && body["add_generation_prompt"].is_boolean() &&
+            body["add_generation_prompt"].get<bool>()) {
+            send_json_error(res, 400, "invalid_request_error",
+                            "continue_final_message and add_generation_prompt cannot both be true",
+                            "continue_final_message");
+            return false;
+        }
+        // tool_calls read off the wire: a family without Jinja tools renders them into the content.
+        const json& wire_last = messages.back();
+        const bool has_calls = wire_last.is_object() && wire_last.contains("tool_calls") &&
+                               !wire_last["tool_calls"].is_null() && !wire_last["tool_calls"].empty();
+        const auto& msgs = ctx.params.chat_msgs;
+        if (msgs.empty() || msgs.back().role != "assistant" || has_calls ||
+            msgs.back().content.find_first_not_of(" \t\n\r\f\v") == std::string::npos) {
+            send_json_error(
+                res, 400, "invalid_request_error",
+                "continue_final_message needs a final assistant message with text and no tool_calls",
+                "messages");
+            return false;
+        }
+    }
+
     // Log request received (structured)
     ctx.req_id = make_completion_id(state);
     // Trace join on the wire: the client's id when it sent one, the server's

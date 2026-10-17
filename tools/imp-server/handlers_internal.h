@@ -62,6 +62,9 @@ struct ChatRequestParams : SamplingFields {
     float cvec_scale = 1.0f;                 // "control_vector.scale"
     bool cvec_bad = false;                   // "control_vector" present but not a name or {name, scale}
     bool enable_thinking_set = false;        // true iff either carried a boolean
+    // continue_final: the last message is an assistant prefix the reply continues ("continue_final_message",
+    // or a trailing assistant turn on /v1/messages).
+    bool continue_final = false;
     // Stop sequences
     std::vector<std::string> stop_sequences;
     size_t max_stop_len = 0;
@@ -364,6 +367,9 @@ void log_request_jsonl(ServerState& state, bool skip, const std::chrono::system_
 bool parse_chat_request_params(const httplib::Request& req, httplib::Response& res, ServerState& state,
                                ChatRequestContext& ctx);
 bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, ChatRequestContext& ctx);
+// Reply thinking state from the rendered prompt tail; appends <think>\n when it opens
+// (handlers_chat_thinking.cpp).
+void settle_thinking_from_prompt_(ChatRequestContext& ctx);
 // build_imp_request_: single params->request mapping for all four ctx-based submission sites
 // (chat stream/non-stream, /v1/messages stream, /v1/responses stream) - was hand-copied per
 // site and drifted (#941). completion_idx offsets the seed for n>1; stream forces per-step decode (#754).

@@ -255,6 +255,7 @@ set(IMP_MODEL_SOURCES
     src/model/tensor_kind_table.cpp
     src/model/tensor_kind_matcher.cpp
     src/model/chat_template.cpp
+    src/model/chat_template_continue.cpp
     src/model/chat_template_tokenize.cpp
     src/model/transcript_ids.cpp
     src/model/chat_template_families.cpp
@@ -795,6 +796,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/handlers_completions_params.cpp
         tools/imp-server/fim_request.cpp
         tools/imp-server/handlers_chat_core.cpp
+        tools/imp-server/handlers_chat_thinking.cpp
         tools/imp-server/vision_parts.cpp
         tools/imp-server/handlers_chat_params.cpp
         tools/imp-server/image_fetch.cpp
@@ -1146,6 +1148,7 @@ if(IMP_BUILD_TESTS)
         # tools/imp-server/utils.cpp (#557).
         target_sources(test-core PRIVATE
             tests/test_anthropic_transform.cpp
+            tests/test_assistant_prefill_transform.cpp
             tests/test_responses_transform.cpp
             tests/test_responses_store.cpp
             tests/test_spec_usage.cpp  # includes handlers_internal.h -> httplib.h
@@ -1217,6 +1220,7 @@ if(IMP_BUILD_TESTS)
         tests/test_tokenizer_pretok_json.cpp
         tests/test_tokenizer_robustness.cpp
         tests/test_chat_template.cpp
+        tests/test_chat_template_continue.cpp
         tests/test_transcript_ids.cpp
         tests/test_gpt_oss_harmony_golden.cpp
         tests/test_qwen38_chat_template.cpp

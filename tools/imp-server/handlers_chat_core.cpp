@@ -395,6 +395,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         return false;
 
     // Tokenize with chat template (with image tokens if vision is active)
+    ctx.snap.chat_tpl.set_continue_final(ctx.params.continue_final);
     if (ctx.snap.have_template && !ctx.snap.qwen_patches.empty()) {
         // Chat template renders one image pad per image before sizes are known (smart_resize runs
         // after). Placed on the first user turn (the position the parser reliably tracks), rendered,
@@ -500,8 +501,11 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         std::string raw;
         for (const auto& m : ctx.params.chat_msgs)
             raw += m.content + "\n";
+        if (ctx.params.continue_final)
+            raw.pop_back();  // the prefix continues on its own line
         ctx.snap.tokens = ctx.snap.tok->encode(raw);
     }
+    ctx.snap.chat_tpl.set_continue_final(false);  // the cache_control prefix renders closed turns
 
     // cache_control breakpoint (#1046): re-render leading messages up to the marked block and count
     // tokens; engine pins that many tokens (rounded down to full KV blocks) against eviction.
@@ -519,51 +523,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                 .size());
     }
 
-    // Thinking-state pipeline: INTENT (explicit request or heuristic) -> RENDER (apply() stamps
-    // enable_thinking only when forced/suppressed) -> GROUND TRUTH (below: reconcile against the
-    // actual rendered prompt tail, matching vLLM's qwen3_reasoning_parser auto-detection).
-    // Detects on decoded text, not token-ID equality: Qwen3.6 ships <think>/</think> as non-special
-    // added_tokens, so BPE splits them into 3 pieces instead of one special-token id.
-    auto prompt_tail_contains = [&](const char* needle, int max_tail_tokens) -> bool {
-        int n = static_cast<int>(ctx.snap.tokens.size());
-        int start = std::max(0, n - max_tail_tokens);
-        std::string tail_text;
-        for (int i = start; i < n; ++i) {
-            tail_text += decode_chat_piece(*ctx.snap.tok, ctx.snap.output_aliases, ctx.snap.tokens[i]);
-        }
-        return tail_text.find(needle) != std::string::npos;
-    };
-    // Reconcile: an OPEN <think> prefix (no matching </think> in the tail) turns thinking ON; a
-    // pre-closed block (<think>...</think>) turns it OFF even if the heuristic defaulted ON (#934:
-    // Qwen3.5-4B mentions enable_thinking but defaults closed, else content is empty).
-    // Window 16 (not 8) so both tags of an adjacent closed block land in the same tail scan.
-    {
-        const bool tail_has_think = prompt_tail_contains("<think>", 16);
-        const bool tail_has_close = prompt_tail_contains("</think>", 16);
-        const bool was_thinking = ctx.snap.enable_thinking;
-        ctx.snap.enable_thinking = imp::server::reconcile_thinking_with_prompt_tail(
-            ctx.snap.enable_thinking, ctx.params.enable_thinking_set, tail_has_think, tail_has_close);
-        // If reconcile flips thinking OFF after the snapshot already removed the provisional <think>
-        // stop token (added while ON), restore it - a non-thinking think-model still needs the
-        // phantom-"<think>"-turn guard.
-        if (was_thinking && !ctx.snap.enable_thinking && ctx.snap.think_start_id >= 0) {
-            auto& ids = ctx.snap.stop_token_ids;
-            if (std::find(ids.begin(), ids.end(), ctx.snap.think_start_id) == ids.end())
-                ids.push_back(ctx.snap.think_start_id);
-        }
-    }
-
-    // Append <think>\n to trigger reasoning mode (matches llama.cpp behavior).
-    // Without this prefix, think-trained models produce degenerate output.
-    // Skip if the chat template already added it (Qwen3.x default path).
-    if (ctx.snap.enable_thinking && ctx.snap.think_start_id >= 0) {
-        if (!prompt_tail_contains("<think>", 8)) {
-            ctx.snap.tokens.push_back(ctx.snap.think_start_id);
-            // Append newline after <think> — the model expects "\n" before reasoning
-            auto nl_ids = ctx.snap.tok->encode("\n");
-            ctx.snap.tokens.insert(ctx.snap.tokens.end(), nl_ids.begin(), nl_ids.end());
-        }
-    }
+    settle_thinking_from_prompt_(ctx);
 
     ctx.snap.n_prompt_tokens = static_cast<int>(ctx.snap.tokens.size());
 
