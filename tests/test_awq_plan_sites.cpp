@@ -518,16 +518,20 @@ TEST(AwqSites, NemotronHMambaAttentionAndRelu2ExpertSites) {
         for (const char* p : {"up_proj.weight", "down_proj.weight"})
             moe.insert(x + "mixer.experts." + std::to_string(i) + "." + p);
     const auto sites = layer_fold_sites(moe, x, NormConvention::Plain, kAwqAllGroups);
-    int ys = 0;
-    for (const auto& s : sites)
-        if (s.group == 'Y') {
-            ys++;
-            EXPECT_TRUE(s.producer_sqrt) << "relu^2 experts take the square root of the divisor";
-        }
-    EXPECT_EQ(ys, 2);
+    // --calibrate records no down statistic for non-gated experts: no Y site.
+    EXPECT_EQ(site_of(sites, 'Y'), nullptr);
     ASSERT_NE(site_of(sites, 'S'), nullptr);
-    EXPECT_TRUE(site_of(sites, 'S')->producer_sqrt);
+    EXPECT_TRUE(site_of(sites, 'S')->producer_sqrt) << "relu^2 takes the square root of the divisor";
     EXPECT_EQ(site_of(sites, 'G'), nullptr);  // the pre-norm also feeds the router: nothing folds into it
+}
+
+// Nemotron-3-Nano: G 10.1743 / 12.4981 vs RTN 10.2391 / 12.5052, E 11.4932 / 14.5062.
+// GLM-4.7-Flash: ABCDEGKQS 10.4179 / 13.5082 vs RTN 10.4301 / 13.7470.
+TEST(AwqSites, ArchDefaultGroupsFollowTheMeasuredArms) {
+    EXPECT_STREQ(arch_default_groups("nemotron_h", 16, false), "G");
+    EXPECT_STREQ(arch_default_groups("glm4_moe_lite", 1, false), "ABCDEGKQS");
+    EXPECT_STREQ(arch_default_groups("qwen3", 4, false), default_groups(4, false));
+    EXPECT_STREQ(arch_default_groups("qwen3_5", 6, true), default_groups(6, true));
 }
 
 TEST(AwqSites, DeepseekV2MoeLayerHasNoMlpNormFold) {

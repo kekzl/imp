@@ -28,9 +28,9 @@
 
 namespace imp::awq {
 
-// AWQ scale groups, selectable to attribute a bad result. E and G exist only on qwen3_5 GDN
-// hybrids and are unmeasured against an uncalibrated twin.
-// Q (MLA q_lora q_b_proj into q_a_layernorm) and S (shared-expert down into up) are opt-in like K/X/Y.
+// AWQ scale groups, selectable to attribute a bad result. E and G: qwen3_5 GDN and nemotron_h Mamba2.
+// Q (MLA q_lora q_b_proj into q_a_layernorm) and S (shared-expert down into up) are opt-in like K/X/Y,
+// except in arch_default_groups.
 constexpr const char* kAwqAllGroups = "ABCDEGKQSXY";
 // X/Y are opt-in, no measured gain: Gemma-4-26B arms 17.10..17.37 PPL sit inside the RTN rounding band
 // 16.7551..19.0110 (8 tensor-scale shifts, sd 4.63 %, 14676 framed tokens).
@@ -44,6 +44,17 @@ constexpr int64_t kAwqWideGqaRep = 4;
 constexpr const char* kAwqWideGqaGroups = "BDEG";
 [[nodiscard]] inline const char* default_groups(int64_t n_rep, bool hybrid) {
     return n_rep >= kAwqWideGqaRep && !hybrid ? kAwqWideGqaGroups : kAwqDefaultGroups;
+}
+// Measured per-arch defaults (RTN vs groups, two ppl_corpus_45k slices): nemotron_h G 10.1743 / 12.4981 vs
+// RTN 10.2391 / 12.5052, E 11.4932 / 14.5062; glm4_moe_lite ABCDEGKQS 10.4179 / 13.5082 vs RTN 10.4301
+// / 13.7470.
+[[nodiscard]] inline const char* arch_default_groups(const std::string& model_type, int64_t n_rep,
+                                                     bool hybrid) {
+    if (model_type == "nemotron_h")
+        return "G";
+    if (model_type == "glm4_moe_lite")
+        return "ABCDEGKQS";
+    return default_groups(n_rep, hybrid);
 }
 [[nodiscard]] inline bool attention_groups_on_wide_gqa(const std::string& groups, int64_t n_rep,
                                                        bool hybrid) {

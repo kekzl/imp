@@ -53,7 +53,7 @@ std::pair<std::string, std::vector<int64_t>> layer_experts(const std::set<std::s
 
 // Nemotron-H (backbone.layers.N.{norm, mixer.*}): one mixer per block, read through the block's
 // pre-norm. Mamba2: in_proj (G), out_proj into the gated group norm (E, per channel). Attention:
-// q/k/v (A), o_proj into v rows (C). MoE: non-gated relu^2 experts, so a Y/S row fold takes the
+// q/k/v (A), o_proj into v rows (C). MoE: non-gated relu^2 shared expert, so the S row fold takes the
 // square root of the divisor; the pre-norm also feeds the router, so no X.
 std::vector<FoldSite> nemotron_h_fold_sites(const std::set<std::string>& names, const std::string& base,
                                             const std::string& groups) {
@@ -72,21 +72,8 @@ std::vector<FoldSite> nemotron_h_fold_sites(const std::set<std::string>& names, 
         s.calib_keys = {"WO"};
         out.push_back(std::move(s));
     }
-    const auto [experts, expert_ids] = layer_experts(names, base);
-    for (const int64_t e : wants(groups, 'Y') ? expert_ids : std::vector<int64_t>{}) {
-        const std::string ex = experts + std::to_string(e) + ".";
-        if (!has(names, ex + "down_proj.weight") || !has(names, ex + "up_proj.weight") ||
-            has(names, ex + "gate_proj.weight"))
-            continue;
-        FoldSite s;
-        s.group = 'Y';
-        s.members = {ex + "down_proj.weight"};
-        s.producer = ex + "up_proj.weight";
-        s.kind = FoldKind::MatrixRows;
-        s.producer_sqrt = true;
-        s.calib_keys = {"EXPERT_DOWN." + std::to_string(e)};
-        out.push_back(std::move(s));
-    }
+    // No Y: --calibrate records no down statistic for non-gated experts (executor_forward_moe.cu
+    // calibrate_moe_experts_), every expert site would skip.
     const std::string sh = mix + "shared_experts.";
     if (wants(groups, 'S') && has(names, sh + "down_proj.weight") && has(names, sh + "up_proj.weight") &&
         !has(names, sh + "gate_proj.weight")) {
