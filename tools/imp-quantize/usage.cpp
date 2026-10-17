@@ -22,6 +22,8 @@ void usage() {
         "                  imp-cli --model DIR --perplexity <corpus> --calibrate FILE\n"
         "                Without it the quantization is plain round-to-nearest,\n"
         "                which costs measurably more quality (see the header).\n"
+        "  --gptq FILE   GPTQ against IMPHES01 second moments (imp-cli --perplexity <corpus>\n"
+        "                --calibrate F --set calibration.hessian=true writes F.hess)\n"
         "  --calib-weight abs|sq  error weight of the AWQ search (default abs;\n"
         "                sq loses at wide GQA: Qwen3-14B BD 9.9068 abs vs 10.0563 sq)\n"
         "  --calib-groups ABCDEG\n"

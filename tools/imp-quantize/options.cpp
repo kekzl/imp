@@ -50,7 +50,9 @@ std::optional<int> parse_args(int argc, char** argv, Options& opt) {
             opt.gdn_proj_mxfp8 = true;
             if (opt.keep_gdn_proj.empty())
                 opt.keep_gdn_proj = "all";
-        } else if (a == "--calib")
+        } else if (a == "--gptq")
+            opt.gptq_file = next();
+        else if (a == "--calib")
             opt.calib_file = next();
         else if (a == "--format") {
             const std::string f = next();

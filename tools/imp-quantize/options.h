@@ -13,6 +13,7 @@ namespace imp::quantize {
 struct Options {
     std::string in_dir, out_dir;
     std::string calib_file;  // --calib: activation statistics for AWQ scaling
+    std::string gptq_file;   // --gptq: IMPHES01 second moments (calibration.hessian), GPTQ per weight
     // --calib-groups: which AWQ scale groups run, for attributing a bad result.
     // Empty = awq::default_groups(n_rep, hybrid), resolved in build_plan.
     std::string calib_groups;

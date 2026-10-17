@@ -442,6 +442,9 @@ struct RuntimeConfig {
         // Where imp_calibration_write() puts the file. Empty means the caller
         // supplies the path.
         std::string out_path;
+        // Also collect mean x^T x per weight input for imp-quantize --gptq (row 101), written
+        // next to the file as <out>.hess. FP32 [K, K] each: Qwen3-1.7B about 5.6 GB.
+        bool hessian = false;
     } calibration;
 
     // ----- Loading -----

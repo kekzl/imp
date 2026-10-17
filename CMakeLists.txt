@@ -273,6 +273,7 @@ set(IMP_QUANT_SOURCES
     src/quant/awq_transform.cpp
     src/quant/awq_norm_fold.cpp
     src/quant/calibration_stats.cpp
+    src/quant/calibration_hessian.cpp
     src/quant/fp8_quant.cu
     src/quant/nvfp4_quant.cu
     src/quant/nvfp4_gemm.cu
@@ -483,6 +484,7 @@ set(IMP_EXEC_SOURCES
     src/exec/executor_gemm_dispatch.cpp
     src/exec/executor_gemm_released.cpp
     src/exec/activation_calibrator.cu
+    src/exec/activation_calibrator_hessian.cu
     src/exec/gemm_kernel_registry.cpp
     src/exec/gemm_kernel_cutlass_nvfp4.cpp
     src/exec/gemm_kernel_gguf.cpp
@@ -695,11 +697,13 @@ if(IMP_BUILD_TOOLS)
         tools/imp-quantize/awq_sites.cpp
         tools/imp-quantize/quant_report.cpp
         tools/imp-quantize/awq.cu
+        tools/imp-quantize/gptq.cu
+        tools/imp-quantize/quantize_weight.cpp
     )
     # Export recipe (#2481): the build's git tree id (build_image.sh), one TU so ccache keeps the rest.
     set(IMP_TREE_ID "" CACHE STRING "git tree id recorded in imp-quantize export recipes")
     set_source_files_properties(tools/imp-quantize/recipe.cpp PROPERTIES COMPILE_DEFINITIONS "IMP_TREE_ID=\"${IMP_TREE_ID}\"")
-    target_link_libraries(imp-quantize PRIVATE imp imp_warnings)
+    target_link_libraries(imp-quantize PRIVATE imp imp_warnings CUDA::cusolver CUDA::cublas)
     target_include_directories(imp-quantize PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
                                                    ${CMAKE_CURRENT_SOURCE_DIR}/tools)
 
@@ -1385,6 +1389,10 @@ if(IMP_BUILD_TESTS)
         ${cutlass_SOURCE_DIR}/include
         ${cutlass_SOURCE_DIR}/tools/util/include
     )
+    # GPTQ (row 101): imp-quantize's kernel against a synthetic Hessian, needs the GPU and cuSOLVER.
+    target_sources(test-quant PRIVATE tools/imp-quantize/gptq.cu tests/test_gptq_nvfp4.cu)
+    target_include_directories(test-quant PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/imp-quantize)
+    target_link_libraries(test-quant PRIVATE CUDA::cusolver CUDA::cublas)
 
     imp_add_test_module(test-kv GPU SOURCES
         tests/test_fp8_kv_cache.cu

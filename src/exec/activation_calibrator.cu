@@ -1,4 +1,5 @@
 #include "exec/activation_calibrator.h"
+#include "compute/cublas_handle.h"
 
 #include "core/logging.h"
 
@@ -67,6 +68,13 @@ ActivationCalibrator::~ActivationCalibrator() {
             alloc_->free(e.d_sum);
         if (e.d_rows)
             alloc_->free(e.d_rows);
+    }
+    for (auto& [key, e] : hess_)
+        if (e.d_H)
+            alloc_->free(e.d_H);
+    if (cublas_) {
+        auto h = static_cast<cublasHandle_t>(cublas_);
+        cublas_handle_destroy(h);
     }
 }
 
@@ -161,6 +169,8 @@ void ActivationCalibrator::accumulate(int layer, TensorKind kind, const Tensor& 
                                                            it->second.d_sum + K);
     IMP_CUDA_CHECK_LAUNCH();
     it->second.rows += static_cast<uint64_t>(rows);
+    if (hessian_)
+        accumulate_hessian_(layer, kind, input, row_stride, stream);
 }
 
 CalibrationStats ActivationCalibrator::snapshot(const std::string& model_id) const {
