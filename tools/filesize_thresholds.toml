@@ -70,7 +70,7 @@ roots = ["src", "tools", "tests"]
 # figure, because that is the part that went stale. Classification letter:
 # (a) bundles independent concepts -> split candidate; (b) explicit template
 # instantiations inline; (c) legitimately monolithic (one cohesive unit / test target).
-"src/compute/apa/apa_pass2.cuh" = { code_loc = 704, reason = "(c) vendored kekzl/apa v0.8.1 (persistent fused kernel, pass 2, KV-window quant items); change upstream first, the copy stays equal to the tag" }
+"src/compute/apa/apa_pass2.cuh" = { code_loc = 704, reason = "(c) vendored kekzl/apa v0.8.2 (persistent fused kernel, pass 2, KV-window quant items); change upstream first, the copy stays equal to the tag" }
 "src/compute/attention_fmha_mxfp4_sm120.cu" ={ code_loc = 1542, reason = "(c) single MXFP4 FA2 attention kernel family" }
 "src/compute/attention_fmha_sm120.cu" = { code_loc = 1569, reason = "(c) single FA2 attention family (base/fp8/fa2 variants) sharing one smem layout" }
 "src/compute/attention_paged.cu" = { code_loc = 1127, reason = "(c) one paged-attention family: gqa-prefill, decode, splitk, reduce, cluster - shared block/KV layout; 1086 -> 1127 = HD 192 instances for MLA decode, MHA launch split out of paged_attention_decode (CCN 56 -> 51), generic-kernel WARN (#2374)" }
