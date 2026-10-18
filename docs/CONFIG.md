@@ -163,7 +163,7 @@ $ imp-bench gemm --json 2>/dev/null
 | auth | `HF_TOKEN` sent as `Authorization: Bearer`; a gated repo without it fails before any byte is written |
 | integrity | `<file>.part`, resumed with `Range` (3 retries per start, and again on the next start), LFS files checked against the sha256 from `/api/models/<repo>?blobs=true`; a mismatch deletes the part |
 | second start | `refs/<rev>` plus the file present: `hf-fetch: cache hit ... no download`, no network request; delete `refs/<rev>` to pick up a newer commit |
-| endpoint | `HF_ENDPOINT` (default `https://huggingface.co`) |
+| endpoint | `HF_ENDPOINT` (default `https://huggingface.co`), a mirror such as `https://hf-mirror.com` included; redirects are followed |
 | permissions | the image user is uid 1001; a host bind mount owned by another uid needs `docker run --user $(id -u):$(id -g)` |
 
 ```bash
