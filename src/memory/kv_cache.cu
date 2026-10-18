@@ -581,7 +581,9 @@ int KVCache::try_grow_to(int wanted) {
 // serving pool untouched; peak is old + new committed blocks and scale planes.
 bool KVCache::raise_ceiling(int ceiling_blocks) {
     const int usable = usable_blocks_.load(std::memory_order_acquire);
-    if (accounting_only_ || !growable_ || !region_ || ceiling_blocks <= max_blocks_ || minmax_pool_)
+    // A growable key min/max pool is rebuilt at the new ceiling (no live blocks, nothing to keep).
+    if (accounting_only_ || !growable_ || !region_ || ceiling_blocks <= max_blocks_ ||
+        (minmax_pool_ && !minmax_region_))
         return false;
     if (blocks_.live_blocks() != 0 || swa_blocks_.live_blocks() != 0)
         return false;
@@ -599,6 +601,11 @@ bool KVCache::raise_ceiling(int ceiling_blocks) {
     }
     if (!fresh->growable_ || fresh->max_blocks_ != ceiling_blocks)
         return false;  // reservation declined: fresh fell back to a fixed pool and frees it
+    if (minmax_pool_ && !fresh->enable_key_minmax())
+        return false;  // the old pool and its metadata keep serving
+    std::swap(minmax_pool_, fresh->minmax_pool_);
+    std::swap(minmax_region_, fresh->minmax_region_);
+    std::swap(minmax_block_bytes_, fresh->minmax_block_bytes_);
     // The id spaces stay: same usable count, all free. fresh's destructor frees the old pool.
     std::swap(pool_, fresh->pool_);
     std::swap(region_, fresh->region_);

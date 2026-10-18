@@ -78,7 +78,7 @@ struct VRAMBudget {
     // reserves). Exposed so plan_memory() compares against the SAME figure (A7 step 2b).
     size_t weight_cache_estimate_bytes = 0;
     // TRANSIENT slice of the estimate above: init-time headroom phase-0..3 builders re-derive
-    // (max(total/10, floor) + margin), free again once the KV pool is sized.
+    // (vram_reserve_floor + margin), free again once the KV pool is sized.
     // Live pass needs it in the estimate; the shadow plan must NOT charge it against KV (#1765).
     size_t weight_cache_transient_bytes = 0;
     // Batch-shaped SSM/GDN state footprint charged as overhead (0 on

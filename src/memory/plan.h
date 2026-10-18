@@ -83,8 +83,8 @@ struct LibraryReserve {
 // The first-forward library claim varies by config (mmq_q8_imma's per-weight s8 planes
 // used to be miscounted here; they are planned separately now, VRAMBudget::
 // imma_plane_bytes). kMeasuredLibraryReserveBytes stays as the cold-start floor for
-// models with no recorded measurement: over-reserving costs KV (absorbed partly by the
-// 10% reserve floor), under-reserving spills the card. Re-measure after a driver or CUDA
+// models with no recorded measurement: over-reserving costs KV, under-reserving spills
+// the card. Re-measure after a driver or CUDA
 // bump; imp.conf vram.library_reserve_mb overrides it per host.
 constexpr size_t kMeasuredLibraryReserveBytes = 3900ull * 1024 * 1024;
 

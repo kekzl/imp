@@ -26,7 +26,7 @@ public:
 
     // Initialize: query total VRAM and set headroom fraction.
     // Must be called before any allocations.
-    [[nodiscard]] bool init(float headroom_fraction = 0.10f);
+    [[nodiscard]] bool init(float headroom_fraction = 0.04f);  // kAllocatorHeadroomPct (vram_query.h)
 
     // Allocate device memory; returns nullptr if it would violate headroom (unless
     // bypass_headroom) or cudaMalloc fails. tag: descriptive name for reporting.

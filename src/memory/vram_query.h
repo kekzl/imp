@@ -64,12 +64,9 @@ size_t vram_own_peak_bytes();
 void vram_reserved_uncommitted_add(std::ptrdiff_t delta_bytes);
 size_t vram_reserved_uncommitted_bytes();
 
-// Canonical free-VRAM reserve floor for sizing phases: pct% of the (budget-visible)
-// total, floored at 256 MiB. Keeps the WSL2 shared-memory spill guard in ONE place; pass
-// the `total` from vram_budget_mem_get_info so the floor scales with a --vram-budget
-// slice, not the physical card. pct is a budget-planner knob
-// (vram.reserve_floor_pct, compute_vram_budget only); pre-dequant phases keep the
-// default so their internal safety floors stay independent of the knob.
+// Canonical free-VRAM reserve floor for sizing phases: the measured allocator headroom
+// (4 %, #2482), or pct% of the (budget-visible) total when larger. pct = 0 (default,
+// B-29f: one measured margin, no policy percentage); vram.reserve_floor_pct opts in.
 // Headroom the VRAMAllocator enforces on every allocation >=16 MiB (can_allocate: free
 // >= bytes + headroom). A HARD constraint, not a policy knob: a plan leaving less free
 // than this cannot be executed, the allocation is simply refused. Engine::init and the
@@ -87,8 +84,8 @@ inline size_t vram_allocator_headroom(size_t total_bytes) {
 // derived: see executor_workspace_buffers.cu for the sweep this number comes from.
 constexpr int kExpertCacheAutoPctHostResident = 55;
 
-inline size_t vram_reserve_floor(size_t total_bytes, int pct = 10) {
-    const size_t floor_bytes = 256ULL * 1024 * 1024;
+inline size_t vram_reserve_floor(size_t total_bytes, int pct = 0) {
+    const size_t floor_bytes = vram_allocator_headroom(total_bytes);
     pct = pct < 0 ? 0 : (pct > 50 ? 50 : pct);
     const size_t share = total_bytes * static_cast<size_t>(pct) / 100;
     return share > floor_bytes ? share : floor_bytes;

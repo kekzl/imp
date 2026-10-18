@@ -192,8 +192,8 @@ TEST(VramBudgetReserve, VramKnobDefaultsArePinned) {
     const size_t GiB = 1024ull * 1024 * 1024;
     EngineConfig def = knob_config();
     EngineConfig expl = knob_config();
-    expl.kv_fraction = 0.8f;
-    expl.vram_reserve_floor_pct = 10;
+    expl.kv_fraction = 1.0f;
+    expl.vram_reserve_floor_pct = 0;
 
     VRAMBudget a = compute_vram_budget(m, def, 32, 128, 8 * GiB);
     VRAMBudget b = compute_vram_budget(m, expl, 32, 128, 8 * GiB);
@@ -211,6 +211,7 @@ TEST(VramBudgetReserve, KvFractionScalesKvPool) {
     const size_t GiB = 1024ull * 1024 * 1024;
     EngineConfig cfg_08 = knob_config();
     EngineConfig cfg_04 = knob_config();
+    cfg_08.kv_fraction = 0.8f;
     cfg_04.kv_fraction = 0.4f;
 
     VRAMBudget b08 = compute_vram_budget(m, cfg_08, 32, 128, 8 * GiB);
@@ -229,9 +230,12 @@ TEST(VramBudgetReserve, ReserveFloorPctScalesReserve) {
     fill_model(m, QType::F16, QType::F16);
 
     const size_t GiB = 1024ull * 1024 * 1024;
+    EngineConfig cfg_00 = knob_config();
     EngineConfig cfg_10 = knob_config();
     EngineConfig cfg_20 = knob_config();
+    cfg_10.vram_reserve_floor_pct = 10;
     cfg_20.vram_reserve_floor_pct = 20;
+    cfg_00.library_reserve_mb = 0;
     // reserve_bytes = max(pct floor, library charge); the library charge (its own test,
     // ReserveIsFlooredAtTheLibraryCharge) wins on any real card, which is exactly what silently
     // broke this test in #1109 (AUDIT B63).
@@ -242,8 +246,12 @@ TEST(VramBudgetReserve, ReserveFloorPctScalesReserve) {
     ASSERT_TRUE(vram_budget_mem_get_info(nullptr, &total_vram));
     ASSERT_GT(total_vram, 0u);
 
+    VRAMBudget b00 = compute_vram_budget(m, cfg_00, 32, 128, 8 * GiB);
     VRAMBudget b10 = compute_vram_budget(m, cfg_10, 32, 128, 8 * GiB);
     VRAMBudget b20 = compute_vram_budget(m, cfg_20, 32, 128, 8 * GiB);
+    // Default (B-29f): no policy floor, the reserve is the measured allocator headroom.
+    EXPECT_EQ(b00.reserve_bytes, std::max<size_t>(512ull * 1024 * 1024, vram_allocator_headroom(total_vram)));
+    EXPECT_GE(b10.reserve_bytes, b00.reserve_bytes);
     // Feature reserve here is 512 MiB (graphs off) — the floor dominates on
     // any real card, so the reserve must equal vram_reserve_floor(total, pct).
     EXPECT_EQ(b10.reserve_bytes,
@@ -618,11 +626,11 @@ TEST(VramBudgetReserve, VramKnobsAreClamped) {
 
     const size_t GiB = 1024ull * 1024 * 1024;
     EngineConfig silly = knob_config();
-    silly.kv_fraction = 5.0f;            // clamped to 0.95
-    silly.vram_reserve_floor_pct = -5;   // clamped to 0 → 512 MiB feature base
+    silly.kv_fraction = 5.0f;           // clamped to 1.0
+    silly.vram_reserve_floor_pct = -5;  // clamped to 0 → the allocator headroom
 
     EngineConfig max_sane = knob_config();
-    max_sane.kv_fraction = 0.95f;
+    max_sane.kv_fraction = 1.0f;
     max_sane.vram_reserve_floor_pct = 0;
 
     VRAMBudget a = compute_vram_budget(m, silly, 32, 128, 8 * GiB);

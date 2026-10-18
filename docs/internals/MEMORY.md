@@ -120,7 +120,7 @@ Every graph-capturable kernel launch wrapper takes `StableSpan`, so a relocatabl
 | Dominant input is a live `cudaMemGetInfo`, read after weights upload, before caches build | KV pool sized against a number that still contains ~3.9 GiB of library reservation claimed later |
 | Pre-dequant phases re-derive their own reserve from live free VRAM again | #1100: cache bytes counted twice against the same headroom |
 | A physical `cudaMalloc` balloon held across `init_weights`, released before phase 3 | hid bytes from the KV planner instead of ordering the build correctly (deleted, archive B0 6.6) |
-| Six incident-driven clamps stacked on the result | `target_blocks`, `max_fit_blocks`, `min_kv_blocks`, `kv_fraction` cap, SWA batch charge, `#1103` headroom floor |
+| Six incident-driven clamps stacked on the result | `target_blocks`, `max_fit_blocks`, `min_kv_blocks`, `kv_fraction` cap (1.0 = off since B-29f), SWA batch charge, `#1103` headroom floor (= the 4 % allocator headroom since B-29f) |
 
 ```cpp
 // src/memory/plan.h - current fields, condensed

@@ -625,9 +625,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         config_.mmproj_path = runtime_config_.paths.mmproj;
     if (config_.vram_budget_mb == 0 && runtime_config_.runtime.vram_budget_mb > 0)
         config_.vram_budget_mb = static_cast<size_t>(runtime_config_.runtime.vram_budget_mb);
-    if (config_.kv_fraction == 0.8f)  // EngineConfig default untouched → take imp.conf
+    if (config_.kv_fraction == 1.0f)  // EngineConfig default untouched → take imp.conf
         config_.kv_fraction = runtime_config_.vram.kv_fraction;
-    if (config_.vram_reserve_floor_pct == 10)
+    if (config_.vram_reserve_floor_pct == 0)
         config_.vram_reserve_floor_pct = runtime_config_.vram.reserve_floor_pct;
     if (config_.library_reserve_mb < 0)
         config_.library_reserve_mb = runtime_config_.vram.library_reserve_mb;

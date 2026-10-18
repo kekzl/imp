@@ -235,9 +235,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     if (config.use_fp8_prefill)
         budget.reserve_bytes += 128ULL * 1024 * 1024;
     budget.reserve_bytes = std::max(budget.reserve_bytes, static_cast<size_t>(512ULL * 1024 * 1024));
-    // At least 10% of total VRAM as headroom, skipped for second-pass NVFP4 (mode 2): the NVFP4
-    // MoE caching path already enforces its own ~1 GiB reserve, and adding 10% on top pushed
-    // `available` to 0 on a 32 GiB card, collapsing KV to the 16-block floor.
+    // Opt-in policy floor (vram.reserve_floor_pct, default 0 = the 4 % allocator headroom), skipped for
+    // mode 2: 10 % on top of its own ~1 GiB reserve pushed `available` to 0 on a 32 GiB card.
     size_t total_vram = 0;
     {
         size_t f;
@@ -246,7 +245,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     }
     // Budget-planner knobs (imp.conf [vram]): clamp once here so direct
     // EngineConfig embedders (tests, C-API) get the same envelope.
-    const float kv_fraction = std::clamp(config.kv_fraction, 0.05f, 0.95f);
+    const float kv_fraction = std::clamp(config.kv_fraction, 0.05f, 1.0f);
     const int reserve_floor_pct = std::clamp(config.vram_reserve_floor_pct, 0, 50);
     if (config.use_nvfp4_decode != 2) {
         budget.reserve_bytes =
@@ -459,8 +458,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         // post-KV headroom for (a) the persistent CUTLASS SfAtom SF cache (~elems/16 across ALL
         // NVFP4 weights incl. experts, summed from the source-aware PLAN), (b) the transient
         // per-(layer,proj) MoE contiguous-copy slab, and (c) free-VRAM reserves phases 0-3
-        // re-derive (max(total/10, 256 MiB)) plus executor workspaces between KV init and phase 3.
-        // Without this the KV clamp eats ALL post-weight VRAM and both caches get zero budget.
+        // re-derive (vram_reserve_floor: the 4 % allocator headroom) plus executor workspaces between KV init
+        // and phase 3. Without this the KV clamp eats ALL post-weight VRAM and both caches get zero budget.
         if (mcfg.is_nvfp4_prequant) {
             // Both the count above and the plan classify by source qtype, which at budget time is still
             // the wire dtype (NVFP4-ness lives in nvfp4_scratch_ sidecars until phase 0 promotes it), so
@@ -558,7 +557,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             // NVFP4 decode cache is critical for performance, ensure it fits first.
             // FP8 prefill cache is nice-to-have but not essential (fallback: dequant on-the-fly).
             budget.nvfp4_cache_bytes = nvfp4_estimate;
-            // KV target = kv_fraction (default 0.8) of available for BOTH modes: on sm_120, mode 2
+            // KV target = kv_fraction (default 1.0) of available for BOTH modes: on sm_120, mode 2
             // (native-NVFP4 second pass) has no FP8 weight cache to protect room for, so reserving
             // less here would only be dead VRAM. target_blocks below clamps every mode to
             // needed_blocks, so the fraction lifts KV to the per-sequence need and leaves the

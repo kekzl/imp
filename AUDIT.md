@@ -281,7 +281,9 @@ then measured per model with `diagnostics.vram_audit=true`. Closed by #2711-#271
 - 15 executor workspaces sized for 4096 tokens while the prefill chunk is 2048: FIXED the same
   day, `set_prefill_chunk` before executor init, max(chunk, 2048) rows, unchunked keeps 4096
   (Qwen3-14B-Q6_K -363 MiB of workspace + arena).
-- 24 stacked reserves (library 3900 + 4 % + 256 + 10 % floor + kv_fraction 0.8).
+- 24 stacked reserves (library 3900 + 4 % + 256 + 10 % floor + kv_fraction 0.8): FIXED 2026-10-18 (owner:
+  one measured margin), floor and kv_fraction default off, library + 4 % headroom remain; the warmup
+  ceiling raise now rebuilds the key min/max pool (Qwen3.8-27B-NVFP4 32 streams: 8396 -> 19063 blocks).
 
 ### GOTCHAS
 

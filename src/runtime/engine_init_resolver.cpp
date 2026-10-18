@@ -990,11 +990,11 @@ void Engine::init_compute_max_seq_len_() {
         size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim * kv_layer_count *
                                2;  // K+V, per KV head, attention layers only
         size_t kv_bytes_per_token = kv_data_bytes(config_.kv_cache_dtype, per_tok_elems);
-        // The budget planner downstream targets kv_fraction (default 0.8) of
-        // free VRAM for KV. Cap the auto-detect at 0.75x that (0.6 at the
-        // default) so it doesn't undershoot what the planner can afford and
-        // stays tracking a tuned vram.kv_fraction.
-        float kv_fraction = std::clamp(config_.kv_fraction, 0.05f, 0.95f);
+        // The budget planner downstream targets kv_fraction (default 1.0) of
+        // free VRAM for KV. Cap the auto-detect at 0.75x that so it doesn't
+        // undershoot what the planner can afford and stays tracking a tuned
+        // vram.kv_fraction.
+        float kv_fraction = std::clamp(config_.kv_fraction, 0.05f, 1.0f);
         // Native-NVFP4 models: weights plus the mandatory decode caches
         // (CUTLASS SfAtom slab + nvfp4_moe, reserved right after upload) will
         // consume most of the card; subtract them so the auto context
