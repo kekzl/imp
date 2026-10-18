@@ -546,7 +546,7 @@ attn_scores_mib      = 384
 # nemotron_h_moe, llama, gpt_oss (NIAH + tok/s gate, #2405), 0 elsewhere.
 # 0 = off. Contexts at or below the budget are bit-identical to dense.
 # F16/FP8/NVFP4 KV, uniform geometry; refused with absorbed MLA decode,
-# speculative.token_recycling or the persistent prefix cache
+# speculative.token_recycling (on by default under --gpu-layers) or the persistent prefix cache
 # (src/runtime/vram_budget.cpp sparse_minmax_refusal); auto also resolves 0 with
 # kv_cache.host_spill_mb > 0 (the spill tier refuses the pool); SWA / StreamingLLM
 # layers and spec verify chunks keep full attention. Costs a metadata pool of
@@ -1017,6 +1017,8 @@ k                    = 16
 # request; the cross-request warm table is the open question — see
 # docs/archive/PERF_AUDIT_2026_07_23.md).
 # Experimental, expires: 2026-12-31 (remove or promote by then).
+# Under --gpu-layers it turns on with recycle_width 4 unless set here: a verify costs one
+# streamed pass there (Qwen3-14B Q6_K --gpu-layers 0: prose 5.30 -> 6.13, code 6.85 -> 8.87 tok/s).
 token_recycling      = false
 recycle_slots        = 8
 recycle_depth        = 3

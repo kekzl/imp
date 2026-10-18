@@ -4,6 +4,21 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-10-18 · token recycling on by default under `--gpu-layers` (ROADMAP row 119.2)
+
+Protocol: Qwen3-14B Q6_K, `--gpu-layers 0`, `imp-cli --prompt ... --max-tokens 160 --temperature 0`.
+
+| `speculative.recycle_width` (recycling on) | prose tok/s | code-rewrite tok/s |
+|---|---:|---:|
+| recycling off (old default) | 5.30 | 6.85 |
+| 1 | 5.27 | 7.09 |
+| 4 (new default under offload) | 6.13 | 8.87 |
+| 8 | 6.09 | 8.43 |
+
+Lossless: `imp-server --gpu-layers 0`, `attention.sparse_topk_tokens=0` in both arms, two greedy chats: default (19 verifies) vs speculation off, 1193 bytes identical. Side effect: recycling refuses the sparse key min/max pool, so sparse decode stays off under offload unless recycling is set off.
+
+---
+
 ## 2026-10-18 · n-gram speculation keeps drafting under `--gpu-layers` (ROADMAP row 119.3)
 
 Protocol: Qwen3-14B Q6_K, `--gpu-layers 0`, `imp-cli --prompt ... --max-tokens 200 --temperature 0`. One streamed forward: tg 188.6 ms per token, pp 4 / 16 / 64 = 189.70 / 193.53 / 189.71 ms (`--gpu-layers 20`: 97.1 ms, 116.93 / 109.40 / 111.76 ms). A verify costs one pass, so both give-up rules (64 misses, acceptance < 15 %) are off under offload.
