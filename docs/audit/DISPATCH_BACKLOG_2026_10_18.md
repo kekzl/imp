@@ -156,3 +156,14 @@ PR #2780 merged batch 7 (09797f27).
 | B-29 | BLOCKED | a and d DONE; b, c, e, f blocked on models or the reserve decision |
 
 Final gates on main 09797f27: `make build` exit 0, `make test-gpu` 3756 ran 0 failed, `make dev-test` 13/13, `make preflight` 0 failures; inventory re-run: 0 comment markers, 0 open issues / PRs. Report: [`REPORT_BACKLOG_2026_10_18.md`](REPORT_BACKLOG_2026_10_18.md).
+
+## 2026-10-18 Batch 8: cold KV pages decision (R-112.1)
+
+Measurement only, no builder: selection ids dumped by a scratch patch (never committed), gather cost from `tools/analysis/h2d_gather_probe.cu` (now takes a slot size, picks distinct destination slots). Validation: the first probe run picked duplicate slots, concurrent copies into one slot mixed and failed verify; rerun with distinct slots, 0 verify failures.
+
+| ID | Status | Evidence |
+|---|---|---|
+| R-112.1 | DONE | churn 110.28 / 110.71 / 116.03 of 256 blocks per layer per step (Qwen3-8B 32k, Qwen3-4B-2507 32k / 64k); ring 4x at 32k: 760.6 misses = 24.9 MB per token, +10.4 % (49.7 GB/s floor) to +22.4 % (per-layer gather) of the 4.820 ms sparse step |
+| R-112.2-112.7 | WONTFIX | NO-GO from 112.1: `--kv-nvfp4` saves the same 50 % without PCIe, PCIe bytes scale with sessions; reopen on a sticky selection that passes the NIAH A/B |
+
+Record: [`docs/plans/2026-10-18-kv-cold-pages-decision.md`](../plans/2026-10-18-kv-cold-pages-decision.md).

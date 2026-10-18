@@ -3,8 +3,9 @@
 //   A: one cudaMemcpyAsync per slot (the expert-cache miss path before 2026-09-20)
 //   B: one cudaMemcpyBatchAsync per layer (the miss path since)
 //   C: one gather kernel per layer reading mapped pinned memory (zero-copy)
-// Args: n_copy n_bufs buf_mb pool_mb mapped(0/1). The in-situ shape of Qwen3.8-Flash-Next
-// is 305 pinned buffers of ~180 MiB and a 7.8 GiB pool.
+// Args: n_copy n_bufs buf_mb pool_mb mapped(0/1) slot_kib (default 922).
+// Qwen3.8-Flash-Next in situ: 305 pinned buffers of ~180 MiB, a 7.8 GiB pool.
+// 16 KiB = K (or V) of one 16-token FP8 KV block at 8 kv heads x hd 128 (roadmap row 112).
 // Build: nvcc -O2 -arch=sm_120a -o /tmp/h2d_gather_probe tools/analysis/h2d_gather_probe.cu
 #include <cuda_runtime.h>
 #include <chrono>
@@ -23,7 +24,7 @@
         }                                                                                  \
     } while (0)
 
-constexpr int kMaxCopies = 128;
+constexpr int kMaxCopies = 512;  // 8 KiB of kernel params (limit 32 KiB)
 struct GatherArgs {
     const char* src[kMaxCopies];
     char* dst[kMaxCopies];
@@ -47,7 +48,7 @@ int main(int argc, char** argv) {
         printf("n_copy <= %d\n", kMaxCopies);
         return 1;
     }
-    const size_t bytes = 922 * 1024;  // 0.9 MiB, 16-byte multiple
+    const size_t bytes = static_cast<size_t>(argc > 6 ? atoi(argv[6]) : 922) * 1024;  // 16-byte multiple
     const int per_buf = static_cast<int>(buf_mb * 1024 * 1024 / bytes);
     const int n_slots = static_cast<int>(pool_mb * 1024 * 1024 / bytes);
     std::vector<char*> hosts(n_bufs), hosts_dev(n_bufs);
@@ -71,10 +72,16 @@ int main(int argc, char** argv) {
     struct Pick {
         int buf, expert, slot;
     };
-    auto pick = [&](std::vector<Pick>& p) {
+    auto pick = [&](std::vector<Pick>& p) {  // distinct device slots: concurrent copies into one slot mix
         p.resize(n_copy);
-        for (int i = 0; i < n_copy; ++i)
-            p[i] = {rand() % n_bufs, rand() % per_buf, rand() % n_slots};
+        std::vector<char> used(n_slots, 0);
+        for (int i = 0; i < n_copy; ++i) {
+            int s = rand() % n_slots;
+            while (used[s])
+                s = rand() % n_slots;
+            used[s] = 1;
+            p[i] = {rand() % n_bufs, rand() % per_buf, s};
+        }
     };
     auto verify = [&](const std::vector<Pick>& p) {
         std::vector<char> buf(bytes);

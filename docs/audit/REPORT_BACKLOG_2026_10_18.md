@@ -7,10 +7,10 @@ Commit range: main a6492284 (start) .. 09797f27, PRs #2777, #2778, #2779, #2780,
 | Status | Count |
 |---|---:|
 | DONE | 28 |
-| WONTFIX | 12 |
+| WONTFIX | 13 |
 | BLOCKED (owner question or missing model) | 10 |
 | IN_PROGRESS | 1 (R-119) |
-| OPEN (L rows with plans) | 13 |
+| OPEN (L rows with plans) | 12 |
 
 ## Done
 
@@ -37,6 +37,7 @@ Commit range: main a6492284 (start) .. 09797f27, PRs #2777, #2778, #2779, #2780,
 | B-13, B-14 | C-023 / C-024 measured, not pursued (269.87 vs 269.91 tok/s; sites off the default tiers) |
 | B-26, B-27, B-32 | split refuted (SETTLED S-32); flags "not a defect" per the ledger; ledger closed the Gemma-4 delta itself |
 | W-01..W-05 | env-gated modes, debug-only aborts, on-demand benchmarks, C-017 measured |
+| R-112 | 112.1 NO-GO: selection replaces 110.28 of 256 blocks per layer per step; half the KV resident still costs +10.4 % to +22.4 % per token over PCIe ([record](../plans/2026-10-18-kv-cold-pages-decision.md)) |
 
 ## Blocked: questions for the owner
 
@@ -54,7 +55,6 @@ Commit range: main a6492284 (start) .. 09797f27, PRs #2777, #2778, #2779, #2780,
 | ID | Next step |
 |---|---|
 | R-119.4-119.6 | width 8 recycling measured worse than 4 (6.09 vs 6.13 prose): lifting caps waits for a better tree drafter (119.5) |
-| R-112 | 112.1 decision measurement (cold-page fetch share at `sparse_topk=4096`), then 112.2-112.7 |
 | R-065 | `mmq_imma_q8k128_kernel` at 30.9 / 31.6 % of the INT8 tensor peak: raise it |
 | R-049 | forced-width verify harness for widths 8..16, then a block drafter |
 | R-101 | rotation (MR-GPTQ) or sequential calibration after plain GPTQ (#2775) |
