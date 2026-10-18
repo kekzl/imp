@@ -58,7 +58,7 @@ The 123.6 GiB checkpoint does not fit in 32 GB. imp keeps its 56.25 GiB of exper
 
 | You have | imp |
 | --- | --- |
-| GeForce RTX 5090 (tested), 5080, 5070 Ti, 5070, 5060 Ti, 5060, 5050 or RTX PRO 6000, 5000, 4500, 4000, 2000 Blackwell | yes: same kernels, VRAM decides the model ([which card, which model](docs/QUICKSTART.md#which-card)) |
+| GeForce RTX 5090 (tested), 5090 D, 5090 D V2, 5080, 5070 Ti, 5070, 5060 Ti, 5060, 5050 or RTX PRO 6000, 5000, 4500, 4000, 2000 Blackwell | yes: same kernels, VRAM decides the model ([which card, which model](docs/QUICKSTART.md#which-card)) |
 | any other GPU, CPU only, several GPUs | no: use [llama.cpp](https://github.com/ggerganov/llama.cpp) for breadth, [vLLM](https://github.com/vllm-project/vllm) for many GPUs ([who fits where](docs/PERF.md#competitive-standing)) |
 
 imp has one author: issues are welcome, answers are not guaranteed.
