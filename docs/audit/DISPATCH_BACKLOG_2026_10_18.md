@@ -198,3 +198,9 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | R-055 | DONE | Dockerfile `bundle` stage + `scripts/bundle_release.sh`: libexec/ binaries, every ldd-resolved library except `libcuda.so.1` (glibc and loader included, the binaries need GLIBC_2.43 via `sqrtf`), bin/ launchers run the bundled loader; 824 MB, 46 libs; `release-docker.yml` checks, cosign-signs and attaches it; `debian:12` and `ubuntu:22.04`: no library outside lib/; `debian:12 --gpus all` Llama-3.2-3B Q8_0 greedy 713 bytes identical to `imp:test`, request 0.286-0.293 vs 0.285-0.289 s |
+
+## 2026-10-18 Batch 12: owner question B-34 answered from the config
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-34 | WONTFIX | FP8 KV at head_dim 256 is never the default: `kv_cache.dtype = "auto"` (`imp.conf.example:210`) puts the hd256 families (Qwen3.5/3.6/3.8) on NVFP4 KV, the FP8 lists are hd128 families (SETTLED A2-4); no local container sets `kv_cache.dtype=fp8` (`maria-imp`: `--max-batch 8` only). Reopen when an operator runs `kv_cache.dtype=fp8` on an hd256 model |
