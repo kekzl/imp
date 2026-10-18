@@ -3,6 +3,7 @@
 // reserves L2 cache, tunes cudaMallocAsync, sizes the expert-upload VRAM reserve, wires StreamingLLM / host-offload guards, and hashes the model identity for the persisted prefix cache.
 
 #include "runtime/engine.h"
+#include "exec/executor.h"
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
 #include "core/cuda_raii.h"

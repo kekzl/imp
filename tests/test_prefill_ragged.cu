@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 #include "runtime/engine.h"
+#include "exec/executor.h"
 #include "runtime/config.h"
 #include "compute/gemm.h"
 #include "test_model_builder.h"

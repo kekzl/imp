@@ -3,7 +3,7 @@
 // compounds across layers and shifts argmax at large vocab (NVFP4 degeneration root
 // cause); FFN/SSM weights tolerate 8-bit and go to FP8 for prefill speed.
 
-#include "exec/executor.h"
+#include "exec/quant_pipeline.h"
 #include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"

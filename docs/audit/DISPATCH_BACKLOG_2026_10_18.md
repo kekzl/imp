@@ -204,3 +204,9 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | B-34 | WONTFIX | FP8 KV at head_dim 256 is never the default: `kv_cache.dtype = "auto"` (`imp.conf.example:210`) puts the hd256 families (Qwen3.5/3.6/3.8) on NVFP4 KV, the FP8 lists are hd128 families (SETTLED A2-4); no local container sets `kv_cache.dtype=fp8` (`maria-imp`: `--max-batch 8` only). Reopen when an operator runs `kv_cache.dtype=fp8` on an hd256 model |
+
+## 2026-10-18 Batch 13: owner go R-080, measured scope
+
+| ID | Status | Evidence |
+|---|---|---|
+| R-080 | DONE | per-family state structs dropped by measurement: of 47 `executor.h` commits since 2026-09-18, 4 changed fields only, 42 also method declarations; done instead: `engine.h` includes `exec/executor_fwd.h` (Engine ctor out of line), 11 `pre_dequant_*` TUs and `pre_dequant_internal.h` include `quant_pipeline.h` / `weight_caches.h` / `quant_scratch.h`, 5 TUs that dereference the executor include it directly; `make dev` after one real `executor.h` edit: 125 compiles / 150 steps / 68.8 s -> 78 / 104 / 47.4 s; `make dev-test` 13/13 |

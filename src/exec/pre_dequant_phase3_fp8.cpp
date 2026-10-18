@@ -2,7 +2,7 @@
 // keep each .cu under the kernel file-size threshold.
 
 #include "core/dispatch_policy.h"
-#include "exec/executor.h"
+#include "exec/quant_pipeline.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "quant/fp8_quant.h"

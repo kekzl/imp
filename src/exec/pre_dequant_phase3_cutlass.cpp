@@ -3,7 +3,7 @@
 // the kernel file-size threshold.
 
 #include "core/dispatch_policy.h"
-#include "exec/executor.h"
+#include "exec/quant_pipeline.h"
 #include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"

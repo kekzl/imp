@@ -4,7 +4,7 @@
 // evicted by layer M's misses; each layer owns slots_per_layer_ slots with independent LRU.
 
 #include <gtest/gtest.h>
-#include "exec/executor.h"
+#include "exec/expert_cache.h"
 #include "memory/vram_allocator.h"
 #include <cuda_runtime.h>
 #include <cstring>

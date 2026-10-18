@@ -30,7 +30,9 @@
 #include "memory/vram_allocator.h"
 #include "memory/vram_owned.h"
 #include "runtime/stop_mask.h"
-#include "exec/executor.h"
+#include "exec/executor_fwd.h"
+#include "exec/inference_state.h"
+#include "exec/sae.h"
 #include "core/cuda_raii.h"
 #include <atomic>
 #include <memory>
@@ -162,7 +164,7 @@ struct EngineConfig {
 
 class Engine {
 public:
-    Engine() = default;
+    Engine();  // defined in engine.cpp: unique_ptr<GraphExecutor> needs the complete type
     ~Engine();
 
     [[nodiscard]] bool init(std::shared_ptr<Model> model, const EngineConfig& config);

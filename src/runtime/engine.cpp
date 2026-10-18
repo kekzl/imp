@@ -79,6 +79,8 @@ void alloc_residual_decode_buffers(int n, int*& d_slot, std::vector<int>& slot_u
 void MtpDraftWorkspaceDeleter::operator()(MtpDraftWorkspace* ws) const noexcept { delete ws; }
 void EncoderWorkspaceDeleter::operator()(EncoderWorkspace* ws) const noexcept { delete ws; }
 
+Engine::Engine() = default;
+
 Engine::~Engine() {
     // The last step's work can still be queued (a pipelined decode step), and VMM-backed
     // regions (engine arena, lazy pools) unmap with no implicit sync: drain first (#2275).

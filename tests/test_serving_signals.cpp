@@ -11,6 +11,7 @@
 #include "model/tokenizer.h"
 #include "runtime/config.h"
 #include "runtime/engine.h"
+#include "exec/executor.h"
 #include "test_models.h"
 #include <chrono>
 #include <cstdio>

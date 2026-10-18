@@ -7,7 +7,7 @@
 // replaces, resource leaks); don't chase residual output-quality bugs on community MXFP4
 // quants without an external reference engine to compare against.
 
-#include "exec/executor.h"
+#include "exec/quant_pipeline.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
