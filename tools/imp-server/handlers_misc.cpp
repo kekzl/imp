@@ -3,6 +3,7 @@
 // handle_embeddings (with its fp16->fp32 helper).
 
 #include "runtime/engine.h"
+#include "exec/executor.h"
 #include "handlers.h"
 #include "handlers_internal.h"
 #include "utils.h"

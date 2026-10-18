@@ -1,7 +1,7 @@
 // FP8 E4M3 per-row LM head (gemm.nvfp4_lm_head=fp8, #2156): quantizes the head once at load
 // with quantize_fp8_rows_async; every LM-head dispatch then runs gemv_fp8_rowscale_fp32.
 
-#include "exec/executor.h"
+#include "exec/quant_pipeline.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "core/config/lm_head_mode.h"

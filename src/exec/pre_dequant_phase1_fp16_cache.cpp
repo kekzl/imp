@@ -3,7 +3,7 @@
 // qtype) so Phase 1 and Phase 3 tier decisions agree (closes the Q4_K_M coverage gap
 // where Phase 1 early-exited and Phase 3 only caches nvfp4_beneficial weights).
 
-#include "exec/executor.h"
+#include "exec/quant_pipeline.h"
 #include "runtime/vram_budget.h"  // VRAMBudget: executor.h forward-declares it
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"

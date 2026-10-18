@@ -13,7 +13,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/dispatch_policy.h"
 #include "core/logging.h"
-#include "exec/executor.h"
+#include "exec/quant_pipeline.h"
 #include "exec/executor_helpers.h"
 #include "exec/pre_dequant_internal.h"
 #include "exec/quant_pipeline.h"

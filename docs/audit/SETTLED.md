@@ -86,6 +86,10 @@ loop, and the shared part is already factored out.
   runner-extraction track ENDED in a cosmetic friend-backdoor; the header split is already
   done (1188 → 584 lines). Do not re-attempt runner classes. The `compute/` files are not
   god-files either.
+  2026-10-18 (R-080): the header is back at 1442 lines. Per-family state structs measured
+  not worth it (4 of 47 executor.h commits in 30 days changed fields only, 42 also method
+  declarations); the lever is includers: `engine.h` forward-declares (`exec/executor_fwd.h`),
+  `pre_dequant_*` include `quant_pipeline.h`: one edit 125 -> 78 compiles, 68.8 -> 47.4 s.
 
 ## C — Hunted and absent (07-29 §6.2 — the sweep already ran)
 

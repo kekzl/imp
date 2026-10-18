@@ -3,7 +3,7 @@
 // metadata for the prefill GEMM path. Colocated as both are loader-side concerns.
 
 #include "core/dispatch_policy.h"
-#include "exec/executor.h"
+#include "exec/quant_pipeline.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "exec/nvfp4_expert_offload.h"

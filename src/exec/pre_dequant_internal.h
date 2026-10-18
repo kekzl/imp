@@ -5,7 +5,10 @@
 
 #include "core/storage_tier.h"
 #include "core/tensor.h"
-#include "exec/executor.h"
+#include "exec/quant_pipeline.h"
+#include "exec/weight_caches.h"
+#include "exec/quant_scratch.h"
+#include "model/model.h"
 #include "exec/executor_helpers.h"
 #include "exec/weight_handle.h"
 #include "memory/device_alloc_all.h"

@@ -5,8 +5,10 @@
 
 #include "compute/mmq_q8_imma.h"
 #include "core/logging.h"
-#include "exec/executor.h"
 #include "exec/quant_pipeline.h"
+#include "exec/pre_dequant_internal.h"
+#include "exec/quant_pipeline.h"
+#include "exec/pre_dequant_internal.h"
 #include "memory/mem_account.h"
 
 #include <cuda_runtime.h>
