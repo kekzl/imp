@@ -180,3 +180,15 @@ Orchestrator only (one subagent mapped the reserve chain read-only). Validation:
 Test change: `RaiseCeilingKeepsTheCommitAndGrowsPastTheOldCeiling` asserted the refusal with key min/max on; it now asserts the rebuilt pool (moved pointer, stride, backed grown block), mutant without the swap fails it. `VramKnobDefaultsArePinned`, `KvFractionScalesKvPool`, `ReserveFloorPctScalesReserve`, `VramKnobsAreClamped`, `test_config.cpp` defaults: pinned to the new defaults, same contracts; new `VramReserveFloor.*` in test-core.
 
 Record: [`docs/plans/2026-10-18-one-measured-vram-margin.md`](../plans/2026-10-18-one-measured-vram-margin.md).
+
+PR #2783 merged batch 9 (3bb3864d).
+
+## 2026-10-18 Batch 10: 64 verify rows under offload (R-119.4)
+
+Orchestrator only. The batch-7 width-8 arm ran at depth 1: `width * (1 + depth) <= 17` capped it, so 119.4 had not been measured at full rows.
+
+| ID | Status | Evidence |
+|---|---|---|
+| R-119.4 | DONE | `recycle_mc_shape` (`src/runtime/offload_spec_defaults.h`): 64 rows under offload, 17 resident (unchanged); `kOffloadRecycleWidth` 4 -> 8; PERF_LOG 2026-10-18 row 119.4: prose 6.12 -> 7.22, code 8.90 -> 9.80 tok/s; server `--gpu-layers 0` greedy, default vs speculation off: 1169 bytes identical; log `auto -> on, width 8 (layer offload)` |
+
+Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFourRows` (test-core); `OffloadTurnsRecyclingOnAtWidthEight` pins the constant; `OperatorKeysWin` moved its explicit width 8 -> 2 (8 is now the default and would not show the operator key winning).

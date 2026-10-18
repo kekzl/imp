@@ -7,11 +7,34 @@
 #include "runtime/config.h"
 #include "runtime/graph_eligibility.h"
 
+#include <algorithm>
+
 namespace imp {
 
-inline constexpr int kOffloadRecycleWidth = 4;  // width 4: prose 5.30 -> 6.13, code 6.85 -> 8.87 tok/s
+// 64-row budget: width 8 prose 7.22, code 9.80 tok/s (width 4: 6.12, 8.90).
+inline constexpr int kOffloadRecycleWidth = 8;
 
-// Token recycling on (width 4) under offload unless the operator set the key.
+// Multi-candidate verify rows, width * (1 + depth): resident 17 (mid capture bucket, per-row
+// context walks at linear-chunk cost); offload 64 (one streamed pass is flat to 64 rows).
+inline constexpr int kVerifyRowsResident = 17;
+inline constexpr int kVerifyRowsOffload = 64;
+
+struct RecycleMcShape {
+    int width = 1;
+    int depth = 1;
+};
+
+// Width capped at the 8 recycle slots, depth at the row budget and k.
+inline RecycleMcShape recycle_mc_shape(int recycle_width, int recycle_depth, int k, bool offload) {
+    const int rows = offload ? kVerifyRowsOffload : kVerifyRowsResident;
+    RecycleMcShape s;
+    s.width = std::min(8, std::max(1, recycle_width));
+    const int depth_cap = std::max(1, (rows / std::max(2, s.width)) - 1);
+    s.depth = std::min({std::max(1, recycle_depth), depth_cap, k});
+    return s;
+}
+
+// Token recycling on (width 8) under offload unless the operator set the key.
 inline void apply_offload_recycling_default(RuntimeConfig& rc, int gpu_layers) {
     if (!layer_offload_blocks_graphs(gpu_layers) || rc.was_set("speculative.token_recycling"))
         return;
