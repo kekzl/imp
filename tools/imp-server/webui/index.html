@@ -6,22 +6,23 @@
 <meta name="color-scheme" content="dark light">
 <title>imp</title>
 <style>
-  /* Palette from docs/logo.svg: horn red #ff2222 -> #990000, silver letters, near-black ground.
-     The mascot adds its own two: magenta skin (thinking) and fireball amber (tokens, speed). */
+  /* Palette: NVIDIA green #76b900 -> #3f6b00 on a near-black ground, silver letters; red only for warnings.
+     The mascot keeps its own two: magenta skin (thinking) and fireball amber (tokens, speed). */
   :root {
-    --bg:       #0c0809;
-    --bg-side:  #120b0e;
-    --surface:  #1a1115;
-    --surface2: #24171d;
-    --line:     rgba(255, 214, 228, 0.08);
-    --line2:    rgba(255, 214, 228, 0.17);
-    --text:     #f2ecef;
-    --text2:    #bdb1b7;
-    --text3:    #8d8087;
-    --horn:     #ff2222;
-    --horn2:    #990000;
-    --accent:   #ff3a3a;
-    --accent-ink: #ffffff;
+    --bg:       #0a0b0a;
+    --bg-side:  #0e100e;
+    --surface:  #151815;
+    --surface2: #1d211c;
+    --line:     rgba(214, 255, 190, 0.08);
+    --line2:    rgba(214, 255, 190, 0.17);
+    --text:     #eef1ec;
+    --text2:    #b5bcb1;
+    --text3:    #868d83;
+    --horn:     #76b900;
+    --horn2:    #3f6b00;
+    --accent:   #76b900;
+    --warn:     #ff3a3a;
+    --accent-ink: #0a0b0a;
     --skin:     #ff5ea2;
     --skin2:    #c8175d;
     --fire:     #ffb43a;
@@ -30,9 +31,9 @@
     --word1:    #ffffff;
     --word2:    #f0f0f0;
     --word3:    #b0b0b0;
-    --code-bg:  #110a0d;
+    --code-bg:  #0c0e0c;
     --shadow:   0 18px 50px rgba(0, 0, 0, 0.45);
-    --glow:     rgba(255, 34, 34, 0.10);
+    --glow:     rgba(118, 185, 0, 0.10);
 
     --sans: system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -41,21 +42,21 @@
   }
   @media (prefers-color-scheme: light) {
     :root:not([data-theme="dark"]) {
-      --bg: #f7f3f4; --bg-side: #efe8eb; --surface: #ffffff; --surface2: #f4edf0;
-      --line: rgba(70, 20, 40, 0.10); --line2: rgba(70, 20, 40, 0.20);
-      --text: #1f1317; --text2: #5b4a52; --text3: #85747c;
-      --accent: #c8001e; --skin: #d6246f; --skin2: #a5104e; --fire: #b85c00; --fire2: #d06a00; --ok: #1d8a52;
-      --word1: #4a3a41; --word2: #2b2025; --word3: #120b0e; --code-bg: #fbf7f8;
-      --shadow: 0 14px 40px rgba(70, 20, 40, 0.12); --glow: rgba(255, 34, 34, 0.06);
+      --bg: #f4f6f2; --bg-side: #eaeee6; --surface: #ffffff; --surface2: #eef2ea;
+      --line: rgba(30, 50, 10, 0.10); --line2: rgba(30, 50, 10, 0.20);
+      --text: #141a10; --text2: #4c5646; --text3: #747d6e;
+      --accent: #3f6b00; --warn: #c8001e; --skin: #d6246f; --skin2: #a5104e; --fire: #b85c00; --fire2: #d06a00; --ok: #1d8a52;
+      --word1: #3f4a3a; --word2: #222a1f; --word3: #0e100e; --code-bg: #f8faf6;
+      --shadow: 0 14px 40px rgba(30, 50, 10, 0.12); --glow: rgba(118, 185, 0, 0.06);
     }
   }
   :root[data-theme="light"] {
-    --bg: #f7f3f4; --bg-side: #efe8eb; --surface: #ffffff; --surface2: #f4edf0;
-    --line: rgba(70, 20, 40, 0.10); --line2: rgba(70, 20, 40, 0.20);
-    --text: #1f1317; --text2: #5b4a52; --text3: #85747c;
-    --accent: #c8001e; --skin: #d6246f; --skin2: #a5104e; --fire: #b85c00; --fire2: #d06a00; --ok: #1d8a52;
-    --word1: #4a3a41; --word2: #2b2025; --word3: #120b0e; --code-bg: #fbf7f8;
-    --shadow: 0 14px 40px rgba(70, 20, 40, 0.12); --glow: rgba(255, 34, 34, 0.06);
+    --bg: #f4f6f2; --bg-side: #eaeee6; --surface: #ffffff; --surface2: #eef2ea;
+    --line: rgba(30, 50, 10, 0.10); --line2: rgba(30, 50, 10, 0.20);
+    --text: #141a10; --text2: #4c5646; --text3: #747d6e;
+    --accent: #3f6b00; --warn: #c8001e; --skin: #d6246f; --skin2: #a5104e; --fire: #b85c00; --fire2: #d06a00; --ok: #1d8a52;
+    --word1: #3f4a3a; --word2: #222a1f; --word3: #0e100e; --code-bg: #f8faf6;
+    --shadow: 0 14px 40px rgba(30, 50, 10, 0.12); --glow: rgba(118, 185, 0, 0.06);
   }
 
   * { box-sizing: border-box; }
@@ -69,7 +70,7 @@
     -webkit-font-smoothing: antialiased;
     overflow: hidden;
   }
-  /* The logo's red ambient glow behind the horns, once, behind the header. */
+  /* The horns' green ambient glow, once, behind the header. */
   body::before {
     content: "";
     position: fixed;
@@ -134,10 +135,10 @@
   .btn.primary {
     background: linear-gradient(180deg, var(--horn), var(--horn2));
     border-color: transparent;
-    color: #fff;
-    box-shadow: 0 6px 20px rgba(255, 34, 34, 0.22);
+    color: var(--accent-ink);
+    box-shadow: 0 6px 20px rgba(118, 185, 0, 0.22);
   }
-  .btn.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.08); }
+  .btn.primary:hover:not(:disabled) { color: var(--accent-ink); filter: brightness(1.08); }
   .btn svg { width: 15px; height: 15px; flex: none; }
   .btn kbd { margin-left: auto; }
   kbd {
@@ -149,7 +150,7 @@
     background: var(--surface2);
     color: var(--text2);
   }
-  .btn.primary kbd { background: rgba(0, 0, 0, 0.2); border-color: rgba(255, 255, 255, 0.25); color: #fff; }
+  .btn.primary kbd { background: rgba(0, 0, 0, 0.12); border-color: rgba(0, 0, 0, 0.25); color: var(--accent-ink); }
   .search {
     width: 100%;
     padding: 7px 10px;
@@ -186,7 +187,7 @@
     font-size: 11.5px; padding: 3px 6px; border-radius: 6px;
   }
   .conv-acts button:hover { color: var(--text); background: var(--surface2); }
-  .conv-acts button.armed { color: #fff; background: var(--accent); }
+  .conv-acts button.armed { color: #fff; background: var(--warn); }
   .rename { flex: 1; margin: 3px; padding: 5px 8px; border-radius: 7px; border: 1px solid var(--accent); background: var(--surface); font-size: 13px; }
   .side-empty { padding: 10px 12px; font-size: 12.5px; color: var(--text3); }
   .side-foot { padding: 10px 14px 14px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 6px; }
@@ -444,8 +445,8 @@
   .body.tokens .tk:focus-visible { outline-offset: 0; }
   .tk.p1 { background: color-mix(in srgb, var(--fire) 16%, transparent); }
   .tk.p2 { background: color-mix(in srgb, var(--fire) 34%, transparent); }
-  .tk.p3 { background: color-mix(in srgb, var(--accent) 38%, transparent); }
-  .tk.p4 { background: color-mix(in srgb, var(--accent) 62%, transparent); color: #fff; }
+  .tk.p3 { background: color-mix(in srgb, var(--warn) 38%, transparent); }
+  .tk.p4 { background: color-mix(in srgb, var(--warn) 62%, transparent); color: #fff; }
   .tk-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; font-size: 11.5px; color: var(--text3); }
   .tk-legend .tk { padding: 0 6px; }
   .tk-tip {
@@ -563,12 +564,12 @@
   }
   button.send {
     flex: none; height: 38px; min-width: 84px; padding: 0 16px; border: 1px solid transparent; border-radius: 11px;
-    background: linear-gradient(180deg, var(--horn), var(--horn2)); color: #fff;
+    background: linear-gradient(180deg, var(--horn), var(--horn2)); color: var(--accent-ink);
     font-size: 13.5px; font-weight: 650;
-    box-shadow: 0 6px 18px rgba(255, 34, 34, 0.28);
+    box-shadow: 0 6px 18px rgba(118, 185, 0, 0.28);
     transition: filter 120ms linear, box-shadow 120ms linear;
   }
-  button.send:hover:not(:disabled) { filter: brightness(1.1); box-shadow: 0 8px 24px rgba(255, 34, 34, 0.4); }
+  button.send:hover:not(:disabled) { filter: brightness(1.1); box-shadow: 0 8px 24px rgba(118, 185, 0, 0.4); }
   button.send:disabled { opacity: 0.4; box-shadow: none; }
   button.send.stop { background: transparent; color: var(--text); border-color: var(--line2); box-shadow: none; }
   button.send.stop:hover { background: var(--surface2); }
@@ -736,7 +737,7 @@
 <body>
 <svg class="defs" aria-hidden="true" focusable="false">
   <defs>
-    <linearGradient id="g-horn" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff2222"/><stop offset="1" stop-color="#990000"/></linearGradient>
+    <linearGradient id="g-horn" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9be000"/><stop offset="1" stop-color="#3f6b00"/></linearGradient>
     <linearGradient id="g-word" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" style="stop-color: var(--word1)"/><stop offset="0.4" style="stop-color: var(--word2)"/><stop offset="1" style="stop-color: var(--word3)"/>
     </linearGradient>
@@ -1532,8 +1533,8 @@ const ctx2d = strip.getContext("2d");
 
 // Canvas fillStyle cannot read CSS variables, so each theme's ramp is spelled out here.
 const RAMPS = {
-  dark:  { line: [64, 34, 46], red: [255, 34, 34], hot: [255, 214, 140], ice: [189, 177, 183] },
-  light: { line: [228, 210, 217], red: [200, 0, 30], hot: [255, 168, 40], ice: [133, 116, 124] },
+  dark:  { line: [40, 52, 36], red: [118, 185, 0], hot: [255, 214, 140], ice: [181, 188, 177] },
+  light: { line: [214, 224, 208], red: [63, 107, 0], hot: [255, 168, 40], ice: [116, 125, 110] },
 };
 const mixA = (a, b, t) => [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t));
 const rgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
