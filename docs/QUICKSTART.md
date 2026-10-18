@@ -13,7 +13,7 @@ Worked example: **Qwen3.8-27B**, same as the [README](../README.md#install). Thi
 
 ## Requirements
 
-- An `sm_120a` GPU: RTX 5090 (32 GB, the tested one), 5080, 5070 Ti, or RTX PRO 6000. Nothing else works; imp says so rather than fall back.
+- A compute capability 12.0 GPU ([which card](#which-card)). Nothing else works; imp says so rather than fall back.
 - Recent NVIDIA driver plus NVIDIA Container Toolkit (`--gpus all`).
 - Disk for the model: Qwen3.8-27B in NVFP4 is 19.2 GiB, a 30B-class checkpoint ~16 GB. Converting yourself needs room for the source too.
 
@@ -23,6 +23,24 @@ Check the GPU is visible and free first. On WSL2 `nvidia-smi` alone is not enoug
 nvidia-smi
 docker ps
 ```
+
+### Which card
+
+- Every compute capability 12.0 card runs the same `sm_120a` kernels ([NVIDIA list](https://developer.nvidia.com/cuda-gpus)).
+- Tested: RTX 5090; the other rows are untested.
+- Weight sizes: [`MODELS.md`](MODELS.md); the KV cache takes what is left.
+
+| VRAM | Cards | Picks (weights) |
+| --- | --- | --- |
+| 96 GB | RTX PRO 6000 Blackwell (Workstation, Max-Q, Server) | every 32 GB pick with a far longer context |
+| 48 GB | RTX PRO 5000 Blackwell | every 32 GB pick with a longer context |
+| 32 GB | **RTX 5090** (tested), RTX PRO 4500 Blackwell | Qwen3.8-27B NVFP4 (17 GB), Qwen3.6-35B-A3B NVFP4 (18 GB), Nemotron-3-Nano-30B-A3B NVFP4 (18 GB); Qwen3.8-Flash-Next with ~62 GiB host RAM |
+| 24 GB | RTX PRO 4000 Blackwell | Qwen3.8-27B NVFP4 (17 GB), Qwen3-30B-A3B NVFP4 (16 GB), short context |
+| 16 GB | RTX 5080, RTX 5070 Ti, RTX 5060 Ti 16 GB, RTX PRO 2000 Blackwell | Qwen3-14B NVFP4 (10 GB), Qwen3-8B Q8_0 (8.2 GB) |
+| 12 GB | RTX 5070 | Qwen3-8B Q8_0 (8.2 GB), Qwen3-8B NVFP4 (5.0 GB) |
+| 8 GB | RTX 5060, RTX 5060 Ti 8 GB, RTX 5050 | Qwen3-4B Q8_0 (4.0 GB), Llama-3.2-3B Q8_0 (3.2 GB) |
+
+DGX Spark (GB10) is compute capability 12.1: no image in the default build ([`LIMITATIONS.md`](LIMITATIONS.md)).
 
 ## 1. Get a model
 
