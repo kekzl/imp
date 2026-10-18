@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- `speculative.recycle_tree`: token recycling drafts the best-first tree of successor paths (branching at every depth, slot costs learned from the verify argmax). Opt-in: Qwen3-14B Q6_K `--gpu-layers 0`, prose + code + list 24.70 -> 25.10 tok/s summed, per prompt -6 to +6 %; greedy output identical.
+
 ## [0.54.0] - 2026-10-18
 
 ### Added

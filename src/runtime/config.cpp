@@ -461,6 +461,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("speculative.recycle_slots", cfg.speculative.recycle_slots);
     I("speculative.recycle_depth", cfg.speculative.recycle_depth);
     I("speculative.recycle_width", cfg.speculative.recycle_width);
+    B("speculative.recycle_tree", cfg.speculative.recycle_tree);
     I("speculative.mtp_tree_width", cfg.speculative.mtp_tree_width);
     F("speculative.mtp_tree_margin", cfg.speculative.mtp_tree_margin);
     I("speculative.recycle_min_streak", cfg.speculative.recycle_min_streak);

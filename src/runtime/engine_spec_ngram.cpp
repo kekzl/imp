@@ -419,8 +419,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             const auto [width, depth] = recycle_mc_shape(scfg.recycle_width, scfg.recycle_depth, k,
                                                          offload_mgr_ != nullptr);
             if (mc_route_ok && width > 1) {
-                auto cands = spec_recycle_table_().draft_candidates(
-                    req->output_tokens.back(), width, depth);
+                auto cands = spec_recycle_table_().draft_multi(scfg.recycle_tree, req->output_tokens.back(),
+                                                               width, depth);
                 if (cands.size() > 1) {
                     mc = std::move(cands);
                     mc_depth = 0;
@@ -1031,6 +1031,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // acceptance; that breadth is what makes the next draft fire).
     if (recycle_m > 0) {
         TokenRecycleTable& tr = spec_recycle_table_();
+        // Before observe_topk below rewrites the rows: draft_tree's slot costs.
+        observe_candidate_ranks(tr, scfg.recycle_tree, t0, mc, h_spec_argmax_.as<int32_t>());
         for (int j = 0; j < chunk_len; ++j) {
             int32_t tok;
             if (mc_on) {
@@ -1042,8 +1044,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             } else {
                 tok = (j == 0) ? t0 : draft[j - 1];
             }
-            tr.observe_topk(tok, std::span(h_spec_topm_ + (static_cast<size_t>(j) * recycle_m),
-                                           static_cast<size_t>(recycle_m)));
+            tr.observe_topk(tok, std::span(h_spec_topm_ + static_cast<size_t>(j) * recycle_m, recycle_m));
         }
     }
 
