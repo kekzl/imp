@@ -333,7 +333,7 @@
   .body a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
   .body table { border-collapse: collapse; margin: 10px 0; font-size: 0.92em; white-space: normal; display: block; overflow-x: auto; max-width: 100%; }
   .body hr { border: 0; border-top: 1px solid var(--line2); margin: 14px 0; }
-  .body th, .body td { border: 1px solid var(--line2); padding: 4px 10px; text-align: left; }
+  .body th, .body td { border: 1px solid var(--line2); padding: 4px 10px; text-align: left; overflow-wrap: normal; }
   .body th { font-weight: 600; background: var(--surface); }
   .body code { font-family: var(--mono); font-size: 0.86em; background: var(--surface2); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
   .body pre {
@@ -1824,6 +1824,9 @@ function markup(src) {
   // with white-space: pre-wrap it would otherwise double the gap.
   s = s.replace(/^#{1,6}[ \t]+(.+?)[ \t]*(?:\n+|$)/gm, "<h4>$1</h4>");
   s = s.replace(/^[ \t]*(?:-[ \t]*){3,}(?:\n+|$)|^[ \t]*(?:\*[ \t]*){3,}(?:\n+|$)|^[ \t]*(?:_[ \t]*){3,}(?:\n+|$)/gm, "<hr>");
+  // Backslash escapes (\* \_ \# ...) print the character; inline code keeps them.
+  s = s.split(/(<code>[\s\S]*?<\/code>)/).map((part, k) => k % 2 ? part :
+        part.replace(/\\([\\`*_{}[\]()#+\-.!~])/g, "$1")).join("");
   s = s.replace(MATH_SLOT, (_, i) => maths[i]);
   s = s.replace(FENCE_SLOT, (_, i) => codeBlock(fences[i][0], fences[i][1]));
   return s;
