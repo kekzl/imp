@@ -617,6 +617,7 @@ static int run_server(int argc, char** argv) {
         else
             printf("Responses store: off (explicit store=true answers 400)\n");
     }
+    start_power_metrics();
     printf("Server listening on http://%s:%d\n", args.host.c_str(), args.port);
     printf("Endpoints:\n");
     printf("  GET    /                    web UI — open this in a browser\n");
