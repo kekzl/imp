@@ -504,31 +504,26 @@
   .fault code { font-family: var(--mono); font-size: 0.9em; color: var(--accent); overflow-wrap: anywhere; }
   .fault small { display: block; margin-top: 4px; font-family: var(--mono); font-size: 11px; color: var(--text3); }
 
-  /* ---- pulse: one bar per token -------------------------------------- */
+  /* ---- pulse: one bar per token, in the header ----------------------- */
 
-  .pulse {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 16px;
-    align-items: end;
-    padding: 10px 22px 0;
-    border-top: 1px solid var(--line);
-  }
-  .pulse > div:first-child { min-width: 0; }
+  .pulse { display: flex; align-items: center; gap: 10px; margin-left: auto; flex: 0 1 300px; min-width: 0; }
+  .pulse + .top-acts { margin-left: 4px; }
+  .pulse > div:first-child { flex: 1 1 200px; min-width: 48px; }
   .strip {
-    display: block; width: 100%; height: 56px; border-radius: 9px;
+    display: block; width: 100%; height: 30px; border-radius: 7px;
     background: var(--surface);
     border: 1px solid var(--line);
   }
-  .strip-note { margin: 5px 0 0; font-size: 11.5px; color: var(--text3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .rate { text-align: right; padding-bottom: 20px; white-space: nowrap; }
+  /* Token count and median gap also sit in the Run panel. */
+  .strip-note { display: none; }
+  .rate { display: flex; align-items: baseline; gap: 4px; white-space: nowrap; flex: none; }
   .rate .n {
-    font-size: 32px; font-weight: 750; line-height: 1; letter-spacing: -0.02em;
+    font-size: 21px; font-weight: 750; line-height: 1; letter-spacing: -0.02em;
     color: var(--fire); font-variant-numeric: tabular-nums;
-    text-shadow: 0 0 22px color-mix(in srgb, var(--fire2) 45%, transparent);
+    text-shadow: 0 0 16px color-mix(in srgb, var(--fire2) 45%, transparent);
   }
   .rate.idle .n { color: var(--text2); text-shadow: none; }
-  .rate .u { font-size: 12px; color: var(--text3); margin-top: 3px; }
+  .rate .u { font-size: 11px; color: var(--text3); }
 
   /* ---- composer ------------------------------------------------------ */
 
@@ -710,12 +705,12 @@
     }
     .app.panel-open .panel { transform: none; visibility: visible; }
     .top { flex-wrap: wrap; gap: 6px 10px; padding: 8px 12px; }
-    .model, select.model { order: 5; flex: 1 1 100%; max-width: 100%; border-left: 0; padding-left: 2px; }
+    .model, select.model { order: 5; flex: 1 1 70%; max-width: 100%; border-left: 0; padding-left: 2px; }
     .log { padding: 18px 14px 8px; }
-    .pulse { padding: 8px 14px 0; gap: 12px; }
-    .strip { height: 44px; }
-    .rate { padding-bottom: 18px; }
-    .rate .n { font-size: 26px; }
+    .pulse { flex: none; order: 6; }
+    .pulse + .top-acts { margin-left: auto; }
+    .pulse > div:first-child { display: none; }
+    .rate .n { font-size: 18px; }
     .compose { padding: 8px 12px 12px; }
     .turn.is-user { max-width: 92%; }
   }
@@ -737,12 +732,12 @@
 <body>
 <svg class="defs" aria-hidden="true" focusable="false">
   <defs>
-    <linearGradient id="g-horn" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9be000"/><stop offset="1" stop-color="#3f6b00"/></linearGradient>
+    <linearGradient id="g-horn" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5a1424"/><stop offset="1" stop-color="#2a0710"/></linearGradient>
     <linearGradient id="g-word" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" style="stop-color: var(--word1)"/><stop offset="0.4" style="stop-color: var(--word2)"/><stop offset="1" style="stop-color: var(--word3)"/>
     </linearGradient>
-    <linearGradient id="g-skin" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff74b0"/><stop offset="1" stop-color="#d81b63"/></linearGradient>
-    <linearGradient id="g-skin-d" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ec3f86"/><stop offset="1" stop-color="#a8104a"/></linearGradient>
+    <linearGradient id="g-skin" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff6f7d"/><stop offset="1" stop-color="#e0244a"/></linearGradient>
+    <linearGradient id="g-skin-d" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e8334f"/><stop offset="1" stop-color="#a3122f"/></linearGradient>
     <radialGradient id="g-ball" cx="0.4" cy="0.4" r="0.65"><stop offset="0" stop-color="#fff6c2"/><stop offset="0.45" stop-color="#ffc53a"/><stop offset="1" stop-color="#ff5a00"/></radialGradient>
     <linearGradient id="g-flame" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#ff7a00"/><stop offset="0.6" stop-color="#ffcf40" stop-opacity="0.9"/><stop offset="1" stop-color="#ff3b00" stop-opacity="0"/></linearGradient>
     <filter id="f-glow" x="-60%" y="-60%" width="220%" height="220%">
@@ -824,11 +819,8 @@
           <svg aria-hidden="true"><use href="#imp"/></svg>
         </button>
         <svg class="wordmark" viewBox="76 0 410 214" role="img" aria-label="imp">
-          <g filter="url(#f-hot)">
-            <path d="M 120 72 C 112 50, 98 30, 82 6 C 80 2, 84 4, 86 6 C 100 26, 116 50, 134 72 Z" fill="url(#g-horn)"/>
-            <path d="M 150 72 C 158 50, 172 30, 190 6 C 192 2, 188 4, 186 6 C 172 26, 156 50, 138 72 Z" fill="url(#g-horn)"/>
-          </g>
-          <circle cx="137" cy="68" r="10" fill="url(#g-horn)" filter="url(#f-hot)"/>
+          <path d="M 128 66 C 124 52, 130 40, 140 32 C 140 42, 146 44, 150 36 C 156 46, 156 58, 148 66 Z" fill="url(#g-flame)"/>
+          <circle cx="137" cy="66" r="12" fill="url(#g-ball)" filter="url(#f-hot)"/>
           <rect x="119" y="90" width="36" height="86" rx="5" fill="url(#g-word)"/>
           <path d="M 178 176 L 178 126 C 178 96, 206 86, 226 86 C 244 86, 256 94, 262 108 C 268 94, 280 86, 298 86 C 318 86, 346 96, 346 126 L 346 176 L 314 176 L 314 130 C 314 112, 304 104, 292 104 C 280 104, 270 112, 270 130 L 270 176 L 238 176 L 238 130 C 238 112, 228 104, 216 104 C 204 104, 194 112, 194 130 L 194 176 Z" fill="url(#g-word)"/>
           <path d="M 370 86 L 370 210 L 388 210 L 388 170 C 396 176, 410 180, 424 180 C 458 180, 480 158, 480 132 C 480 106, 458 86, 424 86 C 410 86, 396 90, 388 98 L 388 86 Z M 420 104 C 445 104, 460 116, 460 132 C 460 148, 445 160, 420 160 C 400 160, 388 150, 388 132 C 388 114, 400 104, 420 104 Z" fill="url(#g-word)" fill-rule="evenodd"/>
@@ -837,6 +829,17 @@
       <div class="bubble" id="bubble" role="status" aria-live="polite" hidden></div>
       <span class="state"><span class="dot" id="dot"></span><span id="state">starting</span></span>
       <span class="model" id="model">connecting...</span>
+      <div class="pulse">
+        <div>
+          <canvas class="strip" id="strip" width="400" height="60" role="img"
+                  aria-label="one bar per token, height is the gap to the previous token"></canvas>
+          <p class="strip-note" id="strip-note">one bar per token, dashed line is the median gap</p>
+        </div>
+        <div class="rate idle" id="rate">
+          <div class="n" id="m-rate">0.0</div>
+          <div class="u">tok/s</div>
+        </div>
+      </div>
       <div class="top-acts">
         <button type="button" class="icon-btn" id="theme" aria-label="Switch theme"></button>
         <button type="button" class="icon-btn" id="help-btn" aria-label="Keyboard shortcuts" title="keyboard shortcuts (?)">?</button>
@@ -847,18 +850,6 @@
     </header>
 
     <main class="log" id="log" role="log" aria-label="Conversation"></main>
-
-    <div class="pulse">
-      <div>
-        <canvas class="strip" id="strip" width="960" height="112" role="img"
-                aria-label="one bar per token, height is the gap to the previous token"></canvas>
-        <p class="strip-note" id="strip-note">one bar per token, dashed line is the median gap</p>
-      </div>
-      <div class="rate idle" id="rate">
-        <div class="n" id="m-rate">0.0</div>
-        <div class="u">tok/s</div>
-      </div>
-    </div>
 
     <form class="compose" id="composer">
       <div class="box">
