@@ -60,6 +60,7 @@ constexpr VisionPromptLayout kQwen3VLLayout = {
 };
 
 // InternVL chat_template.jinja: one context token + newline; HF InternVLProcessor, one tile per image.
+// A video ('<video>\n' in the template) is "\n".join("Frame{i+1}: <img>...</img>"): frame blocks.
 constexpr VisionPromptLayout kInternVLLayout = {
     .image_block = "<IMG_CONTEXT>\n",
     .video_block = "",
@@ -68,6 +69,7 @@ constexpr VisionPromptLayout kInternVLLayout = {
     .start = "<img>",
     .end = "</img>",
     .wrap_each_image = true,
+    .frame_label = "Frame",
 };
 
 }  // namespace
@@ -76,11 +78,23 @@ const VisionPromptLayout& vision_prompt_layout(VisionFamily f) {
     return f == VisionFamily::InternVL ? kInternVLLayout : kQwen3VLLayout;
 }
 
-std::string vision_prompt_blocks(VisionFamily f, std::string_view order) {
+std::string vision_prompt_blocks(VisionFamily f, std::string_view order, std::span<const int> video_frames) {
     const VisionPromptLayout& l = vision_prompt_layout(f);
     std::string blocks;
-    for (const char kind : order)
-        blocks += kind == 'v' ? l.video_block : l.image_block;
+    size_t nv = 0;
+    for (const char kind : order) {
+        if (kind != 'v') {
+            blocks += l.image_block;
+        } else if (l.frame_label.empty()) {
+            blocks += l.video_block;
+        } else {
+            const int frames = nv < video_frames.size() ? video_frames[nv] : 0;
+            for (int i = 0; i < frames; ++i)
+                blocks += std::string(l.frame_label) + std::to_string(i + 1) + ": " +
+                          std::string(l.image_block);
+        }
+        nv += kind == 'v' ? 1 : 0;
+    }
     return blocks;
 }
 

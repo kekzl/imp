@@ -82,3 +82,15 @@ Orchestrator: B-29a, B-24; validator (fresh agent): both PASS, `make dev-test` 1
 | B-25 | OPEN, measured | topk_partial + topk_finalize 67.6 us per decode step, 2.3 % of GPU time at top-k 40 (PERF_LOG); the frame is a dynamically indexed array, not spills. Lever: radix-select partial, at most about 1.9 % decode |
 
 Validator notes kept: updates cost 0.12 ms each before and 0.02 ms after (unexplained, not gated); `spare_` keeps one exec per layer beyond eviction (graph execs without memory nodes).
+
+PR #2777 merged batches 1-3 (809ad716). Continued on `auto/backlog-2026-10-18b`.
+
+## 2026-10-18 Batch 4: verify ratio, InternVL video
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-31 | DONE, no change | re-measured `imp-cli --bench --bench-pp 512 --bench-reps 5`: Qwen3-14B Q6_K 14.14 ms/verify at 4.12 tok/verify vs 5.8 ms decode step (2.4x), NVFP4 12.43 ms at 2.00 tok/verify vs 5.95 ms (2.1x); the ledger's 51.97 ms / 8.4x and the 3.4x quant gap are gone |
+| B-32 | WONTFIX | the ledger closes it itself: "Not chased", the question dissolved when the drop turned out a priced trade (`DEBT_LEDGER_2026_08_21.md:705-707`) |
+| B-35 | DONE (this commit) | server: InternVL `video` part = one image per frame, `Frame{i}: ` lines; golden rows written from HF `replace_video_token`, not from imp output; InternVL3.5-2B e2e: "A cat and red double decker buses.", 1077 prompt tokens; validator PASS (logic), gates fixed after its run (API_FEATURES 301 -> 300 lines, format, stale 400 text) |
+
+Decision (B-35): frames use the image path (448, ImageNet mean/std) as OpenGVLab's `load_video(..., max_num=1)`, not the checkpoint's `video_preprocessor_config.json` (384 x 384, CLIP stats), which cannot give the 256 tokens `replace_video_token` writes per frame. `imp-cli --video-frames` stays Qwen3-VL only.

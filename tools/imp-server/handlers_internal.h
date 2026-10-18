@@ -158,6 +158,8 @@ struct ChatStateSnapshot {
     // One layout per video part, in prompt order; its frame pairs sit in `qwen_patches` at the
     // video's position among the images.
     std::vector<imp::VideoPlaceholderLayout> qwen_video_layouts;
+    // Frames per video part (a frame_label family encodes each frame as an image).
+    std::vector<int> video_frame_counts;
     // Prompt layout of the loaded tower (imp::vision_prompt_layout).
     imp::VisionFamily vision_family = imp::VisionFamily::None;
     size_t vision_content_hash = 0;

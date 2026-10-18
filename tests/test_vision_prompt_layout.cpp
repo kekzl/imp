@@ -74,21 +74,29 @@ const std::vector<Case> kCases = {
 
 // Front-end flow: blocks before the user text, template render, then expansion.
 std::string render(VisionFamily family, const Case& c) {
-    // Same gate as the server: a family without a video block refuses video parts.
-    if (vision_prompt_layout(family).video_block.empty() && c.order.find('v') != std::string::npos)
-        return "error: video parts need a Qwen3-VL model; this InternVL model takes images only";
+    // Same flow as the server (vision_parts.cpp): a frame_label family encodes each of the video's
+    // 2 x video_groups frames as an image, in content order.
+    const VisionPromptLayout& layout = vision_prompt_layout(family);
     std::vector<VideoPlaceholderLayout> videos;
-    for (const char k : c.order)
-        if (k == 'v') {
+    std::vector<int> image_tokens, frame_counts;
+    size_t ni = 0;
+    for (const char k : c.order) {
+        if (k != 'v') {
+            image_tokens.push_back(c.image_tokens[ni++]);
+        } else if (!layout.frame_label.empty()) {
+            frame_counts.push_back(2 * c.video_groups);
+            image_tokens.insert(image_tokens.end(), static_cast<size_t>(2 * c.video_groups), 4);
+        } else {
             std::vector<double> seconds;
             for (int f = 0; f < 2 * c.video_groups; ++f)
                 seconds.push_back(f * 0.5);
             videos.push_back(
                 qwen_video_layout(3, seconds, 2, [](const std::string& s) { return toy_encode(s); }));
         }
-    std::vector<int32_t> tokens = toy_encode("<|im_start|>user\n" + vision_prompt_blocks(family, c.order) +
-                                             "Describe.<|im_end|>");
-    const auto r = expand_vision_prompt(family, tokens, toy_find, c.image_tokens, videos);
+    }
+    std::vector<int32_t> tokens = toy_encode(
+        "<|im_start|>user\n" + vision_prompt_blocks(family, c.order, frame_counts) + "Describe.<|im_end|>");
+    const auto r = expand_vision_prompt(family, tokens, toy_find, image_tokens, videos);
     return r ? toy_decode(tokens) : "error: " + r.error();
 }
 

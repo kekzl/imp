@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- InternVL3.5 takes `video` content parts on the server: each frame is one 448 x 448 tile, rendered as HF `replace_video_token` (`Frame{i}: <img>...</img>`). InternVL3.5-2B, frames cat, cat, bus, bus: "A cat and red double decker buses.", 1077 prompt tokens.
 - `imp-quantize --gptq F.hess`: GPTQ error feedback for NVFP4 exports, Hessians from `imp-cli --calibrate F --set calibration.hessian=true`; opt-in, damp 10. AWQ+GPTQ PPL: Qwen3-0.6B 27.59 -> 27.17 (mean of 7 damps), Qwen3-1.7B 18.07-18.46 vs AWQ 18.23; damp 0.01 loses to round-to-nearest.
 - SAE features: `imp-server --sae DIR` (Gemma Scope 2), `"sae_features": N` adds the strongest features per token, `"sae_clamp": {id: value}` steers; Web UI "Concepts" panel. gemma-3-12b-it Q4_K_M, layer 24: L0 58.5, reconstruction error 0.055 (same SAE at layer 10: L0 2193, error 99.4).
 - Classifier-free guidance: `cfg_scale` on chat decodes a shadow without the system message (or with `cfg_negative_prompt`) in the same step and samples l_b + s (l_a - l_b). Qwen3-4B Q8_0, "exactly three words": unguided "Sushi is my favorite.", cfg 1.5 "Sushi, fresh, delicious".

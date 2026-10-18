@@ -27,10 +27,26 @@ size_t vision_parts_hash(ChatRequestParams& params) {
 std::string qwen_preprocess_vision_parts(imp::Engine& engine, const ChatRequestParams& params,
                                          ChatStateSnapshot& snap) {
     snap.vision_family = engine.vision_family();
-    if (imp::vision_prompt_layout(snap.vision_family).video_block.empty() && !params.videos.empty())
-        return "video parts need a Qwen3-VL model; this InternVL model takes images only";
+    const imp::VisionPromptLayout& layout = imp::vision_prompt_layout(snap.vision_family);
+    if (layout.video_block.empty() && layout.frame_label.empty() && !params.videos.empty())
+        return "video parts need a vision model that takes video";
     size_t ni = 0, nv = 0;
     for (const char kind : params.vision_order) {
+        if (kind == 'v' && !layout.frame_label.empty()) {
+            const ChatVideoInput& v = params.videos[nv++];
+            if (v.frames.size() < 2 || v.frames.size() > imp::Engine::kQwenVideoMaxFrames)
+                return "Failed to process video frames (JPEG or PNG, 2.." +
+                       std::to_string(imp::Engine::kQwenVideoMaxFrames) + " frames)";
+            for (const auto& frame : v.frames) {
+                auto patches = std::make_shared<imp::QwenPatches>();
+                if (!engine.preprocess_image_qwen(frame, *patches) || engine.image_tokens_of(*patches) <= 0)
+                    return "Failed to process video frames (JPEG or PNG)";
+                snap.qwen_image_tokens.push_back(engine.image_tokens_of(*patches));
+                snap.qwen_patches.push_back(std::move(patches));
+            }
+            snap.video_frame_counts.push_back(static_cast<int>(v.frames.size()));
+            continue;
+        }
         if (kind == 'v') {
             const ChatVideoInput& v = params.videos[nv++];
             std::vector<std::span<const uint8_t>> spans(v.frames.begin(), v.frames.end());

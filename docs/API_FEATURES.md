@@ -218,7 +218,7 @@ Refusal rules:
 
 ## Video
 
-✅ on `/v1/chat/completions` for Qwen3-VL, as a `video` content part of frames the client sampled; no container decoding (mp4 is out by decision).
+✅ on `/v1/chat/completions` for Qwen3-VL and InternVL3.5, as a `video` content part of frames the client sampled; no container decoding (mp4 is out by decision).
 
 ```json
 {"type": "video", "video": ["data:image/png;base64,...", "data:image/png;base64,..."], "fps": 2}
@@ -232,8 +232,8 @@ Refusal rules:
 
 - Frames pair up on the temporal axis (odd count repeats the last frame); each pair becomes one `<x.x seconds><\|vision_start\|>` + tokens + `<\|vision_end\|>` group, as `Qwen3VLProcessor` emits it.
 - Resize bound: t*h*w in 4096..25165824 pixels (`video_preprocessor_config.json`), capped at frames x the per-image patch budget; `cap_pixels_per_frame` off (transformers 5.17.0 default).
-- `imp-cli`: `--video-frames a.png,b.png,... [--video-fps F | --video-timestamps s0,s1,...]`.
-- Wrong frame count, unreadable or mixed-size frames: `400`. Model without a Qwen3-VL tower: `400 vision_unavailable`.
+- `imp-cli`: `--video-frames a.png,b.png,... [--video-fps F | --video-timestamps s0,s1,...]` (Qwen3-VL only). InternVL3.5 (server): each frame is one 448 x 448 tile (256 tokens), rendered as HF `replace_video_token`: `Frame{i}: <img>...</img>` lines, `fps` / `timestamps` unread; InternVL3.5-2B, frames cat, cat, bus, bus: "A cat and red double decker buses.", 1077 prompt tokens.
+- Wrong frame count, unreadable or mixed-size frames: `400`. Model without a Qwen3-VL or InternVL tower: `400 vision_unavailable`.
 
 ## Fill-in-the-middle
 
