@@ -4,6 +4,24 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-10-18 · best-first tree drafter for token recycling, opt-in (ROADMAP row 119.5)
+
+Protocol: Qwen3-14B Q6_K, `--gpu-layers 0`, `IMP_DETERMINISTIC=1`, `imp-cli --prompt ... --max-tokens 160 --temperature 0`, `speculative.recycle_width` / `recycle_depth` / `recycle_tree` per arm. Tree = `TokenRecycleTable::draft_tree`: the `width` lowest-cost paths, hop cost log2(rate(0) / rate(r)) from slot hit rates learned on every verify row's argmax (`observe_rank`).
+
+| tok/s | w8 d3 root-only (default) | w8 d3 tree | w8 d7 tree |
+|---|---:|---:|---:|
+| prose (three paragraphs) | 7.17 | 7.36 | 6.74 |
+| code (rewrite `merge`) | 9.87 | 10.23 | 10.43 |
+| list (ten Moon facts) | 7.66 | 7.40 | 7.93 |
+| sum | 24.70 | 24.99 | 25.10 |
+
+- Fixed rank-sum prior (no learning), same prompts, non-deterministic: code w4 d7 9.16 -> 10.13, prose w8 d7 6.97 -> 6.48 tok/s.
+- Without `IMP_DETERMINISTIC` the root-only arm alone moved 1.76 -> 1.62 tok/verify between two runs (prose w8 d7).
+- Lossless: `imp-server --gpu-layers 0`, `recycle_tree=true recycle_depth=7` (log `auto -> on, width 8`, 21 verifies) vs speculation off: 1193 bytes identical.
+- Verdict: +1.2 % (d3) / +1.6 % (d7) summed, per prompt -6 % .. +6 %: opt-in, default unchanged. ms/verify 196.6 (32 rows) vs 204.1 (64 rows): compute does not limit, so the shared-prefix mask (119.6) buys nothing; the limit is the successor table's candidates.
+
+---
+
 ## 2026-10-18 · multi-candidate verify gets 64 rows under `--gpu-layers`, offload width 4 -> 8 (ROADMAP row 119.4)
 
 Protocol: Qwen3-14B Q6_K, `--gpu-layers 0`, `imp-cli --prompt ... --max-tokens 160 --temperature 0`, `speculative.recycle_width` / `recycle_depth` set per arm. Row budget width x (1 + depth): 17 resident, 64 under offload (`recycle_mc_shape`, `src/runtime/offload_spec_defaults.h`). The 119.2 width-8 arm (6.09 / 8.43) ran at depth 1 under the 17-row cap.

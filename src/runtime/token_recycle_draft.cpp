@@ -1,14 +1,18 @@
 #include "runtime/token_recycle_draft.h"
 
 #include <algorithm>
+#include <cmath>
+#include <queue>
 #include <ranges>
 
 namespace imp {
 
 TokenRecycleTable::TokenRecycleTable(int vocab_size, int slots)
-    : vocab_(vocab_size), slots_(slots),
+    : vocab_(vocab_size),
+      slots_(slots),
       succ_(static_cast<size_t>(vocab_size) * slots, -1),
-      streak_(static_cast<size_t>(vocab_size), 0) {}
+      streak_(static_cast<size_t>(vocab_size), 0),
+      rank_hits_(static_cast<size_t>(std::max(0, slots)), 0) {}
 
 // MRU slot shuffle only: returns true when `next` was already recorded
 // (a RE-observation). Streak accounting stays with the callers.
@@ -109,6 +113,88 @@ std::vector<std::vector<int32_t>> TokenRecycleTable::draft_candidates(int32_t t0
         out.push_back(std::move(cand));
     }
     return out;
+}
+
+std::vector<std::vector<int32_t>> TokenRecycleTable::draft_tree(int32_t t0, int width, int depth) const {
+    std::vector<std::vector<int32_t>> out;
+    if (!valid_(t0) || width <= 0 || depth <= 0 || row_(t0)[0] < 0)
+        return out;
+    // Cost of a hop through slot r = log2(rate(0) / rate(r)): slot 0 is free, so path length is not
+    // penalised (prior: cost = r, the rank sum). A deviation at depth j costs j / 1024
+    // more than at depth 0: a miss is likeliest at the first hop, so an early alternative pays more.
+    std::vector<double> hop(static_cast<size_t>(slots_));
+    for (int r = 0; r < slots_; ++r)
+        hop[static_cast<size_t>(r)] = std::max(0.0, std::log2(rank_hit_rate(0) / rank_hit_rate(r)));
+    struct Node {
+        double cost;
+        int64_t seq;  // FIFO among equal costs: deterministic order
+        std::vector<int32_t> toks;
+    };
+    auto worse = [](const Node& a, const Node& b) {
+        return a.cost != b.cost ? a.cost > b.cost : a.seq > b.seq;
+    };
+    std::priority_queue<Node, std::vector<Node>, decltype(worse)> open(worse);
+    int64_t seq = 0;
+    open.push({0.0, seq++, {}});
+    // Each pop pushes at most slots_ children: the bound keeps a sparse table from looping.
+    for (int pops = 0;
+         !open.empty() && static_cast<int>(out.size()) < width && pops < width * depth * slots_ + 1; ++pops) {
+        Node n = open.top();
+        open.pop();
+        const int32_t cur = n.toks.empty() ? t0 : n.toks.back();
+        const int d = static_cast<int>(n.toks.size());
+        if (d == depth || !valid_(cur) || row_(cur)[0] < 0) {
+            if (!n.toks.empty())
+                out.push_back(std::move(n.toks));
+            continue;
+        }
+        for (int r = 0; r < slots_; ++r) {
+            const int32_t s = row_(cur)[r];
+            if (s < 0)
+                break;  // slots are packed front-first
+            Node c{n.cost + hop[static_cast<size_t>(r)] + (r > 0 ? d / 1024.0 : 0.0), seq++, n.toks};
+            c.toks.push_back(s);
+            open.push(std::move(c));
+        }
+    }
+    return out;
+}
+
+void TokenRecycleTable::observe_rank(int32_t prev, int32_t next) {
+    if (!valid_(prev) || !valid_(next) || row_(prev)[0] < 0)
+        return;  // no draft could have come from an empty row
+    ++rank_samples_;
+    for (int r = 0; r < slots_; ++r)
+        if (row_(prev)[r] == next) {
+            ++rank_hits_[static_cast<size_t>(r)];
+            return;
+        }
+}
+
+double TokenRecycleTable::rank_hit_rate(int rank) const {
+    if (rank < 0 || rank >= slots_)
+        return 0.0;
+    constexpr double kPriorSamples = 16.0;
+    const double prior = std::ldexp(1.0, -(rank + 1));
+    return (static_cast<double>(rank_hits_[static_cast<size_t>(rank)]) + kPriorSamples * prior) /
+           (static_cast<double>(rank_samples_) + kPriorSamples);
+}
+
+void observe_candidate_ranks(TokenRecycleTable& tr, bool enabled, int32_t t0,
+                             const std::vector<std::vector<int32_t>>& mc, const int32_t* argmax) {
+    if (!enabled)
+        return;
+    size_t rows_per_cand = 1;  // the engine's mc_rows_per_cand: 1 + the longest candidate
+    for (const auto& cand : mc)
+        rows_per_cand = std::max(rows_per_cand, 1 + cand.size());
+    for (size_t c = 0; c < mc.size(); ++c)
+        for (size_t r = 0; r <= mc[c].size(); ++r) {
+            bool seen = false;
+            for (size_t e = 0; e < c && !seen; ++e)
+                seen = mc[e].size() >= r && std::equal(mc[c].begin(), mc[c].begin() + r, mc[e].begin());
+            if (!seen)
+                tr.observe_rank(r == 0 ? t0 : mc[c][r - 1], argmax[c * rows_per_cand + r]);
+        }
 }
 
 bool TokenRecycleTable::has(int32_t token) const {

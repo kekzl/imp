@@ -44,6 +44,24 @@ public:
     // front-slot chains up to `depth` tokens. Empty when t0 is unseen.
     std::vector<std::vector<int32_t>> draft_candidates(int32_t t0, int width, int depth) const;
 
+    // Best-first tree draft (SpecExec-style, roadmap 119.5): the `width` most likely successor
+    // paths of up to `depth` tokens, branching at every depth. Path score = product of the
+    // per-rank hit rates (observe_rank); ties go to the earlier deviation.
+    std::vector<std::vector<int32_t>> draft_tree(int32_t t0, int width, int depth) const;
+
+    // tree ? draft_tree : draft_candidates (speculative.recycle_tree).
+    std::vector<std::vector<int32_t>> draft_multi(bool tree, int32_t t0, int width, int depth) const {
+        return tree ? draft_tree(t0, width, depth) : draft_candidates(t0, width, depth);
+    }
+
+    // Record which slot of `prev` held the model's actual next token (`next`, e.g. a verify
+    // row's argmax); a miss counts too. Call before observe_topk updates `prev`'s row.
+    void observe_rank(int32_t prev, int32_t next);
+
+    // Hit rate of slot `rank` so far; prior 2^-(rank+1) worth 16 samples before any data.
+    [[nodiscard]] double rank_hit_rate(int rank) const;
+    [[nodiscard]] uint64_t rank_samples() const { return rank_samples_; }
+
     // True when `token` has at least one recorded successor.
     [[nodiscard]] bool has(int32_t token) const;
 
@@ -63,6 +81,14 @@ private:
     // Consecutive re-confirmations of the front slot: observe_pair bumps it
     // when `next` already IS the front, resets it when the front changes.
     std::vector<uint8_t> streak_;  // vocab_
+    std::vector<uint64_t> rank_hits_;  // slots_, observe_rank
+    uint64_t rank_samples_ = 0;
 };
+
+// observe_rank for every verify row of a multi-candidate chunk (`argmax[c * (1 + longest) + r]`
+// follows prefix mc[c][0, r) of root t0); a prefix an earlier candidate covered counts once.
+// No-op when !enabled (speculative.recycle_tree off) or mc is empty.
+void observe_candidate_ranks(TokenRecycleTable& tr, bool enabled, int32_t t0,
+                             const std::vector<std::vector<int32_t>>& mc, const int32_t* argmax);
 
 }  // namespace imp

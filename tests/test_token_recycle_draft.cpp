@@ -137,6 +137,60 @@ TEST(TokenRecycle, CandidatesEmptyOnUnseenRoot) {
     EXPECT_TRUE(t.draft_candidates(9, 4, 3).empty());
 }
 
+// 1 -> {5, 6, 7}, 5 -> {50, 51}, 50 -> {500}. Rank sums: [5,50,500] 0, [6] 1, [5,51] 1 (deeper,
+// so after [6]), [7] 2. draft_candidates never reaches [5,51]: it branches at the root only.
+static TokenRecycleTable tree_table() {
+    TokenRecycleTable t(1000, 4);
+    const int32_t root[3] = {5, 6, 7};
+    t.observe_topk(1, std::span(root, 3));
+    const int32_t five[2] = {50, 51};
+    t.observe_topk(5, std::span(five, 2));
+    t.observe_pair(50, 500);
+    return t;
+}
+
+TEST(TokenRecycle, TreeBranchesBelowTheRootByRankSum) {
+    const TokenRecycleTable t = tree_table();
+    const auto c = t.draft_tree(1, 4, 3);
+    const std::vector<std::vector<int32_t>> want = {{5, 50, 500}, {6}, {5, 51}, {7}};
+    EXPECT_EQ(c, want);
+    for (const auto& cand : t.draft_candidates(1, 4, 3))
+        EXPECT_NE(cand, (std::vector<int32_t>{5, 51})) << "the root-only drafter has no second-hop branch";
+}
+
+TEST(TokenRecycle, TreeLearnsSlotHitRates) {
+    TokenRecycleTable t = tree_table();
+    EXPECT_DOUBLE_EQ(t.rank_hit_rate(0), 0.5);  // prior 2^-(r+1)
+    for (int i = 0; i < 100; ++i)
+        t.observe_rank(1, 7);  // the model kept choosing slot 2 of token 1
+    t.observe_rank(1, 999);    // a miss counts as a sample
+    EXPECT_GT(t.rank_hit_rate(2), t.rank_hit_rate(0));
+    const auto c = t.draft_tree(1, 2, 3);
+    const std::vector<std::vector<int32_t>> want = {{7}, {5, 50, 500}};
+    EXPECT_EQ(c, want) << "slot 2 is now free, slot 1 ([6]) no longer makes the cut";
+}
+
+TEST(TokenRecycle, CandidateRanksCountSharedPrefixesOnce) {
+    TokenRecycleTable t = tree_table();
+    const std::vector<std::vector<int32_t>> mc = {{5, 50}, {5, 51}};
+    // rows_per_cand 3: [t0], [t0 5], [t0 5 50] | [t0] dup, [t0 5] dup, [t0 5 51]
+    const int32_t argmax[6] = {5, 50, 500, 5, 50, 7};
+    observe_candidate_ranks(t, false, 1, mc, argmax);
+    EXPECT_EQ(t.rank_samples(), 0u) << "speculative.recycle_tree off";
+    observe_candidate_ranks(t, true, 1, mc, argmax);
+    EXPECT_EQ(t.rank_samples(), 3u) << "2 rows are shared prefixes; [t0 5 51] follows 51, an empty row";
+    EXPECT_GT(t.rank_hit_rate(0), 0.5) << "all 3 argmaxes sat in slot 0";
+}
+
+TEST(TokenRecycle, TreeKeepsWidthAndDepth) {
+    const TokenRecycleTable t = tree_table();
+    const auto c = t.draft_tree(1, 2, 2);
+    const std::vector<std::vector<int32_t>> want = {{5, 50}, {6}};
+    EXPECT_EQ(c, want);
+    EXPECT_TRUE(t.draft_tree(9, 4, 3).empty()) << "unseen root";
+    EXPECT_TRUE(t.draft_tree(1, 0, 3).empty());
+}
+
 // Streak gating (#1055): a verify step costs ~1.4x a decode step, so drafts
 // should only fire on CONFIRMED bigrams — the front slot must have repeated
 // at least min_streak times. Fresh (streak-0) successors extend nothing.

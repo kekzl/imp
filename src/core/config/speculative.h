@@ -90,6 +90,10 @@ struct Speculative {
     // (width*(1+depth)<=17). Default 1 (linear): wider buckets run CUTLASS at
     // low effective bandwidth, not worth the accept lift.
     int recycle_width = 1;
+    // Multi-candidate shape: false = branch at the first hop only (candidate i = successor i,
+    // then front-slot chains); true = best-first tree, the `recycle_width` lowest-rank-sum paths
+    // branching at every depth (TokenRecycleTable::draft_tree, roadmap 119.5).
+    bool recycle_tree = false;
     // MTP multi-candidate width: W>1 drafts W chains per verify step (chain 0
     // continues the head's top-1, chains 1..W-1 branch at the first position on
     // top-W ids). Chains verify as one multi-candidate chunk (private KV blocks,

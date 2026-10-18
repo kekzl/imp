@@ -210,3 +210,10 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | R-080 | DONE | per-family state structs dropped by measurement: of 47 `executor.h` commits since 2026-09-18, 4 changed fields only, 42 also method declarations; done instead: `engine.h` includes `exec/executor_fwd.h` (Engine ctor out of line), 11 `pre_dequant_*` TUs and `pre_dequant_internal.h` include `quant_pipeline.h` / `weight_caches.h` / `quant_scratch.h`, 5 TUs that dereference the executor include it directly; `make dev` after one real `executor.h` edit: 125 compiles / 150 steps / 68.8 s -> 78 / 104 / 47.4 s; `make dev-test` 13/13 |
+
+## 2026-10-18 Batch 14: R-119.5 tree drafter, R-119.6 dropped
+
+| ID | Status | Evidence |
+|---|---|---|
+| R-119.5 | DONE (opt-in) | `TokenRecycleTable::draft_tree` + `observe_rank` (slot hit rates from verify-row argmax), `speculative.recycle_tree`; PERF_LOG 2026-10-18 119.5: deterministic sum over prose / code / list 24.70 -> 24.99 (w8 d3) / 25.10 (w8 d7) tok/s, per prompt -6 .. +6 %; lossless 1193 bytes identical with 21 verifies; tests `TreeBranchesBelowTheRootByRankSum`, `TreeLearnsSlotHitRates`, `TreeKeepsWidthAndDepth` (mutants: rank cost dropped, hit counter dropped, both fail) |
+| R-119.6 | DROPPED | shared-prefix mask only pays when compute limits before 64 rows: 196.6 ms/verify at 32 rows vs 204.1 at 64 |
