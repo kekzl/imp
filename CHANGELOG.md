@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.54.0] - 2026-10-18
+
 ### Added
 - Releases attach `imp-<version>-linux-x86_64.tar.gz`: imp-server, imp-cli, imp-quantize, imp-bench with cudart, cuBLAS and glibc bundled, the host needs only the NVIDIA driver (`make bundle`). 824 MB; on `debian:12` Llama-3.2-3B Q8_0 greedy matches the image byte for byte.
 - InternVL3.5 takes `video` content parts on the server: each frame is one 448 x 448 tile, rendered as HF `replace_video_token` (`Frame{i}: <img>...</img>`). InternVL3.5-2B, frames cat, cat, bus, bus: "A cat and red double decker buses.", 1077 prompt tokens.
