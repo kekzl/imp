@@ -4,6 +4,31 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-10-18 · n-gram speculation keeps drafting under `--gpu-layers` (ROADMAP row 119.3)
+
+Protocol: Qwen3-14B Q6_K, `--gpu-layers 0`, `imp-cli --prompt ... --max-tokens 200 --temperature 0`. One streamed forward: tg 188.6 ms per token, pp 4 / 16 / 64 = 189.70 / 193.53 / 189.71 ms (`--gpu-layers 20`: 97.1 ms, 116.93 / 109.40 / 111.76 ms). A verify costs one pass, so both give-up rules (64 misses, acceptance < 15 %) are off under offload.
+
+| prompt | before | after |
+|---|---:|---:|
+| rewrite a Python function | 5.30 tok/s, 0 verifies (gave up after 64 misses) | 6.83 tok/s, 5 verifies, 10.00 tok/verify |
+| three paragraphs prose | 5.28 tok/s | 5.29 tok/s |
+
+---
+
+## 2026-10-18 · radix-select top-k sampling kernels (BACKLOG B-25)
+
+Protocol: `imp-cli` under `nsys --cuda-graph-trace=node`, Qwen3-4B-Instruct-2507 Q8_0, temperature 0.8, top-k 40, top-p 0.95, 256 calls each.
+
+| kernel | before (legacy) | after (radix) |
+|---|---:|---:|
+| `topk_partial_kernel` | 31.22 us | 8.19 us |
+| `topk_finalize_kernel` | 35.55 us | 10.57 us |
+| per decode step | 66.77 us | 18.76 us |
+
+Same candidates and order as legacy (`TopkRadixSampler.*`: 588 configs x 12 seeds byte-compared, scratch and tokens; a tie-break mutant fails it). Stack 1056 B -> 0. Legacy kernels stay for vocab > 262144 or top-k > 128.
+
+---
+
 ## 2026-10-18 · FFN prefill graph cache reuses evicted execs via cudaGraphExecUpdate (BACKLOG B-24, C-029)
 
 Protocol: `imp-server` under `nsys -t cuda`, Qwen3-4B-Instruct-2507 Q8_0, `server.prefix_cache=false`, 40 serial chats with prompts of 308..2931 tokens, `max_tokens` 2; `nsys stats --report cuda_api_sum` over the whole run (startup included: 35 instantiates, 84 ms on an idle run).
