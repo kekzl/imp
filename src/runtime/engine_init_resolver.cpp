@@ -853,11 +853,12 @@ void Engine::init_resolve_quant_flags_() {
             IMP_LOG_INFO("Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=%s for deterministic grouped GEMM",
                          kCublasDeterministicWorkspace);
         }
-        // Enable MMVQ for all weight GEMMs: quantized matmul matching llama.cpp's
-        // accumulation behavior, critical for 128-expert MoE precision.
+        // MMVQ for the weight GEMMs the NVFP4 decode overlay does not take (llama.cpp accumulation).
+        // Q4_K_M: overlay 256.48 tg / PPL 231.17, MMVQ (no_nvfp4_decode_cache) 116.85 / 223.72.
         if (!model_->config().overrides.gemma4.force_mmvq) {
             model_->config_.overrides.gemma4.force_mmvq = true;
-            IMP_LOG_INFO("Gemma 4: enabling MMVQ for all weight GEMMs (numerical parity with llama.cpp)");
+            IMP_LOG_INFO(
+                "Gemma 4: MMVQ for weight GEMMs outside the NVFP4 decode overlay (llama.cpp parity)");
         }
     }
 }

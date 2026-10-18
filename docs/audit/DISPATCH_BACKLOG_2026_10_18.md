@@ -94,3 +94,15 @@ PR #2777 merged batches 1-3 (809ad716). Continued on `auto/backlog-2026-10-18b`.
 | B-35 | DONE (this commit) | server: InternVL `video` part = one image per frame, `Frame{i}: ` lines; golden rows written from HF `replace_video_token`, not from imp output; InternVL3.5-2B e2e: "A cat and red double decker buses.", 1077 prompt tokens; validator PASS (logic), gates fixed after its run (API_FEATURES 301 -> 300 lines, format, stale 400 text) |
 
 Decision (B-35): frames use the image path (448, ImageNet mean/std) as OpenGVLab's `load_video(..., max_num=1)`, not the checkpoint's `video_preprocessor_config.json` (384 x 384, CLIP stats), which cannot give the 256 tokens `replace_video_token` writes per frame. `imp-cli --video-frames` stays Qwen3-VL only.
+
+PR #2778 merged B-35 (6d1c883d). Continued on `auto/backlog-2026-10-18c`.
+
+## 2026-10-18 Batch 5: roadmap measurements (R-077, R-065, R-049)
+
+| ID | Status | Evidence |
+|---|---|---|
+| R-077 | DONE (this commit) | Gemma-4-26B-A4B Q4_K_M, `imp-cli --bench --bench-pp 512 --bench-reps 3`, ngram off: overlay tg 256.48 / pp512 16221.60 tok/s, PPL 231.1655; MMVQ (`diagnostics.no_nvfp4_decode_cache=true`) 116.85 / 13904.67, PPL 223.7162. Overlay stays; every kernel the row names is reachable through a knob or MTP, none retired (deleting a knob's path is a user-facing removal); resolver log corrected |
+| R-065 | OPEN, re-measured | `tools/roofline/inventory/ncu_cell.sh q8-8b pp512` (clocks not locked on this host): `mmq_imma_q8k128_kernel` grid 32x4 117.3 us / tensor pipe 30.9 %, grid 96x4 215.4 us / 31.6 %; `mmq_imma_kernel<32>` grid 8x16 34.8 us / 12.6 %; nsys pp512: K128 kernel 51.2 % of prefill GPU time |
+| R-049 | OPEN, verify cost measured | Qwen3-14B NVFP4 11.87-12.72 ms per 2-token verify (k 1/3/7/15 all draft 1 on the bench history) vs 5.94 ms decode (168.23 tok/s); Q6_K 14.14 ms per 4.12-token verify; next sub-item: forced-width verify harness for widths 8..16 |
+
+Finding beside R-049: on Qwen3-14B-NVFP4 a 2-token n-gram verify costs 2.0x a decode step, so n-gram at width 2 gains nothing there (6.1 vs 5.94 ms per token).
