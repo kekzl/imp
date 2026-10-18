@@ -23,6 +23,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `/metrics`: `imp_gpu_power_watts` and `imp_gpu_energy_joules_total` from NVML (`dlopen`, absent without libnvidia-ml). A 60-token Qwen3-4B Q8_0 chat reads 18.4 J on the driver counter.
 
 ### Changed
+- Web UI: NVIDIA green palette (red kept for warnings), the imp mascot as logo, tok/s readout moved from above the composer into the header; markdown tables keep words whole in narrow cells and `\*` escapes print the character. Screenshots: `docs/webui*.png`.
 - VRAM planner keeps one measured margin (library reserve + 4 % allocator headroom): `vram.reserve_floor_pct` 10 -> 0, `vram.kv_fraction` 0.8 -> 1.0, both stay opt-in. Qwen3.6-35B-A3B NVFP4 KV ceiling 118128 -> 143184 tokens; 9 of 10 models unchanged.
 - `--gpu-layers` turns on token recycling (width 8, multi-candidate verify up to 64 rows instead of 17) unless `speculative.token_recycling` is set: Qwen3-14B Q6_K `--gpu-layers 0`, prose 5.30 -> 7.22 tok/s, code rewrite 6.85 -> 9.80; greedy output byte-identical to speculation off.
 - Top-k sampling kernels select by radix instead of k rounds of block argmax: 66.77 -> 18.76 us per decode step (Qwen3-4B Q8_0, top-k 40), same sampled tokens (588 configs x 12 seeds byte-compared against the old kernels).
