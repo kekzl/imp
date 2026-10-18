@@ -272,7 +272,8 @@ then measured per model with `diagnostics.vram_audit=true`. Closed by #2711-#271
 - 4 NVFP4 LM-head SfAtom built twice (35-76 MiB), not re-checked after #2711.
 - 6 Nemotron MTP per-expert FP16 originals after restack (2434 MiB computed): model not local.
 - 7 gemma-3 Q8_0/Q6_K mode 1 per-weight FP16 beside fused, budget-cut: unmeasured.
-- 8 encoder weights (NOMIC_BERT) as FP16 copies, 115 MiB: unmeasured.
+- 8 encoder weights (NOMIC_BERT) as FP16 copies, 115 MiB: FIXED 2026-10-18 (06fdf269), the
+  encoder frees its 84 quantized sources after the dequant, Q8 release pool 128.0 -> 0.0 MiB.
 - 9 dense MXFP4 GGUF linear scales copy (6.25 % of FP4): unmeasured.
 - 14 Phase 4b `cudaFreeAsync` into the default pool without a trim: partly covered by the
   release-on-free pools of #2712.

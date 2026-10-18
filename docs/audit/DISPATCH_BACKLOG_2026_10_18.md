@@ -48,3 +48,24 @@ Builder: B-05, B-06 (subagent); orchestrator: B-09, B-11, B-28. Validator (fresh
 Questions for the owner:
 - B-33: download a model whose MoE NVFP4 decode GEMV has K/16 > 512 (which one) to re-measure MaxL1?
 - B-34: is FP8 paged KV at head_dim 256 used by anyone, so the multitok port is worth its cost?
+
+## 2026-10-18 Batch 2: tidy sweep, kernel templates, encoder sources
+
+Builders: B-23 (subagent, SASS gate with a control mutation that the compare caught), B-08 + B-22 (subagent, own build dir); orchestrator: B-29 item 8. Decision: one commit 06fdf269 for the four items, the parallel builders edited the same files and splitting hunks needs interactive staging.
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-08 | DONE 06fdf269 | 444 TUs swept: parentheses 4110, contains 244, min/max 110, string concat 10, redundant inline 4; 0 findings left for the five checks |
+| B-22 | DONE 06fdf269 | 7 modernize checks enabled (170 fixes), 0 findings; 10 checks left off with counts in `.clang-tidy` |
+| B-23 | DONE 06fdf269 | C-004..C-007 merged; 3 files 1732 -> 1586 LOC; validator SASS: 5 renamed instances identical to their old kernels |
+| B-29 | IN_PROGRESS | split into B-29a..f; B-29d DONE |
+| B-29d | DONE 06fdf269 | nomic-embed-text-v1.5 Q8_0: 84 sources freed, Q8 release pool 128.0 -> 0.0 MiB; `EncoderEmbedTest.NomicBertEmbedsMatchReferenceStructure` passed |
+| B-29b, B-29c | BLOCKED | Nemotron MTP checkpoint and gemma-3 Q8_0/Q6_K not local |
+| B-29f | BLOCKED | item 24 is a reserve-policy decision; item 14 partly covered by #2712 |
+
+Validator (fresh agent, opus): SASS of 1123 kernels HEAD vs tree, 1114 identical, 9 differ only in the `std::max` select form (FSETP.GT + FSEL vs FSETP.GEU + !FSEL, same value for every input incl. NaN and signed zero): `mtp_attn_kv_scan(_rows)`, `apply_min_p`, `softmax_max`, `topk_partial(_rows)`, `topk_finalize(_rows)`, `absmax_kernel` (546 -> 498 SASS lines). About 230 host sites reviewed, 0 non-equivalent. Anti-cheat: `tests/` untouched, 0 NOLINT, 0 suppressions, alloc allowlist total 361 unchanged (one site moved into `Model::free_source_weight`), em dashes 15 added vs 19 removed on reflowed lines, none new.
+
+Gates on the tree: `make dev-test` 13/13, `make preflight` 0 failures, `make test-gpu` 3749 ran 0 failed, `make verify-fast` all PASS (decode tg128 -0.50 %, prefill pp512 +17.53 %, PPL 0.000 %, server c8 +2.95 %, peak VRAM -0.08 %).
+
+Question for the owner:
+- B-29f: keep the five stacked reserves (library 3900 + 4 % + 256 + 10 % floor + kv_fraction 0.8) or collapse them into one measured margin?
