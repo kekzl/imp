@@ -1,116 +1,128 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 260" width="600" height="260">
   <defs>
-    <linearGradient id="horn" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#ff2222"/>
-      <stop offset="100%" stop-color="#990000"/>
+    <linearGradient id="skin" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff6f7d"/>
+      <stop offset="1" stop-color="#e0244a"/>
     </linearGradient>
-    <linearGradient id="txt" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#ffffff"/>
-      <stop offset="40%" stop-color="#f0f0f0"/>
-      <stop offset="100%" stop-color="#b0b0b0"/>
+    <linearGradient id="skin-d" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e8334f"/>
+      <stop offset="1" stop-color="#a3122f"/>
     </linearGradient>
-    <linearGradient id="tail" x1="0%" y1="0%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#990000"/>
-      <stop offset="100%" stop-color="#ff2222"/>
+    <linearGradient id="nub" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5a1424"/>
+      <stop offset="1" stop-color="#2a0710"/>
     </linearGradient>
-    <filter id="glow" x="-15%" y="-15%" width="130%" height="130%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    <linearGradient id="txt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.4" stop-color="#f0f0f0"/>
+      <stop offset="1" stop-color="#b0b0b0"/>
+    </linearGradient>
+    <radialGradient id="ball" cx="0.4" cy="0.4" r="0.65">
+      <stop offset="0" stop-color="#fff6c2"/>
+      <stop offset="0.45" stop-color="#ffc53a"/>
+      <stop offset="1" stop-color="#ff5a00"/>
+    </radialGradient>
+    <linearGradient id="flame" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#ff7a00"/>
+      <stop offset="0.6" stop-color="#ffcf40" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#ff3b00" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="aura" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ff3b3b" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#ff3b3b" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="1.2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
-    <filter id="glow-hot" x="-25%" y="-25%" width="150%" height="150%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="5" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    <filter id="glow-hot" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
     <filter id="shadow">
       <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#000" flood-opacity="0.6"/>
     </filter>
   </defs>
 
-  <!-- Background -->
   <rect width="600" height="260" rx="20" fill="#080808"/>
+  <ellipse cx="128" cy="120" rx="125" ry="115" fill="url(#aura)"/>
 
-  <!-- Faint grid -->
-  <g opacity="0.025" stroke="#fff" stroke-width="0.5">
-    <line x1="0" y1="60" x2="600" y2="60"/>
-    <line x1="0" y1="120" x2="600" y2="120"/>
-    <line x1="0" y1="180" x2="600" y2="180"/>
+  <!-- The imp: WoW warlock's summoned imp. Big bald head and jaw, pointy ears, horn nubs,
+       glowing eyes, cheeky fanged grin, stubby body, fireball in the raised hand. -->
+  <g transform="translate(10 4) scale(3.35)" stroke="#3a0716" stroke-width="0.9" stroke-linejoin="round">
+    <ellipse cx="34" cy="73" rx="13" ry="2" fill="#000" opacity="0.5" stroke="none"/>
+    <!-- feet -->
+    <path d="M24 66 C21 66 19.5 68.5 21.5 69.5 C24 70.5 28.5 70 29.5 68 C30 66.5 27.5 65.5 24 66 Z" fill="url(#skin-d)"/>
+    <path d="M44 66 C47 66 48.5 68.5 46.5 69.5 C44 70.5 39.5 70 38.5 68 C38 66.5 40.5 65.5 44 66 Z" fill="url(#skin-d)"/>
+    <!-- left arm on the hip -->
+    <path d="M23.5 50 C17.5 50.5 15.5 56 19 59.5 C20.5 61 23 60 24 58.5" fill="none" stroke="url(#skin-d)" stroke-width="4.2" stroke-linecap="round"/>
+    <!-- body -->
+    <path d="M22 54 C22 45.5 27.5 42 34 42 C40.5 42 46 45.5 46 54 C46 62 41 67.5 34 67.5 C27 67.5 22 62 22 54 Z" fill="url(#skin)"/>
+    <ellipse cx="34" cy="56" rx="6.5" ry="6" fill="#fff" opacity="0.14" stroke="none"/>
+    <path d="M31 63.5 Q34 65 37 63.5" fill="none" stroke-width="0.7"/>
+    <!-- right arm up, fireball in the hand -->
+    <path d="M44.5 49 C50 47.5 54 42 56 36.5" fill="none" stroke="url(#skin-d)" stroke-width="4.2" stroke-linecap="round"/>
+    <g stroke="none">
+      <path d="M53 33.5 C51.5 27 54 21 58.5 16.5 C59 21 62 21.5 63.5 17.5 C66.5 23 66.5 29.5 63 33.5 Z" fill="url(#flame)"/>
+      <circle cx="58.5" cy="30.5" r="6.2" fill="url(#ball)" filter="url(#glow)"/>
+    </g>
+    <path d="M53.5 36.5 C53 34.5 54.5 33 56 33.8 C57.5 32.8 59.5 33.6 59.3 35.6 C59 37.6 55.5 38.5 53.5 36.5 Z" fill="url(#skin-d)"/>
+    <path d="M54.2 33.6 L53.6 31.6 L55.4 33.2 Z M57.2 33.1 L57.4 31 L58.4 33.2 Z" fill="#fff4e0" stroke-width="0.4"/>
+    <!-- ears -->
+    <path d="M17 24 C10 20.5 5 15 2.5 11 C7.5 12 13 14 18.5 18 Z" fill="url(#skin-d)"/>
+    <path d="M51 24 C58 20.5 63 15 65.5 11 C60.5 12 55 14 49.5 18 Z" fill="url(#skin-d)"/>
+    <path d="M15.5 21 C11 18.5 8 16 6.5 13.8 C10 15 13.5 16.5 16.5 19 Z" fill="#7a0e26" stroke="none"/>
+    <path d="M52.5 21 C57 18.5 60 16 61.5 13.8 C58 15 54.5 16.5 51.5 19 Z" fill="#7a0e26" stroke="none"/>
+    <!-- head: wide jaw -->
+    <path d="M34 4.5 C45.5 4.5 52.5 12 52.5 22 C52.5 29 51 35 47 39.5 C43.5 43.5 39 45 34 45 C29 45 24.5 43.5 21 39.5 C17 35 15.5 29 15.5 22 C15.5 12 22.5 4.5 34 4.5 Z" fill="url(#skin)"/>
+    <!-- horn nubs -->
+    <path d="M24 9.5 C23 6 23.5 3 25.5 1 C26.5 3.5 28 6 29.5 7.2 Z" fill="url(#nub)"/>
+    <path d="M44 9.5 C45 6 44.5 3 42.5 1 C41.5 3.5 40 6 38.5 7.2 Z" fill="url(#nub)"/>
+    <ellipse cx="28" cy="11" rx="7" ry="3" fill="#fff" opacity="0.22" stroke="none"/>
+    <!-- brows: mischievous -->
+    <path d="M20.5 19.5 Q25 16.5 30 20" fill="none" stroke="#3a0716" stroke-width="2" stroke-linecap="round"/>
+    <path d="M38 20 Q43 16.5 47.5 19.5" fill="none" stroke="#3a0716" stroke-width="2" stroke-linecap="round"/>
+    <!-- eyes -->
+    <g filter="url(#glow)">
+      <ellipse cx="26" cy="25.5" rx="5" ry="5.4" fill="#ffe14d"/>
+      <ellipse cx="42" cy="25.5" rx="5" ry="5.4" fill="#ffe14d"/>
+    </g>
+    <ellipse cx="27.2" cy="26.2" rx="1.6" ry="2.1" fill="#2a0010" stroke="none"/>
+    <ellipse cx="43.2" cy="26.2" rx="1.6" ry="2.1" fill="#2a0010" stroke="none"/>
+    <circle cx="25" cy="24" r="0.9" fill="#fff" stroke="none"/>
+    <circle cx="41" cy="24" r="0.9" fill="#fff" stroke="none"/>
+    <!-- cheeks -->
+    <ellipse cx="20.5" cy="32.5" rx="3" ry="1.8" fill="#ff9aa8" opacity="0.55" stroke="none"/>
+    <ellipse cx="47.5" cy="32.5" rx="3" ry="1.8" fill="#ff9aa8" opacity="0.55" stroke="none"/>
+    <!-- grin with two fangs -->
+    <path d="M23.5 33 C27 39.5 41 39.5 44.5 33 C40 35 28 35 23.5 33 Z" fill="#4a0418"/>
+    <path d="M27.5 34.2 L28.6 37 L29.8 34.5 Z M38.2 34.5 L39.4 37 L40.5 34.2 Z" fill="#fff" stroke-width="0.4"/>
+    <path d="M31 37.6 Q34 38.8 37 37.6" fill="none" stroke="#ff7a8a" stroke-width="0.9" opacity="0.8"/>
   </g>
 
-  <!-- Red ambient glow behind horns -->
-  <ellipse cx="142" cy="50" rx="60" ry="45" fill="#ff0000" opacity="0.07"/>
-
-  <!-- ===== HORNS ===== -->
-  <g filter="url(#glow-hot)">
-    <!-- Left horn — thick, curved, sharp -->
-    <path d="M 120 72 C 112 50, 98 30, 82 6
-             C 80 2, 84 4, 86 6
-             C 100 26, 116 50, 134 72 Z"
-          fill="url(#horn)"/>
-    <!-- Right horn -->
-    <path d="M 150 72 C 158 50, 172 30, 190 6
-             C 192 2, 188 4, 186 6
-             C 172 26, 156 50, 138 72 Z"
-          fill="url(#horn)"/>
+  <!-- wordmark: the i's dot is the imp's fireball -->
+  <g transform="translate(160.85 28) scale(0.85)">
+    <g filter="url(#shadow)">
+      <rect x="119" y="90" width="36" height="86" rx="5" fill="url(#txt)"/>
+      <path d="M 178 176 L 178 126
+               C 178 96, 206 86, 226 86 C 244 86, 256 94, 262 108
+               C 268 94, 280 86, 298 86 C 318 86, 346 96, 346 126
+               L 346 176 L 314 176 L 314 130 C 314 112, 304 104, 292 104
+               C 280 104, 270 112, 270 130 L 270 176 L 238 176 L 238 130
+               C 238 112, 228 104, 216 104 C 204 104, 194 112, 194 130
+               L 194 176 Z" fill="url(#txt)"/>
+      <path d="M 370 86 L 370 210 L 388 210 L 388 170
+               C 396 176, 410 180, 424 180 C 458 180, 480 158, 480 132
+               C 480 106, 458 86, 424 86 C 410 86, 396 90, 388 98 L 388 86 Z
+               M 420 104 C 445 104, 460 116, 460 132 C 460 148, 445 160, 420 160
+               C 400 160, 388 150, 388 132 C 388 114, 400 104, 420 104 Z"
+            fill="url(#txt)" fill-rule="evenodd"/>
+    </g>
+    <path d="M 128 66 C 124 52, 130 40, 140 32 C 140 42, 146 44, 150 36 C 156 46, 156 58, 148 66 Z" fill="url(#flame)"/>
+    <circle cx="137" cy="66" r="12" fill="url(#ball)" filter="url(#glow-hot)"/>
   </g>
 
-  <!-- ===== MAIN LETTERS ===== -->
-  <g filter="url(#shadow)">
-
-    <!-- ── i ── -->
-    <!-- Glowing red dot -->
-    <circle cx="137" cy="68" r="10" fill="url(#horn)" filter="url(#glow-hot)"/>
-    <!-- Thick stem -->
-    <rect x="119" y="90" width="36" height="86" rx="5" fill="url(#txt)"/>
-
-    <!-- ── m ── -->
-    <path d="M 178 176 L 178 126
-             C 178 96, 206 86, 226 86
-             C 244 86, 256 94, 262 108
-             C 268 94, 280 86, 298 86
-             C 318 86, 346 96, 346 126
-             L 346 176 L 314 176 L 314 130
-             C 314 112, 304 104, 292 104
-             C 280 104, 270 112, 270 130 L 270 176
-             L 238 176 L 238 130
-             C 238 112, 228 104, 216 104
-             C 204 104, 194 112, 194 130
-             L 194 176 Z"
-          fill="url(#txt)"/>
-
-    <!-- ── p ── -->
-    <path d="M 370 86 L 370 210 L 388 210 L 388 170
-             C 396 176, 410 180, 424 180
-             C 458 180, 480 158, 480 132
-             C 480 106, 458 86, 424 86
-             C 410 86, 396 90, 388 98 L 388 86 Z
-             M 420 104
-             C 445 104, 460 116, 460 132
-             C 460 148, 445 160, 420 160
-             C 400 160, 388 150, 388 132
-             C 388 114, 400 104, 420 104 Z"
-          fill="url(#txt)" fill-rule="evenodd"/>
-  </g>
-
-  <!-- ===== DEVIL TAIL from p descender ===== -->
-  <g filter="url(#glow-hot)">
-    <path d="M 388 210 C 410 214, 438 208, 460 198
-             C 482 188, 498 184, 508 190"
-          fill="none" stroke="url(#tail)" stroke-width="7" stroke-linecap="round"/>
-    <!-- Spade tip -->
-    <path d="M 508 190
-             C 512 180, 522 176, 524 184
-             C 526 176, 520 170, 514 176
-             C 518 168, 528 172, 526 182
-             L 524 184
-             C 526 192, 520 196, 514 190
-             C 518 198, 508 198, 508 190 Z"
-          fill="#ff2222"/>
-  </g>
-
-  <!-- ===== TAGLINE ===== -->
-  <text x="300" y="244" text-anchor="middle"
+  <text x="430" y="238" text-anchor="middle"
         font-family="'SF Mono','Fira Code','Cascadia Code','Consolas',monospace"
-        font-size="12" font-weight="500" letter-spacing="5" fill="#444">
-    LLM INFERENCE ENGINE
-  </text>
+        font-size="12" font-weight="600" letter-spacing="4" fill="#76b900">LLM INFERENCE ENGINE</text>
 </svg>
