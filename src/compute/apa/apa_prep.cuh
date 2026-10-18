@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa_prep.cuh (v0.8.1, c616972); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa_prep.cuh (v0.8.2, abe6994); change there first, then copy.
 // APA prep: KV readers (flat / paged FP16 / paged NVFP4), K/V stats, quantization into tile blobs, Q packing.
 #pragma once
 #include "apa_common.cuh"
@@ -223,7 +223,8 @@ __device__ __forceinline__ float quant_tile(const Reader& rd, const Dims& dm, co
                                             int tid, int nthr,
                                             __half (*vt)[D + 2]) {  // V / vg (|x| <= 2688 fits FP16)
     using C = Cfg<D>;
-    constexpr int NG = BKV * C::G16;  // groups per tile and phase
+    constexpr int NG = BKV * C::G16;           // groups per tile and phase
+    const float ik = 1.f / kg, iv = 1.f / vg;  // used when POW2_SCALES (bitwise equal to the division)
     float amx = 0.f;
     for (int pp = tid; pp < nb * NG; pp += nthr) {
         const int ti = pp / NG, p = pp % NG, r = p / C::G16, g = p % C::G16, s = (tile0 + ti) * BKV + r;
@@ -240,13 +241,13 @@ __device__ __forceinline__ float quant_tile(const Reader& rd, const Dims& dm, co
         }
 #pragma unroll
         for (int i = 0; i < 16; ++i)
-            vt[ti * BKV + r][g * 16 + i] = __float2half(x[i] / vg);
+            vt[ti * BKV + r][g * 16 + i] = __float2half(POW2_SCALES ? x[i] * iv : x[i] / vg);
         // ---- K (token row r, swizzled 16 B chunk g>>1, half g&1)
         if (s < dm.Skv) {
             rd.load16(false, b, s, hk, g * 16, dm, D, x);
 #pragma unroll
             for (int i = 0; i < 16; ++i)
-                x[i] = (x[i] - kmean[g * 16 + i]) / kg;
+                x[i] = POW2_SCALES ? (x[i] - kmean[g * 16 + i]) * ik : (x[i] - kmean[g * 16 + i]) / kg;
         } else {
 #pragma unroll
             for (int i = 0; i < 16; ++i)

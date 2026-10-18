@@ -1,7 +1,7 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the
 // MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 // Copyright (c) 2026 Raphael Friedmann (github.com/kekzl). APA: https://github.com/kekzl/apa
-// Vendored from kekzl/apa include/apa/apa.cuh (v0.8.1, c616972); change there first, then copy.
+// Vendored from kekzl/apa include/apa/apa.cuh (v0.8.2, abe6994); change there first, then copy.
 // APA (adaptive-precision attention) prefill for sm_120a, host API (header-only). Pass 1: all-FP4 flash
 // attention; a KV tile whose share of the running row sum exceeds eps goes to pass 2 (exact FP16), merged by
 // log-sum-exp. Attention: hd 128 or 256, causal (q_offset = position of Q row 0), GQA (H % Hkv == 0). Q/O
@@ -14,8 +14,8 @@
 
 // Version of this header set (kekzl/apa); see CHANGELOG.md.
 #define APA_VERSION_MAJOR 0
-#define APA_VERSION_MINOR 6
-#define APA_VERSION_PATCH 1
+#define APA_VERSION_MINOR 8
+#define APA_VERSION_PATCH 2
 
 namespace apa {
 
@@ -168,10 +168,7 @@ inline size_t workspace_bytes(const Problem& p, bool own_kv = true, int win = WI
 // 1024-key chunk
 // (>= APA_PREP_SAMPLE chunks; 0: all chunks, exact head scales). Head scales x4, rounded up to powers of two
 // (as the KvState: equal tiles at restats). A 16-block past the UE4M3 range sets ovf: exact stats + every
-// tile again, gated.
-#ifndef APA_PREP_SAMPLE
-#define APA_PREP_SAMPLE 16
-#endif
+// tile again, gated. APA_PREP_SAMPLE default: apa_common.cuh.
 #ifndef APA_KV_HEADROOM  // head scales x this: later keys (KvState) or unsampled chunks up to 4x the seen
                          // maxima
 #define APA_KV_HEADROOM 4.f
