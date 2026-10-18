@@ -40,6 +40,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Release bar 2 (`bench-competitive`): Qwen3.8-27B Q4_K_M is a hero (6 of 8 contested), the non-hero Qwen3-30B-A3B row is gone; the sweep refuses on host 1-min load > nproc/4 instead of any running container.
 
 ### Fixed
+- Web UI: a heading directly above a markdown table became the table's first header cell and shifted every column; `---` / `***` / `___` rendered as text, now a rule. 3 new `markup_test.py` cases, all 3 fail on the old renderer.
+- `/metrics` `imp_gpu_energy_joules_total` counts from server start (driver counter minus its start value); it read the counter since driver load, 18.11 kWh on a 103 h WSL uptime, labelled "GPU energy total" in the Web UI.
 - The warmup KV re-plan (measured library reserve) never raised the ceiling of a pool with sparse-decode key min/max: Qwen3.8-27B NVFP4, 32 streams, ceiling 8396 -> 19063 blocks.
 - Control vectors on Gemma-3 edited only the FP16 copy of the residual; the FP32 accumulator the next layer adds to dropped the edit. Same path for SAE clamps: feature 451 at 20000 left the gemma-3-12b answer intact before, breaks it after.
 - Streaming `logprobs` (chat, `/v1/completions`) read `Request::output_logprobs` on the handler thread while the worker appended to it; a reallocation left the reader on freed memory. The worker now hands each token's copy over with the token. Qwen3-4B Q8_0: stream == non-stream, 97 and 120 tokens.

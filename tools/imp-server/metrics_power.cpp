@@ -20,8 +20,8 @@ using nvml_dev = void*;
 constexpr nvml_ret kNvmlSuccess = 0;
 constexpr auto kSamplePeriod = std::chrono::milliseconds(100);
 
-// One reader per process. Energy comes from the driver counter (mJ since driver load) where
-// the GPU reports it, else from integrating power.draw every 100 ms since the first scrape.
+// One reader per process, started with the server. Energy since that start: the driver counter
+// (mJ since driver load) minus its value then, else power.draw integrated every 100 ms.
 class GpuPower {
 public:
     static GpuPower& get() {
@@ -41,7 +41,7 @@ public:
             unsigned long long mj = 0;
             if (energy_mj_(dev_, &mj) != kNvmlSuccess)
                 return false;
-            joules = static_cast<double>(mj) / 1000.0;
+            joules = static_cast<double>(mj - base_mj_) / 1000.0;
         } else {
             std::lock_guard<std::mutex> lk(mu_);
             joules = integrated_j_;
@@ -78,10 +78,12 @@ private:
         if (power_mw_(dev_, &mw) != kNvmlSuccess)
             return;
         unsigned long long mj = 0;
-        if (energy && energy(dev_, &mj) == kNvmlSuccess)
+        if (energy && energy(dev_, &mj) == kNvmlSuccess) {
             energy_mj_ = energy;
-        else
+            base_mj_ = mj;
+        } else {
             sampler_ = std::thread([this] { sample_loop(); });
+        }
         ok_ = true;
     }
 
@@ -109,6 +111,7 @@ private:
     nvml_dev dev_ = nullptr;
     nvml_ret (*power_mw_)(nvml_dev, unsigned int*) = nullptr;
     nvml_ret (*energy_mj_)(nvml_dev, unsigned long long*) = nullptr;
+    unsigned long long base_mj_ = 0;
     std::mutex mu_;
     double integrated_j_ = 0.0;
     std::atomic<bool> stop_{false};
@@ -116,6 +119,8 @@ private:
 };
 
 }  // namespace
+
+void start_power_metrics() { GpuPower::get(); }
 
 void append_power_metrics(std::string& out) {
     double watts = 0.0, joules = 0.0;
@@ -126,7 +131,9 @@ void append_power_metrics(std::string& out) {
     out += "# TYPE imp_gpu_power_watts gauge\n";
     std::snprintf(buf, sizeof(buf), "imp_gpu_power_watts %.2f\n", watts);
     out += buf;
-    out += "# HELP imp_gpu_energy_joules_total Energy drawn by the serving GPU (NVML)\n";
+    out +=
+        "# HELP imp_gpu_energy_joules_total Energy drawn by the serving GPU since server start, all "
+        "processes (NVML)\n";
     out += "# TYPE imp_gpu_energy_joules_total counter\n";
     std::snprintf(buf, sizeof(buf), "imp_gpu_energy_joules_total %.3f\n", joules);
     out += buf;

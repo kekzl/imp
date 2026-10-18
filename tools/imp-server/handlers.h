@@ -433,7 +433,9 @@ void handle_metrics(const httplib::Request& req, httplib::Response& res, ServerS
 // Appends the per-tier memory gauges (I7) to a /metrics body. Lives in
 // metrics_memory.cpp.
 void append_memory_metrics(std::string& out, ServerState& state);
-// imp_gpu_power_watts / imp_gpu_energy_joules_total; nothing when NVML is absent.
+// imp_gpu_power_watts / imp_gpu_energy_joules_total; nothing when NVML is absent. Energy counts
+// from start_power_metrics() (server start).
+void start_power_metrics();
 void append_power_metrics(std::string& out);
 void handle_embeddings(const httplib::Request& req, httplib::Response& res, ServerState& state);
 

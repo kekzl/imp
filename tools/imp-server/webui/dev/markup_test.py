@@ -31,6 +31,12 @@ CASES = [
     ("prose over rule is not a table", "a | b\n---\nnext", lambda o: "<table>" not in o),
     ("table then text", "| A |\n|---|\n| 1 |\n\nafter", lambda o: "</table>" in o and "after" in o),
     ("heading", "## Title\nbody", lambda o: "<h4>Title</h4>" in o),
+    ("headings right above a table stay outside it",
+     "### 11. Fazit\n#### 11.1 Ab wann?\n| Kriterium | Wert |\n|---|---|\n| Strompreis | 30 ct |",
+     lambda o: "<h4>11.1 Ab wann?</h4><table>" in o
+     and "<thead><tr><th>Kriterium</th><th>Wert</th></tr></thead>" in o),
+    ("rule", "a\n\n---\n\nb", lambda o: "<hr>" in o and "---" not in o),
+    ("star rule", "a\n\n***\n\nb", lambda o: "<hr>" in o),
     ("inline math", "so $x^2 + \\alpha$ holds",
      lambda o: 'class="math"' in o and "<sup>2</sup>" in o and "α" in o),
     ("dollar amounts stay text", "costs $5 and $10 today",

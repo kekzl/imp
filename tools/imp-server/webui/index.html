@@ -332,6 +332,7 @@
   .body h4 { font-size: 14px; font-weight: 650; color: var(--text); margin: 16px 0 4px; }
   .body a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
   .body table { border-collapse: collapse; margin: 10px 0; font-size: 0.92em; white-space: normal; display: block; overflow-x: auto; max-width: 100%; }
+  .body hr { border: 0; border-top: 1px solid var(--line2); margin: 14px 0; }
   .body th, .body td { border: 1px solid var(--line2); padding: 4px 10px; text-align: left; }
   .body th { font-weight: 600; background: var(--surface); }
   .body code { font-family: var(--mono); font-size: 0.86em; background: var(--surface2); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
@@ -987,7 +988,7 @@
         <div class="meter" id="s-vram-meter" role="progressbar" aria-label="VRAM held" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
         <dt>VRAM peak</dt>          <dd id="s-vpeak" class="dim">-</dd>
         <div id="s-power-row" hidden><dt>GPU power</dt><dd id="s-power">-</dd></div>
-        <div id="s-energy-row" hidden><dt>GPU energy total</dt><dd id="s-energy" class="dim">-</dd></div>
+        <div id="s-energy-row" hidden title="whole card, every process on it"><dt>GPU energy since start</dt><dd id="s-energy" class="dim">-</dd></div>
       </dl>
       <svg class="spark-chart" id="s-power-spark" viewBox="0 0 280 64" preserveAspectRatio="none" role="img" aria-label="GPU power over the last polls" hidden></svg>
 
@@ -1816,10 +1817,13 @@ function markup(src) {
                      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')).join("");
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-  // The heading owns its margins, so the blank line after it is swallowed:
+  // Tables first: the heading swallows its newline and would join the header row (a heading
+  // directly above a table became its first cell).
+  s = tables(s);
+  // The heading and the rule own their margins, so the blank line after them is swallowed:
   // with white-space: pre-wrap it would otherwise double the gap.
   s = s.replace(/^#{1,6}[ \t]+(.+?)[ \t]*(?:\n+|$)/gm, "<h4>$1</h4>");
-  s = tables(s);
+  s = s.replace(/^[ \t]*(?:-[ \t]*){3,}(?:\n+|$)|^[ \t]*(?:\*[ \t]*){3,}(?:\n+|$)|^[ \t]*(?:_[ \t]*){3,}(?:\n+|$)/gm, "<hr>");
   s = s.replace(MATH_SLOT, (_, i) => maths[i]);
   s = s.replace(FENCE_SLOT, (_, i) => codeBlock(fences[i][0], fences[i][1]));
   return s;
