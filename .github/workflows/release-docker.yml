@@ -11,7 +11,7 @@ on:
         default: 'manual'
 
 permissions:
-  contents: read
+  contents: write  # gh release upload of the binary tarball
   packages: write
   id-token: write  # keyless cosign signing (Fulcio OIDC)
 
@@ -138,6 +138,51 @@ jobs:
           prov=$(docker buildx imagetools inspect "$IMAGE" --format '{{ json .Provenance }}')
           echo "SBOM ${#sbom} bytes, provenance ${#prov} bytes"
           [ "${#sbom}" -gt 100 ] && [ "${#prov}" -gt 100 ] || { echo "::error::SBOM or provenance missing on $IMAGE"; exit 1; }
+
+      # Binary tarball without Docker (roadmap row 55): the builder layers come from the gha cache.
+      - name: Build the release tarball
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: bundle
+          build-args: |
+            IMP_BUILD_BENCH=ON
+          outputs: type=local,dest=dist
+          cache-from: type=gha
+
+      # The runner has no driver: everything but libcuda.so.1 must resolve from the tarball's lib/.
+      - name: Check the release tarball
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c ./*.tar.gz.sha256
+          tar -xzf ./*.tar.gz
+          d=$(echo "$PWD"/imp-*-linux-x86_64)
+          for b in "$d"/libexec/*; do
+            deps=$("$d/lib/ld-linux-x86-64.so.2" --library-path "$d/lib" --list "$b")
+            outside=$(echo "$deps" | grep '=>' | grep -v -e "=> $d/lib/" -e '^\s*libcuda\.so\.1 => not found' || true)
+            [ -z "$outside" ] || { echo "::error::$b: not from lib/: $outside"; exit 1; }
+          done
+          [ -x "$d/bin/imp-server" ] || { echo "::error::no bin/imp-server launcher"; exit 1; }
+          rm -rf "$d"
+
+      - name: Sign the release tarball
+        env:
+          IDENTITY_RE: ^https://github\.com/${{ github.repository }}/\.github/workflows/release-docker\.yml@refs/(tags|heads)/
+        run: |
+          set -euo pipefail
+          for f in dist/*.tar.gz; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+            cosign verify-blob --bundle "$f.sigstore.json" \
+              --certificate-identity-regexp "$IDENTITY_RE" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com "$f"
+          done
+
+      - name: Attach the tarball to the release
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$TAG" dist/*.tar.gz dist/*.tar.gz.sha256 dist/*.sigstore.json --clobber
 
       # First-time package visibility must be flipped to public manually:
       # GitHub repo → Packages → imp → Package settings → Change visibility → Public.

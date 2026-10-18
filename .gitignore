@@ -2,6 +2,7 @@
 build/
 build-*/
 build-docker/
+dist/
 cmake-build-*/
 out/
 *.o

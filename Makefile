@@ -35,7 +35,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: bench-serve bench-serve-mock chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-quantize-repro test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
+.PHONY: bench-serve bench-serve-mock chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build bundle test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-quantize-repro test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -69,6 +69,10 @@ check-deps-online:
 # this tree (label imp.tree); IMP_FORCE_BUILD=1 builds anyway.
 build: check-deps
 	@bash scripts/build_image.sh $(DOCKER_IMG) $(BUILD_ARGS) $(DEP_ARGS)
+
+# Release tarball without Docker (scripts/bundle_release.sh): dist/imp-<version>-linux-x86_64.tar.gz.
+bundle: check-deps
+	docker build $(BUILD_ARGS) $(DEP_ARGS) --build-arg IMP_BUILD_BENCH=ON --target bundle -o dist .
 
 # ---------------------------------------------------------------------------
 # Fast inner loop (`make dev`) — incremental compile, seconds not minutes.
