@@ -16,7 +16,8 @@ class Engine;
 // every image and video frame, in that order, into one prefix-cache salt.
 size_t vision_parts_hash(ChatRequestParams& params);
 
-// Patchifies every part into snap.qwen_patches (a video adds one entry per frame pair), with
-// snap.qwen_image_tokens and snap.qwen_video_layouts. Returns "" or the 400 message.
+// Patchifies every part into snap.qwen_patches (a video adds one entry per frame pair; on InternVL
+// one image per frame), with snap.qwen_image_tokens, snap.qwen_video_layouts and
+// snap.video_frame_counts. Returns "" or the 400 message.
 std::string qwen_preprocess_vision_parts(imp::Engine& engine, const ChatRequestParams& params,
                                          ChatStateSnapshot& snap);

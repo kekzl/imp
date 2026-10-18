@@ -202,9 +202,10 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
                                       model_has_vision;
     }
     if (!ctx.params.videos.empty() && !(state.ctx && state.ctx->engine->has_qwen_vision())) {
-        send_json_error(res, 400, "invalid_request_error",
-                        "This model cannot take video parts: video input needs a Qwen3-VL checkpoint.",
-                        nullptr, "vision_unavailable");
+        send_json_error(
+            res, 400, "invalid_request_error",
+            "This model cannot take video parts: video input needs a Qwen3-VL or InternVL checkpoint.",
+            nullptr, "vision_unavailable");
         return false;
     }
 
@@ -406,7 +407,8 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         // Chat template renders one image pad per image before sizes are known (smart_resize runs
         // after). Placed on the first user turn (the position the parser reliably tracks), rendered,
         // then each placeholder expands to its real token count.
-        const std::string blocks = imp::vision_prompt_blocks(ctx.snap.vision_family, ctx.params.vision_order);
+        const std::string blocks = imp::vision_prompt_blocks(ctx.snap.vision_family, ctx.params.vision_order,
+                                                             ctx.snap.video_frame_counts);
         auto msgs = ctx.params.chat_msgs;
         for (auto& m : msgs)
             if (m.role == "user") {

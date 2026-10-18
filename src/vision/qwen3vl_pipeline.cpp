@@ -258,7 +258,7 @@ bool Qwen3VLPipeline::preprocess(std::span<const uint8_t> data, QwenPatches& out
 bool Qwen3VLPipeline::preprocess_video(std::span<const std::span<const uint8_t>> frames,
                                        std::vector<QwenPatches>& out) const {
     out.clear();
-    if (!tower_ || frames.empty() || tower_->config.is_internvl)  // InternVL video: not implemented
+    if (!tower_ || frames.empty() || tower_->config.is_internvl)  // InternVL video: image path
         return false;
     std::vector<DecodedImage> rgb(frames.size());
     int w0 = 0, h0 = 0;

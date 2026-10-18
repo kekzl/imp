@@ -59,7 +59,18 @@
      "<|im_start|>user\n<img><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT></"
      "img>\n<img><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT></"
      "img>\n<img><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT></img>\nDescribe.<|im_end|>"},
+    // InternVL video rows written from HF InternVLProcessor.replace_video_token ("\n".join of
+    // "Frame{i+1}: <img>...</img>") plus the template's "\n" after <video>, not from imp's output.
     {"internvl_vision", "video",
-     "error: video parts need a Qwen3-VL model; this InternVL model takes images only"},
+     "<|im_start|>user\nFrame1: <img><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT></img>\nFrame2: "
+     "<img><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT></img>\nFrame3: "
+     "<img><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT></img>\nFrame4: "
+     "<img><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT></img>\nDescribe.<|im_end|>"},
     {"internvl_vision", "image_video_text",
-     "error: video parts need a Qwen3-VL model; this InternVL model takes images only"},
+     "<|im_start|>user\n<img><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT></img>\nFrame1: "
+     "<img><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT></img>\nFrame2: "
+     "<img><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT></img>\n"
+     "Frame3: <img><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT></img>\nFrame4: "
+     "<img><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT></img>\n<img><IMG_CONTEXT><IMG_CONTEXT><IMG_CONTEXT></"
+     "img>\n"
+     "Describe.<|im_end|>"},

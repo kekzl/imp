@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -41,13 +42,18 @@ struct VisionPromptLayout {
     // true: each image_pad -> start + n x image_pad + end, n = first image's count (InternVL).
     // false: the k-th image_pad -> counts[k] x image_pad inside the block's own markers.
     bool wrap_each_image = false;
+    // Non-empty: a video renders as one image block per frame behind "<label><i>: " (InternVL,
+    // HF replace_video_token), its frames encoded as images.
+    std::string_view frame_label;
 };
 
 // None maps to the Qwen3-VL layout: a build without a tower renders no blocks.
 const VisionPromptLayout& vision_prompt_layout(VisionFamily f);
 
-// One block per part in `order` ('i' image, 'v' video), content order.
-std::string vision_prompt_blocks(VisionFamily f, std::string_view order);
+// One block per part in `order` ('i' image, 'v' video), content order. video_frames[k]: frames of
+// the k-th video, read only by a frame_label family.
+std::string vision_prompt_blocks(VisionFamily f, std::string_view order,
+                                 std::span<const int> video_frames = {});
 
 // Expands the rendered blocks in `tokens` to image_tokens (one count per image, prompt order) and
 // `videos`. Tokens untouched on refusal.
