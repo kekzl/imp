@@ -69,3 +69,16 @@ Gates on the tree: `make dev-test` 13/13, `make preflight` 0 failures, `make tes
 
 Question for the owner:
 - B-29f: keep the five stacked reserves (library 3900 + 4 % + 256 + 10 % floor + kv_fraction 0.8) or collapse them into one measured margin?
+
+## 2026-10-18 Batch 3: LM-head SfAtom, MXFP4 scales, topk, FFN graph churn
+
+Orchestrator: B-29a, B-24; validator (fresh agent): both PASS, `make dev-test` 13/13, `make preflight` 0 failures, anti-cheat clean.
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-29a | DONE 14b805e7 | Qwen3-14B-NVFP4 `gemm.nvfp4_lm_head=on`, `max_batch_size` 4: base "+47480 KiB SfAtom scales", fix borrows them; two concurrent temp-0 chats: base 1 == base 2 == fix 2 byte for byte, fix 1 differed by batching (n>1 CUTLASS head vs n==1 GEMV per step) |
+| B-29e | BLOCKED | no dense MXFP4 GGUF local; Qwen3.5-4B-mxfp4 is GDN and decodes through the FP16 fallback (8020 MiB), gpt-oss-20b is MoE |
+| B-24 | DONE (this commit) | `docs/audit/PERF_LOG.md` 2026-10-18: instantiates 396 -> 324, 72 updates, -53.7 ms; `FfnGraphCacheGpu.EvictedExecIsUpdatedForTheNextBucket` passes |
+| B-25 | OPEN, measured | topk_partial + topk_finalize 67.6 us per decode step, 2.3 % of GPU time at top-k 40 (PERF_LOG); the frame is a dynamically indexed array, not spills. Lever: radix-select partial, at most about 1.9 % decode |
+
+Validator notes kept: updates cost 0.12 ms each before and 0.02 ms after (unexplained, not gated); `spare_` keeps one exec per layer beyond eviction (graph execs without memory nodes).

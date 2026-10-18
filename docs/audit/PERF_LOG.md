@@ -4,6 +4,25 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-10-18 · FFN prefill graph cache reuses evicted execs via cudaGraphExecUpdate (BACKLOG B-24, C-029)
+
+Protocol: `imp-server` under `nsys -t cuda`, Qwen3-4B-Instruct-2507 Q8_0, `server.prefix_cache=false`, 40 serial chats with prompts of 308..2931 tokens, `max_tokens` 2; `nsys stats --report cuda_api_sum` over the whole run (startup included: 35 instantiates, 84 ms on an idle run).
+
+| | cudaGraphInstantiate | cudaGraphExecUpdate | cudaGraphExecDestroy | 40-request wall |
+|---|---:|---:|---:|---:|
+| before (b33e6114 tree) | 396 calls, 315.9 ms | 40, 4.7 ms | 396, 16.6 ms | 2864 ms |
+| after | 324 calls, 262.2 ms | 112, 2.2 ms | 324, 15.5 ms | 2766 ms |
+
+72 captures served by an update (-53.7 ms instantiate); wall is one run per arm, not a gated figure. Test: `FfnGraphCacheGpu.EvictedExecIsUpdatedForTheNextBucket`.
+
+---
+
+## 2026-10-18 · topk sampling kernels measured (BACKLOG B-25, C-031), no change
+
+Protocol: `imp-cli` under `nsys --cuda-graph-trace=node`, Qwen3-4B-Instruct-2507 Q8_0, temperature 0.8, top-k 40, top-p 0.95, 256 tokens. `topk_finalize_kernel` 256 calls, 35.5 us mean (1.2 % of GPU time); `topk_partial_kernel` 256 calls, 32.1 us mean (1.1 %). The 1056 B frame is the dynamically indexed `local_vals[SAMPLE_MAX_TOP_K]` / `local_idxs` (not spills); each of 16384 threads holds about 9 logits of 151936.
+
+---
+
 ## 2026-09-07 · KV block size as an operator key; the pool probes its own residency (AUDIT_ARCH_2026 B-5/B-6/B-7)
 
 Build: `make dev` (`build-dev/`, `imp:toolchain`), branch `mem/kv-block-size-residency` on 79e4cb1f.

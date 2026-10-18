@@ -34,6 +34,8 @@ public:
 
     [[nodiscard]] bool disabled() const { return disabled_; }
     [[nodiscard]] uint64_t replays() const { return replays_; }
+    // Captures served by cudaGraphExecUpdate of an evicted bucket's exec instead of an instantiate.
+    [[nodiscard]] uint64_t updates() const { return updates_; }
     [[nodiscard]] size_t graphs() const;
 
 private:
@@ -44,10 +46,15 @@ private:
     };
     void disable_(const char* what, cudaError_t err);
     void evict_oldest_bucket_();
+    cudaError_t instantiate_or_update_(int layer, cudaGraph_t graph, cudaGraphExec_t& exec);
     std::map<std::pair<int, int>, Entry> entries_;  // (rows, layer)
+    // One exec per layer from the last evicted bucket. Qwen3-4B Q8_0, 40 mixed-length prompts:
+    // 361 instantiates, 232 ms of 2864 ms wall; an update costs ~0.12 ms.
+    std::map<int, cudaGraphExec_t> spare_;
     uint64_t generation_ = 0;
     uint64_t clock_ = 0;
     uint64_t replays_ = 0;
+    uint64_t updates_ = 0;
     bool disabled_ = false;
 };
 
