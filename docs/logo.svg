@@ -28,8 +28,8 @@
       <stop offset="1" stop-color="#ff3b00" stop-opacity="0"/>
     </linearGradient>
     <radialGradient id="aura" cx="0.5" cy="0.5" r="0.5">
-      <stop offset="0" stop-color="#ff3b3b" stop-opacity="0.22"/>
-      <stop offset="1" stop-color="#ff3b3b" stop-opacity="0"/>
+      <stop offset="0" stop-color="#76b900" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#76b900" stop-opacity="0"/>
     </radialGradient>
     <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
       <feGaussianBlur stdDeviation="1.2" result="b"/>
@@ -45,6 +45,7 @@
   </defs>
 
   <rect width="600" height="260" rx="20" fill="#080808"/>
+  <rect x="1" y="1" width="598" height="258" rx="19" fill="none" stroke="#76b900" stroke-opacity="0.45" stroke-width="2"/>
   <ellipse cx="128" cy="120" rx="125" ry="115" fill="url(#aura)"/>
 
   <!-- The imp: WoW warlock's summoned imp. Big bald head and jaw, pointy ears, horn nubs,
