@@ -27,6 +27,7 @@ Commit range: main a6492284 (start) .. 09797f27, PRs #2777, #2778, #2779, #2780,
 | B-35 | InternVL3.5 video parts (HF `replace_video_token` layout): "A cat and red double decker buses." |
 | R-077 | closed: Gemma-4 overlay 256.48 tg vs MMVQ 116.85, no kernel unreachable without a knob |
 | R-119.1-119.3 | offload pass flat in width (188.6 ms at 1, 189.71 at 64); n-gram never gives up under offload; token recycling width 4 default there: Qwen3-14B Q6_K `--gpu-layers 0` prose 5.30 -> 6.18, code 6.85 -> 8.85 tok/s, greedy output byte-identical |
+| R-119.4 | multi-candidate verify 64 rows under offload (17 resident), offload width 4 -> 8: prose 6.12 -> 7.22, code 8.90 -> 9.80 tok/s, greedy server text identical to speculation off (1169 bytes) |
 | B-01..B-03, B-10, B-12, B-15..B-21, B-30, B-31 | already fixed on main; verified (green test, later ledger entry, commit or re-measurement) |
 
 ## Wontfix
@@ -54,7 +55,7 @@ Commit range: main a6492284 (start) .. 09797f27, PRs #2777, #2778, #2779, #2780,
 
 | ID | Next step |
 |---|---|
-| R-119.4-119.6 | width 8 recycling measured worse than 4 (6.09 vs 6.13 prose): lifting caps waits for a better tree drafter (119.5) |
+| R-119.5-119.6 | best-first tree drafter (SpecExec) on the 64-row offload budget; depth 7 adds nothing over depth 3 at width 8 (prose 7.22 both) |
 | R-065 | `mmq_imma_q8k128_kernel` at 30.9 / 31.6 % of the INT8 tensor peak: raise it |
 | R-049 | forced-width verify harness for widths 8..16, then a block drafter |
 | R-101 | rotation (MR-GPTQ) or sequential calibration after plain GPTQ (#2775) |

@@ -4,6 +4,22 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-10-18 · multi-candidate verify gets 64 rows under `--gpu-layers`, offload width 4 -> 8 (ROADMAP row 119.4)
+
+Protocol: Qwen3-14B Q6_K, `--gpu-layers 0`, `imp-cli --prompt ... --max-tokens 160 --temperature 0`, `speculative.recycle_width` / `recycle_depth` set per arm. Row budget width x (1 + depth): 17 resident, 64 under offload (`recycle_mc_shape`, `src/runtime/offload_spec_defaults.h`). The 119.2 width-8 arm (6.09 / 8.43) ran at depth 1 under the 17-row cap.
+
+| width, depth (rows) | prose tok/s | prose tok/verify | code tok/s | code tok/verify |
+|---|---:|---:|---:|---:|
+| 4, 3 (16, old default) | 6.12 | 1.38 | 8.90 | 2.22 |
+| 8, 3 (32, new default) | 7.22 | 1.79 | 9.80 | 2.43 |
+| 8, 7 (64) | 7.22 | 1.84 | 9.93 | 2.65 |
+| 4, 7 (32) | 6.41 | 1.52 | 9.15 | 2.40 |
+| 4, 15 (64) | 6.19 | 1.48 | 9.45 | 2.53 |
+
+ms per verify: 193.50 (4, 3) to 210.37 (4, 15).
+
+---
+
 ## 2026-10-18 · token recycling on by default under `--gpu-layers` (ROADMAP row 119.2)
 
 Protocol: Qwen3-14B Q6_K, `--gpu-layers 0`, `imp-cli --prompt ... --max-tokens 160 --temperature 0`.

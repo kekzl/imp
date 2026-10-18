@@ -38,6 +38,7 @@
 #include "memory/kv_cache_manager.h"
 #include "model/ngram_table.h"
 #include "runtime/engine.h"
+#include "runtime/offload_spec_defaults.h"
 #include "runtime/spec_trace.h"
 #include "runtime/ngram_draft.h"
 #include "runtime/request.h"
@@ -415,11 +416,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
                                  !model_->profile().is_moe && !model_->config().is_mla() &&
                                  !swa_sizing_active_ && !mc_refused && !mtp_spec_decode_enabled();
         if (draft.empty()) {
-            const int width = std::min(8, std::max(1, scfg.recycle_width));
-            // Row budget: width * (1 + depth) <= 17 (the mid capture bucket)
-            // keeps the per-row context walks at linear-chunk cost.
-            const int depth_cap = std::max(1, (17 / std::max(2, width)) - 1);
-            const int depth = std::min({std::max(1, scfg.recycle_depth), depth_cap, k});
+            const auto [width, depth] = recycle_mc_shape(scfg.recycle_width, scfg.recycle_depth, k,
+                                                         offload_mgr_ != nullptr);
             if (mc_route_ok && width > 1) {
                 auto cands = spec_recycle_table_().draft_candidates(
                     req->output_tokens.back(), width, depth);

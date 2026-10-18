@@ -1017,8 +1017,8 @@ k                    = 16
 # request; the cross-request warm table is the open question — see
 # docs/archive/PERF_AUDIT_2026_07_23.md).
 # Experimental, expires: 2026-12-31 (remove or promote by then).
-# Under --gpu-layers it turns on with recycle_width 4 unless set here: a verify costs one
-# streamed pass there (Qwen3-14B Q6_K --gpu-layers 0: prose 5.30 -> 6.13, code 6.85 -> 8.87 tok/s).
+# Under --gpu-layers it turns on with recycle_width 8 unless set here: a verify costs one
+# streamed pass there, flat to 64 rows (Qwen3-14B Q6_K --gpu-layers 0: prose 5.30 -> 7.22, code 6.85 -> 9.80 tok/s).
 token_recycling      = false
 recycle_slots        = 8
 recycle_depth        = 3
