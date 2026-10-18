@@ -41,7 +41,7 @@ void awq_apply_matrix(std::vector<uint16_t>& fp16, int64_t N, int64_t K, const s
             const float f = inv_d * c;
             if (f == 1.0f)
                 continue;
-            const size_t idx = static_cast<size_t>(i) * static_cast<size_t>(K) + static_cast<size_t>(j);
+            const size_t idx = (static_cast<size_t>(i) * static_cast<size_t>(K)) + static_cast<size_t>(j);
             fp16_set(fp16, idx, fp16_at(fp16, idx) * f);
         }
     }
@@ -63,19 +63,19 @@ bool awq_apply_vector_div(unsigned char* bytes, size_t n_elems, const std::strin
             continue;
         if (dtype == "F32") {
             float v;
-            std::memcpy(&v, bytes + i * 4, 4);
+            std::memcpy(&v, bytes + (i * 4), 4);
             v = awq_fold_norm_value(v, d, offset);
-            std::memcpy(bytes + i * 4, &v, 4);
+            std::memcpy(bytes + (i * 4), &v, 4);
         } else if (dtype == "F16") {
             uint16_t raw;
-            std::memcpy(&raw, bytes + i * 2, 2);
+            std::memcpy(&raw, bytes + (i * 2), 2);
             raw = float_to_half(awq_fold_norm_value(half_to_float(raw), d, offset));
-            std::memcpy(bytes + i * 2, &raw, 2);
+            std::memcpy(bytes + (i * 2), &raw, 2);
         } else {
             uint16_t raw;
-            std::memcpy(&raw, bytes + i * 2, 2);
+            std::memcpy(&raw, bytes + (i * 2), 2);
             raw = float_to_bf16(awq_fold_norm_value(bf16_to_float(raw), d, offset));
-            std::memcpy(bytes + i * 2, &raw, 2);
+            std::memcpy(bytes + (i * 2), &raw, 2);
         }
     }
     return true;

@@ -184,9 +184,9 @@ const SchemaNode* SchemaConstrainer::find_property(const SchemaNode* obj, const 
 // TOOL_CALL keys are ORDERED: "name" must be emitted before "arguments" so the
 // argument schema is bound before any argument content is generated (#1002).
 static bool tool_call_key_available(const std::string& key, const std::set<std::string>& emitted) {
-    if (!emitted.count("name"))
+    if (!emitted.contains("name"))
         return key == "name";
-    return key == "arguments" && !emitted.count("arguments");
+    return key == "arguments" && !emitted.contains("arguments");
 }
 
 
@@ -195,11 +195,11 @@ bool SchemaConstrainer::is_valid_key_prefix(const SchemaNode* obj, const std::st
     if (object_allows_additional(obj))
         return true;  // any key name is legal; nothing to prefix-match against
     for (auto& [name, _] : obj->properties) {
-        if (emitted.count(name))
+        if (emitted.contains(name))
             continue;
         if (obj->type == SchemaType::TOOL_CALL && !tool_call_key_available(name, emitted))
             continue;
-        if (name.size() >= prefix.size() && name.compare(0, prefix.size(), prefix) == 0)
+        if (name.size() >= prefix.size() && name.starts_with(prefix))
             return true;
     }
     return false;
@@ -208,7 +208,7 @@ bool SchemaConstrainer::is_valid_key_prefix(const SchemaNode* obj, const std::st
 bool SchemaConstrainer::is_valid_enum_prefix(const std::vector<std::string>& values,
                                              const std::string& prefix) const {
     for (auto& v : values) {
-        if (v.size() >= prefix.size() && v.compare(0, prefix.size(), prefix) == 0)
+        if (v.size() >= prefix.size() && v.starts_with(prefix))
             return true;
     }
     return false;
@@ -530,13 +530,12 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
                 cands = "\"";
                 for (const auto& [name, prop] : f.node->properties) {
                     (void)prop;
-                    if (f.emitted_keys.count(name))
+                    if (f.emitted_keys.contains(name))
                         continue;
                     if (f.node->type == SchemaType::TOOL_CALL &&
                         !tool_call_key_available(name, f.emitted_keys))
                         continue;
-                    if (name.size() > f.key_buffer.size() &&
-                        name.compare(0, f.key_buffer.size(), f.key_buffer) == 0)
+                    if (name.size() > f.key_buffer.size() && name.starts_with(f.key_buffer))
                         cands += name[f.key_buffer.size()];
                 }
                 break;
@@ -560,8 +559,7 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
                 if (!f.node)
                     return static_cast<int>(out.size());
                 for (const auto& v : f.node->enum_values) {
-                    if (v.size() < f.enum_buffer.size() ||
-                        v.compare(0, f.enum_buffer.size(), f.enum_buffer) != 0)
+                    if (v.size() < f.enum_buffer.size() || !v.starts_with(f.enum_buffer))
                         continue;
                     cands += v.size() == f.enum_buffer.size() ? '"' : v[f.enum_buffer.size()];
                 }
@@ -587,8 +585,7 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
                 if (!f.node)
                     return static_cast<int>(out.size());
                 for (const auto& v : f.node->enum_values) {
-                    if (v.size() < f.enum_buffer.size() ||
-                        v.compare(0, f.enum_buffer.size(), f.enum_buffer) != 0)
+                    if (v.size() < f.enum_buffer.size() || !v.starts_with(f.enum_buffer))
                         continue;
                     cands += v.size() == f.enum_buffer.size() ? '>' : v[f.enum_buffer.size()];
                 }
@@ -610,10 +607,9 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
                 cands = ">";
                 for (const auto& [name, prop] : tool->properties) {
                     (void)prop;
-                    if (f.emitted_keys.count(name))
+                    if (f.emitted_keys.contains(name))
                         continue;
-                    if (name.size() > f.key_buffer.size() &&
-                        name.compare(0, f.key_buffer.size(), f.key_buffer) == 0)
+                    if (name.size() > f.key_buffer.size() && name.starts_with(f.key_buffer))
                         cands += name[f.key_buffer.size()];
                 }
                 break;
@@ -634,7 +630,7 @@ int SchemaConstrainer::forced_text(std::string& out, int max_chars) const {
         int legal = 0;
         std::string seen;
         for (char c : cands) {
-            if (seen.find(c) != std::string::npos)
+            if (seen.contains(c))
                 continue;
             seen += c;
             std::vector<SchemaFrame> probe = stk;
@@ -802,7 +798,7 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                         if (f.node->type == SchemaType::TOOL_CALL &&
                             !tool_call_key_available(name, f.emitted_keys))
                             continue;
-                        if (!f.emitted_keys.count(name) && name == f.key_buffer) {
+                        if (!f.emitted_keys.contains(name) && name == f.key_buffer) {
                             complete = true;
                             break;
                         }
@@ -812,7 +808,7 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 // properties, non-empty, and not already emitted (a duplicate
                 // key is a desync whatever the schema says).
                 if (!complete && object_allows_additional(f.node) && !f.key_buffer.empty() &&
-                    !f.emitted_keys.count(f.key_buffer))
+                    !f.emitted_keys.contains(f.key_buffer))
                     complete = true;
                 if (!complete)
                     return false;
@@ -1168,21 +1164,21 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
                 return false;
             bool can_param = false;
             for (auto& [pname, _] : tool->properties) {
-                if (!f.emitted_keys.count(pname)) {
+                if (!f.emitted_keys.contains(pname)) {
                     can_param = true;
                     break;
                 }
             }
             bool can_close = true;
             for (auto& req : tool->required) {
-                if (!f.emitted_keys.count(req)) {
+                if (!f.emitted_keys.contains(req)) {
                     can_close = false;
                     break;
                 }
             }
             const std::string next = f.key_buffer + c;
-            const bool param_pfx = can_param && kXmlParamOpen.compare(0, next.size(), next) == 0;
-            const bool close_pfx = can_close && kXmlFnClose.compare(0, next.size(), next) == 0;
+            const bool param_pfx = can_param && kXmlParamOpen.starts_with(next);
+            const bool close_pfx = can_close && kXmlFnClose.starts_with(next);
             if (!param_pfx && !close_pfx)
                 return false;
             f.key_buffer = next;
@@ -1203,7 +1199,7 @@ bool SchemaConstrainer::sim_advance(std::vector<SchemaFrame>& stk, char c) const
             if (c == '>') {
                 bool complete = false;
                 for (auto& [pname, _] : tool->properties) {
-                    if (!f.emitted_keys.count(pname) && pname == f.key_buffer) {
+                    if (!f.emitted_keys.contains(pname) && pname == f.key_buffer) {
                         complete = true;
                         break;
                     }
@@ -1272,8 +1268,7 @@ bool SchemaConstrainer::enum_literal_step(std::vector<SchemaFrame>& stk, char c)
         f.enum_buffer += c;
         const bool member = std::find(lits.begin(), lits.end(), f.enum_buffer) != lits.end();
         if (member && std::none_of(lits.begin(), lits.end(), [&](const std::string& v) {
-                return v.size() > f.enum_buffer.size() &&
-                       v.compare(0, f.enum_buffer.size(), f.enum_buffer) == 0;
+                return v.size() > f.enum_buffer.size() && v.starts_with(f.enum_buffer);
             })) {
             stk.pop_back();  // complete and no member extends it: done, like LITERAL_VALUE
             sim_fixup_parent(stk);

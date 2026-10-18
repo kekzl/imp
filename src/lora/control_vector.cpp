@@ -72,7 +72,7 @@ bool parse_control_vector_gguf(std::span<const uint8_t> bytes, int d_model, int 
         const size_t nbytes = sizeof(float) * static_cast<size_t>(d_model);
         if (t.offset > bytes.size() - data_start || nbytes > bytes.size() - data_start - t.offset)
             return fail(err, "control vector: " + t.name + " data past end of file");
-        std::memcpy(out.dirs.data() + static_cast<size_t>(layer) * d_model,
+        std::memcpy(out.dirs.data() + (static_cast<size_t>(layer) * d_model),
                     bytes.data() + data_start + t.offset, nbytes);
         out.layer_mask[layer] = 1;
         ++found;

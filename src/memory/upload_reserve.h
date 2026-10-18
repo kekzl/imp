@@ -35,7 +35,7 @@ inline size_t upload_reserve_kv_bytes(const UploadReserve& r, int batch) {
 inline size_t upload_reserve_bytes(const UploadReserve& r, int batch) {
     const int slots = std::max(batch, 0) + std::max(r.reserved_state_slots, 0);
     return r.fixed_bytes + upload_reserve_kv_bytes(r, batch) +
-           r.state_bytes_per_slot * static_cast<size_t>(slots);
+           (r.state_bytes_per_slot * static_cast<size_t>(slots));
 }
 
 // Largest batch in [1, configured] with weights + reserve <= free, the test checked_cuda_malloc

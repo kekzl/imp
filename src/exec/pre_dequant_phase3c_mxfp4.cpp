@@ -131,7 +131,7 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
                 return;
             if (w.ndim < 2 || w.shape[1] % 32 != 0)
                 return;
-            if (wcache_->cutlass_mxfp4.count(w.data))
+            if (wcache_->cutlass_mxfp4.contains(w.data))
                 return;
             CutlassMxFP4Weight mw;
             if (unpack_mxfp4_gguf(w.data, w.shape[0], w.shape[1], mw, stream)) {

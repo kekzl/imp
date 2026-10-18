@@ -174,7 +174,7 @@ StableSpan<std::byte> BlockPool::block(int id) const {
     std::lock_guard<std::mutex> lock(mu_);
     if (!region_.valid() || id < 0 || id >= num_blocks_)
         return StableSpan<std::byte>();
-    auto* base = static_cast<std::byte*>(region_.base()) + static_cast<size_t>(id) * block_bytes_;
+    auto* base = static_cast<std::byte*>(region_.base()) + (static_cast<size_t>(id) * block_bytes_);
     return StableSpan<std::byte>(detail::StableKey{}, base, block_bytes_);
 }
 

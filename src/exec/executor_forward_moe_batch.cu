@@ -82,7 +82,7 @@ __global__ void moe_imbalance_kernel(const int32_t* __restrict__ offsets, unsign
     __syncthreads();
     if (threadIdx.x != 0)
         return;
-    unsigned int* slot = acc + static_cast<size_t>(layer) * 4;
+    unsigned int* slot = acc + (static_cast<size_t>(layer) * 4);
     atomicMax(&slot[0], static_cast<unsigned int>(s_max));
     atomicAdd(&slot[1], static_cast<unsigned int>(s_max));
     atomicAdd(&slot[2], static_cast<unsigned int>(s_total));
@@ -99,7 +99,7 @@ std::vector<GraphExecutor::MoeImbalance> GraphExecutor::moe_imbalance() const {
         return out;
     out.resize(moe_.imb_layers);
     for (int l = 0; l < moe_.imb_layers; ++l) {
-        const unsigned int* slot = raw.data() + static_cast<size_t>(l) * 4;
+        const unsigned int* slot = raw.data() + (static_cast<size_t>(l) * 4);
         out[l].peak_max = slot[0];
         out[l].launches = slot[3];
         if (slot[3] > 0) {
@@ -156,7 +156,7 @@ bool GraphExecutor::try_run_moe_nvfp4_dequant_batch_prefill_(int layer, cudaStre
 
         std::vector<const void*> b_ptrs(ctx.ne);
         for (int e = 0; e < ctx.ne; ++e)
-            b_ptrs[e] = buf + static_cast<size_t>(e) * expert_fp16_sz;
+            b_ptrs[e] = buf + (static_cast<size_t>(e) * expert_fp16_sz);
 
         gemm_moe_batched(a_base, c_base, h_offsets.data(), b_ptrs.data(), K_dim, N_dim, QType::F16,
                          ctx.ne, stream, moe_.d_work_ptrs);
@@ -385,8 +385,8 @@ bool GraphExecutor::try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int 
     // Step 2: Quantize gathered activations to Q8_1 (reuse batch dequant buf)
     int gate_up_elems = expanded * d;
     block_q8_1* q8_buf = reinterpret_cast<block_q8_1*>(moe_.batch_dequant_buf);
-    float* d8_buf = reinterpret_cast<float*>(
-        reinterpret_cast<char*>(q8_buf) + static_cast<size_t>(gate_up_elems / 32) * sizeof(block_q8_1));
+    float* d8_buf = reinterpret_cast<float*>(reinterpret_cast<char*>(q8_buf) +
+                                             (static_cast<size_t>(gate_up_elems / 32) * sizeof(block_q8_1)));
     quantize_fp16_to_q8_1(static_cast<const half*>(moe_.gathered.data), q8_buf, d8_buf,
                           gate_up_elems, stream);
 
@@ -410,8 +410,8 @@ bool GraphExecutor::try_run_moe_q4k_prefill(int layer, cudaStream_t stream, int 
 
     int down_elems = expanded * eff;
     block_q8_1* q8_down = reinterpret_cast<block_q8_1*>(moe_.batch_dequant_buf);
-    float* d8_down = reinterpret_cast<float*>(
-        reinterpret_cast<char*>(q8_down) + static_cast<size_t>(down_elems / 32) * sizeof(block_q8_1));
+    float* d8_down = reinterpret_cast<float*>(reinterpret_cast<char*>(q8_down) +
+                                              (static_cast<size_t>(down_elems / 32) * sizeof(block_q8_1)));
     quantize_fp16_to_q8_1(reinterpret_cast<const half*>(down_act), q8_down, d8_down,
                           down_elems, stream);
     fused_dp4a_for_qtype(down_qtype, ly.expert_down_packed.data, q8_down, d8_down,
@@ -470,7 +470,7 @@ bool GraphExecutor::try_run_moe_fp8_batch_prefill(int layer, cudaStream_t stream
         moe_host_args_ok_or_throw(cudaStreamSynchronize(stream), "fp8 batch prefill");
         std::vector<const void*> weight_ptrs(ne);
         for (int e = 0; e < ne; ++e)
-            weight_ptrs[e] = fp8_weights + static_cast<size_t>(e) * expert_fp8_sz;
+            weight_ptrs[e] = fp8_weights + (static_cast<size_t>(e) * expert_fp8_sz);
 
         gemm_moe_batched(fp8_acts, c_base_fp16, h_offsets.data(), weight_ptrs.data(), K_dim, N_dim,
                          QType::FP8_E4M3, ne, stream, moe_.d_work_ptrs, QType::F16,
@@ -566,7 +566,7 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
                     static_cast<int>(cols), stream);
         std::vector<const void*> b_ptrs(ne);
         for (int e = 0; e < ne; ++e)
-            b_ptrs[e] = dst + static_cast<size_t>(e) * expert_fp16_sz;
+            b_ptrs[e] = dst + (static_cast<size_t>(e) * expert_fp16_sz);
         gemm_moe_batched(a_base, c_base, offsets, b_ptrs.data(), K_dim, N_dim, QType::F16, ne, stream,
                          moe_.d_work_ptrs, out_dtype);
         if (tmp != nullptr) {
@@ -611,7 +611,7 @@ bool GraphExecutor::try_run_moe_fp16_batch_prefill(int layer, cudaStream_t strea
 __global__ void moe_expert_hist_kernel(const int32_t* __restrict__ expert_indices,
                                        unsigned int* __restrict__ hist, int n_decisions, int n_experts,
                                        int layer) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (i >= n_decisions)
         return;
     int e = expert_indices[i];
@@ -620,7 +620,7 @@ __global__ void moe_expert_hist_kernel(const int32_t* __restrict__ expert_indice
     // buffer is read as evidence.
     if (e < 0 || e >= n_experts)
         return;
-    atomicAdd(&hist[static_cast<size_t>(layer) * n_experts + e], 1u);
+    atomicAdd(&hist[(static_cast<size_t>(layer) * n_experts) + e], 1u);
 }
 
 // Per-token expert trace: one record per (token,layer) = [layer, e0..e_{k-1}],
@@ -990,7 +990,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
                 if (e < 0 || e >= packed.shape[0])
                     return false;
                 const char* host_ptr = static_cast<const char*>(packed.data) +
-                                       static_cast<size_t>(e) * expert_raw;
+                                       (static_cast<size_t>(e) * expert_raw);
                 ExpertCacheKey ck{packed.data, e};
                 void* p = expert_cache_.get_or_load(layer, proj, ck, host_ptr, expert_raw, stream);
                 if (!p)
@@ -998,7 +998,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
                 size_t flat = static_cast<size_t>(static_cast<char*>(p) -
                                                   static_cast<char*>(expert_cache_.pool_)) /
                               expert_cache_.slot_size_;
-                h_slots[off + k] = static_cast<int32_t>(flat) - layer * expert_cache_.slots_per_layer_;
+                h_slots[off + k] = static_cast<int32_t>(flat) - (layer * expert_cache_.slots_per_layer_);
             }
             return true;
         };
@@ -1008,9 +1008,9 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.d_slot_idx, h_slots.data(),
                                                h_slots.size() * sizeof(int32_t), cudaMemcpyHostToDevice,
                                                stream));
-            char* layer_pool = static_cast<char*>(expert_cache_.pool_) + static_cast<size_t>(layer) *
-                                                                             expert_cache_.slots_per_layer_ *
-                                                                             expert_cache_.slot_size_;
+            char* layer_pool = static_cast<char*>(expert_cache_.pool_) +
+                               (static_cast<size_t>(layer) * expert_cache_.slots_per_layer_ *
+                                expert_cache_.slot_size_);
             gate_base = up_base = down_base = layer_pool;
             gate_idx = moe_.d_slot_idx;
             up_idx = moe_.d_slot_idx + top_k;

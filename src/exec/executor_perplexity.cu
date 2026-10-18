@@ -42,7 +42,7 @@ __global__ void perplexity_nll_kernel(const float* __restrict__ logits,  // [csz
     int global_pos = chunk_start + row;   // position in the corpus
     if (global_pos >= n - 1)
         return;                           // last position has no target
-    const float* lg = logits + static_cast<int64_t>(row) * V;
+    const float* lg = logits + (static_cast<int64_t>(row) * V);
     int target = tokens[global_pos + 1];
 
     __shared__ float s_max;
@@ -126,7 +126,7 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
     const StorageTier lm_tier = lm_h ? lm_h->primary_tier : StorageTier::Undefined;
     auto lm_nvfp4_it = wcache_.nvfp4.find(model_->output_proj().data);
     const bool lm_nvfp4_secondary = (lm_nvfp4_it != wcache_.nvfp4.end());
-    const bool lm_has_fp8 = (wcache_.fp8.count(model_->output_proj().data) != 0);
+    const bool lm_has_fp8 = (wcache_.fp8.contains(model_->output_proj().data));
     const bool lm_is_nvfp4 = !lm_has_fp8 && ((lm_tier == StorageTier::NVFP4) || lm_nvfp4_secondary);
     // Raw-GGUF-quant LM head (tied-embedding Gemma Q4_K etc.): mirrors the
     // production use_dp4a_lm arm. Routing through gemm_via_handle_ at M=1 hits
@@ -198,11 +198,12 @@ void GraphExecutor::for_each_lm_head_batch_(int n_rows, cudaStream_t stream, boo
                         Tensor h_row = hc.slice(r0 + r, r0 + r + 1);
                         rmsnorm_quantize_q8_1(static_cast<const half*>(h_row.data),
                                               static_cast<const half*>(model_->output_norm().data),
-                                              q8 + (size_t)r * stride, qscratch_.d8_buf + (size_t)r * stride,
-                                              nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
+                                              q8 + ((size_t)r * stride),
+                                              qscratch_.d8_buf + ((size_t)r * stride), nullptr, cfg.d_model,
+                                              cfg.rms_norm_eps, stream, norm_w_off_);
                     }
                     gemv_dp4a_fp32_batched(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
-                                           static_cast<float*>(lg.data) + (size_t)r0 * cfg.vocab_size,
+                                           static_cast<float*>(lg.data) + ((size_t)r0 * cfg.vocab_size),
                                            cfg.vocab_size, cfg.d_model, rn, stride, stream);
                 }
             } else {
@@ -274,7 +275,7 @@ __global__ void rowwise_argmax_partial_kernel(const float* __restrict__ logits, 
     const int chunk = (V + kArgmaxSplits - 1) / kArgmaxSplits;
     const int begin = split * chunk;
     const int end = min(V, begin + chunk);
-    const float* lg = logits + static_cast<int64_t>(row) * V;
+    const float* lg = logits + (static_cast<int64_t>(row) * V);
     const int tid = threadIdx.x;
     float best = -FLT_MAX;
     int best_idx = 0;
@@ -301,8 +302,8 @@ __global__ void rowwise_argmax_partial_kernel(const float* __restrict__ logits, 
         __syncthreads();
     }
     if (tid == 0) {
-        pvals[row * kArgmaxSplits + split] = s_val[0];
-        pidxs[row * kArgmaxSplits + split] = s_idx[0];
+        pvals[(row * kArgmaxSplits) + split] = s_val[0];
+        pidxs[(row * kArgmaxSplits) + split] = s_idx[0];
     }
 }
 
@@ -310,14 +311,14 @@ __global__ void rowwise_argmax_partial_kernel(const float* __restrict__ logits, 
 __global__ void rowwise_argmax_reduce_kernel(const float* __restrict__ pvals,
                                              const int* __restrict__ pidxs, int n_rows,
                                              int32_t* __restrict__ out) {
-    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    const int row = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (row >= n_rows)
         return;
     float best = -FLT_MAX;
     int best_idx = 0;
     for (int s = 0; s < kArgmaxSplits; ++s) {
-        const float v = pvals[row * kArgmaxSplits + s];
-        const int i = pidxs[row * kArgmaxSplits + s];
+        const float v = pvals[(row * kArgmaxSplits) + s];
+        const int i = pidxs[(row * kArgmaxSplits) + s];
         if (v > best || (v == best && i < best_idx)) {
             best = v;
             best_idx = i;
@@ -331,7 +332,7 @@ __global__ void rowwise_argmax_reduce_kernel(const float* __restrict__ pvals,
 // once here amortizes the scan across all chunk rows).
 __global__ void verify_hist_count_kernel(const int32_t* __restrict__ hist, int n_hist, int V,
                                          int32_t* __restrict__ counts) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= V) return;
     int c = 0;
     for (int i = 0; i < n_hist; ++i)
@@ -348,14 +349,14 @@ __global__ void verify_penalties_kernel(float* __restrict__ logits, int row0, in
                                         const int32_t* __restrict__ counts,
                                         const int32_t* __restrict__ draft, float rep_pen,
                                         float freq_pen, float pres_pen) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= V) return;
     const int row = row0 + blockIdx.y;
     int count = counts[idx];
     for (int i = 0; i < row; ++i)
         if (draft[i] == idx) count++;
     if (count == 0) return;
-    float* lg = logits + static_cast<size_t>(blockIdx.y) * V + idx;
+    float* lg = logits + (static_cast<size_t>(blockIdx.y) * V) + idx;
     float logit = *lg;
     if (rep_pen != 1.0f) {
         if (logit > 0.0f)
@@ -405,7 +406,7 @@ bool GraphExecutor::ensure_verify_scratch(bool with_penalties) {
 
 namespace {
 size_t verify_sample_args_bytes(int rows) {
-    return (static_cast<size_t>(rows) * sizeof(TopkRowArgs) + 255) & ~size_t{255};
+    return ((static_cast<size_t>(rows) * sizeof(TopkRowArgs)) + 255) & ~size_t{255};
 }
 }  // namespace
 
@@ -419,7 +420,7 @@ bool GraphExecutor::ensure_verify_sample_scratch(int rows) {
     verify_sample_rows_cap_ = 0;
     verify_sample_scratch_ = VramOwned<char>(*vram_alloc_,
                                              verify_sample_args_bytes(rows) +
-                                                 static_cast<size_t>(rows) * SAMPLE_SCRATCH_BYTES,
+                                                 (static_cast<size_t>(rows) * SAMPLE_SCRATCH_BYTES),
                                              "verify_sample_rows");
     h_verify_sample_args_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(),
                                                   static_cast<size_t>(rows) * sizeof(TopkRowArgs));
@@ -447,7 +448,7 @@ void GraphExecutor::pick_verify_rows_(const Tensor& lg, int row0, int csz, int n
         const cudaError_t e = sample_verify_rows(static_cast<float*>(lg.data), csz, V, *verify_sampling_,
                                                  row0, h_verify_sample_args_.as<TopkRowArgs>() + row0,
                                                  d_args + row0,
-                                                 slots + static_cast<size_t>(row0) * SAMPLE_SCRATCH_BYTES,
+                                                 slots + (static_cast<size_t>(row0) * SAMPLE_SCRATCH_BYTES),
                                                  d_out + row0, stream);
         if (e == cudaSuccess)
             return;
@@ -456,7 +457,7 @@ void GraphExecutor::pick_verify_rows_(const Tensor& lg, int row0, int csz, int n
     }
     const int mb = max_logit_tokens_ > 0 ? max_logit_tokens_ : 1;
     float* pvals = static_cast<float*>(verify_argmax_scratch_);
-    int* pidxs = reinterpret_cast<int*>(pvals + static_cast<size_t>(mb) * kArgmaxSplits);
+    int* pidxs = reinterpret_cast<int*>(pvals + (static_cast<size_t>(mb) * kArgmaxSplits));
     dim3 grid(csz, kArgmaxSplits);
     rowwise_argmax_partial_kernel<<<grid, 256, 0, stream>>>(static_cast<const float*>(lg.data), V, pvals,
                                                             pidxs);
@@ -509,11 +510,11 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
         if (h_row_hist != nullptr && h_row_hist_n != nullptr && h_row_pens != nullptr) {
             for (int r = 0; r < csz; ++r) {
                 const int row = row0 + r;
-                const float* p = h_row_pens + static_cast<size_t>(row) * 3;
+                const float* p = h_row_pens + (static_cast<size_t>(row) * 3);
                 if (h_row_hist[row] != nullptr && h_row_hist_n[row] > 0 &&
                     (p[0] != 1.0f || p[1] != 0.0f || p[2] != 0.0f))
-                    apply_penalties(static_cast<float*>(lg.data) + static_cast<size_t>(r) * V, V, h_row_hist[row],
-                                    h_row_hist_n[row], p[0], p[1], p[2], stream);
+                    apply_penalties(static_cast<float*>(lg.data) + (static_cast<size_t>(r) * V), V,
+                                    h_row_hist[row], h_row_hist_n[row], p[0], p[1], p[2], stream);
             }
         }
         for (int r = 0; r < csz; ++r) {
@@ -521,13 +522,13 @@ void GraphExecutor::greedy_argmax_all(int n_rows, int32_t* d_out, cudaStream_t s
             const int32_t* ban = alt ? d_banned_alt : d_banned;
             const int nb = alt ? n_banned_alt : n_banned;
             if (ban != nullptr && nb > 0)
-                launch_ban_logits(static_cast<float*>(lg.data) + static_cast<size_t>(r) * V, ban, nb, V,
+                launch_ban_logits(static_cast<float*>(lg.data) + (static_cast<size_t>(r) * V), ban, nb, V,
                                   stream);
         }
         pick_verify_rows_(lg, row0, csz, n_rows, d_out, stream);
         if (d_topm && topm > 0)
             rowwise_topm(static_cast<const float*>(lg.data), csz, V, topm,
-                         d_topm + static_cast<int64_t>(row0) * topm, stream);
+                         d_topm + (static_cast<int64_t>(row0) * topm), stream);
     });
 }
 
@@ -542,10 +543,11 @@ bool GraphExecutor::lm_head_rows_argmax(const void* d_rows, int n_rows, int32_t*
     if (!ensure_verify_scratch(/*with_penalties=*/false))
         return false;
     float* pvals = static_cast<float*>(verify_argmax_scratch_);
-    int* pidxs = reinterpret_cast<int*>(pvals + static_cast<size_t>(mb) * kArgmaxSplits);
+    int* pidxs = reinterpret_cast<int*>(pvals + (static_cast<size_t>(mb) * kArgmaxSplits));
     for (int c = 0; c < n_rows; c += mb) {
         const int csz = std::min(mb, n_rows - c);
-        const void* rows = static_cast<const char*>(d_rows) + static_cast<size_t>(c) * cfg.d_model * sizeof(half);
+        const void* rows = static_cast<const char*>(d_rows) +
+                           (static_cast<size_t>(c) * cfg.d_model * sizeof(half));
         Tensor lg = view_tokens(logits_, csz);
         quantize_fp16_to_nvfp4_cutlass(rows, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, csz, cfg.d_model,
                                        stream);
@@ -568,10 +570,10 @@ void GraphExecutor::project_logits_all(int n_rows, float* d_out, cudaStream_t st
     // allow_cutlass=false: same batch=1 verify-path reasoning as greedy_argmax_all.
     for_each_lm_head_batch_(n_rows, stream, /*allow_cutlass=*/false,
                             [&](const Tensor& lg, int row0, int csz) {
-                                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
-                                    d_out + static_cast<size_t>(row0) * V, lg.data,
-                                    static_cast<size_t>(csz) * V * sizeof(float),
-                                    cudaMemcpyDeviceToDevice, stream));
+                                IMP_CUDA_CHECK_LOG(
+                                    cudaMemcpyAsync(d_out + (static_cast<size_t>(row0) * V), lg.data,
+                                                    static_cast<size_t>(csz) * V * sizeof(float),
+                                                    cudaMemcpyDeviceToDevice, stream));
                             });
 }
 

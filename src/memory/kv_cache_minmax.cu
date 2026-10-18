@@ -101,11 +101,11 @@ bool KVCache::commit_minmax_(int from, int to) {
     if (!ok)
         return false;
     for (int l = 0; l < n_layers_ && to > from; l++) {
-        char* dst = static_cast<char*>(minmax_pool_) + l * stride + from * minmax_block_bytes_;
+        char* dst = static_cast<char*>(minmax_pool_) + (l * stride) + (from * minmax_block_bytes_);
         IMP_CUDA_CHECK_LOG(cudaMemset(dst, 0, static_cast<size_t>(to - from) * minmax_block_bytes_));
     }
     if (to > from)
-        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(0));
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(nullptr));
     return true;
 }
 
@@ -115,7 +115,7 @@ void* KVCache::key_minmax_ptr(int layer, int block_id) {
               "Build it with the normal constructor if the test needs bytes.");
     if (!minmax_pool_)
         return nullptr;
-    size_t offset = (static_cast<size_t>(layer) * max_blocks_ + static_cast<size_t>(block_id)) *
+    size_t offset = ((static_cast<size_t>(layer) * max_blocks_) + static_cast<size_t>(block_id)) *
                     minmax_block_bytes_;
     return static_cast<char*>(minmax_pool_) + offset;
 }

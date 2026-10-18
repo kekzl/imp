@@ -105,6 +105,9 @@ public:
 
     // Remove a pointer from gpu_allocations_ tracking (does not free).
     void release_gpu_allocation(void* ptr);
+    // Untrack, async free and mark dropped_source (the pointer stays a cache key): the one free
+    // site for source weights nothing reads any more (Phases 4b/4c, the encoder).
+    void free_source_weight(Tensor& t, cudaStream_t stream);
 
     // Return true if `ptr` is a BASE pointer tracked in gpu_allocations_
     // (1:1 with a cudaMallocAsync), false if it's an offset into a shared

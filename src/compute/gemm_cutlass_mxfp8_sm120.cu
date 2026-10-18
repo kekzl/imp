@@ -11,6 +11,7 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstdint>
 
 #include "cutlass/cutlass.h"
@@ -84,7 +85,7 @@ __device__ __host__ __forceinline__ int mx8_sfatom_offset(int row, int k_group, 
     const int k_local = k_group % kMx8AtomKGroups;
     const int n0 = row_local % 32;
     const int n1 = row_local / 32;
-    return (tile_row * n_k_tiles + tile_k) * kMx8AtomSize + n0 * 16 + n1 * 4 + k_local;
+    return (((tile_row * n_k_tiles) + tile_k) * kMx8AtomSize) + (n0 * 16) + (n1 * 4) + k_local;
 }
 
 size_t cutlass_mxfp8_sf_size(int rows, int K) {
@@ -103,10 +104,8 @@ __device__ __forceinline__ uint8_t mx8_scale_ue8m0(float absmax) {
     int e = static_cast<int>((bits >> 23) & 0xFF);
     if (bits & 0x7FFFFF)
         e++;  // ceil to the next power of two
-    if (e < 1)
-        e = 1;
-    if (e > 254)
-        e = 254;
+    e = std::max(e, 1);
+    e = std::min(e, 254);
     return static_cast<uint8_t>(e);
 }
 
@@ -125,13 +124,13 @@ __device__ __forceinline__ uint16_t mx8_pack_e4m3_pair(float v0, float v1) {
 __global__ void quantize_fp16_mxfp8_cutlass_kernel(const half* __restrict__ input, uint8_t* __restrict__ out,
                                                    uint8_t* __restrict__ sf_out, int rows, int K,
                                                    int n_k_tiles) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     const int K_groups = K / kMx8SFVecSize;
     if (idx >= rows * K_groups)
         return;
     const int row = idx / K_groups;
     const int k_group = idx % K_groups;
-    const size_t base = static_cast<size_t>(row) * K + static_cast<size_t>(k_group) * kMx8SFVecSize;
+    const size_t base = (static_cast<size_t>(row) * K) + (static_cast<size_t>(k_group) * kMx8SFVecSize);
 
     float vals[kMx8SFVecSize];
     float absmax = 0.0f;
@@ -143,8 +142,8 @@ __global__ void quantize_fp16_mxfp8_cutlass_kernel(const half* __restrict__ inpu
 #pragma unroll
         for (int j = 0; j < 4; j++) {
             const float2 f = __half22float2(h[j]);
-            vals[v * 8 + j * 2] = f.x;
-            vals[v * 8 + j * 2 + 1] = f.y;
+            vals[(v * 8) + (j * 2)] = f.x;
+            vals[(v * 8) + (j * 2) + 1] = f.y;
             absmax = fmaxf(absmax, fmaxf(fabsf(f.x), fabsf(f.y)));
         }
     }
@@ -157,8 +156,8 @@ __global__ void quantize_fp16_mxfp8_cutlass_kernel(const half* __restrict__ inpu
 #pragma unroll
     for (int w = 0; w < 8; w++) {
         const uint32_t lo = mx8_pack_e4m3_pair(vals[static_cast<ptrdiff_t>(w * 4)] * inv,
-                                               vals[w * 4 + 1] * inv);
-        const uint32_t hi = mx8_pack_e4m3_pair(vals[w * 4 + 2] * inv, vals[w * 4 + 3] * inv);
+                                               vals[(w * 4) + 1] * inv);
+        const uint32_t hi = mx8_pack_e4m3_pair(vals[(w * 4) + 2] * inv, vals[(w * 4) + 3] * inv);
         words[w] = lo | (hi << 16);
     }
     uint4* dst = reinterpret_cast<uint4*>(out + base);
@@ -186,7 +185,7 @@ void quantize_fp16_to_mxfp8_cutlass(const void* src_fp16, void* dst_data, void* 
 __global__ void mxfp8_sf_from_row_scales_kernel(const float* __restrict__ row_scales,
                                                 uint8_t* __restrict__ sf, float* __restrict__ col_scale,
                                                 int rows, int K_groups, int n_k_tiles) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= rows * K_groups)
         return;
     const int row = idx / K_groups;
@@ -222,7 +221,7 @@ void mxfp8_sf_from_row_scales(const float* row_scales, void* dst_sf, float* dst_
 // D[m, n] *= col_scale[n], 8 halves per thread (N % 8 == 0).
 __global__ void mxfp8_scale_cols_kernel(half* __restrict__ d, const float* __restrict__ col_scale, int M,
                                         int N) {
-    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     const int64_t n8 = N / 8;
     if (idx >= static_cast<int64_t>(M) * n8)
         return;
@@ -241,13 +240,13 @@ __global__ void dequantize_mxfp8_cutlass_fp16_kernel(const uint8_t* __restrict__
                                                      const uint8_t* __restrict__ sf,
                                                      const float* __restrict__ row_scale,
                                                      half* __restrict__ out, int rows, int K, int n_k_tiles) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     const int K_groups = K / kMx8SFVecSize;
     if (idx >= rows * K_groups)
         return;
     const int row = idx / K_groups;
     const int k_group = idx % K_groups;
-    const size_t base = static_cast<size_t>(row) * K + static_cast<size_t>(k_group) * kMx8SFVecSize;
+    const size_t base = (static_cast<size_t>(row) * K) + (static_cast<size_t>(k_group) * kMx8SFVecSize);
     const float s = mx8_ue8m0_to_float(sf[mx8_sfatom_offset(row, k_group, n_k_tiles)]) *
                     (row_scale ? row_scale[row] : 1.0f);
     const uint4* src = reinterpret_cast<const uint4*>(data + base);
@@ -262,10 +261,10 @@ __global__ void dequantize_mxfp8_cutlass_fp16_kernel(const uint8_t* __restrict__
 #pragma unroll
             for (int j = 0; j < 8; j++) {
                 __nv_fp8_e4m3 e;
-                *reinterpret_cast<uint8_t*>(&e) = b[h * 8 + j];
+                *reinterpret_cast<uint8_t*>(&e) = b[(h * 8) + j];
                 o[j] = __float2half(static_cast<float>(e) * s);
             }
-            dst[v * 2 + h] = *reinterpret_cast<const uint4*>(o);
+            dst[(v * 2) + h] = *reinterpret_cast<const uint4*>(o);
         }
     }
 }

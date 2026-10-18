@@ -11,6 +11,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <cfloat>
 
 namespace imp {
@@ -60,8 +61,8 @@ __device__ __forceinline__ void load_v_tokens(const uint8_t* __restrict__ V_lane
 #pragma unroll
     for (int i = 0; i < TOK; i++) {
         const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
-        vw[i] = load_packed<PACK>(V_lane + static_cast<int64_t>(ti) * kv_slot_stride);
-        vs[i] = __ldg(V_sc_lane + static_cast<int64_t>(ti) * sc_slot_stride);
+        vw[i] = load_packed<PACK>(V_lane + (static_cast<int64_t>(ti) * kv_slot_stride));
+        vs[i] = __ldg(V_sc_lane + (static_cast<int64_t>(ti) * sc_slot_stride));
     }
 }
 
@@ -78,8 +79,8 @@ __device__ __forceinline__ void nvfp4_block_multitok_gqa(
     constexpr int PACK = ELEMS / 2;
     // #2218 bounded: kv_head * kv_head_bytes <= kMaxHeads * 128 = 2^19, kv_head * sc_groups <= kMaxHeads
     // * 16 = 2^16 (model_limits.h:24; callers pass HEAD_DIM / 2, / 16; HEAD_DIM <= 256 by refusal :353).
-    const uint8_t* K_lane = K_block + static_cast<ptrdiff_t>(kv_head * kv_head_bytes) + lane_offset / 2;
-    const uint8_t* V_lane = V_block + static_cast<ptrdiff_t>(kv_head * kv_head_bytes) + lane_offset / 2;
+    const uint8_t* K_lane = K_block + static_cast<ptrdiff_t>(kv_head * kv_head_bytes) + (lane_offset / 2);
+    const uint8_t* V_lane = V_block + static_cast<ptrdiff_t>(kv_head * kv_head_bytes) + (lane_offset / 2);
     const uint8_t* K_sc_lane = K_sc_block + static_cast<ptrdiff_t>(kv_head * sc_groups) + lane_group;
     const uint8_t* V_sc_lane = V_sc_block + static_cast<ptrdiff_t>(kv_head * sc_groups) + lane_group;
     for (int t = first_tok; t < n_tok; t += TOK) {
@@ -88,8 +89,8 @@ __device__ __forceinline__ void nvfp4_block_multitok_gqa(
 #pragma unroll
         for (int i = 0; i < TOK; i++) {
             const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);  // clamped, masked below
-            kw[i] = load_packed<PACK>(K_lane + static_cast<int64_t>(ti) * kv_slot_stride);
-            ks[i] = __ldg(K_sc_lane + static_cast<int64_t>(ti) * sc_slot_stride);
+            kw[i] = load_packed<PACK>(K_lane + (static_cast<int64_t>(ti) * kv_slot_stride));
+            ks[i] = __ldg(K_sc_lane + (static_cast<int64_t>(ti) * sc_slot_stride));
         }
         uint32_t vw[TOK];
         uint8_t vs[TOK];
@@ -167,7 +168,7 @@ __device__ __forceinline__ void nvfp4_block_multitok_gqa(
             for (int b = 0; b < PACK; b++) {
                 const float2 f = __half22float2(fp4_pair_to_half2((vw[i] >> (8 * b)) & 0xFF));
                 vf[2 * b] = f.x;
-                vf[2 * b + 1] = f.y;
+                vf[(2 * b) + 1] = f.y;
             }
 #pragma unroll
             for (int h = 0; h < HPC; h++) {
@@ -191,7 +192,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_nvfp4_mu
     const int batch_idx = blockIdx.x;
     const int groups_per_kv = n_q_per_kv / HPC;
     const int kv_head = blockIdx.y / groups_per_kv;
-    const int head0 = kv_head * n_q_per_kv + (blockIdx.y % groups_per_kv) * HPC;
+    const int head0 = (kv_head * n_q_per_kv) + ((blockIdx.y % groups_per_kv) * HPC);
     const int ctx_len = context_lens[batch_idx];
     if (ctx_len <= 0)
         return;
@@ -205,7 +206,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_nvfp4_mu
     for (int h = 0; h < HPC; h++)
         load_q_half2<HEAD_DIM>(Q, batch_idx, head0 + h, n_heads, lane_offset, q_h2[h]);
 
-    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
+    const int* bt = block_tables + ((int64_t)batch_idx * max_num_blocks);
     const int kv_head_bytes = HEAD_DIM / 2;
     const int kv_slot_stride = n_kv_heads * kv_head_bytes;
     const int kv_block_stride = block_size * kv_slot_stride;
@@ -231,10 +232,10 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_nvfp4_mu
         if (tok_start + n_tok > ctx_len)
             n_tok = ctx_len - tok_start;
         const int first_tok = (tok_start < effective_start) ? (effective_start - tok_start) : 0;
-        nvfp4_block_multitok_gqa<HEAD_DIM, 4, HPC>(K_cache + (int64_t)phys * kv_block_stride,
-                                                   V_cache + (int64_t)phys * kv_block_stride,
-                                                   K_scales + (int64_t)phys * sc_block_stride,
-                                                   V_scales + (int64_t)phys * sc_block_stride, first_tok,
+        nvfp4_block_multitok_gqa<HEAD_DIM, 4, HPC>(K_cache + ((int64_t)phys * kv_block_stride),
+                                                   V_cache + ((int64_t)phys * kv_block_stride),
+                                                   K_scales + ((int64_t)phys * sc_block_stride),
+                                                   V_scales + ((int64_t)phys * sc_block_stride), first_tok,
                                                    n_tok, kv_slot_stride, sc_slot_stride, kv_head_bytes,
                                                    sc_groups, kv_head, lane_offset, lane_group, q_h2, scale,
                                                    softcap, st);
@@ -263,7 +264,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_nvfp4_mu
     const int batch_idx = blockIdx.x;
     const int groups_per_kv = n_q_per_kv / HPC;
     const int kv_head = blockIdx.y / groups_per_kv;
-    const int head0 = kv_head * n_q_per_kv + (blockIdx.y % groups_per_kv) * HPC;
+    const int head0 = (kv_head * n_q_per_kv) + ((blockIdx.y % groups_per_kv) * HPC);
     const int split_idx = blockIdx.z;
     const int ctx_len = context_lens[batch_idx];
     if (ctx_len <= 0)
@@ -280,10 +281,9 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_nvfp4_mu
     const int num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
     const int total_blocks = num_ctx_blocks - first_block;
     const int blocks_per_split = (total_blocks + num_splits - 1) / num_splits;
-    const int split_start = first_block + split_idx * blocks_per_split;
+    const int split_start = first_block + (split_idx * blocks_per_split);
     int split_end = split_start + blocks_per_split;
-    if (split_end > num_ctx_blocks)
-        split_end = num_ctx_blocks;
+    split_end = std::min(split_end, num_ctx_blocks);
     if (split_start >= split_end) {
 #pragma unroll
         for (int h = 0; h < HPC; h++)
@@ -297,7 +297,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_nvfp4_mu
     for (int h = 0; h < HPC; h++)
         load_q_half2<HEAD_DIM>(Q, batch_idx, head0 + h, n_heads, lane_offset, q_h2[h]);
 
-    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
+    const int* bt = block_tables + ((int64_t)batch_idx * max_num_blocks);
     const int kv_head_bytes = HEAD_DIM / 2;
     const int kv_slot_stride = n_kv_heads * kv_head_bytes;
     const int kv_block_stride = block_size * kv_slot_stride;
@@ -317,10 +317,10 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_nvfp4_mu
         if (tok_start + n_tok > ctx_len)
             n_tok = ctx_len - tok_start;
         const int first_tok = (tok_start < effective_start) ? (effective_start - tok_start) : 0;
-        nvfp4_block_multitok_gqa<HEAD_DIM, 4, HPC>(K_cache + (int64_t)phys * kv_block_stride,
-                                                   V_cache + (int64_t)phys * kv_block_stride,
-                                                   K_scales + (int64_t)phys * sc_block_stride,
-                                                   V_scales + (int64_t)phys * sc_block_stride, first_tok,
+        nvfp4_block_multitok_gqa<HEAD_DIM, 4, HPC>(K_cache + ((int64_t)phys * kv_block_stride),
+                                                   V_cache + ((int64_t)phys * kv_block_stride),
+                                                   K_scales + ((int64_t)phys * sc_block_stride),
+                                                   V_scales + ((int64_t)phys * sc_block_stride), first_tok,
                                                    n_tok, kv_slot_stride, sc_slot_stride, kv_head_bytes,
                                                    sc_groups, kv_head, lane_offset, lane_group, q_h2, scale,
                                                    softcap, st);
@@ -344,8 +344,8 @@ void launch_gqa(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache, c
                 const int* context_lens, int batch_size, int n_heads, int n_kv_heads, int n_q_per_kv,
                 int block_size, float scale, int max_num_blocks, int num_splits, int sliding_window,
                 float softcap, const half* attn_sinks, cudaStream_t stream) {
-    const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 +
-                              static_cast<int64_t>(NUM_WARPS) * HEAD_DIM * sizeof(float);
+    const size_t smem_bytes = (NUM_WARPS * sizeof(float) * 2) +
+                              (static_cast<int64_t>(NUM_WARPS) * HEAD_DIM * sizeof(float));
     dim3 block(BLOCK_THREADS);
     const int groups = n_kv_heads * (n_q_per_kv / HPC);
     if (num_splits > 1) {

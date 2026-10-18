@@ -46,15 +46,15 @@ __global__ void __launch_bounds__(128, 2) gemm_q6k_moe_fused_kernel(const uint8_
         return;
 
     // My output column
-    const int n_col = blockIdx.x * FUSED_WARPS_PER_CTA + warp_id;
+    const int n_col = (blockIdx.x * FUSED_WARPS_PER_CTA) + warp_id;
     if (n_col >= N)
         return;
 
     // Weight row pointer for this expert and output column
     const int blocks_per_row = K / Q6K_BLOCK_ELEMS;
     const size_t row_bytes = static_cast<size_t>(blocks_per_row) * Q6K_BLOCK_BYTES;
-    const uint8_t* w_row = packed_weight + static_cast<size_t>(expert) * weight_stride +
-                           static_cast<size_t>(n_col) * row_bytes;
+    const uint8_t* w_row = packed_weight + (static_cast<size_t>(expert) * weight_stride) +
+                           (static_cast<size_t>(n_col) * row_bytes);
 
     // Shared memory layout: smem_qs[TILE_M][q8_per_row][32] int8_t (Q8_1 quantized values),
     // smem_d8[TILE_M][q8_per_row] float (Q8_1 block scales). Stored as flat int8_t arrays, not
@@ -81,19 +81,19 @@ __global__ void __launch_bounds__(128, 2) gemm_q6k_moe_fused_kernel(const uint8_
                 const int tok = m_start + m_base + mi;
 
                 // Load Q8_1 block: copy qs[32] and d8 scale
-                const block_q8_1& src = q8_base[tok * q8_per_row + qi];
+                const block_q8_1& src = q8_base[(tok * q8_per_row) + qi];
                 // Copy 32 bytes of qs data — use memcpy for source because
                 // block_q8_1::qs is at offset 4 in a 36-byte struct (not 16-byte aligned).
                 // Destination in smem IS 32-byte aligned so int4 store is safe.
                 int4* dst_qs = reinterpret_cast<int4*>(smem_qs +
-                                                       static_cast<ptrdiff_t>((mi * q8_per_row + qi) * 32));
+                                                       static_cast<ptrdiff_t>(((mi * q8_per_row) + qi) * 32));
                 int4 tmp0, tmp1;
                 memcpy(&tmp0, src.qs, 16);
                 memcpy(&tmp1, src.qs + 16, 16);
                 dst_qs[0] = tmp0;
                 dst_qs[1] = tmp1;
 
-                smem_d8[mi * q8_per_row + qi] = d8_base[tok * q8_per_row + qi];
+                smem_d8[(mi * q8_per_row) + qi] = d8_base[(tok * q8_per_row) + qi];
             }
         }
         __syncthreads();
@@ -109,17 +109,17 @@ __global__ void __launch_bounds__(128, 2) gemm_q6k_moe_fused_kernel(const uint8_
             const int g = q8_idx % 8;
 
             // Pre-load Q6K weight data into registers
-            const uint8_t* bp = w_row + static_cast<size_t>(q6k_blk) * Q6K_BLOCK_BYTES;
+            const uint8_t* bp = w_row + (static_cast<size_t>(q6k_blk) * Q6K_BLOCK_BYTES);
             const float d_w = __half2float(*reinterpret_cast<const half*>(bp + 208));
 
-            const int ql_base = (g / 4) * 64 + (g % 2) * 32;
+            const int ql_base = ((g / 4) * 64) + ((g % 2) * 32);
             const int is_high = ((g % 4) >= 2);
             const int qh_base_off = (g < 4) ? 0 : 32;
             const int qh_shift = (g % 4) * 2;
 
             const int8_t* sc_ptr = reinterpret_cast<const int8_t*>(bp + 192);
-            const int8_t sc0 = sc_ptr[2 * g + 0];
-            const int8_t sc1 = sc_ptr[2 * g + 1];
+            const int8_t sc0 = sc_ptr[(2 * g) + 0];
+            const int8_t sc1 = sc_ptr[(2 * g) + 1];
 
             // Pre-load Q6K ql and qh values for this group
             uint32_t ql_reg[8], qh_reg[8];
@@ -127,16 +127,16 @@ __global__ void __launch_bounds__(128, 2) gemm_q6k_moe_fused_kernel(const uint8_
             for (int sb = 0; sb < 2; sb++) {
 #pragma unroll
                 for (int d4 = 0; d4 < 4; d4++) {
-                    const int k = sb * 16 + d4 * 4;
-                    memcpy(&ql_reg[sb * 4 + d4], bp + ql_base + k, 4);
-                    memcpy(&qh_reg[sb * 4 + d4], bp + 128 + qh_base_off + k, 4);
+                    const int k = (sb * 16) + (d4 * 4);
+                    memcpy(&ql_reg[(sb * 4) + d4], bp + ql_base + k, 4);
+                    memcpy(&qh_reg[(sb * 4) + d4], bp + 128 + qh_base_off + k, 4);
                 }
             }
 
             // M-loop: process each token using Q8_1 from shared memory
             for (int mi = 0; mi < m_count; mi++) {
                 // Read Q8_1 from shared memory (no L2 traffic!)
-                const int8_t* qs_ptr = smem_qs + static_cast<ptrdiff_t>((mi * q8_per_row + q8_idx) * 32);
+                const int8_t* qs_ptr = smem_qs + static_cast<ptrdiff_t>(((mi * q8_per_row) + q8_idx) * 32);
                 int xqs[8];
                 const int4* qs_v = reinterpret_cast<const int4*>(qs_ptr);
                 int4 v0 = qs_v[0];
@@ -144,7 +144,7 @@ __global__ void __launch_bounds__(128, 2) gemm_q6k_moe_fused_kernel(const uint8_
                 memcpy(&xqs[0], &v0, 16);
                 memcpy(&xqs[4], &v1, 16);
 
-                const float dq = smem_d8[mi * q8_per_row + q8_idx];
+                const float dq = smem_d8[(mi * q8_per_row) + q8_idx];
 
                 // dp4a with pre-loaded Q6K weights — sub-block 0
                 {
@@ -186,7 +186,7 @@ __global__ void __launch_bounds__(128, 2) gemm_q6k_moe_fused_kernel(const uint8_
         if (lane == 0) {
             for (int mi = 0; mi < m_count; mi++) {
                 const int tok = m_start + m_base + mi;
-                c_base[static_cast<size_t>(tok) * N + n_col] = __float2half(acc[mi]);
+                c_base[(static_cast<size_t>(tok) * N) + n_col] = __float2half(acc[mi]);
             }
         }
 

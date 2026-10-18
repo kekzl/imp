@@ -68,7 +68,7 @@ bool Engine::kv_swap_out_(Request& req) {
     auto st = std::make_shared<KvSwapState>();
     st->n_blocks = static_cast<int>(blocks.size());
     st->descs_offset = align16(blocks.size() * per_block);
-    const size_t bytes = st->descs_offset + n_descs * sizeof(KVCache::CopyDesc);
+    const size_t bytes = st->descs_offset + (n_descs * sizeof(KVCache::CopyDesc));
     st->image = PinnedBuffer::acquire(cuda_host_pinned_allocator(), bytes, HostPinnedKind::Mapped);
     if (!st->image || st->image.device() == nullptr) {
         IMP_LOG_WARN("KV swap: %zu MiB pinned host for seq %d unavailable", bytes >> 20, req.id);

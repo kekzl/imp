@@ -8,9 +8,7 @@ bool ends_with(std::string_view s, std::string_view suffix) {
     return s.size() >= suffix.size() && s.substr(s.size() - suffix.size()) == suffix;
 }
 
-bool contains(std::string_view s, std::string_view needle) {
-    return s.find(needle) != std::string_view::npos;
-}
+bool contains(std::string_view s, std::string_view needle) { return s.contains(needle); }
 
 // MLA latent down-projections (kv_a_proj_with_mqa, q_lora q_a_proj): precision-sensitive, FP16 tier.
 bool is_mla_down_proj(std::string_view n) {
@@ -33,8 +31,8 @@ TensorKind match_tensor_kind(std::string_view name) {
         return TensorKind::FFN_NORM;
 
     // Per-layer tensors: "blk.N." prefix, "layers.N." prefix, or "model.layers.N." prefix
-    const bool is_layer = (name.substr(0, 4) == "blk." || name.substr(0, 7) == "layers." ||
-                           name.substr(0, 13) == "model.layers.");
+    const bool is_layer = (name.starts_with("blk.") || name.starts_with("layers.") ||
+                           name.starts_with("model.layers."));
     if (!is_layer)
         return TensorKind::UNKNOWN;
 

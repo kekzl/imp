@@ -23,12 +23,12 @@
 // once per prefill chunk so chunked inputs pool correctly.
 __global__ void hidden_pool_sum_kernel(const __half* __restrict__ hidden, int n_tokens, int d_model,
                                        float* __restrict__ out) {
-    int d = blockIdx.x * blockDim.x + threadIdx.x;
+    int d = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (d >= d_model)
         return;
     float acc = 0.0f;
     for (int t = 0; t < n_tokens; t++)
-        acc += __half2float(hidden[(size_t)t * d_model + d]);
+        acc += __half2float(hidden[((size_t)t * d_model) + d]);
     out[d] = acc;
 }
 
@@ -38,7 +38,7 @@ __global__ void hidden_pool_sum_kernel(const __half* __restrict__ hidden, int n_
 __global__ __launch_bounds__(256) void ban_logits_kernel(float* __restrict__ logits,
                                                          const int32_t* __restrict__ banned_ids, int n_banned,
                                                          int vocab_size) {
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n_banned; i += gridDim.x * blockDim.x) {
+    for (int i = (blockIdx.x * blockDim.x) + threadIdx.x; i < n_banned; i += gridDim.x * blockDim.x) {
         int32_t tid = banned_ids[i];
         if (tid >= 0 && tid < vocab_size)
             logits[tid] = -1e30f;
@@ -53,7 +53,7 @@ __global__ __launch_bounds__(256) void ban_logits_if_kernel(float* __restrict__ 
                                                             const int* __restrict__ d_active) {
     if (*d_active == 0)
         return;
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n_banned; i += gridDim.x * blockDim.x) {
+    for (int i = (blockIdx.x * blockDim.x) + threadIdx.x; i < n_banned; i += gridDim.x * blockDim.x) {
         int32_t tid = banned_ids[i];
         if (tid >= 0 && tid < vocab_size)
             logits[tid] = -1e30f;

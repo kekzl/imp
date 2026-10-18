@@ -82,20 +82,20 @@ __device__ __forceinline__ void load_stage(half* stage, const PrefillArgs& args,
     // #2218 bounded: r < max(kBM, NPAD) <= 128 (NPAD template 32..128, :311): r * kBK < 128 * 32 = 4096
     for (int c = threadIdx.x; c < kBM * kChunksPerRow; c += kThreads) {
         const int r = c / kChunksPerRow;
-        const int kc = (c - r * kChunksPerRow) * kChunkHalves;
+        const int kc = (c - (r * kChunksPerRow)) * kChunkHalves;
         const int gr = row0 + r;
         const bool valid = gr < args.M;
-        const half* src = args.A + static_cast<size_t>(valid ? gr : 0) * args.K + k0 + kc;
+        const half* src = args.A + (static_cast<size_t>(valid ? gr : 0) * args.K) + k0 + kc;
         cp_async_cg16_zero(As + static_cast<ptrdiff_t>(r * kBK) + kc, src, valid);
     }
     for (int c = threadIdx.x; c < NPAD * kChunksPerRow; c += kThreads) {
         const int r = c / kChunksPerRow;
-        const int kc = (c - r * kChunksPerRow) * kChunkHalves;
+        const int kc = (c - (r * kChunksPerRow)) * kChunkHalves;
         const bool valid = r < args.n_total;
         const bool p1 = r >= args.N[0];
         const half* base = p1 ? args.W[1] : args.W[0];
         const int wr = valid ? (p1 ? r - args.N[0] : r) : 0;
-        const half* src = (valid ? base : args.W[0]) + static_cast<size_t>(wr) * args.K + k0 + kc;
+        const half* src = (valid ? base : args.W[0]) + (static_cast<size_t>(wr) * args.K) + k0 + kc;
         cp_async_cg16_zero(Ws + static_cast<ptrdiff_t>(r * kBK) + kc, src, valid);
     }
 }
@@ -173,15 +173,15 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_prefill_kernel(Prefi
     if (args.split == 1) {
         for (int o = lane; o < 16 * nt; o += 32) {
             const int r = o / nt;
-            const int c = o - r * nt;
-            const int m = row0 + warp * 16 + r;
+            const int c = o - (r * nt);
+            const int m = row0 + (warp * 16) + r;
             if (m >= M)
                 continue;
             const bool p1 = c >= N0;
             half* C = args.C[p1 ? 1 : 0];
             const int N = args.N[p1 ? 1 : 0];
-            C[static_cast<size_t>(m) * N + (p1 ? c - N0 : c)] = __float2half_rn(
-                tile[(warp * 16 + r) * NPAD + c]);
+            C[(static_cast<size_t>(m) * N) + (p1 ? c - N0 : c)] = __float2half_rn(
+                tile[(((warp * 16) + r) * NPAD) + c]);
         }
         return;
     }
@@ -189,11 +189,11 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_prefill_kernel(Prefi
     float* ws = args.ws;
     for (int o = lane; o < 16 * nt; o += 32) {
         const int r = o / nt;
-        const int c = o - r * nt;
-        const int m = row0 + warp * 16 + r;
+        const int c = o - (r * nt);
+        const int m = row0 + (warp * 16) + r;
         if (m >= M)
             continue;
-        ws[(static_cast<size_t>(ks) * M + m) * nt + c] = tile[(warp * 16 + r) * NPAD + c];
+        ws[(((static_cast<size_t>(ks) * M) + m) * nt) + c] = tile[(((warp * 16) + r) * NPAD) + c];
     }
 }
 
@@ -204,18 +204,18 @@ __global__ void __launch_bounds__(kReduceThreads) gemm_f16_narrow_prefill_reduce
     const int M = args.M;
     const int nt = args.n_total;
     const int nt4 = nt >> 2;
-    const int o = blockIdx.x * kReduceThreads + threadIdx.x;
+    const int o = (blockIdx.x * kReduceThreads) + threadIdx.x;
     if (o >= M * nt4)
         return;
     const int m = o / nt4;
-    const int c = (o - m * nt4) * 4;
+    const int c = (o - (m * nt4)) * 4;
     const float* ws = args.ws;
     float4 p[kMaxSplit];
 #pragma unroll
     for (int k2 = 0; k2 < kMaxSplit; ++k2)
-        p[k2] = (k2 < args.split)
-                    ? __ldcg(reinterpret_cast<const float4*>(&ws[(static_cast<size_t>(k2) * M + m) * nt + c]))
-                    : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        p[k2] = (k2 < args.split) ? __ldcg(reinterpret_cast<const float4*>(
+                                        &ws[(((static_cast<size_t>(k2) * M) + m) * nt) + c]))
+                                  : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
     float4 sum = p[0];
 #pragma unroll
     for (int k2 = 1; k2 < kMaxSplit; ++k2) {
@@ -231,7 +231,7 @@ __global__ void __launch_bounds__(kReduceThreads) gemm_f16_narrow_prefill_reduce
     const bool p1 = c >= N0;
     half* C = args.C[p1 ? 1 : 0];
     const int N = args.N[p1 ? 1 : 0];
-    half2* dst = reinterpret_cast<half2*>(C + static_cast<size_t>(m) * N + (p1 ? c - N0 : c));
+    half2* dst = reinterpret_cast<half2*>(C + (static_cast<size_t>(m) * N) + (p1 ? c - N0 : c));
     dst[0] = __floats2half2_rn(sum.x, sum.y);
     dst[1] = __floats2half2_rn(sum.z, sum.w);
 }

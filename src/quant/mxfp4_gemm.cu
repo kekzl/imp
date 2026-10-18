@@ -75,12 +75,12 @@ __device__ __forceinline__ float gemv_mxfp4_row(const uint8_t* __restrict__ row_
     for (int gi = tid; gi < n_groups; gi += kKparThreads) {
         // Load 16 bytes as uint4 (128-bit coalesced)
         uint4 packed4 = *reinterpret_cast<const uint4*>(row_packed +
-                                                        static_cast<int64_t>(gi) * kMxGroupBytes);
+                                                        (static_cast<int64_t>(gi) * kMxGroupBytes));
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed4);
         float scale = ue8m0_to_float(row_scales[gi]);
         // Two micro-blocks of 8 bytes (16 nibbles) each, shared scale
         float dot0 = dot_micro_block(pb, x, gi * kMxGroupSize);
-        float dot1 = dot_micro_block(pb + 8, x, gi * kMxGroupSize + 16);
+        float dot1 = dot_micro_block(pb + 8, x, (gi * kMxGroupSize) + 16);
         acc = __fmaf_rn(dot0 + dot1, scale, acc);
     }
     return acc;
@@ -94,7 +94,7 @@ __device__ __forceinline__ float warp_k_loop(const uint8_t* __restrict__ row_pac
     float acc = 0.0f;
     for (int gi = lane; gi < n_groups; gi += 32) {
         uint4 packed4 = *reinterpret_cast<const uint4*>(row_packed +
-                                                        static_cast<int64_t>(gi) * kMxGroupBytes);
+                                                        (static_cast<int64_t>(gi) * kMxGroupBytes));
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed4);
         float scale = ue8m0_to_float(row_scales[gi]);
         acc = __fmaf_rn(dot_fn(pb, gi * kMxGroupSize), scale, acc);
@@ -150,8 +150,8 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_kpar_kernel(
     const int tid = threadIdx.x;
     const int n_groups = K / kMxGroupSize;
     __shared__ SmemKpar smem;
-    float acc = gemv_mxfp4_row(packed_data + (int64_t)row * (K / 2), linear_scales + (int64_t)row * n_groups,
-                               x, n_groups, tid);
+    float acc = gemv_mxfp4_row(packed_data + ((int64_t)row * (K / 2)),
+                               linear_scales + ((int64_t)row * n_groups), x, n_groups, tid);
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0)
         y[row] = __float2half(total);
@@ -166,8 +166,8 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_kpar_fp32_kernel(
     const int tid = threadIdx.x;
     const int n_groups = K / kMxGroupSize;
     __shared__ SmemKpar smem;
-    float acc = gemv_mxfp4_row(packed_data + (int64_t)row * (K / 2), linear_scales + (int64_t)row * n_groups,
-                               x, n_groups, tid);
+    float acc = gemv_mxfp4_row(packed_data + ((int64_t)row * (K / 2)),
+                               linear_scales + ((int64_t)row * n_groups), x, n_groups, tid);
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0)
         y[row] = total;
@@ -189,7 +189,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_mxfp4_multirow_kernel(
     if (row >= N || warp_id >= NR)
         return;
 
-    float acc = warp_k_loop(packed_data + (int64_t)row * K_half, linear_scales + (int64_t)row * n_groups,
+    float acc = warp_k_loop(packed_data + ((int64_t)row * K_half), linear_scales + ((int64_t)row * n_groups),
                             n_groups, lane, [&] __device__(const uint8_t* pb, int elem_base) {
                                 return dot_micro_block(pb, x, elem_base) +
                                        dot_micro_block(pb + 8, x, elem_base + 16);
@@ -212,7 +212,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_mxfp4_multirow_fp32_kernel(
     if (row >= N || warp_id >= NR)
         return;
 
-    float acc = warp_k_loop(packed_data + (int64_t)row * K_half, linear_scales + (int64_t)row * n_groups,
+    float acc = warp_k_loop(packed_data + ((int64_t)row * K_half), linear_scales + ((int64_t)row * n_groups),
                             n_groups, lane, [&] __device__(const uint8_t* pb, int elem_base) {
                                 return dot_micro_block(pb, x, elem_base) +
                                        dot_micro_block(pb + 8, x, elem_base + 16);
@@ -234,8 +234,8 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_residual_kernel(
     const int tid = threadIdx.x;
     const int n_groups = K / kMxGroupSize;
     __shared__ SmemKpar smem;
-    float acc = gemv_mxfp4_row(packed_data + (int64_t)row * (K / 2), linear_scales + (int64_t)row * n_groups,
-                               x, n_groups, tid);
+    float acc = gemv_mxfp4_row(packed_data + ((int64_t)row * (K / 2)),
+                               linear_scales + ((int64_t)row * n_groups), x, n_groups, tid);
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0)
         y[row] = __float2half(total + __half2float(residual[row]));
@@ -262,18 +262,18 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_qkv_kernel(
     int row;
     if (global_row < q_rows) {
         row = global_row;
-        packed = q_packed + (int64_t)row * K_half;
-        scales = q_scales + (int64_t)row * n_groups;
+        packed = q_packed + ((int64_t)row * K_half);
+        scales = q_scales + ((int64_t)row * n_groups);
         y_out = yq;
     } else if (global_row < q_rows + k_rows) {
         row = global_row - q_rows;
-        packed = k_packed + (int64_t)row * K_half;
-        scales = k_scales + (int64_t)row * n_groups;
+        packed = k_packed + ((int64_t)row * K_half);
+        scales = k_scales + ((int64_t)row * n_groups);
         y_out = yk;
     } else if (global_row < q_rows + k_rows + v_rows) {
         row = global_row - q_rows - k_rows;
-        packed = v_packed + (int64_t)row * K_half;
-        scales = v_scales + (int64_t)row * n_groups;
+        packed = v_packed + ((int64_t)row * K_half);
+        scales = v_scales + ((int64_t)row * n_groups);
         y_out = yv;
     } else {
         return;
@@ -304,13 +304,13 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_gate_up_kernel(
     int row;
     if (global_row < rows) {
         row = global_row;
-        packed = g_packed + (int64_t)row * K_half;
-        scales = g_scales + (int64_t)row * n_groups;
+        packed = g_packed + ((int64_t)row * K_half);
+        scales = g_scales + ((int64_t)row * n_groups);
         y_out = yg;
     } else if (global_row < rows * 2) {
         row = global_row - rows;
-        packed = u_packed + (int64_t)row * K_half;
-        scales = u_scales + (int64_t)row * n_groups;
+        packed = u_packed + ((int64_t)row * K_half);
+        scales = u_scales + ((int64_t)row * n_groups);
         y_out = yu;
     } else {
         return;
@@ -368,16 +368,16 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_swiglu_residual_k
     init_lut(s_lut, tid);
     __syncthreads();
 
-    const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
-    const uint8_t* row_scales = linear_scales + (int64_t)row * n_groups;
+    const uint8_t* row_packed = packed_data + ((int64_t)row * K_half);
+    const uint8_t* row_scales = linear_scales + ((int64_t)row * n_groups);
     float acc = 0.0f;
     for (int gi = tid; gi < n_groups; gi += kKparThreads) {
         uint4 packed4 = *reinterpret_cast<const uint4*>(row_packed +
-                                                        static_cast<int64_t>(gi) * kMxGroupBytes);
+                                                        (static_cast<int64_t>(gi) * kMxGroupBytes));
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed4);
         float scale = ue8m0_to_float(row_scales[gi]);
         float dot0 = dot_micro_block_swiglu(pb, gate, up, gi * kMxGroupSize, s_lut);
-        float dot1 = dot_micro_block_swiglu(pb + 8, gate, up, gi * kMxGroupSize + 16, s_lut);
+        float dot1 = dot_micro_block_swiglu(pb + 8, gate, up, (gi * kMxGroupSize) + 16, s_lut);
         acc = __fmaf_rn(dot0 + dot1, scale, acc);
     }
     float total = reduce_kpar(acc, tid, warp_sums);
@@ -402,8 +402,8 @@ __device__ __forceinline__ float dot_micro_block_geglu(const uint8_t* __restrict
         const half2 uh = *reinterpret_cast<const half2*>(up + elem_base + static_cast<ptrdiff_t>(b * 2));
         const float2 gf = __half22float2(gh);
         const float2 uf = __half22float2(uh);
-        float g0 = gf.x * 0.5f * (1.0f + tanhf(SQRT_2_PI * (gf.x + COEFF * gf.x * gf.x * gf.x)));
-        float g1 = gf.y * 0.5f * (1.0f + tanhf(SQRT_2_PI * (gf.y + COEFF * gf.y * gf.y * gf.y)));
+        float g0 = gf.x * 0.5f * (1.0f + tanhf(SQRT_2_PI * (gf.x + (COEFF * gf.x * gf.x * gf.x))));
+        float g1 = gf.y * 0.5f * (1.0f + tanhf(SQRT_2_PI * (gf.y + (COEFF * gf.y * gf.y * gf.y))));
         acc = __fmaf_rn(s_lut[pb[b] & 0x0F], g0 * uf.x, acc);
         acc = __fmaf_rn(s_lut[pb[b] >> 4], g1 * uf.y, acc);
     }
@@ -426,16 +426,16 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_mxfp4_geglu_residual_ke
     init_lut(s_lut, tid);
     __syncthreads();
 
-    const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
-    const uint8_t* row_scales = linear_scales + (int64_t)row * n_groups;
+    const uint8_t* row_packed = packed_data + ((int64_t)row * K_half);
+    const uint8_t* row_scales = linear_scales + ((int64_t)row * n_groups);
     float acc = 0.0f;
     for (int gi = tid; gi < n_groups; gi += kKparThreads) {
         uint4 packed4 = *reinterpret_cast<const uint4*>(row_packed +
-                                                        static_cast<int64_t>(gi) * kMxGroupBytes);
+                                                        (static_cast<int64_t>(gi) * kMxGroupBytes));
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed4);
         float scale = ue8m0_to_float(row_scales[gi]);
         float dot0 = dot_micro_block_geglu(pb, gate, up, gi * kMxGroupSize, s_lut);
-        float dot1 = dot_micro_block_geglu(pb + 8, gate, up, gi * kMxGroupSize + 16, s_lut);
+        float dot1 = dot_micro_block_geglu(pb + 8, gate, up, (gi * kMxGroupSize) + 16, s_lut);
         acc = __fmaf_rn(dot0 + dot1, scale, acc);
     }
     float total = reduce_kpar(acc, tid, warp_sums);

@@ -128,7 +128,7 @@ IMP_REGISTER_CUDA_STATIC_RESET(nvfp4_gemm_reset_static_cuda_state);
 // accumulates and writes FP32; gemm_nvfp4's contract is an FP16 C).
 __global__ void nvfp4_fp32_to_fp16_kernel(const float* __restrict__ in, __half* __restrict__ out,
                                           int64_t n) {
-    int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i < n)
         out[i] = __float2half(in[i]);
 }

@@ -67,8 +67,8 @@ __global__ void dequant_q6k_v2_kernel(const uint8_t* __restrict__ src, half* __r
     if (blk_id >= total_blocks)
         return;
 
-    const uint8_t* bp = src + static_cast<int64_t>(blk_id) * 210;
-    half2* out = reinterpret_cast<half2*>(dst + static_cast<int64_t>(blk_id) * 256);
+    const uint8_t* bp = src + (static_cast<int64_t>(blk_id) * 210);
+    half2* out = reinterpret_cast<half2*>(dst + (static_cast<int64_t>(blk_id) * 256));
 
     // Super-block scale — same for all 256 elements.
     // All threads in the block read the same address; hits L1 cache.
@@ -97,7 +97,7 @@ __global__ void dequant_q6k_v2_kernel(const uint8_t* __restrict__ src, half* __r
 
 __global__ void dequant_q8_0_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                     int cols) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t total = static_cast<int64_t>(rows) * cols;
     if (idx >= total)
         return;
@@ -108,7 +108,7 @@ __global__ void dequant_q8_0_kernel(const uint8_t* __restrict__ src, half* __res
     int i = col % 32;
     int blocks_per_row = cols / 32;
 
-    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 34;
+    const uint8_t* block_ptr = src + (static_cast<int64_t>((row * blocks_per_row) + blk) * 34);
     half d_val = *reinterpret_cast<const half*>(block_ptr);
     int8_t q = reinterpret_cast<const int8_t*>(block_ptr + 2)[i];
 
@@ -122,7 +122,7 @@ __global__ void dequant_q8_0_kernel(const uint8_t* __restrict__ src, half* __res
 
 __global__ void dequant_q8k_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                    int cols) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t total = static_cast<int64_t>(rows) * cols;
     if (idx >= total)
         return;
@@ -133,7 +133,7 @@ __global__ void dequant_q8k_kernel(const uint8_t* __restrict__ src, half* __rest
     int i = col % 256;
     int blocks_per_row = cols / 256;
 
-    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 292;
+    const uint8_t* block_ptr = src + (static_cast<int64_t>((row * blocks_per_row) + blk) * 292);
     float d_val;
     memcpy(&d_val, block_ptr, 4);
     int8_t q = reinterpret_cast<const int8_t*>(block_ptr + 4)[i];
@@ -147,7 +147,7 @@ __global__ void dequant_q8k_kernel(const uint8_t* __restrict__ src, half* __rest
 
 __global__ void dequant_q4_0_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                     int cols) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t total = static_cast<int64_t>(rows) * cols;
     if (idx >= total)
         return;
@@ -158,7 +158,7 @@ __global__ void dequant_q4_0_kernel(const uint8_t* __restrict__ src, half* __res
     int i = col % 32;
     int blocks_per_row = cols / 32;
 
-    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 18;
+    const uint8_t* block_ptr = src + (static_cast<int64_t>((row * blocks_per_row) + blk) * 18);
     half d_val = *reinterpret_cast<const half*>(block_ptr);
     const uint8_t* qs = block_ptr + 2;
 
@@ -177,7 +177,7 @@ __global__ void dequant_q4_0_kernel(const uint8_t* __restrict__ src, half* __res
 
 __global__ void dequant_q4_1_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                     int cols) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t total = static_cast<int64_t>(rows) * cols;
     if (idx >= total)
         return;
@@ -188,7 +188,7 @@ __global__ void dequant_q4_1_kernel(const uint8_t* __restrict__ src, half* __res
     int i = col % 32;
     int blocks_per_row = cols / 32;
 
-    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 20;
+    const uint8_t* block_ptr = src + (static_cast<int64_t>((row * blocks_per_row) + blk) * 20);
     half d_val = *reinterpret_cast<const half*>(block_ptr);
     half m_val = *reinterpret_cast<const half*>(block_ptr + 2);
     const uint8_t* qs = block_ptr + 4;
@@ -197,7 +197,7 @@ __global__ void dequant_q4_1_kernel(const uint8_t* __restrict__ src, half* __res
     uint8_t packed = qs[byte_idx];
     int nibble = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
 
-    float val = __half2float(d_val) * static_cast<float>(nibble) + __half2float(m_val);
+    float val = (__half2float(d_val) * static_cast<float>(nibble)) + __half2float(m_val);
     dst[idx] = __float2half(val);
 }
 
@@ -206,7 +206,7 @@ __global__ void dequant_q4_1_kernel(const uint8_t* __restrict__ src, half* __res
 
 __global__ void dequant_q5_0_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                     int cols) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t total = static_cast<int64_t>(rows) * cols;
     if (idx >= total)
         return;
@@ -217,7 +217,7 @@ __global__ void dequant_q5_0_kernel(const uint8_t* __restrict__ src, half* __res
     int i = col % 32;
     int blocks_per_row = cols / 32;
 
-    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 22;
+    const uint8_t* block_ptr = src + (static_cast<int64_t>((row * blocks_per_row) + blk) * 22);
     half d_val = *reinterpret_cast<const half*>(block_ptr);
     const uint8_t* qh = block_ptr + 2;  // 4 bytes high bits
     const uint8_t* qs = block_ptr + 6;  // 16 bytes low nibbles
@@ -240,7 +240,7 @@ __global__ void dequant_q5_0_kernel(const uint8_t* __restrict__ src, half* __res
 
 __global__ void dequant_q5_1_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                     int cols) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t total = static_cast<int64_t>(rows) * cols;
     if (idx >= total)
         return;
@@ -251,7 +251,7 @@ __global__ void dequant_q5_1_kernel(const uint8_t* __restrict__ src, half* __res
     int i = col % 32;
     int blocks_per_row = cols / 32;
 
-    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 24;
+    const uint8_t* block_ptr = src + (static_cast<int64_t>((row * blocks_per_row) + blk) * 24);
     half d_val = *reinterpret_cast<const half*>(block_ptr);
     half m_val = *reinterpret_cast<const half*>(block_ptr + 2);
     const uint8_t* qh = block_ptr + 4;  // 4 bytes high bits
@@ -264,7 +264,7 @@ __global__ void dequant_q5_1_kernel(const uint8_t* __restrict__ src, half* __res
     int high1 = (qh[i / 8] >> (i % 8)) & 1;
     int q5 = (high1 << 4) | low4;
 
-    float val = __half2float(d_val) * static_cast<float>(q5) + __half2float(m_val);
+    float val = (__half2float(d_val) * static_cast<float>(q5)) + __half2float(m_val);
     dst[idx] = __float2half(val);
 }
 
@@ -275,7 +275,7 @@ __global__ void dequant_q5_1_kernel(const uint8_t* __restrict__ src, half* __res
 
 __global__ void dequant_q4k_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                    int cols) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t total = static_cast<int64_t>(rows) * cols;
     if (idx >= total)
         return;
@@ -286,7 +286,7 @@ __global__ void dequant_q4k_kernel(const uint8_t* __restrict__ src, half* __rest
     int i = col % 256;
     int blocks_per_row = cols / 256;
 
-    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 144;
+    const uint8_t* block_ptr = src + (static_cast<int64_t>((row * blocks_per_row) + blk) * 144);
     float d = __half2float(*reinterpret_cast<const half*>(block_ptr));
     float dmin = __half2float(*reinterpret_cast<const half*>(block_ptr + 2));
     const uint8_t* sc = block_ptr + 4;   // 12 bytes packed scales
@@ -310,12 +310,13 @@ __global__ void dequant_q4k_kernel(const uint8_t* __restrict__ src, half* __rest
     // Extract 4-bit quant value.
     // Q4_K layout: each 64-element chunk uses 32 bytes. First 32 elements
     // in low nibbles, next 32 in high nibbles of the SAME 32 bytes.
-    int qs_byte = (i / 64) * 32 + (i % 32);
+    int qs_byte = ((i / 64) * 32) + (i % 32);
     int use_high = (i / 32) & 1;
     uint8_t packed = qs[qs_byte];
     int q4 = use_high ? ((packed >> 4) & 0xF) : (packed & 0xF);
 
-    float val = d * static_cast<float>(sc_val) * static_cast<float>(q4) - dmin * static_cast<float>(min_val);
+    float val = (d * static_cast<float>(sc_val) * static_cast<float>(q4)) -
+                (dmin * static_cast<float>(min_val));
     dst[idx] = __float2half(val);
 }
 
@@ -326,7 +327,7 @@ __global__ void dequant_q4k_kernel(const uint8_t* __restrict__ src, half* __rest
 
 __global__ void dequant_q5k_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                    int cols) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t total = static_cast<int64_t>(rows) * cols;
     if (idx >= total)
         return;
@@ -337,7 +338,7 @@ __global__ void dequant_q5k_kernel(const uint8_t* __restrict__ src, half* __rest
     int i = col % 256;
     int blocks_per_row = cols / 256;
 
-    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 176;
+    const uint8_t* block_ptr = src + (static_cast<int64_t>((row * blocks_per_row) + blk) * 176);
     float d = __half2float(*reinterpret_cast<const half*>(block_ptr));
     float dmin = __half2float(*reinterpret_cast<const half*>(block_ptr + 2));
     const uint8_t* sc = block_ptr + 4;   // 12 bytes packed scales
@@ -357,7 +358,7 @@ __global__ void dequant_q5k_kernel(const uint8_t* __restrict__ src, half* __rest
     }
 
     // Extract low 4-bit quant value (same layout as Q4_K)
-    int qs_byte = (i / 64) * 32 + (i % 32);
+    int qs_byte = ((i / 64) * 32) + (i % 32);
     int use_high = (i / 32) & 1;
     uint8_t packed = qs[qs_byte];
     int q4 = use_high ? ((packed >> 4) & 0xF) : (packed & 0xF);
@@ -373,7 +374,8 @@ __global__ void dequant_q5k_kernel(const uint8_t* __restrict__ src, half* __rest
     int qh_bit = (qh[l] >> bit_pos) & 1;
     int q5 = q4 | (qh_bit << 4);
 
-    float val = d * static_cast<float>(sc_val) * static_cast<float>(q5) - dmin * static_cast<float>(min_val);
+    float val = (d * static_cast<float>(sc_val) * static_cast<float>(q5)) -
+                (dmin * static_cast<float>(min_val));
     dst[idx] = __float2half(val);
 }
 
@@ -385,7 +387,7 @@ __global__ void dequant_q5k_kernel(const uint8_t* __restrict__ src, half* __rest
 
 __global__ void dequant_q2k_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                    int cols) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t total = static_cast<int64_t>(rows) * cols;
     if (idx >= total)
         return;
@@ -396,7 +398,7 @@ __global__ void dequant_q2k_kernel(const uint8_t* __restrict__ src, half* __rest
     int i = col % 256;
     int blocks_per_row = cols / 256;
 
-    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 84;
+    const uint8_t* block_ptr = src + (static_cast<int64_t>((row * blocks_per_row) + blk) * 84);
     // Q2_K layout: scales[16], qs[64], d(fp16), dmin(fp16)
     const uint8_t* scales = block_ptr;   // 16 bytes
     const uint8_t* qs = block_ptr + 16;  // 64 bytes
@@ -413,7 +415,7 @@ __global__ void dequant_q2k_kernel(const uint8_t* __restrict__ src, half* __rest
 
     // qs index: 32 bytes per 128-element half, element maps to in_grp + (in_grp>=16 ? 16 : 0)
     // Actually: first 16 elements use qs[l], next 16 use qs[l+16]
-    int qs_idx = half_idx * 32 + (in_grp < 16 ? in_grp : in_grp);
+    int qs_idx = (half_idx * 32) + (in_grp < 16 ? in_grp : in_grp);
     uint8_t qs_byte = qs[qs_idx];
     int q2 = (qs_byte >> shift) & 3;
 
@@ -423,7 +425,7 @@ __global__ void dequant_q2k_kernel(const uint8_t* __restrict__ src, half* __rest
     float dl = d * static_cast<float>(sc_byte & 0xF);
     float ml = dmin * static_cast<float>(sc_byte >> 4);
 
-    float val = dl * static_cast<float>(q2) - ml;
+    float val = (dl * static_cast<float>(q2)) - ml;
     dst[idx] = __float2half(val);
 }
 
@@ -434,7 +436,7 @@ __global__ void dequant_q2k_kernel(const uint8_t* __restrict__ src, half* __rest
 
 __global__ void dequant_q3k_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                    int cols) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t total = static_cast<int64_t>(rows) * cols;
     if (idx >= total)
         return;
@@ -445,7 +447,7 @@ __global__ void dequant_q3k_kernel(const uint8_t* __restrict__ src, half* __rest
     int i = col % 256;
     int blocks_per_row = cols / 256;
 
-    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 110;
+    const uint8_t* block_ptr = src + (static_cast<int64_t>((row * blocks_per_row) + blk) * 110);
     // Q3_K layout: hmask[32], qs[64], scales[12], d(fp16)
     const uint8_t* hmask = block_ptr;        // 32 bytes
     const uint8_t* qs = block_ptr + 32;      // 64 bytes
@@ -459,7 +461,7 @@ __global__ void dequant_q3k_kernel(const uint8_t* __restrict__ src, half* __rest
     int in_grp = within % 32;  // 0..31
     int shift = group * 2;
 
-    int qs_idx = half_idx * 32 + in_grp;
+    int qs_idx = (half_idx * 32) + in_grp;
     int q2 = (qs[qs_idx] >> shift) & 3;
 
     // hmask's 256 high bits are NOT stored in output order: ggml walks one bitplane per
@@ -509,7 +511,7 @@ __device__ __constant__ int8_t kvalues_iq4nl_gpu[16] = {-127, -104, -83, -65, -4
 
 __global__ void dequant_iq4_nl_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                       int cols) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t total = static_cast<int64_t>(rows) * cols;
     if (idx >= total)
         return;
@@ -520,7 +522,7 @@ __global__ void dequant_iq4_nl_kernel(const uint8_t* __restrict__ src, half* __r
     int i = col % 32;
     int blocks_per_row = cols / 32;
 
-    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 18;
+    const uint8_t* block_ptr = src + (static_cast<int64_t>((row * blocks_per_row) + blk) * 18);
     half d_val = *reinterpret_cast<const half*>(block_ptr);
     const uint8_t* qs = block_ptr + 2;
 
@@ -540,7 +542,7 @@ __global__ void dequant_iq4_nl_kernel(const uint8_t* __restrict__ src, half* __r
 
 __global__ void dequant_iq4_xs_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                       int cols) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t total = static_cast<int64_t>(rows) * cols;
     if (idx >= total)
         return;
@@ -551,7 +553,7 @@ __global__ void dequant_iq4_xs_kernel(const uint8_t* __restrict__ src, half* __r
     int i = col % 256;
     int blocks_per_row = cols / 256;
 
-    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 136;
+    const uint8_t* block_ptr = src + (static_cast<int64_t>((row * blocks_per_row) + blk) * 136);
     half d_val = *reinterpret_cast<const half*>(block_ptr);
     uint16_t scales_h;
     memcpy(&scales_h, block_ptr + 2, 2);
@@ -565,7 +567,7 @@ __global__ void dequant_iq4_xs_kernel(const uint8_t* __restrict__ src, half* __r
     int ls_high = (scales_h >> (2 * sub)) & 3;
     int ls = ls_low | (ls_high << 4);
 
-    int byte_idx = sub * 16 + (within & 15);
+    int byte_idx = (sub * 16) + (within & 15);
     uint8_t packed = qs[byte_idx];
     int nibble = (within < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
 
@@ -585,7 +587,7 @@ __device__ __constant__ uint32_t kIq3sGridGpu[512] = {
 
 __global__ void dequant_iq3_s_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int rows,
                                      int cols) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t total = static_cast<int64_t>(rows) * cols;
     if (idx >= total)
         return;
@@ -596,7 +598,7 @@ __global__ void dequant_iq3_s_kernel(const uint8_t* __restrict__ src, half* __re
     int i = col % 256;
     int blocks_per_row = cols / 256;
 
-    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 110;
+    const uint8_t* block_ptr = src + (static_cast<int64_t>((row * blocks_per_row) + blk) * 110);
     half d_val = *reinterpret_cast<const half*>(block_ptr);
     const uint8_t* qs = block_ptr + 2;
     const uint8_t* qh = block_ptr + 66;
@@ -606,12 +608,12 @@ __global__ void dequant_iq3_s_kernel(const uint8_t* __restrict__ src, half* __re
     int ib = i / 32;
     int l = (i & 31) / 8;
     int h = (i & 7) / 4;
-    int grid_idx = qs[ib * 8 + 2 * l + h] | (((qh[ib] >> (2 * l + h)) & 1) << 8);
+    int grid_idx = qs[(ib * 8) + (2 * l) + h] | (((qh[ib] >> ((2 * l) + h)) & 1) << 8);
     int mag = (kIq3sGridGpu[grid_idx] >> (8 * (i & 3))) & 0xFF;
     int sc = (scales[ib / 2] >> (4 * (ib & 1))) & 0xF;
-    float sign = ((signs[ib * 4 + l] >> (i & 7)) & 1) ? -1.0f : 1.0f;
+    float sign = ((signs[(ib * 4) + l] >> (i & 7)) & 1) ? -1.0f : 1.0f;
 
-    float val = __half2float(d_val) * static_cast<float>(1 + 2 * sc) * static_cast<float>(mag) * sign;
+    float val = __half2float(d_val) * static_cast<float>(1 + (2 * sc)) * static_cast<float>(mag) * sign;
     dst[idx] = __float2half(val);
 }
 
@@ -626,8 +628,8 @@ __global__ void dequant_q6k_to_fp8_kernel(const uint8_t* __restrict__ src, uint8
     if (blk_id >= total_blocks)
         return;
 
-    const uint8_t* bp = src + static_cast<int64_t>(blk_id) * 210;
-    uint16_t* out = reinterpret_cast<uint16_t*>(dst + static_cast<int64_t>(blk_id) * 256);
+    const uint8_t* bp = src + (static_cast<int64_t>(blk_id) * 210);
+    uint16_t* out = reinterpret_cast<uint16_t*>(dst + (static_cast<int64_t>(blk_id) * 256));
     float d_w = __half2float(*reinterpret_cast<const half*>(bp + 208));
     const int8_t* scales = reinterpret_cast<const int8_t*>(bp + 192);
     int i0 = threadIdx.x * 2;

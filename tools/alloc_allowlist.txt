@@ -52,10 +52,10 @@ src/exec/pre_dequant_phase3_fp8.cpp  # 2
 src/exec/pre_dequant_phase3_moe.cpp  # 3
 src/exec/pre_dequant_phase3_nvfp4_decode.cpp  # 16
 src/exec/pre_dequant_phase3c_mxfp4.cpp  # 1
-src/exec/pre_dequant_phase4_tensor_registry.cpp  # 4
+src/exec/pre_dequant_phase4_tensor_registry.cpp  # 3
 src/exec/quant_scratch.cpp  # 1
 src/lora/lora_adapter.cpp  # 3
-src/model/model.cpp  # 1
+src/model/model.cpp  # 2
 src/model/weight_upload.cpp  # 19
 src/quant/fp8_quant.cu  # 4
 src/quant/gpt_oss_mxfp4_convert.cpp  # 9

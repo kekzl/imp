@@ -38,20 +38,20 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_qkv_fused_kernel(
 
     if (bid < q_rows) {
         local_row = bid;
-        row_packed = packed_q + (int64_t)local_row * K_half;
-        row_ms = ms_q + (int64_t)local_row * n_mb;
+        row_packed = packed_q + ((int64_t)local_row * K_half);
+        row_ms = ms_q + ((int64_t)local_row * n_mb);
         ts = ts_q;
         out = yq;
     } else if (bid < q_rows + k_rows) {
         local_row = bid - q_rows;
-        row_packed = packed_k + (int64_t)local_row * K_half;
-        row_ms = ms_k + (int64_t)local_row * n_mb;
+        row_packed = packed_k + ((int64_t)local_row * K_half);
+        row_ms = ms_k + ((int64_t)local_row * n_mb);
         ts = ts_k;
         out = yk;
     } else {
         local_row = bid - q_rows - k_rows;
-        row_packed = packed_v + (int64_t)local_row * K_half;
-        row_ms = ms_v + (int64_t)local_row * n_mb;
+        row_packed = packed_v + ((int64_t)local_row * K_half);
+        row_ms = ms_v + ((int64_t)local_row * n_mb);
         ts = ts_v;
         out = yv;
     }
@@ -86,14 +86,14 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_gate_up_fused_kernel(
 
     if (bid < rows) {
         local_row = bid;
-        row_packed = packed_g + (int64_t)local_row * K_half;
-        row_ms = ms_g + (int64_t)local_row * n_mb;
+        row_packed = packed_g + ((int64_t)local_row * K_half);
+        row_ms = ms_g + ((int64_t)local_row * n_mb);
         ts = ts_g;
         out = yg;
     } else {
         local_row = bid - rows;
-        row_packed = packed_u + (int64_t)local_row * K_half;
-        row_ms = ms_u + (int64_t)local_row * n_mb;
+        row_packed = packed_u + ((int64_t)local_row * K_half);
+        row_ms = ms_u + ((int64_t)local_row * n_mb);
         ts = ts_u;
         out = yu;
     }
@@ -120,7 +120,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_qkv_fused_mr_kernel(
     NvFP4NormFoldIn fold) {
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
-    const int global_row = blockIdx.x * NR + warp_id;
+    const int global_row = (blockIdx.x * NR) + warp_id;
     const int total_rows = q_rows + k_rows + v_rows;
     if (global_row >= total_rows || warp_id >= NR)
         return;
@@ -137,20 +137,20 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_qkv_fused_mr_kernel(
 
     if (global_row < q_rows) {
         local_row = global_row;
-        row_packed = packed_q + (int64_t)local_row * K_half;
-        row_ms = ms_q + (int64_t)local_row * n_mb;
+        row_packed = packed_q + ((int64_t)local_row * K_half);
+        row_ms = ms_q + ((int64_t)local_row * n_mb);
         ts = ts_q;
         out = yq;
     } else if (global_row < q_rows + k_rows) {
         local_row = global_row - q_rows;
-        row_packed = packed_k + (int64_t)local_row * K_half;
-        row_ms = ms_k + (int64_t)local_row * n_mb;
+        row_packed = packed_k + ((int64_t)local_row * K_half);
+        row_ms = ms_k + ((int64_t)local_row * n_mb);
         ts = ts_k;
         out = yk;
     } else {
         local_row = global_row - q_rows - k_rows;
-        row_packed = packed_v + (int64_t)local_row * K_half;
-        row_ms = ms_v + (int64_t)local_row * n_mb;
+        row_packed = packed_v + ((int64_t)local_row * K_half);
+        row_ms = ms_v + ((int64_t)local_row * n_mb);
         ts = ts_v;
         out = yv;
     }
@@ -174,7 +174,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gate_up_fused_mr_kernel
     NvFP4NormFoldIn fold) {
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
-    const int global_row = blockIdx.x * NR + warp_id;
+    const int global_row = (blockIdx.x * NR) + warp_id;
     const int total_rows = 2 * rows;
     if (global_row >= total_rows || warp_id >= NR)
         return;
@@ -191,14 +191,14 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gate_up_fused_mr_kernel
 
     if (global_row < rows) {
         local_row = global_row;
-        row_packed = packed_g + (int64_t)local_row * K_half;
-        row_ms = ms_g + (int64_t)local_row * n_mb;
+        row_packed = packed_g + ((int64_t)local_row * K_half);
+        row_ms = ms_g + ((int64_t)local_row * n_mb);
         ts = ts_g;
         out = yg;
     } else {
         local_row = global_row - rows;
-        row_packed = packed_u + (int64_t)local_row * K_half;
-        row_ms = ms_u + (int64_t)local_row * n_mb;
+        row_packed = packed_u + ((int64_t)local_row * K_half);
+        row_ms = ms_u + ((int64_t)local_row * n_mb);
         ts = ts_u;
         out = yu;
     }

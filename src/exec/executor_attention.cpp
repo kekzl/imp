@@ -202,7 +202,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                                                : StorageTier::Undefined;
     // NVFP4 wo: primary tier OR Phase-3 secondary NVFP4 decode cache
     // (Q8_0/Q6_K/Q5_K models). c8763ad refactor dropped the secondary check.
-    const bool wo_nvfp4_secondary = (wcache_.nvfp4.count(ly.wo.data) != 0);
+    const bool wo_nvfp4_secondary = (wcache_.nvfp4.contains(ly.wo.data));
     bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.qtype == QType::F16 &&
                               (wo_tier == StorageTier::NVFP4 || wo_nvfp4_secondary));
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 && n == 1 &&
@@ -373,7 +373,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                                                  cudaMemcpyDeviceToDevice, stream));
             IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(attn_gate_buf.data, static_cast<size_t>(q_actual_dim) * es_q,
                                                  static_cast<char*>(q_target.data) +
-                                                     static_cast<size_t>(q_actual_dim) * es_q,
+                                                     (static_cast<size_t>(q_actual_dim) * es_q),
                                                  static_cast<size_t>(q_out_dim) * es_q,
                                                  static_cast<size_t>(q_actual_dim) * es_q, n,
                                                  cudaMemcpyDeviceToDevice, stream));
@@ -488,7 +488,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         state.n_sequences == 1;
     if (mla_absorb_active) {
         half* cache_layer = static_cast<half*>(mla_absorb_cache_) +
-                            static_cast<size_t>(layer) * mla_absorb_layer_stride_;
+                            (static_cast<size_t>(layer) * mla_absorb_layer_stride_);
         mla_latent_cache_write(static_cast<const half*>(mla_latent_buf_),
                                static_cast<const half*>(kk.data), cache_layer, state.positions, n, nh,
                                hd, cfg.qk_rope_head_dim, cfg.kv_lora_rank, mla_absorb_max_seq_, stream);
@@ -520,7 +520,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
             const size_t es_r = dtype_size(compute_dtype_);
             auto rows_view = [&](const Tensor& t, int64_t cols, int row0, int nrows) -> Tensor {
                 int64_t shape[2] = {static_cast<int64_t>(nrows), cols};
-                char* p = static_cast<char*>(t.data) + static_cast<size_t>(row0) * cols * es_r;
+                char* p = static_cast<char*>(t.data) + (static_cast<size_t>(row0) * cols * es_r);
                 return Tensor(p, t.qtype, 2, shape, true);
             };
             const int n_pf = state.n_sequences - state.n_riders;
@@ -529,7 +529,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 const int ns = state.h_seq_offsets[s + 1] - rb;
                 if (ns <= 0)
                     continue;
-                const int* bt_s = state.block_tables + static_cast<size_t>(s) * state.max_blocks_per_seq;
+                const int* bt_s = state.block_tables + (static_cast<size_t>(s) * state.max_blocks_per_seq);
                 prefill_attend_seq(ns, state.h_seq_q_offsets[s], rb,
                                    rows_view(qv, static_cast<int64_t>(nh) * hd, rb, ns),
                                    rows_view(kk, static_cast<int64_t>(nkv) * hd, rb, ns),
@@ -547,7 +547,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
                 rst.is_prefill = false;
                 rst.n_tokens = nr;
                 rst.n_sequences = state.n_riders;
-                rst.block_tables = state.block_tables + static_cast<size_t>(n_pf) * state.max_blocks_per_seq;
+                rst.block_tables = state.block_tables +
+                                   (static_cast<size_t>(n_pf) * state.max_blocks_per_seq);
                 rst.block_tables_swa = nullptr;
                 rst.context_lens = state.context_lens + n_pf;
                 rst.positions = state.positions + rb;

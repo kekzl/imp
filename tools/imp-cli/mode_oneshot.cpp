@@ -269,7 +269,7 @@ int run_oneshot(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGenerate
                 output_text += piece;
                 bool stop_found = false;
                 for (const auto& stop : args.stop_sequences) {
-                    if (output_text.find(stop) != std::string::npos) {
+                    if (output_text.contains(stop)) {
                         stop_found = true;
                         break;
                     }

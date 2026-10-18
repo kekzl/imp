@@ -121,7 +121,7 @@ bool InternVLEncoder::attention(int tokens, cudaStream_t stream) {
         const int rows = std::min(kAttnChunk, tokens - c0);
         cublasStatus_t st = cublasGemmStridedBatchedEx(
             handle(), CUBLAS_OP_T, CUBLAS_OP_N, tokens, rows, hd, &scale, d_k_, CUDA_R_16F, hd,
-            static_cast<long long>(tokens) * hd, d_q_ + static_cast<int64_t>(c0) * hd, CUDA_R_16F, hd,
+            static_cast<long long>(tokens) * hd, d_q_ + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
             static_cast<long long>(tokens) * hd, &zero, d_scores_, CUDA_R_16F, tokens,
             static_cast<long long>(rows) * tokens, heads, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
         if (st != CUBLAS_STATUS_SUCCESS) {
@@ -132,7 +132,7 @@ bool InternVLEncoder::attention(int tokens, cudaStream_t stream) {
         st = cublasGemmStridedBatchedEx(handle(), CUBLAS_OP_N, CUBLAS_OP_N, hd, rows, tokens, &one, d_v_,
                                         CUDA_R_16F, hd, static_cast<long long>(tokens) * hd, d_scores_,
                                         CUDA_R_16F, tokens, static_cast<long long>(rows) * tokens, &zero,
-                                        d_attn_ + static_cast<int64_t>(c0) * hd, CUDA_R_16F, hd,
+                                        d_attn_ + (static_cast<int64_t>(c0) * hd), CUDA_R_16F, hd,
                                         static_cast<long long>(tokens) * hd, heads, CUBLAS_COMPUTE_32F,
                                         CUBLAS_GEMM_DEFAULT);
         if (st != CUBLAS_STATUS_SUCCESS) {

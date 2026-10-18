@@ -105,7 +105,7 @@ inline size_t vram_reserve_floor(size_t total_bytes, int pct = 10) {
 [[nodiscard]] inline bool upload_exceeds_checkpoint(size_t consumed_bytes, size_t on_disk_bytes) {
     if (on_disk_bytes == 0)
         return false;
-    return consumed_bytes > on_disk_bytes + on_disk_bytes / 4;
+    return consumed_bytes > on_disk_bytes + (on_disk_bytes / 4);
 }
 
 // Outcome of sizing the KV pool from the measured post-cache residual.

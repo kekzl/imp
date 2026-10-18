@@ -183,7 +183,7 @@ void RecurrentSnapshotStore::evict_device_lru_(cudaStream_t stream) {
         return;
     std::shared_ptr<RecurrentSnapshotEntry> dev = it->second;
     entries_.erase(it);
-    if (host_capacity_ > 0 && host_entries_.count(victim) == 0) {
+    if (host_capacity_ > 0 && !host_entries_.contains(victim)) {
         void* hbuf = acquire_host_buffer_();
         if (hbuf &&
             cudaMemcpyAsync(hbuf, dev->data, buf_bytes_, cudaMemcpyDeviceToHost, stream) == cudaSuccess) {
@@ -235,7 +235,7 @@ bool RecurrentSnapshotStore::save(size_t key, int n_tokens, const void* src, cud
                                   const void* sidecar_src, std::vector<KvChainLink> kv_chain) {
     if (!enabled() || src == nullptr || n_tokens <= 0 || (sidecar_bytes_ > 0 && sidecar_src == nullptr))
         return false;
-    if (entries_.count(key) != 0 || host_entries_.count(key) != 0)
+    if (entries_.contains(key) || host_entries_.contains(key))
         return true;  // identical prefix already snapshotted (either tier)
     void* buf = acquire_buffer_(stream);
     if (!buf)

@@ -18,7 +18,7 @@ namespace imp {
 __global__ __launch_bounds__(256) void broadcast_add_bias_fp16_kernel(half* __restrict__ out,
                                                                       const half* __restrict__ bias, int rows,
                                                                       int cols) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     int total = rows * cols;
     for (int i = idx; i < total; i += blockDim.x * gridDim.x) {
         int col = i % cols;
@@ -28,7 +28,7 @@ __global__ __launch_bounds__(256) void broadcast_add_bias_fp16_kernel(half* __re
 
 // Element-wise scale: out[i] *= scale, for FP16 data (Gemma embedding scaling)
 __global__ __launch_bounds__(256) void scale_fp16_kernel(half* __restrict__ data, half scale, int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t n2 = n / 2;
     half2 s2 = __half2half2(scale);
     if (idx < n2) {
@@ -44,7 +44,7 @@ __global__ __launch_bounds__(256) void scale_fp16_kernel(half* __restrict__ data
 // Element-wise addition: a[i] += b[i], for FP16 data
 __global__ __launch_bounds__(256) void elementwise_add_fp16_kernel(half* __restrict__ a,
                                                                    const half* __restrict__ b, int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t n2 = n / 2;
     pdl_wait();
     pdl_trigger();  // one load + one store per thread: let the next grid in now
@@ -63,7 +63,7 @@ __global__ __launch_bounds__(256) void parallel_residual_merge_fp16_kernel(half*
                                                                            const half* __restrict__ a,
                                                                            const half* __restrict__ b,
                                                                            int64_t n) {
-    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx < n)
         h[idx] = __float2half(__half2float(h[idx]) + (__half2float(a[idx]) - __half2float(b[idx])));
 }
@@ -72,7 +72,7 @@ __global__ __launch_bounds__(256) void parallel_residual_merge_fp16_kernel(half*
 __global__ __launch_bounds__(256) void elementwise_add_store_fp16_kernel(const half* __restrict__ a,
                                                                          const half* __restrict__ b,
                                                                          half* __restrict__ out, int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t n2 = n / 2;
     pdl_wait();
     pdl_trigger();  // one load + one store per thread: let the next grid in now
@@ -98,8 +98,8 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_rowscale_kernel(const float*
     if (row >= rows)
         return;
 
-    const float* row_in = in + static_cast<int64_t>(row) * cols;
-    half* row_out = out + static_cast<int64_t>(row) * cols;
+    const float* row_in = in + (static_cast<int64_t>(row) * cols);
+    half* row_out = out + (static_cast<int64_t>(row) * cols);
 
     // Phase 1: parallel reduction to find max |value| in this row
     float local_max = 0.0f;
@@ -146,10 +146,10 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
     // Vectorized: process 8 halfs (1 float4 = 2 half2) per iteration.
     const int d_model_v = d_model / 8;  // number of float4-sized chunks
 
-    const float4* x_row4 = reinterpret_cast<const float4*>(input + static_cast<int64_t>(row) * d_model);
+    const float4* x_row4 = reinterpret_cast<const float4*>(input + (static_cast<int64_t>(row) * d_model));
     const float4* nw_row4 = reinterpret_cast<const float4*>(norm_w);
-    float4* accum_row4 = reinterpret_cast<float4*>(fp32_accum + static_cast<int64_t>(row) * d_model);
-    float4* out_row4 = reinterpret_cast<float4*>(output + static_cast<int64_t>(row) * d_model);
+    float4* accum_row4 = reinterpret_cast<float4*>(fp32_accum + (static_cast<int64_t>(row) * d_model));
+    float4* out_row4 = reinterpret_cast<float4*>(output + (static_cast<int64_t>(row) * d_model));
 
     // Phase 1: Load input (half→float via float4 loads), compute sum of squares.
     // Each thread handles d_model_v / blockDim.x chunks, each chunk = 8 halfs.
@@ -161,8 +161,8 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
         float2 f1 = __half22float2(h2[1]);
         float2 f2 = __half22float2(h2[2]);
         float2 f3 = __half22float2(h2[3]);
-        sum_sq += f0.x * f0.x + f0.y * f0.y + f1.x * f1.x + f1.y * f1.y + f2.x * f2.x + f2.y * f2.y +
-                  f3.x * f3.x + f3.y * f3.y;
+        sum_sq += (f0.x * f0.x) + (f0.y * f0.y) + (f1.x * f1.x) + (f1.y * f1.y) + (f2.x * f2.x) +
+                  (f2.y * f2.y) + (f3.x * f3.x) + (f3.y * f3.y);
     }
 
 // Block reduce sum_sq
@@ -179,7 +179,7 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
         for (int off = 16; off > 0; off >>= 1)
             total += __shfl_xor_sync(0xFFFFFFFF, total, off);
         if (lane == 0)
-            s_inv_rms = rsqrtf(total / static_cast<float>(d_model) + eps);
+            s_inv_rms = rsqrtf((total / static_cast<float>(d_model)) + eps);
     }
     __syncthreads();
     float inv_rms = s_inv_rms;
@@ -196,7 +196,7 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
 
         // Read FP32 accumulator (2 float4s = 8 floats)
         float4 acc_lo = accum_row4[static_cast<int64_t>(i) * 2];
-        float4 acc_hi = accum_row4[i * 2 + 1];
+        float4 acc_hi = accum_row4[(i * 2) + 1];
         float* acc_f = reinterpret_cast<float*>(&acc_lo);
         float* acc_f_hi = reinterpret_cast<float*>(&acc_hi);
 
@@ -219,7 +219,7 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
         acc_f_hi[3] += f3.y * inv_rms * (w3.y + weight_offset);
 
         accum_row4[static_cast<int64_t>(i) * 2] = acc_lo;
-        accum_row4[i * 2 + 1] = acc_hi;
+        accum_row4[(i * 2) + 1] = acc_hi;
 
         local_max = fmaxf(local_max, fmaxf(fmaxf(fabsf(acc_f[0]), fabsf(acc_f[1])),
                                            fmaxf(fabsf(acc_f[2]), fabsf(acc_f[3]))));
@@ -249,7 +249,7 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
     // Phase 3: Scale FP32 accum → FP16 output (vectorized float4 reads, half2×4 writes).
     for (int i = tid; i < d_model_v; i += blockDim.x) {
         float4 acc_lo = accum_row4[static_cast<int64_t>(i) * 2];
-        float4 acc_hi = accum_row4[i * 2 + 1];
+        float4 acc_hi = accum_row4[(i * 2) + 1];
         float* af = reinterpret_cast<float*>(&acc_lo);
         float* af_hi = reinterpret_cast<float*>(&acc_hi);
 
@@ -266,7 +266,7 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
 // Convert FP16 → FP32: out[i] = __half2float(in[i])
 __global__ __launch_bounds__(256) void fp16_to_fp32_kernel(const half* __restrict__ in,
                                                            float* __restrict__ out, int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx < n) {
         out[idx] = __half2float(in[idx]);
     }
@@ -275,7 +275,7 @@ __global__ __launch_bounds__(256) void fp16_to_fp32_kernel(const half* __restric
 // Element-wise addition: a[i] += b[i], for FP32 data
 __global__ __launch_bounds__(256) void elementwise_add_fp32_kernel(float* __restrict__ a,
                                                                    const float* __restrict__ b, int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     for (int64_t i = idx; i < n; i += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         a[i] += b[i];
     }
@@ -283,7 +283,7 @@ __global__ __launch_bounds__(256) void elementwise_add_fp32_kernel(float* __rest
 
 // Scale FP32 expert weights in-place: weights[i] *= scale
 __global__ __launch_bounds__(256) void scale_fp32_kernel(float* __restrict__ data, float scale, int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx < n) {
         data[idx] *= scale;
     }
@@ -292,7 +292,7 @@ __global__ __launch_bounds__(256) void scale_fp32_kernel(float* __restrict__ dat
 // Logit soft-capping: logit = softcap * tanh(logit / softcap)  (Gemma-2/3)
 __global__ __launch_bounds__(256) void logit_softcap_fp32_kernel(float* __restrict__ data, float softcap,
                                                                  float inv_softcap, int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx < n) {
         data[idx] = softcap * tanhf(data[idx] * inv_softcap);
     }
@@ -301,7 +301,7 @@ __global__ __launch_bounds__(256) void logit_softcap_fp32_kernel(float* __restri
 // FP32 -> FP16 conversion kernel (for scatter output back to compute_dtype)
 __global__ __launch_bounds__(256) void fp32_to_fp16_kernel(const float* __restrict__ in,
                                                            half* __restrict__ out, int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx < n) {
         out[idx] = __float2half(in[idx]);
     }
@@ -316,7 +316,7 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_kernel(const float* __restri
 // ~165 us/call, costly per-MoE-layer at n=16. A kernel launch costs ~10 us
 // and stays stream-async. 16-byte vectorized; falls back to the driver copy for unaligned buffers.
 __global__ void device_copy_v4_kernel(const uint4* __restrict__ src, uint4* __restrict__ dst, size_t n4) {
-    size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    size_t i = (static_cast<size_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     pdl_wait();
     pdl_trigger();
     if (i < n4)
@@ -436,7 +436,7 @@ __global__ __launch_bounds__(256) void add_bias_3way_kernel(
         return;
 
     int total = rows * cols;
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < total; i += blockDim.x * gridDim.x) {
+    for (int i = (blockIdx.x * blockDim.x) + threadIdx.x; i < total; i += blockDim.x * gridDim.x) {
         int col = i % cols;
         out[i] = __hadd(out[i], bias[col]);
     }
@@ -478,27 +478,24 @@ void add_bias_3way(Tensor& out_a, const Tensor& bias_a, Tensor& out_b, const Ten
     IMP_CUDA_CHECK_LAUNCH();
 }
 
-// Fused residual add + RMSNorm: hidden += residual; output = rmsnorm(hidden, weight).
-// Saves 1 DRAM round-trip: reads hidden+residual+weight, writes hidden+output.
-// Launch: <<<n_rows, 256>>>
-__global__ __launch_bounds__(256) void residual_add_rmsnorm_kernel(
-    half* __restrict__ hidden,          // [n, d_model] — modified in-place (residual added)
-    const half* __restrict__ residual,  // [n, d_model]
-    const half* __restrict__ weight,    // [d_model] RMSNorm weight
-    half* __restrict__ output,          // [n, d_model] normalized output
-    int d_model, float eps, float weight_offset) {
+// One FP16 add + RMSNorm row, <<<n_rows, 256>>>. h_row = a + b (kResidual: a is h_row itself);
+// kResidual writes the norm to o_row, else back into h_row. Saves 1 DRAM round-trip / 2 launches.
+template <bool kResidual>
+__device__ __forceinline__ void add_rmsnorm_row(half* __restrict__ h_row, const half* __restrict__ a_row,
+                                                const half* __restrict__ b_row,
+                                                const half* __restrict__ weight, half* __restrict__ o_row,
+                                                int d_model, float eps, float weight_offset) {
     __shared__ float warp_reduce[kWarpSize];
     const int tid = threadIdx.x;
-    const int row = blockIdx.x;
 
-    half* h_row = hidden + static_cast<int64_t>(row) * d_model;
-    const half* r_row = residual + static_cast<int64_t>(row) * d_model;
-    half* o_row = output + static_cast<int64_t>(row) * d_model;
-
-    // Phase 1: Add residual to hidden + compute sum of squares
+    // Phase 1: a + b into h_row + sum of squares
     float sum_sq = 0.0f;
     for (int d = tid; d < d_model; d += blockDim.x) {
-        float h = __half2float(h_row[d]) + __half2float(r_row[d]);
+        float h;
+        if constexpr (kResidual)
+            h = __half2float(h_row[d]) + __half2float(b_row[d]);
+        else
+            h = __half2float(a_row[d]) + __half2float(b_row[d]);
         h_row[d] = __float2half(h);
         sum_sq += h * h;
     }
@@ -521,7 +518,7 @@ __global__ __launch_bounds__(256) void residual_add_rmsnorm_kernel(
         for (int off = kWarpSize / 2; off > 0; off >>= 1)
             total += __shfl_xor_sync(0xFFFFFFFF, total, off);
         if (lane == 0)
-            warp_reduce[0] = rsqrtf(total / static_cast<float>(d_model) + eps);
+            warp_reduce[0] = rsqrtf((total / static_cast<float>(d_model)) + eps);
     }
     __syncthreads();
     float inv_rms = warp_reduce[0];
@@ -530,8 +527,23 @@ __global__ __launch_bounds__(256) void residual_add_rmsnorm_kernel(
     for (int d = tid; d < d_model; d += blockDim.x) {
         float h = __half2float(h_row[d]);
         float w = __half2float(weight[d]) + weight_offset;
-        o_row[d] = __float2half(h * inv_rms * w);
+        if constexpr (kResidual)
+            o_row[d] = __float2half(h * inv_rms * w);
+        else
+            h_row[d] = __float2half(h * inv_rms * w);
     }
+}
+
+// Fused residual add + RMSNorm: hidden += residual; output = rmsnorm(hidden, weight).
+__global__ __launch_bounds__(256) void residual_add_rmsnorm_kernel(
+    half* __restrict__ hidden,          // [n, d_model]: modified in-place (residual added)
+    const half* __restrict__ residual,  // [n, d_model]
+    const half* __restrict__ weight,    // [d_model] RMSNorm weight
+    half* __restrict__ output,          // [n, d_model] normalized output
+    int d_model, float eps, float weight_offset) {
+    const int64_t off = static_cast<int64_t>(static_cast<int>(blockIdx.x)) * d_model;
+    add_rmsnorm_row<true>(hidden + off, nullptr, residual + off, weight, output + off, d_model, eps,
+                          weight_offset);
 }
 
 void residual_add_rmsnorm(Tensor& hidden, const Tensor& residual, const Tensor& weight, Tensor& output,
@@ -547,59 +559,14 @@ void residual_add_rmsnorm(Tensor& hidden, const Tensor& residual, const Tensor& 
 }
 
 // Fused add-store + RMSNorm in-place: hidden = rmsnorm(a + b, weight).
-// Saves 2 kernel launches + 1 memcpy vs separate add_store + rmsnorm + copy.
-// Launch: <<<n_rows, 256>>>
 __global__ __launch_bounds__(256) void add_rmsnorm_inplace_kernel(
     const half* __restrict__ a,       // [n, d_model]
     const half* __restrict__ b,       // [n, d_model]
-    half* __restrict__ hidden,        // [n, d_model] — output (a + b, then normalized)
+    half* __restrict__ hidden,        // [n, d_model]: output (a + b, then normalized)
     const half* __restrict__ weight,  // [d_model] RMSNorm weight
     int d_model, float eps, float weight_offset) {
-    __shared__ float warp_reduce[kWarpSize];
-    const int tid = threadIdx.x;
-    const int row = blockIdx.x;
-
-    const half* a_row = a + static_cast<int64_t>(row) * d_model;
-    const half* b_row = b + static_cast<int64_t>(row) * d_model;
-    half* h_row = hidden + static_cast<int64_t>(row) * d_model;
-
-    // Phase 1: Compute a+b and sum of squares in one pass
-    float sum_sq = 0.0f;
-    for (int d = tid; d < d_model; d += blockDim.x) {
-        float h = __half2float(a_row[d]) + __half2float(b_row[d]);
-        h_row[d] = __float2half(h);  // store sum for phase 2
-        sum_sq += h * h;
-    }
-
-// Warp-level reduction
-#pragma unroll
-    for (int off = kWarpSize / 2; off > 0; off >>= 1)
-        sum_sq += __shfl_xor_sync(0xFFFFFFFF, sum_sq, off);
-
-    int warp_id = tid / kWarpSize;
-    int lane = tid % kWarpSize;
-    if (lane == 0)
-        warp_reduce[warp_id] = sum_sq;
-    __syncthreads();
-
-    if (warp_id == 0) {
-        int n_warps = blockDim.x / kWarpSize;
-        float total = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
-#pragma unroll
-        for (int off = kWarpSize / 2; off > 0; off >>= 1)
-            total += __shfl_xor_sync(0xFFFFFFFF, total, off);
-        if (lane == 0)
-            warp_reduce[0] = rsqrtf(total / static_cast<float>(d_model) + eps);
-    }
-    __syncthreads();
-    float inv_rms = warp_reduce[0];
-
-    // Phase 2: Normalize in-place
-    for (int d = tid; d < d_model; d += blockDim.x) {
-        float h = __half2float(h_row[d]);
-        float w = __half2float(weight[d]) + weight_offset;
-        h_row[d] = __float2half(h * inv_rms * w);
-    }
+    const int64_t off = static_cast<int64_t>(static_cast<int>(blockIdx.x)) * d_model;
+    add_rmsnorm_row<false>(hidden + off, a + off, b + off, weight, nullptr, d_model, eps, weight_offset);
 }
 
 void add_rmsnorm_inplace(const Tensor& a, const Tensor& b, Tensor& hidden, const Tensor& weight, float eps,
@@ -626,9 +593,9 @@ __global__ __launch_bounds__(256) void rmsnorm_add_residual_kernel(
     const int tid = threadIdx.x;
     const int row = blockIdx.x;
 
-    const half* in_row = input + static_cast<int64_t>(row) * d_model;
-    const half* r_row = residual + static_cast<int64_t>(row) * d_model;
-    half* o_row = output + static_cast<int64_t>(row) * d_model;
+    const half* in_row = input + (static_cast<int64_t>(row) * d_model);
+    const half* r_row = residual + (static_cast<int64_t>(row) * d_model);
+    half* o_row = output + (static_cast<int64_t>(row) * d_model);
 
     // Phase 1: Compute sum of squares of input
     float sum_sq = 0.0f;
@@ -654,7 +621,7 @@ __global__ __launch_bounds__(256) void rmsnorm_add_residual_kernel(
         for (int off = kWarpSize / 2; off > 0; off >>= 1)
             total += __shfl_xor_sync(0xFFFFFFFF, total, off);
         if (lane == 0)
-            warp_reduce[0] = rsqrtf(total / static_cast<float>(d_model) + eps);
+            warp_reduce[0] = rsqrtf((total / static_cast<float>(d_model)) + eps);
     }
     __syncthreads();
     float inv_rms = warp_reduce[0];
@@ -664,7 +631,7 @@ __global__ __launch_bounds__(256) void rmsnorm_add_residual_kernel(
         float v = __half2float(in_row[d]);
         float w = __half2float(weight[d]) + weight_offset;
         float r = __half2float(r_row[d]);
-        o_row[d] = __float2half(v * inv_rms * w + r);
+        o_row[d] = __float2half((v * inv_rms * w) + r);
     }
 }
 

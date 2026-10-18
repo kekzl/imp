@@ -1,12 +1,12 @@
 #include "memory/host_task_pool.h"
 
+#include <algorithm>
 #include <utility>
 
 namespace imp {
 
 HostTaskPool::HostTaskPool(int n_threads) {
-    if (n_threads < 1)
-        n_threads = 1;
+    n_threads = std::max(n_threads, 1);
     threads_.reserve(static_cast<size_t>(n_threads));
     for (int i = 0; i < n_threads; ++i)
         threads_.emplace_back([this] { worker_(); });

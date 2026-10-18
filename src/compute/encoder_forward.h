@@ -62,6 +62,10 @@ struct EncoderWorkspace {
                             cudaStream_t stream);
 void encoder_workspace_free(EncoderWorkspace& ws);
 
+// After encoder_workspace_init: frees the uploaded projection sources, which only the dequant
+// read. Returns the tensors freed; the model then refuses a second engine (sources_consumed).
+int encoder_drop_sources(Model& model, cudaStream_t stream);
+
 // Full pass: host tokens -> pooled, L2-normalized embedding (host float[d]).
 // Returns false on precondition violation (n > max_tokens, ws not init).
 [[nodiscard]] bool encoder_embed(const Model& model, EncoderWorkspace& ws, std::span<const int32_t> tokens, float* out_host,

@@ -54,14 +54,14 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
 
     half2 q_h2[ELEMS / 2];  // the lane's four q elements as two half2
     {
-        const half2* Q_ptr2 = reinterpret_cast<const half2*>(Q + (int64_t)batch_idx * n_heads * HEAD_DIM +
-                                                             (int64_t)head_idx * HEAD_DIM + lane_offset);
+        const half2* Q_ptr2 = reinterpret_cast<const half2*>(Q + ((int64_t)batch_idx * n_heads * HEAD_DIM) +
+                                                             ((int64_t)head_idx * HEAD_DIM) + lane_offset);
 #pragma unroll
         for (int i = 0; i < ELEMS / 2; i++)
             q_h2[i] = Q_ptr2[i];
     }
 
-    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
+    const int* bt = block_tables + ((int64_t)batch_idx * max_num_blocks);
     const int kv_block_stride = block_size * n_kv_heads * HEAD_DIM;
     const int kv_slot_stride = n_kv_heads * HEAD_DIM;
     const float fused_scale = scale * kv_scale;
@@ -84,9 +84,9 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
         if (phys_block < 0)
             continue;  // StreamingLLM sentinel, same guard as the plain kernel
         // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 128 (static_assert :41) = 2^19 (model_limits.h:24)
-        const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride +
+        const uint8_t* K_block = K_cache + ((int64_t)phys_block * kv_block_stride) +
                                  static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset;
-        const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride +
+        const uint8_t* V_block = V_cache + ((int64_t)phys_block * kv_block_stride) +
                                  static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset;
         const int tok_start = blk * block_size;
         int n_tok = block_size;
@@ -105,7 +105,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
             for (int i = 0; i < TOK; i++) {
                 const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
                 kp[i] = __ldcs(
-                    reinterpret_cast<const uint32_t*>(K_block + static_cast<int64_t>(ti) * kv_slot_stride));
+                    reinterpret_cast<const uint32_t*>(K_block + (static_cast<int64_t>(ti) * kv_slot_stride)));
             }
             float dot[TOK];
 #pragma unroll
@@ -139,7 +139,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
                 p[i] = (t + i < n_tok) ? expf(dot[i] - m_new) : 0.0f;
                 p_sum += p[i];
             }
-            l_w = alpha * l_w + p_sum;
+            l_w = (alpha * l_w) + p_sum;
             m_w = m_new;
             // V rows of the group in flight together; the invalid ones carry p = 0.
             uint32_t vp[TOK];
@@ -147,7 +147,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_fp8_mult
             for (int i = 0; i < TOK; i++) {
                 const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
                 vp[i] = __ldcs(
-                    reinterpret_cast<const uint32_t*>(V_block + static_cast<int64_t>(ti) * kv_slot_stride));
+                    reinterpret_cast<const uint32_t*>(V_block + (static_cast<int64_t>(ti) * kv_slot_stride)));
             }
 #pragma unroll
             for (int e = 0; e < ELEMS; e++)
@@ -190,8 +190,8 @@ void paged_attention_decode_fp8_multitok_hd128(const half* Q, const uint8_t* K_c
                                                float scale, float kv_scale, int max_num_blocks,
                                                int sliding_window, float softcap, const half* attn_sinks,
                                                cudaStream_t stream) {
-    const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 +
-                              static_cast<int64_t>(NUM_WARPS) * 128 * sizeof(float);
+    const size_t smem_bytes = (NUM_WARPS * sizeof(float) * 2) +
+                              (static_cast<int64_t>(NUM_WARPS) * 128 * sizeof(float));
     dim3 grid(batch_size, n_heads);
     dim3 block(BLOCK_THREADS);
     // TOK=4. An 8-token instance measured 94.2 vs 91.7 us at 32 x 1100 and

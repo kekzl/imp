@@ -23,7 +23,7 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_
                                    const half* __restrict__ score_bias) {
     const int token = blockIdx.x;
     const int tid = threadIdx.x;
-    const float* logits = gate_logits + static_cast<int64_t>(token) * n_experts;
+    const float* logits = gate_logits + (static_cast<int64_t>(token) * n_experts);
     pdl_wait();  // gate_logits is the router GEMV's output
 
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
@@ -216,7 +216,7 @@ __global__ void gemv_gate_topk_fused_kernel(const half* __restrict__ W_gate,  //
     const half2* x2 = reinterpret_cast<const half2*>(x);
 
     for (int e = warp_id; e < n_experts; e += NUM_WARPS) {
-        const half2* W2 = reinterpret_cast<const half2*>(W_gate + static_cast<size_t>(e) * d_model);
+        const half2* W2 = reinterpret_cast<const half2*>(W_gate + (static_cast<size_t>(e) * d_model));
         float sum = 0.0f;
 
         for (int i = lane_id; i < K2; i += WARP_SIZE) {
@@ -453,9 +453,9 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& res
 
     // ---- Kernel 1: Softmax + top-k selection per token ----
     int probs_arrays = score_bias ? 2 : 1;
-    size_t smem_gating = static_cast<size_t>(n_experts) * probs_arrays * sizeof(float) +
-                         static_cast<size_t>(top_k) * sizeof(float) +
-                         static_cast<size_t>(top_k) * sizeof(int32_t);
+    size_t smem_gating = (static_cast<size_t>(n_experts) * probs_arrays * sizeof(float)) +
+                         (static_cast<size_t>(top_k) * sizeof(float)) +
+                         (static_cast<size_t>(top_k) * sizeof(int32_t));
 
     pdl::enable_kernel(topk_gating_kernel);
     pdl::launch(topk_gating_kernel, dim3(n_tokens), dim3(BLOCK_SIZE), smem_gating, stream,
@@ -577,9 +577,9 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& bu
 
     // Kernel 1: Softmax + top-k selection per token
     int probs_arrays = score_bias ? 2 : 1;
-    size_t smem_gating = static_cast<size_t>(n_experts) * probs_arrays * sizeof(float) +
-                         static_cast<size_t>(top_k) * sizeof(float) +
-                         static_cast<size_t>(top_k) * sizeof(int32_t);
+    size_t smem_gating = (static_cast<size_t>(n_experts) * probs_arrays * sizeof(float)) +
+                         (static_cast<size_t>(top_k) * sizeof(float)) +
+                         (static_cast<size_t>(top_k) * sizeof(int32_t));
 
     pdl::enable_kernel(topk_gating_kernel);
     pdl::launch(topk_gating_kernel, dim3(n_tokens), dim3(BLOCK_SIZE), smem_gating, stream,
@@ -615,9 +615,10 @@ void moe_gate_topk_fused(const void* W_gate, const void* x, int n_experts, int d
     //                + warp scratch (float[8] + int[8])
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     int probs_arrays = score_bias ? 2 : 1;
-    size_t smem = static_cast<size_t>(n_experts) * probs_arrays * sizeof(float) +
-                  static_cast<size_t>(top_k) * sizeof(float) + static_cast<size_t>(top_k) * sizeof(int32_t) +
-                  NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(int);
+    size_t smem = (static_cast<size_t>(n_experts) * probs_arrays * sizeof(float)) +
+                  (static_cast<size_t>(top_k) * sizeof(float)) +
+                  (static_cast<size_t>(top_k) * sizeof(int32_t)) + (NUM_WARPS * sizeof(float)) +
+                  (NUM_WARPS * sizeof(int));
 
     gemv_gate_topk_fused_kernel<<<1, BLOCK_SIZE, smem, stream>>>(static_cast<const half*>(W_gate),
                                                                  static_cast<const half*>(x), n_experts,

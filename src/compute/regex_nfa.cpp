@@ -318,7 +318,7 @@ bool RegexNfa::parse_repeat(Frag& out) {
                 // overflow, i.e. UB, before it is ever compared to a limit.
                 // Saturate at the repeat cap; the caller rejects from there.
                 if (v <= kMaxRepeat)
-                    v = v * 10 + ((*src_)[pos_] - '0');
+                    v = (v * 10) + ((*src_)[pos_] - '0');
                 pos_++;
                 any = true;
             }

@@ -39,7 +39,7 @@ __global__ void embedding_lookup_scalar_kernel(const T* __restrict__ table,
     const int row = token_ids[token];
 
     for (int i = tid; i < d_model; i += blockDim.x) {
-        out[static_cast<int64_t>(token) * d_model + i] = table[static_cast<int64_t>(row) * d_model + i];
+        out[(static_cast<int64_t>(token) * d_model) + i] = table[(static_cast<int64_t>(row) * d_model) + i];
     }
 }
 
@@ -71,7 +71,7 @@ __global__ void embedding_lookup_vec_kernel(const T* __restrict__ table,
     // Handle tail elements (d_model not divisible by 4)
     const int tail_start = vec_d * 4;
     for (int i = tail_start + tid; i < d_model; i += blockDim.x) {
-        out[static_cast<int64_t>(token) * d_model + i] = table[static_cast<int64_t>(row) * d_model + i];
+        out[(static_cast<int64_t>(token) * d_model) + i] = table[(static_cast<int64_t>(row) * d_model) + i];
     }
 }
 
@@ -89,7 +89,7 @@ template __global__ void embedding_lookup_vec_kernel<uint16_t>(const uint16_t*, 
 static __device__ __forceinline__ half dequant_q8_0_element(const uint8_t* __restrict__ row_ptr, int i) {
     int blk = i / 32;
     int q_idx = i % 32;
-    const uint8_t* block_ptr = row_ptr + static_cast<int64_t>(blk) * 34;
+    const uint8_t* block_ptr = row_ptr + (static_cast<int64_t>(blk) * 34);
     half d_val = *reinterpret_cast<const half*>(block_ptr);
     int8_t q = reinterpret_cast<const int8_t*>(block_ptr + 2)[q_idx];
     return __float2half(__half2float(d_val) * static_cast<float>(q));
@@ -99,7 +99,7 @@ static __device__ __forceinline__ half dequant_q8_0_element(const uint8_t* __res
 static __device__ __forceinline__ half dequant_q6k_element(const uint8_t* __restrict__ row_ptr, int idx) {
     int blk = idx / 256;
     int i = idx % 256;
-    const uint8_t* block_ptr = row_ptr + static_cast<int64_t>(blk) * 210;
+    const uint8_t* block_ptr = row_ptr + (static_cast<int64_t>(blk) * 210);
 
     const uint8_t* ql = block_ptr;
     const uint8_t* qh = block_ptr + 128;
@@ -132,8 +132,8 @@ __global__ void embedding_lookup_q8_0_kernel(const uint8_t* __restrict__ table_r
 
     const int blocks_per_row = d_model / 32;
     const int64_t row_bytes = static_cast<int64_t>(blocks_per_row) * 34;
-    const uint8_t* row_ptr = table_raw + static_cast<int64_t>(row) * row_bytes;
-    half* out_row = out + static_cast<int64_t>(token) * d_model;
+    const uint8_t* row_ptr = table_raw + (static_cast<int64_t>(row) * row_bytes);
+    half* out_row = out + (static_cast<int64_t>(token) * d_model);
 
     for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
         out_row[i] = dequant_q8_0_element(row_ptr, i);
@@ -149,8 +149,8 @@ __global__ void embedding_lookup_q6k_kernel(const uint8_t* __restrict__ table_ra
 
     const int blocks_per_row = d_model / 256;
     const int64_t row_bytes = static_cast<int64_t>(blocks_per_row) * 210;
-    const uint8_t* row_ptr = table_raw + static_cast<int64_t>(row) * row_bytes;
-    half* out_row = out + static_cast<int64_t>(token) * d_model;
+    const uint8_t* row_ptr = table_raw + (static_cast<int64_t>(row) * row_bytes);
+    half* out_row = out + (static_cast<int64_t>(token) * d_model);
 
     for (int idx = threadIdx.x; idx < d_model; idx += blockDim.x) {
         out_row[idx] = dequant_q6k_element(row_ptr, idx);
@@ -251,7 +251,7 @@ __global__ void embedding_lookup_fp16_device_kernel(const __half* __restrict__ t
     const int row = d_token_id[0];  // read from device memory
 
     const int vec_d = d_model / 4;
-    const float2* src = reinterpret_cast<const float2*>(table + static_cast<int64_t>(row) * d_model);
+    const float2* src = reinterpret_cast<const float2*>(table + (static_cast<int64_t>(row) * d_model));
     float2* dst = reinterpret_cast<float2*>(out);
 
     for (int i = tid; i < vec_d; i += blockDim.x) {
@@ -260,7 +260,7 @@ __global__ void embedding_lookup_fp16_device_kernel(const __half* __restrict__ t
 
     const int tail_start = vec_d * 4;
     for (int i = tail_start + tid; i < d_model; i += blockDim.x) {
-        out[i] = table[static_cast<int64_t>(row) * d_model + i];
+        out[i] = table[(static_cast<int64_t>(row) * d_model) + i];
     }
 }
 
@@ -272,7 +272,7 @@ __global__ void embedding_lookup_q8_0_device_kernel(const uint8_t* __restrict__ 
 
     const int blocks_per_row = d_model / 32;
     const int64_t row_bytes = static_cast<int64_t>(blocks_per_row) * 34;
-    const uint8_t* row_ptr = table_raw + static_cast<int64_t>(row) * row_bytes;
+    const uint8_t* row_ptr = table_raw + (static_cast<int64_t>(row) * row_bytes);
 
     for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
         out[i] = dequant_q8_0_element(row_ptr, i);
@@ -287,7 +287,7 @@ __global__ void embedding_lookup_q6k_device_kernel(const uint8_t* __restrict__ t
 
     const int blocks_per_row = d_model / 256;
     const int64_t row_bytes = static_cast<int64_t>(blocks_per_row) * 210;
-    const uint8_t* row_ptr = table_raw + static_cast<int64_t>(row) * row_bytes;
+    const uint8_t* row_ptr = table_raw + (static_cast<int64_t>(row) * row_bytes);
 
     for (int idx = threadIdx.x; idx < d_model; idx += blockDim.x) {
         out[idx] = dequant_q6k_element(row_ptr, idx);

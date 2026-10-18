@@ -90,7 +90,7 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit) {
     }
 
     int blocks_got = static_cast<int>(kv_manager_->block_table(req->id).size());
-    int capped = blocks_got * kv_bs - ctx_len;
+    int capped = (blocks_got * kv_bs) - ctx_len;
     if (capped <= 0)
         return 0;
     int steps = std::min(capped, remaining);
@@ -630,8 +630,8 @@ int Engine::step_constrained_pipeline() {
     if (consuming && p.fnext >= 2) {
         const int64_t vocab = model_->config().vocab_size;
         int64_t shape[2] = {1, vocab};
-        row_logits = Tensor(p.d_frows + static_cast<size_t>(p.fnext - 2) * vocab, QType::F32, 2,
-                            shape, /*on_device=*/true);
+        row_logits = Tensor(p.d_frows + (static_cast<size_t>(p.fnext - 2) * vocab), QType::F32, 2, shape,
+                            /*on_device=*/true);
         tick_logits = &row_logits;
     }
     executor_->masked_sample_async(p.state, *tick_logits, p.d_token, p.h_token.as<int32_t>(),

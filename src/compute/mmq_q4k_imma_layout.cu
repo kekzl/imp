@@ -42,8 +42,8 @@ __global__ void mmq_q4k_imma_reorder_kernel(const uint8_t* __restrict__ q4k_bloc
 
     if (row >= N || super_in_row >= blocks_per_row) return;
 
-    const int super_idx = row * blocks_per_row + super_in_row;
-    const uint8_t* bp = q4k_blocks + static_cast<size_t>(super_idx) * kBlockBytes;
+    const int super_idx = (row * blocks_per_row) + super_in_row;
+    const uint8_t* bp = q4k_blocks + (static_cast<size_t>(super_idx) * kBlockBytes);
 
     // Read super-block header: d (FP16) + dmin (FP16).
     __half d_h, dmin_h;
@@ -71,14 +71,14 @@ __global__ void mmq_q4k_imma_reorder_kernel(const uint8_t* __restrict__ q4k_bloc
         const float sc_f = static_cast<float>(sc_u);
         const float m_f = static_cast<float>(m_u);
         s_alpha[tid] = d * sc_f;
-        s_beta[tid] = 8.0f * d * sc_f - dmin * m_f;
+        s_beta[tid] = (8.0f * d * sc_f) - (dmin * m_f);
     }
     __syncthreads();
 
     // Write α, β to output tensors. One thread per sub-block is enough.
     if (tid < kQ4kSubBlocksPerSuper) {
-        const int alpha_idx =
-            row * blocks_per_row * kQ4kSubBlocksPerSuper + super_in_row * kQ4kSubBlocksPerSuper + tid;
+        const int alpha_idx = (row * blocks_per_row * kQ4kSubBlocksPerSuper) +
+                              (super_in_row * kQ4kSubBlocksPerSuper) + tid;
         eff_alpha[alpha_idx] = __float2half(s_alpha[tid]);
         eff_beta[alpha_idx] = __float2half(s_beta[tid]);
     }
@@ -87,16 +87,15 @@ __global__ void mmq_q4k_imma_reorder_kernel(const uint8_t* __restrict__ q4k_bloc
     // For k in [0,256): group=k/64, in_grp=k%64, is_high=(in_grp>=32), byte_in_group=in_grp%32,
     // byte_in_qs=group*32+byte_in_group, sub_block=group*2+is_high.
     const int8_t* w_row = reinterpret_cast<const int8_t*>(w_sym_s8);
-    int8_t* w_super = const_cast<int8_t*>(w_row) +
-                      static_cast<size_t>(row) * static_cast<size_t>(K) +
-                      static_cast<size_t>(super_in_row) * kQK4K;
+    int8_t* w_super = const_cast<int8_t*>(w_row) + (static_cast<size_t>(row) * static_cast<size_t>(K)) +
+                      (static_cast<size_t>(super_in_row) * kQK4K);
 #pragma unroll
     for (int e = tid; e < kQK4K; e += 32) {
         const int group = e >> 6;            // /64
         const int in_grp = e & 63;           // %64
         const int is_high = (in_grp >> 5);   // /32 ∈ {0,1}
         const int byte_in_group = in_grp & 31;
-        const int byte_in_qs = group * 32 + byte_in_group;
+        const int byte_in_qs = (group * 32) + byte_in_group;
         const uint8_t packed = qs[byte_in_qs];
         const int nibble = is_high ? (packed >> 4) : (packed & 0xF);
         const int q_sym = nibble - 8;

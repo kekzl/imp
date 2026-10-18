@@ -260,7 +260,7 @@ size_t exec_ra2_workspace_bytes(int sq, int skv, int nh, int nkv, int hd) {
                  d = static_cast<size_t>(hd);
     using namespace fp4_attn_geom;
     const size_t ntkv = (static_cast<size_t>(skv) + kKvTileTokens - 1) / kKvTileTokens,
-                 tile = kRa2TileBytesPerD * d + kRa2TileBytesExtra;
+                 tile = (kRa2TileBytesPerD * d) + kRa2TileBytesExtra;
     return al(bhk * 3 * 4) + al(bhk * d * 4) + al(bhk * 12) + al(rows * 4) + al(rows * d) +
            al(bhk * ntkv * tile);
 }
@@ -275,17 +275,17 @@ size_t exec_apa_workspace_bytes(int sq, int skv, int nh, int nkv, int hd) {
     using namespace fp4_attn_geom;
     const size_t ntkv = (static_cast<size_t>(skv) + kKvTileTokens - 1) / kKvTileTokens,
                  words = (ntkv + 31) / 32;
-    const size_t nqb = (rows / bhk + kApaQBlockRows - 1) / kApaQBlockRows;
+    const size_t nqb = ((rows / bhk) + kApaQBlockRows - 1) / kApaQBlockRows;
     const size_t rows_p = bhk * nqb * kApaQBlockRows;
     const size_t nchunk = (ntkv + kApaStatsTiles - 1) / kApaStatsTiles;
     const bool wnd = ntkv - 1 > kApaWinSlots * kApaWinTiles;
     const size_t nseg = wnd ? std::max<size_t>(2, (ntkv - 1 + kApaWinTiles - 1) / kApaWinTiles) : 1;
-    const size_t cnt = nseg > 1 ? 2 * nseg * bhk + bhk * nqb : 0;
-    const size_t kv_tiles = wnd ? 1 + kApaWinSlots * kApaWinTiles : ntkv;
+    const size_t cnt = nseg > 1 ? (2 * nseg * bhk) + (bhk * nqb) : 0;
+    const size_t kv_tiles = wnd ? 1 + (kApaWinSlots * kApaWinTiles) : ntkv;
     const size_t seg_state = nseg > 1 ? al(rows_p * 16) + al(rows_p * d * 2) + al(rows_p * 32) : 0;
-    return al((bhk * 3 + 1) * 4) + al(bhk * d * 4) + al(bhk * 12) + al(rows * 4) + al(rows * d) +
+    return al(((bhk * 3) + 1) * 4) + al(bhk * d * 4) + al(bhk * 12) + al(rows * 4) + al(rows * d) +
            al(rows * d / 8) + al(bhk * kv_tiles * kApaTileBytesPerD * d) +
-           al((bhk * nqb * (kApaWarpsHd128 * words + 1) + 2 + cnt) * 4) + al(rows_p * d * 4) +
+           al(((bhk * nqb * ((kApaWarpsHd128 * words) + 1)) + 2 + cnt) * 4) + al(rows_p * d * 4) +
            al(rows_p * 8) + seg_state + al(bhk * nchunk * d * 4);
 }
 
@@ -313,7 +313,7 @@ static void apa_kv_state_demand(const ExecShape& shape, int max_seq_len, ExecT2D
     out.apa_kv_cap = (max_seq_len > 0) ? max_seq_len : shape.max_seq_len_cfg;
     const size_t stride = (exec_apa_kv_state_bytes(shape.kv_heads_max, 128, out.apa_kv_cap) + 255) &
                           ~size_t(255);
-    out.apa_kv_states = stride * static_cast<size_t>(shape.n_layers) + kTakeAlign;
+    out.apa_kv_states = (stride * static_cast<size_t>(shape.n_layers)) + kTakeAlign;
 }
 
 // RA2 prefill workspace, taken once at this bound (attention_ra2_set_workspace_bound): prefill
@@ -388,15 +388,15 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
             k_max = std::max(k_max, k);
         }
         if (ws > 0)
-            out.smallm_scratch = ws + 32 * static_cast<size_t>(k_max / 2) +
-                                 32 * static_cast<size_t>(k_max / 16) + 2 * kTakeAlign;
+            out.smallm_scratch = ws + (32 * static_cast<size_t>(k_max / 2)) +
+                                 (32 * static_cast<size_t>(k_max / 16)) + (2 * kTakeAlign);
     }
 
     // Sampling result scratch: two parities of max_logit_tokens slots, each
     // SAMPLE_SCRATCH_BYTES. max_logit_tokens is max(max_batch_size, 8), the BATCH not the
     // context (AUDIT B53).
     constexpr size_t kSampleScratchBytes =
-        sizeof(int32_t) + 64 * (2 * sizeof(float) + 128 * (sizeof(float) + sizeof(int32_t)));
+        sizeof(int32_t) + (64 * ((2 * sizeof(float)) + (128 * (sizeof(float) + sizeof(int32_t)))));
     const int logit_tokens = std::max(shape.max_batch_size, 8);
     out.sample_scratch = 2ull * static_cast<size_t>(logit_tokens) * kSampleScratchBytes;
     // History-sized penalties: one 16-bit count per vocab entry per row
@@ -409,20 +409,20 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     // sum (ne+1) int64. A few KiB total; charged so the arena is sized for them.
     if (shape.n_experts > 0) {
         const size_t ne = static_cast<size_t>(shape.n_experts);
-        out.moe_arrays = 3 * ne * sizeof(void*)        // d_work_ptrs
-                         + ne * sizeof(float)          // d_fp8_scales
-                         + ne * sizeof(int32_t)        // d_M_per
-                         + ne * sizeof(float)          // d_alpha_compact
-                         + sizeof(int32_t)             // d_na
-                         + (ne + 1) * sizeof(int64_t)  // d_sfa_offsets
-                         + 2 * ne * sizeof(void*)      // d_B_ptrs_cache, d_SFB_ptrs_cache
-                         + ne * sizeof(float)          // d_alpha_full
-                         + ne * sizeof(void*)          // d_weight_ptrs
-                         + ne * sizeof(void*)          // cutlass3x_sfa_ptrs
-                         + 2 * ne * sizeof(void*)      // smallM_ptrs (#2446)
-                         + 3 * ne * sizeof(float)      // smallM_scales (#2446)
+        out.moe_arrays = (3 * ne * sizeof(void*))               // d_work_ptrs
+                         + (ne * sizeof(float))                 // d_fp8_scales
+                         + (ne * sizeof(int32_t))               // d_M_per
+                         + (ne * sizeof(float))                 // d_alpha_compact
+                         + sizeof(int32_t)                      // d_na
+                         + ((ne + 1) * sizeof(int64_t))         // d_sfa_offsets
+                         + (2 * ne * sizeof(void*))             // d_B_ptrs_cache, d_SFB_ptrs_cache
+                         + (ne * sizeof(float))                 // d_alpha_full
+                         + (ne * sizeof(void*))                 // d_weight_ptrs
+                         + (ne * sizeof(void*))                 // cutlass3x_sfa_ptrs
+                         + (2 * ne * sizeof(void*))             // smallM_ptrs (#2446)
+                         + (3 * ne * sizeof(float))             // smallM_scales (#2446)
                          + smallM_table_bytes(shape.n_experts)  // smallM kernel tables (#2451)
-                         + 12 * kTakeAlign;            // per-take 256 B alignment
+                         + (12 * kTakeAlign);                   // per-take 256 B alignment
     }
 
     // dp4a input staging, all three tenants of one sizing family. max_blocks = max(max_k/32,
@@ -465,8 +465,8 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
         const int stride = 2 + hd;
         const int batch = std::max(shape.max_batch_size, 8);
         if (hd > 0) {
-            out.splitk_scratch = static_cast<size_t>(batch) * shape.n_heads * splits * stride *
-                                     sizeof(float) +
+            out.splitk_scratch = (static_cast<size_t>(batch) * shape.n_heads * splits * stride *
+                                  sizeof(float)) +
                                  256;
         }
     }
@@ -477,14 +477,14 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     {
         const int effective = (max_seq_len > 0) ? max_seq_len : shape.max_seq_len_cfg;
         const size_t slots = static_cast<size_t>(effective > 0 ? effective : 4096);
-        out.dry_penalty = slots * (sizeof(int32_t) + sizeof(float)) + 2 * kTakeAlign;
+        out.dry_penalty = (slots * (sizeof(int32_t) + sizeof(float))) + (2 * kTakeAlign);
     }
 
     // cuBLASLt workspace + algo-bench scratch (compute/gemm.cu, gemm_init()): not a function
     // of shape at all. cuBLASLt is handed a workspace CEILING and picks algos that fit
     // inside it, so the number is a policy choice. Charged for every model since gemm_init()
     // is unconditional; the site steps down if the arena can't serve the full amount.
-    out.cublas_workspace = kExecCublasWorkspaceBytes + kExecBenchScratchBytes + 2 * kTakeAlign;
+    out.cublas_workspace = kExecCublasWorkspaceBytes + kExecBenchScratchBytes + (2 * kTakeAlign);
 
     // IMMA prefill activation scratch (mmq_q8_imma.cu) plus its split-K
     // partials. The act triple is M*K int8 + M*(K/32) half + M*(K/32) float =
@@ -492,7 +492,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     if (const ImmaScratchShape imma = exec_imma_scratch_shape(shape, max_seq_len); imma.valid()) {
         const size_t rows = static_cast<size_t>(imma.rows);
         const size_t k = static_cast<size_t>(imma.k);
-        out.imma_scratch = rows * k + rows * (k / 32) * 6 + kExecImmaSplitkBytes + 4 * kTakeAlign;
+        out.imma_scratch = (rows * k) + (rows * (k / 32) * 6) + kExecImmaSplitkBytes + (4 * kTakeAlign);
     }
 
     // Chunk-capture K/V pair (ensure_chunk_capture_scratch): two buffers of ctx * kv_heads *
@@ -501,9 +501,9 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     // bound once, so it's charged here at that size (A7 step 4b.2, AUDIT B13).
     if (shape.capture_ctx_cap > 0 && shape.kv_heads_max > 0 && shape.head_dim_max > 0) {
         const size_t ctx = static_cast<size_t>(shape.capture_ctx_cap);
-        out.chunk_capture = 2 * ctx * static_cast<size_t>(shape.kv_heads_max) *
-                                static_cast<size_t>(shape.head_dim_max) * sizeof(uint16_t) +
-                            2 * kTakeAlign;
+        out.chunk_capture = (2 * ctx * static_cast<size_t>(shape.kv_heads_max) *
+                             static_cast<size_t>(shape.head_dim_max) * sizeof(uint16_t)) +
+                            (2 * kTakeAlign);
     }
 
     // CUTLASS 3.x grouped staging + workspace, MoE models only (same gate engine.cpp puts on
@@ -511,7 +511,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
     // MiB the pre-arena code reserved (AUDIT B73); the arena reserves it before the
     // pre-dequant caches can spend it, which is what makes the smaller number safe.
     if (shape.is_moe)
-        out.grouped3x = kExecGrouped3xStagingBytes + kExecGrouped3xWorkspaceBytes + 2 * kTakeAlign;
+        out.grouped3x = kExecGrouped3xStagingBytes + kExecGrouped3xWorkspaceBytes + (2 * kTakeAlign);
 
     out.ra2_scratch = ra2_scratch_demand(shape, t, max_seq_len);
     out.apa_scratch = apa_scratch_demand(shape, t, max_seq_len);
@@ -532,7 +532,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
         out.mla_scratch += 4 * kTakeAlign;  // four takes
         // q_lora q_a take (V3, GLM); q_lora_rank 0 adds nothing.
         const size_t q_lora = static_cast<size_t>(std::max(shape.q_lora_rank, 0));
-        out.mla_scratch += T * 2 * q_lora + kTakeAlign * static_cast<size_t>(q_lora > 0);
+        out.mla_scratch += (T * 2 * q_lora) + (kTakeAlign * static_cast<size_t>(q_lora > 0));
 
         // Absorbed-decode latent cache: sized from the FULL sequence length, NOT max_tokens
         // (mla_absorb_max_seq_ is deliberately uncapped where max_tokens_ clamps at 4096).
@@ -549,7 +549,7 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
 
     // Parallel-block residual pair (take_parallel_block_buffers_): two takes, no degradation.
     out.parallel_block = static_cast<size_t>(shape.parallel_block) * 2 *
-                         (static_cast<size_t>(t) * static_cast<size_t>(shape.d_model) * 2 + kTakeAlign);
+                         ((static_cast<size_t>(t) * static_cast<size_t>(shape.d_model) * 2) + kTakeAlign);
 
     // FP8 activation reduction scratch. Mirrors the max_dim ladder and the grid
     // arithmetic in executor_workspace_buffers.cu exactly: kElemsPerThread=4,
@@ -565,13 +565,13 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
         if (shape.ssm_inner_size > 0) {
             max_dim = std::max(max_dim, shape.ssm_inner_size + shape.ssm_conv_channels +
                                             shape.ssm_dt_rank);
-            max_dim = std::max(max_dim, shape.ssm_conv_channels + shape.ssm_inner_size +
-                                            2 * shape.ssm_dt_rank);
+            max_dim = std::max(max_dim,
+                               shape.ssm_conv_channels + shape.ssm_inner_size + (2 * shape.ssm_dt_rank));
             max_dim = std::max(max_dim, shape.ssm_inner_size);
         }
         const size_t act = static_cast<size_t>(t) * static_cast<size_t>(max_dim);
-        const size_t grid = ((act + 3) / 4 + 255) / 256;
-        out.fp8_reduction = grid * sizeof(float) + 2 * sizeof(float) + 3 * kTakeAlign;
+        const size_t grid = (((act + 3) / 4) + 255) / 256;
+        out.fp8_reduction = (grid * sizeof(float)) + (2 * sizeof(float)) + (3 * kTakeAlign);
     }
 
     return out;

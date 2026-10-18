@@ -25,14 +25,14 @@ __global__ void decode_pipeline_advance_kernel(int n_rows, const char* __restric
                                                const int* __restrict__ hist_pos) {
     int i = threadIdx.x;
     if (i < n_rows) {
-        const int32_t tok = *reinterpret_cast<const int32_t*>(slot_base + i * slot_stride_bytes);
+        const int32_t tok = *reinterpret_cast<const int32_t*>(slot_base + (i * slot_stride_bytes));
         token_ids[i] = tok;
         positions[i] += 1;
         context_lens[i] += 1;
         // Per-row output-token history append: penalty rows sample the NEXT
         // step against a history that includes this (host-unseen) token.
         if (hist_base != nullptr)
-            hist_base[static_cast<size_t>(i) * hist_stride + hist_pos[i]] = tok;
+            hist_base[(static_cast<size_t>(i) * hist_stride) + hist_pos[i]] = tok;
     } else if (i < n_rows + n_patches) {
         block_tables[patch_offsets[i - n_rows]] = patch_values[i - n_rows];
     }

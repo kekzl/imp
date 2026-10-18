@@ -26,11 +26,11 @@ int64_t bytes_for_tier(int64_t rows, int64_t cols, StorageTier tier) {
         case StorageTier::FP8:
             return n + 4;  // packed bytes + per-tensor scale
         case StorageTier::NVFP4:
-            return n / 2 + n / 16;  // packed FP4 + micro-scales
+            return (n / 2) + (n / 16);  // packed FP4 + micro-scales
         case StorageTier::CUTLASS_NVFP4:
-            return n / 2 + n / 16;
+            return (n / 2) + (n / 16);
         case StorageTier::MXFP4:
-            return n / 2 + n / 32;
+            return (n / 2) + (n / 32);
         case StorageTier::Undefined:
             return 0;
     }
@@ -153,8 +153,7 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg, const PlanH
     // If the model has more layers than cfg.n_layers, iterate over all of them.
     // In synthetic test models, layers_ is populated directly so we use the
     // larger of the two.
-    if (model.n_layers() > n_layers)
-        n_layers = model.n_layers();
+    n_layers = std::max(n_layers, model.n_layers());
 
     for (int i = 0; i < n_layers; ++i) {
         const auto& L = model.layer(i);

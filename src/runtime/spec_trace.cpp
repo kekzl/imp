@@ -12,7 +12,7 @@ namespace imp {
 std::string spec_trace_top2_gaps(const float* logits, int n_rows, size_t vocab) {
     std::string s;
     for (int j = 0; j < n_rows; ++j) {
-        const float* row = logits + static_cast<size_t>(j) * vocab;
+        const float* row = logits + (static_cast<size_t>(j) * vocab);
         // Two passes would read 2 MB twice; one pass keeping the best two is
         // enough and this runs per verify step when the flag is on.
         float b1 = -3e38f, b2 = -3e38f;

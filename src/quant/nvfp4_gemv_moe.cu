@@ -33,18 +33,18 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_moe_decode_kernel
     const int n_mb = K / kMicroBlockSize;
     const int expert_id = expert_indices[expert_slot];
 
-    const uint8_t* W = packed_data + (size_t)expert_id * expert_stride_packed;
-    const uint8_t* MS = micro_scales + (size_t)expert_id * expert_stride_ms;
+    const uint8_t* W = packed_data + ((size_t)expert_id * expert_stride_packed);
+    const uint8_t* MS = micro_scales + ((size_t)expert_id * expert_stride_ms);
     float ts = tensor_scales[expert_id];
-    const half* xi = x + (size_t)(expert_slot / x_group) * x_stride;
+    const half* xi = x + ((size_t)(expert_slot / x_group) * x_stride);
 
     __shared__ SmemKpar smem;
 
-    float acc = gemv_nvfp4_row(W + (size_t)row * (K / 2), MS + (size_t)row * n_mb, ts, xi, n_mb, tid);
+    float acc = gemv_nvfp4_row(W + ((size_t)row * (K / 2)), MS + ((size_t)row * n_mb), ts, xi, n_mb, tid);
 
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0)
-        y[(size_t)expert_slot * rows + row] = __float2half(total);
+        y[((size_t)expert_slot * rows) + row] = __float2half(total);
 }
 
 // Fused gate+up MoE NVFP4 GEMV. Grid: dim3(top_k*rows,2), blockIdx.y=0->gate, y=1->up.
@@ -65,10 +65,10 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_moe_gate_up_fused
     const int expert_id = expert_indices[expert_slot];
     const bool is_up = (blockIdx.y == 1);
 
-    const uint8_t* W = is_up ? (up_packed + (size_t)expert_id * expert_stride_packed)
-                             : (gate_packed + (size_t)expert_id * expert_stride_packed);
-    const uint8_t* MS = is_up ? (up_ms + (size_t)expert_id * expert_stride_ms)
-                              : (gate_ms + (size_t)expert_id * expert_stride_ms);
+    const uint8_t* W = is_up ? (up_packed + ((size_t)expert_id * expert_stride_packed))
+                             : (gate_packed + ((size_t)expert_id * expert_stride_packed));
+    const uint8_t* MS = is_up ? (up_ms + ((size_t)expert_id * expert_stride_ms))
+                              : (gate_ms + ((size_t)expert_id * expert_stride_ms));
     float ts = is_up ? up_ts[expert_id] : gate_ts[expert_id];
     half* out = is_up ? y_up : y_gate;
 
@@ -77,11 +77,11 @@ __global__ void __launch_bounds__(kKparThreads, 12) gemv_nvfp4_moe_gate_up_fused
 
     __shared__ SmemKpar smem;
 
-    float acc = gemv_nvfp4_row(W + (size_t)row * (K / 2), MS + (size_t)row * n_mb, ts, xi, n_mb, tid);
+    float acc = gemv_nvfp4_row(W + ((size_t)row * (K / 2)), MS + ((size_t)row * n_mb), ts, xi, n_mb, tid);
 
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0)
-        out[(size_t)expert_slot * rows + row] = __float2half(total);
+        out[((size_t)expert_slot * rows) + row] = __float2half(total);
 }
 
 // Multi-row MoE NVFP4 kernels: 8 warps (256 threads), NR rows/block, truly fused gate+up
@@ -104,7 +104,7 @@ __global__ void gemv_nvfp4_moe_gate_up_mr_kernel(
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
 
-    const int row = local_block * NR + warp_id;
+    const int row = (local_block * NR) + warp_id;
     if (row >= rows || warp_id >= NR)
         return;
 
@@ -112,15 +112,15 @@ __global__ void gemv_nvfp4_moe_gate_up_mr_kernel(
     const int expert_id = expert_indices[expert_slot];
     const bool is_up = (blockIdx.y == 1);
 
-    const uint8_t* W = is_up ? (up_packed + (size_t)expert_id * expert_stride_packed)
-                             : (gate_packed + (size_t)expert_id * expert_stride_packed);
-    const uint8_t* MS = is_up ? (up_ms + (size_t)expert_id * expert_stride_ms)
-                              : (gate_ms + (size_t)expert_id * expert_stride_ms);
+    const uint8_t* W = is_up ? (up_packed + ((size_t)expert_id * expert_stride_packed))
+                             : (gate_packed + ((size_t)expert_id * expert_stride_packed));
+    const uint8_t* MS = is_up ? (up_ms + ((size_t)expert_id * expert_stride_ms))
+                              : (gate_ms + ((size_t)expert_id * expert_stride_ms));
     float ts = is_up ? up_ts[expert_id] : gate_ts[expert_id];
     half* out = is_up ? y_up : y_gate;
 
-    const uint8_t* row_packed = W + (size_t)row * (K / 2);
-    const uint8_t* row_ms = MS + (size_t)row * n_mb;
+    const uint8_t* row_packed = W + ((size_t)row * (K / 2));
+    const uint8_t* row_ms = MS + ((size_t)row * n_mb);
 
     float acc = warp_k_loop(row_packed, row_ms, ts, n_mb, lane, [&] __device__(const uint8_t* pb, int off) {
         return dot_micro_block(pb, x, off);
@@ -128,7 +128,7 @@ __global__ void gemv_nvfp4_moe_gate_up_mr_kernel(
 
     acc = warp_reduce(acc);
     if (lane == 0)
-        out[(size_t)expert_slot * rows + row] = __float2half(acc);
+        out[((size_t)expert_slot * rows) + row] = __float2half(acc);
 }
 
 // Multi-row MoE NVFP4 decode (single weight matrix, e.g., non-gated up or down).
@@ -148,17 +148,17 @@ __global__ void gemv_nvfp4_moe_decode_mr_kernel(const uint8_t* __restrict__ pack
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
 
-    const int row = local_block * NR + warp_id;
+    const int row = (local_block * NR) + warp_id;
     if (row >= rows || warp_id >= NR)
         return;
 
     const int n_mb = K / kMicroBlockSize;
     const int expert_id = expert_indices[expert_slot];
 
-    const uint8_t* W = packed_data + (size_t)expert_id * expert_stride_packed + (size_t)row * (K / 2);
-    const uint8_t* MS = micro_scales + (size_t)expert_id * expert_stride_ms + (size_t)row * n_mb;
+    const uint8_t* W = packed_data + ((size_t)expert_id * expert_stride_packed) + ((size_t)row * (K / 2));
+    const uint8_t* MS = micro_scales + ((size_t)expert_id * expert_stride_ms) + ((size_t)row * n_mb);
     float ts = tensor_scales[expert_id];
-    const half* xi = x + (size_t)(expert_slot / x_group) * x_stride;
+    const half* xi = x + ((size_t)(expert_slot / x_group) * x_stride);
 
     float acc = warp_k_loop(W, MS, ts, n_mb, lane, [&] __device__(const uint8_t* pb, int off) {
         return dot_micro_block(pb, xi, off);
@@ -166,7 +166,7 @@ __global__ void gemv_nvfp4_moe_decode_mr_kernel(const uint8_t* __restrict__ pack
 
     acc = warp_reduce(acc);
     if (lane == 0)
-        y[(size_t)expert_slot * rows + row] = __float2half(acc);
+        y[((size_t)expert_slot * rows) + row] = __float2half(acc);
 }
 
 // ---------------------------------------------------------------------------

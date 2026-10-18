@@ -9,7 +9,7 @@ namespace {
 
 __global__ void cfg_combine_kernel(float* __restrict__ cond, const float* __restrict__ uncond, float scale,
                                    int n) {
-    const int i = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int i = (static_cast<int>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i < n)
         cond[i] += scale * (cond[i] - uncond[i]);
 }

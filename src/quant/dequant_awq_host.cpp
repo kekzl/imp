@@ -32,7 +32,8 @@ void dequant4_host(__half* out, const int32_t* qweight, const int32_t* qzeros, c
                    int K, int group_size) {
     for (int n = 0; n < N; ++n)
         for (int k = 0; k < K; ++k)
-            out[static_cast<int64_t>(n) * K + k] = dequant_elem(qweight, qzeros, scales, N, group_size, k, n);
+            out[(static_cast<int64_t>(n) * K) + k] = dequant_elem(qweight, qzeros, scales, N, group_size, k,
+                                                                  n);
 }
 
 }  // namespace imp::awq

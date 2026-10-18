@@ -25,6 +25,8 @@
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 
+#include <algorithm>
+
 namespace imp {
 
 // dispatch_gemv_residual: from executor_gemv_helpers.h
@@ -67,10 +69,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             if (!p)
                 return;
             auto* cp = static_cast<const char*>(p);
-            if (cp < lo)
-                lo = cp;
-            if (cp + sz > hi)
-                hi = cp + sz;
+            lo = std::min(lo, cp);
+            hi = std::max(hi, cp + sz);
         };
         if (!ly.w_gate.dropped_source)
             update(ly.w_gate.data, ly.w_gate.nbytes());
@@ -98,7 +98,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                  hwd->payload.mxfp4.linear_scales != nullptr);
     // NVFP4 down: primary tier OR Phase-3 secondary NVFP4 decode cache
     // (Q8_0/Q6_K/Q5_K models). c8763ad refactor dropped the secondary check.
-    const bool wd_nvfp4_secondary = (wcache_.nvfp4.count(ly.w_down.data) != 0);
+    const bool wd_nvfp4_secondary = (wcache_.nvfp4.contains(ly.w_down.data));
     bool will_fuse_down_nvfp4 = (!has_post_ffn_norm && !will_fuse_down_mxfp4 && n == 1 &&
                                  h.qtype == QType::F16 &&
                                  (wd_tier == StorageTier::NVFP4 || wd_nvfp4_secondary));

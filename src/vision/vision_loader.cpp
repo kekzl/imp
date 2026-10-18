@@ -128,7 +128,7 @@ bool upload_tensor_fp16_transposed(const void* src, GgufWireType type, int64_t r
     std::vector<half> h_dst(static_cast<size_t>(n));
     for (int64_t r = 0; r < rows; r++)
         for (int64_t c = 0; c < cols; c++)
-            h_dst[c * rows + r] = h_src[r * cols + c];
+            h_dst[(c * rows) + r] = h_src[(r * cols) + c];
 
     auto slab = engine_arena().take_bytes(static_cast<size_t>(n) * sizeof(half));
     if (slab.empty()) {
@@ -461,7 +461,7 @@ static std::unique_ptr<VisionModel> load_vision_gguf_impl(const std::string& pat
             assigned++;
         }
         // Layer weights: "v.blk.{i}.{field}"
-        else if (name.substr(0, 6) == "v.blk.") {
+        else if (name.starts_with("v.blk.")) {
             const int layer_idx = vision_blk_layer_index(name);
             if (layer_idx < 0 || layer_idx >= cfg.num_layers)
                 continue;

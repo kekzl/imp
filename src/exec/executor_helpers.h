@@ -4,6 +4,7 @@
 #include "core/tensor.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <vector>
 
 namespace imp {
@@ -74,8 +75,7 @@ static inline void set_l2_streaming(cudaStream_t stream, const void* ptr, size_t
             s_max_bytes = 128ULL * 1024 * 1024;  // conservative fallback
         }
     }
-    if (bytes > s_max_bytes)
-        bytes = s_max_bytes;
+    bytes = std::min(bytes, s_max_bytes);
     cudaStreamAttrValue attr = {};
     attr.accessPolicyWindow.base_ptr = const_cast<void*>(ptr);
     attr.accessPolicyWindow.num_bytes = bytes;

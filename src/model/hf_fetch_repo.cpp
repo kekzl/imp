@@ -14,11 +14,11 @@ namespace {
 constexpr const char* kScheme = "hf://";
 
 bool ends_with(const std::string& s, const std::string& suffix) {
-    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+    return s.size() >= suffix.size() && s.ends_with(suffix);
 }
 
 bool valid_repo_part(const std::string& p) {
-    if (p.empty() || p.front() == '.' || p.front() == '-' || p.find("..") != std::string::npos)
+    if (p.empty() || p.front() == '.' || p.front() == '-' || p.contains(".."))
         return false;
     return std::all_of(p.begin(), p.end(), [](char c) {
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' ||
@@ -39,7 +39,7 @@ std::string join_names(const std::vector<std::string>& names, size_t limit = 20)
 }
 
 bool is_safetensors_set_member(const std::string& name) {
-    if (name.find('/') != std::string::npos)
+    if (name.contains('/'))
         return false;
     return ends_with(name, ".safetensors") || ends_with(name, ".json") || ends_with(name, ".jinja") ||
            name == "tokenizer.model" || name == "merges.txt" || name == "vocab.txt";
@@ -55,8 +55,7 @@ bool is_commit_sha(const std::string& s) {
 
 // A repo file name becomes a path under the snapshot dir: no absolute path, no "..".
 bool is_safe_repo_path(const std::string& f) {
-    if (f.empty() || f.front() == '/' || f.find('\\') != std::string::npos ||
-        f.find('\0') != std::string::npos)
+    if (f.empty() || f.front() == '/' || f.contains('\\') || f.contains('\0'))
         return false;
     size_t start = 0;
     while (start <= f.size()) {
@@ -71,7 +70,7 @@ bool is_safe_repo_path(const std::string& f) {
     return true;
 }
 
-bool is_hf_uri(const std::string& s) { return s.rfind(kScheme, 0) == 0; }
+bool is_hf_uri(const std::string& s) { return s.starts_with(kScheme); }
 
 bool parse_hf_uri(const std::string& s, HfUri& out, std::string& err) {
     if (!is_hf_uri(s)) {

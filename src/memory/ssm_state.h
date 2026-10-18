@@ -54,13 +54,13 @@ public:
     // Base pointer / size of one sequence's full state slab (all layers,
     // conv + h contiguous) — the unit copied by recurrent-state snapshots.
     void* seq_base(int seq_id) {
-        return static_cast<char*>(pool_) + static_cast<size_t>(seq_id) * slot_stride_bytes_;
+        return static_cast<char*>(pool_) + (static_cast<size_t>(seq_id) * slot_stride_bytes_);
     }
     size_t per_seq_bytes() const { return per_seq_bytes_; }
     // Per-slot tail after the layers (init's extra_bytes_per_slot): reset, snapshots and
     // spec rollback move it with the slab. nullptr when init reserved none.
     void* extra_state(int seq_id) {
-        return extra_bytes_ ? static_cast<char*>(seq_base(seq_id)) + per_layer_bytes_ * n_ssm_layers_
+        return extra_bytes_ ? static_cast<char*>(seq_base(seq_id)) + (per_layer_bytes_ * n_ssm_layers_)
                             : nullptr;
     }
     size_t extra_bytes() const { return extra_bytes_; }
@@ -73,13 +73,14 @@ public:
     // scratch rather than a live sequence. Speculative verify writes a second, mid-chunk
     // state into one of these so a partial acceptance can adopt it instead of re-forwarding.
     void* conv_state_in(void* slab, int ssm_layer_idx) const {
-        return static_cast<char*>(slab) + static_cast<size_t>(ssm_layer_idx) * per_layer_bytes_;
+        return static_cast<char*>(slab) + (static_cast<size_t>(ssm_layer_idx) * per_layer_bytes_);
     }
     void* extra_state_in(void* slab) const {
-        return extra_bytes_ ? static_cast<char*>(slab) + per_layer_bytes_ * n_ssm_layers_ : nullptr;
+        return extra_bytes_ ? static_cast<char*>(slab) + (per_layer_bytes_ * n_ssm_layers_) : nullptr;
     }
     void* h_state_in(void* slab, int ssm_layer_idx) const {
-        return static_cast<char*>(slab) + static_cast<size_t>(ssm_layer_idx) * per_layer_bytes_ + conv_bytes_;
+        return static_cast<char*>(slab) + (static_cast<size_t>(ssm_layer_idx) * per_layer_bytes_) +
+               conv_bytes_;
     }
 
     // Live slots [0, max_sequences()): the scheduler's pool. Reserved slots

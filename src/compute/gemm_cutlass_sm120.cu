@@ -190,8 +190,8 @@ __device__ __host__ __forceinline__ int sfatom_offset(int row, int k_group, int 
     int n0 = row_local % 32;  // within 32-row sub-block
     int n1 = row_local / 32;  // which of 4 sub-blocks
 
-    int atom_offset = n0 * 16 + n1 * 4 + k_local;
-    int tile_base = (tile_row * n_k_tiles + tile_k) * kAtomSize;
+    int atom_offset = (n0 * 16) + (n1 * 4) + k_local;
+    int tile_base = ((tile_row * n_k_tiles) + tile_k) * kAtomSize;
     return tile_base + atom_offset;
 }
 
@@ -212,7 +212,7 @@ size_t cutlass_nvfp4_sf_size(int rows, int K) {
 __global__ void convert_scales_sfatom_kernel(const uint8_t* __restrict__ src_ms,  // [N, K/16] linear
                                              uint8_t* __restrict__ dst_sf,        // SfAtom layout
                                              int N, int K, int n_k_tiles) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     int K_groups = K / kSFVecSize;
     int total = N * K_groups;
     if (idx >= total)
@@ -236,15 +236,15 @@ __global__ void convert_scales_sfatom_moe_kernel(const uint8_t* __restrict__ src
                                                  uint8_t* __restrict__ dst_sf, int N, int K,
                                                  int n_k_tiles, size_t native_stride_per_expert,
                                                  size_t sfatom_stride_per_expert) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     int K_groups = K / kSFVecSize;
     int total = N * K_groups;
     if (idx >= total)
         return;
 
     int e = blockIdx.y;
-    const uint8_t* src_e = src_ms + static_cast<size_t>(e) * native_stride_per_expert;
-    uint8_t* dst_e = dst_sf + static_cast<size_t>(e) * sfatom_stride_per_expert;
+    const uint8_t* src_e = src_ms + (static_cast<size_t>(e) * native_stride_per_expert);
+    uint8_t* dst_e = dst_sf + (static_cast<size_t>(e) * sfatom_stride_per_expert);
 
     int n = idx / K_groups;
     int k_group = idx % K_groups;
@@ -317,7 +317,7 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4_from_vals(const float
 
     *sfa_target = ue4m3;
 
-    uint8_t* packed_at = packed_out_row + static_cast<int64_t>(k_group) * (kSFVecSize / 2);
+    uint8_t* packed_at = packed_out_row + (static_cast<int64_t>(k_group) * (kSFVecSize / 2));
 #pragma unroll
     for (int i = 0; i < kSFVecSize; i += 2) {
         float s0 = vals[i] * inv_scale;
@@ -332,15 +332,15 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* input_row
     float vals[kSFVecSize];
     float local_absmax = 0.0f;
     const half2* src_h2 = reinterpret_cast<const half2*>(input_row_base +
-                                                         static_cast<int64_t>(k_group) * kSFVecSize);
+                                                         (static_cast<int64_t>(k_group) * kSFVecSize));
     // #2218 bounded: i * 2 <= 14 (loop i < kSFVecSize / 2, kSFVecSize = 16 at :174)
 #pragma unroll
     for (int i = 0; i < kSFVecSize / 2; i++) {
         half2 h2 = src_h2[i];
         vals[static_cast<ptrdiff_t>(i * 2)] = __half2float(h2.x);
-        vals[i * 2 + 1] = __half2float(h2.y);
+        vals[(i * 2) + 1] = __half2float(h2.y);
         local_absmax = fmaxf(local_absmax,
-                             fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[i * 2 + 1])));
+                             fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[(i * 2) + 1])));
     }
     quantize_micro_block_nvfp4_from_vals(vals, local_absmax, packed_out_row, k_group, sfa_target);
 }
@@ -352,7 +352,7 @@ __global__ void quantize_fp16_nvfp4_cutlass_kernel(
     uint8_t* __restrict__ packed_out,  // [M, K/2] packed nibbles
     uint8_t* __restrict__ sf_out,      // SfAtom layout UE4M3
     int M, int K, int n_k_tiles) {
-    int mb_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int mb_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     int K_groups = K / kSFVecSize;
     int total_mb = M * K_groups;
     if (mb_idx >= total_mb)
@@ -361,8 +361,8 @@ __global__ void quantize_fp16_nvfp4_cutlass_kernel(
     int row = mb_idx / K_groups;
     int k_group = mb_idx % K_groups;
 
-    quantize_micro_block_nvfp4(input + static_cast<int64_t>(row) * K, k_group,
-                               packed_out + static_cast<int64_t>(row) * (K / 2),
+    quantize_micro_block_nvfp4(input + (static_cast<int64_t>(row) * K), k_group,
+                               packed_out + (static_cast<int64_t>(row) * (K / 2)),
                                sf_out + sfatom_offset(row, k_group, n_k_tiles));
 }
 
@@ -390,7 +390,7 @@ __global__ void quantize_fp16_nvfp4_cutlass_moe_kernel(
     uint8_t* const* __restrict__ sfa_bases,  // [ne] per-expert SFA base (may be null)
     const int* __restrict__ offsets,         // [ne+1] cumulative row offsets
     int expanded, int K, int ne, int n_k_tiles) {
-    int mb_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int mb_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     int K_groups = K / kSFVecSize;
     if (mb_idx >= expanded * K_groups)
         return;
@@ -408,8 +408,8 @@ __global__ void quantize_fp16_nvfp4_cutlass_moe_kernel(
     // intermediate when the upstream moe_gather is skipped (gated on a lazy-gather
     // addition in the legacy MoE fallback, see docs/plans/moe_prefill_cudagraph_*.md).
     const int src_row = (gather != nullptr) ? gather[row] : row;
-    quantize_micro_block_nvfp4(input + static_cast<int64_t>(src_row) * K, k_group,
-                               packed_out + static_cast<int64_t>(row) * (K / 2),
+    quantize_micro_block_nvfp4(input + (static_cast<int64_t>(src_row) * K), k_group,
+                               packed_out + (static_cast<int64_t>(row) * (K / 2)),
                                sfa + sfatom_offset(local_row, k_group, n_k_tiles));
 }
 
@@ -604,7 +604,7 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
     int expanded, int K, int ne, int n_k_tiles,
     const half* __restrict__ gate_bias,  // [ne, K], read only when kAct == GPT_OSS_GLU
     const half* __restrict__ up_bias) {  // [ne, K], read only when kAct == GPT_OSS_GLU
-    int mb_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int mb_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     int K_groups = K / kSFVecSize;
     if (mb_idx >= expanded * K_groups)
         return;
@@ -620,10 +620,11 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
     // Compute 16 activation values + their absmax in registers.
     float vals[kSFVecSize];
     float local_absmax = 0.0f;
-    const int64_t row_off = static_cast<int64_t>(row) * K + static_cast<int64_t>(k_group) * kSFVecSize;
+    const int64_t row_off = (static_cast<int64_t>(row) * K) + (static_cast<int64_t>(k_group) * kSFVecSize);
     const half2* up_h2 = reinterpret_cast<const half2*>(up + row_off);
     const half2* gate_h2 = (gate != nullptr) ? reinterpret_cast<const half2*>(gate + row_off) : nullptr;
-    const int64_t bias_off = static_cast<int64_t>(expert) * K + static_cast<int64_t>(k_group) * kSFVecSize;
+    const int64_t bias_off = (static_cast<int64_t>(expert) * K) +
+                             (static_cast<int64_t>(k_group) * kSFVecSize);
 
     constexpr float kGeluSqrt2OverPi = 0.7978845608028654f;
     constexpr float kGeluCoeff = 0.044715f;
@@ -645,10 +646,8 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
             half2 gh2 = gate_h2[i];
             float g0 = __half2float(gh2.x);
             float g1 = __half2float(gh2.y);
-            float gelu0 = g0 * 0.5f *
-                          (1.0f + tanhf(kGeluSqrt2OverPi * (g0 + kGeluCoeff * g0 * g0 * g0)));
-            float gelu1 = g1 * 0.5f *
-                          (1.0f + tanhf(kGeluSqrt2OverPi * (g1 + kGeluCoeff * g1 * g1 * g1)));
+            float gelu0 = g0 * 0.5f * (1.0f + tanhf(kGeluSqrt2OverPi * (g0 + (kGeluCoeff * g0 * g0 * g0))));
+            float gelu1 = g1 * 0.5f * (1.0f + tanhf(kGeluSqrt2OverPi * (g1 + (kGeluCoeff * g1 * g1 * g1))));
             v0 = fminf(fmaxf(gelu0 * u0, -65504.0f), 65504.0f);
             v1 = fminf(fmaxf(gelu1 * u1, -65504.0f), 65504.0f);
         } else if (kAct == 3) {  // GPT_OSS_GLU: FP16 bias add + FP16 GLU output, as the 4-launch path
@@ -661,14 +660,13 @@ __global__ void fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel(
             v1 = (u1 > 0.0f) ? (u1 * u1) : 0.0f;
         }
         vals[static_cast<ptrdiff_t>(i * 2)] = v0;
-        vals[i * 2 + 1] = v1;
+        vals[(i * 2) + 1] = v1;
         local_absmax = fmaxf(local_absmax, fmaxf(fabsf(v0), fabsf(v1)));
     }
 
-    quantize_micro_block_nvfp4_from_vals(
-        vals, local_absmax,
-        packed_out + static_cast<int64_t>(row) * (K / 2), k_group,
-        sfa + sfatom_offset(local_row, k_group, n_k_tiles));
+    quantize_micro_block_nvfp4_from_vals(vals, local_absmax,
+                                         packed_out + (static_cast<int64_t>(row) * (K / 2)), k_group,
+                                         sfa + sfatom_offset(local_row, k_group, n_k_tiles));
 }
 
 void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const void* up_fp16,
@@ -689,7 +687,7 @@ void fused_act_quantize_fp16_to_nvfp4_cutlass_moe(const void* gate_fp16, const v
 
     const int n_k_tiles = (K + kAtomKElems - 1) / kAtomKElems;
     const int threads = 256;
-    const int blocks = (expanded * (K / kSFVecSize) + threads - 1) / threads;
+    const int blocks = ((expanded * (K / kSFVecSize)) + threads - 1) / threads;
     auto* kernel = act_type == FFNActivation::SWIGLU  ? fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<0>
                    : act_type == FFNActivation::GEGLU ? fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<1>
                    : gpt_oss                          ? fused_act_quantize_fp16_nvfp4_cutlass_moe_kernel<3>
@@ -711,7 +709,7 @@ __global__ void swiglu_quantize_fp16_nvfp4_cutlass_kernel(const half* __restrict
                                                           uint8_t* __restrict__ sf_out, int M, int K,
                                                           int n_k_tiles) {
     const int k_groups = K / kSFVecSize;
-    const int64_t mb = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t mb = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (mb >= static_cast<int64_t>(M) * k_groups)
         return;
     const int row = static_cast<int>(mb / k_groups);
@@ -734,14 +732,14 @@ __global__ void swiglu_quantize_fp16_nvfp4_cutlass_kernel(const half* __restrict
             o2[k] = __float22half2_rn(
                 make_float2(gf.x / (1.0f + __expf(-gf.x)) * uf.x, gf.y / (1.0f + __expf(-gf.y)) * uf.y));
             const float2 rf = __half22float2(o2[k]);
-            vals[v * 8 + k * 2] = rf.x;
-            vals[v * 8 + k * 2 + 1] = rf.y;
+            vals[(v * 8) + (k * 2)] = rf.x;
+            vals[(v * 8) + (k * 2) + 1] = rf.y;
             amax = fmaxf(amax, fmaxf(fabsf(rf.x), fabsf(rf.y)));
         }
     }
     reinterpret_cast<float4*>(out + base)[0] = ov[0];
     reinterpret_cast<float4*>(out + base)[1] = ov[1];
-    quantize_micro_block_nvfp4_from_vals(vals, amax, packed_out + static_cast<int64_t>(row) * (K / 2),
+    quantize_micro_block_nvfp4_from_vals(vals, amax, packed_out + (static_cast<int64_t>(row) * (K / 2)),
                                          k_group, sf_out + sfatom_offset(row, k_group, n_k_tiles));
 }
 
@@ -750,7 +748,8 @@ void swiglu_quantize_fp16_to_nvfp4_cutlass(const void* gate_fp16, const void* up
     IMP_CHECK(K % kSFVecSize == 0, "swiglu_quantize_fp16_to_nvfp4_cutlass: K=%d must be multiple of %d", K,
               kSFVecSize);
     const int threads = 256;
-    const int blocks = static_cast<int>((static_cast<int64_t>(M) * (K / kSFVecSize) + threads - 1) / threads);
+    const int blocks = static_cast<int>(((static_cast<int64_t>(M) * (K / kSFVecSize)) + threads - 1) /
+                                        threads);
     swiglu_quantize_fp16_nvfp4_cutlass_kernel<<<blocks, threads, 0, stream>>>(
         static_cast<const half*>(gate_fp16), static_cast<const half*>(up_fp16), static_cast<half*>(out_fp16),
         static_cast<uint8_t*>(dst_data), static_cast<uint8_t*>(dst_sf), M, K,

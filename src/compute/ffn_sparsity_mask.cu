@@ -73,11 +73,11 @@ __global__ void gemv_q8_0_q8_1_residual_masked_kernel(const uint8_t* __restrict_
 
     const int total_q8 = K / kBlockElems;
     const size_t row_bytes = static_cast<size_t>(total_q8) * kBlockBytes;
-    const uint8_t* row_w = W + static_cast<size_t>(row) * row_bytes;
+    const uint8_t* row_w = W + (static_cast<size_t>(row) * row_bytes);
 
     float sum = 0.0f;
     constexpr int STRIDE = NWARPS * 32;
-    for (int b = warp_id * 32 + lane; b < total_q8; b += STRIDE) {
+    for (int b = (warp_id * 32) + lane; b < total_q8; b += STRIDE) {
         // Mask test — skip block if its bit is 0.
         if (!((mask[b >> 5] >> (b & 31)) & 1u)) continue;
 
@@ -85,7 +85,7 @@ __global__ void gemv_q8_0_q8_1_residual_masked_kernel(const uint8_t* __restrict_
         memcpy(xi, q8_1[b].qs, 32);
         const float dq = d8[b];
 
-        const uint8_t* bp = row_w + static_cast<size_t>(b) * kBlockBytes;
+        const uint8_t* bp = row_w + (static_cast<size_t>(b) * kBlockBytes);
         __half d_w_h;
         memcpy(&d_w_h, bp, sizeof(__half));
         const float d_w = __half2float(d_w_h);

@@ -21,7 +21,7 @@ void settle_thinking_from_prompt_(ChatRequestContext& ctx) {
         return tail_text;
     };
     auto prompt_tail_contains = [&](const char* needle, int max_tail_tokens) -> bool {
-        return prompt_tail_text(max_tail_tokens).find(needle) != std::string::npos;
+        return prompt_tail_text(max_tail_tokens).contains(needle);
     };
     // Reconcile: an OPEN <think> prefix (no matching </think> in the tail) turns thinking ON; a
     // pre-closed block (<think>...</think>) turns it OFF even if the heuristic defaulted ON (#934:

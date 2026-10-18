@@ -6,6 +6,7 @@
 // histogram averages this skew away; split out here so the arithmetic is testable
 // without a GPU or an executor.
 
+#include <algorithm>
 #include <cstdint>
 
 namespace imp {
@@ -23,8 +24,7 @@ inline MoeLaunchRows moe_launch_rows(const int32_t* offsets, int ne) {
         return r;
     for (int e = 0; e < ne; ++e) {
         const int32_t m = offsets[e + 1] - offsets[e];
-        if (m > r.max_rows)
-            r.max_rows = m;
+        r.max_rows = std::max(r.max_rows, m);
         r.total_rows += m;
     }
     return r;

@@ -10,7 +10,7 @@ constexpr int kBlock = 256;
 
 __global__ void cls_pos_kernel(half* __restrict__ hidden, const half* __restrict__ cls,
                                const half* __restrict__ pos, int64_t total, int dim) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= total)
         return;
     const int64_t row = i / dim;
@@ -21,14 +21,14 @@ __global__ void cls_pos_kernel(half* __restrict__ hidden, const half* __restrict
 __global__ void split_heads_kernel(const half* __restrict__ qkv, half* __restrict__ q, half* __restrict__ k,
                                    half* __restrict__ v, int tokens, int heads, int head_dim) {
     const int64_t width = static_cast<int64_t>(heads) * head_dim;
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= tokens * width)
         return;
     const int64_t t = i / width;
     const int64_t c = i % width;
     const int64_t h = c / head_dim, d = c % head_dim;
-    const int64_t dst = (h * tokens + t) * head_dim + d;
-    const half* src = qkv + t * 3 * width + c;
+    const int64_t dst = (((h * tokens) + t) * head_dim) + d;
+    const half* src = qkv + (t * 3 * width) + c;
     q[dst] = src[0];
     k[dst] = src[width];
     v[dst] = src[2 * width];
@@ -36,10 +36,10 @@ __global__ void split_heads_kernel(const half* __restrict__ qkv, half* __restric
 
 __global__ void scaled_residual_kernel(half* __restrict__ h, const half* __restrict__ x,
                                        const half* __restrict__ scale, int64_t total, int dim) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= total)
         return;
-    h[i] = __float2half(__half2float(h[i]) + __half2float(scale[i % dim]) * __half2float(x[i]));
+    h[i] = __float2half(__half2float(h[i]) + (__half2float(scale[i % dim]) * __half2float(x[i])));
 }
 
 __global__ void pixel_shuffle_kernel(const half* __restrict__ hidden, half* __restrict__ out, int side,
@@ -47,19 +47,19 @@ __global__ void pixel_shuffle_kernel(const half* __restrict__ hidden, half* __re
     const int half_side = side / 2;
     const int64_t wide = 4LL * dim;
     const int64_t total = static_cast<int64_t>(half_side) * half_side * wide;
-    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx >= total)
         return;
     const int64_t tok = idx / wide;
     const int64_t c = idx % wide;
     const int64_t i = tok / half_side, j = tok % half_side;
     const int64_t quad = c / dim, ch = c % dim;
-    const int64_t r = 2 * i + quad / 2, col = 2 * j + quad % 2;
-    out[idx] = hidden[(1 + r * side + col) * dim + ch];  // +1: skip the CLS row
+    const int64_t r = (2 * i) + (quad / 2), col = (2 * j) + (quad % 2);
+    out[idx] = hidden[((1 + (r * side) + col) * dim) + ch];  // +1: skip the CLS row
 }
 
 __global__ void fill_rows_kernel(half* __restrict__ out, const half* __restrict__ row, int64_t total, int dim) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i < total)
         out[i] = row[i % dim];
 }

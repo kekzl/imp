@@ -443,12 +443,8 @@ bool smallM_done = false;
                     packed_offs.assign(ne + 1, 0);
                     sf_offs.assign(ne + 1, 0);
                     for (int e = 0; e < ne; ++e) {
-                        packed_offs[e + 1] =
-                            packed_offs[e] +
-                            static_cast<size_t>(M_per[e]) * K_in / 2;
-                        sf_offs[e + 1] =
-                            sf_offs[e] +
-                            static_cast<size_t>(M_per[e]) * K_in / 16;
+                        packed_offs[e + 1] = packed_offs[e] + (static_cast<size_t>(M_per[e]) * K_in / 2);
+                        sf_offs[e + 1] = sf_offs[e] + (static_cast<size_t>(M_per[e]) * K_in / 16);
                     }
                 };
 
@@ -474,7 +470,7 @@ bool smallM_done = false;
             // [0,ne) act tensor scales, [ne,2ne) alpha, [2ne,3ne) compacted alpha.
             float* d_act_tscales = moe_.smallM_scales;
             float* d_alpha = moe_.smallM_scales + ne;
-            float* d_alpha_compact_dev = moe_.smallM_scales + 2 * static_cast<ptrdiff_t>(ne);
+            float* d_alpha_compact_dev = moe_.smallM_scales + (2 * static_cast<ptrdiff_t>(ne));
             if (ok) {
                 for (int e = 0; e < ne; ++e) {
                     act_packed_ptrs[e] = act_packed_base + packed_offs_du[e];
@@ -539,14 +535,10 @@ bool smallM_done = false;
                     hA.push_back(act_packed[e]);
                     hSFA.push_back(act_sf[e]);
                     hB.push_back(static_cast<char*>(W->packed_data) +
-                                 static_cast<size_t>(e) *
-                                     W->expert_stride_packed);
+                                 (static_cast<size_t>(e) * W->expert_stride_packed));
                     hSFB.push_back(static_cast<char*>(W->micro_scales) +
-                                   static_cast<size_t>(e) *
-                                       W->expert_stride_ms);
-                    hD.push_back(c_base +
-                                 static_cast<size_t>(h_offsets[e]) * N_out *
-                                     sizeof(half));
+                                   (static_cast<size_t>(e) * W->expert_stride_ms));
+                    hD.push_back(c_base + (static_cast<size_t>(h_offsets[e]) * N_out * sizeof(half)));
                 }
                 const int na = static_cast<int>(active_M_local.size());
                 if (na == 0)
@@ -718,11 +710,11 @@ auto grouped_gemm = [&](const std::vector<TensorID>& weight_ids, char* c_base, i
             continue;
         const auto& h = registry_.handle(weight_ids[e]);
         active_M.push_back(M_per[e]);
-        hA.push_back(all_packed + static_cast<size_t>(h_offsets[e]) * K_in / 2);
+        hA.push_back(all_packed + (static_cast<size_t>(h_offsets[e]) * K_in / 2));
         hSFA.push_back(all_sfa + sfa_offsets[e]);
         hB.push_back(h.payload.cutlass_nvfp4.weight);
         hSFB.push_back(h.payload.cutlass_nvfp4.sf);
-        hD.push_back(c_base + static_cast<size_t>(h_offsets[e]) * N_out * sizeof(half));
+        hD.push_back(c_base + (static_cast<size_t>(h_offsets[e]) * N_out * sizeof(half)));
         hAlpha.push_back(h.payload.cutlass_nvfp4.global_scale
                              ? *h.payload.cutlass_nvfp4.global_scale
                              : 1.0f);

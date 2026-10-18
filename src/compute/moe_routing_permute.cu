@@ -48,7 +48,7 @@ __global__ void moe_scatter_kernel_impl(const T* __restrict__ expert_output,
     float weight = expert_weights[flat_idx];
 
     const T* src = expert_output + static_cast<int64_t>(row) * d_model;
-    float* dst = output + static_cast<int64_t>(token_id) * d_model;
+    float* dst = output + (static_cast<int64_t>(token_id) * d_model);
 
     for (int col = threadIdx.x; col < d_model; col += blockDim.x) {
         atomicAdd(&dst[col], weight * to_float(src[col]));
@@ -113,9 +113,9 @@ __global__ void moe_scatter_deterministic_kernel_impl(const T* __restrict__ expe
             for (int i = 0; i < k; ++i) {
                 const int row = s_rows[i];
                 const float weight = expert_weights[sorted_flat_idx[row]];
-                sum += weight * to_float(expert_output[static_cast<int64_t>(row) * d_model + col]);
+                sum += weight * to_float(expert_output[(static_cast<int64_t>(row) * d_model) + col]);
             }
-            output[static_cast<int64_t>(token) * d_model + col] = sum;
+            output[(static_cast<int64_t>(token) * d_model) + col] = sum;
         }
         return;
     }
@@ -128,9 +128,9 @@ __global__ void moe_scatter_deterministic_kernel_impl(const T* __restrict__ expe
             if (sorted_token_ids[row] != token)
                 continue;
             const float weight = expert_weights[sorted_flat_idx[row]];
-            sum += weight * to_float(expert_output[static_cast<int64_t>(row) * d_model + col]);
+            sum += weight * to_float(expert_output[(static_cast<int64_t>(row) * d_model) + col]);
         }
-        output[static_cast<int64_t>(token) * d_model + col] = sum;
+        output[(static_cast<int64_t>(token) * d_model) + col] = sum;
     }
 }
 
@@ -139,7 +139,7 @@ __global__ void moe_scatter_deterministic_kernel_impl(const T* __restrict__ expe
 // ============================================================================
 
 __global__ void zero_float_kernel(float* data, int n) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx < n)
         data[idx] = 0.0f;
 }
@@ -246,7 +246,7 @@ __global__ void moe_weighted_sum_residual_kernel(const half* __restrict__ expert
                                                  const half* residual,  // may be nullptr, may alias output
                                                  half* output,  // no __restrict__ — may alias residual
                                                  int d_model, int top_k) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (i >= d_model)
         return;
     const int r = blockIdx.y;
@@ -258,7 +258,7 @@ __global__ void moe_weighted_sum_residual_kernel(const half* __restrict__ expert
 
     float sum = 0.0f;
     for (int k = 0; k < top_k; ++k) {
-        sum += expert_weights[k] * __half2float(expert_outputs[k * d_model + i]);
+        sum += expert_weights[k] * __half2float(expert_outputs[(k * d_model) + i]);
     }
     if (residual)
         sum += __half2float(residual[i]);
@@ -300,15 +300,15 @@ __global__ void moe_scatter_fused_residual_kernel(
         for (int k = 0; k < top_k; ++k) {
             int expanded_row = token_to_expanded[base_flat + k];
             float w = expert_weights[base_flat + k];
-            half x = expert_output[static_cast<int64_t>(expanded_row) * d_model + col];
+            half x = expert_output[(static_cast<int64_t>(expanded_row) * d_model) + col];
             if constexpr (kBias)
-                x = __hadd(x,
-                           expert_bias[static_cast<int64_t>(expert_indices[base_flat + k]) * d_model + col]);
+                x = __hadd(
+                    x, expert_bias[(static_cast<int64_t>(expert_indices[base_flat + k]) * d_model) + col]);
             sum += w * __half2float(x);
         }
         if (residual)
-            sum += __half2float(residual[static_cast<int64_t>(token) * d_model + col]);
-        output[static_cast<int64_t>(token) * d_model + col] = __float2half(sum);
+            sum += __half2float(residual[(static_cast<int64_t>(token) * d_model) + col]);
+        output[(static_cast<int64_t>(token) * d_model) + col] = __float2half(sum);
     }
 }
 
@@ -333,7 +333,7 @@ void moe_scatter_fused_residual(const void* expert_output, const int32_t* token_
 
 __global__ void moe_add_logit_bias_kernel(float* __restrict__ logits, const half* __restrict__ bias,
                                           int64_t total, int ne) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx < total)
         logits[idx] += __half2float(bias[idx % ne]);
 }
@@ -341,18 +341,18 @@ __global__ void moe_add_logit_bias_kernel(float* __restrict__ logits, const half
 __global__ void moe_add_expert_bias_indexed_kernel(half* __restrict__ buf, const half* __restrict__ bias,
                                                    const int32_t* __restrict__ expert_indices,
                                                    int64_t total, int dim) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx < total) {
         int row = static_cast<int>(idx / dim);
         int e = expert_indices[row];
-        buf[idx] = __hadd(buf[idx], bias[static_cast<int64_t>(e) * dim + idx % dim]);
+        buf[idx] = __hadd(buf[idx], bias[(static_cast<int64_t>(e) * dim) + (idx % dim)]);
     }
 }
 
 __global__ void moe_add_expert_bias_sorted_kernel(half* __restrict__ buf, const half* __restrict__ bias,
                                                   const int32_t* __restrict__ expert_offsets, int ne,
                                                   int64_t total, int dim) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx >= total)
         return;
     int row = static_cast<int>(idx / dim);
@@ -366,7 +366,7 @@ __global__ void moe_add_expert_bias_sorted_kernel(half* __restrict__ buf, const 
         else
             hi = mid - 1;
     }
-    buf[idx] = __hadd(buf[idx], bias[static_cast<int64_t>(lo) * dim + idx % dim]);
+    buf[idx] = __hadd(buf[idx], bias[(static_cast<int64_t>(lo) * dim) + (idx % dim)]);
 }
 
 void moe_add_logit_bias(float* logits_f32, const void* bias_fp16, int n, int ne, cudaStream_t stream) {

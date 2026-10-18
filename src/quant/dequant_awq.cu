@@ -7,11 +7,11 @@ namespace imp {
 __global__ void dequant_awq4_kernel(half* __restrict__ out, const int32_t* __restrict__ qweight,
                                     const int32_t* __restrict__ qzeros, const half* __restrict__ scales, int N,
                                     int K, int group_size) {
-    const int k = blockIdx.x * blockDim.x + threadIdx.x;
-    const int n = blockIdx.y * blockDim.y + threadIdx.y;
+    const int k = (blockIdx.x * blockDim.x) + threadIdx.x;
+    const int n = (blockIdx.y * blockDim.y) + threadIdx.y;
     if (k >= K || n >= N)
         return;
-    out[static_cast<int64_t>(n) * K + k] = awq::dequant_elem(qweight, qzeros, scales, N, group_size, k, n);
+    out[(static_cast<int64_t>(n) * K) + k] = awq::dequant_elem(qweight, qzeros, scales, N, group_size, k, n);
 }
 
 void dequant_awq4(half* out, const int32_t* qweight, const int32_t* qzeros, const half* scales, int N, int K,

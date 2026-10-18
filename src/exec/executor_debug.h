@@ -5,6 +5,7 @@
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -104,9 +105,9 @@ inline void dump_tensor_npy(const char* tag, const Tensor& t, cudaStream_t strea
                 return;
         } else {
             for (int r = 0; r < rows; r++) {
-                if (!debug_cuda_ok(cudaMemcpy(tmp.data() + static_cast<size_t>(r) * cols,
+                if (!debug_cuda_ok(cudaMemcpy(tmp.data() + (static_cast<size_t>(r) * cols),
                                               static_cast<const char*>(t.data) +
-                                                  static_cast<int64_t>(r) * row_stride * sizeof(half),
+                                                  (static_cast<int64_t>(r) * row_stride * sizeof(half)),
                                               cols * sizeof(half), cudaMemcpyDeviceToHost),
                                    tag))
                     return;
@@ -121,9 +122,9 @@ inline void dump_tensor_npy(const char* tag, const Tensor& t, cudaStream_t strea
                 return;
         } else {
             for (int r = 0; r < rows; r++) {
-                if (!debug_cuda_ok(cudaMemcpy(host.data() + static_cast<size_t>(r) * cols,
+                if (!debug_cuda_ok(cudaMemcpy(host.data() + (static_cast<size_t>(r) * cols),
                                               static_cast<const char*>(t.data) +
-                                                  static_cast<int64_t>(r) * row_stride * sizeof(float),
+                                                  (static_cast<int64_t>(r) * row_stride * sizeof(float)),
                                               cols * sizeof(float), cudaMemcpyDeviceToHost),
                                    tag))
                     return;
@@ -165,7 +166,8 @@ inline void debug_tensor_stats(const char* name, const Tensor& t, cudaStream_t s
 
     if (t.qtype == QType::F16) {
         std::vector<half> tmp(n);
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(tmp.data(), static_cast<const half*>(t.data) + (int64_t)row * cols,
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(tmp.data(),
+                                           static_cast<const half*>(t.data) + ((int64_t)row * cols),
                                            n * sizeof(half), cudaMemcpyDeviceToHost, stream));
         if (!debug_cuda_ok(cudaStreamSynchronize(stream), name))
             return;
@@ -173,7 +175,7 @@ inline void debug_tensor_stats(const char* name, const Tensor& t, cudaStream_t s
             host[i] = __half2float(tmp[i]);
     } else if (t.qtype == QType::F32) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(host.data(),
-                                           static_cast<const float*>(t.data) + (int64_t)row * cols,
+                                           static_cast<const float*>(t.data) + ((int64_t)row * cols),
                                            n * sizeof(float), cudaMemcpyDeviceToHost, stream));
         if (!debug_cuda_ok(cudaStreamSynchronize(stream), name))
             return;
@@ -194,10 +196,8 @@ inline void debug_tensor_stats(const char* name, const Tensor& t, cudaStream_t s
             inf_count++;
             continue;
         }
-        if (v < vmin)
-            vmin = v;
-        if (v > vmax)
-            vmax = v;
+        vmin = std::min(vmin, v);
+        vmax = std::max(vmax, v);
         vsum += v;
         vl2 += v * v;
     }
@@ -234,7 +234,7 @@ inline void debug_tensor_rows(const char* name, const Tensor& t, cudaStream_t st
                   (long long)row_stride, max_rows);
     std::vector<float> row_f(cols);
     for (int r = 0; r < max_rows; r++) {
-        const char* src = static_cast<const char*>(t.data) + (int64_t)r * row_stride * elem_sz;
+        const char* src = static_cast<const char*>(t.data) + ((int64_t)r * row_stride * elem_sz);
         if (t.qtype == QType::F16) {
             std::vector<half> tmp(cols);
             if (!debug_cuda_ok(cudaMemcpy(tmp.data(), src, cols * sizeof(half), cudaMemcpyDeviceToHost),

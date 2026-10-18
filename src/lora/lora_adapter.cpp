@@ -38,7 +38,7 @@ bool lora_parse_key(const std::string& key, int* layer, LoraProj* proj, bool* is
     };
     bool found = false;
     for (const auto& m : kMap) {
-        if (key.find(m.needle) != std::string::npos) {
+        if (key.contains(m.needle)) {
             *proj = m.p;
             found = true;
             break;
@@ -47,11 +47,11 @@ bool lora_parse_key(const std::string& key, int* layer, LoraProj* proj, bool* is
     if (!found)
         return false;
 
-    if (key.find("lora_A") != std::string::npos) {
+    if (key.contains("lora_A")) {
         *is_A = true;
         return true;
     }
-    if (key.find("lora_B") != std::string::npos) {
+    if (key.contains("lora_B")) {
         *is_A = false;
         return true;
     }
@@ -205,7 +205,7 @@ bool LoraAdapter::load(const std::string& path, int n_layers) {
         LoraProj proj{};
         bool is_A = false;
         if (!lora_parse_key(key, &layer, &proj, &is_A)) {
-            if (key.find("lora") != std::string::npos)
+            if (key.contains("lora"))
                 IMP_LOG_WARN("LoRA: unsupported tensor '%s' skipped (v1: per-layer q/k/v/o/gate/up/down)",
                              key.c_str());
             continue;

@@ -9,6 +9,8 @@
 #include <mma.h>
 #include <float.h>
 
+#include <algorithm>
+
 namespace imp {
 
 // NVFP4 paged attention decode. KV cache: 2 FP4 (E2M1) values/byte (low=even, high=odd);
@@ -72,7 +74,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
     // Comes BEFORE the crosswarp_reduce smem region.
     extern __shared__ char tc_smem_raw[];
     __half* tc_smem = reinterpret_cast<__half*>(tc_smem_raw);
-    constexpr int WARP_TC_HALVES = 16 * 16 + 16 * 16 + 16 * 16 * 2;  // sQ + sK + sFV (float in halves)
+    constexpr int WARP_TC_HALVES = (16 * 16) + (16 * 16) + (16 * 16 * 2);  // sQ + sK + sFV (float in halves)
 
     const int batch_idx = blockIdx.x;
     const int head_idx = blockIdx.y;
@@ -88,7 +90,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
     const int lane_group = lane_offset / 16;  // scale group covering this lane's elems
 
     // Q into registers
-    const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * HEAD_DIM + (int64_t)head_idx * HEAD_DIM;
+    const half* Q_ptr = Q + ((int64_t)batch_idx * n_heads * HEAD_DIM) + ((int64_t)head_idx * HEAD_DIM);
     float q_reg[ELEMS];
     {
         const half2* Q_ptr2 = reinterpret_cast<const half2*>(Q_ptr + lane_offset);
@@ -96,11 +98,11 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         for (int i = 0; i < ELEMS / 2; i++) {
             half2 h2 = Q_ptr2[i];
             q_reg[2 * i] = __half2float(h2.x);
-            q_reg[2 * i + 1] = __half2float(h2.y);
+            q_reg[(2 * i) + 1] = __half2float(h2.y);
         }
     }
 
-    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
+    const int* bt = block_tables + ((int64_t)batch_idx * max_num_blocks);
     const int kv_head_bytes = HEAD_DIM / 2;
     const int kv_block_stride = block_size * n_kv_heads * kv_head_bytes;
     const int kv_slot_stride = n_kv_heads * kv_head_bytes;
@@ -124,8 +126,8 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         int rc = (d_residual_counts != nullptr) ? d_residual_counts[batch_idx] : 0;
         int rw = (d_residual_write_idxes != nullptr) ? d_residual_write_idxes[batch_idx] : 0;
         if (seq_slot >= 0 && rc > 0) {
-            K_res_ptr = K_residual_base + (int64_t)seq_slot * residual_seq_stride_elems;
-            V_res_ptr = V_residual_base + (int64_t)seq_slot * residual_seq_stride_elems;
+            K_res_ptr = K_residual_base + ((int64_t)seq_slot * residual_seq_stride_elems);
+            V_res_ptr = V_residual_base + ((int64_t)seq_slot * residual_seq_stride_elems);
             residual_count = rc;
             residual_write_idx = rw;
         }
@@ -148,14 +150,12 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
     int residual_skip = 0;             // chronologically-stale residual entries to skip
     if (residual_have) {
         int res_have = residual_count;
-        if (res_have > ctx_len) res_have = ctx_len;
+        res_have = std::min(res_have, ctx_len);
         int res_chrono_first = ctx_len - res_have;
         residual_first_abs = (effective_start > res_chrono_first) ? effective_start : res_chrono_first;
         residual_active_count = ctx_len - residual_first_abs;
         residual_skip = res_have - residual_active_count;
-        if (residual_active_count <= 0) {
-            residual_active_count = 0;  // window excludes all residual entries
-        }
+        residual_active_count = std::max(residual_active_count, 0);  // window excludes all residual entries
     }
     const int paged_end_token = ctx_len - residual_active_count;
     const int first_block = effective_start / block_size;
@@ -174,15 +174,14 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
         // KV read. FP16 carried this guard since #963, quantised kernels only since #1678.
         if (phys_block < 0)
             continue;
-        const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
-        const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
-        const uint8_t* K_sc_block = K_scales + (int64_t)phys_block * sc_block_stride;
-        const uint8_t* V_sc_block = V_scales + (int64_t)phys_block * sc_block_stride;
+        const uint8_t* K_block = K_cache + ((int64_t)phys_block * kv_block_stride);
+        const uint8_t* V_block = V_cache + ((int64_t)phys_block * kv_block_stride);
+        const uint8_t* K_sc_block = K_scales + ((int64_t)phys_block * sc_block_stride);
+        const uint8_t* V_sc_block = V_scales + ((int64_t)phys_block * sc_block_stride);
 
         int tok_start = blk * block_size;
         int tok_end = tok_start + block_size;
-        if (tok_end > paged_end_token)
-            tok_end = paged_end_token;
+        tok_end = std::min(tok_end, paged_end_token);
 
         int first_tok = 0;
         if (tok_start < effective_start)
@@ -235,7 +234,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
                     half2 hh = fp4_byte_to_half2(b);
                     half v = (hd_global & 1) ? hh.y : hh.x;
                     float scale_k = ue4m3_decode(
-                        K_sc_block[t * sc_slot_stride + kv_head * sc_groups + (hd_global / 16)]);
+                        K_sc_block[(t * sc_slot_stride) + (kv_head * sc_groups) + (hd_global / 16)]);
                     sK_w[i] = __float2half(__half2float(v) * scale_k);
                 } else {
                     sK_w[i] = __float2half(0.0f);
@@ -298,7 +297,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
             l_local += __shfl_xor_sync(0xffffffff, l_local, off);
         }
 
-        float l_new = exp_diff * l_w + l_local;
+        float l_new = (exp_diff * l_w) + l_local;
         // Normalized rescale: (exp_diff * l_w_old) / l_new — same role as
         // Phase 1's online_softmax_step.rescale, applied once per block.
         float rescale_norm = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
@@ -350,7 +349,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
                     half2 hh = fp4_byte_to_half2(b);
                     half v = (hd_global & 1) ? hh.y : hh.x;
                     float scale_v = ue4m3_decode(
-                        V_sc_block[t * sc_slot_stride + kv_head * sc_groups + (hd_global / 16)]);
+                        V_sc_block[(t * sc_slot_stride) + (kv_head * sc_groups) + (hd_global / 16)]);
                     sK_w[i] = __float2half(__half2float(v) * scale_v);
                 } else {
                     sK_w[i] = __float2half(0.0f);
@@ -411,7 +410,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
 
             const int tile_first = tile * 16;
             int tile_count = residual_active_count - tile_first;
-            if (tile_count > 16) tile_count = 16;
+            tile_count = std::min(tile_count, 16);
 
             wmma::fill_fragment(c_frag, __float2half(0.0f));
 
@@ -432,7 +431,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
                     int hd_global = hd_off + hd_local;
                     if (t < tile_count) {
                         int slot = (slot_base + tile_first + t) % residual_n_tokens;
-                        sK_r[i] = K_res_ptr[(int64_t)slot * slot_stride_res +
+                        sK_r[i] = K_res_ptr[((int64_t)slot * slot_stride_res) +
                                             static_cast<ptrdiff_t>(kv_head * kv_head_stride_res) + hd_global];
                     } else {
                         sK_r[i] = __float2half(0.0f);
@@ -490,7 +489,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
                 l_local += __shfl_xor_sync(0xffffffff, l_local, off);
             }
 
-            float l_new = exp_diff * l_w + l_local;
+            float l_new = (exp_diff * l_w) + l_local;
             float rescale_norm = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
             float l_inv = (l_new > 0.0f) ? (1.0f / l_new) : 0.0f;
 
@@ -524,7 +523,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
                     int hd_global = hd_off + hd_local;
                     if (t < tile_count) {
                         int slot = (slot_base + tile_first + t) % residual_n_tokens;
-                        sK_r[i] = V_res_ptr[(int64_t)slot * slot_stride_res +
+                        sK_r[i] = V_res_ptr[((int64_t)slot * slot_stride_res) +
                                             static_cast<ptrdiff_t>(kv_head * kv_head_stride_res) + hd_global];
                     } else {
                         sK_r[i] = __float2half(0.0f);
@@ -553,7 +552,7 @@ __global__ void paged_attention_decode_nvfp4_tc_kernel(
     pdl_trigger();  // KV walk done; the dependent o_proj may be scheduled during the reduce + O store
     // crosswarp reduce smem starts AFTER the per-warp TC scratch region
     // (NUM_WARPS * WARP_TC_HALVES halves = NUM_WARPS * 1024 bytes).
-    char* crosswarp_smem = tc_smem_raw + static_cast<size_t>(NUM_WARPS * WARP_TC_HALVES) * sizeof(__half);
+    char* crosswarp_smem = tc_smem_raw + (static_cast<size_t>(NUM_WARPS * WARP_TC_HALVES) * sizeof(__half));
     crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(crosswarp_smem), m_w, l_w, o_reg, warp_id,
                                          lane_id, lane_offset, O, batch_idx, n_heads, head_idx);
 }
@@ -587,7 +586,7 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
     const int lane_offset = lane_id * ELEMS;
     const int lane_group = lane_offset / 16;
 
-    const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * HEAD_DIM + (int64_t)head_idx * HEAD_DIM;
+    const half* Q_ptr = Q + ((int64_t)batch_idx * n_heads * HEAD_DIM) + ((int64_t)head_idx * HEAD_DIM);
     float q_reg[ELEMS];
     {
         const half2* Q_ptr2 = reinterpret_cast<const half2*>(Q_ptr + lane_offset);
@@ -595,7 +594,7 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
         for (int i = 0; i < ELEMS / 2; i++) {
             half2 h2 = Q_ptr2[i];
             q_reg[2 * i] = __half2float(h2.x);
-            q_reg[2 * i + 1] = __half2float(h2.y);
+            q_reg[(2 * i) + 1] = __half2float(h2.y);
         }
     }
 
@@ -607,10 +606,9 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
     const int total_blocks = num_ctx_blocks - first_block;
 
     int blocks_per_split = (total_blocks + num_splits - 1) / num_splits;
-    int split_start = first_block + split_idx * blocks_per_split;
+    int split_start = first_block + (split_idx * blocks_per_split);
     int split_end = split_start + blocks_per_split;
-    if (split_end > num_ctx_blocks)
-        split_end = num_ctx_blocks;
+    split_end = std::min(split_end, num_ctx_blocks);
 
     if (split_start >= split_end) {
         write_empty_split_sentinel<HEAD_DIM>(partial_out, batch_idx, n_heads, head_idx, num_splits, split_idx,
@@ -618,7 +616,7 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
         return;
     }
 
-    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
+    const int* bt = block_tables + ((int64_t)batch_idx * max_num_blocks);
     const int kv_head_bytes = HEAD_DIM / 2;
     const int kv_block_stride = block_size * n_kv_heads * kv_head_bytes;
     const int kv_slot_stride = n_kv_heads * kv_head_bytes;
@@ -639,15 +637,14 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
         // KV read. FP16 carried this guard since #963, quantised kernels only since #1678.
         if (phys_block < 0)
             continue;
-        const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
-        const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
-        const uint8_t* K_sc_block = K_scales + (int64_t)phys_block * sc_block_stride;
-        const uint8_t* V_sc_block = V_scales + (int64_t)phys_block * sc_block_stride;
+        const uint8_t* K_block = K_cache + ((int64_t)phys_block * kv_block_stride);
+        const uint8_t* V_block = V_cache + ((int64_t)phys_block * kv_block_stride);
+        const uint8_t* K_sc_block = K_scales + ((int64_t)phys_block * sc_block_stride);
+        const uint8_t* V_sc_block = V_scales + ((int64_t)phys_block * sc_block_stride);
 
         int tok_start = blk * block_size;
         int tok_end = tok_start + block_size;
-        if (tok_end > ctx_len)
-            tok_end = ctx_len;
+        tok_end = std::min(tok_end, ctx_len);
 
         int first_tok = 0;
         if (tok_start < effective_start)
@@ -655,28 +652,28 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
             // #2218 bounded: kv_head * kv_head_bytes <= kMaxHeads * 256 = 2^20 (model_limits.h:24, :1066).
-            const uint8_t* K_tok = K_block + static_cast<int64_t>(t) * kv_slot_stride +
+            const uint8_t* K_tok = K_block + (static_cast<int64_t>(t) * kv_slot_stride) +
                                    static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
-            const uint8_t* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +
+            const uint8_t* V_tok = V_block + (static_cast<int64_t>(t) * kv_slot_stride) +
                                    static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
 
             float k_scale = ue4m3_decode(
-                K_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
+                K_sc_block[(t * sc_slot_stride) + (kv_head * sc_groups) + lane_group]);
             float v_scale = ue4m3_decode(
-                V_sc_block[t * sc_slot_stride + kv_head * sc_groups + lane_group]);
+                V_sc_block[(t * sc_slot_stride) + (kv_head * sc_groups) + lane_group]);
             const half2 k_scale_h2 = __float2half2_rn(k_scale);
             const half2 v_scale_h2 = __float2half2_rn(v_scale);
 
             float dot = 0.0f;
             {
-                const uint8_t* k_bytes = K_tok + lane_offset / 2;
+                const uint8_t* k_bytes = K_tok + (lane_offset / 2);
 #pragma unroll
                 for (int i = 0; i < ELEMS / 2; i++) {
                     half2 kh2 = fp4_byte_to_half2(k_bytes[i]);
                     kh2 = __hmul2(kh2, k_scale_h2);
                     float2 kf = __half22float2(kh2);
                     dot = __fmaf_rn(q_reg[2 * i], kf.x, dot);
-                    dot = __fmaf_rn(q_reg[2 * i + 1], kf.y, dot);
+                    dot = __fmaf_rn(q_reg[(2 * i) + 1], kf.y, dot);
                 }
             }
             dot = warp_reduce_sum(dot);
@@ -687,14 +684,14 @@ __global__ void paged_attention_splitk_nvfp4_tc_kernel(
             online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
             {
-                const uint8_t* v_bytes = V_tok + lane_offset / 2;
+                const uint8_t* v_bytes = V_tok + (lane_offset / 2);
 #pragma unroll
                 for (int i = 0; i < ELEMS / 2; i++) {
                     half2 vh2 = fp4_byte_to_half2(v_bytes[i]);
                     vh2 = __hmul2(vh2, v_scale_h2);
                     float2 vf = __half22float2(vh2);
                     o_reg[2 * i] = __fmaf_rn(w_new, vf.x, rescale * o_reg[2 * i]);
-                    o_reg[2 * i + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[2 * i + 1]);
+                    o_reg[(2 * i) + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[(2 * i) + 1]);
                 }
             }
         }
@@ -779,8 +776,8 @@ __global__ void paged_attention_residual_reduce_kernel(
             rw_b = (d_residual_write_idxes != nullptr) ? d_residual_write_idxes[batch_idx] : 0;
         }
         if (slot >= 0 && rc_b > 0) {
-            K_res = K_residual_base + (int64_t)slot * residual_seq_stride_elems;
-            V_res = V_residual_base + (int64_t)slot * residual_seq_stride_elems;
+            K_res = K_residual_base + ((int64_t)slot * residual_seq_stride_elems);
+            V_res = V_residual_base + ((int64_t)slot * residual_seq_stride_elems);
             rc = rc_b;
             rwi = rw_b;
         }
@@ -803,14 +800,15 @@ __global__ void paged_attention_residual_reduce_kernel(
         int rfa = (effective_start > rcf) ? effective_start : rcf;
         res_active = ctx_len - rfa;
         res_skip = rh - res_active;
-        if (res_active < 0) res_active = 0;
+        res_active = std::max(res_active, 0);
     }
 
     // Step 1: compute (m_paged, l_paged) from per-split partials. Single-thread
     // reduction over a small (≤ 32) split count — same pattern as the standard
     // reduce kernel.
     const float* paged_base = partial_out +
-        (int64_t)((batch_idx * n_heads + head_idx) * num_paged_splits) * partial_stride;
+                              ((int64_t)(((batch_idx * n_heads) + head_idx) * num_paged_splits) *
+                               partial_stride);
 
     __shared__ float s_m_paged;
     __shared__ float s_l_paged;
@@ -826,7 +824,7 @@ __global__ void paged_attention_residual_reduce_kernel(
         float gl = 0.0f;
         for (int s = 0; s < num_paged_splits; s++) {
             float m = paged_base[static_cast<int64_t>(s) * partial_stride];
-            float l = paged_base[s * partial_stride + 1];
+            float l = paged_base[(s * partial_stride) + 1];
             gl += expf(m - gmax) * l;
         }
         s_l_paged = gl;
@@ -844,14 +842,14 @@ __global__ void paged_attention_residual_reduce_kernel(
     float* warp_o   = warp_l + NUM_WARPS;                    // [NUM_WARPS * HEAD_DIM]
 
     if (res_active > 0) {
-        const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * HEAD_DIM + (int64_t)head_idx * HEAD_DIM;
+        const half* Q_ptr = Q + ((int64_t)batch_idx * n_heads * HEAD_DIM) + ((int64_t)head_idx * HEAD_DIM);
         float q_reg[ELEMS];
         const half2* Q_ptr2 = reinterpret_cast<const half2*>(Q_ptr + lane_offset);
 #pragma unroll
         for (int i = 0; i < ELEMS / 2; i++) {
             half2 h2 = Q_ptr2[i];
             q_reg[2 * i] = __half2float(h2.x);
-            q_reg[2 * i + 1] = __half2float(h2.y);
+            q_reg[(2 * i) + 1] = __half2float(h2.y);
         }
 
         const int slot_stride = n_kv_heads * HEAD_DIM;
@@ -866,9 +864,9 @@ __global__ void paged_attention_residual_reduce_kernel(
         for (int t = warp_id; t < res_active; t += NUM_WARPS) {
             int slot = (sb + t) % residual_n_tokens;
             // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 = 2^21 (model_limits.h:24, :1104).
-            const half* K_tok = K_res + (int64_t)slot * slot_stride +
+            const half* K_tok = K_res + ((int64_t)slot * slot_stride) +
                                 static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
-            const half* V_tok = V_res + (int64_t)slot * slot_stride +
+            const half* V_tok = V_res + ((int64_t)slot * slot_stride) +
                                 static_cast<ptrdiff_t>(kv_head * HEAD_DIM);
 
             float dot = 0.0f;
@@ -878,7 +876,7 @@ __global__ void paged_attention_residual_reduce_kernel(
                 half2 kh = k_h2[i];
                 float2 kf = __half22float2(kh);
                 dot = __fmaf_rn(q_reg[2 * i], kf.x, dot);
-                dot = __fmaf_rn(q_reg[2 * i + 1], kf.y, dot);
+                dot = __fmaf_rn(q_reg[(2 * i) + 1], kf.y, dot);
             }
             dot = warp_reduce_sum(dot);
             dot *= scale;
@@ -893,7 +891,7 @@ __global__ void paged_attention_residual_reduce_kernel(
                 half2 vh = v_h2[i];
                 float2 vf = __half22float2(vh);
                 o_reg[2 * i] = __fmaf_rn(w_new, vf.x, rescale * o_reg[2 * i]);
-                o_reg[2 * i + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[2 * i + 1]);
+                o_reg[(2 * i) + 1] = __fmaf_rn(w_new, vf.y, rescale * o_reg[(2 * i) + 1]);
             }
         }
 
@@ -904,7 +902,7 @@ __global__ void paged_attention_residual_reduce_kernel(
         }
 #pragma unroll
         for (int i = 0; i < ELEMS; i++)
-            warp_o[warp_id * HEAD_DIM + lane_offset + i] = o_reg[i];
+            warp_o[(warp_id * HEAD_DIM) + lane_offset + i] = o_reg[i];
         __syncthreads();
 
         if (threadIdx.x == 0) {
@@ -935,7 +933,7 @@ __global__ void paged_attention_residual_reduce_kernel(
         m_global = fmaxf(m_paged, m_res);
         w_paged = expf(m_paged - m_global);
         w_res = expf(m_res - m_global);
-        float l_global = w_paged * l_paged + w_res * l_res;
+        float l_global = (w_paged * l_paged) + (w_res * l_res);
         inv_l = (l_global > 0.0f) ? (1.0f / l_global) : 0.0f;
     } else {
         m_global = m_paged;
@@ -950,7 +948,7 @@ __global__ void paged_attention_residual_reduce_kernel(
         for (int s = 0; s < num_paged_splits; s++) {
             float m_s = paged_base[static_cast<int64_t>(s) * partial_stride];
             float weight_s = expf(m_s - m_paged);
-            o_paged_unnorm += weight_s * paged_base[s * partial_stride + 2 + d];
+            o_paged_unnorm += weight_s * paged_base[(s * partial_stride) + 2 + d];
         }
 
         // Aggregate residual partials at m_res basis: sum_w exp(m_w - m_res) * l_w * warp_o[w, d]
@@ -958,12 +956,12 @@ __global__ void paged_attention_residual_reduce_kernel(
         if (res_active > 0) {
             for (int w = 0; w < NUM_WARPS; w++) {
                 float weight_w = expf(warp_max[w] - m_res) * warp_l[w];
-                o_res_unnorm += weight_w * warp_o[w * HEAD_DIM + d];
+                o_res_unnorm += weight_w * warp_o[(w * HEAD_DIM) + d];
             }
         }
 
-        float final_o = inv_l * (w_paged * o_paged_unnorm + w_res * o_res_unnorm);
-        int out_idx = batch_idx * n_heads * HEAD_DIM + head_idx * HEAD_DIM + d;
+        float final_o = inv_l * ((w_paged * o_paged_unnorm) + (w_res * o_res_unnorm));
+        int out_idx = (batch_idx * n_heads * HEAD_DIM) + (head_idx * HEAD_DIM) + d;
         O[out_idx] = __float2half(final_o);
     }
 }
@@ -1015,12 +1013,12 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
     // BitDecoding TC variant adds NUM_WARPS * 2048 bytes of WMMA scratch
     // (16x16 sQ halves + 16x16 sK halves + 16x16 sFV floats per warp).
     // Total: 8 warps × 2048 = 16 KiB. Comes BEFORE the crosswarp_reduce smem.
-    constexpr size_t TC_SCRATCH_PER_WARP = (static_cast<int64_t>(16) * 16) * sizeof(__half) +
-                                           (static_cast<int64_t>(16) * 16) * sizeof(__half) +
-                                           (static_cast<int64_t>(16) * 16) * sizeof(float);
-    size_t smem_bytes = NUM_WARPS * TC_SCRATCH_PER_WARP + NUM_WARPS * sizeof(float) +
-                        NUM_WARPS * sizeof(float) +
-                        static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float);
+    constexpr size_t TC_SCRATCH_PER_WARP = ((static_cast<int64_t>(16) * 16) * sizeof(__half)) +
+                                           ((static_cast<int64_t>(16) * 16) * sizeof(__half)) +
+                                           ((static_cast<int64_t>(16) * 16) * sizeof(float));
+    size_t smem_bytes = (NUM_WARPS * TC_SCRATCH_PER_WARP) + (NUM_WARPS * sizeof(float)) +
+                        (NUM_WARPS * sizeof(float)) +
+                        (static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float));
 
     void* scratch_ptr = nullptr;
     int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
@@ -1074,8 +1072,8 @@ void paged_attention_decode_nvfp4_tc(const Tensor& Q, const Tensor& K_cache, con
         if (use_residual_reduce) {
             // Combined paged-reduce + residual-merge. Smem layout:
             //   warp_max[NUM_WARPS] + warp_l[NUM_WARPS] + warp_o[NUM_WARPS * HEAD_DIM] floats.
-            const size_t reduce_smem = NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
-                                       static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float);
+            const size_t reduce_smem = (NUM_WARPS * sizeof(float)) + (NUM_WARPS * sizeof(float)) +
+                                       (static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float));
             dim3 grid_red(batch_size, n_heads);
             dim3 block_red(BLOCK_THREADS);
 

@@ -72,8 +72,8 @@ static __device__ __forceinline__ int get_int_b2(const void* x, const int& i32) 
     // 2-byte aligned read for structs with 2-byte prefix (Q8_0: half d + int8_t qs[32] = 34 bytes).
     // Reads two uint16_t and packs into int32, matching llama.cpp's get_int_b2.
     const uint16_t* x16 = (const uint16_t*)x;
-    int x32 = x16[2 * i32 + 0] << 0;
-    x32 |= x16[2 * i32 + 1] << 16;
+    int x32 = x16[(2 * i32) + 0] << 0;
+    x32 |= x16[(2 * i32) + 1] << 16;
     return x32;
 }
 
@@ -106,14 +106,14 @@ static __device__ __forceinline__ float vec_dot_q5_1_q8_1_impl(const int* vl, co
         vi0 |= (vh[i] << 11) & 0x00001000;
         vi0 |= (vh[i] << 18) & 0x00100000;
         vi0 |= (vh[i] << 25) & 0x10000000;
-        sumi = ggml_dp4a(vi0, u[2 * i + 0], sumi);
+        sumi = ggml_dp4a(vi0, u[(2 * i) + 0], sumi);
 
         int vi1 = (vl[i] >> 4) & 0x0F0F0F0F;
         vi1 |= (vh[i] >> 12) & 0x00000010;
         vi1 |= (vh[i] >> 5) & 0x00001000;
         vi1 |= (vh[i] << 2) & 0x00100000;
         vi1 |= (vh[i] << 9) & 0x10000000;
-        sumi = ggml_dp4a(vi1, u[2 * i + 1], sumi);
+        sumi = ggml_dp4a(vi1, u[(2 * i) + 1], sumi);
     }
 
     const float2 tmp = __half22float2(__hmul2(dm5, ds8));
@@ -122,7 +122,7 @@ static __device__ __forceinline__ float vec_dot_q5_1_q8_1_impl(const int* vl, co
 
     // QI5_1 / vdr is an exact int ratio (4 / 1|2), ggml reference (#2210)
     // NOLINTNEXTLINE(bugprone-integer-division)
-    return sumi * d5d8 + m5s8 / (QI5_1 / vdr);
+    return (sumi * d5d8) + (m5s8 / (QI5_1 / vdr));
 }
 
 static __device__ __forceinline__ float vec_dot_q5_1_q8_1(const void* __restrict__ vbq,
@@ -138,8 +138,8 @@ static __device__ __forceinline__ float vec_dot_q5_1_q8_1(const void* __restrict
     for (int i = 0; i < VDR_Q5_1; ++i) {
         vl[i] = get_int_b4(bq5_1->qs, iqs + i);
         vh[i] = get_int_b4(bq5_1->qh, 0) >> (4 * (iqs + i));
-        u[2 * i + 0] = get_int_b4(bq8_1->qs, iqs + i);
-        u[2 * i + 1] = get_int_b4(bq8_1->qs, iqs + i + QI5_1);
+        u[(2 * i) + 0] = get_int_b4(bq8_1->qs, iqs + i);
+        u[(2 * i) + 1] = get_int_b4(bq8_1->qs, iqs + i + QI5_1);
     }
 
     // Construct half2 from imp's separate d/m and d/s fields
@@ -167,8 +167,8 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_vmmq(
         const int v0i = (v[0] >> (4 * i)) & 0x0F0F0F0F;
         const int v1i = (v[1] >> (4 * i)) & 0x0F0F0F0F;
 
-        const int dot1 = ggml_dp4a(v1i, u[2 * i + 1], ggml_dp4a(v0i, u[2 * i + 0], 0));
-        const int dot2 = ggml_dp4a(0x01010101, u[2 * i + 1], ggml_dp4a(0x01010101, u[2 * i + 0], 0));
+        const int dot1 = ggml_dp4a(v1i, u[(2 * i) + 1], ggml_dp4a(v0i, u[(2 * i) + 0], 0));
+        const int dot2 = ggml_dp4a(0x01010101, u[(2 * i) + 1], ggml_dp4a(0x01010101, u[(2 * i) + 0], 0));
 
         sumf_d += d8[i] * (dot1 * sc[i]);
         sumf_m += d8[i] * (dot2 * m[i]);
@@ -176,7 +176,7 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_vmmq(
 
     const float2 dm4f = __half22float2(dm4);
 
-    return dm4f.x * sumf_d - dm4f.y * sumf_m;
+    return (dm4f.x * sumf_d) - (dm4f.y * sumf_m);
 }
 
 static __device__ __forceinline__ float vec_dot_q4_K_q8_1(const void* __restrict__ vbq,
@@ -215,8 +215,8 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(const void* __restrict
         d8[i] = __half2float(bq8i->d);
 
         const int* q8 = (const int*)bq8i->qs + ((iqs / 2) % 4);
-        u[2 * i + 0] = q8[0];
-        u[2 * i + 1] = q8[4];
+        u[(2 * i) + 0] = q8[0];
+        u[(2 * i) + 1] = q8[4];
     }
 
     const half2 dm = make_half2(bq4_K->d, bq4_K->dmin);
@@ -230,12 +230,12 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1(const void* __restrict
 
 static __global__ void quantize_fp16_to_q8_1_ggml_kernel(const half* __restrict__ x,
                                                          ggml_block_q8_1* __restrict__ y, int K) {
-    const int block_id = blockIdx.x * blockDim.x + threadIdx.x;
+    const int block_id = (blockIdx.x * blockDim.x) + threadIdx.x;
     const int num_blocks = K / QK8_1;
     if (block_id >= num_blocks)
         return;
 
-    const half* xb = x + static_cast<int64_t>(block_id) * QK8_1;
+    const half* xb = x + (static_cast<int64_t>(block_id) * QK8_1);
     ggml_block_q8_1* yb = y + block_id;
 
     // Find max absolute value
@@ -311,15 +311,15 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1_impl_vmmq(
         const int v0i = vl0i | vh0i;
         const int v1i = vl1i | vh1i;
 
-        const int dot1 = ggml_dp4a(v0i, u[2 * i + 0], ggml_dp4a(v1i, u[2 * i + 1], 0));
-        const int dot2 = ggml_dp4a(0x01010101, u[2 * i + 0], ggml_dp4a(0x01010101, u[2 * i + 1], 0));
+        const int dot1 = ggml_dp4a(v0i, u[(2 * i) + 0], ggml_dp4a(v1i, u[(2 * i) + 1], 0));
+        const int dot2 = ggml_dp4a(0x01010101, u[(2 * i) + 0], ggml_dp4a(0x01010101, u[(2 * i) + 1], 0));
 
         sumf_d += d8[i] * (dot1 * sc[i]);
         sumf_m += d8[i] * (dot2 * m[i]);
     }
 
     const float2 dm5f = __half22float2(dm5);
-    return dm5f.x * sumf_d - dm5f.y * sumf_m;
+    return (dm5f.x * sumf_d) - (dm5f.y * sumf_m);
 }
 
 static __device__ __forceinline__ float vec_dot_q5_K_q8_1(const void* __restrict__ vbq,
@@ -361,8 +361,8 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1(const void* __restrict
         const ggml_block_q8_1* bq8i = bq8_1 + bq8_offset + i;
         d8[i] = __half2float(bq8i->d);
         const int* q8 = (const int*)bq8i->qs + ((iqs / 2) % 4);
-        u[2 * i + 0] = q8[0];
-        u[2 * i + 1] = q8[4];
+        u[(2 * i) + 0] = q8[0];
+        u[(2 * i) + 1] = q8[4];
     }
 
     const half2 dm = make_half2(bq5_K->d, bq5_K->dmin);
@@ -427,7 +427,7 @@ static __global__ void mmvq_kernel(const void* __restrict__ W, const ggml_block_
                                                    : VDR_Q5_1;
     constexpr int blocks_per_iter = vdr * nwarps * WARP_SIZE / qi;
 
-    const int tid = WARP_SIZE * threadIdx.y + threadIdx.x;
+    const int tid = (WARP_SIZE * threadIdx.y) + threadIdx.x;
     const int row = blockIdx.x;  // output row (N dimension of W)
     const int col = blockIdx.y;  // input row (M dimension of x)
 
@@ -437,7 +437,7 @@ static __global__ void mmvq_kernel(const void* __restrict__ W, const ggml_block_
     const int blocks_per_row = K / qk;
 
     // Quantized input: offset to correct row
-    const ggml_block_q8_1* yq = x_q8 + static_cast<int64_t>(col) * (K / QK8_1);
+    const ggml_block_q8_1* yq = x_q8 + (static_cast<int64_t>(col) * (K / QK8_1));
 
     float tmp = 0.0f;
 
@@ -446,13 +446,13 @@ static __global__ void mmvq_kernel(const void* __restrict__ W, const ggml_block_
         const int kqs = vdr * (tid % (qi / vdr));
 
         if constexpr (qtype == MMVQTag::Q4_K) {
-            tmp += vec_dot_q4_K_q8_1(W, &yq[kby], row * blocks_per_row + kbx, kqs);
+            tmp += vec_dot_q4_K_q8_1(W, &yq[kby], (row * blocks_per_row) + kbx, kqs);
         } else if constexpr (qtype == MMVQTag::Q5_K) {
-            tmp += vec_dot_q5_K_q8_1(W, &yq[kby], row * blocks_per_row + kbx, kqs);
+            tmp += vec_dot_q5_K_q8_1(W, &yq[kby], (row * blocks_per_row) + kbx, kqs);
         } else if constexpr (qtype == MMVQTag::Q8_0) {
-            tmp += vec_dot_q8_0_q8_1(W, &yq[kby], row * blocks_per_row + kbx, kqs);
+            tmp += vec_dot_q8_0_q8_1(W, &yq[kby], (row * blocks_per_row) + kbx, kqs);
         } else {
-            tmp += vec_dot_q5_1_q8_1(W, &yq[kby], row * blocks_per_row + kbx, kqs);
+            tmp += vec_dot_q5_1_q8_1(W, &yq[kby], (row * blocks_per_row) + kbx, kqs);
         }
     }
 
@@ -476,7 +476,7 @@ static __global__ void mmvq_kernel(const void* __restrict__ W, const ggml_block_
     tmp = warp_reduce_sum(tmp);
 
     if (threadIdx.x == 0) {
-        y[col * N + row] = __float2half(tmp);
+        y[(col * N) + row] = __float2half(tmp);
     }
 }
 

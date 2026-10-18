@@ -98,12 +98,12 @@ __global__ void gemv_fp32_kernel(const float* __restrict__ A, const float* __res
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps_per_block + warp_id;
+    const int row = (blockIdx.x * warps_per_block) + warp_id;
 
     if (row >= M)
         return;
 
-    const float* A_row = A + (int64_t)row * K;
+    const float* A_row = A + ((int64_t)row * K);
 
     float sum = 0.0f;
 
@@ -115,7 +115,7 @@ __global__ void gemv_fp32_kernel(const float* __restrict__ A, const float* __res
     for (int i = lane; i < K_vec; i += 32) {
         float4 a = A_row_v[i];
         float4 xv = x_v[i];
-        sum += a.x * xv.x + a.y * xv.y + a.z * xv.z + a.w * xv.w;
+        sum += (a.x * xv.x) + (a.y * xv.y) + (a.z * xv.z) + (a.w * xv.w);
     }
 
     // Handle remainder elements (K not divisible by 4).
@@ -138,13 +138,13 @@ __global__ void gemv_fp16_kernel(const half* __restrict__ A, const half* __restr
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps_per_block + warp_id;
+    const int row = (blockIdx.x * warps_per_block) + warp_id;
 
     if (row >= M)
         return;
     pdl_wait();
 
-    const half* A_row = A + (int64_t)row * K;
+    const half* A_row = A + ((int64_t)row * K);
 
     float sum = 0.0f;
 
@@ -242,12 +242,12 @@ __global__ void gemv_bf16_kernel(const __nv_bfloat16* __restrict__ A, const __nv
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps_per_block + warp_id;
+    const int row = (blockIdx.x * warps_per_block) + warp_id;
 
     if (row >= M)
         return;
 
-    const __nv_bfloat16* A_row = A + (int64_t)row * K;
+    const __nv_bfloat16* A_row = A + ((int64_t)row * K);
 
     float sum = 0.0f;
 
@@ -301,16 +301,16 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
         switch (A.qtype) {
             case QType::F32: {
                 const float* A_ptr = static_cast<const float*>(A.data);
-                const float* x_ptr = static_cast<const float*>(x.data) + (int64_t)b * K;
-                float* y_ptr = static_cast<float*>(y.data) + (int64_t)b * M;
+                const float* x_ptr = static_cast<const float*>(x.data) + ((int64_t)b * K);
+                float* y_ptr = static_cast<float*>(y.data) + ((int64_t)b * M);
                 gemv_fp32_kernel<<<blocks, kGemvThreads, 0, stream>>>(A_ptr, x_ptr, y_ptr, M, K);
                 IMP_CUDA_CHECK_LAUNCH();
                 break;
             }
             case QType::F16: {
                 const half* A_ptr = static_cast<const half*>(A.data);
-                const half* x_ptr = static_cast<const half*>(x.data) + (int64_t)b * K;
-                half* y_ptr = static_cast<half*>(y.data) + (int64_t)b * M;
+                const half* x_ptr = static_cast<const half*>(x.data) + ((int64_t)b * K);
+                half* y_ptr = static_cast<half*>(y.data) + ((int64_t)b * M);
                 pdl::enable_kernel(gemv_fp16_kernel);
                 pdl::launch(gemv_fp16_kernel, dim3(blocks), dim3(kGemvThreads), size_t(0), stream, A_ptr, x_ptr, y_ptr, M, K);
                 IMP_CUDA_CHECK_LAUNCH();
@@ -318,8 +318,8 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
             }
             case QType::BF16: {
                 const __nv_bfloat16* A_ptr = static_cast<const __nv_bfloat16*>(A.data);
-                const __nv_bfloat16* x_ptr = static_cast<const __nv_bfloat16*>(x.data) + (int64_t)b * K;
-                __nv_bfloat16* y_ptr = static_cast<__nv_bfloat16*>(y.data) + (int64_t)b * M;
+                const __nv_bfloat16* x_ptr = static_cast<const __nv_bfloat16*>(x.data) + ((int64_t)b * K);
+                __nv_bfloat16* y_ptr = static_cast<__nv_bfloat16*>(y.data) + ((int64_t)b * M);
                 gemv_bf16_kernel<<<blocks, kGemvThreads, 0, stream>>>(A_ptr, x_ptr, y_ptr, M, K);
                 IMP_CUDA_CHECK_LAUNCH();
                 break;
@@ -328,7 +328,7 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
                 // Fallback: use cuBLAS gemv for other dtypes via gemm with N=1.
                 // Construct a temporary Tensor view for the column vectors.
                 Tensor x_col;
-                x_col.data = static_cast<char*>(x.data) + static_cast<int64_t>(b) * K * dtype_size(x.qtype);
+                x_col.data = static_cast<char*>(x.data) + (static_cast<int64_t>(b) * K * dtype_size(x.qtype));
                 x_col.qtype = x.qtype;
                 x_col.ndim = 2;
                 x_col.shape[0] = K;
@@ -338,7 +338,7 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
                 x_col.on_device = true;
 
                 Tensor y_col;
-                y_col.data = static_cast<char*>(y.data) + static_cast<int64_t>(b) * M * dtype_size(y.qtype);
+                y_col.data = static_cast<char*>(y.data) + (static_cast<int64_t>(b) * M * dtype_size(y.qtype));
                 y_col.qtype = y.qtype;
                 y_col.ndim = 2;
                 y_col.shape[0] = M;
@@ -365,7 +365,7 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* 
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps_per_block + warp_id;
+    const int row = (blockIdx.x * warps_per_block) + warp_id;
 
     if (row >= M)
         return;
@@ -373,7 +373,7 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* 
     if constexpr (ROWSCALE)
         scale = row_scales[row];
 
-    const uint8_t* A_row = A + (int64_t)row * K;
+    const uint8_t* A_row = A + ((int64_t)row * K);
 
     float sum = 0.0f;
 
@@ -389,7 +389,7 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* 
 
         // 16 FP8 values need 16 FP16 values = 2 float4 loads from x
         float4 x_raw0 = x_v[static_cast<int64_t>(2) * i];
-        float4 x_raw1 = x_v[2 * i + 1];
+        float4 x_raw1 = x_v[(2 * i) + 1];
 
         // Reinterpret FP8 bytes
         const uint8_t* a_bytes = reinterpret_cast<const uint8_t*>(&a_raw);
@@ -438,18 +438,18 @@ __global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W, const half* __res
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps_per_block + warp_id;
+    const int row = (blockIdx.x * warps_per_block) + warp_id;
 
     if (row >= M)
         return;
 
     const int blocks_per_row = K / 256;
     const size_t row_bytes = (size_t)blocks_per_row * 210;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
+    const uint8_t* W_row = W + ((size_t)row * row_bytes);
     float sum = 0.0f;
 
     for (int b = 0; b < blocks_per_row; ++b) {
-        const uint8_t* bp = W_row + static_cast<int64_t>(b) * 210;
+        const uint8_t* bp = W_row + (static_cast<int64_t>(b) * 210);
         const uint8_t* ql = bp;                            // ql[128]
         const uint8_t* qh = bp + 128;                      // qh[64]
         const int8_t* sc = (const int8_t*)(bp + 192);      // scales[16]
@@ -477,14 +477,14 @@ __global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W, const half* __res
         // Scale lookups: 16 scales per block, 2 sub-blocks of 32 elements each
         // lane/16 selects between two scale groups within each 32-lane sub-block
         int sc_idx = lane >> 4;  // 0 or 1
-        sum += d * ((float)sc[sc_idx] * (float)q0 * __half2float(x[base + lane]) +
-                    (float)sc[sc_idx + 2] * (float)q1 * __half2float(x[base + lane + 32]) +
-                    (float)sc[sc_idx + 4] * (float)q2 * __half2float(x[base + lane + 64]) +
-                    (float)sc[sc_idx + 6] * (float)q3 * __half2float(x[base + lane + 96]) +
-                    (float)sc[sc_idx + 8] * (float)q4 * __half2float(x[base + lane + 128]) +
-                    (float)sc[sc_idx + 10] * (float)q5 * __half2float(x[base + lane + 160]) +
-                    (float)sc[sc_idx + 12] * (float)q6 * __half2float(x[base + lane + 192]) +
-                    (float)sc[sc_idx + 14] * (float)q7 * __half2float(x[base + lane + 224]));
+        sum += d * (((float)sc[sc_idx] * (float)q0 * __half2float(x[base + lane])) +
+                    ((float)sc[sc_idx + 2] * (float)q1 * __half2float(x[base + lane + 32])) +
+                    ((float)sc[sc_idx + 4] * (float)q2 * __half2float(x[base + lane + 64])) +
+                    ((float)sc[sc_idx + 6] * (float)q3 * __half2float(x[base + lane + 96])) +
+                    ((float)sc[sc_idx + 8] * (float)q4 * __half2float(x[base + lane + 128])) +
+                    ((float)sc[sc_idx + 10] * (float)q5 * __half2float(x[base + lane + 160])) +
+                    ((float)sc[sc_idx + 12] * (float)q6 * __half2float(x[base + lane + 192])) +
+                    ((float)sc[sc_idx + 14] * (float)q7 * __half2float(x[base + lane + 224])));
     }
 
     // Warp shuffle reduction
@@ -507,21 +507,21 @@ __global__ void gemv_q8_0_kernel(const uint8_t* __restrict__ W, const half* __re
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps_per_block + warp_id;
+    const int row = (blockIdx.x * warps_per_block) + warp_id;
 
     if (row >= M)
         return;
 
     const int blocks_per_row = K / 32;
     const size_t row_bytes = (size_t)blocks_per_row * 34;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
+    const uint8_t* W_row = W + ((size_t)row * row_bytes);
     float sum = 0.0f;
 
     for (int b = 0; b < blocks_per_row; ++b) {
-        const uint8_t* bp = W_row + static_cast<int64_t>(b) * 34;
+        const uint8_t* bp = W_row + (static_cast<int64_t>(b) * 34);
         float d = __half2float(*(const half*)bp);
         int8_t q = ((const int8_t*)(bp + 2))[lane];
-        sum += d * (float)q * __half2float(x[b * 32 + lane]);
+        sum += d * (float)q * __half2float(x[(b * 32) + lane]);
     }
 
     // Warp shuffle reduction

@@ -33,7 +33,7 @@ constexpr std::array<std::pair<std::string_view, std::string_view>, 3> kExpertRe
 
 // `sub` = from + "." + suffix -> to + "." + suffix.
 bool rewrite_module(std::string_view sub, std::string_view from, std::string_view to, std::string& out) {
-    if (sub.size() <= from.size() || sub.compare(0, from.size(), from) != 0 || sub[from.size()] != '.')
+    if (sub.size() <= from.size() || !sub.starts_with(from) || sub[from.size()] != '.')
         return false;
     out = std::string(to) + std::string(sub.substr(from.size()));
     return true;
@@ -45,7 +45,7 @@ std::string lfm2_canonical_name(const std::string& name) {
     if (name == "model.embedding_norm.weight")
         return "model.norm.weight";
     constexpr std::string_view kLayers = "model.layers.";
-    if (name.compare(0, kLayers.size(), kLayers) != 0)
+    if (!name.starts_with(kLayers))
         return name;
     const size_t dot = name.find('.', kLayers.size());
     if (dot == std::string::npos)
@@ -59,13 +59,16 @@ std::string lfm2_canonical_name(const std::string& name) {
         if (rewrite_module(sub, from, to, out))
             return head + out;
     constexpr std::string_view kExperts = "feed_forward.experts.";
-    if (sub.compare(0, kExperts.size(), kExperts) == 0) {
+    if (sub.starts_with(kExperts)) {
         const std::string_view rest = sub.substr(kExperts.size());  // E.w1.<suffix>
         const size_t edot = rest.find('.');
         if (edot != std::string_view::npos)
             for (const auto& [from, to] : kExpertRewrites)
                 if (rewrite_module(rest.substr(edot + 1), from, to, out))
-                    return head + "mlp.experts." + std::string(rest.substr(0, edot + 1)) + out;
+                    return std::string(head)
+                        .append("mlp.experts.")
+                        .append(rest.substr(0, edot + 1))
+                        .append(out);
     }
     return name;
 }

@@ -32,29 +32,60 @@ __device__ float block_reduce_sum(float val) {
     return val;
 }
 
-__global__ void rmsnorm_fp32_kernel(const float* __restrict__ x, const float* __restrict__ weight,
-                                    float* __restrict__ out, int d_model, float eps, float weight_offset) {
-    const int row = blockIdx.x;
-    const float* x_row = x + static_cast<int64_t>(row) * d_model;
-    float* out_row = out + static_cast<int64_t>(row) * d_model;
+__device__ __forceinline__ float rms_weight(float w) { return w; }
+__device__ __forceinline__ float rms_weight(__half w) { return __half2float(w); }
+__device__ __forceinline__ void rms_store(float* p, float v) { *p = v; }
+__device__ __forceinline__ void rms_store(__half* p, float v) { *p = __float2half(v); }
 
+// One FP32-input RMSNorm row. TX = float (kResidual: x_row += r_row in place first) or const float.
+template <bool kResidual, typename TX, typename TW, typename TO>
+__device__ __forceinline__ void rmsnorm_fp32_row(TX* __restrict__ x_row, const float* __restrict__ r_row,
+                                                 const TW* __restrict__ weight, TO* __restrict__ out_row,
+                                                 int d_model, float eps, float weight_offset) {
     float sum_sq = 0.0f;
     for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
-        float v = x_row[i];
+        float v;
+        if constexpr (kResidual) {
+            v = x_row[i] + r_row[i];
+            x_row[i] = v;
+        } else {
+            v = x_row[i];
+        }
         sum_sq += v * v;
     }
     sum_sq = block_reduce_sum(sum_sq);
 
     __shared__ float s_inv_rms;
     if (threadIdx.x == 0) {
-        s_inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
+        s_inv_rms = rsqrtf((sum_sq / static_cast<float>(d_model)) + eps);
     }
     __syncthreads();
     const float inv_rms = s_inv_rms;
 
     for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
-        out_row[i] = x_row[i] * inv_rms * (weight[i] + weight_offset);
+        rms_store(&out_row[i], x_row[i] * inv_rms * (rms_weight(weight[i]) + weight_offset));
     }
+}
+
+// RMSNorm, FP32 input. TW = weight, TO = output (float or __half; FP16 rounds at the store).
+// <float, float>: F32 rmsnorm(). <__half, __half>: FP32 residual stream (`fp32_hidden_`, Gemma-4)
+// into an FP16 GEMM. <__half, float>: Gemma-4 ggml MMVQ prefill, FP32 through norm -> Q8_1.
+template <typename TW, typename TO>
+__global__ void rmsnorm_fp32_in_kernel(const float* __restrict__ x, const TW* __restrict__ weight,
+                                       TO* __restrict__ out, int d_model, float eps, float weight_offset) {
+    const int row = blockIdx.x;
+    const int64_t off = static_cast<int64_t>(row) * d_model;
+    rmsnorm_fp32_row<false>(x + off, nullptr, weight, out + off, d_model, eps, weight_offset);
+}
+
+// Fused RMSNorm + residual (FP32): out = rmsnorm(x + residual) * weight.
+// x is updated in-place to (x + residual).
+__global__ void rmsnorm_residual_fp32_kernel(float* __restrict__ x, const float* __restrict__ residual,
+                                             const float* __restrict__ weight, float* __restrict__ out,
+                                             int d_model, float eps, float weight_offset) {
+    const int row = blockIdx.x;
+    const int64_t off = static_cast<int64_t>(row) * d_model;
+    rmsnorm_fp32_row<true>(x + off, residual + off, weight, out + off, d_model, eps, weight_offset);
 }
 
 // FP16 RMSNorm via vectorized float4 loads (8 halfs/load). Requires d_model % 8 == 0.
@@ -62,9 +93,9 @@ __global__ void rmsnorm_fp16_kernel(const __half* __restrict__ x, const __half* 
                                     __half* __restrict__ out, int d_model, float eps, float weight_offset) {
     const int row = blockIdx.x;
     const int d_vec = d_model >> 3;  // d_model / 8
-    const float4* x_vec = reinterpret_cast<const float4*>(x + static_cast<int64_t>(row) * d_model);
+    const float4* x_vec = reinterpret_cast<const float4*>(x + (static_cast<int64_t>(row) * d_model));
     const float4* w_vec = reinterpret_cast<const float4*>(weight);
-    float4* out_vec = reinterpret_cast<float4*>(out + static_cast<int64_t>(row) * d_model);
+    float4* out_vec = reinterpret_cast<float4*>(out + (static_cast<int64_t>(row) * d_model));
 
     // Pass 1: vectorized sum-of-squares
     float sum_sq = 0.0f;
@@ -77,14 +108,14 @@ __global__ void rmsnorm_fp16_kernel(const __half* __restrict__ x, const __half* 
         half2 h3 = *reinterpret_cast<half2*>(&v.w);
         float2 f0 = __half22float2(h0), f1 = __half22float2(h1);
         float2 f2 = __half22float2(h2), f3 = __half22float2(h3);
-        sum_sq += f0.x * f0.x + f0.y * f0.y + f1.x * f1.x + f1.y * f1.y + f2.x * f2.x + f2.y * f2.y +
-                  f3.x * f3.x + f3.y * f3.y;
+        sum_sq += (f0.x * f0.x) + (f0.y * f0.y) + (f1.x * f1.x) + (f1.y * f1.y) + (f2.x * f2.x) +
+                  (f2.y * f2.y) + (f3.x * f3.x) + (f3.y * f3.y);
     }
     sum_sq = block_reduce_sum(sum_sq);
 
     __shared__ float s_inv_rms;
     if (threadIdx.x == 0) {
-        s_inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
+        s_inv_rms = rsqrtf((sum_sq / static_cast<float>(d_model)) + eps);
     }
     __syncthreads();
     pdl_trigger();
@@ -136,12 +167,12 @@ __global__ void rmsnorm_fp16_warp_kernel(const __half* __restrict__ x,
                                          __half* __restrict__ out, int rows, int d_model,
                                          float eps, float weight_offset) {
     const int lane = threadIdx.x & 31;
-    const int row = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+    const int row = (blockIdx.x * (blockDim.x >> 5)) + (threadIdx.x >> 5);
     if (row >= rows) return;
     const int d_vec = d_model >> 3;
-    const float4* x_vec = reinterpret_cast<const float4*>(x + static_cast<int64_t>(row) * d_model);
+    const float4* x_vec = reinterpret_cast<const float4*>(x + (static_cast<int64_t>(row) * d_model));
     const float4* w_vec = reinterpret_cast<const float4*>(weight);
-    float4* out_vec = reinterpret_cast<float4*>(out + static_cast<int64_t>(row) * d_model);
+    float4* out_vec = reinterpret_cast<float4*>(out + (static_cast<int64_t>(row) * d_model));
 
     float sum_sq = 0.0f;
     pdl_wait();
@@ -153,13 +184,13 @@ __global__ void rmsnorm_fp16_warp_kernel(const __half* __restrict__ x,
         half2 h3 = *reinterpret_cast<half2*>(&v.w);
         float2 f0 = __half22float2(h0), f1 = __half22float2(h1);
         float2 f2 = __half22float2(h2), f3 = __half22float2(h3);
-        sum_sq += f0.x * f0.x + f0.y * f0.y + f1.x * f1.x + f1.y * f1.y + f2.x * f2.x +
-                  f2.y * f2.y + f3.x * f3.x + f3.y * f3.y;
+        sum_sq += (f0.x * f0.x) + (f0.y * f0.y) + (f1.x * f1.x) + (f1.y * f1.y) + (f2.x * f2.x) +
+                  (f2.y * f2.y) + (f3.x * f3.x) + (f3.y * f3.y);
     }
 #pragma unroll
     for (int off = 16; off > 0; off >>= 1)
         sum_sq += __shfl_xor_sync(0xFFFFFFFFu, sum_sq, off);
-    const float inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
+    const float inv_rms = rsqrtf((sum_sq / static_cast<float>(d_model)) + eps);
     pdl_trigger();
 
     for (int i = lane; i < d_vec; i += 32) {
@@ -197,46 +228,16 @@ __global__ void rmsnorm_fp16_warp_kernel(const __half* __restrict__ x,
 // Row-block batched-decode kernels (plain + NVFP4 producer fusion) live in
 // layernorm_rowblock.cu: see rmsnorm_fp16_rowblock() / rmsnorm_nvfp4().
 
-// Fused RMSNorm + residual (FP32): out = rmsnorm(x + residual) * weight.
-// x is updated in-place to (x + residual).
-__global__ void rmsnorm_residual_fp32_kernel(float* __restrict__ x, const float* __restrict__ residual,
-                                             const float* __restrict__ weight, float* __restrict__ out,
-                                             int d_model, float eps, float weight_offset) {
-    const int row = blockIdx.x;
-    float* x_row = x + static_cast<int64_t>(row) * d_model;
-    const float* r_row = residual + static_cast<int64_t>(row) * d_model;
-    float* out_row = out + static_cast<int64_t>(row) * d_model;
-
-    float sum_sq = 0.0f;
-    for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
-        float v = x_row[i] + r_row[i];
-        x_row[i] = v;
-        sum_sq += v * v;
-    }
-    sum_sq = block_reduce_sum(sum_sq);
-
-    __shared__ float s_inv_rms;
-    if (threadIdx.x == 0) {
-        s_inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
-    }
-    __syncthreads();
-    const float inv_rms = s_inv_rms;
-
-    for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
-        out_row[i] = x_row[i] * inv_rms * (weight[i] + weight_offset);
-    }
-}
-
 // Fused RMSNorm + residual (FP16): vectorized float4 loads, same semantics as the FP32 kernel above.
 __global__ void rmsnorm_residual_fp16_kernel(__half* __restrict__ x, const __half* __restrict__ residual,
                                              const __half* __restrict__ weight, __half* __restrict__ out,
                                              int d_model, float eps, float weight_offset) {
     const int row = blockIdx.x;
     const int d_vec = d_model >> 3;
-    float4* x_vec = reinterpret_cast<float4*>(x + static_cast<int64_t>(row) * d_model);
-    const float4* r_vec = reinterpret_cast<const float4*>(residual + static_cast<int64_t>(row) * d_model);
+    float4* x_vec = reinterpret_cast<float4*>(x + (static_cast<int64_t>(row) * d_model));
+    const float4* r_vec = reinterpret_cast<const float4*>(residual + (static_cast<int64_t>(row) * d_model));
     const float4* w_vec = reinterpret_cast<const float4*>(weight);
-    float4* out_vec = reinterpret_cast<float4*>(out + static_cast<int64_t>(row) * d_model);
+    float4* out_vec = reinterpret_cast<float4*>(out + (static_cast<int64_t>(row) * d_model));
 
     float sum_sq = 0.0f;
     pdl_wait();
@@ -271,14 +272,14 @@ __global__ void rmsnorm_residual_fp16_kernel(__half* __restrict__ x, const __hal
         *reinterpret_cast<half2*>(&sv.w) = __float22half2_rn(s3);
         x_vec[i] = sv;
 
-        sum_sq += s0.x * s0.x + s0.y * s0.y + s1.x * s1.x + s1.y * s1.y + s2.x * s2.x + s2.y * s2.y +
-                  s3.x * s3.x + s3.y * s3.y;
+        sum_sq += (s0.x * s0.x) + (s0.y * s0.y) + (s1.x * s1.x) + (s1.y * s1.y) + (s2.x * s2.x) +
+                  (s2.y * s2.y) + (s3.x * s3.x) + (s3.y * s3.y);
     }
     sum_sq = block_reduce_sum(sum_sq);
 
     __shared__ float s_inv_rms;
     if (threadIdx.x == 0) {
-        s_inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
+        s_inv_rms = rsqrtf((sum_sq / static_cast<float>(d_model)) + eps);
     }
     __syncthreads();
     pdl_trigger();
@@ -347,7 +348,7 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, float eps, cuda
 
     switch (x.qtype) {
         case QType::F32:
-            pdl::launch(rmsnorm_fp32_kernel, dim3(rows), dim3(block), 0, stream,
+            pdl::launch(rmsnorm_fp32_in_kernel<float, float>, dim3(rows), dim3(block), 0, stream,
                         static_cast<const float*>(x.data), static_cast<const float*>(weight.data),
                         static_cast<float*>(out.data), d_model, eps, weight_offset);
             break;
@@ -377,37 +378,6 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out, float eps, cuda
     }
 }
 
-// RMSNorm FP32 input, FP16 output: used when the residual stream stays FP32
-// (`fp32_hidden_`, Gemma-4) but the downstream GEMM needs FP16 input.
-__global__ void rmsnorm_fp32_in_fp16_out_kernel(const float* __restrict__ x,
-                                                const __half* __restrict__ weight, __half* __restrict__ out,
-                                                int d_model, float eps, float weight_offset) {
-    const int row = blockIdx.x;
-    const float* x_row = x + static_cast<int64_t>(row) * d_model;
-    __half* out_row = out + static_cast<int64_t>(row) * d_model;
-
-    // Pass 1: sum of squares in FP32.
-    float sum_sq = 0.0f;
-    for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
-        float v = x_row[i];
-        sum_sq += v * v;
-    }
-    sum_sq = block_reduce_sum(sum_sq);
-
-    __shared__ float s_inv_rms;
-    if (threadIdx.x == 0) {
-        s_inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
-    }
-    __syncthreads();
-    const float inv_rms = s_inv_rms;
-
-    // Pass 2: normalize + weight, cast to FP16 at store.
-    for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
-        float v = x_row[i] * inv_rms * (__half2float(weight[i]) + weight_offset);
-        out_row[i] = __float2half(v);
-    }
-}
-
 void rmsnorm_fp32_to_fp16(const Tensor& x_fp32, const Tensor& weight, Tensor& out_fp16, float eps,
                           cudaStream_t stream, float weight_offset) {
     const int rows = static_cast<int>(x_fp32.shape[0]);
@@ -415,38 +385,9 @@ void rmsnorm_fp32_to_fp16(const Tensor& x_fp32, const Tensor& weight, Tensor& ou
     if (rows == 0 || d_model == 0)
         return;
     const int block = 512;
-    pdl::launch(rmsnorm_fp32_in_fp16_out_kernel, dim3(rows), dim3(block), 0, stream,
+    pdl::launch(rmsnorm_fp32_in_kernel<__half, __half>, dim3(rows), dim3(block), 0, stream,
                 static_cast<const float*>(x_fp32.data), static_cast<const __half*>(weight.data),
                 static_cast<__half*>(out_fp16.data), d_model, eps, weight_offset);
-}
-
-// FP32 input, FP32 output, FP16 weight. Used for Gemma-4 ggml MMVQ prefill:
-// keeps full FP32 precision through norm → Q8_1 quantization, matching llama's
-// FP32→Q8_1 path and avoiding the ~0.03% per-element FP16 truncation.
-__global__ void rmsnorm_fp32_in_fp32_out_kernel(const float* __restrict__ x,
-                                                const __half* __restrict__ weight, float* __restrict__ out,
-                                                int d_model, float eps, float weight_offset) {
-    const int row = blockIdx.x;
-    const float* x_row = x + static_cast<int64_t>(row) * d_model;
-    float* out_row = out + static_cast<int64_t>(row) * d_model;
-
-    float sum_sq = 0.0f;
-    for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
-        float v = x_row[i];
-        sum_sq += v * v;
-    }
-    sum_sq = block_reduce_sum(sum_sq);
-
-    __shared__ float s_inv_rms;
-    if (threadIdx.x == 0) {
-        s_inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
-    }
-    __syncthreads();
-    const float inv_rms = s_inv_rms;
-
-    for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
-        out_row[i] = x_row[i] * inv_rms * (__half2float(weight[i]) + weight_offset);
-    }
 }
 
 void rmsnorm_fp32_to_fp32(const Tensor& x_fp32, const Tensor& weight, float* out_fp32, int rows, int d_model,
@@ -454,7 +395,7 @@ void rmsnorm_fp32_to_fp32(const Tensor& x_fp32, const Tensor& weight, float* out
     if (rows == 0 || d_model == 0)
         return;
     const int block = 512;
-    pdl::launch(rmsnorm_fp32_in_fp32_out_kernel, dim3(rows), dim3(block), 0, stream,
+    pdl::launch(rmsnorm_fp32_in_kernel<__half, float>, dim3(rows), dim3(block), 0, stream,
                 static_cast<const float*>(x_fp32.data), static_cast<const __half*>(weight.data), out_fp32,
                 d_model, eps, weight_offset);
 }
@@ -539,10 +480,10 @@ __global__ void layernorm_residual_kernel(const __half* __restrict__ x,
         var_sum += c * c;
     }
     __syncthreads();
-    const float rstd = rsqrtf(ln_block_sum(var_sum) / d + eps);
+    const float rstd = rsqrtf((ln_block_sum(var_sum) / d) + eps);
     for (int i = threadIdx.x; i < d; i += blockDim.x) {
         const float bias = b ? ln_param(b, b_f32, i) : 0.0f;
-        out[base + i] = __float2half((row[i] - mean) * rstd * ln_param(w, w_f32, i) + bias);
+        out[base + i] = __float2half(((row[i] - mean) * rstd * ln_param(w, w_f32, i)) + bias);
     }
 }
 }  // namespace

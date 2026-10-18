@@ -368,7 +368,7 @@ static int run_server(int argc, char** argv) {
         }
 
         // Idle clock (#2199): every admitted POST except /admin/* counts as activity.
-        if (req.method == "POST" && req.path.rfind("/admin/", 0) != 0)
+        if (req.method == "POST" && !req.path.starts_with("/admin/"))
             state.touch_activity();
 
         return httplib::Server::HandlerResponse::Unhandled;

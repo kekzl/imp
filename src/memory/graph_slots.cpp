@@ -125,7 +125,7 @@ bool GraphSlotPool::is_open() const {
 
 GraphSlotView GraphSlotPool::carve_(int index) const {
     GraphSlotView v{};
-    auto* d = static_cast<std::byte*>(region_.base()) + slot_device_stride_ * static_cast<size_t>(index);
+    auto* d = static_cast<std::byte*>(region_.base()) + (slot_device_stride_ * static_cast<size_t>(index));
 
     v.sample_scratch = d;
     d += align_up(kSampleScratchBytes, kSubAlign);

@@ -122,7 +122,7 @@ std::string RawSafeTensors::open(const std::string& path) {
         if (!safetensors_internal::validate_tensor_offsets(start, end, expected, data_offset, file_size,
                                                            &err)) {
             close();
-            return path + ": tensor '" + t.name + "': " + err;
+            return std::string(path).append(": tensor '").append(t.name).append("': ").append(err);
         }
 
         t.data = bytes + data_offset + start;

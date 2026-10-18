@@ -16,18 +16,18 @@ namespace {
 bool try_rename_suffix(std::string& name, std::string_view from, std::string_view to) {
     if (name.size() < from.size())
         return false;
-    if (name.compare(name.size() - from.size(), from.size(), from) != 0)
+    if (!name.ends_with(from))
         return false;
     name.replace(name.size() - from.size(), from.size(), to);
     return true;
 }
 
 bool starts_with(std::string_view s, std::string_view prefix) {
-    return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
+    return s.size() >= prefix.size() && s.starts_with(prefix);
 }
 
 bool ends_with(std::string_view s, std::string_view suffix) {
-    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+    return s.size() >= suffix.size() && s.ends_with(suffix);
 }
 
 // Recognized projection names whose `.scale` is NOT a Gemma-4 extra.
@@ -127,7 +127,7 @@ bool name_is_unused(const std::string& in, bool keep_vision, bool keep_mtp) {
     return name_is_ple_host_table(in);
 }
 
-bool name_is_ple_host_table(const std::string& in) { return in.find(".ple.ple_embedding.") != std::string::npos; }
+bool name_is_ple_host_table(const std::string& in) { return in.contains(".ple.ple_embedding."); }
 
 NameTranslation translate_name(const std::string& in, TranslationCounters& counters, bool keep_vision) {
     std::string out = in;
@@ -243,7 +243,7 @@ bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4C
         if (collecting_ignore) {
             ignore_buf.push_back(' ');
             ignore_buf.append(line);
-            if (ignore_buf.find(']') != std::string::npos) {
+            if (ignore_buf.contains(']')) {
                 ignore_list = parse_bracket_array(ignore_buf);
                 collecting_ignore = false;
                 ignore_buf.clear();
@@ -268,7 +268,7 @@ bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4C
             }
         }
 
-        if (sv.find("QuantizationModifier:") == 0) {
+        if (sv.starts_with("QuantizationModifier:")) {
             seen_quant_mod = true;
             // A new modifier block resets any prior config_groups state.
             config_groups_indent = -1;
@@ -278,37 +278,37 @@ bool parse_recipe_yaml(const std::string& model_dir, imp::HFConfigLoader::NvFP4C
         if (!seen_quant_mod)
             continue;
 
-        if (sv.find("config_groups:") == 0) {
+        if (sv.starts_with("config_groups:")) {
             config_groups_indent = indent;
             continue;
         }
-        if (config_groups_indent >= 0 && sv.find("weights:") == 0) {
+        if (config_groups_indent >= 0 && sv.starts_with("weights:")) {
             weights_indent = indent;
             continue;
         }
 
         if (weights_indent >= 0) {
-            if (sv.find("num_bits:") == 0) {
+            if (sv.starts_with("num_bits:")) {
                 weights_num_bits = stoi_or(trim_value(sv.substr(9)), weights_num_bits);
-            } else if (sv.find("type:") == 0) {
+            } else if (sv.starts_with("type:")) {
                 weights_type = trim_value(sv.substr(5));
-            } else if (sv.find("group_size:") == 0) {
+            } else if (sv.starts_with("group_size:")) {
                 weights_group_size = stoi_or(trim_value(sv.substr(11)), weights_group_size);
             }
             continue;
         }
 
-        if (sv.find("scheme:") == 0) {
+        if (sv.starts_with("scheme:")) {
             scheme = trim_value(sv.substr(7));
-        } else if (sv.find("ignore:") == 0) {
+        } else if (sv.starts_with("ignore:")) {
             std::string body(sv.substr(7));
-            if (body.find('[') != std::string::npos && body.find(']') == std::string::npos) {
+            if (body.contains('[') && !body.contains(']')) {
                 ignore_buf = std::move(body);
                 collecting_ignore = true;
             } else {
                 ignore_list = parse_bracket_array(body);
             }
-        } else if (sv.find("group_size:") == 0) {
+        } else if (sv.starts_with("group_size:")) {
             cfg.group_size = stoi_or(trim_value(sv.substr(11)), cfg.group_size);
         }
     }

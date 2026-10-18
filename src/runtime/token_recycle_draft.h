@@ -54,10 +54,8 @@ public:
 private:
     bool valid_(int32_t tok) const { return tok >= 0 && tok < vocab_; }
     [[nodiscard]] bool promote_(int32_t prev, int32_t next);
-    int32_t* row_(int32_t tok) { return succ_.data() + static_cast<size_t>(tok) * slots_; }
-    const int32_t* row_(int32_t tok) const {
-        return succ_.data() + static_cast<size_t>(tok) * slots_;
-    }
+    int32_t* row_(int32_t tok) { return succ_.data() + (static_cast<size_t>(tok) * slots_); }
+    const int32_t* row_(int32_t tok) const { return succ_.data() + (static_cast<size_t>(tok) * slots_); }
 
     int vocab_;
     int slots_;

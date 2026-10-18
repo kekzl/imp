@@ -90,7 +90,7 @@ __device__ __forceinline__ void stash_partials(const float (&acc)[MT][kNT][4], f
         for (int j = 0; j < kNT; ++j)
 #pragma unroll
             for (int e = 0; e < 4; ++e)
-                s_red[(mt * kNT + j) * 4 + e][lane] = acc[mt][j][e];
+                s_red[(((mt * kNT) + j) * 4) + e][lane] = acc[mt][j][e];
 }
 
 template <int MT, int kNT>
@@ -104,7 +104,7 @@ __device__ __forceinline__ void add_partials(float (&acc)[MT][kNT][4], const flo
             for (int j = 0; j < kNT; ++j)
 #pragma unroll
                 for (int e = 0; e < 4; ++e)
-                    acc[mt][j][e] += s_red[w][(mt * kNT + j) * 4 + e][lane];
+                    acc[mt][j][e] += s_red[w][(((mt * kNT) + j) * 4) + e][lane];
 }
 
 template <int MT, int kNT, typename OutT>
@@ -115,17 +115,17 @@ __device__ __forceinline__ void store_rows(const float (&acc)[MT][kNT][4],
     for (int j = 0; j < kNT; ++j) {
 #pragma unroll
         for (int e = 0; e < 2; ++e) {
-            const int col = n_base + 8 * j + 2 * t + e;
+            const int col = n_base + (8 * j) + (2 * t) + e;
             if (col >= M)
                 continue;
             const float sc = row_scales[col];
 #pragma unroll
             for (int mt = 0; mt < MT; ++mt) {
-                const int r0 = mt * 16 + g;
+                const int r0 = (mt * 16) + g;
                 if (r0 < n_rows)
-                    y[static_cast<int64_t>(r0) * M + col] = static_cast<OutT>(acc[mt][j][e] * sc);
+                    y[(static_cast<int64_t>(r0) * M) + col] = static_cast<OutT>(acc[mt][j][e] * sc);
                 if (r0 + 8 < n_rows)
-                    y[static_cast<int64_t>(r0 + 8) * M + col] = static_cast<OutT>(acc[mt][j][2 + e] * sc);
+                    y[(static_cast<int64_t>(r0 + 8) * M) + col] = static_cast<OutT>(acc[mt][j][2 + e] * sc);
             }
         }
     }
@@ -157,9 +157,9 @@ __global__ void __launch_bounds__(kThreads) fp8_head_mma_kernel(const uint8_t* _
     bool w_ok[kNT];
 #pragma unroll
     for (int j = 0; j < kNT; ++j) {
-        const int r = n_base + 8 * j + g;
+        const int r = n_base + (8 * j) + g;
         w_ok[j] = r < M;
-        wp[j] = reinterpret_cast<const uint4*>(W + static_cast<int64_t>(w_ok[j] ? r : 0) * K);
+        wp[j] = reinterpret_cast<const uint4*>(W + (static_cast<int64_t>(w_ok[j] ? r : 0) * K));
     }
     const uint4* xp[MT][2];
     bool x_ok[MT][2];
@@ -167,9 +167,9 @@ __global__ void __launch_bounds__(kThreads) fp8_head_mma_kernel(const uint8_t* _
     for (int mt = 0; mt < MT; ++mt)
 #pragma unroll
         for (int h = 0; h < 2; ++h) {
-            const int r = mt * 16 + h * 8 + g;
+            const int r = (mt * 16) + (h * 8) + g;
             x_ok[mt][h] = r < n_rows;
-            xp[mt][h] = reinterpret_cast<const uint4*>(x + static_cast<int64_t>(x_ok[mt][h] ? r : 0) * K);
+            xp[mt][h] = reinterpret_cast<const uint4*>(x + (static_cast<int64_t>(x_ok[mt][h] ? r : 0) * K));
         }
 
     float acc[MT][kNT][4];
@@ -186,16 +186,16 @@ __global__ void __launch_bounds__(kThreads) fp8_head_mma_kernel(const uint8_t* _
     // math and chunk order either way.
     const int k_end = k_begin + k_len;
     int k0 = k_begin;
-    for (; k0 + kU * 64 <= k_end; k0 += kU * 64) {
+    for (; k0 + (kU * 64) <= k_end; k0 += kU * 64) {
         uint4 wr[kU][kNT];
 #pragma unroll
         for (int u = 0; u < kU; ++u)
 #pragma unroll
             for (int j = 0; j < kNT; ++j)
-                wr[u][j] = w_ok[j] ? __ldcs(wp[j] + ((k0 + 64 * u) >> 4) + t) : zero;
+                wr[u][j] = w_ok[j] ? __ldcs(wp[j] + ((k0 + (64 * u)) >> 4) + t) : zero;
 #pragma unroll
         for (int u = 0; u < kU; ++u)
-            mma_chunk<MT, kNT>(acc, wr[u], xp, x_ok, k0 + 64 * u, t);
+            mma_chunk<MT, kNT>(acc, wr[u], xp, x_ok, k0 + (64 * u), t);
     }
     for (; k0 < k_end; k0 += 64) {
         uint4 wr[kNT];
@@ -220,10 +220,10 @@ bool launch_fp8_head(const void* W_fp8, const float* d_row_scales, const half* x
     if (!W_fp8 || !d_row_scales || !x || !y || M <= 0 || K <= 0 || (K % (64 * kWarps)) != 0 || n_rows <= 0)
         return false;
     const auto* W = static_cast<const uint8_t*>(W_fp8);
-    const int blocks = (M + kNT * 8 - 1) / (kNT * 8);
+    const int blocks = (M + (kNT * 8) - 1) / (kNT * 8);
     for (int r0 = 0; r0 < n_rows; r0 += kRowsPerPass) {
         const int nb = std::min(kRowsPerPass, n_rows - r0);
-        const half* xr = x + static_cast<int64_t>(r0) * K;
+        const half* xr = x + (static_cast<int64_t>(r0) * K);
         OutT* yr = y + static_cast<int64_t>(r0) * M;
         if (nb <= 16)
             fp8_head_mma_kernel<1, kNT, kU, OutT>

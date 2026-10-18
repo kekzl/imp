@@ -81,14 +81,14 @@ gemm_qk_dp4a_moe_fused_kernel(
     if (M_e <= 0)
         return;
 
-    const int n_col = blockIdx.x * WARPS_PER_CTA + warp_id;
+    const int n_col = (blockIdx.x * WARPS_PER_CTA) + warp_id;
     if (n_col >= N)
         return;
 
     const int blocks_per_row = K / BLOCK_ELEMS;
     const size_t row_bytes = static_cast<size_t>(blocks_per_row) * Traits::BYTES;
-    const uint8_t* w_row = packed_weight + static_cast<size_t>(expert) * weight_stride +
-                           static_cast<size_t>(n_col) * row_bytes;
+    const uint8_t* w_row = packed_weight + (static_cast<size_t>(expert) * weight_stride) +
+                           (static_cast<size_t>(n_col) * row_bytes);
 
     // #2218 bounded: TILE_M * q8_per_row * 32, (mi * q8_per_row + q) * 32 < smem_bytes (gemm_q4k.cu:436)
     // <= 101376 B (sm_120 opt-in max; the launch at :446 fails above it)
@@ -107,16 +107,16 @@ gemm_qk_dp4a_moe_fused_kernel(
                 const int qi = i % q8_per_row;
                 const int tok = m_start + m_base + mi;
 
-                const block_q8_1& src = q8_base[tok * q8_per_row + qi];
+                const block_q8_1& src = q8_base[(tok * q8_per_row) + qi];
                 int4* dst_qs = reinterpret_cast<int4*>(smem_qs +
-                                                       static_cast<ptrdiff_t>((mi * q8_per_row + qi) * 32));
+                                                       static_cast<ptrdiff_t>(((mi * q8_per_row) + qi) * 32));
                 int4 tmp0, tmp1;
                 memcpy(&tmp0, src.qs, 16);
                 memcpy(&tmp1, src.qs + 16, 16);
                 dst_qs[0] = tmp0;
                 dst_qs[1] = tmp1;
 
-                smem_d8[mi * q8_per_row + qi] = d8_base[tok * q8_per_row + qi];
+                smem_d8[(mi * q8_per_row) + qi] = d8_base[(tok * q8_per_row) + qi];
             }
         }
         __syncthreads();
@@ -157,7 +157,7 @@ gemm_qk_dp4a_moe_fused_kernel(
             [[maybe_unused]] int qh_shift = 0;
             if constexpr (BT == QKType::Q5_K) {
                 memcpy(qh_packed, bp + Traits::QH_OFFSET, 32);
-                qh_shift = 2 * chunk + is_high;
+                qh_shift = (2 * chunk) + is_high;
             }
 
             // Extract 8 packed int32s of nibble values (4 nibbles per int32)
@@ -182,7 +182,7 @@ gemm_qk_dp4a_moe_fused_kernel(
 
             // M-loop
             for (int mi = 0; mi < m_count; mi++) {
-                const int8_t* qs_act = smem_qs + static_cast<ptrdiff_t>((mi * q8_per_row + q8_idx) * 32);
+                const int8_t* qs_act = smem_qs + static_cast<ptrdiff_t>(((mi * q8_per_row) + q8_idx) * 32);
                 int4* qs_v = reinterpret_cast<int4*>(const_cast<int8_t*>(qs_act));
                 int4 v0 = qs_v[0];
                 int4 v1 = qs_v[1];
@@ -190,7 +190,7 @@ gemm_qk_dp4a_moe_fused_kernel(
                 memcpy(&xqs[0], &v0, 16);
                 memcpy(&xqs[4], &v1, 16);
 
-                const float dq = smem_d8[mi * q8_per_row + q8_idx];
+                const float dq = smem_d8[(mi * q8_per_row) + q8_idx];
 
                 int32_t sumi = 0;
                 int32_t sum_ones = 0;
@@ -203,8 +203,8 @@ gemm_qk_dp4a_moe_fused_kernel(
                     sum_ones = __dp4a(ones, xqs[d4], sum_ones);
                 }
 
-                acc[mi] += dq * (d_sc * static_cast<float>(sumi) -
-                                 dmin_mn * static_cast<float>(sum_ones));
+                acc[mi] += dq *
+                           ((d_sc * static_cast<float>(sumi)) - (dmin_mn * static_cast<float>(sum_ones)));
             }
         }
 
@@ -218,7 +218,7 @@ gemm_qk_dp4a_moe_fused_kernel(
         if (lane == 0) {
             for (int mi = 0; mi < m_count; mi++) {
                 const int tok = m_start + m_base + mi;
-                c_base[static_cast<size_t>(tok) * N + n_col] = __float2half(acc[mi]);
+                c_base[(static_cast<size_t>(tok) * N) + n_col] = __float2half(acc[mi]);
             }
         }
 
@@ -241,13 +241,13 @@ __global__ void __launch_bounds__(CTA_THREADS, 1) gemm_qk_dp4a_dense_kernel(
     const int lane = threadIdx.x % 32;
     const int tid = threadIdx.x;
 
-    const int n_col = blockIdx.x * WARPS_PER_CTA + warp_id;
+    const int n_col = (blockIdx.x * WARPS_PER_CTA) + warp_id;
     if (n_col >= N)
         return;
 
     const int blocks_per_row = K / BLOCK_ELEMS;
     const size_t row_bytes = static_cast<size_t>(blocks_per_row) * Traits::BYTES;
-    const uint8_t* w_row = packed_weight + static_cast<size_t>(n_col) * row_bytes;
+    const uint8_t* w_row = packed_weight + (static_cast<size_t>(n_col) * row_bytes);
 
     // #2218 bounded: TILE_M * q8_per_row * 32, (mi * q8_per_row + q) * 32 < smem_bytes (:400)
     // <= 101376 B (sm_120 opt-in max; the launch at :412 fails above it)
@@ -265,16 +265,16 @@ __global__ void __launch_bounds__(CTA_THREADS, 1) gemm_qk_dp4a_dense_kernel(
                 const int qi = i % q8_per_row;
                 const int tok = m_base + mi;
 
-                const block_q8_1& src = q8_base[tok * q8_per_row + qi];
+                const block_q8_1& src = q8_base[(tok * q8_per_row) + qi];
                 int4* dst_qs = reinterpret_cast<int4*>(smem_qs +
-                                                       static_cast<ptrdiff_t>((mi * q8_per_row + qi) * 32));
+                                                       static_cast<ptrdiff_t>(((mi * q8_per_row) + qi) * 32));
                 int4 tmp0, tmp1;
                 memcpy(&tmp0, src.qs, 16);
                 memcpy(&tmp1, src.qs + 16, 16);
                 dst_qs[0] = tmp0;
                 dst_qs[1] = tmp1;
 
-                smem_d8[mi * q8_per_row + qi] = d8_base[tok * q8_per_row + qi];
+                smem_d8[(mi * q8_per_row) + qi] = d8_base[(tok * q8_per_row) + qi];
             }
         }
         __syncthreads();
@@ -309,7 +309,7 @@ __global__ void __launch_bounds__(CTA_THREADS, 1) gemm_qk_dp4a_dense_kernel(
             [[maybe_unused]] int qh_shift = 0;
             if constexpr (BT == QKType::Q5_K) {
                 memcpy(qh_packed, bp + Traits::QH_OFFSET, 32);
-                qh_shift = 2 * chunk + is_high;
+                qh_shift = (2 * chunk) + is_high;
             }
 
             uint32_t nib[8];
@@ -331,7 +331,7 @@ __global__ void __launch_bounds__(CTA_THREADS, 1) gemm_qk_dp4a_dense_kernel(
             }
 
             for (int mi = 0; mi < m_count; mi++) {
-                const int8_t* qs_act = smem_qs + static_cast<ptrdiff_t>((mi * q8_per_row + q8_idx) * 32);
+                const int8_t* qs_act = smem_qs + static_cast<ptrdiff_t>(((mi * q8_per_row) + q8_idx) * 32);
                 int4* qs_v = reinterpret_cast<int4*>(const_cast<int8_t*>(qs_act));
                 int4 v0 = qs_v[0];
                 int4 v1 = qs_v[1];
@@ -339,7 +339,7 @@ __global__ void __launch_bounds__(CTA_THREADS, 1) gemm_qk_dp4a_dense_kernel(
                 memcpy(&xqs[0], &v0, 16);
                 memcpy(&xqs[4], &v1, 16);
 
-                const float dq = smem_d8[mi * q8_per_row + q8_idx];
+                const float dq = smem_d8[(mi * q8_per_row) + q8_idx];
 
                 int32_t sumi = 0;
                 int32_t sum_ones = 0;
@@ -352,8 +352,8 @@ __global__ void __launch_bounds__(CTA_THREADS, 1) gemm_qk_dp4a_dense_kernel(
                     sum_ones = __dp4a(ones, xqs[d4], sum_ones);
                 }
 
-                acc[mi] += dq * (d_sc * static_cast<float>(sumi) -
-                                 dmin_mn * static_cast<float>(sum_ones));
+                acc[mi] += dq *
+                           ((d_sc * static_cast<float>(sumi)) - (dmin_mn * static_cast<float>(sum_ones)));
             }
         }
 
@@ -365,7 +365,7 @@ __global__ void __launch_bounds__(CTA_THREADS, 1) gemm_qk_dp4a_dense_kernel(
 
         if (lane == 0) {
             for (int mi = 0; mi < m_count; mi++) {
-                half* o = output + static_cast<size_t>(m_base + mi) * N + n_col;
+                half* o = output + (static_cast<size_t>(m_base + mi) * N) + n_col;
                 *o = __float2half(ACCUM ? __half2float(*o) + acc[mi] : acc[mi]);
             }
         }

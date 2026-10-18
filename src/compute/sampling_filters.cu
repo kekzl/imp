@@ -4,6 +4,7 @@
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cmath>
 #include <cfloat>
 
@@ -27,8 +28,7 @@ __global__ void apply_min_p_kernel(float* __restrict__ logits, int vocab_size, f
     float local_max = -FLT_MAX;
     for (int i = tid; i < vocab_size; i += blockDim.x) {
         float v = logits[i];
-        if (v > local_max)
-            local_max = v;
+        local_max = std::max(local_max, v);
     }
     local_max = warp_reduce_max(local_max);
     int warp_id = tid / WARP_SIZE;
@@ -39,8 +39,7 @@ __global__ void apply_min_p_kernel(float* __restrict__ logits, int vocab_size, f
     if (tid == 0) {
         float mx = -FLT_MAX;
         for (int w = 0; w < NUM_WARPS; w++)
-            if (s_max[w] > mx)
-                mx = s_max[w];
+            mx = std::max(mx, s_max[w]);
         s_threshold = mx + log_min_p;
     }
     __syncthreads();
@@ -203,7 +202,7 @@ __global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_siz
         {
             float total = 0.0f;
             for (int w = 0; w < NUM_WARPS; w++)
-                total += s_warp_buckets[w * TYPICAL_NBUCKETS + tid];
+                total += s_warp_buckets[(w * TYPICAL_NBUCKETS) + tid];
             s_buckets[tid] = total;
         }
         __syncthreads();

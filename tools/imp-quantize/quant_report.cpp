@@ -26,7 +26,7 @@ float fp8_e4m3_to_float(unsigned char bits) {
     const uint32_t exp = (bits >> 3) & 0x0Fu;
     const uint32_t man = bits & 0x07u;
     const float mag = exp == 0 ? static_cast<float>(man) / 512.0f
-                               : (1.0f + static_cast<float>(man) / 8.0f) * std::ldexp(1.0f, int(exp) - 7);
+                               : (1.0f + (static_cast<float>(man) / 8.0f)) * std::ldexp(1.0f, int(exp) - 7);
     return sign ? -mag : mag;
 }
 
@@ -54,11 +54,11 @@ TensorError nvfp4_tensor_error(const std::string& name, const uint16_t* src_fp16
     double sq = 0.0, max_abs_err = 0.0, absmax = 0.0;
     for (int64_t i = 0; i < N; i++) {
         for (int64_t j = 0; j < K; j++) {
-            const size_t idx = static_cast<size_t>(i) * static_cast<size_t>(K) + static_cast<size_t>(j);
+            const size_t idx = (static_cast<size_t>(i) * static_cast<size_t>(K)) + static_cast<size_t>(j);
             const double src = half_to_float(src_fp16[idx]);
             const unsigned char byte = packed[idx / 2];
             const unsigned char nib = (j % 2 == 0) ? (byte & 0x0F) : ((byte >> 4) & 0x0F);
-            const size_t ms_idx = static_cast<size_t>(i) * static_cast<size_t>(K / 16) +
+            const size_t ms_idx = (static_cast<size_t>(i) * static_cast<size_t>(K / 16)) +
                                   static_cast<size_t>(j / 16);
             const double dq = double(e2m1_to_float(nib)) * double(fp8_e4m3_to_float(micro[ms_idx])) *
                               double(tensor_scale);

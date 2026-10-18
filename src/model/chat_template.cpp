@@ -40,35 +40,34 @@ ChatTemplateFamily ChatTemplate::detect_family(const std::string& jinja2_str) {
         return ChatTemplateFamily::RAW;
 
     // Order matters: check more specific patterns first
-    if (jinja2_str.find("<|im_start|>") != std::string::npos)
+    if (jinja2_str.contains("<|im_start|>"))
         return ChatTemplateFamily::CHATML;
-    if (jinja2_str.find("<|start_header_id|>") != std::string::npos)
+    if (jinja2_str.contains("<|start_header_id|>"))
         return ChatTemplateFamily::LLAMA3;
-    if (jinja2_str.find("<start_of_turn>") != std::string::npos)
+    if (jinja2_str.contains("<start_of_turn>"))
         return ChatTemplateFamily::GEMMA;
     // Gemma-4 uses <|turn> instead of <start_of_turn>
-    if (jinja2_str.find("<|turn>") != std::string::npos)
+    if (jinja2_str.contains("<|turn>"))
         return ChatTemplateFamily::GEMMA;
     // Mistral V3-Tekken adds [TOOL_CALLS]/[AVAILABLE_TOOLS]/[TOOL_RESULTS] on the V1/V2 [INST]
     // core. Check before the LLAMA2 [INST] fallback so newer Mistrals are not misclassified.
-    if (jinja2_str.find("[TOOL_CALLS]") != std::string::npos ||
-        jinja2_str.find("[AVAILABLE_TOOLS]") != std::string::npos)
+    if (jinja2_str.contains("[TOOL_CALLS]") || jinja2_str.contains("[AVAILABLE_TOOLS]"))
         return ChatTemplateFamily::MISTRAL_V3;
-    if (jinja2_str.find("[INST]") != std::string::npos)
+    if (jinja2_str.contains("[INST]"))
         return ChatTemplateFamily::LLAMA2;
-    if (jinja2_str.find("<extra_id_0>") != std::string::npos)
+    if (jinja2_str.contains("<extra_id_0>"))
         return ChatTemplateFamily::NEMOTRON;
     // DeepSeek R1: fullwidth vertical bars ｜ (U+FF5C = \xef\xbd\x9c)
-    if (jinja2_str.find("\xef\xbd\x9c"
-                        "User"
-                        "\xef\xbd\x9c") != std::string::npos)
+    if (jinja2_str.contains("\xef\xbd\x9c"
+                            "User"
+                            "\xef\xbd\x9c"))
         return ChatTemplateFamily::DEEPSEEK_R1;
     // Harmony (gpt-oss): <|channel|> is unique to the format. Must be checked
     // BEFORE Phi — the Harmony template also contains the literal <|end|>.
-    if (jinja2_str.find("<|channel|>") != std::string::npos)
+    if (jinja2_str.contains("<|channel|>"))
         return ChatTemplateFamily::HARMONY;
     // Phi: <|end|> is literal in the Jinja2 template (role tags are dynamic)
-    if (jinja2_str.find("<|end|>") != std::string::npos)
+    if (jinja2_str.contains("<|end|>"))
         return ChatTemplateFamily::PHI;
 
     return ChatTemplateFamily::RAW;
@@ -190,14 +189,13 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
             // Think evidence: template exposes enable_thinking (Qwen3 hybrid/3.6/Nemotron), or a fresh
             // render emits "<think>" (Phi-4, DeepSeek-R1). Raw substring match is not enough:
             // Qwen3-*-Instruct-2507 mentions <think> only when re-rendering past turns, never fresh ones.
-            mentions_thinking_ = jinja_str.find("enable_thinking") != std::string::npos;
-            if (!mentions_thinking_ && jinja_str.find("<think>") != std::string::npos)
+            mentions_thinking_ = jinja_str.contains("enable_thinking");
+            if (!mentions_thinking_ && jinja_str.contains("<think>"))
                 mentions_thinking_ = probe_render_mentions_think(tokenizer);
             // Qwen-Coder/Qwen3.6 XML tool-call dialect: <function=NAME><parameter=KEY> raw-text bodies.
             // Constrained enforcement must use the XML grammar; the JSON body FSM mangles multi-line args.
             // Source substring is only a prefilter; probe_render_teaches_xml_tools confirms the render.
-            tool_xml_dialect_ = jinja_str.find("<parameter=") != std::string::npos &&
-                                jinja_str.find("<function=") != std::string::npos &&
+            tool_xml_dialect_ = jinja_str.contains("<parameter=") && jinja_str.contains("<function=") &&
                                 probe_render_teaches_xml_tools(tokenizer);
             // Served as /v1/models meta.reasoning_effort (model/reasoning_effort_spec.h).
             parse_reasoning_effort_spec(jinja_str, reasoning_effort_values_, reasoning_effort_default_);
@@ -387,9 +385,8 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, c
 
             std::string candidate = jinja.substr(content_start, content_end - content_start);
             // Skip entries that reference Jinja variables (user-provided messages)
-            if (candidate.find("messages") == std::string::npos &&
-                candidate.find("{{") == std::string::npos && candidate.find("content") == std::string::npos &&
-                !candidate.empty()) {
+            if (!candidate.contains("messages") && !candidate.contains("{{") &&
+                !candidate.contains("content") && !candidate.empty()) {
                 default_system_message_ = candidate;
                 IMP_LOG_INFO("Default system message: %.40s%s", default_system_message_.c_str(),
                              default_system_message_.size() > 40 ? "..." : "");
@@ -814,7 +811,7 @@ bool ChatTemplate::probe_render_mentions_think(const Tokenizer& tok) const {
     ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
     ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
     std::string rendered = jinja_tpl_->render(ctx);
-    return rendered.find("<think>") != std::string::npos;
+    return rendered.contains("<think>");
 }
 
 // Renders a dummy tools conversation and checks whether the RENDERED prompt teaches the
@@ -844,9 +841,8 @@ bool ChatTemplate::probe_render_teaches_xml_tools(const Tokenizer& tok) const {
     ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
     ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
     std::string rendered = jinja_tpl_->render(ctx);
-    return rendered.find("<function=") != std::string::npos &&
-           rendered.find("<parameter=") != std::string::npos &&
-           rendered.find("<tool_call>") != std::string::npos;
+    return rendered.contains("<function=") && rendered.contains("<parameter=") &&
+           rendered.contains("<tool_call>");
 }
 
 // ---------------------------------------------------------------------------

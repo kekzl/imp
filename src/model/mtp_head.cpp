@@ -27,7 +27,7 @@ MtpHead dispatch_mtp_head(const std::unordered_map<std::string, Tensor>& tm, con
     };
     // Qwen4Exp layout (docs/plans/2026-09-28-qwen4exp-mtp.md): split fc, hyper-connection
     // modules instead of pre-norms and final norm, QSA indexer, 512 per-expert FP8 experts.
-    if (tm.count(kMtpHeadKeyFcEmbedding)) {
+    if (tm.contains(kMtpHeadKeyFcEmbedding)) {
         head.layout = MtpLayout::Qwen4Exp;
         bool ok = true;
         ok &= take("mtp.pre_fc_norm_embedding.weight", head.pre_fc_norm_embedding);
@@ -103,7 +103,7 @@ MtpHead dispatch_mtp_head(const std::unordered_map<std::string, Tensor>& tm, con
     // layers.1, mixer where Qwen says self_attn/mlp, per-expert 2-D weights instead of one
     // packed 3-D stack. Detected on a name only this layout has, so the Qwen path below stays
     // byte-for-byte unaffected.
-    if (tm.count(kMtpHeadKeyEhProj)) {
+    if (tm.contains(kMtpHeadKeyEhProj)) {
         head.layout = MtpLayout::Nemotron;
         bool nok = true;
         nok &= take("mtp.layers.0.enorm.weight", head.pre_fc_norm_embedding);

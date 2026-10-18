@@ -49,7 +49,7 @@ Engine::PhraseRecurrent& Engine::phrase_rec_of_(int req_id) {
 }
 
 void Engine::phrase_release_(int req_id) {
-    if (!phrase_rec_.count(req_id))
+    if (!phrase_rec_.contains(req_id))
         return;
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(decode_stream()));  // a snapshot copy may still be queued
     phrase_rec_.erase(req_id);

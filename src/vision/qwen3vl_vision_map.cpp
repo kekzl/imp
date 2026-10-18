@@ -8,7 +8,7 @@ namespace {
 
 using Slot = Qwen3VLVisionSlot;
 
-bool starts_with(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
+bool starts_with(const std::string& s, const char* p) { return s.starts_with(p); }
 
 // Parse "<digits>." at `pos`, advancing past the dot. Returns -1 if there is no
 // digit run followed by a dot — a name like `blocks.x.norm1.weight` must fall

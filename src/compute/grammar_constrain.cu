@@ -12,7 +12,7 @@ namespace {
 // they have no token text, so they are masked wholesale rather than indexed.
 __global__ void grammar_mask_kernel(float* __restrict__ logits, const uint8_t* __restrict__ allow,
                                     int vocab_size, int n_classified) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (i >= vocab_size)
         return;
     if (i >= n_classified || allow[i] == 0)

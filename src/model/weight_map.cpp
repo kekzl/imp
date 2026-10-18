@@ -377,13 +377,12 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
             }
             // Gemma-4 unified multimodal: the audio embedder ships under model.embed_audio.*; no
             // encoder anywhere in imp, a lost modality rather than a lost tensor, counted apart.
-            if (name.compare(0, 18, "model.embed_audio.") == 0) {
+            if (name.starts_with("model.embed_audio.")) {
                 ++skipped;
                 ++stats.audio;
                 continue;
             }
-            if (name.compare(0, 4, "mtp.") == 0 ||
-                name.compare(0, 10, "model.mtp.") == 0) {
+            if (name.starts_with("mtp.") || name.starts_with("model.mtp.")) {
                 ++skipped;
                 ++stats.mtp;
                 continue;
@@ -406,7 +405,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 name = "model.embed_tokens.weight";
             } else if (name == "backbone.norm_f.weight") {
                 name = "model.norm.weight";
-            } else if (name.compare(0, 16, "backbone.layers.") == 0) {
+            } else if (name.starts_with("backbone.layers.")) {
                 std::vector<std::string> bp = split(name, '.');
                 // bp = [backbone, layers, N, ...]
                 if (bp.size() >= 4) {
@@ -515,9 +514,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
         if (name == "model.hyper_connection_mixer.hc_norm.weight" ||
             name == "model.hyper_connection_mixer.input_mix_weight_down.weight" ||
             name == "model.hyper_connection_mixer.input_mix_weight_up.weight") {
-            if (name.find(".hc_norm.") != std::string::npos)
+            if (name.contains(".hc_norm."))
                 model.hc_mixer_norm_ = t;
-            else if (name.find("_down.") != std::string::npos)
+            else if (name.contains("_down."))
                 model.hc_mixer_down_ = t;
             else
                 model.hc_mixer_up_ = t;
@@ -594,20 +593,23 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 int q_rows = mc.n_heads * hd;
                 int kv_rows = mc.n_kv_heads * hd;
                 size_t row_bytes = t.nbytes() / static_cast<size_t>(t.shape[0]);
-                if (t.shape[0] == q_rows + 2 * kv_rows) {
+                if (t.shape[0] == q_rows + (2 * kv_rows)) {
                     layer.wq = t;
                     layer.wq.shape[0] = q_rows;
                     layer.wk = t;
-                    layer.wk.data = static_cast<char*>(t.data) + static_cast<size_t>(q_rows) * row_bytes;
+                    layer.wk.data = static_cast<char*>(t.data) + (static_cast<size_t>(q_rows) * row_bytes);
                     layer.wk.shape[0] = kv_rows;
                     layer.wv = t;
-                    layer.wv.data = static_cast<char*>(t.data) + static_cast<size_t>(q_rows + kv_rows) * row_bytes;
+                    layer.wv.data = static_cast<char*>(t.data) +
+                                    (static_cast<size_t>(q_rows + kv_rows) * row_bytes);
                     layer.wv.shape[0] = kv_rows;
                     if (t.scales) {
                         int64_t scale_cols = t.shape[1] / 8;
                         size_t scale_row_bytes = static_cast<size_t>(scale_cols);
-                        layer.wk.scales = static_cast<char*>(t.scales) + static_cast<size_t>(q_rows) * scale_row_bytes;
-                        layer.wv.scales = static_cast<char*>(t.scales) + static_cast<size_t>(q_rows + kv_rows) * scale_row_bytes;
+                        layer.wk.scales = static_cast<char*>(t.scales) +
+                                          (static_cast<size_t>(q_rows) * scale_row_bytes);
+                        layer.wv.scales = static_cast<char*>(t.scales) +
+                                          (static_cast<size_t>(q_rows + kv_rows) * scale_row_bytes);
                     }
                     // The only producer of a real q|k|v split. The loader's
                     // scale fix-up requires this flag (model_config.h).
@@ -738,12 +740,13 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                 layer.w_gate = t;
                 layer.w_gate.shape[0] = half_rows;
                 layer.w_up = t;
-                layer.w_up.data = static_cast<char*>(t.data) + static_cast<size_t>(half_rows) * row_bytes;
+                layer.w_up.data = static_cast<char*>(t.data) + (static_cast<size_t>(half_rows) * row_bytes);
                 layer.w_up.shape[0] = half_rows;
                 if (t.scales) {
                     int64_t scale_cols = cols / 8;
                     size_t scale_row_bytes = static_cast<size_t>(scale_cols);
-                    layer.w_up.scales = static_cast<char*>(t.scales) + static_cast<size_t>(half_rows) * scale_row_bytes;
+                    layer.w_up.scales = static_cast<char*>(t.scales) +
+                                        (static_cast<size_t>(half_rows) * scale_row_bytes);
                 }
                 layer.gate_up_split_from_fused = true;  // see qkv_proj above
                 matched = true;
@@ -792,9 +795,9 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                     Tensor sq = t, sk = t, sv = t;
                     sq.shape[0] = q_rows;
                     sk.shape[0] = kv_rows;
-                    sk.data = static_cast<char*>(t.data) + static_cast<size_t>(q_rows) * srow;
+                    sk.data = static_cast<char*>(t.data) + (static_cast<size_t>(q_rows) * srow);
                     sv.shape[0] = kv_rows;
-                    sv.data = static_cast<char*>(t.data) + static_cast<size_t>(q_rows + kv_rows) * srow;
+                    sv.data = static_cast<char*>(t.data) + (static_cast<size_t>(q_rows + kv_rows) * srow);
                     route_nvfp4_scale(model, layer_key_prefix + "wq", kind, sq);
                     route_nvfp4_scale(model, layer_key_prefix + "wk", kind, sk);
                     route_nvfp4_scale(model, layer_key_prefix + "wv", kind, sv);
@@ -832,7 +835,7 @@ bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string
                     Tensor sg = t, su = t;
                     sg.shape[0] = half;
                     su.shape[0] = half;
-                    su.data = static_cast<char*>(t.data) + static_cast<size_t>(half) * srow;
+                    su.data = static_cast<char*>(t.data) + (static_cast<size_t>(half) * srow);
                     route_nvfp4_scale(model, layer_key_prefix + "w_gate", kind, sg);
                     route_nvfp4_scale(model, layer_key_prefix + "w_up", kind, su);
                 } else {

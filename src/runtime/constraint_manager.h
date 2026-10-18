@@ -68,7 +68,7 @@ public:
                                      bool xml = false) {
         std::string key = (xml ? "xml-tool-call:" : "tool-call:") + envelope_open + "\x1f" + envelope_close;
         for (auto& [name, params] : tools)
-            key += "\x1f" + name + "\x1e" + params;
+            key.append("\x1f").append(name).append("\x1e").append(params);
         return key;
     }
 

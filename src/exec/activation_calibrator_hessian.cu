@@ -19,7 +19,7 @@ void ActivationCalibrator::accumulate_hessian_(int layer, TensorKind kind, const
     if (kind == TensorKind::WK || kind == TensorKind::WV || kind == TensorKind::W_UP)
         return;
     const int64_t rows = input.shape[0], K = input.shape[1];
-    const uint32_t key = static_cast<uint32_t>(layer) * 256u + static_cast<uint32_t>(kind);
+    const uint32_t key = (static_cast<uint32_t>(layer) * 256u) + static_cast<uint32_t>(kind);
     auto it = hess_.find(key);
     if (it == hess_.end()) {
         HessEntry e;

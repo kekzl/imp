@@ -26,7 +26,7 @@ void mxfp8_quantize(const uint16_t* fp16, int64_t n, int64_t k, uint8_t* q, uint
             float amax = 0.0f;
             for (int i = 0; i < kMxfp8Block; ++i) {
                 __half_raw hr;
-                hr.x = fp16[r * k + b * kMxfp8Block + i];
+                hr.x = fp16[(r * k) + (b * kMxfp8Block) + i];
                 v[i] = __half2float(__half(hr));
                 amax = std::fmax(amax, std::fabs(v[i]));
             }
@@ -39,10 +39,10 @@ void mxfp8_quantize(const uint16_t* fp16, int64_t n, int64_t k, uint8_t* q, uint
                     --e;
                 e = std::clamp(e, -127, 127);
             }
-            scale[r * nb + b] = static_cast<uint8_t>(e + 127);
+            scale[(r * nb) + b] = static_cast<uint8_t>(e + 127);
             const float inv = std::ldexp(1.0f, -e);
             for (int i = 0; i < kMxfp8Block; ++i)
-                q[r * k + b * kMxfp8Block + i] = fp8_rows::encode(v[i], inv);
+                q[(r * k) + (b * kMxfp8Block) + i] = fp8_rows::encode(v[i], inv);
         }
     }
 }
@@ -57,7 +57,7 @@ int widen_mxfp8_pairs(std::unordered_map<std::string, Tensor>& map, std::vector<
     static const std::string kW = ".weight";
     std::vector<std::string> scales;
     for (auto& [name, w] : map) {
-        if (name.size() <= kW.size() || name.compare(name.size() - kW.size(), kW.size(), kW) != 0)
+        if (name.size() <= kW.size() || !name.ends_with(kW))
             continue;
         const auto it = map.find(name + "_scale");
         if (it == map.end() || !is_mxfp8_pair(w, it->second))
@@ -72,11 +72,11 @@ int widen_mxfp8_pairs(std::unordered_map<std::string, Tensor>& map, std::vector<
         const auto* s = static_cast<const uint8_t*>(it->second.data);
         for (int64_t r = 0; r < n; ++r) {
             for (int64_t b = 0; b < k / kMxfp8Block; ++b) {
-                const uint8_t e = s[r * (k / kMxfp8Block) + b];
+                const uint8_t e = s[(r * (k / kMxfp8Block)) + b];
                 if (e == 0xFF)
                     throw std::runtime_error("MXFP8 " + name + ": E8M0 scale is NaN (255)");
                 for (int64_t i = b * kMxfp8Block; i < (b + 1) * kMxfp8Block; ++i)
-                    dst[r * k + i] = mxfp8_to_bf16(q[r * k + i], e);
+                    dst[(r * k) + i] = mxfp8_to_bf16(q[(r * k) + i], e);
             }
         }
         const int64_t shape[2] = {n, k};

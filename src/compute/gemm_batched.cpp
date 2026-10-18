@@ -53,7 +53,7 @@ void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv, Tensor& k_out
         int64_t w_shape[2] = {N, K};
         Tensor wk(weight_kv.data, weight_kv.qtype, 2, w_shape, true);
         Tensor wv(static_cast<char*>(weight_kv.data) +
-                      weight_stride * static_cast<long long>(dtype_size(weight_kv.qtype)),
+                      (weight_stride * static_cast<long long>(dtype_size(weight_kv.qtype))),
                   weight_kv.qtype, 2, w_shape, true);
         gemm(input, wk, k_out, alpha, beta, stream);
         gemm(input, wv, v_out, alpha, beta, stream);

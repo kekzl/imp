@@ -386,7 +386,7 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
     if (n_feed >= 8 && ws->feed_rows_cap > 0) {
         while (j0 < n_feed) {
             const int m = std::min(ws->feed_rows_cap, n_feed - j0);
-            const void* rows = base + static_cast<size_t>(j0) * row_cols * sizeof(__half);
+            const void* rows = base + (static_cast<size_t>(j0) * row_cols * sizeof(__half));
             if (!imp::mtp_feed_batch(tokens + j0, rows, m, *model_->mtp_, model_->tok_emb_,
                                      *ws, hidden_dim, decode_stream()))
                 break;  // unsupported head or transient failure, per-pair takes over
@@ -404,7 +404,7 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
                       ? std::min(cfg_w, imp::kMtpMaxTopW)
                       : 1;
     for (int j = j0; j < n_pairs; ++j) {
-        const void* h_j = base + static_cast<size_t>(j) * row_cols * sizeof(__half);
+        const void* h_j = base + (static_cast<size_t>(j) * row_cols * sizeof(__half));
         const bool last = (j == n_pairs - 1);
         if (chain_after && last && device_chain) {
             // W > 1: the same launch also fills ws->d_topk (fast top-W, no
@@ -452,7 +452,7 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
         }
         for (int c = 1; c < W; ++c) {
             ws->mtp_pos = pos_after;  // drop the previous chain's appends
-            int32_t* slots = ws->d_chain_tokens + static_cast<size_t>(c) * kStride;
+            int32_t* slots = ws->d_chain_tokens + (static_cast<size_t>(c) * kStride);
             // Token 0 of chain c is the head's rank-c candidate, known, not
             // drafted.
             if (cudaMemcpyAsync(slots, ws->d_topk + c, sizeof(int32_t), cudaMemcpyDeviceToDevice, stream) !=
@@ -509,7 +509,7 @@ bool Engine::mtp_feed_pairs_(const int32_t* tokens, const void* d_hidden_rows, i
             for (int c = 1; c < W; ++c) {
                 std::vector<int32_t> alt;
                 for (int k = 0; k < launched[c]; ++k) {
-                    const int32_t t = h_chain[static_cast<size_t>(c) * kStride + k];
+                    const int32_t t = h_chain[(static_cast<size_t>(c) * kStride) + k];
                     if (t < 0 || t >= vocab_size)
                         break;
                     alt.push_back(t);
@@ -571,7 +571,7 @@ void Engine::mtp_post_verify_update_(const Request& req, int emitted, int row0) 
         return;
     }
     const void* rows = static_cast<const char*>(h.data) +
-                       static_cast<size_t>(row0) * imp::mtp_h_prev_cols(*ws) * sizeof(__half);
+                       (static_cast<size_t>(row0) * imp::mtp_h_prev_cols(*ws) * sizeof(__half));
     const int32_t* toks = req.output_tokens.data() + req.output_tokens.size() - emitted;
     if (!mtp_feed_pairs_(toks, rows, emitted, /*chain_after=*/req.status == RequestStatus::DECODING))
         mtp_unbind_("verify feed failed (kv cap or forward error)");
@@ -660,7 +660,7 @@ void Engine::mtp_prefill_feed_chunk(const Request& req, int offset, int chunk_le
         return;
     }
     const char* rows = static_cast<const char*>(h.data) +
-                       static_cast<size_t>(start - offset) * imp::mtp_h_prev_cols(*ws) * sizeof(__half);
+                       (static_cast<size_t>(start - offset) * imp::mtp_h_prev_cols(*ws) * sizeof(__half));
     const bool last_chunk = next_token >= 0;
     if (!mtp_feed_pairs_(toks.data(), rows, static_cast<int>(toks.size()),
                          /*chain_after=*/last_chunk))

@@ -132,6 +132,12 @@ void Model::release_gpu_allocation(void* ptr) {
     }
 }
 
+void Model::free_source_weight(Tensor& t, cudaStream_t stream) {
+    release_gpu_allocation(t.data);
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(t.data, stream));
+    t.dropped_source = true;
+}
+
 bool Model::is_base_gpu_allocation(void* ptr) const {
     if (!ptr)
         return false;
@@ -239,7 +245,7 @@ static const ArchEntry& lookup_arch(ModelArch arch) {
     for (const auto& e : kArchRegistry)
         if (e.arch == arch)
             return e;
-    return kArchRegistry[sizeof(kArchRegistry) / sizeof(kArchRegistry[0]) - 1];  // GENERIC
+    return kArchRegistry[(sizeof(kArchRegistry) / sizeof(kArchRegistry[0])) - 1];  // GENERIC
 }
 
 const char* model_arch_name(ModelArch arch) { return lookup_arch(arch).name; }
@@ -395,8 +401,7 @@ bool is_encoder_only_arch(const std::string& s) {
     for (char c : s)
         l += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     // No causal-decoder arch name (GGUF id or HF class) contains any of these.
-    if (l.find("bert") != std::string::npos || l.find("roberta") != std::string::npos ||
-        l.find("mpnet") != std::string::npos)
+    if (l.contains("bert") || l.contains("roberta") || l.contains("mpnet"))
         return true;
     // Encoder-only T5 + embedding-family aliases (exact ids).
     return l == "t5encoder" || l == "e5" || l == "bge";

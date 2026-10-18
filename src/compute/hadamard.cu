@@ -32,7 +32,7 @@ __global__ void hadamard_warp_kernel(const half* __restrict__ input, half* __res
     static_assert(BLOCK_SIZE <= 32, "Use shared memory kernel for block_size > 32");
 
     // Grid: one warp per block. Total blocks = M * (K / BLOCK_SIZE).
-    int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    int warp_id = ((blockIdx.x * blockDim.x) + threadIdx.x) / 32;
     int tid_in_warp = threadIdx.x & 31;
 
     int total_blocks = M * (K / BLOCK_SIZE);
@@ -43,7 +43,7 @@ __global__ void hadamard_warp_kernel(const half* __restrict__ input, half* __res
 
     int row = warp_id / (K / BLOCK_SIZE);
     int blk = warp_id % (K / BLOCK_SIZE);
-    int base = row * K + blk * BLOCK_SIZE;
+    int base = (row * K) + (blk * BLOCK_SIZE);
 
     float val = __half2float(input[base + tid_in_warp]);
 
@@ -78,7 +78,7 @@ __global__ void hadamard_64_kernel(const half* __restrict__ input, half* __restr
 
     int row = block_id / (K / BLOCK_SIZE);
     int blk = block_id % (K / BLOCK_SIZE);
-    int base = row * K + blk * BLOCK_SIZE;
+    int base = (row * K) + (blk * BLOCK_SIZE);
 
     float val = __half2float(input[base + tid]);
 
@@ -116,7 +116,7 @@ __global__ void hadamard_128_kernel(const half* __restrict__ input, half* __rest
 
     int row = block_id / (K / BLOCK_SIZE);
     int blk = block_id % (K / BLOCK_SIZE);
-    int base = row * K + blk * BLOCK_SIZE;
+    int base = (row * K) + (blk * BLOCK_SIZE);
 
     float val = __half2float(input[base + tid]);
 

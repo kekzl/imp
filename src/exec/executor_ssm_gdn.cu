@@ -26,7 +26,7 @@ namespace imp {
 // bit-accurate inputs (fixes Qwen 3.6 sign flips). Used when gdn.fp32_out is set.
 __global__ void fp32_plus_fp16_to_fp16(const float* __restrict__ a_fp32, const __half* __restrict__ b_fp16,
                                        __half* __restrict__ out_fp16, int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx < n) {
         float v = a_fp32[idx] + __half2float(b_fp16[idx]);
         out_fp16[idx] = __float2half(v);
@@ -154,11 +154,11 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
         int64_t z_shape[2] = {1, static_cast<int64_t>(inner)};
         z_buf = Tensor(proj.data, compute_dtype_, 2, z_shape, true);
 
-        char* xbc_ptr = static_cast<char*>(proj.data) + static_cast<size_t>(inner) * es;
+        char* xbc_ptr = static_cast<char*>(proj.data) + (static_cast<size_t>(inner) * es);
         int64_t xbc_shape[2] = {1, static_cast<int64_t>(conv_channels)};
         xBC_in = Tensor(xbc_ptr, compute_dtype_, 2, xbc_shape, true);
 
-        char* dt_ptr = static_cast<char*>(proj.data) + static_cast<size_t>(inner + conv_channels) * es;
+        char* dt_ptr = static_cast<char*>(proj.data) + (static_cast<size_t>(inner + conv_channels) * es);
         int64_t dt_shape2[2] = {1, static_cast<int64_t>(n_heads)};
         dt_buf = Tensor(dt_ptr, compute_dtype_, 2, dt_shape2, true);
     } else {
@@ -174,7 +174,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
         xBC_in = view_tokens(ssm_xBC_buf_, n);
 
         dt_buf = view_tokens(ssm_dt_buf_, n);
-        char* dt_src = static_cast<char*>(proj.data) + static_cast<size_t>(inner + conv_channels) * es;
+        char* dt_src = static_cast<char*>(proj.data) + (static_cast<size_t>(inner + conv_channels) * es);
         IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(dt_buf.data, static_cast<size_t>(n_heads) * es, dt_src,
                                              src_pitch, static_cast<size_t>(n_heads) * es, n,
                                              cudaMemcpyDeviceToDevice, stream));
@@ -196,7 +196,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
         ssm_conv_tap_apply(state.ssm_state->conv_state(0, ssm_idx),
                            static_cast<int64_t>(state.ssm_state->slot_stride_bytes() / sizeof(float)),
                            static_cast<const char*>(state.ssm_tap_in) +
-                               state.ssm_tap_layer_stride * ssm_idx * 2,
+                               (state.ssm_tap_layer_stride * ssm_idx * 2),
                            conv_channels, conv_kernel, state.ssm_tap_slots, state.ssm_tap_n, stream);
 
     const int BC_size = n_groups * ssize;
@@ -237,8 +237,8 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state, cudaStream_t
             Tensor x_t(row, compute_dtype_, 1, x_shape, true);
 
             int64_t bc_shape[1] = {static_cast<int64_t>(BC_size)};
-            Tensor B_t(row + static_cast<size_t>(inner) * es, compute_dtype_, 1, bc_shape, true);
-            Tensor C_t(row + static_cast<size_t>(inner + BC_size) * es, compute_dtype_, 1, bc_shape, true);
+            Tensor B_t(row + (static_cast<size_t>(inner) * es), compute_dtype_, 1, bc_shape, true);
+            Tensor C_t(row + (static_cast<size_t>(inner + BC_size) * es), compute_dtype_, 1, bc_shape, true);
 
             int64_t dt_shape[1] = {static_cast<int64_t>(n_heads)};
             Tensor dt_t(dt_buf.data, compute_dtype_, 1, dt_shape, true);
@@ -366,7 +366,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     if (fused_input) {
         // One GEMV produces [proj | gate | alpha | beta] contiguously in
         // gdn_fused_proj_buf_; the views below take offset slices.
-        int total_out = packed_conv_channels + packed_inner + 2 * packed_n_heads;
+        int total_out = packed_conv_channels + packed_inner + (2 * packed_n_heads);
         int64_t fused_shape[2] = {1, total_out};
         Tensor fused_out(gdn_fused_proj_buf_.data, compute_dtype_, 2, fused_shape, true);
         gemm_via_handle_(ly.gdn_input_packed_id, no, fused_out, ctx);
@@ -431,10 +431,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 int64_t seq_shape[2] = {static_cast<int64_t>(ns),
                                         static_cast<int64_t>(conv_channels)};
                 Tensor xBC_s(static_cast<char*>(xBC_out.data) +
-                                 static_cast<size_t>(rb) * conv_channels * es_c,
+                                 (static_cast<size_t>(rb) * conv_channels * es_c),
                              compute_dtype_, 2, seq_shape, true);
                 ssm_conv1d_prefill_f32_silu(cst, xBC_s, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
-                                            conv_f32 + static_cast<size_t>(rb) * conv_channels, conv_kernel,
+                                            conv_f32 + (static_cast<size_t>(rb) * conv_channels), conv_kernel,
                                             stream, /*d_real_n=*/nullptr,
                                             /*conv_snap=*/nullptr, /*d_snap_n=*/nullptr,
                                             /*conv_prev=*/nullptr);
@@ -477,7 +477,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 per_group ? state.ssm_snap_slots : nullptr);
             if (factored)
                 ssm_conv_tap_stash(static_cast<char*>(state.ssm_tap_out) +
-                                       state.ssm_tap_layer_stride * ssm_idx * 2,
+                                       (state.ssm_tap_layer_stride * ssm_idx * 2),
                                    xBC_g.data, T, conv_channels, state.d_chunk_len, state.ssm_seq_slots,
                                    state.ssm_n_seq, stream);
             // Bucket pad rows past the last group belong to no sequence: no conv ran
@@ -486,11 +486,12 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             const int grouped_rows = state.ssm_n_seq * T;
             if (grouped_rows < n) {
                 const size_t pad_rows = static_cast<size_t>(n - grouped_rows);
-                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(conv_f32 + static_cast<size_t>(grouped_rows) * conv_channels,
-                                                   0, pad_rows * conv_channels * sizeof(float), stream));
+                IMP_CUDA_CHECK_LOG(
+                    cudaMemsetAsync(conv_f32 + (static_cast<size_t>(grouped_rows) * conv_channels), 0,
+                                    pad_rows * conv_channels * sizeof(float), stream));
                 IMP_CUDA_CHECK_LOG(cudaMemsetAsync(
-                    static_cast<char*>(ssm_y_buf_.data) +
-                        static_cast<size_t>(grouped_rows) * n_heads * head_dim_ssm * dtype_size(compute_dtype_),
+                    static_cast<char*>(ssm_y_buf_.data) + (static_cast<size_t>(grouped_rows) * n_heads *
+                                                           head_dim_ssm * dtype_size(compute_dtype_)),
                     0, pad_rows * n_heads * head_dim_ssm * dtype_size(compute_dtype_), stream));
             }
         } else if (state.is_prefill) {
@@ -571,12 +572,12 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         // Scratch buffers at tail of ssm_proj_buf_ (FP32, max_tokens * ssm_in_dim floats).
         // ssm_proj_buf_ already contains conv_f32 (n * conv_channels floats) at the head;
         // reserve two scratch regions past that.
-        float* v_scratch_tiled = conv_f32 + static_cast<size_t>(n) * conv_channels;
-        float* v_scratch_grouped = v_scratch_tiled + static_cast<size_t>(n) * inner_v;
+        float* v_scratch_tiled = conv_f32 + (static_cast<size_t>(n) * conv_channels);
+        float* v_scratch_grouped = v_scratch_tiled + (static_cast<size_t>(n) * inner_v);
 
         // Gather V slice from strided conv_f32 into contiguous [n, n_heads, head_dim_ssm].
         IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(v_scratch_tiled, static_cast<size_t>(inner_v) * sizeof(float),
-                                             conv_f32 + static_cast<ptrdiff_t>(2) * BC_size_vh,
+                                             conv_f32 + (static_cast<ptrdiff_t>(2) * BC_size_vh),
                                              static_cast<size_t>(conv_channels) * sizeof(float),
                                              static_cast<size_t>(inner_v) * sizeof(float), n,
                                              cudaMemcpyDeviceToDevice, stream));
@@ -584,7 +585,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
         vhead_tiled_to_grouped_f32(v_scratch_tiled, v_scratch_grouped, n, n_heads, head_dim_ssm, n_groups,
                                    stream);
         // Scatter reordered V back into conv_f32 V slice.
-        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(conv_f32 + static_cast<ptrdiff_t>(2) * BC_size_vh,
+        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(conv_f32 + (static_cast<ptrdiff_t>(2) * BC_size_vh),
                                              static_cast<size_t>(conv_channels) * sizeof(float),
                                              v_scratch_grouped, static_cast<size_t>(inner_v) * sizeof(float),
                                              static_cast<size_t>(inner_v) * sizeof(float), n,
@@ -607,8 +608,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     Tensor gate_out;
     if (fused_input) {
         size_t es_loc = dtype_size(compute_dtype_);
-        char* gate_ptr =
-            static_cast<char*>(gdn_fused_proj_buf_.data) + static_cast<size_t>(packed_conv_channels) * es_loc;
+        char* gate_ptr = static_cast<char*>(gdn_fused_proj_buf_.data) +
+                         (static_cast<size_t>(packed_conv_channels) * es_loc);
         gate_out = Tensor(gate_ptr, compute_dtype_, 2, gate_shape, true);
     } else {
         gate_out = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
@@ -639,9 +640,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 // Step 2: alpha and beta slices are at the tail of the fused
                 // GEMV output. No dispatch, no copies.
                 char* alpha_ptr = static_cast<char*>(gdn_fused_proj_buf_.data) +
-                                  static_cast<size_t>(packed_conv_channels + packed_inner) * es;
-                char* beta_ptr =
-                    alpha_ptr + static_cast<size_t>(packed_n_heads) * es;
+                                  (static_cast<size_t>(packed_conv_channels + packed_inner) * es);
+                char* beta_ptr = alpha_ptr + (static_cast<size_t>(packed_n_heads) * es);
                 alpha_proj_out = Tensor(alpha_ptr, compute_dtype_, 2, ab_shape, true);
                 beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
             } else if (n == 1 && ly.gdn_alpha_beta_packed.data) {
@@ -650,7 +650,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 int64_t ab2_shape[2] = {1, static_cast<int64_t>(2 * n_heads)};
                 Tensor ab_packed_out(ssm_dt_buf_.data, compute_dtype_, 2, ab2_shape, true);
                 alpha_proj_out = Tensor(ssm_dt_buf_.data, compute_dtype_, 2, ab_shape, true);
-                beta_proj_out = Tensor(static_cast<char*>(ssm_dt_buf_.data) + n_heads * es, compute_dtype_,
+                beta_proj_out = Tensor(static_cast<char*>(ssm_dt_buf_.data) + (n_heads * es), compute_dtype_,
                                        2, ab_shape, true);
                 gemm_via_handle_(ly.gdn_alpha_beta_packed_id, no, ab_packed_out, ctx);
             } else {
@@ -703,8 +703,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // output). The post-norm FP32 buffer feeds directly into the ssm_out GEMM
             // when FP32_OUT is active, bypassing the FP16 y_buf that would drop
             // precision (root cause of Qwen 3.6 L0 drift).
-            float* y_fp32 = conv_f32 + static_cast<size_t>(n) * conv_channels;
-            float* y_fp32_postnorm = y_fp32 + static_cast<size_t>(n) * n_heads * head_dim_ssm;
+            float* y_fp32 = conv_f32 + (static_cast<size_t>(n) * conv_channels);
+            float* y_fp32_postnorm = y_fp32 + (static_cast<size_t>(n) * n_heads * head_dim_ssm);
             const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
             if (use_chunkwise) {
                 gdn_scan_chunkwise_fp32out(conv_f32, conv_channels,
@@ -812,12 +812,12 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                     const int rows = state.h_seq_offsets[sq + 1] - r0;
                     if (rows <= 0)
                         continue;
-                    const float* conv_s = conv_f32 + static_cast<size_t>(r0) * conv_channels;
+                    const float* conv_s = conv_f32 + (static_cast<size_t>(r0) * conv_channels);
                     const half* alpha_s = static_cast<const half*>(alpha_proj_out.data) +
-                                          static_cast<size_t>(r0) * n_heads;
+                                          (static_cast<size_t>(r0) * n_heads);
                     const half* beta_s = static_cast<const half*>(beta_proj_out.data) +
-                                         static_cast<size_t>(r0) * n_heads;
-                    half* y_s = static_cast<half*>(y_buf.data) + static_cast<size_t>(r0) * inner;
+                                         (static_cast<size_t>(r0) * n_heads);
+                    half* y_s = static_cast<half*>(y_buf.data) + (static_cast<size_t>(r0) * inner);
                     void* h_s = state.ssm_state->h_state(state.h_ssm_slots[sq], ssm_idx);
                     if (rows >= 128) {
                         if (state_bf16) {

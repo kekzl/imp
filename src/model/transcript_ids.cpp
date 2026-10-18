@@ -48,7 +48,7 @@ size_t TranscriptIdStore::lookup(std::string_view rendered, std::vector<int32_t>
     for (const auto& e : entries_) {
         if (e.text.size() > rendered.size() || (best && e.text.size() <= best->text.size()))
             continue;
-        if (rendered.compare(0, e.text.size(), e.text) == 0)
+        if (rendered.starts_with(e.text))
             best = &e;
     }
     if (!best)

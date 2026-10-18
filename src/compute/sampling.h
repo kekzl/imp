@@ -12,7 +12,7 @@ namespace imp {
 // bytes to hold the partial reduction arrays used by the multi-block kernel.
 static constexpr int ARGMAX_NBLOCKS = 64;
 static constexpr size_t ARGMAX_SCRATCH_BYTES = sizeof(int32_t) +
-                                               ARGMAX_NBLOCKS * (sizeof(float) + sizeof(int32_t));
+                                               (ARGMAX_NBLOCKS * (sizeof(float) + sizeof(int32_t)));
 
 // Multi-block top-k/top-p scratch: single-block sampler used 1 of 170 SMs (the #1 GPU
 // consumer in batched decode); two-phase multi-block spreads full-vocab scans across
@@ -22,8 +22,8 @@ static constexpr size_t ARGMAX_SCRATCH_BYTES = sizeof(int32_t) +
 static constexpr int SAMPLE_NBLOCKS = 64;
 static constexpr int SAMPLE_MAX_TOP_K = 128;
 static constexpr size_t SAMPLE_SCRATCH_BYTES =
-    sizeof(int32_t) + SAMPLE_NBLOCKS * (2 * sizeof(float) +
-                                        SAMPLE_MAX_TOP_K * (sizeof(float) + sizeof(int32_t)));
+    sizeof(int32_t) +
+    (SAMPLE_NBLOCKS * ((2 * sizeof(float)) + (SAMPLE_MAX_TOP_K * (sizeof(float) + sizeof(int32_t)))));
 
 // Synchronous samplers (sample_greedy, sample_topk_topp, sample_mirostat_v2): sync the stream,
 // never under graph capture. Failed scratch alloc / kernel launch / readback throws std::runtime_error

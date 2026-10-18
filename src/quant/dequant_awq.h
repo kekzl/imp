@@ -31,9 +31,9 @@ IMP_AWQ_HD inline __half dequant_elem(const int32_t* qweight, const int32_t* qze
     const int64_t packed_n = N / 8;
     const int64_t g = k / group_size;
     const int sh = nibble_shift(n);
-    const int q = (qweight[k * packed_n + n / 8] >> sh) & 0xF;
-    const int z = (qzeros[g * packed_n + n / 8] >> sh) & 0xF;
-    return __float2half_rn(static_cast<float>(q - z) * __half2float(scales[g * N + n]));
+    const int q = (qweight[(k * packed_n) + (n / 8)] >> sh) & 0xF;
+    const int z = (qzeros[(g * packed_n) + (n / 8)] >> sh) & 0xF;
+    return __float2half_rn(static_cast<float>(q - z) * __half2float(scales[(g * N) + n]));
 }
 
 // Checks one projection's AWQ tensor shapes; derives K, N. False with `err` set on any mismatch.

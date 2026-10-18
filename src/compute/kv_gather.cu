@@ -31,7 +31,7 @@ __global__ void paged_kv_gather_fp16_kernel(half* __restrict__ dst, const half* 
 
     if (d_n_past)
         n_past = __ldg(d_n_past);
-    const int pos = block_group * TOKENS_PER_BLOCK + token_in_block;
+    const int pos = (block_group * TOKENS_PER_BLOCK) + token_in_block;
     if (pos >= n_past)
         return;
 
@@ -42,7 +42,7 @@ __global__ void paged_kv_gather_fp16_kernel(half* __restrict__ dst, const half* 
     const int kv_block_stride = block_size * nkv * hd;
     const int kv_slot_stride = nkv * hd;
 
-    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
+    half* dst_row = dst + ((size_t)pos * nkv * hd) + ((size_t)kv_head * hd);
     if (phys_block < 0) {
         // -1 sentinel: SWA trailing-free hole (kv_cache.swa_sizing) or StreamingLLM-evicted block.
         // Rows this far back are never consumed (chunk attention kernels skip pre-window tiles);
@@ -52,9 +52,8 @@ __global__ void paged_kv_gather_fp16_kernel(half* __restrict__ dst, const half* 
         return;
     }
 
-    const half* src_row = src + (size_t)phys_block * kv_block_stride
-                              + (size_t)slot * kv_slot_stride
-                              + (size_t)kv_head * hd;
+    const half* src_row = src + ((size_t)phys_block * kv_block_stride) + ((size_t)slot * kv_slot_stride) +
+                          ((size_t)kv_head * hd);
 
     for (int d = d_lane; d < hd; d += threads_per_token) {
         // Streaming load (skip L1, evict-first from L2) so KV bytes don't pollute
@@ -79,7 +78,7 @@ __global__ void paged_kv_gather_fp8_to_fp16_kernel(half* __restrict__ dst,
 
     if (d_n_past)
         n_past = __ldg(d_n_past);
-    const int pos = block_group * TOKENS_PER_BLOCK + token_in_block;
+    const int pos = (block_group * TOKENS_PER_BLOCK) + token_in_block;
     if (pos >= n_past)
         return;
 
@@ -90,7 +89,7 @@ __global__ void paged_kv_gather_fp8_to_fp16_kernel(half* __restrict__ dst,
     const int kv_block_stride = block_size * nkv * hd;
     const int kv_slot_stride = nkv * hd;
 
-    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
+    half* dst_row = dst + ((size_t)pos * nkv * hd) + ((size_t)kv_head * hd);
     if (phys_block < 0) {
         // -1 sentinel: SWA trailing-free / StreamingLLM hole — zero-fill (see
         // paged_kv_gather_fp16_kernel).
@@ -99,9 +98,8 @@ __global__ void paged_kv_gather_fp8_to_fp16_kernel(half* __restrict__ dst,
         return;
     }
 
-    const __nv_fp8_e4m3* src_row = src + (size_t)phys_block * kv_block_stride
-                                       + (size_t)slot * kv_slot_stride
-                                       + (size_t)kv_head * hd;
+    const __nv_fp8_e4m3* src_row = src + ((size_t)phys_block * kv_block_stride) +
+                                   ((size_t)slot * kv_slot_stride) + ((size_t)kv_head * hd);
 
     for (int d = d_lane; d < hd; d += threads_per_token) {
         // Streaming load via __ldcs on uint8 (FP8 is 1 byte).
@@ -143,13 +141,27 @@ void paged_kv_gather_fp8_to_fp16(half* dst, const __nv_fp8_e4m3* src, const int*
 // NVFP4 -> FP16 dequant gather. Same TOKENS_PER_BLOCK/threads_per_token grid as the FP16/FP8
 // variants. Per (token,hd) elem: read packed FP4 byte, decode to half2 via
 // cvt.rn.f16x2.e2m1x2 PTX, pick the correct nibble's half, multiply by the per-group-of-16
-// UE4M3 scale, store as FP16. Matches write_kv_cache_nvfp4_kernel.
-__global__ void paged_kv_gather_nvfp4_to_fp16_kernel(
+// UE4M3 scale, store as FP16. Matches write_kv_cache_nvfp4_kernel. MXFP4-KV: same kernel,
+// UE8M0 scales (pure exponent 2^(bits-127)); E2M1 nibbles are identical.
+struct Ue4m3Scale {
+    __device__ __forceinline__ float operator()(unsigned char sc_byte) const {
+        __nv_fp8_e4m3 sc_fp8;
+        memcpy(&sc_fp8, &sc_byte, 1);
+        return static_cast<float>(sc_fp8);
+    }
+};
+struct Ue8m0Scale {
+    __device__ __forceinline__ float operator()(unsigned char sc_byte) const {
+        return (sc_byte == 0) ? 0.0f : __uint_as_float((unsigned int)sc_byte << 23);
+    }
+};
+
+template <typename ScaleDecode>
+__global__ void paged_kv_gather_fp4_to_fp16_kernel(
     half* __restrict__ dst,
-    const uint8_t* __restrict__ src_packed,    // [block, slot, nkv, hd/2]
-    const uint8_t* __restrict__ src_scales,    // [block, slot, nkv, hd/16] UE4M3
-    const int* __restrict__ block_table,
-    int n_past, int block_size, int nkv, int hd,
+    const uint8_t* __restrict__ src_packed,  // [block, slot, nkv, hd/2]
+    const uint8_t* __restrict__ src_scales,  // [block, slot, nkv, hd/16] ScaleDecode format
+    const int* __restrict__ block_table, int n_past, int block_size, int nkv, int hd,
     const int* __restrict__ d_n_past) {
     constexpr int kGroup = 16;
 
@@ -162,7 +174,7 @@ __global__ void paged_kv_gather_nvfp4_to_fp16_kernel(
 
     if (d_n_past)
         n_past = __ldg(d_n_past);
-    const int pos = block_group * TOKENS_PER_BLOCK + token_in_block;
+    const int pos = (block_group * TOKENS_PER_BLOCK) + token_in_block;
     if (pos >= n_past)
         return;
 
@@ -175,7 +187,7 @@ __global__ void paged_kv_gather_nvfp4_to_fp16_kernel(
     const int sc_block_stride = block_size * nkv * (hd / kGroup);
     const int sc_slot_stride = nkv * (hd / kGroup);
 
-    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
+    half* dst_row = dst + ((size_t)pos * nkv * hd) + ((size_t)kv_head * hd);
     if (phys_block < 0) {
         // -1 sentinel: SWA trailing-free / StreamingLLM hole — zero-fill (see
         // paged_kv_gather_fp16_kernel).
@@ -184,12 +196,10 @@ __global__ void paged_kv_gather_nvfp4_to_fp16_kernel(
         return;
     }
 
-    const uint8_t* src_row = src_packed + (size_t)phys_block * kv_block_stride_bytes
-                                        + (size_t)slot * kv_slot_stride_bytes
-                                        + (size_t)kv_head * (hd / 2);
-    const uint8_t* sc_row = src_scales + (size_t)phys_block * sc_block_stride
-                                       + (size_t)slot * sc_slot_stride
-                                       + (size_t)kv_head * (hd / kGroup);
+    const uint8_t* src_row = src_packed + ((size_t)phys_block * kv_block_stride_bytes) +
+                             ((size_t)slot * kv_slot_stride_bytes) + ((size_t)kv_head * (hd / 2));
+    const uint8_t* sc_row = src_scales + ((size_t)phys_block * sc_block_stride) +
+                            ((size_t)slot * sc_slot_stride) + ((size_t)kv_head * (hd / kGroup));
 
     for (int d = d_lane; d < hd; d += threads_per_token) {
         // FP4 nibble decode: PTX cvt produces a half2 from two packed nibbles.
@@ -201,12 +211,10 @@ __global__ void paged_kv_gather_nvfp4_to_fp16_kernel(
         half2 hh = *reinterpret_cast<half2*>(&fp16x2);
         half v = (d & 1) ? hh.y : hh.x;
 
-        // UE4M3 scale (per group of 16 hd elems).
+        // Scale per group of 16 hd elems.
         unsigned char sc_byte =
             __ldcs(reinterpret_cast<const unsigned char*>(sc_row + (d / kGroup)));
-        __nv_fp8_e4m3 sc_fp8;
-        memcpy(&sc_fp8, &sc_byte, 1);
-        float scale = static_cast<float>(sc_fp8);
+        float scale = ScaleDecode{}(sc_byte);
 
         dst_row[d] = __float2half(__half2float(v) * scale);
     }
@@ -221,77 +229,10 @@ void paged_kv_gather_nvfp4_to_fp16(half* dst, const uint8_t* src_packed,
     int n_block_groups = (n_past + TOKENS_PER_BLOCK - 1) / TOKENS_PER_BLOCK;
     dim3 grid(n_block_groups, nkv);
     int threads = 256;
-    paged_kv_gather_nvfp4_to_fp16_kernel<<<grid, threads, 0, stream>>>(
-        dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd, d_n_past);
+    paged_kv_gather_fp4_to_fp16_kernel<Ue4m3Scale>
+        <<<grid, threads, 0, stream>>>(dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd,
+                                       d_n_past);
     IMP_CUDA_CHECK_LAUNCH();
-}
-
-// MXFP4-KV gather: identical to the NVFP4 gather but decodes UE8M0 scales
-// (pure-exponent 2^(bits-127)) instead of E4M3.
-__global__ void paged_kv_gather_mxfp4_kv_to_fp16_kernel(
-    half* __restrict__ dst,
-    const uint8_t* __restrict__ src_packed,  // [block, slot, nkv, hd/2]
-    const uint8_t* __restrict__ src_scales,  // [block, slot, nkv, hd/16] UE8M0
-    const int* __restrict__ block_table,
-    int n_past, int block_size, int nkv, int hd,
-    const int* __restrict__ d_n_past) {
-    constexpr int kGroup = 16;
-
-    const int block_group = blockIdx.x;
-    const int kv_head = blockIdx.y;
-    const int tid = threadIdx.x;
-    const int threads_per_token = blockDim.x / TOKENS_PER_BLOCK;
-    const int token_in_block = tid / threads_per_token;
-    const int d_lane = tid % threads_per_token;
-
-    if (d_n_past)
-        n_past = __ldg(d_n_past);
-    const int pos = block_group * TOKENS_PER_BLOCK + token_in_block;
-    if (pos >= n_past)
-        return;
-
-    const int blk_idx = pos / block_size;
-    const int slot = pos % block_size;
-    const int phys_block = block_table[blk_idx];
-
-    const int kv_block_stride_bytes = block_size * nkv * (hd / 2);
-    const int kv_slot_stride_bytes = nkv * (hd / 2);
-    const int sc_block_stride = block_size * nkv * (hd / kGroup);
-    const int sc_slot_stride = nkv * (hd / kGroup);
-
-    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
-    if (phys_block < 0) {
-        // -1 sentinel: SWA trailing-free / StreamingLLM hole — zero-fill (see
-        // paged_kv_gather_fp16_kernel).
-        for (int d = d_lane; d < hd; d += threads_per_token)
-            dst_row[d] = __float2half(0.0f);
-        return;
-    }
-
-    const uint8_t* src_row = src_packed + (size_t)phys_block * kv_block_stride_bytes
-                                        + (size_t)slot * kv_slot_stride_bytes
-                                        + (size_t)kv_head * (hd / 2);
-    const uint8_t* sc_row = src_scales + (size_t)phys_block * sc_block_stride
-                                       + (size_t)slot * sc_slot_stride
-                                       + (size_t)kv_head * (hd / kGroup);
-
-    for (int d = d_lane; d < hd; d += threads_per_token) {
-        // FP4 nibble decode: same as NVFP4 (E2M1 format identical)
-        const unsigned char byte =
-            __ldcs(reinterpret_cast<const unsigned char*>(src_row + (d / 2)));
-        unsigned int fp16x2;
-        asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"
-            : "=r"(fp16x2) : "r"((unsigned int)byte));
-        half2 hh = *reinterpret_cast<half2*>(&fp16x2);
-        half v = (d & 1) ? hh.y : hh.x;
-
-        // UE8M0 scale decode: 2^(bits - 127) — pure exponent, no mantissa.
-        unsigned char sc_byte =
-            __ldcs(reinterpret_cast<const unsigned char*>(sc_row + (d / kGroup)));
-        float scale = (sc_byte == 0) ? 0.0f : __uint_as_float((unsigned int)sc_byte << 23);
-
-        dst_row[d] = __float2half(__half2float(v) * scale);
-    }
 }
 
 void paged_kv_gather_mxfp4_kv_to_fp16(half* dst, const uint8_t* src_packed,
@@ -303,8 +244,9 @@ void paged_kv_gather_mxfp4_kv_to_fp16(half* dst, const uint8_t* src_packed,
     int n_block_groups = (n_past + TOKENS_PER_BLOCK - 1) / TOKENS_PER_BLOCK;
     dim3 grid(n_block_groups, nkv);
     int threads = 256;
-    paged_kv_gather_mxfp4_kv_to_fp16_kernel<<<grid, threads, 0, stream>>>(
-        dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd, d_n_past);
+    paged_kv_gather_fp4_to_fp16_kernel<Ue8m0Scale>
+        <<<grid, threads, 0, stream>>>(dst, src_packed, src_scales, block_table, n_past, block_size, nkv, hd,
+                                       d_n_past);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
@@ -327,7 +269,7 @@ __global__ void paged_kv_gather_int4_to_fp16_kernel(
 
     if (d_n_past)
         n_past = __ldg(d_n_past);
-    const int pos = block_group * TOKENS_PER_BLOCK + token_in_block;
+    const int pos = (block_group * TOKENS_PER_BLOCK) + token_in_block;
     if (pos >= n_past)
         return;
 
@@ -340,7 +282,7 @@ __global__ void paged_kv_gather_int4_to_fp16_kernel(
     const int sc_block_stride = block_size * nkv;
     const int sc_slot_stride = nkv;
 
-    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
+    half* dst_row = dst + ((size_t)pos * nkv * hd) + ((size_t)kv_head * hd);
     if (phys_block < 0) {
         // -1 sentinel: SWA trailing-free / StreamingLLM hole — zero-fill (see
         // paged_kv_gather_fp16_kernel).
@@ -352,12 +294,10 @@ __global__ void paged_kv_gather_int4_to_fp16_kernel(
         return;
     }
 
-    const uint8_t* src_row = src_packed + (size_t)phys_block * kv_block_stride_bytes
-                                        + (size_t)slot * kv_slot_stride_bytes
-                                        + (size_t)kv_head * (hd / 2);
-    half scale_h = src_scales[(size_t)phys_block * sc_block_stride
-                              + (size_t)slot * sc_slot_stride
-                              + (size_t)kv_head];
+    const uint8_t* src_row = src_packed + ((size_t)phys_block * kv_block_stride_bytes) +
+                             ((size_t)slot * kv_slot_stride_bytes) + ((size_t)kv_head * (hd / 2));
+    half scale_h = src_scales[((size_t)phys_block * sc_block_stride) + ((size_t)slot * sc_slot_stride) +
+                              (size_t)kv_head];
     float scale = __half2float(scale_h);
 
     // Each lane writes 2 FP16 values per byte read. We iterate in steps of 2
@@ -406,7 +346,7 @@ __global__ void paged_kv_gather_int8_to_fp16_kernel(
 
     if (d_n_past)
         n_past = __ldg(d_n_past);
-    const int pos = block_group * TOKENS_PER_BLOCK + token_in_block;
+    const int pos = (block_group * TOKENS_PER_BLOCK) + token_in_block;
     if (pos >= n_past)
         return;
 
@@ -419,7 +359,7 @@ __global__ void paged_kv_gather_int8_to_fp16_kernel(
     const int sc_block_stride = block_size * nkv;
     const int sc_slot_stride = nkv;
 
-    half* dst_row = dst + (size_t)pos * nkv * hd + (size_t)kv_head * hd;
+    half* dst_row = dst + ((size_t)pos * nkv * hd) + ((size_t)kv_head * hd);
     if (phys_block < 0) {
         // -1 sentinel: SWA trailing-free / StreamingLLM hole — zero-fill (see
         // paged_kv_gather_fp16_kernel).
@@ -428,10 +368,10 @@ __global__ void paged_kv_gather_int8_to_fp16_kernel(
         return;
     }
 
-    const int8_t* src_row = src + (size_t)phys_block * kv_block_stride + (size_t)slot * kv_slot_stride +
-                            (size_t)kv_head * hd;
-    float scale = __half2float(
-        src_scales[(size_t)phys_block * sc_block_stride + (size_t)slot * sc_slot_stride + (size_t)kv_head]);
+    const int8_t* src_row = src + ((size_t)phys_block * kv_block_stride) + ((size_t)slot * kv_slot_stride) +
+                            ((size_t)kv_head * hd);
+    float scale = __half2float(src_scales[((size_t)phys_block * sc_block_stride) +
+                                          ((size_t)slot * sc_slot_stride) + (size_t)kv_head]);
 
     for (int d = d_lane; d < hd; d += threads_per_token) {
         // Streaming load on the raw byte (INT8 is 1 byte), same hint as the
@@ -460,8 +400,8 @@ __global__ void kv_chunk_append_fp16_kernel(half* __restrict__ dst, const half* 
                                             const int* __restrict__ d_past_len, int row_elems) {
     const int row = blockIdx.x;
     const int past = __ldg(d_past_len);
-    half* dst_row = dst + ((size_t)past + row) * row_elems;
-    const half* src_row = src + (size_t)row * row_elems;
+    half* dst_row = dst + (((size_t)past + row) * row_elems);
+    const half* src_row = src + ((size_t)row * row_elems);
     for (int e = threadIdx.x; e < row_elems; e += blockDim.x)
         dst_row[e] = src_row[e];
 }

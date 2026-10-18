@@ -153,7 +153,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     const int head_idx = batch_head % n_heads;
     const int kv_head = head_idx / (n_heads / n_kv_heads);
 
-    const int tid = threadIdx.x + threadIdx.y * blockDim.x;
+    const int tid = threadIdx.x + (threadIdx.y * blockDim.x);
     const int warp_id = tid / MX_WARP_SIZE;
     const int lane_id = tid % MX_WARP_SIZE;
     const int q_start = tile_q * Bq;
@@ -164,12 +164,12 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     const int64_t q_row_stride = (int64_t)n_heads * head_dim;
     const int64_t kv_row_stride = (int64_t)n_kv_heads * head_dim;
 
-    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
-                        (int64_t)head_idx * head_dim;
-    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
-    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
-    half* O_ptr = O + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
-                  (int64_t)head_idx * head_dim;
+    const half* Q_ptr = Q + ((int64_t)batch_idx * seq_q * q_row_stride) + ((int64_t)q_start * q_row_stride) +
+                        ((int64_t)head_idx * head_dim);
+    const half* K_ptr = K + ((int64_t)batch_idx * seq_kv * kv_row_stride) + ((int64_t)kv_head * head_dim);
+    const half* V_ptr = V + ((int64_t)batch_idx * seq_kv * kv_row_stride) + ((int64_t)kv_head * head_dim);
+    half* O_ptr = O + ((int64_t)batch_idx * seq_q * q_row_stride) + ((int64_t)q_start * q_row_stride) +
+                  ((int64_t)head_idx * head_dim);
 
     // ---- shared memory layout -----------------------------------------------
     //
@@ -195,7 +195,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     KV_raw = reinterpret_cast<char*>((reinterpret_cast<uintptr_t>(KV_raw) + 15) & ~15ULL);
     uint8_t* KV_fp4 = reinterpret_cast<uint8_t*>(KV_raw);  // K as FP4
     half* KV_fp16 = reinterpret_cast<half*>(KV_raw);       // V as FP16 (same slot)
-    float* k_scales = reinterpret_cast<float*>(KV_raw + static_cast<size_t>(Bkv * head_dim) * sizeof(half));
+    float* k_scales = reinterpret_cast<float*>(KV_raw + (static_cast<size_t>(Bkv * head_dim) * sizeof(half)));
     float* S_tile = k_scales + Bkv;
     float* O_acc = S_tile + static_cast<ptrdiff_t>(Bq * Bkv);
     float* row_m = O_acc + static_cast<ptrdiff_t>(Bq * head_dim);
@@ -208,7 +208,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
     // layout matches compute_smem_mxfp4). All strides are multiples of 4 so
     // the uint32 sfa/sfb loads stay aligned. p_rowf goes first (float align).
     constexpr int n_kv_groups = Bkv / 16;              // P/V k-groups (KV dim)
-    constexpr int kv_half_padded = Bkv / 2 + 4;        // packed P/V^T row bytes
+    constexpr int kv_half_padded = (Bkv / 2) + 4;      // packed P/V^T row bytes
     float* p_rowf = row_l + Bq;                        // [Bq] per-row PV post-factor
     float* p_rowq = p_rowf + (PVFP4 ? Bq : 0);         // [Bq] per-row P quant multiplier
     uint8_t* q_scales_fp8 = reinterpret_cast<uint8_t*>(p_rowq + (PVFP4 ? Bq : 0));
@@ -220,7 +220,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
 
     // K-smoothing: per-channel mean pointer for this (batch, kv_head).
     const float* kmean = (d_kmean != nullptr)
-                             ? d_kmean + ((int64_t)batch_idx * n_kv_heads + kv_head) * head_dim
+                             ? d_kmean + ((((int64_t)batch_idx * n_kv_heads) + kv_head) * head_dim)
                              : nullptr;
 
     // Precomputes sqrt(attention_scale) to fold into Q and K scales: S_true = q_scale[i]*k_scale[j]*
@@ -251,7 +251,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 float4* dst = reinterpret_cast<float4*>(&Q_stage[i]);
                 if (q_start + r < seq_q) {
                     const float4* src = reinterpret_cast<const float4*>(
-                        &Q_ptr[(int64_t)r * q_row_stride + d]);
+                        &Q_ptr[((int64_t)r * q_row_stride) + d]);
                     *dst = *src;
                 } else {
                     *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -268,12 +268,12 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 int r = idx / n_k_groups;
                 int kg = idx % n_k_groups;
                 float absmax = 0.0f;
-                const half* row_start = &Q_stage[r * head_dim + kg * 16];
+                const half* row_start = &Q_stage[(r * head_dim) + (kg * 16)];
 #pragma unroll
                 for (int i = 0; i < 16; i++)
                     absmax = fmaxf(absmax, fabsf(__half2float(row_start[i])));
                 float raw = absmax / 6.0f;
-                q_scales_fp8[r * n_k_groups + kg] = float_to_fp8_e4m3(raw * q_sfold);
+                q_scales_fp8[(r * n_k_groups) + kg] = float_to_fp8_e4m3(raw * q_sfold);
             }
         } else {
             // Absmax from shared memory (fast L1 reads) — per-row (legacy)
@@ -281,7 +281,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
             float local_max = 0.0f;
             if (r < Bq) {
                 for (int d = sm_lane; d < head_dim; d += TPR)
-                    local_max = fmaxf(local_max, fabsf(__half2float(Q_stage[r * head_dim + d])));
+                    local_max = fmaxf(local_max, fabsf(__half2float(Q_stage[(r * head_dim) + d])));
             }
 #pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1)
@@ -303,12 +303,12 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 float inv_scale;
                 if constexpr (UseBlockScaleMma) {
                     int kg = b4 / 2;  // 8 halves fit inside a 16-half k_group
-                    float dequant = fp8_e4m3_to_float_fast(q_scales_fp8[r * n_k_groups + kg]);
+                    float dequant = fp8_e4m3_to_float_fast(q_scales_fp8[(r * n_k_groups) + kg]);
                     inv_scale = (dequant > 0.0f) ? (q_sfold / dequant) : 0.0f;
                 } else {
                     inv_scale = (q_scales[r] > 0.0f) ? (sqrt_scale / q_scales[r]) : 0.0f;
                 }
-                const half* src = &Q_stage[r * head_dim + d];
+                const half* src = &Q_stage[(r * head_dim) + d];
                 half2 h01 = reinterpret_cast<const half2*>(src)[0];
                 half2 h23 = reinterpret_cast<const half2*>(src)[1];
                 half2 h45 = reinterpret_cast<const half2*>(src)[2];
@@ -318,7 +318,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 uint32_t b2 = pack_fp4_pair(__half2float(h45.x) * inv_scale, __half2float(h45.y) * inv_scale);
                 uint32_t b3 = pack_fp4_pair(__half2float(h67.x) * inv_scale, __half2float(h67.y) * inv_scale);
                 uint32_t packed = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-                *reinterpret_cast<uint32_t*>(&Q_fp4[r * hd_half_padded + b4 * 4]) = packed;
+                *reinterpret_cast<uint32_t*>(&Q_fp4[(r * hd_half_padded) + (b4 * 4)]) = packed;
             }
         }
     } else {
@@ -332,20 +332,20 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 int kg = idx % n_k_groups;
                 float absmax = 0.0f;
                 if (q_start + r < seq_q) {
-                    const half* row = &Q_ptr[(int64_t)r * q_row_stride + static_cast<ptrdiff_t>(kg * 16)];
+                    const half* row = &Q_ptr[((int64_t)r * q_row_stride) + static_cast<ptrdiff_t>(kg * 16)];
 #pragma unroll
                     for (int i = 0; i < 16; i++)
                         absmax = fmaxf(absmax, fabsf(__half2float(row[i])));
                 }
                 float raw = absmax / 6.0f;
-                q_scales_fp8[r * n_k_groups + kg] = float_to_fp8_e4m3(raw * q_sfold);
+                q_scales_fp8[(r * n_k_groups) + kg] = float_to_fp8_e4m3(raw * q_sfold);
             }
         } else {
             const int r = sm_row;
             float local_max = 0.0f;
             if (r < Bq && q_start + r < seq_q) {
                 for (int d = sm_lane; d < head_dim; d += TPR)
-                    local_max = fmaxf(local_max, fabsf(__half2float(Q_ptr[(int64_t)r * q_row_stride + d])));
+                    local_max = fmaxf(local_max, fabsf(__half2float(Q_ptr[((int64_t)r * q_row_stride) + d])));
             }
 #pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1)
@@ -365,16 +365,16 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     float inv_scale;
                     if constexpr (UseBlockScaleMma) {
                         int kg = d / 16;
-                        float dequant = fp8_e4m3_to_float_fast(q_scales_fp8[r * n_k_groups + kg]);
+                        float dequant = fp8_e4m3_to_float_fast(q_scales_fp8[(r * n_k_groups) + kg]);
                         inv_scale = (dequant > 0.0f) ? (q_sfold / dequant) : 0.0f;
                     } else {
                         inv_scale = (q_scales[r] > 0.0f) ? (sqrt_scale / q_scales[r]) : 0.0f;
                     }
-                    float v0 = __half2float(Q_ptr[(int64_t)r * q_row_stride + d]) * inv_scale;
-                    float v1 = __half2float(Q_ptr[(int64_t)r * q_row_stride + d + 1]) * inv_scale;
-                    Q_fp4[r * hd_half_padded + d_byte] = pack_fp4_pair(v0, v1);
+                    float v0 = __half2float(Q_ptr[((int64_t)r * q_row_stride) + d]) * inv_scale;
+                    float v1 = __half2float(Q_ptr[((int64_t)r * q_row_stride) + d + 1]) * inv_scale;
+                    Q_fp4[(r * hd_half_padded) + d_byte] = pack_fp4_pair(v0, v1);
                 } else {
-                    Q_fp4[r * hd_half_padded + d_byte] = 0;
+                    Q_fp4[(r * hd_half_padded) + d_byte] = 0;
                 }
             }
         }
@@ -427,7 +427,8 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
         bool promoted = false;
         if constexpr (Promote) {
             if (d_promote != nullptr)
-                promoted = d_promote[((size_t)batch_head * gridDim.x + tile_q) * n_kv_tiles_mask + j] != 0;
+                promoted = d_promote[((((size_t)batch_head * gridDim.x) + tile_q) * n_kv_tiles_mask) + j] !=
+                           0;
             if constexpr (PagedKV)
                 promoted = promoted || (kv_start >= q_offset);
         }
@@ -453,11 +454,11 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                         const int blk = pkv.block_table[pos / pkv.block_size];
                         const int slot = pos % pkv.block_size;
                         const uint8_t* row = pkv.k_data +
-                                             ((size_t)blk * pkv.block_size + slot) * kv_row_bytes +
-                                             (size_t)kv_head * hd_half;
+                                             ((((size_t)blk * pkv.block_size) + slot) * kv_row_bytes) +
+                                             ((size_t)kv_head * hd_half);
                         val = reinterpret_cast<const uint32_t*>(row)[b4];
                     }
-                    *reinterpret_cast<uint32_t*>(&KV_fp4[r * hd_half_padded + b4 * 4]) = val;
+                    *reinterpret_cast<uint32_t*>(&KV_fp4[(r * hd_half_padded) + (b4 * 4)]) = val;
                 }
                 const int total_sc = Bkv * n_k_groups;
                 for (int idx = tid; idx < total_sc; idx += MX_BLOCK_THREADS) {
@@ -468,10 +469,10 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     if (pos < seq_kv) {
                         const int blk = pkv.block_table[pos / pkv.block_size];
                         const int slot = pos % pkv.block_size;
-                        sc = pkv.k_scales[((size_t)blk * pkv.block_size + slot) * sc_row_bytes +
-                                          (size_t)kv_head * n_k_groups + kg];
+                        sc = pkv.k_scales[((((size_t)blk * pkv.block_size) + slot) * sc_row_bytes) +
+                                          ((size_t)kv_head * n_k_groups) + kg];
                     }
-                    k_scales_fp8[r * n_k_groups + kg] = sc;
+                    k_scales_fp8[(r * n_k_groups) + kg] = sc;
                 }
             }
             __syncthreads();
@@ -488,7 +489,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     float4* dst = reinterpret_cast<float4*>(&K_stage[i]);
                     if (kv_start + r < seq_kv) {
                         const float4* src = reinterpret_cast<const float4*>(
-                            &K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                            &K_ptr[((int64_t)(kv_start + r) * kv_row_stride) + d]);
                         if (kmean == nullptr) {
                             *dst = *src;
                         } else {
@@ -515,12 +516,12 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     int r = idx / n_k_groups;
                     int kg = idx % n_k_groups;
                     float absmax = 0.0f;
-                    const half* row_start = &K_stage[r * head_dim + kg * 16];
+                    const half* row_start = &K_stage[(r * head_dim) + (kg * 16)];
 #pragma unroll
                     for (int i = 0; i < 16; i++)
                         absmax = fmaxf(absmax, fabsf(__half2float(row_start[i])));
                     float raw = absmax / 6.0f;
-                    k_scales_fp8[r * n_k_groups + kg] = float_to_fp8_e4m3(raw * sqrt_scale);
+                    k_scales_fp8[(r * n_k_groups) + kg] = float_to_fp8_e4m3(raw * sqrt_scale);
                 }
             } else {
                 // Per-row absmax (legacy)
@@ -528,7 +529,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 float local_max = 0.0f;
                 if (r < Bkv) {
                     for (int d = sm_lane; d < head_dim; d += TPR)
-                        local_max = fmaxf(local_max, fabsf(__half2float(K_stage[r * head_dim + d])));
+                        local_max = fmaxf(local_max, fabsf(__half2float(K_stage[(r * head_dim) + d])));
                 }
 #pragma unroll
                 for (int offset = TPR / 2; offset >= 1; offset >>= 1)
@@ -548,12 +549,12 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     float inv_scale;
                     if constexpr (UseBlockScaleMma) {
                         int kg = b4 / 2;
-                        float dequant = fp8_e4m3_to_float_fast(k_scales_fp8[r * n_k_groups + kg]);
+                        float dequant = fp8_e4m3_to_float_fast(k_scales_fp8[(r * n_k_groups) + kg]);
                         inv_scale = (dequant > 0.0f) ? (sqrt_scale / dequant) : 0.0f;
                     } else {
                         inv_scale = (k_scales[r] > 0.0f) ? (sqrt_scale / k_scales[r]) : 0.0f;
                     }
-                    const half* src = &K_stage[r * head_dim + d];
+                    const half* src = &K_stage[(r * head_dim) + d];
                     half2 h01 = reinterpret_cast<const half2*>(src)[0];
                     half2 h23 = reinterpret_cast<const half2*>(src)[1];
                     half2 h45 = reinterpret_cast<const half2*>(src)[2];
@@ -567,7 +568,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     uint32_t b3 = pack_fp4_pair(__half2float(h67.x) * inv_scale,
                                                 __half2float(h67.y) * inv_scale);
                     uint32_t packed = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-                    *reinterpret_cast<uint32_t*>(&KV_fp4[r * hd_half_padded + b4 * 4]) = packed;
+                    *reinterpret_cast<uint32_t*>(&KV_fp4[(r * hd_half_padded) + (b4 * 4)]) = packed;
                 }
             }
             __syncthreads();
@@ -581,18 +582,18 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     int kg = idx % n_k_groups;
                     float absmax = 0.0f;
                     if (kv_start + r < seq_kv) {
-                        const half* row =
-                            &K_ptr[(int64_t)(kv_start + r) * kv_row_stride + static_cast<ptrdiff_t>(kg * 16)];
+                        const half* row = &K_ptr[((int64_t)(kv_start + r) * kv_row_stride) +
+                                                 static_cast<ptrdiff_t>(kg * 16)];
 #pragma unroll
                         for (int i = 0; i < 16; i++) {
                             float kv = __half2float(row[i]);
                             if (kmean != nullptr)
-                                kv -= kmean[kg * 16 + i];
+                                kv -= kmean[(kg * 16) + i];
                             absmax = fmaxf(absmax, fabsf(kv));
                         }
                     }
                     float raw = absmax / 6.0f;
-                    k_scales_fp8[r * n_k_groups + kg] = float_to_fp8_e4m3(raw * sqrt_scale);
+                    k_scales_fp8[(r * n_k_groups) + kg] = float_to_fp8_e4m3(raw * sqrt_scale);
                 }
             } else {
                 const int r = sm_row;
@@ -601,7 +602,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     for (int d = sm_lane; d < head_dim; d += TPR)
                         local_max = fmaxf(local_max,
                                           fabsf(__half2float(
-                                              K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d])));
+                                              K_ptr[((int64_t)(kv_start + r) * kv_row_stride) + d])));
                 }
 #pragma unroll
                 for (int offset = TPR / 2; offset >= 1; offset >>= 1)
@@ -621,20 +622,20 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                         float inv_scale;
                         if constexpr (UseBlockScaleMma) {
                             int kg = d / 16;
-                            float dequant = fp8_e4m3_to_float_fast(k_scales_fp8[r * n_k_groups + kg]);
+                            float dequant = fp8_e4m3_to_float_fast(k_scales_fp8[(r * n_k_groups) + kg]);
                             inv_scale = (dequant > 0.0f) ? (sqrt_scale / dequant) : 0.0f;
                         } else {
                             inv_scale = (k_scales[r] > 0.0f) ? (sqrt_scale / k_scales[r]) : 0.0f;
                         }
-                        float v0 = __half2float(K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
-                        float v1 = __half2float(K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d + 1]);
+                        float v0 = __half2float(K_ptr[((int64_t)(kv_start + r) * kv_row_stride) + d]);
+                        float v1 = __half2float(K_ptr[((int64_t)(kv_start + r) * kv_row_stride) + d + 1]);
                         if (kmean != nullptr) {
                             v0 -= kmean[d];
                             v1 -= kmean[d + 1];
                         }
-                        KV_fp4[r * hd_half_padded + d_byte] = pack_fp4_pair(v0 * inv_scale, v1 * inv_scale);
+                        KV_fp4[(r * hd_half_padded) + d_byte] = pack_fp4_pair(v0 * inv_scale, v1 * inv_scale);
                     } else {
-                        KV_fp4[r * hd_half_padded + d_byte] = 0;
+                        KV_fp4[(r * hd_half_padded) + d_byte] = 0;
                     }
                 }
             }
@@ -685,13 +686,13 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                         const int blk = pkv.block_table[gk / pkv.block_size];
                         const int slot = gk % pkv.block_size;
                         const uint8_t* krow = pkv.k_data +
-                                              ((size_t)blk * pkv.block_size + slot) *
-                                                  static_cast<size_t>(n_kv_heads * hd_half) +
-                                              (size_t)kv_head * hd_half;
+                                              ((((size_t)blk * pkv.block_size) + slot) *
+                                               static_cast<size_t>(n_kv_heads * hd_half)) +
+                                              ((size_t)kv_head * hd_half);
                         const uint8_t* ksc = pkv.k_scales +
-                                             ((size_t)blk * pkv.block_size + slot) *
-                                                 static_cast<size_t>(n_kv_heads * n_k_groups) +
-                                             (size_t)kv_head * n_k_groups;
+                                             ((((size_t)blk * pkv.block_size) + slot) *
+                                              static_cast<size_t>(n_kv_heads * n_k_groups)) +
+                                             ((size_t)kv_head * n_k_groups);
                         for (int d = 0; d < head_dim; d += 2) {
                             const half2 kh = unpack_fp4_pair(krow[d / 2]);
                             const float sc = fp8_e4m3_to_float_fast(ksc[d / 16]);
@@ -719,7 +720,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     if (softcap > 0.0f)
                         s = softcap * tanhf(s / softcap);
                 }
-                S_tile[r * Bkv + c] = s;
+                S_tile[(r * Bkv) + c] = s;
             }
         }
         for (int tile_idx = warp_id; !promoted && tile_idx < outer_total; tile_idx += MX_NUM_WARPS) {
@@ -752,7 +753,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 //   a0: row[gid] k-stripe 2k; a1: row[gid+8] k-stripe 2k; a2: row[gid] k-stripe 2k+1;
                 //   a3: row[gid+8] k-stripe 2k+1; b0: col[gid] k-stripe 2k; b1: col[gid] k-stripe 2k+1.
                 const int k_pairs = hd_chunks_fp4 / 2;
-                const int m_sfa = (lane_id / 4) + (lane_id % 2) * 8;
+                const int m_sfa = (lane_id / 4) + ((lane_id % 2) * 8);
                 const int n_sfb = lane_id / 4;
                 constexpr uint16_t bidA = 0, tidA = 0, bidB = 0, tidB = 0;
 #define MXF4_MMA(d_a, d_b, d_c, d_d, b_lo, b_hi, sfb_)                                                      \
@@ -791,7 +792,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     // sfa shared across all 4 ci's
                     const int kg_base = k * 4;
                     uint32_t sfa = *reinterpret_cast<const uint32_t*>(
-                        &q_scales_fp8[(ri * MX_MMA_M + m_sfa) * n_k_groups + kg_base]);
+                        &q_scales_fp8[(((ri * MX_MMA_M) + m_sfa) * n_k_groups) + kg_base]);
 
 // 4 MMAs for ci_meta_base + 0..3, all sharing A and sfa
 #pragma unroll
@@ -810,7 +811,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                         uint32_t b1 = *reinterpret_cast<const uint32_t*>(
                             k_base1 + static_cast<ptrdiff_t>(group_id * hd_half_padded) + byte_offset);
                         uint32_t sfb = *reinterpret_cast<const uint32_t*>(
-                            &k_scales_fp8[(ci_local * MX_MMA_N + n_sfb) * n_k_groups + kg_base]);
+                            &k_scales_fp8[(((ci_local * MX_MMA_N) + n_sfb) * n_k_groups) + kg_base]);
 #if __CUDA_ARCH__ >= 1200
                         if (co == 0) {
                             MXF4_MMA(d0, d1, d2, d3, b0, b1, sfb);
@@ -899,15 +900,15 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
 
                 if constexpr (UseBlockScaleMma) {
 // 4-issue path: store 4 ci's, scales already HW-applied
-#define STORE_CI(d_a, d_b, d_c, d_d, ci_off)                                                             \
-    do {                                                                                                 \
-        int base_col_x = (ci_meta_base + (ci_off)) * MX_MMA_N;                                           \
-        int gk0_x = kv_start + base_col_x + c0;                                                          \
-        int gk1_x = kv_start + base_col_x + c0 + 1;                                                      \
-        FUSED_STORE(d_a, lq0, gq0, gk0_x, pg_qs, 1.0f, (base_row + r0) * Bkv + base_col_x + c0);         \
-        FUSED_STORE(d_b, lq0, gq0, gk1_x, pg_qs, 1.0f, (base_row + r0) * Bkv + base_col_x + c0 + 1);     \
-        FUSED_STORE(d_c, lq1, gq1, gk0_x, pg_qs, 1.0f, (base_row + r0 + 8) * Bkv + base_col_x + c0);     \
-        FUSED_STORE(d_d, lq1, gq1, gk1_x, pg_qs, 1.0f, (base_row + r0 + 8) * Bkv + base_col_x + c0 + 1); \
+#define STORE_CI(d_a, d_b, d_c, d_d, ci_off)                                                               \
+    do {                                                                                                   \
+        int base_col_x = (ci_meta_base + (ci_off)) * MX_MMA_N;                                             \
+        int gk0_x = kv_start + base_col_x + c0;                                                            \
+        int gk1_x = kv_start + base_col_x + c0 + 1;                                                        \
+        FUSED_STORE(d_a, lq0, gq0, gk0_x, pg_qs, 1.0f, ((base_row + r0) * Bkv) + base_col_x + c0);         \
+        FUSED_STORE(d_b, lq0, gq0, gk1_x, pg_qs, 1.0f, ((base_row + r0) * Bkv) + base_col_x + c0 + 1);     \
+        FUSED_STORE(d_c, lq1, gq1, gk0_x, pg_qs, 1.0f, ((base_row + r0 + 8) * Bkv) + base_col_x + c0);     \
+        FUSED_STORE(d_d, lq1, gq1, gk1_x, pg_qs, 1.0f, ((base_row + r0 + 8) * Bkv) + base_col_x + c0 + 1); \
     } while (0)
                     STORE_CI(d0, d1, d2, d3, 0);
                     STORE_CI(d4, d5, d6, d7, 1);
@@ -923,10 +924,10 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     float ks1 = k_scales[base_col + c0 + 1];
                     int gk0 = kv_start + base_col + c0;
                     int gk1 = kv_start + base_col + c0 + 1;
-                    FUSED_STORE(d0, lq0, gq0, gk0, qs0, ks0, (base_row + r0) * Bkv + base_col + c0);
-                    FUSED_STORE(d1, lq0, gq0, gk1, qs0, ks1, (base_row + r0) * Bkv + base_col + c0 + 1);
-                    FUSED_STORE(d2, lq1, gq1, gk0, qs1, ks0, (base_row + r0 + 8) * Bkv + base_col + c0);
-                    FUSED_STORE(d3, lq1, gq1, gk1, qs1, ks1, (base_row + r0 + 8) * Bkv + base_col + c0 + 1);
+                    FUSED_STORE(d0, lq0, gq0, gk0, qs0, ks0, ((base_row + r0) * Bkv) + base_col + c0);
+                    FUSED_STORE(d1, lq0, gq0, gk1, qs0, ks1, ((base_row + r0) * Bkv) + base_col + c0 + 1);
+                    FUSED_STORE(d2, lq1, gq1, gk0, qs1, ks0, ((base_row + r0 + 8) * Bkv) + base_col + c0);
+                    FUSED_STORE(d3, lq1, gq1, gk1, qs1, ks1, ((base_row + r0 + 8) * Bkv) + base_col + c0 + 1);
                 }
 #undef FUSED_STORE
             }
@@ -946,23 +947,23 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 if (pos >= q_offset && pos < seq_kv) {
                     // Current-chunk V: fresh FP16 (V arg holds the chunk rows).
                     out = *reinterpret_cast<const half2*>(
-                        &V_ptr[(int64_t)(pos - q_offset) * kv_row_stride + static_cast<ptrdiff_t>(2 * b)]);
+                        &V_ptr[((int64_t)(pos - q_offset) * kv_row_stride) + static_cast<ptrdiff_t>(2 * b)]);
                 } else if (pos < seq_kv) {
                     const int blk = pkv.block_table[pos / pkv.block_size];
                     const int slot = pos % pkv.block_size;
                     const uint8_t* vrow = pkv.v_data +
-                                          ((size_t)blk * pkv.block_size + slot) *
-                                              static_cast<size_t>(n_kv_heads * hd_half) +
-                                          (size_t)kv_head * hd_half;
+                                          ((((size_t)blk * pkv.block_size) + slot) *
+                                           static_cast<size_t>(n_kv_heads * hd_half)) +
+                                          ((size_t)kv_head * hd_half);
                     const uint8_t* vsc = pkv.v_scales +
-                                         ((size_t)blk * pkv.block_size + slot) *
-                                             static_cast<size_t>(n_kv_heads * n_k_groups) +
-                                         (size_t)kv_head * n_k_groups;
+                                         ((((size_t)blk * pkv.block_size) + slot) *
+                                          static_cast<size_t>(n_kv_heads * n_k_groups)) +
+                                         ((size_t)kv_head * n_k_groups);
                     const half2 hh = unpack_fp4_pair(vrow[b]);
                     const float sc = fp8_e4m3_to_float_fast(vsc[(2 * b) / 16]);
                     out = __floats2half2_rn(__half2float(hh.x) * sc, __half2float(hh.y) * sc);
                 }
-                *reinterpret_cast<half2*>(&KV_fp16[r * head_dim + 2 * b]) = out;
+                *reinterpret_cast<half2*>(&KV_fp16[(r * head_dim) + (2 * b)]) = out;
             }
         } else {
             constexpr int CHUNK_HALVES = 8;  // 16 bytes = 8 halves per cp.async
@@ -972,12 +973,12 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 int r = elem / head_dim;
                 int d = elem % head_dim;
                 if (kv_start + r < seq_kv) {
-                    cp_async_ca_16(&KV_fp16[r * head_dim + d],
-                                   &V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                    cp_async_ca_16(&KV_fp16[(r * head_dim) + d],
+                                   &V_ptr[((int64_t)(kv_start + r) * kv_row_stride) + d]);
                 } else {
                     // cp.async can't zero — use regular store
-                    reinterpret_cast<float4*>(&KV_fp16[r * head_dim + d])[0] = make_float4(0.0f, 0.0f, 0.0f,
-                                                                                           0.0f);
+                    reinterpret_cast<float4*>(&KV_fp16[(r * head_dim) + d])[0] = make_float4(0.0f, 0.0f, 0.0f,
+                                                                                             0.0f);
                 }
             }
             cp_async_commit();
@@ -993,7 +994,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
             float partial_max = -FLT_MAX;
             if (row_valid) {
                 for (int c = sm_lane; c < Bkv; c += TPR)
-                    partial_max = fmaxf(partial_max, S_tile[r * Bkv + c]);
+                    partial_max = fmaxf(partial_max, S_tile[(r * Bkv) + c]);
             }
 #pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1)
@@ -1010,10 +1011,10 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
             float partial_sum = 0.0f;
             if (row_valid) {
                 for (int c = sm_lane; c < Bkv; c += TPR) {
-                    float s_val = S_tile[r * Bkv + c];
+                    float s_val = S_tile[(r * Bkv) + c];
                     float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f : __expf(s_val - m_new);
                     partial_sum += p;
-                    S_tile[r * Bkv + c] = p;
+                    S_tile[(r * Bkv) + c] = p;
                 }
             }
 #pragma unroll
@@ -1022,7 +1023,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
 
             // Step 4: Update running sum
             float l_old = row_valid ? row_l[r] : 0.0f;
-            float l_new = alpha * l_old + partial_sum;
+            float l_new = (alpha * l_old) + partial_sum;
             if (sm_lane == 0 && row_valid) {
                 row_m[r] = m_new;
                 row_l[r] = l_new;
@@ -1033,7 +1034,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 float rescale = (l_old > 0.0f) ? (alpha * l_old / l_new) : 0.0f;
                 if (row_valid) {
                     for (int d = sm_lane; d < head_dim; d += TPR)
-                        O_acc[r * head_dim + d] *= rescale;
+                        O_acc[(r * head_dim) + d] *= rescale;
                 }
             }
 
@@ -1050,13 +1051,13 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 half hbuf[CPT];
 #pragma unroll
                 for (int i = 0; i < CPT; i++) {
-                    int c = sm_lane + i * TPR;
-                    hbuf[i] = __float2half(row_valid ? S_tile[r * Bkv + c] * spv : 0.0f);
+                    int c = sm_lane + (i * TPR);
+                    hbuf[i] = __float2half(row_valid ? S_tile[(r * Bkv) + c] * spv : 0.0f);
                 }
                 __syncthreads();  // all float reads of S_tile complete before any half write
 #pragma unroll
                 for (int i = 0; i < CPT; i++)
-                    SP_half[r * Bkv + sm_lane + i * TPR] = hbuf[i];
+                    SP_half[(r * Bkv) + sm_lane + (i * TPR)] = hbuf[i];
             } else {
                 // Step 6' (#846): two-level FP4 quantization of P. Level 1: rescale the row so its tile-local
                 // max (exp(m_ij-m_new)) lands at MX_PV_LEVEL1 (448*6). Level 2: per-16 absmax -> UE4M3 scale.
@@ -1074,21 +1075,21 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     const int rr = idx / n_kv_groups;
                     const int kg = idx % n_kv_groups;
                     const float rq = p_rowq[rr];
-                    const float* prow = &S_tile[rr * Bkv + kg * 16];
+                    const float* prow = &S_tile[(rr * Bkv) + (kg * 16)];
                     float bmax = 0.0f;  // p >= 0, no fabs needed
 #pragma unroll
                     for (int i = 0; i < 16; i++)
                         bmax = fmaxf(bmax, prow[i]);
                     bmax *= rq;
                     const uint8_t sf = float_to_fp8_e4m3(bmax / 6.0f);
-                    p_scales_fp8[rr * n_kv_groups + kg] = sf;
+                    p_scales_fp8[(rr * n_kv_groups) + kg] = sf;
                     const float dq = fp8_e4m3_to_float_fast(sf);
                     const float inv = (dq > 0.0f) ? (rq / dq) : 0.0f;
-                    uint8_t* dst = &P_fp4[rr * kv_half_padded + kg * 8];
+                    uint8_t* dst = &P_fp4[(rr * kv_half_padded) + (kg * 8)];
 #pragma unroll
                     for (int i = 0; i < 8; i++)
                         dst[i] = pack_fp4_pair(prow[static_cast<ptrdiff_t>(2 * i)] * inv,
-                                               prow[2 * i + 1] * inv);
+                                               prow[(2 * i) + 1] * inv);
                 }
                 (void)SP_half;
             }
@@ -1114,18 +1115,18 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                     float bmax = 0.0f;
 #pragma unroll
                     for (int i = 0; i < 16; i++) {
-                        vals[i] = __half2float(KV_fp16[(kg * 16 + i) * head_dim + dcol]);
+                        vals[i] = __half2float(KV_fp16[(((kg * 16) + i) * head_dim) + dcol]);
                         bmax = fmaxf(bmax, fabsf(vals[i]));
                     }
                     const uint8_t sf = float_to_fp8_e4m3(bmax / 6.0f);
-                    v_scales_fp8[dcol * n_kv_groups + kg] = sf;
+                    v_scales_fp8[(dcol * n_kv_groups) + kg] = sf;
                     const float dq = fp8_e4m3_to_float_fast(sf);
                     const float inv = (dq > 0.0f) ? (1.0f / dq) : 0.0f;
-                    uint8_t* dst = &V_fp4T[dcol * kv_half_padded + kg * 8];
+                    uint8_t* dst = &V_fp4T[(dcol * kv_half_padded) + (kg * 8)];
 #pragma unroll
                     for (int i = 0; i < 8; i++)
                         dst[i] = pack_fp4_pair(vals[static_cast<ptrdiff_t>(2 * i)] * inv,
-                                               vals[2 * i + 1] * inv);
+                                               vals[(2 * i) + 1] * inv);
                 }
             }
             __syncthreads();
@@ -1139,7 +1140,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                 const int pv_total = (Bq / MX_MMA_M) * pv_col_tiles;
                 const int group_id = lane_id / 4;
                 const int byte_offset = (lane_id % 4) * 4;
-                const int m_sfa = (lane_id / 4) + (lane_id % 2) * 8;
+                const int m_sfa = (lane_id / 4) + ((lane_id % 2) * 8);
                 const int n_sfb = lane_id / 4;
                 constexpr uint16_t bidA = 0, tidA = 0, bidB = 0, tidB = 0;
                 for (int tile_idx = warp_id; tile_idx < pv_total; tile_idx += MX_NUM_WARPS) {
@@ -1155,15 +1156,15 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
                         p_base + static_cast<ptrdiff_t>(group_id * kv_half_padded) + 16 + byte_offset);
                     uint32_t a3 = *reinterpret_cast<const uint32_t*>(
                         p_base + static_cast<ptrdiff_t>((group_id + 8) * kv_half_padded) + 16 + byte_offset);
-                    const uint8_t* v_base = V_fp4T + (size_t)(ci * MX_MMA_N) * kv_half_padded;
+                    const uint8_t* v_base = V_fp4T + ((size_t)(ci * MX_MMA_N) * kv_half_padded);
                     uint32_t b0 = *reinterpret_cast<const uint32_t*>(
                         v_base + static_cast<ptrdiff_t>(group_id * kv_half_padded) + byte_offset);
                     uint32_t b1 = *reinterpret_cast<const uint32_t*>(
                         v_base + static_cast<ptrdiff_t>(group_id * kv_half_padded) + 16 + byte_offset);
                     uint32_t sfa = *reinterpret_cast<const uint32_t*>(
-                        &p_scales_fp8[static_cast<ptrdiff_t>((ri * MX_MMA_M + m_sfa) * n_kv_groups)]);
+                        &p_scales_fp8[static_cast<ptrdiff_t>(((ri * MX_MMA_M) + m_sfa) * n_kv_groups)]);
                     uint32_t sfb = *reinterpret_cast<const uint32_t*>(
-                        &v_scales_fp8[static_cast<ptrdiff_t>((ci * MX_MMA_N + n_sfb) * n_kv_groups)]);
+                        &v_scales_fp8[static_cast<ptrdiff_t>(((ci * MX_MMA_N) + n_sfb) * n_kv_groups)]);
 #if __CUDA_ARCH__ >= 1200
                     asm volatile(
                         "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32."
@@ -1182,12 +1183,12 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
 #endif
                     // Per-row two-level factor folds back the level-1 rescale
                     // AND the 1/l_new softmax normalization.
-                    const int r0 = ri * MX_MMA_M + (lane_id / 4);
-                    const int c0 = ci * MX_MMA_N + (lane_id % 4) * 2;
-                    O_acc[r0 * head_dim + c0] += p_rowf[r0] * d0;
-                    O_acc[r0 * head_dim + c0 + 1] += p_rowf[r0] * d1;
-                    O_acc[(r0 + 8) * head_dim + c0] += p_rowf[r0 + 8] * d2;
-                    O_acc[(r0 + 8) * head_dim + c0 + 1] += p_rowf[r0 + 8] * d3;
+                    const int r0 = (ri * MX_MMA_M) + (lane_id / 4);
+                    const int c0 = (ci * MX_MMA_N) + ((lane_id % 4) * 2);
+                    O_acc[(r0 * head_dim) + c0] += p_rowf[r0] * d0;
+                    O_acc[(r0 * head_dim) + c0 + 1] += p_rowf[r0] * d1;
+                    O_acc[((r0 + 8) * head_dim) + c0] += p_rowf[r0 + 8] * d2;
+                    O_acc[((r0 + 8) * head_dim) + c0 + 1] += p_rowf[r0 + 8] * d3;
                 }
             }
             first_kv_iter = false;
@@ -1251,7 +1252,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
             uint2 packed;
             packed.x = *reinterpret_cast<const uint32_t*>(&lo);
             packed.y = *reinterpret_cast<const uint32_t*>(&hi);
-            *reinterpret_cast<uint2*>(&O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
+            *reinterpret_cast<uint2*>(&O_ptr[((int64_t)r * q_row_stride) + (i % head_dim)]) = packed;
         }
     }
 }
@@ -1261,7 +1262,7 @@ __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
 // =============================================================================
 
 static size_t compute_smem_mxfp4(int Bq, int Bkv, int head_dim, bool pv_fp4 = false) {
-    size_t q_fp4 = (size_t)Bq * (head_dim / 2 + 4);         // Q packed FP4 (padded stride)
+    size_t q_fp4 = (size_t)Bq * ((head_dim / 2) + 4);       // Q packed FP4 (padded stride)
     size_t q_scales = (size_t)Bq * sizeof(float);           // Q row scales
     size_t align = 16;                                      // alignment padding
     size_t kv_buf = (size_t)Bkv * head_dim * sizeof(half);  // KV (FP4 K or FP16 V)
@@ -1274,12 +1275,12 @@ static size_t compute_smem_mxfp4(int Bq, int Bkv, int head_dim, bool pv_fp4 = fa
     size_t pv = 0;
     if (pv_fp4) {
         const int n_kv_groups = Bkv / 16;
-        const int kv_half_padded = Bkv / 2 + 4;
-        pv = 2 * (size_t)Bq * sizeof(float)          // p_rowf + p_rowq
-             + (size_t)Bq * n_kv_groups              // P scales
-             + (size_t)head_dim * n_kv_groups        // V scales
-             + (size_t)Bq * kv_half_padded           // P_fp4
-             + (size_t)head_dim * kv_half_padded;    // V_fp4T
+        const int kv_half_padded = (Bkv / 2) + 4;
+        pv = (2 * (size_t)Bq * sizeof(float))        // p_rowf + p_rowq
+             + ((size_t)Bq * n_kv_groups)            // P scales
+             + ((size_t)head_dim * n_kv_groups)      // V scales
+             + ((size_t)Bq * kv_half_padded)         // P_fp4
+             + ((size_t)head_dim * kv_half_padded);  // V_fp4T
     }
     return q_fp4 + q_scales + align + kv_buf + k_scales + s_tile + o_acc + softmax + scales_fp8 + pv;
 }
@@ -1292,12 +1293,12 @@ __global__ void mxfp4_k_channel_mean_kernel(const half* __restrict__ K, float* _
     const int batch = bh / n_kv_heads;
     const int kvh = bh % n_kv_heads;
     const int64_t row_stride = (int64_t)n_kv_heads * head_dim;
-    const half* base = K + (int64_t)batch * seq_kv * row_stride + (int64_t)kvh * head_dim;
+    const half* base = K + ((int64_t)batch * seq_kv * row_stride) + ((int64_t)kvh * head_dim);
     for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
         float s = 0.0f;
         for (int r = 0; r < seq_kv; r++)
-            s += __half2float(base[(int64_t)r * row_stride + d]);
-        mean[(int64_t)bh * head_dim + d] = s / (float)seq_kv;
+            s += __half2float(base[((int64_t)r * row_stride) + d]);
+        mean[((int64_t)bh * head_dim) + d] = s / (float)seq_kv;
     }
 }
 
@@ -1313,14 +1314,14 @@ __global__ void mxfp4_tile_mean_kernel(const half* __restrict__ X, float* __rest
     const int64_t row_stride = (int64_t)n_heads_x * head_dim;
     const int r0 = tile * tile_rows;
     const int rows = min(tile_rows, seq - r0);
-    const half* base = X + (int64_t)batch * seq * row_stride + (int64_t)r0 * row_stride +
-                       (int64_t)h * head_dim;
+    const half* base = X + ((int64_t)batch * seq * row_stride) + ((int64_t)r0 * row_stride) +
+                       ((int64_t)h * head_dim);
     const float inv = 1.0f / (float)rows;
     for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
         float s = 0.0f;
         for (int r = 0; r < rows; r++)
-            s += __half2float(base[(int64_t)r * row_stride + d]);
-        mean[((int64_t)bh * gridDim.x + tile) * head_dim + d] = s * inv;
+            s += __half2float(base[((int64_t)r * row_stride) + d]);
+        mean[((((int64_t)bh * gridDim.x) + tile) * head_dim) + d] = s * inv;
     }
 }
 
@@ -1346,15 +1347,15 @@ __global__ void mxfp4_tile_mean_paged_kernel(const uint8_t* __restrict__ k_data,
             const int pos = r0 + r;
             const int blk = block_table[pos / block_size];
             const int slot = pos % block_size;
-            const uint8_t byte = k_data[((size_t)blk * block_size + slot) * row_bytes +
-                                        (size_t)kvh * (head_dim / 2) + d / 2];
+            const uint8_t byte = k_data[((((size_t)blk * block_size) + slot) * row_bytes) +
+                                        ((size_t)kvh * (head_dim / 2)) + (d / 2)];
             const half2 hh = unpack_fp4_pair(byte);
             const float sc = fp8_e4m3_to_float_fast(
-                k_scales[((size_t)blk * block_size + slot) * sc_row_bytes + (size_t)kvh * n_groups +
-                         d / 16]);
+                k_scales[((((size_t)blk * block_size) + slot) * sc_row_bytes) + ((size_t)kvh * n_groups) +
+                         (d / 16)]);
             s += __half2float((d & 1) ? hh.y : hh.x) * sc;
         }
-        mean[((int64_t)kvh * gridDim.x + tile) * head_dim + d] = s * inv;
+        mean[((((int64_t)kvh * gridDim.x) + tile) * head_dim) + d] = s * inv;
     }
 }
 
@@ -1371,7 +1372,7 @@ __global__ void mxfp4_promote_select_kernel(const float* __restrict__ qmean,
     const int batch = bh / n_heads;
     const int head = bh % n_heads;
     const int kvh = head / (n_heads / n_kv_heads);
-    const int bkvh = batch * n_kv_heads + kvh;
+    const int bkvh = (batch * n_kv_heads) + kvh;
 
     extern __shared__ float sel_sm[];
     float* qm = sel_sm;                 // [head_dim]
@@ -1379,7 +1380,7 @@ __global__ void mxfp4_promote_select_kernel(const float* __restrict__ qmean,
     __shared__ float red_v[128];
     __shared__ int red_j[128];
 
-    const float* qmv = qmean + ((int64_t)bh * n_q_tiles + q_tile) * head_dim;
+    const float* qmv = qmean + ((((int64_t)bh * n_q_tiles) + q_tile) * head_dim);
     for (int d = threadIdx.x; d < head_dim; d += blockDim.x)
         qm[d] = qmv[d];
 
@@ -1390,13 +1391,13 @@ __global__ void mxfp4_promote_select_kernel(const float* __restrict__ qmean,
         last = max(last, 0);
     }
 
-    uint8_t* mrow = mask + ((int64_t)bh * n_q_tiles + q_tile) * n_kv_tiles;
+    uint8_t* mrow = mask + ((((int64_t)bh * n_q_tiles) + q_tile) * n_kv_tiles);
     for (int j = threadIdx.x; j < n_kv_tiles; j += blockDim.x)
         mrow[j] = 0;
     __syncthreads();
 
     for (int j = threadIdx.x; j <= last; j += blockDim.x) {
-        const float* km = kmean_tiles + ((int64_t)bkvh * n_kv_tiles + j) * head_dim;
+        const float* km = kmean_tiles + ((((int64_t)bkvh * n_kv_tiles) + j) * head_dim);
         float s = 0.0f;
         for (int d = 0; d < head_dim; d++)
             s = fmaf(qm[d], km[d], s);

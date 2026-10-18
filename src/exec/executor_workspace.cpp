@@ -24,6 +24,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
@@ -76,7 +77,7 @@ void GraphExecutor::dump_moe_expert_hist_() {
             for (int l = 0; l < moe_.hist_layers; l++) {
                 fprintf(f, "    [");
                 for (int e = 0; e < moe_.hist_experts; e++)
-                    fprintf(f, "%s%u", e ? "," : "", h[static_cast<size_t>(l) * moe_.hist_experts + e]);
+                    fprintf(f, "%s%u", e ? "," : "", h[(static_cast<size_t>(l) * moe_.hist_experts) + e]);
                 fprintf(f, "]%s\n", l + 1 < moe_.hist_layers ? "," : "");
             }
             fprintf(f, "  ],\n");
@@ -133,14 +134,14 @@ void GraphExecutor::dump_moe_expert_trace_() {
             for (size_t r = 0; r < records; r++) {
                 fprintf(f, "    [");
                 for (int j = 0; j < rec; j++)
-                    fprintf(f, "%s%d", j ? "," : "", t[r * rec + j]);
+                    fprintf(f, "%s%d", j ? "," : "", t[(r * rec) + j]);
                 fprintf(f, "]%s\n", r + 1 < records ? "," : "");
             }
             fprintf(f, "  ],\n  \"weights\": [\n");
             for (size_t r = 0; r < records; r++) {
                 fprintf(f, "    [");
                 for (int j = 0; j < moe_.trace_top_k; j++)
-                    fprintf(f, "%s%.6g", j ? "," : "", static_cast<double>(w[r * moe_.trace_top_k + j]));
+                    fprintf(f, "%s%.6g", j ? "," : "", static_cast<double>(w[(r * moe_.trace_top_k) + j]));
                 fprintf(f, "]%s\n", r + 1 < records ? "," : "");
             }
             fprintf(f, "  ]\n}\n");
@@ -465,7 +466,7 @@ size_t Workspace::workspace_estimate(bool include_attn_scores) const {
     size_t es = dtype_size(compute_dtype_);
 
     // Persistent: hidden + residual + norm_out + logits
-    size_t persistent = 3 * align256(static_cast<size_t>(*max_tokens_) * d * es) +
+    size_t persistent = (3 * align256(static_cast<size_t>(*max_tokens_) * d * es)) +
                         align256(static_cast<size_t>(*max_logit_tokens_) * cfg.vocab_size * sizeof(float));
 
     // Shared: max of phases (already computed in compute_shared_sizes)
@@ -538,8 +539,7 @@ void Workspace::compute_shared_sizes(int max_tokens) {
         const auto& ly = model_->layer(i);
         if (ly.wq.data) {
             int q_dim = static_cast<int>(ly.wq.shape[0]);
-            if (q_dim > max_q_out)
-                max_q_out = q_dim;
+            max_q_out = std::max(max_q_out, q_dim);
         }
     }
     // MLA: mla_assemble_kv materialises K/V for all n_heads (not n_kv_heads=1).
@@ -586,7 +586,7 @@ void Workspace::compute_shared_sizes(int max_tokens) {
         int ssm_in_dim = cfg.ssm_proj_dim();
 
         size_t proj_elem_size = *has_gdn_ ? sizeof(float) : es;
-        int fused_total_out = conv_channels + inner + 2 * n_heads;
+        int fused_total_out = conv_channels + inner + (2 * n_heads);
         // z serves two tenants: the recurrent gate and the attention output
         // gate, which borrows it. Charge the wider one, or the borrow overruns
         // the neighbouring buffer on any model where the gate is wider.

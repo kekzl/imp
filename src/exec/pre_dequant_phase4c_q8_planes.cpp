@@ -27,7 +27,7 @@ void QuantPipeline::pre_dequant_phase4c_q8_planes_only_(const ModelConfig& cfg, 
     // fused n == 1 dp4a path reads the source of every member (dp4a_qkv_route_, fused_ffn_norm).
     auto release_group = [&](std::initializer_list<Tensor*> group) {
         for (const Tensor* t : group)
-            if (t->data && wcache_->nvfp4.count(t->data) == 0)
+            if (t->data && !wcache_->nvfp4.contains(t->data))
                 return;
         for (Tensor* t : group) {
             if (!t->data || t->dropped_source || t->qtype != QType::Q8_0 || t->ndim != 2 ||

@@ -89,9 +89,9 @@ std::expected<std::vector<uint16_t>, std::string> fp8_block_scaled_to_fp16(const
     for (int64_t i = 0; i < n; i++) {
         const int64_t br = i / block;
         for (int64_t j = 0; j < k; j++) {
-            const float s = scales[static_cast<size_t>(br * sc + j / block)];
-            const float v = e4m3_to_float(w[static_cast<size_t>(i * k + j)]) * s;
-            tmp[static_cast<size_t>(i * k + j)] = float_to_half(v);
+            const float s = scales[static_cast<size_t>((br * sc) + (j / block))];
+            const float v = e4m3_to_float(w[static_cast<size_t>((i * k) + j)]) * s;
+            tmp[static_cast<size_t>((i * k) + j)] = float_to_half(v);
         }
     }
     return tmp;
@@ -125,8 +125,7 @@ Fp8Pairing pair_fp8_scales(const std::map<std::string, const RawTensor*>& by_nam
     static const std::string kW = ".weight";
     Fp8Pairing p;
     for (const auto& [name, t] : by_name) {
-        if (!is_fp8_e4m3_dtype(t->dtype) || name.size() <= kW.size() ||
-            name.compare(name.size() - kW.size(), kW.size(), kW) != 0)
+        if (!is_fp8_e4m3_dtype(t->dtype) || name.size() <= kW.size() || !name.ends_with(kW))
             continue;
         const std::string base = name.substr(0, name.size() - kW.size());
         if (const auto it = by_name.find(base + ".weight_scale_inv"); it != by_name.end()) {
@@ -137,7 +136,7 @@ Fp8Pairing pair_fp8_scales(const std::map<std::string, const RawTensor*>& by_nam
                    ts != by_name.end() && is_per_tensor_scale(*ts->second)) {
             p.scale_of[name] = ts->second;
             p.consumed.insert(ts->first);
-            if (by_name.count(base + ".input_scale"))
+            if (by_name.contains(base + ".input_scale"))
                 p.consumed.insert(base + ".input_scale");
             p.n_tensor++;
         } else {

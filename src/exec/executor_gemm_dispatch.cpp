@@ -208,7 +208,7 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
 
 void gguf_source_fallback(const WeightHandle& h, const Tensor& input, Tensor& output, const GemmContext& ctx,
                           bool decode_rows) {
-    if (ctx.wcache == nullptr || ctx.wcache->q8_planes_only.count(h.source_data) == 0) {
+    if (ctx.wcache == nullptr || !ctx.wcache->q8_planes_only.contains(h.source_data)) {
         Tensor weight(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
         gemm_dispatch_uncached_fallback(input, weight, output, ctx, decode_rows);
         return;
@@ -311,7 +311,7 @@ static bool nvfp4_prefill_copy_routes(const WeightHandle& h, int M, bool spec_ve
                                       const QuantScratch& qs) {
     return M > 32 && !spec_verify && h.source_qtype == QType::F16 &&
            (h.primary_tier == StorageTier::FP16 || h.primary_tier == StorageTier::Undefined) &&
-           wc.cutlass_nvfp4_prefill.count(h.source_data) && qs.cutlass_act_data != nullptr &&
+           wc.cutlass_nvfp4_prefill.contains(h.source_data) && qs.cutlass_act_data != nullptr &&
            qs.cutlass_act_sf != nullptr;
 }
 
@@ -360,9 +360,9 @@ bool GraphExecutor::prefill_routes_cutlass_nvfp4_(TensorID id, int M) const {
     StorageTier prefill =
         (h.prefill_tier != StorageTier::Undefined) ? h.prefill_tier : h.primary_tier;
     // FP16 / FP8 prefill-cache hits intercept before the CUTLASS block.
-    if (prefill == StorageTier::FP16 && wcache_.fp16.count(h.source_data))
+    if (prefill == StorageTier::FP16 && wcache_.fp16.contains(h.source_data))
         return false;
-    if (prefill == StorageTier::FP8 && wcache_.fp8.count(h.source_data))
+    if (prefill == StorageTier::FP8 && wcache_.fp8.contains(h.source_data))
         return false;
     // GGUF source with NVFP4 decode overlay: prefill dequants the original
     // quant — never reaches the CUTLASS block.
@@ -420,7 +420,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     // MXFP8 prefill copy of an F16 GDN projection (gemm.mxfp8_gdn_proj_prefill): the same
     // gate as the NVFP4 copy below, checked first. Quantizes the activation into the MXFP8
     // scratch on every call (ssm_in and gdn_gate share one input; the dedupe is a later lever).
-    if (static_cast<int>(input.shape[0]) > 32 && wcache_.cutlass_mxfp8_prefill.count(h.source_data)) {
+    if (static_cast<int>(input.shape[0]) > 32 && wcache_.cutlass_mxfp8_prefill.contains(h.source_data)) {
         const int Mp = static_cast<int>(input.shape[0]);
         const int Kp = static_cast<int>(input.shape[1]);
         const auto& cw = wcache_.cutlass_mxfp8_prefill.find(h.source_data)->second;
@@ -447,7 +447,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     // tier split: on Qwen3.6-35B ssm_in and gdn_gate sit in no cache (tier Undefined) and
     // ssm_out carries the FP8 sidecar (tier FP16). Declines (beta=1, M<=32, spec verify, no
     // scratch) fall through to the route the handle had before.
-    if (static_cast<int>(input.shape[0]) > 32 && wcache_.cutlass_nvfp4_prefill.count(h.source_data)) {
+    if (static_cast<int>(input.shape[0]) > 32 && wcache_.cutlass_nvfp4_prefill.contains(h.source_data)) {
         const int Mp = static_cast<int>(input.shape[0]);
         auto it = wcache_.cutlass_nvfp4_prefill.find(h.source_data);
         const bool active = ctx.beta == 0.0f && input.qtype == QType::F16 && output.qtype == QType::F16 &&
@@ -643,11 +643,11 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
             // unit tensor scale) and reads both sides packed. The FP16 variant lost to
             // L2 eviction of its large x tile; packed x is far smaller. Scratch sized
             // for K_max on first eager use, like the split-K workspace.
-            const size_t xq_need = (size_t)32 * (K / 2) + (size_t)32 * (K / 16);
+            const size_t xq_need = ((size_t)32 * (K / 2)) + ((size_t)32 * (K / 16));
             ensure_smallm_xq_(xq_need, ctx.stream);
             if (smallm_ws_bytes_ >= need && smallm_xq_bytes_ >= xq_need) {
                 uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_);
-                uint8_t* xq_scales = xq_packed + (size_t)32 * (K / 2);
+                uint8_t* xq_scales = xq_packed + ((size_t)32 * (K / 2));
                 // Shared-activation skip: the call site marked this input as already
                 // quantized by the PREVIOUS dispatch (act-quant hint), and the scratch tag
                 // confirms it still holds exactly that quantize. Saves one quantize launch

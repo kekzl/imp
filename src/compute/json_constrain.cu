@@ -18,7 +18,7 @@ __global__ void constrain_mask_allow_kernel(float* __restrict__ logits,
                                             const uint8_t* __restrict__ token_allow,
                                             const uint16_t* __restrict__ allowed_mask, int vocab_size,
                                             int n_classified, bool use_token_allow) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= vocab_size)
         return;
     if (idx >= n_classified) {

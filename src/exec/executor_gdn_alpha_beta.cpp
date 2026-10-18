@@ -74,7 +74,8 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
                 "gdn alpha/beta narrow GEMM declined: alpha tier=%d source_qtype=%d shape=[%lld,%lld] "
                 "expected [%lld,%lld] fp16_cache=%d (two-call route)",
                 static_cast<int>(h.primary_tier), static_cast<int>(h.source_qtype), (long long)h.shape[0],
-                (long long)h.shape[1], (long long)N, (long long)K, wcache_.fp16.count(h.source_data) ? 1 : 0);
+                (long long)h.shape[1], (long long)N, (long long)K,
+                wcache_.fp16.contains(h.source_data) ? 1 : 0);
         }
         return false;
     }

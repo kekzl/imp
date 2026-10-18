@@ -27,6 +27,7 @@
 #include "exec/executor.h"
 #include "runtime/engine.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <vector>
@@ -61,7 +62,7 @@ void Engine::prewarm_spec_scratch_() {
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     const int chunk_cap = std::max({spec_capture_bucket_max_(), scfg.k + 1, 33});
     const int ctx_for_table = std::max(config_.max_seq_len, spec_capture_ctx_cap_);
-    const int table_cap = (ctx_for_table + kv_bs - 1) / kv_bs + 16;
+    const int table_cap = ((ctx_for_table + kv_bs - 1) / kv_bs) + 16;
     if (!ensure_spec_buffers_(chunk_cap, table_cap)) {
         IMP_LOG_WARN("[spec] scratch prewarm failed (chunk_cap=%d table_cap=%d) — "
                      "buffers will be taken on first use instead",
@@ -202,16 +203,14 @@ bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
                 double mx = 0.0;
                 for (size_t i = 0; i < vocab; i++) {
                     const double d = std::fabs(static_cast<double>(eager[i]) - static_cast<double>(graph[i]));
-                    if (d > mx)
-                        mx = d;
+                    mx = std::max(mx, d);
                     if (eager[i] > eager[ie])
                         ie = i;
                     if (graph[i] > graph[ig])
                         ig = i;
                 }
                 spec_fidelity_checked_++;
-                if (mx > spec_fidelity_max_delta_)
-                    spec_fidelity_max_delta_ = mx;
+                spec_fidelity_max_delta_ = std::max(spec_fidelity_max_delta_, mx);
                 if (ie != ig) {
                     spec_fidelity_differing_++;
                     IMP_LOG_WARN(

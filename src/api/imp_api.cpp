@@ -88,7 +88,7 @@ ImpConfig imp_config_default(void) {
     config.use_prefix_caching = 0;            // off by default
     config.prefix_cache_path[0] = '\0';       // no persistence by default
     config.prefix_pin_budget_pct = 25;        // cache_control pins capped at 25% of the KV pool
-    config.mmproj_path = NULL;                // no vision model
+    config.mmproj_path = nullptr;             // no vision model
     config.streaming_kv_enabled = 0;          // off by default (opt-in)
     config.streaming_kv_auto = 1;             // auto-enable when KV cache >90% full
     config.streaming_kv_n_sinks = 4;          // StreamingLLM paper default

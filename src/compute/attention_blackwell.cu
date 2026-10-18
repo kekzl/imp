@@ -45,7 +45,7 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
     const int head_idx = batch_head % n_heads;
     const int kv_head = head_idx / (n_heads / n_kv_heads);
 
-    const int tid = threadIdx.x + threadIdx.y * blockDim.x;  // [0,256)
+    const int tid = threadIdx.x + (threadIdx.y * blockDim.x);  // [0,256)
     const int warp_id = tid / BW_WARP_SIZE;                  // [0,8)
     const int q_start = tile_q * Br;
 
@@ -57,12 +57,12 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
     const int64_t q_row_stride = (int64_t)n_heads * head_dim;
     const int64_t kv_row_stride = (int64_t)n_kv_heads * head_dim;
 
-    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
-                        (int64_t)head_idx * head_dim;
-    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
-    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
-    half* O_ptr = O + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
-                  (int64_t)head_idx * head_dim;
+    const half* Q_ptr = Q + ((int64_t)batch_idx * seq_q * q_row_stride) + ((int64_t)q_start * q_row_stride) +
+                        ((int64_t)head_idx * head_dim);
+    const half* K_ptr = K + ((int64_t)batch_idx * seq_kv * kv_row_stride) + ((int64_t)kv_head * head_dim);
+    const half* V_ptr = V + ((int64_t)batch_idx * seq_kv * kv_row_stride) + ((int64_t)kv_head * head_dim);
+    half* O_ptr = O + ((int64_t)batch_idx * seq_q * q_row_stride) + ((int64_t)q_start * q_row_stride) +
+                  ((int64_t)head_idx * head_dim);
 
     // ---- shared memory layout -----------------------------------------------
     //
@@ -84,7 +84,7 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
     float* SP_float = reinterpret_cast<float*>(KV_buf1 + static_cast<ptrdiff_t>(BW_Bc * head_dim));
     half* SP_half = reinterpret_cast<half*>(SP_float);
     float* O_acc = reinterpret_cast<float*>(reinterpret_cast<char*>(SP_float) +
-                                            static_cast<size_t>(Br * BW_Bc) * sizeof(float));
+                                            (static_cast<size_t>(Br * BW_Bc) * sizeof(float)));
     float* row_m = reinterpret_cast<float*>(O_acc + static_cast<ptrdiff_t>(Br * head_dim));
     float* row_l = row_m + Br;
 
@@ -97,7 +97,7 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
             int r = i / head_dim;
             int d = i % head_dim;
             if (q_start + r < seq_q) {
-                Q_tile[i] = Q_ptr[(int64_t)r * q_row_stride + d];
+                Q_tile[i] = Q_ptr[((int64_t)r * q_row_stride) + d];
             } else {
                 Q_tile[i] = __float2half(0.0f);
             }
@@ -143,7 +143,7 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
             int r = i / head_dim;
             int d = i % head_dim;
             if (kv_start + r < seq_kv) {
-                KV_bufs[0][i] = K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d];
+                KV_bufs[0][i] = K_ptr[((int64_t)(kv_start + r) * kv_row_stride) + d];
             } else {
                 KV_bufs[0][i] = __float2half(0.0f);
             }
@@ -208,7 +208,7 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
             float partial_max = -FLT_MAX;
             if (row_valid) {
                 for (int c = sm_lane; c < BW_Bc; c += TPR) {
-                    partial_max = fmaxf(partial_max, SP_float[r * BW_Bc + c]);
+                    partial_max = fmaxf(partial_max, SP_float[(r * BW_Bc) + c]);
                 }
             }
 // Warp shuffle XOR reduction across TPR lanes
@@ -229,10 +229,10 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
             float partial_sum = 0.0f;
             if (row_valid) {
                 for (int c = sm_lane; c < BW_Bc; c += TPR) {
-                    float s_val = SP_float[r * BW_Bc + c];
+                    float s_val = SP_float[(r * BW_Bc) + c];
                     float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f : __expf(s_val - m_new);
                     partial_sum += p;
-                    SP_float[r * BW_Bc + c] = p;  // store for half conversion below
+                    SP_float[(r * BW_Bc) + c] = p;  // store for half conversion below
                 }
             }
 // Reduce sum across TPR lanes
@@ -243,7 +243,7 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
 
             // Step 4: Update running state (one thread per row writes)
             float l_old = row_valid ? row_l[r] : 0.0f;
-            float l_new = alpha * l_old + partial_sum;
+            float l_new = (alpha * l_old) + partial_sum;
             if (sm_lane == 0 && row_valid) {
                 row_m[r] = m_new;
                 row_l[r] = l_new;
@@ -253,7 +253,7 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
             float rescale = (l_old > 0.0f) ? (alpha * l_old / l_new) : 0.0f;
             if (row_valid) {
                 for (int d = sm_lane; d < head_dim; d += TPR) {
-                    O_acc[r * head_dim + d] *= rescale;
+                    O_acc[(r * head_dim) + d] *= rescale;
                 }
             }
 
@@ -266,13 +266,13 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
             half hbuf[CPT];
 #pragma unroll
             for (int i = 0; i < CPT; i++) {
-                int c = sm_lane + i * TPR;
-                hbuf[i] = __float2half(row_valid ? SP_float[r * BW_Bc + c] * spv : 0.0f);
+                int c = sm_lane + (i * TPR);
+                hbuf[i] = __float2half(row_valid ? SP_float[(r * BW_Bc) + c] * spv : 0.0f);
             }
             __syncthreads();  // all float reads of SP_float complete before any half write
 #pragma unroll
             for (int i = 0; i < CPT; i++)
-                SP_half[r * BW_Bc + sm_lane + i * TPR] = hbuf[i];
+                SP_half[(r * BW_Bc) + sm_lane + (i * TPR)] = hbuf[i];
         }
         __syncthreads();
 
@@ -283,7 +283,7 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
                 int r = i / head_dim;
                 int d = i % head_dim;
                 if (kv_start + r < seq_kv) {
-                    KV_bufs[cur_buf][i] = V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d];
+                    KV_bufs[cur_buf][i] = V_ptr[((int64_t)(kv_start + r) * kv_row_stride) + d];
                 } else {
                     KV_bufs[cur_buf][i] = __float2half(0.0f);
                 }
@@ -337,7 +337,7 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
                 int r = i / head_dim;
                 int d = i % head_dim;
                 if (next_kv_start + r < seq_kv) {
-                    KV_bufs[next_buf][i] = K_ptr[(int64_t)(next_kv_start + r) * kv_row_stride + d];
+                    KV_bufs[next_buf][i] = K_ptr[((int64_t)(next_kv_start + r) * kv_row_stride) + d];
                 } else {
                     KV_bufs[next_buf][i] = __float2half(0.0f);
                 }
@@ -353,7 +353,7 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
         for (int i = tid; i < total; i += BW_BLOCK_THREADS) {
             int r = i / head_dim;
             if (q_start + r < seq_q) {
-                O_ptr[(int64_t)r * q_row_stride + (i % head_dim)] = __float2half(O_acc[i]);
+                O_ptr[((int64_t)r * q_row_stride) + (i % head_dim)] = __float2half(O_acc[i]);
             }
         }
     }
@@ -361,11 +361,11 @@ __global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, con
 
 // Compute shared memory for a given Br and head_dim
 static size_t compute_smem(int Br, int head_dim) {
-    return (size_t)Br * head_dim * sizeof(half)           // Q_tile
-           + 2 * (size_t)BW_Bc * head_dim * sizeof(half)  // KV_buf[0] + KV_buf[1]
-           + (size_t)Br * BW_Bc * sizeof(float)           // SP_tile (float union)
-           + (size_t)Br * head_dim * sizeof(float)        // O_acc
-           + 2 * (size_t)Br * sizeof(float);              // row_m + row_l
+    return ((size_t)Br * head_dim * sizeof(half))           // Q_tile
+           + (2 * (size_t)BW_Bc * head_dim * sizeof(half))  // KV_buf[0] + KV_buf[1]
+           + ((size_t)Br * BW_Bc * sizeof(float))           // SP_tile (float union)
+           + ((size_t)Br * head_dim * sizeof(float))        // O_acc
+           + (2 * (size_t)Br * sizeof(float));              // row_m + row_l
 }
 
 // ===== Host-side launcher ====================================================

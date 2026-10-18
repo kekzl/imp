@@ -15,7 +15,7 @@ namespace imp::quantize {
 namespace {
 
 bool ends_with(std::string_view s, std::string_view suf) {
-    return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+    return s.size() >= suf.size() && s.ends_with(suf);
 }
 
 // v[i] *= f for every i with sel(i), creating the all-ones vector of length n first.
@@ -95,7 +95,7 @@ int fold_rules(awq::Plan& plan, const std::map<std::string, const RawTensor*>& i
     for (const auto& [name, t] : index) {
         for (const auto& r : rules) {
             if (!ends_with(name, r.producer_suffix) || t->shape.size() != 2 ||
-                (!r.must_contain.empty() && name.find(r.must_contain) == std::string::npos))
+                (!r.must_contain.empty() && !name.contains(r.must_contain)))
                 continue;
             const std::string stem = name.substr(0, name.size() - r.producer_suffix.size());
             const auto c = index.find(stem + std::string(r.consumer_suffix));
@@ -146,7 +146,7 @@ void apply_act_prescale(const Options& opt, const std::vector<std::unique_ptr<Ra
             index[t.name] = &t;
     const auto quantized = [&](const RawTensor& t) {
         std::string why;
-        return gated_q_proj.count(t.name) == 0 && !keep_gdn_projection(t.name, opt.keep_gdn_proj) &&
+        return !gated_q_proj.contains(t.name) && !keep_gdn_projection(t.name, opt.keep_gdn_proj) &&
                should_quantize(t, opt.quantize_lm_head, why);
     };
     const int pairs = fold_rules(plan, index, rules, mla, quantized);

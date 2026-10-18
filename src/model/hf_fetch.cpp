@@ -50,7 +50,7 @@ size_t header_cb(char* buf, size_t size, size_t n, void* ud) {
     std::string line(buf, size * n);
     while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
         line.pop_back();
-    if (line.rfind("HTTP/", 0) == 0) {
+    if (line.starts_with("HTTP/")) {
         h->error_code.clear();
         h->error_message.clear();
         return size * n;
@@ -134,7 +134,7 @@ struct GetCtx {
 
 size_t get_write_cb(char* p, size_t size, size_t n, void* ud) {
     auto* g = static_cast<GetCtx*>(ud);
-    if (g->body.size() + size * n > kMaxApiBody)
+    if (g->body.size() + (size * n) > kMaxApiBody)
         return 0;
     g->body.append(p, size * n);
     return size * n;

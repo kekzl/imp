@@ -32,6 +32,7 @@
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 
+#include <algorithm>
 #include <climits>
 #include <cstdio>
 #include <cmath>
@@ -768,7 +769,7 @@ bool Engine::decode_prepare_kv_(std::shared_ptr<Request>& req, int kv_bs) {
                                                     : model_->config().sliding_window;
         if (n_sinks > 0 && win > 0) {
             int threshold = (config_.streaming_kv_threshold > 0) ? config_.streaming_kv_threshold
-                                                                 : (n_sinks + win + 2 * kv_bs);
+                                                                 : (n_sinks + win + (2 * kv_bs));
             if (req->context_len() > threshold) {
                 // Idempotent: returns 0 once this sequence is fully
                 // streamed, so accumulating gives the total context this
@@ -1161,9 +1162,9 @@ void Engine::decode_build_inference_state_(GPUBatch& gpu_batch,
                         base, stride, residual_meta_h_slots_.data(), residual_meta_h_counts_.data(),
                         residual_meta_h_widxes_.data(), N, dec_stream);
                     err == cudaSuccess) {
-                    state.d_residual_seq_slots = base + 0 * stride;
-                    state.d_residual_counts = base + 1 * stride;
-                    state.d_residual_write_idxes = base + 2 * stride;
+                    state.d_residual_seq_slots = base + (0 * stride);
+                    state.d_residual_counts = base + (1 * stride);
+                    state.d_residual_write_idxes = base + (2 * stride);
                     state.h_residual_seq_ids = residual_meta_h_seq_ids_.data();
                 } else {
                     IMP_LOG_ERROR("residual metadata upload failed (%s); this step runs without it",
@@ -1298,13 +1299,13 @@ std::vector<int32_t> Engine::sample_decode_rows_(InferenceState& state,
                 if (hs.synced != need) {
                     // Full (re)sync: first batch entry of this request, or
                     // the host history diverged (sync-row step, think strip).
-                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_hist_ + (size_t)slot * penalty_hist_cap_,
+                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_hist_ + ((size_t)slot * penalty_hist_cap_),
                                                        req->output_tokens.data(),
                                                        (size_t)need * sizeof(int32_t), cudaMemcpyHostToDevice,
                                                        dec_stream));
                     hs.synced = need;
                 }
-                per_state.penalty_tokens = d_penalty_hist_ + (size_t)slot * penalty_hist_cap_;
+                per_state.penalty_tokens = d_penalty_hist_ + ((size_t)slot * penalty_hist_cap_);
                 per_state.n_penalty_tokens = need;
                 pen_row_slot[i] = slot;
             } else if (d_penalty_tokens_ && (size_t)need <= d_penalty_tokens_capacity_) {
@@ -1478,7 +1479,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             std::memset(padded_block_table_.data(), 0, needed * sizeof(int));
             for (int s = 0; s < n_seq; s++) {
                 for (int b = 0; b < old_stride; b++) {
-                    padded_block_table_[s * pool_max + b] = batch.block_tables[s * old_stride + b];
+                    padded_block_table_[(s * pool_max) + b] = batch.block_tables[(s * old_stride) + b];
                 }
             }
             batch.block_tables.swap(padded_block_table_);
@@ -1487,8 +1488,8 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
                 padded_swa_block_table_.assign(needed, -1);
                 for (int s = 0; s < n_seq; s++) {
                     for (int b = 0; b < old_stride; b++) {
-                        padded_swa_block_table_[s * pool_max + b] =
-                            batch.block_tables_swa[s * old_stride + b];
+                        padded_swa_block_table_[(s * pool_max) + b] =
+                            batch.block_tables_swa[(s * old_stride) + b];
                     }
                 }
                 batch.block_tables_swa.swap(padded_swa_block_table_);
@@ -1894,8 +1895,8 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             if (!valid_decode[i]->logprobs)
                 continue;
             const float* d_logits = static_cast<const float*>(decode_logits_out.data) +
-                                    static_cast<size_t>(i) * vocab_size;
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_base + static_cast<size_t>(slot) * vocab_size, d_logits,
+                                    (static_cast<size_t>(i) * vocab_size);
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_base + (static_cast<size_t>(slot) * vocab_size), d_logits,
                                                vocab_size * sizeof(float), cudaMemcpyDeviceToHost,
                                                dec_stream));
             slot++;
@@ -1908,7 +1909,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             if (!req->logprobs)
                 continue;
 
-            float* h_logits = h_base + static_cast<size_t>(slot) * vocab_size;
+            float* h_logits = h_base + (static_cast<size_t>(slot) * vocab_size);
             req->output_logprobs.push_back(
                 build_logprob_info(h_logits, vocab_size, tokens[i], req->top_logprobs, tok));
             slot++;
@@ -1972,7 +1973,7 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
             if (spec_ngram_enabled_(*dreq)) {
                 spec_limit = dreq->spec_ngram_given_up ? runtime_config_.speculative.burst
                                                        : spec_effective_miss_burst_(*dreq);
-                if (spec_limit < 0) spec_limit = 0;
+                spec_limit = std::max(spec_limit, 0);
             }
             // #754: streaming requests run the loop too, since
             // step_async_graph_resume polls the mapped ring buffer and

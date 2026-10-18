@@ -345,7 +345,7 @@ static void require_chunk_kv(const half* k, const half* v) {
         int block_id = h_block_table[b];
         if (block_id < 0)
             continue;
-        int toks_in_block = std::min(kv_bs, ctx_len - b * kv_bs);
+        int toks_in_block = std::min(kv_bs, ctx_len - (b * kv_bs));
         size_t row_bytes = static_cast<size_t>(nkv * hd) * sizeof(half);
         half* k_src = static_cast<half*>(cache_dbg->k_ptr(kv_layer, block_id));
         half* v_src = static_cast<half*>(cache_dbg->v_ptr(kv_layer, block_id));

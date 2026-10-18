@@ -110,9 +110,9 @@ bool parse_llama3_rope(const JValue& rs, const JValue& eff, float factor, ModelC
         } else if (wavelen > low_wavelen) {
             pair_factor = factor;
         } else {
-            const float smooth = (static_cast<float>(orig_max_pos) / wavelen - low_freq_factor) /
+            const float smooth = ((static_cast<float>(orig_max_pos) / wavelen) - low_freq_factor) /
                                  (high_freq_factor - low_freq_factor);
-            pair_factor = factor / (1.0f - smooth + smooth * factor);
+            pair_factor = factor / (1.0f - smooth + (smooth * factor));
         }
         cfg.rope_short_factor[i] = pair_factor;
         cfg.rope_long_factor[i] = pair_factor;

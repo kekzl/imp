@@ -260,7 +260,7 @@ bool GraphExecutor::lm_head_nvfp4_view(NvFP4QuantResult& out) const {
     const Tensor& lm = model_->output_proj();
     if (!lm.data)
         return false;
-    if (wcache_.fp8.count(lm.data))
+    if (wcache_.fp8.contains(lm.data))
         return false;
     auto it = wcache_.nvfp4.find(lm.data);
     if (it != wcache_.nvfp4.end()) {

@@ -96,7 +96,7 @@ struct MtpBindPool {
 
 // Is req_id bound: the active binding or a parked one.
 [[nodiscard]] inline bool mtp_bound(const MtpBind& active, const MtpBindPool& pool, int req_id) {
-    return req_id >= 0 && (active.req == req_id || pool.binds.count(req_id) != 0);
+    return req_id >= 0 && (active.req == req_id || pool.binds.contains(req_id));
 }
 
 struct RuntimeConfig;

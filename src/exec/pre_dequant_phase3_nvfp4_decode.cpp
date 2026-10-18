@@ -109,17 +109,17 @@ void QuantPipeline::nvfp4_decode_collect_candidates_(const ModelConfig& cfg,
             return;
         if (!nvfp4_beneficial(qtype, decode_all))
             return;
-        if (wcache_->nvfp4.count(w.data))
+        if (wcache_->nvfp4.contains(w.data))
             return;
         // Skip excluded weights (dual-path attention, GDN/SSM recurrent projections)
-        if (dctx.exclude_ptrs.count(w.data))
+        if (dctx.exclude_ptrs.contains(w.data))
             return;
 
         int cols = static_cast<int>(w.shape[1]);
         if (cols % 16 != 0)
             return;
 
-        bool from_scratch = (wcache_->fp16.find(w.data) == wcache_->fp16.end());
+        bool from_scratch = (!wcache_->fp16.contains(w.data));
         if (from_scratch && (!dequant_gpu_supported(qtype) || !qscratch_->dequant))
             return;
         // gemma-3 (#959): from-scratch entries are skipped; with companions on every NVFP4-tier
@@ -188,7 +188,7 @@ void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
     if (cols % 16 != 0)
         return;
     // Already cached (e.g. tied embeddings already promoted, or re-entry).
-    if (wcache_->nvfp4.count(lm.data))
+    if (wcache_->nvfp4.contains(lm.data))
         return;
 
     // GDN/SSM-hybrid models: the LM head is quality-load-bearing for the recurrent state;
@@ -225,7 +225,8 @@ void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
     IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
 
     // Bytes: FP4 data (2 per byte) + one FP8 scale per 16 elements, integer bytes as before.
-    const size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 + static_cast<size_t>(rows) * cols / 16;
+    const size_t nvfp4_bytes = (static_cast<size_t>(rows) * cols / 2) +
+                               (static_cast<size_t>(rows) * cols / 16);
     wcache_->nvfp4_lm_head_bytes = nvfp4_bytes;  // raw allocation, no tag (gpt-oss-20b: 310 MiB)
     const double nvfp4_mib = static_cast<double>(nvfp4_bytes) / (1024.0 * 1024.0);
     IMP_LOG_INFO("NVFP4 LM head: quantized FP16 [%d x %d] → NVFP4 (%.1f MiB), decode GEMV fast path",
@@ -277,7 +278,7 @@ void QuantPipeline::nvfp4_decode_cache_fp16_projections_(const ModelConfig& cfg,
         const int cols = static_cast<int>(w.shape[1]);
         if (cols % 16 != 0)
             return 0;
-        if (wcache_->nvfp4.count(w.data))
+        if (wcache_->nvfp4.contains(w.data))
             return 0;  // already cached (e.g. re-entry)
 
         Tensor fp16_view(w.data, QType::F16, 2, w.shape, /*on_device=*/true);
@@ -291,7 +292,7 @@ void QuantPipeline::nvfp4_decode_cache_fp16_projections_(const ModelConfig& cfg,
         result.N = rows;
         result.K = cols;
         wcache_->nvfp4[w.data] = result;
-        return static_cast<size_t>(rows) * cols / 2 + static_cast<size_t>(rows) * cols / 16;
+        return (static_cast<size_t>(rows) * cols / 2) + (static_cast<size_t>(rows) * cols / 16);
     };
 
     for (int i = 0; i < cfg.n_layers; i++) {
@@ -452,8 +453,8 @@ void QuantPipeline::nvfp4_decode_quantize_mode2_(cudaStream_t stream, Nvfp4Decod
     for (auto& e : nvfp4_entries) {
         int rows = static_cast<int>(e.weight.shape[0]);
         int cols = static_cast<int>(e.weight.shape[1]);
-        size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
-                             static_cast<size_t>(rows) * cols / 16 + 4;
+        size_t nvfp4_bytes = (static_cast<size_t>(rows) * cols / 2) +
+                             (static_cast<size_t>(rows) * cols / 16) + 4;
 
         // Check actual free VRAM against the per-call safety reserve computed
         // in pre_dequant_phase3_nvfp4_decode_ (see dctx.safety_reserve).
@@ -565,7 +566,7 @@ void QuantPipeline::nvfp4_decode_quantize_mode1_(size_t& remaining_budget, cudaS
     std::vector<NvFP4Entry> budgeted;
     for (auto& e : nvfp4_entries) {
         size_t rows = e.weight.shape[0], cols = e.weight.shape[1];
-        size_t nvfp4_bytes = rows * cols / 2 + rows * cols / 16 + 4;
+        size_t nvfp4_bytes = (rows * cols / 2) + (rows * cols / 16) + 4;
         if (budget_used + nvfp4_bytes > remaining_budget) {
             if (!budget_exhausted) {
                 budget_exhausted = true;
@@ -673,12 +674,12 @@ void QuantPipeline::nvfp4_decode_second_pass_(const VRAMBudget& budget, cudaStre
     size_t second_bytes = 0;
 
     for (auto& e : nvfp4_entries) {
-        if (wcache_->nvfp4.count(e.orig_ptr))
+        if (wcache_->nvfp4.contains(e.orig_ptr))
             continue;  // already cached
         int rows = static_cast<int>(e.weight.shape[0]);
         int cols = static_cast<int>(e.weight.shape[1]);
-        size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
-                             static_cast<size_t>(rows) * cols / 16 + 4;
+        size_t nvfp4_bytes = (static_cast<size_t>(rows) * cols / 2) +
+                             (static_cast<size_t>(rows) * cols / 16) + 4;
 
         size_t free_mem2 = 0, total_mem2 = 0;
         // Failure zeroes both outputs (vram_query.h): sized as no free VRAM, never over.

@@ -29,10 +29,10 @@ IMP_GPTQ_HD inline __half dequant_elem(const int32_t* qweight, const int32_t* qz
                                        const int32_t* g_idx, int N, int group_size, ZeroFormat fmt, int k,
                                        int n) {
     const int64_t g = g_idx ? g_idx[k] : k / group_size;
-    const int q = (qweight[static_cast<int64_t>(k / 8) * N + n] >> ((k & 7) * 4)) & 0xF;
-    const int zs = (qzeros[g * (N / 8) + n / 8] >> ((n & 7) * 4)) & 0xF;
+    const int q = (qweight[(static_cast<int64_t>(k / 8) * N) + n] >> ((k & 7) * 4)) & 0xF;
+    const int zs = (qzeros[(g * (N / 8)) + (n / 8)] >> ((n & 7) * 4)) & 0xF;
     const int z = (zs + static_cast<int>(fmt)) & 0xF;
-    return __float2half_rn(static_cast<float>(q - z) * __half2float(scales[g * N + n]));
+    return __float2half_rn(static_cast<float>(q - z) * __half2float(scales[(g * N) + n]));
 }
 
 struct Dims {

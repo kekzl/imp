@@ -192,9 +192,9 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
             if (count == 0)
                 continue;
             int start = offsets[e];
-            h_A[active_idx] = a_bytes + static_cast<size_t>(start) * K * elem_sz;
+            h_A[active_idx] = a_bytes + (static_cast<size_t>(start) * K * elem_sz);
             h_B[active_idx] = b_ptrs[e];
-            h_C[active_idx] = c_bytes + static_cast<size_t>(start) * N * out_elem_sz;
+            h_C[active_idx] = c_bytes + (static_cast<size_t>(start) * N * out_elem_sz);
             groups[active_idx].count = 1;
             active_idx++;
         }
@@ -210,9 +210,9 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
                     int idx = g.start + g.count;
                     g.count++;
                     int start = offsets[e];
-                    h_A[idx] = a_bytes + static_cast<size_t>(start) * K * elem_sz;
+                    h_A[idx] = a_bytes + (static_cast<size_t>(start) * K * elem_sz);
                     h_B[idx] = b_ptrs[e];
-                    h_C[idx] = c_bytes + static_cast<size_t>(start) * N * out_elem_sz;
+                    h_C[idx] = c_bytes + (static_cast<size_t>(start) * N * out_elem_sz);
                     break;
                 }
             }
@@ -229,7 +229,7 @@ void gemm_moe_batched(const void* a_base, void* c_base, const int32_t* offsets, 
         // Use pre-allocated device memory: [A..., B..., C...]
         d_A_ptrs = d_work_ptrs;
         d_B_ptrs = d_work_ptrs + n_experts;
-        d_C_ptrs = d_work_ptrs + static_cast<ptrdiff_t>(2) * n_experts;
+        d_C_ptrs = d_work_ptrs + (static_cast<ptrdiff_t>(2) * n_experts);
     } else {
         // Allocate once for all groups (not per-group)
         size_t ptr_bytes = n_active * sizeof(void*);

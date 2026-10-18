@@ -94,14 +94,14 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
         if (kAQuant) {
 #pragma unroll
             for (int v = 0; v < kXMbs; ++v) {
-                const int xi = tid + v * kThreads;
+                const int xi = tid + (v * kThreads);
                 const int m = xi / kMbPerTile;
                 const int mi = (k_base / kMicroBlockSize) + (xi % kMbPerTile);
                 if (m < M) {
-                    pxq[v] = *reinterpret_cast<const uint2*>(xq_packed + (int64_t)m * (K / 2) +
-                                                             (int64_t)mi * 8);
-                    pxs[v] = x_ts * fp8_e4m3_to_float_fast(
-                                        xq_scales[(int64_t)m * (K / kMicroBlockSize) + mi]);
+                    pxq[v] = *reinterpret_cast<const uint2*>(xq_packed + ((int64_t)m * (K / 2)) +
+                                                             ((int64_t)mi * 8));
+                    pxs[v] = x_ts *
+                             fp8_e4m3_to_float_fast(xq_scales[((int64_t)m * (K / kMicroBlockSize)) + mi]);
                 } else {
                     pxq[v] = uint2{0, 0};
                     pxs[v] = 0.0f;
@@ -113,11 +113,11 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
             // 32 B per thread (evict_last's minimum on this arch): thread
             // tid owns vectors 2*tid and 2*tid+1 of round v/2 — adjacent, so
             // one 256-bit load covers both.
-            const int i = tid * 2 + (v / 2) * kThreads * 2;
+            const int i = (tid * 2) + ((v / 2) * kThreads * 2);
             const int m = i / (kKT / 8);
             const int kv = (i % (kKT / 8)) * 8;
             if (m < M) {
-                ldg_evict_last_256(x + (int64_t)m * K + k_base + kv, px[v], px[v + 1]);
+                ldg_evict_last_256(x + ((int64_t)m * K) + k_base + kv, px[v], px[v + 1]);
             } else {
                 px[v] = uint4{0, 0, 0, 0};
                 px[v + 1] = uint4{0, 0, 0, 0};
@@ -126,17 +126,17 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
         }
 #pragma unroll
         for (int v = 0; v < kWMbs; ++v) {
-            const int wi = tid + v * kThreads;
-            const int n = n_base + wi / kMbPerTile;
+            const int wi = tid + (v * kThreads);
+            const int n = n_base + (wi / kMbPerTile);
             const int mi = (k_base / kMicroBlockSize) + (wi % kMbPerTile);
             if (n < N_out) {
                 // Streaming load (evict-first): weight bytes are read exactly once, letting them age
                 // normally in L2 would evict the x tile every block re-reads (measured bimodal 23/59 us
                 // kernel until this hint went in).
-                pw[v] = __ldcs(reinterpret_cast<const uint2*>(packed_data + (int64_t)n * (K / 2) +
-                                                              (int64_t)mi * 8));
+                pw[v] = __ldcs(
+                    reinterpret_cast<const uint2*>(packed_data + ((int64_t)n * (K / 2)) + ((int64_t)mi * 8)));
                 pcs[v] = tensor_scale *
-                         fp8_e4m3_to_float_fast(micro_scales[(int64_t)n * (K / kMicroBlockSize) + mi]);
+                         fp8_e4m3_to_float_fast(micro_scales[((int64_t)n * (K / kMicroBlockSize)) + mi]);
             } else {
                 pw[v] = uint2{0, 0};
                 pcs[v] = 0.0f;
@@ -147,7 +147,7 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
         if (kAQuant) {
 #pragma unroll
             for (int v = 0; v < kXMbs; ++v) {
-                const int xi = tid + v * kThreads;
+                const int xi = tid + (v * kThreads);
                 const int m = xi / kMbPerTile;
                 const int mb = xi % kMbPerTile;
                 const uint8_t* pb = reinterpret_cast<const uint8_t*>(&pxq[v]);
@@ -165,7 +165,7 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
         } else {
 #pragma unroll
         for (int v = 0; v < kXVecs; v += 2) {
-            const int i = tid * 2 + (v / 2) * kThreads * 2;
+            const int i = (tid * 2) + ((v / 2) * kThreads * 2);
             const int m = i / (kKT / 8);
             const int kv = (i % (kKT / 8)) * 8;
             *reinterpret_cast<uint4*>(&s_x[m][kv]) = px[v];
@@ -174,7 +174,7 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
         }
 #pragma unroll
         for (int v = 0; v < kWMbs; ++v) {
-            const int wi = tid + v * kThreads;
+            const int wi = tid + (v * kThreads);
             const int row = wi / kMbPerTile;
             const int mb = wi % kMbPerTile;
             const uint8_t* pb = reinterpret_cast<const uint8_t*>(&pw[v]);
@@ -221,13 +221,13 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
         // Streaming stores: each partial is written once and read once by the reduce kernel;
         // letting it age normally in L2 knocks out sets the weight stream needs (split-K
         // bimodality: identical configs read 26 vs 63 us depending on where cudaMalloc landed ws).
-        float* plane = ws_partials + (size_t)split * kSmM * N_out;
+        float* plane = ws_partials + ((size_t)split * kSmM * N_out);
         for (int i = tid; i < kSmM * kNR; i += kThreads) {
             const int m = i / kNR;
             const int n = i % kNR;
             const int gn = n_base + n;
             if (gn < N_out)
-                __stcs(&plane[(int64_t)m * N_out + gn], s_acc[m][n]);
+                __stcs(&plane[((int64_t)m * N_out) + gn], s_acc[m][n]);
         }
     }
     (void)s_out;
@@ -238,15 +238,15 @@ __global__ void __launch_bounds__(kThreads) gemm_nvfp4_smallm_kernel(
 template <bool kAcc>
 __global__ void smallm_splitk_reduce_kernel(const float* __restrict__ ws_partials,
                                             half* __restrict__ y, int M, int N_out) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (i >= M * N_out)
         return;
     const int m = i / N_out, n = i % N_out;
-    float acc = kAcc ? __half2float(y[(int64_t)m * N_out + n]) : 0.0f;
+    float acc = kAcc ? __half2float(y[((int64_t)m * N_out) + n]) : 0.0f;
 #pragma unroll
     for (int sp = 0; sp < kSplitK; ++sp)
-        acc += __ldcs(&ws_partials[(size_t)sp * kSmM * N_out + (int64_t)m * N_out + n]);
-    y[(int64_t)m * N_out + n] = __float2half(acc);
+        acc += __ldcs(&ws_partials[((size_t)sp * kSmM * N_out) + ((int64_t)m * N_out) + n]);
+    y[((int64_t)m * N_out) + n] = __float2half(acc);
 }
 
 }  // namespace

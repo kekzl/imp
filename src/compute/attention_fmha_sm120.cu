@@ -68,7 +68,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
     const int head_idx = batch_head % n_heads;
     const int kv_head = head_idx / (n_heads / n_kv_heads);
 
-    const int tid = threadIdx.x + threadIdx.y * blockDim.x;
+    const int tid = threadIdx.x + (threadIdx.y * blockDim.x);
     const int warp_id = tid / SM120_WARP_SIZE;
     const int q_start = tile_q * Bq;
 
@@ -80,12 +80,12 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
     const int64_t q_row_stride = (int64_t)n_heads * head_dim;
     const int64_t kv_row_stride = (int64_t)n_kv_heads * head_dim;
 
-    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
-                        (int64_t)head_idx * head_dim;
-    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
-    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
-    half* O_ptr = O + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
-                  (int64_t)head_idx * head_dim;
+    const half* Q_ptr = Q + ((int64_t)batch_idx * seq_q * q_row_stride) + ((int64_t)q_start * q_row_stride) +
+                        ((int64_t)head_idx * head_dim);
+    const half* K_ptr = K + ((int64_t)batch_idx * seq_kv * kv_row_stride) + ((int64_t)kv_head * head_dim);
+    const half* V_ptr = V + ((int64_t)batch_idx * seq_kv * kv_row_stride) + ((int64_t)kv_head * head_dim);
+    half* O_ptr = O + ((int64_t)batch_idx * seq_q * q_row_stride) + ((int64_t)q_start * q_row_stride) +
+                  ((int64_t)head_idx * head_dim);
 
     // ---- shared memory layout -----------------------------------------------
     // K and V share the same buffer (KV_tile): K is loaded first, consumed
@@ -108,7 +108,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
             int d = i % head_dim;
             float4* dst = reinterpret_cast<float4*>(&Q_tile[i]);
             if (q_start + r < seq_q) {
-                const float4* src = reinterpret_cast<const float4*>(&Q_ptr[(int64_t)r * q_row_stride + d]);
+                const float4* src = reinterpret_cast<const float4*>(&Q_ptr[((int64_t)r * q_row_stride) + d]);
                 *dst = *src;
             } else {
                 *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -175,7 +175,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
                 float4* dst = reinterpret_cast<float4*>(&KV_tile[i]);
                 if (kv_start + r < seq_kv) {
                     const float4* src = reinterpret_cast<const float4*>(
-                        &K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                        &K_ptr[((int64_t)(kv_start + r) * kv_row_stride) + d]);
                     *dst = *src;
                 } else {
                     *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -199,7 +199,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
                                wmma::row_major>
                     a_frag;
                 wmma::load_matrix_sync(a_frag,
-                                       Q_tile + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim +
+                                       Q_tile + (static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim) +
                                            static_cast<ptrdiff_t>(k * SM120_WMMA_K),
                                        head_dim);
 
@@ -207,14 +207,14 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
                                wmma::col_major>
                     b_frag;
                 wmma::load_matrix_sync(b_frag,
-                                       KV_tile + static_cast<ptrdiff_t>(ci) * SM120_WMMA_N * head_dim +
+                                       KV_tile + (static_cast<ptrdiff_t>(ci) * SM120_WMMA_N * head_dim) +
                                            static_cast<ptrdiff_t>(k * SM120_WMMA_K),
                                        head_dim);
 
                 wmma::mma_sync(acc, a_frag, b_frag, acc);
             }
 
-            wmma::store_matrix_sync(S_tile + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * Bkv +
+            wmma::store_matrix_sync(S_tile + (static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * Bkv) +
                                         static_cast<ptrdiff_t>(ci * SM120_WMMA_N),
                                     acc, Bkv, wmma::mem_row_major);
         }
@@ -236,7 +236,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
             float partial_max = -FLT_MAX;
             if (row_valid) {
                 for (int c = sm_lane; c < Bkv; c += TPR) {
-                    partial_max = fmaxf(partial_max, S_tile[r * Bkv + c]);
+                    partial_max = fmaxf(partial_max, S_tile[(r * Bkv) + c]);
                 }
             }
 #pragma unroll
@@ -257,10 +257,10 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
             float partial_sum = 0.0f;
             if (row_valid) {
                 for (int c = sm_lane; c < Bkv; c += TPR) {
-                    float s_val = S_tile[r * Bkv + c];
+                    float s_val = S_tile[(r * Bkv) + c];
                     float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f : __expf(s_val - m_new);
                     partial_sum += p;
-                    S_tile[r * Bkv + c] = p;
+                    S_tile[(r * Bkv) + c] = p;
                 }
             }
 #pragma unroll
@@ -270,7 +270,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
 
             // Step 4: Update running state
             float l_old = row_valid ? row_l[r] : 0.0f;
-            float l_new = alpha * l_old + partial_sum;
+            float l_new = (alpha * l_old) + partial_sum;
             if (sm_lane == 0 && row_valid) {
                 row_m[r] = m_new;
                 row_l[r] = l_new;
@@ -281,7 +281,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
             float rescale = (l_old > 0.0f) ? __fdiv_rn(alpha * l_old, l_new) : 0.0f;
             if (row_valid) {
                 for (int d = sm_lane; d < head_dim; d += TPR) {
-                    O_acc[r * head_dim + d] *= rescale;
+                    O_acc[(r * head_dim) + d] *= rescale;
                 }
             }
 
@@ -293,13 +293,13 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
             half hbuf[CPT];
 #pragma unroll
             for (int i = 0; i < CPT; i++) {
-                int c = sm_lane + i * TPR;
-                hbuf[i] = __float2half(row_valid ? S_tile[r * Bkv + c] * spv : 0.0f);
+                int c = sm_lane + (i * TPR);
+                hbuf[i] = __float2half(row_valid ? S_tile[(r * Bkv) + c] * spv : 0.0f);
             }
             __syncthreads();  // all float reads of S_tile complete before any half write
 #pragma unroll
             for (int i = 0; i < CPT; i++)
-                SP_half[r * Bkv + sm_lane + i * TPR] = hbuf[i];
+                SP_half[(r * Bkv) + sm_lane + (i * TPR)] = hbuf[i];
         }
         __syncthreads();
 
@@ -315,7 +315,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
                 float4* dst = reinterpret_cast<float4*>(&KV_tile[i]);
                 if (kv_start + r < seq_kv) {
                     const float4* src = reinterpret_cast<const float4*>(
-                        &V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                        &V_ptr[((int64_t)(kv_start + r) * kv_row_stride) + d]);
                     *dst = *src;
                 } else {
                     *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -335,7 +335,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
 
                 wmma::fragment<wmma::accumulator, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, float> o_frag;
                 wmma::load_matrix_sync(o_frag,
-                                       O_acc + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim +
+                                       O_acc + (static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim) +
                                            static_cast<ptrdiff_t>(di * SM120_WMMA_N),
                                        head_dim, wmma::mem_row_major);
 
@@ -344,7 +344,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
                                    wmma::row_major>
                         p_frag;
                     wmma::load_matrix_sync(p_frag,
-                                           P_half + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * Bkv +
+                                           P_half + (static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * Bkv) +
                                                static_cast<ptrdiff_t>(k * SM120_WMMA_K),
                                            Bkv);
 
@@ -352,14 +352,14 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
                                    wmma::row_major>
                         v_frag;
                     wmma::load_matrix_sync(v_frag,
-                                           KV_tile + static_cast<ptrdiff_t>(k) * SM120_WMMA_N * head_dim +
+                                           KV_tile + (static_cast<ptrdiff_t>(k) * SM120_WMMA_N * head_dim) +
                                                static_cast<ptrdiff_t>(di * SM120_WMMA_N),
                                            head_dim);
 
                     wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
                 }
 
-                wmma::store_matrix_sync(O_acc + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim +
+                wmma::store_matrix_sync(O_acc + (static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim) +
                                             static_cast<ptrdiff_t>(di * SM120_WMMA_N),
                                         o_frag, head_dim, wmma::mem_row_major);
             }
@@ -382,7 +382,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 2) fmha_sm120_kernel(
             uint2 packed;
             packed.x = *reinterpret_cast<const uint32_t*>(&lo);
             packed.y = *reinterpret_cast<const uint32_t*>(&hi);
-            *reinterpret_cast<uint2*>(&O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
+            *reinterpret_cast<uint2*>(&O_ptr[((int64_t)r * q_row_stride) + (i % head_dim)]) = packed;
         }
     }
 }
@@ -588,7 +588,7 @@ __device__ __forceinline__ uint32_t cvt_4xfp16_to_4xe4m3_scaled(const half* src,
 // chunk — small next to the attention itself). Caller zeroes `amax` first.
 __global__ void fa2_amax_fp16_kernel(const half* __restrict__ x, int64_t n, float* __restrict__ amax) {
     float m = 0.f;
-    for (int64_t i = blockIdx.x * (int64_t)blockDim.x + threadIdx.x; i < n;
+    for (int64_t i = (blockIdx.x * (int64_t)blockDim.x) + threadIdx.x; i < n;
          i += (int64_t)gridDim.x * blockDim.x)
         m = fmaxf(m, fabsf(__half2float(x[i])));
 #pragma unroll
@@ -614,7 +614,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
     const int head_idx = batch_head % n_heads;
     const int kv_head = head_idx / (n_heads / n_kv_heads);
 
-    const int tid = threadIdx.x + threadIdx.y * blockDim.x;
+    const int tid = threadIdx.x + (threadIdx.y * blockDim.x);
     const int warp_id = tid / SM120_WARP_SIZE;
     const int lane_id = tid % SM120_WARP_SIZE;
     const int q_start = tile_q * Bq;
@@ -625,12 +625,12 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
     const int64_t q_row_stride = (int64_t)n_heads * head_dim;
     const int64_t kv_row_stride = (int64_t)n_kv_heads * head_dim;
 
-    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
-                        (int64_t)head_idx * head_dim;
-    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
-    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
-    half* O_ptr = O + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
-                  (int64_t)head_idx * head_dim;
+    const half* Q_ptr = Q + ((int64_t)batch_idx * seq_q * q_row_stride) + ((int64_t)q_start * q_row_stride) +
+                        ((int64_t)head_idx * head_dim);
+    const half* K_ptr = K + ((int64_t)batch_idx * seq_kv * kv_row_stride) + ((int64_t)kv_head * head_dim);
+    const half* V_ptr = V + ((int64_t)batch_idx * seq_kv * kv_row_stride) + ((int64_t)kv_head * head_dim);
+    half* O_ptr = O + ((int64_t)batch_idx * seq_q * q_row_stride) + ((int64_t)q_start * q_row_stride) +
+                  ((int64_t)head_idx * head_dim);
 
     // Shared memory layout:
     //   Q_fp8:  uint8[Bq x HD]      — Q converted to FP8 E4M3
@@ -647,7 +647,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
     // S_tile must sit after the FULL V-as-half region, not just the FP8 K region: V writes
     // Bkv*head_dim halves (2x the FP8 K bytes); advancing only Bkv*head_dim bytes would place
     // S_tile inside V's area, letting V rows overwrite P and poison the PV MMA with garbage/NaN.
-    float* S_tile = reinterpret_cast<float*>(KV_fp8 + static_cast<size_t>(Bkv * head_dim) * sizeof(half));
+    float* S_tile = reinterpret_cast<float*>(KV_fp8 + (static_cast<size_t>(Bkv * head_dim) * sizeof(half)));
     float* O_acc = S_tile + static_cast<ptrdiff_t>(Bq * Bkv);
     float* row_m = O_acc + static_cast<ptrdiff_t>(Bq * head_dim);
     float* row_l = row_m + Bq;
@@ -666,7 +666,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
                 continue;
             }
             // 4 consecutive halves are always within head_dim (HD % 4 == 0 for Bq multiples).
-            const half* src = &Q_ptr[(int64_t)r * q_row_stride + d];
+            const half* src = &Q_ptr[((int64_t)r * q_row_stride) + d];
             reinterpret_cast<uint32_t*>(Q_fp8)[vi] = cvt_4xfp16_to_4xe4m3(src);
         }
         // Scalar tail if Bq*head_dim isn't a multiple of 4 (shouldn't happen on
@@ -722,7 +722,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
                     reinterpret_cast<uint32_t*>(KV_fp8)[vi] = 0;
                     continue;
                 }
-                const half* src = &K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d];
+                const half* src = &K_ptr[((int64_t)(kv_start + r) * kv_row_stride) + d];
                 reinterpret_cast<uint32_t*>(KV_fp8)[vi] = cvt_4xfp16_to_4xe4m3(src);
             }
         }
@@ -741,7 +741,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
                 // lane_id/4 within the 16-row tile, 4 consecutive FP8 values at col (lane_id%4)*4 + k*32.
                 uint32_t a0, a1, a2, a3;
                 {
-                    const uint8_t* q_base = Q_fp8 + static_cast<ptrdiff_t>(ri) * S_M * head_dim +
+                    const uint8_t* q_base = Q_fp8 + (static_cast<ptrdiff_t>(ri) * S_M * head_dim) +
                                             static_cast<ptrdiff_t>(k * S_K);
                     int row_in_tile = lane_id / 4;
                     int col_base = (lane_id % 4) * 4;
@@ -760,7 +760,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
                 // row-major but MMA needs col-major B, so B[col,k] = K_fp8[ci*8+col][k*32+...] (K^T).
                 uint32_t b0, b1;
                 {
-                    const uint8_t* k_base = KV_fp8 + static_cast<ptrdiff_t>(ci) * S_N * head_dim +
+                    const uint8_t* k_base = KV_fp8 + (static_cast<ptrdiff_t>(ci) * S_N * head_dim) +
                                             static_cast<ptrdiff_t>(k * S_K);
                     int col_in_tile = lane_id / 4;
                     int k_base_offset = (lane_id % 4) * 4;
@@ -794,10 +794,10 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
                 int base_col = ci * S_N;
                 int r0 = (lane_id / 4) % 8;
                 int c0 = (lane_id % 4) * 2;
-                S_tile[(base_row + r0) * Bkv + base_col + c0] = d0;
-                S_tile[(base_row + r0) * Bkv + base_col + c0 + 1] = d1;
-                S_tile[(base_row + r0 + 8) * Bkv + base_col + c0] = d2;
-                S_tile[(base_row + r0 + 8) * Bkv + base_col + c0 + 1] = d3;
+                S_tile[((base_row + r0) * Bkv) + base_col + c0] = d0;
+                S_tile[((base_row + r0) * Bkv) + base_col + c0 + 1] = d1;
+                S_tile[((base_row + r0 + 8) * Bkv) + base_col + c0] = d2;
+                S_tile[((base_row + r0 + 8) * Bkv) + base_col + c0 + 1] = d3;
             }
         }
         __syncthreads();
@@ -816,7 +816,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
             float partial_max = -FLT_MAX;
             if (row_valid) {
                 for (int c = sm_lane; c < Bkv; c += TPR)
-                    partial_max = fmaxf(partial_max, S_tile[r * Bkv + c]);
+                    partial_max = fmaxf(partial_max, S_tile[(r * Bkv) + c]);
             }
 #pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1)
@@ -833,10 +833,10 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
             float partial_sum = 0.0f;
             if (row_valid) {
                 for (int c = sm_lane; c < Bkv; c += TPR) {
-                    float s_val = S_tile[r * Bkv + c];
+                    float s_val = S_tile[(r * Bkv) + c];
                     float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f : __expf(s_val - m_new);
                     partial_sum += p;
-                    S_tile[r * Bkv + c] = p;
+                    S_tile[(r * Bkv) + c] = p;
                 }
             }
 #pragma unroll
@@ -844,7 +844,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
                 partial_sum += __shfl_xor_sync(0xffffffff, partial_sum, offset);
 
             float l_old = row_valid ? row_l[r] : 0.0f;
-            float l_new = alpha * l_old + partial_sum;
+            float l_new = (alpha * l_old) + partial_sum;
             if (sm_lane == 0 && row_valid) {
                 row_m[r] = m_new;
                 row_l[r] = l_new;
@@ -853,7 +853,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
             float rescale = (l_old > 0.0f) ? (alpha * l_old / l_new) : 0.0f;
             if (row_valid) {
                 for (int d = sm_lane; d < head_dim; d += TPR)
-                    O_acc[r * head_dim + d] *= rescale;
+                    O_acc[(r * head_dim) + d] *= rescale;
             }
 
             // In-place float→half compaction: stage in registers + barrier
@@ -864,13 +864,13 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
             half hbuf[CPT];
 #pragma unroll
             for (int i = 0; i < CPT; i++) {
-                int c = sm_lane + i * TPR;
-                hbuf[i] = __float2half(row_valid ? S_tile[r * Bkv + c] * spv : 0.0f);
+                int c = sm_lane + (i * TPR);
+                hbuf[i] = __float2half(row_valid ? S_tile[(r * Bkv) + c] * spv : 0.0f);
             }
             __syncthreads();  // all float reads of S_tile complete before any half write
 #pragma unroll
             for (int i = 0; i < CPT; i++)
-                SP_half[r * Bkv + sm_lane + i * TPR] = hbuf[i];
+                SP_half[(r * Bkv) + sm_lane + (i * TPR)] = hbuf[i];
         }
         __syncthreads();
 
@@ -884,7 +884,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
                 float4* dst = reinterpret_cast<float4*>(&KV_fp16[i]);
                 if (kv_start + r < seq_kv) {
                     const float4* src = reinterpret_cast<const float4*>(
-                        &V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                        &V_ptr[((int64_t)(kv_start + r) * kv_row_stride) + d]);
                     *dst = *src;
                 } else {
                     *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -902,7 +902,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
 
                 wmma::fragment<wmma::accumulator, SM120_WMMA_M, SM120_WMMA_N, SM120_WMMA_K, float> o_frag;
                 wmma::load_matrix_sync(o_frag,
-                                       O_acc + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim +
+                                       O_acc + (static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim) +
                                            static_cast<ptrdiff_t>(di * SM120_WMMA_N),
                                        head_dim, wmma::mem_row_major);
 
@@ -911,7 +911,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
                                    wmma::row_major>
                         p_frag;
                     wmma::load_matrix_sync(p_frag,
-                                           P_half + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * Bkv +
+                                           P_half + (static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * Bkv) +
                                                static_cast<ptrdiff_t>(k * SM120_WMMA_K),
                                            Bkv);
 
@@ -919,14 +919,14 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
                                    wmma::row_major>
                         v_frag;
                     wmma::load_matrix_sync(v_frag,
-                                           KV_fp16 + static_cast<ptrdiff_t>(k) * SM120_WMMA_N * head_dim +
+                                           KV_fp16 + (static_cast<ptrdiff_t>(k) * SM120_WMMA_N * head_dim) +
                                                static_cast<ptrdiff_t>(di * SM120_WMMA_N),
                                            head_dim);
 
                     wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
                 }
 
-                wmma::store_matrix_sync(O_acc + static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim +
+                wmma::store_matrix_sync(O_acc + (static_cast<ptrdiff_t>(ri) * SM120_WMMA_M * head_dim) +
                                             static_cast<ptrdiff_t>(di * SM120_WMMA_N),
                                         o_frag, head_dim, wmma::mem_row_major);
             }
@@ -948,7 +948,7 @@ __global__ void __launch_bounds__(SM120_BLOCK_THREADS, 1) fmha_sm120_fp8_kernel(
             uint2 packed;
             packed.x = *reinterpret_cast<const uint32_t*>(&lo);
             packed.y = *reinterpret_cast<const uint32_t*>(&hi);
-            *reinterpret_cast<uint2*>(&O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
+            *reinterpret_cast<uint2*>(&O_ptr[((int64_t)r * q_row_stride) + (i % head_dim)]) = packed;
         }
     }
 }
@@ -1128,12 +1128,12 @@ __device__ __forceinline__ void prefetch_kv_tile(half* K_dst, half* V_dst, const
         int r = vi / vecs_per_row;
         int c = (vi % vecs_per_row) * VEC;
         if (kv_start + r < seq_kv) {
-            const half* ks = K_ptr + (int64_t)(kv_start + r) * kv_row_stride + c;
-            const half* vs = V_ptr + (int64_t)(kv_start + r) * kv_row_stride + c;
-            cp_async_cg_16(&K_dst[r * KVS + c], ks);
-            cp_async_cg_16(&V_dst[r * KVS + c], vs);
+            const half* ks = K_ptr + ((int64_t)(kv_start + r) * kv_row_stride) + c;
+            const half* vs = V_ptr + ((int64_t)(kv_start + r) * kv_row_stride) + c;
+            cp_async_cg_16(&K_dst[(r * KVS) + c], ks);
+            cp_async_cg_16(&V_dst[(r * KVS) + c], vs);
         } else {
-            *reinterpret_cast<uint4*>(&V_dst[r * KVS + c]) = make_uint4(0, 0, 0, 0);
+            *reinterpret_cast<uint4*>(&V_dst[(r * KVS) + c]) = make_uint4(0, 0, 0, 0);
         }
     }
 }
@@ -1152,7 +1152,7 @@ __device__ __forceinline__ void prefetch_k_tile(half* K_dst, const half* K_ptr, 
         int r = vi / vecs_per_row;
         int c = (vi % vecs_per_row) * VEC;
         if (kv_start + r < seq_kv)
-            cp_async_cg_16(&K_dst[r * KVS + c], K_ptr + (int64_t)(kv_start + r) * kv_row_stride + c);
+            cp_async_cg_16(&K_dst[(r * KVS) + c], K_ptr + ((int64_t)(kv_start + r) * kv_row_stride) + c);
     }
 }
 
@@ -1167,9 +1167,9 @@ __device__ __forceinline__ void prefetch_v_tile(half* V_dst, const half* V_ptr, 
         int r = vi / vecs_per_row;
         int c = (vi % vecs_per_row) * VEC;
         if (kv_start + r < seq_kv) {
-            cp_async_cg_16(&V_dst[r * KVS + c], V_ptr + (int64_t)(kv_start + r) * kv_row_stride + c);
+            cp_async_cg_16(&V_dst[(r * KVS) + c], V_ptr + ((int64_t)(kv_start + r) * kv_row_stride) + c);
         } else {
-            *reinterpret_cast<uint4*>(&V_dst[r * KVS + c]) = make_uint4(0, 0, 0, 0);
+            *reinterpret_cast<uint4*>(&V_dst[(r * KVS) + c]) = make_uint4(0, 0, 0, 0);
         }
     }
 }
@@ -1224,20 +1224,20 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
 
     const int lane = threadIdx.x;     // 0..31
     const int warp_id = threadIdx.y;  // 0..7  → this warp's row tile
-    const int tid = lane + warp_id * 32;
+    const int tid = lane + (warp_id * 32);
     const int q_start = tile_q * Bq;
-    const int row_lo = warp_id * 16 + lane / 4;  // local row within Bq for d0/d1
+    const int row_lo = (warp_id * 16) + (lane / 4);  // local row within Bq for d0/d1
     const int rl = lane / 4;                     // row in 16-tile (lo)
     const int cl = (lane % 4) * 2;               // col base in 8/16-tile
 
     const int64_t q_row_stride = (int64_t)n_heads * head_dim;
     const int64_t kv_row_stride = (int64_t)n_kv_heads * head_dim;
-    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
-                        (int64_t)head_idx * head_dim;
-    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
-    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
-    half* O_ptr = O + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
-                  (int64_t)head_idx * head_dim;
+    const half* Q_ptr = Q + ((int64_t)batch_idx * seq_q * q_row_stride) + ((int64_t)q_start * q_row_stride) +
+                        ((int64_t)head_idx * head_dim);
+    const half* K_ptr = K + ((int64_t)batch_idx * seq_kv * kv_row_stride) + ((int64_t)kv_head * head_dim);
+    const half* V_ptr = V + ((int64_t)batch_idx * seq_kv * kv_row_stride) + ((int64_t)kv_head * head_dim);
+    half* O_ptr = O + ((int64_t)batch_idx * seq_q * q_row_stride) + ((int64_t)q_start * q_row_stride) +
+                  ((int64_t)head_idx * head_dim);
 
     // Padded smem row strides (see FA2_Q_PAD / FA2_KV_PAD — bank-conflict relief).
     // fp16 mode keeps Q in registers (no smem tile at all); fp8 mode stages
@@ -1284,9 +1284,9 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
             if (q_start + r >= seq_q) {
                 *dst = 0;
             } else if constexpr (FP8SCALED) {
-                *dst = cvt_4xfp16_to_4xe4m3_scaled(&Q_ptr[(int64_t)r * q_row_stride + d], fp8_inv_sq2);
+                *dst = cvt_4xfp16_to_4xe4m3_scaled(&Q_ptr[((int64_t)r * q_row_stride) + d], fp8_inv_sq2);
             } else {
-                *dst = cvt_4xfp16_to_4xe4m3(&Q_ptr[(int64_t)r * q_row_stride + d]);
+                *dst = cvt_4xfp16_to_4xe4m3(&Q_ptr[((int64_t)r * q_row_stride) + d]);
             }
         }
     }
@@ -1330,15 +1330,15 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
     // a2=(rl,cl+8) a3=(rl+8,cl+8).
     uint32_t a_frag[FP16QK ? (HD / 16) : 1][4];
     if constexpr (FP16QK) {
-        const int r0 = warp_id * 16 + rl;
+        const int r0 = (warp_id * 16) + rl;
         const int r1 = r0 + 8;
         const bool v0 = (q_start + r0) < seq_q;
         const bool v1 = (q_start + r1) < seq_q;
-        const half* q0 = Q_ptr + (int64_t)r0 * q_row_stride;
-        const half* q1 = Q_ptr + (int64_t)r1 * q_row_stride;
+        const half* q0 = Q_ptr + ((int64_t)r0 * q_row_stride);
+        const half* q1 = Q_ptr + ((int64_t)r1 * q_row_stride);
 #pragma unroll
         for (int k = 0; k < HD / 16; k++) {
-            const int d = k * 16 + cl;
+            const int d = (k * 16) + cl;
             a_frag[k][0] = v0 ? *reinterpret_cast<const uint32_t*>(q0 + d) : 0u;
             a_frag[k][1] = v1 ? *reinterpret_cast<const uint32_t*>(q1 + d) : 0u;
             a_frag[k][2] = v0 ? *reinterpret_cast<const uint32_t*>(q0 + d + 8) : 0u;
@@ -1397,7 +1397,7 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
             // n+1. A comes from the hoisted loop-invariant a_frag.
 #pragma unroll
             for (int n = 0; n < N_S; n += 2) {
-                const int b_row = (n + (lane >> 4)) * 8 + (lane & 7);
+                const int b_row = ((n + (lane >> 4)) * 8) + (lane & 7);
                 const int b_khalf = ((lane >> 3) & 1) << 3;
                 const half* krow = K_cur + static_cast<ptrdiff_t>(b_row * KVSTRIDE) + b_khalf;
                 // software pipeline: fetch k+1's B fragments while k's MMAs
@@ -1498,30 +1498,31 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
             {
 #pragma unroll
                 for (int k = 0; k < KC; k++) {
-                    const uint8_t* qb = Q_fp8 + static_cast<ptrdiff_t>(warp_id) * 16 * QSTRIDE +
+                    const uint8_t* qb = Q_fp8 + (static_cast<ptrdiff_t>(warp_id) * 16 * QSTRIDE) +
                                         static_cast<ptrdiff_t>(k * 32);
                     uint32_t a0 = *reinterpret_cast<const uint32_t*>(
-                        qb + static_cast<ptrdiff_t>(rl) * QSTRIDE + static_cast<ptrdiff_t>(cl * 2));
+                        qb + (static_cast<ptrdiff_t>(rl) * QSTRIDE) + static_cast<ptrdiff_t>(cl * 2));
                     uint32_t a1 = *reinterpret_cast<const uint32_t*>(
-                        qb + static_cast<ptrdiff_t>(rl) * QSTRIDE + static_cast<ptrdiff_t>(cl * 2) + 16);
+                        qb + (static_cast<ptrdiff_t>(rl) * QSTRIDE) + static_cast<ptrdiff_t>(cl * 2) + 16);
                     uint32_t a2 = *reinterpret_cast<const uint32_t*>(
-                        qb + static_cast<ptrdiff_t>(rl + 8) * QSTRIDE + static_cast<ptrdiff_t>(cl * 2));
+                        qb + (static_cast<ptrdiff_t>(rl + 8) * QSTRIDE) + static_cast<ptrdiff_t>(cl * 2));
                     uint32_t a3 = *reinterpret_cast<const uint32_t*>(
-                        qb + static_cast<ptrdiff_t>(rl + 8) * QSTRIDE + static_cast<ptrdiff_t>(cl * 2) + 16);
-                    const half* kb = K_cur + static_cast<ptrdiff_t>(n) * 8 * KVSTRIDE +
+                        qb + (static_cast<ptrdiff_t>(rl + 8) * QSTRIDE) + static_cast<ptrdiff_t>(cl * 2) +
+                        16);
+                    const half* kb = K_cur + (static_cast<ptrdiff_t>(n) * 8 * KVSTRIDE) +
                                      static_cast<ptrdiff_t>(k * 32);
                     uint32_t b0, b1;
                     if constexpr (FP8SCALED) {
-                        b0 = cvt_4xfp16_to_4xe4m3_scaled(kb + static_cast<ptrdiff_t>(rl) * KVSTRIDE +
+                        b0 = cvt_4xfp16_to_4xe4m3_scaled(kb + (static_cast<ptrdiff_t>(rl) * KVSTRIDE) +
                                                              static_cast<ptrdiff_t>(cl * 2),
                                                          fp8_inv_sk2);
-                        b1 = cvt_4xfp16_to_4xe4m3_scaled(kb + static_cast<ptrdiff_t>(rl) * KVSTRIDE +
+                        b1 = cvt_4xfp16_to_4xe4m3_scaled(kb + (static_cast<ptrdiff_t>(rl) * KVSTRIDE) +
                                                              static_cast<ptrdiff_t>(cl * 2) + 16,
                                                          fp8_inv_sk2);
                     } else {
-                        b0 = cvt_4xfp16_to_4xe4m3(kb + static_cast<ptrdiff_t>(rl) * KVSTRIDE +
+                        b0 = cvt_4xfp16_to_4xe4m3(kb + (static_cast<ptrdiff_t>(rl) * KVSTRIDE) +
                                                   static_cast<ptrdiff_t>(cl * 2));
-                        b1 = cvt_4xfp16_to_4xe4m3(kb + static_cast<ptrdiff_t>(rl) * KVSTRIDE +
+                        b1 = cvt_4xfp16_to_4xe4m3(kb + (static_cast<ptrdiff_t>(rl) * KVSTRIDE) +
                                                   static_cast<ptrdiff_t>(cl * 2) + 16);
                     }
 #if __CUDA_ARCH__ >= 1200
@@ -1572,10 +1573,10 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
         } else {
 #pragma unroll
             for (int n = 0; n < N_S; n++) {
-                int colb = kv_start + n * 8 + cl;
-                int gqA = q_offset + q_start + warp_id * 16 + rl;
+                int colb = kv_start + (n * 8) + cl;
+                int gqA = q_offset + q_start + (warp_id * 16) + rl;
                 int gqB = gqA + 8;
-                int lqA = q_start + warp_id * 16 + rl;
+                int lqA = q_start + (warp_id * 16) + rl;
 #pragma unroll
                 for (int e = 0; e < 4; e++) {
                     int col = colb + (e & 1);
@@ -1650,8 +1651,8 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
         }
         psA = quad_sum(psA);
         psB = quad_sum(psB);
-        lA = alphaA * lA + psA;
-        lB = alphaB * lB + psB;
+        lA = (alphaA * lA) + psA;
+        lB = (alphaB * lB) + psB;
         mA = mnA;
         mB = mnB;
         // rescale O accumulator (rows A=o0,o1 ; B=o2,o3)
@@ -1682,9 +1683,9 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
         for (int m = 0; m < N_KG; m++) {
             uint32_t ra0 = pack2_f2h(S[2 * m][0], S[2 * m][1]);
             uint32_t ra1 = pack2_f2h(S[2 * m][2], S[2 * m][3]);
-            uint32_t ra2 = pack2_f2h(S[2 * m + 1][0], S[2 * m + 1][1]);
-            uint32_t ra3 = pack2_f2h(S[2 * m + 1][2], S[2 * m + 1][3]);
-            const half* vrow = V_cur + static_cast<ptrdiff_t>((m * 16 + (lane & 15)) * KVSTRIDE) +
+            uint32_t ra2 = pack2_f2h(S[(2 * m) + 1][0], S[(2 * m) + 1][1]);
+            uint32_t ra3 = pack2_f2h(S[(2 * m) + 1][2], S[(2 * m) + 1][3]);
+            const half* vrow = V_cur + static_cast<ptrdiff_t>(((m * 16) + (lane & 15)) * KVSTRIDE) +
                                ((lane >> 4) << 3);
             // software pipeline: V fragments for hn+2 fetched under hn's MMAs
             uint32_t rb0, rb1, rc0, rc1;
@@ -1748,11 +1749,11 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
     // ---- normalize by row sum and write O ----
     float invA = (lA > 0.f) ? (1.0f / lA) : 0.f;
     float invB = (lB > 0.f) ? (1.0f / lB) : 0.f;
-    int rowA = warp_id * 16 + rl;  // local row (O_ptr already at q_start)
+    int rowA = (warp_id * 16) + rl;  // local row (O_ptr already at q_start)
     int rowB = rowA + 8;
 #pragma unroll
     for (int hn = 0; hn < N_O; hn++) {
-        int col = hn * 8 + cl;
+        int col = (hn * 8) + cl;
         float oA0, oA1, oB0, oB1;
         if constexpr (PVF16) {
             const float2 fA = __half22float2(*reinterpret_cast<const __half2*>(&O_h2[hn][0]));
@@ -1762,12 +1763,12 @@ __device__ __forceinline__ void fmha_sm120_fa2_body(
             oA0 = O_frag[hn][0], oA1 = O_frag[hn][1], oB0 = O_frag[hn][2], oB1 = O_frag[hn][3];
         }
         if (q_start + rowA < seq_q) {
-            O_ptr[(int64_t)rowA * q_row_stride + col] = __float2half(oA0 * invA);
-            O_ptr[(int64_t)rowA * q_row_stride + col + 1] = __float2half(oA1 * invA);
+            O_ptr[((int64_t)rowA * q_row_stride) + col] = __float2half(oA0 * invA);
+            O_ptr[((int64_t)rowA * q_row_stride) + col + 1] = __float2half(oA1 * invA);
         }
         if (q_start + rowB < seq_q) {
-            O_ptr[(int64_t)rowB * q_row_stride + col] = __float2half(oB0 * invB);
-            O_ptr[(int64_t)rowB * q_row_stride + col + 1] = __float2half(oB1 * invB);
+            O_ptr[((int64_t)rowB * q_row_stride) + col] = __float2half(oB0 * invB);
+            O_ptr[((int64_t)rowB * q_row_stride) + col + 1] = __float2half(oB1 * invB);
         }
     }
 }
@@ -1810,8 +1811,8 @@ static size_t compute_smem_fa2(int Bq, int head_dim, bool fp16_qk, int Bkv, bool
     // smem tile at all, which is what lets Bq=128 (8 warps) fit.
     const size_t q_bytes = fp16_qk ? 0 : (size_t)Bq * (head_dim + FA2_Q_PAD) * sizeof(uint8_t);
     const size_t slots = twoslot ? 1 : 2;  // TWOSLOT: one K + one V slot
-    return q_bytes + slots * Bkv * kvstride * sizeof(half)  // K_buf f16 (padded)
-           + slots * Bkv * kvstride * sizeof(half);         // V_buf f16 (padded)
+    return q_bytes + (slots * Bkv * kvstride * sizeof(half))  // K_buf f16 (padded)
+           + (slots * Bkv * kvstride * sizeof(half));         // V_buf f16 (padded)
 }
 
 // hd=64: the hd=128 fp16-qk bands, f32 accumulators (f16acc/pv_f16 flags do not apply), Bkv=64.

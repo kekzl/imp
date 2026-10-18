@@ -39,10 +39,10 @@ void adjust_mla_yarn_attn_factor(ModelConfig& cfg) {
     if (cfg.yarn_ext_factor <= 0.0f || cfg.rope_freq_scale <= 1.0f)
         return;
     const float log_scale = std::log(cfg.rope_freq_scale);
-    const float ms_num = 0.1f * cfg.mla_mscale_num * log_scale + 1.0f;
-    const float ms_den = 0.1f * cfg.mla_mscale * log_scale + 1.0f;
+    const float ms_num = (0.1f * cfg.mla_mscale_num * log_scale) + 1.0f;
+    const float ms_den = (0.1f * cfg.mla_mscale * log_scale) + 1.0f;
     const float hf_rope_mscale = ms_num / ms_den;
-    const float imp_mscale = 0.1f * log_scale + 1.0f;
+    const float imp_mscale = (0.1f * log_scale) + 1.0f;
     cfg.yarn_attn_factor = hf_rope_mscale / imp_mscale;
     IMP_LOG_INFO(
         "  MLA YaRN rope-mscale adjust: yarn_attn_factor=%.4f "

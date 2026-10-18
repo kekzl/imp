@@ -14,9 +14,9 @@ __global__ void pos_embed_add_kernel(half* __restrict__ hidden, const half* __re
                                      const int32_t* __restrict__ taps, const float* __restrict__ weights,
                                      int dim, int taps_per_token) {
     const int token = blockIdx.x;
-    const int32_t* my_taps = taps + static_cast<int64_t>(token) * taps_per_token;
-    const float* my_w = weights + static_cast<int64_t>(token) * taps_per_token;
-    half* row = hidden + static_cast<int64_t>(token) * dim;
+    const int32_t* my_taps = taps + (static_cast<int64_t>(token) * taps_per_token);
+    const float* my_w = weights + (static_cast<int64_t>(token) * taps_per_token);
+    half* row = hidden + (static_cast<int64_t>(token) * dim);
 
     for (int j = threadIdx.x; j < dim; j += blockDim.x) {
         float acc = __half2float(row[j]);
@@ -25,7 +25,7 @@ __global__ void pos_embed_add_kernel(half* __restrict__ hidden, const half* __re
             // A zero weight is the common case at the grid edges; skipping the
             // load matters because these are scattered rows.
             if (w != 0.0f)
-                acc += w * __half2float(table[static_cast<int64_t>(my_taps[t]) * dim + j]);
+                acc += w * __half2float(table[(static_cast<int64_t>(my_taps[t]) * dim) + j]);
         }
         row[j] = __float2half(acc);
     }
@@ -37,8 +37,8 @@ __global__ void layernorm_kernel(const half* __restrict__ x, const half* __restr
                                  const half* __restrict__ bias, half* __restrict__ out, int dim, float eps) {
     extern __shared__ float smem[];
     const int row = blockIdx.x;
-    const half* xr = x + static_cast<int64_t>(row) * dim;
-    half* outr = out + static_cast<int64_t>(row) * dim;
+    const half* xr = x + (static_cast<int64_t>(row) * dim);
+    half* outr = out + (static_cast<int64_t>(row) * dim);
 
     float sum = 0.0f;
     for (int j = threadIdx.x; j < dim; j += blockDim.x)
@@ -65,37 +65,37 @@ __global__ void layernorm_kernel(const half* __restrict__ x, const half* __restr
             smem[threadIdx.x] += smem[threadIdx.x + s];
         __syncthreads();
     }
-    const float inv_std = rsqrtf(smem[0] / dim + eps);
+    const float inv_std = rsqrtf((smem[0] / dim) + eps);
 
     for (int j = threadIdx.x; j < dim; j += blockDim.x) {
         const float v = (__half2float(xr[j]) - mean) * inv_std;
-        outr[j] = __float2half(v * __half2float(weight[j]) + __half2float(bias[j]));
+        outr[j] = __float2half((v * __half2float(weight[j])) + __half2float(bias[j]));
     }
 }
 
 __global__ void add_bias_kernel(half* __restrict__ x, const half* __restrict__ bias, int64_t n, int dim) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i < n)
         x[i] = __float2half(__half2float(x[i]) + __half2float(bias[i % dim]));
 }
 
 __global__ void residual_add_kernel(half* __restrict__ dst, const half* __restrict__ src, int64_t n) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i < n)
         dst[i] = __float2half(__half2float(dst[i]) + __half2float(src[i]));
 }
 
 __global__ void gelu_tanh_kernel(half* __restrict__ x, int64_t n) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= n)
         return;
     const float v = __half2float(x[i]);
-    const float inner = 0.7978845608028654f * (v + 0.044715f * v * v * v);
+    const float inner = 0.7978845608028654f * (v + (0.044715f * v * v * v));
     x[i] = __float2half(0.5f * v * (1.0f + tanhf(inner)));
 }
 
 __global__ void gelu_erf_kernel(half* __restrict__ x, int64_t n) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= n)
         return;
     const float v = __half2float(x[i]);
@@ -113,11 +113,11 @@ __global__ void split_qkv_rope_kernel(const half* __restrict__ qkv, const int32_
     const int hidden = heads * head_dim;
     const int half_rot = head_dim / 2;  // rotated pair distance
     const int quarter = half_rot / 2;   // where the row axis hands over to the column axis
-    const int64_t src = static_cast<int64_t>(token) * 3 * hidden + static_cast<int64_t>(head) * head_dim;
-    const int64_t dst = (static_cast<int64_t>(head) * tokens + token) * head_dim;
+    const int64_t src = (static_cast<int64_t>(token) * 3 * hidden) + (static_cast<int64_t>(head) * head_dim);
+    const int64_t dst = ((static_cast<int64_t>(head) * tokens) + token) * head_dim;
 
     for (int j = threadIdx.x; j < head_dim; j += blockDim.x)
-        v[dst + j] = qkv[src + static_cast<int64_t>(2) * hidden + j];
+        v[dst + j] = qkv[src + (static_cast<int64_t>(2) * hidden) + j];
 
     const float r = static_cast<float>(row_id[token]);
     const float c = static_cast<float>(col_id[token]);
@@ -133,13 +133,13 @@ __global__ void split_qkv_rope_kernel(const half* __restrict__ qkv, const int32_
 
         const float q0 = __half2float(qkv[src + j]);
         const float q1 = __half2float(qkv[src + j + half_rot]);
-        q[dst + j] = __float2half(q0 * cs - q1 * sn);
-        q[dst + j + half_rot] = __float2half(q1 * cs + q0 * sn);
+        q[dst + j] = __float2half((q0 * cs) - (q1 * sn));
+        q[dst + j + half_rot] = __float2half((q1 * cs) + (q0 * sn));
 
         const float k0 = __half2float(qkv[src + hidden + j]);
         const float k1 = __half2float(qkv[src + hidden + j + half_rot]);
-        k[dst + j] = __float2half(k0 * cs - k1 * sn);
-        k[dst + j + half_rot] = __float2half(k1 * cs + k0 * sn);
+        k[dst + j] = __float2half((k0 * cs) - (k1 * sn));
+        k[dst + j + half_rot] = __float2half((k1 * cs) + (k0 * sn));
     }
 }
 
@@ -185,8 +185,8 @@ __global__ void merge_heads_kernel(const half* __restrict__ per_head, half* __re
     for (int j = threadIdx.x; j < hidden; j += blockDim.x) {
         const int head = j / head_dim;
         const int d = j % head_dim;
-        out[static_cast<int64_t>(token) * hidden + j] =
-            per_head[(static_cast<int64_t>(head) * tokens + token) * head_dim + d];
+        out[(static_cast<int64_t>(token) * hidden) + j] =
+            per_head[(((static_cast<int64_t>(head) * tokens) + token) * head_dim) + d];
     }
 }
 

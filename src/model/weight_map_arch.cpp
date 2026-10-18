@@ -16,15 +16,14 @@ bool arch_canonical_name(ModelArch arch, int declared_layers, std::string& name)
         return true;
     }
     constexpr std::string_view kLayers = "model.layers.";
-    if (arch != ModelArch::DEEPSEEK || declared_layers <= 0 || name.compare(0, kLayers.size(), kLayers) != 0)
+    if (arch != ModelArch::DEEPSEEK || declared_layers <= 0 || !name.starts_with(kLayers))
         return true;
     // q_lora: q_b_proj is the Q projection proper (input q_lora_rank), weight and NVFP4 scales alike.
     if (const size_t qb = name.find(".self_attn.q_b_proj."); qb != std::string::npos)
         name.replace(qb, 20, ".self_attn.q_proj.");
     // DeepSeek-V3 / GLM noaux_tc score correction is the router bias the MoE routing adds before top-k.
     constexpr std::string_view kScoreBias = ".mlp.gate.e_score_correction_bias";
-    if (name.size() > kScoreBias.size() &&
-        name.compare(name.size() - kScoreBias.size(), kScoreBias.size(), kScoreBias) == 0)
+    if (name.size() > kScoreBias.size() && name.ends_with(kScoreBias))
         name.replace(name.size() - kScoreBias.size(), kScoreBias.size(), ".mlp.gate.bias");
     return parse_index(name.substr(kLayers.size(), name.find('.', kLayers.size()) - kLayers.size())) <
            declared_layers;

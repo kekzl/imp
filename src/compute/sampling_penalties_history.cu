@@ -86,7 +86,7 @@ __global__ void penalties_hist_rows_kernel(const PenaltyRowArgs* __restrict__ ro
                                            uint32_t* __restrict__ counts, int words_per_row) {
     pdl_wait();
     const PenaltyRowArgs r = rows[blockIdx.y];
-    uint32_t* words = counts + static_cast<size_t>(blockIdx.y) * words_per_row;
+    uint32_t* words = counts + (static_cast<size_t>(blockIdx.y) * words_per_row);
     if (r.n_tokens > 0)
         penalties_hist_body(r.logits, r.token_ids, r.n_tokens, vocab_size, r.repetition_penalty,
                             r.frequency_penalty, r.presence_penalty, words);

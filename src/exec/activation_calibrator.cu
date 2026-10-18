@@ -20,12 +20,12 @@ constexpr int kThreads = 256;
 // to avoid reading the activation twice.
 __global__ void accum_abs_cols_kernel(const half* __restrict__ x, int64_t rows, int64_t K, int64_t row_stride,
                                       double* __restrict__ sum, double* __restrict__ sumsq) {
-    int64_t j = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t j = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (j >= K)
         return;
     double acc = 0.0, accsq = 0.0;
     for (int64_t r = 0; r < rows; r++) {
-        const double v = static_cast<double>(__half2float(x[r * row_stride + j]));
+        const double v = static_cast<double>(__half2float(x[(r * row_stride) + j]));
         acc += fabs(v);
         accsq += v * v;
     }
@@ -41,16 +41,16 @@ __global__ void accum_abs_cols_experts_kernel(const half* __restrict__ x, const 
     const int64_t r0 = offsets[e], r1 = offsets[e + 1];
     if (blockIdx.x == 0 && threadIdx.x == 0 && r1 > r0)
         rows[e] += static_cast<uint64_t>(r1 - r0);
-    int64_t j = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t j = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (j >= K)
         return;
     double acc = 0.0, accsq = 0.0;
     for (int64_t r = r0; r < r1; r++) {
-        const double v = static_cast<double>(__half2float(x[r * row_stride + j]));
+        const double v = static_cast<double>(__half2float(x[(r * row_stride) + j]));
         acc += fabs(v);
         accsq += v * v;
     }
-    double* s = sum + static_cast<int64_t>(e) * 2 * K;
+    double* s = sum + (static_cast<int64_t>(e) * 2 * K);
     s[j] += acc;
     s[K + j] += accsq;
 }
@@ -91,7 +91,7 @@ void ActivationCalibrator::accumulate_experts(int layer, TensorKind kind, const 
         return;
     const int64_t row_stride = (input.stride[0] > 0) ? input.stride[0] : K;
 
-    const uint32_t key = static_cast<uint32_t>(layer) * 256u + static_cast<uint32_t>(kind);
+    const uint32_t key = (static_cast<uint32_t>(layer) * 256u) + static_cast<uint32_t>(kind);
     auto it = expert_entries_.find(key);
     if (it == expert_entries_.end()) {
         ExpertEntry e;
@@ -138,7 +138,7 @@ void ActivationCalibrator::accumulate(int layer, TensorKind kind, const Tensor& 
         return;
     const int64_t row_stride = (input.stride[0] > 0) ? input.stride[0] : K;
 
-    const uint32_t key = static_cast<uint32_t>(layer) * 256u + static_cast<uint32_t>(kind);
+    const uint32_t key = (static_cast<uint32_t>(layer) * 256u) + static_cast<uint32_t>(kind);
     auto it = entries_.find(key);
     if (it == entries_.end()) {
         Entry e;
@@ -223,7 +223,7 @@ CalibrationStats ActivationCalibrator::snapshot(const std::string& model_id) con
             ce.layer = static_cast<int>(key / 256u);
             ce.kind = kind + "." + std::to_string(x);
             ce.rows = rows[static_cast<size_t>(x)];
-            const double* s = host.data() + static_cast<size_t>(x) * 2 * k;
+            const double* s = host.data() + (static_cast<size_t>(x) * 2 * k);
             ce.mean_abs.resize(k);
             ce.mean_sq.resize(k);
             const double inv = 1.0 / static_cast<double>(ce.rows);

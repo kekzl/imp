@@ -70,8 +70,8 @@ void dequant4_host(__half* out, const int32_t* qweight, const int32_t* qzeros, c
                    const int32_t* g_idx, int N, int K, int group_size, ZeroFormat fmt) {
     for (int n = 0; n < N; ++n)
         for (int k = 0; k < K; ++k)
-            out[static_cast<int64_t>(n) * K + k] = dequant_elem(qweight, qzeros, scales, g_idx, N, group_size,
-                                                                fmt, k, n);
+            out[(static_cast<int64_t>(n) * K) + k] = dequant_elem(qweight, qzeros, scales, g_idx, N,
+                                                                  group_size, fmt, k, n);
 }
 
 }  // namespace imp::gptq

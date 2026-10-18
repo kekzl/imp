@@ -1,6 +1,7 @@
 #include "compute/gemm.h"
 #include "compute/cublas_handle.h"
 #include "compute/gemm_cutlass_sm120.h"
+#include <algorithm>
 #include <atomic>
 #include "compute/gemm_algo_capture.h"
 #include "compute/gemm_capture_fp16_sm120.h"
@@ -674,8 +675,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         // Base is timed first and explicitly — every other candidate in this round
         // is judged against this number, so it must exist before they are timed.
         const float base_ms = time_candidate(base, reps[base]);
-        if (base_ms < cand_ms[base])
-            cand_ms[base] = base_ms;
+        cand_ms[base] = std::min(cand_ms[base], base_ms);
         beats_base[base] = false;
         for (int i = 0; i < nresults; i++) {
             if (i == base)
@@ -685,8 +685,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
                 continue;
             }
             const float per_rep = time_candidate(i, reps[i]);
-            if (per_rep < cand_ms[i])
-                cand_ms[i] = per_rep;
+            cand_ms[i] = std::min(cand_ms[i], per_rep);
             if (per_rep >= base_ms * (1.0f - kAlgoMargin))
                 beats_base[i] = false;
         }

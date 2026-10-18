@@ -101,36 +101,36 @@ std::vector<OtlpSpan> spans_for_request(const RequestSpan& r, const std::string&
     root.kind = 2;  // SERVER
     root.start_ns = to_ns(r.t_start);
     root.end_ns = root.start_ns + static_cast<uint64_t>(r.latency_ms > 0 ? r.latency_ms * 1e6 : 0);
-    root.str_attrs.push_back({"imp.request_id", r.req_id});
+    root.str_attrs.emplace_back("imp.request_id", r.req_id);
     if (!r.client_request_id.empty())
-        root.str_attrs.push_back({"imp.client_request_id", r.client_request_id});
+        root.str_attrs.emplace_back("imp.client_request_id", r.client_request_id);
     if (!r.model.empty())
-        root.str_attrs.push_back({"gen_ai.request.model", r.model});
+        root.str_attrs.emplace_back("gen_ai.request.model", r.model);
     // GenAI semantic conventions: provider.name is the current key,
     // gen_ai.system its predecessor (dashboards still key on it).
-    root.str_attrs.push_back({"gen_ai.provider.name", "imp"});
-    root.str_attrs.push_back({"gen_ai.system", "imp"});
-    root.str_attrs.push_back(
-        {"gen_ai.operation.name", r.endpoint == "/v1/completions" ? "text_completion" : "chat"});
-    root.str_attrs.push_back({"http.request.method", "POST"});
+    root.str_attrs.emplace_back("gen_ai.provider.name", "imp");
+    root.str_attrs.emplace_back("gen_ai.system", "imp");
+    root.str_attrs.emplace_back("gen_ai.operation.name",
+                                r.endpoint == "/v1/completions" ? "text_completion" : "chat");
+    root.str_attrs.emplace_back("http.request.method", "POST");
     if (!r.endpoint.empty())
-        root.str_attrs.push_back({"http.route", r.endpoint});
-    root.int_attrs.push_back({"gen_ai.usage.input_tokens", r.prompt_tokens});
-    root.int_attrs.push_back({"gen_ai.usage.output_tokens", r.completion_tokens});
-    root.int_attrs.push_back({"imp.cached_tokens", r.cached_tokens});
+        root.str_attrs.emplace_back("http.route", r.endpoint);
+    root.int_attrs.emplace_back("gen_ai.usage.input_tokens", r.prompt_tokens);
+    root.int_attrs.emplace_back("gen_ai.usage.output_tokens", r.completion_tokens);
+    root.int_attrs.emplace_back("imp.cached_tokens", r.cached_tokens);
     if (r.spec_verify_steps >= 0) {
-        root.int_attrs.push_back({"imp.spec_drafted", r.spec_drafted});
-        root.int_attrs.push_back({"imp.spec_accepted", r.spec_accepted});
-        root.int_attrs.push_back({"imp.spec_verify_steps", r.spec_verify_steps});
+        root.int_attrs.emplace_back("imp.spec_drafted", r.spec_drafted);
+        root.int_attrs.emplace_back("imp.spec_accepted", r.spec_accepted);
+        root.int_attrs.emplace_back("imp.spec_verify_steps", r.spec_verify_steps);
     }
-    root.int_attrs.push_back({"http.response.status_code", r.http_status});
+    root.int_attrs.emplace_back("http.response.status_code", r.http_status);
     if (!r.finish_reason.empty())  // semconv: string[] (one per choice)
         root.str_array_attrs.push_back({"gen_ai.response.finish_reasons", {r.finish_reason}});
-    root.bool_attrs.push_back({"imp.stream", r.stream});
+    root.bool_attrs.emplace_back("imp.stream", r.stream);
     if (r.queue_ms >= 0)
-        root.int_attrs.push_back({"imp.queue_ms", static_cast<int64_t>(r.queue_ms)});
+        root.int_attrs.emplace_back("imp.queue_ms", static_cast<int64_t>(r.queue_ms));
     if (r.ttft_ms >= 0)
-        root.int_attrs.push_back({"imp.ttft_ms", static_cast<int64_t>(r.ttft_ms)});
+        root.int_attrs.emplace_back("imp.ttft_ms", static_cast<int64_t>(r.ttft_ms));
     out.push_back(root);
 
     // Children on the request's timeline: [start, start+queue) queue,
@@ -156,7 +156,7 @@ std::vector<OtlpSpan> spans_for_request(const RequestSpan& r, const std::string&
         const uint64_t first = root.start_ns + static_cast<uint64_t>(r.ttft_ms * 1e6);
         out.push_back(child("prefill", t, first));
         OtlpSpan d = child("decode", first, root.end_ns);
-        d.int_attrs.push_back({"gen_ai.usage.output_tokens", r.completion_tokens});
+        d.int_attrs.emplace_back("gen_ai.usage.output_tokens", r.completion_tokens);
         out.push_back(d);
     }
     return out;
@@ -205,7 +205,7 @@ void Tracer::init(const std::string& endpoint, const std::string& service_name,
     if (endpoint.empty())
         return;
     const auto scheme_end = endpoint.find("://");
-    if (scheme_end == std::string::npos || endpoint.compare(0, 7, "http://") != 0) {
+    if (scheme_end == std::string::npos || !endpoint.starts_with("http://")) {
         IMP_LOG_WARN("tracing: only http:// OTLP endpoints are supported, got '%s' - tracing off",
                      endpoint.c_str());
         return;

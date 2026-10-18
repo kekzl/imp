@@ -493,7 +493,7 @@ private:
     // Removes block_id's primary or shadow binding and its serial (no-op when unbound).
     void unbind_block_(int block_id);
     [[nodiscard]] bool has_binding_(int block_id) const {
-        return block_id_to_hash_.count(block_id) != 0 || shadow_id_to_hash_.count(block_id) != 0;
+        return block_id_to_hash_.contains(block_id) || shadow_id_to_hash_.contains(block_id);
     }
 
     // LRU list of cached (unreferenced) block IDs. When a block's

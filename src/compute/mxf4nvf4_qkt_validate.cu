@@ -54,9 +54,9 @@ __global__ void qkt_mxf4nvf4_kernel(const half* __restrict__ Q,     // [M=16, KD
         int V0 = v & 7;
         int V1 = (v >> 3) & 1;
         int V2 = (v >> 4) & 1;
-        int m = T1 + V1 * 8;
-        int k = T0 * 8 + V0 + V2 * 32;
-        float val = (m < M && k < KD) ? __half2float(Q[m * KD + k]) : 0.0f;
+        int m = T1 + (V1 * 8);
+        int k = (T0 * 8) + V0 + (V2 * 32);
+        float val = (m < M && k < KD) ? __half2float(Q[(m * KD) + k]) : 0.0f;
         uint8_t nibble = fp32_to_e2m1(val);
         int reg_idx = v >> 3;
         int nib_in_reg = v & 7;
@@ -79,8 +79,8 @@ __global__ void qkt_mxf4nvf4_kernel(const half* __restrict__ Q,     // [M=16, KD
         int V0 = v & 7;
         int V1 = (v >> 3) & 1;
         int n = T1;
-        int k = T0 * 8 + V0 + V1 * 32;
-        float val = (n < N && k < KD) ? __half2float(Kmat[n * KD + k]) : 0.0f;
+        int k = (T0 * 8) + V0 + (V1 * 32);
+        float val = (n < N && k < KD) ? __half2float(Kmat[(n * KD) + k]) : 0.0f;
         uint8_t nibble = fp32_to_e2m1(val);
         int reg_idx = v >> 3;
         int nib_in_reg = v & 7;
@@ -127,13 +127,13 @@ __global__ void qkt_mxf4nvf4_kernel(const half* __restrict__ Q,     // [M=16, KD
     const int n1 = n0 + 1;
 
     if (m0 < M && n0 < N)
-        D[m0 * N + n0] = d0;
+        D[(m0 * N) + n0] = d0;
     if (m0 < M && n1 < N)
-        D[m0 * N + n1] = d1;
+        D[(m0 * N) + n1] = d1;
     if (m1 < M && n0 < N)
-        D[m1 * N + n0] = d2;
+        D[(m1 * N) + n0] = d2;
     if (m1 < M && n1 < N)
-        D[m1 * N + n1] = d3;
+        D[(m1 * N) + n1] = d3;
 }
 
 bool qkt_mxf4nvf4_validate(const half* d_Q, const half* d_K, float* d_D, cudaStream_t stream) {

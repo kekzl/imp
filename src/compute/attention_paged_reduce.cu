@@ -28,7 +28,7 @@ __global__ void paged_attention_reduce_kernel(
     pdl_trigger();  // scheduling only: o_proj prefetches its weights during the merge
     const int partial_stride = 2 + head_dim;
     const float* base = partial_out +
-                        (int64_t)((batch_idx * n_heads + head_idx) * num_splits) * partial_stride;
+                        ((int64_t)(((batch_idx * n_heads) + head_idx) * num_splits) * partial_stride);
 
     // Step 1: Find global max across all splits (thread 0)
     __shared__ float s_global_max;
@@ -47,7 +47,7 @@ __global__ void paged_attention_reduce_kernel(
     if (staged) {
         for (int s = tid; s < num_splits; s += blockDim.x) {
             s_m[s] = base[static_cast<int64_t>(s) * partial_stride];
-            s_l[s] = base[s * partial_stride + 1];
+            s_l[s] = base[(s * partial_stride) + 1];
         }
         __syncthreads();
     }
@@ -68,7 +68,7 @@ __global__ void paged_attention_reduce_kernel(
         float gl = 0.0f;
         for (int s = 0; s < num_splits; s++) {
             float m = staged ? s_m[s] : base[static_cast<int64_t>(s) * partial_stride];
-            float l = staged ? s_l[s] : base[s * partial_stride + 1];
+            float l = staged ? s_l[s] : base[(s * partial_stride) + 1];
             gl += expf(m - gmax) * l;
         }
         if (attn_sinks)
@@ -92,18 +92,18 @@ __global__ void paged_attention_reduce_kernel(
 
     // Step 3: one head_dim element per thread; blockIdx.z = the blockDim.x slice (each slice recomputes
     // gmax/gl in the same order). Unroll 8 keeps 8 partial loads in flight per thread.
-    const int d = blockIdx.z * blockDim.x + tid;
+    const int d = (blockIdx.z * blockDim.x) + tid;
     if (d < head_dim) {
         float o_val = 0.0f;
 #pragma unroll 32
         for (int s = 0; s < num_splits; s++) {
             float weight = staged ? s_w[s] : expf(base[static_cast<int64_t>(s) * partial_stride] - gmax);
-            float o_s = base[s * partial_stride + 2 + d];
+            float o_s = base[(s * partial_stride) + 2 + d];
             o_val += weight * o_s;
         }
         o_val *= inv_gl;
 
-        int out_idx = batch_idx * n_heads * head_dim + head_idx * head_dim + d;
+        int out_idx = (batch_idx * n_heads * head_dim) + (head_idx * head_dim) + d;
         const half o_h = __float2half(o_val);
         stcs_half(&O[out_idx], o_h);
         if (q8_out != nullptr)  // block-uniform; a warp holds one whole 32-element Q8_1 block

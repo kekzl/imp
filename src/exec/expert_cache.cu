@@ -73,7 +73,7 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
 
     slots_.resize(n_slots_);
     for (int i = 0; i < n_slots_; i++) {
-        slots_[i].gpu_ptr = static_cast<char*>(pool_) + static_cast<size_t>(i) * slot_size_;
+        slots_[i].gpu_ptr = static_cast<char*>(pool_) + (static_cast<size_t>(i) * slot_size_);
         slots_[i].layer = i / slots_per_layer_;
     }
 
@@ -179,7 +179,7 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
 namespace {
 
 inline int flat_slot(int layer, int slot_in_layer, int slots_per_layer) {
-    return layer * slots_per_layer + slot_in_layer;
+    return (layer * slots_per_layer) + slot_in_layer;
 }
 
 // Write a single int32 cell to the device-side lookup mirror.
@@ -192,7 +192,7 @@ inline void write_lookup_cell(int* d_lookup, int n_experts, int layer, int proj,
         return;
     if (layer < 0 || proj < 0 || expert < 0)
         return;
-    size_t off = (static_cast<size_t>(layer) * kExpertProjCount + proj) * n_experts + expert;
+    size_t off = (((static_cast<size_t>(layer) * kExpertProjCount) + proj) * n_experts) + expert;
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_lookup + off, &slot_idx_in_layer, sizeof(int),
                                        cudaMemcpyHostToDevice, stream));
 }
@@ -236,21 +236,21 @@ ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, Exp
     if (!host_expert_addrs_.empty() && n_experts_ > 0 && key.expert_idx >= 0 &&
         key.expert_idx < n_experts_) {
         auto& table = host_expert_addrs_[layer];
-        size_t off = static_cast<size_t>(proj_idx) * n_experts_ + key.expert_idx;
+        size_t off = (static_cast<size_t>(proj_idx) * n_experts_) + key.expert_idx;
         if (off < table.size())
             table[off] = src_host;
     }
     // Stamp the canonical packed_ptr per (layer, proj) - Phase 4 needs it
     // to rebuild keys for prefetch_layer.
     if (!host_packed_ptrs_.empty()) {
-        size_t pp_off = static_cast<size_t>(layer) * kExpertProjCount + proj_idx;
+        size_t pp_off = (static_cast<size_t>(layer) * kExpertProjCount) + proj_idx;
         if (pp_off < host_packed_ptrs_.size())
             host_packed_ptrs_[pp_off] = key.packed_ptr;
     }
     // Stamp the per-(layer, proj) expert byte size - prefetch must use this
     // (not slot_size_) to avoid reading past the pinned host region.
     if (!host_expert_bytes_.empty()) {
-        size_t pp_off = static_cast<size_t>(layer) * kExpertProjCount + proj_idx;
+        size_t pp_off = (static_cast<size_t>(layer) * kExpertProjCount) + proj_idx;
         if (pp_off < host_expert_bytes_.size() && stamp_bytes > 0)
             host_expert_bytes_[pp_off] = stamp_bytes;
     }
@@ -515,18 +515,18 @@ int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fal
         }
         if (dup)
             continue;
-        considered.push_back({proj, expert});
+        considered.emplace_back(proj, expert);
 
         // Rebuild the cache key from the canonical packed_ptr stamped by
         // get_or_load - this guarantees prefetched entries are found by
         // subsequent dispatch lookups that use the same packed.data.
-        size_t pp_off = static_cast<size_t>(layer) * kExpertProjCount + proj;
+        size_t pp_off = (static_cast<size_t>(layer) * kExpertProjCount) + proj;
         if (pp_off >= host_packed_ptrs_.size())
             continue;
         const void* canonical_packed_ptr = host_packed_ptrs_[pp_off];
         if (!canonical_packed_ptr)
             continue;
-        size_t addr_off = static_cast<size_t>(proj) * n_experts_ + expert;
+        size_t addr_off = (static_cast<size_t>(proj) * n_experts_) + expert;
         if (addr_off >= addr_table.size())
             continue;
         const void* src_host = addr_table[addr_off];
@@ -574,7 +574,7 @@ int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fal
         // "invalid argument" on pinned-but-narrower host regions.
         size_t copy_bytes = expert_bytes_fallback;
         if (!host_expert_bytes_.empty()) {
-            size_t pp_off = static_cast<size_t>(layer) * kExpertProjCount + proj;
+            size_t pp_off = (static_cast<size_t>(layer) * kExpertProjCount) + proj;
             if (pp_off < host_expert_bytes_.size() && host_expert_bytes_[pp_off] > 0)
                 copy_bytes = host_expert_bytes_[pp_off];
         }
@@ -632,9 +632,8 @@ bool ExpertLRUCache::check_parity(cudaStream_t stream) const {
             continue;
         if (slot.layer >= n_layers_ || slot.proj >= kExpertProjCount || slot.expert >= n_experts_)
             continue;
-        const int slot_in_layer = static_cast<int>(flat) - slot.layer * slots_per_layer_;
-        size_t off = (static_cast<size_t>(slot.layer) * kExpertProjCount + slot.proj) *
-                         n_experts_ +
+        const int slot_in_layer = static_cast<int>(flat) - (slot.layer * slots_per_layer_);
+        size_t off = (((static_cast<size_t>(slot.layer) * kExpertProjCount) + slot.proj) * n_experts_) +
                      slot.expert;
         host[off] = slot_in_layer;
     }

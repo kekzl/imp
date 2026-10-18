@@ -4,6 +4,7 @@
 #include "api/imp_internal.h"
 #include "model/tokenizer.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -22,8 +23,7 @@ ImpError imp_tokenize(ImpModel model, const char* text, int32_t* tokens, int* n_
     try {
         auto ids = tok->encode(text);
         int count = static_cast<int>(ids.size());
-        if (count > max_tokens)
-            count = max_tokens;
+        count = std::min(count, max_tokens);
 
         for (int i = 0; i < count; i++) {
             tokens[i] = ids[i];

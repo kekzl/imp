@@ -42,6 +42,11 @@
 # New in LLVM 23 and on (findings fixed): misc-override-with-different-visibility (5),
 # performance-use-std-move (6), readability-redundant-parentheses (5), readability-redundant-qualified-alias (2).
 #
+# modernize-* subset (advisory, auto-fixed repo-wide, 0 findings): the fix is mechanical and behaviour-neutral.
+# Left off, full-sweep unique findings: use-designated-initializers 735, use-auto 562, use-std-print 360,
+# use-nodiscard 271, use-integer-sign-comparison 209, return-braced-init-list 157, use-ranges 103 (style churn
+# or a changed signedness/overload), loop-convert 47, raw-string-literal 31, deprecated-headers 13.
+#
 # clang-analyzer-* is listed explicitly: LLVM 23 dropped it from the built-in default Checks
 # (21: 'clang-diagnostic-*,clang-analyzer-*', 23: 'clang-diagnostic-*'), #2285. Same full-lane
 # rule; "device" = __global__/__device__ bodies analysed host-side with stub intrinsics.
@@ -64,6 +69,13 @@ Checks: >
   readability-*,
   cppcoreguidelines-pro-type-cstyle-cast,
   cppcoreguidelines-pro-type-member-init,
+  modernize-use-starts-ends-with,
+  modernize-use-emplace,
+  modernize-use-nullptr,
+  modernize-use-using,
+  modernize-use-bool-literals,
+  modernize-unary-static-assert,
+  modernize-concat-nested-namespaces,
   -bugprone-easily-swappable-parameters,
   -bugprone-narrowing-conversions,
   -bugprone-branch-clone,

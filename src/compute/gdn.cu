@@ -70,7 +70,7 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
         return;
     // SPLIT partners are ADJACENT lanes (d = tid / SPLIT), so the cross-partner
     // reductions below are a warp shuffle rather than a shared-memory round.
-    const int d = static_cast<int>(blockIdx.z) * (HD / CSPLIT) +
+    const int d = (static_cast<int>(blockIdx.z) * (HD / CSPLIT)) +
                   ((SPLIT == 1) ? static_cast<int>(threadIdx.x) : static_cast<int>(threadIdx.x) / SPLIT);
     const int part = (SPLIT == 1) ? 0 : static_cast<int>(threadIdx.x) % SPLIT;
     constexpr int SS_PER = SS / SPLIT;   // state rows this thread owns
@@ -89,7 +89,7 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
                                                          blockIdx.z * (HD / CSPLIT));
         for (int i = threadIdx.x; i < SS * kLines; i += kNT)
             asm volatile("prefetch.global.L2 [%0];" ::"l"(
-                base + static_cast<size_t>(i / kLines) * HD * sizeof(StateT) +
+                base + (static_cast<size_t>(i / kLines) * HD * sizeof(StateT)) +
                 static_cast<size_t>((i % kLines) * 128)));
     }
     const float A_h = A_log[h];
@@ -148,7 +148,7 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
     // Factor rows are indexed by the recurrent SLOT, not by the batch
     // position: a request keeps its slot across steps but moves within the
     // batch, so indexing by seq would hand the next step another request's row.
-    const size_t fac_row = (static_cast<size_t>(seq_slots ? seq_slots[seq] : seq) * n_heads + h) *
+    const size_t fac_row = ((static_cast<size_t>(seq_slots ? seq_slots[seq] : seq) * n_heads) + h) *
                            static_cast<size_t>(fac_stride);
     gdn_factor_apply<SS_PER>(H_reg, fac_in ? fac_in + fac_row : nullptr, SS, s_base, d);
 
@@ -160,22 +160,22 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
 
     // Process each token
     for (int t = 0; t < n_tokens; t++) {
-        const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
-        const float* Q_g = row + static_cast<int64_t>(g) * SS;
-        const float* K_g = row + BC_size + static_cast<int64_t>(g) * SS;
-        const float* V_base = row + static_cast<int64_t>(2) * BC_size;
+        const float* row = conv_f32 + (static_cast<size_t>(t) * conv_channels);
+        const float* Q_g = row + (static_cast<int64_t>(g) * SS);
+        const float* K_g = row + BC_size + (static_cast<int64_t>(g) * SS);
+        const float* V_base = row + (static_cast<int64_t>(2) * BC_size);
 
         // Load V for this thread's d index
-        float v_d = V_base[h * HD + d];
+        float v_d = V_base[(h * HD) + d];
 
         // Compute alpha → decay gate
-        float alpha_h = __half2float(alpha_all[t * n_heads + h]);
+        float alpha_h = __half2float(alpha_all[(t * n_heads) + h]);
         float dt_val = alpha_h + dtb_h;
         dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
         float g_t = expf(fmaxf(A_h * dt_val, -20.0f));
 
         // Compute beta → learning rate
-        float beta_h = __half2float(beta_all[t * n_heads + h]);
+        float beta_h = __half2float(beta_all[(t * n_heads) + h]);
         beta_h = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));
 
         // Parallel L2-normalize K and Q.
@@ -252,7 +252,7 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
         }
 
         // Step 2: delta = (v - g*kv) * beta
-        float delta_d = (v_d - g_t * kv_d) * beta_h;
+        float delta_d = (v_d - (g_t * kv_d)) * beta_h;
 
         // Step 3: Update state + compute output
         float y_partial = 0.0f;
@@ -271,9 +271,9 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
         if (part == 0) {
             const float out_val = y_partial * scale;
             if constexpr (std::is_same_v<YOut, float>) {
-                y_out[t * inner + h * HD + d] = out_val;
+                y_out[(t * inner) + (h * HD) + d] = out_val;
             } else {
-                y_out[t * inner + h * HD + d] = __float2half(out_val);
+                y_out[(t * inner) + (h * HD) + d] = __float2half(out_val);
             }
         }
 
@@ -318,7 +318,7 @@ __global__ void __launch_bounds__(HD * SPLIT / CSPLIT, 1) gdn_scan_fused_kernel(
 // kernel reads V[h*HD+d] assuming grouped layout.
 __global__ void vhead_tiled_to_grouped_f32_kernel(const float* __restrict__ src, float* __restrict__ dst,
                                                   int n_tokens, int n_heads, int head_dim, int n_groups) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = (blockIdx.x * blockDim.x) + threadIdx.x;
     int total = n_tokens * n_heads * head_dim;
     if (tid >= total)
         return;
@@ -330,10 +330,10 @@ __global__ void vhead_tiled_to_grouped_f32_kernel(const float* __restrict__ src,
     int n_v_per_k = n_heads / n_groups;
     int replica = h_tiled / n_groups;
     int group = h_tiled % n_groups;
-    int h_grouped = group * n_v_per_k + replica;
+    int h_grouped = (group * n_v_per_k) + replica;
 
-    dst[t * n_heads * head_dim + h_grouped * head_dim + d] =
-        src[t * n_heads * head_dim + h_tiled * head_dim + d];
+    dst[(t * n_heads * head_dim) + (h_grouped * head_dim) + d] =
+        src[(t * n_heads * head_dim) + (h_tiled * head_dim) + d];
 }
 
 void vhead_tiled_to_grouped_f32(const float* src, float* dst, int n_tokens, int n_heads, int head_dim,
@@ -360,7 +360,7 @@ constexpr int kScanColSplitMaxCtas = 96;
 template <typename YOut, typename StateT, typename... Args>
 void launch_scan128(int n_heads, int n_seq, bool factored, cudaStream_t stream, Args... args) {
     constexpr int SPLIT = 2;
-    const size_t smem = (2 * 128 + 128 * SPLIT) * sizeof(float);
+    const size_t smem = ((2 * 128) + (128 * SPLIT)) * sizeof(float);
     if (!factored && n_heads * n_seq <= kScanColSplitMaxCtas) {
         auto* k = gdn_scan_fused_kernel<128, 128, YOut, SPLIT, StateT, kScanColSplit>;
         pdl::enable_kernel(k);
@@ -410,7 +410,7 @@ void gdn_scan_fused_f32_batched(const float* conv_f32, int conv_channels, const 
             conv_channels, grouped_layout, d_real_n, h_snap, d_snap_n, seq_slots, h_state_seq_stride,
             seq_row_offsets, out_slots, snap_slots, fac_out, fac_in, fac_stride);
     } else if (head_dim_ssm == 64 && state_size == 64) {
-        const size_t smem = (2 * 64 + 64) * sizeof(float);
+        const size_t smem = ((2 * 64) + 64) * sizeof(float);
         pdl::enable_kernel(gdn_scan_fused_kernel<64, 64, half>);
         pdl::launch(gdn_scan_fused_kernel<64, 64, half>, dim3(grid), dim3(64), size_t(smem), stream,
             conv_f32, alpha, beta, A_log, dt_bias, h_state_pool, y, n_tokens, n_heads, n_groups,
@@ -462,7 +462,7 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
                         int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
                         int grouped_layout, const int* d_real_n, float* h_snap, const int* d_snap_n) {
     // Shared memory: K_norm[SS] + Q_norm[SS] + reduce[HD]
-    size_t smem = (2 * state_size + head_dim_ssm) * sizeof(float);
+    size_t smem = ((2 * state_size) + head_dim_ssm) * sizeof(float);
 
     // Template dispatch for common sizes
     if (head_dim_ssm == 128 && state_size == 128) {
@@ -486,13 +486,13 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* al
                                      std::to_string(head_dim_ssm) + " SS=" + std::to_string(state_size));
         int inner = n_heads * head_dim_ssm;
         int BC_size = n_groups * state_size;
-        size_t smem_old = static_cast<int64_t>(2) * state_size * sizeof(float) + 2 * sizeof(float);
+        size_t smem_old = (static_cast<int64_t>(2) * state_size * sizeof(float)) + (2 * sizeof(float));
         for (int t = 0; t < n_tokens; t++) {
-            const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
+            const float* row = conv_f32 + (static_cast<size_t>(t) * conv_channels);
             gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem_old, stream>>>(
-                row + static_cast<ptrdiff_t>(2) * BC_size, row + BC_size, row,
-                alpha + static_cast<ptrdiff_t>(t) * n_heads, beta + static_cast<ptrdiff_t>(t) * n_heads,
-                A_log, dt_bias, h_state, y + static_cast<ptrdiff_t>(t) * inner, nullptr, n_heads,
+                row + (static_cast<ptrdiff_t>(2) * BC_size), row + BC_size, row,
+                alpha + (static_cast<ptrdiff_t>(t) * n_heads), beta + (static_cast<ptrdiff_t>(t) * n_heads),
+                A_log, dt_bias, h_state, y + (static_cast<ptrdiff_t>(t) * inner), nullptr, n_heads,
                 head_dim_ssm, state_size, n_groups, grouped_layout);
             IMP_CUDA_CHECK_LAUNCH();
         }
@@ -522,7 +522,7 @@ void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half
                             int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
                             cudaStream_t stream, int grouped_layout, const int* d_real_n, float* h_snap,
                             const int* d_snap_n) {
-    size_t smem = (2 * state_size + head_dim_ssm) * sizeof(float);
+    size_t smem = ((2 * state_size) + head_dim_ssm) * sizeof(float);
     if (head_dim_ssm == 128 && state_size == 128) {
         launch_scan128<float, float>(n_heads, 1, false, stream, conv_f32, alpha, beta, A_log,
                     dt_bias, h_state, y_fp32, n_tokens, n_heads, n_groups, conv_channels, grouped_layout,
@@ -599,14 +599,14 @@ __global__ void gdn_scan_reference_kernel(
     // s_reduce[HD] block reduction scratch (all for this block's head, this token).
     extern __shared__ float smem[];
     float* s_H = smem;
-    float* s_k = s_H + static_cast<int64_t>(SS) * HD;
+    float* s_k = s_H + (static_cast<int64_t>(SS) * HD);
     float* s_q = s_k + SS;
     float* s_v = s_q + SS;
     float* s_reduce = s_v + HD;
 
     // Load state from global into shared.
     {
-        const float* H_src = h_state + static_cast<size_t>(h) * SS * HD;
+        const float* H_src = h_state + (static_cast<size_t>(h) * SS * HD);
         for (int idx = d; idx < SS * HD; idx += HD) {
             s_H[idx] = H_src[idx];
         }
@@ -614,10 +614,10 @@ __global__ void gdn_scan_reference_kernel(
     __syncthreads();
 
     for (int t = 0; t < n_tokens; t++) {
-        const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
-        const float* Q_g = row + static_cast<int64_t>(g) * SS;
-        const float* K_g = row + BC_size + static_cast<int64_t>(g) * SS;
-        const float* V_base = row + static_cast<int64_t>(2) * BC_size + static_cast<int64_t>(h) * HD;
+        const float* row = conv_f32 + (static_cast<size_t>(t) * conv_channels);
+        const float* Q_g = row + (static_cast<int64_t>(g) * SS);
+        const float* K_g = row + BC_size + (static_cast<int64_t>(g) * SS);
+        const float* V_base = row + (static_cast<int64_t>(2) * BC_size) + (static_cast<int64_t>(h) * HD);
 
         // Load V (one element per thread)
         s_v[d] = V_base[d];
@@ -630,12 +630,12 @@ __global__ void gdn_scan_reference_kernel(
         __syncthreads();
 
         // Per-head scalars
-        float alpha_h = __half2float(alpha_all[t * n_heads + h]);
+        float alpha_h = __half2float(alpha_all[(t * n_heads) + h]);
         float dt_val = alpha_h + dtb_h;
         dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
         float g_t = expf(fmaxf(A_h * dt_val, -20.0f));
 
-        float beta_h = __half2float(beta_all[t * n_heads + h]);
+        float beta_h = __half2float(beta_all[(t * n_heads) + h]);
         beta_h = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));
 
         // L2-normalize Q, K across state_size.
@@ -657,27 +657,27 @@ __global__ void gdn_scan_reference_kernel(
         // [0,SS). kv[d] = sum_s H[s,d] * k_norm[s].
         float kv_d = 0.0f;
         for (int s = 0; s < SS; s++) {
-            kv_d += s_H[s * HD + d] * s_k[s];
+            kv_d += s_H[(s * HD) + d] * s_k[s];
         }
 
         // delta[d] = (v[d] - g*kv[d]) * beta
-        float delta_d = (s_v[d] - g_t * kv_d) * beta_h;
+        float delta_d = (s_v[d] - (g_t * kv_d)) * beta_h;
 
         // H_new[s, d] = g * H[s, d] + k_norm[s] * delta[d]
         // y[d] = sum_s H_new[s, d] * q_norm[s]
         float y_partial = 0.0f;
         for (int s = 0; s < SS; s++) {
-            float h_new = g_t * s_H[s * HD + d] + s_k[s] * delta_d;
-            s_H[s * HD + d] = h_new;
+            float h_new = (g_t * s_H[(s * HD) + d]) + (s_k[s] * delta_d);
+            s_H[(s * HD) + d] = h_new;
             y_partial += h_new * s_q[s];
         }
 
-        y_out[t * inner + h * HD + d] = __float2half(y_partial * rsqrtf(static_cast<float>(HD)));
+        y_out[(t * inner) + (h * HD) + d] = __float2half(y_partial * rsqrtf(static_cast<float>(HD)));
 
         // Commit the state at the real last row. Each thread copies exactly
         // the column (d, d+HD, ...) it wrote above — no barrier needed.
         if (t + 1 == real_n) {
-            float* H_dst = h_state + static_cast<size_t>(h) * SS * HD;
+            float* H_dst = h_state + (static_cast<size_t>(h) * SS * HD);
             for (int idx = d; idx < SS * HD; idx += HD) {
                 H_dst[idx] = s_H[idx];
             }
@@ -694,7 +694,7 @@ void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half
     // Shared memory: state slab [SS*HD] + K[SS] + Q[SS] + V[HD] + reduce[HD]
     // For Qwen 3.6 (SS=128, HD=128): ~66 KB — exceeds 48 KB default per block,
     // needs the opt-in dynamic-shared attribute.
-    size_t smem = (state_size * head_dim_ssm + 2 * state_size + 2 * head_dim_ssm) * sizeof(float);
+    size_t smem = ((state_size * head_dim_ssm) + (2 * state_size) + (2 * head_dim_ssm)) * sizeof(float);
     static bool attr_set = false;
     if (!attr_set) {
         IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(
@@ -729,11 +729,11 @@ __global__ void gdn_scan_decode_kernel(const float* __restrict__ x, const float*
         return;
 
     const int g = grouped_layout ? (h / (n_heads / n_groups)) : (h % n_groups);
-    float* H = h_state + static_cast<size_t>(h) * state_size * head_dim_ssm;
-    const float* K_g = B_in + static_cast<int64_t>(g) * state_size;
-    const float* Q_g = C_in + static_cast<int64_t>(g) * state_size;
+    float* H = h_state + (static_cast<size_t>(h) * state_size * head_dim_ssm);
+    const float* K_g = B_in + (static_cast<int64_t>(g) * state_size);
+    const float* Q_g = C_in + (static_cast<int64_t>(g) * state_size);
 
-    float v_d = x[h * head_dim_ssm + d];
+    float v_d = x[(h * head_dim_ssm) + d];
     float alpha_h = __half2float(alpha_raw[h]);
     float dt_val = alpha_h + dt_bias[h];
     dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
@@ -769,22 +769,22 @@ __global__ void gdn_scan_decode_kernel(const float* __restrict__ x, const float*
     const float scale = rsqrtf(static_cast<float>(head_dim_ssm));
     float kv_d = 0.0f;
     for (int s = 0; s < state_size; s++)
-        kv_d += H[s * head_dim_ssm + d] * s_k[s];
-    float delta_d = (v_d - g_t * kv_d) * beta_h;
+        kv_d += H[(s * head_dim_ssm) + d] * s_k[s];
+    float delta_d = (v_d - (g_t * kv_d)) * beta_h;
     float y_partial = 0.0f;
     for (int s = 0; s < state_size; s++) {
-        float h_new = g_t * H[s * head_dim_ssm + d] + s_k[s] * delta_d;
-        H[s * head_dim_ssm + d] = h_new;
+        float h_new = (g_t * H[(s * head_dim_ssm) + d]) + (s_k[s] * delta_d);
+        H[(s * head_dim_ssm) + d] = h_new;
         y_partial += h_new * s_q[s];
     }
-    y[h * head_dim_ssm + d] = __float2half(y_partial * scale);
+    y[(h * head_dim_ssm) + d] = __float2half(y_partial * scale);
 }
 
 void gdn_scan_decode_f32(const float* x, const float* B, const float* C, const half* alpha, const half* beta,
                          const float* A_log, const float* dt_bias, float* h_state, half* y, const half* z,
                          int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
                          int grouped_layout) {
-    size_t smem = static_cast<int64_t>(2) * state_size * sizeof(float) + 2 * sizeof(float);
+    size_t smem = (static_cast<int64_t>(2) * state_size * sizeof(float)) + (2 * sizeof(float));
     gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(x, B, C, alpha, beta, A_log, dt_bias,
                                                                     h_state, y, z, n_heads, head_dim_ssm,
                                                                     state_size, n_groups, grouped_layout);

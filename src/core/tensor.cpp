@@ -96,7 +96,7 @@ Tensor Tensor::slice(int64_t start, int64_t end) const {
 
     Tensor t = *this;
     t.shape[0] = end - start;
-    t.data = static_cast<char*>(data) + start * stride[0] * static_cast<int64_t>(qtype_elem_bytes(qtype));
+    t.data = static_cast<char*>(data) + (start * stride[0] * static_cast<int64_t>(qtype_elem_bytes(qtype)));
     return t;
 }
 

@@ -31,24 +31,24 @@ __global__ void __launch_bounds__(kThreads, 1) gemm_q8_0_dp4a_dense_kernel(const
                                                                            int N, int q8_per_row) {
     extern __shared__ char smem_raw[];
     int8_t* smem_qs = reinterpret_cast<int8_t*>(smem_raw);
-    float* smem_d8 = reinterpret_cast<float*>(smem_raw + static_cast<ptrdiff_t>(TILE_M) * q8_per_row * 32);
+    float* smem_d8 = reinterpret_cast<float*>(smem_raw + (static_cast<ptrdiff_t>(TILE_M) * q8_per_row * 32));
 
     const int warp = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    const int n = blockIdx.x * kWarps + warp;
+    const int n = (blockIdx.x * kWarps) + warp;
     const bool valid = n < N;  // no early return: every thread loads its share of the tile
-    const uint8_t* w_row = w + static_cast<size_t>(valid ? n : 0) * q8_per_row * kBlockBytes;
+    const uint8_t* w_row = w + (static_cast<size_t>(valid ? n : 0) * q8_per_row * kBlockBytes);
 
     for (int m_base = 0; m_base < M; m_base += TILE_M) {
         const int m_count = min(TILE_M, M - m_base);
         for (int i = threadIdx.x; i < m_count * q8_per_row; i += kThreads) {
             const int mi = i / q8_per_row;
             const int qi = i % q8_per_row;
-            const block_q8_1& src = q8[static_cast<size_t>(m_base + mi) * q8_per_row + qi];
-            int4* dst = reinterpret_cast<int4*>(smem_qs + static_cast<ptrdiff_t>(i) * 32);
+            const block_q8_1& src = q8[(static_cast<size_t>(m_base + mi) * q8_per_row) + qi];
+            int4* dst = reinterpret_cast<int4*>(smem_qs + (static_cast<ptrdiff_t>(i) * 32));
             dst[0] = *reinterpret_cast<const int4*>(src.qs);
             dst[1] = *reinterpret_cast<const int4*>(src.qs + 16);
-            smem_d8[i] = d8[static_cast<size_t>(m_base + mi) * q8_per_row + qi];
+            smem_d8[i] = d8[(static_cast<size_t>(m_base + mi) * q8_per_row) + qi];
         }
         __syncthreads();
 
@@ -60,21 +60,21 @@ __global__ void __launch_bounds__(kThreads, 1) gemm_q8_0_dp4a_dense_kernel(const
         if (valid) {
             for (int qi = lane; qi < q8_per_row; qi += 32) {
                 // 34-B blocks: 2-B aligned only, so 16-bit loads.
-                const uint16_t* bp = reinterpret_cast<const uint16_t*>(w_row +
-                                                                       static_cast<size_t>(qi) * kBlockBytes);
+                const uint16_t* bp = reinterpret_cast<const uint16_t*>(
+                    w_row + (static_cast<size_t>(qi) * kBlockBytes));
                 const float dw = __half2float(__ushort_as_half(bp[0]));
                 int wq[8];
 #pragma unroll
                 for (int j = 0; j < 8; ++j)
-                    wq[j] = static_cast<int>(static_cast<uint32_t>(bp[1 + 2 * j]) |
-                                             (static_cast<uint32_t>(bp[2 + 2 * j]) << 16));
+                    wq[j] = static_cast<int>(static_cast<uint32_t>(bp[1 + (2 * j)]) |
+                                             (static_cast<uint32_t>(bp[2 + (2 * j)]) << 16));
 #pragma unroll
                 for (int mi = 0; mi < TILE_M; ++mi) {
                     if (mi >= m_count)
                         break;
-                    const int idx = mi * q8_per_row + qi;
+                    const int idx = (mi * q8_per_row) + qi;
                     const int4* xv = reinterpret_cast<const int4*>(smem_qs +
-                                                                   static_cast<ptrdiff_t>(idx) * 32);
+                                                                   (static_cast<ptrdiff_t>(idx) * 32));
                     const int4 x0 = xv[0];
                     const int4 x1 = xv[1];
                     int s = 0;
@@ -96,7 +96,7 @@ __global__ void __launch_bounds__(kThreads, 1) gemm_q8_0_dp4a_dense_kernel(const
                     acc[mi] += __shfl_down_sync(0xFFFFFFFFu, acc[mi], off);
             if (lane == 0) {
                 for (int mi = 0; mi < m_count; ++mi) {
-                    half* o = out + static_cast<size_t>(m_base + mi) * N + n;
+                    half* o = out + (static_cast<size_t>(m_base + mi) * N) + n;
                     *o = __float2half(ACCUM ? __half2float(*o) + acc[mi] : acc[mi]);
                 }
             }

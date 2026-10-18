@@ -33,7 +33,7 @@ std::expected<MRopePositions, std::string> qwen_build_mrope_positions_mm(
     auto set = [&](size_t token, int t, int h, int w) {
         pos[token] = t;
         pos[n + token] = h;
-        pos[2 * n + token] = w;
+        pos[(2 * n) + token] = w;
     };
 
     size_t i = 0;
@@ -71,7 +71,7 @@ std::expected<MRopePositions, std::string> qwen_build_mrope_positions_mm(
         // Raster order over the merged grid: the same order the vision merger
         // emits its tokens in, so token k sits at (k / cols, k % cols).
         for (int k = 0; k < g.tokens(); ++k)
-            set(i + static_cast<size_t>(k), cur, cur + k / g.cols, cur + k % g.cols);
+            set(i + static_cast<size_t>(k), cur, cur + (k / g.cols), cur + (k % g.cols));
         // An image costs max(rows, cols) positions, not rows*cols: the axes
         // advance in parallel, so the longer side is what the next token has to
         // clear.

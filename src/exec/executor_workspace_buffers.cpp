@@ -34,6 +34,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#include <algorithm>
 #include <cmath>
 #include <algorithm>
 
@@ -69,7 +70,7 @@ HostStageGeometry host_stage_geometry(int n_experts, bool staged_cutlass, int wa
 void take_smallM_scratch(MoEWorkspace& moe, int n_experts) {
     const size_t ne = static_cast<size_t>(n_experts);
     const size_t tables = smallM_table_bytes(n_experts);
-    auto sl = engine_arena().take_bytes(tables + 2 * ne * sizeof(void*) + 3 * ne * sizeof(float));
+    auto sl = engine_arena().take_bytes(tables + (2 * ne * sizeof(void*)) + (3 * ne * sizeof(float)));
     if (sl.empty()) {
         IMP_LOG_WARN("smallM MoE prefill scratch unavailable from the T2 arena; smallM branch off");
         return;
@@ -77,7 +78,8 @@ void take_smallM_scratch(MoEWorkspace& moe, int n_experts) {
     moe.smallM_tables = sl.data();
     moe.smallM_tables_bytes = tables;
     moe.smallM_ptrs = reinterpret_cast<void**>(sl.data() + tables);
-    moe.smallM_scales = reinterpret_cast<float*>(moe.smallM_ptrs + 2 * ne);  // floats follow the 2*ne pointers
+    moe.smallM_scales = reinterpret_cast<float*>(moe.smallM_ptrs +
+                                                 (2 * ne));  // floats follow the 2*ne pointers
     moe.smallM_count = n_experts;
 }
 }  // namespace
@@ -889,7 +891,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // SFA worst-case: each expert's rows pad to SfAtom row tile (128),
             // so sum over ne of cutlass_nvfp4_sf_size(M_i, max_K) ≤
             // cutlass_nvfp4_sf_size(max_expanded + 128*ne, max_K).
-            size_t sf_sz = cutlass_nvfp4_sf_size(max_expanded + 128 * cfg.n_experts, max_K);
+            size_t sf_sz = cutlass_nvfp4_sf_size(max_expanded + (128 * cfg.n_experts), max_K);
             moe_.cutlass3x_packed = vram_alloc(vram_alloc_, packed_sz, "moe_3x_packed");
             moe_.cutlass3x_sf = vram_alloc(vram_alloc_, sf_sz, "moe_3x_sf");
             if (moe_.cutlass3x_packed && moe_.cutlass3x_sf) {
@@ -1064,7 +1066,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         if (cfg.ssm_inner_size > 0) {
             int conv_ch = cfg.ssm_conv_channels();
             int ssm_in_dim = cfg.ssm_proj_dim();
-            int gdn_fused_total = conv_ch + cfg.ssm_inner_size + 2 * cfg.ssm_dt_rank;
+            int gdn_fused_total = conv_ch + cfg.ssm_inner_size + (2 * cfg.ssm_dt_rank);
             max_dim = std::max(max_dim, ssm_in_dim);
             max_dim = std::max(max_dim, gdn_fused_total);
             max_dim = std::max(max_dim, cfg.ssm_inner_size);
@@ -1275,8 +1277,7 @@ bool GraphExecutor::allocate_nvfp4_dequant_workspace() {
     const void* lm_head_ptr = model_ ? model_->output_proj().data : nullptr;
     auto consider = [&](int64_t N, int64_t K) {
         size_t bytes = static_cast<size_t>(N) * static_cast<size_t>(K) * sizeof(half);
-        if (bytes > max_bytes)
-            max_bytes = bytes;
+        max_bytes = std::max(max_bytes, bytes);
         if (bytes <= kCap && bytes > covered_bytes)
             covered_bytes = bytes;
     };
@@ -1799,7 +1800,7 @@ int GraphExecutor::max_safe_prefill_chunk(int offset, int desired, int kv_bs) co
     // cuBLAS serves this chunk: n × (offset + n) ≤ s_cap² and n ≤ s_cap.
     // Solve the quadratic for n; floor to a KV-block multiple.
     const double cap2 = static_cast<double>(s_cap) * s_cap;
-    const double disc = static_cast<double>(offset) * offset + 4.0 * cap2;
+    const double disc = (static_cast<double>(offset) * offset) + (4.0 * cap2);
     int n_max = static_cast<int>((std::sqrt(disc) - offset) / 2.0);
     n_max = std::min(n_max, s_cap);
     if (kv_bs > 0)

@@ -32,14 +32,13 @@ __device__ __forceinline__ void load_kstep_q6k_a(int tid, const int8_t* __restri
         const int row = i >> 2;
         const int col = (i & 3) * 16;
         const bool valid = (base_m + row) < M;
-        cp_async_cg_16(&sA[row][col],
-                       A + static_cast<size_t>(base_m + row) * K + k_base + col, valid);
+        cp_async_cg_16(&sA[row][col], A + (static_cast<size_t>(base_m + row) * K) + k_base + col, valid);
     }
     const int kb0 = k_base / 32;
 #pragma unroll
     for (int i = tid; i < BM; i += kThreads) {
         const bool valid = (base_m + i) < M;
-        cp_async_ca_4(&sAsc[i][0], Asc + static_cast<size_t>(base_m + i) * subs + kb0, valid);
+        cp_async_ca_4(&sAsc[i][0], Asc + (static_cast<size_t>(base_m + i) * subs) + kb0, valid);
     }
 }
 
@@ -49,7 +48,7 @@ __device__ __forceinline__ void load_kstep_q6k_a(int tid, const int8_t* __restri
 // across it and spill BM=128 (255 regs + 40 B stack).
 constexpr int kQ6Gguf = 210;
 constexpr int kUnpParts = 7;
-constexpr int kUnpTasks = (kBN * kUnpParts + kThreads - 1) / kThreads;
+constexpr int kUnpTasks = ((kBN * kUnpParts) + kThreads - 1) / kThreads;
 constexpr int kUnpHalf = kUnpTasks / 2;
 static_assert(kUnpTasks == 2 * kUnpHalf, "unpacked B tasks split into two halves");
 
@@ -68,14 +67,14 @@ __device__ __forceinline__ void fetch_b_q6k_unpacked(Q6kUnpackedB& rb, int tid, 
     rb.shifts = 0;
 #pragma unroll
     for (int i = 0; i < kUnpHalf; ++i) {
-        const int t = tid + (T0 + i) * kThreads;
+        const int t = tid + ((T0 + i) * kThreads);
         const int row = t / kUnpParts;
         const int part = t % kUnpParts;
         const bool valid = t < kBN * kUnpParts && ((base_n_rows < 0) || (row < base_n_rows));
-        const uint8_t* blk = W + (static_cast<size_t>(base_n + row) * sblk_count + sblk) * kQ6Gguf;
-        const int off = part < 4   ? g * 64 + part * 16
-                        : part < 6 ? 128 + g * 32 + (part - 4) * 16
-                                   : 192 + 2 * j;
+        const uint8_t* blk = W + (((static_cast<size_t>(base_n + row) * sblk_count) + sblk) * kQ6Gguf);
+        const int off = part < 4   ? (g * 64) + (part * 16)
+                        : part < 6 ? 128 + (g * 32) + ((part - 4) * 16)
+                                   : 192 + (2 * j);
         const uintptr_t addr = reinterpret_cast<uintptr_t>(blk) + off;
         rb.shifts |= (static_cast<uint32_t>(addr & 3u) * 8u) << (8 * i);
         const uint32_t* wp = reinterpret_cast<const uint32_t*>(addr & ~static_cast<uintptr_t>(3));
@@ -93,7 +92,7 @@ __device__ __forceinline__ void commit_b_q6k_unpacked(const Q6kUnpackedB& rb, in
                                                       uint8_t (*sQh)[kQhRow], uint8_t (*sScd)[8]) {
 #pragma unroll
     for (int i = 0; i < kUnpHalf; ++i) {
-        const int t = tid + (T0 + i) * kThreads;
+        const int t = tid + ((T0 + i) * kThreads);
         if (t >= kBN * kUnpParts)
             break;
         const int row = t / kUnpParts;
@@ -146,10 +145,10 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
 
     const int subs = K / 32;
     const int sblk_count = K / 256;
-    const int8_t* A = X_s8 + row_off * K;
-    const __half* Asc = x_scale + row_off * subs;
-    const uint8_t* W = Wq6k + static_cast<size_t>(e) * w_stride_blocks * kQ6Gguf;
-    __half* C = out + row_off * N;
+    const int8_t* A = X_s8 + (row_off * K);
+    const __half* Asc = x_scale + (row_off * subs);
+    const uint8_t* W = Wq6k + (static_cast<size_t>(e) * w_stride_blocks * kQ6Gguf);
+    __half* C = out + (row_off * N);
 
     const int tid = threadIdx.x;
     const int warp_id = tid >> 5;
@@ -165,20 +164,30 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
     // 3-stage experiment's local-memory spill trap).
     extern __shared__ uint8_t smem6[];
     constexpr size_t kAOff = 0;
-    constexpr size_t kQlOff = kAOff + static_cast<size_t>(kStages) * BM * kRow;
-    constexpr size_t kQhOff = kQlOff + static_cast<size_t>(kStages) * kBN * kQlRow;
-    constexpr size_t kScdOff = kQhOff + static_cast<size_t>(kStages) * kBN * kQhRow;
-    constexpr size_t kAscOff = kScdOff + static_cast<size_t>(kStages) * kBN * 8;
-    typedef int8_t ARow[kRow];
-    typedef uint8_t QlRow[kQlRow];
-    typedef uint8_t QhRow[kQhRow];
-    typedef uint8_t ScdRow[8];
-    typedef __half AscRow[2];
-    auto sA = [&](int st) { return reinterpret_cast<ARow*>(smem6 + kAOff + static_cast<size_t>(st) * BM * kRow); };
-    auto sQl = [&](int st) { return reinterpret_cast<QlRow*>(smem6 + kQlOff + static_cast<size_t>(st) * kBN * kQlRow); };
-    auto sQh = [&](int st) { return reinterpret_cast<QhRow*>(smem6 + kQhOff + static_cast<size_t>(st) * kBN * kQhRow); };
-    auto sScd = [&](int st) { return reinterpret_cast<ScdRow*>(smem6 + kScdOff + static_cast<size_t>(st) * kBN * 8); };
-    auto sAsc = [&](int st) { return reinterpret_cast<AscRow*>(smem6 + kAscOff + static_cast<size_t>(st) * BM * 4); };
+    constexpr size_t kQlOff = kAOff + (static_cast<size_t>(kStages) * BM * kRow);
+    constexpr size_t kQhOff = kQlOff + (static_cast<size_t>(kStages) * kBN * kQlRow);
+    constexpr size_t kScdOff = kQhOff + (static_cast<size_t>(kStages) * kBN * kQhRow);
+    constexpr size_t kAscOff = kScdOff + (static_cast<size_t>(kStages) * kBN * 8);
+    using ARow = int8_t[kRow];
+    using QlRow = uint8_t[kQlRow];
+    using QhRow = uint8_t[kQhRow];
+    using ScdRow = uint8_t[8];
+    using AscRow = __half[2];
+    auto sA = [&](int st) {
+        return reinterpret_cast<ARow*>(smem6 + kAOff + (static_cast<size_t>(st) * BM * kRow));
+    };
+    auto sQl = [&](int st) {
+        return reinterpret_cast<QlRow*>(smem6 + kQlOff + (static_cast<size_t>(st) * kBN * kQlRow));
+    };
+    auto sQh = [&](int st) {
+        return reinterpret_cast<QhRow*>(smem6 + kQhOff + (static_cast<size_t>(st) * kBN * kQhRow));
+    };
+    auto sScd = [&](int st) {
+        return reinterpret_cast<ScdRow*>(smem6 + kScdOff + (static_cast<size_t>(st) * kBN * 8));
+    };
+    auto sAsc = [&](int st) {
+        return reinterpret_cast<AscRow*>(smem6 + kAscOff + (static_cast<size_t>(st) * BM * 4));
+    };
 
     float acc[kMF][kNF][4];
 #pragma unroll
@@ -222,9 +231,9 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
             const uint32_t qh_shift = static_cast<uint32_t>(quad * 2);
 #pragma unroll
             for (int mf = 0; mf < kMF; ++mf) {
-                const int arow_lo = warp_m * kTileM + mf * 16 + rl;
+                const int arow_lo = (warp_m * kTileM) + (mf * 16) + rl;
                 const int arow_hi = arow_lo + 8;
-                const int acol = kc + cl * 4;
+                const int acol = kc + (cl * 4);
                 uint32_t a0 = *reinterpret_cast<const uint32_t*>(&sA(stage)[arow_lo][acol]);
                 uint32_t a1 = *reinterpret_cast<const uint32_t*>(&sA(stage)[arow_hi][acol]);
                 uint32_t a2 = *reinterpret_cast<const uint32_t*>(&sA(stage)[arow_lo][acol + 16]);
@@ -234,15 +243,14 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
 
 #pragma unroll
                 for (int nf = 0; nf < kNF; ++nf) {
-                    const int bcol = warp_n * kTileN + nf * 8 + rl;
-                    const uint32_t ql0 =
-                        *reinterpret_cast<const uint32_t*>(&sQl(stage)[bcol][ql_half + cl * 4]);
+                    const int bcol = (warp_n * kTileN) + (nf * 8) + rl;
+                    const uint32_t ql0 = *reinterpret_cast<const uint32_t*>(
+                        &sQl(stage)[bcol][ql_half + (cl * 4)]);
                     const uint32_t ql1 = *reinterpret_cast<const uint32_t*>(
-                        &sQl(stage)[bcol][ql_half + cl * 4 + 16]);
+                        &sQl(stage)[bcol][ql_half + (cl * 4) + 16]);
                     const uint32_t qh0 =
                         *reinterpret_cast<const uint32_t*>(&sQh(stage)[bcol][cl * 4]);
-                    const uint32_t qh1 =
-                        *reinterpret_cast<const uint32_t*>(&sQh(stage)[bcol][cl * 4 + 16]);
+                    const uint32_t qh1 = *reinterpret_cast<const uint32_t*>(&sQh(stage)[bcol][(cl * 4) + 16]);
                     const uint32_t b0 = __vsub4(((ql0 >> nib_shift) & 0x0F0F0F0Fu) |
                                                     (((qh0 >> qh_shift) & 0x03030303u) << 4),
                                                 0x20202020u);
@@ -266,7 +274,7 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
                         : "=r"(q0), "=r"(q1), "=r"(q2), "=r"(q3)
                         : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(0), "r"(b1), "r"(0), "r"(0),
                           "r"(0), "r"(0));
-                    const int ncol_lo = warp_n * kTileN + nf * 8 + cl * 2;
+                    const int ncol_lo = (warp_n * kTileN) + (nf * 8) + (cl * 2);
                     // per-16 α from the staged scales: bytes [2*kb], [2*kb+1]; d at [4]
                     const int8_t* sc_lo = reinterpret_cast<const int8_t*>(&sScd(stage)[ncol_lo][0]);
                     const int8_t* sc_hi =
@@ -277,9 +285,9 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
                     const float dlo = __half2float(d_lo_h);
                     const float dhi = __half2float(d_hi_h);
                     const float al1 = dlo * static_cast<float>(sc_lo[static_cast<ptrdiff_t>(2 * kb)]);
-                    const float al2 = dlo * static_cast<float>(sc_lo[2 * kb + 1]);
+                    const float al2 = dlo * static_cast<float>(sc_lo[(2 * kb) + 1]);
                     const float ah1 = dhi * static_cast<float>(sc_hi[static_cast<ptrdiff_t>(2 * kb)]);
-                    const float ah2 = dhi * static_cast<float>(sc_hi[2 * kb + 1]);
+                    const float ah2 = dhi * static_cast<float>(sc_hi[(2 * kb) + 1]);
                     acc[mf][nf][0] += da_lo * fmaf(al1, static_cast<float>(p0),
                                                    al2 * static_cast<float>(q0));
                     acc[mf][nf][1] += da_lo * fmaf(ah1, static_cast<float>(p1),
@@ -306,19 +314,19 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
 
 #pragma unroll
     for (int mf = 0; mf < kMF; ++mf) {
-        const int row_lo = base_m + warp_m * kTileM + mf * 16 + rl;
+        const int row_lo = base_m + (warp_m * kTileM) + (mf * 16) + rl;
         const int row_hi = row_lo + 8;
 #pragma unroll
         for (int nf = 0; nf < kNF; ++nf) {
-            const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
+            const int col = base_n + (warp_n * kTileN) + (nf * 8) + (cl * 2);
             if (col + 1 >= N) continue;  // N-tail: OOB columns are never stored
             if (row_lo < rows) {
-                __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_lo) * N + col]);
+                __half2* p = reinterpret_cast<__half2*>(&C[(static_cast<size_t>(row_lo) * N) + col]);
                 __half2 v = __floats2half2_rn(acc[mf][nf][0], acc[mf][nf][1]);
                 *p = BETA1 ? __hadd2(*p, v) : v;
             }
             if (row_hi < rows) {
-                __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_hi) * N + col]);
+                __half2* p = reinterpret_cast<__half2*>(&C[(static_cast<size_t>(row_hi) * N) + col]);
                 __half2 v = __floats2half2_rn(acc[mf][nf][2], acc[mf][nf][3]);
                 *p = BETA1 ? __hadd2(*p, v) : v;
             }

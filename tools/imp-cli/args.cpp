@@ -180,9 +180,9 @@ CliArgs parse_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--kv-fp16") == 0) {
             // Force FP16 KV cache — opts out of the "auto" FP8 upgrade for
             // models that ship a kv_cache_quant_algo=FP8 hint.
-            args.config_overrides.push_back("kv_cache.dtype=fp16");
+            args.config_overrides.emplace_back("kv_cache.dtype=fp16");
         } else if (std::strcmp(arg, "--no-fp8-prefill") == 0) {
-            args.config_overrides.push_back("attention.fp8_prefill=never");
+            args.config_overrides.emplace_back("attention.fp8_prefill=never");
         } else if (std::strcmp(arg, "--mtp-spec-decode") == 0 && i + 1 < argc) {
             args.mtp_spec_decode_k = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--prefill-fp8") == 0) {
@@ -201,7 +201,7 @@ CliArgs parse_args(int argc, char** argv) {
             args.streaming_window = cli_int(arg, argv[++i]);
         } else if (std::strcmp(arg, "--stop") == 0 && i + 1 < argc) {
             if (args.stop_sequences.size() < 4)
-                args.stop_sequences.push_back(argv[++i]);
+                args.stop_sequences.emplace_back(argv[++i]);
             else
                 ++i;  // skip value if at limit
         } else if (std::strcmp(arg, "--bench") == 0) {
@@ -215,7 +215,7 @@ CliArgs parse_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--bench-prompt-file") == 0 && i + 1 < argc) {
             args.bench_prompt_file = argv[++i];
         } else if (std::strcmp(arg, "--image") == 0 && i + 1 < argc) {
-            args.image_paths.push_back(argv[++i]);
+            args.image_paths.emplace_back(argv[++i]);
         } else if (std::strcmp(arg, "--video-frames") == 0 && i + 1 < argc) {
             const std::string list = argv[++i];
             for (size_t s = 0; s <= list.size();) {
@@ -289,7 +289,7 @@ void apply_config_pins(imp::RuntimeConfig& runtime_cfg, const CliArgs& args) {
 if (args.bench) {
     bool user_set = false;
     for (const auto& ov : args.config_overrides)
-        if (ov.rfind("speculative.moe", 0) == 0)
+        if (ov.starts_with("speculative.moe"))
             user_set = true;
     if (!user_set)
         runtime_cfg.speculative.moe = false;
@@ -298,7 +298,7 @@ if (args.bench) {
     // semantics. An explicit --set speculative.suffix=... still wins.
     bool suffix_set = false;
     for (const auto& ov : args.config_overrides)
-        if (ov.rfind("speculative.suffix=", 0) == 0)
+        if (ov.starts_with("speculative.suffix="))
             suffix_set = true;
     if (!suffix_set)
         runtime_cfg.speculative.suffix = false;
@@ -307,7 +307,7 @@ if (args.bench) {
     // are unaffected. An explicit --set server.recurrent_snapshot_mb=... still wins.
     bool snap_set = false;
     for (const auto& ov : args.config_overrides)
-        if (ov.rfind("server.recurrent_snapshot_mb", 0) == 0)
+        if (ov.starts_with("server.recurrent_snapshot_mb"))
             snap_set = true;
     if (!snap_set)
         runtime_cfg.server.recurrent_snapshot_mb = 0;
@@ -316,7 +316,7 @@ if (args.bench) {
     // canonical baseline raw-decode. An explicit --set wins.
     bool hybrid_set = false;
     for (const auto& ov : args.config_overrides)
-        if (ov.rfind("speculative.hybrid", 0) == 0)
+        if (ov.starts_with("speculative.hybrid"))
             hybrid_set = true;
     if (!hybrid_set)
         runtime_cfg.speculative.hybrid = false;
@@ -325,7 +325,7 @@ if (args.bench) {
     // An explicit --set speculative.mtp_k=... still wins.
     bool mtp_set = false;
     for (const auto& ov : args.config_overrides)
-        if (ov.rfind("speculative.mtp_k", 0) == 0)
+        if (ov.starts_with("speculative.mtp_k"))
             mtp_set = true;
     if (!mtp_set && runtime_cfg.speculative.mtp_k < 0)
         runtime_cfg.speculative.mtp_k = 0;
@@ -333,7 +333,7 @@ if (args.bench) {
     // An explicit --set speculative.ngram=... still wins.
     bool ngram_set = false;
     for (const auto& ov : args.config_overrides)
-        if (ov.rfind("speculative.ngram=", 0) == 0)
+        if (ov.starts_with("speculative.ngram="))
             ngram_set = true;
     if (!ngram_set && !args.bench_prompt_file.empty())
         runtime_cfg.speculative.ngram = false;
@@ -342,7 +342,7 @@ if (args.bench) {
     // An explicit --set speculative.capture=… still wins.
     bool capture_set = false;
     for (const auto& ov : args.config_overrides)
-        if (ov.rfind("speculative.capture", 0) == 0)
+        if (ov.starts_with("speculative.capture"))
             capture_set = true;
     if (!capture_set)
         runtime_cfg.speculative.capture = false;
@@ -351,7 +351,7 @@ if (args.bench) {
     // KV. An explicit --set kv_cache.swa_sizing=… still wins.
     bool swa_set = false;
     for (const auto& ov : args.config_overrides)
-        if (ov.rfind("kv_cache.swa_sizing", 0) == 0)
+        if (ov.starts_with("kv_cache.swa_sizing"))
             swa_set = true;
     if (!swa_set)
         runtime_cfg.kv_cache.swa_sizing = "off";
@@ -363,7 +363,7 @@ if (args.bench) {
 if (!args.interactive && !args.prefix_caching) {
     bool pc_set = false;
     for (const auto& ov : args.config_overrides)
-        if (ov.rfind("server.prefix_cache", 0) == 0)
+        if (ov.starts_with("server.prefix_cache"))
             pc_set = true;
     if (!pc_set)
         runtime_cfg.server.prefix_cache = false;

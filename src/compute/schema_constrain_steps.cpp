@@ -248,7 +248,7 @@ bool SchemaConstrainer::object_may_close(const SchemaFrame& f) {
     if (!f.node)
         return true;
     for (const auto& req : f.node->required)
-        if (!f.emitted_keys.count(req))
+        if (!f.emitted_keys.contains(req))
             return false;
     return f.node->min_properties < 0 || static_cast<int>(f.emitted_keys.size()) >= f.node->min_properties;
 }
@@ -261,7 +261,7 @@ bool SchemaConstrainer::object_may_add_key(const SchemaFrame& f) {
     if (object_allows_additional(f.node))
         return true;  // an undeclared key can always follow
     for (const auto& [name, _] : f.node->properties)
-        if (!f.emitted_keys.count(name))
+        if (!f.emitted_keys.contains(name))
             return true;
     return false;
 }

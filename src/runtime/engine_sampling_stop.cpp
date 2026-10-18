@@ -252,7 +252,7 @@ int Engine::acquire_recurrent_slot_(int req_id) {
     // this is the catch for every other path (imp-cli, the aliasing fallback
     // above). A slab that is not there cannot be handed to a kernel.
     if (!ssm_state_->ensure_slot(slot)) {
-        if (recurrent_slot_of_.find(req_id) == recurrent_slot_of_.end())
+        if (!recurrent_slot_of_.contains(req_id))
             free_recurrent_slots_.push_back(slot);
         throw std::runtime_error("recurrent state slot " + std::to_string(slot) +
                                  " could not be committed: the card cannot spare it above the allocator "
@@ -312,7 +312,7 @@ bool Engine::recurrent_slot_admissible_() {
     // concurrent requests internal_error). The request asking now pops after those already waiting.
     int waiting = 0;
     for (const int id : scheduler_->active_ids())
-        if (recurrent_slot_of_.find(id) == recurrent_slot_of_.end())
+        if (!recurrent_slot_of_.contains(id))
             ++waiting;
     const int pos = static_cast<int>(free_recurrent_slots_.size()) - 1 - waiting;
     if (pos < 0)

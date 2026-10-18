@@ -105,7 +105,7 @@ bool GbnfGrammar::check_left_recursion(std::string* err) const {
     for (size_t start = 0; start < rules_.size(); start++) {
         if (color[start])
             continue;
-        stack.push_back({static_cast<int32_t>(start), 0});
+        stack.emplace_back(static_cast<int32_t>(start), 0);
         color[start] = 1;
         while (!stack.empty()) {
             auto& [r, i] = stack.back();
@@ -120,7 +120,7 @@ bool GbnfGrammar::check_left_recursion(std::string* err) const {
                 }
                 if (color[static_cast<size_t>(next)] == 0) {
                     color[static_cast<size_t>(next)] = 1;
-                    stack.push_back({next, 0});
+                    stack.emplace_back(next, 0);
                 }
             } else {
                 color[static_cast<size_t>(r)] = 2;

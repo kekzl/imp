@@ -62,7 +62,7 @@ __global__ void moe_apply_per_expert_scale_kernel(
     const int32_t* __restrict__ indices,  // [n_weights]
     const __half* __restrict__ scales,    // [n_experts]
     int n_weights) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= n_weights)
         return;
     int eid = indices[idx];
@@ -73,7 +73,7 @@ __global__ void moe_apply_per_expert_scale_kernel(
 // Replace +/-Inf with 0 in an FP16 tensor (in-place).
 // Used to sanitize FP16 GEMM outputs that overflow (e.g. Gemma 4 shared MLP at deep layers).
 __global__ void sanitize_fp16_kernel(__half* __restrict__ data, int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx >= n)
         return;
     __half v = data[idx];
@@ -300,7 +300,7 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
             }
             int64_t total_elems = static_cast<int64_t>(ctx.n) * ctx.d;
             int threads_s = 256;
-            int blocks_s = static_cast<int>((total_elems / 2 + threads_s - 1) / threads_s);
+            int blocks_s = static_cast<int>(((total_elems / 2) + threads_s - 1) / threads_s);
             float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(ctx.d));
             scale_fp16_kernel<<<blocks_s, threads_s, 0, stream>>>(static_cast<half*>(router_in.data),
                                                                   __float2half(inv_sqrt_d), total_elems);
@@ -553,7 +553,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 size_t max_act_cols = std::max(static_cast<size_t>(ly.expert_up_packed.shape[2]),
                                                static_cast<size_t>(ly.expert_down_packed.shape[2]));
                 size_t fp8_buf_needed = std::max(up_fp8_sz, down_fp8_sz) +
-                                        static_cast<size_t>(expanded) * max_act_cols;
+                                        (static_cast<size_t>(expanded) * max_act_cols);
                 bool can_fp8_batch = (!can_fp16_batch_nosync && moe_.batch_dequant_buf != nullptr &&
                                       moe_.batch_dequant_buf_size >= fp8_buf_needed &&
                                       ly.expert_up_packed.data && ly.expert_up_packed.on_device &&

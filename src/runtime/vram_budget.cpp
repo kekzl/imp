@@ -48,7 +48,7 @@ size_t gguf_moe_nvfp4_cache_bytes(const Model& model, bool decode_all, int nvfp4
 size_t planned_post_cache_reserve(const VRAMBudget& budget, size_t total_vram) {
     if (budget.kv_plan_bytes == 0)
         return 0;
-    return budget.kv_plan_bytes + 256ULL * 1024 * 1024 + vram_allocator_headroom(total_vram) +
+    return budget.kv_plan_bytes + (256ULL * 1024 * 1024) + vram_allocator_headroom(total_vram) +
            budget.library_reserve_bytes + budget.imma_plane_bytes + budget.ssm_footprint_bytes;
 }
 
@@ -93,9 +93,8 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
             d.sf_bytes += align_up(static_cast<size_t>(ne) *
                                        cutlass_nvfp4_sf_size(N, static_cast<int>(K)),
                                    kSfAlign);
-            size_t slab = static_cast<size_t>(ne) * N * (K / 2) +
-                          static_cast<size_t>(ne) * N * (K / 16) +
-                          static_cast<size_t>(ne) * sizeof(float);
+            size_t slab = (static_cast<size_t>(ne) * N * (K / 2)) + (static_cast<size_t>(ne) * N * (K / 16)) +
+                          (static_cast<size_t>(ne) * sizeof(float));
             d.moe_slab_bytes = std::max(d.moe_slab_bytes, slab);
             return;
         }
@@ -115,8 +114,8 @@ NativeCacheDemand compute_native_cache_demand(const Model& model) {
                                kSfAlign);
         // Transient contiguous-copy slab (phase 3-moe copy branch: packed + micro-scales + tensor-scales,
         // matching add_bytes there). The zero-copy borrow branch needs ~none of this: it is an upper bound.
-        size_t slab = static_cast<size_t>(ne) * N * Kp + static_cast<size_t>(ne) * N * (K / 16) +
-                      static_cast<size_t>(ne) * sizeof(float);
+        size_t slab = (static_cast<size_t>(ne) * N * Kp) + (static_cast<size_t>(ne) * N * (K / 16)) +
+                      (static_cast<size_t>(ne) * sizeof(float));
         d.moe_slab_bytes = std::max(d.moe_slab_bytes, slab);
     };
 
@@ -349,11 +348,11 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
     int n_global_layers = n_kv_layers;
     if (swa_live_tokens > 0 && n_swa_layers > 0 && n_swa_layers <= n_kv_layers) {
         n_global_layers = n_kv_layers - n_swa_layers;
-        int swa_blocks_per_seq = (swa_live_tokens + bs - 1) / bs + 1;
+        int swa_blocks_per_seq = ((swa_live_tokens + bs - 1) / bs) + 1;
         int batch = config.max_batch_size > 0 ? config.max_batch_size : 1;
         budget.swa_max_blocks = swa_blocks_per_seq * batch;
         if (config.swa_shared_tokens > 0)
-            budget.swa_max_blocks += (config.swa_shared_tokens + bs - 1) / bs + 1;
+            budget.swa_max_blocks += ((config.swa_shared_tokens + bs - 1) / bs) + 1;
         size_t swa_footprint = static_cast<size_t>(budget.swa_max_blocks) * per_layer_block_bytes *
                                static_cast<size_t>(n_swa_layers);
         if (swa_footprint >= available)
@@ -436,7 +435,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         count_nvfp4(L.w_down_shared, L.w_down_shared.qtype);
     }
 
-    size_t nvfp4_estimate = nvfp4_elems / 2 + nvfp4_elems / 16 + fp8_head_bytes;
+    size_t nvfp4_estimate = (nvfp4_elems / 2) + (nvfp4_elems / 16) + fp8_head_bytes;
     size_t cutlass_sf_estimate = nvfp4_elems / 16;
 
     // Cross-check heuristic estimate against StoragePlanner's projected total (source-qtype-aware):
@@ -472,8 +471,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             // If the slab genuinely cannot be allocated, the builder degrades to partial coverage.
             budget.mandatory_sf_bytes = demand.sf_bytes;
             budget.mandatory_moe_bytes = demand.moe_slab_bytes;
-            size_t phase3_reserve =
-                vram_reserve_floor(total_vram, reserve_floor_pct) + 1024ULL * 1024 * 1024;
+            size_t phase3_reserve = vram_reserve_floor(total_vram, reserve_floor_pct) +
+                                    (1024ULL * 1024 * 1024);
             // KV is charged the full measured demand: nothing is hidden from free_vram, the plan
             // states the cost instead of enforcing it via a hidden hold.
             size_t native_need = demand.total() + phase3_reserve;
@@ -625,7 +624,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         // outright. Hybrids price KV at ~0.02 MiB/token, so full coverage plus 12.5% streaming
         // headroom stays cheap; take it whenever the cost is under 1 GiB (dense/expensive-KV models
         // keep the old floor, protected by the kv_fraction affordability cap below).
-        const int full_cov_tok = config.max_seq_len + config.max_seq_len / 8;
+        const int full_cov_tok = config.max_seq_len + (config.max_seq_len / 8);
         if (full_cov_tok > min_kv_tok && per_block_total > 0) {
             const size_t full_cov_bytes =
                 static_cast<size_t>((full_cov_tok + bs - 1) / bs) * per_block_total;

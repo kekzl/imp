@@ -468,7 +468,7 @@ int KVCache::commit_blocks_(int blocks) {
     // blocks, erasing live KV (#1652). Synchronize stream 0 (not the device): the only work
     // waited on is these memsets, and growth is rare, so the sync costs nothing extra.
     if (blocks > first_new)
-        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(0));
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(nullptr));
     // A block is usable only with its scales and metadata backed too (#2483, #2360).
     if (!commit_scales_(first_new, blocks) || !commit_minmax_(first_new, blocks))
         return committed_blocks_;
@@ -546,7 +546,7 @@ int KVCache::try_grow_to(int wanted) {
         // opportunistic, a promised SSM slot or the vision tower is not.
         const size_t headroom = vram_allocator_headroom(total_now);
         const size_t spare = free_now > headroom ? free_now - headroom : 0;
-        const size_t affordable = static_cast<size_t>(have) + spare / per_block;
+        const size_t affordable = static_cast<size_t>(have) + (spare / per_block);
         if (affordable < static_cast<size_t>(target)) {
             const int capped = static_cast<int>(affordable);
             if (last_capped_logged_.exchange(capped, std::memory_order_relaxed) != capped) {
@@ -687,11 +687,11 @@ void* KVCache::k_ptr(int layer, int block_id) {
 #endif
     // Per-layer shape path: use precomputed per-layer offsets and block bytes.
     if (!layer_block_bytes_.empty()) {
-        size_t offset = layer_k_offset_[layer] + static_cast<size_t>(block_id) * layer_block_bytes_[layer];
+        size_t offset = layer_k_offset_[layer] + (static_cast<size_t>(block_id) * layer_block_bytes_[layer]);
         return static_cast<char*>(pool_) + offset;
     }
     // K blocks: [layer * 2 * max_blocks + block_id] * block_bytes
-    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ + static_cast<size_t>(block_id)) *
+    size_t offset = ((static_cast<size_t>(layer) * 2 * max_blocks_) + static_cast<size_t>(block_id)) *
                     block_bytes_;
     return static_cast<char*>(pool_) + offset;
 }
@@ -708,11 +708,11 @@ void* KVCache::v_ptr(int layer, int block_id) {
 #endif
     // Per-layer shape path
     if (!layer_block_bytes_.empty()) {
-        size_t offset = layer_v_offset_[layer] + static_cast<size_t>(block_id) * layer_block_bytes_[layer];
+        size_t offset = layer_v_offset_[layer] + (static_cast<size_t>(block_id) * layer_block_bytes_[layer]);
         return static_cast<char*>(pool_) + offset;
     }
     // Standard K+V pool: V blocks follow K blocks per layer
-    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ + max_blocks_ +
+    size_t offset = ((static_cast<size_t>(layer) * 2 * max_blocks_) + max_blocks_ +
                      static_cast<size_t>(block_id)) *
                     block_bytes_;
     return static_cast<char*>(pool_) + offset;
@@ -762,11 +762,11 @@ void* KVCache::k_scale_ptr(int layer, int block_id) {
     // Per-layer NVFP4 path
     if (!layer_scale_block_bytes_.empty()) {
         size_t off = layer_k_scale_offset_[layer] +
-                     static_cast<size_t>(block_id) * layer_scale_block_bytes_[layer];
+                     (static_cast<size_t>(block_id) * layer_scale_block_bytes_[layer]);
         return static_cast<char*>(scale_pool_) + off;
     }
     // Scale pool always uses 2x layout (K scales region + V scales region)
-    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ + static_cast<size_t>(block_id)) *
+    size_t offset = ((static_cast<size_t>(layer) * 2 * max_blocks_) + static_cast<size_t>(block_id)) *
                     scale_block_bytes_;
     return static_cast<char*>(scale_pool_) + offset;
 }
@@ -785,10 +785,10 @@ void* KVCache::v_scale_ptr(int layer, int block_id) {
 #endif
     if (!layer_scale_block_bytes_.empty()) {
         size_t off = layer_v_scale_offset_[layer] +
-                     static_cast<size_t>(block_id) * layer_scale_block_bytes_[layer];
+                     (static_cast<size_t>(block_id) * layer_scale_block_bytes_[layer]);
         return static_cast<char*>(scale_pool_) + off;
     }
-    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ + max_blocks_ +
+    size_t offset = ((static_cast<size_t>(layer) * 2 * max_blocks_) + max_blocks_ +
                      static_cast<size_t>(block_id)) *
                     scale_block_bytes_;
     return static_cast<char*>(scale_pool_) + offset;
@@ -818,7 +818,7 @@ struct KVCopyPairs {
 // {k_off, v_off, block_bytes, k_scale_off, v_scale_off, scale_bytes}.
 __global__ void kv_block_copy_kernel(char* pool, char* spool, char* mpool, size_t mbytes, size_t mstride,
                                      const size_t* __restrict__ meta, KVCopyPairs pairs) {
-    const size_t* m = meta + 6ull * blockIdx.x;
+    const size_t* m = meta + (6ull * blockIdx.x);
     const int sec = blockIdx.y;
     char* base = (sec < 2) ? pool : (sec < 4) ? spool : mpool;
     if (base == nullptr || m[2] == 0)
@@ -831,8 +831,8 @@ __global__ void kv_block_copy_kernel(char* pool, char* spool, char* mpool, size_
                        : (sec == 2) ? m[3]
                        : (sec == 3) ? m[4]
                                     : static_cast<size_t>(blockIdx.x) * mstride;
-    const char* s = base + off + static_cast<size_t>(pairs.src[blockIdx.z]) * bytes;
-    char* d = base + off + static_cast<size_t>(pairs.dst[blockIdx.z]) * bytes;
+    const char* s = base + off + (static_cast<size_t>(pairs.src[blockIdx.z]) * bytes);
+    char* d = base + off + (static_cast<size_t>(pairs.dst[blockIdx.z]) * bytes);
     const bool vec_ok = bytes % 16 == 0 && (reinterpret_cast<uintptr_t>(s) % 16 == 0) &&
                         (reinterpret_cast<uintptr_t>(d) % 16 == 0);
     if (vec_ok) {
@@ -852,12 +852,11 @@ void KVCache::copy_blocks_device(const int* srcs, const int* dsts, int n_pairs,
                                  cudaStream_t stream) {
     if (n_pairs <= 0 || !srcs || !dsts)
         return;
-    if (n_pairs > kCopyMaxPairs)
-        n_pairs = kCopyMaxPairs;
+    n_pairs = std::min(n_pairs, kCopyMaxPairs);
     if (!d_copy_meta_) {
         std::vector<size_t> meta(6ull * n_layers_);
         for (int l = 0; l < n_layers_; ++l) {
-            size_t* m = meta.data() + 6ull * l;
+            size_t* m = meta.data() + (6ull * l);
             if (layer_is_swa(l)) {
                 // Separate id space — never copied here (route excludes SWA).
                 m[2] = m[5] = 0;

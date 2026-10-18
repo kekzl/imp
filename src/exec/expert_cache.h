@@ -240,7 +240,7 @@ struct ExpertLRUCache {
     float* layer_slot_scales(int layer) const {
         if (!d_slot_scales_ || layer < 0 || layer >= n_layers_)
             return nullptr;
-        return d_slot_scales_ + static_cast<size_t>(layer) * slots_per_layer_;
+        return d_slot_scales_ + (static_cast<size_t>(layer) * slots_per_layer_);
     }
 
     // Check if (layer, expert) is cached (no insertion). Updates LRU recency
@@ -270,8 +270,8 @@ struct ExpertLRUCache {
         if (!pool_ || slot_idx_within_layer < 0 ||
             slot_idx_within_layer >= slots_per_layer_)
             return nullptr;
-        size_t flat = static_cast<size_t>(layer) * slots_per_layer_ + slot_idx_within_layer;
-        return static_cast<char*>(pool_) + flat * slot_size_;
+        size_t flat = (static_cast<size_t>(layer) * slots_per_layer_) + slot_idx_within_layer;
+        return static_cast<char*>(pool_) + (flat * slot_size_);
     }
 
     // Phase 4 — async prefetch.

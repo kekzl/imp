@@ -21,15 +21,15 @@ namespace {
 __global__ void ssm_conv_tap_stash_kernel(half* __restrict__ tap_pool, const half* __restrict__ x_in,
                                           int n_tokens, int channels, const int* __restrict__ d_real_n,
                                           const int* __restrict__ slots) {
-    const int ch = blockIdx.x * blockDim.x + threadIdx.x;
+    const int ch = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (ch >= channels)
         return;
     const int seq = blockIdx.y;
     const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
     if (real_n <= 0)
         return;
-    const half* row = x_in + (static_cast<size_t>(seq) * n_tokens + (real_n - 1)) * channels;
-    tap_pool[static_cast<size_t>(slots[seq]) * channels + ch] = row[ch];
+    const half* row = x_in + (((static_cast<size_t>(seq) * n_tokens) + (real_n - 1)) * channels);
+    tap_pool[(static_cast<size_t>(slots[seq]) * channels) + ch] = row[ch];
 }
 
 // Advance a window by the stashed tap: drop the oldest entry, append the tap.
@@ -38,15 +38,15 @@ __global__ void ssm_conv_tap_stash_kernel(half* __restrict__ tap_pool, const hal
 __global__ void ssm_conv_tap_apply_kernel(float* __restrict__ conv_pool, int64_t slot_stride,
                                           const half* __restrict__ tap_pool, int channels, int kernel_size,
                                           const int* __restrict__ slots) {
-    const int ch = blockIdx.x * blockDim.x + threadIdx.x;
+    const int ch = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (ch >= channels)
         return;
     const int slot = slots[blockIdx.y];
-    float* w = conv_pool + static_cast<size_t>(slot) * static_cast<size_t>(slot_stride) +
-               static_cast<int64_t>(ch) * kernel_size;
+    float* w = conv_pool + (static_cast<size_t>(slot) * static_cast<size_t>(slot_stride)) +
+               (static_cast<int64_t>(ch) * kernel_size);
     for (int k = 0; k + 1 < kernel_size; k++)
         w[k] = w[k + 1];
-    w[kernel_size - 1] = __half2float(tap_pool[static_cast<size_t>(slot) * channels + ch]);
+    w[kernel_size - 1] = __half2float(tap_pool[(static_cast<size_t>(slot) * channels) + ch]);
 }
 
 constexpr int kTapThreads = 256;

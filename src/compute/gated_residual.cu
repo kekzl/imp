@@ -23,9 +23,9 @@ __global__ void hc_grouped_rmsnorm_kernel(const half* __restrict__ x, const half
                                           half* __restrict__ out, int hc, int d, float eps) {
     const int row = blockIdx.x / hc;
     const int s = blockIdx.x % hc;
-    const size_t base = (static_cast<size_t>(row) * hc + s) * d;
+    const size_t base = ((static_cast<size_t>(row) * hc) + s) * d;
     const half* xr = x + base;
-    const half* wr = w + static_cast<size_t>(s) * d;
+    const half* wr = w + (static_cast<size_t>(s) * d);
     half* orow = out + base;
 
     float sum = 0.0f;
@@ -47,7 +47,7 @@ __global__ void hc_grouped_rmsnorm_kernel(const half* __restrict__ x, const half
             red[0] = v;
     }
     __syncthreads();
-    const float inv = rsqrtf(red[0] / static_cast<float>(d) + eps);
+    const float inv = rsqrtf((red[0] / static_cast<float>(d)) + eps);
     for (int j = threadIdx.x; j < d; j += blockDim.x)
         orow[j] = __float2half(__half2float(xr[j]) * inv * (1.0f + __half2float(wr[j])));
 }
@@ -74,7 +74,7 @@ __global__ void hc_read_decode_kernel(const half* __restrict__ x, const half* __
         float v[kMaxHc];
 #pragma unroll
         for (int s = 0; s < kMaxHc; ++s)
-            v[s] = s < hc ? __half2float(x[static_cast<size_t>(s) * d + j]) : 0.0f;
+            v[s] = s < hc ? __half2float(x[(static_cast<size_t>(s) * d) + j]) : 0.0f;
 #pragma unroll
         for (int s = 0; s < kMaxHc; ++s)
             part[s] += v[s] * v[s];
@@ -93,7 +93,7 @@ __global__ void hc_read_decode_kernel(const half* __restrict__ x, const half* __
             for (int off = 16; off > 0; off >>= 1)
                 v += __shfl_xor_sync(0xffffffffu, v, off);
             if (lane == 0)
-                inv[s] = rsqrtf(v / static_cast<float>(d) + eps);
+                inv[s] = rsqrtf((v / static_cast<float>(d)) + eps);
         }
     __syncthreads();
     // 8 halves per thread step (d % 8 == 0: one stream per vector), elementwise as in the norm kernel.
@@ -114,11 +114,11 @@ __global__ void hc_read_decode_kernel(const half* __restrict__ x, const half* __
     }
     __syncthreads();
 
-    const int row = blockIdx.x * rows_per_block + warp;
+    const int row = (blockIdx.x * rows_per_block) + warp;
     if (warp >= rows_per_block || row >= lowrank + n_inj)
         return;
-    const half* A_row = row < lowrank ? down + static_cast<size_t>(row) * K
-                                      : inject + static_cast<size_t>(row - lowrank) * K;
+    const half* A_row = row < lowrank ? down + (static_cast<size_t>(row) * K)
+                                      : inject + (static_cast<size_t>(row - lowrank) * K);
     const float4* A_v = reinterpret_cast<const float4*>(A_row);
     const float4* x_v = reinterpret_cast<const float4*>(s_x);
     float sum = 0.0f;
@@ -155,22 +155,22 @@ __global__ void hc_read_decode_kernel(const half* __restrict__ x, const half* __
 __global__ void hc_write_kernel(half* __restrict__ hidden, const half* __restrict__ h,
                                 const half* __restrict__ mixed, const half* __restrict__ inj, int hc, int d,
                                 int64_t total) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= total)
         return;
     const int64_t t = i / (static_cast<int64_t>(hc) * d);
-    const int64_t rem = i - t * hc * d;
+    const int64_t rem = i - (t * hc * d);
     const int s = static_cast<int>(rem / d);
-    const int j = static_cast<int>(rem - static_cast<int64_t>(s) * d);
-    const int64_t k = t * d + j;
+    const int j = static_cast<int>(rem - (static_cast<int64_t>(s) * d));
+    const int64_t k = (t * d) + j;
     const half out = __float2half(__half2float(h[k]) - __half2float(mixed[k]));
-    const float g = __half2float(inj[t * hc + s]);
+    const float g = __half2float(inj[(t * hc) + s]);
     const float o = __half2float(out);
-    hidden[i] = __float2half(__half2float(hidden[i]) + o * g);
+    hidden[i] = __float2half(__half2float(hidden[i]) + (o * g));
 }
 
 __global__ void hc_silu_div_kernel(half* __restrict__ x, float inv_hc, int64_t n) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i < n) {
         const float v = __half2float(x[i]) * inv_hc;
         x[i] = __float2half(v * sigmoidf_(v));
@@ -180,15 +180,15 @@ __global__ void hc_silu_div_kernel(half* __restrict__ x, float inv_hc, int64_t n
 // Grid over n*d; loop over the hc streams.
 __global__ void hc_mix_kernel(const half* __restrict__ mixw, const half* __restrict__ normed,
                               half* __restrict__ out, half* __restrict__ out2, int hc, int d, int64_t nd) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= nd)
         return;
     const int64_t t = i / d;
-    const int j = static_cast<int>(i - t * d);
-    const size_t base = static_cast<size_t>(t) * hc * d + j;
+    const int j = static_cast<int>(i - (t * d));
+    const size_t base = (static_cast<size_t>(t) * hc * d) + j;
     float acc = 0.0f;
     for (int s = 0; s < hc; ++s) {
-        const size_t k = base + static_cast<size_t>(s) * d;
+        const size_t k = base + (static_cast<size_t>(s) * d);
         acc += sigmoidf_(__half2float(mixw[k])) * __half2float(normed[k]);
     }
     const half r = __float2half(acc / static_cast<float>(hc));
@@ -198,7 +198,7 @@ __global__ void hc_mix_kernel(const half* __restrict__ mixw, const half* __restr
 }
 
 __global__ void hc_inject_weights_kernel(half* __restrict__ inj, float inv_hc, int64_t n) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i < n)
         inj[i] = __float2half(2.0f * sigmoidf_(__half2float(inj[i]) * inv_hc));
 }
@@ -206,33 +206,33 @@ __global__ void hc_inject_weights_kernel(half* __restrict__ inj, float inv_hc, i
 // Grid over n*hc*d.
 __global__ void hc_inject_add_kernel(half* __restrict__ hidden, const half* __restrict__ out,
                                      const half* __restrict__ inj, int hc, int d, int64_t total) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= total)
         return;
     const int64_t t = i / (static_cast<int64_t>(hc) * d);
-    const int64_t rem = i - t * hc * d;
+    const int64_t rem = i - (t * hc * d);
     const int s = static_cast<int>(rem / d);
-    const int j = static_cast<int>(rem - static_cast<int64_t>(s) * d);
-    const float g = __half2float(inj[t * hc + s]);
-    const float o = __half2float(out[t * d + j]);
-    hidden[i] = __float2half(__half2float(hidden[i]) + o * g);
+    const int j = static_cast<int>(rem - (static_cast<int64_t>(s) * d));
+    const float g = __half2float(inj[(t * hc) + s]);
+    const float o = __half2float(out[(t * d) + j]);
+    hidden[i] = __float2half(__half2float(hidden[i]) + (o * g));
 }
 
 __global__ void hc_sub_kernel(const half* __restrict__ a, const half* __restrict__ b, half* __restrict__ out,
                               int64_t n) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i < n)
         out[i] = __float2half(__half2float(a[i]) - __half2float(b[i]));
 }
 
 __global__ void hc_repeat_kernel(const half* __restrict__ src, half* __restrict__ dst, int hc, int d,
                                  int64_t total) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= total)
         return;
     const int64_t t = i / (static_cast<int64_t>(hc) * d);
-    const int j = static_cast<int>((i - t * hc * d) % d);
-    dst[i] = src[t * d + j];
+    const int j = static_cast<int>((i - (t * hc * d)) % d);
+    dst[i] = src[(t * d) + j];
 }
 
 inline int blocks_for(int64_t n) { return static_cast<int>((n + kThreads - 1) / kThreads); }

@@ -39,7 +39,7 @@ __device__ __forceinline__ void load_kstep_q5k(int tid, const int8_t* __restrict
         const int row = i >> 2;
         const int col = (i & 3) * 16;
         const bool valid = (base_m + row) < M;
-        cp_async_cg_16(&sA[row][col], A + static_cast<size_t>(base_m + row) * K + k_base + col, valid);
+        cp_async_cg_16(&sA[row][col], A + (static_cast<size_t>(base_m + row) * K) + k_base + col, valid);
     }
     const int ks = k_base / kBK;
     const int sblk = ks >> 2;  // super-block index along K
@@ -50,7 +50,7 @@ __device__ __forceinline__ void load_kstep_q5k(int tid, const int8_t* __restrict
         const int row = i / 5;
         const int part = i % 5;
         const bool bvalid = (base_n_rows < 0) || (row < base_n_rows);
-        const uint8_t* blk = Wq5k + (static_cast<size_t>(base_n + row) * sblk_count + sblk) * kQ5Block;
+        const uint8_t* blk = Wq5k + (((static_cast<size_t>(base_n + row) * sblk_count) + sblk) * kQ5Block);
         if (part == 0) {
             cp_async_cg_16(&sBh[row][0], blk, bvalid);  // d, dmin, 12-B scales
         } else if (part < 3) {
@@ -65,8 +65,8 @@ __device__ __forceinline__ void load_kstep_q5k(int tid, const int8_t* __restrict
 #pragma unroll
     for (int i = tid; i < BM; i += kThreads) {
         const bool valid = (base_m + i) < M;
-        cp_async_ca_4(&sAsc[i][0], Asc + static_cast<size_t>(base_m + i) * subs + kb0, valid);
-        cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
+        cp_async_ca_4(&sAsc[i][0], Asc + (static_cast<size_t>(base_m + i) * subs) + kb0, valid);
+        cp_async_ca_8(&sArs[i][0], Ars + (static_cast<size_t>(base_m + i) * subs) + kb0, valid);
     }
 }
 
@@ -108,11 +108,11 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q5k_raw_kernel(
 
     const int subs = K / 32;
     const int sblk_count = K / 256;
-    const int8_t* A = X_s8 + row_off * K;
-    const __half* Asc = x_scale + row_off * subs;
-    const float* Ars = x_rowsum + row_off * subs;
-    const uint8_t* W = Wq5k + static_cast<size_t>(e) * w_stride_blocks * kQ5Block;
-    __half* C = out + row_off * N;
+    const int8_t* A = X_s8 + (row_off * K);
+    const __half* Asc = x_scale + (row_off * subs);
+    const float* Ars = x_rowsum + (row_off * subs);
+    const uint8_t* W = Wq5k + (static_cast<size_t>(e) * w_stride_blocks * kQ5Block);
+    __half* C = out + (row_off * N);
 
     const int tid = threadIdx.x;
     const int warp_id = tid >> 5;
@@ -179,7 +179,7 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q5k_raw_kernel(
                 uint32_t sc, mn;
                 q5k_scale_min(j0 + kb, h + 4, sc, mn);
                 const float a = __half2float(d_h) * static_cast<float>(sc);
-                const float b = 16.0f * a - __half2float(dmin_h) * static_cast<float>(mn);
+                const float b = (16.0f * a) - (__half2float(dmin_h) * static_cast<float>(mn));
                 sBab[stage][row][kb] = __floats2half2_rn(a, b);
             }
         }
@@ -192,9 +192,9 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q5k_raw_kernel(
             const uint32_t hbit = static_cast<uint32_t>(j0 + kb);  // 2 * group + nibble half
 #pragma unroll
             for (int mf = 0; mf < kMF; ++mf) {
-                const int arow_lo = warp_m * kTileM + mf * 16 + rl;
+                const int arow_lo = (warp_m * kTileM) + (mf * 16) + rl;
                 const int arow_hi = arow_lo + 8;
-                const int acol = kc + cl * 4;
+                const int acol = kc + (cl * 4);
                 uint32_t a0 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol]);
                 uint32_t a1 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_hi][acol]);
                 uint32_t a2 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol + 16]);
@@ -206,15 +206,15 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q5k_raw_kernel(
 
 #pragma unroll
                 for (int nf = 0; nf < kNF; ++nf) {
-                    const int bcol = warp_n * kTileN + nf * 8 + rl;
+                    const int bcol = (warp_n * kTileN) + (nf * 8) + rl;
                     const uint32_t b0 = q5k_s8x4(*reinterpret_cast<const uint32_t*>(
                                                      &sBq[stage][bcol][static_cast<ptrdiff_t>(cl * 4)]),
                                                  *reinterpret_cast<const uint32_t*>(
                                                      &sBqh[stage][bcol][static_cast<ptrdiff_t>(cl * 4)]),
                                                  shift, hbit);
                     const uint32_t b1 = q5k_s8x4(
-                        *reinterpret_cast<const uint32_t*>(&sBq[stage][bcol][cl * 4 + 16]),
-                        *reinterpret_cast<const uint32_t*>(&sBqh[stage][bcol][cl * 4 + 16]), shift, hbit);
+                        *reinterpret_cast<const uint32_t*>(&sBq[stage][bcol][(cl * 4) + 16]),
+                        *reinterpret_cast<const uint32_t*>(&sBqh[stage][bcol][(cl * 4) + 16]), shift, hbit);
 
                     int32_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
                     asm volatile(
@@ -223,7 +223,7 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q5k_raw_kernel(
                         : "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3)
                         : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(0), "r"(0), "r"(0),
                           "r"(0));
-                    const int ncol_lo = warp_n * kTileN + nf * 8 + cl * 2;
+                    const int ncol_lo = (warp_n * kTileN) + (nf * 8) + (cl * 2);
                     const __half2 ab_lo = sBab[stage][ncol_lo][kb];
                     const __half2 ab_hi = sBab[stage][ncol_lo + 1][kb];
                     const float al = __half2float(__low2half(ab_lo));
@@ -242,20 +242,20 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q5k_raw_kernel(
 
 #pragma unroll
     for (int mf = 0; mf < kMF; ++mf) {
-        const int row_lo = base_m + warp_m * kTileM + mf * 16 + rl;
+        const int row_lo = base_m + (warp_m * kTileM) + (mf * 16) + rl;
         const int row_hi = row_lo + 8;
 #pragma unroll
         for (int nf = 0; nf < kNF; ++nf) {
-            const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
+            const int col = base_n + (warp_n * kTileN) + (nf * 8) + (cl * 2);
             if (col + 1 >= N)
                 continue;  // N-tail: OOB columns are never stored
             if (row_lo < rows) {
-                __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_lo) * N + col]);
+                __half2* p = reinterpret_cast<__half2*>(&C[(static_cast<size_t>(row_lo) * N) + col]);
                 __half2 v = __floats2half2_rn(acc[mf][nf][0], acc[mf][nf][1]);
                 *p = BETA1 ? __hadd2(*p, v) : v;
             }
             if (row_hi < rows) {
-                __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_hi) * N + col]);
+                __half2* p = reinterpret_cast<__half2*>(&C[(static_cast<size_t>(row_hi) * N) + col]);
                 __half2 v = __floats2half2_rn(acc[mf][nf][2], acc[mf][nf][3]);
                 *p = BETA1 ? __hadd2(*p, v) : v;
             }

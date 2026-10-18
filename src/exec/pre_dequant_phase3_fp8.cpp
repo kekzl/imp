@@ -36,7 +36,7 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
         };
         std::vector<MigrateEntry> to_migrate;
         for (auto& [orig_ptr, fp16_tensor] : wcache_->fp16) {
-            if (wcache_->fp8.count(orig_ptr))
+            if (wcache_->fp8.contains(orig_ptr))
                 continue;
             size_t n = static_cast<size_t>(fp16_tensor.shape[0]) * fp16_tensor.shape[1];
             to_migrate.push_back({orig_ptr, fp16_tensor, n});
@@ -48,8 +48,7 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
             for (auto& e : to_migrate) {
                 int threads_needed = (static_cast<int>(e.n_elems) + 3) / 4;
                 int grid = (threads_needed + 255) / 256;
-                if (grid > max_grid)
-                    max_grid = grid;
+                max_grid = std::max(max_grid, grid);
                 total_fp8_bytes += e.n_elems;
             }
 
@@ -116,13 +115,13 @@ void QuantPipeline::nvfp4_decode_free_fp16_and_migrate_fp8_(size_t& remaining_bu
     int kept_count = 0;
     std::vector<const void*> to_erase;
     for (auto& [ptr, tensor] : wcache_->fp16) {
-        const bool has_cutlass_nvfp4 = (wcache_->cutlass_nvfp4.find(ptr) != wcache_->cutlass_nvfp4.end());
+        const bool has_cutlass_nvfp4 = (wcache_->cutlass_nvfp4.contains(ptr));
         if (has_cutlass_nvfp4) {
             kept_bytes += static_cast<size_t>(tensor.shape[0]) * tensor.shape[1] * sizeof(half);
             kept_count++;
             continue;
         }
-        const bool has_nvfp4 = (wcache_->nvfp4.find(ptr) != wcache_->nvfp4.end());
+        const bool has_nvfp4 = (wcache_->nvfp4.contains(ptr));
         // A native-FP8 entry beside an FP16 copy (gemm.fp8_native_prefill off) serves only the
         // M=1 GEMV; prefill reads the copy. Freeing FP16 on its account leaves
         // prefill with a dangling pointer (cublasLtMatmul status 14) and an illegal access at the

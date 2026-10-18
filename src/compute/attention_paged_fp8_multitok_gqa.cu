@@ -52,7 +52,7 @@ __device__ __forceinline__ void fp8_words_to_half2(const uint32_t (&w)[NW], half
             __nv_cvt_fp8x2_to_halfraw2(static_cast<__nv_fp8x2_storage_t>(w[i] & 0xFFFFu), __NV_E4M3);
         const __half2_raw r1 = __nv_cvt_fp8x2_to_halfraw2(static_cast<__nv_fp8x2_storage_t>(w[i] >> 16), __NV_E4M3);
         out[2 * i] = half2(r0);
-        out[2 * i + 1] = half2(r1);
+        out[(2 * i) + 1] = half2(r1);
     }
 }
 
@@ -112,8 +112,8 @@ struct WalkGeom {
 };
 
 __device__ __forceinline__ bool cursor_enter_block(Cursor& c, const WalkGeom& g, int phys) {
-    c.K_block = g.K_cache + (int64_t)phys * g.kv_block_stride + g.kv_head_off;
-    c.V_block = g.V_cache + (int64_t)phys * g.kv_block_stride + g.kv_head_off;
+    c.K_block = g.K_cache + ((int64_t)phys * g.kv_block_stride) + g.kv_head_off;
+    c.V_block = g.V_cache + ((int64_t)phys * g.kv_block_stride) + g.kv_head_off;
     const int tok_start = c.blk * g.block_size;
     c.n_tok = (tok_start + g.block_size > g.ctx_len) ? (g.ctx_len - tok_start) : g.block_size;
     c.t = (tok_start < g.effective_start) ? (g.effective_start - tok_start) : 0;
@@ -173,7 +173,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
     const int batch_idx = blockIdx.x;
     const int groups_per_kv = n_q_per_kv / HPC;
     const int kv_head = blockIdx.y / groups_per_kv;
-    const int head0 = kv_head * n_q_per_kv + (blockIdx.y % groups_per_kv) * HPC;
+    const int head0 = (kv_head * n_q_per_kv) + ((blockIdx.y % groups_per_kv) * HPC);
     const int ctx_len = context_lens[batch_idx];
     if (ctx_len <= 0)
         return;
@@ -193,15 +193,16 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
     half2* q_smem = reinterpret_cast<half2*>(relayout +
                                              static_cast<ptrdiff_t>(NUM_WARPS * HD));  // HPC x HD / 2
     {
-        const half2* q_src = reinterpret_cast<const half2*>(Q + ((int64_t)batch_idx * n_heads + head0) * HD);
+        const half2* q_src = reinterpret_cast<const half2*>(Q +
+                                                            ((((int64_t)batch_idx * n_heads) + head0) * HD));
         for (int i = threadIdx.x; i < HPC * HD / 2; i += BLOCK_THREADS)
             q_smem[i] = q_src[i];
     }
     __syncthreads();
-    const uint32_t q_saddr = static_cast<uint32_t>(__cvta_generic_to_shared(q_smem)) + dim0 * sizeof(half);
+    const uint32_t q_saddr = static_cast<uint32_t>(__cvta_generic_to_shared(q_smem)) + (dim0 * sizeof(half));
 
     WalkGeom g;
-    g.bt = block_tables + (int64_t)batch_idx * max_num_blocks;
+    g.bt = block_tables + ((int64_t)batch_idx * max_num_blocks);
     g.K_cache = K_cache;
     g.V_cache = V_cache;
     g.num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
@@ -209,7 +210,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
     g.block_size = block_size;
     g.effective_start = (sliding_window > 0 && ctx_len > sliding_window) ? (ctx_len - sliding_window) : 0;
     g.kv_block_stride = (int64_t)block_size * n_kv_heads * HD;
-    g.kv_head_off = kv_head * HD + dim0;
+    g.kv_head_off = (kv_head * HD) + dim0;
     const int kv_slot_stride = n_kv_heads * HD;
     const float fused_scale = scale * kv_scale;
 
@@ -228,17 +229,17 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
     auto load_group = [&](const Cursor& c, Vec (&kq)[TOK], Vec (&vq)[TOK]) {
 #pragma unroll
         for (int j = 0; j < TOK; j++) {
-            const int r = c.t + j * RPW + row_slot;
+            const int r = c.t + (j * RPW) + row_slot;
             const int rc = (r < c.n_tok) ? r : (c.n_tok - 1);
             kq[j] = __ldcs(
-                reinterpret_cast<const Vec*>(c.K_block + static_cast<int64_t>(rc) * kv_slot_stride));
+                reinterpret_cast<const Vec*>(c.K_block + (static_cast<int64_t>(rc) * kv_slot_stride)));
             vq[j] = __ldcs(
-                reinterpret_cast<const Vec*>(c.V_block + static_cast<int64_t>(rc) * kv_slot_stride));
+                reinterpret_cast<const Vec*>(c.V_block + (static_cast<int64_t>(rc) * kv_slot_stride)));
         }
     };
 
     Cursor cur;
-    bool valid = cursor_init(cur, g, g.effective_start / block_size + warp_id);
+    bool valid = cursor_init(cur, g, (g.effective_start / block_size) + warp_id);
     Vec kq[TOK], vq[TOK];
     if (valid)
         load_group(cur, kq, vq);
@@ -262,7 +263,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
 #pragma unroll
         for (int h = 0; h < HPC; h++) {
             half2 qh[NH2];
-            lds_q_slice<NH2>(q_saddr + static_cast<size_t>(h * HD) * sizeof(half), qh);
+            lds_q_slice<NH2>(q_saddr + (static_cast<size_t>(h * HD) * sizeof(half)), qh);
 #pragma unroll
             for (int j = 0; j < TOK; j++)
                 s[h][j] = dot_slice<NH2>(qh, kh[j]);
@@ -283,7 +284,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
             float m_new = m[h];
 #pragma unroll
             for (int j = 0; j < TOK; j++) {
-                const bool row_ok = (cur.t + j * RPW + row_slot) < cur.n_tok;
+                const bool row_ok = (cur.t + (j * RPW) + row_slot) < cur.n_tok;
                 s[h][j] = row_ok ? apply_softcap(s[h][j] * fused_scale, softcap) : -FLT_MAX;
                 m_new = fmaxf(m_new, s[h][j]);
             }
@@ -291,7 +292,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
             float p_sum = 0.0f;
 #pragma unroll
             for (int j = 0; j < TOK; j++) {
-                const bool row_ok = (cur.t + j * RPW + row_slot) < cur.n_tok;
+                const bool row_ok = (cur.t + (j * RPW) + row_slot) < cur.n_tok;
                 p[h][j] = row_ok ? expf(s[h][j] - m_new) : 0.0f;
                 p_sum += p[h][j];
             }
@@ -315,7 +316,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
             for (int i = 0; i < NH2; i++) {
                 const float2 f = __half22float2(vh[i]);
                 vf[2 * i] = f.x;
-                vf[2 * i + 1] = f.y;
+                vf[(2 * i) + 1] = f.y;
             }
 #pragma unroll
             for (int h = 0; h < HPC; h++) {
@@ -371,13 +372,13 @@ __global__ void __launch_bounds__(BLOCK_THREADS, 2) paged_attention_decode_fp8_g
         if (row_slot == 0) {
 #pragma unroll
             for (int e = 0; e < BYTES; e++)
-                relayout[warp_id * HD + dim0 + e] = o[h][e];
+                relayout[(warp_id * HD) + dim0 + e] = o[h][e];
         }
         __syncwarp();
         float o4[ELEMS];
 #pragma unroll
         for (int i = 0; i < ELEMS; i++)
-            o4[i] = relayout[warp_id * HD + lane_offset + i];
+            o4[i] = relayout[(warp_id * HD) + lane_offset + i];
         __syncthreads();
         crosswarp_reduce_and_write<HD>(merge_smem, m[h], l[h], o4, warp_id, lane_id, lane_offset, O, batch_idx,
                                        n_heads, head0 + h, attn_sinks);
@@ -389,8 +390,8 @@ void launch_gqa(const half* Q, const uint8_t* K_cache, const uint8_t* V_cache, h
                 const int* context_lens, int batch_size, int n_heads, int n_kv_heads, int n_q_per_kv,
                 int block_size, float scale, float kv_scale, int max_num_blocks, int sliding_window,
                 float softcap, const half* attn_sinks, cudaStream_t stream) {
-    const size_t smem_bytes = (2 * NUM_WARPS + 2 * NUM_WARPS * HD) * sizeof(float) +
-                              static_cast<int64_t>(HPC) * HD * sizeof(half);
+    const size_t smem_bytes = (((2 * NUM_WARPS) + (2 * NUM_WARPS * HD)) * sizeof(float)) +
+                              (static_cast<int64_t>(HPC) * HD * sizeof(half));
     dim3 grid(batch_size, n_kv_heads * (n_q_per_kv / HPC));
     dim3 block(BLOCK_THREADS);
     paged_attention_decode_fp8_gqa_kernel<LPR, TOK, HPC>

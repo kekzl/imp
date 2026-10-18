@@ -11,12 +11,12 @@ namespace {
 
 __global__ void gdn_factor_clear_kernel(float* __restrict__ fac, int64_t layer_stride, int n_layers,
                                         const int* __restrict__ slots, int n_heads, int fac_stride) {
-    const int head = blockIdx.x * blockDim.x + threadIdx.x;
+    const int head = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (head >= n_heads)
         return;
     const int layer = blockIdx.y;
     const int slot = slots[blockIdx.z];
-    fac[layer * layer_stride + (static_cast<int64_t>(slot) * n_heads + head) * fac_stride] = 0.0f;
+    fac[(layer * layer_stride) + (((static_cast<int64_t>(slot) * n_heads) + head) * fac_stride)] = 0.0f;
 }
 
 }  // namespace

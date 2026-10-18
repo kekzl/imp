@@ -34,7 +34,7 @@ __device__ __forceinline__ float norm_rope_128(float* y, float* red, const half*
                                                const QsaGeom& g) {
     const int d = threadIdx.x;
     const float ss = block_sum_128(y[d] * y[d], red);
-    const float inv = rsqrtf(ss / D + g.eps);
+    const float inv = rsqrtf((ss / D) + g.eps);
     const float yn = __half2float(__float2half(y[d] * inv * (1.0f + __half2float(w[d]))));
     __syncthreads();
     y[d] = yn;
@@ -46,7 +46,7 @@ __device__ __forceinline__ float norm_rope_128(float* y, float* red, const half*
         const float inv_freq = powf(g.theta, -2.0f * static_cast<float>(i) / g.rope_dim);
         const float ang = static_cast<float>(pos) * inv_freq;
         const float c = cosf(ang), s = sinf(ang);
-        out = (d < half_dim) ? yn * c - y[d + half_dim] * s : yn * c + y[d - half_dim] * s;
+        out = (d < half_dim) ? (yn * c) - (y[d + half_dim] * s) : (yn * c) + (y[d - half_dim] * s);
     }
     return out;
 }
@@ -61,12 +61,12 @@ __global__ void qsa_prep_queries_kernel(const half* __restrict__ qk, const int* 
     const int stride = (g.n_heads + 1) * D;
     const int pos = positions[row];
     if (head == 0)
-        raw_keys[static_cast<size_t>(pos) * D + d] =
-            qk[static_cast<size_t>(row) * stride + static_cast<size_t>(g.n_heads) * D + d];
-    y[d] = __half2float(qk[static_cast<size_t>(row) * stride + static_cast<size_t>(head) * D + d]);
+        raw_keys[(static_cast<size_t>(pos) * D) + d] =
+            qk[(static_cast<size_t>(row) * stride) + (static_cast<size_t>(g.n_heads) * D) + d];
+    y[d] = __half2float(qk[(static_cast<size_t>(row) * stride) + (static_cast<size_t>(head) * D) + d]);
     __syncthreads();
     const float out = norm_rope_128(y, red, w_q, pos, g);
-    q_out[(static_cast<size_t>(row) * g.n_heads + head) * D + d] = __float2half(out);
+    q_out[(((static_cast<size_t>(row) * g.n_heads) + head) * D) + d] = __float2half(out);
 }
 
 // grid nb, block 128. positions != nullptr: decode, the last complete block before
@@ -78,7 +78,7 @@ __global__ void qsa_pool_blocks_kernel(const half* __restrict__ raw_keys, const 
     __shared__ float red[4];
     int b;
     if (positions) {
-        b = (positions[0] + 1) / g.ratio - 1;
+        b = ((positions[0] + 1) / g.ratio) - 1;
         if (b < 0)
             return;
     } else {
@@ -87,11 +87,11 @@ __global__ void qsa_pool_blocks_kernel(const half* __restrict__ raw_keys, const 
     const int d = threadIdx.x;
     float acc = 0.0f;
     for (int j = 0; j < g.ratio; ++j)
-        acc += __half2float(raw_keys[(static_cast<size_t>(b) * g.ratio + j) * D + d]);
+        acc += __half2float(raw_keys[(((static_cast<size_t>(b) * g.ratio) + j) * D) + d]);
     y[d] = __half2float(__float2half(acc / g.ratio));
     __syncthreads();
     const float out = norm_rope_128(y, red, w_k, b * g.ratio, g);
-    block_keys[static_cast<size_t>(b) * D + d] = __float2half(out);
+    block_keys[(static_cast<size_t>(b) * D) + d] = __float2half(out);
 }
 
 // grid (x, rows), block kScoreWarps * 32: one warp per block key (256 B, coalesced),
@@ -108,7 +108,7 @@ __global__ void __launch_bounds__(kScoreWarps * 32) qsa_score_kernel(const half*
 #pragma unroll
     for (int h = 0; h < 4; ++h) {
         const uint2 u = h < g.n_heads ? *reinterpret_cast<const uint2*>(
-                                            q + (static_cast<size_t>(r) * g.n_heads + h) * D +
+                                            q + (((static_cast<size_t>(r) * g.n_heads) + h) * D) +
                                             static_cast<size_t>(lane * 4))
                                       : make_uint2(0u, 0u);
         const float2 a = __half22float2(*reinterpret_cast<const half2*>(&u.x));
@@ -116,18 +116,18 @@ __global__ void __launch_bounds__(kScoreWarps * 32) qsa_score_kernel(const half*
         qr[h][0] = a.x, qr[h][1] = a.y, qr[h][2] = b.x, qr[h][3] = b.y;
     }
     const float inv_sqrt = rsqrtf(static_cast<float>(D));
-    float* my_scores = scores + static_cast<size_t>(r) * max_blocks;
+    float* my_scores = scores + (static_cast<size_t>(r) * max_blocks);
     const int stride = gridDim.x * kScoreWarps;
-    for (int b = blockIdx.x * kScoreWarps + (threadIdx.x >> 5); b < nb; b += stride) {
+    for (int b = (blockIdx.x * kScoreWarps) + (threadIdx.x >> 5); b < nb; b += stride) {
         // #2218 bounded: lane * 4 < 32 * 4 = 128 (lane = threadIdx.x & 31, :103).
-        const uint2 u = *reinterpret_cast<const uint2*>(block_keys + static_cast<size_t>(b) * D +
+        const uint2 u = *reinterpret_cast<const uint2*>(block_keys + (static_cast<size_t>(b) * D) +
                                                         static_cast<size_t>(lane * 4));
         const float2 k0 = __half22float2(*reinterpret_cast<const half2*>(&u.x));
         const float2 k1 = __half22float2(*reinterpret_cast<const half2*>(&u.y));
         float dot[4];
 #pragma unroll
         for (int h = 0; h < 4; ++h)
-            dot[h] = qr[h][0] * k0.x + qr[h][1] * k0.y + qr[h][2] * k1.x + qr[h][3] * k1.y;
+            dot[h] = (qr[h][0] * k0.x) + (qr[h][1] * k0.y) + (qr[h][2] * k1.x) + (qr[h][3] * k1.y);
 #pragma unroll
         for (int o = 16; o > 0; o >>= 1)
 #pragma unroll
@@ -184,8 +184,8 @@ __global__ void __launch_bounds__(kSelThreads) qsa_select_kernel(const int* __re
     const int topk = g.budget / g.ratio;
     const int k = nb < topk ? nb : topk;
     const int cap = g.budget + g.ratio - 1;
-    const float* my_scores = scores + static_cast<size_t>(r) * max_blocks;
-    int32_t* out = sel_tokens + static_cast<size_t>(r) * cap;
+    const float* my_scores = scores + (static_cast<size_t>(r) * max_blocks);
+    int32_t* out = sel_tokens + (static_cast<size_t>(r) * cap);
 
     // Threshold key T (k-th largest) and how many ties at T to take, ascending.
     uint32_t T = 0;
@@ -209,7 +209,7 @@ __global__ void __launch_bounds__(kSelThreads) qsa_select_kernel(const int* __re
                 int c[8], sum = 0;
 #pragma unroll
                 for (int j = 0; j < 8; ++j) {
-                    c[j] = hist[255 - 8 * lane - j];
+                    c[j] = hist[255 - (8 * lane) - j];
                     sum += c[j];
                 }
                 int incl = sum;
@@ -223,7 +223,7 @@ __global__ void __launch_bounds__(kSelThreads) qsa_select_kernel(const int* __re
                     int cum = incl - sum, digit = 0;
                     for (int j = 0; j < 8; ++j) {
                         if (cum + c[j] >= remaining) {
-                            digit = 255 - 8 * lane - j;
+                            digit = 255 - (8 * lane) - j;
                             break;
                         }
                         cum += c[j];
@@ -260,7 +260,7 @@ __global__ void __launch_bounds__(kSelThreads) qsa_select_kernel(const int* __re
         if (take) {
             const int slot = out_blocks + take_excl;
             for (int j = 0; j < g.ratio; ++j)
-                out[slot * g.ratio + j] = b * g.ratio + j;
+                out[(slot * g.ratio) + j] = (b * g.ratio) + j;
         }
         out_blocks += take_total;
         eq_seen += eq_total;
@@ -269,9 +269,9 @@ __global__ void __launch_bounds__(kSelThreads) qsa_select_kernel(const int* __re
     const int tail0 = nb * g.ratio;
     const int n_tail = p + 1 - tail0;
     for (int i = t; i < n_tail; i += kSelThreads)
-        out[out_blocks * g.ratio + i] = tail0 + i;
+        out[(out_blocks * g.ratio) + i] = tail0 + i;
     if (t == 0)
-        sel_count[r] = out_blocks * g.ratio + n_tail;
+        sel_count[r] = (out_blocks * g.ratio) + n_tail;
 }
 
 // grid (rows, ceil(cap * vec_per_token / 256)), block 256; one int4 (8 halfs) per thread.
@@ -285,21 +285,24 @@ __global__ void qsa_gather_kv_kernel(const int4* __restrict__ k_cache, const int
     const int count = sel_count[r];
     if (blockIdx.y == 0 && threadIdx.x == 0)
         scratch_ctx[r] = count;
-    const int idx = blockIdx.y * blockDim.x + threadIdx.x;
-    const int j = idx / vec_per_token, v = idx - j * vec_per_token;
+    const int idx = (blockIdx.y * blockDim.x) + threadIdx.x;
+    const int j = idx / vec_per_token, v = idx - (j * vec_per_token);
     if (j >= count)
         return;
-    const int tok = sel_tokens[static_cast<size_t>(r) * cap + j];
-    const size_t src = (static_cast<size_t>(bt[tok / block_size]) * block_size + tok % block_size) *
-                           vec_per_token + v;
-    const size_t dst = ((static_cast<size_t>(r) * blocks_per_row + j / block_size) * block_size +
-                        j % block_size) * vec_per_token + v;
+    const int tok = sel_tokens[(static_cast<size_t>(r) * cap) + j];
+    const size_t src = (((static_cast<size_t>(bt[tok / block_size]) * block_size) + (tok % block_size)) *
+                        vec_per_token) +
+                       v;
+    const size_t dst = (((((static_cast<size_t>(r) * blocks_per_row) + (j / block_size)) * block_size) +
+                         (j % block_size)) *
+                        vec_per_token) +
+                       v;
     k_scratch[dst] = k_cache[src];
     v_scratch[dst] = v_cache[src];
 }
 
 __global__ void qsa_init_scratch_bt_kernel(int32_t* bt, int n) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (i < n)
         bt[i] = i;
 }
