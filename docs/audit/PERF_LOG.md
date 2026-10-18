@@ -4,6 +4,23 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-10-18 · captured verify cost per chunk width, small-M route for captured verify (ROADMAP row 49)
+
+Protocol: `imp-cli --bench --bench-pp 512 --max-tokens 128 --bench-reps 3..5 --set speculative.capture=true`; chunk width forced by token recycling (`ngram=false token_recycling=true recycle_min_streak=0`, rows = width x (1 + depth)); `tools/analysis/verify_width_cost.sh`. Decode step: Qwen3-14B NVFP4 5.888 ms, Q6_K 5.831 ms.
+
+| ms/verify, batched GEMV -> small-M | 3 rows | 4 rows | 8 rows | 16 rows |
+|---|---:|---:|---:|---:|
+| Qwen3-14B NVFP4 | 8.81 -> 8.22 | 9.74 -> 8.34 | 12.03 -> 8.67 | 13.21 -> 9.72 |
+| Qwen3-14B Q6_K | 8.87 -> 8.04 | 9.88 -> 8.48 | 17.67 -> 11.14 | 30.15 -> 11.99 |
+
+- Batch 5's 11.87 ms per 2-token verify (2.0x decode) was eager: `imp-cli --bench` turns `speculative.capture` off unless set. Captured: 8.47 ms. nsys on the eager run: wall 860.3 ms, kernel union 466.4 ms.
+- Small-M on eager verify loses: 10.93 -> 15.02 ms/verify, so `speculative.verify_smallm_captured` routes only captured verify steps, decided per step so warmup and fidelity forwards match the graph. With a per-stream rule (`cudaStreamIsCapturing`) `SpecCaptureFidelityTest.CachedGraphMatchesEagerForward` failed: argmax mismatch, max |dlogit| up to 2.0.
+- Same image, default n-gram: NVFP4 8.59 / 8.53 -> 7.73 / 7.75 ms/verify, tg 226.32 / 228.66 -> 249.27 tok/s (default 251.10); Q6_K 16 rows 31.47 -> 12.17 ms (tok/verify 2.00 -> 1.95). Eager verify 13.06 vs 12.14 ms: same path, run-to-run spread. Qwen3.8-27B-NVFP4 MTP 70.82 / 70.74 -> 70.60 / 70.52 tok/s; Q6_K `--gpu-layers 0` 197.52 -> 197.49 ms/verify.
+- The small-M route quantizes activations to FP4 (W4A4, as batched decode at 2..32 streams already does); greedy acceptance stays lossless against the verify logits.
+- Found beside it (B-36): Qwen3-14B Q6_K pp2..pp32 run 39.0-40.7 ms vs 5.83 ms decode, the dense GGUF prompt path dequantizes every weight per chunk.
+
+---
+
 ## 2026-10-18 · Q8_0 K128 prefill kernel: three levers refuted (ROADMAP row 65)
 
 Protocol: Qwen3-8B Q8_0, `tools/roofline/inventory/ncu_cell.sh q8-8b pp512 mmq_imma_q8k128` (clocks unlocked, 2.17 GHz under ncu), gate-up launch M=512 N=12288 K=4096 = grid 96 x 4 = 384 tiles on 170 SMs; one image per arm, `test-quant --gtest_filter='MmqQ8Imma.*'` green on every arm (bit identity included).

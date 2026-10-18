@@ -43,6 +43,10 @@ struct Speculative {
     // reads weights slower at small M. Argmax parity is not a concern: a
     // speculative arm never reproduces non-speculative greedy output anyway. Default off.
     bool verify_smallm = false;
+    // verify_smallm for graph-captured verify steps (their warmup and fidelity forwards too).
+    // Qwen3-14B NVFP4 n-gram tg 228.66 -> 249.27 tok/s, Q6_K 16-row verify 31.47 -> 12.17 ms.
+    // Eager verify keeps the batched GEMV (smallm there: 10.93 -> 15.02 ms/verify).
+    bool verify_smallm_captured = true;
     // Make the verify chunk's NVFP4 GEMV reduce K exactly like the M=1 decode
     // GEMV (32 partial sums, one per warp lane, vs the batched kernel's 128).
     // The rounding difference reached the STOP decision and truncated answers

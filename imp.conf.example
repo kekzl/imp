@@ -1147,6 +1147,9 @@ verify_row_parity    = false
 # Verify-chunk native-NVFP4 GEMMs through the small-M pipeline kernel instead
 # of the batched GEMV: +1-2 %, inside the trajectory variance (2026-08-27).
 verify_smallm        = false
+# verify_smallm for graph-captured verify chunks only; eager verify keeps the
+# batched GEMV. Qwen3-14B NVFP4 n-gram tg 228.66 -> 249.27 tok/s.
+verify_smallm_captured = true
 
 [constrained]
 # Jump-ahead over schema-forced spans (#844): when the json_schema FSM

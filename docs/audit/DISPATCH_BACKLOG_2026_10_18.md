@@ -223,3 +223,11 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | R-065 | WONTFIX (NO-GO) | PERF_LOG 2026-10-18 row 65, gate-up M=512 under ncu: base 215.8 us; 512 threads 219.7; IMMA onto magic bits instead of I2FP 216.9; BM=32 column tail 165.0 + 56.4; each arm `MmqQ8Imma.*` 30/30 (tail arm 31/31 with its own bit-identity test); code reverted, ROADMAP row 65 closed with a reopen condition |
+
+## 2026-10-18 Batch 16: R-049 verify cost, captured verify on small-M, B-36 found
+
+| ID | Status | Evidence |
+|---|---|---|
+| R-049 | OPEN, economics measured | PERF_LOG 2026-10-18 row 49: batch 5's 2.0x was `imp-cli --bench` running verify eager (`tools/imp-cli/args.cpp` turns `speculative.capture` off); captured Qwen3-14B NVFP4 16-row verify 9.72 ms = 1.65x decode on the small-M route; next step is a DFlash drafter checkpoint (model download, owner) |
+| R-049.1 | DONE (this PR) | `speculative.verify_smallm_captured` (default on): same image, NVFP4 n-gram 8.59 / 8.53 -> 7.73 / 7.75 ms/verify, tg 226.32 / 228.66 -> 249.27 tok/s, Q6_K 16 rows 31.47 -> 12.17; `make test-spec-fidelity` red with a per-stream rule (graph vs eager on different kernels), green with the per-step rule; `make verify-fast` OK |
+| B-36 | OPEN (new) | Qwen3-14B Q6_K pp2..pp32 39.0-40.7 ms vs 5.83 ms decode: `gguf_source_fallback` dequantizes every weight per prompt chunk |

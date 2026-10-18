@@ -7,6 +7,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Added
 - `speculative.recycle_tree`: token recycling drafts the best-first tree of successor paths (branching at every depth, slot costs learned from the verify argmax). Opt-in: Qwen3-14B Q6_K `--gpu-layers 0`, prose + code + list 24.70 -> 25.10 tok/s summed, per prompt -6 to +6 %; greedy output identical.
 
+### Changed
+- Graph-captured speculative verify chunks run their NVFP4 GEMMs through the small-M kernel (`speculative.verify_smallm_captured`, default on); eager verify keeps the batched GEMV. Qwen3-14B NVFP4 n-gram tg 228.66 -> 249.27 tok/s; Q6_K 16-row verify 31.47 -> 12.17 ms.
+
 ## [0.54.0] - 2026-10-18
 
 ### Added

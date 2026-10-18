@@ -245,6 +245,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
     cur_decode_step_ = decode_step;
     cur_force_fp16_ = state.force_fp16_gemm;
     cur_spec_verify_ = state.spec_verify_chunk;
+    cur_spec_verify_smallm_ = state.spec_verify_smallm;
     // Verify chunks forward with is_prefill=true (KV-write semantics) but
     // their rows are draft tokens, so they count as decode rows here.
     cur_decode_rows_ = n > 1 && (!state.is_prefill || state.spec_verify_chunk);
