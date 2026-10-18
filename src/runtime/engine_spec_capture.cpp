@@ -155,6 +155,8 @@ void Engine::free_spec_graphs_() {
 
 bool Engine::spec_captured_forward_(InferenceState& state, Tensor& logits_out,
                                     cudaStream_t stream) {
+    // A capture-on step: the capture, its eager warmup and fidelity forwards share one GEMM route.
+    state.spec_verify_smallm = true;
     // The graphs bake workspace pointers — invalidate when the arena moved.
     const uint64_t ws_gen = executor_->workspace_generation();
     if (ws_gen != spec_capture_ws_gen_) {

@@ -121,6 +121,9 @@ struct InferenceState {
     // K-quants the per-chunk dequant cost made speculation net-negative. Set for every verify
     // chunk regardless of attention route.
     bool spec_verify_chunk = false;
+    // Verify step that runs graph-captured: under speculative.verify_smallm_captured its GEMMs take the
+    // small-M block, the step's eager warmup and fidelity forwards too, so graph and eager match.
+    bool spec_verify_smallm = false;
     const int* seq_offsets =
         nullptr;  // [n_sequences+1] for ragged prefill token offsets (optional, nullptr for decode)
 

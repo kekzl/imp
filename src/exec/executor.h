@@ -734,6 +734,7 @@ private:
     int cur_decode_step_ = 0;      // set by forward_logits for debug dump tagging
     bool cur_force_fp16_ = false;  // set by forward_logits, bypasses FP8 GEMM paths
     bool cur_spec_verify_ = false; // set by forward_logits: spec-verify chunk (#998)
+    bool cur_spec_verify_smallm_ = false;  // InferenceState::spec_verify_smallm
     // Set by forward_logits: the forward's rows are generated tokens (batched
     // decode or a spec-verify chunk), not prompt rows. Gates the GGUF NVFP4
     // decode overlay for 2..32-row GEMMs (#1897): M alone cannot tell a decode

@@ -556,6 +556,12 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         StorageTier prefill = h.prefill_tier;
         if (prefill == StorageTier::Undefined)
             prefill = h.primary_tier;
+        // Verify chunk to the small-M block: speculative.verify_smallm, or a graph-captured verify step
+        // under verify_smallm_captured.
+        const auto& spec = dispatch_policy().speculative;
+        const bool verify_smallm = ctx.spec_verify_small_m &&
+                                   (spec.verify_smallm ||
+                                    (cur_spec_verify_smallm_ && spec.verify_smallm_captured));
 
         // Spec-verify chunk (#998): reads the NVFP4 decode overlay in one weight
         // pass per MR<=4 tile instead of dequantizing the source (GGUF K-quants
@@ -565,9 +571,9 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // native-ST NVFP4 weights read NVFP4 directly via the CUTLASS block below
         // (prefill_routes_cutlass_nvfp4_ must answer false here for those).
         // speculative.verify_smallm routes the chunk to the small-M block instead.
-        if (ctx.spec_verify_small_m && !dispatch_policy().speculative.verify_smallm &&
-            (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 33 && input.qtype == QType::F16 &&
-            output.qtype == QType::F16 && h.source_data != nullptr && dequant_gpu_supported(h.source_qtype)) {
+        if (ctx.spec_verify_small_m && !verify_smallm && (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 33 &&
+            input.qtype == QType::F16 && output.qtype == QType::F16 && h.source_data != nullptr &&
+            dequant_gpu_supported(h.source_qtype)) {
             auto it = ctx.wcache->nvfp4.find(h.source_data);
             if (it != ctx.wcache->nvfp4.end()) {
                 // beta=1 (o/down residual add, #1055): accumulate variant —
@@ -587,8 +593,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // micro-scales as the M=1 decode GEMV, but NOT the same kernel (decode
         // uses gemv_nvfp4_kpar, verify uses gemm_nvfp4_batched); no argmax parity
         // with non-speculative greedy output either way (docs/LIMITATIONS.md).
-        if (ctx.spec_verify_small_m && !dispatch_policy().speculative.verify_smallm &&
-            (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 4 &&
+        if (ctx.spec_verify_small_m && !verify_smallm && (ctx.beta == 0.0f || ctx.beta == 1.0f) && M <= 4 &&
             input.qtype == QType::F16 && output.qtype == QType::F16 &&
             h.primary_tier == StorageTier::CUTLASS_NVFP4 && h.source_data != nullptr &&
             h.source_scales != nullptr && !dequant_gpu_supported(h.source_qtype)) {
@@ -613,8 +618,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // documented paths (#1055). Weight is the native NVFP4 source or, on
         // decode rows of a GGUF source, its NVFP4 decode overlay (smallm_weight_, #1897).
         NvFP4QuantResult nv;
-        if (dispatch_policy().gemm.nvfp4_smallm &&
-            (!ctx.spec_verify_small_m || dispatch_policy().speculative.verify_smallm) &&
+        if (dispatch_policy().gemm.nvfp4_smallm && (!ctx.spec_verify_small_m || verify_smallm) &&
             !overlap_prefill_active_ && M <= 32 && (ctx.beta == 0.0f || ctx.beta == 1.0f) &&
             input.qtype == QType::F16 && output.qtype == QType::F16 && smallm_weight_(h, nv)) {
             const int N = static_cast<int>(nv.N);
