@@ -33,14 +33,14 @@ __global__ void __launch_bounds__(kPlpNormThreads) plp_rmsnorm_q8_roundtrip_kern
     const int warp_id = threadIdx.x >> 5;
     const int n_warps = blockDim.x >> 5;
     const int n_q8_blocks = d_model >> 5;
-    const half* xr = x + static_cast<int64_t>(blockIdx.x) * d_model;
-    half* orow = out + static_cast<int64_t>(blockIdx.x) * d_model;
+    const half* xr = x + (static_cast<int64_t>(blockIdx.x) * d_model);
+    half* orow = out + (static_cast<int64_t>(blockIdx.x) * d_model);
 
     float x_cache[32];
     float sum_sq = 0.0f;
     int n_cached = 0;
     for (int b = warp_id; b < n_q8_blocks; b += n_warps) {
-        const float v = __half2float(xr[b * 32 + lane]);
+        const float v = __half2float(xr[(b * 32) + lane]);
         x_cache[n_cached++] = v;
         sum_sq += v * v;
     }
@@ -56,7 +56,7 @@ __global__ void __launch_bounds__(kPlpNormThreads) plp_rmsnorm_q8_roundtrip_kern
         for (int off = 16; off > 0; off >>= 1)
             total += __shfl_xor_sync(0xFFFFFFFF, total, off);
         if (lane == 0)
-            s_inv_rms = rsqrtf(total / static_cast<float>(d_model) + eps);
+            s_inv_rms = rsqrtf((total / static_cast<float>(d_model)) + eps);
     }
     __syncthreads();
     const float inv_rms = s_inv_rms;
@@ -64,7 +64,7 @@ __global__ void __launch_bounds__(kPlpNormThreads) plp_rmsnorm_q8_roundtrip_kern
     int cache_idx = 0;
     for (int b = warp_id; b < n_q8_blocks; b += n_warps) {
         const float val = x_cache[cache_idx++] * inv_rms *
-                          (__half2float(weight[b * 32 + lane]) + weight_offset);
+                          (__half2float(weight[(b * 32) + lane]) + weight_offset);
         float amax = fabsf(val);
 #pragma unroll
         for (int off = 16; off > 0; off >>= 1)
@@ -72,7 +72,7 @@ __global__ void __launch_bounds__(kPlpNormThreads) plp_rmsnorm_q8_roundtrip_kern
         const float d = amax / 127.0f;
         const float id = (d > 0.0f) ? (1.0f / d) : 0.0f;
         const int q = __float2int_rn(val * id);
-        orow[b * 32 + lane] = __float2half(static_cast<float>(q) * d);
+        orow[(b * 32) + lane] = __float2half(static_cast<float>(q) * d);
     }
 }
 
@@ -96,8 +96,8 @@ bool GraphExecutor::prompt_lm_head_chunk_(int row0, int csz, float* lg, int& sla
                                    ? &registry_.handle(model_->out_proj_id)
                                    : nullptr;
     const StorageTier tier = lm_h ? lm_h->primary_tier : StorageTier::Undefined;
-    const bool has_fp8 = wcache_.fp8.count(w) != 0;
-    const bool nvfp4 = !has_fp8 && (tier == StorageTier::NVFP4 || wcache_.nvfp4.count(w) != 0);
+    const bool has_fp8 = wcache_.fp8.contains(w);
+    const bool nvfp4 = !has_fp8 && (tier == StorageTier::NVFP4 || wcache_.nvfp4.contains(w));
     const bool dp4a = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 && is_dp4a_qtype(qt) &&
                       !dispatch_policy().gemm.no_dp4a_lm && tier != StorageTier::MXFP4 && !has_fp8;
     // Vocab slab = dequant-scratch rows; below 256 rows the per-batch driver wins.
@@ -117,12 +117,12 @@ bool GraphExecutor::prompt_lm_head_chunk_(int row0, int csz, float* lg, int& sla
     const size_t row_bytes = qtype_row_bytes(qt, K);
     for (int n0 = 0; n0 < V; n0 += slab) {
         const int ws = std::min(slab, V - n0);
-        dequant_gpu(static_cast<const uint8_t*>(w) + static_cast<size_t>(n0) * row_bytes, qscratch_.dequant,
+        dequant_gpu(static_cast<const uint8_t*>(w) + (static_cast<size_t>(n0) * row_bytes), qscratch_.dequant,
                     qt, ws, K, stream);
         const int64_t w_shape[2] = {ws, K};
         const int64_t c_shape[2] = {csz, ws};
         Tensor wt(qscratch_.dequant, QType::F16, 2, w_shape, true);
-        Tensor ct(lg + static_cast<size_t>(n0) * csz, QType::F32, 2, c_shape, true);
+        Tensor ct(lg + (static_cast<size_t>(n0) * csz), QType::F32, 2, c_shape, true);
         gemm(noc, wt, ct, 1.0f, 0.0f, stream);
     }
     slab_w = slab;

@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     const std::string path = argv[1];
-    const bool gguf = path.size() > 5 && path.compare(path.size() - 5, 5, ".gguf") == 0;
+    const bool gguf = path.size() > 5 && path.ends_with(".gguf");
     std::unique_ptr<imp::Model> m = gguf ? imp::load_gguf(path) : imp::load_safetensors(path);
     if (!m || !m->tokenizer()) {
         fprintf(stderr, "load failed: %s\n", path.c_str());

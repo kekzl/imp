@@ -42,15 +42,15 @@ __global__ __launch_bounds__(256) void write_kv_cache_fused_kernel(
     const half* src;
     half* dst_base;
     if (blockIdx.y == 0) {
-        src = k_in + static_cast<int64_t>(token_idx) * row_elems;
+        src = k_in + (static_cast<int64_t>(token_idx) * row_elems);
         dst_base = k_cache_base;
     } else {
-        src = v_in + static_cast<int64_t>(token_idx) * row_elems;
+        src = v_in + (static_cast<int64_t>(token_idx) * row_elems);
         dst_base = v_cache_base;
     }
 
-    half* dst = dst_base + static_cast<int64_t>(block_id) * block_stride +
-                static_cast<int64_t>(slot_in_block) * row_elems;
+    half* dst = dst_base + (static_cast<int64_t>(block_id) * block_stride) +
+                (static_cast<int64_t>(slot_in_block) * row_elems);
 
     // Vectorized 128-bit copy (8 FP16 per store)
     const int vec_elems = row_elems / 8;
@@ -95,11 +95,11 @@ __global__ __launch_bounds__(256) void write_kv_cache_int8_kernel(
     half* scale_base = (blockIdx.y == 0) ? k_scale_base : v_scale_base;
 
     const int row_elems = n_kv_heads * head_dim;
-    const half* src = src_base + static_cast<int64_t>(token_idx) * row_elems;
-    int8_t* dst = cache_base + static_cast<int64_t>(block_id) * block_stride +
-                  static_cast<int64_t>(slot_in_block) * row_elems;
-    half* scale_dst = scale_base + static_cast<int64_t>(block_id) * scale_block_stride +
-                      static_cast<int64_t>(slot_in_block) * n_kv_heads;
+    const half* src = src_base + (static_cast<int64_t>(token_idx) * row_elems);
+    int8_t* dst = cache_base + (static_cast<int64_t>(block_id) * block_stride) +
+                  (static_cast<int64_t>(slot_in_block) * row_elems);
+    half* scale_dst = scale_base + (static_cast<int64_t>(block_id) * scale_block_stride) +
+                      (static_cast<int64_t>(slot_in_block) * n_kv_heads);
 
     const int warp_id = threadIdx.x / kWarpSize;
     const int lane_id = threadIdx.x % kWarpSize;
@@ -183,11 +183,11 @@ __global__ __launch_bounds__(256) void write_kv_cache_int4_kernel(
 
     const int row_elems = n_kv_heads * head_dim;
     const int row_bytes = row_elems / 2;  // 2 INT4 values per byte
-    const half* src = src_base + static_cast<int64_t>(token_idx) * row_elems;
-    uint8_t* dst = cache_base + static_cast<int64_t>(block_id) * block_stride +
-                   static_cast<int64_t>(slot_in_block) * row_bytes;
-    half* scale_dst = scale_base + static_cast<int64_t>(block_id) * scale_block_stride +
-                      static_cast<int64_t>(slot_in_block) * n_kv_heads;
+    const half* src = src_base + (static_cast<int64_t>(token_idx) * row_elems);
+    uint8_t* dst = cache_base + (static_cast<int64_t>(block_id) * block_stride) +
+                   (static_cast<int64_t>(slot_in_block) * row_bytes);
+    half* scale_dst = scale_base + (static_cast<int64_t>(block_id) * scale_block_stride) +
+                      (static_cast<int64_t>(slot_in_block) * n_kv_heads);
 
     const int warp_id = threadIdx.x / kWarpSize;
     const int lane_id = threadIdx.x % kWarpSize;
@@ -224,7 +224,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_int4_kernel(
 
             // Pack: low nibble = q0, high nibble = q1
             uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) | (static_cast<uint8_t>(q1 & 0xF) << 4);
-            dst[head_byte_offset + d / 2] = packed;
+            dst[head_byte_offset + (d / 2)] = packed;
         }
 
         // Step 4: Write scale
@@ -268,11 +268,11 @@ __global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
     const int row_elems = n_kv_heads * head_dim;
     const int row_bytes = row_elems / 2;
     const int row_scale_bytes = n_kv_heads * (head_dim / kGroup);
-    const half* src = src_base + static_cast<int64_t>(token_idx) * row_elems;
-    uint8_t* dst = cache_base + static_cast<int64_t>(block_id) * block_stride +
-                   static_cast<int64_t>(slot_in_block) * row_bytes;
-    uint8_t* scale_dst = scale_base + static_cast<int64_t>(block_id) * scale_block_stride +
-                         static_cast<int64_t>(slot_in_block) * row_scale_bytes;
+    const half* src = src_base + (static_cast<int64_t>(token_idx) * row_elems);
+    uint8_t* dst = cache_base + (static_cast<int64_t>(block_id) * block_stride) +
+                   (static_cast<int64_t>(slot_in_block) * row_bytes);
+    uint8_t* scale_dst = scale_base + (static_cast<int64_t>(block_id) * scale_block_stride) +
+                         (static_cast<int64_t>(slot_in_block) * row_scale_bytes);
 
     const int n_groups_per_head = head_dim / kGroup;
     const int total_groups = n_kv_heads * n_groups_per_head;
@@ -281,7 +281,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
     for (int g = threadIdx.x; g < total_groups; g += blockDim.x) {
         int h = g / n_groups_per_head;
         int gh = g % n_groups_per_head;             // group within head
-        int base_elem = h * head_dim + gh * kGroup;  // first elem in this group
+        int base_elem = (h * head_dim) + (gh * kGroup);  // first elem in this group
 
         // absmax
         float amax = 0.0f;
@@ -294,11 +294,11 @@ __global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
         float inv_sc = (sc > 1e-30f) ? (1.0f / sc) : 0.0f;
 
         // pack 16 nibbles → 8 bytes
-        int dst_byte_off = h * (head_dim / 2) + gh * (kGroup / 2);
+        int dst_byte_off = (h * (head_dim / 2)) + (gh * (kGroup / 2));
 #pragma unroll
         for (int p = 0; p < kGroup / 2; p++) {
-            float v0 = __half2float(src[base_elem + 2 * p]);
-            float v1 = __half2float(src[base_elem + 2 * p + 1]);
+            float v0 = __half2float(src[base_elem + (2 * p)]);
+            float v1 = __half2float(src[base_elem + (2 * p) + 1]);
             uint8_t q0 = e2m1_quantize(v0, inv_sc);
             uint8_t q1 = e2m1_quantize(v1, inv_sc);
             dst[dst_byte_off + p] = static_cast<uint8_t>(q0 | (q1 << 4));
@@ -306,7 +306,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_nvfp4_kernel(
 
         // store UE4M3 scale (saturates oversize values, 0 if amax==0)
         __nv_fp8_e4m3 ue4m3(sc);
-        scale_dst[h * n_groups_per_head + gh] = *reinterpret_cast<uint8_t*>(&ue4m3);
+        scale_dst[(h * n_groups_per_head) + gh] = *reinterpret_cast<uint8_t*>(&ue4m3);
     }
 }
 
@@ -343,11 +343,11 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
     const int row_elems = n_kv_heads * head_dim;
     const int row_bytes = row_elems / 2;
     const int row_scale_bytes = n_kv_heads * (head_dim / kGroup);
-    const half* src = src_base + static_cast<int64_t>(token_idx) * row_elems;
-    uint8_t* dst = cache_base + static_cast<int64_t>(block_id) * block_stride +
-                   static_cast<int64_t>(slot_in_block) * row_bytes;
-    uint8_t* scale_dst = scale_base + static_cast<int64_t>(block_id) * scale_block_stride +
-                         static_cast<int64_t>(slot_in_block) * row_scale_bytes;
+    const half* src = src_base + (static_cast<int64_t>(token_idx) * row_elems);
+    uint8_t* dst = cache_base + (static_cast<int64_t>(block_id) * block_stride) +
+                   (static_cast<int64_t>(slot_in_block) * row_bytes);
+    uint8_t* scale_dst = scale_base + (static_cast<int64_t>(block_id) * scale_block_stride) +
+                         (static_cast<int64_t>(slot_in_block) * row_scale_bytes);
 
     const int n_groups_per_head = head_dim / kGroup;
     const int total_groups = n_kv_heads * n_groups_per_head;
@@ -355,7 +355,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
     for (int g = threadIdx.x; g < total_groups; g += blockDim.x) {
         int h = g / n_groups_per_head;
         int gh = g % n_groups_per_head;
-        int base_elem = h * head_dim + gh * kGroup;
+        int base_elem = (h * head_dim) + (gh * kGroup);
 
         // absmax
         float amax = 0.0f;
@@ -376,17 +376,17 @@ __global__ __launch_bounds__(256) void write_kv_cache_mxfp4_kv_kernel(
         float inv_sc = (sc_actual > 1e-30f) ? (1.0f / sc_actual) : 0.0f;
 
         // pack 16 nibbles → 8 bytes
-        int dst_byte_off = h * (head_dim / 2) + gh * (kGroup / 2);
+        int dst_byte_off = (h * (head_dim / 2)) + (gh * (kGroup / 2));
 #pragma unroll
         for (int p = 0; p < kGroup / 2; p++) {
-            float v0 = __half2float(src[base_elem + 2 * p]);
-            float v1 = __half2float(src[base_elem + 2 * p + 1]);
+            float v0 = __half2float(src[base_elem + (2 * p)]);
+            float v1 = __half2float(src[base_elem + (2 * p) + 1]);
             uint8_t q0 = e2m1_quantize(v0, inv_sc);
             uint8_t q1 = e2m1_quantize(v1, inv_sc);
             dst[dst_byte_off + p] = static_cast<uint8_t>(q0 | (q1 << 4));
         }
 
-        scale_dst[h * n_groups_per_head + gh] = sc_byte;
+        scale_dst[(h * n_groups_per_head) + gh] = sc_byte;
     }
 }
 
@@ -406,9 +406,9 @@ __global__ void residual_kv_write_indirect_kernel(
     if (base == nullptr) return;
     const half* src = is_v ? v_in : k_in;
     const int widx = d_residual_widx_ptr[seq_slot];
-    half* dst = base + static_cast<int64_t>(widx) * slot_elems;
+    half* dst = base + (static_cast<int64_t>(widx) * slot_elems);
 
-    const int i = threadIdx.x + blockIdx.y * blockDim.x;
+    const int i = threadIdx.x + (blockIdx.y * blockDim.x);
     if (i < slot_elems) {
         dst[i] = src[i];
     }
@@ -430,8 +430,8 @@ __global__ void residual_kv_write_multi_indirect_kernel(
     base += static_cast<int64_t>(seq_slot) * seq_stride_elems;
 
     const int widx = d_residual_widx_ptr[seq_slot];
-    half* dst = base + static_cast<int64_t>(widx) * slot_elems;
-    const half* src = (is_v ? v_in : k_in) + static_cast<int64_t>(token_idx) * slot_elems;
+    half* dst = base + (static_cast<int64_t>(widx) * slot_elems);
+    const half* src = (is_v ? v_in : k_in) + (static_cast<int64_t>(token_idx) * slot_elems);
 
     for (int i = threadIdx.x; i < slot_elems; i += blockDim.x) {
         dst[i] = src[i];
@@ -518,9 +518,9 @@ __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
 
     if (blockIdx.y == 0) {
         // K path: apply RoPE during write
-        const half* k_src = k_in + static_cast<int64_t>(token_idx) * row_elems;
-        half* k_dst = k_cache_base + static_cast<int64_t>(block_id) * block_stride +
-                      static_cast<int64_t>(slot_in_block) * row_elems;
+        const half* k_src = k_in + (static_cast<int64_t>(token_idx) * row_elems);
+        half* k_dst = k_cache_base + (static_cast<int64_t>(block_id) * block_stride) +
+                      (static_cast<int64_t>(slot_in_block) * row_elems);
 
         // Process RoPE pairs
         int total_pairs = n_kv_heads * rope_pairs;
@@ -534,8 +534,8 @@ __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
                 idx0 = head_offset + pair_idx;
                 idx1 = head_offset + pair_idx + rope_pairs;
             } else {
-                idx0 = head_offset + 2 * pair_idx;
-                idx1 = head_offset + 2 * pair_idx + 1;
+                idx0 = head_offset + (2 * pair_idx);
+                idx1 = head_offset + (2 * pair_idx) + 1;
             }
 
             float cos_val, sin_val;
@@ -544,8 +544,8 @@ __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
 
             float k0 = __half2float(k_src[idx0]);
             float k1 = __half2float(k_src[idx1]);
-            k_dst[idx0] = __float2half(k0 * cos_val - k1 * sin_val);
-            k_dst[idx1] = __float2half(k0 * sin_val + k1 * cos_val);
+            k_dst[idx0] = __float2half((k0 * cos_val) - (k1 * sin_val));
+            k_dst[idx1] = __float2half((k0 * sin_val) + (k1 * cos_val));
         }
 
         // Copy non-rotated dimensions (partial RoPE: rope_dim < head_dim)
@@ -560,9 +560,9 @@ __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
         }
     } else {
         // V path: vectorized 128-bit copy (no RoPE)
-        const half* v_src = v_in + static_cast<int64_t>(token_idx) * row_elems;
-        half* v_dst = v_cache_base + static_cast<int64_t>(block_id) * block_stride +
-                      static_cast<int64_t>(slot_in_block) * row_elems;
+        const half* v_src = v_in + (static_cast<int64_t>(token_idx) * row_elems);
+        half* v_dst = v_cache_base + (static_cast<int64_t>(block_id) * block_stride) +
+                      (static_cast<int64_t>(slot_in_block) * row_elems);
         const int vec_elems = row_elems / 8;
         const float4* vs4 = reinterpret_cast<const float4*>(v_src);
         float4* vd4 = reinterpret_cast<float4*>(v_dst);
@@ -600,13 +600,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     const half* src;
     __nv_fp8_e4m3* dst;
     if (blockIdx.y == 0) {
-        src = k_in + static_cast<int64_t>(token_idx) * row_elems;
-        dst = k_cache_base + static_cast<int64_t>(block_id) * block_stride +
-              static_cast<int64_t>(slot_in_block) * row_elems;
+        src = k_in + (static_cast<int64_t>(token_idx) * row_elems);
+        dst = k_cache_base + (static_cast<int64_t>(block_id) * block_stride) +
+              (static_cast<int64_t>(slot_in_block) * row_elems);
     } else {
-        src = v_in + static_cast<int64_t>(token_idx) * row_elems;
-        dst = v_cache_base + static_cast<int64_t>(block_id) * block_stride +
-              static_cast<int64_t>(slot_in_block) * row_elems;
+        src = v_in + (static_cast<int64_t>(token_idx) * row_elems);
+        dst = v_cache_base + (static_cast<int64_t>(block_id) * block_stride) +
+              (static_cast<int64_t>(slot_in_block) * row_elems);
     }
 
     // Packed PTX cvt: 2 paired conversions per 4 elements (half→e4m3x2).
@@ -619,13 +619,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     // (loop guard i < vec_elems below, row_elems is int)
     for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
         half2 lo = __hmul2(src2[static_cast<ptrdiff_t>(2 * i)], inv_scale_h2);
-        half2 hi = __hmul2(src2[2 * i + 1], inv_scale_h2);
+        half2 hi = __hmul2(src2[(2 * i) + 1], inv_scale_h2);
         uint16_t e4m3_lo = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&lo));
         uint16_t e4m3_hi = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&hi));
         dst4[i] = static_cast<uint32_t>(e4m3_lo) | (static_cast<uint32_t>(e4m3_hi) << 16);
     }
     // Scalar tail for non-aligned remainder
-    for (int i = vec_elems * 4 + threadIdx.x; i < row_elems; i += blockDim.x) {
+    for (int i = (vec_elems * 4) + threadIdx.x; i < row_elems; i += blockDim.x) {
         dst[i] = __nv_fp8_e4m3(__half2float(src[i]) * inv_scale);
     }
 }
@@ -649,12 +649,12 @@ __global__ __launch_bounds__(256) void rope_q_only_fp16_kernel(half* __restrict_
 
     int64_t base = static_cast<int64_t>(head_idx) * head_dim;
     int idx0 = neox ? pair_idx : (2 * pair_idx);
-    int idx1 = neox ? (pair_idx + rope_pairs) : (2 * pair_idx + 1);
+    int idx1 = neox ? (pair_idx + rope_pairs) : ((2 * pair_idx) + 1);
 
     float q0 = __half2float(Q[base + idx0]);
     float q1 = __half2float(Q[base + idx1]);
-    Q[base + idx0] = __float2half(q0 * cos_val - q1 * sin_val);
-    Q[base + idx1] = __float2half(q0 * sin_val + q1 * cos_val);
+    Q[base + idx0] = __float2half((q0 * cos_val) - (q1 * sin_val));
+    Q[base + idx1] = __float2half((q0 * sin_val) + (q1 * cos_val));
 }
 
 void write_kv_cache_rope_fused(dim3 grid, int threads, cudaStream_t stream, const half* k_in, const half* v_in,

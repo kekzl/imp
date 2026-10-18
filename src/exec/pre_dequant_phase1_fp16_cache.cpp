@@ -53,7 +53,7 @@ void QuantPipeline::pre_dequant_phase1_fp16_cache_(
         const bool native_fp8 = (qtype == QType::FP8_E4M3);
         if (!fp16_cache_source(w, qtype, dequant_gpu_supported(qtype)))
             return;  // also skips --gpu-layers host-streamed weights (model/layer_host_keep.h)
-        if (wcache_->fp16.count(w.data))
+        if (wcache_->fp16.contains(w.data))
             return;  // already cached
         if (budget_exhausted)
             return;
@@ -194,7 +194,7 @@ static bool upload_native_fp8_scales(WeightCaches& wc, VRAMAllocator* alloc,
     for (size_t i = 0; i < entries.size(); ++i) {
         host[2 * i] = entries[i]->host_scale;
         const auto it = wc.fp8_native_act_scale.find(entries[i]->weight.data);
-        host[2 * i + 1] = it != wc.fp8_native_act_scale.end() ? it->second : 0.0f;
+        host[(2 * i) + 1] = it != wc.fp8_native_act_scale.end() ? it->second : 0.0f;
     }
     auto* d = static_cast<float*>(vram_alloc(alloc, host.size() * sizeof(float), "fp8_native_scales"));
     if (!d || cudaMemcpyAsync(d, host.data(), host.size() * sizeof(float), cudaMemcpyHostToDevice, stream) !=
@@ -204,8 +204,8 @@ static bool upload_native_fp8_scales(WeightCaches& wc, VRAMAllocator* alloc,
     }
     wc.fp8_native_scales = d;
     for (size_t i = 0; i < entries.size(); ++i) {
-        entries[i]->d_scale = d + 2 * i;
-        entries[i]->d_act_scale = host[2 * i + 1] > 0.0f ? d + 2 * i + 1 : nullptr;  // null: dynamic
+        entries[i]->d_scale = d + (2 * i);
+        entries[i]->d_act_scale = host[(2 * i) + 1] > 0.0f ? d + (2 * i) + 1 : nullptr;  // null: dynamic
     }
     return true;
 }
@@ -218,7 +218,7 @@ void QuantPipeline::pre_dequant_phase1a_native_fp8_(const ModelConfig& cfg, cuda
         const auto& L = model_->layer(i);
         for (const Tensor* t : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.ssm_in,
                                 &L.ssm_out, &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared}) {
-            if (!t->data || !t->on_device || t->qtype != QType::FP8_E4M3 || wcache_->fp8.count(t->data))
+            if (!t->data || !t->on_device || t->qtype != QType::FP8_E4M3 || wcache_->fp8.contains(t->data))
                 continue;
             FP8CacheEntry fe;
             fe.weight = Tensor(t->data, QType::FP8_E4M3, t->ndim, t->shape, true);

@@ -76,7 +76,7 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
                         dispatch_policy().gemm.nvfp4_smallm_impl == 2 && (K % 256) == 0 && (N % 64) == 0;
         ws_need = std::max(ws_need, v2 ? gemm_nvfp4_smallm_v2_workspace_bytes(N, K)
                                        : gemm_nvfp4_smallm_workspace_bytes(N));
-        xq_need = std::max(xq_need, (size_t)32 * (K / 2) + (size_t)32 * (K / 16));
+        xq_need = std::max(xq_need, ((size_t)32 * (K / 2)) + ((size_t)32 * (K / 16)));
         ++n_weights;
     }
     cur_decode_rows_ = saved;
@@ -120,11 +120,11 @@ uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, 
     NvFP4QuantResult nv;
     if (!smallm_weight_(registry_.handle(consumer_id), nv) || static_cast<int>(nv.K) != K)
         return nullptr;
-    const size_t xq_need = (size_t)32 * (K / 2) + (size_t)32 * (K / 16);
+    const size_t xq_need = ((size_t)32 * (K / 2)) + ((size_t)32 * (K / 16));
     ensure_smallm_xq_(xq_need, stream);
     if (smallm_xq_bytes_ < xq_need)
         return nullptr;
-    *scales_out = static_cast<uint8_t*>(smallm_xq_) + (size_t)32 * (K / 2);
+    *scales_out = static_cast<uint8_t*>(smallm_xq_) + ((size_t)32 * (K / 2));
     return static_cast<uint8_t*>(smallm_xq_);
 }
 
@@ -269,7 +269,7 @@ bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* cons
     }
     if (gemm_nvfp4_smallm_v2_stripes(total_tiles * 64, K) != 1)
         return false;
-    const size_t xq_need = (size_t)32 * (K / 2) + (size_t)32 * (K / 16);
+    const size_t xq_need = ((size_t)32 * (K / 2)) + ((size_t)32 * (K / 16));
     ensure_smallm_xq_(xq_need, ctx.stream);
     if (smallm_xq_bytes_ < xq_need)
         return false;
@@ -279,7 +279,7 @@ bool GraphExecutor::try_smallm_multi_dispatch_(const TensorID* ids, Tensor* cons
             calib_->accumulate(cur_layer_, registry_.handle(ids[i]).kind, input, ctx.stream);
     }
     uint8_t* xq_packed = static_cast<uint8_t*>(smallm_xq_);
-    uint8_t* xq_scales = xq_packed + (size_t)32 * (K / 2);
+    uint8_t* xq_scales = xq_packed + ((size_t)32 * (K / 2));
     // Quantize dedupe — identical contract to the single-tensor block: a
     // matching scratch tag plus either the caller's act-quant hint or a
     // producer-side tag skips the re-quantize.

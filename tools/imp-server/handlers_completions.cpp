@@ -232,7 +232,7 @@ void stream_completion_response_(httplib::Response& res, ServerState& state, con
                     think_tokens++;
 
                     if (!think_confirmed) {
-                        if (think_buf.find("<think>") != std::string::npos)
+                        if (think_buf.contains("<think>"))
                             think_confirmed = true;
                         else if (think_tokens == 1 && piece.empty())
                             think_confirmed = true;
@@ -640,8 +640,7 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
         return;
 
     int remaining = snap_max_seq_len - n_prompt_tokens;
-    if (max_tokens > remaining)
-        max_tokens = remaining;
+    max_tokens = std::min(max_tokens, remaining);
 
     auto t_start = std::chrono::high_resolution_clock::now();
 

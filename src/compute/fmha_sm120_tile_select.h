@@ -34,8 +34,8 @@ constexpr int sm120_fmha_bkv(int head_dim) { return head_dim >= 512 ? 32 : 64; }
 
 // Dynamic smem: Q (half) + shared K/V tile (half) + S (f32) + O_acc (f32) + row_m/row_l (f32).
 constexpr size_t sm120_fmha_smem_bytes(int bq, int bkv, int head_dim) {
-    return (size_t)bq * head_dim * 2 + (size_t)bkv * head_dim * 2 + (size_t)bq * bkv * sizeof(float) +
-           (size_t)bq * head_dim * sizeof(float) + 2 * (size_t)bq * sizeof(float);
+    return ((size_t)bq * head_dim * 2) + ((size_t)bkv * head_dim * 2) + ((size_t)bq * bkv * sizeof(float)) +
+           ((size_t)bq * head_dim * sizeof(float)) + (2 * (size_t)bq * sizeof(float));
 }
 
 // Bq for head_dim under max_smem, 0 when no instanced tile fits. Occupancy 2 first (smem <= max/2,

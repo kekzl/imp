@@ -78,7 +78,7 @@ int run_interactive(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGene
             break;
 
         // Handle /image command
-        if (input.rfind("/image ", 0) == 0) {
+        if (input.starts_with("/image ")) {
             std::string img_path = input.substr(7);
             // Repeating /image before sending stacks the pictures up. The
             // pending list empties when a message consumes it, so the first
@@ -240,7 +240,7 @@ int run_interactive(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGene
                 if (!args.stop_sequences.empty()) {
                     bool text_stop = false;
                     for (const auto& stop : args.stop_sequences) {
-                        if (interactive_text.find(stop) != std::string::npos) {
+                        if (interactive_text.contains(stop)) {
                             text_stop = true;
                             break;
                         }

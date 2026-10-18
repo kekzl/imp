@@ -60,7 +60,7 @@ __device__ __forceinline__ int mrope_position(const MRopeParams& m, int fallback
     } else {
         axis = (pair_idx < m.sec_t) ? 0 : (pair_idx < m.sec_t + m.sec_h) ? 1 : 2;
     }
-    return m.positions[static_cast<int64_t>(axis) * m.stride + token_idx];
+    return m.positions[(static_cast<int64_t>(axis) * m.stride) + token_idx];
 }
 
 // Per (token, pair) rotation angle, moved verbatim out of rope_forward_kernel.
@@ -135,26 +135,26 @@ __global__ void rope_forward_kernel(T* __restrict__ Q, T* __restrict__ K, const 
     // (x1=x[ix+n_dims/2], n_dims=RoPE dim count, not full head_dim). Dims [rope_dim,head_dim)
     // stay unchanged.
     const int idx0 = neox ? pair_idx : (2 * pair_idx);
-    const int idx1 = neox ? (pair_idx + rope_pairs) : (2 * pair_idx + 1);
+    const int idx1 = neox ? (pair_idx + rope_pairs) : ((2 * pair_idx) + 1);
     const int max_heads = max(n_heads, n_kv_heads);
 
-    for (int head_idx = blockIdx.y * blockDim.y + threadIdx.y; head_idx < max_heads;
+    for (int head_idx = (blockIdx.y * blockDim.y) + threadIdx.y; head_idx < max_heads;
          head_idx += gridDim.y * blockDim.y) {
         if (head_idx < n_heads) {
-            int64_t base = static_cast<int64_t>(token_idx) * n_heads * head_dim +
-                           static_cast<int64_t>(head_idx) * head_dim;
+            int64_t base = (static_cast<int64_t>(token_idx) * n_heads * head_dim) +
+                           (static_cast<int64_t>(head_idx) * head_dim);
             float q0 = Traits::load(Q, base + idx0);
             float q1 = Traits::load(Q, base + idx1);
-            Traits::store(Q, base + idx0, q0 * cos_val - q1 * sin_val);
-            Traits::store(Q, base + idx1, q0 * sin_val + q1 * cos_val);
+            Traits::store(Q, base + idx0, (q0 * cos_val) - (q1 * sin_val));
+            Traits::store(Q, base + idx1, (q0 * sin_val) + (q1 * cos_val));
         }
         if (head_idx < n_kv_heads) {
-            int64_t base = static_cast<int64_t>(token_idx) * n_kv_heads * head_dim +
-                           static_cast<int64_t>(head_idx) * head_dim;
+            int64_t base = (static_cast<int64_t>(token_idx) * n_kv_heads * head_dim) +
+                           (static_cast<int64_t>(head_idx) * head_dim);
             float k0 = Traits::load(K, base + idx0);
             float k1 = Traits::load(K, base + idx1);
-            Traits::store(K, base + idx0, k0 * cos_val - k1 * sin_val);
-            Traits::store(K, base + idx1, k0 * sin_val + k1 * cos_val);
+            Traits::store(K, base + idx0, (k0 * cos_val) - (k1 * sin_val));
+            Traits::store(K, base + idx1, (k0 * sin_val) + (k1 * cos_val));
         }
     }
 }
@@ -234,10 +234,10 @@ __global__ void q_position_temperature_kernel(__half* __restrict__ Q, const int*
         return;
     const int pos = positions[t];
     const float m = 1.0f +
-                    scale * logf(1.0f + floorf(static_cast<float>(pos) / static_cast<float>(floor_len)));
+                    (scale * logf(1.0f + floorf(static_cast<float>(pos) / static_cast<float>(floor_len))));
     if (m == 1.0f)
         return;
-    __half2* row = reinterpret_cast<__half2*>(Q + static_cast<int64_t>(t) * row_elems);
+    __half2* row = reinterpret_cast<__half2*>(Q + (static_cast<int64_t>(t) * row_elems));
     for (int i = threadIdx.x; i < row_elems / 2; i += blockDim.x) {
         const float2 v = __half22float2(row[i]);
         row[i] = __floats2half2_rn(v.x * m, v.y * m);
@@ -295,7 +295,7 @@ __global__ void qknorm_rope_fused_fp16_kernel(
 
     // --- Process Q head ---
     if (head_idx < n_heads) {
-        __half* q_head = Q + (static_cast<int64_t>(token_idx) * n_heads + head_idx) * head_dim;
+        __half* q_head = Q + (((static_cast<int64_t>(token_idx) * n_heads) + head_idx) * head_dim);
 
         float sum_sq = 0.0f;
         for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
@@ -306,7 +306,7 @@ __global__ void qknorm_rope_fused_fp16_kernel(
 
         float inv_rms;
         if (threadIdx.x == 0) {
-            reduce_buf[0] = rsqrtf(sum_sq / (float)head_dim + eps);
+            reduce_buf[0] = rsqrtf((sum_sq / (float)head_dim) + eps);
         }
         __syncthreads();
         inv_rms = reduce_buf[0];
@@ -337,17 +337,17 @@ __global__ void qknorm_rope_fused_fp16_kernel(
             }
 
             int idx0 = neox ? pair : (2 * pair);
-            int idx1 = neox ? (pair + rope_pairs) : (2 * pair + 1);
+            int idx1 = neox ? (pair + rope_pairs) : ((2 * pair) + 1);
 
             float q0 = normed_vals[idx0];
             float q1 = normed_vals[idx1];
-            q_head[idx0] = __float2half(q0 * cos_val - q1 * sin_val);
-            q_head[idx1] = __float2half(q0 * sin_val + q1 * cos_val);
+            q_head[idx0] = __float2half((q0 * cos_val) - (q1 * sin_val));
+            q_head[idx1] = __float2half((q0 * sin_val) + (q1 * cos_val));
         }
         // Copy back non-rotated dims: for partial RoPE, pairs (i,i+rope_pairs) live in
         // [0,2*rope_pairs); dims [2*rope_pairs,head_dim) stay unchanged (matches llama.cpp's
         // rope_neox kernel).
-        for (int i = 2 * rope_pairs + threadIdx.x; i < head_dim; i += blockDim.x) {
+        for (int i = (2 * rope_pairs) + threadIdx.x; i < head_dim; i += blockDim.x) {
             q_head[i] = __float2half(normed_vals[i]);
         }
     }
@@ -357,7 +357,7 @@ __global__ void qknorm_rope_fused_fp16_kernel(
 
     // --- Process K head ---
     if (head_idx < n_kv_heads) {
-        __half* k_head = K + (static_cast<int64_t>(token_idx) * n_kv_heads + head_idx) * head_dim;
+        __half* k_head = K + (((static_cast<int64_t>(token_idx) * n_kv_heads) + head_idx) * head_dim);
 
         float sum_sq = 0.0f;
         for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
@@ -368,7 +368,7 @@ __global__ void qknorm_rope_fused_fp16_kernel(
 
         float inv_rms;
         if (threadIdx.x == 0) {
-            reduce_buf[0] = rsqrtf(sum_sq / (float)head_dim + eps);
+            reduce_buf[0] = rsqrtf((sum_sq / (float)head_dim) + eps);
         }
         __syncthreads();
         inv_rms = reduce_buf[0];
@@ -399,15 +399,15 @@ __global__ void qknorm_rope_fused_fp16_kernel(
             }
 
             int idx0 = neox ? pair : (2 * pair);
-            int idx1 = neox ? (pair + rope_pairs) : (2 * pair + 1);
+            int idx1 = neox ? (pair + rope_pairs) : ((2 * pair) + 1);
 
             float k0 = normed_vals[idx0];
             float k1 = normed_vals[idx1];
-            k_head[idx0] = __float2half(k0 * cos_val - k1 * sin_val);
-            k_head[idx1] = __float2half(k0 * sin_val + k1 * cos_val);
+            k_head[idx0] = __float2half((k0 * cos_val) - (k1 * sin_val));
+            k_head[idx1] = __float2half((k0 * sin_val) + (k1 * cos_val));
         }
         // Copy back non-rotated dims (see Q path comment above).
-        for (int i = 2 * rope_pairs + threadIdx.x; i < head_dim; i += blockDim.x) {
+        for (int i = (2 * rope_pairs) + threadIdx.x; i < head_dim; i += blockDim.x) {
             k_head[i] = __float2half(normed_vals[i]);
         }
     }

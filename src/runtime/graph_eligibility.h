@@ -61,7 +61,7 @@ inline int kv_unmet_blocks(int ctx_len, int remaining, int held, int block_size)
     const int ahead = std::min(remaining, kKvValveHorizonTokens);
     if (ahead <= 0 || block_size <= 0)
         return 0;
-    return std::max(0, (ctx_len + ahead - 1 + block_size - 1) / block_size - held);
+    return std::max(0, ((ctx_len + ahead - 1 + block_size - 1) / block_size) - held);
 }
 
 // The mid-run trigger, as arithmetic the CPU lane can pin (AUDIT_ARCH_2026
@@ -73,8 +73,7 @@ inline int kv_unmet_blocks(int ctx_len, int remaining, int held, int block_size)
 // lost 108400 tokens and answered wrong).
 [[nodiscard]] inline bool kv_pressure_demotes_graphs(int free_blocks, int reclaimable_blocks, int pool_total, int unmet) {
     const int supply = free_blocks + reclaimable_blocks;
-    return pool_total > 0 && supply < pool_total / 10 && unmet > 0 &&
-           supply < unmet + pool_total / 100;
+    return pool_total > 0 && supply < pool_total / 10 && unmet > 0 && supply < unmet + (pool_total / 100);
 }
 
 // The way back (C-3): lifted when a fifth of the pool is free again

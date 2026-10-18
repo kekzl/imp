@@ -407,12 +407,12 @@ bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config
                 std::string ta;
                 if (spec.type == JType::OBJECT)
                     jobj_opt_string(spec, "quant_algo", ta);
-                if (ta.find("NVFP4") != std::string::npos) {
+                if (ta.contains("NVFP4")) {
                     cfg.n_nvfp4_tensors++;
                     // group_size rides on the NVFP4 entries, not the top level.
                     if (cfg.n_nvfp4_tensors == 1)
                         jobj_opt_int(spec, "group_size", cfg.group_size);
-                } else if (ta.find("FP8") != std::string::npos) {
+                } else if (ta.contains("FP8")) {
                     cfg.n_fp8_tensors++;
                 } else {
                     cfg.n_other_tensors++;

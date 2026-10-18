@@ -3,6 +3,7 @@
 #include "core/fp_bits.h"
 #include "model/json_util.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <filesystem>
@@ -18,7 +19,7 @@ namespace {
 constexpr float kFp4E2M1Max = 6.0f;
 
 bool ends_with(const std::string& s, const std::string& suf) {
-    return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+    return s.size() >= suf.size() && s.ends_with(suf);
 }
 
 // The module suffixes an engine merges, and the name of the merged layer. Order
@@ -185,8 +186,7 @@ float fp16_absmax(const uint16_t* data, size_t n) {
         const uint16_t mag = data[i] & 0x7FFFu;
         if (mag >= 0x7C00u)  // Inf or NaN — not a magnitude this scale should follow
             continue;
-        if (mag > best)
-            best = mag;
+        best = std::max(best, mag);
     }
     return half_to_float(best);
 }
@@ -306,8 +306,13 @@ std::expected<std::string, std::string> patch_config_json(const std::string& src
                 skip_ws(src, j);
                 return j == i;
             }();
-            return src.substr(0, obj_open + 1) + "\n  \"" + kKey + "\": " + quant_config_obj +
-                   (empty ? "\n" : ",\n") + src.substr(obj_open + 1);
+            return src.substr(0, obj_open + 1)
+                .append("\n  \"")
+                .append(kKey)
+                .append("\": ")
+                .append(quant_config_obj)
+                .append(empty ? "\n" : ",\n")
+                .append(src.substr(obj_open + 1));
         }
         std::string key;
         if (!read_string(src, i, key))
@@ -403,7 +408,7 @@ std::expected<void, std::string> copy_aux_files(const std::string& in_dir, const
         if (!e.is_regular_file())
             continue;
         const std::string name = e.path().filename().string();
-        if (copied.count(name) || !ends_with(name, "_config.json"))
+        if (copied.contains(name) || !ends_with(name, "_config.json"))
             continue;
         if (name == "hf_quant_config.json")
             continue;

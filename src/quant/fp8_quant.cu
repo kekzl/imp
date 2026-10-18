@@ -39,7 +39,7 @@ __global__ void absmax_reduce_kernel(const half* __restrict__ input, float* __re
     __shared__ float sdata[kBlockSize];
 
     const int tid = threadIdx.x;
-    const int base = (blockIdx.x * blockDim.x + tid) * kElemsPerThread;
+    const int base = ((blockIdx.x * blockDim.x) + tid) * kElemsPerThread;
 
     float local_max = 0.0f;
 
@@ -110,7 +110,7 @@ __global__ void calibrate_quantize_fp8_kernel(const half* __restrict__ input, ui
         d_scale_out[0] = scale;
     }
 
-    const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
+    const int base = ((blockIdx.x * blockDim.x) + threadIdx.x) * kElemsPerThread;
     if (base >= n)
         return;
 
@@ -134,7 +134,7 @@ __global__ void quantize_fp16_to_fp8_scaled_kernel(const half* __restrict__ inpu
                                                    uint8_t* __restrict__ output, int n,
                                                    float inv_scale)  // 1.0f / scale
 {
-    const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
+    const int base = ((blockIdx.x * blockDim.x) + threadIdx.x) * kElemsPerThread;
     if (base >= n)
         return;
 
@@ -156,7 +156,7 @@ __global__ void quantize_fp16_to_fp8_scaled_kernel(const half* __restrict__ inpu
 __global__ void quantize_fp16_to_fp8_dscale_kernel(const half* __restrict__ input,
                                                    uint8_t* __restrict__ output, int n8,
                                                    const float* __restrict__ d_scale) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (i >= n8)
         return;
     const float inv = 1.0f / __ldg(d_scale);
@@ -182,7 +182,7 @@ __global__ void quantize_fp16_to_fp8_dscale_kernel(const half* __restrict__ inpu
 
 __global__ void dequantize_fp8_to_fp16_scaled_kernel(const uint8_t* __restrict__ input,
                                                      half* __restrict__ output, int n, float scale) {
-    const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
+    const int base = ((blockIdx.x * blockDim.x) + threadIdx.x) * kElemsPerThread;
     if (base >= n)
         return;
 
@@ -346,8 +346,8 @@ void calibrate_and_quantize_fp8_async(const void* input_fp16, void* output_fp8, 
 __global__ void quantize_fp8_rows_kernel(const half* __restrict__ in, uint8_t* __restrict__ out,
                                          int K, float* __restrict__ d_row_scales) {
     const int row = blockIdx.x;
-    const half* r = in + static_cast<int64_t>(row) * K;
-    uint8_t* o = out + static_cast<int64_t>(row) * K;
+    const half* r = in + (static_cast<int64_t>(row) * K);
+    uint8_t* o = out + (static_cast<int64_t>(row) * K);
 
     float m = 0.0f;
     for (int i = threadIdx.x; i < K; i += blockDim.x)
@@ -382,8 +382,8 @@ __global__ void dequantize_fp8_rows_kernel(const uint8_t* __restrict__ in, const
                                            half* __restrict__ out, int K) {
     const int row = blockIdx.x;
     const float s = d_row_scales[row];
-    const uint2* r = reinterpret_cast<const uint2*>(in + static_cast<int64_t>(row) * K);
-    half* o = out + static_cast<int64_t>(row) * K;
+    const uint2* r = reinterpret_cast<const uint2*>(in + (static_cast<int64_t>(row) * K));
+    half* o = out + (static_cast<int64_t>(row) * K);
     for (int i = threadIdx.x; i < K / 8; i += blockDim.x) {
         const uint2 v = r[i];
         const uint8_t* b = reinterpret_cast<const uint8_t*>(&v);
@@ -394,7 +394,7 @@ __global__ void dequantize_fp8_rows_kernel(const uint8_t* __restrict__ in, const
             *reinterpret_cast<uint8_t*>(&q) = b[j];
             h[j] = __float2half(static_cast<float>(q) * s);
         }
-        *reinterpret_cast<uint4*>(o + static_cast<int64_t>(8) * i) = *reinterpret_cast<const uint4*>(h);
+        *reinterpret_cast<uint4*>(o + (static_cast<int64_t>(8) * i)) = *reinterpret_cast<const uint4*>(h);
     }
 }
 
@@ -570,7 +570,7 @@ __global__ void calibrate_fp8_scales_per_expert_kernel(const half* __restrict__ 
     const int end = offsets[expert + 1];
     const int n_elems = (end - start) * K;
 
-    const half* expert_base = input + static_cast<int64_t>(start) * K;
+    const half* expert_base = input + (static_cast<int64_t>(start) * K);
 
     float local_max = 0.0f;
     for (int i = tid; i < n_elems; i += kBlockSize) {
@@ -612,10 +612,10 @@ __global__ void quantize_fp16_to_fp8_per_expert_kernel(const half* __restrict__ 
     float scale = scales[expert];
     float inv_scale = (scale > 0.0f) ? (1.0f / scale) : 1.0f;
 
-    const half* expert_in = input + static_cast<int64_t>(start) * K;
-    uint8_t* expert_out = output + static_cast<int64_t>(start) * K;
+    const half* expert_in = input + (static_cast<int64_t>(start) * K);
+    uint8_t* expert_out = output + (static_cast<int64_t>(start) * K);
 
-    int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
+    int base = ((blockIdx.x * blockDim.x) + threadIdx.x) * kElemsPerThread;
     if (base >= n_elems)
         return;
 

@@ -28,14 +28,14 @@ Tensor row_view(void* p, int64_t rows, int64_t cols) {
 
 // x[s * d + j] += e[j] for every stream s: the layer's first combine (prev_injection = None).
 __global__ void mtp_hc_add_broadcast_kernel(__half* __restrict__ x, const __half* __restrict__ e, int hc, int d) {
-    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int t = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (t >= hc * d)
         return;
     x[t] = __float2half(__half2float(x[t]) + __half2float(e[t % d]));
 }
 
 __global__ void mtp_add_rows_kernel(__half* __restrict__ a, const __half* __restrict__ b, int n) {
-    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int t = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (t < n)
         a[t] = __float2half(__half2float(a[t]) + __half2float(b[t]));
 }

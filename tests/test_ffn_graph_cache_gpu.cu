@@ -47,5 +47,38 @@ TEST(FfnGraphCacheGpu, CaptureRefusalRunsEagerAndDisables) {
     cudaStreamDestroy(stream);
 }
 
+// C-029: the bucket past kMaxRowBuckets evicts the oldest; its capture reuses the evicted exec
+// through cudaGraphExecUpdate, and the replay runs the new bucket's work, not the old one's.
+TEST(FfnGraphCacheGpu, EvictedExecIsUpdatedForTheNextBucket) {
+    cudaStream_t stream = nullptr;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+    int* d = nullptr;
+    ASSERT_EQ(cudaMalloc(&d, sizeof(int)), cudaSuccess);
+    FfnGraphCache c;
+    auto read = [&] {
+        int h = 0;
+        EXPECT_EQ(cudaMemcpyAsync(&h, d, sizeof(int), cudaMemcpyDeviceToHost, stream), cudaSuccess);
+        EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+        return h & 0xff;
+    };
+    const int n = FfnGraphCache::kMaxRowBuckets + 1;
+    for (int b = 1; b <= n; ++b) {
+        auto fn = [&, b] { ASSERT_EQ(cudaMemsetAsync(d, b, sizeof(int), stream), cudaSuccess); };
+        c.run(0, 16 * b, 1, stream, fn);  // eager
+        c.run(0, 16 * b, 1, stream, fn);  // capture + launch
+        EXPECT_EQ(read(), b) << "bucket " << b;
+    }
+    EXPECT_FALSE(c.disabled());
+    EXPECT_EQ(c.graphs(), static_cast<size_t>(FfnGraphCache::kMaxRowBuckets));
+    EXPECT_EQ(c.updates(), 1u) << "bucket " << n << " reused the evicted exec of bucket 1";
+    c.run(0, 16 * n, 1, stream, [] { FAIL() << "a replay must not run fn"; });
+    EXPECT_EQ(read(), n);
+    EXPECT_EQ(c.replays(), 1u);
+
+    c.clear();
+    cudaFree(d);
+    cudaStreamDestroy(stream);
+}
+
 }  // namespace
 }  // namespace imp

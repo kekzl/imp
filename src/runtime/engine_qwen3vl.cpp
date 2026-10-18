@@ -77,14 +77,14 @@ void Engine::bind_mrope_prefill_(InferenceState& state, const Request& req, int 
     if (req.mrope_positions.size() == 3 * n_prompt && offset + chunk_len <= static_cast<int>(n_prompt)) {
         for (int a = 0; a < 3; ++a)
             for (int i = 0; i < chunk_len; ++i)
-                h_mrope_scratch_[static_cast<size_t>(a) * chunk_len + i] =
-                    req.mrope_positions[static_cast<size_t>(a) * n_prompt + offset + i];
+                h_mrope_scratch_[(static_cast<size_t>(a) * chunk_len) + i] =
+                    req.mrope_positions[(static_cast<size_t>(a) * n_prompt) + offset + i];
     } else {
         // No image (or a prompt this engine did not lay out): plain ascending
         // positions on all three axes, which is what the single-axis path does.
         for (int a = 0; a < 3; ++a)
             for (int i = 0; i < chunk_len; ++i)
-                h_mrope_scratch_[static_cast<size_t>(a) * chunk_len + i] = offset + i;
+                h_mrope_scratch_[(static_cast<size_t>(a) * chunk_len) + i] = offset + i;
     }
     bind_mrope_(state, chunk_len, d_mrope_prefill_, mrope_prefill_cap_, /*fixed=*/false, stream);
 }
@@ -112,8 +112,8 @@ void Engine::bind_mrope_prefill_ragged_(InferenceState& state,
                               offset + chunk_len <= static_cast<int>(n_prompt);
         for (int a = 0; a < 3; ++a) {
             for (int i = 0; i < chunk_len; ++i) {
-                h_mrope_scratch_[static_cast<size_t>(a) * total_rows + col + i] =
-                    laid_out ? req.mrope_positions[static_cast<size_t>(a) * n_prompt + offset + i]
+                h_mrope_scratch_[(static_cast<size_t>(a) * total_rows) + col + i] =
+                    laid_out ? req.mrope_positions[(static_cast<size_t>(a) * n_prompt) + offset + i]
                              : offset + i;
             }
         }
@@ -469,7 +469,7 @@ bool Engine::encode_image_for(Request& req) {
     if (!*buf)
         return false;
     for (size_t i = 0; i < req.images.size(); ++i)
-        if (!vision_.encode_to(*req.images[i], buf->as<half>() + i * (per_image / sizeof(half)), stream_))
+        if (!vision_.encode_to(*req.images[i], buf->as<half>() + (i * (per_image / sizeof(half))), stream_))
             return false;
     req.vision_emb = std::move(buf);
     req.vision_token_id = vision_.soft_token_id();

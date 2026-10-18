@@ -14,6 +14,8 @@
 #include <cuda_fp16.h>
 #include <float.h>
 
+#include <algorithm>
+
 namespace imp {
 
 namespace {
@@ -47,7 +49,7 @@ __device__ __forceinline__ void tile_load(uint8_t* k_tile, uint8_t* v_tile, cons
                                           const uint8_t* v_src, int kv_slot_stride, int lane) {
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-        int piece = lane + 32 * i;  // 128 pieces: row = piece/8, 16B col = piece%8
+        int piece = lane + (32 * i);  // 128 pieces: row = piece/8, 16B col = piece%8
         int row = piece >> 3;
         int col = (piece & 7) * 16;
         // #2218 bounded: row < 16 (piece < 128): row * kTileRowStride < 16 * 144 = 2304 (constexpr :26),
@@ -111,10 +113,9 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
     const int total_blocks = num_ctx_blocks - first_block;
 
     int blocks_per_split = (total_blocks + num_splits - 1) / num_splits;
-    int split_start = first_block + split_idx * blocks_per_split;
+    int split_start = first_block + (split_idx * blocks_per_split);
     int split_end = split_start + blocks_per_split;
-    if (split_end > num_ctx_blocks)
-        split_end = num_ctx_blocks;
+    split_end = std::min(split_end, num_ctx_blocks);
 
     if (split_start >= split_end) {
         write_empty_split_sentinel<HEAD_DIM>(partial_out, batch_idx, n_heads, head_idx, num_splits, split_idx,
@@ -122,7 +123,7 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
         return;
     }
 
-    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
+    const int* bt = block_tables + ((int64_t)batch_idx * max_num_blocks);
     const int kv_block_stride = block_size * n_kv_heads * HEAD_DIM;
     const int kv_slot_stride = n_kv_heads * HEAD_DIM;
     const int kv_head_off = kv_head * HEAD_DIM;
@@ -143,8 +144,8 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
     // Q slice for this lane's dim half: 64 dims as 32 half2 (exact convert per FMA).
     half2 q_reg[HEAD_DIM / 4];
     {
-        const uint4* q4 = reinterpret_cast<const uint4*>(Q + (int64_t)batch_idx * n_heads * HEAD_DIM +
-                                                         (int64_t)head_idx * HEAD_DIM +
+        const uint4* q4 = reinterpret_cast<const uint4*>(Q + ((int64_t)batch_idx * n_heads * HEAD_DIM) +
+                                                         ((int64_t)head_idx * HEAD_DIM) +
                                                          static_cast<ptrdiff_t>(my_half * (HEAD_DIM / 2)));
 #pragma unroll
         for (int i = 0; i < HEAD_DIM / 16; i++) {
@@ -173,9 +174,9 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
     auto page_live = [&](int ch) { return bt[ch / chunks_per_page] >= 0; };
     auto chunk_src = [&](int ch, const uint8_t* __restrict__ cache) {
         const int page = ch / chunks_per_page;
-        const int slot0 = (ch - page * chunks_per_page) * kTileTokens;
+        const int slot0 = (ch - (page * chunks_per_page)) * kTileTokens;
         const int phys = max(bt[page], 0);
-        return cache + (int64_t)phys * kv_block_stride + static_cast<int64_t>(slot0) * kv_slot_stride +
+        return cache + ((int64_t)phys * kv_block_stride) + (static_cast<int64_t>(slot0) * kv_slot_stride) +
                kv_head_off;
     };
 
@@ -215,7 +216,7 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
             float2 k01 = __half22float2(fp8x2_to_half2(packed));
             float2 k23 = __half22float2(fp8x2_to_half2(packed >> 16));
             float2 q01 = __half22float2(q_reg[i * 2]);
-            float2 q23 = __half22float2(q_reg[i * 2 + 1]);
+            float2 q23 = __half22float2(q_reg[(i * 2) + 1]);
             part = __fmaf_rn(q01.x, k01.x, part);
             part = __fmaf_rn(q01.y, k01.y, part);
             part = __fmaf_rn(q23.x, k23.x, part);
@@ -240,7 +241,7 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
 #pragma unroll
         for (int off = 16; off > 0; off >>= 1)
             l_tile += __shfl_xor_sync(0xFFFFFFFF, l_tile, off);
-        l_w = l_w * rescale + l_tile;
+        l_w = (l_w * rescale) + l_tile;
         m_w = m_new;
 
         // ---- PV phase: lane owns dims [lane*4, lane*4+4) ----
@@ -254,7 +255,7 @@ __global__ void paged_attention_splitk_fp8_tile_kernel(
             float pj = __shfl_sync(0xFFFFFFFF, p, j) * kv_scale;
             if (pj == 0.0f)
                 continue;
-            uint32_t packed = v_words[j * kRowWords + lane_id];
+            uint32_t packed = v_words[(j * kRowWords) + lane_id];
             float2 v01 = __half22float2(fp8x2_to_half2(packed));
             float2 v23 = __half22float2(fp8x2_to_half2(packed >> 16));
             o_reg[0] = __fmaf_rn(pj, v01.x, o_reg[0]);
@@ -305,7 +306,7 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
     const int split_idx = blockIdx.z;
     const int warp_id = threadIdx.x / WARP_SIZE;  // blockDim.x == 32 * G, warp w = Q head w
     const int lane_id = threadIdx.x % WARP_SIZE;
-    const int head_idx = kv_head * (n_heads / n_kv_heads) + warp_id;
+    const int head_idx = (kv_head * (n_heads / n_kv_heads)) + warp_id;
 
     const int ctx_len = context_lens[batch_idx];
     if (ctx_len <= 0)
@@ -319,14 +320,13 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
     const int total_blocks = num_ctx_blocks - first_block;
 
     int blocks_per_split = (total_blocks + num_splits - 1) / num_splits;
-    int split_start = first_block + split_idx * blocks_per_split;
+    int split_start = first_block + (split_idx * blocks_per_split);
     int split_end = split_start + blocks_per_split;
-    if (split_end > num_ctx_blocks)
-        split_end = num_ctx_blocks;
+    split_end = std::min(split_end, num_ctx_blocks);
 
     constexpr int partial_stride = 2 + HEAD_DIM;
     float* out = partial_out +
-                 (int64_t)((batch_idx * n_heads + head_idx) * num_splits + split_idx) * partial_stride;
+                 ((int64_t)((((batch_idx * n_heads) + head_idx) * num_splits) + split_idx) * partial_stride);
 
     if (split_start >= split_end) {
         // Per-warp sentinel (each warp owns a distinct head's partial).
@@ -336,11 +336,11 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
         }
 #pragma unroll
         for (int i = 0; i < ELEMS; i++)
-            out[2 + lane_id * ELEMS + i] = 0.0f;
+            out[2 + (lane_id * ELEMS) + i] = 0.0f;
         return;
     }
 
-    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
+    const int* bt = block_tables + ((int64_t)batch_idx * max_num_blocks);
     const int kv_block_stride = block_size * n_kv_heads * HEAD_DIM;
     const int kv_slot_stride = n_kv_heads * HEAD_DIM;
     const int kv_head_off = kv_head * HEAD_DIM;
@@ -364,8 +364,8 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
     // Q slice for this warp's head and this lane's dim half (see tile kernel).
     half2 q_reg[HEAD_DIM / 4];
     {
-        const uint4* q4 = reinterpret_cast<const uint4*>(Q + (int64_t)batch_idx * n_heads * HEAD_DIM +
-                                                         (int64_t)head_idx * HEAD_DIM +
+        const uint4* q4 = reinterpret_cast<const uint4*>(Q + ((int64_t)batch_idx * n_heads * HEAD_DIM) +
+                                                         ((int64_t)head_idx * HEAD_DIM) +
                                                          static_cast<ptrdiff_t>(my_half * (HEAD_DIM / 2)));
 #pragma unroll
         for (int i = 0; i < HEAD_DIM / 16; i++) {
@@ -393,9 +393,9 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
     auto page_live = [&](int ch) { return bt[ch / chunks_per_page] >= 0; };
     auto chunk_src = [&](int ch, const uint8_t* __restrict__ cache) {
         const int page = ch / chunks_per_page;
-        const int slot0 = (ch - page * chunks_per_page) * kTileTokens;
+        const int slot0 = (ch - (page * chunks_per_page)) * kTileTokens;
         const int phys = max(bt[page], 0);
-        return cache + (int64_t)phys * kv_block_stride + static_cast<int64_t>(slot0) * kv_slot_stride +
+        return cache + ((int64_t)phys * kv_block_stride) + (static_cast<int64_t>(slot0) * kv_slot_stride) +
                kv_head_off;
     };
 
@@ -441,7 +441,7 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
             float2 k01 = __half22float2(fp8x2_to_half2(packed));
             float2 k23 = __half22float2(fp8x2_to_half2(packed >> 16));
             float2 q01 = __half22float2(q_reg[i * 2]);
-            float2 q23 = __half22float2(q_reg[i * 2 + 1]);
+            float2 q23 = __half22float2(q_reg[(i * 2) + 1]);
             part = __fmaf_rn(q01.x, k01.x, part);
             part = __fmaf_rn(q01.y, k01.y, part);
             part = __fmaf_rn(q23.x, k23.x, part);
@@ -466,7 +466,7 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
 #pragma unroll
         for (int off = 16; off > 0; off >>= 1)
             l_tile += __shfl_xor_sync(0xFFFFFFFF, l_tile, off);
-        l_w = l_w * rescale + l_tile;
+        l_w = (l_w * rescale) + l_tile;
         m_w = m_new;
 
         // ---- PV phase: lane owns dims [lane*4, lane*4+4) ----
@@ -480,7 +480,7 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
             float pj = __shfl_sync(0xFFFFFFFF, p, j) * kv_scale;
             if (pj == 0.0f)
                 continue;
-            uint32_t packed = v_words[j * kRowWords + lane_id];
+            uint32_t packed = v_words[(j * kRowWords) + lane_id];
             float2 v01 = __half22float2(fp8x2_to_half2(packed));
             float2 v23 = __half22float2(fp8x2_to_half2(packed >> 16));
             o_reg[0] = __fmaf_rn(pj, v01.x, o_reg[0]);
@@ -505,7 +505,7 @@ __global__ void paged_attention_splitk_fp8_tile_gqa_kernel(
     }
 #pragma unroll
     for (int i = 0; i < ELEMS; i++)
-        out[2 + lane_id * ELEMS + i] = o_reg[i];
+        out[2 + (lane_id * ELEMS) + i] = o_reg[i];
 }
 
 bool paged_attention_splitk_fp8_tile_supported(int head_dim, int block_size) {
@@ -546,7 +546,7 @@ int paged_attention_splitk_fp8_tile_gqa_splits(int batch_size, int n_heads, int 
     // decode monotonically) - the kernel is not bandwidth-bound at M=1 despite ~31% of peak; its
     // stall profile shows more blocks buy per-split overhead, not overlap. See sm120-cuda-expert
     // known-issues before retrying either direction.
-    int s = (2 * sms + bh_kv - 1) / bh_kv;
+    int s = ((2 * sms) + bh_kv - 1) / bh_kv;
     s = min(s, num_ctx_blocks);
     void* sk_ptr = nullptr;
     size_t sk_size = 0;

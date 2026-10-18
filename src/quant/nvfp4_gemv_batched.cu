@@ -31,8 +31,8 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
     pdl_wait();
     const int tid = threadIdx.x;
     const int n_mb = K / kMicroBlockSize;
-    const uint8_t* row_packed = packed_data + (int64_t)n * (K / 2);
-    const uint8_t* row_ms = micro_scales + (int64_t)n * n_mb;
+    const uint8_t* row_packed = packed_data + ((int64_t)n * (K / 2));
+    const uint8_t* row_ms = micro_scales + ((int64_t)n * n_mb);
 
     float acc[MR];
 #pragma unroll
@@ -55,13 +55,13 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
                 : "r"(static_cast<uint32_t>(pb[b])));
             float2 wf2 = __half22float2(*reinterpret_cast<const half2*>(&w_fp16x2));
             wf[static_cast<ptrdiff_t>(b * 2)] = wf2.x;
-            wf[b * 2 + 1] = wf2.y;
+            wf[(b * 2) + 1] = wf2.y;
         }
         float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
         const int elem_base = byte_off * 2;
 #pragma unroll
         for (int m = 0; m < MR; ++m) {
-            const half* xm = x + (int64_t)m * K + elem_base;
+            const half* xm = x + ((int64_t)m * K) + elem_base;
             const uint4 xv0 = *reinterpret_cast<const uint4*>(xm);
             const uint4 xv1 = *reinterpret_cast<const uint4*>(xm + 8);
             half2 xh[8];
@@ -72,7 +72,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
             for (int b = 0; b < 8; ++b) {
                 float2 xf = __half22float2(xh[b]);
                 d = __fmaf_rn(wf[static_cast<ptrdiff_t>(b * 2)], xf.x, d);
-                d = __fmaf_rn(wf[b * 2 + 1], xf.y, d);
+                d = __fmaf_rn(wf[(b * 2) + 1], xf.y, d);
             }
             acc[m] = __fmaf_rn(d, cs, acc[m]);
         }
@@ -84,7 +84,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp32_kernel(
     for (int m = 0; m < MR; ++m) {
         float total = reduce_kpar(acc[m], tid, warp_sums);
         if (tid == 0)
-            y[(int64_t)m * N_out + n] = total;
+            y[((int64_t)m * N_out) + n] = total;
         __syncthreads();  // reuse warp_sums for the next activation row
     }
 }
@@ -109,13 +109,13 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_mb_kernel(
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
 
-    const int row = blockIdx.x * NR + warp_id;
+    const int row = (blockIdx.x * NR) + warp_id;
     if (row >= N_out || warp_id >= NR)
         return;
     pdl_wait();
 
-    const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
-    const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
+    const uint8_t* row_packed = packed_data + ((int64_t)row * K_half);
+    const uint8_t* row_ms = micro_scales + ((int64_t)row * n_mb);
 
     float acc[MR];
 #pragma unroll
@@ -132,7 +132,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_mb_kernel(
         const float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
 #pragma unroll
         for (int m = 0; m < MR; ++m)
-            acc[m] = __fmaf_rn(dot_micro_block(pb, x + (int64_t)m * K, byte_off * 2), cs, acc[m]);
+            acc[m] = __fmaf_rn(dot_micro_block(pb, x + ((int64_t)m * K), byte_off * 2), cs, acc[m]);
     }
 
     pdl_trigger();
@@ -140,7 +140,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_mb_kernel(
     for (int m = 0; m < MR; ++m) {
         const float total = warp_reduce(acc[m]);
         if (lane == 0) {
-            half* yp = y + (int64_t)m * N_out + row;
+            half* yp = y + ((int64_t)m * N_out) + row;
             *yp = __float2half(kAcc ? total + __half2float(*yp) : total);
         }
     }
@@ -160,8 +160,8 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
     pdl_wait();
     const int tid = threadIdx.x;
     const int n_mb = K / kMicroBlockSize;
-    const uint8_t* row_packed = packed_data + (int64_t)n * (K / 2);
-    const uint8_t* row_ms = micro_scales + (int64_t)n * n_mb;
+    const uint8_t* row_packed = packed_data + ((int64_t)n * (K / 2));
+    const uint8_t* row_ms = micro_scales + ((int64_t)n * n_mb);
 
     float acc[MR];
 #pragma unroll
@@ -182,13 +182,13 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
                 : "r"(static_cast<uint32_t>(pb[b])));
             float2 wf2 = __half22float2(*reinterpret_cast<const half2*>(&w_fp16x2));
             wf[static_cast<ptrdiff_t>(b * 2)] = wf2.x;
-            wf[b * 2 + 1] = wf2.y;
+            wf[(b * 2) + 1] = wf2.y;
         }
         float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
         const int elem_base = byte_off * 2;
 #pragma unroll
         for (int m = 0; m < MR; ++m) {
-            const half* xm = x + (int64_t)m * K + elem_base;
+            const half* xm = x + ((int64_t)m * K) + elem_base;
             const uint4 xv0 = *reinterpret_cast<const uint4*>(xm);
             const uint4 xv1 = *reinterpret_cast<const uint4*>(xm + 8);
             half2 xh[8];
@@ -199,7 +199,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
             for (int b = 0; b < 8; ++b) {
                 float2 xf = __half22float2(xh[b]);
                 d = __fmaf_rn(wf[static_cast<ptrdiff_t>(b * 2)], xf.x, d);
-                d = __fmaf_rn(wf[b * 2 + 1], xf.y, d);
+                d = __fmaf_rn(wf[(b * 2) + 1], xf.y, d);
             }
             acc[m] = __fmaf_rn(d, cs, acc[m]);
         }
@@ -211,7 +211,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_mb_fp16_kernel(
     for (int m = 0; m < MR; ++m) {
         float total = reduce_kpar(acc[m], tid, warp_sums);
         if (tid == 0) {
-            half* yp = y + (int64_t)m * N_out + n;
+            half* yp = y + ((int64_t)m * N_out) + n;
             if (kAcc)
                 total += __half2float(*yp);
             *yp = __float2half(total);
@@ -267,8 +267,8 @@ void gemv_nvfp4_kpar_batched_fp32(const NvFP4QuantResult& A, const half* x, floa
     int done = 0;
     while (done < n_act) {
         const int rem = n_act - done;
-        const half* xm = x + (int64_t)done * K;
-        float* ym = y + (int64_t)done * N_out;
+        const half* xm = x + ((int64_t)done * K);
+        float* ym = y + ((int64_t)done * N_out);
         int used;
         if (rem >= 4) {
             pdl::launch(gemv_nvfp4_kpar_mb_fp32_kernel<4>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
@@ -311,8 +311,8 @@ void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N
             int d = 0;
             while (d < n_act) {
                 const int rem = n_act - d;
-                const half* xm = x + (int64_t)d * K;
-                half* ym = y + (int64_t)d * N_out;
+                const half* xm = x + ((int64_t)d * K);
+                half* ym = y + ((int64_t)d * N_out);
                 int used;
                 if (rem >= 4) {
                     pdl::launch(gemv_nvfp4_multirow_mb_kernel<NR, 4, false>, dim3(mr_blocks_p),
@@ -341,8 +341,8 @@ void gemm_nvfp4_batched(const NvFP4QuantResult& A, const half* x, half* y, int N
     int done = 0;
     while (done < n_act) {
         const int rem = n_act - done;
-        const half* xm = x + (int64_t)done * K;
-        half* ym = y + (int64_t)done * N_out;
+        const half* xm = x + ((int64_t)done * K);
+        half* ym = y + ((int64_t)done * N_out);
         int used;
         if (rem >= 4) {
             pdl::launch(gemv_nvfp4_kpar_mb_fp16_kernel<4>, dim3(N_out), dim3(kKparThreads), size_t(0), stream,
@@ -385,8 +385,8 @@ void gemm_nvfp4_batched_acc(const NvFP4QuantResult& A, const half* x, half* y, i
             int d = 0;
             while (d < n_act) {
                 const int rem = n_act - d;
-                const half* xm = x + (int64_t)d * K;
-                half* ym = y + (int64_t)d * N_out;
+                const half* xm = x + ((int64_t)d * K);
+                half* ym = y + ((int64_t)d * N_out);
                 int used;
                 if (rem >= 4) {
                     pdl::launch(gemv_nvfp4_multirow_mb_kernel<NR, 4, true>, dim3(mr_blocks_p),
@@ -415,8 +415,8 @@ void gemm_nvfp4_batched_acc(const NvFP4QuantResult& A, const half* x, half* y, i
     int done = 0;
     while (done < n_act) {
         const int rem = n_act - done;
-        const half* xm = x + (int64_t)done * K;
-        half* ym = y + (int64_t)done * N_out;
+        const half* xm = x + ((int64_t)done * K);
+        half* ym = y + ((int64_t)done * N_out);
         int used;
         if (rem >= 4) {
             pdl::launch(gemv_nvfp4_kpar_mb_fp16_kernel<4, true>, dim3(N_out), dim3(kKparThreads), size_t(0),

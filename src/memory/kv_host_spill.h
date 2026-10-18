@@ -53,7 +53,7 @@ public:
 
     // Slot buffer holding hash, nullptr on a miss. Marks it most recently used.
     const void* find(size_t hash);
-    [[nodiscard]] bool contains(size_t hash) const { return index_.count(hash) != 0; }
+    [[nodiscard]] bool contains(size_t hash) const { return index_.contains(hash); }
     void erase(size_t hash);
     void clear();
     int size() const { return static_cast<int>(index_.size()); }
@@ -69,7 +69,7 @@ private:
         bool committed;
         std::list<size_t>::iterator lru;
     };
-    char* slot_ptr(int slot) const { return arena_ + static_cast<size_t>(slot) * slot_bytes_; }
+    char* slot_ptr(int slot) const { return arena_ + (static_cast<size_t>(slot) * slot_bytes_); }
 
     size_t slot_bytes_ = 0;
     int slots_ = 0;

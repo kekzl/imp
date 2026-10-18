@@ -4,9 +4,7 @@
 
 #include "core/logging.h"
 
-namespace imp {
-
-namespace pdl {
+namespace imp::pdl {
 
 // Enable PDL on a kernel function. Must be called before the kernel is launched.
 void enable(const void* kernel_func);
@@ -47,6 +45,4 @@ private:
     bool auto_disable_;
 };
 
-}  // namespace pdl
-
-}  // namespace imp
+}  // namespace imp::pdl

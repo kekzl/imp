@@ -10,6 +10,7 @@
 #include "core/pdl_device.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <cfloat>
@@ -131,9 +132,9 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* __restric
     for (int i = 0; i < kMicroBlockSize / 2; i++) {
         half2 h2 = src_h2[i];
         vals[static_cast<ptrdiff_t>(i * 2)] = __half2float(h2.x);
-        vals[i * 2 + 1] = __half2float(h2.y);
+        vals[(i * 2) + 1] = __half2float(h2.y);
         local_absmax = fmaxf(local_absmax,
-                             fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[i * 2 + 1])));
+                             fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[(i * 2) + 1])));
     }
 
     // Step 2: Compute micro-scale = local_absmax / (tensor_scale * 6.0).
@@ -142,17 +143,17 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(const half* __restric
     float micro_scale_actual = nvfp4_encode_micro_scale(local_absmax, tensor_scale, &micro_scale_fp8);
 
     // Store micro-scale.
-    micro_scales[row * num_mb_per_row + col_mb] = micro_scale_fp8;
+    micro_scales[(row * num_mb_per_row) + col_mb] = micro_scale_fp8;
 
     // Step 3: Quantize each value to FP4 E2M1 and pack 2 per byte.
     float inv_combined_scale = 1.0f / (tensor_scale * micro_scale_actual);
-    int64_t packed_base = row * (K / 2) + col_mb * (kMicroBlockSize / 2);
+    int64_t packed_base = (row * (K / 2)) + (col_mb * (kMicroBlockSize / 2));
 
 #pragma unroll
     for (int i = 0; i < kMicroBlockSize; i += 2) {
         float s0 = vals[i] * inv_combined_scale;
         float s1 = vals[i + 1] * inv_combined_scale;
-        packed_out[packed_base + i / 2] = nvfp4_pack_pair_hw(s0, s1);
+        packed_out[packed_base + (i / 2)] = nvfp4_pack_pair_hw(s0, s1);
     }
 }
 
@@ -164,13 +165,12 @@ __global__ void absmax_kernel(const half* __restrict__ input, int64_t n_elements
     __shared__ float smem[kBlockSize];
 
     float local_max = 0.0f;
-    int64_t idx = (int64_t)blockIdx.x * kBlockSize + threadIdx.x;
+    int64_t idx = ((int64_t)blockIdx.x * kBlockSize) + threadIdx.x;
     int64_t stride = (int64_t)gridDim.x * kBlockSize;
 
     for (int64_t i = idx; i < n_elements; i += stride) {
         float v = fabsf(__half2float(input[i]));
-        if (v > local_max)
-            local_max = v;
+        local_max = std::max(local_max, v);
     }
 
     smem[threadIdx.x] = local_max;
@@ -179,8 +179,7 @@ __global__ void absmax_kernel(const half* __restrict__ input, int64_t n_elements
     // Block reduction.
     for (int s = kBlockSize / 2; s > 0; s >>= 1) {
         if (threadIdx.x < s) {
-            if (smem[threadIdx.x + s] > smem[threadIdx.x])
-                smem[threadIdx.x] = smem[threadIdx.x + s];
+            smem[threadIdx.x] = std::max(smem[threadIdx.x], smem[threadIdx.x + s]);
         }
         __syncthreads();
     }
@@ -204,7 +203,7 @@ __global__ void quantize_nvfp4_kernel(const half* __restrict__ input,      // [N
     const int64_t num_mb_per_row = K / kMicroBlockSize;
     const int64_t total_mb = N * num_mb_per_row;
 
-    int64_t mb_idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t mb_idx = ((int64_t)blockIdx.x * blockDim.x) + threadIdx.x;
     // PDL (no-ops on a plain launch): the decode-step activation quantize
     // reads the previous kernel's output; the dependent small-M GEMM
     // prefetches its weights during this grid.
@@ -215,7 +214,7 @@ __global__ void quantize_nvfp4_kernel(const half* __restrict__ input,      // [N
 
     int64_t row = mb_idx / num_mb_per_row;
     int64_t col_mb = mb_idx % num_mb_per_row;
-    int64_t base = row * K + col_mb * kMicroBlockSize;
+    int64_t base = (row * K) + (col_mb * kMicroBlockSize);
 
     quantize_micro_block_nvfp4(input, packed_out, micro_scales, tensor_scale, base, row, col_mb,
                                num_mb_per_row, K);
@@ -238,13 +237,13 @@ __global__ void quantize_nvfp4_from_absmax_kernel(
     const int64_t num_mb_per_row = K / kMicroBlockSize;
     const int64_t total_mb = N * num_mb_per_row;
 
-    int64_t mb_idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t mb_idx = ((int64_t)blockIdx.x * blockDim.x) + threadIdx.x;
     if (mb_idx >= total_mb)
         return;
 
     int64_t row = mb_idx / num_mb_per_row;
     int64_t col_mb = mb_idx % num_mb_per_row;
-    int64_t base = row * K + col_mb * kMicroBlockSize;
+    int64_t base = (row * K) + (col_mb * kMicroBlockSize);
 
     quantize_micro_block_nvfp4(input, packed_out, micro_scales, tensor_scale, base, row, col_mb,
                                num_mb_per_row, K);
@@ -260,7 +259,7 @@ __global__ void dequantize_nvfp4_kernel(const uint8_t* __restrict__ packed_data,
     const int64_t num_mb_per_row = K / kMicroBlockSize;
     const int64_t total_mb = N * num_mb_per_row;
 
-    int64_t mb_idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t mb_idx = ((int64_t)blockIdx.x * blockDim.x) + threadIdx.x;
     if (mb_idx >= total_mb)
         return;
 
@@ -268,16 +267,16 @@ __global__ void dequantize_nvfp4_kernel(const uint8_t* __restrict__ packed_data,
     int64_t col_mb = mb_idx % num_mb_per_row;
 
     // Recover micro-scale.
-    uint8_t ms_fp8 = micro_scales[row * num_mb_per_row + col_mb];
+    uint8_t ms_fp8 = micro_scales[(row * num_mb_per_row) + col_mb];
     float micro_scale = fp8_e4m3_to_float(ms_fp8);
     float combined_scale = tensor_scale * micro_scale;
 
-    int64_t out_base = row * K + col_mb * kMicroBlockSize;
-    int64_t packed_base = row * (K / 2) + col_mb * (kMicroBlockSize / 2);
+    int64_t out_base = (row * K) + (col_mb * kMicroBlockSize);
+    int64_t packed_base = (row * (K / 2)) + (col_mb * (kMicroBlockSize / 2));
 
 #pragma unroll
     for (int i = 0; i < kMicroBlockSize; i += 2) {
-        uint8_t byte = packed_data[packed_base + i / 2];
+        uint8_t byte = packed_data[packed_base + (i / 2)];
 
         // Low nibble = even element.
         uint8_t fp4_lo = byte & 0x0F;
@@ -321,8 +320,7 @@ float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream, float* d_
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_global_max, 0, sizeof(float), stream));
 
     int num_blocks = (int)((n_elements + kBlockSize - 1) / kBlockSize);
-    if (num_blocks > 2048)
-        num_blocks = 2048;  // cap grid size
+    num_blocks = std::min(num_blocks, 2048);  // cap grid size
 
     absmax_kernel<<<num_blocks, kBlockSize, 0, stream>>>(reinterpret_cast<const half*>(input.data),
                                                          n_elements, d_global_max);
@@ -439,8 +437,7 @@ void quantize_fp16_to_nvfp4_async(const Tensor& input, NvFP4QuantResult& result,
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_absmax_buf, 0, sizeof(float), stream));
     int64_t n_elements = input.numel();
     int absmax_blocks = (int)((n_elements + kBlockSize - 1) / kBlockSize);
-    if (absmax_blocks > 2048)
-        absmax_blocks = 2048;
+    absmax_blocks = std::min(absmax_blocks, 2048);
 
     absmax_kernel<<<absmax_blocks, kBlockSize, 0, stream>>>(reinterpret_cast<const half*>(input.data),
                                                             n_elements, d_absmax_buf);
@@ -501,7 +498,7 @@ __global__ void dequantize_nvfp4_moe_kernel(const uint8_t* __restrict__ packed_d
     const int64_t mb_per_expert = N * num_mb_per_row;
     const int64_t total_mb = static_cast<int64_t>(n_experts) * mb_per_expert;
 
-    int64_t mb_idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t mb_idx = ((int64_t)blockIdx.x * blockDim.x) + threadIdx.x;
     if (mb_idx >= total_mb)
         return;
 
@@ -511,16 +508,16 @@ __global__ void dequantize_nvfp4_moe_kernel(const uint8_t* __restrict__ packed_d
     int64_t col_mb = local_mb % num_mb_per_row;
 
     float ts = tensor_scales[expert];
-    uint8_t ms_fp8 = micro_scales[expert * expert_stride_ms + row * num_mb_per_row + col_mb];
+    uint8_t ms_fp8 = micro_scales[(expert * expert_stride_ms) + (row * num_mb_per_row) + col_mb];
     float combined_scale = ts * fp8_e4m3_to_float(ms_fp8);
 
-    int64_t out_base = static_cast<int64_t>(expert) * (N * K) + row * K + col_mb * kMicroBlockSize;
-    int64_t packed_base = static_cast<int64_t>(expert) * expert_stride_packed + row * (K / 2) +
-                          col_mb * (kMicroBlockSize / 2);
+    int64_t out_base = (static_cast<int64_t>(expert) * (N * K)) + (row * K) + (col_mb * kMicroBlockSize);
+    int64_t packed_base = (static_cast<int64_t>(expert) * expert_stride_packed) + (row * (K / 2)) +
+                          (col_mb * (kMicroBlockSize / 2));
 
 #pragma unroll
     for (int i = 0; i < kMicroBlockSize; i += 2) {
-        uint8_t byte = packed_data[packed_base + i / 2];
+        uint8_t byte = packed_data[packed_base + (i / 2)];
 
         uint8_t fp4_lo = byte & 0x0F;
         uint8_t sign_lo = (fp4_lo >> 3) & 1;
@@ -610,7 +607,7 @@ void quantize_packed_experts_to_nvfp4(const void* packed_ggml_data, QType qtype,
     int quant_blocks = static_cast<int>((total_micro_blocks + kBlockSize - 1) / kBlockSize);
 
     for (int e = 0; e < n_experts; e++) {
-        const uint8_t* src = static_cast<const uint8_t*>(packed_ggml_data) + e * src_expert_stride;
+        const uint8_t* src = static_cast<const uint8_t*>(packed_ggml_data) + (e * src_expert_stride);
         half* scratch = static_cast<half*>(dequant_scratch);
 
         // Step 1: Dequant this expert slice to FP16 scratch
@@ -619,8 +616,7 @@ void quantize_packed_experts_to_nvfp4(const void* packed_ggml_data, QType qtype,
         // Step 2: Calibrate tensor_scale = absmax / 6.0
         IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_global_max, 0, sizeof(float), stream));
         int absmax_blocks = static_cast<int>((n_elements + kBlockSize - 1) / kBlockSize);
-        if (absmax_blocks > 2048)
-            absmax_blocks = 2048;
+        absmax_blocks = std::min(absmax_blocks, 2048);
         absmax_kernel<<<absmax_blocks, kBlockSize, 0, stream>>>(scratch, n_elements, d_global_max);
         IMP_CUDA_CHECK_LAUNCH();
 
@@ -637,8 +633,8 @@ void quantize_packed_experts_to_nvfp4(const void* packed_ggml_data, QType qtype,
 
         // Step 3: Quantize FP16 scratch -> NVFP4 at expert offset
         quantize_nvfp4_kernel<<<quant_blocks, kBlockSize, 0, stream>>>(scratch,
-                                                                       d_packed + e * expert_packed_bytes,
-                                                                       d_micro_scales + e * expert_ms_bytes,
+                                                                       d_packed + (e * expert_packed_bytes),
+                                                                       d_micro_scales + (e * expert_ms_bytes),
                                                                        ts, static_cast<int64_t>(eff),
                                                                        static_cast<int64_t>(K));
         IMP_CUDA_CHECK_LAUNCH();

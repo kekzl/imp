@@ -113,7 +113,7 @@ void Engine::cfg_pair_rows_(std::vector<std::shared_ptr<Request>>& rows) {
             r->cfg.reset();
             return false;
         }
-        return !p || !in_step.count(p->id) || p->output_tokens.size() != r->output_tokens.size();
+        return !p || !in_step.contains(p->id) || p->output_tokens.size() != r->output_tokens.size();
     });
 }
 
@@ -129,7 +129,7 @@ void Engine::cfg_combine_rows_(const std::vector<std::shared_ptr<Request>>& rows
             continue;
         for (size_t j = 0; j < rows.size(); ++j)
             if (rows[j] == rows[i]->cfg->shadow)
-                cfg_combine(base + static_cast<int64_t>(i) * v, base + static_cast<int64_t>(j) * v,
+                cfg_combine(base + (static_cast<int64_t>(i) * v), base + (static_cast<int64_t>(j) * v),
                             rows[i]->cfg->scale, static_cast<int>(v), stream);
     }
 }

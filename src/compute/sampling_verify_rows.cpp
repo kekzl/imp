@@ -17,13 +17,13 @@ cudaError_t sample_verify_rows(float* d_logits, int n_rows, int vocab_size, cons
         return cudaErrorInvalidValue;
     const float temperature = s.temperature > 0.0f ? s.temperature : 1.0f;
     for (int r = 0; r < n_rows; ++r) {
-        float* lp = d_logits + static_cast<size_t>(r) * vocab_size;
+        float* lp = d_logits + (static_cast<size_t>(r) * vocab_size);
         apply_min_p(lp, vocab_size, s.min_p, stream);          // no-op at 0
         apply_typical_p(lp, vocab_size, s.typical_p, stream);  // no-op outside (0, 1)
         TopkRowArgs& a = h_args[r];
         a.logits = lp;
         a.d_result = reinterpret_cast<int32_t*>(static_cast<char*>(d_slots) +
-                                                static_cast<size_t>(r) * SAMPLE_SCRATCH_BYTES);
+                                                (static_cast<size_t>(r) * SAMPLE_SCRATCH_BYTES));
         a.inv_temperature = 1.0f / temperature;
         a.top_p = s.top_p > 0.0f ? s.top_p : 1.0f;
         a.seed = (static_cast<unsigned>(s.seed0) + static_cast<unsigned>(row0 + r)) & 0x7fffffffu;

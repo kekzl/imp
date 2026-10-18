@@ -73,7 +73,7 @@ bool ResponseStore::put(const std::string& id, StoredResponse entry) {
     Slot slot;
     slot.value = std::move(value);
     slot.bytes = sz;
-    slot.expires_ms = now + limits_.ttl_seconds * 1000;
+    slot.expires_ms = now + (limits_.ttl_seconds * 1000);
     slot.lru_it = lru_.begin();
     slot.age_it = std::prev(age_.end());
     map_.emplace(id, std::move(slot));

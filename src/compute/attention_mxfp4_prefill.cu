@@ -100,8 +100,8 @@ __device__ __forceinline__ int mxfp4_sfatom_offset(int row, int k_group, int n_k
     int k_local = k_group % kAtomKGroups;
     int n0 = row_local % 32;
     int n1 = row_local / 32;
-    int atom_offset = n0 * 16 + n1 * 4 + k_local;
-    int tile_base = (tile_row * n_k_tiles + tile_k) * kAtomSize;
+    int atom_offset = (n0 * 16) + (n1 * 4) + k_local;
+    int tile_base = ((tile_row * n_k_tiles) + tile_k) * kAtomSize;
     return tile_base + atom_offset;
 }
 
@@ -113,7 +113,7 @@ __global__ void quantize_fp16_mxfp4_strided_kernel(const half* __restrict__ inpu
                                                    uint8_t* __restrict__ packed_out,  // [M, K/2] contiguous
                                                    uint8_t* __restrict__ sf_out,      // SfAtom layout UE8M0
                                                    int M, int K, int n_k_tiles) {
-    int mb_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int mb_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     int K_groups = K / kMxGroupSize;
     int total_mb = M * K_groups;
     if (mb_idx >= total_mb)
@@ -121,8 +121,8 @@ __global__ void quantize_fp16_mxfp4_strided_kernel(const half* __restrict__ inpu
 
     int row = mb_idx / K_groups;
     int k_group = mb_idx % K_groups;
-    const int64_t base =
-        static_cast<int64_t>(row) * input_row_stride + static_cast<int64_t>(k_group) * kMxGroupSize;
+    const int64_t base = (static_cast<int64_t>(row) * input_row_stride) +
+                         (static_cast<int64_t>(k_group) * kMxGroupSize);
 
     // Load 32 FP16 values via vectorized half2 loads, track absmax
     // #2218 bounded: i * 2 <= 30 < 32 (array extent vals[32] :124, constant loop bound i < 16 :128).
@@ -133,9 +133,9 @@ __global__ void quantize_fp16_mxfp4_strided_kernel(const half* __restrict__ inpu
     for (int i = 0; i < 16; i++) {
         half2 h2 = src_h2[i];
         vals[static_cast<ptrdiff_t>(i * 2)] = __half2float(h2.x);
-        vals[i * 2 + 1] = __half2float(h2.y);
+        vals[(i * 2) + 1] = __half2float(h2.y);
         local_absmax = fmaxf(local_absmax,
-                             fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[i * 2 + 1])));
+                             fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[(i * 2) + 1])));
     }
 
     // UE8M0 scale = ceil_pow2(absmax / 6.0)
@@ -149,12 +149,12 @@ __global__ void quantize_fp16_mxfp4_strided_kernel(const half* __restrict__ inpu
     sf_out[mxfp4_sfatom_offset(row, k_group, n_k_tiles)] = ue8m0;
 
     // Pack E2M1 nibbles (output is contiguous [M, K/2])
-    int packed_base = row * (K / 2) + k_group * (kMxGroupSize / 2);
+    int packed_base = (row * (K / 2)) + (k_group * (kMxGroupSize / 2));
 #pragma unroll
     for (int i = 0; i < 32; i += 2) {
         float s0 = vals[i] * inv_scale;
         float s1 = vals[i + 1] * inv_scale;
-        packed_out[packed_base + i / 2] = mxfp4_pack_pair_hw(s0, s1);
+        packed_out[packed_base + (i / 2)] = mxfp4_pack_pair_hw(s0, s1);
     }
 }
 
@@ -170,7 +170,7 @@ __global__ void mxfp4_attn_softmax_kernel(half* __restrict__ S, int seq_q, int s
     int warp_id = tid / 32;
     int lane_id = tid % 32;
 
-    half* row_ptr = S + (int64_t)row * seq_kv;
+    half* row_ptr = S + ((int64_t)row * seq_kv);
     int gq = q_offset + row;
 
     // --- Pass 1: row max ---
@@ -425,14 +425,14 @@ bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, 
     float one = 1.0f, zero = 0.0f;
 
     for (int b = 0; b < batch; b++) {
-        const half* Q_b = Q_base + (int64_t)b * seq_q * q_row_stride;
-        const half* K_b = K_base + (int64_t)b * seq_kv * kv_row_stride;
-        const half* V_b = V_base + (int64_t)b * seq_kv * kv_row_stride;
-        half* O_b = O_base + (int64_t)b * seq_q * q_row_stride;
+        const half* Q_b = Q_base + ((int64_t)b * seq_q * q_row_stride);
+        const half* K_b = K_base + ((int64_t)b * seq_kv * kv_row_stride);
+        const half* V_b = V_base + ((int64_t)b * seq_kv * kv_row_stride);
+        half* O_b = O_base + ((int64_t)b * seq_q * q_row_stride);
 
         for (int g = 0; g < n_kv; g++) {
             // ---- Quantize K for this KV head ----
-            const half* K_head = K_b + static_cast<ptrdiff_t>(g) * hd;
+            const half* K_head = K_b + (static_cast<ptrdiff_t>(g) * hd);
 
             IMP_CUDA_CHECK_LOG(cudaMemsetAsync(s_ws.k_sf, 0, k_sf_bytes, stream));
             quantize_fp16_mxfp4_strided_kernel<<<k_blocks, 256, 0, stream>>>(
@@ -442,10 +442,10 @@ bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, 
 
             // ---- Process each Q head in this GQA group ----
             for (int h_local = 0; h_local < gqa_ratio; h_local++) {
-                int h = g * gqa_ratio + h_local;
+                int h = (g * gqa_ratio) + h_local;
 
                 // Quantize Q for this head
-                const half* Q_head = Q_b + static_cast<ptrdiff_t>(h) * hd;
+                const half* Q_head = Q_b + (static_cast<ptrdiff_t>(h) * hd);
                 IMP_CUDA_CHECK_LOG(cudaMemsetAsync(s_ws.q_sf, 0, q_sf_bytes, stream));
                 quantize_fp16_mxfp4_strided_kernel<<<q_blocks, 256, 0, stream>>>(
                     Q_head, q_row_stride, static_cast<uint8_t*>(s_ws.q_packed),
@@ -467,8 +467,8 @@ bool attention_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, 
 
                 // P.V via cuBLAS (D = A@B, column-major): A = V^T [hd,seq_kv] ld=kv_row_stride, B = S^T
                 // [seq_kv,seq_q] ld=seq_kv, D = O^T [hd,seq_q] ld=q_row_stride.
-                const half* V_head = V_b + static_cast<ptrdiff_t>(g) * hd;
-                half* O_head = O_b + static_cast<ptrdiff_t>(h) * hd;
+                const half* V_head = V_b + (static_cast<ptrdiff_t>(g) * hd);
+                half* O_head = O_b + (static_cast<ptrdiff_t>(h) * hd);
 
                 IMP_CUBLAS_CHECK_LOG(cublasGemmEx(cublas, CUBLAS_OP_N, CUBLAS_OP_N,
                                                   hd,      // M

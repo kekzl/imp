@@ -128,7 +128,7 @@ static apa::KvState* kv_state(int layer, int nkv, int kv_len, int owner) {
         }
         auto* base = reinterpret_cast<uint8_t*>(slab.data());
         for (int l = 0; l < s_kvs_layers; ++l)
-            s_kvs.push_back(apa::kv_state_carve(base + l * stride, 1, nkv, 128, s_kvs_cap));
+            s_kvs.push_back(apa::kv_state_carve(base + (l * stride), 1, nkv, 128, s_kvs_cap));
         s_kvs_owner.assign(s_kvs_layers, -1);
     }
     if (s_kvs_owner[layer] != owner) {  // another request's keys: len 0 restarts the cache
@@ -178,26 +178,27 @@ void attention_apa_warmup(int nh, int nkv, int hd, int d_model, float eps, cudaS
     constexpr int n = 256, kv = 512, bs = 16, tail = kv - n;
     const size_t qn = (size_t)n * nh * hd, kn = (size_t)kv * nkv * hd;
     const size_t need = apa::workspace_bytes(apa::Problem{1, n, kv, nh, nkv, hd, tail, true, 1.0f});
-    const size_t extra = ((2 * qn + 2 * kn) * sizeof(half) + (tail / bs) * sizeof(int) + 255) & ~size_t(255);
+    const size_t extra = ((((2 * qn) + (2 * kn)) * sizeof(half)) + ((tail / bs) * sizeof(int)) + 255) &
+                         ~size_t(255);
     // Dummy Q/K/V/O and block table at the end of the planned workspace slab: no allocation of its own.
     uint8_t* ws = ensure_apa_workspace(need);
     if (ws == nullptr || s_apa_ws_cap < need + extra)
         return;
     auto* buf = reinterpret_cast<half*>(ws + ((s_apa_ws_cap - extra) & ~size_t(255)));
-    auto* bt = reinterpret_cast<int*>(buf + 2 * qn + 2 * kn);
-    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(buf, 0x3C, (2 * qn + 2 * kn) * sizeof(half), stream));  // 1.0586
+    auto* bt = reinterpret_cast<int*>(buf + (2 * qn) + (2 * kn));
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(buf, 0x3C, ((2 * qn) + (2 * kn)) * sizeof(half), stream));  // 1.0586
     std::vector<int> h_bt(tail / bs);
     for (int i = 0; i < tail / bs; ++i)
         h_bt[i] = i;
     IMP_CUDA_CHECK_LOG(
         cudaMemcpyAsync(bt, h_bt.data(), h_bt.size() * sizeof(int), cudaMemcpyHostToDevice, stream));
-    half *q = buf, *o = buf + qn, *k = buf + 2 * qn, *v = k + kn;
+    half *q = buf, *o = buf + qn, *k = buf + (2 * qn), *v = k + kn;
     const int64_t qs[2] = {n, (int64_t)nh * hd}, ks[2] = {kv, (int64_t)nkv * hd},
                   ts[2] = {n, (int64_t)nkv * hd};
     Tensor tq(q, QType::F16, 2, qs, true), to(o, QType::F16, 2, qs, true);
     Tensor tk(k, QType::F16, 2, ks, true), tv(v, QType::F16, 2, ks, true);
-    Tensor kt(k + (size_t)tail * nkv * hd, QType::F16, 2, ts, true),
-        vt(v + (size_t)tail * nkv * hd, QType::F16, 2, ts, true);
+    Tensor kt(k + ((size_t)tail * nkv * hd), QType::F16, 2, ts, true),
+        vt(v + ((size_t)tail * nkv * hd), QType::F16, 2, ts, true);
     const float scale = 0.08838835f;  // 1/sqrt(128)
     s_warming = true;
     bool ok = attention_apa_prefill(tq, tk, tv, to, n, kv, nh, nkv, hd, scale, tail, eps, stream);

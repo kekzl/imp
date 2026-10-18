@@ -20,11 +20,11 @@ __global__ static void mla_latent_cache_write_kernel(
     if (pos < 0 || pos >= max_seq) return;
 
     const int width = kv_lora + rope_dim;
-    __half* dst = cache + static_cast<size_t>(pos) * width;
-    const __half* lat = latent + static_cast<size_t>(t) * kv_lora;
+    __half* dst = cache + (static_cast<size_t>(pos) * width);
+    const __half* lat = latent + (static_cast<size_t>(t) * kv_lora);
     // k_rope: head 0 of the assembled K (replicated across heads, post-RoPE),
     // the first rope_dim dims of each head.
-    const __half* krope = k_assembled + static_cast<size_t>(t) * n_heads * head_dim;
+    const __half* krope = k_assembled + (static_cast<size_t>(t) * n_heads * head_dim);
 
     for (int i = threadIdx.x; i < kv_lora; i += blockDim.x)
         dst[i] = lat[i];
@@ -94,12 +94,12 @@ __global__ static void mla_absorbed_decode_kernel(
     float* sh_ctx = sh_qpe + rope_dim;         // [kv_lora]
     float* sh_red = sh_ctx + kv_lora;          // [nthreads]
 
-    const __half* q_h = q + static_cast<size_t>(h) * head_dim;  // [pe|nope]
+    const __half* q_h = q + (static_cast<size_t>(h) * head_dim);  // [pe|nope]
     const __half* q_pe = q_h;                                   // [rope_dim]
     const __half* q_nope = q_h + rope_dim;                      // [nope_dim]
-    const __half* WUK = kv_b + static_cast<size_t>(h) * head_out * kv_lora;          // [nope, kv_lora]
-    const __half* WUV = kv_b + (static_cast<size_t>(h) * head_out + nope_dim) * kv_lora;  // [v, kv_lora]
-    float* my_scores = scores + static_cast<size_t>(h) * max_seq;
+    const __half* WUK = kv_b + (static_cast<size_t>(h) * head_out * kv_lora);  // [nope, kv_lora]
+    const __half* WUV = kv_b + (((static_cast<size_t>(h) * head_out) + nope_dim) * kv_lora);  // [v, kv_lora]
+    float* my_scores = scores + (static_cast<size_t>(h) * max_seq);
 
     // Load q_pe into shared (small).
     for (int i = tid; i < rope_dim; i += nthreads)
@@ -110,7 +110,7 @@ __global__ static void mla_absorbed_decode_kernel(
     for (int c = tid; c < kv_lora; c += nthreads) {
         float acc = 0.0f;
         for (int r = 0; r < nope_dim; r++)
-            acc += __half2float(q_nope[r]) * __half2float(WUK[static_cast<size_t>(r) * kv_lora + c]);
+            acc += __half2float(q_nope[r]) * __half2float(WUK[(static_cast<size_t>(r) * kv_lora) + c]);
         sh_qabs[c] = acc;
     }
     __syncthreads();
@@ -118,7 +118,7 @@ __global__ static void mla_absorbed_decode_kernel(
     // 2. scores[t] = scale * (q_absorbed . latent[t] + q_pe . k_rope[t])
     float local_max = -1e30f;
     for (int t = tid; t < ctx; t += nthreads) {
-        const __half* lat = cache + static_cast<size_t>(t) * width;
+        const __half* lat = cache + (static_cast<size_t>(t) * width);
         const __half* kr = lat + kv_lora;
         float s = 0.0f;
         for (int c = 0; c < kv_lora; c++)
@@ -145,7 +145,7 @@ __global__ static void mla_absorbed_decode_kernel(
     for (int c = tid; c < kv_lora; c += nthreads) {
         float acc = 0.0f;
         for (int t = 0; t < ctx; t++) {
-            const __half* lat = cache + static_cast<size_t>(t) * width;
+            const __half* lat = cache + (static_cast<size_t>(t) * width);
             acc += my_scores[t] * __half2float(lat[c]);
         }
         sh_ctx[c] = acc * inv_sum;
@@ -153,11 +153,11 @@ __global__ static void mla_absorbed_decode_kernel(
     __syncthreads();
 
     // 5. out[d] = sum_c ctx[c] * WUV[d][c]
-    __half* out_h = out + static_cast<size_t>(h) * v_head_dim;
+    __half* out_h = out + (static_cast<size_t>(h) * v_head_dim);
     for (int d = tid; d < v_head_dim; d += nthreads) {
         float acc = 0.0f;
         for (int c = 0; c < kv_lora; c++)
-            acc += sh_ctx[c] * __half2float(WUV[static_cast<size_t>(d) * kv_lora + c]);
+            acc += sh_ctx[c] * __half2float(WUV[(static_cast<size_t>(d) * kv_lora) + c]);
         out_h[d] = __float2half(acc);
     }
 }

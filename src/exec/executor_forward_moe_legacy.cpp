@@ -270,9 +270,9 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                     if (layer_staged && sp.covers(eidx)) {
                         NvFP4QuantResult nw;
                         nw.packed_data = const_cast<char*>(sp.packed) +
-                                         static_cast<size_t>(eidx) * sp.packed_stride;
+                                         (static_cast<size_t>(eidx) * sp.packed_stride);
                         nw.micro_scales = const_cast<char*>(sp.ms) +
-                                          static_cast<size_t>(eidx) * sp.ms_stride;
+                                          (static_cast<size_t>(eidx) * sp.ms_stride);
                         nw.tensor_scale = w.tensor_scale;
                         nw.N = static_cast<int>(w.shape[0]);
                         nw.K = static_cast<int>(w.shape[1] * 2);
@@ -408,8 +408,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
 
                 if (packed.on_device) {
                     // On-device: point directly into packed tensor
-                    w = static_cast<const char*>(packed.data) +
-                        (size_t)eidx * (size_t)rows * rb;
+                    w = static_cast<const char*>(packed.data) + ((size_t)eidx * (size_t)rows * rb);
                 } else {
                     // Host-resident: try LRU cache, then staging buffer.
                     size_t expert_raw = (size_t)rows * rb;
@@ -518,11 +517,11 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                     int64_t count64 = static_cast<int64_t>(count);
                     int64_t a_shape[2] = {count64, static_cast<int64_t>(K_dim)};
                     Tensor a_view(const_cast<void*>(static_cast<const void*>(
-                                      a_base + static_cast<size_t>(start) * K_dim * es)),
+                                      a_base + (static_cast<size_t>(start) * K_dim * es))),
                                   compute_dtype_, 2, a_shape, true);
                     int64_t c_shape[2] = {count64, static_cast<int64_t>(N_dim)};
-                    Tensor c_view(c_base + static_cast<size_t>(start) * N_dim * es,
-                                  compute_dtype_, 2, c_shape, true);
+                    Tensor c_view(c_base + (static_cast<size_t>(start) * N_dim * es), compute_dtype_, 2,
+                                  c_shape, true);
                     expert_gemm(a_view, c_view, packed, qtype, fallback, fallback_ids, e,
                                 proj);
                 }
@@ -540,7 +539,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
 
             std::vector<const void*> b_ptrs(ne);
             for (int e = 0; e < ne; ++e)
-                b_ptrs[e] = buf + static_cast<size_t>(e) * expert_fp16_sz;
+                b_ptrs[e] = buf + (static_cast<size_t>(e) * expert_fp16_sz);
 
             // Uses cublasGemmGroupedBatchedEx, one call for all experts: h_offsets is
             // already available from the D2H sync above, so no need for
@@ -637,13 +636,13 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                 int64_t count64 = static_cast<int64_t>(count);
 
                 int64_t a_shape[2] = {count64, static_cast<int64_t>(d)};
-                Tensor a_view(gathered_base + static_cast<size_t>(start) * d * es,
-                              compute_dtype_, 2, a_shape, true);
+                Tensor a_view(gathered_base + (static_cast<size_t>(start) * d * es), compute_dtype_, 2,
+                              a_shape, true);
 
                 if (!non_gated_experts) {
                     int64_t c_shape[2] = {count64, static_cast<int64_t>(eff)};
-                    Tensor c_view(expert_gate_base + static_cast<size_t>(start) * eff * es,
-                                  compute_dtype_, 2, c_shape, true);
+                    Tensor c_view(expert_gate_base + (static_cast<size_t>(start) * eff * es), compute_dtype_,
+                                  2, c_shape, true);
                     expert_gemm(a_view, c_view, ly.expert_gate_packed,
                                 ly.expert_gate_packed.qtype, ly.expert_w_gate,
                                 ly.expert_gate_ids, e, ExpertProj::Gate);
@@ -651,8 +650,8 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
 
                 {
                     int64_t c_shape[2] = {count64, static_cast<int64_t>(eff)};
-                    Tensor c_view(expert_up_base + static_cast<size_t>(start) * eff * es,
-                                  compute_dtype_, 2, c_shape, true);
+                    Tensor c_view(expert_up_base + (static_cast<size_t>(start) * eff * es), compute_dtype_, 2,
+                                  c_shape, true);
                     expert_gemm(a_view, c_view, ly.expert_up_packed,
                                 ly.expert_up_packed.qtype, ly.expert_w_up, ly.expert_up_ids,
                                 e, ExpertProj::Up);
@@ -675,11 +674,11 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
                 int64_t count64 = static_cast<int64_t>(count);
 
                 int64_t a_shape[2] = {count64, static_cast<int64_t>(eff)};
-                Tensor a_view(down_act_base + static_cast<size_t>(start) * eff * es,
-                              compute_dtype_, 2, a_shape, true);
+                Tensor a_view(down_act_base + (static_cast<size_t>(start) * eff * es), compute_dtype_, 2,
+                              a_shape, true);
                 int64_t c_shape[2] = {count64, static_cast<int64_t>(d)};
-                Tensor c_view(expert_down_base + static_cast<size_t>(start) * d * es,
-                              compute_dtype_, 2, c_shape, true);
+                Tensor c_view(expert_down_base + (static_cast<size_t>(start) * d * es), compute_dtype_, 2,
+                              c_shape, true);
                 expert_gemm(a_view, c_view, ly.expert_down_packed,
                             ly.expert_down_packed.qtype, ly.expert_w_down, ly.expert_down_ids,
                             e, ExpertProj::Down);

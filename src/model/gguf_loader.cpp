@@ -763,7 +763,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
                 ly.w_gate = Tensor(base, ly.w_up.qtype, 2, half_shape, ly.w_up.on_device);
                 ly.w_gate.qtype = ly.w_up.qtype;
-                ly.w_up = Tensor(base + static_cast<size_t>(d_ff) * row_bytes, ly.w_up.qtype, 2, half_shape,
+                ly.w_up = Tensor(base + (static_cast<size_t>(d_ff) * row_bytes), ly.w_up.qtype, 2, half_shape,
                                  ly.w_up.on_device);
                 // w_up_qtype unchanged
                 fused_count++;
@@ -999,7 +999,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                 return false;
             std::memcpy(dst, t.data, bytes);
             for (int64_t b = 0; b < nblocks; b++) {
-                uint16_t* d = reinterpret_cast<uint16_t*>(dst + static_cast<size_t>(b) * 34);
+                uint16_t* d = reinterpret_cast<uint16_t*>(dst + (static_cast<size_t>(b) * 34));
                 *d = float_to_half(half_to_float(*d) * 0.0625f);
             }
             model->host_owned_buffers_.push_back(dst);

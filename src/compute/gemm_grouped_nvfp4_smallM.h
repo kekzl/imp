@@ -32,10 +32,10 @@ namespace imp {
 
 // Tables per call, each at a 128 B boundary: 5 pointer arrays, M, 2 CUtensorMap (128 B) per expert.
 inline constexpr size_t kSmallMTensorMapBytes = 128;
-inline constexpr size_t smallM_table_bytes(int n_experts) {
+constexpr size_t smallM_table_bytes(int n_experts) {
     const size_t ne = n_experts > 0 ? static_cast<size_t>(n_experts) : 0;
     auto r128 = [](size_t b) { return (b + 127) / 128 * 128; };
-    return 5 * r128(ne * sizeof(void*)) + r128(ne * sizeof(int)) + 2 * ne * kSmallMTensorMapBytes;
+    return (5 * r128(ne * sizeof(void*))) + r128(ne * sizeof(int)) + (2 * ne * kSmallMTensorMapBytes);
 }
 
 [[nodiscard]] bool gemm_grouped_nvfp4_smallM_available();

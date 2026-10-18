@@ -230,10 +230,10 @@ bool parse_stream_tool_body(const std::string& body, bool gemma_body, const std:
     if (parse_chatml_json_call(body, tc))
         return true;
     // ... then Qwen3.6's <function=NAME><parameter=K>V</parameter> layout.
-    if (body.find("<function=") != std::string::npos && parse_qwen36_xml_call(body, tc))
+    if (body.contains("<function=") && parse_qwen36_xml_call(body, tc))
         return true;
     // ... then GLM-4.x's NAME<arg_key>K</arg_key><arg_value>V</arg_value>.
-    return body.find("<arg_key>") != std::string::npos && parse_glm_arg_key_call(body, tc);
+    return body.contains("<arg_key>") && parse_glm_arg_key_call(body, tc);
 }
 
 std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const json& tool_calls,

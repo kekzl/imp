@@ -23,17 +23,17 @@ __global__ void gemv_q6k_moe_decode_kernel(const uint8_t* __restrict__ packed_we
 
     const int expert_slot = blockIdx.x / blocks_per_expert;
     const int local_block = blockIdx.x % blocks_per_expert;
-    const int row = local_block * warps_per_block + warp_id;
+    const int row = (local_block * warps_per_block) + warp_id;
 
     if (row >= rows)
         return;
 
     const int expert_id = expert_indices[expert_slot];
-    const uint8_t* W = packed_weights + (size_t)expert_id * expert_stride_bytes;
+    const uint8_t* W = packed_weights + ((size_t)expert_id * expert_stride_bytes);
 
     const int blocks_per_row = K / 256;
     const size_t row_bytes = (size_t)blocks_per_row * 210;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
+    const uint8_t* W_row = W + ((size_t)row * row_bytes);
 
     const half* x_ptr = x + static_cast<ptrdiff_t>(expert_slot * x_stride);
     float sum = 0.0f;
@@ -63,20 +63,20 @@ __global__ void gemv_q6k_moe_decode_kernel(const uint8_t* __restrict__ packed_we
         int q7 = (int)((((qh1 >> 6) & 0x03) << 4) | ((ql_d >> 4) & 0x0F)) - 32;
 
         int sc_idx = lane >> 4;
-        sum += d * ((float)sc[sc_idx] * (float)q0 * __half2float(x_ptr[base + lane]) +
-                    (float)sc[sc_idx + 2] * (float)q1 * __half2float(x_ptr[base + lane + 32]) +
-                    (float)sc[sc_idx + 4] * (float)q2 * __half2float(x_ptr[base + lane + 64]) +
-                    (float)sc[sc_idx + 6] * (float)q3 * __half2float(x_ptr[base + lane + 96]) +
-                    (float)sc[sc_idx + 8] * (float)q4 * __half2float(x_ptr[base + lane + 128]) +
-                    (float)sc[sc_idx + 10] * (float)q5 * __half2float(x_ptr[base + lane + 160]) +
-                    (float)sc[sc_idx + 12] * (float)q6 * __half2float(x_ptr[base + lane + 192]) +
-                    (float)sc[sc_idx + 14] * (float)q7 * __half2float(x_ptr[base + lane + 224]));
+        sum += d * (((float)sc[sc_idx] * (float)q0 * __half2float(x_ptr[base + lane])) +
+                    ((float)sc[sc_idx + 2] * (float)q1 * __half2float(x_ptr[base + lane + 32])) +
+                    ((float)sc[sc_idx + 4] * (float)q2 * __half2float(x_ptr[base + lane + 64])) +
+                    ((float)sc[sc_idx + 6] * (float)q3 * __half2float(x_ptr[base + lane + 96])) +
+                    ((float)sc[sc_idx + 8] * (float)q4 * __half2float(x_ptr[base + lane + 128])) +
+                    ((float)sc[sc_idx + 10] * (float)q5 * __half2float(x_ptr[base + lane + 160])) +
+                    ((float)sc[sc_idx + 12] * (float)q6 * __half2float(x_ptr[base + lane + 192])) +
+                    ((float)sc[sc_idx + 14] * (float)q7 * __half2float(x_ptr[base + lane + 224])));
     }
 
     sum = warp_reduce_sum(sum);
 
     if (lane == 0)
-        y[expert_slot * rows + row] = __float2half(sum);
+        y[(expert_slot * rows) + row] = __float2half(sum);
 }
 
 void gemv_q6k_moe_decode(const void* packed_weights, const int32_t* expert_indices, const half* x, half* y,
@@ -99,17 +99,17 @@ __global__ void gemv_q8_0_moe_decode_kernel(const uint8_t* __restrict__ packed_w
 
     const int expert_slot = blockIdx.x / blocks_per_expert;
     const int local_block = blockIdx.x % blocks_per_expert;
-    const int row = local_block * warps_per_block + warp_id;
+    const int row = (local_block * warps_per_block) + warp_id;
 
     if (row >= rows)
         return;
 
     const int expert_id = expert_indices[expert_slot];
-    const uint8_t* W = packed_weights + (size_t)expert_id * expert_stride_bytes;
+    const uint8_t* W = packed_weights + ((size_t)expert_id * expert_stride_bytes);
 
     const int blocks_per_row = K / 32;
     const size_t row_bytes = (size_t)blocks_per_row * 34;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
+    const uint8_t* W_row = W + ((size_t)row * row_bytes);
 
     const half* x_ptr = x + static_cast<ptrdiff_t>(expert_slot * x_stride);
     float sum = 0.0f;
@@ -118,13 +118,13 @@ __global__ void gemv_q8_0_moe_decode_kernel(const uint8_t* __restrict__ packed_w
         const uint8_t* bp = W_row + static_cast<ptrdiff_t>(b * 34);
         float d = __half2float(*(const half*)bp);
         int8_t q = ((const int8_t*)(bp + 2))[lane];
-        sum += d * (float)q * __half2float(x_ptr[b * 32 + lane]);
+        sum += d * (float)q * __half2float(x_ptr[(b * 32) + lane]);
     }
 
     sum = warp_reduce_sum(sum);
 
     if (lane == 0)
-        y[expert_slot * rows + row] = __float2half(sum);
+        y[(expert_slot * rows) + row] = __float2half(sum);
 }
 
 void gemv_q8_0_moe_decode(const void* packed_weights, const int32_t* expert_indices, const half* x, half* y,
@@ -152,13 +152,13 @@ __global__ void gemv_f16_moe_decode_kernel(const half* __restrict__ packed_weigh
 
     const int expert_slot = blockIdx.x / blocks_per_expert;
     const int local_block = blockIdx.x % blocks_per_expert;
-    const int row = local_block * warps_per_block + warp_id;
+    const int row = (local_block * warps_per_block) + warp_id;
 
     if (row >= rows)
         return;
 
     const int expert_id = expert_indices[expert_slot];
-    const half* W_row = packed_weights + (size_t)expert_id * expert_stride_elems + (size_t)row * K;
+    const half* W_row = packed_weights + ((size_t)expert_id * expert_stride_elems) + ((size_t)row * K);
     const half* x_ptr = x + static_cast<ptrdiff_t>(expert_slot * x_stride);
 
     float sum = 0.0f;
@@ -171,7 +171,7 @@ __global__ void gemv_f16_moe_decode_kernel(const half* __restrict__ packed_weigh
         for (int i = lane; i < K2; i += 32) {
             const float2 w = __half22float2(W2[i]);
             const float2 v = __half22float2(x2[i]);
-            sum += w.x * v.x + w.y * v.y;
+            sum += (w.x * v.x) + (w.y * v.y);
         }
     } else {
         for (int i = lane; i < K; i += 32)
@@ -181,7 +181,7 @@ __global__ void gemv_f16_moe_decode_kernel(const half* __restrict__ packed_weigh
     sum = warp_reduce_sum(sum);
 
     if (lane == 0)
-        y[expert_slot * rows + row] = __float2half(sum);
+        y[(expert_slot * rows) + row] = __float2half(sum);
 }
 
 void gemv_f16_moe_decode(const void* packed_weights, const int32_t* expert_indices, const half* x, half* y,
@@ -202,12 +202,12 @@ __global__ void gemv_gate_fp32_kernel(const half* __restrict__ W, const half* __
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps_per_block + warp_id;
+    const int row = (blockIdx.x * warps_per_block) + warp_id;
 
     if (row >= M)
         return;
 
-    const half* W_row = W + (size_t)row * K;
+    const half* W_row = W + ((size_t)row * K);
     float sum = 0.0f;
 
     // Process 2 elements per thread per iteration using half2
@@ -245,12 +245,12 @@ __global__ void gemv_gate_fp32_fp32input_kernel(const half* __restrict__ W, cons
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps_per_block + warp_id;
+    const int row = (blockIdx.x * warps_per_block) + warp_id;
 
     if (row >= M)
         return;
 
-    const half* W_row = W + (size_t)row * K;
+    const half* W_row = W + ((size_t)row * K);
     float sum = 0.0f;
 
     // Process 2 weight elements per iteration (half2), read FP32 input directly
@@ -260,7 +260,7 @@ __global__ void gemv_gate_fp32_fp32input_kernel(const half* __restrict__ W, cons
     for (int i = lane; i < K2; i += 32) {
         half2 w = W2[i];
         sum += __half2float(w.x) * x[static_cast<ptrdiff_t>(i * 2)];
-        sum += __half2float(w.y) * x[i * 2 + 1];
+        sum += __half2float(w.y) * x[(i * 2) + 1];
     }
 
     if ((K & 1) && lane == 0) {
@@ -303,12 +303,12 @@ __global__ void __launch_bounds__(256) gemm_gate_fp32_rows_kernel(const half* __
         for (int i = threadIdx.x; i < kGateBT * kGateBK; i += blockDim.x) {
             const int r = i / kGateBK, c = i % kGateBK;
             const bool ok = t0 + r < n && k0 + c < K;
-            Xs[i] = ok ? X[(size_t)(t0 + r) * K + k0 + c] : __float2half(0.0f);
+            Xs[i] = ok ? X[((size_t)(t0 + r) * K) + k0 + c] : __float2half(0.0f);
         }
         for (int i = threadIdx.x; i < kGateBE * kGateBK; i += blockDim.x) {
             const int r = i / kGateBK, c = i % kGateBK;
             const bool ok = e0 + r < M && k0 + c < K;
-            Ws[i] = ok ? W[(size_t)(e0 + r) * K + k0 + c] : __float2half(0.0f);
+            Ws[i] = ok ? W[((size_t)(e0 + r) * K) + k0 + c] : __float2half(0.0f);
         }
         __syncthreads();
 #pragma unroll
@@ -318,7 +318,7 @@ __global__ void __launch_bounds__(256) gemm_gate_fp32_rows_kernel(const half* __
 #pragma unroll
             for (int j = 0; j < 2; ++j) {
                 wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b;
-                wmma::load_matrix_sync(b, Ws + static_cast<ptrdiff_t>((te * 32 + j * 16) * kGateBK) + kk,
+                wmma::load_matrix_sync(b, Ws + static_cast<ptrdiff_t>(((te * 32) + (j * 16)) * kGateBK) + kk,
                                        kGateBK);
                 wmma::mma_sync(acc[j], a, b, acc[j]);
             }
@@ -334,7 +334,7 @@ __global__ void __launch_bounds__(256) gemm_gate_fp32_rows_kernel(const half* __
     for (int i = threadIdx.x; i < kGateBT * kGateBE; i += blockDim.x) {
         const int r = i / kGateBE, c = i % kGateBE;
         if (t0 + r < n && e0 + c < M)
-            Y[(size_t)(t0 + r) * M + e0 + c] = Ys[i];
+            Y[((size_t)(t0 + r) * M) + e0 + c] = Ys[i];
     }
 }
 
@@ -368,7 +368,7 @@ __global__ void gemv_q6k_moe_gate_up_fused_kernel(const uint8_t* __restrict__ ga
 
     const int expert_slot = blockIdx.x / blocks_per_expert;
     const int local_block = blockIdx.x % blocks_per_expert;
-    const int row = local_block * warps_per_block + warp_id;
+    const int row = (local_block * warps_per_block) + warp_id;
 
     if (row >= rows)
         return;
@@ -380,11 +380,11 @@ __global__ void gemv_q6k_moe_gate_up_fused_kernel(const uint8_t* __restrict__ ga
     half* y = is_up ? y_up : y_gate;
 
     const int expert_id = expert_indices[expert_slot];
-    const uint8_t* W = packed + (size_t)expert_id * stride;
+    const uint8_t* W = packed + ((size_t)expert_id * stride);
 
     const int blocks_per_row = K / 256;
     const size_t row_bytes = (size_t)blocks_per_row * 210;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
+    const uint8_t* W_row = W + ((size_t)row * row_bytes);
 
     const half* x_ptr = x + static_cast<ptrdiff_t>(expert_slot * x_stride);
     float sum = 0.0f;
@@ -414,20 +414,20 @@ __global__ void gemv_q6k_moe_gate_up_fused_kernel(const uint8_t* __restrict__ ga
         int q7 = (int)((((qh1 >> 6) & 0x03) << 4) | ((ql_d >> 4) & 0x0F)) - 32;
 
         int sc_idx = lane >> 4;
-        sum += d * ((float)sc[sc_idx] * (float)q0 * __half2float(x_ptr[base + lane]) +
-                    (float)sc[sc_idx + 2] * (float)q1 * __half2float(x_ptr[base + lane + 32]) +
-                    (float)sc[sc_idx + 4] * (float)q2 * __half2float(x_ptr[base + lane + 64]) +
-                    (float)sc[sc_idx + 6] * (float)q3 * __half2float(x_ptr[base + lane + 96]) +
-                    (float)sc[sc_idx + 8] * (float)q4 * __half2float(x_ptr[base + lane + 128]) +
-                    (float)sc[sc_idx + 10] * (float)q5 * __half2float(x_ptr[base + lane + 160]) +
-                    (float)sc[sc_idx + 12] * (float)q6 * __half2float(x_ptr[base + lane + 192]) +
-                    (float)sc[sc_idx + 14] * (float)q7 * __half2float(x_ptr[base + lane + 224]));
+        sum += d * (((float)sc[sc_idx] * (float)q0 * __half2float(x_ptr[base + lane])) +
+                    ((float)sc[sc_idx + 2] * (float)q1 * __half2float(x_ptr[base + lane + 32])) +
+                    ((float)sc[sc_idx + 4] * (float)q2 * __half2float(x_ptr[base + lane + 64])) +
+                    ((float)sc[sc_idx + 6] * (float)q3 * __half2float(x_ptr[base + lane + 96])) +
+                    ((float)sc[sc_idx + 8] * (float)q4 * __half2float(x_ptr[base + lane + 128])) +
+                    ((float)sc[sc_idx + 10] * (float)q5 * __half2float(x_ptr[base + lane + 160])) +
+                    ((float)sc[sc_idx + 12] * (float)q6 * __half2float(x_ptr[base + lane + 192])) +
+                    ((float)sc[sc_idx + 14] * (float)q7 * __half2float(x_ptr[base + lane + 224])));
     }
 
     sum = warp_reduce_sum(sum);
 
     if (lane == 0)
-        y[expert_slot * rows + row] = __float2half(sum);
+        y[(expert_slot * rows) + row] = __float2half(sum);
 }
 
 void gemv_q6k_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
@@ -455,7 +455,7 @@ __global__ void gemv_q8_0_moe_gate_up_fused_kernel(const uint8_t* __restrict__ g
 
     const int expert_slot = blockIdx.x / blocks_per_expert;
     const int local_block = blockIdx.x % blocks_per_expert;
-    const int row = local_block * warps_per_block + warp_id;
+    const int row = (local_block * warps_per_block) + warp_id;
 
     if (row >= rows)
         return;
@@ -466,11 +466,11 @@ __global__ void gemv_q8_0_moe_gate_up_fused_kernel(const uint8_t* __restrict__ g
     half* y = is_up ? y_up : y_gate;
 
     const int expert_id = expert_indices[expert_slot];
-    const uint8_t* W = packed + (size_t)expert_id * stride;
+    const uint8_t* W = packed + ((size_t)expert_id * stride);
 
     const int blocks_per_row = K / 32;
     const size_t row_bytes = (size_t)blocks_per_row * 34;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
+    const uint8_t* W_row = W + ((size_t)row * row_bytes);
 
     const half* x_ptr = x + static_cast<ptrdiff_t>(expert_slot * x_stride);
     float sum = 0.0f;
@@ -479,13 +479,13 @@ __global__ void gemv_q8_0_moe_gate_up_fused_kernel(const uint8_t* __restrict__ g
         const uint8_t* bp = W_row + static_cast<ptrdiff_t>(b * 34);
         float d = __half2float(*(const half*)bp);
         int8_t q = ((const int8_t*)(bp + 2))[lane];
-        sum += d * (float)q * __half2float(x_ptr[b * 32 + lane]);
+        sum += d * (float)q * __half2float(x_ptr[(b * 32) + lane]);
     }
 
     sum = warp_reduce_sum(sum);
 
     if (lane == 0)
-        y[expert_slot * rows + row] = __float2half(sum);
+        y[(expert_slot * rows) + row] = __float2half(sum);
 }
 
 void gemv_q8_0_moe_gate_up_fused(const void* gate_weights, const void* up_weights,

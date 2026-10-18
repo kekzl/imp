@@ -35,7 +35,7 @@ struct FusedSplitRequest {
 
 // Rows the fused scale plane must cover for the split to be in bounds.
 inline int64_t fused_split_needed_rows(const FusedSplitRequest& r) {
-    return r.base_rows + static_cast<int64_t>(r.n_sibs) * r.sib_rows;
+    return r.base_rows + (static_cast<int64_t>(r.n_sibs) * r.sib_rows);
 }
 
 // True when the fix-up arm may fire. Declines are not errors: a checkpoint with separate
@@ -139,7 +139,7 @@ struct MergedScaleGroup {
         const MergedScaleMember& s = g.m[i];
         if (s.scales == nullptr)
             return fail("sibling " + std::to_string(i) + " lost its scales after the split");
-        const char* want = base + off_rows * g.scale_row_bytes;
+        const char* want = base + (off_rows * g.scale_row_bytes);
         if (static_cast<const char*>(s.scales) != want)
             return fail("sibling " + std::to_string(i) + " points " +
                         std::to_string(static_cast<const char*>(s.scales) - base) +

@@ -42,9 +42,9 @@ ProjSelection parse_projection_selection(const std::string& sel, const char* fla
         return s;
     }
     const std::string list = "," + sel + ",";
-    s.in = list.find(",in,") != std::string::npos;
-    s.gate = list.find(",gate,") != std::string::npos;
-    s.out = list.find(",out,") != std::string::npos;
+    s.in = list.contains(",in,");
+    s.gate = list.contains(",gate,");
+    s.out = list.contains(",out,");
     if (!s.any())
         IMP_LOG_WARN("%s=\"%s\": expected false|all|<in,gate,out list>, flag ignored", flag, sel.c_str());
     return s;
@@ -65,17 +65,17 @@ struct RowViews {
 // SFB (row power of two) and col_scale (residual in [1, 2)), one allocation.
 void borrow_fp8_rows(WeightCaches& wc, VRAMAllocator* alloc, const Tensor& w, const FP8CacheEntry& e,
                      int64_t row0, cudaStream_t stream, RowViews& out) {
-    if (!eligible_f16_projection(w) || wc.cutlass_mxfp8_prefill.count(w.data) || !e.d_row_scales ||
+    if (!eligible_f16_projection(w) || wc.cutlass_mxfp8_prefill.contains(w.data) || !e.d_row_scales ||
         e.weight.shape[1] != w.shape[1] || row0 + w.shape[0] > e.weight.shape[0])
         return;
     CutlassMxFP8Weight cw;
     cw.N = w.shape[0];
     cw.K = w.shape[1];
     cw.borrowed_data = true;
-    cw.data = static_cast<char*>(e.weight.data) + row0 * cw.K;
+    cw.data = static_cast<char*>(e.weight.data) + (row0 * cw.K);
     cw.sf_bytes = cutlass_mxfp8_sf_size(static_cast<int>(cw.N), static_cast<int>(cw.K));
     const size_t sf_aligned = (cw.sf_bytes + 255) & ~size_t{255};
-    const size_t bytes = sf_aligned + cw.N * sizeof(float);
+    const size_t bytes = sf_aligned + (cw.N * sizeof(float));
     cw.scale_factors = vram_alloc(alloc, bytes, "mxfp8_rows_sf");
     if (!cw.scale_factors)
         return;
@@ -168,7 +168,7 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
     int64_t mx_max_k = 0, mx_max_n = 0;
 
     auto quantize_nvfp4 = [&](const Tensor& w) {
-        if (wcache_->cutlass_nvfp4_prefill.count(w.data))
+        if (wcache_->cutlass_nvfp4_prefill.contains(w.data))
             return;
         Tensor fp16_view(w.data, QType::F16, 2, w.shape, /*on_device=*/true);
         const float tscale = calibrate_nvfp4_scales(fp16_view, stream);
@@ -189,11 +189,11 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
         wcache_->cutlass_nvfp4_prefill_src.push_back(result);
         wcache_->cutlass_nvfp4_prefill[w.data] = cw;
         n_nv++;
-        nv_bytes += static_cast<size_t>(w.shape[0]) * w.shape[1] / 2 + cw.sf_bytes;
+        nv_bytes += (static_cast<size_t>(w.shape[0]) * w.shape[1] / 2) + cw.sf_bytes;
     };
 
     auto quantize_mxfp8 = [&](const Tensor& w) {
-        if (wcache_->cutlass_mxfp8_prefill.count(w.data))
+        if (wcache_->cutlass_mxfp8_prefill.contains(w.data))
             return;
         CutlassMxFP8Weight cw;
         cw.N = w.shape[0];
@@ -221,7 +221,7 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
 
     // A projection named in both flags gets the MXFP8 copy only; a borrowed view takes neither.
     auto place = [&](const Tensor& w, bool want_mx, bool want_nv) {
-        if (!eligible_f16_projection(w) || wcache_->cutlass_mxfp8_prefill.count(w.data))
+        if (!eligible_f16_projection(w) || wcache_->cutlass_mxfp8_prefill.contains(w.data))
             return;  // native NVFP4 / FP8 projections already have their own prefill route
         // fp8rows without FP8 rows for this projection (Qwen3.5-4B GGUF): NVFP4 per its own flag,
         // no MXFP8 copy (pp2048 -6.9 % on the F16 route).

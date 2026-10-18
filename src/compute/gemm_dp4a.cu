@@ -50,7 +50,7 @@ struct GeGLUAct {
         constexpr float COEFF = 0.044715f;
         float g = __half2float(gate[idx]);
         float u = __half2float(up[idx]);
-        float gelu_g = g * 0.5f * (1.0f + tanhf(SQRT_2_PI * (g + COEFF * g * g * g)));
+        float gelu_g = g * 0.5f * (1.0f + tanhf(SQRT_2_PI * (g + (COEFF * g * g * g))));
         return gelu_g * u;
     }
     static constexpr bool kEarlyReturn = false;
@@ -80,7 +80,7 @@ __global__ void fused_act_quantize_q8_1_kernel(
     block_q8_1* __restrict__ q8_out, float* __restrict__ d8_out, int total_elements, Act act) {
     const int blk = blockIdx.x;
     const int tid = threadIdx.x;  // 0..31
-    const int idx = blk * 32 + tid;
+    const int idx = (blk * 32) + tid;
 
     // For kEarlyReturn functors: OOB threads return before shuffle reduction.
     // This preserves the original behavior of quantize_fp16_to_q8_1 and
@@ -215,7 +215,7 @@ __global__ void rmsnorm_quantize_q8_1_kernel(
     int n_cached = 0;
 
     for (int b = warp_id; b < n_q8_blocks; b += n_warps) {
-        float v = __half2float(x[b * 32 + lane]);
+        float v = __half2float(x[(b * 32) + lane]);
         x_cache[n_cached++] = v;
         sum_sq += v * v;
     }
@@ -235,7 +235,7 @@ __global__ void rmsnorm_quantize_q8_1_kernel(
         for (int off = 16; off > 0; off >>= 1)
             total += __shfl_xor_sync(0xFFFFFFFF, total, off);
         if (lane == 0)
-            s_inv_rms = rsqrtf(total / static_cast<float>(d_model) + eps);
+            s_inv_rms = rsqrtf((total / static_cast<float>(d_model)) + eps);
     }
     __syncthreads();
     float inv_rms = s_inv_rms;
@@ -244,10 +244,10 @@ __global__ void rmsnorm_quantize_q8_1_kernel(
     // No intermediate shared memory buffer needed.
     int cache_idx = 0;
     for (int b = warp_id; b < n_q8_blocks; b += n_warps) {
-        float val = x_cache[cache_idx++] * inv_rms * (__half2float(weight[b * 32 + lane]) + weight_offset);
+        float val = x_cache[cache_idx++] * inv_rms * (__half2float(weight[(b * 32) + lane]) + weight_offset);
 
         if (norm_out_ptr)
-            norm_out_ptr[b * 32 + lane] = __float2half(val);
+            norm_out_ptr[(b * 32) + lane] = __float2half(val);
 
         // Warp-level amax for Q8_1 quantization
         float amax = fabsf(val);
@@ -427,29 +427,29 @@ void gemv_gate_up_fused(const void* gate_weights, const void* up_weights, const 
                     q8_1, d8, y_gate, y_up, M, K);                                                         \
     } while (0)
 
-#define DISPATCH_GATE_UP(QT)                                                        \
-    do {                                                                            \
-        int nr1 = (M + warps_per_block - 1) / warps_per_block;                      \
-        if (kpar_is_better<QT::kPreferKpar>(M, nr1)) {                              \
-            LAUNCH_KPAR_GU(QT);                                                     \
-            break;                                                                  \
-        }                                                                           \
-        constexpr int MAX_NR = QT::kMaxNRows;                                       \
-        if constexpr (MAX_NR >= 4) {                                                \
-            int nr4_blocks = (M + warps_per_block * 4 - 1) / (warps_per_block * 4); \
-            if (nr4_blocks >= 128) {                                                \
-                LAUNCH_GATE_UP_NR(QT, 4);                                           \
-                break;                                                              \
-            }                                                                       \
-        }                                                                           \
-        if constexpr (MAX_NR >= 2) {                                                \
-            int nr2_blocks = (M + warps_per_block * 2 - 1) / (warps_per_block * 2); \
-            if (nr2_blocks >= 64) {                                                 \
-                LAUNCH_GATE_UP_NR(QT, 2);                                           \
-                break;                                                              \
-            }                                                                       \
-        }                                                                           \
-        LAUNCH_GATE_UP_NR(QT, 1);                                                   \
+#define DISPATCH_GATE_UP(QT)                                                          \
+    do {                                                                              \
+        int nr1 = (M + warps_per_block - 1) / warps_per_block;                        \
+        if (kpar_is_better<QT::kPreferKpar>(M, nr1)) {                                \
+            LAUNCH_KPAR_GU(QT);                                                       \
+            break;                                                                    \
+        }                                                                             \
+        constexpr int MAX_NR = QT::kMaxNRows;                                         \
+        if constexpr (MAX_NR >= 4) {                                                  \
+            int nr4_blocks = (M + (warps_per_block * 4) - 1) / (warps_per_block * 4); \
+            if (nr4_blocks >= 128) {                                                  \
+                LAUNCH_GATE_UP_NR(QT, 4);                                             \
+                break;                                                                \
+            }                                                                         \
+        }                                                                             \
+        if constexpr (MAX_NR >= 2) {                                                  \
+            int nr2_blocks = (M + (warps_per_block * 2) - 1) / (warps_per_block * 2); \
+            if (nr2_blocks >= 64) {                                                   \
+                LAUNCH_GATE_UP_NR(QT, 2);                                             \
+                break;                                                                \
+            }                                                                         \
+        }                                                                             \
+        LAUNCH_GATE_UP_NR(QT, 1);                                                     \
     } while (0)
 
     if (qtype == QType::Q6_K) {

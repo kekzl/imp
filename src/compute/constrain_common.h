@@ -109,7 +109,7 @@ static inline uint16_t classify_token(const std::string& text) {
         // string (`."`, `n"`, `!"`) don't start with a quote, so keying on first=='"' gave them neither
         // CAT_QUOTE nor CAT_STRING_CHAR, and the category pre-filter dropped them before token_legal
         // (which accepts them) ever ran - same class of bug as #1197 (#1199).
-        if (text.find('"') != std::string::npos)
+        if (text.contains('"'))
             cat |= CAT_QUOTE;
 
         if (is_ws)

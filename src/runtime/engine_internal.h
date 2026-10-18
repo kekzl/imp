@@ -109,9 +109,9 @@ inline const int32_t* ple_step_context(int ctx_len, int32_t eos,
         const Request& r = *rows[static_cast<size_t>(s)];
         // false = positions past the history are eos-filled, the documented contract (ngram_table.h).
         (void)ngram_context_at(r.input_tokens.data(), static_cast<int>(r.input_tokens.size()),
-                         r.output_tokens.data(), static_cast<int>(r.output_tokens.size()),
-                         positions[static_cast<size_t>(s) * per_seq], ctx_len, eos,
-                         out.data() + static_cast<size_t>(s) * ctx_len);
+                               r.output_tokens.data(), static_cast<int>(r.output_tokens.size()),
+                               positions[static_cast<size_t>(s) * per_seq], ctx_len, eos,
+                               out.data() + (static_cast<size_t>(s) * ctx_len));
     }
     return out.data();
 }
@@ -165,7 +165,7 @@ inline cudaError_t upload_residual_meta(int* base, ptrdiff_t cap, const int* slo
     if (err == cudaSuccess)
         err = cudaMemcpyAsync(base + cap, counts, bytes, cudaMemcpyHostToDevice, stream);
     if (err == cudaSuccess)
-        err = cudaMemcpyAsync(base + 2 * cap, widxes, bytes, cudaMemcpyHostToDevice, stream);
+        err = cudaMemcpyAsync(base + (2 * cap), widxes, bytes, cudaMemcpyHostToDevice, stream);
     return err;
 }
 

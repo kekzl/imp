@@ -23,9 +23,9 @@ __global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const
                                              __half* __restrict__ out, int d_model, float eps,
                                              float weight_offset) {
     const int d_vec = d_model >> 3;
-    const float4* x_vec = reinterpret_cast<const float4*>(x + static_cast<int64_t>(blockIdx.x) * d_model);
+    const float4* x_vec = reinterpret_cast<const float4*>(x + (static_cast<int64_t>(blockIdx.x) * d_model));
     const float4* w_vec = reinterpret_cast<const float4*>(weight);
-    float4* out_vec = reinterpret_cast<float4*>(out + static_cast<int64_t>(blockIdx.x) * d_model);
+    float4* out_vec = reinterpret_cast<float4*>(out + (static_cast<int64_t>(blockIdx.x) * d_model));
 
     float4 v[kVecs];
     float sum_sq = 0.0f;
@@ -33,7 +33,7 @@ __global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const
     float4 w_pre[kVecs];
 #pragma unroll
     for (int j = 0; j < kVecs; ++j) {
-        const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
+        const int i = threadIdx.x + (j * static_cast<int>(blockDim.x));
         if (i < d_vec)
             w_pre[j] = w_vec[i];
     }
@@ -41,14 +41,14 @@ __global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const
     pdl_trigger();  // scheduling only: the dependent GEMM prefetches its weights during this grid
 #pragma unroll
     for (int j = 0; j < kVecs; ++j) {
-        const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
+        const int i = threadIdx.x + (j * static_cast<int>(blockDim.x));
         if (i < d_vec) {
             v[j] = x_vec[i];
             const half2* h = reinterpret_cast<const half2*>(&v[j]);
 #pragma unroll
             for (int k = 0; k < 4; ++k) {
                 const float2 f = __half22float2(h[k]);
-                sum_sq += f.x * f.x + f.y * f.y;
+                sum_sq += (f.x * f.x) + (f.y * f.y);
             }
         }
     }
@@ -68,13 +68,13 @@ __global__ void rmsnorm_fp16_rowblock_kernel(const __half* __restrict__ x, const
         for (int off = 16; off > 0; off >>= 1)
             t += __shfl_xor_sync(0xFFFFFFFFu, t, off);
         if (lane == 0)
-            s_inv = rsqrtf(t / static_cast<float>(d_model) + eps);
+            s_inv = rsqrtf((t / static_cast<float>(d_model)) + eps);
     }
     __syncthreads();
     const float inv_rms = s_inv;
 #pragma unroll
     for (int j = 0; j < kVecs; ++j) {
-        const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
+        const int i = threadIdx.x + (j * static_cast<int>(blockDim.x));
         if (i < d_vec) {
             const float4 wv = w_pre[j];
             const half2* xh = reinterpret_cast<const half2*>(&v[j]);
@@ -110,9 +110,9 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
                                                    float weight_offset, const __half* __restrict__ add_a,
                                                    __half* add_r, __half* __restrict__ add_h) {
     const int d_vec = d_model >> 3;
-    const float4* x_vec = reinterpret_cast<const float4*>(x + static_cast<int64_t>(blockIdx.x) * d_model);
+    const float4* x_vec = reinterpret_cast<const float4*>(x + (static_cast<int64_t>(blockIdx.x) * d_model));
     const float4* w_vec = reinterpret_cast<const float4*>(weight);
-    float4* out_vec = reinterpret_cast<float4*>(out + static_cast<int64_t>(blockIdx.x) * d_model);
+    float4* out_vec = reinterpret_cast<float4*>(out + (static_cast<int64_t>(blockIdx.x) * d_model));
 
     float4 v[kVecs];
     float sum_sq = 0.0f;
@@ -120,7 +120,7 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
     float4 w_pre[kVecs];
 #pragma unroll
     for (int j = 0; j < kVecs; ++j) {
-        const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
+        const int i = threadIdx.x + (j * static_cast<int>(blockDim.x));
         if (i < d_vec)
             w_pre[j] = w_vec[i];
     }
@@ -129,7 +129,7 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
     const int64_t row_off = static_cast<int64_t>(blockIdx.x) * d_model;
 #pragma unroll
     for (int j = 0; j < kVecs; ++j) {
-        const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
+        const int i = threadIdx.x + (j * static_cast<int>(blockDim.x));
         if (i < d_vec) {
             if constexpr (kAdd) {
                 const float4 av = reinterpret_cast<const float4*>(add_a + row_off)[i];
@@ -149,7 +149,7 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
 #pragma unroll
             for (int k = 0; k < 4; ++k) {
                 const float2 f = __half22float2(h[k]);
-                sum_sq += f.x * f.x + f.y * f.y;
+                sum_sq += (f.x * f.x) + (f.y * f.y);
             }
         }
     }
@@ -169,7 +169,7 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
         for (int off = 16; off > 0; off >>= 1)
             t += __shfl_xor_sync(0xFFFFFFFFu, t, off);
         if (lane == 0)
-            s_inv = rsqrtf(t / static_cast<float>(d_model) + eps);
+            s_inv = rsqrtf((t / static_cast<float>(d_model)) + eps);
     }
     __syncthreads();
     const float inv_rms = s_inv;
@@ -178,7 +178,7 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
     const int64_t scales_row = static_cast<int64_t>(blockIdx.x) * (d_model >> 4);
 #pragma unroll
     for (int j = 0; j < kVecs; ++j) {
-        const int i = threadIdx.x + j * static_cast<int>(blockDim.x);
+        const int i = threadIdx.x + (j * static_cast<int>(blockDim.x));
         const bool active = i < d_vec;
         float vals[8];
         float amax = 0.0f;
@@ -197,7 +197,7 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
                                                       xf.y * inv_rms * (wf.y + weight_offset)));
                 const float2 rf = __half22float2(rh[k]);
                 vals[static_cast<ptrdiff_t>(k * 2)] = rf.x;
-                vals[k * 2 + 1] = rf.y;
+                vals[(k * 2) + 1] = rf.y;
                 amax = fmaxf(amax, fmaxf(fabsf(rf.x), fabsf(rf.y)));
             }
             out_vec[i] = result;
@@ -216,7 +216,7 @@ __global__ void rmsnorm_fp16_rowblock_nvfp4_kernel(const __half* __restrict__ x,
             pb.y = nvfp4_pack_pair_hw(vals[2] * inv, vals[3] * inv);
             pb.z = nvfp4_pack_pair_hw(vals[4] * inv, vals[5] * inv);
             pb.w = nvfp4_pack_pair_hw(vals[6] * inv, vals[7] * inv);
-            *reinterpret_cast<uchar4*>(xq_packed + packed_row + static_cast<int64_t>(i) * 4) = pb;
+            *reinterpret_cast<uchar4*>(xq_packed + packed_row + (static_cast<int64_t>(i) * 4)) = pb;
         }
     }
 }

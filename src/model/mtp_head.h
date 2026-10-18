@@ -90,7 +90,7 @@ namespace imp {
 // kept). One rule, two callers (load_shard's divert decision, the presence probe) - both
 // must ask this shared question to avoid the #1384/#1443 defect class of disagreeing answers.
 [[nodiscard]] inline bool name_is_mtp_tensor(std::string_view name) {
-    return name.rfind("mtp.", 0) == 0 || name.rfind("model.mtp.", 0) == 0;
+    return name.starts_with("mtp.") || name.starts_with("model.mtp.");
 }
 
 // Does this name make an mtp.* group a head imp can dispatch? It's the projection fusing
@@ -101,7 +101,7 @@ inline constexpr const char* kMtpHeadKeyFc = "mtp.fc.weight";
 inline constexpr const char* kMtpHeadKeyFcEmbedding = "mtp.fc_embedding.weight";
 
 [[nodiscard]] inline bool name_is_mtp_head_key(std::string_view name) {
-    if (name.rfind("model.", 0) == 0)
+    if (name.starts_with("model."))
         name.remove_prefix(6);
     return name == kMtpHeadKeyEhProj || name == kMtpHeadKeyFc || name == kMtpHeadKeyFcEmbedding;
 }

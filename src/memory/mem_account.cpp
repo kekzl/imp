@@ -105,8 +105,7 @@ void MemAccount::note(const char* pool, std::ptrdiff_t delta_bytes) {
     p.current += delta_bytes;
     if (delta_bytes > 0)
         p.alloc_count++;
-    if (p.current > p.peak)
-        p.peak = p.current;
+    p.peak = std::max(p.peak, p.current);
 }
 
 void MemAccount::note_alloc(const char* pool, const void* ptr, size_t bytes) {

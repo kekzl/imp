@@ -92,14 +92,14 @@ __device__ __forceinline__ void publish_state(Smem& s, const float (&hacc)[2][kJ
         for (int j = 0; j < kJ; ++j)
 #pragma unroll
             for (int e = 0; e < 4; e += 2) {
-                const int n = 32 * warp + 16 * mt + g + (e ? 8 : 0);
-                const int d = 8 * j + 2 * q;
+                const int n = (32 * warp) + (16 * mt) + g + (e ? 8 : 0);
+                const int d = (8 * j) + (2 * q);
                 uint32_t hi, lo;
                 split_f16x2(hacc[mt][j][e] * sc, hacc[mt][j][e + 1] * sc, hi, lo);
-                s.h_hi[d * kHS + n] = __ushort_as_half(static_cast<unsigned short>(hi & 0xffffu));
-                s.h_hi[(d + 1) * kHS + n] = __ushort_as_half(static_cast<unsigned short>(hi >> 16));
-                s.h_lo[d * kHS + n] = __ushort_as_half(static_cast<unsigned short>(lo & 0xffffu));
-                s.h_lo[(d + 1) * kHS + n] = __ushort_as_half(static_cast<unsigned short>(lo >> 16));
+                s.h_hi[(d * kHS) + n] = __ushort_as_half(static_cast<unsigned short>(hi & 0xffffu));
+                s.h_hi[((d + 1) * kHS) + n] = __ushort_as_half(static_cast<unsigned short>(hi >> 16));
+                s.h_lo[(d * kHS) + n] = __ushort_as_half(static_cast<unsigned short>(lo & 0xffffu));
+                s.h_lo[((d + 1) * kHS) + n] = __ushort_as_half(static_cast<unsigned short>(lo >> 16));
             }
 }
 

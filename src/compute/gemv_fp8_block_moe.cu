@@ -26,8 +26,8 @@ __device__ __forceinline__ float fp8x16_dot(const uint4 w, const uint4 xa, const
         const float2 wh = __half22float2(*reinterpret_cast<const __half2*>(&hi));
         const float2 x0 = __half22float2(
             *reinterpret_cast<const __half2*>(&xv[static_cast<ptrdiff_t>(2 * i)]));
-        const float2 x1 = __half22float2(*reinterpret_cast<const __half2*>(&xv[2 * i + 1]));
-        acc += wl.x * x0.x + wl.y * x0.y + wh.x * x1.x + wh.y * x1.y;
+        const float2 x1 = __half22float2(*reinterpret_cast<const __half2*>(&xv[(2 * i) + 1]));
+        acc += (wl.x * x0.x) + (wl.y * x0.y) + (wh.x * x1.x) + (wh.y * x1.y);
     }
     return acc;
 }
@@ -39,15 +39,17 @@ __global__ void gemv_fp8_block_moe_kernel(Fp8BlockMoeArgs a, int blocks_per_proj
     const int sp = blockIdx.x / blocks_per_proj;  // slot * n_proj + proj
     const int slot = sp / a.n_proj;
     const int proj = sp % a.n_proj;
-    const int row = (blockIdx.x % blocks_per_proj) * warps + warp;
+    const int row = ((blockIdx.x % blocks_per_proj) * warps) + warp;
     if (row >= a.rows)
         return;
     const int e = a.expert_ids[slot];
-    const int tab = e * a.n_proj + proj;
-    const uint8_t* w_row = a.w[tab] + static_cast<size_t>(row) * a.K;
+    const int tab = (e * a.n_proj) + proj;
+    const uint8_t* w_row = a.w[tab] + (static_cast<size_t>(row) * a.K);
     const int kb = a.K / kFp8BlockSize;
-    const float* s_row = a.scales + (static_cast<size_t>(tab) * (a.rows / kFp8BlockSize) + row / kFp8BlockSize) * kb;
-    const half* x = a.x + static_cast<size_t>(slot) * a.x_stride;
+    const float* s_row = a.scales +
+                         (((static_cast<size_t>(tab) * (a.rows / kFp8BlockSize)) + (row / kFp8BlockSize)) *
+                          kb);
+    const half* x = a.x + (static_cast<size_t>(slot) * a.x_stride);
 
     float sum = 0.0f;
     const int chunks = a.K / 16;
@@ -59,17 +61,17 @@ __global__ void gemv_fp8_block_moe_kernel(Fp8BlockMoeArgs a, int blocks_per_proj
     }
     sum = warp_reduce_sum(sum);
     if (lane == 0)
-        a.y[(static_cast<size_t>(slot) * a.n_proj + proj) * a.rows + row] = __float2half(sum);
+        a.y[(((static_cast<size_t>(slot) * a.n_proj) + proj) * a.rows) + row] = __float2half(sum);
 }
 
 __global__ void swiglu_packed_rows_kernel(const half* __restrict__ gu, half* __restrict__ act, int eff, int n) {
-    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int t = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (t >= n)
         return;
     const int s = t / eff;
     const int j = t % eff;
-    const float g = __half2float(gu[static_cast<size_t>(s) * 2 * eff + j]);
-    const float u = __half2float(gu[static_cast<size_t>(s) * 2 * eff + eff + j]);
+    const float g = __half2float(gu[(static_cast<size_t>(s) * 2 * eff) + j]);
+    const float u = __half2float(gu[(static_cast<size_t>(s) * 2 * eff) + eff + j]);
     act[t] = __float2half(g / (1.0f + __expf(-g)) * u);
 }
 

@@ -30,7 +30,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_kernel(
 
     __shared__ SmemKpar smem;
 
-    float acc = gemv_nvfp4_row(packed_data + (int64_t)row * K_half, micro_scales + (int64_t)row * n_mb,
+    float acc = gemv_nvfp4_row(packed_data + ((int64_t)row * K_half), micro_scales + ((int64_t)row * n_mb),
                                tensor_scale, x, n_mb, tid);
 
     pdl_trigger();
@@ -54,7 +54,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_kpar_fp32_kernel(
 
     __shared__ SmemKpar smem;
 
-    float acc = gemv_nvfp4_row(packed_data + (int64_t)row * (K / 2), micro_scales + (int64_t)row * n_mb,
+    float acc = gemv_nvfp4_row(packed_data + ((int64_t)row * (K / 2)), micro_scales + ((int64_t)row * n_mb),
                                tensor_scale, x, n_mb, tid);
 
     pdl_trigger();
@@ -81,8 +81,8 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_kernel(
         return;
     pdl_wait();
 
-    const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
-    const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
+    const uint8_t* row_packed = packed_data + ((int64_t)row * K_half);
+    const uint8_t* row_ms = micro_scales + ((int64_t)row * n_mb);
 
     // K-parallel within warp (32 threads), prmt register LUT
     float acc = warp_k_loop(row_packed, row_ms, tensor_scale, n_mb, lane,
@@ -113,8 +113,8 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_multirow_fp32_kernel(
         return;
     pdl_wait();
 
-    const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
-    const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
+    const uint8_t* row_packed = packed_data + ((int64_t)row * K_half);
+    const uint8_t* row_ms = micro_scales + ((int64_t)row * n_mb);
 
     float acc = warp_k_loop(row_packed, row_ms, tensor_scale, n_mb, lane,
                             [&]
@@ -145,7 +145,7 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_residual_kernel(
 
     __shared__ SmemKpar smem;
 
-    float acc = gemv_nvfp4_row(packed_data + (int64_t)row * K_half, micro_scales + (int64_t)row * n_mb,
+    float acc = gemv_nvfp4_row(packed_data + ((int64_t)row * K_half), micro_scales + ((int64_t)row * n_mb),
                                tensor_scale, x, n_mb, tid);
 
     pdl_trigger();
@@ -179,8 +179,9 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_swiglu_residual_kerne
     init_lut(s_lut, tid);
     __syncthreads();
 
-    float acc = gemv_nvfp4_row_swiglu(packed_data + (int64_t)row * K_half, micro_scales + (int64_t)row * n_mb,
-                                      tensor_scale, gate, up, n_mb, tid, s_lut);
+    float acc = gemv_nvfp4_row_swiglu(packed_data + ((int64_t)row * K_half),
+                                      micro_scales + ((int64_t)row * n_mb), tensor_scale, gate, up, n_mb, tid,
+                                      s_lut);
 
     pdl_trigger();
     float total = reduce_kpar(acc, tid, warp_sums);
@@ -209,8 +210,8 @@ __global__ void __launch_bounds__(kKparThreads) gemv_nvfp4_geglu_residual_kernel
     init_lut(s_lut, tid);
     __syncthreads();
 
-    const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
-    const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
+    const uint8_t* row_packed = packed_data + ((int64_t)row * K_half);
+    const uint8_t* row_ms = micro_scales + ((int64_t)row * n_mb);
 
     float acc = 0.0f;
     for (int mi = tid; mi < n_mb; mi += kKparThreads) {
@@ -236,7 +237,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_residual_mr_kernel(
     NvFP4NormFoldOut fold) {
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
-    const int row = blockIdx.x * NR + warp_id;
+    const int row = (blockIdx.x * NR) + warp_id;
     if (row >= M || warp_id >= NR)
         return;
     const float gain = lane == 0 ? norm_fold_gain(fold, row) : 0.0f;
@@ -245,8 +246,8 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_residual_mr_kernel(
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
 
-    const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
-    const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
+    const uint8_t* row_packed = packed_data + ((int64_t)row * K_half);
+    const uint8_t* row_ms = micro_scales + ((int64_t)row * n_mb);
 
     float acc = warp_k_loop(row_packed, row_ms, tensor_scale, n_mb, lane,
                             [&]
@@ -270,7 +271,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_swiglu_residual_mr_kern
     const half* __restrict__ residual, int M, int K) {
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
-    const int row = blockIdx.x * NR + warp_id;
+    const int row = (blockIdx.x * NR) + warp_id;
     if (row >= M || warp_id >= NR)
         return;
     pdl_wait();
@@ -282,8 +283,8 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_swiglu_residual_mr_kern
     init_lut(s_lut, threadIdx.x);
     __syncthreads();
 
-    const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
-    const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
+    const uint8_t* row_packed = packed_data + ((int64_t)row * K_half);
+    const uint8_t* row_ms = micro_scales + ((int64_t)row * n_mb);
 
     float acc = warp_k_loop(row_packed, row_ms, tensor_scale, n_mb, lane,
                             [&] __device__(const uint8_t* pb, int off) {
@@ -304,7 +305,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_geglu_residual_mr_kerne
     const half* __restrict__ residual, int M, int K) {
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
-    const int row = blockIdx.x * NR + warp_id;
+    const int row = (blockIdx.x * NR) + warp_id;
     if (row >= M || warp_id >= NR)
         return;
     pdl_wait();
@@ -316,8 +317,8 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_geglu_residual_mr_kerne
     init_lut(s_lut, threadIdx.x);
     __syncthreads();
 
-    const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
-    const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
+    const uint8_t* row_packed = packed_data + ((int64_t)row * K_half);
+    const uint8_t* row_ms = micro_scales + ((int64_t)row * n_mb);
 
     float acc = warp_k_loop(row_packed, row_ms, tensor_scale, n_mb, lane,
                             [&] __device__(const uint8_t* pb, int off) {

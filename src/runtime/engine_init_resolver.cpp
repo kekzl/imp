@@ -5,6 +5,7 @@
 
 #include "runtime/engine.h"
 
+#include <algorithm>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -90,7 +91,7 @@ void Engine::init_apply_debug_raw_overrides_() {
         "[runtime] debug_raw=true: naked FP16 path (FP8/NVFP4/graphs/warmup/FP8-KV and the MoE expert "
         "cache off; deterministic cuBLAS, GDN reference scan)");
     // Weight storage: keep FP16 (skip the lossy cache paths)
-    config_.use_fp8_prefill = 0;
+    config_.use_fp8_prefill = false;
     config_.use_nvfp4_decode = 0;
     config_.dual_path_quant = false;
     // #1628: these were dead setenv() calls (nothing in the tree reads the
@@ -187,8 +188,7 @@ bool apply_rope_override(ModelConfig& mcfg, const RuntimeConfig::Rope& rope) {
     }
 
     int extended = static_cast<int>(rope.factor * static_cast<float>(orig_ctx));
-    if (extended > mcfg.max_seq_len)
-        mcfg.max_seq_len = extended;
+    mcfg.max_seq_len = std::max(mcfg.max_seq_len, extended);
 
     if (mcfg.sliding_window_pattern > 0 || !mcfg.swa_layers.empty()) {
         IMP_LOG_INFO("[rope] note: sliding-window layers keep freq_scale=1.0 by design — the "
@@ -361,13 +361,13 @@ void Engine::init_resolve_kv_dtype_policy_() {
         IMP_LOG_INFO("KV cache dtype: NVFP4 (FP4 E2M1 + UE4M3 per-16-elem scales, ~3.6× compression)");
         if (config_.use_fp8_prefill) {
             IMP_LOG_INFO("NVFP4 KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
-            config_.use_fp8_prefill = 0;
+            config_.use_fp8_prefill = false;
         }
     } else if (config_.kv_cache_dtype == QType::MXFP4_KV) {
         IMP_LOG_INFO("KV cache dtype: MXFP4_KV (FP4 E2M1 + UE8M0 per-16-elem scales, ~3.6× compression)");
         if (config_.use_fp8_prefill) {
             IMP_LOG_INFO("MXFP4_KV: disabling FP8 prefill cache (avoid stacked low-precision drift)");
-            config_.use_fp8_prefill = 0;
+            config_.use_fp8_prefill = false;
         }
     }
 
@@ -502,7 +502,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
                                             model_->ple_state_bytes()};
                 per_slot_state = ssm_bytes_per_slot(geom);
             }
-            size_t per_slot = per_tok_kv * static_cast<size_t>(kRefCtxTokens) + per_slot_state;
+            size_t per_slot = (per_tok_kv * static_cast<size_t>(kRefCtxTokens)) + per_slot_state;
             if (per_slot > 0) {
                 int fit = static_cast<int>((static_cast<double>(headroom) * kKvHeadroomFrac) /
                                            static_cast<double>(per_slot));
@@ -513,7 +513,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
                 // exactly that request.
                 if (runtime_config_.speculative.mtp_k > 0 && model_->mtp_ && model_->mtp_->loaded &&
                     per_slot_state > 0) {
-                    size_t mtp_cost = 2 * mtp_upload_peak_bytes(*model_->mtp_) + (260ULL << 20);
+                    size_t mtp_cost = (2 * mtp_upload_peak_bytes(*model_->mtp_)) + (260ULL << 20);
                     // Batched verify: the MTP KV slots share a 1 GiB budget
                     // (engine_spec_mtp.cpp, enable_mtp_spec_decode).
                     if (batch_verify_on(runtime_config_, model_.get()))
@@ -562,8 +562,7 @@ void Engine::init_resolve_kv_dtype_policy_() {
             "Concurrent requests are served one decode step at a time.",
             config_.max_batch_size);
         config_.max_batch_size = 1;
-        if (runtime_config_.runtime.max_batch_size > 1)
-            runtime_config_.runtime.max_batch_size = 1;
+        runtime_config_.runtime.max_batch_size = std::min(runtime_config_.runtime.max_batch_size, 1);
         if (scheduler_)
             scheduler_->clamp_max_batch_size(1);
     }
@@ -660,7 +659,7 @@ void Engine::init_resolve_fp8_prefill_() {
         int sm_minor = 0;
         const bool sm_ok = cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor, 0) == cudaSuccess &&
                            cudaDeviceGetAttribute(&sm_minor, cudaDevAttrComputeCapabilityMinor, 0) == cudaSuccess;
-        int sm = sm_major * 10 + sm_minor;
+        int sm = (sm_major * 10) + sm_minor;
         if (!sm_ok) {
             IMP_LOG_WARN("FP8 prefill: auto → DISABLED (compute capability query failed)");
         } else if (sm >= 120 && runtime_config_.attention.fp8_prefill != "always") {
@@ -766,7 +765,7 @@ void Engine::init_resolve_quant_flags_() {
                          qtype == QType::Q5_K || qtype == QType::Q3_K || qtype == QType::Q2_K ||
                          qtype == QType::Q4_1 || qtype == QType::Q5_1);
         if (sub_8bit) {
-            config_.use_fp8_prefill = 0;
+            config_.use_fp8_prefill = false;
             IMP_LOG_INFO("FP8 prefill cache: auto-disabled (sub-8-bit weights → dequant fallback)");
         }
     }
@@ -794,7 +793,7 @@ void Engine::init_resolve_quant_flags_() {
     // even on GDN; only attention drops to FP16.
     if (config_.use_fp8_prefill && !config_.dual_path_quant && model_->profile().is_gdn) {
         IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
-        config_.use_fp8_prefill = 0;
+        config_.use_fp8_prefill = false;
     }
     // DENSE Gemma (3 and 4) from GGUF: no longer capped to mode 1 (#514/#516
     // fixed by #539). Dense Gemma follows the same sub-8-bit mode-2 auto-pick
@@ -1063,8 +1062,7 @@ void Engine::clamp_max_batch_to_plan_(ShadowPlanProbe& probe, PlanResult& plan, 
     probe.ssm_state_bytes -= per_batch_slot * static_cast<size_t>(probe.max_batch_size - fit);
     probe.max_batch_size = fit;
     config_.max_batch_size = fit;
-    if (runtime_config_.runtime.max_batch_size > fit)
-        runtime_config_.runtime.max_batch_size = fit;
+    runtime_config_.runtime.max_batch_size = std::min(runtime_config_.runtime.max_batch_size, fit);
     if (scheduler_)
         scheduler_->clamp_max_batch_size(fit);
     plan = plan_memory(shadow_plan_input(probe));

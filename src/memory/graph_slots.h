@@ -30,7 +30,7 @@ class GraphSlotPool;
 // CUDA sampling surface and this one is host-only. cuda_graph.cu static_asserts the two
 // against each other.
 constexpr size_t kGraphSlotSampleScratchBytes =
-    sizeof(int32_t) + 64 * (2 * sizeof(float) + 128 * (sizeof(float) + sizeof(int32_t)));
+    sizeof(int32_t) + (64 * ((2 * sizeof(float)) + (128 * (sizeof(float) + sizeof(int32_t)))));
 
 // The pinned-host half of a slot comes from T5's engine-persistent allocator
 // (memory/host_pinned.h); moved out because it is a tier, not a detail of this pool.

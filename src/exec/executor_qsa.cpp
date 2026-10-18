@@ -30,7 +30,7 @@ bool GraphExecutor::qsa_layer_(int layer) const {
 QsaGeom GraphExecutor::qsa_geom_(int layer) const {
     const auto& cfg = model_->config();
     QsaGeom g{};
-    g.n_heads = static_cast<int>(model_->layer(layer).qsa_index_qk.shape[0]) / kQsaDim - 1;
+    g.n_heads = (static_cast<int>(model_->layer(layer).qsa_index_qk.shape[0]) / kQsaDim) - 1;
     g.ratio = cfg.qsa_ratio;
     g.budget = cfg.qsa_budget;
     g.rope_dim = std::min(cfg.rope_dim > 0 ? cfg.rope_dim : cfg.head_dim, kQsaDim);
@@ -48,7 +48,7 @@ bool GraphExecutor::qsa_alloc_(int max_tokens) {
     if (layer < 0)
         return true;
     const int cols = static_cast<int>(model_->layer(layer).qsa_index_qk.shape[0]);
-    const int n_heads = cols / kQsaDim - 1;
+    const int n_heads = (cols / kQsaDim) - 1;
     if (cols % kQsaDim != 0 || n_heads < 1 || n_heads > 4 || cfg.qsa_ratio <= 0 || cfg.qsa_budget <= 0 ||
         compute_dtype_ != QType::F16) {
         IMP_LOG_ERROR("QSA indexer: unsupported shape (index_qk_proj rows %d, ratio %d, budget %d) or "
@@ -91,7 +91,7 @@ bool GraphExecutor::qsa_ensure_ctx_(const InferenceState& state, cudaStream_t st
         return false;
     const int bs = cache->block_size();
     const int max_ctx = cache->ceiling_blocks() * bs;
-    const int nb_max = max_ctx / cfg.qsa_ratio + 1;
+    const int nb_max = (max_ctx / cfg.qsa_ratio) + 1;
     const int cap = cfg.qsa_budget + cfg.qsa_ratio - 1;
     const int bpr = (cap + bs - 1) / bs;
     qsa_layers_.assign(cfg.n_layers, QsaLayerState{});
@@ -246,7 +246,7 @@ void GraphExecutor::qsa_prefill_(int layer, const InferenceState& state, int n, 
                      static_cast<const half*>(ly.qsa_index_q_norm.data), static_cast<half*>(qsa_q_.data),
                      static_cast<half*>(L.raw_keys), n, g, stream);
     const int b0 = pos0 / g.ratio;
-    const int nb = (pos0 + n) / g.ratio - b0;
+    const int nb = ((pos0 + n) / g.ratio) - b0;
     qsa_pool_blocks(static_cast<const half*>(L.raw_keys), static_cast<const half*>(ly.qsa_index_k_norm.data),
                     static_cast<half*>(L.block_keys), b0, nb, nullptr, g, stream);
     qsa_valid_ = pos0 + n;
@@ -257,14 +257,15 @@ void GraphExecutor::qsa_prefill_(int layer, const InferenceState& state, int n, 
     const bool dbg = dispatch_policy().attention.qsa_debug && layer == 3;
     for (int r = r0; r < n; r += qsa_rows_) {
         const int rows = std::min(qsa_rows_, n - r);
-        qsa_select(static_cast<const half*>(qsa_q_.data) + static_cast<size_t>(r) * g.n_heads * kQsaDim,
+        qsa_select(static_cast<const half*>(qsa_q_.data) + (static_cast<size_t>(r) * g.n_heads * kQsaDim),
                    state.positions + r, static_cast<const half*>(L.block_keys), qsa_scores_, qsa_nb_max_,
                    qsa_sel_tokens_, qsa_sel_count_, rows, g, stream);
         if (dbg)
-            qsa_debug_rows_(layer, state, static_cast<const char*>(qv.data) + r * q_row,
-                            static_cast<const char*>(ao.data) + r * q_row, rows, pos0 + r, bt, scale, stream);
-        qsa_attend_rows_(layer, state, static_cast<const char*>(qv.data) + r * q_row,
-                         static_cast<char*>(ao.data) + r * q_row, rows, bt, scale, pos0 + r + rows, stream);
+            qsa_debug_rows_(layer, state, static_cast<const char*>(qv.data) + (r * q_row),
+                            static_cast<const char*>(ao.data) + (r * q_row), rows, pos0 + r, bt, scale,
+                            stream);
+        qsa_attend_rows_(layer, state, static_cast<const char*>(qv.data) + (r * q_row),
+                         static_cast<char*>(ao.data) + (r * q_row), rows, bt, scale, pos0 + r + rows, stream);
     }
 }
 

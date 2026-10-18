@@ -8,10 +8,10 @@ namespace imp::quantize {
 namespace {
 
 bool ends_with(const std::string& s, const std::string& suf) {
-    return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+    return s.size() >= suf.size() && s.ends_with(suf);
 }
 
-bool contains(const std::string& s, const char* what) { return s.find(what) != std::string::npos; }
+bool contains(const std::string& s, const char* what) { return s.contains(what); }
 
 bool is_float_dtype(const std::string& dtype) { return dtype == "BF16" || dtype == "F16"; }
 
@@ -73,7 +73,7 @@ std::string gdn_projection_role(const std::string& name) {
         return "out";
     if (leaf == "in_proj_z")
         return "gate";
-    if (leaf.rfind("in_proj", 0) == 0)
+    if (leaf.starts_with("in_proj"))
         return "in";
     return "";
 }
@@ -105,7 +105,7 @@ bool keep_gdn_projection(const std::string& name, const std::string& sel) {
         return false;
     if (sel == "all" || sel == "true")
         return true;
-    return ("," + sel + ",").find("," + role + ",") != std::string::npos;
+    return ("," + sel + ",").contains("," + role + ",");
 }
 
 Fp8SourceAction fp8_source_action(const RawTensor& weight, bool gated, bool quantize_lm_head,
@@ -127,8 +127,8 @@ size_t nvfp4_output_bytes(int64_t N, int64_t K) {
     if (N <= 0 || K <= 0)
         return 0;
     const size_t n = static_cast<size_t>(N), k = static_cast<size_t>(K);
-    return n * k / 2       // packed FP4 nibbles, two per byte
-           + n * k / 16    // one FP8 E4M3 micro-scale per 16 values
+    return (n * k / 2)       // packed FP4 nibbles, two per byte
+           + (n * k / 16)    // one FP8 E4M3 micro-scale per 16 values
            + sizeof(float);  // the per-tensor F32 scale
 }
 

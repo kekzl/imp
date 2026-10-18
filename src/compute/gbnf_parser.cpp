@@ -27,7 +27,7 @@ inline bool bound_from_digits(const std::string& s, int& out) {
         return false;
     out = 0;
     for (char c : s)
-        out = out * 10 + (c - '0');
+        out = (out * 10) + (c - '0');
     return true;
 }
 

@@ -35,10 +35,10 @@ const uint64_t* find_decomp(uint32_t cp) {
 void decompose(uint32_t cp, std::vector<Unit>& out) {
     if (cp >= kSBase && cp < kSBase + kSCount) {
         const uint32_t s = cp - kSBase;
-        out.push_back({kLBase + s / (kVCount * kTCount), false});
-        out.push_back({kVBase + (s % (kVCount * kTCount)) / kTCount, false});
+        out.push_back({kLBase + (s / (kVCount * kTCount)), false});
+        out.push_back({kVBase + ((s % (kVCount * kTCount)) / kTCount), false});
         if (s % kTCount)
-            out.push_back({kTBase + s % kTCount, false});
+            out.push_back({kTBase + (s % kTCount), false});
         return;
     }
     const uint64_t* d = find_decomp(cp);
@@ -54,7 +54,7 @@ void decompose(uint32_t cp, std::vector<Unit>& out) {
 
 uint32_t compose_pair(uint32_t a, uint32_t b) {
     if (a >= kLBase && a < kLBase + kLCount && b >= kVBase && b < kVBase + kVCount)
-        return kSBase + ((a - kLBase) * kVCount + (b - kVBase)) * kTCount;
+        return kSBase + ((((a - kLBase) * kVCount) + (b - kVBase)) * kTCount);
     if (a >= kSBase && a < kSBase + kSCount && (a - kSBase) % kTCount == 0 && b > kTBase &&
         b < kTBase + kTCount)
         return a + (b - kTBase);

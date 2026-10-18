@@ -54,7 +54,7 @@ inline size_t ssm_bytes_per_layer(const SsmStateGeometry& g) {
 
 // One scheduler slot: every GDN layer's conv + h state, contiguous, then the extra tail.
 inline size_t ssm_bytes_per_slot(const SsmStateGeometry& g) {
-    return ssm_bytes_per_layer(g) * static_cast<size_t>(g.n_ssm_layers > 0 ? g.n_ssm_layers : 0) +
+    return (ssm_bytes_per_layer(g) * static_cast<size_t>(g.n_ssm_layers > 0 ? g.n_ssm_layers : 0)) +
            ssm_align256(g.extra_bytes_per_slot);
 }
 

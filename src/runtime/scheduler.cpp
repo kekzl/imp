@@ -107,7 +107,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 // NOW, so an all-fits batch can still run the pool dry mid-generation.
                 // Clamped to the pool: a cache too small for prompt+max_tokens (16-block
                 // floor) degrades to prompt-only admission instead of queuing forever.
-                const int decode_blocks = (reserve_decode_tokens(*req) + bs - 1) / bs + 1;
+                const int decode_blocks = ((reserve_decode_tokens(*req) + bs - 1) / bs) + 1;
                 const int pool_blocks = kv_manager_->kv_cache()->total_blocks();
                 int admit_blocks = std::min(blocks_needed + decode_blocks,
                                             std::max(blocks_needed, pool_blocks));
@@ -306,7 +306,7 @@ void Scheduler::hold_decode_reservation_(const Request& req) {
     // free_sequence().
     const int bs = kv_manager_->kv_cache()->block_size();
     const int prompt_blocks = (req.context_len() + bs - 1) / bs;
-    const int decode_blocks = (reserve_decode_tokens(req) + bs - 1) / bs + 1;
+    const int decode_blocks = ((reserve_decode_tokens(req) + bs - 1) / bs) + 1;
     const int pool_blocks = kv_manager_->kv_cache()->total_blocks();
     kv_manager_->set_decode_reservation(req.id, std::min(prompt_blocks + decode_blocks,
                                                          std::max(prompt_blocks, pool_blocks)));
@@ -335,7 +335,7 @@ bool Scheduler::swap_in_waiting_() {
         // Same promise as admission, for what is left of the expected length.
         const int bs = kv_manager_->kv_cache()->block_size();
         const int left = std::max(1, reserve_decode_tokens(*r) - static_cast<int>(r->output_tokens.size()));
-        kv_manager_->set_decode_reservation(r->id, (r->context_len() + left + bs - 1) / bs + 1);
+        kv_manager_->set_decode_reservation(r->id, ((r->context_len() + left + bs - 1) / bs) + 1);
     }
     return waiting;
 }

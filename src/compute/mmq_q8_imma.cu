@@ -57,29 +57,28 @@ __device__ __forceinline__ void load_kstep(int tid, const int8_t* __restrict__ A
         const int row = i >> 2;
         const int col = (i & 3) * 16;
         const bool valid = (base_m + row) < M;
-        cp_async_cg_16(&sA[row][col],
-                       A + static_cast<size_t>(base_m + row) * K + k_base + col, valid);
+        cp_async_cg_16(&sA[row][col], A + (static_cast<size_t>(base_m + row) * K) + k_base + col, valid);
     }
 #pragma unroll
     for (int i = tid; i < BN * 4; i += kThreads) {
         const int row = i >> 2;
         const int col = (i & 3) * 16;
-        cp_async_cg_16(&sB[row][col], B + static_cast<size_t>(row) * K + k_base + col,
+        cp_async_cg_16(&sB[row][col], B + (static_cast<size_t>(row) * K) + k_base + col,
                        (base_n_rows < 0) || (row < base_n_rows));
     }
     const int kb0 = k_base / 32;
 #pragma unroll
     for (int i = tid; i < BM; i += kThreads) {
         const bool valid = (base_m + i) < M;
-        cp_async_ca_4(&sAsc[i][0], Asc + static_cast<size_t>(base_m + i) * subs + kb0, valid);
+        cp_async_ca_4(&sAsc[i][0], Asc + (static_cast<size_t>(base_m + i) * subs) + kb0, valid);
         if (WB)
-            cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
+            cp_async_ca_8(&sArs[i][0], Ars + (static_cast<size_t>(base_m + i) * subs) + kb0, valid);
     }
 #pragma unroll
     for (int i = tid; i < BN * 2; i += kThreads) {
         // kb-major [kb][n][2]: one fragment's two columns read as one 8-B word
         const int n = i >> 1, kb = i & 1;
-        cp_async_ca_4(&sBsc[kb][n][0], Bsc + (static_cast<size_t>(n) * subs + kb0 + kb) * 2,
+        cp_async_ca_4(&sBsc[kb][n][0], Bsc + (((static_cast<size_t>(n) * subs) + kb0 + kb) * 2),
                       (base_n_rows < 0) || (n < base_n_rows));
     }
 }
@@ -121,13 +120,13 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_kernel(
     const int n_rem = (N - base_n >= BN) ? -1 : (N - base_n);  // -1 = full tile
 
     const int subs = K / 32;
-    const int8_t* A = X_s8 + row_off * K;
-    const __half* Asc = x_scale + row_off * subs;
-    const float* Ars = x_rowsum + row_off * subs;
-    const int8_t* B = W_s8 + static_cast<size_t>(e) * w_stride + static_cast<size_t>(base_n) * K;
-    const __half* Bsc = w_sc + static_cast<size_t>(e) * wsc_stride +
-                        static_cast<size_t>(base_n) * subs * 2;
-    __half* C = out + row_off * N;
+    const int8_t* A = X_s8 + (row_off * K);
+    const __half* Asc = x_scale + (row_off * subs);
+    const float* Ars = x_rowsum + (row_off * subs);
+    const int8_t* B = W_s8 + (static_cast<size_t>(e) * w_stride) + (static_cast<size_t>(base_n) * K);
+    const __half* Bsc = w_sc + (static_cast<size_t>(e) * wsc_stride) +
+                        (static_cast<size_t>(base_n) * subs * 2);
+    __half* C = out + (row_off * N);
 
     const int tid = threadIdx.x;
     const int warp_id = tid >> 5;
@@ -185,9 +184,9 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_kernel(
             float da_lo[kMF], da_hi[kMF], rs_lo[kMF], rs_hi[kMF];
 #pragma unroll
             for (int mf = 0; mf < kMF; ++mf) {
-                const int arow_lo = warp_m * kTileM + mf * 16 + rl;
+                const int arow_lo = (warp_m * kTileM) + (mf * 16) + rl;
                 const int arow_hi = arow_lo + 8;
-                const int acol = kc + cl * 4;
+                const int acol = kc + (cl * 4);
                 a[mf][0] = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol]);
                 a[mf][1] = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_hi][acol]);
                 a[mf][2] = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol + 16]);
@@ -200,12 +199,12 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_kernel(
 
 #pragma unroll
             for (int nf = 0; nf < kNF; ++nf) {
-                const int bcol = warp_n * kTileN + nf * 8 + rl;
-                const int bk = kc + cl * 4;
+                const int bcol = (warp_n * kTileN) + (nf * 8) + rl;
+                const int bk = kc + (cl * 4);
                 const uint32_t b0 = *reinterpret_cast<const uint32_t*>(&sB[stage][bcol][bk]);
                 const uint32_t b1 = *reinterpret_cast<const uint32_t*>(&sB[stage][bcol][bk + 16]);
                 // c0,c1 = rows (rl) cols (cl*2, cl*2+1); c2,c3 = rows (rl+8)
-                const int ncol_lo = warp_n * kTileN + nf * 8 + cl * 2;
+                const int ncol_lo = (warp_n * kTileN) + (nf * 8) + (cl * 2);
                 const uint2 ab = *reinterpret_cast<const uint2*>(&sBsc[stage][kb][ncol_lo][0]);
                 const __half2 ab_lo = *reinterpret_cast<const __half2*>(&ab.x);
                 const __half2 ab_hi = *reinterpret_cast<const __half2*>(&ab.y);
@@ -243,22 +242,22 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_kernel(
     // SPLITK epilogue: store the fp32 partial tile to this split's slice;
     // mmq_splitk_finalize_kernel reduces slices and applies beta/residual.
     if constexpr (SPLITK) {
-        float* Cs = split_out + static_cast<size_t>(blockIdx.z) * (static_cast<size_t>(M) * N);
+        float* Cs = split_out + (static_cast<size_t>(blockIdx.z) * (static_cast<size_t>(M) * N));
 #pragma unroll
         for (int mf = 0; mf < kMF; ++mf) {
-            const int row_lo = base_m + warp_m * kTileM + mf * 16 + rl;
+            const int row_lo = base_m + (warp_m * kTileM) + (mf * 16) + rl;
             const int row_hi = row_lo + 8;
 #pragma unroll
             for (int nf = 0; nf < kNF; ++nf) {
-                const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
+                const int col = base_n + (warp_n * kTileN) + (nf * 8) + (cl * 2);
                 if (col + 1 >= N) continue;
                 if (row_lo < rows) {
-                    Cs[static_cast<size_t>(row_lo) * N + col] = acc[mf][nf][0];
-                    Cs[static_cast<size_t>(row_lo) * N + col + 1] = acc[mf][nf][1];
+                    Cs[(static_cast<size_t>(row_lo) * N) + col] = acc[mf][nf][0];
+                    Cs[(static_cast<size_t>(row_lo) * N) + col + 1] = acc[mf][nf][1];
                 }
                 if (row_hi < rows) {
-                    Cs[static_cast<size_t>(row_hi) * N + col] = acc[mf][nf][2];
-                    Cs[static_cast<size_t>(row_hi) * N + col + 1] = acc[mf][nf][3];
+                    Cs[(static_cast<size_t>(row_hi) * N) + col] = acc[mf][nf][2];
+                    Cs[(static_cast<size_t>(row_hi) * N) + col + 1] = acc[mf][nf][3];
                 }
             }
         }
@@ -266,19 +265,19 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_kernel(
         // Epilogue: FP16 store, M-tail predicated (N is a multiple of BN).
 #pragma unroll
         for (int mf = 0; mf < kMF; ++mf) {
-            const int row_lo = base_m + warp_m * kTileM + mf * 16 + rl;
+            const int row_lo = base_m + (warp_m * kTileM) + (mf * 16) + rl;
             const int row_hi = row_lo + 8;
 #pragma unroll
             for (int nf = 0; nf < kNF; ++nf) {
-                const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
+                const int col = base_n + (warp_n * kTileN) + (nf * 8) + (cl * 2);
                 if (col + 1 >= N) continue;  // N-tail: OOB columns are never stored
                 if (row_lo < rows) {
-                    __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_lo) * N + col]);
+                    __half2* p = reinterpret_cast<__half2*>(&C[(static_cast<size_t>(row_lo) * N) + col]);
                     __half2 v = __floats2half2_rn(acc[mf][nf][0], acc[mf][nf][1]);
                     *p = BETA1 ? __hadd2(*p, v) : v;
                 }
                 if (row_hi < rows) {
-                    __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_hi) * N + col]);
+                    __half2* p = reinterpret_cast<__half2*>(&C[(static_cast<size_t>(row_hi) * N) + col]);
                     __half2 v = __floats2half2_rn(acc[mf][nf][2], acc[mf][nf][3]);
                     *p = BETA1 ? __hadd2(*p, v) : v;
                 }
@@ -290,11 +289,11 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_kernel(
 // Reduce SPLITK partial slices in fixed order (bit-reproducible); beta 0: out = sum, beta 1: out += sum.
 __global__ void mmq_splitk_finalize_kernel(const float* __restrict__ split_out, int n_splits,
                                            int total, __half* __restrict__ out, int beta1) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= total) return;
     float v = 0.0f;
     for (int s = 0; s < n_splits; ++s)
-        v += split_out[static_cast<size_t>(s) * total + idx];
+        v += split_out[(static_cast<size_t>(s) * total) + idx];
     out[idx] = beta1 ? __hadd(out[idx], __float2half(v)) : __float2half(v);
 }
 
@@ -358,9 +357,9 @@ bool launch_q8_k128_split(const WeightPlanes& w, __half* out_f16, int M, int N, 
         const size_t subs = static_cast<size_t>(K) / 32;
         const int rows_small = M - rows_big;
         const dim3 g32(grid.x, (rows_small + 31) / 32, 1);
-        if (!launch_q8_k128(g_imma_act.xs8 + static_cast<size_t>(rows_big) * K,
-                            g_imma_act.xscale + rows_big * subs, w.qs, w.sc,
-                            out_f16 + static_cast<size_t>(rows_big) * N, rows_small, N, K, 32, beta1, g32,
+        if (!launch_q8_k128(g_imma_act.xs8 + (static_cast<size_t>(rows_big) * K),
+                            g_imma_act.xscale + (rows_big * subs), w.qs, w.sc,
+                            out_f16 + (static_cast<size_t>(rows_big) * N), rows_small, N, K, 32, beta1, g32,
                             stream))
             IMP_LOG_ERROR("mmq imma q8 k128: BM=32 tail launch refused after the BM=128 launch");
     }
@@ -395,11 +394,11 @@ void launch_q8_plane_dense(const WeightPlanes& w, __half* out_f16, int M, int N,
     if (d_offsets != nullptr || rows_big >= M)
         return;
     mmq_imma_kernel<32, false, false>
-        <<<g32, kThreads, 0, stream>>>(g_imma_act.xs8 + static_cast<size_t>(rows_big) * K,
-                                       g_imma_act.xscale + rows_big * subs,
-                                       g_imma_act.xrowsum + rows_big * subs, w.qs, w.sc,
-                                       out_f16 + static_cast<size_t>(rows_big) * N, rows_small, N, K, nullptr,
-                                       w_stride, wsc_stride);
+        <<<g32, kThreads, 0, stream>>>(g_imma_act.xs8 + (static_cast<size_t>(rows_big) * K),
+                                       g_imma_act.xscale + (rows_big * subs),
+                                       g_imma_act.xrowsum + (rows_big * subs), w.qs, w.sc,
+                                       out_f16 + (static_cast<size_t>(rows_big) * N), rows_small, N, K,
+                                       nullptr, w_stride, wsc_stride);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

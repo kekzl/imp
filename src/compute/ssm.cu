@@ -4,6 +4,7 @@
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include "core/pdl_device.cuh"
@@ -15,7 +16,7 @@ namespace imp {
 // SiLU in-place kernel
 // ---------------------------------------------------------------------------
 __global__ void silu_inplace_fp16_kernel(half* __restrict__ x, int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx < n) {
         float val = __half2float(x[idx]);
         val = val / (1.0f + expf(-val));
@@ -36,7 +37,7 @@ void silu_inplace(Tensor& x, cudaStream_t stream) {
 // Squared ReLU: out[i] = max(0,x[i])^2. Used by Nemotron-H expert FFN (non-gated) instead
 // of SiLU.
 __global__ void relu_sqr_inplace_fp16_kernel(half* __restrict__ x, int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx < n) {
         float val = __half2float(x[idx]);
         val = fmaxf(val, 0.0f);
@@ -58,7 +59,7 @@ void relu_sqr_inplace(Tensor& x, cudaStream_t stream) {
 // Sigmoid multiply: out[i] = a[i] * sigmoid(b[i]). Used by Qwen3.5 attention output gate.
 __global__ void sigmoid_mul_fp16_kernel(const half* __restrict__ a, const half* __restrict__ b,
                                         half* __restrict__ out, int64_t n) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx < n) {
         float val_a = __half2float(a[idx]);
         float val_b = __half2float(b[idx]);
@@ -93,11 +94,11 @@ __global__ void ssm_conv1d_decode_kernel(
     const half* __restrict__ bias,    // [channels] or nullptr
     half* __restrict__ x_out,         // [channels]
     int channels, int kernel_size) {
-    int ch = blockIdx.x * blockDim.x + threadIdx.x;
+    int ch = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (ch >= channels)
         return;
 
-    float* state = conv_state + static_cast<int64_t>(ch) * kernel_size;
+    float* state = conv_state + (static_cast<int64_t>(ch) * kernel_size);
     float sum;
     if (kernel_size == 4) {
         // One 16B read and one 16B write per channel, instead of the shift loop's three loads and
@@ -106,7 +107,7 @@ __global__ void ssm_conv1d_decode_kernel(
         float4 s = *reinterpret_cast<const float4*>(state);
         s = make_float4(s.y, s.z, s.w, __half2float(x_in[ch]));
         *reinterpret_cast<float4*>(state) = s;
-        const uint2 wraw = *reinterpret_cast<const uint2*>(weight + static_cast<int64_t>(ch) * 4);
+        const uint2 wraw = *reinterpret_cast<const uint2*>(weight + (static_cast<int64_t>(ch) * 4));
         const half2 w01 = *reinterpret_cast<const half2*>(&wraw.x);
         const half2 w23 = *reinterpret_cast<const half2*>(&wraw.y);
         sum = fmaf(s.w, __high2float(w23),
@@ -117,7 +118,7 @@ __global__ void ssm_conv1d_decode_kernel(
         state[kernel_size - 1] = __half2float(x_in[ch]);
         sum = 0.0f;
         for (int k = 0; k < kernel_size; k++)
-            sum = fmaf(state[k], __half2float(weight[ch * kernel_size + k]), sum);
+            sum = fmaf(state[k], __half2float(weight[(ch * kernel_size) + k]), sum);
     }
     if (bias) {
         sum += __half2float(bias[ch]);
@@ -139,7 +140,7 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     // seq_slots: per-blockIdx.y conv-state slot, or nullptr for the
     // single-sequence call (gridDim.y == 1, every offset below is zero).
     const int* __restrict__ seq_slots = nullptr, int64_t conv_state_seq_stride = 0) {
-    int ch = blockIdx.x * blockDim.x + threadIdx.x;
+    int ch = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (ch >= channels)
         return;
     // Single-sequence k=4: weights load before the PDL wait, conv_state (mutable) only prefetches L2
@@ -147,8 +148,8 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     const bool early = seq_slots == nullptr && kernel_size == 4;
     uint2 w_early{};
     if (early) {
-        asm volatile("prefetch.global.L2 [%0];" ::"l"(conv_state + static_cast<int64_t>(ch) * 4));
-        w_early = *reinterpret_cast<const uint2*>(weight + static_cast<int64_t>(ch) * 4);
+        asm volatile("prefetch.global.L2 [%0];" ::"l"(conv_state + (static_cast<int64_t>(ch) * 4)));
+        w_early = *reinterpret_cast<const uint2*>(weight + (static_cast<int64_t>(ch) * 4));
     }
     pdl_wait();
     pdl_trigger();
@@ -158,7 +159,7 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
     x_in += static_cast<size_t>(seq) * channels;
     x_out += static_cast<size_t>(seq) * channels;
 
-    float* state = conv_state + static_cast<int64_t>(ch) * kernel_size;
+    float* state = conv_state + (static_cast<int64_t>(ch) * kernel_size);
     float sum;
     if (kernel_size == 4) {
         // One 16B read and one 16B write per channel, instead of the shift loop's three loads and
@@ -168,7 +169,7 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
         s = make_float4(s.y, s.z, s.w, __half2float(x_in[ch]));
         *reinterpret_cast<float4*>(state) = s;
         const uint2 wraw = early ? w_early
-                                 : *reinterpret_cast<const uint2*>(weight + static_cast<int64_t>(ch) * 4);
+                                 : *reinterpret_cast<const uint2*>(weight + (static_cast<int64_t>(ch) * 4));
         const half2 w01 = *reinterpret_cast<const half2*>(&wraw.x);
         const half2 w23 = *reinterpret_cast<const half2*>(&wraw.y);
         sum = fmaf(s.w, __high2float(w23),
@@ -179,7 +180,7 @@ __global__ void ssm_conv1d_decode_f32_silu_kernel(
         state[kernel_size - 1] = __half2float(x_in[ch]);
         sum = 0.0f;
         for (int k = 0; k < kernel_size; k++)
-            sum = fmaf(state[k], __half2float(weight[ch * kernel_size + k]), sum);
+            sum = fmaf(state[k], __half2float(weight[(ch * kernel_size) + k]), sum);
     }
 
     if (bias)
@@ -266,25 +267,24 @@ __global__ void ssm_conv1d_prefill_kernel(
             int src_t = token - (kernel_size - 1) + k;
             float val;
             if (src_t >= 0) {
-                val = __half2float(x_in[static_cast<int64_t>(src_t) * channels + ch]);
+                val = __half2float(x_in[(static_cast<int64_t>(src_t) * channels) + ch]);
             } else if (conv_state) {
                 // Chunked prefill: read trailing context from previous chunk's
                 // conv_state instead of zero-padding. conv_state[ch*K + s] holds
                 // the input at global position (chunk_offset - K + s).
                 int state_idx = src_t + kernel_size;  // maps to [1..K-1]
-                val = (state_idx >= 0 && state_idx < kernel_size)
-                          ? conv_state[ch * kernel_size + state_idx]
-                          : 0.0f;
+                val = (state_idx >= 0 && state_idx < kernel_size) ? conv_state[(ch * kernel_size) + state_idx]
+                                                                  : 0.0f;
             } else {
                 val = 0.0f;
             }
             // Weight layout: [channels, kernel_size] — kernel_size is contiguous per channel
-            sum += val * __half2float(weight[ch * kernel_size + k]);
+            sum += val * __half2float(weight[(ch * kernel_size) + k]);
         }
         if (bias) {
             sum += __half2float(bias[ch]);
         }
-        x_out[static_cast<int64_t>(token) * channels + ch] = __float2half(sum);
+        x_out[(static_cast<int64_t>(token) * channels) + ch] = __float2half(sum);
 
         // The conv window commit for the last real row is ssm_conv1d_commit_kernel, launched
         // after this grid: rows 0..K-2 read the PREVIOUS window here, nothing inside one grid
@@ -293,11 +293,11 @@ __global__ void ssm_conv1d_prefill_kernel(
         // not the live one (the real-row commit may have already run on another block).
         // snap_n==real_n needs no second copy - the two commits coincide.
         if (token == snap_n - 1 && conv_snap && conv_prev && snap_n != real_n) {
-            float* snap = conv_snap + static_cast<int64_t>(ch) * kernel_size;
-            const float* prev = conv_prev + static_cast<int64_t>(ch) * kernel_size;
+            float* snap = conv_snap + (static_cast<int64_t>(ch) * kernel_size);
+            const float* prev = conv_prev + (static_cast<int64_t>(ch) * kernel_size);
             for (int k = 0; k < kernel_size; k++) {
                 int src_t = snap_n - kernel_size + k;
-                snap[k] = (src_t >= 0) ? __half2float(x_in[static_cast<int64_t>(src_t) * channels + ch])
+                snap[k] = (src_t >= 0) ? __half2float(x_in[(static_cast<int64_t>(src_t) * channels) + ch])
                                        : prev[src_t + kernel_size];
             }
         }
@@ -315,23 +315,24 @@ __global__ void ssm_conv1d_commit_kernel(float* __restrict__ conv_state, const h
                                          int n_tokens, int channels, int kernel_size, int64_t x_pitch,
                                          const int* __restrict__ d_real_n, const int* __restrict__ seq_slots,
                                          int64_t slot_stride, const int* __restrict__ dst_slots) {
-    const int ch = blockIdx.x * blockDim.x + threadIdx.x;
+    const int ch = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (ch >= channels)
         return;
     const int seq = blockIdx.y;
     float* dst_state = conv_state;
     if (seq_slots) {
         float* const pool = conv_state;
-        conv_state = pool + static_cast<size_t>(seq_slots[seq]) * static_cast<size_t>(slot_stride);
-        dst_state = dst_slots ? pool + static_cast<size_t>(dst_slots[seq]) * static_cast<size_t>(slot_stride)
-                              : conv_state;
+        conv_state = pool + (static_cast<size_t>(seq_slots[seq]) * static_cast<size_t>(slot_stride));
+        dst_state = dst_slots
+                        ? pool + (static_cast<size_t>(dst_slots[seq]) * static_cast<size_t>(slot_stride))
+                        : conv_state;
         x_in += static_cast<size_t>(seq) * n_tokens * channels;
     }
     const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
     if (real_n <= 0)
         return;
-    const float* src = conv_state + static_cast<int64_t>(ch) * kernel_size;
-    float* dst = dst_state + static_cast<int64_t>(ch) * kernel_size;
+    const float* src = conv_state + (static_cast<int64_t>(ch) * kernel_size);
+    float* dst = dst_state + (static_cast<int64_t>(ch) * kernel_size);
     for (int k = 0; k < kernel_size; k++) {
         const int src_t = real_n - kernel_size + k;
         dst[k] = (src_t >= 0) ? __half2float(x_in[(static_cast<int64_t>(src_t) * x_pitch) + ch])
@@ -410,31 +411,30 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
     // from x_in, conv_state only for leading positions), and the two state commits below are
     // per channel, so widening the grid changes no result. Prefill keeps the same mapping
     // with more blocks.
-    for (int ch = blockIdx.y * blockDim.x + threadIdx.x; ch < channels;
-         ch += gridDim.y * blockDim.x) {
+    for (int ch = (blockIdx.y * blockDim.x) + threadIdx.x; ch < channels; ch += gridDim.y * blockDim.x) {
         float sum = 0.0f;
         for (int k = 0; k < kernel_size; k++) {
             int src_t = token - (kernel_size - 1) + k;
             float val;
             if (src_t >= 0) {
-                val = __half2float(x_in[static_cast<int64_t>(src_t) * channels + ch]);
+                val = __half2float(x_in[(static_cast<int64_t>(src_t) * channels) + ch]);
             } else if (conv_state) {
                 // Chunked prefill: read trailing context from previous chunk's
                 // conv_state instead of zero-padding.  conv_state[ch*K + s]
                 // holds the input at global position (chunk_offset - K + s).
                 int state_idx = src_t + kernel_size;  // maps to [1..K-1]
-                val = (state_idx >= 0 && state_idx < kernel_size) ? conv_state[ch * kernel_size + state_idx]
+                val = (state_idx >= 0 && state_idx < kernel_size) ? conv_state[(ch * kernel_size) + state_idx]
                                                                   : 0.0f;
             } else {
                 val = 0.0f;
             }
-            sum += val * __half2float(weight[ch * kernel_size + k]);
+            sum += val * __half2float(weight[(ch * kernel_size) + k]);
         }
         if (bias)
             sum += __half2float(bias[ch]);
 
         // Fused SiLU + FP32 output
-        x_out_f32[static_cast<int64_t>(token) * channels + ch] = sum / (1.0f + expf(-sum));
+        x_out_f32[(static_cast<int64_t>(token) * channels) + ch] = sum / (1.0f + expf(-sum));
 
         // Conv window commit is ssm_conv1d_commit_kernel, launched after this grid. Same window
         // at snap_n rows; its leading values come from the state BEFORE this chunk and must be
@@ -443,11 +443,11 @@ __global__ void ssm_conv1d_prefill_f32_silu_kernel(
         // here silently picks up whichever block ran first, dropping draft acceptance with no
         // error anywhere.
         if (token == snap_n - 1 && conv_snap && conv_prev && snap_n != real_n) {
-            const float* src_state = conv_prev + static_cast<int64_t>(ch) * kernel_size;
-            float* snap = conv_snap + static_cast<int64_t>(ch) * kernel_size;
+            const float* src_state = conv_prev + (static_cast<int64_t>(ch) * kernel_size);
+            float* snap = conv_snap + (static_cast<int64_t>(ch) * kernel_size);
             for (int k = 0; k < kernel_size; k++) {
                 int src_t = snap_n - kernel_size + k;
-                snap[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch])
+                snap[k] = (src_t >= 0) ? __half2float(x_in[(src_t * channels) + ch])
                                        : src_state[src_t + kernel_size];
             }
         }
@@ -561,8 +561,7 @@ __global__ void ssm_scan_kernel(
     int s_chunk = (state_size + s_tiles - 1) / s_tiles;
     int s_start = s_tid * s_chunk;
     int s_end = s_start + s_chunk;
-    if (s_end > state_size)
-        s_end = state_size;
+    s_end = std::min(s_end, state_size);
 
     // h_state transposed layout: [n_heads, state_size, head_dim_ssm]
     // For coalesced access: h_state[h, s, d] = base[h * S * hd + s * hd + d]
@@ -573,30 +572,30 @@ __global__ void ssm_scan_kernel(
     extern __shared__ float smem[];
 
     for (int t = 0; t < n_tokens; t++) {
-        const half* B_g = B_in + static_cast<int64_t>(t) * BC_size + static_cast<int64_t>(g) * state_size;
-        const half* C_g = C_in + static_cast<int64_t>(t) * BC_size + static_cast<int64_t>(g) * state_size;
+        const half* B_g = B_in + (static_cast<int64_t>(t) * BC_size) + (static_cast<int64_t>(g) * state_size);
+        const half* C_g = C_in + (static_cast<int64_t>(t) * BC_size) + (static_cast<int64_t>(g) * state_size);
 
         // Compute dt for this token (shared across all threads in this head)
-        float dt_val = __half2float(dt_raw[t * n_heads + h]) + dt_b;
+        float dt_val = __half2float(dt_raw[(t * n_heads) + h]) + dt_b;
         dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
         float a_bar = expf(dt_val * a_log_h);
 
         float x_val = __half2float(
-            x[static_cast<int64_t>(t) * inner_size + static_cast<int64_t>(h) * head_dim_ssm + d_tid]);
+            x[(static_cast<int64_t>(t) * inner_size) + (static_cast<int64_t>(h) * head_dim_ssm) + d_tid]);
 
         float y_partial = 0.0f;
         for (int s = s_start; s < s_end; s++) {
             float b_s = __half2float(B_g[s]);
             float c_s = __half2float(C_g[s]);
             // Transposed access: adjacent d-threads read adjacent memory (coalesced)
-            int64_t idx = h_base + static_cast<int64_t>(s) * head_dim_ssm + d_tid;
+            int64_t idx = h_base + (static_cast<int64_t>(s) * head_dim_ssm) + d_tid;
             float h_old;
             if constexpr (H_FP16) {
                 h_old = __half2float(static_cast<half*>(h_state)[idx]);
             } else {
                 h_old = static_cast<float*>(h_state)[idx];
             }
-            float h_new = a_bar * h_old + dt_val * x_val * b_s;
+            float h_new = (a_bar * h_old) + (dt_val * x_val * b_s);
             if (t < real_n) {
                 if constexpr (H_FP16) {
                     static_cast<half*>(h_state)[idx] = __float2half(h_new);
@@ -616,25 +615,25 @@ __global__ void ssm_scan_kernel(
 
         if (s_tiles > 1) {
             // Reduce y_partial across s-tiles for this d
-            smem[d_tid * s_tiles + s_tid] = y_partial;
+            smem[(d_tid * s_tiles) + s_tid] = y_partial;
             __syncthreads();
 
             for (int stride = s_tiles / 2; stride > 0; stride >>= 1) {
                 if (s_tid < stride) {
-                    smem[d_tid * s_tiles + s_tid] += smem[d_tid * s_tiles + s_tid + stride];
+                    smem[(d_tid * s_tiles) + s_tid] += smem[(d_tid * s_tiles) + s_tid + stride];
                 }
                 __syncthreads();
             }
 
             if (s_tid == 0) {
-                float y_val = smem[static_cast<ptrdiff_t>(d_tid * s_tiles)] + d_val * x_val;
+                float y_val = smem[static_cast<ptrdiff_t>(d_tid * s_tiles)] + (d_val * x_val);
                 if constexpr (FUSE_GATE) {
-                    float z_val = __half2float(z[static_cast<int64_t>(t) * inner_size +
-                                                 static_cast<int64_t>(h) * head_dim_ssm + d_tid]);
+                    float z_val = __half2float(z[(static_cast<int64_t>(t) * inner_size) +
+                                                 (static_cast<int64_t>(h) * head_dim_ssm) + d_tid]);
                     z_val = z_val / (1.0f + expf(-z_val));
                     y_val *= z_val;
                 }
-                y[static_cast<int64_t>(t) * inner_size + static_cast<int64_t>(h) * head_dim_ssm + d_tid] =
+                y[(static_cast<int64_t>(t) * inner_size) + (static_cast<int64_t>(h) * head_dim_ssm) + d_tid] =
                     __float2half(y_val);
             }
             // Barrier before next token iteration (all threads must finish writing smem)
@@ -642,14 +641,14 @@ __global__ void ssm_scan_kernel(
                 __syncthreads();
         } else {
             // s_tiles == 1: no reduction needed
-            float y_val = y_partial + d_val * x_val;
+            float y_val = y_partial + (d_val * x_val);
             if constexpr (FUSE_GATE) {
-                float z_val = __half2float(
-                    z[static_cast<int64_t>(t) * inner_size + static_cast<int64_t>(h) * head_dim_ssm + d_tid]);
+                float z_val = __half2float(z[(static_cast<int64_t>(t) * inner_size) +
+                                             (static_cast<int64_t>(h) * head_dim_ssm) + d_tid]);
                 z_val = z_val / (1.0f + expf(-z_val));
                 y_val *= z_val;
             }
-            y[static_cast<int64_t>(t) * inner_size + static_cast<int64_t>(h) * head_dim_ssm + d_tid] =
+            y[(static_cast<int64_t>(t) * inner_size) + (static_cast<int64_t>(h) * head_dim_ssm) + d_tid] =
                 __float2half(y_val);
         }
     }
@@ -746,7 +745,7 @@ __global__ void group_rmsnorm_fp16_kernel(const half* __restrict__ x, const half
     int token = blockIdx.x;
     int group = blockIdx.y;
     int group_size = total_dim / n_groups;
-    int offset = token * total_dim + group * group_size;
+    int offset = (token * total_dim) + (group * group_size);
 
     // Compute sum of squares
     extern __shared__ float sdata[];
@@ -766,12 +765,12 @@ __global__ void group_rmsnorm_fp16_kernel(const half* __restrict__ x, const half
         __syncthreads();
     }
 
-    float rms = rsqrtf(sdata[0] / static_cast<float>(group_size) + eps);
+    float rms = rsqrtf((sdata[0] / static_cast<float>(group_size)) + eps);
 
     // Apply norm + weight
     for (int i = threadIdx.x; i < group_size; i += blockDim.x) {
         float val = __half2float(x[offset + i]);
-        float w = __half2float(weight[group * group_size + i]);
+        float w = __half2float(weight[(group * group_size) + i]);
         out[offset + i] = __float2half(val * rms * w);
     }
 }

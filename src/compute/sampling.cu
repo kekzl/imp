@@ -80,7 +80,7 @@ __device__ __forceinline__ void argmax_partial_body(const float* __restrict__ lo
     float local_max = -FLT_MAX;
     int local_idx = 0;
 
-    int start = blockIdx.x * blockDim.x + threadIdx.x;
+    int start = (blockIdx.x * blockDim.x) + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
 
     for (int i = start; i < vocab_size; i += stride) {
@@ -169,7 +169,7 @@ __global__ void argmax_partial_rows_kernel(const GreedyRowArgs* __restrict__ row
     const GreedyRowArgs r = rows[blockIdx.y];
     auto* base = reinterpret_cast<char*>(r.d_result);
     auto* pv = reinterpret_cast<float*>(base + sizeof(int32_t));
-    auto* pi = reinterpret_cast<int32_t*>(base + sizeof(int32_t) + ARGMAX_NBLOCKS * sizeof(float));
+    auto* pi = reinterpret_cast<int32_t*>(base + sizeof(int32_t) + (ARGMAX_NBLOCKS * sizeof(float)));
     argmax_partial_body(r.logits, vocab_size, pv, pi);
 }
 
@@ -178,7 +178,7 @@ __global__ void argmax_reduce_rows_kernel(const GreedyRowArgs* __restrict__ rows
     const GreedyRowArgs r = rows[blockIdx.x];
     auto* base = reinterpret_cast<char*>(r.d_result);
     auto* pv = reinterpret_cast<float*>(base + sizeof(int32_t));
-    auto* pi = reinterpret_cast<int32_t*>(base + sizeof(int32_t) + ARGMAX_NBLOCKS * sizeof(float));
+    auto* pi = reinterpret_cast<int32_t*>(base + sizeof(int32_t) + (ARGMAX_NBLOCKS * sizeof(float)));
     argmax_reduce_body(pv, pi, ARGMAX_NBLOCKS, r.d_result);
 }
 
@@ -234,7 +234,8 @@ static cudaError_t launch_argmax_multiblock(const float* d_logits, int vocab_siz
                                             cudaStream_t stream, const char* who) {
     auto* base = reinterpret_cast<char*>(d_result);
     auto* partial_vals = reinterpret_cast<float*>(base + sizeof(int32_t));
-    auto* partial_idxs = reinterpret_cast<int32_t*>(base + sizeof(int32_t) + ARGMAX_NBLOCKS * sizeof(float));
+    auto* partial_idxs = reinterpret_cast<int32_t*>(base + sizeof(int32_t) +
+                                                    (ARGMAX_NBLOCKS * sizeof(float)));
 
     sampler_launch_begin(who);
     argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, partial_vals,
@@ -313,8 +314,8 @@ __global__ void penalty_hist_append_kernel(const char* __restrict__ sample_base,
     const int off = args.offs[i];
     if (off < 0 || off >= args.cap)
         return;
-    const int32_t tok = *reinterpret_cast<const int32_t*>(sample_base + (size_t)i * slot_stride);
-    hist[(size_t)args.slots[i] * args.cap + off] = tok;
+    const int32_t tok = *reinterpret_cast<const int32_t*>(sample_base + ((size_t)i * slot_stride));
+    hist[((size_t)args.slots[i] * args.cap) + off] = tok;
 }
 }  // namespace
 

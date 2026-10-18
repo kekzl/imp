@@ -13,9 +13,9 @@ constexpr int kK8BK = kQ4kBK;    // 128
 constexpr int kK8Row = kQ4kRow;  // 144-B stride: ldmatrix rows conflict-free
 
 constexpr size_t q8k128_smem_bytes(int BM) {
-    return static_cast<size_t>(kStages) *
-           (static_cast<size_t>(BM + kBN) * kK8Row + static_cast<size_t>(kBN) * kK8Sub * 2 * sizeof(__half) +
-            static_cast<size_t>(BM) * kK8Sub * sizeof(__half));
+    return static_cast<size_t>(kStages) * ((static_cast<size_t>(BM + kBN) * kK8Row) +
+                                           (static_cast<size_t>(kBN) * kK8Sub * 2 * sizeof(__half)) +
+                                           (static_cast<size_t>(BM) * kK8Sub * sizeof(__half)));
 }
 
 __device__ __forceinline__ void ldsm_x4(uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3,
@@ -36,23 +36,23 @@ __device__ __forceinline__ void load_kstep_q8k128(
     for (int i = tid; i < BM * (kK8BK / 16); i += kThreads) {
         const int row = i >> 3;
         const int col = (i & 7) * 16;
-        cp_async_cg_16(&sA[row][col], A + static_cast<size_t>(base_m + row) * K + k_base + col,
+        cp_async_cg_16(&sA[row][col], A + (static_cast<size_t>(base_m + row) * K) + k_base + col,
                        (base_m + row) < M);
     }
 #pragma unroll
     for (int i = tid; i < kBN * (kK8BK / 16); i += kThreads) {
         const int row = i >> 3;
         const int col = (i & 7) * 16;
-        cp_async_cg_16(&sB[row][col], B + static_cast<size_t>(row) * K + k_base + col,
+        cp_async_cg_16(&sB[row][col], B + (static_cast<size_t>(row) * K) + k_base + col,
                        (base_n_rows < 0) || (row < base_n_rows));
     }
     const int kb0 = k_base / 32;
 #pragma unroll
     for (int i = tid; i < BM; i += kThreads)
-        cp_async_ca_8(&sAsc[i][0], Asc + static_cast<size_t>(base_m + i) * subs + kb0, (base_m + i) < M);
+        cp_async_ca_8(&sAsc[i][0], Asc + (static_cast<size_t>(base_m + i) * subs) + kb0, (base_m + i) < M);
 #pragma unroll
     for (int i = tid; i < kBN; i += kThreads)
-        cp_async_cg_16(&sBsc[i][0][0], Bsc + (static_cast<size_t>(i) * subs + kb0) * 2,
+        cp_async_cg_16(&sBsc[i][0][0], Bsc + (((static_cast<size_t>(i) * subs) + kb0) * 2),
                        (base_n_rows < 0) || (i < base_n_rows));
 }
 
@@ -62,16 +62,16 @@ __device__ __forceinline__ void load_residual(__half2 (&cres)[MF][NF][2], const 
                                               int row0, int col0, int M, int N) {
 #pragma unroll
     for (int mf = 0; mf < MF; ++mf) {
-        const int r = row0 + mf * 16;
+        const int r = row0 + (mf * 16);
 #pragma unroll
         for (int nf = 0; nf < NF; ++nf) {
-            const int col = col0 + nf * 8;
+            const int col = col0 + (nf * 8);
             const bool cok = col + 1 < N;
-            cres[mf][nf][0] = cok && r < M
-                                  ? *reinterpret_cast<const __half2*>(&out[static_cast<size_t>(r) * N + col])
-                                  : __half2{};
+            cres[mf][nf][0] = cok && r < M ? *reinterpret_cast<const __half2*>(
+                                                 &out[(static_cast<size_t>(r) * N) + col])
+                                           : __half2{};
             cres[mf][nf][1] = cok && r + 8 < M ? *reinterpret_cast<const __half2*>(
-                                                     &out[static_cast<size_t>(r + 8) * N + col])
+                                                     &out[(static_cast<size_t>(r + 8) * N) + col])
                                                : __half2{};
         }
     }
@@ -85,17 +85,17 @@ __device__ __forceinline__ void store_tile(const float (&acc)[MF][NF][4], const 
     for (int mf = 0; mf < MF; ++mf) {
 #pragma unroll
         for (int nf = 0; nf < NF; ++nf) {
-            const int col = col0 + nf * 8;
+            const int col = col0 + (nf * 8);
             if (col + 1 >= N)
                 continue;
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
-                const int r = row0 + mf * 16 + h * 8;
+                const int r = row0 + (mf * 16) + (h * 8);
                 if (r >= M)
                     continue;
-                const __half2 v = __floats2half2_rn(acc[mf][nf][2 * h], acc[mf][nf][2 * h + 1]);
+                const __half2 v = __floats2half2_rn(acc[mf][nf][2 * h], acc[mf][nf][(2 * h) + 1]);
                 *reinterpret_cast<__half2*>(
-                    &out[static_cast<size_t>(r) * N + col]) = BETA1 ? __hadd2(cres[mf][nf][h], v) : v;
+                    &out[(static_cast<size_t>(r) * N) + col]) = BETA1 ? __hadd2(cres[mf][nf][h], v) : v;
             }
         }
     }
@@ -120,8 +120,8 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q8k128_kernel(
     const int n_rem = (N - base_n >= kBN) ? -1 : (N - base_n);
 
     const int subs = K / 32;
-    const int8_t* B = W_s8 + static_cast<size_t>(base_n) * K;
-    const __half* Bsc = w_sc + static_cast<size_t>(base_n) * subs * 2;
+    const int8_t* B = W_s8 + (static_cast<size_t>(base_n) * K);
+    const __half* Bsc = w_sc + (static_cast<size_t>(base_n) * subs * 2);
 
     const int tid = threadIdx.x;
     const int warp_id = tid >> 5;
@@ -149,8 +149,8 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q8k128_kernel(
         for (int j = 0; j < kNF; ++j)
             acc[i][j][0] = acc[i][j][1] = acc[i][j][2] = acc[i][j][3] = 0.0f;
     // This thread's fragment origin in the output: rows row0 + mf * 16 (+8), cols col0 + nf * 8 (+1).
-    const int row0 = base_m + warp_m * kTileM + rl;
-    const int col0 = base_n + warp_n * kTileN + cl * 2;
+    const int row0 = base_m + (warp_m * kTileM) + rl;
+    const int col0 = base_n + (warp_n * kTileN) + (cl * 2);
     // beta 1: the residual tile is read up front, its latency hidden under the K loop (same __hadd2 below).
     __half2 cres[kMF][kNF][2];
     if constexpr (BETA1)
@@ -180,9 +180,10 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q8k128_kernel(
             float da_lo[kMF], da_hi[kMF];
 #pragma unroll
             for (int mf = 0; mf < kMF; ++mf) {
-                const int row = warp_m * kTileM + mf * 16 + (lane & 7) + (lm & 1) * 8;
-                ldsm_x4(a[mf][0], a[mf][1], a[mf][2], a[mf][3], &sA[stage][row][kb * 32 + (lm >> 1) * 16]);
-                const int arow_lo = warp_m * kTileM + mf * 16 + rl;
+                const int row = (warp_m * kTileM) + (mf * 16) + (lane & 7) + ((lm & 1) * 8);
+                ldsm_x4(a[mf][0], a[mf][1], a[mf][2], a[mf][3],
+                        &sA[stage][row][(kb * 32) + ((lm >> 1) * 16)]);
+                const int arow_lo = (warp_m * kTileM) + (mf * 16) + rl;
                 da_lo[mf] = __half2float(sAsc[stage][arow_lo][kb]);
                 da_hi[mf] = __half2float(sAsc[stage][arow_lo + 8][kb]);
             }
@@ -190,13 +191,13 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q8k128_kernel(
             for (int nf = 0; nf < kNF; nf += 2) {
                 uint32_t b[2][2];
                 {
-                    const int col = warp_n * kTileN + nf * 8 + (lane & 7) + (lm >> 1) * 8;
-                    ldsm_x4(b[0][0], b[0][1], b[1][0], b[1][1], &sB[stage][col][kb * 32 + (lm & 1) * 16]);
+                    const int col = (warp_n * kTileN) + (nf * 8) + (lane & 7) + ((lm >> 1) * 8);
+                    ldsm_x4(b[0][0], b[0][1], b[1][0], b[1][1], &sB[stage][col][(kb * 32) + ((lm & 1) * 16)]);
                 }
 #pragma unroll
                 for (int p = 0; p < 2; ++p) {
                     // c0,c1 = rows (rl) cols (cl*2, cl*2+1); c2,c3 = rows (rl+8)
-                    const int ncol_lo = warp_n * kTileN + (nf + p) * 8 + cl * 2;
+                    const int ncol_lo = (warp_n * kTileN) + ((nf + p) * 8) + (cl * 2);
                     const float al = __half2float(sBsc[stage][ncol_lo][kb][0]);
                     const float ah = __half2float(sBsc[stage][ncol_lo + 1][kb][0]);
 #pragma unroll

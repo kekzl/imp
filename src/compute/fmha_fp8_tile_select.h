@@ -40,9 +40,9 @@ constexpr bool fp8_fmha_supports_head_dim(int head_dim) {
 
 // Dynamic smem: Q_fp8 (1 B) + KV buffer (half) + S_tile (f32) + O_acc (f32) + row_m/row_l (f32).
 constexpr size_t fp8_fmha_smem_bytes(int bq, int bkv, int head_dim) {
-    return (size_t)bq * head_dim * sizeof(uint8_t) + (size_t)bkv * head_dim * 2 +
-           (size_t)bq * bkv * sizeof(float) + (size_t)bq * head_dim * sizeof(float) +
-           2 * (size_t)bq * sizeof(float);
+    return ((size_t)bq * head_dim * sizeof(uint8_t)) + ((size_t)bkv * head_dim * 2) +
+           ((size_t)bq * bkv * sizeof(float)) + ((size_t)bq * head_dim * sizeof(float)) +
+           (2 * (size_t)bq * sizeof(float));
 }
 
 // Largest Bq that has an instance for head_dim and fits max_smem; 0 when none does.

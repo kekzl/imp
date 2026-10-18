@@ -12,11 +12,11 @@ namespace imp {
 
 // exec_ra2_workspace_bytes (workspace_sizes.cpp) sizes ra2::carve from fp4_attn_geometry.h.
 static_assert(fp4_attn_geom::kKvTileTokens == static_cast<size_t>(ra2::BKV));
-static_assert(fp4_attn_geom::kRa2TileBytesPerD * 64 + fp4_attn_geom::kRa2TileBytesExtra ==
+static_assert((fp4_attn_geom::kRa2TileBytesPerD * 64) + fp4_attn_geom::kRa2TileBytesExtra ==
               static_cast<size_t>(ra2::Cfg<64>::TILE));
-static_assert(fp4_attn_geom::kRa2TileBytesPerD * 128 + fp4_attn_geom::kRa2TileBytesExtra ==
+static_assert((fp4_attn_geom::kRa2TileBytesPerD * 128) + fp4_attn_geom::kRa2TileBytesExtra ==
               static_cast<size_t>(ra2::Cfg<128>::TILE));
-static_assert(fp4_attn_geom::kRa2TileBytesPerD * 256 + fp4_attn_geom::kRa2TileBytesExtra ==
+static_assert((fp4_attn_geom::kRa2TileBytesPerD * 256) + fp4_attn_geom::kRa2TileBytesExtra ==
               static_cast<size_t>(ra2::Cfg<256>::TILE));
 
 // T2 arena scratch (AUDIT B13 family), taken once at the planned bound (exec_t2_demand ra2_scratch);

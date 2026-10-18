@@ -86,8 +86,8 @@ __global__ void extract_patches_kernel(const half* __restrict__ pixels,  // [3, 
 
         int y = y0 + dy;
         int x = x0 + dx;
-        half val = pixels[c * H * W + y * W + x];
-        patches[patch_idx * patch_dim + i] = val;
+        half val = pixels[(c * H * W) + (y * W) + x];
+        patches[(patch_idx * patch_dim) + i] = val;
     }
 }
 
@@ -98,8 +98,8 @@ __global__ void vision_layernorm_kernel(const half* __restrict__ x, const half* 
     int row = blockIdx.x;
     int tid = threadIdx.x;
 
-    const half* x_row = x + static_cast<int64_t>(row) * D;
-    half* o_row = out + static_cast<int64_t>(row) * D;
+    const half* x_row = x + (static_cast<int64_t>(row) * D);
+    half* o_row = out + (static_cast<int64_t>(row) * D);
 
     // Compute mean
     __shared__ float s_buf[32];
@@ -114,12 +114,12 @@ __global__ void vision_layernorm_kernel(const half* __restrict__ x, const half* 
         float v = __half2float(x_row[i]) - mean;
         var_sum += v * v;
     }
-    float inv_std = rsqrtf(block_reduce_sum(var_sum, s_buf) / D + eps);
+    float inv_std = rsqrtf((block_reduce_sum(var_sum, s_buf) / D) + eps);
 
     // Normalize + scale + bias
     for (int i = tid; i < D; i += blockDim.x) {
         float v = (__half2float(x_row[i]) - mean) * inv_std;
-        v = v * __half2float(weight[i]) + __half2float(bias[i]);
+        v = (v * __half2float(weight[i])) + __half2float(bias[i]);
         o_row[i] = __float2half(v);
     }
 }
@@ -130,8 +130,8 @@ __global__ void vision_rmsnorm_kernel(const half* __restrict__ x, const half* __
     int row = blockIdx.x;
     int tid = threadIdx.x;
 
-    const half* x_row = x + static_cast<int64_t>(row) * D;
-    half* o_row = out + static_cast<int64_t>(row) * D;
+    const half* x_row = x + (static_cast<int64_t>(row) * D);
+    half* o_row = out + (static_cast<int64_t>(row) * D);
 
     __shared__ float s_buf[32];
     float ss = 0.0f;
@@ -139,7 +139,7 @@ __global__ void vision_rmsnorm_kernel(const half* __restrict__ x, const half* __
         float v = __half2float(x_row[i]);
         ss += v * v;
     }
-    float inv_rms = rsqrtf(block_reduce_sum(ss, s_buf) / D + eps);
+    float inv_rms = rsqrtf((block_reduce_sum(ss, s_buf) / D) + eps);
 
     for (int i = tid; i < D; i += blockDim.x) {
         float v = __half2float(x_row[i]) * inv_rms * __half2float(weight[i]);
@@ -149,7 +149,7 @@ __global__ void vision_rmsnorm_kernel(const half* __restrict__ x, const half* __
 
 // Add bias: x[row, i] += bias[i]
 __global__ void add_bias_kernel(half* __restrict__ x, const half* __restrict__ bias, int N, int D) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= N * D)
         return;
     int col = idx % D;
@@ -159,7 +159,7 @@ __global__ void add_bias_kernel(half* __restrict__ x, const half* __restrict__ b
 // Element-wise add: out = a + b
 __global__ void add_tensors_kernel(const half* __restrict__ a, const half* __restrict__ b,
                                    half* __restrict__ out, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= N)
         return;
     out[idx] = __float2half(__half2float(a[idx]) + __half2float(b[idx]));
@@ -167,12 +167,12 @@ __global__ void add_tensors_kernel(const half* __restrict__ a, const half* __res
 
 // GELU tanh approximation: gelu(x) = 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))
 __global__ void gelu_tanh_kernel(half* __restrict__ x, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= N)
         return;
     float v = __half2float(x[idx]);
     float c = 0.7978845608f;  // sqrt(2/pi)
-    float inner = c * (v + 0.044715f * v * v * v);
+    float inner = c * (v + (0.044715f * v * v * v));
     float gelu = 0.5f * v * (1.0f + tanhf(inner));
     x[idx] = __float2half(gelu);
 }
@@ -184,7 +184,7 @@ __global__ void softmax_2d_kernel(half* __restrict__ scores, int cols) {
     int row = blockIdx.x;  // flattened: head * num_patches + patch
     int tid = threadIdx.x;
 
-    half* row_ptr = scores + static_cast<int64_t>(row) * cols;
+    half* row_ptr = scores + (static_cast<int64_t>(row) * cols);
 
     __shared__ float s_buf[32];
 
@@ -224,15 +224,15 @@ __global__ void avg_pool_spatial_kernel(const half* __restrict__ in,  // [grid_h
         int count = 0;
         for (int py = 0; py < pool; py++) {
             for (int px = 0; px < pool; px++) {
-                int iy = oy * pool + py;
-                int ix = ox * pool + px;
+                int iy = (oy * pool) + py;
+                int ix = (ox * pool) + px;
                 if (iy < grid_h && ix < grid_w) {
-                    sum += __half2float(in[(iy * grid_w + ix) * D + d]);
+                    sum += __half2float(in[(((iy * grid_w) + ix) * D) + d]);
                     count++;
                 }
             }
         }
-        out[out_idx * D + d] = __float2half(sum / count);
+        out[(out_idx * D) + d] = __float2half(sum / count);
     }
 }
 
@@ -243,8 +243,8 @@ __global__ void vision_rmsnorm_opt_kernel(const half* __restrict__ x, const half
                                           half* __restrict__ out, int D, float eps) {
     int row = blockIdx.x;
     int tid = threadIdx.x;
-    const half* x_row = x + static_cast<int64_t>(row) * D;
-    half* o_row = out + static_cast<int64_t>(row) * D;
+    const half* x_row = x + (static_cast<int64_t>(row) * D);
+    half* o_row = out + (static_cast<int64_t>(row) * D);
 
     __shared__ float s_buf[32];
     float ss = 0.0f;
@@ -252,7 +252,7 @@ __global__ void vision_rmsnorm_opt_kernel(const half* __restrict__ x, const half
         float v = __half2float(x_row[i]);
         ss += v * v;
     }
-    float inv_rms = rsqrtf(block_reduce_sum(ss, s_buf) / D + eps);
+    float inv_rms = rsqrtf((block_reduce_sum(ss, s_buf) / D) + eps);
 
     for (int i = tid; i < D; i += blockDim.x) {
         float v = __half2float(x_row[i]) * inv_rms;
@@ -270,14 +270,14 @@ __global__ void vision_rope2d_neox_kernel(half* __restrict__ qk, const int* __re
                                           float base) {
     int half_dim = head_dim / 2;       // dims rotated per axis
     int pairs = half_dim / 2;          // rotation pairs per axis
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     int total = np * nh * pairs;
     if (idx >= total)
         return;
     int j = idx % pairs;          // 0..pairs-1
     int hp = idx / pairs;         // patch*nh + head
     int p = hp / nh;
-    half* vec = qk + static_cast<int64_t>(hp) * head_dim;
+    half* vec = qk + (static_cast<int64_t>(hp) * head_dim);
 
     float inv = powf(base, -2.0f * j / half_dim);
     // first half: column position
@@ -286,8 +286,8 @@ __global__ void vision_rope2d_neox_kernel(half* __restrict__ qk, const int* __re
         float c = cosf(ang), s = sinf(ang);
         float a = __half2float(vec[j]);
         float b = __half2float(vec[j + pairs]);
-        vec[j] = __float2half(a * c - b * s);
-        vec[j + pairs] = __float2half(a * s + b * c);
+        vec[j] = __float2half((a * c) - (b * s));
+        vec[j + pairs] = __float2half((a * s) + (b * c));
     }
     // second half: row position
     {
@@ -296,8 +296,8 @@ __global__ void vision_rope2d_neox_kernel(half* __restrict__ qk, const int* __re
         float c = cosf(ang), s = sinf(ang);
         float a = __half2float(vec[o + j]);
         float b = __half2float(vec[o + j + pairs]);
-        vec[o + j] = __float2half(a * c - b * s);
-        vec[o + j + pairs] = __float2half(a * s + b * c);
+        vec[o + j] = __float2half((a * c) - (b * s));
+        vec[o + j + pairs] = __float2half((a * s) + (b * c));
     }
 }
 
@@ -307,13 +307,13 @@ __global__ void vision_rope2d_neox_kernel(half* __restrict__ qk, const int* __re
 __global__ void axial_pos_add_kernel(half* __restrict__ x, const half* __restrict__ tbl,
                                      const int* __restrict__ pos_x, const int* __restrict__ pos_y, int np,
                                      int D, int pos_size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= np * D)
         return;
     int p = idx / D;
     int d = idx % D;
-    float ex = __half2float(tbl[static_cast<int64_t>(pos_x[p]) * D + d]);
-    float ey = __half2float(tbl[(static_cast<int64_t>(pos_size) + pos_y[p]) * D + d]);
+    float ex = __half2float(tbl[(static_cast<int64_t>(pos_x[p]) * D) + d]);
+    float ey = __half2float(tbl[((static_cast<int64_t>(pos_size) + pos_y[p]) * D) + d]);
     x[idx] = __float2half(__half2float(x[idx]) + ex + ey);
 }
 
@@ -326,8 +326,8 @@ __global__ void gemma4v_tail_norm_kernel(const half* __restrict__ x, const half*
                                          float scale_factor, float eps) {
     int row = blockIdx.x;
     int tid = threadIdx.x;
-    const half* x_row = x + static_cast<int64_t>(row) * D;
-    half* o_row = out + static_cast<int64_t>(row) * D;
+    const half* x_row = x + (static_cast<int64_t>(row) * D);
+    half* o_row = out + (static_cast<int64_t>(row) * D);
     extern __shared__ float sv[];  // [D] FP32 scratch
     __shared__ float s_buf[32];
     float ss = 0.0f;
@@ -338,7 +338,7 @@ __global__ void gemma4v_tail_norm_kernel(const half* __restrict__ x, const half*
         sv[i] = v;
         ss += v * v;
     }
-    float inv = rsqrtf(block_reduce_sum(ss, s_buf) / D + eps);
+    float inv = rsqrtf((block_reduce_sum(ss, s_buf) / D) + eps);
     for (int i = tid; i < D; i += blockDim.x)
         o_row[i] = __float2half(sv[i] * inv);
 }
@@ -346,7 +346,7 @@ __global__ void gemma4v_tail_norm_kernel(const half* __restrict__ x, const half*
 // Element-wise multiply: out = a * b (GeGLU gate combine).
 __global__ void mul_tensors_kernel(const half* __restrict__ a, const half* __restrict__ b,
                                    half* __restrict__ out, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= N)
         return;
     out[idx] = __float2half(__half2float(a[idx]) * __half2float(b[idx]));
@@ -383,7 +383,7 @@ __global__ void replace_vision_embeddings_v2_kernel(half* __restrict__ hidden,
 
     // Copy vision embedding into hidden state
     for (int d = threadIdx.x; d < d_model; d += blockDim.x) {
-        hidden[token_pos * d_model + d] = vision_emb[emb_idx * d_model + d];
+        hidden[(token_pos * d_model) + d] = vision_emb[(emb_idx * d_model) + d];
     }
 }
 
@@ -489,11 +489,11 @@ bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t 
         }
     }
 
-    size_t total_mb = (np * pd + np * hd * 4 +
-                       np * hd +  // patches + hidden/residual/q/attn_out + k/v overlap
-                       static_cast<size_t>(nh) * np * np +              // attention scores
-                       static_cast<int64_t>(np) * ff +                  // ffn
-                       static_cast<int64_t>(cfg.num_image_tokens) * hd  // pooled
+    size_t total_mb = ((np * pd) + (np * hd * 4) +
+                       (np * hd) +  // patches + hidden/residual/q/attn_out + k/v overlap
+                       (static_cast<size_t>(nh) * np * np) +              // attention scores
+                       (static_cast<int64_t>(np) * ff) +                  // ffn
+                       (static_cast<int64_t>(cfg.num_image_tokens) * hd)  // pooled
                        ) *
                       sizeof(half) / (static_cast<int64_t>(1024) * 1024);
 

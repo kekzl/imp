@@ -67,7 +67,7 @@ __global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __re
     const int h = blockIdx.x;
     const int lane = threadIdx.x & 31;
     const int s_tid = threadIdx.x % S_TILES;
-    const int d = blockIdx.y * (kThreads / S_TILES) + threadIdx.x / S_TILES;
+    const int d = (blockIdx.y * (kThreads / S_TILES)) + (threadIdx.x / S_TILES);
     const int real_n = d_real_n ? min(n_tokens, __ldg(d_real_n)) : n_tokens;
     const int snap_n = (h_snap && d_snap_n) ? min(n_tokens, __ldg(d_snap_n)) : 0;
 
@@ -85,12 +85,12 @@ __global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __re
     const half* x_base = x + static_cast<ptrdiff_t>(h * head_dim_ssm) + d;
     const half* z_base = FUSE_GATE ? z + static_cast<ptrdiff_t>(h * head_dim_ssm) + d : nullptr;
     half* y_base = y + static_cast<ptrdiff_t>(h * head_dim_ssm) + d;
-    const int64_t h_base = static_cast<int64_t>(h) * kState * head_dim_ssm + d;
+    const int64_t h_base = (static_cast<int64_t>(h) * kState * head_dim_ssm) + d;
 
     float hs[SPT];
 #pragma unroll
     for (int i = 0; i < SPT; ++i) {
-        const int64_t idx = h_base + static_cast<int64_t>(s_start + i) * head_dim_ssm;
+        const int64_t idx = h_base + (static_cast<int64_t>(s_start + i) * head_dim_ssm);
         if constexpr (H_FP16)
             hs[i] = __half2float(static_cast<const half*>(h_state)[idx]);
         else
@@ -99,14 +99,14 @@ __global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __re
 
     // dt_val / a_bar depend on (t, h) only: lane l computes token blk + l, step() reads it by
     // shuffle. Same expressions as ssm_scan_kernel (bit-identity is the contract).
-    half dt_pref = dt_raw[min(lane, n_tokens - 1) * n_heads + h];
+    half dt_pref = dt_raw[(min(lane, n_tokens - 1) * n_heads) + h];
     float dtv_l = 0.0f, abar_l = 0.0f;
     auto refresh_dt = [&](int blk) {
         float dt_val = __half2float(dt_pref) + dt_b;
         dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
         dtv_l = dt_val;
         abar_l = expf(dt_val * a_log_h);
-        dt_pref = dt_raw[min(blk + kDtBlock + lane, n_tokens - 1) * n_heads + h];
+        dt_pref = dt_raw[(min(blk + kDtBlock + lane, n_tokens - 1) * n_heads) + h];
     };
 
     auto step = [&](const TokenIn<SPT>& cur, int t, bool advance, bool check_snap) {
@@ -138,7 +138,7 @@ __global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __re
         if (check_snap && t == snap_n - 1) {
 #pragma unroll
             for (int i = 0; i < SPT; ++i) {
-                const int64_t idx = h_base + static_cast<int64_t>(s_start + i) * head_dim_ssm;
+                const int64_t idx = h_base + (static_cast<int64_t>(s_start + i) * head_dim_ssm);
                 if constexpr (H_FP16)
                     static_cast<half*>(h_snap)[idx] = __float2half(hn[i]);
                 else
@@ -148,7 +148,7 @@ __global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __re
 #pragma unroll
         for (int off = S_TILES / 2; off > 0; off >>= 1)
             y_partial += __shfl_down_sync(0xffffffffu, y_partial, off, S_TILES);
-        float y_val = y_partial + d_val * x_val;
+        float y_val = y_partial + (d_val * x_val);
         if constexpr (FUSE_GATE) {
             float z_val = __half2float(cur.z);
             z_val = z_val / (1.0f + expf(-z_val));
@@ -177,7 +177,7 @@ __global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __re
         }
     };
     static_assert(kDtBlock % kPrefetch == 0, "a prefetch group never straddles a dt block");
-    const int n_full = n_tokens - n_tokens % kPrefetch;
+    const int n_full = n_tokens - (n_tokens % kPrefetch);
     for (int t0 = 0; t0 < n_full; t0 += kPrefetch) {
         if ((t0 & (kDtBlock - 1)) == 0)
             refresh_dt(t0);
@@ -199,7 +199,7 @@ __global__ void ssm_scan_reg_kernel(const half* __restrict__ x, const half* __re
     if (real_n > 0) {
 #pragma unroll
         for (int i = 0; i < SPT; ++i) {
-            const int64_t idx = h_base + static_cast<int64_t>(s_start + i) * head_dim_ssm;
+            const int64_t idx = h_base + (static_cast<int64_t>(s_start + i) * head_dim_ssm);
             if constexpr (H_FP16)
                 static_cast<half*>(h_state)[idx] = __float2half(hs[i]);
             else

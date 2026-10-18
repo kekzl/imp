@@ -44,7 +44,7 @@ __device__ __forceinline__ void q4k_header_pass(int tid, int ks, const uint8_t (
         uint32_t sc, mn;
         q4k_scale_min(j0 + kb, h + 4, sc, mn);
         const float a = __half2float(d_h) * static_cast<float>(sc);
-        const float b = 8.0f * a - __half2float(dmin_h) * static_cast<float>(mn);
+        const float b = (8.0f * a) - (__half2float(dmin_h) * static_cast<float>(mn));
         sBab[row][kb] = __floats2half2_rn(a, b);
     }
 }
@@ -71,8 +71,7 @@ __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict
         const int row = i >> 3;
         const int col = (i & 7) * 16;
         const bool valid = (base_m + row) < M;
-        cp_async_cg_16(&sA[row][col],
-                       A + static_cast<size_t>(base_m + row) * K + k_base + col, valid);
+        cp_async_cg_16(&sA[row][col], A + (static_cast<size_t>(base_m + row) * K) + k_base + col, valid);
     }
     const int ks = k_base / kQ4kBK;
     const int sblk = ks >> 1;  // super-block index along K
@@ -83,7 +82,7 @@ __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict
         const int row = i / 5;
         const int part = i % 5;
         const bool bvalid = (base_n_rows < 0) || (row < base_n_rows);
-        const uint8_t* blk = Wq4k + (static_cast<size_t>(base_n + row) * sblk_count + sblk) * 144;
+        const uint8_t* blk = Wq4k + (((static_cast<size_t>(base_n + row) * sblk_count) + sblk) * 144);
         if (part == 0) {
             cp_async_cg_16(&sBh[row][0], blk, bvalid);  // d, dmin, 12-B scales
         } else {
@@ -95,8 +94,8 @@ __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict
 #pragma unroll
     for (int i = tid; i < BM; i += kThreads) {
         const bool valid = (base_m + i) < M;
-        cp_async_ca_8(&sAsc[i][0], Asc + static_cast<size_t>(base_m + i) * subs + kb0, valid);
-        cp_async_cg_16(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
+        cp_async_ca_8(&sAsc[i][0], Asc + (static_cast<size_t>(base_m + i) * subs) + kb0, valid);
+        cp_async_cg_16(&sArs[i][0], Ars + (static_cast<size_t>(base_m + i) * subs) + kb0, valid);
     }
 }
 
@@ -132,11 +131,11 @@ __global__ void __launch_bounds__(kThreads)
 
     const int subs = K / 32;
     const int sblk_count = K / 256;
-    const int8_t* A = X_s8 + row_off * K;
-    const __half* Asc = x_scale + row_off * subs;
-    const float* Ars = x_rowsum + row_off * subs;
-    const uint8_t* W = Wq4k + static_cast<size_t>(e) * w_stride_blocks * 144;
-    __half* C = out + row_off * N;
+    const int8_t* A = X_s8 + (row_off * K);
+    const __half* Asc = x_scale + (row_off * subs);
+    const float* Ars = x_rowsum + (row_off * subs);
+    const uint8_t* W = Wq4k + (static_cast<size_t>(e) * w_stride_blocks * 144);
+    __half* C = out + (row_off * N);
 
     const int tid = threadIdx.x;
     const int warp_id = tid >> 5;
@@ -198,25 +197,25 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
                 for (int nf = 0; nf < kNF; nf += 2) {
                     const int m = lane >> 3;
-                    const int col = warp_n * kTileN + nf * 8 + (lane & 7) + (m >> 1) * 8;
+                    const int col = (warp_n * kTileN) + (nf * 8) + (lane & 7) + ((m >> 1) * 8);
                     ldmatrix_x4(raw[nf][0], raw[nf][1], raw[nf + 1][0], raw[nf + 1][1],
-                                &sBq[stage][col][g * 32 + (m & 1) * 16]);
+                                &sBq[stage][col][(g * 32) + ((m & 1) * 16)]);
                 }
             }
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
-                const int kb = 2 * g + h;
+                const int kb = (2 * g) + h;
                 const uint32_t shift = h * 4;
 #pragma unroll
                 for (int mf = 0; mf < kMF; ++mf) {
-                    const int arow_lo = warp_m * kTileM + mf * 16 + rl;
+                    const int arow_lo = (warp_m * kTileM) + (mf * 16) + rl;
                     const int arow_hi = arow_lo + 8;
                     // A: one ldmatrix.x4 = (rows 0-7, 8-15) x (k 0-15, 16-31) of the 16 x 32 fragment
                     uint32_t a0, a1, a2, a3;
                     {
                         const int m = lane >> 3;
-                        const int row = warp_m * kTileM + mf * 16 + (lane & 7) + (m & 1) * 8;
-                        ldmatrix_x4(a0, a1, a2, a3, &sA[stage][row][kb * 32 + (m >> 1) * 16]);
+                        const int row = (warp_m * kTileM) + (mf * 16) + (lane & 7) + ((m & 1) * 8);
+                        ldmatrix_x4(a0, a1, a2, a3, &sA[stage][row][(kb * 32) + ((m >> 1) * 16)]);
                     }
                     const float da_lo = __half2float(sAsc[stage][arow_lo][kb]);
                     const float da_hi = __half2float(sAsc[stage][arow_hi][kb]);
@@ -226,12 +225,12 @@ __global__ void __launch_bounds__(kThreads)
 #pragma unroll
                     for (int nf = 0; nf < kNF; ++nf) {
                         if constexpr (!kHoistB) {
-                            const int bcol = warp_n * kTileN + nf * 8 +
+                            const int bcol = (warp_n * kTileN) + (nf * 8) +
                                              rl;  // BM=128: scalar (hoisted = 254 regs)
                             raw[nf][0] = *reinterpret_cast<const uint32_t*>(
-                                &sBq[stage][bcol][g * 32 + cl * 4]);
+                                &sBq[stage][bcol][(g * 32) + (cl * 4)]);
                             raw[nf][1] = *reinterpret_cast<const uint32_t*>(
-                                &sBq[stage][bcol][g * 32 + cl * 4 + 16]);
+                                &sBq[stage][bcol][(g * 32) + (cl * 4) + 16]);
                         }
                         const uint32_t b0 = __vsub4((raw[nf][0] >> shift) & 0x0F0F0F0Fu, 0x08080808u);
                         const uint32_t b1 = __vsub4((raw[nf][1] >> shift) & 0x0F0F0F0Fu, 0x08080808u);
@@ -243,7 +242,7 @@ __global__ void __launch_bounds__(kThreads)
                             : "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3)
                             : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(0), "r"(0), "r"(0),
                               "r"(0));
-                        const int ncol_lo = warp_n * kTileN + nf * 8 + cl * 2;
+                        const int ncol_lo = (warp_n * kTileN) + (nf * 8) + (cl * 2);
                         const __half2 ab_lo = sBab[stage][ncol_lo][kb];
                         const __half2 ab_hi = sBab[stage][ncol_lo + 1][kb];
                         const float al = __half2float(__low2half(ab_lo));
@@ -263,19 +262,19 @@ __global__ void __launch_bounds__(kThreads)
 
 #pragma unroll
     for (int mf = 0; mf < kMF; ++mf) {
-        const int row_lo = base_m + warp_m * kTileM + mf * 16 + rl;
+        const int row_lo = base_m + (warp_m * kTileM) + (mf * 16) + rl;
         const int row_hi = row_lo + 8;
 #pragma unroll
         for (int nf = 0; nf < kNF; ++nf) {
-            const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
+            const int col = base_n + (warp_n * kTileN) + (nf * 8) + (cl * 2);
             if (col + 1 >= N) continue;  // N-tail: OOB columns are never stored
             if (row_lo < rows) {
-                __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_lo) * N + col]);
+                __half2* p = reinterpret_cast<__half2*>(&C[(static_cast<size_t>(row_lo) * N) + col]);
                 __half2 v = __floats2half2_rn(acc[mf][nf][0], acc[mf][nf][1]);
                 *p = BETA1 ? __hadd2(*p, v) : v;
             }
             if (row_hi < rows) {
-                __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_hi) * N + col]);
+                __half2* p = reinterpret_cast<__half2*>(&C[(static_cast<size_t>(row_hi) * N) + col]);
                 __half2 v = __floats2half2_rn(acc[mf][nf][2], acc[mf][nf][3]);
                 *p = BETA1 ? __hadd2(*p, v) : v;
             }

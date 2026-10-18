@@ -158,7 +158,8 @@ void ngram_hash(const NGramHashParams& p, const int32_t* ctx, const int32_t* tok
             mixed ^= static_cast<uint64_t>(shifted[g - 1]) * static_cast<uint64_t>(p.multipliers[g - 1]);
             const int64_t m = static_cast<int64_t>(mixed);
             for (int h = (g - 2) * heads_per_ngram; h < (g - 1) * heads_per_ngram; h++)
-                ids_out[static_cast<size_t>(t) * p.n_heads + h] = py_mod(m, p.vocab_sizes[h]) + p.offsets[h];
+                ids_out[(static_cast<size_t>(t) * p.n_heads) + h] = py_mod(m, p.vocab_sizes[h]) +
+                                                                    p.offsets[h];
         }
     }
 }
@@ -261,7 +262,7 @@ std::unique_ptr<NGramTable> NGramTable::open(const std::string& model_dir, int l
     }
     int n_shards = 0;
     for (const auto& [suffix, fname] : file_of) {
-        if (suffix.rfind("ngram_embedding.shard_", 0) == 0)
+        if (suffix.starts_with("ngram_embedding.shard_"))
             n_shards++;
     }
     if (n_shards == 0 || n_shards > kMaxTableShards) {
@@ -343,7 +344,7 @@ void NGramTable::gather(const int64_t* ids, int n, uint16_t* out) const {
         auto it = std::upper_bound(shards_.begin(), shards_.end(), id,
                                    [](int64_t v, const Shard& s) { return v < s.row_start; });
         --it;
-        return it->data + static_cast<size_t>(id - it->row_start) * head_dim_;
+        return it->data + (static_cast<size_t>(id - it->row_start) * head_dim_);
     };
     const long page = sysconf(_SC_PAGESIZE);
     for (size_t i = 0; i < count; i++) {
@@ -355,7 +356,7 @@ void NGramTable::gather(const int64_t* ids, int n, uint16_t* out) const {
         madvise(reinterpret_cast<void*>(a), e - a, MADV_WILLNEED);
     }
     for (size_t i = 0; i < count; i++) {
-        uint16_t* o = out + i * head_dim_;
+        uint16_t* o = out + (i * head_dim_);
         const uint8_t* p = row_ptr(ids[i]);
         if (p == nullptr) {
             if (n_out_of_range_++ == 0)

@@ -196,21 +196,21 @@ bool gemm_grouped_cutlass_3x_nvfp4(int n_experts, const int* host_M, int N, int 
         size_t alpha, aPtr, total;
     } o;
     o.shape = 0;
-    o.stA = align128(o.shape + n * sizeof(GrpUnderlyingShape));
-    o.stB = align128(o.stA + n * sizeof(GrpStrideA));
-    o.stC = align128(o.stB + n * sizeof(GrpStrideB));
-    o.stD = align128(o.stC + n * sizeof(GrpStrideC));
-    o.lSFA = align128(o.stD + n * sizeof(GrpStrideD));
-    o.lSFB = align128(o.lSFA + n * sizeof(GrpLayoutSFA));
-    o.ptrA = align128(o.lSFB + n * sizeof(GrpLayoutSFB));
-    o.ptrB = align128(o.ptrA + n * sizeof(void*));
-    o.ptrSFA = align128(o.ptrB + n * sizeof(void*));
-    o.ptrSFB = align128(o.ptrSFA + n * sizeof(void*));
-    o.ptrC = align128(o.ptrSFB + n * sizeof(void*));
-    o.ptrD = align128(o.ptrC + n * sizeof(void*));
-    o.alpha = align128(o.ptrD + n * sizeof(void*));
-    o.aPtr = align128(o.alpha + n * sizeof(float));
-    o.total = align128(o.aPtr + n * sizeof(float*));
+    o.stA = align128(o.shape + (n * sizeof(GrpUnderlyingShape)));
+    o.stB = align128(o.stA + (n * sizeof(GrpStrideA)));
+    o.stC = align128(o.stB + (n * sizeof(GrpStrideB)));
+    o.stD = align128(o.stC + (n * sizeof(GrpStrideC)));
+    o.lSFA = align128(o.stD + (n * sizeof(GrpStrideD)));
+    o.lSFB = align128(o.lSFA + (n * sizeof(GrpLayoutSFA)));
+    o.ptrA = align128(o.lSFB + (n * sizeof(GrpLayoutSFB)));
+    o.ptrB = align128(o.ptrA + (n * sizeof(void*)));
+    o.ptrSFA = align128(o.ptrB + (n * sizeof(void*)));
+    o.ptrSFB = align128(o.ptrSFA + (n * sizeof(void*)));
+    o.ptrC = align128(o.ptrSFB + (n * sizeof(void*)));
+    o.ptrD = align128(o.ptrC + (n * sizeof(void*)));
+    o.alpha = align128(o.ptrD + (n * sizeof(void*)));
+    o.aPtr = align128(o.alpha + (n * sizeof(float)));
+    o.total = align128(o.aPtr + (n * sizeof(float*)));
 
     ensure_staging(o.total);
     char* d_base = static_cast<char*>(s_staging);
@@ -433,7 +433,7 @@ __global__ void build_grouped_3x_staging_kernel(
     // Shared shape dims.
     int N, int K, int n_experts)
 {
-    const int e = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    const int e = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     if (e >= n_experts) return;
 
     int     M_e          = d_M_per[e];
@@ -461,8 +461,8 @@ __global__ void build_grouped_3x_staging_kernel(
     // 4. Per-expert pointer arrays.
     //   A activations: contiguous, K/2 bytes per row, offset_e rows.
     int64_t a_row_bytes = static_cast<int64_t>(K) / 2;
-    ptrA[e] = reinterpret_cast<const imp::DeviceArgsElemA*>(
-        static_cast<const char*>(base_A_packed) + row_offset_e * a_row_bytes);
+    ptrA[e] = reinterpret_cast<const imp::DeviceArgsElemA*>(static_cast<const char*>(base_A_packed) +
+                                                            (row_offset_e * a_row_bytes));
     //   SFA: SfAtom-padded slab, byte offset from prefix sum.
     ptrSFA[e] = reinterpret_cast<const GrpElementSF*>(
         static_cast<const char*>(base_A_sf) + sfa_offset_e);
@@ -472,15 +472,14 @@ __global__ void build_grouped_3x_staging_kernel(
         ptrB[e]   = reinterpret_cast<const imp::DeviceArgsElemB*>(d_B_ptrs[e]);
         ptrSFB[e] = reinterpret_cast<const GrpElementSF*>(d_SFB_ptrs[e]);
     } else {
-        ptrB[e]   = reinterpret_cast<const imp::DeviceArgsElemB*>(
-            static_cast<const char*>(base_B_packed) + static_cast<int64_t>(e) * b_expert_stride_packed);
-        ptrSFB[e] = reinterpret_cast<const GrpElementSF*>(
-            static_cast<const char*>(base_B_sf) + static_cast<int64_t>(e) * b_expert_stride_sf);
+        ptrB[e] = reinterpret_cast<const imp::DeviceArgsElemB*>(
+            static_cast<const char*>(base_B_packed) + (static_cast<int64_t>(e) * b_expert_stride_packed));
+        ptrSFB[e] = reinterpret_cast<const GrpElementSF*>(static_cast<const char*>(base_B_sf) +
+                                                          (static_cast<int64_t>(e) * b_expert_stride_sf));
     }
     //   C/D outputs alias the FP16 result buffer (beta=0).
-    void* dst_e =
-        static_cast<char*>(base_D) +
-        row_offset_e * static_cast<int64_t>(N) * static_cast<int64_t>(sizeof(half));
+    void* dst_e = static_cast<char*>(base_D) +
+                  (row_offset_e * static_cast<int64_t>(N) * static_cast<int64_t>(sizeof(half)));
     ptrC[e] = reinterpret_cast<const imp::DeviceArgsElemC*>(dst_e);
     ptrD[e] = reinterpret_cast<imp::DeviceArgsElemD*>(dst_e);
 
@@ -527,21 +526,21 @@ bool gemm_grouped_cutlass_3x_nvfp4_device_args(
         size_t alpha, aPtr, total;
     } o;
     o.shape  = 0;
-    o.stA    = align128(o.shape  + n * sizeof(GrpUnderlyingShape));
-    o.stB    = align128(o.stA    + n * sizeof(GrpStrideA));
-    o.stC    = align128(o.stB    + n * sizeof(GrpStrideB));
-    o.stD    = align128(o.stC    + n * sizeof(GrpStrideC));
-    o.lSFA   = align128(o.stD    + n * sizeof(GrpStrideD));
-    o.lSFB   = align128(o.lSFA   + n * sizeof(GrpLayoutSFA));
-    o.ptrA   = align128(o.lSFB   + n * sizeof(GrpLayoutSFB));
-    o.ptrB   = align128(o.ptrA   + n * sizeof(void*));
-    o.ptrSFA = align128(o.ptrB   + n * sizeof(void*));
-    o.ptrSFB = align128(o.ptrSFA + n * sizeof(void*));
-    o.ptrC   = align128(o.ptrSFB + n * sizeof(void*));
-    o.ptrD   = align128(o.ptrC   + n * sizeof(void*));
-    o.alpha  = align128(o.ptrD   + n * sizeof(void*));
-    o.aPtr   = align128(o.alpha  + n * sizeof(float));
-    o.total  = align128(o.aPtr   + n * sizeof(float*));
+    o.stA = align128(o.shape + (n * sizeof(GrpUnderlyingShape)));
+    o.stB = align128(o.stA + (n * sizeof(GrpStrideA)));
+    o.stC = align128(o.stB + (n * sizeof(GrpStrideB)));
+    o.stD = align128(o.stC + (n * sizeof(GrpStrideC)));
+    o.lSFA = align128(o.stD + (n * sizeof(GrpStrideD)));
+    o.lSFB = align128(o.lSFA + (n * sizeof(GrpLayoutSFA)));
+    o.ptrA = align128(o.lSFB + (n * sizeof(GrpLayoutSFB)));
+    o.ptrB = align128(o.ptrA + (n * sizeof(void*)));
+    o.ptrSFA = align128(o.ptrB + (n * sizeof(void*)));
+    o.ptrSFB = align128(o.ptrSFA + (n * sizeof(void*)));
+    o.ptrC = align128(o.ptrSFB + (n * sizeof(void*)));
+    o.ptrD = align128(o.ptrC + (n * sizeof(void*)));
+    o.alpha = align128(o.ptrD + (n * sizeof(void*)));
+    o.aPtr = align128(o.alpha + (n * sizeof(float)));
+    o.total = align128(o.aPtr + (n * sizeof(float*)));
 
     ensure_staging(o.total);
     char* d_base = static_cast<char*>(s_staging);

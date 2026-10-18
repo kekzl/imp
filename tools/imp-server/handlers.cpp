@@ -211,13 +211,13 @@ std::vector<std::pair<std::string, std::string>> scan_model_files(const std::str
         }
         // GGUF files
         if ((entry.is_regular_file() || entry.is_symlink()) && path.extension() == ".gguf" &&
-            path.string().find(".no_exist") == std::string::npos) {
+            !path.string().contains(".no_exist")) {
             std::error_code ec2;
             auto real = std::filesystem::canonical(path, ec2);
             if (ec2)
                 continue;
             std::string real_str = real.string();
-            if (real_str.compare(0, base_prefix.size(), base_prefix) != 0)
+            if (!real_str.starts_with(base_prefix))
                 continue;
             results.emplace_back(path.filename().string(), real_str);
         }
@@ -230,7 +230,7 @@ std::vector<std::pair<std::string, std::string>> scan_model_files(const std::str
                 if (ec2)
                     continue;
                 std::string real_str = real.string();
-                if (real_str.compare(0, base_prefix.size(), base_prefix) != 0)
+                if (!real_str.starts_with(base_prefix))
                     continue;
                 results.emplace_back(path.filename().string(), real_str);
             }

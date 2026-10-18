@@ -177,8 +177,8 @@ void GraphExecutor::ple_prepare_host_(const int32_t* ids, int n, int n_seq, cons
     const int ctx_len = tab->context_len();
     const int rows = n / n_seq;
     for (int s = 0; s < n_seq; s++)
-        tab->hash(ctx + static_cast<size_t>(s) * ctx_len, ids + static_cast<size_t>(s) * rows, rows,
-                  ple_ids_.data() + static_cast<size_t>(s) * rows * tab->n_heads());
+        tab->hash(ctx + (static_cast<size_t>(s) * ctx_len), ids + (static_cast<size_t>(s) * rows), rows,
+                  ple_ids_.data() + (static_cast<size_t>(s) * rows * tab->n_heads()));
     // The previous chunk's H2D must have drained before the staging rows are rewritten.
     IMP_CUDA_CHECK_LOG(cudaEventSynchronize(ple_h2d_done_));
     tab->gather(ple_ids_.data(), n, ple_host_.as<uint16_t>());

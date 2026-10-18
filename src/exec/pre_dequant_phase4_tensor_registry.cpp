@@ -50,7 +50,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
             auto it = wcache_->fp8.find(t.data);
             const bool native = it != wcache_->fp8.end() && it->second.native_source;
             if (native) {
-                fp8_decode_sidecar = wcache_->fp16.count(t.data) != 0;
+                fp8_decode_sidecar = wcache_->fp16.contains(t.data);
             } else if (t.qtype == QType::F16) {
                 fp8_decode_sidecar = true;
             } else if (dequant_gpu_supported(t.qtype)) {
@@ -76,13 +76,13 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
         // compounding).
         h.prefill_tier = tier;
         h.decode_tier = tier;
-        if (tier == StorageTier::CUTLASS_NVFP4 && wcache_->fp16.count(t.data)) {
+        if (tier == StorageTier::CUTLASS_NVFP4 && wcache_->fp16.contains(t.data)) {
             h.prefill_tier = StorageTier::FP16;
             // Decode: use source NVFP4 data for GEMV (not the FP16 cache)
-        } else if (tier == StorageTier::CUTLASS_NVFP4 && wcache_->fp8.count(t.data)) {
+        } else if (tier == StorageTier::CUTLASS_NVFP4 && wcache_->fp8.contains(t.data)) {
             h.prefill_tier = StorageTier::FP8;
             h.decode_tier = StorageTier::FP8;
-        } else if (tier == StorageTier::CUTLASS_NVFP4 && wcache_->nvfp4.count(t.data)) {
+        } else if (tier == StorageTier::CUTLASS_NVFP4 && wcache_->nvfp4.contains(t.data)) {
             h.decode_tier = StorageTier::NVFP4;
         } else if (fp8_decode_sidecar) {
             h.decode_tier = StorageTier::FP8;
@@ -296,18 +296,23 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
             // different map = real tier mismatch; nowhere = evicted (budget/native fallback, benign).
             auto present_in = [&](StorageTier t, const void* src) -> bool {
                 switch (t) {
-                    case StorageTier::FP16: return wcache_->fp16.count(src) > 0;
-                    case StorageTier::FP8: return wcache_->fp8.count(src) > 0;
-                    case StorageTier::NVFP4: return wcache_->nvfp4.count(src) > 0;
-                    case StorageTier::CUTLASS_NVFP4: return wcache_->cutlass_nvfp4.count(src) > 0;
-                    case StorageTier::MXFP4: return wcache_->cutlass_mxfp4.count(src) > 0;
+                    case StorageTier::FP16:
+                        return wcache_->fp16.contains(src);
+                    case StorageTier::FP8:
+                        return wcache_->fp8.contains(src);
+                    case StorageTier::NVFP4:
+                        return wcache_->nvfp4.contains(src);
+                    case StorageTier::CUTLASS_NVFP4:
+                        return wcache_->cutlass_nvfp4.contains(src);
+                    case StorageTier::MXFP4:
+                        return wcache_->cutlass_mxfp4.contains(src);
                     default: return false;
                 }
             };
             auto any_overlay = [&](const void* src) -> bool {
-                return wcache_->fp16.count(src) || wcache_->fp8.count(src) ||
-                       wcache_->nvfp4.count(src) || wcache_->cutlass_nvfp4.count(src) ||
-                       wcache_->cutlass_mxfp4.count(src);
+                return wcache_->fp16.contains(src) || wcache_->fp8.contains(src) ||
+                       wcache_->nvfp4.contains(src) || wcache_->cutlass_nvfp4.contains(src) ||
+                       wcache_->cutlass_mxfp4.contains(src);
             };
             int mismatch = 0, evicted = 0, matched = 0;
             for (const auto& e : ideal_plan.entries) {
@@ -515,8 +520,7 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
                 "Pre-cached per-layer NVFP4 device-args ptr arrays for "
                 "%d/%d layers × 3 projections × %d experts (~%.1f KiB)",
                 built_layers, eligible_layers, ne,
-                (built_layers * 3.0 * ne * (2 * sizeof(void*) + sizeof(float))) /
-                    1024.0);
+                (built_layers * 3.0 * ne * ((2 * sizeof(void*)) + sizeof(float))) / 1024.0);
         }
         if (host_resident_layers > 0) {
             IMP_LOG_INFO(
@@ -528,11 +532,9 @@ void QuantPipeline::pre_dequant_phase4_tensor_registry_(
     }
 }
 
-// The one free site of Phases 4b and 4c: untrack, async free, mark (the pointer stays a cache key).
+// Phases 4b and 4c free sources through Model::free_source_weight.
 void QuantPipeline::free_source_(Tensor& t, cudaStream_t stream) {
-    const_cast<Model*>(model_)->release_gpu_allocation(t.data);
-    IMP_CUDA_CHECK_LOG(cudaFreeAsync(t.data, stream));
-    t.dropped_source = true;
+    const_cast<Model*>(model_)->free_source_weight(t, stream);
 }
 
 // Free a GGUF source allocation only when NO path still reads it: try_mark frees a
@@ -568,7 +570,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         // A native FP8 entry borrows these bytes: they are the served weight, not a source.
         if (const auto it = wcache_->fp8.find(t.data); it != wcache_->fp8.end() && it->second.native_source)
             return false;
-        if (wcache_->cutlass_nvfp4.count(t.data) > 0 || wcache_->nvfp4.count(t.data) > 0 ||
+        if (wcache_->cutlass_nvfp4.contains(t.data) || wcache_->nvfp4.contains(t.data) ||
             wcache_->lm_head_fp8.weight.data == t.data) {  // checkpoint FP8 head is served (#2479)
             ++skipped_shared_count;
             skipped_shared_bytes += bytes;
@@ -630,7 +632,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         const bool out_view = out_fp8 != wcache_->fp8.end() && out_fp8->second.d_row_scales != nullptr;
         const bool copies = pack_sidecar && L.gdn_packed_conv_channels == L.ssm_in.shape[0] &&
                             L.gdn_packed_inner == L.gdn_gate.shape[0] &&
-                            (out_view || wcache_->cutlass_mxfp8_prefill.count(L.ssm_out.data) != 0);
+                            (out_view || wcache_->cutlass_mxfp8_prefill.contains(L.ssm_out.data));
         if (!(host_experts || wcache_->gdn_fp8rows) || !copies || !releasable(L.ssm_in, L.ssm_in_id) ||
             !releasable(L.gdn_gate, L.gdn_gate_id) || !releasable(L.ssm_out, L.ssm_out_id))
             continue;
@@ -646,7 +648,7 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         auto pack_rows = [&](const Tensor& t, int64_t row0) {
             FP8CacheEntry view = pk->second;
             const int64_t shape[2] = {t.shape[0], t.shape[1]};
-            view.weight = Tensor(static_cast<char*>(pk->second.weight.data) + row0 * t.shape[1],
+            view.weight = Tensor(static_cast<char*>(pk->second.weight.data) + (row0 * t.shape[1]),
                                  QType::FP8_E4M3, 2, shape, true);
             view.d_row_scales = pk->second.d_row_scales + row0;
             wcache_->released_fp8_view[t.data] = view;
@@ -716,7 +718,7 @@ void QuantPipeline::release_lm_head_source_(cudaStream_t stream,
     if (!head.data || head.dropped_source)
         return;
     const bool fp8_head = wcache_->lm_head_fp8.weight.data != nullptr;
-    const bool nvfp4_head = !fp8_head && wcache_->nvfp4.count(head.data) != 0;
+    const bool nvfp4_head = !fp8_head && wcache_->nvfp4.contains(head.data);
     if (!fp8_head && !nvfp4_head)
         return;
     const char* served = fp8_head ? "FP8" : "NVFP4";
@@ -728,9 +730,9 @@ void QuantPipeline::release_lm_head_source_(cudaStream_t stream,
     // speculative.mtp_nvfp4_head=false: the MTP draft reads the source head.
     const bool mtp_reads_source = nvfp4_head && model_->mtp_ && !dispatch_policy().speculative.mtp_nvfp4_head;
     if (head.data == model_->tok_emb_.data || !mut_model->is_base_gpu_allocation(head.data) ||
-        (fp8_head && wcache_->nvfp4.count(head.data)) || mtp_reads_source ||
+        (fp8_head && wcache_->nvfp4.contains(head.data)) || mtp_reads_source ||
         (ct != wcache_->cutlass_nvfp4.end() && ct->second.scale_factors != nullptr) ||
-        wcache_->fp16.count(head.data) || wcache_->fp8.count(head.data)) {
+        wcache_->fp16.contains(head.data) || wcache_->fp8.contains(head.data)) {
         IMP_LOG_INFO("%s LM head: source retained (tied, shared allocation, or keyed by another cache)",
                      served);
         return;
@@ -740,8 +742,8 @@ void QuantPipeline::release_lm_head_source_(cudaStream_t stream,
     size_t price = wcache_->lm_head_fp8_bytes;
     if (nvfp4_head) {
         const NvFP4QuantResult& e = wcache_->nvfp4.at(head.data);
-        price = static_cast<size_t>(e.N) * static_cast<size_t>(e.K) / 2 +
-                static_cast<size_t>(e.N) * (e.K / 16);
+        price = (static_cast<size_t>(e.N) * static_cast<size_t>(e.K) / 2) +
+                (static_cast<size_t>(e.N) * (e.K / 16));
     }
     const size_t head_bytes = qtype_row_bytes(head.qtype, head.shape[1]) * static_cast<size_t>(head.shape[0]);
     const size_t head_pool_before = release_on_free_pool_reserved(ReleasePool::LmHead);

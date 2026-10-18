@@ -117,7 +117,7 @@ std::expected<void, std::string> expand_internvl_image_placeholders(std::vector<
     if (tokens_per_image <= 0 || start_id < 0 || end_id < 0)
         return std::unexpected("InternVL image tokens are not configured");
     std::vector<int32_t> out;
-    out.reserve(tokens.size() + static_cast<size_t>(n_images) * (tokens_per_image + 1));
+    out.reserve(tokens.size() + (static_cast<size_t>(n_images) * (tokens_per_image + 1)));
     for (int32_t t : tokens) {
         if (t != context_id) {
             out.push_back(t);

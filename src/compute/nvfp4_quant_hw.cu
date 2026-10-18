@@ -47,8 +47,8 @@ __device__ __forceinline__ uint32_t
 hw_scale_offset_hd128(uint32_t col_id_local,    // 0..7 (scale group along K)
                       uint32_t token_id_local)  // 0..63 (row in current 64-token block)
 {
-    return (col_id_local / 4) * 256 + (col_id_local % 4) + (token_id_local / 16) * 4 +
-           (token_id_local % 16) * 16;
+    return ((col_id_local / 4) * 256) + (col_id_local % 4) + ((token_id_local / 16) * 4) +
+           ((token_id_local % 16) * 16);
 }
 
 template <typename T>
@@ -76,7 +76,7 @@ __global__ void nvfp4_quant_hw_kernel(const half* __restrict__ input, uint8_t* _
     const int head_id = blockIdx.z;
     const int token_block_id = blockIdx.x;
 
-    const int token_id = token_block_id * BLOCK_SIZE + threadIdx.x / NUM_THREADS_PER_TOKEN;
+    const int token_id = (token_block_id * BLOCK_SIZE) + (threadIdx.x / NUM_THREADS_PER_TOKEN);
 
     // Load 16 FP16 elements assigned to this thread.
     PackedVec16<half> in_vec;
@@ -87,8 +87,8 @@ __global__ void nvfp4_quant_hw_kernel(const half* __restrict__ input, uint8_t* _
 
     // #2218 bounded: (tid % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD < HEAD_DIM <= 128 (:73)
     if (token_id < n_tokens) {
-        const half* src = input + batch_id * stride_bz_input + head_id * stride_h_input +
-                          token_id * stride_seq_input +
+        const half* src = input + (batch_id * stride_bz_input) + (head_id * stride_h_input) +
+                          (token_id * stride_seq_input) +
                           static_cast<ptrdiff_t>((threadIdx.x % NUM_THREADS_PER_TOKEN) *
                                                  CVT_FP4_ELTS_PER_THREAD);
         in_vec = *reinterpret_cast<const PackedVec16<half>*>(src);
@@ -126,17 +126,17 @@ __global__ void nvfp4_quant_hw_kernel(const half* __restrict__ input, uint8_t* _
     uint32_t e2m1_hi = fp32x8_to_e2m1x8_hw(&fp2[4]);
 
     // Store NVFP4 bytes (contiguous in output row).
-    uint8_t* dst = nvfp4_out + batch_id * stride_bz_output + head_id * stride_h_output +
-                   token_id * stride_seq_output +
-                   (threadIdx.x % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD / 2;
+    uint8_t* dst = nvfp4_out + (batch_id * stride_bz_output) + (head_id * stride_h_output) +
+                   (token_id * stride_seq_output) +
+                   ((threadIdx.x % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD / 2);
 
     if (token_id < n_tokens) {
         reinterpret_cast<uint64_t*>(dst)[0] = (static_cast<uint64_t>(e2m1_hi) << 32) | e2m1_lo;
     }
 
-    uint8_t* sf_base = sf_out + static_cast<int64_t>(batch_id) * stride_bz_output_sf +
-                       static_cast<int64_t>(head_id) * stride_h_output_sf +
-                       static_cast<int64_t>(token_id / 64) * 64 * stride_seq_output_sf;
+    uint8_t* sf_base = sf_out + (static_cast<int64_t>(batch_id) * stride_bz_output_sf) +
+                       (static_cast<int64_t>(head_id) * stride_h_output_sf) +
+                       (static_cast<int64_t>(token_id / 64) * 64 * stride_seq_output_sf);
     uint32_t token_id_local = token_id % 64;
 
     if constexpr (CVT_FP4_ELTS_PER_THREAD == 16) {
@@ -148,8 +148,8 @@ __global__ void nvfp4_quant_hw_kernel(const half* __restrict__ input, uint8_t* _
         // head_dim=64 case: only even threads write (scale is shared with odd).
         if ((threadIdx.x % 2) == 0) {
             uint32_t col_id_local = (threadIdx.x % NUM_THREADS_PER_TOKEN) / 2;
-            uint32_t offset_local = (col_id_local / 4) * 256 + (col_id_local % 4) +
-                                    (token_id_local / 16) * 4 + (token_id_local % 16) * 16;
+            uint32_t offset_local = ((col_id_local / 4) * 256) + (col_id_local % 4) +
+                                    ((token_id_local / 16) * 4) + ((token_id_local % 16) * 16);
             if (token_id < n_tokens)
                 sf_base[offset_local] = sc_fp8;
         }
@@ -171,14 +171,14 @@ __global__ void nvfp4_dequant_hw_kernel(const uint8_t* __restrict__ nvfp4_in,
     const int batch_id = blockIdx.y;
     const int head_id = blockIdx.z;
     const int token_block_id = blockIdx.x;
-    const int token_id = token_block_id * BLOCK_SIZE + threadIdx.x / NUM_THREADS_PER_TOKEN;
+    const int token_id = (token_block_id * BLOCK_SIZE) + (threadIdx.x / NUM_THREADS_PER_TOKEN);
 
     if (token_id >= n_tokens)
         return;
 
-    const uint8_t* sf_base = sf_in + static_cast<int64_t>(batch_id) * stride_bz_input_sf +
-                             static_cast<int64_t>(head_id) * stride_h_input_sf +
-                             static_cast<int64_t>(token_id / 64) * 64 * stride_seq_input_sf;
+    const uint8_t* sf_base = sf_in + (static_cast<int64_t>(batch_id) * stride_bz_input_sf) +
+                             (static_cast<int64_t>(head_id) * stride_h_input_sf) +
+                             (static_cast<int64_t>(token_id / 64) * 64 * stride_seq_input_sf);
     uint32_t token_id_local = token_id % 64;
     uint32_t col_id_local = threadIdx.x % NUM_THREADS_PER_TOKEN;
     uint32_t offset_local;
@@ -186,20 +186,20 @@ __global__ void nvfp4_dequant_hw_kernel(const uint8_t* __restrict__ nvfp4_in,
         offset_local = hw_scale_offset_hd128(col_id_local, token_id_local);
     } else {
         uint32_t col_half = col_id_local / 2;
-        offset_local = (col_half / 4) * 256 + (col_half % 4) + (token_id_local / 16) * 4 +
-                       (token_id_local % 16) * 16;
+        offset_local = ((col_half / 4) * 256) + (col_half % 4) + ((token_id_local / 16) * 4) +
+                       ((token_id_local % 16) * 16);
     }
     uint8_t sc_fp8 = sf_base[offset_local];
     float sc = float(reinterpret_cast<const __nv_fp8_e4m3&>(sc_fp8));
 
     // Load 8 NVFP4 bytes (16 nibbles).
-    const uint8_t* src = nvfp4_in + batch_id * stride_bz_input + head_id * stride_h_input +
-                         token_id * stride_seq_input +
-                         (threadIdx.x % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD / 2;
+    const uint8_t* src = nvfp4_in + (batch_id * stride_bz_input) + (head_id * stride_h_input) +
+                         (token_id * stride_seq_input) +
+                         ((threadIdx.x % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD / 2);
 
     // #2218 bounded: (tid % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD < HEAD_DIM <= 128 (:169)
-    half* dst = output + batch_id * stride_bz_output + head_id * stride_h_output +
-                token_id * stride_seq_output +
+    half* dst = output + (batch_id * stride_bz_output) + (head_id * stride_h_output) +
+                (token_id * stride_seq_output) +
                 static_cast<ptrdiff_t>((threadIdx.x % NUM_THREADS_PER_TOKEN) * CVT_FP4_ELTS_PER_THREAD);
 
 #pragma unroll

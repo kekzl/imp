@@ -59,7 +59,7 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(Narrow
     const int tile_in_pair = tile - (pair ? args.tiles0 : 0);
     const int K = args.K;
     const int M = args.M;
-    const half* __restrict__ W = args.W[pair] + static_cast<size_t>(tile_in_pair) * kNT * K;
+    const half* __restrict__ W = args.W[pair] + (static_cast<size_t>(tile_in_pair) * kNT * K);
 
     const int warp = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
@@ -73,12 +73,12 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(Narrow
     bool vr[4];
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
-        const int row = g + 8 * i;
+        const int row = g + (8 * i);
         vr[i] = row < M;
-        Ar[i] = args.A + static_cast<size_t>(vr[i] ? row : 0) * K + static_cast<size_t>(2 * tg);
+        Ar[i] = args.A + (static_cast<size_t>(vr[i] ? row : 0) * K) + static_cast<size_t>(2 * tg);
     }
-    const half* Wg0 = W + static_cast<size_t>(g) * K + static_cast<size_t>(2 * tg);
-    const half* Wg1 = Wg0 + static_cast<size_t>(8) * K;
+    const half* Wg0 = W + (static_cast<size_t>(g) * K) + static_cast<size_t>(2 * tg);
+    const half* Wg1 = Wg0 + (static_cast<size_t>(8) * K);
     const bool m1 = M > 16;
 
     const int k_cta = K / kSplit;
@@ -87,7 +87,7 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(Narrow
 
     float acc[2][2][4] = {};
     for (int s = warp; s < nsteps; s += kWarps) {
-        const int k = k0 + s * 16;
+        const int k = k0 + (s * 16);
         uint32_t a[2][4];
         a[0][0] = vr[0] ? ld_u32(Ar[0] + k) : 0u;
         a[0][1] = vr[1] ? ld_u32(Ar[1] + k) : 0u;
@@ -118,11 +118,11 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(Narrow
     for (int i = 0; i < 2; ++i) {
 #pragma unroll
         for (int j = 0; j < 2; ++j) {
-            const int col = 8 * j + 2 * tg;
-            s_red[warp][g + 16 * i][col] = acc[i][j][0];
-            s_red[warp][g + 16 * i][col + 1] = acc[i][j][1];
-            s_red[warp][g + 16 * i + 8][col] = acc[i][j][2];
-            s_red[warp][g + 16 * i + 8][col + 1] = acc[i][j][3];
+            const int col = (8 * j) + (2 * tg);
+            s_red[warp][g + (16 * i)][col] = acc[i][j][0];
+            s_red[warp][g + (16 * i)][col + 1] = acc[i][j][1];
+            s_red[warp][g + (16 * i) + 8][col] = acc[i][j][2];
+            s_red[warp][g + (16 * i) + 8][col + 1] = acc[i][j][3];
         }
     }
     __syncthreads();
@@ -131,14 +131,14 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(Narrow
     float* ws = args.ws;
     for (int o = threadIdx.x; o < kMaxM * kNT; o += kThreads) {
         const int m = o / kNT;
-        const int c = o - m * kNT;
+        const int c = o - (m * kNT);
         if (m >= M)
             continue;
         float sum = 0.0f;
 #pragma unroll
         for (int w = 0; w < kWarps; ++w)
             sum += s_red[w][m][c];
-        ws[(static_cast<size_t>(ks) * kMaxM + m) * args.n_total + col0 + c] = sum;
+        ws[(((static_cast<size_t>(ks) * kMaxM) + m) * args.n_total) + col0 + c] = sum;
     }
     __threadfence();
     __syncthreads();
@@ -153,14 +153,15 @@ __global__ void __launch_bounds__(kThreads) gemm_f16_narrow_smallm_kernel(Narrow
     const int N = args.N[pair];
     for (int o = threadIdx.x; o < kMaxM * kNT; o += kThreads) {
         const int m = o / kNT;
-        const int c = o - m * kNT;
+        const int c = o - (m * kNT);
         if (m >= M)
             continue;
         float sum = 0.0f;
 #pragma unroll
         for (int k2 = 0; k2 < kSplit; ++k2)
-            sum += __ldcg(&ws[(static_cast<size_t>(k2) * kMaxM + m) * args.n_total + col0 + c]);
-        C[static_cast<size_t>(m) * N + static_cast<size_t>(tile_in_pair) * kNT + c] = __float2half_rn(sum);
+            sum += __ldcg(&ws[(((static_cast<size_t>(k2) * kMaxM) + m) * args.n_total) + col0 + c]);
+        C[(static_cast<size_t>(m) * N) + (static_cast<size_t>(tile_in_pair) * kNT) + c] = __float2half_rn(
+            sum);
     }
     if (threadIdx.x == 0)
         args.tickets[tile] = 0;
@@ -172,7 +173,7 @@ size_t partials_bytes(int n_total) { return static_cast<size_t>(kSplit) * kMaxM 
 
 size_t gemm_f16_narrow_smallm_workspace_bytes(int n_total_max) {
     const size_t p = (partials_bytes(n_total_max) + 255) & ~size_t(255);
-    return p + static_cast<size_t>(n_total_max / kNT + 1) * sizeof(int);
+    return p + (static_cast<size_t>((n_total_max / kNT) + 1) * sizeof(int));
 }
 
 bool gemm_f16_narrow_smallm(const half* A, int M, int K, const half* W0, half* C0, int N0, const half* W1,

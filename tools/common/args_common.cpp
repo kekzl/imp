@@ -18,7 +18,7 @@ bool parse_common_flag(CommonArgs& args, int argc, char** argv, int& i) {
     } else if (std::strcmp(a, "--config") == 0 && i + 1 < argc) {
         args.config_path = argv[++i];
     } else if (std::strcmp(a, "--set") == 0 && i + 1 < argc) {
-        args.config_overrides.push_back(argv[++i]);
+        args.config_overrides.emplace_back(argv[++i]);
     } else if (std::strcmp(a, "--gpu-layers") == 0 && i + 1 < argc) {
         args.gpu_layers = cli_int(a, argv[++i]);
     } else if (std::strcmp(a, "--max-tokens") == 0 && i + 1 < argc) {

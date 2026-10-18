@@ -29,9 +29,9 @@ bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_
         // the largest block scale maps to e4m3 value 2^8=256 (<=448), leaving e4m3's ~18 octaves of
         // range downward (min subnormal 2^-9 covers blocks within 2^17 of max).
         int max_u = 0;
-        const uint8_t* es_base = h_scales + static_cast<size_t>(e) * n_rows_total * kb32;
+        const uint8_t* es_base = h_scales + (static_cast<size_t>(e) * n_rows_total * kb32);
         for (int64_t r = 0; r < N; r++) {
-            const uint8_t* sr = es_base + static_cast<size_t>(row_offset + r * row_stride) * kb32;
+            const uint8_t* sr = es_base + (static_cast<size_t>(row_offset + (r * row_stride)) * kb32);
             for (int64_t b = 0; b < kb32; b++)
                 max_u = std::max(max_u, static_cast<int>(sr[b]));
         }
@@ -39,15 +39,15 @@ bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_
         tscales[e] = std::ldexp(1.0f, ts_exp) * extra_scale;
 
         // Pass 2: nibbles copy + scale expansion.
-        const uint8_t* eb_base = h_blocks + static_cast<size_t>(e) * n_rows_total * row_bytes;
-        uint8_t* op = packed.data() + static_cast<size_t>(e) * N * row_bytes;
-        uint8_t* om = mscales.data() + static_cast<size_t>(e) * N * ms_per_row;
+        const uint8_t* eb_base = h_blocks + (static_cast<size_t>(e) * n_rows_total * row_bytes);
+        uint8_t* op = packed.data() + (static_cast<size_t>(e) * N * row_bytes);
+        uint8_t* om = mscales.data() + (static_cast<size_t>(e) * N * ms_per_row);
         for (int64_t r = 0; r < N; r++) {
-            const int64_t src_row = row_offset + r * row_stride;
-            std::memcpy(op + r * row_bytes, eb_base + static_cast<size_t>(src_row) * row_bytes,
+            const int64_t src_row = row_offset + (r * row_stride);
+            std::memcpy(op + (r * row_bytes), eb_base + (static_cast<size_t>(src_row) * row_bytes),
                         static_cast<size_t>(row_bytes));
-            const uint8_t* sr = es_base + static_cast<size_t>(src_row) * kb32;
-            uint8_t* mr = om + r * ms_per_row;
+            const uint8_t* sr = es_base + (static_cast<size_t>(src_row) * kb32);
+            uint8_t* mr = om + (r * ms_per_row);
             for (int64_t b = 0; b < kb32; b++) {
                 // block scale (absolute) = 2^(u-127); stored e4m3 = scale / ts
                 float rel = std::ldexp(1.0f, static_cast<int>(sr[b]) - 127 - ts_exp);
@@ -62,7 +62,7 @@ bool gpt_oss_convert_experts_to_nvfp4(const uint8_t* h_blocks, const uint8_t* h_
                 uint8_t byte;
                 std::memcpy(&byte, &f8, 1);
                 mr[2 * b] = byte;
-                mr[2 * b + 1] = byte;  // one 32-block scale covers two 16-blocks
+                mr[(2 * b) + 1] = byte;  // one 32-block scale covers two 16-blocks
             }
         }
     }

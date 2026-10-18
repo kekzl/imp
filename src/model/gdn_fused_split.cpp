@@ -31,8 +31,8 @@ bool make_rows(const Tensor& src, int64_t rows, std::vector<void*>& owned, Tenso
 
 void copy_rows(const Tensor& src, int64_t src_row, Tensor& dst, int64_t dst_row, int64_t n) {
     const size_t row_bytes = src.nbytes() / static_cast<size_t>(src.shape[0]);
-    std::memcpy(static_cast<char*>(dst.data) + static_cast<size_t>(dst_row) * row_bytes,
-                static_cast<const char*>(src.data) + static_cast<size_t>(src_row) * row_bytes,
+    std::memcpy(static_cast<char*>(dst.data) + (static_cast<size_t>(dst_row) * row_bytes),
+                static_cast<const char*>(src.data) + (static_cast<size_t>(src_row) * row_bytes),
                 static_cast<size_t>(n) * row_bytes);
 }
 
@@ -56,18 +56,18 @@ bool split_gdn_qkvz(const Tensor& t, const GdnFusedDims& d, std::vector<void*>& 
     if (!dims_ok(d) || !dense_2d(t))
         return false;
     const int64_t r = d.n_v / d.n_k;
-    const int64_t group = 2 * d.dk + 2 * r * d.dv;
+    const int64_t group = (2 * d.dk) + (2 * r * d.dv);
     if (t.shape[0] != d.n_k * group)
         return false;
     const int64_t key_rows = d.n_k * d.dk;
-    if (!make_rows(t, 2 * key_rows + d.n_v * d.dv, owned, qkv) || !make_rows(t, d.n_v * d.dv, owned, z))
+    if (!make_rows(t, (2 * key_rows) + (d.n_v * d.dv), owned, qkv) || !make_rows(t, d.n_v * d.dv, owned, z))
         return false;
     for (int64_t g = 0; g < d.n_k; ++g) {
         const int64_t s = g * group;
         copy_rows(t, s, qkv, g * d.dk, d.dk);                                    // q
-        copy_rows(t, s + d.dk, qkv, key_rows + g * d.dk, d.dk);                  // k
-        copy_rows(t, s + 2 * d.dk, qkv, 2 * key_rows + g * r * d.dv, r * d.dv);  // v
-        copy_rows(t, s + 2 * d.dk + r * d.dv, z, g * r * d.dv, r * d.dv);        // z
+        copy_rows(t, s + d.dk, qkv, key_rows + (g * d.dk), d.dk);                // k
+        copy_rows(t, s + (2 * d.dk), qkv, (2 * key_rows) + (g * r * d.dv), r * d.dv);  // v
+        copy_rows(t, s + (2 * d.dk) + (r * d.dv), z, g * r * d.dv, r * d.dv);          // z
     }
     return true;
 }
@@ -80,7 +80,7 @@ bool split_gdn_ba(const Tensor& t, const GdnFusedDims& d, std::vector<void*>& ow
         return false;
     for (int64_t g = 0; g < d.n_k; ++g) {
         copy_rows(t, g * 2 * r, b, g * r, r);
-        copy_rows(t, g * 2 * r + r, a, g * r, r);
+        copy_rows(t, (g * 2 * r) + r, a, g * r, r);
     }
     return true;
 }

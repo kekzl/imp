@@ -36,9 +36,9 @@ __global__ void add_vision_embeddings_kernel(half* __restrict__ hidden, const in
     // FP32 accumulation: the hidden state after a few layers and the merger's
     // output are both O(1..10), and adding them in FP16 would round twice.
     for (int d = threadIdx.x; d < d_model; d += blockDim.x) {
-        const int64_t at = static_cast<int64_t>(token_pos) * d_model + d;
+        const int64_t at = (static_cast<int64_t>(token_pos) * d_model) + d;
         hidden[at] = __float2half(__half2float(hidden[at]) +
-                                  __half2float(embeddings[static_cast<int64_t>(emb_idx) * d_model + d]));
+                                  __half2float(embeddings[(static_cast<int64_t>(emb_idx) * d_model) + d]));
     }
 }
 

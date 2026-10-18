@@ -72,7 +72,7 @@ inline constexpr int kMaxAnswerReserve = 256;
 // think_limit takes the LATER of the fractional budget and max_tokens minus
 // answer_reserve_for's reserve (max_tokens/4, floored at kMaxAnswerReserve, #1248).
 // reserve = runtime.think_answer_reserve; negative clamps to 0 (never adds thinking room).
-inline constexpr int answer_reserve_for(int max_tokens, int reserve = kMaxAnswerReserve) {
+constexpr int answer_reserve_for(int max_tokens, int reserve = kMaxAnswerReserve) {
     const int floor = reserve > 0 ? reserve : 0;
     const int scaled = max_tokens / 4;
     return scaled > floor ? scaled : floor;
@@ -81,7 +81,7 @@ inline constexpr int answer_reserve_for(int max_tokens, int reserve = kMaxAnswer
 // Reasoning-token limit shared by all enforcement paths (eager sampler,
 // CUDA-graph device counter, n-gram/scheduler gates): the LATER of the
 // fractional budget and max_tokens minus the answer reserve.
-inline constexpr int think_limit(int max_tokens, float think_budget, int answer_reserve = kMaxAnswerReserve) {
+constexpr int think_limit(int max_tokens, float think_budget, int answer_reserve = kMaxAnswerReserve) {
     const int frac_limit = static_cast<int>(max_tokens * think_budget);
     const int reserve_limit = max_tokens - answer_reserve_for(max_tokens, answer_reserve);
     return frac_limit > reserve_limit ? frac_limit : reserve_limit;
@@ -151,14 +151,13 @@ struct TextThinkState {
         if (think_text_tail.size() > kWindow)
             think_text_tail.erase(0, think_text_tail.size() - kWindow);
         if (in_think_block) {
-            if (think_text_tail.find("</think>") != std::string::npos) {
+            if (think_text_tail.contains("</think>")) {
                 in_think_block = false;
                 think_text_tail.clear();
                 return true;
             }
         } else {
-            if (think_text_tail.find("<think>") != std::string::npos &&
-                think_text_tail.find("</think>") == std::string::npos) {
+            if (think_text_tail.contains("<think>") && !think_text_tail.contains("</think>")) {
                 in_think_block = true;
                 think_text_tail.clear();
                 return true;

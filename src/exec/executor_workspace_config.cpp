@@ -128,7 +128,7 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
                                                  : align256(static_cast<size_t>(max_tokens) * n_heads * es));
     // Output buffer for the fused GDN input projection (4-way: ssm_in + gdn_gate +
     // gdn_alpha + gdn_beta concatenated along N). Only sized on has_gdn_ models.
-    int fused_total_out = conv_channels + inner + 2 * n_heads;
+    int fused_total_out = conv_channels + inner + (2 * n_heads);
     size_t fused_bytes =
         has_gdn_ ? align256(static_cast<size_t>(max_tokens) * fused_total_out * es) : align256(0);
     gdn_fused_proj_buf_ =
@@ -148,8 +148,7 @@ bool Workspace::resize_workspace(int new_max_tokens, cudaStream_t stream) {
         use_workspace(0);
     if (new_max_tokens == shared_workspace_max_tokens_ || new_max_tokens <= 0)
         return true;
-    if (new_max_tokens > *max_tokens_)
-        new_max_tokens = *max_tokens_;  // never exceed init-time max
+    new_max_tokens = std::min(new_max_tokens, *max_tokens_);  // never exceed init-time max
 
     // Recompute shared sizes for the new token count
     int saved_max = *max_tokens_;
@@ -200,9 +199,9 @@ bool Workspace::allocate_decode_workspace(cudaStream_t /*stream*/, int max_batch
     decode_max_batch_ = max_batch;
 
     // Persistent workspace for max_batch tokens: hidden + residual + norm_out + logits
-    size_t persistent = static_cast<size_t>(dm) * sizeof(half) * 3 *
-                            max_batch  // hidden + residual + norm_out
-                        + static_cast<size_t>(cfg.vocab_size) * sizeof(float) * max_batch;  // logits
+    size_t persistent = (static_cast<size_t>(dm) * sizeof(half) * 3 *
+                         max_batch)  // hidden + residual + norm_out
+                        + (static_cast<size_t>(cfg.vocab_size) * sizeof(float) * max_batch);  // logits
     if ((*fp32_accum_buf_))
         persistent += static_cast<size_t>(dm) * sizeof(float) * max_batch;  // fp32_hidden
 

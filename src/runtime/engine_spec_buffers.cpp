@@ -28,7 +28,7 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     // verify step instead of six (pageable sources stage through a driver
     // buffer on WSL2). Captured graphs bake the sub-pointers, so the block
     // must stay stable per capacity. Same trick for argmax+topm D2H.
-    const size_t stage_ints = 3ull * chunk_cap + 4 + kMtpMaxTopW;
+    const size_t stage_ints = (3ull * chunk_cap) + 4 + kMtpMaxTopW;
     const size_t out_ints = static_cast<size_t>(chunk_cap) * (1 + kRowwiseTopMMax);
     // T5b for the pinned twins (memory/host_pinned.h). Wrapped in a lambda so the
     // && chain still SHORT-CIRCUITS: acquiring them up front would allocate host
@@ -61,8 +61,8 @@ bool Engine::ensure_spec_buffers_(int chunk_cap, int max_blocks) {
     // ctx_len, past_len, chunk_len] and [argmax | topm].
     d_spec_tokens_ = d_spec_stage_;
     d_spec_positions_ = d_spec_stage_ + chunk_cap;
-    d_spec_row_ctx_lens_ = d_spec_stage_ + 2ull * chunk_cap;
-    d_spec_context_len_ = d_spec_stage_ + 3ull * chunk_cap;
+    d_spec_row_ctx_lens_ = d_spec_stage_ + (2ull * chunk_cap);
+    d_spec_context_len_ = d_spec_stage_ + (3ull * chunk_cap);
     d_spec_past_len_ = d_spec_context_len_ + 1;
     d_spec_chunk_len_ = d_spec_context_len_ + 2;
     d_spec_snap_n_ = d_spec_context_len_ + 3;

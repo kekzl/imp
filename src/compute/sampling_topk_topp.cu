@@ -6,6 +6,7 @@
 #include "core/process_diag.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <cub/cub.cuh>
 #include <cub/device/device_topk.cuh>
 #include <cmath>
@@ -51,14 +52,13 @@ __device__ __forceinline__ void topk_partial_body(const float* __restrict__ logi
 
     const int tid = threadIdx.x;
     const int gstride = blockDim.x * gridDim.x;
-    const int gstart = blockIdx.x * blockDim.x + tid;
+    const int gstart = (blockIdx.x * blockDim.x) + tid;
 
     // ---- block max over strided subset ----
     float local_max = -FLT_MAX;
     for (int i = gstart; i < vocab_size; i += gstride) {
         float v = logits[i];
-        if (v > local_max)
-            local_max = v;
+        local_max = std::max(local_max, v);
     }
     local_max = warp_reduce_max(local_max);
     s_reduce[tid] = -FLT_MAX;
@@ -69,8 +69,7 @@ __device__ __forceinline__ void topk_partial_body(const float* __restrict__ logi
     if (tid == 0) {
         float mx = -FLT_MAX;
         for (int w = 0; w < NUM_WARPS; ++w)
-            if (s_reduce[w] > mx)
-                mx = s_reduce[w];
+            mx = std::max(mx, s_reduce[w]);
         s_gmax[0] = mx;
     }
     __syncthreads();
@@ -132,8 +131,8 @@ __device__ __forceinline__ void topk_partial_body(const float* __restrict__ logi
     }
     // reduce per-thread candidates into the block's top_k (sorted desc) → scratch
     block_reduce_topk(local_vals, local_idxs, local_count, top_k, s_warp_vals, s_warp_idxs,
-                      cand_val_out + static_cast<size_t>(blockIdx.x) * top_k,
-                      cand_idx_out + static_cast<size_t>(blockIdx.x) * top_k);
+                      cand_val_out + (static_cast<size_t>(blockIdx.x) * top_k),
+                      cand_idx_out + (static_cast<size_t>(blockIdx.x) * top_k));
 }
 
 __global__ void topk_partial_kernel(const float* __restrict__ logits, int vocab_size, int top_k,
@@ -153,7 +152,7 @@ __global__ void topk_partial_rows_kernel(const TopkRowArgs* __restrict__ rows, i
     float* block_max = reinterpret_cast<float*>(base + sizeof(int32_t));
     float* block_sum = block_max + SAMPLE_NBLOCKS;
     float* cand_val = block_sum + SAMPLE_NBLOCKS;
-    int* cand_idx = reinterpret_cast<int*>(cand_val + static_cast<size_t>(SAMPLE_NBLOCKS) * a.top_k);
+    int* cand_idx = reinterpret_cast<int*>(cand_val + (static_cast<size_t>(SAMPLE_NBLOCKS) * a.top_k));
     topk_partial_body(a.logits, vocab_size, a.top_k, a.inv_temperature, block_max, block_sum, cand_val,
                       cand_idx);
 }
@@ -227,8 +226,7 @@ __device__ __forceinline__ void topk_finalize_body(int top_k, float top_p, float
     // global max + online-softmax-merged global sum (block partials are tiny)
     float gmax = -FLT_MAX;
     for (int b = 0; b < n_blocks; ++b)
-        if (block_max_in[b] > gmax)
-            gmax = block_max_in[b];
+        gmax = std::max(gmax, block_max_in[b]);
     float gsum = 0.0f;
     for (int b = 0; b < n_blocks; ++b) {
         float bm = block_max_in[b];
@@ -291,7 +289,7 @@ __global__ void topk_finalize_rows_kernel(const TopkRowArgs* __restrict__ rows, 
     float* block_max = reinterpret_cast<float*>(base + sizeof(int32_t));
     float* block_sum = block_max + SAMPLE_NBLOCKS;
     float* cand_val = block_sum + SAMPLE_NBLOCKS;
-    int* cand_idx = reinterpret_cast<int*>(cand_val + static_cast<size_t>(SAMPLE_NBLOCKS) * a.top_k);
+    int* cand_idx = reinterpret_cast<int*>(cand_val + (static_cast<size_t>(SAMPLE_NBLOCKS) * a.top_k));
     topk_finalize_body(a.top_k, a.top_p, a.inv_temperature, a.seed, n_blocks, block_max, block_sum,
                        cand_val, cand_idx, a.d_result);
 }
@@ -307,15 +305,15 @@ static cudaError_t launch_topk_topp_multiblock(const float* d_logits, int vocab_
     float* block_max = reinterpret_cast<float*>(base + sizeof(int32_t));
     float* block_sum = block_max + SAMPLE_NBLOCKS;
     float* cand_val = block_sum + SAMPLE_NBLOCKS;
-    int* cand_idx = reinterpret_cast<int*>(cand_val + static_cast<size_t>(SAMPLE_NBLOCKS) * top_k);
+    int* cand_idx = reinterpret_cast<int*>(cand_val + (static_cast<size_t>(SAMPLE_NBLOCKS) * top_k));
 
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     // both phases use NUM_WARPS*top_k warp-merge scratch; phase 1 also needs the
     // block reduction scratch, phase 2 the merged top_k output.
-    size_t smem1 = static_cast<size_t>(BLOCK_SIZE) * sizeof(float) + 2 * sizeof(float) +
-                   static_cast<size_t>(NUM_WARPS) * top_k * (sizeof(float) + sizeof(int));
-    size_t smem2 = static_cast<size_t>(NUM_WARPS) * top_k * (sizeof(float) + sizeof(int)) +
-                   static_cast<size_t>(top_k) * (sizeof(float) + sizeof(int));
+    size_t smem1 = (static_cast<size_t>(BLOCK_SIZE) * sizeof(float)) + (2 * sizeof(float)) +
+                   (static_cast<size_t>(NUM_WARPS) * top_k * (sizeof(float) + sizeof(int)));
+    size_t smem2 = (static_cast<size_t>(NUM_WARPS) * top_k * (sizeof(float) + sizeof(int))) +
+                   (static_cast<size_t>(top_k) * (sizeof(float) + sizeof(int)));
 
     sampler_launch_begin("topk_multiblock");
     topk_partial_kernel<<<SAMPLE_NBLOCKS, BLOCK_SIZE, smem1, stream>>>(
@@ -333,10 +331,10 @@ cudaError_t launch_topk_topp_rows(const TopkRowArgs* d_rows, int n_rows, int max
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     // Shared-memory sizes carved with the batch's max top_k — every block
     // carves with its OWN row's top_k, which is <= max_top_k.
-    size_t smem1 = static_cast<size_t>(BLOCK_SIZE) * sizeof(float) + 2 * sizeof(float) +
-                   static_cast<size_t>(NUM_WARPS) * max_top_k * (sizeof(float) + sizeof(int));
-    size_t smem2 = static_cast<size_t>(NUM_WARPS) * max_top_k * (sizeof(float) + sizeof(int)) +
-                   static_cast<size_t>(max_top_k) * (sizeof(float) + sizeof(int));
+    size_t smem1 = (static_cast<size_t>(BLOCK_SIZE) * sizeof(float)) + (2 * sizeof(float)) +
+                   (static_cast<size_t>(NUM_WARPS) * max_top_k * (sizeof(float) + sizeof(int)));
+    size_t smem2 = (static_cast<size_t>(NUM_WARPS) * max_top_k * (sizeof(float) + sizeof(int))) +
+                   (static_cast<size_t>(max_top_k) * (sizeof(float) + sizeof(int)));
     dim3 grid1(SAMPLE_NBLOCKS, n_rows);
     sampler_launch_begin("topk_rows");
     topk_partial_rows_kernel<<<grid1, BLOCK_SIZE, smem1, stream>>>(d_rows, vocab_size);
@@ -358,7 +356,7 @@ __global__ void softmax_to_pairs_device_kernel(const float* __restrict__ logits,
                                                float* __restrict__ d_keys, int32_t* __restrict__ d_values) {
     float global_max = d_max_sum[0];
     float inv_sum = 1.0f / d_max_sum[1];
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= vocab_size)
         return;
     float prob = expf((logits[idx] - global_max) * inv_temperature) * inv_sum;
@@ -372,10 +370,9 @@ __global__ void softmax_max_kernel(const float* __restrict__ logits, int vocab_s
     __shared__ float s_max[BLOCK_SIZE / WARP_SIZE];
 
     float local_max = -FLT_MAX;
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size; i += blockDim.x * gridDim.x) {
+    for (int i = (blockIdx.x * blockDim.x) + threadIdx.x; i < vocab_size; i += blockDim.x * gridDim.x) {
         float v = logits[i];
-        if (v > local_max)
-            local_max = v;
+        local_max = std::max(local_max, v);
     }
     local_max = warp_reduce_max(local_max);
     int warp_id = threadIdx.x / WARP_SIZE;
@@ -386,8 +383,7 @@ __global__ void softmax_max_kernel(const float* __restrict__ logits, int vocab_s
     if (threadIdx.x == 0) {
         float mx = -FLT_MAX;
         for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++)
-            if (s_max[w] > mx)
-                mx = s_max[w];
+            mx = std::max(mx, s_max[w]);
         atomic_max_float(d_max, mx);
     }
 }
@@ -401,7 +397,7 @@ __global__ void softmax_sum_device_max_kernel(const float* __restrict__ logits, 
 
     float global_max = *d_max;
     float local_sum = 0.0f;
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size; i += blockDim.x * gridDim.x) {
+    for (int i = (blockIdx.x * blockDim.x) + threadIdx.x; i < vocab_size; i += blockDim.x * gridDim.x) {
         local_sum += expf((logits[i] - global_max) * inv_temperature);
     }
     local_sum = warp_reduce_sum(local_sum);
@@ -537,7 +533,7 @@ struct CubSortScratch {
         capacity = vocab_size;
         gen = g;
         IMP_LOG_DEBUG("CUB sort scratch: %.2f MiB from the T2 arena for vocab=%d (CUB temp %.2f MiB)",
-                      (2 * elem_bytes + 2 * idx_bytes + 8 + temp_bytes) / (1024.0 * 1024.0), vocab_size,
+                      ((2 * elem_bytes) + (2 * idx_bytes) + 8 + temp_bytes) / (1024.0 * 1024.0), vocab_size,
                       temp_bytes / (1024.0 * 1024.0));
         return true;
     }

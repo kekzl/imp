@@ -23,6 +23,7 @@
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -37,11 +38,11 @@ namespace imp {
 // [n_rows, 2*hidden_dim]: out[r, 0..hd) = a[r], out[r, hd..2hd) = b[r].
 __global__ void mtp_concat_kernel(const __half* __restrict__ a, const __half* __restrict__ b,
                                    __half* __restrict__ out, int hidden_dim, int n_rows) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    int t = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (t >= n_rows * 2 * hidden_dim) return;
     int r = t / (2 * hidden_dim);
     int i = t % (2 * hidden_dim);
-    out[t] = (i < hidden_dim) ? a[r * hidden_dim + i] : b[r * hidden_dim + i - hidden_dim];
+    out[t] = (i < hidden_dim) ? a[(r * hidden_dim) + i] : b[(r * hidden_dim) + i - hidden_dim];
 }
 
 __device__ __forceinline__ float mtp_logit_to_float(__half v) { return __half2float(v); }
@@ -88,7 +89,7 @@ __global__ void mtp_argmax_kernel(const T* __restrict__ logits, int vocab_size,
 __global__ void mtp_add_shared_kernel(__half* __restrict__ fc_out,
                                        const __half* __restrict__ shared_out,
                                        int hidden_dim) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    int t = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (t >= hidden_dim) return;
     float v = __half2float(fc_out[t]) + __half2float(shared_out[t]);
     fc_out[t] = __float2half(v);
@@ -103,7 +104,7 @@ __global__ void mtp_gated_v_broadcast_kernel(
     const __half* __restrict__ v,         // [num_kv_heads, head_dim]
     __half* __restrict__ out,             // [num_heads * head_dim]
     int num_heads, int num_kv_heads, int head_dim) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    int t = (blockIdx.x * blockDim.x) + threadIdx.x;
     int total = num_heads * head_dim;
     if (t >= total) return;
     int h = t / head_dim;
@@ -111,14 +112,14 @@ __global__ void mtp_gated_v_broadcast_kernel(
     int kv_h = h * num_kv_heads / num_heads;  // GQA broadcast
 
     // gate is the SECOND head_dim slice of q_full[h]
-    int gate_idx = h * (2 * head_dim) + head_dim + d;
+    int gate_idx = (h * (2 * head_dim)) + head_dim + d;
     float g = __half2float(q_full[gate_idx]);
     // silu(g) = g * sigmoid(g)
     // Qwen3-Next attn_output_gate: attn_out *= sigmoid(gate) (NOT silu).
     // Ref: vLLM Qwen3NextAttention.forward — attn_output * torch.sigmoid(gate).
     float gate_act = 1.0f / (1.0f + expf(-g));
 
-    float v_val = __half2float(v[kv_h * head_dim + d]);
+    float v_val = __half2float(v[(kv_h * head_dim) + d]);
     out[t] = __float2half(gate_act * v_val);
 }
 
@@ -126,7 +127,7 @@ __global__ void mtp_gated_v_broadcast_kernel(
 __global__ void mtp_add_kernel(__half* __restrict__ fc_out,
                                 const __half* __restrict__ attn_residual,
                                 int hidden_dim) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    int t = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (t >= hidden_dim) return;
     float v = __half2float(fc_out[t]) + __half2float(attn_residual[t]);
     fc_out[t] = __float2half(v);
@@ -158,13 +159,13 @@ __global__ void mtp_attn_kv_scan_kernel(
     extern __shared__ float s_scores[];  // sized: max seq_len * sizeof(float)
 
     // Q row for this (query row, head): contiguous [head_dim].
-    const __half* q_row = q_attn + (static_cast<int64_t>(r) * num_heads + h) * head_dim;
+    const __half* q_row = q_attn + (((static_cast<int64_t>(r) * num_heads) + h) * head_dim);
 
     // ---- (1) Q · K for each cached t, accumulate into shared mem ----
     // One thread per t (with strip-mining if seq_len > blockDim.x).
     float max_score = -1.0e30f;
     for (int t = tid; t < seq_len; t += blockDim.x) {
-        const __half* k_row = k_cache + (static_cast<int64_t>(t) * num_kv_heads + kv_h) * head_dim;
+        const __half* k_row = k_cache + (((static_cast<int64_t>(t) * num_kv_heads) + kv_h) * head_dim);
         float acc = 0.0f;
         // Inner dot product along head_dim — let one thread do the whole thing
         // (head_dim=256 is small enough for serial accumulation per-t).
@@ -173,7 +174,7 @@ __global__ void mtp_attn_kv_scan_kernel(
         }
         float scaled = acc * scale;
         s_scores[t] = scaled;
-        if (scaled > max_score) max_score = scaled;
+        max_score = std::max(max_score, scaled);
     }
 
     // Reduce max across block via shared mem (small block: kBlock = 256 typical).
@@ -203,10 +204,10 @@ __global__ void mtp_attn_kv_scan_kernel(
     for (int d = tid; d < head_dim; d += blockDim.x) {
         float acc = 0.0f;
         for (int t = 0; t < seq_len; ++t) {
-            const __half* v_row = v_cache + (static_cast<int64_t>(t) * num_kv_heads + kv_h) * head_dim;
+            const __half* v_row = v_cache + (((static_cast<int64_t>(t) * num_kv_heads) + kv_h) * head_dim);
             acc += s_scores[t] * inv_denom * __half2float(v_row[d]);
         }
-        out[(static_cast<int64_t>(r) * num_heads + h) * head_dim + d] = __float2half(acc);
+        out[(((static_cast<int64_t>(r) * num_heads) + h) * head_dim) + d] = __float2half(acc);
     }
 }
 
@@ -216,14 +217,14 @@ __global__ void mtp_gate_attn_out_kernel(
     __half* __restrict__ attn_out,            // [n_rows, num_heads, head_dim] in/out
     const __half* __restrict__ q_full,        // [n_rows, num_heads, 2*head_dim]
     int num_heads, int head_dim, int n_rows) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    int t = (blockIdx.x * blockDim.x) + threadIdx.x;
     int total = n_rows * num_heads * head_dim;
     if (t >= total) return;
     int r   = t / (num_heads * head_dim);
     int rem = t % (num_heads * head_dim);
     int h = rem / head_dim;
     int d = rem % head_dim;
-    int64_t gate_idx = (static_cast<int64_t>(r) * num_heads + h) * (int64_t{2} * head_dim) + head_dim + d;
+    int64_t gate_idx = (((static_cast<int64_t>(r) * num_heads) + h) * (int64_t{2} * head_dim)) + head_dim + d;
     float g = __half2float(q_full[gate_idx]);
     // Qwen3-Next attn_output_gate: attn_out *= sigmoid(gate) (NOT silu).
     // Ref: vLLM Qwen3NextAttention.forward — attn_output * torch.sigmoid(gate).
@@ -240,7 +241,7 @@ __global__ void mtp_kv_append_kernel(
     __half* __restrict__ k_cache,        // [max_seq, num_kv_heads, head_dim]
     __half* __restrict__ v_cache,
     int pos, int num_kv_heads, int head_dim, int n_rows) {
-    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    int t = (blockIdx.x * blockDim.x) + threadIdx.x;
     int row_elems = num_kv_heads * head_dim;
     if (t >= n_rows * row_elems) return;
     int r   = t / row_elems;
@@ -269,7 +270,7 @@ __global__ void mtp_mrope_kernel(
     int h = blockIdx.x;
     int r = blockIdx.y;  // query row within a batched feed; 0 for M=1 decode
     if (h >= n_heads) return;
-    __half* row = x + (static_cast<int64_t>(r) * n_heads + h) * head_dim;
+    __half* row = x + (((static_cast<int64_t>(r) * n_heads) + h) * head_dim);
     int pairs = rope_dim / 2;
     int s01 = sec0;
     int s12 = sec0 + sec1;
@@ -300,8 +301,8 @@ __global__ void mtp_mrope_kernel(
         int i1 = k + pairs;
         float x0 = __half2float(row[i0]);
         float x1 = __half2float(row[i1]);
-        row[i0] = __float2half(x0 * c - x1 * s);
-        row[i1] = __float2half(x0 * s + x1 * c);
+        row[i0] = __float2half((x0 * c) - (x1 * s));
+        row[i1] = __float2half((x0 * s) + (x1 * c));
     }
     // (void) IsKv — currently unused but reserved for any future per-head
     // GQA/MQA divergences. Both Q and K paths share the same rotation math.
@@ -335,22 +336,23 @@ void mtp_apply_mrope(void* d_q, int n_heads, void* d_k, int n_kv_heads, int head
 // and position.
 __global__ void mtp_gather_rows_kernel(const __half* __restrict__ src, const int* __restrict__ idx,
                                        __half* __restrict__ dst, int H, int n_rows) {
-    const int64_t t = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t t = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (t >= static_cast<int64_t>(n_rows) * H) return;
     const int r = static_cast<int>(t / H);
     const int c = static_cast<int>(t % H);
-    dst[t] = src[static_cast<int64_t>(idx[r]) * H + c];
+    dst[t] = src[(static_cast<int64_t>(idx[r]) * H) + c];
 }
 
 __global__ void mtp_kv_append_rows_kernel(const __half* __restrict__ k_step, const __half* __restrict__ v_step,
                                           __half* __restrict__ k_base, __half* __restrict__ v_base,
                                           const int* __restrict__ slots, const int* __restrict__ pos,
                                           int64_t slot_elems, int row_elems, int n_rows) {
-    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int t = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (t >= n_rows * row_elems) return;
     const int r = t / row_elems;
     const int rem = t % row_elems;
-    const int64_t off = static_cast<int64_t>(slots[r]) * slot_elems + static_cast<int64_t>(pos[r]) * row_elems + rem;
+    const int64_t off = (static_cast<int64_t>(slots[r]) * slot_elems) +
+                        (static_cast<int64_t>(pos[r]) * row_elems) + rem;
     k_base[off] = k_step[t];
     v_base[off] = v_step[t];
 }
@@ -366,21 +368,21 @@ __global__ void mtp_attn_kv_scan_rows_kernel(const __half* __restrict__ q_attn, 
     const int r = blockIdx.y;
     if (h >= num_heads) return;
     const int seq_len = pos[r] + 1;
-    const __half* k_cache = k_base + static_cast<int64_t>(slots[r]) * slot_elems;
-    const __half* v_cache = v_base + static_cast<int64_t>(slots[r]) * slot_elems;
+    const __half* k_cache = k_base + (static_cast<int64_t>(slots[r]) * slot_elems);
+    const __half* v_cache = v_base + (static_cast<int64_t>(slots[r]) * slot_elems);
     const int tid = threadIdx.x;
     const int gqa = num_heads / num_kv_heads;
     const int kv_h = h / gqa;
     extern __shared__ float s_scores[];
-    const __half* q_row = q_attn + (static_cast<int64_t>(r) * num_heads + h) * head_dim;
+    const __half* q_row = q_attn + (((static_cast<int64_t>(r) * num_heads) + h) * head_dim);
     float max_score = -1.0e30f;
     for (int t = tid; t < seq_len; t += blockDim.x) {
-        const __half* k_row = k_cache + (static_cast<int64_t>(t) * num_kv_heads + kv_h) * head_dim;
+        const __half* k_row = k_cache + (((static_cast<int64_t>(t) * num_kv_heads) + kv_h) * head_dim);
         float acc = 0.0f;
         for (int d = 0; d < head_dim; ++d) acc += __half2float(q_row[d]) * __half2float(k_row[d]);
         const float scaled = acc * scale;
         s_scores[t] = scaled;
-        if (scaled > max_score) max_score = scaled;
+        max_score = std::max(max_score, scaled);
     }
     __shared__ float s_block_max;
     if (tid == 0) s_block_max = -1.0e30f;
@@ -404,10 +406,10 @@ __global__ void mtp_attn_kv_scan_rows_kernel(const __half* __restrict__ q_attn, 
     for (int d = tid; d < head_dim; d += blockDim.x) {
         float acc = 0.0f;
         for (int t = 0; t < seq_len; ++t) {
-            const __half* v_row = v_cache + (static_cast<int64_t>(t) * num_kv_heads + kv_h) * head_dim;
+            const __half* v_row = v_cache + (((static_cast<int64_t>(t) * num_kv_heads) + kv_h) * head_dim);
             acc += s_scores[t] * inv_denom * __half2float(v_row[d]);
         }
-        out[(static_cast<int64_t>(r) * num_heads + h) * head_dim + d] = __float2half(acc);
+        out[(((static_cast<int64_t>(r) * num_heads) + h) * head_dim) + d] = __float2half(acc);
     }
 }
 
@@ -425,8 +427,8 @@ void mtp_select_slot(MtpDraftWorkspace& ws, int slot) {
     ws.slot_pos[static_cast<size_t>(ws.cur_slot)] = ws.mtp_pos;
     ws.cur_slot = slot;
     ws.mtp_pos = ws.slot_pos[static_cast<size_t>(slot)];
-    ws.d_k_cache = static_cast<__half*>(ws.d_k_cache_base) + static_cast<size_t>(slot) * ws.kv_slot_elems;
-    ws.d_v_cache = static_cast<__half*>(ws.d_v_cache_base) + static_cast<size_t>(slot) * ws.kv_slot_elems;
+    ws.d_k_cache = static_cast<__half*>(ws.d_k_cache_base) + (static_cast<size_t>(slot) * ws.kv_slot_elems);
+    ws.d_v_cache = static_cast<__half*>(ws.d_v_cache_base) + (static_cast<size_t>(slot) * ws.kv_slot_elems);
 }
 
 // ---------------------------------------------------------------------------
@@ -572,8 +574,8 @@ bool mtp_workspace_allocate(MtpDraftWorkspace& ws, int hidden_dim, int vocab_siz
         if (bok) {
             ws.feed_rows_cap = kMtpFeedRows;
             ws.d_row_slots = ws.d_feed_tokens + n;
-            ws.d_row_pos = ws.d_feed_tokens + 2 * n;
-            ws.d_row_src = ws.d_feed_tokens + 3 * n;
+            ws.d_row_pos = ws.d_feed_tokens + (2 * n);
+            ws.d_row_src = ws.d_feed_tokens + (3 * n);
             ws.d_b_gather = ws.d_b_h_norm;   // gathered rows, normed in place
             ws.d_b_h_final = ws.d_b_norm;    // free once the MLP consumed the post-norm
         } else {
@@ -776,7 +778,7 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
         // 5.A.4.a — append k_step, v_step into cache at pos
         {
             int block = 256;
-            int grid  = (nkv * hdh + block - 1) / block;
+            int grid = ((nkv * hdh) + block - 1) / block;
             mtp_kv_append_kernel<<<grid, block, 0, stream>>>(
                 static_cast<const __half*>(ws.d_k_proj),
                 static_cast<const __half*>(ws.d_v_proj),
@@ -806,7 +808,7 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
         // output by a sigmoid of Q itself.
         if (mtp.attn_output_gate) {
             int block = 256;
-            int grid  = (nh * hdh + block - 1) / block;
+            int grid = ((nh * hdh) + block - 1) / block;
             mtp_gate_attn_out_kernel<<<grid, block, 0, stream>>>(
                 static_cast<__half*>(ws.d_attn_out),
                 static_cast<const __half*>(ws.d_q_full),
@@ -817,7 +819,7 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
     } else if (mtp.attn_output_gate) {
         // MVP fallback: silu(gate) * V_broadcast
         int block = 256;
-        int grid  = (nh * hdh + block - 1) / block;
+        int grid = ((nh * hdh) + block - 1) / block;
         mtp_gated_v_broadcast_kernel<<<grid, block, 0, stream>>>(
             static_cast<const __half*>(ws.d_q_full),
             static_cast<const __half*>(ws.d_v_proj),
@@ -830,8 +832,8 @@ bool mtp_attention_row(const MtpHead& mtp, MtpDraftWorkspace& ws, int hidden_dim
         const int group = (nkv > 0) ? (nh / nkv) : 1;
         for (int h = 0; h < nh; ++h) {
             const int kv = (group > 0) ? (h / group) : 0;
-            if (cudaMemcpyAsync(static_cast<__half*>(ws.d_attn_out) + static_cast<size_t>(h) * hdh,
-                                static_cast<const __half*>(ws.d_v_proj) + static_cast<size_t>(kv) * hdh,
+            if (cudaMemcpyAsync(static_cast<__half*>(ws.d_attn_out) + (static_cast<size_t>(h) * hdh),
+                                static_cast<const __half*>(ws.d_v_proj) + (static_cast<size_t>(kv) * hdh),
                                 static_cast<size_t>(hdh) * sizeof(__half), cudaMemcpyDeviceToDevice,
                                 stream) != cudaSuccess)
                 return false;
@@ -1065,7 +1067,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
     // Step 3: concat(emb_n, h_n) into d_fc_in (overwrites the temp emb storage).
     {
         int block = 256;
-        int grid  = (2 * hidden_dim + block - 1) / block;
+        int grid = ((2 * hidden_dim) + block - 1) / block;
         mtp_concat_kernel<<<grid, block, 0, stream>>>(
             static_cast<const __half*>(ws.d_emb_norm),
             static_cast<const __half*>(ws.d_h_norm),
@@ -1208,9 +1210,9 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
                     dn_view = mtp.experts_down[static_cast<size_t>(e_idx)];
                 } else {
                     char* gu_base = static_cast<char*>(mtp.experts_gate_up_packed.data) +
-                                    static_cast<size_t>(e_idx) * gu_per_expert_bytes;
+                                    (static_cast<size_t>(e_idx) * gu_per_expert_bytes);
                     char* dn_base = static_cast<char*>(mtp.experts_down_packed.data) +
-                                    static_cast<size_t>(e_idx) * dn_per_expert_bytes;
+                                    (static_cast<size_t>(e_idx) * dn_per_expert_bytes);
                     gu_view = Tensor(gu_base, QType::F16, 2, gu_shape, true);
                     dn_view = Tensor(dn_base, QType::F16, 2, dn_shape, true);
                 }
@@ -1236,7 +1238,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
                     // swiglu: gate = first half, up = second half → act = silu(gate)*up
                     int64_t half_shape[2] = {1, d_ff_e};
                     Tensor gate_view(ws.d_expert_gate_up, QType::F16, 2, half_shape, true);
-                    Tensor up_view(static_cast<char*>(ws.d_expert_gate_up) + d_ff_e * sizeof(__half),
+                    Tensor up_view(static_cast<char*>(ws.d_expert_gate_up) + (d_ff_e * sizeof(__half)),
                                    QType::F16, 2, half_shape, true);
                     Tensor act_view(ws.d_expert_act, QType::F16, 2, half_shape, true);
                     imp::swiglu(gate_view, up_view, act_view, stream);
@@ -1247,7 +1249,7 @@ bool mtp_draft_step(int prev_token_id, const void* d_h_prev, const MtpHead& mtp,
                     int64_t out_shape[2] = {1, hd};
                     Tensor in_view(ws.d_expert_act, QType::F16, 2, in_shape, true);
                     __half* out_base = static_cast<__half*>(ws.d_expert_outputs) +
-                                       static_cast<ptrdiff_t>(k) * hd;
+                                       (static_cast<ptrdiff_t>(k) * hd);
                     Tensor out_view(out_base, QType::F16, 2, out_shape, true);
                     imp::gemm(in_view, dn_view, out_view, 1.0f, 0.0f, stream);
                 }
@@ -1402,7 +1404,7 @@ bool mtp_feed_dense_rows(const MtpHead& mtp, MtpDraftWorkspace& ws, Tensor& emb_
 
     // 3 - row-wise concat -> d_b_fc_in [n, 2H]
     {
-        int grid = (n * 2 * H + kBlock - 1) / kBlock;
+        int grid = ((n * 2 * H) + kBlock - 1) / kBlock;
         mtp_concat_kernel<<<grid, kBlock, 0, stream>>>(static_cast<const __half*>(ws.d_b_emb),
                                                        static_cast<const __half*>(ws.d_b_h_norm),
                                                        static_cast<__half*>(ws.d_b_fc_in), H, n);
@@ -1458,7 +1460,7 @@ bool mtp_feed_dense_rows(const MtpHead& mtp, MtpDraftWorkspace& ws, Tensor& emb_
         }
         kv_attn();
         if (mtp.attn_output_gate) {
-            int grid = (n * nh * hdh + kBlock - 1) / kBlock;
+            int grid = ((n * nh * hdh) + kBlock - 1) / kBlock;
             mtp_gate_attn_out_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(ws.d_b_attn_out),
                                                                   static_cast<const __half*>(ws.d_b_q_full), nh, hdh,
                                                                   n);
@@ -1470,7 +1472,7 @@ bool mtp_feed_dense_rows(const MtpHead& mtp, MtpDraftWorkspace& ws, Tensor& emb_
             Tensor in_a(ws.d_b_attn_out, QType::F16, 2, in_s, true);
             Tensor out_v(ws.d_b_res, QType::F16, 2, nH, true);
             imp::gemm(in_a, mtp.o_proj, out_v, 1.0f, 0.0f, stream);
-            int grid = (n * H + kBlock - 1) / kBlock;
+            int grid = ((n * H) + kBlock - 1) / kBlock;
             mtp_add_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(ws.d_b_fc_out),
                                                         static_cast<const __half*>(ws.d_b_res), n * H);
             IMP_CUDA_CHECK_LAUNCH();
@@ -1491,7 +1493,7 @@ bool mtp_feed_dense_rows(const MtpHead& mtp, MtpDraftWorkspace& ws, Tensor& emb_
         imp::swiglu(gate_v, up_v, act_v, stream);
         Tensor down_v(ws.d_b_res, QType::F16, 2, nH, true);
         imp::gemm(act_v, mtp.shared_expert_down_proj, down_v, 1.0f, 0.0f, stream);
-        int grid = (n * H + kBlock - 1) / kBlock;
+        int grid = ((n * H) + kBlock - 1) / kBlock;
         mtp_add_shared_kernel<<<grid, kBlock, 0, stream>>>(static_cast<__half*>(ws.d_b_fc_out),
                                                            static_cast<const __half*>(ws.d_b_res), n * H);
         IMP_CUDA_CHECK_LAUNCH();
@@ -1539,7 +1541,7 @@ bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_ro
     // KV append at base..base+n, then the causal per-row scan
     auto kv_attn = [&] {
         {
-            int grid = (n * nkv * hdh + kBlock - 1) / kBlock;
+            int grid = ((n * nkv * hdh) + kBlock - 1) / kBlock;
             mtp_kv_append_kernel<<<grid, kBlock, 0, stream>>>(
                 static_cast<const __half*>(ws.d_b_k),
                 static_cast<const __half*>(ws.d_b_v),
@@ -1578,8 +1580,7 @@ bool mtp_feed_batch(const int32_t* h_tokens, const void* d_hidden_rows, int n_ro
     // per-pair loop leaves behind (the chain reads it when it continues).
     {
         int64_t one[2] = {1, H};
-        Tensor last(static_cast<char*>(ws.d_b_fc_out) +
-                        static_cast<size_t>(n - 1) * H * sizeof(__half),
+        Tensor last(static_cast<char*>(ws.d_b_fc_out) + (static_cast<size_t>(n - 1) * H * sizeof(__half)),
                     QType::F16, 2, one, true);
         Tensor h_final(ws.d_h_final, QType::F16, 2, one, true);
         imp::rmsnorm(last, mtp.final_norm, h_final, 1e-6f, stream);
@@ -1647,7 +1648,7 @@ bool mtp_feed_rows_multislot(const int32_t* h_tokens, const void* d_hidden_all, 
     // KV append and scan at per-row slot and position
     auto kv_attn = [&] {
         {
-            int grid = (n * nkv * hdh + kBlock - 1) / kBlock;
+            int grid = ((n * nkv * hdh) + kBlock - 1) / kBlock;
             mtp_kv_append_rows_kernel<<<grid, kBlock, 0, stream>>>(
                 static_cast<const __half*>(ws.d_b_k), static_cast<const __half*>(ws.d_b_v),
                 static_cast<__half*>(ws.d_k_cache_base), static_cast<__half*>(ws.d_v_cache_base), ws.d_row_slots,

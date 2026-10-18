@@ -166,7 +166,7 @@ bool anthropic_tool_result_unreadable(const json& block, std::string& why) {
         if (ptype == "image") {
             if (anthropic_image_is_readable(p, why))
                 continue;
-            why = "inside a tool_result: " + why;
+            why.insert(0, "inside a tool_result: ");
             return true;
         }
         why = "unsupported block \"" + (ptype.empty() ? std::string("(missing type)") : ptype) +

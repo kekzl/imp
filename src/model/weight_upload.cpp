@@ -267,7 +267,7 @@ static bool upload_scale_slab(void* slab, const std::vector<NvFP4PreQuantWeight*
                               cudaStream_t stream, int& scale_count) {
     for (size_t e = 0; e < grp.size(); ++e) {
         Tensor& ws = grp[e]->weight_scale;
-        void* dst = static_cast<char*>(slab) + e * e_ms;
+        void* dst = static_cast<char*>(slab) + (e * e_ms);
         if (cudaError_t ce = cudaMemcpyAsync(dst, ws.data, e_ms, cudaMemcpyHostToDevice, stream);
             ce != cudaSuccess) {
             IMP_LOG_ERROR("scale slab: cudaMemcpyAsync expert %zu: %s", e, cudaGetErrorString(ce));
@@ -292,10 +292,7 @@ static bool is_wsl2() {
     if (f) {
         std::string line;
         std::getline(f, line);
-        cached = (line.find("microsoft") != std::string::npos ||
-                  line.find("Microsoft") != std::string::npos || line.find("WSL") != std::string::npos)
-                     ? 1
-                     : 0;
+        cached = (line.contains("microsoft") || line.contains("Microsoft") || line.contains("WSL")) ? 1 : 0;
     } else {
         cached = 0;
     }
@@ -601,12 +598,13 @@ static bool upload_mtp_fp8_experts(MtpHead& head, const UploadCtx& ctx) {
         uint8_t* b = static_cast<uint8_t*>(d);
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(b, x.gate_proj.data, mat, cudaMemcpyHostToDevice, ctx.stream));
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(b + mat, x.up_proj.data, mat, cudaMemcpyHostToDevice, ctx.stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(b + 2 * mat, x.down_proj.data, mat, cudaMemcpyHostToDevice, ctx.stream));
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpyAsync(b + (2 * mat), x.down_proj.data, mat, cudaMemcpyHostToDevice, ctx.stream));
         gu_tab[size_t{2} * e] = b;
-        gu_tab[size_t{2} * e + 1] = b + mat;
-        dn_tab[e] = b + 2 * mat;
+        gu_tab[(size_t{2} * e) + 1] = b + mat;
+        dn_tab[e] = b + (2 * mat);
         widen(x.gate_scale_inv, &gu_s[(2 * static_cast<size_t>(e)) * gu_sc], gu_sc);
-        widen(x.up_scale_inv, &gu_s[(2 * static_cast<size_t>(e) + 1) * gu_sc], gu_sc);
+        widen(x.up_scale_inv, &gu_s[((2 * static_cast<size_t>(e)) + 1) * gu_sc], gu_sc);
         widen(x.down_scale_inv, &dn_s[static_cast<size_t>(e) * gu_sc], gu_sc);
     }
     // Tables and scales: four small uploads, synchronous so the host vectors may die here.
@@ -741,7 +739,7 @@ static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
                                   (long long)rows, (long long)cols);
                     return false;
                 }
-                char* dst = static_cast<char*>(slab) + static_cast<size_t>(e) * per;
+                char* dst = static_cast<char*>(slab) + (static_cast<size_t>(e) * per);
                 IMP_CUDA_CHECK_LOG(
                     cudaMemcpyAsync(dst, parts[e].data, per, cudaMemcpyDeviceToDevice, ctx.stream));
             }
@@ -751,7 +749,7 @@ static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
             // Repoint the per-expert views into the slab; the standalone
             // allocations stay owned by gpu_allocs and are freed at teardown.
             for (int64_t e = 0; e < ne; ++e)
-                parts[e].data = static_cast<char*>(slab) + static_cast<size_t>(e) * per;
+                parts[e].data = static_cast<char*>(slab) + (static_cast<size_t>(e) * per);
             return true;
         };
         ok &= stack(head.experts_up, head.experts_up_stacked, "experts_up");
@@ -1276,7 +1274,7 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i, const UploadCtx
         int64_t inner = b.shape[0];
         int64_t n_heads = c.shape[0];
         int64_t d_model = a.shape[1];
-        int64_t total_out = conv_channels + inner + 2 * n_heads;
+        int64_t total_out = conv_channels + inner + (2 * n_heads);
         size_t es = 2;  // F16 / BF16 = 2 bytes
         size_t total_bytes = static_cast<size_t>(total_out) * d_model * es;
         void* d_packed = nullptr;
@@ -1417,8 +1415,7 @@ static void decide_expert_layer_placement_(const std::vector<size_t>& layer_expe
     size_t total_reserve = expert_reserve_bytes + overhead;
     size_t budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
     int force_host_n = process_diag_moe_force_host_experts();
-    if (force_host_n < 0)
-        force_host_n = 0;
+    force_host_n = std::max(force_host_n, 0);
 
     // NVFP4 experts that do not all fit: every layer goes to the host and the VRAM the
     // partial upload would have taken becomes expert-cache slots. A resident layer buys a
@@ -1662,7 +1659,7 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             expert_vec.resize(n_experts);
             size_t expert_bytes = static_cast<size_t>(rows) * cols * sizeof(uint16_t);
             for (int e = 0; e < n_experts; e++) {
-                char* ptr = static_cast<char*>(flat.data) + e * expert_bytes;
+                char* ptr = static_cast<char*>(flat.data) + (e * expert_bytes);
                 int64_t eshape[4] = {rows, cols, 0, 0};
                 expert_vec[e] = Tensor(ptr, QType::F16, 2, eshape, true);
             }
@@ -1715,9 +1712,9 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
             const char* src_base = static_cast<const char*>(L.expert_gate_packed.data);
             for (int64_t e = 0; e < n_exp; ++e) {
                 // gate half = rows [0, half_rows)
-                memcpy(static_cast<char*>(gate_buf) + e * dst_pitch, src_base + e * src_pitch, dst_pitch);
+                memcpy(static_cast<char*>(gate_buf) + (e * dst_pitch), src_base + (e * src_pitch), dst_pitch);
                 // up half = rows [half_rows, fused_rows)
-                memcpy(static_cast<char*>(up_buf) + e * dst_pitch, src_base + e * src_pitch + dst_pitch,
+                memcpy(static_cast<char*>(up_buf) + (e * dst_pitch), src_base + (e * src_pitch) + dst_pitch,
                        dst_pitch);
             }
 
@@ -1784,8 +1781,8 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                 // With dst_pitch < src_pitch expert e+1's dst overlaps expert e's src region, so
                 // experts are walked forward and copied one at a time, not as one 2D launch.
                 for (int64_t e = 1; e < n_exp; ++e) {  // e=0 already at the right offset
-                    cudaError_t cp_e = cudaMemcpyAsync(const_cast<char*>(src_base) + e * dst_pitch,
-                                                       src_base + e * src_pitch, dst_pitch,
+                    cudaError_t cp_e = cudaMemcpyAsync(const_cast<char*>(src_base) + (e * dst_pitch),
+                                                       src_base + (e * src_pitch), dst_pitch,
                                                        cudaMemcpyDeviceToDevice, ctx.stream);
                     if (cp_e != cudaSuccess) {
                         IMP_LOG_ERROR("Gemma 4: gate compact memcpy failed (layer %d, expert %ld): %s", i,
@@ -2211,10 +2208,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                     float v = p[i];
                     if (v == 0.0f)
                         ws2_zero++;
-                    if (v < ws2_min)
-                        ws2_min = v;
-                    if (v > ws2_max)
-                        ws2_max = v;
+                    ws2_min = std::min(ws2_min, v);
+                    ws2_max = std::max(ws2_max, v);
                     ws2_sum += v;
                     ws2_count++;
                 }
@@ -2234,10 +2229,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream, size_t 
                     float v = p[i];
                     if (v == 0.0f)
                         is_zero++;
-                    if (v < is_min)
-                        is_min = v;
-                    if (v > is_max)
-                        is_max = v;
+                    is_min = std::min(is_min, v);
+                    is_max = std::max(is_max, v);
                     is_sum += v;
                     is_count++;
                 }

@@ -389,7 +389,7 @@ bool Engine::init_kv_cache() {
                 } else {
                     IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
                 }
-                config_.use_fp8_prefill = 0;
+                config_.use_fp8_prefill = false;
                 executor_->disable_fp8_prefill();
             }
         }
@@ -443,7 +443,8 @@ bool Engine::init_kv_cache() {
         const size_t imma_used = mmq_q8_imma_plane_bytes_used();
         const size_t imma_outstanding = yield_imma_planes_to_one_sequence(
             vram_budget, imma_used, free_now,
-            static_cast<size_t>(kv_blocks_per_sequence(config_.max_seq_len, kv_bs)) * per_block_total_bytes +
+            (static_cast<size_t>(kv_blocks_per_sequence(config_.max_seq_len, kv_bs)) *
+             per_block_total_bytes) +
                 vram_allocator_headroom(total_now),
             config_.max_seq_len);
         if (imma_outstanding > 0) {

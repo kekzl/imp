@@ -37,7 +37,7 @@ std::vector<int32_t> ChatTemplate::tokenize_rendered(const Tokenizer& tok,
     bool rendered_has_bos = false;
     if (bos_id_ >= 0) {
         const std::string& bos_text = tok.token_text(bos_id_);
-        if (!bos_text.empty() && rendered.find(bos_text) != std::string::npos)
+        if (!bos_text.empty() && rendered.contains(bos_text))
             rendered_has_bos = true;
     }
     if (tok.add_bos() && !rendered_has_bos) {

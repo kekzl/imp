@@ -22,7 +22,7 @@ __device__ __forceinline__ bool plp_better(float av, int ai, float bv, int bi) {
 __device__ __forceinline__ const float* plp_slab_row(const float* logits, int rows, int V, int slab_w,
                                                      int row, int n0, int& w) {
     w = min(slab_w, V - n0);
-    return logits + static_cast<int64_t>(n0) * rows + static_cast<int64_t>(row) * w;
+    return logits + (static_cast<int64_t>(n0) * rows) + (static_cast<int64_t>(row) * w);
 }
 
 // Merges thread tid's list with thread o's list into tid's list (top_n best, both sorted).
@@ -33,8 +33,8 @@ __device__ __forceinline__ void plp_merge_lists(float* s_v, int* s_i, int tid, i
 #pragma unroll
     for (int k = 0; k < kPlpMaxTopN; ++k) {
         if (k < top_n) {
-            const float av = s_v[a * kPlpRowThreads + tid], bv = s_v[b * kPlpRowThreads + o];
-            const int ai = s_i[a * kPlpRowThreads + tid], bi = s_i[b * kPlpRowThreads + o];
+            const float av = s_v[(a * kPlpRowThreads) + tid], bv = s_v[(b * kPlpRowThreads) + o];
+            const int ai = s_i[(a * kPlpRowThreads) + tid], bi = s_i[(b * kPlpRowThreads) + o];
             const bool take_a = plp_better(av, ai, bv, bi);
             mv[k] = take_a ? av : bv;
             mi[k] = take_a ? ai : bi;
@@ -45,8 +45,8 @@ __device__ __forceinline__ void plp_merge_lists(float* s_v, int* s_i, int tid, i
 #pragma unroll
     for (int k = 0; k < kPlpMaxTopN; ++k) {
         if (k < top_n) {
-            s_v[k * kPlpRowThreads + tid] = mv[k];
-            s_i[k * kPlpRowThreads + tid] = mi[k];
+            s_v[(k * kPlpRowThreads) + tid] = mv[k];
+            s_i[(k * kPlpRowThreads) + tid] = mi[k];
         }
     }
 }
@@ -55,16 +55,16 @@ __device__ __forceinline__ void plp_merge_lists(float* s_v, int* s_i, int tid, i
 __device__ __forceinline__ void plp_insert(float* s_v, int* s_i, int tid, int top_n, float v, int j,
                                            float& kv, int& ki) {
     int pos = top_n - 1;
-    while (pos > 0 &&
-           plp_better(v, j, s_v[(pos - 1) * kPlpRowThreads + tid], s_i[(pos - 1) * kPlpRowThreads + tid])) {
-        s_v[pos * kPlpRowThreads + tid] = s_v[(pos - 1) * kPlpRowThreads + tid];
-        s_i[pos * kPlpRowThreads + tid] = s_i[(pos - 1) * kPlpRowThreads + tid];
+    while (pos > 0 && plp_better(v, j, s_v[((pos - 1) * kPlpRowThreads) + tid],
+                                 s_i[((pos - 1) * kPlpRowThreads) + tid])) {
+        s_v[(pos * kPlpRowThreads) + tid] = s_v[((pos - 1) * kPlpRowThreads) + tid];
+        s_i[(pos * kPlpRowThreads) + tid] = s_i[((pos - 1) * kPlpRowThreads) + tid];
         --pos;
     }
-    s_v[pos * kPlpRowThreads + tid] = v;
-    s_i[pos * kPlpRowThreads + tid] = j;
-    kv = s_v[(top_n - 1) * kPlpRowThreads + tid];
-    ki = s_i[(top_n - 1) * kPlpRowThreads + tid];
+    s_v[(pos * kPlpRowThreads) + tid] = v;
+    s_i[(pos * kPlpRowThreads) + tid] = j;
+    kv = s_v[((top_n - 1) * kPlpRowThreads) + tid];
+    ki = s_i[((top_n - 1) * kPlpRowThreads) + tid];
 }
 
 __global__ void __launch_bounds__(kPlpRowThreads) prompt_logprobs_rows_kernel(
@@ -73,7 +73,7 @@ __global__ void __launch_bounds__(kPlpRowThreads) prompt_logprobs_rows_kernel(
     float* __restrict__ out_top_lp, float* __restrict__ out_entropy) {
     extern __shared__ unsigned char plp_smem[];
     float* s_v = reinterpret_cast<float*>(plp_smem);  // [top_n][threads]
-    int* s_i = reinterpret_cast<int*>(s_v + static_cast<size_t>(top_n) * kPlpRowThreads);
+    int* s_i = reinterpret_cast<int*>(s_v + (static_cast<size_t>(top_n) * kPlpRowThreads));
     __shared__ float s_m[kPlpRowThreads];
     __shared__ double s_s[kPlpRowThreads];
     __shared__ double s_t[kPlpRowThreads];
@@ -88,8 +88,8 @@ __global__ void __launch_bounds__(kPlpRowThreads) prompt_logprobs_rows_kernel(
     const float tv = plp_slab_row(logits, rows, V, slab_w, row, tn0, tw)[target - tn0];
 
     for (int k = 0; k < top_n; ++k) {
-        s_v[k * kPlpRowThreads + tid] = -INFINITY;
-        s_i[k * kPlpRowThreads + tid] = INT_MAX;
+        s_v[(k * kPlpRowThreads) + tid] = -INFINITY;
+        s_i[(k * kPlpRowThreads) + tid] = INT_MAX;
     }
     float kv = -INFINITY;  // this thread's N-th best so far
     int ki = INT_MAX;
@@ -105,7 +105,7 @@ __global__ void __launch_bounds__(kPlpRowThreads) prompt_logprobs_rows_kernel(
             const int j = n0 + c;
             if (v > m) {
                 const double r = static_cast<double>(expf(m - v));
-                s = s * r + 1.0;
+                s = (s * r) + 1.0;
                 if (want_h)
                     t = (m > -INFINITY ? t * r : 0.0) + static_cast<double>(v);
                 m = v;
@@ -149,10 +149,10 @@ __global__ void __launch_bounds__(kPlpRowThreads) prompt_logprobs_rows_kernel(
         out_lp[row] = static_cast<float>(static_cast<double>(tv) - lse);
         out_rank[row] = s_c[0] + 1;
         if (want_h)  // H = lse - E[x], nats
-            out_entropy[row] = static_cast<float>(lse - s_t[0] / s_s[0]);
+            out_entropy[row] = static_cast<float>(lse - (s_t[0] / s_s[0]));
     }
     if (tid < top_n) {
-        const int64_t o = static_cast<int64_t>(row) * top_n + tid;
+        const int64_t o = (static_cast<int64_t>(row) * top_n) + tid;
         out_top_ids[o] = s_i[static_cast<ptrdiff_t>(tid * kPlpRowThreads)];
         out_top_lp[o] = static_cast<float>(
             static_cast<double>(s_v[static_cast<ptrdiff_t>(tid * kPlpRowThreads)]) - lse);

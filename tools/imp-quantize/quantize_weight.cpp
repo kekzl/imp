@@ -78,7 +78,7 @@ std::expected<Quantized, std::string> WeightQuantizer::quantize(
         cs != col_scale.end() && cs->second.size() == static_cast<size_t>(K))
         for (int64_t i = 0; i < K; i++)
             for (int64_t j = 0; j < K; j++)
-                H[static_cast<size_t>(i) * K + j] /= cs->second[i] * cs->second[j];
+                H[(static_cast<size_t>(i) * K) + j] /= cs->second[i] * cs->second[j];
     const float scale = forced_scale > 0.0f ? forced_scale
                                             : export_tensor_scale(fp16_absmax(h.data(), h.size()));
     auto g = gptq::quantize_nvfp4(h.data(), N, K, std::move(H), scale, damp_);

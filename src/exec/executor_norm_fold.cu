@@ -12,11 +12,11 @@ namespace imp {
 
 namespace {
 // Two producers per layer; the slack covers a final norm and odd layer shapes.
-int norm_fold_slots(int n_layers) { return 2 * n_layers + 4; }
+int norm_fold_slots(int n_layers) { return (2 * n_layers) + 4; }
 // Kernel, not cudaMemsetAsync: a memset node in imp-server's AsyncGraphLoop conditional body
 // faults with an illegal address (degen_suite 8/14 FAIL with memset, 50/50 with this kernel).
 __global__ void norm_fold_zero_kernel(unsigned long long* p, int n) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (i < n)
         p[i] = 0ull;
 }

@@ -50,8 +50,8 @@ void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
     }
     const int rows = static_cast<int>(lm.shape[0]);
     const int cols = static_cast<int>(lm.shape[1]);
-    const size_t code_bytes = (static_cast<size_t>(rows) * cols + 255) & ~static_cast<size_t>(255);
-    const size_t total = code_bytes + static_cast<size_t>(rows) * sizeof(float);
+    const size_t code_bytes = ((static_cast<size_t>(rows) * cols) + 255) & ~static_cast<size_t>(255);
+    const size_t total = code_bytes + (static_cast<size_t>(rows) * sizeof(float));
     // Past the headroom like the NVFP4 head (raw cudaMalloc): Phase 4b then frees the source head.
     auto* bulk = static_cast<uint8_t*>(vram_alloc_force(vram_alloc_, total, "fp8_lm_head"));
     if (!bulk) {
@@ -75,9 +75,9 @@ void QuantPipeline::fp8_lm_head_cache_(cudaStream_t stream) {
         // Serialized on `stream`: each slab's quantize finishes before the next dequant reuses the scratch.
         for (int r0 = 0; r0 < rows; r0 += slab) {
             const int n = std::min(slab, rows - r0);
-            dequant_gpu(static_cast<const uint8_t*>(lm.data) + static_cast<size_t>(r0) * row_src,
+            dequant_gpu(static_cast<const uint8_t*>(lm.data) + (static_cast<size_t>(r0) * row_src),
                         qscratch_->dequant, q, n, cols, stream);
-            quantize_fp8_rows_async(qscratch_->dequant, bulk + static_cast<size_t>(r0) * cols, n, cols,
+            quantize_fp8_rows_async(qscratch_->dequant, bulk + (static_cast<size_t>(r0) * cols), n, cols,
                                     scales + r0, stream);
         }
     }

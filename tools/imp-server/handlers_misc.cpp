@@ -161,7 +161,7 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res, Serv
     }
 
     std::vector<int32_t> tokens = body["tokens"].get<std::vector<int32_t>>();
-    std::vector<char> buf(tokens.size() * 32 + 256);
+    std::vector<char> buf((tokens.size() * 32) + 256);
     ImpError err = imp_detokenize(snap_model, tokens.data(), static_cast<int>(tokens.size()), buf.data(),
                                   buf.size());
     if (err != IMP_SUCCESS) {
@@ -896,7 +896,7 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res, Serv
         std::vector<float> embedding(d_model, 0.0f);
         for (int t = 0; t < n_tokens; ++t) {
             for (int d = 0; d < d_model; ++d) {
-                embedding[d] += imp::half_to_float(h_hidden[t * d_model + d]);
+                embedding[d] += imp::half_to_float(h_hidden[(t * d_model) + d]);
             }
         }
         float inv_n = 1.0f / static_cast<float>(n_tokens);

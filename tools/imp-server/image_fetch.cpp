@@ -166,8 +166,8 @@ FetchResult fetch_remote_image(const std::string& url, bool allow_remote) {
         return out;
     }
 
-    const bool is_https = (url.rfind("https://", 0) == 0);
-    if (!is_https && url.rfind("http://", 0) != 0) {
+    const bool is_https = (url.starts_with("https://"));
+    if (!is_https && !url.starts_with("http://")) {
         out.detail = "scheme is not http/https";
         return out;
     }

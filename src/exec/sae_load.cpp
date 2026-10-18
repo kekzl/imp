@@ -46,7 +46,7 @@ bool load_sae_dir(const std::string& dir, int d_model, int n_layers, SaeHost& ou
     // "model.layers.N.output": the residual after decoder layer N.
     constexpr const char* kPre = "model.layers.";
     constexpr const char* kPost = ".output";
-    if (hook.rfind(kPre, 0) != 0 || hook.size() <= std::strlen(kPre) + std::strlen(kPost) ||
+    if (!hook.starts_with(kPre) || hook.size() <= std::strlen(kPre) + std::strlen(kPost) ||
         hook.compare(hook.size() - std::strlen(kPost), std::strlen(kPost), kPost) != 0)
         return fail("hf_hook_point_in \"" + hook + "\" is not model.layers.N.output");
     const std::string num = hook.substr(std::strlen(kPre),

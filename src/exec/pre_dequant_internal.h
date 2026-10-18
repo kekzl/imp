@@ -106,15 +106,15 @@ inline bool has_host_resident_experts(const Model& m) {
 
 // Infer StorageTier from which wcache_ map the source pointer landed in.
 inline StorageTier infer_tier_from_wcache(const WeightCaches& wc, const void* src_ptr) {
-    if (wc.cutlass_nvfp4.count(src_ptr))
+    if (wc.cutlass_nvfp4.contains(src_ptr))
         return StorageTier::CUTLASS_NVFP4;
-    if (wc.cutlass_mxfp4.count(src_ptr))
+    if (wc.cutlass_mxfp4.contains(src_ptr))
         return StorageTier::MXFP4;
-    if (wc.nvfp4.count(src_ptr))
+    if (wc.nvfp4.contains(src_ptr))
         return StorageTier::NVFP4;
-    if (wc.fp8.count(src_ptr))
+    if (wc.fp8.contains(src_ptr))
         return StorageTier::FP8;
-    if (wc.fp16.count(src_ptr))
+    if (wc.fp16.contains(src_ptr))
         return StorageTier::FP16;
     return StorageTier::Undefined;
 }
@@ -201,7 +201,7 @@ inline void deduct_budget(size_t& budget, size_t amount) {
     int K = static_cast<int>(w_a.shape[1]);
     size_t one_sz = static_cast<size_t>(a_rows) * K * sizeof(half);
 
-    if (total_cache_bytes + 2 * one_sz > remaining_budget) {
+    if (total_cache_bytes + (2 * one_sz) > remaining_budget) {
         should_stop = true;
         return false;
     }

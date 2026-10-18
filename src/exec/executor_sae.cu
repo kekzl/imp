@@ -22,12 +22,12 @@ constexpr int kThreads = 256;
 __global__ void sae_gather_kernel(const half* __restrict__ h16, const float* __restrict__ h32,
                                   const int* __restrict__ rows, int base, int t_n, int d,
                                   float* __restrict__ x) {
-    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    const int k = (blockIdx.x * blockDim.x) + threadIdx.x;
     const int t = blockIdx.y;
     if (k >= d || t >= t_n)
         return;
-    const int64_t src = static_cast<int64_t>(rows[base + t]) * d + k;
-    x[static_cast<int64_t>(t) * d + k] = h32 ? h32[src] : __half2float(h16[src]);
+    const int64_t src = (static_cast<int64_t>(rows[base + t]) * d) + k;
+    x[(static_cast<int64_t>(t) * d) + k] = h32 ? h32[src] : __half2float(h16[src]);
 }
 
 // a[t, j] = pre * (pre > threshold[j]), pre = b_enc[j] + sum_k x[t, k] w_enc[k, j]. One thread
@@ -35,7 +35,7 @@ __global__ void sae_gather_kernel(const half* __restrict__ h16, const float* __r
 __global__ void sae_encode_kernel(const float* __restrict__ x, const float* __restrict__ w_enc,
                                   const float* __restrict__ b_enc, const float* __restrict__ thr, int t_n,
                                   int d, int width, float* __restrict__ acts) {
-    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (j >= width)
         return;
     float acc[kSaeTile];
@@ -43,17 +43,17 @@ __global__ void sae_encode_kernel(const float* __restrict__ x, const float* __re
     for (int t = 0; t < kSaeTile; t++)
         acc[t] = b_enc[j];
     for (int k = 0; k < d; k++) {
-        const float w = w_enc[static_cast<int64_t>(k) * width + j];
+        const float w = w_enc[(static_cast<int64_t>(k) * width) + j];
 #pragma unroll
         for (int t = 0; t < kSaeTile; t++)
             if (t < t_n)
-                acc[t] = fmaf(x[static_cast<int64_t>(t) * d + k], w, acc[t]);
+                acc[t] = fmaf(x[(static_cast<int64_t>(t) * d) + k], w, acc[t]);
     }
     const float th = thr[j];
 #pragma unroll
     for (int t = 0; t < kSaeTile; t++)
         if (t < t_n)
-            acts[static_cast<int64_t>(t) * width + j] = acc[t] > th ? acc[t] : 0.0f;
+            acts[(static_cast<int64_t>(t) * width) + j] = acc[t] > th ? acc[t] : 0.0f;
 }
 
 // err[slot] += (||x - x_hat||^2, ||x||^2) for readout rows, x_hat = b_dec + a w_dec. Zero
@@ -66,15 +66,15 @@ __global__ void sae_err_kernel(const float* __restrict__ x, const float* __restr
     const int s = slot[base + t];
     if (s < 0)
         return;
-    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    const int k = (blockIdx.x * blockDim.x) + threadIdx.x;
     float e2 = 0.0f, n2 = 0.0f;
     if (k < d) {
-        const float* a = acts + static_cast<int64_t>(t) * width;
+        const float* a = acts + (static_cast<int64_t>(t) * width);
         float xh = b_dec[k];
         for (int j = 0; j < width; j++)
             if (a[j] != 0.0f)
-                xh = fmaf(a[j], w_dec[static_cast<int64_t>(j) * d + k], xh);
-        const float xv = x[static_cast<int64_t>(t) * d + k];
+                xh = fmaf(a[j], w_dec[(static_cast<int64_t>(j) * d) + k], xh);
+        const float xv = x[(static_cast<int64_t>(t) * d) + k];
         e2 = (xv - xh) * (xv - xh);
         n2 = xv * xv;
     }
@@ -94,8 +94,8 @@ __global__ void sae_err_kernel(const float* __restrict__ x, const float* __restr
             se += red[0][w];
             sn += red[1][w];
         }
-        atomicAdd(err + 2 * static_cast<int64_t>(s), se);
-        atomicAdd(err + 2 * static_cast<int64_t>(s) + 1, sn);
+        atomicAdd(err + (2 * static_cast<int64_t>(s)), se);
+        atomicAdd(err + (2 * static_cast<int64_t>(s)) + 1, sn);
     }
 }
 
@@ -106,13 +106,13 @@ __global__ void sae_clamp_kernel(half* __restrict__ h16, float* __restrict__ h32
                                  const float* __restrict__ vals, int base, int d, int width) {
     const int t = blockIdx.x;
     const int g = base + t;
-    float* a = acts + static_cast<int64_t>(t) * width;
+    float* a = acts + (static_cast<int64_t>(t) * width);
     const int64_t row = static_cast<int64_t>(rows[g]) * d;
     for (int c = off[g]; c < off[g + 1]; c++) {
         const int j = ids[c];
         const float delta = vals[c] - a[j];
         for (int k = threadIdx.x; k < d; k += blockDim.x) {
-            const float add = delta * w_dec[static_cast<int64_t>(j) * d + k];
+            const float add = delta * w_dec[(static_cast<int64_t>(j) * d) + k];
             h16[row + k] = __float2half(__half2float(h16[row + k]) + add);
             if (h32)
                 h32[row + k] += add;
@@ -139,13 +139,13 @@ void GraphExecutor::set_sae_rows(std::vector<SaeRowSpec> rows, cudaStream_t stre
     const int r_n = static_cast<int>(sae_rows_.size());
     auto& hi = sae_h_int_;
     auto& hf = sae_h_vals_;
-    hi.assign(3 * static_cast<size_t>(r_n) + 1, 0);
+    hi.assign((3 * static_cast<size_t>(r_n)) + 1, 0);
     hf.clear();
     std::vector<int32_t> ids;
     for (int r = 0; r < r_n; r++) {
         hi[r] = sae_rows_[r].row;
         hi[r_n + r] = sae_rows_[r].readout ? sae_n_readout_++ : -1;
-        hi[2 * r_n + r] = static_cast<int>(ids.size());
+        hi[(2 * r_n) + r] = static_cast<int>(ids.size());
         for (const auto& [j, v] : sae_rows_[r].clamp)
             if (j >= 0 && j < sae_->width) {
                 ids.push_back(j);
@@ -192,9 +192,9 @@ void GraphExecutor::sae_apply_(int n, cudaStream_t stream) {
     const int* idx = sae_idx_.get();
     const int* rows = idx;
     const int* slot = idx + r_n;
-    const int* off = idx + 2 * static_cast<ptrdiff_t>(r_n);
-    const int* ids = idx + 3 * static_cast<ptrdiff_t>(r_n) + 1;
-    float* out_err = sae_out_.get() + static_cast<size_t>(sae_n_readout_) * w;
+    const int* off = idx + (2 * static_cast<ptrdiff_t>(r_n));
+    const int* ids = idx + (3 * static_cast<ptrdiff_t>(r_n)) + 1;
+    float* out_err = sae_out_.get() + (static_cast<size_t>(sae_n_readout_) * w);
     for (int base = 0; base < r_n; base += kSaeTile) {
         const int t_n = std::min(kSaeTile, r_n - base);
         bool any_ro = false, any_clamp = false;
@@ -224,8 +224,8 @@ void GraphExecutor::sae_apply_(int n, cudaStream_t stream) {
         for (int t = 0; t < t_n; t++) {
             const int s = sae_h_int_[r_n + base + t];
             if (s >= 0)
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sae_out_.get() + static_cast<size_t>(s) * w,
-                                                   sae_acts_.get() + static_cast<size_t>(t) * w,
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sae_out_.get() + (static_cast<size_t>(s) * w),
+                                                   sae_acts_.get() + (static_cast<size_t>(t) * w),
                                                    w * sizeof(float), cudaMemcpyDeviceToDevice, stream));
         }
     }
@@ -248,7 +248,7 @@ bool GraphExecutor::sae_readout(SaeReadout& out, cudaStream_t stream) {
     out.width = sae_->width;
     out.acts.assign(host.begin(), host.begin() + static_cast<std::ptrdiff_t>(sae_n_readout_ * w));
     for (int r = 0; r < sae_n_readout_; r++) {
-        const size_t e = static_cast<size_t>(sae_n_readout_) * w + 2 * static_cast<size_t>(r);
+        const size_t e = (static_cast<size_t>(sae_n_readout_) * w) + (2 * static_cast<size_t>(r));
         const float e2 = host[e], n2 = host[e + 1];
         out.rel_err.push_back(n2 > 0.0f ? std::sqrt(e2 / n2) : 0.0f);
     }

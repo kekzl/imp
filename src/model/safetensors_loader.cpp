@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -183,15 +184,15 @@ static ModelArch detect_arch_from_weights(const std::unordered_map<std::string, 
 
     for (const auto& kv : tensors) {
         const auto& name = kv.first;
-        if (name.find("model.layers") != std::string::npos)
+        if (name.contains("model.layers"))
             has_layers = true;
-        if (name.find("block_sparse_moe") != std::string::npos)
+        if (name.contains("block_sparse_moe"))
             has_block_sparse_moe = true;
-        if (name.find("mlp.experts") != std::string::npos)
+        if (name.contains("mlp.experts"))
             has_mlp_experts = true;
-        if (name.find("mamba") != std::string::npos || name.find("ssm") != std::string::npos)
+        if (name.contains("mamba") || name.contains("ssm"))
             has_ssm = true;
-        if (name.find(".qweight") != std::string::npos)
+        if (name.contains(".qweight"))
             has_gptq = true;
     }
 
@@ -226,7 +227,7 @@ static int extract_layer_index(const std::string& name) {
     int idx = 0;
     size_t i = plen;
     while (i < name.size() && name[i] >= '0' && name[i] <= '9') {
-        idx = idx * 10 + (name[i] - '0');
+        idx = (idx * 10) + (name[i] - '0');
         if (idx > kMaxModelLayers)
             return -1;
         i++;
@@ -242,8 +243,7 @@ static int infer_n_layers(const std::unordered_map<std::string, Tensor>& tensors
     int max_idx = -1;
     for (const auto& kv : tensors) {
         int idx = extract_layer_index(kv.first);
-        if (idx > max_idx)
-            max_idx = idx;
+        max_idx = std::max(max_idx, idx);
     }
     return max_idx + 1;  // 0-indexed, so count = max + 1
 }
@@ -437,7 +437,7 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
                 // Embedded MTP head: keep the tensor, but route it to the
                 // separate MTP map under its raw mtp.* name.
                 if (mtp_out != nullptr && name_is_mtp_tensor(tensor_name)) {
-                    if (tensor_name.rfind("model.mtp.", 0) == 0)
+                    if (tensor_name.starts_with("model.mtp."))
                         tensor_name = tensor_name.substr(6);
                     divert_to_mtp = true;
                 }
@@ -612,7 +612,7 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
 bool safetensors_shard_name_is_safe(const std::string& name) {
     if (name.empty())
         return false;
-    if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos)
+    if (name.contains('/') || name.contains('\\'))
         return false;
     if (name == "." || name == "..")
         return false;
@@ -719,7 +719,7 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
         std::string shard_path = model_dir + "/" + shard_list[i];
         if (!load_shard(shard_path, per_shard_maps[i], per_shard_info[i], llm_compressor_format, keep_vision,
                         per_shard_counters[i], keep_mtp ? &per_shard_mtp[i] : nullptr,
-                        sparse_shards.count(shard_list[i]) > 0)) {
+                        sparse_shards.contains(shard_list[i]))) {
             IMP_LOG_ERROR("Failed to load shard: %s", shard_path.c_str());
             any_failure.store(true);
         }
@@ -831,14 +831,14 @@ static bool nvfp4_inventory_refuses(const std::unordered_map<std::string, Tensor
     namespace pol = imp::nvfp4_policy;
     std::vector<pol::SlotObservation> slots;
     for (const auto& [name, t] : tensor_map) {
-        if (name.size() < 7 || name.compare(name.size() - 7, 7, ".weight") != 0)
+        if (name.size() < 7 || !name.ends_with(".weight"))
             continue;
         const std::string module = name.substr(0, name.size() - 7);
         pol::SlotObservation s;
         s.name = name;
         s.ndim = t.ndim;
-        s.has_micro_scale = tensor_map.count(module + ".weight_scale") > 0;
-        s.has_global_scale = tensor_map.count(module + ".weight_scale_2") > 0;
+        s.has_micro_scale = tensor_map.contains(module + ".weight_scale");
+        s.has_global_scale = tensor_map.contains(module + ".weight_scale_2");
         // A packed NVFP4 weight still carries its on-disk [N, K/2] byte width
         // here; the logical K is what the group-size rule is about.
         s.K = (t.ndim == 2) ? (s.has_micro_scale ? 2 * t.shape[1] : t.shape[1]) : 0;
@@ -929,7 +929,7 @@ static bool gptq_refuses(Model& model, const std::unordered_map<std::string, Ten
     }
     size_t n_qweight = 0;
     for (const auto& kv : tensor_map)
-        if (kv.first.size() > 8 && kv.first.compare(kv.first.size() - 8, 8, ".qweight") == 0)
+        if (kv.first.size() > 8 && kv.first.ends_with(".qweight"))
             ++n_qweight;
     if (n_proj != n_qweight) {
         IMP_LOG_ERROR(
@@ -1092,7 +1092,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
                 for (const auto& kv : tensor_map) {
                     if (!name_is_mtp_tensor(kv.first))
                         continue;
-                    const bool prefixed = kv.first.rfind("model.mtp.", 0) == 0;
+                    const bool prefixed = kv.first.starts_with("model.mtp.");
                     embedded_mtp_map.emplace(prefixed ? kv.first.substr(6) : kv.first, kv.second);
                 }
             }
@@ -1492,10 +1492,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
                 return nullptr;
             }
             for (int64_t e = 0; e < ne; e++) {
-                const uint16_t* row = src + e * two_ff;
+                const uint16_t* row = src + (e * two_ff);
                 for (int64_t i = 0; i < ff; i++) {
-                    g[e * ff + i] = row[2 * i];
-                    u[e * ff + i] = row[2 * i + 1];
+                    g[(e * ff) + i] = row[2 * i];
+                    u[(e * ff) + i] = row[(2 * i) + 1];
                 }
             }
             model->host_owned_buffers_.push_back(g);

@@ -484,7 +484,7 @@ struct EndThinkSim {
     bool in_think = true;
     bool end_requested = false;
     int harmony_idx = -1;
-    std::vector<int32_t> out;
+    std::vector<int32_t> out{};
 
     int32_t step(int32_t model_tok) {
         const bool due = harmony_idx < 0 && end_think_due(end_requested, in_think, end_id);

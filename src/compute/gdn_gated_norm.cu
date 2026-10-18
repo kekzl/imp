@@ -24,7 +24,7 @@ __global__ void gdn_rmsnorm_gated_silu_kernel(
         return;
 
     const int inner = n_heads * head_dim;
-    const int base = t * inner + h * head_dim;
+    const int base = (t * inner) + (h * head_dim);
 
     // Load y value
     pdl_wait();
@@ -39,7 +39,7 @@ __global__ void gdn_rmsnorm_gated_silu_kernel(
             s_buf[d] += s_buf[d + stride];
         __syncthreads();
     }
-    float inv_rms = rsqrtf(s_buf[0] / static_cast<float>(head_dim) + eps);
+    float inv_rms = rsqrtf((s_buf[0] / static_cast<float>(head_dim)) + eps);
 
     // RMSNorm: normalize and scale by weight
     float normed = val * inv_rms * __half2float(weight[d]);
@@ -67,7 +67,7 @@ __global__ void gdn_rmsnorm_gated_silu_fp32inout_kernel(float* __restrict__ y_fp
         return;
 
     const int inner = n_heads * head_dim;
-    const int base = t * inner + h * head_dim;
+    const int base = (t * inner) + (h * head_dim);
 
     float val = y_fp32_in[base + d];
 
@@ -79,7 +79,7 @@ __global__ void gdn_rmsnorm_gated_silu_fp32inout_kernel(float* __restrict__ y_fp
             s_buf[d] += s_buf[d + stride];
         __syncthreads();
     }
-    float inv_rms = rsqrtf(s_buf[0] / static_cast<float>(head_dim) + eps);
+    float inv_rms = rsqrtf((s_buf[0] / static_cast<float>(head_dim)) + eps);
 
     float normed = val * inv_rms * __half2float(weight[d]);
 

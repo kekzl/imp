@@ -67,16 +67,16 @@ __device__ __forceinline__ void ldg_words(const uint8_t* p, uint32_t (&w)[N]) {
         for (int i = 0; i < N / 4; i++) {
             const uint4 v = __ldg(reinterpret_cast<const uint4*>(p) + i);
             w[4 * i] = v.x;
-            w[4 * i + 1] = v.y;
-            w[4 * i + 2] = v.z;
-            w[4 * i + 3] = v.w;
+            w[(4 * i) + 1] = v.y;
+            w[(4 * i) + 2] = v.z;
+            w[(4 * i) + 3] = v.w;
         }
     } else {
 #pragma unroll
         for (int i = 0; i < N / 2; i++) {
             const uint2 v = __ldg(reinterpret_cast<const uint2*>(p) + i);
             w[2 * i] = v.x;
-            w[2 * i + 1] = v.y;
+            w[(2 * i) + 1] = v.y;
         }
     }
 }
@@ -109,22 +109,24 @@ __device__ __forceinline__ void mma_block(
     uint32_t ksc[2], vsc[4];
 #pragma unroll
     for (int r = 0; r < 2; r++) {
-        const int row = clamp_tok(g + 8 * r);
-        ldg_words<KW>(K_blk + static_cast<int64_t>(row) * slot_stride + static_cast<ptrdiff_t>(t) * (RB / 4),
+        const int row = clamp_tok(g + (8 * r));
+        ldg_words<KW>(K_blk + (static_cast<int64_t>(row) * slot_stride) +
+                          (static_cast<ptrdiff_t>(t) * (RB / 4)),
                       kw[r]);
-        const uint8_t* sp = Ks_blk + static_cast<int64_t>(row) * sc_slot_stride +
-                            static_cast<ptrdiff_t>(t) * (KS / 4);
+        const uint8_t* sp = Ks_blk + (static_cast<int64_t>(row) * sc_slot_stride) +
+                            (static_cast<ptrdiff_t>(t) * (KS / 4));
         ksc[r] = (KS / 4 == 4) ? __ldg(reinterpret_cast<const uint32_t*>(sp))
                                : __ldg(reinterpret_cast<const unsigned short*>(sp));
     }
     constexpr int kVRow[4] = {0, 1, 8, 9};
 #pragma unroll
     for (int r = 0; r < 4; r++) {
-        const int row = clamp_tok(2 * t + kVRow[r]);
-        ldg_words<VW>(V_blk + static_cast<int64_t>(row) * slot_stride + static_cast<ptrdiff_t>(g) * (HD / 16),
+        const int row = clamp_tok((2 * t) + kVRow[r]);
+        ldg_words<VW>(V_blk + (static_cast<int64_t>(row) * slot_stride) +
+                          (static_cast<ptrdiff_t>(g) * (HD / 16)),
                       vw[r]);
-        const uint8_t* sp = Vs_blk + static_cast<int64_t>(row) * sc_slot_stride +
-                            static_cast<ptrdiff_t>(g) * (KS / 8);
+        const uint8_t* sp = Vs_blk + (static_cast<int64_t>(row) * sc_slot_stride) +
+                            (static_cast<ptrdiff_t>(g) * (KS / 8));
         vsc[r] = (KS / 8 == 2) ? __ldg(reinterpret_cast<const unsigned short*>(sp)) : __ldg(sp);
     }
 
@@ -139,7 +141,7 @@ __device__ __forceinline__ void mma_block(
             // word w = k-steps 2w, 2w + 1; scale group of k-step s = s / 4
 #pragma unroll
             for (int half_w = 0; half_w < 2; half_w++) {
-                const int ks = 2 * w + half_w;
+                const int ks = (2 * w) + half_w;
                 const int k0 = 2 * half_w;
                 const uint32_t sel = static_cast<uint32_t>(ks / 4);
                 const uint32_t sc = e4m3x2_to_h2(__byte_perm(ksc[nt], 0, sel | (sel << 4)));
@@ -154,7 +156,7 @@ __device__ __forceinline__ void mma_block(
     float mx = st.m;
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-        const int tok = (i >> 1) * 8 + 2 * t + (i & 1);
+        const int tok = ((i >> 1) * 8) + (2 * t) + (i & 1);
         x[i] = apply_softcap(x[i] * scale, softcap);
         if (tok < first_tok || tok >= n_tok)
             x[i] = -FLT_MAX;
@@ -166,7 +168,7 @@ __device__ __forceinline__ void mma_block(
     float p[4];
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-        const int tok = (i >> 1) * 8 + 2 * t + (i & 1);
+        const int tok = ((i >> 1) * 8) + (2 * t) + (i & 1);
         p[i] = (tok < first_tok || tok >= n_tok) ? 0.0f : expf(x[i] - mx);
     }
     st.l = alpha * st.l + ((p[0] + p[1]) + (p[2] + p[3]));
@@ -174,7 +176,7 @@ __device__ __forceinline__ void mma_block(
     // O^T columns of this lane are heads 2t, 2t + 1; alpha lives on lanes 4 * head.
     if (!__all_sync(0xffffffffu, alpha == 1.0f)) {
         const float a0 = __shfl_sync(0xffffffffu, alpha, 8 * t);
-        const float a1 = __shfl_sync(0xffffffffu, alpha, 8 * t + 4);
+        const float a1 = __shfl_sync(0xffffffffu, alpha, (8 * t) + 4);
 #pragma unroll
         for (int mt = 0; mt < KS; mt++) {
             st.o[mt][0] *= a0;
@@ -202,7 +204,7 @@ __device__ __forceinline__ void mma_block(
             e2m1x8_to_h2(vw[r][w], vh[r]);
 #pragma unroll
         for (int b = 0; b < 4; b++) {
-            const int mt = 4 * w + b;
+            const int mt = (4 * w) + b;
             const uint32_t sa = vs01[mt / 8], sb = vs89[mt / 8];
             // lows = dim 2j, highs = dim 2j + 1
             const uint32_t a0 = hmul2_u32(__byte_perm(vh[0][b], vh[1][b], 0x5410), sa);
@@ -240,15 +242,15 @@ __global__ void __launch_bounds__(kMmaThreads) paged_attention_splitk_nvfp4_mma_
     const int first_block = effective_start / kMmaBlock;
     const int num_ctx_blocks = (ctx_len + kMmaBlock - 1) / kMmaBlock;
     const int blocks_per_split = (num_ctx_blocks - first_block + num_splits - 1) / num_splits;
-    const int split_start = first_block + split_idx * blocks_per_split;
+    const int split_start = first_block + (split_idx * blocks_per_split);
     const int split_end = min(split_start + blocks_per_split, num_ctx_blocks);
     constexpr int partial_stride = 2 + HD;
     if (split_start >= split_end) {
         for (int i = threadIdx.x; i < n_q * partial_stride; i += kMmaThreads) {
             const int h = i / partial_stride, e = i % partial_stride;
-            float* out = partial_out +
-                         static_cast<int64_t>((batch_idx * n_heads + head0 + h) * num_splits + split_idx) *
-                             partial_stride;
+            float* out = partial_out + (static_cast<int64_t>(
+                                            (((batch_idx * n_heads) + head0 + h) * num_splits) + split_idx) *
+                                        partial_stride);
             out[e] = (e == 0) ? -FLT_MAX : 0.0f;
         }
         return;
@@ -259,15 +261,15 @@ __global__ void __launch_bounds__(kMmaThreads) paged_attention_splitk_nvfp4_mma_
     {
         const bool live = g < n_q;
         const uint4* qp = reinterpret_cast<const uint4*>(
-            Q + (static_cast<int64_t>(batch_idx) * n_heads + head0 + (live ? g : 0)) * HD +
-            static_cast<ptrdiff_t>(t) * (HD / 4));
+            Q + (((static_cast<int64_t>(batch_idx) * n_heads) + head0 + (live ? g : 0)) * HD) +
+            (static_cast<ptrdiff_t>(t) * (HD / 4)));
 #pragma unroll
         for (int i = 0; i < KS / 2; i++) {
             const uint4 v = live ? __ldg(qp + i) : make_uint4(0, 0, 0, 0);
             qa[2 * i][0] = v.x;
             qa[2 * i][1] = v.y;
-            qa[2 * i + 1][0] = v.z;
-            qa[2 * i + 1][1] = v.w;
+            qa[(2 * i) + 1][0] = v.z;
+            qa[(2 * i) + 1][1] = v.w;
         }
     }
 
@@ -275,7 +277,7 @@ __global__ void __launch_bounds__(kMmaThreads) paged_attention_splitk_nvfp4_mma_
     const int sc_slot_stride = n_kv_heads * (HD / 16);
     const int64_t kv_block_stride = static_cast<int64_t>(kMmaBlock) * slot_stride;
     const int64_t sc_block_stride = static_cast<int64_t>(kMmaBlock) * sc_slot_stride;
-    const int* bt = block_tables + static_cast<int64_t>(batch_idx) * max_num_blocks;
+    const int* bt = block_tables + (static_cast<int64_t>(batch_idx) * max_num_blocks);
 
     MmaWarpState<HD> st;
     st.m = -FLT_MAX;
@@ -293,10 +295,10 @@ __global__ void __launch_bounds__(kMmaThreads) paged_attention_splitk_nvfp4_mma_
         const int tok_start = blk * kMmaBlock;
         const int n_tok = min(kMmaBlock, ctx_len - tok_start);
         const int first_tok = (tok_start < effective_start) ? (effective_start - tok_start) : 0;
-        mma_block<HD>(K_cache + phys * kv_block_stride + static_cast<ptrdiff_t>(kv_head) * (HD / 2),
-                      V_cache + phys * kv_block_stride + static_cast<ptrdiff_t>(kv_head) * (HD / 2),
-                      K_scales + phys * sc_block_stride + static_cast<ptrdiff_t>(kv_head) * (HD / 16),
-                      V_scales + phys * sc_block_stride + static_cast<ptrdiff_t>(kv_head) * (HD / 16),
+        mma_block<HD>(K_cache + (phys * kv_block_stride) + (static_cast<ptrdiff_t>(kv_head) * (HD / 2)),
+                      V_cache + (phys * kv_block_stride) + (static_cast<ptrdiff_t>(kv_head) * (HD / 2)),
+                      K_scales + (phys * sc_block_stride) + (static_cast<ptrdiff_t>(kv_head) * (HD / 16)),
+                      V_scales + (phys * sc_block_stride) + (static_cast<ptrdiff_t>(kv_head) * (HD / 16)),
                       first_tok, n_tok, slot_stride, sc_slot_stride, qa, scale, softcap, st, g, t);
     }
     pdl_trigger();
@@ -304,23 +306,23 @@ __global__ void __launch_bounds__(kMmaThreads) paged_attention_splitk_nvfp4_mma_
     // Cross-warp merge: per-warp (m, l) per head and O^T to smem, then a fixed-order sum.
     extern __shared__ float smem_mma[];
     float* s_m = smem_mma;                                             // [warps][8]
-    float* s_l = s_m + static_cast<ptrdiff_t>(kMmaWarps) * kMmaHeads;  // [warps][8]
-    float* s_o = s_l + static_cast<ptrdiff_t>(kMmaWarps) * kMmaHeads;  // [warps][8][HD]
+    float* s_l = s_m + (static_cast<ptrdiff_t>(kMmaWarps) * kMmaHeads);  // [warps][8]
+    float* s_o = s_l + (static_cast<ptrdiff_t>(kMmaWarps) * kMmaHeads);  // [warps][8][HD]
     float l = st.l;
     l += __shfl_xor_sync(0xffffffffu, l, 1);
     l += __shfl_xor_sync(0xffffffffu, l, 2);
     if (t == 0) {
-        s_m[warp_id * kMmaHeads + g] = st.m;
-        s_l[warp_id * kMmaHeads + g] = l;
+        s_m[(warp_id * kMmaHeads) + g] = st.m;
+        s_l[(warp_id * kMmaHeads) + g] = l;
     }
-    float* wo = s_o + static_cast<ptrdiff_t>(warp_id) * kMmaHeads * HD;
+    float* wo = s_o + (static_cast<ptrdiff_t>(warp_id) * kMmaHeads * HD);
 #pragma unroll
     for (int mt = 0; mt < KS; mt++) {
-        const int d = 2 * (g * KS + mt);
-        wo[(2 * t) * HD + d] = st.o[mt][0];
-        wo[(2 * t + 1) * HD + d] = st.o[mt][1];
-        wo[(2 * t) * HD + d + 1] = st.o[mt][2];
-        wo[(2 * t + 1) * HD + d + 1] = st.o[mt][3];
+        const int d = 2 * ((g * KS) + mt);
+        wo[((2 * t) * HD) + d] = st.o[mt][0];
+        wo[(((2 * t) + 1) * HD) + d] = st.o[mt][1];
+        wo[((2 * t) * HD) + d + 1] = st.o[mt][2];
+        wo[(((2 * t) + 1) * HD) + d + 1] = st.o[mt][3];
     }
     __syncthreads();
     for (int i = threadIdx.x; i < n_q * HD; i += kMmaThreads) {
@@ -328,17 +330,17 @@ __global__ void __launch_bounds__(kMmaThreads) paged_attention_splitk_nvfp4_mma_
         float gm = -FLT_MAX;
 #pragma unroll
         for (int w = 0; w < kMmaWarps; w++)
-            gm = fmaxf(gm, s_m[w * kMmaHeads + h]);
+            gm = fmaxf(gm, s_m[(w * kMmaHeads) + h]);
         float gl = 0.0f, o = 0.0f;
 #pragma unroll
         for (int w = 0; w < kMmaWarps; w++) {
-            const float f = expf(s_m[w * kMmaHeads + h] - gm);
-            gl += f * s_l[w * kMmaHeads + h];
-            o += f * s_o[(w * kMmaHeads + h) * HD + d];
+            const float f = expf(s_m[(w * kMmaHeads) + h] - gm);
+            gl += f * s_l[(w * kMmaHeads) + h];
+            o += f * s_o[(((w * kMmaHeads) + h) * HD) + d];
         }
         float* out = partial_out +
-                     static_cast<int64_t>((batch_idx * n_heads + head0 + h) * num_splits + split_idx) *
-                         partial_stride;
+                     (static_cast<int64_t>((((batch_idx * n_heads) + head0 + h) * num_splits) + split_idx) *
+                      partial_stride);
         if (d == 0) {
             out[0] = gm;
             out[1] = gl;
@@ -363,14 +365,14 @@ bool paged_attention_nvfp4_mma_launch(const half* Q, const uint8_t* K_cache, con
     if (n_q < 2 || n_q > kMmaHeads || n_heads % n_kv_heads != 0)
         return false;
     const size_t smem = (static_cast<size_t>(2 * kMmaWarps * kMmaHeads) +
-                         static_cast<size_t>(kMmaWarps) * kMmaHeads * head_dim) *
+                         (static_cast<size_t>(kMmaWarps) * kMmaHeads * head_dim)) *
                         sizeof(float);
     const dim3 grid(batch_size, n_kv_heads, num_splits);
     if (head_dim == 256) {
         static const bool attr = [] {
             return cudaFuncSetAttribute(paged_attention_splitk_nvfp4_mma_kernel<256>,
                                         cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                        (2 * kMmaWarps * kMmaHeads + kMmaWarps * kMmaHeads * 256) *
+                                        ((2 * kMmaWarps * kMmaHeads) + (kMmaWarps * kMmaHeads * 256)) *
                                             static_cast<int>(sizeof(float))) == cudaSuccess;
         }();
         if (!attr)

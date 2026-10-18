@@ -13,6 +13,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <cfloat>
 
 namespace imp {
@@ -60,7 +61,7 @@ __device__ __forceinline__ void lane_vec_to_float(const typename LaneVec<ELEMS>:
         const float2 f = __half22float2(h2[i]);
         // #2218 bounded: 2 * i < ELEMS <= 16 (LaneVec<ELEMS> defined for 2 / 4 / 8 / 16 only, :22-52).
         out[static_cast<ptrdiff_t>(2 * i)] = f.x;
-        out[2 * i + 1] = f.y;
+        out[(2 * i) + 1] = f.y;
     }
 }
 
@@ -114,7 +115,7 @@ __device__ __forceinline__ void f16_block_multitok(const half* __restrict__ K_bl
         for (int i = 0; i < TOK; i++) {
             const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
             kp[i] = ldcs_lane(
-                reinterpret_cast<const Vec*>(K_block + static_cast<int64_t>(ti) * kv_slot_stride));
+                reinterpret_cast<const Vec*>(K_block + (static_cast<int64_t>(ti) * kv_slot_stride)));
         }
         float dot[HPC][TOK];
 #pragma unroll
@@ -167,7 +168,7 @@ __device__ __forceinline__ void f16_block_multitok(const half* __restrict__ K_bl
         for (int i = 0; i < TOK; i++) {
             const int ti = (t + i < n_tok) ? (t + i) : (n_tok - 1);
             vp[i] = ldcs_lane(
-                reinterpret_cast<const Vec*>(V_block + static_cast<int64_t>(ti) * kv_slot_stride));
+                reinterpret_cast<const Vec*>(V_block + (static_cast<int64_t>(ti) * kv_slot_stride)));
         }
 #pragma unroll
         for (int h = 0; h < HPC; h++)
@@ -195,8 +196,8 @@ __device__ __forceinline__ void load_q_heads(const half* __restrict__ Q, int bat
     using Vec = typename LaneVec<ELEMS>::type;
 #pragma unroll
     for (int h = 0; h < HPC; h++) {
-        const Vec qv = *reinterpret_cast<const Vec*>(Q + (int64_t)batch_idx * n_heads * HEAD_DIM +
-                                                     (int64_t)(head0 + h) * HEAD_DIM + lane_offset);
+        const Vec qv = *reinterpret_cast<const Vec*>(Q + ((int64_t)batch_idx * n_heads * HEAD_DIM) +
+                                                     ((int64_t)(head0 + h) * HEAD_DIM) + lane_offset);
         lane_vec_to_float<ELEMS>(qv, q_reg[h]);
     }
 }
@@ -214,7 +215,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_f16_mult
     const int batch_idx = blockIdx.x;
     const int groups_per_kv = n_q_per_kv / HPC;
     const int kv_head = blockIdx.y / groups_per_kv;
-    const int head0 = kv_head * n_q_per_kv + (blockIdx.y % groups_per_kv) * HPC;
+    const int head0 = (kv_head * n_q_per_kv) + ((blockIdx.y % groups_per_kv) * HPC);
     const int ctx_len = context_lens[batch_idx];
     if (ctx_len <= 0)
         return;
@@ -226,7 +227,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_f16_mult
     float q_reg[HPC][ELEMS];
     load_q_heads<HEAD_DIM, HPC>(Q, batch_idx, n_heads, head0, lane_offset, q_reg);
 
-    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
+    const int* bt = block_tables + ((int64_t)batch_idx * max_num_blocks);
     const int kv_block_stride = block_size * n_kv_heads * HEAD_DIM;
     const int kv_slot_stride = n_kv_heads * HEAD_DIM;
 
@@ -249,9 +250,9 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_decode_f16_mult
             n_tok = ctx_len - tok_start;
         const int first_tok = (tok_start < effective_start) ? (effective_start - tok_start) : 0;
         // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 (static_assert:209) = 2^21 (model_limits.h:24)
-        f16_block_multitok<HEAD_DIM, TOK, HPC>(K_cache + (int64_t)phys_block * kv_block_stride +
+        f16_block_multitok<HEAD_DIM, TOK, HPC>(K_cache + ((int64_t)phys_block * kv_block_stride) +
                                                    static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
-                                               V_cache + (int64_t)phys_block * kv_block_stride +
+                                               V_cache + ((int64_t)phys_block * kv_block_stride) +
                                                    static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
                                                first_tok, n_tok, kv_slot_stride, q_reg, scale, softcap, st);
     }
@@ -284,7 +285,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_f16_mult
     const int batch_idx = blockIdx.x;
     const int groups_per_kv = n_q_per_kv / HPC;
     const int kv_head = blockIdx.y / groups_per_kv;
-    const int head0 = kv_head * n_q_per_kv + (blockIdx.y % groups_per_kv) * HPC;
+    const int head0 = (kv_head * n_q_per_kv) + ((blockIdx.y % groups_per_kv) * HPC);
     const int split_idx = blockIdx.z;
     const int ctx_len = context_lens[batch_idx];
     if (ctx_len <= 0)
@@ -301,10 +302,9 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_f16_mult
     const int num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
     const int total_blocks = num_ctx_blocks - first_block;
     const int blocks_per_split = (total_blocks + num_splits - 1) / num_splits;
-    const int split_start = first_block + split_idx * blocks_per_split;
+    const int split_start = first_block + (split_idx * blocks_per_split);
     int split_end = split_start + blocks_per_split;
-    if (split_end > num_ctx_blocks)
-        split_end = num_ctx_blocks;
+    split_end = std::min(split_end, num_ctx_blocks);
     if (split_start >= split_end) {
 #pragma unroll
         for (int h = 0; h < HPC; h++)
@@ -316,7 +316,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_f16_mult
     float q_reg[HPC][ELEMS];
     load_q_heads<HEAD_DIM, HPC>(Q, batch_idx, n_heads, head0, lane_offset, q_reg);
 
-    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
+    const int* bt = block_tables + ((int64_t)batch_idx * max_num_blocks);
     const int kv_block_stride = block_size * n_kv_heads * HEAD_DIM;
     const int kv_slot_stride = n_kv_heads * HEAD_DIM;
 
@@ -333,9 +333,9 @@ __global__ void __launch_bounds__(BLOCK_THREADS) paged_attention_splitk_f16_mult
             n_tok = ctx_len - tok_start;
         const int first_tok = (tok_start < effective_start) ? (effective_start - tok_start) : 0;
         // #2218 bounded: kv_head * HEAD_DIM <= kMaxHeads * 512 (static_assert:279) = 2^21 (model_limits.h:24)
-        f16_block_multitok<HEAD_DIM, TOK, HPC>(K_cache + (int64_t)phys_block * kv_block_stride +
+        f16_block_multitok<HEAD_DIM, TOK, HPC>(K_cache + ((int64_t)phys_block * kv_block_stride) +
                                                    static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
-                                               V_cache + (int64_t)phys_block * kv_block_stride +
+                                               V_cache + ((int64_t)phys_block * kv_block_stride) +
                                                    static_cast<ptrdiff_t>(kv_head * HEAD_DIM) + lane_offset,
                                                first_tok, n_tok, kv_slot_stride, q_reg, scale, softcap, st);
     }
@@ -357,8 +357,8 @@ void launch_f16_multitok(const half* Q, const half* K_cache, const half* V_cache
                          const int* block_tables, const int* context_lens, int batch_size, int n_heads,
                          int n_kv_heads, int n_q_per_kv, int block_size, float scale, int max_num_blocks,
                          int sliding_window, float softcap, const half* attn_sinks, cudaStream_t stream) {
-    const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 +
-                              static_cast<int64_t>(NUM_WARPS) * HEAD_DIM * sizeof(float);
+    const size_t smem_bytes = (NUM_WARPS * sizeof(float) * 2) +
+                              (static_cast<int64_t>(NUM_WARPS) * HEAD_DIM * sizeof(float));
     dim3 grid(batch_size, n_kv_heads * (n_q_per_kv / HPC));
     dim3 block(BLOCK_THREADS);
     paged_attention_decode_f16_multitok_kernel<HEAD_DIM, 4, HPC>
@@ -374,8 +374,8 @@ void launch_f16_splitk_multitok(const half* Q, const half* K_cache, const half* 
                                 int n_kv_heads, int n_q_per_kv, int block_size, float scale,
                                 int max_num_blocks, int num_splits, int sliding_window, float softcap,
                                 cudaStream_t stream) {
-    const size_t smem_bytes = NUM_WARPS * sizeof(float) * 2 +
-                              static_cast<int64_t>(NUM_WARPS) * HEAD_DIM * sizeof(float);
+    const size_t smem_bytes = (NUM_WARPS * sizeof(float) * 2) +
+                              (static_cast<int64_t>(NUM_WARPS) * HEAD_DIM * sizeof(float));
     dim3 grid(batch_size, n_kv_heads * (n_q_per_kv / HPC), num_splits);
     dim3 block(BLOCK_THREADS);
     paged_attention_splitk_f16_multitok_kernel<HEAD_DIM, 4, HPC>
@@ -456,8 +456,8 @@ namespace {
 template <int HEAD_DIM, int HPC>
 int splitk_occupancy() {
     static const int occ = [] {
-        const size_t smem = NUM_WARPS * sizeof(float) * 2 +
-                            static_cast<int64_t>(NUM_WARPS) * HEAD_DIM * sizeof(float);
+        const size_t smem = (NUM_WARPS * sizeof(float) * 2) +
+                            (static_cast<int64_t>(NUM_WARPS) * HEAD_DIM * sizeof(float));
         int n = 0;
         if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                 &n, paged_attention_splitk_f16_multitok_kernel<HEAD_DIM, 4, HPC>, BLOCK_THREADS, smem) !=
@@ -470,28 +470,28 @@ int splitk_occupancy() {
 }  // namespace
 
 int paged_attention_f16_multitok_splitk_ctas_per_sm(int head_dim, int hpc) {
-    switch (head_dim * 8 + hpc) {
-        case 64 * 8 + 1:
+    switch ((head_dim * 8) + hpc) {
+        case (64 * 8) + 1:
             return splitk_occupancy<64, 1>();
-        case 64 * 8 + 2:
+        case (64 * 8) + 2:
             return splitk_occupancy<64, 2>();
-        case 64 * 8 + 4:
+        case (64 * 8) + 4:
             return splitk_occupancy<64, 4>();
-        case 128 * 8 + 1:
+        case (128 * 8) + 1:
             return splitk_occupancy<128, 1>();
-        case 128 * 8 + 2:
+        case (128 * 8) + 2:
             return splitk_occupancy<128, 2>();
-        case 128 * 8 + 4:
+        case (128 * 8) + 4:
             return splitk_occupancy<128, 4>();
-        case 256 * 8 + 1:
+        case (256 * 8) + 1:
             return splitk_occupancy<256, 1>();
-        case 256 * 8 + 2:
+        case (256 * 8) + 2:
             return splitk_occupancy<256, 2>();
-        case 256 * 8 + 4:
+        case (256 * 8) + 4:
             return splitk_occupancy<256, 4>();
-        case 512 * 8 + 1:
+        case (512 * 8) + 1:
             return splitk_occupancy<512, 1>();
-        case 512 * 8 + 2:
+        case (512 * 8) + 2:
             return splitk_occupancy<512, 2>();
         default:
             return 0;

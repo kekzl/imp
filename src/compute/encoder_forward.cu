@@ -23,7 +23,7 @@ namespace {
 // h[i, :] += type_row[:]  (token_type embedding, row 0 for plain text)
 __global__ void encoder_add_type_kernel(__half* __restrict__ h, const __half* __restrict__ type_row,
                                         int n, int d) {
-    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx < static_cast<int64_t>(n) * d)
         h[idx] = __float2half(__half2float(h[idx]) + __half2float(type_row[idx % d]));
 }
@@ -31,10 +31,11 @@ __global__ void encoder_add_type_kernel(__half* __restrict__ h, const __half* __
 // out[j] = mean_i h[i, j]; then L2-normalize out in a second kernel.
 __global__ void encoder_mean_pool_kernel(const __half* __restrict__ h, float* __restrict__ out,
                                          int n, int d) {
-    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (j >= d) return;
     float s = 0.0f;
-    for (int i = 0; i < n; ++i) s += __half2float(h[static_cast<int64_t>(i) * d + j]);
+    for (int i = 0; i < n; ++i)
+        s += __half2float(h[(static_cast<int64_t>(i) * d) + j]);
     out[j] = s / n;
 }
 
@@ -175,6 +176,20 @@ void encoder_workspace_free(EncoderWorkspace& ws) {
     ws.d_gate = ws.d_up = ws.d_act = ws.d_scores = nullptr;
     ws.d_pooled = nullptr;
     ws.max_tokens = 0;
+}
+
+int encoder_drop_sources(Model& model, cudaStream_t stream) {
+    int freed = 0;
+    for (int i = 0; i < model.n_layers(); ++i) {
+        auto& L = model.layer(i);
+        for (Tensor* t : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down}) {
+            if (!model.is_base_gpu_allocation(t->data))
+                continue;
+            ++freed;
+            model.free_source_weight(*t, stream);
+        }
+    }
+    return freed;
 }
 
 bool encoder_embed(const Model& model, EncoderWorkspace& ws, std::span<const int32_t> tokens, float* out_host,

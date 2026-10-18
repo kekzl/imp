@@ -7,6 +7,7 @@
 #include "handlers_internal.h"
 #include "vision_parts.h"
 
+#include <algorithm>
 #include <tuple>
 #include "model/image_placeholders.h"
 #include "utils.h"
@@ -381,7 +382,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
     // at high temperature, only when the caller supplied no stop sequences. Skipped under ignore_eos
     // (a benchmark run past EOS would stop early).
     if (ctx.snap.is_think_model && ctx.params.stop_sequences.empty() && !ctx.params.ignore_eos) {
-        ctx.params.stop_sequences.push_back("\nHuman");
+        ctx.params.stop_sequences.emplace_back("\nHuman");
     }
 
     // force_thinking stamps enable_thinking=true into the Jinja render so a template defaulting to a
@@ -587,8 +588,7 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
 
     // Clamp max_tokens to remaining context window
     int remaining = ctx.snap.max_seq_len - ctx.snap.n_prompt_tokens;
-    if (ctx.params.max_tokens > remaining)
-        ctx.params.max_tokens = remaining;
+    ctx.params.max_tokens = std::min(ctx.params.max_tokens, remaining);
 
     // Start timing
     ctx.t_start = std::chrono::high_resolution_clock::now();
@@ -873,8 +873,7 @@ void nonstream_chat_response_(httplib::Response& res, ServerState& state, ChatRe
             // If generation started inside an injected <think> prefix and never reached </think> (budget
             // exhausted, or stopped mid-think), the WHOLE text is reasoning - extract_reasoning() cannot
             // tell that from text alone (streaming path handles it via its state machine).
-            if (ctx.snap.enable_thinking && content.find("</think>") == std::string::npos &&
-                content.find("<think>") == std::string::npos) {
+            if (ctx.snap.enable_thinking && !content.contains("</think>") && !content.contains("<think>")) {
                 reasoning_content = std::move(content);
                 content.clear();
             } else {

@@ -69,7 +69,9 @@ public:
     int size() const { return static_cast<int>(entries_.size()); }
     int host_size() const { return static_cast<int>(host_entries_.size()); }
 
-    [[nodiscard]] bool contains(size_t key) const { return entries_.count(key) != 0 || host_entries_.count(key) != 0; }
+    [[nodiscard]] bool contains(size_t key) const {
+        return entries_.contains(key) || host_entries_.contains(key);
+    }
 
     // Look up a snapshot by key and mark it most-recently-used.
     std::shared_ptr<const RecurrentSnapshotEntry> find(size_t key);

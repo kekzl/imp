@@ -27,7 +27,7 @@ constexpr int kSweepEvery = 256;
 }  // namespace
 
 std::string RateLimiter::key(const std::string& remote_addr, const std::string& xff) const {
-    if (xff.empty() || trusted_proxies.find(remote_addr) == trusted_proxies.end())
+    if (xff.empty() || !trusted_proxies.contains(remote_addr))
         return remote_addr;
 
     const size_t comma = xff.find(',');

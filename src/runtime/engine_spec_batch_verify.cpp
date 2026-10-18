@@ -90,7 +90,7 @@ bool Engine::ensure_batch_verify_bufs_(cudaStream_t stream) {
     if (cap_seq < 2 || table_cap <= 0)
         return false;
     const int cap_rows = 2 * cap_seq;
-    const size_t stage_ints = 3ull * cap_rows + 3ull * cap_seq + 2;
+    const size_t stage_ints = (3ull * cap_rows) + (3ull * cap_seq) + 2;
     const size_t table_ints = static_cast<size_t>(cap_rows) * table_cap;
     auto pin = [](PinnedBuffer& b, size_t bytes) {
         b = PinnedBuffer::acquire(cuda_host_pinned_allocator(), bytes);
@@ -390,7 +390,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         if (slot < 0)
             return decline("penalty_history_unavailable");
         auto& hs = penalty_hist_state_[static_cast<size_t>(slot)];
-        int32_t* base = d_penalty_hist_ + static_cast<size_t>(slot) * penalty_hist_cap_;
+        int32_t* base = d_penalty_hist_ + (static_cast<size_t>(slot) * penalty_hist_cap_);
         if (hs.synced != need) {
             // Full (re)sync: first batch entry of this request or a diverged
             // host history (pageable source, the same copy the plain step does).
@@ -403,12 +403,12 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         pen_need[g] = need;
         pen_hist[2 * static_cast<size_t>(g)] = base;
         pen_n[2 * static_cast<size_t>(g)] = need;
-        pen_hist[2 * g + 1] = base;
-        pen_n[2 * g + 1] = need + 1;
+        pen_hist[(2 * g) + 1] = base;
+        pen_n[(2 * g) + 1] = need + 1;
         for (int j = 0; j < 2; ++j) {
-            pen_v[static_cast<size_t>(2 * g + j) * 3 + 0] = req.repetition_penalty;
-            pen_v[static_cast<size_t>(2 * g + j) * 3 + 1] = req.frequency_penalty;
-            pen_v[static_cast<size_t>(2 * g + j) * 3 + 2] = req.presence_penalty;
+            pen_v[(static_cast<size_t>((2 * g) + j) * 3) + 0] = req.repetition_penalty;
+            pen_v[(static_cast<size_t>((2 * g) + j) * 3) + 1] = req.frequency_penalty;
+            pen_v[(static_cast<size_t>((2 * g) + j) * 3) + 2] = req.presence_penalty;
         }
         any_pen = true;
     }
@@ -450,8 +450,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     int32_t* h = bv_.h_stage.as<int32_t>();
     int32_t* h_tok = h;
     int32_t* h_pos = h + cap_rows;
-    int32_t* h_ctx = h + 2ull * cap_rows;
-    int32_t* h_seq = h + 3ull * cap_rows;
+    int32_t* h_ctx = h + (2ull * cap_rows);
+    int32_t* h_seq = h + (3ull * cap_rows);
     int32_t* h_out = h_seq + cap_seq;
     int32_t* h_snap = h_out + cap_seq;
     int32_t* h_misc = h_snap + cap_seq;
@@ -460,17 +460,17 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         const int32_t t0 = reqs[g]->output_tokens.back();
         const bool has = draft[g] >= 0;
         h_tok[2 * static_cast<size_t>(g)] = t0;
-        h_tok[2 * g + 1] = has ? draft[g] : t0;
+        h_tok[(2 * g) + 1] = has ? draft[g] : t0;
         h_pos[2 * static_cast<size_t>(g)] = p0[g];
-        h_pos[2 * g + 1] = p0[g] + 1;
+        h_pos[(2 * g) + 1] = p0[g] + 1;
         h_ctx[2 * static_cast<size_t>(g)] = p0[g] + 1;
-        h_ctx[2 * g + 1] = has ? p0[g] + 2 : 1;  // a pad row attends one token
+        h_ctx[(2 * g) + 1] = has ? p0[g] + 2 : 1;  // a pad row attends one token
         h_seq[g] = live[g];
         h_out[g] = spare[g];
         h_snap[g] = live[g];
         const auto& bt = kv_manager_->block_table(reqs[g]->id);
         for (int j = 0; j < 2; ++j) {
-            int32_t* row = h_tab + static_cast<size_t>(2 * g + j) * table_cap;
+            int32_t* row = h_tab + (static_cast<size_t>((2 * g) + j) * table_cap);
             std::copy(bt.begin(), bt.end(), row);
         }
     }
@@ -479,8 +479,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     int32_t* d = bv_.d_stage;
     int32_t* d_tok = d;
     int32_t* d_pos = d + cap_rows;
-    int32_t* d_ctx = d + 2ull * cap_rows;
-    int32_t* d_seq = d + 3ull * cap_rows;
+    int32_t* d_ctx = d + (2ull * cap_rows);
+    int32_t* d_seq = d + (3ull * cap_rows);
     int32_t* d_out = d_seq + cap_seq;
     int32_t* d_snap = d_out + cap_seq;
     int32_t* d_misc = d_snap + cap_seq;
@@ -491,7 +491,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         }
         return true;
     };
-    const size_t stage_ints = 3ull * cap_rows + 3ull * cap_seq + 2;
+    const size_t stage_ints = (3ull * cap_rows) + (3ull * cap_seq) + 2;
     if (!check(cudaMemcpyAsync(d, h, stage_ints * sizeof(int32_t), cudaMemcpyHostToDevice, stream),
                "stage H2D") ||
         !check(cudaMemcpyAsync(bv_.d_row_tables, h_tab,
@@ -506,8 +506,8 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     for (int g = 0; g < N && any_pen; ++g) {
         if (pen_slot[g] < 0)
             continue;
-        int32_t* base = d_penalty_hist_ + static_cast<size_t>(pen_slot[g]) * penalty_hist_cap_;
-        if (!check(cudaMemcpyAsync(base + pen_need[g], h_tok + 2 * static_cast<size_t>(g) + 1,
+        int32_t* base = d_penalty_hist_ + (static_cast<size_t>(pen_slot[g]) * penalty_hist_cap_);
+        if (!check(cudaMemcpyAsync(base + pen_need[g], h_tok + (2 * static_cast<size_t>(g)) + 1,
                                    sizeof(int32_t), cudaMemcpyHostToDevice, stream),
                    "penalty draft H2D")) {
             rollback_all(N);
@@ -602,7 +602,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     bool any_alt = false;
     for (int g = 0; g < N; ++g) {
         if (stop_mask_active(*reqs[g], think_end_id_)) {
-            row_alt[2 * static_cast<size_t>(g)] = row_alt[2 * g + 1] = 1;
+            row_alt[2 * static_cast<size_t>(g)] = row_alt[(2 * g) + 1] = 1;
             any_alt = true;
         }
     }
@@ -638,7 +638,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         for (int j = 0; j < 2; ++j) {
             if (j == 1 && !has)
                 break;
-            const int32_t tok = h_am[2 * g + j];
+            const int32_t tok = h_am[(2 * g) + j];
             req->output_tokens.push_back(tok);
             track_think_state(*req, tok);
             emitted++;
@@ -661,9 +661,9 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
         // Device penalty history: the emitted tokens are rows 2g.. of the
         // pinned argmax buffer, in order.
         if (pen_slot[g] >= 0 && emitted > 0) {
-            int32_t* base = d_penalty_hist_ + static_cast<size_t>(pen_slot[g]) * penalty_hist_cap_;
+            int32_t* base = d_penalty_hist_ + (static_cast<size_t>(pen_slot[g]) * penalty_hist_cap_);
             auto& hs = penalty_hist_state_[static_cast<size_t>(pen_slot[g])];
-            if (cudaMemcpyAsync(base + pen_need[g], h_am + 2 * static_cast<size_t>(g),
+            if (cudaMemcpyAsync(base + pen_need[g], h_am + (2 * static_cast<size_t>(g)),
                                 static_cast<size_t>(emitted) * sizeof(int32_t), cudaMemcpyHostToDevice,
                                 stream) == cudaSuccess)
                 hs.synced = pen_need[g] + emitted;

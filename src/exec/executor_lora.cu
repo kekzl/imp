@@ -21,7 +21,7 @@ __global__ void lora_gemv_a_kernel(const half* __restrict__ A, const half* __res
     int row = blockIdx.x;
     if (row >= r)
         return;
-    const half* arow = A + static_cast<int64_t>(row) * K;
+    const half* arow = A + (static_cast<int64_t>(row) * K);
     float acc = 0.0f;
     for (int k = threadIdx.x; k < K; k += blockDim.x)
         acc += __half2float(arow[k]) * __half2float(x[k]);
@@ -40,14 +40,14 @@ __global__ void lora_gemv_a_kernel(const half* __restrict__ A, const half* __res
 // y[i] += scale * dot(B[i, :], t)  — r is tiny, one thread per output row.
 __global__ void lora_gemv_b_kernel(const half* __restrict__ B, const float* __restrict__ t,
                                    half* __restrict__ y, float scale, int N, int r) {
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (row >= N)
         return;
-    const half* brow = B + static_cast<int64_t>(row) * r;
+    const half* brow = B + (static_cast<int64_t>(row) * r);
     float acc = 0.0f;
     for (int k = 0; k < r; k++)
         acc += __half2float(brow[k]) * t[k];
-    y[row] = __float2half(__half2float(y[row]) + scale * acc);
+    y[row] = __float2half(__half2float(y[row]) + (scale * acc));
 }
 
 void GraphExecutor::set_lora(const LoraAdapter* adapter) {
@@ -56,8 +56,8 @@ void GraphExecutor::set_lora(const LoraAdapter* adapter) {
         return;
     // Rank-intermediate scratch: fp32 [max_rank] for decode + fp16
     // [max_tokens × max_rank] for prefill. Grow-only.
-    size_t need = sizeof(float) * static_cast<size_t>(adapter->max_rank()) +
-                  sizeof(half) * static_cast<size_t>(max_tokens_) * adapter->max_rank();
+    size_t need = (sizeof(float) * static_cast<size_t>(adapter->max_rank())) +
+                  (sizeof(half) * static_cast<size_t>(max_tokens_) * adapter->max_rank());
     if (need > lora_scratch_sz_) {
         if (lora_scratch_)
             IMP_CUDA_CHECK_LOG(cudaFree(lora_scratch_));

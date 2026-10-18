@@ -8,8 +8,7 @@
 #include <cuda_bf16.h>
 #include <mutex>
 
-namespace imp {
-namespace chunkpar {
+namespace imp::chunkpar {
 namespace {
 
 // Kernel 2, sequential inter-chunk state pass + outputs, on tensor cores. Grid
@@ -35,10 +34,10 @@ __device__ __forceinline__ void gemm_rows_x_h(const float* __restrict__ s_a, con
         acc[nt][0] = acc[nt][1] = acc[nt][2] = acc[nt][3] = 0.0f;
     for (int k0 = 0; k0 < SS; k0 += 16) {
         float a[8];
-        const float2 p0 = *reinterpret_cast<const float2*>(&s_a[swz128(m0 + g, k0 + 2 * tg)]);
-        const float2 p1 = *reinterpret_cast<const float2*>(&s_a[swz128(m0 + g + 8, k0 + 2 * tg)]);
-        const float2 p2 = *reinterpret_cast<const float2*>(&s_a[swz128(m0 + g, k0 + 2 * tg + 8)]);
-        const float2 p3 = *reinterpret_cast<const float2*>(&s_a[swz128(m0 + g + 8, k0 + 2 * tg + 8)]);
+        const float2 p0 = *reinterpret_cast<const float2*>(&s_a[swz128(m0 + g, k0 + (2 * tg))]);
+        const float2 p1 = *reinterpret_cast<const float2*>(&s_a[swz128(m0 + g + 8, k0 + (2 * tg))]);
+        const float2 p2 = *reinterpret_cast<const float2*>(&s_a[swz128(m0 + g, k0 + (2 * tg) + 8)]);
+        const float2 p3 = *reinterpret_cast<const float2*>(&s_a[swz128(m0 + g + 8, k0 + (2 * tg) + 8)]);
         a[0] = p0.x;
         a[1] = p0.y;
         a[2] = p1.x;
@@ -51,10 +50,10 @@ __device__ __forceinline__ void gemm_rows_x_h(const float* __restrict__ s_a, con
 #pragma unroll
         for (int nt = 0; nt < NTILE; nt++) {
             float b[4];
-            b[0] = s_h[(k0 + 2 * tg) * SH + nt * 8 + g];
-            b[1] = s_h[(k0 + 2 * tg + 1) * SH + nt * 8 + g];
-            b[2] = s_h[(k0 + 2 * tg + 8) * SH + nt * 8 + g];
-            b[3] = s_h[(k0 + 2 * tg + 9) * SH + nt * 8 + g];
+            b[0] = s_h[((k0 + (2 * tg)) * SH) + (nt * 8) + g];
+            b[1] = s_h[((k0 + (2 * tg) + 1) * SH) + (nt * 8) + g];
+            b[2] = s_h[((k0 + (2 * tg) + 8) * SH) + (nt * 8) + g];
+            b[3] = s_h[((k0 + (2 * tg) + 9) * SH) + (nt * 8) + g];
             const F16B bf = f16_split_b(b);
             if constexpr (X3)
                 mma_f16x3(acc[nt], af, bf);
@@ -90,7 +89,7 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
     const int inner = n_heads * HD;
 
     const ChunkparWs ws = chunkpar_ws_layout<HD, SS>(ws_base, n_heads);
-    float* H32_h = ws.H32 + static_cast<size_t>(h) * SS * HD;
+    float* H32_h = ws.H32 + (static_cast<size_t>(h) * SS * HD);
 
     // #2218 bounded: kChunk = 64, kColSplit = 4 (gdn_scan_chunkpar.cuh:16,18), HD = SS = 128 (only
     // instantiation, launcher below): smem kChunk * SS = 8192, SS * SH = 128 * 36 = 4608 floats
@@ -102,10 +101,10 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
     // This CTA's state slice: H[s][d_base + dl].
     for (int idx = tid; idx < SS * COLS; idx += NT) {
         const int s = idx / COLS, dl = idx % COLS;
-        const size_t gi = static_cast<size_t>(s) * HD + d_base + dl;
-        s_h[s * SH + dl] = load_statet
-                               ? static_cast<float>(h_state[static_cast<size_t>(h) * SS * HD + gi])
-                               : H32_h[gi];
+        const size_t gi = (static_cast<size_t>(s) * HD) + d_base + dl;
+        s_h[(s * SH) + dl] = load_statet
+                                 ? static_cast<float>(h_state[(static_cast<size_t>(h) * SS * HD) + gi])
+                                 : H32_h[gi];
     }
     __syncthreads();
 
@@ -121,14 +120,14 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
         const float4* src = reinterpret_cast<const float4*>(src_rows);
 #pragma unroll
         for (int i = 0; i < F4T; i++) {
-            const int idx = tid + i * NT;
+            const int idx = tid + (i * NT);
             pf[i] = (idx / F4_PER_ROW < L) ? src[idx] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         }
     };
     auto commit = [&]() {
 #pragma unroll
         for (int i = 0; i < F4T; i++) {
-            const int idx = tid + i * NT;
+            const int idx = tid + (i * NT);
             *reinterpret_cast<float4*>(&s_a[swz128(idx / F4_PER_ROW, (idx % F4_PER_ROW) * 4)]) = pf[i];
         }
     };
@@ -137,43 +136,43 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
     const int n0 = (warp / (kChunk / 16)) * NTW * 8;  // its first column in the row GEMMs
     const int r0 = m0 + g, r1 = r0 + 8;
 
-    prefetch(ws.W + static_cast<size_t>(h) * kChunk * SS, min(kChunk, strip_tokens));
+    prefetch(ws.W + (static_cast<size_t>(h) * kChunk * SS), min(kChunk, strip_tokens));
     for (int c = 0; c < n_chunks; c++) {
-        const int L = min(kChunk, strip_tokens - c * kChunk);
-        const size_t slot = static_cast<size_t>(c) * n_heads + h;
-        const float* UA_s = ws.UA + slot * kChunk * HD;
-        const float* YA_s = ws.YA + slot * kChunk * HD;
+        const int L = min(kChunk, strip_tokens - (c * kChunk));
+        const size_t slot = (static_cast<size_t>(c) * n_heads) + h;
+        const float* UA_s = ws.UA + (slot * kChunk * HD);
+        const float* YA_s = ws.YA + (slot * kChunk * HD);
         const float d0l = ws.D0L[slot];
 
         // -- u_eff = U_A - W @ H --
         commit();  // W
-        prefetch(ws.QE + slot * kChunk * SS, L);
+        prefetch(ws.QE + (slot * kChunk * SS), L);
         if (L < kChunk)  // tail rows are K operands of the state update: zero them
             for (int idx = tid; idx < (kChunk - L) * COLS; idx += NT)
-                s_ue[(L + idx / COLS) * SH + idx % COLS] = 0.0f;
+                s_ue[((L + (idx / COLS)) * SH) + (idx % COLS)] = 0.0f;
         __syncthreads();
         if (m0 < L) {
             float2 ua[NTW][2];
 #pragma unroll
             for (int nt = 0; nt < NTW; nt++) {
-                const int col = n0 + nt * 8 + 2 * tg;
-                ua[nt][0] = (r0 < L) ? *reinterpret_cast<const float2*>(&UA_s[r0 * HD + d_base + col])
+                const int col = n0 + (nt * 8) + (2 * tg);
+                ua[nt][0] = (r0 < L) ? *reinterpret_cast<const float2*>(&UA_s[(r0 * HD) + d_base + col])
                                      : make_float2(0.0f, 0.0f);
-                ua[nt][1] = (r1 < L) ? *reinterpret_cast<const float2*>(&UA_s[r1 * HD + d_base + col])
+                ua[nt][1] = (r1 < L) ? *reinterpret_cast<const float2*>(&UA_s[(r1 * HD) + d_base + col])
                                      : make_float2(0.0f, 0.0f);
             }
             float acc[NTW][4];
             gemm_rows_x_h<SS, SH, NTW, true>(s_a, s_h + n0, m0, g, tg, acc);  // feeds the state: 3xFP16
 #pragma unroll
             for (int nt = 0; nt < NTW; nt++) {
-                const int col = n0 + nt * 8 + 2 * tg;
+                const int col = n0 + (nt * 8) + (2 * tg);
                 if (r0 < L) {
-                    s_ue[r0 * SH + col] = ua[nt][0].x - acc[nt][0];
-                    s_ue[r0 * SH + col + 1] = ua[nt][0].y - acc[nt][1];
+                    s_ue[(r0 * SH) + col] = ua[nt][0].x - acc[nt][0];
+                    s_ue[(r0 * SH) + col + 1] = ua[nt][0].y - acc[nt][1];
                 }
                 if (r1 < L) {
-                    s_ue[r1 * SH + col] = ua[nt][1].x - acc[nt][2];
-                    s_ue[r1 * SH + col + 1] = ua[nt][1].y - acc[nt][3];
+                    s_ue[(r1 * SH) + col] = ua[nt][1].x - acc[nt][2];
+                    s_ue[(r1 * SH) + col + 1] = ua[nt][1].y - acc[nt][3];
                 }
             }
         }
@@ -181,32 +180,32 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
 
         // -- y = (Y_A + Qeff @ H) * scale, from the PRE-update state --
         commit();  // Qeff
-        prefetch(ws.KD + slot * kChunk * SS, L);
+        prefetch(ws.KD + (slot * kChunk * SS), L);
         __syncthreads();
         if (m0 < L) {
             float2 ya[NTW][2];
 #pragma unroll
             for (int nt = 0; nt < NTW; nt++) {
-                const int col = n0 + nt * 8 + 2 * tg;
-                ya[nt][0] = (r0 < L) ? *reinterpret_cast<const float2*>(&YA_s[r0 * HD + d_base + col])
+                const int col = n0 + (nt * 8) + (2 * tg);
+                ya[nt][0] = (r0 < L) ? *reinterpret_cast<const float2*>(&YA_s[(r0 * HD) + d_base + col])
                                      : make_float2(0.0f, 0.0f);
-                ya[nt][1] = (r1 < L) ? *reinterpret_cast<const float2*>(&YA_s[r1 * HD + d_base + col])
+                ya[nt][1] = (r1 < L) ? *reinterpret_cast<const float2*>(&YA_s[(r1 * HD) + d_base + col])
                                      : make_float2(0.0f, 0.0f);
             }
             float acc[NTW][4];
             gemm_rows_x_h<SS, SH, NTW, false>(s_a, s_h + n0, m0, g, tg, acc);  // output only: plain fp16
-            const size_t t_base = static_cast<size_t>(strip_t0) + static_cast<size_t>(c) * kChunk;
+            const size_t t_base = static_cast<size_t>(strip_t0) + (static_cast<size_t>(c) * kChunk);
 #pragma unroll
             for (int nt = 0; nt < NTW; nt++) {
-                const int col = n0 + nt * 8 + 2 * tg;
+                const int col = n0 + (nt * 8) + (2 * tg);
                 if (r0 < L)
                     *reinterpret_cast<__half2*>(
-                        &y_out[(t_base + r0) * inner + static_cast<size_t>(h) * HD + d_base + col]) =
+                        &y_out[((t_base + r0) * inner) + (static_cast<size_t>(h) * HD) + d_base + col]) =
                         __floats2half2_rn((ya[nt][0].x + acc[nt][0]) * scale,
                                           (ya[nt][0].y + acc[nt][1]) * scale);
                 if (r1 < L)
                     *reinterpret_cast<__half2*>(
-                        &y_out[(t_base + r1) * inner + static_cast<size_t>(h) * HD + d_base + col]) =
+                        &y_out[((t_base + r1) * inner) + (static_cast<size_t>(h) * HD) + d_base + col]) =
                         __floats2half2_rn((ya[nt][1].x + acc[nt][2]) * scale,
                                           (ya[nt][1].y + acc[nt][3]) * scale);
             }
@@ -216,7 +215,7 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
         // -- H = D0L * H + K_d^T @ u_eff --
         commit();  // K_d, rows >= L zero (the partial k-block needs finite rows)
         if (c + 1 < n_chunks)
-            prefetch(ws.W + (slot + n_heads) * kChunk * SS, min(kChunk, strip_tokens - (c + 1) * kChunk));
+            prefetch(ws.W + ((slot + n_heads) * kChunk * SS), min(kChunk, strip_tokens - ((c + 1) * kChunk)));
         __syncthreads();
         {
             constexpr int MT = SS / 16 / NW;  // m-tiles (16 state rows each) per warp
@@ -227,11 +226,11 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
             for (int mt = 0; mt < MT; mt++)
 #pragma unroll
                 for (int nt = 0; nt < NTILE; nt++) {
-                    const int r = mbase + mt * 16 + g, col = nt * 8 + 2 * tg;
-                    acc[mt][nt][0] = d0l * s_h[r * SH + col];
-                    acc[mt][nt][1] = d0l * s_h[r * SH + col + 1];
-                    acc[mt][nt][2] = d0l * s_h[(r + 8) * SH + col];
-                    acc[mt][nt][3] = d0l * s_h[(r + 8) * SH + col + 1];
+                    const int r = mbase + (mt * 16) + g, col = (nt * 8) + (2 * tg);
+                    acc[mt][nt][0] = d0l * s_h[(r * SH) + col];
+                    acc[mt][nt][1] = d0l * s_h[(r * SH) + col + 1];
+                    acc[mt][nt][2] = d0l * s_h[((r + 8) * SH) + col];
+                    acc[mt][nt][3] = d0l * s_h[((r + 8) * SH) + col + 1];
                 }
             const int kmax16 = (L + 15) & ~15;  // rows [L, kmax16) of K_d and u_eff are zero
             for (int k0 = 0; k0 < kmax16; k0 += 16) {
@@ -239,25 +238,25 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
 #pragma unroll
                 for (int nt = 0; nt < NTILE; nt++) {
                     float b[4];
-                    b[0] = s_ue[(k0 + 2 * tg) * SH + nt * 8 + g];
-                    b[1] = s_ue[(k0 + 2 * tg + 1) * SH + nt * 8 + g];
-                    b[2] = s_ue[(k0 + 2 * tg + 8) * SH + nt * 8 + g];
-                    b[3] = s_ue[(k0 + 2 * tg + 9) * SH + nt * 8 + g];
+                    b[0] = s_ue[((k0 + (2 * tg)) * SH) + (nt * 8) + g];
+                    b[1] = s_ue[((k0 + (2 * tg) + 1) * SH) + (nt * 8) + g];
+                    b[2] = s_ue[((k0 + (2 * tg) + 8) * SH) + (nt * 8) + g];
+                    b[3] = s_ue[((k0 + (2 * tg) + 9) * SH) + (nt * 8) + g];
                     bf[nt] = f16_split_b(b);
                 }
 #pragma unroll
                 for (int mt = 0; mt < MT; mt++) {
                     // A[m = s][k = t] = K_d[t][s], staged row-major as [t][s]
-                    const int r = mbase + mt * 16 + g;
+                    const int r = mbase + (mt * 16) + g;
                     float a[8];
-                    a[0] = s_a[swz128(k0 + 2 * tg, r)];
-                    a[1] = s_a[swz128(k0 + 2 * tg + 1, r)];
-                    a[2] = s_a[swz128(k0 + 2 * tg, r + 8)];
-                    a[3] = s_a[swz128(k0 + 2 * tg + 1, r + 8)];
-                    a[4] = s_a[swz128(k0 + 2 * tg + 8, r)];
-                    a[5] = s_a[swz128(k0 + 2 * tg + 9, r)];
-                    a[6] = s_a[swz128(k0 + 2 * tg + 8, r + 8)];
-                    a[7] = s_a[swz128(k0 + 2 * tg + 9, r + 8)];
+                    a[0] = s_a[swz128(k0 + (2 * tg), r)];
+                    a[1] = s_a[swz128(k0 + (2 * tg) + 1, r)];
+                    a[2] = s_a[swz128(k0 + (2 * tg), r + 8)];
+                    a[3] = s_a[swz128(k0 + (2 * tg) + 1, r + 8)];
+                    a[4] = s_a[swz128(k0 + (2 * tg) + 8, r)];
+                    a[5] = s_a[swz128(k0 + (2 * tg) + 9, r)];
+                    a[6] = s_a[swz128(k0 + (2 * tg) + 8, r + 8)];
+                    a[7] = s_a[swz128(k0 + (2 * tg) + 9, r + 8)];
                     const F16A af = f16_split_a(a);
 #pragma unroll
                     for (int nt = 0; nt < NTILE; nt++)
@@ -269,11 +268,11 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
             for (int mt = 0; mt < MT; mt++)
 #pragma unroll
                 for (int nt = 0; nt < NTILE; nt++) {
-                    const int r = mbase + mt * 16 + g, col = nt * 8 + 2 * tg;
-                    s_h[r * SH + col] = acc[mt][nt][0];
-                    s_h[r * SH + col + 1] = acc[mt][nt][1];
-                    s_h[(r + 8) * SH + col] = acc[mt][nt][2];
-                    s_h[(r + 8) * SH + col + 1] = acc[mt][nt][3];
+                    const int r = mbase + (mt * 16) + g, col = (nt * 8) + (2 * tg);
+                    s_h[(r * SH) + col] = acc[mt][nt][0];
+                    s_h[(r * SH) + col + 1] = acc[mt][nt][1];
+                    s_h[((r + 8) * SH) + col] = acc[mt][nt][2];
+                    s_h[((r + 8) * SH) + col + 1] = acc[mt][nt][3];
                 }
         }
         __syncthreads();
@@ -281,10 +280,10 @@ __global__ void __launch_bounds__(kPassThreads, 1) gdn_chunkpar_pass_kernel(
 
     for (int idx = tid; idx < SS * COLS; idx += NT) {
         const int s = idx / COLS, dl = idx % COLS;
-        const size_t gi = static_cast<size_t>(s) * HD + d_base + dl;
-        const float v = s_h[s * SH + dl];
+        const size_t gi = (static_cast<size_t>(s) * HD) + d_base + dl;
+        const float v = s_h[(s * SH) + dl];
         if (store_statet)
-            h_state[static_cast<size_t>(h) * SS * HD + gi] = static_cast<StateT>(v);
+            h_state[(static_cast<size_t>(h) * SS * HD) + gi] = static_cast<StateT>(v);
         else
             H32_h[gi] = v;
     }
@@ -296,7 +295,8 @@ template <typename StateT>
 void chunkpar_pass_128(float* ws_base, StateT* h_state, half* y, int strip_t0, int strip_tokens,
                        int n_chunks, int n_heads, int load_statet, int store_statet, cudaStream_t stream) {
     constexpr int HD = 128, SS = 128;
-    constexpr size_t smem = (kChunk * SS + SS * (HD / kColSplit + 4) + kChunk * (HD / kColSplit + 4)) *
+    constexpr size_t smem = ((kChunk * SS) + (SS * ((HD / kColSplit) + 4)) +
+                             (kChunk * ((HD / kColSplit) + 4))) *
                             sizeof(float);
     static std::once_flag attr_once;
     std::call_once(attr_once, [] {
@@ -313,5 +313,4 @@ template void chunkpar_pass_128<float>(float*, float*, half*, int, int, int, int
 template void chunkpar_pass_128<__nv_bfloat16>(float*, __nv_bfloat16*, half*, int, int, int, int, int, int,
                                                cudaStream_t);
 
-}  // namespace chunkpar
-}  // namespace imp
+}  // namespace imp::chunkpar

@@ -69,7 +69,7 @@ using imp::quantize::Quantized;
 namespace {
 
 bool ends_with(const std::string& s, const std::string& suf) {
-    return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+    return s.size() >= suf.size() && s.ends_with(suf);
 }
 
 // Look up a plan vector by tensor name, or an empty one when the plan has
@@ -207,7 +207,7 @@ bool plan_shard_stacks(const RawSafeTensors& src, const std::set<std::string>& s
                        std::map<std::string, std::vector<quantize::DestackedMatrix>>& plans,
                        size_t& n_destacked) {
     for (const auto& t : src.tensors()) {
-        if (!stacked_names.count(t.name))
+        if (!stacked_names.contains(t.name))
             continue;
         auto planned = quantize::destack_plan(t, layout);
         if (!planned) {
@@ -312,7 +312,7 @@ bool mxfp8_target(const Options& opt, const RawTensor& t) {
 }
 
 size_t mxfp8_bytes(const RawTensor& t) {
-    return static_cast<size_t>(t.numel() + t.numel() / imp::kMxfp8Block);
+    return static_cast<size_t>(t.numel() + (t.numel() / imp::kMxfp8Block));
 }
 
 // E4M3 `<m>.weight` + E8M0 `<m>.weight_scale` from FP16 `h`; `store` owns the bytes.
@@ -428,7 +428,7 @@ int main(int argc, char** argv) {
             size_t extra_bytes = 0;
             for (const RawTensor* t : gated) {
                 // What keeping it full precision costs over quantizing it.
-                const size_t nvfp4 = t->numel() / 2 + t->numel() / 16;
+                const size_t nvfp4 = (t->numel() / 2) + (t->numel() / 16);
                 extra_bytes += t->nbytes > nvfp4 ? t->nbytes - nvfp4 : 0;
                 if (opt.keep_attn_gate)
                     gated_q_proj.insert(t->name);
@@ -542,7 +542,7 @@ int main(int argc, char** argv) {
         std::map<std::string, std::vector<const RawTensor*>> groups;
         for (const auto& src : opened) {
             for (const auto& t : src->tensors()) {
-                if (fp8_scale_names.count(t.name) || gated_q_proj.count(t.name))
+                if (fp8_scale_names.contains(t.name) || gated_q_proj.contains(t.name))
                     continue;
                 // Asks the policy exactly as the writer does, so a tensor the writer keeps at full precision
                 // isn't given a scale here, and doesn't drag a fused sibling's scale up with an absmax that
@@ -550,7 +550,7 @@ int main(int argc, char** argv) {
                 // never quantized.
                 std::string why;
                 const bool refused = quantize::keep_gdn_projection(t.name, opt.keep_gdn_proj) ||
-                                     (fp8_scale_of.count(t.name)
+                                     (fp8_scale_of.contains(t.name)
                                           ? quantize::fp8_source_action(t, false, opt.quantize_lm_head,
                                                                         why) !=
                                                 quantize::Fp8SourceAction::Quantize
@@ -630,7 +630,7 @@ int main(int argc, char** argv) {
         const size_t bytes = mxfp8_bytes(t);
         bytes_out += bytes;
         copied_bytes_by_reason["GDN projection (--gdn-proj-mxfp8)"] += bytes;
-        mx_widen_bytes += static_cast<size_t>(t.numel()) * 2 - bytes;
+        mx_widen_bytes += (static_cast<size_t>(t.numel()) * 2) - bytes;
         n_copied++;
         excluded_modules.push_back(t.name.substr(0, t.name.size() - strlen(".weight")));
         const auto h = opt.dry_run ? std::vector<uint16_t>{} : tensor_as_fp16(t, fp8_scale_of, plan);
@@ -675,7 +675,7 @@ int main(int argc, char** argv) {
             bytes_in += t.nbytes;
             // A consumed FP8 scale grid: its weight is about to become NVFP4
             // with scales of its own, so this tensor must not reach the output.
-            if (fp8_scale_names.count(t.name)) {
+            if (fp8_scale_names.contains(t.name)) {
                 if (opt.dry_run)
                     printf("  DROP  %-58s FP8 scale, consumed by its weight\n", t.name.c_str());
                 continue;
@@ -698,7 +698,7 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 if (kept_gdn_fp8 ||
-                    quantize::fp8_source_action(t, gated_q_proj.count(t.name) != 0, opt.quantize_lm_head,
+                    quantize::fp8_source_action(t, gated_q_proj.contains(t.name), opt.quantize_lm_head,
                                                 why_fp8) != quantize::Fp8SourceAction::Quantize) {
                     // Its block grid was dropped above, so the E4M3 bytes cannot
                     // travel as they are. Widen and write full precision.
@@ -770,7 +770,7 @@ int main(int argc, char** argv) {
             std::string why;
             // Checked before should_quantize, which sees one tensor and cannot
             // know a q_proj is gated — that needs the layer's o_proj too.
-            const bool gated = gated_q_proj.count(t.name) != 0;
+            const bool gated = gated_q_proj.contains(t.name);
             const bool kept_gdn = quantize::keep_gdn_projection(t.name, opt.keep_gdn_proj);
             if (gated)
                 why = "fused Q+gate projection (--keep-attn-gate)";

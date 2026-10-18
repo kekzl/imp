@@ -64,15 +64,15 @@ void Engine::logit_lens_collect_(const std::vector<std::shared_ptr<Request>>& ro
         const int keep = std::min(reqs[r]->logit_lens, out.top_n);
         step.resize(out.layers);
         for (int l = 0; l < out.layers; ++l) {
-            const size_t k = static_cast<size_t>(l) * out.rows + r;
+            const size_t k = (static_cast<size_t>(l) * out.rows) + r;
             LogitLensLayer& ly = step[l];
             ly.logprob = out.lp[k];
             ly.rank = out.rank[k];
             ly.entropy = out.entropy[k];
             ly.top.reserve(keep);
             for (int j = 0; j < keep; ++j) {
-                const int32_t id = out.top_ids[k * out.top_n + j];
-                ly.top.push_back({id, out.top_lp[k * out.top_n + j], tok->decode_token(id)});
+                const int32_t id = out.top_ids[(k * out.top_n) + j];
+                ly.top.push_back({id, out.top_lp[(k * out.top_n) + j], tok->decode_token(id)});
             }
         }
     }

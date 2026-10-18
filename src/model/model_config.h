@@ -54,7 +54,7 @@ struct ModelConfig {
     // Conv1d channel count (xBC width: x plus the B/C group states). Derived,
     // not stored — the single source for what used to be hand-derived at
     // every SSM sizing/upload/assign site. 0 on non-SSM models.
-    int ssm_conv_channels() const { return ssm_inner_size + 2 * ssm_group_count * ssm_state_size; }
+    int ssm_conv_channels() const { return ssm_inner_size + (2 * ssm_group_count * ssm_state_size); }
     // LFM2 short conv: in_proj emits [B | C | x] (3 x inner), conv over inner channels, no scan state.
     bool ssm_short_conv = false;
     // ssm_in output width: the shared sizing of ssm_proj_buf_ and the dequant scratch.
@@ -213,7 +213,7 @@ struct ModelConfig {
 inline float mla_attention_scale_multiplier(const ModelConfig& cfg) {
     if (!cfg.is_mla() || cfg.rope_freq_scale <= 1.0f)
         return 1.0f;
-    const float mscale_adj = 0.1f * cfg.mla_mscale * std::log(cfg.rope_freq_scale) + 1.0f;
+    const float mscale_adj = (0.1f * cfg.mla_mscale * std::log(cfg.rope_freq_scale)) + 1.0f;
     return mscale_adj * mscale_adj;
 }
 
@@ -254,7 +254,7 @@ inline void set_yarn_mscale_ratio(ModelConfig& cfg, float mscale, float mscale_a
     if (cfg.yarn_ext_factor <= 0.0f || f <= 1.0f || mscale <= 0.0f || mscale_all_dim <= 0.0f ||
         cfg.arch == ModelArch::DEEPSEEK)
         return;
-    auto get_mscale = [f](float m) { return 0.1f * m * std::log(f) + 1.0f; };
+    auto get_mscale = [f](float m) { return (0.1f * m * std::log(f)) + 1.0f; };
     cfg.yarn_attn_factor = get_mscale(mscale) / get_mscale(mscale_all_dim) / get_mscale(1.0f);
 }
 

@@ -589,12 +589,12 @@ private:
         std::string name;
         if (ref == "#") {
             name = "#";
-        } else if (ref.rfind("#/$defs/", 0) == 0) {
+        } else if (ref.starts_with("#/$defs/")) {
             name = ref.substr(8);
-        } else if (ref.rfind("#/definitions/", 0) == 0) {
+        } else if (ref.starts_with("#/definitions/")) {
             name = ref.substr(14);
         }
-        if (name.empty() || name.find('/') != std::string::npos) {
+        if (name.empty() || name.contains('/')) {
             // External refs / deep JSON pointers — unsupported; fail the
             // parse so the caller declines constrained decoding.
             IMP_LOG_WARN("JSON schema: unsupported $ref '%s'", ref.c_str());
@@ -1021,10 +1021,11 @@ static bool collect_tool_defs(const std::vector<std::pair<std::string, std::stri
             std::map<std::string, std::string> rename;
             rename["#"] = name;
             for (auto& [def_name, def_schema] : params->defs)
-                rename[def_name] = name + "/" + def_name;
+                rename[def_name] = std::string(name).append("/").append(def_name);
             rewrite_refs(params.get(), rename);  // recurses into params->defs too
             for (auto& [def_name, def_schema] : params->defs)
-                root->defs.emplace_back(name + "/" + def_name, std::move(def_schema));
+                root->defs.emplace_back(std::string(name).append("/").append(def_name),
+                                        std::move(def_schema));
             params->defs.clear();
         }
         names.push_back(name);

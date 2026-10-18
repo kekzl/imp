@@ -32,6 +32,25 @@ void FfnGraphCache::clear() {
         if (e.exec)
             IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(e.exec));
     entries_.clear();
+    for (auto& [layer, exec] : spare_)
+        IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(exec));
+    spare_.clear();
+}
+
+cudaError_t FfnGraphCache::instantiate_or_update_(int layer, cudaGraph_t graph, cudaGraphExec_t& exec) {
+    if (auto s = spare_.find(layer); s != spare_.end()) {
+        cudaGraphExec_t spare = s->second;
+        spare_.erase(s);
+        cudaGraphExecUpdateResultInfo info{};
+        if (cudaGraphExecUpdate(spare, graph, &info) == cudaSuccess) {
+            exec = spare;
+            ++updates_;
+            return cudaSuccess;
+        }
+        (void)cudaGetLastError();  // topology differs (another GEMM kernel at this row count)
+        IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(spare));
+    }
+    return cudaGraphInstantiate(&exec, graph, 0);
 }
 
 void FfnGraphCache::disable_(const char* what, cudaError_t err) {
@@ -55,8 +74,12 @@ void FfnGraphCache::evict_oldest_bucket_() {
             victim = rows;
     for (auto it = entries_.begin(); it != entries_.end();) {
         if (it->first.first == victim) {
-            if (it->second.exec)
-                IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(it->second.exec));
+            if (cudaGraphExec_t ex = it->second.exec) {
+                cudaGraphExec_t& slot = spare_[it->first.second];
+                if (slot)
+                    IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(slot));
+                slot = ex;
+            }
             it = entries_.erase(it);
         } else {
             ++it;
@@ -123,7 +146,7 @@ void FfnGraphCache::run(int layer, int rows, uint64_t generation, cudaStream_t s
     gemm_set_lt_capture_allowed(false);
     err = cudaStreamEndCapture(stream, &graph);
     if (err == cudaSuccess && graph != nullptr)
-        err = cudaGraphInstantiate(&e.exec, graph, 0);
+        err = instantiate_or_update_(layer, graph, e.exec);
     if (graph)
         IMP_CUDA_CHECK_LOG(cudaGraphDestroy(graph));
     if (err != cudaSuccess || e.exec == nullptr) {

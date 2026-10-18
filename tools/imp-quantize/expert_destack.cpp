@@ -9,7 +9,7 @@ namespace imp::quantize {
 namespace {
 
 bool ends_with(const std::string& s, const std::string& suf) {
-    return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+    return s.size() >= suf.size() && s.ends_with(suf);
 }
 
 const char* part_name(ExpertPart p) {
@@ -96,7 +96,7 @@ std::vector<uint16_t> destack_read(const RawTensor& stack, const StackedExpertLa
                                    const DestackedMatrix& m) {
     const int64_t R = layout.transposed ? stack.shape[2] : stack.shape[1];
     const int64_t K = layout.transposed ? stack.shape[1] : stack.shape[2];
-    const auto* src = static_cast<const uint16_t*>(stack.data) + m.expert * R * K;
+    const auto* src = static_cast<const uint16_t*>(stack.data) + (m.expert * R * K);
     const bool f16 = stack.dtype == "F16";
     std::vector<uint16_t> out(static_cast<size_t>(m.N) * static_cast<size_t>(m.K));
     for (int64_t n = 0; n < m.N; ++n) {
@@ -104,11 +104,11 @@ std::vector<uint16_t> destack_read(const RawTensor& stack, const StackedExpertLa
         int64_t r = n;
         if (m.part != ExpertPart::Down) {
             const bool up = m.part == ExpertPart::Up;
-            r = layout.gate_up == GateUpOrder::Interleaved ? 2 * n + (up ? 1 : 0) : n + (up ? m.N : 0);
+            r = layout.gate_up == GateUpOrder::Interleaved ? (2 * n) + (up ? 1 : 0) : n + (up ? m.N : 0);
         }
-        uint16_t* dst = out.data() + n * m.K;
+        uint16_t* dst = out.data() + (n * m.K);
         for (int64_t k = 0; k < m.K; ++k) {
-            const uint16_t v = layout.transposed ? src[k * R + r] : src[r * K + k];
+            const uint16_t v = layout.transposed ? src[(k * R) + r] : src[(r * K) + k];
             dst[k] = f16 ? v : float_to_half(bf16_to_float(v));
         }
     }

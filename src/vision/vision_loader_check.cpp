@@ -7,7 +7,7 @@ namespace imp {
 
 int vision_blk_layer_index(const std::string& name) {
     constexpr size_t kPrefix = 6;  // "v.blk."
-    if (name.rfind("v.blk.", 0) != 0)
+    if (!name.starts_with("v.blk."))
         return -1;
     const size_t dot = name.find('.', kPrefix);
     if (dot == std::string::npos)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <functional>
 #include <vector>
 #include <cstdint>
@@ -128,10 +129,7 @@ public:
     // Engine::warmup() calls this after tearing down the warmup graphs; otherwise that eager step
     // lands only in the FIRST real request with a numerically different kernel mix (FP order),
     // making greedy output request-order dependent on near-tie logits (30B-NVFP4-MoE flipper).
-    void mark_process_warm() {
-        if (step_count_ < warmup_steps_)
-            step_count_ = warmup_steps_;
-    }
+    void mark_process_warm() { step_count_ = std::max(step_count_, warmup_steps_); }
 
     // Test-only: make the next post-capture replay report failure, so the first-replay-failure
     // path can be exercised. A genuine cudaGraphLaunch failure right after a successful

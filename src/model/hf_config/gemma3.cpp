@@ -13,11 +13,11 @@ namespace {
 bool is_gemma3_config(const JValue& root, const JValue& eff) {
     const JValue* archs = jobj_find(root, "architectures");
     if (archs && archs->type == JType::ARRAY && !archs->arr.empty() &&
-        archs->arr[0].str_val.rfind("Gemma3", 0) == 0)
+        archs->arr[0].str_val.starts_with("Gemma3"))
         return true;
     std::string mt;
     return (jobj_get_string(eff, "model_type", mt) || jobj_get_string(root, "model_type", mt)) &&
-           mt.rfind("gemma3", 0) == 0;
+           mt.starts_with("gemma3");
 }
 
 // transformers 5 rope_parameters.{full,sliding}_attention: global theta + scaling, local theta.

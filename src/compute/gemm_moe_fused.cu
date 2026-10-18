@@ -27,7 +27,7 @@ __global__ void __launch_bounds__(FUSED_BLOCK) gemm_q6k_fused_moe_prefill_kernel
     const int warp_id = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
 
-    const int row = blockIdx.x * FUSED_WARPS + warp_id;
+    const int row = (blockIdx.x * FUSED_WARPS) + warp_id;
     const int expert_id = blockIdx.y;
 
     if (row >= N || expert_id >= n_experts)
@@ -41,8 +41,8 @@ __global__ void __launch_bounds__(FUSED_BLOCK) gemm_q6k_fused_moe_prefill_kernel
     // Weight pointer for this expert's output row
     const int blocks_per_row = K / 256;
     const size_t row_bytes = static_cast<size_t>(blocks_per_row) * 210;
-    const uint8_t* W_row = packed_weights + static_cast<size_t>(expert_id) * expert_stride_bytes +
-                           static_cast<size_t>(row) * row_bytes;
+    const uint8_t* W_row = packed_weights + (static_cast<size_t>(expert_id) * expert_stride_bytes) +
+                           (static_cast<size_t>(row) * row_bytes);
 
     // Each lane handles 8 elements per Q6_K block (lane L → elements L*8..L*8+7)
     const int base_elem = lane * 8;
@@ -71,7 +71,7 @@ __global__ void __launch_bounds__(FUSED_BLOCK) gemm_q6k_fused_moe_prefill_kernel
 
         // Walk K dimension in Q6_K blocks of 256 elements
         for (int blk = 0; blk < blocks_per_row; blk++) {
-            const uint8_t* bp = W_row + static_cast<int64_t>(blk) * 210;
+            const uint8_t* bp = W_row + (static_cast<int64_t>(blk) * 210);
 
             // Load block-level and per-group scales
             float d_w = __half2float(*reinterpret_cast<const half*>(bp + 208));
@@ -96,14 +96,14 @@ __global__ void __launch_bounds__(FUSED_BLOCK) gemm_q6k_fused_moe_prefill_kernel
             }
 
             // Multiply with each token's activation values
-            const int k_offset = blk * 256 + k_lane_offset;
+            const int k_offset = (blk * 256) + k_lane_offset;
 
 #pragma unroll
             for (int m = 0; m < FUSED_M_TILE; m++) {
                 if (m >= M_cur)
                     break;
                 const int64_t token = start + m_base + m;
-                const half* a_ptr = activations + token * K + k_offset;
+                const half* a_ptr = activations + (token * K) + k_offset;
 
                 // Vectorized 128-bit load (16-byte aligned)
                 uint4 a_vec = *reinterpret_cast<const uint4*>(a_ptr);
@@ -134,7 +134,7 @@ __global__ void __launch_bounds__(FUSED_BLOCK) gemm_q6k_fused_moe_prefill_kernel
             for (int m = 0; m < FUSED_M_TILE; m++) {
                 if (m >= M_cur)
                     break;
-                output[static_cast<int64_t>(start + m_base + m) * N + row] = __float2half(acc[m]);
+                output[(static_cast<int64_t>(start + m_base + m) * N) + row] = __float2half(acc[m]);
             }
         }
     }

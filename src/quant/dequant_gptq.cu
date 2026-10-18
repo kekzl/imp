@@ -8,12 +8,12 @@ __global__ void dequant_gptq4_kernel(half* __restrict__ out, const int32_t* __re
                                      const int32_t* __restrict__ qzeros, const half* __restrict__ scales,
                                      const int32_t* __restrict__ g_idx, int N, int K, int group_size,
                                      gptq::ZeroFormat fmt) {
-    const int k = blockIdx.x * blockDim.x + threadIdx.x;
-    const int n = blockIdx.y * blockDim.y + threadIdx.y;
+    const int k = (blockIdx.x * blockDim.x) + threadIdx.x;
+    const int n = (blockIdx.y * blockDim.y) + threadIdx.y;
     if (k >= K || n >= N)
         return;
-    out[static_cast<int64_t>(n) * K + k] = gptq::dequant_elem(qweight, qzeros, scales, g_idx, N, group_size,
-                                                              fmt, k, n);
+    out[(static_cast<int64_t>(n) * K) + k] = gptq::dequant_elem(qweight, qzeros, scales, g_idx, N, group_size,
+                                                                fmt, k, n);
 }
 
 void dequant_gptq4(half* out, const int32_t* qweight, const int32_t* qzeros, const half* scales,

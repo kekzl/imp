@@ -5,8 +5,7 @@
 #include <cuda_runtime.h>
 #include <unordered_set>
 
-namespace imp {
-namespace pdl {
+namespace imp::pdl {
 
 // Registry of kernel functions with PDL enabled.
 static std::unordered_set<const void*>& enabled_kernels() {
@@ -31,7 +30,7 @@ bool is_enabled(const void* kernel_func) {
     // Disable PDL globally via [runtime] no_pdl = true in imp.conf.
     if (process_diag_no_pdl())
         return false;
-    return enabled_kernels().count(kernel_func) > 0;
+    return enabled_kernels().contains(kernel_func);
 }
 
 bool is_available() {
@@ -49,5 +48,4 @@ bool is_available() {
     return s_pdl_available;
 }
 
-}  // namespace pdl
-}  // namespace imp
+}  // namespace imp::pdl

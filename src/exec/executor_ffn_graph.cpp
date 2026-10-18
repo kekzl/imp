@@ -44,7 +44,7 @@ int GraphExecutor::ffn_graph_begin_(const InferenceState& state, int n, cudaStre
         for (Tensor* t : {&hidden_, &residual_, &norm_out_}) {
             const size_t row_bytes = t->nbytes() / static_cast<size_t>(t->shape[0]);
             IMP_CUDA_CHECK_LOG(
-                cudaMemsetAsync(static_cast<char*>(t->data) + static_cast<size_t>(n) * row_bytes, 0,
+                cudaMemsetAsync(static_cast<char*>(t->data) + (static_cast<size_t>(n) * row_bytes), 0,
                                 static_cast<size_t>(rows - n) * row_bytes, stream));
         }
     }

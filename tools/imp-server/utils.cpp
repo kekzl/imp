@@ -166,7 +166,7 @@ long long kv_capacity_ceiling_tokens(int total_blocks, int ceiling_blocks, int b
     return static_cast<long long>(std::max(total_blocks, ceiling_blocks)) * block_size;
 }
 
-bool is_anthropic_path(const std::string& path) { return path.rfind("/v1/messages", 0) == 0; }
+bool is_anthropic_path(const std::string& path) { return path.starts_with("/v1/messages"); }
 
 void send_anthropic_error(httplib::Response& res, int status, const char* type, const std::string& message,
                           const std::string& request_id) {
@@ -602,7 +602,7 @@ void strip_think_block(std::string& text) {
     if (split_last_think(text, reasoning, content)) {
         // Content after the last </think>. If it re-opens an (unclosed) <think>,
         // the model never finished that block — discard it.
-        text = (content.compare(0, 7, "<think>") == 0) ? std::string() : content;
+        text = (content.starts_with("<think>")) ? std::string() : content;
         return;
     }
 

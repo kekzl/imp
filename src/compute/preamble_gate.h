@@ -140,7 +140,7 @@ private:
         // Tool-opener detection (char-prefix fallback).
         if (!open_prefix_.empty()) {
             append_char_buf(text);
-            if (char_buf_.find(open_prefix_) != std::string::npos) {
+            if (char_buf_.contains(open_prefix_)) {
                 state_ = strict_tool_ ? State::TOOL_ARGS : State::TOOL_BODY;
                 char_buf_.clear();
                 return true;
@@ -175,7 +175,7 @@ private:
         // Close-suffix detection (char-suffix fallback).
         if (!close_suffix_.empty()) {
             append_char_buf(text);
-            if (char_buf_.find(close_suffix_) != std::string::npos) {
+            if (char_buf_.contains(close_suffix_)) {
                 state_ = State::TERMINAL_OFF;
                 char_buf_.clear();
                 return true;

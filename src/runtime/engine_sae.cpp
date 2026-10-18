@@ -101,7 +101,7 @@ void Engine::sae_collect_(const std::vector<std::shared_ptr<Request>>& rows, cud
             continue;
         // One entry per output token even on a failed readout: output_sae stays parallel to output_tokens.
         if (ok && r < out.rows)
-            req->output_sae.push_back(sae_token_info(out.acts.data() + static_cast<size_t>(r) * out.width,
+            req->output_sae.push_back(sae_token_info(out.acts.data() + (static_cast<size_t>(r) * out.width),
                                                      out.width, req->sae_top, out.rel_err[r]));
         else
             req->output_sae.emplace_back();

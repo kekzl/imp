@@ -7,9 +7,9 @@ namespace imp::awq {
 
 namespace {
 
-bool has(const std::set<std::string>& names, const std::string& n) { return names.count(n) != 0; }
+bool has(const std::set<std::string>& names, const std::string& n) { return names.contains(n); }
 
-bool wants(const std::string& groups, char g) { return groups.find(g) != std::string::npos; }
+bool wants(const std::string& groups, char g) { return groups.contains(g); }
 
 // Members that exist, in the order given. Callers decide whether a partial set
 // is usable: for a shared pre-norm it never is.
@@ -35,8 +35,7 @@ std::pair<std::string, std::vector<int64_t>> layer_experts(const std::set<std::s
     for (const char* p : {"experts.", "mlp.experts.", "mixer.experts."}) {
         const std::string pre = base + p;
         std::set<int64_t> ids;
-        for (auto it = names.lower_bound(pre); it != names.end() && it->compare(0, pre.size(), pre) == 0;
-             ++it) {
+        for (auto it = names.lower_bound(pre); it != names.end() && it->starts_with(pre); ++it) {
             const size_t dot = it->find('.', pre.size());
             if (dot == std::string::npos || dot == pre.size() ||
                 it->compare(dot, 15, ".up_proj.weight") != 0 || it->size() != dot + 15)
@@ -123,7 +122,7 @@ std::vector<FoldSite> nemotron_h_fold_sites(const std::set<std::string>& names, 
         s.calib_keys = {"SSM_IN"};
         s.scan_prefix = mix;
         std::vector<std::string> ex = strs(mamba_rest);
-        ex.push_back("out_proj.weight");  // reads the gated norm (group E)
+        ex.emplace_back("out_proj.weight");  // reads the gated norm (group E)
         s.scan_exempt = std::move(ex);
         out.push_back(std::move(s));
     }
@@ -165,7 +164,7 @@ std::string resolve_layer_prefix(const std::set<std::string>& names) {
     for (const char* p : kKnown) {
         const std::string pre = p;
         for (const auto& n : names)
-            if (n.size() > pre.size() && n.compare(0, pre.size(), pre) == 0 &&
+            if (n.size() > pre.size() && n.starts_with(pre) &&
                 std::isdigit(static_cast<unsigned char>(n[pre.size()])))
                 return pre;
     }
@@ -174,7 +173,7 @@ std::string resolve_layer_prefix(const std::set<std::string>& names) {
     // checkpoint whose only "layers." are the draft's has no site here.
     static const std::string kMark = "layers.";
     for (const auto& n : names) {
-        if (n.rfind("mtp.", 0) == 0 || n.find(".visual.") != std::string::npos)
+        if (n.starts_with("mtp.") || n.contains(".visual."))
             continue;
         const size_t at = n.find(kMark);
         if (at == std::string::npos)
@@ -217,7 +216,7 @@ std::vector<int64_t> tie_map(TieMode tie, int64_t K, const Geometry& geo) {
                 // Several query heads read one KV head, so every o_proj input
                 // channel mapping to the same v channel must get the same scale.
                 const int64_t h = i / geo.head_dim, d = i % geo.head_dim;
-                out[static_cast<size_t>(i)] = (h / geo.n_rep) * geo.head_dim + d;
+                out[static_cast<size_t>(i)] = ((h / geo.n_rep) * geo.head_dim) + d;
                 break;
             }
             case TieMode::PerHeadDim:

@@ -162,7 +162,7 @@ std::optional<Tensor> fuse3(const Tensor& a, const Tensor& b, const Tensor& c, i
     auto& buf = out.host_owned.emplace_back(3 * each);
     std::memcpy(buf.data(), a.data, each);
     std::memcpy(buf.data() + each, b.data, each);
-    std::memcpy(buf.data() + 2 * each, c.data, each);
+    std::memcpy(buf.data() + (2 * each), c.data, each);
     Tensor f = a;
     f.data = buf.data();
     f.ndim = 1;

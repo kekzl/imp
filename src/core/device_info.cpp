@@ -31,7 +31,7 @@ DeviceInfo query_device_info() {
         cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev) != cudaSuccess)
         IMP_LOG_WARN("device %d: compute capability query failed; sm_120 kernels off", dev);
     else
-        info.cc = major * 10 + minor;
+        info.cc = (major * 10) + minor;
     return info;
 }
 

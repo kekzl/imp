@@ -49,9 +49,9 @@ __device__ __forceinline__ float warp_dot_fp16(const half* __restrict__ row, con
     float sum = 0.0f;
     for (int i = lane; i < K_vec16; i += 32) {
         float4 a0 = row_v[static_cast<int64_t>(2) * i];
-        float4 a1 = row_v[2 * i + 1];
+        float4 a1 = row_v[(2 * i) + 1];
         float4 x0 = x_v[static_cast<int64_t>(2) * i];
-        float4 x1 = x_v[2 * i + 1];
+        float4 x1 = x_v[(2 * i) + 1];
         const half2* a_h2_0 = reinterpret_cast<const half2*>(&a0);
         const half2* x_h2_0 = reinterpret_cast<const half2*>(&x0);
         const half2* a_h2_1 = reinterpret_cast<const half2*>(&a1);
@@ -91,12 +91,12 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gdn_input_kernel(GdnInp
         __shared__ float warp_sums[kGdnGateRowsPerBlock][kKparWarps];
         const int half_id = threadIdx.x / kKparThreads;
         const int tid = threadIdx.x % kKparThreads;
-        const int row = (blockIdx.x - in_blocks) * kGdnGateRowsPerBlock + half_id;
+        const int row = ((blockIdx.x - in_blocks) * kGdnGateRowsPerBlock) + half_id;
         const bool live = row < a.gate_rows;
         pdl_wait();
         float acc = 0.0f;
         if (live)
-            acc = gemv_nvfp4_row(a.packed_gate + (int64_t)row * K_half, a.ms_gate + (int64_t)row * n_mb,
+            acc = gemv_nvfp4_row(a.packed_gate + ((int64_t)row * K_half), a.ms_gate + ((int64_t)row * n_mb),
                                  a.ts_gate, a.x, n_mb, tid);
         pdl_trigger();
         acc = warp_reduce(acc);
@@ -115,7 +115,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gdn_input_kernel(GdnInp
 
     // Warp-per-row segments: row is 0-based inside its own segment.
     const bool in_seg = blockIdx.x < in_blocks;
-    const int row = (in_seg ? blockIdx.x : blockIdx.x - in_blocks - gate_blocks) * kGdnInputNR + warp_id;
+    const int row = ((in_seg ? blockIdx.x : blockIdx.x - in_blocks - gate_blocks) * kGdnInputNR) + warp_id;
     if (in_seg ? row >= a.in_rows : row >= 2 * a.ab_rows)
         return;
     pdl_wait();
@@ -125,8 +125,8 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gdn_input_kernel(GdnInp
     if (in_seg) {
         local_row = row;
         out = a.y_in;
-        acc = warp_k_loop(a.packed_in + (int64_t)row * K_half, a.ms_in + (int64_t)row * n_mb, a.ts_in, n_mb,
-                          lane, [&] __device__(const uint8_t* pb, int off) {
+        acc = warp_k_loop(a.packed_in + ((int64_t)row * K_half), a.ms_in + ((int64_t)row * n_mb), a.ts_in,
+                          n_mb, lane, [&] __device__(const uint8_t* pb, int off) {
                               return dot_micro_block(pb, a.x, off);
                           });
     } else {
@@ -134,7 +134,7 @@ __global__ void __launch_bounds__(kMRThreads) gemv_nvfp4_gdn_input_kernel(GdnInp
         local_row = is_alpha ? row : row - a.ab_rows;
         const half* w = is_alpha ? a.w_alpha : a.w_beta;
         out = is_alpha ? a.y_alpha : a.y_beta;
-        acc = warp_dot_fp16(w + (int64_t)local_row * a.K, a.x, a.K, lane);
+        acc = warp_dot_fp16(w + ((int64_t)local_row * a.K), a.x, a.K, lane);
     }
     pdl_trigger();
     acc = warp_reduce(acc);
@@ -170,9 +170,9 @@ bool gemv_nvfp4_gdn_input_fused(const NvFP4QuantResult& w_in, const NvFP4QuantRe
     a.x = x;
     a.K = K;
     a.fold = fold;
-    const int blocks = (a.in_rows + kGdnInputNR - 1) / kGdnInputNR +
-                       (a.gate_rows + kGdnGateRowsPerBlock - 1) / kGdnGateRowsPerBlock +
-                       (2 * ab_rows + kGdnInputNR - 1) / kGdnInputNR;
+    const int blocks = ((a.in_rows + kGdnInputNR - 1) / kGdnInputNR) +
+                       ((a.gate_rows + kGdnGateRowsPerBlock - 1) / kGdnGateRowsPerBlock) +
+                       (((2 * ab_rows) + kGdnInputNR - 1) / kGdnInputNR);
     pdl::launch(gemv_nvfp4_gdn_input_kernel, dim3(blocks), dim3(kMRThreads), size_t(0), stream, a);
     return true;
 }

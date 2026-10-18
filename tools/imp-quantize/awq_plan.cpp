@@ -120,16 +120,15 @@ std::vector<std::string> unlisted_consumers(const std::map<std::string, const Ra
                                             const std::vector<std::string>& exempt_suffixes) {
     std::vector<std::string> out;
     for (const auto& [name, t] : index) {
-        if (name.rfind(prefix, 0) != 0 || t->shape.size() != 2)
+        if (!name.starts_with(prefix) || t->shape.size() != 2)
             continue;
-        if (name.size() < 7 || name.compare(name.size() - 7, 7, ".weight") != 0)
+        if (name.size() < 7 || !name.ends_with(".weight"))
             continue;
         if (std::find(members.begin(), members.end(), name) != members.end())
             continue;
         bool skip = false;
         for (const auto& suf : exempt_suffixes)
-            if (name.size() >= suf.size() &&
-                name.compare(name.size() - suf.size(), suf.size(), suf) == 0)
+            if (name.size() >= suf.size() && name.ends_with(suf))
                 skip = true;
         if (!skip)
             out.push_back(name);
@@ -248,7 +247,7 @@ std::expected<void, std::string> run_site(bool weight_sq,
     // One producer, one fold. Two groups of the same layer folding into the
     // same tensor would leave the second one's divisor standing and the first
     // one's consumers scaled against a divisor nothing applied.
-    if (plan.vec_div.count(site.producer) || plan.row_div.count(site.producer)) {
+    if (plan.vec_div.contains(site.producer) || plan.row_div.contains(site.producer)) {
         skip(site.producer + " was already folded by another group of this layer");
         return {};
     }
@@ -330,7 +329,7 @@ std::expected<void, std::string> run_site(bool weight_sq,
             for (float& d : div)
                 d = std::sqrt(d);
         plan.row_div[site.producer] = div;
-        if (!site.producer_bias.empty() && index.count(site.producer_bias))
+        if (!site.producer_bias.empty() && index.contains(site.producer_bias))
             plan.vec_div[site.producer_bias] = div;
     }
 
@@ -425,7 +424,7 @@ std::expected<Plan, std::string> build_plan(const std::map<std::string, const Ra
     bool hybrid = false;  // GDN layers present: the wide-GQA default does not apply (Qwen3.8)
     for (const auto& [name, t] : index) {
         names.insert(name);
-        hybrid = hybrid || name.find(".linear_attn.") != std::string::npos;
+        hybrid = hybrid || name.contains(".linear_attn.");
     }
     for (const auto& [name, m] : stacked)
         names.insert(name);

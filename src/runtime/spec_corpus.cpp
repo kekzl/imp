@@ -23,7 +23,7 @@ bool read_text_file(const std::filesystem::path& p, size_t budget, std::string& 
     if (!f)
         return false;
     out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-    return out.find('\0') == std::string::npos;
+    return !out.contains('\0');
 }
 
 }  // namespace

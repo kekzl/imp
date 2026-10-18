@@ -26,14 +26,14 @@ namespace {
 // qs plane[N][K] s8 + interleaved (alpha=d, beta=0) plane[N][K/32][2].
 __global__ void q8_split_kernel(const uint8_t* __restrict__ src, int8_t* __restrict__ qs_plane,
                                 __half* __restrict__ sc_plane, int n_blocks_total) {
-    const int b = blockIdx.x * blockDim.x + threadIdx.x;
+    const int b = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (b >= n_blocks_total) return;
-    const uint8_t* blk = src + static_cast<size_t>(b) * 34;
+    const uint8_t* blk = src + (static_cast<size_t>(b) * 34);
     __half d;
     memcpy(&d, blk, 2);
     sc_plane[static_cast<size_t>(b) * 2] = d;
-    sc_plane[static_cast<size_t>(b) * 2 + 1] = __float2half(0.0f);
-    int8_t* dst = qs_plane + static_cast<size_t>(b) * 32;
+    sc_plane[(static_cast<size_t>(b) * 2) + 1] = __float2half(0.0f);
+    int8_t* dst = qs_plane + (static_cast<size_t>(b) * 32);
 #pragma unroll
     for (int i = 0; i < 32; ++i) dst[i] = static_cast<int8_t>(blk[2 + i]);
 }
@@ -49,12 +49,12 @@ __global__ void quantize_act_fast_kernel(const __half* __restrict__ X, int M, in
     const size_t total = static_cast<size_t>(M) * (K / 32);
     const int lane = threadIdx.x & 31;
     const int quad = lane & 3;
-    const size_t warp = (static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x) >> 5;
+    const size_t warp = ((static_cast<size_t>(blockIdx.x) * blockDim.x) + threadIdx.x) >> 5;
     const size_t nwarps = (static_cast<size_t>(gridDim.x) * blockDim.x) >> 5;
     for (size_t base = warp * 8; base < total; base += nwarps * 8) {  // warp-uniform trip count
         const size_t b = base + (lane >> 2);
         const bool valid = b < total;
-        const size_t off = b * 32 + static_cast<size_t>(quad) * 8;
+        const size_t off = (b * 32) + (static_cast<size_t>(quad) * 8);
         uint4 raw = make_uint4(0u, 0u, 0u, 0u);
         if (valid)
             raw = *reinterpret_cast<const uint4*>(X + off);
@@ -111,8 +111,8 @@ bool g_imma_plane_budget_hit = false;
 // (alpha, beta) half pair per 32-block. Public so the planner charges the
 // number this allocator will actually take.
 size_t imma_q8_plane_bytes(int64_t N, int64_t K) {
-    return static_cast<size_t>(N) * static_cast<size_t>(K) +
-           static_cast<size_t>(N) * (static_cast<size_t>(K) / 32) * 2 * sizeof(__half);
+    return (static_cast<size_t>(N) * static_cast<size_t>(K)) +
+           (static_cast<size_t>(N) * (static_cast<size_t>(K) / 32) * 2 * sizeof(__half));
 }
 
 namespace {
@@ -204,9 +204,10 @@ bool imma_ensure_act(int M, int K, bool capturing) {
         // Reachable only if mmq_q8_imma_preallocate()'s bound was too small: preallocation takes
         // the charged (rows, K) up front so a staircase of intermediate takes (each stranded in
         // the bump arena) cannot happen.
-        IMP_LOG_WARN("mmq_q8_imma: activation scratch regrew to M=%d K=%d (%.1f MiB) past the "
-                     "preallocated bound — re-measure exec_imma_scratch_shape()",
-                     M, K, (mk + msubs * 6) / (1024.0 * 1024.0));
+        IMP_LOG_WARN(
+            "mmq_q8_imma: activation scratch regrew to M=%d K=%d (%.1f MiB) past the "
+            "preallocated bound — re-measure exec_imma_scratch_shape()",
+            M, K, (mk + (msubs * 6)) / (1024.0 * 1024.0));
     }
     auto xs8 = engine_arena().take_bytes(mk);
     auto xscale = engine_arena().take_bytes(msubs * sizeof(__half));
@@ -274,7 +275,7 @@ void imma_quantize_act(const __half* x, int M, int K, cudaStream_t stream) {
     const bool reuse = std::exchange(t_reuse_next, false);
     if (reuse && imma_act_holds(x, M, K, stream))
         return;
-    const int total_warps = (M * (K / 32) + 7) / 8;  // 8 blocks of 32 per warp
+    const int total_warps = ((M * (K / 32)) + 7) / 8;  // 8 blocks of 32 per warp
     const int blocks = min(2048, (total_warps + 7) / 8);
     quantize_act_fast_kernel<<<blocks, 256, 0, stream>>>(x, M, K, g_imma_act.xs8, g_imma_act.xscale,
                                                          g_imma_act.xrowsum);
@@ -315,7 +316,7 @@ namespace {
 // Planes -> FP16, the arithmetic of dequant_q8_0_kernel (fp32 d * q, one rounding).
 __global__ void q8_planes_to_f16_kernel(const int8_t* __restrict__ qs, const __half* __restrict__ sc,
                                         __half* __restrict__ dst, int64_t total) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= total)
         return;
     dst[i] = __float2half(__half2float(sc[(i / 32) * 2]) * static_cast<float>(qs[i]));

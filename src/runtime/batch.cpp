@@ -154,7 +154,7 @@ Batch BatchBuilder::build() {
     for (int s = 0; s < batch_.n_sequences; s++) {
         const auto& table = raw_block_tables_[static_cast<size_t>(s)];
         for (const auto [b, block] : std::views::enumerate(table))
-            batch_.block_tables[s * max_blocks + static_cast<int>(b)] = block;
+            batch_.block_tables[(s * max_blocks) + static_cast<int>(b)] = block;
     }
 
     // Parallel SWA tables (same shape/stride). Padded with -1 — a padded slot
@@ -165,7 +165,7 @@ Batch BatchBuilder::build() {
             const auto full = raw_swa_block_tables_[static_cast<size_t>(s)];
             const auto table = full.first(std::min(full.size(), static_cast<size_t>(max_blocks)));
             for (const auto [b, block] : std::views::enumerate(table))
-                batch_.block_tables_swa[s * max_blocks + static_cast<int>(b)] = block;
+                batch_.block_tables_swa[(s * max_blocks) + static_cast<int>(b)] = block;
         }
     }
 

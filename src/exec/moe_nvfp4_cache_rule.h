@@ -17,7 +17,7 @@ struct MoeProjCacheState {
 // NVFP4 bytes of one packed [ne, rows, cols] expert tensor: e2m1 data + FP8 scale per 16 + FP32 per expert.
 [[nodiscard]] constexpr size_t moe_nvfp4_packed_bytes(int64_t ne, int64_t rows, int64_t cols) {
     const size_t elems = static_cast<size_t>(ne) * static_cast<size_t>(rows) * static_cast<size_t>(cols);
-    return elems / 2 + elems / 16 + static_cast<size_t>(ne) * sizeof(float);
+    return (elems / 2) + (elems / 16) + (static_cast<size_t>(ne) * sizeof(float));
 }
 
 [[nodiscard]] constexpr bool moe_layer_cache_whole(MoeProjCacheState gate, MoeProjCacheState up,

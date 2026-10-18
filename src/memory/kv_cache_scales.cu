@@ -93,7 +93,7 @@ bool KVCache::commit_scales_(int from, int to) {
             ok = ok &&
                  be->commit_range(scale_region_, static_cast<size_t>(p - base), hi * sbb) == MemError::Ok;
             if (ok && hi > lo) {
-                IMP_CUDA_CHECK_LOG(cudaMemset(p + lo * sbb, 0, (hi - lo) * sbb));
+                IMP_CUDA_CHECK_LOG(cudaMemset(p + (lo * sbb), 0, (hi - lo) * sbb));
                 zeroed = true;
             }
         }
@@ -102,7 +102,7 @@ bool KVCache::commit_scales_(int from, int to) {
     if (added > 0)
         MemAccount::instance().note("kv_cache_scales", static_cast<std::ptrdiff_t>(added));
     if (zeroed)
-        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(0));
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(nullptr));
     return ok;
 }
 

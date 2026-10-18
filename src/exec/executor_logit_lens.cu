@@ -16,8 +16,8 @@ namespace {
 
 // Bytes per stashed row: the FP16 row, then target, lp, rank, entropy and a kPlpMaxTopN top list.
 size_t lens_row_bytes(int d_model) {
-    return static_cast<size_t>(d_model) * sizeof(half) + 4 * sizeof(float) +
-           static_cast<size_t>(kPlpMaxTopN) * (sizeof(int32_t) + sizeof(float));
+    return (static_cast<size_t>(d_model) * sizeof(half)) + (4 * sizeof(float)) +
+           (static_cast<size_t>(kPlpMaxTopN) * (sizeof(int32_t) + sizeof(float)));
 }
 
 }  // namespace
@@ -29,9 +29,9 @@ void GraphExecutor::set_lens_rows(std::vector<int> rows) {
     lens_layers_ = 0;
     if (lens_rows_.empty() || vram_alloc_ == nullptr)
         return;
-    const size_t need = static_cast<size_t>(model_->n_layers()) * lens_rows_.size() *
-                            lens_row_bytes(model_->config().d_model) +
-                        6 * size_t{256};  // alignment of the six output arrays
+    const size_t need = (static_cast<size_t>(model_->n_layers()) * lens_rows_.size() *
+                         lens_row_bytes(model_->config().d_model)) +
+                        (6 * size_t{256});  // alignment of the six output arrays
     if (need > lens_scratch_bytes_) {
         lens_scratch_bytes_ = 0;
         lens_scratch_ = VramOwned<char>(*vram_alloc_, need, "logit_lens");
@@ -53,13 +53,13 @@ void GraphExecutor::lens_stash_(int layer, int n, cudaStream_t stream) {
     const int d = model_->config().d_model;
     const int r_n = static_cast<int>(lens_rows_.size());
     const size_t row_b = static_cast<size_t>(d) * sizeof(half);
-    char* dst = lens_scratch_.get() + static_cast<size_t>(layer) * r_n * row_b;
+    char* dst = lens_scratch_.get() + (static_cast<size_t>(layer) * r_n * row_b);
     const char* src = static_cast<const char*>(hidden_.data);
     for (int r = 0; r < r_n; ++r) {
         if (lens_rows_[r] < 0 || lens_rows_[r] >= n)
             continue;
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dst + static_cast<size_t>(r) * row_b,
-                                           src + static_cast<size_t>(lens_rows_[r]) * row_b, row_b,
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dst + (static_cast<size_t>(r) * row_b),
+                                           src + (static_cast<size_t>(lens_rows_[r]) * row_b), row_b,
                                            cudaMemcpyDeviceToDevice, stream));
     }
     lens_layers_ = std::max(lens_layers_, layer + 1);
@@ -75,7 +75,7 @@ bool GraphExecutor::logit_lens_readout(const std::vector<int32_t>& targets, int 
     const int d = cfg.d_model;
     const int n = lens_layers_ * r_n;
     // Stash first (sized for every layer), then the per-row outputs behind it.
-    char* p = lens_scratch_.get() + static_cast<size_t>(model_->n_layers()) * r_n * d * sizeof(half);
+    char* p = lens_scratch_.get() + (static_cast<size_t>(model_->n_layers()) * r_n * d * sizeof(half));
     auto take = [&](size_t bytes) {
         char* q = p;
         p += (bytes + 255) & ~size_t{255};
@@ -104,8 +104,8 @@ bool GraphExecutor::logit_lens_readout(const std::vector<int32_t>& targets, int 
     for_each_lm_head_batch_(n, stream, /*allow_cutlass=*/false, [&](const Tensor& lg, int row0, int csz) {
         prompt_logprobs_rows(static_cast<const float*>(lg.data), csz, cfg.vocab_size, cfg.vocab_size,
                              d_tgt + row0, top_n, d_lp + row0, d_rank + row0,
-                             top_n > 0 ? d_top_ids + static_cast<int64_t>(row0) * top_n : nullptr,
-                             top_n > 0 ? d_top_lp + static_cast<int64_t>(row0) * top_n : nullptr, stream,
+                             top_n > 0 ? d_top_ids + (static_cast<int64_t>(row0) * top_n) : nullptr,
+                             top_n > 0 ? d_top_lp + (static_cast<int64_t>(row0) * top_n) : nullptr, stream,
                              d_ent + row0);
     });
     lm_rows_ = nullptr;

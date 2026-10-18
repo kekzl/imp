@@ -32,7 +32,7 @@ static Tensor kv_rows_view(Tensor t, const ModelConfig& cfg, int row_begin, int 
     }
     if (row_begin > 0)
         t.data = static_cast<char*>(t.data) +
-                 static_cast<size_t>(row_begin) * t.shape[1] * dtype_size(t.qtype);
+                 (static_cast<size_t>(row_begin) * t.shape[1] * dtype_size(t.qtype));
     return t;
 }
 

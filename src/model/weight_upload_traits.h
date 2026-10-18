@@ -112,8 +112,8 @@ void stage_host_dequant(const Tensor& w, StagePlan& p) {
     const uint8_t* raw = static_cast<const uint8_t*>(w.data);
     for (int64_t n = 0; n < N; ++n) {
         for (int b = 0; b < blocks_per_row; ++b) {
-            const uint8_t* block_ptr = raw + (n * blocks_per_row + b) * Fmt::kBlockBytes;
-            Fmt::decode(block_ptr, p.h16.data() + n * K + b * Fmt::kBlockElems);
+            const uint8_t* block_ptr = raw + (((n * blocks_per_row) + b) * Fmt::kBlockBytes);
+            Fmt::decode(block_ptr, p.h16.data() + (n * K) + (b * Fmt::kBlockElems));
         }
     }
     p.add(p.h16.data(), p.h16.size() * sizeof(uint16_t));
@@ -144,11 +144,11 @@ struct Mxfp4Fmt {
 
     static void repack_v2(const uint8_t* src, int total_blocks, size_t data_bytes, uint8_t* h) {
         for (int i = 0; i < total_blocks; i++) {
-            const uint8_t* qs = src + static_cast<size_t>(i) * kBlockBytes + 1;
+            const uint8_t* qs = src + (static_cast<size_t>(i) * kBlockBytes) + 1;
             h[data_bytes + i] = src[static_cast<size_t>(i) * kBlockBytes];
-            uint8_t* dst = h + static_cast<size_t>(i) * kDataBytes;
+            uint8_t* dst = h + (static_cast<size_t>(i) * kDataBytes);
             for (int b = 0; b < 16; b++) {
-                const int e0 = 2 * b, e1 = 2 * b + 1;
+                const int e0 = 2 * b, e1 = (2 * b) + 1;
                 const uint8_t n0 = (e0 < 16) ? (qs[e0] & 0xF) : (qs[e0 - 16] >> 4);
                 const uint8_t n1 = (e1 < 16) ? (qs[e1] & 0xF) : (qs[e1 - 16] >> 4);
                 dst[b] = static_cast<uint8_t>(n0 | (n1 << 4));
@@ -157,8 +157,9 @@ struct Mxfp4Fmt {
     }
     static void repack_legacy(const uint8_t* src, int total_blocks, size_t data_bytes, uint8_t* h) {
         for (int i = 0; i < total_blocks; i++) {
-            memcpy(h + static_cast<size_t>(i) * kDataBytes, src + static_cast<size_t>(i) * kBlockBytes, kDataBytes);
-            h[data_bytes + i] = src[static_cast<size_t>(i) * kBlockBytes + kDataBytes];
+            memcpy(h + (static_cast<size_t>(i) * kDataBytes), src + (static_cast<size_t>(i) * kBlockBytes),
+                   kDataBytes);
+            h[data_bytes + i] = src[(static_cast<size_t>(i) * kBlockBytes) + kDataBytes];
         }
     }
     [[nodiscard]] static bool stage(const Tensor& w, QType qtype, bool, float, StagePlan& p) {
@@ -198,9 +199,9 @@ struct Q4_0Fmt {
         const uint8_t* raw = static_cast<const uint8_t*>(w.data);
         for (int64_t n = 0; n < N; ++n) {
             for (int b = 0; b < blocks_per_row; ++b) {
-                const uint8_t* block_ptr = raw + (n * blocks_per_row + b) * kBlockBytes;
-                std::memcpy(&p.h16[n * blocks_per_row + b], block_ptr, 2);
-                std::memcpy(&p.h8[n * half_K + static_cast<int64_t>(b) * 16], block_ptr + 2, 16);
+                const uint8_t* block_ptr = raw + (((n * blocks_per_row) + b) * kBlockBytes);
+                std::memcpy(&p.h16[(n * blocks_per_row) + b], block_ptr, 2);
+                std::memcpy(&p.h8[(n * half_K) + (static_cast<int64_t>(b) * 16)], block_ptr + 2, 16);
             }
         }
         p.add(p.h8.data(), p.h8.size());
@@ -248,9 +249,9 @@ struct Q6_KFmt {
             int within = i % 128;
             int quad = within / 32;
             int l = within % 32;
-            uint8_t ql_byte = ql[group * 64 + (quad & 1) * 32 + l];
+            uint8_t ql_byte = ql[(group * 64) + ((quad & 1) * 32) + l];
             uint8_t low4 = (quad >= 2) ? ((ql_byte >> 4) & 0xF) : (ql_byte & 0xF);
-            uint8_t high2 = (qh[group * 32 + l] >> (quad * 2)) & 0x3;
+            uint8_t high2 = (qh[(group * 32) + l] >> (quad * 2)) & 0x3;
             int q6 = static_cast<int>((high2 << 4) | low4) - 32;
             const int8_t scale = scales[i / 16];  // index math, not a float division
             out[i] = float_to_fp16(d * static_cast<float>(scale) * static_cast<float>(q6));

@@ -70,7 +70,7 @@ bool Engine::mixed_rider_ok_(const Request& r) const {
     if (r.status != RequestStatus::DECODING || r.output_tokens.empty() || !prefill_ragged_req_ok_(r))
         return false;
     // A hybrid rider needs its live recurrent slot in the ragged slot table.
-    if (ssm_state_ && recurrent_slot_of_.find(r.id) == recurrent_slot_of_.end())
+    if (ssm_state_ && !recurrent_slot_of_.contains(r.id))
         return false;
     // The rider's row is a one-token continuation chunk at its context end;
     // the cuBLAS-only attention configs size their S-matrix from it.

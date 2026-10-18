@@ -38,7 +38,7 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
         size_t fp16_all_bytes = 0;
         {
             auto cache_weight_fp16 = [&](const Tensor& w) {
-                if (!w.data || wcache_->fp16.count(w.data))
+                if (!w.data || wcache_->fp16.contains(w.data))
                     return;
                 QType qtype = w.qtype;
                 if (qtype != QType::NVFP4)
@@ -107,9 +107,9 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
                 return;
             if (!dequant_gpu_supported(qtype) && qtype != QType::NVFP4)
                 return;
-            if (wcache_->fp16.count(w.data))
+            if (wcache_->fp16.contains(w.data))
                 return;
-            if (wcache_->fp8.count(w.data))
+            if (wcache_->fp8.contains(w.data))
                 return;
             if (fp8_exhausted)
                 return;
@@ -143,8 +143,7 @@ void QuantPipeline::pre_dequant_phase2_fp8_cache_(
             for (auto& e : fp8_entries) {
                 int threads_needed = (static_cast<int>(e.n_elems) + 3) / 4;
                 int grid = (threads_needed + 255) / 256;
-                if (grid > max_grid)
-                    max_grid = grid;
+                max_grid = std::max(max_grid, grid);
                 total_fp8_bytes += e.n_elems;
             }
 
@@ -294,8 +293,8 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
             // resident weight, the calibration kernel reads __half.
             if (w->qtype != QType::F16)
                 continue;
-            if (wcache_->fp8.count(w->data) || wcache_->nvfp4.count(w->data) ||
-                wcache_->cutlass_nvfp4.count(w->data))
+            if (wcache_->fp8.contains(w->data) || wcache_->nvfp4.contains(w->data) ||
+                wcache_->cutlass_nvfp4.contains(w->data))
                 continue;
             size_t n = static_cast<size_t>(w->shape[0]) * w->shape[1];
             if (n == 0 || (w->shape[1] % 16) != 0)

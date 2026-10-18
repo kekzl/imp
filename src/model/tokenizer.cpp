@@ -427,8 +427,7 @@ bool Tokenizer::load(const std::string& path) {
                     n_dropped_id++;
                     continue;
                 }
-                if (id > max_id)
-                    max_id = id;
+                max_id = std::max(max_id, id);
             }
         }
         vocab_.resize(static_cast<size_t>(max_id + 1));
@@ -1191,7 +1190,7 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
                 // (intermediate merge steps). Applying such a merge produces a symbol that fails lookup and
                 // byte-falls-back the WHOLE word; skipping it keeps sub-parts that ARE tokens intact
                 // (matches llama.cpp).
-                if (token_to_id_.find(merged) == token_to_id_.end())
+                if (!token_to_id_.contains(merged))
                     continue;
 
                 symbols[pos] = merged;

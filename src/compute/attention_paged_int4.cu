@@ -7,6 +7,8 @@
 #include <cuda_fp16.h>
 #include <float.h>
 
+#include <algorithm>
+
 namespace imp {
 
 // INT4 paged attention decode: KV cache stores 2 INT4 values/byte (low nibble=even, high=odd).
@@ -49,7 +51,7 @@ __global__ void paged_attention_decode_int4_kernel(
     const int lane_offset = lane_id * ELEMS;
 
     // Load Q into registers
-    const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * HEAD_DIM + (int64_t)head_idx * HEAD_DIM;
+    const half* Q_ptr = Q + ((int64_t)batch_idx * n_heads * HEAD_DIM) + ((int64_t)head_idx * HEAD_DIM);
     float q_reg[ELEMS];
     {
         const half2* Q_ptr2 = reinterpret_cast<const half2*>(Q_ptr + lane_offset);
@@ -57,11 +59,11 @@ __global__ void paged_attention_decode_int4_kernel(
         for (int i = 0; i < ELEMS / 2; i++) {
             half2 h2 = Q_ptr2[i];
             q_reg[2 * i] = __half2float(h2.x);
-            q_reg[2 * i + 1] = __half2float(h2.y);
+            q_reg[(2 * i) + 1] = __half2float(h2.y);
         }
     }
 
-    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
+    const int* bt = block_tables + ((int64_t)batch_idx * max_num_blocks);
     const int kv_head_bytes = HEAD_DIM / 2;  // bytes per head per token (INT4 packed)
     const int kv_block_stride = block_size * n_kv_heads * kv_head_bytes;
     const int kv_slot_stride = n_kv_heads * kv_head_bytes;
@@ -86,15 +88,14 @@ __global__ void paged_attention_decode_int4_kernel(
         // KV read. FP16 carried this guard since #963, quantised kernels only since #1678.
         if (phys_block < 0)
             continue;
-        const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
-        const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
-        const half* K_sc_block = K_scales + (int64_t)phys_block * scale_block_stride;
-        const half* V_sc_block = V_scales + (int64_t)phys_block * scale_block_stride;
+        const uint8_t* K_block = K_cache + ((int64_t)phys_block * kv_block_stride);
+        const uint8_t* V_block = V_cache + ((int64_t)phys_block * kv_block_stride);
+        const half* K_sc_block = K_scales + ((int64_t)phys_block * scale_block_stride);
+        const half* V_sc_block = V_scales + ((int64_t)phys_block * scale_block_stride);
 
         int tok_start = blk * block_size;
         int tok_end = tok_start + block_size;
-        if (tok_end > ctx_len)
-            tok_end = ctx_len;
+        tok_end = std::min(tok_end, ctx_len);
 
         int first_tok = 0;
         if (tok_start < effective_start)
@@ -105,9 +106,9 @@ __global__ void paged_attention_decode_int4_kernel(
             if (t + 1 < (tok_end - tok_start)) {
                 // #2218 bounded: kv_head * kv_head_bytes <= kMaxHeads * 256 / 2 = 2^19
                 // (model_limits.h:24, max HEAD_DIM :469).
-                const auto* K_next = K_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
+                const auto* K_next = K_block + (static_cast<int64_t>(t + 1) * kv_slot_stride) +
                                      static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
-                const auto* V_next = V_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
+                const auto* V_next = V_block + (static_cast<int64_t>(t + 1) * kv_slot_stride) +
                                      static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
                 if (lane_id == 0) {
                     asm volatile("prefetch.global.L1 [%0];\n" ::"l"(K_next));
@@ -115,23 +116,23 @@ __global__ void paged_attention_decode_int4_kernel(
                 }
             }
 
-            const uint8_t* K_tok = K_block + static_cast<int64_t>(t) * kv_slot_stride +
+            const uint8_t* K_tok = K_block + (static_cast<int64_t>(t) * kv_slot_stride) +
                                    static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
-            float k_scale = __half2float(K_sc_block[t * n_kv_heads + kv_head]);
+            float k_scale = __half2float(K_sc_block[(t * n_kv_heads) + kv_head]);
 
             // Q.K dot product: unpack INT4, dequant, multiply with Q
             float dot = 0.0f;
             {
                 // Each lane handles ELEMS elements starting at lane_offset
                 // INT4: 2 elements per byte, so lane reads ELEMS/2 bytes
-                const uint8_t* k_bytes = K_tok + lane_offset / 2;
+                const uint8_t* k_bytes = K_tok + (lane_offset / 2);
 #pragma unroll
                 for (int i = 0; i < ELEMS / 2; i++) {
                     uint8_t packed = k_bytes[i];
                     float k0 = static_cast<float>(unpack_int4_lo(packed)) * k_scale;
                     float k1 = static_cast<float>(unpack_int4_hi(packed)) * k_scale;
                     dot += q_reg[2 * i] * k0;
-                    dot += q_reg[2 * i + 1] * k1;
+                    dot += q_reg[(2 * i) + 1] * k1;
                 }
             }
             dot = warp_reduce_sum(dot);
@@ -142,18 +143,18 @@ __global__ void paged_attention_decode_int4_kernel(
             online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
             // V accumulation: unpack INT4, dequant, weighted sum
-            const uint8_t* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +
+            const uint8_t* V_tok = V_block + (static_cast<int64_t>(t) * kv_slot_stride) +
                                    static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
-            float v_scale = __half2float(V_sc_block[t * n_kv_heads + kv_head]);
+            float v_scale = __half2float(V_sc_block[(t * n_kv_heads) + kv_head]);
             {
-                const uint8_t* v_bytes = V_tok + lane_offset / 2;
+                const uint8_t* v_bytes = V_tok + (lane_offset / 2);
 #pragma unroll
                 for (int i = 0; i < ELEMS / 2; i++) {
                     uint8_t packed = v_bytes[i];
                     float v0 = static_cast<float>(unpack_int4_lo(packed)) * v_scale;
                     float v1 = static_cast<float>(unpack_int4_hi(packed)) * v_scale;
                     o_reg[2 * i] = rescale * o_reg[2 * i] + w_new * v0;
-                    o_reg[2 * i + 1] = rescale * o_reg[2 * i + 1] + w_new * v1;
+                    o_reg[(2 * i) + 1] = rescale * o_reg[(2 * i) + 1] + w_new * v1;
                 }
             }
         }
@@ -196,7 +197,7 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
     const int lane_offset = lane_id * ELEMS;
 
     // Load Q into registers
-    const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * HEAD_DIM + (int64_t)head_idx * HEAD_DIM;
+    const half* Q_ptr = Q + ((int64_t)batch_idx * n_heads * HEAD_DIM) + ((int64_t)head_idx * HEAD_DIM);
     float q_reg[ELEMS];
     {
         const half2* Q_ptr2 = reinterpret_cast<const half2*>(Q_ptr + lane_offset);
@@ -204,7 +205,7 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
         for (int i = 0; i < ELEMS / 2; i++) {
             half2 h2 = Q_ptr2[i];
             q_reg[2 * i] = __half2float(h2.x);
-            q_reg[2 * i + 1] = __half2float(h2.y);
+            q_reg[(2 * i) + 1] = __half2float(h2.y);
         }
     }
 
@@ -217,10 +218,9 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
     const int total_blocks = num_ctx_blocks - first_block;
 
     int blocks_per_split = (total_blocks + num_splits - 1) / num_splits;
-    int split_start = first_block + split_idx * blocks_per_split;
+    int split_start = first_block + (split_idx * blocks_per_split);
     int split_end = split_start + blocks_per_split;
-    if (split_end > num_ctx_blocks)
-        split_end = num_ctx_blocks;
+    split_end = std::min(split_end, num_ctx_blocks);
 
     if (split_start >= split_end) {
         write_empty_split_sentinel<HEAD_DIM>(partial_out, batch_idx, n_heads, head_idx, num_splits, split_idx,
@@ -228,7 +228,7 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
         return;
     }
 
-    const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
+    const int* bt = block_tables + ((int64_t)batch_idx * max_num_blocks);
     const int kv_head_bytes = HEAD_DIM / 2;
     const int kv_block_stride = block_size * n_kv_heads * kv_head_bytes;
     const int kv_slot_stride = n_kv_heads * kv_head_bytes;
@@ -260,15 +260,14 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
         // KV read. FP16 carried this guard since #963, quantised kernels only since #1678.
         if (phys_block < 0)
             continue;
-        const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
-        const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
-        const half* K_sc_block = K_scales + (int64_t)phys_block * scale_block_stride;
-        const half* V_sc_block = V_scales + (int64_t)phys_block * scale_block_stride;
+        const uint8_t* K_block = K_cache + ((int64_t)phys_block * kv_block_stride);
+        const uint8_t* V_block = V_cache + ((int64_t)phys_block * kv_block_stride);
+        const half* K_sc_block = K_scales + ((int64_t)phys_block * scale_block_stride);
+        const half* V_sc_block = V_scales + ((int64_t)phys_block * scale_block_stride);
 
         int tok_start = blk * block_size;
         int tok_end = tok_start + block_size;
-        if (tok_end > ctx_len)
-            tok_end = ctx_len;
+        tok_end = std::min(tok_end, ctx_len);
 
         int first_tok = 0;
         if (tok_start < effective_start)
@@ -280,7 +279,7 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
         // Prime: async load K[first_tok] into k_buf0
         // INT4: LANE_BYTES per lane. Use byte-level cp.async.
         {
-            const uint8_t* K_tok = K_block + static_cast<int64_t>(first_tok) * kv_slot_stride +
+            const uint8_t* K_tok = K_block + (static_cast<int64_t>(first_tok) * kv_slot_stride) +
                                    static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
             const int lane_byte_offset = lane_offset / 2;  // ELEMS/2 = LANE_BYTES
 // cp.async with LANE_BYTES. For HD=128, LANE_BYTES=2; HD=256, LANE_BYTES=4.
@@ -300,7 +299,7 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
 
             // Load V[t] into v_buf
             {
-                const uint8_t* V_tok = V_block + static_cast<int64_t>(t) * kv_slot_stride +
+                const uint8_t* V_tok = V_block + (static_cast<int64_t>(t) * kv_slot_stride) +
                                        static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
                 const int lane_byte_offset = lane_offset / 2;
 #pragma unroll
@@ -311,7 +310,7 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
 
             // Prefetch K[t+1] into alternate buffer
             if (ti + 1 < n_toks) {
-                const uint8_t* K_next = K_block + static_cast<int64_t>(t + 1) * kv_slot_stride +
+                const uint8_t* K_next = K_block + (static_cast<int64_t>(t + 1) * kv_slot_stride) +
                                         static_cast<ptrdiff_t>(kv_head * kv_head_bytes);
                 const int lane_byte_offset = lane_offset / 2;
 #pragma unroll
@@ -321,7 +320,7 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
             }
 
             // Compute Q.K dot product from smem K[t]
-            float k_scale = __half2float(K_sc_block[t * n_kv_heads + kv_head]);
+            float k_scale = __half2float(K_sc_block[(t * n_kv_heads) + kv_head]);
             float dot = 0.0f;
             {
                 uint8_t* k_cur = k_bufs[cur];
@@ -332,7 +331,7 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
                     float k0 = static_cast<float>(unpack_int4_lo(packed)) * k_scale;
                     float k1 = static_cast<float>(unpack_int4_hi(packed)) * k_scale;
                     dot += q_reg[2 * i] * k0;
-                    dot += q_reg[2 * i + 1] * k1;
+                    dot += q_reg[(2 * i) + 1] * k1;
                 }
             }
             dot = warp_reduce_sum(dot);
@@ -343,7 +342,7 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
             online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
             // V accumulation from smem v_buf
-            float v_scale = __half2float(V_sc_block[t * n_kv_heads + kv_head]);
+            float v_scale = __half2float(V_sc_block[(t * n_kv_heads) + kv_head]);
             {
                 const int lane_byte_offset = lane_offset / 2;
 #pragma unroll
@@ -352,7 +351,7 @@ __global__ void paged_attention_splitk_int4_pipeline_kernel(
                     float v0 = static_cast<float>(unpack_int4_lo(packed)) * v_scale;
                     float v1 = static_cast<float>(unpack_int4_hi(packed)) * v_scale;
                     o_reg[2 * i] = rescale * o_reg[2 * i] + w_new * v0;
-                    o_reg[2 * i + 1] = rescale * o_reg[2 * i + 1] + w_new * v1;
+                    o_reg[(2 * i) + 1] = rescale * o_reg[(2 * i) + 1] + w_new * v1;
                 }
             }
 
@@ -390,8 +389,8 @@ void paged_attention_decode_int4(const Tensor& Q, const Tensor& K_cache, const T
     const int max_num_blocks = (max_blocks_per_seq > 0) ? max_blocks_per_seq
                                                         : (max_context_len + block_size - 1) / block_size;
 
-    size_t smem_bytes = NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
-                        static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float);
+    size_t smem_bytes = (NUM_WARPS * sizeof(float)) + (NUM_WARPS * sizeof(float)) +
+                        (static_cast<int64_t>(NUM_WARPS) * head_dim * sizeof(float));
 
     // Split-K decision
     void* scratch_ptr = nullptr;

@@ -38,8 +38,7 @@ __device__ __forceinline__ void load_kstep_q51(int tid, const int8_t* __restrict
         const int row = i >> 2;
         const int col = (i & 3) * 16;
         const bool valid = (base_m + row) < M;
-        cp_async_cg_16(&sA[row][col],
-                       A + static_cast<size_t>(base_m + row) * K + k_base + col, valid);
+        cp_async_cg_16(&sA[row][col], A + (static_cast<size_t>(base_m + row) * K) + k_base + col, valid);
     }
     const int kb0 = k_base / 32;
     // #2218 bounded: part = i % 3 <= 2: part * 16 <= 32 B
@@ -48,15 +47,15 @@ __device__ __forceinline__ void load_kstep_q51(int tid, const int8_t* __restrict
         const int row = i / 3;
         const int part = i % 3;
         const bool bvalid = (base_n_rows < 0) || (row < base_n_rows);
-        const uint8_t* blk = Wq51 + (static_cast<size_t>(base_n + row) * blk_count + kb0) * 24 +
+        const uint8_t* blk = Wq51 + (((static_cast<size_t>(base_n + row) * blk_count) + kb0) * 24) +
                              static_cast<ptrdiff_t>(part * 16);
         cp_async_cg_16(&sBq[row][static_cast<ptrdiff_t>(part * 16)], blk, bvalid);
     }
 #pragma unroll
     for (int i = tid; i < BM; i += kThreads) {
         const bool valid = (base_m + i) < M;
-        cp_async_ca_4(&sAsc[i][0], Asc + static_cast<size_t>(base_m + i) * subs + kb0, valid);
-        cp_async_ca_8(&sArs[i][0], Ars + static_cast<size_t>(base_m + i) * subs + kb0, valid);
+        cp_async_ca_4(&sAsc[i][0], Asc + (static_cast<size_t>(base_m + i) * subs) + kb0, valid);
+        cp_async_ca_8(&sArs[i][0], Ars + (static_cast<size_t>(base_m + i) * subs) + kb0, valid);
     }
 }
 
@@ -91,11 +90,11 @@ __global__ void __launch_bounds__(kThreads)
 
     const int subs = K / 32;
     const int blk_count = subs;  // one block per 32
-    const int8_t* A = X_s8 + row_off * K;
-    const __half* Asc = x_scale + row_off * subs;
-    const float* Ars = x_rowsum + row_off * subs;
-    const uint8_t* W = Wq51 + static_cast<size_t>(e) * w_stride_blocks * 24;
-    __half* C = out + row_off * N;
+    const int8_t* A = X_s8 + (row_off * K);
+    const __half* Asc = x_scale + (row_off * subs);
+    const float* Ars = x_rowsum + (row_off * subs);
+    const uint8_t* W = Wq51 + (static_cast<size_t>(e) * w_stride_blocks * 24);
+    __half* C = out + (row_off * N);
 
     const int tid = threadIdx.x;
     const int warp_id = tid >> 5;
@@ -149,7 +148,7 @@ __global__ void __launch_bounds__(kThreads)
                 memcpy(&d_h, blk, 2);
                 memcpy(&m_h, blk + 2, 2);
                 const float d = __half2float(d_h);
-                const float b = 16.0f * d + __half2float(m_h);
+                const float b = (16.0f * d) + __half2float(m_h);
                 sBab[stage][row][kb] = __floats2half2_rn(d, b);
             }
         }
@@ -160,9 +159,9 @@ __global__ void __launch_bounds__(kThreads)
             const int kc = kb * 32;
 #pragma unroll
             for (int mf = 0; mf < kMF; ++mf) {
-                const int arow_lo = warp_m * kTileM + mf * 16 + rl;
+                const int arow_lo = (warp_m * kTileM) + (mf * 16) + rl;
                 const int arow_hi = arow_lo + 8;
-                const int acol = kc + cl * 4;
+                const int acol = kc + (cl * 4);
                 uint32_t a0 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol]);
                 uint32_t a1 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_hi][acol]);
                 uint32_t a2 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol + 16]);
@@ -174,7 +173,7 @@ __global__ void __launch_bounds__(kThreads)
 
 #pragma unroll
                 for (int nf = 0; nf < kNF; ++nf) {
-                    const int bcol = warp_n * kTileN + nf * 8 + rl;
+                    const int bcol = (warp_n * kTileN) + (nf * 8) + rl;
                     const uint8_t* blk = &sBq[stage][bcol][static_cast<ptrdiff_t>(kb * 24)];
                     uint32_t qh;
                     memcpy(&qh, blk + 4, 4);
@@ -185,7 +184,7 @@ __global__ void __launch_bounds__(kThreads)
                                                     q51_spread4((qh >> (cl * 4)) & 0xFu),
                                                 0x10101010u);
                     const uint32_t b1 = __vsub4(((qs_u32 >> 4) & 0x0F0F0F0Fu) |
-                                                    q51_spread4((qh >> (16 + cl * 4)) & 0xFu),
+                                                    q51_spread4((qh >> (16 + (cl * 4))) & 0xFu),
                                                 0x10101010u);
 
                     int32_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
@@ -195,7 +194,7 @@ __global__ void __launch_bounds__(kThreads)
                         : "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3)
                         : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(0), "r"(0),
                           "r"(0), "r"(0));
-                    const int ncol_lo = warp_n * kTileN + nf * 8 + cl * 2;
+                    const int ncol_lo = (warp_n * kTileN) + (nf * 8) + (cl * 2);
                     const __half2 ab_lo = sBab[stage][ncol_lo][kb];
                     const __half2 ab_hi = sBab[stage][ncol_lo + 1][kb];
                     const float al = __half2float(__low2half(ab_lo));
@@ -214,19 +213,19 @@ __global__ void __launch_bounds__(kThreads)
 
 #pragma unroll
     for (int mf = 0; mf < kMF; ++mf) {
-        const int row_lo = base_m + warp_m * kTileM + mf * 16 + rl;
+        const int row_lo = base_m + (warp_m * kTileM) + (mf * 16) + rl;
         const int row_hi = row_lo + 8;
 #pragma unroll
         for (int nf = 0; nf < kNF; ++nf) {
-            const int col = base_n + warp_n * kTileN + nf * 8 + cl * 2;
+            const int col = base_n + (warp_n * kTileN) + (nf * 8) + (cl * 2);
             if (col + 1 >= N) continue;  // N-tail
             if (row_lo < rows) {
-                __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_lo) * N + col]);
+                __half2* p = reinterpret_cast<__half2*>(&C[(static_cast<size_t>(row_lo) * N) + col]);
                 __half2 v = __floats2half2_rn(acc[mf][nf][0], acc[mf][nf][1]);
                 *p = BETA1 ? __hadd2(*p, v) : v;
             }
             if (row_hi < rows) {
-                __half2* p = reinterpret_cast<__half2*>(&C[static_cast<size_t>(row_hi) * N + col]);
+                __half2* p = reinterpret_cast<__half2*>(&C[(static_cast<size_t>(row_hi) * N) + col]);
                 __half2 v = __floats2half2_rn(acc[mf][nf][2], acc[mf][nf][3]);
                 *p = BETA1 ? __hadd2(*p, v) : v;
             }

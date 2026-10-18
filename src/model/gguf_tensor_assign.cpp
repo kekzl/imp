@@ -81,7 +81,7 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
     }
 
     // Layer weights: "blk.{i}.{field}" or "blk.{i}.{field}.{expert}.weight"
-    if (name.substr(0, 4) != "blk.")
+    if (!name.starts_with("blk."))
         return false;
 
     auto parts = split(name, '.');
@@ -180,10 +180,10 @@ bool assign_tensor(Model& model, const std::string& name, const Tensor& tensor, 
                 int64_t kv_shape[4] = {k_rows, d_model, 1, 1};
 
                 Tensor q_t(base, tensor.qtype, 2, q_shape, tensor.on_device);
-                Tensor k_t(base + static_cast<size_t>(q_rows) * row_bytes, tensor.qtype, 2, kv_shape,
+                Tensor k_t(base + (static_cast<size_t>(q_rows) * row_bytes), tensor.qtype, 2, kv_shape,
                            tensor.on_device);
-                Tensor v_t(base + static_cast<size_t>(q_rows + k_rows) * row_bytes, tensor.qtype, 2, kv_shape,
-                           tensor.on_device);
+                Tensor v_t(base + (static_cast<size_t>(q_rows + k_rows) * row_bytes), tensor.qtype, 2,
+                           kv_shape, tensor.on_device);
                 assign_quant(layer.wq, q_t);
                 assign_quant(layer.wk, k_t);
                 assign_quant(layer.wv, v_t);

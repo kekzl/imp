@@ -39,14 +39,14 @@ __global__ void ple_gate_value_kernel(const half* __restrict__ key, half* __rest
                                       const half* __restrict__ value, int hc, int d, float inv_sqrt_d) {
     const int row = blockIdx.x / hc;
     const int s = blockIdx.x % hc;
-    const size_t base = (static_cast<size_t>(row) * hc + s) * d;
+    const size_t base = ((static_cast<size_t>(row) * hc) + s) * d;
     float dot = 0.0f;
     for (int j = threadIdx.x; j < d; j += blockDim.x)
         dot += __half2float(key[base + j]) * __half2float(q_gv[base + j]);
     float g = block_sum_(dot) * inv_sqrt_d;
     g = copysignf(sqrtf(fmaxf(fabsf(g), 1e-6f)), g);
     const float gate = sigmoidf_(g);
-    const half* vrow = value + static_cast<size_t>(row) * d;
+    const half* vrow = value + (static_cast<size_t>(row) * d);
     for (int j = threadIdx.x; j < d; j += blockDim.x)
         q_gv[base + j] = __float2half(gate * __half2float(vrow[j]));
 }
@@ -62,12 +62,12 @@ __global__ void ple_conv_add_kernel(const half* __restrict__ gv, const half* __r
                                     int64_t slot_stride, const int* __restrict__ slots, int rows_per_seq,
                                     half* __restrict__ hidden, int channels, int n, int kernel, int dilation,
                                     int state_len) {
-    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    const int c = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (c >= channels)
         return;
     float wk[kMaxKernel];
     for (int k = 0; k < kernel; k++)
-        wk[k] = __half2float(w[static_cast<size_t>(c) * kernel + k]);
+        wk[k] = __half2float(w[(static_cast<size_t>(c) * kernel) + k]);
     const int t0 = blockIdx.y * kConvRowsPerBlock;
     const int t1 = min(n, t0 + kConvRowsPerBlock);
     for (int t = t0; t < t1; t++) {
@@ -76,13 +76,13 @@ __global__ void ple_conv_add_kernel(const half* __restrict__ gv, const half* __r
         const half* st = conv_state + seq_state_off_(slot_stride, slots, s);
         float acc = 0.0f;
         for (int k = 0; k < kernel; k++) {
-            const int tp = t - row0 - (kernel - 1 - k) * dilation;
-            const half x = (tp >= 0) ? gvn[static_cast<size_t>(row0 + tp) * channels + c]
-                                     : st[static_cast<size_t>(state_len + tp) * channels + c];
+            const int tp = t - row0 - ((kernel - 1 - k) * dilation);
+            const half x = (tp >= 0) ? gvn[(static_cast<size_t>(row0 + tp) * channels) + c]
+                                     : st[(static_cast<size_t>(state_len + tp) * channels) + c];
             acc += wk[k] * __half2float(x);
         }
-        const size_t i = static_cast<size_t>(t) * channels + c;
-        const float out = __half2float(gv[i]) + acc * sigmoidf_(acc);
+        const size_t i = (static_cast<size_t>(t) * channels) + c;
+        const float out = __half2float(gv[i]) + (acc * sigmoidf_(acc));
         hidden[i] = __float2half(__half2float(hidden[i]) + out);
     }
 }
@@ -93,7 +93,7 @@ __global__ void ple_conv_add_kernel(const half* __restrict__ gv, const half* __r
 __global__ void ple_conv_shift_kernel(const half* __restrict__ gvn, const half* src_state, half* dst_state,
                                       int64_t slot_stride, const int* __restrict__ slots, int rows_per_seq,
                                       const int* __restrict__ d_rows, int channels, int state_len) {
-    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    const int c = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (c >= channels)
         return;
     const int s = blockIdx.y;
@@ -105,11 +105,11 @@ __global__ void ple_conv_shift_kernel(const half* __restrict__ gvn, const half* 
     half nv[kMaxKernel * kMaxKernel];
     for (int r = 0; r < state_len; r++) {
         const int tp = rows - state_len + r;
-        nv[r] = (tp >= 0) ? gvn[static_cast<size_t>(row0 + tp) * channels + c]
-                          : st[static_cast<size_t>(state_len + tp) * channels + c];
+        nv[r] = (tp >= 0) ? gvn[(static_cast<size_t>(row0 + tp) * channels) + c]
+                          : st[(static_cast<size_t>(state_len + tp) * channels) + c];
     }
     for (int r = 0; r < state_len; r++)
-        out[static_cast<size_t>(r) * channels + c] = nv[r];
+        out[(static_cast<size_t>(r) * channels) + c] = nv[r];
 }
 
 }  // namespace

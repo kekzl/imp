@@ -112,8 +112,8 @@ __global__ void mtp_topw_pass1_kernel(const T* __restrict__ logits, int vocab_si
         }
         if (tid == 0) {
             s_found[w] = s_idx[0];
-            part_val[blockIdx.x * kMtpMaxTopW + w] = s_val[0];
-            part_idx[blockIdx.x * kMtpMaxTopW + w] = s_idx[0];
+            part_val[(blockIdx.x * kMtpMaxTopW) + w] = s_val[0];
+            part_idx[(blockIdx.x * kMtpMaxTopW) + w] = s_idx[0];
         }
         __syncthreads();
     }

@@ -106,8 +106,8 @@ __device__ __host__ __forceinline__ int mx_sfatom_offset(int row, int k_group, i
     int n0 = row_local % 32;
     int n1 = row_local / 32;
 
-    int atom_offset = n0 * 16 + n1 * 4 + k_local;
-    int tile_base = (tile_row * n_k_tiles + tile_k) * kMxAtomSize;
+    int atom_offset = (n0 * 16) + (n1 * 4) + k_local;
+    int tile_base = ((tile_row * n_k_tiles) + tile_k) * kMxAtomSize;
     return tile_base + atom_offset;
 }
 
@@ -150,7 +150,7 @@ __global__ void convert_nvfp4_to_mxfp4_scales_kernel(
     uint8_t* __restrict__ dst_linear,    // [N, K/32] row-major UE8M0 (for GEMV)
     float tensor_scale,                  // NVFP4 tensor scale
     int N, int K, int n_k_tiles) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     int K_groups_mx = K / kMxSFVecSize;  // number of MXFP4 groups (per 32)
     int total = N * K_groups_mx;
     if (idx >= total)
@@ -161,11 +161,11 @@ __global__ void convert_nvfp4_to_mxfp4_scales_kernel(
 
     // Each MXFP4 group of 32 corresponds to 2 consecutive NVFP4 groups of 16
     int nv_group0 = mx_group * 2;
-    int nv_group1 = mx_group * 2 + 1;
+    int nv_group1 = (mx_group * 2) + 1;
     int K_groups_nv = K / 16;
 
-    float ms0 = fabsf(fp8_e4m3_to_float(src_ms[n * K_groups_nv + nv_group0]));
-    float ms1 = fabsf(fp8_e4m3_to_float(src_ms[n * K_groups_nv + nv_group1]));
+    float ms0 = fabsf(fp8_e4m3_to_float(src_ms[(n * K_groups_nv) + nv_group0]));
+    float ms1 = fabsf(fp8_e4m3_to_float(src_ms[(n * K_groups_nv) + nv_group1]));
 
     // Combined scale = tensor_scale * max(ms0, ms1)
     // This is the scale that maps the group of 32 elements to FP4 range [0, 6]
@@ -177,7 +177,7 @@ __global__ void convert_nvfp4_to_mxfp4_scales_kernel(
     int sf_idx = mx_sfatom_offset(n, mx_group, n_k_tiles);
     dst_sf[sf_idx] = ue8m0;
     if (dst_linear)
-        dst_linear[static_cast<size_t>(n) * K_groups_mx + mx_group] = ue8m0;
+        dst_linear[(static_cast<size_t>(n) * K_groups_mx) + mx_group] = ue8m0;
 }
 
 void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src, CutlassMxFP4Weight& dst,
@@ -233,7 +233,7 @@ __global__ void build_mxfp4_scales_kernel(
     uint8_t* __restrict__ sf_out,            // SfAtom layout
     uint8_t* __restrict__ linear_out,        // [N, K/32] separate linear buffer
     int total_blocks, int blocks_per_row, int n_k_tiles) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= total_blocks)
         return;
     int row = idx / blocks_per_row;
@@ -311,7 +311,7 @@ __global__ void dequant_mxfp4_split_kernel(const uint8_t* __restrict__ data,    
                                            const uint8_t* __restrict__ scales,  // [total_blocks] UE8M0
                                            half* __restrict__ out,              // [N, K]
                                            int N, int K, int blocks_per_row) {
-    int64_t blk_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t blk_idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     int64_t total_blocks = static_cast<int64_t>(N) * blocks_per_row;
     if (blk_idx >= total_blocks)
         return;
@@ -324,8 +324,8 @@ __global__ void dequant_mxfp4_split_kernel(const uint8_t* __restrict__ data,    
     uint32_t fbits = static_cast<uint32_t>(ue8m0) << 23;
     memcpy(&scale, &fbits, sizeof(float));
 
-    const uint8_t* block_data = data + blk_idx * 16;
-    int64_t out_base = static_cast<int64_t>(row) * K + static_cast<int64_t>(blk) * 32;
+    const uint8_t* block_data = data + (blk_idx * 16);
+    int64_t out_base = (static_cast<int64_t>(row) * K) + (static_cast<int64_t>(blk) * 32);
     int64_t out_limit = static_cast<int64_t>(N) * K;
     if (out_base + 31 >= out_limit)
         return;
@@ -421,7 +421,7 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
                                                    uint8_t* __restrict__ packed_out,
                                                    uint8_t* __restrict__ sf_out, int M, int K,
                                                    int n_k_tiles) {
-    int mb_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int mb_idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     int K_groups = K / kMxSFVecSize;
     int total_mb = M * K_groups;
     if (mb_idx >= total_mb)
@@ -429,7 +429,7 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
 
     int row = mb_idx / K_groups;
     int k_group = mb_idx % K_groups;
-    const int64_t base = static_cast<int64_t>(row) * K + static_cast<int64_t>(k_group) * kMxSFVecSize;
+    const int64_t base = (static_cast<int64_t>(row) * K) + (static_cast<int64_t>(k_group) * kMxSFVecSize);
 
     // Load 32 values via vectorized half2 loads and find absmax
     float vals[32];
@@ -440,9 +440,9 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
     for (int i = 0; i < 16; i++) {
         half2 h2 = src_h2[i];
         vals[static_cast<ptrdiff_t>(i * 2)] = __half2float(h2.x);
-        vals[i * 2 + 1] = __half2float(h2.y);
+        vals[(i * 2) + 1] = __half2float(h2.y);
         local_absmax = fmaxf(local_absmax,
-                             fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[i * 2 + 1])));
+                             fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[(i * 2) + 1])));
     }
 
     // Compute UE8M0 scale = ceil_pow2(absmax / 6.0)
@@ -458,13 +458,13 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
     sf_out[sf_idx] = ue8m0;
 
     // Quantize and pack FP4 values (2 per byte) via HW conversion
-    int64_t packed_base = static_cast<int64_t>(row) * (K / 2) +
-                          static_cast<int64_t>(k_group) * (kMxSFVecSize / 2);
+    int64_t packed_base = (static_cast<int64_t>(row) * (K / 2)) +
+                          (static_cast<int64_t>(k_group) * (kMxSFVecSize / 2));
 #pragma unroll
     for (int i = 0; i < 32; i += 2) {
         float s0 = vals[i] * inv_scale;
         float s1 = vals[i + 1] * inv_scale;
-        packed_out[packed_base + i / 2] = pack_fp4_pair_hw_mx(s0, s1);
+        packed_out[packed_base + (i / 2)] = pack_fp4_pair_hw_mx(s0, s1);
     }
 }
 

@@ -4,8 +4,8 @@
 # merged over red advisory gates because non-required jobs block nothing). Not `needs:` on
 # Build: a needs-skip's effect on required-check merging is unverified.
 # Deliberately kept advisory: Lint and Mock API (network installs in a required check),
-# clang-tidy, Real API (needs the build artifact), alloc-interpose (~15min+GPU, lives in
-# check-release.sh). Everything here is cheap, hermetic, deterministic.
+# clang-tidy, Real API (needs the build artifact), alloc-interpose (~15min+GPU, a
+# check-release.sh section). Everything here is cheap, hermetic, deterministic.
 set -uo pipefail
 
 # Repo root from this script's own location, not git: the Actions container runs as a

@@ -10,8 +10,7 @@ NgramDraft ngram_draft(std::span<const int32_t> hist, int k, int min_match, int 
     // length that does not belong to it" is not a callable state any more.
     if (k <= 0 || min_match < 1 || n < min_match + 1)
         return {};
-    if (max_match < min_match)
-        max_match = min_match;
+    max_match = std::max(max_match, min_match);
 
     // Single backward pass over candidate end positions. `end` is one past
     // the candidate occurrence: hist[end-m .. end) compared against the

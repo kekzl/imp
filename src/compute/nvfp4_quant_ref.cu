@@ -48,7 +48,7 @@ __global__ void nvfp4_quant_linear_kernel(const half* __restrict__ input,
                                           uint8_t* __restrict__ nvfp4_out,  // [n_elements / 2]
                                           uint8_t* __restrict__ sf_out,     // [n_elements / 16]
                                           int n_elements) {
-    const int group_id = blockIdx.x * blockDim.x + threadIdx.x;  // one group = 16 FP16 elems
+    const int group_id = (blockIdx.x * blockDim.x) + threadIdx.x;  // one group = 16 FP16 elems
     const int start = group_id * 16;
     if (start >= n_elements)
         return;
@@ -57,7 +57,7 @@ __global__ void nvfp4_quant_linear_kernel(const half* __restrict__ input,
     half2 h2[8];
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
-        int idx = start + i * 2;
+        int idx = start + (i * 2);
         h2[i] = __halves2half2((idx < n_elements) ? input[idx] : __float2half(0.0f),
                                (idx + 1 < n_elements) ? input[idx + 1] : __float2half(0.0f));
     }
@@ -92,7 +92,7 @@ __global__ void nvfp4_quant_linear_kernel(const half* __restrict__ input,
     uint32_t hi = fp32x8_to_e2m1x8(&fp2[4]);
 
     // 6. Store. 16 nibbles = 8 bytes per group.
-    uint32_t* dst = reinterpret_cast<uint32_t*>(nvfp4_out + start / 2);
+    uint32_t* dst = reinterpret_cast<uint32_t*>(nvfp4_out + (start / 2));
     dst[0] = lo;
     dst[1] = hi;
 
@@ -106,7 +106,7 @@ __global__ void nvfp4_quant_linear_kernel(const half* __restrict__ input,
 __global__ void nvfp4_dequant_linear_kernel(const uint8_t* __restrict__ nvfp4_in,
                                             const uint8_t* __restrict__ sf_in, half* __restrict__ output,
                                             int n_elements) {
-    const int group_id = blockIdx.x * blockDim.x + threadIdx.x;
+    const int group_id = (blockIdx.x * blockDim.x) + threadIdx.x;
     const int start = group_id * 16;
     if (start >= n_elements)
         return;

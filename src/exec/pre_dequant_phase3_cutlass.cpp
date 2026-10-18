@@ -133,9 +133,9 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
                 static_cast<int>(w.shape[1]) != Kp)
                 return;  // non-uniform shape
             if (static_cast<const char*>(w.scales) !=
-                static_cast<const char*>(experts[0].scales) + static_cast<size_t>(e) * e_ms)
+                static_cast<const char*>(experts[0].scales) + (static_cast<size_t>(e) * e_ms))
                 return;  // micro-scales not contiguous → per-tensor fallback
-            if (!wcache_->nvfp4.count(w.data))
+            if (!wcache_->nvfp4.contains(w.data))
                 return;  // not a registered CUTLASS candidate
         }
         MoeGroup g;
@@ -181,7 +181,7 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
     }
     if (!ct_exhausted) {
         for (auto& [ptr, nvfp4] : wcache_->nvfp4) {
-            if (grouped.count(ptr))
+            if (grouped.contains(ptr))
                 continue;  // converted by a batched MoE group above
             if (const G3 g3 = g3_classify(storage_plan_, dispatch_policy(), *wcache_, ptr, nvfp4);
                 g3 != G3::SfAtom) {
@@ -227,7 +227,7 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
             for (int e = 0; e < g.ne; ++e) {
                 CutlassNvFP4Weight cw;
                 cw.data = g.data_ptrs[e];
-                cw.scale_factors = slab + g.slab_off + static_cast<size_t>(e) * g.sf_per_expert;
+                cw.scale_factors = slab + g.slab_off + (static_cast<size_t>(e) * g.sf_per_expert);
                 cw.tensor_scale = g.tscale[e];
                 cw.N = g.N;
                 cw.K = g.K;
@@ -379,7 +379,7 @@ auto register_if_mxfp4 = [&](const Tensor& w, QType qt, bool is_attn = true) {
         return;
     if (w.ndim < 2 || w.shape[1] % 32 != 0)
         return;
-    if (wcache_->cutlass_mxfp4.count(w.data))
+    if (wcache_->cutlass_mxfp4.contains(w.data))
         return;  // already registered
     CutlassMxFP4Weight mw;
     if (unpack_mxfp4_gguf(w.data, w.shape[0], w.shape[1], mw, stream)) {
@@ -478,10 +478,10 @@ if (mx_native > 0) {
     size_t fp16_total = 0;
     if (!mxfp4_gemv_available) {
         for (auto& [p, m] : wcache_->cutlass_mxfp4) {
-            if (wcache_->fp16.count(p))
+            if (wcache_->fp16.contains(p))
                 continue;
             size_t b = static_cast<size_t>(m.N) * m.K * sizeof(half);
-            if (pruned_policy && pruned_skip_ptrs.count(p)) {
+            if (pruned_policy && pruned_skip_ptrs.contains(p)) {
                 pruned_skipped_bytes += b;
                 pruned_skipped_count++;
                 continue;
@@ -547,11 +547,11 @@ if (mx_native > 0) {
     if (d_fp16_bulk) {
         size_t offset = 0;
         for (auto& [ptr, mw] : wcache_->cutlass_mxfp4) {
-            if (wcache_->fp16.count(ptr))
+            if (wcache_->fp16.contains(ptr))
                 continue;
             // Honor the same pruning filter the fp16_total compute
             // pass used; otherwise the offset accounting drifts.
-            if (pruned_policy && pruned_skip_ptrs.count(ptr))
+            if (pruned_policy && pruned_skip_ptrs.contains(ptr))
                 continue;
             size_t fp16_bytes = static_cast<size_t>(mw.N) * mw.K * sizeof(half);
             void* d_fp16 = static_cast<char*>(d_fp16_bulk) + offset;

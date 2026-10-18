@@ -87,25 +87,25 @@ __device__ __forceinline__ void issue_tile_load(__half* a_smem, __half* b_smem, 
 
 #pragma unroll
     for (int c = 0; c < A_CHUNKS_PER_THREAD; ++c) {
-        int chunk         = c * THREADS_PER_BLOCK + tid;
+        int chunk = (c * THREADS_PER_BLOCK) + tid;
         int row           = chunk >> 2;       // chunk / (BK/CHUNK_HALVES) = chunk / 4
         int col           = (chunk & 3) << 3; // (chunk % 4) * CHUNK_HALVES
         int g_row         = block_m + row;
         int g_col         = k_tile + col;
         __half* dst = a_smem + static_cast<ptrdiff_t>(row * BK_SMEM) + col;  // padded SMEM stride
-        const __half* src = A + (int64_t)g_row * K + g_col;
+        const __half* src = A + ((int64_t)g_row * K) + g_col;
         bool valid        = a_full || (g_row < M);
         cp_async_cg16_zero(dst, src, valid);
     }
 #pragma unroll
     for (int c = 0; c < B_CHUNKS_PER_THREAD; ++c) {
-        int chunk         = c * THREADS_PER_BLOCK + tid;
+        int chunk = (c * THREADS_PER_BLOCK) + tid;
         int row           = chunk >> 2;
         int col           = (chunk & 3) << 3;
         int g_row         = block_n + row;
         int g_col         = k_tile + col;
         __half* dst = b_smem + static_cast<ptrdiff_t>(row * BK_SMEM) + col;  // padded SMEM stride
-        const __half* src = B + (int64_t)g_row * K + g_col;
+        const __half* src = B + ((int64_t)g_row * K) + g_col;
         bool valid        = b_full || (g_row < N);
         cp_async_cg16_zero(dst, src, valid);
     }
@@ -187,7 +187,7 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
             wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> a_frag[FRAGS_M];
 #pragma unroll
             for (int i = 0; i < FRAGS_M; ++i) {
-                int a_row = wm * WARP_M + i * WMMA_M;
+                int a_row = (wm * WARP_M) + (i * WMMA_M);
                 wmma::load_matrix_sync(a_frag[i],
                                        A_s + static_cast<ptrdiff_t>(a_row * BK_SMEM) +
                                            static_cast<ptrdiff_t>(kk * WMMA_K),
@@ -196,7 +196,7 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
             wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, wmma::col_major> b_frag[FRAGS_N];
 #pragma unroll
             for (int j = 0; j < FRAGS_N; ++j) {
-                int b_row = wn * WARP_N + j * WMMA_N;
+                int b_row = (wn * WARP_N) + (j * WMMA_N);
                 wmma::load_matrix_sync(b_frag[j],
                                        B_s + static_cast<ptrdiff_t>(b_row * BK_SMEM) +
                                            static_cast<ptrdiff_t>(kk * WMMA_K),
@@ -217,8 +217,8 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
     __shared__ float frag_smem[WARPS_PER_BLOCK * WMMA_M * WMMA_N];
     float* warp_frag = frag_smem + static_cast<ptrdiff_t>(warp * (WMMA_M * WMMA_N));
 
-    int warp_base_m = block_m + wm * WARP_M;
-    int warp_base_n = block_n + wn * WARP_N;
+    int warp_base_m = block_m + (wm * WARP_M);
+    int warp_base_n = block_n + (wn * WARP_N);
 
 #pragma unroll
     for (int i = 0; i < FRAGS_M; ++i) {
@@ -227,11 +227,11 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
             wmma::store_matrix_sync(warp_frag, acc[i][j], WMMA_N, wmma::mem_row_major);
             __syncwarp();
 
-            int frag_row0 = warp_base_m + i * WMMA_M;
-            int frag_col0 = warp_base_n + j * WMMA_N;
+            int frag_row0 = warp_base_m + (i * WMMA_M);
+            int frag_col0 = warp_base_n + (j * WMMA_N);
 
             for (int t = 0; t < (WMMA_M * WMMA_N) / 32; ++t) {
-                int idx   = t * 32 + lane;
+                int idx = (t * 32) + lane;
                 int r     = idx / WMMA_N;
                 int c     = idx % WMMA_N;
                 int g_row = frag_row0 + r;
@@ -239,10 +239,10 @@ __launch_bounds__(THREADS_PER_BLOCK, 2) __global__
                 if (g_row >= M || g_col >= N) continue;
                 float v = alpha * warp_frag[idx];
                 if (beta != 0.0f) {
-                    float prev = __half2float(D[(int64_t)g_row * N + g_col]);
+                    float prev = __half2float(D[((int64_t)g_row * N) + g_col]);
                     v += beta * prev;
                 }
-                D[(int64_t)g_row * N + g_col] = __float2half(v);
+                D[((int64_t)g_row * N) + g_col] = __float2half(v);
             }
             __syncwarp();
         }

@@ -143,7 +143,7 @@ public:
                              size_t pb, size_t mb, int e0, int n, int proj0, int proj1, cudaStream_t stream);
 
     // Per-projection micro-scale offset within a slot (same layout the host path uses).
-    size_t ms_off(int layer, int proj) const { return ms_off_[static_cast<size_t>(layer) * 3 + proj]; }
+    size_t ms_off(int layer, int proj) const { return ms_off_[(static_cast<size_t>(layer) * 3) + proj]; }
 
     [[nodiscard]] bool layer_tiered(int layer) const {
         return layer >= 0 && layer < static_cast<int>(tiered_.size()) && tiered_[layer];

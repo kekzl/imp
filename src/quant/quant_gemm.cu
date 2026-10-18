@@ -32,7 +32,7 @@ __global__ void quant_gemm_int4_kernel(
     const int bn = blockIdx.y * TILE_N;
     const int tx = threadIdx.x;             // 0..15
     const int ty = threadIdx.y;             // 0..15
-    const int tid = ty * BLOCK_DIM_X + tx;  // flat thread id 0..255
+    const int tid = (ty * BLOCK_DIM_X) + tx;  // flat thread id 0..255
 
     const int num_groups = (K + group_size - 1) / group_size;
 
@@ -58,13 +58,13 @@ __global__ void quant_gemm_int4_kernel(
 // 256 threads, TILE_M * TILE_K = 64 * 32 = 2048 elements -> 8 per thread.
 #pragma unroll
         for (int i = 0; i < (TILE_M * TILE_K) / (BLOCK_DIM_X * BLOCK_DIM_Y); ++i) {
-            int flat = tid + i * (BLOCK_DIM_X * BLOCK_DIM_Y);
+            int flat = tid + (i * (BLOCK_DIM_X * BLOCK_DIM_Y));
             int row = flat / TILE_K;
             int col = flat % TILE_K;
             int global_m = bm + row;
             int global_k = k_offset + col;
             if (global_m < M && global_k < K) {
-                As[row][col] = A[global_m * K + global_k];
+                As[row][col] = A[(global_m * K) + global_k];
             } else {
                 As[row][col] = __float2half(0.0f);
             }
@@ -77,14 +77,14 @@ __global__ void quant_gemm_int4_kernel(
 
 #pragma unroll
         for (int i = 0; i < (TILE_N * TILE_K) / (BLOCK_DIM_X * BLOCK_DIM_Y); ++i) {
-            int flat = tid + i * (BLOCK_DIM_X * BLOCK_DIM_Y);
+            int flat = tid + (i * (BLOCK_DIM_X * BLOCK_DIM_Y));
             int n_local = flat / TILE_K;
             int k_local = flat % TILE_K;
             int global_n = bn + n_local;
             int global_k = k_offset + k_local;
 
             if (global_n < N && global_k < K) {
-                int byte_idx = global_n * half_K + global_k / 2;
+                int byte_idx = (global_n * half_K) + (global_k / 2);
                 uint8_t packed = B_quant[byte_idx];
                 int nibble;
                 if (global_k % 2 == 0) {
@@ -93,7 +93,7 @@ __global__ void quant_gemm_int4_kernel(
                     nibble = (packed >> 4) & 0x0F;  // high nibble
                 }
                 int group_idx = global_k / group_size;
-                float scale = __half2float(scales[global_n * num_groups + group_idx]);
+                float scale = __half2float(scales[(global_n * num_groups) + group_idx]);
                 Bs[n_local][k_local] = __float2half((float)(nibble - 8) * scale);
             } else {
                 Bs[n_local][k_local] = __float2half(0.0f);
@@ -110,13 +110,13 @@ __global__ void quant_gemm_int4_kernel(
             float a_val[THREAD_TILE_M];
 #pragma unroll
             for (int i = 0; i < THREAD_TILE_M; ++i) {
-                a_val[i] = __half2float(As[ty * THREAD_TILE_M + i][tk]);
+                a_val[i] = __half2float(As[(ty * THREAD_TILE_M) + i][tk]);
             }
             // Load B values for this thread's cols.
             float b_val[THREAD_TILE_N];
 #pragma unroll
             for (int j = 0; j < THREAD_TILE_N; ++j) {
-                b_val[j] = __half2float(Bs[tx * THREAD_TILE_N + j][tk]);
+                b_val[j] = __half2float(Bs[(tx * THREAD_TILE_N) + j][tk]);
             }
 // Outer product accumulation.
 #pragma unroll
@@ -132,14 +132,14 @@ __global__ void quant_gemm_int4_kernel(
 // --- Write C tile back to global memory ---------------------------------
 #pragma unroll
     for (int i = 0; i < THREAD_TILE_M; ++i) {
-        int global_m = bm + ty * THREAD_TILE_M + i;
+        int global_m = bm + (ty * THREAD_TILE_M) + i;
         if (global_m >= M)
             continue;
 #pragma unroll
         for (int j = 0; j < THREAD_TILE_N; ++j) {
-            int global_n = bn + tx * THREAD_TILE_N + j;
+            int global_n = bn + (tx * THREAD_TILE_N) + j;
             if (global_n < N) {
-                C[global_m * N + global_n] = __float2half(acc[i][j]);
+                C[(global_m * N) + global_n] = __float2half(acc[i][j]);
             }
         }
     }

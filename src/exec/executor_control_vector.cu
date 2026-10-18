@@ -12,15 +12,15 @@ namespace imp {
 
 __global__ void control_vector_add_fp16_kernel(half* __restrict__ h, const float* __restrict__ v, float scale,
                                                int d_model, int64_t total) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= total)
         return;
-    h[i] = __float2half(__half2float(h[i]) + scale * v[i % d_model]);
+    h[i] = __float2half(__half2float(h[i]) + (scale * v[i % d_model]));
 }
 
 __global__ void control_vector_add_fp32_kernel(float* __restrict__ h, const float* __restrict__ v,
                                                float scale, int d_model, int64_t total) {
-    const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int64_t i = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (i >= total)
         return;
     h[i] += scale * v[i % d_model];
@@ -33,7 +33,7 @@ void GraphExecutor::set_control_vector(const ControlVectorDevice* cv, float scal
 
 void GraphExecutor::control_vector_add_(int layer, int n, cudaStream_t stream) {
     const int d = cvec_->d_model;
-    const float* v = cvec_->dirs.get() + static_cast<int64_t>(layer) * d;
+    const float* v = cvec_->dirs.get() + (static_cast<int64_t>(layer) * d);
     const int64_t total = static_cast<int64_t>(n) * d;
     constexpr int kThreads = 256;
     const int blocks = static_cast<int>((total + kThreads - 1) / kThreads);

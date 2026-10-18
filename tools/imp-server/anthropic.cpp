@@ -6,6 +6,7 @@
 #include "spec_usage_keys.h"
 #include "utils.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 
@@ -204,7 +205,7 @@ void push_user_turn(json& out, const json& anth_msg) {
             // successful result and the model proceeded as if it worked (#1557). OpenAI's role:"tool"
             // turn has no field for this - content IS the channel - so the failure is labelled in the text.
             if (block.value("is_error", false)) {
-                body = body.empty() ? "[tool error]" : "[tool error] " + body;
+                body = body.empty() ? "[tool error]" : std::string("[tool error] ").append(body);
             }
             tool_results.push_back({
                 {"role", "tool"},
@@ -523,9 +524,9 @@ std::string tool_call_id_to_anthropic(const std::string& openai_id) {
     // OpenAI-style id from imp: "call_imp_<counter>". Rewrite to Anthropic's
     // "toolu_..." prefix so well-behaved Anthropic clients accept it.
     constexpr const char* kSrcPrefix = "call_imp_";
-    if (openai_id.rfind("toolu_", 0) == 0)
+    if (openai_id.starts_with("toolu_"))
         return openai_id;  // already OK
-    if (openai_id.rfind(kSrcPrefix, 0) == 0) {
+    if (openai_id.starts_with(kSrcPrefix)) {
         return std::string("toolu_") + openai_id.substr(std::char_traits<char>::length(kSrcPrefix));
     }
     return std::string("toolu_") + openai_id;
@@ -663,8 +664,7 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
             creation = u["prompt_tokens_details"].value("cache_creation_tokens", 0);
             evicted = u["prompt_tokens_details"].value("evicted_tokens", 0);
         }
-        if (cached > prompt_tokens)
-            cached = prompt_tokens;
+        cached = std::min(cached, prompt_tokens);
         usage_out["input_tokens"] = prompt_tokens - cached;
         usage_out["cache_read_input_tokens"] = cached;
         usage_out["cache_creation_input_tokens"] = creation;
@@ -692,7 +692,7 @@ json openai_to_anthropic_response(const json& oai, const std::string& anth_model
     std::string id = oai.value("id", "");
     if (id.empty()) {
         id = make_message_id(static_cast<uint64_t>(oai.value("created", 0)));
-    } else if (id.rfind("chatcmpl", 0) == 0) {
+    } else if (id.starts_with("chatcmpl")) {
         id = std::string("msg_") + id.substr(std::char_traits<char>::length("chatcmpl"));
     }
 

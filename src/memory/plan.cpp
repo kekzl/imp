@@ -24,9 +24,9 @@ std::string fmt_lever(const char* key, long long from, long long to) {
 int swa_group_blocks(const FeatureSet& f, int n_kv_layers, int bs, int batch) {
     if (f.swa_live_tokens <= 0 || f.n_swa_layers <= 0 || f.n_swa_layers > n_kv_layers)
         return 0;
-    const int per_seq = (f.swa_live_tokens + bs - 1) / bs + 1;
-    const int shared = f.swa_shared_tokens > 0 ? (f.swa_shared_tokens + bs - 1) / bs + 1 : 0;
-    return per_seq * batch + shared;
+    const int per_seq = ((f.swa_live_tokens + bs - 1) / bs) + 1;
+    const int shared = f.swa_shared_tokens > 0 ? ((f.swa_shared_tokens + bs - 1) / bs) + 1 : 0;
+    return (per_seq * batch) + shared;
 }
 
 }  // namespace
@@ -208,7 +208,7 @@ PlanResult plan_memory(const PlanInput& in) {
             kv_charged += l.bytes;
     if (seq > 256 && per_block > 0) {
         const size_t frees = std::min(kv_charged,
-                                      static_cast<size_t>(p.kv.blocks_per_seq - ((seq / 2) + bs - 1) / bs) *
+                                      static_cast<size_t>(p.kv.blocks_per_seq - (((seq / 2) + bs - 1) / bs)) *
                                           per_block * batch);
         f.levers.push_back(PlanLever{fmt_lever("runtime.max_seq_len", seq, seq / 2), frees});
     }
@@ -216,9 +216,9 @@ PlanResult plan_memory(const PlanInput& in) {
         // Everything batch-shaped: the KV share per slot AND the SSM/GDN state
         // per slot. Without the state the lever read "64 -> 63 frees 0 MiB" on
         // a hybrid whose 4968 MiB state was the whole overrun (2026-09-08).
-        const size_t frees = p.kv.bytes / static_cast<size_t>(batch) +
-                             p.kv.swa_bytes / static_cast<size_t>(batch) +
-                             in.features.ssm_state_bytes / static_cast<size_t>(batch);
+        const size_t frees = (p.kv.bytes / static_cast<size_t>(batch)) +
+                             (p.kv.swa_bytes / static_cast<size_t>(batch)) +
+                             (in.features.ssm_state_bytes / static_cast<size_t>(batch));
         f.levers.push_back(
             PlanLever{fmt_lever("runtime.max_batch_size", batch, batch - 1), frees});
     }

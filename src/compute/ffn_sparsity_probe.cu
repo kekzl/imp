@@ -7,6 +7,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
@@ -76,7 +77,7 @@ __device__ __forceinline__ float silu_f(float x) {
 __global__ void probe_silu_kernel(int layer, const __half* __restrict__ gate,
                                   const __half* __restrict__ up, int K,
                                   unsigned long long* __restrict__ counters) {
-    unsigned long long* base = counters + static_cast<size_t>(layer) * kSlotsPerLayer;
+    unsigned long long* base = counters + (static_cast<size_t>(layer) * kSlotsPerLayer);
 
     unsigned int local[kNumThresholds];
 #pragma unroll
@@ -117,7 +118,7 @@ void probe_ffn_silu_sparsity(int layer, const __half* gate, const __half* up, in
         ensure_init_locked();
         if (!g_state.enabled || g_state.d_counters == nullptr) return;
         if (layer < 0 || layer >= kMaxLayers) return;
-        if (layer > g_state.max_layer_seen) g_state.max_layer_seen = layer;
+        g_state.max_layer_seen = std::max(g_state.max_layer_seen, layer);
     }
     if (gate == nullptr || up == nullptr || K <= 0) return;
 

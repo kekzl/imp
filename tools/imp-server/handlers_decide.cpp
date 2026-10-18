@@ -324,7 +324,7 @@ void handle_decide(const httplib::Request& req, httplib::Response& res, ServerSt
             nlohmann::ordered_json opts = nlohmann::ordered_json::object();
             std::vector<std::string> letters;
             for (size_t k = 0; k < d.options.size(); k++) {
-                letters.push_back(std::string(1, static_cast<char>('A' + k)));
+                letters.emplace_back(1, static_cast<char>('A' + k));
                 opts[letters.back()] = d.options[k];
             }
             user["options"] = opts;

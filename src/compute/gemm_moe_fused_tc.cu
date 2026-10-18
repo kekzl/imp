@@ -122,7 +122,7 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
         const int M = offsets[expert_id + 1] - start;
         const int M_cur = min(TC_TILE_M, M - m_base);
 
-        const uint8_t* W = packed_weights + static_cast<size_t>(expert_id) * expert_stride_bytes;
+        const uint8_t* W = packed_weights + (static_cast<size_t>(expert_id) * expert_stride_bytes);
 
         // --- GEMM for single M-tile ---
         wmma::fragment<wmma::accumulator, 16, 16, 16, float> c_frag;
@@ -132,14 +132,14 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
 // --- Load B: warp-cooperative Q6_K dequant → B_smem ---
 #pragma unroll
             for (int iter = 0; iter < TC_TILE_N / 8; iter++) {
-                const int row = warp_id + iter * 8;
+                const int row = warp_id + (iter * 8);
                 const int n_global = n_base + row;
 
                 half w_vals[8];
 
                 if (n_global < N) {
-                    const uint8_t* bp = W + static_cast<size_t>(n_global) * row_bytes +
-                                        static_cast<size_t>(k_block) * 210;
+                    const uint8_t* bp = W + (static_cast<size_t>(n_global) * row_bytes) +
+                                        (static_cast<size_t>(k_block) * 210);
 
                     float d_w = __half2float(*reinterpret_cast<const half*>(bp + 208));
                     float sc = static_cast<float>(reinterpret_cast<const int8_t*>(bp + 192)[scale_idx]);
@@ -165,14 +165,14 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
                         w_vals[i] = __float2half(0.0f);
                 }
 
-                *reinterpret_cast<uint4*>(&B_smem[row * TC_STRIDE + base_elem]) = *reinterpret_cast<uint4*>(
+                *reinterpret_cast<uint4*>(&B_smem[(row * TC_STRIDE) + base_elem]) = *reinterpret_cast<uint4*>(
                     w_vals);
             }
 
 // --- Load A: activations → AC_smem ---
 #pragma unroll 4
             for (int i = 0; i < (TC_TILE_M * TC_K_TILE / 8) / TC_BLOCK; i++) {
-                const int load_idx = tid + i * TC_BLOCK;
+                const int load_idx = tid + (i * TC_BLOCK);
                 const int flat = load_idx * 8;
                 const int row = flat / TC_K_TILE;
                 const int col = flat % TC_K_TILE;
@@ -182,11 +182,11 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
                     const int64_t token = sorted_token_ids
                                               ? static_cast<int64_t>(sorted_token_ids[expanded_idx])
                                               : static_cast<int64_t>(expanded_idx);
-                    *reinterpret_cast<uint4*>(&AC_smem[row * TC_STRIDE + col]) =
+                    *reinterpret_cast<uint4*>(&AC_smem[(row * TC_STRIDE) + col]) =
                         *reinterpret_cast<const uint4*>(
-                            &activations[token * K + static_cast<int64_t>(k_block) * TC_K_TILE + col]);
+                            &activations[(token * K) + (static_cast<int64_t>(k_block) * TC_K_TILE) + col]);
                 } else {
-                    *reinterpret_cast<uint4*>(&AC_smem[row * TC_STRIDE + col]) = make_uint4(0, 0, 0, 0);
+                    *reinterpret_cast<uint4*>(&AC_smem[(row * TC_STRIDE) + col]) = make_uint4(0, 0, 0, 0);
                 }
             }
 
@@ -198,8 +198,8 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
 
 #pragma unroll
             for (int kk = 0; kk < TC_K_TILE / 16; kk++) {
-                wmma::load_matrix_sync(a_frag, &AC_smem[warp_m * 16 * TC_STRIDE + kk * 16], TC_STRIDE);
-                wmma::load_matrix_sync(b_frag, &B_smem[warp_n * 16 * TC_STRIDE + kk * 16], TC_STRIDE);
+                wmma::load_matrix_sync(a_frag, &AC_smem[(warp_m * 16 * TC_STRIDE) + (kk * 16)], TC_STRIDE);
+                wmma::load_matrix_sync(b_frag, &B_smem[(warp_n * 16 * TC_STRIDE) + (kk * 16)], TC_STRIDE);
                 wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
             }
 
@@ -209,7 +209,7 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
         // --- Store: FP32 accumulators → FP16 output ---
         float* C_smem_f32 = reinterpret_cast<float*>(AC_smem);
 
-        wmma::store_matrix_sync(&C_smem_f32[(warp_m * 16) * TC_TILE_N + (warp_n * 16)], c_frag, TC_TILE_N,
+        wmma::store_matrix_sync(&C_smem_f32[((warp_m * 16) * TC_TILE_N) + (warp_n * 16)], c_frag, TC_TILE_N,
                                 wmma::mem_row_major);
 
         __syncthreads();
@@ -221,7 +221,7 @@ __global__ void __launch_bounds__(TC_BLOCK) gemm_q6k_fused_moe_prefill_tc_kernel
 
             if (m < M_cur && n_global < N) {
                 const int64_t token = start + m_base + m;
-                output[token * N + n_global] = __float2half(C_smem_f32[m * TC_TILE_N + n]);
+                output[(token * N) + n_global] = __float2half(C_smem_f32[(m * TC_TILE_N) + n]);
             }
         }
 

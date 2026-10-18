@@ -82,7 +82,7 @@ __device__ __forceinline__ void commit_miss(const DevExpertLayer& L, int key, in
     L.key_of_slot[victim] = key;
     L.stamp[victim] = clock;
     L.slot_scales[victim] = src.scale;
-    misses[ord] = DevMissEntry{src.packed, src.ms,  L.pool + static_cast<size_t>(victim) * L.slot_bytes,
+    misses[ord] = DevMissEntry{src.packed, src.ms,  L.pool + (static_cast<size_t>(victim) * L.slot_bytes),
                                nullptr,    nullptr, key,
                                old};
 }
@@ -145,14 +145,14 @@ __global__ void expert_cache_resolve_kernel(DevExpertLayer L, const int32_t* __r
 
     for (int i = tid; i < n; i += kResolveThreads) {
         const int proj = i / nk;
-        const int j = i - proj * nk;
+        const int j = i - (proj * nk);
         const int e = expert_indices[j];
-        const int key = proj * L.n_experts + e;
+        const int key = (proj * L.n_experts) + e;
         s_key[i] = key;
         const int first = first_entry_of(expert_indices, j, e);
         if (first >= 0) {
             s_miss[i] = -1;
-            s_ord[i] = proj * nk + first;
+            s_ord[i] = (proj * nk) + first;
             continue;
         }
         const int s = L.slot_of[key];
@@ -215,7 +215,7 @@ __device__ __forceinline__ DevExpertSrc stage_src(const DevExpertSrc* __restrict
     DevExpertSrc s = src[key];
     const int slot = v.slot_of ? v.slot_of[key] : -1;
     if (slot >= 0) {
-        s.packed = v.pool + static_cast<size_t>(slot) * v.slot_bytes;
+        s.packed = v.pool + (static_cast<size_t>(slot) * v.slot_bytes);
         s.ms = s.packed + v.ms_off;
     }
     return s;
@@ -230,22 +230,22 @@ __global__ void expert_stage_touched_kernel(const DevExpertSrc* __restrict__ src
     const int e = blockIdx.y, p = blockIdx.z;
     if (expert_offsets[e + 1] == expert_offsets[e])
         return;
-    const DevExpertSrc s = stage_src(src, slots, p * n_experts + e);
+    const DevExpertSrc s = stage_src(src, slots, (p * n_experts) + e);
     if (!s.packed || !s.ms)
         return;
-    char* base = stage_buf + static_cast<size_t>(p) * proj_bytes;
+    char* base = stage_buf + (static_cast<size_t>(p) * proj_bytes);
     const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
-    const size_t t0 = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t t0 = (static_cast<size_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     {
         const int4* sp = reinterpret_cast<const int4*>(s.packed);
-        int4* dp = reinterpret_cast<int4*>(base + static_cast<size_t>(e) * pb);
+        int4* dp = reinterpret_cast<int4*>(base + (static_cast<size_t>(e) * pb));
         for (size_t j = t0; j < pb / 16; j += stride)
             dp[j] = sp[j];
     }
     {
         const int4* sm = reinterpret_cast<const int4*>(s.ms);
-        int4* dm = reinterpret_cast<int4*>(base + static_cast<size_t>(n_experts) * pb +
-                                          static_cast<size_t>(e) * mb);
+        int4* dm = reinterpret_cast<int4*>(base + (static_cast<size_t>(n_experts) * pb) +
+                                           (static_cast<size_t>(e) * mb));
         for (size_t j = t0; j < mb / 16; j += stride)
             dm[j] = sm[j];
     }
@@ -262,19 +262,19 @@ __global__ void expert_stage_touched_range_kernel(const DevExpertSrc* __restrict
     const int p = z == 0 ? proj_of_slot.x : proj_of_slot.y;
     if (e >= n_experts || expert_offsets[e + 1] == expert_offsets[e])
         return;
-    const DevExpertSrc s = stage_src(src, slots, p * n_experts + e);
+    const DevExpertSrc s = stage_src(src, slots, (p * n_experts) + e);
     if (!s.packed || !s.ms)
         return;
-    char* base = stage_buf + static_cast<size_t>(z) * proj_bytes;
+    char* base = stage_buf + (static_cast<size_t>(z) * proj_bytes);
     const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
-    const size_t t0 = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t t0 = (static_cast<size_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     const int4* sp = reinterpret_cast<const int4*>(s.packed);
-    int4* dp = reinterpret_cast<int4*>(base + static_cast<size_t>(i) * pb);
+    int4* dp = reinterpret_cast<int4*>(base + (static_cast<size_t>(i) * pb));
     for (size_t j = t0; j < pb / 16; j += stride)
         dp[j] = sp[j];
     const int4* sm = reinterpret_cast<const int4*>(s.ms);
-    int4* dm = reinterpret_cast<int4*>(base + static_cast<size_t>(gridDim.y) * pb +
-                                       static_cast<size_t>(i) * mb);
+    int4* dm = reinterpret_cast<int4*>(base + (static_cast<size_t>(gridDim.y) * pb) +
+                                       (static_cast<size_t>(i) * mb));
     for (size_t j = t0; j < mb / 16; j += stride)
         dm[j] = sm[j];
 }
@@ -309,7 +309,7 @@ __global__ void expert_cache_gather_kernel(const DevMissEntry* __restrict__ miss
     if (!m.packed || !m.ms)
         return;  // tiered source the host node could not provide (logged there)
     const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
-    const size_t t0 = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t t0 = (static_cast<size_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     // Tiered write-back: the same thread reads the old element before it stores the new one.
     {
         const int4* s = reinterpret_cast<const int4*>(m.packed);
@@ -383,7 +383,7 @@ bool DeviceExpertCache::init(const Model& model, ExpertLRUCache& cache, VRAMAllo
     const size_t stamp_b = static_cast<size_t>(n_layers) * slots * sizeof(uint32_t);
     const size_t clock_b = static_cast<size_t>(n_layers) * sizeof(uint32_t);
     const size_t stats_b = 2 * sizeof(unsigned long long);
-    const size_t miss_b = static_cast<size_t>(kMaxEntries) * sizeof(DevMissEntry) + 256;
+    const size_t miss_b = (static_cast<size_t>(kMaxEntries) * sizeof(DevMissEntry)) + 256;
     auto al = [](size_t v) { return (v + 255) / 256 * 256; };
     tables_bytes_ = al(src_b) + al(slot_of_b) + al(key_b) + al(stamp_b) + al(clock_b) + al(stats_b) +
                     al(miss_b);
@@ -406,9 +406,9 @@ bool DeviceExpertCache::init(const Model& model, ExpertLRUCache& cache, VRAMAllo
     d_stats_ = reinterpret_cast<unsigned long long*>(base);
     base += al(stats_b);
     d_misses_ = reinterpret_cast<DevMissEntry*>(base);
-    d_n_miss_ = reinterpret_cast<int*>(base + static_cast<size_t>(kMaxEntries) * sizeof(DevMissEntry));
-    d_tier_seq_ = reinterpret_cast<uint32_t*>(base + static_cast<size_t>(kMaxEntries) * sizeof(DevMissEntry) +
-                                              64);
+    d_n_miss_ = reinterpret_cast<int*>(base + (static_cast<size_t>(kMaxEntries) * sizeof(DevMissEntry)));
+    d_tier_seq_ = reinterpret_cast<uint32_t*>(base +
+                                              (static_cast<size_t>(kMaxEntries) * sizeof(DevMissEntry)) + 64);
 
     IMP_CUDA_CHECK_LOG(cudaMemcpy(d_src, src.data(), src_b, cudaMemcpyHostToDevice));
     IMP_CUDA_CHECK_LOG(cudaMemset(d_slot_of, 0xFF, slot_of_b));
@@ -423,14 +423,13 @@ bool DeviceExpertCache::init(const Model& model, ExpertLRUCache& cache, VRAMAllo
         if (!ready[l])
             continue;
         DevExpertLayer& L = layers_[l];
-        L.src = d_src + static_cast<size_t>(l) * 3 * ne;
-        L.slot_of = d_slot_of + static_cast<size_t>(l) * 3 * ne;
-        L.key_of_slot = d_key + static_cast<size_t>(l) * slots;
-        L.stamp = d_stamp + static_cast<size_t>(l) * slots;
+        L.src = d_src + (static_cast<size_t>(l) * 3 * ne);
+        L.slot_of = d_slot_of + (static_cast<size_t>(l) * 3 * ne);
+        L.key_of_slot = d_key + (static_cast<size_t>(l) * slots);
+        L.stamp = d_stamp + (static_cast<size_t>(l) * slots);
         L.clock = d_clock + l;
         L.stats = d_stats_;
-        L.pool = static_cast<char*>(cache.pool_) +
-                 static_cast<size_t>(l) * slots * cache.slot_size_;
+        L.pool = static_cast<char*>(cache.pool_) + (static_cast<size_t>(l) * slots * cache.slot_size_);
         L.slot_scales = cache.layer_slot_scales(l);
         L.slot_bytes = cache.slot_size_;
         L.n_experts = ne;
@@ -473,7 +472,7 @@ StageSlots DeviceExpertCache::stage_slots_(int layer) const {
     if (layer_tiered(layer) || !cache_ || cache_->host_generation_ != seen_host_generation_)
         return {};
     const DevExpertLayer& L = layers_[layer];
-    return {L.slot_of, L.pool, L.slot_bytes, ms_off_[static_cast<size_t>(layer) * 3 + 1]};
+    return {L.slot_of, L.pool, L.slot_bytes, ms_off_[(static_cast<size_t>(layer) * 3) + 1]};
 }
 
 bool DeviceExpertCache::stage_touched(int layer, const int32_t* expert_offsets, char* stage_buf,
@@ -483,7 +482,7 @@ bool DeviceExpertCache::stage_touched(int layer, const int32_t* expert_offsets, 
         return false;
     const DevExpertLayer& L = layers_[layer];
     for (int p = 0; p < 3; ++p) {
-        const size_t i = static_cast<size_t>(layer) * 3 + p;
+        const size_t i = (static_cast<size_t>(layer) * 3) + p;
         if (packed_bytes_[i] != pb || ms_bytes_[i] != mb)
             return false;
     }
@@ -510,7 +509,7 @@ bool DeviceExpertCache::stage_touched_range(int layer, const int32_t* expert_off
     for (int p : {proj0, proj1}) {
         if (p < 0)
             continue;
-        const size_t i = static_cast<size_t>(layer) * 3 + p;
+        const size_t i = (static_cast<size_t>(layer) * 3) + p;
         if (packed_bytes_[i] != pb || ms_bytes_[i] != mb)
             return false;
     }
@@ -561,7 +560,7 @@ void DeviceExpertCache::gather(int layer, int top_k, int n_rows, cudaStream_t st
     // gate, up and down share one slot layout per model (the pool was sized for the largest);
     // the gather takes the up projection's sizes, identical for the three in every NVFP4 MoE
     // seen so far (N x K and K x N have the same byte counts).
-    const size_t i = static_cast<size_t>(layer) * 3 + 1;
+    const size_t i = (static_cast<size_t>(layer) * 3) + 1;
     const dim3 grid(16, 3 * top_k * n_rows);
     expert_cache_gather_kernel<<<grid, 256, 0, stream>>>(tier ? tier_misses_d_ : d_misses_,
                                                          tier ? tier_n_miss_d_ : d_n_miss_, packed_bytes_[i],

@@ -2,6 +2,7 @@
 #include "core/logging.h"
 #include "memory/engine_arena.h"
 
+#include <algorithm>
 #include <cfloat>
 
 namespace imp {
@@ -20,12 +21,12 @@ __global__ void rowwise_topm_partial_kernel(const float* __restrict__ logits, in
     const int chunk = (V + kTopMSplits - 1) / kTopMSplits;
     const int begin = split * chunk;
     const int end = min(V, begin + chunk);
-    const float* lg = logits + static_cast<int64_t>(row) * V;
+    const float* lg = logits + (static_cast<int64_t>(row) * V);
     const int tid = threadIdx.x;
     __shared__ int s_sel[kRowwiseTopMMax];
     __shared__ float s_val[256];
     __shared__ int s_idx[256];
-    const int64_t out_base = (static_cast<int64_t>(row) * kTopMSplits + split) * m;
+    const int64_t out_base = ((static_cast<int64_t>(row) * kTopMSplits) + split) * m;
     for (int pass = 0; pass < m; ++pass) {
         float best = -FLT_MAX;
         int best_idx = V;  // sentinel: loses every tie-break
@@ -75,8 +76,8 @@ __global__ void rowwise_topm_reduce_kernel(const float* __restrict__ pvals,
         return;
     const int row = blockIdx.x;
     const int n = kTopMSplits * m;
-    const float* pv = pvals + static_cast<int64_t>(row) * n;
-    const int32_t* pi = pidxs + static_cast<int64_t>(row) * n;
+    const float* pv = pvals + (static_cast<int64_t>(row) * n);
+    const int32_t* pi = pidxs + (static_cast<int64_t>(row) * n);
     int32_t sel[kRowwiseTopMMax];
     for (int pass = 0; pass < m; ++pass) {
         float best = -FLT_MAX;
@@ -98,7 +99,7 @@ __global__ void rowwise_topm_reduce_kernel(const float* __restrict__ pvals,
             }
         }
         sel[pass] = best_idx;
-        out[static_cast<int64_t>(row) * m + pass] = best_idx;
+        out[(static_cast<int64_t>(row) * m) + pass] = best_idx;
     }
 }
 
@@ -148,8 +149,7 @@ void rowwise_topm(const float* d_logits, int rows, int vocab, int m, int32_t* d_
                   cudaStream_t stream) {
     if (rows <= 0 || vocab <= 0 || m <= 0 || !d_logits || !d_out)
         return;
-    if (m > kRowwiseTopMMax)
-        m = kRowwiseTopMMax;
+    m = std::min(m, kRowwiseTopMMax);
     const size_t need = static_cast<size_t>(rows) * kTopMSplits * m;
     if (!topm_ensure(need))
         return;

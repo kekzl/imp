@@ -42,7 +42,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
     // State in registers (one column per thread).
     float H_reg[SS];
     {
-        const float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
+        const float* H_col = h_state + (static_cast<size_t>(h) * SS * HD) + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
             H_reg[s] = H_col[static_cast<ptrdiff_t>(s * HD)];
@@ -74,9 +74,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
         if (d < SS) {
             for (int t_loc = 0; t_loc < L; t_loc++) {
                 const int t = t_chunk_start + t_loc;
-                const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
-                s_q_fp16[t_loc * SS + d] = __float2half(row[g_idx * SS + d]);
-                s_k_fp16[t_loc * SS + d] = __float2half(row[BC_size + g_idx * SS + d]);
+                const float* row = conv_f32 + (static_cast<size_t>(t) * conv_channels);
+                s_q_fp16[(t_loc * SS) + d] = __float2half(row[(g_idx * SS) + d]);
+                s_k_fp16[(t_loc * SS) + d] = __float2half(row[BC_size + (g_idx * SS) + d]);
             }
         }
         __syncthreads();
@@ -85,8 +85,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
         for (int t_loc = 0; t_loc < L; t_loc++) {
             float k_sq = 0.0f, q_sq = 0.0f;
             for (int i = d; i < SS; i += HD) {
-                float k = __half2float(s_k_fp16[t_loc * SS + i]);
-                float q = __half2float(s_q_fp16[t_loc * SS + i]);
+                float k = __half2float(s_k_fp16[(t_loc * SS) + i]);
+                float q = __half2float(s_q_fp16[(t_loc * SS) + i]);
                 k_sq += k * k;
                 q_sq += q * q;
             }
@@ -94,8 +94,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
             const float q_inv = rsqrtf(fmaxf(gdn_block_sum(s_reduce, q_sq, d, HD), 1e-12f));
 
             if (d < SS) {
-                s_k_fp16[t_loc * SS + d] = __float2half(__half2float(s_k_fp16[t_loc * SS + d]) * k_inv);
-                s_q_fp16[t_loc * SS + d] = __float2half(__half2float(s_q_fp16[t_loc * SS + d]) * q_inv);
+                s_k_fp16[(t_loc * SS) + d] = __float2half(__half2float(s_k_fp16[(t_loc * SS) + d]) * k_inv);
+                s_q_fp16[(t_loc * SS) + d] = __float2half(__half2float(s_q_fp16[(t_loc * SS) + d]) * q_inv);
             }
             __syncthreads();
         }
@@ -106,14 +106,14 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
             s_D[0] = 1.0f;
             for (int t_loc = 0; t_loc < L; t_loc++) {
                 const int t = t_chunk_start + t_loc;
-                float alpha_h = __half2float(alpha_all[t * n_heads + h]);
+                float alpha_h = __half2float(alpha_all[(t * n_heads) + h]);
                 float dt_val = alpha_h + dtb_h;
                 dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
                 float lg_t = fmaxf(A_h * dt_val, -20.0f);
                 s_g[t_loc] = expf(lg_t);
                 D_cum *= s_g[t_loc];
                 s_D[t_loc + 1] = D_cum;
-                float beta_h = __half2float(beta_all[t * n_heads + h]);
+                float beta_h = __half2float(beta_all[(t * n_heads) + h]);
                 s_beta[t_loc] = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));
             }
         }
@@ -123,7 +123,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
         // The static H_reg[SS] array doesn't allow trivial cp.async; do per-element stores.
 #pragma unroll
         for (int s = 0; s < SS; s++) {
-            s_h0_fp16[s * HD + d] = __float2half(H_reg[s]);
+            s_h0_fp16[(s * HD) + d] = __float2half(H_reg[s]);
         }
         __syncthreads();
 
@@ -194,21 +194,21 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
         // u, so add one sync after the loop.
         for (int t_loc = 0; t_loc < L; t_loc++) {
             const int t = t_chunk_start + t_loc;
-            const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
-            const float v_d = row[2 * BC_size + h * HD + d];
+            const float* row = conv_f32 + (static_cast<size_t>(t) * conv_channels);
+            const float v_d = row[(2 * BC_size) + (h * HD) + d];
 
             const float g_t = s_g[t_loc];
             const float beta_t = s_beta[t_loc];
             const float D_0t = s_D[t_loc];
 
-            float u_t = beta_t * v_d - beta_t * g_t * D_0t * s_kh_fp32[t_loc * HD + d];
+            float u_t = (beta_t * v_d) - (beta_t * g_t * D_0t * s_kh_fp32[(t_loc * HD) + d]);
             const float bg_Dt = beta_t * g_t * D_0t;
             for (int j = 0; j < t_loc; j++) {
                 const float D_inv_j1 = 1.0f / s_D[j + 1];
-                const float coef = bg_Dt * D_inv_j1 * s_kk_fp32[t_loc * CHUNK + j];
-                u_t -= coef * s_u_fp32[j * HD + d];
+                const float coef = bg_Dt * D_inv_j1 * s_kk_fp32[(t_loc * CHUNK) + j];
+                u_t -= coef * s_u_fp32[(j * HD) + d];
             }
-            s_u_fp32[t_loc * HD + d] = u_t;
+            s_u_fp32[(t_loc * HD) + d] = u_t;
         }
         __syncthreads();
 
@@ -218,12 +218,13 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
             const int t = t_chunk_start + t_loc;
             const float D_0t1 = s_D[t_loc + 1];
 
-            float y = D_0t1 * s_qh_fp32[t_loc * HD + d];
+            float y = D_0t1 * s_qh_fp32[(t_loc * HD) + d];
             for (int j = 0; j <= t_loc; j++) {
-                const float coef = (D_0t1 / s_D[j + 1]) * s_qk_fp32[t_loc * CHUNK + j];
-                y += coef * s_u_fp32[j * HD + d];
+                const float coef = (D_0t1 / s_D[j + 1]) * s_qk_fp32[(t_loc * CHUNK) + j];
+                y += coef * s_u_fp32[(j * HD) + d];
             }
-            y_out[static_cast<size_t>(t) * inner + static_cast<size_t>(h) * HD + d] = __float2half(y * scale);
+            y_out[(static_cast<size_t>(t) * inner) + (static_cast<size_t>(h) * HD) + d] = __float2half(y *
+                                                                                                       scale);
         }
 
         // ---------------- STEP 7: H_L = D[0..L] H_0 + Σ_t (D[0..L]/D[0..t+1]) k̃_t u_t^T ----------------
@@ -244,7 +245,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
             H_reg[s] *= D_0L;
         }
         for (int t_loc = 0; t_loc < L; t_loc++) {
-            const float coef = s_g[t_loc] * s_u_fp32[t_loc * HD + d];
+            const float coef = s_g[t_loc] * s_u_fp32[(t_loc * HD) + d];
             const half* k_row = s_k_fp16 + static_cast<ptrdiff_t>(t_loc * SS);
 #pragma unroll
             for (int s = 0; s < SS; s++) {
@@ -258,7 +259,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc_kernel(
 
     // Write final state back to global memory.
     {
-        float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
+        float* H_col = h_state + (static_cast<size_t>(h) * SS * HD) + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
             H_col[static_cast<ptrdiff_t>(s * HD)] = H_reg[s];
@@ -304,7 +305,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
     // State in registers.
     float H_reg[SS];
     {
-        const float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
+        const float* H_col = h_state + (static_cast<size_t>(h) * SS * HD) + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
             H_reg[s] = H_col[static_cast<ptrdiff_t>(s * HD)];
@@ -341,9 +342,9 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
         if (d < SS) {
             for (int t_loc = 0; t_loc < L; t_loc++) {
                 const int t = t_chunk_start + t_loc;
-                const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
-                s_q_fp16[t_loc * SS + d] = __float2half(row[g_idx * SS + d]);
-                s_k_fp16[t_loc * SS + d] = __float2half(row[BC_size + g_idx * SS + d]);
+                const float* row = conv_f32 + (static_cast<size_t>(t) * conv_channels);
+                s_q_fp16[(t_loc * SS) + d] = __float2half(row[(g_idx * SS) + d]);
+                s_k_fp16[(t_loc * SS) + d] = __float2half(row[BC_size + (g_idx * SS) + d]);
             }
         }
         __syncthreads();
@@ -354,8 +355,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
         for (int t_loc = 0; t_loc < L; t_loc++) {
             float k_sq = 0.0f, q_sq = 0.0f;
             for (int i = d; i < SS; i += HD) {
-                float k = __half2float(s_k_fp16[t_loc * SS + i]);
-                float q = __half2float(s_q_fp16[t_loc * SS + i]);
+                float k = __half2float(s_k_fp16[(t_loc * SS) + i]);
+                float q = __half2float(s_q_fp16[(t_loc * SS) + i]);
                 k_sq += k * k;
                 q_sq += q * q;
             }
@@ -363,8 +364,8 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
             const float q_inv = rsqrtf(fmaxf(gdn_block_sum(s_reduce, q_sq, d, HD), 1e-12f));
 
             if (d < SS) {
-                s_k_fp16[t_loc * SS + d] = __float2half(__half2float(s_k_fp16[t_loc * SS + d]) * k_inv);
-                s_q_fp16[t_loc * SS + d] = __float2half(__half2float(s_q_fp16[t_loc * SS + d]) * q_inv);
+                s_k_fp16[(t_loc * SS) + d] = __float2half(__half2float(s_k_fp16[(t_loc * SS) + d]) * k_inv);
+                s_q_fp16[(t_loc * SS) + d] = __float2half(__half2float(s_q_fp16[(t_loc * SS) + d]) * q_inv);
             }
             __syncthreads();
         }
@@ -375,14 +376,14 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
             s_D[0] = 1.0f;
             for (int t_loc = 0; t_loc < L; t_loc++) {
                 const int t = t_chunk_start + t_loc;
-                float alpha_h = __half2float(alpha_all[t * n_heads + h]);
+                float alpha_h = __half2float(alpha_all[(t * n_heads) + h]);
                 float dt_val = alpha_h + dtb_h;
                 dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
                 float lg_t = fmaxf(A_h * dt_val, -20.0f);
                 s_g[t_loc] = expf(lg_t);
                 D_cum *= s_g[t_loc];
                 s_D[t_loc + 1] = D_cum;
-                float beta_h = __half2float(beta_all[t * n_heads + h]);
+                float beta_h = __half2float(beta_all[(t * n_heads) + h]);
                 s_beta[t_loc] = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));
             }
         }
@@ -390,7 +391,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
         // ---------------- STEP 3: materialise H_0 in shared memory as FP16 ----------------
 #pragma unroll
         for (int s = 0; s < SS; s++) {
-            s_h0_fp16[s * HD + d] = __float2half(H_reg[s]);
+            s_h0_fp16[(s * HD) + d] = __float2half(H_reg[s]);
         }
         __syncthreads();
 
@@ -458,21 +459,21 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
         // Own-column-only reads — no per-iteration sync needed.
         for (int t_loc = 0; t_loc < L; t_loc++) {
             const int t = t_chunk_start + t_loc;
-            const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
-            const float v_d = row[2 * BC_size + h * HD + d];
+            const float* row = conv_f32 + (static_cast<size_t>(t) * conv_channels);
+            const float v_d = row[(2 * BC_size) + (h * HD) + d];
 
             const float g_t = s_g[t_loc];
             const float beta_t = s_beta[t_loc];
             const float D_0t = s_D[t_loc];
 
-            float u_t = beta_t * v_d - beta_t * g_t * D_0t * s_kh_fp32[t_loc * HD + d];
+            float u_t = (beta_t * v_d) - (beta_t * g_t * D_0t * s_kh_fp32[(t_loc * HD) + d]);
             const float bg_Dt = beta_t * g_t * D_0t;
             for (int j = 0; j < t_loc; j++) {
                 const float D_inv_j1 = 1.0f / s_D[j + 1];
-                const float coef = bg_Dt * D_inv_j1 * s_kk_fp32[t_loc * CHUNK + j];
-                u_t -= coef * s_u_fp32[j * HD + d];
+                const float coef = bg_Dt * D_inv_j1 * s_kk_fp32[(t_loc * CHUNK) + j];
+                u_t -= coef * s_u_fp32[(j * HD) + d];
             }
-            s_u_fp32[t_loc * HD + d] = u_t;
+            s_u_fp32[(t_loc * HD) + d] = u_t;
         }
         __syncthreads();  // Before Step 6a TC-MMA overwrites s_kh.
 
@@ -511,12 +512,13 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
             const int t = t_chunk_start + t_loc;
             const float D_0t1 = s_D[t_loc + 1];
 
-            float y = D_0t1 * s_qh_fp32[t_loc * HD + d];
+            float y = D_0t1 * s_qh_fp32[(t_loc * HD) + d];
             for (int j = 0; j <= t_loc; j++) {
-                const float coef = (D_0t1 / s_D[j + 1]) * s_qk_fp32[t_loc * CHUNK + j];
-                y += coef * s_u_fp32[j * HD + d];
+                const float coef = (D_0t1 / s_D[j + 1]) * s_qk_fp32[(t_loc * CHUNK) + j];
+                y += coef * s_u_fp32[(j * HD) + d];
             }
-            y_out[static_cast<size_t>(t) * inner + static_cast<size_t>(h) * HD + d] = __float2half(y * scale);
+            y_out[(static_cast<size_t>(t) * inner) + (static_cast<size_t>(h) * HD) + d] = __float2half(y *
+                                                                                                       scale);
         }
         __syncthreads();
 
@@ -528,7 +530,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
         }
         __syncthreads();
         for (int t_loc = 0; t_loc < L; t_loc++) {
-            s_u_fp16[t_loc * HD + d] = __float2half(s_g[t_loc] * s_u_fp32[t_loc * HD + d]);
+            s_u_fp16[(t_loc * HD) + d] = __float2half(s_g[t_loc] * s_u_fp32[(t_loc * HD) + d]);
         }
         __syncthreads();
 
@@ -570,7 +572,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
             // Each thread updates 16 elements of its H_reg column.
 #pragma unroll
             for (int m_local = 0; m_local < 16; m_local++) {
-                H_reg[m_offset + m_local] += s_strip_out[m_local * HD + d];
+                H_reg[m_offset + m_local] += s_strip_out[(m_local * HD) + d];
             }
             __syncthreads();  // Before next strip overwrites s_strip_out.
         }
@@ -580,7 +582,7 @@ __global__ void __launch_bounds__(HD, 1) gdn_scan_chunkwise_wy_tc2_kernel(
 
     // Write final state back.
     {
-        float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
+        float* H_col = h_state + (static_cast<size_t>(h) * SS * HD) + d;
 #pragma unroll
         for (int s = 0; s < SS; s++)
             H_col[static_cast<ptrdiff_t>(s * HD)] = H_reg[s];
@@ -603,10 +605,11 @@ void gdn_scan_chunkwise_wy_tc_f32(const float* conv_f32, int conv_channels, cons
         // 2*CHUNK*SS*2 = 8 KiB; s_h0_fp16 = SS*HD*2 = 32 KiB; s_kh+s_qh = 2*CHUNK*HD*4 = 16 KiB;
         // s_kk+s_qk = 2*CHUNK^2*4 = 2 KiB; s_u_fp32 = CHUNK*HD*4 = 8 KiB; rest ~1 KiB.
         // Total ~67 KiB, fits the 96 KiB opt-in.
-        const size_t smem = (static_cast<int64_t>(2 * CHUNK) * SS) * sizeof(half) +
-                            (static_cast<int64_t>(SS) * HD) * sizeof(half) +
-                            (2 * CHUNK * HD + 2 * CHUNK * CHUNK + CHUNK * HD + (CHUNK + 1) + 2 * CHUNK + HD) *
-                                sizeof(float);
+        const size_t smem = ((static_cast<int64_t>(2 * CHUNK) * SS) * sizeof(half)) +
+                            ((static_cast<int64_t>(SS) * HD) * sizeof(half)) +
+                            (((2 * CHUNK * HD) + (2 * CHUNK * CHUNK) + (CHUNK * HD) + (CHUNK + 1) +
+                              (2 * CHUNK) + HD) *
+                             sizeof(float));
         static bool attr_set = false;
         if (!attr_set) {
             IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(
@@ -632,10 +635,11 @@ void gdn_scan_chunkwise_wy_tc2_f32(const float* conv_f32, int conv_channels, con
     if (head_dim_ssm == 128 && state_size == 128 && n_tokens >= 1) {
         constexpr int HD = 128, SS = 128, CHUNK = 32;
         // Smem (see kernel header for full breakdown): ~89 KiB total.
-        const size_t smem = (static_cast<int64_t>(2 * CHUNK) * SS) * sizeof(half) +
-                            (static_cast<int64_t>(SS) * HD) * sizeof(half) +
-                            (CHUNK * HD + 2 * CHUNK * CHUNK + CHUNK * HD + (CHUNK + 1) + 2 * CHUNK + HD) *
-                                sizeof(float);
+        const size_t smem = ((static_cast<int64_t>(2 * CHUNK) * SS) * sizeof(half)) +
+                            ((static_cast<int64_t>(SS) * HD) * sizeof(half)) +
+                            (((CHUNK * HD) + (2 * CHUNK * CHUNK) + (CHUNK * HD) + (CHUNK + 1) + (2 * CHUNK) +
+                              HD) *
+                             sizeof(float));
         static bool attr_set = false;
         if (!attr_set) {
             IMP_CUDA_CHECK_LOG(cudaFuncSetAttribute(

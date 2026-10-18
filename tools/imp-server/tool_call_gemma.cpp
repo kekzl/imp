@@ -175,7 +175,7 @@ bool parse_gemma_tool_call_body(const std::string& body_in, ParsedToolCall& tc) 
         return false;
     std::string body = body_in.substr(bs);
 
-    if (body.compare(0, 5, "call:") != 0)
+    if (!body.starts_with("call:"))
         return false;
     size_t brace = body.find('{', 5);
     if (brace == std::string::npos)

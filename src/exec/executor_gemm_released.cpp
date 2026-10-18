@@ -35,9 +35,9 @@ void GraphExecutor::released_source_gemm_(const WeightHandle& h, const Tensor& i
         if (e && e->d_row_scales && (M <= 4 || (cur_spec_verify_ && M <= 8))) {
             for (int r = 0; r < M; ++r) {
                 const int64_t xs[2] = {1, K}, ys[2] = {1, N};
-                const Tensor x(static_cast<char*>(input.data) + r * K * sizeof(half), QType::F16, 2, xs,
+                const Tensor x(static_cast<char*>(input.data) + (r * K * sizeof(half)), QType::F16, 2, xs,
                                true);
-                Tensor y(static_cast<char*>(output.data) + r * N * sizeof(half), QType::F16, 2, ys, true);
+                Tensor y(static_cast<char*>(output.data) + (r * N * sizeof(half)), QType::F16, 2, ys, true);
                 gemv_fp8_rowscale(e->weight, x, y, e->d_row_scales, ctx.stream);
             }
             return;

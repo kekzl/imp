@@ -229,8 +229,8 @@ __global__ void smallM_kernel_v1(
     const uint8_t* SFB_e = static_cast<const uint8_t*>(d_SFB[e]);
     half*          D_e   = static_cast<half*>(d_D[e]);
     const float    alpha = d_alpha[e];
-    const CUtensorMap* desc_A = d_descs + static_cast<int64_t>(2) * e + 0;
-    const CUtensorMap* desc_B = d_descs + static_cast<int64_t>(2) * e + 1;
+    const CUtensorMap* desc_A = d_descs + (static_cast<int64_t>(2) * e) + 0;
+    const CUtensorMap* desc_B = d_descs + (static_cast<int64_t>(2) * e) + 1;
 
     constexpr int A_BYTES_ROW   = TILE_K / 2;     // 64 bytes per A-row in tile
     constexpr int B_BYTES_ROW   = TILE_K / 2;     // 64 bytes per B-row in tile
@@ -282,9 +282,9 @@ __global__ void smallM_kernel_v1(
     constexpr int N_CONSUMER_WARPS = 4;
     constexpr int PRODUCER_THREADS = N_PRODUCER_WARPS * 32;  // 128
     constexpr int CONSUMER_THREADS = N_CONSUMER_WARPS * 32;  // 128
-    static_assert(N_PRODUCER_WARPS + N_CONSUMER_WARPS == WARPS_PER_CTA, "");
+    static_assert(N_PRODUCER_WARPS + N_CONSUMER_WARPS == WARPS_PER_CTA);
     constexpr int N_ITERS_PER_CONSUMER = N_SUBTILES / N_CONSUMER_WARPS;  // 4
-    static_assert(N_ITERS_PER_CONSUMER * N_CONSUMER_WARPS == N_SUBTILES, "");
+    static_assert(N_ITERS_PER_CONSUMER * N_CONSUMER_WARPS == N_SUBTILES);
 
     // Two mbarrier arrays per stage: bar_full (data ready, arrival_count=PRODUCER_THREADS,
     // expected_tx=TMA_BYTES; W0L0 arrives via mbarrier.arrive.expect_tx + issues TMA, the other
@@ -352,7 +352,7 @@ __global__ void smallM_kernel_v1(
                         int col = (op % N_OPS_PER_ROW) * 8;
                         uint8_t* dst = stage_SFA(stage) + (size_t)row * SFA_BYTES_ROW + col;
                         if (row < M_eff) {
-                            const uint8_t* src = SFA_e + (size_t)row * K_groups + k_sf + col;
+                            const uint8_t* src = SFA_e + ((size_t)row * K_groups) + k_sf + col;
                             cp_async_ca_8_local(dst, src);
                         } else {
                             *reinterpret_cast<uint64_t*>(dst) = 0ULL;
@@ -368,7 +368,7 @@ __global__ void smallM_kernel_v1(
                         int n_global = n_base + row;
                         uint8_t* dst = stage_SFB(stage) + (size_t)row * SFB_BYTES_ROW + col;
                         if (n_global < N) {
-                            const uint8_t* src = SFB_e + (size_t)n_global * K_groups + k_sf + col;
+                            const uint8_t* src = SFB_e + ((size_t)n_global * K_groups) + k_sf + col;
                             cp_async_ca_8_local(dst, src);
                         } else {
                             *reinterpret_cast<uint64_t*>(dst) = 0ULL;
@@ -427,7 +427,7 @@ __global__ void smallM_kernel_v1(
             const int T0 = lane_id & 3;
             const int T1 = lane_id >> 2;
             const int byte_offset = T0 * 4;
-            const int m_sfa = T1 + (T0 & 1) * 8;
+            const int m_sfa = T1 + ((T0 & 1) * 8);
             const int n_sfb = T1;
             const int ni_base = consumer_warp * N_ITERS_PER_CONSUMER;
 
@@ -438,39 +438,39 @@ __global__ void smallM_kernel_v1(
 
             #pragma unroll 1
             for (int mi = 0; mi < M_SUBTILES; ++mi) {
-                const int m_lo = mi * 16 + T1;
+                const int m_lo = (mi * 16) + T1;
                 const int m_hi = m_lo + 8;
 
                 #pragma unroll
                 for (int ni_local = 0; ni_local < N_ITERS_PER_CONSUMER; ++ni_local) {
                     const int ni  = ni_base + ni_local;
-                    const int n_b = ni * 8 + T1;
+                    const int n_b = (ni * 8) + T1;
 
-                    #pragma unroll
+#pragma unroll
                     for (int ki = 0; ki < K_STRIPES; ++ki) {
                         const int stripe_byte = ki * 32;
                         const int kg_base = ki * 4;
 
                         uint32_t a0, a1, a2, a3;
-                        a0 = *reinterpret_cast<const uint32_t*>(
-                            sA + (size_t)m_lo * A_BYTES_ROW + stripe_byte +  0 + byte_offset);
-                        a1 = *reinterpret_cast<const uint32_t*>(
-                            sA + (size_t)m_hi * A_BYTES_ROW + stripe_byte +  0 + byte_offset);
-                        a2 = *reinterpret_cast<const uint32_t*>(
-                            sA + (size_t)m_lo * A_BYTES_ROW + stripe_byte + 16 + byte_offset);
-                        a3 = *reinterpret_cast<const uint32_t*>(
-                            sA + (size_t)m_hi * A_BYTES_ROW + stripe_byte + 16 + byte_offset);
+                        a0 = *reinterpret_cast<const uint32_t*>(sA + ((size_t)m_lo * A_BYTES_ROW) +
+                                                                stripe_byte + 0 + byte_offset);
+                        a1 = *reinterpret_cast<const uint32_t*>(sA + ((size_t)m_hi * A_BYTES_ROW) +
+                                                                stripe_byte + 0 + byte_offset);
+                        a2 = *reinterpret_cast<const uint32_t*>(sA + ((size_t)m_lo * A_BYTES_ROW) +
+                                                                stripe_byte + 16 + byte_offset);
+                        a3 = *reinterpret_cast<const uint32_t*>(sA + ((size_t)m_hi * A_BYTES_ROW) +
+                                                                stripe_byte + 16 + byte_offset);
 
                         uint32_t b0, b1;
-                        b0 = *reinterpret_cast<const uint32_t*>(
-                            sB + (size_t)n_b * B_BYTES_ROW + stripe_byte +  0 + byte_offset);
-                        b1 = *reinterpret_cast<const uint32_t*>(
-                            sB + (size_t)n_b * B_BYTES_ROW + stripe_byte + 16 + byte_offset);
+                        b0 = *reinterpret_cast<const uint32_t*>(sB + ((size_t)n_b * B_BYTES_ROW) +
+                                                                stripe_byte + 0 + byte_offset);
+                        b1 = *reinterpret_cast<const uint32_t*>(sB + ((size_t)n_b * B_BYTES_ROW) +
+                                                                stripe_byte + 16 + byte_offset);
 
                         uint32_t sfa = *reinterpret_cast<const uint32_t*>(
-                            sSFA + (size_t)(mi * 16 + m_sfa) * SFA_BYTES_ROW + kg_base);
+                            sSFA + ((size_t)((mi * 16) + m_sfa) * SFA_BYTES_ROW) + kg_base);
                         uint32_t sfb = *reinterpret_cast<const uint32_t*>(
-                            sSFB + (size_t)(ni * 8  + n_sfb) * SFB_BYTES_ROW + kg_base);
+                            sSFB + ((size_t)((ni * 8) + n_sfb) * SFB_BYTES_ROW) + kg_base);
 
                         uint32_t a_arr[4] = {a0, a1, a2, a3};
                         uint32_t b_arr[2] = {b0, b1};
@@ -499,9 +499,9 @@ __global__ void smallM_kernel_v1(
             #pragma unroll
             for (int ni_local = 0; ni_local < N_ITERS_PER_CONSUMER; ++ni_local) {
                 const int ni = ni_base + ni_local;
-                const int m0 = mi * 16 + T1;
+                const int m0 = (mi * 16) + T1;
                 const int m1 = m0 + 8;
-                const int n0_local = ni * 8 + T0 * 2;
+                const int n0_local = (ni * 8) + (T0 * 2);
                 const int n1_local = n0_local + 1;
                 const int n0_g = n_base + n0_local;
                 const int n1_g = n_base + n1_local;
@@ -512,13 +512,13 @@ __global__ void smallM_kernel_v1(
                 const float a3_out = acc[mi][ni_local][3] * alpha;
 
                 if (m0 < M_eff && n0_g < N)
-                    D_e[(size_t)m0 * N + n0_g] = __float2half(a0_out);
+                    D_e[((size_t)m0 * N) + n0_g] = __float2half(a0_out);
                 if (m0 < M_eff && n1_g < N)
-                    D_e[(size_t)m0 * N + n1_g] = __float2half(a1_out);
+                    D_e[((size_t)m0 * N) + n1_g] = __float2half(a1_out);
                 if (m1 < M_eff && n0_g < N)
-                    D_e[(size_t)m1 * N + n0_g] = __float2half(a2_out);
+                    D_e[((size_t)m1 * N) + n0_g] = __float2half(a2_out);
                 if (m1 < M_eff && n1_g < N)
-                    D_e[(size_t)m1 * N + n1_g] = __float2half(a3_out);
+                    D_e[((size_t)m1 * N) + n1_g] = __float2half(a3_out);
             }
         }
     }
@@ -646,7 +646,7 @@ int pick_m_tile(int M_e) {
 
 std::vector<WorkItem> build_work_queue(int n_experts, const int* M_per, int N) {
     std::vector<WorkItem> q;
-    q.reserve((size_t)n_experts * (size_t)((N + 127) / 128) + 8);
+    q.reserve(((size_t)n_experts * (size_t)((N + 127) / 128)) + 8);
     for (int e = 0; e < n_experts; ++e) {
         if (M_per[e] <= 0) continue;
         int tm = pick_m_tile(M_per[e]);
@@ -755,24 +755,22 @@ static bool encode_expert_descs(CUtensorMap* descs, int n_experts, const int* ho
         const int M_e = host_M[e];
         if (M_e <= 0) {
             // Dummy descriptor — won't be used.
-            build_tma_2d_u8(&descs[2 * e + 0], s_dummy, 16, 16, TILE_M_rt, TILE_K_rt / 2);
-            build_tma_2d_u8(&descs[2 * e + 1], s_dummy, 16, 16, TILE_N, TILE_K_rt / 2);
+            build_tma_2d_u8(&descs[(2 * e) + 0], s_dummy, 16, 16, TILE_M_rt, TILE_K_rt / 2);
+            build_tma_2d_u8(&descs[(2 * e) + 1], s_dummy, 16, 16, TILE_N, TILE_K_rt / 2);
             continue;
         }
         // A: rows = max(M_e, TILE_M) (pad rows out-of-bounds, OOB filled by TMA)
         // We pass actual M_e — TMA's OOB handling fills with zeros for rows past M_e.
         // gmem_cols = K/2, box_cols = TILE_K/2.
-        if (!build_tma_2d_u8(&descs[2 * e + 0],
-                              const_cast<void*>(host_ptr_A[e]),
-                              /*gmem_rows=*/M_e, /*gmem_cols=*/K / 2,
-                              /*box_rows=*/TILE_M_rt, /*box_cols=*/TILE_K_rt / 2)) {
+        if (!build_tma_2d_u8(&descs[(2 * e) + 0], const_cast<void*>(host_ptr_A[e]),
+                             /*gmem_rows=*/M_e, /*gmem_cols=*/K / 2,
+                             /*box_rows=*/TILE_M_rt, /*box_cols=*/TILE_K_rt / 2)) {
             IMP_LOG_ERROR("[smallM] cuTensorMapEncodeTiled(A) failed (e=%d M=%d K=%d)", e, M_e, K);
             return false;
         }
-        if (!build_tma_2d_u8(&descs[2 * e + 1],
-                              const_cast<void*>(host_ptr_B[e]),
-                              /*gmem_rows=*/N, /*gmem_cols=*/K / 2,
-                              /*box_rows=*/TILE_N, /*box_cols=*/TILE_K_rt / 2)) {
+        if (!build_tma_2d_u8(&descs[(2 * e) + 1], const_cast<void*>(host_ptr_B[e]),
+                             /*gmem_rows=*/N, /*gmem_cols=*/K / 2,
+                             /*box_rows=*/TILE_N, /*box_cols=*/TILE_K_rt / 2)) {
             IMP_LOG_ERROR("[smallM] cuTensorMapEncodeTiled(B) failed (e=%d N=%d K=%d)", e, N, K);
             return false;
         }
@@ -857,7 +855,7 @@ bool gemm_grouped_nvfp4_smallM(
         const int B   = TILE_N * (TK / 2);
         const int SFA = TM * (TK / 16);
         const int SFB = TILE_N * (TK / 16);
-        return NS * (A + B + SFA + SFB) + 128;
+        return (NS * (A + B + SFA + SFB)) + 128;
     };
 
     // One static flag per (TILE_M × TILE_K) variant (8 total).

@@ -201,18 +201,18 @@ bool SSMState::decommit_slot(int slot) {
 
 void* SSMState::conv_state(int seq_id, int ssm_layer_idx) {
     char* base = static_cast<char*>(pool_);
-    return base + seq_id * slot_stride_bytes_ + ssm_layer_idx * per_layer_bytes_;
+    return base + (seq_id * slot_stride_bytes_) + (ssm_layer_idx * per_layer_bytes_);
 }
 
 void* SSMState::h_state(int seq_id, int ssm_layer_idx) {
     char* base = static_cast<char*>(pool_);
-    return base + seq_id * slot_stride_bytes_ + ssm_layer_idx * per_layer_bytes_ + conv_bytes_;
+    return base + (seq_id * slot_stride_bytes_) + (ssm_layer_idx * per_layer_bytes_) + conv_bytes_;
 }
 
 void SSMState::reset_sequence(int seq_id, cudaStream_t stream) {
     if (!pool_ || !slot_committed(seq_id))
         return;
-    char* base = static_cast<char*>(pool_) + seq_id * slot_stride_bytes_;
+    char* base = static_cast<char*>(pool_) + (seq_id * slot_stride_bytes_);
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(base, 0, per_seq_bytes_, stream));
 }
 

@@ -35,7 +35,7 @@ std::string lower(std::string s) {
 // it fails loudly instead of silently scoring garbage.
 bool looks_like_reranker(const std::string& name) {
     const std::string l = lower(name);
-    return l.find("rerank") != std::string::npos;
+    return l.contains("rerank");
 }
 
 // Tokenize `text` and require it to be exactly one token.
@@ -150,8 +150,14 @@ void handle_rerank(const httplib::Request& req, httplib::Response& res, ServerSt
     int total_prompt_tokens = 0;
     const int tok_cap = std::max(state.max_seq_len, 262144);
     for (const auto& doc : documents) {
-        const std::string prompt = std::string(kPrefix) + "<Instruct>: " + instruct + "\n<Query>: " + query +
-                                   "\n<Document>: " + doc + kSuffix;
+        const std::string prompt = std::string(kPrefix)
+                                       .append("<Instruct>: ")
+                                       .append(instruct)
+                                       .append("\n<Query>: ")
+                                       .append(query)
+                                       .append("\n<Document>: ")
+                                       .append(doc)
+                                       .append(kSuffix);
         std::vector<int32_t> tokens(tok_cap);
         int n_tokens = 0;
         if (imp_tokenize(state.model, prompt.c_str(), tokens.data(), &n_tokens, tok_cap) != IMP_SUCCESS ||

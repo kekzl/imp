@@ -109,20 +109,21 @@ void patchify_resized(std::span<const uint8_t* const> temporal, const SmartResiz
         for (int bw = 0; bw < gw / M; ++bw) {
             for (int mh = 0; mh < M; ++mh) {
                 for (int mw = 0; mw < M; ++mw, ++tok) {
-                    const int patch_row = bh * M + mh;
-                    const int patch_col = bw * M + mw;
-                    half* dst = out.data.data() + tok * out.features;
+                    const int patch_row = (bh * M) + mh;
+                    const int patch_col = (bw * M) + mw;
+                    half* dst = out.data.data() + (tok * out.features);
                     for (int c = 0; c < C; ++c) {
                         for (int t = 0; t < T; ++t) {
                             const uint8_t* frame = temporal[static_cast<size_t>(t)];
                             for (int ph = 0; ph < P; ++ph) {
-                                const int y = patch_row * P + ph;
+                                const int y = (patch_row * P) + ph;
                                 for (int pw = 0; pw < P; ++pw) {
-                                    const int x = patch_col * P + pw;
+                                    const int x = (patch_col * P) + pw;
                                     const uint8_t raw =
-                                        frame[(static_cast<size_t>(y) * rs.width + x) * 3 + c];
-                                    const float v = (raw / 255.0f - cfg.mean[c]) / cfg.std[c];
-                                    const size_t idx = ((static_cast<size_t>(c) * T + t) * P + ph) * P + pw;
+                                        frame[(((static_cast<size_t>(y) * rs.width) + x) * 3) + c];
+                                    const float v = ((raw / 255.0f) - cfg.mean[c]) / cfg.std[c];
+                                    const size_t idx = (((((static_cast<size_t>(c) * T) + t) * P) + ph) * P) +
+                                                       pw;
                                     dst[idx] = __float2half(v);
                                 }
                             }
@@ -234,7 +235,7 @@ bool qwen_patchify_video(std::span<const uint8_t* const> frames, int width, int 
     for (size_t g = 0; g < groups; ++g) {
         for (int t = 0; t < T; ++t)
             temporal[static_cast<size_t>(t)] =
-                resized[std::min(g * static_cast<size_t>(T) + static_cast<size_t>(t), frames.size() - 1)]
+                resized[std::min((g * static_cast<size_t>(T)) + static_cast<size_t>(t), frames.size() - 1)]
                     .data();
         patchify_resized(temporal, rs, cfg, out[g]);
     }
@@ -267,9 +268,9 @@ double bicubic_filter(double x) {
     constexpr double a = -0.5;
     x = std::fabs(x);
     if (x < 1.0)
-        return ((a + 2.0) * x - (a + 3.0)) * x * x + 1.0;
+        return ((((a + 2.0) * x) - (a + 3.0)) * x * x) + 1.0;
     if (x < 2.0)
-        return (((x - 5.0) * x + 8.0) * x - 4.0) * a;
+        return (((((x - 5.0) * x) + 8.0) * x) - 4.0) * a;
     return 0.0;
 }
 
@@ -279,7 +280,7 @@ ResampleTaps resample_taps(int in_size, int out_size) {
     const double scale = static_cast<double>(in_size) / out_size;
     const double filterscale = std::max(scale, 1.0);
     const double support = 2.0 * filterscale;
-    t.ksize = static_cast<int>(std::ceil(support)) * 2 + 1;
+    t.ksize = (static_cast<int>(std::ceil(support)) * 2) + 1;
     t.start.resize(static_cast<size_t>(out_size));
     t.count.resize(static_cast<size_t>(out_size));
     t.weights.assign(static_cast<size_t>(out_size) * t.ksize, 0);
@@ -298,8 +299,8 @@ ResampleTaps resample_taps(int in_size, int out_size) {
         }
         for (int x = 0; x < xmax; ++x) {
             const double w = ww != 0.0 ? k[x] / ww : k[x];
-            t.weights[static_cast<size_t>(xx) * t.ksize + x] = static_cast<int32_t>(
-                w * (1 << kPrecisionBits) + (w < 0.0 ? -0.5 : 0.5));
+            t.weights[(static_cast<size_t>(xx) * t.ksize) + x] = static_cast<int32_t>(
+                (w * (1 << kPrecisionBits)) + (w < 0.0 ? -0.5 : 0.5));
         }
         t.start[xx] = xmin;
         t.count[xx] = xmax;
@@ -325,9 +326,10 @@ void pil_resize_bicubic_u8(const uint8_t* in, int w, int h, uint8_t* out, int ow
                 int64_t ss = half;
                 const int32_t* k = &th.weights[static_cast<size_t>(x) * th.ksize];
                 for (int i = 0; i < th.count[x]; ++i)
-                    ss += static_cast<int64_t>(in[(static_cast<size_t>(y) * w + th.start[x] + i) * 3 + c]) *
+                    ss += static_cast<int64_t>(
+                              in[(((static_cast<size_t>(y) * w) + th.start[x] + i) * 3) + c]) *
                           k[i];
-                mid[(static_cast<size_t>(y) * ow + x) * 3 + c] = clip8(ss);
+                mid[(((static_cast<size_t>(y) * ow) + x) * 3) + c] = clip8(ss);
             }
     for (int y = 0; y < oh; ++y)
         for (int x = 0; x < ow; ++x)
@@ -335,7 +337,8 @@ void pil_resize_bicubic_u8(const uint8_t* in, int w, int h, uint8_t* out, int ow
                 int64_t ss = half;
                 const int32_t* k = &tv.weights[static_cast<size_t>(y) * tv.ksize];
                 for (int i = 0; i < tv.count[y]; ++i)
-                    ss += static_cast<int64_t>(mid[(static_cast<size_t>(tv.start[y] + i) * ow + x) * 3 + c]) *
+                    ss += static_cast<int64_t>(
+                              mid[(((static_cast<size_t>(tv.start[y] + i) * ow) + x) * 3) + c]) *
                           k[i];
                 out[(((static_cast<size_t>(y) * ow) + x) * 3) + c] = clip8(ss);
             }
@@ -357,7 +360,7 @@ bool internvl_preprocess(const uint8_t* rgb, int width, int height, const Intern
             for (int y = 0; y < P; ++y)
                 for (int x = 0; x < P; ++x) {
                     const int py = ((pi / side) * P) + y, px = ((pi % side) * P) + x;
-                    const float v = (tile[(((static_cast<size_t>(py) * S) + px) * 3) + c] / 255.0f -
+                    const float v = ((tile[(((static_cast<size_t>(py) * S) + px) * 3) + c] / 255.0f) -
                                      cfg.mean[c]) /
                                     cfg.std[c];
                     patches[(static_cast<size_t>(pi) * features) + (((static_cast<size_t>(c) * P) + y) * P) +

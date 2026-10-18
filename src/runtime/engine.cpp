@@ -465,7 +465,7 @@ void Engine::score_capture_(Request& req, const Tensor& logits, cudaStream_t str
     const int64_t n_rows = logits.ndim >= 2 ? logits.shape[0] : 1;
     const int64_t vocab = logits.ndim >= 2 ? logits.shape[1] : logits.shape[0];
     const float* last_row = static_cast<const float*>(logits.data) +
-                            static_cast<size_t>(n_rows - 1) * static_cast<size_t>(vocab);
+                            (static_cast<size_t>(n_rows - 1) * static_cast<size_t>(vocab));
     req.score_out.assign(req.score_token_ids.size(), 0.0f);
     // One D2H per id: the ids are a handful (yes/no), so a full-row copy would
     // move 600 KB to read 8 bytes.
@@ -846,6 +846,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             cap = std::min(cap, config_.max_seq_len);
         if (!imp::encoder_workspace_init(*ews, *model_, cap, stream_))
             return false;
+        const size_t pool_before = release_on_free_pool_reserved(ReleasePool::Q8Sources);
+        const int dropped = imp::encoder_drop_sources(*model_, stream_);
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream_));
+        IMP_LOG_INFO("encoder: freed %d projection sources (Q8 release pool %.1f -> %.1f MiB)", dropped,
+                     pool_before / 1048576.0,
+                     release_on_free_pool_reserved(ReleasePool::Q8Sources) / 1048576.0);
         encoder_ws_storage_.reset(ews.release());
         IMP_LOG_INFO("Encoder embedder ready (arch=%s, max_tokens=%d, d=%d)",
                      model_arch_name(model_->config_.arch), cap, model_->config_.d_model);

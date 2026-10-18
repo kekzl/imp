@@ -17,16 +17,14 @@
 namespace imp::nvfp4_policy {
 
 [[nodiscard]] inline bool ends_with_(std::string_view s, std::string_view suf) {
-    return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+    return s.size() >= suf.size() && s.ends_with(suf);
 }
 
 [[nodiscard]] inline bool starts_with_(std::string_view s, std::string_view pre) {
-    return s.size() >= pre.size() && s.compare(0, pre.size(), pre) == 0;
+    return s.size() >= pre.size() && s.starts_with(pre);
 }
 
-[[nodiscard]] inline bool contains_(std::string_view s, std::string_view what) {
-    return s.find(what) != std::string_view::npos;
-}
+[[nodiscard]] inline bool contains_(std::string_view s, std::string_view what) { return s.contains(what); }
 
 // Strips the multimodal wrapper prefix, exactly as llm_compressor::translate_name step 3.
 // The ignore list is written against the ON-DISK spelling while the tensor map holds the

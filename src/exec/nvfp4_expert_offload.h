@@ -25,7 +25,7 @@ namespace imp {
 // 16 covers both with room.
 inline constexpr size_t kNvFP4SlotAlign = 16;
 
-inline constexpr size_t nvfp4_align_up(size_t v, size_t a) { return (v + a - 1) / a * a; }
+constexpr size_t nvfp4_align_up(size_t v, size_t a) { return (v + a - 1) / a * a; }
 
 // Byte layout of one cache slot holding a single NVFP4 expert.
 struct NvFP4SlotLayout {
@@ -114,22 +114,22 @@ inline NvFP4ExpertKey parse_expert_key(std::string_view key) {
     for (size_t i = 1; i < dot; ++i) {
         if (key[i] < '0' || key[i] > '9')
             return out;
-        layer = layer * 10 + (key[i] - '0');
+        layer = (layer * 10) + (key[i] - '0');
     }
 
     std::string_view rest = key.substr(dot + 1);
-    if (rest.rfind("expert_w_", 0) != 0)
+    if (!rest.starts_with("expert_w_"))
         return out;
     rest.remove_prefix(9);  // "expert_w_"
 
     NvFP4ExpertKey::Kind kind;
-    if (rest.rfind("gate.", 0) == 0) {
+    if (rest.starts_with("gate.")) {
         kind = NvFP4ExpertKey::Kind::Gate;
         rest.remove_prefix(5);
-    } else if (rest.rfind("up.", 0) == 0) {
+    } else if (rest.starts_with("up.")) {
         kind = NvFP4ExpertKey::Kind::Up;
         rest.remove_prefix(3);
-    } else if (rest.rfind("down.", 0) == 0) {
+    } else if (rest.starts_with("down.")) {
         kind = NvFP4ExpertKey::Kind::Down;
         rest.remove_prefix(5);
     } else {
@@ -142,7 +142,7 @@ inline NvFP4ExpertKey parse_expert_key(std::string_view key) {
     for (char c : rest) {
         if (c < '0' || c > '9')
             return out;
-        expert = expert * 10 + (c - '0');
+        expert = (expert * 10) + (c - '0');
     }
 
     out.valid = true;

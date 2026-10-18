@@ -231,10 +231,10 @@ bool Value::contains(const Value& item) const {
         return false;
     }
     if (is_string() && item.is_string()) {
-        return as_string().find(item.as_string()) != std::string::npos;
+        return as_string().contains(item.as_string());
     }
     if (is_object() && as_object() && item.is_string()) {
-        return as_object()->count(item.as_string()) > 0;
+        return as_object()->contains(item.as_string());
     }
     return false;
 }
@@ -1567,7 +1567,7 @@ private:
                 if (check(TokenType::ASSIGN)) {
                     advance();
                     auto val = parse_expr();
-                    kwargs.push_back({std::move(name), std::move(val)});
+                    kwargs.emplace_back(std::move(name), std::move(val));
                     if (check(TokenType::COMMA)) {
                         advance();
                         continue;
@@ -1597,7 +1597,7 @@ private:
         if (check(TokenType::NUMBER)) {
             auto val = peek().value;
             advance();
-            if (val.find('.') != std::string::npos) {
+            if (val.contains('.')) {
                 double d = 0;
                 std::from_chars(val.data(), val.data() + val.size(), d);
                 return std::make_unique<LiteralExpr>(Value(d));
@@ -1778,12 +1778,12 @@ private:
     // subtraction is done unsigned so INT64_MIN..INT64_MAX cannot overflow.
     static uint64_t range_length(int64_t start, int64_t end, int64_t step) {
         if (step > 0 && end > start)
-            return (static_cast<uint64_t>(end) - static_cast<uint64_t>(start) - 1) /
-                       static_cast<uint64_t>(step) +
+            return ((static_cast<uint64_t>(end) - static_cast<uint64_t>(start) - 1) /
+                    static_cast<uint64_t>(step)) +
                    1;
         if (step < 0 && start > end)
-            return (static_cast<uint64_t>(start) - static_cast<uint64_t>(end) - 1) /
-                       (uint64_t{0} - static_cast<uint64_t>(step)) +
+            return ((static_cast<uint64_t>(start) - static_cast<uint64_t>(end) - 1) /
+                    (uint64_t{0} - static_cast<uint64_t>(step))) +
                    1;
         return 0;
     }
@@ -1805,7 +1805,7 @@ private:
 
     bool is_defined(const std::string& name) const {
         for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
-            if (it->count(name))
+            if (it->contains(name))
                 return true;
         }
         return false;
@@ -2105,7 +2105,7 @@ private:
             return false;
         };
 
-        if (bin.op.size() > 3 && bin.op.substr(0, 3) == "is " && bin.op.substr(3, 4) != "not ") {
+        if (bin.op.size() > 3 && bin.op.starts_with("is ") && bin.op.substr(3, 4) != "not ") {
             std::string test_name = bin.op.substr(3);
             // For "is defined", check variable existence rather than value
             if (test_name == "defined") {
@@ -2126,7 +2126,7 @@ private:
             Value left = eval(*bin.left);
             return Value(eval_type_test(test_name, left));
         }
-        if (bin.op.size() > 7 && bin.op.substr(0, 7) == "is not ") {
+        if (bin.op.size() > 7 && bin.op.starts_with("is not ")) {
             std::string test_name = bin.op.substr(7);
             if (test_name == "defined") {
                 if (auto* var = dynamic_cast<const VariableExpr*>(bin.left.get()))
@@ -2308,7 +2308,7 @@ private:
             if (val.is_string()) {
                 Value::Array arr;
                 for (char c : val.as_string())
-                    arr.push_back(Value(std::string(1, c)));
+                    arr.emplace_back(std::string(1, c));
                 return Value(std::move(arr));
             }
             return Value(Value::Array{});
@@ -2319,9 +2319,9 @@ private:
                 Value::Array arr;
                 for (auto& [k, v] : *val.as_object()) {
                     Value::Array pair;
-                    pair.push_back(Value(k));
+                    pair.emplace_back(k);
                     pair.push_back(v);
-                    arr.push_back(Value(std::move(pair)));
+                    arr.emplace_back(std::move(pair));
                 }
                 return Value(std::move(arr));
             }
@@ -2486,14 +2486,14 @@ private:
                     throw EvalBudgetExceeded("range length exceeds " + std::to_string(kMaxLoopIterations));
                 if (call.args.size() == 1) {
                     for (int64_t i = 0; i < end; i++)
-                        arr.push_back(Value(i));
+                        arr.emplace_back(i);
                 } else if (call.args.size() >= 2) {
                     if (step > 0) {
                         for (int64_t i = start; i < end; i += step)
-                            arr.push_back(Value(i));
+                            arr.emplace_back(i);
                     } else if (step < 0) {
                         for (int64_t i = start; i > end; i += step)
-                            arr.push_back(Value(i));
+                            arr.emplace_back(i);
                     }
                 }
                 return Value(std::move(arr));
@@ -2563,7 +2563,7 @@ private:
                     while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start])))
                         start++;
                 } else {
-                    while (start < s.size() && chars.find(s[start]) != std::string::npos)
+                    while (start < s.size() && chars.contains(s[start]))
                         start++;
                 }
                 size_t end = s.size();
@@ -2571,7 +2571,7 @@ private:
                     while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1])))
                         end--;
                 } else {
-                    while (end > start && chars.find(s[end - 1]) != std::string::npos)
+                    while (end > start && chars.contains(s[end - 1]))
                         end--;
                 }
                 return Value(s.substr(start, end - start));
@@ -2585,7 +2585,7 @@ private:
                     while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start])))
                         start++;
                 } else {
-                    while (start < s.size() && chars.find(s[start]) != std::string::npos)
+                    while (start < s.size() && chars.contains(s[start]))
                         start++;
                 }
                 return Value(s.substr(start));
@@ -2599,7 +2599,7 @@ private:
                     while (end > 0 && std::isspace(static_cast<unsigned char>(s[end - 1])))
                         end--;
                 } else {
-                    while (end > 0 && chars.find(s[end - 1]) != std::string::npos)
+                    while (end > 0 && chars.contains(s[end - 1]))
                         end--;
                 }
                 return Value(s.substr(0, end));
@@ -2608,14 +2608,13 @@ private:
                 if (m.args.empty())
                     return Value(false);
                 std::string prefix = eval(*m.args[0]).to_string();
-                return Value(s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0);
+                return Value(s.size() >= prefix.size() && s.starts_with(prefix));
             }
             if (m.method == "endswith") {
                 if (m.args.empty())
                     return Value(false);
                 std::string suffix = eval(*m.args[0]).to_string();
-                return Value(s.size() >= suffix.size() &&
-                             s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0);
+                return Value(s.size() >= suffix.size() && s.ends_with(suffix));
             }
             if (m.method == "upper") {
                 std::string r = s;
@@ -2651,7 +2650,7 @@ private:
                     std::istringstream iss(s);
                     std::string word;
                     while (iss >> word)
-                        arr.push_back(Value(std::move(word)));
+                        arr.emplace_back(std::move(word));
                 } else {
                     std::string sep = eval(*m.args[0]).to_string();
                     if (sep.empty()) {
@@ -2661,10 +2660,10 @@ private:
                         while (true) {
                             size_t pos = s.find(sep, start);
                             if (pos == std::string::npos) {
-                                arr.push_back(Value(s.substr(start)));
+                                arr.emplace_back(s.substr(start));
                                 break;
                             }
-                            arr.push_back(Value(s.substr(start, pos - start)));
+                            arr.emplace_back(s.substr(start, pos - start));
                             start = pos + sep.size();
                         }
                     }
@@ -2711,10 +2710,8 @@ private:
                 Value::Array arr = obj.as_array();
                 if (m.args.size() >= 2) {
                     int64_t idx = eval(*m.args[0]).as_int();
-                    if (idx < 0)
-                        idx = 0;
-                    if (idx > static_cast<int64_t>(arr.size()))
-                        idx = static_cast<int64_t>(arr.size());
+                    idx = std::max<int64_t>(idx, 0);
+                    idx = std::min(idx, static_cast<int64_t>(arr.size()));
                     arr.insert(arr.begin() + idx, eval(*m.args[1]));
                 }
                 return Value(std::move(arr));
@@ -2727,9 +2724,9 @@ private:
                 Value::Array arr;
                 for (auto& [k, v] : *obj.as_object()) {
                     Value::Array pair;
-                    pair.push_back(Value(k));
+                    pair.emplace_back(k);
                     pair.push_back(v);
-                    arr.push_back(Value(std::move(pair)));
+                    arr.emplace_back(std::move(pair));
                 }
                 return Value(std::move(arr));
             }
@@ -2737,7 +2734,7 @@ private:
                 Value::Array arr;
                 for (auto& [k, v] : *obj.as_object()) {
                     (void)v;
-                    arr.push_back(Value(k));
+                    arr.emplace_back(k);
                 }
                 return Value(std::move(arr));
             }
@@ -2804,21 +2801,15 @@ private:
 
         // Clamp
         if (step > 0) {
-            if (start < 0)
-                start = 0;
-            if (start > len)
-                start = len;
-            if (stop < 0)
-                stop = 0;
-            if (stop > len)
-                stop = len;
+            start = std::max<int64_t>(start, 0);
+            start = std::min(start, len);
+            stop = std::max<int64_t>(stop, 0);
+            stop = std::min(stop, len);
         } else {
-            if (start < -1)
-                start = -1;
+            start = std::max<int64_t>(start, -1);
             if (start >= len)
                 start = len - 1;
-            if (stop < -1)
-                stop = -1;
+            stop = std::max<int64_t>(stop, -1);
             if (stop >= len)
                 stop = len - 1;
         }
@@ -2868,8 +2859,7 @@ private:
             std::snprintf(buf, sizeof(buf), "%g", val.as_double());
             // Ensure it looks like a number (has decimal or exponent)
             std::string s(buf);
-            if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
-                s.find('E') == std::string::npos)
+            if (!s.contains('.') && !s.contains('e') && !s.contains('E'))
                 s += ".0";
             return s;
         }

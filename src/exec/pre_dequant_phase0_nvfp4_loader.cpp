@@ -207,7 +207,7 @@ Tensor* resolve_nvfp4_scratch_key(Model& model, int n_layers, const std::string&
         return nullptr;
     auto& L = model.layers_[idx];
     std::string slot = key.substr(dot + 1);
-    return slot.rfind("expert_w_", 0) == 0 ? resolve_expert_slot(L, slot) : resolve_layer_slot(L, slot);
+    return slot.starts_with("expert_w_") ? resolve_expert_slot(L, slot) : resolve_layer_slot(L, slot);
 }
 
 void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
@@ -412,11 +412,11 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                     L.wk.qtype = QType::NVFP4;
                     L.wk.tensor_scale = L.wq.tensor_scale;
                     L.wk.scales = static_cast<char*>(L.wq.scales) +
-                                  static_cast<size_t>(q_rows) * scale_row_bytes;
+                                  (static_cast<size_t>(q_rows) * scale_row_bytes);
                     L.wv.qtype = QType::NVFP4;
                     L.wv.tensor_scale = L.wq.tensor_scale;
                     L.wv.scales = static_cast<char*>(L.wq.scales) +
-                                  static_cast<size_t>(q_rows + kv_rows) * scale_row_bytes;
+                                  (static_cast<size_t>(q_rows + kv_rows) * scale_row_bytes);
                     arm_qkv[i] = 1;
                     n_qkv_split++;
                 }
@@ -445,7 +445,7 @@ void QuantPipeline::pre_dequant_phase0_promote_nvfp4_sidecars_(
                     L.w_up.qtype = QType::NVFP4;
                     L.w_up.tensor_scale = L.w_gate.tensor_scale;
                     L.w_up.scales = static_cast<char*>(L.w_gate.scales) +
-                                    static_cast<size_t>(r.base_rows) * scale_row_bytes;
+                                    (static_cast<size_t>(r.base_rows) * scale_row_bytes);
                     arm_gate_up[i] = 1;
                     n_gateup_split++;
                 }
@@ -588,7 +588,7 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
             // MoE experts are served by the expert cache instead (exec/nvfp4_expert_offload.h).
             if (!w.on_device)
                 return;
-            if (wcache_->nvfp4.count(w.data))
+            if (wcache_->nvfp4.contains(w.data))
                 return;
             NvFP4QuantResult tmp;
             tmp.packed_data = w.data;
@@ -644,11 +644,11 @@ void QuantPipeline::pre_dequant_phase0b_register_cutlass_nvfp4_(
                 const auto& L = mut_model->layer(i);
                 if (L.ssm_in.data) {
                     n_ssm++;
-                    n_ssm_cached += wcache_->nvfp4.count(L.ssm_in.data) ? 1 : 0;
+                    n_ssm_cached += wcache_->nvfp4.contains(L.ssm_in.data) ? 1 : 0;
                 }
                 if (L.ssm_out.data) {
                     n_ssm++;
-                    n_ssm_cached += wcache_->nvfp4.count(L.ssm_out.data) ? 1 : 0;
+                    n_ssm_cached += wcache_->nvfp4.contains(L.ssm_out.data) ? 1 : 0;
                 }
             }
             if (n_ssm > 0)

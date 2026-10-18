@@ -11,6 +11,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <cstdint>
 #include <cfloat>
 #include <cassert>
@@ -86,7 +87,7 @@ __global__ void nvfp4_moe_native_quant_kernel(
 
         // Load 16 FP16 values via vectorized half2 loads.
         const half2* src_h2 = reinterpret_cast<const half2*>(
-            src + (int64_t)(M0 + m) * K + static_cast<ptrdiff_t>(kb * kNativeMicroBlockSize));
+            src + ((int64_t)(M0 + m) * K) + static_cast<ptrdiff_t>(kb * kNativeMicroBlockSize));
 
         float vals[kNativeMicroBlockSize];
         float local_absmax = 0.0f;
@@ -94,18 +95,16 @@ __global__ void nvfp4_moe_native_quant_kernel(
         for (int i = 0; i < kNativeMicroBlockSize / 2; i++) {
             half2 h2 = src_h2[i];
             vals[static_cast<ptrdiff_t>(i * 2)] = __half2float(h2.x);
-            vals[i * 2 + 1] = __half2float(h2.y);
+            vals[(i * 2) + 1] = __half2float(h2.y);
             local_absmax = fmaxf(local_absmax,
-                                 fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[i * 2 + 1])));
+                                 fmaxf(fabsf(vals[static_cast<ptrdiff_t>(i * 2)]), fabsf(vals[(i * 2) + 1])));
         }
 
         // Micro-scale — same formula and clamping as quantize_micro_block_nvfp4.
         constexpr float kFP8E4M3Max = 448.0f;
         float micro_scale_f = local_absmax / (tensor_scale * kNativeFP4E2M1Max);
-        if (micro_scale_f < (1.0f / 512.0f))
-            micro_scale_f = 1.0f / 512.0f;
-        if (micro_scale_f > kFP8E4M3Max)
-            micro_scale_f = kFP8E4M3Max;
+        micro_scale_f = std::max(micro_scale_f, 1.0f / 512.0f);
+        micro_scale_f = std::min(micro_scale_f, kFP8E4M3Max);
 
         uint8_t ue4m3 = float_to_fp8_e4m3(micro_scale_f);
 
@@ -115,12 +114,12 @@ __global__ void nvfp4_moe_native_quant_kernel(
             actual_scale = 1.0f / 512.0f;
 
         // Write UE4M3 scale — native row-major: sf[m * K_blocks + kb]
-        sf_e[m * K_blocks + kb] = ue4m3;
+        sf_e[(m * K_blocks) + kb] = ue4m3;
 
         // Quantize 16 FP16 -> 8 packed bytes — native row-major:
         // packed[m * (K/2) + kb * 8 + byte_idx]
         float inv_combined = 1.0f / (tensor_scale * actual_scale);
-        uint8_t* packed_at = packed_e + (int64_t)m * (K / 2) +
+        uint8_t* packed_at = packed_e + ((int64_t)m * (K / 2)) +
                              static_cast<ptrdiff_t>(kb * (kNativeMicroBlockSize / 2));
 #pragma unroll
         for (int i = 0; i < kNativeMicroBlockSize; i += 2) {
@@ -133,7 +132,7 @@ __global__ void nvfp4_moe_native_quant_kernel(
 
 // Per-expert activation tensor scales for the smallM alpha: the fixed kNativeActTensorScale.
 __global__ void nvfp4_moe_native_fill_scales_kernel(float* __restrict__ d_tensor_scales, int n_experts) {
-    int e = blockIdx.x * blockDim.x + threadIdx.x;
+    int e = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (e < n_experts)
         d_tensor_scales[e] = kNativeActTensorScale;
 }
@@ -229,7 +228,7 @@ __global__ void moe_alpha_mul_kernel(
     float* __restrict__ d_out,
     int n)
 {
-    int e = blockIdx.x * blockDim.x + threadIdx.x;
+    int e = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (e < n)
         d_out[e] = d_act[e] * d_weight[e];
 }
@@ -256,7 +255,7 @@ __global__ void moe_compute_M_per_kernel(
     int32_t* __restrict__ d_M_per_out,
     int n_experts)
 {
-    int e = blockIdx.x * blockDim.x + threadIdx.x;
+    int e = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (e < n_experts)
         d_M_per_out[e] = d_offsets[e + 1] - d_offsets[e];
 }
@@ -432,7 +431,7 @@ __global__ void bzero_sfa_active_kernel(
     const int64_t total = (n_experts > 0) ? d_sfa_offsets[n_experts] : 0;
     const int64_t bound = (total < max_bytes) ? total : max_bytes;
 
-    const int64_t tid     = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
+    const int64_t tid = (blockIdx.x * (int64_t)blockDim.x) + threadIdx.x;
     const int64_t stride  = (int64_t)gridDim.x * blockDim.x;
 
     // Vectorized 16-byte stores
@@ -465,8 +464,8 @@ void bzero_sfa_active(
     constexpr int kThreads = 256;
     const int64_t vec_max = static_cast<int64_t>(max_bytes >> 4);
     int64_t blocks_needed = (vec_max + kThreads - 1) / kThreads;
-    if (blocks_needed < 1) blocks_needed = 1;
-    if (blocks_needed > 4096) blocks_needed = 4096;  // cap grid
+    blocks_needed = std::max<int64_t>(blocks_needed, 1);
+    blocks_needed = std::min<int64_t>(blocks_needed, 4096);  // cap grid
     bzero_sfa_active_kernel<<<static_cast<int>(blocks_needed), kThreads, 0, stream>>>(
         static_cast<uint8_t*>(dst), d_sfa_offsets, n_experts,
         static_cast<int64_t>(max_bytes));

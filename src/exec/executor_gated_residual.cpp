@@ -67,7 +67,7 @@ bool GraphExecutor::hc_alloc_(int max_tokens) {
     if (ok)
         IMP_LOG_INFO("gated residual: hc=%d lowrank=%d, %d streams x %d wide, %.1f MiB for %d tokens", hc,
                      cfg.hc_lowrank, hc, d,
-                     (3.0 * hc * d + cfg.hc_lowrank + hc + 1.0 * d) * max_tokens * es / (1024.0 * 1024.0),
+                     ((3.0 * hc * d) + cfg.hc_lowrank + hc + (1.0 * d)) * max_tokens * es / (1024.0 * 1024.0),
                      max_tokens);
     return ok;
 }

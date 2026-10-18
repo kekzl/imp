@@ -98,7 +98,7 @@ void HostFileMap::load(const std::string* maps_text) {
         std::string path = line.substr(static_cast<size_t>(n));
         while (!path.empty() && (path.back() == ' ' || path.back() == '\n'))
             path.pop_back();
-        if (path.empty() || path[0] != '/' || path.find(" (deleted)") != std::string::npos)
+        if (path.empty() || path[0] != '/' || path.contains(" (deleted)"))
             continue;
         regions_.push_back(
             Region{static_cast<uintptr_t>(s), static_cast<uintptr_t>(e), off, std::move(path)});
@@ -134,11 +134,11 @@ HostFileSource HostFileMap::resolve(const void* p) {
 
 namespace {
 size_t packed_region(size_t unit_bytes_total, size_t ms_region) { return unit_bytes_total - ms_region; }
-size_t ms_region_bytes(size_t ms_bytes) { return round_up(ms_bytes, kAlign) + 2 * kAlign; }
+size_t ms_region_bytes(size_t ms_bytes) { return round_up(ms_bytes, kAlign) + (2 * kAlign); }
 }  // namespace
 
 size_t HostExpertTier::unit_bytes(size_t packed_bytes, size_t ms_bytes) {
-    return round_up(packed_bytes, kAlign) + 2 * kAlign + ms_region_bytes(ms_bytes);
+    return round_up(packed_bytes, kAlign) + (2 * kAlign) + ms_region_bytes(ms_bytes);
 }
 
 HostExpertTier::HostExpertTier(char* host, char* dev, size_t bytes, size_t unit, int n_keys, int io_threads,
@@ -206,7 +206,7 @@ void HostExpertTier::touch_(int u) {
 
 void HostExpertTier::load_(int u, int key) {
     const Src& s = src_[key];
-    char* base = host_ + static_cast<size_t>(u) * unit_;
+    char* base = host_ + (static_cast<size_t>(u) * unit_);
     const size_t ms_reg = ms_region_bytes(s.ms_bytes);
     const size_t pk_reg = packed_region(unit_, ms_reg);
     bool d0 = false, d1 = false;
@@ -331,7 +331,7 @@ bool HostExpertTier::exchange(const int* in_keys, int n, UnitView* src, const in
         const size_t pk_reg = packed_region(unit_, ms_region_bytes(src_[k].ms_bytes));
         packed_off_[u] = 0;
         ms_off_[u] = static_cast<uint32_t>(pk_reg);
-        char* base = dev_ + static_cast<size_t>(u) * unit_;
+        char* base = dev_ + (static_cast<size_t>(u) * unit_);
         wb[i] = MutView{base, base + pk_reg};
         ++stats_.writebacks;
     }

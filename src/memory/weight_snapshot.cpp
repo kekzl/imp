@@ -134,7 +134,7 @@ size_t parse_meminfo_field(std::string_view meminfo_text, std::string_view key) 
     size_t kb = 0;
     bool any = false;
     while (p < end && *p >= '0' && *p <= '9') {
-        kb = kb * 10 + static_cast<size_t>(*p - '0');
+        kb = (kb * 10) + static_cast<size_t>(*p - '0');
         ++p;
         any = true;
     }
@@ -151,13 +151,13 @@ size_t parse_meminfo_total(std::string_view meminfo_text) {
 }
 
 size_t parse_cgroup_limit(std::string_view limit_text) {
-    if (limit_text.find("max") != std::string_view::npos)
+    if (limit_text.contains("max"))
         return 0;  // cgroup v2 "no limit"
     size_t v = 0;
     bool any = false;
     for (const char c : limit_text) {
         if (c >= '0' && c <= '9') {
-            v = v * 10 + static_cast<size_t>(c - '0');
+            v = (v * 10) + static_cast<size_t>(c - '0');
             any = true;
         } else if (any) {
             break;
@@ -178,7 +178,7 @@ size_t parse_cgroup_headroom(std::string_view limit_text, std::string_view curre
         bool any = false;
         for (char c : s) {
             if (c >= '0' && c <= '9') {
-                v = v * 10 + static_cast<size_t>(c - '0');
+                v = (v * 10) + static_cast<size_t>(c - '0');
                 any = true;
             } else if (any) {
                 break;
@@ -201,7 +201,7 @@ size_t parse_cgroup_headroom(std::string_view limit_text, std::string_view curre
     };
     // cgroup v2 writes the literal "max" for "no limit"; v1 writes a number so large it
     // means the same. Either way there is no cgroup ceiling to report.
-    if (limit_text.find("max") != std::string_view::npos)
+    if (limit_text.contains("max"))
         return 0;
     const size_t limit = number(limit_text);
     if (limit == 0 || limit >= (1ULL << 50))

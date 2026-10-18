@@ -60,7 +60,7 @@ void cmyk_inverted_to_rgb(const uint8_t* in, uint8_t* out, int n) {
     for (int i = 0; i < n; ++i, in += 4, out += 3) {
         const int nk = in[3];
         for (int ch = 0; ch < 3; ++ch) {
-            const int t = (255 - in[ch]) * nk + 128;
+            const int t = ((255 - in[ch]) * nk) + 128;
             const int v = nk - (((t >> 8) + t) >> 8);
             out[ch] = static_cast<uint8_t>(v < 0 ? 0 : v);
         }
@@ -107,7 +107,7 @@ bool decode_jpeg(std::span<const uint8_t> data, DecodedImage& out, std::vector<u
     if (cmyk)
         cmyk_row.resize(static_cast<size_t>(out.width) * 4);
     while (c.output_scanline < c.output_height) {
-        uint8_t* dst = out.rgb.data() + static_cast<size_t>(c.output_scanline) * row;
+        uint8_t* dst = out.rgb.data() + (static_cast<size_t>(c.output_scanline) * row);
         JSAMPROW r = cmyk ? cmyk_row.data() : dst;
         if (jpeg_read_scanlines(&c, &r, 1) != 1)
             break;
@@ -150,7 +150,7 @@ bool decode_image(std::span<const uint8_t> data, DecodedImage& out) {
     }
     out.width = w;
     out.height = h;
-    out.rgb.assign(px, px + static_cast<size_t>(w) * static_cast<size_t>(h) * 3);
+    out.rgb.assign(px, px + (static_cast<size_t>(w) * static_cast<size_t>(h) * 3));
     stbi_image_free(px);
     return true;
 }

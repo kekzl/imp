@@ -108,7 +108,7 @@ __global__ void causal_softmax_fp32_to_fp16_kernel(const float* __restrict__ S_i
     int row = blockIdx.x, head = blockIdx.y, tid = threadIdx.x;
     int warp_id = tid / 32, lane_id = tid % 32;
     int n_warps = (blockDim.x + 31) / 32;
-    int64_t row_base = (static_cast<int64_t>(head) * q_len + row) * kv_len;
+    int64_t row_base = ((static_cast<int64_t>(head) * q_len) + row) * kv_len;
     const float* row_in = S_in + row_base;
     half* row_out = S_out + row_base;
     int abs_row = q_offset + row;
@@ -184,7 +184,7 @@ __global__ void causal_softmax_inplace_kernel(half* __restrict__ S, int q_len, i
     int lane_id = tid % 32;
     int n_warps = (blockDim.x + 31) / 32;
 
-    half* row_ptr = S + (static_cast<int64_t>(head) * q_len + row) * kv_len;
+    half* row_ptr = S + (((static_cast<int64_t>(head) * q_len) + row) * kv_len);
     int abs_row = q_offset + row;
     auto masked = [abs_row, causal, sliding_window](int j) {
         if (causal && j > abs_row) return true;
@@ -278,7 +278,7 @@ __global__ void causal_softmax_inplace_kernel(half* __restrict__ S, int q_len, i
 
 // Softcap: S[i] = softcap*tanh(S[i]/softcap), in-place on FP16 S between GEMM and softmax.
 __global__ void softcap_fp16_kernel(half* S, int64_t n, float softcap) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx < n) {
         float val = __half2float(S[idx]);
         val = softcap * tanhf(val / softcap);
@@ -290,7 +290,7 @@ __global__ void softcap_fp16_kernel(half* S, int64_t n, float softcap) {
 // FP32 softmax reads them directly, so softcap must be applied to the float
 // buffer here (Gemma-2 attn_logit_softcap=50 was silently dropped on this path).
 __global__ void softcap_fp32_kernel(float* S, int64_t n, float softcap) {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
     if (idx < n) {
         float val = S[idx];
         S[idx] = softcap * tanhf(val / softcap);
@@ -341,13 +341,13 @@ __global__ void build_attn_ptr_arrays_kernel(const void** d_A, const void** d_B,
                                               const char* base_B, int64_t stride_B_bytes,
                                               char* base_C, int64_t stride_C_bytes, int gqa_ratio,
                                               int n_heads) {
-    int h = blockIdx.x * blockDim.x + threadIdx.x;
+    int h = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (h >= n_heads)
         return;
     int g = h / gqa_ratio;
-    d_A[h] = base_A + g * stride_A_bytes;
-    d_B[h] = base_B + h * stride_B_bytes;
-    d_C[h] = base_C + h * stride_C_bytes;
+    d_A[h] = base_A + (g * stride_A_bytes);
+    d_B[h] = base_B + (h * stride_B_bytes);
+    d_C[h] = base_C + (h * stride_C_bytes);
 }
 
 static inline void launch_build_attn_ptrs(void** d_ptrs, int n_heads, const void* base_A,
@@ -359,7 +359,7 @@ static inline void launch_build_attn_ptrs(void** d_ptrs, int n_heads, const void
     int grid = (n_heads + block - 1) / block;
     build_attn_ptr_arrays_kernel<<<grid, block, 0, stream>>>(
         const_cast<const void**>(d_ptrs), const_cast<const void**>(d_ptrs + n_heads),
-        d_ptrs + static_cast<ptrdiff_t>(2) * n_heads, reinterpret_cast<const char*>(base_A), stride_A_bytes,
+        d_ptrs + (static_cast<ptrdiff_t>(2) * n_heads), reinterpret_cast<const char*>(base_A), stride_A_bytes,
         reinterpret_cast<const char*>(base_B), stride_B_bytes, reinterpret_cast<char*>(base_C),
         stride_C_bytes, gqa_ratio, n_heads);
     IMP_CUDA_CHECK_LAUNCH();
@@ -416,7 +416,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
     float* S_f32 = use_fp32_s ? reinterpret_cast<float*>(S.data) : nullptr;
     // FP16 probabilities: non-overlapping with the FP32 scores on the FP32-S
     // path; identical to S_base on the FP16-S path (in-place, safe).
-    half* S_prob = use_fp32_s ? (S_base + 2 * s_fp32_elems) : S_base;
+    half* S_prob = use_fp32_s ? (S_base + (2 * s_fp32_elems)) : S_base;
 
     if (gqa_ratio == 1) {
         // ---------------------------------------------------------------
@@ -451,8 +451,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
         // Softmax (FP32 or FP16)
         {
             int threads = (kv_len <= 128) ? 128 : ((kv_len <= 256) ? 256 : 512);
-            if (threads > 1024)
-                threads = 1024;
+            threads = std::min(threads, 1024);
             dim3 grid(q_len, n_heads);
             if (use_fp32_s) {
                 // Fused FP32 softmax + downcast: reads FP32 scores, writes FP16
@@ -491,7 +490,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
         IMP_CUBLAS_CHECK_LOG(cublasGemmBatchedEx(
             handle, CUBLAS_OP_T, CUBLAS_OP_N, kv_len, q_len, head_dim, &alpha_f, (const void**)s_attn_d_ptrs,
             CUDA_R_16F, ld_k, (const void**)(s_attn_d_ptrs + n_heads), CUDA_R_16F, ld_q, &beta_f,
-            (void**)(s_attn_d_ptrs + static_cast<ptrdiff_t>(2) * n_heads),
+            (void**)(s_attn_d_ptrs + (static_cast<ptrdiff_t>(2) * n_heads)),
             use_fp32_s ? CUDA_R_32F : CUDA_R_16F, ld_s, n_heads, CUBLAS_COMPUTE_32F, cublas_gemm_algo()));
 
         // Softcap (if enabled): applied to S_f32 on the use_fp32_s path, else S_base
@@ -512,8 +511,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
         // Softmax
         {
             int threads = (kv_len <= 128) ? 128 : ((kv_len <= 256) ? 256 : 512);
-            if (threads > 1024)
-                threads = 1024;
+            threads = std::min(threads, 1024);
             dim3 grid(q_len, n_heads);
             if (use_fp32_s) {
                 // Fused FP32 softmax + downcast (see MHA path above).
@@ -538,7 +536,7 @@ void attention_cublas_prefill(const Tensor& Q, const Tensor& K, const Tensor& V,
             cublasGemmBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_dim, q_len, kv_len, &one_f,
                                 (const void**)s_attn_d_ptrs, CUDA_R_16F, ld_k,
                                 (const void**)(s_attn_d_ptrs + n_heads), CUDA_R_16F, ld_s, &zero_f,
-                                (void**)(s_attn_d_ptrs + static_cast<ptrdiff_t>(2) * n_heads), CUDA_R_16F,
+                                (void**)(s_attn_d_ptrs + (static_cast<ptrdiff_t>(2) * n_heads)), CUDA_R_16F,
                                 ld_o, n_heads, CUBLAS_COMPUTE_32F, cublas_gemm_algo()));
     }
 }
@@ -567,8 +565,8 @@ bool attention_cublas_prefill_sliced(const Tensor& Q, const Tensor& K, const Ten
     for (int off = 0; off < n; off += ns) {
         const int m = std::min(ns, n - off);
         int64_t q2[2] = {m, row};
-        Tensor Qs(const_cast<half*>(Q_base) + off * row, QType::F16, 2, q2, true);
-        Tensor Os(O_base + off * row, QType::F16, 2, q2, true);
+        Tensor Qs(const_cast<half*>(Q_base) + (off * row), QType::F16, 2, q2, true);
+        Tensor Os(O_base + (off * row), QType::F16, 2, q2, true);
         attention_cublas_prefill(Qs, K, V, Os, S, n_heads, n_kv_heads, head_dim, scale, causal, softcap,
                                  q_offset + off, stream, sliding_window, sinks);
     }

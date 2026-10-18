@@ -60,7 +60,7 @@ __device__ __forceinline__ void async_load_tile_mw(int tid, const int8_t* X_s8,
     {
         const int row_in_tile = tid >> 1;      // 0..63
         const int col_off = (tid & 1) * 16;    // 0 or 16
-        const int8_t* src = X_s8 + static_cast<int64_t>(base_m + row_in_tile) * K + k_base + col_off;
+        const int8_t* src = X_s8 + (static_cast<int64_t>(base_m + row_in_tile) * K) + k_base + col_off;
         int8_t* dst = &sA[row_in_tile][col_off];
         cp_async_ca_16(dst, src);
     }
@@ -68,7 +68,7 @@ __device__ __forceinline__ void async_load_tile_mw(int tid, const int8_t* X_s8,
     {
         const int row_in_tile = tid >> 2;      // 0..31
         const int col_off = (tid & 3) * 8;     // 0, 8, 16, 24
-        const int8_t* src = W_s8 + static_cast<int64_t>(base_n + row_in_tile) * K + k_base + col_off;
+        const int8_t* src = W_s8 + (static_cast<int64_t>(base_n + row_in_tile) * K) + k_base + col_off;
         int8_t* dst = &sB[row_in_tile][col_off];
         cp_async_ca_8(dst, src);
     }
@@ -133,7 +133,7 @@ __global__ void mmq_q4k_imma_tile_kernel(const int8_t* __restrict__ X_s8,
         // -------- 4 MMAs per warp per K-block: wrm × wrn = 2 × 2 --------
 #pragma unroll
         for (int wrm = 0; wrm < kWRM; ++wrm) {
-            const int sub_origin_m = warp_origin_m + wrm * 16;
+            const int sub_origin_m = warp_origin_m + (wrm * 16);
             const int a_row_lo = sub_origin_m + (lane >> 2);
             const int a_row_hi = a_row_lo + 8;
             const int a_col_base = (lane & 3) * 4;
@@ -146,7 +146,7 @@ __global__ void mmq_q4k_imma_tile_kernel(const int8_t* __restrict__ X_s8,
 
 #pragma unroll
             for (int wrn = 0; wrn < kWRN; ++wrn) {
-                const int sub_origin_n = warp_origin_n + wrn * 8;
+                const int sub_origin_n = warp_origin_n + (wrn * 8);
                 const int b_col = sub_origin_n + (lane >> 2);
                 const int b_k_base = (lane & 3) * 4;
                 uint32_t b0 = *reinterpret_cast<const uint32_t*>(&sB[stage][b_col][b_k_base]);
@@ -164,7 +164,7 @@ __global__ void mmq_q4k_imma_tile_kernel(const int8_t* __restrict__ X_s8,
                 // -------- Per-sub-block scale apply for this (wrm, wrn) MMA --------
                 const int row_lo = sub_origin_m + ((lane >> 2) & 7);
                 const int row_hi = row_lo + 8;
-                const int col_lo = sub_origin_n + (lane & 3) * 2;
+                const int col_lo = sub_origin_n + ((lane & 3) * 2);
                 const int col_hi = col_lo + 1;
 
                 const int m_lo = base_m + row_lo;
@@ -172,20 +172,20 @@ __global__ void mmq_q4k_imma_tile_kernel(const int8_t* __restrict__ X_s8,
                 const int n_lo = base_n + col_lo;
                 const int n_hi = base_n + col_hi;
 
-                const float xs_lo = __half2float(x_scale[m_lo * subs_per_row + kb]);
-                const float xs_hi = __half2float(x_scale[m_hi * subs_per_row + kb]);
-                const float xrs_lo = x_rowsum[m_lo * subs_per_row + kb];
-                const float xrs_hi = x_rowsum[m_hi * subs_per_row + kb];
+                const float xs_lo = __half2float(x_scale[(m_lo * subs_per_row) + kb]);
+                const float xs_hi = __half2float(x_scale[(m_hi * subs_per_row) + kb]);
+                const float xrs_lo = x_rowsum[(m_lo * subs_per_row) + kb];
+                const float xrs_hi = x_rowsum[(m_hi * subs_per_row) + kb];
 
-                const float a_lo = __half2float(eff_alpha[n_lo * subs_per_row + kb]);
-                const float a_hi = __half2float(eff_alpha[n_hi * subs_per_row + kb]);
-                const float b_lo = __half2float(eff_beta[n_lo * subs_per_row + kb]);
-                const float b_hi = __half2float(eff_beta[n_hi * subs_per_row + kb]);
+                const float a_lo = __half2float(eff_alpha[(n_lo * subs_per_row) + kb]);
+                const float a_hi = __half2float(eff_alpha[(n_hi * subs_per_row) + kb]);
+                const float b_lo = __half2float(eff_beta[(n_lo * subs_per_row) + kb]);
+                const float b_hi = __half2float(eff_beta[(n_hi * subs_per_row) + kb]);
 
-                c_f32[wrm][wrn][0] += xs_lo * (a_lo * static_cast<float>(c0) + b_lo * xrs_lo);
-                c_f32[wrm][wrn][1] += xs_lo * (a_hi * static_cast<float>(c1) + b_hi * xrs_lo);
-                c_f32[wrm][wrn][2] += xs_hi * (a_lo * static_cast<float>(c2) + b_lo * xrs_hi);
-                c_f32[wrm][wrn][3] += xs_hi * (a_hi * static_cast<float>(c3) + b_hi * xrs_hi);
+                c_f32[wrm][wrn][0] += xs_lo * ((a_lo * static_cast<float>(c0)) + (b_lo * xrs_lo));
+                c_f32[wrm][wrn][1] += xs_lo * ((a_hi * static_cast<float>(c1)) + (b_hi * xrs_lo));
+                c_f32[wrm][wrn][2] += xs_hi * ((a_lo * static_cast<float>(c2)) + (b_lo * xrs_hi));
+                c_f32[wrm][wrn][3] += xs_hi * ((a_hi * static_cast<float>(c3)) + (b_hi * xrs_hi));
             }
         }
         __syncthreads();
@@ -194,22 +194,26 @@ __global__ void mmq_q4k_imma_tile_kernel(const int8_t* __restrict__ X_s8,
     // -------- Epilogue: FP16 write for all 4 (wrm, wrn) tiles --------
 #pragma unroll
     for (int wrm = 0; wrm < kWRM; ++wrm) {
-        const int sub_origin_m = warp_origin_m + wrm * 16;
+        const int sub_origin_m = warp_origin_m + (wrm * 16);
 #pragma unroll
         for (int wrn = 0; wrn < kWRN; ++wrn) {
-            const int sub_origin_n = warp_origin_n + wrn * 8;
+            const int sub_origin_n = warp_origin_n + (wrn * 8);
             const int row_lo = sub_origin_m + ((lane >> 2) & 7);
             const int row_hi = row_lo + 8;
-            const int col_lo = sub_origin_n + (lane & 3) * 2;
+            const int col_lo = sub_origin_n + ((lane & 3) * 2);
             const int col_hi = col_lo + 1;
             const int m_lo = base_m + row_lo;
             const int m_hi = base_m + row_hi;
             const int n_lo = base_n + col_lo;
             const int n_hi = base_n + col_hi;
-            if (m_lo < M && n_lo < N) out[m_lo * N + n_lo] = __float2half(c_f32[wrm][wrn][0]);
-            if (m_lo < M && n_hi < N) out[m_lo * N + n_hi] = __float2half(c_f32[wrm][wrn][1]);
-            if (m_hi < M && n_lo < N) out[m_hi * N + n_lo] = __float2half(c_f32[wrm][wrn][2]);
-            if (m_hi < M && n_hi < N) out[m_hi * N + n_hi] = __float2half(c_f32[wrm][wrn][3]);
+            if (m_lo < M && n_lo < N)
+                out[(m_lo * N) + n_lo] = __float2half(c_f32[wrm][wrn][0]);
+            if (m_lo < M && n_hi < N)
+                out[(m_lo * N) + n_hi] = __float2half(c_f32[wrm][wrn][1]);
+            if (m_hi < M && n_lo < N)
+                out[(m_hi * N) + n_lo] = __float2half(c_f32[wrm][wrn][2]);
+            if (m_hi < M && n_hi < N)
+                out[(m_hi * N) + n_hi] = __float2half(c_f32[wrm][wrn][3]);
         }
     }
 }
@@ -246,7 +250,7 @@ __global__ void quantize_fp16_to_int8_subblock_kernel(const __half* __restrict__
     if (k_base >= K) return;
 
     // Pass 1: per-thread absmax (1 element per lane in this 32-K sub-block).
-    const __half* row = X_fp16 + static_cast<size_t>(m) * K + k_base;
+    const __half* row = X_fp16 + (static_cast<size_t>(m) * K) + k_base;
     float v = __half2float(row[lane]);
     float my_amax = fabsf(v);
     // Warp-reduce amax.
@@ -259,7 +263,7 @@ __global__ void quantize_fp16_to_int8_subblock_kernel(const __half* __restrict__
     // Pass 2: quantize, write s8, accumulate per-lane qint, then reduce.
     int qi = __float2int_rn(v * inv_scale);
     qi = max(-127, min(127, qi));
-    X_s8[static_cast<size_t>(m) * K + k_base + lane] = static_cast<int8_t>(qi);
+    X_s8[(static_cast<size_t>(m) * K) + k_base + lane] = static_cast<int8_t>(qi);
 
     int sumq = qi;
     for (int off = 16; off > 0; off >>= 1)
@@ -267,8 +271,8 @@ __global__ void quantize_fp16_to_int8_subblock_kernel(const __half* __restrict__
 
     if (lane == 0) {
         const int subs_per_row = K / kQuantSubBlock;
-        x_scale[static_cast<size_t>(m) * subs_per_row + sub] = __float2half(scale);
-        x_rowsum[static_cast<size_t>(m) * subs_per_row + sub] = static_cast<float>(sumq);
+        x_scale[(static_cast<size_t>(m) * subs_per_row) + sub] = __float2half(scale);
+        x_rowsum[(static_cast<size_t>(m) * subs_per_row) + sub] = static_cast<float>(sumq);
     }
 }
 

@@ -168,7 +168,7 @@ InferenceState Engine::pipeline_row_state_(Request& req, int row_idx) const {
     const bool needs_pen = (req.repetition_penalty != 1.0f || req.frequency_penalty != 0.0f ||
                             req.presence_penalty != 0.0f);
     if (needs_pen && d_pipe_hist_) {
-        per.penalty_tokens = d_pipe_hist_ + static_cast<size_t>(row_idx) * pipe_hist_stride_;
+        per.penalty_tokens = d_pipe_hist_ + (static_cast<size_t>(row_idx) * pipe_hist_stride_);
         per.n_penalty_tokens = static_cast<int>(req.output_tokens.size()) + 1;
     }
     per.schema_constrainer = nullptr;
@@ -245,7 +245,7 @@ int Engine::pipeline_prebook_kv_(int parity) {
             const int nb = kv_manager_->append_block(req->id);
             if (nb < 0)
                 return -1;  // KV exhausted — per-step path handles reject/streaming
-            h_bt_patch_off_[parity].as<int>()[n_patches] = i * stride + have;
+            h_bt_patch_off_[parity].as<int>()[n_patches] = (i * stride) + have;
             h_bt_patch_val_[parity].as<int>()[n_patches] = nb;
             ++n_patches;
         }
@@ -343,7 +343,7 @@ bool Engine::pipeline_enter_(std::vector<std::shared_ptr<Request>>& rows, const 
             // keeps it current on chained steps). Async H2D from the
             // pageable vector is safe: the gather event below syncs before
             // process_outputs can grow it.
-            int32_t* row_hist = d_pipe_hist_ + static_cast<size_t>(i) * pipe_hist_stride_;
+            int32_t* row_hist = d_pipe_hist_ + (static_cast<size_t>(i) * pipe_hist_stride_);
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(row_hist, req->output_tokens.data(), count * sizeof(int32_t),
                                                cudaMemcpyHostToDevice, stream));
             per.penalty_tokens = row_hist;

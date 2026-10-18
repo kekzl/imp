@@ -40,11 +40,10 @@ std::string resolve_model_path(const std::string& model_id, const std::string& r
     // A HF repo id is "org/repo": exactly one '/', not absolute/relative, no model-file
     // extension. Anything else is a local path that doesn't exist; report that instead of
     // suggesting a nonsensical git-clone URL (#759).
-    const bool looks_like_hf_repo =
-        !model_id.empty() && model_id.front() != '/' && model_id.front() != '.' &&
-        model_id.front() != '~' && std::count(model_id.begin(), model_id.end(), '/') == 1 &&
-        model_id.find(".gguf") == std::string::npos &&
-        model_id.find(".safetensors") == std::string::npos;
+    const bool looks_like_hf_repo = !model_id.empty() && model_id.front() != '/' && model_id.front() != '.' &&
+                                    model_id.front() != '~' &&
+                                    std::count(model_id.begin(), model_id.end(), '/') == 1 &&
+                                    !model_id.contains(".gguf") && !model_id.contains(".safetensors");
     if (!looks_like_hf_repo) {
         IMP_LOG_ERROR("Model path does not exist: %s", model_id.c_str());
         return "";

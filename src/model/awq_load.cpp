@@ -52,7 +52,7 @@ static bool apply_awq_layers(Model& model, const std::unordered_map<std::string,
     }
     size_t n_qweight = 0;
     for (const auto& kv : tensor_map)
-        if (kv.first.size() > 8 && kv.first.compare(kv.first.size() - 8, 8, ".qweight") == 0)
+        if (kv.first.size() > 8 && kv.first.ends_with(".qweight"))
             ++n_qweight;
     if (n_proj == 0 || n_proj != n_qweight) {
         *why = std::to_string(n_qweight) + " .qweight tensors, " + std::to_string(n_proj) +

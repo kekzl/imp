@@ -44,8 +44,8 @@ extern thread_local bool g_in_anthropic_shim;
 // scanner of the server's own network).
 static void read_vision_url(ServerState& state, const std::string& url, const char* what,
                             std::vector<uint8_t>& bytes, std::string& error) {
-    const bool remote = url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
-    if (url.rfind("data:", 0) == 0) {
+    const bool remote = url.starts_with("http://") || url.starts_with("https://");
+    if (url.starts_with("data:")) {
         auto comma = url.find(',');
         if (comma != std::string::npos)
             bytes = base64_decode(url.substr(comma + 1));
@@ -172,8 +172,7 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     // the server default.
     ctx.params.max_tokens = parse_max_tokens_field(body, state.default_max_tokens);
     ctx.params.n_completions = body.value("n", 1);
-    if (ctx.params.n_completions < 1)
-        ctx.params.n_completions = 1;
+    ctx.params.n_completions = std::max(ctx.params.n_completions, 1);
     // Each n is a full independent generation, run sequentially, but the whole request still counts
     // as ONE against --rate-limit and --max-concurrent. max_tokens is clamped to context; n was not
     // clamped at all before (#1616).
@@ -213,10 +212,8 @@ bool parse_chat_request_params(const httplib::Request& req, httplib::Response& r
     }
     ctx.params.req_logprobs = body.value("logprobs", false);
     ctx.params.top_logprobs = body.value("top_logprobs", 0);
-    if (ctx.params.top_logprobs < 0)
-        ctx.params.top_logprobs = 0;
-    if (ctx.params.top_logprobs > 20)
-        ctx.params.top_logprobs = 20;
+    ctx.params.top_logprobs = std::max(ctx.params.top_logprobs, 0);
+    ctx.params.top_logprobs = std::min(ctx.params.top_logprobs, 20);
     // Logit lens (row 115): true = top 5 per layer, an integer 1..20 = top N; implies logprobs.
     if (const auto ll = body.find("logit_lens"); ll != body.end() && !ll->is_null()) {
         if (ll->is_boolean()) {

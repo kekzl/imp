@@ -74,7 +74,7 @@ DeviceExpertCache::LayerSource DeviceExpertCache::layer_sources_(const Model& mo
             const char* dp = unpinned ? nullptr : device_view(model, ex[e].data);
             const char* dm = unpinned ? nullptr : device_view(model, ex[e].scales);
             unpinned = unpinned || !dp || !dm;
-            src[(b + p) * ne + e] = DevExpertSrc{dp, dm, ex[e].tensor_scale};
+            src[((b + p) * ne) + e] = DevExpertSrc{dp, dm, ex[e].tensor_scale};
         }
     }
     if (!layer_layout_uniform_(b))
@@ -98,13 +98,13 @@ bool DeviceExpertCache::init_tier_(const Model& model, const std::vector<char>& 
         if (!tiered[l])
             continue;
         ++n_tiered;
-        pb = std::max(pb, packed_bytes_[static_cast<size_t>(l) * 3 + 1]);
-        mb = std::max(mb, ms_bytes_[static_cast<size_t>(l) * 3 + 1]);
+        pb = std::max(pb, packed_bytes_[(static_cast<size_t>(l) * 3) + 1]);
+        mb = std::max(mb, ms_bytes_[(static_cast<size_t>(l) * 3) + 1]);
     }
     const size_t unit = HostExpertTier::unit_bytes(pb, mb);
     const size_t need = static_cast<size_t>(n_tiered) * 3 * ne * unit;
     // Floor: one whole layer (touched-only prefill staging) plus one decode step.
-    const size_t floor_b = (static_cast<size_t>(3) * ne + 3 * static_cast<size_t>(top_k)) * unit;
+    const size_t floor_b = ((static_cast<size_t>(3) * ne) + (3 * static_cast<size_t>(top_k))) * unit;
     size_t budget = 0;
     if (host_pool_mib > 0) {
         budget = static_cast<size_t>(host_pool_mib) << 20;
@@ -114,7 +114,7 @@ bool DeviceExpertCache::init_tier_(const Model& model, const std::vector<char>& 
         budget = avail > headroom ? avail - headroom : 0;
     }
     // LRU for every unit plus the prefill scratch (one layer) is the most the tier can use.
-    size_t bytes = std::min(budget, need + static_cast<size_t>(3) * ne * unit) / unit * unit;
+    size_t bytes = std::min(budget, need + (static_cast<size_t>(3) * ne * unit)) / unit * unit;
     const auto t0 = std::chrono::steady_clock::now();
     while (bytes >= floor_b) {
         tier_arena_ = PinnedBuffer::acquire_filled(bytes, HostPinnedKind::Mapped, [](void*) {});
@@ -129,8 +129,8 @@ bool DeviceExpertCache::init_tier_(const Model& model, const std::vector<char>& 
             budget / (1024.0 * 1024.0 * 1024.0), floor_b / (1024.0 * 1024.0 * 1024.0));
         return false;
     }
-    const size_t io_b = static_cast<size_t>(kMaxEntries) * sizeof(DevMissEntry) + 256 +
-                        static_cast<size_t>(3) * ne * sizeof(DevExpertSrc) + 64 + sizeof(TierMailbox);
+    const size_t io_b = (static_cast<size_t>(kMaxEntries) * sizeof(DevMissEntry)) + 256 +
+                        (static_cast<size_t>(3) * ne * sizeof(DevExpertSrc)) + 64 + sizeof(TierMailbox);
     tier_io_ = PinnedBuffer::acquire(cuda_host_pinned_allocator(), io_b, HostPinnedKind::Mapped);
     if (tier_io_.empty() || !tier_io_.device()) {
         tier_arena_ = PinnedBuffer();
@@ -146,7 +146,8 @@ bool DeviceExpertCache::init_tier_(const Model& model, const std::vector<char>& 
     tier_n_miss_d_ = reinterpret_cast<int*>(d + miss_b);
     tier_stage_src_h_ = reinterpret_cast<DevExpertSrc*>(h + miss_b + 256);
     tier_stage_src_d_ = reinterpret_cast<DevExpertSrc*>(d + miss_b + 256);
-    const size_t mb_off = (miss_b + 256 + static_cast<size_t>(3) * ne * sizeof(DevExpertSrc) + 63) / 64 * 64;
+    const size_t mb_off = (miss_b + 256 + (static_cast<size_t>(3) * ne * sizeof(DevExpertSrc)) + 63) / 64 *
+                          64;
     tier_mb_ = reinterpret_cast<TierMailbox*>(h + mb_off);
     tier_mb_d_ = reinterpret_cast<TierMailbox*>(d + mb_off);
 
@@ -162,9 +163,9 @@ bool DeviceExpertCache::init_tier_(const Model& model, const std::vector<char>& 
             const std::vector<Tensor>& ex = *projs[p];
             if (static_cast<int>(ex.size()) != ne)
                 continue;  // absent gate projection
-            const size_t i = static_cast<size_t>(l) * 3 + p;
+            const size_t i = (static_cast<size_t>(l) * 3) + p;
             for (int e = 0; e < ne; ++e)
-                tier_->set_source(static_cast<int>(i * ne + e),
+                tier_->set_source(static_cast<int>((i * ne) + e),
                                   {ex[e].data, packed_bytes_[i], ex[e].scales, ms_bytes_[i]});
         }
     }
@@ -267,20 +268,20 @@ const DevExpertSrc* DeviceExpertCache::tier_stage_src_(int layer, const int32_t*
     std::vector<int> keys, idx;
     const int base = layer * 3 * ne;
     for (int p : projs) {
-        if (packed_bytes_[static_cast<size_t>(layer) * 3 + p] == 0)
+        if (packed_bytes_[(static_cast<size_t>(layer) * 3) + p] == 0)
             continue;  // absent gate projection
         for (int e = std::max(0, e0); e < std::min(ne, e0 + n); ++e) {
             if (offs[e + 1] == offs[e])
                 continue;
-            const int s = slot_of[static_cast<size_t>(p) * ne + e];
+            const int s = slot_of[(static_cast<size_t>(p) * ne) + e];
             if (s >= 0) {
-                const char* slot = L.pool + static_cast<size_t>(s) * L.slot_bytes;
-                tier_stage_src_h_[p * ne + e] =
-                    DevExpertSrc{slot, slot + ms_off_[static_cast<size_t>(layer) * 3 + p], 0.0f};
+                const char* slot = L.pool + (static_cast<size_t>(s) * L.slot_bytes);
+                tier_stage_src_h_[(p * ne) + e] =
+                    DevExpertSrc{slot, slot + ms_off_[(static_cast<size_t>(layer) * 3) + p], 0.0f};
                 continue;
             }
-            keys.push_back(base + p * ne + e);
-            idx.push_back(p * ne + e);
+            keys.push_back(base + (p * ne) + e);
+            idx.push_back((p * ne) + e);
         }
     }
     std::vector<HostExpertTier::UnitView> views(keys.size());

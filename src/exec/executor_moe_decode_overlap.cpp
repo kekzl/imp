@@ -31,7 +31,7 @@ void GraphExecutor::init_shexp_overlap_() {
     if (eff == 0)
         return;
     auto& o = shexp_overlap_;
-    const size_t bytes = kDevExpertMaxRows * (3 * static_cast<size_t>(eff) + cfg.d_model) * sizeof(half);
+    const size_t bytes = kDevExpertMaxRows * ((3 * static_cast<size_t>(eff)) + cfg.d_model) * sizeof(half);
     o.buf = static_cast<char*>(vram_alloc(vram_alloc_, bytes, "shexp_overlap"));
     if (o.buf == nullptr || !o.stream.create() || !o.fork.create() || !o.join.create()) {
         IMP_LOG_WARN("moe.shared_expert_overlap: side stream setup failed, shared expert stays serial");
@@ -81,7 +81,7 @@ bool GraphExecutor::fork_shared_expert_(int layer, cudaStream_t stream, int d, c
     IMP_CUDA_CHECK_LOG(cudaEventRecord(o.fork, stream));
     IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(o.stream, o.fork, 0));
     (void)shared_expert_core_(layer, o.stream, n, d, model_->config().rms_norm_eps, no, o.buf, o.buf + e,
-                              o.buf + 2 * e, o.buf + 3 * e);
+                              o.buf + (2 * e), o.buf + (3 * e));
     IMP_CUDA_CHECK_LOG(cudaEventRecord(o.join, o.stream));
     o.pending = true;
     return true;
@@ -94,8 +94,8 @@ bool GraphExecutor::join_shared_expert_(cudaStream_t stream, int n, int d, Tenso
     o.pending = false;
     IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(stream, o.join, 0));
     const int64_t shape[2] = {n, d};
-    Tensor sh_down(o.buf + 3 * static_cast<size_t>(kDevExpertMaxRows) * o.eff * sizeof(half), compute_dtype_,
-                   2, shape, true);
+    Tensor sh_down(o.buf + (3 * static_cast<size_t>(kDevExpertMaxRows) * o.eff * sizeof(half)),
+                   compute_dtype_, 2, shape, true);
     elementwise_add(h, sh_down, stream);
     return true;
 }

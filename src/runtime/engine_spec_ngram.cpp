@@ -418,7 +418,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             const int width = std::min(8, std::max(1, scfg.recycle_width));
             // Row budget: width * (1 + depth) <= 17 (the mid capture bucket)
             // keeps the per-row context walks at linear-chunk cost.
-            const int depth_cap = std::max(1, 17 / std::max(2, width) - 1);
+            const int depth_cap = std::max(1, (17 / std::max(2, width)) - 1);
             const int depth = std::min({std::max(1, scfg.recycle_depth), depth_cap, k});
             if (mc_route_ok && width > 1) {
                 auto cands = spec_recycle_table_().draft_candidates(
@@ -552,7 +552,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // them in place of the canonical entries, and the post-accept rollback
     // frees them like any other rejected-draft block.
     const int mc_bp = mc_on ? p0 / kv_bs : 0;
-    const int mc_n_priv = mc_on ? (p0 + mc_depth) / kv_bs - mc_bp + 1 : 0;
+    const int mc_n_priv = mc_on ? ((p0 + mc_depth) / kv_bs) - mc_bp + 1 : 0;
     const int mc_priv_base = blocks_needed;
     const int blocks_target =
         blocks_needed + (mc_on ? static_cast<int>(mc.size()) * mc_n_priv : 0);
@@ -596,8 +596,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     const int chunk_cap =
         std::max({chunk_pad, scfg.k + 1, capture_on ? spec_capture_bucket_max_() : 0});
     const int table_cap = capture_on
-                              ? std::max(n_blocks + 16,
-                                         (spec_capture_ctx_cap_ + kv_bs - 1) / kv_bs + 16)
+                              ? std::max(n_blocks + 16, ((spec_capture_ctx_cap_ + kv_bs - 1) / kv_bs) + 16)
                               : n_blocks + 16;
     if (!ensure_spec_buffers_(chunk_cap, table_cap)) {
         spec_stats_.miss_steps++;
@@ -617,7 +616,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     int32_t* h_stage = h_spec_stage_.as<int32_t>();
     int32_t* h_tokens = h_stage;
     int32_t* h_positions = h_stage + cap;
-    int32_t* h_row_lens = h_stage + 2ull * cap;
+    int32_t* h_row_lens = h_stage + (2ull * cap);
     // Pad rows sit at positions AFTER every real row in both shapes: the
     // rollback drops them. A pad writing canonical p0 would clobber the
     // hybrid mc partial-accept replay, which re-forwards the chunk after
@@ -643,12 +642,12 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         for (int i = 0; i < chunk_len; ++i) h_row_lens[i] = p0 + i + 1;
     }
     h_stage[3ull * cap] = ctx_len;
-    h_stage[3ull * cap + 1] = p0;
+    h_stage[(3ull * cap) + 1] = p0;
     // Hybrid mc: the recurrent kernels read the per-GROUP real row count here
     // (InferenceState::d_chunk_len under ssm_grouped_chunk), not the whole
     // chunk's - every candidate commits its state at its own last row.
-    h_stage[3ull * cap + 2] = hybrid_mc ? mc_rows_per_cand : chunk_len;
-    h_stage[3ull * cap + 3] = 1;  // snapshot row (refreshed below on hybrids)
+    h_stage[(3ull * cap) + 2] = hybrid_mc ? mc_rows_per_cand : chunk_len;
+    h_stage[(3ull * cap) + 3] = 1;  // snapshot row (refreshed below on hybrids)
     // Per-candidate recurrent slots (hybrid mc): candidate 0 on the request's
     // live slot, the rest on the reserved pool slots. Staged with the chunk
     // so the one H2D carries them; the values are what a partial-accept
@@ -660,7 +659,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         h_spec_mc_slots_[0] = rec_slot;
         for (size_t c = 1; c < mc.size(); ++c)
             h_spec_mc_slots_[c] = ssm_state_->reserved_slot(static_cast<int>(c) - 1);
-        std::copy(h_spec_mc_slots_.begin(), h_spec_mc_slots_.end(), h_stage + 3ull * cap + 4);
+        std::copy(h_spec_mc_slots_.begin(), h_spec_mc_slots_.end(), h_stage + (3ull * cap) + 4);
     }
 
     auto check = [&](cudaError_t err, const char* op) {
@@ -671,14 +670,17 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         return true;
     };
     if (!check(cudaMemcpyAsync(d_spec_stage_, h_spec_stage_.as<int32_t>(),
-                               (3ull * cap + 4 + kMtpMaxTopW) * sizeof(int32_t), cudaMemcpyHostToDevice,
-                               stream), "stage H2D") ||
+                               ((3ull * cap) + 4 + kMtpMaxTopW) * sizeof(int32_t), cudaMemcpyHostToDevice,
+                               stream),
+               "stage H2D") ||
         !check(cudaMemcpyAsync(d_spec_block_table_, block_table.data(), n_blocks * sizeof(int),
-                               cudaMemcpyHostToDevice, stream), "block table H2D") ||
+                               cudaMemcpyHostToDevice, stream),
+               "block table H2D") ||
         (swa_sizing_active_ && !swa_block_table.empty() &&
          !check(cudaMemcpyAsync(d_spec_block_table_swa_, swa_block_table.data(),
                                 static_cast<int>(swa_block_table.size()) * sizeof(int),
-                                cudaMemcpyHostToDevice, stream), "swa block table H2D")))
+                                cudaMemcpyHostToDevice, stream),
+                "swa block table H2D")))
         return false;
 
     // Forward the chunk through the standard continuation-prefill path.
@@ -731,7 +733,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         for (int i = 0; i < chunk_pad; ++i)
             std::copy(block_table.begin(), block_table.end(),
                       h_spec_row_tables_pinned_.as<int32_t>() +
-                          static_cast<size_t>(i) * spec_block_table_cap_);
+                          (static_cast<size_t>(i) * spec_block_table_cap_));
         // mc: alias each candidate's written block indices [mc_bp ..
         // mc_bp + mc_n_priv) to its private appended blocks: reads of the
         // committed prefix stay canonical, writes are candidate-isolated.
@@ -739,9 +741,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             for (int i = 0; i < chunk_len; ++i) {
                 const int c = i / mc_rows_per_cand;
                 int32_t* row = h_spec_row_tables_pinned_.as<int32_t>() +
-                               static_cast<size_t>(i) * spec_block_table_cap_;
+                               (static_cast<size_t>(i) * spec_block_table_cap_);
                 for (int t = 0; t < mc_n_priv; ++t)
-                    row[mc_bp + t] = block_table[mc_priv_base + c * mc_n_priv + t];
+                    row[mc_bp + t] = block_table[mc_priv_base + (c * mc_n_priv) + t];
             }
         }
         if (check(cudaMemcpyAsync(d_spec_row_block_tables_, h_spec_row_tables_pinned_.as<int32_t>(),
@@ -782,7 +784,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
                 std::min(static_cast<int>(mc.size()), KVCache::kCopyMaxPairs);
             for (int c = 0; c < n_pairs; ++c) {
                 srcs[c] = block_table[mc_bp];
-                dsts[c] = block_table[mc_priv_base + c * mc_n_priv];
+                dsts[c] = block_table[mc_priv_base + (c * mc_n_priv)];
             }
             kv_cache_raw_->copy_blocks_device(srcs, dsts, n_pairs, stream);
         }
@@ -911,10 +913,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     executor_->set_verify_sampling(nullptr);
     // One D2H covers [argmax | topm] (contiguous block, #1055); without the
     // harvest only the argmax prefix is copied.
-    const size_t d2h_ints =
-        recycle_m > 0
-            ? static_cast<size_t>(spec_chunk_cap_) + static_cast<size_t>(chunk_len) * recycle_m
-            : static_cast<size_t>(chunk_len);
+    const size_t d2h_ints = recycle_m > 0 ? static_cast<size_t>(spec_chunk_cap_) +
+                                                (static_cast<size_t>(chunk_len) * recycle_m)
+                                          : static_cast<size_t>(chunk_len);
     bool argmax_ok =
         check(cudaMemcpyAsync(h_spec_argmax_.as<int32_t>(), d_spec_argmax_, d2h_ints * sizeof(int32_t),
                               cudaMemcpyDeviceToHost, stream), "argmax D2H") &&
@@ -1012,9 +1013,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         const int mc_best_c = mc_row0 / mc_rows_per_cand;
         int srcs[KVCache::kCopyMaxPairs];
         int dsts[KVCache::kCopyMaxPairs];
-        int n_pairs = std::min((p0 + matched) / kv_bs - mc_bp + 1, KVCache::kCopyMaxPairs);
+        int n_pairs = std::min(((p0 + matched) / kv_bs) - mc_bp + 1, KVCache::kCopyMaxPairs);
         for (int t = 0; t < n_pairs; ++t) {
-            srcs[t] = block_table[mc_priv_base + mc_best_c * mc_n_priv + t];
+            srcs[t] = block_table[mc_priv_base + (mc_best_c * mc_n_priv) + t];
             dsts[t] = block_table[mc_bp + t];
         }
         kv_cache_raw_->copy_blocks_device(srcs, dsts, n_pairs, stream);
@@ -1041,7 +1042,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             } else {
                 tok = (j == 0) ? t0 : draft[j - 1];
             }
-            tr.observe_topk(tok, std::span(h_spec_topm_ + static_cast<size_t>(j) * recycle_m,
+            tr.observe_topk(tok, std::span(h_spec_topm_ + (static_cast<size_t>(j) * recycle_m),
                                            static_cast<size_t>(recycle_m)));
         }
     }
@@ -1225,7 +1226,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         // judged against the k=1 break-even or the deeper config dooms it.
         const float k_ran = static_cast<float>(mtp_active_.econ_rows) /
                             static_cast<float>(mtp_active_.econ_verifies);
-        const float min_emit = cfg_min < 0.0f ? 1.0f + kMtpEconAccept * k_ran : cfg_min;
+        const float min_emit = cfg_min < 0.0f ? 1.0f + (kMtpEconAccept * k_ran) : cfg_min;
         if (min_emit > 0.0f && mtp_active_.econ_verifies >= kMtpEconSample &&
             static_cast<float>(mtp_active_.econ_emitted) <
                 static_cast<float>(mtp_active_.econ_verifies) * min_emit) {

@@ -18,7 +18,7 @@ float awq_round_to_dtype(float v, const std::string& dtype) {
 float awq_fold_norm_value(float g, float s, NormOffset off) {
     if (!(s > 0.0f) || !std::isfinite(s))
         return g;
-    return off == NormOffset::Unit ? (1.0f + g) / s - 1.0f : g / s;
+    return off == NormOffset::Unit ? ((1.0f + g) / s) - 1.0f : g / s;
 }
 
 float awq_fold_gain_error(float g, float s, NormOffset off, const std::string& dtype) {

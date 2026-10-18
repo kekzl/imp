@@ -22,6 +22,7 @@
 #include "core/logging.h"
 
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <type_traits>
 #include "core/pdl_device.cuh"
 #include "core/pdl_launch.cuh"
@@ -185,17 +186,17 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         const int64_t k_sf_off = static_cast<int64_t>(kt) * (kKT / kMicroBlockSize);
 #pragma unroll
         for (int v = 0; v < 16; ++v) {
-            const int c = lane + v * 32;
+            const int c = lane + (v * 32);
             const int r = c / 8, j = c % 8;
             cp_async16(s_wn + static_cast<ptrdiff_t>(r * kNibStride) + static_cast<ptrdiff_t>(j * 16),
-                       w_packed + (n_base + r) * w_row_bytes + k_nib_off + static_cast<ptrdiff_t>(j * 16),
+                       w_packed + ((n_base + r) * w_row_bytes) + k_nib_off + static_cast<ptrdiff_t>(j * 16),
                        16);
         }
 #pragma unroll
         for (int v = 0; v < 2; ++v) {
-            const int r = lane + v * 32;
+            const int r = lane + (v * 32);
             cp_async16(s_wsf + static_cast<ptrdiff_t>(r * kSfStride),
-                       w_scales + (n_base + r) * sf_row_bytes + k_sf_off, 16);
+                       w_scales + ((n_base + r) * sf_row_bytes) + k_sf_off, 16);
         }
     };
 
@@ -211,14 +212,14 @@ __device__ __forceinline__ void smallm_v2_cta_body(
             const int64_t k_sf_off = static_cast<int64_t>(kt) * (kKT / kMicroBlockSize);
 #pragma unroll
             for (int v = 0; v < 8; ++v) {
-                const int c = lane + v * 32;
+                const int c = lane + (v * 32);
                 const int r = c / 8, j = c % 8;
                 cp_async16(s_xn + static_cast<ptrdiff_t>(r * kNibStride) + static_cast<ptrdiff_t>(j * 16),
-                           xq_packed + r * w_row_bytes + k_nib_off + static_cast<ptrdiff_t>(j * 16),
+                           xq_packed + (r * w_row_bytes) + k_nib_off + static_cast<ptrdiff_t>(j * 16),
                            r < M ? 16 : 0);
             }
             cp_async16(s_xsf + static_cast<ptrdiff_t>(lane * kSfStride),
-                       xq_scales + lane * sf_row_bytes + k_sf_off, lane < M ? 16 : 0);
+                       xq_scales + (lane * sf_row_bytes) + k_sf_off, lane < M ? 16 : 0);
             // One async-arrive per lane covers every cp.async this lane issued
             // for the stage, the weights before the grid dependency included.
             cp_async_mbar_arrive(&bar_full[s]);
@@ -264,8 +265,8 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         const int warp_n = warp >> 1;
         const int T0 = lane & 3;
         const int T1 = lane >> 2;
-        const int a_row = warp_m * 16 + T1;  // A fragment row (V1=0)
-        const int sfa_row = warp_m * 16 + (lane & 1) * 8 + (lane >> 2);
+        const int a_row = (warp_m * 16) + T1;  // A fragment row (V1=0)
+        const int sfa_row = (warp_m * 16) + ((lane & 1) * 8) + (lane >> 2);
         float acc[4][4];
 #pragma unroll
         for (int nf = 0; nf < 4; ++nf)
@@ -295,7 +296,7 @@ __device__ __forceinline__ void smallm_v2_cta_body(
                     s_xsf + static_cast<ptrdiff_t>(sfa_row * kSfStride) + static_cast<ptrdiff_t>(c * 4));
 #pragma unroll
                 for (int nf = 0; nf < 4; ++nf) {
-                    const int n_row = warp_n * 32 + nf * 8 + T1;
+                    const int n_row = (warp_n * 32) + (nf * 8) + T1;
                     const uint8_t* wr = s_wn + static_cast<ptrdiff_t>(n_row * kNibStride) +
                                         static_cast<ptrdiff_t>(T0 * 4) + static_cast<ptrdiff_t>(c * 32);
                     const uint32_t b0 = *reinterpret_cast<const uint32_t*>(wr);
@@ -314,11 +315,11 @@ __device__ __forceinline__ void smallm_v2_cta_body(
         float* s_out = reinterpret_cast<float*>(smem);  // [kSmM][kNR]
 #pragma unroll
         for (int nf = 0; nf < 4; ++nf) {
-            const int n0 = warp_n * 32 + nf * 8 + T0 * 2;
-            s_out[(warp_m * 16 + T1) * kNR + n0] = acc[nf][0];
-            s_out[(warp_m * 16 + T1) * kNR + n0 + 1] = acc[nf][1];
-            s_out[(warp_m * 16 + T1 + 8) * kNR + n0] = acc[nf][2];
-            s_out[(warp_m * 16 + T1 + 8) * kNR + n0 + 1] = acc[nf][3];
+            const int n0 = (warp_n * 32) + (nf * 8) + (T0 * 2);
+            s_out[(((warp_m * 16) + T1) * kNR) + n0] = acc[nf][0];
+            s_out[(((warp_m * 16) + T1) * kNR) + n0 + 1] = acc[nf][1];
+            s_out[(((warp_m * 16) + T1 + 8) * kNR) + n0] = acc[nf][2];
+            s_out[(((warp_m * 16) + T1 + 8) * kNR) + n0 + 1] = acc[nf][3];
         }
     }
     if (warp == 4)
@@ -334,7 +335,7 @@ __device__ __forceinline__ void smallm_v2_cta_body(
             if (m >= M)
                 continue;
             const int n = i % kNR;
-            const int64_t o = static_cast<int64_t>(m) * N_out + n_base + n;
+            const int64_t o = (static_cast<int64_t>(m) * N_out) + n_base + n;
             if constexpr (std::is_same_v<OutT, float>)
                 y[o] = ts * s_out[i] + (acc_flag ? y[o] : 0.0f);
             else
@@ -345,11 +346,11 @@ __device__ __forceinline__ void smallm_v2_cta_body(
     // Streaming stores: each partial is written once and read once by the
     // reduce kernel (v1 lesson — un-hinted partials knocked L2 sets out from
     // under the weight stream).
-    float* plane = ws_partials + static_cast<size_t>(stripe) * kSmM * N_out;
+    float* plane = ws_partials + (static_cast<size_t>(stripe) * kSmM * N_out);
     for (int i = tid; i < kSmM * kNR; i += kThreads) {
         const int m = i / kNR;
         const int n = i % kNR;
-        __stcs(&plane[static_cast<int64_t>(m) * N_out + n_base + n], s_out[i]);
+        __stcs(&plane[(static_cast<int64_t>(m) * N_out) + n_base + n], s_out[i]);
     }
 }
 
@@ -414,7 +415,7 @@ __global__ void gemm_nvfp4_smallm_v2_multi_kernel(SmallMV2MultiArgs a, const uin
 template <bool kAcc>
 __global__ void smallm_v2_reduce_kernel(const float* __restrict__ ws_partials, half* __restrict__ y, int M,
                                         int N_out, int stripes, float ts) {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (i >= M * N_out)
         return;
     pdl_wait();
@@ -422,10 +423,10 @@ __global__ void smallm_v2_reduce_kernel(const float* __restrict__ ws_partials, h
     float acc = 0.0f;
     for (int sp = 0; sp < stripes; ++sp)
         acc += __ldcs(
-            &ws_partials[static_cast<size_t>(sp) * kSmM * N_out + static_cast<int64_t>(m) * N_out + n]);
-    const int64_t o = static_cast<int64_t>(m) * N_out + n;
+            &ws_partials[(static_cast<size_t>(sp) * kSmM * N_out) + (static_cast<int64_t>(m) * N_out) + n]);
+    const int64_t o = (static_cast<int64_t>(m) * N_out) + n;
     pdl_trigger();
-    y[o] = __float2half(ts * acc + (kAcc ? __half2float(y[o]) : 0.0f));
+    y[o] = __float2half((ts * acc) + (kAcc ? __half2float(y[o]) : 0.0f));
 }
 
 }  // namespace
@@ -442,10 +443,8 @@ int gemm_nvfp4_smallm_v2_stripes(int N_out, int K) {
     if (n_tiles >= 80)
         return 1;
     int s = (160 + n_tiles - 1) / n_tiles;
-    if (s < 1)
-        s = 1;
-    if (s > k_tiles)
-        s = k_tiles;
+    s = std::max(s, 1);
+    s = std::min(s, k_tiles);
     return s;
 }
 

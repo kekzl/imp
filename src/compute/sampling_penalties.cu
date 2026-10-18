@@ -5,6 +5,7 @@
 #include "core/cuda_static_reset.h"
 #include "memory/engine_arena.h"
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cmath>
 #include <cfloat>
 #include <algorithm>
@@ -26,7 +27,7 @@ __device__ __forceinline__ void apply_penalties_body(float* __restrict__ logits,
                                                      int vocab_size, float repetition_penalty,
                                                      float frequency_penalty, float presence_penalty) {
     // Each thread handles one vocab entry
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= vocab_size)
         return;
 
@@ -71,7 +72,7 @@ __global__ void apply_penalties_rows_kernel(const PenaltyRowArgs* __restrict__ r
     pdl_wait();
     const PenaltyRowArgs r = rows[blockIdx.y];
     if (r.n_banned > 0) {
-        const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+        const int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
         if (idx >= vocab_size)
             return;
         for (int i = 0; i < r.n_banned; i++) {
@@ -110,7 +111,7 @@ __global__ void apply_penalties_device_count_kernel(
         start = n_tokens - repeat_last_n;
     }
 
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= vocab_size)
         return;
 
@@ -140,7 +141,7 @@ __global__ void apply_penalties_device_count_kernel(
 // Force a single token: set all logits to -inf except the given token.
 // Used by think-budget to force </think> generation via logit manipulation.
 __global__ void force_single_token_kernel(float* logits, int vocab_size, int32_t keep_token) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx >= vocab_size)
         return;
     logits[idx] = (idx == keep_token) ? 0.0f : -1e30f;
@@ -198,7 +199,7 @@ static size_t s_dry_buf_cap = 0;
 __global__ void apply_dry_sparse_kernel(float* __restrict__ logits,
                                         const int32_t* __restrict__ penalty_tokens,
                                         const float* __restrict__ penalty_values, int n_penalties) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx < n_penalties) {
         logits[penalty_tokens[idx]] -= penalty_values[idx];
     }
@@ -236,8 +237,7 @@ void apply_dry_penalty(float* d_logits, int vocab_size, const int32_t* host_toke
             if (token >= 0 && token < vocab_size) {
                 if (match_buf[token] == 0)
                     touched_tokens.push_back(token);
-                if (match_len > match_buf[token])
-                    match_buf[token] = match_len;
+                match_buf[token] = std::max(match_buf[token], match_len);
             }
         }
     }
@@ -343,7 +343,7 @@ __global__ void mirostat_v2_sample_kernel(const float* __restrict__ logits, int 
     // <=> l_i >= max + T*(log(sum_exp) - mu*ln(2)).
     float temperature = (inv_temperature > 0.0f) ? (1.0f / inv_temperature) : 1.0f;
     float log_sum_exp = logf(s_sum);
-    float threshold = gmax + temperature * (log_sum_exp - mu * 0.6931471805599453f);
+    float threshold = gmax + (temperature * (log_sum_exp - (mu * 0.6931471805599453f)));
 
     // --- Step 3: Compute filtered probability sum ---
     float local_fsum = 0.0f;
@@ -451,7 +451,7 @@ static int32_t sample_mirostat_v2_impl(const Tensor& logits, float temperature, 
     const int32_t token = synced_token_or_throw(synced, &h_result, "sample_mirostat_v2 readback");
 
     // Update mu: mu = mu - eta * (surprise - tau)
-    *mu = *mu - eta * (h_surprise - tau);
+    *mu = *mu - (eta * (h_surprise - tau));
 
     return token;
 }
@@ -478,8 +478,7 @@ void compute_logprobs_cpu(const float* logits, int vocab_size, int32_t sampled_t
     // 1. Find max for numerical stability
     float max_val = -FLT_MAX;
     for (int i = 0; i < vocab_size; i++) {
-        if (logits[i] > max_val)
-            max_val = logits[i];
+        max_val = std::max(max_val, logits[i]);
     }
 
     // 2. Compute log-sum-exp
@@ -530,7 +529,7 @@ void compute_logprobs_cpu(const float* logits, int vocab_size, int32_t sampled_t
 
     out->top.reserve(heap.size());
     for (const auto& e : heap) {
-        out->top.push_back({e.token, e.logprob});
+        out->top.emplace_back(e.token, e.logprob);
     }
 }
 
@@ -544,7 +543,7 @@ static size_t s_bias_buf_cap = 0;
 
 __global__ void apply_logit_bias_kernel(float* __restrict__ logits, const int32_t* __restrict__ tokens,
                                         const float* __restrict__ biases, int n) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (idx < n) {
         // atomicAdd, not `logits[t] += b`: two entries can name the same token
         // ("1" and "01" both parse to 1) and the host loop accumulated both.

@@ -60,8 +60,8 @@ __device__ float block_reduce_sum_softmax(float val) {
 // One block per row, 256 threads.
 __global__ void softmax_fp32_kernel(const float* __restrict__ input, float* __restrict__ output, int cols) {
     const int row = blockIdx.x;
-    const float* in_row = input + static_cast<int64_t>(row) * cols;
-    float* out_row = output + static_cast<int64_t>(row) * cols;
+    const float* in_row = input + (static_cast<int64_t>(row) * cols);
+    float* out_row = output + (static_cast<int64_t>(row) * cols);
 
     // ---- Online max + sum computation ----
     // Each thread maintains a local (max, sum) pair
@@ -112,8 +112,8 @@ __global__ void softmax_fp32_kernel(const float* __restrict__ input, float* __re
 // --------------------------------------------------------------------------
 __global__ void softmax_fp16_kernel(const __half* __restrict__ input, __half* __restrict__ output, int cols) {
     const int row = blockIdx.x;
-    const __half* in_row = input + static_cast<int64_t>(row) * cols;
-    __half* out_row = output + static_cast<int64_t>(row) * cols;
+    const __half* in_row = input + (static_cast<int64_t>(row) * cols);
+    __half* out_row = output + (static_cast<int64_t>(row) * cols);
 
     float local_max = -FLT_MAX;
     float local_sum = 0.0f;

@@ -52,8 +52,8 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     const int tid = threadIdx.x;
     const int col = tid & (HD - 1);
     const bool w_half = tid >= HD;  // this thread owns a W column (else U_A)
-    const int t0 = strip_t0 + c * kChunk;
-    const int L = min(kChunk, strip_tokens - c * kChunk);
+    const int t0 = strip_t0 + (c * kChunk);
+    const int L = min(kChunk, strip_tokens - (c * kChunk));
     if (L <= 0)
         return;
 
@@ -63,12 +63,12 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     const float dtb_h = dt_bias[h];
 
     const ChunkparWs ws = chunkpar_ws_layout<HD, SS>(ws_base, n_heads);
-    const size_t slot = static_cast<size_t>(c) * n_heads + h;
-    float* W_s = ws.W + slot * kChunk * SS;
-    float* KD_s = ws.KD + slot * kChunk * SS;
-    float* UA_s = ws.UA + slot * kChunk * HD;
-    float* QE_s = ws.QE + slot * kChunk * SS;
-    float* YA_s = ws.YA + slot * kChunk * HD;
+    const size_t slot = (static_cast<size_t>(c) * n_heads) + h;
+    float* W_s = ws.W + (slot * kChunk * SS);
+    float* KD_s = ws.KD + (slot * kChunk * SS);
+    float* UA_s = ws.UA + (slot * kChunk * HD);
+    float* QE_s = ws.QE + (slot * kChunk * SS);
+    float* YA_s = ws.YA + (slot * kChunk * HD);
 
     // #2218 bounded: kChunk = 64 (gdn_scan_chunkpar.cuh:16), HD = SS = 128 (static_assert :48, :92):
     // smem kChunk * SS = 8192, kChunk * SQ = 4352 floats; lane * 4 < 128 (lane < 32)
@@ -92,21 +92,21 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     // this phase: one exposed L2/DRAM round-trip per token.)
     static_assert(SS == 128, "float4-per-lane row load assumes SS == 128");
     for (int t = warp; t < L; t += 2 * HD / 32) {
-        const float* row = conv_f32 + static_cast<size_t>(t0 + t) * conv_channels;
+        const float* row = conv_f32 + (static_cast<size_t>(t0 + t) * conv_channels);
         *reinterpret_cast<float4*>(&s_q[swz128(t, lane * 4)]) = *reinterpret_cast<const float4*>(
-            row + static_cast<int64_t>(g_idx) * SS + static_cast<ptrdiff_t>(lane * 4));
+            row + (static_cast<int64_t>(g_idx) * SS) + static_cast<ptrdiff_t>(lane * 4));
         *reinterpret_cast<float4*>(&s_k[swz128(t, lane * 4)]) = *reinterpret_cast<const float4*>(
-            row + BC_size + static_cast<int64_t>(g_idx) * SS + static_cast<ptrdiff_t>(lane * 4));
+            row + BC_size + (static_cast<int64_t>(g_idx) * SS) + static_cast<ptrdiff_t>(lane * 4));
     }
     // Per-token decay / learning rate — same formulas as gdn_scan_fused_kernel:
     // the transcendental part per token in parallel, the prefix sum (same
     // sequential order as before) on thread 0 after the barrier.
     if (tid < L) {
-        float alpha_h = __half2float(alpha_all[static_cast<size_t>(t0 + tid) * n_heads + h]);
+        float alpha_h = __half2float(alpha_all[(static_cast<size_t>(t0 + tid) * n_heads) + h]);
         float dt_val = alpha_h + dtb_h;
         dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
         s_logD[tid + 1] = fmaxf(A_h * dt_val, -20.0f);
-        float beta_h = __half2float(beta_all[static_cast<size_t>(t0 + tid) * n_heads + h]);
+        float beta_h = __half2float(beta_all[(static_cast<size_t>(t0 + tid) * n_heads) + h]);
         s_beta[tid] = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));
     }
     __syncthreads();
@@ -148,11 +148,11 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
     for (int t = 0; t < L; t++) {
         const float d_t1 = expf(s_logD[t + 1]);
         if (w_half) {
-            QE_s[t * SS + col] = d_t1 * s_q[swz128(t, col)];
+            QE_s[(t * SS) + col] = d_t1 * s_q[swz128(t, col)];
         } else {
             const float k_tc = s_k[swz128(t, col)];
-            KD_s[t * SS + col] = expf(logD_L - s_logD[t + 1]) * k_tc;
-            W_s[t * SS + col] = s_beta[t] * d_t1 * k_tc;
+            KD_s[(t * SS) + col] = expf(logD_L - s_logD[t + 1]) * k_tc;
+            W_s[(t * SS) + col] = s_beta[t] * d_t1 * k_tc;
         }
     }
     if (tid == 0)
@@ -171,22 +171,22 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
             acc[nt][0] = acc[nt][1] = acc[nt][2] = acc[nt][3] = 0.0f;
         for (int k0 = 0; k0 < SS; k0 += 16) {
             float a[8];
-            a[0] = A[swz128(m0 + g, k0 + 2 * tg)];
-            a[1] = A[swz128(m0 + g, k0 + 2 * tg + 1)];
-            a[2] = A[swz128(m0 + g + 8, k0 + 2 * tg)];
-            a[3] = A[swz128(m0 + g + 8, k0 + 2 * tg + 1)];
-            a[4] = A[swz128(m0 + g, k0 + 2 * tg + 8)];
-            a[5] = A[swz128(m0 + g, k0 + 2 * tg + 9)];
-            a[6] = A[swz128(m0 + g + 8, k0 + 2 * tg + 8)];
-            a[7] = A[swz128(m0 + g + 8, k0 + 2 * tg + 9)];
+            a[0] = A[swz128(m0 + g, k0 + (2 * tg))];
+            a[1] = A[swz128(m0 + g, k0 + (2 * tg) + 1)];
+            a[2] = A[swz128(m0 + g + 8, k0 + (2 * tg))];
+            a[3] = A[swz128(m0 + g + 8, k0 + (2 * tg) + 1)];
+            a[4] = A[swz128(m0 + g, k0 + (2 * tg) + 8)];
+            a[5] = A[swz128(m0 + g, k0 + (2 * tg) + 9)];
+            a[6] = A[swz128(m0 + g + 8, k0 + (2 * tg) + 8)];
+            a[7] = A[swz128(m0 + g + 8, k0 + (2 * tg) + 9)];
             const F16A af = f16_split_a(a);
 #pragma unroll
             for (int nt = 0; nt < kChunk / 8; nt++) {
                 float b[4];  // B[k][n] = K~[n][k]
-                b[0] = s_k[swz128(nt * 8 + g, k0 + 2 * tg)];
-                b[1] = s_k[swz128(nt * 8 + g, k0 + 2 * tg + 1)];
-                b[2] = s_k[swz128(nt * 8 + g, k0 + 2 * tg + 8)];
-                b[3] = s_k[swz128(nt * 8 + g, k0 + 2 * tg + 9)];
+                b[0] = s_k[swz128((nt * 8) + g, k0 + (2 * tg))];
+                b[1] = s_k[swz128((nt * 8) + g, k0 + (2 * tg) + 1)];
+                b[2] = s_k[swz128((nt * 8) + g, k0 + (2 * tg) + 8)];
+                b[3] = s_k[swz128((nt * 8) + g, k0 + (2 * tg) + 9)];
                 mma_f16x3(acc[nt], af, f16_split_b(b));
             }
         }
@@ -194,11 +194,11 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
         const int i0 = m0 + g, i1 = i0 + 8;
 #pragma unroll
         for (int nt = 0; nt < kChunk / 8; nt++) {
-            const int j = nt * 8 + 2 * tg;
-            dst[i0 * SQ + j] = (j <= i0 && i0 < L) ? acc[nt][0] : 0.0f;
-            dst[i0 * SQ + j + 1] = (j + 1 <= i0 && i0 < L) ? acc[nt][1] : 0.0f;
-            dst[i1 * SQ + j] = (j <= i1 && i1 < L) ? acc[nt][2] : 0.0f;
-            dst[i1 * SQ + j + 1] = (j + 1 <= i1 && i1 < L) ? acc[nt][3] : 0.0f;
+            const int j = (nt * 8) + (2 * tg);
+            dst[(i0 * SQ) + j] = (j <= i0 && i0 < L) ? acc[nt][0] : 0.0f;
+            dst[(i0 * SQ) + j + 1] = (j + 1 <= i0 && i0 < L) ? acc[nt][1] : 0.0f;
+            dst[(i1 * SQ) + j] = (j <= i1 && i1 < L) ? acc[nt][2] : 0.0f;
+            dst[(i1 * SQ) + j + 1] = (j + 1 <= i1 && i1 < L) ? acc[nt][3] : 0.0f;
         }
     }
     __syncthreads();  // region 1 is dead as k~/q~ from here on
@@ -215,25 +215,25 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
             const int t = idx / F4_PER_ROW, c4 = (idx % F4_PER_ROW) * 4;
             float4 u = make_float4(0.0f, 0.0f, 0.0f, 0.0f), w = u;
             if (t < L) {
-                const float* row = conv_f32 + static_cast<size_t>(t0 + t) * conv_channels;
-                u = *reinterpret_cast<const float4*>(row + static_cast<int64_t>(2) * BC_size +
-                                                     static_cast<int64_t>(h) * HD + c4);
+                const float* row = conv_f32 + (static_cast<size_t>(t0 + t) * conv_channels);
+                u = *reinterpret_cast<const float4*>(row + (static_cast<int64_t>(2) * BC_size) +
+                                                     (static_cast<int64_t>(h) * HD) + c4);
                 const float bt = s_beta[t];
                 u.x *= bt;
                 u.y *= bt;
                 u.z *= bt;
                 u.w *= bt;
-                w = *reinterpret_cast<const float4*>(&W_s[t * SS + c4]);  // RHS from phase A
+                w = *reinterpret_cast<const float4*>(&W_s[(t * SS) + c4]);  // RHS from phase A
             }
             *reinterpret_cast<float4*>(&s_u[swz128(t, c4)]) = u;
             *reinterpret_cast<float4*>(&s_w[swz128(t, c4)]) = w;
         }
         for (int idx = tid; idx < kChunk * kChunk; idx += 2 * HD) {
             const int i = idx / kChunk, j = idx % kChunk;
-            float* kk = &s_kk[i * SQ + j];
+            float* kk = &s_kk[(i * SQ) + j];
             *kk = (j < i && i < L) ? s_beta[i] * expf(s_logD[i + 1] - s_logD[j + 1]) * *kk : 0.0f;
             if (j <= i && i < L)
-                s_qk[i * SQ + j] *= expf(s_logD[i + 1] - s_logD[j + 1]);
+                s_qk[(i * SQ) + j] *= expf(s_logD[i + 1] - s_logD[j + 1]);
         }
     }
     __syncthreads();
@@ -255,11 +255,13 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
                 acc[nt][0] = acc[nt][1] = acc[nt][2] = acc[nt][3] = 0.0f;
             for (int k0 = 0; k0 < r0b; k0 += 16) {
                 float a[8];
-                const float2 p0 = *reinterpret_cast<const float2*>(&s_kk[(r0b + g) * SQ + k0 + 2 * tg]);
-                const float2 p1 = *reinterpret_cast<const float2*>(&s_kk[(r0b + g + 8) * SQ + k0 + 2 * tg]);
-                const float2 p2 = *reinterpret_cast<const float2*>(&s_kk[(r0b + g) * SQ + k0 + 2 * tg + 8]);
+                const float2 p0 = *reinterpret_cast<const float2*>(&s_kk[((r0b + g) * SQ) + k0 + (2 * tg)]);
+                const float2 p1 = *reinterpret_cast<const float2*>(
+                    &s_kk[((r0b + g + 8) * SQ) + k0 + (2 * tg)]);
+                const float2 p2 = *reinterpret_cast<const float2*>(
+                    &s_kk[((r0b + g) * SQ) + k0 + (2 * tg) + 8]);
                 const float2 p3 = *reinterpret_cast<const float2*>(
-                    &s_kk[(r0b + g + 8) * SQ + k0 + 2 * tg + 8]);
+                    &s_kk[((r0b + g + 8) * SQ) + k0 + (2 * tg) + 8]);
                 a[0] = p0.x;
                 a[1] = p0.y;
                 a[2] = p1.x;
@@ -272,16 +274,16 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
 #pragma unroll
                 for (int nt = 0; nt < 4; nt++) {
                     float bb[4];
-                    bb[0] = H[swz128(k0 + 2 * tg, nbase + nt * 8 + g)];
-                    bb[1] = H[swz128(k0 + 2 * tg + 1, nbase + nt * 8 + g)];
-                    bb[2] = H[swz128(k0 + 2 * tg + 8, nbase + nt * 8 + g)];
-                    bb[3] = H[swz128(k0 + 2 * tg + 9, nbase + nt * 8 + g)];
+                    bb[0] = H[swz128(k0 + (2 * tg), nbase + (nt * 8) + g)];
+                    bb[1] = H[swz128(k0 + (2 * tg) + 1, nbase + (nt * 8) + g)];
+                    bb[2] = H[swz128(k0 + (2 * tg) + 8, nbase + (nt * 8) + g)];
+                    bb[3] = H[swz128(k0 + (2 * tg) + 9, nbase + (nt * 8) + g)];
                     mma_f16x3(acc[nt], af, f16_split_b(bb));
                 }
             }
 #pragma unroll
             for (int nt = 0; nt < 4; nt++) {
-                const int cb = nbase + nt * 8 + 2 * tg;
+                const int cb = nbase + (nt * 8) + (2 * tg);
                 float2* p0 = reinterpret_cast<float2*>(&H[swz128(r0b + g, cb)]);
                 float2* p1 = reinterpret_cast<float2*>(&H[swz128(r0b + g + 8, cb)]);
                 const float2 v0 = *p0, v1 = *p1;
@@ -297,7 +299,7 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
                 x[i] = hist[swz128(r0b + i, col)];
 #pragma unroll
             for (int i = 1; i < BS; i++) {
-                const float* Ti = &s_kk[(r0b + i) * SQ + r0b];  // warp-broadcast reads
+                const float* Ti = &s_kk[((r0b + i) * SQ) + r0b];  // warp-broadcast reads
 #pragma unroll
                 for (int j = 0; j < i; j++)
                     x[i] -= Ti[j] * x[j];
@@ -317,7 +319,7 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
         for (int idx = tid; idx < 2 * F4; idx += 2 * HD) {
             const int e = (idx < F4) ? idx : idx - F4;
             const int t = e / F4R, c4 = e % F4R;
-            const int src = t * F4R + (c4 ^ ((t & 7) << 1));  // de-swizzle (float4 units)
+            const int src = (t * F4R) + (c4 ^ ((t & 7) << 1));  // de-swizzle (float4 units)
             if (idx < F4)
                 ua4[e] = su4[src];
             else
@@ -348,13 +350,13 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
                     for (int k0 = 0; k0 < kmax16; k0 += 16) {
                         float a[8];
                         const float2 p0 = *reinterpret_cast<const float2*>(
-                            &s_qk[(m0 + g) * SQ + k0 + 2 * tg]);
+                            &s_qk[((m0 + g) * SQ) + k0 + (2 * tg)]);
                         const float2 p1 = *reinterpret_cast<const float2*>(
-                            &s_qk[(m0 + g + 8) * SQ + k0 + 2 * tg]);
+                            &s_qk[((m0 + g + 8) * SQ) + k0 + (2 * tg)]);
                         const float2 p2 = *reinterpret_cast<const float2*>(
-                            &s_qk[(m0 + g) * SQ + k0 + 2 * tg + 8]);
+                            &s_qk[((m0 + g) * SQ) + k0 + (2 * tg) + 8]);
                         const float2 p3 = *reinterpret_cast<const float2*>(
-                            &s_qk[(m0 + g + 8) * SQ + k0 + 2 * tg + 8]);
+                            &s_qk[((m0 + g + 8) * SQ) + k0 + (2 * tg) + 8]);
                         a[0] = p0.x;
                         a[1] = p0.y;
                         a[2] = p1.x;
@@ -367,10 +369,10 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
 #pragma unroll
                         for (int nt = 0; nt < HD / 16; nt++) {
                             float b[4];
-                            b[0] = B[swz128(k0 + 2 * tg, nbase + nt * 8 + g)];
-                            b[1] = B[swz128(k0 + 2 * tg + 1, nbase + nt * 8 + g)];
-                            b[2] = B[swz128(k0 + 2 * tg + 8, nbase + nt * 8 + g)];
-                            b[3] = B[swz128(k0 + 2 * tg + 9, nbase + nt * 8 + g)];
+                            b[0] = B[swz128(k0 + (2 * tg), nbase + (nt * 8) + g)];
+                            b[1] = B[swz128(k0 + (2 * tg) + 1, nbase + (nt * 8) + g)];
+                            b[2] = B[swz128(k0 + (2 * tg) + 8, nbase + (nt * 8) + g)];
+                            b[3] = B[swz128(k0 + (2 * tg) + 9, nbase + (nt * 8) + g)];
                             mma_f16x3(acc[nt], af, f16_split_b(b));
                         }
                     }
@@ -381,41 +383,41 @@ __global__ void __launch_bounds__(2 * HD, 1) gdn_chunkpar_intra_kernel(
                     const int kmax = (L + 7) & ~7;
                     for (int k0 = 0; k0 < kmax; k0 += 8) {
                         float a[4];
-                        a[0] = s_qk[(m0 + g) * SQ + k0 + tg];
-                        a[1] = s_qk[(m0 + g + 8) * SQ + k0 + tg];
-                        a[2] = s_qk[(m0 + g) * SQ + k0 + tg + 4];
-                        a[3] = s_qk[(m0 + g + 8) * SQ + k0 + tg + 4];
+                        a[0] = s_qk[((m0 + g) * SQ) + k0 + tg];
+                        a[1] = s_qk[((m0 + g + 8) * SQ) + k0 + tg];
+                        a[2] = s_qk[((m0 + g) * SQ) + k0 + tg + 4];
+                        a[3] = s_qk[((m0 + g + 8) * SQ) + k0 + tg + 4];
                         const Tf32A af = tf32_a(a);
 #pragma unroll
                         for (int nt = 0; nt < HD / 16; nt++) {
                             float b[2];
-                            b[0] = B[swz128(k0 + tg, nbase + nt * 8 + g)];
-                            b[1] = B[swz128(k0 + tg + 4, nbase + nt * 8 + g)];
+                            b[0] = B[swz128(k0 + tg, nbase + (nt * 8) + g)];
+                            b[1] = B[swz128(k0 + tg + 4, nbase + (nt * 8) + g)];
                             mma_tf32(acc[nt], af, tf32_b(b));
                         }
                     }
                 }
 #pragma unroll
                 for (int nt = 0; nt < HD / 16; nt++) {
-                    const int cb = nbase + nt * 8 + 2 * tg;
+                    const int cb = nbase + (nt * 8) + (2 * tg);
                     if (which == 0) {
                         if (r0 < L) {
-                            float2* q = reinterpret_cast<float2*>(&QE_s[r0 * SS + cb]);
+                            float2* q = reinterpret_cast<float2*>(&QE_s[(r0 * SS) + cb]);
                             const float2 v = *q;
                             *q = make_float2(v.x - acc[nt][0], v.y - acc[nt][1]);
                         }
                         if (r1 < L) {
-                            float2* q = reinterpret_cast<float2*>(&QE_s[r1 * SS + cb]);
+                            float2* q = reinterpret_cast<float2*>(&QE_s[(r1 * SS) + cb]);
                             const float2 v = *q;
                             *q = make_float2(v.x - acc[nt][2], v.y - acc[nt][3]);
                         }
                     } else {
                         if (r0 < L)
-                            *reinterpret_cast<float2*>(&YA_s[r0 * HD + cb]) =
-                                make_float2(acc[nt][0], acc[nt][1]);
+                            *reinterpret_cast<float2*>(&YA_s[(r0 * HD) + cb]) = make_float2(acc[nt][0],
+                                                                                            acc[nt][1]);
                         if (r1 < L)
-                            *reinterpret_cast<float2*>(&YA_s[r1 * HD + cb]) =
-                                make_float2(acc[nt][2], acc[nt][3]);
+                            *reinterpret_cast<float2*>(&YA_s[(r1 * HD) + cb]) = make_float2(acc[nt][2],
+                                                                                            acc[nt][3]);
                     }
                 }
             }
@@ -430,7 +432,7 @@ void chunkpar_intra_128(const float* conv_f32, const half* alpha, const half* be
                         int n_heads, int n_groups, int conv_channels, int grouped_layout,
                         cudaStream_t stream) {
     constexpr int HD = 128, SS = 128;
-    constexpr size_t smem = (2 * kChunk * SS + 2 * kChunk * (kChunk + 4) + kChunk + (kChunk + 1)) *
+    constexpr size_t smem = ((2 * kChunk * SS) + (2 * kChunk * (kChunk + 4)) + kChunk + (kChunk + 1)) *
                             sizeof(float);
     static std::once_flag attr_once;
     std::call_once(attr_once, [] {
@@ -513,7 +515,7 @@ void chunkpar_launch(const float* conv_f32, int conv_channels, const half* alpha
 
 size_t gdn_scan_chunkpar_workspace_bytes(int n_heads) {
     const size_t slots = static_cast<size_t>(chunkpar::kMaxStripChunks) * n_heads;
-    return (5 * slots * kChunk * 128 + slots + static_cast<size_t>(n_heads) * 128 * 128) * sizeof(float);
+    return ((5 * slots * kChunk * 128) + slots + (static_cast<size_t>(n_heads) * 128 * 128)) * sizeof(float);
 }
 
 void gdn_scan_chunkpar_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,

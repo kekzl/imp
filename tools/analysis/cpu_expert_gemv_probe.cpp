@@ -12,6 +12,7 @@
 //   g++ -O3 -march=native -fopenmp -o /tmp/probe tools/analysis/cpu_expert_gemv_probe.cpp
 //   /tmp/probe [misses_per_token] [tokens] [threads]
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -41,7 +42,7 @@ float fp8_e4m3_slow(uint8_t b) {
     if (e == 0)
         v = float(m) / 8.0f * 0.015625f;  // 2^-6 subnormal
     else
-        v = (1.0f + float(m) / 8.0f) * std::ldexp(1.0f, e - 7);
+        v = (1.0f + (float(m) / 8.0f)) * std::ldexp(1.0f, e - 7);
     return s ? -v : v;
 }
 
@@ -69,17 +70,17 @@ uint64_t read_only(const uint8_t* p, size_t n) {
 void gemv_expert(const uint8_t* packed, const uint8_t* scales, const float* x, float* y,
                  int row_begin, int row_end) {
     for (int n = row_begin; n < row_end; ++n) {
-        const uint8_t* w = packed + size_t(n) * (kK / 2);
-        const uint8_t* s = scales + size_t(n) * (kK / 16);
+        const uint8_t* w = packed + (size_t(n) * (kK / 2));
+        const uint8_t* s = scales + (size_t(n) * (kK / 16));
         float acc = 0.0f;
         for (int kb = 0; kb < kK / 16; ++kb) {
             const float sc = kFp8.v[s[kb]];
             float blk = 0.0f;
-            const uint8_t* wb = w + static_cast<size_t>(kb) * 8;
+            const uint8_t* wb = w + (static_cast<size_t>(kb) * 8);
             for (int j = 0; j < 8; ++j) {
                 const uint8_t byte = wb[j];
-                blk += kFp4[byte & 0xF] * x[kb * 16 + j * 2];
-                blk += kFp4[byte >> 4] * x[kb * 16 + j * 2 + 1];
+                blk += kFp4[byte & 0xF] * x[(kb * 16) + (j * 2)];
+                blk += kFp4[byte >> 4] * x[(kb * 16) + (j * 2) + 1];
             }
             acc += blk * sc;
         }
@@ -122,10 +123,9 @@ int main(int argc, char** argv) {
                 pool.emplace_back([&, th] {
                     uint64_t sink = 0;
                     for (int i = th; i < misses; i += threads) {
-                        const uint8_t* base = slab.data() + idx[i] * kExpertBytes;
+                        const uint8_t* base = slab.data() + (idx[i] * kExpertBytes);
                         if (compute)
-                            gemv_expert(base, base + kPacked, x.data(),
-                                        y.data() + size_t(kN) * th, 0, kN);
+                            gemv_expert(base, base + kPacked, x.data(), y.data() + (size_t(kN) * th), 0, kN);
                         else
                             sink += read_only(base, kExpertBytes);
                     }
@@ -151,8 +151,7 @@ int main(int argc, char** argv) {
         const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         const double gb = double(misses) * kExpertBytes / 1e9;
         printf(" dequant+gemv %7.2f ms  %6.1f GB/s\n", ms, gb / (ms / 1e3));
-        if (ms < best_ms)
-            best_ms = ms;
+        best_ms = std::min(best_ms, ms);
     }
 
     const double gb = double(misses) * kExpertBytes / 1e9;

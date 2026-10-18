@@ -72,8 +72,8 @@ json vllm_prompt_logprobs_json(const std::vector<int32_t>& prompt, const imp::Pr
         const size_t row = pos - 1;  // row p scores prompt[p + 1]
         json entry = json::object();
         for (size_t k = 0; k < use; ++k) {
-            const int32_t id = p.top_ids[row * top + k];
-            entry[std::to_string(id)] = {{"logprob", p.top_lp[row * top + k]},
+            const int32_t id = p.top_ids[(row * top) + k];
+            entry[std::to_string(id)] = {{"logprob", p.top_lp[(row * top) + k]},
                                          {"rank", static_cast<int>(k) + 1},
                                          {"decoded_token", safe_token_json(text(id))}};
         }
@@ -131,7 +131,7 @@ json echo_completions_logprobs_json(const std::vector<int32_t>& prompt, const im
             token_logprobs.push_back(p.token_lp[row]);
             std::vector<std::pair<std::string, float>> alts;
             for (size_t k = 0; k < use; ++k)
-                alts.emplace_back(text(p.top_ids[row * top + k]), p.top_lp[row * top + k]);
+                alts.emplace_back(text(p.top_ids[(row * top) + k]), p.top_lp[(row * top) + k]);
             top_logprobs.push_back(top_object(alts));
         }
         advance_cursor(cursor, piece, full_text);
