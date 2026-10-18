@@ -217,3 +217,9 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 |---|---|---|
 | R-119.5 | DONE (opt-in) | `TokenRecycleTable::draft_tree` + `observe_rank` (slot hit rates from verify-row argmax), `speculative.recycle_tree`; PERF_LOG 2026-10-18 119.5: deterministic sum over prose / code / list 24.70 -> 24.99 (w8 d3) / 25.10 (w8 d7) tok/s, per prompt -6 .. +6 %; lossless 1193 bytes identical with 21 verifies; tests `TreeBranchesBelowTheRootByRankSum`, `TreeLearnsSlotHitRates`, `TreeKeepsWidthAndDepth` (mutants: rank cost dropped, hit counter dropped, both fail) |
 | R-119.6 | DROPPED | shared-prefix mask only pays when compute limits before 64 rows: 196.6 ms/verify at 32 rows vs 204.1 at 64 |
+
+## 2026-10-18 Batch 15: R-065 Q8_0 K128 kernel
+
+| ID | Status | Evidence |
+|---|---|---|
+| R-065 | WONTFIX (NO-GO) | PERF_LOG 2026-10-18 row 65, gate-up M=512 under ncu: base 215.8 us; 512 threads 219.7; IMMA onto magic bits instead of I2FP 216.9; BM=32 column tail 165.0 + 56.4; each arm `MmqQ8Imma.*` 30/30 (tail arm 31/31 with its own bit-identity test); code reverted, ROADMAP row 65 closed with a reopen condition |

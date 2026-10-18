@@ -4,6 +4,23 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-10-18 · Q8_0 K128 prefill kernel: three levers refuted (ROADMAP row 65)
+
+Protocol: Qwen3-8B Q8_0, `tools/roofline/inventory/ncu_cell.sh q8-8b pp512 mmq_imma_q8k128` (clocks unlocked, 2.17 GHz under ncu), gate-up launch M=512 N=12288 K=4096 = grid 96 x 4 = 384 tiles on 170 SMs; one image per arm, `test-quant --gtest_filter='MmqQ8Imma.*'` green on every arm (bit identity included).
+
+| Arm | gate-up us | Counters |
+|---|---:|---|
+| base: BM=128, 256 threads, I2FP | 215.8 | tensor 31.5 % elapsed (busiest SM 41.8 %), issue 0.46 per cycle, stalls per issue wait 0.86, math_pipe_throttle 0.52, L2 46.6 %, 155 regs |
+| 512 threads (16 warps, 93 regs) | 219.7 | tensor 41.0 % of active cycles, aluheavy 27.3 %, fma 28.0 %, issue 0.50, math_pipe_throttle 1.70, barrier 1.22 |
+| IMMA C = 0x4B400000, FADD instead of I2FP (exact, 256 FADD for 256 I2FP) | 216.9 | vs the 512-thread arm: aluheavy 27.3 -> 3.7 %, fma 28.0 -> 38.0 %, issue 0.45 |
+| last 11 column tiles as BM=32 (340 BM=128 tiles = 2 waves + 176 BM=32 CTAs) | 165.0 + 56.4 | full waves 82 us each vs 72 us average before |
+
+- SASS per BM=128 k-step: 64 IMMA, 256 I2FP + 256 FMUL + 256 FFMA, 80 LDS + 80 HADD2, 24 LDSM: about 19.6 instructions per IMMA (123.3M for the launch), 16 issue slots per IMMA at the INT8 rate.
+- `fma.rn.f32x2` compiles to two FFMA on sm_120a: no packed FP32 epilogue.
+- Verdict: the kernel is latency-bound at 2 warps per scheduler and shares L2 / clock at full occupancy; none of the three moves the launch. Code reverted; reopen with a larger tile class.
+
+---
+
 ## 2026-10-18 · best-first tree drafter for token recycling, opt-in (ROADMAP row 119.5)
 
 Protocol: Qwen3-14B Q6_K, `--gpu-layers 0`, `IMP_DETERMINISTIC=1`, `imp-cli --prompt ... --max-tokens 160 --temperature 0`, `speculative.recycle_width` / `recycle_depth` / `recycle_tree` per arm. Tree = `TokenRecycleTable::draft_tree`: the `width` lowest-cost paths, hop cost log2(rate(0) / rate(r)) from slot hit rates learned on every verify row's argmax (`observe_rank`).
