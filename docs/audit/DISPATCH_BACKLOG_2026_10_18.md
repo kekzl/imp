@@ -94,3 +94,44 @@ PR #2777 merged batches 1-3 (809ad716). Continued on `auto/backlog-2026-10-18b`.
 | B-35 | DONE (this commit) | server: InternVL `video` part = one image per frame, `Frame{i}: ` lines; golden rows written from HF `replace_video_token`, not from imp output; InternVL3.5-2B e2e: "A cat and red double decker buses.", 1077 prompt tokens; validator PASS (logic), gates fixed after its run (API_FEATURES 301 -> 300 lines, format, stale 400 text) |
 
 Decision (B-35): frames use the image path (448, ImageNet mean/std) as OpenGVLab's `load_video(..., max_num=1)`, not the checkpoint's `video_preprocessor_config.json` (384 x 384, CLIP stats), which cannot give the 256 tokens `replace_video_token` writes per frame. `imp-cli --video-frames` stays Qwen3-VL only.
+
+PR #2778 merged B-35 (6d1c883d). Continued on `auto/backlog-2026-10-18c`.
+
+## 2026-10-18 Batch 5: roadmap measurements (R-077, R-065, R-049)
+
+| ID | Status | Evidence |
+|---|---|---|
+| R-077 | DONE (this commit) | Gemma-4-26B-A4B Q4_K_M, `imp-cli --bench --bench-pp 512 --bench-reps 3`, ngram off: overlay tg 256.48 / pp512 16221.60 tok/s, PPL 231.1655; MMVQ (`diagnostics.no_nvfp4_decode_cache=true`) 116.85 / 13904.67, PPL 223.7162. Overlay stays; every kernel the row names is reachable through a knob or MTP, none retired (deleting a knob's path is a user-facing removal); resolver log corrected |
+| R-065 | OPEN, re-measured | `tools/roofline/inventory/ncu_cell.sh q8-8b pp512` (clocks not locked on this host): `mmq_imma_q8k128_kernel` grid 32x4 117.3 us / tensor pipe 30.9 %, grid 96x4 215.4 us / 31.6 %; `mmq_imma_kernel<32>` grid 8x16 34.8 us / 12.6 %; nsys pp512: K128 kernel 51.2 % of prefill GPU time |
+| R-049 | OPEN, verify cost measured | Qwen3-14B NVFP4 11.87-12.72 ms per 2-token verify (k 1/3/7/15 all draft 1 on the bench history) vs 5.94 ms decode (168.23 tok/s); Q6_K 14.14 ms per 4.12-token verify; next sub-item: forced-width verify harness for widths 8..16 |
+
+Finding beside R-049: on Qwen3-14B-NVFP4 a 2-token n-gram verify costs 2.0x a decode step, so n-gram at width 2 gains nothing there (6.1 vs 5.94 ms per token).
+
+## 2026-10-18 Batch 6: radix top-k (B-25), speculation under offload (R-119.1, R-119.3), L-row splits
+
+Builder (subagent): B-25; it paused twice for this session's GPU lock (holder `imp-05m`) as the rules require. Validator (fresh agent, opus): B-25 PASS (dispatch, tie-break proof against legacy, smem 5176/5680 B static, stack 0, launch checks, test registered in `test-compute`); offload give-up PARTIAL: the post-verify give-up (acceptance-poor / draft-poor) was still live under offload, now gated too and re-measured.
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-25 | DONE (this batch) | topk partial + finalize 66.77 -> 18.76 us per decode step; `TopkRadixSampler.*` 3 tests, 588 configs x 12 seeds byte-compared vs legacy; mutant (tie-break `r = ix[p]`) fails it; 45/45 sampling tests on the build |
+| R-119.1 | DONE | Qwen3-14B Q6_K `--gpu-layers 0`: tg 188.6 ms/token, pp 4/16/64 = 189.70/193.53/189.71 ms; `--gpu-layers 20`: 97.1 ms, 116.93/109.40/111.76; resident: tg 5.7 ms, pp 64 44.86 ms. t(64)/t(1) = 1.0 at full streaming: GO |
+| R-119.3 | DONE (this batch) | n-gram ran under offload already (k=16 default; bench history 3.99 tok/verify at 190.54 ms vs 188.6 ms decode); both give-up rules gated with `!offload_mgr_`; code rewrite 5.30 -> 6.83 tok/s, prose 5.28 -> 5.29 |
+| R-119.2 | OPEN | real-text acceptance: code rewrite 5 verifies x 10.00 tok/verify, prose 0 drafts (suffix drafter finds nothing); `speculative.k` 3/7/15 changes nothing on the bench history (the suffix drafter sizes the draft) |
+| R-112 | OPEN | split below; 112.1 (decision measurement) next |
+
+Plan agent split (verified anchors), kept here as the work queue:
+
+| Sub-item | Goal | Anchor |
+|---|---|---|
+| 112.1 | share of decode time cold-page fetches would cost at `sparse_topk=4096` (32 KiB slots, mapped pinned gather) | `src/exec/executor_attention_decode.cpp:142`, `tools/analysis/h2d_gather_probe.cu:50` |
+| 112.2 | spill carries key min/max so spill and sparse decode can coexist | `src/memory/kv_host_spill.cpp:11`, `src/runtime/engine_init_resolver.cpp:910-912` |
+| 112.3 | mapped spill buffer, GPU-only gather (no mailbox) | `src/memory/kv_host_spill.cpp:116` |
+| 112.4 | KVCacheManager owns cold pages of live sequences | `src/memory/kv_cache_manager.h:358` |
+| 112.5 | selection scores cold pages, gather into a VRAM ring | `src/exec/sparse_attn_select.cu:654` |
+| 112.6 | full-KV readers restore cold pages in bulk | `src/exec/executor_attention_decode.cpp:119` |
+| 112.7 | end to end: more concurrent long sessions than VRAM holds | `tools/analysis/serving_sparse_ab.sh` |
+| 119.4 | lift multi-candidate verify caps (width 8, 17 rows) under offload | `src/runtime/engine_spec_ngram.cpp:418-421`, `src/runtime/engine_spec_capture.cpp:63` |
+| 119.5 | best-first tree drafter from suffix votes and recycling | `src/runtime/engine_spec_ngram.cpp:424` |
+| 119.6 | shared-prefix tree mask, only if compute limits before 64 rows | `src/runtime/engine_spec_ngram.cpp:727-760` |
+
+No dense model > 32 GB is local; `Qwen3-14B-Q6_K.gguf` at `--gpu-layers 0` stands in (streams about the overflow of a 44 GB dense model).

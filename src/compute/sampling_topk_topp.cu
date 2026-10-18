@@ -298,9 +298,9 @@ __global__ void topk_finalize_rows_kernel(const TopkRowArgs* __restrict__ rows, 
 // (caller guarantees >= SAMPLE_SCRATCH_BYTES). Both kernels are graph-capturable
 // (no allocation, fixed topology for a given vocab_size/top_k). Returns the launch status (#2310);
 // finalize is not launched after a failed partial.
-static cudaError_t launch_topk_topp_multiblock(const float* d_logits, int vocab_size, int top_k, float top_p,
+cudaError_t launch_topk_topp_multiblock_legacy(const float* d_logits, int vocab_size, int top_k, float top_p,
                                                float inv_temperature, unsigned int seed, int32_t* d_result,
-                                               cudaStream_t stream, const int* d_seed_salt = nullptr) {
+                                               cudaStream_t stream, const int* d_seed_salt) {
     char* base = reinterpret_cast<char*>(d_result);
     float* block_max = reinterpret_cast<float*>(base + sizeof(int32_t));
     float* block_sum = block_max + SAMPLE_NBLOCKS;
@@ -326,8 +326,8 @@ static cudaError_t launch_topk_topp_multiblock(const float* d_logits, int vocab_
     return sampler_launch_status(cudaGetLastError(), "topk_multiblock");
 }
 
-cudaError_t launch_topk_topp_rows(const TopkRowArgs* d_rows, int n_rows, int max_top_k, int vocab_size,
-                                  cudaStream_t stream) {
+cudaError_t launch_topk_topp_rows_legacy(const TopkRowArgs* d_rows, int n_rows, int max_top_k, int vocab_size,
+                                         cudaStream_t stream) {
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     // Shared-memory sizes carved with the batch's max top_k — every block
     // carves with its OWN row's top_k, which is <= max_top_k.

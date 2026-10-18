@@ -453,7 +453,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         return false;
     if (draft.empty() && !mc_on) {
         spec_stats_.miss_steps++;
-        if (++req->spec_consecutive_misses >= scfg.give_up_after && scfg.give_up_after > 0 &&
+        // Giving up re-arms the graph loop, which layer offload never runs: there a miss is a plain decode
+        // step. Qwen3-14B Q6_K --gpu-layers 0, code rewrite: 5.30 -> 6.76 tok/s without the give-up.
+        if (++req->spec_consecutive_misses >= scfg.give_up_after && scfg.give_up_after > 0 && !offload_mgr_ &&
             !req->spec_ngram_given_up) {
             req->spec_ngram_given_up = true;
             req->spec_last_giveup_pos = static_cast<int>(req->output_tokens.size());
@@ -1238,7 +1240,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     const bool acceptance_poor =
         req->spec_verifies >= 8 &&
         req->spec_accepted * 100 < req->spec_drafted * 15;
-    if (!req->spec_ngram_given_up && scfg.give_up_after > 0 &&
+    // Layer offload: a verify costs one streamed pass like a decode step (190.5 vs 188.6 ms), nothing to
+    // amortize.
+    if (!req->spec_ngram_given_up && scfg.give_up_after > 0 && !offload_mgr_ &&
         (acceptance_poor || req->spec_consecutive_misses >= scfg.give_up_after)) {
         req->spec_ngram_given_up = true;
         req->spec_last_giveup_pos = static_cast<int>(req->output_tokens.size());

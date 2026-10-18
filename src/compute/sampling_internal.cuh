@@ -49,6 +49,28 @@ inline void sampler_launch_begin(const char* who) {
 void sampling_cleanup_cub();  // frees CUB sort scratch (sampling_topk_topp.cu)
 void sampling_cleanup_dry();  // frees DRY penalty buffers (sampling_penalties.cu)
 
+// Top-k/top-p two-phase sampler, d_result = SAMPLE_SCRATCH_BYTES slot. Radix (sampling_topk_radix.cu)
+// writes the same scratch bytes and token as legacy (sampling_topk_topp.cu) for supported shapes.
+[[nodiscard]] bool topk_radix_supported(int vocab_size, int max_top_k);
+// Dispatch: radix where supported, else legacy (sampling_topk_radix.cu).
+[[nodiscard]] cudaError_t launch_topk_topp_multiblock(const float* d_logits, int vocab_size, int top_k,
+                                                      float top_p, float inv_temperature, unsigned int seed,
+                                                      int32_t* d_result, cudaStream_t stream,
+                                                      const int* d_seed_salt = nullptr);
+[[nodiscard]] cudaError_t launch_topk_topp_radix(const float* d_logits, int vocab_size, int top_k,
+                                                 float top_p, float inv_temperature, unsigned int seed,
+                                                 int32_t* d_result, cudaStream_t stream,
+                                                 const int* d_seed_salt);
+[[nodiscard]] cudaError_t launch_topk_topp_multiblock_legacy(const float* d_logits, int vocab_size, int top_k,
+                                                             float top_p, float inv_temperature,
+                                                             unsigned int seed, int32_t* d_result,
+                                                             cudaStream_t stream, const int* d_seed_salt);
+struct TopkRowArgs;
+[[nodiscard]] cudaError_t launch_topk_topp_rows_radix(const TopkRowArgs* d_rows, int n_rows, int max_top_k,
+                                                      int vocab_size, cudaStream_t stream);
+[[nodiscard]] cudaError_t launch_topk_topp_rows_legacy(const TopkRowArgs* d_rows, int n_rows, int max_top_k,
+                                                       int vocab_size, cudaStream_t stream);
+
 // Warp-level argmax reduction: returns the (value, index) of the maximum
 // across all lanes in the warp.
 __device__ __forceinline__ void warp_argmax(float& val, int& idx) {
