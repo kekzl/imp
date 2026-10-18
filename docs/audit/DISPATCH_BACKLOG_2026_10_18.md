@@ -145,3 +145,14 @@ PR #2779 merged batches 5-6 (5e10de3c). Continued on `auto/backlog-2026-10-18d`.
 | R-119.2 | DONE (this commit) | recycle_width sweep under `--gpu-layers 0` (PERF_LOG 2026-10-18): width 4 best, prose 5.30 -> 6.13, code 6.85 -> 8.87 tok/s; `apply_offload_recycling_default` (`src/runtime/offload_spec_defaults.h`, called first in `init_resolve_sparse_attention_`) turns recycling on (width 4) under offload unless set; `OffloadSpecDefaults.*` 3 CPU tests; resident model: no auto line; lossless: server byte A/B identical (1193 bytes, 19 verifies) with sparse pinned off in both arms |
 
 Decision: under offload recycling outranks sparse decode (recycling refuses the sparse key min/max pool, `sparse_minmax_refusal`); a streamed pass is PCIe-bound, attention cost is not the limit there. An operator who wants sparse sets `speculative.token_recycling=false`.
+
+PR #2780 merged batch 7 (09797f27).
+
+## 2026-10-18 Phase 3: final sweep and report
+
+| ID | Status | Evidence |
+|---|---|---|
+| R-119.4 | OPEN, measured | recycling width 8 below width 4 under offload (prose 6.09 vs 6.13, code 8.43 vs 8.87 tok/s): wider candidate rows wait for a better drafter (119.5) |
+| B-29 | BLOCKED | a and d DONE; b, c, e, f blocked on models or the reserve decision |
+
+Final gates on main 09797f27: `make build` exit 0, `make test-gpu` 3756 ran 0 failed, `make dev-test` 13/13, `make preflight` 0 failures; inventory re-run: 0 comment markers, 0 open issues / PRs. Report: [`REPORT_BACKLOG_2026_10_18.md`](REPORT_BACKLOG_2026_10_18.md).
