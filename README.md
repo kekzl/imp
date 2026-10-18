@@ -9,8 +9,8 @@ commit: 95a448b7
   <img src="docs/logo.svg" alt="imp" width="500">
 </p>
 
-<p align="center"><b>Your RTX 5090 is faster than your inference engine. imp fixes that.</b><br>
-one <code>docker run</code> · OpenAI and Anthropic API · built-in chat · Linux or WSL2</p>
+<p align="center"><b>Your RTX 50-series or RTX PRO Blackwell card is faster than your inference engine. imp fixes that.</b><br>
+RTX 5050 to 5090 · RTX PRO 2000 to 6000 · one <code>docker run</code> · OpenAI and Anthropic API · built-in chat · Linux or WSL2</p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/kekzl/imp?style=flat&color=blue" alt="License"></a>
@@ -18,7 +18,7 @@ one <code>docker run</code> · OpenAI and Anthropic API · built-in chat · Linu
   <img src="https://img.shields.io/badge/C++-23-00599C?style=flat&logo=cplusplus" alt="C++23">
 </p>
 
-General-purpose engines run on every GPU, so none of them is built around yours. imp is written for exactly one chip, the RTX 5090 generation (`sm_120a`), and uses what that chip has: native 4-bit (FP4) math, its tensor cores, its memory bandwidth.
+General-purpose engines run on every GPU, so none of them is built around yours. imp is written for exactly one chip generation, Blackwell `sm_120a` (every GeForce RTX 50 and RTX PRO Blackwell card, tuned on the RTX 5090), and uses what that chip has: native 4-bit (FP4) math, its tensor cores, its memory bandwidth.
 
 ### Qwen3.8-27B: text and images, on one card
 
@@ -58,7 +58,7 @@ The 123.6 GiB checkpoint does not fit in 32 GB. imp keeps its 56.25 GiB of exper
 
 | You have | imp |
 | --- | --- |
-| RTX 5090 (32 GB, the tested one), 5080, 5070 Ti, RTX PRO 6000 | yes |
+| GeForce RTX 5090 (tested), 5080, 5070 Ti, 5070, 5060 Ti, 5060, 5050 or RTX PRO 6000, 5000, 4500, 4000, 2000 Blackwell | yes: same kernels, VRAM decides the model ([which card, which model](docs/QUICKSTART.md#which-card)) |
 | any other GPU, CPU only, several GPUs | no: use [llama.cpp](https://github.com/ggerganov/llama.cpp) for breadth, [vLLM](https://github.com/vllm-project/vllm) for many GPUs ([who fits where](docs/PERF.md#competitive-standing)) |
 
 imp has one author: issues are welcome, answers are not guaranteed.
@@ -75,7 +75,7 @@ imp has one author: issues are welcome, answers are not guaranteed.
 | another model family | **gpt-oss-20b** or **Gemma-4-26B-A4B** | both in the [GGUF sweep](docs/BENCHMARKS.md) |
 | the biggest model, and ~62 GiB of free RAM | **Qwen3.8-Flash-Next** NVFP4 | too big for 32 GB: the experts live in host RAM ([above](#qwen38-flash-next-four-times-bigger-than-the-card)) |
 
-**Will it fit?** Weights plus the KV cache (the model's memory of the conversation) must fit in the card's 32 GB. imp sizes the context to what is left after the weights, and refuses at load a model whose experts do not fit instead of running it wrong. Every family that loads, with its size: [`docs/MODELS.md`](docs/MODELS.md).
+**Will it fit?** Weights plus the KV cache (the model's memory of the conversation) must fit in the card's VRAM (32 GB on a 5090, [per card](docs/QUICKSTART.md#which-card)). imp sizes the context to what is left after the weights, and refuses at load a model whose experts do not fit instead of running it wrong. Every family that loads, with its size: [`docs/MODELS.md`](docs/MODELS.md).
 
 **Two file formats, no conversion step:** a **GGUF file** (as used by llama.cpp) or a **SafeTensors directory** in NVFP4 (NVIDIA Model Optimizer, llm-compressor, or imp's own `imp-quantize`). Your own BF16/FP8 checkpoint: [`docs/QUANTIZATION.md`](docs/QUANTIZATION.md).
 
