@@ -49,6 +49,23 @@ docker buildx imagetools inspect ghcr.io/kekzl/imp:<version> --format '{{ json .
 
 Exit 0 from `cosign verify` = built by `release-docker.yml` from a `v*` tag of this repo. Pin the digest it prints (`ghcr.io/kekzl/imp@sha256:...`) in production.
 
+## Without Docker
+
+Releases attach `imp-<version>-linux-x86_64.tar.gz` (+ `.sha256`, `.sigstore.json`): `imp-server`, `imp-cli`, `imp-quantize`, `imp-bench` with cudart, cuBLAS, glibc and its loader bundled. The host needs only the NVIDIA driver.
+
+```sh
+tar -xzf imp-<version>-linux-x86_64.tar.gz
+imp-<version>-linux-x86_64/bin/imp-server --model ~/models/<model> --port 8080
+cosign verify-blob imp-<version>-linux-x86_64.tar.gz --bundle imp-<version>-linux-x86_64.tar.gz.sigstore.json \
+  --certificate-identity-regexp '^https://github\.com/kekzl/imp/\.github/workflows/release-docker\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+- `bin/` holds launchers that start `libexec/` with the bundled loader (`scripts/bundle_release.sh`); only `libcuda.so.1` comes from the host.
+- Size: 824 MB packed (v0.53.0 tree, 46 libraries; cuBLASLt 521 MB, cuSPARSE + cuSOLVER for `imp-quantize` 346 MB).
+- Tested: `debian:12` (glibc 2.36) and `ubuntu:22.04` resolve every library from `lib/`; `debian:12 --gpus all` serves Llama-3.2-3B Q8_0 greedy byte-identical to `imp:test` (713 bytes).
+- Build it locally: `make bundle` writes `dist/`.
+
 ## Configuration
 
 Three layers, later wins: `imp.conf` → `--config <file>` → `--set key=value`.

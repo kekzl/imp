@@ -192,3 +192,9 @@ Orchestrator only. The batch-7 width-8 arm ran at depth 1: `width * (1 + depth) 
 | R-119.4 | DONE | `recycle_mc_shape` (`src/runtime/offload_spec_defaults.h`): 64 rows under offload, 17 resident (unchanged); `kOffloadRecycleWidth` 4 -> 8; PERF_LOG 2026-10-18 row 119.4: prose 6.12 -> 7.22, code 8.90 -> 9.80 tok/s; server `--gpu-layers 0` greedy, default vs speculation off: 1169 bytes identical; log `auto -> on, width 8 (layer offload)` |
 
 Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFourRows` (test-core); `OffloadTurnsRecyclingOnAtWidthEight` pins the constant; `OperatorKeysWin` moved its explicit width 8 -> 2 (8 is now the default and would not show the operator key winning).
+
+## 2026-10-18 Batch 11: owner answer R-055 (A: tarball, CUDA libraries bundled)
+
+| ID | Status | Evidence |
+|---|---|---|
+| R-055 | DONE | Dockerfile `bundle` stage + `scripts/bundle_release.sh`: libexec/ binaries, every ldd-resolved library except `libcuda.so.1` (glibc and loader included, the binaries need GLIBC_2.43 via `sqrtf`), bin/ launchers run the bundled loader; 824 MB, 46 libs; `release-docker.yml` checks, cosign-signs and attaches it; `debian:12` and `ubuntu:22.04`: no library outside lib/; `debian:12 --gpus all` Llama-3.2-3B Q8_0 greedy 713 bytes identical to `imp:test`, request 0.286-0.293 vs 0.285-0.289 s |

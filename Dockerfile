@@ -134,6 +134,14 @@ RUN --mount=type=cache,id=imp-ccache,target=/ccache \
     && ([ -f build/imp-bench ] && cp build/imp-bench /tmp/ || true) \
     && ([ -f build/test-gdn ] && cp build/test-gdn /tmp/ || true)
 
+# Release tarball without Docker (roadmap row 55): `docker build --target bundle -o dist .`
+# writes imp-<version>-linux-x86_64.tar.gz (+ .sha256); scripts/bundle_release.sh.
+FROM builder AS bundle-build
+RUN bash scripts/bundle_release.sh /dist /tmp/imp-server /tmp/imp-cli /tmp/imp-quantize /tmp/imp-bench
+
+FROM scratch AS bundle
+COPY --from=bundle-build /dist/*.tar.gz* /
+
 # =============================================================================
 # Stage 2: Minimal runtime image
 # =============================================================================
