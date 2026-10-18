@@ -7,19 +7,19 @@
 <title>imp social preview</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
 <style>
-  :root { --red: #ff3b3b; --red-dim: #8a1414; --fg: #f4f4f4; --muted: #a9a9a9; --bg: #070707; }
+  :root { --red: #76b900; --red-dim: #3d6000; --fg: #f4f4f4; --muted: #a9a9a9; --bg: #070707; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 1280px; height: 640px; overflow: hidden; background: var(--bg); }
   body {
     font-family: Inter, system-ui, sans-serif; color: var(--fg);
     background:
-      radial-gradient(900px 520px at 22% 42%, rgba(200, 20, 20, 0.30), transparent 70%),
-      radial-gradient(700px 400px at 95% 110%, rgba(140, 10, 10, 0.22), transparent 70%),
+      radial-gradient(900px 520px at 22% 42%, rgba(118, 185, 0, 0.22), transparent 70%),
+      radial-gradient(700px 400px at 95% 110%, rgba(118, 185, 0, 0.14), transparent 70%),
       var(--bg);
     display: grid; grid-template-rows: 1fr auto; padding: 56px 64px 40px;
   }
   .top { display: grid; grid-template-columns: 430px 1fr; gap: 52px; align-items: center; }
-  .logo { width: 430px; filter: drop-shadow(0 0 40px rgba(255, 40, 40, 0.35)); border-radius: 18px; }
+  .logo { width: 430px; filter: hue-rotate(82deg) saturate(2) brightness(1.15) drop-shadow(0 0 40px rgba(118, 185, 0, 0.35)); border-radius: 18px; }
   h1 { font-size: 62px; font-weight: 800; line-height: 1.02; letter-spacing: -1.5px; }
   h1 em { font-style: normal; color: var(--red); }
   .sub { margin-top: 16px; font-size: 23px; color: var(--muted); line-height: 1.35; }
@@ -28,7 +28,7 @@
   .stat b { font-weight: 800; color: var(--fg); font-size: 28px; min-width: 168px; }
   .stat span { color: var(--muted); }
   .cards {
-    border-top: 1px solid rgba(255, 59, 59, 0.35); padding-top: 18px;
+    border-top: 1px solid rgba(118, 185, 0, 0.45); padding-top: 18px;
     font-family: "JetBrains Mono", monospace; font-size: 17px; color: #d8d8d8; white-space: nowrap;
     display: flex; justify-content: space-between; letter-spacing: 0;
   }
