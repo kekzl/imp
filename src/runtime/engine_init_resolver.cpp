@@ -12,6 +12,7 @@
 #include "runtime/engine_internal.h"
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
+#include "runtime/offload_spec_defaults.h"
 #include "model/model_arch.h"
 #include "compute/attention_paged.h"
 #include "core/process_diag.h"
@@ -900,6 +901,8 @@ void Engine::init_resolve_kv_block_size_() {
 // attention.sparse_topk_tokens / sparse_prefill_topk_tokens = -1 (auto): the per-arch budget,
 // or 0 when the family is ungated or the metadata pool would be refused (no WARN for auto).
 void Engine::init_resolve_sparse_attention_() {
+    // First reader of speculative.token_recycling (the sparse refusal below): offload default first.
+    apply_offload_recycling_default(runtime_config_, config_.gpu_layers);
     const auto& mcfg = model_->config();
     auto& acfg = runtime_config_.attention;
     const char* refuse = sparse_minmax_refusal(config_.kv_cache_dtype, mcfg.is_mla() && acfg.mla_absorb,

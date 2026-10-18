@@ -135,3 +135,13 @@ Plan agent split (verified anchors), kept here as the work queue:
 | 119.6 | shared-prefix tree mask, only if compute limits before 64 rows | `src/runtime/engine_spec_ngram.cpp:727-760` |
 
 No dense model > 32 GB is local; `Qwen3-14B-Q6_K.gguf` at `--gpu-layers 0` stands in (streams about the overflow of a 44 GB dense model).
+
+PR #2779 merged batches 5-6 (5e10de3c). Continued on `auto/backlog-2026-10-18d`.
+
+## 2026-10-18 Batch 7: token recycling under offload (R-119.2)
+
+| ID | Status | Evidence |
+|---|---|---|
+| R-119.2 | DONE (this commit) | recycle_width sweep under `--gpu-layers 0` (PERF_LOG 2026-10-18): width 4 best, prose 5.30 -> 6.13, code 6.85 -> 8.87 tok/s; `apply_offload_recycling_default` (`src/runtime/offload_spec_defaults.h`, called first in `init_resolve_sparse_attention_`) turns recycling on (width 4) under offload unless set; `OffloadSpecDefaults.*` 3 CPU tests; resident model: no auto line; lossless: server byte A/B identical (1193 bytes, 19 verifies) with sparse pinned off in both arms |
+
+Decision: under offload recycling outranks sparse decode (recycling refuses the sparse key min/max pool, `sparse_minmax_refusal`); a streamed pass is PCIe-bound, attention cost is not the limit there. An operator who wants sparse sets `speculative.token_recycling=false`.

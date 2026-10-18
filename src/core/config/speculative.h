@@ -72,7 +72,8 @@ struct Speculative {
     // Token-Recycling adjacency drafting (ACL 2025, arXiv 2408.08696): engine-
     // scoped cross-request token->top-M successors table fed from emitted
     // bigrams + verify-chunk top-K logits. Runs as a fallback AFTER suffix/
-    // n-gram and MTP; lossless via greedy argmax verify. Default off.
+    // n-gram and MTP; lossless via greedy argmax verify. Default off; on with recycle_width 4 under
+    // --gpu-layers unless set (offload_spec_defaults.h, a verify costs one streamed pass there).
     bool token_recycling = false;
     int recycle_slots = 8;  // successors kept per token (MRU/rank order)
     // Linear draft length. Default 3 -> chunk 4 -> capture bucket 4 =
