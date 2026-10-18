@@ -27,21 +27,21 @@ General-purpose engines run on every GPU, so none of them is built around yours.
 | one user | **91.0-93.7 tokens/s** | 68.9-70.0 tokens/s | 61.8-63.0 tokens/s |
 | 32 users at once (total) | **1963.5-1977.0 tokens/s** | 1354.8-1449.4 tokens/s | 162.0-166.8 tokens/s |
 
-[PROV: commit=54921da6 date=2026-10-11 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 (imp, vLLM: Qwen3.8-27B-NVFP4-vllm) / Q4_K_M (llama.cpp: ggml-org Qwen3.8-27B-Q4_K_M.gguf)
+<!-- [PROV: commit=54921da6 date=2026-10-11 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 (imp, vLLM: Qwen3.8-27B-NVFP4-vllm) / Q4_K_M (llama.cpp: ggml-org Qwen3.8-27B-Q4_K_M.gguf)
        cuda=13.4.2 path=server-api cmd=`tools/analysis/engine3_conc.sh` n=2 trials x 3 waves, range of the trial medians
-       note=300-token greedy answers, ignore_eos; llama.cpp image server-cuda sha256 9d835c2f]
+       note=300-token greedy answers, ignore_eos; llama.cpp image server-cuda sha256 9d835c2f] -->
 
 imp and vLLM read the same NVFP4 checkpoint, llama.cpp the Q4_K_M GGUF. On that same GGUF imp leads too: **72.7-73.4** vs 60.5-61.0 tokens/s for one user, **240.0-244.4** vs 154.5-155.1 for 32 users at once.
-[PROV: commit=95a448b7 date=2026-10-12 hw=RTX5090 model=Qwen3.8-27B quant=Q4_K_M (ggml-org GGUF, both engines) cuda=13.4.2 path=server-api cmd=`ARMS="imp-gguf llama-gguf" tools/analysis/engine3_conc.sh` n=2 trials x 3 waves note=same harness as above; #2688]
+<!-- [PROV: commit=95a448b7 date=2026-10-12 hw=RTX5090 model=Qwen3.8-27B quant=Q4_K_M (ggml-org GGUF, both engines) cuda=13.4.2 path=server-api cmd=`ARMS="imp-gguf llama-gguf" tools/analysis/engine3_conc.sh` n=2 trials x 3 waves note=same harness as above; #2688] -->
 
 ### Qwen3.8-Flash-Next: four times bigger than the card
 
 The 123.6 GiB checkpoint does not fit in 32 GB. imp keeps its 56.25 GiB of experts in host RAM and caches the busiest ones on the card: **87.89-98.57 tokens/s** on one RTX 5090 with ~62 GiB of free RAM, reading a 512-token prompt at 1094.74-1096.10 tokens/s ([quickstart](#quickstart-qwen38-flash-next)).
 
-[PROV: commit=54921da6 date=2026-10-11 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.2
+<!-- [PROV: commit=54921da6 date=2026-10-11 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.2
        path=host-resident-experts cmd=`imp-cli --bench --bench-pp 512 --bench-reps 3 --max-tokens 128
        --bench-prompt-file novel_prose_2026.txt` n=2 processes note=real-text prompt, imp defaults; 56.25 GiB =
-       load log `NVFP4 experts (56.25 GiB) do not fit`, main 62431977]
+       load log `NVFP4 experts (56.25 GiB) do not fit`, main 62431977] -->
 
 **tokens/s** = how fast the answer appears (a token is about ¾ of a word). Six more models against llama.cpp on the same GGUF file, and every other comparison: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
@@ -92,9 +92,9 @@ docker run --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
 
 The weights take 18.3 GiB on the card and answer at **~102 tokens/s**, leaving ~7 GiB for the conversation memory. Next time, the same `docker run`: the `imp-cache` volume keeps the converted weights, so a restart skips the conversion.
 
-[PROV: commit=f243179c date=2026-08-31 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4
+<!-- [PROV: commit=f243179c date=2026-08-31 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4
        cuda=13.3 path=nvfp4-safetensors n=2 image=ghcr.io/kekzl/imp:latest
-       cmd=`imp-cli --model … --prompt … --max-tokens 128 --temperature 0` (102.8/101.9 tok/s)]
+       cmd=`imp-cli --model … --prompt … --max-tokens 128 --temperature 0` (102.8/101.9 tok/s)] -->
 
 **No Docker:** every release attaches `imp-<version>-linux-x86_64.tar.gz` (CUDA libraries bundled, needs only the NVIDIA driver): [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#without-docker). **Shortcut:** `--model hf://<org>/<repo>[:<file>.gguf]` downloads a repo inside the container into `/models` (resumable, checksummed, `HF_TOKEN` for gated repos): [`docs/CONFIG.md`](docs/CONFIG.md#fetching-from-hugging-face). Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 
