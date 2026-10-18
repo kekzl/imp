@@ -327,15 +327,15 @@ beta_slow   = 1.0
 # address space is reserved at init; a commit the card cannot spare is refused
 # (the request waits), never spilled. Needs CUDA VMM, else every pool is fixed.
 lazy_commit       = true
-# Budget-planner tuning. Governs compute_vram_budget() only (the pre-dequant
-# phases keep their internal safety floors).
+# Budget-planner tuning. One measured margin by default (B-29f): the library
+# reserve below + the 4 % allocator headroom (1304 MiB on 32 GB, #2482).
 # Share of post-reserve / post-weight-cache VRAM the KV pool targets.
-# Clamped to [0.05, 0.95]. Raise to trade weight-cache headroom for context.
-kv_fraction       = 0.8
-# Free-VRAM reserve floor as % of (budget-visible) total VRAM, still floored
-# at 256 MiB absolute. Clamped to [0, 50]. Default 10 ≈ 3.2 GiB on a 32 GiB
-# card — lower to hand more VRAM to the KV pool.
-reserve_floor_pct = 10
+# Clamped to [0.05, 1.0]; 1.0 = no cap. Lower to keep VRAM for weight caches.
+kv_fraction       = 1.0
+# Extra free-VRAM reserve floor as % of (budget-visible) total VRAM, never
+# below the allocator headroom. Clamped to [0, 50]. 0 = the headroom alone;
+# 10 (the old default) = 3.2 GiB on a 32 GiB card.
+reserve_floor_pct = 0
 # What cuBLAS/CUTLASS claim on the FIRST forward pass, in MiB. -1 = the 3900 MiB
 # constant (per-model measurements: 1033-1930 MiB, #2357). This is a FIXED charge: it does not shrink
 # because --vram-budget asked for a smaller slice of the card, so it floors the

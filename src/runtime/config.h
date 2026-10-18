@@ -239,12 +239,13 @@ struct RuntimeConfig {
         // CUDA VMM, else every pool is fixed as before.
         bool lazy_commit = true;
         // Fraction of post-reserve/post-weight-cache VRAM the KV pool
-        // targets. Clamped to [0.05, 0.95] at use.
-        float kv_fraction = 0.8f;
+        // targets. Clamped to [0.05, 1.0] at use; 1.0 = no cap (B-29f: the
+        // library reserve + 4 % allocator headroom are the only margin).
+        float kv_fraction = 1.0f;
         // Free-VRAM reserve floor as % of (budget-visible) total VRAM,
-        // floored at 256 MiB absolute. Clamped to [0, 50] at use.
-        // Default 10 ~= 3.2 GiB on a 32 GiB card; lower for more KV pool.
-        int reserve_floor_pct = 10;
+        // floored at the 4 % allocator headroom. Clamped to [0, 50] at use.
+        // Default 0 = the headroom alone (1304 MiB on 32 GB); raise to opt in.
+        int reserve_floor_pct = 0;
         // Fixed CUDA/cuBLAS/CUTLASS charge on the first forward pass, MiB;
         // not a workspace imp allocates, so the budget pass cannot otherwise
         // see it (docs/internals/MEMORY.md A1.5). ~3900 measured, invariant

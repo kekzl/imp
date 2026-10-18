@@ -289,14 +289,14 @@ expert_overhead_pct = 30
 }
 
 TEST(RuntimeConfigTest, ParsesRopeAndVramSections) {
-    // Defaults: override off, planner at the historical envelope.
+    // Defaults: override off, planner at one measured margin (B-29f: no kv_fraction cap, no policy floor).
     RuntimeConfig defaults;
     EXPECT_TRUE(defaults.rope.scaling.empty());
     EXPECT_FLOAT_EQ(defaults.rope.factor, 1.0f);
     EXPECT_EQ(defaults.rope.orig_ctx, 0);
     EXPECT_FLOAT_EQ(defaults.rope.attn_factor, 1.0f);
-    EXPECT_FLOAT_EQ(defaults.vram.kv_fraction, 0.8f);
-    EXPECT_EQ(defaults.vram.reserve_floor_pct, 10);
+    EXPECT_FLOAT_EQ(defaults.vram.kv_fraction, 1.0f);
+    EXPECT_EQ(defaults.vram.reserve_floor_pct, 0);
     // #1653: 4x4 MiB, not the 4x128 that shipped until the sweep. A default
     // that drifts back silently costs 0.68 s of every process start.
     EXPECT_EQ(defaults.vram.upload_ring_depth, 4);

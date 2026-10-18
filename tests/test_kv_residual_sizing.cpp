@@ -33,6 +33,22 @@ TEST(KvBlockSize, AnythingElseIsRefusedWithAReason) {
         EXPECT_NE(kv_block_size_error(bs), nullptr) << bs;
 }
 
+// B-29f: one measured margin. The default floor is the allocator headroom (4 %, #2482), a
+// policy percentage only raises it; 32607 MiB card: 1304 MiB, pct 10: 3260 MiB.
+TEST(VramReserveFloor, DefaultIsTheAllocatorHeadroom) {
+    const size_t card = 32607 * kMiB;
+    EXPECT_EQ(vram_reserve_floor(card), vram_allocator_headroom(card));
+    EXPECT_EQ(vram_reserve_floor(card, 0), vram_allocator_headroom(card));
+    EXPECT_EQ(vram_reserve_floor(card) / kMiB, 1304u);
+}
+
+TEST(VramReserveFloor, PolicyPercentOnlyRaisesIt) {
+    const size_t card = 32607 * kMiB;
+    EXPECT_EQ(vram_reserve_floor(card, 10), card / 10);
+    EXPECT_EQ(vram_reserve_floor(card, 2), vram_allocator_headroom(card));  // 2 % < 4 %
+    EXPECT_EQ(vram_reserve_floor(card, 99), card / 2);                      // clamped to 50
+}
+
 TEST(KvResidualSizing, PlanFitsSoNothingIsClamped) {
     const auto s = kv_blocks_from_residual(8192 * kMiB, 1630 * kMiB, k35bPerBlock, 4096, 16);
     EXPECT_EQ(s.blocks, 4096);

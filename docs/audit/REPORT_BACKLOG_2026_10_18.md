@@ -6,9 +6,9 @@ Commit range: main a6492284 (start) .. 09797f27, PRs #2777, #2778, #2779, #2780,
 
 | Status | Count |
 |---|---:|
-| DONE | 28 |
-| WONTFIX | 13 |
-| BLOCKED (owner question or missing model) | 10 |
+| DONE | 29 |
+| WONTFIX | 14 |
+| BLOCKED (owner question or missing model) | 8 |
 | IN_PROGRESS | 1 (R-119) |
 | OPEN (L rows with plans) | 12 |
 
@@ -22,6 +22,7 @@ Commit range: main a6492284 (start) .. 09797f27, PRs #2777, #2778, #2779, #2780,
 | B-25 | radix-select top-k: 66.77 -> 18.76 us per decode step (Qwen3-4B Q8_0, top-k 40), tokens byte-identical over 588 configs x 12 seeds |
 | B-24 | FFN prefill graphs reuse evicted execs: 396 -> 324 instantiates on 40 mixed prompts |
 | B-29a, B-29d | batched NVFP4 LM head borrows the prefill SfAtom (Qwen3-14B 46 MiB); nomic-bert frees its Q8_0 sources (pool 128 -> 0 MiB) |
+| B-29f | one measured margin (owner 2026-10-18): reserve floor and kv_fraction default off, warmup ceiling raise rebuilds key min/max; Qwen3.8-27B-NVFP4 32 streams 8396 -> 19063 blocks ([record](../plans/2026-10-18-one-measured-vram-margin.md)) |
 | B-11, B-28, B-09 | shared-workspace fallback through the allocator; release gate runs alloc-interpose (PASS 0/3/0); strict `IMP_FMHA_FA2`, shared cuBLAS helper in `gptq.cu` |
 | B-35 | InternVL3.5 video parts (HF `replace_video_token` layout): "A cat and red double decker buses." |
 | R-077 | closed: Gemma-4 overlay 256.48 tg vs MMVQ 116.85, no kernel unreachable without a knob |
@@ -37,17 +38,16 @@ Commit range: main a6492284 (start) .. 09797f27, PRs #2777, #2778, #2779, #2780,
 | B-13, B-14 | C-023 / C-024 measured, not pursued (269.87 vs 269.91 tok/s; sites off the default tiers) |
 | B-26, B-27, B-32 | split refuted (SETTLED S-32); flags "not a defect" per the ledger; ledger closed the Gemma-4 delta itself |
 | W-01..W-05 | env-gated modes, debug-only aborts, on-demand benchmarks, C-017 measured |
+| R-054 | owner 2026-10-18: no self-hosted GPU runner, GPU gates stay local |
 | R-112 | 112.1 NO-GO: selection replaces 110.28 of 256 blocks per layer per step; half the KV resident still costs +10.4 % to +22.4 % per token over PCIe ([record](../plans/2026-10-18-kv-cold-pages-decision.md)) |
 
 ## Blocked: questions for the owner
 
 | ID | Question |
 |---|---|
-| R-054 | Register a self-hosted GPU runner for CI (which machine, which labels)? |
 | R-055 | Which binary artifact (static `imp-server` tarball, .deb) and where published? |
 | R-080 | Move model-specific block state out of `executor.h` against SETTLED B, yes or no? |
 | B-34 | Is FP8 paged KV at head_dim 256 used, so the multitok port is worth it? |
-| B-29f | Keep five stacked VRAM reserves or collapse them into one measured margin? |
 | B-33, B-29b, B-29c, B-29e | Download a model for each: MoE NVFP4 with K/16 > 512, Nemotron MTP checkpoint, gemma-3 Q8_0 / Q6_K, a dense MXFP4 GGUF? |
 
 ## Follow-ups (OPEN, plans in DISPATCH)

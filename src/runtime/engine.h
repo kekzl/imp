@@ -87,10 +87,11 @@ struct EngineConfig {
     size_t vram_budget_mb = 0;
 
     // Budget-planner tuning (imp.conf [vram], see RuntimeConfig::Vram).
-    // kv_fraction: KV pool share of post-reserve VRAM, clamped [0.05, 0.95].
-    // vram_reserve_floor_pct: reserve floor % of total VRAM, clamped [0, 50]; 256 MiB absolute floor always applies.
-    float kv_fraction = 0.8f;
-    int vram_reserve_floor_pct = 10;
+    // kv_fraction: KV pool share of post-reserve VRAM, clamped [0.05, 1.0].
+    // vram_reserve_floor_pct: reserve floor % of total VRAM, clamped [0, 50]; the 4 % allocator headroom
+    // always applies.
+    float kv_fraction = 1.0f;
+    int vram_reserve_floor_pct = 0;
     // library_reserve_mb: cuBLAS/CUTLASS claim on the first forward pass
     // (MEMORY.md A1.5). -1 = measured default. Fixed charge: floors the
     // reserve above regardless of --vram-budget.

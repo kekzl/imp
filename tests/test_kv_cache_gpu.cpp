@@ -589,7 +589,7 @@ TEST(KVCacheGrowTest, KeyMinmaxGrowsWithThePool) {
 // reports it free (vram.lazy_commit).
 // raise_ceiling (#2436): warmup re-reserves the pool at the ceiling its own library measurement
 // allows. The stride moves, the committed count stays, growth passes the old ceiling and lands in
-// backed memory; refused while a block is held, at a smaller ceiling, and with key min/max on.
+// backed memory; refused while a block is held or at a smaller ceiling; key min/max moves along.
 TEST(KVCacheGrowTest, RaiseCeilingKeepsTheCommitAndGrowsPastTheOldCeiling) {
     SKIP_IF_NO_CUDA();
     KVCache cache(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::NVFP4, /*max_blocks=*/8,
@@ -623,7 +623,21 @@ TEST(KVCacheGrowTest, RaiseCeilingKeepsTheCommitAndGrowsPastTheOldCeiling) {
     KVCache mm(/*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64, QType::F16, /*max_blocks=*/8,
                /*block_size=*/16, /*alloc=*/nullptr, /*ceiling_blocks=*/32);
     ASSERT_TRUE(mm.enable_key_minmax());
-    EXPECT_FALSE(mm.raise_ceiling(64)) << "the min/max pool is strided by the old ceiling";
+    void* const mm_before = mm.key_minmax_ptr(0, 0);
+    ASSERT_TRUE(mm.raise_ceiling(64)) << "the growable min/max pool is rebuilt at the new ceiling";
+    EXPECT_TRUE(mm.key_minmax_enabled());
+    EXPECT_NE(mm.key_minmax_ptr(0, 0), mm_before) << "the metadata moved with the pool";
+    const ptrdiff_t mm_stride = static_cast<char*>(mm.key_minmax_ptr(1, 0)) -
+                                static_cast<char*>(mm.key_minmax_ptr(0, 0));
+    const ptrdiff_t mm_block = static_cast<char*>(mm.key_minmax_ptr(0, 1)) -
+                               static_cast<char*>(mm.key_minmax_ptr(0, 0));
+    EXPECT_EQ(mm_stride, 64 * mm_block) << "layer stride follows the new ceiling";
+    ASSERT_GE(mm.try_grow_to(48), 48);
+    std::vector<uint8_t> meta(static_cast<size_t>(mm_block), 0xAB);
+    ASSERT_EQ(cudaMemcpy(meta.data(), mm.key_minmax_ptr(1, 47), meta.size(), cudaMemcpyDeviceToHost),
+              cudaSuccess)
+        << "a block grown past the old ceiling has its min/max backed";
+    EXPECT_TRUE(std::all_of(meta.begin(), meta.end(), [](uint8_t b) { return b == 0; }));
 }
 
 // Per-layer geometry re-lays out every layer at the new stride.

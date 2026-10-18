@@ -167,3 +167,16 @@ Measurement only, no builder: selection ids dumped by a scratch patch (never com
 | R-112.2-112.7 | WONTFIX | NO-GO from 112.1: `--kv-nvfp4` saves the same 50 % without PCIe, PCIe bytes scale with sessions; reopen on a sticky selection that passes the NIAH A/B |
 
 Record: [`docs/plans/2026-10-18-kv-cold-pages-decision.md`](../plans/2026-10-18-kv-cold-pages-decision.md).
+
+## 2026-10-18 Batch 9: owner answers R-054, B-29f
+
+Orchestrator only (one subagent mapped the reserve chain read-only). Validation: base image from origin/main vs this tree, 10-model sweep at batch 1 and 16, greedy identity, 10 min soak, mutant on the ceiling fix.
+
+| ID | Status | Evidence |
+|---|---|---|
+| R-054 | WONTFIX | owner 2026-10-18: no self-hosted GPU runner; roadmap row 54 closed |
+| B-29f | DONE | `vram.reserve_floor_pct` 10 -> 0 (floor = 4 % headroom), `vram.kv_fraction` 0.8 -> 1.0; 9 of 10 models unchanged, Qwen3.6-35B-A3B-NVFP4 ceiling 118128 -> 143184 tokens; soak showed the warmup re-plan never raised a pool with key min/max (8396 kept, 19063 computed): `raise_ceiling` rebuilds it now, soak 19063 blocks, growth 14 MiB, 0 errors |
+
+Test change: `RaiseCeilingKeepsTheCommitAndGrowsPastTheOldCeiling` asserted the refusal with key min/max on; it now asserts the rebuilt pool (moved pointer, stride, backed grown block), mutant without the swap fails it. `VramKnobDefaultsArePinned`, `KvFractionScalesKvPool`, `ReserveFloorPctScalesReserve`, `VramKnobsAreClamped`, `test_config.cpp` defaults: pinned to the new defaults, same contracts; new `VramReserveFloor.*` in test-core.
+
+Record: [`docs/plans/2026-10-18-one-measured-vram-margin.md`](../plans/2026-10-18-one-measured-vram-margin.md).
