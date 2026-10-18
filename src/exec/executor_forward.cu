@@ -179,6 +179,18 @@ void GraphExecutor::build_lm_head_cutlass_(cudaStream_t stream) {
     auto it = wcache_.nvfp4.find(model_->output_proj().data);
     if (it == wcache_.nvfp4.end())
         return;  // LM head is not in the NVFP4 decode cache (nvfp4_lm_head off / GDN)
+    // Phase 3b's prefill cache may already hold the head's SfAtom: borrow it (both freed in
+    // free_buffers). Qwen3-14B-NVFP4, gemm.nvfp4_lm_head=on: 46.4 MiB not built twice.
+    if (const auto ct = wcache_.cutlass_nvfp4.find(model_->output_proj().data);
+        ct != wcache_.cutlass_nvfp4.end() && ct->second.scale_factors != nullptr) {
+        lm_head_cutlass_ = ct->second;
+        lm_head_cutlass_.sf_borrowed = true;
+        lm_head_cutlass_ready_ = lm_head_cutlass_.data != nullptr;
+        IMP_LOG_INFO(
+            "LM head: batched-decode CUTLASS GEMM borrows the prefill SfAtom (%zu KiB not duplicated)",
+            lm_head_cutlass_.sf_bytes / 1024);
+        return;
+    }
     // Borrows the FP4 data from the decode cache; allocates only the SfAtom scales.
     convert_nvfp4_to_cutlass(it->second, lm_head_cutlass_, stream);
     if (const cudaError_t err = cudaStreamSynchronize(stream); err != cudaSuccess) {

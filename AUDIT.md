@@ -269,7 +269,8 @@ then measured per model with `diagnostics.vram_audit=true`. Closed by #2711-#271
 
 ### OPEN
 
-- 4 NVFP4 LM-head SfAtom built twice (35-76 MiB), not re-checked after #2711.
+- 4 NVFP4 LM-head SfAtom built twice (35-76 MiB): FIXED 2026-10-18, `build_lm_head_cutlass_`
+  borrows the Phase 3b SfAtom; Qwen3-14B-NVFP4 `gemm.nvfp4_lm_head=on`: 47480 KiB not duplicated.
 - 6 Nemotron MTP per-expert FP16 originals after restack (2434 MiB computed): model not local.
 - 7 gemma-3 Q8_0/Q6_K mode 1 per-weight FP16 beside fused, budget-cut: unmeasured.
 - 8 encoder weights (NOMIC_BERT) as FP16 copies, 115 MiB: FIXED 2026-10-18 (06fdf269), the
