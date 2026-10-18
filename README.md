@@ -9,7 +9,7 @@ commit: 95a448b7
   <img src="docs/logo.svg" alt="imp" width="500">
 </p>
 
-<p align="center"><b>Your RTX 50-series or RTX PRO Blackwell card is faster than your inference engine. imp fixes that.</b><br>
+<p align="center"><b>Built for Blackwell. Nothing else.</b><br>
 RTX 5050 to 5090 · RTX PRO 2000 to 6000 · one <code>docker run</code> · OpenAI and Anthropic API · built-in chat · Linux or WSL2</p>
 
 <p align="center">
