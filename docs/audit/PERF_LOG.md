@@ -4,6 +4,25 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-10-19 · DSpark block drafter on Qwen3-8B (ROADMAP row 49)
+
+Protocol: `imp-server --max-batch 1`, one image per comparison, greedy, 256 tokens (`ignore_eos`), one warmup request, then prose / code / list chat prompts (/no_think); DSpark arm `--set speculative.dspark_model=/models/dflash_qwen3_8b_block7`, nospec arm `speculative.ngram=false`, n-gram arm default config. vLLM v0.31.0 `--speculative-config {"method":"dspark","num_speculative_tokens":6}` `--max-num-seqs 1`.
+
+| tok/s, prose / code / list | nospec | n-gram | DSpark |
+|---|---|---|---|
+| Qwen3-8B-NVFP4-cortecs | 282.25 / 280.70 / 281.63 | 278.56 / 273.80 / 318.41 | 260.43 / 457.96 / 349.25 |
+| Qwen3-8B-NVFP4-cortecs, `IMP_DETERMINISTIC=1` | 283.81 / 278.26 / 283.81 | 281.32 / 275.86 / 320.00 | 286.03 / 531.12 / 363.12 |
+| Qwen3-8B-FP8 | 172.86 / 170.89 / 172.04 | 171.47 / 169.87 / 197.84 | 211.22 / 329.47 / 255.74 |
+| vLLM, Qwen3-8B-FP8 | | | 230.84 / 320.00 / 231.05 |
+
+- DSpark acceptance: NVFP4 3.29-3.32 tok/verify at 5.79-5.80 ms/verify; FP8 3.42-3.43 at 9.97-10.02 ms; vLLM 548 of 1410 draft tokens over 235 drafts.
+- Drafter host wall per draft (`[dspark] 64 drafts`): propose 8.8-11.9 ms with `attention_cublas_prefill` (sync `cudaMemcpy` of the GQA pointer arrays per call), 3.25-3.81 ms with `src/compute/dspark_attention.cu` (split-K, no host sync); post-verify append 0.29-0.45 ms.
+- Block row r predicts position pos + r + 1, anchor row included: 7 drafts, 8-row verify. The z-lab DFlash convention (drafts from rows 1..) accepted 0 %.
+- Greedy identity (`MtpGreedyIdentityTest.DSparkDoesNotChangeGreedyTokens`, deterministic): first divergence margins 0.686 / 0.394 nats (one unreadable), envelope 3.27; mutant with the feature tap writing back into the residual: 2667 drafted, 0 accepted, red.
+- Prose on NVFP4 (non-deterministic) loses 7.7 % vs nospec: propose 3.5 ms is 60 % of a 5.8 ms verify. Next levers: target's NVFP4 LM head for the drafter (FP16 lm_head over 8 rows), graph-captured propose (device-side kv_len).
+
+---
+
 ## 2026-10-18 · captured verify cost per chunk width, small-M route for captured verify (ROADMAP row 49)
 
 Protocol: `imp-cli --bench --bench-pp 512 --max-tokens 128 --bench-reps 3..5 --set speculative.capture=true`; chunk width forced by token recycling (`ngram=false token_recycling=true recycle_min_streak=0`, rows = width x (1 + depth)); `tools/analysis/verify_width_cost.sh`. Decode step: Qwen3-14B NVFP4 5.888 ms, Q6_K 5.831 ms.
