@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.55.1] - 2026-10-19
+
 ### Fixed
 - `/v1/responses`: replayed `function_call` / `custom_tool_call` items join the assistant message before them instead of opening a new assistant turn. A replayed Codex turn on Qwen3.8-Flash-Next-NVFP4 ended after its preamble without the call in 7 of 30 runs, 0 of 30 after (#2807).
 - Streaming with a stop sequence (on think models the server's own `"\nHuman"`) dropped up to 5 bytes of the text before a tool call and after the last one; "Sure, listing the files now." streamed as "Sure, listing the files" (#2807).
