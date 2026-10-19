@@ -34,6 +34,8 @@ std::vector<half> features(int rows, int cols) {
 const std::vector<int32_t> kRefIds = {305, 6174, 432, 374,
                                       374, 264,  374};  // block row r -> position C + r + 1
 
+constexpr imp::DSparkOptions kEager16{.fp8 = false, .graph = false};
+
 class DSparkDrafterTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -41,7 +43,7 @@ protected:
             GTEST_SKIP() << "no drafter checkpoint at " << drafter_dir() << " (IMP_TEST_MODEL_DSPARK)";
         ASSERT_EQ(cudaStreamCreate(&stream_), cudaSuccess);
         ASSERT_TRUE(va_.init());
-        const std::string err = dr_.load(va_, drafter_dir(), 4096, 36, 256, stream_);
+        const std::string err = dr_.load(va_, drafter_dir(), 4096, 36, 256, stream_, kEager16);
         ASSERT_TRUE(err.empty()) << err;
         const int cols = dr_.feature_dim();
         ASSERT_EQ(cols, 5 * 4096);
@@ -81,6 +83,38 @@ TEST_F(DSparkDrafterTest, ContextInTwoPartsAndRollback) {
     EXPECT_EQ(dr_.propose(785, kCtx, stream_), kRefIds) << "rollback to position 20 + re-append";
     dr_.reset();
     EXPECT_EQ(dr_.ctx_rows(), 0);
+}
+
+TEST_F(DSparkDrafterTest, Fp8WeightsTrackReference) {
+    imp::DSparkDrafter f8;
+    ASSERT_TRUE(f8.load(va_, drafter_dir(), 4096, 36, 256, stream_, {.fp8 = true, .graph = false}).empty());
+    EXPECT_LT(f8.device_bytes(), dr_.device_bytes() * 6 / 10);
+    f8.append_ctx(rows(0), f8.feature_dim(), kCtx, 0, stream_);
+    const std::vector<int32_t> ids = f8.propose(785, kCtx, stream_);
+    ASSERT_EQ(ids.size(), kRefIds.size());
+    int same = 0;
+    for (size_t i = 0; i < ids.size(); ++i)
+        same += ids[i] == kRefIds[i] ? 1 : 0;
+    EXPECT_GE(same, 6) << "FP8 drafts agreeing with the FP32 reference (FP16 weights: 7 of 7)";
+    f8.append_ctx(rows(20), f8.feature_dim(), kCtx - 20, 20, stream_);
+    EXPECT_EQ(f8.propose(785, kCtx, stream_), ids) << "rollback + re-append";
+}
+
+// Propose 1 eager, 2 captured + replayed, 3 replayed after a rollback: the context length the graph
+// reads moves 12 -> 24 -> 12.
+TEST_F(DSparkDrafterTest, GraphReplayFollowsContextLength) {
+    imp::DSparkDrafter g;
+    ASSERT_TRUE(g.load(va_, drafter_dir(), 4096, 36, 256, stream_, {.fp8 = false, .graph = true}).empty());
+    g.append_ctx(rows(0), g.feature_dim(), kCtx / 2, 0, stream_);
+    const std::vector<int32_t> eager12 = g.propose(785, kCtx / 2, stream_);
+    ASSERT_EQ(eager12.size(), kRefIds.size());
+    EXPECT_EQ(g.graph_replays(), 0);
+    g.append_ctx(rows(kCtx / 2), g.feature_dim(), kCtx - (kCtx / 2), kCtx / 2, stream_);
+    EXPECT_EQ(g.propose(785, kCtx, stream_), kRefIds);
+    EXPECT_EQ(g.graph_replays(), 1);
+    g.append_ctx(nullptr, g.feature_dim(), 0, kCtx / 2, stream_);
+    EXPECT_EQ(g.propose(785, kCtx / 2, stream_), eager12);
+    EXPECT_EQ(g.graph_replays(), 2);
 }
 
 }  // namespace

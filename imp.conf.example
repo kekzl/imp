@@ -1043,6 +1043,8 @@ suffix_k_max         = 64
 ngram_corpus         = ""
 # DSpark block drafter checkpoint dir (deepseek-ai/dflash_qwen3_8b_block7 for Qwen3-8B); forces batch 1.
 dspark_model         = ""
+# DSpark drafter q / o / gate / up / down / lm_head as per-row FP8: propose 3.07 -> 1.76 ms with the graph.
+dspark_fp8           = true
 # Shortest / longest suffix n-gram match searched. Longer min_match =
 # fewer but far more precise drafts (6 vs 3: +16% on code-edit, and the
 # number-table worst case shrinks from -13% to -2%).

@@ -4,6 +4,29 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-10-20 · DSpark propose: FP8 weights + captured graph (ROADMAP row 49, R-049.2)
+
+Protocol: as 2026-10-19 (Qwen3-8B-NVFP4-cortecs, `--max-batch 1`, greedy 256 tokens, `ignore_eos`, /no_think), `build-dev` imp-server in `imp:toolchain`, one server start per arm and round, warmup, then prose / code / list x 2; tok/s = completion tokens / request wall.
+
+| propose host wall per draft (`[dspark] 64 drafts`) | eager | graph |
+|---|---|---|
+| FP16 weights | 3.07 ms | 2.37 ms |
+| FP8 weights (q, o, gate, up, down, lm_head per-row E4M3) | 2.26 ms | 1.76 ms |
+
+| tok/s, 2 rounds x (prose / code / list) x 2 | prose | code | list |
+|---|---|---|---|
+| nospec | 281.01 284.10 282.21 283.67 | 275.50 281.87 281.52 281.76 | 278.68 281.45 272.89 281.87 |
+| DSpark FP16 + graph | 274.67 275.58 274.78 277.26 | 468.12 540.53 494.69 529.03 | 388.10 436.55 425.02 428.59 |
+| DSpark FP8 + graph (default) | 280.13 284.01 275.28 281.65 | 531.28 589.02 539.32 590.96 | 428.99 464.19 420.92 462.36 |
+
+- nsys, layer-0 attention to argmax end per draft: FP16 span 1991.6 us, kernels 1581.8 us, LM head 750.4 us; FP8 span 1280.4 us, kernels 1055.9 us, LM head 434.5 us.
+- Drafter VRAM 4013.1 -> 2540.9 MiB (`dspark` allocator tag).
+- FP8 drafts vs the FP32 reference (`DSparkDrafterTest.Fp8WeightsTrackReference`): 6 of 7 ids; FP16 7 of 7.
+- Greedy identity (`MtpGreedyIdentityTest.DSparkDoesNotChangeGreedyTokens`): margins 0.686 / 0.394 nats, unchanged.
+- Prose: -7.7 % -> parity with nospec, no gain; code and list about 2x and 1.6x nospec.
+
+---
+
 ## 2026-10-19 · DSpark block drafter on Qwen3-8B (ROADMAP row 49)
 
 Protocol: `imp-server --max-batch 1`, one image per comparison, greedy, 256 tokens (`ignore_eos`), one warmup request, then prose / code / list chat prompts (/no_think); DSpark arm `--set speculative.dspark_model=/models/dflash_qwen3_8b_block7`, nospec arm `speculative.ngram=false`, n-gram arm default config. vLLM v0.31.0 `--speculative-config {"method":"dspark","num_speculative_tokens":6}` `--max-num-seqs 1`.
