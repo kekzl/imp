@@ -169,11 +169,10 @@ bool resolve_store_fields(json& body, ServerState& state, httplib::Response& res
 
 // Responses dialect adapter: reasoning -> reasoning_summary_text.delta, content ->
 // output_text.delta, tool call -> function_call_arguments.delta (incremental for JSON layouts).
-static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& ctx,
-                                  ServerState& state,
+static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerState& state,
                                   const std::shared_ptr<ServerRequest>& server_req,
-                                  const std::string& req_model,
-                                  const std::string& response_id, const RspStoreCtx& store_ctx) {
+                                  const std::string& req_model, const std::string& response_id,
+                                  const RspStoreCtx& store_ctx, const rsp::ToolKinds& kinds) {
     ResponsesSSE out{sink};
     auto active_req = server_req->request;
     int n_prompt_tokens = ctx.snap.n_prompt_tokens;
@@ -202,6 +201,20 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
     // Accumulators for the final `response` object.
     std::string acc_text, acc_reasoning;
     json final_output = json::array();
+
+    // A custom tool's input is one string: sent whole at the close, not as JSON argument deltas.
+    bool cur_custom = false;
+    auto close_call_args = [&](const ParsedToolCall& tc) -> bool {
+        if (!cur_custom)
+            return out.emit("response.function_call_arguments.done", json{{"item_id", cur_item_id},
+                                                                          {"output_index", output_index},
+                                                                          {"arguments", tc.arguments}});
+        const std::string input = rsp::custom_tool_input(tc.arguments);
+        return out.emit("response.custom_tool_call_input.delta",
+                        json{{"item_id", cur_item_id}, {"output_index", output_index}, {"delta", input}}) &&
+               out.emit("response.custom_tool_call_input.done",
+                        json{{"item_id", cur_item_id}, {"output_index", output_index}, {"input", input}});
+    };
 
     auto stop_item = [&]() -> bool {
         if (open_item == RspItem::NONE)
@@ -245,16 +258,8 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
             final_output.push_back(std::move(item));
         } else if (open_item == RspItem::FUNCTION_CALL) {
             const auto& tc = lres.tool_calls.back();
-            ok = out.emit("response.function_call_arguments.done",
-                          json{{"item_id", cur_item_id},
-                               {"output_index", output_index},
-                               {"arguments", tc.arguments}});
-            json item = {{"type", "function_call"},
-                         {"id", cur_item_id},
-                         {"call_id", tc.id},
-                         {"name", tc.name},
-                         {"arguments", tc.arguments},
-                         {"status", "completed"}};
+            ok = close_call_args(tc);
+            json item = rsp::tool_call_item(kinds, cur_item_id, tc.id, tc.name, tc.arguments, "completed");
             ok = ok && out.emit("response.output_item.done",
                                 json{{"output_index", output_index}, {"item", item}});
             final_output.push_back(std::move(item));
@@ -335,16 +340,14 @@ static bool run_responses_stream_(httplib::DataSink& sink, ChatRequestContext& c
         ++output_index;
         open_item = RspItem::FUNCTION_CALL;
         cur_item_id = rsp::make_item_id("fc", item_counter++);
-        json item = {{"type", "function_call"},
-                     {"id", cur_item_id},
-                     {"call_id", tc.id},
-                     {"name", tc.name},
-                     {"arguments", ""},
-                     {"status", "in_progress"}};
+        cur_custom = kinds.custom.count(tc.name) != 0;
+        json item = rsp::tool_call_item(kinds, cur_item_id, tc.id, tc.name, "", "in_progress");
         return out.emit("response.output_item.added",
                         json{{"output_index", output_index}, {"item", item}});
     };
     auto emit_args_delta = [&](const std::string& partial) -> bool {
+        if (cur_custom)
+            return true;  // close_call_args sends the whole input
         return out.emit("response.function_call_arguments.delta",
                         json{{"item_id", cur_item_id},
                              {"output_index", output_index},
@@ -451,6 +454,7 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
     const std::string req_model = body.value("model", "");
     const bool want_stream = body.value("stream", false);
 
+    const rsp::ToolKinds kinds = rsp::tool_kinds(body);
     json oai_body;
     try {
         oai_body = rsp::responses_to_openai_body(body);
@@ -512,14 +516,14 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
         res.status = 200;
         res.set_header("Cache-Control", "no-cache");
         res.set_header("Connection", "keep-alive");
-        res.set_chunked_content_provider(
-            "text/event-stream",
-            [stream_ctx = std::move(ctx), &state, server_req, req_model, response_id,
-             store_ctx = std::move(store_ctx)](
-                size_t /*offset*/, httplib::DataSink& sink) mutable -> bool {
-                return run_responses_stream_(sink, stream_ctx, state, server_req, req_model,
-                                             response_id, store_ctx);
-            });
+        res.set_chunked_content_provider("text/event-stream",
+                                         [stream_ctx = std::move(ctx), &state, server_req, req_model,
+                                          response_id, store_ctx = std::move(store_ctx),
+                                          kinds](size_t /*offset*/, httplib::DataSink& sink) mutable -> bool {
+                                             return run_responses_stream_(sink, stream_ctx, state, server_req,
+                                                                          req_model, response_id, store_ctx,
+                                                                          kinds);
+                                         });
         return;
     }
 
@@ -553,7 +557,7 @@ void handle_responses(const httplib::Request& req, httplib::Response& res, Serve
         return;
     }
 
-    json response = rsp::openai_to_responses_response(oai_response, req_model, response_id);
+    json response = rsp::openai_to_responses_response(oai_response, req_model, response_id, kinds);
     annotate_store_fields(response, store_ctx);
 
     {
