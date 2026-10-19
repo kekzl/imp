@@ -14,6 +14,7 @@ updates:
   # Dockerfile.ciq and Dockerfile.cutile build FROM local-only stages (imp:builder-133,
   # imp:ciq); Dependabot resolves those as docker.io/library/imp and fails the whole run
   # (private_source_authentication_failure, run 29214173834), so they are excluded.
+  # Dockerfile.agents stays on python:3.12: aider-chat 0.86.2 (latest) requires Python <3.13.
   - package-ecosystem: "docker"
     directories:
       - "/"
@@ -23,6 +24,7 @@ updates:
     exclude-paths:
       - "tools/analysis/Dockerfile.ciq"
       - "tools/analysis/Dockerfile.cutile"
+      - "tools/Dockerfile.agents"
     schedule:
       interval: "weekly"
     groups:
