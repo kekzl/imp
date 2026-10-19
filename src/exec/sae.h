@@ -52,4 +52,25 @@ struct SaeReadout {
 [[nodiscard]] bool load_sae_dir(const std::string& dir, int d_model, int n_layers, SaeHost& out,
                                 std::string* err);
 
+// Feature tap, the other residual reader (DSpark drafter, runtime/dspark_drafter.h): after layer L with
+// slot[L] = j >= 0 every forward copies its first min(n, rows) residual rows into dst[:, j * d_model]
+// ([rows, ld bytes] FP16), a plain D2D 2-D copy with fixed pointers that a captured verify graph replays.
+struct FeatureTap {
+    std::vector<int> slot;  // per target layer: column block in dst, -1 = none; empty = off
+    void* dst = nullptr;
+    int rows = 0;
+    size_t ld = 0;  // bytes per dst row
+};
+
+inline void feature_tap_configure(FeatureTap& t, const std::vector<int>& layers, int n_layers, int d_model,
+                                  void* dst, int rows) {
+    t.slot.assign(dst != nullptr ? static_cast<size_t>(n_layers) : 0, -1);
+    t.dst = dst;
+    t.rows = rows;
+    t.ld = layers.size() * static_cast<size_t>(d_model) * 2;  // FP16
+    for (size_t j = 0; j < layers.size(); ++j)
+        if (layers[j] >= 0 && layers[j] < static_cast<int>(t.slot.size()))
+            t.slot[static_cast<size_t>(layers[j])] = static_cast<int>(j);
+}
+
 }  // namespace imp

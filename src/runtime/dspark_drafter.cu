@@ -1,0 +1,455 @@
+#include "runtime/dspark_drafter.h"
+
+#include "compute/activation.h"
+#include "compute/dspark_attention.h"
+#include "compute/gemm.h"
+#include "compute/layernorm.h"
+#include "core/logging.h"
+#include "core/tensor.h"
+#include "model/json_util.h"
+#include "memory/host_pinned.h"
+#include "memory/vram_owned.h"
+#include "model/safetensors_raw.h"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstring>
+#include <fstream>
+#include <initializer_list>
+#include <map>
+#include <sstream>
+
+namespace imp {
+
+namespace {
+
+constexpr int kHeadDim = 128;  // the norm + RoPE kernel's pair layout (64 threads x 2)
+
+// Per (row, head): RMSNorm over head_dim, then NeoX RoPE at positions[row], in place.
+__global__ void dspark_head_norm_rope_kernel(half* __restrict__ x, int row_stride, int heads,
+                                             const half* __restrict__ w, const int* __restrict__ pos,
+                                             float log2_theta, float eps) {
+    const int row = blockIdx.x / heads;
+    const int head = blockIdx.x % heads;
+    half* v = x + (static_cast<size_t>(row) * row_stride) + (static_cast<size_t>(head) * kHeadDim);
+    const int i = threadIdx.x;  // pair (i, i + 64)
+    float a = __half2float(v[i]);
+    float b = __half2float(v[i + (kHeadDim / 2)]);
+    float ss = (a * a) + (b * b);
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1)
+        ss += __shfl_xor_sync(0xffffffffu, ss, o);
+    __shared__ float part[2];
+    if ((i & 31) == 0)
+        part[i >> 5] = ss;
+    __syncthreads();
+    const float inv = rsqrtf(((part[0] + part[1]) / kHeadDim) + eps);
+    a *= inv * __half2float(w[i]);
+    b *= inv * __half2float(w[i + (kHeadDim / 2)]);
+    const float freq = exp2f(-log2_theta * (2.0f * i) / kHeadDim);
+    float s = 0.0f;
+    float c = 0.0f;
+    sincosf(static_cast<float>(pos[row]) * freq, &s, &c);
+    v[i] = __float2half((a * c) - (b * s));
+    v[i + (kHeadDim / 2)] = __float2half((b * c) + (a * s));
+}
+
+__global__ void dspark_iota_kernel(int* __restrict__ out, int base, int n) {
+    const int i = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    if (i < n)
+        out[i] = base + i;
+}
+
+// One block per row: index of the largest logit (lowest index on ties).
+__global__ void dspark_argmax_rows_kernel(const half* __restrict__ logits, int vocab,
+                                          int32_t* __restrict__ out) {
+    const half* r = logits + (static_cast<size_t>(blockIdx.x) * vocab);
+    float best = -INFINITY;
+    int idx = 0x7fffffff;
+    for (int j = threadIdx.x; j < vocab; j += blockDim.x) {
+        const float v = __half2float(r[j]);
+        if (v > best) {
+            best = v;
+            idx = j;
+        }
+    }
+    for (int o = 16; o > 0; o >>= 1) {
+        const float ob = __shfl_xor_sync(0xffffffffu, best, o);
+        const int oi = __shfl_xor_sync(0xffffffffu, idx, o);
+        if (ob > best || (ob == best && oi < idx)) {
+            best = ob;
+            idx = oi;
+        }
+    }
+    __shared__ float sb[32];
+    __shared__ int si[32];
+    if ((threadIdx.x & 31) == 0) {
+        sb[threadIdx.x >> 5] = best;
+        si[threadIdx.x >> 5] = idx;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        for (int k = 1; k < static_cast<int>(blockDim.x >> 5); ++k)
+            if (sb[k] > best || (sb[k] == best && si[k] < idx)) {
+                best = sb[k];
+                idx = si[k];
+            }
+        out[blockIdx.x] = idx;
+    }
+}
+
+half bf16_to_half(uint16_t b) {
+    uint32_t u = static_cast<uint32_t>(b) << 16;
+    float f = 0.0f;
+    std::memcpy(&f, &u, sizeof(f));
+    return __float2half(f);
+}
+
+Tensor t2(void* p, int64_t rows, int64_t cols, QType q = QType::F16) {
+    const int64_t s[2] = {rows, cols};
+    return Tensor(p, q, 2, s, true);
+}
+
+}  // namespace
+
+struct DSparkDrafter::Impl {
+    struct Layer {
+        half *in_norm = nullptr, *post_norm = nullptr, *wq = nullptr, *wk = nullptr, *wv = nullptr,
+             *wo = nullptr;
+        half *qn = nullptr, *kn = nullptr, *gate = nullptr, *up = nullptr, *down = nullptr;
+        half *k_cache = nullptr, *v_cache = nullptr;  // [cap, n_kv * head_dim]
+    };
+    int d = 0, n_layers = 0, nh = 0, nkv = 0, ff = 0, vocab = 0, block = 0, mask_id = 0, cap = 0;
+    float eps = 1e-6f, log2_theta = 0.0f;
+    std::vector<int> layer_ids;
+    std::vector<Layer> layers;
+    half *fc = nullptr, *hidden_norm = nullptr, *norm = nullptr, *lm_head = nullptr, *mask_emb = nullptr;
+    // Scratch.
+    half *t = nullptr, *tn = nullptr, *h = nullptr, *xn = nullptr, *q = nullptr, *o = nullptr;
+    half *gate = nullptr, *up = nullptr, *act = nullptr, *logits = nullptr;
+    float* s = nullptr;  // dspark_attention split partials
+    int* d_pos = nullptr;
+    int32_t* d_ids = nullptr;
+    PinnedBuffer pin_anchor, pin_ids;
+    half* h_anchor = nullptr;  // pin_anchor [d]
+    int32_t* h_ids = nullptr;  // pin_ids
+    RawSafeTensors st;
+    const uint16_t* embed_bf16 = nullptr;  // host mmap [vocab, d]
+    std::vector<int> ctx_pos;              // position of every held context row, ascending
+    size_t bytes = 0;
+    VRAMAllocator* alloc = nullptr;
+    cudaStream_t stream = nullptr;  // load-time uploads
+    std::vector<VramOwned<char>> owned;
+
+    template <typename T>
+    T* dev(size_t n) {
+        owned.emplace_back(*alloc, n * sizeof(T), "dspark");
+        if (!owned.back())
+            return nullptr;
+        bytes += n * sizeof(T);
+        return reinterpret_cast<T*>(owned.back().get());
+    }
+
+    int kv_dim() const { return nkv * kHeadDim; }
+    half* upload(const std::map<std::string, const RawTensor*>& by_name, const std::string& name,
+                 int64_t numel);
+    std::string upload_weights();
+    std::string alloc_scratch(cudaStream_t stream);
+
+    void head_norm_rope(half* x, int rows, int row_stride, int heads, const half* w, cudaStream_t st_) const {
+        if (rows <= 0)
+            return;
+        dspark_head_norm_rope_kernel<<<rows * heads, kHeadDim / 2, 0, st_>>>(x, row_stride, heads, w, d_pos,
+                                                                             log2_theta, eps);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+
+    // Positions pos0 .. pos0 + n - 1 written on the device: no pinned staging reused across async copies.
+    void upload_positions(int pos0, int n, cudaStream_t st_) const {
+        dspark_iota_kernel<<<(n + 255) / 256, 256, 0, st_>>>(d_pos, pos0, n);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+};
+
+DSparkDrafter::DSparkDrafter() = default;
+DSparkDrafter::~DSparkDrafter() = default;
+
+int DSparkDrafter::block_size() const { return p_ ? p_->block : 0; }
+const std::vector<int>& DSparkDrafter::target_layer_ids() const { return p_->layer_ids; }
+int DSparkDrafter::feature_dim() const { return p_ ? static_cast<int>(p_->layer_ids.size()) * p_->d : 0; }
+size_t DSparkDrafter::device_bytes() const { return p_ ? p_->bytes : 0; }
+void DSparkDrafter::reset() {
+    if (p_)
+        p_->ctx_pos.clear();
+}
+int DSparkDrafter::ctx_rows() const { return p_ ? static_cast<int>(p_->ctx_pos.size()) : 0; }
+int DSparkDrafter::next_pos() const { return (p_ && !p_->ctx_pos.empty()) ? p_->ctx_pos.back() + 1 : 0; }
+
+namespace {
+
+bool all_set(std::initializer_list<const void*> ptrs) {
+    return std::all_of(ptrs.begin(), ptrs.end(), [](const void* q) { return q != nullptr; });
+}
+
+double json_num(const JValue& obj, const char* key, double dflt) {
+    const JValue* v = jobj_find(obj, key);
+    return (v && v->type == JType::NUMBER) ? v->num_val : dflt;
+}
+
+// config.json -> dims, block, mask id, theta, target layers. "" or a one-line reason.
+std::string parse_dspark_config(const JValue& cfg, int& d, int& n_layers, int& nh, int& nkv, int& ff,
+                                int& vocab, int& block, int& mask_id, float& eps, float& log2_theta,
+                                std::vector<int>& ids) {
+    d = static_cast<int>(json_num(cfg, "hidden_size", 0));
+    n_layers = static_cast<int>(json_num(cfg, "num_hidden_layers", 0));
+    nh = static_cast<int>(json_num(cfg, "num_attention_heads", 0));
+    nkv = static_cast<int>(json_num(cfg, "num_key_value_heads", 0));
+    ff = static_cast<int>(json_num(cfg, "intermediate_size", 0));
+    vocab = static_cast<int>(json_num(cfg, "vocab_size", 0));
+    block = static_cast<int>(json_num(cfg, "block_size", 0));
+    mask_id = static_cast<int>(json_num(cfg, "mask_token_id", -1));
+    eps = static_cast<float>(json_num(cfg, "rms_norm_eps", 1e-6));
+    double theta = json_num(cfg, "rope_theta", 1e6);
+    if (const JValue* rp = jobj_find(cfg, "rope_parameters"); rp && rp->type == JType::OBJECT)
+        theta = json_num(*rp, "rope_theta", theta);
+    log2_theta = static_cast<float>(std::log2(theta));
+    if (const JValue* v = jobj_find(cfg, "target_layer_ids"); v && v->type == JType::ARRAY)
+        for (const JValue& e : v->arr)
+            ids.push_back(static_cast<int>(e.num_val));
+    if (json_num(cfg, "markov_rank", 0) != 0)
+        return "markov_rank != 0 (DSpark Markov head) is not supported";
+    if (static_cast<int>(json_num(cfg, "head_dim", kHeadDim)) != kHeadDim || nh <= 0 || nkv <= 0 ||
+        nh % nkv || nh / nkv > 8)
+        return "needs head_dim 128 and n_heads a multiple of n_kv_heads";
+    if (block < 2 || block > kDSparkMaxRows || mask_id < 0 || mask_id >= vocab || ids.empty())
+        return "block_size / mask_token_id / target_layer_ids missing or out of range";
+    return "";
+}
+
+}  // namespace
+
+// BF16 tensor `name` with `numel` elements -> FP16 device copy; nullptr when missing, mis-typed or
+// mis-shaped.
+half* DSparkDrafter::Impl::upload(const std::map<std::string, const RawTensor*>& by_name,
+                                  const std::string& name, int64_t numel) {
+    auto it = by_name.find(name);
+    if (it == by_name.end() || it->second->dtype != "BF16" || it->second->numel() != numel)
+        return nullptr;
+    std::vector<half> host(static_cast<size_t>(numel));
+    const auto* src = static_cast<const uint16_t*>(it->second->data);
+    for (int64_t i = 0; i < numel; ++i)
+        host[static_cast<size_t>(i)] = bf16_to_half(src[i]);
+    half* dst = dev<half>(static_cast<size_t>(numel));
+    if (dst && (cudaMemcpyAsync(dst, host.data(), numel * sizeof(half), cudaMemcpyHostToDevice, stream) !=
+                    cudaSuccess ||
+                cudaStreamSynchronize(stream) != cudaSuccess))
+        return nullptr;
+    return dst;
+}
+
+std::string DSparkDrafter::Impl::upload_weights() {
+    std::map<std::string, const RawTensor*> by_name;
+    for (const RawTensor& rt : st.tensors())
+        by_name[rt.name] = &rt;
+    const int64_t qd = static_cast<int64_t>(nh) * kHeadDim, kvd = kv_dim(), dd = d;
+    fc = upload(by_name, "fc.weight", dd * static_cast<int64_t>(layer_ids.size()) * dd);
+    hidden_norm = upload(by_name, "hidden_norm.weight", dd);
+    norm = upload(by_name, "norm.weight", dd);
+    lm_head = upload(by_name, "lm_head.weight", static_cast<int64_t>(vocab) * dd);
+    if (!all_set({fc, hidden_norm, norm, lm_head}))
+        return "fc / hidden_norm / norm / lm_head missing, not BF16, or mis-shaped";
+    layers.resize(static_cast<size_t>(n_layers));
+    for (int l = 0; l < n_layers; ++l) {
+        auto& L = layers[static_cast<size_t>(l)];
+        const std::string pre = "layers." + std::to_string(l) + ".";
+        L.in_norm = upload(by_name, pre + "input_layernorm.weight", dd);
+        L.post_norm = upload(by_name, pre + "post_attention_layernorm.weight", dd);
+        L.wq = upload(by_name, pre + "self_attn.q_proj.weight", qd * dd);
+        L.wk = upload(by_name, pre + "self_attn.k_proj.weight", kvd * dd);
+        L.wv = upload(by_name, pre + "self_attn.v_proj.weight", kvd * dd);
+        L.wo = upload(by_name, pre + "self_attn.o_proj.weight", dd * qd);
+        L.qn = upload(by_name, pre + "self_attn.q_norm.weight", kHeadDim);
+        L.kn = upload(by_name, pre + "self_attn.k_norm.weight", kHeadDim);
+        L.gate = upload(by_name, pre + "mlp.gate_proj.weight", static_cast<int64_t>(ff) * dd);
+        L.up = upload(by_name, pre + "mlp.up_proj.weight", static_cast<int64_t>(ff) * dd);
+        L.down = upload(by_name, pre + "mlp.down_proj.weight", dd * ff);
+        L.k_cache = dev<half>(static_cast<size_t>(cap) * kvd);
+        L.v_cache = dev<half>(static_cast<size_t>(cap) * kvd);
+        if (!all_set({L.in_norm, L.post_norm, L.wq, L.wk, L.wv, L.wo, L.qn, L.kn, L.gate, L.up, L.down,
+                      L.k_cache, L.v_cache}))
+            return "layer " + std::to_string(l) + ": tensor missing / mis-shaped, or out of VRAM";
+    }
+    auto eit = by_name.find("embed_tokens.weight");
+    if (eit == by_name.end() || eit->second->dtype != "BF16" ||
+        eit->second->numel() != static_cast<int64_t>(vocab) * d)
+        return "embed_tokens missing or mis-shaped";
+    embed_bf16 = static_cast<const uint16_t*>(eit->second->data);
+    return "";
+}
+
+std::string DSparkDrafter::Impl::alloc_scratch(cudaStream_t stream) {
+    const int rows = std::max(kMaxAppendRows, block);
+    const size_t qd = static_cast<size_t>(nh) * kHeadDim, b = static_cast<size_t>(block);
+    t = dev<half>(static_cast<size_t>(rows) * d);
+    tn = dev<half>(static_cast<size_t>(rows) * d);
+    h = dev<half>(b * d);
+    xn = dev<half>(b * d);
+    q = dev<half>(b * qd);
+    o = dev<half>(b * qd);
+    gate = dev<half>(b * ff);
+    up = dev<half>(b * ff);
+    act = dev<half>(b * ff);
+    logits = dev<half>(b * vocab);
+    s = dev<float>(dspark_attention_work_floats(block, nh, cap));
+    d_pos = dev<int>(static_cast<size_t>(rows));
+    d_ids = dev<int32_t>(b);
+    mask_emb = dev<half>(static_cast<size_t>(d));
+    if (!all_set({t, tn, h, xn, q, o, gate, up, act, logits, s, d_pos, d_ids, mask_emb}))
+        return "scratch allocation failed";
+    pin_anchor = PinnedBuffer::acquire(cuda_host_pinned_allocator(), d * sizeof(half));
+    pin_ids = PinnedBuffer::acquire(cuda_host_pinned_allocator(), b * sizeof(int32_t));
+    h_anchor = pin_anchor.as<half>();
+    h_ids = pin_ids.as<int32_t>();
+    if (!all_set({h_anchor, h_ids}))
+        return "pinned host scratch allocation failed";
+    for (int i = 0; i < d; ++i)
+        h_anchor[i] = bf16_to_half(embed_bf16[(static_cast<int64_t>(mask_id) * d) + i]);
+    if (cudaMemcpyAsync(mask_emb, h_anchor, d * sizeof(half), cudaMemcpyHostToDevice, stream) !=
+            cudaSuccess ||
+        cudaStreamSynchronize(stream) != cudaSuccess)
+        return "mask embedding upload failed";
+    return "";
+}
+
+std::string DSparkDrafter::load(VRAMAllocator& alloc, const std::string& dir, int target_d_model,
+                                int target_layers, int max_ctx, cudaStream_t stream) {
+    auto p = std::make_unique<Impl>();
+    p->alloc = &alloc;
+    p->stream = stream;
+    std::ifstream cf(dir + "/config.json");
+    if (!cf)
+        return "no " + dir + "/config.json";
+    std::stringstream ss;
+    ss << cf.rdbuf();
+    const std::string text = ss.str();
+    JsonParser parser(text);
+    const JValue cfg = parser.parse();
+    if (!parser.ok() || cfg.type != JType::OBJECT)
+        return "config.json does not parse";
+    if (std::string err = parse_dspark_config(cfg, p->d, p->n_layers, p->nh, p->nkv, p->ff, p->vocab,
+                                              p->block, p->mask_id, p->eps, p->log2_theta, p->layer_ids);
+        !err.empty())
+        return err;
+    if (p->d != target_d_model)
+        return "hidden_size " + std::to_string(p->d) + " != target d_model " + std::to_string(target_d_model);
+    for (int id : p->layer_ids)
+        if (id < 0 || id >= target_layers)
+            return "target_layer_ids entry " + std::to_string(id) + " outside the target's layers";
+    if (std::string err = p->st.open(dir + "/model.safetensors"); !err.empty())
+        return err;
+    p->cap = max_ctx + p->block;
+    if (std::string err = p->upload_weights(); !err.empty())
+        return err;
+    if (std::string err = p->alloc_scratch(stream); !err.empty())
+        return err;
+    p_ = std::move(p);
+    return "";
+}
+
+void DSparkDrafter::append_ctx(const half* feat, int ld, int n, int pos0, cudaStream_t stream) {
+    Impl& P = *p_;
+    // Rollback: rows at positions >= pos0 are superseded.
+    P.ctx_pos.erase(std::lower_bound(P.ctx_pos.begin(), P.ctx_pos.end(), pos0), P.ctx_pos.end());
+    if (n <= 0)
+        return;
+    if (n > kMaxAppendRows || ld != feature_dim()) {
+        IMP_LOG_ERROR("dspark: append of %d rows (ld %d, want <= %d rows, ld %d) refused", n, ld,
+                      kMaxAppendRows, feature_dim());
+        return;
+    }
+    if (static_cast<int>(P.ctx_pos.size()) + n + P.block > P.cap)
+        P.ctx_pos.clear();  // past the sized context: restart from these rows
+    const int row0 = static_cast<int>(P.ctx_pos.size());
+    const int kvd = P.kv_dim();
+    P.upload_positions(pos0, n, stream);
+    Tensor tt = t2(P.t, n, P.d);
+    gemm(t2(const_cast<half*>(feat), n, ld), t2(P.fc, P.d, ld), tt, 1.0f, 0.0f, stream);
+    Tensor tn = t2(P.tn, n, P.d);
+    rmsnorm(tt, Tensor(P.hidden_norm, QType::F16, 1, std::array<int64_t, 1>{P.d}.data(), true), tn, P.eps,
+            stream);
+    for (auto& L : P.layers) {
+        half* k = L.k_cache + (static_cast<size_t>(row0) * kvd);
+        half* v = L.v_cache + (static_cast<size_t>(row0) * kvd);
+        Tensor kt = t2(k, n, kvd);
+        Tensor vt = t2(v, n, kvd);
+        gemm(tn, t2(L.wk, kvd, P.d), kt, 1.0f, 0.0f, stream);
+        gemm(tn, t2(L.wv, kvd, P.d), vt, 1.0f, 0.0f, stream);
+        P.head_norm_rope(k, n, kvd, P.nkv, L.kn, stream);
+    }
+    for (int i = 0; i < n; ++i)
+        P.ctx_pos.push_back(pos0 + i);
+}
+
+std::vector<int32_t> DSparkDrafter::propose(int32_t anchor, int pos, cudaStream_t stream) {
+    Impl& P = *p_;
+    const int b = P.block;
+    const int d = P.d;
+    const int qd = P.nh * kHeadDim;
+    const int kvd = P.kv_dim();
+    const int n_ctx = static_cast<int>(P.ctx_pos.size());
+    std::vector<int32_t> out;
+    if (anchor < 0 || anchor >= P.vocab || n_ctx + b > P.cap)
+        return out;
+    for (int i = 0; i < d; ++i)
+        P.h_anchor[i] = bf16_to_half(P.embed_bf16[(static_cast<int64_t>(anchor) * d) + i]);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(P.h, P.h_anchor, d * sizeof(half), cudaMemcpyHostToDevice, stream));
+    for (int r = 1; r < b; ++r)
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(P.h + (static_cast<size_t>(r) * d), P.mask_emb, d * sizeof(half),
+                                           cudaMemcpyDeviceToDevice, stream));
+    P.upload_positions(pos, b, stream);
+    const int64_t dshape[1] = {d};
+    Tensor h = t2(P.h, b, d);
+    Tensor xn = t2(P.xn, b, d);
+    Tensor q = t2(P.q, b, qd);
+    Tensor o = t2(P.o, b, qd);
+    Tensor gate = t2(P.gate, b, P.ff);
+    Tensor upt = t2(P.up, b, P.ff);
+    Tensor act = t2(P.act, b, P.ff);
+    const int kv_len = n_ctx + b;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
+    for (auto& L : P.layers) {
+        rmsnorm(h, Tensor(L.in_norm, QType::F16, 1, dshape, true), xn, P.eps, stream);
+        half* kb = L.k_cache + (static_cast<size_t>(n_ctx) * kvd);
+        half* vb = L.v_cache + (static_cast<size_t>(n_ctx) * kvd);
+        Tensor kt = t2(kb, b, kvd);
+        Tensor vt = t2(vb, b, kvd);
+        gemm(xn, t2(L.wq, qd, d), q, 1.0f, 0.0f, stream);
+        gemm(xn, t2(L.wk, kvd, d), kt, 1.0f, 0.0f, stream);
+        gemm(xn, t2(L.wv, kvd, d), vt, 1.0f, 0.0f, stream);
+        P.head_norm_rope(P.q, b, qd, P.nh, L.qn, stream);
+        P.head_norm_rope(kb, b, kvd, P.nkv, L.kn, stream);
+        IMP_CUDA_CHECK_LOG(
+            dspark_attention(P.q, L.k_cache, L.v_cache, P.o, P.s, b, P.nh, P.nkv, kv_len, scale, stream));
+        gemm(o, t2(L.wo, d, qd), h, 1.0f, 1.0f, stream);
+        rmsnorm(h, Tensor(L.post_norm, QType::F16, 1, dshape, true), xn, P.eps, stream);
+        gemm(xn, t2(L.gate, P.ff, d), gate, 1.0f, 0.0f, stream);
+        gemm(xn, t2(L.up, P.ff, d), upt, 1.0f, 0.0f, stream);
+        swiglu(gate, upt, act, stream);
+        gemm(act, t2(L.down, d, P.ff), h, 1.0f, 1.0f, stream);
+    }
+    rmsnorm(h, Tensor(P.norm, QType::F16, 1, dshape, true), xn, P.eps, stream);
+    Tensor rows = t2(P.xn, b, d);
+    Tensor lg = t2(P.logits, b, P.vocab);
+    gemm(rows, t2(P.lm_head, P.vocab, d), lg, 1.0f, 0.0f, stream);
+    dspark_argmax_rows_kernel<<<b, 1024, 0, stream>>>(P.logits, P.vocab, P.d_ids);
+    IMP_CUDA_CHECK_LAUNCH();
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpyAsync(P.h_ids, P.d_ids, b * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+    if (cudaStreamSynchronize(stream) != cudaSuccess)
+        return out;
+    out.assign(P.h_ids, P.h_ids + b);
+    return out;
+}
+
+}  // namespace imp

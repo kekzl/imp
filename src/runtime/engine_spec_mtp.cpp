@@ -286,6 +286,7 @@ SpecDrafterState Engine::spec_drafter_state_(const Request& req) const {
     // server so the two cannot disagree about what a request asked for.
     s.mtp_on = mtp_resolve_request(mtp_request_state_(req)).k > 0;
     s.recycling_on = !forced_off && runtime_config_.speculative.token_recycling;
+    s.dspark_on = !forced_off && dspark_ != nullptr;
     return s;
 }
 

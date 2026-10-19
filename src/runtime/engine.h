@@ -56,6 +56,7 @@ struct ShadowPlanProbe;  // src/runtime/plan_shadow.h
 struct PlanResult;       // src/memory/plan.h
 struct MtpDraftWorkspace;  // src/compute/mtp_forward.h
 struct EncoderWorkspace;   // src/compute/encoder_forward.h
+class DSparkDrafter;       // src/runtime/dspark_drafter.h
 
 // Typed owners of the forward-declared workspaces: operator() = delete, in engine.cpp.
 struct MtpDraftWorkspaceDeleter { void operator()(MtpDraftWorkspace* ws) const noexcept; };
@@ -541,6 +542,15 @@ private:
     // sampling into output_lens and disarms. Both are no-ops without a lens request.
     void logit_lens_arm_prefill_(const Request& req, int n_tokens);
     std::unique_ptr<SaeDevice> sae_;
+    // DSpark block drafter (speculative.dspark_model, engine_dspark.cpp): its context rows come from the
+    // executor feature tap into dspark_feat_ ([executor max tokens, feature_dim] FP16).
+    std::unique_ptr<DSparkDrafter> dspark_;
+    VramOwned<char> dspark_feat_;
+    int dspark_req_ = -1;  // request whose context the drafter holds
+    [[nodiscard]] bool init_dspark_();
+    void dspark_prefill_feed_(const Request& req, int offset, int n);
+    std::vector<int32_t> dspark_draft_(const Request& req);
+    void dspark_post_verify_(int rows, int pos0);
     [[nodiscard]] bool sae_arm_decode_(const std::vector<std::shared_ptr<Request>>& rows);
     void sae_arm_prefill_(const Request& req, int n_tokens, bool last_chunk, cudaStream_t stream);
     void sae_collect_(const std::vector<std::shared_ptr<Request>>& rows, cudaStream_t stream);

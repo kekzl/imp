@@ -469,6 +469,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.suffix", cfg.speculative.suffix);
     I("speculative.suffix_k_max", cfg.speculative.suffix_k_max);
     S("speculative.ngram_corpus", cfg.speculative.ngram_corpus);
+    S("speculative.dspark_model", cfg.speculative.dspark_model);
     I("speculative.min_match", cfg.speculative.min_match);
     I("speculative.max_match", cfg.speculative.max_match);
     I("speculative.give_up_after", cfg.speculative.give_up_after);

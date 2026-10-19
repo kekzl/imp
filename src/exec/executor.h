@@ -600,6 +600,7 @@ public:
 
     // Public view_tokens wrapper for external callers.
     Tensor view_hidden(int n_tokens) const { return view_tokens(hidden_, n_tokens); }
+    FeatureTap feature_tap;  // exec/sae.h; feature_tap_configure() sets it
     // h_prev rows for an MTP head: the hc streams [n, hc*d] on a gated-residual model (Qwen4Exp
     // multi_hidden after the last combine, the final mixer leaves them untouched), else hidden_.
     Tensor view_mtp_hidden(int n_tokens) const {
@@ -711,7 +712,7 @@ private:
     int lens_layers_ = 0;         // layers stashed since set_lens_rows
     VramOwned<char> lens_scratch_;
     size_t lens_scratch_bytes_ = 0;
-    void lens_stash_(int layer, int n, cudaStream_t stream);
+    void post_layer_taps_(int layer, int n, cudaStream_t stream);  // logit lens rows + feature_tap
     const SaeDevice* sae_ = nullptr;
     std::vector<SaeRowSpec> sae_rows_;
     int sae_n_readout_ = 0;

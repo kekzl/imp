@@ -271,34 +271,6 @@ SuffixDraftIndex& Engine::spec_suffix_index_(const Request& req) {
     return it->second;
 }
 
-TokenRecycleTable& Engine::spec_recycle_table_() {
-    if (!spec_recycle_) {
-        const auto& scfg = runtime_config_.speculative;
-        spec_recycle_ = std::make_unique<TokenRecycleTable>(model_->config_.vocab_size,
-                                                            std::max(1, scfg.recycle_slots));
-    }
-    return *spec_recycle_;
-}
-
-// Ingest this request's not-yet-seen tokens into the engine-scoped
-// adjacency table: prompt bigrams once (spec_recycle_fed == 0), then the
-// new output tokens (every emit path, verify accepts, loop bursts,
-// plain steps, lands in output_tokens, so one cursor covers them all).
-void Engine::spec_recycle_feed_(Request& req) {
-    TokenRecycleTable& tr = spec_recycle_table_();
-    const auto& out = req.output_tokens;
-    if (req.spec_recycle_fed == 0) {
-        const auto& in = req.input_tokens;
-        for (size_t i = 1; i < in.size(); ++i)
-            tr.observe_pair(in[i - 1], in[i]);
-        if (!in.empty() && !out.empty())
-            tr.observe_pair(in.back(), out.front());
-    }
-    for (int i = std::max(1, req.spec_recycle_fed); i < static_cast<int>(out.size()); ++i)
-        tr.observe_pair(out[i - 1], out[i]);
-    req.spec_recycle_fed = static_cast<int>(out.size());
-}
-
 bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream, int min_draft) {
     const auto& scfg = runtime_config_.speculative;
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
@@ -343,6 +315,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         history.insert(history.end(), req->output_tokens.begin(), req->output_tokens.end());
         nd = ngram_draft(history, k, std::max(1, scfg.min_match), scfg.max_match);
     }
+    if (dspark_)  // the block drafter replaces the matcher (engine_dspark.cpp)
+        nd = {dspark_draft_(*req), -1};
     const bool draft_from_prediction = draft_start >= pred_begin && draft_start < pred_end;
     // #964 stage 2, depth-aware long-context gate: a verify step's cost
     // rises with context, so a 1-token draft stops paying past a
@@ -1052,6 +1026,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     // this chunk's hidden rows, which the re-forward overwrites.
     if (mtp_spec_decode_enabled())
         mtp_post_verify_update_(*req, emitted, mc_on ? mc_row0 : 0);
+    dspark_post_verify_(mc_on ? 0 : emitted, p0);  // rows 0..matched: the anchor and the accepted drafts
 
     // Hybrid mc: land the winner's recurrent state on the live slot. Runs
     // BEFORE the rollback because the partial-accept replay below re-forwards
