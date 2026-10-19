@@ -118,6 +118,9 @@ struct Speculative {
     // engine-wide suffix index, asked when the request's own history has no match (speculative.suffix).
     // "" = off.
     std::string ngram_corpus;
+    // DSpark block drafter checkpoint directory (deepseek-ai/dflash_qwen3_8b_block7 for Qwen3-8B):
+    // drafts block_size tokens per verify from the target's hidden states; forces batch 1. "" = off.
+    std::string dspark_model;
     // Longer suffix matches trade draft frequency for precision, and precision
     // wins: a higher min_match cuts false n-gram matches (e.g. in number
     // tables) that never verify, at the cost of fewer drafts overall.

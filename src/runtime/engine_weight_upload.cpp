@@ -445,7 +445,7 @@ bool Engine::init_weights() {
             "(host-resident weights refault on demand)",
             static_cast<double>(dropped) / (1024.0 * 1024.0 * 1024.0));
 
-    return true;
+    return init_dspark_();  // the drafter before the KV pool plans the rest
 }
 
 }  // namespace imp

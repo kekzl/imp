@@ -44,7 +44,15 @@ void GraphExecutor::set_lens_rows(std::vector<int> rows) {
     }
 }
 
-void GraphExecutor::lens_stash_(int layer, int n, cudaStream_t stream) {
+void GraphExecutor::post_layer_taps_(int layer, int n, cudaStream_t stream) {
+    const FeatureTap& ft = feature_tap;
+    if (layer < static_cast<int>(ft.slot.size()) && ft.slot[static_cast<size_t>(layer)] >= 0) {
+        const size_t row_b = static_cast<size_t>(model_->config().d_model) * sizeof(half);
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpy2DAsync(static_cast<char*>(ft.dst) + (ft.slot[static_cast<size_t>(layer)] * row_b),
+                              ft.ld, hidden_.data, row_b, row_b, static_cast<size_t>(std::min(n, ft.rows)),
+                              cudaMemcpyDeviceToDevice, stream));
+    }
     if (lens_rows_.empty() || layer >= model_->n_layers())
         return;
     cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;

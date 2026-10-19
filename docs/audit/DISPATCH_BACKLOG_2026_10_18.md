@@ -231,3 +231,10 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | R-049 | OPEN, economics measured | PERF_LOG 2026-10-18 row 49: batch 5's 2.0x was `imp-cli --bench` running verify eager (`tools/imp-cli/args.cpp` turns `speculative.capture` off); captured Qwen3-14B NVFP4 16-row verify 9.72 ms = 1.65x decode on the small-M route; next step is a DFlash drafter checkpoint (model download, owner) |
 | R-049.1 | DONE (this PR) | `speculative.verify_smallm_captured` (default on): same image, NVFP4 n-gram 8.59 / 8.53 -> 7.73 / 7.75 ms/verify, tg 226.32 / 228.66 -> 249.27 tok/s, Q6_K 16 rows 31.47 -> 12.17; `make test-spec-fidelity` red with a per-stream rule (graph vs eager on different kernels), green with the per-step rule; `make verify-fast` OK |
 | B-36 | OPEN (new) | Qwen3-14B Q6_K pp2..pp32 39.0-40.7 ms vs 5.83 ms decode: `gguf_source_fallback` dequantizes every weight per prompt chunk |
+
+## 2026-10-19 Batch 17: R-049 DSpark block drafter
+
+| ID | Status | Evidence |
+|---|---|---|
+| R-049 | DONE (opt-in) | PERF_LOG 2026-10-19 row 49: `speculative.dspark_model` + deepseek-ai/dflash_qwen3_8b_block7; Qwen3-8B-NVFP4 code 280.70 -> 457.96, list 281.63 -> 349.25, prose 282.25 -> 260.43 tok/s; FP8 code 170.89 -> 329.47 (vLLM 320.00); `DSparkDrafterTest.*` 2/2, `MtpGreedyIdentityTest.DSparkDoesNotChangeGreedyTokens` margins 0.686 / 0.394 nats (feature-tap mutant red), verify-fast OK, test-spec-fidelity OK |
+| R-049.2 | OPEN (new) | propose 3.25-3.81 ms host wall per draft vs 5.8 ms NVFP4 verify; levers: target NVFP4 LM head, captured propose |

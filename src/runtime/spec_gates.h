@@ -16,6 +16,7 @@ struct SpecDrafterState {
     bool ngram_on = false;      // speculative.ngram, after the per-request override
     bool mtp_on = false;        // speculative.mtp_k > 0
     bool recycling_on = false;  // speculative.token_recycling
+    bool dspark_on = false;     // speculative.dspark_model loaded
     // Model-level facts that no flag can overrule (recurrent state without
     // speculative.hybrid, GGUF-MoE, no chunked prefill). False here means this
     // model never speculates, whatever is switched on.
@@ -24,7 +25,7 @@ struct SpecDrafterState {
 
 // Is any drafter able to feed the verify step for this request?
 constexpr bool spec_any_drafter(const SpecDrafterState& s) {
-    return s.model_capable && (s.ngram_on || s.mtp_on || s.recycling_on);
+    return s.model_capable && (s.ngram_on || s.mtp_on || s.recycling_on || s.dspark_on);
 }
 
 // Is the history matcher itself live? Narrower than spec_any_drafter on

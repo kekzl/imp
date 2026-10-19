@@ -1,7 +1,7 @@
 // Speculative decoding may only move greedy output at a near-tie (batch-shape effect, SETTLED
 // D-2/#1924: M=32 vs M=1 mean|dlogp| 0.242, max 1.636 nats, 7/64 tokens flip); wider divergence
-// is a verify/accept defect. Oracle: mtp_k=0 vs mtp_k=2 (ngram=false), margin at the first
-// diverging token must lie inside the batch-shape envelope. GPU: needs checkpoint + MTP head.
+// is a verify/accept defect. Oracle: plain vs mtp_k=2 or the DSpark drafter (ngram=false), margin at
+// the first diverging token must lie inside the batch-shape envelope. GPU: needs the checkpoints.
 #include "imp/imp.h"
 #include "api/imp_internal.h"
 #include "model/chat_template.h"
@@ -159,6 +159,104 @@ std::vector<const char*> prompts() {
     return {std::begin(kPrompts), std::end(kPrompts)};
 }
 
+// Arm A: no speculation at all.
+void plain_baseline(const std::string& dir, std::vector<GreedyRun>* baseline) {
+    imp::set_pending_runtime_config(arm_config(0));
+    ImpModel model = nullptr;
+    ASSERT_EQ(imp_model_load_ex(dir.c_str(), IMP_FORMAT_SAFETENSORS, /*load_mtp_head=*/0, &model),
+              IMP_SUCCESS);
+    ImpConfig cfg = imp_config_default();
+    cfg.max_seq_len = 2048;
+    cfg.max_batch_size = 1;
+    ImpContext ctx = nullptr;
+    ASSERT_EQ(imp_context_create(model, &cfg, &ctx), IMP_SUCCESS);
+    for (const char* p : prompts()) {
+        const GreedyRun first = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false);
+        GreedyRun plain = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false);
+        const GreedyRun with_lp = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/true);
+        // Same engine/params, deterministic, cold: neither a second run nor the logprobs flag may
+        // move a token (AUDIT_QWEN38_NVFP4.md P7: trajectory depends on prior engine state).
+        // Margins cannot be read off a different sequence.
+        const auto report = [&](const GreedyRun& x, const GreedyRun& y) {
+            size_t i = 0;
+            while (i < std::min(x.tokens.size(), y.tokens.size()) && x.tokens[i] == y.tokens[i])
+                ++i;
+            std::printf("[spec-identity] arm A '%s': parts at token %zu of %zu/%zu", p, i, x.tokens.size(),
+                        y.tokens.size());
+            if (i < x.tokens.size() && i < y.tokens.size())
+                std::printf(" (%d vs %d)", x.tokens[i], y.tokens[i]);
+            if (i < y.margin.size())
+                std::printf(", logprobs-run margin there %.3f nats", y.margin[i]);
+            std::printf("\n");
+        };
+        if (first.tokens != plain.tokens)
+            report(first, plain);
+        ASSERT_EQ(first.tokens, plain.tokens)
+            << "prompt " << p << ": two cold deterministic runs of the plain arm differ";
+        // Logprobs run is a different LM-head/sampling path and parts from the plain run at a
+        // near-tie (measured on Qwen3.8-27B-NVFP4: token 81 of 127, 0.086 nats). Its margins equal
+        // the plain run's exactly as far as the two agree, unreadable past that point.
+        size_t lp_split = 0;
+        while (lp_split < std::min(plain.tokens.size(), with_lp.tokens.size()) &&
+               plain.tokens[lp_split] == with_lp.tokens[lp_split])
+            ++lp_split;
+        if (lp_split < plain.tokens.size())
+            report(plain, with_lp);
+        plain.margin.assign(with_lp.margin.begin(),
+                            with_lp.margin.begin() +
+                                static_cast<std::ptrdiff_t>(std::min(lp_split, with_lp.margin.size())));
+        baseline->push_back(std::move(plain));
+    }
+    imp_context_free(ctx);
+    imp_model_free(model);
+    for (size_t i = 0; i < baseline->size(); ++i) {
+        ASSERT_GE((*baseline)[i].tokens.size(), 32u)
+            << "prompt " << i << " produced " << (*baseline)[i].tokens.size()
+            << " tokens; too few for the comparison to mean anything";
+        ASSERT_GT((*baseline)[i].margin.size(), 0u)
+            << "prompt " << i << ": the logprobs run returned no margins, the oracle has nothing to read";
+    }
+}
+
+// First diverging token per prompt; its arm-A margin must lie inside the batch-shape envelope.
+void expect_near_tie_only(const std::vector<GreedyRun>& baseline, const std::vector<GreedyRun>& speculated,
+                          const char* arm) {
+    for (size_t i = 0; i < baseline.size(); ++i) {
+        const auto& a = baseline[i].tokens;
+        const auto& b = speculated[i].tokens;
+        const size_t n = std::min(a.size(), b.size());
+        size_t first = 0;
+        while (first < n && a[first] == b[first])
+            ++first;
+        if (first == n && a.size() == b.size()) {
+            std::printf("[spec-identity] %s prompt %zu: %zu tokens identical\n", arm, i, n);
+            continue;
+        }
+        ASSERT_LT(first, n) << "prompt " << i << ": one arm stopped early (" << a.size() << " vs " << b.size()
+                            << " tokens) with an identical prefix";
+        if (first >= baseline[i].margin.size()) {
+            // The logprobs run parted from the plain run before this point, so
+            // the margin here is unreadable: reported, not judged.
+            std::printf(
+                "[spec-identity] %s prompt %zu: parts at token %zu (plain %d, spec %d), margin "
+                "unreadable (logprobs run parted at %zu)\n",
+                arm, i, first, a[first], b[first], baseline[i].margin.size());
+            continue;
+        }
+        const float margin = baseline[i].margin[first];
+        std::printf(
+            "[spec-identity] %s prompt %zu: parts at token %zu (plain %d, spec %d), margin %.3f nats\n", arm,
+            i, first, a[first], b[first], margin);
+        EXPECT_LE(margin, kBatchShapeMarginNats)
+            << "prompt " << i << " (" << prompts()[i] << "): greedy output parted at token " << first
+            << " (plain chose " << a[first] << ", " << arm << " chose " << b[first] << ") where the "
+            << "plain arm's top-1/top-2 margin was " << margin << " nats.\n"
+            << "The batch shape of the verify chunk can only flip a near-tie (SETTLED D-2, #1924: "
+            << "max 1.636 nats per token). A flip at this margin is a verify/accept defect: an "
+            << "accepted draft the model would not have sampled.";
+    }
+}
+
 TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
     const std::string dir = model_or("IMP_TEST_MODEL_MTP", "/models/Qwen3.8-27B-NVFP4-vllm");
     if (!present(dir))
@@ -170,65 +268,10 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
     if (free_mib < kNeededMiB)
         GTEST_SKIP() << "needs ~" << kNeededMiB << " MiB free, card has " << free_mib << " MiB";
 
-    // ---- arm A: no speculation at all.
     std::vector<GreedyRun> baseline;
-    {
-        imp::set_pending_runtime_config(arm_config(0));
-        ImpModel model = nullptr;
-        ASSERT_EQ(imp_model_load_ex(dir.c_str(), IMP_FORMAT_SAFETENSORS, /*load_mtp_head=*/0, &model),
-                  IMP_SUCCESS);
-        ImpConfig cfg = imp_config_default();
-        cfg.max_seq_len = 2048;
-        cfg.max_batch_size = 1;
-        ImpContext ctx = nullptr;
-        ASSERT_EQ(imp_context_create(model, &cfg, &ctx), IMP_SUCCESS);
-        for (const char* p : prompts()) {
-            const GreedyRun first = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false);
-            GreedyRun plain = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false);
-            const GreedyRun with_lp = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/true);
-            // Same engine/params, deterministic, cold: neither a second run nor the logprobs flag may
-            // move a token (AUDIT_QWEN38_NVFP4.md P7: trajectory depends on prior engine state).
-            // Margins cannot be read off a different sequence.
-            const auto report = [&](const GreedyRun& x, const GreedyRun& y) {
-                size_t i = 0;
-                while (i < std::min(x.tokens.size(), y.tokens.size()) && x.tokens[i] == y.tokens[i])
-                    ++i;
-                std::printf("[mtp-identity] arm A '%s': parts at token %zu of %zu/%zu", p, i,
-                            x.tokens.size(), y.tokens.size());
-                if (i < x.tokens.size() && i < y.tokens.size())
-                    std::printf(" (%d vs %d)", x.tokens[i], y.tokens[i]);
-                if (i < y.margin.size())
-                    std::printf(", logprobs-run margin there %.3f nats", y.margin[i]);
-                std::printf("\n");
-            };
-            if (first.tokens != plain.tokens)
-                report(first, plain);
-            ASSERT_EQ(first.tokens, plain.tokens)
-                << "prompt " << p << ": two cold deterministic runs of the plain arm differ";
-            // Logprobs run is a different LM-head/sampling path and parts from the plain run at a
-            // near-tie (measured on Qwen3.8-27B-NVFP4: token 81 of 127, 0.086 nats). Its margins equal
-            // the plain run's exactly as far as the two agree, unreadable past that point.
-            size_t lp_split = 0;
-            while (lp_split < std::min(plain.tokens.size(), with_lp.tokens.size()) &&
-                   plain.tokens[lp_split] == with_lp.tokens[lp_split])
-                ++lp_split;
-            if (lp_split < plain.tokens.size())
-                report(plain, with_lp);
-            plain.margin.assign(with_lp.margin.begin(),
-                                with_lp.margin.begin() + static_cast<std::ptrdiff_t>(
-                                                            std::min(lp_split, with_lp.margin.size())));
-            baseline.push_back(std::move(plain));
-        }
-        imp_context_free(ctx);
-        imp_model_free(model);
-    }
-    for (size_t i = 0; i < baseline.size(); ++i) {
-        ASSERT_GE(baseline[i].tokens.size(), 32u)
-            << "prompt " << i << " produced " << baseline[i].tokens.size()
-            << " tokens; too few for the comparison to mean anything";
-        ASSERT_GT(baseline[i].margin.size(), 0u)
-            << "prompt " << i << ": the logprobs run returned no margins, the oracle has nothing to read";
-    }
+    plain_baseline(dir, &baseline);
+    if (HasFatalFailure())
+        return;
 
     // ---- arm B: the documented MTP pair, depth 2 (IMP_TEST_MTP_K overrides: Qwen3.8-Flash-Next runs 1).
     const char* k_env = getenv("IMP_TEST_MTP_K");
@@ -266,40 +309,49 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
     ASSERT_GT(stats.mtp.accepted, 0)
         << "the MTP head drafted " << stats.mtp.drafted << " tokens and the verify accepted none";
 
-    for (size_t i = 0; i < baseline.size(); ++i) {
-        const auto& a = baseline[i].tokens;
-        const auto& b = speculated[i].tokens;
-        const size_t n = std::min(a.size(), b.size());
-        size_t first = 0;
-        while (first < n && a[first] == b[first])
-            ++first;
-        if (first == n && a.size() == b.size()) {
-            std::printf("[mtp-identity] prompt %zu: %zu tokens identical\n", i, n);
-            continue;
-        }
-        ASSERT_LT(first, n) << "prompt " << i << ": one arm stopped early (" << a.size() << " vs "
-                            << b.size() << " tokens) with an identical prefix";
-        if (first >= baseline[i].margin.size()) {
-            // The logprobs run parted from the plain run before this point, so
-            // the margin here is unreadable: reported, not judged.
-            std::printf(
-                "[mtp-identity] prompt %zu: parts at token %zu (mtp_k=0 %d, mtp_k=%d %d), margin "
-                "unreadable (logprobs run parted at %zu)\n",
-                i, first, a[first], k, b[first], baseline[i].margin.size());
-            continue;
-        }
-        const float margin = baseline[i].margin[first];
-        std::printf(
-            "[mtp-identity] prompt %zu: parts at token %zu (mtp_k=0 %d, mtp_k=%d %d), margin %.3f nats\n", i,
-            first, a[first], k, b[first], margin);
-        EXPECT_LE(margin, kBatchShapeMarginNats)
-            << "prompt " << i << " (" << prompts()[i] << "): greedy output parted at token " << first
-            << " (mtp_k=0 chose " << a[first] << ", mtp_k=" << k << " chose " << b[first] << ") where the "
-            << "mtp_k=0 arm's top-1/top-2 margin was " << margin << " nats.\n"
-            << "The batch shape of the verify chunk can only flip a near-tie (SETTLED D-2, #1924: "
-            << "max 1.636 nats per token). A flip at this margin is a verify/accept defect: an "
-            << "accepted draft the model would not have sampled.";
-    }
+    expect_near_tie_only(baseline, speculated, "mtp");
+}
+
+// DSpark block drafter: 7 drafts per step, 8-row verify every step.
+TEST(MtpGreedyIdentityTest, DSparkDoesNotChangeGreedyTokens) {
+    const std::string dir = model_or("IMP_TEST_MODEL_DSPARK_TARGET", "/models/Qwen3-8B-NVFP4-cortecs");
+    const std::string drafter = model_or("IMP_TEST_MODEL_DSPARK", "/models/dflash_qwen3_8b_block7");
+    if (!present(dir) || !present(drafter))
+        GTEST_SKIP() << "checkpoint not present at " << dir << " or " << drafter;
+    constexpr size_t kNeededMiB = 12000;  // one 8B NVFP4 load at a time + 2 GB drafter
+    const size_t free_mib = device_free_mib();
+    if (free_mib < kNeededMiB)
+        GTEST_SKIP() << "needs ~" << kNeededMiB << " MiB free, card has " << free_mib << " MiB";
+
+    std::vector<GreedyRun> baseline;
+    plain_baseline(dir, &baseline);
+    if (HasFatalFailure())
+        return;
+
+    imp::RuntimeConfig rc = arm_config(0);
+    rc.speculative.dspark_model = drafter;
+    imp::set_pending_runtime_config(rc);
+    ImpModel model = nullptr;
+    ASSERT_EQ(imp_model_load_ex(dir.c_str(), IMP_FORMAT_SAFETENSORS, /*load_mtp_head=*/0, &model),
+              IMP_SUCCESS);
+    ImpConfig cfg = imp_config_default();
+    cfg.max_seq_len = 2048;
+    cfg.max_batch_size = 1;
+    ImpContext ctx = nullptr;
+    ASSERT_EQ(imp_context_create(model, &cfg, &ctx), IMP_SUCCESS);
+    std::vector<GreedyRun> speculated;
+    for (const char* p : prompts())
+        speculated.push_back(greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false));
+    const auto stats = ctx->engine->spec_stats();
+    imp_context_free(ctx);
+    imp_model_free(model);
+
+    ASSERT_GT(stats.drafted, 0) << "DSpark drafted nothing: the plain path was compared against itself";
+    ASSERT_GT(stats.accepted, 0) << "DSpark drafted " << stats.drafted
+                                 << " tokens and the verify accepted none";
+    std::printf("[spec-identity] dspark drafted=%lld accepted=%lld verify_steps=%lld\n", stats.drafted,
+                stats.accepted, stats.verify_steps);
+    expect_near_tie_only(baseline, speculated, "dspark");
 }
 
 }  // namespace

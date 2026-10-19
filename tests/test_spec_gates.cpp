@@ -37,6 +37,15 @@ TEST(SpecGates, TokenRecyclingAloneEntersTheVerify) {
     EXPECT_FALSE(spec_ngram_source(state(false, false, true)));
 }
 
+TEST(SpecGates, DSparkAloneEntersTheVerify) {
+    SpecDrafterState s = state(false, false, false);
+    s.dspark_on = true;
+    EXPECT_TRUE(spec_any_drafter(s));
+    EXPECT_FALSE(spec_ngram_source(s));
+    s.model_capable = false;
+    EXPECT_FALSE(spec_any_drafter(s)) << "an incapable model never speculates";
+}
+
 TEST(SpecGates, NgramAloneIsUnaffected) {
     EXPECT_TRUE(spec_any_drafter(state(true, false, false)));
     EXPECT_TRUE(spec_ngram_source(state(true, false, false)));

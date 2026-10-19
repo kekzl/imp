@@ -4,6 +4,7 @@
 #include "vision/qwen3vl_vision_load.h"
 #include "vision/vision_pipeline.h"
 #include "runtime/request.h"
+#include "runtime/dspark_drafter.h"
 #include "lora/lora_adapter.h"
 #include "runtime/engine_internal.h"
 #include "runtime/think_stop_logic.h"

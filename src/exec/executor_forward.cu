@@ -576,9 +576,8 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         // SAE (row 116): features of the residual after its layer, clamps edited in before the lens.
         if (sae_ != nullptr && i == sae_->layer && !sae_rows_.empty())
             sae_apply_(n, stream);
-        // Logit lens (row 115): the residual the next layer reads.
-        if (!lens_rows_.empty())
-            lens_stash_(i, n, stream);
+        // Logit lens (row 115) and the DSpark feature tap: the residual the next layer reads.
+        post_layer_taps_(i, n, stream);
 
         // Layer-diff dump: Snapshot C — end-of-layer state (input to next layer).
         // Captures the final hidden state after attention, FFN/MoE, residuals,

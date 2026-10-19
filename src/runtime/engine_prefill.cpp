@@ -745,6 +745,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // hidden_ buffer still holds it (feed-only forwards, no lm_head).
         if (mtp_spec_decode_enabled())
             mtp_prefill_feed_chunk(*req, offset, chunk_len, /*next_token=*/-1);
+        dspark_prefill_feed_(*req, offset, chunk_len);
 
         req->prefill_offset = offset + chunk_len;
         IMP_LOG_DEBUG("Chunked prefill: req %d chunk [%d, %d) of %d", req->id, offset, offset + chunk_len,
@@ -913,6 +914,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
         // uses the just-sampled next_token and seeds the pending draft chain.
         if (mtp_spec_decode_enabled())
             mtp_prefill_feed_chunk(*req, offset, chunk_len, next_token);
+        dspark_prefill_feed_(*req, offset, chunk_len);
 
         if (req->constraints)
             req->constraints->update(next_token);

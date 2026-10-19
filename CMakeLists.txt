@@ -444,6 +444,10 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_spec_sampled.cpp
     src/runtime/engine_spec_buffers.cpp
     src/runtime/engine_spec_capture.cpp
+    src/runtime/dspark_drafter.cu
+    src/compute/dspark_attention.cu
+    src/runtime/engine_dspark.cpp
+    src/runtime/engine_spec_recycle.cpp
     src/runtime/engine_spec_mtp.cpp
     src/runtime/engine_spec_batch_verify.cpp
     src/runtime/engine_sampling_stop.cpp
@@ -1466,6 +1470,7 @@ if(IMP_BUILD_TESTS)
         tests/test_q8_drop_source_e2e.cpp
         tests/test_vram_ledger_e2e.cpp
         tests/test_spec_capture_fidelity.cpp
+        tests/test_dspark_drafter.cu
         # MTP must not change greedy output. The fidelity test above gates the
         # captured graph, not the speculation; this gates the accept path.
         tests/test_mtp_greedy_identity.cpp
