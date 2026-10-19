@@ -5,7 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
-- DSpark drafter (`speculative.dspark_model`): per-row FP8 weights (`speculative.dspark_fp8`, default on) and a CUDA-graph propose. Qwen3-8B-NVFP4 propose 3.07 -> 1.76 ms per draft, code 2x nospec tok/s, prose at parity (was -7.7 %), drafter VRAM 4013 -> 2541 MiB (#NNNN).
+- DSpark drafter (`speculative.dspark_model`): per-row FP8 weights (`speculative.dspark_fp8`, default on) and a CUDA-graph propose. Qwen3-8B-NVFP4 propose 3.07 -> 1.76 ms per draft, code 2x nospec tok/s, prose at parity (was -7.7 %), drafter VRAM 4013 -> 2541 MiB (#2814).
 
 ## [0.55.1] - 2026-10-19
 
