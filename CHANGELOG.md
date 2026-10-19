@@ -11,6 +11,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Changed
 - Graph-captured speculative verify chunks run their NVFP4 GEMMs through the small-M kernel (`speculative.verify_smallm_captured`, default on); eager verify keeps the batched GEMV. Qwen3-14B NVFP4 n-gram tg 228.66 -> 249.27 tok/s; Q6_K 16-row verify 31.47 -> 12.17 ms.
 
+### Fixed
+- `/v1/responses` accepts Codex CLI requests: `custom` tools (`apply_patch`) map to a function with an `input` string and return as `custom_tool_call`, `namespace` tools are flattened, hosted tools (`web_search`, `tool_search`, ...) are dropped. Was a 400 "unsupported tool type: custom" (#2807).
+
 ## [0.54.0] - 2026-10-18
 
 ### Added

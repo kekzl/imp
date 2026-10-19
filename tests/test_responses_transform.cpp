@@ -302,3 +302,121 @@ TEST(ResponsesTransform, NoEvictionMeansNoKey) {
     json out0 = openai_to_responses_response(oai0, "m", "resp_z");
     EXPECT_FALSE(out0["usage"]["input_tokens_details"].contains("evicted_tokens"));
 }
+
+// ---------------------------------------------------------------------------
+// Codex CLI tool shapes (#2807), captured from codex 0.163.0 requests
+// ---------------------------------------------------------------------------
+
+namespace {
+
+json codex_tools() {
+    return json::array(
+        {{{"type", "function"},
+          {"name", "exec_command"},
+          {"description", "Runs a command"},
+          {"strict", false},
+          {"parameters", {{"type", "object"}, {"properties", {{"cmd", {{"type", "string"}}}}}}}},
+         {{"type", "custom"},
+          {"name", "apply_patch"},
+          {"description", "Use the `apply_patch` tool to edit files."},
+          {"format",
+           {{"type", "grammar"}, {"syntax", "lark"}, {"definition", "start: begin_patch hunk+ end_patch"}}}},
+         {{"type", "namespace"},
+          {"name", "multi_agent_v1"},
+          {"description", "Tools in the multi_agent_v1 namespace."},
+          {"tools", json::array({{{"type", "function"},
+                                  {"name", "spawn_agent"},
+                                  {"description", "Spawns an agent"},
+                                  {"strict", false},
+                                  {"parameters", {{"type", "object"}}}}})}},
+         {{"type", "tool_search"}, {"execution", "client"}, {"description", "Tool discovery"}},
+         {{"type", "web_search"}, {"external_web_access", false}}});
+}
+
+}  // namespace
+
+TEST(ResponsesTransform, CodexToolsBecomeChatFunctions) {
+    json oai = responses_to_openai_body(json{{"model", "m"}, {"input", "x"}, {"tools", codex_tools()}});
+    ASSERT_EQ(oai["tools"].size(), 3u) << oai["tools"].dump();
+    EXPECT_EQ(oai["tools"][0]["function"]["name"], "exec_command");
+    EXPECT_EQ(oai["tools"][0]["function"]["strict"], false);
+    const json& patch = oai["tools"][1]["function"];
+    EXPECT_EQ(patch["name"], "apply_patch");
+    EXPECT_EQ(patch["parameters"]["required"], json::array({"input"}));
+    EXPECT_EQ(patch["parameters"]["properties"]["input"]["type"], "string");
+    const std::string desc = patch["parameters"]["properties"]["input"]["description"];
+    EXPECT_NE(desc.find("lark"), std::string::npos) << desc;
+    EXPECT_NE(desc.find("start: begin_patch hunk+ end_patch"), std::string::npos) << desc;
+    EXPECT_EQ(oai["tools"][2]["function"]["name"], "spawn_agent");  // namespace flattened
+}
+
+TEST(ResponsesTransform, OnlyHostedToolsLeaveNoToolsField) {
+    json oai = responses_to_openai_body(
+        json{{"model", "m"}, {"input", "x"}, {"tools", json::array({{{"type", "web_search"}}})}});
+    EXPECT_FALSE(oai.contains("tools"));
+}
+
+TEST(ResponsesTransform, UnknownToolTypeIsStillRefused) {
+    for (const char* t : {"local_shell", "nonsense_value"})
+        EXPECT_THROW(responses_to_openai_body(json{{"model", "m"},
+                                                   {"input", "x"},
+                                                   {"tools", json::array({{{"type", t}, {"name", "f"}}})}}),
+                     std::invalid_argument)
+            << t;
+}
+
+TEST(ResponsesTransform, CustomToolCallReplaysAsChatToolCall) {
+    json body = {{"model", "m"},
+                 {"input",
+                  json::array(
+                      {{{"type", "custom_tool_call"},
+                        {"call_id", "call_1"},
+                        {"name", "apply_patch"},
+                        {"input", "*** Begin Patch\n*** End Patch"}},
+                       {{"type", "custom_tool_call_output"}, {"call_id", "call_1"}, {"output", "Done"}}})}};
+    json oai = responses_to_openai_body(body);
+    ASSERT_EQ(oai["messages"].size(), 2u);
+    const json& tc = oai["messages"][0]["tool_calls"][0];
+    EXPECT_EQ(tc["id"], "call_1");
+    EXPECT_EQ(tc["function"]["name"], "apply_patch");
+    EXPECT_EQ(json::parse(tc["function"]["arguments"].get<std::string>())["input"],
+              "*** Begin Patch\n*** End Patch");
+    EXPECT_EQ(oai["messages"][1]["role"], "tool");
+    EXPECT_EQ(oai["messages"][1]["tool_call_id"], "call_1");
+    EXPECT_EQ(oai["messages"][1]["content"], "Done");
+}
+
+TEST(ResponsesTransform, CustomAndNamespacedCallsKeepTheirShape) {
+    const auto kinds = imp_server::responses::tool_kinds(json{{"tools", codex_tools()}});
+    json tcs = json::array(
+        {{{"id", "call_p"},
+          {"type", "function"},
+          {"function", {{"name", "apply_patch"}, {"arguments", json{{"input", "*** Begin Patch"}}.dump()}}}},
+         {{"id", "call_s"},
+          {"type", "function"},
+          {"function", {{"name", "spawn_agent"}, {"arguments", "{}"}}}},
+         {{"id", "call_e"},
+          {"type", "function"},
+          {"function", {{"name", "exec_command"}, {"arguments", "{\"cmd\":\"ls\"}"}}}}});
+    json oai = {
+        {"choices",
+         json::array({{{"index", 0},
+                       {"finish_reason", "tool_calls"},
+                       {"message", {{"role", "assistant"}, {"content", nullptr}, {"tool_calls", tcs}}}}})}};
+    json out = openai_to_responses_response(oai, "m", "resp_c", kinds);
+    ASSERT_EQ(out["output"].size(), 3u) << out["output"].dump();
+    EXPECT_EQ(out["output"][0]["type"], "custom_tool_call");
+    EXPECT_EQ(out["output"][0]["input"], "*** Begin Patch");
+    EXPECT_FALSE(out["output"][0].contains("arguments"));
+    EXPECT_EQ(out["output"][1]["type"], "function_call");
+    EXPECT_EQ(out["output"][1]["namespace"], "multi_agent_v1");
+    EXPECT_EQ(out["output"][2]["type"], "function_call");
+    EXPECT_EQ(out["output"][2]["arguments"], "{\"cmd\":\"ls\"}");
+    EXPECT_FALSE(out["output"][2].contains("namespace"));
+}
+
+TEST(ResponsesTransform, CustomInputWithoutWrapperPassesThrough) {
+    EXPECT_EQ(imp_server::responses::custom_tool_input("*** Begin Patch"), "*** Begin Patch");
+    EXPECT_EQ(imp_server::responses::custom_tool_input("{\"other\":1}"), "{\"other\":1}");
+    EXPECT_EQ(imp_server::responses::custom_tool_input("{\"input\":\"a\\nb\"}"), "a\nb");
+}

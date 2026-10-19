@@ -26,7 +26,7 @@ so a streaming fix lands in all of them at once.
 | `POST /infill` | ✅ | llama.cpp fill-in-the-middle (`input_prefix`, `input_suffix`, `input_extra`, `prompt`), see [FIM](API_FEATURES.md#fill-in-the-middle) |
 | `POST /v1/messages` | ✅ | Anthropic. Real per-token SSE, `ping` keepalives |
 | `POST /v1/messages/count_tokens` | ✅ | |
-| `POST /v1/responses` | ✅ | OpenAI Responses, the dialect Codex and the Agents SDK speak by default. `store: true` + `previous_response_id` continue server-side, see [Responses store](API_FEATURES.md#responses-store) |
+| `POST /v1/responses` | ✅ | OpenAI Responses, the dialect Codex and the Agents SDK speak by default. `store: true` + `previous_response_id` continue server-side, see [Responses store](API_FEATURES.md#responses-store). Tools: `function`; `custom` (Codex `apply_patch`) as a function with one `input` string, grammar in its description, returned as `custom_tool_call`; `namespace` flattened, calls carry `namespace`; hosted `web_search`, `tool_search`, `file_search`, `code_interpreter`, `image_generation`, `computer_use_preview`, `mcp` dropped; any other type 400 (#2807) |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | ✅ | stored responses only, see [Responses store](API_FEATURES.md#responses-store) |
 | `POST /v1/embeddings` | ✅ | needs an embedding model loaded |
 | `POST /v1/rerank`, `POST /rerank` | ✅ | Cohere/Jina/vLLM shape |

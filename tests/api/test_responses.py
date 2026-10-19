@@ -125,6 +125,50 @@ class TestResponsesNonStream:
             r = c.post("/v1/responses", json={"model": model, "input": "x", **body})
             assert r.status_code != 400, r.text
 
+    # #2807: the request shape of Codex CLI 0.163.0 (captured): custom apply_patch with a Lark
+    # grammar, a namespace, the hosted tool_search / web_search, Codex's extra top-level fields.
+    # The released server answered 400 "unsupported tool type: custom (only function tools)".
+    @pytest.mark.nomodel
+    def test_codex_request_is_not_refused(self, model):
+        body = {
+            "model": model,
+            "instructions": "You are Codex.",
+            "input": [
+                {"type": "message", "role": "developer",
+                 "content": [{"type": "input_text", "text": "sandbox: workspace-write"}]},
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "create hello.txt"}]},
+                {"type": "custom_tool_call", "call_id": "call_1", "name": "apply_patch",
+                 "input": "*** Begin Patch\n*** End Patch"},
+                {"type": "custom_tool_call_output", "call_id": "call_1", "output": "Done"},
+            ],
+            "tools": [
+                {"type": "function", "name": "exec_command", "description": "Runs a command",
+                 "strict": False,
+                 "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}},
+                                "required": ["cmd"]}},
+                {"type": "custom", "name": "apply_patch", "description": "Edit files.",
+                 "format": {"type": "grammar", "syntax": "lark",
+                            "definition": "start: begin_patch hunk+ end_patch"}},
+                {"type": "namespace", "name": "multi_agent_v1", "description": "Agents.",
+                 "tools": [{"type": "function", "name": "spawn_agent", "description": "Spawn",
+                            "strict": False, "parameters": {"type": "object", "properties": {}}}]},
+                {"type": "tool_search", "execution": "client", "description": "Tool discovery"},
+                {"type": "web_search", "external_web_access": False},
+            ],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+            "reasoning": {"effort": "medium", "summary": "auto"},
+            "store": False,
+            "stream": True,
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "01a15380-4e85-7730-b31a-45a691795e47",
+            "text": {"verbosity": "low"},
+        }
+        with httpx.Client(base_url=conftest.BASE_URL, timeout=30.0) as c:
+            r = c.post("/v1/responses", json=body)
+            assert r.status_code != 400, r.text
+
 
 class TestResponsesStream:
     def test_event_sequence(self, model):
