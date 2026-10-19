@@ -372,6 +372,37 @@ TEST(ResponsesTransform, UnknownToolTypeIsStillRefused) {
             << t;
 }
 
+// #2807: Codex replays one response as separate items (preamble message, calls). Two assistant turns
+// rendered "<preamble><|im_end|>", and Qwen3.8-Flash-Next ended 15 of 40 replies after a preamble.
+TEST(ResponsesTransform, PreambleAndCallsOfOneResponseAreOneAssistantTurn) {
+    json body = {
+        {"model", "m"},
+        {"input",
+         json::array(
+             {{{"role", "user"}, {"content", "add tests"}},
+              {{"type", "message"},
+               {"role", "assistant"},
+               {"content", json::array({{{"type", "output_text"}, {"text", "I'll add the tests."}}})}},
+              {{"type", "reasoning"}, {"id", "rs_1"}, {"summary", json::array()}},
+              {{"type", "function_call"}, {"call_id", "c1"}, {"name", "sh"}, {"arguments", "{}"}},
+              {{"type", "custom_tool_call"}, {"call_id", "c2"}, {"name", "apply_patch"}, {"input", "p"}},
+              {{"type", "function_call_output"}, {"call_id", "c1"}, {"output", "ok"}},
+              {{"type", "custom_tool_call_output"}, {"call_id", "c2"}, {"output", "done"}},
+              {{"type", "function_call"}, {"call_id", "c3"}, {"name", "sh"}, {"arguments", "{}"}}})}};
+    json oai = responses_to_openai_body(body);
+    ASSERT_EQ(oai["messages"].size(), 5u) << oai["messages"].dump();
+    const json& turn = oai["messages"][1];
+    EXPECT_EQ(turn["role"], "assistant");
+    EXPECT_EQ(turn["content"], "I'll add the tests.");
+    ASSERT_EQ(turn["tool_calls"].size(), 2u);
+    EXPECT_EQ(turn["tool_calls"][0]["id"], "c1");
+    EXPECT_EQ(turn["tool_calls"][1]["id"], "c2");
+    EXPECT_EQ(oai["messages"][2]["role"], "tool");
+    EXPECT_EQ(oai["messages"][3]["role"], "tool");
+    // A call after tool output starts the next turn.
+    EXPECT_EQ(oai["messages"][4]["tool_calls"][0]["id"], "c3");
+}
+
 TEST(ResponsesTransform, CustomToolCallReplaysAsChatToolCall) {
     json body = {{"model", "m"},
                  {"input",

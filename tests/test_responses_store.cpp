@@ -175,9 +175,10 @@ TEST(ResponsesContinue, MergedInputEqualsStatelessResend) {
     const json a = responses_to_openai_body(json{{"instructions", "be brief"}, {"input", merged}});
     const json b = responses_to_openai_body(json{{"instructions", "be brief"}, {"input", stateless_input}});
     EXPECT_EQ(a["messages"], b["messages"]);
-    ASSERT_EQ(a["messages"].size(), 6u);  // system, user, assistant, assistant(tool_calls), tool, user
+    ASSERT_EQ(a["messages"].size(), 5u);  // system, user, assistant(content + tool_calls), tool, user
     EXPECT_EQ(a["messages"][2]["content"], "4");
-    EXPECT_EQ(a["messages"][5]["content"], "And 3+3?");
+    EXPECT_EQ(a["messages"][2]["tool_calls"][0]["id"], "call_1");
+    EXPECT_EQ(a["messages"][4]["content"], "And 3+3?");
 }
 
 TEST(ResponsesContinue, ChainsAndHandlesStringAndAbsentInput) {
