@@ -405,10 +405,14 @@ struct Request {
     // epilogue reads their compacted last row (#2198 shared). Engine::prefill_ragged_req_ok_.
     [[nodiscard]] bool ragged_prefill_allowed() const {
         const bool has_vision = !images.empty() || !qwen_patches.empty() || vision_emb || n_vision_tokens > 0;
-        const bool wants_constraints = json_mode || !json_schema.empty() || !tool_constraint_tools.empty() ||
-                                       !regex_pattern.empty() || !grammar.empty();
-        return !has_vision && !embedding_request && !logprobs && prompt_logprobs < 0 && !wants_constraints &&
-               !phrase && !cfg;
+        return !has_vision && !embedding_request && !logprobs && prompt_logprobs < 0 &&
+               !wants_constraints() && !phrase && !cfg;
+    }
+
+    // A grammar / schema / JSON / tool-call FSM masks this request's logits for its whole life.
+    [[nodiscard]] bool wants_constraints() const {
+        return json_mode || !json_schema.empty() || !tool_constraint_tools.empty() ||
+               !regex_pattern.empty() || !grammar.empty();
     }
 
     // Deliberately LAST rather than next to `status`: Request is touched every decode step, so

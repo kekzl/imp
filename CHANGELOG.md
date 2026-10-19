@@ -7,6 +7,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Changed
 - DSpark drafter (`speculative.dspark_model`): per-row FP8 weights (`speculative.dspark_fp8`, default on) and a CUDA-graph propose. Qwen3-8B-NVFP4 propose 3.07 -> 1.76 ms per draft, code 2x nospec tok/s, prose at parity (was -7.7 %), drafter VRAM 4013 -> 2541 MiB (#2814).
 
+### Fixed
+- An armed MTP head no longer binds JSON / schema / regex / grammar / tool-constrained requests, which never verify: they keep the constrained pipeline. Qwen3.8-27B-NVFP4 `--max-batch 1`, `mtp_k=2`: json_schema 69.0 -> 93.2 tok/s, json_object 69.0 -> 92.8 (#NNNN).
+
 ## [0.55.1] - 2026-10-19
 
 ### Fixed

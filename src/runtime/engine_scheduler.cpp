@@ -2049,8 +2049,8 @@ void Engine::step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& 
         // pipeline. min_p/typical_p/mirostat/DRY/logit_bias stay eager.
         const bool pipeline_compatible =
             !dreq->host_logit_shaping() && dreq->mirostat == 0 && dreq->dry_multiplier == 0.0f &&
-            dreq->min_p == 0.0f && dreq->typical_p >= 1.0f && !mtp_spec_decode_enabled() &&
-            dreq->constraints && dreq->constraints->is_active() &&
+            dreq->min_p == 0.0f && dreq->typical_p >= 1.0f && !mtp_holds_eager_(*dreq) && dreq->constraints &&
+            dreq->constraints->is_active() &&
             // The pipeline enqueues the next forward before the host sees the token: a
             // PLE model needs the token on the host first, host-resident experts need the
             // device cache's take-over before each step (both in prepare_decode_step_host).

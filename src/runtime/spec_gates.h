@@ -34,6 +34,19 @@ constexpr bool spec_ngram_source(const SpecDrafterState& s) {
     return s.model_capable && s.ngram_on;
 }
 
+// Does the MTP head bind this request at prefill? Only a request that can verify: a bound one runs
+// the eager MTP path every step and skips the constrained pipeline (Qwen3.8-27B-NVFP4: sampled
+// 70.8 vs 93.5 tok/s, json_schema 69.0 vs 92.6).
+struct MtpBindState {
+    bool mtp_armed = false;         // mtp_spec_decode_enabled() and a workspace
+    bool constrained = false;       // Request::wants_constraints(): verify refuses "constrained_decode"
+    bool sampling_refused = false;  // spec_sampling_refusal_ said no
+};
+
+constexpr bool mtp_binds_request(const MtpBindState& s) {
+    return s.mtp_armed && !s.constrained && !s.sampling_refused;
+}
+
 // Round-robin batched speculation (speculative.batch_rr, #1003 stage 1): at
 // batch > 1 one request per step runs its verify while the rest decode
 // batched. Entering it is the same question as any verify step: is there a
