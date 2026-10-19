@@ -10,6 +10,7 @@
 #include "memory/host_pinned.h"
 #include "memory/vram_owned.h"
 #include "model/safetensors_raw.h"
+#include "quant/fp8_quant.h"
 
 #include <algorithm>
 #include <array>
@@ -59,6 +60,26 @@ __global__ void dspark_iota_kernel(int* __restrict__ out, int base, int n) {
     const int i = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
     if (i < n)
         out[i] = base + i;
+}
+
+__global__ void dspark_iota_dev_kernel(int* __restrict__ out, const int* __restrict__ base, int n) {
+    const int i = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    if (i < n)
+        out[i] = *base + i;
+}
+
+// dst[*row0 * row_elems + i] = src[i]: a block's K / V rows to the cache row the device holds.
+__global__ void dspark_store_rows_kernel(half* __restrict__ dst, const half* __restrict__ src,
+                                         const int* __restrict__ row0, int row_elems, int n) {
+    const int i = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    if (i < n)
+        dst[(static_cast<size_t>(*row0) * row_elems) + i] = src[i];
+}
+
+__global__ void dspark_add_kernel(half* __restrict__ h, const half* __restrict__ t, int n) {
+    const int i = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    if (i < n)
+        h[i] = __hadd(h[i], t[i]);
 }
 
 // One block per row: index of the largest logit (lowest index on ties).
@@ -114,24 +135,39 @@ Tensor t2(void* p, int64_t rows, int64_t cols, QType q = QType::F16) {
 }  // namespace
 
 struct DSparkDrafter::Impl {
+    // Per-row E4M3 weight [rows, K] + FP32 row scales; w == nullptr: the FP16 copy serves.
+    struct Fp8Mat {
+        uint8_t* w = nullptr;
+        float* sc = nullptr;
+    };
     struct Layer {
         half *in_norm = nullptr, *post_norm = nullptr, *wq = nullptr, *wk = nullptr, *wv = nullptr,
              *wo = nullptr;
         half *qn = nullptr, *kn = nullptr, *gate = nullptr, *up = nullptr, *down = nullptr;
         half *k_cache = nullptr, *v_cache = nullptr;  // [cap, n_kv * head_dim]
+        Fp8Mat q8, o8, gate8, up8, down8;
     };
     int d = 0, n_layers = 0, nh = 0, nkv = 0, ff = 0, vocab = 0, block = 0, mask_id = 0, cap = 0;
     float eps = 1e-6f, log2_theta = 0.0f;
+    bool fp8 = false;
+    bool graph = false;  // capture on the next eager-warmed propose
+    bool warm = false;
+    cudaGraphExec_t exec = nullptr;
+    int replays = 0;
+    int* d_params = nullptr;            // [pos, ctx rows] for the propose
+    int* h_params = nullptr;            // pin_params
+    half *kb = nullptr, *vb = nullptr;  // [block, kv_dim] before the cache row store
     std::vector<int> layer_ids;
     std::vector<Layer> layers;
     half *fc = nullptr, *hidden_norm = nullptr, *norm = nullptr, *lm_head = nullptr, *mask_emb = nullptr;
+    Fp8Mat head8;
     // Scratch.
-    half *t = nullptr, *tn = nullptr, *h = nullptr, *xn = nullptr, *q = nullptr, *o = nullptr;
+    half *t = nullptr, *tn = nullptr, *h = nullptr, *xn = nullptr, *q = nullptr, *o = nullptr, *res = nullptr;
     half *gate = nullptr, *up = nullptr, *act = nullptr, *logits = nullptr;
     float* s = nullptr;  // dspark_attention split partials
     int* d_pos = nullptr;
     int32_t* d_ids = nullptr;
-    PinnedBuffer pin_anchor, pin_ids;
+    PinnedBuffer pin_anchor, pin_ids, pin_params;
     half* h_anchor = nullptr;  // pin_anchor [d]
     int32_t* h_ids = nullptr;  // pin_ids
     RawSafeTensors st;
@@ -141,6 +177,14 @@ struct DSparkDrafter::Impl {
     VRAMAllocator* alloc = nullptr;
     cudaStream_t stream = nullptr;  // load-time uploads
     std::vector<VramOwned<char>> owned;
+
+    Impl() = default;
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
+    ~Impl() {
+        if (exec)
+            IMP_CUDA_CHECK_LOG(cudaGraphExecDestroy(exec));
+    }
 
     template <typename T>
     T* dev(size_t n) {
@@ -154,8 +198,16 @@ struct DSparkDrafter::Impl {
     int kv_dim() const { return nkv * kHeadDim; }
     half* upload(const std::map<std::string, const RawTensor*>& by_name, const std::string& name,
                  int64_t numel);
+    Fp8Mat upload_fp8(const std::map<std::string, const RawTensor*>& by_name, const std::string& name,
+                      int64_t rows, int64_t k, half* stage, int64_t stage_elems);
+    // y[b, m] (+)= x[b, k] W^T through the FP8 copy when present, else cuBLAS on the FP16 one.
+    void proj(const half* x, int k, const half* w16, const Fp8Mat& w8, half* y, int m, bool accumulate,
+              cudaStream_t st_) const;
     std::string upload_weights();
     std::string alloc_scratch(cudaStream_t stream);
+    // The whole propose from h_params / h_anchor to h_ids, fixed pointers only: graph-capturable.
+    void enqueue_propose(cudaStream_t st_);
+    void launch_propose(cudaStream_t st_);
 
     void head_norm_rope(half* x, int rows, int row_stride, int heads, const half* w, cudaStream_t st_) const {
         if (rows <= 0)
@@ -248,6 +300,54 @@ half* DSparkDrafter::Impl::upload(const std::map<std::string, const RawTensor*>&
     return dst;
 }
 
+// BF16 [rows, k] -> per-row E4M3 + scales, converted in row chunks through `stage`.
+DSparkDrafter::Impl::Fp8Mat DSparkDrafter::Impl::upload_fp8(
+    const std::map<std::string, const RawTensor*>& by_name, const std::string& name, int64_t rows, int64_t k,
+    half* stage, int64_t stage_elems) {
+    auto it = by_name.find(name);
+    if (it == by_name.end() || it->second->dtype != "BF16" || it->second->numel() != rows * k)
+        return {};
+    Fp8Mat m{dev<uint8_t>(static_cast<size_t>(rows * k)), dev<float>(static_cast<size_t>(rows))};
+    if (!m.w || !m.sc)
+        return {};
+    const auto* src = static_cast<const uint16_t*>(it->second->data);
+    const int64_t chunk = std::max<int64_t>(1, stage_elems / k);
+    std::vector<half> host(static_cast<size_t>(std::min(rows, chunk) * k));
+    for (int64_t r0 = 0; r0 < rows; r0 += chunk) {
+        const int64_t nr = std::min(chunk, rows - r0);
+        for (int64_t i = 0; i < nr * k; ++i)
+            host[static_cast<size_t>(i)] = bf16_to_half(src[(r0 * k) + i]);
+        if (cudaMemcpyAsync(stage, host.data(), nr * k * sizeof(half), cudaMemcpyHostToDevice, stream) !=
+            cudaSuccess)
+            return {};
+        quantize_fp8_rows_async(stage, m.w + (r0 * k), static_cast<int>(nr), static_cast<int>(k), m.sc + r0,
+                                stream);
+        if (cudaStreamSynchronize(stream) != cudaSuccess)
+            return {};
+    }
+    return m;
+}
+
+void DSparkDrafter::Impl::proj(const half* x, int k, const half* w16, const Fp8Mat& w8, half* y, int m,
+                               bool accumulate, cudaStream_t st_) const {
+    if (!w8.w) {
+        Tensor yt = t2(y, block, m);
+        gemm(t2(const_cast<half*>(x), block, k), t2(const_cast<half*>(w16), m, k), yt, 1.0f,
+             accumulate ? 1.0f : 0.0f, st_);
+        return;
+    }
+    half* dst = accumulate ? res : y;
+    if (!gemv_fp8_rowscale_f16(w8.w, w8.sc, x, dst, m, k, block, st_)) {
+        IMP_LOG_ERROR("dspark: FP8 projection %d x %d refused", m, k);
+        return;
+    }
+    if (accumulate) {
+        const int n = block * m;
+        dspark_add_kernel<<<(n + 255) / 256, 256, 0, st_>>>(y, res, n);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+}
+
 std::string DSparkDrafter::Impl::upload_weights() {
     std::map<std::string, const RawTensor*> by_name;
     for (const RawTensor& rt : st.tensors())
@@ -256,8 +356,27 @@ std::string DSparkDrafter::Impl::upload_weights() {
     fc = upload(by_name, "fc.weight", dd * static_cast<int64_t>(layer_ids.size()) * dd);
     hidden_norm = upload(by_name, "hidden_norm.weight", dd);
     norm = upload(by_name, "norm.weight", dd);
-    lm_head = upload(by_name, "lm_head.weight", static_cast<int64_t>(vocab) * dd);
-    if (!all_set({fc, hidden_norm, norm, lm_head}))
+    // FP8: propose-only matrices (q, o, gate, up, down, lm_head) keep no FP16 copy; k / v also feed
+    // append_ctx's up-to-1024-row GEMMs and stay FP16.
+    constexpr int64_t kStageElems = int64_t{32} << 20;  // 64 MiB FP16 staging, freed after load
+    VramOwned<char> stage_buf;
+    half* stage = nullptr;
+    if (fp8) {
+        if (dd % 256 || qd % 256 || ff % 256)
+            return "FP8 weights need hidden, q and ffn widths divisible by 256";
+        stage_buf = VramOwned<char>(*alloc, kStageElems * sizeof(half), "dspark_stage");
+        stage = reinterpret_cast<half*>(stage_buf.get());
+        if (!stage)
+            return "FP8 staging buffer allocation failed";
+    }
+    auto mat = [&](const std::string& name, int64_t rows, int64_t k, half*& w16, Fp8Mat& w8) {
+        if (fp8)
+            w8 = upload_fp8(by_name, name, rows, k, stage, kStageElems);
+        else
+            w16 = upload(by_name, name, rows * k);
+        return w16 != nullptr || w8.w != nullptr;
+    };
+    if (!mat("lm_head.weight", vocab, dd, lm_head, head8) || !all_set({fc, hidden_norm, norm}))
         return "fc / hidden_norm / norm / lm_head missing, not BF16, or mis-shaped";
     layers.resize(static_cast<size_t>(n_layers));
     for (int l = 0; l < n_layers; ++l) {
@@ -265,19 +384,18 @@ std::string DSparkDrafter::Impl::upload_weights() {
         const std::string pre = "layers." + std::to_string(l) + ".";
         L.in_norm = upload(by_name, pre + "input_layernorm.weight", dd);
         L.post_norm = upload(by_name, pre + "post_attention_layernorm.weight", dd);
-        L.wq = upload(by_name, pre + "self_attn.q_proj.weight", qd * dd);
         L.wk = upload(by_name, pre + "self_attn.k_proj.weight", kvd * dd);
         L.wv = upload(by_name, pre + "self_attn.v_proj.weight", kvd * dd);
-        L.wo = upload(by_name, pre + "self_attn.o_proj.weight", dd * qd);
         L.qn = upload(by_name, pre + "self_attn.q_norm.weight", kHeadDim);
         L.kn = upload(by_name, pre + "self_attn.k_norm.weight", kHeadDim);
-        L.gate = upload(by_name, pre + "mlp.gate_proj.weight", static_cast<int64_t>(ff) * dd);
-        L.up = upload(by_name, pre + "mlp.up_proj.weight", static_cast<int64_t>(ff) * dd);
-        L.down = upload(by_name, pre + "mlp.down_proj.weight", dd * ff);
+        const bool mats = mat(pre + "self_attn.q_proj.weight", qd, dd, L.wq, L.q8) &&
+                          mat(pre + "self_attn.o_proj.weight", dd, qd, L.wo, L.o8) &&
+                          mat(pre + "mlp.gate_proj.weight", ff, dd, L.gate, L.gate8) &&
+                          mat(pre + "mlp.up_proj.weight", ff, dd, L.up, L.up8) &&
+                          mat(pre + "mlp.down_proj.weight", dd, ff, L.down, L.down8);
         L.k_cache = dev<half>(static_cast<size_t>(cap) * kvd);
         L.v_cache = dev<half>(static_cast<size_t>(cap) * kvd);
-        if (!all_set({L.in_norm, L.post_norm, L.wq, L.wk, L.wv, L.wo, L.qn, L.kn, L.gate, L.up, L.down,
-                      L.k_cache, L.v_cache}))
+        if (!mats || !all_set({L.in_norm, L.post_norm, L.wk, L.wv, L.qn, L.kn, L.k_cache, L.v_cache}))
             return "layer " + std::to_string(l) + ": tensor missing / mis-shaped, or out of VRAM";
     }
     auto eit = by_name.find("embed_tokens.weight");
@@ -297,6 +415,10 @@ std::string DSparkDrafter::Impl::alloc_scratch(cudaStream_t stream) {
     xn = dev<half>(b * d);
     q = dev<half>(b * qd);
     o = dev<half>(b * qd);
+    res = dev<half>(b * d);
+    kb = dev<half>(b * kv_dim());
+    vb = dev<half>(b * kv_dim());
+    d_params = dev<int>(2);
     gate = dev<half>(b * ff);
     up = dev<half>(b * ff);
     act = dev<half>(b * ff);
@@ -305,13 +427,16 @@ std::string DSparkDrafter::Impl::alloc_scratch(cudaStream_t stream) {
     d_pos = dev<int>(static_cast<size_t>(rows));
     d_ids = dev<int32_t>(b);
     mask_emb = dev<half>(static_cast<size_t>(d));
-    if (!all_set({t, tn, h, xn, q, o, gate, up, act, logits, s, d_pos, d_ids, mask_emb}))
+    if (!all_set(
+            {t, tn, h, xn, q, o, res, kb, vb, d_params, gate, up, act, logits, s, d_pos, d_ids, mask_emb}))
         return "scratch allocation failed";
     pin_anchor = PinnedBuffer::acquire(cuda_host_pinned_allocator(), d * sizeof(half));
     pin_ids = PinnedBuffer::acquire(cuda_host_pinned_allocator(), b * sizeof(int32_t));
+    pin_params = PinnedBuffer::acquire(cuda_host_pinned_allocator(), 2 * sizeof(int));
     h_anchor = pin_anchor.as<half>();
     h_ids = pin_ids.as<int32_t>();
-    if (!all_set({h_anchor, h_ids}))
+    h_params = pin_params.as<int>();
+    if (!all_set({h_anchor, h_ids, h_params}))
         return "pinned host scratch allocation failed";
     for (int i = 0; i < d; ++i)
         h_anchor[i] = bf16_to_half(embed_bf16[(static_cast<int64_t>(mask_id) * d) + i]);
@@ -323,9 +448,12 @@ std::string DSparkDrafter::Impl::alloc_scratch(cudaStream_t stream) {
 }
 
 std::string DSparkDrafter::load(VRAMAllocator& alloc, const std::string& dir, int target_d_model,
-                                int target_layers, int max_ctx, cudaStream_t stream) {
+                                int target_layers, int max_ctx, cudaStream_t stream,
+                                const DSparkOptions& opt) {
     auto p = std::make_unique<Impl>();
     p->alloc = &alloc;
+    p->fp8 = opt.fp8;
+    p->graph = opt.graph;
     p->stream = stream;
     std::ifstream cf(dir + "/config.json");
     if (!cf)
@@ -391,65 +519,102 @@ void DSparkDrafter::append_ctx(const half* feat, int ld, int n, int pos0, cudaSt
         P.ctx_pos.push_back(pos0 + i);
 }
 
+void DSparkDrafter::Impl::enqueue_propose(cudaStream_t st_) {
+    const int b = block;
+    const int qd = nh * kHeadDim;
+    const int kvd = kv_dim();
+    const int* d_ctx = d_params + 1;
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_params, h_params, 2 * sizeof(int), cudaMemcpyHostToDevice, st_));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h, h_anchor, d * sizeof(half), cudaMemcpyHostToDevice, st_));
+    for (int r = 1; r < b; ++r)
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h + (static_cast<size_t>(r) * d), mask_emb, d * sizeof(half),
+                                           cudaMemcpyDeviceToDevice, st_));
+    dspark_iota_dev_kernel<<<1, 32, 0, st_>>>(d_pos, d_params, b);
+    IMP_CUDA_CHECK_LAUNCH();
+    const int64_t dshape[1] = {d};
+    Tensor ht = t2(h, b, d);
+    Tensor xt = t2(xn, b, d);
+    Tensor gt = t2(gate, b, ff);
+    Tensor ut = t2(up, b, ff);
+    Tensor at = t2(act, b, ff);
+    Tensor kt = t2(kb, b, kvd);
+    Tensor vt = t2(vb, b, kvd);
+    const float scale = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
+    const int kv_elems = b * kvd;
+    for (auto& L : layers) {
+        rmsnorm(ht, Tensor(L.in_norm, QType::F16, 1, dshape, true), xt, eps, st_);
+        proj(xn, d, L.wq, L.q8, q, qd, false, st_);
+        gemm(xt, t2(L.wk, kvd, d), kt, 1.0f, 0.0f, st_);
+        gemm(xt, t2(L.wv, kvd, d), vt, 1.0f, 0.0f, st_);
+        head_norm_rope(q, b, qd, nh, L.qn, st_);
+        head_norm_rope(kb, b, kvd, nkv, L.kn, st_);
+        dspark_store_rows_kernel<<<(kv_elems + 255) / 256, 256, 0, st_>>>(L.k_cache, kb, d_ctx, kvd,
+                                                                          kv_elems);
+        IMP_CUDA_CHECK_LAUNCH();
+        dspark_store_rows_kernel<<<(kv_elems + 255) / 256, 256, 0, st_>>>(L.v_cache, vb, d_ctx, kvd,
+                                                                          kv_elems);
+        IMP_CUDA_CHECK_LAUNCH();
+        IMP_CUDA_CHECK_LOG(
+            dspark_attention_dev(q, L.k_cache, L.v_cache, o, s, b, nh, nkv, d_ctx, cap, scale, st_));
+        proj(o, qd, L.wo, L.o8, h, d, true, st_);
+        rmsnorm(ht, Tensor(L.post_norm, QType::F16, 1, dshape, true), xt, eps, st_);
+        proj(xn, d, L.gate, L.gate8, gate, ff, false, st_);
+        proj(xn, d, L.up, L.up8, up, ff, false, st_);
+        swiglu(gt, ut, at, st_);
+        proj(act, ff, L.down, L.down8, h, d, true, st_);
+    }
+    rmsnorm(ht, Tensor(norm, QType::F16, 1, dshape, true), xt, eps, st_);
+    proj(xn, d, lm_head, head8, logits, vocab, false, st_);
+    dspark_argmax_rows_kernel<<<b, 1024, 0, st_>>>(logits, vocab, d_ids);
+    IMP_CUDA_CHECK_LAUNCH();
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_ids, d_ids, b * sizeof(int32_t), cudaMemcpyDeviceToHost, st_));
+}
+
+// Eager on the first propose (cuBLAS picks its algorithms outside a capture), captured on the second,
+// replayed after; a failed capture stays eager.
+void DSparkDrafter::Impl::launch_propose(cudaStream_t st_) {
+    if (graph && warm && !exec) {
+        cudaGraph_t g = nullptr;
+        if (cudaStreamBeginCapture(st_, cudaStreamCaptureModeThreadLocal) == cudaSuccess) {
+            enqueue_propose(st_);
+            const cudaError_t end = cudaStreamEndCapture(st_, &g);
+            if (end != cudaSuccess || !g || cudaGraphInstantiate(&exec, g, 0) != cudaSuccess)
+                exec = nullptr;
+            if (g)
+                IMP_CUDA_CHECK_LOG(cudaGraphDestroy(g));
+        }
+        (void)cudaGetLastError();
+        if (!exec) {
+            IMP_LOG_WARN("dspark: propose graph capture failed, proposing eagerly");
+            graph = false;
+        }
+    }
+    warm = true;
+    if (exec && cudaGraphLaunch(exec, st_) == cudaSuccess) {
+        ++replays;
+        return;
+    }
+    enqueue_propose(st_);
+}
+
 std::vector<int32_t> DSparkDrafter::propose(int32_t anchor, int pos, cudaStream_t stream) {
     Impl& P = *p_;
-    const int b = P.block;
-    const int d = P.d;
-    const int qd = P.nh * kHeadDim;
-    const int kvd = P.kv_dim();
     const int n_ctx = static_cast<int>(P.ctx_pos.size());
     std::vector<int32_t> out;
-    if (anchor < 0 || anchor >= P.vocab || n_ctx + b > P.cap)
+    if (anchor < 0 || anchor >= P.vocab || n_ctx + P.block > P.cap)
         return out;
-    for (int i = 0; i < d; ++i)
-        P.h_anchor[i] = bf16_to_half(P.embed_bf16[(static_cast<int64_t>(anchor) * d) + i]);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(P.h, P.h_anchor, d * sizeof(half), cudaMemcpyHostToDevice, stream));
-    for (int r = 1; r < b; ++r)
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(P.h + (static_cast<size_t>(r) * d), P.mask_emb, d * sizeof(half),
-                                           cudaMemcpyDeviceToDevice, stream));
-    P.upload_positions(pos, b, stream);
-    const int64_t dshape[1] = {d};
-    Tensor h = t2(P.h, b, d);
-    Tensor xn = t2(P.xn, b, d);
-    Tensor q = t2(P.q, b, qd);
-    Tensor o = t2(P.o, b, qd);
-    Tensor gate = t2(P.gate, b, P.ff);
-    Tensor upt = t2(P.up, b, P.ff);
-    Tensor act = t2(P.act, b, P.ff);
-    const int kv_len = n_ctx + b;
-    const float scale = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
-    for (auto& L : P.layers) {
-        rmsnorm(h, Tensor(L.in_norm, QType::F16, 1, dshape, true), xn, P.eps, stream);
-        half* kb = L.k_cache + (static_cast<size_t>(n_ctx) * kvd);
-        half* vb = L.v_cache + (static_cast<size_t>(n_ctx) * kvd);
-        Tensor kt = t2(kb, b, kvd);
-        Tensor vt = t2(vb, b, kvd);
-        gemm(xn, t2(L.wq, qd, d), q, 1.0f, 0.0f, stream);
-        gemm(xn, t2(L.wk, kvd, d), kt, 1.0f, 0.0f, stream);
-        gemm(xn, t2(L.wv, kvd, d), vt, 1.0f, 0.0f, stream);
-        P.head_norm_rope(P.q, b, qd, P.nh, L.qn, stream);
-        P.head_norm_rope(kb, b, kvd, P.nkv, L.kn, stream);
-        IMP_CUDA_CHECK_LOG(
-            dspark_attention(P.q, L.k_cache, L.v_cache, P.o, P.s, b, P.nh, P.nkv, kv_len, scale, stream));
-        gemm(o, t2(L.wo, d, qd), h, 1.0f, 1.0f, stream);
-        rmsnorm(h, Tensor(L.post_norm, QType::F16, 1, dshape, true), xn, P.eps, stream);
-        gemm(xn, t2(L.gate, P.ff, d), gate, 1.0f, 0.0f, stream);
-        gemm(xn, t2(L.up, P.ff, d), upt, 1.0f, 0.0f, stream);
-        swiglu(gate, upt, act, stream);
-        gemm(act, t2(L.down, d, P.ff), h, 1.0f, 1.0f, stream);
-    }
-    rmsnorm(h, Tensor(P.norm, QType::F16, 1, dshape, true), xn, P.eps, stream);
-    Tensor rows = t2(P.xn, b, d);
-    Tensor lg = t2(P.logits, b, P.vocab);
-    gemm(rows, t2(P.lm_head, P.vocab, d), lg, 1.0f, 0.0f, stream);
-    dspark_argmax_rows_kernel<<<b, 1024, 0, stream>>>(P.logits, P.vocab, P.d_ids);
-    IMP_CUDA_CHECK_LAUNCH();
-    IMP_CUDA_CHECK_LOG(
-        cudaMemcpyAsync(P.h_ids, P.d_ids, b * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+    // The previous propose synced: the pinned inputs are free to overwrite.
+    for (int i = 0; i < P.d; ++i)
+        P.h_anchor[i] = bf16_to_half(P.embed_bf16[(static_cast<int64_t>(anchor) * P.d) + i]);
+    P.h_params[0] = pos;
+    P.h_params[1] = n_ctx;
+    P.launch_propose(stream);
     if (cudaStreamSynchronize(stream) != cudaSuccess)
         return out;
-    out.assign(P.h_ids, P.h_ids + b);
+    out.assign(P.h_ids, P.h_ids + P.block);
     return out;
 }
+
+int DSparkDrafter::graph_replays() const { return p_ ? p_->replays : 0; }
 
 }  // namespace imp

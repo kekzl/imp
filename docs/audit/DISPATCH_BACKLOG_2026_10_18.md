@@ -238,3 +238,9 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 |---|---|---|
 | R-049 | DONE (opt-in) | PERF_LOG 2026-10-19 row 49: `speculative.dspark_model` + deepseek-ai/dflash_qwen3_8b_block7; Qwen3-8B-NVFP4 code 280.70 -> 457.96, list 281.63 -> 349.25, prose 282.25 -> 260.43 tok/s; FP8 code 170.89 -> 329.47 (vLLM 320.00); `DSparkDrafterTest.*` 2/2, `MtpGreedyIdentityTest.DSparkDoesNotChangeGreedyTokens` margins 0.686 / 0.394 nats (feature-tap mutant red), verify-fast OK, test-spec-fidelity OK |
 | R-049.2 | OPEN (new) | propose 3.25-3.81 ms host wall per draft vs 5.8 ms NVFP4 verify; levers: target NVFP4 LM head, captured propose |
+
+## 2026-10-20 Batch 18: R-049.2 DSpark propose
+
+| ID | Status | Evidence |
+|---|---|---|
+| R-049.2 | DONE | PERF_LOG 2026-10-20: per-row FP8 drafter weights (own lm_head, not the target's) + captured propose, 3.07 -> 1.76 ms per draft; Qwen3-8B-NVFP4 prose at parity with nospec (no gain), code 531-591 vs 276-282 tok/s; `DSparkDrafterTest.*` 4/4 (graph test red under a stale-context mutant), greedy identity margins unchanged |

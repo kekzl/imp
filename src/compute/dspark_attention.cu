@@ -15,16 +15,28 @@ constexpr int kKRow = kHd + 8;      // padded K row (halves): lane-per-key reads
 constexpr int kKeysPerSplit = 256;  // split-K granularity
 constexpr int kMaxSplits = 64;
 
-int n_splits_for(int kv_len) {
-    return std::clamp((kv_len + kKeysPerSplit - 1) / kKeysPerSplit, 1, kMaxSplits);
+__host__ __device__ inline int n_splits_for(int kv_len) {
+    const int s = (kv_len + kKeysPerSplit - 1) / kKeysPerSplit;
+    return s < 1 ? 1 : (s > kMaxSplits ? kMaxSplits : s);
 }
 
-// grid (n_kv_heads, splits), block group * 32: warp w serves query head kv_head * group + w for every row.
-// work: o [splits][n_heads][rows][128], then m and l [splits][n_heads][rows].
+// Keys this launch attends: *d_ctx + rows when the context length lives on the device (graph replay).
+__device__ inline int kv_len_of(const int* d_ctx, int rows, int kv_len) {
+    return d_ctx ? *d_ctx + rows : kv_len;
+}
+
+// grid (n_kv_heads, >= splits), block group * 32: warp w serves query head kv_head * group + w for every row.
+// work: o [gridDim.y][n_heads][rows][128], then m and l [gridDim.y][n_heads][rows]; CTAs past the
+// kv_len's split count exit.
 __global__ void dspark_attn_split_kernel(const half* __restrict__ q, const half* __restrict__ k,
                                          const half* __restrict__ v, float* __restrict__ work, int rows,
-                                         int n_heads, int n_kv_heads, int kv_len, int keys_per_split,
-                                         float scale) {
+                                         int n_heads, int n_kv_heads, const int* __restrict__ d_ctx,
+                                         int kv_len_arg, float scale) {
+    const int kv_len = kv_len_of(d_ctx, rows, kv_len_arg);
+    const int n_splits = n_splits_for(kv_len);
+    if (static_cast<int>(blockIdx.y) >= n_splits)
+        return;
+    const int keys_per_split = (kv_len + n_splits - 1) / n_splits;
     __shared__ __align__(16) half sq[8][kDSparkMaxRows][kHd];
     __shared__ __align__(16) half sk[kTile][kKRow];
     __shared__ __align__(16) half sv[kTile][kHd];
@@ -138,13 +150,15 @@ __global__ void dspark_attn_split_kernel(const half* __restrict__ q, const half*
 
 // grid (n_heads, rows), block 128 = head_dim: merge the split partials, write FP16.
 __global__ void dspark_attn_combine_kernel(const float* __restrict__ work, half* __restrict__ o, int rows,
-                                           int n_heads, int splits) {
+                                           int n_heads, int grid_splits, const int* __restrict__ d_ctx,
+                                           int kv_len_arg) {
     const int head = blockIdx.x;
     const int r = blockIdx.y;
     const int d = threadIdx.x;
+    const int splits = n_splits_for(kv_len_of(d_ctx, rows, kv_len_arg));
     const size_t per_split = static_cast<size_t>(n_heads) * rows;
-    const float* wm = work + (static_cast<size_t>(splits) * per_split * kHd);
-    const float* wl = wm + (static_cast<size_t>(splits) * per_split);
+    const float* wm = work + (static_cast<size_t>(grid_splits) * per_split * kHd);
+    const float* wl = wm + (static_cast<size_t>(grid_splits) * per_split);
     float mx = -FLT_MAX;
     for (int s = 0; s < splits; ++s)
         mx = fmaxf(mx, wm[(s * per_split) + (static_cast<size_t>(head) * rows) + r]);
@@ -167,19 +181,39 @@ size_t dspark_attention_work_floats(int rows, int n_heads, int max_kv_len) {
     return static_cast<size_t>(n_splits_for(max_kv_len)) * n_heads * rows * (kHd + 2);
 }
 
-cudaError_t dspark_attention(const half* q, const half* k, const half* v, half* o, float* work, int rows,
-                             int n_heads, int n_kv_heads, int kv_len, float scale, cudaStream_t stream) {
+namespace {
+
+cudaError_t launch_dspark_attention(const half* q, const half* k, const half* v, half* o, float* work,
+                                    int rows, int n_heads, int n_kv_heads, const int* d_ctx, int kv_len,
+                                    float scale, cudaStream_t stream) {
     if (rows < 1 || rows > kDSparkMaxRows || n_kv_heads < 1 || n_heads % n_kv_heads != 0 ||
         n_heads / n_kv_heads > 8 || kv_len < 1)
         return cudaErrorInvalidValue;
     const int splits = n_splits_for(kv_len);
-    const int keys_per_split = (kv_len + splits - 1) / splits;
     dspark_attn_split_kernel<<<dim3(n_kv_heads, splits), (n_heads / n_kv_heads) * 32, 0, stream>>>(
-        q, k, v, work, rows, n_heads, n_kv_heads, kv_len, keys_per_split, scale);
+        q, k, v, work, rows, n_heads, n_kv_heads, d_ctx, kv_len, scale);
     IMP_CUDA_CHECK_LAUNCH();
-    dspark_attn_combine_kernel<<<dim3(n_heads, rows), kHd, 0, stream>>>(work, o, rows, n_heads, splits);
+    dspark_attn_combine_kernel<<<dim3(n_heads, rows), kHd, 0, stream>>>(work, o, rows, n_heads, splits, d_ctx,
+                                                                        kv_len);
     IMP_CUDA_CHECK_LAUNCH();
     return cudaGetLastError();
+}
+
+}  // namespace
+
+cudaError_t dspark_attention(const half* q, const half* k, const half* v, half* o, float* work, int rows,
+                             int n_heads, int n_kv_heads, int kv_len, float scale, cudaStream_t stream) {
+    return launch_dspark_attention(q, k, v, o, work, rows, n_heads, n_kv_heads, nullptr, kv_len, scale,
+                                   stream);
+}
+
+cudaError_t dspark_attention_dev(const half* q, const half* k, const half* v, half* o, float* work, int rows,
+                                 int n_heads, int n_kv_heads, const int* d_ctx, int max_kv_len, float scale,
+                                 cudaStream_t stream) {
+    if (!d_ctx)
+        return cudaErrorInvalidValue;
+    return launch_dspark_attention(q, k, v, o, work, rows, n_heads, n_kv_heads, d_ctx, max_kv_len, scale,
+                                   stream);
 }
 
 }  // namespace imp

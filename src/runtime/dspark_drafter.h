@@ -12,6 +12,11 @@ namespace imp {
 
 class VRAMAllocator;
 
+struct DSparkOptions {
+    bool fp8 = true;    // q / o / gate / up / down / lm_head as per-row E4M3 (half the propose bytes)
+    bool graph = true;  // propose replays one CUDA graph, captured on the second call
+};
+
 // DSpark / DFlash block drafter (deepseek-ai/dflash_qwen3_8b_block7, z-lab DFlashDraftModel with
 // markov_rank 0): 5 non-causal Qwen3 layers draft block_size tokens in one pass from the target's
 // hidden states at target_layer_ids (concatenated, fc + hidden_norm). Reference forward:
@@ -27,7 +32,9 @@ public:
     // (identical to Qwen3-8B's). `max_ctx` sizes the context K/V; device memory through `alloc`. "" or a
     // reason.
     std::string load(VRAMAllocator& alloc, const std::string& dir, int target_d_model, int target_layers,
-                     int max_ctx, cudaStream_t stream);
+                     int max_ctx, cudaStream_t stream, const DSparkOptions& opt);
+    // Proposes served by graph replay so far.
+    int graph_replays() const;
 
     int block_size() const;
     const std::vector<int>& target_layer_ids() const;
