@@ -356,6 +356,13 @@ TEST(ResponsesTransform, OnlyHostedToolsLeaveNoToolsField) {
     EXPECT_FALSE(oai.contains("tools"));
 }
 
+// tools: [1] was a json type_error the handler turned into a 400 naming "tools[0]"; skipping it
+// silently sent the request on to the model (503 on the model-less CI lane).
+TEST(ResponsesTransform, NonObjectToolEntryIsRefused) {
+    EXPECT_THROW(responses_to_openai_body(json{{"model", "m"}, {"input", "x"}, {"tools", json::array({1})}}),
+                 std::invalid_argument);
+}
+
 TEST(ResponsesTransform, UnknownToolTypeIsStillRefused) {
     for (const char* t : {"local_shell", "nonsense_value"})
         EXPECT_THROW(responses_to_openai_body(json{{"model", "m"},

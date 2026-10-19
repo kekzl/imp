@@ -65,7 +65,7 @@ json custom_tool_parameters(const json& t) {
 void append_chat_tools(const json& list, json& tools) {
     for (const auto& t : list) {
         if (!t.is_object())
-            continue;
+            throw std::invalid_argument("a tools entry must be an object");
         const std::string ttype = t.value("type", "function");
         if (ttype == "namespace") {
             if (t.contains("tools") && t["tools"].is_array())

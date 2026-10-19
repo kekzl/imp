@@ -79,6 +79,10 @@ class TestResponsesNonStream:
          "tools": [{"type": "function", "name": "f",
                     "parameters": {"type": "object", "properties": {}}}]},
         {"tool_choice": {"type": "mcp", "server_label": "s"}},
+        # #2807 follow-up: tool_kinds reads namespace names; a wrongly typed one is a 400, not a throw.
+        {"tools": [{"type": "namespace", "name": 5,
+                    "tools": [{"type": "function", "name": "f",
+                               "parameters": {"type": "object", "properties": {}}}]}]},
     ])
     def test_unmappable_field_is_refused(self, model, body):
         with httpx.Client(base_url=conftest.BASE_URL, timeout=30.0) as c:
