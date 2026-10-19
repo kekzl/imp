@@ -100,6 +100,16 @@ bool tool_item_to_message(const std::string& type, const json& item, json& messa
         json tc = {{"id", item.value("call_id", item.value("id", ""))},
                    {"type", "function"},
                    {"function", {{"name", item.value("name", "")}, {"arguments", args}}}};
+        // One response's preamble and calls are one assistant turn. As separate turns the template
+        // closed the preamble with an end marker, and Qwen3.8-Flash-Next then ended 15 of 40 replies
+        // after its preamble, without the call (#2807).
+        if (!messages.empty() && messages.back().value("role", "") == "assistant") {
+            json& prev = messages.back();
+            if (!prev.contains("tool_calls"))
+                prev["tool_calls"] = json::array();
+            prev["tool_calls"].push_back(std::move(tc));
+            return true;
+        }
         messages.push_back({{"role", "assistant"}, {"content", nullptr}, {"tool_calls", json::array({tc})}});
         return true;
     }

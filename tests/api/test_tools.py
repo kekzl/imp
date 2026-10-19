@@ -200,3 +200,35 @@ class TestStreamingToolCalls:
         assert deltas, "no argument deltas streamed"
         args = json.loads("".join(deltas))
         assert "path" in args and "content" in args
+
+    def test_text_before_a_call_streams_whole(self, model, is_mock):
+        """#2807: on a think model the server's "\\nHuman" stop held the last 5 bytes of the
+        text before a call, and they never went out ("/work." streamed as "/wo")."""
+        if is_mock:
+            pytest.skip("mock server does not implement streaming tool calls")
+        import httpx as _httpx
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "Always start your reply with the exact sentence: "
+                                              "Sure, listing the files now. Then call the tool."},
+                {"role": "user", "content": "List the files in /work. /no_think"}],
+            "tools": [{"type": "function",
+                       "function": {"name": "sh", "description": "run a shell command",
+                                    "parameters": {"type": "object",
+                                                   "properties": {"cmd": {"type": "string"}},
+                                                   "required": ["cmd"]}}}],
+            "max_tokens": 200, "temperature": 0,
+        }
+        with _httpx.Client(base_url=conftest.BASE_URL, timeout=180.0) as c:
+            whole = c.post("/v1/chat/completions", json=body).json()["choices"][0]["message"]
+            assert whole.get("tool_calls") and (whole.get("content") or "").strip(), whole
+            streamed = ""
+            with c.stream("POST", "/v1/chat/completions", json={**body, "stream": True}) as r:
+                assert r.status_code == 200
+                for line in r.iter_lines():
+                    if not line.startswith("data: ") or line == "data: [DONE]":
+                        continue
+                    for ch in json.loads(line[len("data: "):]).get("choices", []):
+                        streamed += ch.get("delta", {}).get("content") or ""
+        assert streamed.strip() == whole["content"].strip()

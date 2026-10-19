@@ -208,8 +208,9 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
                     return false;
             }
         } else if (!pending_text.empty()) {
-            auto hd = imp::stream::holdback_decision(pending_text, max_stop_len, stop_sequences);
-            if (!flush_text(hd.flush_len))
+            // Whole buffer: call markup follows, so a held partial stop cannot complete. Keeping
+            // the "\nHuman" tail dropped up to 5 bytes before every call (#2807).
+            if (!flush_text(pending_text.size()))
                 return false;
         }
         return true;
@@ -646,11 +647,12 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
 
     // Flush any remaining buffers (skip after a text-level stop match or when
     // tool calls were emitted).
-    if (!utf8_buf.empty() && !text_stop_matched && !out.tool_calls_emitted) {
+    // Held tails go out after a tool call too: the text before them already streamed (#2807).
+    if (!utf8_buf.empty() && !text_stop_matched) {
         for (const auto& e : utf8_spans.flush(utf8_buf.size()))
             send_content_token(utf8_buf.substr(e.offset, e.length), e.token_index);
     }
-    if (!pending_text.empty() && !text_stop_matched && !out.tool_calls_emitted)
+    if (!pending_text.empty() && !text_stop_matched)
         flush_text(pending_text.size());
 
     if (!finish)
