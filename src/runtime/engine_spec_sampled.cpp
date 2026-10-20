@@ -20,9 +20,9 @@ const char* Engine::spec_sampling_refusal_(const Request& req) const {
         return nullptr;
     if (!runtime_config_.speculative.sampled)
         return "sampling_not_greedy";
-    // MoE and recurrent verify chunks run other numerics than the M=1 decode (expert GEMMs, chunked GDN
-    // scan): drawn rows shifted the output distribution there (docs/LIMITATIONS.md); argmax rows rarely flip.
-    if (model_->profile().is_moe || ssm_state_ != nullptr)
+    // MoE verify chunks shift the drawn distribution (expert GEMMs, docs/LIMITATIONS.md). GDN hybrids
+    // verify: Qwen3.8-27B MTP vs eager decode length t=-0.38, its own graph vs eager decode t=-8.10.
+    if (model_->profile().is_moe)
         return "sampling_verify_numerics";
     // The row sampler holds at most SAMPLE_MAX_TOP_K candidates per row; the eager path sorts past it.
     if (sample_effective_top_k(req.top_k, model_->config().vocab_size) > SAMPLE_MAX_TOP_K)
