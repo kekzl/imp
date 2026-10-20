@@ -4,12 +4,12 @@
 
 set(IMP_DEP_GOOGLETEST_TAG    v1.18.0  CACHE STRING "googletest git tag")
 set(IMP_DEP_CUTLASS_TAG       v4.8.0   CACHE STRING "NVIDIA/cutlass git tag")
-set(IMP_DEP_HTTPLIB_TAG       v0.61.0  CACHE STRING "cpp-httplib git tag")
+set(IMP_DEP_HTTPLIB_TAG       v0.62.0  CACHE STRING "cpp-httplib git tag")
 set(IMP_DEP_NLOHMANN_JSON_TAG v3.12.0  CACHE STRING "nlohmann/json git tag")
 set(IMP_DEP_PCRE2_TAG         pcre2-10.49 CACHE STRING "PCRE2Project/pcre2 git tag")
 
 set(IMP_DEP_GOOGLETEST_SHA    063de7e9578f82b369302001269680b4b1553359 CACHE STRING "googletest commit")
 set(IMP_DEP_CUTLASS_SHA       098de2a652cf8f00fd70b2df54051c7eccbb855a CACHE STRING "NVIDIA/cutlass commit")
-set(IMP_DEP_HTTPLIB_SHA       c419c904da4ed0d057f169c225c58cc795c07e4d CACHE STRING "cpp-httplib commit")
+set(IMP_DEP_HTTPLIB_SHA       74ef3c42188acd6391f027c4337fb0e1a68c0024 CACHE STRING "cpp-httplib commit")
 set(IMP_DEP_NLOHMANN_JSON_SHA 55f93686c01528224f448c19128836e7df245f72 CACHE STRING "nlohmann/json commit")
 set(IMP_DEP_PCRE2_SHA         6f9d7c1373262c541324a16a358785b33ef116cf CACHE STRING "PCRE2Project/pcre2 commit")
