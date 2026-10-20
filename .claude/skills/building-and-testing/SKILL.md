@@ -29,6 +29,7 @@ description: Use when building imp, running its test suite, checking CI status, 
 | CPU unit binary | `make test-unit` (`imp-tests-unit`) | <5 s |
 | Full GPU suite | `make test-gpu` | 4-10 min |
 | E2E on real models | `make test-e2e` | Qwen3-4B-Instruct-2507-Q8_0, Qwen3.5-4B-mxfp4, gemma-4-26B-A4B Q4_K_M, `MOE_MODEL` (gpt-oss-20b-mxfp4), Qwen3-Coder-30B FP4, Nemotron-3-Nano NVFP4 (paths in `Makefile`) |
+| GDN restore group of test-e2e (a `scripts/check-release.sh` stage) | `make test-hybrid-restore` | Qwen3.5-4B-mxfp4; a skip fails the stage |
 | Server e2e (the ONLY place handlers/batching run end to end) | `make test-server` | includes `degen_suite.py` and `tests/test_server_tracing.py` |
 | Rerank / agents / external harnesses | `make test-rerank`, `make test-agents`, `make test-agents-external` | GPU + local model |
 | NIAH retrieval gate, spec fidelity | `make test-niah`, `make test-spec-fidelity` | spec-fidelity needs ~26 GB free |

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Pre-release sanity gate: doc-link/secret/tracked-binary checks, then defers to make
-# verify-fast (tests+perf+smoke), make test-server (HTTP surface), make test-spec-fidelity
+# verify-fast (tests+perf+smoke), make test-server (HTTP surface), make check-alloc-interpose,
+# make test-hybrid-restore (GDN restore group of test-e2e), make test-spec-fidelity
 # (captured verify chunk), make bench-competitive (vs a competitor, GOAL.md release bar 2).
-# SKIP_VERIFY=1 skips all four; the summary then reports what actually ran instead of "all
+# SKIP_VERIFY=1 skips all model stages; the summary then reports what actually ran instead of "all
 # gates passed" (the Release hygiene CI job runs this way, no GPU there). Exit 1 on any FAIL;
 # exit 0 with SKIP_VERIFY=1 still prints "NOT a release verdict".
 
@@ -351,6 +352,29 @@ else
         echo "  log: /tmp/imp_check_release_interpose.log"
         tail -20 /tmp/imp_check_release_interpose.log | sed 's/^/  /'
         fail "make check-alloc-interpose"
+    fi
+fi
+
+# The hybrid recurrent restore group of make test-e2e (Qwen3.5-4B GDN): red from 2026-10-04 to #2820
+# with no stage here. A skipped test (model missing) or zero OK lines is a FAIL, not a pass.
+section "make test-hybrid-restore"
+if [ "${SKIP_VERIFY:-0}" = "1" ]; then
+    echo "  (skipped via SKIP_VERIFY=1)"
+else
+    MODEL_STAGES_RUN=$((MODEL_STAGES_RUN+1))
+    HYB_LOG=/tmp/imp_check_release_hybrid.log
+    if make test-hybrid-restore >"$HYB_LOG" 2>&1; then
+        HYB_OK=$(grep -c '^\[       OK \]' "$HYB_LOG" || true)
+        if grep -q '\[  SKIPPED \]' "$HYB_LOG" || [ "$HYB_OK" -eq 0 ]; then
+            echo "  log: $HYB_LOG"
+            fail "make test-hybrid-restore ($HYB_OK OK, a test skipped or none ran)"
+        else
+            pass "make test-hybrid-restore ($HYB_OK OK)"
+        fi
+    else
+        echo "  log: $HYB_LOG"
+        grep -E '^\[  FAILED  \]' "$HYB_LOG" | sed 's/^/  /' | head -10 || true
+        fail "make test-hybrid-restore"
     fi
 fi
 

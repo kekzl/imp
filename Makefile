@@ -114,7 +114,7 @@ DEV_CMAKE_ARGS = -DCMAKE_BUILD_TYPE=Release -DIMP_BUILD_TESTS=ON -DIMP_BUILD_TOO
                  -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=/deps/json \
                  -DFETCHCONTENT_SOURCE_DIR_PCRE2=/deps/pcre2
 
-.PHONY: dev dev-image dev-test dev-clean test-spec-fidelity
+.PHONY: dev dev-image dev-test dev-clean test-spec-fidelity test-hybrid-restore
 
 # Toolchain-only image (compiler + pinned deps, no source). Always re-runs
 # rather than guarding on `docker image inspect`: fully cached this costs ~1 s,
@@ -229,6 +229,13 @@ test-all: build
 # `DetEvalE2ETest.*` matches nothing and gtest calls that PASSED.
 # guard_det_suite_filter (CMakeLists.txt, unit lane) holds both to that.
 MOE_MODEL ?= /models/gpt-oss-20b-mxfp4.gguf
+HYBRID_RESTORE_RUN = $(GPU_DOCKER) -v $(HOME)/models:/models \
+		-e IMP_TEST_MODEL=/models/Qwen3.5-4B-mxfp4.gguf \
+		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-mxfp4.gguf \
+		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:PrefixCacheE2ETest.HybridTranscriptRestoreContinuesAtReplyEnd:GdnGraphBucketTest.*:*HybridRestoreChainTest*:HybridBatchedDecodeTest.*"
+# The hybrid group of test-e2e alone: scripts/check-release.sh runs it (red 2026-10-04 to #2820 unblocked).
+test-hybrid-restore: build
+	$(HYBRID_RESTORE_RUN)
 test-e2e: build
 	$(GPU_DOCKER) -v $(HOME)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3-4B-Instruct-2507-Q8_0.gguf \
@@ -260,10 +267,7 @@ test-e2e: build
 	@# (tests/CLAUDE.md - a bare Suite.* on a TEST_P matches nothing and gtest
 	@# calls that PASSED). It chains 30 restores against a cold prefill of the
 	@# same prompt and compares the recurrent slab, not the tokens.
-	$(GPU_DOCKER) -v $(HOME)/models:/models \
-		-e IMP_TEST_MODEL=/models/Qwen3.5-4B-mxfp4.gguf \
-		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-mxfp4.gguf \
-		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:PrefixCacheE2ETest.HybridTranscriptRestoreContinuesAtReplyEnd:GdnGraphBucketTest.*:*HybridRestoreChainTest*:HybridBatchedDecodeTest.*"
+	$(HYBRID_RESTORE_RUN)
 	@# The lock table's other rows are the NVFP4 SafeTensors checkpoint (the
 	@# loader + RoPE path the #503 class shipped prompt-blind on).
 	$(GPU_DOCKER) -v $(HOME)/models:/models \
