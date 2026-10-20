@@ -270,7 +270,7 @@ bool Engine::spec_history_too_short_(const Request& req) const {
 
 bool Engine::mtp_feed_wanted_(const Request& req) const {
     return mtp_binds_request({.mtp_armed = mtp_spec_decode_enabled() && mtp_ws_storage_ != nullptr,
-                              .constrained = req.wants_constraints(),
+                              .constrained = spec_constrained_refused_(req),
                               .sampling_refused = spec_sampling_refusal_(req) != nullptr});
 }
 

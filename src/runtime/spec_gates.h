@@ -39,7 +39,7 @@ constexpr bool spec_ngram_source(const SpecDrafterState& s) {
 // 70.8 vs 93.5 tok/s, json_schema 69.0 vs 92.6).
 struct MtpBindState {
     bool mtp_armed = false;         // mtp_spec_decode_enabled() and a workspace
-    bool constrained = false;       // Request::wants_constraints(): verify refuses "constrained_decode"
+    bool constrained = false;       // constrained, verify refuses it (sampled or constrained=off)
     bool sampling_refused = false;  // spec_sampling_refusal_ said no
 };
 

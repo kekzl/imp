@@ -1045,6 +1045,9 @@ ngram_corpus         = ""
 dspark_model         = ""
 # DSpark drafter q / o / gate / up / down / lm_head as per-row FP8: propose 3.07 -> 1.76 ms with the graph.
 dspark_fp8           = true
+# Greedy JSON / schema / regex / grammar / tool-constrained requests verify drafts (rows checked
+# against the request's own mask); sampled constrained requests stay eager.
+constrained          = true
 # Shortest / longest suffix n-gram match searched. Longer min_match =
 # fewer but far more precise drafts (6 vs 3: +16% on code-edit, and the
 # number-table worst case shrinks from -13% to -2%).

@@ -179,9 +179,9 @@ const char* Engine::spec_verify_gate_refusal_(const Request& req, bool ignore_th
     // Logit-shaping the verify chunk does not replicate disqualifies.
     if (req.dry_multiplier != 0.0f || req.mirostat != 0 || req.host_logit_shaping())
         return "logit_shaping";
-    if (req.logprobs || req.json_mode || !req.json_schema.empty() ||
-        !req.regex_pattern.empty() || !req.grammar.empty() || !req.tool_constraint_tools.empty())
-        return "constrained_decode";  // verify replicates no FSM masks (#1002)
+    if (req.logprobs || spec_constrained_refused_(req))
+        return "constrained_decode";  // greedy constrained rows are mask-checked
+                                      // (engine_spec_constrained.cpp)
     // Think budget forces tokens INSIDE the think block (loop/host-side);
     // verify runs only outside it, since think interior loop bursts handle
     // the budget device-side. Exception: an MTP-bound request runs the
@@ -269,6 +269,17 @@ SuffixDraftIndex& Engine::spec_suffix_index_(const Request& req) {
         it->second.append(req.prediction_tokens);
     }
     return it->second;
+}
+
+bool Engine::spec_verify_abandon_(int req_id, bool hybrid, int rec_slot, int p0, bool count_miss,
+                                  cudaStream_t stream) {
+    if (hybrid)
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), spec_state_scratch_,
+                                           ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice, stream));
+    kv_manager_->rollback(req_id, p0);
+    if (count_miss)
+        spec_stats_.miss_steps++;
+    return false;
 }
 
 bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream, int min_draft) {
@@ -851,15 +862,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         upload_penalties(*req, pstate, stream);
         if (pstate.penalty_tokens == nullptr) {
             // Upload failed: an unpenalized verify would diverge from the
-            // eager path; fall back to the normal step. The chunk forward
-            // already ran: restore the committed hybrid state.
-            if (hybrid)
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
-                    ssm_state_->seq_base(rec_slot), spec_state_scratch_,
-                    ssm_state_->per_seq_bytes(), cudaMemcpyDeviceToDevice, stream));
-            kv_manager_->rollback(req->id, p0);
-            spec_stats_.miss_steps++;
-            return false;
+            // eager path; fall back to the normal step.
+            return spec_verify_abandon_(req->id, hybrid, rec_slot, p0, /*count_miss=*/true, stream);
         }
         d_hist = pstate.penalty_tokens;
         n_hist = pstate.n_penalty_tokens;
@@ -894,16 +898,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         check(cudaMemcpyAsync(h_spec_argmax_.as<int32_t>(), d_spec_argmax_, d2h_ints * sizeof(int32_t),
                               cudaMemcpyDeviceToHost, stream), "argmax D2H") &&
         check(cudaStreamSynchronize(stream), "verify sync");
-    if (!argmax_ok) {
-        // No tokens were emitted; leave the request exactly as before the
-        // step (the chunk forward advanced hybrid state: restore it).
-        if (hybrid)
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(ssm_state_->seq_base(rec_slot), spec_state_scratch_,
-                                               ssm_state_->per_seq_bytes(),
-                                               cudaMemcpyDeviceToDevice, stream));
-        kv_manager_->rollback(req->id, p0);
-        return false;
-    }
+    if (!argmax_ok)  // no tokens emitted: leave the request exactly as before the step
+        return spec_verify_abandon_(req->id, hybrid, rec_slot, p0, /*count_miss=*/false, stream);
 
     if (runtime_config_.diagnostics.spec_trace) {
         // Whole block in runtime/spec_trace.cpp: the speculation loop should
@@ -934,6 +930,9 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         mc_row0 = best_c * mc_rows_per_cand;
         acc = &mc[best_c];
     }
+    // Constrained: a row counts only if the mask allows its argmax; row 0 masked out = eager step.
+    if (!spec_constraint_allows_(*req, h_spec_argmax_.as<int32_t>()[mc_row0], stream))
+        return spec_verify_abandon_(req->id, hybrid, rec_slot, p0, /*count_miss=*/true, stream);
     // Linear: K (attn-scores clamp may have trimmed the staged chunk below
     // draft.size()). mc: the winning candidate's full length.
     const int acc_len = mc_on ? static_cast<int>(acc->size()) : K;
@@ -954,8 +953,7 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
         const bool hard_stop = should_stop(*req, tokj) ||
                                static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
         // Per-request FSM; must advance before finish_request returns the
-        // manager to the pool. (Spec gates exclude json/schema requests, so
-        // this is normally null; kept for parity with the eager path.)
+        // manager to the pool, and before the next row's mask probe.
         if (req->constraints)
             req->constraints->update(tokj);
         if (hard_stop) {
@@ -964,6 +962,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
             break;
         }
         if (j >= acc_len || tokj != (*acc)[j]) break;  // bonus reached or draft diverged
+        if (!spec_constraint_allows_(*req, h_spec_argmax_.as<int32_t>()[mc_row0 + j + 1], stream))
+            break;  // the next row's token is masked out: tokj is the bonus
         matched++;
         // Crossing a think boundary mid-chunk (either direction): stop
         // extending; the accepted prefix stays. Entering: budget forcing

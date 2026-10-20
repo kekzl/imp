@@ -734,6 +734,9 @@ ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_to
             if (params->mirostat == 2 && req->mirostat_mu == 0.0f)
                 req->mirostat_mu = 2.0f * params->mirostat_tau;
         }
+        // The constraint FSM is prepared at admission: json_mode set only by decode_step left it unbuilt.
+        if (params)
+            req->json_mode = (params->json_mode != 0);
         req->ignore_eos = true;  // Don't stop during prefill — decode_step controls stopping
         req->status = imp::RequestStatus::PENDING;
 

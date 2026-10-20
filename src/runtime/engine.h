@@ -546,6 +546,7 @@ private:
     // executor feature tap into dspark_feat_ ([executor max tokens, feature_dim] FP16).
     std::unique_ptr<DSparkDrafter> dspark_;
     VramOwned<char> dspark_feat_;
+    VramOwned<char> spec_probe_row_;  // [vocab] float, spec_constraint_allows_
     int dspark_req_ = -1;  // request whose context the drafter holds
     [[nodiscard]] bool init_dspark_();
     void dspark_prefill_feed_(const Request& req, int offset, int n);
@@ -1112,6 +1113,10 @@ private:
     // min_draft > 0 (#1003 batch-RR): soft-decline when the draft is
     // shallower, since at batch > 1 the whole batch pays for the verify.
     [[nodiscard]] bool step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t stream, int min_draft = 0);
+    // A verify that ran its chunk forward and emits nothing: restore the committed hybrid state,
+    // roll the KV back to p0, count a miss if asked. Always false (the eager step runs).
+    [[nodiscard]] bool spec_verify_abandon_(int req_id, bool hybrid, int rec_slot, int p0, bool count_miss,
+                                            cudaStream_t stream);
     // #847 capturability census for the verify chunk forward (see
     // diagnostics.spec_capture_probe). Runs the forward via stream capture +
     // graph launch when possible, eagerly otherwise.
@@ -1230,6 +1235,11 @@ private:
     [[nodiscard]] bool spec_verify_gates_ok_(const Request& req, bool ignore_think = false) const;
     // Sampled verify (speculative.sampled), engine_spec_sampled.cpp. Refusal: nullptr = verify may run.
     const char* spec_sampling_refusal_(const Request& req) const;
+    // A constrained request the verify cannot serve: sampled, or speculative.constrained off.
+    [[nodiscard]] bool spec_constrained_refused_(const Request& req) const;
+    // Does req's constraint mask, in its current FSM state, allow `tok`? apply_mask over a zero row,
+    // one float back; false on any error (the caller then stops accepting).
+    [[nodiscard]] bool spec_constraint_allows_(const Request& req, int32_t tok, cudaStream_t stream);
     // Multi-candidate chunks: refused under penalties (not replicated) and sampling (draws per candidate).
     [[nodiscard]] bool spec_mc_refused_(const Request& req) const;
     // Arms executor_->set_verify_sampling for the chunk starting at this step; false (armed off) when greedy.
