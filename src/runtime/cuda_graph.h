@@ -223,11 +223,13 @@ public:
     // is forwarded at `position` with context length `context_len` (physical values, no +1
     // applied inside). step_limit bounds this launch (0 = max_steps); think_limit is the
     // REMAINING think budget (0 = no budget; device counter restarts at 0 every launch, so the
-    // caller passes full_budget - tokens_already_thought). Returns false when no graph is built,
-    // a launch is in flight, or context_len would exceed the captured ceiling; caller falls back
-    // to a full setup().
-    [[nodiscard]] bool rearm(int32_t first_token, int position, int context_len, int step_limit, bool in_think,
-               int think_limit, cudaStream_t stream);
+    // caller passes full_budget - tokens_already_thought). penalty_history is the request's whole
+    // output so far (ignored without penalties). Returns false when no graph is built, a launch is
+    // in flight, or context_len or the penalty history would exceed the captured ceiling; caller
+    // falls back to a full setup().
+    [[nodiscard]] bool rearm(int32_t first_token, int position, int context_len, int step_limit,
+                             bool in_think, int think_limit, const std::vector<int32_t>& penalty_history,
+                             cudaStream_t stream);
 
     // Context ceiling baked into the captured graph (attention workspace
     // sizing): initial_context_len + max_steps at setup time.
@@ -293,12 +295,11 @@ private:
     int* d_content_after_think_ = nullptr;  // [1] real answer token seen since </think> (0/1)
     int* d_stop_mask_active_ = nullptr;     // [1] next step masks stop ids (think_logic::stop_mask_active)
 
-    // Penalty token history: [prefix_len + max_steps] ring buffer for penalty computation.
-    // prefix_len tokens are pre-populated from prior output; subsequent slots filled by
-    // post_decode_step_kernel each iteration.
+    // Penalty token history: the request's output so far (setup and every rearm upload it), then
+    // post_decode_step_kernel appends at *d_penalty_count_. Capacity: history at setup + max_steps.
     int32_t* d_penalty_ring_ = nullptr;  // device penalty ring buffer
     int* d_penalty_count_ = nullptr;     // [1] device-side total penalty token count
-    int penalty_prefix_len_ = 0;         // number of pre-populated history tokens
+    int penalty_capacity_ = 0;           // ring slots
 
     // Mapped pinned memory for zero-copy host readback. The four buffers below are EITHER views
     // into a graph-slot lease (pool-owned) or owned here when the pool declines; owners are these

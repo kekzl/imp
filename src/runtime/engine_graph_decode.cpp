@@ -320,8 +320,8 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
             if (runtime_config_.diagnostics.spec_trace)
                 IMP_LOG_INFO("[burst-launch] REARM seed=%d pos=%d ctx=%d limit=%d", (int)first_token,
                              ctx - 1, ctx, step_limit);
-            if (async_graph_runner_.rearm(first_token, /*position=*/ctx - 1, /*context_len=*/ctx,
-                                          step_limit, req->in_think_block, think_limit, stream) &&
+            if (async_graph_runner_.rearm(first_token, /*position=*/ctx - 1, /*context_len=*/ctx, step_limit,
+                                          req->in_think_block, think_limit, req->output_tokens, stream) &&
                 async_graph_runner_.launch(stream)) {
                 async_graph_req_ = req;
                 async_pending_tokens_.clear();
