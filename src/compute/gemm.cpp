@@ -546,10 +546,9 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
                           results[i].workspaceSize);
         }
     }
-    // [runtime] deterministic_gemm = true skips timing-based selection so
-    // repeat runs produce bitwise-identical prefill outputs.
-    const bool s_deterministic_gemm = imp::process_diag_deterministic_gemm();
-    if (s_deterministic_gemm || nresults == 1) {
+    // Timing-based selection only under gemm.algo_timed: near-tie picks flip per process, and a
+    // different algo changes the numerics every later request sees.
+    if (imp::process_diag_deterministic_gemm() || !imp::process_diag_gemm_algo_timed() || nresults == 1) {
         // Deterministic selection must still be VALID: the cuBLASLt heuristic can return a
         // candidate that faults at runtime on sm_120 (status 14 NOT_SUPPORTED at certain M) even
         // though deterministic mode skips the timing warmup that would normally reject it
@@ -594,7 +593,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         entry.has_algo = true;
         entry.benchmarked = false;
         if (gemm_algo_log_enabled() && M > 0) {
-            IMP_LOG_DEBUG("[gemm-algo]   PICKED cand[%d] (deterministic, warmup-validated)", pick);
+            IMP_LOG_DEBUG("[gemm-algo]   PICKED cand[%d] (heuristic, warmup-validated)", pick);
         }
         return;
     }

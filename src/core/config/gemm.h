@@ -15,6 +15,9 @@ struct GEMM {
     bool no_dp4a_lm = false;
     bool no_mmvq = false;
     bool no_mmvq_q8_0 = false;
+    // cuBLASLt algo by timing the candidates (true) or the first heuristic candidate that survives a
+    // warmup (false): timing picks flip per process (Qwen3.8-27B GEMM K=5120 N=48: 3 tiles in 5 starts).
+    bool algo_timed = false;
     // Q8_0 INT8 IMMA prefill GEMM: fused dequant on int8 tensor cores
     // (s8.s8.s32, full rate unlike the quartered f32-accumulate paths),
     // replacing dequant-to-FP16 -> cuBLAS for Q8_0 prefill (M>=64). Default on.

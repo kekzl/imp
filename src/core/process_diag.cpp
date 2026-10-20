@@ -40,6 +40,7 @@ bool process_diag_deterministic() { return slot().deterministic; }
 bool process_diag_cublas_fp16_acc() { return slot().cublas_fp16_acc; }
 void process_diag_set_cublas_fp16_acc(bool v) { slot().cublas_fp16_acc = v; }
 void process_diag_set_deterministic_gemm(bool v) { slot().deterministic_gemm = v; }
+bool process_diag_gemm_algo_timed() { return slot().gemm_algo_timed; }
 bool process_diag_attention_splitk_pipe() { return slot().attention_splitk_pipe; }
 bool process_diag_attention_fp8_tile() { return slot().attention_fp8_tile; }
 bool process_diag_attention_fp8_tile_gqa() { return slot().attention_fp8_tile_gqa; }
