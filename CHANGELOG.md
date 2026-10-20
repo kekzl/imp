@@ -16,6 +16,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - DSpark drafter (`speculative.dspark_model`): per-row FP8 weights (`speculative.dspark_fp8`, default on) and a CUDA-graph propose. Qwen3-8B-NVFP4 propose 3.07 -> 1.76 ms per draft, code 2x nospec tok/s, prose at parity (was -7.7 %), drafter VRAM 4013 -> 2541 MiB (#2814).
 
 ### Fixed
+- `scripts/gen_perf_baseline.sh` keeps the previous pin's thresholds, `own_peak_note` and `_thresholds_note`; it dropped `paired_decode_regression_pct` (read by `make verify-ab`) on every re-pin (#2827).
 - CI `Build`: the background static gates skip `kernels` (`IMP_GATE_SKIP`); next to a ccache-warm build they read a half-linked `libimp.a` and reported 50 kernels gone (run 39418394757). The `Kernel resources` step still reads the finished artifact.
 - Seeded sampled output repeats across server starts: cuBLAS(Lt) algorithms come from heuristic order, timing is opt-in (`gemm.algo_timed`). Qwen3.8-27B-NVFP4, 20 seeds at temperature 1.0: 3 different results in 5 starts before, 4/4 identical after; decode tg128 and Qwen3-1.7B pp512 within run-to-run noise.
 - A rearmed graph decode burst penalizes the whole output, not only its own tokens: `repetition_penalty` (server default 1.05) forgot everything before the last burst (128 tokens, 8 on n-gram misses). Greedy, `presence_penalty` 1000, 200 tokens over a 256-token vocab: 157 repeated tokens -> 0 (`EngineIntegrationTest.RearmedBurstKeepsPenaltyHistory`).
