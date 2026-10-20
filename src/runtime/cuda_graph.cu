@@ -509,6 +509,70 @@ void CudaGraphRunner::invalidate_for_update() {
 // Host sets to 1 via cudaMemcpyToSymbol when IMP_GRAPH_DIAG is enabled.
 __constant__ int d_graph_diag_enabled = 0;
 
+namespace {
+__device__ __forceinline__ bool is_stop_token(int32_t token, int eos_id, const int32_t* d_stop_ids,
+                                              int n_stop_ids) {
+    bool stop = (token == eos_id);
+    for (int i = 0; i < n_stop_ids; i++)
+        stop = stop || token == d_stop_ids[i];
+    return stop;
+}
+
+// Per-launch step cap from device memory (rearm() bounds a burst without recapture); max_steps
+// stays the ring capacity.
+__device__ __forceinline__ int effective_step_cap(int max_steps, const int* d_step_limit) {
+    const int lim = d_step_limit ? *d_step_limit : 0;
+    return (lim > 0 && lim < max_steps) ? lim : max_steps;
+}
+
+struct ThinkTrack {
+    int32_t start_id, end_id;
+    int budget_limit;
+    int *count, *in_think, *exit_step, *content_after;  // content_after may be null
+    const uint8_t* is_ws;                               // [vocab] may be null
+    int vocab_size;
+};
+
+// Think state for one emitted token: <think>/</think> transitions, the reasoning counter (budget only),
+// and the first real answer token after </think> (non-stop, non-whitespace) releasing the grace window.
+__device__ __forceinline__ void track_think_token(const ThinkTrack& t, int32_t token, int step, int eos_id,
+                                                  const int32_t* d_stop_ids, int n_stop_ids) {
+    if (token == t.start_id) {
+        *t.in_think = 1;
+    } else if (token == t.end_id) {
+        *t.in_think = 0;
+        *t.exit_step = step;  // open the post-think grace window
+        if (t.content_after)
+            *t.content_after = 0;  // fresh grace window: no answer yet
+    } else if (*t.in_think && t.budget_limit > 0) {
+        (*t.count)++;
+    }
+    // step > exit_step skips the </think> token itself.
+    if (!t.content_after || !t.exit_step || *t.exit_step < 0 || step <= *t.exit_step || token == t.start_id ||
+        token == t.end_id)
+        return;
+    const bool ws = t.is_ws && token >= 0 && token < t.vocab_size && t.is_ws[token];
+    if (!is_stop_token(token, eos_id, d_stop_ids, n_stop_ids) && !ws)
+        *t.content_after = 1;
+}
+
+__device__ void print_cond_stop(int step, int32_t token, int eff_max, bool in_think, bool stop_allowed,
+                                bool budget_hit, int eos_id, const int32_t* d_stop_ids, int n_stop_ids) {
+    int stop_reason = 0;
+    if (step + 1 >= eff_max) {
+        stop_reason = 1;  // max_steps / step_limit
+    } else if (stop_allowed) {
+        if (token == eos_id)
+            stop_reason = 2;  // eos
+        for (int i = 0; i < n_stop_ids; i++)
+            if (token == d_stop_ids[i])
+                stop_reason = 3 + i;  // stop_ids[i]
+    }
+    printf("[graph_diag:cond_stop] step=%d token=%d in_think=%d eos_id=%d n_stop_ids=%d reason=%d\n", step,
+           token, in_think ? 1 : 0, eos_id, n_stop_ids, budget_hit ? 100 : stop_reason);
+}
+}  // namespace
+
 // Device kernel: post-decode-step bookkeeping.
 // Copies sampled token to ring buffer, increments counters, checks stop
 // conditions, and breaks the WHILE loop via cudaGraphSetConditional.
@@ -524,68 +588,33 @@ __global__ void post_decode_step_kernel(
     // rearm() can shrink it across bounded burst launches (0 = disabled).
     const int* __restrict__ d_think_limit, int32_t think_start_id, int32_t think_end_id,
     int think_grace_tokens,
-    int* __restrict__ d_think_count,      // [1] reasoning token counter
-    int* __restrict__ d_in_think,         // [1] think block flag
-    int* __restrict__ d_think_exit_step,  // [1] step </think> last closed (-1 = never)
-    int* __restrict__ d_content_after_think,  // [1] real answer token seen since </think> (0/1)
-    int* __restrict__ d_stop_mask_active,     // [1] next step bans stop ids (0/1), may be null
+    int* __restrict__ d_think_count,                    // [1] reasoning token counter
+    int* __restrict__ d_in_think,                       // [1] think block flag
+    int* __restrict__ d_think_exit_step,                // [1] step </think> last closed (-1 = never)
+    int* __restrict__ d_content_after_think,            // [1] real answer token seen since </think> (0/1)
+    int* __restrict__ d_stop_mask_active,               // [1] next step bans stop ids (0/1), may be null
     const uint8_t* __restrict__ d_token_is_whitespace,  // [vocab] 1 = decodes to whitespace-only
     int vocab_size,
-    int ignore_eos,                   // 1 = don't stop on EOS/stop tokens
-    // Penalty ring buffer: d_penalty_ring[prefix_len + step] = token
+    int ignore_eos,  // 1 = don't stop on EOS/stop tokens
+    // Penalty ring buffer: d_penalty_ring[(*d_penalty_count)++] = token
     int32_t* __restrict__ d_penalty_ring,  // may be null if no penalties
-    int penalty_prefix_len,
-    int* __restrict__ d_penalty_count,  // [1] total penalty token count
+    int* __restrict__ d_penalty_count,     // [1] total penalty token count
     const int* __restrict__ d_step_limit,  // [1] per-launch cap (0 = max_steps)
-    int* __restrict__ d_burst_done,     // [1] mapped done flag (host-visible)
+    int* __restrict__ d_burst_done,        // [1] mapped done flag (host-visible)
     cudaGraphConditionalHandle handle) {
     int step = *d_step_counter;
     int32_t token = *d_token_id;
     const int think_budget_limit = d_think_limit ? *d_think_limit : 0;
+    const int eff_max = effective_step_cap(max_steps, d_step_limit);
 
-    // Per-launch step cap: read from device memory so rearm() can bound a
-    // burst without recapturing the graph. max_steps stays the hard capacity
-    // ceiling (ring buffer size).
-    int eff_max = max_steps;
-    if (d_step_limit) {
-        const int lim = *d_step_limit;
-        if (lim > 0 && lim < eff_max)
-            eff_max = lim;
-    }
-
-    // Track think state on device. Active whenever a </think> id is known (think_end_id >= 0),
-    // independent of the budget: it drives EOS/stop suppression inside the block and the
-    // post-</think> grace window. The reasoning-token counter only matters for the budget.
+    // Think state is tracked whenever a </think> id is known, independent of the budget: it drives
+    // stop suppression inside the block and the post-</think> grace window (post-#798 0-content fix).
     const bool track_think = (think_end_id >= 0);
     if (track_think) {
-        if (token == think_start_id) {
-            *d_in_think = 1;
-        } else if (token == think_end_id) {
-            *d_in_think = 0;
-            *d_think_exit_step = step;  // open the post-think grace window
-            if (d_content_after_think)
-                *d_content_after_think = 0;  // fresh grace window: no answer yet
-        } else if (*d_in_think && think_budget_limit > 0) {
-            (*d_think_count)++;
-        }
-    }
-
-    // Post-</think> content detection: the first real answer token (non-stop, non-marker)
-    // emitted after the exit step releases the grace, so a complete short answer stops on its
-    // own EOS. Must run before the grace check below; step > exit_step skips the </think> token itself.
-    if (track_think && d_content_after_think && d_think_exit_step && *d_think_exit_step >= 0 &&
-        step > *d_think_exit_step && token != think_start_id && token != think_end_id) {
-        bool tok_is_stop = (token == eos_id);
-        for (int i = 0; i < n_stop_ids; i++) {
-            if (token == d_stop_ids[i])
-                tok_is_stop = true;
-        }
-        // Whitespace/newline tokens after </think> are not real answer content
-        // and must not release the grace (post-#798 0-content fix).
-        bool tok_is_ws = (d_token_is_whitespace && token >= 0 && token < vocab_size &&
-                          d_token_is_whitespace[token]);
-        if (!tok_is_stop && !tok_is_ws)
-            *d_content_after_think = 1;
+        const ThinkTrack tt{think_start_id, think_end_id,      think_budget_limit,    d_think_count,
+                            d_in_think,     d_think_exit_step, d_content_after_think, d_token_is_whitespace,
+                            vocab_size};
+        track_think_token(tt, token, step, eos_id, d_stop_ids, n_stop_ids);
     }
 
     // Write token to ring buffer (visible to host via mapped memory)
@@ -593,15 +622,14 @@ __global__ void post_decode_step_kernel(
 
     // Write token to penalty ring buffer (for next iteration's penalty application)
     if (d_penalty_ring) {
-        d_penalty_ring[penalty_prefix_len + step] = token;
-        *d_penalty_count = penalty_prefix_len + step + 1;
+        const int n = *d_penalty_count;
+        d_penalty_ring[n] = token;
+        *d_penalty_count = n + 1;
     }
 
     // Increment counters
-    int new_pos = *d_position + 1;
-    int new_ctx = *d_context_len + 1;
-    *d_position = new_pos;
-    *d_context_len = new_ctx;
+    *d_position += 1;
+    *d_context_len += 1;
     *d_step_counter = step + 1;
 
     // Flush the ring buffer write to system-scope memory before publishing the host-visible
@@ -624,15 +652,9 @@ __global__ void post_decode_step_kernel(
     bool grace = (think_grace_tokens > 0 && d_think_exit_step && *d_think_exit_step >= 0 &&
                   (step - *d_think_exit_step) < think_grace_tokens &&
                   (!d_content_after_think || *d_content_after_think == 0));
-    bool should_stop = (step + 1 >= eff_max);
-    if (!in_think && !grace && !ignore_eos) {
-        if (token == eos_id)
-            should_stop = true;
-        for (int i = 0; i < n_stop_ids; i++) {
-            if (token == d_stop_ids[i])
-                should_stop = true;
-        }
-    }
+    const bool stop_allowed = !in_think && !grace && !ignore_eos;
+    bool should_stop = (step + 1 >= eff_max) ||
+                       (stop_allowed && is_stop_token(token, eos_id, d_stop_ids, n_stop_ids));
     // Stop mask for the NEXT step's sampler (ban_logits_if_kernel): the same
     // rule as the host (think_logic::stop_mask_active), with output_size ==
     // step + 1 and the budget standing in for "a </think> can be forced".
@@ -648,30 +670,13 @@ __global__ void post_decode_step_kernel(
     // Think budget: break loop to return to CPU for force_token injection. Gated on
     // budget_limit > 0: without it, limit 0 would make every in-think step satisfy (count >= 0)
     // and break the loop on the first reasoning token.
-    if (think_budget_limit > 0 && in_think && *d_think_count >= think_budget_limit) {
-        should_stop = true;
-    }
+    const bool budget_hit = think_budget_limit > 0 && in_think && *d_think_count >= think_budget_limit;
+    should_stop = should_stop || budget_hit;
 
     if (should_stop) {
-        if (d_graph_diag_enabled) {
-            int stop_reason = 0;
-            if (step + 1 >= eff_max)
-                stop_reason = 1;  // max_steps / step_limit
-            else if (!in_think && !grace && !ignore_eos) {
-                if (token == eos_id)
-                    stop_reason = 2;  // eos
-                for (int i = 0; i < n_stop_ids; i++) {
-                    if (token == d_stop_ids[i])
-                        stop_reason = 3 + i;  // stop_ids[i]
-                }
-            }
-            if (in_think && think_budget_limit > 0 && d_think_count && *d_think_count >= think_budget_limit)
-                stop_reason = 100;
-            printf(
-                "[graph_diag:cond_stop] step=%d token=%d in_think=%d "
-                "eos_id=%d n_stop_ids=%d reason=%d\n",
-                step, token, in_think ? 1 : 0, eos_id, n_stop_ids, stop_reason);
-        }
+        if (d_graph_diag_enabled)
+            print_cond_stop(step, token, eff_max, in_think, stop_allowed, budget_hit, eos_id, d_stop_ids,
+                            n_stop_ids);
         cudaGraphSetConditional(handle, 0);  // break WHILE loop
         // Publish burst completion to the host. This is the ONLY loop exit, so the polling host
         // (try_finish_burst) keys teardown off this flag: cudaStreamQuery reports the stream idle
@@ -683,6 +688,20 @@ __global__ void post_decode_step_kernel(
 }
 
 namespace {
+// Whole output history into the penalty ring; false when it plus this launch outgrows the ring.
+bool upload_penalty_history(int32_t* d_ring, int* d_count, int capacity, const std::vector<int32_t>& history,
+                            int steps, cudaStream_t stream) {
+    const int n = static_cast<int>(history.size());
+    if (n + steps > capacity)
+        return false;
+    cudaError_t err = cudaMemcpyAsync(d_count, &n, sizeof(int), cudaMemcpyHostToDevice, stream);
+    if (err == cudaSuccess && n > 0)
+        err = cudaMemcpyAsync(d_ring, history.data(), n * sizeof(int32_t), cudaMemcpyHostToDevice, stream);
+    if (err != cudaSuccess)
+        IMP_LOG_ERROR("ConditionalRunner: rearm penalty history upload failed: %s", cudaGetErrorString(err));
+    return err == cudaSuccess;
+}
+
 // Pre-capture sync, then capture into body; the first failure is returned.
 cudaError_t sync_then_begin_capture(cudaStream_t stream, cudaGraph_t body) {
     const cudaError_t err = cudaStreamSynchronize(stream);
@@ -717,7 +736,7 @@ bool CudaGraphConditionalRunner::capture_decode_body_(GraphExecutor* executor,
         d_think_limit_, config_.think_start_id, config_.think_end_id, config_.think_grace_tokens,
         d_think_count_, d_in_think_, d_think_exit_step_, d_content_after_think_, d_stop_mask_active_,
         config_.token_is_whitespace, config_.vocab_size, config_.ignore_eos ? 1 : 0, d_penalty_ring_,
-        penalty_prefix_len_, d_penalty_count_, d_step_limit_, d_burst_done_mapped_, handle_);
+        d_penalty_count_, d_step_limit_, d_burst_done_mapped_, handle_);
     IMP_CUDA_CHECK_LAUNCH();
 
     // 5c. Close the capture on every path; the body stays owned by graph_ (reset in cleanup()).
@@ -893,8 +912,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
         bool has_penalties = (config_.repetition_penalty != 1.0f || config_.frequency_penalty != 0.0f ||
                               config_.presence_penalty != 0.0f);
         if (has_penalties) {
-            penalty_prefix_len_ = static_cast<int>(config_.penalty_history.size());
-            int total_penalty_slots = penalty_prefix_len_ + config_.max_steps;
+            const int prefix_len = static_cast<int>(config_.penalty_history.size());
+            int total_penalty_slots = prefix_len + config_.max_steps;
+            penalty_capacity_ = total_penalty_slots;
             if (slotted) {
                 const GraphSlotView& sv = slot_.view();
                 d_penalty_ring_ = sv.penalty_ring;
@@ -907,9 +927,9 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                 if (err != cudaSuccess)
                     goto fail;
             }
-            if (penalty_prefix_len_ > 0) {
+            if (prefix_len > 0) {
                 err = cudaMemcpyAsync(d_penalty_ring_, config_.penalty_history.data(),
-                                      penalty_prefix_len_ * sizeof(int32_t), cudaMemcpyHostToDevice, stream);
+                                      prefix_len * sizeof(int32_t), cudaMemcpyHostToDevice, stream);
                 if (err != cudaSuccess) {
                     IMP_LOG_ERROR(
                         "ConditionalRunner: penalty prefix upload "
@@ -919,8 +939,7 @@ bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceS
                 }
             }
             // Initialize penalty count to prefix length (before any generation)
-            err = cudaMemcpyAsync(d_penalty_count_, &penalty_prefix_len_, sizeof(int), cudaMemcpyHostToDevice,
-                                  stream);
+            err = cudaMemcpyAsync(d_penalty_count_, &prefix_len, sizeof(int), cudaMemcpyHostToDevice, stream);
             if (err != cudaSuccess) {
                 IMP_LOG_ERROR("ConditionalRunner: penalty_count init failed: %s", cudaGetErrorString(err));
                 goto fail;
@@ -1192,9 +1211,9 @@ bool CudaGraphConditionalRunner::launch(cudaStream_t stream) {
     return true;
 }
 
-bool CudaGraphConditionalRunner::rearm(int32_t first_token, int position, int context_len,
-                                       int step_limit, bool in_think, int think_limit,
-                                       cudaStream_t stream) {
+bool CudaGraphConditionalRunner::rearm(int32_t first_token, int position, int context_len, int step_limit,
+                                       bool in_think, int think_limit,
+                                       const std::vector<int32_t>& penalty_history, cudaStream_t stream) {
     if (!exec_ || launched_)
         return false;
     // The captured graph sized its attention workspace for
@@ -1221,6 +1240,11 @@ bool CudaGraphConditionalRunner::rearm(int32_t first_token, int position, int co
         !up(d_step_counter_, &zero, sizeof(int), "step_counter") ||
         !up(d_step_limit_, &step_limit, sizeof(int), "step_limit") ||
         !up(d_think_limit_, &think_limit, sizeof(int), "think_limit"))
+        return false;
+    // The device count restarts from the whole output, not from the setup-time prefix: a rearmed
+    // burst otherwise penalized only its own tokens (8-token n-gram miss bursts).
+    if (d_penalty_ring_ && !upload_penalty_history(d_penalty_ring_, d_penalty_count_, penalty_capacity_,
+                                                   penalty_history, steps_this_launch, stream))
         return false;
     if (d_in_think_) {
         const int mask =
@@ -1343,7 +1367,7 @@ void CudaGraphConditionalRunner::cleanup() {
         d_stop_mask_active_ = nullptr;
         d_penalty_ring_ = nullptr;
         d_penalty_count_ = nullptr;
-        penalty_prefix_len_ = 0;
+        penalty_capacity_ = 0;
         h_ring_buffer_ = nullptr;
         d_ring_buffer_ = nullptr;
         h_step_counter_ = nullptr;
@@ -1416,7 +1440,7 @@ void CudaGraphConditionalRunner::cleanup() {
         IMP_CUDA_CHECK_LOG(cudaFree(d_penalty_count_));
         d_penalty_count_ = nullptr;
     }
-    penalty_prefix_len_ = 0;
+    penalty_capacity_ = 0;
 
     // reset() releases what this runner owned and is a no-op for a slot-backed
     // burst, where the pointers were views into the pool's buffer.

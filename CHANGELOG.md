@@ -12,6 +12,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - DSpark drafter (`speculative.dspark_model`): per-row FP8 weights (`speculative.dspark_fp8`, default on) and a CUDA-graph propose. Qwen3-8B-NVFP4 propose 3.07 -> 1.76 ms per draft, code 2x nospec tok/s, prose at parity (was -7.7 %), drafter VRAM 4013 -> 2541 MiB (#2814).
 
 ### Fixed
+- A rearmed graph decode burst penalizes the whole output, not only its own tokens: `repetition_penalty` (server default 1.05) forgot everything before the last burst (128 tokens, 8 on n-gram misses). Greedy, `presence_penalty` 1000, 200 tokens over a 256-token vocab: 157 repeated tokens -> 0 (`EngineIntegrationTest.RearmedBurstKeepsPenaltyHistory`).
 - An armed MTP head no longer binds constrained requests the verify refuses (sampled, or `speculative.constrained=false`): they keep the constrained pipeline. Qwen3.8-27B-NVFP4 `--max-batch 1`, `mtp_k=2`: json_schema 69.0 -> 93.2 tok/s, json_object 69.0 -> 92.8 (#2815).
 - C API: `imp_prefill_with_params` passes `json_mode`. Only `imp_decode_step` set it, after admission, so the JSON FSM was never built through the C API, `imp_generate` included (#2816).
 
