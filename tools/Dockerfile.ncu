@@ -12,7 +12,7 @@
 # image diverged from the C++23 CI build. Nsight Compute and nsys already ship in
 # this CUDA devel base.
 # Same base as the Dockerfile toolchain stage (tag + digest), so recompiles match the build (#2404).
-FROM nvidia/cuda:13.4.2-devel-ubuntu26.04@sha256:14fd494fd8496817a70700e4d2c52bd42de56c5d39c041bf8342814614d5fe56
+FROM nvidia/cuda:13.4.3-devel-ubuntu26.04@sha256:751ce45fa6934b382600b011a040a11d0ae0deb58040b43368098d859f6e156b
 
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends libdw1t64 \

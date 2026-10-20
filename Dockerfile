@@ -3,7 +3,7 @@
 # =============================================================================
 # Stage 1: Build imp from source
 # =============================================================================
-# Native CUDA 13.4.2 devel image: nvcc 13.4 (V13.4.92) is on PATH at
+# Native CUDA 13.4.3 devel image: nvcc 13.4 (V13.4.92) is on PATH at
 # /usr/local/cuda (-> /usr/local/cuda-13.4) out of the box, no apt toolkit
 # install needed. sm_120: no new tensor-core HW (still mma.sync, no tcgen05/wgmma).
 # Ubuntu 26.04 LTS host userland → GCC 15.2 / libstdc++ 15. GCC 15 no longer
@@ -20,7 +20,7 @@
 # Dockerfile built two different base layers on two different days. Refresh
 # with `docker buildx imagetools inspect nvidia/cuda:<tag>` (the index digest,
 # not a per-platform one) and keep the five ci.yml `image:` lines in step.
-FROM nvidia/cuda:13.4.2-devel-ubuntu26.04@sha256:14fd494fd8496817a70700e4d2c52bd42de56c5d39c041bf8342814614d5fe56 AS toolchain
+FROM nvidia/cuda:13.4.3-devel-ubuntu26.04@sha256:751ce45fa6934b382600b011a040a11d0ae0deb58040b43368098d859f6e156b AS toolchain
 
 ARG CMAKE_BUILD_TYPE=Release
 
@@ -54,12 +54,12 @@ ENV CUDA_HOME=/usr/local/cuda
 # The tag is carried only as the human label and lands in /deps/PINS.
 ARG IMP_DEP_GOOGLETEST_TAG=v1.18.0
 ARG IMP_DEP_CUTLASS_TAG=v4.8.0
-ARG IMP_DEP_HTTPLIB_TAG=v0.60.1
+ARG IMP_DEP_HTTPLIB_TAG=v0.61.0
 ARG IMP_DEP_NLOHMANN_JSON_TAG=v3.12.0
 ARG IMP_DEP_PCRE2_TAG=pcre2-10.49
 ARG IMP_DEP_GOOGLETEST_SHA=063de7e9578f82b369302001269680b4b1553359
 ARG IMP_DEP_CUTLASS_SHA=098de2a652cf8f00fd70b2df54051c7eccbb855a
-ARG IMP_DEP_HTTPLIB_SHA=00afaaed6aaba592e4d079742dfecfba2dcd1196
+ARG IMP_DEP_HTTPLIB_SHA=c419c904da4ed0d057f169c225c58cc795c07e4d
 ARG IMP_DEP_NLOHMANN_JSON_SHA=55f93686c01528224f448c19128836e7df245f72
 ARG IMP_DEP_PCRE2_SHA=6f9d7c1373262c541324a16a358785b33ef116cf
 RUN set -eu; \
@@ -145,10 +145,10 @@ COPY --from=bundle-build /dist/*.tar.gz* /
 # =============================================================================
 # Stage 2: Minimal runtime image
 # =============================================================================
-# Native CUDA 13.4.2 runtime image already ships the matching cudart + cuBLAS
+# Native CUDA 13.4.3 runtime image already ships the matching cudart + cuBLAS
 # (and transitive deps like libnvjitlink) at /usr/local/cuda; only the small
 # entrypoint/healthcheck helpers need adding.
-FROM nvidia/cuda:13.4.2-runtime-ubuntu26.04@sha256:761af29727cf549d7938c7cbdce1e6fbf114a96dfbb799ac747395675d2b18f7
+FROM nvidia/cuda:13.4.3-runtime-ubuntu26.04@sha256:83b873636b7ad03b418984f38f6b8a09e6f3c3a105d5cdab8088e998e8ed93f1
 
 # OCI image metadata — GHCR renders org.opencontainers.image.description on the
 # package page (https://github.com/kekzl/imp/pkgs/container/imp). Hardcoded here

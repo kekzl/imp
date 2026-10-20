@@ -60,7 +60,7 @@ jobs:
       # out of the box (matches the Dockerfile builder). No apt toolkit install.
       # Ubuntu 26.04 → GCC 15.2, so CI compiles on the same libstdc++ 15 as the
       # release image and catches missing-include regressions (#903) here.
-      image: nvidia/cuda:13.4.2-devel-ubuntu26.04@sha256:14fd494fd8496817a70700e4d2c52bd42de56c5d39c041bf8342814614d5fe56
+      image: nvidia/cuda:13.4.3-devel-ubuntu26.04@sha256:751ce45fa6934b382600b011a040a11d0ae0deb58040b43368098d859f6e156b
 
     env:
       # CUDA toolchain version — used by the verify step and cache keys. Kept in
@@ -79,7 +79,7 @@ jobs:
       # build tooling installs later, gated on the detection result.)
       #
       # python3 comes with it because the static gates below are python and this
-      # container has neither: `nvidia/cuda:13.4.2-devel-ubuntu26.04` ships no
+      # container has neither: `nvidia/cuda:13.4.3-devel-ubuntu26.04` ships no
       # python3 and no git. Without this the gate step fails "python3: not
       # found" on every PR, which is a false red on the one required check.
       # Every container job points apt at azure.archive.ubuntu.com: the runners
@@ -435,7 +435,7 @@ jobs:
     if: needs.build.outputs.cpp == 'true'
     runs-on: ubuntu-26.04
     container:
-      image: nvidia/cuda:13.4.2-devel-ubuntu26.04@sha256:14fd494fd8496817a70700e4d2c52bd42de56c5d39c041bf8342814614d5fe56
+      image: nvidia/cuda:13.4.3-devel-ubuntu26.04@sha256:751ce45fa6934b382600b011a040a11d0ae0deb58040b43368098d859f6e156b
     env:
       CUDA_VERSION: "13.4"
     # Default is `sh -e` (dash): `mapfile` and `< <(...)` fail there (#2187).
@@ -618,7 +618,7 @@ jobs:
             echo "::warning::apt via $m failed, trying the next mirror"
           done
           [ "$ok" = 1 ]
-          # Toolkit versions = the build image (13.4.2): cudart 13.4.92, cuBLAS 13.8.0.4 (439 MB).
+          # Toolkit versions = the build image (13.4.3): cudart 13.4.92, cuBLAS 13.8.0.4 (439 MB).
           # Fetched in the background while pip runs; sha256-verified (H-6).
           mkdir -p /tmp/cuda-whl
           curl -fsSL https://files.pythonhosted.org/packages/98/8a/3431271f6344874b8f1ac03f16b3d679c91493f8da63f716160403e6d0a0/nvidia_cuda_runtime-13.4.92-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl -o /tmp/cuda-whl/cudart.whl
@@ -814,7 +814,7 @@ jobs:
     name: PTX fallback
     runs-on: ubuntu-26.04
     container:
-      image: nvidia/cuda:13.4.2-devel-ubuntu26.04@sha256:14fd494fd8496817a70700e4d2c52bd42de56c5d39c041bf8342814614d5fe56
+      image: nvidia/cuda:13.4.3-devel-ubuntu26.04@sha256:751ce45fa6934b382600b011a040a11d0ae0deb58040b43368098d859f6e156b
     defaults:
       run:
         shell: bash
@@ -925,7 +925,7 @@ jobs:
     name: Sanitizers
     runs-on: ubuntu-26.04
     container:
-      image: nvidia/cuda:13.4.2-devel-ubuntu26.04@sha256:14fd494fd8496817a70700e4d2c52bd42de56c5d39c041bf8342814614d5fe56
+      image: nvidia/cuda:13.4.3-devel-ubuntu26.04@sha256:751ce45fa6934b382600b011a040a11d0ae0deb58040b43368098d859f6e156b
     # Own ccache namespace: these objects are RelWithDebInfo + ASan/UBSan host
     # flags, so nothing here is shareable with the `Build` (Release) or
     # `PTX fallback` stores and a shared dir would only evict theirs.
