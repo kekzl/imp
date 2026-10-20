@@ -212,6 +212,9 @@ jobs:
         env:
           # CCN pins may only shrink vs this commit (#2210); empty -> merge-base with origin/main.
           IMP_GATE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          # Runs next to the build: cuobjdump on a half-linked libimp.a reported 50 kernels gone
+          # (run 39418394757). The "Kernel resources" step below reads the finished artifact.
+          IMP_GATE_SKIP: kernels
         run: |
           # Every stream detached, or the step's `docker exec` waits for the child.
           # `|| rc=$?`: under `sh -e` a bare failing gate would end the subshell before the rc write.

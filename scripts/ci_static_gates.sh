@@ -22,7 +22,8 @@ run() {  # run <label> <cmd...>
     fi
 }
 
-want() {  # no filter = everything
+want() {  # no filter = everything; IMP_GATE_SKIP="a b" drops sections either way
+    case " ${IMP_GATE_SKIP:-} " in *" ${1:-} "*) return 1 ;; esac
     [ "$#" -eq 0 ] && return 0
     [ "$SELECT_ALL" = "1" ] && return 0
     case " $SELECTED " in *" $1 "*) return 0 ;; *) return 1 ;; esac
