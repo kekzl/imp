@@ -8,6 +8,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Greedy JSON / schema / regex / grammar / tool-constrained requests speculate: a verify row counts only if the request's mask allows its argmax (`speculative.constrained`, default on). Qwen3.8-27B-NVFP4 `--max-batch 1`, `mtp_k=2`: json_object 93.4-94.4 -> 103.8-112.3 tok/s, json_schema 90.3-94.0 -> 99.4-108.3 (#2816).
 
 ### Changed
+- Perf gate re-pinned at e04f6383 (`tests/perf_baseline.json`, previous pin 2026-09-28): pp512 14053.01 -> 16443.57, pp4096 16197.82 -> 18516.20, pp128 6132.05 -> 7663.61 from #2668, never re-pinned; tg128 282.97 -> 281.84. A 16 % prefill drop no longer passes the 8 % gate.
 - CUDA 13.4.2 -> 13.4.3: build, runtime, CI and ncu images by digest. nvcc V13.4.92, cudart 13.4.92 and cuBLASLt 13.8.0.4 are unchanged; the image moves cuSOLVER 12.3.4.7 -> 12.3.5.3, NCCL 2.31.2 -> 2.32.3, OpenSSL 3.5.5-1ubuntu3.5 -> 3.7.
 - cpp-httplib v0.60.1 -> v0.61.0: a request with more than one `Host` line or an invalid `Host` byte gets 400 (RFC 9112 §3.2); Mbed TLS / wolfSSL wildcards match the leftmost label only (imp uses OpenSSL); `set_payload_max_length(0)` is unlimited on chunked reads too.
 - `scripts/check-release.sh` runs `make test-hybrid-restore` (the Qwen3.5-4B GDN restore group of `make test-e2e`, 15 tests); a failure or a skip fails the release. The group was red from #2560/#2568 to #2820 with no blocking gate.
