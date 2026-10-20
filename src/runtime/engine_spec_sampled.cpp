@@ -21,7 +21,7 @@ const char* Engine::spec_sampling_refusal_(const Request& req) const {
     if (!runtime_config_.speculative.sampled)
         return "sampling_not_greedy";
     // MoE verify chunks shift the drawn distribution (expert GEMMs, docs/LIMITATIONS.md). GDN hybrids
-    // verify: Qwen3.8-27B MTP vs eager coin length t=-0.38. The MoE A/B ran under timed cuBLASLt picks.
+    // verify: Qwen3.8-27B MTP vs eager coin length t=-0.38. Qwen3-30B-A3B P(H) t=+3.96 / +2.91 (2 seed sets).
     if (model_->profile().is_moe)
         return "sampling_verify_numerics";
     // The row sampler holds at most SAMPLE_MAX_TOP_K candidates per row; the eager path sorts past it.
