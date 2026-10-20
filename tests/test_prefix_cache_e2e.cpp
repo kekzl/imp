@@ -12,6 +12,7 @@
 #include "model/model.h"
 #include "runtime/engine.h"
 #include "runtime/request.h"
+#include "runtime/prompt_tail.h"
 #include "runtime/snapshot_boundary.h"
 #include "test_models.h"
 
@@ -321,9 +322,10 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     ASSERT_FALSE(cold_a.empty());
     EXPECT_EQ(cold_cached, 0) << "the first run cannot hit a cache it is populating";
     const std::vector<int32_t> warm_a = run(aligned, kTokens, &warm_cached);
-    EXPECT_EQ(warm_cached, imp::snapshot_boundary(aligned_len, kv_bs, min_snap))
+    EXPECT_EQ(warm_cached, imp::snapshot_boundary(aligned_len, kv_bs, min_snap, imp::kMinPromptChunkRows))
         << "a hybrid must skip exactly to the recurrent-snapshot boundary, not to the longer KV "
-           "match (kv_bs=" << kv_bs << ", min=" << min_snap << ", prompt=" << aligned_len << ")";
+           "match (kv_bs="
+        << kv_bs << ", min=" << min_snap << ", prompt=" << aligned_len << ")";
     EXPECT_GT(warm_cached, 0) << "no snapshot was restored: this arm proves nothing";
     EXPECT_EQ(warm_a, cold_a)
         << "restored recurrent state diverged from the fresh forward at the SAME chunk boundary; "
@@ -338,7 +340,7 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     std::vector<int32_t> unaligned(full.begin(), full.begin() + unaligned_len);
     const std::vector<int32_t> cold_b = run(unaligned, kTokens, nullptr);
     const std::vector<int32_t> warm_b = run(unaligned, kTokens, &warm_cached);
-    EXPECT_EQ(warm_cached, imp::snapshot_boundary(unaligned_len, kv_bs, min_snap));
+    EXPECT_EQ(warm_cached, imp::snapshot_boundary(unaligned_len, kv_bs, min_snap, imp::kMinPromptChunkRows));
     EXPECT_EQ(warm_b, cold_b) << "unaligned prompt: restored state != fresh state";
 
     // KV match is longer than the snapshot: cached_tokens must follow the SNAPSHOT, not the
@@ -353,7 +355,7 @@ TEST_F(PrefixCacheE2ETest, HybridSnapshotRestoreMatchesFresh) {
     std::vector<int32_t> extended(full.begin(), full.begin() + aligned_len);
     (void)run(extended, kTokens, nullptr);  // warm: saves the snapshot at its boundary
     extended.insert(extended.end(), full.begin() + aligned_len, full.begin() + aligned_len + 100);
-    const int expect_c = imp::snapshot_boundary(aligned_len, kv_bs, min_snap);
+    const int expect_c = imp::snapshot_boundary(aligned_len, kv_bs, min_snap, imp::kMinPromptChunkRows);
     int ext_cached = -1;
     const std::vector<int32_t> warm_c = run(extended, kTokens, &ext_cached);
     EXPECT_LE(ext_cached, expect_c)
@@ -468,14 +470,14 @@ TEST_F(PrefixCacheE2ETest, HybridTranscriptRestoreContinuesAtReplyEnd) {
     EXPECT_EQ(c3, static_cast<int>(prompt2.size()) + 15) << "turn 3 must restore at the end of reply 2";
 
     // The destructive opposite: with the knob off, the same two turns restore at the prompt's
-    // block boundary, one block short of the aligned prompt (snapshot_boundary.h).
+    // block boundary, >= kMinPromptChunkRows rows short of the prompt (#2560).
     go_cold();
     engine->mutable_runtime_config().server.transcript_snapshot = false;
     (void)run(prompt1, kReply, nullptr);
     int c_off = -1;
     (void)run(prompt2, 16, &c_off);
     engine->mutable_runtime_config().server.transcript_snapshot = true;
-    EXPECT_EQ(c_off, imp::snapshot_boundary(prompt_len, kv_bs, min_snap))
+    EXPECT_EQ(c_off, imp::snapshot_boundary(prompt_len, kv_bs, min_snap, imp::kMinPromptChunkRows))
         << "with transcript snapshots off, turn 2 must fall back to the prompt-boundary snapshot";
 
     // Short chat, the common web-UI turn: prompt AND transcript both under

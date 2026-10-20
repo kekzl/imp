@@ -539,7 +539,10 @@ TEST_P(HybridRestoreChainTest, TranscriptRestoreStateStaysClose) {
     ASSERT_GE(static_cast<int>(prompt1.size()), engine->runtime_config().server.snapshot_min_prompt_tokens);
     go_cold();
     int c1 = -1;
+    // runtime.deterministic saves no transcript snapshot at finish (#2568): turn 1 runs without it.
+    engine->mutable_runtime_config().runtime.deterministic = false;
     const std::vector<int32_t> reply = run(prompt1, kReply, nullptr, &c1);
+    engine->mutable_runtime_config().runtime.deterministic = true;
     ASSERT_EQ(static_cast<int>(reply.size()), kReply);
     EXPECT_EQ(c1, 0);
     std::vector<int32_t> prompt2 = prompt1;
