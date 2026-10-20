@@ -124,6 +124,10 @@ struct Speculative {
     // DSpark drafter q / o / gate / up / down / lm_head as per-row FP8 E4M3 instead of FP16: half the
     // bytes per propose. Drafts only: verify keeps greedy output exact either way.
     bool dspark_fp8 = true;
+    // Greedy JSON / schema / regex / grammar / tool-constrained requests verify drafts: a row's
+    // argmax is kept only if the request's own mask allows it (exact: the masked argmax equals the
+    // unmasked one exactly when the latter is allowed). Sampled constrained requests stay eager.
+    bool constrained = true;
     // Longer suffix matches trade draft frequency for precision, and precision
     // wins: a higher min_match cuts false n-gram matches (e.g. in number
     // tables) that never verify, at the cost of fewer drafts overall.

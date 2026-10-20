@@ -4,6 +4,7 @@
 // the first diverging token must lie inside the batch-shape envelope. GPU: needs the checkpoints.
 #include "imp/imp.h"
 #include "api/imp_internal.h"
+#include "compute/json_constrain.h"
 #include "model/chat_template.h"
 #include "model/tokenizer.h"
 #include "runtime/config.h"
@@ -82,7 +83,8 @@ bool chat_mode() {
 // Speculation gates refuse a request carrying logprobs (engine_spec_ngram.cpp,
 // constrained_decode), so margins come from a logprobs run of the plain arm, valid only
 // as far as its tokens agree with the logprobs-free run.
-GreedyRun greedy_run(ImpModel model, ImpContext ctx, const char* prompt, int n_gen, bool want_margins) {
+GreedyRun greedy_run(ImpModel model, ImpContext ctx, const char* prompt, int n_gen, bool want_margins,
+                     bool json = false) {
     ImpGenerateParams params = imp_generate_params_default();
     params.temperature = 0.0f;
     params.top_k = 1;
@@ -91,6 +93,7 @@ GreedyRun greedy_run(ImpModel model, ImpContext ctx, const char* prompt, int n_g
     params.max_tokens = n_gen;
     params.logprobs = want_margins ? 1 : 0;
     params.top_logprobs = want_margins ? 2 : 0;
+    params.json_mode = json ? 1 : 0;
 
     GreedyRun run;
     std::vector<int32_t> prompt_tokens(2048);
@@ -160,7 +163,7 @@ std::vector<const char*> prompts() {
 }
 
 // Arm A: no speculation at all.
-void plain_baseline(const std::string& dir, std::vector<GreedyRun>* baseline) {
+void plain_baseline(const std::string& dir, std::vector<GreedyRun>* baseline, bool json = false) {
     imp::set_pending_runtime_config(arm_config(0));
     ImpModel model = nullptr;
     ASSERT_EQ(imp_model_load_ex(dir.c_str(), IMP_FORMAT_SAFETENSORS, /*load_mtp_head=*/0, &model),
@@ -171,9 +174,9 @@ void plain_baseline(const std::string& dir, std::vector<GreedyRun>* baseline) {
     ImpContext ctx = nullptr;
     ASSERT_EQ(imp_context_create(model, &cfg, &ctx), IMP_SUCCESS);
     for (const char* p : prompts()) {
-        const GreedyRun first = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false);
-        GreedyRun plain = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false);
-        const GreedyRun with_lp = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/true);
+        const GreedyRun first = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false, json);
+        GreedyRun plain = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false, json);
+        const GreedyRun with_lp = greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/true, json);
         // Same engine/params, deterministic, cold: neither a second run nor the logprobs flag may
         // move a token (AUDIT_QWEN38_NVFP4.md P7: trajectory depends on prior engine state).
         // Margins cannot be read off a different sequence.
@@ -257,7 +260,9 @@ void expect_near_tie_only(const std::vector<GreedyRun>& baseline, const std::vec
     }
 }
 
-TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
+// json: both arms json_mode, so the MTP arm's verify keeps a row only if the mask allows it
+// (speculative.constrained, engine_spec_constrained.cpp).
+void mtp_identity(bool json) {
     const std::string dir = model_or("IMP_TEST_MODEL_MTP", "/models/Qwen3.8-27B-NVFP4-vllm");
     if (!present(dir))
         GTEST_SKIP() << "checkpoint not present at " << dir;
@@ -269,8 +274,8 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
         GTEST_SKIP() << "needs ~" << kNeededMiB << " MiB free, card has " << free_mib << " MiB";
 
     std::vector<GreedyRun> baseline;
-    plain_baseline(dir, &baseline);
-    if (HasFatalFailure())
+    plain_baseline(dir, &baseline, json);
+    if (::testing::Test::HasFatalFailure())
         return;
 
     // ---- arm B: the documented MTP pair, depth 2 (IMP_TEST_MTP_K overrides: Qwen3.8-Flash-Next runs 1).
@@ -294,7 +299,26 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
 
     std::vector<GreedyRun> speculated;
     for (const char* p : prompts())
-        speculated.push_back(greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false));
+        speculated.push_back(greedy_run(model, ctx, p, kGenTokens, /*want_margins=*/false, json));
+
+    // The margin oracle cannot see a mask violation (an unmasked first token passed it at 3.151
+    // nats): every character the json arm emitted must advance the JSON grammar.
+    for (size_t i = 0; json && i < speculated.size(); ++i) {
+        std::vector<char> buf(16384, '\0');
+        ASSERT_EQ(imp_detokenize(model, speculated[i].tokens.data(),
+                                 static_cast<int>(speculated[i].tokens.size()), buf.data(), buf.size()),
+                  IMP_SUCCESS);
+        const std::string text(buf.data());
+        imp::JsonGrammar g;
+        g.reset();
+        size_t bad = 0;
+        while (bad < text.size() && g.advance_char(text[bad]))
+            ++bad;
+        const bool eos_after_done = g.done() && text.compare(bad, 2, "<|") == 0;  // detokenized EOS
+        EXPECT_TRUE(bad == text.size() || eos_after_done)
+            << "prompt " << i << ": the json arm left the grammar at char " << bad << " of \""
+            << text.substr(0, 120) << "\"";
+    }
 
     const auto stats = ctx->engine->spec_stats();
     imp_context_free(ctx);
@@ -309,8 +333,12 @@ TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) {
     ASSERT_GT(stats.mtp.accepted, 0)
         << "the MTP head drafted " << stats.mtp.drafted << " tokens and the verify accepted none";
 
-    expect_near_tie_only(baseline, speculated, "mtp");
+    expect_near_tie_only(baseline, speculated, json ? "mtp-json" : "mtp");
 }
+
+TEST(MtpGreedyIdentityTest, MtpDoesNotChangeGreedyTokens) { mtp_identity(false); }
+
+TEST(MtpGreedyIdentityTest, MtpDoesNotChangeConstrainedGreedyTokens) { mtp_identity(true); }
 
 // DSpark block drafter: 7 drafts per step, 8-row verify every step.
 TEST(MtpGreedyIdentityTest, DSparkDoesNotChangeGreedyTokens) {

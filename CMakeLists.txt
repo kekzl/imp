@@ -442,6 +442,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/engine_spec_ngram.cpp
     src/runtime/engine_spec_stats.cpp
     src/runtime/engine_spec_sampled.cpp
+    src/runtime/engine_spec_constrained.cpp
     src/runtime/engine_spec_buffers.cpp
     src/runtime/engine_spec_capture.cpp
     src/runtime/dspark_drafter.cu
