@@ -8,6 +8,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Greedy JSON / schema / regex / grammar / tool-constrained requests speculate: a verify row counts only if the request's mask allows its argmax (`speculative.constrained`, default on). Qwen3.8-27B-NVFP4 `--max-batch 1`, `mtp_k=2`: json_object 93.4-94.4 -> 103.8-112.3 tok/s, json_schema 90.3-94.0 -> 99.4-108.3 (#2816).
 
 ### Changed
+- Sampled requests speculate on dense GDN hybrids; only MoE keeps `sampling_verify_numerics`. Qwen3.8-27B-NVFP4 `--max-batch 1`, MTP, temperature 0.7 / 1.0, 3 prompts x 2 seeds: 95.6 -> 108.5-112.6 tok/s, 95.5 -> 111.9-112.1.
 - DSpark drafter (`speculative.dspark_model`): per-row FP8 weights (`speculative.dspark_fp8`, default on) and a CUDA-graph propose. Qwen3-8B-NVFP4 propose 3.07 -> 1.76 ms per draft, code 2x nospec tok/s, prose at parity (was -7.7 %), drafter VRAM 4013 -> 2541 MiB (#2814).
 
 ### Fixed
