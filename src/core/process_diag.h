@@ -39,6 +39,8 @@ struct ProcessDiag {
 
     // GEMM (may be promoted in place by engine_init_resolver)
     bool deterministic_gemm = false;
+    // gemm.algo_timed: time cuBLAS(Lt) algo candidates; off = heuristic order, same pick every process.
+    bool gemm_algo_timed = false;
     // runtime.deterministic as the user set it; never promoted by an arch resolver.
     bool deterministic = false;
     bool cublas_fp16_acc = false;
@@ -119,6 +121,8 @@ const std::string& process_diag_graph_capture_mode();
 // process_diag_set_deterministic_gemm() lets the resolver update the cache in place.
 [[nodiscard]] bool process_diag_deterministic_gemm();
 void process_diag_set_deterministic_gemm(bool v);
+// gemm.algo_timed: pick cuBLAS(Lt) algos by timing; the call sites also refuse under deterministic_gemm.
+[[nodiscard]] bool process_diag_gemm_algo_timed();
 // runtime.deterministic (user intent). Unlike deterministic_gemm, Gemma-4 and FP8 KV do not
 // promote it: gates that cost speed or accuracy key on this one (#2167).
 [[nodiscard]] bool process_diag_deterministic();

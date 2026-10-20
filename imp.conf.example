@@ -727,6 +727,11 @@ no_dp4a_gemv         = false
 no_dp4a_lm           = false
 no_mmvq              = false
 no_mmvq_q8_0         = false
+# cuBLAS(Lt) algorithm choice. false = first heuristic candidate that survives a
+# warmup, the same in every process. true = time the candidates: near-tie picks
+# flip per server start and with them the numerics (Qwen3.8-27B-NVFP4 seeded
+# temp-1 outputs: 3 different results in 5 starts). Ignored under deterministic_gemm.
+algo_timed           = false
 # Extend NVFP4 decode cache to Q4_K/Q3_K/Q2_K models (default: only Q8/Q6/Q5).
 # Trades VRAM for decode throughput on sub-8-bit models.
 # tg128 on (2026-09-24): Gemma-3-12B Q4_K_M 157.5 -> 165.0 (+4.5 %), Qwen3-30B-A3B Q4_K_M

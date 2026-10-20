@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 #include "runtime/config.h"
+#include "compute/cublas_gemm_algo.h"
+#include "core/process_diag.h"
 #include "model/model_arch.h"
+#include "runtime/process_diag_install.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -32,6 +35,7 @@ void set_(RuntimeConfig& cfg, const std::vector<std::string>& kvs) {
 TEST(RuntimeConfigTest, DefaultsAreSane) {
     RuntimeConfig cfg;
     EXPECT_FALSE(cfg.runtime.deterministic_gemm);
+    EXPECT_FALSE(cfg.gemm.algo_timed);  // timed cuBLASLt picks flip per process
     EXPECT_EQ(cfg.runtime.cuda_graphs, "auto");
     EXPECT_TRUE(cfg.runtime.warmup);  // default ON: greedy request-order independence (docs/DETERMINISM.md)
     EXPECT_EQ(cfg.kv_cache.dtype, "auto");
@@ -40,6 +44,24 @@ TEST(RuntimeConfigTest, DefaultsAreSane) {
     EXPECT_EQ(cfg.moe.expert_overhead_pct, 10);
     EXPECT_FALSE(cfg.gdn.fp32_scan);
     EXPECT_EQ(cfg.diagnostics.exit_layer, -1);
+}
+
+// Timed cuBLAS(Lt) algo selection only with gemm.algo_timed and never under deterministic_gemm.
+TEST(RuntimeConfigTest, GemmAlgoTimedOnlyWhenAskedAndNotDeterministic) {
+    const ProcessDiag saved = process_diag_current();
+    struct Row {
+        bool timed, det, want;
+    };
+    for (const Row r : {Row{false, false, false}, Row{true, false, true}, Row{true, true, false},
+                        Row{false, true, false}}) {
+        RuntimeConfig cfg;
+        set_(cfg, {std::string("gemm.algo_timed=") + (r.timed ? "true" : "false"),
+                   std::string("runtime.deterministic_gemm=") + (r.det ? "true" : "false")});
+        process_diag_install(cfg);
+        EXPECT_EQ(cublas_gemm_algo() == CUBLAS_GEMM_AUTOTUNE, r.want)
+            << "timed=" << r.timed << " det=" << r.det;
+    }
+    process_diag_set(saved);
 }
 
 // kv_cache.block_size: the operator surface AUDIT_ARCH_2026 B-5 found missing.
