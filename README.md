@@ -69,13 +69,13 @@ imp has one author: issues are welcome, answers are not guaranteed.
 
 | You want | Take | Why |
 | --- | --- | --- |
-| **Not sure** | **Qwen3.8-27B** NVFP4 (the [install](#install) example) | reads text and images, fits one 5090 with room for a long context |
-| the fastest replies | **Qwen3-8B** Q8_0 | the fastest of the [GGUF sweep](docs/BENCHMARKS.md) |
+| **Not sure** | **Qwen3.8-27B** NVFP4 (the [install](#install) example) | reads text and images, fits a 32 GB card with room for a long context (24 GB: short context) |
+| the fastest replies, or a 12-16 GB card | **Qwen3-8B** Q8_0 (8 GB card: **Qwen3-4B** Q8_0) | the fastest of the [GGUF sweep](docs/BENCHMARKS.md); picks per VRAM: [which card](docs/QUICKSTART.md#which-card) |
 | more knowledge, still fast | **Qwen3.6-35B-A3B** | mixture of experts: large, but only a small part works per token |
 | another model family | **gpt-oss-20b** or **Gemma-4-26B-A4B** | both in the [GGUF sweep](docs/BENCHMARKS.md) |
-| the biggest model, and ~62 GiB of free RAM | **Qwen3.8-Flash-Next** NVFP4 | too big for 32 GB: the experts live in host RAM ([above](#qwen38-flash-next-four-times-bigger-than-the-card)) |
+| the biggest model, and ~62 GiB of free RAM | **Qwen3.8-Flash-Next** NVFP4 | bigger than any card's VRAM: the experts live in host RAM ([above](#qwen38-flash-next-four-times-bigger-than-the-card)) |
 
-**Will it fit?** Weights plus the KV cache (the model's memory of the conversation) must fit in the card's VRAM (32 GB on a 5090, [per card](docs/QUICKSTART.md#which-card)). imp sizes the context to what is left after the weights, and refuses at load a model whose experts do not fit instead of running it wrong. Every family that loads, with its size: [`docs/MODELS.md`](docs/MODELS.md).
+**Will it fit?** Weights plus the KV cache (the model's memory of the conversation) must fit in the card's VRAM (8 GB on an RTX 5060 up to 96 GB on an RTX PRO 6000, [per card](docs/QUICKSTART.md#which-card)). imp sizes the context to what is left after the weights, and refuses at load a model whose experts do not fit instead of running it wrong. Every family that loads, with its size: [`docs/MODELS.md`](docs/MODELS.md).
 
 **Two file formats, no conversion step:** a **GGUF file** (as used by llama.cpp) or a **SafeTensors directory** in NVFP4 (NVIDIA Model Optimizer, llm-compressor, or imp's own `imp-quantize`). Your own BF16/FP8 checkpoint: [`docs/QUANTIZATION.md`](docs/QUANTIZATION.md).
 
@@ -99,7 +99,7 @@ The weights take 18.3 GiB on the card and answer at **~102 tokens/s**, leaving ~
 **No Docker:** every release attaches `imp-<version>-linux-x86_64.tar.gz` (CUDA libraries bundled, needs only the NVIDIA driver): [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#without-docker). **Shortcut:** `--model hf://<org>/<repo>[:<file>.gguf]` downloads a repo inside the container into `/models` (resumable, checksummed, `HF_TOKEN` for gated repos): [`docs/CONFIG.md`](docs/CONFIG.md#fetching-from-hugging-face). Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 
 ## Quickstart: Qwen3.8-Flash-Next
-**You need:** RTX 5090, ~62 GiB free host RAM (the 56.25 GiB of experts plus free headroom; less RAM serves from a slower path), 123.6 GiB disk for [`nvidia/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4).
+**You need:** a 32 GB card or bigger (tested: RTX 5090), ~62 GiB free host RAM (the 56.25 GiB of experts plus free headroom; less RAM serves from a slower path), 123.6 GiB disk for [`nvidia/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4).
 ```bash
 docker pull ghcr.io/kekzl/imp:latest
 IMP_IMAGE=ghcr.io/kekzl/imp:latest STAGE_DIR=~/models/Qwen3.8-Flash-Next-NVFP4 scripts/stage-model.sh nvidia/Qwen3.8-Flash-Next-NVFP4 ~/models/Qwen3.8-Flash-Next-NVFP4
@@ -130,7 +130,7 @@ curl -s http://localhost:8090/health | jq -c '{status,kv_blocks_total,kv_capacit
 
 ## How does it work?
 
-- **One chip, no compromises for others.** The RTX 5090 multiplies 4-bit numbers (NVFP4) directly; imp keeps weights in that format and computes on it, where portable engines unpack to 16 bits or skip the format.
+- **One chip generation, no compromises for others.** Every Blackwell `sm_120a` card multiplies 4-bit numbers (NVFP4) directly; imp keeps weights in that format and computes on it, where portable engines unpack to 16 bits or skip the format.
 - **Everything is its own:** file loaders, tokenizer, the conversation memory (a paged KV cache shared between requests), the GPU kernels. No framework underneath.
 - **Replay, not re-launch.** Each answer step is recorded once as a CUDA graph and replayed, so the CPU does not hand the GPU thousands of small jobs per token.
 - **Guess, then check.** A cheap drafter proposes the next tokens, the model checks them all in one pass and keeps what it agrees with: same answer, fewer passes.
