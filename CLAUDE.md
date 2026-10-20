@@ -1,13 +1,13 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-09-23
-commit: 6ca7ee18
+verified: 2026-10-21
+commit: 90037b96
 -->
 
 # imp - Project Instructions
 
-C++23/CUDA LLM inference engine for exactly one chip: NVIDIA Blackwell `sm_120a` (RTX 5090 / GB202, 32 GB GDDR7, 1792 GB/s, native FP4 tensor cores). No portability layer, no FP16 dequant fallback in the hot path. Narrative: [`docs/internals/ARCHITECTURE.md`](docs/internals/ARCHITECTURE.md); what sm_120 lacks against datacenter Blackwell: [`docs/internals/SM120.md`](docs/internals/SM120.md).
+C++23/CUDA LLM inference engine for exactly one chip generation: NVIDIA Blackwell `sm_120a`, every compute capability 12.0 card (GeForce RTX 50, RTX PRO Blackwell, 8-96 GB: [card table](docs/QUICKSTART.md#which-card)). Tuned, tested and gated on the RTX 5090 (GB202, 32 GB GDDR7, 1792 GB/s, native FP4 tensor cores); a VRAM or "fits" claim names the card size, not "the 5090". No portability layer, no FP16 dequant fallback in the hot path. Narrative: [`docs/internals/ARCHITECTURE.md`](docs/internals/ARCHITECTURE.md); what sm_120 lacks against datacenter Blackwell: [`docs/internals/SM120.md`](docs/internals/SM120.md).
 
 This file is the router: rules for every task. Playbooks live in skills; a rule a skill also covers is maintained in the skill.
 
