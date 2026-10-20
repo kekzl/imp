@@ -1234,12 +1234,8 @@ private:
     [[nodiscard]] bool spec_mc_refused_(const Request& req) const;
     // Arms executor_->set_verify_sampling for the chunk starting at this step; false (armed off) when greedy.
     [[nodiscard]] bool spec_arm_verify_sampling_(const Request& req);
-    // MTP binds at prefill only a request that can verify: a never-verifying one would pay the eager MTP
-    // path for nothing (sampled, Qwen3.8-27B-NVFP4: 70.8 vs 93.5 tok/s).
-    [[nodiscard]] bool mtp_feed_wanted_(const Request& req) const {
-        return mtp_spec_decode_enabled() && mtp_ws_storage_ != nullptr &&
-               spec_sampling_refusal_(req) == nullptr;
-    }
+    // MTP binds at prefill only a request that can verify (spec_gates.h mtp_binds_request).
+    [[nodiscard]] bool mtp_feed_wanted_(const Request& req) const;
     // The MTP head is bound to this request: its per-step feed needs every token on the host (no async loop).
     [[nodiscard]] bool mtp_holds_eager_(const Request& req) const;
     [[nodiscard]] bool spec_burst_launch_ok_(const Request& req) const;

@@ -268,6 +268,12 @@ bool Engine::spec_history_too_short_(const Request& req) const {
     return n > 0 && static_cast<int>(req.output_tokens.size()) < n;
 }
 
+bool Engine::mtp_feed_wanted_(const Request& req) const {
+    return mtp_binds_request({.mtp_armed = mtp_spec_decode_enabled() && mtp_ws_storage_ != nullptr,
+                              .constrained = req.wants_constraints(),
+                              .sampling_refused = spec_sampling_refusal_(req) != nullptr});
+}
+
 bool Engine::mtp_holds_eager_(const Request& req) const {
     return mtp_spec_decode_enabled() && mtp_bound(mtp_active_, mtp_pool_, req.id);
 }

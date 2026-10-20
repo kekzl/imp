@@ -97,6 +97,15 @@ TEST(SpecGates, HybridReplayKeepsQOffsetAtP0) {
     }
 }
 
+// A JSON / schema / grammar / tool-constrained request never verifies: binding it put Qwen3.8-27B
+// json_schema turns on the eager MTP path, 92.6 -> 69.0 tok/s.
+TEST(SpecGates, MtpBindsOnlyARequestThatCanVerify) {
+    EXPECT_TRUE(imp::mtp_binds_request({.mtp_armed = true}));
+    EXPECT_FALSE(imp::mtp_binds_request({.mtp_armed = true, .constrained = true}));
+    EXPECT_FALSE(imp::mtp_binds_request({.mtp_armed = true, .sampling_refused = true}));
+    EXPECT_FALSE(imp::mtp_binds_request({.mtp_armed = false}));
+}
+
 // Linear chunk [t0, d1..dK]: the slab ends at row K. A stop at row j < K leaves it ahead.
 TEST(SpecGates, HybridSlabMatchesOnlyAtTheCommittedRow) {
     const int K = 16;
