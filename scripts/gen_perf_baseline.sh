@@ -137,7 +137,8 @@ ppl=${ppl:-0}
 
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-cat > "$OUTPUT" << EOF
+FRESH=$(mktemp)
+cat > "$FRESH" << EOF
 {
   "schema_version": "legacy-v1",
   "model": "$(basename "$MODEL")",
@@ -179,5 +180,17 @@ cat > "$OUTPUT" << EOF
 }
 EOF
 
-echo "Baseline written to $OUTPUT"
+# Policy stays from the previous pin: its thresholds win (paired_decode_regression_pct is read by
+# verify_ab.sh), own_peak_note and _thresholds_note carry over. _note is per pin: write a new one.
+if [ -f "$OUTPUT" ] && jq -e . "$OUTPUT" >/dev/null 2>&1; then
+    jq --slurpfile prev "$OUTPUT" '
+        $prev[0] as $p
+        | .thresholds += ($p.thresholds // {})
+        | if $p.metrics.memory_mb.own_peak_note then .metrics.memory_mb.own_peak_note = $p.metrics.memory_mb.own_peak_note else . end
+        | if $p._thresholds_note then ._thresholds_note = $p._thresholds_note else . end
+    ' "$FRESH" > "$FRESH.merged" && mv "$FRESH.merged" "$FRESH"
+fi
+chmod 644 "$FRESH" && mv "$FRESH" "$OUTPUT"
+
+echo "Baseline written to $OUTPUT (add a _note: why this re-pin, old -> new)"
 cat "$OUTPUT"

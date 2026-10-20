@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <span>
 #include <vector>
 
@@ -89,15 +90,16 @@ constexpr int snapshot_chunk_len(int offset, int chunk_len, bool last, int snap_
 inline int common_prefix_tokens(const std::vector<std::vector<int32_t>>& seqs) {
     if (seqs.size() < 2)
         return 0;
-    size_t n = seqs[0].size();
-    for (size_t i = 1; i < seqs.size(); ++i) {
-        size_t k = 0;
-        const size_t lim = std::min(n, seqs[i].size());
-        while (k < lim && seqs[i][k] == seqs[0][k])
-            ++k;
-        n = k;
+    // Iterators, not seqs[i]: GCC 15 -Warray-bounds flagged seqs[1] for a one-element input
+    // inlined past the early return above.
+    const auto& first = seqs.front();
+    auto prefix_end = first.end();
+    for (auto it = std::next(seqs.begin()); it != seqs.end(); ++it) {
+        const auto lim = first.begin() +
+                         std::min<std::ptrdiff_t>(prefix_end - first.begin(), std::ssize(*it));
+        prefix_end = std::mismatch(first.begin(), lim, it->begin()).first;
     }
-    return static_cast<int>(n);
+    return static_cast<int>(prefix_end - first.begin());
 }
 
 }  // namespace imp
