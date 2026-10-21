@@ -197,6 +197,24 @@ TEST(ResponsesTransform, InputImageBecomesChatImageUrlPart) {
     EXPECT_EQ(oai["messages"][0]["content"], want);
 }
 
+// Codex 0.163.0: two developer items (base instructions, sandbox permissions) before the user turns.
+// Qwen templates drop every system message past index 0, so they become one leading system message.
+TEST(ResponsesTransform, SystemAndDeveloperItemsBecomeOneLeadingSystemMessage) {
+    json body = {{"instructions", "I"},
+                 {"input",
+                  json::array({{{"role", "developer"},
+                                {"content", json::array({{{"type", "input_text"}, {"text", "base"}}})}},
+                               {{"role", "developer"}, {"content", "perms"}},
+                               {{"role", "user"}, {"content", "env"}},
+                               {{"role", "system"}, {"content", "late"}},
+                               {{"role", "user"}, {"content", "task"}}})}};
+    json m = responses_to_openai_body(body)["messages"];
+    ASSERT_EQ(m.size(), 3u);
+    EXPECT_EQ(m[0], (json{{"role", "system"}, {"content", "I\n\nbase\n\nperms\n\nlate"}}));
+    EXPECT_EQ(m[1]["content"], "env");
+    EXPECT_EQ(m[2]["content"], "task");
+}
+
 TEST(ResponsesTransform, TextOnlyPartsStayOneString) {
     json body = {
         {"input", json::array({{{"role", "user"},
