@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- CUTLASS v4.8.0 -> v4.8.1: in the C++ headers only `include/cutlass/version.h` moves (the fixes are CuTe DSL / Python); SASS of all 1106 kernels in `libimp.a` identical.
+
 ### Fixed
 - A tool call the model ends at EOS without its close tag is a call, not text; a Qwen `<function=NAME>` body without `<parameter=...>` becomes `{"input": body}` (freeform tools such as Codex's `apply_patch`). Held text at stream end goes out in stream order (was `in /wor` + call + `k`.`). Codex on Qwen3.8-Flash-Next with a model catalog: 9/10 -> 10/10.
 - `docs/CODEX.md`: Codex CLI config for imp, including the `model_catalog_json` entry Codex needs to offer `apply_patch` to a model it does not know.
