@@ -322,6 +322,23 @@ static void rebuild_layouts_for_m(GemmCacheEntry& entry, cudaDataType_t dtype_A,
     entry.desc_M = M;
 }
 
+// One INFO line per cuBLASLt pick: the full algo config, so two process starts diff line by line.
+static void log_algo_pick(const char* how, int64_t M, int64_t K, int64_t N, int cand, int ncand,
+                          const cublasLtMatmulAlgo_t& algo) {
+    auto attr = [&](cublasLtMatmulAlgoConfigAttributes_t a) {
+        uint32_t v = 0;
+        IMP_CUBLAS_CHECK_LOG(cublasLtMatmulAlgoConfigGetAttribute(&algo, a, &v, sizeof(v), nullptr));
+        return v;
+    };
+    IMP_LOG_INFO(
+        "[gemm-algo] pick M=%ld K=%ld N=%ld %s cand[%d/%d]: id=%u tile=%u stages=%u splitk=%u "
+        "red=%u swizzle=%u custom=%u",
+        (long)M, (long)K, (long)N, how, cand, ncand, attr(CUBLASLT_ALGO_CONFIG_ID),
+        attr(CUBLASLT_ALGO_CONFIG_TILE_ID), attr(CUBLASLT_ALGO_CONFIG_STAGES_ID),
+        attr(CUBLASLT_ALGO_CONFIG_SPLITK_NUM), attr(CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME),
+        attr(CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING), attr(CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION));
+}
+
 // Re-selects the algo via heuristic after a runtime cublasLtMatmul failure (a stale algo
 // from a different M in the same bucket; e.g. FP8 algos on sm_120 are dimension-sensitive).
 // Returns false without touching the entry when deterministic mode is on: the
@@ -364,6 +381,7 @@ static bool reselect_algo_for_entry(GemmCacheEntry& entry, int64_t M, int64_t K,
         entry.workspace_size = (results[0].workspaceSize <= s_workspace_size) ? results[0].workspaceSize : 0;
         entry.has_algo = true;
         entry.benchmarked = false;
+        log_algo_pick("re-pick after a failed matmul", M, K, N, 0, nresults, entry.algo);
     } else {
         entry.has_algo = false;
         entry.workspace_size = 0;
@@ -592,9 +610,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
             (results[pick].workspaceSize <= s_workspace_size) ? results[pick].workspaceSize : 0;
         entry.has_algo = true;
         entry.benchmarked = false;
-        if (gemm_algo_log_enabled() && M > 0) {
-            IMP_LOG_DEBUG("[gemm-algo]   PICKED cand[%d] (heuristic, warmup-validated)", pick);
-        }
+        log_algo_pick("heuristic, warmup-validated", M, K, N, pick, nresults, entry.algo);
         return;
     }
 
@@ -605,6 +621,7 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
         entry.workspace_size = (results[0].workspaceSize <= s_workspace_size) ? results[0].workspaceSize : 0;
         entry.has_algo = true;
         entry.benchmarked = false;
+        log_algo_pick("heuristic, no timing scratch", M, K, N, 0, nresults, entry.algo);
         return;
     }
     void* temp_c = s_bench_scratch;
@@ -727,13 +744,9 @@ static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry
     entry.workspace_size = results[best_idx].workspaceSize;
     entry.has_algo = true;
     entry.benchmarked = true;
-    if (gemm_algo_log_enabled() && M > 0) {
-        int picked_tile = -1;
-        IMP_CUBLAS_CHECK_LOG(cublasLtMatmulAlgoConfigGetAttribute(&entry.algo, CUBLASLT_ALGO_CONFIG_TILE_ID,
-                                                                  &picked_tile, sizeof(picked_tile),
-                                                                  nullptr));
-        IMP_LOG_DEBUG("[gemm-algo]   PICKED cand[%d] tile=%d  best_ms=%.3f", best_idx, picked_tile, best_ms);
-    }
+    log_algo_pick("timed", M, K, N, best_idx, nresults, entry.algo);
+    if (gemm_algo_log_enabled() && M > 0)
+        IMP_LOG_DEBUG("[gemm-algo]   PICKED cand[%d] best_ms=%.3f", best_idx, best_ms);
 }
 
 // True when `stream` is not capturing, so the probe may launch and time candidates (#2396).
@@ -781,13 +794,14 @@ static void select_algo_host_only(cublasLtHandle_t lt, GemmCacheEntry& entry, in
     entry.algo_M = M;
     entry.has_algo = pick >= 0;
     entry.workspace_size = pick >= 0 ? checks[pick].workspace : 0;
-    if (pick >= 0)
+    if (pick >= 0) {
         entry.algo = results[pick].algo;
-    IMP_LOG_INFO(
-        "[gemm-algo] M=%ld K=%ld N=%ld %s: no timing, heuristic cand[%d] of %d (host-checked, tile=%d)",
-        (long)M, (long)K, (long)N,
-        in_capture ? "first seen inside a stream capture" : "FP8 row pin for every M", pick, nresults,
-        pick >= 0 ? algo_tile_id(entry.algo) : -1);
+        log_algo_pick(in_capture ? "host-checked, first seen inside a stream capture"
+                                 : "host-checked, FP8 row pin for every M",
+                      M, K, N, pick, nresults, entry.algo);
+    } else
+        IMP_LOG_INFO("[gemm-algo] pick M=%ld K=%ld N=%ld host-checked: none of %d candidates, default algo",
+                     (long)M, (long)K, (long)N, nresults);
 }
 
 // Probe outside a capture, host-only pick inside one. Same signature as the probe.
