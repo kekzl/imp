@@ -81,10 +81,14 @@ constexpr int answer_reserve_for(int max_tokens, int reserve = kMaxAnswerReserve
 // Reasoning-token limit shared by all enforcement paths (eager sampler,
 // CUDA-graph device counter, n-gram/scheduler gates): the LATER of the
 // fractional budget and max_tokens minus the answer reserve.
-constexpr int think_limit(int max_tokens, float think_budget, int answer_reserve = kMaxAnswerReserve) {
+// think_cap > 0 bounds the result (runtime.think_max_tokens): max_tokens defaults to the remaining
+// context, where 3/4 of it would be ~90k reasoning tokens on a 131072-token context.
+constexpr int think_limit(int max_tokens, float think_budget, int answer_reserve = kMaxAnswerReserve,
+                          int think_cap = 0) {
     const int frac_limit = static_cast<int>(max_tokens * think_budget);
     const int reserve_limit = max_tokens - answer_reserve_for(max_tokens, answer_reserve);
-    return frac_limit > reserve_limit ? frac_limit : reserve_limit;
+    const int limit = frac_limit > reserve_limit ? frac_limit : reserve_limit;
+    return think_cap > 0 && limit > think_cap ? think_cap : limit;
 }
 
 // True when budgeting is active, a </think> id exists, still thinking, and the
@@ -92,10 +96,11 @@ constexpr int think_limit(int max_tokens, float think_budget, int answer_reserve
 // so a larger max_tokens only ever grants more thinking room, never less.
 inline bool should_force_think_end(float think_budget, int32_t think_end_id, int max_tokens,
                                    const std::vector<int32_t>& output_tokens, int32_t think_start_id,
-                                   bool started_in_think, int answer_reserve = kMaxAnswerReserve) {
+                                   bool started_in_think, int answer_reserve = kMaxAnswerReserve,
+                                   int think_cap = 0) {
     if (!(think_budget > 0.0f) || think_end_id < 0 || output_tokens.empty())
         return false;
-    const int limit = think_limit(max_tokens, think_budget, answer_reserve);
+    const int limit = think_limit(max_tokens, think_budget, answer_reserve, think_cap);
     bool currently_thinking = false;
     int n_reasoning = count_reasoning_tokens(output_tokens, think_start_id, think_end_id, started_in_think,
                                              currently_thinking);

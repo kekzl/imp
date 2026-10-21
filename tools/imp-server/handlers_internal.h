@@ -38,6 +38,7 @@ struct ChatVideoInput {
 // Sampling fields (temperature, penalties, priority, stream, ...): SamplingFields, sampling_fields.h.
 struct ChatRequestParams : SamplingFields {
     int max_tokens = 0, n_completions = 1, top_logprobs = 0;
+    int plan_tokens = 0;  // > 0: max_tokens was filled with the remaining context (imp::Request::plan_tokens)
     bool json_mode = false, req_logprobs = false, include_usage = false;
     int logit_lens = 0;  // top-N per layer (row 115), 0 = off
     int sae_features = 0;                              // row 116: top-N SAE features per token, 0 = off

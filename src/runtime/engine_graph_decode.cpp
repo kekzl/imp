@@ -62,7 +62,9 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req, int step_limit) {
     // Reserves for the burst about to run, not the whole generation (#1636): the
     // launch is clamped to runtime.decode_burst (128), 16 while another request
     // waits, or speculative.miss_burst (8); the loop relaunches per burst anyway.
-    int reserve_tokens = remaining;
+    // With plan_tokens set (max_tokens = remaining context) reserve up to the planning horizon only,
+    // or one request would pull the whole pool.
+    int reserve_tokens = std::max(1, planning_max_tokens(*req) - static_cast<int>(req->output_tokens.size()));
     if (step_limit > 0)
         reserve_tokens = std::min(reserve_tokens, step_limit);
 
@@ -153,7 +155,8 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(const Request& req
             // so the per-launch limit is the REMAINING budget (full grant per burst would
             // over-count). Same think_logic::think_limit the eager sampler enforces.
             const int full = think_logic::think_limit(req.max_tokens, req.think_budget,
-                                                      runtime_config_.runtime.think_answer_reserve);
+                                                      runtime_config_.runtime.think_answer_reserve,
+                                                      runtime_config_.runtime.think_max_tokens);
             bool thinking_now = false;
             const int used = think_logic::count_reasoning_tokens(
                 req.output_tokens, think_start_id_, think_end_id_, req.started_in_think,
@@ -312,10 +315,11 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req, int32_t f
                 const int used = think_logic::count_reasoning_tokens(
                     req->output_tokens, think_start_id_, think_end_id_, req->started_in_think,
                     thinking_now);
-                think_limit =
-                    std::max(1, think_logic::think_limit(req->max_tokens, req->think_budget,
-                                                         runtime_config_.runtime.think_answer_reserve) -
-                                    used);
+                think_limit = std::max(1,
+                                       think_logic::think_limit(req->max_tokens, req->think_budget,
+                                                                runtime_config_.runtime.think_answer_reserve,
+                                                                runtime_config_.runtime.think_max_tokens) -
+                                           used);
             }
             if (runtime_config_.diagnostics.spec_trace)
                 IMP_LOG_INFO("[burst-launch] REARM seed=%d pos=%d ctx=%d limit=%d", (int)first_token,

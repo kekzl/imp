@@ -297,6 +297,9 @@ ChannelSegments split_harmony_channels(const std::string& text, bool starts_in_f
 // Effective max output tokens for an OpenAI-shaped body: current OpenAI SDKs
 // send "max_completion_tokens" (max_tokens is deprecated on chat/completions);
 // it takes precedence over "max_tokens". `def` when neither is present.
+// Planning step for a request whose max_tokens defaulted to the remaining context: KV admission and
+// pool growth plan in multiples of it, as they did with the old fixed 8192 default.
+inline constexpr int kAutoMaxTokensPlan = 8192;
 int parse_max_tokens_field(const json& body, int def);
 
 // Parse the OpenAI "stop" field (string or array of strings) into `out`,

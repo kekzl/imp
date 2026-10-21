@@ -315,7 +315,9 @@ int main(int argc, char** argv) {
     params.temperature = args.temperature_set ? args.temperature : sampling.temperature;
     params.top_p = args.top_p_set ? args.top_p : sampling.top_p;
     params.top_k = args.top_k_set ? args.top_k : sampling.top_k;
-    params.max_tokens = args.max_tokens;
+    // Without --max-tokens generation runs to the context end (the C API clamps to the room left);
+    // --bench keeps max_tokens as its decode length.
+    params.max_tokens = (args.max_tokens_set || args.bench) ? args.max_tokens : ctx->engine->max_seq_len();
     params.seed = args.seed;
     params.min_p = args.min_p;
     params.typical_p = args.typical_p;

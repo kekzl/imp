@@ -59,6 +59,31 @@ TEST(KvAdmission, ExpectedLengthAdmitsMoreThanMaxTokens) {
     }
 }
 
+// imp-server's default max_tokens is the remaining context; plan_tokens keeps admission at the old
+// 8192 plan, so no-swap pools (mode -1: SWA, StreamingLLM) admit as many requests as before.
+TEST(KvAdmission, RemainingContextDefaultPlansWithPlanTokens) {
+    EXPECT_EQ(planning_max_tokens(131040, 8192, 0), 8192);
+    EXPECT_EQ(planning_max_tokens(131040, 8192, 8191), 8192);
+    EXPECT_EQ(planning_max_tokens(131040, 8192, 8192), 16384) << "the horizon grows with the output";
+    EXPECT_EQ(planning_max_tokens(10000, 8192, 9000), 10000) << "never above max_tokens";
+    EXPECT_EQ(planning_max_tokens(5000, 0, 0), 5000);
+    for (const bool planned : {false, true}) {
+        auto mgr = make_mgr(2000);
+        Scheduler sched(64);
+        sched.set_kv_manager(mgr.get());
+        sched.set_admission_decode_mode(-1);
+        for (int i = 0; i < 32; ++i) {
+            auto r = make_req(i, 32, 131040);
+            r->plan_tokens = planned ? 8192 : 0;
+            sched.add_request(r);
+        }
+        std::vector<std::shared_ptr<Request>> prefill, decode;
+        sched.schedule(prefill, decode);
+        // planned: 515 blocks each as with max_tokens 8192, 3 fit; unplanned: one request holds the pool.
+        EXPECT_EQ(prefill.size(), planned ? 3u : 1u) << "planned " << planned;
+    }
+}
+
 TEST(KvAdmission, SwappedRequestComesBackFirstAndHoldsTheQueue) {
     auto mgr = make_mgr(64);
     Scheduler sched(16);

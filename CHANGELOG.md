@@ -6,8 +6,10 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Changed
 - CUTLASS v4.8.0 -> v4.8.1: in the C++ headers only `include/cutlass/version.h` moves (the fixes are CuTe DSL / Python); SASS of all 1106 kernels in `libimp.a` identical.
+- `max_tokens` defaults to the remaining context on every server dialect, in `imp-cli` and the web UI (was 8192, web UI 512; `--max-tokens N` sets a fixed default). KV admission and pool growth still plan in 8192-token steps. Reasoning is capped at `runtime.think_max_tokens` (32768; 6144 before at the 8192 default).
 
 ### Fixed
+- `imp-cli --interactive` honours `--max-tokens`: `max_tokens_set` was never set, so every interactive turn ran with 16384.
 - A tool call the model ends at EOS without its close tag is a call, not text; a Qwen `<function=NAME>` body without `<parameter=...>` becomes `{"input": body}` (freeform tools such as Codex's `apply_patch`). Held text at stream end goes out in stream order (was `in /wor` + call + `k`.`). Codex on Qwen3.8-Flash-Next with a model catalog: 9/10 -> 10/10.
 - `docs/CODEX.md`: Codex CLI config for imp, including the `model_catalog_json` entry Codex needs to offer `apply_patch` to a model it does not know.
 - `/v1/responses` joins `instructions`, system and developer items into one leading system message. Codex 0.163.0 sends two developer items; Qwen templates dropped the second (sandbox permissions) on every request. Codex `exec` battery on Qwen3.8-Flash-Next: template raises 38 -> 0 per round, image task 0/2 -> 1/2.

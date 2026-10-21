@@ -163,6 +163,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("runtime.penalty_append_early", cfg.runtime.penalty_append_early);
     B("runtime.decode_pipeline_hybrid", cfg.runtime.decode_pipeline_hybrid);
     I("runtime.think_answer_reserve", cfg.runtime.think_answer_reserve);
+    I("runtime.think_max_tokens", cfg.runtime.think_max_tokens);
     I("runtime.hybrid_decode_quantum", cfg.runtime.hybrid_decode_quantum);
     B("runtime.gdn_batched_decode", cfg.runtime.gdn_batched_decode);
     B("runtime.decode_pipeline", cfg.runtime.decode_pipeline);

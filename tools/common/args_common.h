@@ -24,7 +24,9 @@ struct CommonArgs {
     // think block alone overruns it and the answer returns empty (finish_reason=length).
     // Output length is not the scarce resource on a 32GB card; KV capacity is, sized separately
     // (max_seq_len auto + the planner's min_kv_tokens floor).
-    int max_tokens = 8192;
+    int max_tokens = 8192;  // imp-cli bench tg length; generation modes and imp-server default to
+                            // the remaining context unless --max-tokens is given (max_tokens_set)
+    bool max_tokens_set = false;
 
     std::string chat_template = "auto";  // auto, none, chatml, llama2, llama3, nemotron, gemma
     std::string mmproj_path;             // --mmproj: vision encoder GGUF

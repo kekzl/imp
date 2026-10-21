@@ -267,7 +267,7 @@ class H(BaseHTTPRequestHandler):
         if isinstance(last, list):
             last = " ".join(p.get("text", "") for p in last if isinstance(p, dict))
         low = last.lower()
-        max_tokens = int(body.get("max_tokens") or 512)
+        max_tokens = int(body.get("max_tokens") or ARGS.ctx)  # no field: the context end, as imp-server
         if max_tokens < 1 or max_tokens > 65536:
             self._error(400, "max_tokens must be between 1 and 65536", code="invalid_value")
             return

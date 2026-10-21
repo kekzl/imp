@@ -34,6 +34,7 @@ Keys most often touched, with defaults (`src/runtime/config.h`, `src/core/config
 | `runtime.max_seq_len` | `0` (auto) | KV context ceiling in tokens |
 | `runtime.max_batch_size` | `0` (auto) | decode batch / KV+workspace sizing |
 | `runtime.think_answer_reserve` | `256` | tokens reserved for the answer after forced reasoning close |
+| `runtime.think_max_tokens` | `32768` (`0`=no cap) | reasoning tokens before the engine injects `</think>`, whatever `max_tokens` is |
 | `kv_cache.dtype` | `auto` | widest saving measured safe for the family; `auto`/`fp16`/`fp8`/`int8`/`int4`/`nvfp4`/`mxfp4`. Qwen3 dense GGUF resolves to FP16 (#2208); `fp8` restores the faster long-context decode |
 | `kv_cache.growable` | `true` | pool grows at admission instead of committing the full plan at start |
 | `kv_cache.growable_initial_pct` | `25` | % of the planned pool committed at startup when growable |
@@ -89,7 +90,7 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 | `--config <path>`, `--set sec.key=val` | - | see `imp.conf` above |
 | `--json` | off | one JSON document on stdout, human lines on stderr - see `--json` below |
 | `--prompt <text>` / `--prompt-file <path>` | - | mutually exclusive; `--prompt-file` reads the whole file verbatim (argv is capped at ~128 KiB, ~32k tokens) |
-| `--max-tokens <n>` | `8192` (`16384` with `--interactive`) | max tokens to generate; same default as `imp-server` |
+| `--max-tokens <n>` | the context end (`--bench`: `8192` decode tokens) | max tokens to generate; `imp-server` defaults to each request's remaining context the same way |
 | `--max-seq-len <n>` / `--min-kv-tokens <n>` | auto | KV context ceiling / floor in tokens |
 | `--vram-budget <mb>` | `0` (uncapped) | hard per-process VRAM cap, see below |
 | `--interactive` | off | interactive chat; refuses `--json` (a token stream is not one document) |

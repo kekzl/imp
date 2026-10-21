@@ -58,7 +58,7 @@ static int run_server(int argc, char** argv) {
     printf("IMP Server %s\n", imp_version());
 
     ServerState state;
-    state.default_max_tokens = args.max_tokens;
+    state.default_max_tokens = args.max_tokens_set ? args.max_tokens : 0;  // 0 = remaining context
     state.default_think_budget = args.think_budget;
     state.default_args = args;
 

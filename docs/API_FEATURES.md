@@ -161,7 +161,7 @@ Three knobs, and only one of them caps tokens:
 | `thinking.budget_tokens` | Anthropic | a token count, converted to that same fraction (`N / max_tokens`, clamped to 1.0); `0` disables thinking |
 | `reasoning_effort` / `reasoning.effort` | OpenAI / Responses | a TEMPLATE instruction, no token cap of its own. Identical prompt-token counts across efforts mean it never reached the template. On `/v1/responses` the effort additionally maps to a fraction (0.0 / 0.25 / 0.5 / 0.8). The loaded model's values: `/v1/models` `meta.reasoning_effort` |
 
-Engine enforces answer reserve: reasoning force-closed (injected `</think>`) when it reaches `max_tokens - max(runtime.think_answer_reserve, max_tokens / 4)` or the fraction, whichever is later.
+Engine enforces answer reserve: reasoning force-closed (injected `</think>`) when it reaches `max_tokens - max(runtime.think_answer_reserve, max_tokens / 4)` or the fraction, whichever is later, capped at `runtime.think_max_tokens` (32768).
 
 - `runtime.think_answer_reserve` default 256.
 - Example: `max_tokens: 260` + 0.5 default = `max(130, 4) = 130` reasoning tokens max.

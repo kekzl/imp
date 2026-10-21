@@ -252,7 +252,7 @@ struct ServerState {
     // construction (server may swap models at runtime via /v1/models POST).
     imp::RuntimeConfig runtime_config;
     std::timed_mutex mtx;
-    int default_max_tokens = 8192;
+    int default_max_tokens = 0;  // 0 = the request's remaining context (--max-tokens sets a fixed default)
     int max_seq_len = 0;
     // resolved_max_batch_size: the CURRENT load's resolved batch size. Feeds speculative.mtp_k=auto
     // and /health's decline reason; both read the raw CLI flag before 2026-08-29 (see id 465).
