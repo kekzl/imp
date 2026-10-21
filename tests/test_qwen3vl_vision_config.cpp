@@ -136,6 +136,8 @@ TEST(Qwen3VLVisionConfig, TowerAllowlist) {
     EXPECT_TRUE(vision_tower_supported("qwen3_5_moe"));
     // Qwen3.8 is the dense sibling and carries that same tower.
     EXPECT_TRUE(vision_tower_supported("qwen3_5"));
+    // Qwen3.8-Flash-Next names its copy of that tower qwen4_exp_vision.
+    EXPECT_TRUE(vision_tower_supported("qwen4_exp_vision"));
 
     // Everything else keeps hitting the loud text-only path. Recognising a
     // tower on a resemblance is what this list exists to prevent.

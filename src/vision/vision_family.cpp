@@ -14,12 +14,16 @@ struct Entry {
 
 // Qwen3.6 (qwen3_5_moe) and Qwen3.8 (qwen3_5) ship the Qwen3-VL tower under their text
 // model_type: 333 model.visual.* tensors, a subset of Qwen3-VL's names, same geometry fields.
+// Qwen3.8-Flash-Next (qwen4_exp_vision): the same 333 names and geometry as Qwen3.8, out 2560.
+// clang-format off: one model_type per line
 constexpr Entry kRegistry[] = {
     {"qwen3_vl", VisionFamily::Qwen3VL},
     {"qwen3_5_moe", VisionFamily::Qwen3VL},
     {"qwen3_5", VisionFamily::Qwen3VL},
+    {"qwen4_exp_vision", VisionFamily::Qwen3VL},
     {"internvl_vision", VisionFamily::InternVL},
 };
+// clang-format on
 
 }  // namespace
 

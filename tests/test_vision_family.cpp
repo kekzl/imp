@@ -20,6 +20,7 @@ TEST(VisionFamily, RegistryMapsExactNames) {
     EXPECT_EQ(vision_family_of("qwen3_vl"), VisionFamily::Qwen3VL);
     EXPECT_EQ(vision_family_of("qwen3_5"), VisionFamily::Qwen3VL);
     EXPECT_EQ(vision_family_of("qwen3_5_moe"), VisionFamily::Qwen3VL);
+    EXPECT_EQ(vision_family_of("qwen4_exp_vision"), VisionFamily::Qwen3VL);
     EXPECT_EQ(vision_family_of("internvl_vision"), VisionFamily::InternVL);
 
     for (const char* unknown : {"", "qwen2_vl", "siglip_vision_model", "pixtral", "gemma3", "intern_vit_6b",

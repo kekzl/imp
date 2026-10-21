@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Added
+- Qwen3.8-Flash-Next reads images: `vision_config.model_type` `qwen4_exp_vision` maps onto the Qwen3-VL tower (333 tensors, out 2560). `tools/analysis/vision_sight_check.py`: 8/8 counts vs 2/8 for a constant answer; `/v1/responses` `input_image` answers about the picture (Refs #2831).
 - Every cuBLASLt algorithm pick logs one INFO line `[gemm-algo] pick M K N <path> cand[i/n]: id tile stages splitk red swizzle custom`, so two process starts diff line by line. Qwen3-8B-FP8 pp512: 4 lines, identical over 2 starts. `cublasGemmEx` autotune picks are not exposed by cuBLAS.
 - Greedy JSON / schema / regex / grammar / tool-constrained requests speculate: a verify row counts only if the request's mask allows its argmax (`speculative.constrained`, default on). Qwen3.8-27B-NVFP4 `--max-batch 1`, `mtp_k=2`: json_object 93.4-94.4 -> 103.8-112.3 tok/s, json_schema 90.3-94.0 -> 99.4-108.3 (#2816).
 
