@@ -25,6 +25,7 @@ Gate: `scripts/docs_lint.py` (frontmatter, links, anchors, provenance, prose rul
 | [`CONFIG.md`](CONFIG.md) | `imp.conf` keys, `imp-cli` and `imp-server` flags, C API |
 | [`API.md`](API.md) | HTTP endpoints, request fields, errors |
 | [`API_FEATURES.md`](API_FEATURES.md) | constrained decoding, tool calling, thinking, images |
+| [`CODEX.md`](CODEX.md) | Codex CLI on imp: provider config, the model catalog it needs, measured runs |
 | [`API_SCORING.md`](API_SCORING.md) | `/v1/decide` and `/v1/score`: request, modes, token guards |
 | [`API_CONTROL.md`](API_CONTROL.md) | `POST /v1/requests/{id}/end_thinking`: end a running request's think block |
 | [`MODELS.md`](MODELS.md) | which checkpoints and quants load, and what each needs |

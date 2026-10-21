@@ -177,6 +177,21 @@ public:
         return tag_buf_ + open_text_ + body_buf_;
     }
 
+    // finish_as_call(): a buffered call whose stream ended at EOS before its close marker, parsed
+    // like a closed one. False (nothing consumed) when no buffered body exists or it does not parse;
+    // the caller then restores finish() as text. Qwen3.8-Flash-Next ends apply_patch calls this way.
+    bool finish_as_call(ParsedToolCall& tc) const {
+        if (phase_ != Phase::BODY || call_open() || gemma_body_)
+            return false;
+        auto bs = body_buf_.find_first_not_of("\n\r\t ");
+        auto be = body_buf_.find_last_not_of("\n\r\t ");
+        if (bs == std::string::npos)
+            return false;
+        const std::string body = body_buf_.substr(bs, be - bs + 1);
+        return parse_body_ ? parse_body_(body, fn_name_, tc)
+                           : parse_stream_tool_body(body, false, fn_name_, tc);
+    }
+
     // True while text is being held as a potential/partial tool call.
     bool mid_tool() const { return phase_ != Phase::CONTENT; }
 

@@ -5,6 +5,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Fixed
+- A tool call the model ends at EOS without its close tag is a call, not text; a Qwen `<function=NAME>` body without `<parameter=...>` becomes `{"input": body}` (freeform tools such as Codex's `apply_patch`). Held text at stream end goes out in stream order (was `in /wor` + call + `k`.`). Codex on Qwen3.8-Flash-Next with a model catalog: 9/10 -> 10/10.
+- `docs/CODEX.md`: Codex CLI config for imp, including the `model_catalog_json` entry Codex needs to offer `apply_patch` to a model it does not know.
 - `/v1/responses` joins `instructions`, system and developer items into one leading system message. Codex 0.163.0 sends two developer items; Qwen templates dropped the second (sandbox permissions) on every request. Codex `exec` battery on Qwen3.8-Flash-Next: template raises 38 -> 0 per round, image task 0/2 -> 1/2.
 
 ## [0.56.0] - 2026-10-21
