@@ -156,6 +156,31 @@ void collect_tool_kinds(const json& list, const std::string& ns, ToolKinds& kind
     }
 }
 
+// Every system message (instructions, system and developer items) joined into one leading system
+// message, in order: Qwen templates raise on a system message past index 0 and the renderer then
+// drops it. Codex 0.163.0 sends two developer items (base instructions, sandbox permissions).
+json hoist_system_messages(json messages) {
+    std::string system;
+    json rest = json::array();
+    for (auto& m : messages) {
+        if (m.value("role", "") != "system") {
+            rest.push_back(std::move(m));
+            continue;
+        }
+        if (!m["content"].is_string())
+            throw std::invalid_argument("system and developer messages take text parts only");
+        if (!system.empty())
+            system += "\n\n";
+        system += m["content"].get<std::string>();
+    }
+    if (system.empty())
+        return rest;
+    json out = json::array({{{"role", "system"}, {"content", std::move(system)}}});
+    for (auto& m : rest)
+        out.push_back(std::move(m));
+    return out;
+}
+
 }  // namespace
 
 ToolKinds tool_kinds(const json& rsp) {
@@ -252,7 +277,7 @@ json responses_to_openai_body(const json& rsp) {
             }
         }
     }
-    oai["messages"] = std::move(messages);
+    oai["messages"] = hoist_system_messages(std::move(messages));
     // Assistant prefill (imp extension, the chat field): continue a trailing assistant input item.
     if (rsp.contains("continue_final_message"))
         oai["continue_final_message"] = rsp["continue_final_message"];
