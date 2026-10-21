@@ -971,7 +971,7 @@ std::string Engine::generate(const std::string& prompt, int max_tokens, float te
     auto req = std::make_shared<Request>();
     req->id = next_request_id_++;
     req->input_tokens = std::move(tokens);
-    req->max_tokens = max_tokens;
+    req->max_tokens = clamp_to_context(max_tokens, max_seq_len(), req->input_tokens.size());
     req->temperature = temperature;
     req->top_p = top_p;
     req->top_k = top_k;

@@ -27,7 +27,6 @@ struct CliArgs : CommonArgs {
     int top_k = 40;
 
     // Track which values were explicitly set (vs defaults / preset)
-    bool max_tokens_set = false;
     bool temperature_set = false;
     bool top_p_set = false;
     bool top_k_set = false;

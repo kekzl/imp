@@ -118,6 +118,9 @@ decode_pipeline_hybrid = true
 # tokens; raise the reserve for models whose answers are long structured
 # output, lower it for agent loops that only need a short verdict.
 think_answer_reserve = 256
+# Upper bound on reasoning tokens, whatever max_tokens is (imp-server defaults
+# max_tokens to the remaining context). 0 = no cap.
+think_max_tokens = 32768
 # Hybrid (SSM/GDN) decode fairness: the recurrent scan kernels are single-
 # sequence, so concurrent sessions time-slice the decode. Slice length in
 # tokens; after it the engine rotates round-robin to the next decoding

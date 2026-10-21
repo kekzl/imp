@@ -84,7 +84,8 @@ bool Engine::think_end_due_(const Request& req) const {
     return think_logic::end_think_due(req.end_thinking, req.in_think_block, think_end_id_) ||
            think_logic::should_force_think_end(req.think_budget, think_end_id_, req.max_tokens,
                                                req.output_tokens, think_start_id_, req.started_in_think,
-                                               runtime_config_.runtime.think_answer_reserve);
+                                               runtime_config_.runtime.think_answer_reserve,
+                                               runtime_config_.runtime.think_max_tokens);
 }
 
 bool Engine::think_closer_pending_(const Request& req) const {

@@ -588,9 +588,13 @@ bool snapshot_state_and_tokenize_(httplib::Response& res, ServerState& state, Ch
         return false;
     }
 
-    // Clamp max_tokens to remaining context window
+    // max_tokens <= 0 (no field, no --max-tokens) = the remaining context, as OpenAI and vLLM do;
+    // a larger request value is clamped to it.
     int remaining = ctx.snap.max_seq_len - ctx.snap.n_prompt_tokens;
-    ctx.params.max_tokens = std::min(ctx.params.max_tokens, remaining);
+    if (ctx.params.max_tokens <= 0)
+        ctx.params.plan_tokens = kAutoMaxTokensPlan;
+    if (ctx.params.max_tokens <= 0 || ctx.params.max_tokens > remaining)
+        ctx.params.max_tokens = remaining;
 
     // Start timing
     ctx.t_start = std::chrono::high_resolution_clock::now();
@@ -616,6 +620,7 @@ std::shared_ptr<imp::Request> build_imp_request_(const ChatRequestContext& ctx,
     req->cvec_scale = ctx.snap.cvec_id > 0 ? ctx.params.cvec_scale : 0.0f;
     req->input_tokens = input_tokens;
     req->max_tokens = ctx.params.max_tokens;
+    req->plan_tokens = ctx.params.plan_tokens;
     ctx.params.apply_to(*req);
     req->seed = (ctx.params.seed != -1) ? ctx.params.seed + completion_idx : -1;
     req->pin_kv_prefix_tokens = ctx.snap.pin_prefix_tokens;
