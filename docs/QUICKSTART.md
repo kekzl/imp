@@ -181,7 +181,7 @@ ANTHROPIC_BASE_URL=http://localhost:8080 ANTHROPIC_API_KEY=dummy your-agent
 
 ## Qwen3.8-Flash-Next
 
-Commands: [README](../README.md#quickstart-qwen38-flash-next). Weights: 25 files from `nvidia/Qwen3.8-Flash-Next-NVFP4`; imp loads 9 shards and skips `model-00010-of-00010.safetensors` and `model-fp8-mtp-ple.safetensors` (MTP and vision only).
+Commands: [README](../README.md#quickstart-qwen38-flash-next). Weights: 25 files from `nvidia/Qwen3.8-Flash-Next-NVFP4`; imp loads 9 shards and skips `model-00010-of-00010.safetensors` and `model-fp8-mtp-ple.safetensors` (20 + 3201 MTP/vision tensors imp does not use; the 333-tensor vision tower sits in shard 9 and loads).
 
 | Item | Value |
 | --- | --- |
