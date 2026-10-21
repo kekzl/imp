@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- CUTLASS v4.8.0 -> v4.8.1: in the C++ headers only `include/cutlass/version.h` moves (the fixes are CuTe DSL / Python); SASS of all 1106 kernels in `libimp.a` identical.
 - `max_tokens` defaults to the remaining context on every server dialect, in `imp-cli` and the web UI (was 8192, web UI 512; `--max-tokens N` sets a fixed default). KV admission and pool growth still plan in 8192-token steps. Reasoning is capped at `runtime.think_max_tokens` (32768; 6144 before at the 8192 default).
 
 ### Fixed
