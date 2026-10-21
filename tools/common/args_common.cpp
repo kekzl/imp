@@ -23,6 +23,7 @@ bool parse_common_flag(CommonArgs& args, int argc, char** argv, int& i) {
         args.gpu_layers = cli_int(a, argv[++i]);
     } else if (std::strcmp(a, "--max-tokens") == 0 && i + 1 < argc) {
         args.max_tokens = cli_int(a, argv[++i]);
+        args.max_tokens_set = true;
     } else if (std::strcmp(a, "--chat-template") == 0 && i + 1 < argc) {
         args.chat_template = argv[++i];
     } else if (std::strcmp(a, "--mmproj") == 0 && i + 1 < argc) {

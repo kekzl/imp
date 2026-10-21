@@ -9,6 +9,7 @@
 #include "vision/vision_family.h"
 #include "runtime/request.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -19,11 +20,7 @@ namespace imp_cli {
 
 int run_interactive(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGenerateParams params) {
     ImpError err = IMP_SUCCESS;
-    // Interactive/agentic defaults to 16384 max tokens (needs headroom for
-    // long reasoning chains, code generation, and multi-step tool use)
-    if (!args.max_tokens_set) {
-        params.max_tokens = 16384;
-    }
+
     // Multi-turn interactive mode using token-level API with chat template
     imp::Tokenizer* tok = model->model->tokenizer();
     const imp::ChatTemplate& engine_tpl = ctx->engine->chat_template();
@@ -129,7 +126,11 @@ int run_interactive(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGene
             }
 
             // Prefill with templated tokens (params apply to first sample)
-            err = imp_prefill_with_params(ctx, tokens.data(), static_cast<int>(tokens.size()), &params);
+            // Each turn re-prefills the history: max_tokens is the room the context has left.
+            ImpGenerateParams turn = params;
+            turn.max_tokens = imp::clamp_to_context(turn.max_tokens, ctx->engine->max_seq_len(),
+                                                    tokens.size());
+            err = imp_prefill_with_params(ctx, tokens.data(), static_cast<int>(tokens.size()), &turn);
             if (err != IMP_SUCCESS) {
                 fprintf(stderr, "Prefill error: %s\n", imp_error_string(err));
                 history.pop_back();
@@ -175,9 +176,9 @@ int run_interactive(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGene
                 print_buf.erase(0, safe);
             };
 
-            for (int step = 0; step < params.max_tokens; step++) {
+            for (int step = 0; step < turn.max_tokens; step++) {
                 int32_t token = 0;
-                err = imp_decode_step(ctx, &params, &token);
+                err = imp_decode_step(ctx, &turn, &token);
                 if (err != IMP_SUCCESS)
                     break;
 
@@ -267,7 +268,9 @@ int run_interactive(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGene
             }
             char output[8192];
             size_t output_len = 0;
-            err = imp_generate(ctx, input.c_str(), &params, output, sizeof(output), &output_len);
+            ImpGenerateParams raw = params;  // untokenized here: keep the pre-auto 16384 bound
+            raw.max_tokens = std::min(raw.max_tokens, 16384);
+            err = imp_generate(ctx, input.c_str(), &raw, output, sizeof(output), &output_len);
             if (err != IMP_SUCCESS) {
                 fprintf(stderr, "Generation error: %s\n", imp_error_string(err));
                 continue;

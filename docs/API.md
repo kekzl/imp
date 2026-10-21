@@ -46,7 +46,7 @@ so a streaming fix lands in all of them at once.
 |---|---|---|
 | `model` | ✅ | **required**; basename of the file or directory |
 | `messages`, `prompt`; `"continue_final_message": true` | ✅ | `continue_final_message` = assistant prefill (vLLM field, also on `/v1/responses`): the reply continues the last message, which must be an assistant turn with text and no `tool_calls` (else 400; `add_generation_prompt: true` beside it is a 400 too). The prompt is the template's render cut after that text (HF rule). `/v1/messages` does this for any trailing assistant turn with text. The reply holds only the new text; it is `reasoning_content` only when the prefix leaves a `<think>` open |
-| `max_tokens` | ✅ | on a reasoning model the answer reserve scales with it (`max(256, max_tokens/4)`) |
+| `max_tokens` | ✅ | default: the remaining context (`--max-tokens N` sets a fixed default); on a reasoning model the answer reserve scales with it (`max(256, max_tokens/4)`) |
 | `temperature`, `top_p`, `top_k`, `min_p` | ✅ | **imp's defaults are not OpenAI's** - see the table below |
 | `presence_penalty`, `frequency_penalty`, `repetition_penalty` | ✅ | `repetition_penalty` has no OpenAI field; imp applies 1.05 by default. Ranges: `repetition_penalty` > 0, `min_p` 0..1, `typical_p` in (0, 1], presence/frequency -2..2; outside is a 400 |
 | `seed` | ✅ | greedy is reproducible; see [`DETERMINISM.md`](DETERMINISM.md) for the exact guarantee, which is narrower than "same seed, same bytes" |

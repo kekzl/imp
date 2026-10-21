@@ -18,7 +18,7 @@ void print_server_usage(const char* prog) {
             "  --set <sec.key=val>   Override one imp.conf key (repeatable)\n"
             "  --host <addr>         Listen address (default: 127.0.0.1)\n"
             "  --port <n>            Listen port (default: 8080)\n"
-            "  --max-tokens <n>      Default max tokens (default: 8192)\n"
+            "  --max-tokens <n>      Default max tokens (default: the remaining context)\n"
             "  --max-batch <n>       Decode batch / KV+workspace sizing (default: 0 = auto)\n"
             "  --gpu-layers <n>      Layers on GPU, -1 = all (default: -1)\n"
             "  --chat-template <t>   auto, none, chatml, llama2, llama3, nemotron, gemma\n"

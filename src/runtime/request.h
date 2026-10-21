@@ -94,6 +94,10 @@ struct Request {
     }
 
     int max_tokens = 256;
+    // > 0 when max_tokens is the remaining context (imp-server default): KV admission, pool growth
+    // and graph-loop reservation plan in steps of plan_tokens (planning_max_tokens), max_tokens
+    // stays the hard stop. 0 = plan with max_tokens.
+    int plan_tokens = 0;
     float temperature = 1.0f;
     float top_p = 1.0f;
     int top_k = 0;
@@ -420,5 +424,23 @@ struct Request {
     // paths. Not a measured win: an A/B found branch and main within noise of each other.
     CancelReason cancel_reason = CancelReason::None;
 };
+
+// max_tokens clamped to the room the context has left after the prompt (unchanged when there is none).
+[[nodiscard]] inline int clamp_to_context(int max_tokens, int max_seq_len, size_t n_input) {
+    const int room = max_seq_len - static_cast<int>(n_input);
+    return room > 0 && max_tokens > room ? room : max_tokens;
+}
+
+// Generation length KV planning assumes: max_tokens, or with plan_tokens > 0 the next multiple of
+// plan_tokens above the output so far (8192, 16384, ...), never above max_tokens.
+[[nodiscard]] inline int planning_max_tokens(int max_tokens, int plan_tokens, size_t n_output) {
+    if (plan_tokens <= 0)
+        return max_tokens;
+    const long long horizon = (static_cast<long long>(n_output) / plan_tokens + 1) * plan_tokens;
+    return horizon < max_tokens ? static_cast<int>(horizon) : max_tokens;
+}
+[[nodiscard]] inline int planning_max_tokens(const Request& r) {
+    return planning_max_tokens(r.max_tokens, r.plan_tokens, r.output_tokens.size());
+}
 
 }  // namespace imp

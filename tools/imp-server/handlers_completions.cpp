@@ -640,7 +640,9 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
         return;
 
     int remaining = snap_max_seq_len - n_prompt_tokens;
-    max_tokens = std::min(max_tokens, remaining);
+    const int plan_tokens = max_tokens <= 0 ? kAutoMaxTokensPlan : 0;
+    if (max_tokens <= 0 || max_tokens > remaining)
+        max_tokens = remaining;  // <= 0 = the remaining context
 
     auto t_start = std::chrono::high_resolution_clock::now();
 
@@ -650,6 +652,7 @@ void completions_impl_(const httplib::Request& req, httplib::Response& res, Serv
     imp_req->trace_id = req_id;  // #1582: join the engine's log lines to this request
     imp_req->input_tokens = std::move(tokens);
     imp_req->max_tokens = max_tokens;
+    imp_req->plan_tokens = plan_tokens;
     p.apply_to(*imp_req);
     imp_req->seed = p.seed;
     imp_req->logprobs = p.req_logprobs;

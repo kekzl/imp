@@ -313,7 +313,7 @@ void Scheduler::hold_decode_reservation_(const Request& req) {
 }
 
 int Scheduler::reserve_decode_tokens(const Request& r) const {
-    return admission_decode_tokens(admission_decode_mode_, r.max_tokens, decode_estimate_);
+    return admission_decode_tokens(admission_decode_mode_, planning_max_tokens(r), decode_estimate_);
 }
 
 int Scheduler::swapped_count() const {
@@ -355,7 +355,8 @@ int Scheduler::active_unmet_kv_blocks() const {
         if (r->status == RequestStatus::FINISHED || r->status == RequestStatus::CANCELLED ||
             r->status == RequestStatus::SWAPPED)
             continue;
-        unmet += kv_unmet_blocks(r->context_len(), r->max_tokens - static_cast<int>(r->output_tokens.size()),
+        unmet += kv_unmet_blocks(r->context_len(),
+                                 planning_max_tokens(*r) - static_cast<int>(r->output_tokens.size()),
                                  static_cast<int>(kv_manager_->block_table(r->id).size()), bs);
     }
     return unmet;

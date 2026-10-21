@@ -151,6 +151,8 @@ int run_oneshot(ImpContext ctx, ImpModel model, const CliArgs& args, ImpGenerate
 
         // Prefill with timing
         auto t_prefill_start = std::chrono::high_resolution_clock::now();
+        params.max_tokens = imp::clamp_to_context(params.max_tokens, ctx->engine->max_seq_len(),
+                                                  static_cast<size_t>(n_prompt_tokens));
         err = imp_prefill_with_params(ctx, tokens.data(), n_prompt_tokens, &params);
         auto t_prefill_end = std::chrono::high_resolution_clock::now();
         if (err != IMP_SUCCESS) {
