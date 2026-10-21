@@ -69,6 +69,24 @@ bool parse_qwen36_xml_call(const std::string& body, ParsedToolCall& tc) {
         args[key] = std::move(jv);
         pos = pv_end + pv_adv;
     }
+    if (args.empty()) {
+        // No <parameter=...>: the raw body is the freeform input (a custom tool such as Codex's
+        // apply_patch, which responses.cpp wraps as {input}). Trailing stray close-tag lines go.
+        std::string raw = body.substr(fn_end + 1, scan_end - fn_end - 1);
+        trim(raw);
+        while (raw.ends_with('>')) {
+            const size_t ls = raw.rfind('\n');
+            const std::string last = raw.substr(ls == std::string::npos ? 0 : ls + 1);
+            if (!last.starts_with("</"))
+                break;
+            raw.erase(ls == std::string::npos ? 0 : ls);
+            trim(raw);
+        }
+        if (!raw.empty()) {
+            tc.raw_params.emplace_back("input", raw);
+            args["input"] = raw;
+        }
+    }
     tc.arguments = dump_safe(args);
     return true;
 }

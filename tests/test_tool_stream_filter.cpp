@@ -307,6 +307,31 @@ TEST(ToolStreamFilterChatML, Qwen36XmlFallback) {
     EXPECT_EQ(r.content, "");
 }
 
+// EOS before </tool_call>: the buffered body still parses as a call (stream_driver emits it on a
+// "stop" finish); finish() keeps the raw text for the length/unparseable fallback.
+TEST(ToolStreamFilterChatML, UnclosedCallParsesAtStreamEnd) {
+    StreamToolCallFilter f(ChatTemplateFamily::CHATML);
+    std::string content;
+    for (auto& s :
+         f.feed("I'll write it.\n\n<tool_call>\n<function=apply_patch>\n*** Begin Patch\n*** End Patch\n"))
+        if (s.kind == StreamToolCallFilter::Segment::Kind::TEXT)
+            content += s.text;
+    EXPECT_EQ(content, "I'll write it.\n\n");
+    ASSERT_TRUE(f.mid_tool());
+    ParsedToolCall tc;
+    ASSERT_TRUE(f.finish_as_call(tc));
+    EXPECT_EQ(tc.name, "apply_patch");
+    EXPECT_EQ(json::parse(tc.arguments)["input"], "*** Begin Patch\n*** End Patch");
+    EXPECT_NE(f.finish().find("<function=apply_patch>"), std::string::npos);
+}
+
+TEST(ToolStreamFilterChatML, UnclosedGarbageDoesNotParseAtStreamEnd) {
+    StreamToolCallFilter f(ChatTemplateFamily::CHATML);
+    (void)f.feed("x <tool_call>{\"name\": \"f\", \"argu");
+    ParsedToolCall tc;
+    EXPECT_FALSE(f.finish_as_call(tc));
+}
+
 TEST(ToolStreamFilterChatML, UnparseableBodyRestoredVerbatim) {
     // Neither JSON nor XML: the raw text (markers included) must be restored
     // to the content stream, not silently dropped.

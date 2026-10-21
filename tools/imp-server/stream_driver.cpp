@@ -611,32 +611,48 @@ bool run_stream_loop_(httplib::DataSink& sink, ChatRequestContext& ctx, ServerSt
 
     // Flush the splitter's held tail at stream end: buffered reasoning -> the
     // reasoning sink, any held/undecided content -> the content flush below.
+    // No token span for these bytes: the splitter reorders bytes between its sinks (token_index -1).
+    std::string think_tail;
     if (think_active) {
         auto rs = think_split.finish();
         if (!rs.reasoning.empty())
             d.emit_reasoning(rs.reasoning);
-        if (!rs.content.empty()) {
-            // No token span recorded here on purpose: the splitter reorders bytes between its reasoning and
-            // content sinks, so which token produced a held byte isn't recoverable. These bytes ship with
-            // token_index -1 (no logprob) rather than a guessed one.
-            utf8_buf += rs.content;
-        }
+        think_tail = std::move(rs.content);
     }
 
     // reasoning_truncated: max_tokens exhausted while still reasoning, no content produced
     // (finish=="length" only - a model that hit EOS naturally mid-think already delivered its
     // reasoning). The chat dialect surfaces a notice on this flag.
     out.reasoning_truncated = think_active && think_split.phase() == imp::server::ThinkPhase::REASONING &&
-                              utf8_buf.empty() && pending_text.empty() && finish &&
+                              utf8_buf.empty() && think_tail.empty() && pending_text.empty() && finish &&
                               std::strcmp(finish, "length") == 0;
 
-    // Handle incomplete tool call at end (max_tokens hit while in tag/body):
-    // release the held raw text as content, finish_reason stays "length".
-    if (has_tools && tool_filter.mid_tool() && !out.tool_calls_emitted) {
+    // Held bytes leave in stream order: the stop holdback (oldest), then the tool filter's unclosed
+    // call text, then the splitter tail (newest). The holdback went last before: an unclosed call
+    // after "in `/work`." shipped as "in `/wor" + call text + "k`.\n\n" (Codex, Qwen3.8-Flash-Next).
+    if (!pending_text.empty() && !text_stop_matched)
+        flush_text(pending_text.size());
+
+    // A buffered call the model ended at EOS without its close marker is still a call; a length
+    // cut-off is not (its body may be truncated) and restores as text below.
+    ParsedToolCall eos_call;
+    if (has_tools && tool_filter.mid_tool() && !text_stop_matched && finish &&
+        std::strcmp(finish, "stop") == 0 && (ctx.params.parallel_tool_calls || out.tool_calls.empty()) &&
+        tool_filter.finish_as_call(eos_call)) {
+        eos_call.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
+        restore_raw_string_params(eos_call, ctx.params.tools);
+        flush_buffered_content();
+        out.tool_calls.push_back(std::move(eos_call));
+        out.tool_calls_emitted = true;
+        d.on_call_buffered(out.tool_calls.back());
+    } else if (has_tools && tool_filter.mid_tool() && !out.tool_calls_emitted) {
+        // Handle incomplete tool call at end (max_tokens hit while in tag/body):
+        // release the held raw text as content, finish_reason stays "length".
         std::string leftover = tool_filter.finish();
         if (!leftover.empty())
             utf8_buf += leftover;
     }
+    utf8_buf += think_tail;
     // A STREAMED call cut off mid-arguments: its open frame + deltas are
     // already on the wire (nothing restorable) — record what was streamed for
     // bookkeeping; the client sees finish_reason=length.

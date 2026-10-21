@@ -556,6 +556,25 @@ TEST(ToolCallQwen36Xml, NoFunctionTagReturnsFalse) {
     EXPECT_FALSE(parse_qwen36_xml_call("just some text", tc));
 }
 
+// Qwen3.8-Flash-Next under Codex writes the freeform apply_patch body straight into the function tag,
+// sometimes followed by stray close tags of other dialects.
+TEST(ToolCallQwen36Xml, BodyWithoutParameterIsTheFreeformInput) {
+    ParsedToolCall tc;
+    ASSERT_TRUE(
+        parse_qwen36_xml_call("<function=apply_patch>\n*** Begin Patch\n*** Add File: a.txt\n+</div>\n"
+                              "*** End Patch\n</parameter>\n</invoke>\n</parameter>\n</apply_patch>",
+                              tc));
+    EXPECT_EQ(tc.name, "apply_patch");
+    EXPECT_EQ(json::parse(tc.arguments)["input"],
+              "*** Begin Patch\n*** Add File: a.txt\n+</div>\n*** End Patch");
+}
+
+TEST(ToolCallQwen36Xml, NoArgumentCallStaysEmpty) {
+    ParsedToolCall tc;
+    ASSERT_TRUE(parse_qwen36_xml_call("<function=get_goal>\n</function>", tc));
+    EXPECT_EQ(tc.arguments, "{}");
+}
+
 TEST(ToolCallQwen36Xml, SingleStringParam) {
     ParsedToolCall tc;
     ASSERT_TRUE(
