@@ -10,29 +10,45 @@ namespace imp_server::responses {
 
 namespace {
 
-// Extract the plain text of a Responses message `content` field: either a
-// bare string or an array of {type: input_text|output_text|text, text} parts.
-// Non-text parts (input_image, input_file) are unsupported in v1.
-std::string content_to_text(const json& content) {
+// Responses message `content` -> chat `content`: the joined text when every part is text, else
+// chat parts in order (text, image_url). input_image carries a URL or data: URI in `image_url`;
+// file_id and input_file need a file store this server does not have.
+json content_to_chat(const json& content) {
     if (content.is_string())
-        return content.get<std::string>();
-    std::string out;
+        return content;
+    std::string text;
+    json parts = json::array();
+    bool has_image = false;
     if (content.is_array()) {
         for (const auto& part : content) {
             if (!part.is_object())
                 continue;
             std::string type = part.value("type", "");
+            std::string piece;
             if (type == "input_text" || type == "output_text" || type == "text" ||
                 type == "summary_text") {
-                out += part.value("text", "");
+                piece = part.value("text", "");
             } else if (type == "refusal") {
-                out += part.value("refusal", "");
+                piece = part.value("refusal", "");
+            } else if (type == "input_image") {
+                const json url = part.value("image_url", json());
+                if (!url.is_string() || url.get<std::string>().empty())
+                    throw std::invalid_argument(
+                        "input_image needs image_url (a URL or data: URI); file_id is not supported");
+                json image = {{"url", url}};
+                if (part.contains("detail"))
+                    image["detail"] = part["detail"];
+                parts.push_back({{"type", "image_url"}, {"image_url", std::move(image)}});
+                has_image = true;
+                continue;
             } else {
                 throw std::invalid_argument("unsupported input content part type: " + type);
             }
+            text += piece;
+            parts.push_back({{"type", "text"}, {"text", std::move(piece)}});
         }
     }
-    return out;
+    return has_image ? parts : json(text);
 }
 
 // Server-side tools the server cannot execute: offered, never demanded, so they are dropped
@@ -219,7 +235,8 @@ json responses_to_openai_body(const json& rsp) {
                 std::string role = item.value("role", "user");
                 if (role == "developer")
                     role = "system";  // Responses' developer role ≈ system
-                messages.push_back({{"role", role}, {"content", content_to_text(item.value("content", json()))}});
+                messages.push_back(
+                    {{"role", role}, {"content", content_to_chat(item.value("content", json()))}});
             } else if (tool_item_to_message(type, item, messages)) {
                 // A prior tool call or its output the client is replaying back.
                 continue;

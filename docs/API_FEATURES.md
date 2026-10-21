@@ -208,7 +208,7 @@ Refusal rules:
 - Unreadable content part or block: `400` naming it, all three dialects.
 | Endpoint | Reads |
 |---|---|
-| `/v1/chat/completions`, `/v1/responses` | `text`, `image_url`; `video` on chat completions |
+| `/v1/chat/completions`, `/v1/responses` | chat: `text`, `image_url`, `video`; responses: `input_text`, `input_image` with `image_url` (URL or `data:` URI), not `file_id` or `input_file` |
 | `/v1/messages` | `text`, `image` (base64 or url), `tool_use`, `tool_result`, `thinking` |
 
 - On `/v1/messages` the `system` field takes string or array of `text` blocks.
