@@ -916,7 +916,7 @@
 
       <h2>Sampling <button type="button" class="link aside" id="reset-params">Reset to defaults</button></h2>
       <div class="field"><label for="temp">temperature</label><input type="number" id="temp" value="0.7" min="0" max="2" step="0.05" placeholder="model"></div>
-      <div class="field"><label for="maxtok">max tokens</label><input type="number" id="maxtok" value="512" min="1" max="65536" step="1"></div>
+      <div class="field"><label for="maxtok">max tokens</label><input type="number" id="maxtok" min="1" step="1" placeholder="context"></div>
       <div class="field"><label for="topp">top_p</label><input type="number" id="topp" min="0" max="1" step="0.01" placeholder="model"></div>
       <div class="field"><label for="topk">top_k</label><input type="number" id="topk" min="0" step="1" placeholder="model"></div>
       <div class="field"><label for="minp">min_p</label><input type="number" id="minp" min="0" max="1" step="0.01" placeholder="model"></div>
@@ -1100,7 +1100,7 @@ darkQuery.addEventListener("change", applyTheme);
 // Sampling survives a reload. An empty field is not sent, so the model's own default applies.
 const PARAMS_KEY = "imp.ui.params", DRAFT_KEY = "imp.ui.draft";
 const PARAM_DEFAULTS = {
-  temp: "0.7", maxtok: "512", topp: "", topk: "", minp: "", reppen: "", prespen: "", freqpen: "", seed: "", cfg: "",
+  temp: "0.7", maxtok: "", topp: "", topk: "", minp: "", reppen: "", prespen: "", freqpen: "", seed: "", cfg: "",
   thinking: true, effort: "", logprobs: false, lens: false, sae: false, steer: "", fmt: "none", schema: "", bans: "",
 };
 const paramIds = Object.keys(PARAM_DEFAULTS);
@@ -1121,6 +1121,7 @@ function setParam(id, v) {
 function loadParams() {
   let saved = {};
   try { saved = JSON.parse(lsGet(PARAMS_KEY) || "{}") || {}; } catch { /* fresh */ }
+  if (saved.maxtok === "512") saved.maxtok = "";  // the old fixed default, not a user choice
   for (const id of paramIds) setParam(id, id in saved ? saved[id] : PARAM_DEFAULTS[id]);
   savedEffort = typeof saved.effort === "string" ? saved.effort : "";
   try { promptBox.value = sessionStorage.getItem(DRAFT_KEY) || ""; } catch { /* fine */ }
@@ -1142,7 +1143,7 @@ function saveParams() {
 el("reset-params").addEventListener("click", () => {
   for (const id of paramIds) if (id !== "schema" && id !== "fmt") setParam(id, PARAM_DEFAULTS[id]);
   saveParams();
-  toast("Sampling reset: temperature 0.7, max tokens 512, everything else the model's default.");
+  toast("Sampling reset: temperature 0.7, max tokens to the context end, everything else the model's default.");
 });
 
 const SYS_PRESETS = {
@@ -1995,7 +1996,7 @@ function modelTurn(m, idx, isLast) {
     if (!m.content && m.reasoning)
       addNote(t, "<b>No answer: the whole token budget went to thinking.</b> Raise max tokens, a thinking model needs room to answer after it thinks.");
     else
-      addNote(t, `<b>Cut off at max tokens</b> (${m.stats?.maxTokens ?? parseInt(el("maxtok").value, 10)}). Continue picks up where it stopped, or raise max tokens and regenerate.`);
+      addNote(t, `<b>Cut off at ${m.stats?.maxTokens ? `max tokens</b> (${m.stats.maxTokens})` : "the context end</b>"}. Continue picks up where it stopped, or raise max tokens and regenerate.`);
   } else if (m.noFinish) {
     addNote(t, "<b>The stream ended without a finish reason.</b> Something between here and the engine cut it off; the answer may be incomplete.");
   }
@@ -2441,9 +2442,11 @@ function requestBody() {
     messages: wireMessages(),
     stream: true,
     stream_options: { include_usage: true },
-    max_tokens: parseInt(el("maxtok").value, 10) || 512,
     enable_thinking: el("thinking").checked,
   };
+  // Empty = no field: the server runs to the context end.
+  const maxTok = parseInt(el("maxtok").value, 10);
+  if (maxTok > 0) body.max_tokens = maxTok;
   for (const [id, field, int] of SAMPLING) {
     const v = el(id).value.trim();
     if (v === "") continue;
@@ -2501,7 +2504,7 @@ async function generate({ cont = false, prefill = false } = {}) {
   const swapping = models.length > 1 && !models.find((m) => m.id === modelName)?.loaded;
   if (swapping) setState("busy", "loading " + modelName);
 
-  const maxTokens = parseInt(el("maxtok").value, 10) || 512;
+  const maxTokens = parseInt(el("maxtok").value, 10) || null;  // null = the context end
   let answer = "", reasoning = "", thinking = null, finish = null, usage = null, requestId = null;
   let outcome = "ok", errText = "";
   const lps = [], lensTok = [], saeTok = [];  // lensTok, saeTok parallel to lps

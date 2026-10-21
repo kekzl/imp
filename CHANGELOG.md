@@ -5,7 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
-- `max_tokens` defaults to the remaining context on every server dialect and in `imp-cli` (was 8192; `--max-tokens N` sets a fixed default). KV admission and pool growth still plan in 8192-token steps. Reasoning is capped at `runtime.think_max_tokens` (32768; 6144 before at the 8192 default).
+- `max_tokens` defaults to the remaining context on every server dialect, in `imp-cli` and the web UI (was 8192, web UI 512; `--max-tokens N` sets a fixed default). KV admission and pool growth still plan in 8192-token steps. Reasoning is capped at `runtime.think_max_tokens` (32768; 6144 before at the 8192 default).
 
 ### Fixed
 - `imp-cli --interactive` honours `--max-tokens`: `max_tokens_set` was never set, so every interactive turn ran with 16384.
