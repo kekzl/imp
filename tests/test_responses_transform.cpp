@@ -168,10 +168,41 @@ TEST(ResponsesTransform, StatefulFieldsAreTheHandlers) {
 }
 
 TEST(ResponsesTransform, UnsupportedInputPartsRejected) {
-    json body = {{"input", json::array({{{"role", "user"},
-                                         {"content", json::array({{{"type", "input_image"},
-                                                                   {"image_url", "http://x"}}})}}})}};
-    EXPECT_THROW(responses_to_openai_body(body), std::invalid_argument);
+    auto with_part = [](json part) {
+        return json{{"input", json::array({{{"role", "user"}, {"content", json::array({part})}}})}};
+    };
+    EXPECT_THROW(responses_to_openai_body(with_part({{"type", "input_file"}, {"file_id", "f"}})),
+                 std::invalid_argument);
+    EXPECT_THROW(responses_to_openai_body(with_part({{"type", "input_image"}, {"file_id", "f"}})),
+                 std::invalid_argument)
+        << "file_id needs a file store";
+    EXPECT_THROW(responses_to_openai_body(with_part({{"type", "input_image"}, {"image_url", ""}})),
+                 std::invalid_argument);
+}
+
+// Codex sends a pasted image as input_image with a data: URI next to the text (#2831).
+TEST(ResponsesTransform, InputImageBecomesChatImageUrlPart) {
+    json body = {
+        {"input", json::array({{{"role", "user"},
+                                {"content", json::array({{{"type", "input_text"}, {"text", "what is this?"}},
+                                                         {{"type", "input_image"},
+                                                          {"image_url", "data:image/png;base64,AAAA"},
+                                                          {"detail", "high"}}})}}})}};
+    json oai = responses_to_openai_body(body);
+    ASSERT_EQ(oai["messages"].size(), 1u);
+    const json want = json::array(
+        {{{"type", "text"}, {"text", "what is this?"}},
+         {{"type", "image_url"},
+          {"image_url", {{"url", "data:image/png;base64,AAAA"}, {"detail", "high"}}}}});
+    EXPECT_EQ(oai["messages"][0]["content"], want);
+}
+
+TEST(ResponsesTransform, TextOnlyPartsStayOneString) {
+    json body = {
+        {"input", json::array({{{"role", "user"},
+                                {"content", json::array({{{"type", "input_text"}, {"text", "a"}},
+                                                         {{"type", "input_text"}, {"text", "b"}}})}}})}};
+    EXPECT_EQ(responses_to_openai_body(body)["messages"][0]["content"], "ab");
 }
 
 // ---------------------------------------------------------------------------
