@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- `runtime.no_vision`: drops a checkpoint's Qwen3-VL tower at init, image and video parts answer 400. Qwen3.8-Flash-Next text-only gets the tower's 1079 MiB arena reservation back: 396 -> 422 expert slots/layer, tg512 85.64 -> 87.26 tok/s (code prompt, 6 of 6 pairs faster over 3 prompts).
+
 ## [0.57.0] - 2026-10-21
 
 ### Changed

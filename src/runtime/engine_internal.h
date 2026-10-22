@@ -75,6 +75,14 @@ inline void ensure_prefill_workspace(GraphExecutor* executor) {
     }
 }
 
+// runtime.no_vision: drop the tower before the arena demand is read, so it reserves nothing.
+inline void drop_vision_tower_if_disabled(Model& model, bool no_vision) {
+    if (no_vision && model.vision_tower) {
+        IMP_LOG_INFO("runtime.no_vision: vision tower dropped, image and video parts answer 400");
+        model.vision_tower.reset();
+    }
+}
+
 // The library reserve the PLAN charges: imp.conf's vram.library_reserve_mb, or
 // the measured default when unset. Shared because both the audit table and the
 // warmup reporter need the same number, and duplicating the ternary at two call
