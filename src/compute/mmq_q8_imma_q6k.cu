@@ -115,47 +115,13 @@ __device__ __forceinline__ void commit_b_q6k_unpacked(const Q6kUnpackedB& rb, in
     }
 }
 
-// K-steps [x, y) of this CTA: all of K, or split blockIdx.z of ks_per_split steps.
-template <bool SPLITK>
-__device__ __forceinline__ int2 q6k_kstep_range(int K, int ks_per_split) {
-    const int ksteps = K / kBK;
-    if constexpr (!SPLITK)
-        return make_int2(0, ksteps);
-    const int b = static_cast<int>(blockIdx.z) * ks_per_split;
-    return make_int2(b, min(ksteps, b + ks_per_split));
-}
-
-// SPLITK epilogue: fp32 partial tile to this split's [M][N] slice; mmq_splitk_finalize_kernel sums the
-// slices in fixed order and applies beta. row0/col0: this thread's first row and column.
-template <int kMF, int kNF>
-__device__ __forceinline__ void q6k_store_split_tile(const float (&acc)[kMF][kNF][4], float* __restrict__ Cs,
-                                                     int row0, int col0, int rows, int N) {
-#pragma unroll
-    for (int mf = 0; mf < kMF; ++mf) {
-#pragma unroll
-        for (int nf = 0; nf < kNF; ++nf) {
-            const int col = col0 + (nf * 8);
-            const int r_lo = row0 + (mf * 16);
-            if (col + 1 >= N)
-                continue;
-            if (r_lo < rows)
-                *reinterpret_cast<float2*>(
-                    &Cs[(static_cast<size_t>(r_lo) * N) + col]) = make_float2(acc[mf][nf][0], acc[mf][nf][1]);
-            if (r_lo + 8 < rows)
-                *reinterpret_cast<float2*>(
-                    &Cs[(static_cast<size_t>(r_lo + 8) * N) + col]) = make_float2(acc[mf][nf][2],
-                                                                                  acc[mf][nf][3]);
-        }
-    }
-}
-
 }  // namespace
 
-template <int BM, bool BETA1, bool SPLITK>
+template <int BM, bool BETA1>
 __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
     const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale, const uint8_t* __restrict__ Wq6k,
     __half* __restrict__ out, int M, int N, int K, const int32_t* __restrict__ expert_offsets,
-    size_t w_stride_blocks, float* __restrict__ split_out, int ks_per_split) {
+    size_t w_stride_blocks) {
     constexpr int kWM = (BM == 128) ? 4 : 2;
     constexpr int kWN = (BM == 128) ? 2 : 4;
     constexpr int kTileM = BM / kWM;
@@ -165,8 +131,7 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
 
     int rows = M;
     size_t row_off = 0;
-    const int e = static_cast<int>(blockIdx.z) *
-                  static_cast<int>(!SPLITK);  // SPLITK: gridDim.z is the K-split
+    const int e = blockIdx.z;
     if (expert_offsets != nullptr) {
         const int32_t o0 = __ldg(&expert_offsets[e]);
         const int32_t o1 = __ldg(&expert_offsets[e + 1]);
@@ -231,22 +196,19 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
         for (int j2 = 0; j2 < kNF; ++j2)
             acc[i][j2][0] = acc[i][j2][1] = acc[i][j2][2] = acc[i][j2][3] = 0.0f;
 
-    // This CTA covers K-steps [ks_begin, ksteps), never empty (launch: z < ceil(ksteps / ks_per_split)).
-    const int2 kr = q6k_kstep_range<SPLITK>(K, ks_per_split);
-    const int ks_begin = kr.x;
-    const int ksteps = kr.y;
-    load_kstep_q6k_a<BM>(tid, A, Asc, sA(0), sAsc(0), base_m, rows, K, subs, ks_begin * kBK);
+    const int ksteps = K / kBK;
+    load_kstep_q6k_a<BM>(tid, A, Asc, sA(0), sAsc(0), base_m, rows, K, subs, 0);
     cp_async_commit();
     Q6kUnpackedB rb;
-    fetch_b_q6k_unpacked<0>(rb, tid, W, base_n, sblk_count, ks_begin, n_rem);
+    fetch_b_q6k_unpacked<0>(rb, tid, W, base_n, sblk_count, 0, n_rem);
     commit_b_q6k_unpacked<0>(rb, tid, sQl(0), sQh(0), sScd(0));
-    fetch_b_q6k_unpacked<kUnpHalf>(rb, tid, W, base_n, sblk_count, ks_begin, n_rem);
+    fetch_b_q6k_unpacked<kUnpHalf>(rb, tid, W, base_n, sblk_count, 0, n_rem);
     commit_b_q6k_unpacked<kUnpHalf>(rb, tid, sQl(0), sQh(0), sScd(0));
 
-    for (int ks = ks_begin; ks < ksteps; ++ks) {
-        const int stage = (ks - ks_begin) & 1;
+    for (int ks = 0; ks < ksteps; ++ks) {
+        const int stage = ks & 1;
         if (ks + 1 < ksteps) {
-            const int nstage = (ks + 1 - ks_begin) & 1;
+            const int nstage = (ks + 1) & 1;
             load_kstep_q6k_a<BM>(tid, A, Asc, sA(nstage), sAsc(nstage), base_m, rows, K, subs,
                                  (ks + 1) * kBK);
             fetch_b_q6k_unpacked<0>(rb, tid, W, base_n, sblk_count, ks + 1, n_rem);
@@ -338,7 +300,7 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
             }
             // nstage was last read in iteration ks-1, whose trailing barrier orders these stores after it.
             if (ks + 1 < ksteps) {
-                const int ns = (ks + 1 - ks_begin) & 1;
+                const int ns = (ks + 1) & 1;
                 if (kb == 0) {
                     commit_b_q6k_unpacked<0>(rb, tid, sQl(ns), sQh(ns), sScd(ns));
                     fetch_b_q6k_unpacked<kUnpHalf>(rb, tid, W, base_n, sblk_count, ks + 1, n_rem);
@@ -350,12 +312,6 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
         __syncthreads();
     }
 
-    if constexpr (SPLITK) {
-        q6k_store_split_tile<kMF, kNF>(acc, split_out + (static_cast<size_t>(blockIdx.z) * M * N),
-                                       base_m + (warp_m * kTileM) + rl, base_n + (warp_n * kTileN) + (cl * 2),
-                                       rows, N);
-        return;
-    }
 #pragma unroll
     for (int mf = 0; mf < kMF; ++mf) {
         const int row_lo = base_m + (warp_m * kTileM) + (mf * 16) + rl;
@@ -379,15 +335,13 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_raw_kernel(
 }
 
 // Explicit instantiations launched by the dispatch in mmq_q8_imma.cu.
-#define IMP_Q6K_INST(BM, B1, SK)                                                                         \
-    template __global__ void mmq_imma_q6k_raw_kernel<BM, B1, SK>(const int8_t*, const __half*,           \
-                                                                 const uint8_t*, __half*, int, int, int, \
-                                                                 const int32_t*, size_t, float*, int);
-IMP_Q6K_INST(32, false, false)
-IMP_Q6K_INST(32, true, false)
-IMP_Q6K_INST(32, false, true)
-IMP_Q6K_INST(128, true, false)
-IMP_Q6K_INST(128, false, false)
-#undef IMP_Q6K_INST
+template __global__ void mmq_imma_q6k_raw_kernel<32, false>(const int8_t*, const __half*, const uint8_t*,
+                                                            __half*, int, int, int, const int32_t*, size_t);
+template __global__ void mmq_imma_q6k_raw_kernel<32, true>(const int8_t*, const __half*, const uint8_t*,
+                                                           __half*, int, int, int, const int32_t*, size_t);
+template __global__ void mmq_imma_q6k_raw_kernel<128, true>(const int8_t*, const __half*, const uint8_t*,
+                                                            __half*, int, int, int, const int32_t*, size_t);
+template __global__ void mmq_imma_q6k_raw_kernel<128, false>(const int8_t*, const __half*, const uint8_t*,
+                                                             __half*, int, int, int, const int32_t*, size_t);
 
 }  // namespace imp

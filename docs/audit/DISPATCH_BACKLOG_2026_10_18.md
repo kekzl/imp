@@ -251,3 +251,9 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 |---|---|---|
 | B-36 | DONE | `gemm.q6k_imma_smallm`: Qwen3-14B-Q6_K pp2/8/16/32 39.4-41.4 -> 19.7-21.2 ms (A B B A, 2 runs per arm), pp512 74.8-75.9 ms both arms, PPL `ppl_4k.txt` chunk 32 11.4532 -> 11.4519 (chunk 0: 11.4543) |
 | B-36b | OPEN (new) | nsys pp16: `mmq_imma_q6k_raw_kernel<32,false,true>` 18.5 ms of the forward; ncu down_proj 135 us = 540 GB/s, long scoreboard 2891 of ~6300 stall samples. Tried: full-step register prefetch 19.85 -> 19.55 ms at 146 regs (1 CTA/SM), with `__launch_bounds__(256, 2)` 22-23 ms; neither shipped |
+
+## 2026-10-22 Batch 20: B-36b Q6_K small-M kernel
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-36b | DONE | `mmq_imma_q6k_k256_kernel` (one super-block per step, 2 cp.async stages): Qwen3-14B-Q6_K pp2/8/16/32 9.78/9.65/9.95/11.89 ms (was 19.7-21.2), tg 172 tok/s both; nsys pp16 Q6_K GEMM avg 65.9 -> 29.3 us. Steps: 4-B cp.async windows pp16 13.05 ms, 16-B windows 11.43, skip rows 16..31 at M <= 16 9.95. Refuted: 8 warps along N 10.44, 1 super-block per split 10.08. ncu after 4-B step: issue-bound (MIO throttle top, DRAM 48 %). PPL chunk 32 11.4477; 2 mutants red (window shift, M>16 half) |
