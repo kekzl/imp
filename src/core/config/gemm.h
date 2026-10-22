@@ -31,6 +31,9 @@ struct GEMM {
     // With q4k_imma_prefill, non-MoE models: Q4_K projections get no FP16 cache, prefill IMMA and
     // decode dp4a read the GGUF blocks in place. gemma-3-12b Q4_K_M: FP16 cache 16920 -> 0 MiB.
     bool q4k_in_place = true;
+    // Dense Q6_K prompt chunks of 2..32 rows via the IMMA kernel (BM=32) instead of dequantizing every
+    // weight per chunk; off under runtime.deterministic (rows then change kernel at 33).
+    bool q6k_imma_smallm = true;
     // MoE batch prefill via the grouped IMMA kernel (one launch over all
     // experts, gridDim.z=expert, BM=32). Covers Q8_0/Q4_K expert tensors; Q6_K
     // down_proj stays on dequant->cuBLAS. Default on; false re-enables the

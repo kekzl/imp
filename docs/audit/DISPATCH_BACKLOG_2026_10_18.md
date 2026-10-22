@@ -244,3 +244,10 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | R-049.2 | DONE | PERF_LOG 2026-10-20: per-row FP8 drafter weights (own lm_head, not the target's) + captured propose, 3.07 -> 1.76 ms per draft; Qwen3-8B-NVFP4 prose at parity with nospec (no gain), code 531-591 vs 276-282 tok/s; `DSparkDrafterTest.*` 4/4 (graph test red under a stale-context mutant), greedy identity margins unchanged |
+
+## 2026-10-22 Batch 19: B-36 dense Q6_K short prompts
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-36 | DONE | `gemm.q6k_imma_smallm`: Qwen3-14B-Q6_K pp2/8/16/32 39.4-41.4 -> 19.7-21.2 ms (A B B A, 2 runs per arm), pp512 74.8-75.9 ms both arms, PPL `ppl_4k.txt` chunk 32 11.4532 -> 11.4519 (chunk 0: 11.4543) |
+| B-36b | OPEN (new) | nsys pp16: `mmq_imma_q6k_raw_kernel<32,false,true>` 18.5 ms of the forward; ncu down_proj 135 us = 540 GB/s, long scoreboard 2891 of ~6300 stall samples. Tried: full-step register prefetch 19.85 -> 19.55 ms at 146 regs (1 CTA/SM), with `__launch_bounds__(256, 2)` 22-23 ms; neither shipped |

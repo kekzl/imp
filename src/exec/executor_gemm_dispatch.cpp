@@ -31,6 +31,7 @@
 #include "compute/mmq_q8_imma.h"
 #include "compute/hadamard.h"
 #include "core/pdl.h"
+#include "core/process_diag.h"
 #include "compute/activation.h"
 #include "compute/layernorm.h"
 
@@ -204,6 +205,46 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
     }
 
     gemm(input, weight, output, 1.0f, 0.0f, ctx.stream);
+}
+
+// IMMA prefill on a GGUF source (Q8_0, Q4_K, Q6_K at 2..32 rows); false = caller dequantizes.
+static bool imma_source_prefill(const WeightHandle& h, const Tensor& input, Tensor& output,
+                                const GemmContext& ctx, int M, bool decode_rows) {
+    // Q8_0 INT8 IMMA fast path (gemm.q8_imma_enabled): fused dequant on int8
+    // tensor cores instead of materialize-to-FP16 -> cuBLAS. Covers beta=0 and
+    // the beta=1 residual-add form; declines fall through to the dequant
+    // fallback. M>=2 (was >=64): below 64 the dequant tax dominates even
+    // harder (an M=9 spec-decode verify chunk re-dequantized the entire model
+    // every step, #667). The IMMA kernel zero-fills M-tail rows; MoE already runs it at per-expert M~32.
+    // Split-K only on decode/verify rows: a prompt row must not change with its chunk size (#2152).
+    const bool imma_eligible = input.qtype == QType::F16 && output.qtype == QType::F16 && M >= 2 &&
+                               input.stride[0] == h.shape[1] && output.stride[0] == h.shape[0];
+    if (ctx.q8_imma_enabled && h.source_qtype == QType::Q8_0 && imma_eligible) {
+        // q/k/v share one input: k and v skip the quantize q wrote (tag-checked in the callee).
+        const bool reuse_act = ctx.act_quant_hint_matches(input.data, M, static_cast<int>(h.shape[1]));
+        if (mmq_q8_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
+                             reinterpret_cast<__half*>(output.data), M, static_cast<int>(h.shape[0]),
+                             static_cast<int>(h.shape[1]), ctx.stream, ctx.beta,
+                             /*allow_splitk=*/decode_rows, reuse_act))
+            return true;
+    }
+    if (ctx.q4k_imma_prefill && h.source_qtype == QType::Q4_K && imma_eligible) {
+        if (mmq_q4k_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
+                              reinterpret_cast<__half*>(output.data), M, static_cast<int>(h.shape[0]),
+                              static_cast<int>(h.shape[1]), ctx.stream, ctx.beta,
+                              /*allow_splitk=*/decode_rows))
+            return true;
+    }
+    // Dense Q6_K above 32 rows stays on dequant + f16-acc cuBLAS (the half-MMA split halves the
+    // int8 rate: pp512 6957 vs 3747 tok/s). At 2..32 rows the per-chunk dequant dominates: IMMA.
+    if (ctx.q6k_imma_smallm && h.source_qtype == QType::Q6_K && imma_eligible && M <= 32 &&
+        !process_diag_deterministic()) {
+        if (mmq_q6k_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
+                              reinterpret_cast<__half*>(output.data), M, static_cast<int>(h.shape[0]),
+                              static_cast<int>(h.shape[1]), ctx.stream, ctx.beta))
+            return true;
+    }
+    return false;
 }
 
 void gguf_source_fallback(const WeightHandle& h, const Tensor& input, Tensor& output, const GemmContext& ctx,
@@ -764,36 +805,8 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
     // path.
     if (M > 1 && h.source_data != nullptr && dequant_gpu_supported(h.source_qtype) &&
         (h.primary_tier == StorageTier::CUTLASS_NVFP4 || h.primary_tier == StorageTier::NVFP4)) {
-        // Q8_0 INT8 IMMA fast path (gemm.q8_imma_enabled): fused dequant on int8
-        // tensor cores instead of materialize-to-FP16 -> cuBLAS. Covers beta=0 and
-        // the beta=1 residual-add form; declines fall through to the dequant
-        // fallback. M>=2 (was >=64): below 64 the dequant tax dominates even
-        // harder (an M=9 spec-decode verify chunk re-dequantized the entire model
-        // every step, #667). The IMMA kernel zero-fills M-tail rows; MoE already runs it at per-expert M~32.
-        // Split-K only on decode/verify rows: a prompt row must not change with its chunk size (#2152).
-        const bool imma_eligible = input.qtype == QType::F16 && output.qtype == QType::F16 &&
-                                   M >= 2 && input.stride[0] == h.shape[1] &&
-                                   output.stride[0] == h.shape[0];
-        if (ctx.q8_imma_enabled && h.source_qtype == QType::Q8_0 && imma_eligible) {
-            // q/k/v share one input: k and v skip the quantize q wrote (tag-checked in the callee).
-            const bool reuse_act = ctx.act_quant_hint_matches(input.data, M, static_cast<int>(h.shape[1]));
-            if (mmq_q8_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
-                                 reinterpret_cast<__half*>(output.data), M, static_cast<int>(h.shape[0]),
-                                 static_cast<int>(h.shape[1]), ctx.stream, ctx.beta,
-                                 /*allow_splitk=*/cur_decode_rows_, reuse_act))
-                return;
-        }
-        if (ctx.q4k_imma_prefill && h.source_qtype == QType::Q4_K && imma_eligible) {
-            if (mmq_q4k_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
-                                  reinterpret_cast<__half*>(output.data), M, static_cast<int>(h.shape[0]),
-                                  static_cast<int>(h.shape[1]), ctx.stream, ctx.beta,
-                                  /*allow_splitk=*/cur_decode_rows_))
-                return;
-        }
-        // Dense Q6_K is deliberately NOT routed through IMMA: the half-MMA split
-        // halves the int8 rate, and full-rate f16-acc HMMA wins on large dense
-        // shapes; the fusion saving only dominates in the MoE regime (high dequant tax), where Q6_K-IMMA
-        // ships instead.
+        if (imma_source_prefill(h, input, output, ctx, M, cur_decode_rows_))
+            return;
         gguf_source_fallback(h, input, output, ctx, cur_decode_rows_);
         return;
     }
