@@ -1,6 +1,6 @@
-// Q4_K MoE grouped IMMA (qkind 1) vs the ggml dequant formula in double. Own file: test_mmq_q8_imma.cu
-// sits at the function-size gate. Outlier channels (every 37th K at 20x) price the per-128 activation
-// scale (#2441).
+// Q4_K IMMA (qkind 1) vs the ggml dequant formula in double: MoE grouped and dense small-M. Own file:
+// test_mmq_q8_imma.cu sits at the function-size gate. Outlier channels (every 37th K at 20x) price the
+// per-128 activation scale (#2441).
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include "compute/mmq_q8_imma.h"
@@ -36,6 +37,18 @@ double q4k_weight(const uint8_t* bp, int i) {
     return __half2float(dh) * s * q - __half2float(mh) * m;
 }
 
+void gen_q4k_blocks(std::vector<uint8_t>& W, std::mt19937& rng) {
+    for (size_t b = 0; b < W.size() / 144; ++b) {
+        uint8_t* bp = W.data() + b * 144;
+        const __half dh = __float2half(0.0005f + 0.00002f * (rng() % 100));
+        const __half mh = __float2half(0.0002f + 0.00001f * (rng() % 100));
+        std::memcpy(bp, &dh, 2);
+        std::memcpy(bp + 2, &mh, 2);
+        for (int i = 4; i < 144; ++i)
+            bp[i] = static_cast<uint8_t>(rng() & 0xFF);
+    }
+}
+
 double q4k_moe_nrmse(const std::vector<int>& rows_per, int N, int K, unsigned seed, float outlier) {
     const int ne = static_cast<int>(rows_per.size());
     std::vector<int32_t> h_off(ne + 1, 0);
@@ -48,15 +61,7 @@ double q4k_moe_nrmse(const std::vector<int>& rows_per, int N, int K, unsigned se
     const int sbpr = K / 256;
     std::vector<uint8_t> W(static_cast<size_t>(ne) * N * sbpr * 144);
     std::mt19937 rng(seed);
-    for (size_t b = 0; b < W.size() / 144; ++b) {
-        uint8_t* bp = W.data() + b * 144;
-        const __half dh = __float2half(0.0005f + 0.00002f * (rng() % 100));
-        const __half mh = __float2half(0.0002f + 0.00001f * (rng() % 100));
-        std::memcpy(bp, &dh, 2);
-        std::memcpy(bp + 2, &mh, 2);
-        for (int i = 4; i < 144; ++i)
-            bp[i] = static_cast<uint8_t>(rng() & 0xFF);
-    }
+    gen_q4k_blocks(W, rng);
     std::vector<__half> x(static_cast<size_t>(expanded) * K);
     std::normal_distribution<float> nd(0.0f, 1.0f);
     for (size_t i = 0; i < x.size(); ++i)
@@ -111,6 +116,91 @@ TEST(MmqQ8Imma, MoeGroupedQ4K) {
     EXPECT_LT(small_m, 2e-2) << "Q4_K MoE NRMSE, BM=32";
     EXPECT_LT(large_m, 2e-2) << "Q4_K MoE NRMSE, BM=128";
     EXPECT_LT(outl, 2e-2) << "Q4_K MoE NRMSE, outlier channels";
+}
+
+// Dense Q4_K fixture: W[N][K] and 128 activation rows; run() feeds the first M rows into a residual
+// (beta 1) or a zeroed output (beta 0) and returns out - residual.
+struct Q4kDense {
+    int N, K;
+    std::vector<uint8_t> W;
+    std::vector<__half> x;
+    Q4kDense(int n, int k, unsigned seed) : N(n), K(k), W(static_cast<size_t>(n) * (k / 256) * 144) {
+        std::mt19937 rng(seed);
+        gen_q4k_blocks(W, rng);
+        x.resize(static_cast<size_t>(128) * K);
+        std::normal_distribution<float> nd(0.0f, 1.0f);
+        for (auto& v : x)
+            v = __float2half(nd(rng));
+    }
+    std::vector<float> run(int M, bool beta1, bool split) const {
+        std::vector<__half> resid(static_cast<size_t>(M) * N, __float2half(0.0f));
+        std::mt19937 rng(7);
+        if (beta1)
+            for (auto& v : resid)
+                v = __float2half(static_cast<float>(rng() % 64) * 0.25f - 8.0f);
+        uint8_t* d_w;
+        __half *d_x, *d_out;
+        EXPECT_EQ(cudaMalloc(&d_w, W.size()), cudaSuccess);
+        EXPECT_EQ(cudaMalloc(&d_x, static_cast<size_t>(M) * K * 2), cudaSuccess);
+        EXPECT_EQ(cudaMalloc(&d_out, resid.size() * 2), cudaSuccess);
+        cudaMemcpy(d_w, W.data(), W.size(), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_x, x.data(), static_cast<size_t>(M) * K * 2, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_out, resid.data(), resid.size() * 2, cudaMemcpyHostToDevice);
+        EXPECT_TRUE(mmq_q4k_imma_gemm(d_w, d_x, d_out, M, N, K, nullptr, beta1 ? 1.0f : 0.0f, split));
+        EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        std::vector<__half> out(resid.size());
+        cudaMemcpy(out.data(), d_out, out.size() * 2, cudaMemcpyDeviceToHost);
+        cudaFree(d_w);
+        cudaFree(d_x);
+        cudaFree(d_out);
+        mmq_q8_imma_release_all();
+        std::vector<float> got(out.size());
+        for (size_t i = 0; i < out.size(); ++i)
+            got[i] = __half2float(out[i]) - __half2float(resid[i]);
+        return got;
+    }
+    double nrmse(const std::vector<float>& got, int M) const {
+        const int sbpr = K / 256;
+        double err2 = 0, ref2 = 0;
+        for (int r = 0; r < M; ++r)
+            for (int n = 0; n < N; ++n) {
+                double ref = 0;
+                for (int sb = 0; sb < sbpr; ++sb) {
+                    const uint8_t* bp = W.data() + (static_cast<size_t>(n) * sbpr + sb) * 144;
+                    for (int i = 0; i < 256; ++i)
+                        ref += static_cast<double>(__half2float(x[(size_t)r * K + sb * 256 + i])) *
+                               q4k_weight(bp, i);
+                }
+                const double d = got[(size_t)r * N + n] - ref;
+                err2 += d * d;
+                ref2 += ref * ref;
+            }
+        return std::sqrt(err2 / std::max(ref2, 1e-30));
+    }
+};
+
+// M <= 32: BM=32 tile, rows 16..31 skipped at M <= 16; K=2816 = 22 steps split 3 x 7 + 1 over 8 slices.
+TEST(MmqQ8Imma, Q4KDenseSmallMSplitNRMSE) {
+    const Q4kDense f(384, 2816, 501);
+    const std::pair<int, bool> cases[] = {{2, false}, {9, true}, {16, false}, {17, true}, {32, false}};
+    for (const auto& [M, beta1] : cases)
+        EXPECT_LT(f.nrmse(f.run(M, beta1, true), M), 2e-2) << "Q4_K dense M=" << M << " beta1=" << beta1;
+}
+
+// Without the split a short row is the same bits as inside a 100-row BM=128 call (#2152); the split
+// path really runs (some values move).
+TEST(MmqQ8Imma, Q4KDenseSmallMNoSplitMatchesBM128) {
+    const Q4kDense f(384, 2816, 502);
+    const std::vector<float> big = f.run(100, false, false);
+    const std::vector<float> plain = f.run(20, false, false);
+    const std::vector<float> split = f.run(20, false, true);
+    size_t plain_diff = 0, split_diff = 0;
+    for (size_t i = 0; i < plain.size(); ++i) {
+        plain_diff += plain[i] != big[i];
+        split_diff += split[i] != big[i];
+    }
+    EXPECT_EQ(plain_diff, 0u);
+    EXPECT_GT(split_diff, 0u);
 }
 
 }  // namespace

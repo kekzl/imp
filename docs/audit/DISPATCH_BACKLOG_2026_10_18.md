@@ -257,3 +257,9 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | B-36b | DONE | `mmq_imma_q6k_k256_kernel` (one super-block per step, 2 cp.async stages): Qwen3-14B-Q6_K pp2/8/16/32 9.78/9.65/9.95/11.89 ms (was 19.7-21.2), tg 172 tok/s both; nsys pp16 Q6_K GEMM avg 65.9 -> 29.3 us. Steps: 4-B cp.async windows pp16 13.05 ms, 16-B windows 11.43, skip rows 16..31 at M <= 16 9.95. Refuted: 8 warps along N 10.44, 1 super-block per split 10.08. ncu after 4-B step: issue-bound (MIO throttle top, DRAM 48 %). PPL chunk 32 11.4477; 2 mutants red (window shift, M>16 half) |
+
+## 2026-10-22 Batch 21: B-37 dense Q4_K and uncached Q8_0 short prompts
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-37 | DONE | Q4_K M <= 32 on BM=32 tiles + K-split by N and K (not under runtime.deterministic), warps with no live row skip their MMAs; uncached Q8_0 prompt rows M <= 32 via dp4a in place. Same window main vs branch, Qwen3.8-27B-Q4_K_M pp2/16/32/64 53.62/59.35/58.26/63.10 -> 23.03/29.46/38.39/54.52 ms, gemma-3-12b-it-Q4_K_M pp2/16/32 26.11/25.87/26.76 -> 9.31/8.68/10.74 ms; pp512 within main spread (Qwen 136.8-144.7 main, 144.8-145.4 branch). PPL chunk 32 Qwen 5.0758 -> 5.0841 (Q4_K alone 5.0705, Q8_0 dp4a = int8 activations +0.27 %), gemma 11.9341 -> 11.9285; chunk 0 bit-equal. 3 mutants red |

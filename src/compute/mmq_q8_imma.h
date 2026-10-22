@@ -37,7 +37,8 @@ namespace imp {
 void mmq_imma_act_forget();
 
 // Dense Q4_K (new stack — distinct from the retired 2026-05 64x32 q4k_imma
-// kernel): same contract; K % 256 == 0 (Q4_K super-block).
+// kernel): same contract; K % 256 == 0 (Q4_K super-block). M <= 32: BM=32 tile (per row bit-identical
+// to BM=128), K-split by N and K only when allow_splitk.
 [[nodiscard]] bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
                        cudaStream_t stream, float beta = 0.0f, bool allow_splitk = true);
 

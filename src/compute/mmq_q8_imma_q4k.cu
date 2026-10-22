@@ -3,6 +3,7 @@
 // kernel template declared there, launched from mmq_q8_imma.cu dispatch.
 
 #include "compute/mmq_q8_imma_internal.cuh"
+#include "core/logging.h"
 
 #include <cstring>
 
@@ -99,14 +100,57 @@ __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict
     }
 }
 
+// 128-K steps [x, y) of this CTA: all of K, or split blockIdx.z of ks_per_split steps.
+template <bool SPLITK>
+__device__ __forceinline__ int2 q4k_kstep_range(int K, int ks_per_split) {
+    const int ksteps = K / kQ4kBK;
+    if constexpr (!SPLITK)
+        return make_int2(0, ksteps);
+    const int b = static_cast<int>(blockIdx.z) * ks_per_split;
+    return make_int2(b, min(ksteps, b + ks_per_split));
+}
+
+// Epilogue: fp16 tile (+= when BETA1), or under SPLITK the fp32 partial tile to this split's [M][N] slice
+// (mmq_splitk_finalize_kernel sums the slices in fixed order and applies beta). row0/col0: this thread's
+// first row and column; OOB rows and N-tail columns are never stored.
+template <bool BETA1, bool SPLITK, int kMF, int kNF>
+__device__ __forceinline__ void q4k_store_tile(const float (&acc)[kMF][kNF][4], __half* __restrict__ C,
+                                               float* __restrict__ Cs, int row0, int col0, int rows, int N) {
+#pragma unroll
+    for (int mf = 0; mf < kMF; ++mf) {
+#pragma unroll
+        for (int nf = 0; nf < kNF; ++nf) {
+            const int col = col0 + (nf * 8);
+            if (col + 1 >= N)
+                continue;
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int row = row0 + (mf * 16) + (h * 8);
+                if (row >= rows)
+                    continue;
+                const size_t o = (static_cast<size_t>(row) * N) + col;
+                const float v0 = acc[mf][nf][2 * h];
+                const float v1 = acc[mf][nf][(2 * h) + 1];
+                if constexpr (SPLITK) {
+                    *reinterpret_cast<float2*>(&Cs[o]) = make_float2(v0, v1);
+                } else {
+                    __half2* p = reinterpret_cast<__half2*>(&C[o]);
+                    const __half2 v = __floats2half2_rn(v0, v1);
+                    *p = BETA1 ? __hadd2(*p, v) : v;
+                }
+            }
+        }
+    }
+}
+
 }  // namespace
 
-template <int BM, bool BETA1>
-__global__ void __launch_bounds__(kThreads)
-    mmq_imma_q4k_raw_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
-                            const float* __restrict__ x_rowsum, const uint8_t* __restrict__ Wq4k,
-                            __half* __restrict__ out, int M, int N, int K,
-                            const int32_t* __restrict__ expert_offsets, size_t w_stride_blocks) {
+template <int BM, bool BETA1, bool SPLITK>
+__global__ void __launch_bounds__(kThreads) mmq_imma_q4k_raw_kernel(
+    const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale, const float* __restrict__ x_rowsum,
+    const uint8_t* __restrict__ Wq4k, __half* __restrict__ out, int M, int N, int K,
+    const int32_t* __restrict__ expert_offsets, size_t w_stride_blocks, float* __restrict__ split_out,
+    int ks_per_split) {
     constexpr int kWM = (BM == 128) ? 4 : 2;
     constexpr int kWN = (BM == 128) ? 2 : 4;
     constexpr int kTileM = BM / kWM;
@@ -117,7 +161,7 @@ __global__ void __launch_bounds__(kThreads)
 
     int rows = M;
     size_t row_off = 0;
-    const int e = blockIdx.z;
+    const int e = static_cast<int>(blockIdx.z) * static_cast<int>(!SPLITK);  // SPLITK: z is the K-split
     if (expert_offsets != nullptr) {
         const int32_t o0 = __ldg(&expert_offsets[e]);
         const int32_t o1 = __ldg(&expert_offsets[e + 1]);
@@ -168,15 +212,20 @@ __global__ void __launch_bounds__(kThreads)
         for (int j = 0; j < kNF; ++j)
             acc[i][j][0] = acc[i][j][1] = acc[i][j][2] = acc[i][j][3] = 0.0f;
 
-    const int ksteps = K / kQ4kBK;
+    // This CTA covers K-steps [ks_begin, ksteps), never empty (launch: z < ceil(ksteps / ks_per_split)).
+    const int2 kr = q4k_kstep_range<SPLITK>(K, ks_per_split);
+    const int ks_begin = kr.x;
+    const int ksteps = kr.y;
+    // A warp whose rows all lie past `rows` only loads and syncs (M <= 16 at BM=32: half the warps).
+    const bool rows_live = base_m + (warp_m * kTileM) < rows;
     load_kstep_q4k<BM>(tid, A, Asc, Ars, W, base_n, sblk_count, sA[0], sBq[0], sBh[0], sAsc[0], sArs[0],
-                       base_m, rows, K, subs, 0, n_rem);
+                       base_m, rows, K, subs, ks_begin * kQ4kBK, n_rem);
     cp_async_commit();
 
-    for (int ks = 0; ks < ksteps; ++ks) {
-        const int stage = ks & 1;
+    for (int ks = ks_begin; ks < ksteps; ++ks) {
+        const int stage = (ks - ks_begin) & 1;
         if (ks + 1 < ksteps) {
-            const int nstage = (ks + 1) & 1;
+            const int nstage = stage ^ 1;
             load_kstep_q4k<BM>(tid, A, Asc, Ars, W, base_n, sblk_count, sA[nstage], sBq[nstage], sBh[nstage],
                                sAsc[nstage], sArs[nstage], base_m, rows, K, subs, (ks + 1) * kQ4kBK, n_rem);
             cp_async_commit();
@@ -190,7 +239,7 @@ __global__ void __launch_bounds__(kThreads)
         __syncthreads();
 
 #pragma unroll 1
-        for (int g = 0; g < kQ4kSub / 2; ++g) {  // nibble group: sub-blocks 2g (low) and 2g + 1 (high)
+        for (int g = 0; g < (rows_live ? kQ4kSub / 2 : 0); ++g) {  // nibble group: sub-blocks 2g, 2g + 1
             // B: one ldmatrix.x4 = raw words (k 0-15, k 16-31) of two n-fragments
             uint32_t raw[kNF][2];
             if constexpr (kHoistB) {
@@ -260,37 +309,68 @@ __global__ void __launch_bounds__(kThreads)
         __syncthreads();
     }
 
-#pragma unroll
-    for (int mf = 0; mf < kMF; ++mf) {
-        const int row_lo = base_m + (warp_m * kTileM) + (mf * 16) + rl;
-        const int row_hi = row_lo + 8;
-#pragma unroll
-        for (int nf = 0; nf < kNF; ++nf) {
-            const int col = base_n + (warp_n * kTileN) + (nf * 8) + (cl * 2);
-            if (col + 1 >= N) continue;  // N-tail: OOB columns are never stored
-            if (row_lo < rows) {
-                __half2* p = reinterpret_cast<__half2*>(&C[(static_cast<size_t>(row_lo) * N) + col]);
-                __half2 v = __floats2half2_rn(acc[mf][nf][0], acc[mf][nf][1]);
-                *p = BETA1 ? __hadd2(*p, v) : v;
-            }
-            if (row_hi < rows) {
-                __half2* p = reinterpret_cast<__half2*>(&C[(static_cast<size_t>(row_hi) * N) + col]);
-                __half2 v = __floats2half2_rn(acc[mf][nf][2], acc[mf][nf][3]);
-                *p = BETA1 ? __hadd2(*p, v) : v;
-            }
-        }
-    }
+    q4k_store_tile<BETA1, SPLITK, kMF, kNF>(acc, C, split_out + (SPLITK ? blockIdx.z * size_t{1} * M * N : 0),
+                                            base_m + (warp_m * kTileM) + rl,
+                                            base_n + (warp_n * kTileN) + (cl * 2), rows, N);
 }
 
-// Explicit instantiations launched by the dispatch in mmq_q8_imma.cu.
-template __global__ void mmq_imma_q4k_raw_kernel<32, false>(const int8_t*, const __half*,
-                                                           const float*, const uint8_t*, __half*,
-                                                           int, int, int, const int32_t*, size_t);
-template __global__ void mmq_imma_q4k_raw_kernel<128, true>(const int8_t*, const __half*,
-                                                           const float*, const uint8_t*, __half*,
-                                                           int, int, int, const int32_t*, size_t);
-template __global__ void mmq_imma_q4k_raw_kernel<128, false>(const int8_t*, const __half*,
-                                                            const float*, const uint8_t*, __half*,
-                                                            int, int, int, const int32_t*, size_t);
+// Explicit instantiations (cross-TU template declared in mmq_q8_imma_internal.cuh).
+#define IMP_Q4K_INST(BM, B1, SK)                                                                             \
+    template __global__ void mmq_imma_q4k_raw_kernel<BM, B1, SK>(const int8_t*, const __half*, const float*, \
+                                                                 const uint8_t*, __half*, int, int, int,     \
+                                                                 const int32_t*, size_t, float*, int);
+IMP_Q4K_INST(32, false, false)
+IMP_Q4K_INST(32, true, false)
+IMP_Q4K_INST(32, false, true)
+IMP_Q4K_INST(128, true, false)
+IMP_Q4K_INST(128, false, false)
+#undef IMP_Q4K_INST
+
+// Q4_K: GGUF 144-B blocks read in place. Dense M <= 32 runs BM=32 tiles (per row bit-identical to
+// BM=128), K-split when allow_split (a split changes the k order: never under runtime.deterministic).
+bool launch_q4k(const uint8_t* w4, __half* out_f16, int M, int N, int K, dim3 grid, bool small_m,
+                const int32_t* d_offsets, float beta, bool allow_split, bool capturing, cudaStream_t stream) {
+    const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 256);
+    using Q4Kernel = void (*)(const int8_t*, const __half*, const float*, const uint8_t*, __half*, int, int,
+                              int, const int32_t*, size_t, float*, int);
+    const Q4Kernel k32 = mmq_imma_q4k_raw_kernel<32, false>;
+    const Q4Kernel k32b = mmq_imma_q4k_raw_kernel<32, true>;
+    const Q4Kernel k32s = mmq_imma_q4k_raw_kernel<32, false, true>;
+    const Q4Kernel k128b = mmq_imma_q4k_raw_kernel<128, true>;
+    const Q4Kernel k128 = mmq_imma_q4k_raw_kernel<128, false>;
+    static bool smem_set = false;
+    if (!smem_set)
+        smem_set = imma_smem_opt_in(reinterpret_cast<const void*>(k32), q4k_smem_bytes(32)) &&
+                   imma_smem_opt_in(reinterpret_cast<const void*>(k32b), q4k_smem_bytes(32)) &&
+                   imma_smem_opt_in(reinterpret_cast<const void*>(k32s), q4k_smem_bytes(32)) &&
+                   imma_smem_opt_in(reinterpret_cast<const void*>(k128b), q4k_smem_bytes(128)) &&
+                   imma_smem_opt_in(reinterpret_cast<const void*>(k128), q4k_smem_bytes(128));
+    if (!smem_set)
+        return false;
+    const bool beta1 = beta == 1.0f;
+    if (small_m && d_offsets == nullptr && allow_split) {
+        const int ksteps = K / kQ4kBK;
+        const int s = imma_dense_splits(N, ksteps);
+        const int per = (ksteps + s - 1) / s;
+        const int used = (ksteps + per - 1) / per;
+        const size_t slice = static_cast<size_t>(M) * N;
+        if (used > 1 && imma_ensure_splitk(slice * used, capturing)) {
+            k32s<<<dim3(grid.x, 1, used), kThreads, q4k_smem_bytes(32), stream>>>(
+                g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w4, out_f16, M, N, K, nullptr,
+                w_stride_blocks, g_imma_splitk.buf, per);
+            IMP_CUDA_CHECK_LAUNCH();
+            const int total = static_cast<int>(slice);
+            imma_splitk_finalize(used, total, out_f16, beta1, stream);
+            return true;
+        }
+    }
+    const Q4Kernel k = small_m ? (beta1 ? k32b : k32) : (beta1 ? k128b : k128);
+    k<<<grid, kThreads, q4k_smem_bytes(small_m ? 32 : 128), stream>>>(g_imma_act.xs8, g_imma_act.xscale,
+                                                                      g_imma_act.xrowsum, w4, out_f16, M, N,
+                                                                      K, d_offsets, w_stride_blocks, nullptr,
+                                                                      0);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
 
 }  // namespace imp
