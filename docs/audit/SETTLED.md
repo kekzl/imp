@@ -267,6 +267,17 @@ already proven live before you trust the negative — for the sweep above, `code
 write_kv_cache_fp8_fused_kernel` and `… write_kv_cache_nvfp4_kernel` both correctly returned
 `write_kv_cache`, which is what made the two empty answers meaningful.
 
+**The `cuTensorMapEncodeTiled` driver bug (595.91.07 known issue: Blackwell, allocation
+< 128 KB and a non-dense tensor) does not reach imp (checked 2026-10-22, CUTLASS v4.8.1).**
+
+| Path | Why it is safe |
+|---|---|
+| CUTLASS dense GEMM | CuTe clears descriptor bit 21 after every encode whose first 128 KB are not contiguous (`tma_gmem_prefix_is_contiguous`, since v4.3.4); smallest allocation probed 262144 B |
+| CUTLASS grouped GEMM (`src/compute/gemm_cutlass_grouped_3x.cu`) | Host templates are tile-sized (128x128x128: A 8 KB, D 32 KB, all < 128 KB), so bit 21 is cleared; the device-side `tensormap.replace` writes address, dims and strides only, never bit 21 |
+| smallM grouped (`src/compute/gemm_grouped_nvfp4_smallM.cu`) | Own encode, every tensor dense row-major (row stride = row bytes); the 256 B dummy is a dense 16x16 |
+
+The v4.8.1 `tensormap_replace` fix (`keep_oob_fetch_window`) is in the CuTe DSL; imp builds no DSL kernel.
+
 ## C2 — File and function size: two gate blind spots, one refuted split (2026-09-05)
 
 Full write-up with every number: [`AUDIT_FILESIZE.md`](AUDIT_FILESIZE.md), sections
