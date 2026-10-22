@@ -59,6 +59,9 @@ struct RuntimeConfig {
         bool no_pdl = false;
         bool debug_raw = false;        // raw stream debug
         bool no_vision_graph = false;  // disable SigLIP graph capture
+        // Drop the checkpoint's Qwen3-VL tower at init: image/video parts answer 400, its arena
+        // reservation goes to the expert cache (Flash-Next: 1079 MiB, 396 -> 422 slots/layer).
+        bool no_vision = false;
         // Qwen3-VL patch budget, in 16x16 patches: ceiling that pulls the
         // preprocessor's max_pixels down and sizes every encoder workspace
         // (not a refusal check). 4096 = 1024x1024.

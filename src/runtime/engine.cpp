@@ -725,6 +725,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         IMP_LOG_ERROR("Failed to initialize VRAM allocator");
         return false;
     }
+    engine_internal::drop_vision_tower_if_disabled(*model_, runtime_config_.runtime.no_vision);
     // Engine-persistent (T2) arena, opened before the first tenant
     // (docs/internals/MEMORY.md A3.3): its Region reserves capacity against
     // everything allocated later, notably the pre-dequant cache build (AUDIT
