@@ -63,13 +63,25 @@ __global__ void mmq_imma_q4k_raw_kernel(const int8_t* __restrict__ X_s8,
                                         size_t w_stride_blocks);
 
 // Reads the GGUF 210-B blocks in place (aligned words + funnel shift).
-// SPLITK (dense only): gridDim.z = K-split, fp32 partials to split_out[z][M][N], ks_per_split K-steps each.
-template <int BM, bool BETA1, bool SPLITK = false>
+template <int BM, bool BETA1>
 __global__ void mmq_imma_q6k_raw_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
                                         const uint8_t* __restrict__ Wq6k, __half* __restrict__ out, int M,
                                         int N, int K, const int32_t* __restrict__ expert_offsets,
-                                        size_t w_stride_blocks, float* __restrict__ split_out = nullptr,
-                                        int ks_per_split = 0);
+                                        size_t w_stride_blocks);
+
+// Dense Q6_K at M <= 32 (mmq_q8_imma_q6k_k256.cu): BM=32, one super-block per step, cp.async staging.
+// SPLITK: gridDim.z = K-split, fp32 partials to split_out[z][M][N], sb_per_split super-blocks each.
+template <bool BETA1, bool SPLITK>
+__global__ void mmq_imma_q6k_k256_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
+                                         const uint8_t* __restrict__ Wq6k, __half* __restrict__ out, int M,
+                                         int N, int K, float* __restrict__ split_out, int sb_per_split);
+// Per stage: A [32][272] s8, A scales [32][8] half, B 210-B block windows [128][60 words].
+constexpr int kQ6kK256ARow = 256 + 16;
+constexpr int kQ6kK256BRowW = 60;  // 60 % 32 = 28: rl-lane word reads conflict-free
+constexpr size_t q6k_k256_stage_bytes() {
+    return (32 * kQ6kK256ARow) + (32 * 8 * sizeof(__half)) + (static_cast<size_t>(kBN) * kQ6kK256BRowW * 4);
+}
+constexpr size_t q6k_k256_smem_bytes() { return kStages * q6k_k256_stage_bytes(); }
 
 template <int BM, bool BETA1>
 __global__ void mmq_imma_q51_raw_kernel(const int8_t* __restrict__ X_s8,
