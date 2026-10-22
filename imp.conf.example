@@ -837,6 +837,9 @@ moe_imma_prefill     = true
 # Dense Q4_K via IMMA for weights with no FP16 cache: gemma-3-12b Q4_K_M kernel time
 # pp512 -5.2 %, pp4096 -1.2 %, PPL 9.9819 -> 9.9805. Dense Q6_K is not wired (slower).
 q4k_imma_prefill     = true
+# Dense Q6_K prompt chunks of 2..32 rows via IMMA instead of a per-chunk dequant of every weight:
+# Qwen3-14B-Q6_K pp16 39.6 -> 19.9 ms. Off under runtime.deterministic.
+q6k_imma_smallm      = true
 # With q4k_imma_prefill, non-MoE models: Q4_K projections keep no FP16 copy (prefill IMMA, decode
 # dp4a in place). gemma-3-12b Q4_K_M: FP16 cache 16920 -> 0 MiB. false restores the copy.
 # MoE attention keeps it (Qwen3-30B-A3B pp512 16050 vs 13749 tok/s in place).

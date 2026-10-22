@@ -440,6 +440,65 @@ bool launch_q8_small_grid(const WeightPlanes& w, __half* out_f16, int M, int N, 
     return true;
 }
 
+// K-splits of a dense M <= 32 Q6_K grid: about two waves of CTAs, from N and K only (rows of different
+// M keep their k order). n_tiles * S <= 384 keeps N * S under the kExecImmaSplitkBytes bound.
+int q6k_dense_splits(int N, int K) {
+    const int n_tiles = (N + kBN - 1) / kBN;
+    const int ksteps = K / kBK;
+    int s = 1;
+    while (s < 16 && n_tiles * s * 2 <= 384 && ksteps / (s * 2) >= 2)
+        s *= 2;
+    return s;
+}
+
+// Q6_K: GGUF 210-B blocks read in place (no weight copy). Dense M <= 32 runs K-split BM=32 tiles.
+bool launch_q6k(const uint8_t* w6, __half* out_f16, int M, int N, int K, dim3 grid, bool small_m,
+                const int32_t* d_offsets, float beta, bool capturing, cudaStream_t stream) {
+    const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 256);
+    using Q6Kernel = void (*)(const int8_t*, const __half*, const uint8_t*, __half*, int, int, int,
+                              const int32_t*, size_t, float*, int);
+    const Q6Kernel k32 = mmq_imma_q6k_raw_kernel<32, false>;
+    const Q6Kernel k32b = mmq_imma_q6k_raw_kernel<32, true>;
+    const Q6Kernel k32s = mmq_imma_q6k_raw_kernel<32, false, true>;
+    const Q6Kernel k128b = mmq_imma_q6k_raw_kernel<128, true>;
+    const Q6Kernel k128 = mmq_imma_q6k_raw_kernel<128, false>;
+    static bool smem_set6 = false;
+    static bool smem_set6d = false;
+    if (!ensure_raw_smem(smem_set6, k32, k128b, k128, q6k_smem_bytes(32), q6k_smem_bytes(128)))
+        return false;
+    if (!smem_set6d)
+        smem_set6d = set_max_dyn_smem(k32b, q6k_smem_bytes(32)) && set_max_dyn_smem(k32s, q6k_smem_bytes(32));
+    if (!smem_set6d)
+        return false;
+    const bool beta1 = beta == 1.0f;
+    if (small_m && d_offsets == nullptr) {
+        const int ksteps = K / kBK;
+        const int s = q6k_dense_splits(N, K);
+        const int ks_per_split = (ksteps + s - 1) / s;
+        const int used = (ksteps + ks_per_split - 1) / ks_per_split;
+        const size_t slice = static_cast<size_t>(M) * N;
+        if (used > 1 && imma_ensure_splitk(slice * used, capturing)) {
+            const dim3 sgrid(grid.x, 1, used);
+            k32s<<<sgrid, kThreads, q6k_smem_bytes(32), stream>>>(g_imma_act.xs8, g_imma_act.xscale, w6,
+                                                                  out_f16, M, N, K, nullptr, w_stride_blocks,
+                                                                  g_imma_splitk.buf, ks_per_split);
+            IMP_CUDA_CHECK_LAUNCH();
+            const int total = static_cast<int>(slice);
+            mmq_splitk_finalize_kernel<<<(total + 255) / 256, 256, 0, stream>>>(g_imma_splitk.buf, used,
+                                                                                total, out_f16,
+                                                                                beta1 ? 1 : 0);
+            IMP_CUDA_CHECK_LAUNCH();
+            return true;
+        }
+    }
+    const Q6Kernel k = small_m ? (beta1 ? k32b : k32) : (beta1 ? k128b : k128);
+    k<<<grid, kThreads, q6k_smem_bytes(small_m ? 32 : 128), stream>>>(g_imma_act.xs8, g_imma_act.xscale, w6,
+                                                                      out_f16, M, N, K, d_offsets,
+                                                                      w_stride_blocks, nullptr, 0);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
+
 bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*/, const __half* x_f16,
                  __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
                  const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0,
@@ -455,7 +514,8 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
     imma_quantize_act(x_f16, act_rows, K, stream);
 
     const int grid_m_rows = d_offsets ? h_max_rows : M;
-    const bool small_m = d_offsets && (rows_hint > 0 ? rows_hint : h_max_rows) < 96;
+    // Dense Q6_K at M <= 32 (short prompts): one BM=32 row-block, the weight is read once.
+    const bool small_m = d_offsets ? (rows_hint > 0 ? rows_hint : h_max_rows) < 96 : (qkind == 2 && M <= 32);
     const int bm = small_m ? 32 : 128;
     dim3 grid((N + kBN - 1) / kBN, (grid_m_rows + bm - 1) / bm, ne);
 
@@ -474,25 +534,9 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
         IMP_CUDA_CHECK_LAUNCH();
         return true;
     }
-    if (qkind == 2) {
-        // GGUF 210-B blocks read in place (no weight copy)
-        const uint8_t* w6 = static_cast<const uint8_t*>(w_blocks);
-        const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 256);
-        using Q6Kernel = void (*)(const int8_t*, const __half*, const uint8_t*, __half*, int, int, int,
-                                  const int32_t*, size_t);
-        const Q6Kernel k32 = mmq_imma_q6k_raw_kernel<32, false>;
-        const Q6Kernel k128b = mmq_imma_q6k_raw_kernel<128, true>;
-        const Q6Kernel k128 = mmq_imma_q6k_raw_kernel<128, false>;
-        static bool smem_set6 = false;
-        if (!ensure_raw_smem(smem_set6, k32, k128b, k128, q6k_smem_bytes(32), q6k_smem_bytes(128)))
-            return false;
-        const Q6Kernel k = small_m ? k32 : (beta == 1.0f ? k128b : k128);
-        k<<<grid, kThreads, q6k_smem_bytes(small_m ? 32 : 128), stream>>>(g_imma_act.xs8, g_imma_act.xscale,
-                                                                          w6, out_f16, M, N, K, d_offsets,
-                                                                          w_stride_blocks);
-        IMP_CUDA_CHECK_LAUNCH();
-        return true;
-    }
+    if (qkind == 2)
+        return launch_q6k(static_cast<const uint8_t*>(w_blocks), out_f16, M, N, K, grid, small_m, d_offsets,
+                          beta, capturing, stream);
 
     const auto& w = g_imma_weights[w_blocks];
     const size_t w_stride = static_cast<size_t>(N) * K;
@@ -577,7 +621,9 @@ bool mmq_q4k_imma_gemm(const void* w_q4k_blocks, const __half* x_f16, __half* ou
 
 bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
                        cudaStream_t stream, float beta) {
-    if (M < 64 || N % 2 != 0 || K % 256 != 0) return false;
+    // M 2..32: BM=32 tile; 33..63 stays refused (dense Q6_K above 32 rows loses to dequant + cuBLAS).
+    if (M < 2 || (M > 32 && M < 64) || N % 2 != 0 || K % 256 != 0)
+        return false;
     if (beta != 0.0f && beta != 1.0f) return false;
     return gemm_common(w_q6k_blocks, 2, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
 }

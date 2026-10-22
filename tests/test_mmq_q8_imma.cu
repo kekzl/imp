@@ -300,7 +300,8 @@ inline int q6_element(const uint8_t* bp, int i) {
 }  // namespace q6k_helpers
 
 // GGUF 210-B blocks read in place; odd K/256 alternates the block 4-B parity row to row.
-void run_q6k_dense(int M, int N, int K) {
+// beta1: out holds a residual before the call and must come back as residual + x @ W^T.
+void run_q6k_dense(int M, int N, int K, bool beta1 = false) {
     using namespace q6k_helpers;
     std::vector<uint8_t> W;
     gen_q6k(W, N, K, 311);
@@ -315,7 +316,12 @@ void run_q6k_dense(int M, int N, int K) {
     ASSERT_EQ(cudaMalloc(&d_out, static_cast<size_t>(M) * N * 2), cudaSuccess);
     cudaMemcpy(d_w, W.data(), W.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(d_x, x.data(), x.size() * 2, cudaMemcpyHostToDevice);
-    ASSERT_TRUE(mmq_q6k_imma_gemm(d_w, d_x, d_out, M, N, K, nullptr));
+    std::vector<__half> resid(static_cast<size_t>(M) * N, __float2half(0.0f));
+    if (beta1)
+        for (auto& v : resid)
+            v = __float2half(nd(rng) * 4.0f);
+    cudaMemcpy(d_out, resid.data(), resid.size() * 2, cudaMemcpyHostToDevice);
+    ASSERT_TRUE(mmq_q6k_imma_gemm(d_w, d_x, d_out, M, N, K, nullptr, beta1 ? 1.0f : 0.0f));
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
     std::vector<__half> out(static_cast<size_t>(M) * N);
     cudaMemcpy(out.data(), d_out, out.size() * 2, cudaMemcpyDeviceToHost);
@@ -323,7 +329,7 @@ void run_q6k_dense(int M, int N, int K) {
     const int bpr = K / kSuper;
     double err2 = 0, ref2 = 0;
     for (int n = 0; n < N; ++n) {
-        for (int m = 0; m < M; m += 7) {
+        for (int m = 0; m < M; m += (M <= 32 ? 1 : 7)) {
             double ref = 0;
             for (int sblk = 0; sblk < bpr; ++sblk) {
                 const uint8_t* bp = W.data() + (static_cast<size_t>(n) * bpr + sblk) * kBytes;
@@ -335,7 +341,8 @@ void run_q6k_dense(int M, int N, int K) {
                     ref += static_cast<double>(__half2float(x[(size_t)m * K + sblk * kSuper + i])) *
                            (d * sc[i >> 4] * q6_element(bp, i));
             }
-            const double got = __half2float(out[(size_t)m * N + n]);
+            const double got = static_cast<double>(__half2float(out[(size_t)m * N + n])) -
+                               static_cast<double>(__half2float(resid[(size_t)m * N + n]));
             err2 += (got - ref) * (got - ref);
             ref2 += ref * ref;
         }
@@ -349,6 +356,17 @@ void run_q6k_dense(int M, int N, int K) {
 TEST(MmqQ8Imma, Q6KDenseNRMSE) { run_q6k_dense(128, 128, 512); }
 // K=768: 3 superblocks per row, so the block 4-B parity flips row to row; N=192 leaves a partial tile.
 TEST(MmqQ8Imma, Q6KDenseOddSuperblocksNRMSE) { run_q6k_dense(200, 192, 768); }
+// Short prompt chunks (2..32 rows): BM=32 tile, M-tail zero-filled, beta 1 = o/down residual add.
+TEST(MmqQ8Imma, Q6KDenseSmallM2) { run_q6k_dense(2, 256, 512); }
+TEST(MmqQ8Imma, Q6KDenseSmallM17OddSuperblocks) { run_q6k_dense(17, 192, 768); }
+TEST(MmqQ8Imma, Q6KDenseSmallM32Beta1) { run_q6k_dense(32, 256, 1024, true); }
+TEST(MmqQ8Imma, Q6KDenseSmallM9Beta1) { run_q6k_dense(9, 128, 512, true); }
+TEST(MmqQ8Imma, Q6KDenseDeclinesBetween32And64) {
+    // 33..63 rows: refused, the caller keeps dequant + cuBLAS. Refused before any pointer is read.
+    EXPECT_FALSE(mmq_q6k_imma_gemm(nullptr, nullptr, nullptr, 33, 128, 512, nullptr));
+    EXPECT_FALSE(mmq_q6k_imma_gemm(nullptr, nullptr, nullptr, 63, 128, 512, nullptr));
+    EXPECT_FALSE(mmq_q6k_imma_gemm(nullptr, nullptr, nullptr, 1, 128, 512, nullptr));
+}
 
 // ---- Q5_1 MoE grouped — NRMSE vs dequant reference (asymmetric β-form) ----
 TEST(MmqQ8Imma, MoeGroupedQ51) {

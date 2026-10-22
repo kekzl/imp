@@ -7,6 +7,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Added
 - `runtime.no_vision`: drops a checkpoint's Qwen3-VL tower at init, image and video parts answer 400. Qwen3.8-Flash-Next text-only gets the tower's 1079 MiB arena reservation back: 396 -> 422 expert slots/layer, tg512 85.64 -> 87.26 tok/s (code prompt, 6 of 6 pairs faster over 3 prompts).
 
+### Changed
+- Dense GGUF Q6_K prompts of 2..32 tokens run the Q6_K IMMA kernel (K-split, BM=32) instead of dequantizing every weight per chunk: Qwen3-14B-Q6_K pp2..pp32 39.4-41.4 -> 19.7-21.2 ms, pp512 unchanged, PPL at chunk 32 11.4532 -> 11.4519. `gemm.q6k_imma_smallm`, off under `runtime.deterministic`.
+
 ## [0.57.0] - 2026-10-21
 
 ### Changed

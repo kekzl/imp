@@ -42,8 +42,8 @@ void mmq_imma_act_forget();
                        cudaStream_t stream, float beta = 0.0f, bool allow_splitk = true);
 
 // Dense Q6_K: per-16 scales via half-MMA split (symmetric, no beta term), GGUF 210-B blocks read
-// in place. K % 256 == 0. Not routed: dense Q6_K loses to dequant + fp16-acc cuBLAS
-// (Qwen3-14B-Q6_K pp512 6957 -> 3747 tok/s); kept as the BM=128 test entry.
+// in place. K % 256 == 0. Routed at M 2..32 only (K-split BM=32, gemm.q6k_imma_smallm): above, dequant +
+// fp16-acc cuBLAS wins (Qwen3-14B-Q6_K pp512 6957 vs 3747 tok/s); M >= 64 stays the BM=128 test entry.
 [[nodiscard]] bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
                        cudaStream_t stream, float beta = 0.0f);
 
