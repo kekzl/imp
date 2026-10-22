@@ -88,6 +88,10 @@ static bool dp4a_decode_rows(const Tensor& input, const Tensor& weight, Tensor& 
     return ok;
 }
 
+// Q4_K IMMA K-split at M <= 32: decode/verify rows always; prompt rows (a whole prompt under 33 tokens,
+// chunks keep >= 33 rows) unless runtime.deterministic, since the split changes their k order (#2152).
+static bool q4k_split_ok(bool decode_rows) { return decode_rows || !process_diag_deterministic(); }
+
 // Block-quant weight read in place instead of a per-call dequant to FP16 + cuBLAS: decode rows
 // via dp4a (above); Q4_K prompt rows via IMMA (tier Undefined on gemma-3: every dense Q4_K weight).
 static bool uncached_in_place(const Tensor& input, const Tensor& weight, Tensor& output,
@@ -100,13 +104,16 @@ static bool uncached_in_place(const Tensor& input, const Tensor& weight, Tensor&
         output.stride[0] != weight.shape[0])
         return false;
     // M=1 too: the token GEMV for GGUF GDN projections without the FP8 sidecar (Q8_0) and for
-    // Q4_K weights without an FP16 tier (gemm.q4k_in_place).
-    if ((decode_rows || M == 1) && dp4a_decode_rows(input, weight, output, ctx))
+    // Q4_K weights without an FP16 tier (gemm.q4k_in_place). Q8_0 prompt rows at M <= 32 (a whole
+    // prompt under 33 tokens) too, unless runtime.deterministic: a per-call dequant of the weight dominates.
+    const bool q8_short_prompt = q8 && M <= 32 && !process_diag_deterministic();
+    if ((decode_rows || M == 1 || q8_short_prompt) && dp4a_decode_rows(input, weight, output, ctx))
         return true;
     return q4k && M >= 2 && ctx.q4k_imma_prefill &&
            mmq_q4k_imma_gemm(weight.data, reinterpret_cast<const __half*>(input.data),
                              reinterpret_cast<__half*>(output.data), M, static_cast<int>(weight.shape[0]),
-                             static_cast<int>(weight.shape[1]), ctx.stream, ctx.beta);
+                             static_cast<int>(weight.shape[1]), ctx.stream, ctx.beta,
+                             q4k_split_ok(decode_rows));
 }
 
 // Uncached fallback: safety net for weights without a WeightHandle
@@ -231,8 +238,7 @@ static bool imma_source_prefill(const WeightHandle& h, const Tensor& input, Tens
     if (ctx.q4k_imma_prefill && h.source_qtype == QType::Q4_K && imma_eligible) {
         if (mmq_q4k_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
                               reinterpret_cast<__half*>(output.data), M, static_cast<int>(h.shape[0]),
-                              static_cast<int>(h.shape[1]), ctx.stream, ctx.beta,
-                              /*allow_splitk=*/decode_rows))
+                              static_cast<int>(h.shape[1]), ctx.stream, ctx.beta, q4k_split_ok(decode_rows)))
             return true;
     }
     // Dense Q6_K above 32 rows stays on dequant + f16-acc cuBLAS (the half-MMA split halves the

@@ -3,6 +3,7 @@
 // mmq_imma_q6k_raw_kernel (mmq_q8_imma_q6k.cu). Same per-kb math and order as that kernel at BM=32.
 
 #include "compute/mmq_q8_imma_internal.cuh"
+#include "core/logging.h"
 
 namespace imp {
 
@@ -262,5 +263,44 @@ template __global__ void mmq_imma_q6k_k256_kernel<true, false>(const int8_t*, co
                                                                __half*, int, int, int, float*, int);
 template __global__ void mmq_imma_q6k_k256_kernel<false, true>(const int8_t*, const __half*, const uint8_t*,
                                                                __half*, int, int, int, float*, int);
+
+// Dense M <= 32 on the k256 kernel: K-split when it pays, else one pass. False = smem opt-in failed.
+bool launch_q6k_k256(const uint8_t* w6, __half* out_f16, int M, int N, int K, float beta, bool capturing,
+                     cudaStream_t stream) {
+    using K256 = void (*)(const int8_t*, const __half*, const uint8_t*, __half*, int, int, int, float*, int);
+    const K256 k0 = mmq_imma_q6k_k256_kernel<false, false>;
+    const K256 k1 = mmq_imma_q6k_k256_kernel<true, false>;
+    const K256 ks = mmq_imma_q6k_k256_kernel<false, true>;
+    static bool smem_ok = false;
+    if (!smem_ok)
+        smem_ok = imma_smem_opt_in(reinterpret_cast<const void*>(k0), q6k_k256_smem_bytes()) &&
+                  imma_smem_opt_in(reinterpret_cast<const void*>(k1), q6k_k256_smem_bytes()) &&
+                  imma_smem_opt_in(reinterpret_cast<const void*>(ks), q6k_k256_smem_bytes());
+    if (!smem_ok)
+        return false;
+    const bool beta1 = beta == 1.0f;
+    const int n_tiles = (N + kBN - 1) / kBN;
+    const int sblks = K / 256;
+    const int s = imma_dense_splits(N, sblks);
+    const int per = (sblks + s - 1) / s;
+    const int used = (sblks + per - 1) / per;
+    const size_t slice = static_cast<size_t>(M) * N;
+    if (used > 1 && imma_ensure_splitk(slice * used, capturing)) {
+        ks<<<dim3(n_tiles, 1, used), kThreads, q6k_k256_smem_bytes(), stream>>>(g_imma_act.xs8,
+                                                                                g_imma_act.xscale, w6,
+                                                                                out_f16, M, N, K,
+                                                                                g_imma_splitk.buf, per);
+        IMP_CUDA_CHECK_LAUNCH();
+        const int total = static_cast<int>(slice);
+        imma_splitk_finalize(used, total, out_f16, beta1, stream);
+        return true;
+    }
+    (beta1 ? k1 : k0)<<<dim3(n_tiles, 1, 1), kThreads, q6k_k256_smem_bytes(), stream>>>(g_imma_act.xs8,
+                                                                                        g_imma_act.xscale, w6,
+                                                                                        out_f16, M, N, K,
+                                                                                        nullptr, 0);
+    IMP_CUDA_CHECK_LAUNCH();
+    return true;
+}
 
 }  // namespace imp

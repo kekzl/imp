@@ -53,14 +53,14 @@ constexpr int kQhRow = 32 + 16;
 // Cross-TU template kernel declarations (definitions + explicit instantiations
 // live in the per-format .cu files). External linkage so the dispatch in
 // mmq_q8_imma.cu can launch / cudaFuncSetAttribute them.
-template <int BM, bool BETA1>
-__global__ void mmq_imma_q4k_raw_kernel(const int8_t* __restrict__ X_s8,
-                                        const __half* __restrict__ x_scale,
-                                        const float* __restrict__ x_rowsum,
-                                        const uint8_t* __restrict__ Wq4k, __half* __restrict__ out,
-                                        int M, int N, int K,
-                                        const int32_t* __restrict__ expert_offsets,
-                                        size_t w_stride_blocks);
+// SPLITK (dense only): gridDim.z = K-split, fp32 partials to split_out[z][M][N], ks_per_split 128-K steps
+// each.
+template <int BM, bool BETA1, bool SPLITK = false>
+__global__ void mmq_imma_q4k_raw_kernel(const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale,
+                                        const float* __restrict__ x_rowsum, const uint8_t* __restrict__ Wq4k,
+                                        __half* __restrict__ out, int M, int N, int K,
+                                        const int32_t* __restrict__ expert_offsets, size_t w_stride_blocks,
+                                        float* __restrict__ split_out = nullptr, int ks_per_split = 0);
 
 // Reads the GGUF 210-B blocks in place (aligned words + funnel shift).
 template <int BM, bool BETA1>
@@ -181,6 +181,29 @@ void imma_act_forget();
 // Thread-local one-shot: this thread's next imma_quantize_act skips if imma_act_holds. Only a
 // caller that knows x is unchanged since that quantize may set it (#2469).
 void imma_act_reuse_next(bool on);
+
+// Dynamic smem opt-in of one kernel; false (logged) when the driver refuses.
+[[nodiscard]] bool imma_smem_opt_in(const void* kernel, size_t bytes);
+// Fixed-order sum of `used` fp32 slices of g_imma_splitk into out[total] (beta1: out += sum).
+void imma_splitk_finalize(int used, int total, __half* out, bool beta1, cudaStream_t stream);
+
+// K-splits of a dense M <= 32 raw-kernel grid of `steps` K-steps: about two waves of CTAs, from N and K
+// only (rows of different M keep their k order). n_tiles * S <= 384 keeps N * S under kExecImmaSplitkBytes.
+inline int imma_dense_splits(int N, int steps) {
+    const int n_tiles = (N + kBN - 1) / kBN;
+    int s = 1;
+    while (s < 16 && n_tiles * s * 2 <= 384 && steps / (s * 2) >= 2)
+        s *= 2;
+    return s;
+}
+
+// Q4_K raw launch (mmq_q8_imma_q4k.cu): dense M <= 32 on BM=32 tiles (per row bit-identical to BM=128),
+// K-split when allow_split. Q6_K dense M <= 32 (mmq_q8_imma_q6k_k256.cu). False = smem opt-in failed.
+[[nodiscard]] bool launch_q4k(const uint8_t* w4, __half* out_f16, int M, int N, int K, dim3 grid,
+                              bool small_m, const int32_t* d_offsets, float beta, bool allow_split,
+                              bool capturing, cudaStream_t stream);
+[[nodiscard]] bool launch_q6k_k256(const uint8_t* w6, __half* out_f16, int M, int N, int K, float beta,
+                                   bool capturing, cudaStream_t stream);
 
 }  // namespace imp
 

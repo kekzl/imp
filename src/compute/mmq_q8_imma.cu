@@ -315,20 +315,17 @@ struct RawImmaSet {
     size_t smem32, smem128;
 };
 
-// Kernel triple + dynamic smem per raw qkind (1 = Q4_K, 3 = Q5_1, 4 = Q5_K); false = smem opt-in failed.
+// Kernel triple + dynamic smem per raw qkind (3 = Q5_1, 4 = Q5_K); false = smem opt-in failed.
 bool raw_imma_set(int qkind, RawImmaSet& s) {
-    static bool smem_set4 = false, smem_set5 = false;
+    static bool smem_set5 = false;
     if (qkind == 3) {
         s = {mmq_imma_q51_raw_kernel<32, false>, mmq_imma_q51_raw_kernel<128, true>,
              mmq_imma_q51_raw_kernel<128, false>, 0, 0};
         return true;
     }
-    const bool q5k = qkind == 4;
-    s = q5k ? RawImmaSet{mmq_imma_q5k_raw_kernel<32, false>, mmq_imma_q5k_raw_kernel<128, true>,
-                         mmq_imma_q5k_raw_kernel<128, false>, q5k_smem_bytes(32), q5k_smem_bytes(128)}
-            : RawImmaSet{mmq_imma_q4k_raw_kernel<32, false>, mmq_imma_q4k_raw_kernel<128, true>,
-                         mmq_imma_q4k_raw_kernel<128, false>, q4k_smem_bytes(32), q4k_smem_bytes(128)};
-    return ensure_raw_smem(q5k ? smem_set5 : smem_set4, s.k32, s.k128b, s.k128, s.smem32, s.smem128);
+    s = RawImmaSet{mmq_imma_q5k_raw_kernel<32, false>, mmq_imma_q5k_raw_kernel<128, true>,
+                   mmq_imma_q5k_raw_kernel<128, false>, q5k_smem_bytes(32), q5k_smem_bytes(128)};
+    return ensure_raw_smem(smem_set5, s.k32, s.k128b, s.k128, s.smem32, s.smem128);
 }
 
 // Row-blocks of a dense grid that run as BM=128 tiles; the rest (a last wave under half full, at most one
@@ -440,57 +437,6 @@ bool launch_q8_small_grid(const WeightPlanes& w, __half* out_f16, int M, int N, 
     return true;
 }
 
-// K-splits of a dense M <= 32 Q6_K grid: about two waves of CTAs, from N and K only (rows of different
-// M keep their k order). n_tiles * S <= 384 keeps N * S under the kExecImmaSplitkBytes bound.
-int q6k_dense_splits(int N, int K) {
-    const int n_tiles = (N + kBN - 1) / kBN;
-    const int sblks = K / 256;
-    int s = 1;
-    while (s < 16 && n_tiles * s * 2 <= 384 && sblks / (s * 2) >= 2)
-        s *= 2;
-    return s;
-}
-
-// Dense M <= 32 on the k256 kernel: K-split when it pays, else one pass. False = smem opt-in failed.
-bool launch_q6k_k256(const uint8_t* w6, __half* out_f16, int M, int N, int K, float beta, bool capturing,
-                     cudaStream_t stream) {
-    using K256 = void (*)(const int8_t*, const __half*, const uint8_t*, __half*, int, int, int, float*, int);
-    const K256 k0 = mmq_imma_q6k_k256_kernel<false, false>;
-    const K256 k1 = mmq_imma_q6k_k256_kernel<true, false>;
-    const K256 ks = mmq_imma_q6k_k256_kernel<false, true>;
-    static bool smem_ok = false;
-    if (!smem_ok)
-        smem_ok = set_max_dyn_smem(k0, q6k_k256_smem_bytes()) &&
-                  set_max_dyn_smem(k1, q6k_k256_smem_bytes()) && set_max_dyn_smem(ks, q6k_k256_smem_bytes());
-    if (!smem_ok)
-        return false;
-    const bool beta1 = beta == 1.0f;
-    const int n_tiles = (N + kBN - 1) / kBN;
-    const int sblks = K / 256;
-    const int s = q6k_dense_splits(N, K);
-    const int per = (sblks + s - 1) / s;
-    const int used = (sblks + per - 1) / per;
-    const size_t slice = static_cast<size_t>(M) * N;
-    if (used > 1 && imma_ensure_splitk(slice * used, capturing)) {
-        ks<<<dim3(n_tiles, 1, used), kThreads, q6k_k256_smem_bytes(), stream>>>(g_imma_act.xs8,
-                                                                                g_imma_act.xscale, w6,
-                                                                                out_f16, M, N, K,
-                                                                                g_imma_splitk.buf, per);
-        IMP_CUDA_CHECK_LAUNCH();
-        const int total = static_cast<int>(slice);
-        mmq_splitk_finalize_kernel<<<(total + 255) / 256, 256, 0, stream>>>(g_imma_splitk.buf, used, total,
-                                                                            out_f16, beta1 ? 1 : 0);
-        IMP_CUDA_CHECK_LAUNCH();
-        return true;
-    }
-    (beta1 ? k1 : k0)<<<dim3(n_tiles, 1, 1), kThreads, q6k_k256_smem_bytes(), stream>>>(g_imma_act.xs8,
-                                                                                        g_imma_act.xscale, w6,
-                                                                                        out_f16, M, N, K,
-                                                                                        nullptr, 0);
-    IMP_CUDA_CHECK_LAUNCH();
-    return true;
-}
-
 // Q6_K: GGUF 210-B blocks read in place (no weight copy). Dense M <= 32 runs the k256 kernel.
 bool launch_q6k(const uint8_t* w6, __half* out_f16, int M, int N, int K, dim3 grid, bool small_m,
                 const int32_t* d_offsets, float beta, bool capturing, cudaStream_t stream) {
@@ -536,13 +482,17 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
     imma_quantize_act(x_f16, act_rows, K, stream);
 
     const int grid_m_rows = d_offsets ? h_max_rows : M;
-    // Dense Q6_K at M <= 32 (short prompts): one BM=32 row-block, the weight is read once.
-    const bool small_m = d_offsets ? (rows_hint > 0 ? rows_hint : h_max_rows) < 96 : (qkind == 2 && M <= 32);
+    // Dense Q4_K / Q6_K at M <= 32 (short prompts, decode verify): one BM=32 row-block.
+    const bool small_m = d_offsets ? (rows_hint > 0 ? rows_hint : h_max_rows) < 96
+                                   : ((qkind == 1 || qkind == 2) && M <= 32);
     const int bm = small_m ? 32 : 128;
     dim3 grid((N + kBN - 1) / kBN, (grid_m_rows + bm - 1) / bm, ne);
 
-    if (qkind == 1 || qkind == 3 || qkind == 4) {
-        // Raw-read kernels (Q4_K, Q5_1, Q5_K): zero extra weight VRAM, one argument list.
+    if (qkind == 1)
+        return launch_q4k(static_cast<const uint8_t*>(w_blocks), out_f16, M, N, K, grid, small_m, d_offsets,
+                          beta, allow_splitk, capturing, stream);
+    if (qkind == 3 || qkind == 4) {
+        // Raw-read kernels (Q5_1, Q5_K): zero extra weight VRAM, one argument list.
         const size_t w_stride_blocks = static_cast<size_t>(N) * (K / (qkind == 3 ? 32 : 256));
         RawImmaSet s{};
         if (!raw_imma_set(qkind, s))
@@ -613,6 +563,14 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
 }
 
 }  // namespace
+
+bool imma_smem_opt_in(const void* kernel, size_t bytes) { return set_max_dyn_smem(kernel, bytes); }
+
+void imma_splitk_finalize(int used, int total, __half* out, bool beta1, cudaStream_t stream) {
+    mmq_splitk_finalize_kernel<<<(total + 255) / 256, 256, 0, stream>>>(g_imma_splitk.buf, used, total, out,
+                                                                        beta1 ? 1 : 0);
+    IMP_CUDA_CHECK_LAUNCH();
+}
 
 bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
                       cudaStream_t stream, float beta, bool allow_splitk, bool reuse_act) {
