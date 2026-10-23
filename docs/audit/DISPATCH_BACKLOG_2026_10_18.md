@@ -295,3 +295,9 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | B-43 | DONE | `speculative.mtp_head` -> `attach_mtp_head_file` (Qwen layout, fc [d_model, 2 d_model] checked) between load and mtp_auto in imp-server and imp-cli. Qwen3.8-27B-Q4_K_M + `Qwen3.8-27B-NVFP4-vllm/mtp.safetensors`, server 1 stream, 2 rounds: 77.2 / 77.5 -> 92.9 / 124.6 tok/s (acceptance 67.5-96.5 % by prompt set), 22 ms per verify; degen_suite --quick 51 of 52 (ple-isolation needs >1 concurrent request), 79 % of 1558 drafts accepted, 0 error lines. Mutant (d_model guard off) red in MtpExternalHead.AttachesAMatchingQwenHeadOnly. Not shipped from this batch: per-warp Q4_K header tables (q4k_raw<32> at M=31 53-58 -> 57-61 us), K-split target 768 CTAs (31 streams 1249 -> 1219 tok/s). 32 streams clamp to batch 31 at upload (KV reserve cap total/5 = 6516 MiB vs 890 MiB planned KV): 31 streams 1267 vs 32 streams 851-938 tok/s |
+
+## 2026-10-23 Batch 27: B-44 multi-row GEMV for MTP verify
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-44 | DONE | `RowsOnce<QT>` (Q4_K, Q5_K, Q8_0, IQ4_XS): one block decode per thread, one dot per activation row, same arithmetic order; 4 weight rows per CTA at K >= 8192. Qwen3.8-27B-Q4_K_M + `speculative.mtp_head`, imp-cli tg600 greedy, nsys: Q4_K rows gate/up 40.0 -> 33.6 us (1.49 TB/s), down 45.8 -> 37.2 us, Q8_0 rows 21.6 -> 16.7 us, verify 22.9 -> 20.1 ms, tg 98.9 -> 112.6 tok/s; UD-Q4_K_M verify 22.1 -> 19.7 ms. Mutant (Q4_K min sign) red, 24 failures. Refuted: 4 weight rows per CTA at K=5120 (Q4_K 35.8 -> 40.0 us); FP16-tier GGUF weights at 2..4 rows through the rows kernel instead of cuBLAS (nvjet 0.747 -> 0.016 ms but verify GPU 19.99 -> 20.27 ms); NVFP4 copies of the MTP body (fc, q/k/v/o, MLP; 227.8 MiB): verify 19.74-19.92 -> 19.35-19.38 ms but acceptance 74.6 -> 65.7 %, tg 113.8-114.9 -> 105.4-105.6 tok/s; MLP only: 63.3 %, 101.9 tok/s |
