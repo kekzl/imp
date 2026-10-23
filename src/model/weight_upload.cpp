@@ -155,9 +155,11 @@ static size_t fit_batch_after_pass1(UploadBatchFit& fit, size_t full_reserve) {
     const size_t free_b = g_cached_free_mem, used = g_total_allocated;
     const int b = free_b > 0 ? upload_fitting_batch(fit.reserve, fit.configured, free_b, used) : 0;
     fit.fitted = (b >= 1 && b < fit.configured) ? b : fit.configured;
-    g_vram_reserve = fit.fitted < fit.configured ? upload_reserve_bytes(fit.reserve, b) : full_reserve;
+    g_vram_reserve = b >= 1 ? upload_fit_reserve_bytes(fit.reserve, b, free_b, used) : full_reserve;
     if (fit.fitted < fit.configured)
         IMP_LOG_WARN("%s", upload_batch_clamp_message(fit.reserve, fit.configured, b, free_b, used).c_str());
+    else if (const std::string m = upload_kv_trim_message(fit.reserve, b, free_b, used); b >= 1 && !m.empty())
+        IMP_LOG_INFO("%s", m.c_str());
     return g_vram_reserve;
 }
 
