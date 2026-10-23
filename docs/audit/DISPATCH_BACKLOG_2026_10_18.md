@@ -301,3 +301,9 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | B-44 | DONE | `RowsOnce<QT>` (Q4_K, Q5_K, Q8_0, IQ4_XS): one block decode per thread, one dot per activation row, same arithmetic order; 4 weight rows per CTA at K >= 8192. Qwen3.8-27B-Q4_K_M + `speculative.mtp_head`, imp-cli tg600 greedy, nsys: Q4_K rows gate/up 40.0 -> 33.6 us (1.49 TB/s), down 45.8 -> 37.2 us, Q8_0 rows 21.6 -> 16.7 us, verify 22.9 -> 20.1 ms, tg 98.9 -> 112.6 tok/s; UD-Q4_K_M verify 22.1 -> 19.7 ms. Mutant (Q4_K min sign) red, 24 failures. Refuted: 4 weight rows per CTA at K=5120 (Q4_K 35.8 -> 40.0 us); FP16-tier GGUF weights at 2..4 rows through the rows kernel instead of cuBLAS (nvjet 0.747 -> 0.016 ms but verify GPU 19.99 -> 20.27 ms); NVFP4 copies of the MTP body (fc, q/k/v/o, MLP; 227.8 MiB): verify 19.74-19.92 -> 19.35-19.38 ms but acceptance 74.6 -> 65.7 %, tg 113.8-114.9 -> 105.4-105.6 tok/s; MLP only: 63.3 %, 101.9 tok/s |
+
+## 2026-10-23 Batch 28: B-45 MTP draft attention
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-45 | DONE (GPU re-run of the final refactor open) | `src/compute/mtp_attn_scan.cu`: warp per K row, warps split P*V, 512 threads; split-K (<= 32 CTAs per head) past 512 rows; smem opt-in once at the device maximum. `mtp_feed_batch`: Q, attention, o_proj, MLP for the last row only. Qwen3.8-27B-Q4_K_M + `speculative.mtp_head`, imp-cli greedy, nsys per call: ~670 rows 107 -> 17.7 us, 6.4k rows 280 -> 34 us (0.75 -> 0.09 ms per verify), drafts unchanged (334 of 448). `AttnScanMatchesSoftmaxReference`: FP64 reference, 1..20003 rows; mutants 16 / 6 red. Found on the way: a 64-row test workspace lowered the process-wide smem limit for later scans. Refuted on the way: 1024 threads per CTA (register limit, launch refused) |
