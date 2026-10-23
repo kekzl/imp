@@ -325,3 +325,10 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | B-48 | DONE | `try_gdn_alpha_beta_narrow_` drops the `cur_spec_verify_` exclusion (#1977 measured 10 of 3072 outputs 1 FP16 ulp from cuBLAS; verify already ran cuBLAS, not the M=1 decode kernels). Qwen3.8-27B-NVFP4-vllm imp-cli 600 tokens, main vs branch: 102.31-102.90 -> 105.35-106.08 tok/s, verify 18.95-19.06 -> 18.52-18.65 ms; nsys: `gemm_f16_narrow_smallm_kernel` 8256 launches over 149 verifies, the 64x8 nvjet split-K kernel gone. degen_suite --quick at max_batch_size=1: 52 checks, 0 FAIL, 1 skip (prefix-snapshot resend), 2331 of 2809 drafts accepted, 0 error lines |
+
+## 2026-10-23 Batch 32: B-49 producer quantize in verify
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-49 | DONE | `smallm_producer_xq_` drops the `cur_spec_verify_` exclusion. Qwen3.8-27B-NVFP4-vllm imp-cli 600 tokens, main vs branch: 102.31-102.90 -> 104.82-105.18 tok/s, verify 18.95-19.06 -> 18.54-18.60 ms, accepted 291 / emitted 597 in both arms (same text). degen_suite --quick at max_batch_size=1: 52 of 52, 2832 of 3491 drafts accepted, 0 error lines. Refuted on the way: `residual_beta1_nvfp4_ok_` in verify as well (104.54-105.05 tok/s, flat; matches #1793) |
+| B-49 note | REFUTED | Per-row FP8 copies of the MTP body (fc, q/k/v/o, MLP; 405.2 MiB, `gemv_fp8_rowscale`), 2 runs per arm: Q4_K_M + external head 114.93-115.55 vs 116.03-116.35 tok/s (accepted 330 vs 334), NVFP4 106.11-106.36 vs 105.25-105.77 tok/s (288 vs 294); verify only 0.1-0.5 ms shorter, acceptance -0.8..-2 pp |

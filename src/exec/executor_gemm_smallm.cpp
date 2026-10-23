@@ -110,7 +110,7 @@ void GraphExecutor::allocate_smallm_scratch(cudaStream_t stream) {
 
 uint8_t* GraphExecutor::smallm_producer_xq_(TensorID consumer_id, int M, int K, cudaStream_t stream,
                                             uint8_t** scales_out) {
-    if (!dispatch_policy().gemm.nvfp4_smallm || !dispatch_policy().gemm.nvfp4_smallm_a4 || cur_spec_verify_ ||
+    if (!dispatch_policy().gemm.nvfp4_smallm || !dispatch_policy().gemm.nvfp4_smallm_a4 ||
         overlap_prefill_active_)
         return nullptr;
     if (M < 2 || M > 32 || K <= 0 || (K & 255) != 0)
