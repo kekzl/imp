@@ -10,7 +10,9 @@
 #include "core/dispatch_policy.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
+#include "compute/mmq_q8_imma.h"
 #include "exec/executor.h"
+#include "exec/gemm_context.h"
 #include "exec/workspace_sizes.h"
 #include "quant/nvfp4_gemm.h"
 #include <stdexcept>
@@ -220,6 +222,21 @@ bool GraphExecutor::try_attn_qkv_fused_m1_(const TransformerLayer& ly, const Ten
                      (long long)K, (long long)wq.N, (long long)wk.N, (long long)wv.N);
     }
     return true;
+}
+
+// Uncached Q8_0 gate/alpha/beta at rows 2..32 reuse the IMMA quantize of `no` that ssm_in (any IMMA
+// kind) or the gate wrote. The tag is cleared first, so only this layer's quantize counts (#2416).
+GemmContext GraphExecutor::gdn_q8_reuse_ctx_(int layer, const Tensor& no, const GemmContext& ctx) const {
+    const int n = static_cast<int>(no.shape[0]);
+    const auto& ly = model_->layer(layer);
+    auto raw_q8 = [&](TensorID id) {
+        return id >= 0 && id < static_cast<TensorID>(registry_.size()) &&
+               registry_.handle(id).source_qtype == QType::Q8_0 && !prefill_routes_cutlass_nvfp4_(id, n);
+    };
+    if (n < 2 || n > 32 || !raw_q8(ly.gdn_gate_id) || !raw_q8(ly.gdn_alpha_id) || !raw_q8(ly.gdn_beta_id))
+        return ctx;
+    mmq_imma_act_forget();
+    return ctx.with_act_quant_hint(no.data, n, static_cast<int>(no.shape[1]));
 }
 
 }  // namespace imp

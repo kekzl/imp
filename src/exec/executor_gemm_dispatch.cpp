@@ -92,6 +92,25 @@ static bool dp4a_decode_rows(const Tensor& input, const Tensor& weight, Tensor& 
 // chunks keep >= 33 rows) unless runtime.deterministic, since the split changes their k order (#2152).
 static bool q4k_split_ok(bool decode_rows) { return decode_rows || !process_diag_deterministic(); }
 
+// Q8_0 rows 4..32 via raw IMMA (gemm.q8_0_imma_smallm): the weight is read once, dp4a reads it once per
+// 16 rows. At 2..3 both read it once and dp4a needs one launch less.
+static bool q8_raw_imma_rows(const Tensor& input, const Tensor& weight, Tensor& output,
+                             const GemmContext& ctx) {
+    const int M = static_cast<int>(input.shape[0]);
+    const int K = static_cast<int>(weight.shape[1]);
+    if (M < 4 || M > 32 || !ctx.q8_0_imma_smallm ||
+        !mmq_q8_0_raw_imma_gemm(weight.data, reinterpret_cast<const __half*>(input.data),
+                                reinterpret_cast<__half*>(output.data), M, static_cast<int>(weight.shape[0]),
+                                K, ctx.stream, ctx.beta, ctx.act_quant_hint_matches(input.data, M, K)))
+        return false;
+    static bool s_logged = false;  // activity proof, once
+    if (!s_logged) {
+        s_logged = true;
+        IMP_LOG_INFO("uncached Q8_0 rows M=%d N=%ld K=%d: raw IMMA in place", M, (long)weight.shape[0], K);
+    }
+    return true;
+}
+
 // Block-quant weight read in place instead of a per-call dequant to FP16 + cuBLAS: decode rows
 // via dp4a (above); Q4_K prompt rows via IMMA (tier Undefined on gemma-3: every dense Q4_K weight).
 static bool uncached_in_place(const Tensor& input, const Tensor& weight, Tensor& output,
@@ -107,6 +126,8 @@ static bool uncached_in_place(const Tensor& input, const Tensor& weight, Tensor&
     // Q4_K weights without an FP16 tier (gemm.q4k_in_place). Q8_0 prompt rows at M <= 32 (a whole
     // prompt under 33 tokens) too, unless runtime.deterministic: a per-call dequant of the weight dominates.
     const bool q8_short_prompt = q8 && M <= 32 && !process_diag_deterministic();
+    if (q8 && (decode_rows || q8_short_prompt) && q8_raw_imma_rows(input, weight, output, ctx))
+        return true;
     if ((decode_rows || M == 1 || q8_short_prompt) && dp4a_decode_rows(input, weight, output, ctx))
         return true;
     return q4k && M >= 2 && ctx.q4k_imma_prefill &&

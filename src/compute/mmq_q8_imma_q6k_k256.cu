@@ -159,32 +159,6 @@ __device__ __forceinline__ void q6k_k256_group(float (&acc)[kNF][4], const uint8
     }
 }
 
-// Rows row_lo and row_lo + 8 of the warp tile: fp32 partials (SPLITK) or fp16 (+= when BETA1).
-template <bool BETA1, bool SPLITK, int kNF>
-__device__ __forceinline__ void q6k_k256_store(const float (&acc)[kNF][4], __half* __restrict__ C,
-                                               float* __restrict__ Cs, int row_lo, int col0, int M, int N) {
-#pragma unroll
-    for (int nf = 0; nf < kNF; ++nf) {
-        const int col = col0 + (nf * 8);
-        if (col + 1 >= N)
-            continue;
-#pragma unroll
-        for (int h = 0; h < 2; ++h) {
-            const int row = row_lo + (h * 8);
-            if (row >= M)
-                continue;
-            const size_t o = (static_cast<size_t>(row) * N) + col;
-            if constexpr (SPLITK) {
-                *reinterpret_cast<float2*>(&Cs[o]) = make_float2(acc[nf][2 * h], acc[nf][(2 * h) + 1]);
-            } else {
-                __half2* p = reinterpret_cast<__half2*>(&C[o]);
-                const __half2 v = __floats2half2_rn(acc[nf][2 * h], acc[nf][(2 * h) + 1]);
-                *p = BETA1 ? __hadd2(*p, v) : v;
-            }
-        }
-    }
-}
-
 }  // namespace
 
 template <bool BETA1, bool SPLITK>
@@ -252,9 +226,9 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q6k_k256_kernel(
         __syncthreads();
     }
 
-    q6k_k256_store<BETA1, SPLITK, kNF>(acc, out,
-                                       split_out + (SPLITK ? static_cast<size_t>(blockIdx.z) * M * N : 0),
-                                       arow_lo, base_n + ncol0, M, N);
+    imma_small_m_store<BETA1, SPLITK, kNF>(acc, out,
+                                           split_out + (SPLITK ? static_cast<size_t>(blockIdx.z) * M * N : 0),
+                                           arow_lo, base_n + ncol0, M, N);
 }
 
 template __global__ void mmq_imma_q6k_k256_kernel<false, false>(const int8_t*, const __half*, const uint8_t*,

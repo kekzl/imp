@@ -263,3 +263,9 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | B-37 | DONE | Q4_K M <= 32 on BM=32 tiles + K-split by N and K (not under runtime.deterministic), warps with no live row skip their MMAs; uncached Q8_0 prompt rows M <= 32 via dp4a in place. Same window main vs branch, Qwen3.8-27B-Q4_K_M pp2/16/32/64 53.62/59.35/58.26/63.10 -> 23.03/29.46/38.39/54.52 ms, gemma-3-12b-it-Q4_K_M pp2/16/32 26.11/25.87/26.76 -> 9.31/8.68/10.74 ms; pp512 within main spread (Qwen 136.8-144.7 main, 144.8-145.4 branch). PPL chunk 32 Qwen 5.0758 -> 5.0841 (Q4_K alone 5.0705, Q8_0 dp4a = int8 activations +0.27 %), gemma 11.9341 -> 11.9285; chunk 0 bit-equal. 3 mutants red |
+
+## 2026-10-23 Batch 22: B-38 Q8_0 raw IMMA for GDN projections
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-38 | DONE | `mmq_imma_q8raw_kernel` (8 Q8_0 blocks = 272 B per 256-K step, 16-B cp.async, 2 stages, K-split by N and K) for uncached Q8_0 rows 4..32; GDN gate/alpha/beta reuse one activation quantize. A/B alternating, 3 rounds x 5 reps, Qwen3.8-27B-Q4_K_M pp2/8/16/32/512 off 23.19/24.84/27.82/36.93/133.28 -> on 22.60/23.31/23.54/26.09/132.90 ms. M 2..3 stays dp4a (launch-bound, one launch less). PPL `ppl_4k.txt` chunk 32 5.0841 -> 5.0753, chunk 0 5.0744 both. 8 concurrent greedy chats coherent both arms, 0 error lines. Mutant (even blocks read word-aligned) red in 2 of 4 Q8Raw tests |

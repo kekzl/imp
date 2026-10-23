@@ -204,6 +204,37 @@ inline int imma_dense_splits(int N, int steps) {
                               bool capturing, cudaStream_t stream);
 [[nodiscard]] bool launch_q6k_k256(const uint8_t* w6, __half* out_f16, int M, int N, int K, float beta,
                                    bool capturing, cudaStream_t stream);
+// Dense Q8_0 M <= 32 on the GGUF 34-B blocks (mmq_q8_imma_q8raw.cu): K % 256 == 0, w 16-B aligned.
+[[nodiscard]] bool launch_q8_raw(const uint8_t* w8, __half* out_f16, int M, int N, int K, float beta,
+                                 bool capturing, cudaStream_t stream);
+
+// BM=32 raw-kernel epilogue, rows row_lo and row_lo + 8 of the warp tile: fp32 partials (SPLITK) or
+// fp16 (+= when BETA1).
+template <bool BETA1, bool SPLITK, int kNF>
+__device__ __forceinline__ void imma_small_m_store(const float (&acc)[kNF][4], __half* __restrict__ C,
+                                                   float* __restrict__ Cs, int row_lo, int col0, int M,
+                                                   int N) {
+#pragma unroll
+    for (int nf = 0; nf < kNF; ++nf) {
+        const int col = col0 + (nf * 8);
+        if (col + 1 >= N)
+            continue;
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int row = row_lo + (h * 8);
+            if (row >= M)
+                continue;
+            const size_t o = (static_cast<size_t>(row) * N) + col;
+            if constexpr (SPLITK) {
+                *reinterpret_cast<float2*>(&Cs[o]) = make_float2(acc[nf][2 * h], acc[nf][(2 * h) + 1]);
+            } else {
+                __half2* p = reinterpret_cast<__half2*>(&C[o]);
+                const __half2 v = __floats2half2_rn(acc[nf][2 * h], acc[nf][(2 * h) + 1]);
+                *p = BETA1 ? __hadd2(*p, v) : v;
+            }
+        }
+    }
+}
 
 }  // namespace imp
 
