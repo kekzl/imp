@@ -56,6 +56,12 @@ void dispatch_dp4a_gemv(QType qtype, const void* W, const block_q8_1* q8_1, cons
         case QType::Q3_K:
             gemv_q3_k_q8_1(W, q8_1, d8, y, M, K, stream);
             break;
+        case QType::IQ4_NL:
+            gemv_iq4_nl_q8_1(W, q8_1, d8, y, M, K, stream);
+            break;
+        case QType::IQ4_XS:
+            gemv_iq4_xs_q8_1(W, q8_1, d8, y, M, K, stream);
+            break;
         default:
             gemv_q8_0_q8_1(W, q8_1, d8, y, M, K, stream);
             break;

@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- Single-stream decode of GGUF files with mixed gate/up types (Unsloth UD) read up_proj in gate's format: Qwen3.8-27B-UD-Q4_K_M PPL at prefill chunk 1 248320 -> 5.0855, first chat turn no longer `We<|endoftext|>...`. IQ4_NL/IQ4_XS get native dp4a GEMVs, uncached dp4a types a token GEMV: tg 45.1 -> 87.4 tok/s.
+
 ### Added
 - `runtime.no_vision`: drops a checkpoint's Qwen3-VL tower at init, image and video parts answer 400. Qwen3.8-Flash-Next text-only gets the tower's 1079 MiB arena reservation back: 396 -> 422 expert slots/layer, tg512 85.64 -> 87.26 tok/s (code prompt, 6 of 6 pairs faster over 3 prompts).
 

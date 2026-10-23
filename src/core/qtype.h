@@ -57,13 +57,12 @@ enum class QType : uint16_t {
         case QType::Q4_K:
         case QType::Q3_K:
         case QType::Q2_K:
+        case QType::IQ4_NL:  // native dp4a GEMV, 4.25-4.5 bits: NVFP4 saves nothing
+        case QType::IQ4_XS:
             return decode_all;
         case QType::IQ3_S:
-        case QType::IQ4_NL:
-        case QType::IQ4_XS:
-            // i-quants have no dp4a/MMVQ decode kernel: without the NVFP4 decode cache
-            // they fall to dequant->cuBLAS GEMV (uncapturable under graph capture,
-            // ~2x slower). Similar bit-width to Q4_K, but here NVFP4 is the only fast decode path.
+            // No dp4a/MMVQ decode kernel: without the NVFP4 decode cache it falls to
+            // dequant->cuBLAS GEMV (uncapturable under graph capture, ~2x slower).
             return true;
         default:
             return false;

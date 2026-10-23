@@ -21,7 +21,7 @@ namespace imp {
 static constexpr int kSmemQ8Stride = 9;
 
 // File-local tag enum for template dispatch (distinct from imp::QType).
-enum class DPQTag { Q4_0, Q8_0, Q6_K, Q4_K, Q5_K, Q2_K, Q3_K, Q5_1 };
+enum class DPQTag { Q4_0, Q8_0, Q6_K, Q4_K, Q5_K, Q2_K, Q3_K, Q5_1, IQ4_NL, IQ4_XS };
 
 // ============================================================================
 // Helper device functions (moved from gemm.cu, unchanged)

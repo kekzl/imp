@@ -5,6 +5,7 @@
 // WeightHandle-keyed GEMM dispatch (gemm_via_handle_) and its uncached
 // dequant->cuBLAS safety-net fallback, pulled out of the kernel grab-bag.
 #include "exec/executor_kernels.h"
+#include "exec/executor_gemv_helpers.h"
 #include "exec/gemm_context.h"
 #include "exec/gemm_dispatch_fallback.h"
 #include "exec/gemm_kernel_registry.h"
@@ -137,6 +138,34 @@ static bool uncached_in_place(const Tensor& input, const Tensor& weight, Tensor&
                              q4k_split_ok(decode_rows));
 }
 
+// M=1 token GEMV on the other dp4a GGUF types (IQ4_XS, Q5_K, Q6_K, ...), beta 0 or the beta=1 residual
+// form in place (y = W x + y). The dequant below rebuilt the whole weight per token (UD-Q4_K_M down).
+static bool dp4a_token_gemv(const Tensor& input, const Tensor& weight, Tensor& output,
+                            const GemmContext& ctx) {
+    const auto* qs = ctx.qscratch;
+    const int N = static_cast<int>(weight.shape[0]);
+    const int K = static_cast<int>(weight.shape[1]);
+    if (input.shape[0] != 1 || !is_dp4a_qtype(weight.qtype) || weight.dropped_source ||
+        ctx.gemm_no_dp4a_gemv || (ctx.beta != 0.0f && ctx.beta != 1.0f) || input.qtype != QType::F16 ||
+        output.qtype != QType::F16 || qs == nullptr || qs->q8_1_buf == nullptr || qs->d8_buf == nullptr ||
+        K % 32 != 0 || K / 32 > qs->q8_1_max_blocks)
+        return false;
+    auto* q8 = static_cast<block_q8_1*>(qs->q8_1_buf);
+    auto* y = static_cast<half*>(output.data);
+    quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8, qs->d8_buf, K, ctx.stream);
+    if (ctx.beta == 1.0f)
+        dispatch_gemv_residual(weight.qtype, weight.data, q8, qs->d8_buf, y, y, N, K, ctx.stream);
+    else
+        dispatch_dp4a_gemv(weight.qtype, weight.data, q8, qs->d8_buf, y, N, K, ctx.stream);
+    static bool s_logged[2] = {};  // activity proof per beta, once each
+    if (!s_logged[ctx.beta == 1.0f]) {
+        s_logged[ctx.beta == 1.0f] = true;
+        IMP_LOG_INFO("uncached %s token GEMV N=%d K=%d beta=%.0f: dp4a in place", qtype_name(weight.qtype), N,
+                     K, ctx.beta);
+    }
+    return true;
+}
+
 // Uncached fallback: safety net for weights without a WeightHandle
 // (kInvalidTensorID, budget-exhausted) and for M=1 beta!=0 residual-add.
 void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, Tensor& output,
@@ -148,7 +177,8 @@ void gemm_dispatch_uncached_fallback(const Tensor& input, const Tensor& weight, 
 
     const QType qtype = weight.qtype;
     const int M = static_cast<int>(input.shape[0]);
-    if (uncached_in_place(input, weight, output, ctx, decode_rows))
+    if (uncached_in_place(input, weight, output, ctx, decode_rows) ||
+        dp4a_token_gemv(input, weight, output, ctx))
         return;
 
     if (ctx.beta != 0.0f) {
