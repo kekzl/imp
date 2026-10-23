@@ -724,6 +724,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path) {
         state.model = nullptr;
         return msg;
     }
+    imp::tools::mtp_attach_external_head(*state.model->model, state.runtime_config, mtp_k);
     // Resolve the pair against what the load produced, BEFORE the pending
     // config is stashed for Engine::init below.
     imp::tools::mtp_auto_finalize(state.runtime_config, mtp_k,

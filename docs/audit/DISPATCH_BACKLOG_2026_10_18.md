@@ -289,3 +289,9 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | B-41 | DONE | nsys imp-server at 32 streams, Qwen3.8-27B-Q4_K_M: `gemm_qk_dp4a_dense_kernel<Q4_K>` 74 % (392 / 560 us per call: K=17408 fits 4 rows per weight pass). Q4_K decode rows on `mmq_imma_q4k_raw_kernel<32>` (K-split): 32-stream aggregate 288 -> 938 tok/s, UD-Q4_K_M 533 -> 875. Uncached Q8_0 / Q4_K M=1 on `dp4a_token_gemv`: tg32 76.65 -> 77.44, PPL chunk 1 5.0863 -> 5.0798. UD nextn block as MTP head (FP16 on upload, 928 MiB): 1 stream mtp_k 0 86.1 -> auto 95.5 tok/s, 69.6 % accepted, 22.2 ms per verify vs 11.7 ms per plain step. 8 concurrent chats coherent on both GGUFs. Measurement trap: `tools/analysis/conc_client.py` defaults to model Qwen3.8-27B-NVFP4-vllm and the server swaps to it: pass `MODEL_NAME`. Refuted: Q4_K BM=64 tiles for prompts above 32 rows, pp512 129.5 -> 144.4 ms |
+
+## 2026-10-23 Batch 26: B-43 external MTP head for GGUF
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-43 | DONE | `speculative.mtp_head` -> `attach_mtp_head_file` (Qwen layout, fc [d_model, 2 d_model] checked) between load and mtp_auto in imp-server and imp-cli. Qwen3.8-27B-Q4_K_M + `Qwen3.8-27B-NVFP4-vllm/mtp.safetensors`, server 1 stream, 2 rounds: 77.2 / 77.5 -> 92.9 / 124.6 tok/s (acceptance 67.5-96.5 % by prompt set), 22 ms per verify; degen_suite --quick 51 of 52 (ple-isolation needs >1 concurrent request), 79 % of 1558 drafts accepted, 0 error lines. Mutant (d_model guard off) red in MtpExternalHead.AttachesAMatchingQwenHeadOnly. Not shipped from this batch: per-warp Q4_K header tables (q4k_raw<32> at M=31 53-58 -> 57-61 us), K-split target 768 CTAs (31 streams 1249 -> 1219 tok/s). 32 streams clamp to batch 31 at upload (KV reserve cap total/5 = 6516 MiB vs 890 MiB planned KV): 31 streams 1267 vs 32 streams 851-938 tok/s |

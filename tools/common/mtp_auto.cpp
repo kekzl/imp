@@ -1,6 +1,8 @@
 #include "mtp_auto.h"
 
 #include "core/logging.h"
+#include "model/mtp_head.h"
+#include "model/safetensors_loader.h"
 
 namespace imp::tools {
 
@@ -65,6 +67,12 @@ void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, in
         // load): say so, and leave the n-gram matcher alone.
         IMP_LOG_INFO("speculative.mtp_k: auto -> off (this checkpoint ships no loadable MTP head)");
     }
+}
+
+void mtp_attach_external_head(Model& model, const RuntimeConfig& cfg, int requested_k) {
+    if (requested_k <= 0 || cfg.speculative.mtp_head.empty() || (model.mtp_ && model.mtp_->loaded))
+        return;
+    (void)attach_mtp_head_file(model, cfg.speculative.mtp_head);
 }
 
 }  // namespace imp::tools

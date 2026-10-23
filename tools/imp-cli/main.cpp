@@ -156,6 +156,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Error loading model: %s\n", imp_error_string(err));
         return imp::tools::exit_code_for(err);
     }
+    imp::tools::mtp_attach_external_head(*model->model, runtime_cfg, mtp_k);
     // What the load produced decides the pair: a checkpoint without a head must
     // not end up with ngram off and nothing drafting (mtp_auto_after_load).
     mtp_k = imp::tools::mtp_auto_after_load(runtime_cfg, mtp_k,

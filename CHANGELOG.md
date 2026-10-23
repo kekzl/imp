@@ -8,6 +8,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Single-stream decode of GGUF files with mixed gate/up types (Unsloth UD) read up_proj in gate's format: Qwen3.8-27B-UD-Q4_K_M PPL at prefill chunk 1 248320 -> 5.0855, first chat turn no longer `We<|endoftext|>...`. IQ4_NL/IQ4_XS get native dp4a GEMVs, uncached dp4a types a token GEMV: tg 45.1 -> 87.4 tok/s.
 
 ### Added
+- `speculative.mtp_head`: a GGUF without an MTP block takes the Qwen `mtp.*` head of the same base model from a .safetensors file. ggml-org Qwen3.8-27B-Q4_K_M with the NVFP4 export's `mtp.safetensors`: 1-stream server decode 77.2 / 77.5 -> 92.9 / 124.6 tok/s, 79 % of drafts accepted.
 - GGUF MTP: the nextn block of Unsloth UD Qwen3.8 GGUFs loads as the MTP head (`speculative.mtp_k` auto, single stream, +928 MiB FP16). Qwen3.8-27B-UD-Q4_K_M 1-stream server decode 86.1 -> 95.5 tok/s, 69.6 % of drafts accepted.
 - `runtime.no_vision`: drops a checkpoint's Qwen3-VL tower at init, image and video parts answer 400. Qwen3.8-Flash-Next text-only gets the tower's 1079 MiB arena reservation back: 396 -> 422 expert slots/layer, tg512 85.64 -> 87.26 tok/s (code prompt, 6 of 6 pairs faster over 3 prompts).
 

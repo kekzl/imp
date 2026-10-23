@@ -486,6 +486,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     B("speculative.burst_rearm", cfg.speculative.burst_rearm);
     B("speculative.hybrid", cfg.speculative.hybrid);
     I("speculative.mtp_k", cfg.speculative.mtp_k);
+    S("speculative.mtp_head", cfg.speculative.mtp_head);
     B("speculative.mtp_adaptive_k", cfg.speculative.mtp_adaptive_k);
     B("speculative.mtp_nvfp4_head", cfg.speculative.mtp_nvfp4_head);
     F("speculative.mtp_econ_min_emit", cfg.speculative.mtp_econ_min_emit);

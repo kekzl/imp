@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 namespace imp {
 
@@ -13,6 +14,17 @@ namespace imp {
 // uploaded). Default false skips it entirely (spec-decode unavailable); only pass true when
 // MTP is actually going to be enabled, the head is wasted VRAM otherwise.
 std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_head = false);
+
+// One .safetensors file mmap'd, tensors under their literal names; the caller owns the mapping
+// (munmap or Model::split_mmaps_). False = unreadable or malformed, nothing mapped.
+[[nodiscard]] bool load_raw_safetensors_file(const std::string& path,
+                                             std::unordered_map<std::string, Tensor>& tensors,
+                                             void*& mmap_base, size_t& mmap_size);
+
+// speculative.mtp_head: a Qwen-layout mtp.* file of the same base model as Model::mtp_ when the checkpoint
+// has none (ggml-org Qwen3.8-27B Q4_K_M + the NVFP4 export's mtp.safetensors). False = unreadable, not a
+// Qwen MTP head, or fc not [d_model, 2 d_model]: nothing attached, mapping released.
+[[nodiscard]] bool attach_mtp_head_file(Model& model, const std::string& path);
 
 // True when a model.safetensors.index.json shard name is a bare filename next to the
 // index. Names are file content; a separator escapes the model directory into an

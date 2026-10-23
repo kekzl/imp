@@ -6,6 +6,7 @@
 // Resolution runs in two phases around the load and writes back into RuntimeConfig; the engine
 // only ever sees a plain 0 or >0. Rule and evidence: cfg::Speculative::mtp_k.
 
+#include "model/model.h"
 #include "runtime/config.h"
 
 namespace imp::tools {
@@ -30,5 +31,9 @@ void mtp_auto_finalize(RuntimeConfig& cfg, int requested_k, bool head_loaded, in
 // enable. explicit_flag (--mtp-spec-decode) outranks the config; pass 0 when there is none.
 int mtp_auto_after_load(RuntimeConfig& cfg, int requested_k, bool head_loaded, int explicit_flag,
                         int head_auto_k_cap = 0);
+
+// Between load and phase 2: speculative.mtp_head attaches an external head when MTP was requested
+// (requested_k > 0) and the checkpoint brought none. No-op otherwise.
+void mtp_attach_external_head(Model& model, const RuntimeConfig& cfg, int requested_k);
 
 }  // namespace imp::tools

@@ -1557,4 +1557,15 @@ std::unique_ptr<Model> load_safetensors(const std::string& path, bool load_mtp_h
     return model;
 }
 
+bool load_raw_safetensors_file(const std::string& path, std::unordered_map<std::string, Tensor>& tensors,
+                               void*& mmap_base, size_t& mmap_size) {
+    ShardInfo shard{};
+    imp::llm_compressor::TranslationCounters counters{};
+    if (!load_shard(path, tensors, shard, /*llm_compressor_format=*/false, /*keep_vision=*/false, counters))
+        return false;
+    mmap_base = shard.mmap_base;
+    mmap_size = shard.mmap_size;
+    return true;
+}
+
 }  // namespace imp
