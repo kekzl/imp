@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Fixed
+- The weight-upload batch clamp trims its KV reserve (capped at VRAM/5) down to one sequence at max_seq_len before it drops a slot; the memory plan sizes the pool. Qwen3.8-27B-Q4_K_M at 32 slots was clamped to 31 for 39 MiB: 32 streams 860 -> 1295 tok/s.
 - Single-stream decode of GGUF files with mixed gate/up types (Unsloth UD) read up_proj in gate's format: Qwen3.8-27B-UD-Q4_K_M PPL at prefill chunk 1 248320 -> 5.0855, first chat turn no longer `We<|endoftext|>...`. IQ4_NL/IQ4_XS get native dp4a GEMVs, uncached dp4a types a token GEMV: tg 45.1 -> 87.4 tok/s.
 
 ### Added
