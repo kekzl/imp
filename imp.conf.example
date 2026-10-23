@@ -1109,6 +1109,11 @@ hybrid               = true
 # (chunk-greedy is not the eager trajectory). An explicitly set `ngram` is
 # never overruled by auto.
 mtp_k                = -1
+# External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of the
+# same base model, read only when MTP is requested. ggml-org Qwen3.8-27B-Q4_K_M with the NVFP4 export's
+# mtp.safetensors: 1 stream 77.2 / 77.5 -> 92.9 / 124.6 tok/s.
+# e.g. "/models/Qwen3.8-27B-NVFP4-vllm/mtp.safetensors"; empty = off.
+mtp_head             = ""
 # Adaptive MTP chain depth (AIMD): a fully accepted chain grows the next draft
 # by one row (up to mtp_k), any rejection sheds one (floor 1). Draft-poor
 # prompts converge to k=1 verifies; draft-rich prompts climb back to mtp_k.

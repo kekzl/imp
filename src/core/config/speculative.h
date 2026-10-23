@@ -170,6 +170,10 @@ struct Speculative {
     // (MTP greedy trajectories are not eager-equal, docs/LIMITATIONS.md).
     // Resolution lives in tools/common/mtp_auto.* (both tools decide before an engine exists).
     int mtp_k = -1;
+    // External MTP head for a checkpoint without one: a .safetensors file with the Qwen mtp.* tensors of
+    // the same base model (Qwen3.8-27B: the NVFP4 export's mtp.safetensors serves the ggml-org Q4_K_M).
+    // Read only when MTP is requested and the model brings no head; empty = off.
+    std::string mtp_head;
     // Adaptive MTP chain depth (AIMD): a fully accepted chain grows the next
     // draft by one row (up to mtp_k), any rejection sheds one row (floor 1).
     // The economics guard prices the average depth that actually ran, not the

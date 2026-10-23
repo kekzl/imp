@@ -2,6 +2,9 @@
 #include "model/mtp_head.h"
 
 #include "core/logging.h"
+#include "model/safetensors_loader.h"
+
+#include <sys/mman.h>
 
 #include <string>
 
@@ -206,4 +209,27 @@ MtpHead dispatch_mtp_head(const std::unordered_map<std::string, Tensor>& tm, con
     return head;
 }
 
+bool attach_mtp_head_file(Model& model, const std::string& path) {
+    std::unordered_map<std::string, Tensor> tensors;
+    void* base = nullptr;
+    size_t size = 0;
+    if (!load_raw_safetensors_file(path, tensors, base, size)) {
+        IMP_LOG_WARN("speculative.mtp_head %s: unreadable, no MTP head", path.c_str());
+        return false;
+    }
+    MtpHead head = dispatch_mtp_head(tensors, path, size);
+    const int64_t d = model.config().d_model;
+    if (!head.loaded || head.layout != MtpLayout::Qwen || head.fc.ndim != 2 || head.fc.shape[0] != d ||
+        head.fc.shape[1] != 2 * d) {
+        IMP_LOG_WARN("speculative.mtp_head %s: not a Qwen MTP head for d_model %lld, ignored", path.c_str(),
+                     static_cast<long long>(d));
+        munmap(base, size);
+        return false;
+    }
+    model.split_mmaps_.emplace_back(base, size);
+    model.mtp_ = std::make_unique<MtpHead>(std::move(head));
+    model.mtp_head_available_unloaded_ = false;
+    IMP_LOG_INFO("MTP head attached from %s (speculative.mtp_head)", path.c_str());
+    return true;
+}
 }  // namespace imp

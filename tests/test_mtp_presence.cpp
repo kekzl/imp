@@ -1,10 +1,15 @@
 // MTP name rule lives in three call sites (load_shard divert, modelopt harvest, presence
 // probe); they used to carry three literal prefix copies. A checkpoint one copy sees and
 // another misses is the #1384/#1443 defect class; now one function, pinned here.
+#include "model/model.h"
 #include "model/mtp_head.h"
+#include "model/safetensors_loader.h"
 #include <filesystem>
 #include <cstdlib>
 #include <fstream>
+#include <string>
+#include <utility>
+#include <vector>
 #include <gtest/gtest.h>
 
 namespace fs = std::filesystem;
@@ -117,4 +122,65 @@ TEST(MtpProbe, StaysQuietWithoutAHead) {
     TempDir f("empty");
     EXPECT_FALSE(imp::probe_mtp_head(f.p.string()));
     EXPECT_FALSE(imp::probe_mtp_head(""));
+}
+
+// speculative.mtp_head: a valid Qwen-layout mtp.* file (d_model 8, F16 zeros) attaches to a model of the
+// same d_model and is refused for another d_model or for a file without a head.
+static void write_qwen_mtp_file(const fs::path& file, int d) {
+    const int hd = 4, heads = 2, ff = 16;
+    const std::vector<std::pair<std::string, std::vector<int>>> t = {
+        {"mtp.pre_fc_norm_embedding.weight", {d}},
+        {"mtp.pre_fc_norm_hidden.weight", {d}},
+        {"mtp.fc.weight", {d, 2 * d}},
+        {"mtp.layers.0.input_layernorm.weight", {d}},
+        {"mtp.layers.0.post_attention_layernorm.weight", {d}},
+        {"mtp.layers.0.self_attn.q_proj.weight", {2 * heads * hd, d}},
+        {"mtp.layers.0.self_attn.k_proj.weight", {hd, d}},
+        {"mtp.layers.0.self_attn.v_proj.weight", {hd, d}},
+        {"mtp.layers.0.self_attn.o_proj.weight", {d, heads * hd}},
+        {"mtp.layers.0.self_attn.q_norm.weight", {hd}},
+        {"mtp.layers.0.self_attn.k_norm.weight", {hd}},
+        {"mtp.norm.weight", {d}},
+        {"mtp.layers.0.mlp.gate_proj.weight", {ff, d}},
+        {"mtp.layers.0.mlp.up_proj.weight", {ff, d}},
+        {"mtp.layers.0.mlp.down_proj.weight", {d, ff}},
+    };
+    std::string h = "{";
+    size_t off = 0;
+    for (const auto& [name, shape] : t) {
+        size_t n = 1;
+        std::string s;
+        for (int x : shape) {
+            n *= static_cast<size_t>(x);
+            s += (s.empty() ? "" : ",") + std::to_string(x);
+        }
+        h += (h.size() > 1 ? "," : "") + std::string("\"") + name + "\":{\"dtype\":\"F16\",\"shape\":[" + s +
+             "],\"data_offsets\":[" + std::to_string(off) + "," + std::to_string(off + (2 * n)) + "]}";
+        off += 2 * n;
+    }
+    h += "}";
+    std::ofstream f(file, std::ios::binary);
+    const uint64_t hn = h.size();
+    f.write(reinterpret_cast<const char*>(&hn), sizeof(hn));
+    f.write(h.data(), static_cast<std::streamsize>(hn));
+    const std::vector<char> body(off, 0);
+    f.write(body.data(), static_cast<std::streamsize>(body.size()));
+}
+
+TEST(MtpExternalHead, AttachesAMatchingQwenHeadOnly) {
+    TempDir d("attach");
+    write_qwen_mtp_file(d.p / "mtp.safetensors", 8);
+    imp::Model match;
+    match.config_.d_model = 8;
+    EXPECT_TRUE(imp::attach_mtp_head_file(match, (d.p / "mtp.safetensors").string()));
+    ASSERT_NE(match.mtp_, nullptr);
+    EXPECT_TRUE(match.mtp_->loaded);
+    EXPECT_EQ(match.mtp_->fc.shape[1], 16);
+    imp::Model other;
+    other.config_.d_model = 16;
+    EXPECT_FALSE(imp::attach_mtp_head_file(other, (d.p / "mtp.safetensors").string()));
+    EXPECT_EQ(other.mtp_, nullptr);
+    write_single_file(d.p / "x.safetensors", R"({"model.embed_tokens.weight":{"dtype":"BF16"}})");
+    EXPECT_FALSE(imp::attach_mtp_head_file(match, (d.p / "missing.safetensors").string()));
+    EXPECT_FALSE(imp::attach_mtp_head_file(other, (d.p / "x.safetensors").string()));
 }
