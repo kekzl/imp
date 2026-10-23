@@ -60,7 +60,7 @@ bool GraphExecutor::try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_
         return false;
     if (alpha_id == kInvalidTensorID || beta_id == kInvalidTensorID)
         return false;
-    if (cur_spec_verify_ || lora_ != nullptr || calib_)
+    if (lora_ != nullptr || calib_)
         return false;
     if (!narrow_operands_ok(input, alpha_out, beta_out))
         return false;
