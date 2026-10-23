@@ -11,6 +11,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - Dense GGUF Q6_K prompts of 2..32 tokens run the Q6_K IMMA kernel (K-split, BM=32) instead of dequantizing every weight per chunk: Qwen3-14B-Q6_K pp2..pp32 39.4-41.4 -> 19.7-21.2 ms, pp512 unchanged, PPL at chunk 32 11.4532 -> 11.4519. `gemm.q6k_imma_smallm`, off under `runtime.deterministic`.
 - Dense GGUF Q4_K prompts of 2..32 tokens run BM=32 IMMA tiles with a K-split (off under `runtime.deterministic`), Q8_0 weights without IMMA planes are read in place via dp4a: Qwen3.8-27B-Q4_K_M pp2/pp16 53.6/59.4 -> 23.0/29.5 ms, gemma-3-12b-it-Q4_K_M pp16 25.9 -> 8.7 ms, pp512 unchanged.
 - Dense Q6_K prompts of 2..32 tokens use a new IMMA kernel: one 210-B super-block per K-step via 16-B `cp.async`, empty 16-row halves skipped. Qwen3-14B-Q6_K pp2..pp32 19.7-21.2 -> 9.7-11.9 ms (Q6_K GEMM avg 65.9 -> 29.3 us), pp33 and pp512 unchanged, PPL chunk 32 11.4477.
+- Dense uncached Q8_0 rows 4..32 (GGUF GDN projections) run a raw IMMA kernel on the GGUF blocks, GDN gate/alpha/beta share one activation quantize: Qwen3.8-27B-Q4_K_M pp16/pp32 27.8/36.9 -> 23.5/26.1 ms, pp512 unchanged, PPL chunk 32 5.0841 -> 5.0753. `gemm.q8_0_imma_smallm`.
 
 ## [0.57.0] - 2026-10-21
 

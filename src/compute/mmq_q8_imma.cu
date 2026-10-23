@@ -467,8 +467,8 @@ bool launch_q6k(const uint8_t* w6, __half* out_f16, int M, int N, int K, dim3 gr
     return true;
 }
 
-bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*/, const __half* x_f16,
-                 __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
+bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k 5=q8 raw*/,
+                 const __half* x_f16, __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
                  const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0,
                  bool allow_splitk = true) {
     std::lock_guard<std::mutex> lk(g_imma_mtx);
@@ -480,6 +480,9 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k*
     if (!imma_ensure_act(act_rows, K, capturing))
         return false;
     imma_quantize_act(x_f16, act_rows, K, stream);
+    if (qkind == 5)
+        return launch_q8_raw(static_cast<const uint8_t*>(w_blocks), out_f16, M, N, K, beta, capturing,
+                             stream);
 
     const int grid_m_rows = d_offsets ? h_max_rows : M;
     // Dense Q4_K / Q6_K at M <= 32 (short prompts, decode verify): one BM=32 row-block.
@@ -582,6 +585,19 @@ bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_
     imma_act_reuse_next(reuse_act);  // one-shot, consumed by this call's quantize
     const bool ok = gemm_common(w_q8_blocks, 0, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1, 0,
                                 allow_splitk);
+    imma_act_reuse_next(false);  // gemm_common may return before quantizing
+    return ok;
+}
+
+bool mmq_q8_0_raw_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M, int N,
+                            int K, cudaStream_t stream, float beta, bool reuse_act) {
+    if (M < 2 || M > 32 || N % 2 != 0 || K % 256 != 0 ||
+        (reinterpret_cast<uintptr_t>(w_q8_blocks) & 15u) != 0)
+        return false;
+    if (beta != 0.0f && beta != 1.0f)
+        return false;
+    imma_act_reuse_next(reuse_act);  // one-shot, consumed by this call's quantize
+    const bool ok = gemm_common(w_q8_blocks, 5, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
     imma_act_reuse_next(false);  // gemm_common may return before quantizing
     return ok;
 }

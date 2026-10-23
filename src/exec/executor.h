@@ -1160,6 +1160,7 @@ private:
     // FP16-resident or a shape doesn't fit; caller then issues its two calls.
     [[nodiscard]] bool try_gdn_alpha_beta_narrow_(TensorID alpha_id, TensorID beta_id, const Tensor& input, Tensor& alpha_out,
                                     Tensor& beta_out, cudaStream_t stream);
+    GemmContext gdn_q8_reuse_ctx_(int layer, const Tensor& no, const GemmContext& ctx) const;
     // The NVFP4 view gemm_via_handle_ would hand the M=1 decode GEMV for this
     // weight (decode tier NVFP4 in wcache_.nvfp4, or native CUTLASS_NVFP4 via
     // its source bytes). false = that dispatch would not take the GEMV.

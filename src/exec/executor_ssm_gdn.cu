@@ -330,6 +330,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
     Tensor h = view_tokens(hidden_, n);
     Tensor r = view_tokens(residual_, n);
     Tensor no = view_tokens(norm_out_, n);
+    const GemmContext q8_reuse_ctx = gdn_q8_reuse_ctx_(layer, no, ctx);
 
     // Save residual + RMSNorm; the batched-decode beta=1 out-projection
     // (residual_beta1_nvfp4_ok_) accumulates into h and never reads r, so skip
@@ -618,7 +619,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
             // ssm_in already quantized the same normed input into the activation
             // scratch with no GEMM dispatches in between, so mark it shared (the
             // dispatch verifies against its scratch tag before skipping).
-            GemmContext gate_ctx = ctx;
+            GemmContext gate_ctx = q8_reuse_ctx;
             if (n > 1 && prefill_routes_cutlass_nvfp4_(ly.ssm_in_id, n) &&
                 prefill_routes_cutlass_nvfp4_(ly.gdn_gate_id, n))
                 gate_ctx = ctx.with_act_quant_hint(no.data, n, static_cast<int>(no.shape[1]));
@@ -663,8 +664,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state, cudaStream_t
                 // m1_fused_input: step 2 already wrote both into this layout.
                 if (!m1_fused_input && !try_gdn_alpha_beta_narrow_(ly.gdn_alpha_id, ly.gdn_beta_id, no,
                                                                    alpha_proj_out, beta_proj_out, stream)) {
-                    gemm_via_handle_(ly.gdn_alpha_id, no, alpha_proj_out, ctx);
-                    gemm_via_handle_(ly.gdn_beta_id, no, beta_proj_out, ctx);
+                    gemm_via_handle_(ly.gdn_alpha_id, no, alpha_proj_out, q8_reuse_ctx);
+                    gemm_via_handle_(ly.gdn_beta_id, no, beta_proj_out, q8_reuse_ctx);
                 }
             }
             // Per-element dump: pre-softplus alpha and pre-sigmoid beta projections.
