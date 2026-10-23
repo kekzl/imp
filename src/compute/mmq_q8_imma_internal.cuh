@@ -6,6 +6,7 @@
 // Tile constants, cp.async primitives, cross-TU kernel declarations; definitions live in
 // mmq_q8_imma_q4k/_q6k/_q51.cu, dispatch in mmq_q8_imma.cu. Keep byte-identical.
 
+#include <algorithm>
 #include <mutex>
 #include <unordered_map>
 #include <cuda_fp16.h>
@@ -186,6 +187,38 @@ void imma_act_reuse_next(bool on);
 [[nodiscard]] bool imma_smem_opt_in(const void* kernel, size_t bytes);
 // Fixed-order sum of `used` fp32 slices of g_imma_splitk into out[total] (beta1: out += sum).
 void imma_splitk_finalize(int used, int total, __half* out, bool beta1, cudaStream_t stream);
+// Same for a column block: `used` slices of [rows][cols] into out[rows][ldc].
+void imma_splitk_finalize_cols(int used, int rows, int cols, __half* out, int ldc, bool beta1,
+                               cudaStream_t stream);
+// Split-K scratch floats the engine plans (exec/workspace_sizes.h kExecImmaSplitkBytes = 8 MiB).
+constexpr size_t kImmaSplitkPlannedFloats = (size_t{8} << 20) / sizeof(float);
+
+// Dense BM=128 grid (x = 128-column tiles, y = row blocks) whose last wave is under half full (N=17408 at
+// M=512: 544 tiles = 3 x 170 + 34): the leading nx_big column tiles run plain, the rest K-split into one
+// more wave of `used` splits of `per` steps. used == 0: shape outside the rule.
+struct ImmaWaveTail {
+    int nx_big = 0;
+    int per = 0;
+    int used = 0;
+};
+inline ImmaWaveTail imma_wave_tail(dim3 grid, int M, int N, int ksteps, int n_sms) {
+    const int nx = static_cast<int>(grid.x);
+    const int ny = static_cast<int>(grid.y);
+    const int tiles = nx * ny;
+    if (n_sms <= 0 || tiles <= n_sms || tiles % n_sms == 0 || 2 * (tiles % n_sms) > n_sms)
+        return {};
+    const int nx_big = (tiles / n_sms) * n_sms / ny;
+    const int n_small = N - (nx_big * kBN);
+    if (nx_big <= 0 || n_small <= 0)
+        return {};
+    const size_t slice = static_cast<size_t>(M) * n_small;
+    const int s = std::min(
+        {ksteps, n_sms / ((nx - nx_big) * ny), static_cast<int>(kImmaSplitkPlannedFloats / slice)});
+    if (s < 2)
+        return {};
+    const int per = (ksteps + s - 1) / s;
+    return {nx_big, per, (ksteps + per - 1) / per};
+}
 
 // K-splits of a dense M <= 32 raw-kernel grid of `steps` K-steps: about two waves of CTAs, from N and K
 // only (rows of different M keep their k order). n_tiles * S <= 384 keeps N * S under kExecImmaSplitkBytes.
@@ -210,7 +243,7 @@ inline int imma_dense_splits(int N, int steps) {
 // K % 256 == 0.
 // False = other qkind, nothing launched.
 [[nodiscard]] bool launch_gguf_bm128(int qkind, const uint8_t* w, __half* out_f16, int M, int N, int K,
-                                     float beta, cudaStream_t stream);
+                                     float beta, bool capturing, cudaStream_t stream);
 [[nodiscard]] bool launch_gguf_small_m(int qkind, const uint8_t* w, __half* out_f16, int M, int N, int K,
                                        float beta, bool capturing, cudaStream_t stream);
 

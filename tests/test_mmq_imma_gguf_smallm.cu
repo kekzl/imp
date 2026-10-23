@@ -161,6 +161,7 @@ struct RefFormat {
 const RefFormat kIq4Nl{QType::IQ4_NL, 18, 32, gguf_ref::build_iq4_nl, gguf_ref::ref_dequant_iq4_nl};
 const RefFormat kIq4Xs{QType::IQ4_XS, 136, 256, gguf_ref::build_iq4_xs, gguf_ref::ref_dequant_iq4_xs};
 const RefFormat kQ5K{QType::Q5_K, 176, 256, gguf_ref::build_q5_k, gguf_ref::ref_dequant_q5_k};
+const RefFormat kQ8{QType::Q8_0, 34, 32, gguf_ref::build_q8_0, gguf_ref::ref_dequant_q8_0};
 
 // nrmse of one call vs the fp64 dequant of the same bytes; beta 1 adds onto a random base.
 double ref_nrmse(const RefFormat& f, int N, int K, int M, bool beta1) {
@@ -233,6 +234,17 @@ TEST(MmqQ8Imma, GgufLargeMVsReference) {
     for (const RefFormat* f : {&kIq4Nl, &kIq4Xs, &kQ5K})
         for (auto [M, beta1] : {std::pair{100, false}, {161, true}})
             EXPECT_LT(ref_nrmse(*f, 200, 1024, M, beta1), 1e-2) << qtype_name(f->qt) << " M=" << M;
+}
+
+// BM=128 grid with a short last wave (100 rows, n_sms + n_sms / 8 column tiles): the trailing column tiles
+// run K-split (imma_wave_tail); the whole output stays on the reference.
+TEST(MmqQ8Imma, GgufLargeMWaveTailVsReference) {
+    int n_sms = 0;
+    ASSERT_EQ(cudaDeviceGetAttribute(&n_sms, cudaDevAttrMultiProcessorCount, 0), cudaSuccess);
+    const int N = (n_sms + (n_sms / 8)) * 128;
+    EXPECT_LT(ref_nrmse(kIq4Xs, N, 256, 100, false), 1e-2) << "IQ4_XS";
+    EXPECT_LT(ref_nrmse(kQ5K, N, 256, 100, true), 1e-2) << "Q5_K";
+    EXPECT_LT(ref_nrmse(kQ8, N, 256, 100, true), 1e-2) << "Q8_0";
 }
 
 }  // namespace imp

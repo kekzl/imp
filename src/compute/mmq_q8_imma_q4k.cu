@@ -3,8 +3,10 @@
 // kernel template declared there, launched from mmq_q8_imma.cu dispatch.
 
 #include "compute/mmq_q8_imma_internal.cuh"
+#include "core/device_info.h"
 #include "core/logging.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace imp {
@@ -324,27 +326,58 @@ IMP_Q4K_INST(32, true, false)
 IMP_Q4K_INST(32, false, true)
 IMP_Q4K_INST(128, true, false)
 IMP_Q4K_INST(128, false, false)
+IMP_Q4K_INST(128, false, true)
 #undef IMP_Q4K_INST
+
+namespace {
+
+using Q4Kernel = void (*)(const int8_t*, const __half*, const float*, const uint8_t*, __half*, int, int, int,
+                          const int32_t*, size_t, float*, int);
+
+// imma_wave_tail on the Q4_K grid: leading column tiles unchanged (same bits), the trailing ones K-split.
+// The split changes the k order of those columns (allow_split gate). False: nothing launched.
+bool launch_q4k_wave_tail(const uint8_t* w4, __half* out, int M, int N, int K, dim3 grid, bool beta1,
+                          bool capturing, cudaStream_t stream, Q4Kernel kbig, Q4Kernel ksplit) {
+    const ImmaWaveTail t = imma_wave_tail(grid, M, N, K / kQ4kBK, device_sm_count_or_0());
+    const int n0 = t.nx_big * kBN;
+    if (t.used == 0 || !imma_ensure_splitk(static_cast<size_t>(M) * (N - n0) * t.used, capturing))
+        return false;
+    const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 256);
+    kbig<<<dim3(t.nx_big, grid.y), kThreads, q4k_smem_bytes(128), stream>>>(g_imma_act.xs8, g_imma_act.xscale,
+                                                                            g_imma_act.xrowsum, w4, out, M, N,
+                                                                            K, nullptr, w_stride_blocks,
+                                                                            nullptr, 0);
+    IMP_CUDA_CHECK_LAUNCH();
+    ksplit<<<dim3(grid.x - t.nx_big, grid.y, t.used), kThreads, q4k_smem_bytes(128), stream>>>(
+        g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum,
+        w4 + (static_cast<size_t>(n0) * (K / 256) * 144), out, M, N - n0, K, nullptr, 0, g_imma_splitk.buf,
+        t.per);
+    IMP_CUDA_CHECK_LAUNCH();
+    imma_splitk_finalize_cols(t.used, M, N - n0, out + n0, N, beta1, stream);
+    return true;
+}
+
+}  // namespace
 
 // Q4_K: GGUF 144-B blocks read in place. Dense M <= 32 runs BM=32 tiles (per row bit-identical to
 // BM=128), K-split when allow_split (a split changes the k order: never under runtime.deterministic).
 bool launch_q4k(const uint8_t* w4, __half* out_f16, int M, int N, int K, dim3 grid, bool small_m,
                 const int32_t* d_offsets, float beta, bool allow_split, bool capturing, cudaStream_t stream) {
     const size_t w_stride_blocks = static_cast<size_t>(N) * (K / 256);
-    using Q4Kernel = void (*)(const int8_t*, const __half*, const float*, const uint8_t*, __half*, int, int,
-                              int, const int32_t*, size_t, float*, int);
     const Q4Kernel k32 = mmq_imma_q4k_raw_kernel<32, false>;
     const Q4Kernel k32b = mmq_imma_q4k_raw_kernel<32, true>;
     const Q4Kernel k32s = mmq_imma_q4k_raw_kernel<32, false, true>;
     const Q4Kernel k128b = mmq_imma_q4k_raw_kernel<128, true>;
     const Q4Kernel k128 = mmq_imma_q4k_raw_kernel<128, false>;
+    const Q4Kernel k128s = mmq_imma_q4k_raw_kernel<128, false, true>;
     static bool smem_set = false;
     if (!smem_set)
         smem_set = imma_smem_opt_in(reinterpret_cast<const void*>(k32), q4k_smem_bytes(32)) &&
                    imma_smem_opt_in(reinterpret_cast<const void*>(k32b), q4k_smem_bytes(32)) &&
                    imma_smem_opt_in(reinterpret_cast<const void*>(k32s), q4k_smem_bytes(32)) &&
                    imma_smem_opt_in(reinterpret_cast<const void*>(k128b), q4k_smem_bytes(128)) &&
-                   imma_smem_opt_in(reinterpret_cast<const void*>(k128), q4k_smem_bytes(128));
+                   imma_smem_opt_in(reinterpret_cast<const void*>(k128), q4k_smem_bytes(128)) &&
+                   imma_smem_opt_in(reinterpret_cast<const void*>(k128s), q4k_smem_bytes(128));
     if (!smem_set)
         return false;
     const bool beta1 = beta == 1.0f;
@@ -364,6 +397,10 @@ bool launch_q4k(const uint8_t* w4, __half* out_f16, int M, int N, int K, dim3 gr
             return true;
         }
     }
+    if (!small_m && d_offsets == nullptr && allow_split &&
+        launch_q4k_wave_tail(w4, out_f16, M, N, K, grid, beta1, capturing, stream, beta1 ? k128b : k128,
+                             k128s))
+        return true;
     const Q4Kernel k = small_m ? (beta1 ? k32b : k32) : (beta1 ? k128b : k128);
     k<<<grid, kThreads, q4k_smem_bytes(small_m ? 32 : 128), stream>>>(g_imma_act.xs8, g_imma_act.xscale,
                                                                       g_imma_act.xrowsum, w4, out_f16, M, N,
