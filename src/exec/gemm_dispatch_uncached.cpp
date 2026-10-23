@@ -7,6 +7,7 @@
 #include "compute/gemm.h"
 #include "compute/gemm_q4k.h"
 #include "compute/gemm_q8_0_dense.h"
+#include "compute/gemv_dp4a_rows.h"
 #include "compute/mmq_q8_imma.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
@@ -134,6 +135,23 @@ static bool q6k_rows(const Tensor& input, const Tensor& weight, Tensor& output, 
                              static_cast<int>(weight.shape[1]), ctx.stream, ctx.beta);
 }
 
+// 2..4 rows (MTP verify, 2..4-token prompts): one multi-row dp4a GEMV over the weight, 2 launches; the IMMA
+// tiles cost a quantize, a K-split and a finalize on top.
+static bool dp4a_few_rows(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx) {
+    const auto* qs = ctx.qscratch;
+    const int M = static_cast<int>(input.shape[0]);
+    const int K = static_cast<int>(weight.shape[1]);
+    const size_t blocks = static_cast<size_t>(M) * (K / 32);
+    if (M < 2 || M > 4 || !is_dp4a_qtype(weight.qtype) || (ctx.beta != 0.0f && ctx.beta != 1.0f) ||
+        K % 32 != 0 || qs == nullptr || qs->q8_1_prefill_buf == nullptr || qs->d8_prefill_buf == nullptr ||
+        blocks * sizeof(block_q8_1) > qs->q8_1_prefill_bytes || blocks * sizeof(float) > qs->d8_prefill_bytes)
+        return false;
+    auto* q8 = static_cast<block_q8_1*>(qs->q8_1_prefill_buf);
+    quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8, qs->d8_prefill_buf, M * K, ctx.stream);
+    return gemv_dp4a_rows(weight.qtype, weight.data, q8, qs->d8_prefill_buf, static_cast<half*>(output.data),
+                          static_cast<int>(weight.shape[0]), K, M, ctx.beta == 1.0f, ctx.stream);
+}
+
 bool gemm_uncached_in_place(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx,
                             bool decode_rows) {
     if (!dense_f16_rows(input, weight, output))
@@ -142,6 +160,8 @@ bool gemm_uncached_in_place(const Tensor& input, const Tensor& weight, Tensor& o
     // tokens: the kernel changes at 33 rows (#2152).
     const bool det = process_diag_deterministic();
     const bool short_prompt = input.shape[0] <= 32 && !det;
+    if ((decode_rows || !det) && ctx.gguf_imma_smallm && dp4a_few_rows(input, weight, output, ctx))
+        return true;
     switch (weight.qtype) {
         case QType::Q8_0:
         case QType::Q4_K:

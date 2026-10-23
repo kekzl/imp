@@ -303,6 +303,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/ffn_sparsity_mask.cu
     src/compute/weight_dispatch.cpp
     src/compute/gemm_dp4a.cu
+    src/compute/gemv_dp4a_rows.cu
     src/compute/moe_decode_select.cu
     src/compute/gemm_grouped.cpp
     src/compute/ggml_mmvq.cu
@@ -663,6 +664,7 @@ set_source_files_properties(
     src/compute/mmq_q8_imma.cu
     src/quant/nvfp4_gemm.cu
     src/compute/gemm_dp4a.cu
+    src/compute/gemv_dp4a_rows.cu
     PROPERTIES COMPILE_OPTIONS "-static-global-template-stub=false")
 # Moved from nvcc (host pass -std=c++23: no FMA contraction); g++ -march=x86-64-v3 contracted 6 sites here (#2209).
 set_source_files_properties(
