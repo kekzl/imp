@@ -14,6 +14,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Changed
 - A speculative verify step takes the producer-fused NVFP4 activation quantize of batched decode (the norm writes the small-M GEMM input): Qwen3.8-27B-NVFP4 MTP imp-cli 1 stream 102.3-102.9 -> 104.8-105.2 tok/s, same accepted drafts, degen_suite 52 of 52.
+- GDN alpha/beta of a speculative verify step (2..32 rows) run the one-launch narrow FP16 GEMM instead of two cuBLAS split-K GEMMs: Qwen3.8-27B-NVFP4 MTP imp-cli 1 stream 102.3-102.9 -> 105.4-106.1 tok/s, verify 19.0 -> 18.5-18.7 ms, degen_suite 52 checks 0 FAIL.
 - GGUF IMMA prompt GEMMs whose last wave is under half full (Q4_K, Q8_0, IQ4_XS, Q5_K at BM=128) run the trailing column tiles K-split as one more wave: Qwen3.8-27B pp512 Q4_K_M 129.4 -> 124.2 ms (4124 tok/s), UD-Q4_K_M 140.4 -> 134.0 ms, pp4096 and PPL flat.
 - MTP verify rows (2..4) decode each Q4_K / Q5_K / Q8_0 / IQ4_XS block once for all rows, and reuse the activations across 4 weight rows at K >= 8192: Qwen3.8-27B-Q4_K_M with `speculative.mtp_head`, verify step 22.9 -> 20.1 ms, imp-cli tg600 98.9 -> 112.6 tok/s.
 - MTP draft attention runs warp-parallel with split-K past 512 cache rows; the prefill feed runs Q, attention and MLP for its last row only. Qwen3.8-27B-Q4_K_M + `speculative.mtp_head`, 6.4k-token prompt: prefill 1860-1893 -> 1552-1554 ms, decode 62.2-64.2 -> 74.4 tok/s, same drafts.
