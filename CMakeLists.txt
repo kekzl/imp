@@ -359,7 +359,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/mmq_q8_imma_q5k.cu
     src/compute/mmq_q8_imma_q6k.cu
     src/compute/mmq_q8_imma_q6k_k256.cu
-    src/compute/mmq_q8_imma_q8raw.cu
+    src/compute/mmq_q8_imma_gguf_smallm.cu
     src/compute/mmq_q8_imma_q51.cu
     src/compute/mmq_q8_imma_k128.cu
     src/compute/moe_routing_permute.cu
@@ -490,6 +490,7 @@ set(IMP_EXEC_SOURCES
     src/exec/pre_dequant_phase3_gdn_prefill.cpp
     src/exec/pre_dequant_phase3_moe.cpp
     src/exec/executor_gemm_dispatch.cpp
+    src/exec/gemm_dispatch_uncached.cpp
     src/exec/executor_gemm_released.cpp
     src/exec/activation_calibrator.cu
     src/exec/activation_calibrator_hessian.cu
@@ -652,7 +653,7 @@ set_source_files_properties(
     src/compute/mmq_q8_imma_q5k.cu
     src/compute/mmq_q8_imma_q6k.cu
     src/compute/mmq_q8_imma_q6k_k256.cu
-    src/compute/mmq_q8_imma_q8raw.cu
+    src/compute/mmq_q8_imma_gguf_smallm.cu
     PROPERTIES COMPILE_OPTIONS "-rdc=true")
 # Launchers of those cross-TU templates (and gemm_dp4a.cu: discarded `if constexpr` names) need
 # external host stubs; CUDA 13 defaults to static ones and warns #20280-D (42 warnings).
@@ -1373,7 +1374,7 @@ if(IMP_BUILD_TESTS)
         tests/test_mmq_q8_imma_q5k.cu
         tests/test_mmq_q8_imma_q4k_moe.cu
         tests/test_mmq_q8_imma_q6k.cu
-        tests/test_mmq_q8_imma_q8raw.cu
+        tests/test_mmq_imma_gguf_smallm.cu
         tests/test_mmq_q8_imma_reuse.cu
         tests/test_mmq_q8_imma_tail.cu
         tests/test_weight_dispatch.cu

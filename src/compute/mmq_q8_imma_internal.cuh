@@ -204,9 +204,10 @@ inline int imma_dense_splits(int N, int steps) {
                               bool capturing, cudaStream_t stream);
 [[nodiscard]] bool launch_q6k_k256(const uint8_t* w6, __half* out_f16, int M, int N, int K, float beta,
                                    bool capturing, cudaStream_t stream);
-// Dense Q8_0 M <= 32 on the GGUF 34-B blocks (mmq_q8_imma_q8raw.cu): K % 256 == 0, w 16-B aligned.
-[[nodiscard]] bool launch_q8_raw(const uint8_t* w8, __half* out_f16, int M, int N, int K, float beta,
-                                 bool capturing, cudaStream_t stream);
+// Dense M <= 32 on GGUF blocks in place (mmq_q8_imma_gguf_smallm.cu), qkind 5 Q8_0, 6 IQ4_NL, 7 IQ4_XS,
+// 8 Q5_K: K % 256 == 0, w aligned to the format's copy chunk. False = unknown qkind or smem opt-in failed.
+[[nodiscard]] bool launch_gguf_small_m(int qkind, const uint8_t* w, __half* out_f16, int M, int N, int K,
+                                       float beta, bool capturing, cudaStream_t stream);
 
 // BM=32 raw-kernel epilogue, rows row_lo and row_lo + 8 of the warp tile: fp32 partials (SPLITK) or
 // fp16 (+= when BETA1).

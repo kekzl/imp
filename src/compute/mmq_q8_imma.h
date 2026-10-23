@@ -4,6 +4,8 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 
+#include "core/qtype.h"
+
 namespace imp {
 
 // INT8 IMMA prefill GEMM family (sm_120a) — fused dequant on int8 tensor
@@ -48,11 +50,13 @@ void mmq_imma_act_forget();
 [[nodiscard]] bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
                        cudaStream_t stream, float beta = 0.0f);
 
-// Dense Q8_0 on the GGUF 34-B blocks in place (no planes): M 2..32, K % 256 == 0, w 16-B aligned.
-// K-split by N and K only. Declines otherwise (caller keeps dp4a). reuse_act as in mmq_q8_imma_gemm.
-[[nodiscard]] bool mmq_q8_0_raw_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16,
-                                          int M, int N, int K, cudaStream_t stream, float beta = 0.0f,
-                                          bool reuse_act = false);
+// Dense Q8_0 / IQ4_NL / IQ4_XS / Q5_K on the GGUF blocks in place (no planes): M >= 2 (Q8_0 2..32;
+// 32-row tiles, Q5_K above 32 rows the BM=128 kernel), K % 256 == 0,
+// w 16-B aligned (IQ4_XS 8-B). K-split at M <= 32, by N and K only. Declines otherwise (other qtype too).
+// reuse_act as in mmq_q8_imma_gemm.
+[[nodiscard]] bool mmq_gguf_imma_smallm_gemm(const void* w_blocks, QType qtype, const __half* x_f16,
+                                             __half* out_f16, int M, int N, int K, cudaStream_t stream,
+                                             float beta = 0.0f, bool reuse_act = false);
 
 // MoE grouped prefill GEMM over ne experts in one launch (gridDim.z=ne).
 // w_blocks[ne][N][K] packed GGUF blocks; x_f16[expanded][K] gathered activations

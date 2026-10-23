@@ -844,6 +844,10 @@ q6k_imma_smallm      = true
 # dp4a: Qwen3.8-27B-Q4_K_M pp16/pp32 27.8/36.9 -> 23.5/26.1 ms. Off for prompts under
 # runtime.deterministic.
 q8_0_imma_smallm     = true
+# Dense IQ4_NL / IQ4_XS / Q5_K rows via IMMA on the GGUF blocks instead of a per-call dequant of the
+# weight (Unsloth UD files): Qwen3.8-27B-UD-Q4_K_M pp16/pp512 84.1/162.0 -> 22.9/154.8 ms. Off for
+# prompts under runtime.deterministic.
+gguf_imma_smallm     = true
 # With q4k_imma_prefill, non-MoE models: Q4_K projections keep no FP16 copy (prefill IMMA, decode
 # dp4a in place). gemma-3-12b Q4_K_M: FP16 cache 16920 -> 0 MiB. false restores the copy.
 # MoE attention keeps it (Qwen3-30B-A3B pp512 16050 vs 13749 tok/s in place).
