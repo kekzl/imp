@@ -32,6 +32,11 @@ struct FP8CacheEntry {
     bool native_source = false;
 };
 
+// Packed FP4 (2 per byte) plus one FP8 scale per 16 of an NVFP4 entry; 0 when empty.
+inline size_t nvfp4_result_bytes(const NvFP4QuantResult& r) {
+    return r.packed_data ? (static_cast<size_t>(r.N) * r.K / 2) + (static_cast<size_t>(r.N) * (r.K / 16)) : 0;
+}
+
 // WeightCaches: all pre-quantized weight maps for the inference engine. Replaces the
 // former WeightCacheManager type. All members public for zero-overhead forward-pass
 // access. Lifecycle: allocated during pre_dequant_weights(), freed in free_buffers().
@@ -90,6 +95,9 @@ struct WeightCaches {
     // Source-head bytes Phase 4b returned to the driver, minus the FP8 head (expert-cache regrow).
     size_t lm_head_released_bytes = 0;
     size_t lm_head_fp8_bytes = 0;  // the FP8 head bulk (codes + scales)
+    // MTP draft-only NVFP4 copy of a 16-bit head served as FP8 (speculative.mtp_nvfp4_head): the chain reads
+    // the head once per draft, 682 vs 1213 MiB on Qwen3.8-27B. Verify keeps the FP8 head. Empty = absent.
+    NvFP4QuantResult mtp_lm_head_nvfp4;
     // GDN bytes Phase 4b freed (F16 input packs; with host-resident experts also the F16
     // ssm_in / gdn_gate / ssm_out) and what of them reached the driver: the expert cache grows by it.
     size_t dropped_gdn_bytes = 0;

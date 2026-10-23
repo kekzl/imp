@@ -1613,6 +1613,7 @@ void GraphExecutor::free_buffers() {
         vram_free(vram_alloc_, wcache_.lm_head_fp8_bulk);
         wcache_.lm_head_fp8_bulk = nullptr;
         wcache_.lm_head_fp8 = FP8CacheEntry{};
+        free_nvfp4_result(wcache_.mtp_lm_head_nvfp4);
     }
 
     qscratch_.free(vram_alloc_);

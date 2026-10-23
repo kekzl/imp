@@ -10,6 +10,7 @@
 #include "memory/vram_query.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
+#include "model/mtp_head.h"
 #include "model/nvfp4_module_policy.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
@@ -59,6 +60,25 @@ bool alloc_scale_scratch(float** a, size_t a_count, float** b, size_t b_count, c
         return true;
     IMP_LOG_WARN("%s: scale scratch alloc failed, pass skipped", pass);
     return false;
+}
+
+// FP16 [rows, cols] device head -> NVFP4 with its own tensor scale; false = scratch alloc failed.
+bool quantize_head_nvfp4(const Tensor& lm, NvFP4QuantResult& out, const char* pass, cudaStream_t stream) {
+    float* d_absmax_buf = nullptr;
+    float* d_tscale_buf = nullptr;
+    if (!alloc_scale_scratch(&d_absmax_buf, 1, &d_tscale_buf, 1, pass))
+        return false;
+    Tensor fp16_view(lm.data, QType::F16, 2, lm.shape, /*on_device=*/true);
+    quantize_fp16_to_nvfp4_async(fp16_view, out, d_absmax_buf, d_tscale_buf, stream);
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+    float h_tscale = 1.0f;
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(&h_tscale, d_tscale_buf, sizeof(float), cudaMemcpyDeviceToHost));
+    out.tensor_scale = h_tscale;
+    out.N = lm.shape[0];
+    out.K = lm.shape[1];
+    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
+    return true;
 }
 }  // namespace
 
@@ -204,25 +224,10 @@ void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
         }
     }
 
-    float* d_absmax_buf = nullptr;
-    float* d_tscale_buf = nullptr;
-    if (!alloc_scale_scratch(&d_absmax_buf, 1, &d_tscale_buf, 1, "NVFP4 LM head"))
-        return;
-
-    Tensor fp16_view(lm.data, QType::F16, 2, lm.shape, /*on_device=*/true);
     NvFP4QuantResult result;
-    quantize_fp16_to_nvfp4_async(fp16_view, result, d_absmax_buf, d_tscale_buf, stream);
-    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-
-    float h_tscale = 1.0f;
-    IMP_CUDA_CHECK_LOG(cudaMemcpy(&h_tscale, d_tscale_buf, sizeof(float), cudaMemcpyDeviceToHost));
-    result.tensor_scale = h_tscale;
-    result.N = rows;
-    result.K = cols;
+    if (!quantize_head_nvfp4(lm, result, "NVFP4 LM head", stream))
+        return;
     wcache_->nvfp4[lm.data] = result;
-
-    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
-    IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
 
     // Bytes: FP4 data (2 per byte) + one FP8 scale per 16 elements, integer bytes as before.
     const size_t nvfp4_bytes = (static_cast<size_t>(rows) * cols / 2) +
@@ -239,6 +244,23 @@ void QuantPipeline::nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cud
         IMP_LOG_INFO("lm_head is in quantization_config.ignore; gemm.nvfp4_lm_head=auto "
                      "re-quantizes it at load, set gemm.nvfp4_lm_head=false to serve it at "
                      "checkpoint precision");
+}
+
+// MTP draft head: a 16-bit LM head served as FP8 also gets an NVFP4 copy the draft chain reads (one head
+// pass per drafted token). Verification keeps the FP8 head, so output is unchanged. Qwen3.8-27B-NVFP4
+// MTP: 102.6 -> 118.8 tok/s with NVFP4 on both; main-head NVFP4 alone costs PPL +1.03 %.
+void QuantPipeline::mtp_draft_lm_head_nvfp4_(cudaStream_t stream) {
+    const Tensor& lm = model_->output_proj();
+    const bool mtp_on = model_->mtp_ && model_->mtp_->loaded && dispatch_policy().speculative.mtp_k != 0 &&
+                        dispatch_policy().speculative.mtp_nvfp4_head;
+    if (!mtp_on || wcache_->lm_head_fp8.weight.data == nullptr || wcache_->mtp_lm_head_nvfp4.packed_data ||
+        !lm.data || !lm.on_device || lm.qtype != QType::F16 || lm.ndim != 2 || lm.shape[1] % 16 != 0)
+        return;
+    NvFP4QuantResult& r = wcache_->mtp_lm_head_nvfp4;
+    if (!quantize_head_nvfp4(lm, r, "MTP draft NVFP4 LM head", stream))
+        return;
+    IMP_LOG_INFO("MTP draft LM head: NVFP4 copy of the FP16 head (%.1f MiB), verification stays on FP8",
+                 static_cast<double>(nvfp4_result_bytes(r)) / (1024.0 * 1024.0));
 }
 
 // Quantize the recipe-excluded BF16/FP16 GDN + attention projections of a native-NVFP4

@@ -739,7 +739,7 @@ void QuantPipeline::release_lm_head_source_(cudaStream_t stream,
     }
     // A GGUF head's NVFP4 entry sits in nvfp4_bytes, not nvfp4_lm_head_bytes: price it from its shape
     // (packed N*K/2 + one FP8 scale per 16).
-    size_t price = wcache_->lm_head_fp8_bytes;
+    size_t price = wcache_->lm_head_fp8_bytes + nvfp4_result_bytes(wcache_->mtp_lm_head_nvfp4);
     if (nvfp4_head) {
         const NvFP4QuantResult& e = wcache_->nvfp4.at(head.data);
         price = (static_cast<size_t>(e.N) * static_cast<size_t>(e.K) / 2) +
