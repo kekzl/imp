@@ -320,3 +320,8 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | B-47 | DONE | `mtp_draft_lm_head_nvfp4_`: a 16-bit head served as FP8 gets an NVFP4 copy (682 MiB) while MTP is on (`speculative.mtp_nvfp4_head`, `mtp_k != 0`), built before the source is freed and priced into the release; `lm_head_nvfp4_view` returns it first, the draft skips the FP8 view when an NVFP4 view exists. Qwen3.8-27B-NVFP4 imp-cli 600 tokens, 2 runs per arm: 102.31-102.90 -> 105.48-105.68 tok/s, verify 18.95-19.06 -> 18.27-18.31 ms, 291 -> 289 accepted. degen_suite --quick at max_batch_size=1: 52 of 52, 2874 of 3529 drafts accepted, 0 error lines. Refuted: NVFP4 for the main head too (118.7-118.8 tok/s, but PPL 5.1778 -> 5.2309 deterministic chunk 512) |
+## 2026-10-23 Batch 31: B-48 GDN alpha/beta in verify
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-48 | DONE | `try_gdn_alpha_beta_narrow_` drops the `cur_spec_verify_` exclusion (#1977 measured 10 of 3072 outputs 1 FP16 ulp from cuBLAS; verify already ran cuBLAS, not the M=1 decode kernels). Qwen3.8-27B-NVFP4-vllm imp-cli 600 tokens, main vs branch: 102.31-102.90 -> 105.35-106.08 tok/s, verify 18.95-19.06 -> 18.52-18.65 ms; nsys: `gemm_f16_narrow_smallm_kernel` 8256 launches over 149 verifies, the 64x8 nvjet split-K kernel gone. degen_suite --quick at max_batch_size=1: 52 checks, 0 FAIL, 1 skip (prefix-snapshot resend), 2331 of 2809 drafts accepted, 0 error lines |
