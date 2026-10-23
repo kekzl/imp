@@ -5,11 +5,13 @@
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cmath>
 #include <random>
 #include <vector>
 
 #include "compute/mtp_forward.h"
+#include "compute/mtp_forward_internal.h"
 #include "core/tensor.h"
 #include "model/mtp_head.h"
 
@@ -325,6 +327,72 @@ TEST_F(MtpFeedBatchTest, RefusesUnsupportedOrOverCapacity) {
                                             /*expert_d_ff=*/32, kDff, kNh, kNkv, kHd, kSeq));
     EXPECT_EQ(ws_moe.feed_rows_cap, 0);
     imp::mtp_workspace_free(ws_moe);
+}
+// mtp_attn_scan vs an FP64 softmax reference: Qwen3.8 shape (24/4 heads, head_dim 256) and a
+// 128-dim one, 1 row (direct and split-K) and 3 rows, contexts 1..20003 rows (warp, pass, split tails, split
+// cap).
+TEST_F(MtpFeedBatchTest, AttnScanMatchesSoftmaxReference) {
+    struct Shape {
+        int nh, nkv, hd;
+    };
+    for (const Shape s : {Shape{24, 4, 256}, Shape{8, 2, 128}}) {
+        for (const int base : {0, 36, 699, 4096, 20000}) {
+            for (const int mode : {0, 1, 2}) {  // 1 row, 1 row split-K, 3 rows
+                const int rows = mode == 2 ? 3 : 1;
+                std::mt19937 rng(static_cast<unsigned>((base * 7) + rows + s.hd));
+                const int ctx = base + rows;
+                const auto q = random_h(rng, static_cast<size_t>(rows) * s.nh * s.hd, 1.0f);
+                const auto k = random_h(rng, static_cast<size_t>(ctx) * s.nkv * s.hd, 1.0f);
+                const auto v = random_h(rng, static_cast<size_t>(ctx) * s.nkv * s.hd, 1.0f);
+                const imp::Tensor dq = upload(q, {rows, s.nh * s.hd});
+                const imp::Tensor dk = upload(k, {ctx, s.nkv * s.hd});
+                const imp::Tensor dv = upload(v, {ctx, s.nkv * s.hd});
+                std::vector<__half> out(q.size());
+                const imp::Tensor dout = upload(out, {rows, s.nh * s.hd});
+                const size_t n_part = static_cast<size_t>(s.nh) * 32 * (s.hd + 2);  // kMtpScanMaxSplits
+                float* part = nullptr;
+                ASSERT_EQ(cudaMalloc(&part, n_part * sizeof(float)), cudaSuccess);
+                imp::mtp_attn_scan(dq.data, dk.data, dv.data, dout.data, base, rows, s.nh, s.nkv, s.hd,
+                                   nullptr, mode == 1 ? part : nullptr);
+                ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                ASSERT_EQ(cudaMemcpy(out.data(), dout.data, out.size() * sizeof(__half),
+                                     cudaMemcpyDeviceToHost),
+                          cudaSuccess);
+                double diff2 = 0.0, ref2 = 0.0;
+                for (int r = 0; r < rows; ++r) {
+                    for (int h = 0; h < s.nh; ++h) {
+                        const int kv_h = h / (s.nh / s.nkv);
+                        const int seq = base + r + 1;
+                        std::vector<double> p(static_cast<size_t>(seq));
+                        double mx = -1e300;
+                        for (int t = 0; t < seq; ++t) {
+                            double dot = 0.0;
+                            for (int d = 0; d < s.hd; ++d)
+                                dot += static_cast<double>(__half2float(q[((r * s.nh + h) * s.hd) + d])) *
+                                       __half2float(k[((static_cast<size_t>(t) * s.nkv + kv_h) * s.hd) + d]);
+                            p[t] = dot / std::sqrt(static_cast<double>(s.hd));
+                            mx = std::max(mx, p[t]);
+                        }
+                        double sum = 0.0;
+                        for (double& x : p)
+                            sum += (x = std::exp(x - mx));
+                        for (int d = 0; d < s.hd; ++d) {
+                            double ref = 0.0;
+                            for (int t = 0; t < seq; ++t)
+                                ref += p[t] / sum *
+                                       __half2float(v[((static_cast<size_t>(t) * s.nkv + kv_h) * s.hd) + d]);
+                            const double got = __half2float(out[((r * s.nh + h) * s.hd) + d]);
+                            diff2 += (got - ref) * (got - ref);
+                            ref2 += ref * ref;
+                        }
+                    }
+                }
+                EXPECT_LT(std::sqrt(diff2 / ref2), 2e-3)
+                    << "nh=" << s.nh << " hd=" << s.hd << " base=" << base << " mode=" << mode;
+                ASSERT_EQ(cudaFree(part), cudaSuccess);
+            }
+        }
+    }
 }
 
 }  // namespace

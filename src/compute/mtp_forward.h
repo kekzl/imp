@@ -108,6 +108,7 @@ struct MtpDraftWorkspace {
     void* d_attn_out      = nullptr;  // [num_heads * head_dim] FP16
     void* d_attn_residual = nullptr;  // [hidden_dim] FP16 — o_proj output (added to fc_out)
     int*  d_mtp_position  = nullptr;  // [1] int — current MTP cache position (for RoPE)
+    float* d_scan_part = nullptr;     // [num_heads, 32, head_dim + 2] split-K partials, inside d_mtp_position
 
     // Phase 2.2.Attn+KV: MTP-side KV cache (per-session, M=1 only). K/V accumulate across
     // draft calls; each call appends one row at mtp_pos, then attends [0,mtp_pos+1).

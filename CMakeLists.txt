@@ -470,6 +470,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/cuda_graph.cu
     src/runtime/presets.cpp
     src/compute/mtp_forward.cu
+    src/compute/mtp_attn_scan.cu
     src/compute/mtp_forward_qwen4exp.cu
     src/compute/gemv_fp8_block_moe.cu
     src/compute/mtp_topw.cu
