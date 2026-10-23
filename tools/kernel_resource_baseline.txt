@@ -28,13 +28,14 @@ void apa::apa_kernel<256, true, false, false, __half, apa::FlatKV<__half> >	sm_1
 void apa::apa_kernel<256, true, false, false, __half, apa::PagedF16KV>	sm_120a	255	56	0
 void ra2::attn_kernel<256, 8, 2, false, __half, 1>	sm_120a	255	8	0
 void apa::apa_kernel<256, false, false, false, __half, apa::PagedF16KV>	sm_120a	252	0	0
-void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ5K, false>	sm_120a	250	0	0
-void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ5K, true>	sm_120a	250	0	0
+void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ5K, false, false>	sm_120a	250	0	0
+void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ5K, true, false>	sm_120a	250	0	0
 void ra2::attn_kernel<256, 8, 2, true, __half, 1>	sm_120a	250	0	0
 void imp::mmq_imma_q5k_raw_kernel<128, false>	sm_120a	248	0	0
 void imp::mmq_imma_q5k_raw_kernel<128, true>	sm_120a	248	0	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, true, 32, true, false, false>	sm_120a	246	0	0
 void imp::(anonymous namespace)::gemm_fp16_kernel<128, 2>	sm_120a	244	32	0
+void imp::(anonymous namespace)::mmq_imma_gguf_bm128_kernel<imp::(anonymous namespace)::BigQ8_0, false, true>	sm_120a	242	0	0
 void imp::fmha_sm120_fa2_kernel<64, 256, true, false, 32, true, false, false>	sm_120a	242	0	0
 void apa::apa_kernel<128, true, true, true, __half, apa::FlatKV<__half> >	sm_120a	168	88	0
 void apa::apa_kernel<128, false, false, true, __half, apa::PagedF16KV>	sm_120a	168	80	0

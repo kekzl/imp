@@ -286,6 +286,20 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_kernel(
     }
 }
 
+// mmq_splitk_finalize_kernel for a column block: slices of [rows][cols] into out[rows][ldc].
+__global__ void mmq_splitk_finalize_cols_kernel(const float* __restrict__ split_out, int n_splits, int rows,
+                                                int cols, __half* __restrict__ out, int ldc, int beta1) {
+    const int idx = static_cast<int>((blockIdx.x * blockDim.x) + threadIdx.x);
+    const int total = rows * cols;
+    if (idx >= total)
+        return;
+    float v = 0.0f;
+    for (int s = 0; s < n_splits; ++s)
+        v += split_out[(static_cast<size_t>(s) * total) + idx];
+    __half* o = out + (static_cast<size_t>(idx / cols) * ldc) + (idx % cols);
+    *o = beta1 ? __hadd(*o, __float2half(v)) : __float2half(v);
+}
+
 // Reduce SPLITK partial slices in fixed order (bit-reproducible); beta 0: out = sum, beta 1: out += sum.
 __global__ void mmq_splitk_finalize_kernel(const float* __restrict__ split_out, int n_splits,
                                            int total, __half* __restrict__ out, int beta1) {
@@ -573,6 +587,14 @@ bool imma_smem_opt_in(const void* kernel, size_t bytes) { return set_max_dyn_sme
 void imma_splitk_finalize(int used, int total, __half* out, bool beta1, cudaStream_t stream) {
     mmq_splitk_finalize_kernel<<<(total + 255) / 256, 256, 0, stream>>>(g_imma_splitk.buf, used, total, out,
                                                                         beta1 ? 1 : 0);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
+void imma_splitk_finalize_cols(int used, int rows, int cols, __half* out, int ldc, bool beta1,
+                               cudaStream_t stream) {
+    const int total = rows * cols;
+    mmq_splitk_finalize_cols_kernel<<<(total + 255) / 256, 256, 0, stream>>>(g_imma_splitk.buf, used, rows,
+                                                                             cols, out, ldc, beta1 ? 1 : 0);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

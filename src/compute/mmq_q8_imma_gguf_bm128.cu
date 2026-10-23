@@ -4,6 +4,7 @@
 
 #include "compute/iq4_lut.cuh"
 #include "compute/mmq_q8_imma_internal.cuh"
+#include "core/device_info.h"
 #include "core/logging.h"
 
 #include <type_traits>
@@ -25,7 +26,9 @@ struct BigIQ4XS {
     static __device__ __forceinline__ int piece_off(int ks, int p) {
         return ((ks >> 2) * 136) + (p == 0 ? 0 : 8 + ((ks & 3) * 32) + ((p - 1) * 8));
     }
-    static __device__ __forceinline__ size_t row_bytes(int K) { return static_cast<size_t>(K / 256) * 136; }
+    static __host__ __device__ __forceinline__ size_t row_bytes(int K) {
+        return static_cast<size_t>(K / 256) * 136;
+    }
     static __device__ __forceinline__ uint2 bfrag(const uint8_t* seg, int kb, int cl) {
         const int2 v = iq4nl_lut8(*reinterpret_cast<const uint32_t*>(
             seg + 8 + (static_cast<ptrdiff_t>(kb) * 16) + (static_cast<ptrdiff_t>(cl) * 4)));
@@ -45,7 +48,9 @@ struct BigQ8_0 {
     static constexpr int kPieces = 17, kPiece = 4, kSegRow = 80;
     static constexpr bool kMin = false;
     static __device__ __forceinline__ int piece_off(int ks, int p) { return (ks * 68) + (p * 4); }
-    static __device__ __forceinline__ size_t row_bytes(int K) { return static_cast<size_t>(K / 32) * 34; }
+    static __host__ __device__ __forceinline__ size_t row_bytes(int K) {
+        return static_cast<size_t>(K / 32) * 34;
+    }
     static __device__ __forceinline__ uint2 bfrag(const uint8_t* seg, int kb, int cl) {
         const auto* w = reinterpret_cast<const uint32_t*>(seg);
         const int qo = (kb * 34) + 2 + (cl * 4);  // kb 0: 2 mod 4, kb 1: word-aligned
@@ -86,7 +91,9 @@ struct BigQ5K {
     static __device__ __forceinline__ int piece_off(int ks, int p) {
         return ((ks >> 2) * 176) + (p < 3 ? p * 16 : 48 + ((ks & 3) * 32) + ((p - 3) * 16));
     }
-    static __device__ __forceinline__ size_t row_bytes(int K) { return static_cast<size_t>(K / 256) * 176; }
+    static __host__ __device__ __forceinline__ size_t row_bytes(int K) {
+        return static_cast<size_t>(K / 256) * 176;
+    }
     static __device__ __forceinline__ uint2 bfrag(const uint8_t* seg, int kb, int cl, int j) {
         const auto* qh = reinterpret_cast<const uint32_t*>(seg + 16);
         const auto* qs = reinterpret_cast<const uint32_t*>(seg + 48);
@@ -152,10 +159,11 @@ __device__ __forceinline__ void load_step(int tid, const int8_t* __restrict__ A,
     }
 }
 
-template <class F, bool BETA1>
+template <class F, bool BETA1, bool SPLITK>
 __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
     const int8_t* __restrict__ X_s8, const __half* __restrict__ x_scale, const float* __restrict__ x_rowsum,
-    const uint8_t* __restrict__ W, __half* __restrict__ out, int M, int N, int K) {
+    const uint8_t* __restrict__ W, __half* __restrict__ out, int M, int N, int K,
+    float* __restrict__ split_out, int ks_per_split) {
     constexpr int kWM = 4, kWN = 2;
     constexpr int kTileM = kBM / kWM;  // 32
     constexpr int kTileN = kBN / kWN;  // 64
@@ -186,12 +194,14 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
         for (int j = 0; j < kNF; ++j)
             acc[i][j][0] = acc[i][j][1] = acc[i][j][2] = acc[i][j][3] = 0.0f;
 
-    const int ksteps = K / kBK;
+    // SPLITK: blockIdx.z covers 64-K steps [z * ks_per_split, +ks_per_split), never empty (launch rule).
+    const int ks0 = SPLITK ? static_cast<int>(blockIdx.z) * ks_per_split : 0;
+    const int ksteps = SPLITK ? min(K / kBK, ks0 + ks_per_split) : K / kBK;
     load_step<F>(tid, X_s8, x_scale, x_rowsum, W, sA[0], sAsc[0], sArs[0], sB[0], base_m, M, K, base_n,
-                 n_valid, 0);
+                 n_valid, ks0);
     cp_async_commit();
-    for (int ks = 0; ks < ksteps; ++ks) {
-        const int stage = ks & 1;
+    for (int ks = ks0; ks < ksteps; ++ks) {
+        const int stage = (ks - ks0) & 1;
         if (ks + 1 < ksteps) {
             const int ns = stage ^ 1;
             load_step<F>(tid, X_s8, x_scale, x_rowsum, W, sA[ns], sAsc[ns], sArs[ns], sB[ns], base_m, M, K,
@@ -271,6 +281,12 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
             auto store = [&](int row, float lo, float hi) {
                 if (row >= M)
                     return;
+                if constexpr (SPLITK) {  // fp32 partial into this split's [M][N] slice
+                    const size_t o = (static_cast<size_t>(blockIdx.z) * M * N) +
+                                     (static_cast<size_t>(row) * N) + col;
+                    *reinterpret_cast<float2*>(&split_out[o]) = make_float2(lo, hi);
+                    return;
+                }
                 auto* p = reinterpret_cast<__half2*>(&out[(static_cast<size_t>(row) * N) + col]);
                 const __half2 v = __floats2half2_rn(lo, hi);
                 *p = BETA1 ? __hadd2(*p, v) : v;
@@ -282,27 +298,47 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
 }
 
 template <class F>
-void launch_big(const uint8_t* w, __half* out_f16, int M, int N, int K, float beta, cudaStream_t stream) {
+void launch_big(const uint8_t* w, __half* out_f16, int M, int N, int K, float beta, bool capturing,
+                cudaStream_t stream) {
     const dim3 grid((N + kBN - 1) / kBN, (M + kBM - 1) / kBM, 1);
-    auto* k = beta == 1.0f ? mmq_imma_gguf_bm128_kernel<F, true> : mmq_imma_gguf_bm128_kernel<F, false>;
+    const bool beta1 = beta == 1.0f;
+    auto* k = beta1 ? mmq_imma_gguf_bm128_kernel<F, true, false>
+                    : mmq_imma_gguf_bm128_kernel<F, false, false>;
+    // imma_wave_tail: trailing column tiles K-split into one more wave, the leading ones unchanged.
+    const ImmaWaveTail t = imma_wave_tail(grid, M, N, K / kBK, device_sm_count_or_0());
+    const int n0 = t.nx_big * kBN;
+    if (t.used > 0 && imma_ensure_splitk(static_cast<size_t>(M) * (N - n0) * t.used, capturing)) {
+        k<<<dim3(t.nx_big, grid.y), kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale,
+                                                           g_imma_act.xrowsum, w, out_f16, M, N, K, nullptr,
+                                                           0);
+        IMP_CUDA_CHECK_LAUNCH();
+        mmq_imma_gguf_bm128_kernel<F, false, true>
+            <<<dim3(grid.x - t.nx_big, grid.y, t.used), kThreads, 0, stream>>>(
+                g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum,
+                w + (static_cast<size_t>(n0) * F::row_bytes(K)), out_f16, M, N - n0, K, g_imma_splitk.buf,
+                t.per);
+        IMP_CUDA_CHECK_LAUNCH();
+        imma_splitk_finalize_cols(t.used, M, N - n0, out_f16 + n0, N, beta1, stream);
+        return;
+    }
     k<<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w, out_f16, M, N,
-                                     K);
+                                     K, nullptr, 0);
     IMP_CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace
 
 bool launch_gguf_bm128(int qkind, const uint8_t* w, __half* out_f16, int M, int N, int K, float beta,
-                       cudaStream_t stream) {
+                       bool capturing, cudaStream_t stream) {
     switch (qkind) {
         case 5:
-            launch_big<BigQ8_0>(w, out_f16, M, N, K, beta, stream);
+            launch_big<BigQ8_0>(w, out_f16, M, N, K, beta, capturing, stream);
             return true;
         case 7:
-            launch_big<BigIQ4XS>(w, out_f16, M, N, K, beta, stream);
+            launch_big<BigIQ4XS>(w, out_f16, M, N, K, beta, capturing, stream);
             return true;
         case 8:
-            launch_big<BigQ5K>(w, out_f16, M, N, K, beta, stream);
+            launch_big<BigQ5K>(w, out_f16, M, N, K, beta, capturing, stream);
             return true;
         default:
             return false;

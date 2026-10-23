@@ -211,5 +211,27 @@ TEST(MmqQ8Imma, Q4KDenseSmallMNoSplitMatchesBM128) {
     EXPECT_GT(split_diff, 0u);
 }
 
+// A BM=128 grid with a short last wave (128 rows, n_sms + n_sms / 8 column tiles) runs its trailing column
+// tiles K-split: the leading columns keep their bits, the tail columns move and stay accurate.
+TEST(MmqQ8Imma, Q4KDenseWaveTailSplit) {
+    int n_sms = 0;
+    ASSERT_EQ(cudaDeviceGetAttribute(&n_sms, cudaDevAttrMultiProcessorCount, 0), cudaSuccess);
+    const int n0 = n_sms * 128;
+    const Q4kDense f(n0 + ((n_sms / 8) * 128), 256, 504);
+    for (const bool beta1 : {false, true}) {
+        const std::vector<float> plain = f.run(128, beta1, false);
+        const std::vector<float> tail = f.run(128, beta1, true);
+        size_t head_diff = 0, tail_diff = 0;
+        for (int r = 0; r < 128; ++r)
+            for (int n = 0; n < f.N; ++n) {
+                const size_t i = (static_cast<size_t>(r) * f.N) + n;
+                (n < n0 ? head_diff : tail_diff) += plain[i] != tail[i];
+            }
+        EXPECT_EQ(head_diff, 0u) << "beta1=" << beta1;
+        EXPECT_GT(tail_diff, 0u) << "beta1=" << beta1;
+        EXPECT_LT(f.nrmse(tail, 128), 2e-2) << "beta1=" << beta1;
+    }
+}
+
 }  // namespace
 }  // namespace imp
