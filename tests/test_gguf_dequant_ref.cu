@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "compute/gemm.h"
+#include "compute/gemv_dp4a_rows.h"
 #include "compute/ggml_mmvq.h"
 #include "compute/gemm_q8_0_dense.h"
 #include "compute/gemm_q4k.h"
@@ -357,6 +358,59 @@ void run_dp4a_gemv(const char* name, QType qt, int N, int K,
     cudaFree(d8);
 }
 
+// gemv_dp4a_rows: 3 activation rows in one pass, beta 0 then the beta=1 add onto the beta-0 result
+// (expect 2x the reference). Same q8_1 band as run_dp4a_gemv.
+void run_dp4a_rows(const char* name, QType qt, int N, int K) {
+    constexpr int kR = 3;
+    Lcg g(0x5A40u + static_cast<uint32_t>(qt));
+    std::vector<uint8_t> buf;
+    format_spec(qt).build(buf, N, K, g, NORMAL);
+    void* dW = to_device(buf);
+    std::vector<half> hx[kR];
+    half* dxr[kR];
+    for (int r = 0; r < kR; ++r)
+        dxr[r] = random_x(K, g, hx[r]);
+    half* dx = nullptr;
+    cudaMalloc(&dx, static_cast<size_t>(kR) * K * sizeof(half));
+    for (int r = 0; r < kR; ++r)
+        cudaMemcpy(dx + (static_cast<size_t>(r) * K), dxr[r], K * sizeof(half), cudaMemcpyDeviceToDevice);
+    const int blocks = kR * (K / 32);
+    block_q8_1* q8 = nullptr;
+    float* d8 = nullptr;
+    half* dy = nullptr;
+    cudaMalloc(&q8, blocks * sizeof(block_q8_1));
+    cudaMalloc(&d8, blocks * sizeof(float));
+    cudaMalloc(&dy, static_cast<size_t>(kR) * N * sizeof(half));
+    quantize_fp16_to_q8_1(dx, q8, d8, kR * K, nullptr);
+    ASSERT_TRUE(gemv_dp4a_rows(qt, dW, q8, d8, dy, N, K, kR, false, nullptr)) << name;
+    std::vector<double> wref;
+    ref_dequant_all(buf, N, K, qt, wref);
+    for (int pass = 1; pass <= 2; ++pass) {
+        if (pass == 2)
+            ASSERT_TRUE(gemv_dp4a_rows(qt, dW, q8, d8, dy, N, K, kR, true, nullptr)) << name;
+        cudaDeviceSynchronize();
+        for (int r = 0; r < kR; ++r) {
+            std::vector<half> hy(N);
+            cudaMemcpy(hy.data(), dy + (static_cast<size_t>(r) * N), N * sizeof(half),
+                       cudaMemcpyDeviceToHost);
+            std::vector<double> yref;
+            ref_gemv(wref, hx[r], N, K, yref);
+            for (auto& v : yref)
+                v *= pass;
+            GemvStats s = gemv_eval(hy, yref);
+            EXPECT_LT(s.rms_rel, 1.5e-2) << name << " row " << r << " pass " << pass;
+            EXPECT_LT(s.max_rel_scaled, 5e-2) << name << " row " << r << " pass " << pass;
+        }
+    }
+    for (half* p : dxr)
+        cudaFree(p);
+    cudaFree(dW);
+    cudaFree(dx);
+    cudaFree(dy);
+    cudaFree(q8);
+    cudaFree(d8);
+}
+
 void run_mmvq_gemv(const char* name, QType qt, int N, int K,
                    void (*mmvq_fn)(const void*, const half*, half*, int, int, int, void*, size_t,
                                    cudaStream_t)) {
@@ -547,6 +601,12 @@ TEST(GgufRef, IQ4_NL_GemvDp4a) {
 TEST(GgufRef, IQ4_XS_GemvDp4a) {
     run_dp4a_gemv("IQ4XS", QType::IQ4_XS, 256, 1024, gemv_iq4_xs_q8_1);
     run_dp4a_gemv("IQ4XS", QType::IQ4_XS, 8192, 1280, gemv_iq4_xs_q8_1);
+}
+// Multi-row GEMV (MTP verify rows): every dp4a family.
+TEST(GgufRef, DenseRowsDp4aAllTypes) {
+    for (QType qt : {QType::Q8_0, QType::Q4_0, QType::Q2_K, QType::Q3_K, QType::Q4_K, QType::Q5_K,
+                     QType::Q6_K, QType::IQ4_NL, QType::IQ4_XS})
+        run_dp4a_rows(qtype_name(qt), qt, 384, 1024);
 }
 
 TEST(GgufRef, Q8_0_GemvMmvq) { run_mmvq_gemv("Q8_0", QType::Q8_0, 256, 1024, ggml_mmvq_q8_0); }

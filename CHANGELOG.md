@@ -12,6 +12,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `runtime.no_vision`: drops a checkpoint's Qwen3-VL tower at init, image and video parts answer 400. Qwen3.8-Flash-Next text-only gets the tower's 1079 MiB arena reservation back: 396 -> 422 expert slots/layer, tg512 85.64 -> 87.26 tok/s (code prompt, 6 of 6 pairs faster over 3 prompts).
 
 ### Changed
+- GGUF GEMMs of 2..4 rows (MTP verify, 2..4-token prompts) run one multi-row dp4a GEMV over the blocks for every dp4a type, Q3_K included (dequantized per call before): Qwen3.8-27B-UD-Q4_K_M MTP verify step 22.0-22.2 -> 20.0-20.5 ms.
 - GGUF Q4_K decode rows (batched decode, speculative verify) run the IMMA tile instead of the dp4a row kernel, uncached Q8_0 / Q4_K token GEMVs take the dp4a GEMV: Qwen3.8-27B-Q4_K_M server at 32 streams 288 -> 938 tok/s, UD-Q4_K_M 533 -> 875 tok/s.
 - GGUF IQ4_NL / IQ4_XS / Q5_K weights (Unsloth UD) and wide Q8_0 prompt chunks run IMMA on the blocks instead of a dequant per call: Qwen3.8-27B-UD-Q4_K_M pp16/pp512 84.1/161.5 -> 22.9/140.7 ms, Q4_K_M pp512 132.8 -> 127.9 ms, PPL chunk 0 5.0744 -> 5.0699. `gemm.gguf_imma_smallm`.
 - Dense GGUF Q6_K prompts of 2..32 tokens run the Q6_K IMMA kernel (K-split, BM=32) instead of dequantizing every weight per chunk: Qwen3-14B-Q6_K pp2..pp32 39.4-41.4 -> 19.7-21.2 ms, pp512 unchanged, PPL at chunk 32 11.4532 -> 11.4519. `gemm.q6k_imma_smallm`, off under `runtime.deterministic`.
