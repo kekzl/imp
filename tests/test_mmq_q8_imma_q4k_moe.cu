@@ -187,6 +187,14 @@ TEST(MmqQ8Imma, Q4KDenseSmallMSplitNRMSE) {
         EXPECT_LT(f.nrmse(f.run(M, beta1, true), M), 2e-2) << "Q4_K dense M=" << M << " beta1=" << beta1;
 }
 
+// Above 32 rows with the split allowed (not runtime.deterministic): the 64-K-step GGUF kernel, M=100 / 128
+// one partial and one full row block.
+TEST(MmqQ8Imma, Q4KDenseLargeMNRMSE) {
+    const Q4kDense f(384, 2816, 503);
+    for (const auto& [M, beta1] : {std::pair{100, false}, {128, true}})
+        EXPECT_LT(f.nrmse(f.run(M, beta1, true), M), 2e-2) << "Q4_K dense M=" << M << " beta1=" << beta1;
+}
+
 // Without the split a short row is the same bits as inside a 100-row BM=128 call (#2152); the split
 // path really runs (some values move).
 TEST(MmqQ8Imma, Q4KDenseSmallMNoSplitMatchesBM128) {

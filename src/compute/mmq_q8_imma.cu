@@ -604,9 +604,7 @@ bool mmq_gguf_imma_smallm_gemm(const void* w_blocks, QType qtype, const __half* 
     if (beta != 0.0f && beta != 1.0f)
         return false;
     imma_act_reuse_next(reuse_act);  // one-shot, consumed by this call's quantize
-    // Q5_K above 32 rows: the BM=128 raw kernel (qkind 4) decodes each B fragment for 4x the rows.
-    const int kind = (qkind == 8 && M > 32) ? 4 : qkind;
-    const bool ok = gemm_common(w_blocks, kind, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
+    const bool ok = gemm_common(w_blocks, qkind, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
     imma_act_reuse_next(false);  // gemm_common may return before quantizing
     return ok;
 }

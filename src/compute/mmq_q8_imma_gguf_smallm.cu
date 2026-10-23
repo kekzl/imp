@@ -83,8 +83,9 @@ struct FmtIQ4XS {
     }
 };
 
-// Q5_K: one 176-B super-block (d, dmin, scales[12], qh[32], qs[128]); q = 0..31 enters the s8 MMA as is,
-// x = d sc q - dmin m: (scale, min) = (d sc, -dmin m), element l of sub-block J takes bit J of qh[l].
+// Q5_K: one 176-B super-block (d, dmin, scales[12], qh[32], qs[128]); q - 16 enters the s8 MMA (q in 0..31
+// cancels the min term in fp32), x = d sc (q - 16) + 16 d sc - dmin m: (scale, min) = (d sc, 16 d sc - dmin
+// m). Element l of sub-block J takes bit J of qh[l].
 struct FmtQ5K {
     static constexpr int kStep = 176, kChunk = 16, kRow = 176;
     static constexpr bool kMin = true;
@@ -96,7 +97,7 @@ struct FmtQ5K {
         const uint32_t b0 = ((w[kQs + cl] >> kSh) & 0x0F0F0F0Fu) | (((w[4 + cl] >> J) & 0x01010101u) << 4);
         const uint32_t b1 = ((w[kQs + 4 + cl] >> kSh) & 0x0F0F0F0Fu) |
                             (((w[8 + cl] >> J) & 0x01010101u) << 4);
-        return make_uint2(b0, b1);
+        return make_uint2(__vsub4(b0, 0x10101010u), __vsub4(b1, 0x10101010u));
     }
     template <int J>
     static __device__ __forceinline__ float2 wscale(const uint8_t* row) {
@@ -110,8 +111,8 @@ struct FmtQ5K {
             sc = (q[J + 4] & 0xFu) | ((q[J - 4] >> 6) << 4);
             mn = (q[J + 4] >> 4) | ((q[J] >> 6) << 4);
         }
-        return make_float2(__half2float(h[0]) * static_cast<float>(sc),
-                           -__half2float(h[1]) * static_cast<float>(mn));
+        const float a = __half2float(h[0]) * static_cast<float>(sc);
+        return make_float2(a, fmaf(16.0f, a, -__half2float(h[1]) * static_cast<float>(mn)));
     }
 };
 
@@ -356,7 +357,8 @@ bool launch_gguf_small_m(int qkind, const uint8_t* w, __half* out_f16, int M, in
             return M > 32 ? launch_gguf_bm128(7, w, out_f16, M, N, K, beta, stream)
                           : launch_fmt<FmtIQ4XS>(w, out_f16, M, N, K, beta, capturing, stream);
         case 8:
-            return launch_fmt<FmtQ5K>(w, out_f16, M, N, K, beta, capturing, stream);
+            return M > 32 ? launch_gguf_bm128(8, w, out_f16, M, N, K, beta, stream)
+                          : launch_fmt<FmtQ5K>(w, out_f16, M, N, K, beta, capturing, stream);
         default:
             return false;
     }
