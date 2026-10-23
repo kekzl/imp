@@ -182,7 +182,8 @@ struct Speculative {
     // Serve the MTP chain's full-vocab logits GEMV from the NVFP4 LM-head
     // decode cache when one exists (#847 lever 3): the chain re-reads the LM
     // head once per drafted token, more traffic than the main forward at k=4.
-    // Draft-only precision; verification stays lossless. Off = keep the FP16 chain GEMV.
+    // Draft-only precision; verification stays lossless. Off = keep the FP16 chain GEMV. A 16-bit head
+    // served as FP8 gets an NVFP4 draft copy while MTP is on (+682 MiB on Qwen3.8-27B-NVFP4).
     bool mtp_nvfp4_head = true;
     // MTP economics guard: after an 8-verify sample, average emitted
     // tokens/verify below this dooms MTP for the request. 0 = disabled (raw
