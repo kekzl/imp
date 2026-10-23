@@ -121,6 +121,9 @@ struct InferenceState {
     // K-quants the per-chunk dequant cost made speculation net-negative. Set for every verify
     // chunk regardless of attention route.
     bool spec_verify_chunk = false;
+    // Verify reads its argmax from greedy_argmax_all over every chunk row: forward_logits skips its own LM
+    // head (a second full head pass per verify step, 0.94 ms on the Qwen3.8-27B FP8 head). logits_out empty.
+    bool skip_lm_head = false;
     // Verify step that runs graph-captured: under speculative.verify_smallm_captured its GEMMs take the
     // small-M block, the step's eager warmup and fidelity forwards too, so graph and eager match.
     bool spec_verify_smallm = false;

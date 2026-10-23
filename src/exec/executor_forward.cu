@@ -745,7 +745,9 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         n = state.n_sequences;
     }
 
-    if (state.is_prefill && !state.all_logits && !ragged_lm) {
+    if (state.skip_lm_head) {
+        logits_out = Tensor{};  // verify: greedy_argmax_all projects every chunk row itself
+    } else if (state.is_prefill && !state.all_logits && !ragged_lm) {
         Tensor h_last = view_tokens(hidden_, n).slice(n - 1, n);
         Tensor lg = view_tokens(logits_, 1);
 
@@ -1019,59 +1021,7 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         debug_top_logits(lg, stream);
     }
 
-    // ---- Final logit soft-capping (Gemma-2/3/4, cap=30) ----
-    const bool skip_softcap = dispatch_policy().generation.no_logit_softcap;
-    if (cfg.final_logit_softcap > 0.0f && !skip_softcap) {
-        int64_t n_logits = static_cast<int64_t>(logits_out.shape[0]) * cfg.vocab_size;
-        int threads = 256;
-        int blocks = static_cast<int>((n_logits + threads - 1) / threads);
-        logit_softcap_fp32_kernel<<<blocks, threads, 0, stream>>>(static_cast<float*>(logits_out.data),
-                                                                  cfg.final_logit_softcap,
-                                                                  1.0f / cfg.final_logit_softcap, n_logits);
-        IMP_CUDA_CHECK_LAUNCH();
-    }
-
-    // Final-logit dump (reference parity): what the sampler sees, post
-    // soft-cap, as FP32 .npy, one file per forward pass. The only way to
-    // compare imp's logits value-for-value against an independent
-    // implementation (top_logprobs settles order, not values; the hidden dump
-    // stops before the final norm and LM head). Skipped under CUDA graph
-    // capture (the sync + D2H copy are illegal there); the uncaptured prefill pass still lands.
-    if (!dispatch_policy().diagnostics.dump_final_logits_dir.empty()) {
-        cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
-        if (cudaStreamIsCapturing(stream, &cap) != cudaSuccess)
-            cap = cudaStreamCaptureStatusNone;
-        if (cap != cudaStreamCaptureStatusNone) {
-            static bool warned = false;
-            if (!warned) {
-                IMP_LOG_INFO(
-                    "[DUMP_LOGITS] skipping passes captured into a CUDA graph; the prefill pass "
-                    "is dumped. Set runtime.cuda_graphs=never to capture decode steps too.");
-                warned = true;
-            }
-            goto final_logits_dump_done;
-        }
-        {
-        const std::string& dir = dispatch_policy().diagnostics.dump_final_logits_dir;
-        static int dump_pass = 0;
-        const int rows = static_cast<int>(logits_out.shape[0]);
-        const int vocab = cfg.vocab_size;
-        std::vector<float> host(static_cast<size_t>(rows) * vocab);
-        if (!debug_sync_d2h(host.data(), logits_out.data, host.size() * sizeof(float), stream, "DUMP_LOGITS"))
-            goto final_logits_dump_done;  // pass not written, dump_pass not advanced
-        char fname[512];
-        // The INPUT token count goes in the filename, not just the output row
-        // count: with all_logits off, a prefill and every engine warm-up pass both
-        // emit one row, so `rows` alone can't tell them apart; warm-up passes carry dummy input and come
-        // first.
-        snprintf(fname, sizeof(fname), "%s/imp_logits_pass%03d_in%d_n%d.npy", dir.c_str(), dump_pass, n,
-                 rows);
-        write_npy_fp32(fname, host.data(), rows, vocab);
-        IMP_LOG_INFO("[DUMP_LOGITS] %s (in=%d rows=%d vocab=%d)", fname, n, rows, vocab);
-        dump_pass++;
-        }
-    }
-final_logits_dump_done:
+    finalize_logits_(logits_out, n, stream);
 
     // Gated-DeltaNet recurrent-state dump: state is FP32 by the checkpoint's
     // own contract (mamba_ssm_dtype) because a downcast diverges quietly over
@@ -1166,6 +1116,60 @@ gdn_state_dump_done:
         }
 
         // Cleanup handled by ProfileEvents RAII destructor.
+    }
+}
+
+// Post-LM-head logits: Gemma soft-cap, then the diagnostics.dump_final_logits_dir dump (n = input rows).
+void GraphExecutor::finalize_logits_(Tensor& logits_out, int n, cudaStream_t stream) {
+    const auto& cfg = model_->config();
+    // ---- Final logit soft-capping (Gemma-2/3/4, cap=30) ----
+    if (cfg.final_logit_softcap > 0.0f && !dispatch_policy().generation.no_logit_softcap && logits_out.data) {
+        int64_t n_logits = static_cast<int64_t>(logits_out.shape[0]) * cfg.vocab_size;
+        int threads = 256;
+        int blocks = static_cast<int>((n_logits + threads - 1) / threads);
+        logit_softcap_fp32_kernel<<<blocks, threads, 0, stream>>>(static_cast<float*>(logits_out.data),
+                                                                  cfg.final_logit_softcap,
+                                                                  1.0f / cfg.final_logit_softcap, n_logits);
+        IMP_CUDA_CHECK_LAUNCH();
+    }
+
+    // Final-logit dump (reference parity): what the sampler sees, post
+    // soft-cap, as FP32 .npy, one file per forward pass. The only way to
+    // compare imp's logits value-for-value against an independent
+    // implementation (top_logprobs settles order, not values; the hidden dump
+    // stops before the final norm and LM head). Skipped under CUDA graph
+    // capture (the sync + D2H copy are illegal there); the uncaptured prefill pass still lands.
+    if (!dispatch_policy().diagnostics.dump_final_logits_dir.empty() && logits_out.data != nullptr) {
+        cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+        if (cudaStreamIsCapturing(stream, &cap) != cudaSuccess)
+            cap = cudaStreamCaptureStatusNone;
+        if (cap != cudaStreamCaptureStatusNone) {
+            static bool warned = false;
+            if (!warned) {
+                IMP_LOG_INFO(
+                    "[DUMP_LOGITS] skipping passes captured into a CUDA graph; the prefill pass "
+                    "is dumped. Set runtime.cuda_graphs=never to capture decode steps too.");
+                warned = true;
+            }
+            return;
+        }
+        const std::string& dir = dispatch_policy().diagnostics.dump_final_logits_dir;
+        static int dump_pass = 0;
+        const int rows = static_cast<int>(logits_out.shape[0]);
+        const int vocab = cfg.vocab_size;
+        std::vector<float> host(static_cast<size_t>(rows) * vocab);
+        if (!debug_sync_d2h(host.data(), logits_out.data, host.size() * sizeof(float), stream, "DUMP_LOGITS"))
+            return;  // pass not written, dump_pass not advanced
+        char fname[512];
+        // The INPUT token count goes in the filename, not just the output row
+        // count: with all_logits off, a prefill and every engine warm-up pass both
+        // emit one row, so `rows` alone can't tell them apart; warm-up passes carry dummy input and come
+        // first.
+        snprintf(fname, sizeof(fname), "%s/imp_logits_pass%03d_in%d_n%d.npy", dir.c_str(), dump_pass, n,
+                 rows);
+        write_npy_fp32(fname, host.data(), rows, vocab);
+        IMP_LOG_INFO("[DUMP_LOGITS] %s (in=%d rows=%d vocab=%d)", fname, n, rows, vocab);
+        dump_pass++;
     }
 }
 

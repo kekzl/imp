@@ -694,6 +694,8 @@ bool Engine::step_spec_verify_(std::shared_ptr<Request>& req, cudaStream_t strea
     state.is_prefill = true;
     state.prefill_offset = p0;
     state.spec_verify_chunk = true;
+    // greedy_argmax_all projects every chunk row; the fidelity diagnostic compares the forward's own logits.
+    state.skip_lm_head = !runtime_config_.diagnostics.spec_capture_fidelity;
     state.kv_manager = kv_manager_.get();
     if (kv_manager_ && kv_manager_->residual_enabled()) state.kv_seq_id = req->id;
     if (capture_on) {

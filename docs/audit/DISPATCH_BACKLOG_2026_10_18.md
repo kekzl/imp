@@ -332,3 +332,9 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 |---|---|---|
 | B-49 | DONE | `smallm_producer_xq_` drops the `cur_spec_verify_` exclusion. Qwen3.8-27B-NVFP4-vllm imp-cli 600 tokens, main vs branch: 102.31-102.90 -> 104.82-105.18 tok/s, verify 18.95-19.06 -> 18.54-18.60 ms, accepted 291 / emitted 597 in both arms (same text). degen_suite --quick at max_batch_size=1: 52 of 52, 2832 of 3491 drafts accepted, 0 error lines. Refuted on the way: `residual_beta1_nvfp4_ok_` in verify as well (104.54-105.05 tok/s, flat; matches #1793) |
 | B-49 note | REFUTED | Per-row FP8 copies of the MTP body (fc, q/k/v/o, MLP; 405.2 MiB, `gemv_fp8_rowscale`), 2 runs per arm: Q4_K_M + external head 114.93-115.55 vs 116.03-116.35 tok/s (accepted 330 vs 334), NVFP4 106.11-106.36 vs 105.25-105.77 tok/s (288 vs 294); verify only 0.1-0.5 ms shorter, acceptance -0.8..-2 pp |
+
+## 2026-10-23 Batch 33: B-50 one LM head pass per verify
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-50 | DONE | `InferenceState::skip_lm_head`: the single-stream and batched verify set it (off under `diagnostics.spec_capture_fidelity`, which compares the forward's logits); forward_logits leaves `logits_out` empty, softcap and the final-logit dump skip an empty tensor. nsys before: 709 `fp8_head_mma` launches over 325 verifies, 326 pairs 6 us apart. imp-cli 500 tokens, 4 prompts, NVFP4: 104.77 / 105.32 / 107.39 / 150.82 -> 111.81 / 111.91 / 114.11 / 159.80 tok/s (mean 117.08 -> 124.41), drafted/accepted identical per prompt, verify 16.4 ms. 600-token prompt: Q4_K_M + external head 116.74 -> 119.52, UD 104.28 -> 107.24 tok/s. degen_suite --quick max_batch_size=1 and mtp_k=2 multi-batch: 52 checks, 0 FAIL each; 4 streams with batch_verify=true: 330.9 vs 329.1 tok/s on main (accepted 0 on both arms, pre-existing). Refuted on the way: `speculative.verify_smallm_captured=false` (batched W4A16 GEMV) mean 109.33 vs 117.08 tok/s |

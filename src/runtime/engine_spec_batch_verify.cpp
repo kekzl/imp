@@ -543,6 +543,7 @@ bool Engine::step_spec_verify_batched_(std::vector<std::shared_ptr<Request>>& ba
     state.is_prefill = true;
     state.prefill_offset = 0;
     state.spec_verify_chunk = true;
+    state.skip_lm_head = true;  // greedy_argmax_all below projects every row
     state.chunk_decode_attn = true;
     state.kv_manager = kv_manager_.get();
     state.ssm_state = ssm_state_.get();
