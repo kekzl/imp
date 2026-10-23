@@ -113,7 +113,8 @@ static bool q8_q4k_rows(const Tensor& input, const Tensor& weight, Tensor& outpu
     const bool wide_prompt = M > 32 && weight.shape[0] >= 1024 && !process_diag_deterministic();
     if (q8 && (decode_rows || short_prompt || wide_prompt) && gguf_imma_rows(input, weight, output, ctx))
         return true;
-    if ((decode_rows || M == 1 || (q8 && short_prompt)) && dp4a_decode_rows(input, weight, output, ctx))
+    // M=1 is left to dp4a_token_gemv: the row-tile kernel reads a Q8_0 GDN weight at ~33 % of DRAM peak.
+    if (M > 1 && (decode_rows || (q8 && short_prompt)) && dp4a_decode_rows(input, weight, output, ctx))
         return true;
     return !q8 && M >= 2 && ctx.q4k_imma_prefill &&
            mmq_q4k_imma_gemm(weight.data, reinterpret_cast<const __half*>(input.data),
