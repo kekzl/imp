@@ -200,7 +200,7 @@ ImpError imp_model_load_ex(const char* path, ImpModelFormat format, int load_mtp
 
         switch (format) {
             case IMP_FORMAT_GGUF:
-                model = imp::load_gguf(path);
+                model = imp::gguf_keep_mtp_head(imp::load_gguf(path), load_mtp_head != 0);
                 break;
             case IMP_FORMAT_SAFETENSORS:
                 model = imp::load_safetensors(path, load_mtp_head != 0);

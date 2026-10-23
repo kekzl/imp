@@ -50,7 +50,8 @@ ImpError imp_model_load(const char* path, ImpModelFormat format, ImpModel* out_m
 
 // Opts into loading the MTP head sidecar for SafeTensors models that ship one (DeepSeek-V3
 // family, e.g. Qwen3.6): ~1.57 GiB BF16, useful only with imp_enable_mtp_spec_decode.
-// imp_model_load() == load_mtp_head=0. No effect for GGUF or models without an MTP sidecar.
+// imp_model_load() == load_mtp_head=0. GGUF: the trailing nextn block (Unsloth UD Qwen3.8). No effect for
+// models without an MTP head.
 ImpError imp_model_load_ex(const char* path, ImpModelFormat format, int load_mtp_head,
                            ImpModel* out_model);
 

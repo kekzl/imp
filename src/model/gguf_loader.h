@@ -95,6 +95,11 @@ struct GGUFTensorInfo {
 // Load a model from a GGUF file.
 // Weights are mmap'd from the file (on_device=false).
 // Tokenizer is populated from GGUF metadata if available.
+// The trailing nextn block (Unsloth UD Qwen3.8) lands on Model::mtp_ as host views; gguf_keep_mtp_head
+// drops it unless MTP was requested.
 std::unique_ptr<Model> load_gguf(const std::string& path);
+
+// `model` with its GGUF nextn MTP head kept only when `keep`, else marked available-unloaded (/health).
+std::unique_ptr<Model> gguf_keep_mtp_head(std::unique_ptr<Model> model, bool keep);
 
 }  // namespace imp
