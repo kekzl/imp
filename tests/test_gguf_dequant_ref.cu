@@ -607,6 +607,9 @@ TEST(GgufRef, DenseRowsDp4aAllTypes) {
     for (QType qt : {QType::Q8_0, QType::Q4_0, QType::Q2_K, QType::Q3_K, QType::Q4_K, QType::Q5_K,
                      QType::Q6_K, QType::IQ4_NL, QType::IQ4_XS})
         run_dp4a_rows(qtype_name(qt), qt, 384, 1024);
+    // K >= 8192: 4 weight rows per block, N=386 leaves a 2-row tail.
+    for (QType qt : {QType::Q8_0, QType::Q4_K, QType::IQ4_XS})
+        run_dp4a_rows(qtype_name(qt), qt, 386, 8448);
 }
 
 TEST(GgufRef, Q8_0_GemvMmvq) { run_mmvq_gemv("Q8_0", QType::Q8_0, 256, 1024, ggml_mmvq_q8_0); }
