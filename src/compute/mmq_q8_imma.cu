@@ -467,7 +467,8 @@ bool launch_q6k(const uint8_t* w6, __half* out_f16, int M, int N, int K, dim3 gr
     return true;
 }
 
-bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k 5=q8 raw*/,
+bool gemm_common(const void* w_blocks,
+                 int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k 5..8 = q8/iq4nl/iq4xs/q5k raw M<=32*/,
                  const __half* x_f16, __half* out_f16, int M, int N, int K, cudaStream_t stream, float beta,
                  const int32_t* d_offsets, int h_max_rows, int expanded, int ne, int rows_hint = 0,
                  bool allow_splitk = true) {
@@ -480,9 +481,9 @@ bool gemm_common(const void* w_blocks, int qkind /*0=q8 1=q4k 2=q6k 3=q51 4=q5k 
     if (!imma_ensure_act(act_rows, K, capturing))
         return false;
     imma_quantize_act(x_f16, act_rows, K, stream);
-    if (qkind == 5)
-        return launch_q8_raw(static_cast<const uint8_t*>(w_blocks), out_f16, M, N, K, beta, capturing,
-                             stream);
+    if (qkind >= 5)  // GGUF blocks in place, M <= 32
+        return launch_gguf_small_m(qkind, static_cast<const uint8_t*>(w_blocks), out_f16, M, N, K, beta,
+                                   capturing, stream);
 
     const int grid_m_rows = d_offsets ? h_max_rows : M;
     // Dense Q4_K / Q6_K at M <= 32 (short prompts, decode verify): one BM=32 row-block.
@@ -589,15 +590,21 @@ bool mmq_q8_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_
     return ok;
 }
 
-bool mmq_q8_0_raw_imma_gemm(const void* w_q8_blocks, const __half* x_f16, __half* out_f16, int M, int N,
-                            int K, cudaStream_t stream, float beta, bool reuse_act) {
-    if (M < 2 || M > 32 || N % 2 != 0 || K % 256 != 0 ||
-        (reinterpret_cast<uintptr_t>(w_q8_blocks) & 15u) != 0)
+bool mmq_gguf_imma_smallm_gemm(const void* w_blocks, QType qtype, const __half* x_f16, __half* out_f16, int M,
+                               int N, int K, cudaStream_t stream, float beta, bool reuse_act) {
+    const int qkind = qtype == QType::Q8_0     ? 5
+                      : qtype == QType::IQ4_NL ? 6
+                      : qtype == QType::IQ4_XS ? 7
+                      : qtype == QType::Q5_K   ? 8
+                                               : 0;
+    const uintptr_t align = qkind == 7 ? 7u : 15u;
+    if (qkind == 0 || M < 2 || N % 2 != 0 || K % 256 != 0 ||
+        (reinterpret_cast<uintptr_t>(w_blocks) & align) != 0)
         return false;
     if (beta != 0.0f && beta != 1.0f)
         return false;
     imma_act_reuse_next(reuse_act);  // one-shot, consumed by this call's quantize
-    const bool ok = gemm_common(w_q8_blocks, 5, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
+    const bool ok = gemm_common(w_blocks, qkind, x_f16, out_f16, M, N, K, stream, beta, nullptr, 0, 0, 1);
     imma_act_reuse_next(false);  // gemm_common may return before quantizing
     return ok;
 }

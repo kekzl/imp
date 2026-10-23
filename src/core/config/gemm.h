@@ -37,6 +37,9 @@ struct GEMM {
     // Dense uncached Q8_0 prompt/decode rows 2..32 via the raw IMMA kernel on the GGUF blocks instead of
     // dp4a (weight once per 16 rows). Same int8 activations; off under runtime.deterministic for prompts.
     bool q8_0_imma_smallm = true;
+    // Dense IQ4_NL / IQ4_XS / Q5_K rows via IMMA on the GGUF blocks (BM=32 tiles, Q5_K above 32 rows BM=128)
+    // instead of a per-call dequant of the weight; off under runtime.deterministic for prompts.
+    bool gguf_imma_smallm = true;
     // MoE batch prefill via the grouped IMMA kernel (one launch over all
     // experts, gridDim.z=expert, BM=32). Covers Q8_0/Q4_K expert tensors; Q6_K
     // down_proj stays on dequant->cuBLAS. Default on; false re-enables the

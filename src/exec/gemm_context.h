@@ -38,6 +38,7 @@ struct GemmContext {
     bool q4k_imma_prefill = false;
     bool q6k_imma_smallm = false;
     bool q8_0_imma_smallm = false;
+    bool gguf_imma_smallm = false;
     bool gemm_no_mmvq = false;
     bool gemm_no_mmvq_q8_0 = false;
     bool gemm_no_dp4a_gemv = false;
@@ -69,6 +70,7 @@ struct GemmContext {
         ctx.q4k_imma_prefill = rcfg.gemm.q4k_imma_prefill;
         ctx.q6k_imma_smallm = rcfg.gemm.q6k_imma_smallm;
         ctx.q8_0_imma_smallm = rcfg.gemm.q8_0_imma_smallm;
+        ctx.gguf_imma_smallm = rcfg.gemm.gguf_imma_smallm;
         ctx.gemm_no_mmvq = rcfg.gemm.no_mmvq;
         ctx.gemm_no_mmvq_q8_0 = rcfg.gemm.no_mmvq_q8_0;
         ctx.gemm_no_dp4a_gemv = rcfg.gemm.no_dp4a_gemv;
