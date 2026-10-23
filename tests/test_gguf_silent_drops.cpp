@@ -105,6 +105,20 @@ TEST(GgufSilentDrops, NextnBlocksAreNotDecoderLayers) {
     EXPECT_EQ(gguf_decoder_layers(0, 1), 0u);
 }
 
+// The UD nextn block (blk.64 after 64 decoder layers) maps onto the Qwen MtpHead keys; other
+// layers and unknown fields map to nothing.
+TEST(GgufSilentDrops, NextnBlockMapsOntoMtpHeadKeys) {
+    EXPECT_EQ(gguf_nextn_mtp_name("blk.64.nextn.eh_proj.weight", 64), "mtp.fc.weight");
+    EXPECT_EQ(gguf_nextn_mtp_name("blk.64.nextn.enorm.weight", 64), "mtp.pre_fc_norm_embedding.weight");
+    EXPECT_EQ(gguf_nextn_mtp_name("blk.64.nextn.hnorm.weight", 64), "mtp.pre_fc_norm_hidden.weight");
+    EXPECT_EQ(gguf_nextn_mtp_name("blk.64.nextn.shared_head_norm.weight", 64), "mtp.norm.weight");
+    EXPECT_EQ(gguf_nextn_mtp_name("blk.64.attn_q.weight", 64), "mtp.layers.0.self_attn.q_proj.weight");
+    EXPECT_EQ(gguf_nextn_mtp_name("blk.64.ffn_down.weight", 64), "mtp.layers.0.mlp.down_proj.weight");
+    EXPECT_EQ(gguf_nextn_mtp_name("blk.63.attn_q.weight", 64), "");
+    EXPECT_EQ(gguf_nextn_mtp_name("blk.640.attn_q.weight", 64), "");
+    EXPECT_EQ(gguf_nextn_mtp_name("blk.64.nextn.embed_tokens.weight", 64), "");
+}
+
 // H-012: "blk.3x" is a malformed index, not layer 3. Dropped with a WARN naming the tensor.
 TEST(GgufSilentDrops, MalformedLayerIndexIsSkippedNotMapped) {
     std::vector<uint16_t> backing(1024, 0);

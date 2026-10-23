@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <span>
+#include <unordered_map>
 
 namespace imp {
 
@@ -130,6 +131,23 @@ void apply_gguf_rope_freq_factors(Model& model);
 [[nodiscard]] constexpr uint64_t gguf_decoder_layers(uint64_t block_count, uint64_t nextn) {
     return (nextn > 0 && nextn < block_count) ? block_count - nextn : block_count;
 }
+
+// The MtpHead (Qwen layout) key of a tensor of the first nextn block blk.{nextn_layer}.* (Unsloth UD
+// Qwen3.8: eh_proj, enorm, hnorm, shared_head_norm plus one decoder layer); "" for any other name.
+std::string gguf_nextn_mtp_name(const std::string& name, int nextn_layer);
+
+// The first nextn block of a GGUF, collected under MtpHead keys; the file mmap backs the tensors.
+struct GgufNextnHead {
+    std::unordered_map<std::string, Tensor> tensors;
+    size_t bytes = 0;
+};
+
+// assign_tensor, else a nextn tensor into `head`; false = neither (a skipped tensor).
+[[nodiscard]] bool assign_or_collect_tensor(Model& model, GgufNextnHead& head, const std::string& name,
+                                            const Tensor& tensor, GgufWireType gtype);
+
+// Model::mtp_ (host views) from the collected nextn tensors; no-op when none were collected.
+void finish_nextn_head(Model& model, GgufNextnHead& head, const std::string& path);
 
 // add_bos default for a gpt2 GGUF without tokenizer.ggml.add_bos_token: true for llama3/llama-bpe.
 [[nodiscard]] bool gguf_default_add_bos(const std::string& pre);

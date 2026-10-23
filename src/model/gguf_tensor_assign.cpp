@@ -6,12 +6,15 @@
 #include "model/loader_assign.h"
 #include "model/model_arch.h"
 #include "model/model_limits.h"
+#include "model/mtp_head.h"
 #include "core/logging.h"
 
 #include <cmath>
 #include <cstdlib>
 #include <new>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 #include <utility>
 
@@ -43,6 +46,65 @@ static int name_index_or_warn(const std::string& part, const std::string& name, 
 // "blk.{i}.{field}.{e}.weight" carries an expert index only for these; nextn.* does not.
 static bool is_per_expert_field(const std::string& f) {
     return f == "ffn_gate" || f == "ffn_up" || f == "ffn_down";
+}
+
+std::string gguf_nextn_mtp_name(const std::string& name, int nextn_layer) {
+    static constexpr std::pair<std::string_view, std::string_view> kNames[] = {
+        {"nextn.eh_proj.weight", "mtp.fc.weight"},
+        {"nextn.enorm.weight", "mtp.pre_fc_norm_embedding.weight"},
+        {"nextn.hnorm.weight", "mtp.pre_fc_norm_hidden.weight"},
+        {"nextn.shared_head_norm.weight", "mtp.norm.weight"},
+        {"attn_norm.weight", "mtp.layers.0.input_layernorm.weight"},
+        {"post_attention_norm.weight", "mtp.layers.0.post_attention_layernorm.weight"},
+        {"attn_q.weight", "mtp.layers.0.self_attn.q_proj.weight"},
+        {"attn_k.weight", "mtp.layers.0.self_attn.k_proj.weight"},
+        {"attn_v.weight", "mtp.layers.0.self_attn.v_proj.weight"},
+        {"attn_output.weight", "mtp.layers.0.self_attn.o_proj.weight"},
+        {"attn_q_norm.weight", "mtp.layers.0.self_attn.q_norm.weight"},
+        {"attn_k_norm.weight", "mtp.layers.0.self_attn.k_norm.weight"},
+        {"ffn_gate.weight", "mtp.layers.0.mlp.gate_proj.weight"},
+        {"ffn_up.weight", "mtp.layers.0.mlp.up_proj.weight"},
+        {"ffn_down.weight", "mtp.layers.0.mlp.down_proj.weight"},
+    };
+    const std::string prefix = "blk." + std::to_string(nextn_layer) + ".";
+    if (!name.starts_with(prefix))
+        return {};
+    const std::string_view field = std::string_view(name).substr(prefix.size());
+    for (const auto& [gguf, hf] : kNames)
+        if (field == gguf)
+            return std::string(hf);
+    return {};
+}
+
+bool assign_or_collect_tensor(Model& model, GgufNextnHead& head, const std::string& name,
+                              const Tensor& tensor, GgufWireType gtype) {
+    if (assign_tensor(model, name, tensor, gtype))
+        return true;
+    std::string key = gguf_nextn_mtp_name(name, model.n_layers());
+    if (key.empty())
+        return false;
+    head.bytes += tensor.nbytes();
+    head.tensors.emplace(std::move(key), tensor);
+    return true;
+}
+
+void finish_nextn_head(Model& model, GgufNextnHead& head, const std::string& path) {
+    if (head.tensors.empty())
+        return;
+    MtpHead mtp = dispatch_mtp_head(head.tensors, path + " (GGUF nextn)", head.bytes);
+    if (mtp.loaded)
+        model.mtp_ = std::make_unique<MtpHead>(std::move(mtp));
+}
+
+std::unique_ptr<Model> gguf_keep_mtp_head(std::unique_ptr<Model> model, bool keep) {
+    if (model == nullptr || model->mtp_ == nullptr || keep)
+        return model;
+    model->mtp_.reset();
+    model->mtp_head_available_unloaded_ = true;
+    IMP_LOG_INFO(
+        "MTP (nextn) block present in this GGUF but not loaded; speculative.mtp_k=auto takes it "
+        "only on a single-stream run");
+    return model;
 }
 
 // ---- Assign a single tensor to the model by GGUF name ----

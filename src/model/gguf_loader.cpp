@@ -692,6 +692,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     // of hundreds of DEBUG lines. src/model/CLAUDE.md: "a skip reported only at DEBUG is not
     // reported." SafeTensors got its breakdown in #1929; this mirrors it for GGUF.
     std::map<std::string, int> skipped_families;
+    GgufNextnHead mtp;  // the first nextn block under MtpHead keys (Unsloth UD Qwen3.8)
 
     for (const auto& info : tensor_infos) {
         // Reject tensors whose [offset, offset+size) escapes the mapped file before forming a
@@ -723,7 +724,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             t.mxfp4_layout_v2 = true;
         }
 
-        if (assign_tensor(*model, info.name, t, info.type)) {
+        if (assign_or_collect_tensor(*model, mtp, info.name, t, info.type)) {
             assigned++;
         } else {
             IMP_LOG_DEBUG("Unassigned tensor: %s [%s] shape=[%ld,%ld,%ld,%ld]", info.name.c_str(),
@@ -733,6 +734,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             skipped++;
         }
     }
+
+    finish_nextn_head(*model, mtp, path);
 
     // Infer vocab_size from token_embd if not in metadata
     if (cfg.vocab_size == 0 && model->tok_emb_.data != nullptr) {

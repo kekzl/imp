@@ -262,6 +262,34 @@ static void* scale_to_device(const void* src, size_t bytes, cudaStream_t stream,
     return e == cudaSuccess ? d_ptr : nullptr;
 }
 
+// GGUF block-quant MTP projection (UD nextn block): the raw blocks through a scratch, dequantized into a
+// WEIGHTS FP16 allocation that replaces the tensor; the MTP forward reads FP16 views only.
+static bool upload_dequant_fp16(Tensor& t, cudaStream_t stream, std::vector<void*>& allocs) {
+    const int rows = static_cast<int>(t.shape[0]);
+    const int cols = static_cast<int>(t.shape[1]);
+    const size_t raw_bytes = static_cast<size_t>(rows) * qtype_row_bytes(t.qtype, cols);
+    const size_t out_bytes = static_cast<size_t>(rows) * cols * sizeof(half);
+    void* d_raw = nullptr;
+    void* d_out = nullptr;
+    if (checked_cuda_malloc(&d_raw, raw_bytes, stream) != cudaSuccess)
+        return false;
+    allocs.push_back(d_raw);
+    const bool out_ok = checked_cuda_malloc(&d_out, out_bytes, stream) == cudaSuccess;
+    if (out_ok)
+        allocs.push_back(d_out);
+    const bool ok = out_ok &&
+                    cudaMemcpyAsync(d_raw, t.data, raw_bytes, cudaMemcpyHostToDevice, stream) == cudaSuccess;
+    if (ok)
+        dequant_gpu(d_raw, d_out, t.qtype, rows, cols, stream);
+    release_upload_alloc(allocs, d_raw, raw_bytes, stream);
+    if (!ok)
+        return false;
+    t.data = d_out;
+    t.qtype = QType::F16;
+    t.on_device = true;
+    return true;
+}
+
 // Copies each expert's host weight_scale into `slab`; false = copy e failed, experts >= e stay on host.
 static bool upload_scale_slab(void* slab, const std::vector<NvFP4PreQuantWeight*>& grp, size_t e_ms,
                               cudaStream_t stream, int& scale_count) {
@@ -635,6 +663,14 @@ static bool upload_mtp_fp8_experts(MtpHead& head, const UploadCtx& ctx) {
     return true;
 }
 
+// One MTP projection to FP16: a GGUF block quant (UD nextn block) dequantized, else the BF16 / F16 path.
+static bool upload_mtp_tensor(Tensor& t, const UploadCtx& ctx, const char* name) {
+    if (t.ndim == 2 && dequant_gpu_supported(t.qtype))
+        return upload_dequant_fp16(t, ctx.stream, ctx.gpu_allocs);
+    return upload_unquantized_weight(t, t.qtype, ctx.compute_dtype, ctx.stream, ctx.gpu_allocs, true, name,
+                                     kMtpKeyLayer);
+}
+
 // upload_mtp_weights: BF16->FP16 upload of the MTP head. Walks all 19 named MtpHead
 // tensors; MoE expert tensors (3D [n_experts,...]) upload raw as 3D FP16, per-expert
 // slicing is the forward kernel's concern. CRITICAL: Qwen3.5/3.6 SafeTensors RMSNorm gammas
@@ -659,8 +695,7 @@ static bool upload_mtp_weights(MtpHead& head, const UploadCtx& ctx) {
     auto up = [&](Tensor& t, const char* name) -> bool {
         if (t.data == nullptr || t.on_device)
             return true;
-        if (!upload_unquantized_weight(t, t.qtype, ctx.compute_dtype,
-                                       ctx.stream, ctx.gpu_allocs, true, name, kMtpKeyLayer)) {
+        if (!upload_mtp_tensor(t, ctx, name)) {
             IMP_LOG_ERROR("Failed to upload MTP tensor: %s", name);
             return false;
         }
