@@ -153,7 +153,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         const bool wu_is_nvfp4 = (hwu && hwu->primary_tier == StorageTier::NVFP4) || nv_u_secondary;
         bool nvfp4_ffn = (n == 1 && wg_is_nvfp4 && wu_is_nvfp4);
         bool fused_ffn_norm = (n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
-                               h.qtype == QType::F16 && is_dp4a_qtype(ly.w_gate.qtype));
+                               h.qtype == QType::F16 && is_dp4a_qtype(ly.w_gate.qtype) &&
+                               is_dp4a_qtype(ly.w_up.qtype));
         if (mxfp4_ffn) {
             // MXFP4 gate+up: RMSNorm, optional Hadamard, then MXFP4 fused GEMV
             rmsnorm(h, ffn_norm_w, no, eps, stream, norm_w_off_);
@@ -204,11 +205,20 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             rmsnorm_quantize_q8_1(static_cast<const half*>(h.data), static_cast<const half*>(ffn_norm_w.data),
                                   q8, qscratch_.d8_buf, static_cast<half*>(no.data), d, eps, stream,
                                   norm_w_off_);
-            // Fused gate+up GEMV: single kernel launch for both projections
+            // Fused gate+up GEMV reads both weights in one format: mixed types (UD GGUF, e.g.
+            // Q4_K gate + IQ4_XS up) run one dp4a GEMV each on the same Q8_1 input.
             int ffn_rows = static_cast<int>(ly.w_gate.shape[0]);
-            gemv_gate_up_fused(ly.w_gate.data, ly.w_up.data, q8, qscratch_.d8_buf,
-                               static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
-                               ly.w_gate.qtype, stream);
+            if (ly.w_up.qtype == ly.w_gate.qtype) {
+                gemv_gate_up_fused(ly.w_gate.data, ly.w_up.data, q8, qscratch_.d8_buf,
+                                   static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
+                                   ly.w_gate.qtype, stream);
+            } else {
+                dispatch_dp4a_gemv(ly.w_gate.qtype, ly.w_gate.data, q8, qscratch_.d8_buf,
+                                   static_cast<half*>(go.data), ffn_rows, d, stream);
+                dispatch_dp4a_gemv(ly.w_up.qtype, ly.w_up.data, q8, qscratch_.d8_buf,
+                                   static_cast<half*>(uo.data), static_cast<int>(ly.w_up.shape[0]), d,
+                                   stream);
+            }
         } else {
             // Producer fusion: quantize into the small-M scratch inside the
             // norm kernel when gate will take that route (batched decode,

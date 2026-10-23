@@ -269,3 +269,9 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | B-38 | DONE | `mmq_imma_q8raw_kernel` (8 Q8_0 blocks = 272 B per 256-K step, 16-B cp.async, 2 stages, K-split by N and K) for uncached Q8_0 rows 4..32; GDN gate/alpha/beta reuse one activation quantize. A/B alternating, 3 rounds x 5 reps, Qwen3.8-27B-Q4_K_M pp2/8/16/32/512 off 23.19/24.84/27.82/36.93/133.28 -> on 22.60/23.31/23.54/26.09/132.90 ms. M 2..3 stays dp4a (launch-bound, one launch less). PPL `ppl_4k.txt` chunk 32 5.0841 -> 5.0753, chunk 0 5.0744 both. 8 concurrent greedy chats coherent both arms, 0 error lines. Mutant (even blocks read word-aligned) red in 2 of 4 Q8Raw tests |
+
+## 2026-10-23 Batch 23: B-39 UD GGUF decode
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-39 | DONE | Root cause: `fused_ffn_norm` gated on `is_dp4a_qtype(w_gate)` only, `gemv_gate_up_fused` read up_proj in the gate format; UD-Q4_K_M mixes gate/up types in 28 of 65 blocks (64 layers + MTP). Release v0.57.0 image: PPL `ppl_4k.txt` chunk 1 248320, stream 0 of 8 greedy chats `We<\|endoftext\|><\|im_start\|>...`; fixed: chunk 1 5.0855 (chunk 32 5.0424), 8 chats coherent, degen_suite --quick 52 checks 0 FAIL. IQ4_NL/IQ4_XS dp4a traits (`iq4nl_lut8`, `__byte_perm` codebook) in every dp4a family, `nvfp4_beneficial` IQ4 like Q4_K: NVFP4 decode cache 6240.9 + 2164.2 -> 2415.9 + 1351.4 MiB. Uncached dp4a types at M=1 (beta 0 / residual beta 1) via `dp4a_token_gemv` instead of a 170 MiB dequant per token. tg 45.13 -> 87.38 tok/s (Q4_K_M 75.40 -> 76.65). GgufRef IQ4 tests in the dp4a band (rms_rel 3.7e-3 - 4.2e-3), 2 mutants red (LUT halves swapped, scale bit offset) |

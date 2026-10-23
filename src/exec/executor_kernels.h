@@ -42,7 +42,8 @@ void rope_q_only_fp16(half* Q, const int* positions, int n_heads, int head_dim, 
 // Returns true if the quant type supports dp4a (Q8_1-input) GEMV kernels.
 inline bool is_dp4a_qtype(QType qt) {
     return qt == QType::Q6_K || qt == QType::Q8_0 || qt == QType::Q4_0 || qt == QType::Q4_K ||
-           qt == QType::Q5_K || qt == QType::Q2_K || qt == QType::Q3_K;
+           qt == QType::Q5_K || qt == QType::Q2_K || qt == QType::Q3_K || qt == QType::IQ4_NL ||
+           qt == QType::IQ4_XS;
 }
 
 // Dispatch dp4a GEMV by quant type: y = W @ q8_1 (FP16 output).

@@ -539,6 +539,15 @@ TEST(GgufRef, Q5_K_GemvDp4a) { run_dp4a_gemv("Q5_K", QType::Q5_K, 256, 1024, gem
 // "dispatch == direct" would have agreed while both were wrong (Q3_K was).
 TEST(GgufRef, Q2_K_GemvDp4a) { run_dp4a_gemv("Q2_K", QType::Q2_K, 256, 1024, gemv_q2_k_q8_1); }
 TEST(GgufRef, Q3_K_GemvDp4a) { run_dp4a_gemv("Q3_K", QType::Q3_K, 256, 1024, gemv_q3_k_q8_1); }
+// N=256 runs the K-parallel kernel, N=8192 the row-parallel NR=4 one.
+TEST(GgufRef, IQ4_NL_GemvDp4a) {
+    run_dp4a_gemv("IQ4NL", QType::IQ4_NL, 256, 1024, gemv_iq4_nl_q8_1);
+    run_dp4a_gemv("IQ4NL", QType::IQ4_NL, 8192, 1056, gemv_iq4_nl_q8_1);
+}
+TEST(GgufRef, IQ4_XS_GemvDp4a) {
+    run_dp4a_gemv("IQ4XS", QType::IQ4_XS, 256, 1024, gemv_iq4_xs_q8_1);
+    run_dp4a_gemv("IQ4XS", QType::IQ4_XS, 8192, 1280, gemv_iq4_xs_q8_1);
+}
 
 TEST(GgufRef, Q8_0_GemvMmvq) { run_mmvq_gemv("Q8_0", QType::Q8_0, 256, 1024, ggml_mmvq_q8_0); }
 TEST(GgufRef, Q4_K_GemvMmvq) { run_mmvq_gemv("Q4_K", QType::Q4_K, 256, 1024, ggml_mmvq_q4k); }

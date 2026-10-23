@@ -148,6 +148,10 @@ void gemv_q2_k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8, half
                     cudaStream_t stream = nullptr);
 void gemv_q3_k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8, half* y, int M, int K,
                     cudaStream_t stream = nullptr);
+void gemv_iq4_nl_q8_1(const void* W, const block_q8_1* q8_1, const float* d8, half* y, int M, int K,
+                      cudaStream_t stream = nullptr);
+void gemv_iq4_xs_q8_1(const void* W, const block_q8_1* q8_1, const float* d8, half* y, int M, int K,
+                      cudaStream_t stream = nullptr);
 
 // Residual-fused variants: y[i] = dot(W[i], x) + residual[i]
 void gemv_q6k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8, half* y,
@@ -164,6 +168,10 @@ void gemv_q2_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float*
                              const half* residual, int M, int K, cudaStream_t stream = nullptr);
 void gemv_q3_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8, half* y,
                              const half* residual, int M, int K, cudaStream_t stream = nullptr);
+void gemv_iq4_nl_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8, half* y,
+                               const half* residual, int M, int K, cudaStream_t stream = nullptr);
+void gemv_iq4_xs_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8, half* y,
+                               const half* residual, int M, int K, cudaStream_t stream = nullptr);
 
 // Fused gate+up dense GEMV: both projections in one kernel launch, dispatched
 // internally by quant type. M = output rows, K = inner dim.
@@ -195,6 +203,12 @@ void gemv_qkv_fused_q2_k_q8_1(const void* W_q, const void* W_k, const void* W_v,
 void gemv_qkv_fused_q3_k_q8_1(const void* W_q, const void* W_k, const void* W_v, const block_q8_1* q8_1,
                               const float* d8, half* y_q, half* y_k, half* y_v, int q_rows, int k_rows,
                               int v_rows, int K, cudaStream_t stream = nullptr);
+void gemv_qkv_fused_iq4_nl_q8_1(const void* W_q, const void* W_k, const void* W_v, const block_q8_1* q8_1,
+                                const float* d8, half* y_q, half* y_k, half* y_v, int q_rows, int k_rows,
+                                int v_rows, int K, cudaStream_t stream = nullptr);
+void gemv_qkv_fused_iq4_xs_q8_1(const void* W_q, const void* W_k, const void* W_v, const block_q8_1* q8_1,
+                                const float* d8, half* y_q, half* y_k, half* y_v, int q_rows, int k_rows,
+                                int v_rows, int K, cudaStream_t stream = nullptr);
 
 // Batched K/V projection: input @ [wk; wv]^T → k_out, v_out in a single cuBLAS call.
 // weight_kv: [2 * nkv_hd, d_model] — wk at rows [0..nkv_hd), wv at [nkv_hd..2*nkv_hd)
@@ -362,6 +376,10 @@ void gemv_q2_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
                          cudaStream_t stream = nullptr);
 void gemv_q3_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8, float* y, int M, int K,
                          cudaStream_t stream = nullptr);
+void gemv_iq4_nl_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8, float* y, int M, int K,
+                           cudaStream_t stream = nullptr);
+void gemv_iq4_xs_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8, float* y, int M, int K,
+                           cudaStream_t stream = nullptr);
 
 // Batched-activation LM head GEMV for spec-verify (#847 lever 2): n_act pre-quantized
 // rows (row r at q8_1/d8 + r*act_stride_blocks) share one pass over W; logits land at
