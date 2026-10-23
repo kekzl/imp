@@ -199,6 +199,7 @@ void QuantPipeline::build(const Model& model, const DispatchPolicy& rcfg, VRAMAl
 
     // --- Phase 2c: per-row FP8 E4M3 LM head (gemm.nvfp4_lm_head=fp8) ---
     fp8_lm_head_cache_(stream);
+    mtp_draft_lm_head_nvfp4_(stream);  // MTP draft copy of an FP8-served 16-bit head
 
     // --- Phase 3: NVFP4 decode weight cache + 3b CUTLASS + 3c-native (extracted) ---
     pre_dequant_phase3_nvfp4_decode_(cfg, budget, remaining_budget, stream);
@@ -251,12 +252,16 @@ QuantPipeline::~QuantPipeline() {
         MemAccount::instance().note(pool, -static_cast<std::ptrdiff_t>(bytes));
 }
 
-// NVFP4 view of the LM head for the MTP draft chain — mirrors the decode-path
-// LM-head dispatch (executor_forward.cu): secondary wcache_.nvfp4 entry first,
-// then the native-NVFP4 registry tier; FP8 takes precedence and disables it.
+// NVFP4 view of the LM head for the MTP draft chain: the draft-only copy of an FP8-served head first,
+// then the decode-path order (executor_forward.cu): secondary wcache_.nvfp4 entry, native-NVFP4 tier.
 bool GraphExecutor::lm_head_nvfp4_view(NvFP4QuantResult& out) const {
     if (!model_)
         return false;
+    if (wcache_.mtp_lm_head_nvfp4.packed_data != nullptr) {
+        out = wcache_.mtp_lm_head_nvfp4;
+        out.owned = false;  // borrows wcache_ storage
+        return true;
+    }
     const Tensor& lm = model_->output_proj();
     if (!lm.data)
         return false;

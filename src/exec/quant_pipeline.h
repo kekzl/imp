@@ -130,6 +130,7 @@ private:
     // sequence, mirroring the legacy monolithic body.
     void nvfp4_decode_collect_candidates_(const ModelConfig& cfg, Nvfp4DecodeContext& dctx);
     void nvfp4_decode_cache_fp16_lm_head_(const ModelConfig& cfg, cudaStream_t stream);
+    void mtp_draft_lm_head_nvfp4_(cudaStream_t stream);  // FP8-served head: NVFP4 copy for MTP drafts
     void nvfp4_decode_cache_fp16_projections_(const ModelConfig& cfg, cudaStream_t stream);
     // Phase 3d: NVFP4 prefill copies of F16 GDN in/gate/out (gemm.nvfp4_gdn_proj_prefill).
     void nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg, cudaStream_t stream);
