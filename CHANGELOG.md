@@ -13,6 +13,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `runtime.no_vision`: drops a checkpoint's Qwen3-VL tower at init, image and video parts answer 400. Qwen3.8-Flash-Next text-only gets the tower's 1079 MiB arena reservation back: 396 -> 422 expert slots/layer, tg512 85.64 -> 87.26 tok/s (code prompt, 6 of 6 pairs faster over 3 prompts).
 
 ### Changed
+- A speculative verify step skips the forward's own last-row LM head (greedy_argmax_all projects every chunk row): Qwen3.8-27B MTP imp-cli 1 stream NVFP4 4-prompt mean 117.1 -> 124.4 tok/s, Q4_K_M 116.7 -> 119.5, UD 104.3 -> 107.2, same accepted drafts.
 - A speculative verify step takes the producer-fused NVFP4 activation quantize of batched decode (the norm writes the small-M GEMM input): Qwen3.8-27B-NVFP4 MTP imp-cli 1 stream 102.3-102.9 -> 104.8-105.2 tok/s, same accepted drafts, degen_suite 52 of 52.
 - MTP drafts on a 16-bit LM head served as FP8 read an NVFP4 copy of the head (+682 MiB while MTP is on); verification stays on FP8: Qwen3.8-27B-NVFP4 imp-cli 1 stream 102.3-102.9 -> 105.5-105.7 tok/s, degen_suite 52 of 52.
 - GDN alpha/beta of a speculative verify step (2..32 rows) run the one-launch narrow FP16 GEMM instead of two cuBLAS split-K GEMMs: Qwen3.8-27B-NVFP4 MTP imp-cli 1 stream 102.3-102.9 -> 105.4-106.1 tok/s, verify 19.0 -> 18.5-18.7 ms, degen_suite 52 checks 0 FAIL.

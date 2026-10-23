@@ -675,6 +675,7 @@ private:
     // FP8 per-row LM head (gemm.nvfp4_lm_head=fp8): final norm + gemv_fp8_rowscale_fp32 over h's rows
     // into lg (FP32). False = no FP8 head built; the caller keeps its own dispatch.
     [[nodiscard]] bool lm_head_fp8_(const Tensor& h, Tensor& lg, cudaStream_t stream);
+    void finalize_logits_(Tensor& logits_out, int n, cudaStream_t stream);  // soft-cap + final-logit dump
     // Prompt logprobs (#2257): LM head for hidden_[row0, row0 + csz) into lg (FP32, vocab slabs of
     // slab_w columns, compute/prompt_logprobs_rows.h). False = no one-GEMM route, nothing written.
     [[nodiscard]] bool prompt_lm_head_chunk_(int row0, int csz, float* lg, int& slab_w, cudaStream_t stream);
