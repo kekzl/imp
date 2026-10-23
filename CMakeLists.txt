@@ -360,7 +360,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/mmq_q8_imma_q6k.cu
     src/compute/mmq_q8_imma_q6k_k256.cu
     src/compute/mmq_q8_imma_gguf_smallm.cu
-    src/compute/mmq_q8_imma_iq4xs_bm128.cu
+    src/compute/mmq_q8_imma_gguf_bm128.cu
     src/compute/mmq_q8_imma_q51.cu
     src/compute/mmq_q8_imma_k128.cu
     src/compute/moe_routing_permute.cu
@@ -655,7 +655,7 @@ set_source_files_properties(
     src/compute/mmq_q8_imma_q6k.cu
     src/compute/mmq_q8_imma_q6k_k256.cu
     src/compute/mmq_q8_imma_gguf_smallm.cu
-    src/compute/mmq_q8_imma_iq4xs_bm128.cu
+    src/compute/mmq_q8_imma_gguf_bm128.cu
     PROPERTIES COMPILE_OPTIONS "-rdc=true")
 # Launchers of those cross-TU templates (and gemm_dp4a.cu: discarded `if constexpr` names) need
 # external host stubs; CUDA 13 defaults to static ones and warns #20280-D (42 warnings).

@@ -80,7 +80,8 @@ static bool gguf_imma_rows(const Tensor& input, const Tensor& weight, Tensor& ou
     const int M = static_cast<int>(input.shape[0]);
     const int K = static_cast<int>(weight.shape[1]);
     const bool q8 = weight.qtype == QType::Q8_0;
-    if (M < (q8 ? 4 : 2) || (q8 && M > 32) || !(q8 ? ctx.q8_0_imma_smallm : ctx.gguf_imma_smallm) ||
+    const bool on = (q8 && M <= 32) ? ctx.q8_0_imma_smallm : ctx.gguf_imma_smallm;
+    if (M < (q8 ? 4 : 2) || !on ||
         !mmq_gguf_imma_smallm_gemm(weight.data, weight.qtype, reinterpret_cast<const __half*>(input.data),
                                    reinterpret_cast<__half*>(output.data), M,
                                    static_cast<int>(weight.shape[0]), K, ctx.stream, ctx.beta,
@@ -108,7 +109,9 @@ static bool q8_q4k_rows(const Tensor& input, const Tensor& weight, Tensor& outpu
                         bool decode_rows, bool short_prompt) {
     const int M = static_cast<int>(input.shape[0]);
     const bool q8 = weight.qtype == QType::Q8_0;
-    if (q8 && (decode_rows || short_prompt) && gguf_imma_rows(input, weight, output, ctx))
+    // Above 32 rows only wide Q8_0 weights: N=48 (GDN alpha/beta) is 4 BM=128 CTAs, cuBLAS beats it.
+    const bool wide_prompt = M > 32 && weight.shape[0] >= 1024 && !process_diag_deterministic();
+    if (q8 && (decode_rows || short_prompt || wide_prompt) && gguf_imma_rows(input, weight, output, ctx))
         return true;
     if ((decode_rows || M == 1 || (q8 && short_prompt)) && dp4a_decode_rows(input, weight, output, ctx))
         return true;

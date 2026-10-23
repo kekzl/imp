@@ -124,6 +124,9 @@ TEST(MmqQ8Imma, Q8RawDensePartialTiles) {
     EXPECT_LT(a.nrmse(5, false), 1e-2);
     Q8Raw b(48, 5120, 32);
     EXPECT_LT(b.nrmse(32, true), 1e-2);
+    Q8Raw c(200, 1024, 161);  // above 32 rows: 32-row blocks on gridDim.x, no K-split
+    EXPECT_LT(c.nrmse(100, false), 1e-2);
+    EXPECT_LT(c.nrmse(161, true), 1e-2);
 }
 
 // Splits come from N and K only: the first rows of M=3 and M=32 are bit-identical.
@@ -135,13 +138,12 @@ TEST(MmqQ8Imma, Q8RawDenseRowsInvariantInM) {
     EXPECT_EQ(std::memcmp(o3.data(), o32.data(), o3.size() * 2), 0);
 }
 
-// Declines: M 1 and 33, K % 256, a weight base not 16-B aligned.
+// Declines: M 1, K % 256, a weight base not 16-B aligned.
 TEST(MmqQ8Imma, Q8RawDenseDeclines) {
     Q8Raw t(128, 512, 33);
     Q8Raw u(128, 512, 4, 2);
     std::vector<__half> out;
     EXPECT_FALSE(t.run(1, false, std::vector<__half>(128, __float2half(0.0f)), out));
-    EXPECT_FALSE(t.run(33, false, std::vector<__half>(33 * 128, __float2half(0.0f)), out));
     EXPECT_FALSE(mmq_gguf_imma_smallm_gemm(t.d_w, QType::Q8_0, t.d_x, t.d_out, 4, 128, 480, nullptr, 0.0f));
     EXPECT_FALSE(mmq_gguf_imma_smallm_gemm(t.d_w, QType::Q4_K, t.d_x, t.d_out, 4, 128, 512, nullptr, 0.0f));
     EXPECT_FALSE(u.run(4, false, std::vector<__half>(4 * 128, __float2half(0.0f)), out));

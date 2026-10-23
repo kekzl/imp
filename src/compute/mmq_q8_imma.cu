@@ -598,7 +598,7 @@ bool mmq_gguf_imma_smallm_gemm(const void* w_blocks, QType qtype, const __half* 
                       : qtype == QType::Q5_K   ? 8
                                                : 0;
     const uintptr_t align = qkind == 7 ? 7u : 15u;
-    if (qkind == 0 || M < 2 || (qkind == 5 && M > 32) || N % 2 != 0 || K % 256 != 0 ||
+    if (qkind == 0 || M < 2 || N % 2 != 0 || K % 256 != 0 ||
         (reinterpret_cast<uintptr_t>(w_blocks) & align) != 0)
         return false;
     if (beta != 0.0f && beta != 1.0f)
