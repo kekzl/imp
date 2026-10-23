@@ -5,6 +5,7 @@
 // WeightHandle-keyed GEMM dispatch (gemm_via_handle_) and its uncached
 // dequant->cuBLAS safety-net fallback, pulled out of the kernel grab-bag.
 #include "exec/executor_kernels.h"
+#include "exec/executor_gemv_helpers.h"
 #include "exec/gemm_context.h"
 #include "exec/gemm_dispatch_fallback.h"
 #include "exec/gemm_kernel_registry.h"
