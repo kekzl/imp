@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-10-15
+Last reviewed: 2026-10-24
 
 Single-author, single-GPU experiment: "roadmap" means current focus, not
 schedule. Shipped work is in [`CHANGELOG.md`](../CHANGELOG.md), competitive
@@ -38,7 +38,7 @@ Method: both engines on one client (`tools/analysis/vllm_conc_ab.sh`), 3 alterna
 
 ## Now
 
-No open row; closed rows are indexed below. A new row takes the next free number (122), ranked by what an agent workload notices first.
+No open row; closed rows are indexed below. A new row takes the next free number (123), ranked by what an agent workload notices first.
 
 ## Next
 
@@ -75,6 +75,7 @@ No open row; closed rows are indexed below. A new row takes the next free number
 | 119 | dense models past 32 GB decode at usable speed | `--gpu-layers` streams host layers once per forward; measured 2026-10-18 on Qwen3-14B Q6_K `--gpu-layers 0`: one pass 188.6 ms at width 1 and 189.71 ms at width 64, so verify width is free; n-gram now drafts on through misses there (code rewrite 5.30 -> 6.83 tok/s) and token recycling is on by default there; multi-candidate verify (the flattened tree) gets 64 rows under offload instead of 17 (`src/runtime/offload_spec_defaults.h:20 kVerifyRowsOffload`), default width 4 -> 8: prose 5.30 -> 7.22, code 6.85 -> 9.80 tok/s (119.4 done); depth 7 (64 rows) adds nothing over depth 3 (prose 7.22 both) ; best-first tree drafter opt-in (`speculative.recycle_tree`, 119.5): +1.2-1.6 % summed over prose / code / list, per prompt -6 .. +6 %; 119.6 shared-prefix mask dropped (32 vs 64 rows 196.6 vs 204.1 ms/verify). CLOSED 2026-10-18: further gains need better candidates than the successor table | L | `src/model/layer_host_keep.h:2 --gpu-layers Pass 1`, no issue |
 | 120 | Gemma-4 takes audio input | the loader reads `audio_config`, no encoder, input type or tokenizer route exists -> audio encoder plus an `input_audio` content part | L | `src/model/model_config.h:150 imp has no audio path at all`, no issue |
 | 121 | the Web UI shows watts and joules per answer | CLOSED 2026-10-15: `/metrics` `imp_gpu_power_watts` + `imp_gpu_energy_joules_total` (NVML, #2727); the Web UI reads the counter around each turn and shows J and W average next to tok/s and TTFT, plus a power sparkline in its Server tab. Real server, Qwen3-4B Q8_0, 512-token answer: 558 J, 340 W avg | S | `tools/imp-server/metrics_power.cpp`, `tools/imp-server/webui/index.html` |
+| 122 | Unsloth UD GGUF prompts reach llama.cpp speed | Qwen3.8-27B-UD-Q4_K_M pp512 127.1 ms vs llama.cpp 4179 tok/s = 122.5 ms (2026-10-24, after #2863 / #2864); left: IQ3_S (4 tensors) has no IMMA or GEMV path, 4 x 285 us dequant per prefill and decode from an NVFP4 copy; IQ4_NL decode runs the non-kpar GEMV (gate+up 81.5 vs 57.8 us IQ4_XS); Q3_K GEMV 0.99-1.26 TB/s -> native IQ3_S IMMA + GEMV, IQ4_NL kpar | M | `src/compute/mmq_q8_imma.cu:615 mmq_gguf_imma_smallm_gemm`, `src/compute/gemv_dp4a_traits.cuh:24 enum class DPQTag`, no issue |
 
 ## Not gaps
 

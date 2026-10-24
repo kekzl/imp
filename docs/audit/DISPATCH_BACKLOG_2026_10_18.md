@@ -338,3 +338,29 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | B-50 | DONE | `InferenceState::skip_lm_head`: the single-stream and batched verify set it (off under `diagnostics.spec_capture_fidelity`, which compares the forward's logits); forward_logits leaves `logits_out` empty, softcap and the final-logit dump skip an empty tensor. nsys before: 709 `fp8_head_mma` launches over 325 verifies, 326 pairs 6 us apart. imp-cli 500 tokens, 4 prompts, NVFP4: 104.77 / 105.32 / 107.39 / 150.82 -> 111.81 / 111.91 / 114.11 / 159.80 tok/s (mean 117.08 -> 124.41), drafted/accepted identical per prompt, verify 16.4 ms. 600-token prompt: Q4_K_M + external head 116.74 -> 119.52, UD 104.28 -> 107.24 tok/s. degen_suite --quick max_batch_size=1 and mtp_k=2 multi-batch: 52 checks, 0 FAIL each; 4 streams with batch_verify=true: 330.9 vs 329.1 tok/s on main (accepted 0 on both arms, pre-existing). Refuted on the way: `speculative.verify_smallm_captured=false` (batched W4A16 GEMV) mean 109.33 vs 117.08 tok/s |
+
+## 2026-10-24 Batch 34: B-51 upload KV reserve before a slot
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-51 | DONE | #2860: `upload_fitting_batch` judges each batch with KV at the batch-1 floor, `upload_fit_reserve_bytes` gives KV the rest up to the cap. Qwen3.8-27B-Q4_K_M, max_seq_len 131072, 32 slots: "clamped 32 -> 31" -> "trimmed 6516 -> 6477 MiB"; 32 streams x 300 tok 861.2 / 859.5 (31 slots) -> 1296.3 / 1294.4 tok/s. Qwen3.8-27B-NVFP4 64 slots vs 51: 1722.1 / 1720.3 -> 1797.1 / 1800.9 tok/s. `UploadReserve.*` 8 of 8, mutant 3 red |
+
+## 2026-10-24 Batch 35: B-52 verify GEMMs at the roofline
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-52 | WONTFIX | #2861: PDL-inflated nsys durations; exclusive frontier time 1.34-1.67 TB/s per shape (gate/up 17408 x 5120: 41.9 us duration, 30.4 us exclusive). Verify forward 12116 us wall, 11999 us busy; between verifies 836 us idle under nsys = the profiler's +0.85 ms/verify (16.7 native vs 17.6) |
+| B-52 note | REFUTED | smallm v2 split-K at N=5120 with partial planes bounded to M rows: 4-prompt greedy ms/verify +0.1..+0.6 vs one stripe; the M bound alone identical to main |
+
+## 2026-10-24 Batch 36: B-53 Q5_K 128-K steps
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-53 | DONE | #2863: step width S is a format-policy template parameter; Q5_K S=4. Qwen3.8-27B-UD-Q4_K_M pp512 133.5-133.6 -> 128.0-128.2 ms, pp2048 509.4 / 510.2 -> 487.7 / 488.1 ms, PPL `ppl_slice_12k.txt` 5.0068 both arms; Q4_K_M and gemma-3-12b-it-Q4_K_M flat |
+| B-53 note | REFUTED | IQ4_XS S=4 +1.9 % UD pp512, Q8_0 S=4 +1.6 % Q4_K_M pp512, `#pragma unroll 2` on the sub-block loop loses the gain, s32 MMA seeded with 0x4B400000 (FADD instead of I2FP) +0.8 % UD / +0.4 % Q4_K_M |
+
+## 2026-10-24 Batch 37: B-54 IQ4_NL on the BM=128 kernel
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-54 | DONE | #2864: `BigIQ4NL<2>`. Per launch at pp512 gate/up 524.0 -> 355.1 + 39.5 us, down 497.8 -> 371.5 us; UD-Q4_K_M pp512 127.64 / 127.77 / 127.89 -> 126.85 / 127.47 / 127.14 ms (S=4 127.25-127.40), PPL 5.0068 both arms |
