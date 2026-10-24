@@ -111,9 +111,8 @@ KindCapabilities effective_capabilities(TensorKind k, QType source_qtype) {
     // no compression win, possible quality risk. Mirrors nvfp4_beneficial(qtype).
     const bool nvfp4_overlay_ok = (source_qtype == QType::Q8_0 || source_qtype == QType::Q8_K ||
                                    source_qtype == QType::Q6_K || source_qtype == QType::Q5_K ||
-                                   // i-quants: no dp4a/MMVQ kernels — the NVFP4 decode cache is the
-                                   // only fast decode path, so the overlay is allowed despite the
-                                   // similar bit-width (mirror nvfp4_beneficial).
+                                   // i-quants decode on native dp4a GEMVs; the overlay stays allowed
+                                   // for gemm.nvfp4_decode_all (mirror nvfp4_beneficial).
                                    source_qtype == QType::IQ3_S || source_qtype == QType::IQ4_NL ||
                                    source_qtype == QType::IQ4_XS);
 

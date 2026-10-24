@@ -364,3 +364,12 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 | ID | Status | Evidence |
 |---|---|---|
 | B-54 | DONE | #2864: `BigIQ4NL<2>`. Per launch at pp512 gate/up 524.0 -> 355.1 + 39.5 us, down 497.8 -> 371.5 us; UD-Q4_K_M pp512 127.64 / 127.77 / 127.89 -> 126.85 / 127.47 / 127.14 ms (S=4 127.25-127.40), PPL 5.0068 both arms |
+
+## 2026-10-24 Batch 38: B-55 IQ3_S native, Q3_K word loads, IQ4_NL K-parallel
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-55 | DONE | IQ3_S `DequantTraits` + `FmtIQ3S` / `BigIQ3S<2>` (K % 512 == 0), NVFP4 decode copy off (4746 -> 4555 MiB, KV 7167 -> 7922 blocks). Per launch: IQ3_S prompt GEMM 290 + 274 us (dequant + cuBLAS) -> 406 gate / 457 down at pp512, M <= 32 48.8 us; verify rows Q3_K 95.4 -> 38.6 us, IQ3_S 37.1 / 40.6 us. UD-Q4_K_M tg128 87.97 / 87.97 / 87.96 -> 88.66 / 88.65 / 88.55, pp512 +0.42 % (noise), PPL `ppl_slice_12k.txt` 5.0068 -> 5.0059, degen_suite 52 checks 0 FAIL |
+| B-55 verify | DONE | FP16-tier GGUF weights at 2..32 rows run the in-place kernels for every source qtype (was Q4_K / Q5_K only): UD-Q4_K_M MTP verify had 3-4 cuBLAS FP16 GEMMs per step (116 us per 17408 x 5120), kernel sum per step 16.67 -> 16.02 ms; the freed NVFP4 budget had grown the FP16 cache by one tensor (2600 -> 2770 MiB). MTP imp-cli math prompt (202 verifies, 297 accepted both arms) 136.69 / 136.01 -> 142.48 / 142.79 tok/s, 4-prompt mean 112.27 -> 115.72; Qwen3-8B-Q8_0 tg128 +0.08 %, Qwen3.8-27B-Q4_K_M -0.13 % (nsys kernel sum 6523.1 -> 6515.4 ms) |
+| B-55 note | MEASURED | IQ4_NL `kPreferKpar` alone: tg128 +0.30 % (mtp on) / +0.37 % (mtp_k=0), 6 of 6 pairs. `BigIQ3S` steps: per-warp decode 563 / 630 us, per-CTA predecode 511 / 564, one thread per sub-block 464 / 550, smem codebook 429 / 472 (cp.async.ca shares L1), 12 pieces + LDS.64 tile 406 / 457; IQ4_XS 294 / 360 for the same shapes |
+| B-55 open | OPEN | `BigIQ3S` (smem-codebook build) vs IQ4_XS: ncu wait 0.99, mio_throttle 0.58, barrier 0.43 stalls per issue (IQ4_XS 0.36 / 0.17 / 0.31), 204 vs 177 regs; Q3_K has no IMMA (dequant 528 us + cuBLAS per prompt GEMM, 7 tensors in UD-Q4_K_M) |

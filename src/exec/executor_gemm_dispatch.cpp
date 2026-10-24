@@ -540,10 +540,12 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         // instead of the FP16 cache (2.0 B/elem). Weight-stationary TILE_M=16, so
         // it re-reads the weight ceil(M/16) times; only wins at small M (<=64,
         // memory-bound). sm_120 smem cap 99 KiB fits K up to ~4400.
-        // M <= 32 on a Q4_K / Q5_K source: IMMA on the blocks reads the weight once (dp4a dense once
-        // per 16 rows, UD-Q4_K_M pp16 Q4_K avg 137 us).
-        if (prefill == StorageTier::FP16 && M <= 32 && h.source_data != nullptr &&
-            (h.source_qtype == QType::Q4_K || h.source_qtype == QType::Q5_K)) {
+        // M <= 32 on a Q4_K / Q5_K source, 2..32 on the other GGUF sources: the in-place kernels read the
+        // blocks once (UD-Q4_K_M pp16 Q4_K avg 137 us; the FP16 copy at verify rows: 116 us per 17408 x 5120
+        // cuBLAS call). Other qtypes decline there; M = 1 keeps its route.
+        const bool k_quant = h.source_qtype == QType::Q4_K || h.source_qtype == QType::Q5_K;
+        if (prefill == StorageTier::FP16 && M <= 32 && (M >= 2 || k_quant) && h.source_data != nullptr &&
+            !wcache_.q8_planes_only.contains(h.source_data)) {  // dropped Q8_0 source
             Tensor w(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
             if (gemm_uncached_in_place(input, w, output, ctx, cur_decode_rows_))
                 return;

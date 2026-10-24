@@ -1,4 +1,5 @@
 #include "compute/gemm.h"
+#include "compute/gemv_dp4a_iq3s_traits.cuh"
 #include "compute/gemv_dp4a_iq4_traits.cuh"
 #include "compute/gemv_dp4a_traits.cuh"
 #include "core/pdl_device.cuh"
@@ -293,7 +294,8 @@ void rmsnorm_quantize_q8_1(const half* x, const half* weight, block_q8_1* q8_out
     X(q2_k, Q2_K_Traits)        \
     X(q3_k, Q3_K_Traits)        \
     X(iq4_nl, IQ4_NL_Traits)    \
-    X(iq4_xs, IQ4_XS_Traits)
+    X(iq4_xs, IQ4_XS_Traits)    \
+    X(iq3_s, IQ3_S_Traits)
 
 #define IMP_DEFINE_GEMV_DP4A(name, traits)                                                                   \
     void gemv_##name##_q8_1(const void* W, const block_q8_1* q8_1, const float* d8, half* y, int M, int K,   \
@@ -356,6 +358,11 @@ void gemv_iq4_xs_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d
     launch_gemv_dp4a_fp32<IQ4_XS_Traits>(static_cast<const uint8_t*>(W), q8_1, d8, y, M, K, stream);
 }
 
+void gemv_iq3_s_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8, float* y, int M, int K,
+                          cudaStream_t stream) {
+    launch_gemv_dp4a_fp32<IQ3_S_Traits>(static_cast<const uint8_t*>(W), q8_1, d8, y, M, K, stream);
+}
+
 void gemv_dp4a_fp32_batched(QType qtype, const void* W, const block_q8_1* q8_1, const float* d8,
                             float* y, int M, int K, int n_act, int act_stride_blocks,
                             cudaStream_t stream) {
@@ -392,6 +399,10 @@ void gemv_dp4a_fp32_batched(QType qtype, const void* W, const block_q8_1* q8_1, 
         case QType::IQ4_XS:
             launch_gemv_dp4a_fp32_batched<IQ4_XS_Traits>(w, q8_1, d8, y, M, K, n_act, act_stride_blocks,
                                                          stream);
+            break;
+        case QType::IQ3_S:
+            launch_gemv_dp4a_fp32_batched<IQ3_S_Traits>(w, q8_1, d8, y, M, K, n_act, act_stride_blocks,
+                                                        stream);
             break;
         default:
             launch_gemv_dp4a_fp32_batched<Q8_0_Traits>(w, q8_1, d8, y, M, K, n_act, act_stride_blocks,
@@ -491,6 +502,8 @@ void gemv_gate_up_fused(const void* gate_weights, const void* up_weights, const 
         DISPATCH_GATE_UP(IQ4_NL_Traits);
     } else if (qtype == QType::IQ4_XS) {
         DISPATCH_GATE_UP(IQ4_XS_Traits);
+    } else if (qtype == QType::IQ3_S) {
+        DISPATCH_GATE_UP(IQ3_S_Traits);
     }
 
 #undef DISPATCH_GATE_UP
@@ -709,6 +722,9 @@ void gemv_dp4a_set_l1_carveout() {
     REG(IQ4_XS_Traits, 1);
     REG(IQ4_XS_Traits, 2);
     REG(IQ4_XS_Traits, 4);
+    REG(IQ3_S_Traits, 1);
+    REG(IQ3_S_Traits, 2);
+    REG(IQ3_S_Traits, 4);
 #undef REG
     // Kernels #5 and #6 (MoE decode / gate+up) take no carveout, as before.
     // K-parallel kernels (all types)
@@ -727,6 +743,7 @@ void gemv_dp4a_set_l1_carveout() {
     REG_KPAR(Q3_K_Traits);
     REG_KPAR(IQ4_NL_Traits);
     REG_KPAR(IQ4_XS_Traits);
+    REG_KPAR(IQ3_S_Traits);
 #undef REG_KPAR
 }
 

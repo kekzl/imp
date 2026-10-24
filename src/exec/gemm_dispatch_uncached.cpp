@@ -168,6 +168,7 @@ bool gemm_uncached_in_place(const Tensor& input, const Tensor& weight, Tensor& o
             return q8_q4k_rows(input, weight, output, ctx, decode_rows, short_prompt);
         case QType::IQ4_NL:
         case QType::IQ4_XS:
+        case QType::IQ3_S:
         case QType::Q5_K:
             return (decode_rows || !det) && gguf_imma_rows(input, weight, output, ctx);
         case QType::Q6_K:

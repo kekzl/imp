@@ -236,6 +236,10 @@ static void dispatch_gemv_qkv_fused(QType qtype, const void* W_q, const void* W_
             gemv_qkv_fused_iq4_xs_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K,
                                        stream);
             break;
+        case QType::IQ3_S:
+            gemv_qkv_fused_iq3_s_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K,
+                                      stream);
+            break;
         default:
             gemv_qkv_fused_q8_0_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K,
                                      stream);

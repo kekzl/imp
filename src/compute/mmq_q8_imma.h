@@ -50,9 +50,10 @@ void mmq_imma_act_forget();
 [[nodiscard]] bool mmq_q6k_imma_gemm(const void* w_q6k_blocks, const __half* x_f16, __half* out_f16, int M, int N, int K,
                        cudaStream_t stream, float beta = 0.0f);
 
-// Dense Q8_0 / IQ4_NL / IQ4_XS / Q5_K on the GGUF blocks in place (no planes): M >= 2 (Q8_0 2..32;
+// Dense Q8_0 / IQ4_NL / IQ4_XS / IQ3_S / Q5_K on the GGUF blocks in place (no planes): M >= 2 (Q8_0 2..32;
 // 32-row tiles, Q5_K above 32 rows the BM=128 kernel), K % 256 == 0,
-// w 16-B aligned (IQ4_XS 8-B). K-split at M <= 32, by N and K only. Declines otherwise (other qtype too).
+// w 16-B aligned (IQ4_XS 8-B, IQ3_S 4-B and K % 512 == 0). K-split at M <= 32, by N and K only. Declines
+// otherwise (other qtype too).
 // reuse_act as in mmq_q8_imma_gemm.
 [[nodiscard]] bool mmq_gguf_imma_smallm_gemm(const void* w_blocks, QType qtype, const __half* x_f16,
                                              __half* out_f16, int M, int N, int K, cudaStream_t stream,
