@@ -303,6 +303,50 @@ else
     pass "[Unreleased] has no repeated '###' heading"
 fi
 
+# ------------------------------------------- running containers before the GPU stages
+# A running container may hold the card: list them and ask instead of failing. No terminal:
+# IMP_RELEASE_STOP_CONTAINERS=yes|no (default no). Stopped ones get a restart offer at exit
+# (IMP_RELEASE_RESTART_CONTAINERS=yes|no, default yes).
+STOPPED_CONTAINERS=()
+ask_yes() {  # $1 = prompt, $2 = default y|n, $3 = env answer; true on yes
+    local ans="${3:-}"
+    if [ -z "$ans" ] && [ -t 0 ]; then
+        read -r -p "$1 " ans || ans=""
+    fi
+    case "${ans:-$2}" in y | Y | yes | YES) return 0 ;; *) return 1 ;; esac
+}
+restart_stopped() {
+    [ "${#STOPPED_CONTAINERS[@]}" -eq 0 ] && return 0
+    echo
+    if ask_yes "Restart ${#STOPPED_CONTAINERS[@]} stopped container(s) (${STOPPED_CONTAINERS[*]})? [Y/n]" y \
+        "${IMP_RELEASE_RESTART_CONTAINERS:-}"; then
+        docker start "${STOPPED_CONTAINERS[@]}" >/dev/null && echo "restarted: ${STOPPED_CONTAINERS[*]}"
+    else
+        echo "left stopped: ${STOPPED_CONTAINERS[*]}"
+    fi
+}
+section "running containers"
+if [ "${SKIP_VERIFY:-0}" = "1" ]; then
+    echo "  (skipped via SKIP_VERIFY=1)"
+else
+    mapfile -t RUNNING < <(docker ps --format '{{.Names}}' 2>/dev/null || true)
+    if [ "${#RUNNING[@]}" -eq 0 ]; then
+        pass "no running container"
+    else
+        for c in "${RUNNING[@]}"; do
+            echo "  running: $c ($(docker inspect -f '{{.Config.Image}}' "$c" 2>/dev/null || echo '?'))"
+        done
+        if ask_yes "  Stop them for the GPU stages? [y/N]" n "${IMP_RELEASE_STOP_CONTAINERS:-}"; then
+            trap restart_stopped EXIT
+            for c in "${RUNNING[@]}"; do
+                docker stop "$c" >/dev/null && STOPPED_CONTAINERS+=("$c") && echo "  stopped: $c"
+            done
+        else
+            echo "  left running: a GPU stage refuses only if the card is busy (scripts/require_free_gpu.sh)"
+        fi
+    fi
+fi
+
 # ----------------------------------------------- defer to make verify-fast
 section "make verify-fast"
 if [ "${SKIP_VERIFY:-0}" = "1" ]; then
