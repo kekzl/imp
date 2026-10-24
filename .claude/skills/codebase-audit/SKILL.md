@@ -1,6 +1,6 @@
 ---
 name: codebase-audit
-description: Use when auditing the imp codebase for structural debt, dead code, god-objects/files, duplication, flag sprawl, or deciding whether a cleanup is worth shipping - "structure audit", "tech debt", "is this still used", "dead code", "refactor for clarity", "should we split this file", "remove this flag", "file size gate red", "alloc sites gate red". Do NOT use for build/test mechanics (building-and-testing), perf/kernel work (benchmark-cuda / sm120-cuda-expert), or output quality (check-degeneration).
+description: Structural debt, dead code, god files, duplication, flag sprawl, whether a cleanup is worth shipping - "tech debt", "should we split this file", "remove this flag", "file size gate red", "alloc sites gate red". Not build/test (building-and-testing), perf/kernels (benchmark-cuda, sm120-cuda-expert), output quality (check-degeneration).
 ---
 
 # Codebase audit & structural debt - imp

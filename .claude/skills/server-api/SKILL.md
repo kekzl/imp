@@ -1,6 +1,6 @@
 ---
 name: server-api
-description: Use when working on or testing imp-server and its HTTP APIs - OpenAI/Anthropic endpoints, /v1/chat/completions, /v1/messages, /v1/responses, SSE streaming, tool calling, json_schema/regex/GBNF constrained decoding, thinking/reasoning_content, cache_control/prefix cache, model loading and swapping, request priority, X-Request-Id, OTLP tracing / traceparent / Jaeger, /metrics, container env (IMP_SET), "server returns 404/garbage", API compliance. Do NOT use for CLI-only inference (imp-cli), kernel work (sm120-cuda-expert), or pure output-quality checks (check-degeneration).
+description: imp-server and its HTTP APIs - /v1/chat/completions, /v1/messages, /v1/responses, SSE, tool calling, json_schema/regex/GBNF, reasoning_content, cache_control/prefix cache, model swap, priority, X-Request-Id, OTLP tracing, /metrics, IMP_SET, API compliance. Not imp-cli, kernels (sm120-cuda-expert), output quality (check-degeneration).
 ---
 
 # Server & API - imp-server

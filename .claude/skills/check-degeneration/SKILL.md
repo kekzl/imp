@@ -1,6 +1,6 @@
 ---
 name: check-degeneration
-description: Use when verifying that a model in the imp inference engine produces coherent output without repetition loops, token-stuck states, or state corruption across turns or streams. Triggers on "degenerates", "check degeneration", "repetition loop", "own own own", "stuck token", "empty content", "multi-turn regression", "does it still work", "NIAH", and after enabling CUDA graphs / changing forward pass / MoE routing / KV cache or KV dtype / GDN state or scan / sparse attention / PDL / speculation (MTP, n-gram) / ragged prefill / batched-decode kernels (smallm, producer quantize) / FA2 softmax.
+description: Verify coherent output - repetition loops, stuck token, empty content, state corruption across turns/streams, multi-turn regression, NIAH, "does it still work". Run after changing CUDA graphs, forward pass, MoE routing, KV cache/dtype, GDN state/scan, sparse attention, PDL, speculation (MTP, n-gram), ragged prefill, batched-decode kernels, FA2 softmax.
 ---
 
 # Degeneration Check - imp

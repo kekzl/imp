@@ -1,6 +1,6 @@
 ---
 name: quant-formats
-description: Use when working on imp's quantization formats, loaders, or dequant paths - GGUF Q4_0...Q8_0/Q*_K/IQ4/MXFP4, NVFP4 two-level scaling (Modelopt vs compressed-tensors layouts), FP8 E4M3, StorageTier, decode cache, KV-cache dtypes (auto/fp16/fp8/int8/int4/nvfp4/mxfp4), "which quant should I use", "which KV dtype", scale-factor layout, dequant kernel wiring, imp-quantize / AWQ, judging quant quality (PPL). Do NOT use for writing/optimizing GEMM/GEMV kernels (sm120-cuda-expert) or measuring quant perf (benchmark-cuda).
+description: Quant formats, loaders, dequant - GGUF (Q*_0, Q*_K, IQ*, MXFP4), NVFP4 two-level scaling (Modelopt vs compressed-tensors), FP8 E4M3, StorageTier, decode cache, KV dtypes, "which quant / KV dtype", scale layout, imp-quantize / AWQ, quant quality (PPL). Not GEMM/GEMV kernels (sm120-cuda-expert), not quant perf (benchmark-cuda).
 ---
 
 # Quantization Formats & Pipelines - imp

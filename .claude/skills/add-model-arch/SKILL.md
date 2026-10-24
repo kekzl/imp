@@ -1,6 +1,6 @@
 ---
 name: add-model-arch
-description: Use when adding support for a new model architecture to imp, porting a model family, or debugging a model that loads but produces wrong output - "add support for <model>", "new arch", loader detection, chat template, tokenizer parity, RoPE variant, "outputs garbage", "prompt-blind", "digits scrambled", "NaN logits", "describes a different picture", "does it fit in VRAM". Do NOT use for kernel performance (sm120-cuda-expert) or quant-format questions (quant-formats).
+description: New model architecture, porting a model family, or a model that loads but outputs wrong - "add support for <model>", loader detection, chat template, tokenizer parity, RoPE variant, "outputs garbage", "prompt-blind", "NaN logits", "does it fit in VRAM". Not kernel perf (sm120-cuda-expert), not quant formats (quant-formats).
 ---
 
 # Adding a Model Architecture - imp
