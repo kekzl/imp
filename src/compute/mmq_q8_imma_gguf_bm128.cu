@@ -1,6 +1,6 @@
-// Dense GGUF IMMA kernel for prompt chunks above 32 rows (sm_120a): BM=128 x BN=128 tiles, 64-K steps
-// (2 sub-blocks of 32), cp.async staging. Each warp decodes its B fragments once per sub-block and reuses
-// them over 2 m-fragments; the 32-row kernel (mmq_q8_imma_gguf_smallm.cu) decodes them per 32 rows.
+// Dense GGUF IMMA kernel for prompt chunks above 32 rows (sm_120a): BM=128 x BN=128 tiles, K-steps of S
+// 32-K sub-blocks per barrier pair, B fragments decoded once per sub-block for 2 m-fragments. S per format:
+// Q5_K 4 (UD-Q4_K_M pp512 -4.1 %), IQ4_XS and Q8_0 2 (S = 4: +1.9 % / +1.6 %); per-output math is S-free.
 
 #include "compute/iq4_lut.cuh"
 #include "compute/mmq_q8_imma_internal.cuh"
@@ -15,16 +15,28 @@ namespace {
 
 constexpr int kBM = 128;
 
-// Format policy: one 64-K step of a weight row is kPieces pieces of kPiece bytes (piece_off: byte offset in
-// the row), staged as a kSegRow-B smem segment (kSegRow / 4 % 32 in {12, 20}: rl rows on distinct banks).
-// scale(seg, ks, kb) = (weight scale, min) of sub-block kb of step ks; kMin adds min * activation row sum.
+// K-step of S sub-blocks of 32 (S = 2 or 4); kARow 80 / 144 B puts the 8 rl rows on distinct banks.
+template <int S>
+struct StepGeom {
+    static constexpr int kSub = S;
+    static constexpr int kStepK = S * 32;
+    static constexpr int kARow = kStepK + 16;
+    static constexpr int kSpb = 8 / S;  // K-steps per 256-K super-block
+};
 
-// IQ4_XS: the super-block header (u64) + 32 B of qs (2 sub-blocks) per step.
-struct BigIQ4XS {
-    static constexpr int kPieces = 5, kPiece = 8, kSegRow = 48;
+// Format policy: one K-step of a weight row is kPieces pieces of kPiece bytes (piece_off: byte offset in
+// the row), staged as a kSegRow-B smem segment (kSegRow / 4 % 32 in {4, 12, 20, 28}: rl rows on distinct
+// banks). scale(seg, ks, kb) = (weight scale, min) of sub-block kb of step ks; kMin adds min * activation
+// row sum.
+
+// IQ4_XS: the super-block header (u64) + 16 B of qs per sub-block.
+template <int S>
+struct BigIQ4XS : StepGeom<S> {
+    using G = StepGeom<S>;
+    static constexpr int kPieces = 1 + (2 * S), kPiece = 8, kSegRow = S == 4 ? 80 : 48;
     static constexpr bool kMin = false;
     static __device__ __forceinline__ int piece_off(int ks, int p) {
-        return ((ks >> 2) * 136) + (p == 0 ? 0 : 8 + ((ks & 3) * 32) + ((p - 1) * 8));
+        return ((ks / G::kSpb) * 136) + (p == 0 ? 0 : 8 + ((ks % G::kSpb) * (S * 16)) + ((p - 1) * 8));
     }
     static __host__ __device__ __forceinline__ size_t row_bytes(int K) {
         return static_cast<size_t>(K / 256) * 136;
@@ -36,25 +48,26 @@ struct BigIQ4XS {
     }
     static __device__ __forceinline__ float2 scale(const uint8_t* seg, int ks, int kb) {
         const uint2 h = *reinterpret_cast<const uint2*>(seg);
-        const int j = ((ks & 3) * 2) + kb;
+        const int j = ((ks % G::kSpb) * S) + kb;
         const uint32_t ls = ((h.y >> (4 * j)) & 0xFu) | (((h.x >> (16 + (2 * j))) & 3u) << 4);
         const float d = __half2float(__ushort_as_half(static_cast<unsigned short>(h.x & 0xFFFFu)));
         return make_float2(d * static_cast<float>(static_cast<int>(ls) - 32), 0.0f);
     }
 };
 
-// Q8_0: two 34-B blocks (fp16 d + 32 s8) = 68 B per step, 4-B aligned (K % 256 == 0).
-struct BigQ8_0 {
-    static constexpr int kPieces = 17, kPiece = 4, kSegRow = 80;
+// Q8_0: S 34-B blocks (fp16 d + 32 s8) per step, 4-B aligned (K % 256 == 0).
+template <int S>
+struct BigQ8_0 : StepGeom<S> {
+    static constexpr int kPieces = (S * 34) / 4, kPiece = 4, kSegRow = S == 4 ? 144 : 80;
     static constexpr bool kMin = false;
-    static __device__ __forceinline__ int piece_off(int ks, int p) { return (ks * 68) + (p * 4); }
+    static __device__ __forceinline__ int piece_off(int ks, int p) { return (ks * S * 34) + (p * 4); }
     static __host__ __device__ __forceinline__ size_t row_bytes(int K) {
         return static_cast<size_t>(K / 32) * 34;
     }
     static __device__ __forceinline__ uint2 bfrag(const uint8_t* seg, int kb, int cl) {
         const auto* w = reinterpret_cast<const uint32_t*>(seg);
-        const int qo = (kb * 34) + 2 + (cl * 4);  // kb 0: 2 mod 4, kb 1: word-aligned
-        if (kb != 0)
+        const int qo = (kb * 34) + 2 + (cl * 4);  // even kb: 2 mod 4, odd kb: word-aligned
+        if ((kb & 1) != 0)
             return make_uint2(w[qo >> 2], w[(qo + 16) >> 2]);
         return make_uint2(__byte_perm(w[qo >> 2], w[(qo >> 2) + 1], 0x5432),
                           __byte_perm(w[(qo + 16) >> 2], w[((qo + 16) >> 2) + 1], 0x5432));
@@ -83,53 +96,77 @@ __device__ __forceinline__ float2 k_scale_min(const uint8_t* hdr, int j) {
                        -__half2float(h[1]) * static_cast<float>(mn));
 }
 
-// Q5_K: 176-B super-block (d, dmin, scales[12], qh[32], qs[128]); step = header + qh + 32 B of qs, element l
-// of sub-block j takes bit j of qh[l]. q - 16 enters the MMA (q in 0..31 cancels the min term in fp32).
-struct BigQ5K {
-    static constexpr int kPieces = 5, kPiece = 16, kSegRow = 80;
+// Q5_K: 176-B super-block (d, dmin, scales[12], qh[32], qs[128]); step = header + qh + S * 16 B of qs (32-B
+// chunks, low nibble = even sub-block), element l of sub-block j takes bit j of qh[l]. q - 16 enters the MMA
+// (q in 0..31 cancels the min term in fp32).
+template <int S>
+struct BigQ5K : StepGeom<S> {
+    using G = StepGeom<S>;
+    static constexpr int kPieces = 3 + S, kPiece = 16, kSegRow = S == 4 ? 112 : 80;
     static constexpr bool kMin = true;
     static __device__ __forceinline__ int piece_off(int ks, int p) {
-        return ((ks >> 2) * 176) + (p < 3 ? p * 16 : 48 + ((ks & 3) * 32) + ((p - 3) * 16));
+        return ((ks / G::kSpb) * 176) + (p < 3 ? p * 16 : 48 + ((ks % G::kSpb) * (S * 16)) + ((p - 3) * 16));
     }
     static __host__ __device__ __forceinline__ size_t row_bytes(int K) {
         return static_cast<size_t>(K / 256) * 176;
     }
     static __device__ __forceinline__ uint2 bfrag(const uint8_t* seg, int kb, int cl, int j) {
         const auto* qh = reinterpret_cast<const uint32_t*>(seg + 16);
-        const auto* qs = reinterpret_cast<const uint32_t*>(seg + 48);
-        const uint32_t sh = static_cast<uint32_t>(kb) * 4;
+        const auto* qs = reinterpret_cast<const uint32_t*>(seg + 48 + (static_cast<ptrdiff_t>(kb >> 1) * 32));
+        const uint32_t sh = static_cast<uint32_t>(kb & 1) * 4;
         return make_uint2(
             __vsub4(((qs[cl] >> sh) & 0x0F0F0F0Fu) | (((qh[cl] >> j) & 0x01010101u) << 4), 0x10101010u),
             __vsub4(((qs[cl + 4] >> sh) & 0x0F0F0F0Fu) | (((qh[cl + 4] >> j) & 0x01010101u) << 4),
                     0x10101010u));
     }
     static __device__ __forceinline__ float2 scale(const uint8_t* seg, int ks, int kb) {
-        const float2 s = k_scale_min(seg, ((ks & 3) * 2) + kb);  // q - 16 in the MMA: min += 16 * scale
+        // q - 16 in the MMA: min += 16 * scale
+        const float2 s = k_scale_min(seg, ((ks % G::kSpb) * S) + kb);
         return make_float2(s.x, fmaf(16.0f, s.x, s.y));
     }
 };
 
 template <class F>
+inline constexpr bool kIsQ5K = false;
+template <int S>
+inline constexpr bool kIsQ5K<BigQ5K<S>> = true;
+
+template <class F>
 __device__ __forceinline__ uint2 b_of(const uint8_t* seg, int ks, int kb, int cl) {
-    if constexpr (std::is_same_v<F, BigQ5K>)
-        return F::bfrag(seg, kb, cl, ((ks & 3) * 2) + kb);
+    if constexpr (kIsQ5K<F>)
+        return F::bfrag(seg, kb, cl, ((ks % F::kSpb) * F::kSub) + kb);
     else
         return F::bfrag(seg, kb, cl);
 }
 
-// One 64-K step ks: A [128][kRow] s8 + per-32 scales (+ row sums for kMin), B segments [128][F::kSegRow].
+// One stage of dynamic smem: A [128][kARow] s8, B segments [128][kSegRow], A per-32 scales, A row sums
+// (kMin), B (scale, min) per sub-block. Every part is a multiple of 16 B.
+template <class F>
+struct BigSmem {
+    static constexpr size_t kA = static_cast<size_t>(kBM) * F::kARow;
+    static constexpr size_t kB = static_cast<size_t>(kBN) * F::kSegRow;
+    static constexpr size_t kAsc = static_cast<size_t>(kBM) * F::kSub * sizeof(__half);
+    static constexpr size_t kArs = F::kMin ? static_cast<size_t>(kBM) * F::kSub * sizeof(float) : 0;
+    static constexpr size_t kBs = static_cast<size_t>(kBN) * F::kSub * sizeof(float2);
+    static constexpr size_t kStage = kA + kB + kAsc + kArs + kBs;
+    static constexpr size_t kBytes = kStages * kStage;
+};
+
+// One K-step ks: A [128][kARow] s8 + per-32 scales (+ row sums for kMin), B segments [128][F::kSegRow].
 template <class F>
 __device__ __forceinline__ void load_step(int tid, const int8_t* __restrict__ A,
                                           const __half* __restrict__ Asc, const float* __restrict__ Ars,
-                                          const uint8_t* __restrict__ W, int8_t (*sA)[kRow],
-                                          __half (*sAsc)[2], float (*sArs)[2], uint8_t (*sB)[F::kSegRow],
-                                          int base_m, int M, int K, int base_n, int n_valid, int ks) {
+                                          const uint8_t* __restrict__ W, int8_t (*sA)[F::kARow],
+                                          __half (*sAsc)[F::kSub], float (*sArs)[F::kSub],
+                                          uint8_t (*sB)[F::kSegRow], int base_m, int M, int K, int base_n,
+                                          int n_valid, int ks) {
+    constexpr int kChunks = F::kStepK / 16;  // 16-B chunks per A row
     const int subs = K / 32;
-    const int k_base = ks * kBK;
+    const int k_base = ks * F::kStepK;
 #pragma unroll
-    for (int i = tid; i < kBM * 4; i += kThreads) {
-        const int row = i >> 2;
-        const int col = (i & 3) * 16;
+    for (int i = tid; i < kBM * kChunks; i += kThreads) {
+        const int row = i / kChunks;
+        const int col = (i % kChunks) * 16;
         const bool valid = (base_m + row) < M;
         cp_async_cg_16(&sA[row][col], A + (static_cast<size_t>(valid ? base_m + row : 0) * K) + k_base + col,
                        valid);
@@ -137,9 +174,15 @@ __device__ __forceinline__ void load_step(int tid, const int8_t* __restrict__ A,
     for (int i = tid; i < kBM; i += kThreads) {
         const bool valid = (base_m + i) < M;
         const size_t a = (static_cast<size_t>(valid ? base_m + i : 0) * subs) + (k_base / 32);
-        cp_async_ca_4(&sAsc[i][0], Asc + a, valid);
-        if constexpr (F::kMin)
-            cp_async_ca_8(&sArs[i][0], Ars + a, valid);
+        if constexpr (F::kSub == 4) {
+            cp_async_ca_8(&sAsc[i][0], Asc + a, valid);
+            if constexpr (F::kMin)
+                cp_async_cg_16(&sArs[i][0], Ars + a, valid);
+        } else {
+            cp_async_ca_4(&sAsc[i][0], Asc + a, valid);
+            if constexpr (F::kMin)
+                cp_async_ca_8(&sArs[i][0], Ars + a, valid);
+        }
     }
     const size_t row_bytes = F::row_bytes(K);
 #pragma unroll
@@ -169,6 +212,9 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
     constexpr int kTileN = kBN / kWN;  // 64
     constexpr int kMF = kTileM / 16;
     constexpr int kNF = kTileN / 8;
+    using L = BigSmem<F>;
+    constexpr int kSub = F::kSub;
+    constexpr int kARow = F::kARow;
 
     const int base_n = static_cast<int>(blockIdx.x) * kBN;
     const int base_m = static_cast<int>(blockIdx.y) * kBM;
@@ -181,11 +227,20 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
     const int rl = lane >> 2;
     const int cl = lane & 3;
 
-    __shared__ __align__(16) int8_t sA[kStages][kBM][kRow];
-    __shared__ __align__(16) uint8_t sB[kStages][kBN][F::kSegRow];
-    __shared__ __align__(16) __half sAsc[kStages][kBM][2];
-    __shared__ __align__(16) float sArs[kStages][F::kMin ? kBM : 1][2];
-    __shared__ float2 sBs[kStages][kBN][2];  // (scale, min) per (row, sub-block of the step)
+    extern __shared__ __align__(16) uint8_t smem[];
+    auto sA = [&](int s) { return reinterpret_cast<int8_t (*)[kARow]>(smem + (s * L::kStage)); };
+    auto sB = [&](int s) {
+        return reinterpret_cast<uint8_t (*)[F::kSegRow]>(smem + (s * L::kStage) + L::kA);
+    };
+    auto sAsc = [&](int s) {
+        return reinterpret_cast<__half(*)[kSub]>(smem + (s * L::kStage) + L::kA + L::kB);
+    };
+    auto sArs = [&](int s) {
+        return reinterpret_cast<float (*)[kSub]>(smem + (s * L::kStage) + L::kA + L::kB + L::kAsc);
+    };
+    auto sBs = [&](int s) {
+        return reinterpret_cast<float2(*)[kSub]>(smem + (s * L::kStage) + L::kA + L::kB + L::kAsc + L::kArs);
+    };
 
     float acc[kMF][kNF][4];
 #pragma unroll
@@ -194,17 +249,17 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
         for (int j = 0; j < kNF; ++j)
             acc[i][j][0] = acc[i][j][1] = acc[i][j][2] = acc[i][j][3] = 0.0f;
 
-    // SPLITK: blockIdx.z covers 64-K steps [z * ks_per_split, +ks_per_split), never empty (launch rule).
+    // SPLITK: blockIdx.z covers K-steps [z * ks_per_split, +ks_per_split), never empty (launch rule).
     const int ks0 = SPLITK ? static_cast<int>(blockIdx.z) * ks_per_split : 0;
-    const int ksteps = SPLITK ? min(K / kBK, ks0 + ks_per_split) : K / kBK;
-    load_step<F>(tid, X_s8, x_scale, x_rowsum, W, sA[0], sAsc[0], sArs[0], sB[0], base_m, M, K, base_n,
+    const int ksteps = SPLITK ? min(K / F::kStepK, ks0 + ks_per_split) : K / F::kStepK;
+    load_step<F>(tid, X_s8, x_scale, x_rowsum, W, sA(0), sAsc(0), sArs(0), sB(0), base_m, M, K, base_n,
                  n_valid, ks0);
     cp_async_commit();
     for (int ks = ks0; ks < ksteps; ++ks) {
         const int stage = (ks - ks0) & 1;
         if (ks + 1 < ksteps) {
             const int ns = stage ^ 1;
-            load_step<F>(tid, X_s8, x_scale, x_rowsum, W, sA[ns], sAsc[ns], sArs[ns], sB[ns], base_m, M, K,
+            load_step<F>(tid, X_s8, x_scale, x_rowsum, W, sA(ns), sAsc(ns), sArs(ns), sB(ns), base_m, M, K,
                          base_n, n_valid, ks + 1);
             cp_async_commit();
             cp_async_wait_group<1>();
@@ -212,37 +267,42 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
             cp_async_wait_group<0>();
         }
         __syncthreads();
-        for (int i = tid; i < kBN * 2; i += kThreads)
-            sBs[stage][i >> 1][i & 1] = F::scale(sB[stage][i >> 1], ks, i & 1);
+        const auto stA = sA(stage);
+        const auto stB = sB(stage);
+        const auto stAsc = sAsc(stage);
+        [[maybe_unused]] const auto stArs = sArs(stage);
+        const auto stBs = sBs(stage);
+        for (int i = tid; i < kBN * kSub; i += kThreads)
+            stBs[i / kSub][i % kSub] = F::scale(stB[i / kSub], ks, i % kSub);
         __syncthreads();
 #pragma unroll
-        for (int kb = 0; kb < 2; ++kb) {
+        for (int kb = 0; kb < kSub; ++kb) {
             uint32_t b0[kNF], b1[kNF];
             float2 wl[kNF], wh[kNF];
 #pragma unroll
             for (int nf = 0; nf < kNF; ++nf) {
-                const uint2 b = b_of<F>(sB[stage][(warp_n * kTileN) + (nf * 8) + rl], ks, kb, cl);
+                const uint2 b = b_of<F>(stB[(warp_n * kTileN) + (nf * 8) + rl], ks, kb, cl);
                 b0[nf] = b.x;
                 b1[nf] = b.y;
                 const int ncol = (warp_n * kTileN) + (nf * 8) + (cl * 2);
-                wl[nf] = sBs[stage][ncol][kb];
-                wh[nf] = sBs[stage][ncol + 1][kb];
+                wl[nf] = stBs[ncol][kb];
+                wh[nf] = stBs[ncol + 1][kb];
             }
 #pragma unroll
             for (int mf = 0; mf < kMF; ++mf) {
                 const int arow_lo = (warp_m * kTileM) + (mf * 16) + rl;
                 const int arow_hi = arow_lo + 8;
                 const int acol = (kb * 32) + (cl * 4);
-                const uint32_t a0 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol]);
-                const uint32_t a1 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_hi][acol]);
-                const uint32_t a2 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_lo][acol + 16]);
-                const uint32_t a3 = *reinterpret_cast<const uint32_t*>(&sA[stage][arow_hi][acol + 16]);
-                const float da_lo = __half2float(sAsc[stage][arow_lo][kb]);
-                const float da_hi = __half2float(sAsc[stage][arow_hi][kb]);
+                const uint32_t a0 = *reinterpret_cast<const uint32_t*>(&stA[arow_lo][acol]);
+                const uint32_t a1 = *reinterpret_cast<const uint32_t*>(&stA[arow_hi][acol]);
+                const uint32_t a2 = *reinterpret_cast<const uint32_t*>(&stA[arow_lo][acol + 16]);
+                const uint32_t a3 = *reinterpret_cast<const uint32_t*>(&stA[arow_hi][acol + 16]);
+                const float da_lo = __half2float(stAsc[arow_lo][kb]);
+                const float da_hi = __half2float(stAsc[arow_hi][kb]);
                 [[maybe_unused]] float rs_lo = 0.0f, rs_hi = 0.0f;
                 if constexpr (F::kMin) {
-                    rs_lo = sArs[stage][arow_lo][kb];
-                    rs_hi = sArs[stage][arow_hi][kb];
+                    rs_lo = stArs[arow_lo][kb];
+                    rs_hi = stArs[arow_hi][kb];
                 }
 #pragma unroll
                 for (int nf = 0; nf < kNF; ++nf) {
@@ -297,33 +357,49 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
     }
 }
 
+template <typename Kernel>
+bool big_smem_opt_in(Kernel k, size_t bytes) {
+    const cudaError_t err = cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                 static_cast<int>(bytes));
+    if (err != cudaSuccess)
+        IMP_LOG_ERROR("mmq imma gguf bm128: smem opt-in %zu B failed: %s", bytes, cudaGetErrorString(err));
+    return err == cudaSuccess;
+}
+
 template <class F>
-void launch_big(const uint8_t* w, __half* out_f16, int M, int N, int K, float beta, bool capturing,
+bool launch_big(const uint8_t* w, __half* out_f16, int M, int N, int K, float beta, bool capturing,
                 cudaStream_t stream) {
+    constexpr size_t smem = BigSmem<F>::kBytes;
+    static const bool smem_ok = big_smem_opt_in(mmq_imma_gguf_bm128_kernel<F, false, false>, smem) &&
+                                big_smem_opt_in(mmq_imma_gguf_bm128_kernel<F, true, false>, smem) &&
+                                big_smem_opt_in(mmq_imma_gguf_bm128_kernel<F, false, true>, smem);
+    if (!smem_ok)
+        return false;
     const dim3 grid((N + kBN - 1) / kBN, (M + kBM - 1) / kBM, 1);
     const bool beta1 = beta == 1.0f;
     auto* k = beta1 ? mmq_imma_gguf_bm128_kernel<F, true, false>
                     : mmq_imma_gguf_bm128_kernel<F, false, false>;
     // imma_wave_tail: trailing column tiles K-split into one more wave, the leading ones unchanged.
-    const ImmaWaveTail t = imma_wave_tail(grid, M, N, K / kBK, device_sm_count_or_0());
+    const ImmaWaveTail t = imma_wave_tail(grid, M, N, K / F::kStepK, device_sm_count_or_0());
     const int n0 = t.nx_big * kBN;
     if (t.used > 0 && imma_ensure_splitk(static_cast<size_t>(M) * (N - n0) * t.used, capturing)) {
-        k<<<dim3(t.nx_big, grid.y), kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale,
-                                                           g_imma_act.xrowsum, w, out_f16, M, N, K, nullptr,
-                                                           0);
+        k<<<dim3(t.nx_big, grid.y), kThreads, smem, stream>>>(g_imma_act.xs8, g_imma_act.xscale,
+                                                              g_imma_act.xrowsum, w, out_f16, M, N, K,
+                                                              nullptr, 0);
         IMP_CUDA_CHECK_LAUNCH();
         mmq_imma_gguf_bm128_kernel<F, false, true>
-            <<<dim3(grid.x - t.nx_big, grid.y, t.used), kThreads, 0, stream>>>(
+            <<<dim3(grid.x - t.nx_big, grid.y, t.used), kThreads, smem, stream>>>(
                 g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum,
                 w + (static_cast<size_t>(n0) * F::row_bytes(K)), out_f16, M, N - n0, K, g_imma_splitk.buf,
                 t.per);
         IMP_CUDA_CHECK_LAUNCH();
         imma_splitk_finalize_cols(t.used, M, N - n0, out_f16 + n0, N, beta1, stream);
-        return;
+        return true;
     }
-    k<<<grid, kThreads, 0, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w, out_f16, M, N,
-                                     K, nullptr, 0);
+    k<<<grid, kThreads, smem, stream>>>(g_imma_act.xs8, g_imma_act.xscale, g_imma_act.xrowsum, w, out_f16, M,
+                                        N, K, nullptr, 0);
     IMP_CUDA_CHECK_LAUNCH();
+    return true;
 }
 
 }  // namespace
@@ -332,14 +408,11 @@ bool launch_gguf_bm128(int qkind, const uint8_t* w, __half* out_f16, int M, int 
                        bool capturing, cudaStream_t stream) {
     switch (qkind) {
         case 5:
-            launch_big<BigQ8_0>(w, out_f16, M, N, K, beta, capturing, stream);
-            return true;
+            return launch_big<BigQ8_0<2>>(w, out_f16, M, N, K, beta, capturing, stream);
         case 7:
-            launch_big<BigIQ4XS>(w, out_f16, M, N, K, beta, capturing, stream);
-            return true;
+            return launch_big<BigIQ4XS<2>>(w, out_f16, M, N, K, beta, capturing, stream);
         case 8:
-            launch_big<BigQ5K>(w, out_f16, M, N, K, beta, capturing, stream);
-            return true;
+            return launch_big<BigQ5K<4>>(w, out_f16, M, N, K, beta, capturing, stream);
         default:
             return false;
     }
