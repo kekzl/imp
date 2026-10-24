@@ -1,6 +1,6 @@
 // Dense GGUF IMMA kernel for prompt chunks above 32 rows (sm_120a): BM=128 x BN=128 tiles, K-steps of S
 // 32-K sub-blocks per barrier pair, B fragments decoded once per sub-block for 2 m-fragments. S per format:
-// Q5_K 4 (UD-Q4_K_M pp512 -4.1 %), IQ4_XS and Q8_0 2 (S = 4: +1.9 % / +1.6 %); per-output math is S-free.
+// Q5_K 4 (UD-Q4_K_M pp512 -4.1 %), IQ4_XS, Q8_0, IQ4_NL 2 (S = 4: +1.9 % / +1.6 % / +0.1 %); S-free math.
 
 #include "compute/iq4_lut.cuh"
 #include "compute/mmq_q8_imma_internal.cuh"
@@ -75,6 +75,28 @@ struct BigQ8_0 : StepGeom<S> {
     static __device__ __forceinline__ float2 scale(const uint8_t* seg, int /*ks*/, int kb) {
         return make_float2(__half2float(
                                reinterpret_cast<const __half*>(seg)[static_cast<ptrdiff_t>(kb) * 17]),
+                           0.0f);
+    }
+};
+
+// IQ4_NL: S 18-B blocks (fp16 d + 16 B nibbles, IQ4 LUT) per step, 4-B aligned (K % 256 == 0).
+template <int S>
+struct BigIQ4NL : StepGeom<S> {
+    static constexpr int kPieces = (S * 18) / 4, kPiece = 4, kSegRow = S == 4 ? 80 : 48;
+    static constexpr bool kMin = false;
+    static __device__ __forceinline__ int piece_off(int ks, int p) { return (ks * S * 18) + (p * 4); }
+    static __host__ __device__ __forceinline__ size_t row_bytes(int K) {
+        return static_cast<size_t>(K / 32) * 18;
+    }
+    static __device__ __forceinline__ uint2 bfrag(const uint8_t* seg, int kb, int cl) {
+        const auto* w = reinterpret_cast<const uint32_t*>(seg);
+        const int qo = (kb * 18) + 2 + (cl * 4);  // even kb: 2 mod 4, odd kb: word-aligned
+        const uint32_t q = (kb & 1) != 0 ? w[qo >> 2] : __byte_perm(w[qo >> 2], w[(qo >> 2) + 1], 0x5432);
+        const int2 v = iq4nl_lut8(q);
+        return make_uint2(static_cast<uint32_t>(v.x), static_cast<uint32_t>(v.y));
+    }
+    static __device__ __forceinline__ float2 scale(const uint8_t* seg, int /*ks*/, int kb) {
+        return make_float2(__half2float(reinterpret_cast<const __half*>(seg)[static_cast<ptrdiff_t>(kb) * 9]),
                            0.0f);
     }
 };
@@ -411,6 +433,8 @@ bool launch_gguf_bm128(int qkind, const uint8_t* w, __half* out_f16, int M, int 
             return launch_big<BigQ8_0<2>>(w, out_f16, M, N, K, beta, capturing, stream);
         case 7:
             return launch_big<BigIQ4XS<2>>(w, out_f16, M, N, K, beta, capturing, stream);
+        case 6:
+            return launch_big<BigIQ4NL<2>>(w, out_f16, M, N, K, beta, capturing, stream);
         case 8:
             return launch_big<BigQ5K<4>>(w, out_f16, M, N, K, beta, capturing, stream);
         default:

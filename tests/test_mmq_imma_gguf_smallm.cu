@@ -229,7 +229,7 @@ TEST(MmqQ8Imma, GgufSmallMQ5KVsReference) {
         EXPECT_LT(ref_nrmse(kQ5K, 200, 2816, M, beta1), 1e-2) << "M=" << M;
 }
 
-// Above 32 rows: IQ4 on 32-row blocks (gridDim.x), Q5_K on the BM=128 kernel; M=100 leaves a partial block.
+// Above 32 rows: every format on the BM=128 kernel; M=100 leaves a partial block.
 TEST(MmqQ8Imma, GgufLargeMVsReference) {
     for (const RefFormat* f : {&kIq4Nl, &kIq4Xs, &kQ5K})
         for (auto [M, beta1] : {std::pair{100, false}, {161, true}})
@@ -243,6 +243,7 @@ TEST(MmqQ8Imma, GgufLargeMWaveTailVsReference) {
     ASSERT_EQ(cudaDeviceGetAttribute(&n_sms, cudaDevAttrMultiProcessorCount, 0), cudaSuccess);
     const int N = (n_sms + (n_sms / 8)) * 128;
     EXPECT_LT(ref_nrmse(kIq4Xs, N, 256, 100, false), 1e-2) << "IQ4_XS";
+    EXPECT_LT(ref_nrmse(kIq4Nl, N, 256, 100, true), 1e-2) << "IQ4_NL";
     EXPECT_LT(ref_nrmse(kQ5K, N, 256, 100, true), 1e-2) << "Q5_K";
     EXPECT_LT(ref_nrmse(kQ8, N, 256, 100, true), 1e-2) << "Q8_0";
 }

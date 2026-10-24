@@ -352,7 +352,8 @@ bool launch_gguf_small_m(int qkind, const uint8_t* w, __half* out_f16, int M, in
             return M > 32 ? launch_gguf_bm128(5, w, out_f16, M, N, K, beta, capturing, stream)
                           : launch_fmt<FmtQ8_0>(w, out_f16, M, N, K, beta, capturing, stream);
         case 6:
-            return launch_fmt<FmtIQ4NL>(w, out_f16, M, N, K, beta, capturing, stream);
+            return M > 32 ? launch_gguf_bm128(6, w, out_f16, M, N, K, beta, capturing, stream)
+                          : launch_fmt<FmtIQ4NL>(w, out_f16, M, N, K, beta, capturing, stream);
         case 7:
             return M > 32 ? launch_gguf_bm128(7, w, out_f16, M, N, K, beta, capturing, stream)
                           : launch_fmt<FmtIQ4XS>(w, out_f16, M, N, K, beta, capturing, stream);
