@@ -1,6 +1,6 @@
 ---
 name: find-stubs
-description: Use when asking whether something in imp is actually finished - hunting stubs, placeholders, request fields that are parsed and then ignored, code paths or kernels that never run, gate-based features that silently no-op, tests that assert nothing. Triggers on "is this implemented", "unfinished", "stub", "placeholder", "dead path", "does this flag do anything", "accepted but ignored", "kernel never launched", "test asserts nothing", "neutral A/B on a gated feature". Do NOT use for structural debt / god files / duplication (codebase-audit) or for who-calls-what (code-graph).
+description: Is it actually finished - stubs, placeholders, request fields parsed then ignored, paths/kernels that never run, gated features that silently no-op, tests asserting nothing, "does this flag do anything", neutral A/B on a gated feature. Not structural debt (codebase-audit), not who-calls-what (code-graph).
 ---
 
 # Finding unfinished code - imp

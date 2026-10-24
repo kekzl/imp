@@ -1,6 +1,6 @@
 ---
 name: docs-layers
-description: Use when writing, moving or auditing any .md in imp - deciding which file a paragraph belongs in, adding a doc, fixing a stale claim, or when docs_lint.py fails in CI. Covers the four reader layers (L0 README / L1 operators / L2 kernel devs / L3 agents), the HTML-comment metadata header, [PROV:] provenance, the single-source-of-truth map, generated perf blocks, which numbers may appear in prose, plan-doc closure. Triggers on "which doc does this go in", "docs lint failed", "add a doc", "this claim is stale", "update the README", "PROV block", "layer", "STALE.md". Do NOT use for the CHANGELOG or a release body (shipping-prs), or for code-comment accuracy (codebase-audit).
+description: Write, move or audit any .md - which file a paragraph belongs in, add a doc, stale claim, docs_lint.py red. Layers L0-L3, metadata header, [PROV:], single-source map, generated perf blocks, numbers in prose, plan-doc closure, STALE.md. Not CHANGELOG/release body (shipping-prs), not code comments (codebase-audit).
 ---
 
 # Docs layers - imp

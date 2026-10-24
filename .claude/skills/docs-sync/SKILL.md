@@ -1,6 +1,6 @@
 ---
 name: docs-sync
-description: Use when keeping imp's docs and config examples coherent after a change - updating docs/internals/ARCHITECTURE.md / README / docs/GOAL.md / docs/MODELS.md / docs/ROADMAP.md / imp.conf.example / CHANGELOG / MISSION_JOURNAL, or "is this doc stale", "document this change", "the example config is out of date", "the README says X but the code does Y", "add a roadmap ledger row". Do NOT use for layer/frontmatter/lint questions (docs-layers), structural code audits (codebase-audit), measuring perf or refreshing the perf baseline (benchmark-cuda), or the agent's private memory (MEMORY.md).
+description: Keep docs and config examples coherent after a change - ARCHITECTURE.md, README, GOAL.md, MODELS.md, ROADMAP.md (ledger rows), imp.conf.example, CHANGELOG, MISSION_JOURNAL, "README says X but code does Y". Not layers/lint (docs-layers), code audits (codebase-audit), perf baseline (benchmark-cuda), agent memory.
 ---
 
 # Docs sync - imp

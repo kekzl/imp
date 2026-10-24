@@ -1,6 +1,6 @@
 ---
 name: sm120-cuda-expert
-description: Use when writing, reviewing, or optimizing CUDA kernels targeting sm_120a (RTX 5090 / Consumer Blackwell, GB202) in the imp inference engine. Triggers on CUDA/PTX kernel code, shared-memory layout, bank conflicts, tensor-core MMA (mxf4nvf4, tf32, 3xTF32/3xFP16), GEMV/GEMM/attention/quantization/GDN-scan kernels, decode tok/s under expected, kernel emitting HMMA instead of mxf4nvf4, occupancy, register pressure, __launch_bounds__, spills, PDL. Pair with `benchmark-cuda` for measurement and `check-degeneration` after hot-path changes.
+description: Write, review, optimize sm_120a CUDA/PTX kernels - shared-memory layout, bank conflicts, MMA (mxf4nvf4, tf32, 3xTF32), GEMV/GEMM/attention/quant/GDN-scan kernels, decode tok/s low, HMMA instead of mxf4nvf4, occupancy, registers, __launch_bounds__, spills, PDL. Measure with benchmark-cuda, check-degeneration after hot-path changes.
 ---
 
 # sm_120 CUDA Kernel Expert - imp

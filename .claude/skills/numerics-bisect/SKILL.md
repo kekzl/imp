@@ -1,6 +1,6 @@
 ---
 name: numerics-bisect
-description: Use when imp outputs differ between two paths that should agree - chunk sizes, prefill vs decode, prefix-cache resend, two engines (imp vs llama.cpp vs HF), two builds or kernels - "output changes with chunk size", "first token differs", "logprobs moved", "which layer diverges", "who is right, imp or llama.cpp", "near-tie". Do NOT use for repetition loops or garbage output (check-degeneration), a new arch that loads wrong (add-model-arch), or perf (benchmark-cuda).
+description: Outputs differ between two paths that should agree - chunk sizes, prefill vs decode, prefix-cache resend, imp vs llama.cpp vs HF, two builds/kernels, "first token differs", "logprobs moved", "which layer diverges", near-tie. Not loops/garbage (check-degeneration), new arch (add-model-arch), perf (benchmark-cuda).
 ---
 
 # Numerics bisect - imp

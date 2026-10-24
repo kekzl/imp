@@ -1,6 +1,6 @@
 ---
 name: benchmark-cuda
-description: Use when benchmarking, profiling, or A/B-testing CUDA kernels or end-to-end perf in the imp inference engine on RTX 5090 (sm_120), including refreshing tests/perf_baseline.json or publishing numbers to docs/BENCHMARKS.md and the README. Triggers on "benchmark kernel", "profile cuda", "ncu", "nsys", "kernel timing", "kernel sum", "occupancy", "bandwidth bound", "compute bound", "roofline", "perf baseline", "is this regression real", "decode dropped", "aggregate throughput", "two-image A/B", "prefill kernel A/B". Do NOT use for writing/optimizing kernel code (sm120-cuda-expert) or output-quality checks (check-degeneration).
+description: Benchmark, profile or A/B kernels and end-to-end perf, refresh tests/perf_baseline.json, publish numbers to docs/BENCHMARKS.md / README - ncu, nsys, kernel timing, occupancy, roofline, "is this regression real", "decode dropped", aggregate throughput, two-image A/B. Not kernel code (sm120-cuda-expert), not output quality (check-degeneration).
 ---
 
 # CUDA Benchmarking - imp / sm_120 / RTX 5090

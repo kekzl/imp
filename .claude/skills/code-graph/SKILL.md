@@ -1,6 +1,6 @@
 ---
 name: code-graph
-description: Use when a question is about *structure* rather than text - who calls or launches a symbol, where it is defined, what a change would reach, whether something is dead, how a request gets from the API to a kernel. Triggers on "who calls", "who launches this kernel", "where is X defined", "what breaks if I change", "is this still used", "is this dead", "trace the path from X to Y", "blast radius", "what depends on this header". Do NOT use for free-text search (`rg` is better and cheaper) or to open a file whose path you already know.
+description: Structure questions - who calls/launches a symbol, where it is defined, what a change reaches, is it dead, path from API to kernel, blast radius, what depends on a header. Not free-text search (`rg`), not opening a known path.
 ---
 
 # code-graph - ask the index, then verify

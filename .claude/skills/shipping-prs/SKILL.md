@@ -1,6 +1,6 @@
 ---
 name: shipping-prs
-description: Use when opening, merging, or releasing a PR for imp - branching off main, `gh pr create`, enabling auto-merge, writing the PR body or a CHANGELOG entry, cutting a tagged release (version bump + CHANGELOG + tag + GitHub release). Symptoms - "PR stuck BLOCKED", "my last commit didn't land on main", "which check is required", "how do I cut a release", "auto-merge merged too early", "check-release failed", "STALE.md blocks git pull". Do NOT use for build/test mechanics (building-and-testing) or perf measurement / baseline refresh (benchmark-cuda).
+description: Open, merge, release a PR - branch off main, gh pr create, auto-merge, PR body, CHANGELOG entry, tagged release. "PR stuck BLOCKED", "last commit didn't land", "which check is required", "check-release failed", "STALE.md blocks git pull". Not build/test (building-and-testing), not perf baseline (benchmark-cuda).
 ---
 
 # Shipping PRs & Releases - imp

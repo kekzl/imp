@@ -1,6 +1,6 @@
 ---
 name: building-and-testing
-description: Use when building imp, running its test suite, checking CI status, or debugging build/test failures - "make build", "run the tests", "test-gpu", "verify-fast", GTEST_FILTER, Docker/CUDA toolchain, dependency bumps, "CI is red/blocked", "which gate failed", stale objects / segfault after a header edit, hook edits, docker-entrypoint env vars, determinism or perplexity checks. Do NOT use for benchmarking/profiling (benchmark-cuda) or output-quality batteries (check-degeneration).
+description: Build, test suite, CI status, build/test failures - make build, test-gpu, verify-fast, GTEST_FILTER, Docker/CUDA toolchain, dependency bumps, "CI is red", "which gate failed", stale objects / segfault after a header edit, hooks, docker-entrypoint env vars, determinism, perplexity. Not perf (benchmark-cuda), not output quality (check-degeneration).
 ---
 
 # Build & Test - imp
