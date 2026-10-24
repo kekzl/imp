@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- GGUF prompt GEMMs (IMMA, above 32 rows): IQ4_XS / IQ4_NL / Q5_K weights are decoded once per CTA instead of once per warp, A loads by ldmatrix. Qwen3.8-27B-UD-Q4_K_M pp512 4003-4031 -> 4178-4203 tok/s (llama.cpp 4179), IQ4_XS gate 298.3 -> 270.6 us, PPL 5.0059 both.
 - GGUF IQ3_S runs native (dp4a decode, IMMA prompt GEMMs: 564 -> 406-457 us at pp512), Q3_K GEMVs read words (verify rows 95.4 -> 38.6 us), FP16-cached GGUF weights at 2..32 rows run in place. Qwen3.8-27B-UD-Q4_K_M MTP imp-cli 136.0-136.7 -> 142.5-142.8 tok/s, tg128 +0.74 %, -191 MiB, PPL 5.0068 -> 5.0059.
 - GGUF Q3_K / Q4_K / Q5_K dequant runs one warp per super-block (uint4 stores): 17408 x 5120 Q3_K 482.6 -> 146.8 us, Q5_K 204.7 -> 116.7 us. Qwen3.8-27B-UD-Q4_K_M at a 24 GB budget (no FP16 cache, dequant on every prompt GEMM) pp512 3887-3889 -> 3956-3963 tok/s; 32 GB neutral.
 
