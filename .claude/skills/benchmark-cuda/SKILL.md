@@ -79,6 +79,7 @@ Phantom: gemma-3-12b `--bench` prints bogus tok/s (#514); trust its PPL only.
 - Default-ON knobs that define "same flags": `runtime.prefill_batch`, `gdn.state_bf16`, `gemm.nvfp4_smallm` (+`_impl=2`, `_pair`), `speculative.mtp_adaptive_k`, `runtime.prefill_chunk_decode_cap` (1024; 4096 = +~10% burst lever), `runtime.graph_prewarm`.
 - Profile the right binary: `make build` tags only `imp:test`; `imp:builder` can be days old.
 - Method behind #1750-#1793: two-image A/B, all pairs same sign. Prefill-bound bursts cannot see KV capacity (32x8k with 60-token completions: identical walls while the pool grew 3.2x); capacity levers need `max_tokens >= 512`.
+- PDL kernels start before their producer ends: an nsys duration includes the `griddepcontrol.wait`, overlapping kernels sum past the wall. Per-kernel bandwidth from exclusive time: `tools/analysis/nsys_exclusive_time.py` (Qwen3.8 verify gate/up 1.20 TB/s by duration, 1.65 exclusive).
 - Per-kernel time inside replayed decode graphs: `nsys --cuda-graph-trace=node` (#856). On a server: no `--delay`/`--duration` (flush hangs on `cudaProfilerStop`, SIGKILL loses all); capture fully, `docker stop` gracefully, filter the window by timestamp.
 
 ## Step 1: cudaEvent (quick A/B)
