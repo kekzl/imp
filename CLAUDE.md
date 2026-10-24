@@ -1,15 +1,15 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-10-21
-commit: 90037b96
+verified: 2026-10-24
+commit: 88b968a6
 -->
 
 # imp - Project Instructions
 
-C++23/CUDA LLM inference engine for exactly one chip generation: NVIDIA Blackwell `sm_120a`, every compute capability 12.0 card (GeForce RTX 50, RTX PRO Blackwell, 8-96 GB: [card table](docs/QUICKSTART.md#which-card)). Tuned, tested and gated on the RTX 5090 (GB202, 32 GB GDDR7, 1792 GB/s, native FP4 tensor cores); a VRAM or "fits" claim names the card size, not "the 5090". No portability layer, no FP16 dequant fallback in the hot path. Narrative: [`docs/internals/ARCHITECTURE.md`](docs/internals/ARCHITECTURE.md); what sm_120 lacks against datacenter Blackwell: [`docs/internals/SM120.md`](docs/internals/SM120.md).
+C++23/CUDA LLM inference engine for `sm_120a` only: every compute capability 12.0 card (RTX 50, RTX PRO Blackwell, 8-96 GB: [card table](docs/QUICKSTART.md#which-card)). Tuned and gated on the RTX 5090 (32 GB, 1792 GB/s). A VRAM or "fits" claim names the card size. No portability layer, no FP16 dequant fallback in the hot path. Architecture: [`docs/internals/ARCHITECTURE.md`](docs/internals/ARCHITECTURE.md); sm_120 vs datacenter: [`docs/internals/SM120.md`](docs/internals/SM120.md).
 
-This file is the router: rules for every task. Playbooks live in skills; a rule a skill also covers is maintained in the skill.
+Router: rules for every task here, playbooks in skills. A rule a skill also covers lives in the skill.
 
 ## Task -> entry point
 
@@ -24,40 +24,40 @@ This file is the router: rules for every task. Playbooks live in skills; a rule 
 | New model architecture | skill **add-model-arch** |
 | PR, merge, release | skill **shipping-prs** |
 | Who calls/launches X, blast radius, still used | skill **code-graph**, before grepping |
-| Structure audit, dead code, `File size` gate red | skill **codebase-audit**; read [`docs/audit/SETTLED.md`](docs/audit/SETTLED.md) before forming hypotheses |
+| Structure audit, dead code, `File size` gate red | skill **codebase-audit**; first [`docs/audit/SETTLED.md`](docs/audit/SETTLED.md) |
 | Stub, ignored request field, dead kernel, test asserting nothing | skill **find-stubs** |
 | Docs after a change | skill **docs-sync** |
 | Doc layer, header, PROV; `docs`/`citations` gate red | skill **docs-layers** |
 | VRAM, ownership, lifetime | [`docs/internals/MEMORY.md`](docs/internals/MEMORY.md) first |
 
-Generic build and test commands live only here; directory `CLAUDE.md` files hold area rules.
-
-Doc layers (L0 `README.md`, L1 `docs/*.md`, L2 `docs/internals/`, L3 `CLAUDE.md` tree) are gated by `scripts/docs_lint.py`: root <= 2000 tokens, directory files <= 800, an L3 `verified:` more than 14 days behind the file's last commit is an error. Also canonical: `AGENTS.md` (subagent roles), `docs/internals/BENCHMARKING.md` (measurement contract), `docs/internals/CPP23.md`.
+- Generic build/test commands only here; directory `CLAUDE.md` files hold area rules.
+- `scripts/docs_lint.py` gates the doc layers (L0 `README.md`, L1 `docs/*.md`, L2 `docs/internals/`, L3 `CLAUDE.md` tree): root <= 2000 tokens, directory files <= 800, L3 `verified:` > 14 days behind last commit = error.
+- Also canonical: `AGENTS.md` (subagent roles), `docs/internals/BENCHMARKING.md` (measurement contract), `docs/internals/CPP23.md`.
 
 ## Build & test
 
-- **Before each GPU job (tests, benchmarks, profiling, inference) check the card is free.** Criterion is load (utilization + used VRAM), not `docker ps`: WDDM tenants never show there. Check: user-level skill `gpu-stats` (`gpu-busy-check.sh`, exit 0 = free). Busy: report and ask; no wait loop, no start anyway.
-- The host has no CUDA toolkit: build in Docker. `build/`, `build-dev/` are root-owned: `make dev-clean` or a throwaway container, never `sudo`.
+- **Before each GPU job: card free?** User skill `gpu-stats` (`gpu-busy-check.sh`, exit 0 = free). Criterion is load (utilization + VRAM), not `docker ps` (WDDM tenants are invisible there). Busy: report and ask, no wait loop, no start.
+- No CUDA toolkit on the host: build in Docker. `build/`, `build-dev/` are root-owned: `make dev-clean` or a throwaway container, never `sudo`.
 
 ```
 make dev / make dev-test   # incremental (seconds) + the CI lane (ctest -L unit): iterate here
-make preflight             # CPU only, run before every push: all CI static gates, tidy + format on changed lines, actionlint
+make preflight             # CPU only, before every push: CI static gates, tidy + format on changed lines, actionlint
 make build                 # full image (minutes): anything measured or pushed
 make verify-fast           # pre-push gate, the only gate that runs a kernel against a check
 make verify                # full
 ```
 
-- **Commit and push WITHOUT `--no-verify`.** Both hooks (`make install-hooks`) run `make preflight` (CPU, Docker, ~20 s): all CI static gates, tidy + format on changed lines, actionlint. Exit 0 = every row ok or skip. GPU tests run only with `IMP_HOOK_GPU=1`; without it the hook prints the skipped GPU command.
-- `make test-unit` is a different binary from the CI lane: green there is not green in CI. CI has no GPU. Target list and CI job names: skill **building-and-testing**.
-- **Never bare `make format`.** CI checks changed lines only: format files you created; in edited files only your added lines.
+- **Commit and push WITHOUT `--no-verify`.** Both hooks (`make install-hooks`) run `make preflight` (~20 s); exit 0 = every row ok or skip. GPU tests only with `IMP_HOOK_GPU=1`.
+- `make test-unit` != the CI lane binary. CI has no GPU. Targets and CI job names: skill **building-and-testing**.
+- **Never bare `make format`.** CI checks changed lines only: format files you created, in edited files only your lines.
 
 ## Conventions
 
-- English in the repo (PRs, commits, comments, docs); chat with the user in German. No em dashes in the repo.
-- CHANGELOG: 1-3 lines and <= 360 characters per entry (gated) plus the number that makes it checkable; the investigation goes to `docs/`.
+- English in the repo, German in chat. No em dashes in the repo.
+- CHANGELOG: 1-3 lines, <= 360 characters per entry (gated), plus the checkable number. Investigation goes to `docs/`.
 - Branch off `main`, `gh pr create --base main`, never stack PRs; batch.
-- Perf is gated: `tests/perf_baseline.json` (8 % decode / 8 % prefill). Refresh via `scripts/gen_perf_baseline.sh` only for an intentional move, and say so in the PR.
-- Runtime config is `RuntimeConfig` (`src/runtime/config.h`: `imp.conf` + `--config` + `--set`). Env vars seeded into it: `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`; into `diagnostics.*`: `IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`, `IMP_PPL_DUMP`, `IMP_WORKER_TIMING`. No ad-hoc env reads.
-- Dependency pins: only `cmake/imp-deps.cmake`. Dockerfile: no `--mount=type=cache` on the build dir (ninja reused stale objects, 03a2cc19); the content-addressed `ccache` mount stays.
-- File size is gated on recompile blast radius: per file, per function body (> 500 code LOC hard), per translation unit (an `#include`d `.cu` counts against its includer). Exceptions go to `[allow]` with a reason: `docs/audit/AUDIT_FILESIZE.md`.
-- VRAM misleads rather than fails (WSL2/WDDM): a successful `cudaMalloc` proves nothing, measured bandwidth tells resident from spilled (#1103), free VRAM only decreases within a process. Capacity is planned, not discovered: `docs/internals/MEMORY.md`.
+- Perf gate: `tests/perf_baseline.json` (8 % decode / 8 % prefill). Refresh via `scripts/gen_perf_baseline.sh` only for an intentional move, stated in the PR.
+- Runtime config only via `RuntimeConfig` (`src/runtime/config.h`: `imp.conf` + `--config` + `--set`). Seeded env vars: `IMP_DETERMINISTIC`, `IMP_FMHA_FA2`; `diagnostics.*`: `IMP_SPEC_TRACE`, `IMP_JUMP_TRACE`, `IMP_PPL_DUMP`, `IMP_WORKER_TIMING`. No ad-hoc env reads.
+- Dependency pins only in `cmake/imp-deps.cmake`. Dockerfile: no `--mount=type=cache` on the build dir (stale ninja objects, 03a2cc19); the `ccache` mount stays.
+- File size gate: per file, per function body (> 500 code LOC hard), per TU (an `#include`d `.cu` counts against its includer). Exceptions: `[allow]` with reason in `docs/audit/AUDIT_FILESIZE.md`.
+- VRAM (WSL2/WDDM): a successful `cudaMalloc` proves nothing, bandwidth tells resident from spilled (#1103), free VRAM only decreases within a process. Capacity is planned: `docs/internals/MEMORY.md`.
