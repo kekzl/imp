@@ -87,7 +87,7 @@ Version SSoT: `CMakeLists.txt` `project(imp ... VERSION X.Y.Z)`. A release is it
 1. Bump `project(... VERSION X.Y.Z)`.
 2. `CHANGELOG.md`: rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, add a fresh empty `[Unreleased]`.
 3. `docs/BENCHMARKS.md`: the `**Toolchain (current: \`vX.Y.Z\`):**` line (`check-release.sh` parses exactly that form).
-4. `bash scripts/check-release.sh; echo $?` and read the EXIT CODE (an aborted gate prints no FAIL line, #1394). Known exit-1 cause: `test-spec-fidelity` "skipped, card not free enough" (needs ~26 GB free after the earlier stages); run `make test-spec-fidelity` separately, read exit 0. `check-release.sh` prints only `PASS make verify-fast`: run `make verify-fast` separately for the release-note figures; `bench-competitive` writes `/tmp/bench_competitive.tsv`.
+4. `bash scripts/check-release.sh; echo $?` and read the EXIT CODE (an aborted gate prints no FAIL line, #1394). Running containers: it lists them and asks `Stop them for the GPU stages? [y/N]`, restart offered at exit; without a terminal `IMP_RELEASE_STOP_CONTAINERS=yes|no` (default no). Known exit-1 cause: `test-spec-fidelity` "skipped, card not free enough" (needs ~26 GB free after the earlier stages); run `make test-spec-fidelity` separately, read exit 0. `check-release.sh` prints only `PASS make verify-fast`: run `make verify-fast` separately for the release-note figures; `bench-competitive` writes `/tmp/bench_competitive.tsv`.
 5. Merge (squash), then `git tag vX.Y.Z <sha> && git push origin vX.Y.Z`.
 6. `gh release create vX.Y.Z --title "vX.Y.Z: <what changed>" --notes-file <file> --verify-tag`. The tag alone is not the release.
 
