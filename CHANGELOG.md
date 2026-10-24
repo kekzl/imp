@@ -14,6 +14,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `runtime.no_vision`: drops a checkpoint's Qwen3-VL tower at init, image and video parts answer 400. Qwen3.8-Flash-Next text-only gets the tower's 1079 MiB arena reservation back: 396 -> 422 expert slots/layer, tg512 85.64 -> 87.26 tok/s (code prompt, 6 of 6 pairs faster over 3 prompts).
 
 ### Changed
+- IQ4_NL prompt GEMMs above 32 rows run the BM=128 IMMA kernel instead of 32-row blocks: gate/up 524 -> 395 us, down 498 -> 372 us per launch at pp512, Qwen3.8-27B-UD-Q4_K_M pp512 127.6-127.9 -> 126.9-127.5 ms, PPL unchanged (5.0068).
 - Q5_K prompt GEMMs above 32 rows run 128-K steps (4 sub-blocks per barrier pair): Qwen3.8-27B-UD-Q4_K_M pp512 133.6 -> 128.1 ms, pp2048 509.8 -> 487.9 ms, PPL unchanged (5.0068); IQ4_XS and Q8_0 keep 64-K steps (128-K measured +1.9 % / +1.6 %).
 - A speculative verify step skips the forward's own last-row LM head (greedy_argmax_all projects every chunk row): Qwen3.8-27B MTP imp-cli 1 stream NVFP4 4-prompt mean 117.1 -> 124.4 tok/s, Q4_K_M 116.7 -> 119.5, UD 104.3 -> 107.2, same accepted drafts.
 - A speculative verify step takes the producer-fused NVFP4 activation quantize of batched decode (the norm writes the small-M GEMM input): Qwen3.8-27B-NVFP4 MTP imp-cli 1 stream 102.3-102.9 -> 104.8-105.2 tok/s, same accepted drafts, degen_suite 52 of 52.
