@@ -2,6 +2,7 @@
 // 32-K sub-blocks per barrier pair, B fragments decoded once per sub-block for 2 m-fragments. S per format:
 // Q5_K 4 (UD-Q4_K_M pp512 -4.1 %), IQ4_XS, Q8_0, IQ4_NL 2 (S = 4: +1.9 % / +1.6 % / +0.1 %); S-free math.
 
+#include "compute/iq3s_grid.cuh"
 #include "compute/iq4_lut.cuh"
 #include "compute/mmq_q8_imma_internal.cuh"
 #include "core/device_info.h"
@@ -101,6 +102,63 @@ struct BigIQ4NL : StepGeom<S> {
     }
 };
 
+// IQ3_S (S = 2): 110-B super-block (d, qs[64], qh[8], signs[32], scales[4]), 2-aligned; K % 512 == 0 keeps
+// rows 4-aligned. A step stages each field from the word below it: d 1, qs 5, qh 1, signs 3, scale 1 piece
+// (all inside the row); a field sits at its row offset mod 4 within its pieces (o = 2 for odd blocks).
+template <int S>
+struct BigIQ3S : StepGeom<S> {
+    static_assert(S == 2, "one scale byte per step");
+    using G = StepGeom<S>;
+    static constexpr int kPieces = 12, kPiece = 4, kSegRow = 48;  // piece 11 = piece 10: 6 uniform rounds
+    static constexpr bool kMin = false;
+    static __device__ __forceinline__ int piece_off(int ks, int p) {
+        const int base = (ks / G::kSpb) * 110;
+        const int j0 = (ks % G::kSpb) * S;
+        const int f = p == 0   ? base
+                      : p < 6  ? base + 2 + (8 * j0) + (4 * (p - 1))
+                      : p == 6 ? base + 66 + j0
+                      : p < 10 ? base + 74 + (4 * j0) + (4 * (p - 7))
+                               : base + 106 + (j0 / 2);
+        return f & ~3;
+    }
+    static __host__ __device__ __forceinline__ size_t row_bytes(int K) {
+        return static_cast<size_t>(K / 256) * 110;
+    }
+    static __device__ __forceinline__ int odd2(int ks) { return 2 * ((ks / G::kSpb) & 1); }
+    // Sub-block kb as 32 s8 (word g = elements 4g..4g+3) into dst (16-B aligned); decoded once per CTA into
+    // the predecode tile, one thread per (row, kb).
+    static constexpr int kDecRow = 96;  // 24 words: LDS.64 of 4 rl rows x 4 cl on distinct banks
+    static __device__ __forceinline__ void decode_sub(const uint8_t* seg, int ks, int kb, uint32_t* dst,
+                                                      const uint32_t* grid) {
+        const int o = odd2(ks);
+        const int j0 = (ks % G::kSpb) * S;
+        const int qo = 4 + ((o + 2) & 3) + (8 * kb);
+        const auto* qp = reinterpret_cast<const uint16_t*>(seg + qo);
+        const uint32_t q0 = static_cast<uint32_t>(qp[0]) | (static_cast<uint32_t>(qp[1]) << 16);
+        const uint32_t q1 = static_cast<uint32_t>(qp[2]) | (static_cast<uint32_t>(qp[3]) << 16);
+        const uint32_t qh = seg[24 + ((o + 2 + j0) & 3) + kb];
+        const int so = 28 + ((o + 2) & 3) + (4 * kb);
+        const auto* sh = reinterpret_cast<const uint16_t*>(seg + so);
+        const uint32_t sg = static_cast<uint32_t>(sh[0]) | (static_cast<uint32_t>(sh[1]) << 16);
+        uint32_t v[8];
+#pragma unroll
+        for (int g = 0; g < 8; g++) {
+            const uint32_t q = ((g < 4 ? q0 : q1) >> (8 * (g & 3))) & 0xFFu;
+            v[g] = static_cast<uint32_t>(iq3s_apply_signs(grid[q | (((qh >> g) & 1u) << 8)], sg >> (4 * g)));
+        }
+        reinterpret_cast<uint4*>(dst)[0] = make_uint4(v[0], v[4], v[1], v[5]);  // (b0, b1) of cl adjacent
+        reinterpret_cast<uint4*>(dst)[1] = make_uint4(v[2], v[6], v[3], v[7]);
+    }
+    static __device__ __forceinline__ float2 scale(const uint8_t* seg, int ks, int kb) {
+        const int o = odd2(ks);
+        const int j0 = (ks % G::kSpb) * S;
+        const uint32_t sc = (seg[40 + ((o + 2 + (j0 / 2)) & 3)] >> (4 * kb)) & 0xFu;
+        return make_float2(__half2float(*reinterpret_cast<const __half*>(seg + o)) *
+                               static_cast<float>(1 + (2 * sc)),
+                           0.0f);
+    }
+};
+
 // Q5_K 6-bit (scale, min) of sub-block j from the 12 scale bytes q (ggml get_scale_min_k4):
 // (d * sc, -dmin * m).
 __device__ __forceinline__ float2 k_scale_min(const uint8_t* hdr, int j) {
@@ -152,6 +210,10 @@ template <class F>
 inline constexpr bool kIsQ5K = false;
 template <int S>
 inline constexpr bool kIsQ5K<BigQ5K<S>> = true;
+template <class F>
+inline constexpr bool kIsIQ3S = false;
+template <int S>
+inline constexpr bool kIsIQ3S<BigIQ3S<S>> = true;
 
 template <class F>
 __device__ __forceinline__ uint2 b_of(const uint8_t* seg, int ks, int kb, int cl) {
@@ -159,6 +221,18 @@ __device__ __forceinline__ uint2 b_of(const uint8_t* seg, int ks, int kb, int cl
         return F::bfrag(seg, kb, cl, ((ks % F::kSpb) * F::kSub) + kb);
     else
         return F::bfrag(seg, kb, cl);
+}
+
+// Predecode (IQ3_S): the stage's B tile decoded once per CTA to s8 [kBN][kDecRow] after the scale pass,
+// instead of once per warp_m (4x codebook lookups: 563 / 630 us vs IQ4_XS 291 us at pp512).
+template <class F>
+inline constexpr bool kPredecode = kIsIQ3S<F>;
+template <class F>
+constexpr size_t dec_bytes() {
+    if constexpr (kPredecode<F>)
+        return (static_cast<size_t>(kBN) * F::kDecRow) + sizeof(kIq3sGridLdg);
+    else
+        return 0;
 }
 
 // One stage of dynamic smem: A [128][kARow] s8, B segments [128][kSegRow], A per-32 scales, A row sums
@@ -171,7 +245,7 @@ struct BigSmem {
     static constexpr size_t kArs = F::kMin ? static_cast<size_t>(kBM) * F::kSub * sizeof(float) : 0;
     static constexpr size_t kBs = static_cast<size_t>(kBN) * F::kSub * sizeof(float2);
     static constexpr size_t kStage = kA + kB + kAsc + kArs + kBs;
-    static constexpr size_t kBytes = kStages * kStage;
+    static constexpr size_t kBytes = (kStages * kStage) + dec_bytes<F>();
 };
 
 // One K-step ks: A [128][kARow] s8 + per-32 scales (+ row sums for kMin), B segments [128][F::kSegRow].
@@ -263,6 +337,14 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
     auto sBs = [&](int s) {
         return reinterpret_cast<float2(*)[kSub]>(smem + (s * L::kStage) + L::kA + L::kB + L::kAsc + L::kArs);
     };
+    // Predecode: the IQ3_S codebook in smem after the decoded tile (cp.async.ca pieces share L1 with __ldg).
+    [[maybe_unused]] uint32_t* sGrid = nullptr;
+    if constexpr (kPredecode<F>) {
+        sGrid = reinterpret_cast<uint32_t*>(smem + (kStages * L::kStage) +
+                                            (static_cast<size_t>(kBN) * F::kDecRow));
+        for (int i = tid; i < 512; i += kThreads)
+            sGrid[i] = __ldg(&kIq3sGridLdg[i]);
+    }
 
     float acc[kMF][kNF][4];
 #pragma unroll
@@ -296,6 +378,14 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
         const auto stBs = sBs(stage);
         for (int i = tid; i < kBN * kSub; i += kThreads)
             stBs[i / kSub][i % kSub] = F::scale(stB[i / kSub], ks, i % kSub);
+        [[maybe_unused]] auto* sDec = reinterpret_cast<uint32_t*>(smem + (kStages * L::kStage));
+        if constexpr (kPredecode<F>) {
+            constexpr int kDecW = F::kDecRow / 4;
+            for (int i = tid; i < kBN * kSub; i += kThreads) {  // (row, kb)
+                const int dw = ((i / kSub) * kDecW) + ((i % kSub) * 8);
+                F::decode_sub(stB[i / kSub], ks, i % kSub, sDec + dw, sGrid);
+            }
+        }
         __syncthreads();
 #pragma unroll
         for (int kb = 0; kb < kSub; ++kb) {
@@ -303,7 +393,14 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
             float2 wl[kNF], wh[kNF];
 #pragma unroll
             for (int nf = 0; nf < kNF; ++nf) {
-                const uint2 b = b_of<F>(stB[(warp_n * kTileN) + (nf * 8) + rl], ks, kb, cl);
+                const int brow = (warp_n * kTileN) + (nf * 8) + rl;
+                uint2 b;
+                if constexpr (kPredecode<F>) {
+                    const int dw = (brow * (F::kDecRow / 4)) + (kb * 8) + (2 * cl);
+                    b = *reinterpret_cast<const uint2*>(sDec + dw);
+                } else {
+                    b = b_of<F>(stB[brow], ks, kb, cl);
+                }
                 b0[nf] = b.x;
                 b1[nf] = b.y;
                 const int ncol = (warp_n * kTileN) + (nf * 8) + (cl * 2);
@@ -437,6 +534,8 @@ bool launch_gguf_bm128(int qkind, const uint8_t* w, __half* out_f16, int M, int 
             return launch_big<BigIQ4NL<2>>(w, out_f16, M, N, K, beta, capturing, stream);
         case 8:
             return launch_big<BigQ5K<4>>(w, out_f16, M, N, K, beta, capturing, stream);
+        case 9:
+            return launch_big<BigIQ3S<2>>(w, out_f16, M, N, K, beta, capturing, stream);
         default:
             return false;
     }

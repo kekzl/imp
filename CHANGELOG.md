@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Changed
+- GGUF IQ3_S runs native (dp4a decode, IMMA prompt GEMMs: 564 -> 406-457 us at pp512), Q3_K GEMVs read words (verify rows 95.4 -> 38.6 us), FP16-cached GGUF weights at 2..32 rows run in place. Qwen3.8-27B-UD-Q4_K_M MTP imp-cli 136.0-136.7 -> 142.5-142.8 tok/s, tg128 +0.74 %, -191 MiB, PPL 5.0068 -> 5.0059.
+
 ## [0.58.0] - 2026-10-24
 
 ### Fixed

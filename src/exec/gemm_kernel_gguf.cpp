@@ -18,13 +18,13 @@ namespace imp {
 //
 // use_mmvq = force_mmvq && qtype in {Q4_K,Q5_K,Q5_1,Q8_0} && K%32==0 && !no_mmvq &&
 //            !no_mmvq_q8_0(Q8_0) && !prefer_fp16_cache && input==F16 && !fp32_output
-// use_dp4a = !no_dp4a_gemv && qtype in {Q6_K,Q8_0,Q4_0,Q4_K,Q5_K,Q2_K,Q3_K,IQ4_NL,IQ4_XS} && q8_1_buf
+// use_dp4a = !no_dp4a_gemv && qtype in {Q6_K,Q8_0,Q4_0,Q4_K,Q5_K,Q2_K,Q3_K,IQ4_NL,IQ4_XS,IQ3_S} && q8_1_buf
 //            && d8_buf && !prefer_fp16_cache && input==F16 && !fp32_output && M==1
 // mmvq wins when both eligible (legacy if/else-if order).
 //
 // Fused gemv (Q6_K/Q8_0 only) fires when neither mmvq nor dp4a matches and
 // dequant_scratch != nullptr (engine-ready sentinel; the fused kernel never reads the
-// scratch). Strategy keys: 10 qtypes (Q4_K,Q5_K,Q5_1,Q8_0,Q6_K,Q4_0,Q2_K,Q3_K,IQ4_NL,IQ4_XS),
+// scratch). Strategy keys: 11 qtypes (Q4_K,Q5_K,Q5_1,Q8_0,Q6_K,Q4_0,Q2_K,Q3_K,IQ4_NL,IQ4_XS,IQ3_S),
 // M==1 only. StorageTier::FP16 names the INPUT tier, not the weight's packed format.
 //
 // Out of scope (stays on legacy): Q4_1 (quant_gemm_int4), M>1 dequant+cuBLAS fallback,
@@ -201,8 +201,14 @@ static GemmDispatchResult gguf_iq4xs_kernel(const GemmKernelArgs& args) {
                                                                              /*fused_gemv_eligible=*/false);
 }
 
+static GemmDispatchResult gguf_iq3s_kernel(const GemmKernelArgs& args) {
+    return run_gguf_smallm<&no_op_mmvq_launcher, &no_op_fused_gemv_launcher>(args, QType::IQ3_S,
+                                                                             /*mmvq_eligible=*/false,
+                                                                             /*fused_gemv_eligible=*/false);
+}
+
 void register_gguf_gemm_kernels(GemmKernelRegistry& reg) {
-    // Ten strategies, every small-M GGUF qtype reachable via mmvq or dp4a, all under
+    // Eleven strategies, every small-M GGUF qtype reachable via mmvq or dp4a, all under
     // (StorageTier::FP16, <qtype>, m_is_one=true). qtype is the discriminator; the handler
     // picks the backend internally.
     reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::Q4_K, /*m_is_one=*/true},
@@ -225,6 +231,7 @@ void register_gguf_gemm_kernels(GemmKernelRegistry& reg) {
                         &gguf_iq4nl_kernel);
     reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::IQ4_XS, /*m_is_one=*/true},
                         &gguf_iq4xs_kernel);
+    reg.register_kernel(GemmStrategy{StorageTier::FP16, QType::IQ3_S, /*m_is_one=*/true}, &gguf_iq3s_kernel);
 }
 
 }  // namespace imp

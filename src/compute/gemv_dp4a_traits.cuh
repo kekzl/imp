@@ -21,11 +21,28 @@ namespace imp {
 static constexpr int kSmemQ8Stride = 9;
 
 // File-local tag enum for template dispatch (distinct from imp::QType).
-enum class DPQTag { Q4_0, Q8_0, Q6_K, Q4_K, Q5_K, Q2_K, Q3_K, Q5_1, IQ4_NL, IQ4_XS };
+enum class DPQTag { Q4_0, Q8_0, Q6_K, Q4_K, Q5_K, Q2_K, Q3_K, Q5_1, IQ4_NL, IQ4_XS, IQ3_S };
 
 // ============================================================================
 // Helper device functions (moved from gemm.cu, unchanged)
 // ============================================================================
+
+// N words (bytes [4i, 4i + 4)) from a 2-aligned p in a 4-aligned buffer: N + 1 aligned LDG.32 + funnel
+// shift instead of 4N LDG.U8 from memcpy. Reads [p - 2, p + 4N + 2) at most; at offset 0 never past p + 4N.
+template <int N>
+__device__ __forceinline__ void ldg_words_2a(const uint8_t* p, uint32_t (&w)[N]) {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+    const uint32_t* q = reinterpret_cast<const uint32_t*>(a & ~static_cast<uintptr_t>(3));
+    const uint32_t sh = static_cast<uint32_t>(a & 3u) * 8u;
+    uint32_t r[N + 1];
+#pragma unroll
+    for (int i = 0; i < N; i++)
+        r[i] = __ldg(q + i);
+    r[N] = __ldg(q + N - (sh == 0u ? 1 : 0));  // unused at sh 0
+#pragma unroll
+    for (int i = 0; i < N; i++)
+        w[i] = __funnelshift_r(r[i], r[i + 1], sh);
+}
 
 // The 32 activation bytes of one block_q8_1 (16-B aligned, #598) as 2x LDG.128; memcpy into an
 // int array compiled to 32 byte loads.
@@ -420,25 +437,27 @@ struct DequantTraits<DPQTag::Q3_K> {
     // Q3_K layout (110 bytes / 256 elements): hmask[32] high bit (bit 2) per element; qs[64] 2-bit
     // packed (same layout as Q2_K); scales[12] packed 6-bit scales; d(fp16) at offset 108.
     // q3 = q2_lowbits + (hmask_bit ? 0 : -4), range [-4..3]; val = d*(scale6bit-32)*q3.
-    static __device__ __forceinline__ float dp4a_block(const uint8_t* bp, int sub, const int* xi, float dq,
-                                                       float /*q8_sum*/) {
-        const uint8_t* hmask = bp;
-        const uint8_t* qs = bp + 32;
-        const uint8_t* sc_raw = bp + 96;
-        float d_all = __half2float(*reinterpret_cast<const half*>(bp + 108));
+    // One sub-block decoded: q3 bytes for elements 0..31, the two 16-element scales, d.
+    struct Block {
+        int q3[8];
+        float sc0, sc1, d;
+    };
 
-        int half_idx = sub / 4;
-        int shift = (sub % 4) * 2;
-        const uint8_t* qs_base = qs + half_idx * 32;
+    // 2-aligned 110-B blocks: hmask / qs / scales as aligned words (76 LDG.U8 per sub-block before).
+    static __device__ __forceinline__ Block decode(const uint8_t* bp, int sub) {
+        uint32_t hm[8], qw[8], aux[3];
+        ldg_words_2a(bp, hm);
+        ldg_words_2a(bp + 32 + ((sub / 4) * 32), qw);
+        ldg_words_2a(bp + 96, aux);
+        Block b;
+        b.d = __half2float(__ushort_as_half(__ldg(reinterpret_cast<const unsigned short*>(bp + 108))));
+        const int shift = (sub % 4) * 2;
         // High bits are one bitplane per 32-element sub-block, not 4 bytes per sub-block: ggml's
         // dequantize_row_q3_K reads BYTE (element%32) at BIT (element/32)=`sub`. The old
         // `hmask+sub*4` reading only agreed with it for sub 0 elements 0..7 (AUDIT_ARCH_2026 D-5).
 
         // Unpack 16 6-bit scales from 12 packed bytes
-        uint32_t aux0, aux1, aux2;
-        memcpy(&aux0, sc_raw, 4);
-        memcpy(&aux1, sc_raw + 4, 4);
-        memcpy(&aux2, sc_raw + 8, 4);
+        const uint32_t aux0 = aux[0], aux1 = aux[1], aux2 = aux[2];
         constexpr uint32_t kmask2 = 0x0f0f0f0fu;
         constexpr uint32_t kmask1 = 0x03030303u;
         uint32_t s[4];
@@ -447,42 +466,34 @@ struct DequantTraits<DPQTag::Q3_K> {
         s[2] = ((aux0 >> 4) & kmask2) | (((aux2 >> 4) & kmask1) << 4);
         s[3] = ((aux1 >> 4) & kmask2) | (((aux2 >> 6) & kmask1) << 4);
         const int8_t* up = reinterpret_cast<const int8_t*>(s);
-        float sc0 = (float)(up[sub * 2] - 32);
-        float sc1 = (float)(up[sub * 2 + 1] - 32);
+        b.sc0 = (float)(up[sub * 2] - 32);
+        b.sc1 = (float)(up[sub * 2 + 1] - 32);
 
-        // First 16 elements
-        int32_t sumi0 = 0;
 #pragma unroll
-        for (int j = 0; j < 4; j++) {
-            uint32_t qb4;
-            memcpy(&qb4, qs_base + j * 4, 4);
-            uint32_t q2_4 = (qb4 >> shift) & 0x03030303u;
+        for (int j = 0; j < 8; j++) {
+            uint32_t q2_4 = (qw[j] >> shift) & 0x03030303u;
             // Four consecutive mask BYTES, one bit each: bit `sub` of every byte.
-            uint32_t hm_b4;
-            memcpy(&hm_b4, hmask + j * 4, 4);
-            uint32_t hm4 = (hm_b4 >> sub) & 0x01010101u;
+            uint32_t hm4 = (hm[j] >> sub) & 0x01010101u;
             // q3 = q2 - 4*(1-hm): subtract 4 from each byte where hm=0
             uint32_t sub_mask = (hm4 ^ 0x01010101u) * 4;
-            int q3i = __vsubss4(q2_4, sub_mask);
-            sumi0 = __dp4a(q3i, xi[j], sumi0);
+            b.q3[j] = __vsubss4(q2_4, sub_mask);
         }
+        return b;
+    }
 
-        // Last 16 elements
-        int32_t sumi1 = 0;
+    static __device__ __forceinline__ float dot(const Block& b, const int* xi, float dq) {
+        int32_t sumi0 = 0, sumi1 = 0;
 #pragma unroll
         for (int j = 0; j < 4; j++) {
-            uint32_t qb4;
-            memcpy(&qb4, qs_base + 16 + j * 4, 4);
-            uint32_t q2_4 = (qb4 >> shift) & 0x03030303u;
-            uint32_t hm_b4;
-            memcpy(&hm_b4, hmask + 16 + j * 4, 4);
-            uint32_t hm4 = (hm_b4 >> sub) & 0x01010101u;
-            uint32_t sub_mask = (hm4 ^ 0x01010101u) * 4;
-            int q3i = __vsubss4(q2_4, sub_mask);
-            sumi1 = __dp4a(q3i, xi[4 + j], sumi1);
+            sumi0 = __dp4a(b.q3[j], xi[j], sumi0);
+            sumi1 = __dp4a(b.q3[4 + j], xi[4 + j], sumi1);
         }
+        return b.d * dq * (b.sc0 * (float)sumi0 + b.sc1 * (float)sumi1);
+    }
 
-        return d_all * dq * (sc0 * (float)sumi0 + sc1 * (float)sumi1);
+    static __device__ __forceinline__ float dp4a_block(const uint8_t* bp, int sub, const int* xi, float dq,
+                                                       float /*q8_sum*/) {
+        return dot(decode(bp, sub), xi, dq);
     }
 };
 

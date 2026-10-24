@@ -593,7 +593,7 @@ TEST(GgufRef, Q5_K_GemvDp4a) { run_dp4a_gemv("Q5_K", QType::Q5_K, 256, 1024, gem
 // "dispatch == direct" would have agreed while both were wrong (Q3_K was).
 TEST(GgufRef, Q2_K_GemvDp4a) { run_dp4a_gemv("Q2_K", QType::Q2_K, 256, 1024, gemv_q2_k_q8_1); }
 TEST(GgufRef, Q3_K_GemvDp4a) { run_dp4a_gemv("Q3_K", QType::Q3_K, 256, 1024, gemv_q3_k_q8_1); }
-// N=256 runs the K-parallel kernel, N=8192 the row-parallel NR=4 one.
+// IQ types prefer K-parallel: kpar_is_better() picks it at every N (kpar warps >= row-par warps).
 TEST(GgufRef, IQ4_NL_GemvDp4a) {
     run_dp4a_gemv("IQ4NL", QType::IQ4_NL, 256, 1024, gemv_iq4_nl_q8_1);
     run_dp4a_gemv("IQ4NL", QType::IQ4_NL, 8192, 1056, gemv_iq4_nl_q8_1);
@@ -602,13 +602,21 @@ TEST(GgufRef, IQ4_XS_GemvDp4a) {
     run_dp4a_gemv("IQ4XS", QType::IQ4_XS, 256, 1024, gemv_iq4_xs_q8_1);
     run_dp4a_gemv("IQ4XS", QType::IQ4_XS, 8192, 1280, gemv_iq4_xs_q8_1);
 }
+// IQ3_S: K 1280 = 5 super-blocks, odd rows start 2 mod 4 (aligned-word loads).
+TEST(GgufRef, IQ3_S_GemvDp4a) {
+    run_dp4a_gemv("IQ3S", QType::IQ3_S, 256, 1024, gemv_iq3_s_q8_1);
+    run_dp4a_gemv("IQ3S", QType::IQ3_S, 8192, 1280, gemv_iq3_s_q8_1);
+}
 // Multi-row GEMV (MTP verify rows): every dp4a family.
 TEST(GgufRef, DenseRowsDp4aAllTypes) {
     for (QType qt : {QType::Q8_0, QType::Q4_0, QType::Q2_K, QType::Q3_K, QType::Q4_K, QType::Q5_K,
-                     QType::Q6_K, QType::IQ4_NL, QType::IQ4_XS})
+                     QType::Q6_K, QType::IQ4_NL, QType::IQ4_XS, QType::IQ3_S})
         run_dp4a_rows(qtype_name(qt), qt, 384, 1024);
+    // 110-B blocks: K 1280 starts odd rows at 2 mod 4.
+    for (QType qt : {QType::Q3_K, QType::IQ3_S})
+        run_dp4a_rows(qtype_name(qt), qt, 384, 1280);
     // K >= 8192: 4 weight rows per block, N=386 leaves a 2-row tail.
-    for (QType qt : {QType::Q8_0, QType::Q4_K, QType::IQ4_XS})
+    for (QType qt : {QType::Q8_0, QType::Q4_K, QType::IQ4_XS, QType::Q3_K, QType::IQ3_S})
         run_dp4a_rows(qtype_name(qt), qt, 386, 8448);
 }
 

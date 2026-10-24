@@ -1,8 +1,9 @@
 // Dense small-M IMMA kernel on GGUF blocks in place (sm_120a): BM=32, one 256-K step per stage, cp.async
-// staging, K-split by N and K. Formats with one scale per 32 elements: Q8_0, IQ4_NL, IQ4_XS (symmetric) and
-// Q5_K (scale + min, min term via the activation row sums). Launched from gemm_common (qkind 5..8); above
-// 32 rows gridDim.x runs 32-row blocks (no K-split).
+// staging, K-split by N and K. Formats with one scale per 32 elements: Q8_0, IQ4_NL, IQ4_XS, IQ3_S
+// (symmetric) and Q5_K (scale + min, min term via the activation row sums). Launched from gemm_common
+// (qkind 5..9); above 32 rows gridDim.x runs 32-row blocks (no K-split).
 
+#include "compute/iq3s_grid.cuh"
 #include "compute/iq4_lut.cuh"
 #include "compute/mmq_q8_imma_internal.cuh"
 #include "core/logging.h"
@@ -116,6 +117,41 @@ struct FmtQ5K {
     }
 };
 
+// IQ3_S: one 110-B super-block (d, qs[64], qh[8], signs[32], scales[4]), 2-aligned. With K % 512 == 0 rows
+// start 4-aligned and step st starts at 2 (st & 1) mod 4: staged from the word below as 28 x 4 B (reads
+// stay inside the row), the start offset kept in byte kOff. Group g = grid[qs[8J+g] | qh[J] bit g << 8].
+struct FmtIQ3S {
+    static constexpr int kStep = 110, kChunk = 4, kRow = 144, kStaged = 112, kOff = 140;
+    static constexpr bool kMin = false;
+    static __device__ __forceinline__ int src_off(int st) { return (st * 110) - (2 * (st & 1)); }
+    template <int J>
+    static __device__ __forceinline__ uint2 bfrag(const uint8_t* row, int cl) {
+        const uint8_t* b = row + row[kOff];
+        const auto* h = reinterpret_cast<const uint16_t*>(b);
+        const uint32_t qh = b[66 + J];
+        const uint32_t sg = static_cast<uint32_t>(h[37 + (2 * J)]) |
+                            (static_cast<uint32_t>(h[38 + (2 * J)]) << 16);
+        const int i0 = static_cast<int>(b[2 + (8 * J) + cl] | (((qh >> cl) & 1u) << 8));
+        const int i1 = static_cast<int>(b[6 + (8 * J) + cl] | (((qh >> (4 + cl)) & 1u) << 8));
+        return make_uint2(static_cast<uint32_t>(iq3s_signed4(i0, sg >> (4 * cl))),
+                          static_cast<uint32_t>(iq3s_signed4(i1, sg >> (16 + (4 * cl)))));
+    }
+    template <int J>
+    static __device__ __forceinline__ float2 wscale(const uint8_t* row) {
+        const uint8_t* b = row + row[kOff];
+        const uint32_t sc = (b[106 + (J / 2)] >> (4 * (J & 1))) & 0xFu;
+        return make_float2(__half2float(*reinterpret_cast<const __half*>(b)) *
+                               static_cast<float>(1 + (2 * sc)),
+                           0.0f);
+    }
+};
+
+// Staging geometry: kStaged B per row from byte src_off(st) (default kStep from st * kStep).
+template <class F>
+inline constexpr bool kAlign2 = false;
+template <>
+inline constexpr bool kAlign2<FmtIQ3S> = true;
+
 // Stage: A [32][kARow] s8, A scales [32][8] fp16, A row sums [32][8] fp32 (kMin only), B [128][F::kRow].
 template <class F>
 constexpr size_t stage_bytes() {
@@ -158,21 +194,36 @@ __device__ __forceinline__ void load_step(int tid, const int8_t* __restrict__ A,
                            row < M);
         }
     }
-    constexpr int kChunks = F::kStep / F::kChunk;
-    static_assert(F::kStep % F::kChunk == 0, "a step must be whole chunks");
+    constexpr int kStaged = [] {
+        if constexpr (kAlign2<F>)
+            return F::kStaged;
+        else
+            return F::kStep;
+    }();
+    constexpr int kChunks = kStaged / F::kChunk;
+    static_assert(kStaged % F::kChunk == 0, "a step must be whole chunks");
     const size_t row_bytes = static_cast<size_t>(K / 256) * F::kStep;
+    size_t step_off = static_cast<size_t>(st) * F::kStep;
+    if constexpr (kAlign2<F>)
+        step_off = static_cast<size_t>(F::src_off(st));
 #pragma unroll
     for (int i = tid; i < kBN * kChunks; i += kThreads) {
         const int row = i / kChunks;
         const int c = i - (row * kChunks);
         const bool live = row < n_valid;
-        const uint8_t* src = W + ((live ? static_cast<size_t>(base_n + row) : 0) * row_bytes) +
-                             (static_cast<size_t>(st) * F::kStep) + (static_cast<size_t>(c) * F::kChunk);
+        const uint8_t* src = W + ((live ? static_cast<size_t>(base_n + row) : 0) * row_bytes) + step_off +
+                             (static_cast<size_t>(c) * F::kChunk);
         uint8_t* dst = sB + static_cast<ptrdiff_t>((row * F::kRow) + (c * F::kChunk));
         if constexpr (F::kChunk == 16)
             cp_async_cg_16(dst, src, live);
-        else
+        else if constexpr (F::kChunk == 8)
             cp_async_ca_8(dst, src, live);
+        else
+            cp_async_ca_4(dst, src, live);
+    }
+    if constexpr (kAlign2<F>) {
+        if (tid < kBN)  // read after the stage's wait + barrier, like the async bytes
+            sB[(tid * F::kRow) + F::kOff] = static_cast<uint8_t>(2 * (st & 1));
     }
 }
 
@@ -360,6 +411,9 @@ bool launch_gguf_small_m(int qkind, const uint8_t* w, __half* out_f16, int M, in
         case 8:
             return M > 32 ? launch_gguf_bm128(8, w, out_f16, M, N, K, beta, capturing, stream)
                           : launch_fmt<FmtQ5K>(w, out_f16, M, N, K, beta, capturing, stream);
+        case 9:
+            return M > 32 ? launch_gguf_bm128(9, w, out_f16, M, N, K, beta, capturing, stream)
+                          : launch_fmt<FmtIQ3S>(w, out_f16, M, N, K, beta, capturing, stream);
         default:
             return false;
     }

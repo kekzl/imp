@@ -57,13 +57,10 @@ enum class QType : uint16_t {
         case QType::Q4_K:
         case QType::Q3_K:
         case QType::Q2_K:
-        case QType::IQ4_NL:  // native dp4a GEMV, 4.25-4.5 bits: NVFP4 saves nothing
+        case QType::IQ4_NL:  // native dp4a GEMV, 3.44-4.5 bits: NVFP4 saves nothing
         case QType::IQ4_XS:
-            return decode_all;
         case QType::IQ3_S:
-            // No dp4a/MMVQ decode kernel: without the NVFP4 decode cache it falls to
-            // dequant->cuBLAS GEMV (uncapturable under graph capture, ~2x slower).
-            return true;
+            return decode_all;
         default:
             return false;
     }

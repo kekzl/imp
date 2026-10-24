@@ -27,7 +27,7 @@ struct DequantTraits<DPQTag::IQ4_NL> {
     static constexpr bool kNeedsQ8Sum = false;
     static constexpr int kSmemExtra = 0;
     static constexpr int kMaxNRows = 4;
-    static constexpr bool kPreferKpar = false;
+    static constexpr bool kPreferKpar = true;
 
     static __device__ __forceinline__ float dp4a_block(const uint8_t* bp, int /*sub*/, const int* xi,
                                                        float dq, float /*q8_sum*/) {

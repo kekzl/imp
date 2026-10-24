@@ -618,9 +618,11 @@ bool mmq_gguf_imma_smallm_gemm(const void* w_blocks, QType qtype, const __half* 
                       : qtype == QType::IQ4_NL ? 6
                       : qtype == QType::IQ4_XS ? 7
                       : qtype == QType::Q5_K   ? 8
+                      : qtype == QType::IQ3_S  ? 9
                                                : 0;
-    const uintptr_t align = qkind == 7 ? 7u : 15u;
-    if (qkind == 0 || M < 2 || N % 2 != 0 || K % 256 != 0 ||
+    // IQ3_S: 4-B pieces, rows 4-aligned only at an even super-block count.
+    const uintptr_t align = qkind == 7 ? 7u : qkind == 9 ? 3u : 15u;
+    if (qkind == 0 || M < 2 || N % 2 != 0 || K % (qkind == 9 ? 512 : 256) != 0 ||
         (reinterpret_cast<uintptr_t>(w_blocks) & align) != 0)
         return false;
     if (beta != 0.0f && beta != 1.0f)

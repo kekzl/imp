@@ -3,6 +3,7 @@
 
 #include "compute/gemv_dp4a_rows.h"
 
+#include "compute/gemv_dp4a_iq3s_traits.cuh"
 #include "compute/gemv_dp4a_iq4_traits.cuh"
 #include "compute/gemv_dp4a_traits.cuh"
 #include "core/logging.h"
@@ -128,6 +129,21 @@ struct RowsOnce<Q5_K_Traits> {
         return dq * ((b.dsc * static_cast<float>(sumi + sumi_h)) - (b.dmn * static_cast<float>(q8_sum)));
     }
 };
+
+// Q3_K / IQ3_S: the traits' own decode / dot split (bit-identical to dp4a_block).
+template <typename QT>
+struct RowsOnceSplit {
+    static constexpr bool kOn = true;
+    using Block = typename QT::Block;
+    static __device__ __forceinline__ Block load(const uint8_t* bp, int sub) { return QT::decode(bp, sub); }
+    static __device__ __forceinline__ float dot(const Block& b, const int* xi, float dq) {
+        return QT::dot(b, xi, dq);
+    }
+};
+template <>
+struct RowsOnce<Q3_K_Traits> : RowsOnceSplit<Q3_K_Traits> {};
+template <>
+struct RowsOnce<IQ3_S_Traits> : RowsOnceSplit<IQ3_S_Traits> {};
 
 // IQ4_XS: codebook lookups once; d * (ls - 32) * dq * sumi as in DequantTraits<IQ4_XS>.
 template <>
@@ -283,6 +299,8 @@ bool gemv_dp4a_rows(QType qtype, const void* W, const block_q8_1* q8_1, const fl
             return launch_rows<IQ4_NL_Traits>(W, q8_1, d8, y, N, K, rows, add, stream);
         case QType::IQ4_XS:
             return launch_rows<IQ4_XS_Traits>(W, q8_1, d8, y, N, K, rows, add, stream);
+        case QType::IQ3_S:
+            return launch_rows<IQ3_S_Traits>(W, q8_1, d8, y, N, K, rows, add, stream);
         default:
             return false;
     }
