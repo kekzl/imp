@@ -1,49 +1,48 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-10-15
-commit: 2a127345
+verified: 2026-10-24
+commit: 28185525
 -->
 
 # src/compute - CUDA kernels
 
-Attention, GEMM/GEMV, norms, sampling, SSM/GDN scans. `sm_120a` only; the hot path.
+Attention, GEMM/GEMV, norms, sampling, SSM/GDN scans. `sm_120a` only.
 
 ## Invariants
 
-- One logical unit per `.cu`: touching a kernel re-`ptxas`es the whole translation unit. Split kernel / wrapper / instantiations when recompiles bite (`tools/check_filesize.py`).
+- One logical unit per `.cu`: a kernel edit re-`ptxas`es the whole TU. Split kernel / wrapper / instantiations when recompiles bite (`tools/check_filesize.py`).
 - Every `<<<>>>` carries `IMP_CUDA_CHECK_LAUNCH()` (CI job `Launch guards`).
-- Numeric code is bit-sensitive: move a kernel verbatim, and say so.
+- Numerics are bit-sensitive: move kernels verbatim and say so.
 - A kernel that cannot serve its input fails loud: copy `gemm()`'s scale-less-weight guard.
 
 ## Entry points
 
 - `attention_dispatch.cpp`: prefill FMHA chain per (dtype x layer)
-- `attention_fmha_sm120.cu`: register-resident FA2, the default prefill path
-- `attention_paged_*.cu`: paged decode kernels, one per KV dtype
-- `gemm.cpp`: generic dispatch and the packed-weight guard
-- `gemm_cutlass_grouped_3x.cu`: MoE prefill, the primary NVFP4 GEMM path
-- `gdn_scan.cu`, `gdn_scan_tc.cu`: Gated DeltaNet recurrent scans
-
-Decode-attention variant selection lives one level up: `src/exec/executor_attention_decode.cpp` (`dispatch_record::set_attn_decode`). Prefill gate: `src/exec/executor_attention_prefill.cpp`.
+- `attention_fmha_sm120.cu`: register-resident FA2, default prefill
+- `attention_paged_*.cu`: paged decode, one per KV dtype
+- `gemm.cpp`: generic dispatch, packed-weight guard
+- `gemm_cutlass_grouped_3x.cu`: MoE prefill, primary NVFP4 GEMM
+- `gdn_scan.cu`, `gdn_scan_tc.cu`: Gated DeltaNet scans
+- Decode-attention selection: `src/exec/executor_attention_decode.cpp` (`dispatch_record::set_attn_decode`); prefill gate: `src/exec/executor_attention_prefill.cpp`
 
 ## Test
 
-After `make build`: `test-compute`, `test-attention` cover this directory (`test-quant`, `test-kv`, `test-moe-gdn` cover theirs); all need a GPU.
+After `make build`, GPU only: `test-compute`, `test-attention` (also `test-quant`, `test-kv`, `test-moe-gdn`).
 
 ```
 docker run --rm --gpus all --entrypoint test-attention imp:test --gtest_filter='*Paged*'
 ```
 
-`ctest` registers only the `unit`/`gpu`/`perf` aggregates: filter inside the binary, not with `ctest -R`. Filter and lane pitfalls: `tests/CLAUDE.md`.
+`ctest` has only `unit`/`gpu`/`perf` aggregates: filter in the binary, not `ctest -R`. More: `tests/CLAUDE.md`.
 
 ## Pitfalls
 
-- `build-dev/` holds the branch last compiled there; `git checkout` does not rebuild.
-- `__launch_bounds__` moves perf in both directions: never add or remove one without `make verify-ab`.
-- `compute-sanitizer` does not work on this WSL2 host; `make asan` covers host code only.
-- `paged_attention_decode` split-K: `total_blocks_nosplit` must count the kernel that runs without splits; GQA ratio > 8 without multitok = `paged_attention_gqa_kernel`, batch x n_kv CTAs (#2074).
+- `build-dev/` holds the last-compiled branch; `git checkout` does not rebuild.
+- `__launch_bounds__` moves perf both ways: add/remove only with `make verify-ab`.
+- `compute-sanitizer` fails on this WSL2 host; `make asan` = host code only.
+- `paged_attention_decode` split-K: `total_blocks_nosplit` counts the kernel that runs unsplit; GQA ratio > 8 without multitok = `paged_attention_gqa_kernel`, batch x n_kv CTAs (#2074).
 
 ## See also
 
-[`ARCHITECTURE.md`](../../docs/internals/ARCHITECTURE.md) (what `sm_120a` has and lacks), [`KERNELS.md`](../../docs/internals/KERNELS.md) (catalogue), [`BENCHMARKING.md`](../../docs/internals/BENCHMARKING.md) before quoting a number. Skill `sm120-cuda-expert`.
+[`ARCHITECTURE.md`](../../docs/internals/ARCHITECTURE.md), [`KERNELS.md`](../../docs/internals/KERNELS.md), [`BENCHMARKING.md`](../../docs/internals/BENCHMARKING.md) before quoting a number. Skill `sm120-cuda-expert`.

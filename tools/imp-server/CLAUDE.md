@@ -1,50 +1,50 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-10-18
-commit: 2f7574d5
+verified: 2026-10-24
+commit: 28185525
 -->
 
 # tools/imp-server - the HTTP surface
 
-OpenAI, Anthropic and OpenAI-Responses dialects: thin wire-format adapters over one engine (`src/runtime/`).
+OpenAI, Anthropic, OpenAI-Responses: thin wire-format adapters over one engine (`src/runtime/`).
 
 ## Invariants
 
-- One shared per-token streaming driver (`handlers_chat_stream.cpp`); the three dialects adapt it. No second token loop (#892, #941).
-- Every error is a JSON envelope, never a bare status; `/v1/messages*` gets the Anthropic error shape.
-- A request the server cannot honour is a 4xx, by design: uncompilable constraint, unreadable image, `tool_choice` naming an absent function are all 400.
-- The server connects to a host a request names only with `--allow-remote-images` (`image_url`): destination classified before the connect, no redirects, error strings independent of the destination (#1610, `image_fetch.h`).
-- Reasoning goes to `reasoning_content`, never into `content`, on streaming and non-streaming paths.
+- One shared per-token streaming driver (`handlers_chat_stream.cpp`), no second token loop (#892, #941).
+- Every error is a JSON envelope; `/v1/messages*` uses the Anthropic shape.
+- Unservable request = 4xx: uncompilable constraint, unreadable image, `tool_choice` naming an absent function = 400.
+- Remote hosts only with `--allow-remote-images` (`image_url`): classify before connect, no redirects, destination-independent errors (#1610, `image_fetch.h`).
+- Reasoning goes to `reasoning_content`, never `content`, streaming and non-streaming.
 
 ## Entry points
 
-- `main.cpp`: route registration, CORS, auth
-- `handlers_chat.cpp` / `handlers_chat_stream.cpp`: OpenAI + the shared driver
-- `handlers_completions.cpp` / `fim_request.cpp`: `/v1/completions` and `POST /infill` (fill-in-the-middle, prompt assembly in `src/model/fim.h`)
-- `handlers_messages.cpp`: Anthropic wire format
+- `main.cpp`: routes, CORS, auth
+- `handlers_chat.cpp` / `handlers_chat_stream.cpp`: OpenAI + shared driver
+- `handlers_completions.cpp` / `fim_request.cpp`: `/v1/completions`, `POST /infill` (prompt assembly `src/model/fim.h`)
+- `handlers_messages.cpp`: Anthropic
 - `handlers_responses.cpp`: `/v1/responses`
-- `handlers_chat_params.cpp`: parameter parsing and validation
-- `sampling_fields.h`: the one sampling-field parser and dialect pass-through table; a new field is one row (#2461)
-- `webui/index.html`: embedded at build time by `cmake/embed_webui.cmake`
+- `handlers_chat_params.cpp`: parameter parsing, validation
+- `sampling_fields.h`: the one sampling-field parser + dialect pass-through table; new field = one row (#2461)
+- `webui/index.html`: embedded by `cmake/embed_webui.cmake`
 
 ## Test
 
 ```
 make dev-test             # CPU lane, includes the mock API battery
-make test-server          # boots a real imp-server (GPU)
+make test-server          # real imp-server (GPU)
 make test-agents-external # real aider / Claude Code / OpenAI Agents SDK
 ```
 
-- CI job `Real API contract` runs the API tests against the built binary, no GPU.
-- Web UI without a GPU: `webui/dev/mock_server.py` (imp-shaped SSE per token) + `webui/dev/drive.py` (Python Playwright image `mcr.microsoft.com/playwright/python:v1.55.0-noble`, `markup_test.py` for the renderer); commands in the file headers.
-- Docs screenshots `docs/webui*.png`: `webui/dev/live_shots.py` against a running server, page from the working tree.
-- `tests/api/mock_server.py` sends the SSE body in one write: it does not exercise streaming.
+- CI job `Real API contract`: API tests against the built binary, no GPU.
+- Web UI without GPU: `webui/dev/mock_server.py` + `webui/dev/drive.py` (image `mcr.microsoft.com/playwright/python:v1.55.0-noble`, `markup_test.py` for the renderer); commands in file headers.
+- Docs screenshots `docs/webui*.png`: `webui/dev/live_shots.py` against a running server.
+- `tests/api/mock_server.py` sends SSE in one write: no streaming coverage.
 
 ## Pitfalls
 
-- A test against the mock proves nothing about the server.
-- CORS is off unless `--cors-origins` lists the Origin (#2402); the built-in UI is same-origin. Policy: `cors_allow_origin` in `cors.h`, mirrored in `tests/api/mock_server.py`.
+- A mock test proves nothing about the server.
+- CORS off unless `--cors-origins` lists the Origin (#2402). Policy: `cors_allow_origin` in `cors.h`, mirrored in `tests/api/mock_server.py`.
 
 ## Do not touch
 
@@ -52,4 +52,4 @@ make test-agents-external # real aider / Claude Code / OpenAI Agents SDK
 
 ## See also
 
-[`docs/API.md`](../../docs/API.md) (field-by-field surface), [`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md) (auth, proxying). Skill `server-api`.
+[`docs/API.md`](../../docs/API.md), [`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md). Skill `server-api`.

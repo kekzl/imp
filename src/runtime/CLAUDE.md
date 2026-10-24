@@ -1,44 +1,44 @@
 <!--
 layer: L3
 audience: agents
-verified: 2026-10-15
-commit: c0211fea
+verified: 2026-10-24
+commit: 28185525
 -->
 
 # src/runtime - engine, scheduler, config, KV
 
-Request lifecycle: admission, continuous batching, KV allocation, CUDA-graph capture, and the config surface everything else reads.
+Admission, continuous batching, KV allocation, CUDA-graph capture, config surface.
 
 ## Invariants
 
-- `RuntimeConfig` (`config.h`) is the only config surface: one per engine, no process-global config. Env vars are seeded in `config.cpp` only (list: root `CLAUDE.md`).
-- A `--set` key that does not exist is an error, not a warning.
-- Internal errors throw; `src/api/imp_api.cpp` translates them to `ImpError`. Do not convert them to status returns.
-- Never size anything from a live `cudaMemGetInfo` reading (root `CLAUDE.md`, VRAM).
+- `RuntimeConfig` (`config.h`) is the only config surface, one per engine, no process-global config. Env vars seeded in `config.cpp` only (list: root `CLAUDE.md`).
+- Unknown `--set` key = error.
+- Internal errors throw; `src/api/imp_api.cpp` translates to `ImpError`. No status returns.
+- Never size from a live `cudaMemGetInfo` reading.
 
 ## Entry points
 
-- `engine.cpp`: lifecycle, suspend/resume, the top-level step
+- `engine.cpp`: lifecycle, suspend/resume, top-level step
 - `engine_scheduler.cpp`, `scheduler.cpp`: admission, continuous batching
 - `engine_prefill.cpp`, `engine_prefill_ragged.cpp`: prefill; `engine_decode_pipeline.cpp`: pipelined batched decode
 - `engine_kv_cache_init.cpp`: KV block geometry, pool sizing
 - `engine_graph_decode.cpp`, `cuda_graph.cu`: capture and replay
-- `config.h` / `config.cpp`: every key, with default and rationale inline
+- `config.h` / `config.cpp`: every key with default and rationale
 
 ## Test
 
-CPU tests run in `make dev-test`; new ones go to `test-core`. Anything touching KV, graphs or scheduling: `make verify-fast` before it ships (CI has no GPU).
+CPU tests: `make dev-test`, new ones in `test-core`. KV, graphs, scheduling: `make verify-fast` before shipping (CI has no GPU).
 
 ## Pitfalls
 
-- `runtime.prefill_graph` defaults to `true` and covers serial offset-0 prefill only (not the ragged path); the legacy host-args MoE prefill and KV dtypes other than F16 / calibrated FP8 run eager (`engine_prefill.cpp`). Read `config.h`, not old comments. Every other prefill replays only its FFN/MoE phase from per-(layer, padded rows) graphs (`runtime.prefill_ffn_graph`, `exec/ffn_graph_cache.h`).
-- `kv_cache.swa_snapshot_mb` below one snapshot size disables prefix caching entirely, which is worse than 0.
-- Anything sized off free VRAM: pin `runtime.max_batch_size` for an A/B, or the arms differ.
+- `runtime.prefill_graph` (default `true`) covers serial offset-0 prefill only, not ragged. Eager: legacy host-args MoE prefill, KV dtypes other than F16 / calibrated FP8 (`engine_prefill.cpp`). Other prefills replay only FFN/MoE from per-(layer, padded rows) graphs (`runtime.prefill_ffn_graph`, `exec/ffn_graph_cache.h`). Source of truth: `config.h`.
+- `kv_cache.swa_snapshot_mb` below one snapshot disables prefix caching entirely (worse than 0).
+- A/B on anything sized off free VRAM: pin `runtime.max_batch_size`.
 
 ## Do not touch
 
-Generated config documentation: edit the inline comments in `config.h`, which are the source.
+Generated config docs: edit the inline comments in `config.h`.
 
 ## See also
 
-[`docs/internals/MEMORY.md`](../../docs/internals/MEMORY.md) (VRAM, ownership, lifetime), [`docs/DETERMINISM.md`](../../docs/DETERMINISM.md) (what reproducibility guarantees).
+[`docs/internals/MEMORY.md`](../../docs/internals/MEMORY.md) (VRAM, ownership, lifetime), [`docs/DETERMINISM.md`](../../docs/DETERMINISM.md).
