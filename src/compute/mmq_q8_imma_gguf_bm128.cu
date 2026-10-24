@@ -1,6 +1,6 @@
-// Dense GGUF IMMA kernel for prompt chunks above 32 rows (sm_120a): BM=128 x BN=128 tiles, K-steps of S
-// 32-K sub-blocks per barrier pair, B fragments decoded once per sub-block for 2 m-fragments. S per format:
-// Q5_K 4 (UD-Q4_K_M pp512 -4.1 %), IQ4_XS, Q8_0, IQ4_NL 2 (S = 4: +1.9 % / +1.6 % / +0.1 %); S-free math.
+// Dense GGUF IMMA kernel for prompt chunks above 32 rows (sm_120a): BM=128 x BN=128 tiles, K-steps of
+// S 32-K sub-blocks per barrier pair, A via ldmatrix.x4. B: Q8_0 decoded per warp, IQ3_S / IQ4 / Q5_K
+// once per CTA into a predecode tile (IQ4_XS gate 298.3 -> 270.6 us). S: Q5_K 4, others 2; S-free math.
 
 #include "compute/iq3s_grid.cuh"
 #include "compute/iq4_lut.cuh"
@@ -127,7 +127,6 @@ struct BigIQ3S : StepGeom<S> {
     static __device__ __forceinline__ int odd2(int ks) { return 2 * ((ks / G::kSpb) & 1); }
     // Sub-block kb as 32 s8 (word g = elements 4g..4g+3) into dst (16-B aligned); decoded once per CTA into
     // the predecode tile, one thread per (row, kb).
-    static constexpr int kDecRow = 96;  // 24 words: LDS.64 of 4 rl rows x 4 cl on distinct banks
     static __device__ __forceinline__ void decode_sub(const uint8_t* seg, int ks, int kb, uint32_t* dst,
                                                       const uint32_t* grid) {
         const int o = odd2(ks);
@@ -223,27 +222,87 @@ __device__ __forceinline__ uint2 b_of(const uint8_t* seg, int ks, int kb, int cl
         return F::bfrag(seg, kb, cl);
 }
 
-// Predecode (IQ3_S): the stage's B tile decoded once per CTA to s8 [kBN][kDecRow] after the scale pass,
-// instead of once per warp_m (4x codebook lookups: 563 / 630 us vs IQ4_XS 291 us at pp512).
+// Sub-block weight scale as staged in smem: (scale, min) for kMin formats, the scale alone otherwise.
 template <class F>
-inline constexpr bool kPredecode = kIsIQ3S<F>;
+__device__ __forceinline__ std::conditional_t<F::kMin, float2, float> scale_of(const uint8_t* seg, int ks,
+                                                                               int kb) {
+    if constexpr (F::kMin)
+        return F::scale(seg, ks, kb);
+    else
+        return F::scale(seg, ks, kb).x;
+}
+
+template <class F>
+inline constexpr bool kIsIQ4 = false;
+template <int S>
+inline constexpr bool kIsIQ4<BigIQ4XS<S>> = true;
+template <int S>
+inline constexpr bool kIsIQ4<BigIQ4NL<S>> = true;
+
+// Predecode (IQ3_S, IQ4_XS, IQ4_NL): the stage's B tile decoded once per CTA to s8 [kBN][kDecRow] after the
+// scale pass, instead of once per warp_m (4x codebook lookups: IQ3_S 563 / 630 us vs 406 / 457 us).
+template <class F>
+inline constexpr bool kPredecode = kIsIQ3S<F> || kIsIQ4<F> || kIsQ5K<F>;
+template <class F>
+inline constexpr int kDecRow = F::kSub == 2 ? 96 : 160;  // row mod 128 B in {32, 96}: LDS.64 conflict-free
 template <class F>
 constexpr size_t dec_bytes() {
-    if constexpr (kPredecode<F>)
-        return (static_cast<size_t>(kBN) * F::kDecRow) + sizeof(kIq3sGridLdg);
+    if constexpr (kIsIQ3S<F>)
+        return (static_cast<size_t>(kBN) * kDecRow<F>)+sizeof(kIq3sGridLdg);
+    else if constexpr (kPredecode<F>)
+        return static_cast<size_t>(kBN) * kDecRow<F>;
     else
         return 0;
 }
 
+// Sub-block kb of one row as the 4 lanes' (b0, b1) pairs, cl-major: dst[2 cl], dst[2 cl + 1] (16-B aligned).
+template <class F>
+__device__ __forceinline__ void predecode_sub(const uint8_t* seg, int ks, int kb, uint32_t* dst,
+                                              const uint32_t* grid) {
+    if constexpr (kIsIQ3S<F>) {
+        F::decode_sub(seg, ks, kb, dst, grid);
+    } else {
+        uint2 b[4];
+#pragma unroll
+        for (int cl = 0; cl < 4; ++cl)
+            b[cl] = b_of<F>(seg, ks, kb, cl);
+        reinterpret_cast<uint4*>(dst)[0] = make_uint4(b[0].x, b[0].y, b[1].x, b[1].y);
+        reinterpret_cast<uint4*>(dst)[1] = make_uint4(b[2].x, b[2].y, b[3].x, b[3].y);
+    }
+}
+
+// Lane (rl, cl) B fragment of sub-block kb: from the predecoded tile, else decoded from the staged segment.
+template <class F>
+__device__ __forceinline__ uint2 bfrag_at(const uint8_t* seg, const uint32_t* sDec, int brow, int ks, int kb,
+                                          int cl) {
+    if constexpr (kPredecode<F>)
+        return *reinterpret_cast<const uint2*>(sDec + (brow * (kDecRow<F> / 4)) + (kb * 8) + (2 * cl));
+    else
+        return b_of<F>(seg, ks, kb, cl);
+}
+
+// Weight scales of columns ncol, ncol + 1 (one row of the [sub-block][128] scale tile): one 8-B / 16-B load.
+__device__ __forceinline__ void bscale_at(const float* row, int ncol, float2& wl, float2& wh) {
+    const float2 s = *reinterpret_cast<const float2*>(row + ncol);
+    wl = make_float2(s.x, 0.0f);
+    wh = make_float2(s.y, 0.0f);
+}
+__device__ __forceinline__ void bscale_at(const float2* row, int ncol, float2& wl, float2& wh) {
+    const float4 s = *reinterpret_cast<const float4*>(row + ncol);
+    wl = make_float2(s.x, s.y);
+    wh = make_float2(s.z, s.w);
+}
+
 // One stage of dynamic smem: A [128][kARow] s8, B segments [128][kSegRow], A per-32 scales, A row sums
-// (kMin), B (scale, min) per sub-block. Every part is a multiple of 16 B.
+// (kMin), B [sub-block][128] scale (kMin: (scale, min)). Every part is a multiple of 16 B.
 template <class F>
 struct BigSmem {
     static constexpr size_t kA = static_cast<size_t>(kBM) * F::kARow;
     static constexpr size_t kB = static_cast<size_t>(kBN) * F::kSegRow;
     static constexpr size_t kAsc = static_cast<size_t>(kBM) * F::kSub * sizeof(__half);
     static constexpr size_t kArs = F::kMin ? static_cast<size_t>(kBM) * F::kSub * sizeof(float) : 0;
-    static constexpr size_t kBs = static_cast<size_t>(kBN) * F::kSub * sizeof(float2);
+    using BsT = std::conditional_t<F::kMin, float2, float>;
+    static constexpr size_t kBs = static_cast<size_t>(kBN) * F::kSub * sizeof(BsT);
     static constexpr size_t kStage = kA + kB + kAsc + kArs + kBs;
     static constexpr size_t kBytes = (kStages * kStage) + dec_bytes<F>();
 };
@@ -335,13 +394,14 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
         return reinterpret_cast<float (*)[kSub]>(smem + (s * L::kStage) + L::kA + L::kB + L::kAsc);
     };
     auto sBs = [&](int s) {
-        return reinterpret_cast<float2(*)[kSub]>(smem + (s * L::kStage) + L::kA + L::kB + L::kAsc + L::kArs);
+        return reinterpret_cast<typename L::BsT(*)[kBN]>(smem + (s * L::kStage) + L::kA + L::kB + L::kAsc +
+                                                         L::kArs);
     };
-    // Predecode: the IQ3_S codebook in smem after the decoded tile (cp.async.ca pieces share L1 with __ldg).
+    // IQ3_S: the codebook in smem after the decoded tile (cp.async.ca pieces share L1 with __ldg).
     [[maybe_unused]] uint32_t* sGrid = nullptr;
-    if constexpr (kPredecode<F>) {
+    if constexpr (kIsIQ3S<F>) {
         sGrid = reinterpret_cast<uint32_t*>(smem + (kStages * L::kStage) +
-                                            (static_cast<size_t>(kBN) * F::kDecRow));
+                                            (static_cast<size_t>(kBN) * kDecRow<F>));
         for (int i = tid; i < 512; i += kThreads)
             sGrid[i] = __ldg(&kIq3sGridLdg[i]);
     }
@@ -377,45 +437,39 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
         [[maybe_unused]] const auto stArs = sArs(stage);
         const auto stBs = sBs(stage);
         for (int i = tid; i < kBN * kSub; i += kThreads)
-            stBs[i / kSub][i % kSub] = F::scale(stB[i / kSub], ks, i % kSub);
+            stBs[i / kBN][i % kBN] = scale_of<F>(stB[i % kBN], ks, i / kBN);
         [[maybe_unused]] auto* sDec = reinterpret_cast<uint32_t*>(smem + (kStages * L::kStage));
         if constexpr (kPredecode<F>) {
-            constexpr int kDecW = F::kDecRow / 4;
+            constexpr int kDecW = kDecRow<F> / 4;
             for (int i = tid; i < kBN * kSub; i += kThreads) {  // (row, kb)
                 const int dw = ((i / kSub) * kDecW) + ((i % kSub) * 8);
-                F::decode_sub(stB[i / kSub], ks, i % kSub, sDec + dw, sGrid);
+                predecode_sub<F>(stB[i / kSub], ks, i % kSub, sDec + dw, sGrid);
             }
         }
         __syncthreads();
 #pragma unroll
         for (int kb = 0; kb < kSub; ++kb) {
             uint32_t b0[kNF], b1[kNF];
-            float2 wl[kNF], wh[kNF];
+            float2 wl[kNF], wh[kNF];  // .y: min term (kMin only)
 #pragma unroll
             for (int nf = 0; nf < kNF; ++nf) {
                 const int brow = (warp_n * kTileN) + (nf * 8) + rl;
-                uint2 b;
-                if constexpr (kPredecode<F>) {
-                    const int dw = (brow * (F::kDecRow / 4)) + (kb * 8) + (2 * cl);
-                    b = *reinterpret_cast<const uint2*>(sDec + dw);
-                } else {
-                    b = b_of<F>(stB[brow], ks, kb, cl);
-                }
+                const uint2 b = bfrag_at<F>(stB[brow], sDec, brow, ks, kb, cl);
                 b0[nf] = b.x;
                 b1[nf] = b.y;
-                const int ncol = (warp_n * kTileN) + (nf * 8) + (cl * 2);
-                wl[nf] = stBs[ncol][kb];
-                wh[nf] = stBs[ncol + 1][kb];
+                bscale_at(stBs[kb], (warp_n * kTileN) + (nf * 8) + (cl * 2), wl[nf], wh[nf]);
             }
 #pragma unroll
             for (int mf = 0; mf < kMF; ++mf) {
                 const int arow_lo = (warp_m * kTileM) + (mf * 16) + rl;
                 const int arow_hi = arow_lo + 8;
-                const int acol = (kb * 32) + (cl * 4);
-                const uint32_t a0 = *reinterpret_cast<const uint32_t*>(&stA[arow_lo][acol]);
-                const uint32_t a1 = *reinterpret_cast<const uint32_t*>(&stA[arow_hi][acol]);
-                const uint32_t a2 = *reinterpret_cast<const uint32_t*>(&stA[arow_lo][acol + 16]);
-                const uint32_t a3 = *reinterpret_cast<const uint32_t*>(&stA[arow_hi][acol + 16]);
+                // A: one ldmatrix.x4 = (rows 0-7, 8-15) x (k 0-15, 16-31) of the 16 x 32 fragment
+                uint32_t a0, a1, a2, a3;
+                {
+                    const int m = lane >> 3;
+                    const int row = (warp_m * kTileM) + (mf * 16) + (lane & 7) + ((m & 1) * 8);
+                    ldmatrix_x4(a0, a1, a2, a3, &stA[row][(kb * 32) + ((m >> 1) * 16)]);
+                }
                 const float da_lo = __half2float(stAsc[arow_lo][kb]);
                 const float da_hi = __half2float(stAsc[arow_hi][kb]);
                 [[maybe_unused]] float rs_lo = 0.0f, rs_hi = 0.0f;

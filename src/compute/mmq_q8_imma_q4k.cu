@@ -52,15 +52,6 @@ __device__ __forceinline__ void q4k_header_pass(int tid, int ks, const uint8_t (
     }
 }
 
-// Four 8x8 b16 tiles (8 rows x 16 B each); lane l addresses row (l & 7) of tile l >> 3.
-__device__ __forceinline__ void ldmatrix_x4(uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3,
-                                            const void* smem) {
-    const uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-                 : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3)
-                 : "r"(s));
-}
-
 template <int BM>
 __device__ __forceinline__ void load_kstep_q4k(int tid, const int8_t* __restrict__ A,
                                                const __half* __restrict__ Asc, const float* __restrict__ Ars,
