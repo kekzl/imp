@@ -379,6 +379,56 @@ __global__ void dequant_q5k_kernel(const uint8_t* __restrict__ src, half* __rest
     dst[idx] = __float2half(val);
 }
 
+// Block-centric Q4_K / Q5_K: one warp per super-block, 8 per 256-thread CTA, lane = 8 consecutive
+// elements of one 32-element sub-block (uint2 qs / qh loads, one uint4 store). Same products as the
+// element kernels; needs 16-B aligned src and dst (the dispatcher falls back otherwise).
+constexpr int kKqBlocksPerCta = 8;
+
+template <bool kQ5>
+__global__ void dequant_q45k_v2_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst,
+                                       int n_blocks) {
+    constexpr int kBytes = kQ5 ? 176 : 144;
+    constexpr int kQs = kQ5 ? 48 : 16;
+    const int64_t b = (static_cast<int64_t>(blockIdx.x) * kKqBlocksPerCta) + (threadIdx.x >> 5);
+    if (b >= n_blocks)
+        return;
+    const int lane = static_cast<int>(threadIdx.x) & 31;
+    const uint8_t* bp = src + (b * kBytes);
+    const int sub = lane >> 2;
+    const int in0 = (lane & 3) * 8;
+    const uint8_t* sc = bp + 4;
+    int s = 0, m = 0;
+    if (sub < 4) {
+        s = __ldg(sc + sub) & 63;
+        m = __ldg(sc + sub + 4) & 63;
+    } else {
+        s = (__ldg(sc + sub + 4) & 0xF) | ((__ldg(sc + sub - 4) >> 6) << 4);
+        m = (__ldg(sc + sub + 4) >> 4) | ((__ldg(sc + sub) >> 6) << 4);
+    }
+    const half2 dm = __ldg(reinterpret_cast<const half2*>(bp));
+    const float dl = __low2float(dm) * static_cast<float>(s);
+    const float ml = __high2float(dm) * static_cast<float>(m);
+    const int qs_off = kQs + ((sub >> 1) * 32) + in0;
+    const uint2 q = __ldg(reinterpret_cast<const uint2*>(bp + qs_off));
+    uint2 h = make_uint2(0u, 0u);
+    if constexpr (kQ5)
+        h = __ldg(reinterpret_cast<const uint2*>(bp + 16 + in0));
+    const int nshift = (sub & 1) * 4;
+    alignas(16) half out[8];
+#pragma unroll
+    for (int k = 0; k < 8; k++) {
+        const uint32_t qw = k < 4 ? q.x : q.y;
+        int v = static_cast<int>((qw >> ((8 * (k & 3)) + nshift)) & 0xFu);
+        if constexpr (kQ5) {
+            const uint32_t hw = k < 4 ? h.x : h.y;
+            v |= static_cast<int>((hw >> ((8 * (k & 3)) + sub)) & 1u) << 4;
+        }
+        out[k] = __float2half((dl * static_cast<float>(v)) - ml);
+    }
+    const int e0 = 8 * lane;
+    *reinterpret_cast<uint4*>(dst + (b * 256) + e0) = *reinterpret_cast<const uint4*>(out);
+}
+
 // Q2_K GPU dequant, super-block format (84 bytes per 256 elements): scales[16] 4-bit packed
 // (low nibble=scale, high nibble=min, 1 byte/16 elements), qs[64] 2-bit packed (4/byte),
 // d[2]/dmin[2] fp16 super-block scale/min. 16 sub-blocks of 16 elements; within each
@@ -499,6 +549,46 @@ __global__ void dequant_q3k_kernel(const uint8_t* __restrict__ src, half* __rest
 
     float val = d_all * static_cast<float>(sc_val - 32) * static_cast<float>(q3);
     dst[idx] = __float2half(val);
+}
+
+// Block-centric Q3_K: 8 super-blocks per 256-thread CTA staged to smem with u16 loads, one warp per
+// super-block, 8 consecutive elements per lane (one sub-block scale, one hmask bit, one uint4 store).
+// Same products as dequant_q3k_kernel; needs a 16-B aligned dst (the dispatcher falls back otherwise).
+__global__ void dequant_q3k_v2_kernel(const uint8_t* __restrict__ src, half* __restrict__ dst, int n_blocks) {
+    __shared__ uint16_t stage[kKqBlocksPerCta * 55];
+    const int64_t blk0 = static_cast<int64_t>(blockIdx.x) * kKqBlocksPerCta;
+    const int n_cta = min(kKqBlocksPerCta, static_cast<int>(n_blocks - blk0));
+    const auto* s16 = reinterpret_cast<const uint16_t*>(src + (blk0 * 110));
+    for (int i = static_cast<int>(threadIdx.x); i < n_cta * 55; i += static_cast<int>(blockDim.x))
+        stage[i] = __ldg(s16 + i);
+    __syncthreads();
+
+    const int w = static_cast<int>(threadIdx.x) >> 5;
+    const int lane = static_cast<int>(threadIdx.x) & 31;
+    if (w >= n_cta)
+        return;
+    const int stage_off = w * 110;
+    const auto* bp = reinterpret_cast<const uint8_t*>(stage) + stage_off;
+    const int in_grp0 = (lane & 3) * 8;  // element e0 = 8 * lane: half lane>>4, group (lane>>2)&3
+    const int shift = 2 * ((lane >> 2) & 3);
+    const int hbit = lane >> 2;  // hmask bit plane e0 / 32
+    const int sub = lane >> 1;   // 16-element sub-block
+    const int j = sub & 3;
+    const int lo = (bp[96 + (((sub >> 2) & 1) * 4) + j] >> (4 * (sub >> 3))) & 0xF;
+    const int hi = (bp[104 + j] >> (2 * (sub >> 2))) & 3;
+    const float dl = __half2float(*reinterpret_cast<const half*>(bp + 108)) *
+                     static_cast<float>((lo | (hi << 4)) - 32);
+    const int qs_off = 32 + ((lane >> 4) * 32) + in_grp0;
+    const uint8_t* qs = bp + qs_off;
+    const uint8_t* hm = bp + in_grp0;
+    alignas(16) half out[8];
+#pragma unroll
+    for (int k = 0; k < 8; k++) {
+        const int q3 = ((qs[k] >> shift) & 3) - (((hm[k] >> hbit) & 1) ? 0 : 4);
+        out[k] = __float2half(dl * static_cast<float>(q3));
+    }
+    const int e0 = 8 * lane;
+    *reinterpret_cast<uint4*>(dst + ((blk0 + w) * 256) + e0) = *reinterpret_cast<const uint4*>(out);
 }
 
 // IQ4_NL GPU dequant, block format (18 bytes per 32 elements): d[2] fp16 scale, qs[16]
@@ -702,6 +792,37 @@ void dequant_gpu(const void* src, void* dst, QType qtype, int rows, int cols, cu
             IMP_CUDA_CHECK_LAUNCH();
             break;
         }
+        case QType::Q3_K:
+        case QType::Q4_K:
+        case QType::Q5_K: {
+            // Warp-per-super-block kernels: Q3_K needs a 16-B dst, Q4_K / Q5_K also a 16-B src.
+            const auto* s8 = static_cast<const uint8_t*>(src);
+            auto* d16 = static_cast<half*>(dst);
+            const int n_blocks = rows * (cols / 256);
+            const int grid = (n_blocks + kKqBlocksPerCta - 1) / kKqBlocksPerCta;
+            const uintptr_t mis = reinterpret_cast<uintptr_t>(dst) |
+                                  (qtype == QType::Q3_K ? 0u : reinterpret_cast<uintptr_t>(src));
+            if ((mis & 15u) != 0 && qtype == QType::Q3_K) {
+                dequant_q3k_kernel<<<blocks, threads, 0, stream>>>(s8, d16, rows, cols);
+                IMP_CUDA_CHECK_LAUNCH();
+            } else if ((mis & 15u) != 0 && qtype == QType::Q4_K) {
+                dequant_q4k_kernel<<<blocks, threads, 0, stream>>>(s8, d16, rows, cols);
+                IMP_CUDA_CHECK_LAUNCH();
+            } else if ((mis & 15u) != 0) {
+                dequant_q5k_kernel<<<blocks, threads, 0, stream>>>(s8, d16, rows, cols);
+                IMP_CUDA_CHECK_LAUNCH();
+            } else if (qtype == QType::Q3_K) {
+                dequant_q3k_v2_kernel<<<grid, 256, 0, stream>>>(s8, d16, n_blocks);
+                IMP_CUDA_CHECK_LAUNCH();
+            } else if (qtype == QType::Q4_K) {
+                dequant_q45k_v2_kernel<false><<<grid, 256, 0, stream>>>(s8, d16, n_blocks);
+                IMP_CUDA_CHECK_LAUNCH();
+            } else {
+                dequant_q45k_v2_kernel<true><<<grid, 256, 0, stream>>>(s8, d16, n_blocks);
+                IMP_CUDA_CHECK_LAUNCH();
+            }
+            break;
+        }
 
             DEQUANT_CASE(Q8_0, dequant_q8_0_kernel)
             DEQUANT_CASE(Q4_0, dequant_q4_0_kernel)
@@ -709,9 +830,6 @@ void dequant_gpu(const void* src, void* dst, QType qtype, int rows, int cols, cu
             DEQUANT_CASE(Q5_0, dequant_q5_0_kernel)
             DEQUANT_CASE(Q5_1, dequant_q5_1_kernel)
             DEQUANT_CASE(Q2_K, dequant_q2k_kernel)
-            DEQUANT_CASE(Q3_K, dequant_q3k_kernel)
-            DEQUANT_CASE(Q4_K, dequant_q4k_kernel)
-            DEQUANT_CASE(Q5_K, dequant_q5k_kernel)
             DEQUANT_CASE(Q8_K, dequant_q8k_kernel)
             DEQUANT_CASE(IQ3_S, dequant_iq3_s_kernel)
             DEQUANT_CASE(IQ4_NL, dequant_iq4_nl_kernel)

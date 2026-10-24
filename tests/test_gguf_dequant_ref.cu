@@ -66,19 +66,20 @@ bool any_nan_inf(const std::vector<half>& v) {
 // -----------------------------------------------------------------------------
 // (1) DEQUANT KERNEL vs fp64 reference. Tolerance: f16-rounding only (1e-3 rel).
 // -----------------------------------------------------------------------------
-void check_dequant(const char* name, QType qt, int N, int K, ScaleMode mode, double rel_tol) {
+void check_dequant(const char* name, QType qt, int N, int K, ScaleMode mode, double rel_tol,
+                   int dst_off = 0) {
     Lcg g(0xC0FFEEu + static_cast<uint32_t>(qt) * 131 + mode * 977);
     std::vector<uint8_t> buf;
     format_spec(qt).build(buf, N, K, g, mode);
 
     void* dW = to_device(buf);
     half* dOut = nullptr;
-    cudaMalloc(&dOut, (size_t)N * K * sizeof(half));
-    dequant_gpu(dW, dOut, qt, N, K, nullptr);
+    cudaMalloc(&dOut, ((size_t)N * K + dst_off) * sizeof(half));
+    dequant_gpu(dW, dOut + dst_off, qt, N, K, nullptr);
     cudaDeviceSynchronize();
 
     std::vector<half> hOut((size_t)N * K);
-    cudaMemcpy(hOut.data(), dOut, (size_t)N * K * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hOut.data(), dOut + dst_off, (size_t)N * K * sizeof(half), cudaMemcpyDeviceToHost);
 
     std::vector<double> ref;
     ref_dequant_all(buf, N, K, qt, ref);
@@ -219,6 +220,15 @@ TYPED_TEST(GgufDequant, AllScaleModes) {
     check_dequant(name, qt, 16, 256, ZERO_D, 1e-3);
     check_dequant(name, qt, 16, 256, MAXMAG, 1e-3);
     check_dequant(name, qt, 8, 256, NAN_D, 1e-3);  // no-crash / UB guard
+}
+
+// Q3_K / Q4_K / Q5_K run 8 super-blocks per CTA with uint4 stores: 74 blocks leave a 2-block tail
+// CTA, a 2-B offset dst takes the element kernel.
+TEST(GgufDequantKQuants, TailCtaAndUnalignedDst) {
+    for (QType qt : {QType::Q3_K, QType::Q4_K, QType::Q5_K}) {
+        check_dequant(qtype_name(qt), qt, 37, 512, NORMAL, 1e-3, 8);
+        check_dequant(qtype_name(qt), qt, 37, 512, NORMAL, 1e-3, 1);
+    }
 }
 
 // Two-way: the typed suite covers exactly the formats dequant_gpu serves. A format with no
