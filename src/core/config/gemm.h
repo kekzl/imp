@@ -153,8 +153,8 @@ struct GEMM {
     std::string mxfp8_gdn_proj_prefill = "auto";
     // FP8 decode sidecar for full-precision attention projections (wq/wk/wv/wo),
     // same per-row-scale mechanism as fp8_ssm_proj, decode-only (M=1).
-    // "auto" = on only for gpt-oss (dense BF16 weights get no NVFP4 decode
-    // cache, so halving FP16 GEMV bytes matters most there). Other arches off pending a PPL gate.
+    // "auto" = on for gpt-oss and Qwen4Exp (dense BF16 weights get no NVFP4 decode
+    // cache). Other arches off pending a decode-path PPL gate (--prefill-chunk-size 1).
     std::string fp8_attn_proj = "auto";
     // Route native-NVFP4 MoE expert decode (M=1) through the fast per-expert
     // gemv_nvfp4_moe kernels (borrowing resident expert data+scales) instead of
