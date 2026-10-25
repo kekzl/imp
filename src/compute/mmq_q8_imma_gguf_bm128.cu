@@ -421,16 +421,14 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
     cp_async_commit();
     for (int ks = ks0; ks < ksteps; ++ks) {
         const int stage = (ks - ks0) & 1;
+        cp_async_wait_group<0>();
+        __syncthreads();  // step ks landed; every warp left step ks - 1, so stage ^ 1 and sDec are free
         if (ks + 1 < ksteps) {
             const int ns = stage ^ 1;
             load_step<F>(tid, X_s8, x_scale, x_rowsum, W, sA(ns), sAsc(ns), sArs(ns), sB(ns), base_m, M, K,
                          base_n, n_valid, ks + 1);
             cp_async_commit();
-            cp_async_wait_group<1>();
-        } else {
-            cp_async_wait_group<0>();
         }
-        __syncthreads();
         const auto stA = sA(stage);
         const auto stB = sB(stage);
         const auto stAsc = sAsc(stage);
@@ -500,7 +498,6 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_gguf_bm128_kernel(
                 }
             }
         }
-        __syncthreads();
     }
 
 #pragma unroll
