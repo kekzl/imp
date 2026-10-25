@@ -791,8 +791,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                             vram_alloc(vram_alloc_, ptr_count * sizeof(void*), "moe_stage_bptr"));
                         moe_.layer_stage_sfb_ptrs = static_cast<const void**>(
                             vram_alloc(vram_alloc_, ptr_count * sizeof(void*), "moe_stage_sfbptr"));
+                        const int n_layers = model_->config().n_layers;  // one alpha row per layer
                         moe_.layer_stage_alpha = static_cast<float*>(
-                            vram_alloc(vram_alloc_, ptr_count * sizeof(float), "moe_stage_alpha"));
+                            vram_alloc(vram_alloc_, ptr_count * n_layers * sizeof(float), "moe_stage_alpha"));
+                        moe_.layer_stage_alpha_filled.assign(n_layers, 0);
+                        moe_.layer_stage_ptr_sig.assign(ptr_count, {});
                         if (moe_.layer_stage_sf && moe_.layer_stage_b_ptrs &&
                             moe_.layer_stage_sfb_ptrs && moe_.layer_stage_alpha) {
                             moe_.layer_stage_sf_proj_bytes = sf_proj;
