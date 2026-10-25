@@ -212,7 +212,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
     paged_attention_arm_q8_epilogue(attn_out_q8_epilogue_ok_(will_fuse_o_residual, has_attn_output_gate,
                                                              cfg.is_mla()),
                                     qscratch_.q8_1_buf, qscratch_.d8_buf);
+    // Released wo at n <= 32: the beta = 0 FP8 row GEMV plus the residual add, not a per-call F16 rebuild.
+    const bool wo_released_small = n <= 32 && ly.wo_id != kInvalidTensorID &&
+                                   registry_.handle(ly.wo_id).source_released;
     bool will_fuse_o_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 && n > 1 &&
+                              !wo_released_small &&
                               (wo_tier == StorageTier::FP16 || wo_tier == StorageTier::FP8));
     // Dequant beta=1 path: when force_fp16_gemm bypasses FP8, dequant weights on-the-fly
     bool will_fuse_o_dequant_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 &&

@@ -932,10 +932,14 @@ static bool upload_mla_latent_norms(TransformerLayer& L, int i, const UploadCtx&
 
 static bool upload_layer_attention_weights(TransformerLayer& L, int i, const UploadCtx& ctx) {
     // Attention weights — try regular upload first, fall back to GPTQ dequant
+    std::optional<ReleasePoolScope> attn_scope;  // Phase 4b may free 16-bit q/k/v/o
+    if (L.wq.qtype == QType::F16 || L.wq.qtype == QType::BF16)
+        attn_scope.emplace(ReleasePool::AttnSources);
     UPLOAD_DENSE_OR_FAIL(L.wq, "wq", i, ctx);
     UPLOAD_DENSE_OR_FAIL(L.wk, "wk", i, ctx);
     UPLOAD_DENSE_OR_FAIL(L.wv, "wv", i, ctx);
     UPLOAD_DENSE_OR_FAIL(L.wo, "wo", i, ctx);
+    attn_scope.reset();
     // MLA (DeepSeek-V2/V3) latent-attention projections. UPLOAD_OR_FAIL no-ops when
     // tensor.data==nullptr (non-MLA layers) or already on device, so safe to call
     // unconditionally for every architecture. kv_a_layernorm uploads separately (QK-norm section).

@@ -159,6 +159,9 @@ private:
     void pre_dequant_phase3c_standalone_mxfp4_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase4_tensor_registry_(const ModelConfig& cfg, cudaStream_t stream);
     void pre_dequant_phase4b_drop_redundant_sources_(const ModelConfig& cfg, cudaStream_t stream);
+    // Phase 4b: free F16 q/k/v/o with an FP8 row-scale sidecar (host-resident experts), returns the count.
+    int release_f16_attn_sources_(const ModelConfig& cfg, cudaStream_t stream);
+    [[nodiscard]] bool ensure_released_scratch_(size_t bytes);
     // Phase 4b: the source of an FP8 or NVFP4 served LM head, freed through the phase's one free site.
     void release_lm_head_source_(cudaStream_t stream, const std::function<void(Tensor&)>& free_source);
     // Phase 4c (gemm.q8_drop_source): pin the IMMA planes of dense Q8_0 weights, free their source.
