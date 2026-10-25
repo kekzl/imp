@@ -4,14 +4,16 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.59.0] - 2026-10-25
+
 ### Changed
-- Host-expert NVFP4 prefill uploads its staging pointer and alpha tables once instead of per expert block, and converts scales only for routed experts (bit-identical). Qwen3.8-Flash-Next pp32 272.6-275.6 -> 255.1 ms with a cold cache, server TTFT over 6 prompts 301.7 -> 295.0 ms.
-- Qwen3.8-Flash-Next frees its F16 attention projections (1140 MiB): prefill rebuilds them from the FP8 decode sidecar, the expert cache takes the bytes (396 -> 423 slots/layer). Server decode over 6 prompts 148.4 -> 150.3 tok/s, TTFT 316.4 -> 292.2 ms, prefill PPL 5.0131 -> 5.0057, decode-path PPL unchanged.
-- Qwen3.8-Flash-Next decodes its FP16 attention projections from the FP8 sidecar (`gemm.fp8_attn_proj=auto` now covers Qwen4Exp): server decode over 6 prompts 143.50 -> 149.87 tok/s, decode-path PPL 5.0246 -> 5.0285.
-- GGUF prompt GEMMs (IMMA, above 32 rows) run 2 instead of 3 barriers per K-step: the next stage loads after the first one. Qwen3.8-27B-UD-Q4_K_M IMMA kernel sum 1202.4 -> 1194.4 ms, pp512 4201-4237 -> 4229-4258 tok/s.
-- GGUF prompt GEMMs (IMMA, above 32 rows): IQ4_XS / IQ4_NL / Q5_K weights are decoded once per CTA instead of once per warp, A loads by ldmatrix. Qwen3.8-27B-UD-Q4_K_M pp512 4003-4031 -> 4178-4203 tok/s (llama.cpp 4179), IQ4_XS gate 298.3 -> 270.6 us, PPL 5.0059 both.
-- GGUF IQ3_S runs native (dp4a decode, IMMA prompt GEMMs: 564 -> 406-457 us at pp512), Q3_K GEMVs read words (verify rows 95.4 -> 38.6 us), FP16-cached GGUF weights at 2..32 rows run in place. Qwen3.8-27B-UD-Q4_K_M MTP imp-cli 136.0-136.7 -> 142.5-142.8 tok/s, tg128 +0.74 %, -191 MiB, PPL 5.0068 -> 5.0059.
-- GGUF Q3_K / Q4_K / Q5_K dequant runs one warp per super-block (uint4 stores): 17408 x 5120 Q3_K 482.6 -> 146.8 us, Q5_K 204.7 -> 116.7 us. Qwen3.8-27B-UD-Q4_K_M at a 24 GB budget (no FP16 cache, dequant on every prompt GEMM) pp512 3887-3889 -> 3956-3963 tok/s; 32 GB neutral.
+- Host-expert NVFP4 prefill uploads its staging pointer and alpha tables once instead of per expert block, and converts scales only for routed experts (bit-identical). Qwen3.8-Flash-Next pp32 272.6-275.6 -> 255.1 ms with a cold cache, server TTFT over 6 prompts 301.7 -> 295.0 ms (#2878).
+- Qwen3.8-Flash-Next frees its F16 attention projections (1140 MiB): prefill rebuilds them from the FP8 decode sidecar, the expert cache takes the bytes (396 -> 423 slots/layer). Server decode over 6 prompts 148.4 -> 150.3 tok/s, TTFT 316.4 -> 292.2 ms, prefill PPL 5.0131 -> 5.0057, decode-path PPL unchanged (#2877).
+- Qwen3.8-Flash-Next decodes its FP16 attention projections from the FP8 sidecar (`gemm.fp8_attn_proj=auto` now covers Qwen4Exp): server decode over 6 prompts 143.50 -> 149.87 tok/s, decode-path PPL 5.0246 -> 5.0285 (#2876).
+- GGUF prompt GEMMs (IMMA, above 32 rows) run 2 instead of 3 barriers per K-step: the next stage loads after the first one. Qwen3.8-27B-UD-Q4_K_M IMMA kernel sum 1202.4 -> 1194.4 ms, pp512 4201-4237 -> 4229-4258 tok/s (#2875).
+- GGUF prompt GEMMs (IMMA, above 32 rows): IQ4_XS / IQ4_NL / Q5_K weights are decoded once per CTA instead of once per warp, A loads by ldmatrix. Qwen3.8-27B-UD-Q4_K_M pp512 4003-4031 -> 4178-4203 tok/s (llama.cpp 4179), IQ4_XS gate 298.3 -> 270.6 us, PPL 5.0059 both (#2874).
+- GGUF IQ3_S runs native (dp4a decode, IMMA prompt GEMMs: 564 -> 406-457 us at pp512), Q3_K GEMVs read words (verify rows 95.4 -> 38.6 us), FP16-cached GGUF weights at 2..32 rows run in place. Qwen3.8-27B-UD-Q4_K_M MTP imp-cli 136.0-136.7 -> 142.5-142.8 tok/s, tg128 +0.74 %, -191 MiB, PPL 5.0068 -> 5.0059 (#2872).
+- GGUF Q3_K / Q4_K / Q5_K dequant runs one warp per super-block (uint4 stores): 17408 x 5120 Q3_K 482.6 -> 146.8 us, Q5_K 204.7 -> 116.7 us. Qwen3.8-27B-UD-Q4_K_M at a 24 GB budget (no FP16 cache, dequant on every prompt GEMM) pp512 3887-3889 -> 3956-3963 tok/s; 32 GB neutral (#2873).
 
 ## [0.58.0] - 2026-10-24
 
