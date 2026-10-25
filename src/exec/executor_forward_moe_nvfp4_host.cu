@@ -241,28 +241,9 @@ bool GraphExecutor::stage_nvfp4_layer_(int layer, cudaStream_t stream,
             continue;
         char* sf_base = static_cast<char*>(moe_.layer_stage_sf) +
                         (static_cast<size_t>(p) * moe_.layer_stage_sf_proj_bytes);
-        convert_nvfp4_moe_scales_to_sfatom(ms_dst, sf_base, ne, static_cast<int>(N),
-                                           static_cast<int>(K), stream);
-
-        std::vector<const void*> hb(ne), hsfb(ne);
-        std::vector<float> halpha(ne);
-        for (int e = 0; e < ne; ++e) {
-            hb[e] = packed_dst + (static_cast<size_t>(e) * pb);
-            hsfb[e] = sf_base + (static_cast<size_t>(e) * sf_expert);
-            halpha[e] = experts[e].tensor_scale;
-        }
-        const size_t off = static_cast<size_t>(p) * moe_.layer_stage_ptr_stride;
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_b_ptrs + off),
-                                           static_cast<const void*>(hb.data()),
-                                           static_cast<size_t>(ne) * sizeof(const void*),
-                                           cudaMemcpyHostToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_sfb_ptrs + off),
-                                           static_cast<const void*>(hsfb.data()),
-                                           static_cast<size_t>(ne) * sizeof(const void*),
-                                           cudaMemcpyHostToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_alpha + off, halpha.data(),
-                                           static_cast<size_t>(ne) * sizeof(float),
-                                           cudaMemcpyHostToDevice, stream));
+        convert_nvfp4_moe_scales_to_sfatom(ms_dst, sf_base, ne, static_cast<int>(N), static_cast<int>(K),
+                                           stream, expert_offsets);
+        stage_ptrs_(p, 0, ne, packed_dst, pb, sf_base, sf_expert, stream);
         // The pointer arrays are filled from stack vectors, so this call is
         // not graph-capturable - which is fine, graphs are already off under
         // host-resident experts.
@@ -318,26 +299,56 @@ bool GraphExecutor::stage_nvfp4_block_(int layer, int e0, int n, int p0, int p1,
         char* sf_base = static_cast<char*>(moe_.layer_stage_sf) +
                         (static_cast<size_t>(z) * moe_.layer_stage_sf_proj_bytes);
         convert_nvfp4_moe_scales_to_sfatom(ms_dst, sf_base, n, static_cast<int>(N), static_cast<int>(K),
-                                           stream);
-
-        std::vector<const void*> hb(n), hsfb(n);
-        std::vector<float> halpha(n);
-        for (int i = 0; i < n; ++i) {
-            hb[i] = packed_dst + (static_cast<size_t>(i) * pb);
-            hsfb[i] = sf_base + (static_cast<size_t>(i) * sf_expert);
-            halpha[i] = experts[e0 + i].tensor_scale;
-        }
-        const size_t off = (static_cast<size_t>(p) * moe_.layer_stage_ptr_stride) + e0;
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_b_ptrs + off),
-                                           static_cast<const void*>(hb.data()), n * sizeof(const void*),
-                                           cudaMemcpyHostToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_sfb_ptrs + off),
-                                           static_cast<const void*>(hsfb.data()), n * sizeof(const void*),
-                                           cudaMemcpyHostToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.layer_stage_alpha + off, halpha.data(), n * sizeof(float),
-                                           cudaMemcpyHostToDevice, stream));
+                                           stream, expert_offsets ? expert_offsets + e0 : nullptr);
+        stage_ptrs_(p, e0, n, packed_dst, pb, sf_base, sf_expert, stream);
     }
     return true;
+}
+
+// B / SFB pointers of experts [e0, e0 + n) of projection p, staged at packed / sf: a pure function of
+// the staging layout, so uploaded only when it differs from the last upload for that span.
+void GraphExecutor::stage_ptrs_(int p, int e0, int n, const char* packed, size_t pb, const char* sf,
+                                size_t sfe, cudaStream_t stream) {
+    const size_t off = (static_cast<size_t>(p) * moe_.layer_stage_ptr_stride) + e0;
+    const MoEWorkspace::StagePtrSig sig{packed, sf, pb, sfe, n};
+    if (off < moe_.layer_stage_ptr_sig.size() && moe_.layer_stage_ptr_sig[off] == sig)
+        return;
+    std::vector<const void*> hb(n), hsfb(n);
+    for (int i = 0; i < n; ++i) {
+        hb[i] = packed + (static_cast<size_t>(i) * pb);
+        hsfb[i] = sf + (static_cast<size_t>(i) * sfe);
+    }
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_b_ptrs + off),
+                                       static_cast<const void*>(hb.data()), n * sizeof(const void*),
+                                       cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<void*>(moe_.layer_stage_sfb_ptrs + off),
+                                       static_cast<const void*>(hsfb.data()), n * sizeof(const void*),
+                                       cudaMemcpyHostToDevice, stream));
+    if (off < moe_.layer_stage_ptr_sig.size())
+        moe_.layer_stage_ptr_sig[off] = sig;
+}
+
+// Alpha row of `layer` ([kExpertProjCount * n_experts] tensor scales, fixed after load), uploaded
+// on the layer's first staging.
+float* GraphExecutor::stage_alpha_row_(int layer, cudaStream_t stream) {
+    if (!moe_.layer_stage_alpha)
+        return nullptr;
+    const size_t stride = static_cast<size_t>(moe_.layer_stage_ptr_stride);
+    float* row = moe_.layer_stage_alpha + (static_cast<size_t>(layer) * kExpertProjCount * stride);
+    if (layer >= static_cast<int>(moe_.layer_stage_alpha_filled.size()) ||
+        moe_.layer_stage_alpha_filled[layer])
+        return row;
+    const auto& ly = model_->layer(layer);
+    const std::vector<Tensor>* projs[kExpertProjCount] = {&ly.expert_w_gate, &ly.expert_w_up,
+                                                          &ly.expert_w_down};
+    std::vector<float> h(kExpertProjCount * stride, 1.0f);
+    for (int p = 0; p < kExpertProjCount; ++p)
+        for (size_t e = 0; e < std::min(stride, projs[p]->size()); ++e)
+            h[(p * stride) + e] = (*projs[p])[e].tensor_scale;
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpyAsync(row, h.data(), h.size() * sizeof(float), cudaMemcpyHostToDevice, stream));
+    moe_.layer_stage_alpha_filled[layer] = 1;
+    return row;
 }
 
 bool GraphExecutor::run_staged_blocks_(int layer, cudaStream_t stream, const MoeFfnContext& ctx,
@@ -381,6 +392,8 @@ bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, Moe
                             nvfp4_host_experts_servable(ly.expert_w_down) &&
                             (ctx.non_gated_experts || nvfp4_host_experts_servable(ly.expert_w_gate)) &&
                             static_cast<int>(ly.expert_w_up.size()) <= moe_.layer_stage_ptr_stride;
+        if (ctx.staged_blocks)
+            ctx.staged_alpha = stage_alpha_row_(layer, stream);
         return ctx.staged_blocks;
     }
     if (!ctx.staged_done && ctx.n > 1 && moe_.layer_stage_buf)
@@ -389,6 +402,7 @@ bool GraphExecutor::stage_layer_for_prefill_(int layer, cudaStream_t stream, Moe
             ctx.staged);
     if (!dispatch_policy().moe.staged_cutlass_prefill || !ctx.staged_done)
         return false;
+    ctx.staged_alpha = stage_alpha_row_(layer, stream);
     const auto ready = [&](ExpertProj p) { return ctx.staged[std::to_underlying(p)].cutlass_ready; };
     return ready(ExpertProj::Up) && ready(ExpertProj::Down) &&
            (ctx.non_gated_experts || ready(ExpertProj::Gate));
@@ -402,7 +416,7 @@ bool GraphExecutor::build_staged_device_args_(
     const MoeFfnContext& ctx, bool non_gated,
     MoEWorkspace::PerLayerNvfp4DeviceArgsCache& out) const {
     if (!dispatch_policy().moe.staged_cutlass_prefill || !(ctx.staged_done || ctx.staged_blocks) ||
-        !moe_.layer_stage_b_ptrs || moe_.layer_stage_ptr_stride <= 0)
+        !moe_.layer_stage_b_ptrs || moe_.layer_stage_ptr_stride <= 0 || !ctx.staged_alpha)
         return false;
     const auto ready = [&](ExpertProj p) { return ctx.staged[std::to_underlying(p)].cutlass_ready; };
     if (!ctx.staged_blocks &&
@@ -413,13 +427,13 @@ bool GraphExecutor::build_staged_device_args_(
     const auto at = [&](ExpertProj p) { return static_cast<size_t>(std::to_underlying(p)) * stride; };
     out.d_gate_B_ptrs = moe_.layer_stage_b_ptrs + at(ExpertProj::Gate);
     out.d_gate_SFB_ptrs = moe_.layer_stage_sfb_ptrs + at(ExpertProj::Gate);
-    out.d_gate_alpha = moe_.layer_stage_alpha + at(ExpertProj::Gate);
+    out.d_gate_alpha = ctx.staged_alpha + at(ExpertProj::Gate);
     out.d_up_B_ptrs = moe_.layer_stage_b_ptrs + at(ExpertProj::Up);
     out.d_up_SFB_ptrs = moe_.layer_stage_sfb_ptrs + at(ExpertProj::Up);
-    out.d_up_alpha = moe_.layer_stage_alpha + at(ExpertProj::Up);
+    out.d_up_alpha = ctx.staged_alpha + at(ExpertProj::Up);
     out.d_down_B_ptrs = moe_.layer_stage_b_ptrs + at(ExpertProj::Down);
     out.d_down_SFB_ptrs = moe_.layer_stage_sfb_ptrs + at(ExpertProj::Down);
-    out.d_down_alpha = moe_.layer_stage_alpha + at(ExpertProj::Down);
+    out.d_down_alpha = ctx.staged_alpha + at(ExpertProj::Down);
     out.ready = true;
     return true;
 }

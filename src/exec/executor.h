@@ -1284,6 +1284,10 @@ private:
     [[nodiscard]] bool run_staged_blocks_(int layer, cudaStream_t stream, const MoeFfnContext& ctx,
                             const std::function<bool(ExpertProj, int, int)>& gemm,
                             const std::function<void()>& act_quantize);
+    // Staging tables uploaded once: B / SFB pointers per layout span, the alpha row per layer.
+    void stage_ptrs_(int p, int e0, int n, const char* packed, size_t pb, const char* sf, size_t sfe,
+                     cudaStream_t stream);
+    float* stage_alpha_row_(int layer, cudaStream_t stream);
 
 public:
     // Throws when a MoE layer's NVFP4 experts are host-resident and nothing

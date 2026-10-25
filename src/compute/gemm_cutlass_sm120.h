@@ -48,8 +48,9 @@ size_t cutlass_nvfp4_sf_size(int rows, int K);
 // MoE-fused scale conversion: native row-major UE4M3 [ne,N,K/16] -> SfAtom layout UE4M3
 // [ne, cutlass_nvfp4_sf_size(N,K)]. Single launch (grid.y=ne) so 128-expert layers don't pay
 // 128x kernel-launch overhead. Caller pre-allocates dst sized ne*cutlass_nvfp4_sf_size(N,K).
-void convert_nvfp4_moe_scales_to_sfatom(const void* src_native_ms, void* dst_sfatom_sf, int ne, int N,
-                                        int K, cudaStream_t stream);
+// expert_offsets (ne + 1 prefix sums): experts without rows keep their bytes unconverted.
+void convert_nvfp4_moe_scales_to_sfatom(const void* src_native_ms, void* dst_sfatom_sf, int ne, int N, int K,
+                                        cudaStream_t stream, const int32_t* expert_offsets = nullptr);
 
 // Quantizes FP16 activation [M,K] to NVFP4 CUTLASS block-scaled format. dst_data: [M,K/2]
 // packed FP4; dst_sf: SfAtom UE4M3 scales. Warns once at shutdown if any micro-block clipped

@@ -411,3 +411,10 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 |---|---|---|
 | B-60 | DONE | Phase 4b frees F16 q/k/v/o with an FP8 row-scale sidecar when experts are host-resident (`release_f16_attn_sources_`, pool `ReleasePool::AttnSources`): 48 projections, 1140.0 MiB, expert cache 396 -> 423 slots/layer (server), 475 -> 500 (bench). imp-server, 6 sequential prompts x 400 tokens, A/B/A/B: decode 147.98 / 148.87 -> 150.20 / 150.38 tok/s, hits 87.3 -> 88.1 %, TTFT mean 316.4 -> 292.2 ms; the one prompt with identical text 137.27 -> 140.19. PPL ppl_4k deterministic: prefill 5.0131 -> 5.0057, decode path 5.0285 / 5.0285. Bench pp512 1204.13-1213.18 -> 1270.68-1274.01, tg128 118.97-119.28 -> 115.19-115.26 (hits 93.8 -> 92.5 %: greedy text differs). 4 concurrent requests 143.4 / 144.4 -> 143.2 / 143.2 tok/s |
 | B-60 open | OPEN | Gather (PCIe) stays the largest per-token block; next VRAM for the cache: the server's KV ceiling reserve, the vision arena (`runtime.no_vision`, 1079 MiB) |
+
+## 2026-10-25 Batch 44: B-61 Qwen3.8-Flash-Next TTFT
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-61 | DONE | Staging tables uploaded once (`stage_ptrs_`, `stage_alpha_row_`), scale conversion only for routed experts, 16 grid-stride blocks per expert, no memset without SfAtom padding. Bit-identical (PPL ppl_4k 5.0057 / 5.0057). Bench pp32 cold cache (`--max-tokens 4`) 272.61-275.56 -> 255.12 ms, warm (`--max-tokens 128`) 157.32-176.48 -> 138.68-138.85 ms, pp512 396.04 / 399.22 -> 385.76-392.95 ms. imp-server, 6 prompts: TTFT mean 301.7 -> 295.0 ms (without the cold first request 292.8 -> 281.6), decode 150.95 / 150.46 -> 150.08 / 150.27 tok/s |
+| B-61 open | OPEN | A cold pp32 prefill (nsys) is 81 % `expert_stage_touched_range_kernel`: 14967 touched projections, 16.9 % resident in the expert cache, 10.9 GB over PCIe at ~50 GB/s. Left: GEMMs 12 ms, scale conversion 10 ms, GPU idle 25 ms per prefill. Below the PCIe floor only with fewer bytes: CPU computing part of the missing experts from host RAM in parallel, or prefetching the next layer's experts from a pre-gate prediction |

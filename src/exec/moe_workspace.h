@@ -166,7 +166,18 @@ struct MoEWorkspace {
     size_t layer_stage_sf_size = 0;
     const void** layer_stage_b_ptrs = nullptr;    // [kExpertProjCount * n_experts]
     const void** layer_stage_sfb_ptrs = nullptr;  // [kExpertProjCount * n_experts]
-    float* layer_stage_alpha = nullptr;           // [kExpertProjCount * n_experts]
+    float* layer_stage_alpha = nullptr;           // [n_layers][kExpertProjCount * n_experts]
+    // Pointer arrays and alpha rows depend only on the staging layout and the load-time tensor
+    // scales: uploaded once (pageable H2D per block cost ~1800 copies per Flash-Next prefill).
+    std::vector<uint8_t> layer_stage_alpha_filled;  // [n_layers]
+    struct StagePtrSig {
+        const void* packed = nullptr;
+        const void* sf = nullptr;
+        size_t pb = 0, sfe = 0;
+        int n = 0;
+        bool operator==(const StagePtrSig&) const = default;
+    };
+    std::vector<StagePtrSig> layer_stage_ptr_sig;  // [kExpertProjCount * n_experts], keyed by first expert
 
     // Slot indices for the host-offload decode path: [3 * kDevExpertMaxRows * top_k] int32, one block per
     // projection (gate, up, down). Fused MoE decode kernels address an expert as

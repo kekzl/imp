@@ -63,6 +63,8 @@ struct MoeFfnContext {
     // Chunked staging (moe.stage_expert_chunks > 1): the CUTLASS dispatch stages expert blocks
     // itself, gate+up then down; `staged` stays empty, so a legacy fallback runs unstaged.
     bool staged_blocks = false;
+    // This layer's alpha row in MoEWorkspace::layer_stage_alpha, set with staged_done / staged_blocks.
+    float* staged_alpha = nullptr;
 };
 
 // Implies phase 7 takes the token-centric fused scatter, the only scatter adding scatter_down_bias.
