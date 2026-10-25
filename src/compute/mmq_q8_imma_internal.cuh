@@ -117,7 +117,7 @@ constexpr size_t q5k_smem_bytes(int BM) {
             static_cast<size_t>(BM) * 2 * sizeof(float) + static_cast<size_t>(kBN) * 2 * sizeof(__half2));
 }
 
-// Q4_K raw kernel: 128-K step (4 sub-blocks, 3 barriers per 16 MMAs per warp, #2441).
+// Q4_K raw kernel: 128-K step (4 sub-blocks, 2 barriers per 16 MMAs per warp, #2441).
 constexpr int kQ4kBK = 128;
 constexpr int kQ4kSub = kQ4kBK / 32;
 constexpr int kQ4kRow = kQ4kBK + kPad;  // 144-B stride: rl-lane A reads conflict-free

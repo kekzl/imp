@@ -16,7 +16,7 @@ namespace {
 // Q4_K RAW-read kernel: reads GGUF 144-B super-blocks directly, zero extra weight VRAM
 // (plane-repack duplicated all expert weights, hit 32-GB wall on Qwen3-30B MoE: pp512
 // 8x slower under UVM paging). One 128-wide K-step = 4 sub-blocks = two 32-byte nibble groups
-// per B row (sub-block pair = low/high nibbles), 3 barriers per 16 MMAs per warp (#2441);
+// per B row (sub-block pair = low/high nibbles), 2 barriers per 16 MMAs per warp (#2441);
 // B-fragment fetch = one u32 load + shift/mask/vsub4.
 // alpha/beta computed from staged 16-B block headers after tile lands (alpha=d*sc6,
 // beta=8*alpha-dmin*m6; same algebra as mmq_q4k_imma_reorder, see mmq_q4k_imma_layout.h).
@@ -217,16 +217,14 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q4k_raw_kernel(
 
     for (int ks = ks_begin; ks < ksteps; ++ks) {
         const int stage = (ks - ks_begin) & 1;
+        cp_async_wait_group<0>();
+        __syncthreads();  // step ks landed; every warp left step ks - 1, so stage ^ 1 is free
         if (ks + 1 < ksteps) {
             const int nstage = stage ^ 1;
             load_kstep_q4k<BM>(tid, A, Asc, Ars, W, base_n, sblk_count, sA[nstage], sBq[nstage], sBh[nstage],
                                sAsc[nstage], sArs[nstage], base_m, rows, K, subs, (ks + 1) * kQ4kBK, n_rem);
             cp_async_commit();
-            cp_async_wait_group<1>();
-        } else {
-            cp_async_wait_group<0>();
         }
-        __syncthreads();
 
         q4k_header_pass(tid, ks, sBh[stage], sBab[stage]);
         __syncthreads();
@@ -299,7 +297,6 @@ __global__ void __launch_bounds__(kThreads) mmq_imma_q4k_raw_kernel(
                 }
             }
         }
-        __syncthreads();
     }
 
     q4k_store_tile<BETA1, SPLITK, kMF, kNF>(acc, C, split_out + (SPLITK ? blockIdx.z * size_t{1} * M * N : 0),
