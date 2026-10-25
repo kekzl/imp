@@ -537,6 +537,45 @@ void QuantPipeline::free_source_(Tensor& t, cudaStream_t stream) {
     const_cast<Model*>(model_)->free_source_weight(t, stream);
 }
 
+// F16 rebuild target of released_source_gemm_, grown to the largest released weight.
+bool QuantPipeline::ensure_released_scratch_(size_t bytes) {
+    if (wcache_->released_f16_scratch_bytes < bytes) {
+        vram_free(vram_alloc_, wcache_->released_f16_scratch);
+        wcache_->released_f16_scratch = vram_alloc(vram_alloc_, bytes, "released_f16_scratch");
+        wcache_->released_f16_scratch_bytes = wcache_->released_f16_scratch ? bytes : 0;
+    }
+    return wcache_->released_f16_scratch != nullptr;
+}
+
+// F16 q/k/v/o with an FP8 row-scale decode sidecar (gemm.fp8_attn_proj): M = 1 reads the sidecar either
+// way, prefill rebuilds from it. Called with host-resident experts only, where the expert cache takes the
+// bytes (Flash-Next: 48 projections, 1140 MiB).
+int QuantPipeline::release_f16_attn_sources_(const ModelConfig& cfg, cudaStream_t stream) {
+    auto* mut_model = const_cast<Model*>(model_);
+    int released = 0;
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        auto& L = mut_model->layer(i);
+        for (auto [t, id] : {std::pair{&L.wq, L.wq_id}, std::pair{&L.wk, L.wk_id}, std::pair{&L.wv, L.wv_id},
+                             std::pair{&L.wo, L.wo_id}}) {
+            if (!t->data || t->dropped_source || t->qtype != QType::F16 || t->ndim != 2 ||
+                id == kInvalidTensorID || !mut_model->is_base_gpu_allocation(t->data) ||
+                registry_->handle(id).source_data != t->data)
+                continue;
+            const auto e = wcache_->fp8.find(t->data);
+            const size_t bytes = qtype_row_bytes(t->qtype, t->shape[1]) * static_cast<size_t>(t->shape[0]);
+            if (e == wcache_->fp8.end() || e->second.d_row_scales == nullptr || e->second.native_source ||
+                !ensure_released_scratch_(bytes))
+                continue;
+            wcache_->released_fp8_view[t->data] = e->second;
+            wcache_->dropped_attn_bytes += bytes;
+            registry_->handle(id).source_released = true;
+            free_source_(*t, stream);
+            ++released;
+        }
+    }
+    return released;
+}
+
 // Free a GGUF source allocation only when NO path still reads it: try_mark frees a
 // source iff it's a base allocation AND not present in wcache_->nvfp4 /
 // wcache_->cutlass_nvfp4. Decode-cached weights ARE present there (M>1 prefill still
@@ -611,7 +650,8 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
     int dropped_packs = 0, released_layers = 0;
     auto pools_reserved = [] {
         return release_on_free_pool_reserved(ReleasePool::GdnPacks) +
-               release_on_free_pool_reserved(ReleasePool::GdnSources);
+               release_on_free_pool_reserved(ReleasePool::GdnSources) +
+               release_on_free_pool_reserved(ReleasePool::AttnSources);
     };
     const size_t pool_before = pools_reserved();
     for (int i = 0; i < cfg.n_layers; ++i) {
@@ -636,14 +676,9 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         if (!(host_experts || wcache_->gdn_fp8rows) || !copies || !releasable(L.ssm_in, L.ssm_in_id) ||
             !releasable(L.gdn_gate, L.gdn_gate_id) || !releasable(L.ssm_out, L.ssm_out_id))
             continue;
-        const size_t largest = std::max({bytes_of(L.ssm_in), bytes_of(L.gdn_gate), bytes_of(L.ssm_out)});
-        if (wcache_->released_f16_scratch_bytes < largest) {
-            vram_free(vram_alloc_, wcache_->released_f16_scratch);
-            wcache_->released_f16_scratch = vram_alloc(vram_alloc_, largest, "gdn_released_f16_scratch");
-            wcache_->released_f16_scratch_bytes = wcache_->released_f16_scratch ? largest : 0;
-            if (!wcache_->released_f16_scratch)
-                break;
-        }
+        if (!ensure_released_scratch_(
+                std::max({bytes_of(L.ssm_in), bytes_of(L.gdn_gate), bytes_of(L.ssm_out)})))
+            break;
         // Pack rows: [0, conv_channels) ssm_in, then inner rows of gdn_gate.
         auto pack_rows = [&](const Tensor& t, int64_t row0) {
             FP8CacheEntry view = pk->second;
@@ -665,21 +700,25 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         }
         ++released_layers;
     }
-    if (wcache_->dropped_gdn_bytes > 0) {
+    const int released_attn = host_experts ? release_f16_attn_sources_(cfg, stream) : 0;
+    if (wcache_->dropped_gdn_bytes + wcache_->dropped_attn_bytes > 0) {
         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         // A threshold-0 pool releases at the sync above; the default pool needs the trim.
         const size_t pool_released = pool_before - std::min(pool_before, pools_reserved());
         // Minus what the release costs (rebuild scratch, and the MXFP8 copies "auto" builds for
         // it), so every later allocation sees the same free VRAM as without the release.
-        const size_t released = std::min(wcache_->dropped_gdn_bytes, pool_released + trim_device_mempool());
+        const size_t dropped = wcache_->dropped_gdn_bytes + wcache_->dropped_attn_bytes;
+        const size_t released = std::min(dropped, pool_released + trim_device_mempool());
         const size_t price = wcache_->released_f16_scratch_bytes +
                              (released_layers > 0 ? wcache_->cutlass_mxfp8_prefill_bytes : 0);
-        wcache_->dropped_gdn_released_bytes = released - std::min(released, price);
-        IMP_LOG_INFO("Phase-4b: freed %d F16 GDN input packs and the F16 in/gate/out of %d layers "
-                     "(%.1f MiB; %.1f MiB back to the driver, %.1f MiB to the expert cache after the "
-                     "rebuild scratch and MXFP8 copies)",
-                     dropped_packs, released_layers, wcache_->dropped_gdn_bytes / (1024.0 * 1024.0),
-                     released / (1024.0 * 1024.0), wcache_->dropped_gdn_released_bytes / (1024.0 * 1024.0));
+        wcache_->dropped_released_bytes = released - std::min(released, price);
+        IMP_LOG_INFO(
+            "Phase-4b: freed %d F16 GDN input packs, the F16 in/gate/out of %d layers (%.1f MiB) and "
+            "%d F16 attention projections (%.1f MiB); %.1f MiB back to the driver, %.1f MiB to the "
+            "expert cache after the rebuild scratch and MXFP8 copies",
+            dropped_packs, released_layers, wcache_->dropped_gdn_bytes / (1024.0 * 1024.0), released_attn,
+            wcache_->dropped_attn_bytes / (1024.0 * 1024.0), released / (1024.0 * 1024.0),
+            wcache_->dropped_released_bytes / (1024.0 * 1024.0));
     }
     if (mut_model->out_proj_id != kInvalidTensorID)
         try_mark(mut_model->out_proj_, mut_model->out_proj_id);

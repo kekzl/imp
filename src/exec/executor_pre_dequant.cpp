@@ -37,7 +37,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 // packs. It is still empty here (the device tables and the first request come later), so it
 // is re-created with those bytes on top: everything allocated after sees the same free VRAM.
 void GraphExecutor::regrow_expert_cache_() {
-    const size_t freed = wcache_.dropped_gdn_released_bytes + wcache_.lm_head_released_bytes;
+    const size_t freed = wcache_.dropped_released_bytes + wcache_.lm_head_released_bytes;
     if (expert_cache_budget_ == 0 || expert_cache_.n_slots_ == 0)
         return;
     // Native-NVFP4 host experts also take measured free VRAM beyond the KV ceiling: prefill copies
@@ -68,10 +68,10 @@ void GraphExecutor::regrow_expert_cache_() {
     }
     expert_cache_budget_ = budget;
     IMP_LOG_INFO(
-        "Expert LRU cache: %d -> %d slots/layer with %.1f MiB (freed weights %.1f: GDN %.1f, LM head %.1f; "
-        "free beyond the KV ceiling %.1f)",
+        "Expert LRU cache: %d -> %d slots/layer with %.1f MiB (freed weights %.1f: GDN + attention %.1f, "
+        "LM head %.1f; free beyond the KV ceiling %.1f)",
         before, expert_cache_.slots_per_layer_, grow / (1024.0 * 1024.0), freed / (1024.0 * 1024.0),
-        wcache_.dropped_gdn_released_bytes / (1024.0 * 1024.0),
+        wcache_.dropped_released_bytes / (1024.0 * 1024.0),
         wcache_.lm_head_released_bytes / (1024.0 * 1024.0), slack / (1024.0 * 1024.0));
 }
 

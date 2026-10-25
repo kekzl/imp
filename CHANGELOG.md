@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- Qwen3.8-Flash-Next frees its F16 attention projections (1140 MiB): prefill rebuilds them from the FP8 decode sidecar, the expert cache takes the bytes (396 -> 423 slots/layer). Server decode over 6 prompts 148.4 -> 150.3 tok/s, TTFT 316.4 -> 292.2 ms, prefill PPL 5.0131 -> 5.0057, decode-path PPL unchanged.
 - Qwen3.8-Flash-Next decodes its FP16 attention projections from the FP8 sidecar (`gemm.fp8_attn_proj=auto` now covers Qwen4Exp): server decode over 6 prompts 143.50 -> 149.87 tok/s, decode-path PPL 5.0246 -> 5.0285.
 - GGUF prompt GEMMs (IMMA, above 32 rows) run 2 instead of 3 barriers per K-step: the next stage loads after the first one. Qwen3.8-27B-UD-Q4_K_M IMMA kernel sum 1202.4 -> 1194.4 ms, pp512 4201-4237 -> 4229-4258 tok/s.
 - GGUF prompt GEMMs (IMMA, above 32 rows): IQ4_XS / IQ4_NL / Q5_K weights are decoded once per CTA instead of once per warp, A loads by ldmatrix. Qwen3.8-27B-UD-Q4_K_M pp512 4003-4031 -> 4178-4203 tok/s (llama.cpp 4179), IQ4_XS gate 298.3 -> 270.6 us, PPL 5.0059 both.

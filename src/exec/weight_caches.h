@@ -98,10 +98,12 @@ struct WeightCaches {
     // MTP draft-only NVFP4 copy of a 16-bit head served as FP8 (speculative.mtp_nvfp4_head): the chain reads
     // the head once per draft, 682 vs 1213 MiB on Qwen3.8-27B. Verify keeps the FP8 head. Empty = absent.
     NvFP4QuantResult mtp_lm_head_nvfp4;
-    // GDN bytes Phase 4b freed (F16 input packs; with host-resident experts also the F16
-    // ssm_in / gdn_gate / ssm_out) and what of them reached the driver: the expert cache grows by it.
+    // Bytes Phase 4b freed: GDN (F16 input packs; with host-resident experts also the F16
+    // ssm_in / gdn_gate / ssm_out), F16 q/k/v/o with host-resident experts, and what of them
+    // reached the driver net of the rebuild scratch: the expert cache grows by it.
     size_t dropped_gdn_bytes = 0;
-    size_t dropped_gdn_released_bytes = 0;
+    size_t dropped_attn_bytes = 0;
+    size_t dropped_released_bytes = 0;
     // gemm.mxfp8_gdn_proj_prefill resolved to fp8rows: prefill reads the FP8 sidecar rows, so
     // Phase 4b frees the F16 in/gate/out with VRAM-resident experts too.
     bool gdn_fp8rows = false;
