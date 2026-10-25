@@ -36,11 +36,11 @@ imp and vLLM read the same NVFP4 checkpoint, llama.cpp the Q4_K_M GGUF. On that 
 
 ### Qwen3.8-Flash-Next: four times bigger than the card
 
-The 123.6 GiB checkpoint does not fit in 32 GB. imp keeps its 56.25 GiB of experts in host RAM and caches the busiest ones on the card: **87.89-98.57 tokens/s** on one RTX 5090 with ~62 GiB of free RAM, reading a 512-token prompt at 1094.74-1096.10 tokens/s ([quickstart](#quickstart-qwen38-flash-next)).
+The 123.6 GiB checkpoint does not fit in 32 GB. imp keeps its 56.25 GiB of experts in host RAM and caches the busiest ones on the card: **120.19-120.70 tokens/s** on one RTX 5090 with ~62 GiB of free RAM, reading a 512-token prompt at 1210.81-1236.79 tokens/s ([quickstart](#quickstart-qwen38-flash-next)).
 
-<!-- [PROV: commit=54921da6 date=2026-10-11 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.2
+<!-- [PROV: commit=b9b22c2e+B-59 date=2026-10-25 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3
        path=host-resident-experts cmd=`imp-cli --bench --bench-pp 512 --bench-reps 3 --max-tokens 128
-       --bench-prompt-file novel_prose_2026.txt` n=2 processes note=real-text prompt, imp defaults; 56.25 GiB =
+       --bench-prompt-file novel_prose_2026.txt` n=3 processes note=real-text prompt, imp defaults (FP8 attention decode sidecar, B-59); 56.25 GiB =
        load log `NVFP4 experts (56.25 GiB) do not fit`, main 62431977] -->
 
 **tokens/s** = how fast the answer appears (a token is about ¾ of a word). Six more models against llama.cpp on the same GGUF file, and every other comparison: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).

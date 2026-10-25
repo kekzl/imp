@@ -64,7 +64,8 @@ ModelProfile derive_model_profile(const Model& model, const ModelConfig& cfg) {
     p.moe_expert_bias_glu = is_gpt_oss;
     p.moe_router_logit_bias = is_gpt_oss;
     p.experts_convert_at_predequant = is_gpt_oss;
-    p.fp8_attn_proj_full = is_gpt_oss;
+    // Flash-Next: FP16 q/k/v/o, decode 143.50 -> 149.87 tok/s, decode-path PPL 5.0246 -> 5.0285.
+    p.fp8_attn_proj_full = is_gpt_oss || cfg.arch == ModelArch::QWEN4_EXP;
     p.residual_rescale_in_scales = is_gpt_oss;
 
     p.deny_cublas_fp16_acc = p.is_gemma3 || is_gemma4 || is_gpt_oss;

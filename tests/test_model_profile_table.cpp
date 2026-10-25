@@ -106,8 +106,10 @@ TEST(ModelProfileTable, ArchKeyedFieldsAndSwaWindows) {
               p.v_rmsnorm, p.rope_full_head_dim, p.unit_softmax_scale, p.outlier_sensitive_logits})
             EXPECT_EQ(t, r->gemma4);
         for (bool t : {p.learned_attn_sinks, p.moe_expert_bias_glu, p.moe_router_logit_bias,
-                       p.experts_convert_at_predequant, p.fp8_attn_proj_full, p.residual_rescale_in_scales})
+                       p.experts_convert_at_predequant, p.residual_rescale_in_scales})
             EXPECT_EQ(t, r->gpt_oss);
+        // FP16 attention projections decode from the FP8 sidecar: gpt-oss and Flash-Next.
+        EXPECT_EQ(p.fp8_attn_proj_full, r->gpt_oss || arch == ModelArch::QWEN4_EXP);
         EXPECT_EQ(p.deny_cublas_fp16_acc, r->gemma3 || r->gemma4 || r->gpt_oss);
         EXPECT_EQ(p.is_llama4, r->llama4);
         EXPECT_EQ(p.is_encoder, r->encoder);

@@ -805,7 +805,8 @@ nvfp4_gdn_proj_prefill = "in"
 mxfp8_gdn_proj_prefill = "auto"
 # FP8 E4M3 decode sidecar for FULL-PRECISION attention projections, same
 # per-row-scale mechanism as fp8_ssm_proj, decode-only (#984).
-# "auto" = full q/k/v/o on gpt-oss only (BF16 dense projections have no NVFP4
+# "auto" = full q/k/v/o on gpt-oss and Qwen4Exp (Flash-Next: decode +4.4 %, decode-path
+# PPL 5.0246 -> 5.0285) (gpt-oss: BF16 dense projections have no NVFP4
 # decode cache and were 33.5% of the decode window as FP16 GEMVs; measured
 # +12.1% decode, teacher-forced PPL unaffected by construction). "qo" = only
 # the q/o projections (~76% of the bytes, conservative middle mode), "on" =

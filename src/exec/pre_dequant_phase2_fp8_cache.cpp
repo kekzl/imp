@@ -247,7 +247,7 @@ void QuantPipeline::pre_dequant_phase2b_fp8_ssm_sidecar_(const ModelConfig& cfg,
                                                          cudaStream_t stream) {
     const bool ssm_on = dispatch_policy().gemm.fp8_ssm_proj;
     // gemm.fp8_attn_proj (#984): decode-only per-row-scale sidecar for full-precision
-    // attention projections. "auto" = q/k/v/o on gpt-oss only (its BF16 dense projections get
+    // attention projections. "auto" = q/k/v/o on gpt-oss and Qwen4Exp (BF16 dense projections get
     // no NVFP4 decode cache and decode as FP16 GEMVs). Teacher-forced PPL is unaffected by
     // construction (no FP8 GEMV kernels run during --perplexity). "qo" restricts the sidecar
     // to q/o as a conservative middle mode; "on" forces full q/k/v/o for any full-precision

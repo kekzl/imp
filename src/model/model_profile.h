@@ -44,7 +44,7 @@ struct ModelProfile {
     bool moe_expert_bias_glu = false;            // per-expert gate/up/down bias + clamped GLU
     bool moe_router_logit_bias = false;          // linear router bias before softmax/top-k
     bool experts_convert_at_predequant = false;  // MXFP4 experts stay on host until NVFP4 convert
-    bool fp8_attn_proj_full = false;             // gemm.fp8_attn_proj=auto caches q/k/v/o
+    bool fp8_attn_proj_full = false;             // gemm.fp8_attn_proj=auto caches q/k/v/o (gpt-oss, Qwen4Exp)
     bool residual_rescale_in_scales = false;     // embed_scale folded into NVFP4 Wo/down scales
     // Gemma-3, Gemma-4, gpt-oss today:
     bool deny_cublas_fp16_acc = false;  // FP16 residual overflow: cublas_fp16_acc=auto -> off
