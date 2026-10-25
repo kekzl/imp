@@ -61,7 +61,7 @@ services:
       retries: 10
 
   open-webui:
-    image: ghcr.io/open-webui/open-webui:v0.12.3@sha256:a537bbe1e6b428820f52ed4a029d7fff97062e24d5cf32c365fba36fd0542def
+    image: ghcr.io/open-webui/open-webui:v0.12.4@sha256:a5b9e403d19154796850679c8c5d1295301cee954be8b84ddd62af92426558f7
     restart: unless-stopped
     ports:
       - "${WEBUI_PORT:-3000}:8080"
@@ -104,7 +104,7 @@ services:
         condition: service_healthy
 
   prometheus:
-    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+    image: prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
     restart: unless-stopped
     ports:
       - "${PROMETHEUS_PORT:-9090}:9090"
