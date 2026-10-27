@@ -5,7 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
-- Tooling drops the stale CUDA images: `make kernel-resources` and its preflight row run `cuobjdump` from `$(DEV_IMG)` (13.4.3) instead of a leftover 13.4.2 `imp:builder`; `Dockerfile.ciq` builds on `imp:toolchain` instead of the gone 13.3 `imp:builder-133`, `cupy-cuda12x` -> `cupy-cuda13x`.
+- Tooling drops the stale CUDA images: `make kernel-resources` and its preflight row run `cuobjdump` from `$(DEV_IMG)` (13.4.3) instead of a leftover 13.4.2 `imp:builder`; `Dockerfile.ciq` builds on `imp:toolchain` instead of the gone 13.3 `imp:builder-133`, `cupy-cuda12x` -> `cupy-cuda13x` (#2890).
 
 ## [0.59.2] - 2026-10-27
 
