@@ -5,11 +5,15 @@
 // normalization -> TrailingSlashBase fails.
 
 #include "model_name_policy.h"
+#include "model_scan.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <string>
+#include <vector>
 
 namespace {
 
@@ -87,6 +91,55 @@ TEST_F(PathWithin, TraversalIsResolvedBeforeTheCompare) {
 
 TEST_F(PathWithin, TrailingSlashBase) {
     EXPECT_TRUE(path_within(base_.string() + "/", base_ / "sub" / "m.gguf"));
+}
+
+// #2884: one bad entry under --models-dir threw filesystem_error out of scan_model_files and
+// /v1/models answered 500. Mutation: drop the error_code in is_safetensors_dir or in the
+// entry's is_directory() -> LoopingSymlinkDoesNotHideTheRest throws.
+class ModelScan : public ::testing::Test {
+protected:
+    void SetUp() override {
+        base_ = std::filesystem::temp_directory_path() / "imp_scan_test";
+        std::filesystem::remove_all(base_);
+        std::filesystem::create_directories(base_ / "a-model");
+        std::ofstream(base_ / "a-model" / "model.safetensors") << "x";
+        std::filesystem::create_directories(base_ / "z-model");
+        std::ofstream(base_ / "z-model" / "model.safetensors.index.json") << "{}";
+        std::ofstream(base_ / "m.gguf") << "x";
+    }
+    void TearDown() override {
+        std::error_code ec;
+        std::filesystem::permissions(base_ / "locked", std::filesystem::perms::owner_all, ec);
+        std::filesystem::remove_all(base_, ec);
+    }
+    std::vector<std::string> names() const {
+        std::vector<std::string> out;
+        for (const auto& [name, path] : imp_server::scan_model_files(base_.string()))
+            out.push_back(name);
+        return out;
+    }
+    std::filesystem::path base_;
+};
+
+TEST_F(ModelScan, ListsGgufAndSafetensorsDirs) {
+    EXPECT_EQ(names(), (std::vector<std::string>{"a-model", "m.gguf", "z-model"}));
+}
+
+TEST_F(ModelScan, LoopingSymlinkDoesNotHideTheRest) {
+    // ELOOP on stat, independent of the user (root bypasses permission bits, not loops).
+    std::filesystem::create_symlink(base_ / "loop", base_ / "loop");
+    EXPECT_FALSE(imp::is_safetensors_dir((base_ / "loop").string()));
+    EXPECT_EQ(names(), (std::vector<std::string>{"a-model", "m.gguf", "z-model"}));
+}
+
+TEST_F(ModelScan, UnreadableDirectoryDoesNotHideTheRest) {
+    // As root the directory stays readable and the list is the same: the assertion holds either way.
+    std::filesystem::create_directories(base_ / "locked" / "inner");
+    std::ofstream(base_ / "locked" / "inner" / "model.safetensors") << "x";
+    std::filesystem::permissions(base_ / "locked", std::filesystem::perms::none);
+    const auto got = names();
+    for (const char* want : {"a-model", "m.gguf", "z-model"})
+        EXPECT_NE(std::find(got.begin(), got.end(), want), got.end()) << want;
 }
 
 }  // namespace

@@ -2,6 +2,7 @@
 #include "handlers.h"
 #include "handlers_internal.h"
 #include "model_name_policy.h"
+#include "model_scan.h"
 #include "request_field_types.h"
 #include "utils.h"
 #include "tool_call.h"
@@ -182,64 +183,7 @@ void handle_ready(const httplib::Request& /*req*/, httplib::Response& res, Serve
     res.set_content(dump_safe(body), "application/json");
 }
 
-namespace {
-// Recursively find all model files in a directory, returning (display_name, full_path) pairs.
-// Finds both .gguf files and SafeTensors directories (containing model.safetensors[.index.json]).
-// Resolves symlinks and rejects any path that escapes the base directory (path traversal).
-std::vector<std::pair<std::string, std::string>> scan_model_files(const std::string& dir) {
-    std::vector<std::pair<std::string, std::string>> results;
-    if (dir.empty())
-        return results;
-    std::error_code ec;
-    auto base = std::filesystem::canonical(dir, ec);
-    if (ec)
-        return results;
-    std::string base_prefix = base.string() + "/";
-
-    for (auto it = std::filesystem::recursive_directory_iterator(dir, ec);
-         it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
-        if (ec)
-            break;
-        const auto& entry = *it;
-        const auto& path = entry.path();
-        // Hidden entries (".flash-next-lm-only", ".cache") are scratch, not models: /v1/models
-        // listed them and a client's picker offered them.
-        if (!path.filename().empty() && path.filename().string()[0] == '.') {
-            if (entry.is_directory())
-                it.disable_recursion_pending();
-            continue;
-        }
-        // GGUF files
-        if ((entry.is_regular_file() || entry.is_symlink()) && path.extension() == ".gguf" &&
-            !path.string().contains(".no_exist")) {
-            std::error_code ec2;
-            auto real = std::filesystem::canonical(path, ec2);
-            if (ec2)
-                continue;
-            std::string real_str = real.string();
-            if (!real_str.starts_with(base_prefix))
-                continue;
-            results.emplace_back(path.filename().string(), real_str);
-        }
-        // SafeTensors directories (check for index or single file)
-        if (entry.is_directory()) {
-            std::string dpath = path.string();
-            if (imp::is_safetensors_dir(dpath)) {
-                std::error_code ec2;
-                auto real = std::filesystem::canonical(path, ec2);
-                if (ec2)
-                    continue;
-                std::string real_str = real.string();
-                if (!real_str.starts_with(base_prefix))
-                    continue;
-                results.emplace_back(path.filename().string(), real_str);
-            }
-        }
-    }
-    std::sort(results.begin(), results.end());
-    return results;
-}
-}  // namespace
+using imp_server::scan_model_files;
 
 void handle_models(const httplib::Request& /*req*/, httplib::Response& res, ServerState& state) {
     json data = json::array();

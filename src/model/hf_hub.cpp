@@ -126,14 +126,13 @@ std::string resolve_model_gguf(const std::string& model_id, const std::string& r
 }
 
 bool is_safetensors_dir(const std::string& dir) {
-    if (!fs::is_directory(dir))
+    // Non-throwing: an unreadable or looping entry is "not a model" (#2884: one mode-700 dir
+    // under --models-dir threw filesystem_error out of /v1/models).
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec) || ec)
         return false;
-
-    if (fs::exists(dir + "/model.safetensors") ||
-        fs::exists(dir + "/model.safetensors.index.json")) {
-        return true;
-    }
-    return false;
+    return fs::exists(dir + "/model.safetensors", ec) ||
+           fs::exists(dir + "/model.safetensors.index.json", ec);
 }
 
 std::string resolve_model_auto(const std::string& model_id, ImpModelFormat& out_format,
