@@ -1,6 +1,6 @@
 // WSL2/WDDM viability spike for CUDA VMM APIs (docs/internals/MEMORY.md A3.1, the hard gate
 // on A7 step 7 for the growable KV block pool). No imp dependencies.
-// Build+run: docker run --rm --gpus all -v $PWD:/w -w /w imp:builder bash -lc
+// Build+run: docker run --rm --gpus all -v $PWD:/w -w /w imp:toolchain bash -lc
 // 'nvcc -O2 -arch=sm_120a -o /tmp/vmm_probe tools/analysis/vmm_wsl2_probe.cu -lcuda && /tmp/vmm_probe'.
 // Checks: VA reserve costs no physical memory; commit/map in 256MiB granules matches
 // cudaMemGetInfo; base address invariant across grow/shrink (I3); data survives

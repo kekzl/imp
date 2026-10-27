@@ -143,8 +143,8 @@ if want kernels; then
     [ -z "$KRES_LIB" ] && [ -f build-dev/libimp.a ] && KRES_LIB=build-dev/libimp.a
     if [ -z "$KRES_LIB" ]; then
         echo "  (skipped: no libimp.a — run 'make dev' or 'make build' first)"
-    elif ! command -v cuobjdump >/dev/null 2>&1 && ! docker image inspect imp:builder >/dev/null 2>&1; then
-        echo "  (skipped: no cuobjdump and no imp:builder image)"
+    elif ! command -v cuobjdump >/dev/null 2>&1 && ! docker image inspect "${DEV_IMG:-imp:toolchain}" >/dev/null 2>&1; then
+        echo "  (skipped: no cuobjdump and no ${DEV_IMG:-imp:toolchain} image)"
     else
         run "registers + local frame vs the pin" make -s kernel-resources
     fi

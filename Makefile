@@ -662,7 +662,7 @@ check-alloc-pairs:
 # Per-kernel registers and local frame on sm_120a (#1549). cuobjdump reads the
 # BUILT artifact, so this needs no GPU and no special build flags - but it does
 # need the CUDA toolkit: local cuobjdump when on PATH (dev toolchain image, no
-# docker CLI), else docker run imp:builder (#2238). Uses build-dev
+# docker CLI), else docker run $(DEV_IMG) (#2238). Uses build-dev
 # (make dev) when present, build (make build) otherwise. Also reads
 # libimp_test_kernels.a (test-only probe/bench kernels) when the build has tests.
 KERNEL_RES_DIR = $$(test -f build/libimp.a && echo build || echo build-dev)
@@ -674,7 +674,7 @@ kernel-resources-dump:
 	  if command -v cuobjdump >/dev/null 2>&1; then \
 	    cuobjdump -res-usage "$$f" 2>/dev/null || exit $$?; \
 	  else \
-	    docker run --rm --entrypoint bash -v $(PWD):/src imp:builder -c \
+	    docker run --rm --entrypoint bash -v $(PWD):/src $(DEV_IMG) -c \
 	      "/usr/local/cuda/bin/cuobjdump -res-usage /src/$$f 2>/dev/null" || exit $$?; \
 	  fi; \
 	done

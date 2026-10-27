@@ -251,7 +251,7 @@ logical_lines() {
 declare -A IMG_DIGEST      # "repo:tag" -> digest, first sighting
 declare -A IMG_WHERE
 # Built locally (make, tools/analysis), never pulled. Explicit: a new imp:* tag is red until listed.
-LOCAL_IMAGES=" imp:latest imp:ciq imp:builder-133 scratch "
+LOCAL_IMAGES=" imp:latest imp:ciq imp:toolchain scratch "
 n_images=0
 check_image_ref() {  # file line ref
     local file="$1" line="$2" ref="$3"
