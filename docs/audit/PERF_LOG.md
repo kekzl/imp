@@ -4,6 +4,21 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-10-27 · Qwen3.8-Flash-Next server decode: three rate definitions on one run (v0.59.0 notes corrected)
+
+Protocol: `ghcr.io/kekzl/imp:latest` v0.59.0, README `docker run`, `tools/analysis/decode_rate_methods.py`: the 6 prompts of `seq_stream_client.py`, 400 greedy tokens, `ignore_eos`, thinking at the model default (~200 reasoning deltas, ~197 content deltas per request). Raw: `docs/audit/launch_2026_10_27/decode_rate_methods_flashnext.txt`.
+
+| definition | median tok/s | per prompt |
+|---|---:|---|
+| A: completion tokens / time from the first delta of any kind | **90.24** | 88.17-94.69 |
+| C: content deltas / time from the first content delta | **91.91** | 87.28-99.86 |
+| B: completion tokens / time from the first content delta | 187.10 | 177.68-203.28 |
+
+- Thinking and answer phase decode at the same rate (A = C within 2 %); the v0.59.0 notes' 143.50 -> 150.3 tok/s (#2876, #2877) matches no correct definition, B shows the size of a clock that skips the thinking phase. The client behind those figures is not in the tree.
+- v0.59.0 release title and first highlight corrected on GitHub the same day; CHANGELOG `[Unreleased]` carries the correction.
+
+---
+
 ## 2026-10-27 · MTP one stream, imp vs vLLM 0.31.0: the "vLLM leads with MTP" row is refuted
 
 Protocol: `tools/analysis/mtp_vs_vllm.sh`, Qwen3.8-27B-NVFP4-vllm, fresh server per arm, one warm request, then `seq_stream_client.py`: 6 real chat prompts x 400 greedy tokens x 2 rounds, identical text for both engines (`conc_client.py` puts the arm tag into every prompt), decode tok/s = median per request; spec counters from `/metrics` around the timed rounds. imp `--max-concurrent 1 --set runtime.max_batch_size=1 --set speculative.mtp_k=K`, vLLM `--max-num-seqs 1 --speculative-config {"method":"mtp","num_speculative_tokens":K}`. Raw: `docs/audit/launch_2026_10_27/mtp_vs_vllm_*.txt`.

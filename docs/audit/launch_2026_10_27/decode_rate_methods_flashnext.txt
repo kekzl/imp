@@ -1,0 +1,9 @@
+prose    tokens 400 reasoning_deltas 201 content_deltas 197  A   94.69  B  203.28  C   99.86
+code     tokens 400 reasoning_deltas 201 content_deltas 197  A   90.85  B  190.68  C   93.67
+chat     tokens 400 reasoning_deltas 201 content_deltas 197  A   89.82  B  185.57  C   91.16
+math     tokens 400 reasoning_deltas 200 content_deltas 197  A   88.17  B  180.38  C   88.61
+debug    tokens 400 reasoning_deltas 201 content_deltas 197  A   89.79  B  177.68  C   87.28
+summary  tokens 400 reasoning_deltas 201 content_deltas 197  A   90.66  B  188.62  C   92.66
+MEDIAN A 90.24  MEAN A 90.66
+MEDIAN B 187.10  MEAN B 187.70
+MEDIAN C 91.91  MEAN C 92.20

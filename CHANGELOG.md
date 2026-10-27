@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- Qwen3.8-Flash-Next server decode in the v0.59.0 notes (143.50 -> 150.3 tok/s, #2876, #2877) does not reproduce: the v0.59.0 image reads 90.24 (all tokens) and 91.91 (answer only) tok/s over 6 chat prompts x 400 tokens; only thinking tokens counted against answer-only time reach 187. Release title corrected.
+
 ## [0.59.1] - 2026-10-27
 
 ### Added
