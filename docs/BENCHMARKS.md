@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-12
-commit: 95a448b7
+verified: 2026-10-27
+commit: 48f0058b
 -->
 
 # Benchmarks
@@ -132,24 +132,24 @@ imp also wins TTFT/pp512 outright (2.1-3.4x, vLLM has a flat-cost small-M regime
 
 ## Qwen3.8-27B, three engines
 
-Fresh server per arm, each engine on its defaults (imp `--max-concurrent N --set runtime.max_batch_size=N`,
-vLLM `--max-num-seqs N --max-model-len 16384`, llama.cpp `-ngl 999 -fa on -np N -c N*4096`), 300-token
-greedy answers with `ignore_eos`, aggregate = completion tokens / wall, values = the two trial medians.
+Fresh server per arm, engine defaults (imp `--max-concurrent N --set runtime.max_batch_size=N`, vLLM `--max-num-seqs N --max-model-len 16384`, llama.cpp `-ngl 999 -fa on -np N -c N*4096`), 300-token greedy answers, `ignore_eos`, completion tokens / wall, median of 3 trials (range).
 
-[PROV: commit=54921da6 date=2026-10-11 hw=RTX5090 model=Qwen3.8-27B quant=per-row cuda=13.4.2
-       path=server-api cmd=`tools/analysis/engine3_conc.sh` n=2 trials x 3 waves note=vllm/vllm-openai:v0.31.0
-       sha256 c1c9f6fd, ghcr.io/ggml-org/llama.cpp:server-cuda sha256 9d835c2f, GGUF ggml-org Q4_K_M sha256 c600de03]
+[PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-27B quant=per-row cuda=13.4.3 path=server-api cmd=`tools/analysis/engine3_conc.sh`
+       n=3 trials x 3 waves note=imp ghcr v0.59.0 sha256 7a52810d, vllm/vllm-openai:v0.31.0 sha256 c1c9f6fd, llama.cpp server-cuda sha256 9d835c2f,
+       GGUF ggml-org Q4_K_M; raw logs docs/audit/launch_2026_10_27/]
 
-| engine | checkpoint | 1 stream tok/s | 32 streams tok/s |
-|---|---|---:|---:|
-| imp | Qwen3.8-27B-NVFP4-vllm | **91.0 / 93.7** | **1977.0 / 1963.5** |
-| vLLM 0.31.0 | Qwen3.8-27B-NVFP4-vllm | 70.0 / 68.9 | 1449.4 / 1354.8 |
-| llama.cpp | Qwen3.8-27B-Q4_K_M.gguf | 63.0 / 61.8 | 166.8 / 162.0 |
-| imp `95a448b7` (2026-10-12) | Qwen3.8-27B-Q4_K_M.gguf | **72.7 / 73.4** | **244.4 / 240.0** |
+| engine | checkpoint | speculative decoding | 1 stream tok/s | 32 streams tok/s |
+|---|---|---|---:|---:|
+| imp v0.59.0 | Qwen3.8-27B-NVFP4-vllm | off (`speculative.mtp_k=0 speculative.ngram=false`) | **96.3** (95.4-96.4) | - |
+| imp v0.59.0 | Qwen3.8-27B-NVFP4-vllm | default: MTP k=2 at 1 stream, none at 32 | 116.2 (113.9-121.8) | **1979.1** (1978.6-1980.1) |
+| vLLM 0.31.0 | Qwen3.8-27B-NVFP4-vllm | default: none | 69.9 (68.7-70.4) | 1414.2 (1404.7-1415.6) |
+| vLLM 0.31.0 | Qwen3.8-27B-NVFP4-vllm | MTP k=2 (`--speculative-config`) | 124.4 (119.4-126.9) | 913.6 (906.0-941.5) |
+| imp v0.59.0 | Qwen3.8-27B-Q4_K_M.gguf | default | **77.1** (76.8-77.8) | **1365.2** (1364.7-1365.3) |
+| llama.cpp | Qwen3.8-27B-Q4_K_M.gguf | default: none | 62.9 (62.2-63.8) | 178.7 (177.2-182.4) |
 
-Same harness 2026-10-12 (`ARMS="imp-gguf llama-gguf"`): llama.cpp 61.0 / 60.5 and 154.5 / 155.1; imp at v0.51.0 read
-58.0 / 60.7 and 107.4 / 107.0 ([#2688](https://github.com/kekzl/imp/issues/2688): uncached Q8_0 dequantized per step, 128-row Q4_K tile, 5280 MiB FP8 copy). `UD-Q4_K_M` loads since
-[#2687](https://github.com/kekzl/imp/issues/2687): ppl_corpus_45k PPL 4.4504 vs 4.4623 for the ggml-org Q4_K_M (llama.cpp 4.3196 / 4.3308).
+- MTP k=2 on both: these template completions put the two within prompt noise (imp waves 95.7-132.5); 6 real chat prompts x 400 tokens, 3 starts (`tools/analysis/mtp_vs_vllm.sh`): imp **126.49** vs vLLM 116.84 tok/s. Speculation off: imp leads by 38 %. imp keeps the KV cache in NVFP4 on this family.
+- Same Q4_K_M file, ppl_corpus_45k: imp 4.4623, llama.cpp 4.3308 (2026-10-12, [#2687](https://github.com/kekzl/imp/issues/2687); window settings of the two tools not recorded).
+- The 2026-10-11 sweep (imp 91.0 / 93.7 one stream): [archive](archive/BENCHMARKS_PRE_V0.44.md).
 
 ## imp vs vLLM at concurrency
 

@@ -7,7 +7,7 @@ set -uo pipefail
 
 REPO="${1:-}"
 OUT="${2:-}"
-IMAGE="${IMP_IMAGE:-imp:test}"
+IMAGE="${IMP_IMAGE:-ghcr.io/kekzl/imp:latest}"
 
 if [ -z "$REPO" ] || [ -z "$OUT" ]; then
     cat <<'USAGE'
@@ -20,7 +20,8 @@ usage: scripts/stage-model.sh <hf-repo-id> <output-dir> [--keep-source]
                  pass --drop-source to delete it once the output exists)
 
 Environment:
-  IMP_IMAGE      container image to quantize with (default imp:test)
+  IMP_IMAGE      container image to quantize with (default ghcr.io/kekzl/imp:latest,
+                 pulled when missing; imp:test after make build)
   STAGE_DIR      where the source is downloaded (default <output-dir>.src)
 
 Prefer an FP8 or BF16 source. A published NVFP4 export needs no staging: point
@@ -36,8 +37,8 @@ SRC="${STAGE_DIR:-${OUT}.src}"
 for tool in curl jq docker; do
     command -v "$tool" >/dev/null || { echo "need $tool on PATH"; exit 1; }
 done
-docker image inspect "$IMAGE" >/dev/null 2>&1 || {
-    echo "image $IMAGE not found. Build it with 'make build', or set IMP_IMAGE."
+docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull -q "$IMAGE" >/dev/null 2>&1 || {
+    echo "image $IMAGE not found and not pullable. Set IMP_IMAGE, or build imp:test with 'make build'."
     exit 1
 }
 
@@ -50,6 +51,7 @@ LISTING=$(curl -sf "$API") || { echo "cannot reach $API (private or gated repo?)
 NEED=$(echo "$LISTING" | jq '[.siblings[].rfilename] | length')
 BYTES=$(curl -sf "https://huggingface.co/api/models/${REPO}/tree/main" \
         | jq '[.[] | (.size // .lfs.size // 0)] | add // 0')
+mkdir -p "$(dirname "$OUT")" || exit 1   # df needs an existing path: a fresh ~/models read 0 free and broke the test below
 HAVE=$(df -PB1 "$(dirname "$OUT")" | awk 'NR==2{print $4}')
 printf "   %s files, %.1f GiB to download, %.1f GiB free\n" \
        "$NEED" "$(echo "$BYTES" | awk '{print $1/1073741824}')" \
@@ -74,8 +76,12 @@ echo " done"
 # A repo already imp-readable NVFP4 needs only the download, which git-lfs/huggingface-cli
 # would make easy but neither is installed here by policy. Detect it and stop rather than
 # spend time proving there is nothing to quantize.
-if [ -f "$SRC/hf_quant_config.json" ] && grep -q '"quant_algo"[[:space:]]*:[[:space:]]*"NVFP4"' \
-        "$SRC/hf_quant_config.json" 2>/dev/null; then
+# Two layouts: Modelopt (hf_quant_config.json) and compressed-tensors (config.json format
+# nvfp4-pack-quantized, e.g. kekzle/Qwen3.8-27B-NVFP4-vllm, which went to imp-quantize before).
+if { [ -f "$SRC/hf_quant_config.json" ] && grep -q '"quant_algo"[[:space:]]*:[[:space:]]*"NVFP4"' \
+        "$SRC/hf_quant_config.json" 2>/dev/null; } \
+   || jq -e '.quantization_config | .quant_method == "compressed-tensors" and ((.format // "") | test("nvfp4"))' \
+        "$SRC/config.json" >/dev/null 2>&1; then
     echo "== already NVFP4, no conversion needed"
     if [ "$SRC" != "$OUT" ]; then
         mkdir -p "$(dirname "$OUT")" && rm -rf "$OUT" && mv "$SRC" "$OUT"

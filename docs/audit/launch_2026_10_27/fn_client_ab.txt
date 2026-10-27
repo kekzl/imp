@@ -1,0 +1,78 @@
+fn_ab2.out:b1-default prose    tokens  400  ttft    511.4 ms  decode   94.50 tok/s
+fn_ab2.out:b1-default code     tokens  400  ttft    381.0 ms  decode   90.97 tok/s
+fn_ab2.out:b1-default chat     tokens  400  ttft    401.2 ms  decode   93.58 tok/s
+fn_ab2.out:b1-default math     tokens  400  ttft    392.4 ms  decode   88.83 tok/s
+fn_ab2.out:b1-default debug    tokens  400  ttft    405.7 ms  decode   91.02 tok/s
+fn_ab2.out:b1-default summary  tokens  400  ttft    347.6 ms  decode   93.45 tok/s
+fn_ab2.out:b1-default MEDIAN decode 92.23 tok/s (min 88.83 max 94.50) ttft 396.8 ms (min 347.6 max 511.4) n=6
+fn_ab2.out:[02:42:31.237][INFO] expert_cache_device.cu:439: Device expert cache: 48/48 MoE layer(s) resolved and staged on the device (423 slots/layer, tables 2.2 MiB, 0 layer(s) from the host expert tier)
+fn_ab2.out:t1 prose    tokens  400  ttft    459.6 ms  decode   95.91 tok/s
+fn_ab2.out:t1 code     tokens  400  ttft    372.8 ms  decode   92.22 tok/s
+fn_ab2.out:t1 chat     tokens  400  ttft    418.6 ms  decode   91.38 tok/s
+fn_ab2.out:t1 math     tokens  400  ttft    377.7 ms  decode   89.25 tok/s
+fn_ab2.out:t1 debug    tokens  400  ttft    403.1 ms  decode   91.53 tok/s
+fn_ab2.out:t1 summary  tokens  400  ttft    345.1 ms  decode   93.01 tok/s
+fn_ab2.out:t1 MEDIAN decode 91.87 tok/s (min 89.25 max 95.91) ttft 390.4 ms (min 345.1 max 459.6) n=6
+fn_ab2.out:t2 prose    tokens  400  ttft    463.5 ms  decode   95.70 tok/s
+fn_ab2.out:t2 code     tokens  400  ttft    372.7 ms  decode   92.25 tok/s
+fn_ab2.out:t2 chat     tokens  400  ttft    421.8 ms  decode   91.31 tok/s
+fn_ab2.out:t2 math     tokens  400  ttft    379.5 ms  decode   89.37 tok/s
+fn_ab2.out:t2 debug    tokens  400  ttft    404.1 ms  decode   91.30 tok/s
+fn_ab2.out:t2 summary  tokens  400  ttft    344.5 ms  decode   92.64 tok/s
+fn_ab2.out:t2 MEDIAN decode 91.78 tok/s (min 89.37 max 95.70) ttft 391.8 ms (min 344.5 max 463.5) n=6
+fn_ab2.out:t3 prose    tokens  400  ttft    467.1 ms  decode   96.39 tok/s
+fn_ab2.out:t3 code     tokens  400  ttft    380.0 ms  decode   92.28 tok/s
+fn_ab2.out:t3 chat     tokens  400  ttft    419.6 ms  decode   91.51 tok/s
+fn_ab2.out:t3 math     tokens  400  ttft    383.8 ms  decode   89.36 tok/s
+fn_ab2.out:t3 debug    tokens  400  ttft    405.3 ms  decode   92.06 tok/s
+fn_ab2.out:t3 summary  tokens  400  ttft    349.4 ms  decode   93.06 tok/s
+fn_ab2.out:t3 MEDIAN decode 92.17 tok/s (min 89.36 max 96.39) ttft 394.5 ms (min 349.4 max 467.1) n=6
+fn_ab2.out:t4 prose    tokens  400  ttft    473.7 ms  decode   95.37 tok/s
+fn_ab2.out:t4 code     tokens  400  ttft    366.8 ms  decode   92.35 tok/s
+fn_ab2.out:t4 chat     tokens  400  ttft    416.6 ms  decode   91.50 tok/s
+fn_ab2.out:t4 math     tokens  400  ttft    376.5 ms  decode   89.20 tok/s
+fn_ab2.out:t4 debug    tokens  400  ttft    408.0 ms  decode   91.84 tok/s
+fn_ab2.out:t4 summary  tokens  400  ttft    343.4 ms  decode   92.88 tok/s
+fn_ab2.out:t4 MEDIAN decode 92.10 tok/s (min 89.20 max 95.37) ttft 392.2 ms (min 343.4 max 473.7) n=6
+fn_ab2.out:t1 prose    tokens  400  ttft     27.4 ms  decode   96.48 tok/s
+fn_ab2.out:t1 code     tokens  400  ttft     29.6 ms  decode   96.14 tok/s
+fn_ab2.out:t1 chat     tokens  400  ttft     28.0 ms  decode   97.14 tok/s
+fn_ab2.out:t1 math     tokens  400  ttft     26.4 ms  decode   97.41 tok/s
+fn_ab2.out:t1 debug    tokens  400  ttft     26.6 ms  decode   96.56 tok/s
+fn_ab2.out:t1 summary  tokens  400  ttft     25.9 ms  decode   95.88 tok/s
+fn_ab2.out:t1 MEDIAN decode 96.52 tok/s (min 95.88 max 97.41) ttft 27.0 ms (min 25.9 max 29.6) n=6
+fn_ab2.out:t2 prose    tokens  400  ttft     55.4 ms  decode   96.52 tok/s
+fn_ab2.out:t2 code     tokens  400  ttft     28.1 ms  decode   95.95 tok/s
+fn_ab2.out:t2 chat     tokens  400  ttft     26.1 ms  decode   97.06 tok/s
+fn_ab2.out:t2 math     tokens  400  ttft     25.8 ms  decode   97.33 tok/s
+fn_ab2.out:t2 debug    tokens  400  ttft     28.5 ms  decode   96.54 tok/s
+fn_ab2.out:t2 summary  tokens  400  ttft     27.2 ms  decode   95.70 tok/s
+fn_ab2.out:t2 MEDIAN decode 96.53 tok/s (min 95.70 max 97.33) ttft 27.6 ms (min 25.8 max 55.4) n=6
+fn_ab.out:default-r2 prose    tokens  400  ttft    551.2 ms  decode   95.65 tok/s
+fn_ab.out:default-r2 code     tokens  400  ttft    388.4 ms  decode   92.42 tok/s
+fn_ab.out:default-r2 chat     tokens  400  ttft    439.6 ms  decode   91.78 tok/s
+fn_ab.out:default-r2 math     tokens  400  ttft    400.5 ms  decode   89.08 tok/s
+fn_ab.out:default-r2 debug    tokens  400  ttft    420.5 ms  decode   92.65 tok/s
+fn_ab.out:default-r2 summary  tokens  400  ttft    353.4 ms  decode   93.26 tok/s
+fn_ab.out:default-r2 prose    tokens  400  ttft    341.3 ms  decode  100.94 tok/s
+fn_ab.out:default-r2 code     tokens  400  ttft    364.5 ms  decode   95.45 tok/s
+fn_ab.out:default-r2 chat     tokens  400  ttft    415.4 ms  decode   94.53 tok/s
+fn_ab.out:default-r2 math     tokens  400  ttft    376.3 ms  decode   91.41 tok/s
+fn_ab.out:default-r2 debug    tokens  400  ttft    406.1 ms  decode   95.27 tok/s
+fn_ab.out:default-r2 summary  tokens  400  ttft    339.8 ms  decode   96.21 tok/s
+fn_ab.out:default-r2 MEDIAN decode 93.89 tok/s (min 89.08 max 100.94) ttft 394.5 ms (min 339.8 max 551.2) n=12
+fn_ab.out:nothink prose    tokens  400  ttft    254.3 ms  decode   91.53 tok/s
+fn_ab.out:nothink code     tokens  400  ttft    280.0 ms  decode   92.44 tok/s
+fn_ab.out:nothink chat     tokens  400  ttft    300.1 ms  decode   90.00 tok/s
+fn_ab.out:nothink math     tokens  400  ttft    287.6 ms  decode   89.09 tok/s
+fn_ab.out:nothink debug    tokens  400  ttft    306.2 ms  decode   86.01 tok/s
+fn_ab.out:nothink summary  tokens  400  ttft    283.9 ms  decode   90.39 tok/s
+fn_ab.out:nothink MEDIAN decode 90.20 tok/s (min 86.01 max 92.44) ttft 285.8 ms (min 254.3 max 306.2) n=6
+fn_ab.out:nothink-eos prose    tokens  400  ttft    264.9 ms  decode   95.87 tok/s
+fn_ab.out:nothink-eos code     tokens  400  ttft    321.8 ms  decode   96.13 tok/s
+fn_ab.out:nothink-eos chat     tokens  400  ttft    301.4 ms  decode   93.03 tok/s
+fn_ab.out:nothink-eos math     tokens  400  ttft    309.3 ms  decode   92.73 tok/s
+fn_ab.out:nothink-eos debug    tokens  400  ttft    329.8 ms  decode   89.05 tok/s
+fn_ab.out:nothink-eos summary  tokens  400  ttft    283.4 ms  decode   94.39 tok/s
+fn_ab.out:nothink-eos MEDIAN decode 93.71 tok/s (min 89.05 max 96.13) ttft 305.4 ms (min 264.9 max 329.8) n=6
+fn_ab.out:[02:32:20.810][INFO] expert_cache_device.cu:439: Device expert cache: 48/48 MoE layer(s) resolved and staged on the device (423 slots/layer, tables 2.2 MiB, 0 layer(s) from the host expert tier)

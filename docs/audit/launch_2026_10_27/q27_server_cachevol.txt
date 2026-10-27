@@ -1,0 +1,20 @@
+image ghcr.io/kekzl/imp:latest ghcr.io/kekzl/imp@sha256:7a52810d0b146f4320a2224c8fcbba637c02db4788dd01b2a047db661e4c3567 v0.59.0
+trial 1: load 17 s, host MemAvailable 76.7 -> 70.9 GiB, card VRAM 754 MiB idle -> 20949 MiB peak, health {"status":"ok","kv_blocks_total":4750,"kv_capacity_tokens":76000}
+t1 MEDIAN decode 96.52 tok/s (min 95.88 max 97.41) ttft 27.0 ms (min 25.9 max 29.6) n=6
+trial 2: load 8 s, host MemAvailable 76.6 -> 71.2 GiB, card VRAM 754 MiB idle -> 20951 MiB peak, health {"status":"ok","kv_blocks_total":4750,"kv_capacity_tokens":76000}
+t2 MEDIAN decode 96.53 tok/s (min 95.70 max 97.33) ttft 27.6 ms (min 25.8 max 55.4) n=6
+
+t1 prose    tokens  400  ttft     27.4 ms  decode   96.48 tok/s
+t1 code     tokens  400  ttft     29.6 ms  decode   96.14 tok/s
+t1 chat     tokens  400  ttft     28.0 ms  decode   97.14 tok/s
+t1 math     tokens  400  ttft     26.4 ms  decode   97.41 tok/s
+t1 debug    tokens  400  ttft     26.6 ms  decode   96.56 tok/s
+t1 summary  tokens  400  ttft     25.9 ms  decode   95.88 tok/s
+t1 MEDIAN decode 96.52 tok/s (min 95.88 max 97.41) ttft 27.0 ms (min 25.9 max 29.6) n=6
+t2 prose    tokens  400  ttft     55.4 ms  decode   96.52 tok/s
+t2 code     tokens  400  ttft     28.1 ms  decode   95.95 tok/s
+t2 chat     tokens  400  ttft     26.1 ms  decode   97.06 tok/s
+t2 math     tokens  400  ttft     25.8 ms  decode   97.33 tok/s
+t2 debug    tokens  400  ttft     28.5 ms  decode   96.54 tok/s
+t2 summary  tokens  400  ttft     27.2 ms  decode   95.70 tok/s
+t2 MEDIAN decode 96.53 tok/s (min 95.70 max 97.33) ttft 27.6 ms (min 25.8 max 55.4) n=6

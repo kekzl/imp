@@ -1,0 +1,29 @@
++ cd $HOME/models/launch-qs.L40n
++ cd imp
++ cp <repo>/scripts/stage-model.sh scripts/stage-model.sh
++ scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4-vllm $HOME/models/launch-qs.L40n/imp/../m/Qwen3.8-27B-NVFP4-vllm
+== kekzle/Qwen3.8-27B-NVFP4-vllm
+   31 files, 19.2 GiB to download, 330.0 GiB free
+== downloading to $HOME/models/launch-qs.L40n/imp/../m/Qwen3.8-27B-NVFP4-vllm.src
+ done
+== already NVFP4, no conversion needed
+
+Ready. Serve it with:
+
+  docker run --rm --gpus all -p 8080:8080 -v $HOME/models/launch-qs.L40n/imp/../m:/models ghcr.io/kekzl/imp:latest \
+      imp-server --host 0.0.0.0 --model /models/Qwen3.8-27B-NVFP4-vllm
+
+real	5m17.450s
+user	0m35.127s
+sys	1m52.592s
++ docker run -d --name imp-qs --gpus all -v $HOME/models/launch-qs.L40n/imp/../m:/models -v imp-launch-qs:/home/imp/.cache/imp -p 127.0.0.1:8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4-vllm
+ecc05c21d315395fa96140064aa65ec3d682ac54f7ec7a17ae9298185b5913b2
++ set +x
+ready after 14 s
+Server listening on http://0.0.0.0:8080
++ curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"Qwen3.8-27B-NVFP4-vllm","messages":[{"role":"user","content":"Hello"}],"max_tokens":200}'
++ jq -r '.choices[0].message.content'
+Hello! 👋 How's your day going? Is there something I can help you with today?
++ docker rm -f imp-qs
+imp-qs
+exit=0

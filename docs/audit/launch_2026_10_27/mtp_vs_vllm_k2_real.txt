@@ -1,0 +1,4 @@
+imp:2 tok/s 126.76 drafted 4212 accepted 2510 verifies 2254 accept 59.6% tokens/verify 2.114 ms/verify 16.67
+imp:2:speculative.mtp_adaptive_k=false tok/s 128.34 drafted 4868 accepted 2722 verifies 2042 accept 55.9% tokens/verify 2.333 ms/verify 18.18
+vllm:2 tok/s 118.50 drafted 4380 accepted 2608 verifies 2190 accept 59.5% tokens/verify 2.191 ms/verify 18.49
+exit=0

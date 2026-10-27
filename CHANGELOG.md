@@ -4,6 +4,15 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Added
+- `scripts/bench-community.sh`: pulls the image, benches Qwen3-8B Q8_0 and gpt-oss-20b MXFP4 from Hugging Face in 3 fresh processes each, prints a Markdown block (GPU, driver, CUDA, imp version). RTX 5090: tg128 283.16 / 402.62 tok/s.
+
+### Changed
+- README and `docs/BENCHMARKS.md` re-measured on the v0.59.0 image: Qwen3.8-27B one user without speculation 96.3 tok/s vs vLLM 0.31.0 69.9; MTP k=2 on both, 6 chat prompts: 126.49 vs 116.84 (`tools/analysis/mtp_vs_vllm.sh`). Qwen3.8-Flash-Next server decode 92.1 tok/s, ~68 GiB host RAM.
+
+### Fixed
+- `scripts/stage-model.sh` defaults to `ghcr.io/kekzl/imp:latest` (pulled when missing) instead of exiting without a local `make build`, and sizes free disk on a fresh output directory instead of reading 0 GiB.
+
 ## [0.59.0] - 2026-10-25
 
 ### Changed

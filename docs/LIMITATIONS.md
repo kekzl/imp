@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-16
-commit: df08093a
+verified: 2026-10-27
+commit: 6f1395b8
 -->
 
 # Limitations
@@ -49,6 +49,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 
 | limitation | affected | workaround | issue |
 |---|---|---|---|
+| Perplexity on a shared GGUF reads higher than llama.cpp | Qwen3.8-27B Q4_K_M (ggml-org) | ppl_corpus_45k 4.4623 vs 4.3308 (+3.0 %) [PROV: commit=95a448b7 date=2026-10-12 hw=RTX5090 model=Qwen3.8-27B quant=Q4_K_M path=gguf cmd=`imp-cli --perplexity` vs `llama-perplexity` on ppl_corpus_45k n=1 note=CHANGELOG [0.52.0] entry of #2687; the window settings of the two tools are not recorded, like-for-like unverified] | `kv_cache.dtype=fp16` (imp default is NVFP4 KV on this family, measured at <= +0.35 % PPL) | #2687 |
 | One LoRA adapter at a time: engine-global (executor pointer, decode graphs) | LoRA serving | batching worker serializes by adapter (a request naming a different one waits for in-flight requests, then switches, never batched with them); prefix cache is keyed by adapter, so a shared system prompt prefills once per adapter; C API `imp_lora_set` has no such guard, swap between requests only | AUDIT_ARCH_2026 E-1 |
 | GGUF batched decode rows read the 4-bit overlay with 4-bit activations | batched decode (2-32 rows) on a GGUF source | small-M NVFP4 GEMM runs on the NVFP4 decode overlay (`smallm_weight_`, `src/exec/executor_gemm_smallm.cpp`); single-stream decode reads the same overlay with FP16 activations, prompt rows keep the full-precision dequant route; batched output not byte-identical to single-stream at temperature 0; numbers in [`PERF.md`](PERF.md) "Serving KPIs" | #1897, #1766 |
 | `server.green_contexts=true` gives no green contexts on this chip | sm_120 decode scheduling | `cudaDevResourceGenerateDesc` fails for the decode partition; fallback is priority streams with distinct memSyncDomains, `has_green_contexts()` stays false; dynamic SM reconfiguration in `step_schedule()` is gated on the flag and never runs [PROV: date=2026-08-22 hw=RTX5090, 170 SMs, 80/20 split, 99/1 retry] | reconfigure race #1656 is real code, unreachable on sm_120 |
