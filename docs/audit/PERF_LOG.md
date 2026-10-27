@@ -4,6 +4,70 @@ Append-only. Each entry: date, build, protocol, before/after. Newest first.
 
 ---
 
+## 2026-10-27 · MTP one stream, imp vs vLLM 0.31.0: the "vLLM leads with MTP" row is refuted
+
+Protocol: `tools/analysis/mtp_vs_vllm.sh`, Qwen3.8-27B-NVFP4-vllm, fresh server per arm, one warm request, then `seq_stream_client.py`: 6 real chat prompts x 400 greedy tokens x 2 rounds, identical text for both engines (`conc_client.py` puts the arm tag into every prompt), decode tok/s = median per request; spec counters from `/metrics` around the timed rounds. imp `--max-concurrent 1 --set runtime.max_batch_size=1 --set speculative.mtp_k=K`, vLLM `--max-num-seqs 1 --speculative-config {"method":"mtp","num_speculative_tokens":K}`. Raw: `docs/audit/launch_2026_10_27/mtp_vs_vllm_*.txt`.
+
+| k=2, real prompts | start 1 | start 2 | start 3 | median | tokens / verify | ms / verify |
+|---|---:|---:|---:|---:|---:|---:|
+| imp v0.59.0 | 126.76 | 126.49 | 126.17 | **126.49** | 2.114 | 16.67-16.75 |
+| vLLM 0.31.0 | 118.50 | 116.84 | 116.47 | 116.84 | 2.191-2.233 | 18.49-19.17 |
+
+- k=1, real prompts: imp 128.00 (1.839 tokens / verify, 14.37 ms) vs vLLM 100.87 (1.727, 17.12 ms); imp MTP-only acceptance 74.5 % vs vLLM 72.7 %.
+- imp k=2 `mtp_adaptive_k=false` 128.34 vs default 126.76 (2.333 vs 2.114 tokens / verify at 18.18 vs 16.67 ms): neutral. `mtp_nvfp4_head=false` at k=1: 123.97 vs 128.00, accepted 1082 vs 1087: the NVFP4 draft head costs no acceptance.
+- Template completions (`conc_client.py`, `/v1/completions`, one prompt shape, tag in the prompt): engine3 sweep 116.2 vs 124.4 (3 waves incl. the first per trial, imp waves 95.7-132.5), the same shape with a warm wave and 4 waves 134.7 vs 125.1. Prompt-dependent within noise, no lead either way; vLLM accepts more there (70.1 vs 60.2 %).
+- Verdict: no MTP deficit to fix in the engine; imp's step is 9-13 % cheaper (16.67-16.75 vs 18.49-19.17 ms) at equal acceptance on chat traffic. The LIMITATIONS row and the README note are corrected.
+
+---
+
+## 2026-10-27 · Launch re-measure: README commands, Qwen3.8-Flash-Next and Qwen3.8-27B (launch dispatch Phase 2)
+
+Protocol: `tools/analysis/launch_server_bench.sh` = the README `docker run` of `ghcr.io/kekzl/imp:latest` v0.59.0 (`sha256:7a52810d`), one fresh container per trial, `seq_stream_client.py`: 6 different real chat prompts one after another, 400 tokens each, greedy, `ignore_eos`, thinking at the model default; decode = (completion tokens - 1) / (last delta - first delta). Host 78 GiB RAM, RTX 5090 PCIe 5.0 x16, WSL2. Raw: `docs/audit/launch_2026_10_27/`.
+
+| Qwen3.8-Flash-Next-NVFP4 (123.6 GiB, experts 56.25 GiB host-resident) | start 1 | start 2 | start 3 | start 4 |
+|---|---:|---:|---:|---:|
+| no cache volume: decode median tok/s | 91.79 | 91.82 | 91.84 | - |
+| `-v imp-cache` volume (start 1 records the library reserve): decode median tok/s | 91.87 | 91.78 | 92.17 | 92.10 |
+| volume: TTFT median ms | 390.4 | 391.8 | 394.5 | 392.2 |
+| volume: start to `/health` ok, s | 50 | 38 | 43 | 39 |
+| volume: host `MemAvailable` before -> after load, GiB | 77.0 -> 9.3 | 76.7 -> 9.2 | 77.0 -> 8.9 | 76.6 -> 8.9 |
+| volume: card VRAM peak (idle 754 MiB), MiB | 27069 | 27069 | 27069 | 27069 |
+
+- Per prompt (volume starts 2-4): 89.20 to 96.39 tok/s. Expert cache 423 slots/layer, 0 layers on the host expert tier.
+- `imp-cli --bench --bench-pp 512 --bench-reps 5 --max-tokens 128 --bench-prompt-file novel_prose_2026.txt`, 3 processes: pp512 1331.51 / 1341.98 / 1338.18 tok/s, tg128 116.44 / 116.29 / 116.29 tok/s (README 2026-10-25: 114.90-115.53, 1302.95-1327.26).
+- Server variants, one lifetime each (`fn_client_ab.txt`): same 6 prompts twice 93.89 (round 2 +3 %), thinking off 90.20, thinking off with natural EOS 93.71, `runtime.max_batch_size=1` 92.23. None reaches the 148.4-150.3 tok/s of CHANGELOG [0.59.0] (#2876, #2877); that client is not in the tree, the gap is unexplained.
+
+| Qwen3.8-27B-NVFP4-vllm, README install command | start 1 | start 2 | start 3 |
+|---|---:|---:|---:|
+| no volume: decode median tok/s / TTFT ms | 96.48 / 28.5 | 96.50 / 28.6 | 96.52 / 28.4 |
+| `-v imp-cache` volume: decode median tok/s / TTFT ms | 96.52 / 27.0 | 96.53 / 27.6 | - |
+| volume: start to ready, s | 17 | 8 | - |
+
+- Card VRAM peak 20949-20951 MiB (idle 754), `max_batch_size: auto -> 32`, no speculation (MTP auto needs `max_batch_size=1`), KV NVFP4, `/health` 4750 blocks / 76000 tokens after the run.
+- `scripts/bench-community.sh` on this card: Qwen3-8B Q8_0 pp512 16521.65, tg128 283.16; gpt-oss-20b MXFP4 pp512 35342.88, tg128 402.62 (`community_rtx5090.md`).
+
+---
+
+## 2026-10-27 · Launch re-measure: Qwen3.8-27B, imp vs vLLM vs llama.cpp (launch dispatch Phase 2)
+
+Protocol: `tools/analysis/engine3_conc.sh`, fresh server per arm, `conc_client.py` 300-token greedy answers, `ignore_eos`, 3 waves per arm (value = wave median), 3 trials with alternating arm order, each engine on its defaults. Images: imp `ghcr.io/kekzl/imp:latest` = v0.59.0 (`sha256:7a52810d`), vLLM `v0.31.0` (`sha256:c1c9f6fd`), llama.cpp `server-cuda` (`sha256:9d835c2f`). NVFP4 = `Qwen3.8-27B-NVFP4-vllm` (imp, vLLM), GGUF = ggml-org `Qwen3.8-27B-Q4_K_M.gguf` (imp, llama.cpp). Raw logs: `docs/audit/launch_2026_10_27/`.
+
+| arm | 1 stream: trials | median | 32 streams: trials | median |
+|---|---|---:|---|---:|
+| imp NVFP4, default (MTP k=2 auto, n-gram off) | 113.9 121.8 116.2 | **116.2** | 1978.6 1979.1 1980.1 | **1979.1** |
+| imp NVFP4, `speculative.mtp_k=0 speculative.ngram=false` | 95.4 96.3 96.4 | **96.3** | - | - |
+| vLLM NVFP4, default | 69.9 68.7 70.4 | **69.9** | 1404.7 1414.2 1415.6 | **1414.2** |
+| vLLM NVFP4, `--speculative-config {"method":"mtp","num_speculative_tokens":2}` | 124.4 119.4 126.9 | **124.4** | 913.6 906.0 941.5 | **913.6** |
+| imp GGUF, default | 76.8 77.1 77.8 | **77.1** | 1365.2 1364.7 1365.3 | **1365.2** |
+| llama.cpp GGUF, default | 62.2 62.9 63.8 | **62.9** | 177.2 178.7 182.4 | **178.7** |
+
+- llama.cpp 1 stream trial 1 read 29.4: a stray `scripts/check-release.sh` (GPU gate on) ran during that arm; discarded, re-run as `e3_llama_redo.txt` (63.8).
+- imp default at 1 stream drafts with the checkpoint's MTP head (server log `mtp_auto.cpp:56 auto -> 2`); at 32 streams it runs no speculation.
+- With MTP on both engines, vLLM leads at 1 stream (124.4 vs 116.2, +7.1 %); vLLM MTP at 32 streams loses 35 % against its own default.
+- Against 2026-10-11 (`54921da6`): imp 1 stream 91.0 / 93.7 -> 116.2 (MTP was default then too, #1809; the verify-path changes since moved it), 32 streams 1977.0 / 1963.5 -> 1979.1; imp GGUF 32 streams 244.4 / 240.0 -> 1365.2.
+
+---
+
 ## 2026-10-20 · DSpark propose: FP8 weights + captured graph (ROADMAP row 49, R-049.2)
 
 Protocol: as 2026-10-19 (Qwen3-8B-NVFP4-cortecs, `--max-batch 1`, greedy 256 tokens, `ignore_eos`, /no_think), `build-dev` imp-server in `imp:toolchain`, one server start per arm and round, warmup, then prose / code / list x 2; tok/s = completion tokens / request wall.

@@ -1,0 +1,4 @@
+imp:1 tok/s 128.00 drafted 1792 accepted 1087 verifies 1295 accept 60.7% tokens/verify 1.839 ms/verify 14.37
+imp:1:speculative.mtp_nvfp4_head=false tok/s 123.97 drafted 1730 accepted 1082 verifies 1300 accept 62.5% tokens/verify 1.832 ms/verify 14.78
+vllm:1 tok/s 100.87 drafted 1386 accepted 1008 verifies 1386 accept 72.7% tokens/verify 1.727 ms/verify 17.12
+exit=0

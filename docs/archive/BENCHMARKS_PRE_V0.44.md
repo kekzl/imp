@@ -910,3 +910,26 @@ Weights land at 17.9 GiB resident, ~7.7 GiB left for KV on a 32 GB card. Bounded
 bandwidth, not the LM head (2.4 GiB of the 17.9, served from the NVFP4 decode cache, a trade
 measured at +10.4% decode for +0.99% perplexity, see [`QUANTIZATION.md`](../QUANTIZATION.md)).
 
+
+## Moved from BENCHMARKS.md on 2026-10-27 (superseded by the v0.59.0 three-engine sweep)
+
+### Qwen3.8-27B, three engines (2026-10-11 / 10-12)
+
+Fresh server per arm, each engine on its defaults (imp `--max-concurrent N --set runtime.max_batch_size=N`,
+vLLM `--max-num-seqs N --max-model-len 16384`, llama.cpp `-ngl 999 -fa on -np N -c N*4096`), 300-token
+greedy answers with `ignore_eos`, aggregate = completion tokens / wall, values = the two trial medians.
+
+[PROV: commit=54921da6 date=2026-10-11 hw=RTX5090 model=Qwen3.8-27B quant=per-row cuda=13.4.2
+       path=server-api cmd=`tools/analysis/engine3_conc.sh` n=2 trials x 3 waves note=vllm/vllm-openai:v0.31.0
+       sha256 c1c9f6fd, ghcr.io/ggml-org/llama.cpp:server-cuda sha256 9d835c2f, GGUF ggml-org Q4_K_M sha256 c600de03]
+
+| engine | checkpoint | 1 stream tok/s | 32 streams tok/s |
+|---|---|---:|---:|
+| imp | Qwen3.8-27B-NVFP4-vllm | **91.0 / 93.7** | **1977.0 / 1963.5** |
+| vLLM 0.31.0 | Qwen3.8-27B-NVFP4-vllm | 70.0 / 68.9 | 1449.4 / 1354.8 |
+| llama.cpp | Qwen3.8-27B-Q4_K_M.gguf | 63.0 / 61.8 | 166.8 / 162.0 |
+| imp `95a448b7` (2026-10-12) | Qwen3.8-27B-Q4_K_M.gguf | **72.7 / 73.4** | **244.4 / 240.0** |
+
+Same harness 2026-10-12 (`ARMS="imp-gguf llama-gguf"`): llama.cpp 61.0 / 60.5 and 154.5 / 155.1; imp at v0.51.0 read
+58.0 / 60.7 and 107.4 / 107.0 ([#2688](https://github.com/kekzl/imp/issues/2688): uncached Q8_0 dequantized per step, 128-row Q4_K tile, 5280 MiB FP8 copy). `UD-Q4_K_M` loads since
+[#2687](https://github.com/kekzl/imp/issues/2687): ppl_corpus_45k PPL 4.4504 vs 4.4623 for the ggml-org Q4_K_M (llama.cpp 4.3196 / 4.3308).

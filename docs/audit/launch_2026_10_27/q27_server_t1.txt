@@ -1,0 +1,487 @@
+IMP Server 0.59.0
+[02:20:38.405][INFO] config.cpp:672: imp.conf: no config file found, using built-in defaults
+[02:20:38.406][INFO] hf_hub.cpp:156: Detected SafeTensors directory: /models/Qwen3.8-27B-NVFP4-vllm
+Models directory: /models
+Loading model: /models/Qwen3.8-27B-NVFP4-vllm
+[02:20:38.407][INFO] llm_compressor_loader.cpp:343: NVFP4 model (llm-compressor): scheme=NVFP4, group_size=16, exclude=170 modules
+[02:20:38.407][INFO] hf_config_loader.cpp:469: NVFP4 ignore list: 170 expanded names from config.json replace 170 recipe pattern(s)
+[02:20:38.409][INFO] safetensors_loader.cpp:684: Skipping shard mtp.safetensors (15 tensors are MTP/vision-only and unused)
+[02:20:38.409][INFO] safetensors_loader.cpp:697: Sharded SafeTensors: 65 shards
+[02:20:38.409][INFO] llm_compressor_loader.cpp:343: NVFP4 model (llm-compressor): scheme=NVFP4, group_size=16, exclude=170 modules
+[02:20:38.409][INFO] hf_config_loader.cpp:469: NVFP4 ignore list: 170 expanded names from config.json replace 170 recipe pattern(s)
+[02:20:39.198][INFO] safetensors_loader.cpp:727:   [1/65] mmap'd shard: layers-54.safetensors (30 tensors)
+[02:20:39.320][INFO] safetensors_loader.cpp:727:   [2/65] mmap'd shard: layers-60.safetensors (30 tensors)
+[02:20:39.418][INFO] safetensors_loader.cpp:727:   [3/65] mmap'd shard: layers-46.safetensors (30 tensors)
+[02:20:39.438][INFO] safetensors_loader.cpp:727:   [4/65] mmap'd shard: layers-14.safetensors (30 tensors)
+[02:20:39.493][INFO] safetensors_loader.cpp:727:   [5/65] mmap'd shard: layers-17.safetensors (30 tensors)
+[02:20:39.498][INFO] safetensors_loader.cpp:727:   [6/65] mmap'd shard: layers-35.safetensors (25 tensors)
+[02:20:39.522][INFO] safetensors_loader.cpp:727:   [7/65] mmap'd shard: layers-8.safetensors (30 tensors)
+[02:20:39.538][INFO] safetensors_loader.cpp:727:   [8/65] mmap'd shard: layers-28.safetensors (30 tensors)
+[02:20:39.538][INFO] safetensors_loader.cpp:727:   [9/65] mmap'd shard: layers-30.safetensors (30 tensors)
+[02:20:39.538][INFO] safetensors_loader.cpp:727:   [10/65] mmap'd shard: layers-9.safetensors (30 tensors)
+[02:20:39.542][INFO] safetensors_loader.cpp:727:   [11/65] mmap'd shard: layers-10.safetensors (30 tensors)
+[02:20:39.545][INFO] safetensors_loader.cpp:727:   [12/65] mmap'd shard: layers-24.safetensors (30 tensors)
+[02:20:39.552][INFO] safetensors_loader.cpp:727:   [13/65] mmap'd shard: layers-52.safetensors (30 tensors)
+[02:20:39.558][INFO] safetensors_loader.cpp:727:   [14/65] mmap'd shard: layers-39.safetensors (25 tensors)
+[02:20:39.558][INFO] safetensors_loader.cpp:727:   [15/65] mmap'd shard: layers-19.safetensors (25 tensors)
+[02:20:39.558][INFO] safetensors_loader.cpp:727:   [16/65] mmap'd shard: layers-47.safetensors (25 tensors)
+[02:20:39.558][INFO] safetensors_loader.cpp:727:   [17/65] mmap'd shard: layers-2.safetensors (30 tensors)
+[02:20:39.562][INFO] safetensors_loader.cpp:727:   [18/65] mmap'd shard: layers-33.safetensors (30 tensors)
+[02:20:39.562][INFO] safetensors_loader.cpp:727:   [19/65] mmap'd shard: layers-61.safetensors (30 tensors)
+[02:20:39.575][INFO] safetensors_loader.cpp:727:   [20/65] mmap'd shard: layers-18.safetensors (30 tensors)
+[02:20:39.583][INFO] safetensors_loader.cpp:727:   [21/65] mmap'd shard: layers-37.safetensors (30 tensors)
+[02:20:39.585][INFO] safetensors_loader.cpp:727:   [22/65] mmap'd shard: layers-22.safetensors (30 tensors)
+[02:20:39.588][INFO] safetensors_loader.cpp:727:   [23/65] mmap'd shard: layers-5.safetensors (30 tensors)
+[02:20:39.598][INFO] safetensors_loader.cpp:727:   [24/65] mmap'd shard: layers-21.safetensors (30 tensors)
+[02:20:39.603][INFO] safetensors_loader.cpp:727:   [25/65] mmap'd shard: layers-15.safetensors (25 tensors)
+[02:20:39.603][INFO] safetensors_loader.cpp:727:   [26/65] mmap'd shard: layers-11.safetensors (25 tensors)
+[02:20:39.608][INFO] safetensors_loader.cpp:727:   [27/65] mmap'd shard: layers-27.safetensors (25 tensors)
+[02:20:39.628][INFO] safetensors_loader.cpp:727:   [28/65] mmap'd shard: layers-29.safetensors (30 tensors)
+[02:20:39.631][INFO] safetensors_loader.cpp:727:   [29/65] mmap'd shard: layers-0.safetensors (30 tensors)
+[02:20:39.634][INFO] safetensors_loader.cpp:727:   [30/65] mmap'd shard: layers-23.safetensors (25 tensors)
+[02:20:39.638][INFO] safetensors_loader.cpp:727:   [31/65] mmap'd shard: layers-41.safetensors (30 tensors)
+[02:20:39.644][INFO] safetensors_loader.cpp:727:   [32/65] mmap'd shard: layers-25.safetensors (30 tensors)
+[02:20:39.650][INFO] safetensors_loader.cpp:727:   [33/65] mmap'd shard: layers-32.safetensors (30 tensors)
+[02:20:39.651][INFO] safetensors_loader.cpp:727:   [34/65] mmap'd shard: layers-20.safetensors (30 tensors)
+[02:20:39.652][INFO] safetensors_loader.cpp:727:   [35/65] mmap'd shard: layers-3.safetensors (25 tensors)
+[02:20:39.653][INFO] safetensors_loader.cpp:727:   [36/65] mmap'd shard: layers-12.safetensors (30 tensors)
+[02:20:39.655][INFO] safetensors_loader.cpp:727:   [37/65] mmap'd shard: layers-40.safetensors (30 tensors)
+[02:20:39.657][INFO] safetensors_loader.cpp:727:   [38/65] mmap'd shard: layers-7.safetensors (25 tensors)
+[02:20:39.664][INFO] safetensors_loader.cpp:727:   [39/65] mmap'd shard: layers-44.safetensors (30 tensors)
+[02:20:39.666][INFO] safetensors_loader.cpp:727:   [40/65] mmap'd shard: layers-62.safetensors (30 tensors)
+[02:20:39.668][INFO] safetensors_loader.cpp:727:   [41/65] mmap'd shard: layers-43.safetensors (25 tensors)
+[02:20:39.669][INFO] safetensors_loader.cpp:727:   [42/65] mmap'd shard: layers-26.safetensors (30 tensors)
+[02:20:39.671][INFO] safetensors_loader.cpp:727:   [43/65] mmap'd shard: layers-63.safetensors (25 tensors)
+[02:20:39.685][INFO] safetensors_loader.cpp:727:   [44/65] mmap'd shard: layers-31.safetensors (25 tensors)
+[02:20:39.689][INFO] safetensors_loader.cpp:727:   [45/65] mmap'd shard: layers-57.safetensors (30 tensors)
+[02:20:39.690][INFO] safetensors_loader.cpp:727:   [46/65] mmap'd shard: layers-6.safetensors (30 tensors)
+[02:20:39.691][INFO] safetensors_loader.cpp:727:   [47/65] mmap'd shard: layers-53.safetensors (30 tensors)
+[02:20:39.691][INFO] safetensors_loader.cpp:727:   [48/65] mmap'd shard: layers-16.safetensors (30 tensors)
+[02:20:39.692][INFO] safetensors_loader.cpp:727:   [49/65] mmap'd shard: layers-55.safetensors (25 tensors)
+[02:20:39.696][INFO] safetensors_loader.cpp:727:   [50/65] mmap'd shard: layers-50.safetensors (30 tensors)
+[02:20:39.697][INFO] safetensors_loader.cpp:727:   [51/65] mmap'd shard: layers-56.safetensors (30 tensors)
+[02:20:39.698][INFO] safetensors_loader.cpp:727:   [52/65] mmap'd shard: layers-59.safetensors (25 tensors)
+[02:20:39.701][INFO] safetensors_loader.cpp:727:   [53/65] mmap'd shard: layers-45.safetensors (30 tensors)
+[02:20:39.703][INFO] safetensors_loader.cpp:727:   [54/65] mmap'd shard: layers-42.safetensors (30 tensors)
+[02:20:39.704][INFO] safetensors_loader.cpp:727:   [55/65] mmap'd shard: layers-4.safetensors (30 tensors)
+[02:20:39.705][INFO] safetensors_loader.cpp:727:   [56/65] mmap'd shard: layers-38.safetensors (30 tensors)
+[02:20:39.705][INFO] safetensors_loader.cpp:727:   [57/65] mmap'd shard: layers-13.safetensors (30 tensors)
+[02:20:39.708][INFO] safetensors_loader.cpp:727:   [58/65] mmap'd shard: layers-48.safetensors (30 tensors)
+[02:20:39.709][INFO] safetensors_loader.cpp:727:   [59/65] mmap'd shard: layers-34.safetensors (30 tensors)
+[02:20:39.710][INFO] safetensors_loader.cpp:727:   [60/65] mmap'd shard: layers-36.safetensors (30 tensors)
+[02:20:39.710][INFO] safetensors_loader.cpp:727:   [61/65] mmap'd shard: layers-51.safetensors (25 tensors)
+[02:20:39.713][INFO] safetensors_loader.cpp:727:   [62/65] mmap'd shard: layers-49.safetensors (30 tensors)
+[02:20:39.713][INFO] safetensors_loader.cpp:727:   [63/65] mmap'd shard: layers-58.safetensors (30 tensors)
+[02:20:39.716][INFO] safetensors_loader.cpp:727:   [64/65] mmap'd shard: layers-1.safetensors (30 tensors)
+[02:20:43.464][INFO] safetensors_loader.cpp:727:   [65/65] mmap'd shard: outside.safetensors (336 tensors)
+[02:20:43.464][INFO] safetensors_loader.cpp:758: Loaded shard: layers-0.safetensors (30 tensors total)
+[02:20:43.464][INFO] safetensors_loader.cpp:758: Loaded shard: layers-1.safetensors (60 tensors total)
+[02:20:43.464][INFO] safetensors_loader.cpp:758: Loaded shard: layers-10.safetensors (90 tensors total)
+[02:20:43.464][INFO] safetensors_loader.cpp:758: Loaded shard: layers-11.safetensors (115 tensors total)
+[02:20:43.464][INFO] safetensors_loader.cpp:758: Loaded shard: layers-12.safetensors (145 tensors total)
+[02:20:43.464][INFO] safetensors_loader.cpp:758: Loaded shard: layers-13.safetensors (175 tensors total)
+[02:20:43.464][INFO] safetensors_loader.cpp:758: Loaded shard: layers-14.safetensors (205 tensors total)
+[02:20:43.464][INFO] safetensors_loader.cpp:758: Loaded shard: layers-15.safetensors (230 tensors total)
+[02:20:43.464][INFO] safetensors_loader.cpp:758: Loaded shard: layers-16.safetensors (260 tensors total)
+[02:20:43.464][INFO] safetensors_loader.cpp:758: Loaded shard: layers-17.safetensors (290 tensors total)
+[02:20:43.464][INFO] safetensors_loader.cpp:758: Loaded shard: layers-18.safetensors (320 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-19.safetensors (345 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-2.safetensors (375 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-20.safetensors (405 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-21.safetensors (435 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-22.safetensors (465 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-23.safetensors (490 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-24.safetensors (520 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-25.safetensors (550 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-26.safetensors (580 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-27.safetensors (605 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-28.safetensors (635 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-29.safetensors (665 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-3.safetensors (690 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-30.safetensors (720 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-31.safetensors (745 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-32.safetensors (775 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-33.safetensors (805 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-34.safetensors (835 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-35.safetensors (860 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-36.safetensors (890 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-37.safetensors (920 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-38.safetensors (950 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-39.safetensors (975 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-4.safetensors (1005 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-40.safetensors (1035 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-41.safetensors (1065 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-42.safetensors (1095 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-43.safetensors (1120 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-44.safetensors (1150 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-45.safetensors (1180 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-46.safetensors (1210 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-47.safetensors (1235 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-48.safetensors (1265 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-49.safetensors (1295 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-5.safetensors (1325 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-50.safetensors (1355 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-51.safetensors (1380 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-52.safetensors (1410 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-53.safetensors (1440 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-54.safetensors (1470 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-55.safetensors (1495 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-56.safetensors (1525 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-57.safetensors (1555 tensors total)
+[02:20:43.465][INFO] safetensors_loader.cpp:758: Loaded shard: layers-58.safetensors (1585 tensors total)
+[02:20:43.466][INFO] safetensors_loader.cpp:758: Loaded shard: layers-59.safetensors (1610 tensors total)
+[02:20:43.466][INFO] safetensors_loader.cpp:758: Loaded shard: layers-6.safetensors (1640 tensors total)
+[02:20:43.466][INFO] safetensors_loader.cpp:758: Loaded shard: layers-60.safetensors (1670 tensors total)
+[02:20:43.466][INFO] safetensors_loader.cpp:758: Loaded shard: layers-61.safetensors (1700 tensors total)
+[02:20:43.466][INFO] safetensors_loader.cpp:758: Loaded shard: layers-62.safetensors (1730 tensors total)
+[02:20:43.466][INFO] safetensors_loader.cpp:758: Loaded shard: layers-63.safetensors (1755 tensors total)
+[02:20:43.466][INFO] safetensors_loader.cpp:758: Loaded shard: layers-7.safetensors (1780 tensors total)
+[02:20:43.466][INFO] safetensors_loader.cpp:758: Loaded shard: layers-8.safetensors (1810 tensors total)
+[02:20:43.466][INFO] safetensors_loader.cpp:758: Loaded shard: layers-9.safetensors (1840 tensors total)
+[02:20:43.466][INFO] safetensors_loader.cpp:758: Loaded shard: outside.safetensors (2176 tensors total)
+[02:20:43.466][INFO] llm_compressor_loader.cpp:197: llm-compressor format: 992 suffix renames, 1842 prefix strips, 0 vision tensors skipped, 333 vision tensors kept, 0 Gemma-4 extras emitted, 851 pass-through
+[02:20:43.466][INFO] safetensors_loader.cpp:1056: Parsed 2176 tensors from SafeTensors
+[02:20:43.467][INFO] safetensors_loader.cpp:1110: MTP head present in this checkpoint but not loaded. speculative.mtp_k=auto takes it only on a single-stream run (max_batch_size=1) with runtime.deterministic off; force it with --set speculative.mtp_k=2 --set speculative.ngram=false: measured +17-21 % plain and +27-30 % thinking single-stream decode on Qwen3.8-27B-NVFP4 (2026-08-27), in exchange for the head's VRAM (0.79 GiB there) and eager-equal greedy trajectories. See docs/LIMITATIONS.md
+[02:20:43.467][INFO] hf_config_loader.cpp:110: loading HF config from /models/Qwen3.8-27B-NVFP4-vllm/config.json
+[02:20:43.467][INFO] hf_config_generic.cpp:194: M-RoPE section [11, 11, 10] (interleaved)
+[02:20:43.467][INFO] hf_config_generic.cpp:252: Partial RoPE: partial_rotary_factor=0.250 head_dim=256 → rope_dim=64
+[02:20:43.467][INFO] hf_config_generic.cpp:295:   tie_word_embeddings = false
+[02:20:43.467][INFO] qwen_gdn.cpp:89:   GDN config: inner=6144 state=128 groups=16 n_heads=48 conv_kernel=4
+[02:20:43.467][INFO] multimodal_wrapper.cpp:72: Qwen3-VL vision tower: depth=27 hidden=1152 heads=16 patch=16 merge=2 pos_grid=48x48 out=5120 deepstack=0
+[02:20:43.467][INFO] hf_config_loader.cpp:133:   arch=qwen35 layers=64 d_model=5120 heads=24 kv_heads=4 d_ff=17408 vocab=248320
+[02:20:43.467][INFO] safetensors_loader.cpp:1168: Architecture: qwen35
+[02:20:43.467][INFO] safetensors_loader.cpp:1169: Config: layers=64 d_model=5120 d_ff=17408 heads=24 kv_heads=4 vocab=248320 ctx=262144
+[02:20:43.467][INFO] safetensors_loader.cpp:1171: RoPE: theta=10000000 freq_scale=1.0000 head_dim=256 sliding_window=0 rope_theta_swa=0 rope_local_theta=0 rope_n_ctx_orig=0
+[02:20:43.469][INFO] weight_map.cpp:1388: WeightMap (qwen35): assigned 1843 tensors, skipped 333, layers=64, experts=0
+[02:20:43.469][INFO] weight_map.cpp:1397:   skipped: 333 vision, 0 audio, 0 MTP head, 0 unrecognised
+[02:20:43.469][INFO] multimodal_wrapper.cpp:110: Vision tower: 333 tensors assigned (27 blocks, 0 deepstack mergers)
+[02:20:43.469][INFO] llm_compressor_loader.cpp:343: NVFP4 model (llm-compressor): scheme=NVFP4, group_size=16, exclude=170 modules
+[02:20:43.469][INFO] hf_config_loader.cpp:469: NVFP4 ignore list: 170 expanded names from config.json replace 170 recipe pattern(s)
+[02:20:43.470][INFO] safetensors_loader.cpp:850: NVFP4 inventory: 496 Linear modules quantized, 1 ignored, 0 unclassified, 0 missing global scale; quantization_config.ignore 170 entries = 1 on a Linear slot, 161 outside the Linear set (vision tower, conv1d, embeddings), 8 with no tensor in the map (MTP head, dropped shards)
+[02:20:43.470][INFO] safetensors_loader.cpp:1261: NVFP4 pre-quantized: 496 scratch entries (group_size=16)
+[02:20:43.477][INFO] hf_config_loader.cpp:193: loaded chat_template from tokenizer_config.json (8952 chars)
+[02:20:43.464][WARN] safetensors_loader.cpp:531: SafeTensors /models/Qwen3.8-27B-NVFP4-vllm/outside.safetensors: tensor 'model.visual.patch_embed.proj.weight' has 5 dims; flattening trailing dims to [1152, 1536]
+[02:20:43.586][INFO] tokenizer.cpp:452: tokenizer.json: loaded 248044 vocab entries (type=BPE)
+[02:20:43.619][INFO] tokenizer.cpp:472: tokenizer.json: loaded 247587 merges
+[02:20:43.624][INFO] tokenizer.cpp:830: Tokenizer: 33 special pieces cached for pre-split
+[02:20:43.726][INFO] tokenizer.cpp:730: BPE merges: id path, 247587 pairs
+[02:20:43.726][INFO] tokenizer.cpp:663: tokenizer.json: type=gpt2 vocab_size=248077 bos=1 eos=248044 add_prefix=false pre=1 regex steps ignore_merges=false
+[02:20:43.732][INFO] safetensors_loader.cpp:1320: Loaded tokenizer from /models/Qwen3.8-27B-NVFP4-vllm/tokenizer.json
+[02:20:43.733][INFO] hf_config_loader.cpp:327: tokenizer_config.json: add_bos=false add_eos=unset add_prefix_space=false use_default_system_prompt=unset bos_token='' eos_token='<|im_end|>'
+[02:20:43.733][INFO] safetensors_loader.cpp:1394: tokenizer_config.json: resolved eos_token '<|im_end|>' -> id 248046
+[02:20:43.743][INFO] hf_config_loader.cpp:175: generation_config.json: eos=2 temp=1 top_p=0.95 top_k=20 rep_penalty=-1
+[02:20:43.743][INFO] safetensors_loader.cpp:1556: SafeTensors model loaded successfully from /models/Qwen3.8-27B-NVFP4-vllm
+[02:20:44.243][INFO] engine.cpp:687: ModelProfile: moe=0 gdn=1 ssm=1 hybrid=1 dense=1 attn=standard
+[02:20:44.243][INFO] engine_init_resolver.cpp:253: KV cache dtype: NVFP4 (auto: qwen35 measured at <= +0.35% PPL for 2.7-3.2x the context; set kv_cache.dtype=fp16 to opt out)
+[02:20:44.243][INFO] engine_init_resolver.cpp:362: KV cache dtype: NVFP4 (FP4 E2M1 + UE4M3 per-16-elem scales, ~3.6× compression)
+[02:20:44.243][INFO] engine_init_resolver.cpp:549: max_batch_size: auto → 32 (approx_weights=18.8 GB, post-load headroom=9.9 GB, tier-floor=4, VRAM-aware)
+[02:20:44.244][INFO] engine_init_resolver.cpp:595: prefill graph: off, the NVFP4 KV append syncs its scale to the host per chunk and cannot be captured (F16 KV captures; runtime.prefill_graph resolved to false)
+[02:20:44.244][INFO] engine_init_resolver.cpp:643: SSM state dtype: BF16 (gdn.state_bf16; fused scan route, chunkwise off)
+[02:20:44.244][INFO] engine_init_resolver.cpp:657: FP8 prefill: disabled for native NVFP4 (CUTLASS NVFP4 GEMM used instead)
+[02:20:44.244][INFO] engine_init_resolver.cpp:699: cuBLAS FP16-accumulate prefill: auto → ON (arch=qwen35)
+[02:20:44.244][INFO] engine_init_resolver.cpp:742: NVFP4 decode: auto → mode 2 (GDN model — ssm_in/ssm_out excluded for precision)
+[02:20:44.244][INFO] engine_init_resolver.cpp:891: KV block size: auto -> 16 (n_kv_heads=4)
+[02:20:44.244][INFO] engine_init_resolver.cpp:914: attention.sparse_topk_tokens: auto -> 4096 (arch=qwen35)
+[02:20:44.244][INFO] engine_init_resolver.cpp:914: attention.sparse_prefill_topk_tokens: auto -> 8192 (arch=qwen35)
+[02:20:44.244][INFO] engine_init_resolver.cpp:1023: max_seq_len: auto → 131072 (model=262144, vram_cap=486021, auto_cap=131072, kv=16384 B/tok, attn_layers=16/64)
+[02:20:44.244][INFO] vram_allocator.cpp:28: VRAMAllocator: total=32580 MiB, headroom=1303 MiB (4%)
+[02:20:44.244][INFO] engine_arena.cpp:23: engine arena: 2020.8 MiB reserved (engine-persistent tier, committed as tenants take)
+[02:20:44.244][INFO] engine.cpp:779: engine arena demand: mmvq 0.0 + nvfp4 340.0 + sample 4.0 + pen 15.2 + moe 0.00 + fp8red 0.00 + quant 0.22 + splitk 96.75 + mla 0.0 + dry 1.00 + cublas 96.0 + grp3x 0.00 + imma 0.0 + chunkcap 128.0 + smallm 6.52 + par 0.00 + ra2 0.0 + apa 0.0 + apakv 0.0 MiB + vision 1106.6 + batchpool 2.00 MiB -> 2020.8 MiB reserved
+[02:20:44.249][INFO] graph_slots.cpp:89: graph slot pool: 4 slots (4357.0 KiB device + 2051.0 KiB pinned host), caps: max_steps=131072 penalty_slots=262144 stop_ids=64
+[02:20:44.385][INFO] engine.cpp:817: grouped-3x NVFP4 prewarm skipped: model has no experts
+[02:20:44.386][INFO] executor_workspace.cpp:313: GDN layers: 48 out of 64 total
+[02:20:44.386][INFO] executor_workspace.cpp:329: SSM layers: 48 out of 64 total
+[02:20:44.386][INFO] pdl.cpp:46: PDL: available (sm_120+)
+[02:20:44.386][INFO] executor_workspace.cpp:341: PDL registered on the instrumented decode kernels (elementwise add + NVFP4 GEMV family)
+[02:20:44.403][INFO] executor_workspace.cpp:404: GraphExecutor initialized: max_tokens=2048, d_model=5120, n_layers=64, dtype=F16, pdl=on
+[02:20:44.406][INFO] engine_weight_upload.cpp:115: L2 persisting cache: reserved 45 MB / 60 MB total
+[02:20:44.406][INFO] engine_weight_upload.cpp:272: Expert upload reserve: 10104.95 MiB (workspace=533.00, kv=6515.95, ssm+safety=rest)
+[02:20:44.406][INFO] engine_weight_upload.cpp:279: GPU memory before weight upload: 30691 MiB free / 32579 MiB total
+[02:20:44.407][INFO] weight_upload.cpp:1972: Uploading model weights to GPU (64 layers)...
+[02:20:44.429][INFO] weight_upload.cpp:2021: Pinned staging enabled (4x 4 MiB ring)
+[02:20:45.001][INFO] host_embedding.cpp:73: token embedding: [248320 x 5120] F16 in mapped pinned host memory (2425.0 MiB off the device)
+[02:20:48.049][INFO] weight_upload.cpp:1259: HF GDN A_log: applied -exp() transform to ssm_a (layer 0 first 4 values: -0.0406 -0.0702 -0.0649 -0.0095)
+[02:20:50.196][INFO] weight_upload.cpp:2354: NVFP4 prequant: uploaded 992 scale tensors to GPU
+[02:20:53.651][INFO] weight_cache_file.cpp:220: Warm cache: persisted 194 transformed uploads (2.37 GiB) to /home/imp/.cache/imp/warm/Qwen3.8-27B-NVFP4-vllm-4455b34265703d54.impwcache
+[02:20:53.793][INFO] weight_upload.cpp:2422: All model weights uploaded to GPU (1842 allocations)
+[02:20:53.799][INFO] engine_weight_upload.cpp:326: GPU memory after weight upload: 15171 MiB free / 32579 MiB total (upload consumed 15520 MiB of device free)
+[02:20:53.800][INFO] executor_workspace.cpp:639: Persistent workspace: 90.31 MiB (hidden+residual+norm+logits)
+[02:20:53.801][INFO] executor_workspace.cpp:680: Shared workspace: 301.12 MiB = max(attn=124.0, ffn=224.0, moe=0.0, ssm=301.1 MiB) — saved 348.00 MiB vs separate allocation
+[02:20:53.803][INFO] executor_workspace_buffers.cpp:333: MMVQ scratch buffers: 204.00 KiB (q8_1) + 17.00 KiB (d8), max_blocks=272 (max_k=8704, moe_down=0)
+[02:20:53.803][INFO] gemm_scratch.cpp:77: MMVQ scratch pre-warmed: 19.12 KiB (max_tokens=1, max_K=8704)
+[02:20:53.804][INFO] executor_workspace_buffers.cpp:437: Split-K paged attention scratch: 99072.00 KiB
+[02:20:53.804][INFO] executor_workspace_buffers.cpp:500: Sparse decode attention: budget 256 blocks (4096 tokens), sink 1 + recent 16 blocks, engage above 12288 tokens, score mean+std, scratch 1157.2 KiB
+[02:20:53.805][INFO] executor_sparse_prefill.cpp:48: Sparse prefill attention: budget 512 blocks (8192 tokens), sink 1 + recent 64 blocks, 16 query rows, score mean+std
+[02:20:53.805][INFO] executor_workspace_buffers.cpp:517: cuBLAS attention S-matrix: skipped (FP16-QK FA2 serves all prefill — no S-matrix needed)
+[02:20:53.805][INFO] executor_workspace_buffers.cpp:566: auto fmha_prefill_threshold = 1 (S-matrix cap + 1)
+[02:20:53.807][INFO] executor_workspace_buffers.cpp:1207: CUTLASS NVFP4 activation scratch: 40.32 MiB (data=17.00, sf=2.12, ws=21.19)
+[02:20:53.839][INFO] engine_weight_upload.cpp:443: weight file pages released after upload: 18.36 GiB advised away (host-resident weights refault on demand)
+[02:20:53.840][INFO] engine_kv_cache_init.cpp:83: KV cache layers: 16 attention out of 64 total
+[02:20:53.840][INFO] engine_kv_cache_init.cpp:134: kv_cache.swa_sizing=auto ignored: model has no sliding-window layers
+[02:20:53.840][INFO] engine_kv_cache_init.cpp:206: library reserve: no measurement for this model in /home/imp/.cache/imp/library_reserve — planning with the 3900 MiB constant. It is recorded after the first forward; mount that path (or set vram.library_reserve_cache) to keep it across restarts.
+[02:20:53.840][INFO] vram_budget.cpp:269: VRAM budget: reserve floored at the library charge 1303 -> 3900 MiB
+[02:20:53.840][INFO] vram_budget.cpp:451: VRAM budget: planner projects 21680.0 MiB (354 entries), heuristic nvfp4=1213.4 MiB cutlass_sf=0.0 MiB.
+[02:20:53.840][INFO] vram_budget.cpp:479: VRAM budget: native-NVFP4 weight-cache reserve 3928.8 MiB (sf=1601.6, moe_slab=0.0, phase3+workspaces=2327.2; floored, not pre-held)
+[02:20:53.840][INFO] vram_budget.cpp:607: VRAM budget: KV clamped 262144 → 3904 blocks to fit post-weight VRAM (paged pool; concurrency bounded by scheduler admission)
+[02:20:53.840][INFO] vram_budget.cpp:698: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=6240.2 MiB, kv=3904 blocks (1098.0 MiB), nvfp4=1213.4 MiB, fp8=0.0 MiB, reserve=3900 MiB, second_pass=yes
+[02:20:53.840][INFO] engine_kv_cache_init.cpp:304: memory plan (A7 step 2 — APPLIED: the KV block count below is what the pool uses):
+  distributable               12684 MiB
+  weight-cache demand          2815 MiB  (same figure the live pass used)
+  library reserve              3900 MiB  (charged by both passes since #1109)
+  SSM/GDN state                2544 MiB  (32 slots)
+  recurrent snapshots           238 MiB  (server.recurrent_snapshot_mb)
+  speculative staging           159 MiB  (hybrid verify state scratch, 2 x 1 slot)
+  engine-persistent             142 MiB  (391 MiB already resident, not charged again)
+  KV: live pass 3904 blocks -> plan 8396 blocks, APPLIED (1098 -> 2361 MiB)
+  KV key min/max metadata     524.8 MiB (8396 blocks, charged per block)
+  ceiling: recurrent 32 seqs, KV 1 seqs at max_seq_len 131072 (8192 blocks/seq), all 32 seqs at <= 4198 tokens
+  WARN: the KV pool serves 1 of the 32 recurrent slots at max_seq_len 131072; all 32 fit only up to 4198 tokens of context (8396 blocks x 16). Set runtime.max_seq_len=4198, or lower runtime.max_batch_size
+  note: forward scratch not modelled until A7 step 4 measures its high-water
+
+[02:20:53.840][INFO] engine_kv_cache_init.cpp:328: KV blocks: plan 8396 (live pass sized 3904)
+[02:20:53.840][INFO] engine_kv_cache_init.cpp:359: sparse decode attention: key min/max pool 524.8 MiB for 8396 blocks, priced in the KV plan (22.22% of the K+V pool)
+[02:20:53.840][INFO] engine_kv_cache_init.cpp:376: GDN model: CUDA graphs enabled (recurrent state in-place)
+[02:20:53.866][INFO] pre_dequant_phase0_nvfp4_loader.cpp:102: merged-scale provenance: 80 groups checked, 0 fused, 0 sharing one scale plane
+[02:20:53.868][INFO] pre_dequant_phase0_nvfp4_loader.cpp:503: GDN NVFP4 alpha/beta: dequantized 96 FP16_ONLY projections to FP16
+[02:20:53.868][INFO] pre_dequant_phase0_nvfp4_loader.cpp:537: NVFP4 pre-quantized: promoted 496 weights to Tensor sidecars
+[02:20:53.868][INFO] pre_dequant_phase0_nvfp4_loader.cpp:633: NVFP4 prequant: registered 400 weights in decode cache (CUTLASS SfAtom built once in Phase 3b)
+[02:20:53.868][INFO] pre_dequant_phase0_nvfp4_loader.cpp:655: GDN/SSM: 96 of 96 recurrent projections registered in the NVFP4 decode cache here; the rest keep their source precision and take whatever prefill/decode tier phase 4 assigns
+[02:20:53.868][INFO] executor_pre_dequant.cpp:174: StoragePlanner: 354 entries, projected VRAM 0.00 MiB
+[02:20:53.868][INFO] pre_dequant_phase1_fp16_cache.cpp:235: Native FP8: 0 weight(s) serve prefill (FP8 x FP8 cuBLASLt) and decode from the checkpoint's bytes, no FP16 copy
+[02:20:53.962][INFO] pre_dequant_fp8_lm_head.cpp:93: FP8 LM head: [248320 x 5120] F16 -> E4M3 per-row scales (1213.4 MiB), all LM-head rows; source released after load if no path reads it
+[02:20:53.962][INFO] pre_dequant_phase3_nvfp4_decode.cpp:123: GDN/SSM: excluding 96 recurrent projections from NVFP4 cache
+[02:20:54.075][INFO] pre_dequant_phase3_cutlass.cpp:257: CUTLASS sm_120 NVFP4 weight cache: 400 tensors, 1450.00 MiB; 0 GGUF-source weights without SfAtom, 0 Q8_0 IMMA weights skipped (prefill reads the source)
+[02:20:54.075][INFO] pre_dequant_phase3_gdn_prefill.cpp:260: GDN NVFP4 prefill: no eligible F16 GDN projection (flag on, model has none)
+[02:20:54.075][INFO] pre_dequant_phase3_gdn_prefill.cpp:272: GDN MXFP8 prefill: no eligible F16 GDN projection (flag on, model has none)
+[02:20:54.075][INFO] pre_dequant_phase4_tensor_registry.cpp:202: WeightRegistry populated with 498 handles (phase-2 shim)
+[02:20:54.075][INFO] pre_dequant_phase4_tensor_registry.cpp:245: Phase-4 overlay: registry=498 cached / plan-ideal=354 (uncached 0 remain as native GGUF blocks)
+[02:20:54.075][INFO] pre_dequant_phase4_tensor_registry.cpp:275: Phase-4 plan-ideal tiers: fp16=2 fp8=0 nvfp4=352 cutlass_nvfp4=0 mxfp4=0 fp32=0
+[02:20:54.075][INFO] pre_dequant_phase4_tensor_registry.cpp:279: Phase-4 wcache actual: fp16=0 fp8=0 nvfp4=400 cutlass_nvfp4=400 cutlass_mxfp4=0 nvfp4_moe=0 fused_kv=0 fused_gate_up=0
+[02:20:54.075][INFO] pre_dequant_phase4_tensor_registry.cpp:342: Phase-4 plan/actual parity: matched=352 mismatch=0 evicted=2
+[02:20:54.075][INFO] pre_dequant_phase4_tensor_registry.cpp:349: Phase-4 native: 1842 Model::gpu_allocations_ pointers (GGUF blocks + norms + scratch — bypass the overlay layer)
+[02:20:54.075][INFO] pre_dequant_phase4_tensor_registry.cpp:372: Phase-4 decode-redundancy: 400 handles, 5800.00 MiB of GGUF source is decode-redundant (overlay covers decode) but kept resident for M>1 prefill (upper bound, not freeable).
+[02:20:54.128][INFO] mem_account.cpp:437: mempool trim: reserved 10496->10496 MiB used 10473->10473 MiB (rc=no error)
+[02:20:54.128][INFO] pre_dequant_phase4_tensor_registry.cpp:797: FP8 LM head: freed the F16 source (2425.0 MiB, 2425.0 MiB back to the driver, 1211.6 MiB to the expert cache after the 1213.4 MiB served head)
+[02:20:54.128][INFO] executor_forward_moe_nvfp4_host.cu:119: Device expert cache: not built (no host-resident NVFP4 layer in a mapped pinned slab, or the pool is too small); the host LRU path serves decode
+[02:20:54.128][INFO] engine_kv_cache_init.cpp:550: KV cache: committing 25% of the pool up front (2075 of 8396 blocks)
+[02:20:54.128][INFO] engine_kv_cache_init.cpp:557: KV cache: growable, starting at 2075 blocks with a 8396-block ceiling (33200 -> 134336 tokens as VRAM frees)
+[02:20:54.128][INFO] engine_kv_cache_init.cpp:568: KV cache: 2075 blocks (33200 tokens), 583.59 MiB, dtype=NVFP4 (layers=16/64, kv_heads=4, head_dim=256, block_size=16)
+[02:20:54.167][INFO] kv_cache_scales.cu:30: KV cache scales (kv_cache_scales): 2075 blocks x 32768 B = 64.84 MiB, 134.0 MiB committed; grows with the pool to 262.4 MiB at the 8396-block ceiling
+[02:20:54.472][INFO] engine_kv_cache_init.cpp:682: KV cache: pool copy bandwidth 1629 GB/s (resident)
+[02:20:54.477][INFO] kv_cache_minmax.cu:54: KV cache key min/max metadata: 166.0 MiB committed (16 layers x 2075 blocks), grows with the pool to 524.8 MiB
+[02:20:54.477][INFO] engine_kv_cache_init.cpp:739: Prefix caching enabled (pin budget 518 blocks)
+[02:20:54.477][INFO] ssm_state.cpp:128: SSM state: 48 layers x 32 sequences lazy, 2560.00 MiB reserved, 0.00 MiB committed (0 reserved slot(s); 79.5 MiB per slot, stride 80.0 MiB; conv=160.0 KB, h=1536.0 KB [BF16] per layer)
+[02:20:54.479][INFO] recurrent_snapshot_store.cpp:81: RecurrentSnapshotStore: 3/3 slots x 79.5 MiB pre-allocated (budget 256 MiB)
+[02:20:56.734][INFO] recurrent_snapshot_store.cpp:94: RecurrentSnapshotStore: host tier 25/25 slots x 79.5 MiB pinned (budget 2048 MiB)
+[02:20:56.734][INFO] executor_workspace_buffers.cpp:1354: prefill dequant cap: 170 MiB of eligible planes vs 512 MiB cap -> graph capturable (LM head 0 MiB excluded, it never takes the M>1 dequant fallback; covered 170 MiB)
+[02:20:56.736][INFO] executor_workspace_buffers.cpp:1403: gemm_nvfp4 dequant workspace: 170.00 MiB (graph-safe M>1 fallback; covers dense=400, moe=0, cutlass=400 cache entries + per-layer SafeTensors NVFP4 expert tensors)
+[02:20:56.737][INFO] engine_kv_cache_init.cpp:1036: Serving metadata pool: 3.2 MiB (rows 131072, 36 tables x 8396 blocks)
+[02:20:56.737][INFO] engine_kv_cache_init.cpp:963: GPU memory: 19691 MiB used / 32580 MiB total (12889 MiB free)
+[02:20:56.737][INFO] vram_allocator.cpp:164: VRAMAllocator report: tracked=1788 MiB, free=12889 MiB, headroom=1303 MiB, total=32580 MiB
+[02:20:56.737][INFO] vram_allocator.cpp:171:   cutlass_act_data             17.0 MiB  (1 allocs)
+[02:20:56.737][INFO] vram_allocator.cpp:171:   cutlass_act_sf                2.1 MiB  (1 allocs)
+[02:20:56.737][INFO] vram_allocator.cpp:171:   cutlass_workspace            21.2 MiB  (1 allocs)
+[02:20:56.737][INFO] vram_allocator.cpp:171:   fp8_lm_head                1213.4 MiB  (1 allocs)
+[02:20:56.737][INFO] vram_allocator.cpp:171:   gdn_ab_ws                     0.1 MiB  (1 allocs)
+[02:20:56.737][INFO] vram_allocator.cpp:171:   gdn_chunkpar_ws             123.0 MiB  (1 allocs)
+[02:20:56.737][INFO] vram_allocator.cpp:171:   mrope_delta                   0.0 MiB  (1 allocs)
+[02:20:56.737][INFO] vram_allocator.cpp:171:   mrope_positions               0.0 MiB  (1 allocs)
+[02:20:56.737][INFO] vram_allocator.cpp:171:   penalty_hist                 16.0 MiB  (1 allocs)
+[02:20:56.737][INFO] vram_allocator.cpp:171:   penalty_tokens                0.5 MiB  (1 allocs)
+[02:20:56.737][INFO] vram_allocator.cpp:171:   persistent_workspace         90.3 MiB  (1 allocs)
+[02:20:56.737][INFO] vram_allocator.cpp:171:   prefill_pool                  3.2 MiB  (1 allocs)
+[02:20:56.737][INFO] vram_allocator.cpp:171:   shared_workspace            301.1 MiB  (1 allocs)
+[02:20:56.737][INFO] executor_gemm_smallm.cpp:106: small-M NVFP4 scratch: 400 weights, workspace 2176 KiB + activation 306 KiB from the T2 arena
+[02:20:56.738][INFO] chat_template.cpp:188: Chat template: using Jinja2 engine
+[02:20:56.738][INFO] chat_template.cpp:399: Chat template: chatml
+[02:20:56.738][INFO] engine_workspace_warmup.cpp:344: Banned 19 special tokens from generation
+[02:20:56.738][INFO] engine_workspace_warmup.cpp:354:   banned: 248045(<|im_start|>) 248047(<|object_ref_start|>) 248048(<|object_ref_end|>) 248049(<|box_start|>) 248050(<|box_end|>) 248051(<|quad_start|>) 248052(<|quad_end|>) 248053(<|vision_start|>) 248054(<|vision_end|>) 248055(<|vision_pad|>) 248056(<|image_pad|>) 248057(<|video_pad|>) 248070(<|audio_start|>) 248071(<|audio_end|>) 248072(<tts_pad>) 248073(<tts_text_bos>) 248074(<tts_text_eod>) 248075(<tts_text_bos_single>) 248076(<|audio_pad|>) 
+[02:20:56.751][INFO] stop_mask.cpp:37: Stop mask: 21 ids masked while a stop would be suppressed
+[02:20:56.751][INFO] qwen3vl_pipeline.cpp:117: Qwen3-VL pipeline configured: <= 4096 patches; tower upload and buffers deferred to the first image (1106.6 MiB of the engine arena stay uncommitted until then)
+[02:20:56.756][INFO] executor_gdn_alpha_beta.cpp:103: gdn alpha/beta narrow GEMM ACTIVE (M=16, K=5120, N=48 x 2)
+[02:20:56.771][INFO] attention_fmha_sm120.cu:1991: FMHA FA2 register-resident kernel ACTIVE (hd=256, Bq=64, Bkv=64, qk=f16, qk_acc=f16, pv_acc=f16, kv_buf=twoslot, smem=67584 B, seq_q=16 seq_kv=16)
+[02:20:56.796][INFO] executor_gdn_alpha_beta.cpp:167: gdn M=1 fused input GEMV ACTIVE (K=5120, rows 10240 + 6144 + 2 x 48)
+[02:20:56.798][INFO] executor_gdn_alpha_beta.cpp:195: gdn M=1 out-projection with residual epilogue ACTIVE (N=5120, K=6144)
+[02:20:56.798][INFO] executor_gdn_alpha_beta.cpp:221: attention M=1 fused q|k|v NVFP4 GEMV ACTIVE (K=5120, rows 12288 + 1024 + 1024)
+[02:20:56.819][INFO] engine_scheduler.cpp:286: Resolved dispatch: attn_prefill=fa2_fp16qk attn_decode=paged_nvfp4 moe_prefill=n/a (dense) graphs=1
+[02:20:56.845][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:56.845][INFO] cuda_graph.cu:64: CudaGraphCapture: using cudaStreamCaptureModeRelaxed (default for prefill-safe capture)
+[02:20:56.868][WARN] engine_workspace_warmup.cpp:430: library reserve MISMATCH: the plan charged 3900 MiB, this start measured 234 MiB (-3666 MiB, forward window 0 MiB / whole-init 234 MiB). The plan therefore over-reserved; a start that charged the constant re-sizes the KV pool to the measurement next (#2436). Pin it for this model with 'vram.library_reserve_mb = 234' in imp.conf: that is the number the plan and the measurement cache both use. The charge is stable per model and quant path; the forward WINDOW is not, which is why the two figures above can differ by orders of magnitude (AUDIT B79).
+[02:20:56.868][INFO] engine_workspace_warmup.cpp:402: library reserve: forward window 0 MiB, whole-init 234 MiB — charging 234 MiB (AUDIT B79/B80)
+[02:20:56.868][INFO] engine_workspace_warmup.cpp:531: library reserve: recorded 234 MiB in /home/imp/.cache/imp/library_reserve — the next start on this model plans with it IF that path persists (in a container, mount it or set vram.library_reserve_cache; otherwise the constant is charged again)
+[02:20:56.892][INFO] kv_cache_scales.cu:30: KV cache scales (kv_cache_scales): 2075 blocks x 32768 B = 64.84 MiB, 128.0 MiB committed; grows with the pool to 595.7 MiB at the 19063-block ceiling
+[02:20:56.898][INFO] kv_cache_minmax.cu:54: KV cache key min/max metadata: 160.0 MiB committed (16 layers x 2075 blocks), grows with the pool to 1191.4 MiB
+[02:20:57.254][INFO] kv_cache.cu:572: KV cache: grew 2075 -> 4750 blocks (76000 tokens, 1250 MiB committed of a 19063-block ceiling)
+[02:20:57.254][INFO] engine_kv_replan.cpp:34: library reserve: applied this start's 233 MiB measurement in place of the 3900 MiB charge: KV plan 8396 -> 19063 blocks, committed 2075 -> 4750 (target 4750), ceiling 8396 -> 19063
+[02:20:57.281][INFO] gemm_dispatch_uncached.cpp:266: uncached F16 M=1456 N=48 K=5120: per-call dequant (in stride 5120, out stride 48)
+[02:20:57.313][INFO] gemm.cpp:333: [gemm-algo] pick M=1456 K=5120 N=48 heuristic, warmup-validated cand[0/8]: id=67 tile=319 stages=35 splitk=9 red=2 swizzle=0 custom=28
+[02:20:57.517][INFO] gemm.cpp:333: [gemm-algo] pick M=40 K=5120 N=48 heuristic, warmup-validated cand[0/8]: id=67 tile=9 stages=36 splitk=16 red=2 swizzle=0 custom=18
+[02:20:57.561][INFO] engine_scheduler.cpp:1603: decode-pipeline: first eligible batch n=31 -> ENTERED
+[02:20:57.580][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:57.662][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:57.733][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:57.790][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:57.860][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:57.934][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:57.989][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.061][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.121][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.175][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.231][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.283][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.339][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.396][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.446][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.504][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.571][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.621][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.681][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.730][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.780][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.829][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.878][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.926][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:58.973][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:59.031][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:59.078][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:59.140][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:59.186][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:59.233][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:59.280][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:59.313][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:20:59.350][INFO] cuda_graph.cu:1181: ConditionalRunner: graph built in 9.5 ms (max_steps=6)
+[02:20:59.350][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 6 remaining tokens
+[02:20:59.416][INFO] engine_workspace_warmup.cpp:651: graph prewarm: 32/32 decode graphs captured (105 steps, 2.1 s)
+[02:20:59.439][INFO] engine_sampling_stop.cpp:296: SSM state: 31 slot(s) decommitted after warmup (1 still held), 80 MiB committed
+[02:20:59.439][INFO] engine_workspace_warmup.cpp:674: Warmup complete
+[02:20:59.440][INFO] executor_workspace_buffers.cpp:1932: chunk-capture K/V scratch: 2x 64.0 MiB (ctx_capacity=32768, nkv=4, hd=256)
+[02:20:59.440][INFO] engine_spec_capture.cpp:142: [spec-capture] enabled (ctx_cap=32768)
+[02:20:59.446][INFO] engine_spec_buffers.cpp:159: [spec] hybrid state scratch prewarmed: 159.0 MiB (2 x 79.5 MiB recurrent slot)
+[02:20:59.446][INFO] engine_spec_capture.cpp:75: [spec] scratch prewarmed: chunk_cap=65 table_cap=8208 ctx_cap=32768
+[02:20:59.447][INFO] mem_account.cpp:357: 
+===== VRAM AUDIT [init_complete] =====
+device: total=32580 MiB  used=21335 MiB  free=11245 MiB  peak_used=21335 MiB
+budget: cap=none  own=19682 MiB  own_peak=21802 MiB  ctx_at_install=1653 MiB
+mempool(async): reserved=10624 MiB  used=10601 MiB  trimmable=23 MiB
+mempool(async) high-water since serving began: used=10601 MiB  reserved=10624 MiB (delta vs now: used +0 MiB)
+graphmem: used=0.0 MiB  reserved=0.0 MiB  high_since_serving=0.0 MiB
+--- per-pool notes (tracked allocation sites) ---
+pool                        current_MiB     peak_MiB     allocs
+WEIGHTS                         13067.7      15492.7       1842
+ssm_state                          80.0       2560.0         32
+WEIGHT_CACHE_CUTLASS_SF          1450.0       1450.0          1
+kv_cache                         1250.0       1250.0          3
+fp8_lm_head                      1213.4       1213.4          1
+engine_arena                      518.0        518.0         12
+kv_cache_minmax                   326.0        326.0          3
+shared_workspace                  301.1        301.1          1
+kv_cache_scales                   210.0        262.0          3
+recurrent_snapshots               238.5        238.5          1
+gdn_chunkpar_ws                   123.0        123.0          1
+persistent_workspace               90.3         90.3          1
+spec_state_snapshot                79.5         79.5          1
+cutlass_workspace                  21.2         21.2          1
+cutlass_act_data                   17.0         17.0          1
+penalty_hist                       16.0         16.0          1
+verify_sample_rows                  4.1          4.1          1
+prefill_pool                        3.2          3.2          1
+cutlass_act_sf                      2.1          2.1          1
+penalty_tokens                      0.5          0.5          1
+token_is_whitespace                 0.2          0.2          1
+gdn_ab_ws                           0.1          0.1          1
+mrope_positions                     0.0          0.0          1
+mrope_delta                         0.0          0.0          1
+stop_mask_tokens                    0.0          0.0          1
+banned_tokens                       0.0          0.0          1
+TRACKED TOTAL                   19012.1      23969.1
+  named: context                 1652.8    CUDA context + driver
+  named: library reserve          233.5    claimed on first forward (A1.5)
+ACCOUNTED (tracked+named)       20898.3    98.0% of device used
+RESIDUAL (unattributed)           436.4    2.0% of device used
+===== END VRAM AUDIT [init_complete] =====
+
+Reasoning model: <think>=248068, </think>=248069
+Chat template: chatml
+Continuous batching: started
+Max concurrent: 64
+Request timeout: 300s
+Responses store: ttl 3600s, max 1000 entries, 256 MiB (LRU)
+Server listening on http://0.0.0.0:8090
+Endpoints:
+  GET    /                    web UI — open this in a browser
+  GET    /health
+  GET    /v1/models            (vLLM max_model_len + llama.cpp meta.n_ctx_train)
+  GET    /props               llama.cpp-compatible context probe (n_ctx)
+  GET    /info                TGI-compatible context probe (max_total_tokens)
+  POST   /v1/chat/completions
+  POST   /v1/responses          OpenAI Responses API (Agents SDK / Codex dialect)
+  GET    /v1/responses/{id}     stored response (store=true); DELETE removes it
+  POST   /v1/completions       `suffix` = fill-in-the-middle
+  POST   /infill               llama.cpp fill-in-the-middle
+  POST   /v1/messages          Anthropic-compatible (streaming + non-streaming)
+  POST   /v1/messages/count_tokens
+  POST   /v1/embeddings
+  POST   /v1/rerank            (also /rerank) cross-encoder reranking
+  POST   /v1/decide            closed-choice letter scoring, no decoding
+  POST   /v1/score             softmax over candidate tokens at the last position
+  POST   /tokenize
+  POST   /detokenize
+  POST   /admin/suspend       Park weights in host RAM, free the GPU
+  POST   /admin/resume        Restore weights, serve again
+  POST   /admin/lora/load     Load a PEFT LoRA adapter {path, name?}
+  POST   /admin/lora/unload   Unload a LoRA adapter {id} or {name}
+  POST   /v1/sessions/{id}/close  release a session_id prefix pin
+  POST   /v1/requests/{id}/end_thinking  end a running request's think block
+  GET    /metrics             Prometheus metrics
+[02:21:00.639][INFO] handlers_chat_params.cpp:567: [imp-0] chat/completions: prompt_msgs=1 stream=true max_tokens=400 temp=0.00
+[02:21:00.639][INFO] engine.cpp:1051: request imp-0 -> engine req 34
+[02:21:00.641][INFO] gemm.cpp:333: [gemm-algo] pick M=81 K=5120 N=48 heuristic, warmup-validated cand[0/8]: id=67 tile=13 stages=36 splitk=16 red=2 swizzle=0 custom=28
+[02:21:00.668][INFO] cuda_graph.cu:1160: ConditionalRunner: exec update refused (the graph update was not performed because it included changes which violated constraints specific to instantiated graph update, result 2), instantiating
+[02:21:00.669][INFO] cuda_graph.cu:1181: ConditionalRunner: graph built in 1.1 ms (max_steps=399)
+[02:21:00.669][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 46 remaining tokens
+[02:21:02.725][INFO] engine_scheduler.cpp:867: spec-ngram: gates failed, refused by 'think_budget_in_block' (temp=0.00 top_k=20 rep_pen=1.05 freq=0.00 pres=0.00 dry=0.00 mirostat=0 bias=0 logprobs=0 json=0 schema=0 think_budget=0.50 ssm=1 moe=0 moe_nvfp4=0 spec_moe=1 mtp=0 chunked_prefill=1)
+[02:21:04.803][INFO] engine_spec_stats.cpp:43: [spec-ngram] verify_steps=0 miss_steps=16 drafted=0 accepted=0 (0.0%) emitted=0 (0.00 tok/verify, 0.00 ms/verify) sampled=0
+[02:21:04.803][INFO] stream_driver.cpp:708: [imp-0] 81 prompt + 400 completion tokens, 4164.0 ms (ttft=27.8 ms, cached=0)
+[02:21:04.804][INFO] handlers_chat_params.cpp:567: [imp-1] chat/completions: prompt_msgs=1 stream=true max_tokens=400 temp=0.00
+[02:21:04.805][INFO] engine.cpp:1051: request imp-1 -> engine req 35
+[02:21:04.805][INFO] gemm.cpp:333: [gemm-algo] pick M=87 K=5120 N=48 heuristic, warmup-validated cand[0/8]: id=67 tile=13 stages=36 splitk=16 red=2 swizzle=0 custom=28
+[02:21:04.805][INFO] ffn_graph_cache.cpp:165: FFN prefill graphs ACTIVE: first capture at 128 rows (layer 0)
+[02:21:04.832][INFO] cuda_graph.cu:1181: ConditionalRunner: graph updated in place in 0.1 ms (max_steps=399)
+[02:21:04.833][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 40 remaining tokens
+[02:21:08.971][INFO] engine_spec_stats.cpp:43: [spec-ngram] verify_steps=1 miss_steps=31 drafted=16 accepted=0 (0.0%) emitted=1 (1.00 tok/verify, 17.89 ms/verify) sampled=0
+[02:21:08.971][INFO] engine_spec_stats.cpp:59: [spec-ngram] by source: mtp verifies=0 drafted=0 accepted=0 (0.0%) emitted=0 (0.00 tok/verify) | ngram verifies=1 drafted=16 accepted=0 (0.0%) emitted=1 (1.00 tok/verify)
+[02:21:08.972][INFO] stream_driver.cpp:708: [imp-1] 87 prompt + 400 completion tokens, 4167.3 ms (ttft=26.8 ms, cached=0)
+[02:21:08.973][INFO] handlers_chat_params.cpp:567: [imp-2] chat/completions: prompt_msgs=1 stream=true max_tokens=400 temp=0.00
+[02:21:08.973][INFO] engine.cpp:1051: request imp-2 -> engine req 36
+[02:21:08.974][INFO] gemm.cpp:333: [gemm-algo] pick M=88 K=5120 N=48 heuristic, warmup-validated cand[0/8]: id=67 tile=13 stages=36 splitk=16 red=2 swizzle=0 custom=28
+[02:21:09.011][INFO] cuda_graph.cu:1181: ConditionalRunner: graph updated in place in 0.1 ms (max_steps=399)
+[02:21:09.011][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 39 remaining tokens
+[02:21:11.928][INFO] engine_spec_capture.cpp:311: [spec-capture] verify chunk graph cached (n_tokens=17, ctx_tier=4096, rec_slot=31): capture 2.3 ms, instantiate 5.9 ms, launch 0.5 ms
+[02:21:13.119][INFO] engine_spec_stats.cpp:43: [spec-ngram] verify_steps=2 miss_steps=50 drafted=32 accepted=5 (15.6%) emitted=7 (3.50 tok/verify, 20.44 ms/verify) sampled=0
+[02:21:13.119][INFO] engine_spec_stats.cpp:59: [spec-ngram] by source: mtp verifies=0 drafted=0 accepted=0 (0.0%) emitted=0 (0.00 tok/verify) | ngram verifies=2 drafted=32 accepted=5 (15.6%) emitted=7 (3.50 tok/verify)
+[02:21:13.119][INFO] stream_driver.cpp:708: [imp-2] 88 prompt + 400 completion tokens, 4146.0 ms (ttft=36.4 ms, cached=0)
+[02:21:13.120][INFO] handlers_chat_params.cpp:567: [imp-3] chat/completions: prompt_msgs=1 stream=true max_tokens=400 temp=0.00
+[02:21:13.121][INFO] engine.cpp:1051: request imp-3 -> engine req 37
+[02:21:13.148][INFO] cuda_graph.cu:1181: ConditionalRunner: graph updated in place in 0.1 ms (max_steps=399)
+[02:21:13.148][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 40 remaining tokens
+[02:21:17.244][INFO] engine_spec_stats.cpp:43: [spec-ngram] verify_steps=3 miss_steps=66 drafted=48 accepted=10 (20.8%) emitted=13 (4.33 tok/verify, 18.25 ms/verify) sampled=0
+[02:21:17.244][INFO] engine_spec_stats.cpp:59: [spec-ngram] by source: mtp verifies=0 drafted=0 accepted=0 (0.0%) emitted=0 (0.00 tok/verify) | ngram verifies=3 drafted=48 accepted=10 (20.8%) emitted=13 (4.33 tok/verify)
+[02:21:17.244][INFO] stream_driver.cpp:708: [imp-3] 87 prompt + 400 completion tokens, 4123.6 ms (ttft=26.4 ms, cached=0)
+[02:21:17.246][INFO] handlers_chat_params.cpp:567: [imp-4] chat/completions: prompt_msgs=1 stream=true max_tokens=400 temp=0.00
+[02:21:17.246][INFO] engine.cpp:1051: request imp-4 -> engine req 38
+[02:21:17.246][INFO] gemm.cpp:333: [gemm-algo] pick M=90 K=5120 N=48 heuristic, warmup-validated cand[0/8]: id=67 tile=13 stages=36 splitk=16 red=2 swizzle=0 custom=28
+[02:21:17.272][INFO] cuda_graph.cu:1181: ConditionalRunner: graph updated in place in 0.1 ms (max_steps=399)
+[02:21:17.272][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 37 remaining tokens
+[02:21:21.406][INFO] engine_spec_stats.cpp:43: [spec-ngram] verify_steps=3 miss_steps=82 drafted=48 accepted=10 (20.8%) emitted=13 (4.33 tok/verify, 18.25 ms/verify) sampled=0
+[02:21:21.406][INFO] engine_spec_stats.cpp:59: [spec-ngram] by source: mtp verifies=0 drafted=0 accepted=0 (0.0%) emitted=0 (0.00 tok/verify) | ngram verifies=3 drafted=48 accepted=10 (20.8%) emitted=13 (4.33 tok/verify)
+[02:21:21.406][INFO] stream_driver.cpp:708: [imp-4] 90 prompt + 400 completion tokens, 4160.5 ms (ttft=25.2 ms, cached=0)
+[02:21:21.408][INFO] handlers_chat_params.cpp:567: [imp-5] chat/completions: prompt_msgs=1 stream=true max_tokens=400 temp=0.00
+[02:21:21.409][INFO] engine.cpp:1051: request imp-5 -> engine req 39
+[02:21:21.410][INFO] gemm.cpp:333: [gemm-algo] pick M=84 K=5120 N=48 heuristic, warmup-validated cand[0/8]: id=67 tile=13 stages=36 splitk=16 red=2 swizzle=0 custom=28
+[02:21:21.445][INFO] cuda_graph.cu:1181: ConditionalRunner: graph updated in place in 0.1 ms (max_steps=399)
+[02:21:21.445][INFO] engine_graph_decode.cpp:460: AsyncGraphLoop: launched for 43 remaining tokens
+[02:21:25.223][INFO] gemm.cpp:831: [gemm-algo] captured GEMM M=33 K=5120 N=48 uses the heuristic algo (chosen at M=40, tile=9)
+[02:21:25.236][INFO] engine_spec_capture.cpp:311: [spec-capture] verify chunk graph cached (n_tokens=33, ctx_tier=4096, rec_slot=31): capture 3.5 ms, instantiate 8.9 ms, launch 0.8 ms
+[02:21:25.621][INFO] engine_spec_stats.cpp:43: [spec-ngram] verify_steps=4 miss_steps=100 drafted=65 accepted=12 (18.5%) emitted=16 (4.00 tok/verify, 27.90 ms/verify) sampled=0
+[02:21:25.621][INFO] engine_spec_stats.cpp:59: [spec-ngram] by source: mtp verifies=0 drafted=0 accepted=0 (0.0%) emitted=0 (0.00 tok/verify) | ngram verifies=4 drafted=65 accepted=12 (18.5%) emitted=16 (4.00 tok/verify)
+[02:21:25.621][INFO] stream_driver.cpp:708: [imp-5] 84 prompt + 400 completion tokens, 4212.7 ms (ttft=35.5 ms, cached=0)

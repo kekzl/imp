@@ -1,0 +1,22 @@
+image ghcr.io/kekzl/imp:latest ghcr.io/kekzl/imp@sha256:7a52810d0b146f4320a2224c8fcbba637c02db4788dd01b2a047db661e4c3567
+image vllm/vllm-openai:v0.31.0 vllm/vllm-openai@sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3
+image ghcr.io/ggml-org/llama.cpp:server-cuda ghcr.io/ggml-org/llama.cpp@sha256:9d835c2febd6f09a0aafb30e9c1b29a67a49923b67075993551ab4593d84491f
+== arm llama-gguf conc 1 trial 1 ==
+
+==========
+==========
+
+
+
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+   https://docs.nvidia.com/datacenter/cloud-native/ .
+
+wave0: 300 tok in 5.77s = 52.0 tok/s aggregate (prompt 43 tok avg)
+wave1: 300 tok in 4.66s = 64.3 tok/s aggregate (prompt 43 tok avg)
+wave2: 300 tok in 4.71s = 63.8 tok/s aggregate (prompt 43 tok avg)
+MEDIAN 63.8
+=== summary ===

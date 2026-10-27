@@ -1,0 +1,6 @@
+imp:2 tok/s 134.7 drafted 1059 accepted 637 verifies 556 accept 60.2% tokens/verify 2.146 ms/verify 15.93
+vllm:2 tok/s 125.1 drafted 998 accepted 700 verifies 499 accept 70.1% tokens/verify 2.403 ms/verify 19.21
+imp:1 tok/s 124.7 drafted 882 accepted 536 verifies 658 accept 60.8% tokens/verify 1.815 ms/verify 14.55
+imp:3 tok/s 131.8 drafted 1226 accepted 707 verifies 481 accept 57.7% tokens/verify 2.470 ms/verify 18.74
+vllm:1 tok/s 106.9 drafted 665 accepted 532 verifies 665 accept 80.0% tokens/verify 1.800 ms/verify 16.84
+exit=0

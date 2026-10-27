@@ -5,7 +5,8 @@
 # Usage: bash tools/analysis/engine3_conc.sh [CONCS="1 32"] [TRIALS=2] [WAVES=3]
 # [NVFP4=Qwen3.8-27B-NVFP4-vllm] [GGUF=Qwen3.8-27B-UD-Q4_K_M.gguf] [IMG_IMP=imp:test]
 # [IMG_VLLM=vllm/vllm-openai:v0.31.0] [IMG_LLAMA=ghcr.io/ggml-org/llama.cpp:server-cuda]
-# [ARMS="imp-gguf llama-gguf"] [IMP_SET=key=value, one extra --set on the imp arms]
+# [ARMS="imp-gguf llama-gguf"] [IMP_SET="k=v k2=v2", extra --set per pair on the imp arms]
+# [VLLM_SPEC=<json>, --speculative-config on the vLLM arm]
 set -u
 MODELS_DIR=${MODELS_DIR:-$HOME/models}
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -41,12 +42,12 @@ start() {  # $1 = arm, $2 = conc
         imp-nvfp4|imp-gguf)
             local m=$NVFP4; [ "$1" = imp-gguf ] && m=$GGUF
             docker run "${common[@]}" "$IMG_IMP" imp-server --model "/models/$m" --host 0.0.0.0 \
-                --port "$PORT" --max-concurrent "$2" --set "runtime.max_batch_size=$2" ${IMP_SET:+--set "$IMP_SET"} >/dev/null
+                --port "$PORT" --max-concurrent "$2" --set "runtime.max_batch_size=$2" $(for s in ${IMP_SET:-}; do printf -- "--set %s " "$s"; done) >/dev/null
             wait_healthy 600 ;;
         vllm-nvfp4)
             docker run "${common[@]}" --ipc=host -e VLLM_WSL2_ENABLE_PIN_MEMORY=1 "$IMG_VLLM" \
                 --model "/models/$NVFP4" --served-model-name "$NVFP4" --host 0.0.0.0 --port "$PORT" \
-                --max-model-len 16384 --max-num-seqs "$2" >/dev/null
+                --max-model-len 16384 --max-num-seqs "$2" ${VLLM_SPEC:+--speculative-config "$VLLM_SPEC"} >/dev/null
             wait_healthy 1200 ;;
         llama-gguf)
             docker run "${common[@]}" "$IMG_LLAMA" -m "/models/$GGUF" --host 0.0.0.0 --port "$PORT" \

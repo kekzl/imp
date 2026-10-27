@@ -1,0 +1,5 @@
+vllm:2 tok/s 116.84 drafted 4300 accepted 2650 verifies 2150 accept 61.6% tokens/verify 2.233 ms/verify 19.11
+imp:2 tok/s 126.49 drafted 4212 accepted 2510 verifies 2254 accept 59.6% tokens/verify 2.114 ms/verify 16.71
+vllm:2 tok/s 116.47 drafted 4300 accepted 2650 verifies 2150 accept 61.6% tokens/verify 2.233 ms/verify 19.17
+imp:2 tok/s 126.17 drafted 4212 accepted 2510 verifies 2254 accept 59.6% tokens/verify 2.114 ms/verify 16.75
+exit=0

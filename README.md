@@ -1,8 +1,8 @@
 <!--
 layer: L0
 audience: newcomers
-verified: 2026-10-12
-commit: 95a448b7
+verified: 2026-10-27
+commit: 48f0058b
 -->
 
 <p align="center">
@@ -18,52 +18,35 @@ RTX 5050 to 5090 · RTX PRO 2000 to 6000 · one <code>docker run</code> · OpenA
   <img src="https://img.shields.io/badge/C++-23-00599C?style=flat&logo=cplusplus" alt="C++23">
 </p>
 
-General-purpose engines run on every GPU, so none of them is built around yours. imp is written for exactly one chip generation, Blackwell `sm_120a` (every GeForce RTX 50 and RTX PRO Blackwell card, tuned on the RTX 5090), and uses what that chip has: native 4-bit (FP4) math, its tensor cores, its memory bandwidth.
+**imp is an LLM server for one GPU generation only: NVIDIA Blackwell `sm_120a`, every GeForce RTX 50 and RTX PRO Blackwell card.** It is for people who run models on their own single card and point chat apps and coding agents at it (OpenAI and Anthropic API: Claude Code, Codex, any OpenAI client). Built and tuned on one RTX 5090, it uses what that chip has: native 4-bit (FP4) math, its tensor cores, its memory bandwidth. One container, no CUDA toolkit or Python on your machine, MIT.
 
-### Qwen3.8-27B: text and images, on one card
+<p align="center"><img src="docs/assets/demo.gif" width="760" alt="terminal: the 123.6 GiB Qwen3.8-Flash-Next streams an answer on one 32 GB RTX 5090, with tokens per second"></p>
 
-| Same RTX 5090, each engine on its defaults | **imp** | vLLM 0.31.0 | llama.cpp |
+### Measured on one RTX 5090
+
+| Qwen3.8-27B, tokens/s | **imp** | vLLM 0.31.0 | llama.cpp |
 | --- | ---: | ---: | ---: |
-| one user | **91.0-93.7 tokens/s** | 68.9-70.0 tokens/s | 61.8-63.0 tokens/s |
-| 32 users at once (total) | **1963.5-1977.0 tokens/s** | 1354.8-1449.4 tokens/s | 162.0-166.8 tokens/s |
+| one user | **96.3** | 69.9 | |
+| 32 users at once (total) | **1979.1** | 1414.2 | |
+| one user, same Q4_K_M GGUF file | **77.1** | | 62.9 |
+| 32 users at once, same GGUF file | **1365.2** | | 178.7 |
 
-<!-- [PROV: commit=54921da6 date=2026-10-11 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 (imp, vLLM: Qwen3.8-27B-NVFP4-vllm) / Q4_K_M (llama.cpp: ggml-org Qwen3.8-27B-Q4_K_M.gguf)
-       cuda=13.4.2 path=server-api cmd=`tools/analysis/engine3_conc.sh` n=2 trials x 3 waves, range of the trial medians
-       note=300-token greedy answers, ignore_eos; llama.cpp image server-cuda sha256 9d835c2f] -->
+<!-- [PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-27B quant=NVFP4 (imp, vLLM: Qwen3.8-27B-NVFP4-vllm) / Q4_K_M (imp, llama.cpp: ggml-org GGUF) cuda=13.4.3 path=server-api
+       cmd=`tools/analysis/engine3_conc.sh` n=3 trials x 3 waves note=imp ghcr v0.59.0; one-user imp row speculative.mtp_k=0 ngram=false; MTP k=2 on both: `tools/analysis/mtp_vs_vllm.sh` 3 starts x 12 chat requests; docs/audit/launch_2026_10_27/] -->
 
-imp and vLLM read the same NVFP4 checkpoint, llama.cpp the Q4_K_M GGUF. On that same GGUF imp leads too: **72.7-73.4** vs 60.5-61.0 tokens/s for one user, **240.0-244.4** vs 154.5-155.1 for 32 users at once.
-<!-- [PROV: commit=95a448b7 date=2026-10-12 hw=RTX5090 model=Qwen3.8-27B quant=Q4_K_M (ggml-org GGUF, both engines) cuda=13.4.2 path=server-api cmd=`ARMS="imp-gguf llama-gguf" tools/analysis/engine3_conc.sh` n=2 trials x 3 waves note=same harness as above; #2688] -->
+Server API, 300-token greedy answers to short prompts, median of 3 fresh-server trials, each engine on its defaults; imp and vLLM read the same NVFP4 checkpoint, imp and llama.cpp the same GGUF file. No speculative decoding in the one-user rows (imp NVFP4: switched off; imp GGUF: its default drafts nothing, 77.7 with all of it forced off). With the model's own MTP draft head on in both engines (imp: `--max-batch 1`), 6 real chat prompts: imp **126.49**, vLLM 116.84; on short template completions the two are within noise. Ranges, commands, raw logs: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md#qwen38-27b-three-engines). **tokens/s** = how fast the answer appears (a token is about ¾ of a word).
 
-### Qwen3.8-Flash-Next: four times bigger than the card
+**Bigger than the card:** the 123.6 GiB **Qwen3.8-Flash-Next** answers at **92.1 tokens/s** for one user on a 32 GB RTX 5090, its experts in host RAM ([how](#models-larger-than-vram)).
+<!-- [PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=3 server starts x 6 prompts] -->
 
-The 123.6 GiB checkpoint does not fit in 32 GB. imp keeps its 56.25 GiB of experts in host RAM and caches the busiest ones on the card: **114.90-115.53 tokens/s** on one RTX 5090 with ~62 GiB of free RAM, reading a 512-token prompt at 1302.95-1327.26 tokens/s ([quickstart](#quickstart-qwen38-flash-next)).
+### Where imp loses, and what it is not
 
-<!-- [PROV: commit=ac99df22+B-61 date=2026-10-25 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3
-       path=host-resident-experts cmd=`imp-cli --bench --bench-pp 512 --bench-reps 5 --max-tokens 128
-       --bench-prompt-file novel_prose_2026.txt` n=3 processes note=real-text prompt, imp defaults (FP8 attention decode sidecar B-59, F16 attention sources freed B-60, staging tables once B-61); 56.25 GiB =
-       load log `NVFP4 experts (56.25 GiB) do not fit`, main 62431977] -->
+- **One chip.** Tested on the RTX 5090; every other `sm_120a` card (RTX 5050 to 5090 D V2, RTX PRO 2000 to 6000 Blackwell) runs the same kernels, VRAM decides the model ([which card](docs/QUICKSTART.md#which-card)). No multi-GPU, no CPU, no other GPU: use [llama.cpp](https://github.com/ggerganov/llama.cpp) for breadth, [vLLM](https://github.com/vllm-project/vllm) for many GPUs.
+- **Dense models under heavy load:** vLLM led Qwen3-14B at 32 users (-7.6 %, 2026-09-02); prompt reading on dense GGUF is level with llama.cpp, not ahead ([`BENCHMARKS.md`](docs/BENCHMARKS.md)).
+- **Models bigger than the card** depend on host RAM, PCIe and how often the topic changes the set of busy experts.
+- **One maintainer, no GPU in CI:** every GPU test and benchmark runs on the maintainer's RTX 5090; issues are welcome, answers are not guaranteed. Every gap with its number: [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
 
-**tokens/s** = how fast the answer appears (a token is about ¾ of a word). Six more models against llama.cpp on the same GGUF file, and every other comparison: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
-
-## Why imp
-
-- **Fast where you feel it.** Answers stream faster, many users share the card (table above), long prompts are read with FP4 attention, and a repeated prompt prefix is read once.
-- **Models bigger than the card.** Mixture-of-experts models keep their experts in host RAM and cache the busiest on the card (Flash-Next above).
-- **Drop-in for your tools.** OpenAI and Anthropic APIs, tool calling, JSON output, streaming, thinking models, a built-in chat in the browser. Point your coding agent at it and go.
-- **No conversion step.** Load the GGUF you already have, or an NVFP4 SafeTensors checkpoint straight from Hugging Face.
-- **One container.** No CUDA toolkit, no Python environment on your machine: Docker plus the NVIDIA driver.
-- **Free and open source** (MIT).
-
-## Is it for you?
-
-| You have | imp |
-| --- | --- |
-| GeForce RTX 5090 (tested), 5090 D, 5090 D V2, 5080, 5070 Ti, 5070, 5060 Ti, 5060, 5050 or RTX PRO 6000, 5000, 4500, 4000, 2000 Blackwell | yes: same kernels, VRAM decides the model ([which card, which model](docs/QUICKSTART.md#which-card)) |
-| any other GPU, CPU only, several GPUs | no: use [llama.cpp](https://github.com/ggerganov/llama.cpp) for breadth, [vLLM](https://github.com/vllm-project/vllm) for many GPUs ([who fits where](docs/PERF.md#competitive-standing)) |
-
-imp has one author: issues are welcome, answers are not guaranteed.
-
-> **Jump to:** [Which model?](#which-model-should-i-pick) · [Install](#install) · [Flash-Next](#quickstart-qwen38-flash-next) · [Using it](#using-it) · [Problems?](#something-went-wrong) · [How it works](#how-does-it-work) · [All the docs](#go-deeper)
+> **Jump to:** [Which model?](#which-model-should-i-pick) · [Install](#install) · [Bigger than VRAM](#models-larger-than-vram) · [Using it](#using-it) · [How it works](#how-does-it-work) · [All the docs](#go-deeper)
 
 ## Which model should I pick?
 
@@ -73,7 +56,7 @@ imp has one author: issues are welcome, answers are not guaranteed.
 | the fastest replies, or a 12-16 GB card | **Qwen3-8B** Q8_0 (8 GB card: **Qwen3-4B** Q8_0) | the fastest of the [GGUF sweep](docs/BENCHMARKS.md); picks per VRAM: [which card](docs/QUICKSTART.md#which-card) |
 | more knowledge, still fast | **Qwen3.6-35B-A3B** | mixture of experts: large, but only a small part works per token |
 | another model family | **gpt-oss-20b** or **Gemma-4-26B-A4B** | both in the [GGUF sweep](docs/BENCHMARKS.md) |
-| the biggest model, and ~62 GiB of free RAM | **Qwen3.8-Flash-Next** NVFP4 | bigger than any card's VRAM: the experts live in host RAM ([above](#qwen38-flash-next-four-times-bigger-than-the-card)) |
+| the biggest model, and ~68 GiB of free RAM | **Qwen3.8-Flash-Next** NVFP4 | bigger than any card's VRAM: the experts live in host RAM ([below](#models-larger-than-vram)) |
 
 **Will it fit?** Weights plus the KV cache (the model's memory of the conversation) must fit in the card's VRAM (8 GB on an RTX 5060 up to 96 GB on an RTX PRO 6000, [per card](docs/QUICKSTART.md#which-card)). imp sizes the context to what is left after the weights, and refuses at load a model whose experts do not fit instead of running it wrong. Every family that loads, with its size: [`docs/MODELS.md`](docs/MODELS.md).
 
@@ -81,32 +64,46 @@ imp has one author: issues are welcome, answers are not guaranteed.
 
 ## Install
 
-**You need:** one of the cards above, Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html), Linux or Windows with WSL2. No CUDA toolkit on the host. Checklist: [`docs/QUICKSTART.md`](docs/QUICKSTART.md#requirements).
+**You need:** one of the cards above, Docker with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html), Linux or Windows with WSL2. No build: the image comes from `ghcr.io`. Checklist: [`docs/QUICKSTART.md`](docs/QUICKSTART.md#requirements).
 
 ```bash
-make build                                                     # 1. the image: minutes the first time, seconds after
-scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4-vllm ~/models/Qwen3.8-27B-NVFP4-vllm   # 2. weights, 19.2 GiB download
+git clone https://github.com/kekzl/imp && cd imp
+scripts/stage-model.sh kekzle/Qwen3.8-27B-NVFP4-vllm ~/models/Qwen3.8-27B-NVFP4-vllm   # 1. weights, 19.2 GiB download
 docker run --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
-  -p 127.0.0.1:8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4-vllm   # 3. serve
+  -p 127.0.0.1:8080:8080 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-27B-NVFP4-vllm   # 2. serve
 ```
 
-The weights take 18.3 GiB on the card and answer at **~102 tokens/s**, leaving ~7 GiB for the conversation memory. Next time, the same `docker run`: the `imp-cache` volume keeps the converted weights, so a restart skips the conversion.
+Ready when the log says `Server listening`: open <http://localhost:8080>. Measured with exactly this command: **96.5 tokens/s** for one user (6 real prompts, 400 tokens each), first token after 27-29 ms, 19.7 GiB of the card in use. The `imp-cache` volume keeps converted weights and the measured memory plan for the next start.
+<!-- [PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4 cuda=13.4.3 path=server-api cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` n=5 server starts x 6 prompts note=max_batch_size auto 32, no speculation; VRAM = card peak minus idle] -->
 
-<!-- [PROV: commit=f243179c date=2026-08-31 hw=RTX5090 model=Qwen3.8-27B-NVFP4-vllm quant=NVFP4
-       cuda=13.3 path=nvfp4-safetensors n=2 image=ghcr.io/kekzl/imp:latest
-       cmd=`imp-cli --model … --prompt … --max-tokens 128 --temperature 0` (102.8/101.9 tok/s)] -->
+**No Docker:** every release attaches `imp-<version>-linux-x86_64.tar.gz` (CUDA libraries bundled, needs only the NVIDIA driver): [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#without-docker). **Shortcut:** `--model hf://<org>/<repo>[:<file>.gguf]` downloads inside the container (needs `--user "$(id -u):$(id -g)"` on a bind-mounted `~/models`): [`docs/CONFIG.md`](docs/CONFIG.md#fetching-from-hugging-face). Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md). **Your card's numbers:** `scripts/bench-community.sh` prints a block to post in [Discussions](https://github.com/kekzl/imp/discussions).
 
-**No Docker:** every release attaches `imp-<version>-linux-x86_64.tar.gz` (CUDA libraries bundled, needs only the NVIDIA driver): [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#without-docker). **Shortcut:** `--model hf://<org>/<repo>[:<file>.gguf]` downloads a repo inside the container into `/models` (resumable, checksummed, `HF_TOKEN` for gated repos): [`docs/CONFIG.md`](docs/CONFIG.md#fetching-from-hugging-face). Full walkthrough: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
+## Models larger than VRAM
 
-## Quickstart: Qwen3.8-Flash-Next
-**You need:** a 32 GB card or bigger (tested: RTX 5090), ~62 GiB free host RAM (the 56.25 GiB of experts plus free headroom; less RAM serves from a slower path), 123.6 GiB disk for [`nvidia/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4).
+Mixture-of-experts models use a few experts per token. When the experts do not fit, imp keeps them in pinned host RAM, caches the busiest on the card (least recently used out) and copies a missing expert over PCIe when a token needs it. Nothing to configure: imp decides at load.
+
+**Qwen3.8-Flash-Next** ([`nvidia/Qwen3.8-Flash-Next-NVFP4`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4), 123.6 GiB, 56.25 GiB of experts) on one RTX 5090:
+
+| | measured |
+| --- | --- |
+| one user, 6 real prompts x 400 tokens | **92.1 tokens/s** (89.2-96.4 across the prompts, 91.8-92.2 across 3 starts), first token after 392 ms |
+| reading a 512-token prompt | 1338.18 tokens/s (1331.51-1341.98) |
+| host RAM taken at load | ~68 GiB (`MemAvailable` 76.6-77.0 -> 8.9-9.2 GiB on a 78 GiB host) |
+| card memory in use, start to ready | 25.7 GiB of 32; 38-43 s (50 s on the first start, which records the memory plan) |
+
+<!-- [PROV: commit=ca8780ef date=2026-10-27 hw=RTX5090 model=Qwen3.8-Flash-Next-NVFP4 quant=NVFP4 cuda=13.4.3 path=host-resident-experts cmd=`CACHE_VOL=imp-launch-cache tools/analysis/launch_server_bench.sh` +
+       `imp-cli --bench --bench-pp 512 --bench-reps 5 --max-tokens 128 --bench-prompt-file novel_prose_2026.txt` n=3 server starts, 3 bench processes note=40 GiB row: CHANGELOG [0.50.0] #2621] -->
+
+**You need:** a 32 GB card or bigger, the host RAM above free, 123.6 GiB of disk. With less RAM imp reads missing experts from disk instead (at a 40 GiB container limit: 46.9..60.0 tokens/s, v0.50.0, [`CHANGELOG.md`](CHANGELOG.md)). Speed depends on PCIe (test card: PCIe 5.0 x16) and on how often a conversation changes topic.
+
 ```bash
-docker pull ghcr.io/kekzl/imp:latest
-IMP_IMAGE=ghcr.io/kekzl/imp:latest STAGE_DIR=~/models/Qwen3.8-Flash-Next-NVFP4 scripts/stage-model.sh nvidia/Qwen3.8-Flash-Next-NVFP4 ~/models/Qwen3.8-Flash-Next-NVFP4
-docker run -d --name imp-server --gpus all -v ~/models:/models -p 127.0.0.1:8090:8090 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --port 8090
-curl -s http://localhost:8090/health | jq -c '{status,kv_blocks_total,kv_capacity_tokens}'
+STAGE_DIR=~/models/Qwen3.8-Flash-Next-NVFP4 scripts/stage-model.sh nvidia/Qwen3.8-Flash-Next-NVFP4 ~/models/Qwen3.8-Flash-Next-NVFP4
+docker run -d --name imp-server --gpus all -v ~/models:/models -v imp-cache:/home/imp/.cache/imp \
+  -p 127.0.0.1:8090:8090 ghcr.io/kekzl/imp:latest --model /models/Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --port 8090
 ```
-**Ready** after about 64 s: `Server listening on http://0.0.0.0:8090` in `docker logs imp-server`, `/health` prints `{"status":"ok","kv_blocks_total":2025,"kv_capacity_tokens":32400}`. Image v0.46.0 or later; RAM, measurements: [`docs/QUICKSTART.md`](docs/QUICKSTART.md#qwen38-flash-next).
+
+**Ready** when `docker logs imp-server` prints `Server listening on http://0.0.0.0:8090`. More: [`docs/QUICKSTART.md`](docs/QUICKSTART.md#qwen38-flash-next).
+
 ## Using it
 
 - **In the browser:** <http://localhost:8080>, the built-in chat: saved conversations, sampling controls, live tok/s, server metrics, GPU energy per answer ([tour](docs/QUICKSTART.md#4-or-use-the-other-surfaces)).<br><img src="docs/webui.png" width="720" alt="the built-in web UI: Qwen3.8-Flash-Next answering with a table and code">
@@ -114,19 +111,7 @@ curl -s http://localhost:8090/health | jq -c '{status,kv_blocks_total,kv_capacit
 - **Tool calling, JSON output, streaming** on every API dialect; which fields work: [`docs/API.md`](docs/API.md).
 - **Thinking models:** the reasoning comes back in `reasoning_content`, the answer in `content`.
 - **Proxy, API key, metrics:** [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). **Without the server:** `imp-cli` in the image, or the C library (`include/imp/imp.h`).
-
-## Something went wrong?
-
-| You see | Do |
-| --- | --- |
-| replies much slower than the table above | something else is on the card: on WSL2 `nvidia-smi` does not show containers, check `docker ps`; then look for `graphs=1` in the log |
-| after a restart every prompt is cancelled, `/health` says `kv_pool_floored` | the old process still held the card at start: free the card, start again |
-| `503` | no model loaded or suspended: `GET /v1/models`, `POST /admin/resume` |
-| empty `content`, full `reasoning_content` | the model used its budget thinking: raise `max_tokens` |
-| nothing arrives until the answer is done | a reverse proxy buffers the stream: `proxy_buffering off` (nginx) |
-| `400 vision_unavailable` on an image | the checkpoint loaded text-only; which models see: [`docs/MODELS.md`](docs/MODELS.md) |
-
-**Still stuck?** The [full table](docs/TROUBLESHOOTING.md), or an issue with the server log.
+- **Something went wrong?** Slow replies, `503`, empty `content`, a stalled stream: [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md), or an issue with the server log.
 
 ## How does it work?
 

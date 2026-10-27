@@ -1,0 +1,48 @@
+process 1
+[02:16:09.886][INFO] safetensors_loader.cpp:1168: Architecture: qwen4exp
+[02:16:23.724][INFO] weight_upload.cpp:1472: NVFP4 experts (56.25 GiB) do not fit the 17.23 GiB budget: all 48 MoE layer(s) stay host-resident so the expert cache gets the VRAM (a partial upload starves it).
+    Cannot fit this configuration in the 4498 MiB budget.
+[02:17:01.672][WARN] engine_kv_cache_init.cpp:336: KV blocks: the plan rejects this configuration — the pool ceiling falls back to the live pass's 224 blocks (the 'KV cache:' lines below report what is committed and usable). The report above says what the plan could not fit.
+[02:17:02.321][INFO] executor_moe_decode_overlap.cpp:70: moe.expert_gather_overlap: routed experts that hit run beside the expert miss gather
+token_is_whitespace                 0.2          0.2          1
+pp rep 0  380.742 ms
+pp rep 1  384.858 ms
+pp rep 2  394.432 ms
+pp rep 3  381.618 ms
+pp rep 4  380.981 ms
+pp   512 tokens  avg   384.53 ms  (1331.51 tok/s)  [5 reps]
+tg   128 tokens  avg  1099.24 ms  ( 116.44 tok/s)  [5 reps]
+token_is_whitespace                 0.2          0.2          1
+[02:17:15.859][INFO] expert_cache_device.cu:576: Device expert cache stats: 1034214 hits, 74586 misses (93.3% hit rate)
+process 2
+[02:17:40.755][INFO] safetensors_loader.cpp:1168: Architecture: qwen4exp
+[02:17:58.841][INFO] weight_upload.cpp:1472: NVFP4 experts (56.25 GiB) do not fit the 17.23 GiB budget: all 48 MoE layer(s) stay host-resident so the expert cache gets the VRAM (a partial upload starves it).
+[02:18:26.598][WARN] engine_kv_cache_init.cpp:336: KV blocks: the plan rejects this configuration — the pool ceiling falls back to the live pass's 224 blocks (the 'KV cache:' lines below report what is committed and usable). The report above says what the plan could not fit.
+    Cannot fit this configuration in the 4502 MiB budget.
+[02:18:27.153][INFO] executor_moe_decode_overlap.cpp:70: moe.expert_gather_overlap: routed experts that hit run beside the expert miss gather
+token_is_whitespace                 0.2          0.2          1
+pp rep 0  381.972 ms
+pp rep 1  381.110 ms
+pp rep 2  383.515 ms
+pp rep 3  381.710 ms
+pp rep 4  379.318 ms
+pp   512 tokens  avg   381.53 ms  (1341.98 tok/s)  [5 reps]
+tg   128 tokens  avg  1100.72 ms  ( 116.29 tok/s)  [5 reps]
+token_is_whitespace                 0.2          0.2          1
+[02:18:39.996][INFO] expert_cache_device.cu:576: Device expert cache stats: 1034214 hits, 74586 misses (93.3% hit rate)
+process 3
+[02:19:04.338][INFO] safetensors_loader.cpp:1168: Architecture: qwen4exp
+[02:19:21.882][INFO] weight_upload.cpp:1472: NVFP4 experts (56.25 GiB) do not fit the 17.23 GiB budget: all 48 MoE layer(s) stay host-resident so the expert cache gets the VRAM (a partial upload starves it).
+    Cannot fit this configuration in the 4498 MiB budget.
+[02:20:02.061][WARN] engine_kv_cache_init.cpp:336: KV blocks: the plan rejects this configuration — the pool ceiling falls back to the live pass's 224 blocks (the 'KV cache:' lines below report what is committed and usable). The report above says what the plan could not fit.
+[02:20:02.625][INFO] executor_moe_decode_overlap.cpp:70: moe.expert_gather_overlap: routed experts that hit run beside the expert miss gather
+token_is_whitespace                 0.2          0.2          1
+pp rep 0  381.702 ms
+pp rep 1  380.703 ms
+pp rep 2  381.135 ms
+pp rep 3  384.299 ms
+pp rep 4  385.200 ms
+pp   512 tokens  avg   382.61 ms  (1338.18 tok/s)  [5 reps]
+tg   128 tokens  avg  1100.68 ms  ( 116.29 tok/s)  [5 reps]
+token_is_whitespace                 0.2          0.2          1
+[02:20:16.323][INFO] expert_cache_device.cu:576: Device expert cache stats: 1034214 hits, 74586 misses (93.3% hit rate)

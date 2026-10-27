@@ -1,0 +1,572 @@
+IMP Server 0.59.0
+[02:10:42.636][INFO] config.cpp:672: imp.conf: no config file found, using built-in defaults
+[02:10:42.636][INFO] hf_hub.cpp:156: Detected SafeTensors directory: /models/Qwen3.8-Flash-Next-NVFP4
+Models directory: /models
+Loading model: /models/Qwen3.8-Flash-Next-NVFP4
+[02:10:42.637][INFO] hf_config_loader.cpp:445: NVFP4 model (Model Optimizer, MIXED_PRECISION): group_size=16, kv_cache=, per-tensor algos: 48 NVFP4, 2 FP8, 0 unrecognised
+[02:10:42.821][INFO] safetensors_loader.cpp:684: Skipping shard model-00010-of-00010.safetensors (20 tensors are MTP/vision-only and unused)
+[02:10:42.821][INFO] safetensors_loader.cpp:684: Skipping shard model-fp8-mtp-ple.safetensors (3201 tensors are MTP/vision-only and unused)
+[02:10:42.821][INFO] safetensors_loader.cpp:697: Sharded SafeTensors: 9 shards
+[02:10:42.822][INFO] hf_config_loader.cpp:445: NVFP4 model (Model Optimizer, MIXED_PRECISION): group_size=16, kv_cache=, per-tensor algos: 48 NVFP4, 2 FP8, 0 unrecognised
+[02:10:45.143][WARN] safetensors_loader.cpp:416: SafeTensors /models/Qwen3.8-Flash-Next-NVFP4/model-00001-of-00010.safetensors: dropping tensor 'model.language_model.layers.1.ple.ple_embedding.layer_multipliers' — dtype 'I64' has no equal-width engine type, refusing to re-type it
+[02:10:45.143][WARN] safetensors_loader.cpp:416: SafeTensors /models/Qwen3.8-Flash-Next-NVFP4/model-00001-of-00010.safetensors: dropping tensor 'model.language_model.layers.1.ple.ple_embedding.ngram_heads_offsets' — dtype 'I64' has no equal-width engine type, refusing to re-type it
+[02:10:45.143][WARN] safetensors_loader.cpp:416: SafeTensors /models/Qwen3.8-Flash-Next-NVFP4/model-00001-of-00010.safetensors: dropping tensor 'model.language_model.layers.1.ple.ple_embedding.ngram_heads_vocab_sizes' — dtype 'I64' has no equal-width engine type, refusing to re-type it
+[02:10:45.151][WARN] safetensors_loader.cpp:592: SafeTensors /models/Qwen3.8-Flash-Next-NVFP4/model-00001-of-00010.safetensors: dropped 3 malformed tensors (no_dtype=0 no_shape=0 too_many_dims=0 no_offsets=0 offset_validation=0 dtype_unsupported=3 bad_shape=0)
+[02:10:45.152][INFO] safetensors_loader.cpp:727:   [1/9] mmap'd shard: model-00001-of-00010.safetensors (12324 tensors)
+[02:10:46.861][WARN] safetensors_loader.cpp:531: SafeTensors /models/Qwen3.8-Flash-Next-NVFP4/model-00009-of-00010.safetensors: tensor 'model.visual.patch_embed.proj.weight' has 5 dims; flattening trailing dims to [1152, 1536]
+[02:10:46.865][INFO] safetensors_loader.cpp:727:   [2/9] mmap'd shard: model-00009-of-00010.safetensors (9036 tensors)
+[02:10:49.362][INFO] safetensors_loader.cpp:727:   [3/9] mmap'd shard: model-00002-of-00010.safetensors (38725 tensors)
+[02:10:49.392][INFO] safetensors_loader.cpp:727:   [4/9] mmap'd shard: model-00005-of-00010.safetensors (39617 tensors)
+[02:10:49.397][INFO] safetensors_loader.cpp:727:   [5/9] mmap'd shard: model-00003-of-00010.safetensors (39560 tensors)
+[02:10:49.428][INFO] safetensors_loader.cpp:727:   [6/9] mmap'd shard: model-00004-of-00010.safetensors (38970 tensors)
+[02:10:49.760][INFO] safetensors_loader.cpp:727:   [7/9] mmap'd shard: model-00006-of-00010.safetensors (39560 tensors)
+[02:10:49.813][INFO] safetensors_loader.cpp:727:   [8/9] mmap'd shard: model-00007-of-00010.safetensors (38969 tensors)
+[02:10:50.199][INFO] safetensors_loader.cpp:727:   [9/9] mmap'd shard: model-00008-of-00010.safetensors (39560 tensors)
+[02:10:50.204][INFO] safetensors_loader.cpp:758: Loaded shard: model-00001-of-00010.safetensors (12324 tensors total)
+[02:10:50.222][INFO] safetensors_loader.cpp:758: Loaded shard: model-00002-of-00010.safetensors (51049 tensors total)
+[02:10:50.244][INFO] safetensors_loader.cpp:758: Loaded shard: model-00003-of-00010.safetensors (90609 tensors total)
+[02:10:50.262][INFO] safetensors_loader.cpp:758: Loaded shard: model-00004-of-00010.safetensors (129579 tensors total)
+[02:10:50.282][INFO] safetensors_loader.cpp:758: Loaded shard: model-00005-of-00010.safetensors (169196 tensors total)
+[02:10:50.312][INFO] safetensors_loader.cpp:758: Loaded shard: model-00006-of-00010.safetensors (208756 tensors total)
+[02:10:50.333][INFO] safetensors_loader.cpp:758: Loaded shard: model-00007-of-00010.safetensors (247725 tensors total)
+[02:10:50.359][INFO] safetensors_loader.cpp:758: Loaded shard: model-00008-of-00010.safetensors (287285 tensors total)
+[02:10:50.365][INFO] safetensors_loader.cpp:758: Loaded shard: model-00009-of-00010.safetensors (296321 tensors total)
+[02:10:50.451][INFO] safetensors_loader.cpp:1056: Parsed 296321 tensors from SafeTensors
+[02:10:50.599][INFO] safetensors_loader.cpp:1110: MTP head present in this checkpoint but not loaded. speculative.mtp_k=auto takes it only on a single-stream run (max_batch_size=1) with runtime.deterministic off; force it with --set speculative.mtp_k=2 --set speculative.ngram=false: measured +17-21 % plain and +27-30 % thinking single-stream decode on Qwen3.8-27B-NVFP4 (2026-08-27), in exchange for the head's VRAM (0.79 GiB there) and eager-equal greedy trajectories. See docs/LIMITATIONS.md
+[02:10:50.637][INFO] hf_config_loader.cpp:110: loading HF config from /models/Qwen3.8-Flash-Next-NVFP4/config.json
+[02:10:50.637][INFO] hf_config_generic.cpp:194: M-RoPE section [11, 11, 10] (interleaved)
+[02:10:50.637][INFO] hf_config_generic.cpp:252: Partial RoPE: partial_rotary_factor=0.250 head_dim=256 → rope_dim=64
+[02:10:50.637][INFO] hf_config_generic.cpp:295:   tie_word_embeddings = false
+[02:10:50.637][INFO] qwen_gdn.cpp:89:   GDN config: inner=6144 state=128 groups=16 n_heads=48 conv_kernel=4
+[02:10:50.637][INFO] multimodal_wrapper.cpp:72: Qwen3-VL vision tower: depth=27 hidden=1152 heads=16 patch=16 merge=2 pos_grid=48x48 out=2560 deepstack=0
+[02:10:50.637][INFO] hf_config_loader.cpp:133:   arch=qwen4exp layers=48 d_model=2560 heads=24 kv_heads=2 d_ff=0 vocab=248320
+[02:10:50.637][INFO] safetensors_loader.cpp:1168: Architecture: qwen4exp
+[02:10:50.637][INFO] safetensors_loader.cpp:1169: Config: layers=48 d_model=2560 d_ff=0 heads=24 kv_heads=2 vocab=248320 ctx=262144
+[02:10:50.637][INFO] safetensors_loader.cpp:1171: RoPE: theta=10000000 freq_scale=1.0000 head_dim=256 sliding_window=0 rope_theta_swa=0 rope_local_theta=0 rope_n_ctx_orig=0
+[02:10:50.637][INFO] safetensors_loader.cpp:1177: MoE: 512 experts, 10 active, expert_d_ff=640
+[02:10:50.815][INFO] weight_map.cpp:1388: WeightMap (qwen4exp): assigned 295979 tensors, skipped 342, layers=48, experts=512
+[02:10:50.815][INFO] weight_map.cpp:1397:   skipped: 333 vision, 0 audio, 9 MTP head, 0 unrecognised
+[02:10:50.842][INFO] multimodal_wrapper.cpp:110: Vision tower: 333 tensors assigned (27 blocks, 0 deepstack mergers)
+[02:10:51.003][INFO] ngram_table.cpp:323: ngram table: hash constants m0=23703573157769 m1=20109073645365 m2=8052911324071 h0=0+20000003 h1=20000003+20000023 h2=40000026+20000033 h3=60000059+20000047 h4=80000106+20000059 h5=100000165+20000063 h6=120000228+20000069 h7=140000297+20000077 h8=160000374+20000081 h9=180000455+20000093 h10=200000548+20000107 h11=220000655+20000147 h12=240000802+20000153 h13=260000955+20000159 h14=280001114+20000161 h15=300001275+20000171
+[02:10:51.003][INFO] ngram_table.cpp:325: ngram table: layer 1, 128 shards, 320001536 rows x 160, 16 heads x ngram 3, scale 0.00019932, eos 248044, 47.7 GiB host-mapped (page cache, not resident)
+[02:10:51.015][INFO] hf_config_loader.cpp:445: NVFP4 model (Model Optimizer, MIXED_PRECISION): group_size=16, kv_cache=, per-tensor algos: 48 NVFP4, 2 FP8, 0 unrecognised
+[02:10:51.156][INFO] safetensors_loader.cpp:850: NVFP4 inventory: 73728 Linear modules quantized, 723 ignored, 2 unclassified, 0 missing global scale; quantization_config.ignore 292 entries = 242 on a Linear slot, 50 outside the Linear set (vision tower, conv1d, embeddings), 0 with no tensor in the map (MTP head, dropped shards)
+[02:10:51.157][INFO] safetensors_loader.cpp:1261: NVFP4 pre-quantized: 73728 scratch entries (group_size=16)
+[02:10:51.158][INFO] hf_config_loader.cpp:193: loaded chat_template from tokenizer_config.json (8952 chars)
+[02:10:51.219][INFO] tokenizer.cpp:452: tokenizer.json: loaded 248044 vocab entries (type=BPE)
+[02:10:51.239][INFO] tokenizer.cpp:472: tokenizer.json: loaded 247587 merges
+[02:10:51.245][INFO] tokenizer.cpp:830: Tokenizer: 33 special pieces cached for pre-split
+[02:10:51.345][INFO] tokenizer.cpp:730: BPE merges: id path, 247587 pairs
+[02:10:51.345][INFO] tokenizer.cpp:663: tokenizer.json: type=gpt2 vocab_size=248077 bos=1 eos=248044 add_prefix=false pre=1 regex steps ignore_merges=false
+[02:10:51.348][INFO] safetensors_loader.cpp:1320: Loaded tokenizer from /models/Qwen3.8-Flash-Next-NVFP4/tokenizer.json
+[02:10:51.348][INFO] hf_config_loader.cpp:327: tokenizer_config.json: add_bos=false add_eos=unset add_prefix_space=false use_default_system_prompt=unset bos_token='' eos_token='<|im_end|>'
+[02:10:51.348][INFO] safetensors_loader.cpp:1394: tokenizer_config.json: resolved eos_token '<|im_end|>' -> id 248046
+[02:10:51.349][INFO] hf_config_loader.cpp:175: generation_config.json: eos=2 temp=1 top_p=0.95 top_k=20 rep_penalty=-1
+[02:10:51.349][INFO] safetensors_loader.cpp:1556: SafeTensors model loaded successfully from /models/Qwen3.8-Flash-Next-NVFP4
+[02:10:51.948][INFO] engine.cpp:687: ModelProfile: moe=1 gdn=1 ssm=1 hybrid=1 dense=0 attn=standard
+[02:10:51.948][INFO] engine_init_resolver.cpp:360: KV cache dtype: FP16 (default — pass --kv-fp8 for FP8 E4M3 memory savings)
+[02:10:51.948][INFO] engine_init_resolver.cpp:541: max_batch_size: auto → 8 (48 MoE layer(s) host-resident, device expert cache batches the decode rows; VRAM-derived value was 32, set runtime.max_batch_size to override)
+[02:10:51.948][INFO] engine_init_resolver.cpp:549: max_batch_size: auto → 8 (approx_weights=3.5 GB, post-load headroom=18.8 GB, tier-floor=16, VRAM-aware)
+[02:10:51.948][INFO] engine_init_resolver.cpp:643: SSM state dtype: BF16 (gdn.state_bf16; fused scan route, chunkwise off)
+[02:10:51.948][INFO] engine_init_resolver.cpp:657: FP8 prefill: disabled for native NVFP4 (CUTLASS NVFP4 GEMM used instead)
+[02:10:51.948][INFO] engine_init_resolver.cpp:699: cuBLAS FP16-accumulate prefill: auto → ON (arch=qwen4exp)
+[02:10:51.948][INFO] engine_init_resolver.cpp:742: NVFP4 decode: auto → mode 2 (GDN model — ssm_in/ssm_out excluded for precision)
+[02:10:51.948][INFO] engine_init_resolver.cpp:891: KV block size: auto -> 16 (n_kv_heads=2)
+[02:10:51.948][INFO] engine_init_resolver.cpp:916: attention.sparse_topk_tokens: auto -> 0 (arch=qwen4exp: family not gated on)
+[02:10:51.948][INFO] engine_init_resolver.cpp:916: attention.sparse_prefill_topk_tokens: auto -> 0 (arch=qwen4exp: family not gated on)
+[02:10:51.949][INFO] engine_init_resolver.cpp:1023: max_seq_len: auto → 131072 (model=262144, vram_cap=277262, auto_cap=131072, kv=24576 B/tok, attn_layers=12/48)
+[02:10:51.949][INFO] vram_allocator.cpp:28: VRAMAllocator: total=32580 MiB, headroom=1303 MiB (4%)
+[02:10:51.949][INFO] engine_arena.cpp:23: engine arena: 1503.5 MiB reserved (engine-persistent tier, committed as tenants take)
+[02:10:51.949][INFO] engine.cpp:779: engine arena demand: mmvq 0.0 + nvfp4 60.0 + sample 1.0 + pen 3.8 + moe 0.20 + fp8red 0.00 + quant 0.08 + splitk 24.19 + mla 0.0 + dry 1.00 + cublas 96.0 + grp3x 2.00 + imma 0.0 + chunkcap 64.0 + smallm 4.61 + par 0.00 + ra2 0.0 + apa 0.0 + apakv 0.0 MiB + vision 1079.0 + batchpool 0.50 MiB -> 1503.5 MiB reserved
+[02:10:51.953][INFO] graph_slots.cpp:89: graph slot pool: 4 slots (4357.0 KiB device + 2051.0 KiB pinned host), caps: max_steps=131072 penalty_slots=262144 stop_ids=64
+[02:10:52.068][INFO] executor_workspace.cpp:313: GDN layers: 36 out of 48 total
+[02:10:52.068][INFO] executor_workspace.cpp:329: SSM layers: 36 out of 48 total
+[02:10:52.068][INFO] pdl.cpp:46: PDL: available (sm_120+)
+[02:10:52.069][INFO] executor_workspace.cpp:341: PDL registered on the instrumented decode kernels (elementwise add + NVFP4 GEMV family)
+[02:10:52.102][INFO] executor_workspace.cpp:404: GraphExecutor initialized: max_tokens=2048, d_model=2560, n_layers=48, dtype=F16, pdl=on
+[02:10:52.102][INFO] engine_weight_upload.cpp:115: L2 persisting cache: reserved 45 MB / 60 MB total
+[02:10:52.102][INFO] engine_weight_upload.cpp:272: Expert upload reserve: 4659.38 MiB (workspace=411.00, kv=3257.97, ssm+safety=rest)
+[02:10:52.102][INFO] engine_weight_upload.cpp:279: GPU memory before weight upload: 30689 MiB free / 32579 MiB total
+[02:10:52.102][INFO] weight_upload.cpp:1972: Uploading model weights to GPU (48 layers)...
+[02:10:52.117][INFO] weight_upload.cpp:2021: Pinned staging enabled (4x 4 MiB ring)
+[02:10:52.482][INFO] host_embedding.cpp:73: token embedding: [248320 x 2560] F16 in mapped pinned host memory (1212.5 MiB off the device)
+[02:10:55.813][INFO] weight_upload.cpp:1259: HF GDN A_log: applied -exp() transform to ssm_a (layer 0 first 4 values: -9.0533 -59.9643 -0.2394 -76.9957)
+[02:11:05.919][INFO] weight_upload.cpp:1472: NVFP4 experts (56.25 GiB) do not fit the 13.14 GiB budget: all 48 MoE layer(s) stay host-resident so the expert cache gets the VRAM (a partial upload starves it).
+[02:11:05.919][INFO] weight_upload.cpp:1565: NVFP4 experts: 48 MoE layer(s) stay host-resident (57600 MiB of experts, 18115 MiB free) — they will be served from the expert cache. Decode on those layers is materially slower than resident; the load is refused later if the cache cannot hold them.
+[02:11:35.027][INFO] weight_cache_file.cpp:220: Warm cache: persisted 991 transformed uploads (8.02 GiB) to /home/imp/.cache/imp/warm/Qwen3.8-Flash-Next-NVFP4-b5cf40c7de2c3441.impwcache
+[02:11:35.096][INFO] weight_upload.cpp:2422: All model weights uploaded to GPU (1102 allocations)
+[02:11:35.102][INFO] engine_weight_upload.cpp:326: GPU memory after weight upload: 19521 MiB free / 32579 MiB total (upload consumed 11168 MiB of device free)
+[02:11:35.102][INFO] engine_weight_upload.cpp:388: Experts on host: CUDA graphs stay on, the device expert cache serves decode (demoted after init if it cannot cover every host-resident layer)
+[02:11:35.102][INFO] executor_workspace.cpp:639: Persistent workspace: 37.58 MiB (hidden+residual+norm+logits)
+[02:11:35.104][INFO] executor_gated_residual.cpp:68: gated residual: hc=4 lowrank=320, 4 streams x 2560 wide, 131.3 MiB for 2048 tokens
+[02:11:35.111][INFO] executor_ple.cpp:56: PLE: layer 1, conv kernel 4 dilation 3 (state 9 rows x 10240 per SSM slot), 10.0 MiB pinned staging
+[02:11:35.112][INFO] executor_qsa.cpp:78: QSA indexer: 4 query heads x 128, block 4, budget 2048 (top 512 blocks), rows/pass 16
+[02:11:35.113][INFO] executor_workspace.cpp:680: Shared workspace: 299.00 MiB = max(attn=110.0, ffn=0.0, moe=299.0, ssm=291.1 MiB) — saved 401.12 MiB vs separate allocation
+[02:11:35.116][INFO] executor_workspace_buffers.cpp:333: MMVQ scratch buffers: 72.00 KiB (q8_1) + 6.00 KiB (d8), max_blocks=192 (max_k=6144, moe_down=0)
+[02:11:35.116][INFO] gemm_scratch.cpp:77: MMVQ scratch pre-warmed: 13.50 KiB (max_tokens=1, max_K=6144)
+[02:11:35.117][INFO] executor_workspace_buffers.cpp:437: Split-K paged attention scratch: 24768.00 KiB
+[02:11:35.117][INFO] executor_workspace_buffers.cpp:517: cuBLAS attention S-matrix: skipped (FP16-QK FA2 serves all prefill — no S-matrix needed)
+[02:11:35.117][INFO] executor_workspace_buffers.cpp:566: auto fmha_prefill_threshold = 1 (S-matrix cap + 1)
+[02:11:35.117][INFO] executor_workspace_buffers.cpp:584: MoE dequant buffer: 3.12 MiB (1 expert slot)
+[02:11:35.117][INFO] executor_workspace_buffers.cpp:644: MoE staging buffer: 0.88 MiB (1 expert raw)
+[02:11:35.167][INFO] expert_cache.cu:172: Expert LRU cache: 48 layers × 222 slots × 0.88 MiB = 9365.67 MiB GPU memory
+[02:11:35.167][INFO] executor_workspace_buffers.cpp:734: Expert LRU cache: 10656 slots (9365.62 MiB / 9373.63 MiB budget)
+[02:11:35.169][INFO] executor_workspace_buffers.cpp:777: MoE layer staging buffer: 225.00 MiB (128 experts x 2 projection slots, 4 expert block(s) per layer)
+[02:11:35.169][INFO] executor_workspace_buffers.cpp:803: MoE layer staging: CUTLASS device-args view enabled (+25.00 MiB SfAtom)
+[02:11:35.169][INFO] executor_workspace_buffers.cpp:833: MoE batch dequant buffer: skipped (CUTLASS grouped NVFP4 serves every expert tensor)
+[02:11:35.170][INFO] executor_workspace_buffers.cpp:915: CUTLASS 3.x MoE staging: 38.12 MiB (packed=25.00, sf=13.12) max_expanded=20480
+[02:11:35.172][INFO] executor_workspace_buffers.cpp:1207: CUTLASS NVFP4 activation scratch: 34.63 MiB (data=12.00, sf=1.50, ws=21.13)
+[02:11:35.316][INFO] engine_weight_upload.cpp:443: weight file pages released after upload: 73.42 GiB advised away (host-resident weights refault on demand)
+[02:11:35.317][INFO] engine_kv_cache_init.cpp:83: KV cache layers: 12 attention out of 48 total
+[02:11:35.317][INFO] engine_kv_cache_init.cpp:134: kv_cache.swa_sizing=auto ignored: model has no sliding-window layers
+[02:11:35.368][INFO] engine_kv_cache_init.cpp:206: library reserve: no measurement for this model in /home/imp/.cache/imp/library_reserve — planning with the 3900 MiB constant. It is recorded after the first forward; mount that path (or set vram.library_reserve_cache) to keep it across restarts.
+[02:11:35.369][INFO] vram_budget.cpp:269: VRAM budget: reserve floored at the library charge 1303 -> 3900 MiB
+[02:11:35.370][INFO] vram_budget.cpp:451: VRAM budget: planner projects 115230.0 MiB (73994 entries), heuristic nvfp4=607.2 MiB cutlass_sf=0.0 MiB.
+[02:11:35.370][INFO] vram_budget.cpp:479: VRAM budget: native-NVFP4 weight-cache reserve 10399.8 MiB (sf=7622.7, moe_slab=450.0, phase3+workspaces=2327.2; floored, not pre-held)
+[02:11:35.370][INFO] vram_budget.cpp:698: VRAM budget: strategy=NVFP4_DECODE (fp8 prefill off), available=3429.1 MiB, kv=8192 blocks (3072.0 MiB), nvfp4=607.2 MiB, fp8=0.0 MiB, reserve=3900 MiB, second_pass=yes
+[02:11:35.370][INFO] engine_kv_cache_init.cpp:304: memory plan (A7 step 2 — REJECTED: the pool uses the live pass's 8192 blocks):
+  distributable                7808 MiB
+  weight-cache demand          8680 MiB  (same figure the live pass used)
+  library reserve              3900 MiB  (charged by both passes since #1109)
+  SSM/GDN state                 478 MiB  (8 slots)
+  recurrent snapshots           239 MiB  (server.recurrent_snapshot_mb)
+  speculative staging           120 MiB  (hybrid verify state scratch, 2 x 1 slot)
+  engine-persistent              74 MiB  (337 MiB already resident, not charged again)
+  plan REJECTS this configuration (live pass accepted it with 8192 KV blocks):
+    Cannot fit this configuration in the 7807 MiB budget.
+    
+      requested                                   MiB
+        model weights + mandatory caches         8073
+        library reserve (charged)                3900
+        SSM/GDN state                             478
+        recurrent snapshots                       239
+        speculative decode staging                120
+        engine-persistent                          74
+                                                -----
+        total                                   12884   over by 5077 MiB
+    
+      the largest levers
+        runtime.max_batch_size 8 -> 7          frees     60 MiB
+    
+  ceiling: recurrent 8 seqs, KV 1 seqs at max_seq_len 131072 (8192 blocks/seq), all 8 seqs at <= 16384 tokens
+  WARN: the KV pool serves 1 of the 8 recurrent slots at max_seq_len 131072; all 8 fit only up to 16384 tokens of context (8192 blocks x 16). Set runtime.max_seq_len=16384, or lower runtime.max_batch_size
+  note: forward scratch not modelled until A7 step 4 measures its high-water
+
+[02:11:35.370][INFO] engine_kv_cache_init.cpp:376: GDN model: CUDA graphs enabled (recurrent state in-place)
+[02:11:35.370][WARN] engine_kv_cache_init.cpp:336: KV blocks: the plan rejects this configuration — the pool ceiling falls back to the live pass's 8192 blocks (the 'KV cache:' lines below report what is committed and usable). The report above says what the plan could not fit.
+[02:11:35.422][INFO] pre_dequant_phase0_nvfp4_loader.cpp:537: NVFP4 pre-quantized: promoted 73728 weights to Tensor sidecars
+[02:11:35.423][INFO] pre_dequant_phase0_nvfp4_loader.cpp:655: GDN/SSM: 0 of 72 recurrent projections registered in the NVFP4 decode cache here; the rest keep their source precision and take whatever prefill/decode tier phase 4 assigns
+[02:11:35.424][INFO] executor_pre_dequant.cpp:174: StoragePlanner: 73994 entries, projected VRAM 30.00 MiB
+[02:11:35.424][INFO] pre_dequant_phase1_fp16_cache.cpp:235: Native FP8: 0 weight(s) serve prefill (FP8 x FP8 cuBLASLt) and decode from the checkpoint's bytes, no FP16 copy
+[02:11:35.460][INFO] pre_dequant_phase2_fp8_cache.cpp:356: fp8 decode sidecar: 120 projections [ssm] [attn] (2558.4 MiB, 875904 per-row scales; full-precision source retained for prefill)
+[02:11:35.470][INFO] pre_dequant_fp8_lm_head.cpp:93: FP8 LM head: [248320 x 2560] F16 -> E4M3 per-row scales (607.2 MiB), all LM-head rows; source released after load if no path reads it
+[02:11:35.470][INFO] pre_dequant_phase3_nvfp4_decode.cpp:123: GDN/SSM: excluding 72 recurrent projections from NVFP4 cache
+[02:11:35.470][INFO] pre_dequant_phase3_moe.cpp:303: NVFP4 MoE cache: budget floored at guaranteed 578.0 MiB (live-free-derived 0.0 MiB under-reports)
+[02:11:35.470][INFO] pre_dequant_phase3_moe.cpp:381: NVFP4 decode: no eligible weights found (all ≤ 4.5 bits/elem)
+[02:11:35.490][INFO] pre_dequant_phase3_gdn_prefill.cpp:260: GDN NVFP4 prefill: no eligible F16 GDN projection (flag on, model has none)
+[02:11:35.490][INFO] pre_dequant_phase3_gdn_prefill.cpp:265: GDN MXFP8 prefill: 108 F16 in/gate/out projections -> views of the FP8 sidecar rows, scales only (64.5 MiB), M>32 rows on the CUTLASS GEMM; activation scratch 12.4 MiB
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:202: WeightRegistry populated with 74234 handles (phase-2 shim)
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:245: Phase-4 overlay: registry=74234 cached / plan-ideal=73994 (uncached 0 remain as native GGUF blocks)
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:275: Phase-4 plan-ideal tiers: fp16=266 fp8=0 nvfp4=73728 cutlass_nvfp4=0 mxfp4=0 fp32=0
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:279: Phase-4 wcache actual: fp16=0 fp8=120 nvfp4=0 cutlass_nvfp4=0 cutlass_mxfp4=0 nvfp4_moe=0 fused_kv=0 fused_gate_up=0
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WQ plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WK plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WV plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WO plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WQ plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WK plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WV plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WO plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WQ plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WK plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WV plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WO plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WQ plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WK plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WV plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WO plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.491][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WQ plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WK plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WV plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WO plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WQ plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WK plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WV plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WO plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WQ plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WK plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WV plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WO plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WQ plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WK plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WV plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WO plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WQ plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WK plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WV plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WO plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WQ plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WK plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WV plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WO plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WQ plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WK plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WV plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WO plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: SSM_OUT plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WQ plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WK plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WV plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:335: Phase-4 plan/actual MISMATCH: WO plan-tier=2 actual-tier=3
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:342: Phase-4 plan/actual parity: matched=0 mismatch=84 evicted=73910
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:349: Phase-4 native: 1102 Model::gpu_allocations_ pointers (GGUF blocks + norms + scratch — bypass the overlay layer)
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:372: Phase-4 decode-redundancy: 0 handles, 0.00 MiB of GGUF source is decode-redundant (overlay covers decode) but kept resident for M>1 prefill (upper bound, not freeable).
+[02:11:35.492][INFO] pre_dequant_phase4_tensor_registry.cpp:526: NVFP4 da_cache: skipped 48 host-resident MoE layer(s) (per-layer fallback / H2D staging is the intended path).
+[02:11:35.586][INFO] mem_account.cpp:437: mempool trim: reserved 1920->1920 MiB used 1912->1912 MiB (rc=no error)
+[02:11:35.586][INFO] pre_dequant_phase4_tensor_registry.cpp:715: Phase-4b: freed 36 F16 GDN input packs, the F16 in/gate/out of 36 layers (6856.9 MiB) and 48 F16 attention projections (1140.0 MiB); 7996.9 MiB back to the driver, 7872.4 MiB to the expert cache after the rebuild scratch and MXFP8 copies
+[02:11:35.601][INFO] mem_account.cpp:437: mempool trim: reserved 1920->1920 MiB used 1912->1912 MiB (rc=no error)
+[02:11:35.601][INFO] pre_dequant_phase4_tensor_registry.cpp:797: FP8 LM head: freed the F16 source (1212.5 MiB, 1212.5 MiB back to the driver, 605.3 MiB to the expert cache after the 607.2 MiB served head)
+[02:11:35.740][INFO] expert_cache.cu:172: Expert LRU cache: 48 layers × 423 slots × 0.88 MiB = 17845.39 MiB GPU memory
+[02:11:35.740][INFO] executor_pre_dequant.cpp:70: Expert LRU cache: 222 -> 423 slots/layer with 8477.7 MiB (freed weights 8477.7: GDN + attention 7872.4, LM head 605.3; free beyond the KV ceiling 7409.7)
+[02:11:35.740][INFO] executor_forward_moe_nvfp4_host.cu:99: NVFP4 experts: 48 MoE layer(s) host-resident, served from the expert cache (423 slots/layer, 0.88 MiB per slot)
+[02:11:35.859][INFO] expert_cache_device.cu:439: Device expert cache: 48/48 MoE layer(s) resolved and staged on the device (423 slots/layer, tables 2.2 MiB, 0 layer(s) from the host expert tier)
+[02:11:35.860][INFO] executor_moe_decode_overlap.cpp:43: moe.shared_expert_overlap: decode shared expert (eff 640) runs beside the expert miss gather
+[02:11:35.860][INFO] executor_moe_decode_overlap.cpp:70: moe.expert_gather_overlap: routed experts that hit run beside the expert miss gather
+[02:11:35.860][INFO] engine_kv_cache_init.cpp:550: KV cache: committing 25% of the pool up front (2025 of 8192 blocks)
+[02:11:35.860][INFO] engine_kv_cache_init.cpp:557: KV cache: growable, starting at 2025 blocks with a 8192-block ceiling (32400 -> 131072 tokens as VRAM frees)
+[02:11:35.860][INFO] engine_kv_cache_init.cpp:568: KV cache: 2025 blocks (32400 tokens), 759.38 MiB, dtype=F16 (layers=12/48, kv_heads=2, head_dim=256, block_size=16)
+[02:11:36.173][INFO] engine_kv_cache_init.cpp:682: KV cache: pool copy bandwidth 1593 GB/s (resident)
+[02:11:36.173][INFO] engine_kv_cache_init.cpp:739: Prefix caching enabled (pin budget 506 blocks)
+[02:11:36.173][INFO] ssm_state.cpp:128: SSM state: 36 layers x 8 sequences lazy, 480.00 MiB reserved, 0.00 MiB committed (0 reserved slot(s); 59.8 MiB per slot, stride 60.0 MiB; conv=160.0 KB, h=1536.0 KB [BF16] per layer)
+[02:11:36.175][INFO] recurrent_snapshot_store.cpp:81: RecurrentSnapshotStore: 4/4 slots x 59.8 MiB pre-allocated (budget 256 MiB)
+[02:11:37.457][INFO] recurrent_snapshot_store.cpp:94: RecurrentSnapshotStore: host tier 34/34 slots x 59.8 MiB pinned (budget 2048 MiB)
+[02:11:37.457][INFO] engine_graph_decode.cpp:972: NVFP4 decode caches: 0/48 MoE layers, the other 48 served by the device expert cache - decode graph capture eligible
+[02:11:37.457][INFO] executor_workspace_buffers.cpp:1354: prefill dequant cap: 3 MiB of eligible planes vs 512 MiB cap -> graph capturable (LM head 0 MiB excluded, it never takes the M>1 dequant fallback; covered 3 MiB)
+[02:11:37.458][INFO] executor_workspace_buffers.cpp:1403: gemm_nvfp4 dequant workspace: 3.12 MiB (graph-safe M>1 fallback; covers dense=0, moe=0, cutlass=0 cache entries + per-layer SafeTensors NVFP4 expert tensors)
+[02:11:37.458][INFO] engine_kv_cache_init.cpp:1036: Serving metadata pool: 2.4 MiB (rows 131072, 12 tables x 8192 blocks)
+[02:11:37.459][INFO] engine_kv_cache_init.cpp:963: GPU memory: 27413 MiB used / 32580 MiB total (5167 MiB free)
+[02:11:37.459][INFO] vram_allocator.cpp:164: VRAMAllocator report: tracked=22090 MiB, free=5167 MiB, headroom=1303 MiB, total=32580 MiB
+[02:11:37.459][INFO] vram_allocator.cpp:171:   cutlass_act_data             12.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   cutlass_act_sf                1.5 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   cutlass_workspace            21.1 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   expert_cache              17845.4 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   expert_cache_dev              2.2 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   fp8_lm_head                 607.2 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   fp8_ssm_sidecar            2558.4 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   gdn_ab_ws                     0.1 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   gdn_chunkpar_ws             123.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   hc_hidden                    40.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   hc_inj                        0.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   hc_low                        1.2 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   hc_mixed                     10.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   hc_mixw                      40.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   hc_normed                    40.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   moe_3x_packed                25.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   moe_3x_sf                    13.1 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   moe_dequant                   3.1 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   moe_layer_stage             225.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   moe_layer_stage_sf           25.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   moe_slot_idx                  0.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   moe_stage_alpha               0.3 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   moe_stage_bptr                0.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   moe_stage_sfbptr              0.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   moe_staging                   0.9 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   mrope_delta                   0.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   mrope_positions               0.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   mxfp8_act_data               12.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   mxfp8_act_sf                  0.4 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   mxfp8_rows_sf                64.5 MiB  (108 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   penalty_hist                  4.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   penalty_tokens                0.5 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   persistent_workspace         37.6 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   ple_emb                      10.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   prefill_pool                  2.4 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   qsa_q                         2.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   qsa_qk                        2.5 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   qsa_scratch_ctx               0.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   qsa_sel                       0.1 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   qsa_sel_count                 0.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   released_f16_scratch         60.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   shared_workspace            299.0 MiB  (1 allocs)
+[02:11:37.459][INFO] vram_allocator.cpp:171:   shexp_overlap                 0.1 MiB  (1 allocs)
+[02:11:37.461][INFO] chat_template.cpp:188: Chat template: using Jinja2 engine
+[02:11:37.462][INFO] chat_template.cpp:399: Chat template: chatml
+[02:11:37.462][INFO] engine_workspace_warmup.cpp:344: Banned 19 special tokens from generation
+[02:11:37.462][INFO] engine_workspace_warmup.cpp:354:   banned: 248045(<|im_start|>) 248047(<|object_ref_start|>) 248048(<|object_ref_end|>) 248049(<|box_start|>) 248050(<|box_end|>) 248051(<|quad_start|>) 248052(<|quad_end|>) 248053(<|vision_start|>) 248054(<|vision_end|>) 248055(<|vision_pad|>) 248056(<|image_pad|>) 248057(<|video_pad|>) 248070(<|audio_start|>) 248071(<|audio_end|>) 248072(<tts_pad>) 248073(<tts_text_bos>) 248074(<tts_text_eod>) 248075(<tts_text_bos_single>) 248076(<|audio_pad|>) 
+[02:11:37.484][INFO] stop_mask.cpp:37: Stop mask: 21 ids masked while a stop would be suppressed
+[02:11:37.484][INFO] qwen3vl_pipeline.cpp:117: Qwen3-VL pipeline configured: <= 4096 patches; tower upload and buffers deferred to the first image (1079.0 MiB of the engine arena stay uncommitted until then)
+[02:11:37.486][INFO] engine_prefill.cpp:704: prefill graph: not capturing (runtime.prefill_graph=true) — pf_pool=1 cuda_graphs=1 kv_append_capturable=1 offset0=1 not_snapshot_end=1 nvfp4_dequant_capturable=1 moe_capturable=0 no_ple=0
+[02:11:37.590][INFO] gemm.cpp:333: [gemm-algo] pick M=16 K=10240 N=320 heuristic, warmup-validated cand[0/7]: id=67 tile=312 stages=36 splitk=16 red=2 swizzle=0 custom=29
+[02:11:37.609][INFO] gemm.cpp:333: [gemm-algo] pick M=16 K=10240 N=4 heuristic, warmup-validated cand[0/8]: id=23 tile=11 stages=20 splitk=34 red=2 swizzle=0 custom=0
+[02:11:37.610][INFO] gemm.cpp:333: [gemm-algo] pick M=16 K=320 N=10240 heuristic, warmup-validated cand[0/8]: id=67 tile=393 stages=35 splitk=1 red=0 swizzle=0 custom=105
+[02:11:37.612][INFO] executor_gdn_alpha_beta.cpp:103: gdn alpha/beta narrow GEMM ACTIVE (M=16, K=2560, N=48 x 2)
+[02:11:37.616][INFO] gemm.cpp:333: [gemm-algo] pick M=16 K=2560 N=512 heuristic, warmup-validated cand[0/8]: id=67 tile=394 stages=35 splitk=16 red=2 swizzle=0 custom=19
+[02:11:37.618][INFO] executor_forward_moe_cutlass.cpp:148: MoE prefill: CUTLASS 3.x device-args full path (default; set moe.nvfp4_device_args=false to disable)
+[02:11:37.635][INFO] gemm_dispatch_uncached.cpp:266: uncached F16 M=16 N=640 K=2560: per-call dequant (in stride 2560, out stride 640)
+[02:11:37.635][INFO] gemm.cpp:333: [gemm-algo] pick M=16 K=2560 N=640 heuristic, warmup-validated cand[0/8]: id=67 tile=394 stages=35 splitk=16 red=2 swizzle=0 custom=19
+[02:11:37.637][INFO] gemm.cpp:333: [gemm-algo] pick M=16 K=640 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=9 stages=36 splitk=1 red=0 swizzle=0 custom=133
+[02:11:37.639][INFO] gemm.cpp:333: [gemm-algo] pick M=16 K=2560 N=10240 heuristic, warmup-validated cand[0/8]: id=67 tile=394 stages=35 splitk=1 red=0 swizzle=0 custom=143
+[02:11:37.641][INFO] gemm.cpp:333: [gemm-algo] pick M=16 K=2560 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=487 stages=35 splitk=16 red=2 swizzle=0 custom=29
+[02:11:37.655][INFO] attention_fmha_sm120.cu:1991: FMHA FA2 register-resident kernel ACTIVE (hd=256, Bq=64, Bkv=64, qk=f16, qk_acc=f16, pv_acc=f16, kv_buf=twoslot, smem=67584 B, seq_q=16 seq_kv=16)
+[02:11:37.755][WARN] layernorm.cu:340: rmsnorm: null weight, applying the identity (rows=1 d=2560); expected only on archs that carry no norm at this site
+[02:11:37.829][INFO] engine_scheduler.cpp:286: Resolved dispatch: attn_prefill=fa2_fp16qk attn_decode=paged_fp16 moe_prefill=cutlass3x → device_args graphs=1
+[02:11:37.836][INFO] gemm.cpp:333: [gemm-algo] pick M=32 K=10240 N=320 heuristic, warmup-validated cand[0/8]: id=67 tile=13 stages=35 splitk=16 red=2 swizzle=0 custom=29
+[02:11:37.838][INFO] gemm.cpp:333: [gemm-algo] pick M=32 K=10240 N=4 heuristic, warmup-validated cand[0/8]: id=23 tile=11 stages=13 splitk=46 red=2 swizzle=0 custom=0
+[02:11:37.838][INFO] gemm.cpp:333: [gemm-algo] pick M=32 K=2560 N=512 heuristic, warmup-validated cand[0/8]: id=67 tile=13 stages=35 splitk=16 red=2 swizzle=0 custom=29
+[02:11:37.838][INFO] gemm.cpp:333: [gemm-algo] pick M=32 K=2560 N=640 heuristic, warmup-validated cand[0/8]: id=67 tile=13 stages=35 splitk=16 red=2 swizzle=0 custom=29
+[02:11:37.841][INFO] gemm.cpp:333: [gemm-algo] pick M=32 K=2560 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=16 stages=36 splitk=8 red=2 swizzle=0 custom=31
+[02:11:37.991][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:11:37.991][INFO] cuda_graph.cu:64: CudaGraphCapture: using cudaStreamCaptureModeRelaxed (default for prefill-safe capture)
+[02:11:38.019][INFO] engine_workspace_warmup.cpp:402: library reserve: forward window 64 MiB, whole-init 689 MiB — charging 689 MiB (AUDIT B79/B80)
+[02:11:38.019][WARN] engine_workspace_warmup.cpp:430: library reserve MISMATCH: the plan charged 3900 MiB, this start measured 689 MiB (-3211 MiB, forward window 64 MiB / whole-init 689 MiB). The plan therefore over-reserved; a start that charged the constant re-sizes the KV pool to the measurement next (#2436). Pin it for this model with 'vram.library_reserve_mb = 689' in imp.conf: that is the number the plan and the measurement cache both use. The charge is stable per model and quant path; the forward WINDOW is not, which is why the two figures above can differ by orders of magnitude (AUDIT B79).
+[02:11:38.019][INFO] engine_workspace_warmup.cpp:531: library reserve: recorded 689 MiB in /home/imp/.cache/imp/library_reserve — the next start on this model plans with it IF that path persists (in a container, mount it or set vram.library_reserve_cache; otherwise the constant is charged again)
+[02:11:38.821][INFO] gemm.cpp:333: [gemm-algo] pick M=960 K=10240 N=320 heuristic, warmup-validated cand[0/8]: id=67 tile=135 stages=35 splitk=5 red=2 swizzle=0 custom=6
+[02:11:38.823][INFO] gemm.cpp:333: [gemm-algo] pick M=960 K=10240 N=4 heuristic, warmup-validated cand[0/8]: id=23 tile=15 stages=12 splitk=11 red=2 swizzle=0 custom=0
+[02:11:38.823][INFO] gemm.cpp:333: [gemm-algo] pick M=960 K=320 N=10240 heuristic, warmup-validated cand[0/6]: id=23 tile=24 stages=9 splitk=1 red=0 swizzle=0 custom=0
+[02:11:38.824][INFO] executor_gemm_dispatch.cpp:183: GDN MXFP8 prefill route ACTIVE: SSM_IN [10240 x 2560] M=960 beta=0.0 primary_tier=0 source_qtype=1
+[02:11:38.824][INFO] executor_gemm_dispatch.cpp:183: GDN MXFP8 prefill route ACTIVE: GDN_GATE [6144 x 2560] M=960 beta=0.0 primary_tier=0 source_qtype=1
+[02:11:38.825][INFO] gemm.cpp:333: [gemm-algo] pick M=960 K=2560 N=48 heuristic, warmup-validated cand[0/8]: id=67 tile=92 stages=35 splitk=8 red=2 swizzle=0 custom=6
+[02:11:38.826][INFO] executor_gemm_dispatch.cpp:183: GDN MXFP8 prefill route ACTIVE: SSM_OUT [2560 x 6144] M=960 beta=0.0 primary_tier=2 source_qtype=1
+[02:11:38.827][INFO] gemm.cpp:333: [gemm-algo] pick M=960 K=2560 N=512 heuristic, warmup-validated cand[0/8]: id=67 tile=33 stages=35 splitk=4 red=2 swizzle=0 custom=99
+[02:11:38.829][INFO] gemm.cpp:333: [gemm-algo] pick M=960 K=2560 N=640 heuristic, warmup-validated cand[0/8]: id=67 tile=20 stages=35 splitk=4 red=2 swizzle=0 custom=31
+[02:11:38.831][INFO] gemm.cpp:333: [gemm-algo] pick M=960 K=640 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=20 stages=35 splitk=1 red=0 swizzle=0 custom=23
+[02:11:38.847][INFO] gemm.cpp:333: [gemm-algo] pick M=960 K=2560 N=10240 heuristic, warmup-validated cand[0/7]: id=67 tile=29 stages=35 splitk=1 red=0 swizzle=0 custom=23
+[02:11:38.847][INFO] gemm.cpp:333: [gemm-algo] pick M=960 K=2560 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=20 stages=35 splitk=1 red=0 swizzle=0 custom=23
+[02:11:38.854][INFO] gemm.cpp:333: [gemm-algo] pick M=960 K=2560 N=12288 heuristic, warmup-validated cand[0/7]: id=67 tile=495 stages=35 splitk=1 red=0 swizzle=0 custom=31
+[02:11:38.854][INFO] gemm.cpp:333: [gemm-algo] pick M=960 K=6144 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=20 stages=35 splitk=1 red=0 swizzle=0 custom=23
+[02:11:39.398][INFO] gemm.cpp:333: [gemm-algo] pick M=40 K=10240 N=320 heuristic, warmup-validated cand[0/8]: id=67 tile=314 stages=36 splitk=16 red=2 swizzle=0 custom=29
+[02:11:39.410][INFO] gemm.cpp:333: [gemm-algo] pick M=40 K=10240 N=4 heuristic, warmup-validated cand[0/8]: id=23 tile=11 stages=19 splitk=85 red=2 swizzle=0 custom=0
+[02:11:39.410][INFO] gemm.cpp:333: [gemm-algo] pick M=40 K=2560 N=48 heuristic, warmup-validated cand[0/8]: id=67 tile=312 stages=36 splitk=16 red=2 swizzle=0 custom=28
+[02:11:39.411][INFO] gemm.cpp:333: [gemm-algo] pick M=40 K=2560 N=512 heuristic, warmup-validated cand[0/8]: id=67 tile=314 stages=35 splitk=16 red=2 swizzle=0 custom=29
+[02:11:39.412][INFO] gemm.cpp:333: [gemm-algo] pick M=40 K=2560 N=640 heuristic, warmup-validated cand[0/8]: id=67 tile=314 stages=36 splitk=10 red=2 swizzle=0 custom=29
+[02:11:39.414][INFO] gemm.cpp:333: [gemm-algo] pick M=40 K=2560 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=396 stages=35 splitk=7 red=2 swizzle=0 custom=29
+[02:11:39.418][INFO] gemm.cpp:333: [gemm-algo] pick M=40 K=2560 N=12288 heuristic, warmup-validated cand[0/8]: id=67 tile=460 stages=35 splitk=4 red=2 swizzle=0 custom=30
+[02:11:39.420][INFO] gemm.cpp:333: [gemm-algo] pick M=40 K=6144 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=396 stages=35 splitk=7 red=2 swizzle=0 custom=29
+[02:11:39.691][INFO] engine_decode_pipeline.cpp:131: decode-pipeline: not entering — cfg=1 n=7 graphs=1 profile=0 pool=1 offload=0 ssm_ok=0 swa=0 streaming_kv=0 residual=0 sampler_ready=1 rows_ok=1
+[02:11:39.744][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:11:39.744][INFO] gemm.cpp:831: [gemm-algo] captured GEMM M=8 K=10240 N=320 uses the heuristic algo (chosen at M=16, tile=312)
+[02:11:39.744][INFO] gemm.cpp:831: [gemm-algo] captured GEMM M=8 K=10240 N=4 uses the heuristic algo (chosen at M=16, tile=11)
+[02:11:39.744][INFO] gemm.cpp:831: [gemm-algo] captured GEMM M=8 K=320 N=10240 uses the heuristic algo (chosen at M=16, tile=393)
+[02:11:39.744][INFO] gemm.cpp:831: [gemm-algo] captured GEMM M=8 K=2560 N=512 uses the heuristic algo (chosen at M=16, tile=394)
+[02:11:39.744][INFO] gemm.cpp:831: [gemm-algo] captured GEMM M=8 K=2560 N=640 uses the heuristic algo (chosen at M=16, tile=394)
+[02:11:39.744][INFO] gemm.cpp:831: [gemm-algo] captured GEMM M=8 K=640 N=2560 uses the heuristic algo (chosen at M=16, tile=9)
+[02:11:39.744][INFO] gemm.cpp:831: [gemm-algo] captured GEMM M=8 K=2560 N=10240 uses the heuristic algo (chosen at M=16, tile=394)
+[02:11:39.744][INFO] gemm.cpp:831: [gemm-algo] captured GEMM M=8 K=2560 N=2560 uses the heuristic algo (chosen at M=16, tile=487)
+[02:11:39.861][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:11:39.976][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:11:40.062][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:11:40.143][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:11:40.239][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:11:40.338][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:11:40.383][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:11:40.405][INFO] cuda_graph.cu:379: CudaGraphRunner: capturing CUDA graph (step 1)
+[02:11:40.464][INFO] engine_workspace_warmup.cpp:651: graph prewarm: 8/8 decode graphs captured (33 steps, 2.4 s)
+[02:11:40.467][INFO] engine_sampling_stop.cpp:296: SSM state: 7 slot(s) decommitted after warmup (1 still held), 60 MiB committed
+[02:11:40.467][INFO] engine_workspace_warmup.cpp:674: Warmup complete
+[02:11:40.468][INFO] executor_workspace_buffers.cpp:1932: chunk-capture K/V scratch: 2x 32.0 MiB (ctx_capacity=32768, nkv=2, hd=256)
+[02:11:40.468][INFO] engine_spec_capture.cpp:142: [spec-capture] enabled (ctx_cap=32768)
+[02:11:40.472][INFO] engine_spec_buffers.cpp:159: [spec] hybrid state scratch prewarmed: 119.6 MiB (2 x 59.8 MiB recurrent slot)
+[02:11:40.472][INFO] engine_spec_capture.cpp:75: [spec] scratch prewarmed: chunk_cap=65 table_cap=8208 ctx_cap=32768
+[02:11:40.473][INFO] mem_account.cpp:357: 
+===== VRAM AUDIT [init_complete] =====
+device: total=32580 MiB  used=27921 MiB  free=4659 MiB  peak_used=27921 MiB
+budget: cap=none  own=26268 MiB  own_peak=26250 MiB  ctx_at_install=1653 MiB
+mempool(async): reserved=2048 MiB  used=2040 MiB  trimmable=8 MiB
+mempool(async) high-water since serving began: used=2040 MiB  reserved=2048 MiB (delta vs now: used +0 MiB)
+graphmem: used=0.0 MiB  reserved=0.0 MiB  high_since_serving=0.0 MiB
+--- per-pool notes (tracked allocation sites) ---
+pool                        current_MiB     peak_MiB     allocs
+expert_cache                    17845.4      17845.4          2
+WEIGHTS                          1912.0       8224.5       1066
+fp8_ssm_sidecar                  2558.4       2558.4          1
+kv_cache                          768.0        768.0          1
+fp8_lm_head                       607.2        607.2          1
+ssm_state                          60.0        480.0          8
+shared_workspace                  299.0        299.0          1
+recurrent_snapshots               239.2        239.2          1
+moe_layer_stage                   225.0        225.0          1
+engine_arena                      196.0        196.0          9
+gdn_chunkpar_ws                   123.0        123.0          1
+mxfp8_rows_sf                      64.5         64.5        108
+released_f16_scratch               60.0         60.0          2
+spec_state_snapshot                59.8         59.8          1
+hc_mixw                            40.0         40.0          1
+hc_normed                          40.0         40.0          1
+hc_hidden                          40.0         40.0          1
+persistent_workspace               37.6         37.6          1
+moe_3x_packed                      25.0         25.0          1
+moe_layer_stage_sf                 25.0         25.0          1
+cutlass_workspace                  21.1         21.1          1
+moe_3x_sf                          13.1         13.1          1
+mxfp8_act_data                     12.0         12.0          1
+cutlass_act_data                   12.0         12.0          1
+hc_mixed                           10.0         10.0          1
+ple_emb                            10.0         10.0          1
+verify_sample_rows                  4.1          4.1          1
+penalty_hist                        4.0          4.0          1
+moe_dequant                         3.1          3.1          1
+qsa_qk                              2.5          2.5          1
+prefill_pool                        2.4          2.4          1
+expert_cache_dev                    2.2          2.2          1
+qsa_q                               2.0          2.0          1
+cutlass_act_sf                      1.5          1.5          1
+hc_low                              1.2          1.2          1
+moe_staging                         0.9          0.9          1
+penalty_tokens                      0.5          0.5          1
+mxfp8_act_sf                        0.4          0.4          1
+moe_stage_alpha                     0.3          0.3          1
+token_is_whitespace                 0.2          0.2          1
+qsa_sel                             0.1          0.1          1
+gdn_ab_ws                           0.1          0.1          1
+shexp_overlap                       0.1          0.1          1
+mrope_positions                     0.0          0.0          1
+hc_inj                              0.0          0.0          1
+moe_stage_sfbptr                    0.0          0.0          1
+moe_stage_bptr                      0.0          0.0          1
+moe_slot_idx                        0.0          0.0          1
+moe_imbalance                       0.0          0.0          1
+qsa_scratch_ctx                     0.0          0.0          1
+qsa_sel_count                       0.0          0.0          1
+stop_mask_tokens                    0.0          0.0          1
+banned_tokens                       0.0          0.0          1
+mrope_delta                         0.0          0.0          1
+TRACKED TOTAL                   25329.0      32061.5
+  named: context                 1652.8    CUDA context + driver
+  named: library reserve          689.3    claimed on first forward (A1.5)
+ACCOUNTED (tracked+named)       27671.1    99.1% of device used
+RESIDUAL (unattributed)           250.1    0.9% of device used
+===== END VRAM AUDIT [init_complete] =====
+
+Reasoning model: <think>=248068, </think>=248069
+Chat template: chatml
+Continuous batching: started
+Max concurrent: 64
+Request timeout: 300s
+Responses store: ttl 3600s, max 1000 entries, 256 MiB (LRU)
+Server listening on http://0.0.0.0:8090
+Endpoints:
+  GET    /                    web UI — open this in a browser
+  GET    /health
+  GET    /v1/models            (vLLM max_model_len + llama.cpp meta.n_ctx_train)
+  GET    /props               llama.cpp-compatible context probe (n_ctx)
+  GET    /info                TGI-compatible context probe (max_total_tokens)
+  POST   /v1/chat/completions
+  POST   /v1/responses          OpenAI Responses API (Agents SDK / Codex dialect)
+  GET    /v1/responses/{id}     stored response (store=true); DELETE removes it
+  POST   /v1/completions       `suffix` = fill-in-the-middle
+  POST   /infill               llama.cpp fill-in-the-middle
+  POST   /v1/messages          Anthropic-compatible (streaming + non-streaming)
+  POST   /v1/messages/count_tokens
+  POST   /v1/embeddings
+  POST   /v1/rerank            (also /rerank) cross-encoder reranking
+  POST   /v1/decide            closed-choice letter scoring, no decoding
+  POST   /v1/score             softmax over candidate tokens at the last position
+  POST   /tokenize
+  POST   /detokenize
+  POST   /admin/suspend       Park weights in host RAM, free the GPU
+  POST   /admin/resume        Restore weights, serve again
+  POST   /admin/lora/load     Load a PEFT LoRA adapter {path, name?}
+  POST   /admin/lora/unload   Unload a LoRA adapter {id} or {name}
+  POST   /v1/sessions/{id}/close  release a session_id prefix pin
+  POST   /v1/requests/{id}/end_thinking  end a running request's think block
+  GET    /metrics             Prometheus metrics
+[02:11:41.316][INFO] handlers_chat_params.cpp:567: [imp-0] chat/completions: prompt_msgs=1 stream=true max_tokens=400 temp=0.00
+[02:11:41.318][INFO] engine.cpp:1051: request imp-0 -> engine req 10
+[02:11:41.320][INFO] gemm.cpp:333: [gemm-algo] pick M=81 K=10240 N=320 heuristic, warmup-validated cand[0/8]: id=67 tile=315 stages=36 splitk=16 red=2 swizzle=0 custom=29
+[02:11:41.320][INFO] gemm.cpp:333: [gemm-algo] pick M=81 K=10240 N=4 heuristic, warmup-validated cand[0/8]: id=23 tile=11 stages=19 splitk=56 red=2 swizzle=0 custom=0
+[02:11:41.322][INFO] gemm.cpp:333: [gemm-algo] pick M=81 K=320 N=10240 heuristic, warmup-validated cand[0/8]: id=67 tile=320 stages=35 splitk=1 red=0 swizzle=0 custom=143
+[02:11:41.322][INFO] gemm.cpp:333: [gemm-algo] pick M=81 K=2560 N=48 heuristic, warmup-validated cand[0/8]: id=67 tile=11 stages=36 splitk=32 red=2 swizzle=0 custom=6
+[02:11:41.324][INFO] gemm.cpp:333: [gemm-algo] pick M=81 K=2560 N=512 heuristic, warmup-validated cand[0/8]: id=67 tile=395 stages=35 splitk=9 red=2 swizzle=0 custom=29
+[02:11:41.337][INFO] gemm.cpp:333: [gemm-algo] pick M=81 K=2560 N=640 heuristic, warmup-validated cand[0/8]: id=67 tile=319 stages=35 splitk=16 red=2 swizzle=0 custom=29
+[02:11:41.338][INFO] gemm.cpp:333: [gemm-algo] pick M=81 K=640 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=13 stages=35 splitk=1 red=0 swizzle=0 custom=105
+[02:11:41.356][INFO] gemm.cpp:333: [gemm-algo] pick M=81 K=2560 N=10240 heuristic, warmup-validated cand[0/8]: id=67 tile=403 stages=35 splitk=2 red=2 swizzle=0 custom=31
+[02:11:41.356][INFO] gemm.cpp:333: [gemm-algo] pick M=81 K=2560 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=33 stages=35 splitk=6 red=2 swizzle=0 custom=23
+[02:11:41.358][INFO] gemm.cpp:333: [gemm-algo] pick M=81 K=2560 N=12288 heuristic, warmup-validated cand[0/8]: id=67 tile=403 stages=35 splitk=2 red=2 swizzle=0 custom=31
+[02:11:41.359][INFO] gemm.cpp:333: [gemm-algo] pick M=81 K=6144 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=33 stages=35 splitk=6 red=2 swizzle=0 custom=23
+[02:11:45.964][INFO] stream_driver.cpp:708: [imp-0] 81 prompt + 400 completion tokens, 4646.8 ms (ttft=470.1 ms, cached=0)
+[02:11:45.966][INFO] handlers_chat_params.cpp:567: [imp-1] chat/completions: prompt_msgs=1 stream=true max_tokens=400 temp=0.00
+[02:11:45.966][INFO] engine.cpp:1051: request imp-1 -> engine req 11
+[02:11:45.967][INFO] gemm.cpp:333: [gemm-algo] pick M=87 K=10240 N=320 heuristic, warmup-validated cand[0/8]: id=67 tile=315 stages=36 splitk=16 red=2 swizzle=0 custom=29
+[02:11:45.967][INFO] gemm.cpp:333: [gemm-algo] pick M=87 K=10240 N=4 heuristic, warmup-validated cand[0/8]: id=23 tile=11 stages=19 splitk=56 red=2 swizzle=0 custom=0
+[02:11:45.967][INFO] gemm.cpp:333: [gemm-algo] pick M=87 K=2560 N=48 heuristic, warmup-validated cand[0/8]: id=67 tile=11 stages=36 splitk=32 red=2 swizzle=0 custom=6
+[02:11:45.967][INFO] gemm.cpp:333: [gemm-algo] pick M=87 K=2560 N=512 heuristic, warmup-validated cand[0/8]: id=67 tile=395 stages=35 splitk=9 red=2 swizzle=0 custom=29
+[02:11:45.968][INFO] gemm.cpp:333: [gemm-algo] pick M=87 K=2560 N=640 heuristic, warmup-validated cand[0/8]: id=67 tile=319 stages=35 splitk=16 red=2 swizzle=0 custom=29
+[02:11:45.990][INFO] gemm.cpp:333: [gemm-algo] pick M=87 K=2560 N=10240 heuristic, warmup-validated cand[0/8]: id=67 tile=403 stages=35 splitk=2 red=2 swizzle=0 custom=31
+[02:11:45.990][INFO] gemm.cpp:333: [gemm-algo] pick M=87 K=2560 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=33 stages=35 splitk=6 red=2 swizzle=0 custom=23
+[02:11:45.992][INFO] gemm.cpp:333: [gemm-algo] pick M=87 K=2560 N=12288 heuristic, warmup-validated cand[0/8]: id=67 tile=403 stages=35 splitk=2 red=2 swizzle=0 custom=31
+[02:11:45.992][INFO] gemm.cpp:333: [gemm-algo] pick M=87 K=6144 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=33 stages=35 splitk=6 red=2 swizzle=0 custom=23
+[02:11:50.687][INFO] stream_driver.cpp:708: [imp-1] 87 prompt + 400 completion tokens, 4720.3 ms (ttft=377.6 ms, cached=0)
+[02:11:50.688][INFO] handlers_chat_params.cpp:567: [imp-2] chat/completions: prompt_msgs=1 stream=true max_tokens=400 temp=0.00
+[02:11:50.688][INFO] engine.cpp:1051: request imp-2 -> engine req 12
+[02:11:50.689][INFO] gemm.cpp:333: [gemm-algo] pick M=88 K=10240 N=320 heuristic, warmup-validated cand[0/8]: id=67 tile=315 stages=36 splitk=16 red=2 swizzle=0 custom=29
+[02:11:50.689][INFO] gemm.cpp:333: [gemm-algo] pick M=88 K=10240 N=4 heuristic, warmup-validated cand[0/8]: id=23 tile=11 stages=19 splitk=56 red=2 swizzle=0 custom=0
+[02:11:50.689][INFO] gemm.cpp:333: [gemm-algo] pick M=88 K=2560 N=48 heuristic, warmup-validated cand[0/8]: id=67 tile=11 stages=36 splitk=32 red=2 swizzle=0 custom=6
+[02:11:50.689][INFO] gemm.cpp:333: [gemm-algo] pick M=88 K=2560 N=512 heuristic, warmup-validated cand[0/8]: id=67 tile=395 stages=35 splitk=9 red=2 swizzle=0 custom=29
+[02:11:50.690][INFO] gemm.cpp:333: [gemm-algo] pick M=88 K=2560 N=640 heuristic, warmup-validated cand[0/8]: id=67 tile=319 stages=35 splitk=16 red=2 swizzle=0 custom=29
+[02:11:50.711][INFO] gemm.cpp:333: [gemm-algo] pick M=88 K=2560 N=10240 heuristic, warmup-validated cand[0/8]: id=67 tile=403 stages=35 splitk=2 red=2 swizzle=0 custom=31
+[02:11:50.711][INFO] gemm.cpp:333: [gemm-algo] pick M=88 K=2560 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=33 stages=35 splitk=6 red=2 swizzle=0 custom=23
+[02:11:50.713][INFO] gemm.cpp:333: [gemm-algo] pick M=88 K=2560 N=12288 heuristic, warmup-validated cand[0/8]: id=67 tile=403 stages=35 splitk=2 red=2 swizzle=0 custom=31
+[02:11:50.713][INFO] gemm.cpp:333: [gemm-algo] pick M=88 K=6144 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=33 stages=35 splitk=6 red=2 swizzle=0 custom=23
+[02:11:55.461][INFO] stream_driver.cpp:708: [imp-2] 88 prompt + 400 completion tokens, 4773.2 ms (ttft=421.1 ms, cached=0)
+[02:11:55.463][INFO] handlers_chat_params.cpp:567: [imp-3] chat/completions: prompt_msgs=1 stream=true max_tokens=400 temp=0.00
+[02:11:55.463][INFO] engine.cpp:1051: request imp-3 -> engine req 13
+[02:12:00.350][INFO] stream_driver.cpp:708: [imp-3] 87 prompt + 400 completion tokens, 4886.8 ms (ttft=375.8 ms, cached=0)
+[02:12:00.351][INFO] handlers_chat_params.cpp:567: [imp-4] chat/completions: prompt_msgs=1 stream=true max_tokens=400 temp=0.00
+[02:12:00.351][INFO] engine.cpp:1051: request imp-4 -> engine req 14
+[02:12:00.352][INFO] gemm.cpp:333: [gemm-algo] pick M=90 K=10240 N=320 heuristic, warmup-validated cand[0/8]: id=67 tile=315 stages=36 splitk=16 red=2 swizzle=0 custom=29
+[02:12:00.352][INFO] gemm.cpp:333: [gemm-algo] pick M=90 K=10240 N=4 heuristic, warmup-validated cand[0/8]: id=23 tile=11 stages=19 splitk=56 red=2 swizzle=0 custom=0
+[02:12:00.352][INFO] gemm.cpp:333: [gemm-algo] pick M=90 K=2560 N=48 heuristic, warmup-validated cand[0/8]: id=67 tile=11 stages=36 splitk=32 red=2 swizzle=0 custom=6
+[02:12:00.352][INFO] gemm.cpp:333: [gemm-algo] pick M=90 K=2560 N=512 heuristic, warmup-validated cand[0/8]: id=67 tile=395 stages=35 splitk=9 red=2 swizzle=0 custom=29
+[02:12:00.364][INFO] gemm.cpp:333: [gemm-algo] pick M=90 K=2560 N=640 heuristic, warmup-validated cand[0/8]: id=67 tile=15 stages=35 splitk=8 red=2 swizzle=0 custom=29
+[02:12:00.373][INFO] gemm.cpp:333: [gemm-algo] pick M=90 K=2560 N=10240 heuristic, warmup-validated cand[0/8]: id=67 tile=403 stages=35 splitk=2 red=2 swizzle=0 custom=31
+[02:12:00.373][INFO] gemm.cpp:333: [gemm-algo] pick M=90 K=2560 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=33 stages=35 splitk=6 red=2 swizzle=0 custom=23
+[02:12:00.375][INFO] gemm.cpp:333: [gemm-algo] pick M=90 K=2560 N=12288 heuristic, warmup-validated cand[0/8]: id=67 tile=403 stages=35 splitk=2 red=2 swizzle=0 custom=31
+[02:12:00.375][INFO] gemm.cpp:333: [gemm-algo] pick M=90 K=6144 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=33 stages=35 splitk=6 red=2 swizzle=0 custom=23
+[02:12:05.122][INFO] stream_driver.cpp:708: [imp-4] 90 prompt + 400 completion tokens, 4770.6 ms (ttft=409.8 ms, cached=0)
+[02:12:05.123][INFO] handlers_chat_params.cpp:567: [imp-5] chat/completions: prompt_msgs=1 stream=true max_tokens=400 temp=0.00
+[02:12:05.123][INFO] engine.cpp:1051: request imp-5 -> engine req 15
+[02:12:05.123][INFO] gemm.cpp:333: [gemm-algo] pick M=84 K=10240 N=320 heuristic, warmup-validated cand[0/8]: id=67 tile=315 stages=36 splitk=16 red=2 swizzle=0 custom=29
+[02:12:05.123][INFO] gemm.cpp:333: [gemm-algo] pick M=84 K=10240 N=4 heuristic, warmup-validated cand[0/8]: id=23 tile=11 stages=19 splitk=56 red=2 swizzle=0 custom=0
+[02:12:05.124][INFO] gemm.cpp:333: [gemm-algo] pick M=84 K=2560 N=48 heuristic, warmup-validated cand[0/8]: id=67 tile=11 stages=36 splitk=32 red=2 swizzle=0 custom=6
+[02:12:05.124][INFO] gemm.cpp:333: [gemm-algo] pick M=84 K=2560 N=512 heuristic, warmup-validated cand[0/8]: id=67 tile=395 stages=35 splitk=9 red=2 swizzle=0 custom=29
+[02:12:05.124][INFO] gemm.cpp:333: [gemm-algo] pick M=84 K=2560 N=640 heuristic, warmup-validated cand[0/8]: id=67 tile=319 stages=35 splitk=16 red=2 swizzle=0 custom=29
+[02:12:05.139][INFO] gemm.cpp:333: [gemm-algo] pick M=84 K=2560 N=10240 heuristic, warmup-validated cand[0/8]: id=67 tile=403 stages=35 splitk=2 red=2 swizzle=0 custom=31
+[02:12:05.139][INFO] gemm.cpp:333: [gemm-algo] pick M=84 K=2560 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=33 stages=35 splitk=6 red=2 swizzle=0 custom=23
+[02:12:05.141][INFO] gemm.cpp:333: [gemm-algo] pick M=84 K=2560 N=12288 heuristic, warmup-validated cand[0/8]: id=67 tile=403 stages=35 splitk=2 red=2 swizzle=0 custom=31
+[02:12:05.141][INFO] gemm.cpp:333: [gemm-algo] pick M=84 K=6144 N=2560 heuristic, warmup-validated cand[0/8]: id=67 tile=33 stages=35 splitk=6 red=2 swizzle=0 custom=23
+[02:12:09.792][INFO] stream_driver.cpp:708: [imp-5] 84 prompt + 400 completion tokens, 4669.2 ms (ttft=341.1 ms, cached=0)

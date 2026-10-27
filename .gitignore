@@ -141,3 +141,6 @@ results/
 tools/imp-server/webui/dev/node_modules/
 tools/imp-server/webui/dev/package.json
 tools/imp-server/webui/dev/package-lock.json
+
+# Launch drafts (Show HN, Reddit, release notes, claim table): local only, not published with the repo.
+docs/launch/

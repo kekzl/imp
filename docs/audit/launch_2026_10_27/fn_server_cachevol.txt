@@ -1,0 +1,38 @@
+image ghcr.io/kekzl/imp:latest ghcr.io/kekzl/imp@sha256:7a52810d0b146f4320a2224c8fcbba637c02db4788dd01b2a047db661e4c3567 v0.59.0
+trial 1: load 50 s, host MemAvailable 77.0 -> 9.3 GiB, card VRAM 754 MiB idle -> 27069 MiB peak, health {"status":"ok","kv_blocks_total":2025,"kv_capacity_tokens":32400}
+t1 MEDIAN decode 91.87 tok/s (min 89.25 max 95.91) ttft 390.4 ms (min 345.1 max 459.6) n=6
+trial 2: load 38 s, host MemAvailable 76.7 -> 9.2 GiB, card VRAM 754 MiB idle -> 27069 MiB peak, health {"status":"ok","kv_blocks_total":2025,"kv_capacity_tokens":32400}
+t2 MEDIAN decode 91.78 tok/s (min 89.37 max 95.70) ttft 391.8 ms (min 344.5 max 463.5) n=6
+trial 3: load 43 s, host MemAvailable 77.0 -> 8.9 GiB, card VRAM 754 MiB idle -> 27069 MiB peak, health {"status":"ok","kv_blocks_total":2025,"kv_capacity_tokens":32400}
+t3 MEDIAN decode 92.17 tok/s (min 89.36 max 96.39) ttft 394.5 ms (min 349.4 max 467.1) n=6
+trial 4: load 39 s, host MemAvailable 76.6 -> 8.9 GiB, card VRAM 754 MiB idle -> 27069 MiB peak, health {"status":"ok","kv_blocks_total":2025,"kv_capacity_tokens":32400}
+t4 MEDIAN decode 92.10 tok/s (min 89.20 max 95.37) ttft 392.2 ms (min 343.4 max 473.7) n=6
+
+t1 prose    tokens  400  ttft    459.6 ms  decode   95.91 tok/s
+t1 code     tokens  400  ttft    372.8 ms  decode   92.22 tok/s
+t1 chat     tokens  400  ttft    418.6 ms  decode   91.38 tok/s
+t1 math     tokens  400  ttft    377.7 ms  decode   89.25 tok/s
+t1 debug    tokens  400  ttft    403.1 ms  decode   91.53 tok/s
+t1 summary  tokens  400  ttft    345.1 ms  decode   93.01 tok/s
+t1 MEDIAN decode 91.87 tok/s (min 89.25 max 95.91) ttft 390.4 ms (min 345.1 max 459.6) n=6
+t2 prose    tokens  400  ttft    463.5 ms  decode   95.70 tok/s
+t2 code     tokens  400  ttft    372.7 ms  decode   92.25 tok/s
+t2 chat     tokens  400  ttft    421.8 ms  decode   91.31 tok/s
+t2 math     tokens  400  ttft    379.5 ms  decode   89.37 tok/s
+t2 debug    tokens  400  ttft    404.1 ms  decode   91.30 tok/s
+t2 summary  tokens  400  ttft    344.5 ms  decode   92.64 tok/s
+t2 MEDIAN decode 91.78 tok/s (min 89.37 max 95.70) ttft 391.8 ms (min 344.5 max 463.5) n=6
+t3 prose    tokens  400  ttft    467.1 ms  decode   96.39 tok/s
+t3 code     tokens  400  ttft    380.0 ms  decode   92.28 tok/s
+t3 chat     tokens  400  ttft    419.6 ms  decode   91.51 tok/s
+t3 math     tokens  400  ttft    383.8 ms  decode   89.36 tok/s
+t3 debug    tokens  400  ttft    405.3 ms  decode   92.06 tok/s
+t3 summary  tokens  400  ttft    349.4 ms  decode   93.06 tok/s
+t3 MEDIAN decode 92.17 tok/s (min 89.36 max 96.39) ttft 394.5 ms (min 349.4 max 467.1) n=6
+t4 prose    tokens  400  ttft    473.7 ms  decode   95.37 tok/s
+t4 code     tokens  400  ttft    366.8 ms  decode   92.35 tok/s
+t4 chat     tokens  400  ttft    416.6 ms  decode   91.50 tok/s
+t4 math     tokens  400  ttft    376.5 ms  decode   89.20 tok/s
+t4 debug    tokens  400  ttft    408.0 ms  decode   91.84 tok/s
+t4 summary  tokens  400  ttft    343.4 ms  decode   92.88 tok/s
+t4 MEDIAN decode 92.10 tok/s (min 89.20 max 95.37) ttft 392.2 ms (min 343.4 max 473.7) n=6
