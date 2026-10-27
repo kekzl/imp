@@ -4,6 +4,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+## [0.59.1] - 2026-10-27
+
 ### Added
 - `scripts/bench-community.sh`: pulls the image, benches Qwen3-8B Q8_0 and gpt-oss-20b MXFP4 from Hugging Face in 3 fresh processes each, prints a Markdown block (GPU, driver, CUDA, imp version). RTX 5090: tg128 283.16 / 402.62 tok/s.
 
