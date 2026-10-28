@@ -38,7 +38,7 @@ Method: both engines on one client (`tools/analysis/vllm_conc_ab.sh`), 3 alterna
 
 ## Now
 
-No open row; closed rows are indexed below. A new row takes the next free number (123), ranked by what an agent workload notices first.
+No open row; closed rows are indexed below. A new row takes the next free number (124), ranked by what an agent workload notices first.
 
 ## Next
 
@@ -76,6 +76,7 @@ No open row; closed rows are indexed below. A new row takes the next free number
 | 120 | Gemma-4 takes audio input | the loader reads `audio_config`, no encoder, input type or tokenizer route exists -> audio encoder plus an `input_audio` content part | L | `src/model/model_config.h:150 imp has no audio path at all`, no issue |
 | 121 | the Web UI shows watts and joules per answer | CLOSED 2026-10-15: `/metrics` `imp_gpu_power_watts` + `imp_gpu_energy_joules_total` (NVML, #2727); the Web UI reads the counter around each turn and shows J and W average next to tok/s and TTFT, plus a power sparkline in its Server tab. Real server, Qwen3-4B Q8_0, 512-token answer: 558 J, 340 W avg | S | `tools/imp-server/metrics_power.cpp`, `tools/imp-server/webui/index.html` |
 | 122 | Unsloth UD GGUF prompts reach llama.cpp speed | Qwen3.8-27B-UD-Q4_K_M pp512 4229-4258 tok/s vs llama.cpp 4179 tok/s = 122.5 ms (2026-10-25, B-58 two barriers per K-step; B-57 per-CTA predecode 4178-4203, 127.1 ms after #2863 / #2864); IQ3_S native since B-55 (prompt GEMM 564 -> 406-457 us); Q3_K (7 tensors) sits in the FP16 cache at 32 GB (cuBLAS, dequant at load only); uncached (24 GB budget) its dequant runs per prompt GEMM, warp-per-block since B-56: 482.6 -> 146.8 us, so a Q3_K IMMA would race ~150 us + cuBLAS, not 528; left: `BigIQ3S` 406-442 vs IQ4_XS 271-320 us since B-57 -> IQ3_S tile decode | M | `src/compute/mmq_q8_imma_gguf_bm128.cu BigIQ3S`, `src/quant/dequant_gpu.cu`, no issue |
+| 123 | imp runs without cuBLAS, cuBLASLt and CUTLASS | 2026-10-28: 13 `src/` files call cuBLAS/cuBLASLt (117 call sites), 4 TUs instantiate CUTLASS v4.8.1 (dense NVFP4, MXFP4, MXFP8, grouped MoE); base Qwen3.8-27B 96.3 tok/s 1 stream spec-off, batch=1 roofline ~112 tok/s; library share of that step unmeasured -> nsys inventory, then own PTX kernels per call site, each at or above its library A/B | L | [`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md) CUTLASS row, owner request, no issue |
 
 ## Not gaps
 
