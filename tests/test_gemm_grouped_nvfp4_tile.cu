@@ -158,12 +158,15 @@ protected:
 
 }  // namespace
 
-// Tails (7, 1 rows), several M tiles per expert (300), N tail (N=384 = 3 tiles), both B modes.
-TEST_F(GroupedNvfp4TileTest, MatchesCutlassGrouped) {
+// Tails (7, 1 rows), several M tiles per expert (300), N tail (N=384 = 3 tiles), both B modes;
+// K = 704 / 2880 (Gemma-4 / gpt-oss widths) end on a half 64-K stage.
+class GroupedNvfp4TileK : public GroupedNvfp4TileTest, public ::testing::WithParamInterface<int> {};
+
+TEST_P(GroupedNvfp4TileK, MatchesCutlassGrouped) {
     if (!cutlass_grouped_3x_nvfp4_available())
         GTEST_SKIP() << "CUTLASS 3x grouped NVFP4 disabled";
     Grouped g;
-    g.build({130, 7, 300, 64, 1}, 384, 768, s_);
+    g.build({130, 7, 300, 64, 1}, 384, GetParam(), s_);
     const size_t out_bytes = size_t(g.M_total) * g.N * sizeof(half);
     void *ref = nullptr, *own = nullptr;
     cudaMalloc(&ref, out_bytes);
@@ -192,6 +195,8 @@ TEST_F(GroupedNvfp4TileTest, MatchesCutlassGrouped) {
     cudaFree(own);
     g.release();
 }
+
+INSTANTIATE_TEST_SUITE_P(K, GroupedNvfp4TileK, ::testing::Values(768, 704, 2880));
 
 // Qwen3-30B-A3B experts: 128 x (N=768, K=2048) gate/up and (N=2048, K=768) down; rows per
 // expert from a skewed draw around pp512 (avg 32) and pp4096 (avg 256) routing.

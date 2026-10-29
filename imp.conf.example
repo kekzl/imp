@@ -772,7 +772,7 @@ nvfp4_tile_min_m = 2048
 # Own FP16 GEMM instead of cuBLASLt for FP16-accumulate prefill GEMMs with K >= N and a full
 # wave of tiles (GGUF FP16 paths). Bit-equal; Qwen3-14B-Q6_K pp2048 +4.0 % e2e.
 f16_tile = true
-# Own grouped NVFP4 MoE prefill GEMM before CUTLASS 3.x grouped (bit-exact; K % 128 == 0, K >= 384).
+# Own grouped NVFP4 MoE prefill GEMM before CUTLASS 3.x grouped (bit-exact; K % 64 == 0, K >= 384).
 # Qwen3-30B-A3B-NVFP4 pp512 +3..7 %, pp4096 +2 % e2e.
 moe_tile = true
 # Batched-decode (n>1) LM head via a single CUTLASS NVFP4 GEMM instead of the

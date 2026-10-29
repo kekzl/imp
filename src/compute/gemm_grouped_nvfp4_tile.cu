@@ -140,11 +140,25 @@ __device__ __forceinline__ void produce(const GArgs& g, const Ctx& x, const CUte
             const uint32_t sb = x.s0 + s * C::kStageBytes;
             if (ring >= C::kStages)
                 mbar_wait(x.bars + (C::kStages + s) * 8, ((ring / C::kStages) - 1) & 1);
-            mbar_expect_tx(full, C::kTxBytes);
+            // K % 128 == 64: the last stage holds one 64-K SfAtom per operand; TMA zero-fills the data past
+            // K, the second SF atom is zeroed here (a never-written slot could read as a NaN scale).
+            const bool half_k = kt == x.KT - 1 && (g.K % C::kBK) != 0;
+            const uint32_t sf_bytes = half_k ? C::kSfBytes / 2 : C::kSfBytes;
+            if (half_k) {
+                uint4* z0 = reinterpret_cast<uint4*>(x.smem + (static_cast<size_t>(s) * C::kStageBytes) +
+                                                     C::kSfA + sf_bytes);
+                uint4* z1 = reinterpret_cast<uint4*>(x.smem + (static_cast<size_t>(s) * C::kStageBytes) +
+                                                     C::kSfW + sf_bytes);
+                for (uint32_t i = 0; i < sf_bytes / 16; ++i) {
+                    z0[i] = make_uint4(0, 0, 0, 0);
+                    z1[i] = make_uint4(0, 0, 0, 0);
+                }
+            }
+            mbar_expect_tx(full, C::kTxBytes - (2 * (C::kSfBytes - sf_bytes)));
             tma_2d(sb, &map_a, kt * (C::kBK / 2), row0, full);
             tma_2d(sb + C::kATile, mb, kt * (C::kBK / 2), tl.n0, full);
-            bulk_1d(sb + C::kSfA, sfa + (static_cast<size_t>(kt) * C::kSfBytes), C::kSfBytes, full);
-            bulk_1d(sb + C::kSfW, sfb + (static_cast<size_t>(kt) * C::kSfBytes), C::kSfBytes, full);
+            bulk_1d(sb + C::kSfA, sfa + (static_cast<size_t>(kt) * C::kSfBytes), sf_bytes, full);
+            bulk_1d(sb + C::kSfW, sfb + (static_cast<size_t>(kt) * C::kSfBytes), sf_bytes, full);
         }
     }
 }
@@ -210,7 +224,7 @@ __global__ void __launch_bounds__(C::kThreads, 1) gemm_grouped_nvfp4_tile_kernel
     x.bars = x.s0 + kStageArea;
     x.so = reinterpret_cast<half*>(x.smem + kStageArea + 128);
     x.sp = reinterpret_cast<int*>(x.smem + kStageArea + 128 + kStagingBytes);
-    x.KT = g.K / C::kBK;
+    x.KT = (g.K + C::kBK - 1) / C::kBK;  // K % 128 == 64: a half last stage
     x.n_tiles = (g.N + C::kBN - 1) / C::kBN;
     x.sf_slab = static_cast<size_t>(g.K / 64) * 512;
     const int warp = static_cast<int>(threadIdx.x) >> 5;
@@ -249,7 +263,7 @@ bool gemm_grouped_nvfp4_tile(int n_experts, int N, int K, int expanded, const Gr
                                                      cudaFuncAttributeMaxDynamicSharedMemorySize,
                                                      kSmemBytes) == cudaSuccess;
     if (!smem_ok || sms <= 0 || sms > kMaxCtas || n_experts <= 0 || n_experts > kMaxExperts ||
-        expanded <= 0 || N % 8 != 0 || K % C::kBK != 0 || K / C::kBK < C::kStages ||
+        expanded <= 0 || N % 8 != 0 || K % 64 != 0 || K / C::kBK < C::kStages ||
         args.base_A_packed == nullptr || args.base_A_sf == nullptr || args.base_D == nullptr)
         return false;
     CUtensorMap map_a{};
