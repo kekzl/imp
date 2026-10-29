@@ -26,6 +26,7 @@
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
+#include "quant/nvfp4_gemm_tile.h"
 #include "quant/mxfp4_gemm.h"
 #include "compute/ggml_mmvq.h"
 #include "compute/gemm_q8_0_dense.h"
@@ -186,6 +187,29 @@ static void log_mxfp8_prefill_copy_route(const WeightHandle& h, int M, float bet
         (long long)h.shape[1], M, beta, static_cast<int>(h.primary_tier), static_cast<int>(h.source_qtype));
 }
 
+// gemm.mxfp8_tile: own MXFP8 GEMM on the quantized activation (column scale fused), CUTLASS on refusal.
+// Stream-K borrows the larger of the two prefill workspaces (same stream); none under runtime.deterministic.
+static bool mxfp8_prefill_gemm(const QuantScratch& qs, const CutlassMxFP8Weight& cw, void* out, int M, int K,
+                               cudaStream_t stream) {
+    const int N = static_cast<int>(cw.N);
+    if (process_diag_mxfp8_tile()) {
+        const bool lt = qs.cutlass_workspace_size >= qs.mxfp8_workspace_size;
+        void* ws = process_diag_deterministic() ? nullptr : (lt ? qs.cutlass_workspace : qs.mxfp8_workspace);
+        const size_t ws_bytes = lt ? qs.cutlass_workspace_size : qs.mxfp8_workspace_size;
+        if (gemm_mxfp8_tile(qs.mxfp8_act_data, qs.mxfp8_act_sf, cw.data, cw.scale_factors, cw.col_scale, out,
+                            M, N, K, stream, /*variant=*/-1, ws, ws_bytes)) {
+            static bool logged = false;  // activity proof, once
+            if (!logged) {
+                logged = true;
+                IMP_LOG_INFO("gemm.mxfp8_tile: own MXFP8 prefill GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
+            }
+            return true;
+        }
+    }
+    return gemm_mxfp8_cutlass_sm120(qs.mxfp8_act_data, qs.mxfp8_act_sf, cw, out, M, N, K, qs.mxfp8_workspace,
+                                    qs.mxfp8_workspace_size, stream);
+}
+
 // Conservative mirror of gemm_via_handle_'s M>1 routing: true only when
 // the dispatch is guaranteed to reach the CUTLASS NVFP4 prefill block
 // (which quantizes input into the shared activation scratch). Every
@@ -280,9 +304,7 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         if (active) {
             quantize_fp16_to_mxfp8_cutlass(input.data, qs.mxfp8_act_data, qs.mxfp8_act_sf, Mp, Kp,
                                            ctx.stream);
-            active = gemm_mxfp8_cutlass_sm120(qs.mxfp8_act_data, qs.mxfp8_act_sf, cw, output.data, Mp,
-                                              static_cast<int>(cw.N), Kp, qs.mxfp8_workspace,
-                                              qs.mxfp8_workspace_size, ctx.stream);
+            active = mxfp8_prefill_gemm(qs, cw, output.data, Mp, Kp, ctx.stream);
         }
         log_mxfp8_prefill_copy_route(h, Mp, ctx.beta, active);
         if (active)
