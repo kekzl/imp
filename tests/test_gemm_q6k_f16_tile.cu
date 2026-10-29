@@ -161,7 +161,7 @@ TEST(GemmQ6kTileBench, VsDequantPlusGemm) {
     std::fprintf(stderr, "%6s %6s %6s %10s %9s %9s %9s\n", "M", "N", "K", "dq+gemm_us", "dq_us", "128x128",
                  "256x128");
     for (const auto& nk : shapes)
-        for (int M : {512, 2048}) {
+        for (int M : {512, 1024, 1536, 2048}) {
             Q6Bufs b;
             b.alloc(M, nk[0], nk[1], s);
             auto time_us = [&](auto&& fn) {

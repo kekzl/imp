@@ -6,6 +6,7 @@
 
 #include "compute/gemm.h"
 #include "compute/gemm_q4k.h"
+#include "compute/gemm_q45k_f16_tile.h"
 #include "compute/gemm_q6k_f16_tile.h"
 #include "compute/gemm_q8_0_dense.h"
 #include "compute/gemv_dp4a_rows.h"
@@ -155,6 +156,28 @@ static bool q6k_tile_rows(const Tensor& input, const Tensor& weight, Tensor& out
     return true;
 }
 
+// Q4_K / Q5_K prompt rows (gemm.q45k_tile): the fused tile decodes W from the blocks with fp16 A. Taken
+// on fp16-accumulate rows above 32 (the fp32-accumulate tile runs at 1/4 HMMA rate and loses to IMMA:
+// 512x17408x5120 Q5_K 521 vs 370 us); under runtime.deterministic on every prompt row (tile-invariant).
+bool gemm_q45k_tile_rows(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx,
+                         bool decode_rows) {
+    const int M = static_cast<int>(input.shape[0]);
+    const bool q5 = weight.qtype == QType::Q5_K;
+    if (decode_rows || !process_diag_q45k_tile() || (!q5 && weight.qtype != QType::Q4_K) ||
+        !dense_f16_rows(input, weight, output) || !process_diag_cublas_fp16_acc() ||
+        (M <= 32 && !process_diag_deterministic()) ||
+        !gemm_q45k_f16_tile(q5, input.data, weight.data, output.data, M, static_cast<int>(weight.shape[0]),
+                            static_cast<int>(weight.shape[1]), 1.0f, ctx.beta, true, ctx.stream))
+        return false;
+    static bool s_logged[2] = {};  // activity proof, once per qtype
+    if (!s_logged[q5]) {
+        s_logged[q5] = true;
+        IMP_LOG_INFO("gemm.q45k_tile: fused %s prompt GEMM ACTIVE (M=%d N=%ld K=%ld)",
+                     qtype_name(weight.qtype), M, (long)weight.shape[0], (long)weight.shape[1]);
+    }
+    return true;
+}
+
 // 2..4 rows (MTP verify, 2..4-token prompts): one multi-row dp4a GEMV over the weight, 2 launches; the IMMA
 // tiles cost a quantize, a K-split and a finalize on top.
 static bool dp4a_few_rows(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx) {
@@ -184,12 +207,16 @@ bool gemm_uncached_in_place(const Tensor& input, const Tensor& weight, Tensor& o
         return true;
     switch (weight.qtype) {
         case QType::Q8_0:
-        case QType::Q4_K:
             return q8_q4k_rows(input, weight, output, ctx, decode_rows, short_prompt);
+        case QType::Q4_K:
+            return gemm_q45k_tile_rows(input, weight, output, ctx, decode_rows) ||
+                   q8_q4k_rows(input, weight, output, ctx, decode_rows, short_prompt);
+        case QType::Q5_K:
+            return gemm_q45k_tile_rows(input, weight, output, ctx, decode_rows) ||
+                   ((decode_rows || !det) && gguf_imma_rows(input, weight, output, ctx));
         case QType::IQ4_NL:
         case QType::IQ4_XS:
         case QType::IQ3_S:
-        case QType::Q5_K:
             return (decode_rows || !det) && gguf_imma_rows(input, weight, output, ctx);
         case QType::Q6_K:
             return q6k_rows(input, weight, output, ctx, decode_rows || short_prompt) ||
