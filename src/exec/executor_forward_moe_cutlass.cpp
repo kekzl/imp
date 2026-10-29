@@ -8,6 +8,7 @@
 #include "core/dispatch_policy.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
+#include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"
 #include "compute/dispatch_record.h"  // resolved-path recording (#1205)
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
@@ -266,8 +267,7 @@ bool device_args_done = false;
                 dargs.d_B_ptrs         = d_B + e0;
                 dargs.d_SFB_ptrs       = d_SFB + e0;
                 dargs.base_D           = c_base;
-                return imp::gemm_grouped_cutlass_3x_nvfp4_device_args(
-                    n_grp, N_out, K_in, dargs, stream);
+                return imp::gemm_grouped_nvfp4_dispatch(n_grp, N_out, K_in, expanded, dargs, stream);
             };
 
         // Gate/Up share input quantization (K_in=d): fused gather+quantize reads

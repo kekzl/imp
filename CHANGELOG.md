@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- NVFP4 MoE prefill runs an own grouped GEMM instead of CUTLASS 3.x grouped (bit-exact, persistent, TMA with per-expert `tensormap.replace`): Qwen3-30B-A3B-NVFP4 GEMM kernel sum pp512 98.8-99.1 -> 94.5-95.1 ms, pp4096 260.0-260.7 -> 243.2-245.6 ms; PPL 11.4338 both arms. `gemm.moe_tile`.
 - FP16-accumulate prefill GEMMs with K >= N and a full wave of tiles run an own kernel instead of cuBLASLt (bit-equal): Qwen3-14B-Q6_K pp2048 GEMM kernel sum 1502.9-1508.7 -> 1419.5-1426.1 ms, e2e 9304-9330 -> 9692-9695 tok/s, PPL 9.2022 both arms. `gemm.f16_tile`.
 - The own NVFP4 prefill GEMM gains stream-K and a wave-cost tile pick: Qwen3.8-27B pp4096 GEMM kernel sum 1541.2-1544.7 -> 1533.9-1534.8 ms vs cuBLASLt; at M < 2048 it trails CUTLASS by 0.3-1.8 % (was 7 %), so CUTLASS stays there.
 - Dense NVFP4 prefill GEMMs at M >= 2048 run an own kernel (TMA, `mma.sync` mxf4nvf4, 128x128 / 128x256 tiles) instead of cuBLASLt, bit-equal to CUTLASS: Qwen3.8-27B pp4096 GEMM kernel sum -0.9 %, PPL 4.6079 both arms. `gemm.nvfp4_tile_min_m` (0 = off). ROADMAP 123.
