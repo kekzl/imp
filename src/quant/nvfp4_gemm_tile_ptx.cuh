@@ -63,6 +63,21 @@ __device__ __forceinline__ void mma_mxf4nvf4(float acc[4], const uint32_t a[4], 
 #endif
 }
 
+// MXFP4 m16n8k64: the NVFP4 fragments, two UE8M0 per row / column in bytes 0-1 (one per 32 K).
+__device__ __forceinline__ void mma_mxf4(float acc[4], const uint32_t a[4], uint32_t b0, uint32_t b1,
+                                         uint32_t sfa, uint32_t sfb) {
+#if __CUDA_ARCH__ >= 1200
+    asm volatile(
+        "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::2X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue8m0 "
+        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3}, {%10}, {%11, %12}, {%13}, {%14, "
+        "%15};\n"
+        : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1), "r"(sfa),
+          "h"(static_cast<uint16_t>(0)), "h"(static_cast<uint16_t>(0)), "r"(sfb),
+          "h"(static_cast<uint16_t>(0)), "h"(static_cast<uint16_t>(0)));
+#endif
+}
+
 // MXFP8 m16n8k32: E4M3 x E4M3, one UE8M0 per row / column in byte 0 (CUTLASS SM120_16x8x32_TN_VS);
 // A/B fragments are the m16n8k64 FP4 ones byte for byte.
 __device__ __forceinline__ void mma_mxf8(float acc[4], const uint32_t a[4], uint32_t b0, uint32_t b1,

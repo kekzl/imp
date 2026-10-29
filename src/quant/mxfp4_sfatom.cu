@@ -1,15 +1,9 @@
-// LEGACY/MAINTENANCE MODE: MXFP4 supported but not the dev priority; production hero
-// models use NVFP4+SafeTensors (Qwen3.6-35B-A3B-NVFP4, Qwen3-8B-NVFP4-cortecs,
-// Gemma-4-26B-A4B-it-NVFP4). Ship cleanup fixes; don't chase MXFP4-GGUF quality bugs
-// without an external reference engine (memory: feedback_gguf_mxfp4_legacy_2026_05_24).
-// Same E2M1 packed-nibble data encoding as NVFP4 (gemm_cutlass_sm120.cu); only the
-// scale format differs: NVFP4 UE4M3/16 elements (finer, 3 mantissa bits), MXFP4
-// UE8M0/32 elements (wider range, pure exponent).
+// MXFP4 operand bytes for the own tile GEMM (quant/nvfp4_gemm_tile.cu) and the decode GEMV: SfAtom
+// layout (128 rows x 4 UE8M0 per 128 K = 512 B), GGUF unpack, activation quantize, FP16 dequant.
+// Same E2M1 packed nibbles as NVFP4; scales UE8M0 per 32 elements instead of UE4M3 per 16.
+// Maintenance mode: MXFP4 GGUF is supported, not the dev priority (feedback_gguf_mxfp4_legacy_2026_05_24).
 
-#include "compute/gemm_cutlass_mxfp4_sm120.h"
-#include "quant/nvfp4_quant.h"
-#include "quant/fp8_utils.cuh"
-#include "core/cuda_static_reset.h"
+#include "quant/mxfp4_sfatom.h"
 #include "core/cuda_errors.h"
 #include "core/logging.h"
 #include "memory/device_alloc_all.h"
@@ -17,74 +11,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
-#include <cassert>
-
-#include "cutlass/cutlass.h"
-#include "cute/tensor.hpp"
-#include "cutlass/tensor_ref.h"
-#include "cutlass/gemm/dispatch_policy.hpp"
-#include "cutlass/gemm/collective/collective_builder.hpp"
-#include "cutlass/epilogue/collective/collective_builder.hpp"
-#include "cutlass/detail/sm100_blockscaled_layout.hpp"
-#include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/gemm/kernel/gemm_universal.hpp"
-#include "cutlass/util/packed_stride.hpp"
-
-using namespace cute;
-
-// CUTLASS GEMM type config: MXFP4 x MXFP4 -> FP16, using mx_float4_t with UE8M0 scales
-// (SFVecSize=32).
-
-using MxElementA = cutlass::mx_float4_t<cutlass::float_e2m1_t>;
-using MxLayoutATag = cutlass::layout::RowMajor;
-constexpr int MxAlignmentA = 32;
-
-using MxElementB = cutlass::mx_float4_t<cutlass::float_e2m1_t>;
-using MxLayoutBTag = cutlass::layout::ColumnMajor;
-constexpr int MxAlignmentB = 32;
-
-using MxElementD = cutlass::half_t;
-using MxElementC = cutlass::half_t;
-using MxLayoutCTag = cutlass::layout::RowMajor;
-using MxLayoutDTag = cutlass::layout::RowMajor;
-constexpr int MxAlignmentD = 128 / cutlass::sizeof_bits<MxElementD>::value;
-constexpr int MxAlignmentC = 128 / cutlass::sizeof_bits<MxElementC>::value;
-
-using MxElementAccumulator = float;
-using MxArchTag = cutlass::arch::Sm120;
-using MxOperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
-
-using MxThreadBlockShape = Shape<_128, _128, _128>;
-using MxClusterShape = Shape<_1, _1, _1>;
-
-using MxCollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
-    MxArchTag, MxOperatorClass, MxThreadBlockShape, MxClusterShape,
-    cutlass::epilogue::collective::EpilogueTileAuto, MxElementAccumulator, MxElementAccumulator, MxElementC,
-    MxLayoutCTag, MxAlignmentC, MxElementD, MxLayoutDTag, MxAlignmentD,
-    cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
-
-using MxCollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
-    MxArchTag, MxOperatorClass, MxElementA, MxLayoutATag, MxAlignmentA, MxElementB, MxLayoutBTag,
-    MxAlignmentB, MxElementAccumulator, MxThreadBlockShape, MxClusterShape,
-    cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-        sizeof(typename MxCollectiveEpilogue::SharedStorage))>,
-    cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
-
-using MxGemmKernel = cutlass::gemm::kernel::GemmUniversal<Shape<int, int, int, int>, MxCollectiveMainloop,
-                                                          MxCollectiveEpilogue, void>;
-
-using MxGemm = cutlass::gemm::device::GemmUniversalAdapter<MxGemmKernel>;
-
-using MxStrideA = typename MxGemm::GemmKernel::StrideA;
-using MxStrideB = typename MxGemm::GemmKernel::StrideB;
-using MxStrideC = typename MxGemm::GemmKernel::StrideC;
-using MxStrideD = typename MxGemm::GemmKernel::StrideD;
-using MxLayoutSFA = typename MxGemm::GemmKernel::CollectiveMainloop::LayoutSFA;
-using MxLayoutSFB = typename MxGemm::GemmKernel::CollectiveMainloop::LayoutSFB;
-using MxSm1xxConfig = typename MxGemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
-
-static_assert(MxGemm::GemmKernel::CollectiveMainloop::TiledMma::Traits::SFVecSize == 32,
-              "CUTLASS SFVecSize mismatch — expected 32 for mx_float4_t");
+#include <cstring>
 
 namespace imp {
 
@@ -117,9 +44,6 @@ size_t cutlass_mxfp4_sf_size(int rows, int K) {
     return static_cast<size_t>(n_row_tiles) * n_k_tiles * kMxAtomSize;
 }
 
-// Converts UE4M3 micro-scales (NVFP4, per 16 elements) to UE8M0 (MXFP4, per 32): merges
-// 2 consecutive UE4M3 values into 1 UE8M0 by taking the max exponent.
-
 // UE8M0: pure exponent, value = 2^(bits - 127).  bits=0 → 2^-127, bits=254 → 2^127.
 __device__ __forceinline__ uint8_t float_to_ue8m0(float val) {
     if (val <= 0.0f)
@@ -137,88 +61,6 @@ __device__ __forceinline__ uint8_t float_to_ue8m0(float val) {
     if (f_exp > 254)
         return 254;
     return (uint8_t)f_exp;
-}
-
-// fp8_e4m3_to_float is provided by quant/fp8_utils.cuh (shared across NVFP4/MXFP4).
-
-// Merge 2 NVFP4 micro-scales (UE4M3, per 16 elements each) into 1 MXFP4 scale (UE8M0, per 32).
-// Takes the max of the two micro-scales, then encodes as UE8M0 (nearest power of 2).
-// This loses some precision compared to NVFP4's finer per-16 scales.
-__global__ void convert_nvfp4_to_mxfp4_scales_kernel(
-    const uint8_t* __restrict__ src_ms,  // [N, K/16] NVFP4 UE4M3
-    uint8_t* __restrict__ dst_sf,        // SfAtom MXFP4 UE8M0
-    uint8_t* __restrict__ dst_linear,    // [N, K/32] row-major UE8M0 (for GEMV)
-    float tensor_scale,                  // NVFP4 tensor scale
-    int N, int K, int n_k_tiles) {
-    int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
-    int K_groups_mx = K / kMxSFVecSize;  // number of MXFP4 groups (per 32)
-    int total = N * K_groups_mx;
-    if (idx >= total)
-        return;
-
-    int n = idx / K_groups_mx;
-    int mx_group = idx % K_groups_mx;
-
-    // Each MXFP4 group of 32 corresponds to 2 consecutive NVFP4 groups of 16
-    int nv_group0 = mx_group * 2;
-    int nv_group1 = (mx_group * 2) + 1;
-    int K_groups_nv = K / 16;
-
-    float ms0 = fabsf(fp8_e4m3_to_float(src_ms[(n * K_groups_nv) + nv_group0]));
-    float ms1 = fabsf(fp8_e4m3_to_float(src_ms[(n * K_groups_nv) + nv_group1]));
-
-    // Combined scale = tensor_scale * max(ms0, ms1)
-    // This is the scale that maps the group of 32 elements to FP4 range [0, 6]
-    float combined = tensor_scale * fmaxf(ms0, ms1);
-
-    // Encode as UE8M0
-    uint8_t ue8m0 = float_to_ue8m0(combined / 6.0f);
-
-    int sf_idx = mx_sfatom_offset(n, mx_group, n_k_tiles);
-    dst_sf[sf_idx] = ue8m0;
-    if (dst_linear)
-        dst_linear[(static_cast<size_t>(n) * K_groups_mx) + mx_group] = ue8m0;
-}
-
-void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src, CutlassMxFP4Weight& dst,
-                                    cudaStream_t stream) {
-    IMP_CHECK(src.packed_data != nullptr, "convert_nvfp4_to_mxfp4_cutlass: src.packed_data is null");
-    int64_t N = src.N;
-    int64_t K = src.K;
-    IMP_CHECK(K % kMxSFVecSize == 0, "convert_nvfp4_to_mxfp4_cutlass: K=%lld must be multiple of %d",
-              static_cast<long long>(K), kMxSFVecSize);
-
-    size_t sf_bytes = cutlass_mxfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
-    int K_groups_mx = static_cast<int>(K) / kMxSFVecSize;
-    size_t linear_sf_bytes = static_cast<size_t>(N) * K_groups_mx;
-
-    void* d_sf = nullptr;
-    void* d_linear_sf = nullptr;
-    cuda_alloc_or_throw(device_alloc_all(dev_req(d_sf, sf_bytes), dev_req(d_linear_sf, linear_sf_bytes)),
-                        "convert_nvfp4_to_mxfp4_cutlass scales");
-    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));
-
-    int total = static_cast<int>(N) * K_groups_mx;
-    int n_k_tiles = (static_cast<int>(K) + kMxAtomKElems - 1) / kMxAtomKElems;
-
-    int threads = 256;
-    int blocks = (total + threads - 1) / threads;
-    convert_nvfp4_to_mxfp4_scales_kernel<<<blocks, threads, 0, stream>>>(
-        reinterpret_cast<const uint8_t*>(src.micro_scales), reinterpret_cast<uint8_t*>(d_sf),
-        reinterpret_cast<uint8_t*>(d_linear_sf), src.tensor_scale, static_cast<int>(N), static_cast<int>(K),
-        n_k_tiles);
-    IMP_CUDA_CHECK_LAUNCH();
-
-    dst.data = src.packed_data;
-    dst.scale_factors = d_sf;
-    dst.linear_scales = d_linear_sf;
-    dst.tensor_scale = 1.0f;  // absorbed into UE8M0 scales (unlike NVFP4 path)
-    dst.N = N;
-    dst.K = K;
-    dst.sf_bytes = sf_bytes;
-
-    IMP_LOG_DEBUG("convert_nvfp4_to_mxfp4: N=%lld K=%lld sf=%.2f MiB linear_sf=%.2f MiB", (long long)N,
-                  (long long)K, sf_bytes / (1024.0 * 1024.0), linear_sf_bytes / (1024.0 * 1024.0));
 }
 
 // Unpacks native MXFP4 GGUF blocks into CUTLASS format. GGUF block: [16 bytes E2M1
@@ -470,8 +312,8 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(const half* __restrict__ inpu
 
 void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
                                     cudaStream_t stream) {
-    IMP_CHECK(K % kMxSFVecSize == 0, "quantize_fp16_to_mxfp4_cutlass: K=%d must be multiple of %d",
-              K, kMxSFVecSize);
+    IMP_CHECK(K % kMxSFVecSize == 0, "quantize_fp16_to_mxfp4_cutlass: K=%d must be multiple of %d", K,
+              kMxSFVecSize);
 
     size_t sf_bytes = cutlass_mxfp4_sf_size(M, K);
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(dst_sf, 0, sf_bytes, stream));
@@ -487,96 +329,5 @@ void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data, void* 
         reinterpret_cast<uint8_t*>(dst_sf), M, K, n_k_tiles);
     IMP_CUDA_CHECK_LAUNCH();
 }
-
-// ---------------------------------------------------------------------------
-// CUTLASS GEMM execution
-// ---------------------------------------------------------------------------
-
-size_t gemm_mxfp4_cutlass_sm120_workspace(int M, int N, int K) {
-    auto stride_A = cutlass::make_cute_packed_stride(MxStrideA{}, {M, K, 1});
-    auto stride_B = cutlass::make_cute_packed_stride(MxStrideB{}, {N, K, 1});
-    auto stride_C = cutlass::make_cute_packed_stride(MxStrideC{}, {M, N, 1});
-    auto stride_D = cutlass::make_cute_packed_stride(MxStrideD{}, {M, N, 1});
-
-    auto layout_SFA = MxSm1xxConfig::tile_atom_to_shape_SFA(cute::make_shape(M, N, K, 1));
-    auto layout_SFB = MxSm1xxConfig::tile_atom_to_shape_SFB(cute::make_shape(M, N, K, 1));
-
-    typename MxGemm::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
-                                    {M, N, K, 1},
-                                    {nullptr, stride_A, nullptr, stride_B, nullptr, layout_SFA, nullptr,
-                                     layout_SFB},
-                                    {{1.0f, 0.0f}, nullptr, stride_C, nullptr, stride_D}};
-
-    return MxGemm::get_workspace_size(args);
-}
-
-bool gemm_mxfp4_cutlass_sm120(const void* a_data, const void* a_sf, const CutlassMxFP4Weight& b, void* d_fp16,
-                              int M, int N, int K, void* workspace, size_t workspace_size,
-                              cudaStream_t stream) {
-    {
-        cudaError_t prior = cudaGetLastError();
-        if (prior != cudaSuccess) {
-            IMP_LOG_ERROR("CUTLASS MXFP4 sm120: prior CUDA error: %s", cudaGetErrorString(prior));
-            return false;
-        }
-    }
-
-    auto stride_A = cutlass::make_cute_packed_stride(MxStrideA{}, {M, K, 1});
-    auto stride_B = cutlass::make_cute_packed_stride(MxStrideB{}, {N, K, 1});
-    auto stride_C = cutlass::make_cute_packed_stride(MxStrideC{}, {M, N, 1});
-    auto stride_D = cutlass::make_cute_packed_stride(MxStrideD{}, {M, N, 1});
-
-    auto layout_SFA = MxSm1xxConfig::tile_atom_to_shape_SFA(cute::make_shape(M, N, K, 1));
-    auto layout_SFB = MxSm1xxConfig::tile_atom_to_shape_SFB(cute::make_shape(M, N, K, 1));
-
-    auto* a_ptr = reinterpret_cast<const MxElementA::DataType*>(a_data);
-    auto* b_ptr = reinterpret_cast<const MxElementB::DataType*>(b.data);
-    auto* sfa_ptr = reinterpret_cast<const MxElementA::ScaleFactorType*>(a_sf);
-    auto* sfb_ptr = reinterpret_cast<const MxElementB::ScaleFactorType*>(b.scale_factors);
-    auto* d_ptr = reinterpret_cast<MxElementD*>(d_fp16);
-
-    float alpha = b.tensor_scale;
-
-    typename MxGemm::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
-                                    {M, N, K, 1},
-                                    {a_ptr, stride_A, b_ptr, stride_B, sfa_ptr, layout_SFA, sfb_ptr,
-                                     layout_SFB},
-                                    {{alpha, 0.0f}, d_ptr, stride_C, d_ptr, stride_D}};
-
-    MxGemm gemm;
-    cutlass::Status st = gemm.can_implement(args);
-    if (st != cutlass::Status::kSuccess) {
-        IMP_LOG_WARN("CUTLASS MXFP4 sm120: can_implement failed (%d) M=%d N=%d K=%d", (int)st, M, N, K);
-        return false;
-    }
-
-    // Same deletion as the NVFP4 twin (A7 step 8): no grow-and-realloc at GEMM
-    // time. Every caller sizes with gemm_mxfp4_cutlass_sm120_workspace() for
-    // the same or a larger shape, and a refusal falls back with correct output.
-    size_t needed = MxGemm::get_workspace_size(args);
-    if (needed > workspace_size) {
-        IMP_LOG_WARN(
-            "CUTLASS MXFP4 sm120: workspace %zu B < %zu B needed for M=%d N=%d K=%d "
-            "— refusing, the caller falls back",
-            workspace_size, needed, M, N, K);
-        return false;
-    }
-
-    st = gemm.initialize(args, workspace, stream);
-    if (st != cutlass::Status::kSuccess) {
-        IMP_LOG_ERROR("CUTLASS MXFP4 sm120: initialize failed (%d) M=%d N=%d K=%d", (int)st, M, N, K);
-        return false;
-    }
-
-    st = gemm.run(stream);
-    if (st != cutlass::Status::kSuccess) {
-        IMP_LOG_ERROR("CUTLASS MXFP4 sm120: run failed (%d)", (int)st);
-        return false;
-    }
-
-    return true;
-}
-
-bool cutlass_sm120_mxfp4_available() { return true; }
 
 }  // namespace imp

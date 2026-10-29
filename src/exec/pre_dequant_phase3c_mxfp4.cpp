@@ -10,7 +10,7 @@
 #include "exec/quant_pipeline.h"
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
-#include "compute/gemm_cutlass_mxfp4_sm120.h"
+#include "quant/mxfp4_sfatom.h"
 #include "core/logging.h"
 #include "memory/vram_allocator.h"
 
@@ -23,8 +23,7 @@ namespace imp {
 
 void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
     const ModelConfig& cfg, cudaStream_t stream) {
-    if (!(wcache_->nvfp4_decode_mode == 0 && wcache_->cutlass_mxfp4.empty() &&
-          cutlass_sm120_mxfp4_available()))
+    if (!(wcache_->nvfp4_decode_mode == 0 && wcache_->cutlass_mxfp4.empty()))
         return;
     // Check if any layer has MXFP4 weights
     bool has_mxfp4 = false;
@@ -35,32 +34,18 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
             has_mxfp4 = true;
     }
     if (has_mxfp4) {
-        // Allocate MXFP4 scratch
-        int max_k = 0, max_n = 0;
+        // NVFP4 activation buffer for the CUTLASS NVFP4 prefill, sized over the MXFP4 projections.
+        int max_k = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            auto check = [&](const Tensor& w) {
-                if (w.data && w.ndim >= 2) {
-                    max_n = std::max(max_n, (int)w.shape[0]);
-                    max_k = std::max(max_k, (int)w.shape[1]);
-                }
-            };
-            check(L.wq);
-            check(L.wk);
-            check(L.w_gate);
-            check(L.w_down);
-            check(L.ssm_in);
-            check(L.ssm_out);
-            check(L.gdn_gate);
+            for (const Tensor* w : {&L.wq, &L.wk, &L.w_gate, &L.w_down, &L.ssm_in, &L.ssm_out, &L.gdn_gate})
+                if (w->data && w->ndim >= 2)
+                    max_k = std::max(max_k, static_cast<int>(w->shape[1]));
         }
-        if (max_k > 0 && !qscratch_->mxfp4_act_sf) {
-            qscratch_->mxfp4_act_sf_size = cutlass_mxfp4_sf_size(max_tokens_, max_k);
-            qscratch_->mxfp4_act_sf = vram_alloc(vram_alloc_, qscratch_->mxfp4_act_sf_size, "mxfp4_act_sf");
-            if (!qscratch_->cutlass_act_data) {
-                qscratch_->cutlass_act_data_size = static_cast<size_t>(max_tokens_) * (max_k / 2);
-                qscratch_->cutlass_act_data = vram_alloc(vram_alloc_, qscratch_->cutlass_act_data_size,
-                                                        "cutlass_act_data");
-            }
+        if (max_k > 0 && !qscratch_->cutlass_act_data) {
+            qscratch_->cutlass_act_data_size = static_cast<size_t>(max_tokens_) * (max_k / 2);
+            qscratch_->cutlass_act_data = vram_alloc(vram_alloc_, qscratch_->cutlass_act_data_size,
+                                                     "cutlass_act_data");
         }
         // FIRST: dequant alpha/beta to FP16 BEFORE in-place unpack
         // (dequant_mxfp4_to_fp16 reads raw 17-byte blocks which get compacted by unpack)
@@ -158,7 +143,6 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
         register_mx(model_->output_proj(), model_->out_proj_.qtype, true);
         if (mx_count > 0) {
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-            wcache_->use_mxfp4 = true;
 
             // In-place unpack: raw blocks compact to [N, K/2] within the SAME buffer, no separate
             // allocation or free. The raw buffer tail (scale bytes) is wasted (~6% overhead) but

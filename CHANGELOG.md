@@ -7,7 +7,12 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ### Fixed
 - NVFP4 MoE with host-resident experts: the expert-cache regrow kept 1536 MiB for the first forward, which claims the library reserve (2897 MiB), so the KV pool stuck at 16 blocks; it now keeps the planned reserve and stops at one slot per expert. Qwen3-30B-A3B-NVFP4, 48 host layers: tg128 0 -> 304.5 tok/s, own peak 20256 MiB.
 
+### Removed
+- MXFP4 FMHA prefill attention and the materialized MXFP4 attention (REFUTED #868, +10 % NLL at 9k), with `attention.mxfp4`, `mxfp4_blockscale`, `mxfp4_ksmooth`, `mxfp4_pv_fp4`, `mxfp4_promote_budget`, `mxfp4_paged_kv` (this change: 4532 lines out, 452 in).
+- `--mxfp4-prefill` and C-API `ImpConfig::use_mxfp4_prefill` (ABI change): its dual-cache GEMM branch was unreachable, no dispatch site set the payload.
+
 ### Changed
+- Dense MXFP4 prefill GEMMs run the own tile kernel (MX4 configs, bit-equal to CUTLASS), the CUTLASS MXFP4 TU is gone (4 -> 3 CUTLASS TUs): flushed bench own/CUTLASS geomean 0.968 over 18 shapes x 2, slower only at K 2560 with M <= 2048 (+2..13 %). K % 128 != 0 is refused (was K % 32).
 - The expert cache gives slots only to layers whose experts stay in host RAM: Qwen3-30B-A3B-Q4_K_M, 24 of 48 layers on the host, same 3071 MiB: 52 -> 104 slots per layer, tg128 276.9-283.7 -> 324.4-325.7 tok/s; Qwen3-30B-A3B-NVFP4 24 host layers: pool 14580-14944 MiB -> 7776 MiB, own peak 28326-28843 -> 21118-21138 MiB.
 - GGUF MoE experts in host RAM decode on the device expert cache (routing, residency and miss copies on the GPU, CUDA graphs stay on): Qwen3-30B-A3B-Q4_K_M with 48 host layers tg128 73.6-75.2 -> 235.1-237.5 tok/s; prefill on that path 316.6-350.9 -> 280.1-328.1 tok/s.
 - IQ3_S prompt GEMMs compute their piece offsets without branches (a per-lane branch chain diverged 6x per K-step): Qwen3.8-27B-UD-Q4_K_M IQ3_S kernel sum 15.35-15.79 -> 12.03-12.71 ms per pp512 run, PPL 4.4968 both (bit-identical).

@@ -203,8 +203,6 @@ int main(int argc, char** argv) {
         config.prefill_chunk_size = args.prefill_chunk_size;
     if (args.prefill_fp8)
         config.use_fp8_prefill = 1;
-    if (args.mxfp4_prefill)
-        config.use_mxfp4_prefill = 1;
     if (args.dual_path_quant)
         config.dual_path_quant = 1;
     // --prefix-caching, else imp.conf ([server] prefix_cache, default on). The

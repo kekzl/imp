@@ -9,7 +9,7 @@ cd "$ROOT" || exit 1
 
 # Link deps of test-attention outside the src/compute name pattern: nm closure of its objects over
 # src/compute + src/exec (build-dev, 7687c3ce). Regenerate when a new one appears.
-ATTN_LINK_TUS=(src/compute/dispatch_paths.cpp src/compute/gemm_cutlass_mxfp4_sm120.cu
+ATTN_LINK_TUS=(src/compute/dispatch_paths.cpp
                src/exec/executor_kv_write_kernels.cu src/exec/sparse_attn_select.cu)
 
 # test-attention trigger set: its test TUs + attention-named src files + ATTN_LINK_TUS,

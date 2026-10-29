@@ -6,7 +6,7 @@
 // precision cliff returning.
 
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass_mxfp4_sm120.h"
+#include "quant/mxfp4_sfatom.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "core/tensor.h"
 #include "quant/nvfp4_quant.h"
@@ -623,7 +623,6 @@ TEST(CutlassWorkspaceContract, MaxShapeSizingCoversEverySmallerCall) {
     // max_tokens cap, and N/K above any hero model's projections.
     const int max_m = 4096, max_n = 8192, max_k = 8192;
     const size_t nv_at_max = gemm_nvfp4_cutlass_sm120_workspace(max_m, max_n, max_k);
-    const size_t mx_at_max = gemm_mxfp4_cutlass_sm120_workspace(max_m, max_n, max_k);
 
     for (int m : {1, 8, 512, 2048, 4096}) {
         for (int n : {1024, 2048, 2049, 5120, 8192}) {  // straddles kSmallNThreshold
@@ -632,14 +631,12 @@ TEST(CutlassWorkspaceContract, MaxShapeSizingCoversEverySmallerCall) {
                     << "NVFP4 M=" << m << " N=" << n << " K=" << k
                     << " needs more workspace than the max shape the executor sizes for — "
                        "the refusal path would fire and drop this GEMM to dequant";
-                EXPECT_LE(gemm_mxfp4_cutlass_sm120_workspace(m, n, k), mx_at_max)
-                    << "MXFP4 M=" << m << " N=" << n << " K=" << k;
             }
         }
     }
     // Report the absolute numbers: if these ever leave 0, the executor starts
     // allocating a real buffer and the sizing above starts doing real work.
-    fprintf(stderr, "[WS] nvfp4 max-shape workspace=%zu B, mxfp4=%zu B\n", nv_at_max, mx_at_max);
+    fprintf(stderr, "[WS] nvfp4 max-shape workspace=%zu B\n", nv_at_max);
 }
 
 // FP32 LM-head variant (executor_forward.cu, executor_perplexity.cu) passes

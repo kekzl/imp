@@ -23,4 +23,14 @@ namespace imp {
                                    cudaStream_t stream, int variant = -1, void* workspace = nullptr,
                                    size_t workspace_bytes = 0);
 
+// Same kernel on MXFP4 operands (cutlass_mxfp4_weight.h bytes): A [M,K/2] / W [N,K/2] packed E2M1,
+// UE8M0 per 32 K in SfAtom layout (cutlass_mxfp4_sf_size). K % 128 == 0, N % 8 == 0. Variants and workspace
+// as above.
+[[nodiscard]] bool gemm_mxfp4_tile(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,
+                                   float alpha, void* d_fp16, int M, int N, int K, cudaStream_t stream,
+                                   int variant = -1, void* workspace = nullptr, size_t workspace_bytes = 0);
+
+// Workspace that lets auto pick stream-K: one fp32 128x128 partial tile per SM (170 x 64 KiB on the 5090).
+size_t gemm_tile_streamk_workspace_bytes();
+
 }  // namespace imp

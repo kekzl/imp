@@ -9,7 +9,6 @@ namespace imp {
 
 // Tiers inside the FMHA chain (compute/attention_dispatch.cpp), tried in order.
 enum class AttnPrefillPath {
-    MXFP4,       // fmha_sm120_mxfp4_prefill
     FA2,         // fmha_sm120_fa2_prefill (register-resident)
     FP8,         // fmha_sm120_fp8_prefill
     FMHA_SM120,  // fmha_sm120_prefill (WMMA)

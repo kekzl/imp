@@ -594,8 +594,6 @@ ImpConfig build_config(const ServerArgs& args, const imp::RuntimeConfig& runtime
 
     config.use_nvfp4_decode = args.decode_nvfp4;
 
-    if (args.mxfp4_prefill)
-        config.use_mxfp4_prefill = 1;
     if (args.dual_path_quant)
         config.dual_path_quant = 1;
     if (args.min_kv_tokens > 0)

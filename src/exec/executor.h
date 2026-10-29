@@ -14,7 +14,7 @@
 #include "quant/nvfp4_quant.h"
 // Note: quant/turboquant.h removed (TurboQuant retired Phase 5, 2026-05-17).
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/gemm_cutlass_mxfp4_sm120.h"
+#include "quant/mxfp4_sfatom.h"
 #include "core/tensor.h"
 #include "compute/sampling.h"  // TopkRowArgs (row-batched sampler staging)
 #include "exec/activation_calibrator.h"
@@ -77,7 +77,7 @@ public:
     // Does NOT allocate GPU memory — call allocate_workspaces() after weight upload.
     [[nodiscard]] bool init(const Model& model, QType compute_dtype = QType::F16, bool use_pdl = false,
                             int max_batch_size = 1, int max_seq_len = 0, bool use_fp8_prefill = false,
-                            int use_nvfp4_decode = 0, bool use_mxfp4_prefill = false);
+                            int use_nvfp4_decode = 0);
 
     // Disable FP8 weight cache (must be called before pre_dequant_weights).
     void disable_fp8_prefill() {
@@ -1127,9 +1127,11 @@ private:
     };
     SparsePrefillPast sparse_prefill_pick_(const half* q, int n, KVCache* cache, int kv_layer,
                                            const int* table, int q_offset, int nh, int nkv, int hd,
-                                           bool cap_replay, bool paged_kv_written, int sliding_window,
-                                           const void* sinks, cudaStream_t stream);
+                                           bool cap_replay, int sliding_window, const void* sinks,
+                                           cudaStream_t stream);
     void free_buffers();
+    [[nodiscard]] bool init_rope_tables_(const ModelConfig& cfg);        // YaRN dims, LongRoPE freqs
+    void init_expert_dims_(const Model& model, const ModelConfig& cfg);  // max_expert_eff_
 
     // Per-layer helpers
     void run_attention(int layer, const InferenceState& state, cudaStream_t stream);

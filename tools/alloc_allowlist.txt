@@ -5,16 +5,14 @@
 # be justified in review; the gate fails on any file that allocates and is
 # not listed, and equally on any listed file that no longer allocates.
 #
-# remaining: 68 files, 360 sites
+# remaining: 67 files, 358 sites
 
 src/compute/attention_cublas.cu  # 5
 src/compute/attention_fmha_sm120.cu  # 2
-src/compute/attention_mxfp4_prefill.cu  # 2
 src/compute/constrain_device_buffers.h  # 6
 src/compute/encoder_forward.cu  # 5
 src/compute/gemm.cpp  # 4
 src/compute/gemm_batched.cpp  # 2
-src/compute/gemm_cutlass_mxfp4_sm120.cu  # 7
 src/compute/gemm_cutlass_sm120.cu  # 2
 src/compute/gemm_grouped.cpp  # 3
 src/compute/gemm_grouped_nvfp4_smallM.cu  # 2
@@ -59,6 +57,7 @@ src/model/model.cpp  # 2
 src/model/weight_upload.cpp  # 19
 src/quant/fp8_quant.cu  # 4
 src/quant/gpt_oss_mxfp4_convert.cpp  # 9
+src/quant/mxfp4_sfatom.cu  # 7
 src/quant/nvfp4_gemm.cu  # 3
 src/quant/nvfp4_quant.cu  # 8
 src/runtime/batch.cpp  # 5

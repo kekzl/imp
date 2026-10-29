@@ -9,7 +9,7 @@
 #include "exec/quant_pipeline.h"
 #include "exec/pre_dequant_internal.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/gemm_cutlass_mxfp4_sm120.h"
+#include "quant/mxfp4_sfatom.h"
 #include "quant/dequant_gpu.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
@@ -30,6 +30,7 @@
 namespace imp {
 
 using imp::pre_dequant_internal::deduct_budget;
+using imp::pre_dequant_internal::model_has_dense_mxfp4;
 
 namespace {
 
@@ -266,106 +267,23 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
     }
 }
 
-// Phase 3c-native: register MXFP4 GGUF weights directly in the CUTLASS cache, bypassing
-// NVFP4 (GGUF data unpacked into E2M1 + SfAtom UE8M0 on GPU). Allocates the MXFP4
-// activation scratch once if any layer carries MXFP4 weights, then runs an optional
-// NVFP4->MXFP4 conversion pass for models with use_mxfp4.
-void QuantPipeline::nvfp4_decode_convert_mxfp4_and_native_(const ModelConfig& cfg, cudaStream_t stream) {
-    // These bypass NVFP4 entirely — the GGUF data is unpacked into
-    // separate E2M1 data + SfAtom UE8M0 scales on GPU.
-    // For native MXFP4, allocate activation buffers if not already done.
-    if (cutlass_sm120_mxfp4_available()) {
-        // Check if any layer has MXFP4 weights
-        bool has_mxfp4 = false;
-        auto check_mxfp4 = [&](const Tensor&, QType qt) {
-            if (qt == QType::MXFP4)
-                has_mxfp4 = true;
-        };
-        for (int i = 0; i < cfg.n_layers && !has_mxfp4; i++) {
-            const auto& L = model_->layer(i);
-            check_mxfp4(L.wq, L.wq.qtype);
-            check_mxfp4(L.wk, L.wk.qtype);
-            check_mxfp4(L.w_gate, L.w_gate.qtype);
-            check_mxfp4(L.ssm_in, L.ssm_in.qtype);
-            check_mxfp4(L.ssm_out, L.ssm_out.qtype);
-        }
-
-        // Allocate MXFP4 scratch if needed and not already allocated
-        if (has_mxfp4 && !qscratch_->mxfp4_act_sf) {
-            int max_k = 0, max_n = 0;
-            for (int i = 0; i < cfg.n_layers; i++) {
-                const auto& L = model_->layer(i);
-                if (L.wq.data && L.wq.ndim >= 2) {
-                    max_n = std::max(max_n, (int)L.wq.shape[0]);
-                    max_k = std::max(max_k, (int)L.wq.shape[1]);
-                }
-                if (L.w_gate.data && L.w_gate.ndim >= 2) {
-                    max_n = std::max(max_n, (int)L.w_gate.shape[0]);
-                    max_k = std::max(max_k, (int)L.w_gate.shape[1]);
-                }
-                if (L.w_down.data && L.w_down.ndim >= 2) {
-                    max_n = std::max(max_n, (int)L.w_down.shape[0]);
-                    max_k = std::max(max_k, (int)L.w_down.shape[1]);
-                }
-                if (L.ssm_in.data && L.ssm_in.ndim >= 2) {
-                    max_n = std::max(max_n, (int)L.ssm_in.shape[0]);
-                    max_k = std::max(max_k, (int)L.ssm_in.shape[1]);
-                }
-                if (L.ssm_out.data && L.ssm_out.ndim >= 2) {
-                    max_n = std::max(max_n, (int)L.ssm_out.shape[0]);
-                    max_k = std::max(max_k, (int)L.ssm_out.shape[1]);
-                }
-            }
-            if (max_k > 0) {
-                qscratch_->mxfp4_act_sf_size = cutlass_mxfp4_sf_size(max_tokens_, max_k);
-                qscratch_->mxfp4_workspace_size = gemm_mxfp4_cutlass_sm120_workspace(max_tokens_,
-                                                                                    max_n, max_k);
-                qscratch_->mxfp4_act_sf = vram_alloc(vram_alloc_, qscratch_->mxfp4_act_sf_size,
-                                                    "mxfp4_act_sf");
-                qscratch_->mxfp4_workspace = (qscratch_->mxfp4_workspace_size > 0)
-                                                ? vram_alloc(vram_alloc_,
-                                                             qscratch_->mxfp4_workspace_size,
-                                                             "mxfp4_workspace")
-                                                : nullptr;
-                // Also need CUTLASS activation data buffer
-                if (!qscratch_->cutlass_act_data) {
-                    qscratch_->cutlass_act_data_size = static_cast<size_t>(max_tokens_) * (max_k / 2);
-                    qscratch_->cutlass_act_data = vram_alloc(vram_alloc_,
-                                                            qscratch_->cutlass_act_data_size,
-                                                            "cutlass_act_data");
-                }
-                IMP_LOG_INFO("Native MXFP4: allocated activation scratch (sf=%.2f MiB)",
-                             qscratch_->mxfp4_act_sf_size / (1024.0 * 1024.0));
-            }
-        }
+// Native MXFP4 GGUF: the NVFP4 activation buffer the CUTLASS NVFP4 prefill quantizes into, sized
+// over the MXFP4 projections, when no NVFP4 weight allocated it (the MXFP4 GEMM carves its own).
+void QuantPipeline::nvfp4_decode_native_mxfp4_act_data_(const ModelConfig& cfg) {
+    if (qscratch_->cutlass_act_data || !model_has_dense_mxfp4(*model_, cfg.n_layers))
+        return;
+    int max_k = 0;
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& L = model_->layer(i);
+        for (const Tensor* w : {&L.wq, &L.w_gate, &L.w_down, &L.ssm_in, &L.ssm_out})
+            if (w->data && w->ndim >= 2)
+                max_k = std::max(max_k, static_cast<int>(w->shape[1]));
     }
-
-    // Convert NVFP4 weights to MXFP4 (UE8M0 scales) if MXFP4 prefill is enabled: same packed
-    // FP4 data (borrowed), only new scale-factor buffers. Hadamard rotation requires
-    // MR-GPTQ pre-rotated weights (SafeTensors); GGUF models use direct scale conversion
-    // (no rotation).
-    if (wcache_->use_mxfp4 && qscratch_->mxfp4_act_sf != nullptr && cutlass_sm120_mxfp4_available()) {
-        int mx_count = 0;
-        size_t mx_total = 0;
-        for (auto& [ptr, nvfp4] : wcache_->nvfp4) {
-            // Only convert weights where K is multiple of 32 (MXFP4 requirement)
-            if (nvfp4.K % 32 != 0)
-                continue;
-            CutlassMxFP4Weight mw;
-            convert_nvfp4_to_mxfp4_cutlass(nvfp4, mw, stream);
-            if (mw.data) {
-                wcache_->cutlass_mxfp4[ptr] = mw;
-                mx_total += mw.sf_bytes;
-                mx_count++;
-            }
-        }
-        if (mx_count > 0) {
-            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
-            wcache_->cutlass_mxfp4_bytes = mx_total;
-            IMP_LOG_INFO("CUTLASS sm_120 MXFP4 weight cache: %d tensors, %.2f MiB", mx_count,
-                         mx_total / (1024.0 * 1024.0));
-        }
-    }
+    if (max_k == 0)
+        return;
+    qscratch_->cutlass_act_data_size = static_cast<size_t>(max_tokens_) * (max_k / 2);
+    qscratch_->cutlass_act_data = vram_alloc(vram_alloc_, qscratch_->cutlass_act_data_size,
+                                             "cutlass_act_data");
 }
 
 // Native MXFP4 GGUF unpack + FP16 fallback dequant. Registers MXFP4 weights directly in
@@ -412,7 +330,6 @@ register_if_mxfp4(model_->output_proj(), model_->out_proj_.qtype);
 if (mx_native > 0) {
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     wcache_->cutlass_mxfp4_bytes += mx_native_bytes;
-    wcache_->use_mxfp4 = true;
     // unpack_mxfp4_gguf compacts the GGUF raw blocks IN PLACE inside the model's source
     // buffers: a second engine on this model handle cannot re-run the unpack (it would read
     // the already-compacted layout as raw blocks, illegal access, #830). Engine::init

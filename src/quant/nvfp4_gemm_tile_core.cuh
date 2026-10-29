@@ -13,15 +13,21 @@ namespace imp::nvfp4_tile {
 constexpr int kBM = 128;
 constexpr int kMmaThreads = 256;
 
-template <int BN, int BK, int STAGES, bool TMA, bool PW = false, bool SK = false, bool MX8 = false>
+// Operand format: NVFP4 (E2M1, UE4M3 per 16 K, atom = 64 K), MXFP4 (E2M1, UE8M0 per 32 K, atom = 128 K),
+// MXFP8 (E4M3 bytes, UE8M0 per 32 K, atom = 128 K).
+enum class Fmt { kNv4, kMx4, kMx8 };
+
+template <int BN, int BK, int STAGES, bool TMA, bool PW = false, bool SK = false, Fmt F = Fmt::kNv4>
 struct Cfg {
     static constexpr int kBN = BN;
     static constexpr int kBK = BK;
-    // MX8: MXFP8 operands (E4M3 bytes, one UE8M0 per 32 K, atom = 128 K). A stage moves kRB bytes per
-    // row in both formats, so ldmatrix fragments, swizzle and TMA boxes are shared.
-    static constexpr bool kMx8 = MX8;
-    static constexpr int kRB = MX8 ? BK : BK / 2;
-    static_assert(!MX8 || BK == 64 || BK % 128 == 0, "MXFP8 stage = half or whole SfAtoms");
+    // A stage moves kRB bytes per row in every format, so ldmatrix fragments, swizzle and TMA boxes are
+    // shared.
+    static constexpr bool kMx8 = F == Fmt::kMx8;
+    static constexpr bool kMx4 = F == Fmt::kMx4;
+    static constexpr int kRB = kMx8 ? BK : BK / 2;
+    static_assert(!kMx8 || BK == 64 || BK % 128 == 0, "MXFP8 stage = half or whole SfAtoms");
+    static_assert(!kMx4 || BK % 128 == 0, "MXFP4 stage = whole SfAtoms");
     static constexpr int kStages = STAGES;
     static constexpr bool kTma = TMA;
     // PW: a 9th warp issues the TMA loads. 9 warps put 3 on one SM sub-partition, which caps
@@ -37,18 +43,18 @@ struct Cfg {
     // the 8 rows of an ldmatrix on 32 distinct banks.
     static constexpr int kRS = TMA ? kRB : kRB + 16;
     // SfAtoms per 128-row slab per stage; an MXFP8 BK=64 stage loads its whole atom (two stages share it).
-    static constexpr int kSfBytes = MX8 ? ((BK + 127) / 128) * 512 : (BK / 64) * 512;
+    static constexpr int kSfBytes = kMx8 ? ((BK + 127) / 128) * 512 : (BK / (kMx4 ? 128 : 64)) * 512;
     // Operand geometry per K: row bytes, SF bytes per 128-row slab, SF offset and first K group of stage kt.
     static constexpr size_t row_bytes(int K) {
-        return MX8 ? static_cast<size_t>(K) : static_cast<size_t>(K) / 2;
+        return kMx8 ? static_cast<size_t>(K) : static_cast<size_t>(K) / 2;
     }
     static constexpr size_t sf_slab(int K) {
-        return MX8 ? static_cast<size_t>((K + 127) / 128) * 512 : static_cast<size_t>(K / 64) * 512;
+        return kMx8 || kMx4 ? static_cast<size_t>((K + 127) / 128) * 512 : static_cast<size_t>(K / 64) * 512;
     }
     __host__ __device__ static constexpr size_t sf_k(int kt) {
-        return MX8 ? static_cast<size_t>((kt * BK) / 128) * 512 : static_cast<size_t>(kt) * kSfBytes;
+        return kMx8 ? static_cast<size_t>((kt * BK) / 128) * 512 : static_cast<size_t>(kt) * kSfBytes;
     }
-    __host__ __device__ static constexpr int sf_g0(int kt) { return MX8 ? ((kt * BK) % 128) / 32 : 0; }
+    __host__ __device__ static constexpr int sf_g0(int kt) { return kMx8 ? ((kt * BK) % 128) / 32 : 0; }
     static constexpr int kATile = kBM * kRS;
     static constexpr int kWTile = BN * kRS;
     static constexpr int kSfA = kATile + kWTile;  // stage offsets of the SF slabs
@@ -85,12 +91,15 @@ __device__ __forceinline__ int sf_off(int r, int c) {
     return ((r >> 7) * C::kSfBytes) + (c * 512) + ((r & 31) * 16) + (((r & 127) >> 5) * 4);
 }
 
-// Row r's scale for 32-byte K step c: NVFP4 the 4 UE4M3 of atom c, MXFP8 the UE8M0 of group g0 + c.
+// Row r's scale for 32-byte K step c: NVFP4 the 4 UE4M3 of atom c, MXFP4 the 2 UE8M0 of groups 2c, 2c + 1
+// in the low half, MXFP8 the UE8M0 of group g0 + c.
 template <class C>
 __device__ __forceinline__ uint32_t sf_word(const uint8_t* slab, int r, int c, int g0) {
     if constexpr (C::kMx8) {
         const int g = g0 + c;
         return slab[sf_off<C>(r, g >> 2) + (g & 3)];
+    } else if constexpr (C::kMx4) {
+        return *reinterpret_cast<const uint32_t*>(slab + sf_off<C>(r, c >> 1)) >> ((c & 1) * 16);
     } else {
         return *reinterpret_cast<const uint32_t*>(slab + sf_off<C>(r, c));
     }
@@ -128,6 +137,9 @@ __device__ __forceinline__ void mma_stage(float (&acc)[4][C::kNF][4], uint32_t s
                 for (int mf = 0; mf < 4; ++mf) {
                     if constexpr (C::kMx8)
                         mma_mxf8(acc[mf][nf], af[mf], h == 0 ? bf[0] : bf[2], h == 0 ? bf[1] : bf[3], sfa[mf],
+                                 sfb);
+                    else if constexpr (C::kMx4)
+                        mma_mxf4(acc[mf][nf], af[mf], h == 0 ? bf[0] : bf[2], h == 0 ? bf[1] : bf[3], sfa[mf],
                                  sfb);
                     else
                         mma_mxf4nvf4(acc[mf][nf], af[mf], h == 0 ? bf[0] : bf[2], h == 0 ? bf[1] : bf[3],

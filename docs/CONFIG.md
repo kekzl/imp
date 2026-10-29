@@ -109,7 +109,6 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 | `--prefill-chunk-size <n>` | `0` (per-arch) | max tokens per prefill chunk |
 | `--decode-nvfp4` / `--decode-nvfp4-only` / `--no-nvfp4` | auto | mode 1 additive (FP8 prefill + NVFP4 decode) / mode 2 replacement (NVFP4-only) / disable NVFP4 auto-detection |
 | `--dual-path-quant` | off | FP8 attention + NVFP4 FFN |
-| `--mxfp4-prefill` | off | CUTLASS MXFP4 GEMM for prefill |
 | `--ssm-fp16` | off | FP16 SSM `h_state` (saves ~50% SSM VRAM) |
 | `--no-cuda-graphs` | off | disable CUDA Graph capture for decode |
 | `--prefix-caching` | off | reuse KV blocks for shared token prefixes (CLI engine) |

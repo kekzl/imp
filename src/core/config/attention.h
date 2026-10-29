@@ -86,28 +86,7 @@ struct Attention {
     // the full e4m3 range (the FlashInfer numerics class) instead of raw
     // conversion's #511 quality cliff. Only affects the fp8-QK path. Experimental.
     bool fp8_qk_scaled = false;
-    std::string mxfp4 = "auto";
-    // #846 NVFP4-attention spike (SageAttention3 recipe); all three require the
-    // MXFP4 FMHA to serve prefill (mxfp4=always).
-    // mxfp4_blockscale: per-16-element UE4M3 block scales (mxf4nvf4.block_scale
-    // MMA) instead of legacy per-row software scales.
-    // mxfp4_ksmooth: subtract the per-(batch,kv_head,channel) K mean before
-    // quant; the dropped Q.mean^T term is row-constant and cancels under
-    // softmax. Auto-disabled when softcap>0. Requires mxfp4_blockscale.
-    // mxfp4_pv_fp4: P.V in NVFP4 too (P rescaled to the full E4M3 range,
-    // per-row two-level; V per-16-block along KV). Requires mxfp4_blockscale.
-    // mxfp4_promote_budget: ThriftAttention outlier promotion (arXiv 2605.23081):
-    // top-scoring fraction of causal 64-token KV tiles computed exact in
-    // FP32/FP16 (sink+diagonal force-included). 0=off, 1=all. Requires
-    // mxfp4_blockscale; head_dim 64/128 only.
-    bool mxfp4_blockscale = false;
-    bool mxfp4_ksmooth = false;
-    bool mxfp4_pv_fp4 = false;
-    float mxfp4_promote_budget = 0.0f;
-    // mxfp4_paged_kv: continuation prefill chunks read K/V directly from the
-    // paged NVFP4 KV cache (quantized once at append, no gather->FP16 pass).
-    // Requires kv_cache.dtype=nvfp4, head_dim 128, single sequence.
-    bool mxfp4_paged_kv = false;
+    // mxfp4_fp16_fallback: dequant native MXFP4 GGUF weights to an FP16 cache for decode.
     bool mxfp4_fp16_fallback = false;
     // MXFP4->FP16 cache pruning: "legacy" caches FP16 for every MXFP4 tensor.
     // "pruned" skips MoE expert_*_packed (bypassed by the batch-dequant path)

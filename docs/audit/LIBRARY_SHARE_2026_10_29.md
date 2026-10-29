@@ -243,3 +243,33 @@ The GDN projection prefill copies (`gemm.mxfp8_gdn_proj_prefill`, FP8 row-scale 
 - PPL (`runtime.deterministic`, 45k corpus): 6.7308 -> 6.7158 (ACTIVE line in the own arm), inside the +-0.2..0.5 % routing band of this model; Qwen3.8-27B-NVFP4-vllm takes no MXFP8 route (0 route lines), 4.6079 both arms.
 - Refuted: stream-K for qkv (idle 14 %, threshold 0.15 -> 0.10): 145.3 vs 143.8 us data-parallel, regex sum 207.8 ms (1 run).
 - CUTLASS MXFP8 stays as the refusal fallback (K % 64 != 0, unaligned operands).
+
+## Step 7: own MXFP4 GEMM (`src/quant/nvfp4_gemm_tile.cu`, MX4 configs), MXFP4 attention removed
+
+MXFP4 moves the NVFP4 bytes per K; only the scales differ (UE8M0 per 32 K, a 512-B SfAtom per 128 K): `mma.sync kind::mxf4nvf4 scale_vec::2X ... ue8m0`, a BK=128 stage reads one atom, K step c takes the 2 bytes `word >> ((c & 1) * 16)`. `test-quant --gtest_filter='*Mxfp4GemmTile*'`: max diff 0 against a decode-then-fp32 reference in all 5 variants x 6 shapes, 0 differing halves vs CUTLASS (29 of 29 before the TU went); per-group exponents differ so a wrong scale half fails the test (mutant red).
+
+| Flushed bench M x N x K (`Mxfp4GemmTileBench`, 2 runs, main + this kernel) | CUTLASS us | own us |
+|---|---:|---:|
+| 512 x 9216 x 2560 | 27.6 / 27.9 | 31.2 / 31.2 |
+| 2048 x 9216 x 2560 | 97.5 / 97.1 | 99.4 / 99.6 |
+| 4096 x 9216 x 2560 | 195.2 / 195.6 | 177.0 / 179.5 |
+| 512 x 2560 x 9216 | 35.7 / 35.7 | 33.8 / 33.6 |
+| 2048 x 2560 x 9216 | 95.5 / 95.5 | 89.4 / 89.4 |
+| 4096 x 2560 x 9216 | 179.5 / 179.3 | 171.3 / 171.3 |
+| 512 x 4096 x 2560 | 15.6 / 15.6 | 17.7 / 17.7 |
+| 2048 x 4096 x 2560 | 54.5 / 52.5 | 46.4 / 44.4 |
+| 4096 x 4096 x 2560 | 95.4 / 95.4 | 93.5 / 93.5 |
+| 512 x 2560 x 4096 | 17.7 / 17.7 | 17.7 / 17.2 |
+| 2048 x 2560 x 4096 | 38.1 / 39.0 | 35.8 / 36.0 |
+| 4096 x 2560 x 4096 | 88.9 / 89.4 | 83.2 / 83.0 |
+| 512 x 17408 x 5120 | 105.2 / 105.2 | 99.6 / 99.6 |
+| 2048 x 17408 x 5120 | 335.2 / 336.6 | 326.5 / 326.5 |
+| 4096 x 17408 x 5120 | 660.8 / 648.5 | 609.6 / 611.2 |
+| 512 x 5120 x 17408 | 93.5 / 93.1 | 92.8 / 93.0 |
+| 2048 x 5120 x 17408 | 330.6 / 329.0 | 314.7 / 314.7 |
+| 4096 x 5120 x 17408 | 639.9 / 636.2 | 617.5 / 613.2 |
+
+- Geomean own/CUTLASS 0.968 over 36 measurements; slower only at K 2560 with M <= 2048 (+2..13 %).
+- In situ: no local model reaches the dense MXFP4 tier. Qwen3.5-4B-mxfp4 (GDN) takes the FP16 decode cache and prefills on cuBLAS FP16, gpt-oss-20b runs MXFP4 only in grouped MoE. Both, main vs this change, 2 pairs: PPL 11.6735 / 91.9394 in every run, pp512 and tg inside the run-order drift (Qwen3.5-4B pp512 4 runs each: 28332-29496 vs main 28536-29631 tok/s, the later arm of a pair is the slower one).
+- Removed with it (owner, 2026-10-29): the MXFP4 FMHA (REFUTED #868), the materialized MXFP4 attention (0 callers in `src/`), `--mxfp4-prefill` (its GEMM branch read `GemmKernelArgs::mxfp4_payload`, which no dispatch site set). CUTLASS TUs 4 -> 3, cuBLAS/cuBLASLt files 13 -> 12, call sites 117 -> 115.
+- Limit: K % 128 != 0 is refused with an error (CUTLASS took K % 32); not reachable on any local model.

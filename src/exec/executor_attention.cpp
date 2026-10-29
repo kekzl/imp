@@ -21,7 +21,6 @@
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
 #include "compute/attention_fmha_sm120.h"
-#include "compute/attention_fmha_mxfp4_sm120.h"
 #include "compute/attention_paged.h"
 #include "compute/dispatch_record.h"  // resolved-path recording (#1205)
 #include "compute/kv_gather.h"

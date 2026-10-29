@@ -43,11 +43,6 @@ void QuantScratch::free(VRAMAllocator* alloc) {
     vfree(cutlass_workspace);
     cutlass_workspace_size = 0;
 
-    vfree(mxfp4_act_sf);
-    mxfp4_act_sf_size = 0;
-    vfree(mxfp4_workspace);
-    mxfp4_workspace_size = 0;
-
     vfree(mxfp8_act_data);
     mxfp8_act_data_size = 0;
     vfree(mxfp8_act_sf);

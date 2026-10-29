@@ -72,11 +72,6 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.f16_tile = cfg.gemm.f16_tile;
     d.moe_tile = cfg.gemm.moe_tile;
     d.mxfp8_tile = cfg.gemm.mxfp8_tile;
-    d.attention_mxfp4_mode = cfg.attention.mxfp4;
-    d.mxfp4_blockscale = cfg.attention.mxfp4_blockscale;
-    d.mxfp4_ksmooth = cfg.attention.mxfp4_ksmooth;
-    d.mxfp4_pv_fp4 = cfg.attention.mxfp4_pv_fp4;
-    d.mxfp4_promote_budget = cfg.attention.mxfp4_promote_budget;
     d.ffn_sparsity_probe = cfg.ffn.sparsity_probe;
     d.moe_mr_nr = cfg.moe.mr_nr;
     d.verify_row_parity = cfg.speculative.verify_row_parity;

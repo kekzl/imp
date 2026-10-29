@@ -1,9 +1,8 @@
 #pragma once
 
 // Describes a quantised weight's layout: packed E2M1 nibbles plus the two scale
-// representations prefill and decode read. Lives here rather than in
-// compute/gemm_cutlass_mxfp4_sm120.h to avoid forcing src/quant to include src/compute (one
-// of the two backward edges in an otherwise forward compute->quant relationship).
+// representations prefill and decode read. Apart from quant/mxfp4_sfatom.h so headers that
+// only need the struct skip the kernel declarations.
 
 #include <cuda_runtime.h>
 #include <cstdint>

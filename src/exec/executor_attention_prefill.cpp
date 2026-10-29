@@ -35,7 +35,6 @@
             // (hd=128) and tiled FMHA are O(n), no S-matrix. Uniform per-layer shapes
             // (GDN/Mamba2 hybrids) are served by the O(n) family too; only truly
             // heterogeneous shapes (Gemma-4 dual hd 256/512) require cuBLAS; learned sinks (gpt-oss, hd=64) ride FA2.
-            const bool shapes_uniform = !per_layer_shapes || attn_shapes_uniform();
             // hd=256 rides the stage-1 FA2 port (attention.fa2_hd256, default
             // on since #932): same fp16-qk kernel family, Bq=64/TWOSLOT instance.
             const bool fa2_hd_ok = fa2_serves_head_dim(hd, dispatch_policy().attention.fa2_hd256);
@@ -98,45 +97,15 @@
                 // Throwing fails the capture (or eager warmup) cleanly instead of dooming it silently.
                 throw std::runtime_error("chunked_prefill: capture-replay preconditions violated");
             }
-            // #846 KV-append-quant (opt-in): serves the whole chunk straight from the
-            // NVFP4 paged cache by appending the current chunk FIRST, then reading
-            // [0,ctx_len) as FP4 (no gather, no FP16 materialization, no in-kernel
-            // quantize). Falls through to the gather path if declined; tail write skipped then (KV already
-            // persisted).
-            bool paged_kv_written = false;
-            if (!cap_replay && kvt == QType::NVFP4 && hd == 128 && shapes_uniform && !attn_sinks &&
-                state.n_sequences == 1 && dispatch_policy().attention.mxfp4_paged_kv) {
-                write_kv_cache(layer, state, stream, row_begin, seq_n, bt_flat, bt_swa_flat, seq_positions);
-                paged_kv_written = true;
-                int64_t q4s[4] = {1, (int64_t)seq_n, (int64_t)nh, (int64_t)hd};
-                int64_t o4s[4] = {1, (int64_t)seq_n, (int64_t)nh, (int64_t)hd};
-                Tensor q4 = seq_q.reshape(4, q4s);
-                Tensor o4 = seq_ao.reshape(4, o4s);
-                if (fmha_sm120_mxfp4_prefill_paged(
-                        q4, o4, static_cast<const half*>(seq_k.data), static_cast<const half*>(seq_v.data),
-                        static_cast<const uint8_t*>(cache->k_ptr(kv_layer, 0)),
-                        static_cast<const uint8_t*>(cache->k_scale_ptr(kv_layer, 0)),
-                        static_cast<const uint8_t*>(cache->v_ptr(kv_layer, 0)),
-                        static_cast<const uint8_t*>(cache->v_scale_ptr(kv_layer, 0)), seq_block_tables,
-                        kv_bs, ctx_len, nkv, scale, /*causal=*/true, layer_sliding_window,
-                        cfg.attn_logit_softcap, stream, q_offset,
-                        dispatch_policy().attention.mxfp4_promote_budget)) {
-                    return;
-                }
-                // Declined: the gather below covers only [0, q_offset) and the
-                // fresh-FP16 append fills the current chunk — correct even
-                // though the cache now already holds the current chunk too.
-            }
-
             // Sparse prefill (attention.sparse_prefill_topk_tokens): this chunk attends to its own
             // rows plus the selected past pages, compacted ascending; past keys are post-RoPE, so
             // only the causal offset changes (att_off = selected past tokens).
             const auto [past_bt, att_off] = sparse_prefill_pick_(static_cast<const half*>(seq_q.data), seq_n, cache,
                                                                  kv_layer, seq_block_tables, q_offset, nh,
-                                                                 nkv, hd, cap_replay, paged_kv_written,
+                                                                 nkv, hd, cap_replay,
                                                                  layer_sliding_window, attn_sinks, stream);
-            // APA straight from the FP16 paged cache: no gather, no K/V scratch (FP16 cache only, so the
-            // NVFP4 branch above has not written this chunk). Tile cache only over the uncompacted past.
+            // APA straight from the FP16 paged cache: no gather, no K/V scratch (FP16 cache only). Tile
+            // cache only over the uncompacted past.
             if (try_apa_paged_prefill(dispatch_policy(), cap_replay, seq_q, cache, kv_layer, past_bt, kv_bs, seq_k,
                                       seq_v, att_off, seq_ao, seq_n, nh, nkv, hd, scale, layer_sliding_window,
                                       cfg.attn_logit_softcap, stream, attn_sinks,
@@ -288,9 +257,7 @@
             }
 
             // Persist current chunk's K/V (same as non-chunked path).
-            // Skipped when the paged-FP4 branch already appended it above.
-            if (!paged_kv_written)
-                write_kv_cache(layer, state, stream, row_begin, seq_n, bt_flat, bt_swa_flat, seq_positions);
+            write_kv_cache(layer, state, stream, row_begin, seq_n, bt_flat, bt_swa_flat, seq_positions);
             return;
         }
 

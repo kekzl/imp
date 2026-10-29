@@ -8,7 +8,8 @@
 // Measured against this design (test_nvfp4_gemm_tile bench, RTX 5090): one producer warp of
 // 16 B cp.async 4x slower than CUTLASS, per-row 64 B bulk copies 13x, 5 stages / grouped-M
 // raster / persistent CTAs / direct epilogue stores 0..+8 % slower; 128x128 is L2-bound (77 %).
-// gemm_mxfp8_tile: the same kernels on MXFP8 bytes (Cfg MX8, kind::mxf8f6f4 m16n8k32), half the BK.
+// gemm_mxfp8_tile / gemm_mxfp4_tile: the same kernels on MXFP8 (kind::mxf8f6f4 m16n8k32, half the BK) and
+// MXFP4 bytes (scale_vec::2X ue8m0, one 128-K SfAtom per stage).
 
 #include "quant/nvfp4_gemm_tile.h"
 #include "quant/nvfp4_gemm_tile_core.cuh"
@@ -515,13 +516,13 @@ int pick_variant(int M, int N, int sms, bool sk_fits) {
     return use256 ? 1 : 0;
 }
 
-// Both formats run the same byte geometry: an MXFP8 stage of BK elements moves what an NVFP4 stage
+// All formats run the same byte geometry: an MXFP8 stage of BK elements moves what an NVFP4 / MXFP4 stage
 // of 2 x BK does, so the NVFP4 tile choices carry over with BK halved.
-template <bool MX8>
+template <Fmt F>
 bool run_tile(TileArgs p, cudaStream_t stream, int variant, void* workspace, size_t workspace_bytes) {
-    constexpr int kB1 = MX8 ? 64 : 128;
+    constexpr int kB1 = F == Fmt::kMx8 ? 64 : 128;
     constexpr int kB2 = 2 * kB1;
-    using Sk = Cfg<128, kB1, 3, true, true, true, MX8>;
+    using Sk = Cfg<128, kB1, 3, true, true, true, F>;
     const int M = p.M;
     const int N = p.N;
     const int K = p.K;
@@ -537,22 +538,22 @@ bool run_tile(TileArgs p, cudaStream_t stream, int variant, void* workspace, siz
         variant = pick_variant(M, N, sms, sk_fits);
     switch (variant) {
         case 1:
-            if (launch_tile<Cfg<256, kB1, 3, true, false, false, MX8>>(p, stream))
+            if (launch_tile<Cfg<256, kB1, 3, true, false, false, F>>(p, stream))
                 return true;
             break;
         case 2:
-            return launch_tile<Cfg<128, kB2, 2, false, false, false, MX8>>(p, stream);
+            return launch_tile<Cfg<128, kB2, 2, false, false, false, F>>(p, stream);
         case 3:
             if (sk_fits && launch_tile<Sk>(p, stream))
                 return true;
             [[fallthrough]];
         default:
-            if (launch_tile<Cfg<128, kB1, 4, true, true, false, MX8>>(p, stream))
+            if (launch_tile<Cfg<128, kB1, 4, true, true, false, F>>(p, stream))
                 return true;
             break;
     }
     // no TMA map (alignment): sync mainloop
-    return launch_tile<Cfg<128, kB2, 2, false, false, false, MX8>>(p, stream);
+    return launch_tile<Cfg<128, kB2, 2, false, false, false, F>>(p, stream);
 }
 
 }  // namespace
@@ -572,7 +573,7 @@ bool gemm_nvfp4_tile(const void* a_data, const void* a_sf, const void* w_data, c
                      nullptr,
                      0,
                      nullptr};
-    return run_tile<false>(p, stream, variant, workspace, workspace_bytes);
+    return run_tile<Fmt::kNv4>(p, stream, variant, workspace, workspace_bytes);
 }
 
 bool gemm_mxfp8_tile(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,
@@ -590,8 +591,28 @@ bool gemm_mxfp8_tile(const void* a_data, const void* a_sf, const void* w_data, c
                      nullptr,
                      0,
                      col_scale};
-    return run_tile<true>(p, stream, variant, workspace, workspace_bytes);
+    return run_tile<Fmt::kMx8>(p, stream, variant, workspace, workspace_bytes);
 }
+
+bool gemm_mxfp4_tile(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf, float alpha,
+                     void* d_fp16, int M, int N, int K, cudaStream_t stream, int variant, void* workspace,
+                     size_t workspace_bytes) {
+    const TileArgs p{static_cast<const uint8_t*>(a_data),
+                     static_cast<const uint8_t*>(a_sf),
+                     static_cast<const uint8_t*>(w_data),
+                     static_cast<const uint8_t*>(w_sf),
+                     static_cast<half*>(d_fp16),
+                     alpha,
+                     M,
+                     N,
+                     K,
+                     nullptr,
+                     0,
+                     nullptr};
+    return run_tile<Fmt::kMx4>(p, stream, variant, workspace, workspace_bytes);
+}
+
+size_t gemm_tile_streamk_workspace_bytes() { return static_cast<size_t>(sm_count()) * kSkPartBytes; }
 
 // Shared with gemm_f16_tile.cu (same TMA operand maps, 2-byte elements counted as bytes).
 bool nvfp4_tile::encode_2d(CUtensorMap* map, const void* base, int rows, int row_bytes, int box_bytes,

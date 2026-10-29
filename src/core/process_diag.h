@@ -70,11 +70,6 @@ struct ProcessDiag {
     bool moe_tile = true;                // matches the config.h default
     bool mxfp8_tile = true;              // matches the config.h default
     bool force_splitk_fallback = false;  // test hook
-    std::string attention_mxfp4_mode = "auto";
-    bool mxfp4_blockscale = false;
-    bool mxfp4_ksmooth = false;
-    bool mxfp4_pv_fp4 = false;
-    float mxfp4_promote_budget = 0.0f;
 
     // FFN
     bool ffn_sparsity_probe = false;
@@ -186,18 +181,6 @@ int process_diag_nvfp4_cublaslt_min_m();  // gemm.nvfp4_cublaslt_min_m: 0 off
 // split-K result without provoking a real cudaErrorInvalidValue. Default off.
 [[nodiscard]] bool process_diag_force_splitk_fallback();
 void process_diag_set_force_splitk_fallback(bool v);
-// "auto" | "always" | "never" (default "auto"); attention_mxfp4_available()
-// only enables MXFP4 attention when mode == "always".
-const std::string& process_diag_attention_mxfp4_mode();
-// #846 NVFP4-attention spike knobs (only meaningful when mxfp4 == "always").
-[[nodiscard]] bool process_diag_mxfp4_blockscale();
-[[nodiscard]] bool process_diag_mxfp4_ksmooth();
-[[nodiscard]] bool process_diag_mxfp4_pv_fp4();
-void process_diag_set_mxfp4_ksmooth(bool v);
-void process_diag_set_mxfp4_pv_fp4(bool v);
-// ThriftAttention-style outlier promotion budget (0 = off, requires blockscale).
-float process_diag_mxfp4_promote_budget();
-void process_diag_set_mxfp4_promote_budget(float v);
 
 // FFN
 [[nodiscard]] bool process_diag_ffn_sparsity_probe();

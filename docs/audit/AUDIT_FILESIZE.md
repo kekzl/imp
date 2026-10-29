@@ -97,7 +97,6 @@ _102 files · code LOC p50=323 p90=906 max=1575 · raw LOC p50=439 p90=1214 max=
 | 872 | 1051 | **HARD** | (c) one path: batched-MoE forward dispatch (host-only) | `src/exec/executor_forward_moe_batch.cu` |
 | 845 | 1214 | **HARD** | (c) NVFP4 tensor-core paged-attn family (decode/splitk/reduce) — shared TC path | `src/compute/attention_paged_nvfp4_tc.cu` |
 | 820 | 1157 | **HARD** | (a) 11+ kernels: topk gating, gather/scatter (+deterministic), permute, weighted-sum residual — split candidate | `src/compute/moe_routing.cu` |
-| 810 | 1075 | **HARD** | (c) single MXFP4 FA2 attention kernel family | `src/compute/attention_fmha_mxfp4_sm120.cu` |
 | 718 | 945 | **HARD** | (c) one small-M grouped-GEMM family (software-ref + prod + smoke variants) | `src/compute/gemm_grouped_nvfp4_smallM.cu` |
 | 712 | 906 | **HARD** | (c) executor forward orchestration (one dense forward path + 2 scale helpers) | `src/exec/executor_forward.cu` |
 | 676 | 857 | **HARD** | (c) one module: schema-constrained decode token-mask compute (host-side) | `src/compute/schema_constrain.cu` |
