@@ -62,6 +62,7 @@ Stream-K 128x128 (grid = SMs, forward unit ranges: a CTA's first segment writes 
 - Refuted, hybrid stream-K (whole waves data-parallel, only the remainder tiles split, as CUTLASS stream-K): M=512 N=17408 K=5120 104.5 -> 113.7 us, N=6144 40 -> 54 us; with the last full wave also split, N=17408 108.6-109.9 us. Short split segments (8 k-steps) cost a wave; the full split stays.
 - The own kernels run at the 575 W power cap, CUTLASS below it (M=512 N=17408 K=5120, 3 s back to back, nvidia-smi): CUTLASS 89.6 us at 2350 MHz / 531 W, own 128x128 98.8 us at 2358 MHz / 571 W, own 128x256 89.0 us at 2492 MHz / 575 W, own stream-K 88.5 us at 2203 MHz / 575 W. ncu (base clocks): tensor pipe 73.6 % CUTLASS vs 71.6 % own stream-K.
 - Probed, not committed: 4 MMA warps of 64 x 64 per 128x128 tile (half the A fragment loads per MMA, 210-254 regs, bit-exact). Back to back: stream-K 84.7 us at 2405 MHz vs CUTLASS 88.9. In situ Qwen3.8-27B pp512 (3 pairs, `gemm.nvfp4_tile_min_m` 2048 vs 1): GEMM kernel sum 219.9 / 220.8 / 218.7 vs 222.2 / 222.3 / 218.8 ms; per shape gate/up 89.0 vs 91.4 us, N 5120 / 10240 56.6 vs 53.7, N 6144 32.1 vs 36.0, N 12288 70.7 vs 75.1, N 1024 12.0 vs 15.1 (CUTLASS 128x64-wide grid). Parity, no lead: CUTLASS stays below M 2048.
+- Refuted 2026-10-29: 128x64 tile with 4 MMA warps (warp tile 64 x 32, whole W SF slab per stage, bit-exact, 146 regs). Flush bench M=512: N 1024 K 5120 17.7 us (stream-K 17.7, CUTLASS 19.3), N 6144 58.6 vs 40.2 us. CUTLASS reads N 1024 in 12.0 us in situ vs 17.8-19.7 us isolated.
 
 ## Per cell
 
