@@ -148,8 +148,8 @@ TEST(Nvfp4GemmTileBench, VsCutlassAndCublasLt) {
         GTEST_SKIP() << "CUTLASS sm_120 NVFP4 not available";
     cudaStream_t s;
     cudaStreamCreate(&s);
-    const int shapes[][2] = {{17408, 5120}, {5120, 17408}, {10240, 5120},
-                             {6144, 5120},  {5120, 6144},  {1024, 5120}};
+    const int shapes[][2] = {{17408, 5120}, {5120, 17408}, {10240, 5120}, {6144, 5120},
+                             {5120, 6144},  {1024, 5120},  {12288, 5120}};
     const int ms[] = {512, 2048};
     constexpr size_t kFlushBytes = size_t(256) << 20;  // > 2 x the 96 MB L2
     void* flush = nullptr;
