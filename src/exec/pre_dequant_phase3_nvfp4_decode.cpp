@@ -433,7 +433,7 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
         nvfp4_decode_convert_cutlass_(cfg, budget, remaining_budget, stream);
     }
 
-    nvfp4_decode_native_mxfp4_act_data_(cfg);
+    alloc_mxfp4_gemm_scratch_(cfg);
 
     if (model_has_dense_mxfp4(*model_, cfg.n_layers)) {
         nvfp4_decode_mxfp4_fp16_fallback_(cfg, stream);

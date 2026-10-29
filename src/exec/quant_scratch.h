@@ -32,6 +32,12 @@ struct QuantScratch {
     void* cutlass_workspace = nullptr;  // CUTLASS GEMM workspace
     size_t cutlass_workspace_size = 0;
 
+    // --- Native MXFP4 W4A16 GEMM (M > 1): one dense weight dequantized to FP16 (largest non-LM-head N x K)
+    // and the LM-head slice output, same size. Own buffers: the shared workspace holds the GDN state. ---
+    void* mxfp4_wdeq = nullptr;
+    void* mxfp4_slice_out = nullptr;
+    size_t mxfp4_wdeq_size = 0;
+
     // --- MXFP8 GDN prefill activation buffers (gemm.mxfp8_gdn_proj_prefill) ---
     void* mxfp8_act_data = nullptr;  // [max_tokens, max_K] E4M3
     void* mxfp8_act_sf = nullptr;    // SfAtom UE8M0

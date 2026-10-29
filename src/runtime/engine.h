@@ -95,6 +95,8 @@ struct EngineConfig {
     // always applies.
     float kv_fraction = 1.0f;
     int vram_reserve_floor_pct = 0;
+    // attention.mxfp4_fp16_fallback: native MXFP4 weights decode from an FP16 cache the planner must reserve.
+    bool mxfp4_fp16_cache = false;
     // library_reserve_mb: cuBLAS/CUTLASS claim on the first forward pass
     // (MEMORY.md A1.5). -1 = measured default. Fixed charge: floors the
     // reserve above regardless of --vram-budget.

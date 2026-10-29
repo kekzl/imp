@@ -295,12 +295,12 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
         }
     }
 
-    // Mandatory MXFP4 -> FP16 decode-fallback reserve: on GDN hybrids the native MXFP4 GEMV is
-    // disabled (see pre_dequant_phase3_cutlass.cpp), so decode requires the FP16 dequant cache
+    // MXFP4 -> FP16 decode-cache reserve when attention.mxfp4_fp16_fallback forces the cache
+    // (pre_dequant_phase3_cutlass.cpp): decode then reads the FP16 dequant cache
     // (~4x the raw MXFP4 bytes) resident alongside it. StoragePlanner sizes at MXFP4 wire size
     // and misses this: must charge it here or the KV clamp starves the fallback (#934).
     size_t mxfp4_fp16_fallback_bytes = 0;
-    if (mcfg.ssm_inner_size > 0) {
+    if (config.mxfp4_fp16_cache) {
         auto count_mxfp4 = [&](const Tensor& w, QType qt) {
             if (w.data && qt == QType::MXFP4)
                 mxfp4_fp16_fallback_bytes += static_cast<size_t>(w.shape[0]) * w.shape[1] * sizeof(half);
@@ -322,9 +322,9 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, i
             count_mxfp4(L.ssm_out, L.ssm_out.qtype);
         }
         if (mxfp4_fp16_fallback_bytes > 0)
-            IMP_LOG_INFO("VRAM budget: MXFP4-GDN FP16 decode fallback reserve %.1f MiB (mandatory — "
-                         "native MXFP4 GEMV unavailable on GDN weights)",
-                         mxfp4_fp16_fallback_bytes / (1024.0 * 1024.0));
+            IMP_LOG_INFO(
+                "VRAM budget: MXFP4 FP16 decode cache reserve %.1f MiB (attention.mxfp4_fp16_fallback)",
+                mxfp4_fp16_fallback_bytes / (1024.0 * 1024.0));
     }
 
     const ImmaPlaneDemand imma = imma_plane_demand(model, config, q8_imma_prefill, moe_imma_prefill);

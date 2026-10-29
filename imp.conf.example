@@ -500,6 +500,9 @@ paged_f16_multitok   = 4
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
 # -1 = auto (derived from the cuBLAS S-matrix VRAM cap).
 fmha_prefill_threshold = -1
+# MXFP4 GGUF weights decode natively (GEMV) and prefill W4A16 (per-GEMM FP16 dequant scratch);
+# true restores the FP16 decode cache (~4x the MXFP4 bytes; Qwen3.5-4B: 8020 MiB, pp512 28k vs 19-20k tok/s,
+# tg128 156-166 vs 259-267 tok/s).
 mxfp4_fp16_fallback  = false
 # MXFP4 → FP16 cache pruning policy: "legacy" caches FP16 for every MXFP4
 # tensor; "pruned" skips MoE expert weights + LM head (32 GiB-class loads).

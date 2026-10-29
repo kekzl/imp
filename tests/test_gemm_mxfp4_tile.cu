@@ -1,6 +1,8 @@
 // gemm_mxfp4_tile (own MXFP4 prefill GEMM, ROADMAP row 123) against a decode-then-fp32 reference on the
 // same operand bytes (E2M1 nibbles, UE8M0 per 32 K in SfAtom layout).
 
+#include "compute/embedding.h"
+#include "core/tensor.h"
 #include "quant/mxfp4_sfatom.h"
 #include "quant/nvfp4_gemm_tile.h"
 
@@ -11,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <stdexcept>
 #include <vector>
 
 using namespace imp;
@@ -165,4 +168,90 @@ TEST(Mxfp4GemmTile, RefusesPartialAtomK) {
     EXPECT_FALSE(gemm_mxfp4_tile(o.a, o.a_sf, o.w, o.w_sf, 1.0f, o.y_own, 128, 128, 192, s));
     free_operands(o);
     cudaStreamDestroy(s);
+}
+
+namespace {
+
+// Host decode of the unpacked layout: E2M1 [rows, K/2] (even element low nibble), UE8M0 [rows, K/32].
+float host_mx4(const std::vector<uint8_t>& data, const std::vector<uint8_t>& scales, int row, int k, int K) {
+    static const float kE2M1[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+    const uint8_t byte = data[(static_cast<size_t>(row) * K + k) / 2];
+    const int nib = (k & 1) ? byte >> 4 : byte & 0xf;
+    const float v = (nib & 8) ? -kE2M1[nib & 7] : kE2M1[nib & 7];
+    return v * std::ldexp(1.0f, static_cast<int>(scales[(static_cast<size_t>(row) * K + k) / 32]) - 127);
+}
+
+// Random nibbles, exponents 2^-6..2^5 per 32-K group: a wrong group or nibble order changes the value.
+void make_unpacked(int rows, int K, std::vector<uint8_t>& data, std::vector<uint8_t>& scales) {
+    data.resize(static_cast<size_t>(rows) * K / 2);
+    scales.resize(static_cast<size_t>(rows) * K / 32);
+    uint32_t h = 0x2545f491u;
+    for (auto& b : data) {
+        h = h * 1664525u + 1013904223u;
+        b = static_cast<uint8_t>(h >> 24);
+    }
+    for (size_t i = 0; i < scales.size(); ++i)
+        scales[i] = static_cast<uint8_t>(121 + (i * 7) % 12);
+}
+
+}  // namespace
+
+// dequant_mxfp4_linear_to_fp16 (W4A16 prefill scratch) against the host decode, every element exact.
+TEST(Mxfp4Unpacked, DequantMatchesHostDecode) {
+    const int N = 136, K = 2560;
+    std::vector<uint8_t> data, scales;
+    make_unpacked(N, K, data, scales);
+    void *d_data = nullptr, *d_sf = nullptr;
+    half* d_out = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_data, data.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_sf, scales.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_out, size_t(N) * K * sizeof(half)), cudaSuccess);
+    cudaMemcpy(d_data, data.data(), data.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sf, scales.data(), scales.size(), cudaMemcpyHostToDevice);
+    dequant_mxfp4_linear_to_fp16(d_data, d_sf, N, K, d_out, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<half> out(size_t(N) * K);
+    cudaMemcpy(out.data(), d_out, out.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    size_t bad = 0;
+    for (int r = 0; r < N; ++r)
+        for (int k = 0; k < K; ++k)
+            bad += __half2float(out[size_t(r) * K + k]) != host_mx4(data, scales, r, k, K);
+    EXPECT_EQ(bad, 0u);
+    cudaFree(d_data);
+    cudaFree(d_sf);
+    cudaFree(d_out);
+}
+
+// embedding_lookup_mxfp4 (native MXFP4 token table) against the host decode, repeated ids included.
+TEST(Mxfp4Unpacked, EmbeddingLookupMatchesHostDecode) {
+    const int V = 300, D = 2560;
+    std::vector<uint8_t> data, scales;
+    make_unpacked(V, D, data, scales);
+    const std::vector<int32_t> ids = {0, 7, 299, 7, 150, 1};
+    void *d_data = nullptr, *d_sf = nullptr, *d_ids = nullptr;
+    half* d_out = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_data, data.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_sf, scales.size()), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_ids, ids.size() * sizeof(int32_t)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_out, ids.size() * D * sizeof(half)), cudaSuccess);
+    cudaMemcpy(d_data, data.data(), data.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sf, scales.data(), scales.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_ids, ids.data(), ids.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
+    int64_t shape[2] = {static_cast<int64_t>(ids.size()), D};
+    Tensor out(d_out, QType::F16, 2, shape, true);
+    embedding_lookup_mxfp4(d_data, d_sf, static_cast<const int32_t*>(d_ids), static_cast<int>(ids.size()),
+                           out, nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<half> h(ids.size() * D);
+    cudaMemcpy(h.data(), d_out, h.size() * sizeof(half), cudaMemcpyDeviceToHost);
+    size_t bad = 0;
+    for (size_t t = 0; t < ids.size(); ++t)
+        for (int k = 0; k < D; ++k)
+            bad += __half2float(h[t * D + k]) != host_mx4(data, scales, ids[t], k, D);
+    EXPECT_EQ(bad, 0u);
+    // The generic overload must refuse MXFP4 instead of leaving the output untouched.
+    EXPECT_THROW(embedding_lookup(out, static_cast<const int32_t*>(d_ids), 1, out, QType::MXFP4, nullptr),
+                 std::runtime_error);
+    for (void* p : {d_data, d_sf, d_ids, static_cast<void*>(d_out)})
+        cudaFree(p);
 }

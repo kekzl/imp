@@ -1,5 +1,7 @@
 // executor_gemm_dispatch.cu — GEMM dispatch entry for the executor.
 #include "core/dispatch_policy.h"
+#include <stdexcept>
+#include <string>
 #include <utility>
 // Extracted from executor_kernels.cu (D3, structural-debt audit): the
 // WeightHandle-keyed GEMM dispatch (gemm_via_handle_) and its uncached
@@ -210,6 +212,56 @@ static bool mxfp8_prefill_gemm(const QuantScratch& qs, const CutlassMxFP8Weight&
                                     qs.mxfp8_workspace_size, stream);
 }
 
+// Native MXFP4 GEMM with M > 1 (or fp32 rows): W4A16. Each weight is dequantized to FP16 into the load-time
+// scratch (largest non-LM-head weight), then FP16 GEMM with the FP16 activation: Qwen3.5-4B-mxfp4 PPL
+// 11.6369 vs W4A4 14.2956 (ppl_4k). The LM head, larger than the scratch, runs in N slices through
+// mxfp4_slice_out and lands in its columns by a 2-D copy. The shared workspace is off limits: the SSM/GDN
+// buffers are carved from its start (configure_ssm_workspace).
+static void mxfp4_prefill_gemm(const QuantScratch& qs, const WeightHandle& h, const Tensor& input,
+                               Tensor& output, const GemmContext& ctx) {
+    const int M = static_cast<int>(input.shape[0]);
+    const int K = static_cast<int>(input.shape[1]);
+    const int N = static_cast<int>(h.shape[0]);
+    const bool out_f32 = output.qtype == QType::F32;
+    const size_t es = out_f32 ? sizeof(float) : sizeof(half);
+    const size_t row_w = static_cast<size_t>(K) * sizeof(half);
+    const int rows_w = static_cast<int>(qs.mxfp4_wdeq_size / row_w);
+    const int whole = N <= rows_w ? N : 0;
+    const int rows_o = static_cast<int>(qs.mxfp4_wdeq_size / (static_cast<size_t>(M) * es));
+    const int slice = whole > 0 ? whole : (std::min(rows_w, rows_o) / 8) * 8;
+    if (ctx.beta != 0.0f || (output.qtype != QType::F16 && !out_f32) || K % 32 != 0 || slice <= 0 ||
+        h.payload.mxfp4.weight == nullptr || h.payload.mxfp4.linear_scales == nullptr)
+        throw std::runtime_error("MXFP4 GEMM: beta=" + std::to_string(ctx.beta) +
+                                 " out=" + qtype_name(output.qtype) + " M=" + std::to_string(M) +
+                                 " N=" + std::to_string(N) + " K=" + std::to_string(K) +
+                                 " outside the W4A16 scratch contract");
+    const auto* w = static_cast<const uint8_t*>(h.payload.mxfp4.weight);
+    const auto* s = static_cast<const uint8_t*>(h.payload.mxfp4.linear_scales);
+    for (int n0 = 0; n0 < N; n0 += slice) {
+        const int nr = std::min(slice, N - n0);
+        dequant_mxfp4_linear_to_fp16(w + (static_cast<size_t>(n0) * (K / 2)),
+                                     s + (static_cast<size_t>(n0) * (K / 32)), nr, K, qs.mxfp4_wdeq,
+                                     ctx.stream);
+        int64_t w_shape[2] = {nr, K};
+        Tensor wt(qs.mxfp4_wdeq, QType::F16, 2, w_shape, true);
+        if (whole > 0) {
+            gemm(input, wt, output, 1.0f, 0.0f, ctx.stream);
+            break;
+        }
+        int64_t o_shape[2] = {M, nr};
+        Tensor part(qs.mxfp4_slice_out, output.qtype, 2, o_shape, true);
+        gemm(input, wt, part, 1.0f, 0.0f, ctx.stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(static_cast<char*>(output.data) + (static_cast<size_t>(n0) * es),
+                                             static_cast<size_t>(N) * es, qs.mxfp4_slice_out, nr * es,
+                                             nr * es, M, cudaMemcpyDeviceToDevice, ctx.stream));
+    }
+    static bool logged = false;  // activity proof, once
+    if (!logged) {
+        logged = true;
+        IMP_LOG_INFO("MXFP4 GEMM: W4A16 dequant scratch ACTIVE (M=%d N=%d K=%d, slice %d)", M, N, K, slice);
+    }
+}
+
 // Conservative mirror of gemm_via_handle_'s M>1 routing: true only when
 // the dispatch is guaranteed to reach the CUTLASS NVFP4 prefill block
 // (which quantizes input into the shared activation scratch). Every
@@ -405,6 +457,10 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
                 break;
             }
             case StorageTier::MXFP4:
+                // The MXFP4 GEMV writes fp16: fp32 rows (perplexity LM head, one-row tail) take the prefill
+                // route.
+                if (output.qtype == QType::F32)
+                    break;
                 imp::gemv_dispatch(h, input, output, ctx.stream);
                 return;
             case StorageTier::FP16: {
@@ -694,6 +750,11 @@ void GraphExecutor::gemm_via_handle_(TensorID id, const Tensor& input,
         nv.K = h.shape[1] * 2;  // packed K/2 → logical K
         nv.owned = false;       // borrows resident weight storage
         gemm_nvfp4(nv, input, output, ctx.stream, ctx.beta);
+        return;
+    }
+
+    if ((M > 1 || output.qtype == QType::F32) && h.primary_tier == StorageTier::MXFP4) {
+        mxfp4_prefill_gemm(qscratch_, h, input, output, ctx);
         return;
     }
 
