@@ -70,6 +70,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.nvfp4_cublaslt_min_m = cfg.runtime.deterministic ? 0 : cfg.gemm.nvfp4_cublaslt_min_m;
     d.nvfp4_tile_min_m = cfg.gemm.nvfp4_tile_min_m;  // deterministic: no algo pick, no split
     d.f16_tile = cfg.gemm.f16_tile;
+    d.q6k_tile = cfg.gemm.q6k_tile;
     d.moe_tile = cfg.gemm.moe_tile;
     d.mxfp8_tile = cfg.gemm.mxfp8_tile;
     d.ffn_sparsity_probe = cfg.ffn.sparsity_probe;

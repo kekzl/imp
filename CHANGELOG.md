@@ -13,6 +13,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `--mxfp4-prefill` and C-API `ImpConfig::use_mxfp4_prefill` (ABI change): its dual-cache GEMM branch was unreachable, no dispatch site set the payload.
 
 ### Changed
+- Q6_K prompt GEMMs decode the GGUF blocks inside an own FP16 tile kernel instead of a whole-weight dequant + cuBLASLt per call (bit-equal to dequant + the own tile, up to M 1536): Qwen3-14B-Q6_K pp128 2625-2888 -> 4165, pp512 6545-6611 -> 8364-8365, pp1536 8484-8549 -> 9000-9013 tok/s; PPL 11.4543 -> 11.4542. `gemm.q6k_tile`.
 - MXFP4 GGUF GDN hybrids no longer force the 4x FP16 decode cache: GEMV decode, W4A16 prefill through a one-weight dequant scratch. Qwen3.5-4B-mxfp4: tg128 156-166 -> 259-267 tok/s, own peak 14880 -> 3454 MiB, PPL 11.6735 -> 11.6369, pp512 28k -> 19-20k, pp4096 31k -> 27-29k tok/s. `attention.mxfp4_fp16_fallback` restores it.
 - Dense MXFP4 prefill GEMMs run the own tile kernel (MX4 configs, bit-equal to CUTLASS), the CUTLASS MXFP4 TU is gone (4 -> 3 CUTLASS TUs): flushed bench own/CUTLASS geomean 0.968 over 18 shapes x 2, slower only at K 2560 with M <= 2048 (+2..13 %). K % 128 != 0 is refused (was K % 32).
 - The expert cache gives slots only to layers whose experts stay in host RAM: Qwen3-30B-A3B-Q4_K_M, 24 of 48 layers on the host, same 3071 MiB: 52 -> 104 slots per layer, tg128 276.9-283.7 -> 324.4-325.7 tok/s; Qwen3-30B-A3B-NVFP4 24 host layers: pool 14580-14944 MiB -> 7776 MiB, own peak 28326-28843 -> 21118-21138 MiB.

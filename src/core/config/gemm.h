@@ -109,6 +109,9 @@ struct GEMM {
     // accumulation, deep K (K >= N), grid >= one wave; bit-equal to COMPUTE_16F. Qwen3-14B-Q6_K
     // pp2048 GEMM sum -5.5 %, e2e +4.0 %, PPL 9.2022 both arms.
     bool f16_tile = true;
+    // Fused Q6_K prompt GEMM (src/compute/gemm_q6k_f16_tile.cu): W decoded per tile from the GGUF blocks
+    // instead of a whole-weight dequant + cuBLASLt per call; bit-equal to dequant + the own FP16 tile.
+    bool q6k_tile = true;
     // Own grouped NVFP4 MoE prefill GEMM (gemm_grouped_nvfp4_tile.cu) before CUTLASS 3.x grouped on the
     // same device-args operands, bit-exact. Qwen3-30B-A3B-NVFP4 pp512 / pp4096 GEMM sum -4 / -6 %,
     // e2e +3..7 / +2 %, PPL 11.4338 both arms; gpt-oss-20b (K 2880) pp4096 +2.3..2.8 %. Refuses K % 64 != 0
