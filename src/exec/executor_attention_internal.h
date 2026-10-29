@@ -4,6 +4,7 @@
 // to keep each TU under the file-size gate. Included only by
 // executor_attention.cu and its dispatch fragments; static helpers assume single-TU inclusion.
 
+#include "compute/attention_fa2_hd512.h"
 #include "exec/attention_dispatch_rules.h"
 #include "exec/executor_kernels.h"
 #include "exec/executor_helpers.h"
@@ -168,7 +169,8 @@ static void gather_past_kv_fp16(KVCache* cache, int kv_layer, half* k_full, half
 
 // hd=512 prefill whose rows do not depend on n or q_offset (#2167): the WMMA FMHA with a forward
 // KV scan, used by the single-shot and the chunk-continuation path alike.
-// attention.hd512_prefill: "fmha" always, "cublas" never, "auto" under runtime.deterministic.
+// attention.hd512_prefill: "fa2" / "auto" the split-D FA2 (no window, no sinks), "fmha" the WMMA kernel,
+// "auto" falls back to WMMA under runtime.deterministic, "cublas" never.
 // False = not selected or declined.
 [[nodiscard]] static bool try_hd512_row_invariant_prefill(const DispatchPolicy& rcfg, int hd, const Tensor& q,
                                                           const Tensor& k, const Tensor& v, Tensor& o, int n,
@@ -176,6 +178,13 @@ static void gather_past_kv_fp16(KVCache* cache, int kv_layer, half* k_full, half
                                                           int sliding_window, float softcap, int q_offset,
                                                           cudaStream_t stream, const void* sinks) {
     const std::string& mode = rcfg.attention.hd512_prefill;
+    // "fa2" / "auto": split-D FA2 (attention_fa2_hd512.cu), rows independent of n and q_offset as well;
+    // Gemma-4-26B pp4096 e2e +3.4..4.2 % vs cuBLAS, PPL 409.5548 -> 407.3936 (deterministic).
+    if (hd == 512 && (mode == "fa2" || mode == "auto") && sliding_window == 0 && sinks == nullptr &&
+        fa2_hd512_prefill(static_cast<const half*>(q.data), static_cast<const half*>(k.data),
+                          static_cast<const half*>(v.data), static_cast<half*>(o.data), n, kv_len, nh, nkv,
+                          scale, softcap, q_offset, stream))
+        return true;
     if (hd != 512 || !(mode == "fmha" || (mode == "auto" && process_diag_deterministic())))
         return false;
     int64_t q4s[4] = {1, (int64_t)n, (int64_t)nh, (int64_t)hd};
