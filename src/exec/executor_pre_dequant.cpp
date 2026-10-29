@@ -30,6 +30,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     quant_pipeline_.build(*model_, dispatch_policy(), *vram_alloc_, budget, stream,
                           wcache_, qscratch_, registry_, hints_, moe_, max_tokens_);
     ssm_pool_bytes_ = budget.ssm_footprint_bytes;
+    library_reserve_pending_ = budget.library_reserve_bytes;
     regrow_expert_cache_();
 }
 
@@ -48,7 +49,10 @@ void GraphExecutor::regrow_expert_cache_() {
         return;
     const auto& mcfg = model_->config();
     const int before = expert_cache_.slots_per_layer_;
-    const size_t budget = expert_cache_budget_ + grow;
+    const size_t budget = std::min(expert_cache_budget_ + grow,
+                                   expert_cache_full_bytes_(expert_cache_slot_raw_));
+    if (budget <= expert_cache_budget_)
+        return;  // every expert already has a slot
     const size_t got = expert_cache_.reinit_or_disable(
         expert_cache_slot_raw_, budget, expert_cache_budget_, vram_alloc_, mcfg.n_layers, mcfg.n_experts,
         dispatch_policy().moe.expert_cache_debug_parity, expert_cache_nvfp4_slots_);
@@ -90,8 +94,10 @@ size_t GraphExecutor::kv_bytes_per_token_() const {
 
 // Free VRAM a regrow may take: free now minus the KV pool at its ceiling (context x
 // kv_ceiling_seqs), the allocator headroom, the lazy state slots past the first (Flash-Next 59.8 MiB
-// each) and a 1536 MiB tail for what init and serving still commit (Flash-Next at a 110k-token
-// prompt, batch 1: 1101-1220 MiB over 3 starts). 0 when the batch is unknown.
+// each) and a tail for what init and serving still commit: at least 1536 MiB (Flash-Next at a
+// 110k-token prompt, batch 1: 1101-1220 MiB over 3 starts) and at least the library reserve the first
+// forward claims (Qwen3-30B-A3B-NVFP4: 2897 MiB; below it the KV pool could not grow past 16 blocks).
+// 0 when the batch is unknown.
 size_t GraphExecutor::expert_cache_free_slack_bytes_() const {
     if (kv_ctx_batch_ <= 0 || kv_ctx_tokens_ <= 0)
         return 0;
@@ -101,8 +107,19 @@ size_t GraphExecutor::expert_cache_free_slack_bytes_() const {
     const size_t kv = static_cast<size_t>(kv_ctx_tokens_) * kv_ceiling_seqs(kv_ctx_batch_, true) *
                       kv_bytes_per_token_();
     const size_t state = ssm_pool_bytes_ / static_cast<size_t>(kv_ctx_batch_) * (kv_ctx_batch_ - 1);
-    const size_t keep = kv + state + (vram_alloc_ ? vram_alloc_->headroom() : 0) + kTail;
+    const size_t tail = std::max(kTail, library_reserve_pending_);
+    const size_t keep = kv + state + (vram_alloc_ ? vram_alloc_->headroom() : 0) + tail;
     return free_mem > keep ? free_mem - keep : 0;
+}
+
+// A pool where every (projection, expert) of every layer has a slot: more slots stay empty
+// (Qwen3-30B-A3B-NVFP4, 48 host layers: 600 slots/layer for 384 keys, 8.7 GB idle).
+size_t GraphExecutor::expert_cache_full_bytes_(size_t slot_raw) const {
+    const auto& cfg = model_->config();
+    if (cfg.n_experts <= 0)
+        return static_cast<size_t>(-1);
+    return static_cast<size_t>(cfg.n_layers) * kExpertProjCount * static_cast<size_t>(cfg.n_experts) *
+           slot_raw;
 }
 
 size_t GraphExecutor::expert_cache_ctx_slack_bytes_() const {
