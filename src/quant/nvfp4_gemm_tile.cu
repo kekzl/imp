@@ -632,4 +632,10 @@ bool gemm_nvfp4_tile(const void* a_data, const void* a_sf, const void* w_data, c
     return launch_tile<Cfg<128, 256, 2, false>>(p, stream);  // no TMA map (alignment): sync mainloop
 }
 
+// Shared with gemm_f16_tile.cu (same TMA operand maps, 2-byte elements counted as bytes).
+bool nvfp4_tile::encode_2d(CUtensorMap* map, const void* base, int rows, int row_bytes, int box_bytes,
+                           int box_rows) {
+    return encode_operand(map, base, rows, row_bytes, box_bytes, box_rows);
+}
+
 }  // namespace imp

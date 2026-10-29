@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- FP16-accumulate prefill GEMMs with K >= N and a full wave of tiles run an own kernel instead of cuBLASLt (bit-equal): Qwen3-14B-Q6_K pp2048 GEMM kernel sum 1502.9-1508.7 -> 1419.5-1426.1 ms, e2e 9304-9330 -> 9692-9695 tok/s, PPL 9.2022 both arms. `gemm.f16_tile`.
 - The own NVFP4 prefill GEMM gains stream-K and a wave-cost tile pick: Qwen3.8-27B pp4096 GEMM kernel sum 1541.2-1544.7 -> 1533.9-1534.8 ms vs cuBLASLt; at M < 2048 it trails CUTLASS by 0.3-1.8 % (was 7 %), so CUTLASS stays there.
 - Dense NVFP4 prefill GEMMs at M >= 2048 run an own kernel (TMA, `mma.sync` mxf4nvf4, 128x128 / 128x256 tiles) instead of cuBLASLt, bit-equal to CUTLASS: Qwen3.8-27B pp4096 GEMM kernel sum -0.9 %, PPL 4.6079 both arms. `gemm.nvfp4_tile_min_m` (0 = off). ROADMAP 123.
 - Tooling drops the stale CUDA images: `make kernel-resources` and its preflight row run `cuobjdump` from `$(DEV_IMG)` (13.4.3) instead of a leftover 13.4.2 `imp:builder`; `Dockerfile.ciq` builds on `imp:toolchain` instead of the gone 13.3 `imp:builder-133`, `cupy-cuda12x` -> `cupy-cuda13x` (#2890).

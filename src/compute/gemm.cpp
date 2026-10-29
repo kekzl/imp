@@ -5,6 +5,7 @@
 #include <atomic>
 #include "compute/gemm_algo_capture.h"
 #include "compute/gemm_capture_fp16_sm120.h"
+#include "compute/gemm_f16_tile.h"
 #include "core/cuda_raii.h"
 #include "core/cuda_static_reset.h"
 #include "compute/gemm_internal.cuh"
@@ -883,6 +884,13 @@ IMP_REGISTER_CUDA_STATIC_RESET(gemm_reset_static_cuda_state);
 // live in gemm_gemv_dtype.cu (declared in gemm_internal.cuh).
 
 // --- Generic path via cuBLASLt (uses pre-allocated static workspace + descriptor cache) ---
+// FP16-accumulate prefill fast path (gemm.cublas_fp16_acc): sm_120 runs FP16 TC with FP32
+// accumulate at 1/4 rate; COMPUTE_16F restores full rate. F16 x F16 -> F16, M > 1 only.
+static bool fp16_acc_route(const Tensor& A, const Tensor& B, const Tensor& C) {
+    return process_diag_cublas_fp16_acc() && A.shape[0] > 1 && A.qtype == QType::F16 &&
+           B.qtype == QType::F16 && C.qtype == QType::F16;
+}
+
 static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
                                   cudaStream_t stream) {
     const int64_t M = A.shape[0];
@@ -898,13 +906,11 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, f
     cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.qtype);
     cublasComputeType_t compute_type = dtype_to_compute(A.qtype);
 
-    // FP16-accumulate prefill fast path (gemm.cublas_fp16_acc): sm_120 runs FP16 TC with
-    // FP32 accumulate at 1/4 rate; COMPUTE_16F restores full rate. FP16-only, M>1 (decode
-    // M==1 routes through gemm_try_gemv before this, stays FP32 accumulate).
-    const bool use_fp16_acc = process_diag_cublas_fp16_acc() && M > 1 && A.qtype == QType::F16 &&
-                              B.qtype == QType::F16 && C.qtype == QType::F16;
+    const bool use_fp16_acc = fp16_acc_route(A, B, C);
     if (use_fp16_acc)
         compute_type = CUBLAS_COMPUTE_16F;
+    if (use_fp16_acc && gemm_f16_tile_route(A, B, C, alpha, beta, stream))
+        return;
 
     // Capture-safe path: cuBLASLt fails with CUBLAS_STATUS_INTERNAL_ERROR under stream
     // capture on sm_120 for cold shapes (heuristic + workspace allocation aren't graph-safe).
