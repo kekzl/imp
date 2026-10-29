@@ -728,6 +728,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                         budget += std::min(expert_cache_ctx_slack_bytes_(), free_mem - safety - budget);
                 }
                 const auto& mcfg = model_->config();
+                budget = std::min(budget, expert_cache_full_bytes_(max_expert_raw));
                 bool debug_parity = dispatch_policy().moe.expert_cache_debug_parity;
                 if (expert_cache_.init(max_expert_raw, budget, vram_alloc_, mcfg.n_layers,
                                        mcfg.n_experts, debug_parity, nvfp4_host_experts)) {

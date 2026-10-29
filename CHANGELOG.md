@@ -4,6 +4,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased]
 
+### Fixed
+- NVFP4 MoE with host-resident experts: the expert-cache regrow kept 1536 MiB for the first forward, which claims the library reserve (2897 MiB), so the KV pool stuck at 16 blocks; it now keeps the planned reserve and stops at one slot per expert. Qwen3-30B-A3B-NVFP4, 48 host layers: tg128 0 -> 304.5 tok/s, own peak 20256 MiB.
+
 ### Changed
 - IQ3_S prompt GEMMs compute their piece offsets without branches (a per-lane branch chain diverged 6x per K-step): Qwen3.8-27B-UD-Q4_K_M IQ3_S kernel sum 15.35-15.79 -> 12.03-12.71 ms per pp512 run, PPL 4.4968 both (bit-identical).
 - GDN projection MXFP8 prefill GEMMs run the own tile kernel (MXFP8 format, column scale fused) instead of CUTLASS plus a scale pass: Qwen3.6-35B-A3B-NVFP4 pp4096 class sum 175.3 -> 159.6 ms, e2e 33595-34067 -> 33774-34365 tok/s, PPL 6.7308 -> 6.7158. `gemm.mxfp8_tile`.

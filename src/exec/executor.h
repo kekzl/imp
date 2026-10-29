@@ -888,6 +888,8 @@ private:
     int kv_ctx_tokens_ = 0;  // engine max_seq_len as init() got it
     int kv_ctx_batch_ = 0;   // engine max_batch_size, 0 = unknown
     size_t ssm_pool_bytes_ = 0;  // VRAMBudget::ssm_footprint_bytes: lazy state slots, committed while serving
+    size_t library_reserve_pending_ = 0;  // VRAMBudget::library_reserve_bytes: claimed on the first forward
+    [[nodiscard]] size_t expert_cache_full_bytes_(size_t slot_raw) const;
     [[nodiscard]] size_t expert_cache_ctx_slack_bytes_() const;
     [[nodiscard]] size_t expert_cache_free_slack_bytes_() const;
     [[nodiscard]] size_t kv_bytes_per_token_() const;
