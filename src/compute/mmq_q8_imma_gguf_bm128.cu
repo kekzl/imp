@@ -111,15 +111,25 @@ struct BigIQ3S : StepGeom<S> {
     using G = StepGeom<S>;
     static constexpr int kPieces = 12, kPiece = 4, kSegRow = 48;  // piece 11 = piece 10: 6 uniform rounds
     static constexpr bool kMin = false;
+    // Piece p at base + kC0[p] + kM2[p] * (j0 / 2): d, qs 1-5, qh, signs 7-9, scales 10-11. Packed into
+    // immediates: a per-lane p indexing a branch chain diverged 6x per K-step (stall_branch_resolving).
+    static constexpr uint8_t kC0[12] = {0, 2, 6, 10, 14, 18, 66, 74, 78, 82, 106, 106};
+    static constexpr uint8_t kM2[12] = {0, 16, 16, 16, 16, 16, 2, 8, 8, 8, 1, 1};
+    static constexpr uint64_t pack(const uint8_t* v, int from, int n, int bits) {
+        uint64_t r = 0;
+        for (int i = 0; i < n; ++i)
+            r |= static_cast<uint64_t>(v[from + i]) << (bits * i);
+        return r;
+    }
+    static constexpr uint64_t kC0Lo = pack(kC0, 0, 8, 8), kC0Hi = pack(kC0, 8, 4, 8),
+                              kM2P = pack(kM2, 0, 12, 5);
     static __device__ __forceinline__ int piece_off(int ks, int p) {
         const int base = (ks / G::kSpb) * 110;
-        const int j0 = (ks % G::kSpb) * S;
-        const int f = p == 0   ? base
-                      : p < 6  ? base + 2 + (8 * j0) + (4 * (p - 1))
-                      : p == 6 ? base + 66 + j0
-                      : p < 10 ? base + 74 + (4 * j0) + (4 * (p - 7))
-                               : base + 106 + (j0 / 2);
-        return f & ~3;
+        const int h = ks % G::kSpb;  // j0 / 2
+        const uint64_t c0w = (p & 8) != 0 ? kC0Hi : kC0Lo;
+        const int c0 = static_cast<int>((c0w >> (8 * (p & 7))) & 0xFFu);
+        const int m2 = static_cast<int>((kM2P >> (5 * p)) & 31u);
+        return (base + c0 + (m2 * h)) & ~3;
     }
     static __host__ __device__ __forceinline__ size_t row_bytes(int K) {
         return static_cast<size_t>(K / 256) * 110;

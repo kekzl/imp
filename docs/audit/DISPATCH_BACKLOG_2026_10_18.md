@@ -418,3 +418,9 @@ Tests: `McShapeResidentKeepsTheSeventeenRowBudget`, `McShapeOffloadUsesSixtyFour
 |---|---|---|
 | B-61 | DONE | Staging tables uploaded once (`stage_ptrs_`, `stage_alpha_row_`), scale conversion only for routed experts, 16 grid-stride blocks per expert, no memset without SfAtom padding. Bit-identical (PPL ppl_4k 5.0057 / 5.0057). Bench pp32 cold cache (`--max-tokens 4`) 272.61-275.56 -> 255.12 ms, warm (`--max-tokens 128`) 157.32-176.48 -> 138.68-138.85 ms, pp512 396.04 / 399.22 -> 385.76-392.95 ms. imp-server, 6 prompts: TTFT mean 301.7 -> 295.0 ms (without the cold first request 292.8 -> 281.6), decode 150.95 / 150.46 -> 150.08 / 150.27 tok/s |
 | B-61 open | OPEN | A cold pp32 prefill (nsys) is 81 % `expert_stage_touched_range_kernel`: 14967 touched projections, 16.9 % resident in the expert cache, 10.9 GB over PCIe at ~50 GB/s. Left: GEMMs 12 ms, scale conversion 10 ms, GPU idle 25 ms per prefill. Below the PCIe floor only with fewer bytes: CPU computing part of the missing experts from host RAM in parallel, or prefetching the next layer's experts from a pre-gate prediction |
+
+## 2026-10-29 Batch 45: B-62 IQ3_S piece offsets without branches
+
+| ID | Status | Evidence |
+|---|---|---|
+| B-62 | DONE | `BigIQ3S::piece_off` from packed immediates (base offset per piece, j0 factor in 5-bit fields) instead of a ternary chain: BSSY / BRA 35 / 95 -> 16 / 22. Qwen3.8-27B-UD-Q4_K_M pp512 nsys, 4 alternating pairs: BigIQ3S kernel sum 15.38 / 15.79 / 15.35 / 15.42 -> 12.03 / 12.39 / 12.71 / 12.05 ms (45 launches), pp512 3903-4019 -> 4000-4023 tok/s. PPL 45k deterministic 4.4968 both (bit-identical offsets). |

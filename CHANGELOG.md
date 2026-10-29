@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- IQ3_S prompt GEMMs compute their piece offsets without branches (a per-lane branch chain diverged 6x per K-step): Qwen3.8-27B-UD-Q4_K_M IQ3_S kernel sum 15.35-15.79 -> 12.03-12.71 ms per pp512 run, PPL 4.4968 both (bit-identical).
 - GDN projection MXFP8 prefill GEMMs run the own tile kernel (MXFP8 format, column scale fused) instead of CUTLASS plus a scale pass: Qwen3.6-35B-A3B-NVFP4 pp4096 class sum 175.3 -> 159.6 ms, e2e 33595-34067 -> 33774-34365 tok/s, PPL 6.7308 -> 6.7158. `gemm.mxfp8_tile`.
 - Gemma-4 hd=512 attention prefill runs an own split-D FA2 kernel instead of cuBLAS materialized scores: Gemma-4-26B-NVFP4 pp4096 e2e 41057-41213 -> 42620-42789 tok/s, PPL 409.5548 -> 407.3936 (deterministic). `attention.hd512_prefill`.
 - The own grouped NVFP4 MoE GEMM takes expert widths with K % 128 == 64 (a half last stage): gpt-oss-20b moves off CUTLASS, GEMM kernel sum pp4096 256.0-296.4 -> 238.0-238.5 ms, e2e 51906-51964 -> 53165-53342 tok/s; PPL 262.6413 both arms.
