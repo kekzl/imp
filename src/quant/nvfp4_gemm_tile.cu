@@ -25,6 +25,10 @@ namespace {
 
 using namespace nvfp4_tile;  // NOLINT(google-build-using-namespace): this TU's own PTX helpers
 
+// Stream-K arrival flags, one per CTA: 0 at load, set by a contributor, reset by the tile's finisher in the
+// same launch (no per-launch memset). One stream-K GEMM at a time, as for the shared partial workspace.
+constexpr int kMaxSkCtas = 1024;
+__device__ int g_sk_flags[kMaxSkCtas];
 
 struct TileArgs {
     const uint8_t* a;
@@ -34,9 +38,8 @@ struct TileArgs {
     half* d;
     float alpha;
     int M, N, K;
-    // Stream-K (Cfg::kSk): per-CTA arrival flags (zeroed per launch) and one fp32 partial tile per
-    // CTA; each CTA owns units [b * sk_per, (b + 1) * sk_per) of tiles * KT.
-    int* sk_flags;
+    // Stream-K (Cfg::kSk): one fp32 partial tile per CTA (workspace); each CTA owns units
+    // [b * sk_per, (b + 1) * sk_per) of tiles * KT. Arrival flags: g_sk_flags.
     float* sk_parts;
     int sk_per;
     const float* col_scale;  // MXFP8 only: D column n *= col_scale[n] (FP8 row-scale view), may be null
@@ -338,13 +341,15 @@ __device__ __forceinline__ void sk_mainloop(const Ring& g, const TileArgs& p, co
             __threadfence();
             asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
             if (threadIdx.x == 0)
-                st_release(p.sk_flags + b, 1);
+                st_release(g_sk_flags + b, 1);
         } else {
             if (sg.ke < KT) {  // finisher: CTAs b+1 .. last hold k-steps [ke, KT)
                 const int last = ((sg.t * KT) + KT - 1) / p.sk_per;
                 for (int q = b + 1; q <= last; ++q) {
-                    if (threadIdx.x == 0)
-                        while (ld_acquire(p.sk_flags + q) == 0) {}
+                    if (threadIdx.x == 0) {
+                        while (ld_acquire(g_sk_flags + q) == 0) {}
+                        g_sk_flags[q] = 0;  // the only reader: every set flag is 0 again when the launch ends
+                    }
                     asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
                     const float4* src = sk_slot<C>(p, q);
 #pragma unroll
@@ -462,11 +467,9 @@ bool launch_tile(const TileArgs& p, cudaStream_t stream) {
     if (!smem_ok)
         return false;
     dim3 grid((p.N + C::kBN - 1) / C::kBN, (p.M + kBM - 1) / kBM);
-    if constexpr (C::kSk) {  // caller set sk_per and the workspace; flags start at 0 every launch
+    if constexpr (C::kSk) {  // caller set sk_per and the workspace
         const int units = static_cast<int>(grid.x * grid.y) * (p.K / C::kBK);
         grid = dim3((units + p.sk_per - 1) / p.sk_per);
-        if (cudaMemsetAsync(p.sk_flags, 0, grid.x * sizeof(int), stream) != cudaSuccess)
-            return false;
     }
     gemm_nvfp4_tile_kernel<C><<<grid, C::kThreads, C::kSmemBytes, stream>>>(p, map_a, map_w);
     IMP_CUDA_CHECK_LAUNCH();
@@ -478,7 +481,8 @@ bool launch_tile(const TileArgs& p, cudaStream_t stream) {
 namespace {
 
 using SkCfg = Cfg<128, 128, 3, true, true, true>;  // staged epilogue: M=512 N=1024 15.8 vs 19.0 us direct x4
-constexpr size_t kSkFlagBytes = 4096;  // stream-K workspace: flags, then one fp32 128x128 partial per CTA
+constexpr size_t kSkPartBytes = size_t(kBM) * 128 *
+                                sizeof(float);  // stream-K workspace: one fp32 tile per CTA
 
 int sm_count() {
     static const int sms = [] {
@@ -525,13 +529,9 @@ bool run_tile(TileArgs p, cudaStream_t stream, int variant, void* workspace, siz
         return false;
     const int sms = sm_count();
     const int units = ((N + 127) / 128) * ((M + kBM - 1) / kBM) * (K / Sk::kBK);
-    const bool sk_fits = K % Sk::kBK == 0 && workspace != nullptr &&
-                         sms * 4 <= static_cast<int>(kSkFlagBytes) &&
-                         workspace_bytes >=
-                             kSkFlagBytes + (static_cast<size_t>(sms) * kBM * 128 * sizeof(float));
-    p.sk_flags = static_cast<int*>(workspace);
-    p.sk_parts = sk_fits ? reinterpret_cast<float*>(static_cast<uint8_t*>(workspace) + kSkFlagBytes)
-                         : nullptr;
+    const bool sk_fits = K % Sk::kBK == 0 && workspace != nullptr && sms <= kMaxSkCtas &&
+                         workspace_bytes >= static_cast<size_t>(sms) * kSkPartBytes;
+    p.sk_parts = sk_fits ? static_cast<float*>(workspace) : nullptr;
     p.sk_per = (units + sms - 1) / sms;
     if (variant < 0)
         variant = pick_variant(M, N, sms, sk_fits);
@@ -570,7 +570,6 @@ bool gemm_nvfp4_tile(const void* a_data, const void* a_sf, const void* w_data, c
                      N,
                      K,
                      nullptr,
-                     nullptr,
                      0,
                      nullptr};
     return run_tile<false>(p, stream, variant, workspace, workspace_bytes);
@@ -588,7 +587,6 @@ bool gemm_mxfp8_tile(const void* a_data, const void* a_sf, const void* w_data, c
                      M,
                      N,
                      K,
-                     nullptr,
                      nullptr,
                      0,
                      col_scale};

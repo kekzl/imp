@@ -58,6 +58,8 @@ Stream-K 128x128 (grid = SMs, forward unit ranges: a CTA's first segment writes 
 - Stream-K epilogue staged in its own buffer (3 stages, 168 regs): isolated M=512 N=1024 19.0 -> 15.8, N=6144 32.3 -> 30.8 us; in situ pp512 GEMM sum 221.7-222.7 vs CUTLASS 217.1-219.5 ms, unchanged: in situ the stream-K tiles run slower than isolated (N=17408 90.6 vs 87.6 us), CUTLASS does not.
 - CUTLASS stays the default below M 2048 until the own arm leads there.
 - Isolated vs in situ, explained: `Nvfp4GemmTileBench` rotated 4 weight copies, which fit the 96 MB L2 up to 6144 x 5120 (4 x 15.7 MB). With the L2 flushed (256 MiB memset) before each timed call, median of 31, two runs agree within 2-5 % and rank like in situ. M=512 own auto vs CUTLASS us: N 17408 K 5120 103.4 / 104.5 vs 98.3 / 96.3, N 10240 51.2 / 52.0 vs 56.6 / 56.6, N 1024 19.2 / 19.2 vs 17.7 / 19.7, the rest within 5 %. Rotating > 512 MiB of copies instead swung 12.6 -> 28.3 us between runs. 5 stages (rotating bench, noisy): no clear gain.
+- Stream-K flags: a `__device__` array reset by each tile's finisher replaces the per-launch `cudaMemsetAsync` (one launch fewer per stream-K GEMM); flush bench M=512 N=1024 17.7 / 19.1 -> 17.2 / 17.2 us, other shapes unchanged. So the memset was not the stream-K gap.
+- Refuted, hybrid stream-K (whole waves data-parallel, only the remainder tiles split, as CUTLASS stream-K): M=512 N=17408 K=5120 104.5 -> 113.7 us, N=6144 40 -> 54 us; with the last full wave also split, N=17408 108.6-109.9 us. Short split segments (8 k-steps) cost a wave; the full split stays.
 
 ## Per cell
 

@@ -139,7 +139,8 @@ TEST_P(Nvfp4GemmTileTest, MatchesCutlass) {
 INSTANTIATE_TEST_SUITE_P(Shapes, Nvfp4GemmTileTest,
                          ::testing::Values(std::make_tuple(128, 128, 128), std::make_tuple(200, 384, 512),
                                            std::make_tuple(33, 136, 1024), std::make_tuple(512, 1024, 5120),
-                                           std::make_tuple(1000, 2056, 256)));
+                                           std::make_tuple(1000, 2056, 256),
+                                           std::make_tuple(1536, 2304, 512)));  // 216 tiles: hybrid stream-K
 
 // Timing on Qwen3.8-27B projection shapes, operands from DRAM (L2 flushed before each call).
 TEST(Nvfp4GemmTileBench, VsCutlassAndCublasLt) {
