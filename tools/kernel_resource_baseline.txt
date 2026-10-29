@@ -65,18 +65,21 @@ void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<128
 void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<128, 64, 4, true, true, false, (imp::nvfp4_tile::Fmt)2> >	sm_120a	146	8	0
 void imp::(anonymous namespace)::gemm_f16_tile_kernel<imp::f16_tile::Cfg<256, 64, 2, true, 16, 128> >	sm_120a	140	8	0
 void imp::(anonymous namespace)::gemm_nvfp4_tile_kernel<imp::nvfp4_tile::Cfg<128, 128, 4, true, true, false, (imp::nvfp4_tile::Fmt)0> >	sm_120a	140	8	0
-void imp::(anonymous namespace)::gemm_q6k_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 2, true, 16, 256> >	sm_120a	128	48	0
+void imp::wdq_tile::gemm_wdq_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 2, true, 16, 256>, imp::(anonymous namespace)::Mx4Dec>	sm_120a	128	56	0
+void imp::wdq_tile::gemm_wdq_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 2, true, 16, 256>, imp::(anonymous namespace)::Q6Dec>	sm_120a	128	48	0
 void imp::fmha_sm120_fa2_kernel_2cta<128, 128, true, true, 64, true, true, false>	sm_120a	128	40	0
-void imp::(anonymous namespace)::gemm_q6k_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, false, 0, 128> >	sm_120a	128	32	0
+void imp::wdq_tile::gemm_wdq_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, false, 0, 128>, imp::(anonymous namespace)::Q6Dec>	sm_120a	128	32	0
 void imp::(anonymous namespace)::gemm_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, false, 0, 128> >	sm_120a	128	8	0
 void imp::fmha_sm120_fa2_kernel_2cta<128, 64, true, false, 64, false, false, false>	sm_120a	128	8	0
 void imp::fmha_sm120_kernel<64, 256, false>	sm_120a	128	8	0
+void imp::wdq_tile::gemm_wdq_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, false, 0, 128>, imp::(anonymous namespace)::Mx4Dec>	sm_120a	125	8	0
 void imp::(anonymous namespace)::smallM_kernel_v1<32, 128, 256, 2>	sm_120a	104	144	0
 void imp::paged_attention_splitk_fp8_tile_kernel<128>	sm_120a	96	32	0
 void imp::(anonymous namespace)::gemv_dp4a_rows_kernel<imp::DequantTraits<(imp::DPQTag)6>, false, 4>	sm_120a	96	16	0
 void imp::(anonymous namespace)::gemv_dp4a_rows_kernel<imp::DequantTraits<(imp::DPQTag)6>, true, 4>	sm_120a	96	16	0
 void imp::(anonymous namespace)::gemm_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, true, 16, 128> >	sm_120a	96	8	0
-void imp::(anonymous namespace)::gemm_q6k_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, true, 16, 128> >	sm_120a	96	8	0
+void imp::wdq_tile::gemm_wdq_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, true, 16, 128>, imp::(anonymous namespace)::Q6Dec>	sm_120a	96	8	0
+void imp::wdq_tile::gemm_wdq_f16_tile_kernel<imp::f16_tile::Cfg<128, 64, 3, true, 16, 128>, imp::(anonymous namespace)::Mx4Dec>	sm_120a	93	8	0
 void imp::paged_attention_splitk_fp8_tile_gqa_kernel<128>	sm_120a	80	32	0
 void imp::paged_attention_splitk_fp8_pipeline_kernel<512>	sm_120a	79	16	0
 void imp::paged_attention_splitk_pipeline_kernel<512>	sm_120a	79	16	0

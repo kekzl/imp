@@ -1,37 +1,25 @@
-// Fused Q6_K prompt GEMM (ROADMAP row 123): the f16 tile core (gemm_f16_tile_core.cuh) with W read as
-// raw GGUF Q6_K blocks. A producer warp TMAs the A tile; 4 or 8 decoder warps load the stage's Q6_K bytes
-// from L2 and write the swizzled fp16 W slot (fp32 d * sc * (q - 32), the dequant_q6k_v2 bits).
-// Replaces the whole-weight dequant + cuBLASLt pass (Qwen3-14B-Q6_K pp512: dequant 35 % of kernels).
+// Fused Q6_K prompt GEMM (ROADMAP row 123): the weight-decode tile (gemm_wdq_f16_tile.cuh) with W read as
+// raw GGUF Q6_K blocks. The decoder warps load the stage's Q6_K bytes from L2 and write the swizzled fp16
+// W slot (fp32 d * sc * (q - 32), the dequant_q6k_v2 bits). Replaces the whole-weight dequant + cuBLASLt
+// pass (Qwen3-14B-Q6_K pp512: dequant 35 % of kernels).
 
 #include "compute/gemm_q6k_f16_tile.h"
 
-#include "compute/gemm_f16_tile_core.cuh"
-#include "core/logging.h"
+#include "compute/gemm_wdq_f16_tile.cuh"
 
-#include <cuda.h>
 #include <cuda_fp16.h>
 #include <cstdint>
 
 namespace imp {
 namespace {
 
-using namespace f16_tile;  // NOLINT(google-build-using-namespace): the shared tile core
+using namespace wdq_tile;  // NOLINT(google-build-using-namespace): the shared decode-tile skeleton
 
-// Decoder warps per config: 8 where the MMA warps leave the registers (128x128 fp16 acc: 96 regs x 544),
-// else 4 (13 warps cap ptxas at 128 regs: 48 B stack on 256x128; the TMA folded into decoder thread 0
-// removed it but cost +10 % at 2048x17408x5120). 128x128 without decode: 992 us there (cuBLASLt 1011).
-template <class C>
-constexpr int kDecWarps = (C::kBM == 128 && C::kBN == 128 && C::kAcc16) ? 8 : 4;
-template <class C>
-constexpr int kDecThreads = kDecWarps<C> * 32;
-template <class C>
-constexpr int kThreads = kMmaThreads + 32 + kDecThreads<C>;
 template <class C>
 constexpr int kRowStep = kDecThreads<C> / 4;  // rows per decoder pass: 4 threads (u) per row
 template <class C>
 constexpr int kUnits = C::kBN / kRowStep<C>;
 constexpr int kQ6Bytes = 210;  // ql[128] qh[64] scales[16] d (fp16) per 256 weights
-
 // Raw bytes of one (row, u) unit of half-block g: ql 8u.. and 32 + 8u.. (low nibbles = stage 2g, high =
 // stage 2g + 1 of the block), qh 8u.. (all four bit pairs), the half-block's 8 scales, d.
 struct Q6Unit {
@@ -101,118 +89,46 @@ __device__ __forceinline__ void ld_units(Q6Unit (&t)[kUnits<C>], const Q6Args& p
     }
 }
 
-template <class C>
-__device__ __forceinline__ void decode_stages(const Q6Args& p, uint32_t bars, uint8_t* smem, int n0, int KT) {
-    static_assert(C::kBK == 64 && kUnits<C> <= 4,
-                  "two stages per half-block; the prefetch holds 2 x 36 regs");
-    constexpr int kU = kUnits<C>;
-    const int dt = static_cast<int>(threadIdx.x) - kMmaThreads - 32;
-    const int u = dt & 3;
-    const int r0 = dt >> 2;
-    Q6Unit t[kU];
-    Q6Unit nx[kU];
-    ld_units<C>(t, p, n0, r0, u, 0);
-    for (int kp = 0; kp < KT / 2; ++kp) {
-        if (kp + 1 < KT / 2)
-            ld_units<C>(nx, p, n0, r0, u, kp + 1);
+struct Q6Dec {
+    static constexpr bool kWide = true;
+    using Args = Q6Args;
+    template <class C>
+    static __device__ __forceinline__ void decode(const Q6Args& p, uint32_t bars, uint8_t* smem, int n0,
+                                                  int KT) {
+        static_assert(C::kBK == 64 && kUnits<C> <= 4,
+                      "two stages per half-block; the prefetch holds 2 x 36 regs");
+        constexpr int kU = kUnits<C>;
+        const int dt = decoder_tid();
+        const int u = dt & 3;
+        const int r0 = dt >> 2;
+        Q6Unit t[kU];
+        Q6Unit nx[kU];
+        ld_units<C>(t, p, n0, r0, u, 0);
+        for (int kp = 0; kp < KT / 2; ++kp) {
+            if (kp + 1 < KT / 2)
+                ld_units<C>(nx, p, n0, r0, u, kp + 1);
 #pragma unroll
-        for (int j = 0; j < 2; ++j) {
-            const int kt = (kp * 2) + j;
-            const int s = kt % C::kStages;
-            if (kt >= C::kStages)
-                mbar_wait(bars + (C::kStages + s) * 8, ((kt / C::kStages) - 1) & 1);
-            uint8_t* ws = smem + (s * C::kStageBytes) + C::kATile;
+            for (int j = 0; j < 2; ++j) {
+                const int kt = (kp * 2) + j;
+                uint8_t* ws = stage_slot<C>(bars, smem, kt);
 #pragma unroll
-            for (int i = 0; i < kU; ++i) {
-                const int r = r0 + (kRowStep<C> * i);
-                *reinterpret_cast<uint4*>(ws + (r * C::kRS) +
-                                          (C::chunk(r, u) * 16)) = q6_chunk(t[i].qa, t[i], j, 2 * j, u >> 1);
-                *reinterpret_cast<uint4*>(ws + (r * C::kRS) +
-                                          (C::chunk(r, u + 4) * 16)) = q6_chunk(t[i].qb, t[i], j, (2 * j) + 1,
-                                                                                2 + (u >> 1));
+                for (int i = 0; i < kU; ++i) {
+                    const int r = r0 + (kRowStep<C> * i);
+                    *reinterpret_cast<uint4*>(ws + (r * C::kRS) +
+                                              (C::chunk(r, u) * 16)) = q6_chunk(t[i].qa, t[i], j, 2 * j,
+                                                                                u >> 1);
+                    *reinterpret_cast<uint4*>(
+                        ws + (r * C::kRS) + (C::chunk(r, u + 4) * 16)) = q6_chunk(t[i].qb, t[i], j,
+                                                                                  (2 * j) + 1, 2 + (u >> 1));
+                }
+                stage_done<C>(bars, kt);
             }
-            __syncwarp();
-            if ((threadIdx.x & 31) == 0)
-                mbar_arrive(bars + s * 8);
-        }
 #pragma unroll
-        for (int i = 0; i < kU; ++i)
-            t[i] = nx[i];
-    }
-}
-
-template <class C>
-__global__ void __launch_bounds__(kThreads<C>, 1) gemm_q6k_f16_tile_kernel(
-    Q6Args p, const __grid_constant__ CUtensorMap map_a) {
-    extern __shared__ __align__(128) uint8_t smem_raw[];
-    const uint32_t raw = static_cast<uint32_t>(__cvta_generic_to_shared(smem_raw));
-    const uint32_t pad = ((raw + kAlign - 1) & ~uint32_t(kAlign - 1)) - raw;
-    const uint32_t s0 = raw + pad;
-    const uint32_t bars = s0 + C::kStages * C::kStageBytes;
-    int mt = 0;
-    int nt = 0;
-    tile_coords<C>(mt, nt);
-    const int n0 = nt * C::kBN;
-    const int m0 = mt * C::kBM;
-    const int KT = p.o.K / C::kBK;
-    const int warp = static_cast<int>(threadIdx.x) >> 5;
-    const int lane = static_cast<int>(threadIdx.x) & 31;
-    if (threadIdx.x == 0) {
-        for (int s = 0; s < C::kStages; ++s) {
-            mbar_init(bars + s * 8, 1 + kDecWarps<C>);  // TMA expect_tx + one arrive per decoder warp
-            mbar_init(bars + (C::kStages + s) * 8, kMmaThreads / 32);
+            for (int i = 0; i < kU; ++i)
+                t[i] = nx[i];
         }
-        asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     }
-    __syncthreads();
-    if (warp > kMmaThreads / 32) {
-        decode_stages<C>(p, bars, smem_raw + pad, n0, KT);
-        return;
-    }
-    if (warp == kMmaThreads / 32) {  // producer: one lane issues the A tile per stage
-        if (lane == 0)
-            for (int kt = 0; kt < KT; ++kt) {
-                const int s = kt % C::kStages;
-                const uint32_t full = bars + s * 8;
-                if (kt >= C::kStages)
-                    mbar_wait(bars + (C::kStages + s) * 8, ((kt / C::kStages) - 1) & 1);
-                mbar_expect_tx(full, C::kATile);
-                tma_2d(s0 + s * C::kStageBytes, &map_a, kt * C::kRS, m0, full);
-            }
-        return;
-    }
-    const int wm = (warp % C::kWarpsM) * 64;
-    const int wn = (warp / C::kWarpsM) * C::kWN;
-    Acc<C> acc{};
-    for (int kt = 0; kt < KT; ++kt) {
-        const int s = kt % C::kStages;
-        mbar_wait(bars + s * 8, (kt / C::kStages) & 1);
-        mma_stage<C>(acc, s0 + s * C::kStageBytes, wm, wn, lane);
-        // ptxas hoists the release above the stage's last HMMAs, right behind its last LDSM; the decoders
-        // store into the slot at once (no TMA latency), so without the fence 19/20 runs differed.
-        __threadfence_block();
-        __syncwarp();
-        if (lane == 0)
-            mbar_arrive(bars + (C::kStages + s) * 8);
-    }
-    store_out<C>(acc, smem_raw + pad, p.o, m0, n0, wm, wn, lane);
-}
-
-template <class C>
-bool launch(const Q6Args& p, const void* a, cudaStream_t stream) {
-    CUtensorMap map_a{};
-    if (!encode_2d(&map_a, a, p.o.M, p.o.K * 2, C::kRS, C::kBM))
-        return false;
-    static const bool smem_ok = cudaFuncSetAttribute(gemm_q6k_f16_tile_kernel<C>,
-                                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                     C::kSmemBytes) == cudaSuccess;
-    if (!smem_ok)
-        return false;
-    const dim3 grid((p.o.N + C::kBN - 1) / C::kBN, (p.o.M + C::kBM - 1) / C::kBM);
-    gemm_q6k_f16_tile_kernel<C><<<grid, kThreads<C>, C::kSmemBytes, stream>>>(p, map_a);
-    IMP_CUDA_CHECK_LAUNCH();
-    return true;
-}
+};
 
 }  // namespace
 
@@ -225,14 +141,7 @@ bool gemm_q6k_f16_tile(const void* a, const void* w_q6k, void* d, int M, int N, 
     const Q6Args p{{static_cast<half*>(d), alpha, beta, M, N, K},
                    static_cast<const uint8_t*>(w_q6k),
                    static_cast<size_t>(K / 256) * kQ6Bytes};
-    if (!acc_fp16)
-        return launch<Cfg<128, 64, 3, false>>(p, a, stream);
-    // 256x128 (each decoded W row serves 256 A rows) once its grid fills a wave, else 128x128 with 8
-    // decoder warps. 512x17408x5120: 324 vs 128x256 341 us; 512x5120x17408: 128x128 331 vs 256x128 443.
-    if (variant < 0)
-        variant = (((M + 255) / 256) * ((N + 127) / 128) >= 170) ? 2 : 1;
-    return variant == 2 ? launch<Cfg<128, 64, 2, true, 16, 256>>(p, a, stream)
-                        : launch<Cfg<128, 64, 3, true, 16>>(p, a, stream);
+    return launch_auto<Q6Dec>(p, a, acc_fp16, variant, stream);
 }
 
 // In situ Qwen3-14B-Q6_K vs dequant + cuBLASLt: pp512 +27 %, pp1536 +5 %, pp2048 -1.7 % (sustained

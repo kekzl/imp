@@ -21,6 +21,7 @@
 #include "compute/gemm_cutlass_mxfp8_sm120.h"
 #include "compute/gemm_q4k.h"
 #include "compute/gemm_q6k.h"
+#include "compute/gemm_mxfp4_f16_tile.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "quant/mxfp4_sfatom.h"
 #include "compute/hadamard.h"
@@ -217,6 +218,26 @@ static bool mxfp8_prefill_gemm(const QuantScratch& qs, const CutlassMxFP8Weight&
 // 11.6369 vs W4A4 14.2956 (ppl_4k). The LM head, larger than the scratch, runs in N slices through
 // mxfp4_slice_out and lands in its columns by a 2-D copy. The shared workspace is off limits: the SSM/GDN
 // buffers are carved from its start (configure_ssm_workspace).
+// gemm.mxfp4_tile: the fused W4A16 tile decodes E2M1 per stage (bit-equal to the scratch path below) where
+// it wins in situ: M <= 1024 and >= 64 128x128 tiles (Qwen3.5-4B pp2048 gate/up 316 vs 254 + 50 us; N <= 128
+// 35 vs ~3 us). fp32 LM-head rows keep the scratch path.
+static bool mxfp4_tile_rows(const uint8_t* w, const uint8_t* s, const Tensor& input, Tensor& output, int M,
+                            int N, int K, const GemmContext& ctx) {
+    const bool det = process_diag_deterministic();  // every row: tile-invariant bits, chunk-invariant
+    if (!process_diag_mxfp4_tile() || output.qtype != QType::F16 || input.qtype != QType::F16 ||
+        (!det && (M > 1024 || ((M + 127) / 128) * ((N + 127) / 128) < 64)) || input.stride[0] != K ||
+        output.stride[0] != N ||
+        !gemm_mxfp4_f16_tile(input.data, w, s, output.data, M, N, K, 1.0f, 0.0f,
+                             process_diag_cublas_fp16_acc(), ctx.stream))
+        return false;
+    static bool logged = false;  // activity proof, once
+    if (!logged) {
+        logged = true;
+        IMP_LOG_INFO("gemm.mxfp4_tile: fused MXFP4 W4A16 GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
+    }
+    return true;
+}
+
 static void mxfp4_prefill_gemm(const QuantScratch& qs, const WeightHandle& h, const Tensor& input,
                                Tensor& output, const GemmContext& ctx) {
     const int M = static_cast<int>(input.shape[0]);
@@ -237,6 +258,8 @@ static void mxfp4_prefill_gemm(const QuantScratch& qs, const WeightHandle& h, co
                                  " outside the W4A16 scratch contract");
     const auto* w = static_cast<const uint8_t*>(h.payload.mxfp4.weight);
     const auto* s = static_cast<const uint8_t*>(h.payload.mxfp4.linear_scales);
+    if (mxfp4_tile_rows(w, s, input, output, M, N, K, ctx))
+        return;
     for (int n0 = 0; n0 < N; n0 += slice) {
         const int nr = std::min(slice, N - n0);
         dequant_mxfp4_linear_to_fp16(w + (static_cast<size_t>(n0) * (K / 2)),
