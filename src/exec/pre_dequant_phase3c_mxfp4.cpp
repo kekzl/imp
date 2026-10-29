@@ -34,19 +34,7 @@ void QuantPipeline::pre_dequant_phase3c_standalone_mxfp4_(
             has_mxfp4 = true;
     }
     if (has_mxfp4) {
-        // NVFP4 activation buffer for the CUTLASS NVFP4 prefill, sized over the MXFP4 projections.
-        int max_k = 0;
-        for (int i = 0; i < cfg.n_layers; i++) {
-            const auto& L = model_->layer(i);
-            for (const Tensor* w : {&L.wq, &L.wk, &L.w_gate, &L.w_down, &L.ssm_in, &L.ssm_out, &L.gdn_gate})
-                if (w->data && w->ndim >= 2)
-                    max_k = std::max(max_k, static_cast<int>(w->shape[1]));
-        }
-        if (max_k > 0 && !qscratch_->cutlass_act_data) {
-            qscratch_->cutlass_act_data_size = static_cast<size_t>(max_tokens_) * (max_k / 2);
-            qscratch_->cutlass_act_data = vram_alloc(vram_alloc_, qscratch_->cutlass_act_data_size,
-                                                     "cutlass_act_data");
-        }
+        alloc_mxfp4_gemm_scratch_(cfg);
         // FIRST: dequant alpha/beta to FP16 BEFORE in-place unpack
         // (dequant_mxfp4_to_fp16 reads raw 17-byte blocks which get compacted by unpack)
         {

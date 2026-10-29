@@ -29,6 +29,10 @@ void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data, void* 
 // Dequantize raw MXFP4 GGUF blocks to FP16.
 // Input: raw interleaved blocks (17 bytes each: 16 E2M1 + 1 UE8M0).
 // Output: [N, K] FP16 on device (caller allocates).
+// Unpacked weight (unpack_mxfp4_gguf output: data + linear_scales) to FP16 [N, K].
+void dequant_mxfp4_linear_to_fp16(const void* data, const void* linear_scales, int64_t N, int64_t K,
+                                  void* dst_fp16, cudaStream_t stream);
+
 void dequant_mxfp4_to_fp16(const void* raw_mxfp4_data, int64_t N, int64_t K, void* dst_fp16,
                            cudaStream_t stream);
 

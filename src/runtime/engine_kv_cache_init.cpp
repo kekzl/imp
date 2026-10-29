@@ -215,6 +215,7 @@ bool Engine::init_kv_cache() {
     config_.kv_ceiling_seqs = kv_ceiling_seqs(config_.max_batch_size,
                                               experts_on_host_ && executor_ &&
                                                   executor_->expert_cache_nvfp4_slots());
+    config_.mxfp4_fp16_cache = runtime_config_.attention.mxfp4_fp16_fallback;  // FP16 decode cache reserve
     auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers, head_dim, effective_free_vram(),
                                            swa_live_tokens, n_swa_layers, &native_cache_demand(),
                                            ssm_reserved_slots, runtime_config_.gemm.q8_imma_enabled,

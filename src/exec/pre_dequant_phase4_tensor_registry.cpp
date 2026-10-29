@@ -609,7 +609,10 @@ void QuantPipeline::pre_dequant_phase4b_drop_redundant_sources_(
         // A native FP8 entry borrows these bytes: they are the served weight, not a source.
         if (const auto it = wcache_->fp8.find(t.data); it != wcache_->fp8.end() && it->second.native_source)
             return false;
+        // Native MXFP4 unpacks in place: the cache entry IS these bytes (freeing them let later allocations
+        // overwrite the served weights from the second prefill chunk on, Qwen3.5-4B-mxfp4 PPL 11.7 -> 4377).
         if (wcache_->cutlass_nvfp4.contains(t.data) || wcache_->nvfp4.contains(t.data) ||
+            wcache_->cutlass_mxfp4.contains(t.data) ||
             wcache_->lm_head_fp8.weight.data == t.data) {  // checkpoint FP8 head is served (#2479)
             ++skipped_shared_count;
             skipped_shared_bytes += bytes;

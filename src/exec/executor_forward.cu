@@ -328,7 +328,13 @@ void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_o
         IMP_LOG_DEBUG("[DEBUG_FWD] [step=%d] positions (%d):%s", decode_step, n, pos_line.c_str());
     }
     Tensor h = view_tokens(hidden_, n);
-    embedding_lookup(model_->token_embedding(), state.token_ids, n, h, model_->tok_emb_.qtype, stream);
+    // Native MXFP4 table: unpacked in place, scales in its cache entry (without one the MXFP4 overload
+    // throws).
+    if (const auto it = wcache_.cutlass_mxfp4.find(model_->token_embedding().data);
+        model_->tok_emb_.qtype == QType::MXFP4 && it != wcache_.cutlass_mxfp4.end())
+        embedding_lookup_mxfp4(it->second.data, it->second.linear_scales, state.token_ids, n, h, stream);
+    else
+        embedding_lookup(model_->token_embedding(), state.token_ids, n, h, model_->tok_emb_.qtype, stream);
 
     // Gemma: scale embeddings by sqrt(d_model)
     if (cfg.embed_scale > 0.0f && h.qtype == QType::F16) {

@@ -267,23 +267,38 @@ void QuantPipeline::nvfp4_decode_convert_cutlass_(const ModelConfig& cfg, const 
     }
 }
 
-// Native MXFP4 GGUF: the NVFP4 activation buffer the CUTLASS NVFP4 prefill quantizes into, sized
-// over the MXFP4 projections, when no NVFP4 weight allocated it (the MXFP4 GEMM carves its own).
-void QuantPipeline::nvfp4_decode_native_mxfp4_act_data_(const ModelConfig& cfg) {
-    if (qscratch_->cutlass_act_data || !model_has_dense_mxfp4(*model_, cfg.n_layers))
+// Native MXFP4 GGUF: the W4A16 GEMM scratch (one dense MXFP4 weight as FP16, largest non-LM-head N x K, plus
+// the LM-head slice output of the same size), and the NVFP4 activation buffer the CUTLASS NVFP4 prefill
+// quantizes into when no NVFP4 weight allocated it. Phase 3 and the standalone phase 3c both call this.
+void QuantPipeline::alloc_mxfp4_gemm_scratch_(const ModelConfig& cfg) {
+    if (!model_has_dense_mxfp4(*model_, cfg.n_layers))
         return;
     int max_k = 0;
+    size_t max_nk_mx = 0;
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model_->layer(i);
-        for (const Tensor* w : {&L.wq, &L.w_gate, &L.w_down, &L.ssm_in, &L.ssm_out})
-            if (w->data && w->ndim >= 2)
-                max_k = std::max(max_k, static_cast<int>(w->shape[1]));
+        for (const Tensor* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_up, &L.w_gate, &L.w_down, &L.ssm_in,
+                                &L.ssm_out, &L.gdn_gate, &L.gdn_alpha, &L.gdn_beta}) {
+            if (!w->data || w->ndim < 2)
+                continue;
+            max_k = std::max(max_k, static_cast<int>(w->shape[1]));
+            if (w->qtype == QType::MXFP4)
+                max_nk_mx = std::max(max_nk_mx, static_cast<size_t>(w->shape[0]) * w->shape[1]);
+        }
     }
-    if (max_k == 0)
-        return;
-    qscratch_->cutlass_act_data_size = static_cast<size_t>(max_tokens_) * (max_k / 2);
-    qscratch_->cutlass_act_data = vram_alloc(vram_alloc_, qscratch_->cutlass_act_data_size,
-                                             "cutlass_act_data");
+    const Tensor& head = model_->output_proj();
+    if (max_nk_mx == 0 && head.qtype == QType::MXFP4)  // only the LM head: slices of 8192 rows
+        max_nk_mx = static_cast<size_t>(8192) * head.shape[1];
+    if (max_nk_mx > 0 && !qscratch_->mxfp4_wdeq) {
+        qscratch_->mxfp4_wdeq_size = max_nk_mx * sizeof(half);
+        qscratch_->mxfp4_wdeq = vram_alloc(vram_alloc_, qscratch_->mxfp4_wdeq_size, "mxfp4_wdeq");
+        qscratch_->mxfp4_slice_out = vram_alloc(vram_alloc_, qscratch_->mxfp4_wdeq_size, "mxfp4_slice_out");
+    }
+    if (max_k > 0 && !qscratch_->cutlass_act_data) {
+        qscratch_->cutlass_act_data_size = static_cast<size_t>(max_tokens_) * (max_k / 2);
+        qscratch_->cutlass_act_data = vram_alloc(vram_alloc_, qscratch_->cutlass_act_data_size,
+                                                 "cutlass_act_data");
+    }
 }
 
 // Native MXFP4 GGUF unpack + FP16 fallback dequant. Registers MXFP4 weights directly in
@@ -349,13 +364,10 @@ if (mx_native > 0) {
             IMP_LOG_ERROR("MXFP4 unpack error: %s", cudaGetErrorString(e));
     }
 
-    // GDN models force the FP16 fallback: although every linear projection in
-    // executor_ssm_gdn.cu now routes through gemm_dispatch, the MXFP4 prefill path for
-    // GDN-shape weights hits a cuBLAS-INTERNAL_ERROR (status 14) cascade, not yet
-    // root-caused. Honor the fallback until resolved.
-    bool force_fallback = dispatch_policy().attention.mxfp4_fp16_fallback;
-    bool has_gdn = (cfg.ssm_inner_size > 0);
-    bool mxfp4_gemv_available = !force_fallback && !has_gdn;
+    // Native MXFP4 (GEMV decode, W4A16 prefill via mxfp4_prefill_gemm) unless the FP16 cache is forced
+    // (attention.mxfp4_fp16_fallback). GDN hybrids were forced onto the cache: the prefill wrote its
+    // activation into the shared workspace that holds the GDN buffers.
+    bool mxfp4_gemv_available = !dispatch_policy().attention.mxfp4_fp16_fallback;
     for (auto& [p, m] : wcache_->cutlass_mxfp4)
         if (!m.linear_scales) {
             mxfp4_gemv_available = false;
@@ -441,8 +453,9 @@ if (mx_native > 0) {
                 std::to_string(fp16_total / (static_cast<int64_t>(1024) * 1024)) + " MiB + " +
                 std::to_string(kRuntimeHeadroom / (static_cast<int64_t>(1024) * 1024)) +
                 " MiB runtime headroom, " + std::to_string(free_mem / (static_cast<int64_t>(1024) * 1024)) +
-                " MiB free). This model needs the FP16 decode cache (native MXFP4 GEMV is "
-                "unavailable on its weights) and does not fit on this GPU at the requested "
+                " MiB free). The FP16 decode cache was requested (attention.mxfp4_fp16_fallback) or the "
+                "weights "
+                "carry no linear scales, and it does not fit on this GPU at the requested "
                 "context length. Reduce --min-kv-tokens / max context, or use a smaller model.");
         }
     }

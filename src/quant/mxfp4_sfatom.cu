@@ -181,6 +181,41 @@ __global__ void dequant_mxfp4_split_kernel(const uint8_t* __restrict__ data,    
     }
 }
 
+// Unpacked layout: E2M1 [N, K/2] (even element low nibble) + UE8M0 linear scales [N, K/32]. One thread per
+// 32 K: one 16 B load, four 16 B stores (scalar 2 B stores ran pp4096 at ~10x the dequant byte floor).
+__global__ void dequant_mxfp4_linear_kernel(const uint8_t* __restrict__ data,
+                                            const uint8_t* __restrict__ scales, half* __restrict__ out,
+                                            int64_t total_groups) {
+    const int64_t g = (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
+    if (g >= total_groups)
+        return;
+    uint32_t fbits = static_cast<uint32_t>(scales[g]) << 23;
+    float scale;
+    memcpy(&scale, &fbits, sizeof(float));
+    const uint4 q = reinterpret_cast<const uint4*>(data)[g];
+    const uint32_t w[4] = {q.x, q.y, q.z, q.w};
+    uint4* dst = reinterpret_cast<uint4*>(out + (g * 32));
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {  // 4 bytes -> 8 halves -> one 16 B store
+        __half2 h2[4];
+#pragma unroll
+        for (int b = 0; b < 4; ++b) {
+            const uint32_t byte = (w[j] >> (b * 8)) & 0xffu;
+            h2[b] = __floats2half2_rn(kE2M1Table[byte & 0xF] * scale, kE2M1Table[byte >> 4] * scale);
+        }
+        dst[j] = *reinterpret_cast<const uint4*>(h2);
+    }
+}
+
+void dequant_mxfp4_linear_to_fp16(const void* data, const void* linear_scales, int64_t N, int64_t K,
+                                  void* dst_fp16, cudaStream_t stream) {
+    const int64_t groups = N * (K / 32);
+    dequant_mxfp4_linear_kernel<<<static_cast<int>((groups + 255) / 256), 256, 0, stream>>>(
+        static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(linear_scales),
+        static_cast<half*>(dst_fp16), groups);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
 void dequant_mxfp4_to_fp16(const void* raw_mxfp4_data, int64_t N, int64_t K, void* dst_fp16,
                            cudaStream_t stream) {
     int blocks_per_row = static_cast<int>(K / 32);

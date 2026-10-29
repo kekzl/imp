@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
+#include <stdexcept>
 #include "core/pdl_device.cuh"
 #include "core/pdl_launch.cuh"
 
@@ -236,8 +237,45 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids, int n_token
         return;
     }
 
+    // Unpacked MXFP4 needs its scale array: embedding_lookup_mxfp4. Writing nothing here left the
+    // hidden state stale (PPL = vocab size on Qwen3.5-4B-mxfp4 without the FP16 cache).
+    if (qtype == QType::MXFP4)
+        throw std::runtime_error("embedding_lookup: MXFP4 table needs embedding_lookup_mxfp4 (scales)");
+
     // Non-quantized: delegate to standard dtype-based dispatch
     embedding_lookup(table, token_ids, n_tokens, out, stream);
+}
+
+// Unpacked MXFP4 rows: E2M1 nibbles [rows, d/2] (even element in the low nibble), UE8M0 [rows, d/32]
+// row-major, value = e2m1 * 2^(e - 127). Grid: (n_tokens), Block: 256.
+__global__ void embedding_lookup_mxfp4_kernel(const uint8_t* __restrict__ packed,
+                                              const uint8_t* __restrict__ scales,
+                                              const int32_t* __restrict__ token_ids, half* __restrict__ out,
+                                              int d_model) {
+    constexpr float kE2M1[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+    const int64_t row = token_ids[blockIdx.x];
+    const uint8_t* p = packed + (row * (d_model / 2));
+    const uint8_t* s = scales + (row * (d_model / 32));
+    half* o = out + (static_cast<int64_t>(blockIdx.x) * d_model);
+    for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
+        const int nib = (i & 1) ? p[i >> 1] >> 4 : p[i >> 1] & 0xf;
+        const float v = (nib & 8) ? -kE2M1[nib & 7] : kE2M1[nib & 7];
+        o[i] = __float2half(v * exp2f(static_cast<float>(s[i >> 5]) - 127.0f));
+    }
+}
+
+void embedding_lookup_mxfp4(const void* packed, const void* linear_scales, const int32_t* token_ids,
+                            int n_tokens, Tensor& out, cudaStream_t stream) {
+    const int d_model = static_cast<int>(out.shape[1]);
+    if (n_tokens == 0)
+        return;
+    if (packed == nullptr || linear_scales == nullptr || d_model % 32 != 0)
+        throw std::runtime_error("embedding_lookup_mxfp4: missing data/scales or d_model % 32 != 0");
+    embedding_lookup_mxfp4_kernel<<<n_tokens, 256, 0, stream>>>(static_cast<const uint8_t*>(packed),
+                                                                static_cast<const uint8_t*>(linear_scales),
+                                                                token_ids, static_cast<half*>(out.data),
+                                                                d_model);
+    IMP_CUDA_CHECK_LAUNCH();
 }
 
 // Device-side embedding lookup: reads the token id from device memory (d_token_id[0]) instead
