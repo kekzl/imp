@@ -217,3 +217,4 @@ Persistent CTAs over a per-expert tile prefix (warp scan in shared memory), A th
 - PPL 409.5548 (cuBLAS) -> 407.3936 (FA2), `runtime.deterministic`, 45k raw corpus (instruct model, no template).
 - The kernel runs at ~246 TFLOPS at pp4096 (1115.6 us per call): the fp32-accumulate FP16 rate. The hd<=256 FA2 accumulates in fp16; that is the next lever.
 - A first A/B showed equal launch counts in both arms; the rerun after a fresh build differed (776 vs 666 at pp512), only the rerun is recorded.
+- Refuted 2026-10-29: fp16 accumulators in the hd=512 FA2. Gemma-4-26B-NVFP4, `runtime.deterministic` PPL (45k corpus): fp32 407.3936, fp16 output accumulator 418.6447 (+2.8 %, pp4096 +1.1 % single run), fp16 scores and output 446.9929 (+9.7 %, fa2_hd512 kernel 99.0 / 98.8 -> 71.4 / 71.6 ms, pp4096 e2e +3.3..3.5 %). The hd<=256 FA2 tolerates fp16 accumulation; 512-wide dot products and 256 KV tiles of rescaled fp16 sums do not.
