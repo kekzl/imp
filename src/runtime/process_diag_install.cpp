@@ -69,6 +69,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.nvfp4_cutlass_streamk = cfg.runtime.deterministic ? 0 : cfg.gemm.nvfp4_cutlass_streamk;
     d.nvfp4_cublaslt_min_m = cfg.runtime.deterministic ? 0 : cfg.gemm.nvfp4_cublaslt_min_m;
     d.nvfp4_tile_min_m = cfg.gemm.nvfp4_tile_min_m;  // deterministic: no algo pick, no split
+    d.f16_tile = cfg.gemm.f16_tile;
     d.attention_mxfp4_mode = cfg.attention.mxfp4;
     d.mxfp4_blockscale = cfg.attention.mxfp4_blockscale;
     d.mxfp4_ksmooth = cfg.attention.mxfp4_ksmooth;

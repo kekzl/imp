@@ -71,4 +71,9 @@ __device__ __forceinline__ void ldsm_x4(uint32_t r[4], uint32_t addr) {
                  : "r"(addr));
 }
 
+// Host: 2D uint8 TMA map over [rows, row_bytes], box [box_bytes, box_rows], 64B/128B swizzle by
+// box_bytes (nvfp4_gemm_tile.cu).
+[[nodiscard]] bool encode_2d(CUtensorMap* map, const void* base, int rows, int row_bytes, int box_bytes,
+                             int box_rows);
+
 }  // namespace imp::nvfp4_tile

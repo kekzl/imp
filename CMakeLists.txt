@@ -300,6 +300,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_capture_fp16_sm120.cu
     src/compute/gemm_f16_narrow_smallm.cu
     src/compute/gemm_f16_narrow_prefill.cu
+    src/compute/gemm_f16_tile.cu
     src/compute/ffn_sparsity_probe.cu
     src/compute/ffn_sparsity_mask.cu
     src/compute/weight_dispatch.cpp
@@ -1287,6 +1288,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm_capture_probe.cu
         tests/test_gemm_f16_narrow_smallm.cu
         tests/test_gemm_f16_narrow_prefill.cu
+        tests/test_gemm_f16_tile.cu
         tests/test_gemm_dp4a.cu
         tests/test_gemm_kernel_registry.cu
         tests/test_fp8_gemm.cu

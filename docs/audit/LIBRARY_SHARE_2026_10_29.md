@@ -166,3 +166,23 @@ Stream-K 128x128 (grid = SMs, forward unit ranges: a CTA's first segment writes 
 | q8-8b__tg128 | bench:tg | 1024.3 | 0.0 | 0.0 | 0.0 | 0.0 | - |
 | q8-8b__tg128_ctx8k | bench:pp | 515.8 | 0.0 | 0.0 | 0.0 | 0.0 | - |
 | q8-8b__tg128_ctx8k | bench:tg | 616.3 | 0.0 | 0.0 | 0.0 | 0.0 | - |
+
+## Step 3: own FP16 GEMM (`src/compute/gemm_f16_tile.cu`)
+
+The NVFP4 skeleton with `mma.sync m16n8k16` (fp16 or fp32 accumulator), BK 64 halves, 128x256 x 2 stages, grouped-M raster 16. FP16 moves 4x the bytes per flop of NVFP4: the 178 MB weight of 17408x5120 exceeds the 96 MB L2, so N-fastest order re-read it from DRAM.
+
+| Isolated (`test-compute --gtest_filter='GemmF16TileBench*'`) | cuBLASLt us | own us |
+|---|---:|---:|
+| 4096x17408x5120 (128x128 / no group / group 8 / group 16) | 1990.9 | 3034.7 / 2382.1 / 2183.8 / 2102.6 |
+| 4096x5120x17408 | 2330.3 | 2133.1 |
+| 512x1024x5120 | 30.7 | 120 (no split-K) |
+
+| In situ, Qwen3-14B-Q6_K (`gemm.f16_tile`, 2 pairs) | cuBLASLt | own |
+|---|---:|---:|
+| pp2048, own when grid >= 1 wave | 1505.4 / 1510.1 ms | 1438.6 / 1441.6 ms |
+| pp2048, own when grid >= 2 waves | 1501.1 / 1505.8 ms | 1522.3 / 1522.4 ms |
+| pp2048, own when K >= N and grid >= 1 wave (default) | 1502.9 / 1508.7 ms | 1419.5 / 1426.1 ms |
+| pp2048 e2e, default rule | 9304 / 9330 tok/s | 9692 / 9695 tok/s |
+
+- In situ the deep-K shapes win (down proj 2048x5120x17408 lost isolated, 1072.2 vs 1007.1 us) and the N=17408 gate/up lose ~1 %: the rule follows the in-situ data.
+- fp16 accumulate is bit-equal to cuBLASLt COMPUTE_16F (max diff 0); PPL 9.2022 both arms, ACTIVE line in the own arm (M=2048 N=5120 K=5120).

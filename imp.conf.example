@@ -769,6 +769,9 @@ nvfp4_cublaslt_min_m = 2048
 # ahead of cuBLASLt (0 = off). Same bytes, bit-equal to CUTLASS. Qwen3.8-27B pp4096 GEMM
 # kernel sum -0.9 % vs cuBLASLt.
 nvfp4_tile_min_m = 2048
+# Own FP16 GEMM instead of cuBLASLt for FP16-accumulate prefill GEMMs with K >= N and a full
+# wave of tiles (GGUF FP16 paths). Bit-equal; Qwen3-14B-Q6_K pp2048 +4.0 % e2e.
+f16_tile = true
 # Batched-decode (n>1) LM head via a single CUTLASS NVFP4 GEMM instead of the
 # FP16-activation batched-M GEMV: reads the LM-head weight once per batch but
 # forces NVFP4 activations on the final logits. +8% aggregate concurrent decode

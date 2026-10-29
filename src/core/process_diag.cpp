@@ -76,6 +76,7 @@ int process_diag_nvfp4_cutlass_streamk() { return slot().nvfp4_cutlass_streamk; 
 void process_diag_set_nvfp4_cutlass_streamk(int v) { slot().nvfp4_cutlass_streamk = v; }
 int process_diag_nvfp4_cublaslt_min_m() { return slot().nvfp4_cublaslt_min_m; }
 int process_diag_nvfp4_tile_min_m() { return slot().nvfp4_tile_min_m; }
+bool process_diag_f16_tile() { return slot().f16_tile; }
 bool process_diag_force_splitk_fallback() { return slot().force_splitk_fallback; }
 void process_diag_set_force_splitk_fallback(bool v) { slot().force_splitk_fallback = v; }
 const std::string& process_diag_attention_mxfp4_mode() { return slot().attention_mxfp4_mode; }
