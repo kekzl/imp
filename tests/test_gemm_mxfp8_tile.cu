@@ -141,7 +141,8 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(std::make_tuple(128, 128, 128, false), std::make_tuple(200, 384, 576, false),
                       std::make_tuple(33, 136, 1024, false), std::make_tuple(512, 1024, 2048, false),
                       std::make_tuple(1000, 2056, 256, false), std::make_tuple(96, 384, 1024, true),
-                      std::make_tuple(300, 2056, 576, true)));
+                      std::make_tuple(300, 2056, 576, true),
+                      std::make_tuple(1536, 2304, 512, true)));  // 216 tiles: hybrid stream-K
 
 // Timing on the Qwen3.6-35B GDN projections (qkv, z, out) in the FP8 row-scale view, the prefill
 // default: CUTLASS + its column-scale pass vs the own kernel; 4 weight copies rotate out of L2.
