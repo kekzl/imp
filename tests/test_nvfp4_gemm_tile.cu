@@ -60,7 +60,8 @@ void make_operands(Operands& o, int M, int N, int K, cudaStream_t s) {
     ASSERT_EQ(cudaMalloc(&o.act_sf, cutlass_nvfp4_sf_size(M, K)), cudaSuccess);
     cudaMemsetAsync(o.act_sf, 0, cutlass_nvfp4_sf_size(M, K), s);
     quantize_fp16_to_nvfp4_cutlass(x, o.act, o.act_sf, M, K, s);
-    o.ws_bytes = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
+    // Max of the CUTLASS workspace and the stream-K need (4 KiB flags + 170 x 64 KiB partials).
+    o.ws_bytes = std::max<size_t>(gemm_nvfp4_cutlass_sm120_workspace(M, N, K), 4096 + (size_t(170) << 16));
     ASSERT_EQ(cudaMalloc(&o.ws, std::max<size_t>(o.ws_bytes, 1)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&o.y_ref, size_t(M) * N * sizeof(half)), cudaSuccess);
     ASSERT_EQ(cudaMalloc(&o.y_own, size_t(M) * N * sizeof(half)), cudaSuccess);
@@ -85,8 +86,8 @@ bool run_cutlass(const Operands& o, cudaStream_t s) {
 }
 
 // Variants: 0 TMA 128x128 x4 + producer warp, 1 TMA 128x256 x3, 2 sync 128x128 BK256x2, -1 auto.
-constexpr int kCheckedVariants = 3;
-constexpr int kVariantBk[kCheckedVariants] = {128, 128, 256};
+constexpr int kCheckedVariants = 4;  // 3 = stream-K 128x128
+constexpr int kVariantBk[kCheckedVariants] = {128, 128, 256, 128};
 
 class Nvfp4GemmTileTest : public ::testing::TestWithParam<std::tuple<int, int, int>> {
 protected:
@@ -113,7 +114,7 @@ TEST_P(Nvfp4GemmTileTest, MatchesCutlass) {
             continue;
         cudaMemsetAsync(o.y_own, 0xff, ref.size() * sizeof(half), s_);
         ASSERT_TRUE(gemm_nvfp4_tile(o.act, o.act_sf, o.cw.data, o.cw.scale_factors, o.cw.tensor_scale,
-                                    o.y_own, M, N, K, s_, v));
+                                    o.y_own, M, N, K, s_, v, o.ws, o.ws_bytes));
         ASSERT_EQ(cudaStreamSynchronize(s_), cudaSuccess);
         cudaMemcpy(own.data(), o.y_own, own.size() * sizeof(half), cudaMemcpyDeviceToHost);
         double max_ref = 0.0, max_diff = 0.0;
@@ -146,11 +147,12 @@ TEST(Nvfp4GemmTileBench, VsCutlassAndCublasLt) {
         GTEST_SKIP() << "CUTLASS sm_120 NVFP4 not available";
     cudaStream_t s;
     cudaStreamCreate(&s);
-    const int shapes[][2] = {{17408, 5120}, {5120, 17408}, {10240, 5120}, {5120, 6144}};
-    const int ms[] = {512, 2048, 4096};
-    constexpr int kVariants = 4;  // variants 0, 1, 2, then -1 (auto, the dispatch default)
-    std::fprintf(stderr, "%6s %6s %6s %8s %8s %8s %8s %8s %8s %7s\n", "M", "N", "K", "cutlass", "lt", "t128",
-                 "t256", "sync", "auto", "best_TF");
+    const int shapes[][2] = {{17408, 5120}, {5120, 17408}, {10240, 5120},
+                             {6144, 5120},  {5120, 6144},  {1024, 5120}};
+    const int ms[] = {512, 2048};
+    constexpr int kVariants = 5;  // variants 0..3, then -1 (auto, the dispatch default)
+    std::fprintf(stderr, "%6s %6s %6s %8s %8s %8s %8s %8s %8s %8s %7s\n", "M", "N", "K", "cutlass", "lt",
+                 "t128", "t256", "sync", "sk", "auto", "best_TF");
     for (const auto& nk : shapes) {
         for (int M : ms) {
             Operands o;
@@ -198,7 +200,7 @@ TEST(Nvfp4GemmTileBench, VsCutlassAndCublasLt) {
             for (int v = 0; v < kVariants; ++v)
                 t_v[v] = time_us([&](int c) {
                     (void)gemm_nvfp4_tile(o.act, o.act_sf, wd[c], wsf[c], o.cw.tensor_scale, o.y_own, o.M,
-                                          o.N, o.K, s, v < 3 ? v : -1);
+                                          o.N, o.K, s, v < 4 ? v : -1, o.ws, o.ws_bytes);
                 });
             ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
             double best = 1e30;
