@@ -13,6 +13,8 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `--mxfp4-prefill` and C-API `ImpConfig::use_mxfp4_prefill` (ABI change): its dual-cache GEMM branch was unreachable, no dispatch site set the payload.
 
 ### Changed
+- Q4_K / Q5_K prompt GEMMs (fp16 accumulate, M > 32) decode the GGUF blocks in the own FP16 tile instead of the raw IMMA tiles: Qwen3.8-27B-UD-Q4_K_M pp512 4175-4179 -> 4384-4405, pp2048 4368-4374 -> 4772-4776; Q4_K_M pp2048 4276 -> 4923 tok/s; PPL 4.9905 -> 4.9934 / 5.0635 -> 5.0653. `gemm.q45k_tile`.
+- The weight-decode tiles (Q6_K, Q4_K, Q5_K) choose 256x128 by wave count with a per-format cost instead of a fixed 170-tile threshold: Qwen3-14B-Q6_K pp1024 8700-8731 -> 9372-9388 tok/s, pp512 / pp1536 unchanged.
 - Native MXFP4 prompt GEMMs (M <= 1024) decode E2M1 inside the own FP16 tile instead of a weight dequant into scratch + FP16 GEMM per call (bit-equal): Qwen3.5-4B-mxfp4 pp512 19614-19904 -> 21965-22593, pp1024 25299-25758 -> 26310-26491 tok/s; PPL 11.6369 -> 11.6367. `gemm.mxfp4_tile`.
 - Q6_K prompt GEMMs decode the GGUF blocks inside an own FP16 tile kernel instead of a whole-weight dequant + cuBLASLt per call (bit-equal to dequant + the own tile, up to M 1536): Qwen3-14B-Q6_K pp128 2625-2888 -> 4165, pp512 6545-6611 -> 8364-8365, pp1536 8484-8549 -> 9000-9013 tok/s; PPL 11.4543 -> 11.4542. `gemm.q6k_tile`.
 - MXFP4 GGUF GDN hybrids no longer force the 4x FP16 decode cache: GEMV decode, W4A16 prefill through a one-weight dequant scratch. Qwen3.5-4B-mxfp4: tg128 156-166 -> 259-267 tok/s, own peak 14880 -> 3454 MiB, PPL 11.6735 -> 11.6369, pp512 28k -> 19-20k, pp4096 31k -> 27-29k tok/s. `attention.mxfp4_fp16_fallback` restores it.

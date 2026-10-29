@@ -63,6 +63,11 @@ static bool imma_source_prefill(const WeightHandle& h, const Tensor& input, Tens
                              /*allow_splitk=*/decode_rows, reuse_act))
             return true;
     }
+    if (h.source_qtype == QType::Q4_K || h.source_qtype == QType::Q5_K) {
+        const Tensor w(const_cast<void*>(h.source_data), h.source_qtype, 2, h.shape, true);
+        if (gemm_q45k_tile_rows(input, w, output, ctx, decode_rows))
+            return true;
+    }
     if (ctx.q4k_imma_prefill && h.source_qtype == QType::Q4_K && imma_eligible) {
         if (mmq_q4k_imma_gemm(h.source_data, reinterpret_cast<const __half*>(input.data),
                               reinterpret_cast<__half*>(output.data), M, static_cast<int>(h.shape[0]),

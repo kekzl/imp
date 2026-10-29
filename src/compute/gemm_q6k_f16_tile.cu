@@ -90,7 +90,7 @@ __device__ __forceinline__ void ld_units(Q6Unit (&t)[kUnits<C>], const Q6Args& p
 }
 
 struct Q6Dec {
-    static constexpr bool kWide = true;
+    static constexpr int kWideCost = 14;  // wide_wins: decode per 256 rows, 1536x5120x5120 296 vs 313 us
     using Args = Q6Args;
     template <class C>
     static __device__ __forceinline__ void decode(const Q6Args& p, uint32_t bars, uint8_t* smem, int n0,

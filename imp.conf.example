@@ -758,6 +758,9 @@ q6k_tile = true
 # Fused MXFP4 W4A16 prompt GEMM (native MXFP4 GGUF): E2M1 decoded per tile, no weight dequant into a
 # scratch + FP16 GEMM per call. Bit-equal to that path.
 mxfp4_tile = true
+# Fused Q4_K / Q5_K prompt GEMM: W decoded per tile from the GGUF blocks with fp16 activations, before
+# the raw IMMA tiles (fp16-accumulate rows above 32). Bit-equal to dequant + the own FP16 tile.
+q45k_tile = true
 # Own grouped NVFP4 MoE prefill GEMM before CUTLASS 3.x grouped (bit-exact; K % 64 == 0, K >= 384).
 # Qwen3-30B-A3B-NVFP4 pp512 +3..7 %, pp4096 +2 % e2e.
 moe_tile = true

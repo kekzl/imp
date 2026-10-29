@@ -38,7 +38,7 @@ __device__ __forceinline__ uint4 mx4_chunk(uint32_t w, __half2 s2) {
 // one scale byte -> chunks 4 hb .. 4 hb + 3. The next stage's loads are issued before this one decodes.
 // Rows past N decode row N - 1 (never stored).
 struct Mx4Dec {
-    static constexpr bool kWide = false;
+    static constexpr int kWideCost = 0;  // 128x128 only
     using Args = Mx4Args;
     template <class C>
     static __device__ __forceinline__ void decode(const Mx4Args& p, uint32_t bars, uint8_t* smem, int n0,

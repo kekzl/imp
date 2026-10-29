@@ -45,8 +45,8 @@ __device__ __forceinline__ void stage_done(uint32_t bars, int kt) {
         mbar_arrive(bars + (kt % C::kStages) * 8);
 }
 
-// D: `Args` (with `F16Args o`), `kWide` (256x128 allowed) and `template <class C> static void decode(const
-// Args&, bars, smem, n0, KT)`.
+// D: `Args` (with `F16Args o`), `kWideCost` (wide_wins; 0 = 128x128 only) and `template <class C> static
+// void decode(const Args&, bars, smem, n0, KT)`.
 template <class C, class D>
 __global__ void __launch_bounds__(kThreads<C>, 1) gemm_wdq_f16_tile_kernel(
     typename D::Args p, const __grid_constant__ CUtensorMap map_a) {
@@ -120,19 +120,36 @@ template <class C, class D>
     return true;
 }
 
-// The shipped configs: 256x128 (each decoded W row serves 256 A rows) once its grid fills a wave, else
-// 128x128 with 8 decoder warps; fp32 accumulate 128x128. 512x17408x5120 Q6_K: 324 vs 128x256 341 us;
-// 512x5120x17408: 128x128 331 vs 256x128 443. D::kWide = false keeps 128x128 (MXFP4: 2048x9216x2560 271
-// vs 393 us). variant: -1 auto, 1 128x128, 2 256x128.
+// 256x128 (1 CTA/SM) when its waves x D::kWideCost / 10 (one 256x128 wave in 128x128 waves) undercut the
+// 128x128 waves. Q5_K flushed: 512x6144x5120 150 vs 187 us (1 vs 2 waves), 1024x6144x5120 320 vs 278 (2 vs
+// 3); Q6_K 1536x5120x5120 296 vs 313 (2 vs 3).
+[[nodiscard]] inline bool wide_wins(int M, int N, int cost10) {
+    static const int sms = [] {
+        int dev = 0;
+        int n = 0;
+        return (cudaGetDevice(&dev) == cudaSuccess &&
+                cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev) == cudaSuccess && n > 0)
+                   ? n
+                   : 170;
+    }();
+    const int tn = (N + 127) / 128;
+    const int w128 = ((((M + 127) / 128) * tn) + sms - 1) / sms;
+    const int w256 = ((((M + 255) / 256) * tn) + sms - 1) / sms;
+    return w256 * cost10 < w128 * 10;
+}
+
+// The shipped configs: 256x128 (each decoded W row serves 256 A rows) where wide_wins, else 128x128 with
+// 8 decoder warps; fp32 accumulate 128x128. D::kWideCost = 0 keeps 128x128 (MXFP4: 2048x9216x2560 271 vs
+// 393 us). variant: -1 auto, 1 128x128, 2 256x128.
 template <class D>
 [[nodiscard]] bool launch_auto(const typename D::Args& p, const void* a, bool acc_fp16, int variant,
                                cudaStream_t stream) {
     if (!acc_fp16)
         return launch<Cfg<128, 64, 3, false>, D>(p, a, stream);
-    if (variant < 0 && !D::kWide)
+    if (variant < 0 && D::kWideCost == 0)
         variant = 1;
     if (variant < 0)
-        variant = (((p.o.M + 255) / 256) * ((p.o.N + 127) / 128) >= 170) ? 2 : 1;
+        variant = wide_wins(p.o.M, p.o.N, D::kWideCost) ? 2 : 1;
     return variant == 2 ? launch<Cfg<128, 64, 2, true, 16, 256>, D>(p, a, stream)
                         : launch<Cfg<128, 64, 3, true, 16>, D>(p, a, stream);
 }
