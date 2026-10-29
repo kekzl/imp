@@ -54,7 +54,10 @@ struct Cfg {
     static constexpr uint32_t kTxBytes = (kBM + BN) * (BK / 2) + (1 + BN / 128) * kSfBytes;
     static constexpr int kOS = BN + 8;   // epilogue staging stride in halves: half2 writes conflict-free
     static constexpr int kAlign = 1024;  // 128B-swizzle atom; stage and tile offsets keep it
-    static constexpr int kSmemBytes = STAGES * kStageBytes + 128 + kAlign;
+    // Stream-K stages the epilogue in its own buffer behind the mbarriers when it fits 99 KiB: the
+    // producer refills the ring meanwhile.
+    static constexpr bool kSkStaged = SK && (STAGES * kStageBytes) + 128 + (kBM * kOS * 2) + kAlign <= 101376;
+    static constexpr int kSmemBytes = STAGES * kStageBytes + 128 + (kSkStaged ? kBM * kOS * 2 : 0) + kAlign;
     static_assert(STAGES * kStageBytes >= kBM * kOS * 2, "epilogue staging must fit the ring");
     static_assert(2 * STAGES * 8 <= 128, "mbarrier area");
     static_assert(TMA || BN == 128, "sync mainloop loads one 128-row W slab");
@@ -266,29 +269,28 @@ __device__ __forceinline__ void sync_mainloop(float (&acc)[4][C::kNF][4], const 
     cp_async_wait<0>();
 }
 
-// alpha, fp16, staged in the dead ring for 16 B row-contiguous stores (256 MMA threads).
+// alpha, fp16, staged in so (stride kOS) for 16 B row-contiguous stores (256 MMA threads).
 template <class C>
-__device__ __forceinline__ void store_tile(const float (&acc)[4][C::kNF][4], const Ring& g,
-                                           const TileArgs& p) {
-    asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));  // every warp left the ring
-    const int T0 = g.lane & 3;
-    const int T1 = g.lane >> 2;
-    half* so = reinterpret_cast<half*>(g.smem);
+__device__ __forceinline__ void store_tile(const float (&acc)[4][C::kNF][4], half* so, int m0, int n0, int wm,
+                                           int wn, int lane, const TileArgs& p) {
+    asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));  // every warp left the ring / the last store loop
+    const int T0 = lane & 3;
+    const int T1 = lane >> 2;
 #pragma unroll
     for (int mf = 0; mf < 4; ++mf)
 #pragma unroll
         for (int nf = 0; nf < C::kNF; ++nf)
 #pragma unroll
             for (int h = 0; h < 2; ++h)
-                *reinterpret_cast<__half2*>(so + ((g.wm + mf * 16 + T1 + h * 8) * C::kOS) + g.wn + nf * 8 +
+                *reinterpret_cast<__half2*>(so + ((wm + mf * 16 + T1 + h * 8) * C::kOS) + wn + nf * 8 +
                                             T0 * 2) = __floats2half2_rn(acc[mf][nf][h * 2] * p.alpha,
                                                                         acc[mf][nf][h * 2 + 1] * p.alpha);
     asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
     for (int i = threadIdx.x; i < kBM * (C::kBN / 8); i += kMmaThreads) {
         const int r = i / (C::kBN / 8);
         const int c = (i % (C::kBN / 8)) * 8;
-        const int row = g.m0 + r;
-        const int col = g.n0 + c;
+        const int row = m0 + r;
+        const int col = n0 + c;
         if (row < p.M && col < p.N)
             *reinterpret_cast<uint4*>(p.d + (static_cast<size_t>(row) * p.N) +
                                       col) = *reinterpret_cast<const uint4*>(so + (r * C::kOS) + c);
@@ -432,7 +434,11 @@ __device__ __forceinline__ void sk_mainloop(const Ring& g, const TileArgs& p, co
                         }
                 }
             }
-            store_direct<C>(acc, p, m0, n0, g.wm, g.wn, g.lane);
+            if constexpr (C::kSkStaged)
+                store_tile<C>(acc, reinterpret_cast<half*>(g.smem + (C::kStages * C::kStageBytes) + 128), m0,
+                              n0, g.wm, g.wn, g.lane, p);
+            else
+                store_direct<C>(acc, p, m0, n0, g.wm, g.wn, g.lane);
         }
         it += sg.ke - sg.kb;
     }
@@ -474,7 +480,7 @@ __global__ void __launch_bounds__(C::kThreads, 1) gemm_nvfp4_tile_kernel(
         } else {
             sync_mainloop<C>(acc, g, p);
         }
-        store_tile<C>(acc, g, p);
+        store_tile<C>(acc, reinterpret_cast<half*>(g.smem), g.m0, g.n0, g.wm, g.wn, g.lane, p);
     }
 }
 
@@ -546,7 +552,7 @@ bool launch_tile(const TileArgs& p, cudaStream_t stream) {
 
 namespace {
 
-using SkCfg = Cfg<128, 128, 4, true, true, true>;
+using SkCfg = Cfg<128, 128, 3, true, true, true>;  // staged epilogue: M=512 N=1024 15.8 vs 19.0 us direct x4
 constexpr size_t kSkFlagBytes = 4096;  // stream-K workspace: flags, then one fp32 128x128 partial per CTA
 
 int sm_count() {
