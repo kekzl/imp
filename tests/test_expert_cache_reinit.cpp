@@ -22,5 +22,19 @@ TEST(ExpertCacheReinitCpu, BothBudgetsRefusedLeavesCacheDisabled) {
     EXPECT_EQ(cache.layer_slot_scales(0), nullptr);
 }
 
+// A mask without any cached layer refuses before any CUDA call: no rows, no slots.
+TEST(ExpertCacheReinitCpu, EmptyLayerMaskRefuses) {
+    constexpr size_t kSlot = 1 << 20;
+    ExpertLRUCache cache;
+    EXPECT_FALSE(cache.init(kSlot, 16 * kSlot, /*alloc=*/nullptr, /*n_layers=*/3, /*n_experts=*/8,
+                            /*debug_parity=*/false, /*nvfp4_slots=*/false, {false, false, false}));
+    EXPECT_EQ(cache.pool_, nullptr);
+    EXPECT_EQ(cache.n_slots_, 0);
+    EXPECT_EQ(cache.n_rows_, 0);
+    EXPECT_FALSE(cache.layer_cached(1));
+    EXPECT_EQ(cache.layer_pool(1), nullptr);
+    cache.destroy();
+}
+
 }  // namespace
 }  // namespace imp

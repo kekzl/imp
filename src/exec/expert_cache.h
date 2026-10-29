@@ -93,8 +93,34 @@ struct ExpertLRUCache {
     void* pool_ = nullptr;     // contiguous GPU allocation for all slots
     size_t slot_size_ = 0;     // bytes per slot (max expert raw size)
     int slots_per_layer_ = 0;  // S — uniform per-layer pool depth (Phase 3)
-    int n_slots_ = 0;          // = n_layers_ * slots_per_layer_ (total)
-    std::vector<Slot> slots_;  // flat array, layer-major (size = n_slots_)
+    int n_slots_ = 0;          // = n_rows_ * slots_per_layer_ (total)
+    std::vector<Slot> slots_;  // flat array, row-major (size = n_slots_)
+    // Pool row per layer, -1 = no slots (device-resident experts). Rows only for cached layers:
+    // Qwen3-30B-A3B 24 of 48 host layers idled 372 slots x 24 x 0.84 MiB with one row per layer.
+    std::vector<int> layer_row_;
+    std::vector<int> row_layer_;
+    int n_rows_ = 0;
+    [[nodiscard]] bool layer_cached(int layer) const {
+        return n_slots_ > 0 && layer >= 0 && layer < static_cast<int>(layer_row_.size()) &&
+               layer_row_[layer] >= 0;
+    }
+    // Flat index of the layer's slot 0; the layer must be cached.
+    size_t layer_flat_base(int layer) const {
+        return static_cast<size_t>(layer_row_[layer]) * slots_per_layer_;
+    }
+    // Device base of the layer's slots, nullptr for an uncached layer.
+    char* layer_pool(int layer) const {
+        if (!pool_ || !layer_cached(layer))
+            return nullptr;
+        return static_cast<char*>(pool_) + (layer_flat_base(layer) * slot_size_);
+    }
+    // Layer-relative slot index of a pointer returned by get_or_load*.
+    int slot_in_layer(int layer, const void* p) const {
+        const size_t flat = static_cast<size_t>(static_cast<const char*>(p) -
+                                                static_cast<const char*>(pool_)) /
+                            slot_size_;
+        return static_cast<int>(flat - layer_flat_base(layer));
+    }
 
     // Per-layer LRU state (Phase 3). `per_layer_lru_[layer]` holds layer L's
     // recency list + key→slot map. Slot indices are layer-relative (0..S-1).
@@ -200,14 +226,20 @@ struct ExpertLRUCache {
     // `nvfp4_slots` sizes the per-slot tensor-scale mirror and puts the cache
     // in NVFP4 mode; `max_expert_raw` is then the full slot size (packed +
     // micro-scales, aligned), not a single range.
+    // `cached_layers` marks the layers that get slots (size n_layers); empty = every layer.
     [[nodiscard]] bool init(size_t max_expert_raw, size_t budget_bytes, VRAMAllocator* alloc, int n_layers,
-                            int n_experts, bool debug_parity = false, bool nvfp4_slots = false);
+                            int n_experts, bool debug_parity = false, bool nvfp4_slots = false,
+                            const std::vector<bool>& cached_layers = {});
 
     // destroy() + init() at `grown_bytes`, else at `original_bytes`. Returns the budget that took,
     // or 0 with the cache disabled (pool_ == nullptr, n_slots_ == 0): every consumer checks those.
+    // Fills layer_row_ / row_layer_ / n_rows_ from the mask; false when no layer is cached.
+    [[nodiscard]] bool assign_rows_(const std::vector<bool>& cached_layers);
+
     [[nodiscard]] size_t reinit_or_disable(size_t max_expert_raw, size_t grown_bytes, size_t original_bytes,
                                            VRAMAllocator* alloc, int n_layers, int n_experts,
-                                           bool debug_parity, bool nvfp4_slots);
+                                           bool debug_parity, bool nvfp4_slots,
+                                           const std::vector<bool>& cached_layers = {});
 
     // Lookup or insert an expert. Returns GPU pointer to cached expert data.
     // If cache miss: copies from host, evicts LRU entry within the layer's
@@ -238,9 +270,9 @@ struct ExpertLRUCache {
     // outside NVFP4 mode. Indexed by the same layer-relative slot index the
     // dispatch feeds the kernels as `expert_indices`.
     float* layer_slot_scales(int layer) const {
-        if (!d_slot_scales_ || layer < 0 || layer >= n_layers_)
+        if (!d_slot_scales_ || !layer_cached(layer))
             return nullptr;
-        return d_slot_scales_ + (static_cast<size_t>(layer) * slots_per_layer_);
+        return d_slot_scales_ + layer_flat_base(layer);
     }
 
     // Check if (layer, expert) is cached (no insertion). Updates LRU recency
@@ -267,10 +299,10 @@ struct ExpertLRUCache {
     // future Phase 5 kernel-side resolve helper. Phase 5 will inline this
     // logic into the dispatch kernels.
     void* slot_ptr(int layer, int slot_idx_within_layer) const {
-        if (!pool_ || slot_idx_within_layer < 0 ||
+        if (!pool_ || !layer_cached(layer) || slot_idx_within_layer < 0 ||
             slot_idx_within_layer >= slots_per_layer_)
             return nullptr;
-        size_t flat = (static_cast<size_t>(layer) * slots_per_layer_) + slot_idx_within_layer;
+        size_t flat = layer_flat_base(layer) + slot_idx_within_layer;
         return static_cast<char*>(pool_) + (flat * slot_size_);
     }
 

@@ -103,7 +103,7 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
         // staging, so eviction is harmless; this is a performance heuristic only.
         // Tested: a pool at ~79% of the working set still retains ~0% hit rate and
         // is slower than bypassing the cache, so the full-fit threshold stays exact.
-        const bool use_expert_cache = expert_cache_.n_slots_ > 0 &&
+        const bool use_expert_cache = expert_cache_.layer_cached(layer) &&
                                       dispatch_cells <= expert_cache_.slots_per_layer_;
 
         // Host-resident NVFP4 experts, n>1: stage the layer once instead of two H2D per
@@ -295,15 +295,14 @@ void GraphExecutor::run_moe_legacy_fallback_(int layer, cudaStream_t stream, Moe
 
                     void* staged_ptr = nullptr;
                     if (layout.slot_bytes() > 0) {
-                        if (use_expert_cache && nvfp4_host_pool_ready_for_staging(expert_cache_) &&
+                        if (use_expert_cache && nvfp4_host_pool_ready_for_staging(expert_cache_, layer) &&
                             layout.slot_bytes() <= expert_cache_.slot_size_) {
                             ExpertCacheKey ck{fallback[0].data, eidx};
                             staged_ptr = expert_cache_.get_or_load_nvfp4(
                                 layer, proj, ck, w.data, layout.packed_bytes, w.scales,
                                 layout.ms_bytes, layout.packed_off(), w.tensor_scale, stream);
                             expert_cache_.flush_staging(stream);
-                        } else if (moe_.raw_staging_buf &&
-                                   moe_.raw_staging_size >= layout.slot_bytes()) {
+                        } else if (moe_.raw_staging_buf && moe_.raw_staging_size >= layout.slot_bytes()) {
                             // Same slot layout, one buffer: packed at 0, the
                             // micro-scales behind it, so the NvFP4QuantResult
                             // below is built the same way for both routes.

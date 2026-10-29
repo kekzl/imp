@@ -195,13 +195,15 @@ void GraphExecutor::moe_ffn_phase2_state_and_norm_(int layer, cudaStream_t strea
     }
 
     // Pre-check decode fast path (same logic as will_decode_fast below)
-    ctx.will_skip_residual_copy =
-        can_decode_fast(ctx.n, ly, moe_.dequant_buf, compute_dtype_,
-                        host_expert_pool_ready(ly.expert_up_packed, expert_cache_, moe_,
-                                               model_->config().n_experts_active),
-                        nvfp4_host_decode_ready(ly, expert_cache_, moe_, model_->config().n_experts_active),
-                        prof.moe_expert_bias_glu, qscratch_) &&
-        ly.w_up_shared.data == nullptr;  // must not have shared expert for full residual fusion
+    ctx.will_skip_residual_copy = can_decode_fast(ctx.n, ly, moe_.dequant_buf, compute_dtype_,
+                                                  host_expert_pool_ready(ly.expert_up_packed, layer,
+                                                                         expert_cache_, moe_,
+                                                                         model_->config().n_experts_active),
+                                                  nvfp4_host_decode_ready(ly, layer, expert_cache_, moe_,
+                                                                          model_->config().n_experts_active),
+                                                  prof.moe_expert_bias_glu, qscratch_) &&
+                                  ly.w_up_shared.data ==
+                                      nullptr;  // must not have shared expert for full residual fusion
 
     if (!ctx.will_skip_residual_copy) {
         // Kernel copy, not cudaMemcpyAsync: the D2D DMA submission blocked
@@ -321,9 +323,9 @@ void GraphExecutor::moe_ffn_phase3_route_(int layer, cudaStream_t stream, MoeFfn
 
     ctx.up_qtype         = ly.expert_up_packed.qtype;
     ctx.will_decode_fast = can_decode_fast(ctx.n, ly, moe_.dequant_buf, compute_dtype_,
-                                           host_expert_pool_ready(ly.expert_up_packed, expert_cache_, moe_,
-                                                                  cfg.n_experts_active),
-                                           nvfp4_host_decode_ready(ly, expert_cache_, moe_,
+                                           host_expert_pool_ready(ly.expert_up_packed, layer, expert_cache_,
+                                                                  moe_, cfg.n_experts_active),
+                                           nvfp4_host_decode_ready(ly, layer, expert_cache_, moe_,
                                                                    cfg.n_experts_active),
                                            prof.moe_expert_bias_glu, qscratch_);
     compute_moe_routing(layer, stream, ctx.n, ctx.d, ctx.ne, ctx.top_k, router_in,

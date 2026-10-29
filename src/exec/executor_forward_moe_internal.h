@@ -69,10 +69,12 @@ inline size_t expert_stride(const Tensor& packed, QType qtype) {
 // agree exactly, else a host pointer reaches a kernel. One definition, two
 // call sites. The whole working set must fit the layer's pool (#1365), or one projection's loads evict
 // another's.
-[[nodiscard]] inline bool host_expert_pool_ready(const Tensor& up_packed, const ExpertLRUCache& cache,
-                                   const MoEWorkspace& moe, int top_k) {
-    return (!up_packed.on_device && cache.n_slots_ > 0 && cache.pool_ != nullptr && cache.slot_size_ > 0 &&
-            moe.d_slot_idx != nullptr && moe.d_slot_idx_count >= kExpertProjCount * top_k &&
+[[nodiscard]] inline bool host_expert_pool_ready(const Tensor& up_packed, int layer,
+                                                 const ExpertLRUCache& cache, const MoEWorkspace& moe,
+                                                 int top_k) {
+    return (!up_packed.on_device && cache.layer_cached(layer) && cache.n_slots_ > 0 &&
+            cache.pool_ != nullptr && cache.slot_size_ > 0 && moe.d_slot_idx != nullptr &&
+            moe.d_slot_idx_count >= kExpertProjCount * top_k &&
             cache.slots_per_layer_ >= kExpertProjCount * top_k);
 }
 
@@ -80,18 +82,19 @@ inline size_t expert_stride(const Tensor& packed, QType qtype) {
 // and consumes it before the next, so it needs neither the slot-index
 // buffer nor 3*top_k slots (stream ordering already keeps a refill behind
 // its reader). Just needs a pool that carries NVFP4 slots at all.
-[[nodiscard]] inline bool nvfp4_host_pool_ready_for_staging(const ExpertLRUCache& cache) {
-    return (cache.nvfp4_slots_ && cache.d_slot_scales_ != nullptr && cache.pool_ != nullptr &&
-            cache.slot_size_ > 0 && cache.slots_per_layer_ >= kExpertProjCount);
+[[nodiscard]] inline bool nvfp4_host_pool_ready_for_staging(const ExpertLRUCache& cache, int layer) {
+    return (cache.nvfp4_slots_ && cache.layer_cached(layer) && cache.d_slot_scales_ != nullptr &&
+            cache.pool_ != nullptr && cache.slot_size_ > 0 && cache.slots_per_layer_ >= kExpertProjCount);
 }
 
 // Same question for NVFP4 experts, two extra requirements over GGUF: the
 // pool must be initialised with NVFP4 slots (wider: packed weights AND
 // micro-scales), and the per-slot tensor-scale mirror must exist (fused kernels index it by slot number).
-[[nodiscard]] inline bool nvfp4_host_pool_ready(const ExpertLRUCache& cache, const MoEWorkspace& moe, int top_k) {
-    return (cache.nvfp4_slots_ && cache.d_slot_scales_ != nullptr && cache.n_slots_ > 0 &&
-            cache.pool_ != nullptr && cache.slot_size_ > 0 && moe.d_slot_idx != nullptr &&
-            moe.d_slot_idx_count >= kExpertProjCount * top_k &&
+[[nodiscard]] inline bool nvfp4_host_pool_ready(const ExpertLRUCache& cache, int layer,
+                                                const MoEWorkspace& moe, int top_k) {
+    return (cache.nvfp4_slots_ && cache.layer_cached(layer) && cache.d_slot_scales_ != nullptr &&
+            cache.n_slots_ > 0 && cache.pool_ != nullptr && cache.slot_size_ > 0 &&
+            moe.d_slot_idx != nullptr && moe.d_slot_idx_count >= kExpertProjCount * top_k &&
             cache.slots_per_layer_ >= kExpertProjCount * top_k);
 }
 
@@ -100,9 +103,10 @@ inline size_t expert_stride(const Tensor& packed, QType qtype) {
 // pre-check, run_moe_decode_fast) that must agree exactly. Deliberately
 // does NOT look at expert_up_packed: that tensor is only stamped for
 // device-resident experts, so checking it kept host-resident NVFP4 decode stuck in the slow serial path.
-[[nodiscard]] inline bool nvfp4_host_decode_ready(const TransformerLayer& ly, const ExpertLRUCache& cache,
-                                    const MoEWorkspace& moe, int top_k) {
-    if (!nvfp4_host_pool_ready(cache, moe, top_k))
+[[nodiscard]] inline bool nvfp4_host_decode_ready(const TransformerLayer& ly, int layer,
+                                                  const ExpertLRUCache& cache, const MoEWorkspace& moe,
+                                                  int top_k) {
+    if (!nvfp4_host_pool_ready(cache, layer, moe, top_k))
         return false;
     const bool non_gated = (ly.expert_gate_packed.data == nullptr &&
                             (ly.expert_w_gate.empty() || ly.expert_w_gate[0].data == nullptr));

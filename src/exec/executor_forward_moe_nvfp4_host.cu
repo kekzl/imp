@@ -70,7 +70,7 @@ void GraphExecutor::verify_host_expert_placement() const {
         const bool ok = nvfp4_host_experts_servable(L.expert_w_up) &&
                         nvfp4_host_experts_servable(L.expert_w_down) &&
                         (!has_gate || nvfp4_host_experts_servable(L.expert_w_gate)) &&
-                        nvfp4_host_pool_ready(expert_cache_, moe_, top_k);
+                        nvfp4_host_pool_ready(expert_cache_, i, moe_, top_k);
         if (!ok) {
             ++unservable;
             if (first_bad < 0)
@@ -528,10 +528,7 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
                                                       w.tensor_scale, stream);
             if (!p)
                 return false;
-            const size_t flat =
-                static_cast<size_t>(static_cast<char*>(p) - static_cast<char*>(expert_cache_.pool_)) /
-                expert_cache_.slot_size_;
-            h_slots[off + k] = static_cast<int32_t>(flat) - (layer * expert_cache_.slots_per_layer_);
+            h_slots[off + k] = expert_cache_.slot_in_layer(layer, p);
         }
         return true;
     };
@@ -560,9 +557,7 @@ void GraphExecutor::run_moe_decode_nvfp4_host(int layer, cudaStream_t stream, in
     }
     }  // host staging
 
-    char* layer_pool = static_cast<char*>(expert_cache_.pool_) +
-                       (static_cast<size_t>(layer) * expert_cache_.slots_per_layer_ *
-                        expert_cache_.slot_size_);
+    char* layer_pool = expert_cache_.layer_pool(layer);
     float* slot_scales = expert_cache_.layer_slot_scales(layer);
     const size_t slot_size = expert_cache_.slot_size_;
     const int slots_per_layer = expert_cache_.slots_per_layer_;
@@ -632,7 +627,7 @@ constexpr int kHostDecodeRowsMax = 8;
 bool GraphExecutor::host_decode_rows_ok_(int layer, int n, int top_k) const {
     return n > 1 && n <= kHostDecodeRowsMax && compute_dtype_ == QType::F16 &&
            !model_->profile().moe_expert_bias_glu &&
-           nvfp4_host_decode_ready(model_->layer(layer), expert_cache_, moe_, top_k);
+           nvfp4_host_decode_ready(model_->layer(layer), layer, expert_cache_, moe_, top_k);
 }
 
 int GraphExecutor::moe_host_rows_capture_max() const {

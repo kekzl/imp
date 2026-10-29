@@ -201,6 +201,44 @@ TEST_F(ExpertCachePhase3Test, SlotPtrAgreesWithGpuPtr) {
     EXPECT_EQ(cache_.slot_ptr(2, slot_in_layer), p);
 }
 
+// Only masked layers get pool rows: the budget splits over 2 of 4 layers, uncached layers have no slots.
+TEST(ExpertCacheLayerMask, OnlyCachedLayersGetRows) {
+    constexpr int kSlot = 64;
+    void* src = nullptr;
+    ASSERT_EQ(cudaSuccess, cudaHostAlloc(&src, kSlot, cudaHostAllocDefault));
+    cudaStream_t stream = nullptr;
+    ASSERT_EQ(cudaSuccess, cudaStreamCreate(&stream));
+    ExpertLRUCache cache;
+    const std::vector<bool> mask = {false, true, false, true};
+    ASSERT_TRUE(cache.init(kSlot, 2 * 3 * kSlot, /*alloc=*/nullptr, /*n_layers=*/4, /*n_experts=*/8,
+                           /*debug_parity=*/true, /*nvfp4_slots=*/false, mask));
+    EXPECT_EQ(cache.n_rows_, 2);
+    EXPECT_EQ(cache.slots_per_layer_, 3);
+    EXPECT_EQ(cache.n_slots_, 6);
+    EXPECT_FALSE(cache.layer_cached(0));
+    EXPECT_EQ(cache.layer_pool(2), nullptr);
+    EXPECT_EQ(cache.slot_ptr(0, 0), nullptr);
+    EXPECT_EQ(cache.layer_pool(1), static_cast<char*>(cache.pool_));
+    EXPECT_EQ(cache.layer_pool(3), static_cast<char*>(cache.pool_) + (3 * kSlot));
+
+    ExpertCacheKey k0{reinterpret_cast<const void*>(uintptr_t{0x10}), 1};
+    EXPECT_EQ(cache.get_or_load(0, ExpertProj::Up, k0, src, kSlot, stream), nullptr);
+    ExpertCacheKey k3{reinterpret_cast<const void*>(uintptr_t{0x40}), 5};
+    void* p = cache.get_or_load(3, ExpertProj::Up, k3, src, kSlot, stream);
+    ASSERT_NE(p, nullptr);
+    const int s = cache.slot_in_layer(3, p);
+    EXPECT_GE(s, 0);
+    EXPECT_LT(s, 3);
+    EXPECT_EQ(cache.slot_ptr(3, s), p);
+    EXPECT_EQ(cache.slots_[cache.layer_flat_base(3) + s].layer, 3);
+    EXPECT_TRUE(cache.check_parity(stream));
+    EXPECT_EQ(cache.prefetch_layer(0, 2, kSlot), 0);
+
+    cache.destroy();
+    cudaStreamDestroy(stream);
+    cudaFreeHost(src);
+}
+
 // =========================================================================
 // Phase 4 — async prefetch
 // =========================================================================
