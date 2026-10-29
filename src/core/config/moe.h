@@ -70,10 +70,11 @@ struct MoE {
     bool nvfp4_device_args = true;
     // Opt-in smallM kernel branch for NVFP4 MoE prefill.
     bool nvfp4_smallM = false;
-    // Decode on host-resident NVFP4 experts: resolve routing to cache slots and gather the
+    // Decode on host-resident NVFP4 or GGUF experts: resolve routing to cache slots and gather the
     // misses on the device (no per-layer D2H + host LRU). Needs pin_host_experts (the
     // slabs are mapped); otherwise the host LRU path serves. 2026-09-20: see
-    // src/exec/expert_cache_device.h.
+    // src/exec/expert_cache_device.h. GGUF (packed experts in a mapped WSL2 slab): Qwen3-30B-A3B-Q4_K_M
+    // 48 host layers tg128 73.6 -> 236 tok/s, CUDA graphs stay on.
     bool device_expert_cache = true;
     // Decode (n = 1) on the device expert cache: the shared expert FFN runs on a side stream
     // while the layer's misses are gathered, into its own scratch; phase 8 joins and adds, so

@@ -81,7 +81,8 @@ __device__ __forceinline__ void commit_miss(const DevExpertLayer& L, int key, in
     L.slot_of[key] = victim;
     L.key_of_slot[victim] = key;
     L.stamp[victim] = clock;
-    L.slot_scales[victim] = src.scale;
+    if (L.slot_scales)
+        L.slot_scales[victim] = src.scale;
     misses[ord] = DevMissEntry{src.packed, src.ms,  L.pool + (static_cast<size_t>(victim) * L.slot_bytes),
                                nullptr,    nullptr, key,
                                old};
@@ -299,14 +300,20 @@ __global__ void expert_tier_wait_kernel(const TierMailbox* mb, const uint32_t* t
 }
 
 // grid (blocks_per_copy, routed entries): block y copies miss y, packed block then micro-scales.
+// Sizes per projection (key / n_experts): GGUF gate / up and down differ (Q4_K vs Q6_K), no micro-scales.
 __global__ void expert_cache_gather_kernel(const DevMissEntry* __restrict__ misses,
-                                           const int* __restrict__ n_miss, size_t packed_bytes,
-                                           size_t ms_bytes, size_t ms_off) {
+                                           const int* __restrict__ n_miss, DevGatherBytes sz) {
     const int i = blockIdx.y;
     if (i >= *n_miss)
         return;
     const DevMissEntry m = misses[i];
-    if (!m.packed || !m.ms)
+    const int proj = m.key / sz.n_experts;
+    // Selects, not a dynamic index: indexing the by-value parameter put it in a local frame.
+    const auto pick = [proj](const size_t (&v)[3]) { return proj == 0 ? v[0] : (proj == 1 ? v[1] : v[2]); };
+    const size_t packed_bytes = pick(sz.packed);
+    const size_t ms_bytes = pick(sz.ms);
+    const size_t ms_off = pick(sz.ms_off);
+    if (!m.packed || (ms_bytes != 0 && !m.ms))
         return;  // tiered source the host node could not provide (logged there)
     const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
     const size_t t0 = (static_cast<size_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
@@ -338,7 +345,8 @@ __global__ void expert_cache_gather_kernel(const DevMissEntry* __restrict__ miss
 bool DeviceExpertCache::init(const Model& model, ExpertLRUCache& cache, VRAMAllocator* alloc,
                              int top_k) {
     destroy();
-    if (!cache.pool_ || !cache.nvfp4_slots_ || !cache.d_slot_scales_ || cache.n_experts_ <= 0)
+    // NVFP4 slots carry a per-slot scale mirror; GGUF slots are raw blocks (layer_sources_ picks the kind).
+    if (!cache.pool_ || (cache.nvfp4_slots_ && !cache.d_slot_scales_) || cache.n_experts_ <= 0)
         return false;
     if (top_k <= 0 || top_k > kDevExpertMaxTopK || cache.slots_per_layer_ < 3 * top_k)
         return false;
@@ -557,14 +565,19 @@ void DeviceExpertCache::gather(int layer, int top_k, int n_rows, cudaStream_t st
         expert_tier_wait_kernel<<<1, 1, 0, stream>>>(tier_mb_d_, d_tier_seq_);
         IMP_CUDA_CHECK_LAUNCH();
     }
-    // gate, up and down share one slot layout per model (the pool was sized for the largest);
-    // the gather takes the up projection's sizes, identical for the three in every NVFP4 MoE
-    // seen so far (N x K and K x N have the same byte counts).
-    const size_t i = (static_cast<size_t>(layer) * 3) + 1;
+    // Per-projection sizes (the pool was sized for the largest): NVFP4 layers have one layout for all
+    // three, GGUF gate / up and down can differ.
+    DevGatherBytes sz{};
+    sz.n_experts = n_experts_;
+    for (int p = 0; p < 3; ++p) {
+        const size_t i = (static_cast<size_t>(layer) * 3) + p;
+        sz.packed[p] = packed_bytes_[i];
+        sz.ms[p] = ms_bytes_[i];
+        sz.ms_off[p] = ms_off_[i];
+    }
     const dim3 grid(16, 3 * top_k * n_rows);
     expert_cache_gather_kernel<<<grid, 256, 0, stream>>>(tier ? tier_misses_d_ : d_misses_,
-                                                         tier ? tier_n_miss_d_ : d_n_miss_, packed_bytes_[i],
-                                                         ms_bytes_[i], ms_off_[i]);
+                                                         tier ? tier_n_miss_d_ : d_n_miss_, sz);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

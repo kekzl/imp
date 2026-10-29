@@ -1653,10 +1653,13 @@ static bool upload_expert_weights(std::vector<TransformerLayer>& layers, int n_l
                     // WSL2: cudaHostRegister fails on mmap'd memory. Instead,
                     // allocate fresh pinned memory and copy mmap'd data there.
                     // This enables true async DMA H2D (no per-token CPU memcpy).
-                    PinnedBuffer pinned_buf =
-                        PinnedBuffer::acquire(cuda_host_pinned_allocator(), total_raw);
+                    // Mapped: the device expert cache gathers misses zero-copy from this slab.
+                    const void* src_raw = packed.data;
+                    PinnedBuffer pinned_buf = PinnedBuffer::acquire_filled(total_raw, HostPinnedKind::Mapped,
+                                                                           [&](void* p) {
+                                                                               memcpy(p, src_raw, total_raw);
+                                                                           });
                     if (!pinned_buf.empty()) {
-                        memcpy(pinned_buf.data(), packed.data, total_raw);
                         packed.data = pinned_buf.data();
                         ctx.host_pinned_allocs.push_back(std::move(pinned_buf));
                         IMP_LOG_INFO("  %s: WSL2 pinned copy (%.2f MiB, DMA-ready)", name,

@@ -50,6 +50,8 @@ bool DeviceExpertCache::layer_layout_uniform_(size_t b) const {
 // Tier: every expert host-resident but not all in a mapped slab, and the tier is allowed.
 DeviceExpertCache::LayerSource DeviceExpertCache::layer_sources_(const Model& model, int l, size_t slot_size,
                                                                  std::vector<DevExpertSrc>& src) {
+    if (!cache_->nvfp4_slots_)
+        return layer_sources_gguf_(model, l, slot_size, src);
     const int ne = n_experts_;
     const TransformerLayer& ly = model.layer(l);
     if (ly.expert_w_up.empty() || !ly.expert_w_up[0].data || ly.expert_w_up[0].on_device)
@@ -88,6 +90,36 @@ DeviceExpertCache::LayerSource DeviceExpertCache::layer_sources_(const Model& mo
         src[i].packed = src[i].ms = nullptr;
     return LayerSource::Tier;
 }
+// GGUF: each 3-D packed projection in one mapped pinned slab; a slot holds one projection's raw expert
+// blocks at offset 0 (no micro-scales, scale 1). No tier: a layer outside a mapped slab stays on the host
+// LRU.
+DeviceExpertCache::LayerSource DeviceExpertCache::layer_sources_gguf_(const Model& model, int l,
+                                                                      size_t slot_size,
+                                                                      std::vector<DevExpertSrc>& src) {
+    const int ne = n_experts_;
+    const TransformerLayer& ly = model.layer(l);
+    if (!ly.expert_up_packed.data || ly.expert_up_packed.on_device)
+        return LayerSource::None;
+    const Tensor* projs[3] = {&ly.expert_gate_packed, &ly.expert_up_packed, &ly.expert_down_packed};
+    const size_t b = static_cast<size_t>(l) * 3;
+    for (int p = 0; p < 3; ++p) {
+        const Tensor& t = *projs[p];
+        if (p == 0 && !t.data)
+            continue;  // non-gated model
+        if (!t.data || t.on_device || t.ndim < 3 || t.shape[0] != ne)
+            return LayerSource::None;
+        const size_t raw = static_cast<size_t>(t.shape[1]) * qtype_row_bytes(t.qtype, t.shape[2]);
+        const char* base = device_view(model, t.data);
+        if (!base || raw == 0 || raw > slot_size || raw % 16 != 0 ||
+            reinterpret_cast<uintptr_t>(base) % 16 != 0)
+            return LayerSource::None;
+        packed_bytes_[b + p] = raw;
+        for (int e = 0; e < ne; ++e)
+            src[((b + p) * ne) + e] = DevExpertSrc{base + (static_cast<size_t>(e) * raw), nullptr, 1.0f};
+    }
+    return LayerSource::Pinned;
+}
+
 bool DeviceExpertCache::init_tier_(const Model& model, const std::vector<char>& tiered, int top_k,
                                    int host_pool_mib) {
     const int n_layers = static_cast<int>(tiered.size());
