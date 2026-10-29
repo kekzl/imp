@@ -57,6 +57,7 @@ Stream-K 128x128 (grid = SMs, forward unit ranges: a CTA's first segment writes 
 - pp512 per shape, own vs CUTLASS us/call (before the idle rule): N=17408 89.3 vs 86.0, N=6144 36.6 / 77.5 vs 31.7 / 68.5, N=1024 14.0 vs 11.9; N=5120/10240 group 83.2 vs 87.9 ms total.
 - Stream-K epilogue staged in its own buffer (3 stages, 168 regs): isolated M=512 N=1024 19.0 -> 15.8, N=6144 32.3 -> 30.8 us; in situ pp512 GEMM sum 221.7-222.7 vs CUTLASS 217.1-219.5 ms, unchanged: in situ the stream-K tiles run slower than isolated (N=17408 90.6 vs 87.6 us), CUTLASS does not.
 - CUTLASS stays the default below M 2048 until the own arm leads there.
+- Isolated vs in situ, explained: `Nvfp4GemmTileBench` rotated 4 weight copies, which fit the 96 MB L2 up to 6144 x 5120 (4 x 15.7 MB). With the L2 flushed (256 MiB memset) before each timed call, median of 31, two runs agree within 2-5 % and rank like in situ. M=512 own auto vs CUTLASS us: N 17408 K 5120 103.4 / 104.5 vs 98.3 / 96.3, N 10240 51.2 / 52.0 vs 56.6 / 56.6, N 1024 19.2 / 19.2 vs 17.7 / 19.7, the rest within 5 %. Rotating > 512 MiB of copies instead swung 12.6 -> 28.3 us between runs. 5 stages (rotating bench, noisy): no clear gain.
 
 ## Per cell
 

@@ -141,7 +141,7 @@ INSTANTIATE_TEST_SUITE_P(Shapes, Nvfp4GemmTileTest,
                                            std::make_tuple(33, 136, 1024), std::make_tuple(512, 1024, 5120),
                                            std::make_tuple(1000, 2056, 256)));
 
-// Timing on Qwen3.8-27B projection shapes; 4 weight copies rotate so W is not L2-resident.
+// Timing on Qwen3.8-27B projection shapes, operands from DRAM (L2 flushed before each call).
 TEST(Nvfp4GemmTileBench, VsCutlassAndCublasLt) {
     if (!cutlass_sm120_nvfp4_available())
         GTEST_SKIP() << "CUTLASS sm_120 NVFP4 not available";
@@ -150,6 +150,9 @@ TEST(Nvfp4GemmTileBench, VsCutlassAndCublasLt) {
     const int shapes[][2] = {{17408, 5120}, {5120, 17408}, {10240, 5120},
                              {6144, 5120},  {5120, 6144},  {1024, 5120}};
     const int ms[] = {512, 2048};
+    constexpr size_t kFlushBytes = size_t(256) << 20;  // > 2 x the 96 MB L2
+    void* flush = nullptr;
+    ASSERT_EQ(cudaMalloc(&flush, kFlushBytes), cudaSuccess);
     constexpr int kVariants = 5;  // variants 0..3, then -1 (auto, the dispatch default)
     std::fprintf(stderr, "%6s %6s %6s %8s %8s %8s %8s %8s %8s %8s %7s\n", "M", "N", "K", "cutlass", "lt",
                  "t128", "t256", "sync", "sk", "auto", "best_TF");
@@ -157,7 +160,9 @@ TEST(Nvfp4GemmTileBench, VsCutlassAndCublasLt) {
         for (int M : ms) {
             Operands o;
             make_operands(o, M, nk[0], nk[1], s);
-            constexpr int kCopies = 4;
+            // One W copy; the L2 is flushed before every timed call, so W and A come from DRAM as in a
+            // prefill pass (rotating 4 copies kept small shapes L2-resident and hid the M < 2048 gap).
+            constexpr int kCopies = 1;
             const size_t wb = size_t(o.N) * o.K / 2;
             const size_t sb = o.cw.sf_bytes;
             std::vector<void*> wd(kCopies), wsf(kCopies);
@@ -167,23 +172,32 @@ TEST(Nvfp4GemmTileBench, VsCutlassAndCublasLt) {
                 cudaMemcpyAsync(wd[c], o.cw.data, wb, cudaMemcpyDeviceToDevice, s);
                 cudaMemcpyAsync(wsf[c], o.cw.scale_factors, sb, cudaMemcpyDeviceToDevice, s);
             }
+            // >= 1 s back to back (clocks ramp ~1 s), then the median of 31 single calls, each after a flush.
             auto time_us = [&](auto&& fn) {
                 cudaEvent_t e0, e1;
                 cudaEventCreate(&e0);
                 cudaEventCreate(&e1);
-                for (int i = 0; i < 40; ++i)
-                    fn(i % kCopies);
-                constexpr int kIters = 40;
                 cudaEventRecord(e0, s);
-                for (int i = 0; i < kIters; ++i)
-                    fn(i % kCopies);
-                cudaEventRecord(e1, s);
-                cudaEventSynchronize(e1);
-                float ms_total = 0.0f;
-                cudaEventElapsedTime(&ms_total, e0, e1);
+                for (float warm = 0.0f; warm < 1000.0f;) {
+                    for (int i = 0; i < 20; ++i)
+                        fn(0);
+                    cudaEventRecord(e1, s);
+                    cudaEventSynchronize(e1);
+                    cudaEventElapsedTime(&warm, e0, e1);
+                }
+                std::vector<float> t(31);
+                for (size_t i = 0; i < t.size(); ++i) {
+                    cudaMemsetAsync(flush, static_cast<int>(i), kFlushBytes, s);
+                    cudaEventRecord(e0, s);
+                    fn(0);
+                    cudaEventRecord(e1, s);
+                    cudaEventSynchronize(e1);
+                    cudaEventElapsedTime(&t[i], e0, e1);
+                }
+                std::nth_element(t.begin(), t.begin() + 15, t.end());
                 cudaEventDestroy(e0);
                 cudaEventDestroy(e1);
-                return 1000.0 * ms_total / kIters;
+                return 1000.0 * t[15];
             };
             CutlassNvFP4Weight cw = o.cw;
             const double t_ct = time_us([&](int c) {
@@ -219,5 +233,6 @@ TEST(Nvfp4GemmTileBench, VsCutlassAndCublasLt) {
             free_operands(o);
         }
     }
+    cudaFree(flush);
     cudaStreamDestroy(s);
 }
