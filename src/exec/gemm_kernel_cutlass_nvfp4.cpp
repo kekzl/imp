@@ -3,6 +3,7 @@
 #include "compute/gemm_cutlass_mxfp4_sm120.h"  // CutlassMxFP4Weight, gemm_mxfp4_cutlass_sm120 (QW7 dual-cache path)
 #include "compute/gemm.h"                      // gemm_nvfp4_cublaslt
 #include "compute/gemm_cutlass_sm120.h"  // CutlassNvFP4Weight, gemm_nvfp4_cutlass_sm120, quantize_fp16_to_nvfp4_cutlass
+#include "quant/nvfp4_gemm_tile.h"       // gemm_nvfp4_tile
 #include "core/logging.h"
 #include "core/process_diag.h"
 #include "core/tensor.h"
@@ -70,6 +71,18 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     // tier) but kept because that is one edit away from not being true (#1547).
     if (args.beta != 0.0f)
         return GemmDispatchResult::PreconditionFail;
+    // gemm.nvfp4_tile_min_m: own TMA GEMM, same SfAtom bytes, bit-equal to CUTLASS; libraries on refusal.
+    const int tile_min_m = process_diag_nvfp4_tile_min_m();
+    if (tile_min_m > 0 && M >= tile_min_m &&
+        gemm_nvfp4_tile(args.cutlass_act_data, args.cutlass_act_sf, payload.data, payload.scale_factors,
+                        payload.tensor_scale, args.output->data, M, N, K, args.stream)) {
+        static bool logged = false;  // activity proof, once
+        if (!logged) {
+            logged = true;
+            IMP_LOG_INFO("gemm.nvfp4_tile_min_m: own NVFP4 prefill GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
+        }
+        return GemmDispatchResult::Ok;
+    }
     // gemm.nvfp4_cublaslt_min_m: cuBLASLt on the same SfAtom bytes from M >= min_m; CUTLASS on refusal.
     const int lt_min_m = process_diag_nvfp4_cublaslt_min_m();
     if (lt_min_m > 0 && M >= lt_min_m &&
