@@ -68,6 +68,7 @@ struct ProcessDiag {
     int nvfp4_tile_min_m = 2048;         // matches the config.h default
     bool f16_tile = true;                // matches the config.h default
     bool moe_tile = true;                // matches the config.h default
+    bool mxfp8_tile = true;              // matches the config.h default
     bool force_splitk_fallback = false;  // test hook
     std::string attention_mxfp4_mode = "auto";
     bool mxfp4_blockscale = false;
@@ -179,6 +180,7 @@ int process_diag_nvfp4_cublaslt_min_m();  // gemm.nvfp4_cublaslt_min_m: 0 off
 [[nodiscard]] int process_diag_nvfp4_tile_min_m();  // gemm.nvfp4_tile_min_m: 0 off
 [[nodiscard]] bool process_diag_f16_tile();         // gemm.f16_tile
 [[nodiscard]] bool process_diag_moe_tile();         // gemm.moe_tile
+[[nodiscard]] bool process_diag_mxfp8_tile();       // gemm.mxfp8_tile
 // test hook: force the paged-decode split-K path onto its single-split GQA/MHA
 // fallback even on a clean launch, so the fallback can be verified against the
 // split-K result without provoking a real cudaErrorInvalidValue. Default off.

@@ -8,6 +8,7 @@
 // Measured against this design (test_nvfp4_gemm_tile bench, RTX 5090): one producer warp of
 // 16 B cp.async 4x slower than CUTLASS, per-row 64 B bulk copies 13x, 5 stages / grouped-M
 // raster / persistent CTAs / direct epilogue stores 0..+8 % slower; 128x128 is L2-bound (77 %).
+// gemm_mxfp8_tile: the same kernels on MXFP8 bytes (Cfg MX8, kind::mxf8f6f4 m16n8k32), half the BK.
 
 #include "quant/nvfp4_gemm_tile.h"
 #include "quant/nvfp4_gemm_tile_core.cuh"
@@ -38,17 +39,27 @@ struct TileArgs {
     int* sk_flags;
     float* sk_parts;
     int sk_per;
+    const float* col_scale;  // MXFP8 only: D column n *= col_scale[n] (FP8 row-scale view), may be null
 };
+
+// alpha, times col_scale[col], col + 1 for the MXFP8 row-scale view.
+template <class C>
+__device__ __forceinline__ float2 out_scale(const TileArgs& p, int col) {
+    if constexpr (C::kMx8)
+        if (p.col_scale != nullptr && col < p.N)  // N % 8 == 0: col + 1 < N too
+            return make_float2(p.alpha * p.col_scale[col], p.alpha * p.col_scale[col + 1]);
+    return make_float2(p.alpha, p.alpha);
+}
 
 // Sync mainloop stage load: 16 B cp.async chunks over the 256 MMA threads (rows >= M/N zero-fill).
 template <class C>
 __device__ __forceinline__ void load_stage(uint32_t s_base, const TileArgs& p, int m0, int n0, int kt) {
     constexpr int kData = kBM * C::kChunks;
     constexpr int kSf = C::kSfBytes / 16;
-    const size_t row_bytes = static_cast<size_t>(p.K) / 2;
-    const size_t k_byte = static_cast<size_t>(kt) * (C::kBK / 2);
-    const size_t sf_k = static_cast<size_t>(kt) * C::kSfBytes;
-    const size_t sf_slab = static_cast<size_t>(p.K / 64) * 512;
+    const size_t row_bytes = C::row_bytes(p.K);
+    const size_t k_byte = static_cast<size_t>(kt) * C::kRB;
+    const size_t sf_k = C::sf_k(kt);
+    const size_t sf_slab = C::sf_slab(p.K);
     for (int i = threadIdx.x; i < 2 * kData + 2 * kSf; i += kMmaThreads) {
         if (i < 2 * kData) {
             const bool is_w = i >= kData;
@@ -77,11 +88,11 @@ __device__ __forceinline__ void load_stage(uint32_t s_base, const TileArgs& p, i
 template <class C>
 __device__ __forceinline__ void tma_stage(uint32_t s_base, uint32_t full, const CUtensorMap* ma,
                                           const CUtensorMap* mw, const TileArgs& p, int m0, int n0, int kt) {
-    const size_t sf_slab = static_cast<size_t>(p.K / 64) * 512;
-    const size_t sf_k = static_cast<size_t>(kt) * C::kSfBytes;
+    const size_t sf_slab = C::sf_slab(p.K);
+    const size_t sf_k = C::sf_k(kt);
     mbar_expect_tx(full, C::kTxBytes);
-    tma_2d(s_base, ma, kt * (C::kBK / 2), m0, full);
-    tma_2d(s_base + C::kATile, mw, kt * (C::kBK / 2), n0, full);
+    tma_2d(s_base, ma, kt * C::kRB, m0, full);
+    tma_2d(s_base + C::kATile, mw, kt * C::kRB, n0, full);
     bulk_1d(s_base + C::kSfA, p.a_sf + (static_cast<size_t>(m0 / kBM) * sf_slab) + sf_k, C::kSfBytes, full);
 #pragma unroll
     for (int j = 0; j < C::kBN / 128; ++j)
@@ -108,7 +119,8 @@ __device__ __forceinline__ void tma_consume(float (&acc)[4][C::kNF][4], const Ri
     for (int kt = 0; kt < g.KT; ++kt) {
         const int s = kt % C::kStages;
         mbar_wait(g.bars + s * 8, (kt / C::kStages) & 1);
-        mma_stage<C>(acc, g.s0 + s * C::kStageBytes, g.smem + s * C::kStageBytes, g.wm, g.wn, g.lane);
+        mma_stage<C>(acc, g.s0 + s * C::kStageBytes, g.smem + s * C::kStageBytes, g.wm, g.wn, g.lane,
+                     C::sf_g0(kt));
         __syncwarp();
         if (g.lane == 0)
             mbar_arrive(g.bars + (C::kStages + s) * 8);
@@ -172,7 +184,8 @@ __device__ __forceinline__ void sync_mainloop(float (&acc)[4][C::kNF][4], const 
             load_stage<C>(g.s0 + (pf % C::kStages) * C::kStageBytes, p, g.m0, g.n0, pf);
         cp_async_commit();
         const int s = kt % C::kStages;
-        mma_stage<C>(acc, g.s0 + s * C::kStageBytes, g.smem + s * C::kStageBytes, g.wm, g.wn, g.lane);
+        mma_stage<C>(acc, g.s0 + s * C::kStageBytes, g.smem + s * C::kStageBytes, g.wm, g.wn, g.lane,
+                     C::sf_g0(kt));
     }
     cp_async_wait<0>();
 }
@@ -187,12 +200,14 @@ __device__ __forceinline__ void store_tile(const float (&acc)[4][C::kNF][4], hal
 #pragma unroll
     for (int mf = 0; mf < 4; ++mf)
 #pragma unroll
-        for (int nf = 0; nf < C::kNF; ++nf)
+        for (int nf = 0; nf < C::kNF; ++nf) {
+            const float2 sc = out_scale<C>(p, n0 + wn + nf * 8 + T0 * 2);
 #pragma unroll
             for (int h = 0; h < 2; ++h)
                 *reinterpret_cast<__half2*>(so + ((wm + mf * 16 + T1 + h * 8) * C::kOS) + wn + nf * 8 +
-                                            T0 * 2) = __floats2half2_rn(acc[mf][nf][h * 2] * p.alpha,
-                                                                        acc[mf][nf][h * 2 + 1] * p.alpha);
+                                            T0 * 2) = __floats2half2_rn(acc[mf][nf][h * 2] * sc.x,
+                                                                        acc[mf][nf][h * 2 + 1] * sc.y);
+        }
     asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
     for (int i = threadIdx.x; i < kBM * (C::kBN / 8); i += kMmaThreads) {
         const int r = i / (C::kBN / 8);
@@ -239,13 +254,14 @@ __device__ __forceinline__ void store_direct(const float (&acc)[4][C::kNF][4], c
 #pragma unroll
         for (int nf = 0; nf < C::kNF; ++nf) {
             const int col = n0 + wn + nf * 8 + T0 * 2;
+            const float2 sc = out_scale<C>(p, col);
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
                 const int row = m0 + wm + mf * 16 + T1 + h * 8;
                 if (row < p.M && col < p.N)
                     *reinterpret_cast<__half2*>(p.d + (static_cast<size_t>(row) * p.N) +
-                                                col) = __floats2half2_rn(acc[mf][nf][h * 2] * p.alpha,
-                                                                         acc[mf][nf][(h * 2) + 1] * p.alpha);
+                                                col) = __floats2half2_rn(acc[mf][nf][h * 2] * sc.x,
+                                                                         acc[mf][nf][(h * 2) + 1] * sc.y);
             }
         }
 }
@@ -305,7 +321,8 @@ __device__ __forceinline__ void sk_mainloop(const Ring& g, const TileArgs& p, co
         for (int kt = sg.kb; kt < sg.ke; ++kt, ++ring) {
             const int s = ring % C::kStages;
             mbar_wait(g.bars + s * 8, (ring / C::kStages) & 1);
-            mma_stage<C>(acc, g.s0 + s * C::kStageBytes, g.smem + s * C::kStageBytes, g.wm, g.wn, g.lane);
+            mma_stage<C>(acc, g.s0 + s * C::kStageBytes, g.smem + s * C::kStageBytes, g.wm, g.wn, g.lane,
+                         C::sf_g0(kt));
             __syncwarp();
             if (g.lane == 0)
                 mbar_arrive(g.bars + (C::kStages + s) * 8);
@@ -435,8 +452,8 @@ bool launch_tile(const TileArgs& p, cudaStream_t stream) {
     CUtensorMap map_w{};
     if constexpr (C::kTma) {
         if (reinterpret_cast<uintptr_t>(p.a) % 16 != 0 || reinterpret_cast<uintptr_t>(p.w) % 16 != 0 ||
-            !encode_operand(&map_a, p.a, p.M, p.K / 2, C::kBK / 2, kBM) ||
-            !encode_operand(&map_w, p.w, p.N, p.K / 2, C::kBK / 2, C::kBN))
+            !encode_operand(&map_a, p.a, p.M, static_cast<int>(C::row_bytes(p.K)), C::kRB, kBM) ||
+            !encode_operand(&map_w, p.w, p.N, static_cast<int>(C::row_bytes(p.K)), C::kRB, C::kBN))
             return false;
     }
     static const bool smem_ok = cudaFuncSetAttribute(gemm_nvfp4_tile_kernel<C>,
@@ -494,50 +511,88 @@ int pick_variant(int M, int N, int sms, bool sk_fits) {
     return use256 ? 1 : 0;
 }
 
+// Both formats run the same byte geometry: an MXFP8 stage of BK elements moves what an NVFP4 stage
+// of 2 x BK does, so the NVFP4 tile choices carry over with BK halved.
+template <bool MX8>
+bool run_tile(TileArgs p, cudaStream_t stream, int variant, void* workspace, size_t workspace_bytes) {
+    constexpr int kB1 = MX8 ? 64 : 128;
+    constexpr int kB2 = 2 * kB1;
+    using Sk = Cfg<128, kB1, 3, true, true, true, MX8>;
+    const int M = p.M;
+    const int N = p.N;
+    const int K = p.K;
+    if (M <= 0 || N <= 0 || K <= 0 || N % 8 != 0 || !p.a || !p.a_sf || !p.w || !p.w_sf || !p.d)
+        return false;
+    const int sms = sm_count();
+    const int units = ((N + 127) / 128) * ((M + kBM - 1) / kBM) * (K / Sk::kBK);
+    const bool sk_fits = K % Sk::kBK == 0 && workspace != nullptr &&
+                         sms * 4 <= static_cast<int>(kSkFlagBytes) &&
+                         workspace_bytes >=
+                             kSkFlagBytes + (static_cast<size_t>(sms) * kBM * 128 * sizeof(float));
+    p.sk_flags = static_cast<int*>(workspace);
+    p.sk_parts = sk_fits ? reinterpret_cast<float*>(static_cast<uint8_t*>(workspace) + kSkFlagBytes)
+                         : nullptr;
+    p.sk_per = (units + sms - 1) / sms;
+    if (variant < 0)
+        variant = pick_variant(M, N, sms, sk_fits);
+    switch (variant) {
+        case 1:
+            if (launch_tile<Cfg<256, kB1, 3, true, false, false, MX8>>(p, stream))
+                return true;
+            break;
+        case 2:
+            return launch_tile<Cfg<128, kB2, 2, false, false, false, MX8>>(p, stream);
+        case 3:
+            if (sk_fits && launch_tile<Sk>(p, stream))
+                return true;
+            [[fallthrough]];
+        default:
+            if (launch_tile<Cfg<128, kB1, 4, true, true, false, MX8>>(p, stream))
+                return true;
+            break;
+    }
+    // no TMA map (alignment): sync mainloop
+    return launch_tile<Cfg<128, kB2, 2, false, false, false, MX8>>(p, stream);
+}
+
 }  // namespace
 
 bool gemm_nvfp4_tile(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf, float alpha,
                      void* d_fp16, int M, int N, int K, cudaStream_t stream, int variant, void* workspace,
                      size_t workspace_bytes) {
-    if (M <= 0 || N <= 0 || K <= 0 || N % 8 != 0 || !a_data || !a_sf || !w_data || !w_sf || !d_fp16)
-        return false;
-    const int sms = sm_count();
-    const int units = ((N + 127) / 128) * ((M + kBM - 1) / kBM) * (K / SkCfg::kBK);
-    const bool sk_fits = K % SkCfg::kBK == 0 && workspace != nullptr &&
-                         sms * 4 <= static_cast<int>(kSkFlagBytes) &&
-                         workspace_bytes >=
-                             kSkFlagBytes + (static_cast<size_t>(sms) * kBM * 128 * sizeof(float));
-    TileArgs p{static_cast<const uint8_t*>(a_data),
-               static_cast<const uint8_t*>(a_sf),
-               static_cast<const uint8_t*>(w_data),
-               static_cast<const uint8_t*>(w_sf),
-               static_cast<half*>(d_fp16),
-               alpha,
-               M,
-               N,
-               K,
-               static_cast<int*>(workspace),
-               sk_fits ? reinterpret_cast<float*>(static_cast<uint8_t*>(workspace) + kSkFlagBytes) : nullptr,
-               (units + sms - 1) / sms};
-    if (variant < 0)
-        variant = pick_variant(M, N, sms, sk_fits);
-    switch (variant) {
-        case 1:
-            if (launch_tile<Cfg<256, 128, 3, true>>(p, stream))
-                return true;
-            break;
-        case 2:
-            return launch_tile<Cfg<128, 256, 2, false>>(p, stream);
-        case 3:
-            if (sk_fits && launch_tile<SkCfg>(p, stream))
-                return true;
-            [[fallthrough]];
-        default:
-            if (launch_tile<Cfg<128, 128, 4, true, true>>(p, stream))
-                return true;
-            break;
-    }
-    return launch_tile<Cfg<128, 256, 2, false>>(p, stream);  // no TMA map (alignment): sync mainloop
+    const TileArgs p{static_cast<const uint8_t*>(a_data),
+                     static_cast<const uint8_t*>(a_sf),
+                     static_cast<const uint8_t*>(w_data),
+                     static_cast<const uint8_t*>(w_sf),
+                     static_cast<half*>(d_fp16),
+                     alpha,
+                     M,
+                     N,
+                     K,
+                     nullptr,
+                     nullptr,
+                     0,
+                     nullptr};
+    return run_tile<false>(p, stream, variant, workspace, workspace_bytes);
+}
+
+bool gemm_mxfp8_tile(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf,
+                     const float* col_scale, void* d_fp16, int M, int N, int K, cudaStream_t stream,
+                     int variant, void* workspace, size_t workspace_bytes) {
+    const TileArgs p{static_cast<const uint8_t*>(a_data),
+                     static_cast<const uint8_t*>(a_sf),
+                     static_cast<const uint8_t*>(w_data),
+                     static_cast<const uint8_t*>(w_sf),
+                     static_cast<half*>(d_fp16),
+                     1.0f,
+                     M,
+                     N,
+                     K,
+                     nullptr,
+                     nullptr,
+                     0,
+                     col_scale};
+    return run_tile<true>(p, stream, variant, workspace, workspace_bytes);
 }
 
 // Shared with gemm_f16_tile.cu (same TMA operand maps, 2-byte elements counted as bytes).

@@ -114,6 +114,9 @@ struct GEMM {
     // e2e +3..7 / +2 %, PPL 11.4338 both arms; gpt-oss-20b (K 2880) pp4096 +2.3..2.8 %. Refuses K % 64 != 0
     // or K < 384 (CUTLASS then).
     bool moe_tile = true;
+    // Own MXFP8 GEMM (nvfp4_gemm_tile.cu, MX8 configs) before CUTLASS MXFP8 for the GDN projection
+    // prefill copies; bit-equal on plain weights, column scale fused into the epilogue (FP8 row view).
+    bool mxfp8_tile = true;
     // Which small-M implementation the gate above dispatches: 1 = W4A16
     // dequant+HMMA kernel (kept for A/B), 2 = native mxf4nvf4 producer/consumer
     // pipeline (nvfp4_gemm_smallm_v2.cu).

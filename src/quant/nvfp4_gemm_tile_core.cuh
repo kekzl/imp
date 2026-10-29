@@ -13,10 +13,15 @@ namespace imp::nvfp4_tile {
 constexpr int kBM = 128;
 constexpr int kMmaThreads = 256;
 
-template <int BN, int BK, int STAGES, bool TMA, bool PW = false, bool SK = false>
+template <int BN, int BK, int STAGES, bool TMA, bool PW = false, bool SK = false, bool MX8 = false>
 struct Cfg {
     static constexpr int kBN = BN;
     static constexpr int kBK = BK;
+    // MX8: MXFP8 operands (E4M3 bytes, one UE8M0 per 32 K, atom = 128 K). A stage moves kRB bytes per
+    // row in both formats, so ldmatrix fragments, swizzle and TMA boxes are shared.
+    static constexpr bool kMx8 = MX8;
+    static constexpr int kRB = MX8 ? BK : BK / 2;
+    static_assert(!MX8 || BK == 64 || BK % 128 == 0, "MXFP8 stage = half or whole SfAtoms");
     static constexpr int kStages = STAGES;
     static constexpr bool kTma = TMA;
     // PW: a 9th warp issues the TMA loads. 9 warps put 3 on one SM sub-partition, which caps
@@ -27,17 +32,31 @@ struct Cfg {
     static constexpr int kThreads = kMmaThreads + (kPw ? 32 : 0);
     static constexpr int kWN = BN / 4;  // warp tile 64 x kWN
     static constexpr int kNF = kWN / 8;
-    static constexpr int kChunks = BK / 32;  // 16 B chunks per row per stage
+    static constexpr int kChunks = kRB / 16;  // 16 B chunks per row per stage
     // TMA: dense rows, swizzled chunks (64B / 128B mode); sync: rows padded by 16 B. Both put
     // the 8 rows of an ldmatrix on 32 distinct banks.
-    static constexpr int kRS = TMA ? BK / 2 : BK / 2 + 16;
-    static constexpr int kSfBytes = (BK / 64) * 512;  // SfAtoms per 128-row slab per stage
+    static constexpr int kRS = TMA ? kRB : kRB + 16;
+    // SfAtoms per 128-row slab per stage; an MXFP8 BK=64 stage loads its whole atom (two stages share it).
+    static constexpr int kSfBytes = MX8 ? ((BK + 127) / 128) * 512 : (BK / 64) * 512;
+    // Operand geometry per K: row bytes, SF bytes per 128-row slab, SF offset and first K group of stage kt.
+    static constexpr size_t row_bytes(int K) {
+        return MX8 ? static_cast<size_t>(K) : static_cast<size_t>(K) / 2;
+    }
+    static constexpr size_t sf_slab(int K) {
+        return MX8 ? static_cast<size_t>((K + 127) / 128) * 512 : static_cast<size_t>(K / 64) * 512;
+    }
+    __host__ __device__ static constexpr size_t sf_k(int kt) {
+        return MX8 ? static_cast<size_t>((kt * BK) / 128) * 512 : static_cast<size_t>(kt) * kSfBytes;
+    }
+    __host__ __device__ static constexpr int sf_g0(int kt) { return MX8 ? ((kt * BK) % 128) / 32 : 0; }
     static constexpr int kATile = kBM * kRS;
     static constexpr int kWTile = BN * kRS;
     static constexpr int kSfA = kATile + kWTile;  // stage offsets of the SF slabs
     static constexpr int kSfW = kSfA + kSfBytes;
-    static constexpr int kStageBytes = kSfW + (BN / 128) * kSfBytes;
-    static constexpr uint32_t kTxBytes = (kBM + BN) * (BK / 2) + (1 + BN / 128) * kSfBytes;
+    // Rounded to the TMA alignment (MXFP8 128x256: 25.5 KiB of tiles + SF).
+    static constexpr int kStageBytes = TMA ? ((kSfW + (BN / 128) * kSfBytes + 1023) / 1024) * 1024
+                                           : kSfW + (BN / 128) * kSfBytes;
+    static constexpr uint32_t kTxBytes = (kBM + BN) * kRB + (1 + BN / 128) * kSfBytes;
     static constexpr int kOS = BN + 8;   // epilogue staging stride in halves: half2 writes conflict-free
     static constexpr int kAlign = 1024;  // 128B-swizzle atom; stage and tile offsets keep it
     // Stream-K stages the epilogue in its own buffer behind the mbarriers when it fits 99 KiB: the
@@ -53,7 +72,7 @@ struct Cfg {
     __device__ static __forceinline__ int chunk(int r, int c) {
         if constexpr (!TMA)
             return c;
-        else if constexpr (BK == 128)
+        else if constexpr (kRB == 64)
             return c ^ ((r >> 1) & 3);
         else
             return c ^ (r & 7);
@@ -66,24 +85,35 @@ __device__ __forceinline__ int sf_off(int r, int c) {
     return ((r >> 7) * C::kSfBytes) + (c * 512) + ((r & 31) * 16) + (((r & 127) >> 5) * 4);
 }
 
-// One stage of MMAs for a 64 x kWN warp tile: BK/64 k64 steps of 4 x kNF m16n8k64.
+// Row r's scale for 32-byte K step c: NVFP4 the 4 UE4M3 of atom c, MXFP8 the UE8M0 of group g0 + c.
+template <class C>
+__device__ __forceinline__ uint32_t sf_word(const uint8_t* slab, int r, int c, int g0) {
+    if constexpr (C::kMx8) {
+        const int g = g0 + c;
+        return slab[sf_off<C>(r, g >> 2) + (g & 3)];
+    } else {
+        return *reinterpret_cast<const uint32_t*>(slab + sf_off<C>(r, c));
+    }
+}
+
+// One stage of MMAs for a 64 x kWN warp tile: kRB/32 steps of 4 x kNF m16n8k64 (NVFP4) or m16n8k32
+// (MXFP8); both read 32 bytes of K per row. g0: the stage's first MXFP8 K group in its atom.
 template <class C>
 __device__ __forceinline__ void mma_stage(float (&acc)[4][C::kNF][4], uint32_t sa_s, const uint8_t* sst,
-                                          int wm, int wn, int lane) {
+                                          int wm, int wn, int lane, int g0 = 0) {
     const int T1 = lane >> 2;
     const int lr = lane & 7;
     const int lm = lane >> 3;
     const int sfa_lane = ((lane & 1) * 8) + (lane >> 2);
 #pragma unroll
-    for (int c = 0; c < C::kBK / 64; ++c) {
+    for (int c = 0; c < C::kRB / 32; ++c) {
         uint32_t af[4][4];
         uint32_t sfa[4];
 #pragma unroll
         for (int mf = 0; mf < 4; ++mf) {
             const int r = wm + mf * 16 + lr + (lm & 1) * 8;
             ldsm_x4(af[mf], sa_s + (r * C::kRS) + (C::chunk(r, (c * 2) + (lm >> 1)) * 16));
-            sfa[mf] = *reinterpret_cast<const uint32_t*>(sst + C::kSfA +
-                                                         sf_off<C>(wm + mf * 16 + sfa_lane, c));
+            sfa[mf] = sf_word<C>(sst + C::kSfA, wm + mf * 16 + sfa_lane, c, g0);
         }
 #pragma unroll
         for (int np = 0; np < C::kNF / 2; ++np) {
@@ -93,12 +123,16 @@ __device__ __forceinline__ void mma_stage(float (&acc)[4][C::kNF][4], uint32_t s
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
                 const int nf = np * 2 + h;
-                const uint32_t sfb = *reinterpret_cast<const uint32_t*>(sst + C::kSfW +
-                                                                        sf_off<C>(wn + nf * 8 + T1, c));
+                const uint32_t sfb = sf_word<C>(sst + C::kSfW, wn + nf * 8 + T1, c, g0);
 #pragma unroll
-                for (int mf = 0; mf < 4; ++mf)
-                    mma_mxf4nvf4(acc[mf][nf], af[mf], h == 0 ? bf[0] : bf[2], h == 0 ? bf[1] : bf[3], sfa[mf],
+                for (int mf = 0; mf < 4; ++mf) {
+                    if constexpr (C::kMx8)
+                        mma_mxf8(acc[mf][nf], af[mf], h == 0 ? bf[0] : bf[2], h == 0 ? bf[1] : bf[3], sfa[mf],
                                  sfb);
+                    else
+                        mma_mxf4nvf4(acc[mf][nf], af[mf], h == 0 ? bf[0] : bf[2], h == 0 ? bf[1] : bf[3],
+                                     sfa[mf], sfb);
+                }
             }
         }
     }

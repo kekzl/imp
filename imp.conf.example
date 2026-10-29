@@ -776,6 +776,8 @@ f16_tile = true
 # Own grouped NVFP4 MoE prefill GEMM before CUTLASS 3.x grouped (bit-exact; K % 64 == 0, K >= 384).
 # Qwen3-30B-A3B-NVFP4 pp512 +3..7 %, pp4096 +2 % e2e.
 moe_tile = true
+# Own MXFP8 GEMM before CUTLASS MXFP8 for the GDN projection prefill copies (gemm.mxfp8_gdn_proj_prefill).
+mxfp8_tile = true
 # Batched-decode (n>1) LM head via a single CUTLASS NVFP4 GEMM instead of the
 # FP16-activation batched-M GEMV: reads the LM-head weight once per batch but
 # forces NVFP4 activations on the final logits. +8% aggregate concurrent decode
