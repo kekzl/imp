@@ -111,7 +111,8 @@ struct GEMM {
     bool f16_tile = true;
     // Own grouped NVFP4 MoE prefill GEMM (gemm_grouped_nvfp4_tile.cu) before CUTLASS 3.x grouped on the
     // same device-args operands, bit-exact. Qwen3-30B-A3B-NVFP4 pp512 / pp4096 GEMM sum -4 / -6 %,
-    // e2e +3..7 / +2 %, PPL 11.4338 both arms. Refuses K % 128 != 0 or K < 384 (CUTLASS then).
+    // e2e +3..7 / +2 %, PPL 11.4338 both arms; gpt-oss-20b (K 2880) pp4096 +2.3..2.8 %. Refuses K % 64 != 0
+    // or K < 384 (CUTLASS then).
     bool moe_tile = true;
     // Which small-M implementation the gate above dispatches: 1 = W4A16
     // dequant+HMMA kernel (kept for A/B), 2 = native mxf4nvf4 producer/consumer

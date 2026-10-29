@@ -8,7 +8,7 @@ namespace imp {
 
 // Own grouped NVFP4 MoE GEMM on the CUTLASS 3.x grouped operands (same bytes, all state on the
 // device). expanded: rows of the expert-sorted activation buffer (bound of its TMA map).
-// K % 128 == 0, K >= 384, N % 8 == 0, <= 512 experts; false = refused (caller keeps CUTLASS).
+// K % 64 == 0, K >= 384, N % 8 == 0, <= 512 experts; false = refused (caller keeps CUTLASS).
 // Two tensormap slots per CTA live in a static device array (one launch at a time).
 [[nodiscard]] bool gemm_grouped_nvfp4_tile(int n_experts, int N, int K, int expanded,
                                            const GroupedNvfp4DeviceArgs& args, cudaStream_t stream);

@@ -202,3 +202,4 @@ Persistent CTAs over a per-expert tile prefix (warp scan in shared memory), A th
 - Qwen3.6-35B-A3B-NVFP4 pp512 GEMM sum 115.8 / 115.9 -> 112.2 / 112.3 ms (2 pairs; e2e spread too wide for a verdict).
 - PPL 11.4338 both arms (`runtime.deterministic`, 45k corpus), ACTIVE line (experts=128 N=768 K=2048).
 - Measured before the port: pp512 CUTLASS grouped sits near the weight floor (~208 vs ~197 us per layer), pp4096 at ~40 % of the dense own kernel's rate.
+- K % 128 == 64 (half last stage, second SF atom zeroed in shared memory): bit-exact at K 704 / 2880. gpt-oss-20b (MXFP4 converted to NVFP4 at load, `moe_prefill=cutlass3x → device_args`) GEMM sum pp512 70.1 / 81.5 -> 67.1 / 67.3 ms, pp4096 256.0 / 296.4 -> 238.0 / 238.5 ms, e2e pp4096 51964 / 51906 -> 53165 / 53342 tok/s; PPL 262.6413 both arms (raw corpus, no harmony template). Gemma-4-26B and Nemotron-3-Nano do not reach this path (no ACTIVE line).
