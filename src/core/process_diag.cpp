@@ -81,14 +81,6 @@ bool process_diag_moe_tile() { return slot().moe_tile; }
 bool process_diag_mxfp8_tile() { return slot().mxfp8_tile; }
 bool process_diag_force_splitk_fallback() { return slot().force_splitk_fallback; }
 void process_diag_set_force_splitk_fallback(bool v) { slot().force_splitk_fallback = v; }
-const std::string& process_diag_attention_mxfp4_mode() { return slot().attention_mxfp4_mode; }
-bool process_diag_mxfp4_blockscale() { return slot().mxfp4_blockscale; }
-bool process_diag_mxfp4_ksmooth() { return slot().mxfp4_ksmooth; }
-bool process_diag_mxfp4_pv_fp4() { return slot().mxfp4_pv_fp4; }
-void process_diag_set_mxfp4_ksmooth(bool v) { slot().mxfp4_ksmooth = v; }
-void process_diag_set_mxfp4_pv_fp4(bool v) { slot().mxfp4_pv_fp4 = v; }
-float process_diag_mxfp4_promote_budget() { return slot().mxfp4_promote_budget; }
-void process_diag_set_mxfp4_promote_budget(float v) { slot().mxfp4_promote_budget = v; }
 bool process_diag_ffn_sparsity_probe() { return slot().ffn_sparsity_probe; }
 int process_diag_moe_mr_nr() { return slot().moe_mr_nr; }
 bool process_diag_verify_row_parity() { return slot().verify_row_parity; }

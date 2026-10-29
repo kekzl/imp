@@ -2,10 +2,11 @@
 #include "compute/gemm.h"
 #include "compute/gemm_grouped.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/gemm_cutlass_mxfp4_sm120.h"
+#include "quant/mxfp4_sfatom.h"
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/mxfp4_gemm.h"
+#include "quant/nvfp4_gemm_tile.h"
 #include "core/logging.h"
 #include "core/process_diag.h"
 
@@ -36,6 +37,40 @@ static bool cutlass_nvfp4_m1(const Tensor& x, void* act_data, void* act_sf, size
         return false;
     quantize_fp16_to_nvfp4_cutlass(x.data, act_data, act_sf, M, K, stream);
     return gemm_nvfp4_cutlass_sm120(act_data, act_sf, cw, y.data, M, N, K, ws_buf, ws_needed, stream);
+}
+
+// MXFP4 prefill (M > 1): quantize the activation into the workspace, then the own tile GEMM
+// (K % 128 == 0). Stream-K takes the workspace past the activation; none under runtime.deterministic.
+static void mxfp4_prefill_gemm(const CutlassMxFP4Weight& mw, const Tensor& x, Tensor& y, int M, int N, int K,
+                               void* workspace, size_t workspace_bytes, cudaStream_t stream) {
+    if (K % 128 != 0) {
+        IMP_LOG_ERROR("gemm_dispatch MXFP4: K=%d is not a multiple of 128 (one SfAtom per stage)", K);
+        return;
+    }
+    const size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
+    const size_t act_sf_bytes = cutlass_mxfp4_sf_size(M, K);
+    const size_t total_needed = act_data_bytes + act_sf_bytes;
+    if (workspace != nullptr && workspace_bytes >= total_needed) {
+        uint8_t* act_data = reinterpret_cast<uint8_t*>(workspace);
+        uint8_t* act_sf = act_data + act_data_bytes;
+        // 256-B aligned stream-K partials after the activation (float4 stores).
+        const size_t sk_off = (total_needed + 255) & ~size_t(255);
+        const bool sk = !process_diag_deterministic() && workspace_bytes > sk_off;
+        quantize_fp16_to_mxfp4_cutlass(x.data, act_data, act_sf, M, K, stream);
+        if (gemm_mxfp4_tile(act_data, act_sf, mw.data, mw.scale_factors, mw.tensor_scale, y.data, M, N, K,
+                            stream,
+                            /*variant=*/-1, sk ? static_cast<uint8_t*>(workspace) + sk_off : nullptr,
+                            sk ? workspace_bytes - sk_off : 0)) {
+            static bool logged = false;  // activity proof, once
+            if (!logged) {
+                logged = true;
+                IMP_LOG_INFO("gemm_dispatch MXFP4: own tile GEMM ACTIVE (M=%d N=%d K=%d)", M, N, K);
+            }
+            return;
+        }
+    }
+    IMP_LOG_ERROR("gemm_dispatch MXFP4: workspace too small (need %zu, have %zu) or tile GEMM refused",
+                  total_needed, workspace_bytes);
 }
 
 void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Tensor& y, float alpha,
@@ -212,36 +247,7 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w, const Tensor& x, Ten
                 return;
             }
 
-            // M>1 prefill: quantize activation → MXFP4, then CUTLASS GEMM.
-            if (K % 32 != 0) {
-                IMP_LOG_ERROR(
-                    "gemm_dispatch MXFP4: K=%d is not a multiple of 32, "
-                    "MXFP4 GEMM requires K%%32==0",
-                    K);
-                return;
-            }
-
-            size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
-            size_t act_sf_bytes = cutlass_mxfp4_sf_size(M, K);
-            size_t ws_needed = gemm_mxfp4_cutlass_sm120_workspace(M, N, K);
-            size_t total_needed = act_data_bytes + act_sf_bytes + ws_needed;
-
-            if (workspace != nullptr && workspace_bytes >= total_needed) {
-                uint8_t* act_data = reinterpret_cast<uint8_t*>(workspace);
-                void* act_sf = act_data + act_data_bytes;
-                void* ws_buf = reinterpret_cast<uint8_t*>(act_sf) + act_sf_bytes;
-                quantize_fp16_to_mxfp4_cutlass(x.data, act_data, act_sf, M, K, stream);
-                bool ok = gemm_mxfp4_cutlass_sm120(act_data, act_sf, mw, y.data, M, N, K, ws_buf, ws_needed,
-                                                   stream);
-                if (ok)
-                    return;
-                // CUTLASS failed; fall through.
-            }
-
-            IMP_LOG_ERROR(
-                "gemm_dispatch MXFP4: workspace too small (need %zu, have %zu) "
-                "or CUTLASS GEMM failed",
-                total_needed, workspace_bytes);
+            mxfp4_prefill_gemm(mw, x, y, M, N, K, workspace, workspace_bytes, stream);
             return;
         }
 

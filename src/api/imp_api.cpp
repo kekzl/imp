@@ -82,7 +82,6 @@ ImpConfig imp_config_default(void) {
     config.prefill_chunk_size = -1;           // per-arch default (2048 if supported, 0 otherwise)
     config.use_fp8_prefill = 0;               // FP16 weight cache by default
     config.use_nvfp4_decode = -1;             // auto (by quant/MoE/GDN, not by arch)
-    config.use_mxfp4_prefill = 0;             // off by default
     config.dual_path_quant = 0;               // off by default
     config.min_kv_tokens = 0;                 // auto (pick reasonable minimum based on model)
     config.use_prefix_caching = 0;            // off by default
@@ -425,7 +424,6 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config, ImpContext*
         ecfg.use_fp8_prefill = (config->use_fp8_prefill != 0);
         ecfg.use_nvfp4_decode = config->use_nvfp4_decode;
         ecfg.min_kv_tokens = config->min_kv_tokens;
-        ecfg.use_mxfp4_prefill = (config->use_mxfp4_prefill != 0);
         ecfg.dual_path_quant = (config->dual_path_quant != 0);
         ecfg.use_prefix_caching = (config->use_prefix_caching != 0);
         if (config->prefix_cache_path[0] != '\0')

@@ -14,7 +14,7 @@
 namespace imp {
 
 // E2M1 magnitudes {0,.5,1,1.5,2,3,4,6}; E4M3 exp4/mant3 bias7, max=448, min>0=2^-9.
-// Mirrors src/compute/attention_fmha_mxfp4_sm120.cu pack_fp4_pair/float_to_fp8_e4m3.
+// Mirrors pack_fp4_pair/float_to_fp8_e4m3 of the removed MXFP4 FMHA (attention_fmha_mxfp4_sm120.cu).
 // Software path uses midpoint cascade vs PTX IEEE RNE: immaterial for the long-tail question.
 
 static constexpr float kFp4Mag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};

@@ -32,13 +32,6 @@ struct QuantScratch {
     void* cutlass_workspace = nullptr;  // CUTLASS GEMM workspace
     size_t cutlass_workspace_size = 0;
 
-    // --- MXFP4 activation buffers (SfAtom UE8M0 scales) ---
-    // Packed data shares cutlass_act_data (same FP4 nibble format).
-    void* mxfp4_act_sf = nullptr;
-    size_t mxfp4_act_sf_size = 0;
-    void* mxfp4_workspace = nullptr;
-    size_t mxfp4_workspace_size = 0;
-
     // --- MXFP8 GDN prefill activation buffers (gemm.mxfp8_gdn_proj_prefill) ---
     void* mxfp8_act_data = nullptr;  // [max_tokens, max_K] E4M3
     void* mxfp8_act_sf = nullptr;    // SfAtom UE8M0

@@ -1,6 +1,6 @@
 // CUTLASS sm_120 block-scaled MXFP8 x MXFP8 -> FP16 GEMM (CUTLASS example 79c operand
 // types on the 79b kernel structure). Same cooperative 128x128x128 tile and SfAtom scale
-// layout as the MXFP4 twin (gemm_cutlass_mxfp4_sm120.cu); the data operand is one E4M3 byte
+// layout as MXFP4 (quant/mxfp4_sfatom.cu); the data operand is one E4M3 byte
 // per element instead of a packed nibble pair.
 
 #include "compute/gemm_cutlass_mxfp8_sm120.h"

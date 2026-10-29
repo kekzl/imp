@@ -220,7 +220,7 @@ bool Engine::init_weights() {
     {
         int eff_batch = config_.max_batch_size;
         if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl, eff_batch, config_.max_seq_len,
-                             config_.use_fp8_prefill, config_.use_nvfp4_decode, config_.use_mxfp4_prefill))
+                             config_.use_fp8_prefill, config_.use_nvfp4_decode))
             return false;
 
         if (config_.dual_path_quant) {

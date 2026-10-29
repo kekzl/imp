@@ -500,30 +500,6 @@ paged_f16_multitok   = 4
 # (tiled, O(n) memory) instead of the materialized cuBLAS S-matrix path.
 # -1 = auto (derived from the cuBLAS S-matrix VRAM cap).
 fmha_prefill_threshold = -1
-mxfp4                = "auto"
-# #846 NVFP4-attention spike (SageAttention3 recipe), all require
-# mxfp4 = "always" (+ fa2_fp16qk = "never" so the MXFP4 FMHA actually serves
-# hd=128 prefill). QUALITY-NEGATIVE on LLMs at real context lengths
-# (Qwen3-14B-NVFP4 teacher-forced NLL +10% at 9k tokens, full recipe) —
-# diagnostic/research knobs, keep off in production.
-# blockscale: per-16-element UE4M3 scales in the mxf4nvf4.block_scale MMA
-#   (vs legacy per-row software scales, which are catastrophically lossy).
-# ksmooth: subtract per-(batch,kv_head,channel) K mean before quantization.
-# pv_fp4: P·V in NVFP4 too (two-level P scaling).
-# promote_budget: ThriftAttention-style outlier promotion (arXiv 2605.23081) —
-#   per q-tile, the top-scoring fraction of visible 64-token KV tiles (block-
-#   mean score Q̄·K̄^T, sink + diagonal force-included) computes exactly in
-#   FP32/FP16 instead of FP4. 0 = off, 1 = promote everything. Requires
-#   blockscale; head_dim 64/128 only.
-mxfp4_blockscale     = false
-mxfp4_ksmooth        = false
-mxfp4_pv_fp4         = false
-mxfp4_promote_budget = 0.0
-# KV-append-quant chunked prefill (#846 follow-up): continuation chunks read
-# K/V directly from the paged NVFP4 KV cache (quant paid once at append, no
-# gather->FP16 pass, no in-kernel quant). Requires kv_cache dtype = "nvfp4",
-# head_dim 128, single sequence. Combine with mxfp4_promote_budget.
-mxfp4_paged_kv       = false
 mxfp4_fp16_fallback  = false
 # MXFP4 → FP16 cache pruning policy: "legacy" caches FP16 for every MXFP4
 # tensor; "pruned" skips MoE expert weights + LM head (32 GiB-class loads).

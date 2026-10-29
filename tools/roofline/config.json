@@ -189,11 +189,6 @@
       "regex": "fmha_sm120_fp8_kernel"
     },
     {
-      "name": "attn_fmha_mxfp4",
-      "group": "attention",
-      "regex": "fmha_sm120_mxfp4_kernel"
-    },
-    {
       "name": "attn_fmha_wmma",
       "group": "attention",
       "regex": "fmha_sm120_kernel"

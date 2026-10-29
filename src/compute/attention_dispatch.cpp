@@ -9,8 +9,6 @@
 #include <stdexcept>
 
 #include "compute/attention_fmha_sm120.h"
-#include "compute/attention_fmha_mxfp4_sm120.h"
-#include "compute/attention_mxfp4_prefill.h"
 #include "compute/dispatch_record.h"
 #include "compute/attention_dispatch_decision.h"
 
@@ -73,21 +71,6 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
                  "declined head_dim=%d (or both are off) - no sink-capable kernel (#992)",
                  static_cast<int>(Q.shape[3]));
         throw std::runtime_error(msg);
-    }
-
-    // MXFP4 Flash Attention: tiled FP4 E2M1 QK^T with online softmax, O(n) memory, ~4x score
-    // throughput over FP16 / ~2x over FP8. Enabled via [attention] mxfp4="always". Blockscale/
-    // ksmooth/pv_fp4 (#846) read from process_diag inside the launcher.
-    sup.mxfp4_available = attention_mxfp4_available();
-    if (sup.mxfp4_available) {
-        sup.mxfp4_accepts = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap,
-                                                     stream, process_diag_mxfp4_blockscale(), q_offset);
-        if (sup.mxfp4_accepts) {
-            dispatch_record::set_attn_prefill_tier(AttnPrefillPath::MXFP4);
-            verify_against_routing_model(rcfg, sup, has_sinks, AttnPrefillPath::MXFP4);
-            return;
-        }
-        // Fall through: head_dim not supported (e.g. < 32), use FP8/FP16 path
     }
 
     // Register-resident FA2 ("echtes FA"): S/P/O in registers, 1 barrier/KV tile (vs FP8 FMHA's
@@ -153,12 +136,12 @@ void attention_prefill_dispatch(const Tensor& Q, const Tensor& K, const Tensor& 
     snprintf(msg, sizeof(msg),
              "attention_prefill_dispatch: no prefill kernel accepts head_dim=%d "
              "(check attention.fmha_sm120/fmha_fa2 config) (#654): Q [%d, %d, %d] K [%d, %d] q_offset %d "
-             "qtype %d; mxfp4 %d fa2 %d (fmha_fa2=%s hd256=%d) fp8 %d fmha_sm120 %d blackwell %d",
+             "qtype %d; fa2 %d (fmha_fa2=%s hd256=%d) fp8 %d fmha_sm120 %d blackwell %d",
              static_cast<int>(Q.shape[3]), static_cast<int>(Q.shape[0]), static_cast<int>(Q.shape[1]),
              static_cast<int>(Q.shape[2]), static_cast<int>(K.shape[1]), static_cast<int>(K.shape[2]),
-             q_offset, static_cast<int>(Q.qtype), (int)sup.mxfp4_accepts, (int)sup.fa2_accepts,
-             rcfg.attention.fmha_fa2.c_str(), (int)imp::process_diag_fa2_hd256(), (int)sup.fp8_accepts,
-             (int)sup.fmha_sm120_accepts, (int)sup.blackwell_accepts);
+             q_offset, static_cast<int>(Q.qtype), (int)sup.fa2_accepts, rcfg.attention.fmha_fa2.c_str(),
+             (int)imp::process_diag_fa2_hd256(), (int)sup.fp8_accepts, (int)sup.fmha_sm120_accepts,
+             (int)sup.blackwell_accepts);
     throw std::runtime_error(msg);
 }
 

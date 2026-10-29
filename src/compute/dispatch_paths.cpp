@@ -4,8 +4,6 @@ namespace imp {
 
 const char* attn_prefill_path_name(AttnPrefillPath p) {
     switch (p) {
-        case AttnPrefillPath::MXFP4:
-            return "fmha_mxfp4";
         case AttnPrefillPath::FA2:
             return "fmha_fa2";
         case AttnPrefillPath::FP8:

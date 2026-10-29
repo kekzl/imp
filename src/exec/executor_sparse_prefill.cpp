@@ -55,16 +55,14 @@ void GraphExecutor::allocate_sparse_prefill_scratch_() {
 GraphExecutor::SparsePrefillPast GraphExecutor::sparse_prefill_pick_(const half* q, int n, KVCache* cache,
                                                                      int kv_layer, const int* table,
                                                                      int q_offset, int nh, int nkv, int hd,
-                                                                     bool cap_replay, bool paged_kv_written,
-                                                                     int sliding_window, const void* sinks,
-                                                                     cudaStream_t stream) {
+                                                                     bool cap_replay, int sliding_window,
+                                                                     const void* sinks, cudaStream_t stream) {
     SparsePrefillPast dense{table, q_offset};
     const auto& s = qscratch_;
     const int kv_bs = cache->block_size();
-    // Graph-replayed verify chunks, the paged-FP4 branch (KV already appended), SWA and learned
-    // sinks keep the dense past.
-    if (cap_replay || paged_kv_written || sliding_window != 0 || sinks != nullptr ||
-        s.sp_prefill_budget_blocks <= 0 || !cache->key_minmax_enabled() || nkv <= 0 || nh / nkv > 16 ||
+    // Graph-replayed verify chunks, SWA and learned sinks keep the dense past.
+    if (cap_replay || sliding_window != 0 || sinks != nullptr || s.sp_prefill_budget_blocks <= 0 ||
+        !cache->key_minmax_enabled() || nkv <= 0 || nh / nkv > 16 ||
         (q_offset + kv_bs - 1) / kv_bs <= s.sp_prefill_budget_blocks)
         return dense;
     const int past = sparse_prefill_select_past(q, n, s.sp_prefill_rows, cache->key_minmax_ptr(kv_layer, 0),

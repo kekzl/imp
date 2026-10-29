@@ -35,7 +35,6 @@ static EngineConfig ragged_engine_config() {
     cfg.use_green_contexts = false;
     cfg.gpu_layers = -1;
     cfg.use_prefix_caching = false;
-    cfg.use_mxfp4_prefill = false;
     cfg.dual_path_quant = false;
     return cfg;
 }

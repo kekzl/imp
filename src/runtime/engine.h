@@ -130,9 +130,6 @@ struct EngineConfig {
     // tokens of KV capacity before allocating weight caches. 0 = auto.
     int min_kv_tokens = 0;
 
-    // MXFP4 prefill: CUTLASS MXFP4 GEMM for prefill (converts NVFP4 → MXFP4 format, sm_120)
-    bool use_mxfp4_prefill = false;
-
     // Dual-path quantization: attention weights (WQ/WK/WV/WO) stay at FP8 for quality,
     // FFN weights (gate/up/down) use NVFP4 for 2x bandwidth reduction during decode.
     bool dual_path_quant = false;

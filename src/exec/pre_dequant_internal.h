@@ -107,6 +107,18 @@ inline bool has_host_resident_experts(const Model& m) {
     return false;
 }
 
+// A dense projection or the LM head in native MXFP4 (the tensors the MXFP4 unpack registers).
+[[nodiscard]] inline bool model_has_dense_mxfp4(const Model& m, int n_layers) {
+    for (int i = 0; i < n_layers; ++i) {
+        const auto& L = m.layer(i);
+        for (const Tensor* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_up, &L.w_gate, &L.w_down, &L.ssm_in,
+                                &L.ssm_out, &L.gdn_gate, &L.gdn_alpha, &L.gdn_beta})
+            if (w->qtype == QType::MXFP4)
+                return true;
+    }
+    return m.output_proj().qtype == QType::MXFP4;
+}
+
 // Infer StorageTier from which wcache_ map the source pointer landed in.
 inline StorageTier infer_tier_from_wcache(const WeightCaches& wc, const void* src_ptr) {
     if (wc.cutlass_nvfp4.contains(src_ptr))

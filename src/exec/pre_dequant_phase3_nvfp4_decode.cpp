@@ -13,7 +13,7 @@
 #include "model/mtp_head.h"
 #include "model/nvfp4_module_policy.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/gemm_cutlass_mxfp4_sm120.h"
+#include "quant/mxfp4_sfatom.h"
 #include "quant/dequant_gpu.h"
 #include "quant/gpt_oss_mxfp4_convert.h"
 #include "quant/fp8_quant.h"
@@ -36,6 +36,7 @@ namespace imp {
 
 using imp::pre_dequant_internal::deduct_budget;
 using imp::pre_dequant_internal::for_each_dense_weight;
+using imp::pre_dequant_internal::model_has_dense_mxfp4;
 using imp::pre_dequant_internal::nvfp4_beneficial;
 using imp::pre_dequant_internal::nvfp4_lm_head_enabled;
 
@@ -432,9 +433,9 @@ void QuantPipeline::pre_dequant_phase3_nvfp4_decode_(
         nvfp4_decode_convert_cutlass_(cfg, budget, remaining_budget, stream);
     }
 
-    nvfp4_decode_convert_mxfp4_and_native_(cfg, stream);
+    nvfp4_decode_native_mxfp4_act_data_(cfg);
 
-    if (qscratch_->mxfp4_act_sf != nullptr && cutlass_sm120_mxfp4_available()) {
+    if (model_has_dense_mxfp4(*model_, cfg.n_layers)) {
         nvfp4_decode_mxfp4_fp16_fallback_(cfg, stream);
     }
 

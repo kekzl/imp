@@ -1,13 +1,14 @@
 #include "compute/weight_dispatch.h"
 #include "compute/gemm.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/gemm_cutlass_mxfp4_sm120.h"
+#include "quant/mxfp4_sfatom.h"
 #include "core/tensor.h"
 #include "exec/weight_handle.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_quant.h"
 #include "quant/nvfp4_gemm.h"
 #include "quant/mxfp4_gemm.h"
+#include "quant/nvfp4_gemm_tile.h"
 
 #include <gtest/gtest.h>
 #include <cstdint>
@@ -17,6 +18,7 @@
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <vector>
+#include <algorithm>
 #include <cmath>
 
 using namespace imp;
@@ -698,15 +700,10 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemvRefusesInsteadOfAnsweringWithStaleM
 // MXFP4 tier
 // ===========================================================================
 
-// gemm_dispatch MXFP4 tier (M>1): dispatch reconstructs CutlassMxFP4Weight and calls
-// gemm_mxfp4_cutlass_sm120. K must be a multiple of 32 (UE8M0 SFVecSize).
+// gemm_dispatch MXFP4 tier (M>1): dispatch reconstructs CutlassMxFP4Weight and runs the own
+// tile GEMM (gemm_mxfp4_tile) on the quantized activation. K must be a multiple of 128.
 TEST_F(WeightDispatchTest, MXFP4_GemmMatchesDirect) {
-    if (!cutlass_sm120_mxfp4_available()) {
-        GTEST_SKIP() << "CUTLASS sm_120 MXFP4 not compiled/available on this device";
-    }
-
-    // K must be multiple of 32 for MXFP4
-    const int M = 8, N = 16, K = 64;
+    const int M = 8, N = 16, K = 128;
 
     std::vector<half> h_w(N * K), h_x(M * K);
     for (int i = 0; i < N * K; ++i)
@@ -717,114 +714,87 @@ TEST_F(WeightDispatchTest, MXFP4_GemmMatchesDirect) {
     half* d_w = dev_alloc_copy(h_w);
     half* d_x = dev_alloc_copy(h_x);
 
-    int64_t wshape[2] = {N, K};
-    Tensor w_t(d_w, QType::F16, 2, wshape, true);
+    // W straight to MXFP4 (packed E2M1 + SfAtom UE8M0), the bytes the native GGUF unpack produces.
+    void* d_w_data;
+    cudaMalloc(&d_w_data, static_cast<size_t>(N) * K / 2);
+    void* d_w_sf;
+    cudaMalloc(&d_w_sf, cutlass_mxfp4_sf_size(N, K));
+    cudaMemsetAsync(d_w_sf, 0, cutlass_mxfp4_sf_size(N, K), stream_);
+    quantize_fp16_to_mxfp4_cutlass(d_w, d_w_data, d_w_sf, N, K, stream_);
 
-    // Quantize: FP16 → NVFP4 → MXFP4
-    NvFP4QuantResult qr;
-    quantize_fp16_to_nvfp4(w_t, qr, stream_);
-    cudaStreamSynchronize(stream_);
-
-    CutlassMxFP4Weight mw;
-    convert_nvfp4_to_mxfp4_cutlass(qr, mw, stream_);
-    cudaStreamSynchronize(stream_);
-
-    // Allocate activation scratch for direct call
-    size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
-    size_t act_sf_bytes = cutlass_mxfp4_sf_size(M, K);
-    size_t ws_needed = gemm_mxfp4_cutlass_sm120_workspace(M, N, K);
-
+    const size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
+    const size_t act_sf_bytes = cutlass_mxfp4_sf_size(M, K);
     void* d_act_data;
     cudaMalloc(&d_act_data, act_data_bytes);
     void* d_act_sf;
     cudaMalloc(&d_act_sf, act_sf_bytes);
-    void* d_ws;
-    cudaMalloc(&d_ws, (ws_needed > 0) ? ws_needed : 1);
-
     quantize_fp16_to_mxfp4_cutlass(d_x, d_act_data, d_act_sf, M, K, stream_);
-    cudaStreamSynchronize(stream_);
 
     half* d_y_direct;
     cudaMalloc(&d_y_direct, M * N * sizeof(half));
     half* d_y_disp;
     cudaMalloc(&d_y_disp, M * N * sizeof(half));
 
-    bool ok = gemm_mxfp4_cutlass_sm120(d_act_data, d_act_sf, mw, d_y_direct, M, N, K, d_ws, ws_needed,
-                                       stream_);
+    ASSERT_TRUE(gemm_mxfp4_tile(d_act_data, d_act_sf, d_w_data, d_w_sf, 1.0f, d_y_direct, M, N, K, stream_));
     cudaStreamSynchronize(stream_);
 
-    if (!ok) {
-        GTEST_SKIP() << "gemm_mxfp4_cutlass_sm120 returned false for M=" << M << " N=" << N << " K=" << K;
-    }
-
-    // Build handle
     WeightHandle h;
     h.kind = TensorKind::WQ;
     h.primary_tier = StorageTier::MXFP4;
     h.shape[0] = N;
     h.shape[1] = K;
-    h.payload.mxfp4.weight = const_cast<void*>(mw.data);
-    h.payload.mxfp4.scales = mw.scale_factors;
-    h.payload.mxfp4.linear_scales = mw.linear_scales;
+    h.payload.mxfp4.weight = d_w_data;
+    h.payload.mxfp4.scales = d_w_sf;
 
     int64_t xshape[2] = {M, K}, yshape[2] = {M, N};
     Tensor x_t(d_x, QType::F16, 2, xshape, true);
     Tensor y_disp(d_y_disp, QType::F16, 2, yshape, true);
 
-    ASSERT_LE(act_data_bytes + act_sf_bytes + ws_needed, kWorkspaceBytes);
+    ASSERT_LE(act_data_bytes + act_sf_bytes, kWorkspaceBytes);
 
     gemm_dispatch(lt_, h, x_t, y_disp, 1.0f, 0.0f, workspace_, kWorkspaceBytes, stream_);
     cudaStreamSynchronize(stream_);
 
     auto h_direct = dev_read(d_y_direct, M * N);
     auto h_disp = dev_read(d_y_disp, M * N);
+    float max_abs = 0.0f;
     for (int i = 0; i < M * N; ++i) {
         float vd = __half2float(h_direct[i]);
         float vp = __half2float(h_disp[i]);
-        // Same kernel path: byte-identical output expected.
+        max_abs = std::max(max_abs, std::fabs(vd));
+        // Same kernel path, one k-step per tile: byte-identical output expected.
         EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
             << "MXFP4 GEMM mismatch at i=" << i << " direct=" << vd << " dispatch=" << vp;
     }
+    EXPECT_GT(max_abs, 0.0f);
 
-    free_nvfp4_result(qr);
-    free_cutlass_mxfp4_weight(mw);
-    cudaFree(d_w);
-    cudaFree(d_x);
-    cudaFree(d_act_data);
-    cudaFree(d_act_sf);
-    cudaFree(d_ws);
-    cudaFree(d_y_direct);
-    cudaFree(d_y_disp);
+    for (void* p : {static_cast<void*>(d_w), static_cast<void*>(d_x), d_w_data, d_w_sf, d_act_data, d_act_sf,
+                    static_cast<void*>(d_y_direct), static_cast<void*>(d_y_disp)})
+        cudaFree(p);
 }
 
-// gemv_dispatch MXFP4 tier (M=1): decode path using linear_scales.
+// gemv_dispatch MXFP4 tier (M=1): decode path using linear_scales ([N, K/32] UE8M0 row-major).
 TEST_F(WeightDispatchTest, MXFP4_GemvMatchesDirect) {
-    // K must be multiple of 32
     const int M = 16, K = 64;
 
-    std::vector<half> h_w(M * K), h_x(K);
-    for (int i = 0; i < M * K; ++i)
-        h_w[i] = __float2half((i % 5) * 0.1f - 0.2f);
+    std::vector<uint8_t> h_packed(static_cast<size_t>(M) * K / 2), h_lin(static_cast<size_t>(M) * K / 32);
+    for (size_t i = 0; i < h_packed.size(); ++i)
+        h_packed[i] = static_cast<uint8_t>((i * 37 + 11) & 0x77);  // positive E2M1 nibbles
+    for (size_t i = 0; i < h_lin.size(); ++i)
+        h_lin[i] = static_cast<uint8_t>(124 + (i % 5));  // 2^-3 .. 2^1
+    std::vector<half> h_x(K);
     for (int i = 0; i < K; ++i)
         h_x[i] = __float2half((i % 7) * 0.05f);
 
-    half* d_w = dev_alloc_copy(h_w);
+    uint8_t* d_packed = dev_alloc_copy(h_packed);
+    uint8_t* d_lin = dev_alloc_copy(h_lin);
     half* d_x = dev_alloc_copy(h_x);
 
-    int64_t wshape[2] = {M, K};
-    Tensor w_t(d_w, QType::F16, 2, wshape, true);
-
-    NvFP4QuantResult qr;
-    quantize_fp16_to_nvfp4(w_t, qr, stream_);
-    cudaStreamSynchronize(stream_);
-
     CutlassMxFP4Weight mw;
-    convert_nvfp4_to_mxfp4_cutlass(qr, mw, stream_);
-    cudaStreamSynchronize(stream_);
-
-    if (mw.linear_scales == nullptr) {
-        GTEST_SKIP() << "convert_nvfp4_to_mxfp4_cutlass did not populate linear_scales";
-    }
+    mw.data = d_packed;
+    mw.linear_scales = d_lin;
+    mw.N = M;
+    mw.K = K;
 
     half* d_y_direct;
     cudaMalloc(&d_y_direct, M * sizeof(half));
@@ -845,25 +815,26 @@ TEST_F(WeightDispatchTest, MXFP4_GemvMatchesDirect) {
     h.primary_tier = StorageTier::MXFP4;
     h.shape[0] = M;
     h.shape[1] = K;
-    h.payload.mxfp4.weight = const_cast<void*>(mw.data);
-    h.payload.mxfp4.scales = mw.scale_factors;
-    h.payload.mxfp4.linear_scales = mw.linear_scales;
+    h.payload.mxfp4.weight = d_packed;
+    h.payload.mxfp4.linear_scales = d_lin;
 
     gemv_dispatch(h, x_t, y_disp, stream_);
     cudaStreamSynchronize(stream_);
 
     auto h_direct = dev_read(d_y_direct, M);
     auto h_disp = dev_read(d_y_disp, M);
+    float max_abs = 0.0f;
     for (int i = 0; i < M; ++i) {
         float vd = __half2float(h_direct[i]);
         float vp = __half2float(h_disp[i]);
+        max_abs = std::max(max_abs, std::fabs(vd));
         EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
             << "MXFP4 GEMV mismatch at i=" << i << " direct=" << vd << " dispatch=" << vp;
     }
+    EXPECT_GT(max_abs, 0.0f);
 
-    free_nvfp4_result(qr);
-    free_cutlass_mxfp4_weight(mw);
-    cudaFree(d_w);
+    cudaFree(d_packed);
+    cudaFree(d_lin);
     cudaFree(d_x);
     cudaFree(d_y_direct);
     cudaFree(d_y_disp);

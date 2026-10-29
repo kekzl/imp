@@ -282,6 +282,7 @@ set(IMP_QUANT_SOURCES
     src/quant/nvfp4_gemm_smallm.cu
     src/quant/nvfp4_gemm_smallm_v2.cu
     src/quant/nvfp4_gemm_tile.cu
+    src/quant/mxfp4_sfatom.cu
     src/quant/nvfp4_gemv_fused.cu
     src/quant/nvfp4_gemv_gdn_input.cu
     src/quant/nvfp4_gemv_moe.cu
@@ -402,16 +403,13 @@ set(IMP_COMPUTE_SOURCES
 )
 
 list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_sm120.cu)
-list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_mxfp4_sm120.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_mxfp8_sm120.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_grouped_3x.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_grouped_nvfp4_smallM.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/quantize_fp16_nvfp4_moe_native.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_sm120.cu)
-list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_mxfp4_sm120.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_ra2.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_apa.cu)
-list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
 list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_hw.cu)
 if(IMP_BUILD_TESTS)
     set_source_files_properties(src/compute/gemm_grouped_nvfp4_smallM.cu
@@ -1316,8 +1314,6 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_crosspath.cu
         tests/test_gpt_oss_sinks_ref.cu
         tests/test_fmha_fp8.cu
-        tests/test_attention_mxfp4.cu
-        tests/test_attention_fmha_mxfp4.cu
         tests/test_attention_ra2.cu
         tests/test_paged_attention.cu
         tests/test_attention_paged_oracle.cu
@@ -1364,6 +1360,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_batched_smallm_equiv.cu
         tests/test_nvfp4_gemm_tile.cu
         tests/test_gemm_mxfp8_tile.cu
+        tests/test_gemm_mxfp4_tile.cu
         tests/test_quantize_fp16_nvfp4_moe_native.cu
         tests/test_prefill_row_invariance.cu
         # Export round trip: quantize like the exporter, decode by the format's own rule, bound the

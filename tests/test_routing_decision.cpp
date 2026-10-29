@@ -23,8 +23,6 @@ DispatchPolicy default_cfg() { return DispatchPolicy{}; }
 // Typical hd=128 F16 prefill: every specialized kernel would accept.
 AttnKernelSupport all_accept() {
     AttnKernelSupport s;
-    s.mxfp4_available = false;  // mxfp4 is opt-in, off by default
-    s.mxfp4_accepts = true;
     s.fa2_accepts = true;
     s.fp8_accepts = true;
     s.fmha_sm120_accepts = true;
@@ -37,21 +35,6 @@ AttnKernelSupport all_accept() {
 TEST(AttnDispatchTable, DefaultConfigPicksFA2) {
     // fmha_fa2="on" (default) and FA2 accepts hd=128 → FA2 wins over FP8.
     EXPECT_EQ(select_attn_prefill_path(default_cfg(), all_accept()), AttnPrefillPath::FA2);
-}
-
-TEST(AttnDispatchTable, Mxfp4WinsWhenAvailableAndAccepts) {
-    auto cfg = default_cfg();
-    auto sup = all_accept();
-    sup.mxfp4_available = true;
-    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::MXFP4);
-}
-
-TEST(AttnDispatchTable, Mxfp4AvailableButDeclinesFallsToFA2) {
-    auto cfg = default_cfg();
-    auto sup = all_accept();
-    sup.mxfp4_available = true;
-    sup.mxfp4_accepts = false;  // e.g. head_dim < 32
-    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::FA2);
 }
 
 TEST(AttnDispatchTable, FA2NeverFallsToFMHANotFP8) {
@@ -245,7 +228,7 @@ TEST(MoePrefillTable, GptOssNoCutlass3xFallsToLegacy) {
 
 TEST(AttnDispatchTable, SinksRouteToFA2WhenItAccepts) {
     // gpt-oss learned sinks: fp16-qk FA2 and the FP16 WMMA FMHA fold them into their online
-    // softmax; MXFP4/FP8/Blackwell must not serve sink configs.
+    // softmax; FP8/Blackwell must not serve sink configs.
     EXPECT_EQ(select_attn_prefill_path(default_cfg(), all_accept(), /*has_sinks=*/true),
               AttnPrefillPath::FA2);
     auto sup = all_accept();
@@ -285,10 +268,6 @@ namespace {
 AttnKernelSupport observed_when(AttnPrefillPath winner) {
     AttnKernelSupport s;  // all false — the dispatch's starting state
     switch (winner) {
-        case AttnPrefillPath::MXFP4:
-            s.mxfp4_available = true;
-            s.mxfp4_accepts = true;
-            break;
         case AttnPrefillPath::FA2:
             s.fa2_accepts = true;
             break;
@@ -323,11 +302,6 @@ TEST(AttnRoutingModelCoupling, EveryTierReplaysToItself) {
     }
 }
 
-TEST(AttnRoutingModelCoupling, Mxfp4ReplaysToItselfWhenAvailable) {
-    EXPECT_EQ(select_attn_prefill_path(default_cfg(), observed_when(AttnPrefillPath::MXFP4)),
-              AttnPrefillPath::MXFP4);
-}
-
 // The sinks pre-gate (#992) is a separate entry point in the dispatch: it runs FA2, then the
 // FP16 WMMA tier, or throws. All three arms must replay.
 TEST(AttnRoutingModelCoupling, SinksReplayToFmhaOrNone) {
@@ -351,13 +325,6 @@ TEST(AttnRoutingModelCoupling, NothingAcceptsReplaysToNone) {
 // so swapping two tiers changes nothing (verified by mutation: FP8 ahead of FA2 stayed
 // green). The 16 AttnDispatchTable cases can't either (FP8 cases force fmha_fa2="never", so
 // FA2/FP8 are never both live). These pin actual chain order: both gates on, earlier wins.
-TEST(AttnTierPrecedence, Mxfp4BeatsFA2) {
-    auto cfg = default_cfg();
-    auto sup = all_accept();
-    sup.mxfp4_available = true;
-    ASSERT_TRUE(sup.mxfp4_accepts && sup.fa2_accepts);
-    EXPECT_EQ(select_attn_prefill_path(cfg, sup), AttnPrefillPath::MXFP4);
-}
 
 TEST(AttnTierPrecedence, FA2BeatsFP8WhenBothOnAndBothAccept) {
     auto cfg = default_cfg();
@@ -482,7 +449,6 @@ TEST(MoeTierPrecedence, EntryGateBeatsEveryReadyTier) {
     ws.grouped_available = false;  // the six early returns in the .cu
     EXPECT_EQ(select_moe_prefill_path(kPlainMoe, cfg, ws), MoePrefillPath::LEGACY);
 }
-
 
 // #1548: max(M_e) per launch decides the grouped GEMM's M tile and the smallM tier gate; imp
 // computed it on the host at three sites and dropped it. Arithmetic lives here so it can be

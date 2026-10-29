@@ -198,9 +198,84 @@ int forward_rows(int seq_len, int prefill_chunk) {
 }
 }  // namespace
 
+// Widest packed expert FFN width (MoE except Gemma-4), moved verbatim out of init().
+void GraphExecutor::init_expert_dims_(const Model& model, const ModelConfig& cfg) {
+    max_expert_eff_ = cfg.expert_d_ff;
+    if (has_moe_ && cfg.arch != ModelArch::GEMMA4) {
+        for (int li = 0; li < cfg.n_layers; li++) {
+            const auto& L = model.layer(li);
+            // gate/up packed: shape [n_experts, expert_d_ff, d_model]
+            for (const auto* p : {&L.expert_gate_packed, &L.expert_up_packed}) {
+                if (p->data && p->ndim >= 3)
+                    max_expert_eff_ = std::max(max_expert_eff_, static_cast<int>(p->shape[1]));
+            }
+            // down packed: shape [n_experts, d_model, expert_d_ff]
+            if (L.expert_down_packed.data && L.expert_down_packed.ndim >= 3)
+                max_expert_eff_ = std::max(max_expert_eff_, static_cast<int>(L.expert_down_packed.shape[2]));
+        }
+        if (max_expert_eff_ != cfg.expert_d_ff) {
+            IMP_LOG_WARN("expert_d_ff mismatch: config=%d, actual packed tensors=%d — using %d",
+                         cfg.expert_d_ff, max_expert_eff_, max_expert_eff_);
+        }
+    }
+}
+
+// YaRN correction dims and LongRoPE inverse frequencies (Phi-4), moved verbatim out of init().
+bool GraphExecutor::init_rope_tables_(const ModelConfig& cfg) {
+    // Precompute YaRN correction dimensions if enabled
+    if (cfg.yarn_ext_factor > 0.0f) {
+        int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
+        int n_dims = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
+        int n_ctx_orig = cfg.rope_n_ctx_orig > 0 ? cfg.rope_n_ctx_orig : cfg.max_seq_len;
+        rope_yarn_corr_dims(n_dims, n_ctx_orig, cfg.rope_theta, cfg.yarn_beta_fast, cfg.yarn_beta_slow,
+                            yarn_corr_dims_);
+        IMP_LOG_INFO("YaRN corr_dims: [%.1f, %.1f] (n_dims=%d, n_ctx_orig=%d)", yarn_corr_dims_[0],
+                     yarn_corr_dims_[1], n_dims, n_ctx_orig);
+    }
+
+    // Pre-compute LongRoPE inverse frequencies if enabled (Phi-4)
+    if (!cfg.rope_short_factor.empty() && !cfg.rope_long_factor.empty()) {
+        int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
+        int rd = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
+        int pairs = rd / 2;
+        longrope_n_pairs_ = pairs;
+        longrope_orig_max_pos_ = cfg.rope_scaling_orig_max_pos;
+
+        // inv_freq[i] = 1.0 / (factor[i] * theta^(2i/rd))
+        std::vector<float> short_freqs(pairs), long_freqs(pairs);
+        for (int i = 0; i < pairs; i++) {
+            float base_freq = 1.0f / std::pow(cfg.rope_theta, (2.0f * i) / static_cast<float>(rd));
+            short_freqs[i] = base_freq / cfg.rope_short_factor[i];
+            long_freqs[i] = base_freq / cfg.rope_long_factor[i];
+        }
+
+        cudaError_t e1 = cudaMalloc(&longrope_short_freqs_, pairs * sizeof(float));
+        cudaError_t e2 = cudaMalloc(&longrope_long_freqs_, pairs * sizeof(float));
+        if (e1 != cudaSuccess || e2 != cudaSuccess) {
+            IMP_LOG_ERROR("Failed to allocate LongRoPE frequency buffers: %s",
+                          cudaGetErrorString(e1 != cudaSuccess ? e1 : e2));
+            if (longrope_short_freqs_) {
+                IMP_CUDA_CHECK_LOG(cudaFree(longrope_short_freqs_));
+                longrope_short_freqs_ = nullptr;
+            }
+            if (longrope_long_freqs_) {
+                IMP_CUDA_CHECK_LOG(cudaFree(longrope_long_freqs_));
+                longrope_long_freqs_ = nullptr;
+            }
+            return false;
+        }
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(longrope_short_freqs_, short_freqs.data(), pairs * sizeof(float),
+                                      cudaMemcpyHostToDevice));
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(longrope_long_freqs_, long_freqs.data(), pairs * sizeof(float),
+                                      cudaMemcpyHostToDevice));
+
+        IMP_LOG_INFO("LongRoPE: %d freq pairs, orig_max_pos=%d", pairs, longrope_orig_max_pos_);
+    }
+    return true;
+}
+
 bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, int max_batch_size,
-                         int max_seq_len, bool use_fp8_prefill, int use_nvfp4_decode,
-                         bool use_mxfp4_prefill) {
+                         int max_seq_len, bool use_fp8_prefill, int use_nvfp4_decode) {
     if (initialized_) {
         free_buffers();
     }
@@ -215,7 +290,6 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     use_pdl_ = use_pdl;
     wcache_.use_fp8 = use_fp8_prefill;
     wcache_.nvfp4_decode_mode = use_nvfp4_decode;
-    wcache_.use_mxfp4 = use_mxfp4_prefill;
     // dual_path_quant is set separately by the engine after init
     hints_.prefer_fp8 = use_fp8_prefill;
     hints_.prefer_nvfp4_decode = (use_nvfp4_decode > 0);
@@ -235,24 +309,7 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     // cfg.expert_d_ff may not match the tensors (e.g. Nemotron-H). Gemma 4's
     // ffn_gate_up_exps is fused (shape[1]=2*expert_d_ff) but splits at
     // weight_upload time; trust cfg.expert_d_ff over the pre-split shape.
-    max_expert_eff_ = cfg.expert_d_ff;
-    if (has_moe_ && cfg.arch != ModelArch::GEMMA4) {
-        for (int li = 0; li < cfg.n_layers; li++) {
-            const auto& L = model.layer(li);
-            // gate/up packed: shape [n_experts, expert_d_ff, d_model]
-            for (const auto* p : {&L.expert_gate_packed, &L.expert_up_packed}) {
-                if (p->data && p->ndim >= 3)
-                    max_expert_eff_ = std::max(max_expert_eff_, static_cast<int>(p->shape[1]));
-            }
-            // down packed: shape [n_experts, d_model, expert_d_ff]
-            if (L.expert_down_packed.data && L.expert_down_packed.ndim >= 3)
-                max_expert_eff_ = std::max(max_expert_eff_, static_cast<int>(L.expert_down_packed.shape[2]));
-        }
-        if (max_expert_eff_ != cfg.expert_d_ff) {
-            IMP_LOG_WARN("expert_d_ff mismatch: config=%d, actual packed tensors=%d — using %d",
-                         cfg.expert_d_ff, max_expert_eff_, max_expert_eff_);
-        }
-    }
+    init_expert_dims_(model, cfg);
 
     // Use engine-provided max_seq_len if given, otherwise fall back to model config.
     int effective_seq_len = (max_seq_len > 0) ? max_seq_len : cfg.max_seq_len;
@@ -349,55 +406,8 @@ bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl, 
     mxfp4_gemv_set_l1_carveout();
     gemv_dp4a_set_l1_carveout();
 
-    // Precompute YaRN correction dimensions if enabled
-    if (cfg.yarn_ext_factor > 0.0f) {
-        int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
-        int n_dims = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
-        int n_ctx_orig = cfg.rope_n_ctx_orig > 0 ? cfg.rope_n_ctx_orig : cfg.max_seq_len;
-        rope_yarn_corr_dims(n_dims, n_ctx_orig, cfg.rope_theta, cfg.yarn_beta_fast, cfg.yarn_beta_slow,
-                            yarn_corr_dims_);
-        IMP_LOG_INFO("YaRN corr_dims: [%.1f, %.1f] (n_dims=%d, n_ctx_orig=%d)", yarn_corr_dims_[0],
-                     yarn_corr_dims_[1], n_dims, n_ctx_orig);
-    }
-
-    // Pre-compute LongRoPE inverse frequencies if enabled (Phi-4)
-    if (!cfg.rope_short_factor.empty() && !cfg.rope_long_factor.empty()) {
-        int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
-        int rd = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
-        int pairs = rd / 2;
-        longrope_n_pairs_ = pairs;
-        longrope_orig_max_pos_ = cfg.rope_scaling_orig_max_pos;
-
-        // inv_freq[i] = 1.0 / (factor[i] * theta^(2i/rd))
-        std::vector<float> short_freqs(pairs), long_freqs(pairs);
-        for (int i = 0; i < pairs; i++) {
-            float base_freq = 1.0f / std::pow(cfg.rope_theta, (2.0f * i) / static_cast<float>(rd));
-            short_freqs[i] = base_freq / cfg.rope_short_factor[i];
-            long_freqs[i] = base_freq / cfg.rope_long_factor[i];
-        }
-
-        cudaError_t e1 = cudaMalloc(&longrope_short_freqs_, pairs * sizeof(float));
-        cudaError_t e2 = cudaMalloc(&longrope_long_freqs_, pairs * sizeof(float));
-        if (e1 != cudaSuccess || e2 != cudaSuccess) {
-            IMP_LOG_ERROR("Failed to allocate LongRoPE frequency buffers: %s",
-                          cudaGetErrorString(e1 != cudaSuccess ? e1 : e2));
-            if (longrope_short_freqs_) {
-                IMP_CUDA_CHECK_LOG(cudaFree(longrope_short_freqs_));
-                longrope_short_freqs_ = nullptr;
-            }
-            if (longrope_long_freqs_) {
-                IMP_CUDA_CHECK_LOG(cudaFree(longrope_long_freqs_));
-                longrope_long_freqs_ = nullptr;
-            }
-            return false;
-        }
-        IMP_CUDA_CHECK_LOG(cudaMemcpy(longrope_short_freqs_, short_freqs.data(), pairs * sizeof(float),
-                                      cudaMemcpyHostToDevice));
-        IMP_CUDA_CHECK_LOG(cudaMemcpy(longrope_long_freqs_, long_freqs.data(), pairs * sizeof(float),
-                                      cudaMemcpyHostToDevice));
-
-        IMP_LOG_INFO("LongRoPE: %d freq pairs, orig_max_pos=%d", pairs, longrope_orig_max_pos_);
-    }
+    if (!init_rope_tables_(cfg))
+        return false;
 
     initialized_ = true;
 

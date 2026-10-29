@@ -50,7 +50,6 @@ struct CommonArgs {
 
     bool ssm_fp16 = false;         // FP16 for SSM h_state
     int decode_nvfp4 = -1;         // -1=auto, 0=off, 1=additive, 2=NVFP4-only
-    bool mxfp4_prefill = false;    // --mxfp4-prefill: CUTLASS MXFP4 GEMM for prefill
     bool dual_path_quant = false;  // --dual-path-quant: FP8 attention + NVFP4 FFN
 };
 

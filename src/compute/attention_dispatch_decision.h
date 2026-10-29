@@ -15,11 +15,9 @@ namespace imp {
 // model does — see #1205. Renaming a tier breaks both sides together.
 
 // Per-kernel "would this kernel accept the config" flags, mirroring the bool each
-// fmha_..._prefill() collapses to (mxfp4 also has an outer availability gate). Defaults reflect
-// the common hd=128 F16 case where the specialized kernels accept.
+// fmha_..._prefill() collapses to. Defaults reflect the common hd=128 F16 case where the
+// specialized kernels accept.
 struct AttnKernelSupport {
-    bool mxfp4_available = false;   // attention_mxfp4_available()
-    bool mxfp4_accepts = false;     // fmha_sm120_mxfp4_prefill(...) succeeded
     bool fa2_accepts = false;       // fmha_sm120_fa2_prefill(...) succeeded
     bool fp8_accepts = false;       // fmha_sm120_fp8_prefill(...) succeeded
     bool fmha_sm120_accepts = false;// fmha_sm120_prefill(...) succeeded
@@ -41,10 +39,6 @@ inline AttnPrefillPath select_attn_prefill_path(const DispatchPolicy& rcfg, cons
             return AttnPrefillPath::FMHA_SM120;
         return AttnPrefillPath::NONE;  // dispatcher throws (silent-wrong guard)
     }
-
-    // 1. MXFP4 Flash Attention (opt-in, outer availability + per-config accept).
-    if (sup.mxfp4_available && sup.mxfp4_accepts)
-        return AttnPrefillPath::MXFP4;
 
     // 2. Register-resident FA2 — only when [attention] fmha_fa2 == "on".
     if (rcfg.attention.fmha_fa2 == "on" && sup.fa2_accepts)

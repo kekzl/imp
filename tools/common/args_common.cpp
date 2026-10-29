@@ -58,8 +58,6 @@ bool parse_common_flag(CommonArgs& args, int argc, char** argv, int& i) {
         args.decode_nvfp4 = 2;
     } else if (std::strcmp(a, "--no-nvfp4") == 0) {
         args.decode_nvfp4 = 0;
-    } else if (std::strcmp(a, "--mxfp4-prefill") == 0) {
-        args.mxfp4_prefill = true;
     } else if (std::strcmp(a, "--dual-path-quant") == 0) {
         args.dual_path_quant = true;
     } else {

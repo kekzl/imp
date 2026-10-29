@@ -1,5 +1,5 @@
 // Microbench: cp.async vs TMA bulk for FMHA V-tile loads (SM120).
-// Mirrors the FMHA-MXFP4 V-prefetch shape in attention_fmha_mxfp4_sm120.cu:755-772.
+// Mirrors the V-prefetch shape of the removed MXFP4 FMHA (attention_fmha_mxfp4_sm120.cu:755-772).
 // Launches on all 170 SMs (RTX 5090) to saturate memory engines like the real kernel.
 
 #include "fmha_v_load_bench.h"

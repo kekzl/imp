@@ -16,7 +16,7 @@
 #include "compute/gemm_f16_narrow_smallm.h"  // gemm_f16_narrow_smallm_workspace_bytes
 #include "compute/gemm.h"       // kGemmCublasWorkspaceBytes, block_q8_1
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/gemm_cutlass_mxfp4_sm120.h"
+#include "quant/mxfp4_sfatom.h"
 #include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"  // smallM_table_bytes
 #include "compute/sampling.h"
@@ -1213,53 +1213,6 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                              qscratch_.cutlass_act_data_size / (1024.0 * 1024.0),
                              qscratch_.cutlass_act_sf_size / (1024.0 * 1024.0),
                              qscratch_.cutlass_workspace_size / (1024.0 * 1024.0));
-
-                // MXFP4 activation buffers share packed data with NVFP4, only need separate UE8M0 scale
-                // factors (SFVecSize=32 vs NVFP4's 16). Allocate only when the model carries MXFP4
-                // weights (or attention.mxfp4 prefill is opt-in enabled); hardware availability alone is
-                // not sufficient.
-                bool has_mxfp4_weights = false;
-                for (int i = 0; i < cfg.n_layers && !has_mxfp4_weights; i++) {
-                    const auto& L = model_->layer(i);
-                    if (L.wq.qtype == QType::MXFP4 || L.w_gate.qtype == QType::MXFP4 ||
-                        L.w_up.qtype == QType::MXFP4 || L.w_down.qtype == QType::MXFP4 ||
-                        L.ssm_in.qtype == QType::MXFP4 || L.ssm_out.qtype == QType::MXFP4 ||
-                        L.expert_gate_packed.qtype == QType::MXFP4 ||
-                        L.expert_up_packed.qtype == QType::MXFP4 ||
-                        L.expert_down_packed.qtype == QType::MXFP4) {
-                        has_mxfp4_weights = true;
-                    }
-                }
-                if (cutlass_sm120_mxfp4_available() &&
-                    (has_mxfp4_weights || dispatch_policy().attention.mxfp4 == "always")) {
-                    qscratch_.mxfp4_act_sf_size = cutlass_mxfp4_sf_size(max_tokens_, max_k);
-                    qscratch_.mxfp4_workspace_size = gemm_mxfp4_cutlass_sm120_workspace(max_tokens_, max_n,
-                                                                                        max_k);
-                    qscratch_.mxfp4_act_sf = vram_alloc(vram_alloc_, qscratch_.mxfp4_act_sf_size,
-                                                        "mxfp4_act_sf");
-                    qscratch_.mxfp4_workspace = (qscratch_.mxfp4_workspace_size > 0)
-                                                    ? vram_alloc(vram_alloc_, qscratch_.mxfp4_workspace_size,
-                                                                 "mxfp4_workspace")
-                                                    : nullptr;
-                    if (!qscratch_.mxfp4_act_sf ||
-                        (qscratch_.mxfp4_workspace_size > 0 && !qscratch_.mxfp4_workspace)) {
-                        IMP_LOG_WARN("Failed to allocate MXFP4 activation buffers, MXFP4 prefill disabled");
-                        if (qscratch_.mxfp4_act_sf) {
-                            vram_free(vram_alloc_, qscratch_.mxfp4_act_sf);
-                            qscratch_.mxfp4_act_sf = nullptr;
-                        }
-                        if (qscratch_.mxfp4_workspace) {
-                            vram_free(vram_alloc_, qscratch_.mxfp4_workspace);
-                            qscratch_.mxfp4_workspace = nullptr;
-                        }
-                        qscratch_.mxfp4_act_sf_size = 0;
-                        qscratch_.mxfp4_workspace_size = 0;
-                    } else {
-                        IMP_LOG_INFO("CUTLASS MXFP4 activation scratch: sf=%.2f MiB, ws=%.2f MiB",
-                                     qscratch_.mxfp4_act_sf_size / (1024.0 * 1024.0),
-                                     qscratch_.mxfp4_workspace_size / (1024.0 * 1024.0));
-                    }
-                }
             }
         }
     }

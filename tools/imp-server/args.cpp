@@ -41,7 +41,6 @@ void print_server_usage(const char* prog) {
             "  --prefix-cache <path> Persist the prefix cache to this path across restarts\n"
             "  --decode-nvfp4        NVFP4 decode cache (additive: FP16 prefill + NVFP4 decode)\n"
             "  --decode-nvfp4-only   NVFP4 decode cache (replacement: saves VRAM, slower prefill)\n"
-            "  --mxfp4-prefill       Use CUTLASS MXFP4 GEMM for prefill (sm_120, requires NVFP4)\n"
             "  --dual-path-quant     FP8 attention + NVFP4 FFN (higher quality attention, faster FFN)\n"
             "  --no-nvfp4            Disable NVFP4 decode cache (override auto-detection)\n"
             "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for multimodal\n"

@@ -3,7 +3,7 @@
 #include "core/tensor.h"
 #include "quant/nvfp4_quant.h"               // NvFP4QuantResult, NvFP4MoEQuantResult
 #include "compute/gemm_cutlass_sm120.h"      // CutlassNvFP4Weight
-#include "compute/gemm_cutlass_mxfp4_sm120.h"// CutlassMxFP4Weight
+#include "quant/cutlass_mxfp4_weight.h"      // CutlassMxFP4Weight
 #include "compute/gemm_cutlass_mxfp8_sm120.h"  // CutlassMxFP8Weight
 #include <cuda_fp16.h>
 #include <unordered_map>
@@ -169,7 +169,6 @@ struct WeightCaches {
     size_t cutlass_mxfp4_bytes = 0;
     // Native MXFP4 GGUF: packed data compacted in place in the source buffers (already WEIGHTS).
     size_t cutlass_mxfp4_inplace_bytes = 0;
-    bool use_mxfp4 = false;
 
     // Dual-path mode: FP8 attention + NVFP4 FFN
     bool dual_path_quant = false;
