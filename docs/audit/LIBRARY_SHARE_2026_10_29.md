@@ -203,3 +203,17 @@ Persistent CTAs over a per-expert tile prefix (warp scan in shared memory), A th
 - PPL 11.4338 both arms (`runtime.deterministic`, 45k corpus), ACTIVE line (experts=128 N=768 K=2048).
 - Measured before the port: pp512 CUTLASS grouped sits near the weight floor (~208 vs ~197 us per layer), pp4096 at ~40 % of the dense own kernel's rate.
 - K % 128 == 64 (half last stage, second SF atom zeroed in shared memory): bit-exact at K 704 / 2880. gpt-oss-20b (MXFP4 converted to NVFP4 at load, `moe_prefill=cutlass3x → device_args`) GEMM sum pp512 70.1 / 81.5 -> 67.1 / 67.3 ms, pp4096 256.0 / 296.4 -> 238.0 / 238.5 ms, e2e pp4096 51964 / 51906 -> 53165 / 53342 tok/s; PPL 262.6413 both arms (raw corpus, no harmony template). Correction: Gemma-4-26B (N 704, K 2816) and Nemotron-3-Nano (N 1856 / 2688, K 2688 / 1856) do run the own kernel since #2897 (ACTIVE line); the "no ACTIVE line" read came from a mis-named log glob. pp4096, 2 pairs: grouped time 211.7 / 211.0 -> 200.4 / 202.1 ms and 236.2 / 236.2 -> 232.2 / 233.2 ms, e2e 40785 / 40756 -> 41166 / 40982 and 55080 / 55098 -> 55385 / 55667 tok/s.
+
+## Step 5: own FA2 for head_dim 512 (`src/compute/attention_fa2_hd512.cu`)
+
+8 warps = 4 row groups x 2 D halves; each warp keeps Q (16 x 256, 64 regs) and O (16 x 256 fp32, 128 regs) in registers, the two warps of a row group swap their partial scores per 16-row KV tile through shared memory (double-buffered, one named barrier) and run the identical online softmax. 253 registers, no spill. CPU reference test (`test-attention --gtest_filter='*Fa2Hd512*'`): max error 3.5e-4 with q_offset, GQA, softcap.
+
+| Gemma-4-26B-NVFP4 (`attention.hd512_prefill`, 2 pairs) | cuBLAS materialized | own FA2 | own WMMA (`fmha`) |
+|---|---:|---:|---:|
+| pp512 e2e | 33450 / 33851 tok/s | 34013 / 33461 tok/s | 32689 / 32652 tok/s |
+| pp4096 attention kernels | 211.4 / 211.2 ms | 194.2 / 194.4 ms | 528.8 / 525.3 ms (other regex) |
+| pp4096 e2e | 41057 / 41213 tok/s | 42789 / 42620 tok/s | 31419 / 31596 tok/s |
+
+- PPL 409.5548 (cuBLAS) -> 407.3936 (FA2), `runtime.deterministic`, 45k raw corpus (instruct model, no template).
+- The kernel runs at ~246 TFLOPS at pp4096 (1115.6 us per call): the fp32-accumulate FP16 rate. The hd<=256 FA2 accumulates in fp16; that is the next lever.
+- A first A/B showed equal launch counts in both arms; the rerun after a fresh build differed (776 vs 666 at pp512), only the rerun is recorded.

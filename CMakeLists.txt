@@ -302,6 +302,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_f16_narrow_prefill.cu
     src/compute/gemm_f16_tile.cu
     src/compute/gemm_grouped_nvfp4_tile.cu
+    src/compute/attention_fa2_hd512.cu
     src/compute/ffn_sparsity_probe.cu
     src/compute/ffn_sparsity_mask.cu
     src/compute/weight_dispatch.cpp
@@ -1311,6 +1312,7 @@ if(IMP_BUILD_TESTS)
     imp_add_test_module(test-attention GPU SOURCES
         tests/test_attention_fmha_sm120.cu
         tests/test_attention_fmha_hd512.cu
+        tests/test_attention_fa2_hd512.cu
         tests/test_attention_crosspath.cu
         tests/test_gpt_oss_sinks_ref.cu
         tests/test_fmha_fp8.cu

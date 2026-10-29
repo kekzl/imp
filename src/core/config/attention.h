@@ -38,9 +38,10 @@ struct Attention {
     // prefill through the register-resident FA2 kernel (fp16-qk, Bq=64/TWOSLOT)
     // instead of SMEM-tiled WMMA/cuBLAS. Also gates the FP8-KV cuBLAS skip at hd=256.
     bool fa2_hd256 = true;
-    // hd=512 prefill (Gemma-4 global layers), single-shot and chunk continuation: "fmha" = WMMA
+    // hd=512 prefill (Gemma-4 global layers), single-shot and chunk continuation: "fa2" = split-D FA2
+    // (attention_fa2_hd512.cu, the "auto" default when no window / sinks), "fmha" = WMMA
     // FMHA with a forward KV scan, a row identical in every chunk (#2167); "cublas" = S-matrix
-    // cuBLAS (algorithm picked by n); "auto" = fmha under runtime.deterministic, else cublas.
+    // cuBLAS (algorithm picked by n); "auto" = fa2, else fmha under runtime.deterministic, else cublas.
     std::string hd512_prefill = "auto";
     // KV tile rows for the HD=256 FA2 instance: 64 or 32. At Bkv=64 the TWOSLOT
     // tile is 67.6 KB of the 100 KB SM budget (1 CTA/SM); Bkv=32 halves it for
