@@ -55,6 +55,7 @@ Stream-K 128x128 (grid = SMs, forward unit ranges: a CTA's first segment writes 
 | pp4096 e2e | 12109 / 12101 tok/s | 12147 / 12136 tok/s |
 
 - pp512 per shape, own vs CUTLASS us/call (before the idle rule): N=17408 89.3 vs 86.0, N=6144 36.6 / 77.5 vs 31.7 / 68.5, N=1024 14.0 vs 11.9; N=5120/10240 group 83.2 vs 87.9 ms total.
+- Stream-K epilogue staged in its own buffer (3 stages, 168 regs): isolated M=512 N=1024 19.0 -> 15.8, N=6144 32.3 -> 30.8 us; in situ pp512 GEMM sum 221.7-222.7 vs CUTLASS 217.1-219.5 ms, unchanged: in situ the stream-K tiles run slower than isolated (N=17408 90.6 vs 87.6 us), CUTLASS does not.
 - CUTLASS stays the default below M 2048 until the own arm leads there.
 
 ## Per cell
