@@ -350,6 +350,7 @@ bool apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     I("gemm.nvfp4_cublaslt_min_m", cfg.gemm.nvfp4_cublaslt_min_m);
     I("gemm.nvfp4_tile_min_m", cfg.gemm.nvfp4_tile_min_m);
     B("gemm.f16_tile", cfg.gemm.f16_tile);
+    B("gemm.q6k_tile", cfg.gemm.q6k_tile);
     B("gemm.moe_tile", cfg.gemm.moe_tile);
     B("gemm.mxfp8_tile", cfg.gemm.mxfp8_tile);
     I("gemm.nvfp4_smallm_impl", cfg.gemm.nvfp4_smallm_impl);

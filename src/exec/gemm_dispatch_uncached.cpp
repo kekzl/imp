@@ -6,6 +6,7 @@
 
 #include "compute/gemm.h"
 #include "compute/gemm_q4k.h"
+#include "compute/gemm_q6k_f16_tile.h"
 #include "compute/gemm_q8_0_dense.h"
 #include "compute/gemv_dp4a_rows.h"
 #include "compute/mmq_q8_imma.h"
@@ -135,6 +136,25 @@ static bool q6k_rows(const Tensor& input, const Tensor& weight, Tensor& output, 
                              static_cast<int>(weight.shape[1]), ctx.stream, ctx.beta);
 }
 
+// Q6_K prompt rows (gemm.q6k_tile): the fused tile decodes W from the blocks, no whole-weight dequant.
+// Under runtime.deterministic every prompt row takes it (bit-equal across tiles, so chunk-invariant);
+// otherwise only where it wins in situ (gemm_q6k_f16_tile_wins).
+static bool q6k_tile_rows(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx) {
+    const int M = static_cast<int>(input.shape[0]);
+    const int N = static_cast<int>(weight.shape[0]);
+    if (!process_diag_q6k_tile() || !gemm_q6k_f16_tile_wins(M, N, process_diag_deterministic()) ||
+        !gemm_q6k_f16_tile(input.data, weight.data, output.data, M, N, static_cast<int>(weight.shape[1]),
+                           1.0f, ctx.beta, process_diag_cublas_fp16_acc(), ctx.stream))
+        return false;
+    static bool logged = false;  // activity proof, once
+    if (!logged) {
+        logged = true;
+        IMP_LOG_INFO("gemm.q6k_tile: fused Q6_K prompt GEMM ACTIVE (M=%d N=%d K=%ld)", M, N,
+                     (long)weight.shape[1]);
+    }
+    return true;
+}
+
 // 2..4 rows (MTP verify, 2..4-token prompts): one multi-row dp4a GEMV over the weight, 2 launches; the IMMA
 // tiles cost a quantize, a K-split and a finalize on top.
 static bool dp4a_few_rows(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx) {
@@ -172,7 +192,8 @@ bool gemm_uncached_in_place(const Tensor& input, const Tensor& weight, Tensor& o
         case QType::Q5_K:
             return (decode_rows || !det) && gguf_imma_rows(input, weight, output, ctx);
         case QType::Q6_K:
-            return q6k_rows(input, weight, output, ctx, decode_rows || short_prompt);
+            return q6k_rows(input, weight, output, ctx, decode_rows || short_prompt) ||
+                   (!decode_rows && q6k_tile_rows(input, weight, output, ctx));
         default:
             return false;
     }
