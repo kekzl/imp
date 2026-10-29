@@ -186,3 +186,19 @@ The NVFP4 skeleton with `mma.sync m16n8k16` (fp16 or fp32 accumulator), BK 64 ha
 
 - In situ the deep-K shapes win (down proj 2048x5120x17408 lost isolated, 1072.2 vs 1007.1 us) and the N=17408 gate/up lose ~1 %: the rule follows the in-situ data.
 - fp16 accumulate is bit-equal to cuBLASLt COMPUTE_16F (max diff 0); PPL 9.2022 both arms, ACTIVE line in the own arm (M=2048 N=5120 K=5120).
+
+## Step 4: own grouped NVFP4 MoE GEMM (`src/compute/gemm_grouped_nvfp4_tile.cu`)
+
+Persistent CTAs over a per-expert tile prefix (warp scan in shared memory), A through one TMA map over the expert-sorted rows, B per expert through a per-CTA tensormap re-pointed with `tensormap.replace` (two slots). Same `GroupedNvfp4DeviceArgs` operands as CUTLASS 3.x grouped, bit-exact in both B modes (`test-quant --gtest_filter='GroupedNvfp4TileTest.*'`).
+
+| Qwen3-30B-A3B-NVFP4 in situ (`gemm.moe_tile`, 3 pairs) | CUTLASS grouped | own |
+|---|---:|---:|
+| pp512 GEMM kernel sum | 98.8-99.1 ms | 94.5-95.1 ms |
+| pp512 e2e | 30066-30770 tok/s | 31663-32112 tok/s |
+| pp4096 GEMM kernel sum | 260.0-260.7 ms | 243.2-245.6 ms |
+| pp4096 e2e | 40935-41025 tok/s | 41811-41831 tok/s |
+
+- First version with a separate prefix kernel per call: kernel sums lower, pp512 e2e mixed (30202 / 30787 vs 30747 / 30799 tok/s); the in-kernel scan removed the extra launch.
+- Qwen3.6-35B-A3B-NVFP4 pp512 GEMM sum 115.8 / 115.9 -> 112.2 / 112.3 ms (2 pairs; e2e spread too wide for a verdict).
+- PPL 11.4338 both arms (`runtime.deterministic`, 45k corpus), ACTIVE line (experts=128 N=768 K=2048).
+- Measured before the port: pp512 CUTLASS grouped sits near the weight floor (~208 vs ~197 us per layer), pp4096 at ~40 % of the dense own kernel's rate.

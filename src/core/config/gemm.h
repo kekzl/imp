@@ -109,6 +109,10 @@ struct GEMM {
     // accumulation, deep K (K >= N), grid >= one wave; bit-equal to COMPUTE_16F. Qwen3-14B-Q6_K
     // pp2048 GEMM sum -5.5 %, e2e +4.0 %, PPL 9.2022 both arms.
     bool f16_tile = true;
+    // Own grouped NVFP4 MoE prefill GEMM (gemm_grouped_nvfp4_tile.cu) before CUTLASS 3.x grouped on the
+    // same device-args operands, bit-exact. Qwen3-30B-A3B-NVFP4 pp512 / pp4096 GEMM sum -4 / -6 %,
+    // e2e +3..7 / +2 %, PPL 11.4338 both arms. Refuses K % 128 != 0 or K < 384 (CUTLASS then).
+    bool moe_tile = true;
     // Which small-M implementation the gate above dispatches: 1 = W4A16
     // dequant+HMMA kernel (kept for A/B), 2 = native mxf4nvf4 producer/consumer
     // pipeline (nvfp4_gemm_smallm_v2.cu).

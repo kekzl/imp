@@ -301,6 +301,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_f16_narrow_smallm.cu
     src/compute/gemm_f16_narrow_prefill.cu
     src/compute/gemm_f16_tile.cu
+    src/compute/gemm_grouped_nvfp4_tile.cu
     src/compute/ffn_sparsity_probe.cu
     src/compute/ffn_sparsity_mask.cu
     src/compute/weight_dispatch.cpp
@@ -1347,6 +1348,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_gemm_graph_capture.cu
         # tests/test_turboquant.cu removed (TurboQuant retired Phase 5, 2026-05-17)
         tests/test_cutlass_grouped_3x_nvfp4.cu
+        tests/test_gemm_grouped_nvfp4_tile.cu
         tests/test_cutlass_grouped_tile_bench.cu
         tests/test_cutlass_grouped_ref.cu
         tests/test_cutlass_nvfp4_alpha.cu
