@@ -10,20 +10,24 @@
 // raster / persistent CTAs / direct epilogue stores 0..+8 % slower; 128x128 is L2-bound (77 %).
 
 #include "quant/nvfp4_gemm_tile.h"
+#include "quant/nvfp4_gemm_tile_ptx.cuh"
 
 #include "core/logging.h"
 
 #include <cuda.h>
 #include <cuda_fp16.h>
+#include <cmath>
 #include <cstdint>
 
 namespace imp {
 namespace {
 
+using namespace nvfp4_tile;  // NOLINT(google-build-using-namespace): this TU's own PTX helpers
+
 constexpr int kBM = 128;
 constexpr int kMmaThreads = 256;
 
-template <int BN, int BK, int STAGES, bool TMA, bool PW = false>
+template <int BN, int BK, int STAGES, bool TMA, bool PW = false, bool SK = false>
 struct Cfg {
     static constexpr int kBN = BN;
     static constexpr int kBK = BK;
@@ -32,6 +36,8 @@ struct Cfg {
     // PW: a 9th warp issues the TMA loads. 9 warps put 3 on one SM sub-partition, which caps
     // ptxas at 168 registers (128x256 spilled 140 B); without it thread 0 refills each slot.
     static constexpr bool kPw = TMA && PW;
+    static constexpr bool kSk = SK;  // stream-K: grid = SMs over (tile, k-step) units, direct epilogue
+    static_assert(!SK || (TMA && PW), "stream-K runs on the producer-warp mainloop");
     static constexpr int kThreads = kMmaThreads + (kPw ? 32 : 0);
     static constexpr int kWN = BN / 4;  // warp tile 64 x kWN
     static constexpr int kNF = kWN / 8;
@@ -65,69 +71,6 @@ struct Cfg {
     }
 };
 
-__device__ __forceinline__ void cp_async16(uint32_t dst, const void* src, int src_bytes) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;" ::"r"(dst), "l"(src), "r"(src_bytes));
-}
-__device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;"); }
-template <int N>
-__device__ __forceinline__ void cp_async_wait() {
-    asm volatile("cp.async.wait_group %0;" ::"n"(N));
-}
-
-__device__ __forceinline__ void mbar_init(uint32_t bar, uint32_t count) {
-    asm volatile("mbarrier.init.shared.b64 [%0], %1;" ::"r"(bar), "r"(count));
-}
-__device__ __forceinline__ void mbar_arrive(uint32_t bar) {
-    asm volatile("mbarrier.arrive.shared.b64 _, [%0];" ::"r"(bar) : "memory");
-}
-__device__ __forceinline__ void mbar_expect_tx(uint32_t bar, uint32_t bytes) {
-    asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;" ::"r"(bar), "r"(bytes) : "memory");
-}
-__device__ __forceinline__ void mbar_wait(uint32_t bar, uint32_t parity) {
-    asm volatile(
-        "{\n\t.reg .pred P;\n"
-        "TILE_WAIT_%=:\n\t"
-        "mbarrier.try_wait.parity.shared.b64 P, [%0], %1;\n\t"
-        "@!P bra TILE_WAIT_%=;\n\t}" ::"r"(bar),
-        "r"(parity)
-        : "memory");
-}
-__device__ __forceinline__ void tma_2d(uint32_t dst, const CUtensorMap* map, int x, int y, uint32_t bar) {
-    asm volatile(
-        "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], "
-        "[%4];" ::"r"(dst),
-        "l"(map), "r"(x), "r"(y), "r"(bar)
-        : "memory");
-}
-__device__ __forceinline__ void bulk_1d(uint32_t dst, const void* src, uint32_t bytes, uint32_t bar) {
-    asm volatile(
-        "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(dst),
-        "l"(src), "r"(bytes), "r"(bar)
-        : "memory");
-}
-
-__device__ __forceinline__ void mma_mxf4nvf4(float acc[4], const uint32_t a[4], uint32_t b0, uint32_t b1,
-                                             uint32_t sfa, uint32_t sfb) {
-#if __CUDA_ARCH__ >= 1200
-    asm volatile(
-        "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "
-        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3}, {%10}, {%11, %12}, {%13}, {%14, "
-        "%15};\n"
-        : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])
-        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1), "r"(sfa),
-          "h"(static_cast<uint16_t>(0)), "h"(static_cast<uint16_t>(0)), "r"(sfb),
-          "h"(static_cast<uint16_t>(0)), "h"(static_cast<uint16_t>(0)));
-#endif
-}
-
-// ldmatrix x4: lane l addresses row l%8 of 8x16 B matrix l/8; register j of every lane is the
-// u32 at (row T1, byte T0*4) of matrix j, the m16n8k64 fragment order.
-__device__ __forceinline__ void ldsm_x4(uint32_t r[4], uint32_t addr) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
-                 : "r"(addr));
-}
-
 // Byte of row r's 4 K-group scales inside a stage's SF slabs (r < 128 per slab).
 template <class C>
 __device__ __forceinline__ int sf_off(int r, int c) {
@@ -142,6 +85,11 @@ struct TileArgs {
     half* d;
     float alpha;
     int M, N, K;
+    // Stream-K (Cfg::kSk): per-CTA arrival flags (zeroed per launch) and one fp32 partial tile per
+    // CTA; each CTA owns units [b * sk_per, (b + 1) * sk_per) of tiles * KT.
+    int* sk_flags;
+    float* sk_parts;
+    int sk_per;
 };
 
 // Sync mainloop stage load: 16 B cp.async chunks over the 256 MMA threads (rows >= M/N zero-fill).
@@ -347,6 +295,149 @@ __device__ __forceinline__ void store_tile(const float (&acc)[4][C::kNF][4], con
     }
 }
 
+// Stream-K. CTA b walks its unit range [begin, end) forward in segments (tile t, k-steps
+// [kb, ke)): its first segment can start mid tile (kb > 0): a partial, written right at the start;
+// its last can end mid tile (kb == 0, ke < KT): it holds k-step 0, finishes the tile and reads the
+// partials of CTAs b+1.. at the end of its range. Whole tiles store directly.
+// Partials sum in a fixed order (deterministic, not bit-equal to the data-parallel kernel).
+struct SkSeg {
+    int t, kb, ke;
+};
+
+__device__ __forceinline__ SkSeg sk_seg(int it, int end, int KT) {
+    const int t = it / KT;
+    const int kb = it - (t * KT);
+    return {t, kb, min(KT, kb + (end - it))};
+}
+
+__device__ __forceinline__ int ld_acquire(const int* p) {
+    int v;
+    asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(v) : "l"(p) : "memory");
+    return v;
+}
+__device__ __forceinline__ void st_release(int* p, int v) {
+    asm volatile("st.release.gpu.global.b32 [%0], %1;" ::"l"(p), "r"(v) : "memory");
+}
+
+template <class C>
+__device__ __forceinline__ void store_direct(const float (&acc)[4][C::kNF][4], const TileArgs& p, int m0,
+                                             int n0, int wm, int wn, int lane) {
+    const int T0 = lane & 3;
+    const int T1 = lane >> 2;
+#pragma unroll
+    for (int mf = 0; mf < 4; ++mf)
+#pragma unroll
+        for (int nf = 0; nf < C::kNF; ++nf) {
+            const int col = n0 + wn + nf * 8 + T0 * 2;
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int row = m0 + wm + mf * 16 + T1 + h * 8;
+                if (row < p.M && col < p.N)
+                    *reinterpret_cast<__half2*>(p.d + (static_cast<size_t>(row) * p.N) +
+                                                col) = __floats2half2_rn(acc[mf][nf][h * 2] * p.alpha,
+                                                                         acc[mf][nf][(h * 2) + 1] * p.alpha);
+            }
+        }
+}
+
+// Partial tile of CTA b in fragment order: float4 j of thread tid at (j * 256 + tid), coalesced.
+template <class C>
+__device__ __forceinline__ float4* sk_slot(const TileArgs& p, int b) {
+    return reinterpret_cast<float4*>(p.sk_parts) + (static_cast<size_t>(b) * 4 * C::kNF * kMmaThreads);
+}
+
+template <class C>
+__device__ __forceinline__ void sk_mainloop(const Ring& g, const TileArgs& p, const CUtensorMap* ma,
+                                            const CUtensorMap* mw) {
+    const int KT = p.K / C::kBK;
+    const int n_tiles = (p.N + C::kBN - 1) / C::kBN;
+    const int units = n_tiles * ((p.M + kBM - 1) / kBM) * KT;
+    const int b = blockIdx.x;
+    const int begin = b * p.sk_per;
+    const int end = min(begin + p.sk_per, units);
+    if (threadIdx.x == 0) {
+        for (int s = 0; s < C::kStages; ++s) {
+            mbar_init(g.bars + s * 8, 1);
+            mbar_init(g.bars + (C::kStages + s) * 8, kMmaThreads / 32);
+        }
+        asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+    }
+    __syncthreads();
+    int ring = 0;
+    if (g.warp == kMmaThreads / 32) {
+        if (g.lane == 0)
+            for (int it = begin; it < end;) {
+                const SkSeg sg = sk_seg(it, end, KT);
+                const int m0 = (sg.t / n_tiles) * kBM;
+                const int n0 = (sg.t % n_tiles) * C::kBN;
+                for (int kt = sg.kb; kt < sg.ke; ++kt, ++ring) {
+                    const int s = ring % C::kStages;
+                    if (ring >= C::kStages)
+                        mbar_wait(g.bars + (C::kStages + s) * 8, ((ring / C::kStages) - 1) & 1);
+                    tma_stage<C>(g.s0 + s * C::kStageBytes, g.bars + s * 8, ma, mw, p, m0, n0, kt);
+                }
+                it += sg.ke - sg.kb;
+            }
+        return;
+    }
+    float acc[4][C::kNF][4];
+    for (int it = begin; it < end;) {
+        const SkSeg sg = sk_seg(it, end, KT);
+        const int m0 = (sg.t / n_tiles) * kBM;
+        const int n0 = (sg.t % n_tiles) * C::kBN;
+#pragma unroll
+        for (int i = 0; i < 4; ++i)
+#pragma unroll
+            for (int j = 0; j < C::kNF; ++j)
+#pragma unroll
+                for (int r = 0; r < 4; ++r)
+                    acc[i][j][r] = 0.0f;
+        for (int kt = sg.kb; kt < sg.ke; ++kt, ++ring) {
+            const int s = ring % C::kStages;
+            mbar_wait(g.bars + s * 8, (ring / C::kStages) & 1);
+            mma_stage<C>(acc, g.s0 + s * C::kStageBytes, g.smem + s * C::kStageBytes, g.wm, g.wn, g.lane);
+            __syncwarp();
+            if (g.lane == 0)
+                mbar_arrive(g.bars + (C::kStages + s) * 8);
+        }
+        float4* own = sk_slot<C>(p, b);
+        if (sg.kb > 0) {  // contributor: this tile's k-step 0 belongs to an earlier CTA
+#pragma unroll
+            for (int mf = 0; mf < 4; ++mf)
+#pragma unroll
+                for (int nf = 0; nf < C::kNF; ++nf)
+                    own[((mf * C::kNF + nf) * kMmaThreads) + threadIdx.x] =
+                        make_float4(acc[mf][nf][0], acc[mf][nf][1], acc[mf][nf][2], acc[mf][nf][3]);
+            __threadfence();
+            asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
+            if (threadIdx.x == 0)
+                st_release(p.sk_flags + b, 1);
+        } else {
+            if (sg.ke < KT) {  // finisher: CTAs b+1 .. last hold k-steps [ke, KT)
+                const int last = ((sg.t * KT) + KT - 1) / p.sk_per;
+                for (int q = b + 1; q <= last; ++q) {
+                    if (threadIdx.x == 0)
+                        while (ld_acquire(p.sk_flags + q) == 0) {}
+                    asm volatile("bar.sync 1, %0;" ::"n"(kMmaThreads));
+                    const float4* src = sk_slot<C>(p, q);
+#pragma unroll
+                    for (int mf = 0; mf < 4; ++mf)
+#pragma unroll
+                        for (int nf = 0; nf < C::kNF; ++nf) {
+                            const float4 v = __ldcg(src + ((mf * C::kNF + nf) * kMmaThreads) + threadIdx.x);
+                            acc[mf][nf][0] += v.x;
+                            acc[mf][nf][1] += v.y;
+                            acc[mf][nf][2] += v.z;
+                            acc[mf][nf][3] += v.w;
+                        }
+                }
+            }
+            store_direct<C>(acc, p, m0, n0, g.wm, g.wn, g.lane);
+        }
+        it += sg.ke - sg.kb;
+    }
+}
+
 template <class C>
 __global__ void __launch_bounds__(C::kThreads, 1) gemm_nvfp4_tile_kernel(
     TileArgs p, const __grid_constant__ CUtensorMap map_a, const __grid_constant__ CUtensorMap map_w) {
@@ -365,22 +456,26 @@ __global__ void __launch_bounds__(C::kThreads, 1) gemm_nvfp4_tile_kernel(
                  (warp & 1) * 64,
                  ((warp >> 1) & 3) * C::kWN};
 
-    float acc[4][C::kNF][4];
-#pragma unroll
-    for (int i = 0; i < 4; ++i)
-#pragma unroll
-        for (int j = 0; j < C::kNF; ++j)
-#pragma unroll
-            for (int r = 0; r < 4; ++r)
-                acc[i][j][r] = 0.0f;
-
-    if constexpr (C::kTma) {
-        if (!tma_mainloop<C>(acc, g, p, &map_a, &map_w))
-            return;
+    if constexpr (C::kSk) {
+        sk_mainloop<C>(g, p, &map_a, &map_w);
     } else {
-        sync_mainloop<C>(acc, g, p);
+        float acc[4][C::kNF][4];
+#pragma unroll
+        for (int i = 0; i < 4; ++i)
+#pragma unroll
+            for (int j = 0; j < C::kNF; ++j)
+#pragma unroll
+                for (int r = 0; r < 4; ++r)
+                    acc[i][j][r] = 0.0f;
+
+        if constexpr (C::kTma) {
+            if (!tma_mainloop<C>(acc, g, p, &map_a, &map_w))
+                return;
+        } else {
+            sync_mainloop<C>(acc, g, p);
+        }
+        store_tile<C>(acc, g, p);
     }
-    store_tile<C>(acc, g, p);
 }
 
 // cuTensorMapEncodeTiled via the runtime's driver entry point (no link-time libcuda dependency).
@@ -435,7 +530,13 @@ bool launch_tile(const TileArgs& p, cudaStream_t stream) {
                                                      C::kSmemBytes) == cudaSuccess;
     if (!smem_ok)
         return false;
-    const dim3 grid((p.N + C::kBN - 1) / C::kBN, (p.M + kBM - 1) / kBM);
+    dim3 grid((p.N + C::kBN - 1) / C::kBN, (p.M + kBM - 1) / kBM);
+    if constexpr (C::kSk) {  // caller set sk_per and the workspace; flags start at 0 every launch
+        const int units = static_cast<int>(grid.x * grid.y) * (p.K / C::kBK);
+        grid = dim3((units + p.sk_per - 1) / p.sk_per);
+        if (cudaMemsetAsync(p.sk_flags, 0, grid.x * sizeof(int), stream) != cudaSuccess)
+            return false;
+    }
     gemm_nvfp4_tile_kernel<C><<<grid, C::kThreads, C::kSmemBytes, stream>>>(p, map_a, map_w);
     IMP_CUDA_CHECK_LAUNCH();
     return true;
@@ -443,43 +544,86 @@ bool launch_tile(const TileArgs& p, cudaStream_t stream) {
 
 }  // namespace
 
+namespace {
+
+using SkCfg = Cfg<128, 128, 4, true, true, true>;
+constexpr size_t kSkFlagBytes = 4096;  // stream-K workspace: flags, then one fp32 128x128 partial per CTA
+
+int sm_count() {
+    static const int sms = [] {
+        int dev = 0, n = 0;
+        if (cudaGetDevice(&dev) != cudaSuccess ||
+            cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess)
+            return 170;  // RTX 5090
+        return n > 0 ? n : 170;
+    }();
+    return sms;
+}
+
+// Data-parallel tile by wave cost per column of work (128x256 1.0, 128x128 1.12, isolated
+// full-wave bench; 128x256 only from 3/4 of a wave). Stream-K only when that tile idles
+// >= 15 % of its waves: M=512 N=17408 88.4 vs 92.1 us, but M=2048 N=6144 132.5 vs 128.5.
+int pick_variant(int M, int N, int sms, bool sk_fits) {
+    const int m_tiles = (M + kBM - 1) / kBM;
+    const int t128 = ((N + 127) / 128) * m_tiles;
+    const int t256 = ((N + 255) / 256) * m_tiles;
+    const auto waves = [&](int ctas) {
+        return std::ceil(static_cast<float>(ctas) / static_cast<float>(sms));
+    };
+    const float c256 = waves(t256) * 256.0f;
+    const float c128 = waves(t128) * 128.0f * 1.12f;
+    const bool use256 = 4 * t256 >= 3 * sms && c256 <= c128;
+    const int dp = use256 ? t256 : t128;
+    const float idle = 1.0f - (static_cast<float>(dp) / (waves(dp) * static_cast<float>(sms)));
+    if (sk_fits && idle >= 0.15f)
+        return 3;
+    return use256 ? 1 : 0;
+}
+
+}  // namespace
+
 bool gemm_nvfp4_tile(const void* a_data, const void* a_sf, const void* w_data, const void* w_sf, float alpha,
-                     void* d_fp16, int M, int N, int K, cudaStream_t stream, int variant) {
+                     void* d_fp16, int M, int N, int K, cudaStream_t stream, int variant, void* workspace,
+                     size_t workspace_bytes) {
     if (M <= 0 || N <= 0 || K <= 0 || N % 8 != 0 || !a_data || !a_sf || !w_data || !w_sf || !d_fp16)
         return false;
-    const TileArgs p{static_cast<const uint8_t*>(a_data),
-                     static_cast<const uint8_t*>(a_sf),
-                     static_cast<const uint8_t*>(w_data),
-                     static_cast<const uint8_t*>(w_sf),
-                     static_cast<half*>(d_fp16),
-                     alpha,
-                     M,
-                     N,
-                     K};
-    if (variant < 0) {  // auto: 128x256 once its grid fills 3/4 of the card, else 128x128 (twice the CTAs)
-        static const int sms = [] {
-            int dev = 0, n = 0;
-            if (cudaGetDevice(&dev) != cudaSuccess ||
-                cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess)
-                return 170;  // RTX 5090
-            return n > 0 ? n : 170;
-        }();
-        const int ctas_256 = ((N + 255) / 256) * ((M + kBM - 1) / kBM);
-        variant = 4 * ctas_256 >= 3 * sms ? 1 : 0;  // 160 CTAs: 128x256 45.4 vs 51.4 us; 80: 45.0 vs 30.7
-        if (variant == 1 && launch_tile<Cfg<256, 128, 3, true>>(p, stream))
-            return true;
-        if (launch_tile<Cfg<128, 128, 4, true, true>>(p, stream))
-            return true;
-        return launch_tile<Cfg<128, 256, 2, false>>(p, stream);  // no TMA map (alignment): sync mainloop
-    }
+    const int sms = sm_count();
+    const int units = ((N + 127) / 128) * ((M + kBM - 1) / kBM) * (K / SkCfg::kBK);
+    const bool sk_fits = K % SkCfg::kBK == 0 && workspace != nullptr &&
+                         sms * 4 <= static_cast<int>(kSkFlagBytes) &&
+                         workspace_bytes >=
+                             kSkFlagBytes + (static_cast<size_t>(sms) * kBM * 128 * sizeof(float));
+    TileArgs p{static_cast<const uint8_t*>(a_data),
+               static_cast<const uint8_t*>(a_sf),
+               static_cast<const uint8_t*>(w_data),
+               static_cast<const uint8_t*>(w_sf),
+               static_cast<half*>(d_fp16),
+               alpha,
+               M,
+               N,
+               K,
+               static_cast<int*>(workspace),
+               sk_fits ? reinterpret_cast<float*>(static_cast<uint8_t*>(workspace) + kSkFlagBytes) : nullptr,
+               (units + sms - 1) / sms};
+    if (variant < 0)
+        variant = pick_variant(M, N, sms, sk_fits);
     switch (variant) {
         case 1:
-            return launch_tile<Cfg<256, 128, 3, true>>(p, stream);
+            if (launch_tile<Cfg<256, 128, 3, true>>(p, stream))
+                return true;
+            break;
         case 2:
             return launch_tile<Cfg<128, 256, 2, false>>(p, stream);
+        case 3:
+            if (sk_fits && launch_tile<SkCfg>(p, stream))
+                return true;
+            [[fallthrough]];
         default:
-            return launch_tile<Cfg<128, 128, 4, true, true>>(p, stream);
+            if (launch_tile<Cfg<128, 128, 4, true, true>>(p, stream))
+                return true;
+            break;
     }
+    return launch_tile<Cfg<128, 256, 2, false>>(p, stream);  // no TMA map (alignment): sync mainloop
 }
 
 }  // namespace imp

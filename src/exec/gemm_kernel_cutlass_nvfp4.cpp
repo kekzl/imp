@@ -75,7 +75,11 @@ static GemmDispatchResult cutlass_nvfp4_gemm_kernel(const GemmKernelArgs& args) 
     const int tile_min_m = process_diag_nvfp4_tile_min_m();
     if (tile_min_m > 0 && M >= tile_min_m &&
         gemm_nvfp4_tile(args.cutlass_act_data, args.cutlass_act_sf, payload.data, payload.scale_factors,
-                        payload.tensor_scale, args.output->data, M, N, K, args.stream)) {
+                        payload.tensor_scale, args.output->data, M, N, K, args.stream, /*variant=*/-1,
+                        // no workspace = no stream-K under runtime.deterministic: its partial sums take
+                        // another order than the data-parallel tile, and the pick follows M (#2152)
+                        process_diag_deterministic() ? nullptr : args.cutlass_workspace,
+                        args.cutlass_workspace_size)) {
         static bool logged = false;  // activity proof, once
         if (!logged) {
             logged = true;

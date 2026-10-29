@@ -44,6 +44,19 @@ Isolated: `test-quant --gtest_filter='*Nvfp4GemmTile*'` (4 weight copies rotate,
 - pp512 gap per grid: N=17408 94.3 vs 87.6 us (CUTLASS stream-K), small-N grids 17.4 vs 12.0 us (CUTLASS 128x64 tile). Next: stream-K tail and a 64-wide tile.
 - Refuted on the isolated bench: 5 stages, grouped-M raster, persistent CTAs, direct epilogue stores (0..+8 %).
 
+## Step 2: stream-K and the tile pick
+
+Stream-K 128x128 (grid = SMs, forward unit ranges: a CTA's first segment writes its partial at once, the tile's k-step-0 owner adds it at the end of its own range), used when the data-parallel tile idles >= 15 % of its waves; off under `runtime.deterministic` (other summation order). 128x64 tile (8 warps of 64x16) refuted: M=512 N=1024 17.8 vs CUTLASS 12.5 us.
+
+| In situ, Qwen3.8-27B (`gemm.nvfp4_tile_min_m` A/B) | library arm | own arm |
+|---|---:|---:|
+| pp512 GEMM kernel sum (2048 vs 1, 3 pairs) | 219.2-221.0 ms | 221.7-223.2 ms |
+| pp4096 GEMM kernel sum (0 vs 2048, 2 pairs) | 1541.2 / 1544.7 ms | 1533.9 / 1534.8 ms |
+| pp4096 e2e | 12109 / 12101 tok/s | 12147 / 12136 tok/s |
+
+- pp512 per shape, own vs CUTLASS us/call (before the idle rule): N=17408 89.3 vs 86.0, N=6144 36.6 / 77.5 vs 31.7 / 68.5, N=1024 14.0 vs 11.9; N=5120/10240 group 83.2 vs 87.9 ms total.
+- CUTLASS stays the default below M 2048 until the own arm leads there.
+
 ## Per cell
 
 | cell | phase | kernel ms | cuBLAS/Lt ms | % | CUTLASS ms | % | top library kernels (us/call x calls) |
