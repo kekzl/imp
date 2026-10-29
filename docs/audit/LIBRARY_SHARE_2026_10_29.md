@@ -218,3 +218,21 @@ Persistent CTAs over a per-expert tile prefix (warp scan in shared memory), A th
 - The kernel runs at ~246 TFLOPS at pp4096 (1115.6 us per call): the fp32-accumulate FP16 rate. The hd<=256 FA2 accumulates in fp16; that is the next lever.
 - A first A/B showed equal launch counts in both arms; the rerun after a fresh build differed (776 vs 666 at pp512), only the rerun is recorded.
 - Refuted 2026-10-29: fp16 accumulators in the hd=512 FA2. Gemma-4-26B-NVFP4, `runtime.deterministic` PPL (45k corpus): fp32 407.3936, fp16 output accumulator 418.6447 (+2.8 %, pp4096 +1.1 % single run), fp16 scores and output 446.9929 (+9.7 %, fa2_hd512 kernel 99.0 / 98.8 -> 71.4 / 71.6 ms, pp4096 e2e +3.3..3.5 %). The hd<=256 FA2 tolerates fp16 accumulation; 512-wide dot products and 256 KV tiles of rescaled fp16 sums do not.
+
+## Step 6: own MXFP8 GEMM (`src/quant/nvfp4_gemm_tile.cu`, MX8 configs)
+
+The GDN projection prefill copies (`gemm.mxfp8_gdn_proj_prefill`, FP8 row-scale view by default) ran CUTLASS MXFP8 plus a separate column-scale pass. An MXFP8 stage of BK elements moves the bytes of an NVFP4 stage of 2 x BK, and the `m16n8k32` E4M3 fragments are the `m16n8k64` E2M1 ones byte for byte, so the NVFP4 tile kernel takes MXFP8 as a format parameter: `mma.sync kind::mxf8f6f4 scale_vec::1X`, one UE8M0 byte per row per K group (a BK=64 stage reads half an SfAtom), column scale fused into the epilogue. `test-quant --gtest_filter='*Mxfp8GemmTile*'`: max diff 0 vs CUTLASS on plain weights in the data-parallel variants, one fp16 ulp (0.0039) on the row-scale view.
+
+| Qwen3.6-35B-A3B-NVFP4 pp4096 in situ (`gemm.mxfp8_tile`, pair 2, M = 2048 per chunk) | CUTLASS + scale pass | own |
+|---|---:|---:|
+| qkv N 8192 K 2048, per call | 141.2 + 14.4 us | 143.8 us (128x128) |
+| z N 4096 K 2048, per call | 77.1 + 8.3 us | 75.9 us (stream-K) |
+| out N 2048 K 4096, per call | 79.1 + 4.5 us | 75.9 us (stream-K) |
+| class sum, 540 calls each | 175.3 ms | 159.6 ms |
+| regex sum incl. the unchanged NVFP4 dense, 2 pairs | 221.1 / 222.7 ms | 204.9 / 208.1 ms |
+| e2e pp4096, 2 pairs | 34067 / 33595 tok/s | 34365 / 33774 tok/s |
+
+- pp512, 2 pairs: regex sum 34.8 / 34.6 -> 31.8 / 31.0 ms, launches 3060 -> 2250; e2e inside the MoE spread (21046 / 17745 vs 20741 / 17964 tok/s).
+- The qkv GEMM alone is 1.8 % slower than CUTLASS in situ (143.8 vs 141.2 us), 12.5 % faster isolated (121.8 vs 139.2 us incl. the scale pass, `Mxfp8GemmTileBench`): the in-situ/isolated gap of the NVFP4 tiles, unexplained.
+- PPL (`runtime.deterministic`, 45k corpus): 6.7308 -> 6.7158 (ACTIVE line in the own arm), inside the +-0.2..0.5 % routing band of this model; Qwen3.8-27B-NVFP4-vllm takes no MXFP8 route (0 route lines), 4.6079 both arms.
+- CUTLASS MXFP8 stays as the refusal fallback (K % 64 != 0, unaligned operands).

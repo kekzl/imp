@@ -71,6 +71,7 @@ void process_diag_install(const RuntimeConfig& cfg) {
     d.nvfp4_tile_min_m = cfg.gemm.nvfp4_tile_min_m;  // deterministic: no algo pick, no split
     d.f16_tile = cfg.gemm.f16_tile;
     d.moe_tile = cfg.gemm.moe_tile;
+    d.mxfp8_tile = cfg.gemm.mxfp8_tile;
     d.attention_mxfp4_mode = cfg.attention.mxfp4;
     d.mxfp4_blockscale = cfg.attention.mxfp4_blockscale;
     d.mxfp4_ksmooth = cfg.attention.mxfp4_ksmooth;
