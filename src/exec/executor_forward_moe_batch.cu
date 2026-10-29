@@ -898,7 +898,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
     // into the same pool/stride; the tensor scale alone comes from the cache's
     // per-slot mirror, indexed by the same id as the weight. Layout: nvfp4_expert_offload.h.
     if (!use_nvfp4_moe && !model_->profile().moe_expert_bias_glu &&
-        nvfp4_host_decode_ready(ly, expert_cache_, moe_, top_k)) {
+        nvfp4_host_decode_ready(ly, layer, expert_cache_, moe_, top_k)) {
         if (dev_expert_cache_.layer_ready(layer))
             (void)fork_shared_expert_(layer, stream, d, no);  // joined in phase 8
         run_moe_decode_nvfp4_host(layer, stream, d, eff, top_k, routing, no, h, r,
@@ -959,7 +959,8 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
     // cache's per-layer slot pool (fixed slot_size_), so idx becomes a slot
     // index, no new kernel, no staging copy. Requires the whole working set to fit the layer's pool.
     const bool host_experts = (ly.expert_up_packed.data != nullptr &&
-                               host_expert_pool_ready(ly.expert_up_packed, expert_cache_, moe_, top_k));
+                               host_expert_pool_ready(ly.expert_up_packed, layer, expert_cache_, moe_,
+                                                      top_k));
 
     const void* gate_base = ly.expert_gate_packed.data;
     const void* up_base = ly.expert_up_packed.data;
@@ -971,9 +972,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
     bool pool_addressed = false;
     // The layer's pool is the expert array, d_slot_idx [gate | up | down] x top_k the indices.
     auto address_pool = [&] {
-        char* layer_pool = static_cast<char*>(expert_cache_.pool_) +
-                           (static_cast<size_t>(layer) * expert_cache_.slots_per_layer_ *
-                            expert_cache_.slot_size_);
+        char* layer_pool = expert_cache_.layer_pool(layer);
         gate_base = up_base = down_base = layer_pool;
         gate_idx = moe_.d_slot_idx;
         up_idx = moe_.d_slot_idx + top_k;
@@ -1011,10 +1010,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
                 void* p = expert_cache_.get_or_load(layer, proj, ck, host_ptr, expert_raw, stream);
                 if (!p)
                     return false;
-                size_t flat = static_cast<size_t>(static_cast<char*>(p) -
-                                                  static_cast<char*>(expert_cache_.pool_)) /
-                              expert_cache_.slot_size_;
-                h_slots[off + k] = static_cast<int32_t>(flat) - (layer * expert_cache_.slots_per_layer_);
+                h_slots[off + k] = expert_cache_.slot_in_layer(layer, p);
             }
             return true;
         };

@@ -728,10 +728,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                         budget += std::min(expert_cache_ctx_slack_bytes_(), free_mem - safety - budget);
                 }
                 const auto& mcfg = model_->config();
+                expert_cache_layers_ = host_expert_layers_();
                 budget = std::min(budget, expert_cache_full_bytes_(max_expert_raw));
                 bool debug_parity = dispatch_policy().moe.expert_cache_debug_parity;
-                if (expert_cache_.init(max_expert_raw, budget, vram_alloc_, mcfg.n_layers,
-                                       mcfg.n_experts, debug_parity, nvfp4_host_experts)) {
+                if (expert_cache_.init(max_expert_raw, budget, vram_alloc_, mcfg.n_layers, mcfg.n_experts,
+                                       debug_parity, nvfp4_host_experts, expert_cache_layers_)) {
                     IMP_LOG_INFO("Expert LRU cache: %d slots (%.2f MiB / %.2f MiB budget)",
                                  expert_cache_.n_slots_,
                                  expert_cache_.n_slots_ * max_expert_raw / (1024.0 * 1024.0),

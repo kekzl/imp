@@ -10,8 +10,9 @@
 
 namespace imp {
 
-bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAllocator* alloc,
-                          int n_layers, int n_experts, bool debug_parity, bool nvfp4_slots) {
+bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAllocator* alloc, int n_layers,
+                          int n_experts, bool debug_parity, bool nvfp4_slots,
+                          const std::vector<bool>& cached_layers) {
     if (max_expert_raw == 0 || budget_bytes == 0)
         return false;
 
@@ -28,23 +29,25 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
     debug_parity_ = debug_parity;
     parity_checks_ok_ = 0;
 
-    // slots_per_layer = floor(budget / (slot_size × n_layers)). We need ≥ 1
+    if (!assign_rows_(cached_layers))
+        return false;
+
+    // slots_per_layer = floor(budget / (slot_size × cached layers)). We need ≥ 1
     // slot per layer (else a single miss in any layer can't be cached) and
     // ideally ≥ 2 total so an eviction-aware test isn't trivial.
-    size_t per_layer_budget = budget_bytes / static_cast<size_t>(n_layers_);
+    size_t per_layer_budget = budget_bytes / static_cast<size_t>(n_rows_);
     slots_per_layer_ = static_cast<int>(per_layer_budget / slot_size_);
     if (slots_per_layer_ < 1) {
         IMP_LOG_WARN(
             "Expert LRU cache: budget too small for even 1 slot per layer "
             "(need %zu bytes/slot × %d layers, budget %zu bytes)",
-            slot_size_, n_layers_, budget_bytes);
+            slot_size_, n_rows_, budget_bytes);
         return false;
     }
-    n_slots_ = n_layers_ * slots_per_layer_;
+    n_slots_ = n_rows_ * slots_per_layer_;
     if (n_slots_ < 2) {
-        IMP_LOG_WARN(
-            "Expert LRU cache: total slot count too small (%d slots from %d layers × %d per-layer)",
-            n_slots_, n_layers_, slots_per_layer_);
+        IMP_LOG_WARN("Expert LRU cache: total slot count too small (%d slots from %d layers × %d per-layer)",
+                     n_slots_, n_rows_, slots_per_layer_);
         return false;
     }
 
@@ -74,7 +77,7 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
     slots_.resize(n_slots_);
     for (int i = 0; i < n_slots_; i++) {
         slots_[i].gpu_ptr = static_cast<char*>(pool_) + (static_cast<size_t>(i) * slot_size_);
-        slots_[i].layer = i / slots_per_layer_;
+        slots_[i].layer = row_layer_[i / slots_per_layer_];
     }
 
     per_layer_lru_.assign(n_layers_, PerLayerLRU{});
@@ -169,18 +172,26 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes, VRAMAlloca
         host_expert_bytes_.assign(static_cast<size_t>(n_layers_) * kExpertProjCount, 0);
     }
 
-    IMP_LOG_INFO("Expert LRU cache: %d layers × %d slots × %.2f MiB = %.2f MiB GPU memory%s%s",
-                 n_layers_, slots_per_layer_, slot_size_ / (1024.0 * 1024.0),
-                 total / (1024.0 * 1024.0), d_lookup_ ? " (+ device mirror)" : "",
-                 debug_parity_ ? " [parity-check on]" : "");
+    IMP_LOG_INFO("Expert LRU cache: %d of %d layers × %d slots × %.2f MiB = %.2f MiB GPU memory%s%s", n_rows_,
+                 n_layers_, slots_per_layer_, slot_size_ / (1024.0 * 1024.0), total / (1024.0 * 1024.0),
+                 d_lookup_ ? " (+ device mirror)" : "", debug_parity_ ? " [parity-check on]" : "");
     return true;
 }
 
-namespace {
-
-inline int flat_slot(int layer, int slot_in_layer, int slots_per_layer) {
-    return (layer * slots_per_layer) + slot_in_layer;
+bool ExpertLRUCache::assign_rows_(const std::vector<bool>& cached_layers) {
+    layer_row_.assign(n_layers_, -1);
+    row_layer_.clear();
+    for (int l = 0; l < n_layers_; ++l) {
+        if (cached_layers.empty() || (l < static_cast<int>(cached_layers.size()) && cached_layers[l])) {
+            layer_row_[l] = static_cast<int>(row_layer_.size());
+            row_layer_.push_back(l);
+        }
+    }
+    n_rows_ = static_cast<int>(row_layer_.size());
+    return n_rows_ > 0;
 }
+
+namespace {
 
 // Write a single int32 cell to the device-side lookup mirror.
 // Async on the supplied stream - Phase 3 mirror is write-only from the
@@ -200,7 +211,7 @@ inline void write_lookup_cell(int* d_lookup, int n_experts, int layer, int proj,
 }  // namespace
 
 void* ExpertLRUCache::find(int layer, ExpertCacheKey key) {
-    if (layer < 0 || layer >= n_layers_)
+    if (!layer_cached(layer))
         return nullptr;
     auto& plru = per_layer_lru_[layer];
     auto it = plru.lookup.find(key);
@@ -213,16 +224,16 @@ void* ExpertLRUCache::find(int layer, ExpertCacheKey key) {
     plru.lru_order.push_front(slot_in_layer);
     it->second.second = plru.lru_order.begin();
     hits_++;
-    return slots_[flat_slot(layer, slot_in_layer, slots_per_layer_)].gpu_ptr;
+    return slots_[static_cast<int>(layer_flat_base(layer)) + slot_in_layer].gpu_ptr;
 }
 
 ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, ExpertCacheKey key,
                                                     const void* src_host, size_t stamp_bytes,
                                                     cudaStream_t stream, bool* hit) {
     *hit = false;
-    if (layer < 0 || layer >= n_layers_) {
-        IMP_LOG_ERROR("ExpertLRUCache::acquire_slot_: layer %d out of range [0, %d)", layer,
-                      n_layers_);
+    if (!layer_cached(layer)) {
+        IMP_LOG_ERROR("ExpertLRUCache::acquire_slot_: layer %d has no slots (%d of %d layers cached)", layer,
+                      n_rows_, n_layers_);
         return nullptr;
     }
     if (device_dirty_) {
@@ -280,7 +291,7 @@ ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, Exp
             IMP_CHECK(check_parity(stream), "ExpertLRUCache: parity check failed (cache hit path)");
         *hit = true;
         auto it = plru.lookup.find(key);
-        return &slots_[flat_slot(layer, it->second.first, slots_per_layer_)];
+        return &slots_[static_cast<int>(layer_flat_base(layer)) + it->second.first];
     }
 
     misses_++;
@@ -290,7 +301,7 @@ ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, Exp
     int slot_in_layer = -1;
     if (static_cast<int>(plru.lookup.size()) < slots_per_layer_) {
         for (int s = 0; s < slots_per_layer_; ++s) {
-            if (!slots_[flat_slot(layer, s, slots_per_layer_)].occupied) {
+            if (!slots_[static_cast<int>(layer_flat_base(layer)) + s].occupied) {
                 slot_in_layer = s;
                 break;
             }
@@ -300,7 +311,7 @@ ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, Exp
         // Evict layer-LRU (back of this layer's list).
         slot_in_layer = plru.lru_order.back();
         plru.lru_order.pop_back();
-        const int flat = flat_slot(layer, slot_in_layer, slots_per_layer_);
+        const int flat = static_cast<int>(layer_flat_base(layer)) + slot_in_layer;
         plru.lookup.erase(slots_[flat].key);
         // Invalidate the evicted slot's device mirror cell before reusing.
         if (debug_parity_)
@@ -309,7 +320,7 @@ ExpertLRUCache::Slot* ExpertLRUCache::acquire_slot_(int layer, int proj_idx, Exp
         slots_[flat].occupied = false;
     }
 
-    const int flat = flat_slot(layer, slot_in_layer, slots_per_layer_);
+    const int flat = static_cast<int>(layer_flat_base(layer)) + slot_in_layer;
     Slot& slot = slots_[flat];
 
     slot.key = key;
@@ -480,7 +491,7 @@ void ExpertLRUCache::flush_staging(cudaStream_t stream) {
 }
 
 int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fallback) {
-    if (!prefetch_stream_ || top_k <= 0 || layer < 0 || layer >= n_layers_)
+    if (!prefetch_stream_ || top_k <= 0 || !layer_cached(layer))
         return 0;
     if (per_layer_history_.empty() || history_capacity_ <= 0)
         return 0;
@@ -550,7 +561,7 @@ int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fal
         int slot_in_layer = -1;
         if (static_cast<int>(plru.lookup.size()) < slots_per_layer_) {
             for (int s = 0; s < slots_per_layer_; ++s) {
-                if (!slots_[flat_slot(layer, s, slots_per_layer_)].occupied) {
+                if (!slots_[static_cast<int>(layer_flat_base(layer)) + s].occupied) {
                     slot_in_layer = s;
                     break;
                 }
@@ -559,7 +570,7 @@ int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fal
         if (slot_in_layer < 0) {
             slot_in_layer = plru.lru_order.back();
             plru.lru_order.pop_back();
-            const int flat = flat_slot(layer, slot_in_layer, slots_per_layer_);
+            const int flat = static_cast<int>(layer_flat_base(layer)) + slot_in_layer;
             plru.lookup.erase(slots_[flat].key);
             if (debug_parity_)
                 write_lookup_cell(d_lookup_, n_experts_, slots_[flat].layer, slots_[flat].proj,
@@ -567,7 +578,7 @@ int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fal
             slots_[flat].occupied = false;
         }
 
-        const int flat = flat_slot(layer, slot_in_layer, slots_per_layer_);
+        const int flat = static_cast<int>(layer_flat_base(layer)) + slot_in_layer;
         Slot& slot = slots_[flat];
         // Prefer the per-(layer, proj) byte size - using slot_size_ as the
         // fallback overflows for smaller projections and produces a CUDA
@@ -605,7 +616,7 @@ int ExpertLRUCache::prefetch_layer(int layer, int top_k, size_t expert_bytes_fal
 }
 
 void ExpertLRUCache::await_prefetch(int layer, cudaStream_t compute_stream) {
-    if (!prefetch_stream_ || layer < 0 || layer >= n_layers_)
+    if (!prefetch_stream_ || !layer_cached(layer))
         return;
     if (prefetch_issued_.empty() || !prefetch_issued_[layer])
         return;
@@ -632,7 +643,7 @@ bool ExpertLRUCache::check_parity(cudaStream_t stream) const {
             continue;
         if (slot.layer >= n_layers_ || slot.proj >= kExpertProjCount || slot.expert >= n_experts_)
             continue;
-        const int slot_in_layer = static_cast<int>(flat) - (slot.layer * slots_per_layer_);
+        const int slot_in_layer = static_cast<int>(flat - layer_flat_base(slot.layer));
         size_t off = (((static_cast<size_t>(slot.layer) * kExpertProjCount) + slot.proj) * n_experts_) +
                      slot.expert;
         host[off] = slot_in_layer;
@@ -685,14 +696,16 @@ void ExpertLRUCache::invalidate_host_state(cudaStream_t stream) {
     ++host_generation_;
 }
 
-size_t ExpertLRUCache::reinit_or_disable(size_t max_expert_raw, size_t grown_bytes,
-                                         size_t original_bytes, VRAMAllocator* alloc, int n_layers,
-                                         int n_experts, bool debug_parity, bool nvfp4_slots) {
+size_t ExpertLRUCache::reinit_or_disable(size_t max_expert_raw, size_t grown_bytes, size_t original_bytes,
+                                         VRAMAllocator* alloc, int n_layers, int n_experts, bool debug_parity,
+                                         bool nvfp4_slots, const std::vector<bool>& cached_layers) {
     destroy();
-    if (init(max_expert_raw, grown_bytes, alloc, n_layers, n_experts, debug_parity, nvfp4_slots))
+    if (init(max_expert_raw, grown_bytes, alloc, n_layers, n_experts, debug_parity, nvfp4_slots,
+             cached_layers))
         return grown_bytes;
     destroy();
-    if (init(max_expert_raw, original_bytes, alloc, n_layers, n_experts, debug_parity, nvfp4_slots))
+    if (init(max_expert_raw, original_bytes, alloc, n_layers, n_experts, debug_parity, nvfp4_slots,
+             cached_layers))
         return original_bytes;
     // A failed init can leave n_slots_ = 1 with pool_ == nullptr (the n_slots_ < 2 exit).
     destroy();
@@ -739,6 +752,9 @@ void ExpertLRUCache::destroy() {
     n_slots_ = 0;
     slots_per_layer_ = 0;
     n_layers_ = 0;
+    n_rows_ = 0;
+    layer_row_.clear();
+    row_layer_.clear();
     n_experts_ = 0;
     history_capacity_ = 0;
     hits_ = 0;

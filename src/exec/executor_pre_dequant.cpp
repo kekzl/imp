@@ -53,9 +53,10 @@ void GraphExecutor::regrow_expert_cache_() {
                                    expert_cache_full_bytes_(expert_cache_slot_raw_));
     if (budget <= expert_cache_budget_)
         return;  // every expert already has a slot
-    const size_t got = expert_cache_.reinit_or_disable(
-        expert_cache_slot_raw_, budget, expert_cache_budget_, vram_alloc_, mcfg.n_layers, mcfg.n_experts,
-        dispatch_policy().moe.expert_cache_debug_parity, expert_cache_nvfp4_slots_);
+    const size_t got = expert_cache_.reinit_or_disable(expert_cache_slot_raw_, budget, expert_cache_budget_,
+                                                       vram_alloc_, mcfg.n_layers, mcfg.n_experts,
+                                                       dispatch_policy().moe.expert_cache_debug_parity,
+                                                       expert_cache_nvfp4_slots_, expert_cache_layers_);
     if (got == 0) {
         // Disabled cache: host experts take the staging path (GGUF) or
         // verify_host_expert_placement() refuses the load (NVFP4).
@@ -118,8 +119,24 @@ size_t GraphExecutor::expert_cache_full_bytes_(size_t slot_raw) const {
     const auto& cfg = model_->config();
     if (cfg.n_experts <= 0)
         return static_cast<size_t>(-1);
-    return static_cast<size_t>(cfg.n_layers) * kExpertProjCount * static_cast<size_t>(cfg.n_experts) *
-           slot_raw;
+    const size_t layers = expert_cache_layers_.empty()
+                              ? static_cast<size_t>(cfg.n_layers)
+                              : static_cast<size_t>(std::count(expert_cache_layers_.begin(),
+                                                               expert_cache_layers_.end(), true));
+    return layers * kExpertProjCount * static_cast<size_t>(cfg.n_experts) * slot_raw;
+}
+
+// Layers whose experts (3-D GGUF packs or per-expert NVFP4) stay on the host: the cache's rows.
+std::vector<bool> GraphExecutor::host_expert_layers_() const {
+    std::vector<bool> mask(model_->n_layers(), false);
+    auto host = [](const Tensor& t) { return t.data != nullptr && !t.on_device; };
+    auto host_nv = [&](const std::vector<Tensor>& ex) { return !ex.empty() && host(ex[0]); };
+    for (int i = 0; i < model_->n_layers(); ++i) {
+        const auto& L = model_->layer(i);
+        mask[i] = host(L.expert_up_packed) || host(L.expert_down_packed) || host(L.expert_gate_packed) ||
+                  host_nv(L.expert_w_up) || host_nv(L.expert_w_down) || host_nv(L.expert_w_gate);
+    }
+    return mask;
 }
 
 size_t GraphExecutor::expert_cache_ctx_slack_bytes_() const {

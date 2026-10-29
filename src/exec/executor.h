@@ -882,6 +882,7 @@ private:
     size_t expert_cache_budget_ = 0;
     size_t expert_cache_slot_raw_ = 0;
     bool expert_cache_nvfp4_slots_ = false;
+    std::vector<bool> expert_cache_layers_;  // layers with host experts: the only ones given slots
     DeviceExpertCache dev_expert_cache_;  // decode: routing -> slots -> gather, all on device
     // Expert cache auto budget: KV bytes a context shorter than the model default leaves unused.
     QType kv_plan_dtype_ = QType::F16;
@@ -890,6 +891,7 @@ private:
     size_t ssm_pool_bytes_ = 0;  // VRAMBudget::ssm_footprint_bytes: lazy state slots, committed while serving
     size_t library_reserve_pending_ = 0;  // VRAMBudget::library_reserve_bytes: claimed on the first forward
     [[nodiscard]] size_t expert_cache_full_bytes_(size_t slot_raw) const;
+    [[nodiscard]] std::vector<bool> host_expert_layers_() const;
     [[nodiscard]] size_t expert_cache_ctx_slack_bytes_() const;
     [[nodiscard]] size_t expert_cache_free_slack_bytes_() const;
     [[nodiscard]] size_t kv_bytes_per_token_() const;

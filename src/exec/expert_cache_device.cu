@@ -365,7 +365,8 @@ bool DeviceExpertCache::init(const Model& model, ExpertLRUCache& cache, VRAMAllo
     packed_bytes_.assign(static_cast<size_t>(n_layers) * 3, 0);
     ms_bytes_.assign(static_cast<size_t>(n_layers) * 3, 0);
     for (int l = 0; l < n_layers; ++l) {
-        const LayerSource s = layer_sources_(model, l, cache.slot_size_, src);
+        const LayerSource s = cache.layer_cached(l) ? layer_sources_(model, l, cache.slot_size_, src)
+                                                    : LayerSource::None;
         ready[l] = s != LayerSource::None ? 1 : 0;
         tiered[l] = s == LayerSource::Tier ? 1 : 0;
     }
@@ -437,7 +438,7 @@ bool DeviceExpertCache::init(const Model& model, ExpertLRUCache& cache, VRAMAllo
         L.stamp = d_stamp + (static_cast<size_t>(l) * slots);
         L.clock = d_clock + l;
         L.stats = d_stats_;
-        L.pool = static_cast<char*>(cache.pool_) + (static_cast<size_t>(l) * slots * cache.slot_size_);
+        L.pool = cache.layer_pool(l);
         L.slot_scales = cache.layer_slot_scales(l);
         L.slot_bytes = cache.slot_size_;
         L.n_experts = ne;
