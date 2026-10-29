@@ -235,4 +235,5 @@ The GDN projection prefill copies (`gemm.mxfp8_gdn_proj_prefill`, FP8 row-scale 
 - pp512, 2 pairs: regex sum 34.8 / 34.6 -> 31.8 / 31.0 ms, launches 3060 -> 2250; e2e inside the MoE spread (21046 / 17745 vs 20741 / 17964 tok/s).
 - The qkv GEMM alone is 1.8 % slower than CUTLASS in situ (143.8 vs 141.2 us), 12.5 % faster isolated (121.8 vs 139.2 us incl. the scale pass, `Mxfp8GemmTileBench`): the in-situ/isolated gap of the NVFP4 tiles, unexplained.
 - PPL (`runtime.deterministic`, 45k corpus): 6.7308 -> 6.7158 (ACTIVE line in the own arm), inside the +-0.2..0.5 % routing band of this model; Qwen3.8-27B-NVFP4-vllm takes no MXFP8 route (0 route lines), 4.6079 both arms.
+- Refuted: stream-K for qkv (idle 14 %, threshold 0.15 -> 0.10): 145.3 vs 143.8 us data-parallel, regex sum 207.8 ms (1 run).
 - CUTLASS MXFP8 stays as the refusal fallback (K % 64 != 0, unaligned operands).
