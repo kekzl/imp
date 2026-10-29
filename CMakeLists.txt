@@ -281,6 +281,7 @@ set(IMP_QUANT_SOURCES
     src/quant/nvfp4_gemv_batched.cu
     src/quant/nvfp4_gemm_smallm.cu
     src/quant/nvfp4_gemm_smallm_v2.cu
+    src/quant/nvfp4_gemm_tile.cu
     src/quant/nvfp4_gemv_fused.cu
     src/quant/nvfp4_gemv_gdn_input.cu
     src/quant/nvfp4_gemv_moe.cu
@@ -1355,6 +1356,7 @@ if(IMP_BUILD_TESTS)
         tests/test_smallm_dense_bench.cu
         tests/test_gemm_grouped_nvfp4_smallM.cu
         tests/test_nvfp4_batched_smallm_equiv.cu
+        tests/test_nvfp4_gemm_tile.cu
         tests/test_quantize_fp16_nvfp4_moe_native.cu
         tests/test_prefill_row_invariance.cu
         # Export round trip: quantize like the exporter, decode by the format's own rule, bound the

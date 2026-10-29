@@ -765,6 +765,10 @@ nvfp4_cutlass_streamk = 1
 # M >= this (0 = off). Same weight/scale bytes, output matches CUTLASS.
 # pp4096 +4.6..5.2 % Qwen3-14B-NVFP4, +2.5..3.1 % Qwen3.8-27B-NVFP4.
 nvfp4_cublaslt_min_m = 2048
+# Own NVFP4 prefill GEMM (TMA + mxf4nvf4, no library) for dense prefill at M >= this,
+# ahead of cuBLASLt (0 = off). Same bytes, bit-equal to CUTLASS. Qwen3.8-27B pp4096 GEMM
+# kernel sum -0.9 % vs cuBLASLt.
+nvfp4_tile_min_m = 2048
 # Batched-decode (n>1) LM head via a single CUTLASS NVFP4 GEMM instead of the
 # FP16-activation batched-M GEMV: reads the LM-head weight once per batch but
 # forces NVFP4 activations on the final logits. +8% aggregate concurrent decode

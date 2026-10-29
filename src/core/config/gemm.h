@@ -101,6 +101,10 @@ struct GEMM {
     // M >= this, 0 = off. Same SfAtom bytes, output matches; M=2048 GEMM -5.8..-7.7 % (#2540).
     // runtime.deterministic forces 0 (timed algo pick).
     int nvfp4_cublaslt_min_m = 2048;
+    // Own TMA + mxf4nvf4 dense prefill GEMM (src/quant/nvfp4_gemm_tile.cu) from M >= this, 0 = off;
+    // ahead of cuBLASLt, same SfAtom bytes, bit-equal to CUTLASS. Qwen3.8-27B pp4096 GEMM sum
+    // -0.9 % vs cuBLASLt; pp512 +7 % vs CUTLASS stream-K, so M < 2048 stays on CUTLASS.
+    int nvfp4_tile_min_m = 2048;
     // Which small-M implementation the gate above dispatches: 1 = W4A16
     // dequant+HMMA kernel (kept for A/B), 2 = native mxf4nvf4 producer/consumer
     // pipeline (nvfp4_gemm_smallm_v2.cu).

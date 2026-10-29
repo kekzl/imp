@@ -21,6 +21,29 @@ Class: cuBLAS/Lt = `nvjet_*`, `cutlass3x_*` (cuBLASLt-internal), `*xmma*`, `gemv
 - Prefill order by library ms: Q6_K FP16 GEMM, NVFP4 dense cuBLASLt (M >= 2048), NVFP4 dense CUTLASS (M < 2048), MoE CUTLASS grouped, MXFP4 CUTLASS.
 - Raw per-cell JSONs (3.2 MB) are not committed: rerun the harness.
 
+## Step 1: own dense NVFP4 GEMM (`src/quant/nvfp4_gemm_tile.cu`)
+
+Isolated: `test-quant --gtest_filter='*Nvfp4GemmTile*'` (4 weight copies rotate, 40 timed calls). In situ: `MODEL=Qwen3.8-27B-NVFP4-vllm tools/analysis/prefill_kernel_ab.sh gemm.nvfp4_tile_min_m 0 1 'gemm_nvfp4_tile|device_kernel|cutlass3x|nvjet' <pp> <pairs>` (measured with the earlier bool key `gemm.nvfp4_tile` false/true, the same dispatch as min_m 0/1), build-dev at a23d0bc3 + branch.
+
+| Design step | 4096x17408x5120 us (CUTLASS 591.3, cuBLASLt 517.3) |
+|---|---:|
+| sync cp.async ring, LDS fragments | 1029.6 |
+| + ldmatrix | 949.4 |
+| BK 256 x 2 stages | 911.6 |
+| producer warp, 16 B cp.async / per-row 64 B bulk copies | 2446.4 / 11587.5 |
+| 2D TMA tiles + 1D bulk SF, producer warp, 128x128 | 659.4 |
+| 128x256, thread 0 refills the previous slot (8 warps: 234 regs, 9 warps capped ptxas at 168 and spilled) | 604.8 |
+
+| In situ, Qwen3.8-27B | GEMM kernel sum, library arm | own arm | e2e pp tok/s |
+|---|---:|---:|---|
+| pp512 (M 512, CUTLASS) | 216.8-220.6 ms | 235.1-236.1 ms | 10656-10839 vs 10382-10642 |
+| pp4096 (M 4096, cuBLASLt) | 1548.8 / 1551.4 ms | 1536.3 / 1535.3 ms | 12086 / 12103 vs 12151 / 12130 |
+
+- Output bit-equal to CUTLASS in 5/5 test shapes per variant; Qwen3.8 PPL 4.6079 both arms (`runtime.deterministic`, 45k corpus, 13811 tokens).
+- Default `gemm.nvfp4_tile_min_m = 2048`: replaces cuBLASLt for dense NVFP4; M < 2048 stays CUTLASS.
+- pp512 gap per grid: N=17408 94.3 vs 87.6 us (CUTLASS stream-K), small-N grids 17.4 vs 12.0 us (CUTLASS 128x64 tile). Next: stream-K tail and a 64-wide tile.
+- Refuted on the isolated bench: 5 stages, grouped-M raster, persistent CTAs, direct epilogue stores (0..+8 %).
+
 ## Per cell
 
 | cell | phase | kernel ms | cuBLAS/Lt ms | % | CUTLASS ms | % | top library kernels (us/call x calls) |
