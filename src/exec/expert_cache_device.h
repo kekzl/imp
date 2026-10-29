@@ -1,6 +1,6 @@
 #pragma once
 
-// Device-driven expert cache for host-resident NVFP4 MoE experts (decode, n = 1).
+// Device-driven expert cache for host-resident NVFP4 and GGUF MoE experts (decode, n = 1).
 //
 // The host LRU path (expert_cache.h) needs the routing on the host: one D2H + stream sync
 // per MoE layer, then host bookkeeping, then the miss copies. Here the whole step runs on the
@@ -63,6 +63,14 @@ struct DevMissEntry {
     int32_t victim_key;  // old occupant of dst, -1 = empty slot
 };
 
+// One layer's gather sizes per projection (gate, up, down), passed by value.
+struct DevGatherBytes {
+    size_t packed[3];
+    size_t ms[3];
+    size_t ms_off[3];
+    int n_experts;
+};
+
 // One layer's tables, passed to the kernels by value.
 struct DevExpertLayer {
     const DevExpertSrc* src;     // [3 * n_experts]
@@ -72,7 +80,7 @@ struct DevExpertLayer {
     uint32_t* clock;             // [1]
     unsigned long long* stats;   // [2]: hits, misses
     char* pool;                  // layer pool base
-    float* slot_scales;          // [slots]
+    float* slot_scales;          // [slots]; null for GGUF slots (no per-slot scale)
     size_t slot_bytes;
     int n_experts;
     int slots;
@@ -155,6 +163,8 @@ private:
     [[nodiscard]] StageSlots stage_slots_(int layer) const;
     enum class LayerSource { None, Pinned, Tier };
     LayerSource layer_sources_(const Model& model, int l, size_t slot_size, std::vector<DevExpertSrc>& src);
+    LayerSource layer_sources_gguf_(const Model& model, int l, size_t slot_size,
+                                    std::vector<DevExpertSrc>& src);
     [[nodiscard]] bool layer_layout_uniform_(size_t b) const;
     [[nodiscard]] bool init_tier_(const Model& model, const std::vector<char>& tiered, int top_k,
                                   int host_pool_mib);

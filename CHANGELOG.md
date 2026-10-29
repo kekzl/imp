@@ -5,6 +5,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 ## [Unreleased]
 
 ### Changed
+- GGUF MoE experts in host RAM decode on the device expert cache (routing, residency and miss copies on the GPU, CUDA graphs stay on): Qwen3-30B-A3B-Q4_K_M with 48 host layers tg128 73.6-75.2 -> 235.1-237.5 tok/s; prefill on that path 316.6-350.9 -> 280.1-328.1 tok/s.
 - IQ3_S prompt GEMMs compute their piece offsets without branches (a per-lane branch chain diverged 6x per K-step): Qwen3.8-27B-UD-Q4_K_M IQ3_S kernel sum 15.35-15.79 -> 12.03-12.71 ms per pp512 run, PPL 4.4968 both (bit-identical).
 - GDN projection MXFP8 prefill GEMMs run the own tile kernel (MXFP8 format, column scale fused) instead of CUTLASS plus a scale pass: Qwen3.6-35B-A3B-NVFP4 pp4096 class sum 175.3 -> 159.6 ms, e2e 33595-34067 -> 33774-34365 tok/s, PPL 6.7308 -> 6.7158. `gemm.mxfp8_tile`.
 - Gemma-4 hd=512 attention prefill runs an own split-D FA2 kernel instead of cuBLAS materialized scores: Gemma-4-26B-NVFP4 pp4096 e2e 41057-41213 -> 42620-42789 tok/s, PPL 409.5548 -> 407.3936 (deterministic). `attention.hd512_prefill`.

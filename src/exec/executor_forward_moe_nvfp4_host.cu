@@ -111,13 +111,14 @@ void GraphExecutor::verify_host_expert_placement() const {
 // too); contiguity is CHECKED here, not assumed, or an interleaved
 // checkpoint would silently read experts from the wrong addresses.
 bool GraphExecutor::init_device_expert_cache() {
-    if (!dispatch_policy().moe.device_expert_cache || !model_->config().is_nvfp4_prequant)
+    if (!dispatch_policy().moe.device_expert_cache || !expert_cache_.pool_)  // no pool: no host experts
         return device_expert_cache_covers_host_layers();
     const int top_k = std::max(1, model_->config().n_experts_active);
     dev_expert_cache_.set_host_pool_mib(dispatch_policy().moe.host_expert_pool_mib);
     if (!dev_expert_cache_.init(*model_, expert_cache_, vram_alloc_, top_k))
-        IMP_LOG_INFO("Device expert cache: not built (no host-resident NVFP4 layer in a mapped "
-                     "pinned slab, or the pool is too small); the host LRU path serves decode");
+        IMP_LOG_INFO(
+            "Device expert cache: not built (no host-resident NVFP4 / GGUF layer in a mapped "
+            "pinned slab, or the pool is too small); the host LRU path serves decode");
     init_shexp_overlap_();
     init_gather_overlap_();
     return device_expert_cache_covers_host_layers();

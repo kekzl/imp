@@ -656,7 +656,7 @@ mr_nr                = 8
 # hits 96-98 %); prefill is what the transfers cost. Six paired rounds, not
 # fewer: the off arm alone spread 34.7-66.1 tok/s decode.
 pin_host_experts     = false
-# Decode on host-resident NVFP4 experts: routing -> cache slots -> zero-copy gather of
+# Decode on host-resident NVFP4 or GGUF experts: routing -> cache slots -> zero-copy gather of
 # the misses, all on the device (no per-layer D2H + host LRU). Needs pin_host_experts.
 device_expert_cache  = true
 # Decode on the device expert cache: the shared expert FFN runs on a side stream while the

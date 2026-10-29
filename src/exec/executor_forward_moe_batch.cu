@@ -969,8 +969,24 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
     const int32_t* down_idx = expert_indices;
     size_t slot_stride = 0;  // non-zero once the pool is the array
     bool pool_addressed = false;
+    // The layer's pool is the expert array, d_slot_idx [gate | up | down] x top_k the indices.
+    auto address_pool = [&] {
+        char* layer_pool = static_cast<char*>(expert_cache_.pool_) +
+                           (static_cast<size_t>(layer) * expert_cache_.slots_per_layer_ *
+                            expert_cache_.slot_size_);
+        gate_base = up_base = down_base = layer_pool;
+        gate_idx = moe_.d_slot_idx;
+        up_idx = moe_.d_slot_idx + top_k;
+        down_idx = moe_.d_slot_idx + static_cast<ptrdiff_t>(2 * top_k);
+        slot_stride = expert_cache_.slot_size_;
+        pool_addressed = true;
+    };
 
-    if (host_experts) {
+    if (host_experts && dev_expert_cache_.layer_ready(layer)) {
+        // Device expert cache: routing, residency and the miss copies on the device (capture-safe).
+        dev_expert_cache_.resolve_and_stage(layer, expert_indices, top_k, 1, moe_.d_slot_idx, stream);
+        address_pool();
+    } else if (host_experts) {
         moe_host_args_capture_guard(stream);
         std::vector<int32_t> h_experts(top_k);
         moe_host_args_ok_or_throw(cudaMemcpyAsync(h_experts.data(), expert_indices,
@@ -1008,15 +1024,7 @@ void GraphExecutor::run_moe_decode_fast(int layer, cudaStream_t stream, int n, i
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.d_slot_idx, h_slots.data(),
                                                h_slots.size() * sizeof(int32_t), cudaMemcpyHostToDevice,
                                                stream));
-            char* layer_pool = static_cast<char*>(expert_cache_.pool_) +
-                               (static_cast<size_t>(layer) * expert_cache_.slots_per_layer_ *
-                                expert_cache_.slot_size_);
-            gate_base = up_base = down_base = layer_pool;
-            gate_idx = moe_.d_slot_idx;
-            up_idx = moe_.d_slot_idx + top_k;
-            down_idx = moe_.d_slot_idx + static_cast<ptrdiff_t>(2 * top_k);
-            slot_stride = expert_cache_.slot_size_;
-            pool_addressed = true;
+            address_pool();
         } else {
             // Unreachable by construction: host_expert_pool_ready() is the same
             // predicate the dispatch used to send us here; staging can only fail on an
