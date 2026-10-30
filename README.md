@@ -1,8 +1,8 @@
 <!--
 layer: L0
 audience: newcomers
-verified: 2026-10-27
-commit: 48f0058b
+verified: 2026-10-30
+commit: 4967c34e
 -->
 
 <p align="center">
@@ -53,14 +53,14 @@ Server API, 300-token greedy answers to short prompts, median of 3 fresh-server 
 | You want | Take | Why |
 | --- | --- | --- |
 | **Not sure** | **Qwen3.8-27B** NVFP4 (the [install](#install) example) | reads text and images, fits a 32 GB card with room for a long context (24 GB: short context) |
-| the fastest replies, or a 12-16 GB card | **Qwen3-8B** Q8_0 (8 GB card: **Qwen3-4B** Q8_0) | the fastest of the [GGUF sweep](docs/BENCHMARKS.md); picks per VRAM: [which card](docs/QUICKSTART.md#which-card) |
+| the fastest replies, or a 12-16 GB card | **Qwen3-8B** NVFP4 | the fastest dense SafeTensors row in [`MODELS.md`](docs/MODELS.md); picks per VRAM: [which card](docs/QUICKSTART.md#which-card) |
 | more knowledge, still fast | **Qwen3.6-35B-A3B** | mixture of experts: large, but only a small part works per token |
-| another model family | **gpt-oss-20b** or **Gemma-4-26B-A4B** | both in the [GGUF sweep](docs/BENCHMARKS.md) |
+| another model family | **gpt-oss-20b** or **Gemma-4-26B-A4B** | format and quality notes per checkpoint: [`MODELS.md`](docs/MODELS.md) |
 | the biggest model, and ~68 GiB of free RAM | **Qwen3.8-Flash-Next** NVFP4 | bigger than any card's VRAM: the experts live in host RAM ([below](#models-larger-than-vram)) |
 
 **Will it fit?** Weights plus the KV cache (the model's memory of the conversation) must fit in the card's VRAM (8 GB on an RTX 5060 up to 96 GB on an RTX PRO 6000, [per card](docs/QUICKSTART.md#which-card)). imp sizes the context to what is left after the weights, and refuses at load a model whose experts do not fit instead of running it wrong. Every family that loads, with its size: [`docs/MODELS.md`](docs/MODELS.md).
 
-**Two file formats, no conversion step:** a **GGUF file** (as used by llama.cpp) or a **SafeTensors directory** in NVFP4 (NVIDIA Model Optimizer, llm-compressor, or imp's own `imp-quantize`). Your own BF16/FP8 checkpoint: [`docs/QUANTIZATION.md`](docs/QUANTIZATION.md).
+**File format: SafeTensors.** A **SafeTensors directory** in NVFP4 or FP8 (NVIDIA Model Optimizer, llm-compressor, or imp's own `imp-quantize`) is what imp is optimised for. Your own BF16 checkpoint: [`docs/QUANTIZATION.md`](docs/QUANTIZATION.md). **GGUF files** (as used by llama.cpp) still load, but are legacy: no new speedups ([why](docs/DESIGN_DECISIONS.md)).
 
 ## Install
 

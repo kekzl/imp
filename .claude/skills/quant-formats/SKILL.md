@@ -7,6 +7,8 @@ description: Quant formats, loaders, dequant - GGUF (Q*_0, Q*_K, IQ*, MXFP4), NV
 
 Sources of truth: `docs/QUANTIZATION.md` (formats, choosing a quant), `docs/internals/QUANT_PIPELINE.md` (files, GEMM-dispatch registry, boundary rules). This skill carries the gotchas only.
 
+GGUF is legacy (`docs/DESIGN_DECISIONS.md`, 2026-10-30): fix load blockers and wrong output, no new GGUF kernels, routes or speedups. Perf and quality work goes to SafeTensors NVFP4 / FP8.
+
 ## The two worlds
 
 | | GGUF | SafeTensors NVFP4 (prequant) |
