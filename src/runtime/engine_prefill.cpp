@@ -734,7 +734,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
 
         // Embedding pooling for this chunk (#1005): hidden_ still holds it.
         if (req->embedding_request)
-            embed_accumulate_chunk_(*req, chunk_len, pf_stream);
+            embed_accumulate_chunk_(*req, chunk_len, pf_stream, /*last_chunk=*/false);
 
         if (!pf_pool_used) {
             free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa, d_context_lens,
@@ -779,13 +779,8 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             free_prefill_buffers(d_token_ids, d_positions, d_block_tables, d_block_tables_swa, d_context_lens,
                                  pf_stream);
         }
-        embed_accumulate_chunk_(*req, chunk_len, pf_stream);
-        const size_t total = req->input_tokens.size();
-        if (total > 0 && !req->embedding_out.empty()) {
-            const float inv = 1.0f / static_cast<float>(total);
-            for (float& v : req->embedding_out)
-                v *= inv;
-        }
+        embed_accumulate_chunk_(*req, chunk_len, pf_stream, /*last_chunk=*/true);
+        embed_finish_(*req);
         finish_request(req);
     } else {
         // Last chunk: forward + sample

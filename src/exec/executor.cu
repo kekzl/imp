@@ -32,6 +32,13 @@ __global__ void hidden_pool_sum_kernel(const __half* __restrict__ hidden, int n_
     out[d] = acc;
 }
 
+__global__ void half_row_to_float_kernel(const __half* __restrict__ in, int d_model,
+                                         float* __restrict__ out) {
+    int d = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (d < d_model)
+        out[d] = __half2float(in[d]);
+}
+
 // Ban specific token IDs by setting their logits to -inf.
 // Used in the CUDA graph decode path where host-side logit manipulation
 // (cudaMemcpyAsync per token) is not possible during graph replay.
@@ -102,6 +109,16 @@ void GraphExecutor::pool_hidden_sum(int n_tokens, float* d_out, cudaStream_t str
     const int blocks = (d_model + threads - 1) / threads;
     hidden_pool_sum_kernel<<<blocks, threads, 0, stream>>>(
         static_cast<const __half*>(hidden.data), n_tokens, d_model, d_out);
+    IMP_CUDA_CHECK_LAUNCH();
+}
+
+void GraphExecutor::pool_hidden_last(int n_tokens, float* d_out, cudaStream_t stream) {
+    Tensor last = view_tokens(hidden_, n_tokens).slice(n_tokens - 1, n_tokens);
+    Tensor no = view_tokens(norm_out_, 1);  // scratch: the forward that filled hidden_ is done
+    rmsnorm(last, model_->output_norm(), no, model_->config().rms_norm_eps, stream, norm_w_off_);
+    const int d_model = static_cast<int>(no.shape[no.ndim - 1]);
+    half_row_to_float_kernel<<<(d_model + 255) / 256, 256, 0, stream>>>(static_cast<const __half*>(no.data),
+                                                                        d_model, d_out);
     IMP_CUDA_CHECK_LAUNCH();
 }
 

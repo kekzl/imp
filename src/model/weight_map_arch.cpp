@@ -10,6 +10,13 @@ namespace imp {
 // Arch-specific name translation before the generic matchers. false = drop the tensor as an MTP
 // sidecar: DeepSeek-style checkpoints (GLM-4.7-Flash) append num_nextn_predict_layers as
 // model.layers.<n_layers + i>.*, which would otherwise grow the decoder stack.
+void base_model_canonical_name(std::string& name) {
+    const bool layer = name.starts_with("layers.") && (name.contains(".self_attn.") ||
+                                                       name.contains(".mlp.") || name.contains("layernorm."));
+    if (layer || name == "embed_tokens.weight" || name == "norm.weight")
+        name = "model." + name;
+}
+
 bool arch_canonical_name(ModelArch arch, int declared_layers, std::string& name) {
     if (arch == ModelArch::LFM2) {
         name = lfm2_canonical_name(name);

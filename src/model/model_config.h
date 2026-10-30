@@ -147,6 +147,14 @@ struct ModelConfig {
     // is plain Qwen3).
     bool multimodal_wrapper = false;
 
+    // /v1/embeddings pools the final-norm hidden state of the LAST token instead of the mean
+    // over all tokens: sentence-transformers 1_Pooling/config.json pooling_mode_lasttoken
+    // (Qwen3-Embedding). Mean pooling there gives a different vector than the model trained on.
+    bool embed_last_token_pool = false;
+    // Token the HF tokenizer's TemplateProcessing appends to a single sequence (Qwen3-Embedding:
+    // <|endoftext|>); the last-token pool reads it. -1 = none. imp's encode() does not apply it.
+    int32_t embed_append_token = -1;
+
     // Checkpoint declares an audio encoder; imp has no audio path at all (no encoder, input
     // type, or tokenizer route). Read from audio_config being a JSON OBJECT, not key presence:
     // Gemma-4-26B writes audio_config:null with no audio tensor, Gemma-4-12B writes the object.

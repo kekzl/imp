@@ -35,7 +35,7 @@ BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 # script — inlining the sed breaks make's $(shell ...) paren matching.
 DEP_ARGS = $(shell scripts/dep_build_args.sh)
 
-.PHONY: bench-serve bench-serve-mock chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build bundle test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-quantize-repro test-perf test-golden test-agents test-agents-external test-niah test-rerank bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
+.PHONY: bench-serve bench-serve-mock chat-goldens kernel-resources kernel-resources-dump kernel-resources-update kernel-resources-stats check-ptx-fallback check-alloc-pairs alloc-pairs-list check-test-lanes check-dead-inline check-log-fatal check-alloc-interpose bench-competitive check-deps check-deps-online roofline-measure roofline-pin roofline-regress build bundle test-unit test-gpu test-fast test-all test-e2e test-server test-vision test-quantize test-quantize-repro test-perf test-golden test-agents test-agents-external test-niah test-rerank test-embed bench bench-agentic check-gpu verify verify-fast verify-chunked verify-north-star gen-perf-baseline install-hooks lint-image format format-check tidy sanitize asan coverage
 
 # Check that nothing else is using the GPU. Delegates to
 # scripts/require_free_gpu.sh, the same guard the git hooks use, because
@@ -416,10 +416,9 @@ test-agents: build check-gpu
 # /v1/rerank contract, semantics (the relevant document wins) and stability.
 # Pass COMPARE_URL=http://host:port to also diff against a reference reranking
 # server (vLLM /v1/rerank) running the SAME model.
-# No default checkpoint: the only one was a GGUF, deleted 2026-10-30 (SafeTensors only).
-RERANK_MODEL ?=
+# Qwen3-Reranker-0.6B (SafeTensors, Qwen/Qwen3-Reranker-0.6B): 16/16 checks 2026-10-30.
+RERANK_MODEL ?= Qwen3-Reranker-0.6B
 test-rerank: build check-gpu
-	@test -n "$(RERANK_MODEL)" || { echo "test-rerank: set RERANK_MODEL=<reranker under ~/models>"; exit 1; }
 	@docker rm -f imp-rerank >/dev/null 2>&1 || true
 	@docker run -d --name imp-rerank --gpus all -p 8080:8080 \
 		-v $(HOME)/models:/models $(DOCKER_IMG) \
@@ -427,8 +426,23 @@ test-rerank: build check-gpu
 	@echo "waiting for server..."; \
 	for i in $$(seq 1 90); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && break; sleep 2; done; \
 	trap 'docker rm -f imp-rerank >/dev/null 2>&1' EXIT; \
-	python3 tools/analysis/rerank_check.py --url http://localhost:8080 \
-		$(if $(COMPARE_URL),--compare $(COMPARE_URL),)
+	docker run --rm --network host -v $(PWD)/tools/analysis:/t:ro imp:toolchain \
+		python3 /t/rerank_check.py --url http://localhost:8080 $(if $(COMPARE_URL),--compare $(COMPARE_URL),)
+
+# Embedding gate: Qwen3-Embedding-0.6B (SafeTensors, last-token pooling from 1_Pooling/config.json)
+# against the HF golden tests/refs/qwen3_embedding_ref.json, cos >= 0.9999 per text. Mean pooling
+# on this model measured cos 0.23-0.57, so a pooling regression cannot pass.
+EMBED_MODEL ?= Qwen3-Embedding-0.6B
+test-embed: build check-gpu
+	@docker rm -f imp-embed >/dev/null 2>&1 || true
+	@docker run -d --name imp-embed --gpus all -p 8080:8080 \
+		-v $(HOME)/models:/models $(DOCKER_IMG) \
+		imp-server --host 0.0.0.0 --model /models/$(EMBED_MODEL) >/dev/null
+	@echo "waiting for server..."; \
+	for i in $$(seq 1 90); do curl -sf http://localhost:8080/health >/dev/null 2>&1 && break; sleep 2; done; \
+	trap 'docker rm -f imp-embed >/dev/null 2>&1' EXIT; \
+	docker run --rm --network host -v $(PWD)/tools/analysis:/t:ro -v $(PWD)/tests/refs:/r:ro imp:toolchain \
+		python3 /t/embed_check.py http://localhost:8080 /r/qwen3_embedding_ref.json
 
 NIAH_MODEL ?= Qwen3-14B-NVFP4
 test-niah: build check-gpu

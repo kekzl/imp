@@ -12,6 +12,10 @@ namespace imp {
 // (GLM-4.7-Flash) append num_nextn_predict_layers as model.layers.<n_layers + i>.*.
 [[nodiscard]] bool arch_canonical_name(ModelArch arch, int declared_layers, std::string& name);
 
+// Base-model (AutoModel) exports drop the `model.` prefix (Qwen3-Embedding: layers.N.self_attn.*,
+// embed_tokens, norm); adds it back. HF names only: Mistral-native `.attention.` stays untouched.
+void base_model_canonical_name(std::string& name);
+
 // MLA self_attn.<proj>.weight (kv_a_proj_with_mqa, kv_a_layernorm, kv_b_proj, q_a_proj, q_a_layernorm).
 // false = not an MLA tensor.
 [[nodiscard]] bool assign_mla_tensor(TransformerLayer& layer, const std::string& proj, const Tensor& t);

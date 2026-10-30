@@ -95,6 +95,44 @@ void note_audio_config(const JValue& root, bool has_vision, ModelConfig& cfg) {
         audio_type.empty() ? "?" : audio_type.c_str(), has_vision ? "+vision" : "");
 }
 
+// sentence-transformers pooling module (<model_dir>/1_Pooling/config.json): only last-token
+// pooling changes what /v1/embeddings computes; mean is imp's default.
+void note_st_pooling(const std::string& model_dir, ModelConfig& cfg) {
+    JValue pool;
+    if (!parse_json_file(model_dir + "/1_Pooling/config.json", pool))
+        return;
+    const JValue* last = jobj_find(pool, "pooling_mode_lasttoken");
+    if (!last || last->type != JType::NUMBER || last->num_val == 0.0)
+        return;
+    cfg.embed_last_token_pool = true;
+    // The pooled token is the trailing SpecialToken of post_processor TemplateProcessing.single.
+    JValue tok;
+    if (parse_json_file(model_dir + "/tokenizer.json", tok)) {
+        const JValue* pp = jobj_find(tok, "post_processor");
+        const JValue* procs = pp ? jobj_find(*pp, "processors") : nullptr;
+        std::vector<const JValue*> cand;
+        if (pp)
+            cand.push_back(pp);
+        if (procs && procs->type == JType::ARRAY)
+            for (const JValue& p : procs->arr)
+                cand.push_back(&p);
+        for (const JValue* p : cand) {
+            const JValue* single = jobj_find(*p, "single");
+            const JValue* specials = jobj_find(*p, "special_tokens");
+            if (!single || single->type != JType::ARRAY || single->arr.empty() || !specials)
+                continue;
+            const JValue* st = jobj_find(single->arr.back(), "SpecialToken");
+            const JValue* name = st ? jobj_find(*st, "id") : nullptr;
+            const JValue* entry = name ? jobj_find(*specials, name->str_val) : nullptr;
+            const JValue* ids = entry ? jobj_find(*entry, "ids") : nullptr;
+            if (ids && ids->type == JType::ARRAY && ids->arr.size() == 1)
+                cfg.embed_append_token = static_cast<int32_t>(ids->arr[0].as_int());
+        }
+    }
+    IMP_LOG_INFO("embeddings: last-token pooling (1_Pooling/config.json), appended token %d",
+                 cfg.embed_append_token);
+}
+
 }  // namespace
 
 // ---- load_config ----
@@ -128,6 +166,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg,
 
     load_vision_tower_config(root, out_vision_tower);
     note_audio_config(root, out_vision_tower && *out_vision_tower, cfg);
+    note_st_pooling(model_dir, cfg);
     if (cfg.arch == ModelArch::GENERIC)
         cfg.arch_inferred_fallback = true;
     IMP_LOG_INFO("  arch=%s layers=%d d_model=%d heads=%d kv_heads=%d d_ff=%d vocab=%d",
