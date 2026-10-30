@@ -20,7 +20,7 @@
 namespace {
 
 static const char* get_model_path() {
-    return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-Q8_0.gguf");
+    return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-NVFP4-cortecs");
 }
 
 static bool model_exists() {
@@ -46,7 +46,7 @@ struct Cycle {
     std::string output;
 
     bool up(const char* path) {
-        if (imp_model_load(path, IMP_FORMAT_GGUF, &model) != IMP_SUCCESS)
+        if (imp_model_load(path, imp_test::model_format(path), &model) != IMP_SUCCESS)
             return false;
         // Redirect the warm cache into a writable scratch dir. The pending
         // runtime config is consumed per context create, so re-arm each time.

@@ -2,7 +2,7 @@
 layer: L3
 audience: agents
 verified: 2026-10-30
-commit: 4666a109
+commit: a4070e6a
 -->
 
 # imp - Project Instructions
@@ -54,7 +54,7 @@ make verify                # full
 ## Conventions
 
 - English in the repo, German in chat. No em dashes in the repo.
-- SafeTensors (NVFP4, FP8) first; GGUF is legacy (`docs/DESIGN_DECISIONS.md`): keep it loading and gated, no new GGUF kernel or perf work. Competitor reference: vLLM on the same SafeTensors checkpoint.
+- SafeTensors (NVFP4, FP8) first; GGUF is legacy (`docs/DESIGN_DECISIONS.md`): keep it loading, no new GGUF kernel or perf work, GPU gates and test models are SafeTensors only. Competitor reference: vLLM on the same SafeTensors checkpoint.
 - CHANGELOG: 1-3 lines, <= 360 characters per entry (gated), plus the checkable number. Investigation goes to `docs/`.
 - Branch off `main`, `gh pr create --base main`, never stack PRs; batch.
 - Perf gate: `tests/perf_baseline.json` (8 % decode / 8 % prefill). Refresh via `scripts/gen_perf_baseline.sh` only for an intentional move, stated in the PR.

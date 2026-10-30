@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 #include "model/tokenizer.h"
 #include "model/gguf_loader.h"
+#include "model/safetensors_loader.h"
 #include "core/logging.h"
 #include "test_models.h"
 #include "refs/tokenizer_golden_qwen3.h"
@@ -34,7 +35,7 @@ protected:
     void SetUp() override {
         const char* model_env = std::getenv(imp_test::kEnvModel);
         if (!model_env) {
-            GTEST_SKIP() << "Set " << imp_test::kEnvModel << " to a Qwen3 GGUF to run "
+            GTEST_SKIP() << "Set " << imp_test::kEnvModel << " to a Qwen3 checkpoint to run "
                          << "(the golden is " << tokenizer_golden::k_model << "; `make test-gpu` "
                          << "sets the variable)";
         }
@@ -46,7 +47,8 @@ protected:
 };
 
 TEST_F(TokenizerCompatTest, MatchesHuggingFace) {
-    auto model = imp::load_gguf(model_path_);
+    auto model = imp_test::model_format(model_path_) == IMP_FORMAT_GGUF ? imp::load_gguf(model_path_)
+                                                                        : imp::load_safetensors(model_path_);
     ASSERT_NE(model, nullptr) << "Failed to load model: " << model_path_;
 
     auto* tok = model->tokenizer();

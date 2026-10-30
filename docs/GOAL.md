@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-10-30
-commit: 4666a109
+commit: a4070e6a
 -->
 
 # imp - Goal Definition
@@ -13,7 +13,7 @@ imp is the best single-GPU **agentic** AI inference engine on NVIDIA RTX 5090 (`
 
 Foundation, non-negotiable: **the fastest single-stream (batch=1) decode of any engine on this chip**, across every supported architecture.
 
-Format: SafeTensors (NVFP4, FP8), one kernel set per LLM. GGUF is legacy since 2026-10-30: it loads and stays gated, gets no new kernel or performance work ([`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md)).
+Format: SafeTensors (NVFP4, FP8), one kernel set per LLM. GGUF is legacy since 2026-10-30: it loads, gets no new kernel or performance work, and the GPU gates run on SafeTensors only ([`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md)).
 
 - Nothing agentic may erode it.
 - On top of raw speed (release-bar gated, see "Agentic surface"): unbreakable tool-call/JSON contracts, long-context multi-turn loops, reasoning as a separable channel, moderate concurrency (tens of requests on one GPU), reliability under sustained load.

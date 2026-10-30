@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-10-30
-commit: 4666a109
+commit: a4070e6a
 -->
 
 # Performance
@@ -52,14 +52,14 @@ because CI has no GPU runner.
 <!-- PERF:BEGIN -->
 | metric | value | threshold |
 |---|---|---|
-| decode tg128 | **281.84 tok/s** | 8 % |
-| prefill pp128 | 7663.61 tok/s | 8 % |
-| prefill pp512 | **16443.57 tok/s** | 8 % |
-| prefill pp4096 | 18516.2 tok/s | 8 % |
-| peak VRAM (own) | 12666 MiB | 10 % |
+| decode tg128 | **274.93 tok/s** | 8 % |
+| prefill pp128 | 19210.34 tok/s | 8 % |
+| prefill pp512 | **41930.89 tok/s** | 8 % |
+| prefill pp4096 | 44478.41 tok/s | 8 % |
+| peak VRAM (own) | 6214 MiB | 10 % |
 
-[PROV: commit=e04f6383 date=2026-10-20 hw=RTX5090 model=Qwen3-8B-Q8_0 quant=Q8_0
-       cuda=13.4 path=gguf-dp4a cmd=`make verify-fast` n=5x5]
+[PROV: commit=a4070e6a-dirty date=2026-10-30 hw=RTX5090 model=Qwen3-8B-NVFP4-cortecs quant=NVFP4
+       cuda=13.5 path=gguf-dp4a cmd=`make verify-fast` n=5x5]
 <!-- PERF:END -->
 
 Pinned 2026-07-26, thresholds widened 2026-08-13 (#1400); median of 5 trials x 5

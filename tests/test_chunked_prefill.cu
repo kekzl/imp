@@ -37,7 +37,7 @@ static std::string generate_greedy(const char* model_path, const std::string& pr
                                    int chunk_size, int max_tokens,
                                    bool use_fp8_kv = false) {
     ImpModel model = nullptr;
-    if (imp_model_load(model_path, IMP_FORMAT_GGUF, &model) != IMP_SUCCESS || !model)
+    if (imp_model_load(model_path, imp_test::model_format(model_path), &model) != IMP_SUCCESS || !model)
         return {};
 
     ImpConfig cfg = imp_config_default();
@@ -81,7 +81,7 @@ static double ppl_for_chunk(const char* model_path, const std::string& prompt,
                             int chunk_size, bool use_fp8_kv = false,
                             bool enable_graphs = false) {
     ImpModel model = nullptr;
-    if (imp_model_load(model_path, IMP_FORMAT_GGUF, &model) != IMP_SUCCESS || !model)
+    if (imp_model_load(model_path, imp_test::model_format(model_path), &model) != IMP_SUCCESS || !model)
         return -1.0;
 
     std::vector<int32_t> tokens(4096);

@@ -66,7 +66,8 @@ TEST(EndToEndTest, ErrorStrings) {
 
 TEST(EndToEndTest, LoadNonexistentModel) {
     ImpModel model = nullptr;
-    ImpError err = imp_model_load("/nonexistent/path/model.gguf", IMP_FORMAT_GGUF, &model);
+    ImpError err = imp_model_load("/nonexistent/path/model.gguf",
+                                  imp_test::model_format("/nonexistent/path/model.gguf"), &model);
     EXPECT_NE(err, IMP_SUCCESS);
     EXPECT_EQ(model, nullptr);
 }
@@ -77,7 +78,8 @@ TEST(EndToEndTest, NullArguments) {
     EXPECT_EQ(imp_model_load(nullptr, IMP_FORMAT_GGUF, &model), IMP_ERROR_INVALID_ARG);
 
     // model_load with null output
-    EXPECT_EQ(imp_model_load("test.gguf", IMP_FORMAT_GGUF, nullptr), IMP_ERROR_INVALID_ARG);
+    EXPECT_EQ(imp_model_load("test.gguf", imp_test::model_format("test.gguf"), nullptr),
+              IMP_ERROR_INVALID_ARG);
 
     // tokenize with null model
     int32_t tokens[64];
@@ -131,7 +133,7 @@ TEST(EndToEndModelTest, LoadModel) {
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
-    ImpError err = imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model);
+    ImpError err = imp_model_load(path.c_str(), imp_test::model_format(path.c_str()), &model);
     ASSERT_EQ(err, IMP_SUCCESS);
     ASSERT_NE(model, nullptr);
 
@@ -149,7 +151,7 @@ TEST(EndToEndModelTest, Tokenize) {
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path.c_str(), imp_test::model_format(path.c_str()), &model), IMP_SUCCESS);
 
     int32_t tokens[256];
     int n_tokens = 0;
@@ -172,7 +174,7 @@ TEST(EndToEndModelTest, CreateContextAndGenerate) {
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path.c_str(), imp_test::model_format(path.c_str()), &model), IMP_SUCCESS);
 
     ImpConfig config = imp_config_default();
     config.max_seq_len = 512;
@@ -207,7 +209,7 @@ TEST(EndToEndModelTest, PrefillDecodeStep) {
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path.c_str(), imp_test::model_format(path.c_str()), &model), IMP_SUCCESS);
 
     ImpConfig config = imp_config_default();
     config.max_seq_len = 256;
@@ -255,7 +257,7 @@ TEST(EndToEndModelTest, LongContext8k) {
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path.c_str(), imp_test::model_format(path.c_str()), &model), IMP_SUCCESS);
 
     ImpConfig config = imp_config_default();
     config.max_seq_len = 16384;
@@ -293,7 +295,7 @@ TEST(EndToEndModelTest, LongContext16k_NVFP4KV) {
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path.c_str(), imp_test::model_format(path.c_str()), &model), IMP_SUCCESS);
 
     ImpConfig config = imp_config_default();
     config.max_seq_len = 16384;
@@ -351,7 +353,7 @@ protected:
 
 TEST_F(StubModelTest, LoadStubModel) {
     ImpModel model = nullptr;
-    ImpError err = imp_model_load(stub_path_.c_str(), IMP_FORMAT_GGUF, &model);
+    ImpError err = imp_model_load(stub_path_.c_str(), imp_test::model_format(stub_path_.c_str()), &model);
     ASSERT_EQ(err, IMP_SUCCESS) << "Failed to load stub GGUF: " << imp_error_string(err);
     ASSERT_NE(model, nullptr);
 
@@ -364,7 +366,8 @@ TEST_F(StubModelTest, LoadStubModel) {
 
 TEST_F(StubModelTest, TokenizeStub) {
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(stub_path_.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(stub_path_.c_str(), imp_test::model_format(stub_path_.c_str()), &model),
+              IMP_SUCCESS);
 
     // Stub tokenizer has 256 byte-tokens but no BPE merge rules.
     // imp_tokenize may return 0 tokens (no merges to apply) or
@@ -380,7 +383,8 @@ TEST_F(StubModelTest, TokenizeStub) {
 
 TEST_F(StubModelTest, CreateContextAndInfer) {
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(stub_path_.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(stub_path_.c_str(), imp_test::model_format(stub_path_.c_str()), &model),
+              IMP_SUCCESS);
 
     ImpConfig config = imp_config_default();
     config.max_seq_len = 64;
@@ -447,7 +451,8 @@ TEST_F(StubModelTest, CreateContextAndInfer) {
 
 TEST_F(StubModelTest, PrefillDecodeStub) {
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(stub_path_.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(stub_path_.c_str(), imp_test::model_format(stub_path_.c_str()), &model),
+              IMP_SUCCESS);
 
     ImpConfig config = imp_config_default();
     config.max_seq_len = 64;
@@ -497,7 +502,8 @@ TEST_F(StubModelTest, PrefillDecodeStub) {
 
 TEST_F(StubModelTest, VRAMLeakDetection) {
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(stub_path_.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(stub_path_.c_str(), imp_test::model_format(stub_path_.c_str()), &model),
+              IMP_SUCCESS);
 
     ImpConfig config = imp_config_default();
     config.max_seq_len = 64;
@@ -583,7 +589,7 @@ TEST(EndToEndModelTest, MultiDecodeOutputIsolation) {
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModel));
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path.c_str(), imp_test::model_format(path.c_str()), &model), IMP_SUCCESS);
     ASSERT_NE(model, nullptr);
 
     ImpConfig config = imp_config_default();
@@ -683,7 +689,7 @@ TEST(EndToEndModelTest, InThinkStopMaskKeepsStopTokensOutOfTheContext) {
     ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path, imp_test::kEnvModelGdn));
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path.c_str(), imp_test::model_format(path.c_str()), &model), IMP_SUCCESS);
     ImpConfig config = imp_config_default();
     config.max_seq_len = 512;
     config.max_batch_size = 1;

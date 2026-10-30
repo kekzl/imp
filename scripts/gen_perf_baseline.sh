@@ -4,10 +4,10 @@
 # Run inside imp:test: docker run --rm --gpus all -v $HOME/models:/models -v $PWD:/src -w /src
 # -u $(id -u):$(id -g) -e CUBLAS_WORKSPACE_CONFIG=:4096:8 --entrypoint bash imp:test
 # scripts/gen_perf_baseline.sh (-u required so the container can write perf_baseline.json back).
-# Args: $1 model path (default /models/Qwen3-8B-Q8_0.gguf), $2 trials (default 5).
+# Args: $1 model path (default /models/Qwen3-8B-NVFP4-cortecs), $2 trials (default 5).
 set -euo pipefail
 
-MODEL="${1:-/models/Qwen3-8B-Q8_0.gguf}"
+MODEL="${1:-/models/Qwen3-8B-NVFP4-cortecs}"
 N_TRIALS="${2:-5}"
 REPS=5
 OUTPUT="tests/perf_baseline.json"

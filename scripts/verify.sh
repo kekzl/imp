@@ -341,7 +341,7 @@ else
             BL_TG=$(jq -r ".models[\"$BL_MODEL\"].tg256" "$BASELINE")
             BL_PP=$(jq -r ".models[\"$BL_MODEL\"].pp512" "$BASELINE")
             MODEL_PATH="$MODELS/$BL_MODEL"
-            if [ ! -f "$MODEL_PATH" ]; then
+            if [ ! -e "$MODEL_PATH" ]; then
                 skip "  skip $BL_MODEL (not present)"
                 continue
             fi
@@ -391,7 +391,7 @@ else
         PRE_THR=$(jq -r '.thresholds.prefill_regression_pct' "$BASELINE")
         MODEL_PATH="$MODELS/$BL_MODEL"
 
-        if [ ! -f "$MODEL_PATH" ]; then
+        if [ ! -e "$MODEL_PATH" ]; then
             skip "baseline model $MODEL_PATH not present"
         else
             model_gate_ran
@@ -507,14 +507,14 @@ else
     # stands on its own regardless of whether the perf gate ran.
     VRAM_MODEL=$(jq -r '.model // empty' "$BASELINE")
     VRAM_MODEL_PATH="$MODELS/$VRAM_MODEL"
-    if [ -z "$VRAM_MODEL" ] || [ ! -x "$BIN" ] || [ ! -f "$VRAM_MODEL_PATH" ]; then
+    if [ -z "$VRAM_MODEL" ] || [ ! -x "$BIN" ] || [ ! -e "$VRAM_MODEL_PATH" ]; then
         skip "peak-VRAM gate (binary or model missing)"
         BL_VRAM=""
     else
         BL_VRAM=$(jq -r '.metrics.memory_mb.own_peak_mb // empty' "$BASELINE")
     fi
     VRAM_THR=$(jq -r '.thresholds.vram_increase_pct // 10' "$BASELINE")
-    if [ -z "$BL_VRAM" ] && [ -n "$VRAM_MODEL" ] && [ -x "$BIN" ] && [ -f "$VRAM_MODEL_PATH" ]; then
+    if [ -z "$BL_VRAM" ] && [ -n "$VRAM_MODEL" ] && [ -x "$BIN" ] && [ -e "$VRAM_MODEL_PATH" ]; then
         skip "no .metrics.memory_mb.own_peak_mb in $BASELINE — run scripts/gen_perf_baseline.sh"
     elif [ -z "$BL_VRAM" ]; then
         :  # already reported above
@@ -559,7 +559,7 @@ else
     DRIFT_MODEL_PATH="$MODELS/$(jq -r '.model // empty' "$BASELINE")"
     if [ -z "$BL_PPL" ]; then
         skip "no .metrics.quality.ppl_corpus_45k in $BASELINE — run scripts/gen_perf_baseline.sh"
-    elif [ ! -x "$BIN" ] || [ ! -f "$DRIFT_MODEL_PATH" ]; then
+    elif [ ! -x "$BIN" ] || [ ! -e "$DRIFT_MODEL_PATH" ]; then
         skip "PPL drift gate (binary or model missing)"
     else
         model_gate_ran
@@ -606,9 +606,9 @@ if [ "${IMP_VERIFY_SKIP_GRAPHS:-0}" = "1" ]; then
 elif [ ! -f "$BIN" ]; then
     skip "graphs gate requires host build artefacts"
 else
-    GRAPHS_MODEL="${IMP_VERIFY_GRAPHS_MODEL:-Qwen3-4B-Instruct-2507-Q8_0.gguf}"
+    GRAPHS_MODEL="${IMP_VERIFY_GRAPHS_MODEL:-Qwen3-8B-NVFP4-cortecs}"
     GRAPHS_MODEL_PATH="$MODELS/$GRAPHS_MODEL"
-    if [ ! -f "$GRAPHS_MODEL_PATH" ]; then
+    if [ ! -e "$GRAPHS_MODEL_PATH" ]; then
         skip "graphs gate model $GRAPHS_MODEL_PATH not present"
     else
         # Threshold lowered 1.5 -> 1.3 after F1's warmup-pre-pass made graphs-OFF faster on dense Q8
@@ -674,7 +674,7 @@ else
     SRV_MODEL_PATH="$MODELS/$(jq -r '.model // empty' "$BASELINE")"
     if [ -z "$BL_SRV" ]; then
         skip "no .metrics.server.agg_tps_c8 in $BASELINE — run scripts/gen_perf_baseline.sh"
-    elif [ ! -x "$SRV_BIN" ] || [ ! -f "$SRV_MODEL_PATH" ]; then
+    elif [ ! -x "$SRV_BIN" ] || [ ! -e "$SRV_MODEL_PATH" ]; then
         skip "server gate (imp-server or model missing)"
     else
         model_gate_ran
@@ -702,7 +702,7 @@ section "smoke prompts (degeneration check)"
 # for single-word-factual prompts (this gate's own prompt answers in 11 tokens on the 4B model).
 smoke_prompt() {
     local label="$1" model="$2" prompt="$3" expect="$4" min_toks="${5:-10}"
-    if [ ! -f "$MODELS/$model" ]; then
+    if [ ! -e "$MODELS/$model" ]; then
         skip "$label ($model not present)"
         return
     fi
@@ -751,15 +751,15 @@ smoke_prompt() {
     pass "$label (${VERDICT#OK }, contains '$expect')"
 }
 
-smoke_prompt "Qwen3-4B Q8_0 (dense)" \
-    "Qwen3-4B-Instruct-2507-Q8_0.gguf" \
+smoke_prompt "Qwen3-8B NVFP4 (dense)" \
+    "Qwen3-8B-NVFP4-cortecs" \
     "The capital of France is" \
     "Paris" \
     5
 
 if [ "$MODE" = "full" ]; then
-    smoke_prompt "Qwen3.5-4B MXFP4 (GDN)" \
-        "Qwen3.5-4B-mxfp4.gguf" \
+    smoke_prompt "Qwen3.8-27B NVFP4 (GDN)" \
+        "Qwen3.8-27B-NVFP4-vllm" \
         "The capital of France is" \
         "Paris" \
         5

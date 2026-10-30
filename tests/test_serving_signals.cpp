@@ -23,7 +23,7 @@
 namespace {
 
 const char* model_path() {
-    return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-Q8_0.gguf");
+    return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-NVFP4-cortecs");
 }
 
 bool model_exists() {
@@ -80,7 +80,7 @@ struct Loaded {
     }
     bool open(int max_batch_size, size_t kv_blocks, bool streaming_kv_auto = false,
               const char* kv_dtype = "fp16", int streaming_window = 0) {
-        if (imp_model_load(model_path(), IMP_FORMAT_GGUF, &model) != IMP_SUCCESS)
+        if (imp_model_load(model_path(), imp_test::model_format(model_path()), &model) != IMP_SUCCESS)
             return false;
         if (streaming_kv_auto) {
             // The resolver picks FP8 KV for Qwen3 on its own ("auto"). The F16
