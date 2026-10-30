@@ -13,6 +13,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 - `--mxfp4-prefill` and C-API `ImpConfig::use_mxfp4_prefill` (ABI change): its dual-cache GEMM branch was unreachable, no dispatch site set the payload.
 
 ### Changed
+- Own TMA tile GEMMs issue `cp.async.bulk.tensor` into `.shared::cta` (ptxas guarded `.shared::cluster` with a CALL slow path, 8 B stack in 21 kernels), so the 256x128 weight-decode tiles move registers to the MMA warps via setmaxnreg: Qwen3.8-27B-Q4_K_M pp512 4466-4472 -> 4611-4625, Qwen3-14B-Q6_K pp1536 9383-9393 -> 9550-9581 tok/s, bit-equal.
 - Q4_K / Q5_K prompt GEMMs (fp16 accumulate, M > 32) decode the GGUF blocks in the own FP16 tile instead of the raw IMMA tiles: Qwen3.8-27B-UD-Q4_K_M pp512 4175-4179 -> 4384-4405, pp2048 4368-4374 -> 4772-4776; Q4_K_M pp2048 4276 -> 4923 tok/s; PPL 4.9905 -> 4.9934 / 5.0635 -> 5.0653. `gemm.q45k_tile`.
 - The weight-decode tiles (Q6_K, Q4_K, Q5_K) choose 256x128 by wave count with a per-format cost instead of a fixed 170-tile threshold: Qwen3-14B-Q6_K pp1024 8700-8731 -> 9372-9388 tok/s, pp512 / pp1536 unchanged.
 - Native MXFP4 prompt GEMMs (M <= 1024) decode E2M1 inside the own FP16 tile instead of a weight dequant into scratch + FP16 GEMM per call (bit-equal): Qwen3.5-4B-mxfp4 pp512 19614-19904 -> 21965-22593, pp1024 25299-25758 -> 26310-26491 tok/s; PPL 11.6369 -> 11.6367. `gemm.mxfp4_tile`.

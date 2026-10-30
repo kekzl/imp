@@ -95,12 +95,12 @@ struct Q6Dec {
     template <class C>
     static __device__ __forceinline__ void decode(const Q6Args& p, uint32_t bars, uint8_t* smem, int n0,
                                                   int KT) {
-        static_assert(C::kBK == 64 && kUnits<C> <= 4,
-                      "two stages per half-block; the prefetch holds 2 x 36 regs");
+        static_assert(C::kBK == 64 && kUnits<C> <= 4 && kRowStep<C> % 8 == 0,
+                      "two stages per half-block, prefetch 2 x 36 regs, decoder_row4 rows");
         constexpr int kU = kUnits<C>;
-        const int dt = decoder_tid();
+        const int dt = decoder_tid<C>();
         const int u = dt & 3;
-        const int r0 = dt >> 2;
+        const int r0 = decoder_row4(dt);
         Q6Unit t[kU];
         Q6Unit nx[kU];
         ld_units<C>(t, p, n0, r0, u, 0);

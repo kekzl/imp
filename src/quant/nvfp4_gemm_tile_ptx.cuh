@@ -35,18 +35,20 @@ __device__ __forceinline__ void mbar_wait(uint32_t bar, uint32_t parity) {
         "r"(parity)
         : "memory");
 }
+// .shared::cta (no clusters launched): .shared::cluster made ptxas guard every issue with a CTA-id check and
+// a CALL.ABS slow path, which disables setmaxnreg (C7506) and adds an ABI stack frame.
 __device__ __forceinline__ void tma_2d(uint32_t dst, const CUtensorMap* map, int x, int y, uint32_t bar) {
     asm volatile(
-        "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], "
+        "cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], "
         "[%4];" ::"r"(dst),
         "l"(map), "r"(x), "r"(y), "r"(bar)
         : "memory");
 }
 __device__ __forceinline__ void bulk_1d(uint32_t dst, const void* src, uint32_t bytes, uint32_t bar) {
-    asm volatile(
-        "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(dst),
-        "l"(src), "r"(bytes), "r"(bar)
-        : "memory");
+    asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(
+                     dst),
+                 "l"(src), "r"(bytes), "r"(bar)
+                 : "memory");
 }
 
 __device__ __forceinline__ void mma_mxf4nvf4(float acc[4], const uint32_t a[4], uint32_t b0, uint32_t b1,
