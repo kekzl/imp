@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-10-30
-commit: 4666a109
+commit: ff42a9f5
 -->
 
 # Limitations
@@ -31,6 +31,7 @@ Every yellow status in [`FEATURES.md`](FEATURES.md); all tracked under #1680 unl
 | Dequant paths with no gate reading such a checkpoint (Q4_0, Q8_0, Q4_K, Q5_K, Q6_K do have one) | GGUF Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, Q8_K | none | #1680 |
 | **Q8_1** (GGUF wire type 9, an activation format) has no weight path at all | GGUF loader | refused at parse | - |
 | Cross-check against a reference reranker is opt-in behind `COMPARE_URL=`; default `make test-rerank` skips it | `/v1/rerank` | set `COMPARE_URL=` | #1680 |
+| No embedder, reranker or Gemma mmproj checkpoint on the test host since the GGUF checkpoints were deleted (2026-10-30): `test_encoder_embed` and `VisionGolden` skip, `make test-rerank` needs `RERANK_MODEL=` | `/v1/embeddings`, `/v1/rerank`, Gemma vision encoder | stage a checkpoint and pass its path | - |
 | Implemented, ungated | `/admin/suspend`, `/admin/resume`, `server.model_swap` | none | #1680 |
 | SSE frames, usage accounting, `finish_reason`, tool-call streaming: CI's `Real API contract (model-less)` job deselects every token-producing test, no GPU runner | server generation contract | run `make test-server` on a carded machine | #1600, #1559 |
 | Perf gate benches `imp-cli`, which never enters the SSE writer, tool-argument filter or per-chunk JSON serialisation | `tools/imp-server/` per-request cost | `scripts/verify.sh` server gate since 2026-10-05: 8 streamed 128-token chats on the baseline model, 8 % under the pin in `tests/perf_baseline.json`; tool-argument filter and multi-turn not driven | #1685 |
