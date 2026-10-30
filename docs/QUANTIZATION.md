@@ -1,14 +1,14 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-12
-commit: aeff0434
+verified: 2026-10-30
+commit: 4967c34e
 -->
 
 # Quantization
 
-imp reads GGUF quantization (llama.cpp-compatible files, loaded directly) and SafeTensors NVFP4
-prequant (external calibration tools); per-model picks [`MODELS.md`](MODELS.md), benchmark
+imp reads SafeTensors NVFP4 / FP8 (the optimised path; external calibration tools or `imp-quantize`) and
+GGUF quantization (llama.cpp-compatible files, legacy since 2026-10-30: loads, no new speedups, [`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md)); per-model picks [`MODELS.md`](MODELS.md), benchmark
 numbers [`PERF.md`](PERF.md) and [`BENCHMARKS.md`](BENCHMARKS.md), loader/GEMM internals
 [`internals/QUANT_PIPELINE.md`](internals/QUANT_PIPELINE.md).
 

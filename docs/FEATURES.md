@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-12
-commit: aeff0434
+verified: 2026-10-30
+commit: 4967c34e
 -->
 
 # Feature matrix
@@ -28,6 +28,8 @@ Which architecture maps to which code path, per-checkpoint status, VRAM and deco
 ## Quantisation
 
 Source: `src/core/qtype.h`.
+
+GGUF formats (Q\*, IQ\*, MXFP4 from a `.gguf` file) are **legacy** since 2026-10-30: they load and stay gated, new optimisation goes to SafeTensors NVFP4 / FP8 ([`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md)).
 
 | format | status |
 |---|---|

@@ -1172,6 +1172,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     model->set_tokenizer(std::move(tokenizer));
 
     IMP_LOG_INFO("GGUF model loaded successfully from %s", path.c_str());
+    IMP_LOG_WARN("GGUF is legacy: it loads, new speedups go to SafeTensors (docs/DESIGN_DECISIONS.md)");
     return model;
 }
 

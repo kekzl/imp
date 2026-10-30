@@ -7,6 +7,8 @@ description: Write, review, optimize sm_120a CUDA/PTX kernels - shared-memory la
 
 PTX templates: `references/ptx-patterns.md`. Dead ends, version gotchas, load-bearing fixes: `references/known-issues.md` (read BEFORE proposing a lever on a mature path).
 
+Scope: kernels for SafeTensors NVFP4 / FP8 (and BF16/FP16). GGUF-only kernels (dp4a GEMV, K-quant / IQ tiles, IMMA) are legacy: bug fixes only (`docs/DESIGN_DECISIONS.md`).
+
 ## Architecture
 
 | Spec | Value |
