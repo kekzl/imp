@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-15
-commit: c0211fea
+verified: 2026-10-30
+commit: 4666a109
 -->
 
 # Configuration reference
@@ -116,7 +116,7 @@ Format auto-detection: a directory with `model.safetensors`/`model.safetensors.i
 | `--streaming-kv` / `--no-streaming-kv-auto` | off / off | enable StreamingLLM (sinks + window) / disable its auto-enable at >90% KV full |
 | `--stream-sinks <n>` / `--stream-window <n>` | `4` / model's `sliding_window` | |
 | `--token-trace` | off | `[tok=ID 'piece']` marker on stderr for every generated token, not just the first ten |
-| `--bench` / `--bench-pp <n>` / `--bench-reps <n>` | off / `512` / `3` | synthetic benchmark mode (matches llama-bench methodology) |
+| `--bench` / `--bench-pp <n>` / `--bench-reps <n>` | off / `512` / `3` | synthetic benchmark mode (pp + tg tok/s) |
 | `--bench-prompt-file <path>` | unset (prompt = token ids 0..pp-1) | `--bench` prompt from a text file, repeated or cut to `--bench-pp`; pins `speculative.ngram=false`. Flash-Next-NVFP4, 3 processes each: expert cache hit rate 88.6-98.7 % synthetic, 82.7-84.7 % text |
 | `--bench-teacher-force` | off | with `--bench-prompt-file`: tg decode inputs are the file tokens after the prompt (`imp_set_forced_decode`), the run fails unless all tg inputs were forced; decodes per step (no pipeline, graph loop or speculation) |
 | `--perplexity <file>` / `--calibrate <out>` | - | teacher-forced perplexity over a text file (deterministic eval harness, PR #481); `--calibrate` also writes activation-calibration stats (input for `imp-quantize --calib`) |
@@ -182,7 +182,7 @@ Both GGUF and SafeTensors accepted; `--model` is optional (model-less start, fir
 | `--max-batch <n>` | `0` (auto) | decode batch / KV+workspace sizing |
 | `--models-dir <path>` | - | directory to scan for `.gguf` models (auto-load on select) |
 | `--lora NAME=PATH` | - | load a PEFT LoRA adapter, repeatable - see LoRA below |
-| `--control-vector NAME=PATH` | - | load a llama.cpp control vector GGUF, repeatable - see [`API_CONTROL.md`](API_CONTROL.md#steering-with-a-control-vector) |
+| `--control-vector NAME=PATH` | - | load a control vector GGUF, repeatable - see [`API_CONTROL.md`](API_CONTROL.md#steering-with-a-control-vector) |
 | `--sae DIR` | - | load a Gemma Scope 2 SAE dir for the model, see [`API_CONTROL.md`](API_CONTROL.md#reading-and-clamping-sae-features) |
 | `--api-key <key>` | - | require `Authorization: Bearer <key>` |
 | `--cors-origins <list>` | - (no CORS headers) | comma list of browser origins answered with `Access-Control-Allow-Origin` on an exact match (+ `Vary: Origin`); `*` = any origin. See [`DEPLOYMENT.md`](DEPLOYMENT.md#auth-and-exposure) |

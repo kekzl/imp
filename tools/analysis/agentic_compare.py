@@ -30,7 +30,7 @@ Fairness rules baked in:
 
 Usage:
   python3 tools/analysis/agentic_compare.py \
-      --engine imp=http://localhost:8080 --engine llama.cpp=http://localhost:8081 \
+      --engine imp=http://localhost:8080 --engine vllm=http://localhost:8081 \
       --reps 5 --budget 200
   # is a failure just the default? add --thinking-off for a second pass
 Exit code is 0 unless an engine was unreachable; this reports, it does not gate.
@@ -84,8 +84,8 @@ def post(url, body, timeout=180):
 
 def model_id(url):
     """Ask the server what it serves. imp validates the `model` field (it can
-    swap models), so a placeholder name is correctly rejected with 404 —
-    llama.cpp ignores the field. Same request must be valid on both."""
+    swap models), so a placeholder name is correctly rejected with 404;
+    other engines may ignore the field. Same request must be valid on both."""
     try:
         with urllib.request.urlopen(url + "/v1/models", timeout=10) as r:
             data = json.loads(r.read().decode())

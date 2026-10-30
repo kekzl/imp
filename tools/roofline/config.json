@@ -137,7 +137,7 @@
       "path": "/models/gpt-oss-20b",
       "family": "nvfp4",
       "arch": "moe",
-      "comment": "gpt-oss-20b MXFP4 SafeTensors hero (#984 decode-tie vs llama.cpp): BF16 dense + NVFP4-converted experts, attention sinks + alternating SWA. Added additively under config_version 4 \u2014 the accompanying regex additions (gpt_oss_glu / bias / moe_add_*_bias) can only match kernels absent from all pre-existing cells (cv4 pin measured 0 unclassified), so cv4 runs stay comparable."
+      "comment": "gpt-oss-20b MXFP4 SafeTensors hero (#984): BF16 dense + NVFP4-converted experts, attention sinks + alternating SWA. Added additively under config_version 4 \u2014 the accompanying regex additions (gpt_oss_glu / bias / moe_add_*_bias) can only match kernels absent from all pre-existing cells (cv4 pin measured 0 unclassified), so cv4 runs stay comparable."
     }
   },
   "shapes": {

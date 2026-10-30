@@ -370,7 +370,7 @@ test-perf: build check-gpu
 # model with MODEL=<name-under-$HOME/models>.
 AGENTIC_MODEL ?= Qwen3-8B-Q8_0.gguf
 bench-competitive: build check-gpu
-	@echo "Competitive decode sweep vs llama.cpp (image pinned by digest in the script)"
+	@echo "Competitive decode sweep vs vLLM on SafeTensors heroes (image pinned by digest in the script)"
 	bash scripts/bench_competitive.sh
 
 bench-agentic: build check-gpu
@@ -427,7 +427,7 @@ test-agents: build check-gpu
 # Rerank gate (#roadmap gap 9): boots a cross-encoder reranker and asserts the
 # /v1/rerank contract, semantics (the relevant document wins) and stability.
 # Pass COMPARE_URL=http://host:port to also diff against a reference reranking
-# server (llama.cpp --reranking) running the SAME model file.
+# server (vLLM /v1/rerank) running the SAME model.
 RERANK_MODEL ?= qwen3-reranker-0.6b-q8_0.gguf
 test-rerank: build check-gpu
 	@docker rm -f imp-rerank >/dev/null 2>&1 || true

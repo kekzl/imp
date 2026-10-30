@@ -2,7 +2,7 @@
 layer: L1
 audience: operators
 verified: 2026-10-30
-commit: 4967c34e
+commit: 4666a109
 -->
 
 # Feature matrix
@@ -55,7 +55,7 @@ GGUF formats (Q\*, IQ\*, MXFP4 from a `.gguf` file) are **legacy** since 2026-10
 | OpenAI Responses `/v1/responses` | ✅ | the dialect Codex and the Agents SDK speak |
 | SSE streaming, per token, all three dialects | ✅ | one shared driver since v0.18.1 |
 | `/v1/embeddings` | ✅ | |
-| `/v1/rerank` (Cohere/Jina/vLLM shape) | 🟡 | the llama.cpp cross-check is opt-in behind `COMPARE_URL=` (`Makefile:433 --compare $(COMPARE_URL)`), so the default gate does not run it (#1680) |
+| `/v1/rerank` (Cohere/Jina/vLLM shape) | 🟡 | the cross-check against a reference reranker is opt-in behind `COMPARE_URL=` (`Makefile:433 --compare $(COMPARE_URL)`), so the default gate does not run it (#1680) |
 | `/tokenize`, `/detokenize`, `/v1/models`, `/health`, `/metrics`, `/props`, `/info` | ✅ | |
 | `/admin/suspend`, `/admin/resume` | 🟡 | frees the GPU in seconds, resumes without re-reading weights. No gate exercises it (#1680) |
 | model swap on request (`server.model_swap`) | 🟡 | in-flight generations drain, never cancelled. No gate exercises it (#1680) |

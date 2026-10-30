@@ -43,7 +43,7 @@ A new checkpoint is UNTRUSTED INPUT: SafeTensors/`tokenizer.json` parsers are ha
 | Coherent-ish, drifts vs HF | MLA/YaRN `rope_mscale` on the wrong base (1.261x); pin the transformers oracle (4.44.2 for MLA) | #880 |
 | Draft accept collapses, output correct | MTP head RoPE differs from the target (NeoX vs YaRN) | #913 |
 | CLI fine, server broken | not arch: server-api | |
-| Which block diverges | `diagnostics.dump_hidden_dir` + `tools/analysis/layer_diff.py` (vs llama.cpp `llama-eval-callback`) or `layer_ab_diff.py` (two imp runs); `dump_gdn_state_dir`, `dump_logits_dir` | 0 non-finite GDN states over a 46579-token prefill on Qwen3.8 |
+| Which block diverges | `diagnostics.dump_hidden_dir` + `tools/analysis/layer_ab_diff.py` (two imp runs, or imp vs an HF dump); `dump_gdn_state_dir`, `dump_logits_dir` | 0 non-finite GDN states over a 46579-token prefill on Qwen3.8 |
 
 ## Known traps
 

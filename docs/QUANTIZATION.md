@@ -2,13 +2,13 @@
 layer: L1
 audience: operators
 verified: 2026-10-30
-commit: 4967c34e
+commit: 4666a109
 -->
 
 # Quantization
 
 imp reads SafeTensors NVFP4 / FP8 (the optimised path; external calibration tools or `imp-quantize`) and
-GGUF quantization (llama.cpp-compatible files, legacy since 2026-10-30: loads, no new speedups, [`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md)); per-model picks [`MODELS.md`](MODELS.md), benchmark
+GGUF quantization (legacy since 2026-10-30: loads, no new speedups, [`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md)); per-model picks [`MODELS.md`](MODELS.md), benchmark
 numbers [`PERF.md`](PERF.md) and [`BENCHMARKS.md`](BENCHMARKS.md), loader/GEMM internals
 [`internals/QUANT_PIPELINE.md`](internals/QUANT_PIPELINE.md).
 
@@ -237,8 +237,7 @@ Bisection evidence, the RMSNorm-offset root cause behind the gate row, MoE per-e
 
 Same FP4 E2M1 nibble layout as NVFP4, UE8M0 micro-scales (per 32 elements), no separate tensor
 scale: the format Blackwell tensor cores expect natively, so MXFP4 prefill goes through CUTLASS
-at full throughput; shipped inside GGUF under a proprietary tensor-type code (31), which
-llama.cpp reads as the removed `Q4_0_4_4` (cross-tool PPL comparison needs a standard export).
+at full throughput; shipped inside GGUF under a proprietary tensor-type code (31).
 Round-to-nearest MXFP4 is +5-15% perplexity vs Q8_0, worse than Q4_K_M (+2.2% on Qwen3-4B
 wikitext-2); MR-GPTQ calibration would close the gap: [roadmap](ROADMAP.md#later) row 101; plain GPTQ on NVFP4 (`imp-quantize --gptq`): AWQ+GPTQ Qwen3-1.7B 18.07-18.46 vs AWQ 18.23, Qwen3-0.6B -1.5 % ([record](plans/2026-10-17-gptq-nvfp4.md)).
 
@@ -276,16 +275,15 @@ Quick guidance, not a benchmark:
   (`NVFP4 decode: auto -> mode 1`); prefill stays at source precision. `--no-nvfp4` or
   `diagnostics.no_nvfp4_decode_cache = true` decodes at source precision.
 
-| model | decode-path PPL, source -> default | tg128 source -> default | llama.cpp tg128 |
-|---|---|---|---:|
-| Qwen3-8B Q8_0 | 10.7277 -> 11.3713 (+6.0 %) | 159.31 / 158.96 -> 292.78 / 295.59 | 160.1 |
-| Qwen3-14B Q6_K | 9.2289 -> 9.4524 (+2.4 %) | 115.39 / 115.55 -> 169.53 / 168.81 | 114.8 |
+| model | decode-path PPL, source -> default | tg128 source -> default |
+|---|---|---|
+| Qwen3-8B Q8_0 | 10.7277 -> 11.3713 (+6.0 %) | 159.31 / 158.96 -> 292.78 / 295.59 |
+| Qwen3-14B Q6_K | 9.2289 -> 9.4524 (+2.4 %) | 115.39 / 115.55 -> 169.53 / 168.81 |
 
 [PROV: commit=38e435dd date=2026-09-24 hw=RTX5090 model=Qwen3-8B,Qwen3-14B quant=Q8_0,Q6_K cuda=13.4
        path=gguf-nvfp4-decode-cache n=2-alternating-runs
        cmd=`imp-cli --perplexity ppl_corpus_45k.txt --prefill-chunk-size 1 --set runtime.deterministic=true [--no-nvfp4]`;
-       tg from `imp-cli --bench --bench-pp 512 --bench-reps 5 --max-tokens 128 --set speculative.ngram=false`;
-       llama.cpp column: BENCHMARKS.md competitive table (2026-08-30)]
+       tg from `imp-cli --bench --bench-pp 512 --bench-reps 5 --max-tokens 128 --set speculative.ngram=false`]
 
 - **Q4_K_M**: most VRAM-efficient GGUF, sufficient for most chat; degenerates on long code-gen on
   Gemma-4 (use Q5_K_M or Q8_0 there). **Q6_K** is in between, good MoE pick on Qwen3-Coder-30B.

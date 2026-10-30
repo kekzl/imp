@@ -55,3 +55,10 @@ Code changes, listed so they are not lost:
   KV, and the last chunk always running eager), and `can_capture` logged nothing
   when it was false. The comment is accidentally right about the outcome and
   wrong about the reason. Diagnostic added in #1417; the default is still `true`.
+
+## 2026-10-30 - llama.cpp comparisons (GGUF legacy, owner decision)
+
+| removed | why |
+|---|---|
+| `BENCHMARKS.md` sections "Decode vs llama.cpp", "GGUF prefill", "Agentic reliability vs llama.cpp", the llama.cpp rows of the Qwen3.8-27B engine table | moved verbatim to `docs/archive/BENCHMARKS_GGUF.md`; vLLM on the same SafeTensors checkpoint is the only reference engine |
+| README llama.cpp column and GGUF rows; `PERF.md` decode-lead line; `QUANTIZATION.md` llama.cpp tg128 column; `LIMITATIONS.md` PPL-vs-llama.cpp row; `GOAL.md` llama.cpp PPL parity line and history delta; `internals/SM120.md` MMQ gap line | comparisons against an engine imp no longer measures against; dated values stay in the archive and CHANGELOG |
