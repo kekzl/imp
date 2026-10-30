@@ -917,7 +917,8 @@ bool Engine::mtp_draft_one(int prev_token_id, const void* d_h_prev, int hidden_d
     auto* ws = mtp_ws_storage_.get();
     // Chain lm_head via the NVFP4 decode cache when available: full-vocab FP16
     // GEMV is the dominant per-draft cost (#847 lever 3). Draft-only precision
-    // (verify stays lossless); falls back to FP16 GEMV with no cache entry (nvfp4_lm_head/_gdn off, or FP8 LM head).
+    // (verify stays lossless); without a cache entry: the FP8 head, a dp4a GEMV on a GGUF head, else FP16
+    // GEMV.
     imp::NvFP4QuantResult lm_nvfp4;
     const imp::NvFP4QuantResult* lm_nvfp4_p = nullptr;
     if (runtime_config_.speculative.mtp_nvfp4_head && executor_ && executor_->lm_head_nvfp4_view(lm_nvfp4)) {

@@ -49,6 +49,10 @@ struct MtpDraftWorkspace {
     // [vocab_size] FP32 — draft logits when the lm_head GEMV runs through the
     // NVFP4 decode cache (gemv_nvfp4_kpar_fp32 writes FP32). ~1 MiB.
     void* d_logits_f32 = nullptr;
+    // [hidden_dim / 32] block_q8_1 + d8: d_h_final quantized for a GGUF lm_head with neither an NVFP4 nor an
+    // FP8 form (dp4a GEMV into d_logits_f32).
+    void* d_q8_1 = nullptr;
+    void* d_d8 = nullptr;
     // [kMtpMaxTopW] int — top-W candidate ids (Stage 0 tree-ceiling probe,
     // and the multi-candidate branch seed: chains 1..W-1 start from ranks
     // 1..W-1 here).
