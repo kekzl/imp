@@ -1152,6 +1152,9 @@ private:
     // M>1 GEMM on an FP8-tier weight: FP8 x FP8 cuBLASLt, else (native) FP16 dequant scratch.
     void gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry& e, const Tensor& input, Tensor& output,
                            const GemmContext& ctx);
+    // out = *a_scale * *w_scale * a8 w8^T + beta out, E4M3 operands: own tile (gemm.fp8_tile), else cuBLASLt.
+    void gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta, const float* a_scale,
+                     const float* w_scale, cudaStream_t stream);
     // --gpu-layers: ensure_layer + prefetch / release_layer around layer i. Streamed layers rebind
     // handle.source_data to the matmul's current data (slot, then host): gemm_via_handle_ reads it.
     void offload_enter_(int layer, int n_layers, cudaStream_t stream);

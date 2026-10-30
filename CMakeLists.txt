@@ -1369,6 +1369,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_batched_smallm_equiv.cu
         tests/test_nvfp4_gemm_tile.cu
         tests/test_gemm_mxfp8_tile.cu
+        tests/test_gemm_fp8_tile.cu
         tests/test_gemm_mxfp4_tile.cu
         tests/test_quantize_fp16_nvfp4_moe_native.cu
         tests/test_prefill_row_invariance.cu

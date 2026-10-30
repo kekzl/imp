@@ -770,6 +770,9 @@ q45k_tile = true
 moe_tile = true
 # Own MXFP8 GEMM before CUTLASS MXFP8 for the GDN projection prefill copies (gemm.mxfp8_gdn_proj_prefill).
 mxfp8_tile = true
+# Own per-tensor FP8 GEMM before cuBLASLt FP8 x FP8 for native FP8 checkpoint prefill rows from this M
+# (0 = off, K % 64 == 0). Qwen3-8B-FP8 pp4096 +0.6 %; below 2048 cuBLASLt is faster.
+fp8_tile_min_m = 2048
 # Batched-decode (n>1) LM head via a single CUTLASS NVFP4 GEMM instead of the
 # FP16-activation batched-M GEMV: reads the LM-head weight once per batch but
 # forces NVFP4 activations on the final logits. +8% aggregate concurrent decode

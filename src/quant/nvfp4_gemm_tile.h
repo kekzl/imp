@@ -30,6 +30,14 @@ namespace imp {
                                    float alpha, void* d_fp16, int M, int N, int K, cudaStream_t stream,
                                    int variant = -1, void* workspace = nullptr, size_t workspace_bytes = 0);
 
+// Same kernel on per-tensor FP8 (kind::f8f6f4, no SF): D[M,N] fp16 = *a_scale * *w_scale * A W^T + beta * D.
+// A [M,K] / W [N,K] E4M3 row-major, scales are device scalars (graph-capturable). K % 64 == 0, N % 8 == 0.
+// Variants and workspace as above.
+[[nodiscard]] bool gemm_fp8_tile(const void* a_data, const void* w_data, const float* a_scale,
+                                 const float* w_scale, float beta, void* d_fp16, int M, int N, int K,
+                                 cudaStream_t stream, int variant = -1, void* workspace = nullptr,
+                                 size_t workspace_bytes = 0);
+
 // Workspace that lets auto pick stream-K: one fp32 128x128 partial tile per SM (170 x 64 KiB on the 5090).
 size_t gemm_tile_streamk_workspace_bytes();
 
