@@ -4,6 +4,7 @@
 // GTEST_SKIPs without the model. Native MXFP4 (the default) holds neither copy: second test.
 
 #include "imp/imp.h"
+#include "test_models.h"
 #include "runtime/config.h"
 
 #include <cuda_runtime.h>
@@ -37,7 +38,7 @@ TEST(VramLedgerE2E, Mxfp4GdnWeightFormsAreNamed) {
     imp::set_pending_runtime_config(rc);
     ImpModel model = nullptr;
     ImpContext ctx = nullptr;
-    ASSERT_EQ(imp_model_load(kModel, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(kModel, imp_test::model_format(kModel), &model), IMP_SUCCESS);
     ImpConfig cfg = imp_config_default();
     cfg.max_seq_len = 512;
     cfg.max_batch_size = 1;
@@ -63,7 +64,7 @@ TEST(VramLedgerE2E, Mxfp4GdnNativeHoldsNoFp16Cache) {
     imp::set_pending_runtime_config(rc);
     ImpModel model = nullptr;
     ImpContext ctx = nullptr;
-    ASSERT_EQ(imp_model_load(kModel, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(kModel, imp_test::model_format(kModel), &model), IMP_SUCCESS);
     ImpConfig cfg = imp_config_default();
     cfg.max_seq_len = 512;
     cfg.max_batch_size = 1;

@@ -7,7 +7,7 @@
 // mempool (release threshold raised to UINT64_MAX at init), so freeing model+context parked
 // memory in the pool instead of returning it, and the next load's cudaMemGetInfo-based
 // sizing saw ~1.5GB free on a 32GB card and failed.
-// Requires a real model: IMP_TEST_MODEL or default /models/Qwen3-8B-Q8_0.gguf.
+// Requires a real model: IMP_TEST_MODEL or default /models/Qwen3-8B-NVFP4-cortecs.
 
 #include <gtest/gtest.h>
 #include "imp/imp.h"
@@ -23,7 +23,7 @@
 namespace {
 
 static const char* get_model_path() {
-    return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-Q8_0.gguf");
+    return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-NVFP4-cortecs");
 }
 
 static bool model_exists() {
@@ -52,7 +52,7 @@ static size_t device_free_mib() {
 // attention-cuBLAS handle to this engine's stream) → free everything.
 static void run_one_cycle(const char* path) {
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path, imp_test::model_format(path), &model), IMP_SUCCESS);
 
     ImpConfig config = imp_config_default();
     config.max_seq_len = 1024;
@@ -156,7 +156,8 @@ TEST(EngineRelaunchTest, SecondEngineOnSameModelHandleNeverIMAs) {
     SKIP_IF_NO_MODEL();
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(get_model_path(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(get_model_path(), imp_test::model_format(get_model_path()), &model),
+              IMP_SUCCESS);
 
     // Lifecycle diagnostic (#830): dump the model's key tensor pointers/qtypes
     // at each phase so a mutation by engine #1 (which engine #2 then reads as

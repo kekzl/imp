@@ -2,12 +2,12 @@
 layer: L1
 audience: operators
 verified: 2026-10-30
-commit: 4666a109
+commit: a4070e6a
 -->
 
 # Supported models
 
-The decode column is a per-model figure, not a gate; each comes from the sweep named below. The gated number CI defends (Qwen3-8B Q8_0 tg128) lives in [`PERF.md`](PERF.md); its row here links it instead of restating it.
+The decode column is a per-model figure, not a gate; each comes from the sweep named below. The gated number CI defends (Qwen3-8B NVFP4 tg128) lives in [`PERF.md`](PERF.md); its row here links it instead of restating it.
 
 [PROV: commit=2230e1c2 date=2026-07-12 hw=RTX5090 model=per-row quant=per-row
        cuda=13.3 path=per-row cmd=`imp-cli --bench --bench-pp 512 --bench-reps 5`
@@ -28,8 +28,8 @@ Model families with a known-working code path on `main`. Throughput numbers and 
 | [Qwen3-Reranker-0.6B](https://huggingface.co/ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF) | Q8_0 | 0.7 GB | reranking (`/v1/rerank`) | GGUF |
 | [Qwen3-4B](https://huggingface.co/unsloth/Qwen3-4B-GGUF) | Q8_0 | 4.0 GB | 236 | GGUF |
 | Qwen3-4B | MXFP4 | 2.8 GB | 124 | GGUF (imp-converted) |
-| [Qwen3-8B](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | Q8_0 | 8.2 GB | gate pin (tg128): [`PERF.md`](PERF.md) | GGUF |
-| [Qwen3-8B](https://huggingface.co/cortecs/Qwen3-8B-NVFP4) | NVFP4 | 5.0 GB | **277** | SafeTensors (cortecs) |
+| [Qwen3-8B](https://huggingface.co/unsloth/Qwen3-8B-GGUF) | Q8_0 | 8.2 GB | - | GGUF |
+| [Qwen3-8B](https://huggingface.co/cortecs/Qwen3-8B-NVFP4) | NVFP4 | 5.0 GB | gate pin (tg128): [`PERF.md`](PERF.md) | SafeTensors (cortecs) |
 | [Qwen3-14B](https://huggingface.co/unsloth/Qwen3-14B-GGUF) | Q6_K | 12 GB | **158** | GGUF |
 | [Qwen3-14B](https://huggingface.co/nvidia/Qwen3-14B-NVFP4) | NVFP4 | 10 GB | 168 | SafeTensors (nvidia) |
 | [Qwen3-32B](https://huggingface.co/unsloth/Qwen3-32B-GGUF) | Q4_K_M | 19 GB | - | GGUF |

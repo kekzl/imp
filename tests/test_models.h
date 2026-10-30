@@ -12,7 +12,16 @@
 #include <cstdlib>
 #include <string>
 
+#include "imp/types.h"
+
 namespace imp_test {
+
+// Load format from the path: a `.gguf` file is GGUF, anything else a SafeTensors directory
+// (the test models are SafeTensors since 2026-10-30; a fixed IMP_FORMAT_GGUF failed them all).
+inline ImpModelFormat model_format(const std::string& path) {
+    const bool gguf = path.size() >= 5 && path.compare(path.size() - 5, 5, ".gguf") == 0;
+    return gguf ? IMP_FORMAT_GGUF : IMP_FORMAT_SAFETENSORS;
+}
 
 // Primary model env var (IMP_TEST_MODEL); GGUF vs SafeTensors is sniffed from the path,
 // target model set per suite (e.g. Qwen3-8B Q8_0 for greedy-lock/prefix-cache gates).

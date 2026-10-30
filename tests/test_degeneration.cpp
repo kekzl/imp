@@ -15,7 +15,7 @@
 namespace {
 
 static const char* get_model_path() {
-    return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-Q8_0.gguf");
+    return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-NVFP4-cortecs");
 }
 
 // A path not ending in .gguf is a SafeTensors directory (NVFP4 hero models ship as dirs);

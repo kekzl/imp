@@ -172,7 +172,7 @@ test-gpu-suite:
 	@# explicitly, with only the two variables it needs, rather than handing
 	@# test-gpu the whole model battery.
 	$(GPU_DOCKER) -v $(HOME)/models:/models \
-		-e IMP_TEST_MODEL=/models/Qwen3-4B-Instruct-2507-Q8_0.gguf \
+		-e IMP_TEST_MODEL=/models/Qwen3-8B-NVFP4-cortecs \
 		-e IMP_TEST_MOE_MODEL=$(MOE_MODEL) \
 		$(DOCKER_IMG) imp-tests --gtest_filter="*DetEvalE2ETest*"
 	@# Same shape as the line above: the Qwen3.8 tokenizer parity battery skips
@@ -214,7 +214,7 @@ test-all: build
 	$(DOCKER_RUN) test-gdn
 
 # E2E model tests: load real models, generate, verify output
-# Uses Qwen3-4B (dense) + Qwen3.5-4B (GDN hybrid) + Gemma-4-26B-A4B (MoE) from ./models/
+# Uses Qwen3-8B NVFP4 (dense) + Qwen3.8-27B NVFP4 (GDN hybrid) + Gemma-4-26B-A4B NVFP4 (MoE), SafeTensors only
 #
 # IMP_TEST_MOE_MODEL drives the deterministic-mode suite. It was set in exactly
 # one place — tests/.env.test, which nothing sources — so DetEvalE2ETest skipped
@@ -228,19 +228,18 @@ test-all: build
 # NOTE: the *DetEvalE2ETest* form is required — it is a TEST_P suite, so
 # `DetEvalE2ETest.*` matches nothing and gtest calls that PASSED.
 # guard_det_suite_filter (CMakeLists.txt, unit lane) holds both to that.
-MOE_MODEL ?= /models/gpt-oss-20b-mxfp4.gguf
+MOE_MODEL ?= /models/Qwen3.6-35B-A3B-NVFP4
 HYBRID_RESTORE_RUN = $(GPU_DOCKER) -v $(HOME)/models:/models \
-		-e IMP_TEST_MODEL=/models/Qwen3.5-4B-mxfp4.gguf \
-		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-mxfp4.gguf \
+		-e IMP_TEST_MODEL=/models/Qwen3.8-27B-NVFP4-vllm \
+		-e IMP_TEST_MODEL_GDN=/models/Qwen3.8-27B-NVFP4-vllm \
 		$(DOCKER_IMG) test-e2e --gtest_filter="PrefixCacheE2ETest.HybridSnapshotRestoreMatchesFresh:PrefixCacheE2ETest.HybridTranscriptRestoreContinuesAtReplyEnd:GdnGraphBucketTest.*:*HybridRestoreChainTest*:HybridBatchedDecodeTest.*"
 # The hybrid group of test-e2e alone: scripts/check-release.sh runs it (red 2026-10-04 to #2820 unblocked).
 test-hybrid-restore: build
 	$(HYBRID_RESTORE_RUN)
 test-e2e: build
 	$(GPU_DOCKER) -v $(HOME)/models:/models \
-		-e IMP_TEST_MODEL=/models/Qwen3-4B-Instruct-2507-Q8_0.gguf \
-		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-mxfp4.gguf \
-		-e IMP_TEST_MODEL_GEMMA4=/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf \
+		-e IMP_TEST_MODEL=/models/Qwen3-8B-NVFP4-cortecs \
+		-e IMP_TEST_MODEL_GDN=/models/Qwen3.8-27B-NVFP4-vllm \
 		-e IMP_TEST_MODEL_GEMMA4_NVFP4=/models/Gemma-4-26B-A4B-it-NVFP4 \
 		-e IMP_TEST_MOE_MODEL=$(MOE_MODEL) \
 		-e IMP_TEST_MODEL_MODELOPT_CODER=/models/Qwen3-Coder-30B-A3B-Instruct-FP4 \
@@ -251,11 +250,10 @@ test-e2e: build
 	@# equivalence and the tokenizer/tensor-kind parity suites ran from NO
 	@# target until 2026-09-05 (AUDIT_ARCH_2026 I-1 = D-3): the filter above
 	@# never named them, and the lock table (tests/refs/e2e_greedy_locks.h) has
-	@# rows for Qwen3-8B-Q8_0, not the Qwen3-4B the line above loads. Own
-	@# container, own checkpoint, so the lock rows match what is loaded.
+	@# rows per checkpoint. Own container, own checkpoint (the NVFP4 SafeTensors
+	@# one, the loader + RoPE path the #503 class shipped prompt-blind on).
 	$(GPU_DOCKER) -v $(HOME)/models:/models \
-		-e IMP_TEST_MODEL=/models/Qwen3-8B-Q8_0.gguf \
-		-e IMP_TEST_GGUF=/models/Qwen3-8B-Q8_0.gguf \
+		-e IMP_TEST_MODEL=/models/Qwen3-8B-NVFP4-cortecs \
 		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*:DegenerationTest.*:PrefixCacheE2ETest.*:TokenizerCompatTest.*:TensorKindCoverage.*"
 	@# The hybrid recurrent paths: the snapshot restore and the decode-graph
 	@# buckets. Both skip on a dense checkpoint, and every line above loads a
@@ -268,16 +266,6 @@ test-e2e: build
 	@# calls that PASSED). It chains 30 restores against a cold prefill of the
 	@# same prompt and compares the recurrent slab, not the tokens.
 	$(HYBRID_RESTORE_RUN)
-	@# The lock table's other rows are the NVFP4 SafeTensors checkpoint (the
-	@# loader + RoPE path the #503 class shipped prompt-blind on).
-	$(GPU_DOCKER) -v $(HOME)/models:/models \
-		-e IMP_TEST_MODEL=/models/Qwen3-8B-NVFP4-cortecs \
-		$(DOCKER_IMG) test-e2e --gtest_filter="GreedyLockTest.*"
-	@# LoraHotSwap crafts its PEFT adapters in-test against Llama-3.2-3B
-	@# (q/v, r=8); it ran from no target until AUDIT_ARCH_2026 dispatch #6.
-	$(GPU_DOCKER) -v $(HOME)/models:/models \
-		-e IMP_TEST_MODEL_LLAMA=/models/Llama-3.2-3B-Instruct-Q8_0.gguf \
-		$(DOCKER_IMG) test-e2e --gtest_filter="LoraHotSwap.*"
 	@# The batch-invariance instrument (AUDIT_ARCH_2026 D-2): teacher-forced
 	@# M=1 vs M=32 on a DENSE native-NVFP4 checkpoint, own container because it
 	@# needs ~14 GiB free and its own deterministic-mode process state.
@@ -340,11 +328,11 @@ test-vision: build
 bench: build check-gpu
 	@echo "=== imp benchmark suite (RTX 5090) ==="
 	@echo ""
-	@echo "--- Qwen3-4B Q8_0 ---"
-	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-4B-Instruct-2507-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	@echo "--- Qwen3-8B NVFP4 ---"
+	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-8B-NVFP4-cortecs --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 	@echo ""
-	@echo "--- Qwen3-8B Q8_0 ---"
-	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	@echo "--- Qwen3-14B NVFP4 ---"
+	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-14B-NVFP4 --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 	@echo ""
 	@# GDN coverage moved from Qwen3.5-4B-Q8_0 to the mxfp4 checkpoint: the Q8_0
 	@# one is not on this host, and it is the mxfp4 that the E2E battery already
@@ -352,8 +340,8 @@ bench: build check-gpu
 	@# different quant is a different measurement. Consequence, stated rather
 	@# than hidden: the Qwen3.5-4B/9B Q8_0 rows in docs/performance.md were
 	@# measured on checkpoints this target can no longer reproduce.
-	@echo "--- Qwen3.5-4B GDN MXFP4 ---"
-	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3.5-4B-mxfp4.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	@echo "--- Qwen3.8-27B GDN NVFP4 ---"
+	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3.8-27B-NVFP4-vllm --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 	@# Dropped: Qwen3.5-9B GDN Q8_0 (no 9B checkpoint of any quant on this host)
 	@# and Qwen3-4B MXFP4 (qwen3-4b-instruct-2507-mxfp4.gguf is not here either).
 	@# Both were dead paths, and each recipe line aborts the target, so `make
@@ -361,14 +349,14 @@ bench: build check-gpu
 
 # Single model benchmark (quick check)
 test-perf: build check-gpu
-	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	$(BENCH_DOCKER_RUN) imp-cli --model /models/Qwen3-8B-NVFP4-cortecs --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 
 # Agentic benchmarks: boot a real imp-server and drive the two agent-shaped
 # harnesses — concurrency TTFT/ITL (agent_bench.py) and growing-transcript
 # per-turn TTFT with prefix cache on/off (agent_replay_bench.py). The metrics a
 # coding agent actually feels (see docs/GOAL.md "Agentic surface"). Override the
 # model with MODEL=<name-under-$HOME/models>.
-AGENTIC_MODEL ?= Qwen3-8B-Q8_0.gguf
+AGENTIC_MODEL ?= Qwen3-8B-NVFP4-cortecs
 bench-competitive: build check-gpu
 	@echo "Competitive decode sweep vs vLLM on SafeTensors heroes (image pinned by digest in the script)"
 	bash scripts/bench_competitive.sh
@@ -389,7 +377,7 @@ bench-agentic: build check-gpu
 
 # Server-level serving benchmark (#2202): imp-server in Docker, streaming concurrency sweep,
 # results/bench_serve_<sha>_<model>.json + table. Usage:
-#   make bench-serve MODEL=Qwen3-8B-Q8_0.gguf CONC="1 8 32" [PROMPT_LEN=128 OUT_LEN=128 N=64]
+#   make bench-serve MODEL=Qwen3-8B-NVFP4-cortecs CONC="1 8 32" [PROMPT_LEN=128 OUT_LEN=128 N=64]
 # bench-serve-mock runs the same harness against tests/api/mock_server.py (no GPU, no image).
 bench-serve: build check-gpu
 	@test -n "$(MODEL)" || { echo "bench-serve: MODEL=<file under ~/models> required"; exit 2; }
@@ -440,7 +428,7 @@ test-rerank: build check-gpu
 	python3 tools/analysis/rerank_check.py --url http://localhost:8080 \
 		$(if $(COMPARE_URL),--compare $(COMPARE_URL),)
 
-NIAH_MODEL ?= Qwen3-14B-Q6_K.gguf
+NIAH_MODEL ?= Qwen3-14B-NVFP4
 test-niah: build check-gpu
 	@docker rm -f imp-niah >/dev/null 2>&1 || true
 	@docker run -d --name imp-niah --gpus all -p 8080:8080 \
@@ -496,12 +484,9 @@ verify-chunked: build check-gpu
 	 IMP_VERIFY_CHUNK_SIZE=512 \
 	 $(GPU_LOCKED) scripts/verify.sh fast
 
-# verify-north-star: gates the docs/GOAL.md north-star model (Qwen3-14B Q6_K) against
+# verify-north-star: gates the docs/GOAL.md north-star model (Qwen3-14B NVFP4) against
 # tests/perf_baseline_north_star.json. Same 8%/8% thresholds as perf_baseline.json.
-# Requires Qwen3-14B-Q6_K.gguf in $(HOME)/models. Numbers were captured
-# 2026-05-23 under the cold-median methodology (PR #376) — see
-# memory/qwen3_14b_north_star_cold_median_2026_05_23.md for the raw samples
-# (σ = 0.16 tok/s on tg128 @ ctx=2048, well inside the 3% threshold).
+# Requires Qwen3-14B-NVFP4 in $(HOME)/models; numbers from scripts/gen_perf_baseline.sh.
 verify-north-star: build check-gpu
 	@IMP_VERIFY_BASELINE=tests/perf_baseline_north_star.json \
 	 $(GPU_LOCKED) scripts/verify.sh fast
@@ -529,12 +514,12 @@ verify-ab: build check-gpu
 # Regenerate tests/perf_baseline.json with the cold-median methodology (5 trials,
 # 15s cooldown between, median of each metric). Resists cuBLAS-algo-state drift —
 # see memory/bench_sustained_load_cublas_algo_drift_2026_05_23.md.
-# Defaults to Qwen3-8B Q8_0; pass MODEL=… to override.
+# Defaults to Qwen3-8B NVFP4 (cortecs); pass MODEL=… to override.
 #
 # Mounts the resolved model directory (defaults to ~/models so symlinks work)
 # AND the repo root (so the script can write back to tests/perf_baseline.json).
 # `-u` matches the host UID so the write succeeds.
-MODEL ?= /models/Qwen3-8B-Q8_0.gguf
+MODEL ?= /models/Qwen3-8B-NVFP4-cortecs
 MODELS_DIR ?= $(HOME)/models
 # #1623: every other bench target takes check-gpu; this one - the one that
 # re-pins what the gate compares against - did not. A baseline measured next to

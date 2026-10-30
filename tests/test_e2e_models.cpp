@@ -38,7 +38,7 @@ protected:
             GTEST_SKIP() << "Set IMP_TEST_MODEL to run";
         ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path_, imp_test::kEnvModel));
 
-        ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
+        ASSERT_EQ(imp_model_load(path_, imp_test::model_format(path_), &model_), IMP_SUCCESS);
         ASSERT_NE(model_, nullptr);
 
         ImpConfig cfg = imp_config_default();
@@ -174,7 +174,7 @@ protected:
             GTEST_SKIP() << "Set IMP_TEST_MODEL_GDN to run";
         ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path_, imp_test::kEnvModelGdn));
 
-        ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
+        ASSERT_EQ(imp_model_load(path_, imp_test::model_format(path_), &model_), IMP_SUCCESS);
         ASSERT_NE(model_, nullptr);
 
         ImpConfig cfg = imp_config_default();
@@ -288,7 +288,7 @@ protected:
             GTEST_SKIP() << "Set IMP_TEST_MODEL_GEMMA4 to run";
         ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path_, imp_test::kEnvModelGemma4));
 
-        ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
+        ASSERT_EQ(imp_model_load(path_, imp_test::model_format(path_), &model_), IMP_SUCCESS);
         ASSERT_NE(model_, nullptr);
 
         ImpConfig cfg = imp_config_default();
@@ -499,7 +499,7 @@ protected:
             GTEST_SKIP() << "Set IMP_TEST_MODEL_GEMMA4 to run";
         ASSERT_NO_FATAL_FAILURE(imp_test::require_readable(path_, imp_test::kEnvModelGemma4));
 
-        ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
+        ASSERT_EQ(imp_model_load(path_, imp_test::model_format(path_), &model_), IMP_SUCCESS);
         ASSERT_NE(model_, nullptr);
 
         ImpConfig cfg = imp_config_default();
@@ -586,7 +586,7 @@ TEST(DecodeGraphCtxGrowthTest, LongPromptAfterShortRequestStaysAlive) {
 
     ImpModel model = nullptr;
     ImpContext ctx = nullptr;
-    ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(path, imp_test::model_format(path), &model), IMP_SUCCESS);
     ImpConfig cfg = imp_config_default();
     cfg.max_seq_len = 4096;
     cfg.max_batch_size = 1;

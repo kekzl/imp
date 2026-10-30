@@ -2,7 +2,7 @@
 // request finishes internal_error (500), faulted() flips /health to engine_faulted, later
 // submits refuse immediately instead of parking on an undrained queue.
 // Death test: child is a fresh process with its own CUDA context, so the poisoned context
-// dies with it. Requires a real model: IMP_TEST_MODEL or default /models/Qwen3-8B-Q8_0.gguf.
+// dies with it. Requires a real model: IMP_TEST_MODEL or default /models/Qwen3-8B-NVFP4-cortecs.
 #include <gtest/gtest.h>
 #include "imp/imp.h"
 #include "api/imp_internal.h"
@@ -24,7 +24,7 @@ namespace {
 __global__ void write_through_bad_pointer(int* p) { p[threadIdx.x] = 1; }
 
 const char* model_path() {
-    return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-Q8_0.gguf");
+    return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-NVFP4-cortecs");
 }
 
 bool model_exists() {
@@ -63,7 +63,7 @@ bool pop_until_last(ServerRequest& sr, TokenEvent& ev, int ms) {
 
 [[noreturn]] void run_faulted_engine_child() {
     ImpModel model = nullptr;
-    if (imp_model_load(model_path(), IMP_FORMAT_GGUF, &model) != IMP_SUCCESS)
+    if (imp_model_load(model_path(), imp_test::model_format(model_path()), &model) != IMP_SUCCESS)
         die(3, "model load failed");
     ImpConfig config = imp_config_default();
     config.max_seq_len = 1024;

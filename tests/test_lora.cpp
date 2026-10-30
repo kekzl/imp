@@ -131,7 +131,7 @@ TEST(LoraHotSwap, ZeroAdapterIdentity_EffectAdapterDiffers_SwapBack) {
     setenv("IMP_DETERMINISTIC", "1", 1);
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(model_path(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(model_path(), imp_test::model_format(model_path()), &model), IMP_SUCCESS);
     ImpConfig config = imp_config_default();
     config.max_seq_len = 512;
     config.max_batch_size = 1;
@@ -225,7 +225,7 @@ TEST(LoraHotSwap, AdapterShapesAreHeldAgainstTheModel) {
     if (!std::filesystem::exists(model_path()))
         GTEST_SKIP() << "model not present: " << model_path();
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(model_path(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(model_path(), imp_test::model_format(model_path()), &model), IMP_SUCCESS);
     ImpConfig config = imp_config_default();
     config.max_seq_len = 256;
     config.max_batch_size = 1;
@@ -293,7 +293,7 @@ TEST(LoraHotSwap, AdapterIsAPrefixCacheKeyAndAnAdmissionBarrier) {
     if (!std::filesystem::exists(model_path()))
         GTEST_SKIP() << "model not present: " << model_path();
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(model_path(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(model_path(), imp_test::model_format(model_path()), &model), IMP_SUCCESS);
     ImpConfig config = imp_config_default();
     config.max_seq_len = 1024;
     config.max_batch_size = 2;

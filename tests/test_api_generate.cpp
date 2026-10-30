@@ -1,6 +1,6 @@
 // Parity: imp_generate is a thin wrapper around imp_prefill_with_params + imp_decode_step
 // (post Phase 5 Track B refactor). Pins wrapper output against the manual prefill+decode loop.
-// Requires a real model: IMP_TEST_MODEL or default /models/Qwen3-8B-Q8_0.gguf.
+// Requires a real model: IMP_TEST_MODEL or default /models/Qwen3-8B-NVFP4-cortecs.
 
 #include <gtest/gtest.h>
 #include "imp/imp.h"
@@ -14,7 +14,7 @@
 namespace {
 
 static const char* get_model_path() {
-    return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-Q8_0.gguf");
+    return imp_test::env_cstr_or(imp_test::kEnvModel, "/models/Qwen3-8B-NVFP4-cortecs");
 }
 
 static bool model_exists() {
@@ -42,7 +42,8 @@ class ApiGenerateParityTest : public ::testing::Test {
     void SetUp() override {
         SKIP_IF_NO_MODEL();
 
-        ASSERT_EQ(imp_model_load(get_model_path(), IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
+        ASSERT_EQ(imp_model_load(get_model_path(), imp_test::model_format(get_model_path()), &model_),
+                  IMP_SUCCESS);
 
         ImpConfig config = imp_config_default();
         config.max_seq_len = 2048;
@@ -174,7 +175,8 @@ TEST(AdmissionCapacityTest, PromptLargerThanTheKvPoolIsTypedNotCancelled) {
     SKIP_IF_NO_MODEL();
 
     ImpModel model = nullptr;
-    ASSERT_EQ(imp_model_load(get_model_path(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+    ASSERT_EQ(imp_model_load(get_model_path(), imp_test::model_format(get_model_path()), &model),
+              IMP_SUCCESS);
 
     ImpConfig config = imp_config_default();
     config.max_seq_len = 4096;
