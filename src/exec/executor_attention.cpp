@@ -677,7 +677,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state, cudaSt
         Tensor fp8_ao(qscratch_.fp8_act, QType::FP8_E4M3, ao.ndim, ao.shape, true);
         quantize_fp16_to_fp8_e4m3(ao, fp8_ao, qscratch_.d_act_scale, stream, qscratch_.d_fp8_block_maxes,
                                   qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
-        gemm_cublaslt(fp8_ao, fp8_wo, h, 1.0f, 1.0f, qscratch_.d_act_scale, wo_h.payload.fp8.d_scale, stream);
+        gemm_fp8x8_(fp8_ao, fp8_wo, h, 1.0f, qscratch_.d_act_scale, wo_h.payload.fp8.d_scale, stream);
     } else if (will_fuse_o_beta1_nvfp4) {
         // Batched-decode NVFP4: hidden += attn_out @ wo^T via the smallm
         // accumulate path (falls through to a beta-honouring handler if the

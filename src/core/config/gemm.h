@@ -127,6 +127,9 @@ struct GEMM {
     // Own MXFP8 GEMM (nvfp4_gemm_tile.cu, MX8 configs) before CUTLASS MXFP8 for the GDN projection
     // prefill copies; bit-equal on plain weights, column scale fused into the epilogue (FP8 row view).
     bool mxfp8_tile = true;
+    // Own per-tensor FP8 GEMM (nvfp4_gemm_tile.cu, F8 configs) before cuBLASLt FP8 x FP8 from this M (0 off).
+    // Qwen3-8B-FP8 pp4096 e2e +0.6 %, pp512 -18 % (cuBLASLt below 2048). Refuses K % 64 != 0.
+    int fp8_tile_min_m = 2048;
     // Which small-M implementation the gate above dispatches: 1 = W4A16
     // dequant+HMMA kernel (kept for A/B), 2 = native mxf4nvf4 producer/consumer
     // pipeline (nvfp4_gemm_smallm_v2.cu).

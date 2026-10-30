@@ -262,8 +262,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 Tensor fp8_no(qscratch_.fp8_act, QType::FP8_E4M3, no.ndim, no.shape, true);
                 Tensor fp8_tg = make_fp8_tensor(hwg);
                 Tensor fp8_tu = make_fp8_tensor(hwu);
-                gemm_cublaslt(fp8_no, fp8_tg, go, 1.0f, 0.0f, fp8_a_scale, hwg->payload.fp8.d_scale, stream);
-                gemm_cublaslt(fp8_no, fp8_tu, uo, 1.0f, 0.0f, fp8_a_scale, hwu->payload.fp8.d_scale, stream);
+                gemm_fp8x8_(fp8_no, fp8_tg, go, 0.0f, fp8_a_scale, hwg->payload.fp8.d_scale, stream);
+                gemm_fp8x8_(fp8_no, fp8_tu, uo, 0.0f, fp8_a_scale, hwu->payload.fp8.d_scale, stream);
             } else {
                 // Read fused gate+up via WeightRegistry handle — the wcache_
                 // map is no longer the lookup mechanism (it remains the
@@ -504,7 +504,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 Tensor fp8_so(qscratch_.fp8_act, QType::FP8_E4M3, so.ndim, so.shape, true);
                 int64_t wshape[2] = {hwd->shape[0], hwd->shape[1]};
                 Tensor fp8_wd(hwd->payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
-                gemm_cublaslt(fp8_so, fp8_wd, h, 1.0f, 1.0f, down_a_scale, hwd->payload.fp8.d_scale, stream);
+                gemm_fp8x8_(fp8_so, fp8_wd, h, 1.0f, down_a_scale, hwd->payload.fp8.d_scale, stream);
             } else if (will_fuse_down_beta1_nvfp4) {
                 // Batched-decode NVFP4: hidden += swiglu_out @ w_down^T via
                 // the smallm accumulate path.

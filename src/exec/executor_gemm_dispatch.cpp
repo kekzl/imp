@@ -852,7 +852,7 @@ void GraphExecutor::gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry
     if (input.qtype == QType::F16 && e.d_scale) {
         if (const float* a_scale = quantize_act_fp8_(h, input, ctx.stream)) {
             Tensor fp8_in(qscratch_.fp8_act, QType::FP8_E4M3, input.ndim, input.shape, true);
-            gemm_cublaslt(fp8_in, fp8_w, output, 1.0f, ctx.beta, a_scale, e.d_scale, ctx.stream);
+            gemm_fp8x8_(fp8_in, fp8_w, output, ctx.beta, a_scale, e.d_scale, ctx.stream);
             return;
         }
     }
@@ -871,6 +871,28 @@ void GraphExecutor::gemm_fp8_prefill_(const WeightHandle& h, const FP8CacheEntry
         IMP_LOG_ERROR("native FP8 prefill: no activation or dequant scratch (N=%ld K=%ld)",
                       static_cast<long>(wshape[0]), static_cast<long>(wshape[1]));
     gemm_cublaslt(input, fp8_w, output, 1.0f, ctx.beta, nullptr, e.d_scale, ctx.stream);
+}
+
+void GraphExecutor::gemm_fp8x8_(const Tensor& a8, const Tensor& w8, Tensor& out, float beta,
+                                const float* a_scale, const float* w_scale, cudaStream_t stream) {
+    const int M = static_cast<int>(a8.numel() / a8.shape[a8.ndim - 1]);
+    const int K = static_cast<int>(a8.shape[a8.ndim - 1]);
+    const int N = static_cast<int>(w8.shape[0]);
+    // gemm.fp8_tile_min_m: own tile from M 2048 (Qwen3-8B-FP8 pp4096 +0.6 %); below, cuBLASLt (pp512 own -18
+    // %).
+    const int min_m = process_diag_fp8_tile_min_m();
+    if (min_m > 0 && M >= min_m && out.qtype == QType::F16 && a8.is_contiguous() && out.is_contiguous() &&
+        a_scale && w_scale &&
+        gemm_fp8_tile(a8.data, w8.data, a_scale, w_scale, beta, out.data, M, N, K, stream)) {
+        static bool logged = false;  // activity proof, once
+        if (!logged) {
+            logged = true;
+            IMP_LOG_INFO("gemm.fp8_tile_min_m: own FP8 prefill GEMM ACTIVE (M=%d N=%d K=%d beta=%.0f)", M, N,
+                         K, beta);
+        }
+        return;
+    }
+    gemm_cublaslt(a8, w8, out, 1.0f, beta, a_scale, w_scale, stream);
 }
 
 const float* GraphExecutor::quantize_act_fp8_(const WeightHandle& hw, const Tensor& input,

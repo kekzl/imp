@@ -29,8 +29,35 @@ Table: `library_share.py <out> 4`; CUTLASS family (dense NVFP4 / grouped / MXFP8
 
 | # | call site | share | state | next step |
 |---|---|---:|---|---|
-| 1 | dense FP8 prefill, cuBLASLt `qqhsh` | 69.2-77.0 % | never inventoried before | own FP8 tile (`kind::f8f6f4`, per-tensor scales in the epilogue) on the TMA tile skeleton, A/B vs cuBLASLt in situ |
+| 1 | dense FP8 prefill, cuBLASLt `qqhsh` | 69.2-77.0 % | step 12 below: own from M 2048, cuBLASLt below | M < 2048: per-SM efficiency of the tile at < 1 wave (same gap as row 2) |
 | 2 | dense NVFP4 M < 2048, CUTLASS | 55.5-68.9 % dense, 5.8-17.5 % MoE | own tile +1-2 % slower in situ; 128x64, hybrid stream-K, 4-MMA warps refuted | per-SM MMA efficiency only |
 | 3 | FP16 GEMMs of fp16-tier tensors, cuBLASLt | 8.8-10.0 % Nemotron, <= 2.1 % else | own FP16 tile covers K >= N only | N > K and split-K shapes |
 | 4 | Gemma-4 NVFP4 at M 2048, cuBLASLt block-scaled | 1.8 % pp4096 | own tile declines | find the decline, then the CUTLASS / Lt fallback goes |
 | 5 | CUTLASS grouped 3.x, CUTLASS MXFP8 | 0 launches | refusal fallbacks | cover the refusal shapes in the own kernels, then delete both TUs |
+
+## Step 12: own per-tensor FP8 GEMM (`src/quant/nvfp4_gemm_tile.cu`, F8 configs)
+
+`Fmt::kF8`: MXFP8 byte geometry without SF slabs, `*a_scale * *w_scale` (device scalars) and `beta` in the epilogue; beta != 0 stores per fragment in fp32 (one rounding). Call sites: `gemm_fp8_prefill_`, attention q/k/v and o (beta 1), FFN gate/up and down (beta 1); LM head stays cuBLASLt. `gemm.fp8_tile_min_m` (default 2048, 0 off).
+
+| flushed bench `Fp8GemmTileBench.DISABLED_VsCublasLt`, us | cuBLASLt | plain `kind::f8f6f4` | block-scaled, UE8M0 1.0 |
+|---|---:|---:|---:|
+| 2048 x 4096 x 4096 | 136.0 | 162.6 | 130.4 |
+| 2048 x 1024 x 4096 | 50.2 | 48.0 | 36.1 |
+| 2048 x 12288 x 4096 | 323.7 | 486.7 | 318.8 |
+| 2048 x 4096 x 12288 | 359.3 | 461.6 | 337.0 |
+| 2048 x 24576 x 4096 | 621.9 | 980.3 | 722.0 |
+| 512 x 4096 x 4096 | 32.1 | 50.4 | 41.4 |
+| 512 x 12288 x 4096 | 101.6 | 132.4 | 114.0 |
+
+- The plain `kind::f8f6f4` f32-accumulate MMA caps at 424-447 TFLOPS; the block-scaled `kind::mxf8f6f4` with constant UE8M0 1.0 reaches 647 (same numerics, no SF loads).
+- Correctness vs cuBLASLt (`Fp8GemmTileTest`, 7 shapes x 5 variants, beta 0 and 1): max|diff| <= 0.0078 at max|ref| 15.4 (1 fp16 ulp); a mutant that drops beta on one column fails all 7 beta-1 cases.
+
+| Qwen3-8B-FP8 in situ (`prefill_kernel_ab.sh`, 3 pairs) | cuBLASLt | own |
+|---|---:|---:|
+| pp512 e2e, own at every M | 30481-31167 tok/s | 25544-25709 tok/s |
+| pp4096 e2e, own from M 2048 | 26548-26651 tok/s | 26759-26802 tok/s |
+| pp4096 GEMM kernel sum | 936.2-940.3 ms | 923.2-925.9 ms |
+| PPL 45k, `runtime.deterministic` | 10.7654 | 10.7691 |
+
+- pp4096 per shape (M 2048 chunks): k/v 62.2 -> 38.4 ms, gate/up 448.1 -> 430.4 ms, q/o/down 416.1 -> 445.5 ms.
+- Stream-K workspace (10.6 MiB) REFUTED in situ: pp512 GEMM sum 163 -> 155 ms (still behind 131), pp4096 932 -> 963 ms; not wired.

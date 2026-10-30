@@ -12,10 +12,14 @@ namespace imp::nvfp4_tile {
 
 constexpr int kBM = 128;
 constexpr int kMmaThreads = 256;
+// UE8M0 1.0: per-tensor FP8 runs the block-scaled MMA; plain kind::f8f6f4 f32-acc reached 424 vs 647 TFLOPS
+// (2048x12288x4096, flushed bench).
+constexpr uint32_t kUe8m0One = 0x7F7F7F7Fu;
 
 // Operand format: NVFP4 (E2M1, UE4M3 per 16 K, atom = 64 K), MXFP4 (E2M1, UE8M0 per 32 K, atom = 128 K),
-// MXFP8 (E4M3 bytes, UE8M0 per 32 K, atom = 128 K).
-enum class Fmt { kNv4, kMx4, kMx8 };
+// MXFP8 (E4M3 bytes, UE8M0 per 32 K, atom = 128 K), FP8 (E4M3 bytes, per-tensor scales in the epilogue, no
+// SF).
+enum class Fmt { kNv4, kMx4, kMx8, kF8 };
 
 template <int BN, int BK, int STAGES, bool TMA, bool PW = false, bool SK = false, Fmt F = Fmt::kNv4>
 struct Cfg {
@@ -25,8 +29,10 @@ struct Cfg {
     // shared.
     static constexpr bool kMx8 = F == Fmt::kMx8;
     static constexpr bool kMx4 = F == Fmt::kMx4;
-    static constexpr int kRB = kMx8 ? BK : BK / 2;
-    static_assert(!kMx8 || BK == 64 || BK % 128 == 0, "MXFP8 stage = half or whole SfAtoms");
+    static constexpr bool kF8 = F == Fmt::kF8;  // byte geometry of MXFP8, no SF slabs
+    static constexpr bool kB8 = kMx8 || kF8;    // one byte per element
+    static constexpr int kRB = kB8 ? BK : BK / 2;
+    static_assert(!kB8 || BK == 64 || BK % 128 == 0, "8-bit stage = half or whole SfAtoms");
     static_assert(!kMx4 || BK % 128 == 0, "MXFP4 stage = whole SfAtoms");
     static constexpr int kStages = STAGES;
     static constexpr bool kTma = TMA;
@@ -43,13 +49,17 @@ struct Cfg {
     // the 8 rows of an ldmatrix on 32 distinct banks.
     static constexpr int kRS = TMA ? kRB : kRB + 16;
     // SfAtoms per 128-row slab per stage; an MXFP8 BK=64 stage loads its whole atom (two stages share it).
-    static constexpr int kSfBytes = kMx8 ? ((BK + 127) / 128) * 512 : (BK / (kMx4 ? 128 : 64)) * 512;
+    static constexpr int kSfBytes = kF8    ? 0
+                                    : kMx8 ? ((BK + 127) / 128) * 512
+                                           : (BK / (kMx4 ? 128 : 64)) * 512;
     // Operand geometry per K: row bytes, SF bytes per 128-row slab, SF offset and first K group of stage kt.
     static constexpr size_t row_bytes(int K) {
-        return kMx8 ? static_cast<size_t>(K) : static_cast<size_t>(K) / 2;
+        return kB8 ? static_cast<size_t>(K) : static_cast<size_t>(K) / 2;
     }
     static constexpr size_t sf_slab(int K) {
-        return kMx8 || kMx4 ? static_cast<size_t>((K + 127) / 128) * 512 : static_cast<size_t>(K / 64) * 512;
+        return kF8            ? 0
+               : kMx8 || kMx4 ? static_cast<size_t>((K + 127) / 128) * 512
+                              : static_cast<size_t>(K / 64) * 512;
     }
     __host__ __device__ static constexpr size_t sf_k(int kt) {
         return kMx8 ? static_cast<size_t>((kt * BK) / 128) * 512 : static_cast<size_t>(kt) * kSfBytes;
@@ -117,12 +127,13 @@ __device__ __forceinline__ void mma_stage(float (&acc)[4][C::kNF][4], uint32_t s
 #pragma unroll
     for (int c = 0; c < C::kRB / 32; ++c) {
         uint32_t af[4][4];
-        uint32_t sfa[4];
+        uint32_t sfa[4] = {};
 #pragma unroll
         for (int mf = 0; mf < 4; ++mf) {
             const int r = wm + mf * 16 + lr + (lm & 1) * 8;
             ldsm_x4(af[mf], sa_s + (r * C::kRS) + (C::chunk(r, (c * 2) + (lm >> 1)) * 16));
-            sfa[mf] = sf_word<C>(sst + C::kSfA, wm + mf * 16 + sfa_lane, c, g0);
+            if constexpr (!C::kF8)  // FP8: no SF slabs in the stage
+                sfa[mf] = sf_word<C>(sst + C::kSfA, wm + mf * 16 + sfa_lane, c, g0);
         }
 #pragma unroll
         for (int np = 0; np < C::kNF / 2; ++np) {
@@ -132,10 +143,13 @@ __device__ __forceinline__ void mma_stage(float (&acc)[4][C::kNF][4], uint32_t s
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
                 const int nf = np * 2 + h;
-                const uint32_t sfb = sf_word<C>(sst + C::kSfW, wn + nf * 8 + T1, c, g0);
+                const uint32_t sfb = C::kF8 ? 0u : sf_word<C>(sst + C::kSfW, wn + nf * 8 + T1, c, g0);
 #pragma unroll
                 for (int mf = 0; mf < 4; ++mf) {
-                    if constexpr (C::kMx8)
+                    if constexpr (C::kF8)
+                        mma_mxf8(acc[mf][nf], af[mf], h == 0 ? bf[0] : bf[2], h == 0 ? bf[1] : bf[3],
+                                 kUe8m0One, kUe8m0One);
+                    else if constexpr (C::kMx8)
                         mma_mxf8(acc[mf][nf], af[mf], h == 0 ? bf[0] : bf[2], h == 0 ? bf[1] : bf[3], sfa[mf],
                                  sfb);
                     else if constexpr (C::kMx4)
