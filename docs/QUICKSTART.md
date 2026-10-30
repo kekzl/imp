@@ -1,8 +1,8 @@
 <!--
 layer: L1
 audience: operators
-verified: 2026-10-27
-commit: 6f1395b8
+verified: 2026-10-30
+commit: a4070e6a
 -->
 
 # Quickstart
@@ -180,7 +180,7 @@ ANTHROPIC_BASE_URL=http://localhost:8080 ANTHROPIC_API_KEY=dummy your-agent
 
 ## Qwen3.8-Flash-Next
 
-Commands: [README](../README.md#models-larger-than-vram). Weights: 25 files from `nvidia/Qwen3.8-Flash-Next-NVFP4`; imp loads 9 shards and skips `model-00010-of-00010.safetensors` and `model-fp8-mtp-ple.safetensors` (20 + 3201 MTP/vision tensors imp does not use; the 333-tensor vision tower sits in shard 9 and loads).
+Commands: [`BIG_MODELS.md`](BIG_MODELS.md#run-it). Weights: 25 files from `nvidia/Qwen3.8-Flash-Next-NVFP4`; imp loads 9 shards and skips `model-00010-of-00010.safetensors` and `model-fp8-mtp-ple.safetensors` (20 + 3201 MTP/vision tensors imp does not use; the 333-tensor vision tower sits in shard 9 and loads).
 
 | Item | Value |
 | --- | --- |
@@ -201,7 +201,9 @@ Commands: [README](../README.md#models-larger-than-vram). Weights: 25 files from
 
 | | |
 |---|---|
+| run it without Docker (release tarball, CUDA libraries bundled) | [`DEPLOYMENT.md`](DEPLOYMENT.md#without-docker) |
 | put it behind a proxy, with auth | [`DEPLOYMENT.md`](DEPLOYMENT.md) |
+| post your card's numbers | `scripts/bench-community.sh` prints a block for [Discussions](https://github.com/kekzl/imp/discussions) |
 | which API fields actually work | [`API.md`](API.md) |
 | it did something odd | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) |
 | all CLI flags and `imp.conf` keys | [`CONFIG.md`](CONFIG.md) |
