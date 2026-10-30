@@ -173,13 +173,10 @@ bool GraphExecutor::try_gdn_input_fused_m1_(const TransformerLayer& ly, const Te
     return ok;
 }
 
-GraphExecutor::GdnInputDone GraphExecutor::gdn_unpacked_input_(const TransformerLayer& ly, const Tensor& h,
-                                                               Tensor& no, Tensor& proj, int inner,
-                                                               int n_heads, float eps,
-                                                               const NvFP4NormFoldIn& in_fold,
-                                                               const GemmContext& ctx, cudaStream_t stream) {
+int GraphExecutor::gdn_unpacked_input_(const TransformerLayer& ly, const Tensor& h, Tensor& no, Tensor& proj,
+                                       int inner, int n_heads, float eps, const NvFP4NormFoldIn& in_fold,
+                                       const GemmContext& ctx, cudaStream_t stream) {
     const int n = static_cast<int>(no.shape[0]);
-    GdnInputDone d;
     // Batched-decode sibling pair: in-projection and gate both consume `no`,
     // and the gate output buffer (ssm_z_buf_) is untouched until
     // RMSNormGated after the scan, so computing the gate here is a pure
@@ -188,17 +185,20 @@ GraphExecutor::GdnInputDone GraphExecutor::gdn_unpacked_input_(const Transformer
     Tensor gate_early(ssm_z_buf_.data, compute_dtype_, 2, gate_shape_early, true);
     // M=1 (gdn.m1_fused): in_proj, gate, alpha and beta in one GEMV
     // launch; alpha/beta land in the 4-call layout of step 4 of run_gdn.
-    d.m1_fused = try_gdn_input_fused_m1_(ly, no, proj, gate_early, n_heads, stream, in_fold);
-    if (!d.m1_fused && in_fold.ssq)
+    if (try_gdn_input_fused_m1_(ly, no, proj, gate_early, n_heads, stream, in_fold))
+        return kGdnM1Fused | kGdnGateDone;
+    if (in_fold.ssq)
         rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
     // M=1 GGUF (gdn.m1_dp4a): the dp4a-routed projections of mixed qtypes in one launch.
-    if (!d.m1_fused)
-        d.dp4a = try_gdn_input_dp4a_m1_(ly, no, proj, gate_early, n_heads, ctx, stream);
-    bool in_done = d.m1_fused || (d.dp4a & kGdnDp4aIn) != 0;
-    d.gate = d.m1_fused || (d.dp4a & kGdnDp4aGate) != 0;
-    if (!in_done && !d.gate &&
-        try_smallm_pair_dispatch_(ly.ssm_in_id, ly.gdn_gate_id, no, proj, gate_early, ctx))
-        in_done = d.gate = true;
+    int d = try_gdn_input_dp4a_m1_(ly, no, proj, gate_early, n_heads, ctx, stream);
+    bool in_done = (d & kGdnDp4aIn) != 0;
+    if ((d & kGdnDp4aGate) != 0)
+        d |= kGdnGateDone;
+    if (!in_done && (d & kGdnGateDone) == 0 &&
+        try_smallm_pair_dispatch_(ly.ssm_in_id, ly.gdn_gate_id, no, proj, gate_early, ctx)) {
+        in_done = true;
+        d |= kGdnGateDone;
+    }
     if (!in_done)
         gemm_via_handle_(ly.ssm_in_id, no, proj, ctx);
     return d;
@@ -260,12 +260,45 @@ int GraphExecutor::try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tens
                           stream);
     if (!gemv_dp4a_multi(segs, n, q8, qscratch_.d8_buf, static_cast<int>(K), stream))
         throw std::runtime_error("try_gdn_input_dp4a_m1_: gemv_dp4a_multi refused vetted segments");
-    if (!gdn_m1_dp4a_logged_) {
-        gdn_m1_dp4a_logged_ = true;
+    static bool logged = false;  // activity proof, once
+    if (!logged) {
+        logged = true;
         IMP_LOG_INFO("gdn M=1 dp4a multi input GEMV ACTIVE (K=%lld, %d weights, mask %d)", (long long)K, n,
                      done);
     }
     return done;
+}
+
+bool GraphExecutor::dp4a_multi_m1_(const TensorID* ids, Tensor* const* outs, int n, const Tensor& input,
+                                   const GemmContext& ctx, cudaStream_t stream) {
+    if (!dispatch_policy().gdn.m1_dp4a || cur_spec_verify_ || calib_ || lora_ != nullptr || n < 2 ||
+        n > kDp4aMultiMaxSegs || ctx.gemm_no_dp4a_gemv || ctx.force_mmvq || input.shape[0] != 1 ||
+        input.qtype != QType::F16 || qscratch_.q8_1_buf == nullptr || qscratch_.d8_buf == nullptr)
+        return false;
+    const int64_t K = input.shape[1];
+    if (K % 32 != 0 || K / 32 > qscratch_.q8_1_max_blocks)
+        return false;
+    Dp4aGemvSeg segs[kDp4aMultiMaxSegs];
+    for (int i = 0; i < n; ++i) {
+        QType qt = QType::NONE;
+        const void* w = outs[i]->qtype == QType::F16 ? dp4a_m1_source_(ids[i], outs[i]->shape[1], K, qt)
+                                                     : nullptr;
+        if (w == nullptr)
+            return false;
+        segs[i] = {w, qt, static_cast<half*>(outs[i]->data), static_cast<int>(outs[i]->shape[1])};
+    }
+    auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+    quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8, qscratch_.d8_buf, static_cast<int>(K),
+                          stream);
+    if (!gemv_dp4a_multi(segs, n, q8, qscratch_.d8_buf, static_cast<int>(K), stream))
+        throw std::runtime_error("dp4a_multi_m1_: gemv_dp4a_multi refused vetted segments");
+    static bool logged = false;  // activity proof, once
+    if (!logged) {
+        logged = true;
+        IMP_LOG_INFO("M=1 dp4a multi GEMV ACTIVE (K=%lld, %d weights, rows %d + %d)", (long long)K, n,
+                     segs[0].rows, segs[1].rows);
+    }
+    return true;
 }
 
 bool GraphExecutor::gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h) const {

@@ -9,6 +9,7 @@
 #include "compute/layernorm.h"
 #include "compute/gemm.h"
 #include "compute/gemm_q6k.h"
+#include "compute/gemv_dp4a_multi.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/activation.h"
 #include "compute/ffn_sparsity_mask.h"
@@ -34,6 +35,28 @@ namespace imp {
 // Down-projection context: the act-quant hint when the SwiGLU kernel already quantized `so`.
 static GemmContext prequant_hint(const GemmContext& ctx, bool prequant, const Tensor& so, int n) {
     return prequant ? ctx.with_act_quant_hint(so.data, n, static_cast<int>(so.shape[1])) : ctx;
+}
+
+// Mixed-type gate/up (UD GGUF) on the one Q8_1 input: one gemv_dp4a_multi launch instead of two GEMVs
+// (gdn.m1_dp4a). false = a type it does not serve, nothing launched.
+static bool ffn_gate_up_dp4a_multi(bool enabled, const Tensor& w_gate, const Tensor& w_up,
+                                   const block_q8_1* q8, const float* d8, Tensor& go, Tensor& uo, int d,
+                                   cudaStream_t stream) {
+    if (!enabled || !gemv_dp4a_multi_supports(w_gate.qtype, d) || !gemv_dp4a_multi_supports(w_up.qtype, d))
+        return false;
+    const Dp4aGemvSeg segs[2] = {{w_gate.data, w_gate.qtype, static_cast<half*>(go.data),
+                                  static_cast<int>(w_gate.shape[0])},
+                                 {w_up.data, w_up.qtype, static_cast<half*>(uo.data),
+                                  static_cast<int>(w_up.shape[0])}};
+    if (!gemv_dp4a_multi(segs, 2, q8, d8, d, stream))
+        return false;
+    static bool logged = false;  // activity proof, once
+    if (!logged) {
+        logged = true;
+        IMP_LOG_INFO("FFN M=1 mixed-type gate|up dp4a multi GEMV ACTIVE (%s + %s, K=%d)",
+                     qtype_name(w_gate.qtype), qtype_name(w_up.qtype), d);
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +235,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 gemv_gate_up_fused(ly.w_gate.data, ly.w_up.data, q8, qscratch_.d8_buf,
                                    static_cast<half*>(go.data), static_cast<half*>(uo.data), ffn_rows, d,
                                    ly.w_gate.qtype, stream);
-            } else {
+            } else if (!ffn_gate_up_dp4a_multi(dispatch_policy().gdn.m1_dp4a, ly.w_gate, ly.w_up, q8,
+                                               qscratch_.d8_buf, go, uo, d, stream)) {
                 dispatch_dp4a_gemv(ly.w_gate.qtype, ly.w_gate.data, q8, qscratch_.d8_buf,
                                    static_cast<half*>(go.data), ffn_rows, d, stream);
                 dispatch_dp4a_gemv(ly.w_up.qtype, ly.w_up.data, q8, qscratch_.d8_buf,

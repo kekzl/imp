@@ -869,7 +869,6 @@ private:
     bool gdn_ab_narrow_logged_ = false;
     bool gdn_ab_prefill_logged_ = false;
     bool gdn_m1_input_logged_ = false;
-    bool gdn_m1_dp4a_logged_ = false;
     bool gdn_m1_out_logged_ = false;
     bool attn_m1_qkv_logged_ = false;
 
@@ -1181,24 +1180,22 @@ private:
                                  int n_heads, cudaStream_t stream, const NvFP4NormFoldIn& fold);
     // M=1 GGUF twin (gdn.m1_dp4a): the dp4a-routed ones of in_proj / gate / alpha+beta in one gemv_dp4a_multi
     // launch on one q8_1 quantize. Returns the kGdnDp4a* bits written (alpha/beta as above); 0 = no launch.
-    enum : int { kGdnDp4aIn = 1, kGdnDp4aGate = 2, kGdnDp4aAb = 4 };
+    enum : int { kGdnDp4aIn = 1, kGdnDp4aGate = 2, kGdnDp4aAb = 4, kGdnGateDone = 8, kGdnM1Fused = 16 };
     [[nodiscard]] int try_gdn_input_dp4a_m1_(const TransformerLayer& ly, const Tensor& input, Tensor& proj,
                                              Tensor& gate_out, int n_heads, const GemmContext& ctx,
                                              cudaStream_t stream);
-    // run_gdn step 2 without the load-time pack: proj, early gate, (M=1 fused) alpha/beta. gate: gate
-    // written; m1_fused: the NVFP4 4-way GEMV ran; dp4a: kGdnDp4a* bits.
-    struct GdnInputDone {
-        bool gate = false;
-        bool m1_fused = false;
-        int dp4a = 0;
-    };
-    GdnInputDone gdn_unpacked_input_(const TransformerLayer& ly, const Tensor& h, Tensor& no, Tensor& proj,
-                                     int inner, int n_heads, float eps, const NvFP4NormFoldIn& in_fold,
-                                     const GemmContext& ctx, cudaStream_t stream);
-    // Raw GGUF blocks of a weight whose M=1 decode GEMV is the dp4a source kernel (decode tier FP16 or
-    // Undefined, no NVFP4 / FP8 copy; an FP16 prefill copy keeps that route; shape [N, K]); nullptr
-    // otherwise.
+    // run_gdn step 2 without the load-time pack: proj, early gate, (M=1 fused) alpha/beta. Returns kGdnDp4a*
+    // | kGdnGateDone (gate written) | kGdnM1Fused (the NVFP4 4-way GEMV ran).
+    int gdn_unpacked_input_(const TransformerLayer& ly, const Tensor& h, Tensor& no, Tensor& proj, int inner,
+                            int n_heads, float eps, const NvFP4NormFoldIn& in_fold, const GemmContext& ctx,
+                            cudaStream_t stream);
+    // GGUF blocks of a weight whose M=1 GEMV is the dp4a source kernel (tier FP16/Undefined, no NVFP4/FP8
+    // copy).
     [[nodiscard]] const void* dp4a_m1_source_(TensorID id, int64_t N, int64_t K, QType& qtype) const;
+    // All n weights dp4a-routed: one q8_1 quantize of `input` + one gemv_dp4a_multi; false = nothing
+    // launched.
+    [[nodiscard]] bool dp4a_multi_m1_(const TensorID* ids, Tensor* const* outs, int n, const Tensor& input,
+                                      const GemmContext& ctx, cudaStream_t stream);
     [[nodiscard]] bool gdn_out_residual_m1_ok_(const TransformerLayer& ly, int n, const Tensor& h) const;
     void gdn_out_residual_m1_(int layer, const TransformerLayer& ly, const Tensor& y, Tensor& h, cudaStream_t stream);
     // M=1 attention q|k|v in one NVFP4 GEMV launch on gated-attention models

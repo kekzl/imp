@@ -705,8 +705,9 @@ alpha_beta_prefill   = false
 # gated attention q|k|v in one launch (6 launches per GDN layer and 2 per
 # attention layer fewer). false = the per-projection launches.
 m1_fused             = true
-# Single-stream decode (M=1) on GGUF hybrids: in_proj, gate and alpha + beta of mixed
-# quant types in one dp4a GEMV launch on one activation quantize. false = per projection.
+# Single-stream decode (M=1) on GGUF weights: GDN in_proj / gate / alpha + beta, attention
+# q / k / v and FFN gate / up of mixed quant types in one dp4a GEMV launch each on one
+# activation quantize. false = per projection.
 m1_dp4a              = true
 
 [gemm]

@@ -300,6 +300,12 @@
                         qkv_multi = try_attn_qkv_fused_m1_(ly, no, q_target, kk, vv, stream, m1_fold);
                     if (!qkv_multi && m1_fold.ssq)
                         rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
+                    // GGUF twin (gdn.m1_dp4a): q|k|v of mixed qtypes in one dp4a launch, one quantize.
+                    if (!qkv_multi && n == 1 && ly.wv.data != nullptr) {
+                        const TensorID qkv_ids[3] = {ly.wq_id, ly.wk_id, ly.wv_id};
+                        Tensor* qkv_outs[3] = {&q_target, &kk, &vv};
+                        qkv_multi = dp4a_multi_m1_(qkv_ids, qkv_outs, 3, no, ctx, stream);
+                    }
                     if (!qkv_multi) {
                         gemm_via_handle_(ly.wq_id, no, q_target, ctx);
                         gemm_via_handle_(ly.wk_id, no, kk, kv_ctx);
