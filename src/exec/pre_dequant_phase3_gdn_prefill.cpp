@@ -264,7 +264,7 @@ void QuantPipeline::nvfp4_prefill_cache_gdn_projections_(const ModelConfig& cfg,
         alloc_mxfp8_act_scratch(qs, vram_alloc_, max_tokens_, mx_max_k, mx_max_n);
         IMP_LOG_INFO(
             "GDN MXFP8 prefill: %d F16 in/gate/out projections -> %s (%.1f MiB), M>32 rows on the "
-            "CUTLASS GEMM; activation scratch %.1f MiB",
+            "MXFP8 GEMM (gemm.mxfp8_tile, CUTLASS on refusal); activation scratch %.1f MiB",
             n_mx, fp8rows ? "views of the FP8 sidecar rows, scales only" : "MXFP8 copies",
             mx_bytes / (1024.0 * 1024.0),
             (qs.mxfp8_act_data_size + qs.mxfp8_act_sf_size + qs.mxfp8_workspace_size) / (1024.0 * 1024.0));
