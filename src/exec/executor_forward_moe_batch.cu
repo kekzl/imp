@@ -27,7 +27,7 @@
 #include "compute/gemm_q4k.h"
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/gemm_cutlass_grouped_3x.h"
+#include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
 #include "compute/activation.h"

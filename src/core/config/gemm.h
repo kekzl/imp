@@ -119,11 +119,6 @@ struct GEMM {
     // fp16-accumulate prompt rows above 32 (deterministic: every prompt row); bit-equal to dequant + the
     // own FP16 tile.
     bool q45k_tile = true;
-    // Own grouped NVFP4 MoE prefill GEMM (gemm_grouped_nvfp4_tile.cu) before CUTLASS 3.x grouped on the
-    // same device-args operands, bit-exact. Qwen3-30B-A3B-NVFP4 pp512 / pp4096 GEMM sum -4 / -6 %,
-    // e2e +3..7 / +2 %, PPL 11.4338 both arms; gpt-oss-20b (K 2880) pp4096 +2.3..2.8 %. Refuses K % 64 != 0
-    // or K < 384 (CUTLASS then).
-    bool moe_tile = true;
     // Own per-tensor FP8 GEMM (nvfp4_gemm_tile.cu, F8 configs) before cuBLASLt FP8 x FP8 from this M (0 off).
     // Qwen3-8B-FP8 pp4096 e2e +0.6 %, pp512 -18 % (cuBLASLt below 2048). Refuses K % 64 != 0.
     int fp8_tile_min_m = 2048;

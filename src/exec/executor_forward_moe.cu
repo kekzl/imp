@@ -23,7 +23,7 @@
 #include "compute/gemm_moe_fused_tc.h"
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/gemm_cutlass_grouped_3x.h"
+#include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"
 #include "compute/dispatch_record.h"  // resolved-path recording (#1205)
 #include "compute/quantize_fp16_nvfp4_moe_native.h"
@@ -373,7 +373,8 @@ bool GraphExecutor::moe_prefill_uncapturable() const {
     // capture (moe_host_args_capture_guard).
     if (dispatch_policy().moe.no_cutlass3x)
         return true;
-    if (!cutlass_grouped_3x_nvfp4_available())
+    if (!gemm_grouped_nvfp4_moe_supports(model_->config().n_experts, model_->config().d_model,
+                                         max_expert_eff_))
         return true;
     if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf)
         return true;
@@ -397,7 +398,7 @@ bool GraphExecutor::moe_cutlass3x_will_use_device_args_(int layer,
     // use_device_args gate in executor_forward_moe_cutlass.cu).
     if (model_->profile().moe_expert_bias_glu && ctx.staged_blocks)
         return false;
-    if (!cutlass_grouped_3x_nvfp4_available())
+    if (!gemm_grouped_nvfp4_moe_supports(ctx.ne, ctx.d, ctx.eff))
         return false;
     if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf)
         return false;

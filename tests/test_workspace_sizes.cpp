@@ -194,7 +194,7 @@ TEST(ExecT2Demand, TotalIsTheSumOfEveryTenant) {
     EXPECT_GT(d.chunk_capture, 0u);
     EXPECT_EQ(d.total(), d.mmvq_scratch + d.nvfp4_dequant + d.sample_scratch + d.penalty_counts +
                              d.moe_arrays + d.fp8_reduction + d.quant_scratch + d.splitk_scratch +
-                             d.mla_scratch + d.dry_penalty + d.cublas_workspace + d.grouped3x +
+                             d.mla_scratch + d.dry_penalty + d.cublas_workspace + d.grouped_staging +
                              d.imma_scratch + d.chunk_capture + d.smallm_scratch + d.parallel_block +
                              d.ra2_scratch + d.apa_scratch + d.apa_kv_states);
     EXPECT_GT(d.total(), 0u);
@@ -296,26 +296,22 @@ TEST(ExecT2Demand, SmallMScratchCoversTheWidestProjectionNotTheLmHead) {
     EXPECT_EQ(exec_t2_demand(big, 8192).smallm_scratch, d.smallm_scratch);
 }
 
-// CUTLASS grouped staging+workspace: engine.cpp gates the prewarm on profile().is_moe, so
-// the charge must carry the same gate - charging every model reserves 2 MiB a dense model
-// never reaches; not charging a MoE model is the #1103 failure class.
-TEST(ExecT2Demand, Grouped3xIsChargedForMoeModelsOnly) {
+// Grouped NVFP4 host-args staging: engine.cpp gates the prewarm on profile().is_moe, so the charge must
+// carry the same gate - not charging a MoE model is the #1103 failure class.
+TEST(ExecT2Demand, GroupedStagingIsChargedForMoeModelsOnly) {
     ExecShape dense = dense_shape();
-    EXPECT_EQ(exec_t2_demand(dense, 1024).grouped3x, 0u);
+    EXPECT_EQ(exec_t2_demand(dense, 1024).grouped_staging, 0u);
 
     ExecShape moe = dense_shape();
     moe.is_moe = true;
     moe.n_experts = 128;
-    const size_t charged = exec_t2_demand(moe, 1024).grouped3x;
-    EXPECT_GE(charged, kExecGrouped3xStagingBytes + kExecGrouped3xWorkspaceBytes);
+    const size_t charged = exec_t2_demand(moe, 1024).grouped_staging;
+    EXPECT_GE(charged, kExecGroupedStagingBytes);
 
-    // It follows the prewarm, which takes a fixed pair — not the expert count.
+    // It follows the prewarm, which takes a fixed slice - not the expert count.
     moe.n_experts = 256;
-    EXPECT_EQ(exec_t2_demand(moe, 1024).grouped3x, charged);
-
-    // And it is nowhere near the 512 MiB the pre-arena prewarm reserved: that
-    // number was 3500x the measured 152 320 B requirement (AUDIT B73).
-    EXPECT_LT(charged, 8ull * 1024 * 1024);
+    EXPECT_EQ(exec_t2_demand(moe, 1024).grouped_staging, charged);
+    EXPECT_LT(charged, 1ull * 1024 * 1024);
 }
 
 // IMMA prefill activation scratch (A7 step 8/AUDIT B13): charged only for models whose

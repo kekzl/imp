@@ -273,7 +273,7 @@ write_kv_cache_fp8_fused_kernel` and `… write_kv_cache_nvfp4_kernel` both corr
 | Path | Why it is safe |
 |---|---|
 | CUTLASS dense GEMM | CuTe clears descriptor bit 21 after every encode whose first 128 KB are not contiguous (`tma_gmem_prefix_is_contiguous`, since v4.3.4); smallest allocation probed 262144 B |
-| CUTLASS grouped GEMM (`src/compute/gemm_cutlass_grouped_3x.cu`) | Host templates are tile-sized (128x128x128: A 8 KB, D 32 KB, all < 128 KB), so bit 21 is cleared; the device-side `tensormap.replace` writes address, dims and strides only, never bit 21 |
+| Own grouped NVFP4 GEMM (`src/compute/gemm_grouped_nvfp4_tile.cu`, CUTLASS grouped deleted 2026-10-30) | Own encode (`encode_2d`), the A map and the B template dense row-major (row stride = row bytes); the device-side `tensormap.replace` writes the global address only |
 | smallM grouped (`src/compute/gemm_grouped_nvfp4_smallM.cu`) | Own encode, every tensor dense row-major (row stride = row bytes); the 256 B dummy is a dense 16x16 |
 
 The v4.8.1 `tensormap_replace` fix (`keep_oob_fetch_window`) is in the CuTe DSL; imp builds no DSL kernel.

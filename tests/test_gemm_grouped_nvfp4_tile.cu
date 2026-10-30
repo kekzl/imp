@@ -1,13 +1,12 @@
-// gemm_grouped_nvfp4_tile (own grouped NVFP4 MoE GEMM, ROADMAP row 123) against the CUTLASS 3.x
-// grouped GEMM on the same device-args operands (bit-exact), B as a slab (mode a) and as pointer
-// arrays (mode b); plus a timing table on Qwen3-30B-A3B expert shapes (informational).
+// gemm_grouped_nvfp4_tile (own grouped NVFP4 MoE GEMM, ROADMAP row 123) against the independent fp64
+// reference (nvfp4_fp64_ref.h) on device-args operands, B as a slab (mode a) and as pointer arrays
+// (mode b, bit-identical to a); plus a timing table on Qwen3-30B-A3B expert shapes (informational).
 
-#include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "core/tensor.h"
+#include "nvfp4_fp64_ref.h"
 #include "quant/nvfp4_quant.h"
-#include "scoped_engine_arena.h"
 
 #include <gtest/gtest.h>
 #include <cuda_fp16.h>
@@ -68,7 +67,9 @@ struct Grouped {
         cudaMalloc(&w, size_t(N) * K * sizeof(half));
         alpha.resize(ne);
         for (int e = 0; e < ne; ++e) {
-            fill_kernel<<<256, 256, 0, s>>>(w, size_t(N) * K, 0x100u + e, 0.1f);
+            // Distinct amplitude per expert: distinct alpha, so a wrong expert's alpha shows.
+            fill_kernel<<<256, 256, 0, s>>>(w, size_t(N) * K, 0x100u + e,
+                                            0.05f * static_cast<float>(1 + (e % 4)));
             int64_t ws[2] = {N, K};
             Tensor wt(w, QType::F16, 2, ws, true);
             NvFP4QuantResult q;
@@ -133,6 +134,31 @@ struct Grouped {
         g.base_D = d;
         return g;
     }
+    // Host copy of every bit the kernel reads, for the fp64 reference.
+    nvfp4_ref::GroupedHost host() const {
+        nvfp4_ref::GroupedHost h;
+        h.ne = ne;
+        h.N = N;
+        h.K = K;
+        h.offsets = off;
+        h.sfa_off.assign(sfa_off.begin(), sfa_off.end() - 1);
+        h.alpha = alpha;
+        h.a.resize(size_t(M_total) * K / 2);
+        h.a_sf.resize(static_cast<size_t>(sfa_off[ne]));
+        cudaMemcpy(h.a.data(), a, h.a.size(), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h.a_sf.data(), a_sf, h.a_sf.size(), cudaMemcpyDeviceToHost);
+        h.b.resize(ne);
+        h.b_sf.resize(ne);
+        for (int e = 0; e < ne; ++e) {
+            h.b[e].resize(b_stride);
+            h.b_sf[e].resize(sfb_stride);
+            cudaMemcpy(h.b[e].data(), static_cast<const char*>(b) + e * b_stride, b_stride,
+                       cudaMemcpyDeviceToHost);
+            cudaMemcpy(h.b_sf[e].data(), static_cast<const char*>(b_sf) + e * sfb_stride, sfb_stride,
+                       cudaMemcpyDeviceToHost);
+        }
+        return h;
+    }
     void release() {
         for (void* p : {a, a_sf, b, b_sf, static_cast<void*>(d_M), static_cast<void*>(d_off),
                         static_cast<void*>(d_sfa_off), static_cast<void*>(d_alpha),
@@ -143,67 +169,57 @@ struct Grouped {
 
 class GroupedNvfp4TileTest : public ::testing::Test {
 protected:
-    void SetUp() override {
-        arena_ = std::make_unique<ScopedEngineArena>();
-        cudaStreamCreate(&s_);
-    }
-    void TearDown() override {
-        cudaStreamDestroy(s_);
-        gemm_grouped_3x_nvfp4_cleanup();
-        arena_.reset();
-    }
-    std::unique_ptr<ScopedEngineArena> arena_;
+    void SetUp() override { cudaStreamCreate(&s_); }
+    void TearDown() override { cudaStreamDestroy(s_); }
     cudaStream_t s_ = nullptr;
 };
 
 }  // namespace
 
-// Tails (7, 1 rows), several M tiles per expert (300), N tail (N=384 = 3 tiles), both B modes;
-// K = 704 / 2880 (Gemma-4 / gpt-oss widths) end on a half 64-K stage.
+// Tails (7, 1 rows), several M tiles per expert (300), N tail (N=384 = 3 tiles), both B modes. K = 64 / 192
+// / 320 / 704 / 2880 end on a half 64-K stage (64: the only stage), 768 on full stages.
 class GroupedNvfp4TileK : public GroupedNvfp4TileTest, public ::testing::WithParamInterface<int> {};
 
-TEST_P(GroupedNvfp4TileK, MatchesCutlassGrouped) {
-    if (!cutlass_grouped_3x_nvfp4_available())
-        GTEST_SKIP() << "CUTLASS 3x grouped NVFP4 disabled";
+TEST_P(GroupedNvfp4TileK, MatchesFp64Reference) {
     Grouped g;
     g.build({130, 7, 300, 64, 1}, 384, GetParam(), s_);
+    const nvfp4_ref::GroupedHost h = g.host();
     const size_t out_bytes = size_t(g.M_total) * g.N * sizeof(half);
-    void *ref = nullptr, *own = nullptr;
-    cudaMalloc(&ref, out_bytes);
+    void* own = nullptr;
     cudaMalloc(&own, out_bytes);
-    ASSERT_TRUE(gemm_grouped_cutlass_3x_nvfp4_device_args(g.ne, g.N, g.K, g.args(ref, false), s_));
-    std::vector<half> r(size_t(g.M_total) * g.N), o(r.size());
-    ASSERT_EQ(cudaStreamSynchronize(s_), cudaSuccess);
-    cudaMemcpy(r.data(), ref, out_bytes, cudaMemcpyDeviceToHost);
+    std::vector<half> o[2];
     for (bool ptr_mode : {false, true}) {
-        cudaMemset(own, 0xff, out_bytes);
+        std::vector<half>& out = o[ptr_mode ? 1 : 0];
+        out.resize(size_t(g.M_total) * g.N);
+        cudaMemset(own, 0xff, out_bytes);  // NaN fill: a row the kernel misses fails the check
         ASSERT_TRUE(gemm_grouped_nvfp4_tile(g.ne, g.N, g.K, g.M_total, g.args(own, ptr_mode), s_));
         ASSERT_EQ(cudaStreamSynchronize(s_), cudaSuccess);
-        cudaMemcpy(o.data(), own, out_bytes, cudaMemcpyDeviceToHost);
-        size_t mism = 0;
-        double max_ref = 0.0;
-        for (size_t i = 0; i < r.size(); ++i) {
-            mism += __half_as_ushort(r[i]) != __half_as_ushort(o[i]) ? 1 : 0;
-            max_ref = std::max(max_ref, std::fabs((double)__half2float(r[i])));
-        }
-        std::fprintf(stderr, "[grouped tile] mode %c: %zu / %zu mismatches, max|ref| %.4g\n",
-                     ptr_mode ? 'b' : 'a', mism, r.size(), max_ref);
-        EXPECT_GT(max_ref, 0.0);
-        EXPECT_EQ(mism, 0u) << "mode " << (ptr_mode ? 'b' : 'a');
+        cudaMemcpy(out.data(), own, out_bytes, cudaMemcpyDeviceToHost);
+        const nvfp4_ref::GroupedErr err = nvfp4_ref::check_grouped(h, out, 1e-2);
+        std::fprintf(
+            stderr,
+            "[grouped tile] K=%d mode %c: checked %zu bad %zu nonfinite %zu max_rel %.3e max_abs %.3e "
+            "max|ref| %.4g\n",
+            g.K, ptr_mode ? 'b' : 'a', err.checked, err.bad, err.nonfinite, err.max_rel, err.max_abs,
+            err.max_ref);
+        EXPECT_EQ(err.checked, size_t(g.M_total) * g.N);
+        EXPECT_GT(err.max_ref, 0.0);
+        EXPECT_EQ(err.bad, 0u) << "mode " << (ptr_mode ? 'b' : 'a');
     }
-    cudaFree(ref);
+    size_t mism = 0;
+    for (size_t i = 0; i < o[0].size(); ++i)
+        mism += __half_as_ushort(o[0][i]) != __half_as_ushort(o[1][i]) ? 1 : 0;
+    EXPECT_EQ(mism, 0u) << "mode b differs from mode a";
     cudaFree(own);
     g.release();
 }
 
-INSTANTIATE_TEST_SUITE_P(K, GroupedNvfp4TileK, ::testing::Values(768, 704, 2880));
+INSTANTIATE_TEST_SUITE_P(K, GroupedNvfp4TileK, ::testing::Values(64, 192, 320, 768, 704, 2880));
 
 // Qwen3-30B-A3B experts: 128 x (N=768, K=2048) gate/up and (N=2048, K=768) down; rows per
 // expert from a skewed draw around pp512 (avg 32) and pp4096 (avg 256) routing.
-TEST_F(GroupedNvfp4TileTest, BenchVsCutlass) {
-    if (!cutlass_grouped_3x_nvfp4_available())
-        GTEST_SKIP() << "CUTLASS 3x grouped NVFP4 disabled";
-    std::fprintf(stderr, "%6s %6s %6s %10s %10s\n", "avg_M", "N", "K", "cutlass_us", "own_us");
+TEST_F(GroupedNvfp4TileTest, Bench) {
+    std::fprintf(stderr, "%6s %6s %6s %10s %8s\n", "avg_M", "N", "K", "own_us", "TFLOP/s");
     for (int avg : {32, 256})
         for (const auto& nk : {std::pair<int, int>{768, 2048}, std::pair<int, int>{2048, 768}}) {
             std::mt19937 gen(7);
@@ -232,13 +248,11 @@ TEST_F(GroupedNvfp4TileTest, BenchVsCutlass) {
                 cudaEventDestroy(e1);
                 return 1000.0 * ms / 20;
             };
-            const double t_ct = time_us([&] {
-                (void)gemm_grouped_cutlass_3x_nvfp4_device_args(g.ne, g.N, g.K, g.args(d, true), s_);
-            });
             const double t_own = time_us(
                 [&] { (void)gemm_grouped_nvfp4_tile(g.ne, g.N, g.K, g.M_total, g.args(d, true), s_); });
             ASSERT_EQ(cudaStreamSynchronize(s_), cudaSuccess);
-            std::fprintf(stderr, "%6d %6d %6d %10.1f %10.1f\n", avg, g.N, g.K, t_ct, t_own);
+            std::fprintf(stderr, "%6d %6d %6d %10.1f %8.1f\n", avg, g.N, g.K, t_own,
+                         2.0 * g.M_total * g.N * g.K / (t_own * 1e6));
             cudaFree(d);
             g.release();
         }

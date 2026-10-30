@@ -1,4 +1,4 @@
-// CUTLASS 3.x NVFP4 MoE prefill path, extracted from
+// Grouped NVFP4 MoE prefill path (gemm_grouped_nvfp4_tile.cu), extracted from
 // executor_forward_moe.cu: GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_().
 
 #include "exec/executor.h"
@@ -7,7 +7,6 @@
 #include "exec/moe_prefill_decision.h"  // select_moe_prefill_path — the mirror this file verifies against
 #include "core/dispatch_policy.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/gemm_grouped_nvfp4_tile.h"
 #include "compute/gemm_grouped_nvfp4_smallM.h"
 #include "compute/dispatch_record.h"  // resolved-path recording (#1205)
@@ -97,7 +96,7 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
         }
         return true;
     };
-    // CUTLASS 3.x NVFP4 grouped path predicate. moe.no_cutlass3x forces legacy
+    // Grouped NVFP4 path predicate. moe.no_cutlass3x forces legacy
     // for debugging. Observations for the routing-model replay are filled in
     // as the chain is walked; a tier the chain never reaches keeps its false
     // (see verify_against_moe_routing_model's KNOWN LIMIT). Host-resident
@@ -109,9 +108,8 @@ bool GraphExecutor::try_run_moe_cutlass3x_nvfp4_prefill_(int layer, cudaStream_t
     static const bool force_off = dispatch_policy().moe.no_cutlass3x;
     const bool ids_cover = covers_ids(ly.expert_up_ids) && covers_ids(ly.expert_down_ids) &&
                            (ctx.non_gated_experts || covers_ids(ly.expert_gate_ids));
-    obs.grouped_available = !force_off && cutlass_grouped_3x_nvfp4_available() &&
-                            moe_.cutlass3x_packed && moe_.cutlass3x_sf &&
-                            (staged_covers || ids_cover);
+    obs.grouped_available = !force_off && gemm_grouped_nvfp4_moe_supports(ne, d, eff) &&
+                            moe_.cutlass3x_packed && moe_.cutlass3x_sf && (staged_covers || ids_cover);
     if (!obs.grouped_available) {
         verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu, dispatch_policy(), obs,
                                          MoePrefillPath::LEGACY);
@@ -403,7 +401,7 @@ char* expert_down_base = static_cast<char*>(moe_.expert_down.data);
 // Optional smallM kernel branch (opt-in moe.nvfp4_smallM): activates when
 // max(M_per) <= moe.nvfp4_smallM_threshold (default 64) AND all three
 // native NVFP4 MoE pointers are populated ([n_experts,N,K/16] layout).
-// Falls through to CUTLASS 3.x on any failure/unavailability.
+// Falls through to the grouped GEMM on any failure/unavailability.
 bool smallM_done = false;
 {
     const auto& moe_cfg = dispatch_policy().moe;
@@ -460,9 +458,8 @@ bool smallM_done = false;
             if (!ok) {
                 IMP_LOG_ERROR(
                     "smallM gate/up scratch too small (need %zu/%zu, "
-                    "have %zu/%zu); falling back to CUTLASS 3.x",
-                    packed_offs_du[ne], sf_offs_du[ne],
-                    moe_.cutlass3x_packed_size, moe_.cutlass3x_sf_size);
+                    "have %zu/%zu); falling back to the grouped GEMM",
+                    packed_offs_du[ne], sf_offs_du[ne], moe_.cutlass3x_packed_size, moe_.cutlass3x_sf_size);
             }
 
             std::vector<void*> act_packed_ptrs(ne), act_sf_ptrs(ne);
@@ -484,7 +481,7 @@ bool smallM_done = false;
                     act_sf_ptrs.data(), d_act_tscales, static_cast<const int*>(routing.expert_offsets.data),
                     expanded, d, ne, moe_.smallM_ptrs, stream);
                 if (!ok)
-                    IMP_LOG_ERROR("smallM gate/up quantize failed; falling back to CUTLASS 3.x");
+                    IMP_LOG_ERROR("smallM gate/up quantize failed; falling back to the grouped GEMM");
             }
 
             // Builds per-expert weight pointer arrays from the native
@@ -589,9 +586,9 @@ bool smallM_done = false;
                 if (!down_ok) {
                     IMP_LOG_ERROR(
                         "smallM down scratch too small (need %zu/%zu, "
-                        "have %zu/%zu); falling back to CUTLASS 3.x",
-                        packed_offs_dn[ne], sf_offs_dn[ne],
-                        moe_.cutlass3x_packed_size, moe_.cutlass3x_sf_size);
+                        "have %zu/%zu); falling back to the grouped GEMM",
+                        packed_offs_dn[ne], sf_offs_dn[ne], moe_.cutlass3x_packed_size,
+                        moe_.cutlass3x_sf_size);
                 }
                 if (down_ok) {
                     for (int e = 0; e < ne; ++e) {
@@ -622,13 +619,13 @@ bool smallM_done = false;
                     } else {
                         IMP_LOG_ERROR(
                             "smallM down dispatch failed; falling back to "
-                            "CUTLASS 3.x");
+                            "the grouped GEMM");
                     }
                 }
             } else if (ok) {
                 IMP_LOG_ERROR(
                     "smallM gate/up dispatch failed; falling back to "
-                    "CUTLASS 3.x");
+                    "the grouped GEMM");
             }
         }
     }
@@ -640,7 +637,7 @@ if (!smallM_done) {
     verify_against_moe_routing_model(model_->profile().moe_expert_bias_glu, dispatch_policy(), obs,
                                      MoePrefillPath::GROUPED);
     if (layer == 0)
-        IMP_LOG_INFO("MoE prefill: CUTLASS 3.x NVFP4 grouped (n=%d, expanded=%d)", n, expanded);
+        IMP_LOG_INFO("MoE prefill: grouped NVFP4 host-args (n=%d, expanded=%d)", n, expanded);
 }
 
 if (!smallM_done) {
@@ -689,46 +686,29 @@ auto quantize_once = [&](const char* a_base, int K_in, std::vector<size_t>& sfa_
 // Legacy host-args dispatch, entered only when the default-on device-args
 // full path failed its precondition check (workspace buffers not
 // populated). Kept as the safety-net fallback path.
-auto grouped_gemm = [&](const std::vector<TensorID>& weight_ids, char* c_base, int K_in,
-                        int N_out, const std::vector<size_t>& sfa_offsets) {
-    char* all_packed = static_cast<char*>(moe_.cutlass3x_packed);
-    uint8_t* all_sfa = static_cast<uint8_t*>(moe_.cutlass3x_sf);
-    // Active experts only (CUTLASS 3.x wants non-empty groups).
-    std::vector<int> active_M;
-    std::vector<const void*> hA, hSFA, hB, hSFB;
-    std::vector<void*> hD;
-    std::vector<float> hAlpha;
-    active_M.reserve(ne);
-    hA.reserve(ne);
-    hSFA.reserve(ne);
-    hB.reserve(ne);
-    hSFB.reserve(ne);
-    hD.reserve(ne);
-    hAlpha.reserve(ne);
+auto grouped_gemm = [&](const std::vector<TensorID>& weight_ids, char* c_base, int K_in, int N_out,
+                        const std::vector<size_t>& sfa_offsets) {
+    std::vector<const void*> hB(ne), hSFB(ne);
+    std::vector<float> hAlpha(ne);
     for (int e = 0; e < ne; ++e) {
-        if (M_per[e] == 0)
-            continue;
         const auto& h = registry_.handle(weight_ids[e]);
-        active_M.push_back(M_per[e]);
-        hA.push_back(all_packed + (static_cast<size_t>(h_offsets[e]) * K_in / 2));
-        hSFA.push_back(all_sfa + sfa_offsets[e]);
-        hB.push_back(h.payload.cutlass_nvfp4.weight);
-        hSFB.push_back(h.payload.cutlass_nvfp4.sf);
-        hD.push_back(c_base + (static_cast<size_t>(h_offsets[e]) * N_out * sizeof(half)));
-        hAlpha.push_back(h.payload.cutlass_nvfp4.global_scale
-                             ? *h.payload.cutlass_nvfp4.global_scale
-                             : 1.0f);
+        hB[e] = h.payload.cutlass_nvfp4.weight;
+        hSFB[e] = h.payload.cutlass_nvfp4.sf;
+        hAlpha[e] = h.payload.cutlass_nvfp4.global_scale ? *h.payload.cutlass_nvfp4.global_scale : 1.0f;
     }
-    const int na = static_cast<int>(active_M.size());
-    if (na == 0)
-        return;
-    bool ok = gemm_grouped_cutlass_3x_nvfp4(na, active_M.data(), N_out, K_in, hA.data(),
-                                            hSFA.data(), hB.data(), hSFB.data(),
-                                            hD.data(), hAlpha.data(), stream);
+    GroupedNvfp4HostArgs args{};
+    args.offsets = h_offsets.data();
+    args.sfa_offsets = sfa_offsets.data();
+    args.B = hB.data();
+    args.SFB = hSFB.data();
+    args.alpha = hAlpha.data();
+    args.base_A_packed = moe_.cutlass3x_packed;
+    args.base_A_sf = moe_.cutlass3x_sf;
+    args.base_D = c_base;
     // Last tier: an unwritten expert output fails the request instead of reaching the logits (#2446).
-    if (!ok)
-        throw std::runtime_error("CUTLASS 3.x grouped dispatch failed (K=" + std::to_string(K_in) +
-                                 " N=" + std::to_string(N_out) + " ne=" + std::to_string(na) + ")");
+    if (!gemm_grouped_nvfp4_host_args(ne, N_out, K_in, expanded, args, stream))
+        throw std::runtime_error("grouped NVFP4 host-args dispatch failed (K=" + std::to_string(K_in) +
+                                 " N=" + std::to_string(N_out) + " ne=" + std::to_string(ne) + ")");
 };
 
 // Gate+Up share the same input (gathered_base, K_in=d) → quantize once,

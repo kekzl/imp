@@ -69,11 +69,11 @@ std::string ExecT2Demand::describe() const {
     std::snprintf(
         buf, sizeof(buf),
         "mmvq %.1f + nvfp4 %.1f + sample %.1f + pen %.1f + moe %.2f + fp8red %.2f + quant %.2f "
-        "+ splitk %.2f + mla %.1f + dry %.2f + cublas %.1f + grp3x %.2f + imma %.1f + chunkcap %.1f "
+        "+ splitk %.2f + mla %.1f + dry %.2f + cublas %.1f + grpstage %.2f + imma %.1f + chunkcap %.1f "
         "+ smallm %.2f + par %.2f + ra2 %.1f + apa %.1f + apakv %.1f MiB",
         mmvq_scratch / kMiB, nvfp4_dequant / kMiB, sample_scratch / kMiB, penalty_counts / kMiB,
         moe_arrays / kMiB, fp8_reduction / kMiB, quant_scratch / kMiB, splitk_scratch / kMiB,
-        mla_scratch / kMiB, dry_penalty / kMiB, cublas_workspace / kMiB, grouped3x / kMiB,
+        mla_scratch / kMiB, dry_penalty / kMiB, cublas_workspace / kMiB, grouped_staging / kMiB,
         imma_scratch / kMiB, chunk_capture / kMiB, smallm_scratch / kMiB, parallel_block / kMiB,
         ra2_scratch / kMiB, apa_scratch / kMiB, apa_kv_states / kMiB);
     return buf;
@@ -506,12 +506,9 @@ ExecT2Demand exec_t2_demand(const ExecShape& shape, int max_seq_len) {
                             (2 * kTakeAlign);
     }
 
-    // CUTLASS 3.x grouped staging + workspace, MoE models only (same gate engine.cpp puts on
-    // the prewarm). The workspace half is a MEASURED ~152 KB rounded to 1 MiB, not the 512
-    // MiB the pre-arena code reserved (AUDIT B73); the arena reserves it before the
-    // pre-dequant caches can spend it, which is what makes the smaller number safe.
+    // Grouped NVFP4 host-args staging, MoE models only (same gate engine.cpp puts on the prewarm).
     if (shape.is_moe)
-        out.grouped3x = kExecGrouped3xStagingBytes + kExecGrouped3xWorkspaceBytes + (2 * kTakeAlign);
+        out.grouped_staging = kExecGroupedStagingBytes + kTakeAlign;
 
     out.ra2_scratch = ra2_scratch_demand(shape, t, max_seq_len);
     out.apa_scratch = apa_scratch_demand(shape, t, max_seq_len);

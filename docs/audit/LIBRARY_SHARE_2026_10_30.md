@@ -33,7 +33,7 @@ Table: `library_share.py <out> 4`; CUTLASS family (dense NVFP4 / grouped / MXFP8
 | 2 | dense NVFP4 M < 2048, CUTLASS | 55.5-68.9 % dense, 5.8-17.5 % MoE | own tile +1-2 % slower in situ; 128x64, hybrid stream-K, 4-MMA warps refuted | per-SM MMA efficiency only |
 | 3 | FP16 GEMMs of fp16-tier tensors, cuBLASLt | 8.8-10.0 % Nemotron, <= 2.1 % else | own FP16 tile covers K >= N only | N > K and split-K shapes |
 | 4 | Gemma-4 NVFP4 at M 2048, cuBLASLt block-scaled | 1.8 % pp4096 | own tile declines | find the decline, then the CUTLASS / Lt fallback goes |
-| 5 | CUTLASS grouped 3.x | 0 launches | refusal fallback (own grouped tile refuses K % 64 != 0, K < 384) | cover the refusal shapes, then delete the TU; CUTLASS MXFP8 removed in step 13 |
+| 5 | CUTLASS grouped 3.x, CUTLASS MXFP8 | 0 launches | removed (steps 13, 14) | - |
 
 ## Step 12: own per-tensor FP8 GEMM (`src/quant/nvfp4_gemm_tile.cu`, F8 configs)
 
@@ -73,3 +73,19 @@ Table: `library_share.py <out> 4`; CUTLASS family (dense NVFP4 / grouped / MXFP8
 
 - A first in each pair read B 35227-35268 vs A 35434-35516: order effect, gone with B first.
 - Tests vs a host double reference from the operand bytes; a mutant that drops `col_scale` on odd columns fails 4/4 row-view cases.
+
+## Step 14: CUTLASS 3.x grouped GEMM removed
+
+`src/compute/gemm_cutlass_grouped_3x.{cu,h}` deleted, `gemm.moe_tile` removed. The legacy host-args MoE prefill (`moe.nvfp4_device_args=false`, gpt-oss with staged host experts) ran CUTLASS; it now uploads the per-expert arrays into a 64 KiB T2 slice and runs the own kernel (`gemm_grouped_nvfp4_host_args`). Four B tensormap slots per CTA instead of two lift the K >= 384 limit (K % 64 == 0 now); shapes the kernel refuses skip the grouped path (`gemm_grouped_nvfp4_moe_supports`) and take the NVFP4 dequant batch path. T2 charge 2 MiB -> 64 KiB.
+
+| `imp-cli --bench`, 4 pairs, both orders, tok/s | main | step 14 |
+|---|---:|---:|
+| Qwen3-30B-A3B-NVFP4 device-args pp512 | 32717-32982 | 32810-32975 |
+| Qwen3-30B-A3B-NVFP4 device-args pp4096 | 42996-43172 | 43194-43249 |
+| Qwen3-30B-A3B-NVFP4 host-args pp512 | 12379-16748 | 15915-18840 |
+| Qwen3-30B-A3B-NVFP4 host-args pp4096 | 31580-33456 | 32475-34752 |
+| Gemma-4-26B-A4B-NVFP4 pp512 | 35108-35323 | 35016-35163 |
+| Gemma-4-26B-A4B-NVFP4 pp4096 | 44346-44653 | 44432-44692 |
+| Qwen3-30B-A3B PPL 45k, deterministic, device-args / host-args | 11.4338 / 11.3110 | 11.4338 / 11.3110 |
+
+- Tests: fp64 reference from the exact NVFP4 bits (`tests/nvfp4_fp64_ref.h`) at K 64..2880 and 512 experts; host-args bit-equal to the per-expert dense GEMM and to device-args. A mutant that drops alpha on odd experts fails 16/18.
